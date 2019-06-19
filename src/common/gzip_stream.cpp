@@ -58,8 +58,8 @@ using namespace duckdb;
 
  */
 
-static count_t consume_string(fstream &input) {
-	count_t size = 1; // terminator
+static index_t consume_string(fstream &input) {
+	index_t size = 1; // terminator
 	while (input.get() != '\0') {
 		size++;
 	}
@@ -179,6 +179,7 @@ streambuf::int_type GzipStreamBuf::underflow() {
 				mz_inflateEnd(zstrm_p);
 				delete zstrm_p;
 				mz_stream_ptr = nullptr;
+				break;
 			}
 
 		} while (out_buff_free_start == out_buff);
