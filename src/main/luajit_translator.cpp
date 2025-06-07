@@ -3,13 +3,14 @@
 #include "duckdb/planner/expression/bound_constant_expression.hpp"
 #include "duckdb/planner/expression/bound_reference_expression.hpp"
 #include "duckdb/planner/expression/bound_operator_expression.hpp"
-// Add includes for other BoundExpression subtypes as they are supported
+#include "duckdb/planner/expression/bound_function_expression.hpp"
+#include "duckdb/planner/expression/bound_case_expression.hpp"
+#include "duckdb/function/scalar/date_functions.hpp" // For DatePartSpecifier, etc.
 #include <algorithm> // for std::find
 
 namespace duckdb {
 
 // --- LuaTranslatorContext ---
-// Helper to get Lua FFI C type string from LogicalType
 static std::string GetLuaFFITypeFromLogicalType(const LogicalType& type) {
     switch (type.id()) {
         case LogicalTypeId::INTEGER:    return "int32_t";
@@ -18,70 +19,79 @@ static std::string GetLuaFFITypeFromLogicalType(const LogicalType& type) {
         case LogicalTypeId::VARCHAR:    return "FFIString";
         case LogicalTypeId::DATE:       return "int32_t";
         case LogicalTypeId::TIMESTAMP:  return "int64_t";
-        case LogicalTypeId::INTERVAL:   return "FFIInterval"; // Added
+        case LogicalTypeId::INTERVAL:   return "FFIInterval";
+        case LogicalTypeId::BOOLEAN:    return "int8_t";
         default:
             throw NotImplementedException("LuaTranslatorContext: Unsupported logical type for FFI: " + type.ToString());
     }
 }
 
-LuaTranslatorContext::LuaTranslatorContext(const std::vector<LogicalType>& input_types)
-    : input_logical_types_(input_types) {
-    input_lua_ffi_types_.reserve(input_types.size());
-    for (const auto& type : input_types) {
-        input_lua_ffi_types_.push_back(GetLuaFFITypeFromLogicalType(type));
+LuaTranslatorContext::LuaTranslatorContext(const std::vector<LogicalType>& unique_input_types,
+                                           const std::unordered_map<idx_t, idx_t>& col_idx_to_lua_arg_map)
+    : unique_input_logical_types_(unique_input_types),
+      chunk_col_to_lua_arg_map_(col_idx_to_lua_arg_map) {
+    unique_input_lua_ffi_types_.reserve(unique_input_types.size());
+    for (const auto& type : unique_input_types) {
+        unique_input_lua_ffi_types_.push_back(GetLuaFFITypeFromLogicalType(type));
     }
 }
 
-std::string LuaTranslatorContext::GetInputVectorsTable() const {
-    return "input_vectors";
+std::string LuaTranslatorContext::GetInputLuaFFIType(idx_t lua_arg_idx) const {
+    if (lua_arg_idx >= unique_input_lua_ffi_types_.size()) {
+        throw InternalException("LuaTranslatorContext: Lua argument index out of bounds for GetInputLuaFFIType.");
+    }
+    return unique_input_lua_ffi_types_[lua_arg_idx];
 }
 
-std::string LuaTranslatorContext::GetInputLuaFFIType(idx_t col_idx) const {
-    if (col_idx >= input_lua_ffi_types_.size()) {
-        throw InternalException("LuaTranslatorContext: Column index out of bounds for GetInputLuaFFIType.");
+const LogicalType& LuaTranslatorContext::GetInputLogicalType(idx_t lua_arg_idx) const {
+    if (lua_arg_idx >= unique_input_logical_types_.size()) {
+        throw InternalException("LuaTranslatorContext: Lua argument index out of bounds for GetInputLogicalType.");
     }
-    return input_lua_ffi_types_[col_idx];
+    return unique_input_logical_types_[lua_arg_idx];
 }
-const LogicalType& LuaTranslatorContext::GetInputLogicalType(idx_t col_idx) const {
-    if (col_idx >= input_logical_types_.size()) {
-        throw InternalException("LuaTranslatorContext: Column index out of bounds for GetInputLogicalType.");
-    }
-    return input_logical_types_[col_idx];
-}
+
 idx_t LuaTranslatorContext::GetNumInputs() const {
-    return input_logical_types_.size();
+    return unique_input_logical_types_.size();
 }
 
+std::string LuaTranslatorContext::GetOutputTypeLuaFFIType(const LogicalType& type) const {
+    // For now, output type string generation is same as input, but separated for future flexibility
+    return GetLuaFFITypeFromLogicalType(type);
+}
+
+idx_t LuaTranslatorContext::GetLuaArgIndex(idx_t original_chunk_col_idx) const {
+    auto it = chunk_col_to_lua_arg_map_.find(original_chunk_col_idx);
+    if (it == chunk_col_to_lua_arg_map_.end()) {
+        throw InternalException("LuaTranslatorContext: Original chunk column index %d not found in map to Lua arguments. This map should be pre-populated by ExpressionExecutor.", original_chunk_col_idx);
+    }
+    return it->second;
+}
 
 // --- LuaTranslator ---
 
-// Helper to convert DuckDB ExpressionType (for binary operators) to Lua string
+static std::string GenerateTempVarName(int& temp_var_idx) {
+    return "tval" + std::to_string(temp_var_idx++);
+}
+
 static std::string GetLuaOperatorFromExprType(ExpressionType op_type) {
     switch (op_type) {
-        // Arithmetic
-        case ExpressionType::OPERATOR_ADD:                return "+";
-        case ExpressionType::OPERATOR_SUBTRACT:           return "-";
-        case ExpressionType::OPERATOR_MULTIPLY:           return "*";
-        case ExpressionType::OPERATOR_DIVIDE:             return "/";
-        // Comparison
-        case ExpressionType::COMPARE_EQUAL:               return "==";
-        case ExpressionType::COMPARE_NOTEQUAL:            return "~=";
-        case ExpressionType::COMPARE_LESSTHAN:            return "<";
-        case ExpressionType::COMPARE_GREATERTHAN:         return ">";
-        case ExpressionType::COMPARE_LESSTHANOREQUALTO:   return "<=";
-        case ExpressionType::COMPARE_GREATERTHANOREQUALTO:return ">=";
-        // String Concat Operator (if binder maps || to this)
-        case ExpressionType::OPERATOR_CONCAT:             return "..";
-        // Logical Operators (if represented as generic operator)
-        // Note: DuckDB uses BoundConjunctionExpression for AND/OR, BoundOperatorExpression for NOT.
-        case ExpressionType::OPERATOR_NOT:                return "not "; // Unary, handled in GenerateValue for BoundOperatorExpression
+        case ExpressionType::OPERATOR_ADD: return "+";
+        case ExpressionType::OPERATOR_SUBTRACT: return "-";
+        case ExpressionType::OPERATOR_MULTIPLY: return "*";
+        case ExpressionType::OPERATOR_DIVIDE: return "/";
+        case ExpressionType::COMPARE_EQUAL: return "==";
+        case ExpressionType::COMPARE_NOTEQUAL: return "~=";
+        case ExpressionType::COMPARE_LESSTHAN: return "<";
+        case ExpressionType::COMPARE_GREATERTHAN: return ">";
+        case ExpressionType::COMPARE_LESSTHANOREQUALTO: return "<=";
+        case ExpressionType::COMPARE_GREATERTHANOREQUALTO: return ">=";
+        case ExpressionType::OPERATOR_CONCAT: return "..";
+        case ExpressionType::OPERATOR_NOT: return "not ";
         default:
-            // LIKE, AND, OR are typically specific expression classes or functions, not generic BoundOperatorExpression types.
-            throw NotImplementedException("ExpressionType not directly mapped to a simple Lua binary operator: " + ExpressionTypeToString(op_type));
+            throw NotImplementedException("ExpressionType not mapped to Lua operator: " + ExpressionTypeToString(op_type));
     }
 }
 
-// Helper to escape string literals for Lua
 static std::string EscapeLuaString(const std::string& s) {
     std::string result = "\"";
     for (char c : s) {
@@ -98,469 +108,259 @@ static std::string EscapeLuaString(const std::string& s) {
     return result;
 }
 
-// --- GenerateValue for specific BoundExpression types ---
-std::string LuaTranslator::GenerateValue(const BoundConstantExpression& expr, LuaTranslatorContext& ctx,
-                                         std::vector<column_binding>& referenced_columns) {
+// Forward declarations for static helpers
+static std::string GenerateValueBoundFunction(const BoundFunctionExpression& expr, LuaTranslatorContext& ctx, const std::string& result_var_name, int& temp_var_idx);
+static std::string GenerateValueBoundCase(const BoundCaseExpression& expr, LuaTranslatorContext& ctx, const std::string& result_var_name, int& temp_var_idx);
+
+
+std::string LuaTranslator::GenerateValue(const BoundConstantExpression& expr, LuaTranslatorContext& ctx, const std::string& result_var_name, int& temp_var_idx) {
+    std::stringstream ss;
+    ss << "local " << result_var_name << "_val\n";
+    ss << "local " << result_var_name << "_is_null\n";
     const auto& val = expr.value;
     if (val.IsNull()) {
-        return "nil"; // Represent SQL NULL as Lua nil for value expressions
-    }
-    switch (expr.return_type.id()) {
-        case LogicalTypeId::INTEGER:  return std::to_string(val.GetValue<int32_t>());
-        case LogicalTypeId::BIGINT:   return std::to_string(val.GetValue<int64_t>()); // Lua numbers are doubles
-        case LogicalTypeId::DOUBLE:   return std::to_string(val.GetValue<double>());
-        // For VARCHAR, DATE, TIMESTAMP, Lua representation of constant needs care
-        // DATE/TIMESTAMP can be their integer representation.
-        case LogicalTypeId::DATE:      return std::to_string(val.GetValue<date_t>().days);
-        case LogicalTypeId::TIMESTAMP: return std::to_string(val.GetValue<timestamp_t>().micros);
-        case LogicalTypeId::VARCHAR:   return EscapeLuaString(val.GetValue<string>());
-        case LogicalTypeId::INTERVAL: {
-            auto& interval_val = val.GetValue<interval_t>();
-            return StringUtil::Format("ffi.new(\"FFIInterval\", { months = %d, days = %d, micros = %lld })",
-                                      interval_val.months, interval_val.days, interval_val.micros);
+        ss << result_var_name << "_is_null = true\n";
+    } else {
+        ss << result_var_name << "_is_null = false\n";
+        switch (expr.return_type.id()) {
+            case LogicalTypeId::INTEGER:  ss << result_var_name << "_val = " << val.GetValue<int32_t>() << "\n"; break;
+            case LogicalTypeId::BIGINT:   ss << result_var_name << "_val = " << val.GetValue<int64_t>() << "LL\n"; break;
+            case LogicalTypeId::DOUBLE:   ss << result_var_name << "_val = " << val.GetValue<double>() << "\n"; break;
+            case LogicalTypeId::DATE:     ss << result_var_name << "_val = " << val.GetValue<date_t>().days << "\n"; break;
+            case LogicalTypeId::TIMESTAMP:ss << result_var_name << "_val = " << val.GetValue<timestamp_t>().micros << "LL\n"; break;
+            case LogicalTypeId::VARCHAR:  ss << result_var_name << "_val = " << EscapeLuaString(val.GetValue<string>()) << "\n"; break;
+            case LogicalTypeId::BOOLEAN:  ss << result_var_name << "_val = " << (val.GetValue<bool>() ? "true" : "false") << "\n"; break;
+            case LogicalTypeId::INTERVAL: {
+                auto& interval_val = val.GetValue<interval_t>();
+                ss << result_var_name << "_val = ffi.new(\"FFIInterval\", { months = " << interval_val.months
+                   << ", days = " << interval_val.days << ", micros = " << interval_val.micros << "LL })\n";
+                break;
+            }
+            default:
+                throw NotImplementedException("Unsupported constant type for JIT: " + expr.return_type.ToString());
         }
-        default:
-            throw NotImplementedException("Unsupported constant type in LuaTranslator for BoundConstantExpression: " + expr.return_type.ToString());
     }
+    return ss.str();
 }
 
-std::string LuaTranslator::GenerateValue(const BoundReferenceExpression& expr, LuaTranslatorContext& ctx,
-                                         std::vector<column_binding>& referenced_columns) {
-    column_binding binding(expr.index); // Assuming expr.index is the binding index for the DataChunk
-                                        // This might need adjustment if it's a different kind of index.
-                                        // For now, assume it maps to an input vector index.
-
-    // Check if this binding is already recorded
-    bool found = false;
-    for(const auto& b : referenced_columns) {
-        if (b.table_index == binding.table_index && b.column_index == binding.column_index) { // Simplistic check
-            found = true;
-            break;
-        }
-    }
-    if (!found) {
-        referenced_columns.push_back(binding);
-    }
-
-    // The actual column index for input_vectors table might be different from expr.index
-    // if multiple tables are involved. For now, assume expr.index is the direct index
-    // into the list of input vectors passed to the Lua function.
-    // Lua tables are 1-indexed.
-    idx_t input_vector_idx = expr.index + 1;
-
-    const auto& type = ctx.GetInputLogicalType(expr.index);
-    if (type.id() == LogicalTypeId::VARCHAR) {
-        return StringUtil::Format("ffi.string(%s[%d].data[i].ptr, %s[%d].data[i].len)",
-                                  ctx.GetInputVectorsTable(), input_vector_idx,
-                                  ctx.GetInputVectorsTable(), input_vector_idx);
-    }
-    // For other types (numeric, date, timestamp as int) direct data access
-    // For INTERVAL, this would return a pointer to FFIInterval, Lua needs to access fields.
-    if (type.id() == LogicalTypeId::INTERVAL) {
-         // This gives the FFIInterval struct itself (by value if it's an array of structs)
-         // Lua would then do ffi_interval_val.months, .days, .micros
-        return StringUtil::Format("%s[%d].data[i]", ctx.GetInputVectorsTable(), input_vector_idx);
-    }
-    return StringUtil::Format("%s[%d].data[i]", ctx.GetInputVectorsTable(), input_vector_idx);
-}
-
-#include "duckdb/planner/expression/bound_case_expression.hpp"
-#include "duckdb/planner/expression/bound_function_expression.hpp"
-#include "duckdb/function/scalar/date_functions.hpp" // For DatePartSpecifier for EXTRACT
-
-// Forward declaration for BoundFunctionExpression GenerateValue
-static std::string GenerateValueBoundFunction(const BoundFunctionExpression& expr, LuaTranslatorContext& ctx,
-                                         std::vector<column_binding>& referenced_columns);
-// Forward declaration for BoundCaseExpression GenerateValue
-static std::string GenerateValueBoundCase(const BoundCaseExpression& expr, LuaTranslatorContext& ctx,
-                                        std::vector<column_binding>& referenced_columns);
-
-
-std::string LuaTranslator::GenerateValue(const BoundOperatorExpression& expr, LuaTranslatorContext& ctx,
-                                         std::vector<column_binding>& referenced_columns) {
-    if (expr.children.empty()) { // Should not happen for operators we handle
-        throw InternalException("LuaTranslator: BoundOperatorExpression with no children.");
-    }
-
-    std::string first_child_str = GenerateValueExpression(*expr.children[0], ctx, referenced_columns);
-
-    if (expr.type == ExpressionType::OPERATOR_NOT) { // Unary NOT
-        // DuckDB's NOT operator returns BOOLEAN. Input is also BOOLEAN.
-        // Lua's 'not' works on Lua booleans. Our inputs from comparisons are 0 or 1.
-        return StringUtil::Format("(not (%s == 1))", first_child_str);
-    }
-    if (expr.type == ExpressionType::OPERATOR_IS_NULL) { // Unary IS NULL
-        // This needs to check the nullmask of the child's original column.
-        // The child_str is the *value* if not null. We need the column binding of the child.
-        // This requires a more complex way to get the nullmask for an arbitrary child expression.
-        // For a simple BoundReference child:
-        if (expr.children[0]->GetExpressionClass() == ExpressionClass::BOUND_REF) {
-            auto& ref_expr = expr.children[0]->Cast<BoundReferenceExpression>();
-            // Ensure this column is "visited" for the outer null checks if it wasn't already part of value_expr_str
-            column_binding binding(ref_expr.index);
-            bool found = false;
-            for(const auto& b : referenced_columns) { if (b.column_index == binding.column_index) { found = true; break; } }
-            if (!found) { referenced_columns.push_back(binding); }
-            return StringUtil::Format("(%s[%d].nullmask[i])", ctx.GetInputVectorsTable(), ref_expr.index + 1);
-        }
-        throw NotImplementedException("LuaTranslator: IS NULL on non-BoundReference child not yet fully supported for JIT.");
-    }
-     if (expr.type == ExpressionType::OPERATOR_IS_NOT_NULL) {
-        if (expr.children[0]->GetExpressionClass() == ExpressionClass::BOUND_REF) {
-            auto& ref_expr = expr.children[0]->Cast<BoundReferenceExpression>();
-            column_binding binding(ref_expr.index);
-            bool found = false;
-            for(const auto& b : referenced_columns) { if (b.column_index == binding.column_index) { found = true; break; } }
-            if (!found) { referenced_columns.push_back(binding); }
-            return StringUtil::Format("(not %s[%d].nullmask[i])", ctx.GetInputVectorsTable(), ref_expr.index + 1);
-        }
-        throw NotImplementedException("LuaTranslator: IS NOT NULL on non-BoundReference child not yet fully supported for JIT.");
-    }
-
-
-    if (expr.children.size() != 2) { // Must be binary from here
-        throw NotImplementedException("LuaTranslator: BoundOperatorExpression with " + std::to_string(expr.children.size()) + " children not supported for this op type.");
-    }
-    std::string op_str = GetLuaOperatorFromExprType(expr.type);
-    std::string second_child_str = GenerateValueExpression(*expr.children[1], ctx, referenced_columns);
-
-    // String CONCAT specific handling (type awareness)
-    if (expr.type == ExpressionType::OPERATOR_CONCAT) {
-        // Children might be string constants or string column references.
-        // GenerateValue for BoundReference already wraps VARCHAR with ffi.string().
-        // GenerateValue for BoundConstant already generates Lua string literals.
-        // So, first_child_str and second_child_str should be Lua strings here.
-    }
-    // Other binary ops assume numeric/comparable inputs based on GetLuaOperatorFromExprType mapping
-    return StringUtil::Format("(%s %s %s)", first_child_str, op_str, second_child_str);
-}
-
-// Placeholder for BoundFunctionExpression
-// This would be a large switch on function name.
-std::string GenerateValueBoundFunction(const BoundFunctionExpression& expr, LuaTranslatorContext& ctx,
-                                         std::vector<column_binding>& referenced_columns) {
-    std::string func_name_lower = StringUtil::Lower(expr.function.name);
-    std::vector<std::string> arg_strs;
-    for(const auto& child : expr.children) {
-        arg_strs.push_back(GenerateValueExpression(*child, ctx, referenced_columns));
-    }
-
-    if (func_name_lower == "lower") {
-        if (arg_strs.size() != 1) throw InternalException("LOWER expects 1 arg");
-        return StringUtil::Format("string.lower(%s)", arg_strs[0]);
-    } else if (func_name_lower == "upper") {
-        if (arg_strs.size() != 1) throw InternalException("UPPER expects 1 arg");
-        return StringUtil::Format("string.upper(%s)", arg_strs[0]);
-    } else if (func_name_lower == "length" || func_name_lower == "strlen") {
-        if (arg_strs.size() != 1) throw InternalException("LENGTH expects 1 arg");
-        return StringUtil::Format("#(%s)", arg_strs[0]); // Lua string length operator
-    } else if (func_name_lower == "substring" || func_name_lower == "substr") {
-        if (arg_strs.size() != 3 && arg_strs.size() != 2) throw InternalException("SUBSTRING expects 2 or 3 args");
-        if (arg_strs.size() == 3) { // string.sub(s, i [, j])
-            // SQL SUBSTRING(str FROM pos FOR len) -> string.sub(str, pos, pos + len - 1)
-            // Lua pos is 1-based. DuckDB pos is 1-based.
-            // Lua end index is inclusive.
-            return StringUtil::Format("string.sub(%s, %s, (%s + %s - 1))", arg_strs[0], arg_strs[1], arg_strs[1], arg_strs[2]);
-        } else { // string.sub(s, i) -- from i to end
-             return StringUtil::Format("string.sub(%s, %s)", arg_strs[0], arg_strs[1]);
-        }
-    } else if (func_name_lower == "concat") { // For explicit concat function
-        std::string res = "";
-        for(size_t i=0; i<arg_strs.size(); ++i) {
-            res += arg_strs[i];
-            if (i < arg_strs.size() -1) res += " .. ";
-        }
-        return "(" + res + ")";
-    }
-    // LIKE is often a BoundLikeExpression, but if it's a function:
-    // else if (func_name_lower == "like") { ... }
-    // Numeric functions
-    else if (func_name_lower == "abs") {
-        if (arg_strs.size() != 1) throw InternalException("ABS expects 1 arg");
-        return StringUtil::Format("math.abs(%s)", arg_strs[0]);
-    } else if (func_name_lower == "floor") {
-        if (arg_strs.size() != 1) throw InternalException("FLOOR expects 1 arg");
-        return StringUtil::Format("math.floor(%s)", arg_strs[0]);
-    } else if (func_name_lower == "ceil") {
-        if (arg_strs.size() != 1) throw InternalException("CEIL expects 1 arg");
-        return StringUtil::Format("math.ceil(%s)", arg_strs[0]);
-    } else if (func_name_lower == "round") {
-        if (arg_strs.size() == 1) { // round(num)
-            return StringUtil::Format("math.floor(%s + 0.5)", arg_strs[0]); // Lua 5.1 doesn't have math.round
-        } else if (arg_strs.size() == 2) { // round(num, precision)
-            // prec_arg is arg_strs[1]
-            // local p = 10^prec_arg; return math.floor(num_arg*p+0.5)/p
-            return StringUtil::Format("(function() local p = 10^(%s); return math.floor((%s)*p+0.5)/p end)()", arg_strs[1], arg_strs[0]);
-        }
-        throw InternalException("ROUND expects 1 or 2 args");
-    }
-    // Date/Timestamp EXTRACT
-    else if (func_name_lower == "date_part" || func_name_lower == "extract") {
-        if (arg_strs.size() != 2) throw InternalException("DATE_PART/EXTRACT expects 2 args");
-        // arg_strs[0] is the part string (e.g. "year", "month")
-        // arg_strs[1] is the date/timestamp value
-        // The part string should be a constant for direct FFI call.
-        // We assume the first argument (part) is a constant string.
-        // This requires inspecting the actual child expression node, not just its Lua code string.
-        const auto& part_expr = expr.children[0]->Cast<BoundConstantExpression>();
-        std::string part_str = part_expr.value.GetValue<std::string>();
-
-        const auto& date_ts_arg_expr = *expr.children[1];
-        LogicalTypeId date_ts_type_id = date_ts_arg_expr.return_type.id();
-
-        if (date_ts_type_id == LogicalTypeId::DATE) {
-            return StringUtil::Format("duckdb_ffi_extract_from_date(%s, \"%s\")", arg_strs[1], part_str);
-        } else if (date_ts_type_id == LogicalTypeId::TIMESTAMP) {
-            return StringUtil::Format("duckdb_ffi_extract_from_timestamp(%s, \"%s\")", arg_strs[1], part_str);
-        } else {
-            throw NotImplementedException("EXTRACT/DATE_PART on non-date/timestamp type not supported by JIT: " + date_ts_arg_expr.return_type.ToString());
-        }
-    } else if (func_name_lower == "year") { // Specific extract like year(date_col)
-         if (arg_strs.size() != 1) throw InternalException("YEAR expects 1 arg");
-         // Determine if it's date or timestamp from child expression type
-         const auto& date_ts_arg_expr = *expr.children[0];
-         LogicalTypeId date_ts_type_id = date_ts_arg_expr.return_type.id();
-         if (date_ts_type_id == LogicalTypeId::DATE) {
-            return StringUtil::Format("duckdb_ffi_extract_from_date(%s, \"year\")", arg_strs[0]);
-         } else if (date_ts_type_id == LogicalTypeId::TIMESTAMP) {
-            return StringUtil::Format("duckdb_ffi_extract_from_timestamp(%s, \"year\")", arg_strs[0]);
-         } else {
-            throw NotImplementedException("YEAR on non-date/timestamp type not supported by JIT: " + date_ts_arg_expr.return_type.ToString());
-         }
-    }
-    // Add similar for MONTH, DAY etc. if they are separate functions
-
-    // New Math Functions
-    else if (func_name_lower == "sqrt") {
-        if (arg_strs.size() != 1) throw InternalException("SQRT expects 1 arg");
-        return StringUtil::Format("(function(a) if a == nil or a < 0 then return nil else return math.sqrt(a) end end)(%s)", arg_strs[0]);
-    } else if (func_name_lower == "pow" || func_name_lower == "power") {
-        if (arg_strs.size() != 2) throw InternalException("POW/POWER expects 2 args");
-        return StringUtil::Format("(function(b, e) if b == nil or e == nil then return nil else return math.pow(b, e) end end)(%s, %s)", arg_strs[0], arg_strs[1]);
-    } else if (func_name_lower == "ln") {
-        if (arg_strs.size() != 1) throw InternalException("LN expects 1 arg");
-        return StringUtil::Format("(function(a) if a == nil or a <= 0 then return nil else return math.log(a) end end)(%s)", arg_strs[0]);
-    } else if (func_name_lower == "log10") {
-        if (arg_strs.size() != 1) throw InternalException("LOG10 expects 1 arg");
-        return StringUtil::Format("(function(a) if a == nil or a <= 0 then return nil else return math.log10(a) end end)(%s)", arg_strs[0]);
-    } else if (func_name_lower == "sin") {
-        if (arg_strs.size() != 1) throw InternalException("SIN expects 1 arg");
-        return StringUtil::Format("(function(a) if a == nil then return nil else return math.sin(a) end end)(%s)", arg_strs[0]);
-    } else if (func_name_lower == "cos") {
-        if (arg_strs.size() != 1) throw InternalException("COS expects 1 arg");
-        return StringUtil::Format("(function(a) if a == nil then return nil else return math.cos(a) end end)(%s)", arg_strs[0]);
-    } else if (func_name_lower == "tan") {
-        if (arg_strs.size() != 1) throw InternalException("TAN expects 1 arg");
-        return StringUtil::Format("(function(a) if a == nil then return nil else return math.tan(a) end end)(%s)", arg_strs[0]);
-    }
-    // New String Functions
-    else if (func_name_lower == "replace") {
-        if (arg_strs.size() != 3) throw InternalException("REPLACE expects 3 args");
-        // Using a simple string.gsub for all occurrences. Lua patterns are not SQL LIKE patterns.
-        // For plain string replacement, string.gsub is fine.
-        // arg_strs[1] (pattern) needs escaping for magic chars if it's not meant to be a pattern.
-        // For simple literal replace, we can use a helper or more complex string.find loop.
-        // The prompt's simple_replace is for one-by-one, this is simpler:
-        return StringUtil::Format(
-            "(function(s, from_str, to_str) "
-            "  if s == nil or from_str == nil or to_str == nil then return nil end; "
-            // Implemented gsub-like replace for fixed patterns (magic_chars_escaped = false)
-            // This is a simplified version of gsub that doesn't use Lua patterns from `from_str`
-            "  local result = ''; local i = 1; "
-            "  while true do "
-            "    local find_start, find_end = string.find(s, from_str, i, true); " // true for plain text
-            "    if not find_start then break end; "
-            "    result = result .. string.sub(s, i, find_start - 1) .. to_str; "
-            "    i = find_end + 1; "
-            "  end; "
-            "  result = result .. string.sub(s, i); "
-            "  return result; "
-            "end)(%s, %s, %s)", arg_strs[0], arg_strs[1], arg_strs[2]);
-    } else if (func_name_lower == "lpad") {
-        if (arg_strs.size() != 3) throw InternalException("LPAD expects 3 args");
-        return StringUtil::Format(
-            "(function(s, len, pad) "
-            "  if s == nil or len == nil or pad == nil then return nil end; "
-            "  local s_len = #s; local pad_char = string.sub(pad, 1, 1); " // Use first char of pad string
-            "  if pad_char == '' then return string.sub(s, 1, len) end; " // If pad string is empty, behave like substring
-            "  if s_len >= len then return string.sub(s, 1, len) "
-            "  else return string.rep(pad_char, len - s_len) .. s end "
-            "end)(%s, %s, %s)", arg_strs[0], arg_strs[1], arg_strs[2]);
-    } else if (func_name_lower == "rpad") {
-        if (arg_strs.size() != 3) throw InternalException("RPAD expects 3 args");
-        return StringUtil::Format(
-            "(function(s, len, pad) "
-            "  if s == nil or len == nil or pad == nil then return nil end; "
-            "  local s_len = #s; local pad_char = string.sub(pad, 1, 1); "
-            "  if pad_char == '' then return string.sub(s, 1, len) end; "
-            "  if s_len >= len then return string.sub(s, 1, len) "
-            "  else return s .. string.rep(pad_char, len - s_len) end "
-            "end)(%s, %s, %s)", arg_strs[0], arg_strs[1], arg_strs[2]);
-    } else if (func_name_lower == "trim") {
-        if (arg_strs.size() != 1) throw InternalException("TRIM expects 1 arg");
-        // string.match returns nil if no match (e.g. empty string or all whitespace)
-        // We want "" in that case.
-        return StringUtil::Format("(function(s) if s == nil then return nil end; return string.match(s, '^%%s*(.-)%%s*$') or '' end)(%s)", arg_strs[0]);
-    }
-
-    throw NotImplementedException("Unsupported BoundFunctionExpression in LuaTranslator: " + func_name_lower);
-}
-
-std::string GenerateValueBoundCase(const BoundCaseExpression& expr, LuaTranslatorContext& ctx,
-                                 std::vector<column_binding>& referenced_columns) {
+std::string LuaTranslator::GenerateValue(const BoundReferenceExpression& expr, LuaTranslatorContext& ctx, const std::string& result_var_name, int& temp_var_idx) {
     std::stringstream ss;
-    ss << "(function()\n"; // Start IIFE
+    ss << "local " << result_var_name << "_val\n";
+    ss << "local " << result_var_name << "_is_null\n";
+
+    // Get the correct Lua argument index (0, 1, ...) for this original chunk column index
+    idx_t lua_arg_idx = ctx.GetLuaArgIndex(expr.index);
+    // Lua function arguments in ConstructFullLuaFunctionScript are input0_ffi, input1_ffi, ...
+    // Correspondingly, casted data/nullmask arrays are input0_data, input0_nullmask etc.
+    std::string input_data_var = "input" + std::to_string(lua_arg_idx) + "_data";
+    std::string input_nullmask_var = "input" + std::to_string(lua_arg_idx) + "_nullmask";
+
+    ss << "if " << input_nullmask_var << "[i] then\n";
+    ss << "  " << result_var_name << "_is_null = true\n";
+    ss << "else\n";
+    ss << "  " << result_var_name << "_is_null = false\n";
+    const auto& type = expr.return_type;
+    if (type.id() == LogicalTypeId::VARCHAR) {
+        ss << "  " << result_var_name << "_val = ffi.string(" << input_data_var << "[i].ptr, " << input_data_var << "[i].len)\n";
+    } else { // Numeric, Date, Timestamp, Interval, Boolean (as int8_t)
+        ss << "  " << result_var_name << "_val = " << input_data_var << "[i]\n";
+    }
+    ss << "end\n";
+    return ss.str();
+}
+
+std::string LuaTranslator::GenerateValue(const BoundOperatorExpression& expr, LuaTranslatorContext& ctx, const std::string& result_var_name, int& temp_var_idx) {
+    std::stringstream ss;
+    ss << "local " << result_var_name << "_val\n";
+    ss << "local " << result_var_name << "_is_null\n";
+
+    if (expr.children.empty()) throw InternalException("Operator expression with no children.");
+
+    std::string child0_res_name = GenerateTempVarName(temp_var_idx);
+    ss << GenerateValueExpression(*expr.children[0], ctx, child0_res_name, temp_var_idx);
+
+    if (expr.type == ExpressionType::OPERATOR_NOT) {
+        ss << "if " << child0_res_name << "_is_null then " << result_var_name << "_is_null = true else "
+           << result_var_name << "_is_null = false; "
+           << result_var_name << "_val = not " << child0_res_name << "_val end\n";
+    } else if (expr.type == ExpressionType::OPERATOR_IS_NULL) {
+        ss << result_var_name << "_is_null = false\n"; // IS NULL itself is never NULL
+        ss << result_var_name << "_val = " << child0_res_name << "_is_null\n";
+    } else if (expr.type == ExpressionType::OPERATOR_IS_NOT_NULL) {
+        ss << result_var_name << "_is_null = false\n"; // IS NOT NULL itself is never NULL
+        ss << result_var_name << "_val = not " << child0_res_name << "_is_null\n";
+    } else { // Binary operators
+        if (expr.children.size() != 2) throw InternalException("Binary operator with not 2 children.");
+        std::string child1_res_name = GenerateTempVarName(temp_var_idx);
+        ss << GenerateValueExpression(*expr.children[1], ctx, child1_res_name, temp_var_idx);
+
+        ss << "if " << child0_res_name << "_is_null or " << child1_res_name << "_is_null then "
+           << result_var_name << "_is_null = true else "
+           << result_var_name << "_is_null = false; "
+           << result_var_name << "_val = " << child0_res_name << "_val "
+           << GetLuaOperatorFromExprType(expr.type) << " " << child1_res_name << "_val end\n";
+    }
+    return ss.str();
+}
+
+std::string GenerateValueBoundFunction(const BoundFunctionExpression& expr, LuaTranslatorContext& ctx, const std::string& result_var_name, int& temp_var_idx) {
+    std::stringstream ss;
+    ss << "local " << result_var_name << "_val\n";
+    ss << "local " << result_var_name << "_is_null\n";
+
+    std::vector<std::string> child_val_vars;
+    std::string children_null_check = "";
+
+    for (size_t k = 0; k < expr.children.size(); ++k) {
+        std::string child_prefix = GenerateTempVarName(temp_var_idx);
+        ss << LuaTranslator::GenerateValueExpression(*expr.children[k], ctx, child_prefix, temp_var_idx);
+        child_val_vars.push_back(child_prefix + "_val");
+        if (k > 0) children_null_check += " or ";
+        children_null_check += (child_prefix + "_is_null");
+    }
+
+    if (expr.children.empty()) { // Handle 0-arg functions if any (none in this list)
+        children_null_check = "false"; // No inputs means not null due to inputs
+    }
+
+    ss << "if " << children_null_check << " then\n";
+    ss << "  " << result_var_name << "_is_null = true\n";
+    ss << "else\n";
+    ss << "  " << result_var_name << "_is_null = false\n"; // Tentatively
+
+    std::string func_name_lower = StringUtil::Lower(expr.function.name);
+    std::string args_joined = StringUtil::Join(child_val_vars, ", ");
+
+    // Math functions
+    if (func_name_lower == "abs") ss << "  " << result_var_name << "_val = math.abs(" << args_joined << ")\n";
+    else if (func_name_lower == "ceil") ss << "  " << result_var_name << "_val = math.ceil(" << args_joined << ")\n";
+    else if (func_name_lower == "floor") ss << "  " << result_var_name << "_val = math.floor(" << args_joined << ")\n";
+    else if (func_name_lower == "round") {
+        if (child_val_vars.size() == 1) ss << "  " << result_var_name << "_val = math.floor(" << child_val_vars[0] << " + 0.5)\n";
+        else ss << "  do local p = 10^(" << child_val_vars[1] << "); " << result_var_name << "_val = math.floor(" << child_val_vars[0] << "*p+0.5)/p end\n";
+    } else if (func_name_lower == "sqrt") {
+        ss << "  if " << child_val_vars[0] << " < 0 then " << result_var_name << "_is_null = true else " << result_var_name << "_val = math.sqrt(" << child_val_vars[0] << ") end\n";
+    } else if (func_name_lower == "pow" || func_name_lower == "power") {
+        ss << "  " << result_var_name << "_val = math.pow(" << args_joined << ")\n"; // Lua math.pow handles errors like pow(-1, 0.5) by returning nan
+    } else if (func_name_lower == "ln") {
+        ss << "  if " << child_val_vars[0] << " <= 0 then " << result_var_name << "_is_null = true else " << result_var_name << "_val = math.log(" << child_val_vars[0] << ") end\n";
+    } else if (func_name_lower == "log10") {
+        ss << "  if " << child_val_vars[0] << " <= 0 then " << result_var_name << "_is_null = true else " << result_var_name << "_val = math.log10(" << child_val_vars[0] << ") end\n";
+    } else if (func_name_lower == "sin") ss << "  " << result_var_name << "_val = math.sin(" << args_joined << ")\n";
+    else if (func_name_lower == "cos") ss << "  " << result_var_name << "_val = math.cos(" << args_joined << ")\n";
+    else if (func_name_lower == "tan") ss << "  " << result_var_name << "_val = math.tan(" << args_joined << ")\n";
+    // String functions
+    else if (func_name_lower == "lower") ss << "  " << result_var_name << "_val = string.lower(" << args_joined << ")\n";
+    else if (func_name_lower == "upper") ss << "  " << result_var_name << "_val = string.upper(" << args_joined << ")\n";
+    else if (func_name_lower == "length" || func_name_lower == "strlen") ss << "  " << result_var_name << "_val = #(" << args_joined << ")\n";
+    else if (func_name_lower == "concat") {
+        std::string concat_expr_str = "";
+        for(size_t k=0; k < child_val_vars.size(); ++k) { concat_expr_str += child_val_vars[k]; if (k < child_val_vars.size()-1) concat_expr_str += " .. ";}
+        ss << "  " << result_var_name << "_val = " << concat_expr_str << "\n";
+    } else if (func_name_lower == "substring" || func_name_lower == "substr") {
+        if (child_val_vars.size() == 2) ss << "  " << result_var_name << "_val = string.sub(" << child_val_vars[0] << ", " << child_val_vars[1] << ")\n";
+        else ss << "  " << result_var_name << "_val = string.sub(" << child_val_vars[0] << ", " << child_val_vars[1] << ", " << child_val_vars[1] << " + " << child_val_vars[2] << " - 1)\n";
+    } else if (func_name_lower == "replace") {
+        ss << "  do local s, from_str, to_str = " << child_val_vars[0] << ", " << child_val_vars[1] << ", " << child_val_vars[2] << "; "
+           << "local res = ''; local i = 1; "
+           << "while true do local fs, fe = string.find(s, from_str, i, true); "
+           << "if not fs then break end; res = res .. string.sub(s, i, fs - 1) .. to_str; i = fe + 1; end; "
+           << result_var_name << "_val = res .. string.sub(s, i) end\n";
+    } else if (func_name_lower == "lpad") {
+        ss << "  do local s, len, pad = " << child_val_vars[0] << ", " << child_val_vars[1] << ", " << child_val_vars[2] << "; "
+           << "local slen = #s; local pad_char = string.sub(pad,1,1); if pad_char == '' then " << result_var_name << "_val = string.sub(s,1,len); "
+           << "elseif slen >= len then " << result_var_name << "_val = string.sub(s,1,len); "
+           << "else " << result_var_name << "_val = string.rep(pad_char, len-slen) .. s; end end\n";
+    } else if (func_name_lower == "rpad") {
+         ss << "  do local s, len, pad = " << child_val_vars[0] << ", " << child_val_vars[1] << ", " << child_val_vars[2] << "; "
+           << "local slen = #s; local pad_char = string.sub(pad,1,1); if pad_char == '' then " << result_var_name << "_val = string.sub(s,1,len); "
+           << "elseif slen >= len then " << result_var_name << "_val = string.sub(s,1,len); "
+           << "else " << result_var_name << "_val = s .. string.rep(pad_char, len-slen); end end\n";
+    } else if (func_name_lower == "trim") {
+        ss << "  " << result_var_name << "_val = string.match(" << child_val_vars[0] << ", '^%%s*(.-)%%s*$') or ''\n";
+    }
+    // Date/Timestamp EXTRACT (using FFI C helpers)
+    else if (func_name_lower == "date_part" || func_name_lower == "extract") {
+        const auto& part_expr_node = expr.children[0]->Cast<BoundConstantExpression>();
+        std::string part_str_val = EscapeLuaString(part_expr_node.value.GetValue<std::string>());
+        LogicalTypeId temporal_type = expr.children[1]->return_type.id();
+        if (temporal_type == LogicalTypeId::DATE) ss << "  " << result_var_name << "_val = duckdb_ffi_extract_from_date(" << child_val_vars[1] << ", " << part_str_val << ")\n";
+        else if (temporal_type == LogicalTypeId::TIMESTAMP) ss << "  " << result_var_name << "_val = duckdb_ffi_extract_from_timestamp(" << child_val_vars[1] << ", " << part_str_val << ")\n";
+        else { ss << "  " << result_var_name << "_is_null = true -- EXTRACT on non-temporal\n"; }
+    } else if (func_name_lower == "year") { // Example specific extract
+        LogicalTypeId temporal_type = expr.children[0]->return_type.id();
+         if (temporal_type == LogicalTypeId::DATE) ss << "  " << result_var_name << "_val = duckdb_ffi_extract_from_date(" << child_val_vars[0] << ", \"year\")\n";
+        else if (temporal_type == LogicalTypeId::TIMESTAMP) ss << "  " << result_var_name << "_val = duckdb_ffi_extract_from_timestamp(" << child_val_vars[0] << ", \"year\")\n";
+        else { ss << "  " << result_var_name << "_is_null = true -- YEAR on non-temporal\n"; }
+    }
+    else { // Fallback for unhandled functions
+        ss << "  -- Function '" << func_name_lower << "' not fully translated to new JIT style.\n";
+        ss << "  " << result_var_name << "_is_null = true\n";
+    }
+    // If the Lua operation itself could return nil (e.g., some math functions on invalid inputs not caught by domain checks)
+    ss << "  if " << result_var_name << "_val == nil and not " << result_var_name << "_is_null then " << result_var_name << "_is_null = true; end\n";
+    ss << "end\n";
+    return ss.str();
+}
+
+std::string GenerateValueBoundCase(const BoundCaseExpression& expr, LuaTranslatorContext& ctx, const std::string& result_var_name, int& temp_var_idx) {
+    std::stringstream ss;
+    ss << "local " << result_var_name << "_val\n";
+    ss << "local " << result_var_name << "_is_null\n";
+
+    std::vector<std::string> when_val_vars;
+    std::vector<std::string> when_is_null_vars;
+    std::vector<std::string> then_val_vars;
+    std::vector<std::string> then_is_null_vars;
+
+    for (const auto& case_check : expr.case_checks) {
+        std::string when_prefix = GenerateTempVarName(temp_var_idx);
+        ss << LuaTranslator::GenerateValueExpression(*case_check.when_expr, ctx, when_prefix, temp_var_idx);
+        when_val_vars.push_back(when_prefix + "_val");
+        when_is_null_vars.push_back(when_prefix + "_is_null");
+
+        std::string then_prefix = GenerateTempVarName(temp_var_idx);
+        ss << LuaTranslator::GenerateValueExpression(*case_check.then_expr, ctx, then_prefix, temp_var_idx);
+        then_val_vars.push_back(then_prefix + "_val");
+        then_is_null_vars.push_back(then_prefix + "_is_null");
+    }
+    std::string else_prefix = GenerateTempVarName(temp_var_idx);
+    ss << LuaTranslator::GenerateValueExpression(*expr.else_expr, ctx, else_prefix, temp_var_idx);
 
     for (size_t i = 0; i < expr.case_checks.size(); ++i) {
-        const auto& check = expr.case_checks[i];
-        std::string when_str = GenerateValueExpression(*check.when_expr, ctx, referenced_columns);
-        std::string then_str = GenerateValueExpression(*check.then_expr, ctx, referenced_columns);
-
-        // WHEN condition is expected to be boolean (0 or 1 from translator)
-        if (i == 0) {
-            ss << "  if (" << when_str << " == 1) then return " << then_str << "\n";
-        } else {
-            ss << "  elseif (" << when_str << " == 1) then return " << then_str << "\n";
-        }
+        if (i == 0) ss << "if not " << when_is_null_vars[i] << " and " << when_val_vars[i] << " then\n";
+        else ss << "elseif not " << when_is_null_vars[i] << " and " << when_val_vars[i] << " then\n";
+        ss << "  " << result_var_name << "_val = " << then_val_vars[i] << "\n";
+        ss << "  " << result_var_name << "_is_null = " << then_is_null_vars[i] << "\n";
     }
-
-    std::string else_str = GenerateValueExpression(*expr.else_expr, ctx, referenced_columns);
-    ss << "  else return " << else_str << "\n";
-    ss << "  end\n";
-    ss << "end)()"; // End IIFE and call it
+    ss << "else\n";
+    ss << "  " << result_var_name << "_val = " << else_prefix << "_val\n";
+    ss << "  " << result_var_name << "_is_null = " << else_prefix << "_is_null\n";
+    ss << "end\n";
 
     return ss.str();
 }
 
-
-// Main recursive dispatch for GenerateValueExpression
-std::string LuaTranslator::GenerateValueExpression(const Expression& expr, LuaTranslatorContext& ctx,
-                                               std::vector<column_binding>& referenced_columns) {
+std::string LuaTranslator::GenerateValueExpression(const Expression& expr, LuaTranslatorContext& ctx, const std::string& result_var_name, int& temp_var_idx) {
     switch (expr.GetExpressionClass()) {
     case ExpressionClass::BOUND_CONSTANT:
-        return GenerateValue(expr.Cast<BoundConstantExpression>(), ctx, referenced_columns);
+        return GenerateValue(expr.Cast<BoundConstantExpression>(), ctx, result_var_name, temp_var_idx);
     case ExpressionClass::BOUND_REF:
-        return GenerateValue(expr.Cast<BoundReferenceExpression>(), ctx, referenced_columns);
+        return GenerateValue(expr.Cast<BoundReferenceExpression>(), ctx, result_var_name, temp_var_idx);
     case ExpressionClass::BOUND_OPERATOR:
-        return GenerateValue(expr.Cast<BoundOperatorExpression>(), ctx, referenced_columns);
+        return GenerateValue(expr.Cast<BoundOperatorExpression>(), ctx, result_var_name, temp_var_idx);
     case ExpressionClass::BOUND_FUNCTION:
-        return GenerateValueBoundFunction(expr.Cast<BoundFunctionExpression>(), ctx, referenced_columns);
-    case ExpressionClass::BOUND_CASE: // Added
-        return GenerateValueBoundCase(expr.Cast<BoundCaseExpression>(), ctx, referenced_columns);
-    // case ExpressionClass::BOUND_CONJUNCTION: // TODO
+        return GenerateValueBoundFunction(expr.Cast<BoundFunctionExpression>(), ctx, result_var_name, temp_var_idx);
+    case ExpressionClass::BOUND_CASE:
+        return GenerateValueBoundCase(expr.Cast<BoundCaseExpression>(), ctx, result_var_name, temp_var_idx);
     default:
-        throw NotImplementedException("Unsupported BoundExpression class in LuaTranslator: " + ExpressionTypeToString(expr.type) + "[" + expr.GetExpressionClassString() + "]");
+        throw NotImplementedException("Unsupported BoundExpression class for JIT: " + expr.GetExpressionClassString());
     }
 }
 
-// Main public method: TranslateExpressionToLuaRowLogic
 std::string LuaTranslator::TranslateExpressionToLuaRowLogic(const Expression& expr, LuaTranslatorContext& ctx) {
-    std::vector<column_binding> referenced_columns;
-    std::string value_expr_str = GenerateValueExpression(expr, ctx, referenced_columns);
-
-    std::sort(referenced_columns.begin(), referenced_columns.end(),
-              [](const column_binding& a, const column_binding& b) {
-                  return a.column_index < b.column_index;
-              });
-    referenced_columns.erase(std::unique(referenced_columns.begin(), referenced_columns.end(),
-                                       [](const column_binding& a, const column_binding& b) {
-                                           return a.column_index == b.column_index;
-                                       }), referenced_columns.end());
-
-    std::stringstream ss;
-    // Use "output_vec_ffi" as the standard name for the output FFIVector* in Lua,
-    // matching ConstructFullLuaFunctionScript.
-    const std::string output_ffi_arg_name = "output_vec_ffi";
-
-    if (!referenced_columns.empty()) {
-        ss << "if ";
-        for (size_t k = 0; k < referenced_columns.size(); ++k) {
-            ss << ctx.GetInputVectorsTable() << "[" << referenced_columns[k].column_index + 1 << "].nullmask[i]";
-            if (k < referenced_columns.size() - 1) {
-                ss << " or ";
-            }
-        }
-        ss << " then\n";
-        if (expr.return_type.id() == LogicalTypeId::VARCHAR) {
-            ss << "    duckdb_ffi_set_string_output_null(" << output_ffi_arg_name << ", i)\n";
-        } else {
-            // For non-string types, nullmask is part of the FFIVector struct passed for output
-            // This refers to the adapted name used in ConstructFullLuaFunctionScript for the output nullmask array.
-            ss << "    output_nullmask[i] = true\n";
-        }
-    } else { // No column references, so expression is constant or only involves constants.
-             // It can still be NULL (e.g. CAST(NULL AS INTEGER) or a function returning NULL).
-             // The value_expr_str itself will be "nil" if it's a constant null.
-        if (expr.return_type.id() == LogicalTypeId::VARCHAR) {
-            // String output handled below by checking lua_str_result.
-            // No explicit nullmask setting here if no column refs.
-        } else {
-             ss << "output_nullmask[i] = false\n"; // Tentatively false for non-string consts
-        }
-    }
-
-    if (!referenced_columns.empty()) {
-        ss << "else\n"; // All referenced inputs are NOT NULL
-        if (expr.return_type.id() != LogicalTypeId::VARCHAR) {
-            ss << "    output_nullmask[i] = false\n";
-        }
-        // For VARCHAR, nullness is determined by lua_str_result below.
-    }
-
-    bool is_boolean_output_type = expr.return_type.id() == LogicalTypeId::BOOLEAN;
-    std::string indent = (!referenced_columns.empty()) ? "    " : "";
-
-    if (expr.return_type.id() == LogicalTypeId::VARCHAR) {
-        ss << indent << "local lua_str_result = " << value_expr_str << "\n";
-        ss << indent << "if lua_str_result == nil then\n";
-        ss << indent << "    duckdb_ffi_set_string_output_null(" << output_ffi_arg_name << ", i)\n";
-        // If there were no column_refs, we still need to ensure output_nullmask is set if const is nil
-        if (referenced_columns.empty()) {
-            ss << indent << "    output_nullmask[i] = true\n";
-        }
-        ss << indent << "else\n";
-        // Ensure nullmask is false if we are adding a string.
-        ss << indent << "    output_nullmask[i] = false\n";
-        ss << indent << "    duckdb_ffi_add_string_to_output_vector(" << output_ffi_arg_name << ", i, lua_str_result, #lua_str_result)\n";
-        ss << indent << "end\n";
-    } else if (is_boolean_output_type) {
-        // If value_expr_str itself could be nil (e.g. CASE expr returning NULL boolean)
-        // this needs to be handled before comparison.
-        // Current GenerateValue for CASE returns a value or calls another GenerateValue,
-        // which for constants returns "nil".
-        ss << indent << "local bool_val = " << value_expr_str << "\n";
-        ss << indent << "if bool_val == nil then\n"; // Handle if expression itself results in NULL
-        ss << indent << "    output_nullmask[i] = true\n";
-        ss << indent << "else\n";
-        // If it's a constant expression, output_nullmask[i] was already set to false.
-        // If it depended on columns, it was set to false in the 'else' block.
-        // So, if bool_val is not nil, output_nullmask[i] should be false.
-        if (!referenced_columns.empty()) { // Ensure it's false if it came through the non-null path
-             ss << indent << "    output_nullmask[i] = false\n";
-        }
-        ss << indent << "    if bool_val then\n"; // Lua true/false
-        ss << indent << "        output_data[i] = 1\n";
-        ss << indent << "    else\n";
-        ss << indent << "        output_data[i] = 0\n";
-        ss << indent << "    end\n";
-        ss << indent << "end\n";
-    } else { // Numeric types
-        ss << indent << "local num_val = " << value_expr_str << "\n";
-        ss << indent << "if num_val == nil then\n"; // Handle if expression itself results in NULL (e.g. 1 / 0 -> nil in some Lua contexts, or CASE)
-        ss << indent << "    output_nullmask[i] = true\n";
-        ss << indent << "else\n";
-        if (!referenced_columns.empty()) { // Ensure it's false if it came through the non-null path
-             ss << indent << "    output_nullmask[i] = false\n";
-        }
-        ss << indent << "    output_data[i] = num_val\n";
-        ss << indent << "end\n";
-    }
-
-    if (!referenced_columns.empty()) {
-        ss << "end"; // Closes the main "if all inputs not null" block
-    }
-
-    return ss.str();
+    int temp_var_idx = 0;
+    return GenerateValueExpression(expr, ctx, "current_row", temp_var_idx);
 }
 
 } // namespace duckdb

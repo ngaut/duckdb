@@ -221,105 +221,95 @@ static std::string GenerateUniqueJitFunctionName(const Expression& expr) {
     return "jitted_duckdb_expr_func_" + std::to_string(jitted_function_counter.fetch_add(1));
 }
 
+// Note: input_types in LuaTranslatorContext are the unique, ordered inputs to the Lua function
 static std::string ConstructFullLuaFunctionScript(
-    const std::string& function_name,
-    const std::string& lua_row_logic,
-    LuaTranslatorContext& translator_ctx,
+    const std::string& jitted_function_name,
+    const std::string& lua_row_logic_snippet,
+    const LuaTranslatorContext& translator_ctx, // Contains unique input types and mapping
     const LogicalType& output_logical_type) {
 
     std::stringstream ss;
     ss << "local ffi = require('ffi')\n";
+    // FFI CDEFs: Including struct definitions here makes each generated function more self-contained,
+    // though ideally, these are globally defined once in the Lua state. For PoC, this is safer.
     ss << "ffi.cdef[[\n";
-    ss << "    typedef struct FFIVector { void* data; bool* nullmask; unsigned long long count; "
-       << "int ffi_logical_type_id; int ffi_duckdb_vector_type; void* original_duckdb_vector; } FFIVector;\n";
-    ss << "    typedef struct FFIString { char* ptr; unsigned int len; } FFIString;\n";
-    // Ensure FFIInterval matches C++ struct definition (int32_t for months/days)
+    ss << "    typedef unsigned long long uint64_t;\n"; // Ensure uint64_t is known for FFIVector.count
+    ss << "    typedef unsigned int uint32_t;\n";   // Ensure uint32_t is known for FFIString.len
+    ss << "    typedef signed char int8_t;\n";
+    ss << "    typedef int int32_t;\n";
+    ss << "    typedef long long int64_t;\n";
+    ss << "    typedef struct FFIVector { void* data; bool* nullmask; uint64_t count; int32_t ffi_logical_type_id; int32_t ffi_duckdb_vector_type; void* original_duckdb_vector; } FFIVector;\n";
+    ss << "    typedef struct FFIString { char* ptr; uint32_t len; } FFIString;\n";
     ss << "    typedef struct FFIInterval { int32_t months; int32_t days; int64_t micros; } FFIInterval;\n";
     ss << "    typedef signed char int8_t;\n";
     ss << "    typedef int int32_t;\n";
     ss << "    typedef long long int64_t;\n";
-    ss << "    void duckdb_ffi_add_string_to_output_vector(void* ffi_vec_ptr, unsigned long long row_idx, const char* str_data, unsigned int str_len);\n";
-    ss << "    void duckdb_ffi_set_string_output_null(void* ffi_vec_ptr, unsigned long long row_idx);\n";
-    ss << "    long long duckdb_ffi_extract_from_date(int32_t date_val, const char* part_str);\n";
-    ss << "    long long duckdb_ffi_extract_from_timestamp(int64_t ts_val, const char* part_str);\n";
-    ss << "    long long duckdb_ffi_extract_year_from_date(int32_t date_val);\n";
+    ss << "    void duckdb_ffi_add_string_to_output_vector(void* ffi_vec_ptr, uint64_t row_idx, const char* str_data, uint32_t str_len);\n";
+    ss << "    void duckdb_ffi_set_string_output_null(void* ffi_vec_ptr, uint64_t row_idx);\n";
+    ss << "    int64_t duckdb_ffi_extract_from_date(int32_t date_val, const char* part_str);\n";
+    ss << "    int64_t duckdb_ffi_extract_from_timestamp(int64_t ts_val, const char* part_str);\n";
+    ss << "    int64_t duckdb_ffi_extract_year_from_date(int32_t date_val);\n";
     ss << "]]\n";
 
-    ss << function_name << " = function(output_vec_ffi";
+    ss << jitted_function_name << " = function(output_vec_ffi";
     for (idx_t i = 0; i < translator_ctx.GetNumInputs(); ++i) {
-        ss << ", input_vec" << i + 1 << "_ffi";
+        // Lua function arguments are input0_ffi, input1_ffi, ...
+        ss << ", input" << i << "_ffi";
     }
     ss << ", count)\n";
 
-    std::string output_lua_ffi_type_str;
-    bool output_is_string = output_logical_type.id() == LogicalTypeId::VARCHAR;
-    bool output_is_interval = output_logical_type.id() == LogicalTypeId::INTERVAL;
-
-    if (!output_is_string && !output_is_interval) {
-        switch(output_logical_type.id()) {
-            case LogicalTypeId::INTEGER: output_lua_ffi_type_str = "int32_t"; break;
-            case LogicalTypeId::BIGINT: output_lua_ffi_type_str = "int64_t"; break;
-            case LogicalTypeId::DOUBLE: output_lua_ffi_type_str = "double"; break;
-            case LogicalTypeId::BOOLEAN: output_lua_ffi_type_str = "int8_t"; break;
-            case LogicalTypeId::DATE: output_lua_ffi_type_str = "int32_t"; break;
-            case LogicalTypeId::TIMESTAMP: output_lua_ffi_type_str = "int64_t"; break;
-            default: throw NotImplementedException("[JIT] Output type for Lua FFI cast not defined: " + output_logical_type.ToString());
-        }
-        ss << "    local output_data = ffi.cast('" << output_lua_ffi_type_str << "*', output_vec_ffi.data)\n";
-    } else if (output_is_string) {
-         // For string output, Lua code will call C FFI helpers, no direct cast of output_vec_ffi.data for assignment needed here.
-    } else { // INTERVAL
-         ss << "    local output_data_ffi_interval_array = ffi.cast('FFIInterval*', output_vec_ffi.data)\n";
-    }
+    // Cast output vector
     ss << "    local output_nullmask = ffi.cast('bool*', output_vec_ffi.nullmask)\n";
-
-    for (idx_t i = 0; i < translator_ctx.GetNumInputs(); ++i) {
-        std::string lua_ffi_type_str = translator_ctx.GetInputLuaFFIType(i);
-        if (translator_ctx.GetInputLogicalType(i).id() == LogicalTypeId::VARCHAR) {
-             ss << "    local input" << i + 1 << "_data_ffi_str_array = ffi.cast('FFIString*', input_vec" << i + 1 << "_ffi.data)\n";
-        } else if (translator_ctx.GetInputLogicalType(i).id() == LogicalTypeId::INTERVAL) {
-             ss << "    local input" << i + 1 << "_data_ffi_interval_array = ffi.cast('FFIInterval*', input_vec" << i + 1 << "_ffi.data)\n";
-        } else {
-            ss << "    local input" << i + 1 << "_data = ffi.cast('" << lua_ffi_type_str << "*', input_vec" << i + 1 << "_ffi.data)\n";
-        }
-        ss << "    local input" << i + 1 << "_nullmask = ffi.cast('bool*', input_vec" << i + 1 << "_ffi.nullmask)\n";
+    std::string output_data_var_name = "output_data";
+    if (output_logical_type.id() != LogicalTypeId::VARCHAR) { // Strings are handled by FFI call
+        std::string output_ffi_type_str = translator_ctx.GetOutputTypeLuaFFIType(output_logical_type);
+        ss << "    local " << output_data_var_name << " = ffi.cast('" << output_ffi_type_str << "*', output_vec_ffi.data)\n";
     }
 
+    // Cast input vectors
+    for (idx_t i = 0; i < translator_ctx.GetNumInputs(); ++i) {
+        std::string lua_input_ffi_ptr_name = "input" + std::to_string(i) + "_ffi";
+        std::string lua_input_data_var = "input" + std::to_string(i) + "_data";
+        std::string lua_input_nullmask_var = "input" + std::to_string(i) + "_nullmask";
+
+        std::string ffi_element_type_str = translator_ctx.GetInputLuaFFIType(i); // e.g. "int32_t", "FFIString"
+        ss << "    local " << lua_input_data_var << " = ffi.cast('" << ffi_element_type_str << "*', " << lua_input_ffi_ptr_name << ".data)\n";
+        ss << "    local " << lua_input_nullmask_var << " = ffi.cast('bool*', " << lua_input_ffi_ptr_name << ".nullmask)\n";
+    }
+
+    // Main processing loop
     ss << "    for i = 0, count - 1 do\n";
-    std::string adapted_row_logic = lua_row_logic;
-    if (output_is_string) {
-        // String output is handled by FFI C calls generated by LuaTranslator
-    } else if (output_is_interval) {
-        // LuaTranslator for interval output needs to produce Lua code that assigns fields
-        // e.g., output_data_ffi_interval_array[i].months = res_table.months
-        // This adaptation is simplified for now.
-        StringUtil::Replace(adapted_row_logic, "output_vector.data[i]", "output_data_ffi_interval_array[i]");
-    } else {
-        StringUtil::Replace(adapted_row_logic, "output_vector.data[i]", "output_data[i]");
-    }
-    StringUtil::Replace(adapted_row_logic, "output_vector.nullmask[i]", "output_nullmask[i]");
+    ss << "        local current_row_value\n";
+    ss << "        local current_row_is_null = false -- Default to not null\n";
 
-    for (idx_t i = 0; i < translator_ctx.GetNumInputs(); ++i) {
-        std::string input_vec_table_access = StringUtil::Format("input_vectors[%d]", i + 1);
-        std::string lua_input_var_prefix = StringUtil::Format("input%d", i + 1);
-        if (translator_ctx.GetInputLogicalType(i).id() == LogicalTypeId::VARCHAR) {
-            std::string original_col_ref_str = StringUtil::Format("ffi.string(%s.data[i].ptr, %s.data[i].len)",
-                                                                input_vec_table_access, input_vec_table_access);
-            std::string new_col_ref_str = StringUtil::Format("ffi.string(%s_data_ffi_str_array[i].ptr, %s_data_ffi_str_array[i].len)",
-                                                             lua_input_var_prefix, lua_input_var_prefix);
-            StringUtil::Replace(adapted_row_logic, original_col_ref_str, new_col_ref_str);
-        } else if (translator_ctx.GetInputLogicalType(i).id() == LogicalTypeId::INTERVAL) {
-            StringUtil::Replace(adapted_row_logic, input_vec_table_access + ".data[i].months", lua_input_var_prefix + "_data_ffi_interval_array[i].months");
-            StringUtil::Replace(adapted_row_logic, input_vec_table_access + ".data[i].days", lua_input_var_prefix + "_data_ffi_interval_array[i].days");
-            StringUtil::Replace(adapted_row_logic, input_vec_table_access + ".data[i].micros", lua_input_var_prefix + "_data_ffi_interval_array[i].micros");
-        } else {
-            StringUtil::Replace(adapted_row_logic, input_vec_table_access + ".data[i]", lua_input_var_prefix + "_data[i]");
-        }
-        StringUtil::Replace(adapted_row_logic, input_vec_table_access + ".nullmask[i]", lua_input_var_prefix + "_nullmask[i]");
+    // Embed the row logic snippet from LuaTranslator
+    // This snippet is expected to use input0_data, input0_nullmask, input1_data etc.
+    // and set current_row_value and current_row_is_null.
+    ss << "        " << lua_row_logic_snippet << "\n";
+
+    // Output handling
+    ss << "        if current_row_is_null then\n";
+    ss << "            output_nullmask[i] = true\n";
+    if (output_logical_type.id() == LogicalTypeId::VARCHAR) {
+        ss << "            duckdb_ffi_set_string_output_null(output_vec_ffi, i)\n";
     }
-    ss << "        " << adapted_row_logic << "\n";
-    ss << "    end\n";
-    ss << "end\n";
+    // Optional: zero out data for non-VARCHAR nulls if desired, e.g. output_data[i] = 0
+    ss << "        else\n";
+    ss << "            output_nullmask[i] = false\n";
+    if (output_logical_type.id() == LogicalTypeId::VARCHAR) {
+        ss << "            duckdb_ffi_add_string_to_output_vector(output_vec_ffi, i, current_row_value, #current_row_value)\n";
+    } else if (output_logical_type.id() == LogicalTypeId::BOOLEAN) {
+        ss << "            " << output_data_var_name << "[i] = current_row_value and 1 or 0 -- Lua bool to C int8_t\n";
+    } else if (output_logical_type.id() == LogicalTypeId::INTERVAL) {
+        ss << "            " << output_data_var_name << "[i].months = current_row_value.months\n";
+        ss << "            " << output_data_var_name << "[i].days = current_row_value.days\n";
+        ss << "            " << output_data_var_name << "[i].micros = current_row_value.micros\n";
+    } else { // Other fixed-width types (numeric, date, timestamp)
+        ss << "            " << output_data_var_name << "[i] = current_row_value\n";
+    }
+    ss << "        end\n";
+    ss << "    end\n"; // End for loop
+    ss << "end\n"; // End function
     return ss.str();
 }
 
@@ -419,33 +409,50 @@ void ExpressionExecutor::Execute(const Expression &expr, ExpressionState *state,
             if (!state->jit_compilation_succeeded && !state->attempted_jit_compilation) {
                 state->attempted_jit_compilation = true;
 
-                std::vector<LogicalType> input_types_for_translator;
-                std::vector<idx_t> input_column_indices_for_ffi; // Store actual chunk indices for FFI call
+                // 1. Identify unique input columns and their types for the Lua function signature
+                std::vector<LogicalType> unique_input_types;
+                std::vector<idx_t> unique_input_original_indices; // Original chunk indices of these unique inputs
+                std::unordered_map<idx_t, idx_t> original_col_idx_to_lua_arg_map; // Map original chunk idx to Lua arg idx (0,1,2..)
+
                 ExpressionIterator it(expr);
-                it.Next();
+                // Note: ExpressionIterator includes the root expression itself as the first element.
+                // We are interested in the BoundReferenceExpressions within the expression tree.
                 while(it.Next()) {
-                    auto child_exp = it.Get();
-                    if(child_exp->GetExpressionClass() == ExpressionClass::BOUND_REF) {
-                         input_types_for_translator.push_back(child_exp->return_type);
-                         input_column_indices_for_ffi.push_back(child_exp->Cast<BoundReferenceExpression>().index);
+                    auto& child_exp = *it.Get();
+                    if(child_exp.GetExpressionClass() == ExpressionClass::BOUND_REF) {
+                        auto& ref_expr = child_exp.Cast<BoundReferenceExpression>();
+                        bool found = false;
+                        for(idx_t existing_original_idx : unique_input_original_indices) {
+                            if (existing_original_idx == ref_expr.index) {
+                                found = true;
+                                break;
+                            }
+                        }
+                        if (!found) {
+                            idx_t lua_arg_idx = unique_input_types.size(); // New Lua argument index is current size of unique types vector
+                            unique_input_types.push_back(ref_expr.return_type);
+                            unique_input_original_indices.push_back(ref_expr.index);
+                            original_col_idx_to_lua_arg_map[ref_expr.index] = lua_arg_idx;
+                        }
                     }
                 }
-                // Remove duplicates for translator context if same column ref used multiple times but with same type
-                // However, LuaTranslatorContext expects types for each *argument* to the Lua function.
-                // The current input_types_for_translator logic is a simplification.
-                // A more robust way: iterate children of current op/func, get their types.
-                // If current expr is BoundRef, input_types_for_translator has one element.
 
-                LuaTranslatorContext translator_ctx(input_types_for_translator);
-                std::string lua_row_logic = LuaTranslator::TranslateExpressionToLuaRowLogic(expr, translator_ctx);
+                // 2. Create LuaTranslatorContext with these unique inputs and the mapping
+                LuaTranslatorContext translator_ctx(unique_input_types, original_col_idx_to_lua_arg_map);
+
+                // 3. Translate expression to Lua row logic snippet
+                // LuaTranslator::GenerateValue(BoundReferenceExpression) will use ctx.GetLuaArgIndex()
+                std::string lua_row_logic_snippet = LuaTranslator::TranslateExpressionToLuaRowLogic(expr, translator_ctx);
+
+                // 4. Construct the full Lua function script
                 state->jitted_lua_function_name = GenerateUniqueJitFunctionName(expr);
-
                 std::string full_lua_script = ConstructFullLuaFunctionScript(
                     state->jitted_lua_function_name,
-                    lua_row_logic,
-                    translator_ctx,
+                    lua_row_logic_snippet,
+                    translator_ctx, // This context now has info about unique inputs for the Lua function
                     expr.return_type);
 
+                // 5. Compile the script
                 if (luajit_wrapper_.CompileStringAndSetGlobal(full_lua_script, state->jitted_lua_function_name, error_message)) {
                     state->jit_compilation_succeeded = true;
                 } else {
@@ -463,50 +470,23 @@ void ExpressionExecutor::Execute(const Expression &expr, ExpressionState *state,
                 ffi_output_vec.original_duckdb_vector = &result;
                 CreateFFIVectorFromDuckDBVector(result, count, ffi_output_vec, temp_buffers_owner);
 
-                std::vector<ffi::FFIVector*> ffi_input_args_ptrs;
-                std::vector<ffi::FFIVector> ffi_input_vecs_storage;
+                std::vector<ffi::FFIVector*> ffi_input_args_ptrs; // Pointers to FFIVector objects
+                std::vector<ffi::FFIVector> ffi_input_vecs_storage; // Actual storage for input FFIVectors
 
-                // Gather input FFIVectors based on actual BoundReferenceExpressions
-                std::vector<idx_t> distinct_input_column_indices;
-                std::vector<LogicalType> distinct_input_types; // For the FFI call context
-
-                ExpressionIterator it(expr);
-                it.Next();
-                while(it.Next()){
-                    auto child_exp = it.Get();
-                    if(child_exp->GetExpressionClass() == ExpressionClass::BOUND_REF){
-                        idx_t current_col_idx = child_exp->Cast<BoundReferenceExpression>().index;
-                        // Ensure we only add one FFIVector per unique input column index
-                        bool found = false;
-                        for(idx_t existing_idx : distinct_input_column_indices) {
-                            if (existing_idx == current_col_idx) {
-                                found = true;
-                                break;
-                            }
-                        }
-                        if (!found) {
-                            distinct_input_column_indices.push_back(current_col_idx);
-                            distinct_input_types.push_back(child_exp->return_type);
-                        }
+                // Prepare FFIVectors for each unique input column, in the order they appear in unique_input_original_indices
+                ffi_input_vecs_storage.resize(unique_input_original_indices.size());
+                for(size_t i=0; i < unique_input_original_indices.size(); ++i) {
+                    idx_t original_chunk_col_idx = unique_input_original_indices[i];
+                    if (!this->chunk || original_chunk_col_idx >= this->chunk->ColumnCount()) {
+                         throw InternalException("JIT Execution: Input chunk error or column index %d out of bounds for expression '%s'",
+                                                 original_chunk_col_idx, expr.ToString());
                     }
-                }
-                // Sort by index to maintain order if translator relies on it (it does via context)
-                // This part is complex: translator maps based on order of children for ops/funcs,
-                // or direct index for BoundRef. The Lua func args are ordered.
-                // For now, assume distinct_input_column_indices gives the order of Lua function args.
-                // This implies LuaTranslatorContext for PCallGlobal should be built from distinct_input_types.
-
-                ffi_input_vecs_storage.resize(distinct_input_column_indices.size());
-                for(size_t i=0; i < distinct_input_column_indices.size(); ++i) {
-                    idx_t chunk_col_idx = distinct_input_column_indices[i];
-                    if (!this->chunk || chunk_col_idx >= this->chunk->ColumnCount()) {
-                         throw InternalException("JIT Execution: Input chunk error or column index %d out of bounds for expression " + expr.ToString(), chunk_col_idx);
-                    }
-                    CreateFFIVectorFromDuckDBVector(this->chunk->data[chunk_col_idx], count, ffi_input_vecs_storage[i], temp_buffers_owner);
-                    ffi_input_vecs_storage[i].original_duckdb_vector = &this->chunk->data[chunk_col_idx];
+                    CreateFFIVectorFromDuckDBVector(this->chunk->data[original_chunk_col_idx], count, ffi_input_vecs_storage[i], temp_buffers_owner);
+                    ffi_input_vecs_storage[i].original_duckdb_vector = &this->chunk->data[original_chunk_col_idx];
                     ffi_input_args_ptrs.push_back(&ffi_input_vecs_storage[i]);
                 }
 
+                // 7. Call the JITed Lua function
                 if (luajit_wrapper_.PCallGlobal(state->jitted_lua_function_name, ffi_input_args_ptrs, &ffi_output_vec, count, error_message)) {
                     result.SetCount(count);
                     Verify(expr, result, count);
