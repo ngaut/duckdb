@@ -238,11 +238,22 @@ static duckdb::DatePartSpecifier StringToDatePartSpecifier(const char* part_str)
     if (part == "year") return duckdb::DatePartSpecifier::YEAR;
     if (part == "month") return duckdb::DatePartSpecifier::MONTH;
     if (part == "day") return duckdb::DatePartSpecifier::DAY;
-    if (part == "hour") return duckdb::DatePartSpecifier::HOUR;
-    if (part == "minute") return duckdb::DatePartSpecifier::MINUTE;
-    if (part == "second") return duckdb::DatePartSpecifier::SECOND;
-    if (part == "milliseconds") return duckdb::DatePartSpecifier::MILLISECONDS;
+    if (part == "decade") return duckdb::DatePartSpecifier::DECADE;
+    if (part == "century") return duckdb::DatePartSpecifier::CENTURY;
+    if (part == "millennium") return duckdb::DatePartSpecifier::MILLENNIUM;
     if (part == "microseconds") return duckdb::DatePartSpecifier::MICROSECONDS;
+    if (part == "milliseconds") return duckdb::DatePartSpecifier::MILLISECONDS;
+    if (part == "second") return duckdb::DatePartSpecifier::SECOND;
+    if (part == "minute") return duckdb::DatePartSpecifier::MINUTE;
+    if (part == "hour") return duckdb::DatePartSpecifier::HOUR;
+    if (part == "epoch") return duckdb::DatePartSpecifier::EPOCH;
+    if (part == "dow") return duckdb::DatePartSpecifier::DAYOFWEEK; // day of week (Sunday = 0, Saturday = 6)
+    if (part == "isodow") return duckdb::DatePartSpecifier::ISODAYOFWEEK; // ISO day of week (Monday = 1, Sunday = 7)
+    if (part == "week") return duckdb::DatePartSpecifier::WEEK; // week number
+    if (part == "quarter") return duckdb::DatePartSpecifier::QUARTER;
+    if (part == "doy") return duckdb::DatePartSpecifier::DAYOFYEAR;
+    // "isoyear" might be complex if it depends on week number logic
+    // "timezone", "timezone_hour", "timezone_minute" are ignored for non-TZ timestamps
     throw duckdb::NotImplementedException("Unknown date part string for FFI EXTRACT: %s", part_str);
 }
 
@@ -251,7 +262,29 @@ extern "C" DUCKDB_API int64_t duckdb_ffi_extract_from_date(int32_t date_val, con
     try {
         duckdb::date_t date = duckdb::date_t(date_val);
         duckdb::DatePartSpecifier specifier = StringToDatePartSpecifier(part_str);
-        return ExtractDatePart(date, specifier);
+        // Date::ExtractField handles many common parts.
+        // Need to add specific handlers for parts not covered by Date::ExtractField if any.
+        switch (specifier) {
+            case duckdb::DatePartSpecifier::EPOCH: return duckdb::Date::Epoch(date);
+            case duckdb::DatePartSpecifier::DAYOFWEEK: return duckdb::Date::DayOfWeek(date); // Sunday is 0 in DuckDB
+            case duckdb::DatePartSpecifier::ISODAYOFWEEK: return duckdb::Date::ExtractISODayOfWeek(date); // Monday is 1
+            case duckdb::DatePartSpecifier::WEEK: return duckdb::Date::ExtractWeekNumber(date, duckdb::Date::ExtractISODayOfWeek(date), duckdb::Date::ExtractDayOfTheYearRegular(date)); // Using DuckDB's internal logic for ISO week
+            case duckdb::DatePartSpecifier::DAYOFYEAR: return duckdb::Date::ExtractDayOfTheYearRegular(date);
+            case duckdb::DatePartSpecifier::QUARTER: return duckdb::Date::ExtractQuarter(date);
+            // YEAR, MONTH, DAY, DECADE, CENTURY, MILLENNIUM are typically handled by Date::ExtractField or specific functions
+            case duckdb::DatePartSpecifier::YEAR: return duckdb::Date::ExtractYear(date);
+            case duckdb::DatePartSpecifier::MONTH: return duckdb::Date::ExtractMonth(date);
+            case duckdb::DatePartSpecifier::DAY: return duckdb::Date::ExtractDay(date);
+            // For date, time parts are 0
+            case duckdb::DatePartSpecifier::HOUR:
+            case duckdb::DatePartSpecifier::MINUTE:
+            case duckdb::DatePartSpecifier::SECOND:
+            case duckdb::DatePartSpecifier::MILLISECONDS:
+            case duckdb::DatePartSpecifier::MICROSECONDS:
+                return 0;
+            default:
+                 throw duckdb::NotImplementedException("Unsupported date part for FFI EXTRACT from DATE: %s", part_str);
+        }
     } catch (...) { return -1; /* Error, or find a way to signal error to Lua */ }
 }
 
@@ -259,13 +292,35 @@ extern "C" DUCKDB_API int64_t duckdb_ffi_extract_from_timestamp(int64_t ts_val, 
     try {
         duckdb::timestamp_t ts = duckdb::timestamp_t(ts_val);
         duckdb::DatePartSpecifier specifier = StringToDatePartSpecifier(part_str);
-        return ExtractTimestampPart(ts, specifier);
+        // Timestamp::ExtractField handles many common parts.
+        // Need to add specific handlers for parts not covered by Timestamp::ExtractField if any.
+        switch (specifier) {
+            case duckdb::DatePartSpecifier::EPOCH: return duckdb::Timestamp::GetEpochSeconds(ts);
+            case duckdb::DatePartSpecifier::YEAR: return duckdb::Timestamp::ExtractYear(ts);
+            case duckdb::DatePartSpecifier::MONTH: return duckdb::Timestamp::ExtractMonth(ts);
+            case duckdb::DatePartSpecifier::DAY: return duckdb::Timestamp::ExtractDay(ts);
+            case duckdb::DatePartSpecifier::HOUR: return duckdb::Timestamp::ExtractHour(ts);
+            case duckdb::DatePartSpecifier::MINUTE: return duckdb::Timestamp::ExtractMinute(ts);
+            case duckdb::DatePartSpecifier::SECOND: return duckdb::Timestamp::ExtractSecond(ts);
+            case duckdb::DatePartSpecifier::MILLISECONDS: return duckdb::Timestamp::ExtractMillisecond(ts);
+            case duckdb::DatePartSpecifier::MICROSECONDS: return duckdb::Timestamp::ExtractMicrosecond(ts);
+            case duckdb::DatePartSpecifier::DAYOFWEEK: return duckdb::Date::DayOfWeek(duckdb::Timestamp::GetDate(ts));
+            case duckdb::DatePartSpecifier::ISODAYOFWEEK: return duckdb::Date::ExtractISODayOfWeek(duckdb::Timestamp::GetDate(ts));
+            case duckdb::DatePartSpecifier::DAYOFYEAR: return duckdb::Date::ExtractDayOfTheYearRegular(duckdb::Timestamp::GetDate(ts));
+            case duckdb::DatePartSpecifier::QUARTER: return duckdb::Date::ExtractQuarter(duckdb::Timestamp::GetDate(ts));
+            case duckdb::DatePartSpecifier::WEEK: {
+                duckdb::date_t date_part = duckdb::Timestamp::GetDate(ts);
+                return duckdb::Date::ExtractWeekNumber(date_part, duckdb::Date::ExtractISODayOfWeek(date_part), duckdb::Date::ExtractDayOfTheYearRegular(date_part));
+            }
+            default:
+                throw duckdb::NotImplementedException("Unsupported date part for FFI EXTRACT from TIMESTAMP: %s", part_str);
+        }
     } catch (...) { return -1; /* Error */ }
 }
 
 extern "C" DUCKDB_API int64_t duckdb_ffi_extract_year_from_date(int32_t date_val) {
     try {
         duckdb::date_t date = duckdb::date_t(date_val);
-        return duckdb::Date::ExtractYear(date);
+        return duckdb::Date::ExtractYear(date); // Already correct
     } catch (...) { return -1; /* Error, or find a way to signal error to Lua */ }
 }

@@ -233,7 +233,8 @@ static std::string ConstructFullLuaFunctionScript(
     ss << "    typedef struct FFIVector { void* data; bool* nullmask; unsigned long long count; "
        << "int ffi_logical_type_id; int ffi_duckdb_vector_type; void* original_duckdb_vector; } FFIVector;\n";
     ss << "    typedef struct FFIString { char* ptr; unsigned int len; } FFIString;\n";
-    ss << "    typedef struct FFIInterval { int months; int days; long long micros; } FFIInterval;\n";
+    // Ensure FFIInterval matches C++ struct definition (int32_t for months/days)
+    ss << "    typedef struct FFIInterval { int32_t months; int32_t days; int64_t micros; } FFIInterval;\n";
     ss << "    typedef signed char int8_t;\n";
     ss << "    typedef int int32_t;\n";
     ss << "    typedef long long int64_t;\n";

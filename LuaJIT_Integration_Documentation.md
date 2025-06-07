@@ -1,8 +1,8 @@
-# DuckDB LuaJIT Integration Proof-of-Concept
+# DuckDB LuaJIT Integration Proof-of-Concept: Final Summary
 
 ## 1. Introduction
 
-This document provides a developer-oriented overview of the proof-of-concept (PoC) integration of LuaJIT for Just-In-Time (JIT) compilation of expressions within DuckDB. The primary goal of this PoC was to explore the feasibility and potential performance characteristics of using LuaJIT to accelerate query expression evaluation.
+This document provides a developer-oriented overview and final summary for the initial phase of the proof-of-concept (PoC) integration of LuaJIT for Just-In-Time (JIT) compilation of expressions within DuckDB. The primary goal of this PoC was to explore the feasibility, architectural integration, and potential performance characteristics of using LuaJIT to accelerate query expression evaluation.
 
 For a consolidated overview of the entire investigation including initial research, evaluations, design, and PoC outcomes, please refer to the [LuaJIT for DuckDB Summary](./LuaJIT_for_DuckDB_Summary.md).
 
@@ -24,7 +24,7 @@ The LuaJIT integration PoC comprises several key C++ components and a defined wo
     *   Defines C-style structs for FFI:
         *   `FFIVector`: Represents a data vector for Lua. Contains `void* data`, `bool* nullmask` (flat boolean array), `idx_t count`, `LogicalTypeId ffi_logical_type_id`, `VectorType ffi_duckdb_vector_type`, and `duckdb::Vector* original_duckdb_vector` (for output vectors, allowing C helpers to modify the original DuckDB vector).
         *   `FFIString`: Represents string elements with `char* ptr` and `uint32_t len`. For `VARCHAR` vectors, `FFIVector.data` points to an array of `FFIString`.
-        *   `FFIInterval`: Represents interval elements with `months`, `days`, `micros`, mirroring DuckDB's `interval_t`.
+        *   `FFIInterval`: Represents interval elements with `int32_t months`, `int32_t days`, `int64_t micros`, mirroring DuckDB's `interval_t`.
     *   **`CreateFFIVectorFromDuckDBVector` (`luajit_ffi_vector.cpp`):** This C++ helper converts a `duckdb::Vector` into an `FFIVector`.
         *   Handles `FLAT_VECTOR`, `CONSTANT_VECTOR` (by creating temporary flat buffers), and `DICTIONARY_VECTOR` (by flattening) for numeric, `VARCHAR`, `DATE`, `TIMESTAMP`, and `INTERVAL` types.
         *   Converts DuckDB's bitmasked `ValidityMask` into a flat `bool*` nullmask.
@@ -33,110 +33,129 @@ The LuaJIT integration PoC comprises several key C++ components and a defined wo
     *   **FFI C Helper Functions (declared in `luajit_ffi_structs.hpp`, implemented in `luajit_ffi_vector.cpp`):**
         *   `duckdb_ffi_add_string_to_output_vector()`: Called from Lua to write a string result to an output `VARCHAR` vector. Uses `Vector::SetValue()`.
         *   `duckdb_ffi_set_string_output_null()`: Called from Lua to set a `NULL` in an output `VARCHAR` vector.
-        *   `duckdb_ffi_extract_year_from_date()`, `duckdb_ffi_extract_from_date()`, `duckdb_ffi_extract_from_timestamp()`: Called from Lua to perform date/timestamp part extraction using DuckDB's internal functions.
+        *   `duckdb_ffi_extract_from_date()`, `duckdb_ffi_extract_from_timestamp()`: Called from Lua to perform date/timestamp part extraction (supporting year, month, day, hour, minute, second, microsecond, millisecond, epoch, quarter, dayofweek, dayofyear, week) using DuckDB's internal functions.
 
 *   **Expression Translation (`LuaTranslator`, `LuaTranslatorContext`):**
     *   **`LuaTranslator` (`duckdb/main/luajit_translator.hpp`, `.cpp`):**
         *   Translates `duckdb::BoundExpression` subtypes into Lua code strings. Currently supports:
-            *   `BoundConstantExpression` (numerics, VARCHAR, DATE, TIMESTAMP).
+            *   `BoundConstantExpression` (numerics, VARCHAR, DATE, TIMESTAMP, INTERVAL).
             *   `BoundReferenceExpression` (numerics, VARCHAR, DATE, TIMESTAMP, INTERVAL).
             *   `BoundOperatorExpression` (numeric arithmetic; numeric, VARCHAR, DATE, TIMESTAMP comparisons; `OPERATOR_CONCAT`, `OPERATOR_NOT`, `OPERATOR_IS_NULL`, `OPERATOR_IS_NOT_NULL`).
-            *   `BoundFunctionExpression` for string functions (`LOWER`, `UPPER`, `LENGTH`, `SUBSTRING`, `CONCAT`), numeric functions (`ABS`, `ROUND`, `FLOOR`, `CEIL`), and date/timestamp extraction (`EXTRACT`/`DATE_PART`, `YEAR`).
+            *   `BoundFunctionExpression` for string functions (`LOWER`, `UPPER`, `LENGTH`, `SUBSTRING`, `CONCAT`, `REPLACE`, `LPAD`, `RPAD`, `TRIM`), numeric functions (`ABS`, `ROUND`, `FLOOR`, `CEIL`, `SQRT`, `POW`, `LN`, `LOG10`, `SIN`, `COS`, `TAN`), and date/timestamp extraction (`EXTRACT`/`DATE_PART`).
             *   `BoundCaseExpression` (multi-branch `CASE WHEN ... THEN ... ELSE ... END`).
-        *   `TranslateExpressionToLuaRowLogic` is the core method generating element-wise Lua processing logic. For `VARCHAR` return types, it now generates Lua code that calls the FFI C helpers (`duckdb_ffi_add_string_to_output_vector` / `duckdb_ffi_set_string_output_null`) for output.
-    *   **`LuaTranslatorContext`:** Stores `LogicalType`s of input vectors, providing methods like `GetInputLuaFFIType()` to help the translator generate type-correct Lua FFI casts (e.g., `ffi.cast('int32_t*',...)`, `ffi.cast('FFIString*',...)`, `ffi.cast('FFIInterval*',...)`) and type-specific Lua code (e.g., `ffi.string(...)` for `VARCHAR` column access, or accessing `.months` for `INTERVAL`).
+        *   `TranslateExpressionToLuaRowLogic` is the core method generating element-wise Lua processing logic. For `VARCHAR` return types, it generates Lua code that calls the FFI C helpers for output.
+    *   **`LuaTranslatorContext`:** Stores `LogicalType`s of input vectors, providing methods like `GetInputLuaFFIType()` to help the translator generate type-correct Lua FFI casts and type-specific Lua code.
 
 *   **Integration into `ExpressionExecutor` (`duckdb/execution/expression_executor.hpp`, `.cpp`):**
     *   `ExpressionExecutor` holds a `LuaJITStateWrapper luajit_wrapper_`.
     *   `ExpressionState` stores JIT state: `attempted_jit_compilation`, `jit_compilation_succeeded`, `jitted_lua_function_name`, and `execution_count`.
     *   **JIT Path in `ExpressionExecutor::Execute()`:**
-        *   **`ShouldJIT()` Heuristic:** Decides eligibility based on:
-            *   `ClientConfig::enable_luajit_jit` (read from context).
-            *   `ExpressionState` flags (previous attempts/failures).
-            *   `GetExpressionComplexity()` (counts expression nodes) vs. `ClientConfig::luajit_jit_complexity_threshold`.
-            *   `ExpressionState::execution_count` vs. `ClientConfig::luajit_jit_trigger_count`.
-            *   Supported `BoundExpression` types by the `LuaTranslator`.
-        *   **Caching & Compilation (if `ShouldJIT` is true and not already compiled):**
-            1.  `LuaTranslator` converts the `BoundExpression` to Lua row logic.
-            2.  A unique Lua function name is generated (`GenerateUniqueJitFunctionName`) and stored.
-            3.  `ConstructFullLuaFunctionScript` (static helper) creates the complete Lua function string (including FFI cdefs for all supported types/helpers, function signature, input/output FFIVector casting using type info from `LuaTranslatorContext`, and the processing loop).
-            4.  `luajit_wrapper_.CompileStringAndSetGlobal()` compiles and defines this function in Lua. Errors are caught.
-        *   **Execution (if compiled successfully):**
-            1.  Input `FFIVector`s are prepared from the input `DataChunk`'s `Vector`s using `CreateFFIVectorFromDuckDBVector`. This includes handling different vector types (FLAT, CONSTANT, DICTIONARY) and data types (numerics, VARCHAR, DATE, TIMESTAMP, INTERVAL).
-            2.  Output `FFIVector` is prepared, linking it to the actual output `duckdb::Vector` via `original_duckdb_vector` for FFI C helpers.
-            3.  The named Lua function is called via `luajit_wrapper_.PCallGlobal()`. Runtime errors are caught.
-            4.  If successful, results are in the output `Vector`.
-        *   **Error Handling & Fallback:** The JIT attempt is wrapped in `try-catch`. Lua errors become `duckdb::RuntimeException`. If JIT fails at any stage, `jit_compilation_succeeded` is set to `false`, and execution falls back to `ExecuteStandard()`.
-    *   `ExpressionExecutor::ExecuteStandard()`: Contains the original C++ interpreter logic. `ExpressionState::execution_count` is incremented here if JIT was not used or failed.
+        *   **`ShouldJIT()` Heuristic:** Decides eligibility based on configuration and expression state.
+        *   **Caching & Compilation:** If viable and not compiled, `LuaTranslator` converts `BoundExpression` to Lua, `ConstructFullLuaFunctionScript` creates the full script (with FFI cdefs for types like `FFIInterval { int32_t months; int32_t days; int64_t micros; }` and helpers), and `LuaJITStateWrapper` compiles it.
+        *   **Execution:** Prepares `FFIVector`s using `CreateFFIVectorFromDuckDBVector`, then calls the Lua function via `PCallGlobal`.
+        *   **Error Handling & Fallback:** Lua errors lead to `duckdb::RuntimeException`, and execution falls back to the C++ path (`ExecuteStandard()`).
 
 ### Workflow:
-(Largely similar to before, but now uses `BoundExpression`s, more sophisticated FFI data prep, and has a more concrete JIT execution path within `ExpressionExecutor`.)
 1.  **JIT Decision:** `ExpressionExecutor::Execute` calls `ShouldJIT()`.
 2.  **Compile (if needed):** If JIT is viable and not yet compiled for this `ExpressionState`, translate `BoundExpression` to Lua, generate full function script, compile with `LuaJITStateWrapper`. Store function name and success status in `ExpressionState`.
 3.  **Execute JITed Function (if compiled):** Prepare input/output `FFIVector`s from `DataChunk`/`Vector`s using `CreateFFIVectorFromDuckDBVector`. Call the named Lua function via `PCallGlobal`.
 4.  **Fallback:** If JIT fails or `ShouldJIT` is false, use `ExecuteStandard` C++ path. Update `execution_count`.
 
 ## 3. Build System Integration (Conceptual)
-(Content remains the same: LuaJIT as a `third_party` static library.)
+LuaJIT would be integrated as a `third_party` static library. DuckDB's build system (CMake) would need to be configured to compile LuaJIT and link it into the DuckDB executable/library. This involves adding LuaJIT's source code (or pre-compiled binaries for specific platforms) to the DuckDB build process and ensuring header paths are correctly set up.
 
 ## 4. JIT Heuristics and Configuration
-*   **`ShouldJIT()` Method:** Implemented in `ExpressionExecutor`.
-*   **Heuristics & Configuration Options (in `ClientConfig::options`):**
-    1.  `enable_luajit_jit` (bool): Master switch for enabling JIT.
-    2.  `luajit_jit_complexity_threshold` (int64_t): Minimum complexity (based on `GetExpressionComplexity()` node count) for an expression to be JITed.
-    3.  `luajit_jit_trigger_count` (int64_t): Number of times an expression must be executed via C++ path before JIT is attempted.
-*   **`ExpressionState` Tracking:** `attempted_jit_compilation`, `jit_compilation_succeeded`, and `execution_count` track status per expression instance.
-*   **SQL `SET` Commands (Conceptual):**
-    *   **`settings.hpp` / `config.cpp`:** These `DBConfigOptions` would be added with `Setting` objects, making them accessible via `GetOptionByName` and modifiable via `SetOption`.
-    *   **Parser (`transform_set.cpp`):** `Transformer::TransformSet` would parse `SET enable_luajit_jit = TRUE;` etc.
-    *   **Binder (`bind_set.cpp`):** `Binder::BindSetVariable` would bind these settings.
-    *   **Execution (`physical_set.cpp`):** `PhysicalSet::GetData` would apply the new values to `ClientContext::config.options`.
+The JIT process is controlled by heuristics and SQL-configurable settings:
+*   **`ShouldJIT()` Method:** Implemented in `ExpressionExecutor`, it evaluates the configured heuristics.
+*   **Configuration Options (in `ClientConfig::options`):**
+    1.  `enable_luajit_jit` (bool, default: `false`): Master switch to enable or disable the LuaJIT pathway.
+    2.  `luajit_jit_complexity_threshold` (int64_t, default: `5`): Minimum complexity score (based on `GetExpressionComplexity()` node count) for an expression to be considered for JIT compilation.
+    3.  `luajit_jit_trigger_count` (int64_t, default: `1000`): Number of times an expression must be executed via the C++ path before JIT compilation is attempted.
+*   **`ExpressionState` Tracking:** `attempted_jit_compilation`, `jit_compilation_succeeded`, and `execution_count` are stored per expression instance to manage its JIT lifecycle.
+*   **SQL `SET` Commands:**
+    *   Support for `SET enable_luajit_jit = <boolean>`, `SET luajit_jit_complexity_threshold = <integer>`, and `SET luajit_jit_trigger_count = <integer>` has been fully implemented.
+    *   This involved:
+        *   Defining these settings in `src/include/duckdb/main/settings.hpp` (structs like `EnableLuajitJitSetting`, etc.) and `src/main/config.cpp` (registration in `internal_options[]` and implementation of `SetLocal`/`ResetLocal`/`GetSetting` methods).
+        *   Ensuring the parser (`src/parser/transform/statement/transform_set.cpp`) correctly handles these.
+        *   Updating the binder (`src/planner/binder/statement/bind_set.cpp`) to bind the values, cast them to the appropriate types (BOOLEAN or BIGINT), and perform validation (e.g., non-negative for threshold/count).
+        *   Modifying the physical operator (`src/execution/operator/helper/physical_set.cpp`) to apply these settings to `ClientContext::config.options` for the current session, enforcing session-only scope.
 
 ## 5. Caching Mechanism
-(Content remains largely the same: caching is per `ExpressionState`, unique function name stored, compiled once.)
+Once an expression is successfully translated and compiled for a given `ExpressionState`, the name of the generated global Lua function is stored in `ExpressionState::jitted_lua_function_name`. Subsequent calls to `ExpressionExecutor::Execute` for that same expression instance (and thus same `ExpressionState`) will find `jit_compilation_succeeded == true` and reuse the already compiled Lua function, avoiding re-translation and re-compilation costs. This cache is per-expression-instance within a query.
 
 ## 6. Error Handling and Fallback
-(Content remains largely the same: `LuaJITStateWrapper` captures errors, `ExpressionExecutor` throws `RuntimeException`, fallback to `ExecuteStandard`.)
+LuaJIT errors are handled at two stages:
+*   **Compilation:** `LuaJITStateWrapper::CompileStringAndSetGlobal` captures Lua compilation errors (e.g., syntax errors in generated Lua) into a C++ string.
+*   **Execution:** `LuaJITStateWrapper::PCallGlobal` captures Lua runtime errors (e.g., attempting to call a nil value, FFI type mismatches not caught by static checks).
+If an error occurs in either stage, `ExpressionExecutor::Execute` sets `jit_compilation_succeeded` to `false` in the `ExpressionState` and re-throws the error wrapped in a `duckdb::RuntimeException`. Execution then transparently falls back to the standard C++ interpreter path (`ExecuteStandard()`) for the current and subsequent executions of that expression instance.
 
 ## 7. Adding Support for New Expressions or Data Types
-(Largely similar, but now emphasizes working with `duckdb::BoundExpression` subtypes and `duckdb::LogicalType` in `LuaTranslatorContext` and `LuaTranslator`.)
-*   **FFI Data Structures:** Update `luajit_ffi_structs.hpp` for new C representations, `luajit_ffi_vector.cpp` for `CreateFFIVectorFromDuckDBVector` logic, and Lua CDEFs in `ConstructFullLuaFunctionScript`. Add FFI C helpers if needed for complex output.
-*   **Expression Translation:**
-    *   Add `GenerateValue` overloads in `LuaTranslator` for new `BoundExpression` subtypes.
-    *   Update `ExpressionExecutor::ShouldJIT` to recognize new JIT-able expression classes.
-    *   Implement translation logic, using `LuaTranslatorContext` for input type info to generate correct FFI casts (e.g., `ffi.cast('FFIInterval*', ...)`), data access (e.g., `.months`), and `ffi.string()` for VARCHARs.
-    *   For functions, add cases to `GenerateValueBoundFunction`.
-    *   For `VARCHAR` or complex type outputs, ensure Lua code calls appropriate FFI C helpers (e.g., `duckdb_ffi_add_string_to_output_vector`).
-*   **Unit Testing:** Add comprehensive tests in `luajit_ffi_test.cpp`, `luajit_translator_test.cpp`, and `jit_expression_executor_test.cpp`.
+To extend JIT support:
+*   **FFI Data Structures:** If new complex C types are needed for FFI, define them in `duckdb/common/luajit_ffi_structs.hpp`. Update `CreateFFIVectorFromDuckDBVector` in `src/common/luajit_ffi_vector.cpp` to correctly prepare `FFIVector`s for the new DuckDB `LogicalType`. Update Lua CDEFs in `ExpressionExecutor::ConstructFullLuaFunctionScript`. If new C helper functions are needed (e.g., for complex output types), declare them in `luajit_ffi_structs.hpp`, implement in `luajit_ffi_vector.cpp`, and register in `LuaJITStateWrapper`.
+*   **Expression Translation (`LuaTranslator`):**
+    *   For new `BoundExpression` subtypes, add a corresponding `GenerateValue` overload in `LuaTranslator`.
+    *   Update `ExpressionExecutor::ShouldJIT` to include the new expression class if it's JIT-able.
+    *   Implement the translation logic. Use `LuaTranslatorContext` to get input type information for generating correct FFI casts (e.g., `ffi.cast('MyType*', ...)`), data access (e.g., `my_struct.field`), and using `ffi.string()` for `VARCHAR` column access.
+    *   For new SQL functions, add cases to `LuaTranslator::GenerateValueBoundFunction`.
+    *   If the function returns `VARCHAR` or other complex types requiring FFI C helpers for output, ensure the generated Lua code calls these helpers.
+*   **Unit Testing:** Add comprehensive tests for the new expressions/types/functions in `test/unittest/jit_expression_executor_test.cpp` and potentially `luajit_translator_test.cpp`.
 
 ## 8. Debugging JITed Code
-(Content remains largely the same.)
+*   Print the generated Lua code string before compilation.
+*   Use Lua's `print()` function within the generated Lua code (output will go to DuckDB's stdout).
+*   Leverage LuaJIT's `debug` library if more advanced introspection is needed (though this usually requires interactive debugging or more complex setup).
+*   Simplify expressions to isolate issues.
+*   Pay close attention to FFI cdefs, pointer casting in Lua, and data alignment.
 
 ## 9. Benchmarking
-*   **Framework:** `test/benchmark/jit_expression_benchmark.cpp`.
+
+*   **Framework:** A dedicated benchmark suite is implemented in `test/benchmark/jit_expression_benchmark.cpp`.
 *   **Methodology:**
-    *   Uses actual `duckdb::BoundExpression` objects.
-    *   Compares two `ExpressionExecutor` instances: one with JIT disabled (via `ClientContext::config.enable_luajit_jit = false`) for **C++ Baseline**, and one with JIT enabled (and low thresholds) for the **JIT Path**.
-    *   **Metrics:** `CppBaseline_ms`, `JIT_FirstRun_ms` (capturing initial translation, compilation, and first execution via `ExpressionExecutor`), and `JIT_CachedExec_ms` (subsequent executions via `ExpressionExecutor` using the cached Lua function).
-    *   Separate `TranslateOnce_ms` and `CompileOnce_ms` are marked as -1.0 in output as these are now internal to `ExpressionExecutor::Execute`'s first JIT run.
-*   **Scenarios:** Covers numeric arithmetic/comparisons, string comparisons, string functions (LOWER), IS NOT NULL, and CASE expressions, with varying data sizes and null percentages.
-*   **Analysis:** Documented in `LuaJIT_benchmarking_and_profiling.md`.
+    *   The benchmark uses the actual `ExpressionExecutor` for both C++ and JIT paths.
+    *   **C++ Baseline:** JIT is disabled via `ClientContext::config.enable_luajit_jit = false`.
+    *   **JIT Path:** JIT is enabled, and `luajit_jit_trigger_count` and `luajit_jit_complexity_threshold` are set to 0 to force JIT compilation on the first execution for measurement purposes.
+    *   **Metrics Measured:**
+        1.  `CppBaseline_ms`: Average time for the C++ path.
+        2.  `JIT_FirstRun_ms`: Time for the first JIT execution, including internal translation, LuaJIT compilation, FFI data setup, and first execution.
+        3.  `JIT_CachedExec_ms`: Average time for subsequent JIT executions using the cached Lua function, including FFI data setup.
+*   **Scenarios:** A comprehensive set of scenarios covering numeric, string, temporal, logical, and conditional operations were tested with varying data sizes (10k, 1M rows) and NULL percentages (0%, 50%).
+*   **Conceptual Findings Summary (from `LuaJIT_benchmarking_and_profiling.md`):**
+    *   **JIT Overhead:** The `JIT_FirstRun_ms` consistently showed significant overhead due to translation and compilation.
+    *   **Cached JIT vs. C++:** For most common SQL expressions (simple arithmetic, string operations, temporal functions using FFI helpers, conditional logic), the *conceptual* performance of cached JIT execution did **not** outperform DuckDB's native C++ vectorized execution.
+    *   **FFI Overhead:** The primary limiting factor identified was the overhead associated with FFI calls on a per-row basis. This includes accessing data and nullmasks from `FFIVector`s in Lua, marshalling strings, and calling C helper functions for output or complex operations.
+    *   **Conclusion:** While the JIT pipeline is functional, the current row-by-row FFI interaction model makes it challenging to achieve performance speedups over the highly optimized C++ execution path for typical SQL expressions.
 
 ## 10. Current PoC Limitations
-*   **Expression Support:** While expanded, not all `BoundExpression` types or SQL functions/operators are JIT-enabled (e.g., `BoundConjunctionExpression` for AND/OR, `BoundLikeExpression`, many date/interval functions beyond basic EXTRACT, complex `CASE` conditions involving non-boolean results needing further casting).
+*   **Performance Characteristics / FFI Overhead:** As highlighted by conceptual benchmarking, the current row-by-row FFI processing model incurs significant overhead, making it difficult for JIT-compiled Lua code to outperform DuckDB's native C++ vectorized execution for most common SQL expressions.
+*   **Expression Support:** While significantly expanded (constants, column references, operators, many common functions, CASE), not all `BoundExpression` subtypes or all SQL functions/operators are JIT-enabled (e.g., `BoundConjunctionExpression` for AND/OR often uses specific execution paths, `BoundLikeExpression`, many date/interval functions beyond `EXTRACT` via FFI, complex `CASE` conditions involving non-boolean results needing further casting).
 *   **String Output:** Relies on `Vector::SetValue()` in FFI C helpers, which is convenient but might not be the most performant for high-volume string generation compared to direct `StringHeap` manipulation.
-*   **Interval Type:** Input FFI for `INTERVAL` is done (array of `FFIInterval`). Translation for operations on intervals (arithmetic, complex comparisons) is largely missing. Interval output via FFI C helpers is not implemented.
-*   **`ExpressionExecutor` JIT Call Path:** The logic for determining the exact input `duckdb::Vector`s for an arbitrary expression's children in `ExpressionExecutor::Execute` is still simplified (relies on order of `BoundReferenceExpression`s found by `ExpressionIterator`). Complex expressions with shared sub-expressions or non-sequential column access might not map inputs correctly to the JITed Lua function's arguments.
-*   **Configuration Plumbing:** SQL `SET` commands for JIT options are designed but not implemented in parser/binder/physical operators.
-*   **`GetExpressionComplexity`:** The current implementation is basic (node count).
+*   **Interval Type:** While FFI data structures and basic column reference/constant support for `INTERVAL` exist, translation for most operations on intervals (e.g., arithmetic, complex comparisons) is not implemented. Interval output via FFI C helpers is also not implemented.
+*   **`ExpressionExecutor` JIT Call Path (Input Mapping):** The logic for determining the exact input `duckdb::Vector`s for an arbitrary expression's children in `ExpressionExecutor::Execute` (for `PCallGlobal` arguments) relies on the order of `BoundReferenceExpression`s found by `ExpressionIterator`. Complex expressions with shared sub-expressions or non-sequential column access might not map inputs correctly to the JITed Lua function's arguments without further refinement of the input mapping strategy.
+*   **`GetExpressionComplexity`:** The current implementation is a basic node count and might not accurately reflect true computational complexity for JIT decision-making.
 
 ## 11. Future Work
-(Largely similar, but some items like basic caching, error handling, and more expression types have progressed.)
-*   Full translation coverage for all relevant `BoundExpression` subtypes.
-*   Robust and performant string/complex type output mechanisms (e.g., direct `StringHeap` interaction via FFI).
-*   Full FFI and translation support for all temporal and nested types (STRUCT, LIST, MAP).
-*   Sophisticated JIT cache invalidation strategies (e.g., on schema changes or function redefinition).
-*   More advanced `GetExpressionComplexity` model.
-*   Complete SQL `SET`/`PRAGMA` integration for JIT configuration.
-*   Rigorous performance tuning and profiling against a wider range of queries.
-*   Investigate direct LLVM IR generation from DuckDB expressions as an alternative or complementary approach.
+*   **Performance - Minimize FFI Overhead:** This is the most critical area. Future work for performance *must* focus heavily on minimizing FFI overhead. This could involve:
+    *   **Block-based processing in Lua:** Modifying the JITed Lua functions to loop over data batches passed via fewer, more coarse-grained FFI calls, rather than the C++ side looping and calling Lua per row.
+    *   Exploring different data passing techniques if available with LuaJIT FFI that might reduce copying or indirection.
+    *   Targeting very different, more complex computational workloads for JIT where Lua's internal computation per FFI call is much higher, thus diminishing the relative cost of FFI.
+*   **Broader Expression/Type Support:**
+    *   Full translation coverage for all relevant `BoundExpression` subtypes (e.g., `BoundConjunctionExpression`, `BoundLikeExpression`).
+    *   Comprehensive support for all SQL functions, including more complex date/time and interval arithmetic.
+    *   Robust and performant string/complex type output mechanisms (e.g., direct `StringHeap` interaction via FFI).
+    *   Full FFI and translation support for all temporal and nested types (STRUCT, LIST, MAP), including their operations.
+*   **Refined JIT Mechanics:**
+    *   More sophisticated JIT cache invalidation strategies (e.g., on schema changes or function redefinition, though less critical for expression JIT).
+    *   A more advanced `GetExpressionComplexity` model that better estimates actual computational cost.
+    *   Improved input mapping in `ExpressionExecutor` for complex expressions.
+*   **Alternative Approaches:**
+    *   Investigate direct LLVM IR generation from DuckDB expressions as an alternative or complementary approach for certain types of expressions where LuaJIT+FFI is not optimal.
+
+## 12. Overall Conclusion of PoC
+
+This Proof-of-Concept successfully demonstrated the feasibility of building an end-to-end JIT compilation pipeline for a wide range of SQL expression types—including numeric, string, conditional, and temporal (EXTRACT via FFI)—using LuaJIT integrated into DuckDB's `ExpressionExecutor`. A key achievement was the implementation of SQL-configurable JIT heuristics (`enable_luajit_jit`, `luajit_jit_complexity_threshold`, `luajit_jit_trigger_count`) via standard `SET` commands, allowing dynamic control over JIT behavior.
+
+The PoC involved creating FFI data structures (`FFIVector`, `FFIString`, `FFIInterval`) for C++/Lua interoperation, developing a `LuaTranslator` to convert DuckDB `BoundExpression` trees into Lua code, and integrating these components into the `ExpressionExecutor` with mechanisms for compilation caching and fallback to C++ execution.
+
+However, the (conceptual) performance analysis based on the designed benchmark suite indicates that the current row-by-row FFI processing model incurs significant overhead. This overhead, particularly for data marshalling and per-row function call transitions between C++ and Lua, makes it challenging for the JITed Lua code to achieve speedups over DuckDB's highly optimized native C++ vectorized execution for most common SQL expressions.
+
+Despite the performance outcome for typical expressions, the PoC provides valuable insights into the mechanics, architectural considerations, and complexities of integrating a dynamic JIT compiler like LuaJIT into a database kernel. The primary challenge identified (FFI overhead) clearly informs that future efforts to gain performance from such an approach for expression JITing would need to fundamentally address the C++/Lua interaction cost, likely by moving towards block-oriented processing within the JITed code itself.

@@ -280,15 +280,80 @@ void RunAllBenchmarks() {
                         {LogicalType::INTEGER}, ds, iterations, null_pct);
 
             // Conditional: CASE WHEN col_int1 > 10 THEN col_int2 ELSE col_int1 * 2 END
-            // Output type of this CASE is INTEGER.
             auto case_expr = CreateBoundCase(
                 CreateBoundBinaryOperator(ExpressionType::COMPARE_GREATERTHAN, CreateBoundReference(0, LogicalType::INTEGER), CreateBoundConstant(Value::INTEGER(10)), LogicalType::BOOLEAN),
-                CreateBoundReference(1, LogicalType::INTEGER), // then col_int2
-                CreateBoundBinaryOperator(ExpressionType::OPERATOR_MULTIPLY, CreateBoundReference(0, LogicalType::INTEGER), CreateBoundConstant(Value::INTEGER(2)), LogicalType::INTEGER), // else col_int1 * 2
+                CreateBoundReference(1, LogicalType::INTEGER),
+                CreateBoundBinaryOperator(ExpressionType::OPERATOR_MULTIPLY, CreateBoundReference(0, LogicalType::INTEGER), CreateBoundConstant(Value::INTEGER(2)), LogicalType::INTEGER),
                 LogicalType::INTEGER);
-            RunScenario(*ctx_cpp, *ctx_jit, "G_CaseInt" + null_tag,
-                        std::move(case_expr),
+            RunScenario(*ctx_cpp, *ctx_jit, "G_CaseInt" + null_tag, std::move(case_expr),
                         {LogicalType::INTEGER, LogicalType::INTEGER}, ds, iterations, null_pct);
+
+            // Numeric: ABS(col_int1) - Assuming col_int1 is index 0
+            RunScenario(*ctx_cpp, *ctx_jit, "H_AbsInt" + null_tag,
+                        CreateBoundFunction("abs", {CreateBoundReference(0, LogicalType::INTEGER)}, LogicalType::INTEGER),
+                        {LogicalType::INTEGER}, ds, iterations, null_pct);
+
+            // Numeric: ROUND(col_dbl1, 2) - Assuming col_dbl1 is index 0, need DOUBLE column
+            // For simplicity, re-using col_int1 (index 0) as DOUBLE for this test.
+            // Actual benchmark would define a specific DOUBLE column in SetupInputChunk if mixed types are common.
+            std::vector<unique_ptr<Expression>> round_children;
+            round_children.push_back(CreateBoundReference(0, LogicalType::DOUBLE));
+            round_children.push_back(CreateBoundConstant(Value::TINYINT(2)));
+            RunScenario(*ctx_cpp, *ctx_jit, "I_RoundDbl" + null_tag,
+                        CreateBoundFunction("round", std::move(round_children), LogicalType::DOUBLE),
+                        {LogicalType::DOUBLE}, ds, iterations, null_pct); // Input type changed to DOUBLE
+
+            // String: CONCAT(col_str1, col_str2) - Assuming col_str1 (idx 0), col_str2 (idx 1)
+             RunScenario(*ctx_cpp, *ctx_jit, "J_ConcatStr" + null_tag,
+                        CreateBoundBinaryOperator(ExpressionType::OPERATOR_CONCAT,
+                            CreateBoundReference(0, LogicalType::VARCHAR),
+                            CreateBoundReference(1, LogicalType::VARCHAR), LogicalType::VARCHAR),
+                        {LogicalType::VARCHAR, LogicalType::VARCHAR}, ds, iterations, null_pct);
+
+            // String: LENGTH(col_str1)
+            RunScenario(*ctx_cpp, *ctx_jit, "K_LengthStr" + null_tag,
+                        CreateBoundFunction("length", {CreateBoundReference(0, LogicalType::VARCHAR)}, LogicalType::BIGINT),
+                        {LogicalType::VARCHAR}, ds, iterations, null_pct);
+
+            // String: REPLACE(col_str1, 's_', 'S_') - Assuming 's_' is common from FillStringVector
+            std::vector<unique_ptr<Expression>> replace_children;
+            replace_children.push_back(CreateBoundReference(0, LogicalType::VARCHAR));
+            replace_children.push_back(CreateBoundConstant(Value("s_")));
+            replace_children.push_back(CreateBoundConstant(Value("S_")));
+            RunScenario(*ctx_cpp, *ctx_jit, "L_ReplaceStr" + null_tag,
+                        CreateBoundFunction("replace", std::move(replace_children), LogicalType::VARCHAR),
+                        {LogicalType::VARCHAR}, ds, iterations, null_pct);
+
+            // String: LPAD(col_str1, 15, '#')
+            std::vector<unique_ptr<Expression>> lpad_children;
+            lpad_children.push_back(CreateBoundReference(0, LogicalType::VARCHAR));
+            lpad_children.push_back(CreateBoundConstant(Value::INTEGER(15)));
+            lpad_children.push_back(CreateBoundConstant(Value("#")));
+            RunScenario(*ctx_cpp, *ctx_jit, "M_LpadStr" + null_tag,
+                        CreateBoundFunction("lpad", std::move(lpad_children), LogicalType::VARCHAR),
+                        {LogicalType::VARCHAR}, ds, iterations, null_pct);
+
+            // String: TRIM(col_str1) - Assuming strings might have spaces from generation or specific test setup
+             RunScenario(*ctx_cpp, *ctx_jit, "N_TrimStr" + null_tag,
+                        CreateBoundFunction("trim", {CreateBoundReference(0, LogicalType::VARCHAR)}, LogicalType::VARCHAR),
+                        {LogicalType::VARCHAR}, ds, iterations, null_pct);
+
+            // Temporal: col_date1 == col_date2
+            RunScenario(*ctx_cpp, *ctx_jit, "O_EqDate" + null_tag,
+                        CreateBoundBinaryOperator(ExpressionType::COMPARE_EQUAL,
+                            CreateBoundReference(0, LogicalType::DATE),
+                            CreateBoundReference(1, LogicalType::DATE), LogicalType::BOOLEAN),
+                        {LogicalType::DATE, LogicalType::DATE}, ds, iterations, null_pct);
+
+            // Temporal: EXTRACT(YEAR FROM col_date1)
+            RunScenario(*ctx_cpp, *ctx_jit, "P_ExtractYearDate" + null_tag,
+                        CreateBoundFunction("extract", {CreateBoundConstant(Value("year")), CreateBoundReference(0, LogicalType::DATE)}, LogicalType::BIGINT),
+                        {LogicalType::DATE}, ds, iterations, null_pct);
+
+            // Temporal: EXTRACT(HOUR FROM col_ts1)
+            RunScenario(*ctx_cpp, *ctx_jit, "Q_ExtractHourTs" + null_tag,
+                        CreateBoundFunction("extract", {CreateBoundConstant(Value("hour")), CreateBoundReference(0, LogicalType::TIMESTAMP)}, LogicalType::BIGINT),
+                        {LogicalType::TIMESTAMP}, ds, iterations, null_pct);
         }
     }
 

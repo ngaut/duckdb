@@ -1,0 +1,182 @@
+-- Test for SET enable_luajit_jit and current_setting()
+
+-- Check default value (assuming it's false, as per DBConfigOptions in previous conceptual tasks)
+-- The actual default is defined in DBConfig::AddOption<bool>("enable_luajit_jit", ..., false, ...);
+STATEMENT OK
+SELECT current_setting('enable_luajit_jit');
+----
+false
+
+-- Set to true
+STATEMENT OK
+SET enable_luajit_jit = true;
+
+STATEMENT OK
+SELECT current_setting('enable_luajit_jit');
+----
+true
+
+-- Tests for luajit_jit_complexity_threshold
+-- Check default (assuming it's 5 from DBConfigOptions)
+STATEMENT OK
+SELECT current_setting('luajit_jit_complexity_threshold');
+----
+5
+
+STATEMENT OK
+SET luajit_jit_complexity_threshold = 10;
+
+STATEMENT OK
+SELECT current_setting('luajit_jit_complexity_threshold');
+----
+10
+
+STATEMENT OK
+SET luajit_jit_complexity_threshold = 0;
+SELECT current_setting('luajit_jit_complexity_threshold');
+----
+0
+
+STATEMENT ERROR
+SET luajit_jit_complexity_threshold = -1;
+----
+Binder Error: luajit_jit_complexity_threshold must be non-negative.
+
+STATEMENT ERROR
+SET luajit_jit_complexity_threshold = 'abc';
+----
+Binder Error: SET luajit_jit_complexity_threshold: Could not convert string 'abc' to BIGINT
+
+STATEMENT ERROR
+SET GLOBAL luajit_jit_complexity_threshold = 10;
+----
+Invalid Input Error: Cannot SET GLOBAL luajit_jit_complexity_threshold. This setting is session-local.
+
+-- Tests for luajit_jit_trigger_count
+-- Check default (assuming it's 1000 from DBConfigOptions)
+STATEMENT OK
+SELECT current_setting('luajit_jit_trigger_count');
+----
+1000
+
+STATEMENT OK
+SET luajit_jit_trigger_count = 500;
+
+STATEMENT OK
+SELECT current_setting('luajit_jit_trigger_count');
+----
+500
+
+STATEMENT OK
+SET luajit_jit_trigger_count = 0;
+SELECT current_setting('luajit_jit_trigger_count');
+----
+0
+
+STATEMENT ERROR
+SET luajit_jit_trigger_count = -5;
+----
+Binder Error: luajit_jit_trigger_count must be non-negative.
+
+STATEMENT ERROR
+SET luajit_jit_trigger_count = 'xyz';
+----
+Binder Error: SET luajit_jit_trigger_count: Could not convert string 'xyz' to BIGINT
+
+STATEMENT ERROR
+SET GLOBAL luajit_jit_trigger_count = 200;
+----
+Invalid Input Error: Cannot SET GLOBAL luajit_jit_trigger_count. This setting is session-local.
+
+-- Set to false
+STATEMENT OK
+SET enable_luajit_jit = false;
+
+STATEMENT OK
+SELECT current_setting('enable_luajit_jit');
+----
+false
+
+-- Set to 'on' (string)
+STATEMENT OK
+SET enable_luajit_jit = 'on';
+
+STATEMENT OK
+SELECT current_setting('enable_luajit_jit');
+----
+true
+
+-- Set to 'off' (string)
+STATEMENT OK
+SET enable_luajit_jit = 'off';
+
+STATEMENT OK
+SELECT current_setting('enable_luajit_jit');
+----
+false
+
+-- Set to 1 (integer)
+STATEMENT OK
+SET enable_luajit_jit = 1;
+
+STATEMENT OK
+SELECT current_setting('enable_luajit_jit');
+----
+true
+
+-- Set to 0 (integer)
+STATEMENT OK
+SET enable_luajit_jit = 0;
+
+STATEMENT OK
+SELECT current_setting('enable_luajit_jit');
+----
+false
+
+-- Test invalid string value (should error due to cast in binder)
+STATEMENT ERROR
+SET enable_luajit_jit = 'bla';
+----
+Binder Error: SET enable_luajit_jit: Could not convert string 'bla' to BOOLEAN
+
+-- Test invalid numeric value (e.g., 2, should error as boolean cast typically expects 0 or 1)
+-- Note: DuckDB's cast from integer to boolean might be more lenient (any non-zero is true).
+-- Let's test this assumption. If it fails, the error message will guide.
+-- If non-zero is true, then 2 should become true.
+STATEMENT OK
+SET enable_luajit_jit = 2;
+
+STATEMENT OK
+SELECT current_setting('enable_luajit_jit');
+----
+true
+
+-- Test setting back to false after the '2' test
+STATEMENT OK
+SET enable_luajit_jit = false;
+
+STATEMENT OK
+SELECT current_setting('enable_luajit_jit');
+----
+false
+
+-- Test scope (SESSION is default and should work)
+STATEMENT OK
+SET SESSION enable_luajit_jit = true;
+
+STATEMENT OK
+SELECT current_setting('enable_luajit_jit');
+----
+true
+
+-- Test GLOBAL scope (should error as per our PhysicalSet implementation)
+STATEMENT ERROR
+SET GLOBAL enable_luajit_jit = true;
+----
+Invalid Input Error: Cannot SET GLOBAL enable_luajit_jit. This setting is session-local.
+
+-- Final check that session value persists after failed GLOBAL SET
+STATEMENT OK
+SELECT current_setting('enable_luajit_jit');
+----
+true

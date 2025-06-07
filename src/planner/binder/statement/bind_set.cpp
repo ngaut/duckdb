@@ -17,22 +17,78 @@ BoundStatement Binder::Bind(SetVariableStatement &stmt) {
 	// evaluate the scalar value
 	Value value;
 	unique_ptr<LogicalOperator> op;
-	if (stmt.scope != SetScope::VARIABLE) {
-		ConstantBinder default_binder(*this, context, "SET value");
-		auto bound_value = default_binder.Bind(stmt.value);
-		if (bound_value->HasParameter()) {
-			throw NotImplementedException("SET statements cannot have parameters");
+
+	if (StringUtil::Lower(stmt.name) == "enable_luajit_jit") {
+		if (stmt.scope == SetScope::VARIABLE) {
+			throw BinderException("SET enable_luajit_jit cannot be set using a query result.");
 		}
-		value = ExpressionExecutor::EvaluateScalar(context, *bound_value, true);
+		ConstantBinder binder(*this, context, "SET enable_luajit_jit value");
+		auto bound_expression = binder.Bind(stmt.value);
+		if (bound_expression->HasParameter()) {
+			throw BinderException("Parameters are not allowed in SET enable_luajit_jit.");
+		}
+		Value val_from_expr = ExpressionExecutor::EvaluateScalar(context, *bound_expression, true);
+		try {
+			value = val_from_expr.DefaultCastAs(LogicalType::BOOLEAN);
+		} catch (const Exception &e) {
+			throw BinderException("SET enable_luajit_jit: %s", e.GetRawMessage());
+		}
+	} else if (StringUtil::Lower(stmt.name) == "luajit_jit_complexity_threshold") {
+		if (stmt.scope == SetScope::VARIABLE) {
+			throw BinderException("SET luajit_jit_complexity_threshold cannot be set using a query result.");
+		}
+		ConstantBinder binder(*this, context, "SET luajit_jit_complexity_threshold value");
+		auto bound_expression = binder.Bind(stmt.value);
+		if (bound_expression->HasParameter()) {
+			throw BinderException("Parameters are not allowed in SET luajit_jit_complexity_threshold.");
+		}
+		Value val_from_expr = ExpressionExecutor::EvaluateScalar(context, *bound_expression, true);
+		try {
+			value = val_from_expr.DefaultCastAs(LogicalType::BIGINT);
+			int64_t threshold_val = value.GetValue<int64_t>();
+			if (threshold_val < 0) {
+				throw BinderException("luajit_jit_complexity_threshold must be non-negative.");
+			}
+		} catch (const Exception &e) {
+			throw BinderException("SET luajit_jit_complexity_threshold: %s", e.GetRawMessage());
+		}
+	} else if (StringUtil::Lower(stmt.name) == "luajit_jit_trigger_count") {
+		if (stmt.scope == SetScope::VARIABLE) {
+			throw BinderException("SET luajit_jit_trigger_count cannot be set using a query result.");
+		}
+		ConstantBinder binder(*this, context, "SET luajit_jit_trigger_count value");
+		auto bound_expression = binder.Bind(stmt.value);
+		if (bound_expression->HasParameter()) {
+			throw BinderException("Parameters are not allowed in SET luajit_jit_trigger_count.");
+		}
+		Value val_from_expr = ExpressionExecutor::EvaluateScalar(context, *bound_expression, true);
+		try {
+			value = val_from_expr.DefaultCastAs(LogicalType::BIGINT);
+			int64_t count_val = value.GetValue<int64_t>();
+			if (count_val < 0) {
+				throw BinderException("luajit_jit_trigger_count must be non-negative.");
+			}
+		} catch (const Exception &e) {
+			throw BinderException("SET luajit_jit_trigger_count: %s", e.GetRawMessage());
+		}
 	} else {
-		auto select_node = make_uniq<SelectNode>();
-		select_node->select_list.push_back(std::move(stmt.value));
-		select_node->from_table = make_uniq<EmptyTableRef>();
-		auto bound_select = Bind(*select_node);
-		if (bound_select.types.size() > 1) {
-			throw BinderException("SET variable expected a single input");
+		if (stmt.scope != SetScope::VARIABLE) {
+			ConstantBinder default_binder(*this, context, "SET value");
+			auto bound_value = default_binder.Bind(stmt.value);
+			if (bound_value->HasParameter()) {
+				throw NotImplementedException("SET statements cannot have parameters");
+			}
+			value = ExpressionExecutor::EvaluateScalar(context, *bound_value, true);
+		} else {
+			auto select_node = make_uniq<SelectNode>();
+			select_node->select_list.push_back(std::move(stmt.value));
+			select_node->from_table = make_uniq<EmptyTableRef>();
+			auto bound_select = Bind(*select_node);
+			if (bound_select.types.size() > 1) {
+				throw BinderException("SET variable expected a single input");
+			}
+			op = std::move(bound_select.plan);
 		}
-		op = std::move(bound_select.plan);
 	}
 	result.plan = make_uniq<LogicalSet>(stmt.name, std::move(value), stmt.scope);
 	if (op) {

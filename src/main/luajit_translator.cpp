@@ -114,6 +114,11 @@ std::string LuaTranslator::GenerateValue(const BoundConstantExpression& expr, Lu
         case LogicalTypeId::DATE:      return std::to_string(val.GetValue<date_t>().days);
         case LogicalTypeId::TIMESTAMP: return std::to_string(val.GetValue<timestamp_t>().micros);
         case LogicalTypeId::VARCHAR:   return EscapeLuaString(val.GetValue<string>());
+        case LogicalTypeId::INTERVAL: {
+            auto& interval_val = val.GetValue<interval_t>();
+            return StringUtil::Format("ffi.new(\"FFIInterval\", { months = %d, days = %d, micros = %lld })",
+                                      interval_val.months, interval_val.days, interval_val.micros);
+        }
         default:
             throw NotImplementedException("Unsupported constant type in LuaTranslator for BoundConstantExpression: " + expr.return_type.ToString());
     }
@@ -324,6 +329,79 @@ std::string GenerateValueBoundFunction(const BoundFunctionExpression& expr, LuaT
          }
     }
     // Add similar for MONTH, DAY etc. if they are separate functions
+
+    // New Math Functions
+    else if (func_name_lower == "sqrt") {
+        if (arg_strs.size() != 1) throw InternalException("SQRT expects 1 arg");
+        return StringUtil::Format("(function(a) if a == nil or a < 0 then return nil else return math.sqrt(a) end end)(%s)", arg_strs[0]);
+    } else if (func_name_lower == "pow" || func_name_lower == "power") {
+        if (arg_strs.size() != 2) throw InternalException("POW/POWER expects 2 args");
+        return StringUtil::Format("(function(b, e) if b == nil or e == nil then return nil else return math.pow(b, e) end end)(%s, %s)", arg_strs[0], arg_strs[1]);
+    } else if (func_name_lower == "ln") {
+        if (arg_strs.size() != 1) throw InternalException("LN expects 1 arg");
+        return StringUtil::Format("(function(a) if a == nil or a <= 0 then return nil else return math.log(a) end end)(%s)", arg_strs[0]);
+    } else if (func_name_lower == "log10") {
+        if (arg_strs.size() != 1) throw InternalException("LOG10 expects 1 arg");
+        return StringUtil::Format("(function(a) if a == nil or a <= 0 then return nil else return math.log10(a) end end)(%s)", arg_strs[0]);
+    } else if (func_name_lower == "sin") {
+        if (arg_strs.size() != 1) throw InternalException("SIN expects 1 arg");
+        return StringUtil::Format("(function(a) if a == nil then return nil else return math.sin(a) end end)(%s)", arg_strs[0]);
+    } else if (func_name_lower == "cos") {
+        if (arg_strs.size() != 1) throw InternalException("COS expects 1 arg");
+        return StringUtil::Format("(function(a) if a == nil then return nil else return math.cos(a) end end)(%s)", arg_strs[0]);
+    } else if (func_name_lower == "tan") {
+        if (arg_strs.size() != 1) throw InternalException("TAN expects 1 arg");
+        return StringUtil::Format("(function(a) if a == nil then return nil else return math.tan(a) end end)(%s)", arg_strs[0]);
+    }
+    // New String Functions
+    else if (func_name_lower == "replace") {
+        if (arg_strs.size() != 3) throw InternalException("REPLACE expects 3 args");
+        // Using a simple string.gsub for all occurrences. Lua patterns are not SQL LIKE patterns.
+        // For plain string replacement, string.gsub is fine.
+        // arg_strs[1] (pattern) needs escaping for magic chars if it's not meant to be a pattern.
+        // For simple literal replace, we can use a helper or more complex string.find loop.
+        // The prompt's simple_replace is for one-by-one, this is simpler:
+        return StringUtil::Format(
+            "(function(s, from_str, to_str) "
+            "  if s == nil or from_str == nil or to_str == nil then return nil end; "
+            // Implemented gsub-like replace for fixed patterns (magic_chars_escaped = false)
+            // This is a simplified version of gsub that doesn't use Lua patterns from `from_str`
+            "  local result = ''; local i = 1; "
+            "  while true do "
+            "    local find_start, find_end = string.find(s, from_str, i, true); " // true for plain text
+            "    if not find_start then break end; "
+            "    result = result .. string.sub(s, i, find_start - 1) .. to_str; "
+            "    i = find_end + 1; "
+            "  end; "
+            "  result = result .. string.sub(s, i); "
+            "  return result; "
+            "end)(%s, %s, %s)", arg_strs[0], arg_strs[1], arg_strs[2]);
+    } else if (func_name_lower == "lpad") {
+        if (arg_strs.size() != 3) throw InternalException("LPAD expects 3 args");
+        return StringUtil::Format(
+            "(function(s, len, pad) "
+            "  if s == nil or len == nil or pad == nil then return nil end; "
+            "  local s_len = #s; local pad_char = string.sub(pad, 1, 1); " // Use first char of pad string
+            "  if pad_char == '' then return string.sub(s, 1, len) end; " // If pad string is empty, behave like substring
+            "  if s_len >= len then return string.sub(s, 1, len) "
+            "  else return string.rep(pad_char, len - s_len) .. s end "
+            "end)(%s, %s, %s)", arg_strs[0], arg_strs[1], arg_strs[2]);
+    } else if (func_name_lower == "rpad") {
+        if (arg_strs.size() != 3) throw InternalException("RPAD expects 3 args");
+        return StringUtil::Format(
+            "(function(s, len, pad) "
+            "  if s == nil or len == nil or pad == nil then return nil end; "
+            "  local s_len = #s; local pad_char = string.sub(pad, 1, 1); "
+            "  if pad_char == '' then return string.sub(s, 1, len) end; "
+            "  if s_len >= len then return string.sub(s, 1, len) "
+            "  else return s .. string.rep(pad_char, len - s_len) end "
+            "end)(%s, %s, %s)", arg_strs[0], arg_strs[1], arg_strs[2]);
+    } else if (func_name_lower == "trim") {
+        if (arg_strs.size() != 1) throw InternalException("TRIM expects 1 arg");
+        // string.match returns nil if no match (e.g. empty string or all whitespace)
+        // We want "" in that case.
+        return StringUtil::Format("(function(s) if s == nil then return nil end; return string.match(s, '^%%s*(.-)%%s*$') or '' end)(%s)", arg_strs[0]);
+    }
 
     throw NotImplementedException("Unsupported BoundFunctionExpression in LuaTranslator: " + func_name_lower);
 }

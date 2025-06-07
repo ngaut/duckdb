@@ -103,6 +103,9 @@ static const ConfigurationOption internal_options[] = {
     DUCKDB_GLOBAL(DisabledOptimizersSetting),
     DUCKDB_GLOBAL(DuckDBAPISetting),
     DUCKDB_LOCAL(DynamicOrFilterThresholdSetting),
+    DUCKDB_LOCAL(EnableLuajitJitSetting),
+    DUCKDB_LOCAL(LuajitJitComplexityThresholdSetting),
+    DUCKDB_LOCAL(LuajitJitTriggerCountSetting),
     DUCKDB_GLOBAL(EnableExternalAccessSetting),
     DUCKDB_GLOBAL(EnableExternalFileCacheSetting),
     DUCKDB_GLOBAL(EnableFSSTVectorsSetting),
@@ -667,6 +670,49 @@ const string DBConfig::UserAgent() const {
 	}
 	return user_agent;
 }
+
+// --- Implementations for new LuaJIT settings ---
+// These would typically be auto-generated if settings.json and python script were used.
+// Ensure these match the struct definitions in settings.hpp
+
+void EnableLuajitJitSetting::SetLocal(ClientContext &context, const Value &parameter) {
+    ClientConfig::Get(context).options.enable_luajit_jit = BooleanValue::Get(parameter.DefaultCastAs(LogicalType::BOOLEAN));
+}
+void EnableLuajitJitSetting::ResetLocal(ClientContext &context) {
+    ClientConfig::Get(context).options.enable_luajit_jit = DBConfigOptions().enable_luajit_jit;
+}
+Value EnableLuajitJitSetting::GetSetting(const ClientContext &context) {
+    return Value::BOOLEAN(ClientConfig::Get(context).options.enable_luajit_jit);
+}
+
+void LuajitJitComplexityThresholdSetting::SetLocal(ClientContext &context, const Value &parameter) {
+    int64_t val = BigIntValue::Get(parameter.DefaultCastAs(LogicalType::BIGINT));
+    if (val < 0) {
+        throw BinderException("luajit_jit_complexity_threshold cannot be negative.");
+    }
+    ClientConfig::Get(context).options.luajit_jit_complexity_threshold = val;
+}
+void LuajitJitComplexityThresholdSetting::ResetLocal(ClientContext &context) {
+    ClientConfig::Get(context).options.luajit_jit_complexity_threshold = DBConfigOptions().luajit_jit_complexity_threshold;
+}
+Value LuajitJitComplexityThresholdSetting::GetSetting(const ClientContext &context) {
+    return Value::BIGINT(ClientConfig::Get(context).options.luajit_jit_complexity_threshold);
+}
+
+void LuajitJitTriggerCountSetting::SetLocal(ClientContext &context, const Value &parameter) {
+    int64_t val = BigIntValue::Get(parameter.DefaultCastAs(LogicalType::BIGINT));
+    if (val < 0) {
+        throw BinderException("luajit_jit_trigger_count cannot be negative.");
+    }
+    ClientConfig::Get(context).options.luajit_jit_trigger_count = val;
+}
+void LuajitJitTriggerCountSetting::ResetLocal(ClientContext &context) {
+    ClientConfig::Get(context).options.luajit_jit_trigger_count = DBConfigOptions().luajit_jit_trigger_count;
+}
+Value LuajitJitTriggerCountSetting::GetSetting(const ClientContext &context) {
+    return Value::BIGINT(ClientConfig::Get(context).options.luajit_jit_trigger_count);
+}
+// --- End LuaJIT setting implementations ---
 
 string DBConfig::SanitizeAllowedPath(const string &path) const {
 	auto path_sep = file_system->PathSeparator(path);
