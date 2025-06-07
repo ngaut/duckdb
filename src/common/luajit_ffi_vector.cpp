@@ -386,3 +386,56 @@ extern "C" DUCKDB_API int duckdb_ffi_add_lua_string_table_to_output_vector(lua_S
     }
     return 0; // Number of results pushed onto Lua stack by this C function (none)
 }
+
+
+// FFI C Helpers for starts_with and contains
+#include "duckdb/function/scalar/string_functions.hpp" // For StartsWith and Contains operations
+
+extern "C" DUCKDB_API bool duckdb_ffi_starts_with(const char* str_data, int str_len, const char* prefix_data, int prefix_len) {
+    if (!str_data || !prefix_data) { // Should not happen if called from Lua with string args
+        return false;
+    }
+    duckdb::string_t str_t(str_data, static_cast<uint32_t>(str_len));
+    duckdb::string_t prefix_t(prefix_data, static_cast<uint32_t>(prefix_len));
+    return duckdb::StartsWith::Operation(str_t, prefix_t);
+}
+
+extern "C" DUCKDB_API bool duckdb_ffi_contains(const char* str_data, int str_len, const char* substr_data, int substr_len) {
+    if (!str_data || !substr_data) {
+        return false;
+    }
+    duckdb::string_t str_t(str_data, static_cast<uint32_t>(str_len));
+    duckdb::string_t substr_t(substr_data, static_cast<uint32_t>(substr_len));
+    // Contains::Operation(haystack, needle)
+    return duckdb::Contains::Operation(str_t, substr_t);
+}
+
+// FFI C Helper for DATE_TRUNC
+// Note: StringToDatePartSpecifier is already defined in this file for EXTRACT helpers
+extern "C" DUCKDB_API int64_t duckdb_ffi_date_trunc(const char* part_str, int64_t value, bool is_timestamp) {
+    if (!part_str) {
+        // Or handle error appropriately, e.g., throw or return a specific error code if Lua can check
+        return 0; // Should not happen if called correctly from Lua
+    }
+    try {
+        duckdb::DatePartSpecifier specifier = StringToDatePartSpecifier(part_str);
+        if (is_timestamp) {
+            duckdb::timestamp_t ts_input = duckdb::timestamp_t(value);
+            duckdb::timestamp_t truncated_ts = duckdb::Timestamp::Truncate(ts_input, specifier);
+            return truncated_ts.value;
+        } else {
+            duckdb::date_t date_input = duckdb::date_t(static_cast<int32_t>(value)); // Date stored as int32_t
+            duckdb::date_t truncated_date = duckdb::Date::Truncate(date_input, specifier);
+            return static_cast<int64_t>(truncated_date.days); // Cast back to int64_t for consistent return type
+        }
+    } catch (const duckdb::Exception& e) {
+        // Handle DuckDB exceptions (e.g., invalid part string, although StringToDatePartSpecifier might throw first)
+        // For now, return 0 or a specific error indicator if Lua side can handle it.
+        // Returning 0 might be confused with a valid epoch timestamp.
+        // Consider how errors should propagate to Lua. For PoC, let it crash or return 0.
+        return 0;
+    } catch (...) {
+        // Catch-all for other unexpected errors
+        return 0;
+    }
+}

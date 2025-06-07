@@ -39,6 +39,15 @@ LuaJITStateWrapper::LuaJITStateWrapper() : L(nullptr) {
 
     lua_pushcfunction(L, duckdb_ffi_add_lua_string_table_to_output_vector);
     lua_setglobal(L, "duckdb_ffi_add_lua_string_table_to_output_vector");
+
+    lua_pushcfunction(L, duckdb_ffi_starts_with);
+    lua_setglobal(L, "duckdb_ffi_starts_with");
+
+    lua_pushcfunction(L, duckdb_ffi_contains);
+    lua_setglobal(L, "duckdb_ffi_contains");
+
+    lua_pushcfunction(L, duckdb_ffi_date_trunc);
+    lua_setglobal(L, "duckdb_ffi_date_trunc");
 }
 
 LuaJITStateWrapper::~LuaJITStateWrapper() {

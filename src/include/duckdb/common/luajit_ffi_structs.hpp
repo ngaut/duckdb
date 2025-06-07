@@ -94,6 +94,14 @@ DUCKDB_API int64_t duckdb_ffi_extract_year_from_date(int32_t date_val); // Speci
 // FFI C helper for batch string output from Lua table
 DUCKDB_API int duckdb_ffi_add_lua_string_table_to_output_vector(struct lua_State* L);
 
+// FFI C helpers for string operations
+DUCKDB_API bool duckdb_ffi_starts_with(const char* str_data, int str_len, const char* prefix_data, int prefix_len);
+DUCKDB_API bool duckdb_ffi_contains(const char* str_data, int str_len, const char* substr_data, int substr_len);
+
+// FFI C helper for DATE_TRUNC
+DUCKDB_API int64_t duckdb_ffi_date_trunc(const char* part_str, int64_t value, bool is_timestamp);
+
+
 #ifdef __cplusplus
 }
 #endif

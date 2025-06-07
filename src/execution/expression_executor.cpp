@@ -242,13 +242,16 @@ static std::string ConstructFullLuaFunctionScript(
     ss << "    typedef struct FFIString { char* ptr; uint32_t len; } FFIString;\n";
     ss << "    typedef struct FFIInterval { int32_t months; int32_t days; int64_t micros; } FFIInterval;\n";
     ss << "    typedef signed char int8_t;\n";
-    ss << "    typedef int int32_t;\n";
-    ss << "    typedef long long int64_t;\n";
+    ss << "    typedef int int32_t;\n"; // Ensure int32_t is defined before use
+    ss << "    typedef long long int64_t;\n"; // Ensure int64_t is defined before use
     ss << "    void duckdb_ffi_add_string_to_output_vector(void* ffi_vec_ptr, uint64_t row_idx, const char* str_data, uint32_t str_len);\n";
     ss << "    void duckdb_ffi_set_string_output_null(void* ffi_vec_ptr, uint64_t row_idx);\n";
     ss << "    int64_t duckdb_ffi_extract_from_date(int32_t date_val, const char* part_str);\n";
     ss << "    int64_t duckdb_ffi_extract_from_timestamp(int64_t ts_val, const char* part_str);\n";
     ss << "    int64_t duckdb_ffi_extract_year_from_date(int32_t date_val);\n";
+    ss << "    bool duckdb_ffi_starts_with(const char* str_data, int32_t str_len, const char* prefix_data, int32_t prefix_len);\n"; // Use int32_t for len
+    ss << "    bool duckdb_ffi_contains(const char* str_data, int32_t str_len, const char* substr_data, int32_t substr_len);\n"; // Use int32_t for len
+    ss << "    int64_t duckdb_ffi_date_trunc(const char* part_str, int64_t value, bool is_timestamp);\n";
     ss << "]]\n";
 
     ss << jitted_function_name << " = function(output_vec_ffi";
