@@ -278,37 +278,50 @@ static std::string ConstructFullLuaFunctionScript(
     }
 
     // Main processing loop
+    bool output_is_varchar = (output_logical_type.id() == LogicalTypeId::VARCHAR);
+    if (output_is_varchar) {
+        ss << "    local results_table = {}\n"; // Initialize table for string results
+    }
+
     ss << "    for i = 0, count - 1 do\n";
     ss << "        local current_row_value\n";
-    ss << "        local current_row_is_null = false -- Default to not null\n";
+    ss << "        local current_row_is_null = false\n"; // Default to not null
 
     // Embed the row logic snippet from LuaTranslator
-    // This snippet is expected to use input0_data, input0_nullmask, input1_data etc.
-    // and set current_row_value and current_row_is_null.
+    // This snippet sets current_row_value and current_row_is_null.
+    // For VARCHAR output, LuaTranslator::TranslateExpressionToLuaRowLogic now also appends:
+    // results_table[i+1] = current_row_value
     ss << "        " << lua_row_logic_snippet << "\n";
 
-    // Output handling
+    // Output handling based on current_row_value and current_row_is_null
     ss << "        if current_row_is_null then\n";
     ss << "            output_nullmask[i] = true\n";
-    if (output_logical_type.id() == LogicalTypeId::VARCHAR) {
-        ss << "            duckdb_ffi_set_string_output_null(output_vec_ffi, i)\n";
-    }
-    // Optional: zero out data for non-VARCHAR nulls if desired, e.g. output_data[i] = 0
+    // For VARCHAR, LuaTranslator already put nil in results_table[i+1] if current_row_is_null.
+    // The batch FFI call duckdb_ffi_add_lua_string_table_to_output_vector will handle setting null in DuckDB vector.
+    // For other fixed-width types, we might zero out data if desired (optional, nullmask handles validity).
+    // e.g., if (output_logical_type.IsNumeric()) { ss << "            output_data[i] = 0\n"; }
     ss << "        else\n";
     ss << "            output_nullmask[i] = false\n";
-    if (output_logical_type.id() == LogicalTypeId::VARCHAR) {
-        ss << "            duckdb_ffi_add_string_to_output_vector(output_vec_ffi, i, current_row_value, #current_row_value)\n";
+    if (output_is_varchar) {
+        // String data is already in results_table[i+1] via lua_row_logic_snippet.
+        // No direct output_data[i] assignment here for VARCHARs.
     } else if (output_logical_type.id() == LogicalTypeId::BOOLEAN) {
         ss << "            " << output_data_var_name << "[i] = current_row_value and 1 or 0 -- Lua bool to C int8_t\n";
     } else if (output_logical_type.id() == LogicalTypeId::INTERVAL) {
+        // Assuming current_row_value for INTERVAL is a Lua table/FFI struct with .months, .days, .micros
         ss << "            " << output_data_var_name << "[i].months = current_row_value.months\n";
         ss << "            " << output_data_var_name << "[i].days = current_row_value.days\n";
         ss << "            " << output_data_var_name << "[i].micros = current_row_value.micros\n";
     } else { // Other fixed-width types (numeric, date, timestamp)
         ss << "            " << output_data_var_name << "[i] = current_row_value\n";
     }
-    ss << "        end\n";
+    ss << "        end\n"; // End of main if/else for null handling
     ss << "    end\n"; // End for loop
+
+    if (output_is_varchar) {
+        ss << "    duckdb_ffi_add_lua_string_table_to_output_vector(output_vec_ffi, results_table, count)\n";
+    }
+
     ss << "end\n"; // End function
     return ss.str();
 }

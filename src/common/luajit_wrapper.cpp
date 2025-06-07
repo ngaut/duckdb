@@ -36,6 +36,9 @@ LuaJITStateWrapper::LuaJITStateWrapper() : L(nullptr) {
 
     lua_pushcfunction(L, duckdb_ffi_extract_year_from_date);
     lua_setglobal(L, "duckdb_ffi_extract_year_from_date");
+
+    lua_pushcfunction(L, duckdb_ffi_add_lua_string_table_to_output_vector);
+    lua_setglobal(L, "duckdb_ffi_add_lua_string_table_to_output_vector");
 }
 
 LuaJITStateWrapper::~LuaJITStateWrapper() {

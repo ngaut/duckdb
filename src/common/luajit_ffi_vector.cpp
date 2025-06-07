@@ -324,3 +324,65 @@ extern "C" DUCKDB_API int64_t duckdb_ffi_extract_year_from_date(int32_t date_val
         return duckdb::Date::ExtractYear(date); // Already correct
     } catch (...) { return -1; /* Error, or find a way to signal error to Lua */ }
 }
+
+
+extern "C" DUCKDB_API int duckdb_ffi_add_lua_string_table_to_output_vector(lua_State* L) {
+    // Expected Lua call: duckdb_ffi_add_lua_string_table_to_output_vector(output_vec_ffi_ptr, results_table, count_val)
+    // Stack upon C entry:
+    // 1: output_vec_ffi_ptr (lightuserdata)
+    // 2: results_table (Lua table)
+    // 3: count (integer)
+    if (lua_gettop(L) != 3) {
+        return luaL_error(L, "duckdb_ffi_add_lua_string_table_to_output_vector: incorrect argument count (expected 3: FFIVector*, table, count)");
+    }
+    if (!lua_islightuserdata(L, 1)) {
+        return luaL_error(L, "duckdb_ffi_add_lua_string_table_to_output_vector: arg 1 must be lightuserdata (FFIVector*)");
+    }
+    if (!lua_istable(L, 2)) {
+        return luaL_error(L, "duckdb_ffi_add_lua_string_table_to_output_vector: arg 2 must be a table");
+    }
+    if (!lua_isinteger(L, 3)) {
+        return luaL_error(L, "duckdb_ffi_add_lua_string_table_to_output_vector: arg 3 must be an integer (count)");
+    }
+
+    duckdb::ffi::FFIVector* output_ffi_meta = reinterpret_cast<duckdb::ffi::FFIVector*>(lua_touserdata(L, 1));
+    // Lua table is at stack index 2
+    duckdb::idx_t count = lua_tointeger(L, 3);
+
+    if (!output_ffi_meta || !output_ffi_meta->original_duckdb_vector) {
+        return luaL_error(L, "duckdb_ffi_add_lua_string_table_to_output_vector: Invalid FFIVector metadata passed");
+    }
+    duckdb::Vector* actual_vector = reinterpret_cast<duckdb::Vector*>(output_ffi_meta->original_duckdb_vector);
+    if (actual_vector->GetType().id() != duckdb::LogicalTypeId::VARCHAR) {
+        return luaL_error(L, "duckdb_ffi_add_lua_string_table_to_output_vector: Output vector is not of VARCHAR type");
+    }
+
+    // Ensure the vector is flat; ExpressionExecutor should have already set this up.
+    // If not, this might be needed: actual_vector->SetVectorType(duckdb::VectorType::FLAT_VECTOR);
+    // And ensure it can hold 'count' items, though Resize might be too aggressive if count is less than capacity.
+    // duckdb::FlatVector::SetCount(*actual_vector, count); // SetCount is usually for logical size.
+
+    for (duckdb::idx_t i = 0; i < count; ++i) {
+        lua_rawgeti(L, 2, i + 1); // Get results_table[i+1] (1-indexed Lua table)
+        int lua_type_on_stack = lua_type(L, -1); // Type of the value just pushed
+
+        if (lua_type_on_stack == LUA_TNIL) {
+            duckdb::FlatVector::SetNull(*actual_vector, i, true);
+        } else if (lua_type_on_stack == LUA_TSTRING) {
+            size_t len;
+            const char* str_data = lua_tolstring(L, -1, &len);
+            // SetValue handles string heap allocation for flat vectors.
+            actual_vector->SetValue(i, duckdb::Value(std::string(str_data, len)));
+            // SetValue should also mark as not null, but being explicit is safe.
+             duckdb::FlatVector::SetNull(*actual_vector, i, false);
+        } else {
+            // Error: element in table is not a string or nil.
+            // To prevent partial writes or undefined behavior, pop value and error out.
+            lua_pop(L, 1);
+            return luaL_error(L, "duckdb_ffi_add_lua_string_table_to_output_vector: table element at index %d is not a string or nil (type: %s)",
+                              i + 1, lua_typename(L, lua_type_on_stack));
+        }
+        lua_pop(L, 1); // Pop the string/nil value from stack
+    }
+    return 0; // Number of results pushed onto Lua stack by this C function (none)
+}

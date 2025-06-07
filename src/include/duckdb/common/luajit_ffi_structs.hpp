@@ -90,7 +90,9 @@ DUCKDB_API void duckdb_ffi_set_string_output_null(void* ffi_vec_ptr, idx_t row_i
 DUCKDB_API int64_t duckdb_ffi_extract_from_date(int32_t date_val, const char* part_str);
 DUCKDB_API int64_t duckdb_ffi_extract_from_timestamp(int64_t ts_val, const char* part_str);
 DUCKDB_API int64_t duckdb_ffi_extract_year_from_date(int32_t date_val); // Specific for YEAR from DATE
-// Add more for interval if needed, or handle interval part extraction in Lua if simple enough
+
+// FFI C helper for batch string output from Lua table
+DUCKDB_API int duckdb_ffi_add_lua_string_table_to_output_vector(struct lua_State* L);
 
 #ifdef __cplusplus
 }

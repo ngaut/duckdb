@@ -252,8 +252,25 @@ std::string GenerateValueBoundFunction(const BoundFunctionExpression& expr, LuaT
     // String functions
     else if (func_name_lower == "lower") ss << "  " << result_var_name << "_val = string.lower(" << args_joined << ")\n";
     else if (func_name_lower == "upper") ss << "  " << result_var_name << "_val = string.upper(" << args_joined << ")\n";
-    else if (func_name_lower == "length" || func_name_lower == "strlen") ss << "  " << result_var_name << "_val = #(" << args_joined << ")\n";
-    else if (func_name_lower == "concat") {
+    else if (func_name_lower == "length" || func_name_lower == "strlen") {
+        // Optimization: If input is a direct VARCHAR column reference, use .len from FFIString
+        if (expr.children.size() == 1 && expr.children[0]->GetExpressionClass() == ExpressionClass::BOUND_REF &&
+            expr.children[0]->return_type.id() == LogicalTypeId::VARCHAR) {
+            // child_val_vars[0] holds the name of the Lua variable for the FFIString struct itself (e.g. tval0_val)
+            // The actual FFIString is inputX_data[i]. We need to use the variable that holds the FFIString struct for the specific input.
+            // This requires GenerateValue(BoundReference) for VARCHAR to provide the struct itself, not ffi.string().
+            // Let's assume child_val_vars[0] is the direct Lua variable name for the ffi.string() result.
+            // The current GenerateValue(BoundReference) for VARCHAR already does ffi.string().
+            // So, for direct .len access, we need GenerateValue(BoundReference) to expose the struct.
+            // This is a larger change. For now, stick to #lua_string.
+            // Conceptual change if GenerateValue(BoundRef) returned the struct:
+            // ss << "  " << result_var_name << "_val = " << child_val_vars[0] << ".len\n";
+            // Fallback to current:
+            ss << "  " << result_var_name << "_val = #(" << args_joined << ")\n";
+        } else {
+            ss << "  " << result_var_name << "_val = #(" << args_joined << ")\n";
+        }
+    } else if (func_name_lower == "concat") {
         std::string concat_expr_str = "";
         for(size_t k=0; k < child_val_vars.size(); ++k) { concat_expr_str += child_val_vars[k]; if (k < child_val_vars.size()-1) concat_expr_str += " .. ";}
         ss << "  " << result_var_name << "_val = " << concat_expr_str << "\n";

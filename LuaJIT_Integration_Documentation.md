@@ -2,140 +2,131 @@
 
 ## 1. Introduction
 
-This document provides a developer-oriented overview and final summary for the initial phase of the proof-of-concept (PoC) integration of LuaJIT for Just-In-Time (JIT) compilation of expressions within DuckDB. The primary goal of this PoC was to explore the feasibility, architectural integration (culminating in a block-processing model), and potential performance characteristics of using LuaJIT to accelerate query expression evaluation.
+This document provides a developer-oriented overview and final summary for the initial phase of the proof-of-concept (PoC) integration of LuaJIT for Just-In-Time (JIT) compilation of expressions within DuckDB. The primary goal of this PoC was to explore the feasibility, architectural integration (culminating in a block-processing model with advanced VARCHAR FFI), and potential performance characteristics of using LuaJIT to accelerate query expression evaluation.
 
 For a consolidated overview of the entire investigation including initial research, evaluations, design, and PoC outcomes, please refer to the [LuaJIT for DuckDB Summary](./LuaJIT_for_DuckDB_Summary.md).
 
-## 2. Architecture Overview (Block-Processing Model)
+## 2. Architecture Overview (Block-Processing Model with Advanced VARCHAR FFI)
 
-The LuaJIT integration PoC evolved to a **block-processing model**. In this model, a single call to a JITed Lua function processes all rows within a `DataChunk`. The main loop over rows resides *inside* the JITed Lua function, significantly reducing C++-to-Lua FFI call overhead compared to earlier row-by-row approaches.
+The LuaJIT integration PoC utilizes a **block-processing model**. A single call to a JITed Lua function processes all rows within a `DataChunk`. The main loop over rows resides *inside* the JITed Lua function. This architecture was further refined with an advanced FFI mechanism for handling `VARCHAR` outputs to minimize FFI call overhead.
 
 ### Key Components:
 
 *   **`LuaJITStateWrapper` (`duckdb/common/luajit_wrapper.hpp`, `.cpp`):**
     *   Manages LuaJIT Virtual Machine instances (`lua_State*`).
-    *   Handles initialization (creating a Lua state, loading standard libraries including FFI). Globally defines FFI CDEFs for core data structures (`FFIVector`, `FFIString`, `FFIInterval`) and C helper functions.
+    *   Handles initialization, including global FFI CDEFs for core data structures and C helper functions.
     *   Registers custom C FFI helper functions with Lua.
-    *   Provides methods to compile Lua function strings (`CompileStringAndSetGlobal`) and call them (`PCallGlobal`).
 
 *   **FFI Data Structures (`duckdb/common/luajit_ffi_structs.hpp`):**
-    *   `FFIVector`: Represents a data vector for Lua. Contains `void* data`, `bool* nullmask`, `idx_t count`, `LogicalTypeId ffi_logical_type_id`, `VectorType ffi_duckdb_vector_type`, and `duckdb::Vector* original_duckdb_vector`.
-    *   `FFIString`: For `VARCHAR` elements (`char* ptr`, `uint32_t len`).
-    *   `FFIInterval`: For `INTERVAL` elements (`int32_t months, days; int64_t micros`).
-    *   **`CreateFFIVectorFromDuckDBVector` (`luajit_ffi_vector.cpp`):** Converts `duckdb::Vector` to `FFIVector`, handling various vector and data types, and creating flat boolean nullmasks.
-    *   **FFI C Helper Functions:** For string output (`duckdb_ffi_add_string_to_output_vector`, `duckdb_ffi_set_string_output_null`) and date/timestamp part extraction (`duckdb_ffi_extract_from_date`, etc.), callable from Lua.
+    *   `FFIVector`, `FFIString`, `FFIInterval` define C-style data representations for Lua.
+    *   **`CreateFFIVectorFromDuckDBVector` (`luajit_ffi_vector.cpp`):** Converts `duckdb::Vector` to `FFIVector`.
+    *   **FFI C Helper Functions:**
+        *   Standard helpers: `duckdb_ffi_add_string_to_output_vector`, `duckdb_ffi_set_string_output_null` (now largely superseded for block output but kept for potential single-row FFI needs or other contexts), and date/timestamp extraction functions (`duckdb_ffi_extract_from_date`, etc.).
+        *   **Advanced VARCHAR Output Helper:** `duckdb_ffi_add_lua_string_table_to_output_vector(lua_State* L)`: This new function is called *once* per chunk for `VARCHAR`-producing expressions. It takes a Lua table (populated by the JITed Lua code with string results or nils for the chunk) and populates the DuckDB output `VARCHAR` vector.
 
-*   **Expression Translation (`LuaTranslator`, `LuaTranslatorContext` - Block-Processing Aware):**
+*   **Expression Translation (`LuaTranslator`, `LuaTranslatorContext` - Block-Processing & Advanced VARCHAR FFI Aware):**
     *   **`LuaTranslatorContext` (`duckdb/main/luajit_translator.hpp`, `.cpp`):**
-        *   Initialized by `ExpressionExecutor` with the unique, ordered list of `LogicalType`s that correspond to the arguments of the JITed Lua function.
-        *   Stores a map from original `DataChunk` column indices to these 0-based Lua argument indices.
-        *   Provides `GetInputLuaFFIType(lua_arg_idx)` for element FFI type strings and `GetLuaArgIndex(original_chunk_col_idx)` for mapping.
-        *   Provides `GetOutputTypeLuaFFIType()` for the output vector.
+        *   Initialized by `ExpressionExecutor` with unique, ordered input `LogicalType`s for the Lua function and a map from original `DataChunk` column indices to 0-based Lua argument indices.
+        *   Provides methods like `GetInputLuaFFIType(lua_arg_idx)` and `GetLuaArgIndex(original_chunk_col_idx)`.
     *   **`LuaTranslator` (`duckdb/main/luajit_translator.hpp`, `.cpp`):**
-        *   `TranslateExpressionToLuaRowLogic()`: Generates a Lua code *snippet* for processing a single row. This snippet assumes specific Lua local variables (e.g., `input0_data`, `input0_nullmask`, and the loop index `i`) are already defined by an outer function shell. It computes the expression's value and null status for the current row `i` and assigns them to predefined Lua locals: `current_row_value` and `current_row_is_null`.
-        *   `GenerateValueExpression` (and its recursive helpers for `BoundConstantExpression`, `BoundReferenceExpression`, etc.): These now generate Lua code that sets intermediate `[prefix]_val` and `[prefix]_is_null` Lua variables. `BoundReferenceExpression` translation uses `LuaTranslatorContext::GetLuaArgIndex()` to refer to the correct `inputX_data[i]`.
+        *   `TranslateExpressionToLuaRowLogic()`: Generates a Lua code *snippet* for processing a single row `i`. This snippet:
+            *   Assumes Lua local variables (e.g., `input0_data`, `input0_nullmask`) for accessing input vector data are pre-defined and cast by the outer Lua function shell.
+            *   Computes the expression's value and null status, storing them in Lua locals `current_row_value` and `current_row_is_null`.
+            *   **For `VARCHAR` output expressions:** Appends Lua code `results_table[i+1] = current_row_value` to add the string result (or `nil`) to a Lua table named `results_table`.
+            *   **`LENGTH(varchar_col)` Optimization (Deferred):** The design noted that for `LENGTH` on a direct `VARCHAR` column reference, `LuaTranslator` could ideally generate code to use `inputX_data[i].len` directly from the `FFIString` struct. This specific optimization was deferred in the PoC implementation, with `LENGTH` currently operating on Lua strings created via `ffi.string()`.
 
 *   **Integration into `ExpressionExecutor` (`duckdb/execution/expression_executor.hpp`, `.cpp`):**
-    *   `ExpressionExecutor` holds a `LuaJITStateWrapper`. `ExpressionState` tracks JIT status.
-    *   **JIT Path in `ExpressionExecutor::Execute()` (Block-Processing):**
-        *   **Input Analysis:** Identifies unique `BoundReferenceExpression`s in the expression tree. Collects their `LogicalType`s and original column indices. Builds a map from original column indices to 0-based Lua argument indices.
-        *   **`LuaTranslatorContext` Creation:** Instantiated with the unique input types and the mapping.
-        *   **`ShouldJIT()` Heuristic:** Decides eligibility based on configuration and `ExpressionState`.
-        *   **Caching & Compilation (if `ShouldJIT` is true and not already compiled):**
-            1.  `LuaTranslator::TranslateExpressionToLuaRowLogic()` generates the row logic snippet using the new context.
-            2.  `ExpressionExecutor::ConstructFullLuaFunctionScript()` (static helper) generates the complete Lua function string. This function:
-                *   Includes necessary `ffi.cdef` type and C function declarations (ideally defined globally once, but included per script for PoC robustness).
-                *   Defines the Lua function signature: `function_name(output_vec_ffi, input0_ffi, input1_ffi, ..., count)`.
-                *   Generates initial FFI casts for `output_vec_ffi` and each `inputX_ffi` to typed Lua local data and nullmask pointers (e.g., `local input0_data = ffi.cast('int32_t*', input0_ffi.data)`).
-                *   Generates the main loop: `for i = 0, count - 1 do ... end`.
-                *   Embeds the row logic snippet (from `LuaTranslator`) inside this loop.
-                *   After the snippet, adds Lua code to handle the `current_row_value` and `current_row_is_null`: sets `output_nullmask[i]`, and for non-nulls, assigns `current_row_value` to `output_data[i]` (with type-specific handling for `VARCHAR` via FFI C helpers, `BOOLEAN` to 0/1 conversion, and `INTERVAL` struct field assignment).
-            3.  `luajit_wrapper_.CompileStringAndSetGlobal()` compiles this full script.
-        *   **Execution (if compiled successfully):**
-            1.  Input `FFIVector`s are prepared for the *unique, ordered* input columns using `CreateFFIVectorFromDuckDBVector`.
-            2.  Output `FFIVector` is prepared.
-            3.  The named Lua function is called once per chunk via `luajit_wrapper_.PCallGlobal()`.
-        *   **Error Handling & Fallback:** Unchanged; errors lead to fallback to `ExecuteStandard()`.
+    *   **`ExpressionExecutor::ConstructFullLuaFunctionScript()` (Block-Processing & Advanced VARCHAR FFI Aware):**
+        *   Generates the complete Lua function string for block processing.
+        *   Includes `ffi.cdef` for types and C helpers.
+        *   Defines the Lua function signature: `function_name(output_vec_ffi, input0_ffi, ..., count)`.
+        *   Generates initial FFI casts for `output_vec_ffi` and each `inputX_ffi` to typed Lua local data/nullmask pointers.
+        *   **For `VARCHAR` output expressions:** Prepends `local results_table = {}` before the main loop.
+        *   Generates the main `for i = 0, count - 1 do ... end` loop.
+        *   Embeds the row logic snippet from `LuaTranslator` (which sets `current_row_value`, `current_row_is_null`, and for `VARCHAR` output, also populates `results_table`).
+        *   **Output Handling (within the loop, after the snippet):**
+            *   If `current_row_is_null` is true: sets `output_nullmask[i] = true`.
+            *   If false: sets `output_nullmask[i] = false`.
+                *   For **non-VARCHAR** types: Assigns `current_row_value` to `output_data[i]` (with specific handling for `BOOLEAN` to `0/1`, `INTERVAL` fields).
+                *   For **VARCHAR** types: No direct data assignment here; data is in `results_table`.
+        *   **Batch VARCHAR Output Call (after the loop):** If the expression output is `VARCHAR`, appends the call `duckdb_ffi_add_lua_string_table_to_output_vector(output_vec_ffi, results_table, count)`.
+    *   **JIT Path in `ExpressionExecutor::Execute()`:**
+        *   Identifies unique input columns, creates the mapping for `LuaTranslatorContext`.
+        *   Calls `LuaTranslator` and then `ConstructFullLuaFunctionScript`.
+        *   Compiles and executes the generated block-processing Lua function once per chunk.
 
-### Workflow (Block-Processing):
-1.  **JIT Decision & Input Analysis (in `ExpressionExecutor::Execute`):** If JIT is enabled, identify unique input columns, create mapping, and initialize `LuaTranslatorContext`. Call `ShouldJIT()`.
-2.  **Compile (if needed):** If JIT is viable and not yet compiled:
-    a.  `LuaTranslator::TranslateExpressionToLuaRowLogic()` generates the Lua snippet for per-row logic.
-    b.  `ExpressionExecutor::ConstructFullLuaFunctionScript()` builds the full block-processing Lua function string around this snippet.
-    c.  `LuaJITStateWrapper` compiles the full script.
-3.  **Execute JITed Function (if compiled):** Prepare `FFIVector`s for the chunk. Call the JITed Lua function *once* for the entire chunk.
-4.  **Fallback:** If JIT fails or `ShouldJIT` is false, use `ExecuteStandard` C++ path.
+### Workflow (Block-Processing with Advanced VARCHAR FFI):
+1.  **JIT Decision & Input Analysis (in `ExpressionExecutor::Execute`):** As before, identify unique inputs, create mapping, initialize `LuaTranslatorContext`.
+2.  **Compile (if needed):**
+    a.  `LuaTranslator::TranslateExpressionToLuaRowLogic()` generates the Lua snippet (which sets `current_row_val`/`_is_null`, and for `VARCHAR` output, adds to `results_table`).
+    b.  `ExpressionExecutor::ConstructFullLuaFunctionScript()` builds the full block-processing Lua function, including `results_table` logic and the batch FFI call if output is `VARCHAR`.
+    c.  `LuaJITStateWrapper` compiles the script.
+3.  **Execute JITed Function (if compiled):** Prepare `FFIVector`s. Call the JITed Lua function once per chunk. If it was a `VARCHAR` expression, this function internally calls `duckdb_ffi_add_lua_string_table_to_output_vector` at the end.
+4.  **Fallback:** To C++ path if JIT fails.
 
 ## 3. Build System Integration (Conceptual)
-(No change from previous documentation: LuaJIT as a `third_party` static library.)
+(No change from previous documentation.)
 
 ## 4. JIT Heuristics and Configuration
-(No change in the configuration options themselves or their `SET` command implementation from previous documentation. The effectiveness of these heuristics is re-evaluated based on the block-processing model's performance in Section 9.)
+(No change in the configuration options or their `SET` command implementation. Effectiveness re-evaluated in Benchmarking.)
 
 ## 5. Caching Mechanism
-(No change from previous documentation: caching is per `ExpressionState`.)
+(No change from previous documentation.)
 
 ## 6. Error Handling and Fallback
-(No change from previous documentation: errors lead to fallback.)
+(No change from previous documentation.)
 
-## 7. Adding Support for New Expressions or Data Types (Block-Processing Context)
-*   **FFI Data Structures:** (Largely same) Define C structs, update `CreateFFIVectorFromDuckDBVector`, update Lua CDEFs (now in `ConstructFullLuaFunctionScript` and/or global `LuaJITStateWrapper` init), add C helpers if needed.
-*   **Expression Translation (`LuaTranslator`):**
-    *   `GenerateValue` overloads must produce Lua snippets that set `[result_prefix]_val` and `[result_prefix]_is_null`.
-    *   `BoundReferenceExpression` translation now uses `LuaTranslatorContext::GetLuaArgIndex()` to refer to the correct `inputX_data[i]` Lua variable.
-    *   The overall snippet from `TranslateExpressionToLuaRowLogic` will be embedded in the loop by `ConstructFullLuaFunctionScript`.
-*   **Unit Testing:** Tests in `luajit_translator_test.cpp` verify the generated snippets. Tests in `jit_expression_executor_test.cpp` verify end-to-end execution.
+## 7. Adding Support for New Expressions or Data Types
+(Process similar to before, but `LuaTranslator` snippets must set `current_row_val`/`_is_null`, and if outputting `VARCHAR`, also populate `results_table`. `ConstructFullLuaFunctionScript` handles the shell.)
 
 ## 8. Debugging JITed Code
 (No change from previous documentation.)
 
-## 9. Benchmarking (Reflecting Block-Processing Model)
+## 9. Benchmarking (Reflecting Advanced VARCHAR FFI)
 
-*   **Framework:** `test/benchmark/jit_expression_benchmark.cpp` using `ExpressionExecutor` for both C++ and JIT paths.
-*   **Methodology:** JIT path configured for immediate compilation. Metrics: `CppBaseline_ms`, `JIT_FirstRun_ms`, `JIT_CachedExec_ms`.
-*   **Conceptual Findings Summary (Block-Processing Model from `LuaJIT_benchmarking_and_profiling.md`):**
-    *   **`JIT_FirstRun_ms`:** Remains significant due to translation and full-function compilation.
-    *   **`JIT_CachedExec_ms` vs. `CppBaseline_ms`:**
-        *   **Numeric/Fixed-Width Types (including DATE, simple INTERVAL ops):** Conceptually, block processing shows significant improvements. Cached JIT execution can become competitive with or even slightly faster than C++ for complex expressions due to the elimination of per-row C++-to-Lua call overhead. LuaJIT can optimize the entire inner loop.
-        *   **String Operations (Input-Heavy, e.g., `LENGTH(str)`, `StrEq`):** Moderate conceptual improvements. The loop itself is faster in Lua, but per-row `ffi.string()` creation from input `FFIString` arrays within the Lua loop remains a bottleneck.
-        *   **String Operations (Output-Heavy, e.g., `LOWER(str)`, `REPLACE`):** Limited conceptual improvement. Per-row FFI C helper calls from Lua for string output (`duckdb_ffi_add_string_to_output_vector`) are still required and become a dominant factor.
-        *   **Functions with Per-Row FFI Calls (e.g., `EXTRACT`):** Similar to string outputs, the per-row FFI calls to C helpers from Lua limit performance gains, even with the main loop in Lua.
-    *   **Overall JIT Viability (Conceptual):** Block processing makes LuaJIT (conceptually) more competitive for a range of complex, non-FFI-heavy expressions (especially numeric and fixed-width types). However, operations dominated by per-row FFI interactions (like string manipulation with FFI helpers) still face performance challenges compared to native C++.
+*   **Framework & Methodology:** Unchanged (`test/benchmark/jit_expression_benchmark.cpp`).
+*   **Conceptual Findings Summary (Block-Processing with Advanced VARCHAR FFI):**
+    *   **Overall:** The block-processing model itself provides significant conceptual speedups for numeric/fixed-width types by moving the main loop into Lua, thus reducing C++-to-Lua FFI call overhead from per-row to per-chunk.
+    *   **`VARCHAR` Output Expressions (e.g., `LOWER`, `CONCAT`, `REPLACE`):**
+        *   The advanced VARCHAR FFI (batch output via Lua table and a single FFI helper call) further improves the `JIT_CachedExec_ms` for these scenarios compared to a block-processing model that still uses per-row FFI calls for string output from Lua. This makes JITing string functions conceptually more competitive, though still often slower than native C++ due to remaining overheads.
+    *   **Remaining FFI Overheads:**
+        *   Per-chunk data preparation (`CreateFFIVectorFromDuckDBVector`).
+        *   Initial FFI casts for vector data/nullmasks at the start of the JITed Lua function.
+        *   **`VARCHAR` Inputs:** Per-row `ffi.string()` creation within the Lua loop if Lua code needs to operate on string content (a primary bottleneck for string-heavy expressions).
+        *   **`VARCHAR` Outputs (Batched):** While FFI calls are reduced from N to 1, new overheads include Lua table creation per chunk, N Lua table index assignments, and the C-side iteration of this Lua table by `duckdb_ffi_add_lua_string_table_to_output_vector`.
+        *   Per-row FFI C helper calls from Lua for functions like `EXTRACT`.
+    *   **JIT Viability:** Conceptually, block processing with batched VARCHAR output makes JIT a more viable option for a broader range of complex expressions, especially those heavy on numeric/fixed-width computations. For string-heavy expressions, while improved, performance parity or gains over C++ remain challenging primarily due to input string handling (`ffi.string()`) and the overheads of the batch output mechanism itself.
 
-## 10. Current PoC Limitations (Post Block-Processing Refactor)
-*   **Performance - Remaining FFI Overheads:**
-    *   **`ffi.string()` for VARCHAR Inputs:** Creating Lua strings from input `FFIString` structs (`ffi.string(ptr, len)`) inside the Lua loop on a per-row basis is a significant remaining overhead for string processing expressions.
-    *   **Per-Row FFI C Helper Calls:** Operations requiring callbacks to C FFI helpers from within the Lua loop for each row (e.g., `duckdb_ffi_add_string_to_output_vector` for `VARCHAR` results, or `duckdb_ffi_extract_from_date` for `EXTRACT`) are still major performance bottlenecks.
-    *   **Initial Data Preparation:** `CreateFFIVectorFromDuckDBVector` (flattening, nullmask conversion) is still a per-chunk cost on the C++ side.
-*   **Expression Support:** While broad, not all expressions/functions are JITted (e.g., complex `INTERVAL` arithmetic, some specific SQL functions, `LIKE` patterns).
-*   **Input Mapping in `ExpressionExecutor::Execute`:** The current method of identifying unique input columns and mapping them to Lua function arguments (input0, input1, ...) based on `ExpressionIterator` and `BoundReferenceExpression::index` is functional but might need more robustness for deeply nested or very complex shared subexpressions.
-*   **`GetExpressionComplexity`:** Remains a basic node count, not fully reflecting computational cost or FFI implications.
+## 10. Current PoC Limitations
+*   **Performance - Remaining FFI Overheads for Strings:**
+    *   **`VARCHAR` Inputs:** The per-row creation of Lua strings from `FFIString` inputs (via `ffi.string(ptr, len)`) inside the JITed Lua loop is a major performance bottleneck for expressions that process string content. The `LENGTH(varchar_col)` optimization to use `.len` directly was designed but deferred.
+    *   **`VARCHAR` Output Batching Overheads:** While batching reduces FFI calls, creating and populating a Lua table for all string results, then iterating this table in C via Lua API calls, introduces new overheads that can still be significant.
+*   **Expression Support:** Coverage is broad but not exhaustive (e.g., complex `INTERVAL` arithmetic, some SQL functions, `LIKE` patterns).
+*   **Input Mapping & Complexity Model:** (As before - `ExpressionExecutor` input mapping for JIT is simplified; `GetExpressionComplexity` is basic).
 
 ## 11. Future Work
-*   **Performance - Minimize FFI Overhead (Priority):**
-    *   **VARCHAR Input Optimization:** Investigate reducing `ffi.string()` calls. Can more operations be done directly on `FFIString.ptr` in Lua? Are there ways to batch string conversions or operations if multiple string inputs are processed similarly?
-    *   **VARCHAR Output Optimization:** For string results, explore alternatives to per-row `duckdb_ffi_add_string_to_output_vector`. Could Lua code build up intermediate string representations (e.g., in a Lua table of pointers/lengths) and have a single FFI call at the end of the chunk to commit these to DuckDB's `StringHeap`? This is complex but potentially high-impact.
-    *   **Batch FFI Helpers:** For functions like `EXTRACT`, if multiple parts are needed or if it's part of a sequence of FFI-heavy operations, consider if more complex FFI helpers that perform more work per call could be beneficial.
-*   **Broader Expression/Type Support:** (As before, but with new performance context)
-*   **Refined JIT Mechanics & Heuristics:**
-    *   Develop a more advanced `GetExpressionComplexity` model that accounts for FFI costs associated with types and operations.
-    *   Re-evaluate JIT trigger thresholds based on real performance data from the block-processing model.
-*   **Operator-Level JIT:** If expression-level JIT remains challenging for certain operations (especially string/UD_heavy ones due to FFI), consider JITing parts of physical operator logic where more work can be done without crossing the FFI boundary repeatedly.
-*   **Alternative JIT Targets:** (As before)
+*   **Performance - Optimize VARCHAR FFI (Inputs):**
+    *   **Implement `LENGTH(varchar_col)` Optimization:** Prioritize modifying `LuaTranslator` for `BoundReferenceExpression` (VARCHAR) and `GenerateValueBoundFunction` for `LENGTH` to directly use `inputX_data[i].len`.
+    *   Explore more Lua functions that can operate directly on `char*` and `len` (from `FFIString`) to avoid `ffi.string()` creation where possible. This might involve writing more custom C FFI helpers that accept `char*, len` and are called from Lua.
+*   **Performance - Analyze and Optimize VARCHAR Output Batching:** Profile the Lua table population and the C-side iteration in `duckdb_ffi_add_lua_string_table_to_output_vector` to see if further optimizations are possible (e.g., different Lua data structures, optimizing C-side table traversal).
+*   **Broader Expression/Type Support & Refined JIT Mechanics:** (As before).
+*   **Operator-Level JIT:** If expression-level JIT for string/UDF-heavy workloads remains challenging due to FFI costs even with these advancements, research JITing larger portions of query plans (e.g., physical operator segments) where FFI overhead can be amortized over more computation.
 
 ## 12. Overall Conclusion of PoC
 
-This Proof-of-Concept has successfully evolved to implement an end-to-end JIT compilation pipeline using LuaJIT, now based on a **block-processing model**. This model, where the main loop over data rows occurs within the JITed Lua function, significantly reduces the C++-to-Lua FFI call overhead that was a major bottleneck in earlier row-by-row designs. The system supports a wide range of SQL expression types, including numerics, strings, conditionals, and temporal functions (like `EXTRACT` via FFI helpers), and features SQL-configurable JIT heuristics.
+This Proof-of-Concept has successfully established an end-to-end JIT compilation pipeline for SQL expressions in DuckDB using LuaJIT. The architecture evolved to a **block-processing model**, where a single call to a JITed Lua function processes an entire `DataChunk`. This was further refined with an **advanced FFI for `VARCHAR` outputs**, batching string results via a Lua table to reduce FFI call overhead from per-row to per-chunk. SQL-configurable heuristics (`enable_luajit_jit`, `luajit_jit_complexity_threshold`, `luajit_jit_trigger_count`) were also implemented, providing control over JIT behavior.
 
-The refactoring to block-processing conceptually improves the performance landscape. For expressions primarily involving numeric or other fixed-width data types and where the computation can be largely contained within Lua, this model shows potential to be competitive with, or even exceed, DuckDB's native C++ performance for complex expressions once the initial compilation cost is amortized.
+The block-processing model, particularly with batched string outputs, represents a significant architectural improvement. **Conceptually, this model makes JIT compilation a more viable performance optimization for certain classes of expressions compared to earlier row-by-row FFI approaches.** Specifically, complex numeric, date, or conditional logic expressions (not heavily reliant on per-row FFI C helper calls from Lua) are expected to see performance benefits, potentially matching or exceeding native C++ execution times once JIT compilation overhead is amortized.
 
-However, significant FFI-related performance challenges persist, particularly for:
-1.  Processing `VARCHAR` inputs, where `ffi.string()` may be called per row within the Lua loop.
-2.  Operations that require per-row callbacks from Lua to C FFI helper functions, most notably for producing `VARCHAR` results or for functions like `EXTRACT`.
+However, **significant FFI-related performance challenges persist, especially for `VARCHAR` processing.**
+*   The per-row creation of Lua strings from input `FFIString` structs (via `ffi.string()`) inside the JITed Lua loop remains a primary bottleneck for string manipulation functions.
+*   While batching `VARCHAR` output reduces FFI call frequency, the overheads of Lua table manipulation and the C-side processing of this table still impose costs.
+*   Functions that inherently require per-row FFI calls back to C (like `EXTRACT`) also see limited gains from the in-Lua loop.
 
-The PoC has provided crucial insights:
-*   **Feasibility:** Integrating LuaJIT and translating DuckDB expressions to Lua for JIT compilation is architecturally feasible.
-*   **Block Processing:** This is a more viable execution model than row-by-row for reducing FFI call overhead.
-*   **Persistent FFI Costs:** Even with block processing, FFI interactions for specific data types (especially strings) and helper functions remain critical performance determinants.
+The PoC provides crucial insights:
+1.  **Feasibility:** Integrating LuaJIT for expression JITting is architecturally sound.
+2.  **Block Processing is Key:** This model is superior for reducing primary FFI call overhead.
+3.  **Targeted Benefits:** Performance gains are (conceptually) most likely for compute-bound expressions on fixed-width types where the logic can largely stay within Lua.
+4.  **FFI Remains a Challenge:** Interaction with complex types like strings across the C++/Lua boundary, even in a block model, requires careful design to minimize overhead.
 
-Future efforts to enhance performance via this LuaJIT approach must focus on minimizing these remaining FFI bottlenecks, potentially through more advanced data marshalling strategies, batch-oriented FFI helpers, or by carefully selecting only those expressions for JIT where the computational gain within Lua significantly outweighs all FFI costs.
+Future work should prioritize optimizing these FFI interactions for strings (both input and output) and further refining heuristics based on real-world performance data. This PoC forms a strong foundation for such future explorations into JIT compilation within DuckDB.

@@ -442,5 +442,66 @@ end
 )";
         REQUIRE(NormalizeLua(lua_snippet) == NormalizeLua(expected_lua));
     }
+
+    SECTION("Translate BoundFunctionExpression: length(col_varchar)") {
+        auto col_varchar_ref = CreateBoundReference(0, LogicalType::VARCHAR);
+        std::vector<unique_ptr<Expression>> children;
+        children.push_back(std::move(col_varchar_ref));
+        auto length_expr = CreateBoundFunction("length", std::move(children), LogicalType::BIGINT); // LENGTH returns BIGINT
+        std::string lua_snippet = LuaTranslator::TranslateExpressionToLuaRowLogic(*length_expr, ctx_one_varchar);
+
+        // Current expectation (no .len optimization implemented in this pass):
+        // It will create a lua string then get its length.
+        // Output is BIGINT, so no "results_table" involved for this one.
+        std::string expected_lua = R"(local current_row_val
+local current_row_is_null
+local tval0_val
+local tval0_is_null
+if input1_nullmask[i] then
+  tval0_is_null = true
+else
+  tval0_is_null = false
+  tval0_val = ffi.string(input1_data[i].ptr, input1_data[i].len)
+end
+if tval0_is_null then
+  current_row_is_null = true
+else
+  current_row_is_null = false
+  current_row_val = #(tval0_val)
+  if current_row_val == nil and not current_row_is_null then current_row_is_null = true; end
+end
+)";
+        REQUIRE(NormalizeLua(lua_snippet) == NormalizeLua(expected_lua));
+    }
+
+    SECTION("Translate BoundFunctionExpression: lower(col_varchar) (VARCHAR output)") {
+        auto col_varchar_ref = CreateBoundReference(0, LogicalType::VARCHAR);
+        std::vector<unique_ptr<Expression>> children;
+        children.push_back(std::move(col_varchar_ref));
+        auto lower_expr = CreateBoundFunction("lower", std::move(children), LogicalType::VARCHAR);
+        std::string lua_snippet = LuaTranslator::TranslateExpressionToLuaRowLogic(*lower_expr, ctx_one_varchar);
+
+        std::string expected_lua = R"(local current_row_val
+local current_row_is_null
+local tval0_val
+local tval0_is_null
+if input1_nullmask[i] then
+  tval0_is_null = true
+else
+  tval0_is_null = false
+  tval0_val = ffi.string(input1_data[i].ptr, input1_data[i].len)
+end
+if tval0_is_null then
+  current_row_is_null = true
+else
+  current_row_is_null = false
+  current_row_val = string.lower(tval0_val)
+  if current_row_val == nil and not current_row_is_null then current_row_is_null = true; end
+end
+results_table[i+1] = current_row_val
+)"; // Note the added results_table line
+        REQUIRE(NormalizeLua(lua_snippet) == NormalizeLua(expected_lua));
+        REQUIRE(lua_snippet.find("duckdb_ffi_add_string_to_output_vector") == std::string::npos); // Ensure old call is gone
+    }
 }
 ```
