@@ -27,13 +27,19 @@ namespace duckdb {
 namespace ffi {
 
 // Helper to get the size of a single data element for a given logical type.
+#include "duckdb/common/types/date.hpp"     // For Date
+#include "duckdb/common/types/timestamp.hpp" // For Timestamp
+#include "duckdb/common/types/interval.hpp"  // For Interval
+
 static FFI_TYPE_SIZE_SIGNATURE {
     switch(type.id()) {
         case LogicalTypeId::INTEGER: return sizeof(int32_t);
         case LogicalTypeId::BIGINT: return sizeof(int64_t);
         case LogicalTypeId::DOUBLE: return sizeof(double);
-        case LogicalTypeId::VARCHAR: return sizeof(FFIString); // Points to an array of FFIString structs
-        // Add other numeric types as needed (FLOAT, SMALLINT, TINYINT, HUGEINT, DECIMAL)
+        case LogicalTypeId::DATE: return sizeof(date_t); // int32_t
+        case LogicalTypeId::TIMESTAMP: return sizeof(timestamp_t); // int64_t
+        case LogicalTypeId::INTERVAL: return sizeof(FFIInterval); // struct of int32, int32, int64
+        case LogicalTypeId::VARCHAR: return sizeof(FFIString);
         default:
             throw NotImplementedException("FFI: Unsupported logical type for GetFFITypeSize: " + type.ToString());
     }
@@ -43,9 +49,11 @@ static FFI_TYPE_SIZE_SIGNATURE {
 void CreateFFIVectorFromDuckDBVector(duckdb::Vector& duckdb_vec, idx_t count,
                                      duckdb::ffi::FFIVector& out_ffi_vec,
                                      std::vector<std::vector<char>>& temp_buffers_owner) {
+    out_ffi_vec.original_duckdb_vector = &duckdb_vec; // Store pointer to original vector for output helpers
+
     if (count == 0) {
         out_ffi_vec.data = nullptr;
-        out_ffi_vec.nullmask = nullptr; // Or a static always-null/always-valid mask
+        out_ffi_vec.nullmask = nullptr;
         out_ffi_vec.count = 0;
         out_ffi_vec.ffi_logical_type_id = duckdb_vec.GetType().id();
         out_ffi_vec.ffi_duckdb_vector_type = duckdb_vec.GetVectorType();
@@ -84,11 +92,11 @@ void CreateFFIVectorFromDuckDBVector(duckdb::Vector& duckdb_vec, idx_t count,
         temp_buffers_owner.emplace_back(count * sizeof(FFIString));
         FFIString* ffi_string_array = reinterpret_cast<FFIString*>(temp_buffers_owner.back().data());
         out_ffi_vec.data = ffi_string_array;
-        // out_ffi_vec.is_temporary_buffer = true; // Always a temp buffer for FFIString array
+        // out_ffi_vec.is_temporary_buffer = true;
 
         string_t* duckdb_strings = UnifiedVectorFormat::GetData<string_t>(unified_data);
         for (idx_t i = 0; i < count; i++) {
-            if (!flat_nullmask_ptr[i]) { // Only process if not null
+            if (!flat_nullmask_ptr[i]) {
                 idx_t source_idx = unified_data.sel->get_index(i);
                 const string_t& duckdb_str = duckdb_strings[source_idx];
                 ffi_string_array[i].ptr = const_cast<char*>(duckdb_str.GetDataUnsafe());
@@ -98,30 +106,38 @@ void CreateFFIVectorFromDuckDBVector(duckdb::Vector& duckdb_vec, idx_t count,
                 ffi_string_array[i].len = 0;
             }
         }
-    } else if (vector_type == VectorType::FLAT_VECTOR) {
-        // For numeric flat vectors, data can be pointed to directly if no sel_vector implies full buffer use.
-        // However, UnifiedVectorFormat always gives a sel_vector.
-        // If unified_data.sel is incremental (0,1,2...) and covers the whole vector, we could point directly.
-        // For simplicity and consistency, especially with potential selection vectors,
-        // we will copy to a temporary buffer if not all data is used or if it's not contiguous.
-        // However, UnifiedVectorFormat::GetData already gives the direct pointer from the underlying buffer.
+    } else if (logical_type_id == LogicalTypeId::INTERVAL) {
+        temp_buffers_owner.emplace_back(count * sizeof(FFIInterval));
+        FFIInterval* ffi_interval_array = reinterpret_cast<FFIInterval*>(temp_buffers_owner.back().data());
+        out_ffi_vec.data = ffi_interval_array;
+
+        interval_t* duckdb_intervals = UnifiedVectorFormat::GetData<interval_t>(unified_data);
+        for (idx_t i = 0; i < count; i++) {
+            if (!flat_nullmask_ptr[i]) {
+                idx_t source_idx = unified_data.sel->get_index(i);
+                const interval_t& duckdb_interval = duckdb_intervals[source_idx];
+                ffi_interval_array[i].months = duckdb_interval.months;
+                ffi_interval_array[i].days = duckdb_interval.days;
+                ffi_interval_array[i].micros = duckdb_interval.micros;
+            } else {
+                ffi_interval_array[i].months = 0;
+                ffi_interval_array[i].days = 0;
+                ffi_interval_array[i].micros = 0;
+            }
+        }
+    }
+    // Numeric types (INTEGER, BIGINT, DOUBLE, DATE, TIMESTAMP)
+    else if (vector_type == VectorType::FLAT_VECTOR) {
         out_ffi_vec.data = UnifiedVectorFormat::GetData(unified_data);
-        // No temp buffer needed here if Lua directly uses this, but be careful with selection vectors.
-        // The current unified_data.sel already maps indices correctly for this data pointer.
     } else if (vector_type == VectorType::CONSTANT_VECTOR) {
         idx_t element_size = GetFFITypeSize(duckdb_vec.GetType());
         temp_buffers_owner.emplace_back(count * element_size);
         char* temp_data_buffer = temp_buffers_owner.back().data();
         out_ffi_vec.data = temp_data_buffer;
-        // out_ffi_vec.is_temporary_buffer = true;
 
         data_ptr_t constant_data_ptr = UnifiedVectorFormat::GetData(unified_data);
-        // bool is_constant_null = !unified_data.validity.RowIsValid(0); // Already handled by flat_nullmask_ptr
-
-        // Fill the temporary buffer with the repeated constant value if not null.
-        // The flat_nullmask_ptr will indicate which elements are null.
         for (idx_t i = 0; i < count; ++i) {
-            if (!flat_nullmask_ptr[i]) { // Only copy if not null
+            if (!flat_nullmask_ptr[i]) {
                  memcpy(temp_data_buffer + (i * element_size), constant_data_ptr, element_size);
             }
         }
@@ -130,7 +146,6 @@ void CreateFFIVectorFromDuckDBVector(duckdb::Vector& duckdb_vec, idx_t count,
         temp_buffers_owner.emplace_back(count * element_size);
         char* temp_data_buffer = temp_buffers_owner.back().data();
         out_ffi_vec.data = temp_data_buffer;
-        // out_ffi_vec.is_temporary_buffer = true;
 
         data_ptr_t child_data_ptr = UnifiedVectorFormat::GetData(unified_data);
         for (idx_t i = 0; i < count; ++i) {
@@ -143,7 +158,7 @@ void CreateFFIVectorFromDuckDBVector(duckdb::Vector& duckdb_vec, idx_t count,
         }
     } else {
         throw NotImplementedException("FFI: VectorType not yet supported for CreateFFIVectorFromDuckDBVector: " +
-                                      VectorTypeToString(vector_type));
+                                      VectorTypeToString(vector_type) + " for type " + logical_type_id.ToString());
     }
 }
 
@@ -153,3 +168,104 @@ void CreateFFIVectorFromDuckDBVector(duckdb::Vector& duckdb_vec, idx_t count,
 
 } // namespace ffi
 } // namespace duckdb
+
+// --- Implementation of FFI C Helper Functions ---
+// These are extern "C" and will be registered with Lua.
+
+// Note: These helpers assume that ffi_vec_ptr->original_duckdb_vector is correctly set.
+// Error checking (e.g., if original_duckdb_vector is null, or wrong type) is omitted for brevity.
+extern "C" DUCKDB_API void duckdb_ffi_add_string_to_output_vector(void* ffi_vec_ptr, duckdb::idx_t row_idx, const char* str_data, uint32_t str_len) {
+    if (!ffi_vec_ptr) return;
+    auto* ffi_meta = reinterpret_cast<duckdb::ffi::FFIVector*>(ffi_vec_ptr);
+    if (!ffi_meta->original_duckdb_vector) return;
+
+    duckdb::Vector* actual_vector = reinterpret_cast<duckdb::Vector*>(ffi_meta->original_duckdb_vector);
+
+    if (actual_vector->GetType().id() != duckdb::LogicalTypeId::VARCHAR) return;
+    if (row_idx >= ffi_meta->count) return;
+
+    try {
+        // SetValue handles string heap allocation.
+        actual_vector->SetValue(row_idx, duckdb::Value(std::string(str_data, str_len)));
+        // SetValue should also clear the nullmask for this row.
+        // If not, uncomment: duckdb::FlatVector::SetNull(*actual_vector, row_idx, false);
+    } catch (...) { /* TODO: Error propagation to Lua */ }
+}
+
+extern "C" DUCKDB_API void duckdb_ffi_set_string_output_null(void* ffi_vec_ptr, duckdb::idx_t row_idx) {
+    if (!ffi_vec_ptr) return;
+    auto* ffi_meta = reinterpret_cast<duckdb::ffi::FFIVector*>(ffi_vec_ptr);
+    if (!ffi_meta->original_duckdb_vector) return;
+
+    duckdb::Vector* actual_vector = reinterpret_cast<duckdb::Vector*>(ffi_meta->original_duckdb_vector);
+
+    // No type check needed for SetNull, but good for consistency if this was type specific
+    // if (actual_vector->GetType().id() != duckdb::LogicalTypeId::VARCHAR) return;
+     if (row_idx >= ffi_meta->count) return;
+
+    duckdb::FlatVector::SetNull(*actual_vector, row_idx, true);
+}
+
+// FFI Helpers for EXTRACT
+static int64_t ExtractDatePart(duckdb::date_t date, duckdb::DatePartSpecifier specifier) {
+    switch (specifier) {
+    case duckdb::DatePartSpecifier::YEAR: return duckdb::Date::ExtractYear(date);
+    case duckdb::DatePartSpecifier::MONTH: return duckdb::Date::ExtractMonth(date);
+    case duckdb::DatePartSpecifier::DAY: return duckdb::Date::ExtractDay(date);
+    // Add other parts as needed: DOY, WEEK, etc.
+    default: throw duckdb::NotImplementedException("Unsupported date part for FFI EXTRACT");
+    }
+}
+
+static int64_t ExtractTimestampPart(duckdb::timestamp_t ts, duckdb::DatePartSpecifier specifier) {
+     switch (specifier) {
+    case duckdb::DatePartSpecifier::YEAR: return duckdb::Timestamp::GetDate(ts).year; // Simplified from duckdb::Timestamp::ExtractYear etc.
+    case duckdb::DatePartSpecifier::MONTH: return duckdb::Timestamp::GetDate(ts).month;
+    case duckdb::DatePartSpecifier::DAY: return duckdb::Timestamp::GetDate(ts).day;
+    case duckdb::DatePartSpecifier::HOUR: return duckdb::Timestamp::GetTime(ts).hour;
+    case duckdb::DatePartSpecifier::MINUTE: return duckdb::Timestamp::GetTime(ts).min;
+    case duckdb::DatePartSpecifier::SECOND: return duckdb::Timestamp::GetTime(ts).sec;
+    case duckdb::DatePartSpecifier::MILLISECONDS: return duckdb::Timestamp::GetTime(ts).msec;
+    case duckdb::DatePartSpecifier::MICROSECONDS: return duckdb::Timestamp::GetTime(ts).usec; // DuckDB timestamp_t is micros
+    // Add other parts
+    default: throw duckdb::NotImplementedException("Unsupported timestamp part for FFI EXTRACT");
+    }
+}
+
+// These need to parse part_str. A map or if-else chain.
+static duckdb::DatePartSpecifier StringToDatePartSpecifier(const char* part_str) {
+    std::string part = duckdb::StringUtil::Lower(part_str);
+    if (part == "year") return duckdb::DatePartSpecifier::YEAR;
+    if (part == "month") return duckdb::DatePartSpecifier::MONTH;
+    if (part == "day") return duckdb::DatePartSpecifier::DAY;
+    if (part == "hour") return duckdb::DatePartSpecifier::HOUR;
+    if (part == "minute") return duckdb::DatePartSpecifier::MINUTE;
+    if (part == "second") return duckdb::DatePartSpecifier::SECOND;
+    if (part == "milliseconds") return duckdb::DatePartSpecifier::MILLISECONDS;
+    if (part == "microseconds") return duckdb::DatePartSpecifier::MICROSECONDS;
+    throw duckdb::NotImplementedException("Unknown date part string for FFI EXTRACT: %s", part_str);
+}
+
+
+extern "C" DUCKDB_API int64_t duckdb_ffi_extract_from_date(int32_t date_val, const char* part_str) {
+    try {
+        duckdb::date_t date = duckdb::date_t(date_val);
+        duckdb::DatePartSpecifier specifier = StringToDatePartSpecifier(part_str);
+        return ExtractDatePart(date, specifier);
+    } catch (...) { return -1; /* Error, or find a way to signal error to Lua */ }
+}
+
+extern "C" DUCKDB_API int64_t duckdb_ffi_extract_from_timestamp(int64_t ts_val, const char* part_str) {
+    try {
+        duckdb::timestamp_t ts = duckdb::timestamp_t(ts_val);
+        duckdb::DatePartSpecifier specifier = StringToDatePartSpecifier(part_str);
+        return ExtractTimestampPart(ts, specifier);
+    } catch (...) { return -1; /* Error */ }
+}
+
+extern "C" DUCKDB_API int64_t duckdb_ffi_extract_year_from_date(int32_t date_val) {
+    try {
+        duckdb::date_t date = duckdb::date_t(date_val);
+        return duckdb::Date::ExtractYear(date);
+    } catch (...) { return -1; /* Error, or find a way to signal error to Lua */ }
+}

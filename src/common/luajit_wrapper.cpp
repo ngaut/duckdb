@@ -20,6 +20,22 @@ LuaJITStateWrapper::LuaJITStateWrapper() : L(nullptr) {
         return;
     }
     luaL_openlibs(L); // Load standard libraries (base, table, string, math, io, os, package, debug, ffi)
+
+    // Register custom C functions for FFI
+    lua_pushcfunction(L, duckdb_ffi_add_string_to_output_vector);
+    lua_setglobal(L, "duckdb_ffi_add_string_to_output_vector");
+
+    lua_pushcfunction(L, duckdb_ffi_set_string_output_null);
+    lua_setglobal(L, "duckdb_ffi_set_string_output_null");
+
+    lua_pushcfunction(L, duckdb_ffi_extract_from_date);
+    lua_setglobal(L, "duckdb_ffi_extract_from_date");
+
+    lua_pushcfunction(L, duckdb_ffi_extract_from_timestamp);
+    lua_setglobal(L, "duckdb_ffi_extract_from_timestamp");
+
+    lua_pushcfunction(L, duckdb_ffi_extract_year_from_date);
+    lua_setglobal(L, "duckdb_ffi_extract_year_from_date");
 }
 
 LuaJITStateWrapper::~LuaJITStateWrapper() {

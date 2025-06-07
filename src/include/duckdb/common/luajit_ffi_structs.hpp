@@ -48,6 +48,7 @@ struct FFIVector {
                                        // Lua might not use this directly, but C++ host can.
     // bool          is_temporary_buffer; // Flag if 'data' points to a temp buffer from temp_buffers_owner
                                        // Might be useful for debugging or complex scenarios.
+    duckdb::Vector* original_duckdb_vector; // Pointer to the original DuckDB vector, used for output FFI helpers
 };
 
 // C-style struct for string data in FFIVector when data is of type VARCHAR.
@@ -59,6 +60,13 @@ struct FFIString {
     // char prefix[4]; // Example for very short strings, not used in this PoC for simplicity
 };
 
+// C-style struct for INTERVAL data. Matches DuckDB's interval_t.
+struct FFIInterval {
+    int32_t months;
+    int32_t days;
+    int64_t micros;
+};
+
 // Conceptual helper function to populate FFIVector from a DuckDB Vector.
 // The actual implementation of such a function would require careful handling of
 // DuckDB's Vector internals, especially its UnifiedVectorFormat and ValidityMask.
@@ -68,6 +76,25 @@ struct FFIString {
 void CreateFFIVectorFromDuckDBVector(duckdb::Vector& duckdb_vec, idx_t count,
                                      duckdb::ffi::FFIVector& out_ffi_vec,
                                      std::vector<std::vector<char>>& temp_buffers_owner);
+
+
+// FFI C helper functions for writing string results back to DuckDB Vectors from Lua
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+DUCKDB_API void duckdb_ffi_add_string_to_output_vector(void* ffi_vec_ptr, idx_t row_idx, const char* str_data, uint32_t str_len);
+DUCKDB_API void duckdb_ffi_set_string_output_null(void* ffi_vec_ptr, idx_t row_idx);
+
+// FFI C helper functions for date/time operations
+DUCKDB_API int64_t duckdb_ffi_extract_from_date(int32_t date_val, const char* part_str);
+DUCKDB_API int64_t duckdb_ffi_extract_from_timestamp(int64_t ts_val, const char* part_str);
+DUCKDB_API int64_t duckdb_ffi_extract_year_from_date(int32_t date_val); // Specific for YEAR from DATE
+// Add more for interval if needed, or handle interval part extraction in Lua if simple enough
+
+#ifdef __cplusplus
+}
+#endif
 
 } // namespace ffi
 } // namespace duckdb

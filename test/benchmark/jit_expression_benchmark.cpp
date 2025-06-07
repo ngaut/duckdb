@@ -2,24 +2,30 @@
 #include "duckdb/common/luajit_ffi_structs.hpp"
 #include "duckdb/main/luajit_translator.hpp"
 #include "duckdb/main/client_context.hpp"
+#include "duckdb/main/config.hpp" // For DBConfig
 #include "duckdb/common/types/value.hpp"
-#include "duckdb/common/types/vector_operations.hpp"
+#include "duckdb/common/types/vector_operations/vector_operations.hpp"
 #include "duckdb/common/types/data_chunk.hpp"
 #include "duckdb/common/types/vector.hpp"
 #include "duckdb/planner/expression/bound_constant_expression.hpp"
 #include "duckdb/planner/expression/bound_reference_expression.hpp"
 #include "duckdb/planner/expression/bound_operator_expression.hpp"
-#include "duckdb/execution/expression_executor.hpp" // Main include for this refactor
+#include "duckdb/planner/expression/bound_function_expression.hpp"
+#include "duckdb/planner/expression/bound_case_expression.hpp"
+#include "duckdb/function/scalar_function.hpp"
+#include "duckdb/execution/expression_executor.hpp"
 #include "duckdb/common/types/string_t.hpp"
-
+#include "duckdb/common/types/date.hpp"
+#include "duckdb/common/types/timestamp.hpp"
 
 #include <vector>
 #include <string>
 #include <chrono>
 #include <iostream>
 #include <iomanip> // For std::fixed and std::setprecision
+#include <random>  // For random data
 
-// For lua_State and Lua API, typically included via luajit_wrapper.hpp's inclusions
+// For lua_State and Lua API
 extern "C" {
 #include "lua.h"
 #include "lualib.h"
@@ -35,290 +41,288 @@ static high_resolution_clock::time_point T_END;
 #define END_TIMER() T_END = high_resolution_clock::now()
 #define GET_TIMER_MS() duration_cast<duration<double, std::milli>>(T_END - T_START).count()
 
-// --- DuckDB Setup Helpers ---
-static duckdb::DuckDB g_db(nullptr); // Global DB instance for context
+// --- DuckDB Setup ---
+static duckdb::DuckDB g_db(nullptr); // Global DB instance
 
-static duckdb::unique_ptr<duckdb::ClientContext> CreateBenchContext() {
-    duckdb::Connection con(g_db);
-    return std::move(con.context); // Return unique_ptr from shared_ptr
-}
-
-// --- BoundExpression Creation Helpers (from jit_expression_executor_test.cpp) ---
+// --- BoundExpression Creation Helpers ---
 static duckdb::unique_ptr<duckdb::BoundConstantExpression> CreateBoundConstant(duckdb::Value val) {
     return duckdb::make_uniq<duckdb::BoundConstantExpression>(val);
 }
 static duckdb::unique_ptr<duckdb::BoundReferenceExpression> CreateBoundReference(duckdb::idx_t col_idx, duckdb::LogicalType type) {
     return duckdb::make_uniq<duckdb::BoundReferenceExpression>(type, col_idx);
 }
+static duckdb::unique_ptr<duckdb::BoundOperatorExpression> CreateBoundUnaryOperator(
+    duckdb::ExpressionType op_type, duckdb::unique_ptr<duckdb::Expression> child, duckdb::LogicalType return_type) {
+    std::vector<duckdb::unique_ptr<duckdb::Expression>> children;
+    children.push_back(std::move(child));
+    return duckdb::make_uniq<duckdb::BoundOperatorExpression>(op_type, return_type, std::move(children), false);
+}
 static duckdb::unique_ptr<duckdb::BoundOperatorExpression> CreateBoundBinaryOperator(
-    duckdb::ExpressionType op_type,
-    duckdb::unique_ptr<duckdb::Expression> left,
-    duckdb::unique_ptr<duckdb::Expression> right,
-    duckdb::LogicalType return_type) {
+    duckdb::ExpressionType op_type, duckdb::unique_ptr<duckdb::Expression> left, duckdb::unique_ptr<duckdb::Expression> right, duckdb::LogicalType return_type) {
     std::vector<duckdb::unique_ptr<duckdb::Expression>> children;
     children.push_back(std::move(left));
     children.push_back(std::move(right));
     return duckdb::make_uniq<duckdb::BoundOperatorExpression>(op_type, return_type, std::move(children), false);
 }
-
-// Global flag to control JIT path in ExpressionExecutor for benchmarking
-// This is a HACK for PoC. A proper config/pragma should be used.
-bool g_force_jit_path = true;
-// We need to modify ExpressionExecutor::ShouldJIT to check this flag.
-// This modification is outside this file, assumed to be done conceptually.
-// Example modification in ExpressionExecutor::ShouldJIT:
-// if (g_force_jit_path_for_benchmark_is_set && !g_force_jit_path_value) return false; // If forcing CPP
-// if (g_force_jit_path_for_benchmark_is_set && g_force_jit_path_value) return true; // If forcing JIT
+static duckdb::unique_ptr<duckdb::BoundFunctionExpression> CreateBoundFunction(
+    const std::string& func_name, std::vector<duckdb::unique_ptr<duckdb::Expression>> children, duckdb::LogicalType return_type) {
+    duckdb::ScalarFunction scalar_func(func_name, {}, return_type, nullptr);
+    return duckdb::make_uniq<duckdb::BoundFunctionExpression>(return_type, scalar_func, std::move(children), nullptr, false);
+}
+static duckdb::unique_ptr<duckdb::BoundCaseExpression> CreateBoundCase(
+    duckdb::unique_ptr<duckdb::Expression> when_expr, duckdb::unique_ptr<duckdb::Expression> then_expr, duckdb::unique_ptr<duckdb::Expression> else_expr, duckdb::LogicalType return_type) {
+    auto case_expr = duckdb::make_uniq<duckdb::BoundCaseExpression>(return_type);
+    case_expr->case_checks.emplace_back(std::move(when_expr), std::move(then_expr));
+    case_expr->else_expr = std::move(else_expr);
+    return case_expr;
+}
 
 // --- Data Generation & Chunk Setup ---
 template<typename T>
-void FillNumericVector(duckdb::Vector& vec, size_t count, bool with_nulls) {
+void FillNumericVector(duckdb::Vector& vec, size_t count, double null_pct) {
     vec.SetVectorType(duckdb::VectorType::FLAT_VECTOR);
     auto data_ptr = duckdb::FlatVector::GetData<T>(vec);
     auto& null_mask = duckdb::FlatVector::Validity(vec);
+    std::mt19937 gen(0); // Fixed seed for reproducibility
+    std::uniform_real_distribution<> dis(0.0, 1.0);
     for (size_t i = 0; i < count; ++i) {
-        data_ptr[i] = static_cast<T>(i % 1000);
-        if (with_nulls && (i % 10 == 0)) {
+        if (dis(gen) < null_pct) {
             null_mask.SetInvalid(i);
         } else {
             null_mask.SetValid(i);
+            data_ptr[i] = static_cast<T>(i % 1000 - (i % 2000 == 0 ? 500 : 0) ); // some negatives
         }
     }
 }
-
-void FillStringVector(duckdb::Vector& vec, size_t count, bool with_nulls) {
+void FillStringVector(duckdb::Vector& vec, size_t count, double null_pct, int str_len = 10) {
     vec.SetVectorType(duckdb::VectorType::FLAT_VECTOR);
     auto data_ptr = duckdb::FlatVector::GetData<duckdb::string_t>(vec);
     auto& null_mask = duckdb::FlatVector::Validity(vec);
+    std::mt19937 gen(0);
+    std::uniform_real_distribution<> dis(0.0, 1.0);
+    std::string base_str = "s_";
+    for(int k=0; k < str_len - base_str.length(); ++k) base_str += "x";
+
     for (size_t i = 0; i < count; ++i) {
-        std::string s = "s_" + std::to_string(i % 500);
-        if (with_nulls && (i % 10 == 0)) {
+        if (dis(gen) < null_pct) {
             null_mask.SetInvalid(i);
         } else {
             null_mask.SetValid(i);
-            data_ptr[i] = duckdb::StringVector::AddString(vec, s);
+            // Predictable but varied strings
+            std::string current_str = base_str + std::to_string(i % 500);
+            data_ptr[i] = duckdb::StringVector::AddString(vec, current_str);
         }
     }
+}
+static void SetupInputChunk(duckdb::DataChunk& chunk, duckdb::ClientContext& context,
+                            const std::vector<duckdb::LogicalType>& types, duckdb::idx_t count, double null_pct) {
+    chunk.Initialize(duckdb::Allocator::Get(context), types);
+    for(size_t c=0; c<types.size(); ++c) {
+        if (types[c].id() == duckdb::LogicalTypeId::INTEGER) FillNumericVector<int32_t>(chunk.data[c], count, null_pct);
+        else if (types[c].id() == duckdb::LogicalTypeId::BIGINT) FillNumericVector<int64_t>(chunk.data[c], count, null_pct);
+        else if (types[c].id() == duckdb::LogicalTypeId::DOUBLE) FillNumericVector<double>(chunk.data[c], count, null_pct);
+        else if (types[c].id() == duckdb::LogicalTypeId::VARCHAR) FillStringVector(chunk.data[c], count, null_pct);
+        else if (types[c].id() == duckdb::LogicalTypeId::DATE) FillNumericVector<duckdb::date_t>(chunk.data[c], count, null_pct);
+        else if (types[c].id() == duckdb::LogicalTypeId::TIMESTAMP) FillNumericVector<duckdb::timestamp_t>(chunk.data[c], count, null_pct);
+    }
+    chunk.SetCardinality(count);
+    chunk.Verify();
 }
 
 // --- Benchmark Scenarios ---
 struct BenchmarkResult {
     std::string scenario_name;
-    std::string data_type_str;
+    std::string data_type_str; // Type of primary input column
     size_t data_size;
-    bool has_nulls;
-    double cpp_baseline_time_ms = 0;
-    double jit_first_run_total_time_ms = 0; // Trans+Compile+Exec
-    double jit_cached_run_exec_time_ms = 0;
-    double translation_time_ms = 0; // Measured during first run
-    double compilation_time_ms = 0; // Measured during first run
+    double null_pct;
+    double cpp_baseline_ms = 0;
+    double jit_first_run_ms = 0;
+    double jit_cached_run_ms = 0;
+    // Translation and Compilation are part of First Run, but can be estimated if needed
+    // For this PoC, we focus on total first run vs cached run vs C++
 };
 std::vector<BenchmarkResult> benchmark_results_list;
 
+// Global static counter for unique JIT function names in benchmarks
+// Reset this if running multiple benchmark main() calls in one C++ execution.
+// static std::atomic<idx_t> benchmark_jit_func_idx{0};
 
-void RunScenario(duckdb::ClientContext& context,
+
+void RunScenario(duckdb::ClientContext& ctx_cpp, duckdb::ClientContext& ctx_jit, // Separate contexts
                  const std::string& scenario_name_prefix,
-                 duckdb::unique_ptr<duckdb::Expression> expr_to_test, // Pass by value for unique_ptr
+                 duckdb::unique_ptr<duckdb::Expression> expr_to_test,
                  const std::vector<duckdb::LogicalType>& input_col_types,
-                 size_t data_size, int iterations, bool with_nulls) {
+                 size_t data_size, int iterations, double null_pct) {
     using namespace duckdb;
 
     BenchmarkResult current_result;
     current_result.scenario_name = scenario_name_prefix + "_" + expr_to_test->GetName();
-    current_result.data_type_str = input_col_types[0].ToString(); // Assuming first col type is representative
+    current_result.data_type_str = input_col_types.empty() ? "N/A" : input_col_types[0].ToString();
     current_result.data_size = data_size;
-    current_result.has_nulls = with_nulls;
+    current_result.null_pct = null_pct;
 
     DataChunk input_chunk;
-    input_chunk.Initialize(Allocator::Get(context), input_col_types);
-    for(size_t c=0; c<input_col_types.size(); ++c) {
-        if (input_col_types[c].id() == LogicalTypeId::INTEGER) FillNumericVector<int32_t>(input_chunk.data[c], data_size, with_nulls);
-        else if (input_col_types[c].id() == LogicalTypeId::VARCHAR) FillStringVector(input_chunk.data[c], data_size, with_nulls);
-        // Add other types if needed for more scenarios
-    }
-    input_chunk.SetCardinality(data_size);
-    input_chunk.Verify();
-
-    Vector output_vector(expr_to_test->return_type);
+    SetupInputChunk(input_chunk, ctx_cpp, input_col_types, data_size, null_pct);
+    Vector output_vector_cpp(expr_to_test->return_type);
+    Vector output_vector_jit(expr_to_test->return_type);
 
     // --- C++ Baseline Path ---
-    // To force C++ path, we'd conceptually set g_force_jit_path = false;
-    // For PoC, assume ExpressionExecutor has a way to disable JIT for baseline,
-    // or we use a fresh executor with JIT disabled in its context.
-    // For now, we assume the global flag works for this conceptual benchmark.
-    ExpressionExecutor baseline_executor(context); // Fresh executor for baseline
-    baseline_executor.AddExpression(*expr_to_test);
-    baseline_executor.SetChunk(&input_chunk);
-    // TODO: Modify ShouldJIT to check a global/context flag to force C++ path
-    // For now, we time it, but it might take JIT path if not careful.
-    // This requires `ExpressionExecutor::ShouldJIT` to be modifiable for benchmarks.
-    // Let's assume `ShouldJIT` is currently hardcoded to return false for this run.
-    // (This part is tricky without modifying ExpressionExecutor for benchmark mode)
-    // As a workaround, if we can't modify ShouldJIT, we comment out baseline_executor.
-    // For now, this baseline is "conceptual" if it can't be forced.
-    // A true baseline would be `executor.ExecuteStandard(...)` if that were public,
-    // or a manually coded C++ loop as in the previous benchmark version.
-    // Let's revert to manual C++ loop for baseline for simplicity of this step as ShouldJIT not easily controlled.
-    if (scenario_name_prefix == "A_AddInt" && input_col_types.size() == 2) {
-        std::vector<int32_t> baseline_out_data(data_size);
-        std::vector<bool> baseline_out_nulls(data_size);
-        auto col1_data = FlatVector::GetData<int32_t>(input_chunk.data[0]);
-        auto col2_data = FlatVector::GetData<int32_t>(input_chunk.data[1]);
-        START_TIMER();
-        for(int iter=0; iter < iterations; ++iter) {
-            for(size_t i=0; i<data_size; ++i) {
-                bool n1 = FlatVector::IsNull(input_chunk.data[0], i);
-                bool n2 = FlatVector::IsNull(input_chunk.data[1], i);
-                if (n1 || n2) baseline_out_nulls[i] = true;
-                else { baseline_out_nulls[i] = false; baseline_out_data[i] = col1_data[i] + col2_data[i]; }
-            }
-        }
-        END_TIMER();
-        current_result.cpp_baseline_time_ms = GET_TIMER_MS() / iterations;
-    } else {
-        current_result.cpp_baseline_time_ms = -1.0; // Mark as not run for other scenarios for now
-    }
+    ctx_cpp.config.enable_luajit_jit = false; // Force C++ path
+    ExpressionExecutor cpp_executor(ctx_cpp);
+    cpp_executor.AddExpression(*expr_to_test);
+    cpp_executor.SetChunk(&input_chunk);
 
+    START_TIMER();
+    for (int iter = 0; iter < iterations; ++iter) {
+        cpp_executor.ExecuteExpression(0, output_vector_cpp);
+    }
+    END_TIMER();
+    current_result.cpp_baseline_ms = GET_TIMER_MS() / iterations;
 
     // --- LuaJIT Path ---
-    ExpressionExecutor jit_executor(context); // Fresh executor for JIT
-    jit_executor.AddExpression(*expr_to_test);
+    ctx_jit.config.enable_luajit_jit = true;
+    ctx_jit.config.luajit_jit_trigger_count = 0; // JIT on first call
+    ctx_jit.config.luajit_jit_complexity_threshold = 0; // JIT any complexity
+
+    ExpressionExecutor jit_executor(ctx_jit);
+    // Must add a *copy* of the expression, as state is tied to expression object
+    jit_executor.AddExpression(*expr_to_test->Copy());
     jit_executor.SetChunk(&input_chunk);
     ExpressionState* jit_expr_state = jit_executor.GetStates()[0]->root_state.get();
 
     // First Run (Compile + Exec)
-    // We need to capture translation/compilation times which happen inside ExecuteExpression first time.
-    // This requires either instrumenting ExpressionExecutor or pre-compiling here.
-    // For this PoC, let's pre-compile to measure times separately.
-
-    LuaTranslatorContext translator_ctx(input_col_types);
     START_TIMER();
-    std::string lua_row_logic = LuaTranslator::TranslateExpressionToLuaRowLogic(*expr_to_test, translator_ctx);
+    jit_executor.ExecuteExpression(0, output_vector_jit);
     END_TIMER();
-    current_result.translation_time_ms = GET_TIMER_MS();
+    current_result.jit_first_run_ms = GET_TIMER_MS();
+    REQUIRE(jit_expr_state->attempted_jit_compilation == true);
+    // We assume for benchmark that if attempted, it succeeded, or it would have thrown and test failed
+    REQUIRE(jit_expr_state->jit_compilation_succeeded == true);
 
-    std::string func_name = "bench_func_" + expr_to_test->GetName() + "_" + std::to_string(jitted_function_counter.fetch_add(1));
-    std::string full_lua_script = ConstructFullLuaFunctionScript( // Use the existing helper for this
-        func_name, lua_row_logic, translator_ctx, expr_to_test->return_type);
+    // Verify JIT output against C++ output (only once for correctness check)
+    // output_vector_cpp.Verify(data_size);
+    // output_vector_jit.Verify(data_size);
+    // for(idx_t i=0; i<data_size; ++i) {
+    //     if (FlatVector::IsNull(output_vector_cpp, i) != FlatVector::IsNull(output_vector_jit, i)) {
+    //         FAIL("Null mismatch at " << i << " for " << current_result.scenario_name);
+    //     }
+    //     if (!FlatVector::IsNull(output_vector_cpp, i)) {
+    //         // TODO: Add Value::operator== or type-specific comparison
+    //     }
+    // }
 
-    std::string compile_error;
-    START_TIMER();
-    bool compiled = jit_executor.luajit_wrapper_.CompileStringAndSetGlobal(full_lua_script, func_name, compile_error);
-    END_TIMER();
-    current_result.compilation_time_ms = GET_TIMER_MS();
 
-    if (!compiled) {
-        std::cerr << "JIT COMPILE ERROR for " << func_name << ": " << compile_error << std::endl;
-        benchmark_results_list.push_back(current_result);
-        return;
-    }
-    jit_expr_state->jitted_lua_function_name = func_name;
-    jit_expr_state->jit_compilation_succeeded = true;
-    jit_expr_state->attempted_jit_compilation = true; // Mark so ExecuteExpression uses this.
-
-    // Time first execution (which uses the now-compiled function)
-    // This is a bit redundant if CompileStringAndSetGlobal implies it's ready.
-    // The real test is how ExpressionExecutor's Execute call performs.
-    // For this benchmark, we will call the JITed function directly like in executor tests
-    // to isolate JIT execution time after it's marked as compiled.
-
-    std::vector<std::vector<char>> temp_buffers_owner;
-    ffi::FFIVector ffi_out_vec;
-    std::vector<ffi::FFIVector> ffi_input_vecs_storage(input_col_types.size());
-    std::vector<ffi::FFIVector*> ffi_input_vecs_ptrs(input_col_types.size());
-
-    CreateFFIVectorFromDuckDBVector(output_vector, data_size, ffi_out_vec, temp_buffers_owner);
-    for(size_t i=0; i<input_col_types.size(); ++i) {
-        CreateFFIVectorFromDuckDBVector(input_chunk.data[i], data_size, ffi_input_vecs_storage[i], temp_buffers_owner);
-        ffi_input_vecs_ptrs[i] = &ffi_input_vecs_storage[i];
-    }
-
-    lua_State* L = jit_executor.luajit_wrapper_.GetState();
-    std::string pcall_error;
-
+    // Subsequent Runs (Cached Execution)
     START_TIMER();
     for (int iter = 0; iter < iterations; ++iter) {
-         // output_vector needs reset if data is written in place by Lua
-        output_vector.SetVectorType(VectorType::FLAT_VECTOR);
-        FlatVector::Validity(output_vector).EnsureWritable();
-        FlatVector::SetAllValid(output_vector, data_size); // Or reset data too
-
-        if (!jit_executor.luajit_wrapper_.PCallGlobal(func_name, ffi_input_vecs_ptrs, &ffi_out_vec, data_size, pcall_error)) {
-             std::cerr << "JIT EXEC ERROR for " << func_name << " (iter " << iter << "): " << pcall_error << std::endl;
-            benchmark_results_list.push_back(current_result);
-            return;
-        }
+        jit_executor.ExecuteExpression(0, output_vector_jit);
     }
     END_TIMER();
-    current_result.jit_first_run_total_time_ms = current_result.translation_time_ms + current_result.compilation_time_ms + (GET_TIMER_MS() / iterations) ;
-    current_result.jit_cached_run_exec_time_ms = GET_TIMER_MS() / iterations; // This is effectively the cached run
+    current_result.jit_cached_run_ms = GET_TIMER_MS() / iterations;
+
+    // Translation and Compilation times are now internal to ExpressionExecutor's first call.
+    // We can't easily get them separately here without instrumenting ExpressionExecutor.
+    // For this PoC, we report FirstRunTotal and CachedRun.
+    current_result.translation_time_ms = -1; // Mark as part of FirstRun
+    current_result.compilation_time_ms = -1; // Mark as part of FirstRun
 
     benchmark_results_list.push_back(current_result);
 }
 
-
 void RunAllBenchmarks() {
     using namespace duckdb;
-    auto context = CreateBenchContext();
-    REQUIRE(context != nullptr); // Need a context for allocator in DataChunk
+    auto ctx_cpp = CreateBenchContext();
+    auto ctx_jit = CreateBenchContext();
+    REQUIRE(ctx_cpp != nullptr);
+    REQUIRE(ctx_jit != nullptr);
 
-    std::vector<size_t> data_sizes = {1000, 100000}; //, 1000000};
-    int iterations = 100;
+    std::vector<size_t> data_sizes = {10000, 1000000};
+    std::vector<double> null_percentages = {0.0, 0.5};
+    int iterations = 10;
 
     for (size_t ds : data_sizes) {
-        iterations = (ds >= 100000 ? 10 : 100); // Fewer iterations for large data
+        for (double null_pct : null_percentages) {
+            iterations = (ds >= 1000000 ? 2 : 10);
+            std::string null_tag = (null_pct > 0.0) ? "_Nulls" : "";
 
-        // Scenario A: col_int1 + col_int2
-        auto чисел_col0 = CreateBoundReference(0, LogicalType::INTEGER);
-        auto чисел_col1 = CreateBoundReference(1, LogicalType::INTEGER);
-        auto add_expr = CreateBoundBinaryOperator(ExpressionType::OPERATOR_ADD, std::move(чисел_col0), std::move(чисел_col1), LogicalType::INTEGER);
-        RunScenario(*context, "A_AddInt", std::move(add_expr), {LogicalType::INTEGER, LogicalType::INTEGER}, ds, iterations, false);
-        RunScenario(*context, "A_AddInt_Nulls", std::move(add_expr), {LogicalType::INTEGER, LogicalType::INTEGER}, ds, iterations, true);
+            // Numeric: col_int1 + col_int2
+            RunScenario(*ctx_cpp, *ctx_jit, "A_AddInt" + null_tag,
+                        CreateBoundBinaryOperator(ExpressionType::OPERATOR_ADD,
+                            CreateBoundReference(0, LogicalType::INTEGER),
+                            CreateBoundReference(1, LogicalType::INTEGER), LogicalType::INTEGER),
+                        {LogicalType::INTEGER, LogicalType::INTEGER}, ds, iterations, null_pct);
 
+            // Numeric: col_int1 * 10
+            RunScenario(*ctx_cpp, *ctx_jit, "C_MulConstInt" + null_tag,
+                        CreateBoundBinaryOperator(ExpressionType::OPERATOR_MULTIPLY,
+                            CreateBoundReference(0, LogicalType::INTEGER),
+                            CreateBoundConstant(Value::INTEGER(10)), LogicalType::INTEGER),
+                        {LogicalType::INTEGER}, ds, iterations, null_pct);
 
-        // Scenario B: col_int1 > col_int2
-        auto gt_col0 = CreateBoundReference(0, LogicalType::INTEGER);
-        auto gt_col1 = CreateBoundReference(1, LogicalType::INTEGER);
-        auto gt_expr = CreateBoundBinaryOperator(ExpressionType::COMPARE_GREATERTHAN, std::move(gt_col0), std::move(gt_col1), LogicalType::BOOLEAN);
-        RunScenario(*context, "B_GtInt", std::move(gt_expr), {LogicalType::INTEGER, LogicalType::INTEGER}, ds, iterations, false);
+            // String: col_str1 == col_str2
+            RunScenario(*ctx_cpp, *ctx_jit, "D_StrEq" + null_tag,
+                        CreateBoundBinaryOperator(ExpressionType::COMPARE_EQUAL,
+                            CreateBoundReference(0, LogicalType::VARCHAR),
+                            CreateBoundReference(1, LogicalType::VARCHAR), LogicalType::BOOLEAN),
+                        {LogicalType::VARCHAR, LogicalType::VARCHAR}, ds, iterations, null_pct);
 
-        // Scenario C: col_int1 * 10
-        auto mul_col0 = CreateBoundReference(0, LogicalType::INTEGER);
-        auto mul_const10 = CreateBoundConstant(Value::INTEGER(10));
-        auto mul_expr = CreateBoundBinaryOperator(ExpressionType::OPERATOR_MULTIPLY, std::move(mul_col0), std::move(mul_const10), LogicalType::INTEGER);
-        RunScenario(*context, "C_MulConstInt", std::move(mul_expr), {LogicalType::INTEGER}, ds, iterations, false);
+            // String: LOWER(col_str1)
+            std::vector<unique_ptr<Expression>> lower_children;
+            lower_children.push_back(CreateBoundReference(0, LogicalType::VARCHAR));
+            RunScenario(*ctx_cpp, *ctx_jit, "E_LowerStr" + null_tag,
+                        CreateBoundFunction("lower", std::move(lower_children), LogicalType::VARCHAR),
+                        {LogicalType::VARCHAR}, ds, iterations, null_pct);
 
-        // Scenario D: String Comparison col_str1 == col_str2
-        // Output is boolean. String inputs.
-        auto str_eq_col0 = CreateBoundReference(0, LogicalType::VARCHAR);
-        auto str_eq_col1 = CreateBoundReference(1, LogicalType::VARCHAR);
-        auto str_eq_expr = CreateBoundBinaryOperator(ExpressionType::COMPARE_EQUAL, std::move(str_eq_col0), std::move(str_eq_col1), LogicalType::BOOLEAN);
-        RunScenario(*context, "D_StrEq", std::move(str_eq_expr), {LogicalType::VARCHAR, LogicalType::VARCHAR}, ds, iterations, false);
-        RunScenario(*context, "D_StrEq_Nulls", std::move(str_eq_expr), {LogicalType::VARCHAR, LogicalType::VARCHAR}, ds, iterations, true);
+            // Logical: col_int1 IS NULL
+            RunScenario(*ctx_cpp, *ctx_jit, "F_IsNotNullInt" + null_tag, // Note: IS NOT NULL for variety
+                        CreateBoundUnaryOperator(ExpressionType::OPERATOR_IS_NOT_NULL,
+                            CreateBoundReference(0, LogicalType::INTEGER), LogicalType::BOOLEAN),
+                        {LogicalType::INTEGER}, ds, iterations, null_pct);
 
+            // Conditional: CASE WHEN col_int1 > 10 THEN col_int2 ELSE col_int1 * 2 END
+            // Output type of this CASE is INTEGER.
+            auto case_expr = CreateBoundCase(
+                CreateBoundBinaryOperator(ExpressionType::COMPARE_GREATERTHAN, CreateBoundReference(0, LogicalType::INTEGER), CreateBoundConstant(Value::INTEGER(10)), LogicalType::BOOLEAN),
+                CreateBoundReference(1, LogicalType::INTEGER), // then col_int2
+                CreateBoundBinaryOperator(ExpressionType::OPERATOR_MULTIPLY, CreateBoundReference(0, LogicalType::INTEGER), CreateBoundConstant(Value::INTEGER(2)), LogicalType::INTEGER), // else col_int1 * 2
+                LogicalType::INTEGER);
+            RunScenario(*ctx_cpp, *ctx_jit, "G_CaseInt" + null_tag,
+                        std::move(case_expr),
+                        {LogicalType::INTEGER, LogicalType::INTEGER}, ds, iterations, null_pct);
+        }
     }
 
-    // Print results
-    std::cout << "\n--- LuaJIT Expression Benchmark Results ---\n";
+    std::cout << "\n--- LuaJIT Expression Benchmark Results (DuckDB ExpressionExecutor) ---\n";
     std::cout << std::fixed << std::setprecision(3);
-    std::cout << "Scenario,DataType,DataSize,HasNulls,CppBaseline_ms,JIT_FirstRunTotal_ms,JIT_CachedExec_ms,Translate_ms,Compile_ms\n";
+    std::cout << "Scenario,DataType,DataSize,NullPct,CppBaseline_ms,JIT_FirstRun_ms,JIT_CachedExec_ms,TranslateOnce_ms,CompileOnce_ms\n";
     for (const auto& r : benchmark_results_list) {
         std::cout << r.scenario_name << ","
                   << r.data_type_str << ","
                   << r.data_size << ","
-                  << (r.has_nulls ? "Y" : "N") << ","
-                  << r.cpp_baseline_time_ms << ","
-                  << r.jit_first_run_total_time_ms << ","
-                  << r.jit_cached_run_exec_time_ms << ","
-                  << r.translation_time_ms << ","
-                  << r.compilation_time_ms << "\n";
+                  << r.null_pct << ","
+                  << r.cpp_baseline_ms << ","
+                  << r.jit_first_run_ms << ","
+                  << r.jit_cached_run_ms << ","
+                  << r.translation_time_ms << "," // Will be -1 for now
+                  << r.compilation_time_ms << "\n"; // Will be -1 for now
     }
 }
 
 int main() {
-    std::cout << "Running LuaJIT Expression Benchmarks (using ExpressionExecutor conceptually)..." << std::endl;
+    std::cout << "Running LuaJIT Expression Benchmarks with ExpressionExecutor..." << std::endl;
     RunAllBenchmarks();
     std::cout << "Benchmarks finished." << std::endl;
     return 0;
 }
+
+// Conceptual change for ExpressionExecutor::ShouldJIT for benchmarking:
+// Add a global bool like `g_benchmark_force_cpp_path = false;`
+// In ShouldJIT:
+// if (g_benchmark_force_cpp_path) return false; // At the very top to force C++
+// ... rest of ShouldJIT ...
+// To set this from test:
+// duckdb::ClientConfig::Get(context).options.enable_luajit_jit = false; // For baseline
+// duckdb::ClientConfig::Get(context).options.enable_luajit_jit = true; // For JIT run
+// duckdb::ClientConfig::Get(context).options.luajit_jit_trigger_count = 0;
+// duckdb::ClientConfig::Get(context).options.luajit_jit_complexity_threshold = 0;
 ```

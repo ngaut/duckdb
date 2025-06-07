@@ -13,7 +13,8 @@ class Expression; // DuckDB's base class for bound expressions
 class BoundConstantExpression;
 class BoundReferenceExpression;
 class BoundOperatorExpression;
-// Add other BoundExpression subtypes as needed (e.g., BoundFunctionExpression, BoundCaseExpression)
+class BoundFunctionExpression; // Forward declare
+class BoundCaseExpression;   // Forward declare
 }
 
 
@@ -51,10 +52,9 @@ private:
     static std::string GenerateValue(const BoundConstantExpression& expr, LuaTranslatorContext& ctx, std::vector<column_binding>& referenced_columns);
     static std::string GenerateValue(const BoundReferenceExpression& expr, LuaTranslatorContext& ctx, std::vector<column_binding>& referenced_columns);
     static std::string GenerateValue(const BoundOperatorExpression& expr, LuaTranslatorContext& ctx, std::vector<column_binding>& referenced_columns);
-    // Add new overloads for other BoundExpression types as they are supported:
-    // static std::string GenerateValue(const BoundFunctionExpression& expr, LuaTranslatorContext& ctx, std::vector<column_binding>& referenced_columns);
-    // static std::string GenerateValue(const BoundCaseExpression& expr, LuaTranslatorContext& ctx, std::vector<column_binding>& referenced_columns);
-    // static std::string GenerateValue(const BoundConjunctionExpression& expr, LuaTranslatorContext& ctx, std::vector<column_binding>& referenced_columns);
+    static std::string GenerateValue(const BoundFunctionExpression& expr, LuaTranslatorContext& ctx, std::vector<column_binding>& referenced_columns); // Added
+    static std::string GenerateValue(const BoundCaseExpression& expr, LuaTranslatorContext& ctx, std::vector<column_binding>& referenced_columns);       // Added
+    // static std::string GenerateValue(const BoundConjunctionExpression& expr, LuaTranslatorContext& ctx, std::vector<column_binding>& referenced_columns); // For AND/OR if not ops
 };
 
 } // namespace duckdb
