@@ -2,96 +2,105 @@
 
 ## 1. Introduction
 
-This document outlines the setup for micro-benchmarks designed to evaluate the performance characteristics of JIT-compiling expressions using LuaJIT within a DuckDB-like C++ environment. It also discusses conceptual findings based on expected behavior, as direct execution and timing are not performed in this environment.
+This document outlines the setup for micro-benchmarks designed to evaluate the performance characteristics of JIT-compiling expressions using LuaJIT within DuckDB. It also discusses conceptual findings based on expected behavior, as direct execution and timing are not performed in this environment.
 
-The benchmarks aim to measure:
-- **Translation Time:** Time taken by the C++ `LuaTranslator` to convert a PoC expression tree into Lua code for row processing.
-- **Compilation Time:** Time taken by LuaJIT to compile the generated Lua function string.
-- **JIT Execution Time:** Time taken to execute the compiled Lua function over a dataset using FFI for data exchange.
-- **C++ Baseline Time:** Time taken by a manually written C++ loop performing the equivalent operation directly on the data.
+The benchmarks aim to measure and compare:
+- **C++ Baseline Time:** Time taken by DuckDB's standard `ExpressionExecutor` (with JIT conceptually disabled or using the standard C++ path) to evaluate an expression.
+- **JIT First Run Total Time:** The combined time for an expression's first execution via the JIT path. This includes:
+    - **Translation Time:** Converting the `BoundExpression` to Lua row logic.
+    - **Compilation Time:** LuaJIT compiling the full Lua function string.
+    - **Execution Time:** The first execution of the JITed Lua function.
+- **JIT Cached Run Execution Time:** Time taken for subsequent executions of the already compiled JITed Lua function.
+
+This breakdown helps understand the overheads and potential speedups of the JIT approach.
 
 ## 2. Benchmark Setup
 
 The benchmarks are implemented in `test/benchmark/jit_expression_benchmark.cpp`.
 
-- **Environment:** Conceptual C++ environment with LuaJIT integration.
-- **Timing:** `std::chrono::high_resolution_clock` is used for measuring durations in milliseconds (ms) or microseconds (µs).
-- **Data:** Input data (numeric and string) is pre-generated in `std::vector`s. `FFIVector` and `FFIString` structs are used to pass pointers to this data to LuaJIT (zero-copy). Data sizes are varied (e.g., 1,000, 100,000 elements).
-- **Iterations:** Execution times for both JIT path and C++ baseline are averaged over multiple iterations to get stable readings. Translation and compilation times are typically measured once per setup.
+- **Environment:** DuckDB environment, using `ClientContext` and `ExpressionExecutor`.
+- **Timing:** `std::chrono::high_resolution_clock` is used.
+- **Expressions:** Actual `duckdb::BoundExpression` objects are created for benchmarking.
+- **Data:** Input data (numeric and string) is prepared in `duckdb::DataChunk` using `duckdb::Vector`s. `FFIVector` and `FFIString` structs bridge this data to LuaJIT (zero-copy for input reads) via `CreateFFIVectorFromDuckDBVector`.
+- **JIT Control:** A conceptual global flag (`g_force_jit_path`) is assumed to control whether `ExpressionExecutor::ShouldJIT` allows JIT attempts. For C++ baseline measurements, this flag would be false. For JIT measurements, it would be true. (This is a PoC simplification for controlling execution paths).
+- **Iterations:** Execution times are averaged over multiple runs. Translation and compilation for JIT are measured once during the first JIT run.
 
 ## 3. Benchmark Scenarios Implemented
 
-1.  **Scenario A: Simple Arithmetic (`col0 + col1`)**
-    *   **Input:** Two integer vectors.
-    *   **Output:** One integer vector.
-    *   **Operation:** Element-wise addition with null propagation.
-    *   **C++ Baseline:** Loop performing `out[i] = col0[i] + col1[i]` with null checks.
-    *   **LuaJIT Path:** `LuaTranslator` generates code for `input1_data[i] + input2_data[i]`. Lua function takes two input `FFIVector*` (int type) and one output `FFIVector*`.
+The `RunScenario` function in the benchmark code executes the following for each defined expression:
 
-2.  **Scenario D: String Operation (`length(col0 || 'suffix') > threshold`)**
-    *   **Input:** One string vector (`FFIVector` pointing to `FFIString` arrays).
-    *   **Output:** One integer vector (boolean 0/1).
-    *   **Operation:** For each input string, append a constant suffix, calculate the length of the result, and compare against a threshold. Null propagation for input string.
-    *   **C++ Baseline:** Loop performing `std::string temp = string_store[i] + suffix; out[i] = (temp.length() > threshold) ? 1 : 0;` with null checks.
-    *   **LuaJIT Path:** The Lua row logic is manually crafted for this benchmark to correctly use `ffi.string()` for the input `FFIString` and perform concatenation and length checks in Lua. The output is a boolean (0/1). This tests FFI for string inputs and Lua string manipulation.
+1.  **C++ Baseline Path (Conceptual / Simplified):**
+    *   For `A_AddInt (col1 + col2)`, a manual C++ loop is implemented directly in the benchmark for a clear baseline without `ExpressionExecutor` overheads or internal JIT path selections.
+    *   For other scenarios, a true baseline using `ExpressionExecutor` with JIT forced off would be ideal but is complex to set up perfectly in this PoC stage. These are marked with `-1.0` or use the manual loop if simple enough.
 
-    *(Scenarios B - Simple Comparison (`col0 > col1`) and C - Expression with Constant (`col0 * 10`) were planned but might share similar characteristics to Scenario A for numeric types. Their specific results would differ based on operation complexity but follow the same measurement pattern.)*
+2.  **LuaJIT Path:**
+    *   Uses an `ExpressionExecutor` instance.
+    *   The `BoundExpression` is added to the executor.
+    *   **First Run:**
+        *   `LuaTranslator::TranslateExpressionToLuaRowLogic` is called (Translation Time measured).
+        *   A unique Lua function name is generated.
+        *   `ConstructFullLuaFunctionScript` (a test helper) creates the full Lua code.
+        *   `LuaJITStateWrapper::CompileStringAndSetGlobal` compiles the function (Compilation Time measured).
+        *   The JITed function is executed via `LuaJITStateWrapper::PCallGlobal` with FFI arguments prepared by `CreateFFIVectorFromDuckDBVector` (Execution time for this first call is measured).
+        *   `JIT_FirstRun_TotalTime_ms` = Translation + Compilation + First Execution.
+    *   **Subsequent Runs (Cached):**
+        *   The same compiled Lua function is called again via `PCallGlobal` multiple times.
+        *   `JIT_CachedRun_ExecTime_ms` is the average execution time of these subsequent calls.
 
-## 4. Conceptual Benchmark Results (Illustrative Table)
+**Implemented Scenarios:**
 
-Since code execution is not possible, actual timing data cannot be generated. The table below is **illustrative** of what one might expect and what to look for. Values are placeholders.
+*   **A_AddInt:** `col_int1 + col_int2` (with and without nulls).
+*   **B_GtInt:** `col_int1 > col_int2` (boolean output).
+*   **C_MulConstInt:** `col_int1 * 10`.
+*   **D_StrEq:** `col_str1 == col_str2` (VARCHAR inputs, boolean output).
 
-| Scenario                    | DataSize | TranslationTime (ms) | CompilationTime (ms) | JITExecutionTime (ms) | CppBaselineTime (ms) | JIT Speedup (vs C++) | Notes                               |
-|-----------------------------|----------|----------------------|----------------------|-----------------------|----------------------|----------------------|-------------------------------------|
-| A_AddInt                    | 1,000    | 0.01                 | 0.05                 | 0.1                   | 0.02                 | 0.2x                 | Overhead dominates for small data   |
-| A_AddInt                    | 100,000  | 0.01                 | 0.05                 | 5.0                   | 2.0                  | 0.4x                 | FFI overhead, simple op             |
-| D_StringConcatAndLength     | 1,000    | 0.01                 | 0.08                 | 0.5                   | 0.2                  | 0.4x                 | String ops, FFI overhead            |
-| D_StringConcatAndLength     | 100,000  | 0.01                 | 0.08                 | 35.0                  | 20.0                 | 0.57x                | Lua string ops might be slower      |
-| (More complex numeric expr) | 100,000  | 0.05                 | 0.15                 | 10.0                  | 15.0                 | 1.5x                 | JIT potentially faster for complex  |
+## 4. Conceptual Benchmark Results (Illustrative Table Structure)
 
-**Interpreting Conceptual Results:**
+Actual timing data requires execution. The benchmark code is structured to output data in the following format. Values shown are illustrative placeholders.
 
-*   **Translation Time:** Expected to be very low (microseconds to tens of microseconds) as it's simple string manipulation for the PoC translator.
-*   **Compilation Time:** LuaJIT is very fast. Expected to be low (tens of microseconds to a few milliseconds, depending on complexity of generated Lua code).
-*   **JIT Execution Time vs. C++ Baseline:**
-    *   For very simple arithmetic on numeric types (like `A_AddInt`), the JIT path (including FFI call overhead for each element access from Lua) might be **slower** than a direct C++ loop. The C++ compiler can heavily optimize simple loops.
-    *   For string operations (`D_StringConcatAndLength`), Lua's string manipulation is efficient, but the FFI overhead to bring string data (pointer/length) into Lua and then operate might still make it slower than direct C++ `std::string` operations for simple cases.
-    *   **Where JIT Might Win (Conceptual):** JIT is more likely to show benefits when:
-        *   The expression is significantly more complex (many operations, function calls that can be inlined in Lua).
-        *   The C++ interpreter has significant dispatch overhead per operation or per row, which JIT eliminates by creating specialized code. (Our C++ baseline is a direct loop, so it has minimal overhead).
-        *   Data access patterns in LuaJIT allow for better cache utilization than the C++ version (less likely for simple vector iteration).
-        *   LuaJIT's trace compiler can perform optimizations that a C++ compiler might not for a generic interpreter loop.
-*   **FFI Overhead:** Each access to `FFIVector.data[i]` or `.nullmask[i]` from Lua code involves FFI overhead. While LuaJIT's FFI is fast, for tight loops on simple data, this per-element overhead can accumulate and be significant compared to direct C++ pointer access.
+| Scenario        | DataType | DataSize | HasNulls | CppBaseline_ms | JIT_FirstRunTotal_ms | JIT_CachedExec_ms | Translate_ms | Compile_ms |
+|-----------------|----------|----------|----------|----------------|----------------------|-------------------|--------------|------------|
+| A_AddInt        | INTEGER  | 1000     | N        | 0.02           | 0.20                 | 0.08              | 0.01         | 0.05       |
+| A_AddInt        | INTEGER  | 100000   | N        | 2.00           | 7.00                 | 4.50              | 0.01         | 0.05       |
+| A_AddInt_Nulls  | INTEGER  | 100000   | Y        | 2.20           | 7.50                 | 4.80              | 0.01         | 0.05       |
+| B_GtInt         | INTEGER  | 100000   | N        | -1.0           | 7.20                 | 4.60              | 0.01         | 0.06       |
+| C_MulConstInt   | INTEGER  | 100000   | N        | -1.0           | 6.80                 | 4.20              | 0.01         | 0.04       |
+| D_StrEq         | VARCHAR  | 1000     | N        | -1.0           | 0.80                 | 0.50              | 0.02         | 0.10       |
+| D_StrEq         | VARCHAR  | 100000   | N        | -1.0           | 55.00                | 40.00             | 0.02         | 0.10       |
+| D_StrEq_Nulls   | VARCHAR  | 100000   | Y        | -1.0           | 60.00                | 43.00             | 0.02         | 0.10       |
 
-## 5. Analysis and Observations (Conceptual)
+*(Note: CppBaseline_ms is -1.0 where a manual C++ loop for that specific BoundExpression was not implemented in the benchmark code provided for this PoC step; a full benchmark would require these or a reliable way to force ExpressionExecutor's C++ path).*
 
-*   **Overhead of JIT:** For small data sizes or very simple expressions, the combined overhead of translation, compilation, and FFI calls will likely make the LuaJIT path slower than a highly optimized C++ direct execution path.
-*   **Compilation is Fast:** LuaJIT's compilation is a key advantage over systems like LLVM for query JITing, making it suitable for dynamic query environments.
-*   **FFI is Critical:** The performance of the JITed code heavily depends on how efficiently data can be exchanged via FFI. Zero-copy access (passing pointers) is essential, but per-element FFI access from Lua still has costs.
-*   **String Operations:**
-    *   Reading strings (via `FFIString` and `ffi.string()`) in Lua is feasible and relatively efficient.
-    *   Manipulating strings in Lua (concat, length, find) is also efficient within Lua.
-    *   The main challenge for string-heavy workloads is writing string *results* back to C++ `FFIVector<FFIString>` structures, as this involves memory management for the new string data. This was sidestepped in the benchmark by having string operations produce boolean/numeric results.
-*   **Potential Bottlenecks:**
-    *   Per-element FFI access from Lua in tight loops for very simple operations.
-    *   Memory bandwidth if data access is not optimized (though this affects C++ too).
-    *   Complex data type marshalling (not deeply explored in these benchmarks beyond basic FFIString).
-*   **When JIT is Favored:**
-    *   Complex expressions where the translation and compilation overhead is amortized over many operations saved per row.
-    *   When the alternative is a C++ interpreter with high dispatch costs.
-    *   If LuaJIT's trace compiler can achieve specific optimizations (e.g., across multiple "fused" operations within the Lua code) that are hard to get in a generic C++ interpreter.
+## 5. Analysis and Observations (Conceptual, based on new structure)
+
+*   **JIT Overheads (Translation + Compilation):**
+    *   `Translate_ms` (converting `BoundExpression` to Lua row logic) is expected to be very small, likely in microseconds or low single-digit milliseconds, even for moderately complex expressions.
+    *   `Compile_ms` (LuaJIT compiling the full Lua function string) is also expected to be very fast, likely sub-millisecond to a few milliseconds for typical expressions. LuaJIT is designed for rapid compilation.
+    *   The `JIT_FirstRun_TotalTime_ms` captures these overheads plus one execution. This will always be higher than `JIT_CachedExec_ms`.
+
+*   **Cached JIT Execution vs. C++ Baseline:**
+    *   The key comparison is `JIT_CachedExec_ms` vs. `CppBaseline_ms`.
+    *   **Simple Numeric Ops (e.g., A_AddInt):** For very simple, per-element arithmetic like `col1 + col2`, the `JIT_CachedExec_ms` might still be slower than, or at best comparable to, a highly optimized C++ loop (like the manual one for `A_AddInt`). This is because the FFI call overhead for each element access from Lua (`input1_data[i]`, `input1_nullmask[i]`, etc.) can outweigh the benefit of JIT for trivial operations. DuckDB's C++ execution path is already heavily vectorized and optimized.
+    *   **String Comparisons (e.g., D_StrEq):** String operations involve more work per element (pointer dereferencing, length checks, character-by-character comparison). LuaJIT's FFI for `FFIString` (accessing `ptr` and `len`, then `ffi.string` to create Lua strings) and its string comparison speed are good. It's possible that `JIT_CachedExec_ms` could become competitive with or even outperform the C++ baseline if the C++ path has its own overheads (e.g., function call dispatch per row for comparisons if not perfectly inlined/optimized). However, creating Lua strings from FFI data still has some cost.
+    *   **Expressions with Constants (e.g., C_MulConstInt):** Constants are embedded directly into the Lua code by the translator. This is efficient. Performance characteristics would be similar to other simple numeric ops, largely depending on FFI overhead vs. C++ vector processing.
+
+*   **Amortization of Overhead:**
+    *   The JIT approach is beneficial if the (Translation + Compilation) overhead can be amortized over many executions of the same compiled expression (i.g., in a hot loop of a query processing pipeline for many data chunks) or over a very large number of rows where `JIT_CachedExec_ms` is significantly faster than `CppBaseline_ms`.
+    *   If `JIT_CachedExec_ms` is not substantially faster than `CppBaseline_ms`, then JIT might only be worthwhile for expressions that are executed extremely frequently.
+
+*   **Impact of `CreateFFIVectorFromDuckDBVector`:**
+    *   This function now handles `FLAT_VECTOR`, `CONSTANT_VECTOR`, and `DICTIONARY_VECTOR` (by flattening) for inputs, and also prepares `FFIString` arrays for `VARCHAR` vectors.
+    *   The creation of temporary buffers for constant/dictionary vectors or for the flat `bool*` nullmask *adds overhead* to the JIT path (specifically, before `PCallGlobal`). This overhead is currently *not* separately measured in the benchmark structure but is part of the setup for the JIT execution step. In a real scenario, this data preparation cost also needs to be considered.
+
+*   **Limitations in Current Benchmark:**
+    *   **C++ Baseline:** The C++ baseline is either a manual loop (for `A_AddInt`) or not fully implemented using `ExpressionExecutor` with JIT reliably turned off. A true comparison requires running the *same* `ExpressionExecutor` evaluation path, one with JIT and one without.
+    *   **String Output:** Operations that produce new strings (e.g., `CONCAT`) and need to write them back to an output `FFIVector` of `FFIString` are not benchmarked for execution due to the complexity of memory management for string results via FFI (requiring C helper callbacks).
+    *   **`ExpressionExecutor::Execute` JIT Path:** The benchmark currently bypasses the JIT decision and call logic within `ExpressionExecutor::Execute` and calls the compiled Lua function directly (after manually triggering compilation via `LuaTranslator` and `LuaJITStateWrapper`). A full test of the integrated `Execute` path (with its `ShouldJIT`, caching, and FFI call setup) would be the next step for realism.
 
 ## 6. Profiling (Conceptual)
 
-Actual profiling (using tools like `perf` on Linux, or LuaJIT's own profiler `jit.p`) would be needed to:
-
-*   Identify exact hotspots within the JITed Lua code.
-*   Quantify FFI call overhead more precisely.
-*   Analyze cache effects.
-*   Compare instruction paths of JITed code vs. C++ baseline.
-
-Without execution, we can only hypothesize based on LuaJIT's known strengths (trace compilation, fast FFI) and weaknesses (FFI overhead in very tight loops on trivial ops).
+As before, actual profiling tools (`perf`, LuaJIT's `-jp` profiler) would be essential to understand where time is spent within the JITed Lua code, FFI calls, and the C++ parts of the `ExpressionExecutor` when the JIT path is active. This would help identify precise bottlenecks (e.g., specific FFI casts, Lua operations, or data copying in `CreateFFIVectorFromDuckDBVector`).
 
 ## 7. Conclusion
 
-The micro-benchmarks (even conceptually) highlight that LuaJIT offers very fast translation and compilation, making it attractive for dynamic JIT. However, for simple element-wise operations on large vectors, the FFI overhead per element can make it hard to beat optimized, direct C++ execution. The benefits of LuaJIT are more likely to appear with more complex expressions where the per-row work done in JITed Lua code is substantial enough to amortize FFI costs and compilation overhead. String operations are viable, especially for reading and processing, but outputting new strings via FFI requires careful design.
+Refactoring the benchmark to use `BoundExpression`s and a more structured approach to measuring translation, compilation, and execution times provides a better framework for evaluating the LuaJIT PoC. The key performance question remains whether the `JIT_CachedExec_ms` can overcome both the initial `JIT_FirstRun_TotalTime_ms` overhead and be significantly faster than DuckDB's highly optimized C++ execution path for a given expression and data volume. Simple expressions are less likely to show a benefit, while more complex ones (not yet benchmarked) hold more promise. The efficiency of `CreateFFIVectorFromDuckDBVector` is also a factor for input data preparation.

@@ -1,19 +1,20 @@
 #include "catch.hpp"
 #include "duckdb/main/luajit_translator.hpp"
-#include "duckdb/planner/luajit_expression_nodes.hpp" // Using the PoC expression nodes
+// Replace PoC expression nodes with actual DuckDB BoundExpression headers
+#include "duckdb/planner/expression/bound_constant_expression.hpp"
+#include "duckdb/planner/expression/bound_reference_expression.hpp"
+#include "duckdb/planner/expression/bound_operator_expression.hpp"
+#include "duckdb/common/types.hpp" // For LogicalType, Value
 #include <string>
 #include <iostream>
+#include <vector>
 
 // Helper to create the full Lua function string for testing purposes.
-// The LuaTranslator::TranslateExpressionToLuaRowLogic only generates the body for one row.
-// This helper wraps it in a loop and function signature for standalone testing/validation.
+// (This can remain largely the same, as it wraps the row_logic string)
 std::string WrapInLuaFunction(const std::string& row_logic, int num_inputs) {
     std::stringstream ss;
     ss << "function generated_lua_expr_func(output_vector, count, input_vectors)\n";
-    // It's good practice to make ffi local if not already global from a previous script
-    // ss << "  local ffi = require('ffi')\n";
     ss << "  for i = 0, count - 1 do\n";
-    // Indent row_logic for readability
     std::string line;
     std::stringstream row_logic_ss(row_logic);
     while (std::getline(row_logic_ss, line)) {
@@ -24,56 +25,71 @@ std::string WrapInLuaFunction(const std::string& row_logic, int num_inputs) {
     return ss.str();
 }
 
+// --- Helper functions to create DuckDB BoundExpression instances for testing ---
+// These are simplified and might not cover all aspects of real bound expressions.
+duckdb::unique_ptr<duckdb::BoundConstantExpression> CreateBoundConstant(duckdb::Value val) {
+    return duckdb::make_uniq<duckdb::BoundConstantExpression>(val);
+}
 
-TEST_CASE("LuaTranslator Tests for Basic Expressions", "[luajit][translator]") {
+duckdb::unique_ptr<duckdb::BoundReferenceExpression> CreateBoundReference(duckdb::idx_t col_idx, duckdb::LogicalType type) {
+    // BoundReferenceExpression constructor: (type, col_idx) or (alias, type, col_idx)
+    return duckdb::make_uniq<duckdb::BoundReferenceExpression>(type, col_idx);
+}
+
+duckdb::unique_ptr<duckdb::BoundOperatorExpression> CreateBoundBinaryOperator(
+    duckdb::ExpressionType op_type,
+    duckdb::unique_ptr<duckdb::Expression> left,
+    duckdb::unique_ptr<duckdb::Expression> right,
+    duckdb::LogicalType return_type) {
+
+    std::vector<duckdb::unique_ptr<duckdb::Expression>> children;
+    children.push_back(std::move(left));
+    children.push_back(std::move(right));
+    return duckdb::make_uniq<duckdb::BoundOperatorExpression>(op_type, return_type, std::move(children), false /*is_operator_prefix - not relevant for binary*/);
+}
+
+
+TEST_CASE("LuaTranslator Tests with DuckDB BoundExpressions (Numeric)", "[luajit][translator][bound]") {
     using namespace duckdb;
 
-    // Context for 2 input vectors
-    LuaTranslatorContext ctx(2);
-    LuaTranslatorContext ctx_one_input(1);
-    LuaTranslatorContext ctx_three_inputs(3);
+    // Context for input types
+    std::vector<LogicalType> two_int_inputs = {LogicalType::INTEGER, LogicalType::INTEGER};
+    std::vector<LogicalType> one_int_input = {LogicalType::INTEGER};
+    std::vector<LogicalType> three_int_inputs = {LogicalType::INTEGER, LogicalType::INTEGER, LogicalType::INTEGER};
 
+    LuaTranslatorContext ctx_two_ints(two_int_inputs);
+    LuaTranslatorContext ctx_one_int(one_int_input);
+    LuaTranslatorContext ctx_three_ints(three_int_inputs);
 
-    SECTION("Translate Constant Integer") {
-        auto const_expr = MakeLuaConstant(42);
-        std::string lua_row_logic = LuaTranslator::TranslateExpressionToLuaRowLogic(*const_expr, ctx);
+    SECTION("Translate BoundConstantExpression (Integer)") {
+        auto const_expr = CreateBoundConstant(Value::INTEGER(42));
+        std::string lua_row_logic = LuaTranslator::TranslateExpressionToLuaRowLogic(*const_expr, ctx_one_int); // Context not strictly needed for const
 
-        // Expected: assigns constant, never null
-        // output_vector.nullmask[i] = false
-        // output_vector.data[i] = 42
-        // Note: TranslateExpressionToLuaRowLogic handles the if/else for comparisons. For constants, it's simpler.
-        // Let's check the output directly.
         std::string expected_lua =
 R"(output_vector.nullmask[i] = false
 output_vector.data[i] = 42)";
         REQUIRE(lua_row_logic == expected_lua);
-        INFO("Generated Lua for '42':\n" << WrapInLuaFunction(lua_row_logic, 0));
+        INFO("Generated Lua for BoundConstant(42):\n" << WrapInLuaFunction(lua_row_logic, 0));
     }
 
-    SECTION("Translate Constant Double") {
-        auto const_expr = MakeLuaConstant(3.14);
-        std::string lua_row_logic = LuaTranslator::TranslateExpressionToLuaRowLogic(*const_expr, ctx);
-        // std::to_string for double can have trailing zeros. Be mindful in comparison.
-        // For this test, we assume default std::to_string behavior is acceptable.
-        std::string expected_value_str = std::to_string(3.14);
+    SECTION("Translate BoundConstantExpression (Double)") {
+        auto const_expr = CreateBoundConstant(Value::DOUBLE(3.14));
+        std::string lua_row_logic = LuaTranslator::TranslateExpressionToLuaRowLogic(*const_expr, ctx_one_int);
+        std::string expected_val_str = std::to_string(3.14); // Default double to string
         std::string expected_lua =
 R"(output_vector.nullmask[i] = false
-output_vector.data[i] = )" + expected_value_str;
+output_vector.data[i] = )" + expected_val_str;
         REQUIRE(lua_row_logic == expected_lua);
-        INFO("Generated Lua for '3.14':\n" << WrapInLuaFunction(lua_row_logic, 0));
     }
 
-    SECTION("Translate Column Reference") {
-        auto col_ref_expr = MakeLuaColumnRef(0); // col_0
-        std::string lua_row_logic = LuaTranslator::TranslateExpressionToLuaRowLogic(*col_ref_expr, ctx_one_input);
+    SECTION("Translate BoundReferenceExpression (Integer Column)") {
+        auto col_ref_expr = CreateBoundReference(0, LogicalType::INTEGER); // col_0, type INTEGER
+        std::string lua_row_logic = LuaTranslator::TranslateExpressionToLuaRowLogic(*col_ref_expr, ctx_one_int);
 
-        // Expected: reads from input_vectors[1] (0+1), handles its nullmask
-        // if input_vectors[1].nullmask[i] then
-        //     output_vector.nullmask[i] = true
-        // else
-        //     output_vector.nullmask[i] = false
-        //     output_vector.data[i] = input_vectors[1].data[i]
-        // end
+        // Expects: input_vectors[1] (col_idx 0 + 1)
+        // Lua cast for data[i] will use context: ctx_one_int.GetInputLuaFFIType(0) -> "int32_t"
+        // The generic GenerateFullLuaJitFunction in executor tests handles the actual casting of void*
+        // based on type. Here, the translator generates the direct access.
         std::string expected_lua =
 R"(if input_vectors[1].nullmask[i] then
     output_vector.nullmask[i] = true
@@ -82,22 +98,15 @@ else
     output_vector.data[i] = input_vectors[1].data[i]
 end)";
         REQUIRE(lua_row_logic == expected_lua);
-        INFO("Generated Lua for 'col_0':\n" << WrapInLuaFunction(lua_row_logic, 1));
+        INFO("Generated Lua for BoundReference(col_0, INT):\n" << WrapInLuaFunction(lua_row_logic, 1));
     }
 
-    SECTION("Translate col_0 + col_1") {
-        auto col0 = MakeLuaColumnRef(0);
-        auto col1 = MakeLuaColumnRef(1);
-        auto add_expr = MakeLuaBinaryOp(LuaJITBinaryOperatorType::ADD, std::move(col0), std::move(col1));
-        std::string lua_row_logic = LuaTranslator::TranslateExpressionToLuaRowLogic(*add_expr, ctx);
+    SECTION("Translate BoundOperatorExpression: col_0 + col_1 (Integers)") {
+        auto col0 = CreateBoundReference(0, LogicalType::INTEGER);
+        auto col1 = CreateBoundReference(1, LogicalType::INTEGER);
+        auto add_expr = CreateBoundBinaryOperator(ExpressionType::OPERATOR_ADD, std::move(col0), std::move(col1), LogicalType::INTEGER);
+        std::string lua_row_logic = LuaTranslator::TranslateExpressionToLuaRowLogic(*add_expr, ctx_two_ints);
 
-        // Expected: checks nulls for input_vectors[1] and input_vectors[2]
-        // if input_vectors[1].nullmask[i] or input_vectors[2].nullmask[i] then
-        //     output_vector.nullmask[i] = true
-        // else
-        //     output_vector.nullmask[i] = false
-        //     output_vector.data[i] = (input_vectors[1].data[i] + input_vectors[2].data[i])
-        // end
         std::string expected_lua =
 R"(if input_vectors[1].nullmask[i] or input_vectors[2].nullmask[i] then
     output_vector.nullmask[i] = true
@@ -106,22 +115,15 @@ else
     output_vector.data[i] = (input_vectors[1].data[i] + input_vectors[2].data[i])
 end)";
         REQUIRE(lua_row_logic == expected_lua);
-        INFO("Generated Lua for 'col_0 + col_1':\n" << WrapInLuaFunction(lua_row_logic, 2));
     }
 
-    SECTION("Translate col_0 * 10") {
-        auto col0 = MakeLuaColumnRef(0);
-        auto const_10 = MakeLuaConstant(10);
-        auto mul_expr = MakeLuaBinaryOp(LuaJITBinaryOperatorType::MULTIPLY, std::move(col0), std::move(const_10));
-        std::string lua_row_logic = LuaTranslator::TranslateExpressionToLuaRowLogic(*mul_expr, ctx_one_input);
+    SECTION("Translate BoundOperatorExpression: col_0 * 10 (Integer)") {
+        auto col0 = CreateBoundReference(0, LogicalType::INTEGER);
+        auto const_10 = CreateBoundConstant(Value::INTEGER(10));
+        // Return type of col * INT_CONST is INTEGER
+        auto mul_expr = CreateBoundBinaryOperator(ExpressionType::OPERATOR_MULTIPLY, std::move(col0), std::move(const_10), LogicalType::INTEGER);
+        std::string lua_row_logic = LuaTranslator::TranslateExpressionToLuaRowLogic(*mul_expr, ctx_one_int);
 
-        // Expected: checks null for input_vectors[1] only (constant is not nullable by this logic)
-        // if input_vectors[1].nullmask[i] then
-        //     output_vector.nullmask[i] = true
-        // else
-        //     output_vector.nullmask[i] = false
-        //     output_vector.data[i] = (input_vectors[1].data[i] * 10)
-        // end
         std::string expected_lua =
 R"(if input_vectors[1].nullmask[i] then
     output_vector.nullmask[i] = true
@@ -130,28 +132,18 @@ else
     output_vector.data[i] = (input_vectors[1].data[i] * 10)
 end)";
         REQUIRE(lua_row_logic == expected_lua);
-        INFO("Generated Lua for 'col_0 * 10':\n" << WrapInLuaFunction(lua_row_logic, 1));
     }
 
-    SECTION("Translate (col_0 + col_1) > 5") {
-        auto col0 = MakeLuaColumnRef(0);
-        auto col1 = MakeLuaColumnRef(1);
-        auto const_5 = MakeLuaConstant(5);
-        auto add_expr = MakeLuaBinaryOp(LuaJITBinaryOperatorType::ADD, std::move(col0), std::move(col1));
-        auto gt_expr = MakeLuaBinaryOp(LuaJITBinaryOperatorType::GREATER_THAN, std::move(add_expr), std::move(const_5));
-        std::string lua_row_logic = LuaTranslator::TranslateExpressionToLuaRowLogic(*gt_expr, ctx);
+    SECTION("Translate BoundOperatorExpression: (col_0 + col_1) > 5 (Integers, output BOOLEAN)") {
+        auto col0_add = CreateBoundReference(0, LogicalType::INTEGER);
+        auto col1_add = CreateBoundReference(1, LogicalType::INTEGER);
+        auto add_sub_expr = CreateBoundBinaryOperator(ExpressionType::OPERATOR_ADD, std::move(col0_add), std::move(col1_add), LogicalType::INTEGER);
 
-        // Expected: null checks for col0 and col1. Result of comparison is 0 or 1.
-        // if input_vectors[1].nullmask[i] or input_vectors[2].nullmask[i] then
-        //     output_vector.nullmask[i] = true
-        // else
-        //     output_vector.nullmask[i] = false
-        //     if ((input_vectors[1].data[i] + input_vectors[2].data[i]) > 5) then
-        //         output_vector.data[i] = 1
-        //     else
-        //         output_vector.data[i] = 0
-        //     end
-        // end
+        auto const_5 = CreateBoundConstant(Value::INTEGER(5));
+        // Return type of comparison is BOOLEAN
+        auto gt_expr = CreateBoundBinaryOperator(ExpressionType::COMPARE_GREATERTHAN, std::move(add_sub_expr), std::move(const_5), LogicalType::BOOLEAN);
+        std::string lua_row_logic = LuaTranslator::TranslateExpressionToLuaRowLogic(*gt_expr, ctx_two_ints);
+
         std::string expected_lua =
 R"(if input_vectors[1].nullmask[i] or input_vectors[2].nullmask[i] then
     output_vector.nullmask[i] = true
@@ -164,27 +156,17 @@ else
     end
 end)";
         REQUIRE(lua_row_logic == expected_lua);
-        INFO("Generated Lua for '(col_0 + col_1) > 5':\n" << WrapInLuaFunction(lua_row_logic, 2));
     }
 
-    SECTION("Translate col_0 + (col_1 * col_2)") {
-        auto col0 = MakeLuaColumnRef(0); // input_vectors[1]
-        auto col1 = MakeLuaColumnRef(1); // input_vectors[2]
-        auto col2 = MakeLuaColumnRef(2); // input_vectors[3]
-        auto mul_expr = MakeLuaBinaryOp(LuaJITBinaryOperatorType::MULTIPLY, std::move(col1), std::move(col2));
-        auto add_expr = MakeLuaBinaryOp(LuaJITBinaryOperatorType::ADD, std::move(col0), std::move(mul_expr));
-        std::string lua_row_logic = LuaTranslator::TranslateExpressionToLuaRowLogic(*add_expr, ctx_three_inputs);
+    SECTION("Translate BoundOperatorExpression: col_0 + (col_1 * col_2) (Integers)") {
+        auto col0_ref = CreateBoundReference(0, LogicalType::INTEGER);
+        auto col1_ref_mul = CreateBoundReference(1, LogicalType::INTEGER);
+        auto col2_ref_mul = CreateBoundReference(2, LogicalType::INTEGER);
+        auto mul_sub_expr = CreateBoundBinaryOperator(ExpressionType::OPERATOR_MULTIPLY, std::move(col1_ref_mul), std::move(col2_ref_mul), LogicalType::INTEGER);
+        auto add_expr = CreateBoundBinaryOperator(ExpressionType::OPERATOR_ADD, std::move(col0_ref), std::move(mul_sub_expr), LogicalType::INTEGER);
 
-        // Expected: null checks for col0, col1, col2.
-        // if input_vectors[1].nullmask[i] or input_vectors[2].nullmask[i] or input_vectors[3].nullmask[i] then
-        //     output_vector.nullmask[i] = true
-        // else
-        //     output_vector.nullmask[i] = false
-        //     output_vector.data[i] = (input_vectors[1].data[i] + (input_vectors[2].data[i] * input_vectors[3].data[i]))
-        // end
-        // Order of referenced_columns in the if condition might vary depending on std::vector behavior,
-        // so this test might need to be made more robust to ordering, or sort referenced_columns in translator.
-        // For now, assume fixed order from traversal (0, 1, 2).
+        std::string lua_row_logic = LuaTranslator::TranslateExpressionToLuaRowLogic(*add_expr, ctx_three_ints);
+        // Note: referenced_columns are sorted by index in TranslateExpressionToLuaRowLogic
         std::string expected_lua =
 R"(if input_vectors[1].nullmask[i] or input_vectors[2].nullmask[i] or input_vectors[3].nullmask[i] then
     output_vector.nullmask[i] = true
@@ -193,204 +175,96 @@ else
     output_vector.data[i] = (input_vectors[1].data[i] + (input_vectors[2].data[i] * input_vectors[3].data[i]))
 end)";
         REQUIRE(lua_row_logic == expected_lua);
-        INFO("Generated Lua for 'col_0 + (col_1 * col_2)':\n" << WrapInLuaFunction(lua_row_logic, 3));
     }
 
-    SECTION("Translate Constant Comparison: 10 > 5") {
-        auto const_10 = MakeLuaConstant(10);
-        auto const_5 = MakeLuaConstant(5);
-        auto gt_expr = MakeLuaBinaryOp(LuaJITBinaryOperatorType::GREATER_THAN, std::move(const_10), std::move(const_5));
-        std::string lua_row_logic = LuaTranslator::TranslateExpressionToLuaRowLogic(*gt_expr, ctx);
+    SECTION("Translate BoundConstantExpression (VARCHAR)") {
+        auto const_expr = CreateBoundConstant(Value("hello lua")); // Value creates VARCHAR by default
+        REQUIRE(const_expr->return_type.id() == LogicalTypeId::VARCHAR);
+        std::string lua_row_logic = LuaTranslator::TranslateExpressionToLuaRowLogic(*const_expr, ctx_one_int); // Context not really used for const
 
-        // Expected: No input null checks. Result is 0 or 1.
+        // String output assignment is complex (see translator notes).
+        // For now, testing the value_expr_str part.
+        // The current translator's output assignment for non-boolean, non-referenced columns is:
         // output_vector.nullmask[i] = false
-        // if (10 > 5) then
-        //     output_vector.data[i] = 1
-        // else
-        //     output_vector.data[i] = 0
-        // end
+        // output_vector.data[i] = "hello lua"
+        // This is okay if output_vector.data is for a string that Lua itself manages (not FFIString).
+        // For this test, we focus on the constant string representation.
         std::string expected_lua =
 R"(output_vector.nullmask[i] = false
-if (10 > 5) then
-    output_vector.data[i] = 1
-else
-    output_vector.data[i] = 0
-end)";
+output_vector.data[i] = "hello lua")"; // This assignment is problematic if output is FFIString
+        // The translator has a comment about this.
+        // For now, let's assume the test is about the value part "hello lua".
+        // The full assignment requires more FFI output logic.
         REQUIRE(lua_row_logic == expected_lua);
-        INFO("Generated Lua for '10 > 5':\n" << WrapInLuaFunction(lua_row_logic, 0));
     }
+
+    SECTION("Translate BoundReferenceExpression (VARCHAR Column)") {
+        auto col_ref_expr = CreateBoundReference(0, LogicalType::VARCHAR);
+        std::vector<LogicalType> one_varchar_input = {LogicalType::VARCHAR};
+        LuaTranslatorContext ctx_one_varchar(one_varchar_input);
+        std::string lua_row_logic = LuaTranslator::TranslateExpressionToLuaRowLogic(*col_ref_expr, ctx_one_varchar);
+
+        // Expected for VARCHAR: ffi.string(input_vectors[1].data[i].ptr, input_vectors[1].data[i].len)
+        // And this Lua string result needs to be handled if assigned to output_vector.data[i]
+        std::string expected_lua =
+R"(if input_vectors[1].nullmask[i] then
+    output_vector.nullmask[i] = true
+else
+    output_vector.nullmask[i] = false
+    output_vector.data[i] = ffi.string(input_vectors[1].data[i].ptr, input_vectors[1].data[i].len)
+end)"; // Again, direct assignment of Lua string to output_vector.data[i] is for numeric/bool.
+        REQUIRE(lua_row_logic == expected_lua);
+    }
+
 }
 
-TEST_CASE("LuaTranslator Tests for Extended Expressions", "[luajit][translator][extended]") {
-    using namespace duckdb;
-    LuaTranslatorContext ctx_two_inputs(2);
-    LuaTranslatorContext ctx_one_input(1);
+// TODO: Add tests for actual extended expressions (LIKE, CONCAT, CASE, AND, OR, NOT) using BoundExpressions.
+// This will require creating appropriate BoundOperatorExpression, BoundCaseExpression, etc.
+// and carefully managing the expected Lua output, especially for string operations and FFI interactions.
 
-    SECTION("Translate String Constant") {
-        auto str_const_expr = MakeLuaConstant(std::string("hello lua"));
-        std::string lua_row_logic = LuaTranslator::TranslateExpressionToLuaRowLogic(*str_const_expr, ctx_one_input);
-        std::string expected_lua =
-R"(output_vector.nullmask[i] = false
-output_vector.data[i] = "hello lua")"; // Assuming numeric/bool output for now. String output is complex.
-        // If outputting a string, the above data assignment is wrong.
-        // This test primarily verifies the constant representation.
-        REQUIRE(lua_row_logic == expected_lua);
-        INFO("Generated Lua for '\"hello lua\"':\n" << WrapInLuaFunction(lua_row_logic, 0));
-    }
-
-    // NOTE on String Column References for following tests:
-    // The LuaTranslator::GenerateValue for ColumnReference currently produces: input_vectors[X].data[i]
-    // For string operations, this should ideally be: ffi.string(input_vectors[X].data[i].ptr, input_vectors[X].data[i].len)
-    // This requires type information in LuaTranslatorContext. For these tests, we'll assume
-    // that if a column reference is used in a string context (e.g., CONCAT's operand), the
-    // translator would generate the ffi.string(...) wrapper. The expected Lua strings will reflect this.
-    // This is a conceptual leap for the current translator code but necessary for testing string ops.
-
-    SECTION("Translate CONCAT: 'hello' .. 'world'") {
-        auto s1 = MakeLuaConstant(std::string("hello"));
-        auto s2 = MakeLuaConstant(std::string("world"));
-        auto concat_expr = MakeLuaBinaryOp(LuaJITBinaryOperatorType::CONCAT, std::move(s1), std::move(s2));
-        std::string lua_row_logic = LuaTranslator::TranslateExpressionToLuaRowLogic(*concat_expr, ctx_one_input);
-        // Outputting a string to FFIVector.data[i] is problematic.
-        // This test focuses on the value_expr_str part: ("hello" .. "world")
-        // The TranslateExpressionToLuaRowLogic will try to assign this.
-        // For a real string output, output_vector.data[i] would need to be an FFIString,
-        // and a C helper or complex Lua would be needed to allocate/copy the result.
-        // We test the generated value expression, assuming the output part is placeholder for strings.
-        std::string expected_lua =
-R"(output_vector.nullmask[i] = false
-output_vector.data[i] = ("hello" .. "world"))"; // This assignment is conceptually problematic for strings.
-        REQUIRE(lua_row_logic == expected_lua);
-        INFO("Generated Lua for CONCAT (literals):\n" << WrapInLuaFunction(lua_row_logic, 0));
-    }
-
-    SECTION("Translate LIKE: col_str LIKE '%pattern%'") {
-        // Conceptual: Assume col_str (col0) is a string column.
-        // The GenerateValue for ColumnReferenceExpression would need to output
-        // ffi.string(input_vectors[1].data[i].ptr, input_vectors[1].data[i].len)
-        // For this test, we use a string literal for the column for simplicity of value_expr_str.
-        auto str_val = MakeLuaConstant(std::string("teststring")); // Simulates string column for value part
-        auto pattern = MakeLuaConstant(std::string("%str%"));
-        auto like_expr = MakeLuaBinaryOp(LuaJITBinaryOperatorType::LIKE, std::move(str_val), std::move(pattern));
-        std::string lua_row_logic = LuaTranslator::TranslateExpressionToLuaRowLogic(*like_expr, ctx_one_input);
+    SECTION("Translate BoundOperatorExpression: col_0 < 10 (Integer, output BOOLEAN)") {
+        auto col0 = CreateBoundReference(0, LogicalType::INTEGER);
+        auto const_10 = CreateBoundConstant(Value::INTEGER(10));
+        auto lt_expr = CreateBoundBinaryOperator(ExpressionType::COMPARE_LESSTHAN, std::move(col0), std::move(const_10), LogicalType::BOOLEAN);
+        std::string lua_row_logic = LuaTranslator::TranslateExpressionToLuaRowLogic(*lt_expr, ctx_one_int);
 
         std::string expected_lua =
-R"(output_vector.nullmask[i] = false
-if (string.find("teststring", "str", 1, true) ~= nil) then
-    output_vector.data[i] = 1
+R"(if input_vectors[1].nullmask[i] then
+    output_vector.nullmask[i] = true
 else
-    output_vector.data[i] = 0
+    output_vector.nullmask[i] = false
+    if ((input_vectors[1].data[i] < 10)) then
+        output_vector.data[i] = 1
+    else
+        output_vector.data[i] = 0
+    end
 end)";
         REQUIRE(lua_row_logic == expected_lua);
-        INFO("Generated Lua for LIKE:\n" << WrapInLuaFunction(lua_row_logic, 1));
     }
 
-
-    SECTION("Translate Logical AND: (col0 > 5) AND (col1 < 10)") {
-        auto col0 = MakeLuaColumnRef(0);
-        auto const5 = MakeLuaConstant(5);
-        auto gt_expr = MakeLuaBinaryOp(LuaJITBinaryOperatorType::GREATER_THAN, std::move(col0), std::move(const5));
-
-        auto col1 = MakeLuaColumnRef(1);
-        auto const10 = MakeLuaConstant(10);
-        auto lt_expr = MakeLuaBinaryOp(LuaJITBinaryOperatorType::LESS_THAN, std::move(col1), std::move(const10));
-
-        auto and_expr = MakeLuaBinaryOp(LuaJITBinaryOperatorType::AND, std::move(gt_expr), std::move(lt_expr));
-        std::string lua_row_logic = LuaTranslator::TranslateExpressionToLuaRowLogic(*and_expr, ctx_two_inputs);
+    SECTION("Translate BoundOperatorExpression: col_0 == col_1 (Integers, output BOOLEAN)") {
+        auto col0 = CreateBoundReference(0, LogicalType::INTEGER);
+        auto col1 = CreateBoundReference(1, LogicalType::INTEGER);
+        auto eq_expr = CreateBoundBinaryOperator(ExpressionType::COMPARE_EQUAL, std::move(col0), std::move(col1), LogicalType::BOOLEAN);
+        std::string lua_row_logic = LuaTranslator::TranslateExpressionToLuaRowLogic(*eq_expr, ctx_two_ints);
 
         std::string expected_lua =
 R"(if input_vectors[1].nullmask[i] or input_vectors[2].nullmask[i] then
     output_vector.nullmask[i] = true
 else
     output_vector.nullmask[i] = false
-    if (((input_vectors[1].data[i] > 5) == 1) and ((input_vectors[2].data[i] < 10) == 1)) then
+    if ((input_vectors[1].data[i] == input_vectors[2].data[i])) then
         output_vector.data[i] = 1
     else
         output_vector.data[i] = 0
     end
 end)";
         REQUIRE(lua_row_logic == expected_lua);
-        INFO("Generated Lua for AND:\n" << WrapInLuaFunction(lua_row_logic, 2));
     }
 
-    SECTION("Translate Logical OR: (col0 == 0) OR (col0 == 1)") {
-        auto col0_a = MakeLuaColumnRef(0);
-        auto const0 = MakeLuaConstant(0);
-        auto eq_expr1 = MakeLuaBinaryOp(LuaJITBinaryOperatorType::EQUALS, std::move(col0_a), std::move(const0));
-
-        auto col0_b = MakeLuaColumnRef(0); // Needs separate instance for unique_ptr
-        auto const1 = MakeLuaConstant(1);
-        auto eq_expr2 = MakeLuaBinaryOp(LuaJITBinaryOperatorType::EQUALS, std::move(col0_b), std::move(const1));
-
-        auto or_expr = MakeLuaBinaryOp(LuaJITBinaryOperatorType::OR, std::move(eq_expr1), std::move(eq_expr2));
-        std::string lua_row_logic = LuaTranslator::TranslateExpressionToLuaRowLogic(*or_expr, ctx_one_input);
-
-        std::string expected_lua =
-R"(if input_vectors[1].nullmask[i] then
-    output_vector.nullmask[i] = true
-else
-    output_vector.nullmask[i] = false
-    if (((input_vectors[1].data[i] == 0) == 1) or ((input_vectors[1].data[i] == 1) == 1)) then
-        output_vector.data[i] = 1
-    else
-        output_vector.data[i] = 0
-    end
-end)";
-        REQUIRE(lua_row_logic == expected_lua);
-        INFO("Generated Lua for OR:\n" << WrapInLuaFunction(lua_row_logic, 1));
-    }
-
-    SECTION("Translate Unary NOT: NOT (col0 > 5)") {
-        auto col0 = MakeLuaColumnRef(0);
-        auto const5 = MakeLuaConstant(5);
-        auto gt_expr = MakeLuaBinaryOp(LuaJITBinaryOperatorType::GREATER_THAN, std::move(col0), std::move(const5));
-        auto not_expr = MakeLuaUnaryOp(LuaJITUnaryOperatorType::NOT, std::move(gt_expr));
-        std::string lua_row_logic = LuaTranslator::TranslateExpressionToLuaRowLogic(*not_expr, ctx_one_input);
-
-        std::string expected_lua =
-R"(if input_vectors[1].nullmask[i] then
-    output_vector.nullmask[i] = true
-else
-    output_vector.nullmask[i] = false
-    if (not ((input_vectors[1].data[i] > 5) == 1)) then
-        output_vector.data[i] = 1
-    else
-        output_vector.data[i] = 0
-    end
-end)";
-        REQUIRE(lua_row_logic == expected_lua);
-        INFO("Generated Lua for NOT:\n" << WrapInLuaFunction(lua_row_logic, 1));
-    }
-
-    SECTION("Translate Simple CASE: CASE WHEN col0 > 0 THEN 10 ELSE 20 END") {
-        auto col0 = MakeLuaColumnRef(0);
-        auto const0 = MakeLuaConstant(0);
-        auto condition = MakeLuaBinaryOp(LuaJITBinaryOperatorType::GREATER_THAN, std::move(col0), std::move(const0));
-
-        auto result_true = MakeLuaConstant(10);
-        auto result_false = MakeLuaConstant(20);
-
-        std::vector<CaseBranch> branches;
-        branches.emplace_back(CaseBranch{std::move(condition), std::move(result_true)});
-
-        auto case_expr = MakeLuaCaseExpression(std::move(branches), std::move(result_false));
-        std::string lua_row_logic = LuaTranslator::TranslateExpressionToLuaRowLogic(*case_expr, ctx_one_input);
-
-        // Note: The CASE translation uses an IIFE: (function() if (CONDITION==1) then return RES_TRUE else return RES_FALSE end)()
-        // Null propagation for CASE: if col0 is null, the outer null check handles it.
-        // If condition is not null, but result_true/result_false path involves other nullable columns
-        // (not in this simple test), their nullness should be handled by their own sub-expressions.
-        // The current CASE translation itself doesn't add extra null checks for its result branches.
-        std::string expected_lua =
-R"(if input_vectors[1].nullmask[i] then
-    output_vector.nullmask[i] = true
-else
-    output_vector.nullmask[i] = false
-    output_vector.data[i] = (function() if ((input_vectors[1].data[i] > 0) == 1) then return 10 else return 20 end end)()
-end)";
-        REQUIRE(lua_row_logic == expected_lua);
-        INFO("Generated Lua for CASE:\n" << WrapInLuaFunction(lua_row_logic, 1));
-    }
+    // Note: Full support for AND, OR (BoundConjunctionExpression), NOT (BoundOperatorExpression with OPERATOR_NOT),
+    // LIKE (BoundLikeExpression), CASE (BoundCaseExpression), CONCAT (BoundFunctionExpression)
+    // requires adding specific GenerateValue overloads for these BoundExpression subtypes in LuaTranslator.
+    // The current tests primarily verify what's handled by the existing BoundOperatorExpression translator logic.
 }
-// TODO: Test that referenced_columns are correctly collected and sorted if order matters for the test.
 ```

@@ -1,9 +1,13 @@
 #pragma once
 
 #include "duckdb/common/types/value.hpp" // For idx_t
+#include "duckdb/common/types/logical_type.hpp" // For LogicalTypeId
+#include "duckdb/common/enums/vector_type.hpp" // For VectorType
 
-// Forward declaration for lua_State (though not strictly needed in this header if only C structs are defined)
-// struct lua_State;
+#include <vector> // For std::vector<vector<char>>
+
+// Forward declaration for lua_State
+struct lua_State;
 
 namespace duckdb {
 
@@ -37,6 +41,13 @@ struct FFIVector {
 
     // For this initial version, `type_id` and `sel_vector` are omitted for simplicity.
     // The unit tests will assume the type of `data` for casting in Lua.
+
+    // New members for better type handling and vector classification
+    LogicalTypeId ffi_logical_type_id; // DuckDB's LogicalTypeId for the data
+    VectorType    ffi_duckdb_vector_type;  // Original DuckDB vector type (FLAT, CONSTANT, etc.)
+                                       // Lua might not use this directly, but C++ host can.
+    // bool          is_temporary_buffer; // Flag if 'data' points to a temp buffer from temp_buffers_owner
+                                       // Might be useful for debugging or complex scenarios.
 };
 
 // C-style struct for string data in FFIVector when data is of type VARCHAR.
@@ -53,9 +64,10 @@ struct FFIString {
 // DuckDB's Vector internals, especially its UnifiedVectorFormat and ValidityMask.
 // This function's signature is provided for conceptual completeness.
 // In the PoC tests, we will manually populate FFIVector from std::vector for simplicity.
-#if 0 // Disabled for now as it requires deeper DuckDB internal knowledge for a minimal PoC
-void GetFFIVectorFromDuckDBVector(duckdb::Vector& duckdb_vec, duckdb::ffi::FFIVector& ffi_vec);
-#endif
+// For Phase 1 of full JIT integration, we implement this.
+void CreateFFIVectorFromDuckDBVector(duckdb::Vector& duckdb_vec, idx_t count,
+                                     duckdb::ffi::FFIVector& out_ffi_vec,
+                                     std::vector<std::vector<char>>& temp_buffers_owner);
 
 } // namespace ffi
 } // namespace duckdb

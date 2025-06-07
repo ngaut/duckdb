@@ -34,6 +34,7 @@ struct ExpressionState {
 	bool attempted_jit_compilation = false;
 	bool jit_compilation_succeeded = false;
 	std::string jitted_lua_function_name; // Name of the compiled Lua function in Lua registry or as a global
+	idx_t execution_count = 0; // Counter for JIT trigger threshold
 
 public:
 	void AddChild(Expression &child_expr);

@@ -73,8 +73,95 @@ bool LuaJITStateWrapper::ExecuteString(const std::string &lua_script) {
     return true;
 }
 
+// Overload that captures error messages
+bool LuaJITStateWrapper::ExecuteString(const std::string &lua_script, std::string& out_error_message) {
+    out_error_message.clear();
+    if (!L) {
+        out_error_message = "LuaJIT state is not initialized.";
+        return false;
+    }
+
+    if (luaL_loadstring(L, lua_script.c_str()) != LUA_OK) {
+        const char *error_msg_c = lua_tostring(L, -1);
+        out_error_message = error_msg_c ? error_msg_c : "Unknown error during luaL_loadstring.";
+        lua_pop(L, 1); // Pop error message
+        return false;
+    }
+
+    if (lua_pcall(L, 0, LUA_MULTRET, 0) != LUA_OK) {
+        const char *error_msg_c = lua_tostring(L, -1);
+        out_error_message = error_msg_c ? error_msg_c : "Unknown error during lua_pcall.";
+        lua_pop(L, 1); // Pop error message
+        return false;
+    }
+    lua_settop(L, 0); // Clear the stack of any return values
+    return true;
+}
+
+
 lua_State *LuaJITStateWrapper::GetState() const {
     return L;
+}
+
+bool LuaJITStateWrapper::CompileStringAndSetGlobal(const std::string &full_lua_function_definition_script,
+                                               const std::string &global_function_name,
+                                               std::string& out_error_message) {
+    out_error_message.clear();
+    if (!L) {
+        out_error_message = "LuaJIT state is not initialized for CompileStringAndSetGlobal.";
+        return false;
+    }
+
+    // The full_lua_function_definition_script should already be in the form:
+    // `global_function_name = function(args...) ... end`
+    // or `function global_function_name(args...) ... end`
+    // So we just need to execute it.
+    return ExecuteString(full_lua_function_definition_script, out_error_message);
+}
+
+bool LuaJITStateWrapper::PCallGlobal(const std::string& global_function_name,
+                                   const std::vector<ffi::FFIVector*>& ffi_input_args,
+                                   ffi::FFIVector* ffi_output_arg,
+                                   idx_t count,
+                                   std::string& out_error_message) {
+    out_error_message.clear();
+    if (!L) {
+        out_error_message = "LuaJIT state is not initialized for PCallGlobal.";
+        return false;
+    }
+
+    lua_getglobal(L, global_function_name.c_str());
+    if (!lua_isfunction(L, -1)) {
+        out_error_message = "Lua function '" + global_function_name + "' not found or not a function.";
+        lua_pop(L, 1); // Pop non-function
+        return false;
+    }
+
+    // Push arguments: output_ffi_vec, input1_ffi_vec, ..., inputN_ffi_vec, count
+    int num_args = 0;
+    if (ffi_output_arg) { // Output arg is optional; some functions might only read.
+        lua_pushlightuserdata(L, ffi_output_arg);
+        num_args++;
+    } else { // Push a nil placeholder if no output FFIVector is provided (e.g. for scalar returns)
+        lua_pushnil(L);
+        num_args++;
+    }
+
+    for (const auto& input_arg : ffi_input_args) {
+        lua_pushlightuserdata(L, input_arg);
+        num_args++;
+    }
+    lua_pushinteger(L, count);
+    num_args++;
+
+    if (lua_pcall(L, num_args, 0, 0) != LUA_OK) { // 0 results expected on Lua stack from the function itself
+        const char *error_msg_c = lua_tostring(L, -1);
+        out_error_message = error_msg_c ? error_msg_c : "Unknown error during lua_pcall for " + global_function_name;
+        lua_pop(L, 1); // Pop error message
+        return false;
+    }
+    // Function results, if any, are not handled by this wrapper on C++ stack, Lua function should write to FFIVector
+    return true;
 }
 
 } // namespace duckdb

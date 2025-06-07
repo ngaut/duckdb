@@ -1,69 +1,79 @@
 #include "duckdb/main/luajit_translator.hpp"
-#include "duckdb/common/exception.hpp" // For NotImplementedException
+#include "duckdb/common/exception.hpp"
+#include "duckdb/planner/expression/bound_constant_expression.hpp"
+#include "duckdb/planner/expression/bound_reference_expression.hpp"
+#include "duckdb/planner/expression/bound_operator_expression.hpp"
+// Add includes for other BoundExpression subtypes as they are supported
 #include <algorithm> // for std::find
 
 namespace duckdb {
 
 // --- LuaTranslatorContext ---
-LuaTranslatorContext::LuaTranslatorContext(idx_t num_input_vectors) : num_input_vectors_(num_input_vectors) {
-    // Initialization if needed, e.g., for type information
-    // input_vector_lua_types_.resize(num_input_vectors);
-}
-
-std::string LuaTranslatorContext::GetInputVectorsTable() const {
-    return "input_vectors"; // Lua code will use input_vectors[1], input_vectors[2], ...
-}
-
-// --- LuaTranslator ---
-
-// Helper to convert binary operator type to Lua string
-static std::string GetLuaOperator(LuaJITBinaryOperatorType op_type) {
-    switch (op_type) {
-    // Arithmetic
-    case LuaJITBinaryOperatorType::ADD:
-        return "+";
-    case LuaJITBinaryOperatorType::SUBTRACT:
-        return "-";
-    case LuaJITBinaryOperatorType::MULTIPLY:
-        return "*";
-    case LuaJITBinaryOperatorType::DIVIDE:
-        return "/";
-    // Comparison
-    case LuaJITBinaryOperatorType::EQUALS:
-        return "==";
-    case LuaJITBinaryOperatorType::NOT_EQUALS:
-        return "~=";
-    case LuaJITBinaryOperatorType::GREATER_THAN:
-        return ">";
-    case LuaJITBinaryOperatorType::LESS_THAN:
-        return "<";
-    case LuaJITBinaryOperatorType::GREATER_THAN_OR_EQUALS:
-        return ">=";
-    case LuaJITBinaryOperatorType::LESS_THAN_OR_EQUALS:
-        return "<=";
-    // Logical
-    case LuaJITBinaryOperatorType::AND:
-        return "and"; // Note: requires operands to be Lua booleans (or 0/1 converted)
-    case LuaJITBinaryOperatorType::OR:
-        return "or";  // Note: requires operands to be Lua booleans (or 0/1 converted)
-    // String
-    case LuaJITBinaryOperatorType::CONCAT:
-        return "..";
-    case LuaJITBinaryOperatorType::LIKE:
-        // LIKE is handled specially, not a simple operator
-        throw InternalException("LIKE operator should be handled by a special function call in LuaTranslator");
-    default:
-        throw NotImplementedException("LuaJITBinaryOperatorType not yet supported in GetLuaOperator: " + std::to_string((int)op_type));
+// Helper to get Lua FFI C type string from LogicalType
+static std::string GetLuaFFITypeFromLogicalType(const LogicalType& type) {
+    switch (type.id()) {
+        case LogicalTypeId::INTEGER:    return "int32_t"; // Assuming FFIVector.data points to int32_t for INTEGER
+        case LogicalTypeId::BIGINT:     return "int64_t";
+        case LogicalTypeId::DOUBLE:     return "double";
+        case LogicalTypeId::VARCHAR:    return "FFIString"; // FFIVector.data points to FFIString structs
+        case LogicalTypeId::DATE:       return "int32_t"; // date_t
+        case LogicalTypeId::TIMESTAMP:  return "int64_t"; // timestamp_t
+        // Add other supported types
+        default:
+            throw NotImplementedException("LuaTranslatorContext: Unsupported logical type for FFI: " + type.ToString());
     }
 }
 
-// Helper to convert unary operator type to Lua string
-static std::string GetLuaUnaryOperator(LuaJITUnaryOperatorType op_type) {
+LuaTranslatorContext::LuaTranslatorContext(const std::vector<LogicalType>& input_types)
+    : input_logical_types_(input_types) {
+    input_lua_ffi_types_.reserve(input_types.size());
+    for (const auto& type : input_types) {
+        input_lua_ffi_types_.push_back(GetLuaFFITypeFromLogicalType(type));
+    }
+}
+
+std::string LuaTranslatorContext::GetInputVectorsTable() const {
+    return "input_vectors";
+}
+
+std::string LuaTranslatorContext::GetInputLuaFFIType(idx_t col_idx) const {
+    if (col_idx >= input_lua_ffi_types_.size()) {
+        throw InternalException("LuaTranslatorContext: Column index out of bounds for GetInputLuaFFIType.");
+    }
+    return input_lua_ffi_types_[col_idx];
+}
+const LogicalType& LuaTranslatorContext::GetInputLogicalType(idx_t col_idx) const {
+    if (col_idx >= input_logical_types_.size()) {
+        throw InternalException("LuaTranslatorContext: Column index out of bounds for GetInputLogicalType.");
+    }
+    return input_logical_types_[col_idx];
+}
+idx_t LuaTranslatorContext::GetNumInputs() const {
+    return input_logical_types_.size();
+}
+
+
+// --- LuaTranslator ---
+
+// Helper to convert DuckDB ExpressionType (for binary operators) to Lua string
+static std::string GetLuaOperatorFromExprType(ExpressionType op_type) {
     switch (op_type) {
-    case LuaJITUnaryOperatorType::NOT:
-        return "not "; // Note: requires operand to be Lua boolean (or 0/1 converted)
-    default:
-        throw NotImplementedException("LuaJITUnaryOperatorType not yet supported in GetLuaUnaryOperator");
+        // Arithmetic
+        case ExpressionType::OPERATOR_ADD:                return "+";
+        case ExpressionType::OPERATOR_SUBTRACT:           return "-";
+        case ExpressionType::OPERATOR_MULTIPLY:           return "*";
+        case ExpressionType::OPERATOR_DIVIDE:             return "/";
+        // Comparison (numeric and potentially others like strings, dates if inputs are prepared)
+        case ExpressionType::COMPARE_EQUAL:               return "==";
+        case ExpressionType::COMPARE_NOTEQUAL:            return "~=";
+        case ExpressionType::COMPARE_LESSTHAN:            return "<";
+        case ExpressionType::COMPARE_GREATERTHAN:         return ">";
+        case ExpressionType::COMPARE_LESSTHANOREQUALTO:   return "<=";
+        case ExpressionType::COMPARE_GREATERTHANOREQUALTO:return ">=";
+        // TODO: Add string CONCAT, LIKE, logical AND, OR, NOT if they are BoundOperatorExpression
+        // Current PoC handles logical ops via specific expression types or separate logic.
+        default:
+            throw NotImplementedException("ExpressionType not yet supported as Lua binary operator: " + ExpressionTypeToString(op_type));
     }
 }
 
@@ -77,7 +87,6 @@ static std::string EscapeLuaString(const std::string& s) {
         case '\n': result += "\\n"; break;
         case '\r': result += "\\r"; break;
         case '\t': result += "\\t"; break;
-        // Add more escapes if needed
         default: result += c; break;
         }
     }
@@ -85,221 +94,204 @@ static std::string EscapeLuaString(const std::string& s) {
     return result;
 }
 
-
-// Implementation of GenerateValue for ConstantExpression
-std::string LuaTranslator::GenerateValue(const ConstantExpression& expr, LuaTranslatorContext& ctx,
-                                         std::vector<idx_t>& referenced_columns) {
-    if (std::holds_alternative<int>(expr.value)) {
-        return std::to_string(std::get<int>(expr.value));
-    } else if (std::holds_alternative<double>(expr.value)) {
-        return std::to_string(std::get<double>(expr.value));
-    } else if (std::holds_alternative<std::string>(expr.value)) {
-        return EscapeLuaString(std::get<std::string>(expr.value));
-    } else {
-        throw NotImplementedException("Unsupported constant type in LuaTranslator");
+// --- GenerateValue for specific BoundExpression types ---
+std::string LuaTranslator::GenerateValue(const BoundConstantExpression& expr, LuaTranslatorContext& ctx,
+                                         std::vector<column_binding>& referenced_columns) {
+    const auto& val = expr.value;
+    if (val.IsNull()) {
+        return "nil"; // Represent SQL NULL as Lua nil for value expressions
+    }
+    switch (expr.return_type.id()) {
+        case LogicalTypeId::INTEGER:  return std::to_string(val.GetValue<int32_t>());
+        case LogicalTypeId::BIGINT:   return std::to_string(val.GetValue<int64_t>()); // Lua numbers are doubles
+        case LogicalTypeId::DOUBLE:   return std::to_string(val.GetValue<double>());
+        // For VARCHAR, DATE, TIMESTAMP, Lua representation of constant needs care
+        // DATE/TIMESTAMP can be their integer representation.
+        case LogicalTypeId::DATE:      return std::to_string(val.GetValue<date_t>().days);
+        case LogicalTypeId::TIMESTAMP: return std::to_string(val.GetValue<timestamp_t>().micros);
+        case LogicalTypeId::VARCHAR:   return EscapeLuaString(val.GetValue<string>());
+        default:
+            throw NotImplementedException("Unsupported constant type in LuaTranslator for BoundConstantExpression: " + expr.return_type.ToString());
     }
 }
 
-// Implementation of GenerateValue for ColumnReferenceExpression
-std::string LuaTranslator::GenerateValue(const ColumnReferenceExpression& expr, LuaTranslatorContext& ctx,
-                                         std::vector<idx_t>& referenced_columns) {
-    if (std::find(referenced_columns.begin(), referenced_columns.end(), expr.column_index) == referenced_columns.end()) {
-        referenced_columns.push_back(expr.column_index);
-    }
-    // For VARCHAR, this needs to become ffi.string(ptr, len)
-    // This requires type information. For now, assume numeric/boolean.
-    // A type parameter or looking up type in context would be needed.
-    // For PoC, let's assume numeric types are directly accessed via .data[i]
-    // and string types will require specific handling in BinaryOperator for CONCAT/LIKE/compare
-    // or a more complex GetValue that knows the type.
-    // Let's assume for now this returns the raw data access string, and type-specific
-    // wrapping (like ffi.string) happens in the operator logic if needed.
-    return StringUtil::Format("%s[%d].data[i]", ctx.GetInputVectorsTable(), expr.column_index + 1);
-}
+std::string LuaTranslator::GenerateValue(const BoundReferenceExpression& expr, LuaTranslatorContext& ctx,
+                                         std::vector<column_binding>& referenced_columns) {
+    column_binding binding(expr.index); // Assuming expr.index is the binding index for the DataChunk
+                                        // This might need adjustment if it's a different kind of index.
+                                        // For now, assume it maps to an input vector index.
 
-// Implementation of GenerateValue for BinaryOperatorExpression
-std::string LuaTranslator::GenerateValue(const BinaryOperatorExpression& expr, LuaTranslatorContext& ctx,
-                                         std::vector<idx_t>& referenced_columns) {
-    std::string left_str = GenerateValueExpression(*expr.left_child, ctx, referenced_columns);
-    std::string right_str = GenerateValueExpression(*expr.right_child, ctx, referenced_columns);
-
-    // Type assumptions:
-    // For arithmetic/numeric comparisons: left_str, right_str are direct numeric values.
-    // For string ops (CONCAT, LIKE, string compare): left_str, right_str should evaluate to Lua strings.
-    // This might mean wrapping them with ffi.string if they are column refs to FFIString.
-    // For logical ops (AND, OR): left_str, right_str should evaluate to Lua booleans (or 0/1 that we convert).
-
-    // TODO: Add type-aware wrapping for string operations.
-    // For example, if it's a string column_ref, left_str might be:
-    // string.format("ffi.string(%s[%d].data[i].ptr, %s[%d].data[i].len)", table, idx+1, table, idx+1)
-    // This is simplified for now. Assume inputs are already appropriate types or simple values.
-
-    if (expr.operator_type == LuaJITBinaryOperatorType::LIKE) {
-        // Simplified LIKE: pattern is right_str (constant string expected)
-        // left_str is the string to check
-        // Assuming right_str is already a Lua string literal like "\"%pattern%\""
-        // And left_str evaluates to a Lua string (e.g. ffi.string(ptr,len) or another literal)
-
-        // For this PoC, assume right_str is a simple pattern string literal from ConstantExpression
-        std::string pattern_str_literal = GenerateValueExpression(*expr.right_child, ctx, referenced_columns);
-        // Remove quotes for direct use in string.sub/find
-        std::string pattern_val = std::get<std::string>(static_cast<const ConstantExpression&>(*expr.right_child).value);
-
-        if (pattern_val.front() == '%' && pattern_val.back() == '%') { // %abc% -> contains
-            std::string sub = pattern_val.substr(1, pattern_val.length() - 2);
-            return StringUtil::Format("(string.find(%s, \"%s\", 1, true) ~= nil)", left_str, sub);
-        } else if (pattern_val.front() == '%') { // %abc -> ends with
-            std::string sub = pattern_val.substr(1);
-            return StringUtil::Format("(string.sub(%s, -string.len(\"%s\")) == \"%s\")", left_str, sub, sub);
-        } else if (pattern_val.back() == '%') { // abc% -> starts with
-            std::string sub = pattern_val.substr(0, pattern_val.length() - 1);
-            return StringUtil::Format("(string.sub(%s, 1, string.len(\"%s\")) == \"%s\")", left_str, sub, sub);
-        } else { // exact match (or more complex pattern not handled by this simple version)
-            return StringUtil::Format("(%s == %s)", left_str, pattern_str_literal);
+    // Check if this binding is already recorded
+    bool found = false;
+    for(const auto& b : referenced_columns) {
+        if (b.table_index == binding.table_index && b.column_index == binding.column_index) { // Simplistic check
+            found = true;
+            break;
         }
     }
+    if (!found) {
+        referenced_columns.push_back(binding);
+    }
 
-    std::string op_str = GetLuaOperator(expr.operator_type);
+    // The actual column index for input_vectors table might be different from expr.index
+    // if multiple tables are involved. For now, assume expr.index is the direct index
+    // into the list of input vectors passed to the Lua function.
+    // Lua tables are 1-indexed.
+    idx_t input_vector_idx = expr.index + 1;
+
+    const auto& type = ctx.GetInputLogicalType(expr.index);
+    if (type.id() == LogicalTypeId::VARCHAR) {
+        return StringUtil::Format("ffi.string(%s[%d].data[i].ptr, %s[%d].data[i].len)",
+                                  ctx.GetInputVectorsTable(), input_vector_idx,
+                                  ctx.GetInputVectorsTable(), input_vector_idx);
+    }
+    // For other types (numeric, date, timestamp as int) direct data access
+    return StringUtil::Format("%s[%d].data[i]", ctx.GetInputVectorsTable(), input_vector_idx);
+}
+
+std::string LuaTranslator::GenerateValue(const BoundOperatorExpression& expr, LuaTranslatorContext& ctx,
+                                         std::vector<column_binding>& referenced_columns) {
+    if (expr.children.size() < 1 || expr.children.size() > 2) {
+        throw NotImplementedException("LuaTranslator: BoundOperatorExpression with " + std::to_string(expr.children.size()) + " children not supported.");
+    }
+
+    std::string op_str = GetLuaOperatorFromExprType(expr.type); // Use DuckDB's ExpressionType
+
+    std::string first_child_str = GenerateValueExpression(*expr.children[0], ctx, referenced_columns);
+
+    if (expr.children.size() == 1) { // Unary operator (e.g. NOT, IS_NULL - though IS_NULL is different type)
+        if (expr.type == ExpressionType::OPERATOR_IS_NULL) { // Special handling
+             return StringUtil::Format("(%s[%d].nullmask[i])", ctx.GetInputVectorsTable(), static_cast<const BoundReferenceExpression&>(*expr.children[0]).index + 1); // Example direct nullmask access
+        }
+        // Assume other unary ops are prefix, e.g. "not (...)"
+        // For "NOT", need to ensure child is boolean 0/1
+        if (op_str == "not ") { // Assuming GetLuaOperatorFromExprType is extended for unary NOT
+             return StringUtil::Format("(%s (%s == 1))", op_str, first_child_str);
+        }
+        return StringUtil::Format("(%s%s)", op_str, first_child_str);
+    }
+
+    // Binary operator
+    std::string second_child_str = GenerateValueExpression(*expr.children[1], ctx, referenced_columns);
 
     // For logical AND/OR, ensure inputs are treated as booleans (0 or 1 from comparisons)
-    if (expr.operator_type == LuaJITBinaryOperatorType::AND || expr.operator_type == LuaJITBinaryOperatorType::OR) {
-        return StringUtil::Format("((%s == 1) %s (%s == 1))", left_str, op_str, right_str);
+    if (expr.type == ExpressionType::CONJUNCTION_AND || expr.type == ExpressionType::CONJUNCTION_OR) { // These are actually different ExpressionClass
+        // This block for BoundOperatorExpression might not hit for AND/OR if they are BoundConjunctionExpression
+        // This logic is more for when AND/OR are passed as generic operators.
+        return StringUtil::Format("((%s == 1) %s (%s == 1))", first_child_str, op_str, second_child_str);
     }
 
-    return StringUtil::Format("(%s %s %s)", left_str, op_str, right_str);
-}
-
-// Implementation of GenerateValue for UnaryOperatorExpression
-std::string LuaTranslator::GenerateValue(const UnaryOperatorExpression& expr, LuaTranslatorContext& ctx,
-                                         std::vector<idx_t>& referenced_columns) {
-    std::string child_str = GenerateValueExpression(*expr.child_expression, ctx, referenced_columns);
-    std::string op_str = GetLuaUnaryOperator(expr.operator_type);
-
-    if (expr.operator_type == LuaJITUnaryOperatorType::NOT) {
-        // Assuming child_str evaluates to 0 or 1 (result of a comparison)
-        return StringUtil::Format("(%s(%s == 1))", op_str, child_str);
+    // Handle string CONCAT
+    if (expr.type == ExpressionType::OPERATOR_CONCAT) { // Assuming this is the type for '||'
+        // Ensure children are treated as strings if they are FFIString columns
+        // This needs type awareness from children expressions.
+        // For now, assume first_child_str and second_child_str evaluate to Lua strings.
     }
-    return StringUtil::Format("(%s%s)", op_str, child_str); // Default prefix unary
-}
 
-// Implementation of GenerateValue for CaseExpression
-std::string LuaTranslator::GenerateValue(const CaseExpression& expr, LuaTranslatorContext& ctx,
-                                         std::vector<idx_t>& referenced_columns) {
-    // Simplified: CASE WHEN condition THEN result ELSE else_result END
-    // Assumes only one branch for this PoC.
-    if (expr.case_branches.empty()) {
-        throw InternalException("CASE expression without branches in LuaTranslator");
-    }
-    const auto& branch = expr.case_branches[0];
-    std::string condition_str = GenerateValueExpression(*branch.condition, ctx, referenced_columns);
-    std::string result_true_str = GenerateValueExpression(*branch.result_if_true, ctx, referenced_columns);
-    std::string result_else_str = GenerateValueExpression(*expr.result_if_else, ctx, referenced_columns);
 
-    // Condition is expected to be 0 or 1 (result of a comparison)
-    return StringUtil::Format("(function() if (%s == 1) then return %s else return %s end end)()",
-                              condition_str, result_true_str, result_else_str);
+    return StringUtil::Format("(%s %s %s)", first_child_str, op_str, second_child_str);
 }
 
 
 // Main recursive dispatch for GenerateValueExpression
-std::string LuaTranslator::GenerateValueExpression(const BaseExpression& expr, LuaTranslatorContext& ctx,
-                                               std::vector<idx_t>& referenced_columns) {
-    switch (expr.type) {
-    case LuaJITExpressionType::CONSTANT:
-        return GenerateValue(static_cast<const ConstantExpression&>(expr), ctx, referenced_columns);
-    case LuaJITExpressionType::COLUMN_REFERENCE:
-        return GenerateValue(static_cast<const ColumnReferenceExpression&>(expr), ctx, referenced_columns);
-    case LuaJITExpressionType::BINARY_OPERATOR:
-        return GenerateValue(static_cast<const BinaryOperatorExpression&>(expr), ctx, referenced_columns);
-    case LuaJITExpressionType::UNARY_OPERATOR:
-        return GenerateValue(static_cast<const UnaryOperatorExpression&>(expr), ctx, referenced_columns);
-    case LuaJITExpressionType::CASE_EXPRESSION:
-        return GenerateValue(static_cast<const CaseExpression&>(expr), ctx, referenced_columns);
+std::string LuaTranslator::GenerateValueExpression(const Expression& expr, LuaTranslatorContext& ctx,
+                                               std::vector<column_binding>& referenced_columns) {
+    switch (expr.GetExpressionClass()) {
+    case ExpressionClass::BOUND_CONSTANT:
+        return GenerateValue(expr.Cast<BoundConstantExpression>(), ctx, referenced_columns);
+    case ExpressionClass::BOUND_REF:
+        return GenerateValue(expr.Cast<BoundReferenceExpression>(), ctx, referenced_columns);
+    case ExpressionClass::BOUND_OPERATOR:
+        return GenerateValue(expr.Cast<BoundOperatorExpression>(), ctx, referenced_columns);
+    // TODO: Add cases for BoundFunctionExpression, BoundCaseExpression, BoundConjunctionExpression etc.
+    // case ExpressionClass::BOUND_FUNCTION:
+    // case ExpressionClass::BOUND_CASE:
+    // case ExpressionClass::BOUND_CONJUNCTION:
     default:
-        throw NotImplementedException("Unsupported expression type in LuaTranslator::GenerateValueExpression");
+        throw NotImplementedException("Unsupported BoundExpression class in LuaTranslator: " + ExpressionTypeToString(expr.type) + "[" + expr.GetExpressionClassString() + "]");
     }
 }
 
 // Main public method: TranslateExpressionToLuaRowLogic
-std::string LuaTranslator::TranslateExpressionToLuaRowLogic(const BaseExpression& expr, LuaTranslatorContext& ctx) {
-    std::vector<idx_t> referenced_columns;
+std::string LuaTranslator::TranslateExpressionToLuaRowLogic(const Expression& expr, LuaTranslatorContext& ctx) {
+    std::vector<column_binding> referenced_columns;
     std::string value_expr_str = GenerateValueExpression(expr, ctx, referenced_columns);
 
-    std::sort(referenced_columns.begin(), referenced_columns.end()); // Ensure consistent order for null checks
+    // Sort referenced_columns by column_index for consistent null check generation
+    std::sort(referenced_columns.begin(), referenced_columns.end(),
+              [](const column_binding& a, const column_binding& b) {
+                  return a.column_index < b.column_index;
+              });
+    // Remove duplicates that might arise if same column_binding used multiple times
+    referenced_columns.erase(std::unique(referenced_columns.begin(), referenced_columns.end(),
+                                       [](const column_binding& a, const column_binding& b) {
+                                           return a.column_index == b.column_index; // Simple unique by index
+                                       }), referenced_columns.end());
+
 
     std::stringstream ss;
 
     if (!referenced_columns.empty()) {
         ss << "if ";
         for (size_t k = 0; k < referenced_columns.size(); ++k) {
-            ss << ctx.GetInputVectorsTable() << "[" << referenced_columns[k] + 1 << "].nullmask[i]";
+            // Here, referenced_columns[k].column_index is the original index from BoundReferenceExpression
+            // This should map to the correct input vector in the Lua function.
+            // If input vectors to Lua are ordered corresponding to their appearance in the query's projection
+            // or input chunk, then this index is correct for GetInputVectorsTable()[idx+1].
+            ss << ctx.GetInputVectorsTable() << "[" << referenced_columns[k].column_index + 1 << "].nullmask[i]";
             if (k < referenced_columns.size() - 1) {
                 ss << " or ";
             }
         }
         ss << " then\n";
         ss << "    output_vector.nullmask[i] = true\n";
-        // For CASE, if condition is null, result is null. If condition met but result_expr is null, result is null.
-        // This top-level null check based on inputs covers this for direct inputs.
-        // If a CASE branch itself evaluates to NULL due to its own inputs, that specific branch's
-        // value_expr_str will be 'nil' or it will propagate null through its own sub-logic.
-        // The current GenerateValue for CASE doesn't explicitly return 'nil' but a value,
-        // assuming its subexpressions handle their own nulls to produce a value or propagate null to this outer check.
-        // This needs careful thought for full SQL null semantics for CASE.
-        // For now, if any referenced column in the *entire* expression is null, the output is null.
     } else {
-        // No column references, expression is based on constants only.
         ss << "output_vector.nullmask[i] = false\n";
     }
 
-    // This 'else' block is for when all direct inputs are NOT NULL.
-    // The expression itself (value_expr_str) might still evaluate to NULL in Lua (e.g. string op on nil)
-    // or produce a value that needs to be stored.
-    if (!referenced_columns.empty()) { // Only add 'else' if there was an 'if'
+    if (!referenced_columns.empty()) {
         ss << "else\n";
-        ss << "    output_vector.nullmask[i] = false\n"; // Tentatively set to not null
+        ss << "    output_vector.nullmask[i] = false\n";
     }
 
-    // Determine if the expression's result type is boolean (from comparisons, logical ops)
-    // to convert Lua true/false to 1/0 for C.
-    bool is_boolean_result = false;
-    if (expr.type == LuaJITExpressionType::BINARY_OPERATOR) {
-        auto& bin_op = static_cast<const BinaryOperatorExpression&>(expr);
-        is_boolean_result = (bin_op.operator_type == LuaJITBinaryOperatorType::EQUALS ||
-                             bin_op.operator_type == LuaJITBinaryOperatorType::NOT_EQUALS ||
-                             bin_op.operator_type == LuaJITBinaryOperatorType::GREATER_THAN ||
-                             bin_op.operator_type == LuaJITBinaryOperatorType::LESS_THAN ||
-                             bin_op.operator_type == LuaJITBinaryOperatorType::GREATER_THAN_OR_EQUALS ||
-                             bin_op.operator_type == LuaJITBinaryOperatorType::LESS_THAN_OR_EQUALS ||
-                             bin_op.operator_type == LuaJITBinaryOperatorType::AND || // AND/OR results are effectively boolean
-                             bin_op.operator_type == LuaJITBinaryOperatorType::OR ||
-                             bin_op.operator_type == LuaJITBinaryOperatorType::LIKE);
-    } else if (expr.type == LuaJITExpressionType::UNARY_OPERATOR) {
-        auto& un_op = static_cast<const UnaryOperatorExpression&>(expr);
-        is_boolean_result = (un_op.operator_type == LuaJITUnaryOperatorType::NOT);
-    }
-    // CASE expressions can return boolean too, but this depends on the result expressions.
-    // For now, assume CASE does not automatically mean boolean result unless its inner exprs are.
-    // This simple flag might not be perfect for all nested cases.
+    bool is_boolean_output_type = expr.return_type.id() == LogicalTypeId::BOOLEAN;
+    // Some operators might also implicitly return boolean (e.g. LIKE if not a BoundOperatorExpression)
+    // For BoundOperatorExpression, comparisons return BOOLEAN.
+    // For this phase, we rely on expr.return_type.
 
     std::string indent = (!referenced_columns.empty()) ? "    " : "";
-    if (is_boolean_result) {
-        ss << indent << "if " << value_expr_str << " then\n";
-        ss << indent << "    output_vector.data[i] = 1\n";
+    if (is_boolean_output_type) {
+        ss << indent << "if " << value_expr_str << " then\n"; // Lua true/false
+        ss << indent << "    output_vector.data[i] = 1\n";    // C true (1)
         ss << indent << "else\n";
-        ss << indent << "    output_vector.data[i] = 0\n";
+        ss << indent << "    output_vector.data[i] = 0\n";    // C false (0)
         ss << indent << "end\n";
     } else {
-        // For non-boolean results (numeric, string from CONCAT, or CASE returning non-bool)
-        // TODO: For string results, output_vector.data[i] needs to be an FFIString struct.
-        // This requires the output FFIVector to be typed or to have a way to set ptr/len.
-        // This PoC primarily handles numeric output or boolean-as-int. String output is complex.
-        // If value_expr_str is a Lua string (e.g. from CONCAT), this assignment is wrong.
-        // For now, we assume output is numeric/boolean-as-int.
-        ss << indent << "output_vector.data[i] = " << value_expr_str << "\n";
+        // For numeric types, direct assignment.
+        // For VARCHAR output, this is complex. Lua string needs to be written to FFIString.
+        // This requires output_vector.data[i] to be FFIString, and then setting ptr and len.
+        // Memory for ptr needs to be managed (e.g. from a string heap passed via FFI).
+        // For Phase 1, we focus on numeric results or boolean-as-int.
+        // If expr.return_type is VARCHAR, this line is conceptually incorrect for direct assignment.
+        if (expr.return_type.id() == LogicalTypeId::VARCHAR && value_expr_str.rfind("ffi.string", 0) != 0 && value_expr_str != "nil") {
+             // This is a Lua string, e.g. from CONCAT or string literal. Cannot assign directly to output_vector.data[i] if it's void* for FFIString array.
+             // This part needs a robust solution for writing strings back.
+             // For now, we'll comment out direct assignment for strings for clarity of the problem.
+             // ss << indent << "-- String result: " << value_expr_str << " (needs FFIString output handling)\n";
+             // As a placeholder, if it's a string, let's make it try to assign length, or error.
+             // For the benchmark, string ops produced boolean. Here, if we allow string result:
+             ss << indent << "-- Attempting to assign Lua string: " << value_expr_str << "\n";
+             ss << indent << "-- This requires output_vector.data[i] to be FFIString and proper handling.\n";
+             ss << indent << "-- For PoC, this will likely fail or be incorrect for string results.\n";
+             // Let's assume for now, if a string expression gets here, it's an error or unhandled.
+             // A proper way: call a C function to copy string to output FFIString.
+             // e.g. output_vector.data[i].ptr, .len = copy_string_to_output_buffer(value_expr_str)
+        } else {
+             ss << indent << "output_vector.data[i] = " << value_expr_str << "\n";
+        }
     }
 
-    if (!referenced_columns.empty()) { // Close the 'if/else' for null checks
+    if (!referenced_columns.empty()) {
         ss << "end";
     }
 
