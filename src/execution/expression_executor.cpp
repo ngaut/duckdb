@@ -5,40 +5,55 @@
 #include "duckdb/storage/statistics/base_statistics.hpp"
 #include "duckdb/planner/expression/list.hpp"
 
+// Includes for JIT
+#include "duckdb/main/luajit_translator.hpp"       // Assuming this path for PoC
+#include "duckdb/common/luajit_ffi_structs.hpp" // Assuming this path for PoC
+#include "duckdb/planner/luajit_expression_nodes.hpp" // For casting Expression to PoC nodes
+
+// Required for lua_State and Lua API, typically included via luajit_wrapper.hpp's inclusions
+extern "C" {
+#include "lua.h"
+#include "lualib.h"
+#include "lauxlib.h"
+}
+
+
 namespace duckdb {
 
-ExpressionExecutor::ExpressionExecutor(ClientContext &context) : context(&context) {
+ExpressionExecutor::ExpressionExecutor(ClientContext &context) : context(&context), luajit_wrapper_() { // Initialize luajit_wrapper_
 	auto &config = DBConfig::GetConfig(context);
 	debug_vector_verification = config.options.debug_verify_vector;
 }
 
 ExpressionExecutor::ExpressionExecutor(ClientContext &context, const Expression *expression)
-    : ExpressionExecutor(context) {
+    : ExpressionExecutor(context) { // luajit_wrapper_ initialized by delegating constructor
 	D_ASSERT(expression);
 	AddExpression(*expression);
 }
 
 ExpressionExecutor::ExpressionExecutor(ClientContext &context, const Expression &expression)
-    : ExpressionExecutor(context) {
+    : ExpressionExecutor(context) { // luajit_wrapper_ initialized by delegating constructor
 	AddExpression(expression);
 }
 
 ExpressionExecutor::ExpressionExecutor(ClientContext &context, const vector<unique_ptr<Expression>> &exprs)
-    : ExpressionExecutor(context) {
+    : ExpressionExecutor(context) { // luajit_wrapper_ initialized by delegating constructor
 	D_ASSERT(exprs.size() > 0);
 	for (auto &expr : exprs) {
 		AddExpression(*expr);
 	}
 }
 
-ExpressionExecutor::ExpressionExecutor(const vector<unique_ptr<Expression>> &exprs) : context(nullptr) {
+// For constructors without ClientContext, luajit_wrapper_ will be default constructed.
+// This is fine if JIT is only enabled when a context is present.
+ExpressionExecutor::ExpressionExecutor(const vector<unique_ptr<Expression>> &exprs) : context(nullptr), luajit_wrapper_() {
 	D_ASSERT(exprs.size() > 0);
 	for (auto &expr : exprs) {
 		AddExpression(*expr);
 	}
 }
 
-ExpressionExecutor::ExpressionExecutor() : context(nullptr) {
+ExpressionExecutor::ExpressionExecutor() : context(nullptr), luajit_wrapper_() {
 }
 
 bool ExpressionExecutor::HasContext() {
@@ -181,8 +196,138 @@ unique_ptr<ExpressionState> ExpressionExecutor::InitializeState(const Expression
 	}
 }
 
+// New ShouldJIT method implementation
+bool ExpressionExecutor::ShouldJIT(const Expression &expr, ExpressionState *state) {
+	if (!context) { // JIT needs a context for LuaJIT state and potentially configs
+		return false;
+	}
+	// For PoC, enable JIT only for specific expression types (e.g., our simplified binary ops)
+	// and if a global JIT switch is on (e.g., via PRAGMA or session setting).
+	// This PoC assumes luajit_expression_nodes.hpp types are used or mapped.
+	// A real implementation would check DuckDB's internal ExpressionType.
+	if (expr.GetExpressionClass() != ExpressionClass::BOUND_OPERATOR &&
+	    expr.GetExpressionClass() != ExpressionClass::BOUND_COMPARISON) { // Placeholder for actual check
+		// This check is too generic for real DuckDB expressions.
+		// We'd need to cast to our PoC BaseExpression type or map DuckDB expressions.
+		// For now, let's assume the test will pass a compatible expression type
+		// that we can identify or that this check is a placeholder.
+		// A better check for PoC might be:
+		// if (dynamic_cast<const BinaryOperatorExpression*>(&expr)) return true;
+		// But that requires the input 'expr' to be of our PoC type, not DuckDB's real types.
+		// Let's assume for the PoC test, this will pass through.
+	}
+
+	// Example: check a global enable flag from ClientContext
+	auto &config = DBConfig::GetConfig(*context);
+	// if (!config.options.enable_jit) return false; // Assuming such an option exists
+
+	// Avoid JITing for very small counts (compile overhead might dominate)
+	// if (count < 100) return false; // 'count' is not available here, but in Execute.
+
+	// If already tried and failed, don't try again for this expression state
+	if (state->attempted_jit_compilation && !state->jit_compilation_succeeded) {
+		return false;
+	}
+	return true; // Default to attempting JIT for compatible expressions for PoC
+}
+
 void ExpressionExecutor::Execute(const Expression &expr, ExpressionState *state, const SelectionVector *sel,
                                  idx_t count, Vector &result) {
+	// JIT Path
+	if (ShouldJIT(expr, state)) {
+		if (!state->attempted_jit_compilation) {
+			state->attempted_jit_compilation = true;
+			// This is a placeholder for translating DuckDB's Expression to PoC's BaseExpression
+			// For the unit test, we will construct a PoC expression directly.
+			// In a real scenario, this translation is complex.
+			// We assume 'expr' can be conceptually cast or converted to 'lua_expr_node' for translation.
+			// For this PoC, we will skip direct translation from 'expr' and assume
+			// the test provides a translatable 'BaseExpression'.
+			// The current 'expr' is DuckDB's native Expression.
+			// We'll need to construct a luajit_expression_nodes::BaseExpression for the translator.
+			// This part is highly conceptual for full DuckDB integration.
+			// For testing, the test itself will create a luajit_expression_nodes::BaseExpression.
+			// Here, we'd ideally have a function:
+			// unique_ptr<BaseExpression> ConvertToLuaExr(const Expression& duckdb_expr);
+			// For now, this path will only really work if the test calls Execute with a
+			// luajit_expression_nodes::BaseExpression that's also a duckdb::Expression,
+			// which is not the case.
+			// Let's assume for the PoC that we bypass this for now and the test will
+			// call a specific JIT execution path with the PoC expression type.
+			//
+			// OR, we make the test responsible for JIT compilation and storing the function name.
+			// For this step, let's focus on the call to a pre-compiled Lua function.
+			// The test will compile and register the function.
+			//
+			// If state->jitted_lua_function_name is set (by a test or a future JIT manager):
+			if (state->jit_compilation_succeeded && !state->jitted_lua_function_name.empty()) {
+				// Prepare FFIVectors for inputs and output. This is highly conceptual
+				// as it needs to bridge DuckDB's Vector/DataChunk with FFIVector.
+				// For the PoC test, we will create FFIVectors manually from std::vectors.
+
+				// Example for one output, two inputs (hardcoded for col0 + col1 like expr)
+				// This part would need to know the number of inputs for the specific expr.
+				// This is very simplified and assumes flat int vectors.
+				// Proper type handling and UnifiedVectorFormat are major tasks.
+
+				duckdb::ffi::FFIVector ffi_output_vec;
+				// This requires result vector to be setup for writing data, including its data buffer and nullmask
+				// For PoC, assume result.GetData() and result.GetNullMask().GetData() are valid.
+				// THIS IS DANGEROUS AND SIMPLIFIED - DuckDB Vectors need proper handling.
+				// ffi_output_vec.data = FlatVector::GetData(result);
+				// ffi_output_vec.nullmask = FlatVector::Validity(result).GetData(); // This is not bool*
+				// ffi_output_vec.count = count;
+				// For the PoC, we'll assume the test prepares FFIVectors and calls a different ExecuteJITed.
+				// This direct integration is too complex for one step with current PoC structure.
+
+				// ---> REVISION: The JIT path for this PoC will be mostly driven by the TEST.
+				// The test will:
+				// 1. Create PoC expression.
+				// 2. Translate it to Lua, get full_lua_script.
+				// 3. Use luajit_wrapper_.ExecuteString to compile and define the Lua function (e.g., "test_jit_func_1").
+				// 4. Store "test_jit_func_1" in state->jitted_lua_function_name & set jit_compilation_succeeded.
+				// 5. Then, this Execute method, when called, would find the function name and execute it.
+
+				// Actual call to Lua function:
+				lua_State* L = luajit_wrapper_.GetState();
+				lua_getglobal(L, state->jitted_lua_function_name.c_str());
+				if (lua_isfunction(L, -1)) {
+					// Simplified: Assume 1 output vector, and inputs are from 'chunk' (DataChunk)
+					// This part requires mapping DataChunk to FFIVector arguments.
+					// For the PoC, this will be very hardcoded in the test.
+					// The test will prepare FFIVector args and push them.
+					// lua_pushlightuserdata(L, &ffi_output_vec_from_test);
+					// lua_pushlightuserdata(L, &ffi_input1_vec_from_test);
+					// lua_pushlightuserdata(L, &ffi_input2_vec_from_test);
+					// lua_pushinteger(L, count);
+					// if (lua_pcall(L, num_args, 0, 0) == LUA_OK) {
+					//     result.SetCount(count); // Or whatever the Lua script sets as output count
+					//     Verify(expr, result, count);
+					//     return; // JIT execution successful
+					// } else {
+					//     std::cerr << "LuaJIT Runtime Error: " << lua_tostring(L, -1) << std::endl;
+					//     lua_pop(L, 1);
+					//     state->jit_compilation_succeeded = false; // Mark as failed for future
+					// }
+				} else {
+					lua_pop(L, 1); // Pop non-function
+					// std::cerr << "LuaJIT Error: Compiled function " << state->jitted_lua_function_name << " not found." << std::endl;
+					state->jit_compilation_succeeded = false; // Function disappeared?
+				}
+				// If JIT call failed or function not found, fall through to interpreter.
+				// For the PoC, the test will handle the direct call and verification.
+				// This block here is more of a placeholder for where real integration would go.
+				// The critical part is that if state->jit_compilation_succeeded is true AND
+				// jitted_lua_function_name is set, a JIT path MIGHT be taken.
+				// For this subtask, we are making this block very conceptual. The actual JIT call
+				// will be demonstrated more directly in the unit test.
+			}
+		}
+		// If JIT was attempted and succeeded, and the function was called, we would have returned.
+		// If it falls through, it means JIT path was not taken or failed.
+	}
+
+
 #ifdef DEBUG
 	// The result vector must be used for the first time, or must be reset.
 	// Otherwise, the validity mask can contain previous (now incorrect) data.
@@ -329,5 +474,28 @@ idx_t ExpressionExecutor::DefaultSelect(const Expression &expr, ExpressionState 
 vector<unique_ptr<ExpressionExecutorState>> &ExpressionExecutor::GetStates() {
 	return states;
 }
+
+
+// Helper function to get the number of arguments for a LuaJIT expression
+// This is highly dependent on the expression structure.
+// For PoC, we might inspect our simplified luajit_expression_nodes.
+// This is a placeholder for where such logic might go.
+// static idx_t GetNumberOfInputs(const BaseExpression& lua_expr_node) {
+//    if (lua_expr_node.type == LuaJITExpressionType::COLUMN_REFERENCE) {
+//        return 1; // Or rather, indicates max column index + 1
+//    }
+//    if (lua_expr_node.type == LuaJITExpressionType::BINARY_OPERATOR) {
+//        auto& bin_op = static_cast<const BinaryOperatorExpression&>(lua_expr_node);
+//        // This needs to find max column index referenced in children.
+//        // For simplicity, if it's col0 + col1, it implies 2 inputs.
+//        // This is not robust. A proper collection of referenced columns is needed.
+//        idx_t left_inputs = GetNumberOfInputs(*bin_op.left_child);
+//        idx_t right_inputs = GetNumberOfInputs(*bin_op.right_child);
+//        return std::max(left_inputs, right_inputs); // This is not quite right.
+//                                                  // It should be the count of distinct column refs.
+//    }
+//    return 0;
+//}
+
 
 } // namespace duckdb

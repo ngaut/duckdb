@@ -14,6 +14,7 @@
 #include "duckdb/planner/expression.hpp"
 #include "duckdb/main/client_context.hpp"
 #include "duckdb/common/enums/debug_vector_verification.hpp"
+#include "duckdb/common/luajit_wrapper.hpp" // Added for LuaJIT
 
 namespace duckdb {
 class Allocator;
@@ -35,6 +36,9 @@ public:
 	//! The data chunk of the current physical operator, used to resolve
 	//! column references and determines the output cardinality
 	DataChunk *chunk = nullptr;
+
+protected: // Changed to protected for luajit_wrapper_ if it needs to be accessed by derived/test code easily
+	LuaJITStateWrapper luajit_wrapper_; // Added for LuaJIT integration
 
 public:
 	bool HasContext();
@@ -112,6 +116,10 @@ protected:
 	void Execute(const Expression &expr, ExpressionState *state, const SelectionVector *sel, idx_t count,
 	             Vector &result);
 
+private: // Added private section for ShouldJIT
+	bool ShouldJIT(const Expression &expr, ExpressionState *state); // Added for JIT decision
+
+protected: // Ensure original protected methods remain protected if any, or adjust access for Execute
 	void Execute(const BoundBetweenExpression &expr, ExpressionState *state, const SelectionVector *sel, idx_t count,
 	             Vector &result);
 	void Execute(const BoundCaseExpression &expr, ExpressionState *state, const SelectionVector *sel, idx_t count,

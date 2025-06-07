@@ -30,6 +30,11 @@ struct ExpressionState {
 	DataChunk intermediate_chunk;
 	vector<bool> initialize;
 
+	// JIT related state for this specific expression's execution
+	bool attempted_jit_compilation = false;
+	bool jit_compilation_succeeded = false;
+	std::string jitted_lua_function_name; // Name of the compiled Lua function in Lua registry or as a global
+
 public:
 	void AddChild(Expression &child_expr);
 	void Finalize();
