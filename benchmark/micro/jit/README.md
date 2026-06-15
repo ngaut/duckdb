@@ -166,7 +166,7 @@ build/release/benchmark/benchmark_runner --disable-timeout benchmark/micro/jit/n
 `native_projection_*.benchmark` measures a diagnostic SLJIT source-prefix shape:
 
 - `sljit:source-prefix:projection`
-- one generated integer projection followed by a typed reference pass-through
+- one generated integer projection followed by a native typed reference projection
 - normal DuckDB scan and aggregate boundaries
 - single-threaded execution
 

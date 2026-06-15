@@ -62,8 +62,6 @@ const char *JitLoweringKindToString(JitLoweringKind kind) {
 		return "native";
 	case JitLoweringKind::FALLBACK:
 		return "fallback";
-	case JitLoweringKind::PASS_THROUGH:
-		return "pass-through";
 	default:
 		return "unknown";
 	}
@@ -640,16 +638,6 @@ idx_t JitRegionLoweringPlan::FallbackCount() const {
 	return result;
 }
 
-idx_t JitRegionLoweringPlan::PassThroughCount() const {
-	idx_t result = 0;
-	for (auto &node : nodes) {
-		if (node.kind == JitLoweringKind::PASS_THROUGH) {
-			result++;
-		}
-	}
-	return result;
-}
-
 JitExecutionMode JitRegionLoweringPlan::ExpectedCompiledExecutionMode() const {
 	return compiled_execution_mode;
 }
@@ -669,7 +657,6 @@ JitRegionSourceExecutionKind JitRegionLoweringPlan::SelectedSourceExecution() co
 string JitRegionLoweringPlan::EventReason() const {
 	string result = "region-lowering:native=" + std::to_string(NativeCount()) +
 	                ",fallback=" + std::to_string(FallbackCount()) +
-	                ",pass-through=" + std::to_string(PassThroughCount()) +
 	                ",execution-form=" + JitRegionExecutionFormToString(region_execution_form);
 	if (selected_source_execution != JitRegionSourceExecutionKind::NONE) {
 		result += ";selected-source-execution=";

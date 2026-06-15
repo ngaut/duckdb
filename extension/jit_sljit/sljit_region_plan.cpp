@@ -1079,8 +1079,8 @@ static SljitRegionNodePlan PlanSljitProjectionNode(const JitRegionIRNode &node,
 	bool generates_code = false;
 	if (TryPlanDirectSljitProjection(node, native_op, generates_code, error)) {
 		SljitRegionNodePlan result;
-		result.kind = generates_code ? JitLoweringKind::NATIVE : JitLoweringKind::PASS_THROUGH;
-		result.reason = generates_code ? "generated typed projection" : "typed reference projection pass-through";
+		result.kind = JitLoweringKind::NATIVE;
+		result.reason = generates_code ? "generated typed projection" : "native typed reference projection";
 		result.native_op = std::move(native_op);
 		return result;
 	}
@@ -1344,9 +1344,9 @@ static SljitRegionNodePlan PlanSljitNativeSourceNode(const JitRegionIRNode &node
 
 	SljitRegionNodePlan result;
 	if (node.source->filters.empty()) {
-		result.kind = JitLoweringKind::PASS_THROUGH;
+		result.kind = JitLoweringKind::NATIVE;
 		result.requires_native_source = true;
-		result.reason = "DuckDB native table scan source runtime";
+		result.reason = "native table scan source protocol";
 		AppendSljitSourceIR(result.reason, node, JitRegionSourceExecutionKind::NATIVE_SOURCE);
 		return result;
 	}
@@ -1375,11 +1375,11 @@ static SljitRegionNodePlan PlanSljitNativeSourceNode(const JitRegionIRNode &node
 		result.reason = "source-prefix filters are not representable as generated typed predicates;" + result.reason;
 	}
 
-	result.kind = JitLoweringKind::PASS_THROUGH;
+	result.kind = JitLoweringKind::NATIVE;
 	result.requires_native_source = true;
 	result.source_filter_count = node.source->filters.size();
 	result.source_filter_execution = SljitSourceFilterExecutionKind::DUCKDB_SCAN;
-	result.reason = "DuckDB native table scan source runtime;source-filters-owned-by-duckdb-scan";
+	result.reason = "native table scan source protocol;source-filters-owned-by-duckdb-scan";
 	result.reason += ";source_filter_count=" + std::to_string(node.source->filters.size());
 	result.reason += ";source_prefix_filter_prune_required=" +
 	                 string(protocol.source_prefix_filter_prune_required ? "true" : "false");
@@ -1403,9 +1403,9 @@ static SljitRegionNodePlan PlanSljitNativeStateScanSourceNode(const JitRegionIRN
 	}
 
 	SljitRegionNodePlan result;
-	result.kind = JitLoweringKind::PASS_THROUGH;
+	result.kind = JitLoweringKind::NATIVE;
 	result.requires_native_source = true;
-	result.reason = "DuckDB native state scan source runtime";
+	result.reason = "native state scan source protocol";
 	result.reason += ";native-state-scan-contract=";
 	result.reason += JitRegionStateContractStatusToString(node.source->native_state_scan_contract.status);
 	result.reason += ";native-state-scan-capability=" + node.source->native_state_scan_contract.required_capability;
@@ -1428,9 +1428,9 @@ static SljitRegionNodePlan PlanSljitNativeStatefulSourceNode(const JitRegionIRNo
 	}
 
 	SljitRegionNodePlan result;
-	result.kind = JitLoweringKind::PASS_THROUGH;
+	result.kind = JitLoweringKind::NATIVE;
 	result.requires_native_source = true;
-	result.reason = "DuckDB native stateful source runtime";
+	result.reason = "native stateful source protocol";
 	result.reason += ";native-source-contract=";
 	result.reason += JitRegionNativeSourceStatusToString(node.source->native_source_contract.status);
 	result.reason += ";native-source-capability=" + node.source->native_source_contract.required_capability;
@@ -2561,8 +2561,7 @@ SljitRegionPlan BuildSljitRegionPlan(const JitRegionIR &region_ir, const JitRegi
 				                                     : node.source->execution;
 				plan.lowering_plan.SetSelectedSourceExecution(selected_source_execution);
 			}
-			if (executable_source &&
-			    (node_plan.kind == JitLoweringKind::NATIVE || node_plan.kind == JitLoweringKind::PASS_THROUGH)) {
+			if (executable_source && node_plan.kind == JitLoweringKind::NATIVE) {
 				auto source_output_types = SljitRegionNodeHasNativeOps(node_plan)
 				                               ? SljitRegionNodeLastNativeOp(node_plan).output_types
 				                               : node.output_types;
@@ -2639,8 +2638,7 @@ SljitRegionPlan BuildSljitRegionPlan(const JitRegionIR &region_ir, const JitRegi
 				        ? "operator-fusion-gap:hash-join-probe-protocol-missing"
 				        : "operator-fusion-gap:hash-join-probe-native-lowering-missing;" + node_plan.reason);
 			}
-		if ((node_plan.kind != JitLoweringKind::NATIVE && node_plan.kind != JitLoweringKind::PASS_THROUGH) ||
-		    !SljitRegionNodeHasNativeOps(node_plan)) {
+		if (node_plan.kind != JitLoweringKind::NATIVE || !SljitRegionNodeHasNativeOps(node_plan)) {
 			native_region_possible = false;
 			continue;
 		}

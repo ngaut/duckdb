@@ -324,7 +324,7 @@ def verify_backend_contract_tests(root: Path) -> None:
             "kernel=generic-runtime-loop",
             "found_aggregate_sink_protocol",
             "backend cannot generate executable code for this whole region",
-            "typed reference projection pass-through",
+            "native typed reference projection",
             "REQUIRE(event.status == \"unsupported\")",
             "REQUIRE_FALSE(StringUtil::Contains(event.reason, \"kernel=generic-runtime-loop\"))",
             "JIT auto region selection uses maximal transform candidates",
@@ -1584,6 +1584,29 @@ def verify_region_selection_contract(root: Path) -> None:
         root,
         [Path("src/include/duckdb/execution/jit/common.hpp"), Path("src/execution/jit_types.cpp")],
         ["GENERATED_HELPER", "HELPER_BOUNDARY"],
+    )
+    assert_no_text(
+        root,
+        [
+            Path("src/include/duckdb/execution/jit/common.hpp"),
+            Path("src/include/duckdb/execution/jit/runtime.hpp"),
+            Path("src/execution/jit_operator_descriptor.cpp"),
+            Path("src/execution/jit_region_ir.cpp"),
+            Path("src/execution/jit_types.cpp"),
+            Path("extension/jit_sljit/sljit_region_plan.cpp"),
+            Path("test/api/test_jit.cpp"),
+            Path("benchmark/tpch/jit/tpch_trace.py"),
+            Path("benchmark/tpch/jit/verify_tpch_trace.py"),
+        ],
+        [
+            "JitLoweringKind::PASS_THROUGH",
+            "PassThroughCount",
+            "pass-through=",
+            "typed reference projection pass-through",
+            "DuckDB native table scan source runtime",
+            "DuckDB native state scan source runtime",
+            "DuckDB native stateful source runtime",
+        ],
     )
     assert_no_text(
         root,
@@ -3182,7 +3205,7 @@ def verify_core_lowering_boundary(root: Path) -> None:
             "native_source_contract.status == JitRegionNativeSourceStatus::READY",
             "native_state_scan_contract.status == JitRegionStateContractStatus::READY",
             "PlanSljitNativeStatefulSourceNode",
-            "DuckDB native stateful source runtime",
+            "native stateful source protocol",
             "native stateful source requires a ready native-source contract",
             "AppendSljitSourceIR(result.reason, node, JitRegionSourceExecutionKind::NATIVE_SOURCE)",
         ],

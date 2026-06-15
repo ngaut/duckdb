@@ -15,7 +15,7 @@ enum class JitCompileTarget : uint8_t { REGION };
 enum class JitCompileStatus : uint8_t { COMPILED, SKIPPED, UNSUPPORTED, UNAVAILABLE, DISABLED, ERROR };
 enum class JitExecutionMode : uint8_t { NONE, NATIVE, EXECUTOR_FALLBACK, UNSUPPORTED };
 enum class JitRegionExecutionForm : uint8_t { NONE, FUSED };
-enum class JitLoweringKind : uint8_t { NATIVE, FALLBACK, PASS_THROUGH };
+enum class JitLoweringKind : uint8_t { NATIVE, FALLBACK };
 enum class JitRegionIRNodeKind : uint8_t { SOURCE, FILTER, PROJECTION, OPERATOR, SINK };
 enum class JitRegionABI : uint8_t { NONE, CHUNK_TRANSFORM, SOURCE_PREFIX, SINK_SUFFIX, FULL_PIPELINE, STATE_SCAN };
 enum class JitRegionCandidateScope : uint8_t {

@@ -490,13 +490,13 @@ static string JitRegionSourceBoundaryMarker(JitRegionSourceKind kind, JitRegionS
 	case JitRegionSourceKind::DUCKDB_TABLE_SCAN:
 	case JitRegionSourceKind::TABLE_FUNCTION_SCAN:
 	case JitRegionSourceKind::GENERIC_SCAN:
-			if (execution == JitRegionSourceExecutionKind::NATIVE_SOURCE) {
-				return "DuckDB native table scan source runtime";
-			}
-			if (execution == JitRegionSourceExecutionKind::DUCKDB_SOURCE_BOUNDARY) {
-				return "DuckDB table scan source boundary;source-fusion-gap:requires-native-source;"
-				       "source_execution=duckdb-source-boundary";
-			}
+		if (execution == JitRegionSourceExecutionKind::NATIVE_SOURCE) {
+			return "DuckDB native table scan source protocol";
+		}
+		if (execution == JitRegionSourceExecutionKind::DUCKDB_SOURCE_BOUNDARY) {
+			return "DuckDB table scan source boundary;source-fusion-gap:requires-native-source;"
+			       "source_execution=duckdb-source-boundary";
+		}
 		return "DuckDB table scan executor fallback boundary";
 	default:
 		return string();

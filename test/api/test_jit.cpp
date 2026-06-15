@@ -2523,49 +2523,49 @@ TEST_CASE("JIT region lowering exposes stateful source protocol candidates", "[a
 			continue;
 		}
 		found_hash_aggregate_source_protocol = true;
-	found_hash_aggregate_source_reason =
-	    found_hash_aggregate_source_reason ||
-	    StringUtil::Contains(event.reason, "DuckDB hash aggregate native state scan protocol") ||
-	    StringUtil::Contains(event.reason, "DuckDB native state scan source runtime");
-	REQUIRE(StringUtil::Contains(event.ir, "source<kind=stateful-operator"));
-	REQUIRE(StringUtil::Contains(event.ir, "execution=native-source"));
-	REQUIRE(StringUtil::Contains(event.ir, "native_source_contract<status=ready,"
-	                                       "required_capability=stateful-operator-native-source"));
-	REQUIRE(StringUtil::Contains(event.ir, "blocker=none"));
-	REQUIRE(StringUtil::Contains(event.ir, "native_state_scan_contract_status=ready"));
-	REQUIRE(StringUtil::Contains(event.ir, "native_state_scan_required_capability="
-	                                       "hash-aggregate-native-state-scan"));
-	REQUIRE(StringUtil::Contains(event.ir, "native_state_scan_protocol=v1"));
-	REQUIRE(StringUtil::Contains(event.ir, "native_state_scan_blocker=none"));
-	REQUIRE(event.candidate_contract.source_ownership == JitRegionOwnershipKind::NATIVE_PROTOCOL);
-	REQUIRE(event.candidate_contract.state_scan_ownership == JitRegionOwnershipKind::NATIVE_PROTOCOL);
-	REQUIRE(event.candidate_contract.owns_source);
-	REQUIRE(event.candidate_contract.owns_state_scan);
-	REQUIRE(event.candidate_contract.missing_protocol_count == 0);
-	REQUIRE(event.candidate_contract.required_capabilities.size() == 2);
-	REQUIRE(event.candidate_contract.required_capabilities[0] == "hash-aggregate-native-state-scan");
-	REQUIRE(event.candidate_contract.required_capabilities[1] == "hash-aggregate-native-grouped-state");
-	REQUIRE(event.candidate_contract.blockers.empty());
-	RequireStatefulSourceNativeProtocolABI(event, found_hash_aggregate_state_scan_abi);
-	found_hash_aggregate_state_scan_abi =
-	    found_hash_aggregate_state_scan_abi ||
-	    (event.candidate_contract.owns_source && event.candidate_contract.owns_state_scan);
-	REQUIRE(StringUtil::Contains(event.ir, "source=native-protocol,state_scan=native-protocol"));
-	REQUIRE(StringUtil::Contains(event.ir, "native_grouped_state_contract_status=ready"));
-	REQUIRE(StringUtil::Contains(event.ir, "native_grouped_state_required_capability="
-	                                       "hash-aggregate-native-grouped-state"));
-	REQUIRE(StringUtil::Contains(event.ir, "native_grouped_state_blocker=none"));
-	REQUIRE_FALSE(StringUtil::Contains(event.ir, "typed_hash_aggregate_lookup_helper"));
-	REQUIRE_FALSE(StringUtil::Contains(event.ir, "hash-aggregate-typed-lookup-helper"));
-	REQUIRE(StringUtil::Contains(event.ir, "native_hash_aggregate_lookup_contract_status=ready"));
-	REQUIRE(StringUtil::Contains(event.ir, "native_hash_aggregate_lookup_required_capability="
-	                                       "hash-aggregate-native-lookup"));
-	REQUIRE(StringUtil::Contains(event.ir, "native_hash_aggregate_lookup_blocker=none"));
-	REQUIRE(StringUtil::Contains(event.ir, "aggregate_protocol<aggregate_operator_kind=hash"));
-	REQUIRE(StringUtil::Contains(event.ir, "aggregate_operator_kind=hash"));
-	REQUIRE(StringUtil::Contains(event.ir, "aggregates=[aggregate0<function=sum"));
-	REQUIRE(StringUtil::Contains(event.ir, "groups=[group0<input_index=0,type=BIGINT"));
-	REQUIRE(StringUtil::Contains(event.ir, "supported_reference=true"));
+		found_hash_aggregate_source_reason =
+		    found_hash_aggregate_source_reason ||
+		    StringUtil::Contains(event.reason, "DuckDB hash aggregate native state scan protocol") ||
+		    StringUtil::Contains(event.reason, "native state scan source protocol");
+		REQUIRE(StringUtil::Contains(event.ir, "source<kind=stateful-operator"));
+		REQUIRE(StringUtil::Contains(event.ir, "execution=native-source"));
+		REQUIRE(StringUtil::Contains(event.ir, "native_source_contract<status=ready,"
+		                                       "required_capability=stateful-operator-native-source"));
+		REQUIRE(StringUtil::Contains(event.ir, "blocker=none"));
+		REQUIRE(StringUtil::Contains(event.ir, "native_state_scan_contract_status=ready"));
+		REQUIRE(StringUtil::Contains(event.ir, "native_state_scan_required_capability="
+		                                       "hash-aggregate-native-state-scan"));
+		REQUIRE(StringUtil::Contains(event.ir, "native_state_scan_protocol=v1"));
+		REQUIRE(StringUtil::Contains(event.ir, "native_state_scan_blocker=none"));
+		REQUIRE(event.candidate_contract.source_ownership == JitRegionOwnershipKind::NATIVE_PROTOCOL);
+		REQUIRE(event.candidate_contract.state_scan_ownership == JitRegionOwnershipKind::NATIVE_PROTOCOL);
+		REQUIRE(event.candidate_contract.owns_source);
+		REQUIRE(event.candidate_contract.owns_state_scan);
+		REQUIRE(event.candidate_contract.missing_protocol_count == 0);
+		REQUIRE(event.candidate_contract.required_capabilities.size() == 2);
+		REQUIRE(event.candidate_contract.required_capabilities[0] == "hash-aggregate-native-state-scan");
+		REQUIRE(event.candidate_contract.required_capabilities[1] == "hash-aggregate-native-grouped-state");
+		REQUIRE(event.candidate_contract.blockers.empty());
+		RequireStatefulSourceNativeProtocolABI(event, found_hash_aggregate_state_scan_abi);
+		found_hash_aggregate_state_scan_abi =
+		    found_hash_aggregate_state_scan_abi ||
+		    (event.candidate_contract.owns_source && event.candidate_contract.owns_state_scan);
+		REQUIRE(StringUtil::Contains(event.ir, "source=native-protocol,state_scan=native-protocol"));
+		REQUIRE(StringUtil::Contains(event.ir, "native_grouped_state_contract_status=ready"));
+		REQUIRE(StringUtil::Contains(event.ir, "native_grouped_state_required_capability="
+		                                       "hash-aggregate-native-grouped-state"));
+		REQUIRE(StringUtil::Contains(event.ir, "native_grouped_state_blocker=none"));
+		REQUIRE_FALSE(StringUtil::Contains(event.ir, "typed_hash_aggregate_lookup_helper"));
+		REQUIRE_FALSE(StringUtil::Contains(event.ir, "hash-aggregate-typed-lookup-helper"));
+		REQUIRE(StringUtil::Contains(event.ir, "native_hash_aggregate_lookup_contract_status=ready"));
+		REQUIRE(StringUtil::Contains(event.ir, "native_hash_aggregate_lookup_required_capability="
+		                                       "hash-aggregate-native-lookup"));
+		REQUIRE(StringUtil::Contains(event.ir, "native_hash_aggregate_lookup_blocker=none"));
+		REQUIRE(StringUtil::Contains(event.ir, "aggregate_protocol<aggregate_operator_kind=hash"));
+		REQUIRE(StringUtil::Contains(event.ir, "aggregate_operator_kind=hash"));
+		REQUIRE(StringUtil::Contains(event.ir, "aggregates=[aggregate0<function=sum"));
+		REQUIRE(StringUtil::Contains(event.ir, "groups=[group0<input_index=0,type=BIGINT"));
+		REQUIRE(StringUtil::Contains(event.ir, "supported_reference=true"));
 	}
 	REQUIRE(found_hash_aggregate_source_protocol);
 	REQUIRE(found_hash_aggregate_source_reason);
@@ -2644,7 +2644,7 @@ TEST_CASE("JIT region lowering exposes stateful source protocol candidates", "[a
 		    event.region_execution_form == "fused" && event.candidate_scope == "full_pipeline" &&
 		    event.selected_source_execution == JitRegionSourceExecutionKind::NATIVE_SOURCE) {
 			found_compiled_cte_native_source = true;
-			REQUIRE(StringUtil::Contains(event.reason, "DuckDB native stateful source runtime"));
+			REQUIRE(StringUtil::Contains(event.reason, "native stateful source protocol"));
 			REQUIRE(StringUtil::Contains(event.reason, "source-execution:native-source"));
 		}
 	}
@@ -2675,7 +2675,7 @@ TEST_CASE("JIT region lowering exposes stateful source protocol candidates", "[a
 		    found_compiled_perfect_hash_native_state_scan_source ||
 		    (event.status == "compiled" && event.execution_mode == "native" &&
 		     event.candidate_contract.abi == JitRegionABI::SOURCE_PREFIX &&
-		     StringUtil::Contains(event.reason, "DuckDB native state scan source runtime"));
+		     StringUtil::Contains(event.reason, "native state scan source protocol"));
 		REQUIRE(StringUtil::Contains(event.ir, "source<kind=stateful-operator"));
 		REQUIRE(StringUtil::Contains(event.ir, "execution=native-source"));
 		REQUIRE(StringUtil::Contains(event.ir, "native_source_contract<status=ready,"
@@ -2718,37 +2718,37 @@ TEST_CASE("JIT region lowering exposes stateful source protocol candidates", "[a
 	REQUIRE(found_perfect_hash_aggregate_state_scan_abi);
 	(void)found_compiled_perfect_hash_native_state_scan_source;
 
-		manager.ClearEvents();
-		REQUIRE_NO_FAIL(con.Query("SELECT sum(s) FROM (SELECT count(*) AS s FROM range(1000) AS t(i)) g"));
+	manager.ClearEvents();
+	REQUIRE_NO_FAIL(con.Query("SELECT sum(s) FROM (SELECT count(*) AS s FROM range(1000) AS t(i)) g"));
 
 	bool found_ungrouped_aggregate_source_protocol = false;
 	bool found_ungrouped_aggregate_source_reason = false;
 	bool found_ungrouped_aggregate_state_scan_abi = false;
-		bool found_compiled_ungrouped_native_state_scan_source = false;
-		bool found_runtime_ungrouped_native_state_scan_source = false;
-		for (auto &event : manager.GetEvents()) {
-			if (event.target == "region" && event.phase == "runtime" && event.status == "executed" &&
-			    event.execution_mode == "native" && event.region_execution_form == "fused" &&
-			    event.candidate_scope == "full_pipeline" && event.candidate_shape == "projection-sink" &&
-			    event.runtime_result == "finished" && event.source_native_output_rows > 0 &&
-			    event.source_native_invocation_count > 0) {
-				found_runtime_ungrouped_native_state_scan_source = true;
-			}
-			if (event.target != "region" || event.ir.empty() || !event.candidate_traits.has_stateful_source ||
-			    !StringUtil::Contains(event.ir, "function=ungrouped_aggregate_scan")) {
-				continue;
-			}
+	bool found_compiled_ungrouped_native_state_scan_source = false;
+	bool found_runtime_ungrouped_native_state_scan_source = false;
+	for (auto &event : manager.GetEvents()) {
+		if (event.target == "region" && event.phase == "runtime" && event.status == "executed" &&
+		    event.execution_mode == "native" && event.region_execution_form == "fused" &&
+		    event.candidate_scope == "full_pipeline" && event.candidate_shape == "projection-sink" &&
+		    event.runtime_result == "finished" && event.source_native_output_rows > 0 &&
+		    event.source_native_invocation_count > 0) {
+			found_runtime_ungrouped_native_state_scan_source = true;
+		}
+		if (event.target != "region" || event.ir.empty() || !event.candidate_traits.has_stateful_source ||
+		    !StringUtil::Contains(event.ir, "function=ungrouped_aggregate_scan")) {
+			continue;
+		}
 		found_ungrouped_aggregate_source_protocol = true;
 		found_ungrouped_aggregate_source_reason =
 		    found_ungrouped_aggregate_source_reason ||
 		    StringUtil::Contains(event.reason, "DuckDB ungrouped aggregate native state scan protocol") ||
-		    StringUtil::Contains(event.reason, "DuckDB native state scan source runtime");
-			found_compiled_ungrouped_native_state_scan_source =
-			    found_compiled_ungrouped_native_state_scan_source ||
-			    (event.status == "compiled" && event.execution_mode == "native" &&
-			     event.candidate_contract.abi == JitRegionABI::FULL_PIPELINE &&
-			     StringUtil::Contains(event.reason, "DuckDB native state scan source runtime"));
-			REQUIRE(StringUtil::Contains(event.ir, "source<kind=stateful-operator"));
+		    StringUtil::Contains(event.reason, "native state scan source protocol");
+		found_compiled_ungrouped_native_state_scan_source =
+		    found_compiled_ungrouped_native_state_scan_source ||
+		    (event.status == "compiled" && event.execution_mode == "native" &&
+		     event.candidate_contract.abi == JitRegionABI::FULL_PIPELINE &&
+		     StringUtil::Contains(event.reason, "native state scan source protocol"));
+		REQUIRE(StringUtil::Contains(event.ir, "source<kind=stateful-operator"));
 		REQUIRE(StringUtil::Contains(event.ir, "execution=native-source"));
 		REQUIRE(StringUtil::Contains(event.ir, "native_source_contract<status=ready,"
 		                                       "required_capability=stateful-operator-native-source"));
@@ -2763,22 +2763,22 @@ TEST_CASE("JIT region lowering exposes stateful source protocol candidates", "[a
 		REQUIRE(event.candidate_contract.owns_source);
 		REQUIRE(event.candidate_contract.owns_state_scan);
 		REQUIRE(event.candidate_contract.missing_protocol_count == 0);
-			REQUIRE(std::find(event.candidate_contract.required_capabilities.begin(),
-			                  event.candidate_contract.required_capabilities.end(),
-			                  "ungrouped-aggregate-native-state-scan") !=
-			        event.candidate_contract.required_capabilities.end());
-			RequireStatefulSourceNativeProtocolABI(event, found_ungrouped_aggregate_state_scan_abi);
-			found_ungrouped_aggregate_state_scan_abi =
-			    found_ungrouped_aggregate_state_scan_abi ||
-			    (event.candidate_contract.owns_source && event.candidate_contract.owns_state_scan);
-			REQUIRE(StringUtil::Contains(event.ir, "source=native-protocol,state_scan=native-protocol"));
+		REQUIRE(std::find(event.candidate_contract.required_capabilities.begin(),
+		                  event.candidate_contract.required_capabilities.end(),
+		                  "ungrouped-aggregate-native-state-scan") !=
+		        event.candidate_contract.required_capabilities.end());
+		RequireStatefulSourceNativeProtocolABI(event, found_ungrouped_aggregate_state_scan_abi);
+		found_ungrouped_aggregate_state_scan_abi =
+		    found_ungrouped_aggregate_state_scan_abi ||
+		    (event.candidate_contract.owns_source && event.candidate_contract.owns_state_scan);
+		REQUIRE(StringUtil::Contains(event.ir, "source=native-protocol,state_scan=native-protocol"));
 		REQUIRE_FALSE(StringUtil::Contains(event.ir, "native_grouped_state_contract_status"));
 		REQUIRE(StringUtil::Contains(event.ir, "aggregate_protocol<aggregate_operator_kind=ungrouped"));
 		REQUIRE(StringUtil::Contains(event.ir, "aggregate_operator_kind=ungrouped"));
-			auto has_expected_ungrouped_aggregate =
-			    StringUtil::Contains(event.ir, "aggregates=[aggregate0<function=count") ||
-			    StringUtil::Contains(event.ir, "aggregates=[aggregate0<function=sum");
-			REQUIRE(has_expected_ungrouped_aggregate);
+		auto has_expected_ungrouped_aggregate =
+		    StringUtil::Contains(event.ir, "aggregates=[aggregate0<function=count") ||
+		    StringUtil::Contains(event.ir, "aggregates=[aggregate0<function=sum");
+		REQUIRE(has_expected_ungrouped_aggregate);
 	}
 	REQUIRE(found_ungrouped_aggregate_source_protocol);
 	REQUIRE(found_ungrouped_aggregate_source_reason);
@@ -2850,7 +2850,7 @@ TEST_CASE("JIT region lowering exposes order and top-n native state scan source 
 			if (event.status == "compiled" && event.execution_mode == "native" &&
 			    event.selected_source_execution == JitRegionSourceExecutionKind::NATIVE_SOURCE) {
 				found_compiled_native_source = true;
-				REQUIRE(StringUtil::Contains(event.reason, "DuckDB native state scan source runtime"));
+				REQUIRE(StringUtil::Contains(event.reason, "native state scan source protocol"));
 			}
 		}
 		REQUIRE(found_protocol);
@@ -5280,24 +5280,23 @@ TEST_CASE("JIT dump IR and execution mode expose backend honesty", "[api][jit]")
 	REQUIRE_NO_FAIL(con.Query("SELECT b, a FROM (VALUES (1::BIGINT, 10::BIGINT), "
 	                          "(2::BIGINT, 20::BIGINT)) t(a, b)"));
 
-	bool found_reference_pass_through = false;
+	bool found_reference_projection = false;
 	for (auto &event : manager.GetEvents()) {
 		if (event.backend_name != "sljit" || event.target != "region") {
 			continue;
 		}
-		if (StringUtil::Contains(event.reason, "region-lowering:native=0,fallback=") &&
-		    StringUtil::Contains(event.reason, "pass-through=") &&
-		    StringUtil::Contains(event.reason, "op0:PROJECTION:pass-through:typed reference projection pass-through")) {
-			found_reference_pass_through = true;
+		if (StringUtil::Contains(event.reason, "op0:PROJECTION:native:native typed reference projection")) {
+			found_reference_projection = true;
 			REQUIRE(event.code_size == 0);
 			REQUIRE(event.status == "unsupported");
 			REQUIRE(event.execution_mode == "unsupported");
 			REQUIRE(event.region_execution_form == "none");
+			REQUIRE_FALSE(StringUtil::Contains(event.reason, "pass-through"));
 			REQUIRE_FALSE(StringUtil::Contains(event.reason, "kernel=generic-runtime-loop"));
 			REQUIRE_FALSE(StringUtil::Contains(event.reason, "execution:native-sljit-region-"));
 		}
 	}
-	REQUIRE(found_reference_pass_through);
+	REQUIRE(found_reference_projection);
 }
 
 TEST_CASE("JIT runtime trace records kernel execution facts", "[api][jit]") {

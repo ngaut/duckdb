@@ -75,13 +75,13 @@ EXPRESSION_FALLBACK_MARKER = "core expression lowering unsupported;"
 EXPRESSION_FALLBACK_FIELD_RE = re.compile(r"(reason|class|type|return|function)=([^;\)]+)")
 SOURCE_BOUNDARY_MARKERS = (
     ("table_scan_generated_source_filter", "generated source-prefix table scan filters"),
-    ("table_scan_native_source", "DuckDB native table scan source runtime"),
+    ("table_scan_native_source", "native table scan source protocol"),
     ("table_scan_source_boundary", "DuckDB table scan source boundary"),
     ("duckdb_scan_source_boundary", "DuckDB scan source boundary"),
-    ("stateful_native_state_scan", "DuckDB native state scan source runtime"),
+    ("stateful_native_state_scan", "native state scan source protocol"),
     ("stateful_native_state_scan", "DuckDB hash join native state scan protocol"),
     ("stateful_native_state_scan", "DuckDB hash aggregate native state scan protocol"),
-    ("stateful_native_source", "DuckDB native stateful source runtime"),
+    ("stateful_native_source", "native stateful source protocol"),
     ("stateful_native_source", "DuckDB column data native source protocol"),
     ("stateful_source_fallback", "DuckDB hash join state scan source does not produce rows"),
     ("stateful_source_fallback", "DuckDB aggregate source state protocol missing"),
@@ -129,7 +129,7 @@ SOURCE_BOUNDARY_FIELD_RE = re.compile(
 )
 SOURCE_BOUNDARY_EXECUTION_RE = re.compile(r"source<kind=[^,>]+,execution=([^,>]+)")
 REGION_LOWERING_COUNT_RE = re.compile(
-    r"region-lowering:native=(\d+),fallback=(\d+),pass-through=(\d+),execution-form=([^;]+)"
+    r"region-lowering:native=(\d+),fallback=(\d+),execution-form=([^;]+)"
 )
 FUSION_BLOCKER_RE = re.compile(r"(?:^|;)fusion-blocker:([^;]+)")
 NATIVE_SOURCE_CONTRACT_RE = re.compile(

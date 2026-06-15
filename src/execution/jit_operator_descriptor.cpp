@@ -1369,7 +1369,7 @@ static string BuildJitDescriptorTableScanSourceBoundaryReason(const PhysicalTabl
                                                               JitRegionSourceExecutionKind execution) {
 	auto protocol = BuildJitDescriptorTableScanProtocol(scan);
 	string result = execution == JitRegionSourceExecutionKind::NATIVE_SOURCE
-	                    ? "DuckDB native table scan source runtime"
+	                    ? "DuckDB native table scan source protocol"
 	                    : "DuckDB table scan source boundary";
 	if (execution == JitRegionSourceExecutionKind::DUCKDB_SOURCE_BOUNDARY) {
 		result += ";source-fusion-gap:requires-native-source;source_execution=duckdb-source-boundary";

@@ -1473,7 +1473,7 @@ def verify_source_boundary_summary(
                 has_pushed_filter = True
             expected_markers = {
                 "table_scan_generated_source_filter": "generated source-prefix table scan filters",
-                "table_scan_native_source": "DuckDB native table scan source runtime",
+                "table_scan_native_source": "native table scan source protocol",
                 "table_scan_source_boundary": "DuckDB table scan source boundary",
                 "duckdb_scan_source_boundary": "DuckDB scan source boundary",
                 "duckdb_source_boundary": "DuckDB source boundary",
@@ -1566,7 +1566,7 @@ def verify_source_boundary_summary(
                     if row[field] != "":
                         raise AssertionError(f"source_boundary_summary.csv: native-source row has state contract {field}: {row}")
                 if (
-                    "DuckDB native stateful source runtime" not in row["example_reason"]
+                    "native stateful source protocol" not in row["example_reason"]
                     and "DuckDB column data native source protocol" not in row["example_reason"]
                 ):
                     raise AssertionError(f"source_boundary_summary.csv: example reason missing native-source marker: {row}")
@@ -1611,7 +1611,7 @@ def verify_source_boundary_summary(
             )
             if (
                 "DuckDB hash join native state scan protocol" not in row["example_reason"]
-                and "DuckDB native state scan source runtime" not in row["example_reason"]
+                and "native state scan source protocol" not in row["example_reason"]
             ):
                 raise AssertionError(f"source_boundary_summary.csv: example reason missing hash-join marker: {row}")
         if row["source_operator"] in {"HASH_GROUP_BY", "PERFECT_HASH_GROUP_BY", "UNGROUPED_AGGREGATE"}:
@@ -1738,10 +1738,10 @@ def verify_source_boundary_summary(
             if row_int(row, "group_count") <= 0 and row_int(row, "aggregate_count") <= 0:
                 raise AssertionError(f"source_boundary_summary.csv: aggregate source has no grouping or aggregates: {row}")
             expected_aggregate_markers = (
-                ("DuckDB native state scan source runtime", "DuckDB hash aggregate native state scan protocol")
+                ("native state scan source protocol", "DuckDB hash aggregate native state scan protocol")
                 if row["source_operator"] == "HASH_GROUP_BY"
                 else (
-                    ("DuckDB native state scan source runtime",)
+                    ("native state scan source protocol",)
                     if row["source_boundary_kind"] == "stateful_native_state_scan"
                     else ("DuckDB aggregate source state protocol missing",)
                 )
@@ -3199,7 +3199,7 @@ def verify_source_boundary_features(
         "DuckDB source boundary",
     )
     required_scan_helper_reason_features = ()
-    required_scan_native_runtime_reason_features = ("DuckDB native table scan source runtime",)
+    required_scan_native_runtime_reason_features = ("native table scan source protocol",)
     required_scan_native_reason_features = (
         "native_source_contract<status=ready",
         "blocker=none",
@@ -3307,7 +3307,7 @@ def verify_source_boundary_features(
                     "DuckDB hash join state scan source does not produce rows",
                     "DuckDB hash aggregate native state scan protocol",
                     "DuckDB aggregate source state protocol missing",
-                    "DuckDB native state scan source runtime",
+                    "native state scan source protocol",
                 )
             ):
                 continue
@@ -3347,7 +3347,7 @@ def verify_source_boundary_features(
                 )
                 if operator_name in {"HASH_GROUP_BY", "PERFECT_HASH_GROUP_BY", "UNGROUPED_AGGREGATE"}:
                     if (
-                        "DuckDB native state scan source runtime" not in trace_text
+                        "native state scan source protocol" not in trace_text
                         and "native_state_scan_contract_status=ready" not in trace_text
                     ):
                         raise AssertionError(

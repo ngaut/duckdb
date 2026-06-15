@@ -305,7 +305,6 @@ struct JitRegionLoweringPlan {
 	void SetOperatorStageIR(string stage_ir);
 	idx_t NativeCount() const;
 	idx_t FallbackCount() const;
-	idx_t PassThroughCount() const;
 	JitExecutionMode ExpectedCompiledExecutionMode() const;
 	JitRegionExecutionForm ExpectedRegionExecutionForm() const;
 	bool OwnsSourceFilters() const;

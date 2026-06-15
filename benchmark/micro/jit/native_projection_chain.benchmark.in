@@ -53,11 +53,11 @@ SELECT (
 	              AND reason LIKE '%execution-form=none%'
 	              AND reason LIKE '%execution:unsupported%'
 	              AND reason LIKE '%fusion-blocker:source-fusion-gap:requires-native-source%'
-	              AND reason LIKE '%region-lowering:native=2,fallback=1,pass-through=1%'
+	              AND reason LIKE '%region-lowering:native=3,fallback=1%'
               AND reason LIKE '%source:%:fallback:DuckDB source boundary%'
               AND reason LIKE '%op0:PROJECTION:native:generated typed projection%'
               AND reason LIKE '%op1:PROJECTION:native:generated typed projection%'
-              AND reason LIKE '%op2:PROJECTION:pass-through:typed reference projection pass-through%'
+              AND reason LIKE '%op2:PROJECTION:native:native typed reference projection%'
         )
 	        WHEN 'force' THEN (
 	            SELECT (
