@@ -11,7 +11,6 @@
 #include "sljit_region_plan.hpp"
 #include "sljit_platform.hpp"
 
-#include "duckdb/common/string_util.hpp"
 #include "duckdb/execution/jit/registration.hpp"
 
 namespace duckdb {
@@ -70,10 +69,6 @@ static bool IsSljitSourcePrefixFilterProjectionCandidate(const JitRegionCandidat
 	    candidate.traits.expression_fallback_count > 0) {
 		return false;
 	}
-	if (!(candidate.signature.shape == "filter-projection" ||
-	      StringUtil::StartsWith(candidate.signature.shape, "filter-projection-"))) {
-		return false;
-	}
 	if (candidate.traits.filter_count != 1 || candidate.traits.projection_count == 0) {
 		return false;
 	}
@@ -95,9 +90,6 @@ static bool IsSljitSourcePrefixProjectionChainCandidate(const JitRegionCandidate
 	}
 	if (candidate.traits.operator_count > 0 || candidate.traits.operator_fallback_count > 0 ||
 	    candidate.traits.expression_fallback_count > 0) {
-		return false;
-	}
-	if (!StringUtil::StartsWith(candidate.signature.shape, "projection-projection")) {
 		return false;
 	}
 	if (candidate.traits.filter_count != 0 || candidate.traits.projection_count < 2) {

@@ -1749,7 +1749,9 @@ def verify_region_selection_contract(root: Path) -> None:
         [
             "SLJIT_AUTO_ADMISSION_RULES",
             "SLJIT_AUTO_ADMISSION_FAMILIES",
-            "candidate.signature.shape",
+            "candidate.traits.filter_count",
+            "candidate.traits.projection_count",
+            "candidate.traits.operator_count",
             "IsSljitFilterProjectionInventory",
             "IsSljitProjectionChainInventory",
             "sljit:pipeline-inventory",
@@ -1761,6 +1763,9 @@ def verify_region_selection_contract(root: Path) -> None:
         [
             "candidate.shape ==",
             "StringUtil::StartsWith(candidate.shape",
+            "StringUtil::StartsWith(candidate.signature.shape",
+            "candidate.signature.shape ==",
+            "#include \"duckdb/common/string_util.hpp\"",
         ],
     )
     assert_required_text(
@@ -3144,8 +3149,10 @@ def verify_backend_registration_boundary(root: Path) -> None:
             "SLJIT_AUTO_ADMISSION_RULES",
             "SLJIT_AUTO_ADMISSION_FAMILIES",
             "BuildSljitRegionCandidateShapeKey(candidate)",
-            "candidate.signature.shape",
             "candidate.traits.has_table_scan_source",
+            "candidate.traits.filter_count",
+            "candidate.traits.projection_count",
+            "candidate.traits.operator_count",
             "candidate.traits.expression_traits_known",
             "candidate.traits.integer_arithmetic_projection_count",
             "candidate.traits.non_integer_arithmetic_projection_count",
