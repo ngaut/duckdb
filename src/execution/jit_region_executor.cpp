@@ -288,8 +288,8 @@ public:
 			generated_body_selection_invocation_count++;
 			break;
 		case JitGeneratedBodyPath::GENERIC:
-			generated_body_generic_input_rows += input_rows;
-			generated_body_generic_invocation_count++;
+			native_operator_loop_input_rows += input_rows;
+			native_operator_loop_invocation_count++;
 			break;
 		default:
 			throw InternalException("Unknown JIT generated body path");
@@ -364,8 +364,8 @@ public:
 		result.generated_body_shared_selection_invocation_count = generated_body_shared_selection_invocation_count;
 		result.generated_body_selection_input_rows = generated_body_selection_input_rows;
 		result.generated_body_selection_invocation_count = generated_body_selection_invocation_count;
-		result.generated_body_generic_input_rows = generated_body_generic_input_rows;
-		result.generated_body_generic_invocation_count = generated_body_generic_invocation_count;
+		result.native_operator_loop_input_rows = native_operator_loop_input_rows;
+		result.native_operator_loop_invocation_count = native_operator_loop_invocation_count;
 		return result;
 	}
 
@@ -426,8 +426,8 @@ private:
 	idx_t generated_body_shared_selection_invocation_count = 0;
 	idx_t generated_body_selection_input_rows = 0;
 	idx_t generated_body_selection_invocation_count = 0;
-	idx_t generated_body_generic_input_rows = 0;
-	idx_t generated_body_generic_invocation_count = 0;
+	idx_t native_operator_loop_input_rows = 0;
+	idx_t native_operator_loop_invocation_count = 0;
 	bool sink_blocked = false;
 	bool sink_finished = false;
 };

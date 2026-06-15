@@ -1610,6 +1610,7 @@ def verify_region_selection_contract(root: Path) -> None:
             "generic_runtime_loop",
             "generic-runtime-loop",
             "GenericExecutableLoop",
+            "generated_body_generic",
         ],
     )
     assert_no_text(

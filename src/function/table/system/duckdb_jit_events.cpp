@@ -83,9 +83,9 @@ static unique_ptr<FunctionData> DuckDBJitEventsBind(ClientContext &context, Tabl
 	return_types.emplace_back(LogicalType::UBIGINT);
 	names.emplace_back("generated_body_selection_invocation_count");
 	return_types.emplace_back(LogicalType::UBIGINT);
-	names.emplace_back("generated_body_generic_input_rows");
+	names.emplace_back("native_operator_loop_input_rows");
 	return_types.emplace_back(LogicalType::UBIGINT);
-	names.emplace_back("generated_body_generic_invocation_count");
+	names.emplace_back("native_operator_loop_invocation_count");
 	return_types.emplace_back(LogicalType::UBIGINT);
 	names.emplace_back("candidate_id");
 	return_types.emplace_back(LogicalType::UBIGINT);
@@ -189,8 +189,8 @@ static void DuckDBJitEventsFunction(ClientContext &context, TableFunctionInput &
 		output.data[col++].Append(Value::UBIGINT(entry.generated_body_shared_selection_invocation_count));
 		output.data[col++].Append(Value::UBIGINT(entry.generated_body_selection_input_rows));
 		output.data[col++].Append(Value::UBIGINT(entry.generated_body_selection_invocation_count));
-		output.data[col++].Append(Value::UBIGINT(entry.generated_body_generic_input_rows));
-		output.data[col++].Append(Value::UBIGINT(entry.generated_body_generic_invocation_count));
+		output.data[col++].Append(Value::UBIGINT(entry.native_operator_loop_input_rows));
+		output.data[col++].Append(Value::UBIGINT(entry.native_operator_loop_invocation_count));
 		if (entry.has_candidate) {
 			output.data[col++].Append(Value::UBIGINT(entry.candidate_id));
 			output.data[col++].Append(Value(entry.candidate_shape));

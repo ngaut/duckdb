@@ -268,8 +268,8 @@ static void SetRuntimeMetrics(JitEvent &event, const JitRuntimeMetrics &metrics)
 	event.generated_body_shared_selection_invocation_count = metrics.generated_body_shared_selection_invocation_count;
 	event.generated_body_selection_input_rows = metrics.generated_body_selection_input_rows;
 	event.generated_body_selection_invocation_count = metrics.generated_body_selection_invocation_count;
-	event.generated_body_generic_input_rows = metrics.generated_body_generic_input_rows;
-	event.generated_body_generic_invocation_count = metrics.generated_body_generic_invocation_count;
+	event.native_operator_loop_input_rows = metrics.native_operator_loop_input_rows;
+	event.native_operator_loop_invocation_count = metrics.native_operator_loop_invocation_count;
 }
 
 void JitManager::RecordRuntimeEvent(ClientContext &context, const JitRegionKernel &kernel, JitCompileTarget target,

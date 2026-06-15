@@ -58,8 +58,8 @@ void JitEventLog::RecordCounter(const JitEvent &event) {
 		    event.generated_body_shared_selection_invocation_count;
 		counter.generated_body_selection_input_rows += event.generated_body_selection_input_rows;
 		counter.generated_body_selection_invocation_count += event.generated_body_selection_invocation_count;
-		counter.generated_body_generic_input_rows += event.generated_body_generic_input_rows;
-		counter.generated_body_generic_invocation_count += event.generated_body_generic_invocation_count;
+		counter.native_operator_loop_input_rows += event.native_operator_loop_input_rows;
+		counter.native_operator_loop_invocation_count += event.native_operator_loop_invocation_count;
 		counter.ir_lowering_time_us += event.ir_lowering_time_us;
 		counter.backend_analysis_time_us += event.backend_analysis_time_us;
 		counter.admission_time_us += event.admission_time_us;
@@ -97,8 +97,8 @@ void JitEventLog::RecordCounter(const JitEvent &event) {
 	counter.generated_body_shared_selection_invocation_count = event.generated_body_shared_selection_invocation_count;
 	counter.generated_body_selection_input_rows = event.generated_body_selection_input_rows;
 	counter.generated_body_selection_invocation_count = event.generated_body_selection_invocation_count;
-	counter.generated_body_generic_input_rows = event.generated_body_generic_input_rows;
-	counter.generated_body_generic_invocation_count = event.generated_body_generic_invocation_count;
+	counter.native_operator_loop_input_rows = event.native_operator_loop_input_rows;
+	counter.native_operator_loop_invocation_count = event.native_operator_loop_invocation_count;
 	counter.ir_lowering_time_us = event.ir_lowering_time_us;
 	counter.backend_analysis_time_us = event.backend_analysis_time_us;
 	counter.admission_time_us = event.admission_time_us;
@@ -224,8 +224,8 @@ void JitEventLog::AccumulateKernelRuntime(JitKernelCounter &counter, const JitEv
 	counter.generated_body_shared_selection_invocation_count += event.generated_body_shared_selection_invocation_count;
 	counter.generated_body_selection_input_rows += event.generated_body_selection_input_rows;
 	counter.generated_body_selection_invocation_count += event.generated_body_selection_invocation_count;
-	counter.generated_body_generic_input_rows += event.generated_body_generic_input_rows;
-	counter.generated_body_generic_invocation_count += event.generated_body_generic_invocation_count;
+	counter.native_operator_loop_input_rows += event.native_operator_loop_input_rows;
+	counter.native_operator_loop_invocation_count += event.native_operator_loop_invocation_count;
 }
 
 static void SetJitKernelCounterCandidate(JitKernelCounter &counter, const JitEvent &event) {

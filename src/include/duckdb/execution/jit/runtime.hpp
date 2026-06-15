@@ -88,8 +88,8 @@ struct JitEvent {
 	idx_t generated_body_shared_selection_invocation_count = 0;
 	idx_t generated_body_selection_input_rows = 0;
 	idx_t generated_body_selection_invocation_count = 0;
-	idx_t generated_body_generic_input_rows = 0;
-	idx_t generated_body_generic_invocation_count = 0;
+	idx_t native_operator_loop_input_rows = 0;
+	idx_t native_operator_loop_invocation_count = 0;
 	string runtime_result;
 	string kernel_compile_reason;
 	int64_t kernel_compile_time_us = 0;
@@ -131,8 +131,8 @@ struct JitCounter {
 	idx_t generated_body_shared_selection_invocation_count = 0;
 	idx_t generated_body_selection_input_rows = 0;
 	idx_t generated_body_selection_invocation_count = 0;
-	idx_t generated_body_generic_input_rows = 0;
-	idx_t generated_body_generic_invocation_count = 0;
+	idx_t native_operator_loop_input_rows = 0;
+	idx_t native_operator_loop_invocation_count = 0;
 	int64_t ir_lowering_time_us = 0;
 	int64_t backend_analysis_time_us = 0;
 	int64_t admission_time_us = 0;
@@ -217,8 +217,8 @@ struct JitKernelCounter {
 	idx_t generated_body_shared_selection_invocation_count = 0;
 	idx_t generated_body_selection_input_rows = 0;
 	idx_t generated_body_selection_invocation_count = 0;
-	idx_t generated_body_generic_input_rows = 0;
-	idx_t generated_body_generic_invocation_count = 0;
+	idx_t native_operator_loop_input_rows = 0;
+	idx_t native_operator_loop_invocation_count = 0;
 	idx_t declined_invocation_count = 0;
 	int64_t declined_runtime_time_us = 0;
 	idx_t fallback_input_rows = 0;
@@ -279,8 +279,8 @@ struct JitRuntimeMetrics {
 	idx_t generated_body_shared_selection_invocation_count = 0;
 	idx_t generated_body_selection_input_rows = 0;
 	idx_t generated_body_selection_invocation_count = 0;
-	idx_t generated_body_generic_input_rows = 0;
-	idx_t generated_body_generic_invocation_count = 0;
+	idx_t native_operator_loop_input_rows = 0;
+	idx_t native_operator_loop_invocation_count = 0;
 };
 
 struct JitRegionNodeLowering {

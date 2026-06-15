@@ -84,9 +84,9 @@ static unique_ptr<FunctionData> DuckDBJitKernelCountersBind(ClientContext &conte
 	return_types.emplace_back(LogicalType::UBIGINT);
 	names.emplace_back("generated_body_selection_invocation_count");
 	return_types.emplace_back(LogicalType::UBIGINT);
-	names.emplace_back("generated_body_generic_input_rows");
+	names.emplace_back("native_operator_loop_input_rows");
 	return_types.emplace_back(LogicalType::UBIGINT);
-	names.emplace_back("generated_body_generic_invocation_count");
+	names.emplace_back("native_operator_loop_invocation_count");
 	return_types.emplace_back(LogicalType::UBIGINT);
 	names.emplace_back("declined_invocation_count");
 	return_types.emplace_back(LogicalType::UBIGINT);
@@ -176,8 +176,8 @@ static void DuckDBJitKernelCountersFunction(ClientContext &context, TableFunctio
 		output.data[col++].Append(Value::UBIGINT(entry.generated_body_shared_selection_invocation_count));
 		output.data[col++].Append(Value::UBIGINT(entry.generated_body_selection_input_rows));
 		output.data[col++].Append(Value::UBIGINT(entry.generated_body_selection_invocation_count));
-		output.data[col++].Append(Value::UBIGINT(entry.generated_body_generic_input_rows));
-		output.data[col++].Append(Value::UBIGINT(entry.generated_body_generic_invocation_count));
+		output.data[col++].Append(Value::UBIGINT(entry.native_operator_loop_input_rows));
+		output.data[col++].Append(Value::UBIGINT(entry.native_operator_loop_invocation_count));
 		output.data[col++].Append(Value::UBIGINT(entry.declined_invocation_count));
 		output.data[col++].Append(Value::BIGINT(entry.declined_runtime_time_us));
 		output.data[col++].Append(Value::UBIGINT(entry.fallback_input_rows));
