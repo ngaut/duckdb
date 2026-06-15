@@ -2744,13 +2744,26 @@ def verify_prepared_region_contract(root: Path) -> None:
             "op.dynamic_filters && op.dynamic_filters->HasFilters()",
         ],
     )
+    assert_required_text(
+        root,
+        "src/execution/jit.cpp",
+        [
+            "lowering_plan.ExpectedCompiledExecutionMode() == JitExecutionMode::NATIVE",
+            "lowering_plan.ExpectedRegionExecutionForm() == JitRegionExecutionForm::FUSED",
+            "native_fused_source_owner",
+            "contract.owns_filters = !source.filters.empty() && contract.filter_split_supported &&",
+        ],
+    )
     assert_no_text(
         root,
         [
+            Path("src/execution/jit.cpp"),
             Path("src/execution/operator/scan/physical_table_scan.cpp"),
             Path("src/execution/jit_operator_descriptor.cpp"),
         ],
         [
+            "lowering_plan.ExpectedCompiledExecutionMode() != JitExecutionMode::UNSUPPORTED",
+            "lowering_plan.ExpectedRegionExecutionForm() != JitRegionExecutionForm::NONE",
             "if (op.dynamic_filters && op.dynamic_filters->HasFilters()) {\n\t\treturn false;",
             "if (scan.dynamic_filters && scan.dynamic_filters->HasFilters()) {\n\t\treturn false;",
         ],

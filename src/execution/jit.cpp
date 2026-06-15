@@ -718,9 +718,8 @@ static void AccumulateJitPreparedSourceContract(JitPreparedPipeline &prepared, c
 		auto selected_source_execution = lowering_plan.SelectedSourceExecution() != JitRegionSourceExecutionKind::NONE
 		                                     ? lowering_plan.SelectedSourceExecution()
 		                                     : source.execution;
-		auto compiled_source_owner =
-		    lowering_plan.ExpectedCompiledExecutionMode() != JitExecutionMode::UNSUPPORTED &&
-		    lowering_plan.ExpectedRegionExecutionForm() != JitRegionExecutionForm::NONE;
+		auto native_fused_source_owner = lowering_plan.ExpectedCompiledExecutionMode() == JitExecutionMode::NATIVE &&
+		                                 lowering_plan.ExpectedRegionExecutionForm() == JitRegionExecutionForm::FUSED;
 		if (source.kind == JitRegionSourceKind::STATEFUL_OPERATOR) {
 			auto &contract = prepared.source_contract;
 			contract.present = true;
@@ -733,9 +732,9 @@ static void AccumulateJitPreparedSourceContract(JitPreparedPipeline &prepared, c
 			contract.filter_column_map.clear();
 			contract.reason = source.reason;
 			contract.ir = source.ir;
-				contract.native_source = selected_source_execution == JitRegionSourceExecutionKind::NATIVE_SOURCE &&
-				                         source.native_source_contract.status == JitRegionNativeSourceStatus::READY &&
-				                         compiled_source_owner;
+			contract.native_source = selected_source_execution == JitRegionSourceExecutionKind::NATIVE_SOURCE &&
+			                         source.native_source_contract.status == JitRegionNativeSourceStatus::READY &&
+			                         native_fused_source_owner;
 			contract.owns_filters = false;
 			return;
 		}
@@ -756,9 +755,9 @@ static void AccumulateJitPreparedSourceContract(JitPreparedPipeline &prepared, c
 		contract.ir = source.ir;
 		contract.native_source = selected_source_execution == JitRegionSourceExecutionKind::NATIVE_SOURCE &&
 		                         source.native_source_contract.status == JitRegionNativeSourceStatus::READY &&
-		                         compiled_source_owner;
+		                         native_fused_source_owner;
 		contract.owns_filters = !source.filters.empty() && contract.filter_split_supported &&
-		                        lowering_plan.OwnsSourceFilters() && compiled_source_owner;
+		                        lowering_plan.OwnsSourceFilters() && native_fused_source_owner;
 		return;
 	}
 }
