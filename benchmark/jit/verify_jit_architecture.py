@@ -2377,6 +2377,10 @@ def verify_stage_region_contract(root: Path) -> None:
         [
             "RecordJitRegionContractOwnership",
             "RecordJitRegionMissingContract",
+            "JitRegionSourcePipelineBoundary",
+            "return \"source-boundary\"",
+            "return \"source-executor-fallback\"",
+            "return \"source-missing-protocol\"",
             "ClassifyJitRegionNativeSourceOwnership",
             "ClassifyJitRegionStateScanOwnership",
             "ClassifyJitRegionSourceOwnership",
@@ -3498,6 +3502,19 @@ def verify_trace_contracts(root: Path) -> None:
             "missing inner hash-join protocol rows",
             "missing left delimiter hash-join protocol rows",
             "required_hash_join_blocked_state_scan_features",
+        ],
+    )
+    assert_no_text(
+        root,
+        [
+            Path("src"),
+            Path("test/api/test_jit.cpp"),
+            Path("benchmark/tpch/jit"),
+        ],
+        [
+            "source:source:HASH_JOIN:operator-fallback",
+            "\"pipeline;source:source:\" + source + \":operator-fallback\"",
+            "\"source:source:\" + source + \":operator-fallback\"",
         ],
     )
     assert_required_text(

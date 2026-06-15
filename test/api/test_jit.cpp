@@ -2391,10 +2391,11 @@ TEST_CASE("JIT region lowering exposes stateful source protocol candidates", "[a
 		if (event.target != "region") {
 			continue;
 		}
-		if (StringUtil::Contains(event.pipeline_shape, "source:source:HASH_JOIN:operator-fallback") ||
-		    StringUtil::Contains(event.candidate_pipeline_shape, "source:source:HASH_JOIN:operator-fallback") ||
+		if (StringUtil::Contains(event.pipeline_shape, "source:source:HASH_JOIN:source-missing-protocol") ||
+		    StringUtil::Contains(event.candidate_pipeline_shape,
+		                         "source:source:HASH_JOIN:source-missing-protocol") ||
 		    StringUtil::Contains(event.candidate_context_pipeline_shape,
-		                         "source:source:HASH_JOIN:operator-fallback")) {
+		                         "source:source:HASH_JOIN:source-missing-protocol")) {
 			found_inner_hash_join_source_pipeline_candidate = true;
 		}
 		const bool has_non_producing_hash_join_source =
@@ -2880,7 +2881,8 @@ TEST_CASE("JIT region lowering exposes generic operator stage spans", "[api][jit
 				REQUIRE(StringUtil::Contains(event.reason, "native_probe_shape_ready=true"));
 				REQUIRE(StringUtil::Contains(event.reason, JIT_HASH_JOIN_PROBE_EXECUTABLE_READY));
 			}
-		if (StringUtil::Contains(event.candidate_pipeline_shape, "source:source:HASH_JOIN:operator-fallback")) {
+		if (StringUtil::Contains(event.candidate_pipeline_shape,
+		                         "source:source:HASH_JOIN:source-missing-protocol")) {
 			found_non_producing_hash_join_source_candidate = true;
 		}
 	}
@@ -4433,7 +4435,7 @@ TEST_CASE("JIT region lowering excludes wrapper-only pipelines", "[api][jit]") {
 
 	auto has_wrapper_only_pipeline_shape = [](const string &value) {
 		auto wrapper_only_pipeline_shape = [](const string &source, const string &sink = string()) {
-			auto result = "pipeline;source:source:" + source + ":operator-fallback";
+			auto result = "pipeline;source:source:" + source + ":source-missing-protocol";
 			if (!sink.empty()) {
 				result += ";sink:sink:" + sink + ":sink";
 			}

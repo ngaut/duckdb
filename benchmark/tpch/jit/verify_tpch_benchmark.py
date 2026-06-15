@@ -53,7 +53,7 @@ ADMISSION_PROOF_GAP_REQUIRED_COLUMNS = BENCHMARK_ADMISSION_PROOF_GAP_FIELDS
 AUTO_POLICY_RELATIVE_TOLERANCE = 1.005
 
 def wrapper_only_pipeline_shape(source: str, sink: str = "") -> str:
-    result = "pipeline;source:source:" + source + ":operator-fallback"
+    result = "pipeline;source:source:" + source + ":source-missing-protocol"
     if sink:
         result += ";sink:sink:" + sink + ":sink"
     return result

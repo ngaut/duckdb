@@ -993,12 +993,26 @@ static string BuildJitRegionInventoryFeatureShape(const JitRegionPipelineInvento
 	return result;
 }
 
+static const char *JitRegionSourcePipelineBoundary(JitRegionSourceExecutionKind execution) {
+	switch (execution) {
+	case JitRegionSourceExecutionKind::NATIVE_SOURCE:
+		return "source-native";
+	case JitRegionSourceExecutionKind::DUCKDB_SOURCE_BOUNDARY:
+		return "source-boundary";
+	case JitRegionSourceExecutionKind::EXECUTOR_FALLBACK:
+		return "source-executor-fallback";
+	case JitRegionSourceExecutionKind::NONE:
+		return "source-missing-protocol";
+	default:
+		return "source-unknown";
+	}
+}
+
 static string DescribeJitRegionInventoryPipelineShape(const JitRegionPipelineInventory &inventory) {
 	string result = "pipeline";
 	if (inventory.has_source) {
 		result += ";source:source:" + inventory.source_operator_name + ":";
-		result +=
-		    inventory.source_execution == JitRegionSourceExecutionKind::NATIVE_SOURCE ? "source-native" : "operator-fallback";
+		result += JitRegionSourcePipelineBoundary(inventory.source_execution);
 	}
 	for (idx_t op_idx = 0; op_idx < inventory.operator_names.size(); op_idx++) {
 		auto &operator_name = inventory.operator_names[op_idx];

@@ -46,7 +46,7 @@ from tpch_schema import (
 configure_csv_field_size_limit()
 
 def wrapper_only_pipeline_shape(source: str, sink: str = "") -> str:
-    result = "pipeline;source:source:" + source + ":operator-fallback"
+    result = "pipeline;source:source:" + source + ":source-missing-protocol"
     if sink:
         result += ";sink:sink:" + sink + ":sink"
     return result
@@ -102,6 +102,9 @@ KNOWN_CAPABILITY_GAPS = {
     "expression_fallback",
     "sink_boundary",
     "operator_fallback_boundary",
+    "source_boundary",
+    "source_executor_fallback",
+    "source_missing_protocol",
     "other_boundary",
 }
 CAPABILITY_PRIORITY_REQUIRED_COLUMNS = CAPABILITY_PRIORITY_SUMMARY_FIELDS
@@ -530,6 +533,12 @@ def classify_capability_gap(node: dict) -> str:
         return "sink_boundary"
     if boundary == "operator-fallback":
         return "operator_fallback_boundary"
+    if boundary == "source-missing-protocol":
+        return "source_missing_protocol"
+    if boundary == "source-executor-fallback":
+        return "source_executor_fallback"
+    if boundary == "source-boundary":
+        return "source_boundary"
     return "other_boundary"
 
 

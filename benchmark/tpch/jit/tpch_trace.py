@@ -2595,6 +2595,12 @@ def classify_capability_gap(node: dict) -> str:
         return "sink_boundary"
     if boundary == "operator-fallback":
         return "operator_fallback_boundary"
+    if boundary == "source-missing-protocol":
+        return "source_missing_protocol"
+    if boundary == "source-executor-fallback":
+        return "source_executor_fallback"
+    if boundary == "source-boundary":
+        return "source_boundary"
     return "other_boundary"
 
 
