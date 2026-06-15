@@ -19,7 +19,7 @@ EXPECTED_CASES = {
 }
 KNOWN_CANDIDATE_SCOPES = {
     "post_source_operator_interval",
-    "source_pipeline",
+    "source_prefix",
     "sink_pipeline",
     "full_pipeline",
 }
@@ -159,21 +159,21 @@ def verify_executable_candidate_scope(case_name: str, row: dict) -> None:
         raise AssertionError(f"{case_name}: executable region has unknown execution form: {row}")
     if region_execution_form == "none":
         raise AssertionError(f"{case_name}: executable region did not declare an execution form: {row}")
-    if scope == "source_pipeline":
+    if scope == "source_prefix":
         source_execution = event_source_execution(row)
         if source_execution == "native-source" or execution_mode == "native":
             if execution_mode != "native":
-                raise AssertionError(f"{case_name}: native-source pipeline has invalid execution mode: {row}")
+                raise AssertionError(f"{case_name}: native-source-prefix has invalid execution mode: {row}")
             if region_execution_form != "fused":
-                raise AssertionError(f"{case_name}: native-source pipeline has invalid execution form: {row}")
+                raise AssertionError(f"{case_name}: native-source-prefix has invalid execution form: {row}")
         else:
-            raise AssertionError(f"{case_name}: source-boundary pipeline was compiled as executable JIT: {row}")
+            raise AssertionError(f"{case_name}: source-boundary prefix was compiled as executable JIT: {row}")
         if abi and abi not in {"source_prefix", "state_scan"}:
-            raise AssertionError(f"{case_name}: source pipeline executable has wrong ABI: {row}")
+            raise AssertionError(f"{case_name}: source-prefix executable has wrong ABI: {row}")
         if pipeline_shape and not has_source:
-            raise AssertionError(f"{case_name}: source pipeline executable has no source node: {row}")
+            raise AssertionError(f"{case_name}: source-prefix executable has no source node: {row}")
         if pipeline_shape and has_sink:
-            raise AssertionError(f"{case_name}: source pipeline executable contains sink boundary: {row}")
+            raise AssertionError(f"{case_name}: source-prefix executable contains sink boundary: {row}")
         return
     if scope == "post_source_operator_interval":
         if abi and abi != "chunk_transform":
@@ -286,7 +286,7 @@ def verify_resume_state_events(rows: list) -> None:
             and row.get("status") == "unsupported"
             and row.get("execution_mode") == "unsupported"
             and row.get("region_execution_form") == "none"
-            and row.get("candidate_scope") == "source_pipeline"
+            and row.get("candidate_scope") == "source_prefix"
             and row.get("candidate_shape") == "filter"
             and "source-fusion-gap:requires-native-source" in row.get("reason", "")
             and "table-function-source-boundary" in row.get("reason", "")

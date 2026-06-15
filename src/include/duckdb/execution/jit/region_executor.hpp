@@ -24,7 +24,7 @@ public:
 	static bool TryExecuteFullPipeline(PipelineExecutor &executor, idx_t max_chunks, PipelineExecuteResult &result);
 	static bool TryExecute(PipelineExecutor &executor, DataChunk &input, DataChunk &result, idx_t initial_idx,
 	                       OperatorResultType &operator_result);
-	static bool HasSourcePipelineKernel(PipelineExecutor &executor);
+	static bool HasSourcePrefixKernel(PipelineExecutor &executor);
 	static bool TryExecuteSourcePrefix(PipelineExecutor &executor, DataChunk &source_chunk, DataChunk *&result,
 	                                   SourceResultType source_result, int64_t source_fetch_time_us,
 	                                   idx_t &next_operator_idx);

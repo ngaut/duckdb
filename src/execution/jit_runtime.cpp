@@ -503,7 +503,7 @@ const vector<LogicalType> &JitRegionKernel::TraceCandidateOutputTypes() const {
 	return trace_candidate_output_types;
 }
 
-bool JitRegionKernel::CanExecuteSourcePipeline() const {
+bool JitRegionKernel::CanExecuteSourcePrefix() const {
 	return false;
 }
 

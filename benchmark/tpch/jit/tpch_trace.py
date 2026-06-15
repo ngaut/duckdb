@@ -670,7 +670,7 @@ def extract_native_source_contract(trace_text: str) -> dict:
 
 
 def is_source_fusion_gap_event(event: dict, trace_text: str) -> bool:
-    if event.get("candidate_scope", "") not in ("source_pipeline", "full_pipeline"):
+    if event.get("candidate_scope", "") not in ("source_prefix", "full_pipeline"):
         return False
     if event_source_execution(event) == "native-source":
         return False

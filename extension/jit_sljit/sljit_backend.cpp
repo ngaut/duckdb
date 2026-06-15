@@ -29,7 +29,7 @@ static void SetSljitAutoAdmissionRule(const SljitAutoAdmissionRuleSpec &entry, J
 }
 
 static bool IsSljitNativeSourceFilterProjectionCandidate(const JitRegionCandidate &candidate) {
-	if (!JitRegionABIIsSourcePipeline(candidate.contract.abi)) {
+	if (!JitRegionABIIsSourcePrefix(candidate.contract.abi)) {
 		return false;
 	}
 	if (!candidate.traits.has_table_scan_source ||
@@ -48,7 +48,7 @@ static bool IsSljitNativeSourceFilterProjectionCandidate(const JitRegionCandidat
 }
 
 static bool IsSljitSourcePrefixFilterProjectionCandidate(const JitRegionCandidate &candidate) {
-	if (!JitRegionABIIsSourcePipeline(candidate.contract.abi)) {
+	if (!JitRegionABIIsSourcePrefix(candidate.contract.abi)) {
 		return false;
 	}
 	if (!candidate.traits.has_table_scan_source) {
@@ -71,7 +71,7 @@ static bool IsSljitSourcePrefixFilterProjectionCandidate(const JitRegionCandidat
 }
 
 static bool IsSljitSourcePrefixProjectionChainCandidate(const JitRegionCandidate &candidate) {
-	if (!JitRegionABIIsSourcePipeline(candidate.contract.abi)) {
+	if (!JitRegionABIIsSourcePrefix(candidate.contract.abi)) {
 		return false;
 	}
 	if (!candidate.traits.has_table_scan_source) {
@@ -158,7 +158,7 @@ static bool TryRejectSljitAutoAdmissionCandidate(const JitRegionCandidate &candi
 		    candidate.traits.ir;
 		return true;
 	}
-	if (JitRegionABIIsSourcePipeline(candidate.contract.abi) && candidate.traits.source_filter_count > 0) {
+	if (JitRegionABIIsSourcePrefix(candidate.contract.abi) && candidate.traits.source_filter_count > 0) {
 		reason = "jit_policy=auto skips region before backend analysis: SLJIT scan-source work requires native source "
 		         "fusion and measured source admission proof;admission_rule=missing;shape=" +
 		         info.admission_key + ";estimated_cardinality=" + std::to_string(candidate.estimated_cardinality) +

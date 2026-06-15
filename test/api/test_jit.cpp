@@ -29,8 +29,8 @@ static_assert(std::is_same<decltype(&JitRegionKernel::TrySink),
                                                      SinkResultType &)>::value,
               "JIT sink kernels must execute through the JIT sink runtime ABI, not DuckDB executor internals");
 static_assert(
-    std::is_same<decltype(&JitRegionKernel::CanExecuteSourcePipeline), bool (JitRegionKernel::*)() const>::value,
-    "JIT source pipeline kernels must advertise the source-prefix executable ABI explicitly");
+    std::is_same<decltype(&JitRegionKernel::CanExecuteSourcePrefix), bool (JitRegionKernel::*)() const>::value,
+    "JIT source-prefix kernels must advertise the source-prefix executable ABI explicitly");
 static_assert(
     std::is_same<decltype(&JitRegionKernel::CanExecuteSinkPipeline), bool (JitRegionKernel::*)() const>::value,
     "JIT sink pipeline kernels must advertise the sink executable ABI explicitly");
@@ -78,7 +78,7 @@ public:
 		return 1;
 	}
 
-	bool CanExecuteSourcePipeline() const override {
+	bool CanExecuteSourcePrefix() const override {
 		return true;
 	}
 
@@ -95,7 +95,7 @@ private:
 };
 
 static bool IsKnownJitCandidateScope(const string &scope) {
-	return scope == "post_source_operator_interval" || scope == "source_pipeline" || scope == "sink_pipeline" ||
+	return scope == "post_source_operator_interval" || scope == "source_prefix" || scope == "sink_pipeline" ||
 	       scope == "full_pipeline";
 }
 
@@ -104,7 +104,7 @@ static bool IsCompiledRegionExecutionMode(const string &execution_mode) {
 }
 
 static void RequireCompiledRegionScopeHonesty(const JitEvent &event) {
-	if (event.candidate_scope == "source_pipeline") {
+	if (event.candidate_scope == "source_prefix") {
 		REQUIRE(IsCompiledRegionExecutionMode(event.execution_mode));
 		REQUIRE(event.candidate_contract.abi == JitRegionABI::SOURCE_PREFIX);
 		return;
@@ -184,7 +184,7 @@ static void RequireAutoInventorySkipEvent(const JitEvent &event, const string &s
 
 static bool IsMaximalTransformCandidate(const JitRegionCompilationInput &input) {
 	const auto scope = input.candidate.scope;
-	return (scope == JitRegionCandidateScope::SOURCE_PIPELINE ||
+	return (scope == JitRegionCandidateScope::SOURCE_PREFIX ||
 	        scope == JitRegionCandidateScope::POST_SOURCE_OPERATOR_INTERVAL) &&
 	       input.candidate.end_operator_index > input.candidate.start_operator_index;
 }
@@ -203,7 +203,7 @@ public:
 		return backend_name;
 	}
 
-	bool CanExecuteSourcePipeline() const override {
+	bool CanExecuteSourcePrefix() const override {
 		return true;
 	}
 
@@ -566,7 +566,7 @@ public:
 		return 1;
 	}
 
-	bool CanExecuteSourcePipeline() const override {
+	bool CanExecuteSourcePrefix() const override {
 		return true;
 	}
 
@@ -685,7 +685,7 @@ public:
 		return 1;
 	}
 
-	bool CanExecuteSourcePipeline() const override {
+	bool CanExecuteSourcePrefix() const override {
 		return true;
 	}
 
@@ -744,7 +744,7 @@ public:
 		return 1;
 	}
 
-	bool CanExecuteSourcePipeline() const override {
+	bool CanExecuteSourcePrefix() const override {
 		return true;
 	}
 
@@ -808,13 +808,13 @@ public:
 	}
 
 private:
-	string backend_name = "contract_test_source_abi_region_jit_backend";
+	string backend_name = "contract_test_source_prefix_abi_region_jit_backend";
 };
 
 class SourceAbiRejectRegionBackend : public JitBackend {
 public:
 	string Name() const override {
-		return "contract_test_source_abi_region_jit_backend";
+		return "contract_test_source_prefix_abi_region_jit_backend";
 	}
 
 	string Description() const override {
@@ -826,14 +826,14 @@ public:
 	}
 
 	JitRegionLoweringPlan AnalyzeRegion(const JitRegionCompilationInput &input) override {
-		if (input.candidate.scope != JitRegionCandidateScope::SOURCE_PIPELINE) {
+		if (input.candidate.scope != JitRegionCandidateScope::SOURCE_PREFIX) {
 			return UnsupportedContractBoundaryPlan();
 		}
 		JitRegionLoweringPlan plan;
 		plan.SetCompiledExecutionMode(JitExecutionMode::NATIVE);
 		plan.SetRegionExecutionForm(JitRegionExecutionForm::FUSED);
 		plan.AddNode("source", "CONTRACT_SOURCE", JitLoweringKind::NATIVE,
-		             "contract source pipeline node without source-prefix ABI");
+		             "contract source-prefix node without source-prefix ABI");
 		return plan;
 	}
 
@@ -1429,7 +1429,7 @@ TEST_CASE("JIT lowers date year intrinsic as native scalar projection", "[api][j
 		}
 		if (event.execution_mode == "native" && StringUtil::Contains(event.ir, "date_year")) {
 			found_native_date_year = true;
-			REQUIRE(event.candidate_scope == "source_pipeline");
+			REQUIRE(event.candidate_scope == "source_prefix");
 			REQUIRE(event.candidate_shape == "projection");
 			REQUIRE(event.region_execution_form == "fused");
 			REQUIRE(event.code_size > 0);
@@ -1477,7 +1477,7 @@ TEST_CASE("JIT lowers integral compression intrinsic as native scalar projection
 		}
 		if (event.execution_mode == "native" && StringUtil::Contains(event.ir, "integral_compress")) {
 			found_native_integral_compress = true;
-			REQUIRE(event.candidate_scope == "source_pipeline");
+			REQUIRE(event.candidate_scope == "source_prefix");
 			REQUIRE(event.candidate_shape == "projection");
 			REQUIRE(event.region_execution_form == "fused");
 			REQUIRE(event.code_size > 0);
@@ -1810,7 +1810,7 @@ TEST_CASE("JIT lowers signed to unsigned integer cast as native scalar projectio
 		}
 		if (event.execution_mode == "native" && StringUtil::Contains(event.ir, "logical=USMALLINT")) {
 			found_native_unsigned_cast = true;
-			REQUIRE(event.candidate_scope == "source_pipeline");
+			REQUIRE(event.candidate_scope == "source_prefix");
 			REQUIRE(event.candidate_shape == "projection");
 			REQUIRE(event.region_execution_form == "fused");
 			REQUIRE(event.code_size > 0);
@@ -1866,7 +1866,7 @@ TEST_CASE("JIT lowers double division as native scalar projection", "[api][jit]"
 		}
 		if (event.execution_mode == "native" && StringUtil::Contains(event.ir, ".divide")) {
 			found_native_double_divide = true;
-			REQUIRE(event.candidate_scope == "source_pipeline");
+			REQUIRE(event.candidate_scope == "source_prefix");
 			REQUIRE(StringUtil::Contains(event.candidate_shape, "projection"));
 			REQUIRE(event.region_execution_form == "fused");
 			REQUIRE(event.code_size > 0);
@@ -2423,7 +2423,7 @@ TEST_CASE("JIT region lowering exposes stateful source protocol candidates", "[a
 	REQUIRE_NO_FAIL(con.Query("SELECT sum(i) FROM (SELECT l.i FROM range(1000) AS l(i) "
 	                          "JOIN range(1000) AS r(i) ON l.i=r.i) t"));
 
-	bool found_inner_hash_join_source_pipeline_candidate = false;
+	bool found_inner_hash_join_source_prefix_candidate = false;
 	for (auto &event : manager.GetEvents()) {
 		if (event.target != "region") {
 			continue;
@@ -2433,14 +2433,14 @@ TEST_CASE("JIT region lowering exposes stateful source protocol candidates", "[a
 		                         "source:source:HASH_JOIN:source-missing-protocol") ||
 		    StringUtil::Contains(event.candidate_context_pipeline_shape,
 		                         "source:source:HASH_JOIN:source-missing-protocol")) {
-			found_inner_hash_join_source_pipeline_candidate = true;
+			found_inner_hash_join_source_prefix_candidate = true;
 		}
 		const bool has_non_producing_hash_join_source =
 		    event.candidate_traits.has_stateful_source && StringUtil::Contains(event.ir, "function=hash_join_probe") &&
 		    StringUtil::Contains(event.ir, "source_produces_rows=false");
 		REQUIRE_FALSE(has_non_producing_hash_join_source);
 	}
-	REQUIRE_FALSE(found_inner_hash_join_source_pipeline_candidate);
+	REQUIRE_FALSE(found_inner_hash_join_source_prefix_candidate);
 
 	manager.ClearEvents();
 	REQUIRE_NO_FAIL(con.Query("SELECT count(*) FROM range(1000) AS l(i) "
@@ -2893,7 +2893,7 @@ TEST_CASE("JIT region lowering exposes generic operator stage spans", "[api][jit
 		}
 		auto has_hash_join_probe =
 		    StringUtil::Contains(event.candidate_pipeline_shape, "op0:operator:HASH_JOIN:operator-native");
-		if (event.candidate_scope == "source_pipeline" && has_hash_join_probe) {
+		if (event.candidate_scope == "source_prefix" && has_hash_join_probe) {
 			found_source_prefix_hash_join_stage = true;
 		}
 		if (event.candidate_scope == "full_pipeline" && has_hash_join_probe && event.status == "compiled") {
@@ -4610,7 +4610,7 @@ TEST_CASE("JIT auto region selection uses maximal transform candidates", "[api][
 			found_maximal_region_compile = true;
 			REQUIRE(event.policy_decision == "auto");
 			REQUIRE(event.execution_mode == "native");
-			REQUIRE(event.candidate_scope == "source_pipeline");
+			REQUIRE(event.candidate_scope == "source_prefix");
 			REQUIRE(StringUtil::Contains(event.candidate_shape, "projection"));
 		}
 	}
@@ -4681,19 +4681,19 @@ TEST_CASE("JIT manager rejects non-compiled results with kernels", "[api][jit]")
 	REQUIRE(StringUtil::Contains(result->GetError(), "returned kernel for non-compiled region status unsupported"));
 }
 
-TEST_CASE("JIT manager rejects source pipeline kernels without source-prefix ABI", "[api][jit]") {
+TEST_CASE("JIT manager rejects source-prefix kernels without source-prefix ABI", "[api][jit]") {
 	DuckDB db;
 	Connection con(db);
 	auto &context = *con.context;
 	auto &manager = JitManager::Get(context);
 
 	manager.RegisterBackend(make_uniq<SourceAbiRejectRegionBackend>());
-	SetJitTestOptions(context, "contract_test_source_abi_region_jit_backend");
+	SetJitTestOptions(context, "contract_test_source_prefix_abi_region_jit_backend");
 
-	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_source_abi_input AS SELECT i::BIGINT AS i FROM range(3) tbl(i)"));
-	auto result = con.Query("SELECT i + 1 FROM jit_source_abi_input WHERE i > 0");
+	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_source_prefix_abi_input AS SELECT i::BIGINT AS i FROM range(3) tbl(i)"));
+	auto result = con.Query("SELECT i + 1 FROM jit_source_prefix_abi_input WHERE i > 0");
 	REQUIRE(result->HasError());
-	REQUIRE(StringUtil::Contains(result->GetError(), "compiled source pipeline without source-prefix executable ABI"));
+	REQUIRE(StringUtil::Contains(result->GetError(), "compiled source-prefix without source-prefix executable ABI"));
 }
 
 TEST_CASE("JIT manager rejects backend-fused regions across non-fused core stages", "[api][jit]") {
@@ -5155,7 +5155,7 @@ TEST_CASE("JIT runtime trace separates declined kernels from executor fallback w
 		if (event.status == "declined") {
 			declined_kernel_ids.push_back(event.kernel_id);
 			REQUIRE(event.has_candidate);
-			REQUIRE(event.candidate_scope == "source_pipeline");
+			REQUIRE(event.candidate_scope == "source_prefix");
 			REQUIRE(event.candidate_end_operator_index > event.candidate_start_operator_index);
 			REQUIRE(event.execution_mode == "native");
 			REQUIRE(event.input_rows > 0);
@@ -5176,7 +5176,7 @@ TEST_CASE("JIT runtime trace separates declined kernels from executor fallback w
 		found_split_counter = true;
 		REQUIRE(counter.execution_mode == "native");
 		REQUIRE(counter.has_candidate);
-		REQUIRE(counter.candidate_scope == "source_pipeline");
+		REQUIRE(counter.candidate_scope == "source_prefix");
 		REQUIRE(!counter.candidate_pipeline_shape.empty());
 		REQUIRE(counter.candidate_end_operator_index > counter.candidate_start_operator_index);
 		REQUIRE(counter.input_rows == 0);

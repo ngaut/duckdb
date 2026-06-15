@@ -484,7 +484,7 @@ public:
 	const JitRegionCandidateTraits &TraceCandidateTraits() const;
 	const JitRegionContract &TraceCandidateContract() const;
 	const vector<LogicalType> &TraceCandidateOutputTypes() const;
-	virtual bool CanExecuteSourcePipeline() const;
+	virtual bool CanExecuteSourcePrefix() const;
 	virtual bool CanExecuteSinkPipeline() const;
 	virtual bool CanExecuteFullPipeline() const;
 	virtual bool RequiresNativeSource() const;

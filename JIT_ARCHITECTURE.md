@@ -1045,19 +1045,19 @@ sink-suffix admission families. Aggregate sinks must distinguish
 state protocol instead of collapsing every sink to a generic sink label.
 
 `candidate_scope` is the ownership boundary for that executable shape. Current
-planner output is intentionally narrow: `source_pipeline` for one maximal
+planner output is intentionally narrow: `source_prefix` for one maximal
 generated prefix and `full_pipeline` for source-to-sink ownership. Source JIT
 has a core-owned source-prefix runtime ABI: `FetchFromSource` owns DuckDB source
 state, calls the normal source boundary when the source is not native, closes
 source profiling on the raw source chunk, and then invokes a generated chunk
-kernel for the admitted prefix. Source-pipeline kernels must advertise
-`CanExecuteSourcePipeline()`, and the core executor returns the next operator
+kernel for the admitted prefix. Source-prefix kernels must advertise
+`CanExecuteSourcePrefix()`, and the core executor returns the next operator
 index where normal pipeline execution should resume. The generated prefix
 output is written into the same operator-boundary chunk DuckDB would have used
 after the skipped prefix operators, not into the raw source chunk. That keeps
 source-prefix regions valid when filters or projections change column count,
 logical type, physical type, vector format, or selection semantics before the
-remaining DuckDB suffix resumes. A backend that compiles a `source_pipeline`
+remaining DuckDB suffix resumes. A backend that compiles a `source_prefix`
 candidate without that source-prefix executable ABI is an architecture error.
 Sink-owned suffixes are not planner products in the current architecture.
 Existing sink ABI enum support is a reserved runtime contract, not permission to
@@ -1079,7 +1079,7 @@ chunk-transform decisions were reimplemented independently in core execution,
 backend lowering, tests, and trace helpers.
 
 ABI category checks are also centralized in the core JIT common layer through
-`JitRegionABIIsChunkTransform`, `JitRegionABIIsSourcePipeline`,
+`JitRegionABIIsChunkTransform`, `JitRegionABIIsSourcePrefix`,
 `JitRegionABIIsSinkPipeline`, and `JitRegionABIIsFullPipeline`. Runtime dispatch,
 backend admission, and backend planning must use these helpers instead of
 defining backend-local predicates or storing parallel source/sink/full booleans.
@@ -1304,7 +1304,7 @@ codegen contract. Core must skip `full_pipeline` candidates before backend
 analysis when the executor cannot legally enter the full-pipeline ABI from the
 first source-to-sink call. The current hard boundary is any sink that requires
 partition/batch protocol (`RequiredPartitionInfo().AnyRequired()`): those
-pipelines may still select the maximal `source_pipeline` prefix when it can
+pipelines may still select the maximal `source_prefix` prefix when it can
 resume cleanly, but they must not let a non-enterable full-pipeline candidate
 own scan filters or switch table scans to prune-only residual execution. They
 also must not manufacture post-source or sink-suffix candidates to hide the
@@ -1692,7 +1692,7 @@ Systematic performance analysis must follow this order:
 8. confirm `candidate_scope` matches the executor ownership boundary; current
    SLJIT compiled source-prefix kernels must enter through `FetchFromSource`,
    close source profiling before generated prefix execution, and report
-   `source_pipeline` with the core-owned source-prefix runtime ABI;
+   `source_prefix` with the core-owned source-prefix runtime ABI;
 9. when the event ring is too small to retain the compile event, use
    `duckdb_jit_kernel_counters()` to recover the compile identity, candidate
    shape, candidate executable pipeline shape, candidate context pipeline
@@ -1907,7 +1907,7 @@ scan lowering, non-table source support, stateful native source protocols such
 as CTE/materialization scan, or stateful native state-scan protocols such as
 hash-join and aggregate scan.
 Compiled source-prefix rows must be present when the backend compiles a native
-source pipeline. Source-boundary source candidates remain decision rows until a
+source-prefix region. Source-boundary source candidates remain decision rows until a
 native source protocol exists, but their decision rows must still expose the
 candidate identity: query, policy, candidate id, candidate shape, candidate
 pipeline shape, candidate context pipeline shape, and candidate scope. Candidate
@@ -2041,7 +2041,7 @@ must report `source_produces_rows=false`,
 `native_state_scan_blocker=hash-join-source-does-not-produce-rows-for-join-type`.
 They must not be counted as `source-native` regions, because the normal DuckDB
 source call immediately finishes for those join types. The region inventory
-also excludes these non-row-producing source pipelines before candidate
+also excludes these non-row-producing source-prefix candidates before candidate
 admission, so TPCH source-boundary summaries only rank source phases that can
 actually emit rows. Inner/left join work remains visible through the hash-join
 probe/build operator protocol rows and fusion-gap summaries. Right/full/right-semi
@@ -2518,7 +2518,7 @@ limited:
   the source-prefix or sink-suffix ABI;
 - candidate 1 exists only when the prefix before the first hard boundary is a
   maximal native source/filter/projection span and contains real generated work.
-  It reports `source_pipeline` and resumes the reference executor at the exact
+  It reports `source_prefix` and resumes the reference executor at the exact
   next operator boundary. It never includes stateful native operator protocols
   such as hash join probe; those require the full-pipeline runtime ABI;
 - the planner does not emit interior intervals, post-source transforms,

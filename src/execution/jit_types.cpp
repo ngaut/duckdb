@@ -116,7 +116,7 @@ bool JitRegionABIIsChunkTransform(JitRegionABI abi) {
 	return abi == JitRegionABI::CHUNK_TRANSFORM;
 }
 
-bool JitRegionABIIsSourcePipeline(JitRegionABI abi) {
+bool JitRegionABIIsSourcePrefix(JitRegionABI abi) {
 	return abi == JitRegionABI::SOURCE_PREFIX || abi == JitRegionABI::STATE_SCAN;
 }
 
@@ -132,8 +132,8 @@ const char *JitRegionCandidateScopeToString(JitRegionCandidateScope scope) {
 	switch (scope) {
 	case JitRegionCandidateScope::POST_SOURCE_OPERATOR_INTERVAL:
 		return "post_source_operator_interval";
-	case JitRegionCandidateScope::SOURCE_PIPELINE:
-		return "source_pipeline";
+	case JitRegionCandidateScope::SOURCE_PREFIX:
+		return "source_prefix";
 	case JitRegionCandidateScope::SINK_PIPELINE:
 		return "sink_pipeline";
 	case JitRegionCandidateScope::FULL_PIPELINE:

@@ -509,7 +509,7 @@ static void MarkRuntimeCombinedFilterProjections(SljitNativeRegionPlan &region) 
 }
 
 static string SljitRegionCandidateContext(const JitRegionContract &contract) {
-	if (JitRegionABIIsSourcePipeline(contract.abi)) {
+	if (JitRegionABIIsSourcePrefix(contract.abi)) {
 		return "source-prefix";
 	}
 	if (JitRegionABIIsChunkTransform(contract.abi)) {
@@ -2396,7 +2396,7 @@ static bool SljitRejectsSinkRegionContext(const JitRegionIRNode &node, const Jit
 }
 
 static bool SljitRejectsSourcePrefixResumeContext(const JitRegionCandidate &candidate) {
-	return JitRegionABIIsSourcePipeline(candidate.contract.abi) &&
+	return JitRegionABIIsSourcePrefix(candidate.contract.abi) &&
 	       candidate.context_traits.operator_protocol_boundary_count > 0;
 }
 
@@ -2683,7 +2683,7 @@ SljitRegionPlan BuildSljitRegionPlan(const JitRegionIR &region_ir, const JitRegi
 			plan.backend_plan->native_region = std::move(native_region);
 			plan.lowering_plan.SetCompiledExecutionMode(JitExecutionMode::NATIVE);
 			plan.lowering_plan.shape_key = BuildSljitRegionShapeKey(*plan.backend_plan->native_region, contract);
-			if (JitRegionABIIsSourcePipeline(contract.abi) && candidate.traits.has_table_scan_source &&
+			if (JitRegionABIIsSourcePrefix(contract.abi) && candidate.traits.has_table_scan_source &&
 			    candidate.traits.source_execution == JitRegionSourceExecutionKind::NATIVE_SOURCE &&
 			    candidate.traits.source_filter_count > 0 &&
 			    plan.lowering_plan.shape_key == SLJIT_SOURCE_PREFIX_FILTER_PROJECTION_SHAPE) {

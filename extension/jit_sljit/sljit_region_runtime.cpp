@@ -174,8 +174,8 @@ public:
 		return CodeSize() > 0 || HasNativeProtocolBody();
 	}
 
-	bool CanExecuteSourcePipeline() const override {
-		return JitRegionABIIsSourcePipeline(abi);
+	bool CanExecuteSourcePrefix() const override {
+		return JitRegionABIIsSourcePrefix(abi);
 	}
 
 	bool CanExecuteSinkPipeline() const override {

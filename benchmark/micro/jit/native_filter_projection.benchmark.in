@@ -46,7 +46,7 @@ SELECT (
 		              AND region_execution_form='none'
 		              AND policy_decision='auto'
 	              AND candidate_shape='filter-projection-projection'
-	              AND candidate_scope='source_pipeline'
+	              AND candidate_scope='source_prefix'
 	              AND compile_time_us=0
 	              AND code_size=0
 	              AND reason LIKE '%execution-form=none%'
@@ -68,7 +68,7 @@ SELECT (
 		                 AND region_execution_form='none'
 		                 AND policy_decision='force'
 		                 AND candidate_shape='filter-projection-projection'
-		                 AND candidate_scope='source_pipeline'
+		                 AND candidate_scope='source_prefix'
 		                 AND code_size=0
 		                 AND reason LIKE '%execution-form=none%'
 		                 AND reason LIKE '%execution:unsupported%'

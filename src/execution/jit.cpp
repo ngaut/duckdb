@@ -1070,9 +1070,9 @@ vector<unique_ptr<JitRegionKernel>> JitManager::CompilePreparedRegions(ClientCon
 			if (!result.kernel || !result.kernel->HasExecutableBody()) {
 				throw InternalException("JIT backend \"%s\" compiled region without executable code", backend_name);
 			}
-			if (JitRegionABIIsSourcePipeline(candidate.contract.abi) && !result.kernel->CanExecuteSourcePipeline()) {
+			if (JitRegionABIIsSourcePrefix(candidate.contract.abi) && !result.kernel->CanExecuteSourcePrefix()) {
 				throw InternalException(
-				    "JIT backend \"%s\" compiled source pipeline without source-prefix executable ABI", backend_name);
+				    "JIT backend \"%s\" compiled source-prefix without source-prefix executable ABI", backend_name);
 			}
 			if (JitRegionABIIsSinkPipeline(candidate.contract.abi) && !result.kernel->CanExecuteSinkPipeline()) {
 				throw InternalException("JIT backend \"%s\" compiled sink pipeline without sink executable ABI",

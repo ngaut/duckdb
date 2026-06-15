@@ -993,7 +993,7 @@ static string BuildJitRegionInventoryFeatureShape(const JitRegionPipelineInvento
 	return result;
 }
 
-static const char *JitRegionSourcePipelineBoundary(JitRegionSourceExecutionKind execution) {
+static const char *JitRegionSourcePrefixBoundary(JitRegionSourceExecutionKind execution) {
 	switch (execution) {
 	case JitRegionSourceExecutionKind::NATIVE_SOURCE:
 		return "source-native";
@@ -1012,7 +1012,7 @@ static string DescribeJitRegionInventoryPipelineShape(const JitRegionPipelineInv
 	string result = "pipeline";
 	if (inventory.has_source) {
 		result += ";source:source:" + inventory.source_operator_name + ":";
-		result += JitRegionSourcePipelineBoundary(inventory.source_execution);
+		result += JitRegionSourcePrefixBoundary(inventory.source_execution);
 	}
 	D_ASSERT(inventory.operator_names.size() == inventory.operator_boundaries.size());
 	for (idx_t op_idx = 0; op_idx < inventory.operator_names.size(); op_idx++) {
@@ -1997,7 +1997,7 @@ static JitRegionCandidateTraits BuildJitRegionUpstreamTraits(const JitRegionIR &
 	JitRegionCandidate upstream_candidate;
 	upstream_candidate.first_node = 0;
 	upstream_candidate.node_count = MinValue(candidate.first_node, NumericCast<idx_t>(region_ir.nodes.size()));
-	upstream_candidate.scope = JitRegionCandidateScope::SOURCE_PIPELINE;
+	upstream_candidate.scope = JitRegionCandidateScope::SOURCE_PREFIX;
 	return BuildJitRegionSpanTraits(region_ir, std::move(upstream_candidate));
 }
 
@@ -2066,7 +2066,7 @@ static string NormalizeJitRegionSignatureSegment(string input) {
 }
 
 static string GetJitRegionSignatureContext(const JitRegionContract &contract) {
-	if (JitRegionABIIsSourcePipeline(contract.abi)) {
+	if (JitRegionABIIsSourcePrefix(contract.abi)) {
 		return "source-prefix";
 	}
 	if (JitRegionABIIsChunkTransform(contract.abi)) {
@@ -2424,7 +2424,7 @@ static JitRegionCandidateScope DetermineJitRegionCandidateScope(const JitRegionI
 		return JitRegionCandidateScope::SINK_PIPELINE;
 	}
 	if (starts_at_source) {
-		return JitRegionCandidateScope::SOURCE_PIPELINE;
+		return JitRegionCandidateScope::SOURCE_PREFIX;
 	}
 	return JitRegionCandidateScope::POST_SOURCE_OPERATOR_INTERVAL;
 }
@@ -2524,7 +2524,7 @@ static bool JitRegionTraitsRequireOperatorResumeProtocol(const JitRegionCandidat
 
 static bool JitRegionCandidateRequiresMissingSplitProtocol(const JitRegionCandidate &candidate) {
 	switch (candidate.scope) {
-	case JitRegionCandidateScope::SOURCE_PIPELINE:
+	case JitRegionCandidateScope::SOURCE_PREFIX:
 		return candidate.context_traits.operator_protocol_boundary_count > 0;
 	case JitRegionCandidateScope::POST_SOURCE_OPERATOR_INTERVAL:
 		return JitRegionTraitsRequireOperatorResumeProtocol(candidate.upstream_traits) ||

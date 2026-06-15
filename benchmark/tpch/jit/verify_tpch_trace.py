@@ -640,21 +640,21 @@ def verify_executable_candidate_scope(name: str, row: dict) -> None:
         raise AssertionError(f"{name}: executable region has unknown execution form: {row}")
     if region_execution_form == "none":
         raise AssertionError(f"{name}: executable region did not declare an execution form: {row}")
-    if scope == "source_pipeline":
+    if scope == "source_prefix":
         source_execution = event_source_execution(row)
         if source_execution == "native-source" or execution_mode == "native":
             if execution_mode != "native":
-                raise AssertionError(f"{name}: native-source pipeline has invalid execution mode: {row}")
+                raise AssertionError(f"{name}: native-source-prefix has invalid execution mode: {row}")
             if region_execution_form != "fused":
-                raise AssertionError(f"{name}: native-source pipeline has invalid execution form: {row}")
+                raise AssertionError(f"{name}: native-source-prefix has invalid execution form: {row}")
         else:
-            raise AssertionError(f"{name}: source-boundary pipeline was compiled as executable JIT: {row}")
+            raise AssertionError(f"{name}: source-boundary prefix was compiled as executable JIT: {row}")
         if abi and abi not in {"source_prefix", "state_scan"}:
-            raise AssertionError(f"{name}: source pipeline executable has wrong ABI: {row}")
+            raise AssertionError(f"{name}: source-prefix executable has wrong ABI: {row}")
         if not has_source:
-            raise AssertionError(f"{name}: source pipeline executable shape has no source node: {row}")
+            raise AssertionError(f"{name}: source-prefix executable shape has no source node: {row}")
         if has_sink:
-            raise AssertionError(f"{name}: source pipeline executable shape contains sink boundary: {row}")
+            raise AssertionError(f"{name}: source-prefix executable shape contains sink boundary: {row}")
         return
     if scope == "full_pipeline":
         if execution_mode != "native":
@@ -2094,7 +2094,7 @@ def verify_source_fusion_gaps(
             if query_id and query_id not in expected_query_set:
                 raise AssertionError(f"source_fusion_gap_summary.csv: unexpected query example {query_id}: {row}")
         verify_scope_summary_field("source_fusion_gap_summary.csv", row, "candidate_scopes")
-        if "source_pipeline" not in row["candidate_scopes"] and "full_pipeline" not in row["candidate_scopes"]:
+        if "source_prefix" not in row["candidate_scopes"] and "full_pipeline" not in row["candidate_scopes"]:
             raise AssertionError(f"source_fusion_gap_summary.csv: gap row is not a source/full pipeline: {row}")
         if row["candidate_shapes"] == "":
             raise AssertionError(f"source_fusion_gap_summary.csv: missing candidate shapes: {row}")
@@ -2293,7 +2293,7 @@ def verify_fusion_blockers(
                 raise AssertionError(f"fusion_blocker_summary.csv: unexpected query example {query_id}: {row}")
         verify_scope_summary_field("fusion_blocker_summary.csv", row, "candidate_scopes")
         if row["blocker_class"] == "source-fusion-gap":
-            if "source_pipeline" not in row["candidate_scopes"] and "full_pipeline" not in row["candidate_scopes"]:
+            if "source_prefix" not in row["candidate_scopes"] and "full_pipeline" not in row["candidate_scopes"]:
                 raise AssertionError(f"fusion_blocker_summary.csv: source blocker row is not source/full pipeline: {row}")
         if row["blocker_class"] == "sink-fusion-gap":
             if "full_pipeline" not in row["candidate_scopes"]:

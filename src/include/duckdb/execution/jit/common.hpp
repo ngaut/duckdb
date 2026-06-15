@@ -20,7 +20,7 @@ enum class JitRegionIRNodeKind : uint8_t { SOURCE, FILTER, PROJECTION, OPERATOR,
 enum class JitRegionABI : uint8_t { NONE, CHUNK_TRANSFORM, SOURCE_PREFIX, SINK_SUFFIX, FULL_PIPELINE, STATE_SCAN };
 enum class JitRegionCandidateScope : uint8_t {
 	POST_SOURCE_OPERATOR_INTERVAL,
-	SOURCE_PIPELINE,
+	SOURCE_PREFIX,
 	SINK_PIPELINE,
 	FULL_PIPELINE
 };
@@ -170,7 +170,7 @@ DUCKDB_API const char *JitLoweringKindToString(JitLoweringKind kind);
 DUCKDB_API const char *JitRegionIRNodeKindToString(JitRegionIRNodeKind kind);
 DUCKDB_API const char *JitRegionABIToString(JitRegionABI abi);
 DUCKDB_API bool JitRegionABIIsChunkTransform(JitRegionABI abi);
-DUCKDB_API bool JitRegionABIIsSourcePipeline(JitRegionABI abi);
+DUCKDB_API bool JitRegionABIIsSourcePrefix(JitRegionABI abi);
 DUCKDB_API bool JitRegionABIIsSinkPipeline(JitRegionABI abi);
 DUCKDB_API bool JitRegionABIIsFullPipeline(JitRegionABI abi);
 DUCKDB_API bool JitRegionABIOwnsSource(JitRegionABI abi);

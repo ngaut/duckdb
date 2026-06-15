@@ -1044,7 +1044,7 @@ bool JitRegionExecutor::TryExecuteFullPipeline(PipelineExecutor &executor, idx_t
 	}
 }
 
-bool JitRegionExecutor::HasSourcePipelineKernel(PipelineExecutor &executor) {
+bool JitRegionExecutor::HasSourcePrefixKernel(PipelineExecutor &executor) {
 	if (executor.context.client.IsJitSuppressed()) {
 		return false;
 	}
@@ -1054,7 +1054,7 @@ bool JitRegionExecutor::HasSourcePipelineKernel(PipelineExecutor &executor) {
 			continue;
 		}
 		auto &contract = candidate_kernel->TraceCandidateContract();
-		if (!JitRegionABIIsSourcePipeline(contract.abi) || !candidate_kernel->CanExecuteSourcePipeline() ||
+		if (!JitRegionABIIsSourcePrefix(contract.abi) || !candidate_kernel->CanExecuteSourcePrefix() ||
 		    !candidate_kernel->RequiresNativeSource()) {
 			continue;
 		}
@@ -1079,7 +1079,7 @@ bool JitRegionExecutor::TryExecuteSourcePrefix(PipelineExecutor &executor, DataC
 			continue;
 		}
 		auto &contract = candidate_kernel->TraceCandidateContract();
-		if (!JitRegionABIIsSourcePipeline(contract.abi) || !candidate_kernel->CanExecuteSourcePipeline() ||
+		if (!JitRegionABIIsSourcePrefix(contract.abi) || !candidate_kernel->CanExecuteSourcePrefix() ||
 		    !candidate_kernel->RequiresNativeSource()) {
 			continue;
 		}
@@ -1101,7 +1101,7 @@ bool JitRegionExecutor::TryExecuteSourcePrefix(PipelineExecutor &executor, DataC
 			metrics.source_native_runtime_time_us = source_fetch_time_us;
 			JitManager::Get(executor.context.client)
 			    .RecordRuntimeEvent(executor.context.client, *kernel, JitCompileTarget::REGION, "source_native",
-			                        "source pipeline native source fetched before generated prefix execution",
+			                        "source-prefix native source fetched before generated prefix execution",
 			                        0, source_chunk.size(), source_fetch_time_us,
 			                        JitSourceResultTypeToString(source_result), metrics);
 		}
@@ -1128,7 +1128,7 @@ bool JitRegionExecutor::TryExecuteSourcePrefix(PipelineExecutor &executor, DataC
 		auto operator_count = executor.pipeline.GetIntermediateOperators().size();
 		auto candidate_end = kernel->TraceCandidateEndOperatorIndex();
 		if (candidate_end > operator_count) {
-			throw InternalException("JIT source pipeline candidate end %llu exceeds operator count %llu",
+			throw InternalException("JIT source-prefix candidate end %llu exceeds operator count %llu",
 			                        static_cast<unsigned long long>(candidate_end),
 			                        static_cast<unsigned long long>(operator_count));
 		}
@@ -1142,7 +1142,7 @@ bool JitRegionExecutor::TryExecuteSourcePrefix(PipelineExecutor &executor, DataC
 			if (trace_runtime) {
 				JitManager::Get(executor.context.client)
 				    .RecordRuntimeEvent(executor.context.client, *kernel, JitCompileTarget::REGION, "declined",
-				                        "source pipeline kernel declined after source boundary fetch; normal pipeline "
+				                        "source-prefix kernel declined after source boundary fetch; normal pipeline "
 				                        "will resume at source boundary",
 				                        source_chunk.size(), source_chunk.size(), elapsed_us,
 				                        JitSourceResultTypeToString(source_result));
@@ -1150,7 +1150,7 @@ bool JitRegionExecutor::TryExecuteSourcePrefix(PipelineExecutor &executor, DataC
 			return true;
 		}
 		if (operator_result != OperatorResultType::NEED_MORE_INPUT) {
-			throw InternalException("JIT source pipeline prefix returned unsupported operator result %s",
+			throw InternalException("JIT source-prefix kernel returned unsupported operator result %s",
 			                        JitOperatorResultTypeToString(operator_result));
 		}
 		result = &prefix_result;
@@ -1181,7 +1181,7 @@ bool JitRegionExecutor::TryExecuteSourcePrefix(PipelineExecutor &executor, DataC
 		if (trace_runtime) {
 			JitManager::Get(executor.context.client)
 			    .RecordRuntimeEvent(executor.context.client, *kernel, JitCompileTarget::REGION, "executed",
-			                        "source pipeline kernel executed;next_operator_idx=" +
+			                        "source-prefix kernel executed;next_operator_idx=" +
 			                            std::to_string(next_operator_idx),
 			                        source_chunk.size(), result->size(), elapsed_us,
 			                        JitSourceResultTypeToString(source_result),
@@ -1194,7 +1194,7 @@ bool JitRegionExecutor::TryExecuteSourcePrefix(PipelineExecutor &executor, DataC
 			auto elapsed_us = trace_started ? JitRegionElapsedMicros(trace_start) : 0;
 			JitManager::Get(executor.context.client)
 			    .RecordRuntimeEvent(executor.context.client, *kernel, JitCompileTarget::REGION, "error",
-			                        "source pipeline kernel threw: " + JitRegionExceptionMessage(jit_error), 0, 0,
+			                        "source-prefix kernel threw: " + JitRegionExceptionMessage(jit_error), 0, 0,
 			                        elapsed_us, "error");
 		}
 		throw;

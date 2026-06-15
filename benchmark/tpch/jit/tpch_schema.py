@@ -145,7 +145,7 @@ MATERIALIZATION_OPERATORS = ("CTE", "CTE_SCAN", "COLUMN_DATA_SCAN")
 REGION_DECISION_STATUSES = ("compiled", "skipped", "unsupported")
 KNOWN_CANDIDATE_SCOPES = (
     "post_source_operator_interval",
-    "source_pipeline",
+    "source_prefix",
     "sink_pipeline",
     "full_pipeline",
 )

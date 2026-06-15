@@ -23,7 +23,7 @@ static bool HasCompiledJitPreparedSourceOwnerKernel(const vector<unique_ptr<JitR
 			continue;
 		}
 		auto &contract = kernel->TraceCandidateContract();
-		if (JitRegionABIIsSourcePipeline(contract.abi) && kernel->CanExecuteSourcePipeline()) {
+		if (JitRegionABIIsSourcePrefix(contract.abi) && kernel->CanExecuteSourcePrefix()) {
 			return true;
 		}
 		if (JitRegionABIIsFullPipeline(contract.abi) && kernel->CanExecuteFullPipeline()) {
@@ -50,8 +50,8 @@ static string DescribeCompiledJitPreparedSourceOwnerKernels(const vector<unique_
 		result += kernel->HasTraceCandidate() && kernel->TraceCandidateContract().owns_source ? "true" : "false";
 		result += ",owns_sink=";
 		result += kernel->HasTraceCandidate() && kernel->TraceCandidateContract().owns_sink ? "true" : "false";
-		result += ",source_abi=";
-		result += kernel->CanExecuteSourcePipeline() ? "true" : "false";
+		result += ",source_prefix_abi=";
+		result += kernel->CanExecuteSourcePrefix() ? "true" : "false";
 		result += ",full_abi=";
 		result += kernel->CanExecuteFullPipeline() ? "true" : "false";
 		result += ">";
@@ -93,14 +93,14 @@ static string DescribeJitPreparedSourceOwnerState(ClientContext &context, const 
 	return result;
 }
 
-static bool HasJitSourcePipelineKernelRequiringNativeSource(const vector<unique_ptr<JitRegionKernel>> &kernels) {
+static bool HasJitSourcePrefixKernelRequiringNativeSource(const vector<unique_ptr<JitRegionKernel>> &kernels) {
 	for (auto &kernel : kernels) {
 		D_ASSERT(kernel);
 		if (!kernel->HasTraceCandidate()) {
 			continue;
 		}
 		auto &contract = kernel->TraceCandidateContract();
-		if (JitRegionABIIsSourcePipeline(contract.abi) && kernel->CanExecuteSourcePipeline() &&
+		if (JitRegionABIIsSourcePrefix(contract.abi) && kernel->CanExecuteSourcePrefix() &&
 		    kernel->RequiresNativeSource()) {
 			return true;
 		}
@@ -766,10 +766,10 @@ DataChunk &PipelineExecutor::GetSourceChunkForInitialIdx(idx_t initial_idx) {
 }
 
 SourceResultType PipelineExecutor::FetchFromSource(DataChunk *&result, bool allow_source_prefix_jit) {
-	auto source_prefix_jit = allow_source_prefix_jit && JitRegionExecutor::HasSourcePipelineKernel(*this);
+	auto source_prefix_jit = allow_source_prefix_jit && JitRegionExecutor::HasSourcePrefixKernel(*this);
 	auto prepared_jit = pipeline.GetJitPreparedPipeline();
 	auto prepared_source_input = prepared_jit && prepared_jit->RequiresPreparedSourceInput();
-	if (source_prefix_jit && HasJitSourcePipelineKernelRequiringNativeSource(jit_kernels)) {
+	if (source_prefix_jit && HasJitSourcePrefixKernelRequiringNativeSource(jit_kernels)) {
 		std::chrono::steady_clock::time_point source_fetch_start;
 		auto trace_source_fetch = Settings::Get<JitTraceRuntimeSetting>(context.client);
 		if (trace_source_fetch) {

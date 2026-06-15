@@ -126,7 +126,7 @@ def verify_events(trace_dir: Path, rows: list) -> None:
                 for event in region_events
                 if event.get("status") in {"skipped", "unsupported"}
                 and event.get("candidate_shape") == expected["candidate_shape"]
-                and event.get("candidate_scope") == "source_pipeline"
+                and event.get("candidate_scope") == "source_prefix"
                 and event.get("region_execution_form") == "none"
                 and "source-fusion-gap:requires-native-source" in event.get("reason", "")
             ]
