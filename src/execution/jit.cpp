@@ -172,7 +172,7 @@ idx_t JitManager::RecordEvent(ClientContext &context, string backend_name, JitCo
 	}
 	if (admission && admission->has_admission) {
 		event.has_admission = true;
-		event.admission_shape_key = admission->shape_key;
+		event.admission_shape_key = admission->admission_key;
 		event.admission_rule_present = admission->rule_present;
 		event.admission_min_cardinality = admission->min_cardinality;
 		event.admission_proof = admission->proof;
@@ -360,14 +360,14 @@ static JitAdmissionDecision AdmitJitRegion(const JitBackend &backend, JitPolicyM
 	JitAdmissionDecision decision;
 	decision.policy_decision = JitPolicyModeToString(policy);
 	decision.info.has_admission = true;
-	decision.info.shape_key = lowering_plan.shape_key;
+	decision.info.admission_key = lowering_plan.shape_key;
 	auto estimated_work = candidate.estimated_cardinality;
 	JitAutoAdmissionRule admission_rule;
 	auto has_admission_rule =
 	    backend.GetAutoAdmissionRule(JitCompileTarget::REGION, candidate, lowering_plan, admission_rule);
 	decision.info.rule_present = has_admission_rule;
 	if (has_admission_rule) {
-		decision.info.shape_key = admission_rule.shape_key;
+		decision.info.admission_key = admission_rule.admission_key;
 		decision.info.min_cardinality = admission_rule.min_cardinality;
 		decision.info.proof = admission_rule.proof;
 		decision.info.has_score = true;
@@ -379,7 +379,7 @@ static JitAdmissionDecision AdmitJitRegion(const JitBackend &backend, JitPolicyM
 		decision.reason = "jit_policy=" + string(JitPolicyModeToString(policy)) +
 		                  " skips region kernel because region execution form is not fused";
 		decision.reason += ";region_execution_form=" + string(JitRegionExecutionFormToString(region_execution_form));
-		decision.reason += ";requires=fused;shape=" + decision.info.shape_key;
+		decision.reason += ";requires=fused;shape=" + decision.info.admission_key;
 		decision.reason += ";" + lowering_plan.EventReason();
 		if (has_admission_rule) {
 			decision.reason += ";min_cardinality=" + std::to_string(admission_rule.min_cardinality);
@@ -398,14 +398,14 @@ static JitAdmissionDecision AdmitJitRegion(const JitBackend &backend, JitPolicyM
 	D_ASSERT(policy == JitPolicyMode::AUTO);
 	if (has_admission_rule && estimated_work >= admission_rule.min_cardinality) {
 		decision.compile = true;
-		decision.reason = "jit_policy=auto admits shape=" + decision.info.shape_key +
+		decision.reason = "jit_policy=auto admits shape=" + decision.info.admission_key +
 		                  ";estimated_cardinality=" + std::to_string(estimated_work) + ";proof=" + admission_rule.proof;
 		return decision;
 	}
 
 	decision.reason = "jit_policy=auto skips region kernel without admitted performance proof";
-	if (!decision.info.shape_key.empty()) {
-		decision.reason += ": shape=" + decision.info.shape_key;
+	if (!decision.info.admission_key.empty()) {
+		decision.reason += ": shape=" + decision.info.admission_key;
 	}
 	decision.reason += ";estimated_cardinality=" + std::to_string(estimated_work);
 	if (has_admission_rule) {
@@ -876,7 +876,7 @@ unique_ptr<JitPreparedPipeline> JitManager::PreparePipelineRegions(ClientContext
 			if (!maybe_admissible) {
 				if (!precheck_info.has_admission) {
 					precheck_info.has_admission = true;
-					precheck_info.shape_key = candidate.shape;
+					precheck_info.admission_key = candidate.shape;
 					precheck_info.rule_present = false;
 				}
 				if (precheck_reason.empty()) {

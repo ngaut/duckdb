@@ -229,14 +229,14 @@ struct JitKernelCounter {
 
 struct JitAutoAdmissionRule {
 	JitCompileTarget target = JitCompileTarget::REGION;
-	string shape_key;
+	string admission_key;
 	idx_t min_cardinality = 0;
 	string proof;
 };
 
 struct JitAdmissionInfo {
 	bool has_admission = false;
-	string shape_key;
+	string admission_key;
 	bool rule_present = false;
 	idx_t min_cardinality = 0;
 	string proof;

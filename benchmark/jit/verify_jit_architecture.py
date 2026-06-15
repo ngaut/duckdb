@@ -1203,6 +1203,9 @@ def verify_region_selection_contract(root: Path) -> None:
             "MayHaveAutoAdmissionRule(JitCompileTarget target, const JitRegionCandidate",
             "GetAutoAdmissionRule(JitCompileTarget target, const JitRegionCandidate &candidate",
             "const JitRegionLoweringPlan &lowering_plan",
+            "struct JitAutoAdmissionRule",
+            "struct JitAdmissionInfo",
+            "string admission_key",
         ],
     )
     assert_required_text(
@@ -1228,6 +1231,11 @@ def verify_region_selection_contract(root: Path) -> None:
             "backend.GetAutoAdmissionRule(JitCompileTarget::REGION, lowering_plan.shape_key",
             "TryGetSljitAutoAdmissionRule",
             "if (shape_key != entry.",
+            "string shape_key;\n\tidx_t min_cardinality",
+            "info.shape_key",
+            "rule.shape_key",
+            "admission->shape_key",
+            "decision.info.shape_key",
         ],
     )
     assert_required_text(
@@ -3182,7 +3190,7 @@ def verify_backend_registration_boundary(root: Path) -> None:
             "SLJIT_AUTO_ADMISSION_FAMILIES",
             "SljitAutoAdmissionRuleSpec rule",
             "SetSljitAutoAdmissionRule",
-            "rule.shape_key = entry.admission_key",
+            "rule.admission_key = entry.admission_key",
             "BuildSljitRegionCandidateShapeKey(candidate)",
             "candidate.traits.has_table_scan_source",
             "candidate.traits.filter_count",

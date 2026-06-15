@@ -23,7 +23,7 @@ struct SljitAutoAdmissionRuleSpec {
 
 static void SetSljitAutoAdmissionRule(const SljitAutoAdmissionRuleSpec &entry, JitAutoAdmissionRule &rule) {
 	rule.target = JitCompileTarget::REGION;
-	rule.shape_key = entry.admission_key;
+	rule.admission_key = entry.admission_key;
 	rule.min_cardinality = entry.min_cardinality;
 	rule.proof = entry.proof;
 }
@@ -133,7 +133,7 @@ static bool TryGetSljitCandidateAutoAdmissionRule(const JitRegionCandidate &cand
 static void SetSljitAdmissionInfo(JitAdmissionInfo &info, const JitRegionCandidate &candidate,
                                   const JitAutoAdmissionRule &rule) {
 	info.has_admission = true;
-	info.shape_key = rule.shape_key;
+	info.admission_key = rule.admission_key;
 	info.rule_present = true;
 	info.min_cardinality = rule.min_cardinality;
 	info.proof = rule.proof;
@@ -144,15 +144,15 @@ static void SetSljitAdmissionInfo(JitAdmissionInfo &info, const JitRegionCandida
 static bool TryRejectSljitAutoAdmissionCandidate(const JitRegionCandidate &candidate, JitAdmissionInfo &info,
                                                  string &reason) {
 	info.has_admission = true;
-	info.shape_key = BuildSljitRegionCandidateShapeKey(candidate);
+	info.admission_key = BuildSljitRegionCandidateShapeKey(candidate);
 	info.rule_present = false;
 	if (IsSljitNativeSourceFilterProjectionCandidate(candidate)) {
-		info.shape_key =
+		info.admission_key =
 		    BuildSljitRegionCandidateContextShapeKey(candidate, SLJIT_SOURCE_PREFIX_FILTER_PROJECTION_SHAPE);
 		reason =
 		    "jit_policy=auto skips region before backend analysis: SLJIT native source-prefix filter/projection has "
 		    "no admitted production performance proof;admission_rule=missing;shape=" +
-		    info.shape_key + ";estimated_cardinality=" + std::to_string(candidate.estimated_cardinality) +
+		    info.admission_key + ";estimated_cardinality=" + std::to_string(candidate.estimated_cardinality) +
 		    ";source_filter_count=" + std::to_string(candidate.traits.source_filter_count) +
 		    ";source_projected_column_count=" + std::to_string(candidate.traits.source_projected_column_count) + ";" +
 		    candidate.traits.ir;
@@ -161,7 +161,7 @@ static bool TryRejectSljitAutoAdmissionCandidate(const JitRegionCandidate &candi
 	if (JitRegionABIIsSourcePipeline(candidate.contract.abi) && candidate.traits.source_filter_count > 0) {
 		reason = "jit_policy=auto skips region before backend analysis: SLJIT scan-source work requires native source "
 		         "fusion and measured source admission proof;admission_rule=missing;shape=" +
-		         info.shape_key + ";estimated_cardinality=" + std::to_string(candidate.estimated_cardinality) +
+		         info.admission_key + ";estimated_cardinality=" + std::to_string(candidate.estimated_cardinality) +
 		         ";source_filter_count=" + std::to_string(candidate.traits.source_filter_count) +
 		         ";source_projected_column_count=" + std::to_string(candidate.traits.source_projected_column_count) + ";" +
 		         candidate.traits.ir;
@@ -170,21 +170,21 @@ static bool TryRejectSljitAutoAdmissionCandidate(const JitRegionCandidate &candi
 	if (JitRegionABIIsFullPipeline(candidate.contract.abi)) {
 		reason = "jit_policy=auto skips region before backend analysis: SLJIT full-pipeline region "
 		         "requires measured operator-aware admission proof;admission_rule=missing;shape=" +
-		         info.shape_key + ";estimated_cardinality=" + std::to_string(candidate.estimated_cardinality) + ";" +
+		         info.admission_key + ";estimated_cardinality=" + std::to_string(candidate.estimated_cardinality) + ";" +
 		         candidate.traits.ir;
 		return true;
 	}
 	if (JitRegionABIIsSinkPipeline(candidate.contract.abi)) {
 		reason = "jit_policy=auto skips region before backend analysis: SLJIT sink pipeline region "
 		         "requires measured operator-aware admission proof;admission_rule=missing;shape=" +
-		         info.shape_key + ";estimated_cardinality=" + std::to_string(candidate.estimated_cardinality) + ";" +
+		         info.admission_key + ";estimated_cardinality=" + std::to_string(candidate.estimated_cardinality) + ";" +
 		         candidate.traits.ir;
 		return true;
 	}
 	if (JitRegionABIIsChunkTransform(candidate.contract.abi)) {
 		reason = "jit_policy=auto skips region before backend analysis: SLJIT post-source operator intervals have no "
 		         "admitted performance proof;admission_rule=missing;shape=" +
-		         info.shape_key + ";estimated_cardinality=" + std::to_string(candidate.estimated_cardinality) + ";" +
+		         info.admission_key + ";estimated_cardinality=" + std::to_string(candidate.estimated_cardinality) + ";" +
 		         candidate.traits.ir;
 		return true;
 	}
@@ -229,16 +229,16 @@ public:
 		}
 		info.has_admission = true;
 		info.rule_present = false;
-		info.shape_key = "sljit:pipeline-inventory";
+		info.admission_key = "sljit:pipeline-inventory";
 		if (explain && !inventory.feature_shape.empty()) {
-			info.shape_key += ":" + inventory.feature_shape;
+			info.admission_key += ":" + inventory.feature_shape;
 		}
 		if (!explain) {
 			return false;
 		}
 		reason = "jit_policy=auto skips pipeline before typed IR lowering: no SLJIT auto admission family can match "
 		         "pipeline inventory;admission_rule=missing;shape=" +
-		         info.shape_key + ";estimated_cardinality=" + std::to_string(inventory.estimated_cardinality) +
+		         info.admission_key + ";estimated_cardinality=" + std::to_string(inventory.estimated_cardinality) +
 		         ";source_filter_count=" + std::to_string(inventory.source_filter_count) +
 		         ";source_projected_column_count=" + std::to_string(inventory.source_projected_column_count) +
 		         ";features=" + inventory.feature_shape;
@@ -258,7 +258,7 @@ public:
 			}
 			reason = "jit_policy=auto skips region before backend analysis: estimated cardinality below admitted SLJIT "
 			         "auto threshold: shape=" +
-			         rule.shape_key + ";estimated_cardinality=" + std::to_string(candidate.estimated_cardinality) +
+			         rule.admission_key + ";estimated_cardinality=" + std::to_string(candidate.estimated_cardinality) +
 			         ";min_cardinality=" + std::to_string(rule.min_cardinality) + ";proof=" + rule.proof;
 			return false;
 		}
@@ -267,11 +267,11 @@ public:
 		}
 
 		info.has_admission = true;
-		info.shape_key = BuildSljitRegionCandidateShapeKey(candidate);
+		info.admission_key = BuildSljitRegionCandidateShapeKey(candidate);
 		info.rule_present = false;
 		reason = "jit_policy=auto skips region before backend analysis: candidate cannot map to an admitted SLJIT "
 		         "auto shape: shape=" +
-		         info.shape_key + ";estimated_cardinality=" + std::to_string(candidate.estimated_cardinality) +
+		         info.admission_key + ";estimated_cardinality=" + std::to_string(candidate.estimated_cardinality) +
 		         ";admission_rule=missing;" + candidate.traits.ir;
 		return false;
 	}

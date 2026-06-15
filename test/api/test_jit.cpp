@@ -306,7 +306,7 @@ public:
 	                              string &) const override {
 		REQUIRE(target == JitCompileTarget::REGION);
 		info.has_admission = true;
-		info.shape_key = "contract:auto-non-fused";
+		info.admission_key = "contract:auto-non-fused";
 		info.rule_present = true;
 		info.min_cardinality = 0;
 		info.proof = "contract:auto-non-fused-proof";
@@ -342,7 +342,7 @@ public:
 			return false;
 		}
 		rule.target = target;
-		rule.shape_key = lowering_plan.shape_key;
+		rule.admission_key = lowering_plan.shape_key;
 		rule.min_cardinality = 0;
 		rule.proof = "contract:auto-non-fused-proof";
 		return true;
@@ -371,10 +371,10 @@ public:
 		precheck_count++;
 		REQUIRE(target == JitCompileTarget::REGION);
 		info.has_admission = true;
-		info.shape_key = "contract:auto-precheck:" + candidate.shape;
+		info.admission_key = "contract:auto-precheck:" + candidate.shape;
 		info.rule_present = false;
 		reason = "jit_policy=auto skips region before backend analysis: contract precheck rejects candidate;shape=" +
-		         info.shape_key + ";admission_rule=missing";
+		         info.admission_key + ";admission_rule=missing";
 		return false;
 	}
 
@@ -430,7 +430,7 @@ public:
 			REQUIRE(inventory.ir.empty());
 		}
 		info.has_admission = true;
-		info.shape_key = "contract:auto-inventory:" + inventory.feature_shape;
+		info.admission_key = "contract:auto-inventory:" + inventory.feature_shape;
 		info.rule_present = false;
 		if (explain) {
 			reason =
@@ -487,7 +487,7 @@ public:
 		candidate_precheck_count++;
 		REQUIRE(target == JitCompileTarget::REGION);
 		info.has_admission = true;
-		info.shape_key = "contract:auto-candidate-precheck:" + candidate.shape;
+		info.admission_key = "contract:auto-candidate-precheck:" + candidate.shape;
 		info.rule_present = true;
 		info.min_cardinality = 1000000;
 		info.proof = "contract:auto-candidate-precheck";
@@ -598,7 +598,7 @@ public:
 			return false;
 		}
 		rule.target = target;
-		rule.shape_key = lowering_plan.shape_key;
+		rule.admission_key = lowering_plan.shape_key;
 		rule.min_cardinality = StringUtil::Contains(candidate.shape, "projection-projection") ? 1 : 0;
 		rule.proof = "contract:auto-selection";
 		return true;
