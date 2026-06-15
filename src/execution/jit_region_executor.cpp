@@ -1137,17 +1137,7 @@ bool JitRegionExecutor::TryExecuteSourcePrefix(PipelineExecutor &executor, DataC
 		auto jit_executed = kernel->TryExecute(source_chunk, prefix_result, 0, operator_result);
 		auto elapsed_us = trace_runtime ? JitRegionElapsedMicros(trace_start) : 0;
 		if (!jit_executed) {
-			result->Reference(source_chunk);
-			next_operator_idx = 0;
-			if (trace_runtime) {
-				JitManager::Get(executor.context.client)
-				    .RecordRuntimeEvent(executor.context.client, *kernel, JitCompileTarget::REGION, "declined",
-				                        "source-prefix kernel declined after source boundary fetch; normal pipeline "
-				                        "will resume at source boundary",
-				                        source_chunk.size(), source_chunk.size(), elapsed_us,
-				                        JitSourceResultTypeToString(source_result));
-			}
-			return true;
+			throw InternalException("JIT native source-prefix kernel declined after native source fetch");
 		}
 		if (operator_result != OperatorResultType::NEED_MORE_INPUT) {
 			throw InternalException("JIT source-prefix kernel returned unsupported operator result %s",

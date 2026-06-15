@@ -207,6 +207,7 @@ def verify_backend_contract_tests(root: Path) -> None:
             "JIT manager rejects source-prefix kernels without source-prefix ABI",
             "JIT maximal region planner does not emit sink-only ABI candidates",
             "JIT manager rejects full pipeline kernels without full-pipeline ABI",
+            "JIT source-prefix ABI rejects decline after native source fetch",
             "RequireAutoInventorySkipEvent",
             "JIT auto rejects source-boundary full pipeline as proof-gap only",
             "JIT auto rejects native-source ungrouped aggregate without production proof",
@@ -484,6 +485,7 @@ def verify_region_executor_resume_contract(root: Path) -> None:
             "full pipeline kernel declined runtime input",
             "CanExecuteSourcePrefix",
             "RequiresNativeSource()",
+            "JIT native source-prefix kernel declined after native source fetch",
             "DataChunk &prefix_result = executor.GetSourceChunkForInitialIdx(candidate_end)",
             "*chunks[operator_idx + 1]",
             "source-prefix kernel executed;next_operator_idx=",
@@ -498,6 +500,8 @@ def verify_region_executor_resume_contract(root: Path) -> None:
             "JitRegionExecutor::TryExecute(PipelineExecutor",
             "region kernel skipped because executor has in-process operators",
             "region executor fallback executed after JIT decline",
+            "source-prefix kernel declined after source boundary fetch",
+            "normal pipeline will resume at source boundary",
         ],
     )
     assert_required_text(
@@ -577,9 +581,10 @@ def verify_region_executor_resume_contract(root: Path) -> None:
         "JIT_ARCHITECTURE.md",
         [
             "Region JIT must also respect DuckDB's resumable operator protocol.",
-            "a prefix region must not",
-            "run again on the same source chunk",
-            "as `executor_fallback`",
+            "a source-prefix region is",
+            "not entered",
+            "must not decline after native",
+            "same input cannot be safely replayed",
             "`CanExecuteSourcePrefix()`",
             "`CanExecuteFullPipeline()`",
             "`JitRegionKernel::TryExecuteFullPipeline(JitFullPipelineRuntime &,",

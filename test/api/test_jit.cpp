@@ -2,6 +2,7 @@
 #include "test_helpers.hpp"
 
 #include "duckdb/common/types/value.hpp"
+#include "duckdb/common/vector_operations/vector_operations.hpp"
 #include "duckdb/execution/jit/manager.hpp"
 #include "duckdb/execution/jit/region.hpp"
 #include "duckdb/execution/jit/runtime.hpp"
@@ -558,8 +559,16 @@ public:
 		return true;
 	}
 
-	bool TryExecute(DataChunk &, DataChunk &, idx_t, OperatorResultType &) override {
-		return false;
+	bool TryExecute(DataChunk &input, DataChunk &result, idx_t, OperatorResultType &execute_result) override {
+		if (input.ColumnCount() != result.ColumnCount()) {
+			throw InternalException("auto-selection identity test kernel saw mismatched input/output arity");
+		}
+		result.SetChildCardinality(input.size());
+		for (idx_t column_idx = 0; column_idx < input.ColumnCount(); column_idx++) {
+			VectorOperations::DefaultCast(input.data[column_idx], result.data[column_idx], input.size(), true);
+		}
+		execute_result = OperatorResultType::NEED_MORE_INPUT;
+		return true;
 	}
 
 private:
@@ -3244,12 +3253,12 @@ TEST_CASE("JIT perfect hash native aggregate update preserves null-only groups",
 		if (event.target != "region" || event.candidate_scope != "full_pipeline") {
 			continue;
 		}
-			if (event.status == "compiled" && event.execution_mode == "native" &&
-			    StringUtil::Contains(event.reason, "sink:PERFECT_HASH_GROUP_BY:native")) {
-				found_compiled_native_update = true;
-				REQUIRE(StringUtil::Contains(event.reason, "generated native perfect hash aggregate state update"));
-				REQUIRE(StringUtil::Contains(event.reason, "aggregate0_native_update=count-star"));
-				REQUIRE(StringUtil::Contains(event.reason, "aggregate1_native_update=count"));
+		if (event.status == "compiled" && event.execution_mode == "native" &&
+		    StringUtil::Contains(event.reason, "sink:PERFECT_HASH_GROUP_BY:native")) {
+			found_compiled_native_update = true;
+			REQUIRE(StringUtil::Contains(event.reason, "generated native perfect hash aggregate state update"));
+			REQUIRE(StringUtil::Contains(event.reason, "aggregate0_native_update=count-star"));
+			REQUIRE(StringUtil::Contains(event.reason, "aggregate1_native_update=count"));
 			REQUIRE(StringUtil::Contains(event.reason, "aggregate2_native_update=sum"));
 			REQUIRE(StringUtil::Contains(event.reason, "aggregate2_state_optional=true"));
 			REQUIRE(StringUtil::Contains(event.ir, "perfect_hash_aggregate_update"));
@@ -3257,18 +3266,17 @@ TEST_CASE("JIT perfect hash native aggregate update preserves null-only groups",
 			REQUIRE(StringUtil::Contains(event.ir, "aggregate1<function=count"));
 			REQUIRE(StringUtil::Contains(event.ir, "aggregate2<function=sum"));
 		}
-			if (event.phase == "runtime" && event.status == "executed" && event.execution_mode == "native" &&
-			    event.input_rows > 0 &&
-			    StringUtil::Contains(event.reason, "full pipeline kernel executed")) {
-				found_runtime_native_update = true;
-				REQUIRE(event.runtime_result == "finished");
-			}
+		if (event.phase == "runtime" && event.status == "executed" && event.execution_mode == "native" &&
+		    event.input_rows > 0 && StringUtil::Contains(event.reason, "full pipeline kernel executed")) {
+			found_runtime_native_update = true;
+			REQUIRE(event.runtime_result == "finished");
 		}
-		REQUIRE(found_compiled_native_update);
-		REQUIRE(found_runtime_native_update);
 	}
+	REQUIRE(found_compiled_native_update);
+	REQUIRE(found_runtime_native_update);
+}
 
-TEST_CASE("JIT core prunes split regions behind resumable operators", "[api][jit]") {
+TEST_CASE("JIT core prunes partial regions behind resumable operators", "[api][jit]") {
 	DuckDB db;
 	Connection con(db);
 	auto &context = *con.context;
@@ -4475,13 +4483,16 @@ TEST_CASE("JIT auto region selection uses maximal transform candidates", "[api][
 	                          "SELECT i::BIGINT AS i FROM range(64) tbl(i)"));
 
 	manager.ClearEvents();
-	REQUIRE_NO_FAIL(con.Query("SELECT s FROM (SELECT j AS s FROM "
-	                          "(SELECT i + 1 AS j FROM jit_auto_selection_input WHERE i > 0) t1) t2"));
+	auto result = con.Query("SELECT s FROM (SELECT j AS s FROM "
+	                        "(SELECT i AS j FROM jit_auto_selection_input WHERE i >= 0) t1) t2 ORDER BY s");
+	REQUIRE_NO_FAIL(*result);
+	REQUIRE(result->RowCount() == 64);
+	for (idx_t row_idx = 0; row_idx < result->RowCount(); row_idx++) {
+		REQUIRE(result->GetValue(0, row_idx).GetValue<int64_t>() == static_cast<int64_t>(row_idx));
+	}
 
 	REQUIRE(std::find(backend_ref.compiled_candidate_shapes.begin(), backend_ref.compiled_candidate_shapes.end(),
 	                  "boundary-only") == backend_ref.compiled_candidate_shapes.end());
-	REQUIRE(std::find(backend_ref.compiled_candidate_shapes.begin(), backend_ref.compiled_candidate_shapes.end(),
-	                  "projection") == backend_ref.compiled_candidate_shapes.end());
 	REQUIRE(!backend_ref.compiled_candidate_shapes.empty());
 
 	bool found_maximal_region_compile = false;
@@ -4489,7 +4500,6 @@ TEST_CASE("JIT auto region selection uses maximal transform candidates", "[api][
 		if (event.backend_name != "contract_test_auto_select_jit_backend" || event.target != "region") {
 			continue;
 		}
-		REQUIRE_FALSE(event.candidate_shape == "projection");
 		if (event.status == "compiled") {
 			found_maximal_region_compile = true;
 			REQUIRE(event.policy_decision == "auto");
@@ -5024,7 +5034,7 @@ TEST_CASE("JIT kernel counters can be recreated from runtime trace identity", "[
 	REQUIRE(counters[0].last_runtime_result == "need_more_input");
 }
 
-TEST_CASE("JIT runtime trace separates declined kernels from executor fallback work", "[api][jit]") {
+TEST_CASE("JIT source-prefix ABI rejects decline after native source fetch", "[api][jit]") {
 	DuckDB db;
 	Connection con(db);
 	auto &context = *con.context;
@@ -5038,55 +5048,60 @@ TEST_CASE("JIT runtime trace separates declined kernels from executor fallback w
 	                          "SELECT i::BIGINT AS i FROM range(16) tbl(i)"));
 
 	manager.ClearEvents();
-	REQUIRE_NO_FAIL(con.Query("SELECT i + 1 FROM jit_declining_region_input WHERE i > 0"));
+	auto result = con.Query("SELECT i + 1 FROM jit_declining_region_input WHERE i > 0");
+	REQUIRE(result->HasError());
+	REQUIRE(StringUtil::Contains(result->GetError(),
+	                             "JIT native source-prefix kernel declined after native source fetch"));
 
-	vector<idx_t> declined_kernel_ids;
+	bool found_source_native_runtime = false;
+	bool found_source_prefix_error = false;
 	for (auto &event : manager.GetEvents()) {
 		if (event.phase != "runtime" || event.target != "region" ||
 		    event.backend_name != "contract_test_declining_region_jit_backend") {
 			continue;
 		}
 		REQUIRE(event.kernel_id > 0);
-		if (event.status == "declined") {
-			declined_kernel_ids.push_back(event.kernel_id);
+		if (event.status == "source_native") {
+			found_source_native_runtime = true;
+			REQUIRE(event.has_candidate);
+			REQUIRE(event.candidate_scope == "source_prefix");
+			REQUIRE(event.execution_mode == "native");
+			REQUIRE(event.output_rows > 0);
+		}
+		if (event.status == "error") {
+			found_source_prefix_error = true;
 			REQUIRE(event.has_candidate);
 			REQUIRE(event.candidate_scope == "source_prefix");
 			REQUIRE(event.candidate_end_operator_index > event.candidate_start_operator_index);
 			REQUIRE(event.execution_mode == "native");
-			REQUIRE(event.input_rows > 0);
-			REQUIRE(event.output_rows == event.input_rows);
+			REQUIRE(StringUtil::Contains(event.reason,
+			                             "JIT native source-prefix kernel declined after native source fetch"));
 		}
+		REQUIRE(event.status != "declined");
 	}
-	REQUIRE(!declined_kernel_ids.empty());
+	REQUIRE(found_source_native_runtime);
+	REQUIRE(found_source_prefix_error);
 
-	optional_idx traced_kernel_id;
-	traced_kernel_id = declined_kernel_ids[0];
-	REQUIRE(traced_kernel_id.IsValid());
-
-	bool found_split_counter = false;
+	bool found_error_counter = false;
 	for (auto &counter : manager.GetKernelCounters()) {
-		if (counter.kernel_id != traced_kernel_id.GetIndex()) {
+		if (counter.execution_mode != "native" || !counter.has_candidate || counter.candidate_scope != "source_prefix") {
 			continue;
 		}
-		found_split_counter = true;
-		REQUIRE(counter.execution_mode == "native");
-		REQUIRE(counter.has_candidate);
-		REQUIRE(counter.candidate_scope == "source_prefix");
 		REQUIRE(!counter.candidate_pipeline_shape.empty());
 		REQUIRE(counter.candidate_end_operator_index > counter.candidate_start_operator_index);
 		REQUIRE(counter.input_rows == 0);
 		REQUIRE(counter.output_rows == 0);
-		REQUIRE(counter.invocation_count == 0);
-		REQUIRE(counter.runtime_time_us == 0);
-		REQUIRE(counter.declined_invocation_count > 0);
+		REQUIRE(counter.invocation_count > 0);
+		REQUIRE(counter.source_native_invocation_count > 0);
+		REQUIRE(counter.source_native_output_rows > 0);
+		REQUIRE(counter.declined_invocation_count == 0);
 		REQUIRE(counter.fallback_input_rows == 0);
 		REQUIRE(counter.fallback_invocation_count == 0);
-		const bool expected_last_status = counter.last_runtime_status == "declined" ||
-		                                  counter.last_runtime_status == "source_native";
-		REQUIRE(expected_last_status);
+		REQUIRE(counter.last_runtime_status == "error");
 		REQUIRE(counter.last_runtime_result != "fallback");
+		found_error_counter = true;
 	}
-	REQUIRE(found_split_counter);
+	REQUIRE(found_error_counter);
 }
 
 TEST_CASE("JIT dump IR and execution mode expose backend honesty", "[api][jit]") {

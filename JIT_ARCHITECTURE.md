@@ -1565,16 +1565,18 @@ mutable selection buffer across chained filters corrupts dictionary vectors and
 can make verification compare against the same corrupted reference.
 
 A runtime decline is allowed only when the compiled region declared the
-precondition in its boundary contract. Decline is recorded as JIT runtime
-behavior, and the reference executor owns the replacement work. A decline path
-must never be reported as native runtime.
+precondition in its boundary contract and no source, sink, or state side-effect
+has happened yet. Decline is recorded as JIT runtime behavior, and the reference
+executor owns the replacement work. A decline path must never be reported as
+native runtime.
 
 Region JIT must also respect DuckDB's resumable operator protocol. When
-`PipelineExecutor` has pending `in_process_operators`, a prefix region must not
-run again on the same source chunk. The JIT boundary must decline the region,
-resume the reference executor under JIT suppression, and record the resumed work
-as `executor_fallback`. This keeps native runtime counters from counting the same
-input rows repeatedly when a downstream operator returns `HAVE_MORE_OUTPUT`.
+`PipelineExecutor` has pending `in_process_operators`, a source-prefix region is
+not entered; the normal executor already owns the current resume state. A
+source-prefix kernel that requires a native source must not decline after native
+source rows have been fetched. At that point the source cursor has moved and the
+same input cannot be safely replayed through the normal source boundary, so core
+raises an error instead of manufacturing executor fallback work.
 
 ### Initial Generic Region Roadmap
 
