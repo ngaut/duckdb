@@ -19,6 +19,8 @@
 #include "duckdb/common/optional_idx.hpp"
 #include "duckdb/common/types/data_chunk.hpp"
 #include "duckdb/execution/execution_context.hpp"
+#include "duckdb/execution/jit/operator_runtime.hpp"
+#include "duckdb/execution/jit/operator_descriptor.hpp"
 #include "duckdb/execution/partition_info.hpp"
 #include "duckdb/execution/physical_operator_states.hpp"
 #include "duckdb/execution/progress_data.hpp"
@@ -33,6 +35,7 @@ class Pipeline;
 class PipelineBuildState;
 class MetaPipeline;
 class PhysicalPlan;
+struct JitPreparedPipeline;
 
 enum class TableFunctionParallelism : uint8_t;
 enum class OperatorCachingMode : uint8_t { NONE, PARTITIONED, ORDERED, UNORDERED };
@@ -92,12 +95,18 @@ public:
 	bool CanSaturateThreads(ClientContext &context) const;
 
 	virtual void Verify();
+	virtual JitOperatorDescriptor GetJitOperatorDescriptor() const;
 
 public:
 	// Operator interface
 	virtual unique_ptr<OperatorState> GetOperatorState(ExecutionContext &context) const;
 	virtual unique_ptr<GlobalOperatorState> GetGlobalOperatorState(ClientContext &context) const;
 	virtual bool ResetGlobalOperatorState(ClientContext &context, GlobalOperatorState &state) const;
+	virtual bool BindJitNativeOperator(ExecutionContext &context, DataChunk &input, GlobalOperatorState &gstate,
+	                                   OperatorState &state, const JitRegionOperatorInfo &operator_info,
+	                                   JitNativeOperatorBinding &binding) const;
+	virtual bool BindJitNativeSink(ExecutionContext &context, DataChunk &input, OperatorSinkInput &sink_input,
+	                               const JitRegionSinkInfo &sink_info, JitNativeSinkBinding &binding) const;
 	virtual OperatorResultType Execute(ExecutionContext &context, DataChunk &input, DataChunk &chunk,
 	                                   GlobalOperatorState &gstate, OperatorState &state) const;
 	virtual OperatorFinalizeResultType FinalExecute(ExecutionContext &context, DataChunk &chunk,
@@ -127,13 +136,20 @@ public:
 	virtual unique_ptr<LocalSourceState> GetLocalSourceState(ExecutionContext &context,
 	                                                         GlobalSourceState &gstate) const;
 	virtual unique_ptr<GlobalSourceState> GetGlobalSourceState(ClientContext &context) const;
+	virtual unique_ptr<GlobalSourceState>
+	GetGlobalSourceState(ClientContext &context, optional_ptr<const JitPreparedPipeline> jit_prepared_pipeline) const;
+	virtual bool SupportsJitNativeSource(const JitPreparedPipeline &jit_prepared_pipeline) const;
 
 protected:
 	virtual SourceResultType GetDataInternal(ExecutionContext &context, DataChunk &chunk,
 	                                         OperatorSourceInput &input) const;
+	virtual SourceResultType GetJitNativeSourceDataInternal(ExecutionContext &context, DataChunk &chunk,
+	                                                        OperatorSourceInput &input) const;
 
 public:
 	SourceResultType GetData(ExecutionContext &context, DataChunk &chunk, OperatorSourceInput &input) const;
+	SourceResultType GetJitNativeSourceData(ExecutionContext &context, DataChunk &chunk,
+	                                        OperatorSourceInput &input) const;
 
 	virtual OperatorPartitionData GetPartitionData(ExecutionContext &context, DataChunk &chunk,
 	                                               GlobalSourceState &gstate, LocalSourceState &lstate,
@@ -261,6 +277,11 @@ public:
 		can_cache_chunk = OperatorCachingMode::NONE;
 		must_return_continuation_chunk = false;
 		cached_result = OperatorResultType::NEED_MORE_INPUT;
+	}
+
+	void DisableCaching() override {
+		ResetCachingState();
+		initialized = true;
 	}
 
 	unique_ptr<DataChunk> cached_chunk;

@@ -95,8 +95,11 @@ public:
 	unique_ptr<GlobalSourceState> GetGlobalSourceState(ClientContext &context) const override;
 	unique_ptr<LocalSourceState> GetLocalSourceState(ExecutionContext &context,
 	                                                 GlobalSourceState &gstate) const override;
+	bool SupportsJitNativeSource(const JitPreparedPipeline &jit_prepared_pipeline) const override;
 	SourceResultType GetDataInternal(ExecutionContext &context, DataChunk &chunk,
 	                                 OperatorSourceInput &input) const override;
+	SourceResultType GetJitNativeSourceDataInternal(ExecutionContext &context, DataChunk &chunk,
+	                                                OperatorSourceInput &input) const override;
 
 	ProgressData GetProgress(ClientContext &context, GlobalSourceState &gstate) const override;
 
@@ -137,6 +140,7 @@ public:
 
 public:
 	InsertionOrderPreservingMap<string> ParamsToString() const override;
+	JitOperatorDescriptor GetJitOperatorDescriptor() const override;
 	//! Toggle multi-scan capability on a hash table, which prevents the scan of the aggregate from being destructive
 	//! If this is not toggled the GetData method will destroy the hash table as it is scanning it
 	static void SetMultiScan(GlobalSinkState &state);

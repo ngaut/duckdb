@@ -593,13 +593,14 @@ void MaybeRepartition(ClientContext &context, RadixHTGlobalSinkState &gstate, Ra
 	ht.Repartition();
 }
 
-void RadixPartitionedHashTable::Sink(ExecutionContext &context, DataChunk &chunk, OperatorSinkInput &input,
-                                     DataChunk &payload_input, const unsafe_vector<idx_t> &filter) const {
+static GroupedAggregateHashTable &PrepareRadixHTSinkState(ExecutionContext &context,
+                                                          const RadixPartitionedHashTable &radix_ht,
+                                                          OperatorSinkInput &input) {
 	auto &gstate = input.global_state.Cast<RadixHTGlobalSinkState>();
 	auto &lstate = input.local_state.Cast<RadixHTLocalSinkState>();
 	if (!lstate.ht) {
 		lstate.local_sink_capacity = gstate.config.sink_capacity;
-		lstate.ht = CreateHT(context.client, lstate.local_sink_capacity, gstate.config.GetRadixBits());
+		lstate.ht = radix_ht.CreateHT(context.client, lstate.local_sink_capacity, gstate.config.GetRadixBits());
 		if (gstate.number_of_threads > RadixHTConfig::GROW_STRATEGY_THREAD_THRESHOLD) {
 			// Not using grow strategy, so we enable the HLL to potentially adapt later
 			lstate.ht->EnableHLL(true);
@@ -612,12 +613,12 @@ void RadixPartitionedHashTable::Sink(ExecutionContext &context, DataChunk &chunk
 		gstate.active_threads++;
 		lstate.registered = true;
 	}
+	return *lstate.ht;
+}
 
-	auto &group_chunk = lstate.group_chunk;
-	PopulateGroupChunk(group_chunk, chunk);
-
+static void FinishRadixHTSinkState(ClientContext &context, RadixHTGlobalSinkState &gstate,
+                                   RadixHTLocalSinkState &lstate) {
 	auto &ht = *lstate.ht;
-	ht.AddChunk(group_chunk, payload_input, filter);
 
 	// Decide whether we should adapt our strategy to the data
 	if (!lstate.adapted && lstate.ht->GetSinkCount() >= RadixHTLocalSinkState::ADAPTIVITY_THRESHOLD) {
@@ -640,7 +641,7 @@ void RadixPartitionedHashTable::Sink(ExecutionContext &context, DataChunk &chunk
 
 	// Check if we need to repartition
 	const auto radix_bits_before = ht.GetRadixBits();
-	MaybeRepartition(context.client, gstate, lstate, false);
+	MaybeRepartition(context, gstate, lstate, false);
 	const auto repartitioned = radix_bits_before != ht.GetRadixBits();
 
 	if (repartitioned && ht.Count() != 0) {
@@ -652,6 +653,67 @@ void RadixPartitionedHashTable::Sink(ExecutionContext &context, DataChunk &chunk
 	}
 
 	// TODO: combine early and often
+}
+
+void RadixPartitionedHashTable::Sink(ExecutionContext &context, DataChunk &chunk, OperatorSinkInput &input,
+                                     DataChunk &payload_input, const unsafe_vector<idx_t> &filter) const {
+	auto &gstate = input.global_state.Cast<RadixHTGlobalSinkState>();
+	auto &lstate = input.local_state.Cast<RadixHTLocalSinkState>();
+	auto &ht = PrepareRadixHTSinkState(context, *this, input);
+
+	auto &group_chunk = lstate.group_chunk;
+	PopulateGroupChunk(group_chunk, chunk);
+
+	ht.AddChunk(group_chunk, payload_input, filter);
+	FinishRadixHTSinkState(context.client, gstate, lstate);
+}
+
+idx_t RadixPartitionedHashTable::FindOrCreateAggregateStates(ExecutionContext &context, DataChunk &chunk,
+                                                             OperatorSinkInput &input, Vector &addresses_out) const {
+	auto &lstate = input.local_state.Cast<RadixHTLocalSinkState>();
+	auto &ht = PrepareRadixHTSinkState(context, *this, input);
+
+	auto &group_chunk = lstate.group_chunk;
+	PopulateGroupChunk(group_chunk, chunk);
+	return ht.FindOrCreateAggregateStates(group_chunk, addresses_out);
+}
+
+idx_t RadixPartitionedHashTable::FindOrCreateAggregateStatesFromBoundGroups(
+    ExecutionContext &context, DataChunk &chunk, const vector<idx_t> &group_input_indices, OperatorSinkInput &input,
+    Vector &addresses_out) const {
+	auto &lstate = input.local_state.Cast<RadixHTLocalSinkState>();
+	auto &ht = PrepareRadixHTSinkState(context, *this, input);
+	if (group_input_indices.size() != group_types.size()) {
+		throw InternalException("Native radix aggregate group binding count mismatch");
+	}
+
+	auto &group_chunk = lstate.group_chunk;
+	group_chunk.Reset();
+	for (idx_t group_idx = 0; group_idx < group_input_indices.size(); group_idx++) {
+		auto input_idx = group_input_indices[group_idx];
+		if (input_idx >= chunk.ColumnCount()) {
+			throw InternalException("Native radix aggregate group binding references input column %llu beyond %llu",
+			                        static_cast<unsigned long long>(input_idx),
+			                        static_cast<unsigned long long>(chunk.ColumnCount()));
+		}
+		group_chunk.data[group_idx].Reference(chunk.data[input_idx]);
+	}
+	group_chunk.SetChildCardinality(chunk.size());
+	if (group_input_indices.empty()) {
+		FlatVector::SetSize(group_chunk.data[0], count_t(chunk.size()));
+	}
+	group_chunk.Verify(context.client.db);
+	return ht.FindOrCreateAggregateStates(group_chunk, addresses_out);
+}
+
+void RadixPartitionedHashTable::FinishNativeAggregateUpdate(ExecutionContext &context,
+                                                            OperatorSinkInput &input) const {
+	auto &gstate = input.global_state.Cast<RadixHTGlobalSinkState>();
+	auto &lstate = input.local_state.Cast<RadixHTLocalSinkState>();
+	if (!lstate.ht) {
+		throw InternalException("Cannot finish native radix aggregate update before binding aggregate states");
+	}
+	FinishRadixHTSinkState(context.client, gstate, lstate);
 }
 
 void RadixPartitionedHashTable::Combine(ExecutionContext &context, GlobalSinkState &gstate_p,

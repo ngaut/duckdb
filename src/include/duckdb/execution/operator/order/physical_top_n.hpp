@@ -33,14 +33,17 @@ public:
 
 public:
 	// Source interface
-	unique_ptr<LocalSourceState> GetLocalSourceState(ExecutionContext &context,
-	                                                 GlobalSourceState &gstate) const override;
-	unique_ptr<GlobalSourceState> GetGlobalSourceState(ClientContext &context) const override;
-	SourceResultType GetDataInternal(ExecutionContext &context, DataChunk &chunk,
-	                                 OperatorSourceInput &input) const override;
-	OperatorPartitionData GetPartitionData(ExecutionContext &context, DataChunk &chunk, GlobalSourceState &gstate,
-	                                       LocalSourceState &lstate,
-	                                       const OperatorPartitionInfo &partition_info) const override;
+		unique_ptr<LocalSourceState> GetLocalSourceState(ExecutionContext &context,
+		                                                 GlobalSourceState &gstate) const override;
+		unique_ptr<GlobalSourceState> GetGlobalSourceState(ClientContext &context) const override;
+		bool SupportsJitNativeSource(const JitPreparedPipeline &jit_prepared_pipeline) const override;
+		SourceResultType GetDataInternal(ExecutionContext &context, DataChunk &chunk,
+		                                 OperatorSourceInput &input) const override;
+		SourceResultType GetJitNativeSourceDataInternal(ExecutionContext &context, DataChunk &chunk,
+		                                                OperatorSourceInput &input) const override;
+		OperatorPartitionData GetPartitionData(ExecutionContext &context, DataChunk &chunk, GlobalSourceState &gstate,
+		                                       LocalSourceState &lstate,
+		                                       const OperatorPartitionInfo &partition_info) const override;
 
 	bool IsSource() const override {
 		return true;
@@ -76,7 +79,8 @@ public:
 		return true;
 	}
 
-	InsertionOrderPreservingMap<string> ParamsToString() const override;
+		JitOperatorDescriptor GetJitOperatorDescriptor() const override;
+		InsertionOrderPreservingMap<string> ParamsToString() const override;
 };
 
 } // namespace duckdb

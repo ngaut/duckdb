@@ -1,0 +1,10 @@
+# name: benchmark/micro/jit/native_full_pipeline_decimal_projection_ungrouped_sum_threshold_force.benchmark
+# description: Forced JIT at the full-pipeline decimal projection ungrouped SUM diagnostic threshold
+# group: [jit]
+
+template benchmark/micro/jit/native_full_pipeline_decimal_projection_ungrouped_sum.benchmark.in
+JIT_POLICY=force
+JIT_POLICY_NAME=Threshold Force
+ROW_COUNT=1000000
+FILTER_BOUND=500000
+EXPECTED_RESULT=101000193.0000

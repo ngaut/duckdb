@@ -29,6 +29,7 @@ class BufferHandle;
 class ColumnDataCollection;
 struct ColumnDataAppendState;
 struct ClientConfig;
+struct JitNativeHashJoinTableLayout;
 struct ResidualPredicateInfo;
 class PhysicalHashJoin;
 
@@ -288,6 +289,9 @@ public:
 	TupleDataCollection &GetDataCollection() {
 		return *data_collection;
 	}
+	//! Export a backend-neutral native JIT table-layout contract. This is layout/state metadata only;
+	//! it must not execute join semantics.
+	bool GetJitNativeHashJoinTableLayout(JitNativeHashJoinTableLayout &layout) const;
 	//! Perform a full scan of a build column, filling the provided addresses vector and result vector.
 	//! Returns the number of tuples found (can be smaller than the vector capacity).
 	idx_t ScanKeyColumn(Vector &addresses, Vector &result, idx_t column_index) const;

@@ -23,6 +23,7 @@ class Executor;
 class MetaPipeline;
 class PipelineExecutor;
 class Pipeline;
+struct JitPreparedPipeline;
 
 class PipelineTask : public ExecutorTask {
 	static constexpr const idx_t PARTIAL_CHUNK_COUNT = 50;
@@ -79,6 +80,7 @@ class Pipeline : public enable_shared_from_this<Pipeline> {
 
 public:
 	explicit Pipeline(Executor &execution_context);
+	~Pipeline();
 
 	Executor &executor;
 
@@ -94,6 +96,7 @@ public:
 	void ResetSinkForReschedule();
 	void ResetForReschedule(bool reset_sink);
 	void ResetSource(bool force);
+	void PrepareJitRegions();
 	void ClearSource();
 	void Schedule(shared_ptr<Event> &event);
 	void PrepareFinalize();
@@ -122,6 +125,10 @@ public:
 		return source;
 	}
 
+	optional_ptr<const JitPreparedPipeline> GetJitPreparedPipeline() const {
+		return jit_prepared_pipeline.get();
+	}
+
 	//! Returns whether any of the operators in the pipeline care about preserving order
 	bool IsOrderDependent() const;
 
@@ -145,6 +152,8 @@ private:
 
 	//! The global source state
 	unique_ptr<GlobalSourceState> source_state;
+	//! Query/pipeline-scoped JIT region analysis selected before source state captures scan filters.
+	unique_ptr<JitPreparedPipeline> jit_prepared_pipeline;
 
 	//! The parent pipelines (i.e. pipelines that are dependent on this pipeline to finish)
 	vector<weak_ptr<Pipeline>> parents;

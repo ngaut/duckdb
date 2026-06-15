@@ -1,0 +1,10 @@
+# name: benchmark/micro/jit/native_projection_off.benchmark
+# description: Baseline for a large native SLJIT projection shape
+# group: [jit]
+
+template benchmark/micro/jit/native_projection.benchmark.in
+JIT_POLICY=off
+JIT_POLICY_NAME=Off
+ROW_COUNT=20000000
+ADDEND=7
+EXPECTED_RESULT=200000130000000

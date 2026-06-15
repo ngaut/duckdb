@@ -4,6 +4,7 @@
 #include "duckdb/common/mutex.hpp"
 #include "duckdb/common/arena_containers/arena_vector.hpp"
 #include "duckdb/execution/expression_executor.hpp"
+#include "duckdb/execution/jit/runtime.hpp"
 #include "duckdb/function/create_sort_key.hpp"
 #include "duckdb/storage/data_table.hpp"
 #include "duckdb/planner/filter/table_filter_function_helpers.hpp"
@@ -575,6 +576,10 @@ unique_ptr<LocalSourceState> PhysicalTopN::GetLocalSourceState(ExecutionContext 
 	return make_uniq<TopNLocalSourceState>();
 }
 
+bool PhysicalTopN::SupportsJitNativeSource(const JitPreparedPipeline &jit_prepared_pipeline) const {
+	return jit_prepared_pipeline.RequiresNativeSource();
+}
+
 SourceResultType PhysicalTopN::GetDataInternal(ExecutionContext &context, DataChunk &chunk,
                                                OperatorSourceInput &input) const {
 	if (limit == 0) {
@@ -596,6 +601,11 @@ SourceResultType PhysicalTopN::GetDataInternal(ExecutionContext &context, DataCh
 	sink.heap.Scan(gstate.state, chunk, lstate.pos);
 
 	return chunk.size() == 0 ? SourceResultType::FINISHED : SourceResultType::HAVE_MORE_OUTPUT;
+}
+
+SourceResultType PhysicalTopN::GetJitNativeSourceDataInternal(ExecutionContext &context, DataChunk &chunk,
+                                                              OperatorSourceInput &input) const {
+	return GetDataInternal(context, chunk, input);
 }
 
 OperatorPartitionData PhysicalTopN::GetPartitionData(ExecutionContext &context, DataChunk &chunk,

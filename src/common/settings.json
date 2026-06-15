@@ -597,6 +597,13 @@
         "struct": "EnableHTTPMetadataCacheSetting"
     },
     {
+        "name": "enable_jit",
+        "description": "Attempt to compile supported execution fragments through the registered JIT backend",
+        "type": "BOOLEAN",
+        "default_scope": "local",
+        "default_value": "true"
+    },
+    {
         "name": "enable_logging",
         "description": "Enables the logger",
         "type": "BOOLEAN",
@@ -878,6 +885,64 @@
     {
         "name": "integer_division",
         "description": "Whether or not the / operator defaults to integer division, or to floating point division",
+        "type": "BOOLEAN",
+        "default_scope": "local",
+        "default_value": "false"
+    },
+    {
+        "name": "jit_backend",
+        "description": "JIT backend to use, or auto to select the first available backend",
+        "type": "VARCHAR",
+        "default_scope": "local",
+        "default_value": "auto",
+        "on_callbacks": [
+            "set"
+        ]
+    },
+    {
+        "name": "jit_dump_ir",
+        "description": "Dump JIT lowering diagnostics for compiled fragments",
+        "type": "BOOLEAN",
+        "default_scope": "local",
+        "default_value": "false"
+    },
+    {
+        "name": "jit_trace_decisions",
+        "description": "Record detailed per-candidate JIT decision counters",
+        "type": "BOOLEAN",
+        "default_scope": "local",
+        "default_value": "false"
+    },
+    {
+        "name": "jit_event_log_size",
+        "description": "Maximum number of JIT compile events retained per database instance; zero disables retention",
+        "type": "UBIGINT",
+        "scope": "global",
+        "default_value": "4096",
+        "on_callbacks": [
+            "set"
+        ]
+    },
+    {
+        "name": "jit_policy",
+        "description": "JIT execution policy: auto runs only proven native kernels, force runs every supported kernel, off disables JIT",
+        "type": "VARCHAR",
+        "default_scope": "local",
+        "default_value": "auto",
+        "on_callbacks": [
+            "set"
+        ]
+    },
+    {
+        "name": "jit_trace_runtime",
+        "description": "Record bounded runtime trace events for JIT kernels",
+        "type": "BOOLEAN",
+        "default_scope": "local",
+        "default_value": "false"
+    },
+    {
+        "name": "jit_verify",
+        "description": "Verify JIT output against the reference DuckDB execution path",
         "type": "BOOLEAN",
         "default_scope": "local",
         "default_value": "false"

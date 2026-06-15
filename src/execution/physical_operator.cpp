@@ -100,6 +100,30 @@ bool PhysicalOperator::ResetGlobalOperatorState(ClientContext &context, GlobalOp
 	return false;
 }
 
+bool PhysicalOperator::BindJitNativeOperator(ExecutionContext &context, DataChunk &input, GlobalOperatorState &gstate,
+                                             OperatorState &state, const JitRegionOperatorInfo &operator_info,
+                                             JitNativeOperatorBinding &binding) const {
+	(void)context;
+	(void)input;
+	(void)gstate;
+	(void)state;
+	binding.ready = false;
+	binding.kind = operator_info.kind;
+	binding.blocker = "jit-native-operator-binding-unsupported;operator=" + GetName();
+	return false;
+}
+
+bool PhysicalOperator::BindJitNativeSink(ExecutionContext &context, DataChunk &input, OperatorSinkInput &sink_input,
+                                         const JitRegionSinkInfo &sink_info, JitNativeSinkBinding &binding) const {
+	(void)context;
+	(void)input;
+	(void)sink_input;
+	binding.ready = false;
+	binding.kind = sink_info.kind;
+	binding.blocker = "jit-native-sink-binding-unsupported;operator=" + GetName();
+	return false;
+}
+
 OperatorResultType PhysicalOperator::Execute(ExecutionContext &context, DataChunk &input, DataChunk &chunk,
                                              GlobalOperatorState &gstate, OperatorState &state) const {
 	throw InternalException("Calling Execute on a node that is not an operator!");
@@ -128,15 +152,36 @@ unique_ptr<GlobalSourceState> PhysicalOperator::GetGlobalSourceState(ClientConte
 	return make_uniq<GlobalSourceState>();
 }
 
+unique_ptr<GlobalSourceState>
+PhysicalOperator::GetGlobalSourceState(ClientContext &context,
+                                       optional_ptr<const JitPreparedPipeline> jit_prepared_pipeline) const {
+	return GetGlobalSourceState(context);
+}
+
+bool PhysicalOperator::SupportsJitNativeSource(const JitPreparedPipeline &jit_prepared_pipeline) const {
+	(void)jit_prepared_pipeline;
+	return false;
+}
+
 // LCOV_EXCL_START
 SourceResultType PhysicalOperator::GetData(ExecutionContext &context, DataChunk &chunk,
                                            OperatorSourceInput &input) const {
 	return GetDataInternal(context, chunk, input);
 }
 
+SourceResultType PhysicalOperator::GetJitNativeSourceData(ExecutionContext &context, DataChunk &chunk,
+                                                          OperatorSourceInput &input) const {
+	return GetJitNativeSourceDataInternal(context, chunk, input);
+}
+
 SourceResultType PhysicalOperator::GetDataInternal(ExecutionContext &context, DataChunk &chunk,
                                                    OperatorSourceInput &input) const {
 	throw InternalException("Calling GetDataInternal on a node that is not a source!");
+}
+
+SourceResultType PhysicalOperator::GetJitNativeSourceDataInternal(ExecutionContext &context, DataChunk &chunk,
+                                                                  OperatorSourceInput &input) const {
+	throw InternalException("Calling GetJitNativeSourceDataInternal on a source without a native JIT source contract");
 }
 
 OperatorPartitionData PhysicalOperator::GetPartitionData(ExecutionContext &context, DataChunk &chunk,
@@ -292,6 +337,10 @@ void PhysicalOperator::Verify() {
 		child.get().Verify();
 	}
 #endif
+}
+
+JitOperatorDescriptor PhysicalOperator::GetJitOperatorDescriptor() const {
+	return JitOperatorDescriptor();
 }
 
 bool CachingPhysicalOperator::CanCacheType(const LogicalType &type) {

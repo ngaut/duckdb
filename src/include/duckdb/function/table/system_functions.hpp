@@ -111,6 +111,34 @@ struct DuckDBIndexesFun {
 	static void RegisterFunction(BuiltinFunctions &set);
 };
 
+struct DuckDBJitBackendsFun {
+	static void RegisterFunction(BuiltinFunctions &set);
+};
+
+struct DuckDBJitClearEventsFun {
+	static void RegisterFunction(BuiltinFunctions &set);
+};
+
+struct DuckDBJitClearCountersFun {
+	static void RegisterFunction(BuiltinFunctions &set);
+};
+
+struct DuckDBJitCountersFun {
+	static void RegisterFunction(BuiltinFunctions &set);
+};
+
+struct DuckDBJitDecisionCountersFun {
+	static void RegisterFunction(BuiltinFunctions &set);
+};
+
+struct DuckDBJitKernelCountersFun {
+	static void RegisterFunction(BuiltinFunctions &set);
+};
+
+struct DuckDBJitEventsFun {
+	static void RegisterFunction(BuiltinFunctions &set);
+};
+
 struct DuckDBMemoryFun {
 	static void RegisterFunction(BuiltinFunctions &set);
 };

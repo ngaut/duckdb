@@ -1,0 +1,21 @@
+# name: ${FILE_PATH}
+# description: ${DESCRIPTION}
+# group: [jit]
+
+name JIT Native Projection ${JIT_POLICY_NAME}
+group micro
+subgroup jit
+
+require jit_sljit
+
+init
+SET threads=1;
+SET enable_jit=true;
+SET jit_backend='sljit';
+SET jit_policy='${JIT_POLICY}';
+
+run
+SELECT sum(j) FROM (SELECT i::BIGINT + ${ADDEND} AS j FROM range(${ROW_COUNT}) tbl(i));
+
+result I
+${EXPECTED_RESULT}

@@ -149,7 +149,8 @@ public:
 		for (const auto &col_idx : input.column_indexes) {
 			l_state->column_ids.push_back(bind_data.table.GetStorageIndex(col_idx));
 		}
-		l_state->scan_state.Initialize(l_state->column_ids, context.client, input.filters.get());
+		l_state->scan_state.Initialize(l_state->column_ids, context.client, input.filters.get(), nullptr,
+		                               input.filter_execution_mode);
 		local_storage.InitializeScan(storage, l_state->scan_state.local_state, input.filters);
 		return std::move(l_state);
 	}
@@ -304,7 +305,8 @@ public:
 			    make_uniq<RowGroupReorderer>(*bind_data.order_options, TransactionData(tx));
 		}
 
-		l_state->scan_state.Initialize(std::move(storage_ids), context.client, input.filters, input.sample_options);
+		l_state->scan_state.Initialize(std::move(storage_ids), context.client, input.filters, input.sample_options,
+		                               input.filter_execution_mode);
 
 		l_state->rows_in_current_row_group = storage.NextParallelScan(context.client, state, l_state->scan_state);
 		if (l_state->rows_in_current_row_group > 0) {

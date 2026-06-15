@@ -35,12 +35,15 @@ public:
 	//===--------------------------------------------------------------------===//
 	unique_ptr<LocalSourceState> GetLocalSourceState(ExecutionContext &context,
 	                                                 GlobalSourceState &gstate) const override;
-	unique_ptr<GlobalSourceState> GetGlobalSourceState(ClientContext &context) const override;
-	SourceResultType GetDataInternal(ExecutionContext &context, DataChunk &chunk,
-	                                 OperatorSourceInput &input) const override;
-	OperatorPartitionData GetPartitionData(ExecutionContext &context, DataChunk &chunk, GlobalSourceState &gstate,
-	                                       LocalSourceState &lstate,
-	                                       const OperatorPartitionInfo &partition_info) const override;
+		unique_ptr<GlobalSourceState> GetGlobalSourceState(ClientContext &context) const override;
+		bool SupportsJitNativeSource(const JitPreparedPipeline &jit_prepared_pipeline) const override;
+		SourceResultType GetDataInternal(ExecutionContext &context, DataChunk &chunk,
+		                                 OperatorSourceInput &input) const override;
+		SourceResultType GetJitNativeSourceDataInternal(ExecutionContext &context, DataChunk &chunk,
+		                                                OperatorSourceInput &input) const override;
+		OperatorPartitionData GetPartitionData(ExecutionContext &context, DataChunk &chunk, GlobalSourceState &gstate,
+		                                       LocalSourceState &lstate,
+		                                       const OperatorPartitionInfo &partition_info) const override;
 	ProgressData GetProgress(ClientContext &context, GlobalSourceState &gstate) const override;
 
 	bool IsSource() const override {
@@ -85,8 +88,9 @@ public:
 		return false;
 	}
 
-public:
-	InsertionOrderPreservingMap<string> ParamsToString() const override;
-};
+	public:
+		JitOperatorDescriptor GetJitOperatorDescriptor() const override;
+		InsertionOrderPreservingMap<string> ParamsToString() const override;
+	};
 
 } // namespace duckdb

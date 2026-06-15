@@ -6,6 +6,7 @@
 #include "duckdb/common/http_util.hpp"
 #include "duckdb/common/virtual_file_system.hpp"
 #include "duckdb/common/local_file_system.hpp"
+#include "duckdb/execution/jit/manager.hpp"
 #include "duckdb/execution/index/index_type_set.hpp"
 #include "duckdb/execution/operator/helper/physical_set.hpp"
 #include "duckdb/function/cast/cast_function_set.hpp"
@@ -78,10 +79,15 @@ DatabaseInstance::DatabaseInstance() : db_validity(*this) {
 	config.is_user_config = false;
 	create_api_v1 = nullptr;
 	parser_cache = make_uniq<ParserCache>();
+	jit_manager = make_uniq<JitManager>(*this);
 }
 
 ParserCache &DatabaseInstance::GetParserCache() {
 	return *parser_cache;
+}
+
+JitManager &DatabaseInstance::GetJitManager() {
+	return *jit_manager;
 }
 
 DatabaseInstance::~DatabaseInstance() {
@@ -100,6 +106,7 @@ DatabaseInstance::~DatabaseInstance() {
 
 	external_file_cache.reset();
 	result_set_manager.reset();
+	jit_manager.reset();
 
 	buffer_manager.reset();
 

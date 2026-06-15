@@ -8,6 +8,7 @@
 #include "duckdb/common/uhugeint.hpp"
 #include "duckdb/common/types/uhugeint.hpp"
 #include "duckdb/execution/expression_executor.hpp"
+#include "duckdb/execution/jit/runtime.hpp"
 #include "duckdb/execution/join_hashtable.hpp"
 #include "duckdb/execution/operator/aggregate/ungrouped_aggregate_state.hpp"
 #include "duckdb/execution/operator/join/perfect_hash_join_executor.hpp"
@@ -631,6 +632,144 @@ SinkResultType PhysicalHashJoin::Sink(ExecutionContext &context, DataChunk &chun
 	// build the HT
 	lstate.hash_table->Build(lstate.append_state, lstate.join_keys, lstate.payload_chunk);
 
+	return SinkResultType::NEED_MORE_INPUT;
+}
+
+static bool BindJitNativeHashJoinBuildColumns(const JitRegionSinkInfo &sink_info, DataChunk &chunk,
+                                              JitNativeHashJoinBuildBinding &build, string &blocker) {
+	auto &protocol = sink_info.hash_join_protocol;
+	if (sink_info.kind != JitRegionSinkKind::HASH_JOIN_BUILD) {
+		blocker = "hash-join-build-native-runtime-wrong-sink-kind";
+		return false;
+	}
+	if (!protocol.present) {
+		blocker = "hash-join-build-native-runtime-missing-protocol";
+		return false;
+	}
+	if (protocol.native_build_contract.status != JitRegionStateContractStatus::READY) {
+		blocker = protocol.native_build_contract.blocker.empty()
+		              ? "hash-join-build-native-runtime-contract-not-ready"
+		              : protocol.native_build_contract.blocker;
+		return false;
+	}
+	if (!protocol.build_append_shape_ready) {
+		blocker = protocol.build_append_shape_blocker.empty()
+		              ? "hash-join-build-native-runtime-append-shape-not-ready"
+		              : protocol.build_append_shape_blocker;
+		return false;
+	}
+	if (sink_info.hash_join_keys.size() != protocol.condition_count) {
+		blocker = "hash-join-build-native-runtime-key-count-mismatch";
+		return false;
+	}
+	for (auto &key : sink_info.hash_join_keys) {
+		if (!key.supported_reference) {
+			blocker = key.reason.empty() ? "hash-join-build-native-runtime-key-not-reference" : key.reason;
+			return false;
+		}
+		if (key.input_index >= chunk.ColumnCount()) {
+			blocker = "hash-join-build-native-runtime-key-input-out-of-range";
+			return false;
+		}
+		build.key_input_indices.push_back(NumericCast<column_t>(key.input_index));
+		build.key_types.push_back(key.type);
+	}
+	if (protocol.payload_column_indices.size() != protocol.payload_types.size()) {
+		blocker = "hash-join-build-native-runtime-payload-contract-mismatch";
+		return false;
+	}
+	for (idx_t payload_idx = 0; payload_idx < protocol.payload_column_indices.size(); payload_idx++) {
+		auto input_index = protocol.payload_column_indices[payload_idx];
+		if (input_index >= chunk.ColumnCount()) {
+			blocker = "hash-join-build-native-runtime-payload-input-out-of-range";
+			return false;
+		}
+		build.payload_input_indices.push_back(NumericCast<column_t>(input_index));
+		build.payload_types.push_back(protocol.payload_types[payload_idx]);
+	}
+	return true;
+}
+
+bool JitBindNativeHashJoinBuild(ExecutionContext &context, OperatorSinkInput &input, DataChunk &chunk,
+                                const JitRegionSinkInfo &sink_info, JitNativeSinkBinding &binding) {
+	(void)context;
+	binding = JitNativeSinkBinding();
+	binding.kind = sink_info.kind;
+
+	auto &gstate = input.global_state.Cast<HashJoinGlobalSinkState>();
+	auto &lstate = input.local_state.Cast<HashJoinLocalSinkState>();
+	auto &build = binding.hash_join_build;
+	string blocker;
+	if (!BindJitNativeHashJoinBuildColumns(sink_info, chunk, build, blocker)) {
+		binding.blocker = std::move(blocker);
+		build.blocker = binding.blocker;
+		return false;
+	}
+	if (!lstate.hash_table) {
+		binding.blocker = "hash-join-build-native-runtime-missing-local-hash-table";
+		build.blocker = binding.blocker;
+		return false;
+	}
+	if (!lstate.join_keys.ColumnCount()) {
+		binding.blocker = "hash-join-build-native-runtime-missing-key-chunk";
+		build.blocker = binding.blocker;
+		return false;
+	}
+	if (lstate.join_keys.ColumnCount() != build.key_input_indices.size()) {
+		binding.blocker = "hash-join-build-native-runtime-key-chunk-count-mismatch";
+		build.blocker = binding.blocker;
+		return false;
+	}
+	if (lstate.payload_chunk.ColumnCount() != build.payload_input_indices.size()) {
+		binding.blocker = "hash-join-build-native-runtime-payload-chunk-count-mismatch";
+		build.blocker = binding.blocker;
+		return false;
+	}
+	if (lstate.op.filter_pushdown && !gstate.skip_filter_pushdown && !lstate.local_filter_state) {
+		binding.blocker = "hash-join-build-native-runtime-missing-local-filter-state";
+		build.blocker = binding.blocker;
+		return false;
+	}
+
+	binding.ready = true;
+	binding.blocker = "none";
+	build.ready = true;
+	build.hash_table = lstate.hash_table.get();
+	build.append_state = &lstate.append_state;
+	build.join_keys = &lstate.join_keys;
+	build.payload_chunk = &lstate.payload_chunk;
+	build.filter_pushdown = lstate.op.filter_pushdown.get();
+	build.local_filter_state = lstate.local_filter_state.get();
+	build.skip_filter_pushdown = gstate.skip_filter_pushdown;
+	build.blocker = "none";
+	return true;
+}
+
+SinkResultType JitAppendNativeHashJoinBuild(const JitNativeHashJoinBuildBinding &binding, DataChunk &input) {
+	if (!binding.ready || !binding.hash_table || !binding.append_state || !binding.join_keys || !binding.payload_chunk) {
+		throw InternalException("JIT native hash join build append requires a bound hash join build state");
+	}
+	if (binding.join_keys->ColumnCount() != binding.key_input_indices.size()) {
+		throw InternalException("JIT native hash join build key count mismatch");
+	}
+	if (binding.payload_chunk->ColumnCount() != binding.payload_input_indices.size()) {
+		throw InternalException("JIT native hash join build payload count mismatch");
+	}
+
+	binding.join_keys->ReferenceColumns(input, binding.key_input_indices);
+	if (binding.filter_pushdown && !binding.skip_filter_pushdown) {
+		if (!binding.local_filter_state) {
+			throw InternalException("JIT native hash join build filter pushdown requires local filter state");
+		}
+		binding.filter_pushdown->Sink(*binding.join_keys, *binding.local_filter_state);
+	}
+
+	if (binding.payload_input_indices.empty()) {
+		binding.payload_chunk->SetChildCardinality(input.size());
+	} else {
+		binding.payload_chunk->ReferenceColumns(input, binding.payload_input_indices);
+	}
+	binding.hash_table->Build(*binding.append_state, *binding.join_keys, *binding.payload_chunk);
 	return SinkResultType::NEED_MORE_INPUT;
 }
 
@@ -1616,6 +1755,7 @@ public:
 	DataChunk lhs_join_keys;
 	TupleDataChunkState join_key_state;
 	DataChunk lhs_probe_data;
+	DataChunk lhs_output_data;
 
 	ExpressionExecutor probe_executor;
 	JoinHashTable::ScanStructure scan_structure;
@@ -1640,6 +1780,7 @@ public:
 		ResetCachingState();
 		lhs_join_keys.Reset();
 		lhs_probe_data.Reset();
+		lhs_output_data.Reset();
 		scan_structure.Reset();
 		perfect_hash_join_state.reset();
 		spill_state = JoinHashTable::ProbeSpillLocalAppendState();
@@ -1667,6 +1808,9 @@ unique_ptr<OperatorState> PhysicalHashJoin::GetOperatorState(ExecutionContext &c
 	if (!lhs_probe_columns.col_types.empty()) {
 		state->lhs_probe_data.Initialize(allocator, lhs_probe_columns.col_types);
 	}
+	if (!lhs_output_columns.col_types.empty()) {
+		state->lhs_output_data.Initialize(allocator, lhs_output_columns.col_types);
+	}
 
 	for (auto &cond : conditions) {
 		state->probe_executor.AddExpression(cond.GetLHS());
@@ -1690,6 +1834,297 @@ unique_ptr<OperatorState> PhysicalHashJoin::GetOperatorState(ExecutionContext &c
 	return std::move(state);
 }
 
+bool PhysicalHashJoin::BindJitNativeOperator(ExecutionContext &context, DataChunk &input, GlobalOperatorState &gstate,
+                                             OperatorState &state_p, const JitRegionOperatorInfo &operator_info,
+                                             JitNativeOperatorBinding &binding) const {
+	(void)context;
+	(void)gstate;
+	(void)state_p;
+	binding = JitNativeOperatorBinding();
+	binding.kind = operator_info.kind;
+	if (operator_info.kind != JitRegionOperatorKind::HASH_JOIN_PROBE) {
+		binding.blocker = "hash-join-native-runtime-wrong-operator-kind";
+		return false;
+	}
+	auto &protocol = operator_info.hash_join_protocol;
+	if (!protocol.present) {
+		binding.blocker = "hash-join-native-runtime-missing-protocol";
+		return false;
+	}
+	if (protocol.native_probe_contract.status != JitRegionStateContractStatus::READY) {
+		binding.blocker = protocol.native_probe_contract.blocker.empty()
+		                      ? "hash-join-native-runtime-probe-contract-not-ready"
+		                      : protocol.native_probe_contract.blocker;
+		return false;
+	}
+	if (!protocol.native_probe_shape_ready) {
+		binding.blocker = protocol.native_probe_shape_blocker.empty()
+		                      ? "hash-join-native-runtime-probe-shape-not-ready"
+		                      : protocol.native_probe_shape_blocker;
+		return false;
+	}
+	if (operator_info.hash_join_keys.size() != protocol.condition_count) {
+		binding.blocker = "hash-join-native-runtime-probe-key-count-mismatch";
+		return false;
+	}
+	vector<idx_t> probe_key_input_indices;
+	probe_key_input_indices.reserve(operator_info.hash_join_keys.size());
+	for (auto &key : operator_info.hash_join_keys) {
+		if (!key.supported_reference) {
+			binding.blocker = key.reason.empty() ? "hash-join-native-runtime-probe-key-not-reference" : key.reason;
+			return false;
+		}
+		if (key.input_index >= input.ColumnCount()) {
+			binding.blocker = "hash-join-native-runtime-probe-key-input-out-of-range";
+			return false;
+		}
+		probe_key_input_indices.push_back(key.input_index);
+	}
+	if (!sink_state) {
+		binding.blocker = "hash-join-native-runtime-missing-sink-state";
+		return false;
+	}
+	auto &sink = sink_state->Cast<HashJoinGlobalSinkState>();
+	if (!sink.hash_table) {
+		binding.blocker = "hash-join-native-runtime-missing-hash-table";
+		return false;
+	}
+
+	JitNativeHashJoinTableLayout table_layout;
+	JitGetNativeHashJoinTableLayout(*sink.hash_table, table_layout);
+	if (!table_layout.ready) {
+		binding.blocker = table_layout.blocker.empty() ? "hash-join-native-runtime-table-layout-not-ready"
+		                                               : table_layout.blocker;
+		return false;
+	}
+	if (protocol.non_equality_condition_count != 0 && table_layout.chains_longer_than_one) {
+		binding.blocker = "hash-join-native-runtime-non-equality-chain-protocol-missing";
+		return false;
+	}
+	if (!table_layout.single_match_probe &&
+	    protocol.native_probe_output_mode == JitRegionHashJoinProbeOutputMode::MATCHED_PROBE_AND_BUILD) {
+		binding.blocker = "hash-join-native-runtime-resumable-chain-protocol-missing";
+		return false;
+	}
+	if (table_layout.dictionary_emission && table_layout.chains_longer_than_one && !table_layout.aux_next_ptrs &&
+	    protocol.native_probe_output_mode == JitRegionHashJoinProbeOutputMode::MARK_BUILD_ONLY) {
+		binding.blocker = "hash-join-native-runtime-dictionary-chain-layout-missing";
+		return false;
+	}
+	if (table_layout.condition_count != protocol.condition_count) {
+		binding.blocker = "hash-join-native-runtime-condition-count-mismatch";
+		return false;
+	}
+	if (protocol.correlated_mark_counts_required) {
+		auto &mark_info = sink.hash_table->correlated_mark_join_info;
+		if (!mark_info.correlated_counts) {
+			binding.blocker = "hash-join-native-runtime-missing-correlated-mark-counts";
+			return false;
+		}
+		if (mark_info.correlated_types.size() != protocol.delim_type_count) {
+			binding.blocker = "hash-join-native-runtime-correlated-mark-count-shape-mismatch";
+			return false;
+		}
+	}
+
+	binding.ready = true;
+	binding.blocker = "none";
+	binding.hash_join_probe.ready = true;
+	binding.hash_join_probe.hash_table = sink.hash_table.get();
+	binding.hash_join_probe.table_layout = std::move(table_layout);
+	binding.hash_join_probe.probe_key_input_indices = std::move(probe_key_input_indices);
+	binding.hash_join_probe.lhs_output_column_indices = protocol.lhs_output_column_indices;
+	binding.hash_join_probe.rhs_output_column_count = protocol.rhs_output_column_count;
+	binding.hash_join_probe.lhs_probe_column_indices = protocol.lhs_probe_column_indices;
+	binding.hash_join_probe.lhs_probe_types = protocol.lhs_probe_types;
+	binding.hash_join_probe.output_types = types;
+	binding.hash_join_probe.output_mode = protocol.native_probe_output_mode;
+	binding.hash_join_probe.correlated_mark_counts_required = protocol.correlated_mark_counts_required;
+	binding.hash_join_probe.correlated_mark_group_count = protocol.delim_type_count;
+	binding.hash_join_probe.blocker = "none";
+	return true;
+}
+
+bool PhysicalHashJoin::BindJitNativeSink(ExecutionContext &context, DataChunk &input, OperatorSinkInput &sink_input,
+                                         const JitRegionSinkInfo &sink_info, JitNativeSinkBinding &binding) const {
+	return JitBindNativeHashJoinBuild(context, sink_input, input, sink_info, binding);
+}
+
+static void JitReferenceNativeHashJoinProbeOutputColumns(const JitNativeHashJoinProbeBinding &binding, DataChunk &input,
+                                                        DataChunk &result) {
+	for (idx_t col_idx = 0; col_idx < binding.lhs_output_column_indices.size(); col_idx++) {
+		auto input_col = binding.lhs_output_column_indices[col_idx];
+		if (input_col >= input.ColumnCount()) {
+			throw InternalException("JIT native hash join probe output column index out of range");
+		}
+		result.data[col_idx].Reference(input.data[input_col]);
+	}
+}
+
+static void JitMaterializeNativeCorrelatedMarkJoinProbe(const JitNativeHashJoinProbeBinding &binding, DataChunk &input,
+                                                       const SelectionVector &match_sel, idx_t count,
+                                                       DataChunk &result) {
+	if (count != input.size()) {
+		throw InternalException("JIT native correlated MARK probe must materialize every input row");
+	}
+	if (!binding.hash_table) {
+		throw InternalException("JIT native correlated MARK probe requires a hash table");
+	}
+	if (binding.correlated_mark_group_count + 1 != binding.probe_key_input_indices.size()) {
+		throw InternalException("JIT native correlated MARK probe key count mismatch");
+	}
+	auto &info = binding.hash_table->correlated_mark_join_info;
+	if (!info.correlated_counts || info.correlated_types.size() != binding.correlated_mark_group_count) {
+		throw InternalException("JIT native correlated MARK probe count state is missing");
+	}
+
+	lock_guard<mutex> mj_lock(info.mj_lock);
+	for (idx_t group_idx = 0; group_idx < binding.correlated_mark_group_count; group_idx++) {
+		auto input_col = binding.probe_key_input_indices[group_idx];
+		if (input_col >= input.ColumnCount()) {
+			throw InternalException("JIT native correlated MARK probe group key index out of range");
+		}
+		info.group_chunk.data[group_idx].Reference(input.data[input_col]);
+	}
+	info.group_chunk.SetChildCardinality(input.size());
+	info.correlated_counts->FetchAggregates(info.group_chunk, info.result_chunk);
+
+	JitReferenceNativeHashJoinProbeOutputColumns(binding, input, result);
+	result.SetChildCardinality(input.size());
+
+	auto last_key_input_col = binding.probe_key_input_indices[binding.correlated_mark_group_count];
+	if (last_key_input_col >= input.ColumnCount()) {
+		throw InternalException("JIT native correlated MARK probe comparison key index out of range");
+	}
+	auto &last_key = input.data[last_key_input_col];
+	auto &mark_vector = result.data.back();
+	mark_vector.SetVectorType(VectorType::FLAT_VECTOR);
+	FlatVector::SetSize(mark_vector, count_t(input.size()));
+	auto bool_result = FlatVector::GetDataMutable<bool>(mark_vector);
+	auto &mask = FlatVector::ValidityMutable(mark_vector);
+	switch (last_key.GetVectorType()) {
+	case VectorType::CONSTANT_VECTOR:
+		if (ConstantVector::IsNull(last_key)) {
+			mask.SetAllInvalid(input.size());
+		} else {
+			mask.SetAllValid(input.size());
+		}
+		break;
+	case VectorType::FLAT_VECTOR:
+		mask.Copy(FlatVector::Validity(last_key), input.size());
+		break;
+	default: {
+		UnifiedVectorFormat key_data;
+		last_key.ToUnifiedFormat(key_data);
+		if (key_data.validity.CannotHaveNull()) {
+			mask.SetAllValid(input.size());
+		} else {
+			for (idx_t i = 0; i < input.size(); i++) {
+				auto key_idx = key_data.sel->get_index(i);
+				mask.Set(i, key_data.validity.RowIsValid(key_idx));
+			}
+		}
+		break;
+	}
+	}
+
+	auto count_star = FlatVector::GetData<int64_t>(info.result_chunk.data[0]);
+	auto count_non_null = FlatVector::GetData<int64_t>(info.result_chunk.data[1]);
+	for (idx_t i = 0; i < input.size(); i++) {
+		D_ASSERT(count_star[i] >= count_non_null[i]);
+		bool_result[i] = match_sel.get_index(i) != 0;
+		if (!bool_result[i] && count_star[i] > count_non_null[i]) {
+			mask.SetInvalid(i);
+		}
+		if (count_star[i] == 0) {
+			mask.SetValid(i);
+		}
+	}
+}
+
+void JitMaterializeNativeHashJoinProbe(const JitNativeHashJoinProbeBinding &binding, DataChunk &input,
+                                       Vector &row_pointers, const SelectionVector &match_sel, idx_t count,
+                                       DataChunk &result) {
+	if (!binding.ready || !binding.hash_table) {
+		throw InternalException("JIT native hash join probe materialization requires a bound hash join table");
+	}
+	if (binding.output_mode == JitRegionHashJoinProbeOutputMode::NONE) {
+		throw InternalException("JIT native hash join probe materialization requires an output mode");
+	}
+	if (binding.output_mode == JitRegionHashJoinProbeOutputMode::MARK_BUILD_ONLY) {
+		throw InternalException("JIT native hash join mark-only probe does not materialize rows");
+	}
+	auto expected_column_count = binding.lhs_output_column_indices.size();
+	if (binding.output_mode == JitRegionHashJoinProbeOutputMode::MATCHED_PROBE_AND_BUILD) {
+		expected_column_count += binding.rhs_output_column_count;
+	} else if (binding.output_mode == JitRegionHashJoinProbeOutputMode::MARK_PROBE) {
+		expected_column_count++;
+	}
+	if (expected_column_count != result.ColumnCount()) {
+		throw InternalException("JIT native hash join probe output column count mismatch");
+	}
+	if (binding.output_mode == JitRegionHashJoinProbeOutputMode::MARK_PROBE) {
+		if (binding.correlated_mark_counts_required) {
+			JitMaterializeNativeCorrelatedMarkJoinProbe(binding, input, match_sel, count, result);
+			return;
+		}
+		if (count != input.size()) {
+			throw InternalException("JIT native hash join MARK probe must materialize every input row");
+		}
+		JitReferenceNativeHashJoinProbeOutputColumns(binding, input, result);
+		auto &mark_vector = result.data.back();
+		mark_vector.SetVectorType(VectorType::FLAT_VECTOR);
+		FlatVector::SetSize(mark_vector, count_t(count));
+		auto bool_result = FlatVector::GetDataMutable<bool>(mark_vector);
+		auto &mask = FlatVector::ValidityMutable(mark_vector);
+		mask.SetAllValid(count);
+		for (idx_t i = 0; i < count; i++) {
+			bool_result[i] = match_sel.get_index(i) != 0;
+		}
+		for (idx_t key_idx = 0; key_idx < binding.probe_key_input_indices.size(); key_idx++) {
+			if (binding.hash_table->NullValuesAreEqual(key_idx)) {
+				continue;
+			}
+			auto input_col = binding.probe_key_input_indices[key_idx];
+			if (input_col >= input.ColumnCount()) {
+				throw InternalException("JIT native hash join MARK probe key column index out of range");
+			}
+			UnifiedVectorFormat key_data;
+			input.data[input_col].ToUnifiedFormat(key_data);
+			if (!key_data.validity.CanHaveNull()) {
+				continue;
+			}
+			for (idx_t i = 0; i < count; i++) {
+				auto key_row = key_data.sel->get_index(i);
+				if (!key_data.validity.RowIsValidUnsafe(key_row)) {
+					mask.SetInvalid(i);
+				}
+			}
+		}
+		if (binding.hash_table->has_null) {
+			for (idx_t i = 0; i < count; i++) {
+				if (!bool_result[i]) {
+					mask.SetInvalid(i);
+				}
+			}
+		}
+		result.SetChildCardinality(count);
+		return;
+	}
+	for (idx_t col_idx = 0; col_idx < binding.lhs_output_column_indices.size(); col_idx++) {
+		auto input_col = binding.lhs_output_column_indices[col_idx];
+		if (input_col >= input.ColumnCount()) {
+			throw InternalException("JIT native hash join probe output column index out of range");
+		}
+		result.data[col_idx].Slice(input.data[input_col], match_sel, count);
+	}
+	if (binding.output_mode == JitRegionHashJoinProbeOutputMode::MATCHED_PROBE_AND_BUILD) {
+		binding.hash_table->GatherRHS(row_pointers, *FlatVector::IncrementalSelectionVector(), count, result,
+		                              binding.lhs_output_column_indices.size());
+	}
+	result.SetChildCardinality(count);
+}
+
 OperatorResultType PhysicalHashJoin::ExecuteInternal(ExecutionContext &context, DataChunk &input, DataChunk &chunk,
                                                      GlobalOperatorState &gstate, OperatorState &state_p) const {
 	auto &state = state_p.Cast<HashJoinOperatorState>();
@@ -1702,8 +2137,8 @@ OperatorResultType PhysicalHashJoin::ExecuteInternal(ExecutionContext &context, 
 			return OperatorResultType::FINISHED;
 		}
 		// for empty result, only need output columns (no predicate evaluation)
-		state.lhs_probe_data.ReferenceColumns(input, lhs_output_columns.col_idxs);
-		ConstructEmptyJoinResult(sink.hash_table->join_type, sink.hash_table->has_null, state.lhs_probe_data, chunk);
+		state.lhs_output_data.ReferenceColumns(input, lhs_output_columns.col_idxs);
+		ConstructEmptyJoinResult(sink.hash_table->join_type, sink.hash_table->has_null, state.lhs_output_data, chunk);
 		return OperatorResultType::NEED_MORE_INPUT;
 	}
 
@@ -1714,8 +2149,8 @@ OperatorResultType PhysicalHashJoin::ExecuteInternal(ExecutionContext &context, 
 			state.perfect_hash_join_state = sink.perfect_join_executor->GetOperatorState(context);
 		}
 		// for perfect hash join, when predicate is NULL, only output columns are needed
-		state.lhs_probe_data.ReferenceColumns(input, lhs_output_columns.col_idxs);
-		return sink.perfect_join_executor->ProbePerfectHashTable(context, input, state.lhs_probe_data, chunk,
+		state.lhs_output_data.ReferenceColumns(input, lhs_output_columns.col_idxs);
+		return sink.perfect_join_executor->ProbePerfectHashTable(context, input, state.lhs_output_data, chunk,
 		                                                         *state.perfect_hash_join_state);
 	}
 
@@ -1879,6 +2314,7 @@ public:
 	DataChunk lhs_probe_chunk;
 	DataChunk lhs_join_keys;
 	DataChunk lhs_probe_data;
+	DataChunk lhs_output_data;
 	TupleDataChunkState join_key_state;
 	ExpressionExecutor lhs_join_key_executor;
 
@@ -1904,6 +2340,7 @@ private:
 		lhs_probe_chunk.Reset();
 		lhs_join_keys.Reset();
 		lhs_probe_data.Reset();
+		lhs_output_data.Reset();
 		TupleDataCollection::InitializeChunkState(join_key_state, op.condition_types);
 		scan_structure.Reset();
 		empty_ht_probe_in_progress = false;
@@ -2106,6 +2543,7 @@ HashJoinLocalSourceState::HashJoinLocalSourceState(ExecutionContext &context, Gl
 
 	// initialize with PROBE columns (not just output)
 	lhs_probe_data.Initialize(allocator, op.lhs_probe_columns.col_types);
+	lhs_output_data.Initialize(allocator, op.lhs_output_columns.col_types);
 
 	TupleDataCollection::InitializeChunkState(join_key_state, op.condition_types);
 
@@ -2189,8 +2627,8 @@ void HashJoinLocalSourceState::ExternalProbe(HashJoinGlobalSinkState &sink, Hash
 
 	if (sink.hash_table->Count() == 0 && !gstate.op.EmptyResultIfRHSIsEmpty()) {
 		// for empty result, only need output columns (no predicate evaluation)
-		lhs_probe_data.ReferenceColumns(lhs_probe_chunk, gstate.op.lhs_output_columns.col_idxs);
-		gstate.op.ConstructEmptyJoinResult(sink.hash_table->join_type, sink.hash_table->has_null, lhs_probe_data,
+		lhs_output_data.ReferenceColumns(lhs_probe_chunk, gstate.op.lhs_output_columns.col_idxs);
+		gstate.op.ConstructEmptyJoinResult(sink.hash_table->join_type, sink.hash_table->has_null, lhs_output_data,
 		                                   chunk);
 		empty_ht_probe_in_progress = true;
 		return;
@@ -2219,14 +2657,15 @@ void HashJoinLocalSourceState::ExternalScanHT(HashJoinGlobalSinkState &sink, Has
 	}
 }
 
-SourceResultType PhysicalHashJoin::GetDataInternal(ExecutionContext &context, DataChunk &chunk,
-                                                   OperatorSourceInput &input) const {
-	auto &sink = sink_state->Cast<HashJoinGlobalSinkState>();
+static SourceResultType ScanHashJoinSourceState(ExecutionContext &context, DataChunk &chunk, OperatorSourceInput &input,
+                                                const PhysicalHashJoin &op) {
+	(void)context;
+	auto &sink = op.sink_state->Cast<HashJoinGlobalSinkState>();
 	auto &gstate = input.global_state.Cast<HashJoinGlobalSourceState>();
 	auto &lstate = input.local_state.Cast<HashJoinLocalSourceState>();
 	sink.scanned_data = true;
 
-	if (!sink.external && !PropagatesBuildSide(join_type)) {
+	if (!sink.external && !PropagatesBuildSide(op.join_type)) {
 		annotated_lock_guard<annotated_mutex> guard(gstate.lock);
 		if (gstate.global_stage != HashJoinSourceStage::DONE) {
 			gstate.global_stage = HashJoinSourceStage::DONE;
@@ -2260,6 +2699,20 @@ SourceResultType PhysicalHashJoin::GetDataInternal(ExecutionContext &context, Da
 	}
 
 	return chunk.size() == 0 ? SourceResultType::FINISHED : SourceResultType::HAVE_MORE_OUTPUT;
+}
+
+SourceResultType PhysicalHashJoin::GetDataInternal(ExecutionContext &context, DataChunk &chunk,
+                                                   OperatorSourceInput &input) const {
+	return ScanHashJoinSourceState(context, chunk, input, *this);
+}
+
+bool PhysicalHashJoin::SupportsJitNativeSource(const JitPreparedPipeline &jit_prepared_pipeline) const {
+	return jit_prepared_pipeline.RequiresNativeSource() && PropagatesBuildSide(join_type);
+}
+
+SourceResultType PhysicalHashJoin::GetJitNativeSourceDataInternal(ExecutionContext &context, DataChunk &chunk,
+                                                                  OperatorSourceInput &input) const {
+	return ScanHashJoinSourceState(context, chunk, input, *this);
 }
 
 ProgressData PhysicalHashJoin::GetProgress(ClientContext &context, GlobalSourceState &gstate_p) const {

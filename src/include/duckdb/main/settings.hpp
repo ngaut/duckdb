@@ -921,6 +921,17 @@ struct EnableHTTPMetadataCacheSetting {
 	static constexpr idx_t SettingIndex = NEXT_SETTING_INDEX();
 };
 
+struct EnableJitSetting {
+	using RETURN_TYPE = bool;
+	static constexpr const char *Name = "enable_jit";
+	static constexpr const char *Description =
+	    "Attempt to compile supported execution fragments through the registered JIT backend";
+	static constexpr const char *InputType = "BOOLEAN";
+	static constexpr const char *DefaultValue = "true";
+	static constexpr SettingScopeTarget Scope = SettingScopeTarget::LOCAL_DEFAULT;
+	static constexpr idx_t SettingIndex = NEXT_SETTING_INDEX();
+};
+
 struct EnableLogging {
 	using RETURN_TYPE = bool;
 	static constexpr const char *Name = "enable_logging";
@@ -1299,6 +1310,81 @@ struct IntegerDivisionSetting {
 	static constexpr const char *Name = "integer_division";
 	static constexpr const char *Description =
 	    "Whether or not the / operator defaults to integer division, or to floating point division";
+	static constexpr const char *InputType = "BOOLEAN";
+	static constexpr const char *DefaultValue = "false";
+	static constexpr SettingScopeTarget Scope = SettingScopeTarget::LOCAL_DEFAULT;
+	static constexpr idx_t SettingIndex = NEXT_SETTING_INDEX();
+};
+
+struct JitBackendSetting {
+	using RETURN_TYPE = string;
+	static constexpr const char *Name = "jit_backend";
+	static constexpr const char *Description = "JIT backend to use, or auto to select the first available backend";
+	static constexpr const char *InputType = "VARCHAR";
+	static constexpr const char *DefaultValue = "auto";
+	static constexpr SettingScopeTarget Scope = SettingScopeTarget::LOCAL_DEFAULT;
+	static constexpr idx_t SettingIndex = NEXT_SETTING_INDEX();
+	static void OnSet(SettingCallbackInfo &info, Value &input);
+};
+
+struct JitDumpIrSetting {
+	using RETURN_TYPE = bool;
+	static constexpr const char *Name = "jit_dump_ir";
+	static constexpr const char *Description = "Dump JIT lowering diagnostics for compiled fragments";
+	static constexpr const char *InputType = "BOOLEAN";
+	static constexpr const char *DefaultValue = "false";
+	static constexpr SettingScopeTarget Scope = SettingScopeTarget::LOCAL_DEFAULT;
+	static constexpr idx_t SettingIndex = NEXT_SETTING_INDEX();
+};
+
+struct JitTraceDecisionsSetting {
+	using RETURN_TYPE = bool;
+	static constexpr const char *Name = "jit_trace_decisions";
+	static constexpr const char *Description = "Record detailed per-candidate JIT decision counters";
+	static constexpr const char *InputType = "BOOLEAN";
+	static constexpr const char *DefaultValue = "false";
+	static constexpr SettingScopeTarget Scope = SettingScopeTarget::LOCAL_DEFAULT;
+	static constexpr idx_t SettingIndex = NEXT_SETTING_INDEX();
+};
+
+struct JitEventLogSizeSetting {
+	using RETURN_TYPE = idx_t;
+	static constexpr const char *Name = "jit_event_log_size";
+	static constexpr const char *Description =
+	    "Maximum number of JIT compile events retained per database instance; zero disables retention";
+	static constexpr const char *InputType = "UBIGINT";
+	static constexpr const char *DefaultValue = "4096";
+	static constexpr SettingScopeTarget Scope = SettingScopeTarget::GLOBAL_ONLY;
+	static constexpr idx_t SettingIndex = NEXT_SETTING_INDEX();
+	static void OnSet(SettingCallbackInfo &info, Value &input);
+};
+
+struct JitPolicySetting {
+	using RETURN_TYPE = string;
+	static constexpr const char *Name = "jit_policy";
+	static constexpr const char *Description = "JIT execution policy: auto runs only proven native kernels, force runs "
+	                                           "every supported kernel, off disables JIT";
+	static constexpr const char *InputType = "VARCHAR";
+	static constexpr const char *DefaultValue = "auto";
+	static constexpr SettingScopeTarget Scope = SettingScopeTarget::LOCAL_DEFAULT;
+	static constexpr idx_t SettingIndex = NEXT_SETTING_INDEX();
+	static void OnSet(SettingCallbackInfo &info, Value &input);
+};
+
+struct JitTraceRuntimeSetting {
+	using RETURN_TYPE = bool;
+	static constexpr const char *Name = "jit_trace_runtime";
+	static constexpr const char *Description = "Record bounded runtime trace events for JIT kernels";
+	static constexpr const char *InputType = "BOOLEAN";
+	static constexpr const char *DefaultValue = "false";
+	static constexpr SettingScopeTarget Scope = SettingScopeTarget::LOCAL_DEFAULT;
+	static constexpr idx_t SettingIndex = NEXT_SETTING_INDEX();
+};
+
+struct JitVerifySetting {
+	using RETURN_TYPE = bool;
+	static constexpr const char *Name = "jit_verify";
+	static constexpr const char *Description = "Verify JIT output against the reference DuckDB execution path";
 	static constexpr const char *InputType = "BOOLEAN";
 	static constexpr const char *DefaultValue = "false";
 	static constexpr SettingScopeTarget Scope = SettingScopeTarget::LOCAL_DEFAULT;

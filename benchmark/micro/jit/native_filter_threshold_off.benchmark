@@ -1,0 +1,10 @@
+# name: benchmark/micro/jit/native_filter_threshold_off.benchmark
+# description: Baseline at the SLJIT native filter measurement threshold
+# group: [jit]
+
+template benchmark/micro/jit/native_filter.benchmark.in
+JIT_POLICY=off
+JIT_POLICY_NAME=Threshold Off
+ROW_COUNT=1000000
+FILTER_BOUND=500000
+EXPECTED_RESULT=499999

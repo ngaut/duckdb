@@ -1,0 +1,84 @@
+# name: ${FILE_PATH}
+# description: ${DESCRIPTION}
+# group: [jit]
+
+name JIT Native Full Pipeline Decimal Projection Ungrouped Sum ${JIT_POLICY_NAME}
+group micro
+subgroup jit
+
+require jit_sljit
+
+load
+CREATE TABLE jit_full_pipeline_decimal_sum AS
+SELECT i::BIGINT AS i,
+       ((i % 100) + 1)::DECIMAL(18,2) AS extendedprice,
+       ((i % 7) + 1)::DECIMAL(18,2) AS discount
+FROM range(${ROW_COUNT}) tbl(i);
+
+init
+SET threads=1;
+SET enable_jit=true;
+SET jit_backend='sljit';
+SET jit_policy='${JIT_POLICY}';
+SET jit_dump_ir=false;
+SET jit_trace_runtime=false;
+SET jit_event_log_size=10000;
+SELECT * FROM duckdb_jit_clear_events();
+
+run
+SELECT sum(extendedprice * discount)
+FROM jit_full_pipeline_decimal_sum
+WHERE i > ${FILTER_BOUND};
+
+cleanup
+SELECT * FROM duckdb_jit_clear_events();
+
+result_query I
+SELECT (
+    (SELECT * FROM __answer) = ${EXPECTED_RESULT}
+    AND CASE '${JIT_POLICY}'
+        WHEN 'off' THEN (
+            SELECT count(*) = 0
+            FROM duckdb_jit_events()
+            WHERE target='region'
+              AND status='compiled'
+        )
+        WHEN 'force' THEN (
+            SELECT (
+                (SELECT count(*) = 1
+                 FROM duckdb_jit_events()
+                 WHERE phase='compile'
+                   AND target='region'
+                   AND status='compiled'
+                   AND execution_mode='native'
+                   AND region_execution_form='fused'
+                   AND selected_source_execution='native-source'
+                   AND policy_decision='force'
+                   AND candidate_shape='scan-filter-scan-project-projection-sink'
+                   AND candidate_scope='full_pipeline'
+                   AND candidate_source_filter_count=1
+                   AND candidate_source_integer_comparison_filter_count=1
+                   AND candidate_projection_count=1
+                   AND candidate_sink_kind='ungrouped-aggregate-update'
+                   AND admission_shape_key='sljit:full-pipeline:fused-filter-projection-ungrouped-sum'
+                   AND admission_rule_present=false
+                   AND code_size > 0
+                   AND reason LIKE '%generated source-prefix table scan filters%'
+                   AND reason LIKE '%source-strategy=prepared-unfiltered-native-source%'
+                   AND reason LIKE '%owns-source-filters=true%'
+                   AND reason LIKE '%source:TABLE_SCAN:native:generated source-prefix table scan filters%'
+                   AND reason LIKE '%op0:PROJECTION:native:generated typed projection%'
+                   AND reason LIKE '%sink:UNGROUPED_AGGREGATE:native:generated native ungrouped aggregate state update%')
+                AND
+                (SELECT count(*) = 0
+                 FROM duckdb_jit_events()
+	                 WHERE phase='compile'
+	                   AND target='region'
+	                   AND execution_mode <> 'native')
+            )
+        )
+        ELSE false
+    END
+)::INTEGER;
+----
+1

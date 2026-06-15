@@ -15,6 +15,13 @@ add_library_unity(
   duckdb_log.cpp
   duckdb_log_contexts.cpp
   duckdb_indexes.cpp
+  duckdb_jit_backends.cpp
+  duckdb_jit_clear_counters.cpp
+  duckdb_jit_clear_events.cpp
+  duckdb_jit_counters.cpp
+  duckdb_jit_decision_counters.cpp
+  duckdb_jit_events.cpp
+  duckdb_jit_kernel_counters.cpp
   duckdb_memory.cpp
   duckdb_eviction_queues.cpp
   duckdb_metrics.cpp

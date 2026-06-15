@@ -20,6 +20,9 @@
 
 namespace duckdb {
 class Executor;
+class PipelineJitFullPipelineRuntime;
+class JitRegionExecutor;
+class JitRegionKernel;
 
 //! The result of executing a PipelineExecutor
 enum class PipelineExecuteResult {
@@ -56,8 +59,12 @@ private:
 
 //! The Pipeline class represents an execution pipeline
 class PipelineExecutor {
+	friend class PipelineJitFullPipelineRuntime;
+	friend class JitRegionExecutor;
+
 public:
 	PipelineExecutor(ClientContext &context, Pipeline &pipeline);
+	~PipelineExecutor();
 
 	//! Fully execute a pipeline with a source and a sink until the source is completely exhausted
 	PipelineExecuteResult Execute();
@@ -89,6 +96,16 @@ public:
 	void PrepareForExecution();
 
 private:
+	void InitializeOperatorExecutionState(vector<unique_ptr<DataChunk>> &chunks,
+	                                      vector<unique_ptr<OperatorState>> &states,
+	                                      bool disable_operator_caching = false);
+	//! Pushes a chunk through the regular DuckDB pipeline path. Used by verification and JIT-decline paths.
+	OperatorResultType ExecutePipelineReference(DataChunk &input, DataChunk &result, idx_t initial_index = 0);
+	OperatorResultType ExecutePipelineOperators(DataChunk &input, DataChunk &result, idx_t initial_idx,
+	                                            vector<unique_ptr<DataChunk>> &chunks,
+	                                            vector<unique_ptr<OperatorState>> &states,
+	                                            stack<idx_t> &operators_in_process, bool apply_finish_processing);
+
 	//! The pipeline to process
 	Pipeline &pipeline;
 	//! The thread context of this executor
@@ -100,6 +117,8 @@ private:
 	vector<unique_ptr<DataChunk>> intermediate_chunks;
 	//! Intermediate states for the operators
 	vector<unique_ptr<OperatorState>> intermediate_states;
+	//! Optional JIT region kernels for backends that can compile non-overlapping regions of this pipeline
+	vector<unique_ptr<JitRegionKernel>> jit_kernels;
 
 	//! The local source state
 	unique_ptr<LocalSourceState> local_source_state;
@@ -110,6 +129,8 @@ private:
 
 	//! The final chunk used for moving data into the sink
 	DataChunk final_chunk;
+	//! Scratch chunk used when source-pipeline JIT fetches from DuckDB source helpers before generated prefix code.
+	DataChunk jit_source_input_chunk;
 
 	//! The operators that are not yet finished executing and have data remaining
 	//! If the stack of in_process_operators is empty, we fetch from the source instead
@@ -146,14 +167,18 @@ private:
 	bool should_flush_current_idx = true;
 	//! Whether this executor has already run at least once
 	bool has_executed = false;
+	//! Operator index where processing should resume for the most recently fetched source chunk.
+	idx_t source_chunk_initial_idx = 0;
 
 private:
 	void StartOperator(PhysicalOperator &op);
 	void EndOperator(PhysicalOperator &op, optional_ptr<DataChunk> chunk);
 
 	//! Reset the operator index to the first operator
-	void GoToSource(idx_t &current_idx, idx_t initial_idx);
-	SourceResultType FetchFromSource(DataChunk &result);
+	void GoToSource(idx_t &current_idx, idx_t initial_idx, stack<idx_t> &operators_in_process);
+	DataChunk &GetSourceChunkForInitialIdx(idx_t initial_idx);
+	SourceResultType FetchFromSource(DataChunk *&result, bool allow_source_prefix_jit = true);
+	SourceResultType FetchFromNativeSource(DataChunk *&result);
 
 	void FinishProcessing(int32_t operator_idx = -1);
 	bool IsFinished();

@@ -17,6 +17,7 @@
 #include "duckdb/storage/table/segment_lock.hpp"
 #include "duckdb/common/types/data_chunk.hpp"
 #include "duckdb/parser/parsed_data/sample_options.hpp"
+#include "duckdb/planner/table_filter_set.hpp"
 #include "duckdb/storage/storage_index.hpp"
 #include "duckdb/planner/table_filter_state.hpp"
 
@@ -188,7 +189,8 @@ class ScanFilterInfo {
 public:
 	~ScanFilterInfo();
 
-	void Initialize(ClientContext &context, TableFilterSet &filters, const vector<StorageIndex> &column_ids);
+	void Initialize(ClientContext &context, TableFilterSet &filters, const vector<StorageIndex> &column_ids,
+	                TableFilterExecutionMode execution_mode = TableFilterExecutionMode::FILTER_AND_PRUNE);
 
 	const vector<ScanFilter> &GetFilterList() const {
 		return filter_list;
@@ -200,6 +202,7 @@ public:
 
 	//! Whether or not there is any filter we need to execute
 	bool HasFilters() const;
+	bool ExecutesResidualFilters() const;
 
 	//! Whether or not there is a filter we need to execute for this column currently
 	bool ColumnHasFilters(idx_t col_idx);
@@ -217,6 +220,8 @@ private:
 	unique_ptr<AdaptiveFilter> adaptive_filter;
 	//! The set of filters
 	vector<ScanFilter> filter_list;
+	//! Whether table filters should also be evaluated as row-level residual filters during vector scans.
+	bool execute_residual_filters = true;
 	//! Whether or not the column has a filter active right now
 	unsafe_vector<bool> column_has_filter;
 	//! Whether or not the column has a filter active at all
@@ -316,7 +321,8 @@ public:
 public:
 	void Initialize(vector<StorageIndex> column_ids, optional_ptr<ClientContext> context = nullptr,
 	                optional_ptr<TableFilterSet> table_filters = nullptr,
-	                optional_ptr<SampleOptions> table_sampling = nullptr);
+	                optional_ptr<SampleOptions> table_sampling = nullptr,
+	                TableFilterExecutionMode filter_execution_mode = TableFilterExecutionMode::FILTER_AND_PRUNE);
 
 	const vector<StorageIndex> &GetColumnIds();
 

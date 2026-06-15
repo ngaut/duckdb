@@ -73,10 +73,16 @@ public:
 
 public:
 	InsertionOrderPreservingMap<string> ParamsToString() const override;
+	JitOperatorDescriptor GetJitOperatorDescriptor() const override;
 
 public:
 	// Operator Interface
 	unique_ptr<OperatorState> GetOperatorState(ExecutionContext &context) const override;
+	bool BindJitNativeOperator(ExecutionContext &context, DataChunk &input, GlobalOperatorState &gstate,
+	                           OperatorState &state, const JitRegionOperatorInfo &operator_info,
+	                           JitNativeOperatorBinding &binding) const override;
+	bool BindJitNativeSink(ExecutionContext &context, DataChunk &input, OperatorSinkInput &sink_input,
+	                       const JitRegionSinkInfo &sink_info, JitNativeSinkBinding &binding) const override;
 
 	bool ParallelOperator() const override {
 		return true;
@@ -91,8 +97,11 @@ protected:
 	unique_ptr<GlobalSourceState> GetGlobalSourceState(ClientContext &context) const override;
 	unique_ptr<LocalSourceState> GetLocalSourceState(ExecutionContext &context,
 	                                                 GlobalSourceState &gstate) const override;
+	bool SupportsJitNativeSource(const JitPreparedPipeline &jit_prepared_pipeline) const override;
 	SourceResultType GetDataInternal(ExecutionContext &context, DataChunk &chunk,
 	                                 OperatorSourceInput &input) const override;
+	SourceResultType GetJitNativeSourceDataInternal(ExecutionContext &context, DataChunk &chunk,
+	                                                OperatorSourceInput &input) const override;
 
 	ProgressData GetProgress(ClientContext &context, GlobalSourceState &gstate) const override;
 

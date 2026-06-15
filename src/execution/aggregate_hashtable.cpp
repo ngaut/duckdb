@@ -920,6 +920,14 @@ void GroupedAggregateHashTable::FindOrCreateGroups(DataChunk &groups, Vector &ad
 	FindOrCreateGroups(groups, addresses, state.new_groups);
 }
 
+idx_t GroupedAggregateHashTable::FindOrCreateAggregateStates(DataChunk &groups, Vector &addresses_out) {
+	sink_count += groups.size();
+	groups.Hash(state.hashes);
+	const auto new_group_count = FindOrCreateGroups(groups, state.hashes, addresses_out, state.new_groups);
+	VectorOperations::AddInPlace(addresses_out, NumericCast<int64_t>(layout_ptr->GetAggrOffset()));
+	return new_group_count;
+}
+
 idx_t GroupedAggregateHashTable::FindOrCreateGroups(DataChunk &groups, Vector &addresses_out,
                                                     SelectionVector &new_groups_out) {
 	groups.Hash(state.hashes);

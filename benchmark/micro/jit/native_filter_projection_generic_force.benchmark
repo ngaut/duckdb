@@ -1,0 +1,11 @@
+# name: benchmark/micro/jit/native_filter_projection_generic_force.benchmark
+# description: Forced native SLJIT generic filter/projection lowering for a large generic filter/projection shape
+# group: [jit]
+
+template benchmark/micro/jit/native_filter_projection_generic.benchmark.in
+JIT_POLICY=force
+JIT_POLICY_NAME=Force
+ROW_COUNT=20000000
+FILTER_BOUND=10000000
+ADDEND=7
+EXPECTED_RESULT=300000039999993

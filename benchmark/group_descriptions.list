@@ -26,6 +26,10 @@ The index benchmark set checks performance of index lookups compared to non-inde
 [Join]
 The join micro benchmark set contains benchmarks that look at the speed of various join queries.
 
+[jit]
+[JIT]
+The JIT micro benchmark set compares default, auto, and forced JIT execution for supported generated-kernel shapes.
+
 [order]
 [Order]
 The order micro benchmark set contains benchmarks that look at the speed of sorting data using the ORDER BY clause.

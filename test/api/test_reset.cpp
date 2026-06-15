@@ -140,6 +140,10 @@ OptionValueSet GetValueForOption(const string &name, const LogicalType &type) {
 	    {"checkpoint_on_detach", {"ENABLED"}},
 	    {"debug_verify_statement", {"copy_statement"}},
 	    {"enable_caching_operators", {false}},
+	    {"enable_jit", {false}},
+	    {"jit_policy", {"force"}},
+	    {"jit_trace_decisions", {true}},
+	    {"jit_trace_runtime", {true}},
 	    {"enable_optimizer", {false}},
 	    {"parallelize_sequential_sources", {false}},
 	    {"initial_column_segment_size", {4096}}};
@@ -209,6 +213,7 @@ bool OptionIsExcludedFromTest(const string &name) {
 	    "extension_directories",
 	    "progress_bar_time",
 	    "index_scan_max_count",
+	    "jit_backend", // valid values depend on registered JIT backends
 	    "profiling_mode",
 	    "worker_threads",
 	    "tracked_metrics",

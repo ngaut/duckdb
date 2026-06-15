@@ -88,6 +88,7 @@ private:
 
 struct ExpressionExecutorState {
 	ExpressionExecutorState();
+	~ExpressionExecutorState();
 
 	unique_ptr<ExpressionState> root_state;
 	ExpressionExecutor *executor = nullptr;

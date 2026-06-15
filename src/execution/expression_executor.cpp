@@ -113,9 +113,9 @@ idx_t ExpressionExecutor::SelectExpression(DataChunk &input, optional_ptr<Select
 	D_ASSERT(expressions.size() == 1);
 	D_ASSERT(current_count <= input.size());
 	SetChunk(&input);
-	idx_t selected_tuples = Select(*expressions[0], states[0]->root_state.get(), current_sel.get(), current_count,
-	                               true_sel.get(), false_sel.get());
-	return selected_tuples;
+	auto &state = *states[0];
+	return Select(*expressions[0], state.root_state.get(), current_sel.get(), current_count, true_sel.get(),
+	              false_sel.get());
 }
 
 void ExpressionExecutor::ExecuteExpression(Vector &result) {
@@ -126,7 +126,8 @@ void ExpressionExecutor::ExecuteExpression(Vector &result) {
 void ExpressionExecutor::ExecuteExpression(idx_t expr_idx, Vector &result) {
 	D_ASSERT(expr_idx < expressions.size());
 	D_ASSERT(result.GetType().id() == expressions[expr_idx]->GetReturnType().id());
-	Execute(*expressions[expr_idx], states[expr_idx]->root_state.get(), nullptr, chunk ? chunk->size() : 1, result);
+	auto &state = *states[expr_idx];
+	Execute(*expressions[expr_idx], state.root_state.get(), nullptr, chunk ? chunk->size() : 1, result);
 }
 
 Value ExpressionExecutor::EvaluateScalar(ClientContext &context, const Expression &expr, bool allow_unfoldable) {

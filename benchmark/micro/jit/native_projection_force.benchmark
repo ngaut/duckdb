@@ -1,0 +1,10 @@
+# name: benchmark/micro/jit/native_projection_force.benchmark
+# description: Forced native SLJIT projection lowering for a large projection shape
+# group: [jit]
+
+template benchmark/micro/jit/native_projection.benchmark.in
+JIT_POLICY=force
+JIT_POLICY_NAME=Force
+ROW_COUNT=20000000
+ADDEND=7
+EXPECTED_RESULT=200000130000000

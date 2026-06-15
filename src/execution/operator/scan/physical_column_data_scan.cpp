@@ -53,12 +53,22 @@ unique_ptr<LocalSourceState> PhysicalColumnDataScan::GetLocalSourceState(Executi
 	return make_uniq<PhysicalColumnDataLocalScanState>();
 }
 
+bool PhysicalColumnDataScan::SupportsJitNativeSource(const JitPreparedPipeline &jit_prepared_pipeline) const {
+	(void)jit_prepared_pipeline;
+	return type == PhysicalOperatorType::CTE_SCAN || type == PhysicalOperatorType::COLUMN_DATA_SCAN;
+}
+
 SourceResultType PhysicalColumnDataScan::GetDataInternal(ExecutionContext &context, DataChunk &chunk,
                                                          OperatorSourceInput &input) const {
 	auto &gstate = input.global_state.Cast<PhysicalColumnDataGlobalScanState>();
 	auto &lstate = input.local_state.Cast<PhysicalColumnDataLocalScanState>();
 	collection->Scan(gstate.global_scan_state, lstate.local_scan_state, chunk);
 	return chunk.size() == 0 ? SourceResultType::FINISHED : SourceResultType::HAVE_MORE_OUTPUT;
+}
+
+SourceResultType PhysicalColumnDataScan::GetJitNativeSourceDataInternal(ExecutionContext &context, DataChunk &chunk,
+                                                                        OperatorSourceInput &input) const {
+	return GetDataInternal(context, chunk, input);
 }
 
 //===--------------------------------------------------------------------===//

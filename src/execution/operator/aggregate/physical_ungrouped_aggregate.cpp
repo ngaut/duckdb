@@ -8,6 +8,8 @@
 #include "duckdb/common/vector/flat_vector.hpp"
 #include "duckdb/common/vector_operations/vector_operations.hpp"
 #include "duckdb/execution/expression_executor.hpp"
+#include "duckdb/execution/jit/aggregate_runtime.hpp"
+#include "duckdb/execution/jit/runtime.hpp"
 #include "duckdb/execution/operator/aggregate/aggregate_object.hpp"
 #include "duckdb/execution/operator/aggregate/distinct_aggregate_data.hpp"
 #include "duckdb/execution/radix_partitioned_hashtable.hpp"
@@ -391,6 +393,27 @@ void LocalUngroupedAggregateState::Sink(DataChunk &payload_chunk, idx_t payload_
 	}
 }
 
+void JitBindNativeUngroupedAggregateStates(OperatorSinkInput &input,
+                                           const vector<JitNativeUngroupedAggregateState> &requested_states,
+                                           vector<JitNativeUngroupedAggregateState> &bound_states) {
+	auto &sink = input.local_state.Cast<UngroupedAggregateLocalSinkState>();
+	bound_states.clear();
+	bound_states.reserve(requested_states.size());
+	for (auto &requested : requested_states) {
+		if (requested.aggregate_index >= sink.state.state.aggregate_data.size()) {
+			throw InternalException("JIT native ungrouped aggregate state references aggregate index %llu beyond %llu",
+			                        static_cast<unsigned long long>(requested.aggregate_index),
+			                        static_cast<unsigned long long>(sink.state.state.aggregate_data.size()));
+		}
+		JitNativeUngroupedAggregateState bound;
+		bound.aggregate_index = requested.aggregate_index;
+		bound.update_kind = requested.update_kind;
+		bound.state = sink.state.state.aggregate_data[requested.aggregate_index].get();
+		bound.count = &sink.state.state.counts[requested.aggregate_index];
+		bound_states.push_back(bound);
+	}
+}
+
 //===--------------------------------------------------------------------===//
 // Combine
 //===--------------------------------------------------------------------===//
@@ -689,16 +712,33 @@ void GlobalUngroupedAggregateState::Finalize(DataChunk &result, idx_t column_off
 	}
 }
 
-SourceResultType PhysicalUngroupedAggregate::GetDataInternal(ExecutionContext &context, DataChunk &chunk,
-                                                             OperatorSourceInput &input) const {
-	auto &gstate = sink_state->Cast<UngroupedAggregateGlobalSinkState>();
+static SourceResultType ScanUngroupedAggregateState(ExecutionContext &context, DataChunk &chunk,
+                                                    const PhysicalUngroupedAggregate &op) {
+	(void)context;
+	auto &gstate = op.sink_state->Cast<UngroupedAggregateGlobalSinkState>();
 	D_ASSERT(gstate.finished);
 
 	// initialize the result chunk with the aggregate values
 	gstate.state.Finalize(chunk);
-	VerifyNullHandling(chunk, gstate.state.state, aggregates);
+	VerifyNullHandling(chunk, gstate.state.state, op.aggregates);
 
 	return SourceResultType::FINISHED;
+}
+
+bool PhysicalUngroupedAggregate::SupportsJitNativeSource(const JitPreparedPipeline &jit_prepared_pipeline) const {
+	return jit_prepared_pipeline.RequiresNativeSource();
+}
+
+SourceResultType PhysicalUngroupedAggregate::GetDataInternal(ExecutionContext &context, DataChunk &chunk,
+                                                             OperatorSourceInput &input) const {
+	(void)input;
+	return ScanUngroupedAggregateState(context, chunk, *this);
+}
+
+SourceResultType PhysicalUngroupedAggregate::GetJitNativeSourceDataInternal(ExecutionContext &context, DataChunk &chunk,
+                                                                            OperatorSourceInput &input) const {
+	(void)input;
+	return ScanUngroupedAggregateState(context, chunk, *this);
 }
 
 InsertionOrderPreservingMap<string> PhysicalUngroupedAggregate::ParamsToString() const {

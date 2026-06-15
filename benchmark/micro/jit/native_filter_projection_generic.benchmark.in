@@ -1,0 +1,26 @@
+# name: ${FILE_PATH}
+# description: ${DESCRIPTION}
+# group: [jit]
+
+name JIT Native Generic Filter Projection ${JIT_POLICY_NAME}
+group micro
+subgroup jit
+
+require jit_sljit
+
+init
+SET threads=1;
+SET enable_jit=true;
+SET jit_backend='sljit';
+SET jit_policy='${JIT_POLICY}';
+
+run
+SELECT sum(a + b)
+FROM (
+    SELECT i::BIGINT AS a, i::BIGINT + ${ADDEND} AS b
+    FROM range(${ROW_COUNT}) tbl(i)
+    WHERE i > ${FILTER_BOUND}
+) t;
+
+result I
+${EXPECTED_RESULT}

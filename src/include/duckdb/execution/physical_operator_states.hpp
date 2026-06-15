@@ -43,6 +43,9 @@ public:
 	virtual void Reset() {
 	}
 
+	virtual void DisableCaching() {
+	}
+
 	template <class TARGET>
 	TARGET &Cast() {
 		DynamicCastCheck<TARGET>(this);

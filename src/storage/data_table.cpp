@@ -246,9 +246,10 @@ TableIOManager &TableIOManager::Get(DataTable &table) {
 // Scan
 //===--------------------------------------------------------------------===//
 void DataTable::InitializeScan(ClientContext &context, DuckTransaction &transaction, TableScanState &state,
-                               const vector<StorageIndex> &column_ids, optional_ptr<TableFilterSet> table_filters) {
+                               const vector<StorageIndex> &column_ids, optional_ptr<TableFilterSet> table_filters,
+                               TableFilterExecutionMode filter_execution_mode) {
 	auto &local_storage = LocalStorage::Get(transaction);
-	state.Initialize(column_ids, context, table_filters);
+	state.Initialize(column_ids, context, table_filters, nullptr, filter_execution_mode);
 	row_groups->InitializeScan(context, state.table_state, column_ids, table_filters);
 	local_storage.InitializeScan(*this, state.local_state, table_filters);
 }

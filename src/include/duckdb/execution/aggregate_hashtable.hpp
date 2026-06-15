@@ -95,6 +95,7 @@ public:
 	                         SelectionVector &new_groups_out);
 	idx_t FindOrCreateGroups(DataChunk &groups, Vector &addresses_out, SelectionVector &new_groups_out);
 	void FindOrCreateGroups(DataChunk &groups, Vector &addresses_out);
+	idx_t FindOrCreateAggregateStates(DataChunk &groups, Vector &addresses_out);
 
 	const PartitionedTupleData &GetPartitionedData() const;
 	unique_ptr<PartitionedTupleData> AcquirePartitionedData();

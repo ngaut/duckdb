@@ -1,0 +1,100 @@
+# name: ${FILE_PATH}
+# description: ${DESCRIPTION}
+# group: [jit]
+
+name JIT Native Projection Chain ${JIT_POLICY_NAME}
+group micro
+subgroup jit
+
+require jit_sljit
+
+init
+SET threads=1;
+SET enable_jit=true;
+SET jit_backend='sljit';
+SET jit_policy='${JIT_POLICY}';
+SET jit_dump_ir=false;
+SET jit_trace_runtime=false;
+SET jit_event_log_size=10000;
+SELECT * FROM duckdb_jit_clear_events();
+
+run
+SELECT sum(k)
+FROM (
+    SELECT j + ${SECOND_ADDEND} AS k
+    FROM (SELECT i::BIGINT + ${FIRST_ADDEND} AS j FROM range(${ROW_COUNT}) tbl(i))
+) t;
+
+cleanup
+SELECT * FROM duckdb_jit_clear_events();
+
+result_query I
+SELECT (
+    (SELECT * FROM __answer) = ${EXPECTED_RESULT}
+    AND CASE '${JIT_POLICY}'
+        WHEN 'off' THEN (
+            SELECT count(*) = 0
+            FROM duckdb_jit_events()
+            WHERE target='region'
+              AND status='compiled'
+        )
+        WHEN 'auto' THEN (
+	            SELECT count(*) > 0
+	            FROM duckdb_jit_events()
+	            WHERE target='region'
+		              AND status='unsupported'
+		              AND execution_mode='unsupported'
+		              AND region_execution_form='none'
+		              AND policy_decision='auto'
+	              AND candidate_shape='projection-projection-projection'
+	              AND candidate_scope='source_pipeline'
+	              AND compile_time_us=0
+	              AND code_size=0
+	              AND reason LIKE '%execution-form=none%'
+	              AND reason LIKE '%execution:unsupported%'
+	              AND reason LIKE '%fusion-blocker:source-fusion-gap:requires-native-source%'
+	              AND reason LIKE '%region-lowering:native=2,helper=1%pass-through=1%'
+              AND reason LIKE '%source:%:helper-call:DuckDB source GetData helper boundary%'
+              AND reason LIKE '%op0:PROJECTION:native:generated typed projection%'
+              AND reason LIKE '%op1:PROJECTION:native:generated typed projection%'
+              AND reason LIKE '%op2:PROJECTION:pass-through:typed reference projection pass-through%'
+        )
+	        WHEN 'force' THEN (
+	            SELECT (
+		              (SELECT count(*) > 0
+		               FROM duckdb_jit_events()
+		               WHERE target='region'
+		                 AND status='unsupported'
+		                 AND execution_mode='unsupported'
+		                 AND region_execution_form='none'
+		                 AND policy_decision='force'
+		                 AND candidate_shape='projection-projection-projection'
+		                 AND candidate_scope='source_pipeline'
+		                 AND code_size=0
+		                 AND reason LIKE '%execution-form=none%'
+		                 AND reason LIKE '%execution:unsupported%'
+		                 AND reason LIKE '%fusion-blocker:source-fusion-gap:requires-native-source%'
+		                 AND reason LIKE '%source:%:helper-call:DuckDB source GetData helper boundary%')
+	              AND
+	              (SELECT count(*) > 0
+	               FROM duckdb_jit_events()
+	               WHERE target='region'
+	                 AND status='compiled'
+	                 AND execution_mode='native'
+	                 AND region_execution_form='fused'
+	                 AND policy_decision='force'
+	                 AND candidate_scope IN ('post_source_operator_interval', 'sink_pipeline')
+	                 AND code_size > 0)
+	              AND
+		              (SELECT count(*) = 0
+		               FROM duckdb_jit_events()
+			               WHERE target='region'
+			                 AND status='compiled'
+			                 AND execution_mode <> 'native')
+		        )
+	        )
+	        ELSE false
+    END
+)::INTEGER;
+----
+1

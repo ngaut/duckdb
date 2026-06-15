@@ -14,6 +14,14 @@
 
 namespace duckdb {
 
+struct PerfectAggregateHashTableStateLayout {
+	data_ptr_t data = nullptr;
+	bool *group_is_set = nullptr;
+	idx_t total_groups = 0;
+	idx_t tuple_size = 0;
+	idx_t aggregate_state_offset = 0;
+};
+
 class PerfectAggregateHashTable : public BaseAggregateHashTable {
 public:
 	PerfectAggregateHashTable(ClientContext &context, Allocator &allocator, const vector<LogicalType> &group_types,
@@ -22,8 +30,18 @@ public:
 	~PerfectAggregateHashTable() override;
 
 public:
+	//! Get the layout of this perfect aggregate HT
+	const TupleDataLayout &GetLayout() const;
+
 	//! Add the given data to the HT
 	void AddChunk(DataChunk &groups, DataChunk &payload);
+
+	//! Finds aggregate states for the specified group keys. The addresses vector will be filled with aggregate-state
+	//! base pointers, ready for native grouped aggregate updates.
+	idx_t FindOrCreateAggregateStates(DataChunk &groups, Vector &addresses_out);
+
+	//! Expose the stable state-address layout for generated perfect-hash aggregate updates.
+	PerfectAggregateHashTableStateLayout GetStateLayout();
 
 	//! Combines the target perfect aggregate HT into this one
 	void Combine(PerfectAggregateHashTable &other);
@@ -65,6 +83,10 @@ protected:
 	ClusteredAggrState clustered_state;
 
 private:
+	//! Compute raw perfect-hash group ids into addresses_out
+	uintptr_t *ComputeGroupLocationIds(DataChunk &groups, Vector &addresses_out);
+	//! Validate raw group ids, mark occupied groups, and rewrite them to state addresses
+	idx_t ResolveGroupStateAddresses(uintptr_t *address_data, idx_t count, idx_t state_offset);
 	//! Try adding a chunk using the clustered aggregation path. Returns false if not applicable.
 	bool AddChunkClustered(uintptr_t *address_data, DataChunk &payload);
 	//! Destroy the perfect aggregate HT (called automatically by the destructor)

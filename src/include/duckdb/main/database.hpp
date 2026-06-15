@@ -38,6 +38,7 @@ class MetricsManager;
 class ExternalFileCache;
 class ResultSetManager;
 struct ParserCache;
+class JitManager;
 
 class DatabaseInstance : public enable_shared_from_this<DatabaseInstance> {
 	friend class DuckDB;
@@ -66,6 +67,7 @@ public:
 	DUCKDB_API LogManager &GetLogManager() const;
 	DUCKDB_API MetricsManager &GetMetricsManager();
 	DUCKDB_API ParserCache &GetParserCache();
+	DUCKDB_API JitManager &GetJitManager();
 
 	DUCKDB_API const duckdb_ext_api_v1 GetExtensionAPIV1();
 
@@ -106,6 +108,7 @@ private:
 	unique_ptr<ExternalFileCache> external_file_cache;
 	unique_ptr<ResultSetManager> result_set_manager;
 	unique_ptr<ParserCache> parser_cache;
+	unique_ptr<JitManager> jit_manager;
 
 	duckdb_ext_api_v1 (*create_api_v1)();
 };

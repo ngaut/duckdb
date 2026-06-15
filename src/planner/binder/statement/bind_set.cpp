@@ -40,6 +40,7 @@ BoundStatement Binder::Bind(SetVariableStatement &stmt) {
 	}
 	auto &properties = GetStatementProperties();
 	properties.return_type = StatementReturnType::NOTHING;
+	properties.suppress_jit = true;
 	return result;
 }
 
@@ -52,6 +53,7 @@ BoundStatement Binder::Bind(ResetVariableStatement &stmt) {
 
 	auto &properties = GetStatementProperties();
 	properties.return_type = StatementReturnType::NOTHING;
+	properties.suppress_jit = true;
 	return result;
 }
 

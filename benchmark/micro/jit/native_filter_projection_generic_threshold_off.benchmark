@@ -1,0 +1,11 @@
+# name: benchmark/micro/jit/native_filter_projection_generic_threshold_off.benchmark
+# description: Baseline at the SLJIT generic filter/projection measurement threshold
+# group: [jit]
+
+template benchmark/micro/jit/native_filter_projection_generic.benchmark.in
+JIT_POLICY=off
+JIT_POLICY_NAME=Threshold Off
+ROW_COUNT=1000000
+FILTER_BOUND=500000
+ADDEND=7
+EXPECTED_RESULT=750001999993

@@ -14,6 +14,14 @@ add_library_unity(
   column_binding_resolver.cpp
   expression_executor.cpp
   expression_executor_state.cpp
+  jit.cpp
+  jit_expression_ir.cpp
+  jit_join_runtime.cpp
+  jit_operator_descriptor.cpp
+  jit_region_executor.cpp
+  jit_region_ir.cpp
+  jit_runtime.cpp
+  jit_types.cpp
   join_hashtable.cpp
   perfect_aggregate_hashtable.cpp
   physical_operator.cpp

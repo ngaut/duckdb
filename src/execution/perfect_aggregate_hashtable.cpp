@@ -60,6 +60,10 @@ PerfectAggregateHashTable::~PerfectAggregateHashTable() {
 	Destroy();
 }
 
+const TupleDataLayout &PerfectAggregateHashTable::GetLayout() const {
+	return *layout_ptr;
+}
+
 template <class T>
 static void ComputeGroupLocationTemplated(UnifiedVectorFormat &group_data, Value &min, uintptr_t *address_data,
                                           idx_t current_shift, idx_t count) {
@@ -123,11 +127,9 @@ static void ComputeGroupLocation(const Vector &group, Value &min, uintptr_t *add
 	}
 }
 
-void PerfectAggregateHashTable::AddChunk(DataChunk &groups, DataChunk &payload) {
-	// first we need to find the location in the HT of each of the groups
-	FlatVector::SetSize(addresses, groups.size());
-	auto address_data = FlatVector::GetDataMutable<uintptr_t>(addresses);
-	// zero-initialize the address data
+uintptr_t *PerfectAggregateHashTable::ComputeGroupLocationIds(DataChunk &groups, Vector &addresses_out) {
+	FlatVector::SetSize(addresses_out, groups.size());
+	auto address_data = FlatVector::GetDataMutable<uintptr_t>(addresses_out);
 	memset(address_data, 0, groups.size() * sizeof(uintptr_t));
 	D_ASSERT(groups.ColumnCount() == group_minima.size());
 
@@ -137,13 +139,12 @@ void PerfectAggregateHashTable::AddChunk(DataChunk &groups, DataChunk &payload) 
 		current_shift -= required_bits[i];
 		ComputeGroupLocation(groups.data[i], group_minima[i], address_data, current_shift);
 	}
+	return address_data;
+}
 
-	if (AddChunkClustered(address_data, payload)) {
-		return;
-	}
-
-	// Non-clustered path: convert group ids to state pointers and update aggregates.
-	for (idx_t i = 0; i < groups.size(); i++) {
+idx_t PerfectAggregateHashTable::ResolveGroupStateAddresses(uintptr_t *address_data, idx_t count, idx_t state_offset) {
+	idx_t new_group_count = 0;
+	for (idx_t i = 0; i < count; i++) {
 		const auto group = address_data[i];
 		if (group >= total_groups) {
 			throw InvalidInputException("Perfect hash aggregate: aggregate group %llu exceeded total groups %llu. This "
@@ -151,9 +152,40 @@ void PerfectAggregateHashTable::AddChunk(DataChunk &groups, DataChunk &payload) 
 			                            "disable_optimizer to disable optimizations that rely on correct statistics",
 			                            group, total_groups);
 		}
+		if (!group_is_set[group]) {
+			new_group_count++;
+		}
 		group_is_set[group] = true;
-		address_data[i] = uintptr_t(data) + group * tuple_size;
+		address_data[i] = uintptr_t(data) + group * tuple_size + state_offset;
 	}
+	return new_group_count;
+}
+
+idx_t PerfectAggregateHashTable::FindOrCreateAggregateStates(DataChunk &groups, Vector &addresses_out) {
+	auto address_data = ComputeGroupLocationIds(groups, addresses_out);
+	return ResolveGroupStateAddresses(address_data, groups.size(), layout_ptr->GetAggrOffset());
+}
+
+PerfectAggregateHashTableStateLayout PerfectAggregateHashTable::GetStateLayout() {
+	PerfectAggregateHashTableStateLayout result;
+	result.data = data;
+	result.group_is_set = group_is_set.get();
+	result.total_groups = total_groups;
+	result.tuple_size = tuple_size;
+	result.aggregate_state_offset = layout_ptr->GetAggrOffset();
+	return result;
+}
+
+void PerfectAggregateHashTable::AddChunk(DataChunk &groups, DataChunk &payload) {
+	// first we need to find the location in the HT of each of the groups
+	auto address_data = ComputeGroupLocationIds(groups, addresses);
+
+	if (AddChunkClustered(address_data, payload)) {
+		return;
+	}
+
+	// Non-clustered path: convert group ids to state pointers and update aggregates.
+	ResolveGroupStateAddresses(address_data, groups.size(), 0);
 
 	idx_t payload_idx = 0;
 	auto &aggregates = layout_ptr->GetAggregates();

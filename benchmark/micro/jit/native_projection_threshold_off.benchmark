@@ -1,0 +1,10 @@
+# name: benchmark/micro/jit/native_projection_threshold_off.benchmark
+# description: Baseline at the SLJIT native projection diagnostic threshold
+# group: [jit]
+
+template benchmark/micro/jit/native_projection.benchmark.in
+JIT_POLICY=off
+JIT_POLICY_NAME=Threshold Off
+ROW_COUNT=1000000
+ADDEND=7
+EXPECTED_RESULT=500006500000

@@ -1,6 +1,7 @@
 #include "duckdb/execution/operator/order/physical_order.hpp"
 
 #include "duckdb/common/sorting/sort.hpp"
+#include "duckdb/execution/jit/runtime.hpp"
 
 namespace duckdb {
 
@@ -114,12 +115,21 @@ unique_ptr<GlobalSourceState> PhysicalOrder::GetGlobalSourceState(ClientContext 
 	return make_uniq<OrderGlobalSourceState>(context, sink_state->Cast<OrderGlobalSinkState>());
 }
 
+bool PhysicalOrder::SupportsJitNativeSource(const JitPreparedPipeline &jit_prepared_pipeline) const {
+	return jit_prepared_pipeline.RequiresNativeSource();
+}
+
 SourceResultType PhysicalOrder::GetDataInternal(ExecutionContext &context, DataChunk &chunk,
                                                 OperatorSourceInput &input) const {
 	auto &gstate = input.global_state.Cast<OrderGlobalSourceState>();
 	auto &lstate = input.local_state.Cast<OrderLocalSourceState>();
 	OperatorSourceInput sort_input {*gstate.state, *lstate.state, input.interrupt_state};
 	return gstate.sort.GetData(context, chunk, sort_input);
+}
+
+SourceResultType PhysicalOrder::GetJitNativeSourceDataInternal(ExecutionContext &context, DataChunk &chunk,
+                                                               OperatorSourceInput &input) const {
+	return GetDataInternal(context, chunk, input);
 }
 
 OperatorPartitionData PhysicalOrder::GetPartitionData(ExecutionContext &context, DataChunk &chunk,

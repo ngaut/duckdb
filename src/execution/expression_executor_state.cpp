@@ -46,6 +46,9 @@ ExpressionState::ExpressionState(const Expression &expr, ExpressionExecutorState
 ExpressionExecutorState::ExpressionExecutorState() {
 }
 
+ExpressionExecutorState::~ExpressionExecutorState() {
+}
+
 void ExpressionState::Verify(ExpressionExecutorState &root_executor) {
 	D_ASSERT(&root_executor == &root);
 	for (auto &entry : child_states) {

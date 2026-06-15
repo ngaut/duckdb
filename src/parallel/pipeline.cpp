@@ -3,6 +3,7 @@
 #include "duckdb/common/algorithm.hpp"
 #include "duckdb/common/printer.hpp"
 #include "duckdb/common/tree_renderer/text_tree_renderer.hpp"
+#include "duckdb/execution/jit/manager.hpp"
 #include "duckdb/execution/executor.hpp"
 #include "duckdb/execution/operator/aggregate/physical_ungrouped_aggregate.hpp"
 #include "duckdb/execution/operator/scan/physical_table_scan.hpp"
@@ -67,6 +68,9 @@ TaskExecutionResult PipelineTask::ExecuteTask(TaskExecutionMode mode) {
 
 Pipeline::Pipeline(Executor &executor_p)
     : executor(executor_p), ready(false), initialized(false), source(nullptr), sink(nullptr) {
+}
+
+Pipeline::~Pipeline() {
 }
 
 ClientContext &Pipeline::GetClientContext() {
@@ -290,8 +294,9 @@ void Pipeline::ResetForReschedule(bool reset_sink) {
 	if (source && !source->IsSource()) {
 		throw InternalException("Source of pipeline does not have IsSource set");
 	}
+	PrepareJitRegions();
 	if (!allow_reuse || !source_state || !source_state->SupportsReuse()) {
-		source_state = source->GetGlobalSourceState(client);
+		source_state = source->GetGlobalSourceState(client, GetJitPreparedPipeline());
 	} else {
 		source_state->Reset(client);
 	}
@@ -303,8 +308,22 @@ void Pipeline::ResetSource(bool force) {
 		throw InternalException("Source of pipeline does not have IsSource set");
 	}
 	if (force || !source_state) {
-		source_state = source->GetGlobalSourceState(GetClientContext());
+		PrepareJitRegions();
+		source_state = source->GetGlobalSourceState(GetClientContext(), GetJitPreparedPipeline());
 	}
+}
+
+void Pipeline::PrepareJitRegions() {
+	if (!source) {
+		jit_prepared_pipeline.reset();
+		return;
+	}
+	auto &client = GetClientContext();
+	if (executor.IsJitSuppressed() || JitManager::IsJitIntrospectionPipeline(*this)) {
+		jit_prepared_pipeline.reset();
+		return;
+	}
+	jit_prepared_pipeline = JitManager::Get(client).PreparePipelineRegions(client, *this);
 }
 
 void Pipeline::Ready() {

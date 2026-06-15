@@ -8,6 +8,7 @@
 #include "duckdb/execution/ht_entry.hpp"
 #include "duckdb/logging/log_manager.hpp"
 #include "duckdb/execution/expression_executor.hpp"
+#include "duckdb/execution/jit/join_runtime.hpp"
 #include "duckdb/execution/operator/join/physical_hash_join.hpp"
 #include "duckdb/main/client_context.hpp"
 #include "duckdb/main/settings.hpp"
@@ -347,6 +348,67 @@ static void GetRowPointersInternal(DataChunk &keys, TupleDataChunkState &key_sta
 inline bool JoinHashTable::UseSalt() const {
 	// only use salt for large hash tables
 	return this->capacity > USE_SALT_THRESHOLD;
+}
+
+bool JoinHashTable::GetJitNativeHashJoinTableLayout(JitNativeHashJoinTableLayout &layout) const {
+	layout = JitNativeHashJoinTableLayout();
+	layout.join_type = join_type;
+	layout.finalized = finalized;
+	layout.in_memory = finalized && hash_map.get();
+	layout.needs_chain_matcher = needs_chain_matcher;
+	layout.chains_longer_than_one = chains_longer_than_one;
+	layout.residual_predicate = static_cast<bool>(residual_predicate) || static_cast<bool>(residual_info);
+	layout.dictionary_emission = use_dict_emission;
+	layout.can_have_null = layout_ptr && layout_ptr->CanHaveNull();
+	layout.use_salt = UseSalt();
+	layout.condition_count = condition_types.size();
+	layout.condition_types = condition_types;
+	layout.payload_column_count = build_types.size();
+	layout.payload_types = build_types;
+	layout.layout_column_count = layout_ptr ? layout_ptr->ColumnCount() : 0;
+	layout.layout_offsets = layout_ptr ? layout_ptr->GetOffsets() : vector<idx_t>();
+	layout.tuple_size = tuple_size;
+	layout.entry_size = entry_size;
+	layout.pointer_offset = pointer_offset;
+	layout.found_match_column_present = PropagatesBuildSide(join_type);
+	layout.found_match_column_index = condition_types.size() + build_types.size();
+	layout.hash_column_index = layout.found_match_column_present ? layout.found_match_column_index + 1
+	                                                             : layout.found_match_column_index;
+	layout.capacity = capacity == DConstants::INVALID_INDEX ? 0 : capacity;
+	layout.bitmask = bitmask == DConstants::INVALID_INDEX ? 0 : bitmask;
+	layout.pointer_mask = ht_entry_t::POINTER_MASK;
+	layout.salt_mask = ht_entry_t::SALT_MASK;
+	layout.entries = hash_map.get() ? reinterpret_cast<const ht_entry_t *>(hash_map.get()) : nullptr;
+	layout.aux_next_ptrs = aux_next_ptrs_data;
+
+	layout.null_keys_are_filtered = true;
+	for (idx_t condition_idx = 0; condition_idx < null_values_are_equal.size(); condition_idx++) {
+		if (null_values_are_equal[condition_idx]) {
+			layout.null_keys_are_filtered = false;
+			break;
+		}
+	}
+
+	if (!layout.finalized) {
+		layout.blocker = "hash-join-native-table-not-finalized";
+		return false;
+	}
+	if (!layout.entries || layout.capacity == 0) {
+		layout.blocker = "hash-join-native-pointer-table-missing";
+		return false;
+	}
+	if (!layout.in_memory) {
+		layout.blocker = "hash-join-native-external-partitioned-table";
+		return false;
+	}
+	if (layout.residual_predicate) {
+		layout.blocker = "hash-join-native-residual-predicate";
+		return false;
+	}
+	layout.single_match_probe = !layout.chains_longer_than_one;
+	layout.ready = true;
+	layout.blocker = "none";
+	return true;
 }
 
 void JoinHashTable::GetRowPointers(DataChunk &keys, TupleDataChunkState &key_state, ProbeState &state, Vector &hashes_v,

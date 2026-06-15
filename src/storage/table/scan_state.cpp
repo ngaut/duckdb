@@ -18,10 +18,11 @@ TableScanState::~TableScanState() {
 
 void TableScanState::Initialize(vector<StorageIndex> column_ids_p, optional_ptr<ClientContext> context,
                                 optional_ptr<TableFilterSet> table_filters,
-                                optional_ptr<SampleOptions> table_sampling) {
+                                optional_ptr<SampleOptions> table_sampling,
+                                TableFilterExecutionMode filter_execution_mode) {
 	this->column_ids = std::move(column_ids_p);
 	if (table_filters) {
-		filters.Initialize(*context, *table_filters, column_ids);
+		filters.Initialize(*context, *table_filters, column_ids, filter_execution_mode);
 	}
 	if (table_sampling) {
 		sampling_info.do_system_sample = table_sampling->method == SampleMethod::SYSTEM_SAMPLE;
@@ -55,9 +56,11 @@ ScanFilter::ScanFilter(ClientContext &context, ProjectionIndex index, const vect
 }
 
 void ScanFilterInfo::Initialize(ClientContext &context, TableFilterSet &filters,
-                                const vector<StorageIndex> &column_ids) {
+                                const vector<StorageIndex> &column_ids,
+                                TableFilterExecutionMode execution_mode) {
 	D_ASSERT(filters.HasFilters());
 	table_filters = &filters;
+	execute_residual_filters = execution_mode == TableFilterExecutionMode::FILTER_AND_PRUNE;
 	adaptive_filter = make_uniq<AdaptiveFilter>(filters);
 	adaptive_filter->SetLogger(context.logger);
 	filter_list.reserve(filters.FilterCount());
@@ -73,6 +76,9 @@ void ScanFilterInfo::Initialize(ClientContext &context, TableFilterSet &filters,
 }
 
 bool ScanFilterInfo::ColumnHasFilters(idx_t column_idx) {
+	if (!execute_residual_filters) {
+		return false;
+	}
 	if (column_idx < column_has_filter.size()) {
 		return column_has_filter[column_idx];
 	} else {
@@ -81,12 +87,19 @@ bool ScanFilterInfo::ColumnHasFilters(idx_t column_idx) {
 }
 
 bool ScanFilterInfo::HasFilters() const {
+	if (!execute_residual_filters) {
+		return false;
+	}
 	if (!table_filters) {
 		// no filters
 		return false;
 	}
 	// if we have filters - check if we need to check any of them
 	return always_true_filters < filter_list.size();
+}
+
+bool ScanFilterInfo::ExecutesResidualFilters() const {
+	return execute_residual_filters;
 }
 
 void ScanFilterInfo::CheckAllFilters() {
@@ -116,14 +129,14 @@ optional_ptr<AdaptiveFilter> ScanFilterInfo::GetAdaptiveFilter() {
 }
 
 AdaptiveFilterState ScanFilterInfo::BeginFilter() const {
-	if (!adaptive_filter) {
+	if (!execute_residual_filters || !adaptive_filter) {
 		return AdaptiveFilterState();
 	}
 	return adaptive_filter->BeginFilter();
 }
 
 void ScanFilterInfo::EndFilter(AdaptiveFilterState state) {
-	if (!adaptive_filter) {
+	if (!execute_residual_filters || !adaptive_filter) {
 		return;
 	}
 	adaptive_filter->EndFilter(state);

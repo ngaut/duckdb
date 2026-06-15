@@ -59,8 +59,8 @@ DebugVerificationMode DBConfigOptions::global_verification_mode = DebugVerificat
 		    nullptr, optional_idx()                                                                                    \
 	}
 
-#define DUCKDB_SETTING_ALIAS(_ALIAS, _SETTING_INDEX)                                                                   \
-	{ _ALIAS, _SETTING_INDEX }
+#define DUCKDB_SETTING_ALIAS_NAME(_ALIAS, _SETTING_NAME)                                                               \
+	{ _ALIAS, GetInternalOptionIndexByName(_SETTING_NAME) }
 #define FINAL_ALIAS                                                                                                    \
 	{ nullptr, 0 }
 
@@ -140,6 +140,7 @@ static const ConfigurationOption internal_options[] = {
     DUCKDB_SETTING_CALLBACK(EnableExternalFileCacheSetting),
     DUCKDB_SETTING(EnableFSSTVectorsSetting),
     DUCKDB_SETTING(EnableHTTPMetadataCacheSetting),
+    DUCKDB_SETTING(EnableJitSetting),
     DUCKDB_GLOBAL(EnableLogging),
     DUCKDB_SETTING(EnableMacroDependenciesSetting),
     DUCKDB_SETTING(EnableObjectCacheSetting),
@@ -175,6 +176,13 @@ static const ConfigurationOption internal_options[] = {
     DUCKDB_SETTING_CALLBACK(IndexScanPercentageSetting),
     DUCKDB_SETTING_CALLBACK(InitialColumnSegmentSizeSetting),
     DUCKDB_SETTING(IntegerDivisionSetting),
+    DUCKDB_SETTING_CALLBACK(JitBackendSetting),
+    DUCKDB_SETTING(JitDumpIrSetting),
+    DUCKDB_SETTING(JitTraceDecisionsSetting),
+    DUCKDB_SETTING_CALLBACK(JitEventLogSizeSetting),
+    DUCKDB_SETTING_CALLBACK(JitPolicySetting),
+    DUCKDB_SETTING(JitTraceRuntimeSetting),
+    DUCKDB_SETTING(JitVerifySetting),
     DUCKDB_SETTING_CALLBACK(LambdaSyntaxSetting),
     DUCKDB_SETTING(LateMaterializationMaxRowsSetting),
     DUCKDB_SETTING(LegacyDisableNullTypeSetting),
@@ -235,15 +243,25 @@ static const ConfigurationOption internal_options[] = {
     DUCKDB_SETTING(ZstdMinStringLengthSetting),
     FINAL_SETTING};
 
-static const ConfigurationAlias setting_aliases[] = {DUCKDB_SETTING_ALIAS("configure_metrics", 28),
-                                                     DUCKDB_SETTING_ALIAS("custom_profiling_settings", 28),
-                                                     DUCKDB_SETTING_ALIAS("memory_limit", 120),
-                                                     DUCKDB_SETTING_ALIAS("null_order", 55),
-                                                     DUCKDB_SETTING_ALIAS("profiling_output", 141),
-                                                     DUCKDB_SETTING_ALIAS("user", 158),
-                                                     DUCKDB_SETTING_ALIAS("wal_autocheckpoint", 27),
-                                                     DUCKDB_SETTING_ALIAS("worker_threads", 156),
-                                                     FINAL_ALIAS};
+static idx_t GetInternalOptionIndexByName(const char *name) {
+	for (idx_t index = 0; internal_options[index].name; index++) {
+		if (StringUtil::Equals(internal_options[index].name, name)) {
+			return index;
+		}
+	}
+	throw InternalException("Unknown configuration option alias target \"%s\"", name);
+}
+
+static const ConfigurationAlias setting_aliases[] = {
+    DUCKDB_SETTING_ALIAS_NAME("configure_metrics", "configure_profiling"),
+    DUCKDB_SETTING_ALIAS_NAME("custom_profiling_settings", "configure_profiling"),
+    DUCKDB_SETTING_ALIAS_NAME("memory_limit", "max_memory"),
+    DUCKDB_SETTING_ALIAS_NAME("null_order", "default_null_order"),
+    DUCKDB_SETTING_ALIAS_NAME("profiling_output", "profile_output"),
+    DUCKDB_SETTING_ALIAS_NAME("user", "username"),
+    DUCKDB_SETTING_ALIAS_NAME("wal_autocheckpoint", "checkpoint_threshold"),
+    DUCKDB_SETTING_ALIAS_NAME("worker_threads", "threads"),
+    FINAL_ALIAS};
 
 vector<ConfigurationOption> DBConfig::GetOptions() {
 	vector<ConfigurationOption> options;

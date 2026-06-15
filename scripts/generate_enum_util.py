@@ -22,6 +22,12 @@ blacklist = [
 enum_util_header_file = os.path.join("..", "src", "include", "duckdb", "common", "enum_util.hpp")
 enum_util_source_file = os.path.join("..", "src", "common", "enum_util.cpp")
 
+blacklist_paths = [
+    # EnumUtil lives in src/common and must not include private execution/JIT headers.
+    # Keep this path-based so new JIT IR enums stay behind the same dependency boundary.
+    "duckdb/execution/jit/",
+]
+
 # Overrides conversions for the following enums:
 overrides = {
     "LogicalTypeId": {
@@ -122,10 +128,14 @@ enum_paths = []
 enum_path_set = set()
 
 for hpp_file in hpp_files:
+    file_path = remove_prefix(os.path.relpath(hpp_file, os.path.join("..", "src")), "include/")
+    if any(file_path.startswith(prefix) for prefix in blacklist_paths):
+        print(f"Skipping enums in {file_path} because the header path is blacklisted")
+        continue
+
     with open(hpp_file, "r") as f:
         text = f.read()
         for res in re.finditer(r"enum class (\w*)\s*:\s*(\w*)\s*{((?:\s*[^}])*)}", text, re.MULTILINE):
-            file_path = remove_prefix(os.path.relpath(hpp_file, os.path.join("..", "src")), "include/")
             enum_name = res.group(1)
 
             if enum_name in blacklist:
@@ -262,14 +272,16 @@ with open(enum_util_source_file, "w") as f:
         f.write("\n}\n\n")
         f.write(f"template<>\nconst char* EnumUtil::ToChars<{enum_name}>({enum_name} value) {{\n")
         f.write(
-            f"\treturn StringUtil::EnumToString({enum_string_array}, {member_count}, \"{enum_name}\", static_cast<uint32_t>(value));\n"
+            "\treturn StringUtil::EnumToString("
+            f"{enum_string_array}, {member_count}, \"{enum_name}\", static_cast<uint32_t>(value));\n"
         )
         f.write("}\n\n")
 
         # Write the string to enum
         f.write(f"template<>\n{enum_name} EnumUtil::FromString<{enum_name}>(const char *value) {{\n")
         f.write(
-            f"\treturn static_cast<{enum_name}>(StringUtil::StringToEnum({enum_string_array}, {member_count}, \"{enum_name}\", value));"
+            f"\treturn static_cast<{enum_name}>(StringUtil::StringToEnum("
+            f"{enum_string_array}, {member_count}, \"{enum_name}\", value));"
         )
         f.write("\n}\n\n")
 

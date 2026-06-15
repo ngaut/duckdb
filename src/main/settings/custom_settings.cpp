@@ -18,6 +18,7 @@
 #include "duckdb/common/string_util.hpp"
 #include "duckdb/common/file_system.hpp"
 #include "duckdb/common/operator/double_cast_operator.hpp"
+#include "duckdb/execution/jit/manager.hpp"
 #include "duckdb/main/attached_database.hpp"
 #include "duckdb/main/client_context.hpp"
 #include "duckdb/main/client_data.hpp"
@@ -1087,6 +1088,66 @@ void InitialColumnSegmentSizeSetting::OnSet(SettingCallbackInfo &, Value &input)
 	if (!IsPowerOfTwo(initial_column_segment_size)) {
 		throw InvalidInputException("The initial column segment size must be a power of two");
 	}
+}
+
+//===----------------------------------------------------------------------===//
+// JIT Backend
+//===----------------------------------------------------------------------===//
+void JitBackendSetting::OnSet(SettingCallbackInfo &info, Value &input) {
+	auto requested = StringUtil::Lower(input.ToString());
+	if (requested == "auto") {
+		input = Value(requested);
+		return;
+	}
+
+	optional_ptr<DatabaseInstance> db;
+	if (info.context) {
+		db = info.context->db.get();
+	} else if (info.db) {
+		db = info.db;
+	}
+	if (!db) {
+		return;
+	}
+
+	for (auto &backend : JitManager::Get(*db).GetBackends()) {
+		if (StringUtil::Lower(backend.name) != requested) {
+			continue;
+		}
+		if (!backend.available) {
+			throw InvalidInputException("JIT backend \"%s\" is registered but not available", requested);
+		}
+		return;
+	}
+	throw InvalidInputException("JIT backend \"%s\" is not registered", requested);
+}
+
+//===----------------------------------------------------------------------===//
+// JIT Policy
+//===----------------------------------------------------------------------===//
+void JitPolicySetting::OnSet(SettingCallbackInfo &info, Value &input) {
+	auto policy = StringUtil::Lower(input.ToString());
+	if (policy == "auto" || policy == "force" || policy == "off") {
+		input = Value(policy);
+		return;
+	}
+	throw InvalidInputException("JIT policy must be one of auto, force, or off");
+}
+
+//===----------------------------------------------------------------------===//
+// JIT Event Log Size
+//===----------------------------------------------------------------------===//
+void JitEventLogSizeSetting::OnSet(SettingCallbackInfo &info, Value &input) {
+	optional_ptr<DatabaseInstance> db;
+	if (info.context) {
+		db = info.context->db.get();
+	} else if (info.db) {
+		db = info.db;
+	}
+	if (!db) {
+		return;
+	}
+	JitManager::Get(*db).ApplyEventRetentionLimit(NumericCast<idx_t>(input.GetValue<uint64_t>()));
 }
 
 //===----------------------------------------------------------------------===//

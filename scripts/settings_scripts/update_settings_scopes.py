@@ -40,17 +40,21 @@ def generate_scope_code(file):
             new_aliases.append([alias, setting.name])
     new_entries.sort(key=lambda x: x[0])
     new_aliases.sort(key=lambda x: x[0])
-    entry_indexes = {}
-    for i in range(len(new_entries)):
-        entry_indexes[new_entries[i][0]] = i
     for alias in new_aliases:
-        alias_index = entry_indexes[alias[1]]
-        alias.append(f"DUCKDB_SETTING_ALIAS(\"{alias[0]}\", {alias_index})")
+        alias.append(f"DUCKDB_SETTING_ALIAS_NAME(\"{alias[0]}\", \"{alias[1]}\")")
 
     new_array_section = ',\n    '.join([x[1] for x in new_entries])
-    new_array_section += ',    FINAL_SETTING};\n\n'
+    new_array_section += ',\n    FINAL_SETTING};\n\n'
+    new_array_section += 'static idx_t GetInternalOptionIndexByName(const char *name) {\n'
+    new_array_section += '\tfor (idx_t index = 0; internal_options[index].name; index++) {\n'
+    new_array_section += '\t\tif (StringUtil::Equals(internal_options[index].name, name)) {\n'
+    new_array_section += '\t\t\treturn index;\n'
+    new_array_section += '\t\t}\n'
+    new_array_section += '\t}\n'
+    new_array_section += '\tthrow InternalException("Unknown configuration option alias target \\"%s\\"", name);\n'
+    new_array_section += '}\n\n'
     new_array_section += 'static const ConfigurationAlias setting_aliases[] = {'
-    new_array_section += ',\n    '.join([x[2] for x in new_aliases])
+    new_array_section += ',\n                                                     '.join([x[2] for x in new_aliases])
 
     return before_array + new_array_section + after_array
 

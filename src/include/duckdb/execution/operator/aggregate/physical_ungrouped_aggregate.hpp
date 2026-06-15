@@ -35,8 +35,11 @@ public:
 
 public:
 	// Source interface
+	bool SupportsJitNativeSource(const JitPreparedPipeline &jit_prepared_pipeline) const override;
 	SourceResultType GetDataInternal(ExecutionContext &context, DataChunk &chunk,
 	                                 OperatorSourceInput &input) const override;
+	SourceResultType GetJitNativeSourceDataInternal(ExecutionContext &context, DataChunk &chunk,
+	                                                OperatorSourceInput &input) const override;
 
 	bool IsSource() const override {
 		return true;
@@ -53,6 +56,7 @@ public:
 	unique_ptr<GlobalSinkState> GetGlobalSinkState(ClientContext &context) const override;
 
 	InsertionOrderPreservingMap<string> ParamsToString() const override;
+	JitOperatorDescriptor GetJitOperatorDescriptor() const override;
 
 	bool IsSink() const override {
 		return true;

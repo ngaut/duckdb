@@ -2,16 +2,111 @@
 
 #include "duckdb/common/limits.hpp"
 #include "duckdb/common/mutex.hpp"
+#include "duckdb/execution/jit/manager.hpp"
+#include "duckdb/execution/jit/region_executor.hpp"
 #include "duckdb/main/client_context.hpp"
 
 #include "duckdb/main/settings.hpp"
 
-#ifdef DUCKDB_DEBUG_ASYNC_SINK_SOURCE
 #include <chrono>
+
+#ifdef DUCKDB_DEBUG_ASYNC_SINK_SOURCE
 #include <thread>
 #endif
 
 namespace duckdb {
+
+static bool HasCompiledJitPreparedSourceOwnerKernel(const vector<unique_ptr<JitRegionKernel>> &kernels) {
+	for (auto &kernel : kernels) {
+		D_ASSERT(kernel);
+		if (!kernel->HasTraceCandidate()) {
+			continue;
+		}
+		auto &contract = kernel->TraceCandidateContract();
+		if (JitRegionABIIsSourcePipeline(contract.abi) && kernel->CanExecuteSourcePipeline()) {
+			return true;
+		}
+		if (JitRegionABIIsFullPipeline(contract.abi) && kernel->CanExecuteFullPipeline()) {
+			return true;
+		}
+	}
+	return false;
+}
+
+static string DescribeCompiledJitPreparedSourceOwnerKernels(const vector<unique_ptr<JitRegionKernel>> &kernels) {
+	string result = "kernel_count=" + std::to_string(kernels.size());
+	for (idx_t kernel_idx = 0; kernel_idx < kernels.size(); kernel_idx++) {
+		auto &kernel = kernels[kernel_idx];
+		D_ASSERT(kernel);
+		result += ";kernel";
+		result += std::to_string(kernel_idx);
+		result += "<has_candidate=";
+		result += kernel->HasTraceCandidate() ? "true" : "false";
+		result += ",scope=";
+		result += kernel->HasTraceCandidate() ? kernel->TraceCandidateScope() : "none";
+		result += ",abi=";
+		result += kernel->HasTraceCandidate() ? JitRegionABIToString(kernel->TraceCandidateContract().abi) : "none";
+		result += ",owns_source=";
+		result += kernel->HasTraceCandidate() && kernel->TraceCandidateContract().owns_source ? "true" : "false";
+		result += ",owns_sink=";
+		result += kernel->HasTraceCandidate() && kernel->TraceCandidateContract().owns_sink ? "true" : "false";
+		result += ",source_abi=";
+		result += kernel->CanExecuteSourcePipeline() ? "true" : "false";
+		result += ",full_abi=";
+		result += kernel->CanExecuteFullPipeline() ? "true" : "false";
+		result += ">";
+	}
+	return result;
+}
+
+static string DescribeJitPreparedSourceOwnerState(ClientContext &context, const JitPreparedPipeline &prepared,
+                                                  const vector<unique_ptr<JitRegionKernel>> &kernels) {
+	string result = DescribeCompiledJitPreparedSourceOwnerKernels(kernels);
+	result += ";context_jit_suppressed=";
+	result += context.IsJitSuppressed() ? "true" : "false";
+	result += ";prepared_enabled=";
+	result += prepared.enabled ? "true" : "false";
+	result += ";selected_region_count=" + std::to_string(prepared.selected_regions.size());
+	result += ";source_contract<present=";
+	result += prepared.source_contract.present ? "true" : "false";
+	result += ",selected=";
+	result += prepared.source_contract.selected ? "true" : "false";
+	result += ",owns_filters=";
+	result += prepared.source_contract.owns_filters ? "true" : "false";
+	result += ",native_source=";
+	result += prepared.source_contract.native_source ? "true" : "false";
+	result += ">";
+	for (idx_t region_idx = 0; region_idx < prepared.selected_regions.size(); region_idx++) {
+		auto &region = prepared.selected_regions[region_idx];
+		result += ";selected_region";
+		result += std::to_string(region_idx);
+		result += "<shape=";
+		result += region.lowering_plan.shape_key;
+		result += ",mode=";
+		result += JitExecutionModeToString(region.lowering_plan.ExpectedCompiledExecutionMode());
+		result += ",form=";
+		result += JitRegionExecutionFormToString(region.lowering_plan.ExpectedRegionExecutionForm());
+		result += ",owns_source_filters=";
+		result += region.lowering_plan.OwnsSourceFilters() ? "true" : "false";
+		result += ">";
+	}
+	return result;
+}
+
+static bool HasJitSourcePipelineKernelRequiringNativeSource(const vector<unique_ptr<JitRegionKernel>> &kernels) {
+	for (auto &kernel : kernels) {
+		D_ASSERT(kernel);
+		if (!kernel->HasTraceCandidate()) {
+			continue;
+		}
+		auto &contract = kernel->TraceCandidateContract();
+		if (JitRegionABIIsSourcePipeline(contract.abi) && kernel->CanExecuteSourcePipeline() &&
+		    kernel->RequiresNativeSource()) {
+			return true;
+		}
+	}
+	return false;
+}
 
 PipelineExecutor::PipelineExecutor(ClientContext &context_p, Pipeline &pipeline_p)
     : pipeline(pipeline_p), thread(context_p), context(context_p, thread, &pipeline_p) {
@@ -30,26 +125,54 @@ PipelineExecutor::PipelineExecutor(ClientContext &context_p, Pipeline &pipeline_
 	}
 	local_source_state = pipeline.source->GetLocalSourceState(context, *pipeline.source_state);
 
-	intermediate_chunks.reserve(pipeline.operators.size());
-	intermediate_states.reserve(pipeline.operators.size());
+	InitializeOperatorExecutionState(intermediate_chunks, intermediate_states);
 	for (idx_t i = 0; i < pipeline.operators.size(); i++) {
-		auto &prev_operator = i == 0 ? *pipeline.source : pipeline.operators[i - 1].get();
 		auto &current_operator = pipeline.operators[i].get();
-
-		auto chunk = make_uniq<DataChunk>();
-		chunk->Initialize(BufferAllocator::Get(context.client), prev_operator.GetTypes());
-		intermediate_chunks.push_back(std::move(chunk));
-
-		auto op_state = current_operator.GetOperatorState(context);
-		intermediate_states.push_back(std::move(op_state));
-
 		if (current_operator.IsSink() && current_operator.sink_state->state == SinkFinalizeType::NO_OUTPUT_POSSIBLE) {
 			// one of the operators has already figured out no output is possible
 			// we can skip executing the pipeline
 			FinishProcessing();
 		}
 	}
+	auto prepared_jit = pipeline.GetJitPreparedPipeline();
+	if (prepared_jit) {
+		jit_kernels = JitManager::Get(context_p).CompilePreparedRegions(context_p, *prepared_jit);
+	}
+	// Prepared source input changes the DuckDB source chunk shape, so it needs a compiled owner before the normal
+	// pipeline can run. Native-source state is an additive alternate fetch path and may be left unused when codegen
+	// later rejects the only native-source candidate.
+	if (prepared_jit && prepared_jit->RequiresPreparedSourceInput() &&
+	    !HasCompiledJitPreparedSourceOwnerKernel(jit_kernels)) {
+		throw InternalException("prepared JIT source input requires a compiled source-prefix owner kernel: %s",
+		                        DescribeJitPreparedSourceOwnerState(context_p, *prepared_jit, jit_kernels));
+	}
+	auto &source_input_types = prepared_jit ? prepared_jit->SourceInputTypes(pipeline.source->GetTypes())
+	                                       : pipeline.source->GetTypes();
+	jit_source_input_chunk.Initialize(BufferAllocator::Get(context.client), source_input_types);
 	InitializeChunk(final_chunk);
+}
+
+PipelineExecutor::~PipelineExecutor() {
+}
+
+void PipelineExecutor::InitializeOperatorExecutionState(vector<unique_ptr<DataChunk>> &chunks,
+                                                        vector<unique_ptr<OperatorState>> &states,
+                                                        bool disable_operator_caching) {
+	chunks.reserve(pipeline.operators.size());
+	states.reserve(pipeline.operators.size());
+	for (idx_t i = 0; i < pipeline.operators.size(); i++) {
+		auto &prev_operator = i == 0 ? *pipeline.source : pipeline.operators[i - 1].get();
+		auto &current_operator = pipeline.operators[i].get();
+
+		auto chunk = make_uniq<DataChunk>();
+		chunk->Initialize(BufferAllocator::Get(context.client), prev_operator.GetTypes());
+		chunks.push_back(std::move(chunk));
+		auto state = current_operator.GetOperatorState(context);
+		if (disable_operator_caching) {
+			state->DisableCaching();
+		}
+		states.push_back(std::move(state));
+	}
 }
 
 void PipelineExecutor::Reset() {
@@ -65,6 +188,7 @@ void PipelineExecutor::Reset() {
 	next_batch_blocked = false;
 	finished_processing_idx = -1;
 	should_flush_current_idx = true;
+	source_chunk_initial_idx = 0;
 	while (!in_process_operators.empty()) {
 		in_process_operators.pop();
 	}
@@ -111,6 +235,7 @@ void PipelineExecutor::Reset() {
 
 	// Reset the final chunk data (keep allocation)
 	final_chunk.Reset();
+	jit_source_input_chunk.Reset();
 }
 
 void PipelineExecutor::PrepareForExecution() {
@@ -259,11 +384,15 @@ SinkNextBatchType PipelineExecutor::NextBatch(DataChunk &source_chunk, const boo
 
 PipelineExecuteResult PipelineExecutor::Execute(idx_t max_chunks) {
 	D_ASSERT(pipeline.sink);
-	auto &source_chunk = pipeline.operators.empty() ? final_chunk : *intermediate_chunks[0];
+	PipelineExecuteResult jit_result;
+	if (JitRegionExecutor::TryExecuteFullPipeline(*this, max_chunks, jit_result)) {
+		return jit_result;
+	}
 	ExecutionBudget chunk_budget(max_chunks);
 
 	do {
 		context.client.InterruptCheck();
+		auto *source_chunk = &GetSourceChunkForInitialIdx(source_chunk_initial_idx);
 
 		OperatorResultType result;
 		if (exhausted_pipeline && done_flushing && !remaining_sink_chunk && !next_batch_blocked &&
@@ -277,8 +406,8 @@ PipelineExecuteResult PipelineExecutor::Execute(idx_t max_chunks) {
 		} else if (!in_process_operators.empty() && !started_flushing) {
 			// Operator(s) in the pipeline have returned `HAVE_MORE_OUTPUT` in the last Execute call
 			// the operators have to be called with the same input chunk to produce the rest of the output
-			D_ASSERT(source_chunk.size() > 0);
-			result = ExecutePushInternal(source_chunk, chunk_budget);
+			D_ASSERT(source_chunk->size() > 0);
+			result = ExecutePushInternal(*source_chunk, chunk_budget, source_chunk_initial_idx);
 		} else if (exhausted_pipeline && !next_batch_blocked && !done_flushing) {
 			// The pipeline was exhausted, try flushing all operators
 			auto flush_completed = TryFlushCachingOperators(chunk_budget);
@@ -297,7 +426,9 @@ PipelineExecuteResult PipelineExecutor::Execute(idx_t max_chunks) {
 			SourceResultType source_result = SourceResultType::BLOCKED;
 			if (!next_batch_blocked) {
 				// "Regular" path: fetch a chunk from the source and push it through the pipeline
-				source_chunk.Reset();
+				source_chunk_initial_idx = 0;
+				source_chunk = &GetSourceChunkForInitialIdx(source_chunk_initial_idx);
+				source_chunk->Reset();
 				source_result = FetchFromSource(source_chunk);
 				if (source_result == SourceResultType::BLOCKED) {
 					return PipelineExecuteResult::INTERRUPTED;
@@ -309,18 +440,18 @@ PipelineExecuteResult PipelineExecutor::Execute(idx_t max_chunks) {
 			}
 
 			if (required_partition_info.AnyRequired()) {
-				auto next_batch_result = NextBatch(source_chunk, source_result == SourceResultType::HAVE_MORE_OUTPUT);
+				auto next_batch_result = NextBatch(*source_chunk, source_result == SourceResultType::HAVE_MORE_OUTPUT);
 				next_batch_blocked = next_batch_result == SinkNextBatchType::BLOCKED;
 				if (next_batch_blocked) {
 					return PipelineExecuteResult::INTERRUPTED;
 				}
 			}
 
-			if (exhausted_pipeline && source_chunk.size() == 0) {
+			if (exhausted_pipeline && source_chunk->size() == 0) {
 				continue;
 			}
 
-			result = ExecutePushInternal(source_chunk, chunk_budget);
+			result = ExecutePushInternal(*source_chunk, chunk_budget, source_chunk_initial_idx);
 		} else {
 			throw InternalException("Unexpected state reached in pipeline executor");
 		}
@@ -467,27 +598,44 @@ PipelineExecuteResult PipelineExecutor::PushFinalize() {
 	return PipelineExecuteResult::FINISHED;
 }
 
-void PipelineExecutor::GoToSource(idx_t &current_idx, idx_t initial_idx) {
+void PipelineExecutor::GoToSource(idx_t &current_idx, idx_t initial_idx, stack<idx_t> &operators_in_process) {
 	// we go back to the first operator (the source)
 	current_idx = initial_idx;
-	if (!in_process_operators.empty()) {
+	if (!operators_in_process.empty()) {
 		// ... UNLESS there is an in process operator
 		// if there is an in-process operator, we start executing at the latest one
 		// for example, if we have a join operator that has tuples left, we first need to emit those tuples
-		current_idx = in_process_operators.top();
-		in_process_operators.pop();
+		current_idx = operators_in_process.top();
+		operators_in_process.pop();
 	}
 	D_ASSERT(current_idx >= initial_idx);
 }
 
 OperatorResultType PipelineExecutor::Execute(DataChunk &input, DataChunk &result, idx_t initial_idx) {
+	OperatorResultType jit_result;
+	if (JitRegionExecutor::TryExecute(*this, input, result, initial_idx, jit_result)) {
+		return jit_result;
+	}
+	return ExecutePipelineReference(input, result, initial_idx);
+}
+
+OperatorResultType PipelineExecutor::ExecutePipelineReference(DataChunk &input, DataChunk &result, idx_t initial_idx) {
+	return ExecutePipelineOperators(input, result, initial_idx, intermediate_chunks, intermediate_states,
+	                                in_process_operators, true);
+}
+
+OperatorResultType PipelineExecutor::ExecutePipelineOperators(DataChunk &input, DataChunk &result, idx_t initial_idx,
+                                                              vector<unique_ptr<DataChunk>> &chunks,
+                                                              vector<unique_ptr<OperatorState>> &states,
+                                                              stack<idx_t> &operators_in_process,
+                                                              bool apply_finish_processing) {
 	if (input.size() == 0) { // LCOV_EXCL_START
 		return OperatorResultType::NEED_MORE_INPUT;
 	} // LCOV_EXCL_STOP
 	D_ASSERT(!pipeline.operators.empty());
 
 	idx_t current_idx;
-	GoToSource(current_idx, initial_idx);
+	GoToSource(current_idx, initial_idx, operators_in_process);
 	if (current_idx == initial_idx) {
 		current_idx++;
 	}
@@ -501,31 +649,35 @@ OperatorResultType PipelineExecutor::Execute(DataChunk &input, DataChunk &result
 		// if current_idx is the last possible index (>= operators.size()) we write to the result
 		// otherwise we write to an intermediate chunk
 		auto current_intermediate = current_idx;
-		auto &current_chunk =
-		    current_intermediate >= intermediate_chunks.size() ? result : *intermediate_chunks[current_intermediate];
+		auto &current_chunk = current_intermediate >= chunks.size() ? result : *chunks[current_intermediate];
 		current_chunk.Reset();
 		if (current_idx == initial_idx) {
 			// we went back to the source: we need more input
 			return OperatorResultType::NEED_MORE_INPUT;
 		} else {
-			auto &prev_chunk =
-			    current_intermediate == initial_idx + 1 ? input : *intermediate_chunks[current_intermediate - 1];
+			auto &prev_chunk = current_intermediate == initial_idx + 1 ? input : *chunks[current_intermediate - 1];
 			auto operator_idx = current_idx - 1;
+			OperatorResultType jit_result;
+			if (JitRegionExecutor::TryExecute(*this, prev_chunk, result, operator_idx, jit_result)) {
+				return jit_result;
+			}
 			auto &current_operator = pipeline.operators[operator_idx].get();
 
 			// if current_idx > source_idx, we pass the previous operators' output through the Execute of the current
 			// operator
 			StartOperator(current_operator);
 			auto result = current_operator.Execute(context, prev_chunk, current_chunk, *current_operator.op_state,
-			                                       *intermediate_states[current_intermediate - 1]);
+			                                       *states[current_intermediate - 1]);
 			EndOperator(current_operator, &current_chunk);
 			if (result == OperatorResultType::HAVE_MORE_OUTPUT) {
 				// more data remains in this operator
 				// push in-process marker
-				in_process_operators.push(current_idx);
+				operators_in_process.push(current_idx);
 			} else if (result == OperatorResultType::FINISHED) {
 				D_ASSERT(current_chunk.size() == 0);
-				FinishProcessing(NumericCast<int32_t>(current_idx));
+				if (apply_finish_processing) {
+					FinishProcessing(NumericCast<int32_t>(current_idx));
+				}
 				return OperatorResultType::FINISHED;
 			}
 			current_chunk.Verify(context.client.db);
@@ -539,7 +691,7 @@ OperatorResultType PipelineExecutor::Execute(DataChunk &input, DataChunk &result
 			} else {
 				// if we got no output from an intermediate op
 				// we go back and try to pull data from the source again
-				GoToSource(current_idx, initial_idx);
+				GoToSource(current_idx, initial_idx, operators_in_process);
 				continue;
 			}
 		} else {
@@ -552,7 +704,7 @@ OperatorResultType PipelineExecutor::Execute(DataChunk &input, DataChunk &result
 			}
 		}
 	}
-	return in_process_operators.empty() ? OperatorResultType::NEED_MORE_INPUT : OperatorResultType::HAVE_MORE_OUTPUT;
+	return operators_in_process.empty() ? OperatorResultType::NEED_MORE_INPUT : OperatorResultType::HAVE_MORE_OUTPUT;
 }
 
 void PipelineExecutor::SetTaskForInterrupts(weak_ptr<Task> current_task) {
@@ -599,23 +751,118 @@ SinkResultType PipelineExecutor::Sink(DataChunk &chunk, OperatorSinkInput &input
 		return SinkResultType::BLOCKED;
 	}
 #endif
+	SinkResultType jit_result;
+	if (JitRegionExecutor::TrySink(*this, chunk, input, jit_result)) {
+		return jit_result;
+	}
 	return pipeline.sink->Sink(context, chunk, input);
 }
 
-SourceResultType PipelineExecutor::FetchFromSource(DataChunk &result) {
+DataChunk &PipelineExecutor::GetSourceChunkForInitialIdx(idx_t initial_idx) {
+	if (pipeline.operators.empty() || initial_idx >= pipeline.operators.size()) {
+		return final_chunk;
+	}
+	return *intermediate_chunks[initial_idx];
+}
+
+SourceResultType PipelineExecutor::FetchFromSource(DataChunk *&result, bool allow_source_prefix_jit) {
+	auto source_prefix_jit = allow_source_prefix_jit && JitRegionExecutor::HasSourcePipelineKernel(*this);
+	auto prepared_jit = pipeline.GetJitPreparedPipeline();
+	auto prepared_source_input = prepared_jit && prepared_jit->RequiresPreparedSourceInput();
+	if (source_prefix_jit && HasJitSourcePipelineKernelRequiringNativeSource(jit_kernels)) {
+		std::chrono::steady_clock::time_point source_fetch_start;
+		auto trace_source_fetch = Settings::Get<JitTraceRuntimeSetting>(context.client);
+		if (trace_source_fetch) {
+			source_fetch_start = std::chrono::steady_clock::now();
+		}
+		auto res = FetchFromNativeSource(result);
+		int64_t source_fetch_time_us = 0;
+		if (trace_source_fetch) {
+			auto source_fetch_end = std::chrono::steady_clock::now();
+			source_fetch_time_us =
+			    std::chrono::duration_cast<std::chrono::microseconds>(source_fetch_end - source_fetch_start).count();
+		}
+		if (JitRegionExecutor::TryExecuteSourcePrefix(*this, *result, result, res, source_fetch_time_us,
+		                                              source_chunk_initial_idx)) {
+			return res;
+		}
+		throw InternalException("JIT native source-prefix kernel declined after native source fetch");
+	}
+
 	StartOperator(*pipeline.source);
 
 	OperatorSourceInput source_input = {*pipeline.source_state, *local_source_state, interrupt_state};
-	auto res = GetData(result, source_input);
+	source_chunk_initial_idx = 0;
+	auto &fetch_chunk = source_prefix_jit || prepared_source_input ? jit_source_input_chunk : *result;
+	fetch_chunk.Reset();
+	auto trace_source_fetch = (source_prefix_jit || prepared_source_input) &&
+	                          Settings::Get<JitTraceRuntimeSetting>(context.client);
+	std::chrono::steady_clock::time_point source_fetch_start;
+	if (trace_source_fetch) {
+		source_fetch_start = std::chrono::steady_clock::now();
+	}
+	auto res = GetData(fetch_chunk, source_input);
+	int64_t source_fetch_time_us = 0;
+	if (trace_source_fetch) {
+		auto source_fetch_end = std::chrono::steady_clock::now();
+		source_fetch_time_us =
+		    std::chrono::duration_cast<std::chrono::microseconds>(source_fetch_end - source_fetch_start).count();
+	}
 
 	// Ensures sources only return empty results when Blocking or Finished
-	D_ASSERT(res != SourceResultType::BLOCKED || result.size() == 0);
+	D_ASSERT(res != SourceResultType::BLOCKED || fetch_chunk.size() == 0);
 	if (res == SourceResultType::FINISHED) {
 		// final call into the source - finish source execution
 		context.thread.profiler.FinishSource(*pipeline.source_state, *local_source_state);
 		source_profiling_finalized = true;
 	}
-	EndOperator(*pipeline.source, &result);
+	EndOperator(*pipeline.source, &fetch_chunk);
+
+	if (source_prefix_jit) {
+		if (JitRegionExecutor::TryExecuteSourcePrefix(*this, fetch_chunk, result, res, source_fetch_time_us,
+		                                              source_chunk_initial_idx)) {
+			return res;
+		}
+		if (!prepared_source_input) {
+			result->Reference(fetch_chunk);
+		}
+	}
+	if (prepared_source_input) {
+		if (JitRegionExecutor::TryExecutePreparedSourceReference(*this, fetch_chunk, result, res,
+		                                                         source_fetch_time_us, source_chunk_initial_idx)) {
+			return res;
+		}
+		throw InternalException("prepared JIT source input requires source-prefix reference materialization");
+	}
+
+	return res;
+}
+
+SourceResultType PipelineExecutor::FetchFromNativeSource(DataChunk *&result) {
+	auto prepared_jit = pipeline.GetJitPreparedPipeline();
+	if (!prepared_jit || !prepared_jit->RequiresNativeSource()) {
+		throw InternalException("JIT native source fetch requires a selected native-source contract");
+	}
+	if (!pipeline.source->SupportsJitNativeSource(*prepared_jit)) {
+		throw InternalException("JIT native source fetch selected for a source without native-source support");
+	}
+
+	StartOperator(*pipeline.source);
+
+	OperatorSourceInput source_input = {*pipeline.source_state, *local_source_state, interrupt_state};
+	source_chunk_initial_idx = 0;
+	auto &source_chunk = jit_source_input_chunk;
+	source_chunk.Reset();
+	result = &source_chunk;
+
+	auto res = pipeline.source->GetJitNativeSourceData(context, source_chunk, source_input);
+
+	D_ASSERT(res != SourceResultType::BLOCKED || source_chunk.size() == 0);
+	if (res == SourceResultType::FINISHED) {
+		context.thread.profiler.FinishSource(*pipeline.source_state, *local_source_state);
+		source_profiling_finalized = true;
+	}
+	EndOperator(*pipeline.source, &source_chunk);
 
 	return res;
 }
