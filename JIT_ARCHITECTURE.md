@@ -303,7 +303,8 @@ The architecture has four separate decisions:
 - **IR eligibility**: DuckDB can lower the fragment into a complete semantic IR.
 - **Region selection**: DuckDB can form a non-overlapping executable dataflow
   region from that IR.
-- **Backend capability**: a backend can generate correct native/helper code for that IR.
+- **Backend capability**: a backend can generate correct native code for that IR,
+  optionally calling primitive runtime stubs from inside generated loops.
 - **Admission**: the selected policy should pay compilation cost for this execution.
 
 These decisions must not be collapsed. Capability is about correctness.
@@ -574,7 +575,7 @@ Admission inputs belong in `JitManager`, because they are cross-backend policy:
 
 - selected policy (`auto`, `force`, `off`);
 - estimated source and region cardinality from DuckDB physical operators;
-- number and shape of native/helper nodes;
+- number and shape of native/protocol-boundary nodes;
 - backend plan shape key;
 - backend-owned admission rules keyed by target and shape key, with the measured
   proof that justifies auto compilation;
@@ -649,10 +650,10 @@ backend code, and DuckDB executor internals.
 
 The current contract is deliberately stricter than capability. Native
 source-prefix filter/projection, source-owned full-pipeline aggregate update,
-and terminal typed-sink helper paths may be correct force-mode capabilities, but
-they are not `auto` policy until the exact normalized region family has repeated
-production benchmark proof. Forced compilation proves coverage and backend
-honesty; it is not profitability evidence by itself.
+and terminal native sink-update paths may be correct force-mode capabilities,
+but they are not `auto` policy until the exact normalized region family has
+repeated production benchmark proof. Forced compilation proves coverage and
+backend honesty; it is not profitability evidence by itself.
 
 The root architectural correction is operator-context admission. A region
 candidate must carry a backend admission key derived from the executable region
@@ -776,7 +777,7 @@ Region formation should be deterministic:
    dependencies.
 2. Split the graph into streaming chains separated by pipeline breakers and by
    stateful phases without an exposed state protocol.
-3. Mark every semantic node as native-capable, helper-capable, or fallback-only
+3. Mark every semantic node as native-capable, protocol-boundary, or fallback-only
    at the core semantic level.
 4. Emit the maximal native prefix before the first hard boundary when that
    prefix contains real generated work. This is the only source-prefix planner
@@ -821,7 +822,7 @@ A backend may reject a region even when it supports all individual nodes if it
 cannot generate the combined control flow correctly. A backend may call
 primitive helper stubs for narrow operations such as decimal arithmetic, string
 comparison, date extraction, hashing, allocation, or exact exception behavior.
-It must not treat whole operator helper paths such as hash-join build/probe,
+It must not treat whole DuckDB operator paths such as hash-join build/probe,
 generic hash aggregate lookup/update, source fetch, or sink bodies as fused
 operator-region execution. Protocol-only sink regions without generated
 operator work are blockers, not success states.
@@ -832,7 +833,7 @@ counts are trace evidence only; they must not be used as a fallback capability
 model. The same plan also exposes the region execution form explicitly:
 
 - `fused`: generated backend-owned code owns the executable operator interval and
-  removes intermediate DuckDB operator/materialization/source/sink helper
+  removes intermediate DuckDB operator/materialization/source/sink boundaries
   boundaries inside that interval;
 - `none`: valid for non-region, disabled, unavailable, unsupported, and
   non-compiled candidate rows, but invalid for a compiled region.
@@ -903,7 +904,7 @@ A shape key should include:
 - operator sequence;
 - type families;
 - vector and selection formats;
-- native/helper/pass-through/fallback node counts;
+- native/protocol-boundary/pass-through/fallback node counts;
 - state protocols used;
 - boundary crossings removed;
 - approximate expression complexity.
@@ -1122,7 +1123,7 @@ they must not compile the region.
 
 ### Native Sink-Update ABI
 
-The native sink-update ABI is narrower than a typed sink helper. Core DuckDB may
+The native sink-update ABI is narrower than DuckDB sink execution. Core DuckDB may
 bind private sink state because it owns aggregate and sink internals; backends
 must receive only backend-neutral handles. For ungrouped aggregate updates that
 contract is `JitNativeUngroupedAggregateState`, bound by
@@ -1165,7 +1166,7 @@ exposes hash-table lookup ownership through flat
 `native_hash_aggregate_lookup_*` fields inside the same protocol. It does not
 expose an operator-specific partial-ownership contract in core IR. Backends
 must consume those neutral contracts instead of inspecting grouped aggregate
-internals or calling whole aggregate sink helpers. The fields are intentionally
+internals or calling whole aggregate sink execution. The fields are intentionally
 not nested angle-bracket IR records because TPC-H trace extraction treats each
 protocol as one deterministic record.
 Function metadata alone is not native grouped aggregation. Native grouped state
@@ -1216,7 +1217,7 @@ lowering missing" blocker. Unsupported grouped hash shapes should name the
 actual missing piece, such as no aggregate payload bindings or an unsupported
 aggregate update function.
 
-Perfect-hash aggregate now has a native grouped-state update protocol, not a typed sink helper payload callback.
+Perfect-hash aggregate now has a native grouped-state update protocol, not a DuckDB sink payload callback.
 `JitBindNativePerfectHashAggregateStates`
 binds group keys to backend-neutral aggregate state addresses through
 `PerfectAggregateHashTable::FindOrCreateAggregateStates`, and SLJIT consumes
@@ -1258,13 +1259,13 @@ contract and admission machinery:
 ```text
 bound_state_update
 generated_local_accumulate
-typed_duckdb_clustered_helper
+duckdb_clustered_boundary
 executor_fallback
 ```
 
 `generated_local_accumulate` is acceptable only if it proves a real locality win
-without row-list overhead. `typed_duckdb_clustered_helper` may use DuckDB's
-clustered aggregate machinery, but it must report helper execution, not native
+without row-list overhead. `duckdb_clustered_boundary` may use DuckDB's
+clustered aggregate machinery, but it must report boundary execution, not native
 codegen. Until a strategy beats the reference path with trace evidence,
 perfect-hash full-pipeline JIT remains diagnostic coverage rather than proof
 that native aggregate JIT can outperform DuckDB on low-cardinality grouped
@@ -2305,7 +2306,7 @@ runner, while the JIT trace records the admission/decline fact and
 When a compiled kernel declines and the executor fallback immediately performs
 that invocation, the fallback runtime event must use
 `execution_mode=executor_fallback` and stay separate from generated
-native/helper kernel totals. Reporting fallback executor time as native JIT time
+native/generated kernel totals. Reporting fallback executor time as native JIT time
 is forbidden.
 
 `jit_policy=force` is a diagnostic admission-bypass mode for supported
@@ -2388,15 +2389,15 @@ must be reported as fallback or unsupported, never native.
 Compiled region results must also report the fused region execution form:
 
 - `fused`: backend-owned generated code executes the admitted operator interval
-  without intermediate DuckDB operator/materialization boundaries, typed
-  operator/sink helper boundaries, or missing native protocols;
+  without intermediate DuckDB operator/materialization boundaries,
+  operator/sink protocol boundaries, or missing native protocols;
 `none` is never valid for a compiled region. It is reserved for region rows that
 did not produce executable code.
 
 The initial SLJIT backend currently exposes only real native compiled paths.
-It must not use a generated trampoline into C++ vector-helper execution as
-compiled success; unsupported helper-shaped IR is reported as unsupported until a
-backend lowering exists where generated code owns the loop/dispatch.
+It must not use a generated trampoline into C++ vector execution as compiled
+success; unsupported IR is reported as unsupported until a backend lowering
+exists where generated code owns the loop/dispatch.
 
 Executable kernels carry their own trace identity after compilation: kernel ID,
 compiled execution mode, compile reason, compile time, and code size. Runtime
@@ -2583,7 +2584,7 @@ state protocol. Hash-join build/probe and generic hash aggregate lookup/update
 are examples of native operator protocol nodes for supported shapes; unsupported
 variants must stay missing-protocol or fallback rather than falling back to a
 whole DuckDB operator helper. Reporting a normal DuckDB physical operator as a
-compiled helper node is not allowed.
+compiled native node is not allowed.
 
 The initial native scope is filter/projection regions. That path must be moved
 behind first-class region IR before new native region families are added. The

@@ -2321,7 +2321,7 @@ static SljitRegionNodePlan PlanSljitFullPipelineSinkNode(const JitRegionIRNode &
 	if (node.sink->kind == JitRegionSinkKind::HASH_JOIN_BUILD) {
 		auto reason = string("full pipeline hash join build sink requires native hash join build protocol lowering");
 		if (!native_sink.reason.empty()) {
-			reason += ";hash-join-build-protocol-fallback=" + native_sink.reason;
+			reason += ";hash-join-build-protocol-boundary=" + native_sink.reason;
 		}
 		if (!node.sink->ir.empty()) {
 			reason += ";" + node.sink->ir;
@@ -2334,7 +2334,7 @@ static SljitRegionNodePlan PlanSljitFullPipelineSinkNode(const JitRegionIRNode &
 
 	string reason = "full pipeline sink requires native sink or operator update protocol";
 	if (!native_sink.reason.empty()) {
-		reason += ";native-sink-fallback=" + native_sink.reason;
+		reason += ";native-sink-lowering=" + native_sink.reason;
 	}
 	if (!node.sink->ir.empty()) {
 		reason += ";" + node.sink->ir;

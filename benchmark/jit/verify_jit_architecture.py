@@ -530,15 +530,15 @@ def verify_region_executor_resume_contract(root: Path) -> None:
     )
     assert_required_text(
         root,
-        "extension/jit_sljit/sljit_region_plan.cpp",
-        [
-            "PlanSljitFullPipelineSinkNode",
-            "PlanSljitSinkNode(node)",
-            "full pipeline sink requires native sink or operator update protocol",
-            "hash-join-build-protocol-fallback",
-            "full-pipeline-native-protocol-stage",
-        ],
-    )
+	    "extension/jit_sljit/sljit_region_plan.cpp",
+	    [
+	        "PlanSljitFullPipelineSinkNode",
+	        "PlanSljitSinkNode(node)",
+	        "full pipeline sink requires native sink or operator update protocol",
+	        "hash-join-build-protocol-boundary",
+	        "full-pipeline-native-protocol-stage",
+	    ],
+	)
     assert_required_text(
         root,
         "extension/jit_sljit/sljit_region_runtime.cpp",
@@ -1055,17 +1055,17 @@ def verify_native_sink_update_contract(root: Path) -> None:
             "native-grouped-state-blocker=none",
             "hash-aggregate-native-lookup",
             "native_hash_aggregate_lookup_contract_status=ready",
-            "native_hash_aggregate_lookup_blocker=none",
-            "hash-aggregate-distinct-grouped-state-protocol-boundary",
-            "hash-aggregate-distinct-lookup-protocol-boundary",
-            "perfect-hash-aggregate-native-lookup",
-            "JitBindNativeHashAggregateStates",
-            "FindOrCreateAggregateStatesFromBoundGroups",
-            "JitBindNativePerfectHashAggregateStates",
-            "not a typed sink helper payload callback",
-            "perfect_hash_aggregate_update",
-        ],
-    )
+	        "native_hash_aggregate_lookup_blocker=none",
+	        "hash-aggregate-distinct-grouped-state-protocol-boundary",
+	        "hash-aggregate-distinct-lookup-protocol-boundary",
+	        "perfect-hash-aggregate-native-lookup",
+	        "JitBindNativeHashAggregateStates",
+	        "FindOrCreateAggregateStatesFromBoundGroups",
+	        "JitBindNativePerfectHashAggregateStates",
+	        "not a DuckDB sink payload callback",
+	        "perfect_hash_aggregate_update",
+	    ],
+	)
     assert_no_forbidden_includes(
         root,
         [Path("extension/jit_sljit")],
