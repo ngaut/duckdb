@@ -215,6 +215,10 @@ public:
 		if (!JitRegionABIIsFullPipeline(abi) || !HasTraceCandidate()) {
 			return false;
 		}
+		if (!native_source) {
+			SetRuntimeDeclineReason("full pipeline native region requires native-source protocol");
+			return false;
+		}
 		string blocker;
 		if (!CanBindNativeOperators(runtime, blocker)) {
 			SetRuntimeDeclineReason("native-operator-runtime-binding-blocked:" + blocker);
@@ -229,8 +233,7 @@ public:
 
 			DataChunk *source_chunk = nullptr;
 			int64_t source_fetch_time_us = 0;
-			auto source_result = native_source ? runtime.FetchNativeSource(source_chunk, source_fetch_time_us)
-			                                  : runtime.FetchSource(source_chunk, source_fetch_time_us);
+			auto source_result = runtime.FetchNativeSource(source_chunk, source_fetch_time_us);
 			if (source_result == SourceResultType::BLOCKED) {
 				result = JitFullPipelineResult::INTERRUPTED;
 				return true;

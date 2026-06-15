@@ -42,6 +42,10 @@ JitRegionCompileResult CompileSljitRegion(const string &backend_name, const JitR
 		throw InternalException("SLJIT region compile requires native compiled execution mode");
 	}
 	if (native_region) {
+		if (JitRegionABIIsFullPipeline(contract.abi) && !native_region->native_source) {
+			return JitRegionCompileResult::Error(
+			    "SLJIT full-pipeline native regions require a native-source protocol");
+		}
 		if (native_region->elided_identity_projections > 0) {
 			reason += ";elided:identity-projection=" + std::to_string(native_region->elided_identity_projections);
 		}

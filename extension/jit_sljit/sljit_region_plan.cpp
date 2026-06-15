@@ -2951,7 +2951,7 @@ static string DescribeOperatorStageRegion(const SljitOperatorStageRegionPlan &pl
 	if (!plan.kernel_blocker.empty()) {
 		result += ",kernel_blocker=" + plan.kernel_blocker;
 	}
-	result += ",source=" + string(plan.native_source ? "native" : plan.owns_source ? "duckdb-helper" : "none");
+	result += ",source=" + string(plan.native_source ? "native" : plan.owns_source ? "executor-boundary" : "none");
 	result += ",stages=[";
 	for (idx_t stage_idx = 0; stage_idx < plan.stages.size(); stage_idx++) {
 		auto &stage = plan.stages[stage_idx];

@@ -2070,6 +2070,32 @@ def verify_region_execution_form_contract(root: Path) -> None:
             "full pipeline sink requires native sink or operator update protocol",
         ],
     )
+    assert_required_text(
+        root,
+        "extension/jit_sljit/sljit_region.cpp",
+        [
+            "SLJIT full-pipeline native regions require a native-source protocol",
+            "JitRegionABIIsFullPipeline(contract.abi)",
+            "!native_region->native_source",
+        ],
+    )
+    assert_required_text(
+        root,
+        "extension/jit_sljit/sljit_region_runtime.cpp",
+        [
+            "full pipeline native region requires native-source protocol",
+            "runtime.FetchNativeSource(source_chunk, source_fetch_time_us)",
+        ],
+    )
+    assert_no_text(
+        root,
+        [Path("extension/jit_sljit")],
+        [
+            "DUCKDB_SOURCE_HELPER",
+            "duckdb-helper",
+            "runtime.FetchSource(source_chunk, source_fetch_time_us)",
+        ],
+    )
     assert_no_text(
         root,
         [Path("extension/jit_sljit")],

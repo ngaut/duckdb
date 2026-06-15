@@ -31,7 +31,6 @@ enum class SljitNativeRegionOpKind : uint8_t {
 enum class SljitSourceFilterExecutionKind : uint8_t {
 	NONE,
 	DUCKDB_SCAN,
-	DUCKDB_SOURCE_HELPER,
 	GENERATED_REGION
 };
 enum class SljitNativeRegionExpressionKind : uint8_t {
