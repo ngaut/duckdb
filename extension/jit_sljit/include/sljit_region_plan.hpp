@@ -43,17 +43,6 @@ enum class SljitOperatorKernelKind : uint8_t {
 	PROJECTION_UNGROUPED_SUM,
 	PERFECT_HASH_AGGREGATE
 };
-enum class SljitOperatorStageKind : uint8_t {
-	SOURCE,
-	SOURCE_FILTER,
-	FILTER,
-	PROJECTION,
-	HASH_JOIN_PROBE,
-	HASH_JOIN_BUILD,
-	HASH_AGGREGATE_UPDATE,
-	PERFECT_HASH_AGGREGATE_UPDATE,
-	UNGROUPED_AGGREGATE_UPDATE
-};
 enum class SljitSourceFilterExecutionKind : uint8_t {
 	NONE,
 	DUCKDB_SCAN,
@@ -206,17 +195,9 @@ struct SljitNativeRegionPlan {
 	}
 };
 
-struct SljitOperatorStage {
-	SljitOperatorStageKind kind = SljitOperatorStageKind::SOURCE;
-	idx_t op_index = DConstants::INVALID_INDEX;
-	idx_t filter_index = DConstants::INVALID_INDEX;
-	string execution = "pass";
-	bool native = false;
-};
-
 struct SljitOperatorStageRegionPlan {
 	SljitOperatorKernelKind kernel_kind = SljitOperatorKernelKind::NONE;
-	vector<SljitOperatorStage> stages;
+	vector<JitRegionStage> stages;
 	string shape_key;
 	string execution_reason;
 	string stage_ir;
@@ -261,7 +242,8 @@ bool CanFuseNativeFilterProjectionUngroupedSumRegion(const SljitNativeRegionPlan
 bool CanFuseNativeProjectionUngroupedSumRegion(const SljitNativeRegionPlan &region);
 bool CanFuseNativePerfectHashAggregateRegion(const SljitNativeRegionPlan &region);
 SljitOperatorStageRegionPlan BuildSljitOperatorStageRegionPlan(const SljitNativeRegionPlan &region,
-                                                                         const JitRegionContract &contract);
+                                                               const JitRegionContract &contract,
+                                                               const JitRegionStagePlan &core_stage_plan);
 string DescribeNativeRegion(const SljitNativeRegionPlan &region, const string &mode);
 string DescribeNativeRegionShape(const SljitNativeRegionPlan &region);
 string BuildSljitRegionCandidateShapeKey(const JitRegionCandidate &candidate);

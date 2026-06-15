@@ -2224,6 +2224,23 @@ JitRegionStageExecutionFromOwnership(JitRegionOwnershipKind ownership) {
 	}
 }
 
+static JitRegionOwnershipKind JitRegionOwnershipFromStageExecution(JitRegionStageExecutionKind execution) {
+	switch (execution) {
+	case JitRegionStageExecutionKind::GENERATED_IR:
+		return JitRegionOwnershipKind::GENERATED_IR;
+	case JitRegionStageExecutionKind::NATIVE_PROTOCOL:
+		return JitRegionOwnershipKind::NATIVE_PROTOCOL;
+	case JitRegionStageExecutionKind::TYPED_HELPER:
+		return JitRegionOwnershipKind::TYPED_HELPER;
+	case JitRegionStageExecutionKind::EXECUTOR_FALLBACK:
+		return JitRegionOwnershipKind::EXECUTOR_BOUNDARY;
+	case JitRegionStageExecutionKind::MISSING_PROTOCOL:
+		return JitRegionOwnershipKind::MISSING_PROTOCOL;
+	default:
+		return JitRegionOwnershipKind::NONE;
+	}
+}
+
 static JitRegionStageExecutionKind
 JitRegionSourceStageExecution(const JitRegionIRNode &node, const JitRegionContract &contract,
                               JitRegionSourceExecutionKind source_execution) {
@@ -2242,63 +2259,60 @@ JitRegionSourceStageExecution(const JitRegionIRNode &node, const JitRegionContra
 	return JitRegionStageExecutionFromOwnership(contract.source_ownership);
 }
 
-static JitRegionStageKind JitRegionSinkStageKind(const JitRegionIRNode &node) {
-	if (!node.sink) {
-		return JitRegionStageKind::SINK_BOUNDARY;
-	}
-	switch (node.sink->kind) {
-	case JitRegionSinkKind::HASH_JOIN_BUILD:
-		return JitRegionStageKind::HASH_JOIN_BUILD;
-	case JitRegionSinkKind::HASH_AGGREGATE_UPDATE:
-		return JitRegionStageKind::HASH_AGGREGATE_UPDATE;
-	case JitRegionSinkKind::PERFECT_HASH_AGGREGATE_UPDATE:
-		return JitRegionStageKind::PERFECT_HASH_AGGREGATE_UPDATE;
-	case JitRegionSinkKind::UNGROUPED_AGGREGATE_UPDATE:
-		return JitRegionStageKind::UNGROUPED_AGGREGATE_UPDATE;
-	default:
-		return JitRegionStageKind::SINK_BOUNDARY;
-	}
-}
-
-static JitRegionStageKind JitRegionOperatorStageKind(const JitRegionIRNode &node) {
-	if (node.operator_info && node.operator_info->kind == JitRegionOperatorKind::HASH_JOIN_PROBE) {
-		return JitRegionStageKind::HASH_JOIN_PROBE;
-	}
-	return JitRegionStageKind::OPERATOR_BOUNDARY;
-}
-
-static JitRegionOwnershipKind JitRegionOperatorStageOwnership(const JitRegionIRNode &node) {
-	if (node.boundary == JitRegionBoundaryKind::OPERATOR_NATIVE) {
-		if (node.operator_info && node.operator_info->kind == JitRegionOperatorKind::HASH_JOIN_PROBE &&
-		    node.operator_info->hash_join_protocol.present &&
-		    node.operator_info->hash_join_protocol.native_probe_contract.status == JitRegionStateContractStatus::READY) {
-			return JitRegionOwnershipKind::NATIVE_PROTOCOL;
-		}
-		return JitRegionOwnershipKind::MISSING_PROTOCOL;
-	}
-	if (node.boundary == JitRegionBoundaryKind::OPERATOR_HELPER) {
-		return JitRegionOwnershipKind::MISSING_PROTOCOL;
-	}
-	if (node.boundary == JitRegionBoundaryKind::OPERATOR_FALLBACK) {
-		return JitRegionOwnershipKind::EXECUTOR_BOUNDARY;
-	}
-	return JitRegionOwnershipKind::MISSING_PROTOCOL;
-}
-
 static void AddJitRegionStage(JitRegionStagePlan &plan, JitRegionStageKind kind,
                               JitRegionStageExecutionKind execution, JitRegionOwnershipKind ownership,
                               idx_t node_index, const JitRegionIRNode &node, idx_t filter_index = DConstants::INVALID_INDEX,
-                              string reason = string()) {
+                              string reason = string(),
+                              JitCompiledProtocolKind protocol = JitCompiledProtocolKind::NONE,
+                              JitCompiledDrainKind drain = JitCompiledDrainKind::NONE,
+                              string required_capability = string()) {
 	JitRegionStage stage;
 	stage.kind = kind;
 	stage.execution = execution;
 	stage.ownership = ownership;
+	stage.protocol = protocol;
+	stage.drain = drain;
 	stage.node_index = node_index;
 	stage.operator_index = node.operator_index;
 	stage.filter_index = filter_index;
 	stage.operator_name = node.operator_name;
+	stage.required_capability = std::move(required_capability);
 	stage.reason = std::move(reason);
 	plan.stages.push_back(std::move(stage));
+}
+
+static string BuildJitRegionCompiledStageReason(const JitCompiledStageContract &compiled_stage,
+                                                const JitRegionIRNode &node) {
+	string reason = compiled_stage.ir.empty() ? node.fallback_reason : compiled_stage.ir;
+	if (!compiled_stage.blocker.empty() && compiled_stage.blocker != "none" &&
+	    !StringUtil::Contains(reason, compiled_stage.blocker)) {
+		if (!reason.empty()) {
+			reason += ";";
+		}
+		reason += "blocker=" + compiled_stage.blocker;
+	}
+	return reason;
+}
+
+static void AddJitRegionCompiledStage(JitRegionStagePlan &plan, const JitCompiledStageContract &compiled_stage,
+                                      idx_t node_index, const JitRegionIRNode &node,
+                                      JitRegionStageExecutionKind execution,
+                                      JitRegionOwnershipKind ownership) {
+	AddJitRegionStage(plan, compiled_stage.stage, execution, ownership, node_index, node, DConstants::INVALID_INDEX,
+	                  BuildJitRegionCompiledStageReason(compiled_stage, node), compiled_stage.protocol,
+	                  compiled_stage.drain, compiled_stage.required_capability);
+}
+
+static bool AddJitRegionCompiledStages(JitRegionStagePlan &plan, const JitRegionIRNode &node, idx_t node_index) {
+	if (!node.compiled_contract.present) {
+		return false;
+	}
+	for (auto &compiled_stage : node.compiled_contract.stages) {
+		auto execution = compiled_stage.execution;
+		auto ownership = JitRegionOwnershipFromStageExecution(execution);
+		AddJitRegionCompiledStage(plan, compiled_stage, node_index, node, execution, ownership);
+	}
+	return true;
 }
 
 static string DescribeJitRegionStagePlan(const JitRegionStagePlan &plan) {
@@ -2314,6 +2328,10 @@ static string DescribeJitRegionStagePlan(const JitRegionStagePlan &plan) {
 		result += JitRegionStageExecutionKindToString(stage.execution);
 		result += ":";
 		result += JitRegionOwnershipKindToString(stage.ownership);
+		result += ":protocol=";
+		result += JitCompiledProtocolKindToString(stage.protocol);
+		result += ":drain=";
+		result += JitCompiledDrainKindToString(stage.drain);
 		result += "#node";
 		result += std::to_string(stage.node_index);
 		if (stage.operator_index != DConstants::INVALID_INDEX) {
@@ -2328,6 +2346,11 @@ static string DescribeJitRegionStagePlan(const JitRegionStagePlan &plan) {
 			result += "(";
 			result += stage.operator_name;
 			result += ")";
+		}
+		if (!stage.required_capability.empty()) {
+			result += "[capability=";
+			result += stage.required_capability;
+			result += "]";
 		}
 		if (!stage.reason.empty()) {
 			result += "{";
@@ -2349,9 +2372,24 @@ static JitRegionStagePlan BuildJitRegionStagePlan(const JitRegionIR &region_ir,
 		switch (node.kind) {
 		case JitRegionIRNodeKind::SOURCE: {
 			auto source_execution = GetJitRegionCandidateSourceExecution(candidate, node);
-			auto execution = JitRegionSourceStageExecution(node, candidate.contract, source_execution);
-			AddJitRegionStage(plan, JitRegionStageKind::SOURCE, execution, candidate.contract.source_ownership,
-			                  node_idx, node);
+			bool added_source_stage = false;
+			if (node.compiled_contract.present) {
+				for (auto &compiled_stage : node.compiled_contract.stages) {
+					if (compiled_stage.stage != JitRegionStageKind::SOURCE) {
+						continue;
+					}
+					auto execution = JitRegionSourceStageExecution(node, candidate.contract, source_execution);
+					auto ownership = JitRegionOwnershipFromStageExecution(execution);
+					AddJitRegionCompiledStage(plan, compiled_stage, node_idx, node, execution, ownership);
+					added_source_stage = true;
+				}
+			}
+			if (!added_source_stage) {
+				auto execution = JitRegionSourceStageExecution(node, candidate.contract, source_execution);
+				AddJitRegionStage(plan, JitRegionStageKind::SOURCE, execution,
+				                  JitRegionOwnershipFromStageExecution(execution), node_idx, node,
+				                  DConstants::INVALID_INDEX, node.fallback_reason);
+			}
 			if (node.source) {
 				for (idx_t filter_idx = 0; filter_idx < node.source->filters.size(); filter_idx++) {
 					auto &filter = node.source->filters[filter_idx];
@@ -2384,17 +2422,21 @@ static JitRegionStagePlan BuildJitRegionStagePlan(const JitRegionIR &region_ir,
 			                  node_idx, node, DConstants::INVALID_INDEX, node.fallback_reason);
 			break;
 		case JitRegionIRNodeKind::OPERATOR: {
-			auto ownership = JitRegionOperatorStageOwnership(node);
-			AddJitRegionStage(plan, JitRegionOperatorStageKind(node),
-			                  JitRegionStageExecutionFromOwnership(ownership), ownership, node_idx, node,
-			                  DConstants::INVALID_INDEX, node.fallback_reason);
+			if (!AddJitRegionCompiledStages(plan, node, node_idx)) {
+				AddJitRegionStage(plan, JitRegionStageKind::OPERATOR_BOUNDARY,
+				                  JitRegionStageExecutionKind::EXECUTOR_FALLBACK,
+				                  JitRegionOwnershipKind::EXECUTOR_BOUNDARY, node_idx, node,
+				                  DConstants::INVALID_INDEX, node.fallback_reason);
+			}
 			break;
 		}
 		case JitRegionIRNodeKind::SINK:
-			AddJitRegionStage(plan, JitRegionSinkStageKind(node),
-			                  JitRegionStageExecutionFromOwnership(candidate.contract.sink_ownership),
-			                  candidate.contract.sink_ownership, node_idx, node, DConstants::INVALID_INDEX,
-			                  node.fallback_reason);
+			if (!AddJitRegionCompiledStages(plan, node, node_idx)) {
+				AddJitRegionStage(plan, JitRegionStageKind::SINK_BOUNDARY,
+				                  JitRegionStageExecutionKind::EXECUTOR_FALLBACK,
+				                  JitRegionOwnershipKind::EXECUTOR_BOUNDARY, node_idx, node,
+				                  DConstants::INVALID_INDEX, node.fallback_reason);
+			}
 			break;
 		default:
 			break;

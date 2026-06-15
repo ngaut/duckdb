@@ -32,6 +32,9 @@ enum class JitCompiledDrainKind : uint8_t {
 	STATE_DRAIN
 };
 
+DUCKDB_API const char *JitCompiledProtocolKindToString(JitCompiledProtocolKind kind);
+DUCKDB_API const char *JitCompiledDrainKindToString(JitCompiledDrainKind kind);
+
 struct JitCompiledStageContract {
 	JitRegionStageKind stage = JitRegionStageKind::OPERATOR_BOUNDARY;
 	JitCompiledProtocolKind protocol = JitCompiledProtocolKind::NONE;

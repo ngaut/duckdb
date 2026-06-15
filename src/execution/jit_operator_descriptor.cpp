@@ -427,46 +427,6 @@ static vector<JitRegionProtocolField> BuildJitDescriptorProtocolFields(const str
 	return result;
 }
 
-static string JitCompiledProtocolKindName(JitCompiledProtocolKind protocol) {
-	switch (protocol) {
-	case JitCompiledProtocolKind::SCAN_CURSOR:
-		return "scan_cursor";
-	case JitCompiledProtocolKind::FILTER_STAGE:
-		return "filter_stage";
-	case JitCompiledProtocolKind::PROJECTION_STAGE:
-		return "projection_stage";
-	case JitCompiledProtocolKind::HASH_JOIN_BUILD:
-		return "hash_join_build";
-	case JitCompiledProtocolKind::HASH_JOIN_PROBE_CURSOR:
-		return "hash_join_probe_cursor";
-	case JitCompiledProtocolKind::AGGREGATE_LOOKUP:
-		return "aggregate_lookup";
-	case JitCompiledProtocolKind::AGGREGATE_UPDATE:
-		return "aggregate_update";
-	case JitCompiledProtocolKind::SINK_CURSOR:
-		return "sink_cursor";
-	case JitCompiledProtocolKind::STATE_SCAN_CURSOR:
-		return "state_scan_cursor";
-	default:
-		return "none";
-	}
-}
-
-static string JitCompiledDrainKindName(JitCompiledDrainKind drain) {
-	switch (drain) {
-	case JitCompiledDrainKind::ONE_INPUT_ONE_OUTPUT:
-		return "one_input_one_output";
-	case JitCompiledDrainKind::ZERO_OR_ONE_OUTPUT:
-		return "zero_or_one_output";
-	case JitCompiledDrainKind::ZERO_OR_MANY_OUTPUT:
-		return "zero_or_many_output";
-	case JitCompiledDrainKind::STATE_DRAIN:
-		return "state_drain";
-	default:
-		return "none";
-	}
-}
-
 static JitRegionStageExecutionKind JitCompiledSourceExecution(JitRegionSourceExecutionKind execution) {
 	switch (execution) {
 	case JitRegionSourceExecutionKind::NATIVE_SOURCE:
@@ -632,9 +592,9 @@ static string BuildJitCompiledContractIR(const JitCompiledOperatorContract &cont
 	for (idx_t stage_idx = 0; stage_idx < contract.stages.size(); stage_idx++) {
 		auto &stage = contract.stages[stage_idx];
 		result += ",stage" + std::to_string(stage_idx) + "=<protocol=" +
-		          JitCompiledProtocolKindName(stage.protocol);
+		          string(JitCompiledProtocolKindToString(stage.protocol));
 		result += ",execution=" + string(JitRegionStageExecutionKindToString(stage.execution));
-		result += ",drain=" + JitCompiledDrainKindName(stage.drain);
+		result += ",drain=" + string(JitCompiledDrainKindToString(stage.drain));
 		if (!stage.required_capability.empty()) {
 			result += ",capability=" + stage.required_capability;
 		}

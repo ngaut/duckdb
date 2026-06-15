@@ -263,11 +263,12 @@ static bool SljitNativeRegionHasGenericExecutableLoop(const SljitNativeRegionPla
 }
 
 static JitRegionExecutionForm ClassifySljitRegionExecutionForm(const SljitNativeRegionPlan &region,
-                                                               const JitRegionContract &contract) {
+                                                               const JitRegionContract &contract,
+                                                               const JitRegionStagePlan &core_stage_plan) {
 	if (!contract.native_fusion_ready) {
 		return JitRegionExecutionForm::NONE;
 	}
-	auto stage_region = BuildSljitOperatorStageRegionPlan(region, contract);
+	auto stage_region = BuildSljitOperatorStageRegionPlan(region, contract, core_stage_plan);
 	if (stage_region.HasExecutableBody()) {
 		return JitRegionExecutionForm::FUSED;
 	}
@@ -530,9 +531,10 @@ string BuildSljitRegionCandidateContextShapeKey(const JitRegionCandidate &candid
 	return shape_key + ":context:" + candidate.signature.context_feature_shape;
 }
 
-static string BuildSljitRegionShapeKey(const SljitNativeRegionPlan &region, const JitRegionContract &contract) {
+static string BuildSljitRegionShapeKey(const SljitNativeRegionPlan &region, const JitRegionContract &contract,
+                                       const JitRegionStagePlan &core_stage_plan) {
 	const auto context = SljitRegionCandidateContext(contract);
-	auto stage_region = BuildSljitOperatorStageRegionPlan(region, contract);
+	auto stage_region = BuildSljitOperatorStageRegionPlan(region, contract, core_stage_plan);
 	if (stage_region.HasImplementedKernel()) {
 		return stage_region.shape_key;
 	}
@@ -2665,7 +2667,7 @@ SljitRegionPlan BuildSljitRegionPlan(const JitRegionIR &region_ir, const JitRegi
 		native_region->native_source = requires_native_source;
 		FuseAdjacentNativeProjections(*native_region);
 		MarkRuntimeFusedFilterProjections(*native_region);
-		auto stage_plan = BuildSljitOperatorStageRegionPlan(*native_region, contract);
+		auto stage_plan = BuildSljitOperatorStageRegionPlan(*native_region, contract, candidate.stage_plan);
 		if (stage_plan.IsValid()) {
 			auto stage_ir = candidate.stage_plan.ir;
 			if (!stage_ir.empty()) {
@@ -2686,14 +2688,15 @@ SljitRegionPlan BuildSljitRegionPlan(const JitRegionIR &region_ir, const JitRegi
 			plan.lowering_plan.AddFusionBlocker(
 			    "source-fusion-gap:requires-native-source;source_execution=duckdb-getdata-helper");
 		}
-		auto execution_form = ClassifySljitRegionExecutionForm(*native_region, contract);
+		auto execution_form = ClassifySljitRegionExecutionForm(*native_region, contract, candidate.stage_plan);
 		if (execution_form != JitRegionExecutionForm::NONE) {
 			plan.lowering_plan.SetOwnsSourceFilters(owns_source_filters);
 			plan.lowering_plan.SetRegionExecutionForm(execution_form);
 			if (!source_helper) {
 				plan.backend_plan->native_region = std::move(native_region);
 				plan.lowering_plan.SetCompiledExecutionMode(JitExecutionMode::NATIVE);
-				plan.lowering_plan.shape_key = BuildSljitRegionShapeKey(*plan.backend_plan->native_region, contract);
+				plan.lowering_plan.shape_key =
+				    BuildSljitRegionShapeKey(*plan.backend_plan->native_region, contract, candidate.stage_plan);
 				if (JitRegionABIIsSourcePipeline(contract.abi) && candidate.traits.has_table_scan_source &&
 				    candidate.traits.source_execution == JitRegionSourceExecutionKind::NATIVE_SOURCE &&
 				    candidate.traits.source_filter_count > 0 &&
@@ -3188,95 +3191,9 @@ bool CanFuseNativePerfectHashAggregateRegion(const SljitNativeRegionPlan &region
 	return true;
 }
 
-static SljitOperatorStageKind OperatorStageKind(SljitNativeRegionOpKind kind) {
-	switch (kind) {
-	case SljitNativeRegionOpKind::FILTER:
-		return SljitOperatorStageKind::FILTER;
-	case SljitNativeRegionOpKind::PROJECTION:
-		return SljitOperatorStageKind::PROJECTION;
-	case SljitNativeRegionOpKind::HASH_JOIN_PROBE:
-		return SljitOperatorStageKind::HASH_JOIN_PROBE;
-	case SljitNativeRegionOpKind::HASH_JOIN_BUILD:
-		return SljitOperatorStageKind::HASH_JOIN_BUILD;
-	case SljitNativeRegionOpKind::HASH_AGGREGATE_UPDATE:
-		return SljitOperatorStageKind::HASH_AGGREGATE_UPDATE;
-	case SljitNativeRegionOpKind::PERFECT_HASH_AGGREGATE_UPDATE:
-		return SljitOperatorStageKind::PERFECT_HASH_AGGREGATE_UPDATE;
-	case SljitNativeRegionOpKind::UNGROUPED_AGGREGATE_UPDATE:
-		return SljitOperatorStageKind::UNGROUPED_AGGREGATE_UPDATE;
-	default:
-		throw InternalException("Unsupported SLJIT native region op kind in operator-aware fused plan");
-	}
-}
-
-static const char *OperatorStageKindToString(SljitOperatorStageKind kind) {
-	switch (kind) {
-	case SljitOperatorStageKind::SOURCE:
-		return "source";
-	case SljitOperatorStageKind::SOURCE_FILTER:
-		return "source-filter";
-	case SljitOperatorStageKind::FILTER:
-		return "filter";
-	case SljitOperatorStageKind::PROJECTION:
-		return "projection";
-	case SljitOperatorStageKind::HASH_JOIN_PROBE:
-		return "hash-join-probe";
-	case SljitOperatorStageKind::HASH_JOIN_BUILD:
-		return "hash-join-build";
-	case SljitOperatorStageKind::HASH_AGGREGATE_UPDATE:
-		return "hash-aggregate-update";
-	case SljitOperatorStageKind::PERFECT_HASH_AGGREGATE_UPDATE:
-		return "perfect-hash-aggregate-update";
-	case SljitOperatorStageKind::UNGROUPED_AGGREGATE_UPDATE:
-		return "ungrouped-aggregate-update";
-	default:
-		return "unknown";
-	}
-}
-
-static const char *SljitSourceFilterExecutionKindToString(SljitSourceFilterExecutionKind kind) {
-	switch (kind) {
-	case SljitSourceFilterExecutionKind::NONE:
-		return "none";
-	case SljitSourceFilterExecutionKind::DUCKDB_SCAN:
-		return "duckdb-scan";
-	case SljitSourceFilterExecutionKind::DUCKDB_SOURCE_HELPER:
-		return "duckdb-source-helper";
-	case SljitSourceFilterExecutionKind::GENERATED_REGION:
-		return "generated";
-	default:
-		return "unknown";
-	}
-}
-
-static void AppendOperatorStages(SljitOperatorStageRegionPlan &result,
-                                           const SljitNativeRegionPlan &region) {
-	if (result.owns_source || result.native_source) {
-		SljitOperatorStage source_stage;
-		source_stage.kind = SljitOperatorStageKind::SOURCE;
-		source_stage.native = result.native_source;
-		source_stage.execution = result.native_source ? "native" : "helper";
-		result.stages.push_back(source_stage);
-	}
-	for (idx_t filter_idx = 0; filter_idx < region.source_filter_count; filter_idx++) {
-		SljitOperatorStage filter_stage;
-		filter_stage.kind = SljitOperatorStageKind::SOURCE_FILTER;
-		filter_stage.filter_index = filter_idx;
-		filter_stage.native = region.source_filter_execution == SljitSourceFilterExecutionKind::GENERATED_REGION;
-		filter_stage.execution = SljitSourceFilterExecutionKindToString(region.source_filter_execution);
-		result.stages.push_back(filter_stage);
-	}
-	for (idx_t op_idx = 0; op_idx < region.ops.size(); op_idx++) {
-		auto &op = region.ops[op_idx];
-		SljitOperatorStage stage;
-		stage.kind = OperatorStageKind(op.kind);
-		stage.op_index = op.operator_index;
-		stage.native = SljitNativeRegionOpGeneratesCode(op) || SljitNativeRegionOpIsNativeSink(op);
-		stage.execution = SljitNativeRegionOpGeneratesCode(op) ? "native"
-		                                                       : SljitNativeRegionOpIsNativeSink(op) ? "native-protocol"
-		                                                                                             : "pass";
-		result.stages.push_back(stage);
-	}
+static void AppendCoreOperatorStages(SljitOperatorStageRegionPlan &result,
+                                     const JitRegionStagePlan &core_stage_plan) {
+	result.stages = core_stage_plan.stages;
 }
 
 static string DescribeOperatorStageRegion(const SljitOperatorStageRegionPlan &plan) {
@@ -3295,10 +3212,17 @@ static string DescribeOperatorStageRegion(const SljitOperatorStageRegionPlan &pl
 		if (stage_idx > 0) {
 			result += "|";
 		}
-		result += OperatorStageKindToString(stage.kind);
-		result += ":" + stage.execution;
-		if (stage.op_index != DConstants::INVALID_INDEX) {
-			result += "#" + std::to_string(stage.op_index);
+		result += JitRegionStageKindToString(stage.kind);
+		result += ":";
+		result += JitRegionStageExecutionKindToString(stage.execution);
+		result += ":";
+		result += JitRegionOwnershipKindToString(stage.ownership);
+		result += ":protocol=";
+		result += JitCompiledProtocolKindToString(stage.protocol);
+		result += ":drain=";
+		result += JitCompiledDrainKindToString(stage.drain);
+		if (stage.operator_index != DConstants::INVALID_INDEX) {
+			result += "#" + std::to_string(stage.operator_index);
 		}
 		if (stage.filter_index != DConstants::INVALID_INDEX) {
 			result += "#" + std::to_string(stage.filter_index);
@@ -3309,14 +3233,16 @@ static string DescribeOperatorStageRegion(const SljitOperatorStageRegionPlan &pl
 }
 
 SljitOperatorStageRegionPlan BuildSljitOperatorStageRegionPlan(const SljitNativeRegionPlan &region,
-                                                                         const JitRegionContract &contract) {
+                                                               const JitRegionContract &contract,
+                                                               const JitRegionStagePlan &core_stage_plan) {
 	SljitOperatorStageRegionPlan result;
 	result.native_source = region.native_source;
 	result.owns_source = JitRegionABIOwnsSource(contract.abi);
 	result.owns_transform = contract.owns_transform;
 	result.owns_sink = JitRegionABIOwnsSink(contract.abi);
 	const auto context = SljitRegionCandidateContext(contract);
-	if (!region.ops.empty() || result.owns_source || region.source_filter_count > 0 || result.owns_sink) {
+	if (core_stage_plan.HasStages() || !region.ops.empty() || result.owns_source || region.source_filter_count > 0 ||
+	    result.owns_sink) {
 		result.stage_plan_valid = true;
 		result.shape_key = "sljit:" + context + ":operator-stage:" + DescribeNativeRegionShape(region);
 		result.kernel_blocker = SljitNativeRegionCodegenFusionBlocker(region);
@@ -3359,7 +3285,7 @@ SljitOperatorStageRegionPlan BuildSljitOperatorStageRegionPlan(const SljitNative
 	if (!result.IsValid()) {
 		return result;
 	}
-	AppendOperatorStages(result, region);
+	AppendCoreOperatorStages(result, core_stage_plan);
 	result.stage_ir = DescribeOperatorStageRegion(result);
 	return result;
 }

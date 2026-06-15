@@ -367,10 +367,13 @@ struct JitRegionStage {
 	JitRegionStageKind kind = JitRegionStageKind::OPERATOR_BOUNDARY;
 	JitRegionStageExecutionKind execution = JitRegionStageExecutionKind::NONE;
 	JitRegionOwnershipKind ownership = JitRegionOwnershipKind::NONE;
+	JitCompiledProtocolKind protocol = JitCompiledProtocolKind::NONE;
+	JitCompiledDrainKind drain = JitCompiledDrainKind::NONE;
 	idx_t node_index = DConstants::INVALID_INDEX;
 	idx_t operator_index = DConstants::INVALID_INDEX;
 	idx_t filter_index = DConstants::INVALID_INDEX;
 	string operator_name;
+	string required_capability;
 	string reason;
 };
 

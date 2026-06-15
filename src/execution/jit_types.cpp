@@ -416,6 +416,46 @@ const char *JitRegionStageExecutionKindToString(JitRegionStageExecutionKind kind
 	}
 }
 
+const char *JitCompiledProtocolKindToString(JitCompiledProtocolKind kind) {
+	switch (kind) {
+	case JitCompiledProtocolKind::SCAN_CURSOR:
+		return "scan_cursor";
+	case JitCompiledProtocolKind::FILTER_STAGE:
+		return "filter_stage";
+	case JitCompiledProtocolKind::PROJECTION_STAGE:
+		return "projection_stage";
+	case JitCompiledProtocolKind::HASH_JOIN_BUILD:
+		return "hash_join_build";
+	case JitCompiledProtocolKind::HASH_JOIN_PROBE_CURSOR:
+		return "hash_join_probe_cursor";
+	case JitCompiledProtocolKind::AGGREGATE_LOOKUP:
+		return "aggregate_lookup";
+	case JitCompiledProtocolKind::AGGREGATE_UPDATE:
+		return "aggregate_update";
+	case JitCompiledProtocolKind::SINK_CURSOR:
+		return "sink_cursor";
+	case JitCompiledProtocolKind::STATE_SCAN_CURSOR:
+		return "state_scan_cursor";
+	default:
+		return "none";
+	}
+}
+
+const char *JitCompiledDrainKindToString(JitCompiledDrainKind kind) {
+	switch (kind) {
+	case JitCompiledDrainKind::ONE_INPUT_ONE_OUTPUT:
+		return "one_input_one_output";
+	case JitCompiledDrainKind::ZERO_OR_ONE_OUTPUT:
+		return "zero_or_one_output";
+	case JitCompiledDrainKind::ZERO_OR_MANY_OUTPUT:
+		return "zero_or_many_output";
+	case JitCompiledDrainKind::STATE_DRAIN:
+		return "state_drain";
+	default:
+		return "none";
+	}
+}
+
 const char *JitPolicyModeToString(JitPolicyMode mode) {
 	switch (mode) {
 	case JitPolicyMode::AUTO:

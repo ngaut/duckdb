@@ -186,7 +186,8 @@ JitRegionCompileResult CompileSljitRegion(const string &backend_name, const JitR
 		if (native_region->native_source) {
 			reason += ";source-execution:native-source";
 		}
-		auto stage_plan = BuildSljitOperatorStageRegionPlan(*native_region, contract);
+		auto stage_plan =
+		    BuildSljitOperatorStageRegionPlan(*native_region, contract, input.candidate.stage_plan);
 		if (stage_plan.HasImplementedKernel()) {
 			string kernel_ir;
 			auto stage_region = CopySljitNativeRegion(*native_region);
