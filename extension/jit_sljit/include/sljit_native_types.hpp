@@ -171,6 +171,7 @@ struct SljitNativeHashJoinProbeInput {
 	const data_ptr_t *aux_next_ptrs = nullptr;
 	sel_t *match_sel = nullptr;
 	data_ptr_t *row_pointers = nullptr;
+	idx_t output_capacity = 0;
 	idx_t selected_count = 0;
 	idx_t input_offset = 0;
 	data_ptr_t resume_row_pointer = nullptr;

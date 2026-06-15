@@ -28,7 +28,6 @@ struct JitNativeHashJoinTableLayout {
 	bool dictionary_emission = false;
 	bool can_have_null = false;
 	bool use_salt = false;
-	bool single_match_probe = false;
 	bool null_keys_are_filtered = false;
 	idx_t condition_count = 0;
 	vector<LogicalType> condition_types;

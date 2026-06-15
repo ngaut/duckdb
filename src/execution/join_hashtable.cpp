@@ -405,7 +405,6 @@ bool JoinHashTable::GetJitNativeHashJoinTableLayout(JitNativeHashJoinTableLayout
 		layout.blocker = "hash-join-native-residual-predicate";
 		return false;
 	}
-	layout.single_match_probe = !layout.chains_longer_than_one;
 	layout.ready = true;
 	layout.blocker = "none";
 	return true;

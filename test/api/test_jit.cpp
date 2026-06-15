@@ -3383,7 +3383,7 @@ TEST_CASE("JIT hash join build append protocol supports multi-key reference buil
 	REQUIRE(found_multi_key_build_contract);
 }
 
-TEST_CASE("JIT hash join probe keeps non-equality predicates behind explicit chain protocol blocker", "[api][jit]") {
+TEST_CASE("JIT hash join probe natively drains non-equality duplicate chains", "[api][jit]") {
 	DuckDB db;
 	Connection con(db);
 	auto &context = *con.context;
@@ -3409,24 +3409,28 @@ TEST_CASE("JIT hash join probe keeps non-equality predicates behind explicit cha
 	REQUIRE(result->GetValue(0, 0).ToString() == "6");
 	REQUIRE(result->GetValue(1, 0).ToString() == "71");
 
-	bool found_non_equality_probe_blocker = false;
+	bool found_non_equality_native_probe = false;
+	bool found_runtime = false;
 	for (auto &event : manager.GetEvents()) {
 		if (event.target != "region") {
 			continue;
 		}
-		if (StringUtil::Contains(event.reason, "non_equality_condition_count=1")) {
-			REQUIRE_FALSE((event.status == "compiled" &&
-			               StringUtil::Contains(event.reason, JIT_HASH_JOIN_PROBE_EXECUTABLE_REASON)));
+		if (event.status == "compiled" && event.execution_mode == "native" &&
+		    StringUtil::Contains(event.reason, "non_equality_condition_count=1") &&
+		    StringUtil::Contains(event.reason, JIT_HASH_JOIN_PROBE_EXECUTABLE_REASON)) {
+			found_non_equality_native_probe = true;
+			REQUIRE(StringUtil::Contains(event.reason, "native_probe_output_mode=matched_probe_and_build"));
+			REQUIRE(StringUtil::Contains(event.ir, "hash_join_probe(hash_keys=1,conditions="));
+			REQUIRE(StringUtil::Contains(event.ir, "predicate1<input_index="));
+			REQUIRE(StringUtil::Contains(event.ir, "comparison=notequal"));
 		}
-		if (StringUtil::Contains(event.reason, "hash-join-native-non-equality-chain-protocol-missing")) {
-			found_non_equality_probe_blocker = true;
-			REQUIRE_FALSE(StringUtil::Contains(event.reason, JIT_HASH_JOIN_PROBE_EXECUTABLE_REASON));
+		if (event.phase == "runtime" && event.status == "executed" && event.execution_mode == "native" &&
+		    StringUtil::Contains(event.reason, "full pipeline kernel executed") && event.input_rows > 0) {
+			found_runtime = true;
 		}
-		REQUIRE_FALSE(StringUtil::Contains(event.reason,
-		                                   "hash-join-native-runtime-non-equality-chain-protocol-missing"));
-		REQUIRE(event.status != string("de") + "clined");
 	}
-	REQUIRE(found_non_equality_probe_blocker);
+	REQUIRE(found_non_equality_native_probe);
+	REQUIRE(found_runtime);
 }
 
 TEST_CASE("JIT hash join native protocols own correlated mark state", "[api][jit]") {

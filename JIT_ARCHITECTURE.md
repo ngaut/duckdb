@@ -1935,7 +1935,7 @@ tuple. RIGHT_SEMI uses `mark_build_only`: the generated probe owns key matching,
 marks the matching build-side tuple chain, returns no rows from the probe
 operator, and leaves row production to the hash-join native state-scan source.
 MARK uses `mark_probe`, so marker output is owned by the native probe protocol
-rather than by a whole executor fallback. FULL, LEFT, ANTI, and RIGHT_ANTI are
+without an executor-owned join path. FULL, LEFT, ANTI, and RIGHT_ANTI are
 not folded into that path until they have explicit unmatched-side protocols.
 SLJIT also creates a hash-join build native sink op for build-append-ready shapes
 through the core `JitNativeHashJoinBuildBinding` contract. Remaining misses are
@@ -1945,15 +1945,20 @@ Hash-join build append is not limited to one primitive key. Once core proves the
 build keys are bound references and the join has an equality hash prefix without
 a whole-operator boundary, the native build protocol may reference multiple key
 columns and any key type that DuckDB's normal hash-table build path already
-supports. Typed non-equality match predicates remain behind an explicit
-`hash-join-native-non-equality-chain-protocol-missing` blocker until the native
-probe has a chain-drain output protocol that can emit multiple build matches per
-probe row and resume when the output vector fills. Residual predicates remain
-blocked until they are represented as typed residual expression IR. Correlated
-MARK joins use the same build append protocol: the narrow `JoinHashTable::Build`
-contract owns both the tuple append and the correlated grouped count update, so
-the region planner does not need a separate correlated-MARK sink shape. MARK
-probe output is a native probe output mode, not a separate executor fallback.
+supports. Typed non-equality match predicates are handled by the native
+chain-drain/resume protocol for matched output modes. The generated probe
+separates equality-key misses from typed match-predicate misses: equality misses
+continue DuckDB's open-addressing table probe, while predicate misses follow the
+duplicate tuple chain with DuckDB's dictionary/direct next-pointer semantics.
+`matched_probe_and_build` emits every matching build tuple and pauses with an
+explicit resume row pointer when the output vector fills. `matched_probe_only`
+uses the same chain walk for existence and emits each probe row at most once.
+Residual predicates remain blocked until they are represented as typed residual
+expression IR. Correlated MARK joins use the same build append protocol: the
+narrow `JoinHashTable::Build` contract owns both the tuple append and the
+correlated grouped count update, so the region planner does not need a separate
+correlated-MARK sink shape. MARK probe output is a native probe output mode, not
+a separate executor fallback.
 The stateful hash-join source scan is
 a separate native state-scan protocol when core can iterate already-built join
 state as a source. This keeps hash join work anchored to explicit DuckDB
@@ -1963,16 +1968,15 @@ executor call mislabeled as native.
 Hash join runtime state is exposed through core JIT contracts, not through
 physical operator internals. `join_runtime.hpp` exports the finalized table
 entries, bitmask, row layout offsets, tuple/pointer offsets, dictionary
-next-pointer metadata, salt usage, null policy, chain/resume status, and a
-`single_match_probe` fact. Layout readiness
+next-pointer metadata, salt usage, null policy, and chain/resume status. Layout readiness
 means the pointer table is addressable by generated code; it does not mean every
 output protocol can consume that layout. SEMI's `matched_probe_only` mode may use
 a chained table for existence probing because the generated kernel only needs to
 select matching probe rows. INNER and RIGHT `matched_probe_and_build` still
-require `single_match_probe=true` until a resumable chained-match output protocol
-exists, because those modes must emit every matching build row, not just prove
-that one exists. RIGHT_SEMI `mark_build_only` does not emit matched rows and can
-therefore consume chained duplicate-key layouts by following the tuple next
+consume chained tables through the chain-drain/resume protocol, because those
+modes must emit every matching build row, not just prove that one exists.
+RIGHT_SEMI `mark_build_only` does not emit matched rows and can therefore consume
+chained duplicate-key layouts by following the tuple next
 pointer, or the exported dictionary next-pointer array when dictionary emission
 has repurposed the tuple pointer slot. Dictionary emission is likewise a
 materialization fact, not a probe-readiness blocker: generated probes still

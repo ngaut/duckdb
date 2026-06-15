@@ -1897,13 +1897,10 @@ bool PhysicalHashJoin::BindJitNativeOperator(ExecutionContext &context, DataChun
 		                                               : table_layout.blocker;
 		return false;
 	}
-	if (protocol.non_equality_condition_count != 0) {
-		binding.blocker = "hash-join-native-runtime-non-equality-protocol-invariant";
-		return false;
-	}
-	if (!table_layout.single_match_probe &&
-	    protocol.native_probe_output_mode == JitRegionHashJoinProbeOutputMode::MATCHED_PROBE_AND_BUILD) {
-		binding.blocker = "hash-join-native-runtime-resumable-chain-protocol-missing";
+	if (protocol.non_equality_condition_count != 0 &&
+	    protocol.native_probe_output_mode != JitRegionHashJoinProbeOutputMode::MATCHED_PROBE_AND_BUILD &&
+	    protocol.native_probe_output_mode != JitRegionHashJoinProbeOutputMode::MATCHED_PROBE_ONLY) {
+		binding.blocker = "hash-join-native-runtime-non-equality-output-mode-protocol-invariant";
 		return false;
 	}
 	if (table_layout.dictionary_emission && table_layout.chains_longer_than_one && !table_layout.aux_next_ptrs &&

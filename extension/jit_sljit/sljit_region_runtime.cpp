@@ -952,6 +952,7 @@ private:
 		native_input.aux_next_ptrs = layout.aux_next_ptrs;
 		native_input.match_sel = match_selection.data();
 		native_input.row_pointers = row_pointer_data;
+		native_input.output_capacity = STANDARD_VECTOR_SIZE;
 		native_input.selected_count = 0;
 		native_input.input_offset = state.input_offset;
 		native_input.resume_row_pointer = state.resume_row_pointer;

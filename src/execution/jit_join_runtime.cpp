@@ -55,7 +55,6 @@ string DescribeJitNativeHashJoinTableLayout(const JitNativeHashJoinTableLayout &
 	result += ",dictionary_emission=" + JitNativeHashJoinBool(layout.dictionary_emission);
 	result += ",can_have_null=" + JitNativeHashJoinBool(layout.can_have_null);
 	result += ",use_salt=" + JitNativeHashJoinBool(layout.use_salt);
-	result += ",single_match_probe=" + JitNativeHashJoinBool(layout.single_match_probe);
 	result += ",null_keys_are_filtered=" + JitNativeHashJoinBool(layout.null_keys_are_filtered);
 	result += ",condition_count=" + std::to_string(layout.condition_count);
 	result += ",condition_types=" + JitNativeHashJoinTypeList(layout.condition_types);
