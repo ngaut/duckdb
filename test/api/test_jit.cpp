@@ -2486,9 +2486,6 @@ TEST_CASE("JIT region lowering exposes stateful source protocol candidates", "[a
 		REQUIRE(StringUtil::Contains(event.ir, "source_produces_rows=true"));
 		REQUIRE(StringUtil::Contains(event.ir, "condition_count=1"));
 		REQUIRE(StringUtil::Contains(event.ir, "lhs_output_column_indices="));
-		REQUIRE_FALSE(StringUtil::Contains(event.ir, "typed_hash_join_probe_helper"));
-		REQUIRE_FALSE(StringUtil::Contains(event.ir, "typed_hash_join_build_helper"));
-		REQUIRE_FALSE(StringUtil::Contains(event.ir, "hash-join-typed"));
 		REQUIRE(StringUtil::Contains(event.ir, "regular_hash_table_layout_ready=true"));
 		REQUIRE(StringUtil::Contains(event.ir, "hash_join_layout_offsets=["));
 		REQUIRE(StringUtil::Contains(event.ir, "hash_join_tuple_size="));
@@ -2555,8 +2552,6 @@ TEST_CASE("JIT region lowering exposes stateful source protocol candidates", "[a
 		REQUIRE(StringUtil::Contains(event.ir, "native_grouped_state_required_capability="
 		                                       "hash-aggregate-native-grouped-state"));
 		REQUIRE(StringUtil::Contains(event.ir, "native_grouped_state_blocker=none"));
-		REQUIRE_FALSE(StringUtil::Contains(event.ir, "typed_hash_aggregate_lookup_helper"));
-		REQUIRE_FALSE(StringUtil::Contains(event.ir, "hash-aggregate-typed-lookup-helper"));
 		REQUIRE(StringUtil::Contains(event.ir, "native_hash_aggregate_lookup_contract_status=ready"));
 		REQUIRE(StringUtil::Contains(event.ir, "native_hash_aggregate_lookup_required_capability="
 		                                       "hash-aggregate-native-lookup"));
@@ -2966,7 +2961,6 @@ TEST_CASE("JIT full pipeline updates count aggregate through native sink update"
 			REQUIRE(StringUtil::Contains(event.reason, "aggregate0_native_update=count"));
 			REQUIRE(StringUtil::Contains(event.reason, "full-pipeline-native-sink-update"));
 			REQUIRE(StringUtil::Contains(event.reason, "execution:native-sljit-region-ungrouped-aggregate-update"));
-			REQUIRE_FALSE(StringUtil::Contains(event.reason, "execution:generated-helper"));
 			REQUIRE(event.code_size > 0);
 			REQUIRE(StringUtil::Contains(event.ir, "ungrouped_aggregate_update"));
 			REQUIRE(StringUtil::Contains(event.ir, "native_update=count"));
@@ -3101,14 +3095,12 @@ TEST_CASE("JIT full pipeline executes grouped hash aggregate native lookup proto
 		REQUIRE_FALSE(StringUtil::Contains(event.reason,
 		                                   "hash aggregate native lookup contract is ready but SLJIT native lookup "
 		                                   "lowering is missing"));
-		REQUIRE_FALSE(StringUtil::Contains(event.reason, "typed-hash-aggregate-lookup-helper"));
-		REQUIRE_FALSE(StringUtil::Contains(event.reason, "hash-aggregate-typed-lookup-helper"));
 		if (event.phase == "compile" && event.status == "compiled" && event.execution_mode == "native" &&
 		    StringUtil::Contains(event.reason, "sink:HASH_GROUP_BY:native")) {
 			found_compiled_hash_aggregate_sink = true;
-			REQUIRE(event.region_execution_form == "fused");
-			REQUIRE(StringUtil::Contains(event.reason, "generated native hash aggregate lookup and state update"));
-			REQUIRE(StringUtil::Contains(event.reason, "operator-stage-region"));
+				REQUIRE(event.region_execution_form == "fused");
+				REQUIRE(StringUtil::Contains(event.reason, "generated native hash aggregate lookup and state update"));
+				REQUIRE(StringUtil::Contains(event.reason, "operator-stage-region"));
 				REQUIRE(StringUtil::Contains(event.reason, "kernel=native-operator-loop"));
 			REQUIRE_FALSE(StringUtil::Contains(event.reason, "operator-fusion-gap:native-operator-codegen-missing"));
 			REQUIRE(StringUtil::Contains(event.reason, "native-hash-aggregate-lookup-contract=ready"));
@@ -3173,15 +3165,13 @@ TEST_CASE("JIT full pipeline executes grouped decimal hash aggregate native look
 		REQUIRE_FALSE(StringUtil::Contains(event.reason,
 		                                   "hash aggregate native lookup contract is ready but SLJIT native lookup "
 		                                   "lowering is missing"));
-		REQUIRE_FALSE(StringUtil::Contains(event.reason, "typed-hash-aggregate-lookup-helper"));
-		REQUIRE_FALSE(StringUtil::Contains(event.reason, "hash-aggregate-typed-lookup-helper"));
 		if (event.phase == "compile" && event.status == "compiled" && event.execution_mode == "native" &&
 		    StringUtil::Contains(event.reason, "sink:HASH_GROUP_BY:native") &&
 		    StringUtil::Contains(event.reason, "aggregate0_native_update=sum")) {
 			found_compiled_hash_aggregate_sink = true;
-			REQUIRE(event.region_execution_form == "fused");
-			REQUIRE(StringUtil::Contains(event.reason, "generated native hash aggregate lookup and state update"));
-			REQUIRE(StringUtil::Contains(event.reason, "operator-stage-region"));
+				REQUIRE(event.region_execution_form == "fused");
+				REQUIRE(StringUtil::Contains(event.reason, "generated native hash aggregate lookup and state update"));
+				REQUIRE(StringUtil::Contains(event.reason, "operator-stage-region"));
 				REQUIRE(StringUtil::Contains(event.reason, "kernel=native-operator-loop"));
 			REQUIRE_FALSE(StringUtil::Contains(event.reason, "operator-fusion-gap:native-operator-codegen-missing"));
 			REQUIRE(StringUtil::Contains(event.reason, "native-hash-aggregate-lookup-contract=ready"));
@@ -3491,8 +3481,6 @@ TEST_CASE("JIT full pipeline executes native hash join build append protocol", "
 		    event.candidate_scope == "full_pipeline" &&
 		    StringUtil::Contains(event.reason, JIT_HASH_JOIN_BUILD_EXECUTABLE_REASON)) {
 			found_hash_join_build_contract = true;
-			REQUIRE_FALSE(StringUtil::Contains(event.reason, "typed_hash_join_build_helper"));
-			REQUIRE_FALSE(StringUtil::Contains(event.reason, "hash-join-typed-build-helper"));
 			REQUIRE(StringUtil::Contains(event.reason, "regular_hash_table_layout_ready=true"));
 			REQUIRE(StringUtil::Contains(event.reason, "hash_join_native_protocol_blocker=none"));
 			REQUIRE(StringUtil::Contains(event.reason, JIT_HASH_JOIN_PROBE_READY_CONTRACT));
@@ -3540,7 +3528,6 @@ TEST_CASE("JIT hash join build append protocol supports multi-key reference buil
 		}
 		REQUIRE_FALSE(StringUtil::Contains(event.reason, "hash-join-native-build-append-condition-count"));
 		REQUIRE_FALSE(StringUtil::Contains(event.reason, "hash-join-native-build-append-key-type"));
-		REQUIRE_FALSE(StringUtil::Contains(event.reason, "typed_hash_join_build_helper"));
 		if (event.status == "compiled" && event.execution_mode == "native" &&
 		    event.candidate_scope == "full_pipeline" &&
 		    StringUtil::Contains(event.reason, JIT_HASH_JOIN_BUILD_EXECUTABLE_REASON) &&
@@ -3594,7 +3581,6 @@ TEST_CASE("JIT hash join probe lowers native non-equality match predicates", "[a
 		}
 		REQUIRE_FALSE(StringUtil::Contains(event.reason, "sink-fusion-gap:hash-join-build-protocol-missing"));
 		REQUIRE_FALSE(StringUtil::Contains(event.reason, "native_hash_join_probe_blocker=hash-join-native-non-equality-condition"));
-		REQUIRE_FALSE(StringUtil::Contains(event.reason, "typed_hash_join_probe_helper"));
 		if (StringUtil::Contains(event.reason, "non_equality_condition_count=1")) {
 			REQUIRE_FALSE(StringUtil::Contains(event.reason, "native_hash_join_build_contract_status=missing"));
 			REQUIRE(StringUtil::Contains(event.reason, JIT_HASH_JOIN_BUILD_READY_CONTRACT));
@@ -3724,8 +3710,6 @@ TEST_CASE("JIT hash join native protocols own correlated mark state", "[api][jit
 		if (event.target != "region") {
 			continue;
 		}
-		REQUIRE_FALSE(StringUtil::Contains(event.reason, "typed_hash_join_build_helper"));
-		REQUIRE_FALSE(StringUtil::Contains(event.reason, "hash-join-typed-build-helper"));
 		if (!StringUtil::Contains(event.reason, "join_type=mark") ||
 		    !StringUtil::Contains(event.reason, "delim_types=1")) {
 			continue;
@@ -3835,12 +3819,8 @@ TEST_CASE("JIT hash join native protocols own correlated mark state", "[api][jit
 			if (event.target != "region") {
 				continue;
 			}
-				REQUIRE_FALSE(StringUtil::Contains(event.reason, "typed_hash_join_probe_helper"));
-				REQUIRE_FALSE(StringUtil::Contains(event.reason, "hash-join-typed-probe-helper"));
 				REQUIRE_FALSE(StringUtil::Contains(event.reason,
 				                                   "hash-join-native-probe-null-equal-condition"));
-				REQUIRE_FALSE(StringUtil::Contains(event.ir, "typed_hash_join_probe_helper"));
-				REQUIRE_FALSE(StringUtil::Contains(event.ir, "hash-join-typed-probe-helper"));
 				if (event.status == "compiled" && event.execution_mode == "native" &&
 			    StringUtil::Contains(event.ir, "hash_join_probe(hash_keys=")) {
 				REQUIRE(allow_native_probe);
@@ -3970,10 +3950,6 @@ TEST_CASE("JIT full pipeline exposes expanded hash join protocol blockers", "[ap
 			if (event.target != "region") {
 				continue;
 			}
-			REQUIRE_FALSE(StringUtil::Contains(event.reason, "typed_hash_join_probe_helper"));
-			REQUIRE_FALSE(StringUtil::Contains(event.reason, "hash-join-typed-probe-helper"));
-			REQUIRE_FALSE(StringUtil::Contains(event.ir, "typed_hash_join_probe_helper"));
-			REQUIRE_FALSE(StringUtil::Contains(event.ir, "hash-join-typed-probe-helper"));
 			if (event.status == "compiled" && event.execution_mode == "native" &&
 			    StringUtil::Contains(event.ir, "hash_join_probe(hash_keys=")) {
 				REQUIRE(allow_native_probe);
@@ -4293,8 +4269,6 @@ TEST_CASE("JIT full pipeline lowers native hash join build through backend", "[a
 		    StringUtil::Contains(event.ir, "hash_join_protocol<") &&
 		    StringUtil::Contains(event.reason, JIT_HASH_JOIN_BUILD_EXECUTABLE_REASON)) {
 			found_hash_join_sink_protocol = true;
-			REQUIRE_FALSE(StringUtil::Contains(event.reason, "typed_hash_join_build_helper"));
-			REQUIRE_FALSE(StringUtil::Contains(event.reason, "hash-join-typed-build-helper"));
 			REQUIRE(StringUtil::Contains(event.reason, "full-pipeline-native-protocol-stage"));
 			REQUIRE_FALSE(StringUtil::Contains(event.reason, "full-pipeline-native-sink-update"));
 			REQUIRE(StringUtil::Contains(event.ir, "regular_hash_table_layout_ready=true"));

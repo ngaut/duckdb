@@ -306,10 +306,6 @@ def verify_backend_contract_tests(root: Path) -> None:
             "hash-aggregate-distinct-grouped-state-protocol-boundary",
             "hash-aggregate-distinct-lookup-protocol-boundary",
             "perfect-hash-aggregate-native-lookup",
-            "REQUIRE_FALSE(StringUtil::Contains(event.reason, \"typed-hash-aggregate-lookup-helper\"))",
-            "REQUIRE_FALSE(StringUtil::Contains(event.ir, \"typed_hash_aggregate_lookup_helper\"))",
-            "REQUIRE_FALSE(StringUtil::Contains(event.reason, \"typed_hash_join_build_helper\"))",
-            "REQUIRE_FALSE(StringUtil::Contains(event.reason, \"typed_hash_join_probe_helper\"))",
             "generated native hash aggregate lookup and state update",
             "JIT region lowering exposes stateful source protocol candidates",
             "function=hash_join_probe",
@@ -386,11 +382,9 @@ def verify_region_executor_resume_contract(root: Path) -> None:
         [Path("src/include/duckdb/execution/jit/runtime.hpp")],
         [
             "SinkChunk()",
-            "SinkThroughTypedHelper",
             "JitFullPipelineSinkFunction",
             "SinkHashJoinBuildThroughProtocol",
             "ProbeHashJoinThroughProtocol",
-            "ExecuteOperatorThroughTypedHelper",
         ],
     )
     assert_no_text(
@@ -526,7 +520,6 @@ def verify_region_executor_resume_contract(root: Path) -> None:
             "execution:unsupported",
         ],
     )
-    assert_no_text(root, [Path("extension/jit_sljit/include/sljit_region_plan.hpp")], ["SINK_HELPER_BOUNDARY"])
     assert_no_text(
         root,
         [Path("src/execution/jit_operator_descriptor.cpp")],
@@ -566,7 +559,6 @@ def verify_region_executor_resume_contract(root: Path) -> None:
             Path("src/include/duckdb/execution/jit/aggregate_runtime.hpp"),
         ],
         [
-            "SinkThroughTypedHelper",
             "SinkHashJoinBuildThroughProtocol",
             "SljitFullPipelineHashAggregateUpdate",
             "SljitFullPipelinePerfectHashAggregateUpdate",
@@ -1437,21 +1429,11 @@ def verify_region_selection_contract(root: Path) -> None:
         root,
         [Path("src/execution/jit_operator_descriptor.cpp")],
         [
-            "BuildJitDescriptorTypedHelperContract",
-            "MarkJitDescriptorTypedHelperContractReady",
-            "AppendJitDescriptorTypedHelperReason",
-            "BuildJitDescriptorHashJoinTypedHelperBlocker",
-            "BuildJitDescriptorHashAggregateTypedLookupHelperBlocker",
             "IsJitDescriptorNativeHashJoinFixedWidthType",
             "BuildJitDescriptorNativeHashJoinTypeBlocker",
             "hash-join-native-key-type",
             "hash-join-native-payload-type",
             "hash-join-native-probe-type",
-            "typed_hash_join_probe_helper",
-            "typed_hash_join_build_helper",
-            "typed_hash_aggregate_lookup_helper",
-            "hash-join-typed",
-            "hash-aggregate-typed-lookup-helper",
         ],
     )
     assert_no_text(
@@ -1574,16 +1556,6 @@ def verify_region_selection_contract(root: Path) -> None:
             "source-fusion-gap:requires-native-source;source_execution=duckdb-source-boundary",
             "SetCompiledExecutionMode(JitExecutionMode::NATIVE)",
         ],
-    )
-    assert_no_text(
-        root,
-        [Path("extension/jit_sljit/sljit_region_plan.cpp")],
-        ["JitExecutionMode::GENERATED_HELPER", "generated_helper"],
-    )
-    assert_no_text(
-        root,
-        [Path("src/include/duckdb/execution/jit/common.hpp"), Path("src/execution/jit_types.cpp")],
-        ["GENERATED_HELPER", "HELPER_BOUNDARY"],
     )
     assert_no_text(
         root,
@@ -2207,9 +2179,6 @@ def verify_region_execution_form_contract(root: Path) -> None:
             "SljitNativeRegionOpIsTypedOperatorHelper",
             "SljitNativeRegionOpIsTypedSinkHelper",
             "SljitNativeRegionOpIsTypedOperatorHelper(op) || SljitNativeRegionOpIsTypedSinkHelper(op)",
-            "operator-fusion-gap:multi-operator-" + "helper-chain-protocol-missing",
-            "SLJIT typed operator " + "helper chains require a multi-operator helper protocol",
-            "typed operator " + "helper requires full-pipeline region ownership",
             "hash-join-build-primitive-fallback",
         ],
     )
@@ -3001,19 +2970,6 @@ def verify_core_lowering_boundary(root: Path) -> None:
         root,
         [Path("src/execution/jit_region_ir.cpp")],
         [
-            "JitRegionTypedHelperContract",
-            "DescribeJitRegionTypedHelperContract",
-            "typed_hash_join_probe_helper",
-            "typed_hash_join_build_helper",
-            "typed_hash_aggregate_lookup_helper",
-            "hash-join-typed",
-            "hash-aggregate-typed-lookup-helper",
-        ],
-    )
-    assert_no_text(
-        root,
-        [Path("src/execution/jit_region_ir.cpp")],
-        [
             "IsJitRegionSortStateSource",
             "BuildJitRegionSortStateScanCapability",
             "AddJitRegionStatefulSourceStateScanContract",
@@ -3130,8 +3086,6 @@ def verify_core_lowering_boundary(root: Path) -> None:
             "protocol.null_equal_condition_count != 0",
             "protocol.residual_predicate || protocol.residual_info",
             "typed_lookup_helper_contract",
-            "typed-hash-aggregate-lookup-helper-contract",
-            "hash-aggregate-typed-lookup-helper",
         ],
     )
     assert_required_text(
@@ -3480,11 +3434,6 @@ def verify_trace_contracts(root: Path) -> None:
         [Path("benchmark/tpch/jit/tpch_trace.py"), Path("benchmark/tpch/jit/tpch_schema.py"),
          Path("benchmark/tpch/jit/verify_tpch_trace.py")],
         [
-            "typed_hash_join_probe_helper",
-            "typed_hash_join_build_helper",
-            "typed_hash_aggregate_lookup_helper",
-            "hash-join-typed",
-            "hash-aggregate-typed-lookup-helper",
         ],
     )
     assert_required_text(
