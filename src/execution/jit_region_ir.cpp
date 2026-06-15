@@ -1014,15 +1014,17 @@ static string DescribeJitRegionInventoryPipelineShape(const JitRegionPipelineInv
 		result += ";source:source:" + inventory.source_operator_name + ":";
 		result += JitRegionSourcePipelineBoundary(inventory.source_execution);
 	}
+	D_ASSERT(inventory.operator_names.size() == inventory.operator_boundaries.size());
 	for (idx_t op_idx = 0; op_idx < inventory.operator_names.size(); op_idx++) {
 		auto &operator_name = inventory.operator_names[op_idx];
+		auto boundary = inventory.operator_boundaries[op_idx];
 		result += ";op" + std::to_string(op_idx) + ":";
 		if (operator_name == "FILTER") {
-			result += "filter:FILTER:none";
+			result += "filter:FILTER:" + string(JitRegionBoundaryKindToString(boundary));
 		} else if (operator_name == "PROJECTION") {
-			result += "projection:PROJECTION:none";
+			result += "projection:PROJECTION:" + string(JitRegionBoundaryKindToString(boundary));
 		} else {
-			result += "operator:" + operator_name + ":operator-fallback";
+			result += "operator:" + operator_name + ":" + string(JitRegionBoundaryKindToString(boundary));
 		}
 	}
 	if (inventory.has_sink) {
@@ -1084,10 +1086,26 @@ static void AccumulateJitRegionInventorySource(JitRegionPipelineInventory &inven
 	inventory.has_stateful_source = true;
 }
 
+static JitRegionBoundaryKind GetJitRegionInventoryOperatorBoundary(const JitPipelineOperatorEntry &op) {
+	switch (op.type) {
+	case PhysicalOperatorType::FILTER:
+	case PhysicalOperatorType::PROJECTION:
+		return JitRegionBoundaryKind::NONE;
+	default:
+		break;
+	}
+	if (op.HasOperatorContract()) {
+		return op.native_operator ? JitRegionBoundaryKind::OPERATOR_NATIVE
+		                          : JitRegionBoundaryKind::OPERATOR_PROTOCOL_BOUNDARY;
+	}
+	return JitRegionBoundaryKind::OPERATOR_FALLBACK;
+}
+
 static void AccumulateJitRegionInventoryOperator(JitRegionPipelineInventory &inventory,
                                                  const JitPipelineOperatorEntry &op) {
 	inventory.operator_count++;
 	inventory.operator_names.push_back(op.operator_name);
+	inventory.operator_boundaries.push_back(GetJitRegionInventoryOperatorBoundary(op));
 	inventory.estimated_cardinality = MaxValue(inventory.estimated_cardinality, op.estimated_cardinality);
 	switch (op.type) {
 	case PhysicalOperatorType::FILTER:

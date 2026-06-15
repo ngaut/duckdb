@@ -945,6 +945,8 @@ inner fused candidate valid, so the inventory gate must be strict: it may reject
 only when every admitted candidate family is impossible from inventory facts
 alone. If the inventory cannot prove that, full typed IR lowering must run and
 the candidate selector decides.
+Inventory carries source execution kind and typed operator boundary labels; it
+must not rebuild source or operator ownership by parsing rendered pipeline text.
 
 The second level is candidate admission after full typed IR lowering. Its
 long-term invariant is:
