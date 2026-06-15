@@ -786,6 +786,9 @@ static string BuildJitDescriptorHashJoinProbeNativeShapeBlocker(const JitRegionH
 	if (protocol.residual_predicate || protocol.residual_info) {
 		return "hash-join-native-residual-predicate";
 	}
+	if (protocol.non_equality_condition_count != 0) {
+		return "hash-join-native-non-equality-chain-protocol-missing";
+	}
 	return "none";
 }
 

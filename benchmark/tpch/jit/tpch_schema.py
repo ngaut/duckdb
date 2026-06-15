@@ -347,8 +347,6 @@ FLOW_STEP_SUMMARY_FIELDS = (
     "runtime_time_us",
     *SOURCE_NATIVE_RUNTIME_FIELDS,
     "generated_body_runtime_time_us",
-    "declined_invocations",
-    "declined_runtime_time_us",
     "fallback_input_rows",
     "fallback_output_rows",
     "fallback_invocations",

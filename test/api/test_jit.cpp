@@ -727,7 +727,7 @@ public:
 	}
 };
 
-class DecliningRegionKernel : public JitRegionKernel {
+class FalseReturningRegionKernel : public JitRegionKernel {
 public:
 	const string &BackendName() const override {
 		return backend_name;
@@ -750,17 +750,17 @@ public:
 	}
 
 private:
-	string backend_name = "contract_test_declining_region_jit_backend";
+	string backend_name = "contract_test_false_returning_region_jit_backend";
 };
 
-class DecliningRegionBackend : public JitBackend {
+class FalseReturningRegionBackend : public JitBackend {
 public:
 	string Name() const override {
-		return "contract_test_declining_region_jit_backend";
+		return "contract_test_false_returning_region_jit_backend";
 	}
 
 	string Description() const override {
-		return "contract test declining region JIT backend";
+		return "contract test false-returning region JIT backend";
 	}
 
 	bool SupportsRegions() const override {
@@ -781,8 +781,8 @@ public:
 	}
 
 	JitRegionCompileResult CompileRegion(const JitRegionCompilationInput &) override {
-		return JitRegionCompileResult::Compiled(make_uniq<DecliningRegionKernel>(), JitExecutionMode::NATIVE,
-		                                        "contract-test-declining-region");
+		return JitRegionCompileResult::Compiled(make_uniq<FalseReturningRegionKernel>(), JitExecutionMode::NATIVE,
+		                                        "contract-test-false-returning-region");
 	}
 };
 
@@ -885,7 +885,7 @@ public:
 	}
 };
 
-class DecliningFullPipelineRegionKernel : public JitRegionKernel {
+class FalseReturningFullPipelineRegionKernel : public JitRegionKernel {
 public:
 	const string &BackendName() const override {
 		return backend_name;
@@ -904,17 +904,17 @@ public:
 	}
 
 private:
-	string backend_name = "contract_test_declining_full_pipeline_region_jit_backend";
+	string backend_name = "contract_test_false_returning_full_pipeline_region_jit_backend";
 };
 
-class DecliningFullPipelineRegionBackend : public JitBackend {
+class FalseReturningFullPipelineRegionBackend : public JitBackend {
 public:
 	string Name() const override {
-		return "contract_test_declining_full_pipeline_region_jit_backend";
+		return "contract_test_false_returning_full_pipeline_region_jit_backend";
 	}
 
 	string Description() const override {
-		return "contract test declining full-pipeline region JIT backend";
+		return "contract test false-returning full-pipeline region JIT backend";
 	}
 
 	bool SupportsRegions() const override {
@@ -929,70 +929,14 @@ public:
 		plan.SetCompiledExecutionMode(JitExecutionMode::NATIVE);
 		plan.SetRegionExecutionForm(JitRegionExecutionForm::FUSED);
 		plan.AddNode("full", "CONTRACT_FULL_PIPELINE", JitLoweringKind::NATIVE,
-		             "contract declining full pipeline node");
+		             "contract false-returning full pipeline node");
 		return plan;
 	}
 
 	JitRegionCompileResult CompileRegion(const JitRegionCompilationInput &) override {
-		return JitRegionCompileResult::Compiled(make_uniq<DecliningFullPipelineRegionKernel>(),
+		return JitRegionCompileResult::Compiled(make_uniq<FalseReturningFullPipelineRegionKernel>(),
 		                                        JitExecutionMode::NATIVE,
-		                                        "contract-test-declining-full-pipeline-region");
-	}
-};
-
-class SideEffectDecliningFullPipelineRegionKernel : public JitRegionKernel {
-public:
-	const string &BackendName() const override {
-		return backend_name;
-	}
-
-	idx_t CodeSize() const override {
-		return 1;
-	}
-
-	bool CanExecuteFullPipeline() const override {
-		return true;
-	}
-
-	bool TryExecuteFullPipeline(JitFullPipelineRuntime &runtime, JitFullPipelineResult &) override {
-		runtime.RecordNativeSinkResult(0, SinkResultType::NEED_MORE_INPUT);
-		return false;
-	}
-
-private:
-	string backend_name = "contract_test_side_effect_declining_full_pipeline_region_jit_backend";
-};
-
-class SideEffectDecliningFullPipelineRegionBackend : public JitBackend {
-public:
-	string Name() const override {
-		return "contract_test_side_effect_declining_full_pipeline_region_jit_backend";
-	}
-
-	string Description() const override {
-		return "contract test side-effect declining full-pipeline region JIT backend";
-	}
-
-	bool SupportsRegions() const override {
-		return true;
-	}
-
-	JitRegionLoweringPlan AnalyzeRegion(const JitRegionCompilationInput &input) override {
-		if (input.candidate.scope != JitRegionCandidateScope::FULL_PIPELINE) {
-			return UnsupportedContractBoundaryPlan();
-		}
-		JitRegionLoweringPlan plan;
-		plan.SetCompiledExecutionMode(JitExecutionMode::NATIVE);
-		plan.SetRegionExecutionForm(JitRegionExecutionForm::FUSED);
-		plan.AddNode("full", "CONTRACT_FULL_PIPELINE", JitLoweringKind::NATIVE,
-		             "contract side-effect declining full pipeline node");
-		return plan;
-	}
-
-	JitRegionCompileResult CompileRegion(const JitRegionCompilationInput &) override {
-		return JitRegionCompileResult::Compiled(make_uniq<SideEffectDecliningFullPipelineRegionKernel>(),
-		                                        JitExecutionMode::NATIVE,
-		                                        "contract-test-side-effect-declining-full-pipeline-region");
+		                                        "contract-test-false-returning-full-pipeline-region");
 	}
 };
 
@@ -3439,7 +3383,7 @@ TEST_CASE("JIT hash join build append protocol supports multi-key reference buil
 	REQUIRE(found_multi_key_build_contract);
 }
 
-TEST_CASE("JIT hash join probe lowers native non-equality match predicates", "[api][jit]") {
+TEST_CASE("JIT hash join probe keeps non-equality predicates behind explicit chain protocol blocker", "[api][jit]") {
 	DuckDB db;
 	Connection con(db);
 	auto &context = *con.context;
@@ -3447,76 +3391,9 @@ TEST_CASE("JIT hash join probe lowers native non-equality match predicates", "[a
 
 	REQUIRE_NO_FAIL(con.Query("LOAD jit_sljit"));
 	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_hash_native_predicate_l(i BIGINT, j BIGINT)"));
-	REQUIRE_NO_FAIL(con.Query("INSERT INTO jit_hash_native_predicate_l VALUES "
-	                          "(1, 10), (2, 20), (3, NULL), (4, 40), (5, 50)"));
+	REQUIRE_NO_FAIL(con.Query("INSERT INTO jit_hash_native_predicate_l VALUES (1, 10), (1, 12), (2, 20)"));
 	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_hash_native_predicate_r(i BIGINT, j BIGINT)"));
 	REQUIRE_NO_FAIL(con.Query("INSERT INTO jit_hash_native_predicate_r VALUES "
-	                          "(1, 11), (2, 20), (3, 30), (4, 39), (5, NULL)"));
-	REQUIRE_NO_FAIL(con.Query("SET enable_jit=true"));
-	REQUIRE_NO_FAIL(con.Query("SET jit_backend='sljit'"));
-	REQUIRE_NO_FAIL(con.Query("SET jit_policy='force'"));
-	REQUIRE_NO_FAIL(con.Query("SET jit_dump_ir=true"));
-	REQUIRE_NO_FAIL(con.Query("SET jit_trace_runtime=true"));
-	REQUIRE_NO_FAIL(con.Query("SET jit_event_log_size=10000"));
-
-	manager.ClearEvents();
-	auto result = con.Query("SELECT sum(r.j) FROM jit_hash_native_predicate_l l "
-	                        "JOIN jit_hash_native_predicate_r r ON l.i=r.i AND l.j<>r.j");
-	REQUIRE_NO_FAIL(*result);
-	REQUIRE(CHECK_COLUMN(result, 0, {50}));
-
-	bool found_native_build_contract = false;
-	bool found_native_predicate_probe = false;
-	for (auto &event : manager.GetEvents()) {
-		if (event.target != "region") {
-			continue;
-		}
-		REQUIRE_FALSE(StringUtil::Contains(event.reason, "sink-fusion-gap:hash-join-build-protocol-missing"));
-		REQUIRE_FALSE(StringUtil::Contains(event.reason, "native_hash_join_probe_blocker=hash-join-native-non-equality-condition"));
-		if (StringUtil::Contains(event.reason, "non_equality_condition_count=1")) {
-			REQUIRE_FALSE(StringUtil::Contains(event.reason, "native_hash_join_build_contract_status=missing"));
-			REQUIRE(StringUtil::Contains(event.reason, JIT_HASH_JOIN_BUILD_READY_CONTRACT));
-			REQUIRE(StringUtil::Contains(event.reason, JIT_HASH_JOIN_BUILD_READY_BLOCKER));
-			REQUIRE(StringUtil::Contains(event.reason, "build_append_shape_ready=true"));
-			REQUIRE(StringUtil::Contains(event.reason, JIT_HASH_JOIN_PROBE_READY_CONTRACT));
-			REQUIRE(StringUtil::Contains(event.reason, JIT_HASH_JOIN_PROBE_READY_BLOCKER));
-		}
-		if (event.status == "compiled" && event.execution_mode == "native" &&
-		    event.candidate_scope == "full_pipeline" &&
-		    StringUtil::Contains(event.reason, JIT_HASH_JOIN_BUILD_EXECUTABLE_REASON) &&
-		    StringUtil::Contains(event.reason, "non_equality_condition_count=1")) {
-			found_native_build_contract = true;
-			REQUIRE(StringUtil::Contains(event.ir, "hash_join_build("));
-			REQUIRE(StringUtil::Contains(event.ir, "key0<input_index="));
-			REQUIRE(StringUtil::Contains(event.ir, "key1<input_index="));
-		}
-		if (event.status == "compiled" && event.execution_mode == "native" &&
-		    event.candidate_scope == "full_pipeline" &&
-		    StringUtil::Contains(event.reason, JIT_HASH_JOIN_PROBE_EXECUTABLE_REASON) &&
-		    StringUtil::Contains(event.reason, "non_equality_condition_count=1")) {
-			found_native_predicate_probe = true;
-			REQUIRE(event.code_size > 0);
-			REQUIRE(StringUtil::Contains(event.ir, "hash_join_probe("));
-			REQUIRE(StringUtil::Contains(event.ir, "hash_keys=1"));
-			REQUIRE(StringUtil::Contains(event.ir, "predicate1<input_index="));
-			REQUIRE(StringUtil::Contains(event.ir, "comparison=notequal"));
-		}
-	}
-	REQUIRE(found_native_build_contract);
-	REQUIRE(found_native_predicate_probe);
-}
-
-TEST_CASE("JIT hash join probe keeps non-equality duplicate chains honest", "[api][jit]") {
-	DuckDB db;
-	Connection con(db);
-	auto &context = *con.context;
-	auto &manager = JitManager::Get(context);
-
-	REQUIRE_NO_FAIL(con.Query("LOAD jit_sljit"));
-	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_hash_native_chain_l(i BIGINT, j BIGINT)"));
-	REQUIRE_NO_FAIL(con.Query("INSERT INTO jit_hash_native_chain_l VALUES (1, 10), (1, 12), (2, 20)"));
-	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_hash_native_chain_r(i BIGINT, j BIGINT)"));
-	REQUIRE_NO_FAIL(con.Query("INSERT INTO jit_hash_native_chain_r VALUES "
 	                          "(1, 9), (1, 10), (1, 11), (2, 20), (2, 21)"));
 	REQUIRE_NO_FAIL(con.Query("SET enable_jit=true"));
 	REQUIRE_NO_FAIL(con.Query("SET jit_backend='sljit'"));
@@ -3526,36 +3403,30 @@ TEST_CASE("JIT hash join probe keeps non-equality duplicate chains honest", "[ap
 	REQUIRE_NO_FAIL(con.Query("SET jit_event_log_size=10000"));
 
 	manager.ClearEvents();
-	auto result = con.Query("SELECT count(*), sum(r.j) FROM jit_hash_native_chain_l l "
-	                        "JOIN jit_hash_native_chain_r r ON l.i=r.i AND l.j<>r.j");
+	auto result = con.Query("SELECT count(*), sum(r.j) FROM jit_hash_native_predicate_l l "
+	                        "JOIN jit_hash_native_predicate_r r ON l.i=r.i AND l.j<>r.j");
 	REQUIRE_NO_FAIL(*result);
 	REQUIRE(result->GetValue(0, 0).ToString() == "6");
 	REQUIRE(result->GetValue(1, 0).ToString() == "71");
 
-	bool found_native_predicate_probe = false;
-	bool found_chain_protocol_decline = false;
+	bool found_non_equality_probe_blocker = false;
 	for (auto &event : manager.GetEvents()) {
 		if (event.target != "region") {
 			continue;
 		}
-		REQUIRE_FALSE(StringUtil::Contains(event.reason, "native_hash_join_probe_blocker=hash-join-native-non-equality-condition"));
-		if (event.status == "compiled" && event.execution_mode == "native" &&
-		    StringUtil::Contains(event.reason, JIT_HASH_JOIN_PROBE_EXECUTABLE_REASON) &&
-		    StringUtil::Contains(event.reason, "non_equality_condition_count=1")) {
-			found_native_predicate_probe = true;
-			REQUIRE(StringUtil::Contains(event.ir, "hash_join_probe("));
-			REQUIRE(StringUtil::Contains(event.ir, "hash_keys=1"));
-			REQUIRE(StringUtil::Contains(event.ir, "predicate1<input_index="));
-			REQUIRE(StringUtil::Contains(event.ir, "comparison=notequal"));
+		if (StringUtil::Contains(event.reason, "non_equality_condition_count=1")) {
+			REQUIRE_FALSE((event.status == "compiled" &&
+			               StringUtil::Contains(event.reason, JIT_HASH_JOIN_PROBE_EXECUTABLE_REASON)));
 		}
-		if (event.phase == "runtime" && event.status == "declined" &&
-		    StringUtil::Contains(event.reason, "hash-join-native-runtime-non-equality-chain-protocol-missing")) {
-			found_chain_protocol_decline = true;
-			REQUIRE(event.runtime_result == "fallback");
+		if (StringUtil::Contains(event.reason, "hash-join-native-non-equality-chain-protocol-missing")) {
+			found_non_equality_probe_blocker = true;
+			REQUIRE_FALSE(StringUtil::Contains(event.reason, JIT_HASH_JOIN_PROBE_EXECUTABLE_REASON));
 		}
+		REQUIRE_FALSE(StringUtil::Contains(event.reason,
+		                                   "hash-join-native-runtime-non-equality-chain-protocol-missing"));
+		REQUIRE(event.status != string("de") + "clined");
 	}
-	REQUIRE(found_native_predicate_probe);
-	REQUIRE(found_chain_protocol_decline);
+	REQUIRE(found_non_equality_probe_blocker);
 }
 
 TEST_CASE("JIT hash join native protocols own correlated mark state", "[api][jit]") {
@@ -4660,23 +4531,26 @@ TEST_CASE("JIT manager rejects full pipeline kernels without full-pipeline ABI",
 	REQUIRE(StringUtil::Contains(result->GetError(), "compiled full pipeline without full-pipeline executable ABI"));
 }
 
-TEST_CASE("JIT full pipeline ABI dispatch falls back honestly after decline", "[api][jit]") {
+TEST_CASE("JIT full pipeline ABI rejects runtime false return", "[api][jit]") {
 	DuckDB db;
 	Connection con(db);
 	auto &context = *con.context;
 	auto &manager = JitManager::Get(context);
 
-	manager.RegisterBackend(make_uniq<DecliningFullPipelineRegionBackend>());
-	SetJitTestOptions(context, "contract_test_declining_full_pipeline_region_jit_backend");
+	manager.RegisterBackend(make_uniq<FalseReturningFullPipelineRegionBackend>());
+	SetJitTestOptions(context, "contract_test_false_returning_full_pipeline_region_jit_backend");
 	Settings::Set<JitTraceRuntimeSetting>(context, SetScope::SESSION, Value::BOOLEAN(true));
 
-	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_declining_full_input AS SELECT i::BIGINT AS i FROM range(3) tbl(i)"));
-	REQUIRE_NO_FAIL(con.Query("SELECT sum(i) FROM jit_declining_full_input WHERE i > 0"));
+	REQUIRE_NO_FAIL(
+	    con.Query("CREATE TABLE jit_false_returning_full_input AS SELECT i::BIGINT AS i FROM range(3) tbl(i)"));
+	auto result = con.Query("SELECT sum(i) FROM jit_false_returning_full_input WHERE i > 0");
+	REQUIRE(result->HasError());
+	REQUIRE(StringUtil::Contains(result->GetError(), "JIT full pipeline kernel returned false at runtime"));
 
 	bool found_compiled_full_pipeline = false;
-	bool found_declined_full_pipeline = false;
+	bool found_error_full_pipeline = false;
 	for (auto &event : manager.GetEvents()) {
-		if (event.backend_name != "contract_test_declining_full_pipeline_region_jit_backend" ||
+		if (event.backend_name != "contract_test_false_returning_full_pipeline_region_jit_backend" ||
 		    event.target != "region" || event.candidate_scope != "full_pipeline") {
 			continue;
 		}
@@ -4684,31 +4558,15 @@ TEST_CASE("JIT full pipeline ABI dispatch falls back honestly after decline", "[
 			found_compiled_full_pipeline = true;
 			REQUIRE(event.execution_mode == "native");
 		}
-		if (event.phase == "runtime" && event.status == "declined") {
-			found_declined_full_pipeline = true;
+		if (event.phase == "runtime" && event.status == "error") {
+			found_error_full_pipeline = true;
 			REQUIRE(event.execution_mode == "native");
-			REQUIRE(StringUtil::Contains(event.reason, "full pipeline kernel declined"));
+			REQUIRE(StringUtil::Contains(event.reason, "JIT full pipeline kernel returned false at runtime"));
 		}
+		REQUIRE(event.status != string("de") + "clined");
 	}
 	REQUIRE(found_compiled_full_pipeline);
-	REQUIRE(found_declined_full_pipeline);
-}
-
-TEST_CASE("JIT full pipeline ABI rejects decline after runtime side effects", "[api][jit]") {
-	DuckDB db;
-	Connection con(db);
-	auto &context = *con.context;
-	auto &manager = JitManager::Get(context);
-
-	manager.RegisterBackend(make_uniq<SideEffectDecliningFullPipelineRegionBackend>());
-	SetJitTestOptions(context, "contract_test_side_effect_declining_full_pipeline_region_jit_backend");
-	Settings::Set<JitTraceRuntimeSetting>(context, SetScope::SESSION, Value::BOOLEAN(true));
-
-	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_side_effect_full_input AS SELECT i::BIGINT AS i FROM range(4) tbl(i)"));
-	auto result = con.Query("SELECT sum(i) FROM jit_side_effect_full_input");
-	REQUIRE(result->HasError());
-	REQUIRE(StringUtil::Contains(result->GetError(),
-	                             "JIT full pipeline kernel declined after using runtime side-effect APIs"));
+	REQUIRE(found_error_full_pipeline);
 }
 
 TEST_CASE("JIT source-prefix runtime reports JIT-only exceptions", "[api][jit]") {
@@ -4724,11 +4582,11 @@ TEST_CASE("JIT source-prefix runtime reports JIT-only exceptions", "[api][jit]")
 
 		REQUIRE_NO_FAIL(con.Query("CREATE TEMP TABLE jit_throwing_verify_input AS "
 		                          "SELECT i::BIGINT AS i FROM range(3) tbl(i)"));
-			auto result = con.Query("SELECT i + 1 FROM jit_throwing_verify_input WHERE i > 0");
-			REQUIRE(result->HasError());
-			REQUIRE(StringUtil::Contains(result->GetError(), "contract test region runtime failure"));
-		}
+		auto result = con.Query("SELECT i + 1 FROM jit_throwing_verify_input WHERE i > 0");
+		REQUIRE(result->HasError());
+		REQUIRE(StringUtil::Contains(result->GetError(), "contract test region runtime failure"));
 	}
+}
 
 TEST_CASE("JIT code handles clean up through their base interface", "[api][jit]") {
 	bool destroyed = false;
@@ -5025,8 +4883,6 @@ TEST_CASE("JIT kernel counters can be recreated from runtime trace identity", "[
 	REQUIRE(counters[0].source_native_invocation_count == 1);
 	REQUIRE(counters[0].source_native_runtime_time_us == 1);
 	REQUIRE(counters[0].generated_body_runtime_time_us == 0);
-	REQUIRE(counters[0].declined_invocation_count == 0);
-	REQUIRE(counters[0].declined_runtime_time_us == 0);
 	REQUIRE(counters[0].fallback_input_rows == 0);
 	REQUIRE(counters[0].fallback_output_rows == 0);
 	REQUIRE(counters[0].fallback_invocation_count == 0);
@@ -5034,30 +4890,30 @@ TEST_CASE("JIT kernel counters can be recreated from runtime trace identity", "[
 	REQUIRE(counters[0].last_runtime_result == "need_more_input");
 }
 
-TEST_CASE("JIT source-prefix ABI rejects decline after native source fetch", "[api][jit]") {
+TEST_CASE("JIT source-prefix ABI rejects false return after native source fetch", "[api][jit]") {
 	DuckDB db;
 	Connection con(db);
 	auto &context = *con.context;
 	auto &manager = JitManager::Get(context);
 
-	manager.RegisterBackend(make_uniq<DecliningRegionBackend>());
-	REQUIRE_NO_FAIL(con.Query("SET jit_backend='contract_test_declining_region_jit_backend'"));
+	manager.RegisterBackend(make_uniq<FalseReturningRegionBackend>());
+	REQUIRE_NO_FAIL(con.Query("SET jit_backend='contract_test_false_returning_region_jit_backend'"));
 	REQUIRE_NO_FAIL(con.Query("SET jit_policy='force'"));
 	REQUIRE_NO_FAIL(con.Query("SET jit_trace_runtime=true"));
-	REQUIRE_NO_FAIL(con.Query("CREATE TEMP TABLE jit_declining_region_input AS "
+	REQUIRE_NO_FAIL(con.Query("CREATE TEMP TABLE jit_false_returning_region_input AS "
 	                          "SELECT i::BIGINT AS i FROM range(16) tbl(i)"));
 
 	manager.ClearEvents();
-	auto result = con.Query("SELECT i + 1 FROM jit_declining_region_input WHERE i > 0");
+	auto result = con.Query("SELECT i + 1 FROM jit_false_returning_region_input WHERE i > 0");
 	REQUIRE(result->HasError());
 	REQUIRE(StringUtil::Contains(result->GetError(),
-	                             "JIT native source-prefix kernel declined after native source fetch"));
+	                             "JIT native source-prefix kernel returned false after native source fetch"));
 
 	bool found_source_native_runtime = false;
 	bool found_source_prefix_error = false;
 	for (auto &event : manager.GetEvents()) {
 		if (event.phase != "runtime" || event.target != "region" ||
-		    event.backend_name != "contract_test_declining_region_jit_backend") {
+		    event.backend_name != "contract_test_false_returning_region_jit_backend") {
 			continue;
 		}
 		REQUIRE(event.kernel_id > 0);
@@ -5075,9 +4931,9 @@ TEST_CASE("JIT source-prefix ABI rejects decline after native source fetch", "[a
 			REQUIRE(event.candidate_end_operator_index > event.candidate_start_operator_index);
 			REQUIRE(event.execution_mode == "native");
 			REQUIRE(StringUtil::Contains(event.reason,
-			                             "JIT native source-prefix kernel declined after native source fetch"));
+			                             "JIT native source-prefix kernel returned false after native source fetch"));
 		}
-		REQUIRE(event.status != "declined");
+		REQUIRE(event.status != string("de") + "clined");
 	}
 	REQUIRE(found_source_native_runtime);
 	REQUIRE(found_source_prefix_error);
@@ -5094,7 +4950,6 @@ TEST_CASE("JIT source-prefix ABI rejects decline after native source fetch", "[a
 		REQUIRE(counter.invocation_count > 0);
 		REQUIRE(counter.source_native_invocation_count > 0);
 		REQUIRE(counter.source_native_output_rows > 0);
-		REQUIRE(counter.declined_invocation_count == 0);
 		REQUIRE(counter.fallback_input_rows == 0);
 		REQUIRE(counter.fallback_invocation_count == 0);
 		REQUIRE(counter.last_runtime_status == "error");

@@ -200,11 +200,6 @@ void JitEventLog::AccumulateKernelRuntime(JitKernelCounter &counter, const JitEv
 		counter.fallback_runtime_time_us += event.runtime_time_us;
 		return;
 	}
-	if (event.status == "declined") {
-		counter.declined_invocation_count += event.invocation_count;
-		counter.declined_runtime_time_us += event.runtime_time_us;
-		return;
-	}
 	counter.input_rows += event.input_rows;
 	counter.output_rows += event.output_rows;
 	counter.invocation_count += event.invocation_count;
@@ -413,16 +408,6 @@ void JitRegionKernel::SetTraceCandidate(const JitRegionCandidate &candidate) {
 	trace_candidate_output_types = candidate.output_types;
 }
 
-void JitRegionKernel::SetRuntimeDeclineReason(string reason) {
-	runtime_decline_reason = std::move(reason);
-}
-
-string JitRegionKernel::ConsumeRuntimeDeclineReason() {
-	auto result = std::move(runtime_decline_reason);
-	runtime_decline_reason.clear();
-	return result;
-}
-
 idx_t JitRegionKernel::TraceId() const {
 	return trace_id;
 }
@@ -513,6 +498,10 @@ bool JitRegionKernel::CanExecuteFullPipeline() const {
 
 bool JitRegionKernel::RequiresNativeSource() const {
 	return false;
+}
+
+bool JitRegionKernel::CanEnterFullPipeline(JitFullPipelineRuntime &, string &) {
+	return true;
 }
 
 bool JitRegionKernel::TryExecute(DataChunk &, DataChunk &, idx_t, OperatorResultType &) {

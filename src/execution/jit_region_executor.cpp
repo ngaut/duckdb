@@ -960,9 +960,9 @@ bool JitRegionExecutor::TryExecuteFullPipeline(PipelineExecutor &executor, idx_t
 	    executor.done_flushing || executor.exhausted_source || executor.exhausted_pipeline || executor.finalized) {
 		if (trace_runtime) {
 			JitManager::Get(executor.context.client)
-			    .RecordRuntimeEvent(executor.context.client, *kernel, JitCompileTarget::REGION, "declined",
-			                        "full pipeline kernel skipped because executor state is not at a clean "
-			                        "source-to-sink boundary; normal pipeline path will run",
+			    .RecordRuntimeEvent(executor.context.client, *kernel, JitCompileTarget::REGION, "skipped",
+			                        "full pipeline kernel not entered because executor state is not at a clean "
+			                        "source-to-sink boundary",
 			                        0, 0, 0, "fallback");
 		}
 		return false;
@@ -972,28 +972,27 @@ bool JitRegionExecutor::TryExecuteFullPipeline(PipelineExecutor &executor, idx_t
 		if (trace_runtime) {
 			trace_start = std::chrono::steady_clock::now();
 			trace_started = true;
+		}
+		PipelineJitFullPipelineRuntime runtime(executor, max_chunks, trace_runtime);
+		string entry_blocker;
+		if (!kernel->CanEnterFullPipeline(runtime, entry_blocker)) {
+			if (entry_blocker.empty()) {
+				entry_blocker = "full-pipeline-entry-precondition-failed";
 			}
-			PipelineJitFullPipelineRuntime runtime(executor, max_chunks, trace_runtime);
-			JitFullPipelineResult jit_result = JitFullPipelineResult::NOT_FINISHED;
-			kernel->SetRuntimeDeclineReason(string());
-			auto jit_executed = kernel->TryExecuteFullPipeline(runtime, jit_result);
-			if (!jit_executed) {
-				if (runtime.HasRuntimeSideEffects()) {
-					throw InternalException("JIT full pipeline kernel declined after using runtime side-effect APIs");
-				}
-				auto elapsed_us = trace_runtime ? JitRegionElapsedMicros(trace_start) : 0;
-				if (trace_runtime) {
-					auto decline_reason = kernel->ConsumeRuntimeDeclineReason();
-					if (decline_reason.empty()) {
-						decline_reason = "full pipeline kernel declined runtime input";
-					}
-					JitManager::Get(executor.context.client)
-					    .RecordRuntimeEvent(executor.context.client, *kernel, JitCompileTarget::REGION, "declined",
-					                        decline_reason + "; normal pipeline path will run", 0, 0, elapsed_us,
-					                        "fallback");
-				}
-				return false;
+			if (trace_runtime) {
+				auto elapsed_us = JitRegionElapsedMicros(trace_start);
+				JitManager::Get(executor.context.client)
+				    .RecordRuntimeEvent(executor.context.client, *kernel, JitCompileTarget::REGION, "skipped",
+				                        "full pipeline kernel not entered: " + entry_blocker, 0, 0, elapsed_us,
+				                        "fallback");
 			}
+			return false;
+		}
+		JitFullPipelineResult jit_result = JitFullPipelineResult::NOT_FINISHED;
+		auto jit_executed = kernel->TryExecuteFullPipeline(runtime, jit_result);
+		if (!jit_executed) {
+			throw InternalException("JIT full pipeline kernel returned false at runtime");
+		}
 		auto pipeline_result = JitFullPipelineResultToPipelineExecuteResult(jit_result);
 		string runtime_reason = "full pipeline kernel executed";
 		if (jit_result == JitFullPipelineResult::FINISHED) {
@@ -1137,7 +1136,7 @@ bool JitRegionExecutor::TryExecuteSourcePrefix(PipelineExecutor &executor, DataC
 		auto jit_executed = kernel->TryExecute(source_chunk, prefix_result, 0, operator_result);
 		auto elapsed_us = trace_runtime ? JitRegionElapsedMicros(trace_start) : 0;
 		if (!jit_executed) {
-			throw InternalException("JIT native source-prefix kernel declined after native source fetch");
+			throw InternalException("JIT native source-prefix kernel returned false after native source fetch");
 		}
 		if (operator_result != OperatorResultType::NEED_MORE_INPUT) {
 			throw InternalException("JIT source-prefix kernel returned unsupported operator result %s",

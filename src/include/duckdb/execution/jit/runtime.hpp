@@ -219,8 +219,6 @@ struct JitKernelCounter {
 	idx_t generated_body_selection_invocation_count = 0;
 	idx_t native_operator_loop_input_rows = 0;
 	idx_t native_operator_loop_invocation_count = 0;
-	idx_t declined_invocation_count = 0;
-	int64_t declined_runtime_time_us = 0;
 	idx_t fallback_input_rows = 0;
 	idx_t fallback_output_rows = 0;
 	idx_t fallback_invocation_count = 0;
@@ -462,8 +460,6 @@ public:
 	void SetTraceRegionExecutionForm(JitRegionExecutionForm execution_form);
 	void SetTraceSelectedSourceExecution(JitRegionSourceExecutionKind source_execution);
 	void SetTraceCandidate(const JitRegionCandidate &candidate);
-	void SetRuntimeDeclineReason(string reason);
-	string ConsumeRuntimeDeclineReason();
 	idx_t TraceId() const;
 	JitExecutionMode ExecutionMode() const;
 	JitRegionExecutionForm RegionExecutionForm() const;
@@ -487,6 +483,7 @@ public:
 	virtual bool CanExecuteSourcePrefix() const;
 	virtual bool CanExecuteFullPipeline() const;
 	virtual bool RequiresNativeSource() const;
+	virtual bool CanEnterFullPipeline(JitFullPipelineRuntime &runtime, string &blocker);
 	virtual bool TryExecute(DataChunk &input, DataChunk &result, idx_t initial_idx, OperatorResultType &execute_result);
 	virtual bool TryExecuteFullPipeline(JitFullPipelineRuntime &runtime, JitFullPipelineResult &result);
 
@@ -511,7 +508,6 @@ private:
 	JitRegionCandidateTraits trace_candidate_traits;
 	JitRegionContract trace_candidate_contract;
 	vector<LogicalType> trace_candidate_output_types;
-	string runtime_decline_reason;
 };
 
 struct JitRegionCompilationInput {

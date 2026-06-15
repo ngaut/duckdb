@@ -119,7 +119,7 @@ The implementation is correct only if all of these stay true:
 9. `auto` admits only non-overlapping regions with positive cost proof.
 10. `force` is diagnostic coverage, not performance evidence.
 11. Events and counters must separate eligibility, capability, admission, compile,
-   runtime execution, decline, and fallback.
+   runtime execution, skip/error, and fallback.
 12. Compiled code is query/executor scoped until a catalog-aware invalidation
     model exists.
 13. Migration is replace-and-delete. Temporary scaffolding must not survive as a
@@ -325,7 +325,7 @@ Physical plan and pipeline graph are built
   -> pipeline executor instantiates prepared kernels through the selected backend
   -> backend compiles admitted candidates into RAII code handles
   -> core executor boundary installs query-scoped kernels
-  -> runtime invokes kernels, records events/counters, and handles declines
+  -> runtime invokes kernels and records events/counters
   -> jit_verify compares generated results with reference boundaries when set
   -> query/executor teardown releases executable code and temporary state
 ```
@@ -588,7 +588,7 @@ Admission inputs belong in `JitManager`, because they are cross-backend policy:
 Admission outputs must be observable and distinct from unsupported lowering:
 
 - `compiled`: code generation was allowed and produced a kernel;
-- `skipped`: capability exists, but auto policy declined to compile;
+- `skipped`: capability exists, but auto policy chose not to compile;
 - `unsupported`: the IR/backend cannot generate correct code;
 - `unavailable`, `disabled`, or `error`.
 
@@ -1294,10 +1294,11 @@ result of `FINISHED` is finalized by core before the scheduler sees
 `PipelineExecuteResult::FINISHED`, so sink combine, source profiling,
 operator-state finalization, and profiler flushes cannot be skipped. A backend
 that cannot use the declared source and sink runtime ABI must reject the
-candidate. A backend that
-declines at runtime must do so before calling source or sink side-effect APIs;
-declining after runtime side effects is an architecture error because the normal
-DuckDB pipeline can no longer safely replay the same input.
+candidate during capability analysis. A compiled full-pipeline kernel must not
+return `false` at runtime. Runtime predicates belong in the region contract; if a
+backend discovers at execution time that it cannot use the declared ABI, core
+raises an error instead of replaying the work through the normal DuckDB
+pipeline.
 Full-pipeline eligibility is also an executor-entry contract, not just a backend
 codegen contract. Core must skip `full_pipeline` candidates before backend
 analysis when the executor cannot legally enter the full-pipeline ABI from the
@@ -1516,7 +1517,7 @@ mirrors the physical pipeline segment it replaces.
 Core execution should route region kernels through `JitRegionExecutor`, not
 through backend code embedded in `PipelineExecutor`. `PipelineExecutor` remains
 the owner of normal DuckDB execution state and calls the core JIT boundary. The
-JIT boundary owns admission trace, runtime trace, kernel decline handling, and
+JIT boundary owns admission trace, runtime trace, non-entry/error handling, and
 `jit_verify` comparison.
 
 Every region has a `JitRegionBoundaryContract`:
@@ -1531,10 +1532,8 @@ Every region has a `JitRegionBoundaryContract`:
   or source-driven production;
 - vector ownership: borrowed input, generated output, DuckDB-owned sink/state,
   and temporary vector lifetime;
-- decline preconditions: runtime vector/state/protocol cases that are valid IR
-  but not supported by the compiled kernel;
-- conditions under which it declines and lets the executor run the reference
-  path.
+- entry preconditions: runtime vector/state/protocol cases that must be proven
+  before compiled code is selected.
 
 The region kernel API should make these outcomes explicit:
 
@@ -1543,7 +1542,6 @@ The region kernel API should make these outcomes explicit:
 - `state_updated`;
 - `sink_updated`;
 - `finished`;
-- `declined`;
 - `error`.
 
 Those outcomes are mapped by core DuckDB code back to the existing physical
@@ -1564,19 +1562,20 @@ storage per filter stage or otherwise prove stable ownership; reusing one
 mutable selection buffer across chained filters corrupts dictionary vectors and
 can make verification compare against the same corrupted reference.
 
-A runtime decline is allowed only when the compiled region declared the
-precondition in its boundary contract and no source, sink, or state side-effect
-has happened yet. Decline is recorded as JIT runtime behavior, and the reference
-executor owns the replacement work. A decline path must never be reported as
-native runtime.
+Compiled region kernels are non-declinable. Runtime preconditions belong in the
+capability contract and admission decision before code is selected. If a
+compiled kernel reaches execution and cannot use its declared ABI, core records
+an error and raises instead of replaying the invocation through executor
+fallback. Fallback work remains explicit policy, capability, or boundary work
+owned by the normal DuckDB executor.
 
 Region JIT must also respect DuckDB's resumable operator protocol. When
 `PipelineExecutor` has pending `in_process_operators`, a source-prefix region is
 not entered; the normal executor already owns the current resume state. A
-source-prefix kernel that requires a native source must not decline after native
-source rows have been fetched. At that point the source cursor has moved and the
-same input cannot be safely replayed through the normal source boundary, so core
-raises an error instead of manufacturing executor fallback work.
+source-prefix kernel that requires a native source must not return `false` after
+native source rows have been fetched. At that point the source cursor has moved
+and the same input cannot be safely replayed through the normal source boundary,
+so core raises an error instead of manufacturing executor fallback work.
 
 ### Initial Generic Region Roadmap
 
@@ -1670,9 +1669,10 @@ what semantic region was generated; the runtime event tells whether that exact
 generated region actually ran. If those two facts cannot be joined, the trace is
 not acceptable performance evidence.
 
-Runtime events must include declined compiled-kernel calls as `declined`, not
-hide them behind the normal executor path. This matters for region kernels whose
-boundary contract is valid only for a subset of the operator protocol.
+Runtime events must include compiled-kernel execution and errors with the same
+`kernel_id`. A compiled kernel returning `false` is an error, not a hidden
+normal-executor replay. Region kernels whose boundary contract is valid only for
+a subset of the operator protocol must express that subset before compilation.
 
 Systematic performance analysis must follow this order:
 
@@ -1698,8 +1698,8 @@ Systematic performance analysis must follow this order:
    `duckdb_jit_kernel_counters()` to recover the compile identity, candidate
    shape, candidate executable pipeline shape, candidate context pipeline
    shape, candidate scope, candidate operator interval, candidate estimated
-   cardinality, generated runtime totals, declined-attempt totals, and
-   executor-fallback totals for that `kernel_id` while the kernel row remains
+   cardinality, generated runtime totals, and executor-fallback totals for that
+   `kernel_id` while the kernel row remains
    inside the bounded retention window;
 10. compare cumulative `duckdb_jit_counters()` before and after a benchmark run.
 
@@ -1945,15 +1945,15 @@ Hash-join build append is not limited to one primitive key. Once core proves the
 build keys are bound references and the join has an equality hash prefix without
 a whole-operator boundary, the native build protocol may reference multiple key
 columns and any key type that DuckDB's normal hash-table build path already
-supports. Typed non-equality match predicates are part of the native probe
-protocol: the generated kernel hashes only the equality prefix, then evaluates
-the typed predicate suffix against the build layout before accepting a row.
-Residual predicates remain blocked until they are represented as typed residual
-expression IR. Correlated MARK joins use the same build append protocol: the
-narrow `JoinHashTable::Build` contract owns both the tuple append and the
-correlated grouped count update, so the region planner does not need a separate
-correlated-MARK sink shape. MARK probe output is a native probe output mode, not
-a separate executor fallback.
+supports. Typed non-equality match predicates remain behind an explicit
+`hash-join-native-non-equality-chain-protocol-missing` blocker until the native
+probe has a chain-drain output protocol that can emit multiple build matches per
+probe row and resume when the output vector fills. Residual predicates remain
+blocked until they are represented as typed residual expression IR. Correlated
+MARK joins use the same build append protocol: the narrow `JoinHashTable::Build`
+contract owns both the tuple append and the correlated grouped count update, so
+the region planner does not need a separate correlated-MARK sink shape. MARK
+probe output is a native probe output mode, not a separate executor fallback.
 The stateful hash-join source scan is
 a separate native state-scan protocol when core can iterate already-built join
 state as a source. This keeps hash join work anchored to explicit DuckDB
@@ -1988,9 +1988,8 @@ runtime asks the owning `PhysicalOperator` to bind the already-lowered
 the concrete `PhysicalHashJoin` implementation validates the static native
 probe contract, the native probe shape, bound-reference key input, output mode,
 and the live hash table layout before returning a binding. Runtime binding
-declines are surfaced through JIT runtime events with backend-neutral reasons
-such as `native-operator-runtime-binding-blocked:...`; they are not hidden behind
-anonymous full-pipeline fallback. Runtime
+failures are internal contract errors; they are not hidden behind anonymous
+full-pipeline fallback. Runtime
 materialization switches only on the backend-neutral output mode: matched
 probe+build rows gather RHS data, while matched probe-only rows slice the probe
 side and do not touch RHS layout. Mark-build-only rows do not materialize at all;
@@ -2277,8 +2276,8 @@ traceable without conflating it with TPC-H performance evidence.
 Focused SQL traces must also include `flow_step_summary.csv`. This file groups
 each focused case by target, phase, status, execution mode, policy decision,
 candidate shape, and candidate scope, then reconciles event counts, stage
-timing, runtime rows, kernel reachability, declined invocations, and fallback
-counters against the raw event CSVs and `duckdb_jit_kernel_counters()` exports.
+timing, runtime rows, kernel reachability, and fallback counters against the raw
+event CSVs and `duckdb_jit_kernel_counters()` exports.
 It is the existing-test equivalent of the TPC-H stage/runtime summaries: every
 test-facing JIT flow must answer what happened at each step without requiring a
 manual join across event and counter files.
@@ -2305,16 +2304,13 @@ and how much kernel time it consumed. If any answer is missing, the performance
 investigation is incomplete.
 
 JIT runtime tracing is not a replacement for DuckDB's normal operator profiler.
-It explains the generated region. When a generated kernel declines an invocation
-or policy skips a supported candidate, the normal DuckDB executor owns the work;
-that executor work must be analyzed through DuckDB's profiler or benchmark
-runner, while the JIT trace records the admission/decline fact and
-`operator_profile_summary.csv` records the remaining physical-operator weight.
-When a compiled kernel declines and the executor fallback immediately performs
-that invocation, the fallback runtime event must use
-`execution_mode=executor_fallback` and stay separate from generated
-native/generated kernel totals. Reporting fallback executor time as native JIT time
-is forbidden.
+It explains the generated region. When policy skips a supported candidate, the
+normal DuckDB executor owns the work; that executor work must be analyzed
+through DuckDB's profiler or benchmark runner, while the JIT trace records the
+admission fact and `operator_profile_summary.csv` records the remaining
+physical-operator weight. A compiled full-pipeline kernel must not return
+`false` and then let executor fallback immediately perform that invocation.
+Reporting fallback executor time as native JIT time is forbidden.
 
 `jit_policy=force` is a diagnostic admission-bypass mode for supported
 non-overlapping executable regions. It may compile supported region candidates
@@ -2437,8 +2433,8 @@ Core module ownership follows the same trace boundary:
   suppression;
 - `src/execution/jit_region_executor.cpp` owns fused-region JIT execution hooks,
   runtime trace recording, verification against reference region execution, and
-  executor-fallback orchestration after a compiled region declines or when
-  DuckDB has pending in-process operator state to resume;
+  executor non-entry handling when DuckDB has pending in-process operator state
+  to resume;
 - `src/execution/jit_runtime.cpp` owns backend-independent runtime contracts:
   capability results, bounded events, cumulative counters, kernel trace
   identity, compile-result validation, and default backend behavior;
@@ -2455,7 +2451,7 @@ consumed by region analysis.
 and sink protocol, intermediate chunks, and the normal physical-operator path.
 It calls `JitRegionExecutor` as a core JIT boundary. The JIT boundary may use
 `PipelineExecutor` to verify semantics or execute an explicit fallback, but
-runtime trace accounting, JIT decline handling, and JIT verification harnesses
+runtime trace accounting, JIT error handling, and JIT verification harnesses
 belong in the core JIT module rather than the plain pipeline executor.
 `PipelineExecutor`'s `in_process_operators` stack is part of the DuckDB operator
 protocol; region JIT must observe it before entering generated code and must not
@@ -2573,8 +2569,8 @@ that operator exposes a backend-neutral resume contract. Core candidate
 formation does not emit these split regions; backend
 `operator-fusion-gap:upstream-operator-resume-protocol-missing` and
 `sink-fusion-gap:upstream-operator-resume-protocol-missing` checks are defensive
-only. Compiling the suffix and declining at runtime is not a native-fused
-success state.
+only. Compiling the suffix and returning `false` at runtime is not a
+native-fused success state.
 
 ## Pipeline Model
 
@@ -2843,9 +2839,9 @@ Events and counters are part of the architecture:
   shape, candidate executable pipeline shape, candidate context pipeline shape,
   candidate operator interval, candidate estimated cardinality, and region
   execution form, so long-running runtime traces remain attributable after
-  recent events are evicted. Generated-kernel rows/time, declined invocation
-  attempts, and executor-fallback rows/time are separate columns; they must not
-  be summed into a single native-runtime number.
+  recent events are evicted. Generated-kernel rows/time and executor-fallback
+  rows/time are separate columns; they must not be summed into a single
+  native-runtime number.
 
 `jit_event_log_size` bounds retained events and retained per-kernel rows. A
 value of `0` disables those retained detail views but keeps aggregate counters.
@@ -2898,7 +2894,7 @@ admission is enabled:
 - no backend include depends on DuckDB planner, optimizer, physical operator, or
   executor internals;
 - capability, admission, compile, and runtime events are separately observable;
-- fallback and decline paths are not reported as native runtime;
+- fallback and error paths are not reported as native runtime;
 - `jit_verify=true` compares the generated region against the reference path at
   region boundaries;
 - correctness tests cover vector formats, selections, nullability, exceptions,

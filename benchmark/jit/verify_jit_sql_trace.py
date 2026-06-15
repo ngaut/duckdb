@@ -474,8 +474,6 @@ def verify_flow_step_summary(trace_dir: Path, rows: list, summary_rows: list, ma
             ("source_native_invocation_count", "source_native_invocations"),
             ("source_native_runtime_time_us", "source_native_runtime_time_us"),
             ("generated_body_runtime_time_us", "generated_body_runtime_time_us"),
-            ("declined_invocation_count", "declined_invocations"),
-            ("declined_runtime_time_us", "declined_runtime_time_us"),
             ("fallback_input_rows", "fallback_input_rows"),
             ("fallback_output_rows", "fallback_output_rows"),
             ("fallback_invocation_count", "fallback_invocations"),

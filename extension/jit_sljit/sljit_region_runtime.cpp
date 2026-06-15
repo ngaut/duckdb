@@ -186,6 +186,18 @@ public:
 		return native_source;
 	}
 
+	bool CanEnterFullPipeline(JitFullPipelineRuntime &runtime, string &blocker) override {
+		if (!JitRegionABIIsFullPipeline(abi) || !HasTraceCandidate()) {
+			blocker = "sljit-full-pipeline-missing-trace-contract";
+			return false;
+		}
+		if (!native_source) {
+			blocker = "sljit-full-pipeline-missing-native-source-protocol";
+			return false;
+		}
+		return CanBindNativeOperators(runtime, blocker);
+	}
+
 	bool TryExecute(DataChunk &input, DataChunk &result, idx_t initial_idx, OperatorResultType &execute_result) override {
 		if (JitRegionABIOwnsSink(abi)) {
 			return false;
@@ -200,16 +212,14 @@ public:
 
 	bool TryExecuteFullPipeline(JitFullPipelineRuntime &runtime, JitFullPipelineResult &result) override {
 		if (!JitRegionABIIsFullPipeline(abi) || !HasTraceCandidate()) {
-			return false;
+			throw InternalException("SLJIT full pipeline kernel entered without full-pipeline trace contract");
 		}
 		if (!native_source) {
-			SetRuntimeDeclineReason("full pipeline native region requires native-source protocol");
-			return false;
+			throw InternalException("SLJIT full pipeline kernel entered without native-source protocol");
 		}
 		string blocker;
 		if (!CanBindNativeOperators(runtime, blocker)) {
-			SetRuntimeDeclineReason("native-operator-runtime-binding-blocked:" + blocker);
-			return false;
+			throw InternalException("SLJIT full pipeline native operator binding failed: %s", blocker);
 		}
 		idx_t processed_chunks = 0;
 		while (true) {

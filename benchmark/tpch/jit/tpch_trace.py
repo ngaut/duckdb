@@ -1509,8 +1509,6 @@ def new_flow_step_entry(key: tuple) -> dict:
         "source_native_invocations": 0,
         "source_native_runtime_time_us": 0,
         "generated_body_runtime_time_us": 0,
-        "declined_invocations": 0,
-        "declined_runtime_time_us": 0,
         "fallback_input_rows": 0,
         "fallback_output_rows": 0,
         "fallback_invocations": 0,
@@ -1600,8 +1598,6 @@ def collect_flow_step_summary(out_dir: Path, rows: list) -> list:
                 entry["source_native_invocations"] += row_int(counter, "source_native_invocation_count")
                 entry["source_native_runtime_time_us"] += row_int(counter, "source_native_runtime_time_us")
                 entry["generated_body_runtime_time_us"] += row_int(counter, "generated_body_runtime_time_us")
-                entry["declined_invocations"] += row_int(counter, "declined_invocation_count")
-                entry["declined_runtime_time_us"] += row_int(counter, "declined_runtime_time_us")
                 entry["fallback_input_rows"] += row_int(counter, "fallback_input_rows")
                 entry["fallback_output_rows"] += row_int(counter, "fallback_output_rows")
                 entry["fallback_invocations"] += row_int(counter, "fallback_invocation_count")

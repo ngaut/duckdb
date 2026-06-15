@@ -57,8 +57,6 @@ FLOW_STEP_SUMMARY_FIELDS = (
     "source_native_invocations",
     "source_native_runtime_time_us",
     "generated_body_runtime_time_us",
-    "declined_invocations",
-    "declined_runtime_time_us",
     "fallback_input_rows",
     "fallback_output_rows",
     "fallback_invocations",
@@ -443,9 +441,9 @@ def classify_api_test_case(test_name: str) -> tuple[str, tuple, str]:
     if "auto policy" in lower_name or "auto-rejected" in lower_name:
         trace_cases.add("region_native_filter_projection")
         areas.append("policy admission and skip evidence")
-    if "fallback" in lower_name or "declining" in lower_name or "unsupported" in lower_name:
+    if "fallback" in lower_name or "false-returning" in lower_name or "unsupported" in lower_name:
         trace_cases.add("region_unsupported_join_fallback")
-        areas.append("fallback/decline honesty")
+        areas.append("fallback/error honesty")
     if trace_cases:
         route = "api_unit_test_suite;focused_sql_trace"
     else:
@@ -551,8 +549,6 @@ def new_flow_entry(key: tuple) -> dict:
         "source_native_invocations": 0,
         "source_native_runtime_time_us": 0,
         "generated_body_runtime_time_us": 0,
-        "declined_invocations": 0,
-        "declined_runtime_time_us": 0,
         "fallback_input_rows": 0,
         "fallback_output_rows": 0,
         "fallback_invocations": 0,
@@ -632,8 +628,6 @@ def collect_flow_step_summary(out_dir: Path, rows: list) -> list:
                 entry["source_native_invocations"] += row_int(counter, "source_native_invocation_count")
                 entry["source_native_runtime_time_us"] += row_int(counter, "source_native_runtime_time_us")
                 entry["generated_body_runtime_time_us"] += row_int(counter, "generated_body_runtime_time_us")
-                entry["declined_invocations"] += row_int(counter, "declined_invocation_count")
-                entry["declined_runtime_time_us"] += row_int(counter, "declined_runtime_time_us")
                 entry["fallback_input_rows"] += row_int(counter, "fallback_input_rows")
                 entry["fallback_output_rows"] += row_int(counter, "fallback_output_rows")
                 entry["fallback_invocations"] += row_int(counter, "fallback_invocation_count")
