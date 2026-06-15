@@ -54,14 +54,6 @@ static unique_ptr<FunctionData> DuckDBJitKernelCountersBind(ClientContext &conte
 	return_types.emplace_back(LogicalType::UBIGINT);
 	names.emplace_back("runtime_time_us");
 	return_types.emplace_back(LogicalType::BIGINT);
-	names.emplace_back("source_helper_input_rows");
-	return_types.emplace_back(LogicalType::UBIGINT);
-	names.emplace_back("source_helper_output_rows");
-	return_types.emplace_back(LogicalType::UBIGINT);
-	names.emplace_back("source_helper_invocation_count");
-	return_types.emplace_back(LogicalType::UBIGINT);
-	names.emplace_back("source_helper_runtime_time_us");
-	return_types.emplace_back(LogicalType::BIGINT);
 	names.emplace_back("source_native_output_rows");
 	return_types.emplace_back(LogicalType::UBIGINT);
 	names.emplace_back("source_native_invocation_count");
@@ -169,10 +161,6 @@ static void DuckDBJitKernelCountersFunction(ClientContext &context, TableFunctio
 		output.data[col++].Append(Value::UBIGINT(entry.output_rows));
 		output.data[col++].Append(Value::UBIGINT(entry.invocation_count));
 		output.data[col++].Append(Value::BIGINT(entry.runtime_time_us));
-		output.data[col++].Append(Value::UBIGINT(entry.source_helper_input_rows));
-		output.data[col++].Append(Value::UBIGINT(entry.source_helper_output_rows));
-		output.data[col++].Append(Value::UBIGINT(entry.source_helper_invocation_count));
-		output.data[col++].Append(Value::BIGINT(entry.source_helper_runtime_time_us));
 		output.data[col++].Append(Value::UBIGINT(entry.source_native_output_rows));
 		output.data[col++].Append(Value::UBIGINT(entry.source_native_invocation_count));
 		output.data[col++].Append(Value::BIGINT(entry.source_native_runtime_time_us));

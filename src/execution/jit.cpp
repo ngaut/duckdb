@@ -253,10 +253,6 @@ static void SetRuntimeRegionExecutionForm(JitEvent &event, const JitRegionKernel
 }
 
 static void SetRuntimeMetrics(JitEvent &event, const JitRuntimeMetrics &metrics) {
-	event.source_helper_input_rows = metrics.source_helper_input_rows;
-	event.source_helper_output_rows = metrics.source_helper_output_rows;
-	event.source_helper_invocation_count = metrics.source_helper_invocation_count;
-	event.source_helper_runtime_time_us = metrics.source_helper_runtime_time_us;
 	event.source_native_output_rows = metrics.source_native_output_rows;
 	event.source_native_invocation_count = metrics.source_native_invocation_count;
 	event.source_native_runtime_time_us = metrics.source_native_runtime_time_us;

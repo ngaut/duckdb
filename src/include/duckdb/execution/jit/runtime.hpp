@@ -73,10 +73,6 @@ struct JitEvent {
 	idx_t output_rows = 0;
 	idx_t invocation_count = 0;
 	int64_t runtime_time_us = 0;
-	idx_t source_helper_input_rows = 0;
-	idx_t source_helper_output_rows = 0;
-	idx_t source_helper_invocation_count = 0;
-	int64_t source_helper_runtime_time_us = 0;
 	idx_t source_native_output_rows = 0;
 	idx_t source_native_invocation_count = 0;
 	int64_t source_native_runtime_time_us = 0;
@@ -120,10 +116,6 @@ struct JitCounter {
 	idx_t output_rows = 0;
 	idx_t invocation_count = 0;
 	int64_t runtime_time_us = 0;
-	idx_t source_helper_input_rows = 0;
-	idx_t source_helper_output_rows = 0;
-	idx_t source_helper_invocation_count = 0;
-	int64_t source_helper_runtime_time_us = 0;
 	idx_t source_native_output_rows = 0;
 	idx_t source_native_invocation_count = 0;
 	int64_t source_native_runtime_time_us = 0;
@@ -210,10 +202,6 @@ struct JitKernelCounter {
 	idx_t output_rows = 0;
 	idx_t invocation_count = 0;
 	int64_t runtime_time_us = 0;
-	idx_t source_helper_input_rows = 0;
-	idx_t source_helper_output_rows = 0;
-	idx_t source_helper_invocation_count = 0;
-	int64_t source_helper_runtime_time_us = 0;
 	idx_t source_native_output_rows = 0;
 	idx_t source_native_invocation_count = 0;
 	int64_t source_native_runtime_time_us = 0;
@@ -276,10 +264,6 @@ enum class JitGeneratedBodyPath : uint8_t { FLAT_ALL_VALID, SHARED_SELECTION_ALL
 enum class JitFusedRuntimeStage : uint8_t { PREPARE, GROUP, STATE_BIND, UPDATE, FINISH };
 
 struct JitRuntimeMetrics {
-	idx_t source_helper_input_rows = 0;
-	idx_t source_helper_output_rows = 0;
-	idx_t source_helper_invocation_count = 0;
-	int64_t source_helper_runtime_time_us = 0;
 	idx_t source_native_output_rows = 0;
 	idx_t source_native_invocation_count = 0;
 	int64_t source_native_runtime_time_us = 0;

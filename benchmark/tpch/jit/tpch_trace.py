@@ -76,8 +76,8 @@ EXPRESSION_FALLBACK_FIELD_RE = re.compile(r"(reason|class|type|return|function)=
 SOURCE_BOUNDARY_MARKERS = (
     ("table_scan_generated_source_filter", "generated source-prefix table scan filters"),
     ("table_scan_native_source", "DuckDB native table scan source runtime"),
-    ("table_scan_source_helper", "DuckDB table scan source helper boundary"),
-    ("duckdb_scan_source_helper", "DuckDB scan source helper boundary"),
+    ("table_scan_source_boundary", "DuckDB table scan source boundary"),
+    ("duckdb_scan_source_boundary", "DuckDB scan source boundary"),
     ("stateful_native_state_scan", "DuckDB native state scan source runtime"),
     ("stateful_native_state_scan", "DuckDB hash join native state scan protocol"),
     ("stateful_native_state_scan", "DuckDB hash aggregate native state scan protocol"),
@@ -903,7 +903,7 @@ def source_runtime_candidate_key(query: str, policy: str, event: dict) -> tuple:
     )
 
 
-def collect_source_helper_runtime_by_candidate(out_dir: Path, rows: list) -> dict:
+def collect_source_native_runtime_by_candidate(out_dir: Path, rows: list) -> dict:
     runtime_by_candidate = collections.defaultdict(collections.Counter)
     executed_runtime_by_candidate = collections.defaultdict(collections.Counter)
     boundary_runtime_keys = set()
@@ -936,18 +936,6 @@ def collect_source_helper_runtime_by_candidate(out_dir: Path, rows: list) -> dic
                         event, "source_native_runtime_time_us"
                     )
                 elif event.get("status") == "executed":
-                    executed_runtime_by_candidate[key]["source_helper_input_rows"] += row_int(
-                        event, "source_helper_input_rows"
-                    )
-                    executed_runtime_by_candidate[key]["source_helper_output_rows"] += row_int(
-                        event, "source_helper_output_rows"
-                    )
-                    executed_runtime_by_candidate[key]["source_helper_invocations"] += row_int(
-                        event, "source_helper_invocation_count"
-                    )
-                    executed_runtime_by_candidate[key]["source_helper_runtime_time_us"] += row_int(
-                        event, "source_helper_runtime_time_us"
-                    )
                     executed_runtime_by_candidate[key]["source_native_output_rows"] += row_int(
                         event, "source_native_output_rows"
                     )
@@ -1084,10 +1072,6 @@ def new_source_boundary_summary_entry(policy: str, event: dict, details: dict, s
         "grouped_state_layout_ready": details["grouped_state_layout_ready"],
         "grouped_state_offsets": details["grouped_state_offsets"],
         "grouped_state_payload_sizes": details["grouped_state_payload_sizes"],
-        "source_helper_input_rows": 0,
-        "source_helper_output_rows": 0,
-        "source_helper_invocations": 0,
-        "source_helper_runtime_time_us": 0,
         "source_native_output_rows": 0,
         "source_native_invocations": 0,
         "source_native_runtime_time_us": 0,
@@ -1122,10 +1106,6 @@ def accumulate_source_boundary_entry(entry: dict, source_entry: dict) -> None:
     runtime_identity = (source_entry["query"], policy, event.get("candidate_id", ""))
     if runtime and runtime_identity not in entry["runtime_keys"]:
         entry["runtime_keys"].add(runtime_identity)
-        entry["source_helper_input_rows"] += runtime["source_helper_input_rows"]
-        entry["source_helper_output_rows"] += runtime["source_helper_output_rows"]
-        entry["source_helper_invocations"] += runtime["source_helper_invocations"]
-        entry["source_helper_runtime_time_us"] += runtime["source_helper_runtime_time_us"]
         entry["source_native_output_rows"] += runtime["source_native_output_rows"]
         entry["source_native_invocations"] += runtime["source_native_invocations"]
         entry["source_native_runtime_time_us"] += runtime["source_native_runtime_time_us"]
@@ -1206,11 +1186,11 @@ def source_boundary_feature_text(entry: dict) -> str:
 
 def collect_source_boundary_summary(out_dir: Path, rows: list) -> list:
     summary = {}
-    source_helper_runtime = collect_source_helper_runtime_by_candidate(out_dir, rows)
+    source_native_runtime_by_candidate = collect_source_native_runtime_by_candidate(out_dir, rows)
     for source_entry in iter_source_boundary_event_entries(out_dir, rows):
         runtime_key = source_runtime_candidate_key(source_entry["query"], source_entry["policy"], source_entry["event"])
         if source_entry["event"].get("status") == "compiled":
-            source_entry["runtime"] = source_helper_runtime.get(runtime_key)
+            source_entry["runtime"] = source_native_runtime_by_candidate.get(runtime_key)
         else:
             source_entry["runtime"] = None
         key = source_boundary_key(
@@ -1525,10 +1505,6 @@ def new_flow_step_entry(key: tuple) -> dict:
         "output_rows": 0,
         "invocations": 0,
         "runtime_time_us": 0,
-        "source_helper_input_rows": 0,
-        "source_helper_output_rows": 0,
-        "source_helper_invocations": 0,
-        "source_helper_runtime_time_us": 0,
         "source_native_output_rows": 0,
         "source_native_invocations": 0,
         "source_native_runtime_time_us": 0,
@@ -1576,10 +1552,6 @@ def collect_flow_step_summary(out_dir: Path, rows: list) -> list:
                         entry["output_rows"] += row_int(event, "output_rows")
                         entry["invocations"] += row_int(event, "invocation_count")
                         entry["runtime_time_us"] += row_int(event, "runtime_time_us")
-                        entry["source_helper_input_rows"] += row_int(event, "source_helper_input_rows")
-                        entry["source_helper_output_rows"] += row_int(event, "source_helper_output_rows")
-                        entry["source_helper_invocations"] += row_int(event, "source_helper_invocation_count")
-                        entry["source_helper_runtime_time_us"] += row_int(event, "source_helper_runtime_time_us")
                         entry["source_native_output_rows"] += row_int(event, "source_native_output_rows")
                         entry["source_native_invocations"] += row_int(event, "source_native_invocation_count")
                         entry["source_native_runtime_time_us"] += row_int(event, "source_native_runtime_time_us")
@@ -1624,10 +1596,6 @@ def collect_flow_step_summary(out_dir: Path, rows: list) -> list:
                 entry["output_rows"] += row_int(counter, "output_rows")
                 entry["invocations"] += invocation_count
                 entry["runtime_time_us"] += row_int(counter, "runtime_time_us")
-                entry["source_helper_input_rows"] += row_int(counter, "source_helper_input_rows")
-                entry["source_helper_output_rows"] += row_int(counter, "source_helper_output_rows")
-                entry["source_helper_invocations"] += row_int(counter, "source_helper_invocation_count")
-                entry["source_helper_runtime_time_us"] += row_int(counter, "source_helper_runtime_time_us")
                 entry["source_native_output_rows"] += row_int(counter, "source_native_output_rows")
                 entry["source_native_invocations"] += row_int(counter, "source_native_invocation_count")
                 entry["source_native_runtime_time_us"] += row_int(counter, "source_native_runtime_time_us")
@@ -1964,10 +1932,6 @@ def collect_kernel_runtime_summary(out_dir: Path, rows: list) -> list:
                         "output_rows": 0,
                         "invocations": 0,
                         "runtime_time_us": 0,
-                        "source_helper_input_rows": 0,
-                        "source_helper_output_rows": 0,
-                        "source_helper_invocations": 0,
-                        "source_helper_runtime_time_us": 0,
                         "source_native_output_rows": 0,
                         "source_native_invocations": 0,
                         "source_native_runtime_time_us": 0,
@@ -1998,10 +1962,6 @@ def collect_kernel_runtime_summary(out_dir: Path, rows: list) -> list:
                 entry["output_rows"] += row_int(counter, "output_rows")
                 entry["invocations"] += invocation_count
                 entry["runtime_time_us"] += row_int(counter, "runtime_time_us")
-                entry["source_helper_input_rows"] += row_int(counter, "source_helper_input_rows")
-                entry["source_helper_output_rows"] += row_int(counter, "source_helper_output_rows")
-                entry["source_helper_invocations"] += row_int(counter, "source_helper_invocation_count")
-                entry["source_helper_runtime_time_us"] += row_int(counter, "source_helper_runtime_time_us")
                 entry["source_native_output_rows"] += row_int(counter, "source_native_output_rows")
                 entry["source_native_invocations"] += row_int(counter, "source_native_invocation_count")
                 entry["source_native_runtime_time_us"] += row_int(counter, "source_native_runtime_time_us")
@@ -2041,21 +2001,14 @@ def admission_efficiency_key(row: dict) -> tuple:
     )
 
 
-def classify_admission_efficiency(
-    row: dict, region: dict, helper_runtime: int, native_runtime: int, generated_runtime: int
-) -> tuple:
+def classify_admission_efficiency(row: dict, region: dict, native_runtime: int, generated_runtime: int) -> tuple:
     runtime_time = row_int(row, "runtime_time_us")
-    component_time = helper_runtime + native_runtime + generated_runtime
+    component_time = native_runtime + generated_runtime
     if row_int(row, "reached_kernels") <= 0 or row_int(row, "invocations") <= 0:
         return "not_reached", "compiled_kernel_not_reached"
     if runtime_time <= 0 and component_time <= 0:
         return "unmeasured", "compiled_kernel_without_runtime_measurement"
     denominator = max(runtime_time, component_time)
-    if helper_runtime * 100 >= denominator * 80:
-        root_cause = "helper_dominated_compiled_region"
-        if row.get("policy") == "auto":
-            root_cause = "auto_admitted_helper_dominated_region"
-        return "helper_dominated", root_cause
     if native_runtime * 100 >= denominator * 50:
         if row_int(region, "candidate_source_filter_count") > 0 and generated_runtime * 100 < denominator * 20:
             return "native_source_dominant", "source_filter_loop_not_generated"
@@ -2078,15 +2031,13 @@ def collect_admission_efficiency_summary(out_dir: Path, rows: list) -> list:
     result = []
     for kernel in collect_kernel_runtime_summary(out_dir, rows):
         region = region_by_key.get(admission_efficiency_key(kernel), {})
-        source_helper_runtime = row_int(kernel, "source_helper_runtime_time_us")
-        helper_runtime = source_helper_runtime
         source_native_runtime = row_int(kernel, "source_native_runtime_time_us")
         generated_body_runtime = row_int(kernel, "generated_body_runtime_time_us")
         runtime_time = row_int(kernel, "runtime_time_us")
-        component_time = helper_runtime + source_native_runtime + generated_body_runtime
+        component_time = source_native_runtime + generated_body_runtime
         denominator = max(runtime_time, component_time)
         efficiency_class, root_cause = classify_admission_efficiency(
-            kernel, region, helper_runtime, source_native_runtime, generated_body_runtime
+            kernel, region, source_native_runtime, generated_body_runtime
         )
         result.append(
             {
@@ -2112,9 +2063,6 @@ def collect_admission_efficiency_summary(out_dir: Path, rows: list) -> list:
                 "output_rows": kernel["output_rows"],
                 "invocations": kernel["invocations"],
                 "runtime_time_us": kernel["runtime_time_us"],
-                "helper_runtime_time_us": helper_runtime,
-                "helper_runtime_percent": format_percent(helper_runtime, denominator),
-                "source_helper_runtime_time_us": source_helper_runtime,
                 "source_native_runtime_time_us": source_native_runtime,
                 "source_native_runtime_percent": format_percent(source_native_runtime, denominator),
                 "generated_body_runtime_time_us": generated_body_runtime,
@@ -2493,15 +2441,6 @@ def collect_query_gap_summary(out_dir: Path, rows: list) -> list:
                 "force_runtime_output_rows": sum(row_int(entry, "output_rows") for entry in force_kernels),
                 "force_runtime_invocations": sum(row_int(entry, "invocations") for entry in force_kernels),
                 "force_runtime_time_us": sum(row_int(entry, "runtime_time_us") for entry in force_kernels),
-                "force_source_helper_output_rows": sum(
-                    row_int(entry, "source_helper_output_rows") for entry in force_kernels
-                ),
-                "force_source_helper_invocations": sum(
-                    row_int(entry, "source_helper_invocations") for entry in force_kernels
-                ),
-                "force_source_helper_runtime_time_us": sum(
-                    row_int(entry, "source_helper_runtime_time_us") for entry in force_kernels
-                ),
                 "force_source_native_output_rows": sum(
                     row_int(entry, "source_native_output_rows") for entry in force_kernels
                 ),
@@ -2772,10 +2711,6 @@ def accumulate_capability_runtime_entry(entry: dict, kernel_entry: dict) -> None
     entry["runtime_output_rows"] += row_int(kernel_entry, "output_rows")
     entry["runtime_invocations"] += row_int(kernel_entry, "invocations")
     entry["runtime_time_us"] += row_int(kernel_entry, "runtime_time_us")
-    entry["source_helper_input_rows"] += row_int(kernel_entry, "source_helper_input_rows")
-    entry["source_helper_output_rows"] += row_int(kernel_entry, "source_helper_output_rows")
-    entry["source_helper_invocations"] += row_int(kernel_entry, "source_helper_invocations")
-    entry["source_helper_runtime_time_us"] += row_int(kernel_entry, "source_helper_runtime_time_us")
     entry["source_native_output_rows"] += row_int(kernel_entry, "source_native_output_rows")
     entry["source_native_invocations"] += row_int(kernel_entry, "source_native_invocations")
     entry["source_native_runtime_time_us"] += row_int(kernel_entry, "source_native_runtime_time_us")
@@ -3094,11 +3029,11 @@ def collect_source_boundary_priority_summary(out_dir: Path, rows: list) -> list:
         profile_total_by_policy[entry["policy"]] += row_int(entry, "operator_time_us")
 
     summary = {}
-    source_helper_runtime = collect_source_helper_runtime_by_candidate(out_dir, rows)
+    source_native_runtime_by_candidate = collect_source_native_runtime_by_candidate(out_dir, rows)
     for source_entry in iter_source_boundary_event_entries(out_dir, rows):
         runtime_key = source_runtime_candidate_key(source_entry["query"], source_entry["policy"], source_entry["event"])
         if source_entry["event"].get("status") == "compiled":
-            source_entry["runtime"] = source_helper_runtime.get(runtime_key)
+            source_entry["runtime"] = source_native_runtime_by_candidate.get(runtime_key)
         else:
             source_entry["runtime"] = None
         key = source_boundary_key(
@@ -3212,10 +3147,6 @@ def collect_source_fusion_gap_summary(out_dir: Path, rows: list) -> list:
                 "runtime_output_rows": 0,
                 "runtime_invocations": 0,
                 "runtime_time_us": 0,
-                "source_helper_input_rows": 0,
-                "source_helper_output_rows": 0,
-                "source_helper_invocations": 0,
-                "source_helper_runtime_time_us": 0,
                 "source_native_output_rows": 0,
                 "source_native_invocations": 0,
                 "source_native_runtime_time_us": 0,
@@ -3250,10 +3181,6 @@ def collect_source_fusion_gap_summary(out_dir: Path, rows: list) -> list:
             entry["runtime_output_rows"] += row_int(runtime, "output_rows")
             entry["runtime_invocations"] += row_int(runtime, "invocations")
             entry["runtime_time_us"] += row_int(runtime, "runtime_time_us")
-            entry["source_helper_input_rows"] += row_int(runtime, "source_helper_input_rows")
-            entry["source_helper_output_rows"] += row_int(runtime, "source_helper_output_rows")
-            entry["source_helper_invocations"] += row_int(runtime, "source_helper_invocations")
-            entry["source_helper_runtime_time_us"] += row_int(runtime, "source_helper_runtime_time_us")
             entry["source_native_output_rows"] += row_int(runtime, "source_native_output_rows")
             entry["source_native_invocations"] += row_int(runtime, "source_native_invocations")
             entry["source_native_runtime_time_us"] += row_int(runtime, "source_native_runtime_time_us")
@@ -3468,11 +3395,6 @@ def collect_fusion_blocker_summary(out_dir: Path, rows: list) -> list:
         entry["runtime_output_rows"] = sum(row_int(runtime, "output_rows") for runtime in runtime_rows)
         entry["runtime_invocations"] = sum(row_int(runtime, "invocations") for runtime in runtime_rows)
         entry["runtime_time_us"] = sum(row_int(runtime, "runtime_time_us") for runtime in runtime_rows)
-        entry["source_helper_output_rows"] = sum(row_int(runtime, "source_helper_output_rows") for runtime in runtime_rows)
-        entry["source_helper_invocations"] = sum(row_int(runtime, "source_helper_invocations") for runtime in runtime_rows)
-        entry["source_helper_runtime_time_us"] = sum(
-            row_int(runtime, "source_helper_runtime_time_us") for runtime in runtime_rows
-        )
         entry["source_native_output_rows"] = sum(row_int(runtime, "source_native_output_rows") for runtime in runtime_rows)
         entry["source_native_invocations"] = sum(row_int(runtime, "source_native_invocations") for runtime in runtime_rows)
         entry["source_native_runtime_time_us"] = sum(
@@ -3652,10 +3574,6 @@ def collect_pipeline_runtime_summary(out_dir: Path, rows: list) -> list:
                 "runtime_output_rows": 0,
                 "runtime_invocations": 0,
                 "runtime_time_us": 0,
-                "source_helper_input_rows": 0,
-                "source_helper_output_rows": 0,
-                "source_helper_invocations": 0,
-                "source_helper_runtime_time_us": 0,
                 "source_native_output_rows": 0,
                 "source_native_invocations": 0,
                 "source_native_runtime_time_us": 0,
@@ -3671,10 +3589,6 @@ def collect_pipeline_runtime_summary(out_dir: Path, rows: list) -> list:
         entry["runtime_output_rows"] += row_int(kernel_entry, "output_rows")
         entry["runtime_invocations"] += row_int(kernel_entry, "invocations")
         entry["runtime_time_us"] += row_int(kernel_entry, "runtime_time_us")
-        entry["source_helper_input_rows"] += row_int(kernel_entry, "source_helper_input_rows")
-        entry["source_helper_output_rows"] += row_int(kernel_entry, "source_helper_output_rows")
-        entry["source_helper_invocations"] += row_int(kernel_entry, "source_helper_invocations")
-        entry["source_helper_runtime_time_us"] += row_int(kernel_entry, "source_helper_runtime_time_us")
         entry["source_native_output_rows"] += row_int(kernel_entry, "source_native_output_rows")
         entry["source_native_invocations"] += row_int(kernel_entry, "source_native_invocations")
         entry["source_native_runtime_time_us"] += row_int(kernel_entry, "source_native_runtime_time_us")
@@ -3801,18 +3715,6 @@ def collect_pipeline_runtime_summary(out_dir: Path, rows: list) -> list:
                 if entry["status"] == "compiled"
                 else 0,
                 "runtime_time_us": row_int(runtime_entry, "runtime_time_us") if entry["status"] == "compiled" else 0,
-                "source_helper_input_rows": row_int(runtime_entry, "source_helper_input_rows")
-                if entry["status"] == "compiled"
-                else 0,
-                "source_helper_output_rows": row_int(runtime_entry, "source_helper_output_rows")
-                if entry["status"] == "compiled"
-                else 0,
-                "source_helper_invocations": row_int(runtime_entry, "source_helper_invocations")
-                if entry["status"] == "compiled"
-                else 0,
-                "source_helper_runtime_time_us": row_int(runtime_entry, "source_helper_runtime_time_us")
-                if entry["status"] == "compiled"
-                else 0,
                 "source_native_output_rows": row_int(runtime_entry, "source_native_output_rows")
                 if entry["status"] == "compiled"
                 else 0,
@@ -4003,18 +3905,6 @@ SELECT
     coalesce(sum(runtime_time_us) FILTER (
         WHERE phase='runtime'
     ), 0) AS runtime_time_us,
-    coalesce(sum(source_helper_input_rows) FILTER (
-        WHERE phase='runtime'
-    ), 0) AS source_helper_input_rows,
-    coalesce(sum(source_helper_output_rows) FILTER (
-        WHERE phase='runtime'
-    ), 0) AS source_helper_output_rows,
-    coalesce(sum(source_helper_invocation_count) FILTER (
-        WHERE phase='runtime'
-    ), 0) AS source_helper_invocations,
-    coalesce(sum(source_helper_runtime_time_us) FILTER (
-        WHERE phase='runtime'
-    ), 0) AS source_helper_runtime_time_us,
     coalesce(sum(source_native_output_rows) FILTER (
         WHERE phase='runtime'
     ), 0) AS source_native_output_rows,
@@ -4154,10 +4044,6 @@ SELECT
     invocation_count,
     runtime_time_us,
     runtime_result,
-    source_helper_input_rows,
-    source_helper_output_rows,
-    source_helper_invocation_count,
-    source_helper_runtime_time_us,
     source_native_output_rows,
     source_native_invocation_count,
     source_native_runtime_time_us,
@@ -4672,14 +4558,13 @@ def write_report(args: argparse.Namespace, out_dir: Path, rows: list) -> None:
         lines.append("## Admission Efficiency Summary")
         lines.append("")
         lines.append(
-            "| query | policy | mode | form | efficiency | root_cause | runtime_us | helper_pct | generated_pct | "
+            "| query | policy | mode | form | efficiency | root_cause | runtime_us | generated_pct | "
             "native_source_pct | admission_shape | pipeline |"
         )
-        lines.append("| --- | --- | --- | --- | --- | --- | ---: | ---: | ---: | ---: | --- | --- |")
+        lines.append("| --- | --- | --- | --- | --- | --- | ---: | ---: | ---: | --- | --- |")
         top_admission_efficiency = sorted(
             admission_efficiency_summary,
             key=lambda entry: (
-                entry["efficiency_class"] != "helper_dominated",
                 -row_int(entry, "runtime_time_us"),
                 entry["query"],
                 entry["policy"],
@@ -4688,7 +4573,7 @@ def write_report(args: argparse.Namespace, out_dir: Path, rows: list) -> None:
         for entry in top_admission_efficiency:
             lines.append(
                 "| {query} | {policy} | {mode} | {form} | {efficiency} | {root_cause} | {runtime_us} | "
-                "{helper_pct} | {generated_pct} | {native_pct} | {shape_key} | {pipeline} |".format(
+                "{generated_pct} | {native_pct} | {shape_key} | {pipeline} |".format(
                     query=entry["query"],
                     policy=entry["policy"],
                     mode=entry["execution_mode"],
@@ -4696,7 +4581,6 @@ def write_report(args: argparse.Namespace, out_dir: Path, rows: list) -> None:
                     efficiency=entry["efficiency_class"],
                     root_cause=entry["root_cause"],
                     runtime_us=entry["runtime_time_us"],
-                    helper_pct=entry["helper_runtime_percent"],
                     generated_pct=entry["generated_body_runtime_percent"],
                     native_pct=entry["source_native_runtime_percent"],
                     shape_key=truncate_text(entry["admission_shape_key"], 72).replace("|", "\\|"),
@@ -4820,8 +4704,8 @@ def write_report(args: argparse.Namespace, out_dir: Path, rows: list) -> None:
                     profile_percent=entry["profile_percent_of_query_policy"],
                     runtime_rows=entry["runtime_input_rows"],
                     runtime_us=entry["runtime_time_us"],
-                    source_rows=entry["source_helper_output_rows"],
-                    source_us=entry["source_helper_runtime_time_us"],
+                    source_rows=entry["source_native_output_rows"],
+                    source_us=entry["source_native_runtime_time_us"],
                     occurrences=entry["occurrences"],
                     profile_operators=truncate_text(entry["profile_operators"], 80).replace("|", "\\|"),
                     candidate_scopes=truncate_text(entry["candidate_scopes"], 60).replace("|", "\\|"),
@@ -4937,8 +4821,8 @@ def write_report(args: argparse.Namespace, out_dir: Path, rows: list) -> None:
                     profile_percent=entry["profile_percent_of_policy"],
                     runtime_rows=entry["runtime_input_rows"],
                     runtime_us=entry["runtime_time_us"],
-                    source_rows=entry["source_helper_output_rows"],
-                    source_us=entry["source_helper_runtime_time_us"],
+                    source_rows=entry["source_native_output_rows"],
+                    source_us=entry["source_native_runtime_time_us"],
                     occurrences=entry["occurrences"],
                     queries=entry["query_examples"].replace("|", "\\|"),
                     profile_operators=truncate_text(entry["profile_operators"], 80).replace("|", "\\|"),
@@ -4991,8 +4875,8 @@ def write_report(args: argparse.Namespace, out_dir: Path, rows: list) -> None:
                     filters=entry["filter_count"],
                     dynamic=entry["dynamic_filters"],
                     in_out=entry["in_out_function"],
-                    source_rows=entry["source_helper_output_rows"],
-                    source_us=entry["source_helper_runtime_time_us"],
+                    source_rows=entry["source_native_output_rows"],
+                    source_us=entry["source_native_runtime_time_us"],
                     occurrences=entry["occurrences"],
                     events=entry["region_events"],
                     queries=entry["query_examples"].replace("|", "\\|"),
@@ -5040,8 +4924,8 @@ def write_report(args: argparse.Namespace, out_dir: Path, rows: list) -> None:
                     function=entry["scan_function"],
                     profile_us=entry["profile_time_us"],
                     profile_pct=entry["profile_percent_of_policy"],
-                    source_rows=entry["source_helper_output_rows"],
-                    source_us=entry["source_helper_runtime_time_us"],
+                    source_rows=entry["source_native_output_rows"],
+                    source_us=entry["source_native_runtime_time_us"],
                     occurrences=entry["occurrences"],
                     queries=entry["query_examples"].replace("|", "\\|"),
                     profile_operators=truncate_text(entry["profile_operators"], 80).replace("|", "\\|"),
@@ -5093,8 +4977,8 @@ def write_report(args: argparse.Namespace, out_dir: Path, rows: list) -> None:
                     function=entry["scan_function"],
                     profile_us=entry["profile_time_us"],
                     profile_pct=entry["profile_percent_of_policy"],
-                    source_rows=entry["source_helper_output_rows"],
-                    source_us=entry["source_helper_runtime_time_us"],
+                    source_rows=entry["source_native_output_rows"],
+                    source_us=entry["source_native_runtime_time_us"],
                     occurrences=entry["occurrences"],
                     queries=entry["query_examples"].replace("|", "\\|"),
                     shapes=truncate_text(entry["candidate_shapes"], 60).replace("|", "\\|"),
@@ -5142,7 +5026,7 @@ def write_report(args: argparse.Namespace, out_dir: Path, rows: list) -> None:
                     native_blocker=entry["native_source_blocker"] or "none",
                     profile_us=entry["profile_time_us"],
                     runtime_rows=entry["runtime_input_rows"],
-                    source_us=entry["source_helper_runtime_time_us"],
+                    source_us=entry["source_native_runtime_time_us"],
                     body_us=entry["generated_body_runtime_time_us"],
                     occurrences=entry["occurrences"],
                     queries=entry["query_examples"].replace("|", "\\|"),

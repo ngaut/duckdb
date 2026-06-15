@@ -1040,7 +1040,7 @@ state protocol instead of collapsing every sink to a generic sink label.
 planner output is intentionally narrow: `source_pipeline` for one maximal
 generated prefix and `full_pipeline` for source-to-sink ownership. Source JIT
 has a core-owned source-prefix runtime ABI: `FetchFromSource` owns DuckDB source
-state, calls the normal source helper when the source is not native, closes
+state, calls the normal source boundary when the source is not native, closes
 source profiling on the raw source chunk, and then invokes a generated chunk
 kernel for the admitted prefix. Source-pipeline kernels must advertise
 `CanExecuteSourcePipeline()`, and the core executor returns the next operator
@@ -1419,7 +1419,7 @@ or nullable chunks that do not meet the stronger invariants.
 
 Source-prefix runtime tracing must preserve that ownership split. `GetData`
 helper fetch time is measured in `PipelineExecutor::FetchFromSource` and
-recorded as a `source_helper` runtime event with `source_helper_*` rows,
+recorded as a `source_boundary` runtime event with `source_boundary_*` rows,
 invocations, and time. Generated-prefix execution records normal runtime rows
 and elapsed generated-kernel time. This prevents a DuckDB source boundary from
 being counted as native/generated row execution while still making the remaining
@@ -1631,17 +1631,12 @@ timing guesses. The JIT event stream therefore has two phases:
   kernel;
 - `runtime`: actual kernel invocations, linked back to the compiled kernel ID,
   with input rows, output rows, invocation count, elapsed kernel time, and the
-  DuckDB operator result or runtime action. Source-prefix fetch helpers use the
-  same runtime identity but populate `source_helper_input_rows`,
-  `source_helper_output_rows`, `source_helper_invocation_count`, and
-  `source_helper_runtime_time_us` so source-helper work is not mixed into
-  generated/native kernel row counters.
-  Full-pipeline region runtime also records `source_native_output_rows`,
-  `source_native_invocation_count`, `source_native_runtime_time_us`, fused stage
-  times, and `generated_body_runtime_time_us`. This separates DuckDB source
-  protocol cost from the backend-owned generated body and native sink/update
-  stages, which is the required evidence trail for moving from source-helper
-  generated regions toward materialization-free fused operator regions.
+  DuckDB operator result or runtime action. Full-pipeline region runtime records
+  `source_native_output_rows`, `source_native_invocation_count`,
+  `source_native_runtime_time_us`, fused stage times, and
+  `generated_body_runtime_time_us`. DuckDB `GetData` source boundaries remain
+  decision/compile evidence until a native source protocol exists; they do not
+  get their own JIT runtime counter family.
 
 Full-pipeline kernels are already a JIT-local multi-chunk execution unit. They
 consume the executor's `ExecutionBudget` through `JitFullPipelineRuntime::MaxChunks()`
@@ -1649,8 +1644,7 @@ and may fetch/process multiple `STANDARD_VECTOR_SIZE` DuckDB chunks inside one
 runtime event. This is the correct batching boundary for JIT profitability:
 larger JIT work units must be expressed as fused-region runtime ownership, not as a global `STANDARD_VECTOR_SIZE` change that perturbs unrelated DuckDB
 operators, storage, compression, and update paths. The evidence for this
-contract is `source_native_invocation_count` or `source_helper_invocation_count`
-greater than one on a single full-pipeline runtime event.
+contract is `source_native_invocation_count` greater than one on a single full-pipeline runtime event.
 
 Runtime tracing is controlled by `jit_trace_runtime=false` by default. Turning
 it on records bounded per-kernel runtime events in the same database-owned ring
@@ -1873,19 +1867,19 @@ Workload traces must include a capability-priority summary.
 policy, and operator, and joins compiled keys with retained
 `kernel_runtime_summary` rows by the executable region identity. Profile time is
 counted once per query/operator/capability key so repeated region events cannot
-inflate priority. Generated runtime and source-helper runtime are counted once
+inflate priority. Generated runtime and native-source runtime are counted once
 per compiled kernel/capability key, so a compiled region with multiple nodes in
 the same gap class cannot double-count its runtime. This is the no-guessing
 investment-order artifact: occurrence counts explain how widely a capability is
 missing; priority rows explain how much profiled runtime that capability covers,
-how much generated code actually ran, and how much source-helper work remained
-around compiled partial regions.
+how much generated code actually ran, and how much native source protocol work
+remained around compiled regions.
 
 Workload traces must include a query-level capability-priority summary.
 `query_capability_priority_summary` uses the same capability keys as
 `capability_priority_summary`, but keeps query identity in the key and computes
 profile percentage relative to that query/policy. It must also carry the same
-generated runtime and source-helper runtime columns as
+generated runtime and native-source runtime columns as
 `capability_priority_summary` and the verifier must prove that query-level
 runtime totals roll up exactly to the workload-level priority rows. This is the
 query-by-query root-cause artifact: q06-style cases where native code compiled
@@ -1914,8 +1908,8 @@ pipeline shape, candidate context pipeline shape, and candidate scope. Candidate
 IDs are only unique inside a local compilation context and must never be used
 alone. The joined source protocol inventory shows both compile-time boundary
 shape and actual native-source rows/time. Skipped
-or unsupported rows may have zero source-helper runtime because no generated
-source-prefix kernel was reached.
+or unsupported rows have no source runtime because no native source protocol
+was reached.
 Stateful source rows for `HASH_JOIN` must expose the join protocol
 inventory: join type, condition count, equality/non-equality/null-equal
 comparison counts, key logical types, comparison operators, payload columns,
@@ -2062,7 +2056,7 @@ query, policy, and source operator. It is the cost-ranked version of the source
 protocol inventory: count rows explain how often a source boundary appears;
 priority rows explain whether table scans, join-as-source state, aggregate
 state, CTE/materialization sources, or non-table scan sources own the measured
-runtime. It carries the same `source_helper_*` totals as
+runtime. It carries the same `source_boundary_*` totals as
 `source_boundary_summary`, plus deterministic operator-profiler attribution.
 When multiple source-boundary protocol rows reference the same
 query/policy/operator profile bucket, profiler time must be allocated
@@ -2083,7 +2077,7 @@ operator, selected source execution mode, `native_source_status`,
 `native_source_required_capability`, `native_source_protocol`,
 `native_source_blocker`, admission shape keys, candidate shapes and scopes,
 profiler attribution, and measured kernel runtime fields including
-`runtime_time_us`, `source_helper_*`, `source_native_*`, fused stage timings, and
+`runtime_time_us`, `source_boundary_*`, `source_native_*`, fused stage timings, and
 `generated_body_runtime_time_us`.
 This is the fused-region architecture target. A non-fused source-prefix
 filter/projection region is not an admission or threshold problem; it is the
@@ -2214,7 +2208,7 @@ kernel lifecycle counters and profiler attribution by the same executable
 pipeline shape, context pipeline shape, and candidate scope. This file is the production
 step-by-step view: for each candidate pipeline it shows decision count, stage
 cost, compiled/reached/row-processing/unreached kernel counts, runtime rows,
-runtime time, source-helper rows/time, profile time, profile operators,
+runtime time, native-source rows/time, profile time, profile operators,
 capability gaps, and query examples. It must not treat source context as executable native code; compiled
 rows use executable shape attribution, while unsupported rows may use context
 shape to explain scan, join, aggregate, sort, materialization, and sink
@@ -2224,15 +2218,11 @@ Workload traces must include an admission-efficiency summary.
 `admission_efficiency_summary` joins compiled-region admission metadata with
 kernel runtime ownership by the same query, policy, execution mode, region form,
 candidate shape, executable pipeline shape, context pipeline shape, and
-candidate scope. It classifies each compiled runtime row as helper-dominated,
-native-source-dominant, generated-body-dominant, mixed, not reached, or
-unmeasured. This is the production-safe answer to "did the admitted JIT region
-actually own the hot runtime?" A helper-dominated auto row is recorded as
-`auto_admitted_helper_dominated_region`; it is evidence that the current region
-shape needs native operator/source ownership or should not be used as speedup
-proof. The verifier must require the file and validate it against
-`kernel_runtime_summary`, but it must not require helper-dominated auto regions
-to keep existing after the architecture is fixed.
+candidate scope. It classifies each compiled runtime row as native-source
+dominant, generated-body dominant, mixed, not reached, or unmeasured. This is the
+production-safe answer to "did the admitted JIT region actually own the hot
+runtime?" The verifier must require the file and validate it against
+`kernel_runtime_summary`.
 
 The trace directory must be machine-verifiable. `verify_tpch_trace.py` is the
 contract gate for TPC-H trace artifacts: it checks exact q01-q22 query identity

@@ -1449,7 +1449,7 @@ static SljitRegionNodePlan PlanSljitSourceNode(const JitRegionIRNode &node, cons
 		result.kind = JitLoweringKind::FALLBACK;
 		result.reason = "DuckDB source GetData helper boundary;source-fusion-gap:requires-native-source;"
 		                "source_execution=duckdb-getdata-helper";
-		result.reason += ";source-strategy=duckdb-source-helper";
+		result.reason += ";source-strategy=duckdb-source-boundary";
 		result.reason += ";source_filter_count=" + std::to_string(node.source->filters.size());
 		result.reason += ";source_prefix_input_columns=" + std::to_string(protocol.source_prefix_input_column_count);
 		result.reason += ";source_prefix_filter_prune_required=" +
@@ -1471,7 +1471,7 @@ static SljitRegionNodePlan PlanSljitSourceNode(const JitRegionIRNode &node, cons
 	}
 	if (node.operator_name == "TABLE_SCAN" &&
 	    !node.source->table_scan_protocol.present) {
-		return SljitRegionFallbackNode("table scan source helper requires typed table scan protocol IR");
+		return SljitRegionFallbackNode("table scan source boundary requires typed table scan protocol IR");
 	}
 	if (!node.source->filters.empty()) {
 		if (!node.source->table_scan_protocol.present) {

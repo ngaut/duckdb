@@ -542,10 +542,6 @@ def accumulate_capability_runtime_entry(entry: dict, kernel_row: dict) -> None:
     entry["runtime_output_rows"] += row_int(kernel_row, "output_rows")
     entry["runtime_invocations"] += row_int(kernel_row, "invocations")
     entry["runtime_time_us"] += row_int(kernel_row, "runtime_time_us")
-    entry["source_helper_input_rows"] += row_int(kernel_row, "source_helper_input_rows")
-    entry["source_helper_output_rows"] += row_int(kernel_row, "source_helper_output_rows")
-    entry["source_helper_invocations"] += row_int(kernel_row, "source_helper_invocations")
-    entry["source_helper_runtime_time_us"] += row_int(kernel_row, "source_helper_runtime_time_us")
     entry["source_native_output_rows"] += row_int(kernel_row, "source_native_output_rows")
     entry["source_native_invocations"] += row_int(kernel_row, "source_native_invocations")
     entry["source_native_runtime_time_us"] += row_int(kernel_row, "source_native_runtime_time_us")
@@ -643,7 +639,7 @@ def verify_executable_candidate_scope(name: str, row: dict) -> None:
             if region_execution_form != "fused":
                 raise AssertionError(f"{name}: native-source pipeline has invalid execution form: {row}")
         else:
-            raise AssertionError(f"{name}: source-helper pipeline was compiled as executable JIT: {row}")
+            raise AssertionError(f"{name}: source-boundary pipeline was compiled as executable JIT: {row}")
         if abi and abi not in {"source_prefix", "state_scan"}:
             raise AssertionError(f"{name}: source pipeline executable has wrong ABI: {row}")
         if not has_source:
@@ -851,10 +847,6 @@ def verify_query_gaps(rows: list, expected_queries: list, policies: list) -> Non
             raise AssertionError(f"query_gap_summary.csv: q{row['query']} compiled/row/zero-input mismatch")
         if row_int(row, "force_compiled_regions") > 0 and compiled_kernels <= 0:
             raise AssertionError(f"query_gap_summary.csv: q{row['query']} compiled regions without kernel rows")
-        if row_int(row, "force_source_helper_output_rows") > 0 and row_int(row, "force_source_helper_invocations") <= 0:
-            raise AssertionError(f"query_gap_summary.csv: q{row['query']} source helper rows without invocations")
-        if row_int(row, "force_source_helper_runtime_time_us") < 0:
-            raise AssertionError(f"query_gap_summary.csv: q{row['query']} negative source helper runtime")
         if row_int(row, "force_source_native_output_rows") > 0 and row_int(row, "force_source_native_invocations") <= 0:
             raise AssertionError(f"query_gap_summary.csv: q{row['query']} native source rows without invocations")
         if row_int(row, "force_source_native_runtime_time_us") < 0:
@@ -1087,8 +1079,6 @@ def verify_capability_priorities(
                 raise AssertionError(
                     f"capability_priority_summary.csv: non-compiled row has runtime field {field}: {row}"
                 )
-        if row_int(row, "source_helper_output_rows") > 0 and row_int(row, "source_helper_invocations") <= 0:
-            raise AssertionError(f"capability_priority_summary.csv: source helper rows without invocations: {row}")
         verify_scope_summary_field("capability_priority_summary.csv", row, "candidate_scopes")
         if row_int(row, "occurrences") <= 0:
             raise AssertionError(f"capability_priority_summary.csv: non-positive occurrences: {row}")
@@ -1181,8 +1171,6 @@ def verify_query_capability_priorities(
                 raise AssertionError(
                     f"query_capability_priority_summary.csv: non-compiled row has runtime field {field}: {row}"
                 )
-        if row_int(row, "source_helper_output_rows") > 0 and row_int(row, "source_helper_invocations") <= 0:
-            raise AssertionError(f"query_capability_priority_summary.csv: source helper rows without invocations: {row}")
         expected_runtime = expected_runtime_by_query_key.get(key, {})
         for field in CAPABILITY_RUNTIME_FIELDS:
             if row_int(row, field) != row_int(expected_runtime, field):
@@ -1349,8 +1337,7 @@ def verify_source_boundary_summary(
     has_perfect_hash_aggregate_protocol = False
     has_ungrouped_aggregate_protocol = False
     has_column_data_native_source = False
-    has_compiled_source_helper = False
-    has_compiled_source_helper_runtime = False
+    has_compiled_source_boundary = False
     has_compiled_source_native = False
     has_compiled_source_native_runtime = False
     seen_keys = set()
@@ -1378,10 +1365,6 @@ def verify_source_boundary_summary(
         if row_int(row, "region_events") > row_int(row, "occurrences"):
             raise AssertionError(f"source_boundary_summary.csv: events exceed occurrences: {row}")
         for field in (
-            "source_helper_input_rows",
-            "source_helper_output_rows",
-            "source_helper_invocations",
-            "source_helper_runtime_time_us",
             *SOURCE_NATIVE_RUNTIME_FIELDS,
         ):
             if row_int(row, field) < 0:
@@ -1390,33 +1373,21 @@ def verify_source_boundary_summary(
             has_compiled_source_native = True
             if row_int(row, "source_native_output_rows") > 0 and row_int(row, "source_native_invocations") > 0:
                 has_compiled_source_native_runtime = True
-            for field in (
-                "source_helper_input_rows",
-                "source_helper_output_rows",
-                "source_helper_invocations",
-                "source_helper_runtime_time_us",
-            ):
-                if row_int(row, field) != 0:
-                    raise AssertionError(f"source_boundary_summary.csv: native-source row has helper field {field}: {row}")
         elif row["status"] == "compiled" and row["source_execution"] != "native-source":
-            has_compiled_source_helper = True
-            if row_int(row, "source_helper_output_rows") > 0 and row_int(row, "source_helper_invocations") > 0:
-                has_compiled_source_helper_runtime = True
+            has_compiled_source_boundary = True
             for field in SOURCE_NATIVE_RUNTIME_FIELDS:
                 if row_int(row, field) != 0:
-                    raise AssertionError(f"source_boundary_summary.csv: source-helper row has native field {field}: {row}")
+                    raise AssertionError(
+                        f"source_boundary_summary.csv: source-boundary row has native-source field {field}: {row}"
+                    )
         else:
             for field in (
-                "source_helper_input_rows",
-                "source_helper_output_rows",
-                "source_helper_invocations",
-                "source_helper_runtime_time_us",
                 *SOURCE_NATIVE_RUNTIME_FIELDS,
                 "generated_body_runtime_time_us",
             ):
                 if row_int(row, field) != 0:
                     raise AssertionError(
-                        f"source_boundary_summary.csv: non-compiled/helper row has source-helper field {field}: {row}"
+                        f"source_boundary_summary.csv: non-compiled row has runtime field {field}: {row}"
                     )
         if row_int(row, "query_count") <= 0:
             raise AssertionError(f"source_boundary_summary.csv: non-positive query_count: {row}")
@@ -1494,8 +1465,8 @@ def verify_source_boundary_summary(
             expected_markers = {
                 "table_scan_generated_source_filter": "generated source-prefix table scan filters",
                 "table_scan_native_source": "DuckDB native table scan source runtime",
-                "table_scan_source_helper": "DuckDB table scan source helper boundary",
-                "duckdb_scan_source_helper": "DuckDB scan source helper boundary",
+                "table_scan_source_boundary": "DuckDB table scan source boundary",
+                "duckdb_scan_source_boundary": "DuckDB scan source boundary",
                 "source_getdata_helper": "DuckDB source GetData helper boundary",
             }
             expected_marker = expected_markers.get(row["source_boundary_kind"], "")
@@ -1771,7 +1742,7 @@ def verify_source_boundary_summary(
     if not require_full_lowering:
         return
     if not has_table_scan:
-        raise AssertionError("source_boundary_summary.csv: missing table scan source-helper rows")
+        raise AssertionError("source_boundary_summary.csv: missing table scan source-boundary rows")
     if not has_dynamic_filter:
         raise AssertionError("source_boundary_summary.csv: missing dynamic-filter table scan rows")
     if not has_pushed_filter:
@@ -1786,8 +1757,6 @@ def verify_source_boundary_summary(
         raise AssertionError("source_boundary_summary.csv: missing perfect hash aggregate source protocol rows")
     if not has_ungrouped_aggregate_protocol:
         raise AssertionError("source_boundary_summary.csv: missing ungrouped aggregate source protocol rows")
-    if require_runtime and has_compiled_source_helper and not has_compiled_source_helper_runtime:
-        raise AssertionError("source_boundary_summary.csv: compiled source-helper rows lack runtime source-helper totals")
     if require_runtime and has_compiled_source_native and not has_compiled_source_native_runtime:
         raise AssertionError("source_boundary_summary.csv: compiled native-source rows lack runtime source-native totals")
 
@@ -1929,10 +1898,6 @@ def verify_source_boundary_priorities(
             "region_events",
             "query_count",
             "max_estimated_cardinality",
-            "source_helper_input_rows",
-            "source_helper_output_rows",
-            "source_helper_invocations",
-            "source_helper_runtime_time_us",
             *SOURCE_NATIVE_RUNTIME_FIELDS,
         ):
             if row_int(row, field) != row_int(source_row, field):
@@ -1951,10 +1916,6 @@ def verify_source_boundary_priorities(
         if row_float(row, "profile_percent_of_policy") < 0:
             raise AssertionError(f"source_boundary_priority_summary.csv: negative profile percent: {row}")
         for field in (
-            "source_helper_input_rows",
-            "source_helper_output_rows",
-            "source_helper_invocations",
-            "source_helper_runtime_time_us",
             *SOURCE_NATIVE_RUNTIME_FIELDS,
         ):
             if row_int(row, field) < 0:
@@ -1974,7 +1935,7 @@ def verify_source_boundary_priorities(
                 raise AssertionError(f"source_boundary_priority_summary.csv: profile time without operator evidence: {row}")
             if row["source_boundary_kind"] in {
                 "table_scan_generated_source_filter",
-                "table_scan_source_helper",
+                "table_scan_source_boundary",
                 "table_scan_native_source",
             }:
                 has_table_scan_profile = True
@@ -2104,10 +2065,6 @@ def verify_source_fusion_gaps(
             "runtime_output_rows",
             "runtime_invocations",
             "runtime_time_us",
-            "source_helper_input_rows",
-            "source_helper_output_rows",
-            "source_helper_invocations",
-            "source_helper_runtime_time_us",
             *SOURCE_NATIVE_RUNTIME_FIELDS,
             "generated_body_runtime_time_us",
         ):
@@ -2156,9 +2113,6 @@ def verify_source_fusion_gaps(
             raise AssertionError(f"source_fusion_gap_summary.csv: example reason missing source fusion root cause: {row}")
         for field in (
             "profile_time_us",
-            "source_helper_output_rows",
-            "source_helper_invocations",
-            "source_helper_runtime_time_us",
             "generated_body_runtime_time_us",
         ):
             if row_int(row, field) < 0:
@@ -2351,9 +2305,6 @@ def verify_fusion_blockers(
             "runtime_output_rows",
             "runtime_invocations",
             "runtime_time_us",
-            "source_helper_output_rows",
-            "source_helper_invocations",
-            "source_helper_runtime_time_us",
             *SOURCE_NATIVE_RUNTIME_FIELDS,
             "generated_body_runtime_time_us",
         ):
@@ -2681,10 +2632,6 @@ def verify_kernel_runtime(rows: list, summary_rows: list, region_rows: list, req
             raise AssertionError(f"kernel_runtime_summary.csv: input rows without row-processing kernel: {row}")
         if row_int(row, "invocations") > 0 and reached_kernels <= 0:
             raise AssertionError(f"kernel_runtime_summary.csv: invocations without reached kernel: {row}")
-        if row_int(row, "source_helper_output_rows") > 0 and row_int(row, "source_helper_invocations") <= 0:
-            raise AssertionError(f"kernel_runtime_summary.csv: source helper rows without invocations: {row}")
-        if row_int(row, "source_helper_runtime_time_us") < 0:
-            raise AssertionError(f"kernel_runtime_summary.csv: negative source helper runtime: {row}")
         if row_int(row, "source_native_output_rows") > 0 and row_int(row, "source_native_invocations") <= 0:
             raise AssertionError(f"kernel_runtime_summary.csv: native source rows without invocations: {row}")
         if row_int(row, "source_native_runtime_time_us") < 0:
@@ -2735,29 +2682,20 @@ def verify_admission_efficiency(rows: list, kernel_rows: list, summary_rows: lis
             raise AssertionError(f"admission_efficiency_summary.csv: non-compiled efficiency row: {row}")
         if row["policy"] not in policies:
             raise AssertionError(f"admission_efficiency_summary.csv: unknown policy: {row}")
-        if row_float(row, "helper_runtime_percent") < 0 or row_float(row, "helper_runtime_percent") > 100:
-            raise AssertionError(f"admission_efficiency_summary.csv: invalid helper percent: {row}")
         generated_percent = row_float(row, "generated_body_runtime_percent")
         if generated_percent < 0 or generated_percent > 100:
             raise AssertionError(f"admission_efficiency_summary.csv: invalid generated body percent: {row}")
         native_percent = row_float(row, "source_native_runtime_percent")
         if native_percent < 0 or native_percent > 100:
             raise AssertionError(f"admission_efficiency_summary.csv: invalid native source percent: {row}")
-        helper_runtime = row_int(row, "helper_runtime_time_us")
-        source_helper_runtime = row_int(row, "source_helper_runtime_time_us")
-        if helper_runtime != source_helper_runtime:
-            raise AssertionError(f"admission_efficiency_summary.csv: helper runtime decomposition mismatch: {row}")
         for field in (
             "runtime_time_us",
-            "helper_runtime_time_us",
-            "source_helper_runtime_time_us",
             "source_native_runtime_time_us",
             "generated_body_runtime_time_us",
         ):
             if row_int(row, field) < 0:
                 raise AssertionError(f"admission_efficiency_summary.csv: negative {field}: {row}")
         if row["efficiency_class"] not in {
-            "helper_dominated",
             "native_source_dominant",
             "generated_body_dominant",
             "mixed_runtime",
@@ -2765,14 +2703,6 @@ def verify_admission_efficiency(rows: list, kernel_rows: list, summary_rows: lis
             "unmeasured",
         }:
             raise AssertionError(f"admission_efficiency_summary.csv: unknown efficiency class: {row}")
-        if row["efficiency_class"] == "helper_dominated":
-            if row_float(row, "helper_runtime_percent") < 80:
-                raise AssertionError(
-                    f"admission_efficiency_summary.csv: helper-dominated row below threshold: {row}"
-                )
-            if row["policy"] == "auto":
-                if row["root_cause"] != "auto_admitted_helper_dominated_region":
-                    raise AssertionError(f"admission_efficiency_summary.csv: auto helper row missing root cause: {row}")
         if row["efficiency_class"] == "generated_body_dominant" and generated_percent < 50:
             raise AssertionError(f"admission_efficiency_summary.csv: generated-dominant row below threshold: {row}")
         if row["efficiency_class"] == "native_source_dominant" and native_percent < 50:
@@ -2849,10 +2779,6 @@ def verify_pipeline_runtime(
                 "runtime_output_rows": 0,
                 "runtime_invocations": 0,
                 "runtime_time_us": 0,
-                "source_helper_input_rows": 0,
-                "source_helper_output_rows": 0,
-                "source_helper_invocations": 0,
-                "source_helper_runtime_time_us": 0,
                 "source_native_output_rows": 0,
                 "source_native_invocations": 0,
                 "source_native_runtime_time_us": 0,
@@ -2868,10 +2794,6 @@ def verify_pipeline_runtime(
         entry["runtime_output_rows"] += row_int(kernel_row, "output_rows")
         entry["runtime_invocations"] += row_int(kernel_row, "invocations")
         entry["runtime_time_us"] += row_int(kernel_row, "runtime_time_us")
-        entry["source_helper_input_rows"] += row_int(kernel_row, "source_helper_input_rows")
-        entry["source_helper_output_rows"] += row_int(kernel_row, "source_helper_output_rows")
-        entry["source_helper_invocations"] += row_int(kernel_row, "source_helper_invocations")
-        entry["source_helper_runtime_time_us"] += row_int(kernel_row, "source_helper_runtime_time_us")
         entry["source_native_output_rows"] += row_int(kernel_row, "source_native_output_rows")
         entry["source_native_invocations"] += row_int(kernel_row, "source_native_invocations")
         entry["source_native_runtime_time_us"] += row_int(kernel_row, "source_native_runtime_time_us")
@@ -2977,10 +2899,6 @@ def verify_pipeline_runtime(
                 "runtime_output_rows",
                 "runtime_invocations",
                 "runtime_time_us",
-                "source_helper_input_rows",
-                "source_helper_output_rows",
-                "source_helper_invocations",
-                "source_helper_runtime_time_us",
                 *SOURCE_NATIVE_RUNTIME_FIELDS,
                 "generated_body_runtime_time_us",
             ):
@@ -3010,10 +2928,6 @@ def verify_pipeline_runtime(
             "runtime_output_rows",
             "runtime_invocations",
             "runtime_time_us",
-            "source_helper_input_rows",
-            "source_helper_output_rows",
-            "source_helper_invocations",
-            "source_helper_runtime_time_us",
             "generated_body_runtime_time_us",
         ):
             if row_int(row, field) != row_int(runtime_total, field):
@@ -3131,14 +3045,11 @@ def verify_flow_step_summary(rows: list, summary_rows: list, manifest: dict, exp
                 raise AssertionError(f"flow_step_summary.csv: compiled flow row has no code: {row}")
         for runtime_field in (
             "runtime_time_us",
-            "source_helper_runtime_time_us",
             "source_native_runtime_time_us",
             "generated_body_runtime_time_us",
         ):
             if row_int(row, runtime_field) < 0:
                 raise AssertionError(f"flow_step_summary.csv: negative runtime field {runtime_field}: {row}")
-        if row_int(row, "source_helper_output_rows") > 0 and row_int(row, "source_helper_invocations") <= 0:
-            raise AssertionError(f"flow_step_summary.csv: source helper rows without invocations: {row}")
         if row_int(row, "source_native_output_rows") > 0 and row_int(row, "source_native_invocations") <= 0:
             raise AssertionError(f"flow_step_summary.csv: native source rows without invocations: {row}")
         verify_admission_metadata("flow_step_summary.csv", row)
@@ -3175,10 +3086,6 @@ def verify_flow_step_summary(rows: list, summary_rows: list, manifest: dict, exp
             "runtime_output_rows",
             "runtime_invocations",
             "runtime_time_us",
-            "source_helper_input_rows",
-            "source_helper_output_rows",
-            "source_helper_invocations",
-            "source_helper_runtime_time_us",
             "generated_body_runtime_time_us",
             "ir_lowering_time_us",
             "backend_analysis_time_us",
@@ -3190,12 +3097,11 @@ def verify_flow_step_summary(rows: list, summary_rows: list, manifest: dict, exp
                 "runtime_input_rows": "input_rows",
                 "runtime_output_rows": "output_rows",
                 "runtime_invocations": "invocations",
-                "source_helper_invocations": "source_helper_invocations",
             }.get(field, field)
             phase_filter = (
                 {"phase": "runtime"}
                 if field.startswith("runtime_")
-                or field.startswith("source_helper_")
+                or field.startswith("source_boundary_")
                 or field.startswith("generated_body_")
                 else {}
             )
@@ -3280,7 +3186,7 @@ def verify_source_boundary_features(
         "in_out_function=",
     )
     required_scan_helper_reason_markers = (
-        "DuckDB table scan source helper boundary",
+        "DuckDB table scan source boundary",
         "DuckDB source GetData helper boundary",
     )
     required_scan_helper_reason_features = ()
@@ -3387,7 +3293,7 @@ def verify_source_boundary_features(
             if event.get("status") == "skipped" and not any(
                 marker in trace_text
                 for marker in (
-                    "DuckDB table scan source helper boundary",
+                    "DuckDB table scan source boundary",
                     "DuckDB hash join native state scan protocol",
                     "DuckDB hash join state scan source does not produce rows",
                     "DuckDB hash aggregate native state scan protocol",

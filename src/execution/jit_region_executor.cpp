@@ -1142,7 +1142,7 @@ bool JitRegionExecutor::TryExecuteSourcePrefix(PipelineExecutor &executor, DataC
 			if (trace_runtime) {
 				JitManager::Get(executor.context.client)
 				    .RecordRuntimeEvent(executor.context.client, *kernel, JitCompileTarget::REGION, "declined",
-				                        "source pipeline kernel declined after source helper fetch; normal pipeline "
+				                        "source pipeline kernel declined after source boundary fetch; normal pipeline "
 				                        "will resume at source boundary",
 				                        source_chunk.size(), source_chunk.size(), elapsed_us,
 				                        JitSourceResultTypeToString(source_result));

@@ -152,7 +152,7 @@ def verify_events(trace_dir: Path, rows: list) -> None:
             if "execution-form=none" not in reason or "execution:unsupported" not in reason:
                 raise AssertionError(f"{row['events_csv']}: source-boundary reason missing unsupported contract: {event}")
             if "fallback:DuckDB source GetData helper boundary" not in reason:
-                raise AssertionError(f"{row['events_csv']}: source helper reason missing: {event}")
+                raise AssertionError(f"{row['events_csv']}: source boundary reason missing: {event}")
             if row["policy"] == "auto":
                 continue
             native_compiled = [

@@ -42,10 +42,6 @@ void JitEventLog::RecordCounter(const JitEvent &event) {
 		counter.output_rows += event.output_rows;
 		counter.invocation_count += event.invocation_count;
 		counter.runtime_time_us += event.runtime_time_us;
-		counter.source_helper_input_rows += event.source_helper_input_rows;
-		counter.source_helper_output_rows += event.source_helper_output_rows;
-		counter.source_helper_invocation_count += event.source_helper_invocation_count;
-		counter.source_helper_runtime_time_us += event.source_helper_runtime_time_us;
 		counter.source_native_output_rows += event.source_native_output_rows;
 		counter.source_native_invocation_count += event.source_native_invocation_count;
 		counter.source_native_runtime_time_us += event.source_native_runtime_time_us;
@@ -86,10 +82,6 @@ void JitEventLog::RecordCounter(const JitEvent &event) {
 	counter.output_rows = event.output_rows;
 	counter.invocation_count = event.invocation_count;
 	counter.runtime_time_us = event.runtime_time_us;
-	counter.source_helper_input_rows = event.source_helper_input_rows;
-	counter.source_helper_output_rows = event.source_helper_output_rows;
-	counter.source_helper_invocation_count = event.source_helper_invocation_count;
-	counter.source_helper_runtime_time_us = event.source_helper_runtime_time_us;
 	counter.source_native_output_rows = event.source_native_output_rows;
 	counter.source_native_invocation_count = event.source_native_invocation_count;
 	counter.source_native_runtime_time_us = event.source_native_runtime_time_us;
@@ -217,10 +209,6 @@ void JitEventLog::AccumulateKernelRuntime(JitKernelCounter &counter, const JitEv
 	counter.output_rows += event.output_rows;
 	counter.invocation_count += event.invocation_count;
 	counter.runtime_time_us += event.runtime_time_us;
-	counter.source_helper_input_rows += event.source_helper_input_rows;
-	counter.source_helper_output_rows += event.source_helper_output_rows;
-	counter.source_helper_invocation_count += event.source_helper_invocation_count;
-	counter.source_helper_runtime_time_us += event.source_helper_runtime_time_us;
 	counter.source_native_output_rows += event.source_native_output_rows;
 	counter.source_native_invocation_count += event.source_native_invocation_count;
 	counter.source_native_runtime_time_us += event.source_native_runtime_time_us;

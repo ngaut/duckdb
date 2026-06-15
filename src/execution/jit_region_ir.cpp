@@ -494,7 +494,7 @@ static string JitRegionSourceBoundaryMarker(JitRegionSourceKind kind, JitRegionS
 				return "DuckDB native table scan source runtime";
 			}
 			if (execution == JitRegionSourceExecutionKind::DUCKDB_GETDATA_HELPER) {
-				return "DuckDB table scan source helper boundary;source-fusion-gap:requires-native-source;"
+				return "DuckDB table scan source boundary;source-fusion-gap:requires-native-source;"
 				       "source_execution=duckdb-getdata-helper";
 			}
 		return "DuckDB table scan executor fallback boundary";
@@ -805,7 +805,7 @@ static string BuildJitSourceBoundaryReason(const JitPipelineOperatorEntry &entry
 		return entry.source_boundary_reason;
 	}
 	if (IsJitRegionScanSource(entry.type)) {
-		return "DuckDB scan source helper boundary;operator=" + entry.operator_name;
+		return "DuckDB scan source boundary;operator=" + entry.operator_name;
 	}
 	return "DuckDB stateful source operator fallback boundary;operator=" + entry.operator_name;
 }

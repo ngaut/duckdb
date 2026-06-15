@@ -167,7 +167,7 @@ def verify_executable_candidate_scope(case_name: str, row: dict) -> None:
             if region_execution_form != "fused":
                 raise AssertionError(f"{case_name}: native-source pipeline has invalid execution form: {row}")
         else:
-            raise AssertionError(f"{case_name}: source-helper pipeline was compiled as executable JIT: {row}")
+            raise AssertionError(f"{case_name}: source-boundary pipeline was compiled as executable JIT: {row}")
         if abi and abi not in {"source_prefix", "state_scan"}:
             raise AssertionError(f"{case_name}: source pipeline executable has wrong ABI: {row}")
         if pipeline_shape and not has_source:
@@ -467,10 +467,6 @@ def verify_flow_step_summary(trace_dir: Path, rows: list, summary_rows: list, ma
             ("runtime_output_rows", "output_rows"),
             ("runtime_invocations", "invocations"),
             ("runtime_time_us", "runtime_time_us"),
-            ("source_helper_input_rows", "source_helper_input_rows"),
-            ("source_helper_output_rows", "source_helper_output_rows"),
-            ("source_helper_invocations", "source_helper_invocations"),
-            ("source_helper_runtime_time_us", "source_helper_runtime_time_us"),
             ("source_native_output_rows", "source_native_output_rows"),
             ("source_native_invocations", "source_native_invocations"),
             ("source_native_runtime_time_us", "source_native_runtime_time_us"),
@@ -497,10 +493,6 @@ def verify_flow_step_summary(trace_dir: Path, rows: list, summary_rows: list, ma
             ("output_rows", "output_rows"),
             ("invocation_count", "invocations"),
             ("runtime_time_us", "runtime_time_us"),
-            ("source_helper_input_rows", "source_helper_input_rows"),
-            ("source_helper_output_rows", "source_helper_output_rows"),
-            ("source_helper_invocation_count", "source_helper_invocations"),
-            ("source_helper_runtime_time_us", "source_helper_runtime_time_us"),
             ("source_native_output_rows", "source_native_output_rows"),
             ("source_native_invocation_count", "source_native_invocations"),
             ("source_native_runtime_time_us", "source_native_runtime_time_us"),

@@ -129,7 +129,7 @@ private:
 
 	//! The final chunk used for moving data into the sink
 	DataChunk final_chunk;
-	//! Scratch chunk used when source-pipeline JIT fetches from DuckDB source helpers before generated prefix code.
+	//! Scratch chunk used when source-pipeline JIT fetches a source chunk before generated prefix code.
 	DataChunk jit_source_input_chunk;
 
 	//! The operators that are not yet finished executing and have data remaining

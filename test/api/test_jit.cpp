@@ -1838,7 +1838,7 @@ TEST_CASE("JIT lowers double division as native scalar projection", "[api][jit]"
 	REQUIRE(found_native_double_divide);
 }
 
-TEST_CASE("JIT auto rejects source-helper full pipeline as proof-gap only", "[api][jit]") {
+TEST_CASE("JIT auto rejects source-boundary full pipeline as proof-gap only", "[api][jit]") {
 	DuckDB db;
 	Connection con(db);
 	auto &context = *con.context;
@@ -2328,7 +2328,6 @@ TEST_CASE("JIT region lowering exposes typed table scan source protocol", "[api]
 			REQUIRE(event.execution_mode == "native");
 			REQUIRE(event.region_execution_form == "fused");
 			REQUIRE(event.selected_source_execution == JitRegionSourceExecutionKind::NATIVE_SOURCE);
-			REQUIRE(event.source_helper_output_rows == 0);
 			REQUIRE(event.input_rows == event.source_native_output_rows);
 			REQUIRE(event.output_rows > 0);
 			REQUIRE(event.output_rows <= event.input_rows);
@@ -2362,7 +2361,7 @@ TEST_CASE("JIT region lowering exposes typed table scan source protocol", "[api]
 		REQUIRE(StringUtil::Contains(event.ir, "filter_prune=true"));
 		REQUIRE(StringUtil::Contains(event.ir, "filter_count=2"));
 		REQUIRE_FALSE(
-		    StringUtil::Contains(event.reason, "table scan source helper requires typed table scan protocol IR"));
+		    StringUtil::Contains(event.reason, "table scan source boundary requires typed table scan protocol IR"));
 	}
 	REQUIRE(found_table_scan_protocol);
 	REQUIRE(found_compiled_native_filtered_source);
@@ -3023,7 +3022,6 @@ TEST_CASE("JIT full pipeline updates decimal sum aggregate through native sink u
 			REQUIRE(event.input_rows > 0);
 			REQUIRE(event.output_rows > 0);
 			REQUIRE(event.output_rows <= event.input_rows);
-			REQUIRE(event.source_helper_output_rows == 0);
 			REQUIRE(event.source_native_output_rows == event.input_rows);
 			REQUIRE(event.runtime_result == "finished");
 		}
@@ -4971,9 +4969,6 @@ TEST_CASE("JIT kernel counters preserve runtime linkage after event eviction", "
 			REQUIRE(!counter.candidate_pipeline_shape.empty());
 			REQUIRE(counter.candidate_estimated_cardinality > 0);
 			REQUIRE(counter.input_rows + counter.output_rows > 0);
-			REQUIRE(counter.source_helper_output_rows == 0);
-			REQUIRE(counter.source_helper_invocation_count == 0);
-			REQUIRE(counter.source_helper_runtime_time_us == 0);
 			REQUIRE(counter.generated_body_runtime_time_us >= 0);
 			REQUIRE(counter.last_runtime_status == "executed");
 			const bool expected_runtime_result =
@@ -5066,9 +5061,6 @@ TEST_CASE("JIT kernel counters can be recreated from runtime trace identity", "[
 	runtime_event.invocation_count = 1;
 	runtime_event.runtime_time_us = 2;
 	runtime_event.runtime_result = "need_more_input";
-	runtime_event.source_helper_output_rows = 5;
-	runtime_event.source_helper_invocation_count = 1;
-	runtime_event.source_helper_runtime_time_us = 1;
 	runtime_event.source_native_output_rows = 3;
 	runtime_event.source_native_invocation_count = 1;
 	runtime_event.source_native_runtime_time_us = 1;
@@ -5095,10 +5087,6 @@ TEST_CASE("JIT kernel counters can be recreated from runtime trace identity", "[
 	REQUIRE(counters[0].output_rows == 4);
 	REQUIRE(counters[0].invocation_count == 1);
 	REQUIRE(counters[0].runtime_time_us == 2);
-	REQUIRE(counters[0].source_helper_input_rows == 0);
-	REQUIRE(counters[0].source_helper_output_rows == 5);
-	REQUIRE(counters[0].source_helper_invocation_count == 1);
-	REQUIRE(counters[0].source_helper_runtime_time_us == 1);
 	REQUIRE(counters[0].source_native_output_rows == 3);
 	REQUIRE(counters[0].source_native_invocation_count == 1);
 	REQUIRE(counters[0].source_native_runtime_time_us == 1);
@@ -5297,12 +5285,8 @@ TEST_CASE("JIT runtime trace records kernel execution facts", "[api][jit]") {
 			REQUIRE(event.has_candidate);
 			REQUIRE(IsKnownJitCandidateScope(event.candidate_scope));
 			REQUIRE(event.candidate_end_operator_index >= event.candidate_start_operator_index);
-			REQUIRE(event.source_helper_output_rows == 0);
-			REQUIRE(event.source_helper_invocation_count == 0);
-			REQUIRE(event.source_helper_runtime_time_us == 0);
 			REQUIRE(event.generated_body_runtime_time_us >= 0);
-			REQUIRE(event.generated_body_runtime_time_us + event.source_helper_runtime_time_us +
-			            event.source_native_runtime_time_us <=
+			REQUIRE(event.generated_body_runtime_time_us + event.source_native_runtime_time_us <=
 			        event.runtime_time_us);
 			const bool expected_runtime_result = event.runtime_result == "need_more_input" ||
 			                                     event.runtime_result == "have_more_output" ||
@@ -5468,7 +5452,6 @@ TEST_CASE("JIT introspection does not suppress later statements in one SQL batch
 			REQUIRE(event.region_execution_form == "fused");
 			REQUIRE(event.input_rows > 0);
 			REQUIRE(event.source_native_output_rows == event.input_rows);
-			REQUIRE(event.source_helper_output_rows == 0);
 		}
 	}
 	REQUIRE(found_compiled_fused_region);

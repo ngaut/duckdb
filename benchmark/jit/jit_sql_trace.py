@@ -53,10 +53,6 @@ FLOW_STEP_SUMMARY_FIELDS = (
     "output_rows",
     "invocations",
     "runtime_time_us",
-    "source_helper_input_rows",
-    "source_helper_output_rows",
-    "source_helper_invocations",
-    "source_helper_runtime_time_us",
     "source_native_output_rows",
     "source_native_invocations",
     "source_native_runtime_time_us",
@@ -551,10 +547,6 @@ def new_flow_entry(key: tuple) -> dict:
         "output_rows": 0,
         "invocations": 0,
         "runtime_time_us": 0,
-        "source_helper_input_rows": 0,
-        "source_helper_output_rows": 0,
-        "source_helper_invocations": 0,
-        "source_helper_runtime_time_us": 0,
         "source_native_output_rows": 0,
         "source_native_invocations": 0,
         "source_native_runtime_time_us": 0,
@@ -596,10 +588,6 @@ def collect_flow_step_summary(out_dir: Path, rows: list) -> list:
                 entry["output_rows"] += row_int(event, "output_rows")
                 entry["invocations"] += row_int(event, "invocation_count")
                 entry["runtime_time_us"] += row_int(event, "runtime_time_us")
-                entry["source_helper_input_rows"] += row_int(event, "source_helper_input_rows")
-                entry["source_helper_output_rows"] += row_int(event, "source_helper_output_rows")
-                entry["source_helper_invocations"] += row_int(event, "source_helper_invocation_count")
-                entry["source_helper_runtime_time_us"] += row_int(event, "source_helper_runtime_time_us")
                 entry["source_native_output_rows"] += row_int(event, "source_native_output_rows")
                 entry["source_native_invocations"] += row_int(event, "source_native_invocation_count")
                 entry["source_native_runtime_time_us"] += row_int(event, "source_native_runtime_time_us")
@@ -640,10 +628,6 @@ def collect_flow_step_summary(out_dir: Path, rows: list) -> list:
                 entry["output_rows"] += row_int(counter, "output_rows")
                 entry["invocations"] += invocation_count
                 entry["runtime_time_us"] += row_int(counter, "runtime_time_us")
-                entry["source_helper_input_rows"] += row_int(counter, "source_helper_input_rows")
-                entry["source_helper_output_rows"] += row_int(counter, "source_helper_output_rows")
-                entry["source_helper_invocations"] += row_int(counter, "source_helper_invocation_count")
-                entry["source_helper_runtime_time_us"] += row_int(counter, "source_helper_runtime_time_us")
                 entry["source_native_output_rows"] += row_int(counter, "source_native_output_rows")
                 entry["source_native_invocations"] += row_int(counter, "source_native_invocation_count")
                 entry["source_native_runtime_time_us"] += row_int(counter, "source_native_runtime_time_us")
@@ -718,18 +702,6 @@ SELECT
     coalesce(sum(runtime_time_us) FILTER (
         WHERE phase='runtime'
     ), 0) AS runtime_time_us,
-    coalesce(sum(source_helper_input_rows) FILTER (
-        WHERE phase='runtime'
-    ), 0) AS source_helper_input_rows,
-    coalesce(sum(source_helper_output_rows) FILTER (
-        WHERE phase='runtime'
-    ), 0) AS source_helper_output_rows,
-    coalesce(sum(source_helper_invocation_count) FILTER (
-        WHERE phase='runtime'
-    ), 0) AS source_helper_invocations,
-    coalesce(sum(source_helper_runtime_time_us) FILTER (
-        WHERE phase='runtime'
-    ), 0) AS source_helper_runtime_time_us,
     coalesce(sum(source_native_output_rows) FILTER (
         WHERE phase='runtime'
     ), 0) AS source_native_output_rows,
@@ -840,10 +812,6 @@ SELECT
     invocation_count,
     runtime_time_us,
     runtime_result,
-    source_helper_input_rows,
-    source_helper_output_rows,
-    source_helper_invocation_count,
-    source_helper_runtime_time_us,
     source_native_output_rows,
     source_native_invocation_count,
     source_native_runtime_time_us,
