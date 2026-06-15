@@ -1091,7 +1091,9 @@ def verify_region_selection_contract(root: Path) -> None:
             "explain_inventory",
             "JitRegionPipelineInventoryMode::ADMISSION",
             "JitRegionPipelineInventoryMode::DIAGNOSTIC",
-            "TryLowerJitRegion(pipeline)",
+            "BuildJitPipelineDescriptor(pipeline)",
+            "TryInspectJitRegionPipeline(*pipeline_descriptor",
+            "TryLowerJitRegion(*pipeline_descriptor)",
             "MayHaveAutoAdmissionRule",
             "ShouldRecordAutoAdmissionSkip",
             "admission.has_admission",
@@ -1117,6 +1119,17 @@ def verify_region_selection_contract(root: Path) -> None:
     )
     assert_required_text(
         root,
+        "src/include/duckdb/execution/jit/pipeline_descriptor.hpp",
+        [
+            "enum class JitPipelineOperatorRole",
+            "struct JitPipelineOperatorEntry",
+            "struct JitPipelineDescriptor",
+            "JitOperatorDescriptor descriptor",
+            "BuildJitPipelineDescriptor(Pipeline &pipeline)",
+        ],
+    )
+    assert_required_text(
+        root,
         "src/include/duckdb/execution/jit/lowering.hpp",
         [
             "JitRegionPipelineInventoryMode",
@@ -1124,6 +1137,7 @@ def verify_region_selection_contract(root: Path) -> None:
             "DIAGNOSTIC",
             "TryLowerJitRegion",
             "TryInspectJitRegionPipeline",
+            "const JitPipelineDescriptor &pipeline",
         ],
     )
     assert_required_text(
@@ -1163,7 +1177,9 @@ def verify_region_selection_contract(root: Path) -> None:
             "TryInspectJitRegionPipeline",
             "mode == JitRegionPipelineInventoryMode::DIAGNOSTIC",
             "!IsJitRegionPipelineInventoryWorkloadRelevant(*result)",
-            "!TryInspectJitRegionPipeline(pipeline, JitRegionPipelineInventoryMode::ADMISSION)",
+            "BuildJitPipelineDescriptor(Pipeline &pipeline)",
+            "TryInspectJitRegionPipeline(const JitPipelineDescriptor &descriptor",
+            "TryBuildJitRegion(const JitPipelineDescriptor &descriptor)",
             "BuildJitRegionSourceInfo",
             "BuildJitRegionSinkInfo",
             "DescribeJitRegionNativeSourceContract",
@@ -1197,7 +1213,7 @@ def verify_region_selection_contract(root: Path) -> None:
             "GetJitOperatorDescriptor",
             "hash_join_keys",
             "groups",
-            "TryBuildJitRegion(pipeline)",
+            "TryLowerJitRegion(const JitPipelineDescriptor &descriptor)",
         ],
     )
     assert_required_text(
@@ -2904,6 +2920,9 @@ def verify_core_lowering_boundary(root: Path) -> None:
             "lowering.hpp` exposes the core-only lowering boundary",
             "into backend-neutral JIT IR. Backends",
             "must not include it",
+            "pipeline_descriptor.hpp` exposes the core pipeline",
+            "BuildJitPipelineDescriptor",
+            "single pipeline-level discovery point",
             "operator_descriptor.hpp` exposes the physical-operator",
             "GetJitOperatorDescriptor()",
             "Concrete operator knowledge must terminate at the descriptor adapter",

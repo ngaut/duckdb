@@ -428,7 +428,6 @@ struct JitRegionPipelineInventory {
 	string source_operator_name;
 	string sink_operator_name;
 	vector<string> operator_names;
-	vector<JitRegionBoundaryKind> operator_boundaries;
 	idx_t estimated_cardinality = 0;
 	idx_t source_filter_count = 0;
 	idx_t source_projected_column_count = 0;

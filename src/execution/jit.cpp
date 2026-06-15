@@ -798,12 +798,16 @@ unique_ptr<JitPreparedPipeline> JitManager::PreparePipelineRegions(ClientContext
 		            0);
 		return prepared;
 	}
+	auto pipeline_descriptor = BuildJitPipelineDescriptor(pipeline);
+	if (!pipeline_descriptor) {
+		return prepared;
+	}
 	if (policy == JitPolicyMode::AUTO) {
 		auto explain_inventory = ShouldRecordJitDecisionCounters(context) || Settings::Get<JitDumpIrSetting>(context);
 		auto inventory_start = std::chrono::steady_clock::now();
-		auto inventory =
-		    TryInspectJitRegionPipeline(pipeline, explain_inventory ? JitRegionPipelineInventoryMode::DIAGNOSTIC
-		                                                            : JitRegionPipelineInventoryMode::ADMISSION);
+		auto inventory = TryInspectJitRegionPipeline(
+		    *pipeline_descriptor,
+		    explain_inventory ? JitRegionPipelineInventoryMode::DIAGNOSTIC : JitRegionPipelineInventoryMode::ADMISSION);
 		auto inventory_time_us = JitManagerElapsedMicros(inventory_start);
 		if (!inventory) {
 			return prepared;
@@ -815,7 +819,8 @@ unique_ptr<JitPreparedPipeline> JitManager::PreparePipelineRegions(ClientContext
 		if (!maybe_admissible) {
 			if (ShouldRecordAutoAdmissionSkip(context, inventory_info)) {
 				if (inventory->ir.empty() || inventory_reason.empty()) {
-					inventory = TryInspectJitRegionPipeline(pipeline, JitRegionPipelineInventoryMode::DIAGNOSTIC);
+					inventory =
+					    TryInspectJitRegionPipeline(*pipeline_descriptor, JitRegionPipelineInventoryMode::DIAGNOSTIC);
 					if (inventory) {
 						backend->MayHaveAutoAdmissionRule(JitCompileTarget::REGION, *inventory, true, inventory_info,
 						                                  inventory_reason);
@@ -830,7 +835,7 @@ unique_ptr<JitPreparedPipeline> JitManager::PreparePipelineRegions(ClientContext
 		}
 	}
 	auto region_decision_start = std::chrono::steady_clock::now();
-	auto region_ir = TryLowerJitRegion(pipeline);
+	auto region_ir = TryLowerJitRegion(*pipeline_descriptor);
 	auto region_lowering_time_us = JitManagerElapsedMicros(region_decision_start);
 	if (!region_ir) {
 		return prepared;

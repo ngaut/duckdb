@@ -28,6 +28,40 @@ static string JitRegionBool(bool value) {
 	return value ? "true" : "false";
 }
 
+static JitPipelineOperatorEntry BuildJitPipelineOperatorEntry(const PhysicalOperator &op,
+                                                              JitPipelineOperatorRole role,
+                                                              idx_t operator_index = DConstants::INVALID_INDEX) {
+	JitPipelineOperatorEntry entry;
+	entry.role = role;
+	entry.operator_index = operator_index;
+	entry.physical = op;
+	entry.type = op.type;
+	entry.operator_name = PhysicalOperatorToString(op.type);
+	entry.output_types = op.GetTypes();
+	entry.estimated_cardinality = op.estimated_cardinality;
+	entry.descriptor = op.GetJitOperatorDescriptor();
+	return entry;
+}
+
+unique_ptr<JitPipelineDescriptor> BuildJitPipelineDescriptor(Pipeline &pipeline) {
+	auto result = make_uniq<JitPipelineDescriptor>();
+	if (pipeline.GetSource()) {
+		result->source = BuildJitPipelineOperatorEntry(*pipeline.GetSource(), JitPipelineOperatorRole::SOURCE);
+	}
+	auto &operators = pipeline.GetIntermediateOperators();
+	for (idx_t op_idx = 0; op_idx < operators.size(); op_idx++) {
+		result->operators.push_back(
+		    BuildJitPipelineOperatorEntry(operators[op_idx].get(), JitPipelineOperatorRole::OPERATOR, op_idx));
+	}
+	if (pipeline.GetSink()) {
+		result->sink = BuildJitPipelineOperatorEntry(*pipeline.GetSink(), JitPipelineOperatorRole::SINK);
+	}
+	if (result->Empty()) {
+		return nullptr;
+	}
+	return result;
+}
+
 static string BuildJitLogicalTypeList(const vector<LogicalType> &types) {
 	string result = "[";
 	for (idx_t type_idx = 0; type_idx < types.size(); type_idx++) {
@@ -896,31 +930,32 @@ static JitCompiledOperatorContract SliceJitCompiledContract(const JitCompiledOpe
 	return result;
 }
 
-static string BuildJitSourceBoundaryReason(const PhysicalOperator &op, const JitOperatorDescriptor &descriptor) {
-	if (!descriptor.source_boundary_reason.empty()) {
-		return descriptor.source_boundary_reason;
+static string BuildJitSourceBoundaryReason(const JitPipelineOperatorEntry &entry) {
+	if (!entry.descriptor.source_boundary_reason.empty()) {
+		return entry.descriptor.source_boundary_reason;
 	}
-	if (IsJitRegionScanSource(op.type)) {
-		return "DuckDB scan source helper boundary;operator=" + PhysicalOperatorToString(op.type);
+	if (IsJitRegionScanSource(entry.type)) {
+		return "DuckDB scan source helper boundary;operator=" + entry.operator_name;
 	}
-	return "DuckDB stateful source operator fallback boundary;operator=" + PhysicalOperatorToString(op.type);
+	return "DuckDB stateful source operator fallback boundary;operator=" + entry.operator_name;
 }
 
-static string BuildJitSinkBoundaryReason(const PhysicalOperator &op, const JitOperatorDescriptor &descriptor) {
-	if (descriptor.has_sink && !descriptor.sink.reason.empty()) {
-		return descriptor.sink.reason;
+static string BuildJitSinkBoundaryReason(const JitPipelineOperatorEntry &entry) {
+	if (entry.descriptor.has_sink && !entry.descriptor.sink.reason.empty()) {
+		return entry.descriptor.sink.reason;
 	}
-	return BuildJitGenericSinkProtocolReason(op);
+	return BuildJitGenericSinkProtocolReason(entry.Physical());
 }
 
-static JitRegionIRNode BuildJitRegionFallbackNode(string role, const PhysicalOperator &op, JitRegionIRNodeKind kind,
-                                                  string fallback_reason) {
+static JitRegionIRNode BuildJitRegionFallbackNode(string role, const JitPipelineOperatorEntry &entry,
+                                                  JitRegionIRNodeKind kind, string fallback_reason) {
 	JitRegionIRNode node;
 	node.role = std::move(role);
-	node.operator_name = PhysicalOperatorToString(op.type);
+	node.operator_name = entry.operator_name;
+	node.operator_index = entry.operator_index;
 	node.kind = kind;
-	node.output_types = op.GetTypes();
-	node.estimated_cardinality = op.estimated_cardinality;
+	node.output_types = entry.output_types;
+	node.estimated_cardinality = entry.estimated_cardinality;
 	node.input_format = JitRegionVectorFormatKind::EXECUTOR_BOUNDARY;
 	node.output_format = JitRegionVectorFormatKind::EXECUTOR_BOUNDARY;
 	node.vector_source = JitRegionVectorSourceKind::EXECUTOR_BOUNDARY;
@@ -928,7 +963,7 @@ static JitRegionIRNode BuildJitRegionFallbackNode(string role, const PhysicalOpe
 	switch (kind) {
 	case JitRegionIRNodeKind::SOURCE:
 		node.boundary =
-		    IsJitRegionScanSource(op.type) ? JitRegionBoundaryKind::SCAN : JitRegionBoundaryKind::OPERATOR_FALLBACK;
+		    IsJitRegionScanSource(entry.type) ? JitRegionBoundaryKind::SCAN : JitRegionBoundaryKind::OPERATOR_FALLBACK;
 		break;
 	case JitRegionIRNodeKind::SINK:
 		node.boundary = JitRegionBoundaryKind::SINK;
@@ -956,18 +991,19 @@ static void SetJitRegionExecutorBoundaryDataflow(JitRegionDataflowState &state) 
 	state.selection_source = JitRegionSelectionSourceKind::EXECUTOR_BOUNDARY;
 }
 
-static JitRegionIRNode BuildJitRegionOperatorNode(string role, idx_t operator_index, const PhysicalOperator &op,
+static JitRegionIRNode BuildJitRegionOperatorNode(string role, const JitPipelineOperatorEntry &entry,
                                                   JitRegionDataflowState &state) {
-	switch (op.type) {
+	auto &op = entry.Physical();
+	switch (entry.type) {
 	case PhysicalOperatorType::FILTER: {
 		auto &filter = op.Cast<PhysicalFilter>();
 		JitRegionIRNode node;
 		node.role = std::move(role);
-		node.operator_name = PhysicalOperatorToString(op.type);
-		node.operator_index = operator_index;
+		node.operator_name = entry.operator_name;
+		node.operator_index = entry.operator_index;
 		node.kind = JitRegionIRNodeKind::FILTER;
-		node.output_types = op.GetTypes();
-		node.estimated_cardinality = op.estimated_cardinality;
+		node.output_types = entry.output_types;
+		node.estimated_cardinality = entry.estimated_cardinality;
 		node.input_format = JitRegionVectorFormatKind::UNIFIED_VECTOR;
 		node.output_format = JitRegionVectorFormatKind::SELECTION_VECTOR;
 		SetJitRegionInputDataflow(node, state);
@@ -987,11 +1023,11 @@ static JitRegionIRNode BuildJitRegionOperatorNode(string role, idx_t operator_in
 		auto &projection = op.Cast<PhysicalProjection>();
 		JitRegionIRNode node;
 		node.role = std::move(role);
-		node.operator_name = PhysicalOperatorToString(op.type);
-		node.operator_index = operator_index;
+		node.operator_name = entry.operator_name;
+		node.operator_index = entry.operator_index;
 		node.kind = JitRegionIRNodeKind::PROJECTION;
-		node.output_types = op.GetTypes();
-		node.estimated_cardinality = op.estimated_cardinality;
+		node.output_types = entry.output_types;
+		node.estimated_cardinality = entry.estimated_cardinality;
 		node.input_format = JitRegionVectorFormatKind::UNIFIED_VECTOR;
 		node.output_format = JitRegionVectorFormatKind::FLAT_VECTOR;
 		SetJitRegionInputDataflow(node, state);
@@ -1013,16 +1049,16 @@ static JitRegionIRNode BuildJitRegionOperatorNode(string role, idx_t operator_in
 		return node;
 	}
 	default: {
-		auto descriptor = op.GetJitOperatorDescriptor();
+		auto &descriptor = entry.descriptor;
 		if (descriptor.has_operator) {
 			JitRegionIRNode node;
 			node.role = std::move(role);
-			node.operator_name = PhysicalOperatorToString(op.type);
-			node.operator_index = operator_index;
+			node.operator_name = entry.operator_name;
+			node.operator_index = entry.operator_index;
 			node.compiled_contract = SliceJitCompiledContract(descriptor.compiled_contract, "operator");
 			node.kind = JitRegionIRNodeKind::OPERATOR;
-			node.output_types = op.GetTypes();
-			node.estimated_cardinality = op.estimated_cardinality;
+			node.output_types = entry.output_types;
+			node.estimated_cardinality = entry.estimated_cardinality;
 			node.input_format = JitRegionVectorFormatKind::DATA_CHUNK;
 			node.output_format = JitRegionVectorFormatKind::DATA_CHUNK;
 			SetJitRegionInputDataflow(node, state);
@@ -1036,9 +1072,8 @@ static JitRegionIRNode BuildJitRegionOperatorNode(string role, idx_t operator_in
 			state.selection_source = JitRegionSelectionSourceKind::NONE;
 			return node;
 		}
-		auto node = BuildJitRegionFallbackNode(std::move(role), op, JitRegionIRNodeKind::OPERATOR,
+		auto node = BuildJitRegionFallbackNode(std::move(role), entry, JitRegionIRNodeKind::OPERATOR,
 		                                       "DuckDB physical operator outside generated JIT region");
-		node.operator_index = operator_index;
 		SetJitRegionExecutorBoundaryDataflow(state);
 		return node;
 	}
@@ -1098,16 +1133,13 @@ static string DescribeJitRegionInventoryPipelineShape(const JitRegionPipelineInv
 	}
 	for (idx_t op_idx = 0; op_idx < inventory.operator_names.size(); op_idx++) {
 		auto &operator_name = inventory.operator_names[op_idx];
-		auto boundary = op_idx < inventory.operator_boundaries.size() ? inventory.operator_boundaries[op_idx]
-		                                                              : JitRegionBoundaryKind::OPERATOR_FALLBACK;
 		result += ";op" + std::to_string(op_idx) + ":";
 		if (operator_name == "FILTER") {
 			result += "filter:FILTER:none";
 		} else if (operator_name == "PROJECTION") {
 			result += "projection:PROJECTION:none";
 		} else {
-			result +=
-			    "operator:" + operator_name + ":" + StringUtil::Lower(string(JitRegionBoundaryKindToString(boundary)));
+			result += "operator:" + operator_name + ":operator-fallback";
 		}
 	}
 	if (inventory.has_sink) {
@@ -1137,11 +1169,12 @@ static bool IsJitRegionPipelineInventoryWorkloadRelevant(const JitRegionPipeline
 	return false;
 }
 
-static void AccumulateJitRegionInventorySource(JitRegionPipelineInventory &inventory, const PhysicalOperator &source) {
+static void AccumulateJitRegionInventorySource(JitRegionPipelineInventory &inventory,
+                                               const JitPipelineOperatorEntry &source) {
 	inventory.has_source = true;
-	inventory.source_operator_name = PhysicalOperatorToString(source.type);
+	inventory.source_operator_name = source.operator_name;
 	inventory.estimated_cardinality = MaxValue(inventory.estimated_cardinality, source.estimated_cardinality);
-	auto descriptor = source.GetJitOperatorDescriptor();
+	auto &descriptor = source.descriptor;
 	if (descriptor.has_source) {
 		inventory.source_kind = descriptor.source.kind;
 		inventory.source_execution = descriptor.source.execution;
@@ -1168,18 +1201,10 @@ static void AccumulateJitRegionInventorySource(JitRegionPipelineInventory &inven
 	inventory.has_stateful_source = true;
 }
 
-static void AccumulateJitRegionInventoryOperator(JitRegionPipelineInventory &inventory, const PhysicalOperator &op) {
+static void AccumulateJitRegionInventoryOperator(JitRegionPipelineInventory &inventory,
+                                                 const JitPipelineOperatorEntry &op) {
 	inventory.operator_count++;
-	inventory.operator_names.push_back(PhysicalOperatorToString(op.type));
-	auto descriptor = op.GetJitOperatorDescriptor();
-	if (descriptor.has_operator) {
-		auto operator_contract = SliceJitCompiledContract(descriptor.compiled_contract, "operator");
-		inventory.operator_boundaries.push_back(JitCompiledContractHasNativeOperator(operator_contract)
-		                                            ? JitRegionBoundaryKind::OPERATOR_NATIVE
-		                                            : JitRegionBoundaryKind::OPERATOR_HELPER);
-	} else {
-		inventory.operator_boundaries.push_back(JitRegionBoundaryKind::OPERATOR_FALLBACK);
-	}
+	inventory.operator_names.push_back(op.operator_name);
 	inventory.estimated_cardinality = MaxValue(inventory.estimated_cardinality, op.estimated_cardinality);
 	switch (op.type) {
 	case PhysicalOperatorType::FILTER:
@@ -1198,11 +1223,12 @@ static void AccumulateJitRegionInventoryOperator(JitRegionPipelineInventory &inv
 	}
 }
 
-static void AccumulateJitRegionInventorySink(JitRegionPipelineInventory &inventory, const PhysicalOperator &sink) {
+static void AccumulateJitRegionInventorySink(JitRegionPipelineInventory &inventory,
+                                             const JitPipelineOperatorEntry &sink) {
 	inventory.has_sink = true;
-	inventory.sink_operator_name = PhysicalOperatorToString(sink.type);
+	inventory.sink_operator_name = sink.operator_name;
 	inventory.estimated_cardinality = MaxValue(inventory.estimated_cardinality, sink.estimated_cardinality);
-	auto descriptor = sink.GetJitOperatorDescriptor();
+	auto &descriptor = sink.descriptor;
 	if (descriptor.has_sink) {
 		inventory.sink_kind = descriptor.sink.kind;
 	} else {
@@ -1214,17 +1240,17 @@ static void AccumulateJitRegionInventorySink(JitRegionPipelineInventory &invento
 	inventory.has_ungrouped_aggregate_sink = inventory.sink_kind == JitRegionSinkKind::UNGROUPED_AGGREGATE_UPDATE;
 }
 
-unique_ptr<JitRegionPipelineInventory> TryInspectJitRegionPipeline(Pipeline &pipeline,
+unique_ptr<JitRegionPipelineInventory> TryInspectJitRegionPipeline(const JitPipelineDescriptor &descriptor,
                                                                    JitRegionPipelineInventoryMode mode) {
 	auto result = make_uniq<JitRegionPipelineInventory>();
-	if (pipeline.GetSource()) {
-		AccumulateJitRegionInventorySource(*result, *pipeline.GetSource());
+	if (descriptor.HasSource()) {
+		AccumulateJitRegionInventorySource(*result, descriptor.source);
 	}
-	for (auto &op : pipeline.GetIntermediateOperators()) {
-		AccumulateJitRegionInventoryOperator(*result, op.get());
+	for (auto &op : descriptor.operators) {
+		AccumulateJitRegionInventoryOperator(*result, op);
 	}
-	if (pipeline.GetSink()) {
-		AccumulateJitRegionInventorySink(*result, *pipeline.GetSink());
+	if (descriptor.HasSink()) {
+		AccumulateJitRegionInventorySink(*result, descriptor.sink);
 	}
 	if (!result->has_source && result->operator_count == 0 && !result->has_sink) {
 		return nullptr;
@@ -1244,6 +1270,15 @@ unique_ptr<JitRegionPipelineInventory> TryInspectJitRegionPipeline(Pipeline &pip
 		result->ir += ";estimated_cardinality=" + std::to_string(result->estimated_cardinality);
 	}
 	return result;
+}
+
+unique_ptr<JitRegionPipelineInventory> TryInspectJitRegionPipeline(Pipeline &pipeline,
+                                                                   JitRegionPipelineInventoryMode mode) {
+	auto descriptor = BuildJitPipelineDescriptor(pipeline);
+	if (!descriptor) {
+		return nullptr;
+	}
+	return TryInspectJitRegionPipeline(*descriptor, mode);
 }
 
 static string DescribeJitTypeList(const vector<LogicalType> &types) {
@@ -1848,11 +1883,11 @@ static JitRegionContract BuildJitRegionContract(const JitRegionIR &region_ir, co
 			contract.sink_ownership = ClassifyJitRegionSinkOwnership(node, contract);
 			RecordJitRegionContractOwnership(contract, contract.sink_ownership);
 			break;
-			case JitRegionIRNodeKind::OPERATOR: {
-				auto ownership =
-				    ClassifyJitCompiledContractOwnership(node.compiled_contract, contract, node.fallback_reason);
-				contract.transform_ownership = CombineJitRegionTransformOwnership(contract.transform_ownership, ownership);
-				RecordJitRegionContractOwnership(contract, ownership);
+		case JitRegionIRNodeKind::OPERATOR: {
+			auto ownership =
+			    ClassifyJitCompiledContractOwnership(node.compiled_contract, contract, node.fallback_reason);
+			contract.transform_ownership = CombineJitRegionTransformOwnership(contract.transform_ownership, ownership);
+			RecordJitRegionContractOwnership(contract, ownership);
 			has_transform = true;
 			break;
 		}
@@ -1876,6 +1911,9 @@ static JitRegionContract BuildJitRegionContract(const JitRegionIR &region_ir, co
 	return contract;
 }
 
+static JitRegionStagePlan BuildJitRegionStagePlan(const JitRegionIR &region_ir,
+                                                  const JitRegionCandidate &candidate);
+
 static void AccumulateJitRegionFilterTraits(const JitExpressionIR &root, idx_t &comparison_filter_count,
                                             idx_t &integer_comparison_filter_count,
                                             idx_t &non_integer_comparison_filter_count,
@@ -1893,6 +1931,56 @@ static void AccumulateJitRegionFilterTraits(const JitExpressionIR &root, idx_t &
 	}
 	if (JitExpressionContainsKind(root, JitExpressionIRKind::CONJUNCTION)) {
 		conjunction_filter_count++;
+	}
+}
+
+static bool JitRegionStageIsOperatorRole(const JitRegionStage &stage) {
+	return stage.kind == JitRegionStageKind::HASH_JOIN_PROBE ||
+	       stage.kind == JitRegionStageKind::OPERATOR_BOUNDARY;
+}
+
+static bool JitRegionStageIsSinkRole(const JitRegionStage &stage) {
+	return stage.kind == JitRegionStageKind::HASH_JOIN_BUILD ||
+	       stage.kind == JitRegionStageKind::HASH_AGGREGATE_UPDATE ||
+	       stage.kind == JitRegionStageKind::PERFECT_HASH_AGGREGATE_UPDATE ||
+	       stage.kind == JitRegionStageKind::UNGROUPED_AGGREGATE_UPDATE ||
+	       stage.kind == JitRegionStageKind::SINK_BOUNDARY;
+}
+
+static bool JitRegionStageRequiresExecutorBoundary(JitRegionStageExecutionKind execution) {
+	return execution == JitRegionStageExecutionKind::EXECUTOR_FALLBACK;
+}
+
+static bool JitRegionStageRequiresMissingProtocol(JitRegionStageExecutionKind execution) {
+	return execution == JitRegionStageExecutionKind::MISSING_PROTOCOL ||
+	       execution == JitRegionStageExecutionKind::TYPED_HELPER;
+}
+
+static void AccumulateJitRegionStageTraits(const JitRegionStage &stage, JitRegionCandidateTraits &traits) {
+	if (stage.kind == JitRegionStageKind::SOURCE && stage.protocol == JitCompiledProtocolKind::SCAN_CURSOR &&
+	    stage.execution != JitRegionStageExecutionKind::NATIVE_PROTOCOL) {
+		traits.scan_boundary_count++;
+	}
+	if ((stage.kind == JitRegionStageKind::FILTER || stage.kind == JitRegionStageKind::PROJECTION) &&
+	    JitRegionStageRequiresExecutorBoundary(stage.execution)) {
+		traits.expression_fallback_count++;
+	}
+	if (JitRegionStageIsOperatorRole(stage)) {
+		if (JitRegionStageRequiresExecutorBoundary(stage.execution)) {
+			traits.operator_fallback_count++;
+		} else if (JitRegionStageRequiresMissingProtocol(stage.execution)) {
+			traits.operator_helper_count++;
+		}
+	}
+	if (JitRegionStageIsSinkRole(stage) && stage.execution != JitRegionStageExecutionKind::NATIVE_PROTOCOL) {
+		traits.sink_boundary_count++;
+	}
+}
+
+static void AccumulateJitRegionStagePlanTraits(const JitRegionStagePlan &stage_plan,
+                                               JitRegionCandidateTraits &traits) {
+	for (auto &stage : stage_plan.stages) {
+		AccumulateJitRegionStageTraits(stage, traits);
 	}
 }
 
@@ -1927,7 +2015,8 @@ static void AccumulateJitRegionSourceTraits(const JitRegionIRNode &node, JitRegi
 }
 
 static JitRegionCandidateTraits BuildJitRegionCandidateTraits(const JitRegionIR &region_ir,
-                                                              const JitRegionCandidate &candidate) {
+                                                              const JitRegionCandidate &candidate,
+                                                              const JitRegionStagePlan &stage_plan) {
 	JitRegionCandidateTraits traits;
 	bool unknown_expression_traits = false;
 	for (idx_t node_idx = candidate.first_node; node_idx < candidate.EndNode() && node_idx < region_ir.nodes.size();
@@ -1989,33 +2078,18 @@ static JitRegionCandidateTraits BuildJitRegionCandidateTraits(const JitRegionIR 
 			traits.operator_count++;
 			break;
 		}
-		switch (node.boundary) {
-		case JitRegionBoundaryKind::SCAN:
-			traits.scan_boundary_count++;
-			break;
-		case JitRegionBoundaryKind::SOURCE_NATIVE:
-		case JitRegionBoundaryKind::SINK_NATIVE:
-		case JitRegionBoundaryKind::OPERATOR_NATIVE:
-			break;
-		case JitRegionBoundaryKind::SINK:
-			traits.sink_boundary_count++;
-			break;
-		case JitRegionBoundaryKind::OPERATOR_FALLBACK:
-			traits.operator_fallback_count++;
-			break;
-		case JitRegionBoundaryKind::OPERATOR_HELPER:
-			traits.operator_helper_count++;
-			break;
-		case JitRegionBoundaryKind::EXPRESSION_FALLBACK:
-			traits.expression_fallback_count++;
-			break;
-		default:
-			break;
-		}
 	}
+	AccumulateJitRegionStagePlanTraits(stage_plan, traits);
 	traits.expression_traits_known = !unknown_expression_traits;
 	traits.ir = DescribeJitRegionCandidateTraits(traits);
 	return traits;
+}
+
+static JitRegionCandidateTraits BuildJitRegionSpanTraits(const JitRegionIR &region_ir,
+                                                         JitRegionCandidate span_candidate) {
+	span_candidate.contract = BuildJitRegionContract(region_ir, span_candidate);
+	span_candidate.stage_plan = BuildJitRegionStagePlan(region_ir, span_candidate);
+	return BuildJitRegionCandidateTraits(region_ir, span_candidate, span_candidate.stage_plan);
 }
 
 static JitRegionCandidateTraits BuildJitRegionContextTraits(const JitRegionIR &region_ir) {
@@ -2023,7 +2097,7 @@ static JitRegionCandidateTraits BuildJitRegionContextTraits(const JitRegionIR &r
 	context_candidate.first_node = 0;
 	context_candidate.node_count = region_ir.nodes.size();
 	context_candidate.scope = JitRegionCandidateScope::FULL_PIPELINE;
-	return BuildJitRegionCandidateTraits(region_ir, context_candidate);
+	return BuildJitRegionSpanTraits(region_ir, std::move(context_candidate));
 }
 
 static JitRegionCandidateTraits BuildJitRegionUpstreamTraits(const JitRegionIR &region_ir,
@@ -2035,7 +2109,7 @@ static JitRegionCandidateTraits BuildJitRegionUpstreamTraits(const JitRegionIR &
 	upstream_candidate.first_node = 0;
 	upstream_candidate.node_count = MinValue(candidate.first_node, NumericCast<idx_t>(region_ir.nodes.size()));
 	upstream_candidate.scope = JitRegionCandidateScope::SOURCE_PIPELINE;
-	return BuildJitRegionCandidateTraits(region_ir, upstream_candidate);
+	return BuildJitRegionSpanTraits(region_ir, std::move(upstream_candidate));
 }
 
 static JitRegionCandidateTraits BuildJitRegionContinuationTraits(const JitRegionIR &region_ir,
@@ -2047,7 +2121,7 @@ static JitRegionCandidateTraits BuildJitRegionContinuationTraits(const JitRegion
 	}
 	continuation_candidate.node_count = region_ir.nodes.size() - continuation_candidate.first_node;
 	continuation_candidate.scope = JitRegionCandidateScope::POST_SOURCE_OPERATOR_INTERVAL;
-	return BuildJitRegionCandidateTraits(region_ir, continuation_candidate);
+	return BuildJitRegionSpanTraits(region_ir, std::move(continuation_candidate));
 }
 
 static void AppendJitRegionCandidateShapeSegment(string &result, const string &segment) {
@@ -2597,10 +2671,10 @@ static bool AddJitRegionCandidate(JitRegionIR &region_ir, idx_t candidate_id, id
 	candidate.shape = DescribeJitRegionCandidateShape(region_ir, candidate);
 	candidate.pipeline_shape = DescribeJitRegionPipelineShape(region_ir, first_node, node_count);
 	candidate.context_pipeline_shape = region_ir.pipeline_shape;
-	candidate.traits = BuildJitRegionCandidateTraits(region_ir, candidate);
 	candidate.contract = BuildJitRegionContract(region_ir, candidate);
-	candidate.signature = BuildJitRegionSignature(region_ir, candidate);
 	candidate.stage_plan = BuildJitRegionStagePlan(region_ir, candidate);
+	candidate.traits = BuildJitRegionCandidateTraits(region_ir, candidate, candidate.stage_plan);
+	candidate.signature = BuildJitRegionSignature(region_ir, candidate);
 	candidate.upstream_traits = BuildJitRegionUpstreamTraits(region_ir, candidate);
 	candidate.context_traits = BuildJitRegionContextTraits(region_ir);
 	candidate.continuation_traits = BuildJitRegionContinuationTraits(region_ir, candidate);
@@ -2689,16 +2763,16 @@ static void BuildJitRegionCandidates(JitRegionIR &region_ir, idx_t operator_coun
 	AddJitRegionCandidateAndIncrement(region_ir, candidate_id, 0, region_ir.nodes.size(), 0, operator_count);
 }
 
-static unique_ptr<JitRegionIR> TryBuildJitRegion(Pipeline &pipeline) {
-	if (!TryInspectJitRegionPipeline(pipeline, JitRegionPipelineInventoryMode::ADMISSION)) {
+static unique_ptr<JitRegionIR> TryBuildJitRegion(const JitPipelineDescriptor &descriptor) {
+	if (!TryInspectJitRegionPipeline(descriptor, JitRegionPipelineInventoryMode::ADMISSION)) {
 		return nullptr;
 	}
 	auto result = make_uniq<JitRegionIR>();
-	if (pipeline.GetSource()) {
-		auto &source = *pipeline.GetSource();
-		auto source_descriptor = source.GetJitOperatorDescriptor();
+	if (descriptor.HasSource()) {
+		auto &source = descriptor.source;
+		auto &source_descriptor = source.descriptor;
 		auto source_node = BuildJitRegionFallbackNode("source", source, JitRegionIRNodeKind::SOURCE,
-		                                              BuildJitSourceBoundaryReason(source, source_descriptor));
+		                                              BuildJitSourceBoundaryReason(source));
 		source_node.compiled_contract = SliceJitCompiledContract(source_descriptor.compiled_contract, "source");
 		if (source_descriptor.has_source) {
 			source_node.source = BuildJitRegionSourceInfo(source_descriptor.source);
@@ -2706,25 +2780,24 @@ static unique_ptr<JitRegionIR> TryBuildJitRegion(Pipeline &pipeline) {
 				source_node.boundary = JitRegionBoundaryKind::SOURCE_NATIVE;
 			}
 		} else if (IsJitRegionScanSource(source.type)) {
-			source_node.source = BuildJitRegionGenericScanSourceInfo(source, source_node.fallback_reason);
+			source_node.source = BuildJitRegionGenericScanSourceInfo(source.Physical(), source_node.fallback_reason);
 		} else {
-			source_node.source = BuildJitRegionStatefulSourceInfo(source, source_node.fallback_reason);
+			source_node.source = BuildJitRegionStatefulSourceInfo(source.Physical(), source_node.fallback_reason);
 		}
 		result->nodes.push_back(std::move(source_node));
 	}
-	auto &operators = pipeline.GetIntermediateOperators();
 	JitRegionDataflowState state;
-	for (idx_t op_idx = 0; op_idx < operators.size(); op_idx++) {
-		result->nodes.push_back(
-		    BuildJitRegionOperatorNode("op" + std::to_string(op_idx), op_idx, operators[op_idx].get(), state));
+	for (idx_t op_idx = 0; op_idx < descriptor.operators.size(); op_idx++) {
+		result->nodes.push_back(BuildJitRegionOperatorNode("op" + std::to_string(op_idx),
+		                                                   descriptor.operators[op_idx], state));
 	}
-	if (pipeline.GetSink()) {
-		auto &sink = *pipeline.GetSink();
-		auto sink_descriptor = sink.GetJitOperatorDescriptor();
-		auto sink_reason = BuildJitSinkBoundaryReason(sink, sink_descriptor);
+	if (descriptor.HasSink()) {
+		auto &sink = descriptor.sink;
+		auto &sink_descriptor = sink.descriptor;
+		auto sink_reason = BuildJitSinkBoundaryReason(sink);
 		auto sink_node = BuildJitRegionFallbackNode("sink", sink, JitRegionIRNodeKind::SINK, std::move(sink_reason));
 		sink_node.compiled_contract = SliceJitCompiledContract(sink_descriptor.compiled_contract, "sink");
-		sink_node.sink = BuildJitRegionSinkInfo(sink, sink_descriptor);
+		sink_node.sink = BuildJitRegionSinkInfo(sink.Physical(), sink_descriptor);
 		if (sink_node.sink) {
 			sink_node.fallback_reason = sink_node.sink->reason;
 			if (JitCompiledContractHasNativeSink(sink_node.compiled_contract)) {
@@ -2737,7 +2810,7 @@ static unique_ptr<JitRegionIR> TryBuildJitRegion(Pipeline &pipeline) {
 		return nullptr;
 	}
 	result->pipeline_shape = DescribeJitRegionPipelineShape(*result);
-	BuildJitRegionCandidates(*result, operators.size());
+	BuildJitRegionCandidates(*result, descriptor.OperatorCount());
 	result->ir = "duckdb.region typed-vector-ir";
 	for (auto &candidate : result->candidates) {
 		result->ir += ";";
@@ -2751,7 +2824,15 @@ static unique_ptr<JitRegionIR> TryBuildJitRegion(Pipeline &pipeline) {
 }
 
 unique_ptr<JitRegionIR> TryLowerJitRegion(Pipeline &pipeline) {
-	return TryBuildJitRegion(pipeline);
+	auto descriptor = BuildJitPipelineDescriptor(pipeline);
+	if (!descriptor) {
+		return nullptr;
+	}
+	return TryLowerJitRegion(*descriptor);
+}
+
+unique_ptr<JitRegionIR> TryLowerJitRegion(const JitPipelineDescriptor &descriptor) {
+	return TryBuildJitRegion(descriptor);
 }
 
 } // namespace duckdb

@@ -23,6 +23,9 @@ optimized logical plan
 physical plan
         |
         v
+compiled pipeline descriptor
+        |
+        v
 compiled region planner
         |
         v
@@ -148,6 +151,16 @@ Core contracts:
 The region planner fuses contracts, not classes. A backend sees typed IR nodes
 such as `hash_join_probe_cursor`, `aggregate_lookup`, and `aggregate_update`; it
 does not see `PhysicalHashJoin` or `GroupedAggregateHashTable` internals.
+
+Pipeline analysis starts with `JitPipelineDescriptor`. DuckDB walks a physical
+`Pipeline` once, asks each source/operator/sink for its `JitOperatorDescriptor`,
+and records stable operator facts: role, pipeline index, type, name, output
+types, estimated cardinality, and compiled contract. Admission inventory and
+region IR lowering both consume this descriptor. They must not independently
+re-probe the raw `Pipeline` or call `GetJitOperatorDescriptor()` as a second
+discovery path. This is the high-to-low boundary: DuckDB physical operators
+publish contracts first, then region planning lowers those contracts into IR,
+then backends lower IR into executable code.
 
 The canonical in-core object is `JitCompiledOperatorContract`. Legacy source,
 operator, and sink descriptor views are compatibility payloads derived from that
@@ -2404,7 +2417,7 @@ Core module ownership follows the same trace boundary:
 - `src/execution/jit_expression_ir.cpp` owns DuckDB-facing scalar expression
   lowering from planner expressions into backend-neutral typed expression IR;
 - `src/execution/jit_region_ir.cpp` owns DuckDB-facing physical pipeline
-  lowering into region IR, consumes operator-owned JIT descriptors, and consumes
+  descriptor construction and descriptor-to-region-IR lowering. It consumes
   expression IR through the core-only `TryLowerJitExpression` boundary;
 - `src/execution/jit_operator_descriptor.cpp` owns the adapter from selected
   DuckDB physical operators into backend-neutral source/sink protocol
@@ -2455,8 +2468,11 @@ The public header surface mirrors the same dependency direction:
   explicit `JitRegionCandidate` identity, and region boundary contracts only.
   It must not expose DuckDB `Pipeline` lowering;
 - `duckdb/execution/jit/operator_descriptor.hpp` exposes the physical-operator
-  descriptor contract consumed by core region lowering. It is not a backend
-  header;
+  descriptor contract used to publish per-operator compiled facts. It is not a
+  backend header;
+- `duckdb/execution/jit/pipeline_descriptor.hpp` exposes the core pipeline
+  descriptor that snapshots physical operator facts before admission or region
+  IR lowering. Backends must not include it;
 - `duckdb/execution/jit/lowering.hpp` exposes the core-only lowering boundary
   from DuckDB planner/executor objects into backend-neutral JIT IR. Backends
   must not include it;
@@ -2473,11 +2489,12 @@ The public header surface mirrors the same dependency direction:
   should use the narrow header matching the layer they consume.
 
 Concrete DuckDB physical operators expose JIT protocol facts through
-`GetJitOperatorDescriptor()`. Region lowering consumes those descriptors and
-builds backend-neutral `JitRegionSourceInfo` and `JitRegionSinkInfo` records.
-Concrete operator knowledge must terminate at the descriptor adapter. Backend
-implementations must consume only backend-neutral JIT IR, candidate metadata,
-helper-call nodes, fallback nodes, and deterministic reason/IR text.
+`GetJitOperatorDescriptor()`. `BuildJitPipelineDescriptor` is the single pipeline-level discovery point. It snapshots those descriptors before admission
+inventory or region lowering runs. Region lowering consumes the pipeline
+descriptor and builds backend-neutral `JitRegionSourceInfo` and
+`JitRegionSinkInfo` records. Concrete operator knowledge must terminate at the descriptor adapter before the pipeline descriptor snapshots it.
+Backend implementations must consume only backend-neutral JIT IR, candidate
+metadata, helper-call nodes, fallback nodes, and deterministic reason/IR text.
 Source-boundary diagnostics such as projection pushdown, filter counts, dynamic
 filters, returned columns, and table function names therefore belong in
 operator-owned descriptors and core-lowered source boundary reason text, not in

@@ -7,6 +7,7 @@
 
 #pragma once
 
+#include "duckdb/execution/jit/pipeline_descriptor.hpp"
 #include "duckdb/execution/jit/region.hpp"
 
 namespace duckdb {
@@ -21,6 +22,9 @@ DUCKDB_API unique_ptr<JitExpressionFragment> TryLowerJitExpression(const Express
 DUCKDB_API string DescribeJitExpressionLoweringFailure(const Expression &expression);
 DUCKDB_API unique_ptr<JitRegionPipelineInventory> TryInspectJitRegionPipeline(Pipeline &pipeline,
                                                                               JitRegionPipelineInventoryMode mode);
+DUCKDB_API unique_ptr<JitRegionPipelineInventory> TryInspectJitRegionPipeline(const JitPipelineDescriptor &pipeline,
+                                                                              JitRegionPipelineInventoryMode mode);
 DUCKDB_API unique_ptr<JitRegionIR> TryLowerJitRegion(Pipeline &pipeline);
+DUCKDB_API unique_ptr<JitRegionIR> TryLowerJitRegion(const JitPipelineDescriptor &pipeline);
 
 } // namespace duckdb
