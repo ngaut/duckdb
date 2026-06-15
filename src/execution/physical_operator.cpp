@@ -340,7 +340,7 @@ void PhysicalOperator::Verify() {
 }
 
 JitOperatorDescriptor PhysicalOperator::GetJitOperatorDescriptor() const {
-	return JitOperatorDescriptor();
+	return FinalizeJitOperatorDescriptor(JitOperatorDescriptor());
 }
 
 bool CachingPhysicalOperator::CanCacheType(const LogicalType &type) {

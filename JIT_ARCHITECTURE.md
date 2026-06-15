@@ -149,6 +149,21 @@ The region planner fuses contracts, not classes. A backend sees typed IR nodes
 such as `hash_join_probe_cursor`, `aggregate_lookup`, and `aggregate_update`; it
 does not see `PhysicalHashJoin` or `GroupedAggregateHashTable` internals.
 
+The canonical in-core object is `JitCompiledOperatorContract`. Legacy source,
+operator, and sink descriptor views are compatibility payloads derived from that
+contract while migration is in progress. Region IR stores a role-sliced compiled
+contract on every source/operator/sink node:
+
+- a source node sees only scan/state-scan stages;
+- an operator node sees only transform/probe stages;
+- a sink node sees only sink/update/build stages.
+
+This role slicing is required because one DuckDB physical operator can expose
+multiple contracts in different pipelines. For example, a hash join exposes a
+build sink contract, a probe transform contract, and sometimes a state-scan
+source contract. Region planning must not accidentally treat all three as owned
+by one node.
+
 ## Native Region Protocol
 
 Compiled regions use a resumable protocol. They are not constrained to consume

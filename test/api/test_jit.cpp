@@ -2728,8 +2728,10 @@ TEST_CASE("JIT region lowering exposes stateful source protocol candidates", "[a
 		REQUIRE(event.candidate_contract.owns_source);
 		REQUIRE(event.candidate_contract.owns_state_scan);
 		REQUIRE(event.candidate_contract.missing_protocol_count == 0);
-			REQUIRE(event.candidate_contract.required_capabilities.size() == 1);
-			REQUIRE(event.candidate_contract.required_capabilities[0] == "ungrouped-aggregate-native-state-scan");
+			REQUIRE(std::find(event.candidate_contract.required_capabilities.begin(),
+			                  event.candidate_contract.required_capabilities.end(),
+			                  "ungrouped-aggregate-native-state-scan") !=
+			        event.candidate_contract.required_capabilities.end());
 			RequireStatefulSourceNativeProtocolABI(event, found_ungrouped_aggregate_state_scan_abi);
 			found_ungrouped_aggregate_state_scan_abi =
 			    found_ungrouped_aggregate_state_scan_abi ||

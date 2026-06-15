@@ -427,6 +427,262 @@ static vector<JitRegionProtocolField> BuildJitDescriptorProtocolFields(const str
 	return result;
 }
 
+static string JitCompiledProtocolKindName(JitCompiledProtocolKind protocol) {
+	switch (protocol) {
+	case JitCompiledProtocolKind::SCAN_CURSOR:
+		return "scan_cursor";
+	case JitCompiledProtocolKind::FILTER_STAGE:
+		return "filter_stage";
+	case JitCompiledProtocolKind::PROJECTION_STAGE:
+		return "projection_stage";
+	case JitCompiledProtocolKind::HASH_JOIN_BUILD:
+		return "hash_join_build";
+	case JitCompiledProtocolKind::HASH_JOIN_PROBE_CURSOR:
+		return "hash_join_probe_cursor";
+	case JitCompiledProtocolKind::AGGREGATE_LOOKUP:
+		return "aggregate_lookup";
+	case JitCompiledProtocolKind::AGGREGATE_UPDATE:
+		return "aggregate_update";
+	case JitCompiledProtocolKind::SINK_CURSOR:
+		return "sink_cursor";
+	case JitCompiledProtocolKind::STATE_SCAN_CURSOR:
+		return "state_scan_cursor";
+	default:
+		return "none";
+	}
+}
+
+static string JitCompiledDrainKindName(JitCompiledDrainKind drain) {
+	switch (drain) {
+	case JitCompiledDrainKind::ONE_INPUT_ONE_OUTPUT:
+		return "one_input_one_output";
+	case JitCompiledDrainKind::ZERO_OR_ONE_OUTPUT:
+		return "zero_or_one_output";
+	case JitCompiledDrainKind::ZERO_OR_MANY_OUTPUT:
+		return "zero_or_many_output";
+	case JitCompiledDrainKind::STATE_DRAIN:
+		return "state_drain";
+	default:
+		return "none";
+	}
+}
+
+static JitRegionStageExecutionKind JitCompiledSourceExecution(JitRegionSourceExecutionKind execution) {
+	switch (execution) {
+	case JitRegionSourceExecutionKind::NATIVE_SOURCE:
+		return JitRegionStageExecutionKind::NATIVE_PROTOCOL;
+	case JitRegionSourceExecutionKind::DUCKDB_GETDATA_HELPER:
+		return JitRegionStageExecutionKind::TYPED_HELPER;
+	case JitRegionSourceExecutionKind::EXECUTOR_FALLBACK:
+		return JitRegionStageExecutionKind::EXECUTOR_FALLBACK;
+	default:
+		return JitRegionStageExecutionKind::MISSING_PROTOCOL;
+	}
+}
+
+static JitCompiledStageContract BuildJitCompiledSourceStage(const JitOperatorSourceDescriptor &source) {
+	JitCompiledStageContract stage;
+	stage.stage = JitRegionStageKind::SOURCE;
+	stage.protocol = source.native_state_scan_contract.status != JitRegionStateContractStatus::NONE
+	                     ? JitCompiledProtocolKind::STATE_SCAN_CURSOR
+	                     : JitCompiledProtocolKind::SCAN_CURSOR;
+	stage.execution = JitCompiledSourceExecution(source.execution);
+	stage.drain = source.native_state_scan_contract.status != JitRegionStateContractStatus::NONE
+	                  ? JitCompiledDrainKind::STATE_DRAIN
+	                  : JitCompiledDrainKind::ZERO_OR_ONE_OUTPUT;
+	stage.required_capability = source.native_state_scan_contract.status != JitRegionStateContractStatus::NONE
+	                                ? source.native_state_scan_contract.required_capability
+	                                : source.native_source_contract.required_capability;
+	stage.blocker = source.native_state_scan_contract.status != JitRegionStateContractStatus::NONE
+	                    ? source.native_state_scan_contract.blocker
+	                    : source.native_source_contract.blocker;
+	stage.ir = source.reason;
+	return stage;
+}
+
+static JitCompiledStageContract BuildJitCompiledOperatorStage(const JitRegionOperatorInfo &operator_info) {
+	JitCompiledStageContract stage;
+	stage.stage = operator_info.kind == JitRegionOperatorKind::HASH_JOIN_PROBE ? JitRegionStageKind::HASH_JOIN_PROBE
+	                                                                           : JitRegionStageKind::OPERATOR_BOUNDARY;
+	stage.protocol = operator_info.kind == JitRegionOperatorKind::HASH_JOIN_PROBE
+	                     ? JitCompiledProtocolKind::HASH_JOIN_PROBE_CURSOR
+	                     : JitCompiledProtocolKind::NONE;
+	stage.execution = operator_info.hash_join_protocol.native_probe_contract.status == JitRegionStateContractStatus::READY
+	                      ? JitRegionStageExecutionKind::NATIVE_PROTOCOL
+	                      : JitRegionStageExecutionKind::MISSING_PROTOCOL;
+	stage.drain = operator_info.kind == JitRegionOperatorKind::HASH_JOIN_PROBE
+	                  ? JitCompiledDrainKind::ZERO_OR_MANY_OUTPUT
+	                  : JitCompiledDrainKind::NONE;
+	stage.required_capability = operator_info.hash_join_protocol.native_probe_contract.required_capability;
+	stage.blocker = operator_info.hash_join_protocol.native_probe_contract.blocker;
+	stage.ir = operator_info.reason;
+	return stage;
+}
+
+static bool JitCompiledAllAggregatesHaveNativeUpdates(const vector<JitRegionAggregateInput> &aggregates) {
+	if (aggregates.empty()) {
+		return false;
+	}
+	for (auto &aggregate : aggregates) {
+		if (aggregate.native_update == JitAggregateUpdateKind::NONE) {
+			return false;
+		}
+	}
+	return true;
+}
+
+static JitRegionStateContractStatus JitCompiledSinkStatus(const JitRegionSinkInfo &sink) {
+	switch (sink.kind) {
+	case JitRegionSinkKind::HASH_JOIN_BUILD:
+		return sink.hash_join_protocol.native_build_contract.status;
+	case JitRegionSinkKind::HASH_AGGREGATE_UPDATE:
+	case JitRegionSinkKind::PERFECT_HASH_AGGREGATE_UPDATE:
+		return sink.aggregate_protocol.native_hash_lookup_contract.status == JitRegionStateContractStatus::READY &&
+		               sink.aggregate_protocol.native_grouped_state_contract.status == JitRegionStateContractStatus::READY &&
+		               JitCompiledAllAggregatesHaveNativeUpdates(sink.aggregates)
+		           ? JitRegionStateContractStatus::READY
+		           : JitRegionStateContractStatus::MISSING;
+	case JitRegionSinkKind::UNGROUPED_AGGREGATE_UPDATE:
+		return JitCompiledAllAggregatesHaveNativeUpdates(sink.aggregates) ? JitRegionStateContractStatus::READY
+		                                                                  : JitRegionStateContractStatus::MISSING;
+	default:
+		return JitRegionStateContractStatus::MISSING;
+	}
+}
+
+static JitCompiledProtocolKind JitCompiledSinkProtocol(const JitRegionSinkInfo &sink) {
+	switch (sink.kind) {
+	case JitRegionSinkKind::HASH_JOIN_BUILD:
+		return JitCompiledProtocolKind::HASH_JOIN_BUILD;
+	case JitRegionSinkKind::HASH_AGGREGATE_UPDATE:
+	case JitRegionSinkKind::PERFECT_HASH_AGGREGATE_UPDATE:
+	case JitRegionSinkKind::UNGROUPED_AGGREGATE_UPDATE:
+		return JitCompiledProtocolKind::AGGREGATE_UPDATE;
+	case JitRegionSinkKind::SORT:
+	case JitRegionSinkKind::MATERIALIZATION:
+	case JitRegionSinkKind::OPERATOR:
+		return JitCompiledProtocolKind::SINK_CURSOR;
+	default:
+		return JitCompiledProtocolKind::NONE;
+	}
+}
+
+static JitRegionStageKind JitCompiledSinkStage(const JitRegionSinkInfo &sink) {
+	switch (sink.kind) {
+	case JitRegionSinkKind::HASH_JOIN_BUILD:
+		return JitRegionStageKind::HASH_JOIN_BUILD;
+	case JitRegionSinkKind::HASH_AGGREGATE_UPDATE:
+		return JitRegionStageKind::HASH_AGGREGATE_UPDATE;
+	case JitRegionSinkKind::PERFECT_HASH_AGGREGATE_UPDATE:
+		return JitRegionStageKind::PERFECT_HASH_AGGREGATE_UPDATE;
+	case JitRegionSinkKind::UNGROUPED_AGGREGATE_UPDATE:
+		return JitRegionStageKind::UNGROUPED_AGGREGATE_UPDATE;
+	default:
+		return JitRegionStageKind::SINK_BOUNDARY;
+	}
+}
+
+static JitCompiledStageContract BuildJitCompiledSinkStage(const JitRegionSinkInfo &sink) {
+	JitCompiledStageContract stage;
+	stage.stage = JitCompiledSinkStage(sink);
+	stage.protocol = JitCompiledSinkProtocol(sink);
+	stage.execution = JitCompiledSinkStatus(sink) == JitRegionStateContractStatus::READY
+	                      ? JitRegionStageExecutionKind::NATIVE_PROTOCOL
+	                      : JitRegionStageExecutionKind::MISSING_PROTOCOL;
+	stage.drain = JitCompiledDrainKind::NONE;
+	if (sink.kind == JitRegionSinkKind::HASH_JOIN_BUILD) {
+		stage.required_capability = sink.hash_join_protocol.native_build_contract.required_capability;
+		stage.blocker = sink.hash_join_protocol.native_build_contract.blocker;
+	} else if (sink.kind == JitRegionSinkKind::HASH_AGGREGATE_UPDATE ||
+	           sink.kind == JitRegionSinkKind::PERFECT_HASH_AGGREGATE_UPDATE) {
+		if (sink.aggregate_protocol.native_hash_lookup_contract.status != JitRegionStateContractStatus::READY) {
+			stage.required_capability = sink.aggregate_protocol.native_hash_lookup_contract.required_capability;
+			stage.blocker = sink.aggregate_protocol.native_hash_lookup_contract.blocker;
+		} else if (sink.aggregate_protocol.native_grouped_state_contract.status !=
+		           JitRegionStateContractStatus::READY) {
+			stage.required_capability = sink.aggregate_protocol.native_grouped_state_contract.required_capability;
+			stage.blocker = sink.aggregate_protocol.native_grouped_state_contract.blocker;
+		} else if (!JitCompiledAllAggregatesHaveNativeUpdates(sink.aggregates)) {
+			stage.required_capability = "aggregate-native-update";
+			stage.blocker = "aggregate-native-update-missing";
+		} else {
+			stage.required_capability = sink.aggregate_protocol.native_hash_lookup_contract.required_capability;
+			stage.blocker = sink.aggregate_protocol.native_hash_lookup_contract.blocker;
+		}
+	} else if (sink.kind == JitRegionSinkKind::UNGROUPED_AGGREGATE_UPDATE) {
+		stage.required_capability = "ungrouped-aggregate-native-update";
+		stage.blocker = JitCompiledAllAggregatesHaveNativeUpdates(sink.aggregates) ? "none"
+		                                                                           : "aggregate-native-update-missing";
+	} else {
+		stage.required_capability = "sink-cursor";
+		stage.blocker = "sink-cursor-protocol-missing";
+	}
+	stage.ir = sink.reason;
+	return stage;
+}
+
+static string BuildJitCompiledContractIR(const JitCompiledOperatorContract &contract) {
+	string result = "compiled_contract<stages=" + std::to_string(contract.stages.size());
+	result += ",source=" + JitDescriptorBool(contract.has_source);
+	result += ",operator=" + JitDescriptorBool(contract.has_operator);
+	result += ",sink=" + JitDescriptorBool(contract.has_sink);
+	result += ",state_scan=" + JitDescriptorBool(contract.has_state_scan);
+	result += ",resumable_output=" + JitDescriptorBool(contract.has_resumable_output);
+	result += ",executor_boundary_free=" + JitDescriptorBool(contract.executor_boundary_free);
+	for (idx_t stage_idx = 0; stage_idx < contract.stages.size(); stage_idx++) {
+		auto &stage = contract.stages[stage_idx];
+		result += ",stage" + std::to_string(stage_idx) + "=<protocol=" +
+		          JitCompiledProtocolKindName(stage.protocol);
+		result += ",execution=" + string(JitRegionStageExecutionKindToString(stage.execution));
+		result += ",drain=" + JitCompiledDrainKindName(stage.drain);
+		if (!stage.required_capability.empty()) {
+			result += ",capability=" + stage.required_capability;
+		}
+		if (!stage.blocker.empty()) {
+			result += ",blocker=" + stage.blocker;
+		}
+		result += ">";
+	}
+	result += ">";
+	return result;
+}
+
+JitOperatorDescriptor FinalizeJitOperatorDescriptor(JitOperatorDescriptor descriptor) {
+	auto &contract = descriptor.compiled_contract;
+	contract.present = descriptor.has_source || descriptor.has_operator || descriptor.has_sink;
+	contract.has_source = descriptor.has_source;
+	contract.has_operator = descriptor.has_operator;
+	contract.has_sink = descriptor.has_sink;
+	contract.stages.clear();
+
+	if (descriptor.has_source) {
+		auto stage = BuildJitCompiledSourceStage(descriptor.source);
+		contract.has_state_scan = stage.protocol == JitCompiledProtocolKind::STATE_SCAN_CURSOR;
+		contract.stages.push_back(std::move(stage));
+	}
+	if (descriptor.has_operator) {
+		auto stage = BuildJitCompiledOperatorStage(descriptor.operator_info);
+		contract.has_resumable_output =
+		    contract.has_resumable_output || stage.drain == JitCompiledDrainKind::ZERO_OR_MANY_OUTPUT;
+		contract.stages.push_back(std::move(stage));
+	}
+	if (descriptor.has_sink) {
+		contract.stages.push_back(BuildJitCompiledSinkStage(descriptor.sink));
+	}
+
+	contract.executor_boundary_free = contract.present;
+	for (auto &stage : contract.stages) {
+		if (stage.execution != JitRegionStageExecutionKind::NATIVE_PROTOCOL &&
+		    stage.execution != JitRegionStageExecutionKind::GENERATED_IR &&
+		    stage.execution != JitRegionStageExecutionKind::PASS_THROUGH) {
+			contract.executor_boundary_free = false;
+			break;
+		}
+	}
+	contract.ir = BuildJitCompiledContractIR(contract);
+	return descriptor;
+}
+
 static string BuildJitDescriptorJoinComparisonList(const vector<JoinCondition> &conditions) {
 	string result = "[";
 	for (idx_t condition_idx = 0; condition_idx < conditions.size(); condition_idx++) {
@@ -1468,13 +1724,13 @@ JitOperatorDescriptor PhysicalTableScan::GetJitOperatorDescriptor() const {
 	result.source.in_out_function = static_cast<bool>(function.in_out_function);
 	result.source.table_scan_protocol = BuildJitDescriptorTableScanProtocol(*this);
 	AddJitDescriptorTableScanSourceFilters(*this, result.source);
-	return result;
+	return FinalizeJitOperatorDescriptor(std::move(result));
 }
 
 JitOperatorDescriptor PhysicalColumnDataScan::GetJitOperatorDescriptor() const {
 	JitOperatorDescriptor result;
 	if (type != PhysicalOperatorType::CTE_SCAN && type != PhysicalOperatorType::COLUMN_DATA_SCAN) {
-		return result;
+		return FinalizeJitOperatorDescriptor(std::move(result));
 	}
 	result.has_source = true;
 	result.source.kind = JitRegionSourceKind::STATEFUL_OPERATOR;
@@ -1491,7 +1747,7 @@ JitOperatorDescriptor PhysicalColumnDataScan::GetJitOperatorDescriptor() const {
 	result.source_boundary_reason += ";returned_columns=" + std::to_string(result.source.returned_column_count);
 	result.source.reason = result.source_boundary_reason;
 	result.source.fields = BuildJitDescriptorProtocolFields(result.source.reason);
-	return result;
+	return FinalizeJitOperatorDescriptor(std::move(result));
 }
 
 JitOperatorDescriptor PhysicalHashJoin::GetJitOperatorDescriptor() const {
@@ -1539,7 +1795,7 @@ JitOperatorDescriptor PhysicalHashJoin::GetJitOperatorDescriptor() const {
 	result.sink.fields = BuildJitDescriptorProtocolFields(result.sink.reason);
 	result.sink.hash_join_protocol = std::move(protocol);
 	result.sink.hash_join_keys = BuildJitDescriptorHashJoinBuildKeyInputs(*this);
-	return result;
+	return FinalizeJitOperatorDescriptor(std::move(result));
 }
 
 JitOperatorDescriptor PhysicalOrder::GetJitOperatorDescriptor() const {
@@ -1549,7 +1805,7 @@ JitOperatorDescriptor PhysicalOrder::GetJitOperatorDescriptor() const {
 	result.source_boundary_reason += ";is_index_sort=" + JitDescriptorBool(is_index_sort);
 	result.source.reason = result.source_boundary_reason;
 	result.source.fields = BuildJitDescriptorProtocolFields(result.source.reason);
-	return result;
+	return FinalizeJitOperatorDescriptor(std::move(result));
 }
 
 JitOperatorDescriptor PhysicalTopN::GetJitOperatorDescriptor() const {
@@ -1561,7 +1817,7 @@ JitOperatorDescriptor PhysicalTopN::GetJitOperatorDescriptor() const {
 	result.source_boundary_reason += ";dynamic_filter=" + JitDescriptorBool(static_cast<bool>(dynamic_filter));
 	result.source.reason = result.source_boundary_reason;
 	result.source.fields = BuildJitDescriptorProtocolFields(result.source.reason);
-	return result;
+	return FinalizeJitOperatorDescriptor(std::move(result));
 }
 
 JitOperatorDescriptor PhysicalHashAggregate::GetJitOperatorDescriptor() const {
@@ -1600,7 +1856,7 @@ JitOperatorDescriptor PhysicalHashAggregate::GetJitOperatorDescriptor() const {
 	result.sink.aggregate_protocol = std::move(protocol);
 	result.sink.aggregates = BuildJitDescriptorHashAggregateInputs(*this);
 	result.sink.groups = BuildJitDescriptorGroupInputs(*this);
-	return result;
+	return FinalizeJitOperatorDescriptor(std::move(result));
 }
 
 JitOperatorDescriptor PhysicalPerfectHashAggregate::GetJitOperatorDescriptor() const {
@@ -1643,7 +1899,7 @@ JitOperatorDescriptor PhysicalPerfectHashAggregate::GetJitOperatorDescriptor() c
 	result.sink.aggregate_protocol = std::move(protocol);
 	result.sink.aggregates = BuildJitDescriptorPerfectHashAggregateInputs(*this);
 	result.sink.groups = BuildJitDescriptorGroupInputs(*this);
-	return result;
+	return FinalizeJitOperatorDescriptor(std::move(result));
 }
 
 JitOperatorDescriptor PhysicalUngroupedAggregate::GetJitOperatorDescriptor() const {
@@ -1679,7 +1935,7 @@ JitOperatorDescriptor PhysicalUngroupedAggregate::GetJitOperatorDescriptor() con
 	result.sink.fields = BuildJitDescriptorProtocolFields(result.sink.reason);
 	result.sink.aggregate_protocol = std::move(protocol);
 	result.sink.aggregates = BuildJitDescriptorUngroupedAggregateInputs(*this);
-	return result;
+	return FinalizeJitOperatorDescriptor(std::move(result));
 }
 
 } // namespace duckdb

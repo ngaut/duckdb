@@ -7,6 +7,7 @@
 
 #pragma once
 
+#include "duckdb/execution/jit/compiled_contract.hpp"
 #include "duckdb/execution/jit/ir.hpp"
 #include "duckdb/common/enums/expression_type.hpp"
 #include "duckdb/common/enums/join_type.hpp"
@@ -337,6 +338,7 @@ struct JitRegionIRNode {
 	string role;
 	string operator_name;
 	idx_t operator_index = DConstants::INVALID_INDEX;
+	JitCompiledOperatorContract compiled_contract;
 	JitRegionIRNodeKind kind = JitRegionIRNodeKind::OPERATOR;
 	vector<LogicalType> output_types;
 	idx_t estimated_cardinality = 0;

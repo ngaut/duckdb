@@ -7,6 +7,7 @@
 
 #pragma once
 
+#include "duckdb/execution/jit/compiled_contract.hpp"
 #include "duckdb/execution/jit/region.hpp"
 #include "duckdb/common/common.hpp"
 #include "duckdb/common/optional_ptr.hpp"
@@ -50,6 +51,8 @@ struct JitOperatorSourceDescriptor {
 };
 
 struct JitOperatorDescriptor {
+	JitCompiledOperatorContract compiled_contract;
+
 	string source_boundary_reason;
 	bool has_source = false;
 	JitOperatorSourceDescriptor source;
@@ -60,5 +63,7 @@ struct JitOperatorDescriptor {
 	bool has_sink = false;
 	JitRegionSinkInfo sink;
 };
+
+DUCKDB_API JitOperatorDescriptor FinalizeJitOperatorDescriptor(JitOperatorDescriptor descriptor);
 
 } // namespace duckdb
