@@ -252,6 +252,43 @@ public:
 	}
 };
 
+class NonCompiledKernelResultBackend : public JitBackend {
+public:
+	string Name() const override {
+		return "contract_test_non_compiled_kernel_result_jit_backend";
+	}
+
+	string Description() const override {
+		return "contract test non-compiled kernel result JIT backend";
+	}
+
+	bool SupportsRegions() const override {
+		return true;
+	}
+
+	JitRegionLoweringPlan AnalyzeRegion(const JitRegionCompilationInput &input) override {
+		if (!IsMaximalTransformCandidate(input)) {
+			return UnsupportedContractBoundaryPlan();
+		}
+		JitRegionLoweringPlan plan;
+		plan.SetCompiledExecutionMode(JitExecutionMode::NATIVE);
+		plan.SetRegionExecutionForm(JitRegionExecutionForm::FUSED);
+		plan.AddNode("source", "CONTRACT_SOURCE", JitLoweringKind::FALLBACK, "contract source boundary");
+		plan.AddNode("op0", "CONTRACT_FILTER", JitLoweringKind::NATIVE, "contract native node");
+		plan.AddNode("sink", "CONTRACT_SINK", JitLoweringKind::FALLBACK, "contract sink boundary");
+		return plan;
+	}
+
+	JitRegionCompileResult CompileRegion(const JitRegionCompilationInput &) override {
+		JitRegionCompileResult result;
+		result.status = JitCompileStatus::UNSUPPORTED;
+		result.execution_mode = JitExecutionMode::UNSUPPORTED;
+		result.reason = "contract-test-non-compiled-kernel-result";
+		result.kernel = make_uniq<ContractTestRegionKernel>();
+		return result;
+	}
+};
+
 class AutoRejectedCountingBackend : public JitBackend {
 public:
 	string Name() const override {
@@ -4652,6 +4689,22 @@ TEST_CASE("JIT manager rejects compiled kernels without executable code", "[api]
 	auto result = con.Query("SELECT i + 1 FROM jit_zero_code_input WHERE i > 0");
 	REQUIRE(result->HasError());
 	REQUIRE(StringUtil::Contains(result->GetError(), "compiled region without executable code"));
+}
+
+TEST_CASE("JIT manager rejects non-compiled results with kernels", "[api][jit]") {
+	DuckDB db;
+	Connection con(db);
+	auto &context = *con.context;
+	auto &manager = JitManager::Get(context);
+
+	manager.RegisterBackend(make_uniq<NonCompiledKernelResultBackend>());
+	SetJitTestOptions(context, "contract_test_non_compiled_kernel_result_jit_backend");
+
+	REQUIRE_NO_FAIL(con.Query("CREATE TEMP TABLE jit_non_compiled_kernel_input AS "
+	                          "SELECT i::BIGINT AS i FROM range(3) tbl(i)"));
+	auto result = con.Query("SELECT i + 1 FROM jit_non_compiled_kernel_input WHERE i > 0");
+	REQUIRE(result->HasError());
+	REQUIRE(StringUtil::Contains(result->GetError(), "returned kernel for non-compiled region status unsupported"));
 }
 
 TEST_CASE("JIT manager rejects source pipeline kernels without source-prefix ABI", "[api][jit]") {

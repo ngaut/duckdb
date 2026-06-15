@@ -1043,6 +1043,10 @@ vector<unique_ptr<JitRegionKernel>> JitManager::CompilePreparedRegions(ClientCon
 		    candidate, ComposeJitCompileEventReason(prepared_region.admission, result.reason));
 		auto execution_mode = result.execution_mode;
 		auto ir = result.ir;
+		if (status != JitCompileStatus::COMPILED && result.kernel) {
+			throw InternalException("JIT backend \"%s\" returned kernel for non-compiled region status %s", backend_name,
+			                        JitCompileStatusToString(status));
+		}
 		if (status == JitCompileStatus::COMPILED) {
 			auto expected_mode = prepared_region.lowering_plan.ExpectedCompiledExecutionMode();
 			auto expected_form = prepared_region.lowering_plan.ExpectedRegionExecutionForm();
