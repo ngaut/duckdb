@@ -1465,7 +1465,7 @@ def verify_region_selection_contract(root: Path) -> None:
             "source_prefix_filter_column_map",
             "source_prefix_requires_unfiltered_input",
             "source_prefix_filter_prune_required",
-            "source_prefix_filter_split_supported",
+            "source_prefix_filter_takeover_supported",
             "JitRegionTableScanProtocol table_scan_protocol",
             "struct JitRegionHashJoinProtocol",
             "struct JitRegionAggregateProtocol",
@@ -2464,8 +2464,7 @@ def verify_stage_region_contract(root: Path) -> None:
             "BuildJitRegionUpstreamTraits",
             "BuildJitRegionContextTraits",
             "BuildJitRegionContinuationTraits",
-            "JitRegionTraitsRequireOperatorResumeProtocol",
-            "JitRegionCandidateRequiresMissingSplitProtocol",
+            "JitRegionCandidateRequiresMissingResumeProtocol",
             "JitRegionCandidateScope::SOURCE_PREFIX",
             "if (!candidate.contract.owns_source)",
             "contract.native_fusion_ready",
@@ -2475,7 +2474,7 @@ def verify_stage_region_contract(root: Path) -> None:
             "candidate.upstream_traits = BuildJitRegionUpstreamTraits(region_ir, candidate)",
             "candidate.context_traits = BuildJitRegionContextTraits(region_ir)",
             "candidate.continuation_traits = BuildJitRegionContinuationTraits(region_ir, candidate)",
-            "if (JitRegionCandidateRequiresMissingSplitProtocol(candidate))",
+            "if (JitRegionCandidateRequiresMissingResumeProtocol(candidate))",
             "candidate.stage_plan.ir",
             "upstream_\" + candidate.upstream_traits.ir",
             "context_\" + candidate.context_traits.ir",
@@ -2516,11 +2515,12 @@ def verify_stage_region_contract(root: Path) -> None:
     )
     assert_no_text(
         root,
-        [Path("extension/jit_sljit/sljit_region_plan.cpp")],
+        [Path("src/execution/jit_region_ir.cpp"), Path("extension/jit_sljit/sljit_region_plan.cpp")],
         [
             "SljitRejectsPostSourceUpstreamResumeContext",
             "SljitRejectsPostSourceContinuationContext",
             "SljitTraitsRequireUpstreamResumeProtocol",
+            "JitRegionTraitsRequireOperatorResumeProtocol",
             "operator-fusion-gap:upstream-operator-resume-protocol-missing",
             "operator-fusion-gap:downstream-operator-continuation-protocol-missing",
         ],
@@ -2701,7 +2701,7 @@ def verify_prepared_region_contract(root: Path) -> None:
             "bool RequiresPreparedSourceInput() const",
             "const vector<LogicalType> &SourceInputTypes",
             "vector<JitPreparedRegionCandidate> selected_regions",
-            "bool filter_split_supported",
+            "bool filter_takeover_supported",
         ],
     )
     assert_required_text(
@@ -2780,7 +2780,7 @@ def verify_prepared_region_contract(root: Path) -> None:
         [
             "BuildTableScanJitSourceConfig",
             "prepared->RequiresPreparedSourceInput()",
-            "source_contract.filter_split_supported",
+            "source_contract.filter_takeover_supported",
             "BuildIdentityTableScanProjection(op.column_ids.size())",
             "TableFilterExecutionMode::PRUNE_ONLY",
             "jit_source_config.use_prepared_source_input",
@@ -2794,7 +2794,7 @@ def verify_prepared_region_contract(root: Path) -> None:
             "lowering_plan.ExpectedCompiledExecutionMode() == JitExecutionMode::NATIVE",
             "lowering_plan.ExpectedRegionExecutionForm() == JitRegionExecutionForm::FUSED",
             "native_fused_source_owner",
-            "contract.owns_filters = !source.filters.empty() && contract.filter_split_supported &&",
+            "contract.owns_filters = !source.filters.empty() && contract.filter_takeover_supported &&",
         ],
     )
     assert_no_text(
@@ -2936,7 +2936,7 @@ def verify_core_lowering_boundary(root: Path) -> None:
             "source_prefix_filter_column_map=",
             "source_prefix_requires_unfiltered_input=",
             "source_prefix_filter_prune_required=",
-            "source_prefix_filter_split_supported=",
+            "source_prefix_filter_takeover_supported=",
             "hash_join_keys=",
             "aggregates=",
             "groups=",
@@ -3054,7 +3054,7 @@ def verify_core_lowering_boundary(root: Path) -> None:
             "protocol.source_prefix_input_column_count",
             "protocol.source_prefix_requires_unfiltered_input",
             "protocol.source_prefix_filter_prune_required",
-            "protocol.source_prefix_filter_split_supported",
+            "protocol.source_prefix_filter_takeover_supported",
             "SljitSourceFallbackReason",
             "SljitSourceIR",
             "AppendSljitSourceIR",

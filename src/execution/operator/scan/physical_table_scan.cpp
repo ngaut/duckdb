@@ -74,7 +74,7 @@ static TableScanJitSourceConfig BuildTableScanJitSourceConfig(const PhysicalTabl
 		return result;
 	}
 	auto &source_contract = prepared->source_contract;
-	if (!source_contract.requires_unfiltered_input || !source_contract.filter_split_supported) {
+	if (!source_contract.requires_unfiltered_input || !source_contract.filter_takeover_supported) {
 		return result;
 	}
 	result.use_prepared_source_input = true;

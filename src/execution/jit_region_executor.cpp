@@ -816,7 +816,7 @@ static const JitRegionIRNode *GetJitSourcePrefixNode(optional_ptr<const JitPrepa
 	for (idx_t node_idx = candidate.first_node; node_idx < candidate.EndNode(); node_idx++) {
 		auto &node = prepared->region_ir->nodes[node_idx];
 		if (node.kind == JitRegionIRNodeKind::SOURCE && node.source && !node.source->filters.empty() &&
-		    node.source->table_scan_protocol.source_prefix_filter_split_supported) {
+		    node.source->table_scan_protocol.source_prefix_filter_takeover_supported) {
 			return &node;
 		}
 	}
@@ -841,7 +841,7 @@ static const JitRegionIRNode *GetJitPreparedSourceReferenceNode(optional_ptr<con
 		for (idx_t node_idx = candidate.first_node; node_idx < candidate.EndNode(); node_idx++) {
 			auto &node = prepared->region_ir->nodes[node_idx];
 			if (node.kind == JitRegionIRNodeKind::SOURCE && node.source && !node.source->filters.empty() &&
-			    node.source->table_scan_protocol.source_prefix_filter_split_supported) {
+			    node.source->table_scan_protocol.source_prefix_filter_takeover_supported) {
 				return &node;
 			}
 		}

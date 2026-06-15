@@ -1345,7 +1345,7 @@ static SljitRegionNodePlan PlanSljitNativeSourceNode(const JitRegionIRNode &node
 		return result;
 	}
 
-	if (protocol.source_prefix_filter_split_supported) {
+	if (protocol.source_prefix_filter_takeover_supported) {
 		SljitNativeRegionOpPlan filter_op;
 		filter_op.kind = SljitNativeRegionOpKind::FILTER;
 		filter_op.output_types = protocol.source_prefix_input_types;
@@ -1360,7 +1360,7 @@ static SljitRegionNodePlan PlanSljitNativeSourceNode(const JitRegionIRNode &node
 			result.reason += ";source_filter_count=" + std::to_string(node.source->filters.size());
 			result.reason += ";source_prefix_filter_prune_required=" +
 			                 string(protocol.source_prefix_filter_prune_required ? "true" : "false");
-			result.reason += ";source_prefix_filter_split_supported=true";
+			result.reason += ";source_prefix_filter_takeover_supported=true";
 			AppendSljitSourceIR(result.reason, node, JitRegionSourceExecutionKind::NATIVE_SOURCE);
 			result.native_ops.push_back(std::move(filter_op));
 			result.native_ops.push_back(BuildSljitSourceOutputProjection(node, protocol));
@@ -1377,8 +1377,8 @@ static SljitRegionNodePlan PlanSljitNativeSourceNode(const JitRegionIRNode &node
 	result.reason += ";source_filter_count=" + std::to_string(node.source->filters.size());
 	result.reason += ";source_prefix_filter_prune_required=" +
 	                 string(protocol.source_prefix_filter_prune_required ? "true" : "false");
-	result.reason += ";source_prefix_filter_split_supported=" +
-	                 string(protocol.source_prefix_filter_split_supported ? "true" : "false");
+	result.reason += ";source_prefix_filter_takeover_supported=" +
+	                 string(protocol.source_prefix_filter_takeover_supported ? "true" : "false");
 	AppendSljitSourceIR(result.reason, node, JitRegionSourceExecutionKind::NATIVE_SOURCE);
 	return result;
 }
@@ -1457,8 +1457,8 @@ static SljitRegionNodePlan PlanSljitSourceNode(const JitRegionIRNode &node, cons
 		result.reason += ";source_prefix_input_columns=" + std::to_string(protocol.source_prefix_input_column_count);
 		result.reason += ";source_prefix_filter_prune_required=" +
 		                 string(protocol.source_prefix_filter_prune_required ? "true" : "false");
-		result.reason += ";source_prefix_filter_split_supported=" +
-		                 string(protocol.source_prefix_filter_split_supported ? "true" : "false");
+		result.reason += ";source_prefix_filter_takeover_supported=" +
+		                 string(protocol.source_prefix_filter_takeover_supported ? "true" : "false");
 		AppendSljitSourceIR(result.reason, node, JitRegionSourceExecutionKind::DUCKDB_SOURCE_BOUNDARY);
 		return result;
 	}
@@ -1481,7 +1481,7 @@ static SljitRegionNodePlan PlanSljitSourceNode(const JitRegionIRNode &node, cons
 			return SljitRegionFallbackNode("source-pushed filters require typed table scan protocol IR");
 		}
 		auto &protocol = node.source->table_scan_protocol;
-		auto reason = "source-pushed filters require source-prefix filter split;source_execution=" +
+		auto reason = "source-pushed filters require native source-filter takeover;source_execution=" +
 		              string(JitRegionSourceExecutionKindToString(node.source->execution)) +
 		              ";source_filter_count=" + std::to_string(node.source->filters.size()) +
 		              ";source_prefix_input_columns=" + std::to_string(protocol.source_prefix_input_column_count) +
@@ -1489,8 +1489,8 @@ static SljitRegionNodePlan PlanSljitSourceNode(const JitRegionIRNode &node, cons
 		              string(protocol.source_prefix_requires_unfiltered_input ? "true" : "false") +
 		              ";source_prefix_filter_prune_required=" +
 		              string(protocol.source_prefix_filter_prune_required ? "true" : "false") +
-		              ";source_prefix_filter_split_supported=" +
-		              string(protocol.source_prefix_filter_split_supported ? "true" : "false");
+		              ";source_prefix_filter_takeover_supported=" +
+		              string(protocol.source_prefix_filter_takeover_supported ? "true" : "false");
 		if (!JitRegionABIOwnsSource(contract.abi)) {
 			reason += ";source_prefix_ownership_contract=source_required";
 			AppendSljitSourceIR(reason, node, source_execution);
@@ -1502,8 +1502,8 @@ static SljitRegionNodePlan PlanSljitSourceNode(const JitRegionIRNode &node, cons
 		                "source_execution=duckdb-source-boundary";
 		result.reason += ";source_filter_count=" + std::to_string(node.source->filters.size());
 		result.reason += ";source_prefix_input_columns=" + std::to_string(protocol.source_prefix_input_column_count);
-		result.reason += ";source_prefix_filter_split_supported=" +
-		                 string(protocol.source_prefix_filter_split_supported ? "true" : "false");
+		result.reason += ";source_prefix_filter_takeover_supported=" +
+		                 string(protocol.source_prefix_filter_takeover_supported ? "true" : "false");
 		AppendSljitSourceIR(result.reason, node, JitRegionSourceExecutionKind::DUCKDB_SOURCE_BOUNDARY);
 		return result;
 	}
@@ -2548,34 +2548,33 @@ SljitRegionPlan BuildSljitRegionPlan(const JitRegionIR &region_ir, const JitRegi
 				native_region_possible = false;
 			}
 			continue;
-			}
-			SljitRegionNodePlan node_plan;
-			if (node.kind == JitRegionIRNodeKind::OPERATOR &&
-			    node.boundary == JitRegionBoundaryKind::OPERATOR_NATIVE &&
-			    !JitRegionABIIsFullPipeline(contract.abi)) {
-				node_plan = SljitRegionFallbackNode("native operator protocol requires full-pipeline region ABI");
-			} else if (node.kind == JitRegionIRNodeKind::OPERATOR &&
-			           node.boundary == JitRegionBoundaryKind::OPERATOR_PROTOCOL_BOUNDARY &&
-			           !JitRegionABIIsFullPipeline(contract.abi)) {
-			node_plan = SljitRegionFallbackNode("native operator protocol boundary requires full-pipeline region ownership");
+		}
+		SljitRegionNodePlan node_plan;
+		if (node.kind == JitRegionIRNodeKind::OPERATOR && node.boundary == JitRegionBoundaryKind::OPERATOR_NATIVE &&
+		    !JitRegionABIIsFullPipeline(contract.abi)) {
+			node_plan = SljitRegionFallbackNode("native operator protocol requires full-pipeline region ABI");
+		} else if (node.kind == JitRegionIRNodeKind::OPERATOR &&
+		           node.boundary == JitRegionBoundaryKind::OPERATOR_PROTOCOL_BOUNDARY &&
+		           !JitRegionABIIsFullPipeline(contract.abi)) {
+			node_plan =
+			    SljitRegionFallbackNode("native operator protocol boundary requires full-pipeline region ownership");
 		} else {
 			node_plan = PlanSljitRegionNode(node, current_types, plan.backend_plan->error);
 		}
 		plan.lowering_plan.AddNode(node.role, node.operator_name, node_plan.kind, node_plan.reason);
 		if (node_plan.kind == JitLoweringKind::FALLBACK && node.operator_info &&
 		    node.operator_info->kind == JitRegionOperatorKind::HASH_JOIN_PROBE) {
-				auto probe_contract_ready = node.operator_info->hash_join_protocol.present &&
-				                            node.operator_info->hash_join_protocol.native_probe_contract.status ==
-				                                JitRegionStateContractStatus::READY;
-				plan.backend_plan->error =
-				    !probe_contract_ready
-				        ? "SLJIT hash join probe requires a native hash join probe protocol"
-				        : "SLJIT hash join probe rejected by native hash join lowering";
-				plan.lowering_plan.AddFusionBlocker(
-				    !probe_contract_ready
-				        ? "operator-fusion-gap:hash-join-probe-protocol-missing"
-				        : "operator-fusion-gap:hash-join-probe-native-lowering-missing;" + node_plan.reason);
-			}
+			auto probe_contract_ready = node.operator_info->hash_join_protocol.present &&
+			                            node.operator_info->hash_join_protocol.native_probe_contract.status ==
+			                                JitRegionStateContractStatus::READY;
+			plan.backend_plan->error =
+			    !probe_contract_ready ? "SLJIT hash join probe requires a native hash join probe protocol"
+			                          : "SLJIT hash join probe rejected by native hash join lowering";
+			plan.lowering_plan.AddFusionBlocker(
+			    !probe_contract_ready
+			        ? "operator-fusion-gap:hash-join-probe-protocol-missing"
+			        : "operator-fusion-gap:hash-join-probe-native-lowering-missing;" + node_plan.reason);
+		}
 		if (node_plan.kind != JitLoweringKind::NATIVE || !SljitRegionNodeHasNativeOps(node_plan)) {
 			native_region_possible = false;
 			continue;

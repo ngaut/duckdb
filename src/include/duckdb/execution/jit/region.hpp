@@ -75,7 +75,7 @@ struct JitRegionTableScanProtocol {
 	vector<idx_t> source_prefix_filter_column_map;
 	bool source_prefix_requires_unfiltered_input = false;
 	bool source_prefix_filter_prune_required = false;
-	bool source_prefix_filter_split_supported = false;
+	bool source_prefix_filter_takeover_supported = false;
 	bool projection_pushdown = false;
 	bool filter_pushdown = false;
 	bool filter_prune = false;

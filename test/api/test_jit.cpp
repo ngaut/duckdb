@@ -2276,7 +2276,7 @@ TEST_CASE("JIT region lowering exposes typed table scan source protocol", "[api]
 		REQUIRE(StringUtil::Contains(event.ir, "source_prefix_filter_column_map=[0|1]"));
 		REQUIRE(StringUtil::Contains(event.ir, "source_prefix_requires_unfiltered_input=true"));
 		REQUIRE(StringUtil::Contains(event.ir, "source_prefix_filter_prune_required=true"));
-		REQUIRE(StringUtil::Contains(event.ir, "source_prefix_filter_split_supported=true"));
+		REQUIRE(StringUtil::Contains(event.ir, "source_prefix_filter_takeover_supported=true"));
 		REQUIRE(StringUtil::Contains(event.ir, "projection_pushdown=true"));
 		REQUIRE(StringUtil::Contains(event.ir, "filter_pushdown=true"));
 		REQUIRE(StringUtil::Contains(event.ir, "filter_prune=true"));

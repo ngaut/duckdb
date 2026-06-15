@@ -337,7 +337,7 @@ struct JitPreparedSourceContract {
 	bool native_source = false;
 	bool requires_unfiltered_input = false;
 	bool filter_prune_required = false;
-	bool filter_split_supported = false;
+	bool filter_takeover_supported = false;
 	vector<LogicalType> input_types;
 	vector<idx_t> output_projection_map;
 	vector<idx_t> filter_column_map;

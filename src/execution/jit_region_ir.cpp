@@ -185,7 +185,7 @@ static string DescribeJitRegionTableScanProtocol(const JitRegionTableScanProtoco
 	result +=
 	    ",source_prefix_requires_unfiltered_input=" + JitRegionBool(protocol.source_prefix_requires_unfiltered_input);
 	result += ",source_prefix_filter_prune_required=" + JitRegionBool(protocol.source_prefix_filter_prune_required);
-	result += ",source_prefix_filter_split_supported=" + JitRegionBool(protocol.source_prefix_filter_split_supported);
+	result += ",source_prefix_filter_takeover_supported=" + JitRegionBool(protocol.source_prefix_filter_takeover_supported);
 	result += ",projection_pushdown=" + JitRegionBool(protocol.projection_pushdown);
 	result += ",filter_pushdown=" + JitRegionBool(protocol.filter_pushdown);
 	result += ",filter_prune=" + JitRegionBool(protocol.filter_prune);
@@ -2498,12 +2498,7 @@ static bool HasJitRegionCandidate(const JitRegionIR &region_ir, idx_t first_node
 	return false;
 }
 
-static bool JitRegionTraitsRequireOperatorResumeProtocol(const JitRegionCandidateTraits &traits) {
-	return traits.resumable_operator_count > 0 || traits.operator_protocol_boundary_count > 0 ||
-	       traits.operator_fallback_count > 0;
-}
-
-static bool JitRegionCandidateRequiresMissingSplitProtocol(const JitRegionCandidate &candidate) {
+static bool JitRegionCandidateRequiresMissingResumeProtocol(const JitRegionCandidate &candidate) {
 	switch (candidate.scope) {
 	case JitRegionCandidateScope::SOURCE_PREFIX:
 		return candidate.context_traits.operator_protocol_boundary_count > 0;
@@ -2547,7 +2542,7 @@ static bool AddJitRegionCandidate(JitRegionIR &region_ir, idx_t candidate_id, id
 	candidate.upstream_traits = BuildJitRegionUpstreamTraits(region_ir, candidate);
 	candidate.context_traits = BuildJitRegionContextTraits(region_ir);
 	candidate.continuation_traits = BuildJitRegionContinuationTraits(region_ir, candidate);
-	if (JitRegionCandidateRequiresMissingSplitProtocol(candidate)) {
+	if (JitRegionCandidateRequiresMissingResumeProtocol(candidate)) {
 		return false;
 	}
 	candidate.ir = DescribeJitRegionCandidate(candidate);

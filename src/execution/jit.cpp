@@ -727,7 +727,7 @@ static void AccumulateJitPreparedSourceContract(JitPreparedPipeline &prepared, c
 			contract.selected = true;
 			contract.requires_unfiltered_input = false;
 			contract.filter_prune_required = false;
-			contract.filter_split_supported = false;
+			contract.filter_takeover_supported = false;
 			contract.input_types = node.output_types;
 			contract.output_projection_map.clear();
 			contract.filter_column_map.clear();
@@ -748,7 +748,7 @@ static void AccumulateJitPreparedSourceContract(JitPreparedPipeline &prepared, c
 		contract.selected = true;
 		contract.requires_unfiltered_input = protocol.source_prefix_requires_unfiltered_input;
 		contract.filter_prune_required = protocol.source_prefix_filter_prune_required;
-		contract.filter_split_supported = protocol.source_prefix_filter_split_supported;
+		contract.filter_takeover_supported = protocol.source_prefix_filter_takeover_supported;
 		contract.input_types = protocol.source_prefix_input_types;
 		contract.output_projection_map = protocol.source_prefix_output_projection_map;
 		contract.filter_column_map = protocol.source_prefix_filter_column_map;
@@ -757,7 +757,7 @@ static void AccumulateJitPreparedSourceContract(JitPreparedPipeline &prepared, c
 		contract.native_source = selected_source_execution == JitRegionSourceExecutionKind::NATIVE_SOURCE &&
 		                         source.native_source_contract.status == JitRegionNativeSourceStatus::READY &&
 		                         native_fused_source_owner;
-		contract.owns_filters = !source.filters.empty() && contract.filter_split_supported &&
+		contract.owns_filters = !source.filters.empty() && contract.filter_takeover_supported &&
 		                        lowering_plan.OwnsSourceFilters() && native_fused_source_owner;
 		return;
 	}

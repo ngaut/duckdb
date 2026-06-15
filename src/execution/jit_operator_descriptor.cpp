@@ -1354,7 +1354,7 @@ static JitRegionTableScanProtocol BuildJitDescriptorTableScanProtocol(const Phys
 	result.source_prefix_requires_unfiltered_input = !result.source_prefix_filter_column_map.empty();
 	result.source_prefix_filter_prune_required =
 	    result.source_prefix_requires_unfiltered_input && scan.function.filter_prune && !scan.projection_ids.empty();
-	result.source_prefix_filter_split_supported =
+	result.source_prefix_filter_takeover_supported =
 	    result.source_prefix_requires_unfiltered_input && scan.function.filter_pushdown;
 	result.projection_pushdown = scan.function.projection_pushdown;
 	result.filter_pushdown = scan.function.filter_pushdown;
@@ -1388,8 +1388,8 @@ static string BuildJitDescriptorTableScanSourceBoundaryReason(const PhysicalTabl
 	          JitDescriptorBool(protocol.source_prefix_requires_unfiltered_input);
 	result += ";source_prefix_filter_prune_required=" +
 	          JitDescriptorBool(protocol.source_prefix_filter_prune_required);
-	result += ";source_prefix_filter_split_supported=" +
-	          JitDescriptorBool(protocol.source_prefix_filter_split_supported);
+	result += ";source_prefix_filter_takeover_supported=" +
+	          JitDescriptorBool(protocol.source_prefix_filter_takeover_supported);
 	result += ";filter_pushdown=" + JitDescriptorBool(protocol.filter_pushdown);
 	result += ";filter_prune=" + JitDescriptorBool(protocol.filter_prune);
 	result += ";filter_count=" + std::to_string(protocol.filter_count);

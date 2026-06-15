@@ -1320,7 +1320,7 @@ layout as backend-neutral IR: `source_prefix_input_columns`,
 `source_prefix_filter_column_map`,
 `source_prefix_requires_unfiltered_input`, and
 `source_prefix_filter_prune_required`, and
-`source_prefix_filter_split_supported`. These fields describe the raw layout a
+`source_prefix_filter_takeover_supported`. These fields describe the raw layout a
 backend-neutral source-prefix filter ABI needs. In the current architecture,
 native-source table scans use `PRUNE_ONLY` prepared source input when a selected
 region owns source filters, and generated code consumes the unfiltered source
