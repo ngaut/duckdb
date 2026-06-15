@@ -136,37 +136,6 @@ public:
 		return !executor.in_process_operators.empty();
 	}
 
-	SourceResultType FetchSource(DataChunk *&result, int64_t &source_fetch_time_us) override {
-		if (sink_blocked) {
-			throw InternalException("JIT full pipeline runtime cannot fetch source data after a blocked sink");
-		}
-		if (sink_finished) {
-			throw InternalException("JIT full pipeline runtime cannot fetch source data after a finished sink");
-		}
-		auto prepared_jit = executor.pipeline.GetJitPreparedPipeline();
-		auto *source_chunk = prepared_jit && prepared_jit->RequiresPreparedSourceInput()
-		                         ? &executor.jit_source_input_chunk
-		                         : &executor.GetSourceChunkForInitialIdx(0);
-		source_chunk->Reset();
-		result = source_chunk;
-		executor.source_chunk_initial_idx = 0;
-		auto trace_start = std::chrono::steady_clock::now();
-		JitSuppressionGuard guard(executor.context.client);
-		auto source_result = executor.FetchFromSource(result, false);
-		source_fetch_time_us = JitRegionElapsedMicros(trace_start);
-		source_output_rows += result ? result->size() : 0;
-		source_helper_output_rows += result ? result->size() : 0;
-		source_invocation_count++;
-		source_helper_invocation_count++;
-		source_runtime_time_us += source_fetch_time_us;
-		source_helper_runtime_time_us += source_fetch_time_us;
-		if (source_result == SourceResultType::FINISHED) {
-			executor.exhausted_source = true;
-			executor.exhausted_pipeline = true;
-		}
-		return source_result;
-	}
-
 	SourceResultType FetchNativeSource(DataChunk *&result, int64_t &source_fetch_time_us) override {
 		if (sink_blocked) {
 			throw InternalException("JIT full pipeline runtime cannot fetch native source data after a blocked sink");
@@ -378,9 +347,6 @@ public:
 
 	JitRuntimeMetrics Metrics(int64_t runtime_time_us) const {
 		JitRuntimeMetrics result;
-		result.source_helper_output_rows = source_helper_output_rows;
-		result.source_helper_invocation_count = source_helper_invocation_count;
-		result.source_helper_runtime_time_us = source_helper_runtime_time_us;
 		result.source_native_output_rows = source_native_output_rows;
 		result.source_native_invocation_count = source_native_invocation_count;
 		result.source_native_runtime_time_us = source_native_runtime_time_us;
@@ -443,9 +409,6 @@ private:
 	idx_t source_output_rows = 0;
 	idx_t source_invocation_count = 0;
 	int64_t source_runtime_time_us = 0;
-	idx_t source_helper_output_rows = 0;
-	idx_t source_helper_invocation_count = 0;
-	int64_t source_helper_runtime_time_us = 0;
 	idx_t source_native_output_rows = 0;
 	idx_t source_native_invocation_count = 0;
 	int64_t source_native_runtime_time_us = 0;

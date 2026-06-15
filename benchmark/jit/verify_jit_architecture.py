@@ -468,8 +468,9 @@ def verify_region_executor_resume_contract(root: Path) -> None:
             "JitRuntimeMetrics Metrics(int64_t runtime_time_us) const",
             "generated_body_runtime_time_us",
             "remaining_sink_chunk = true",
-            "cannot fetch source data after a blocked sink",
-            "cannot fetch source data after a finished sink",
+            "cannot fetch native source data after a blocked sink",
+            "cannot fetch native source data after a finished sink",
+            "FetchNativeSource(DataChunk *&result",
             "TryFlushCachingOperators",
             "core flushed final operators and finalized sink",
             "declined after using runtime side-effect APIs",
@@ -894,6 +895,16 @@ def verify_native_sink_update_contract(root: Path) -> None:
             "JitRegionABIIsFullPipeline",
             "JitRegionABIOwnsSource",
             "JitRegionABIOwnsSink",
+        ],
+    )
+    assert_no_text(
+        root,
+        [Path("src/include/duckdb/execution/jit/runtime.hpp"), Path("src/execution/jit_region_executor.cpp")],
+        [
+            "virtual SourceResultType FetchSource",
+            "SourceResultType FetchSource(DataChunk",
+            "source_helper_output_rows += result",
+            "source_helper_invocation_count++",
         ],
     )
     assert_no_text(

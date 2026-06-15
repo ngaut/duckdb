@@ -975,9 +975,7 @@ public:
 	}
 
 	bool TryExecuteFullPipeline(JitFullPipelineRuntime &runtime, JitFullPipelineResult &) override {
-		DataChunk *source_chunk = nullptr;
-		int64_t source_fetch_time_us = 0;
-		runtime.FetchSource(source_chunk, source_fetch_time_us);
+		runtime.RecordNativeSinkResult(0, SinkResultType::NEED_MORE_INPUT);
 		return false;
 	}
 

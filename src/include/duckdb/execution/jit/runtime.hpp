@@ -410,7 +410,6 @@ public:
 	virtual bool TraceRuntime() const = 0;
 	virtual bool HasRequiredPartitionInfo() const = 0;
 	virtual bool HasInProcessOperators() const = 0;
-	virtual SourceResultType FetchSource(DataChunk *&result, int64_t &source_fetch_time_us) = 0;
 	virtual SourceResultType FetchNativeSource(DataChunk *&result, int64_t &source_fetch_time_us) = 0;
 	virtual bool BindNativeOperator(idx_t operator_index, DataChunk &input, const JitRegionOperatorInfo &operator_info,
 	                                JitNativeOperatorBinding &binding) = 0;
