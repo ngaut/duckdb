@@ -189,7 +189,7 @@ struct SljitOperatorStageRegionPlan {
 	bool owns_transform = false;
 	bool owns_sink = false;
 	bool stage_plan_valid = false;
-	bool generic_runtime_loop = false;
+	bool native_operator_loop = false;
 	string kernel_blocker;
 
 	bool IsValid() const {
@@ -197,7 +197,7 @@ struct SljitOperatorStageRegionPlan {
 	}
 
 	bool HasExecutableBody() const {
-		return generic_runtime_loop;
+		return native_operator_loop;
 	}
 };
 

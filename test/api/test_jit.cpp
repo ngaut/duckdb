@@ -2350,7 +2350,7 @@ TEST_CASE("JIT region lowering exposes typed table scan source protocol", "[api]
 			REQUIRE(StringUtil::Contains(event.reason, "full-pipeline-native-sink-update"));
 			REQUIRE(StringUtil::Contains(event.reason, "duckdb.operator-stage-region"));
 			REQUIRE(StringUtil::Contains(event.reason, "operator-stage-region"));
-			REQUIRE(StringUtil::Contains(event.reason, "kernel=generic-runtime-loop"));
+				REQUIRE(StringUtil::Contains(event.reason, "kernel=native-operator-loop"));
 			REQUIRE(StringUtil::Contains(event.reason, "source=native"));
 			REQUIRE(StringUtil::Contains(event.ir, "source_execution=native-source"));
 			REQUIRE(StringUtil::Contains(event.ir, "source=native-protocol"));
@@ -3109,7 +3109,7 @@ TEST_CASE("JIT full pipeline executes grouped hash aggregate native lookup proto
 			REQUIRE(event.region_execution_form == "fused");
 			REQUIRE(StringUtil::Contains(event.reason, "generated native hash aggregate lookup and state update"));
 			REQUIRE(StringUtil::Contains(event.reason, "operator-stage-region"));
-			REQUIRE(StringUtil::Contains(event.reason, "kernel=generic-runtime-loop"));
+				REQUIRE(StringUtil::Contains(event.reason, "kernel=native-operator-loop"));
 			REQUIRE_FALSE(StringUtil::Contains(event.reason, "operator-fusion-gap:native-operator-codegen-missing"));
 			REQUIRE(StringUtil::Contains(event.reason, "native-hash-aggregate-lookup-contract=ready"));
 			REQUIRE(StringUtil::Contains(event.reason, "native-hash-aggregate-lookup-blocker=none"));
@@ -3182,7 +3182,7 @@ TEST_CASE("JIT full pipeline executes grouped decimal hash aggregate native look
 			REQUIRE(event.region_execution_form == "fused");
 			REQUIRE(StringUtil::Contains(event.reason, "generated native hash aggregate lookup and state update"));
 			REQUIRE(StringUtil::Contains(event.reason, "operator-stage-region"));
-			REQUIRE(StringUtil::Contains(event.reason, "kernel=generic-runtime-loop"));
+				REQUIRE(StringUtil::Contains(event.reason, "kernel=native-operator-loop"));
 			REQUIRE_FALSE(StringUtil::Contains(event.reason, "operator-fusion-gap:native-operator-codegen-missing"));
 			REQUIRE(StringUtil::Contains(event.reason, "native-hash-aggregate-lookup-contract=ready"));
 			REQUIRE(StringUtil::Contains(event.reason, "native-hash-aggregate-lookup-blocker=none"));
@@ -5292,7 +5292,7 @@ TEST_CASE("JIT dump IR and execution mode expose backend honesty", "[api][jit]")
 			REQUIRE(event.execution_mode == "unsupported");
 			REQUIRE(event.region_execution_form == "none");
 			REQUIRE_FALSE(StringUtil::Contains(event.reason, "pass-through"));
-			REQUIRE_FALSE(StringUtil::Contains(event.reason, "kernel=generic-runtime-loop"));
+			REQUIRE_FALSE(StringUtil::Contains(event.reason, "kernel=native-operator-loop"));
 			REQUIRE_FALSE(StringUtil::Contains(event.reason, "execution:native-sljit-region-"));
 		}
 	}

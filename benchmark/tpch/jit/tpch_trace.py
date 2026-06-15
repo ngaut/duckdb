@@ -3894,7 +3894,7 @@ SELECT
     ) AS unsupported_regions,
     count(*) FILTER (
         WHERE phase='compile' AND execution_mode='native' AND code_size=0
-          AND reason NOT LIKE '%kernel=generic-runtime-loop%'
+          AND reason NOT LIKE '%kernel=native-operator-loop%'
     ) AS zero_code_native_compile_events,
     count(*) FILTER (
         WHERE phase='runtime'

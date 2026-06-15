@@ -243,8 +243,8 @@ static bool SljitNativeRegionOpIsNativeProtocolSinkStage(const SljitNativeRegion
 	return SljitNativeRegionOpIsNativeSink(op) && !SljitNativeRegionOpGeneratesCode(op);
 }
 
-static bool SljitNativeRegionHasGenericExecutableLoop(const SljitNativeRegionPlan &region,
-                                                      const JitRegionContract &contract) {
+static bool SljitNativeRegionHasNativeOperatorLoop(const SljitNativeRegionPlan &region,
+                                                   const JitRegionContract &contract) {
 	if (region.ops.empty()) {
 		return false;
 	}
@@ -2955,7 +2955,7 @@ static void AppendCoreOperatorStages(SljitOperatorStageRegionPlan &result,
 static string DescribeOperatorStageRegion(const SljitOperatorStageRegionPlan &plan) {
 	string result = "operator-stage-region<";
 	result += "shape=" + plan.shape_key;
-	result += ",kernel=" + string(plan.generic_runtime_loop ? "generic-runtime-loop" : "missing");
+	result += ",kernel=" + string(plan.native_operator_loop ? "native-operator-loop" : "missing");
 	if (!plan.kernel_blocker.empty()) {
 		result += ",kernel_blocker=" + plan.kernel_blocker;
 	}
@@ -3001,8 +3001,8 @@ SljitOperatorStageRegionPlan BuildSljitOperatorStageRegionPlan(const SljitNative
 		result.shape_key = "sljit:" + context + ":operator-stage:" + DescribeNativeRegionShape(region);
 		result.kernel_blocker = SljitNativeRegionCodegenFusionBlocker(region);
 	}
-	if (SljitNativeRegionHasGenericExecutableLoop(region, contract)) {
-		result.generic_runtime_loop = true;
+	if (SljitNativeRegionHasNativeOperatorLoop(region, contract)) {
+		result.native_operator_loop = true;
 		result.execution_reason = "execution:native-sljit-region-" + DescribeNativeRegionShape(region);
 		result.kernel_blocker.clear();
 	}
