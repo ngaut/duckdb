@@ -324,9 +324,9 @@ public:
 			plan.shape_key = "contract:auto-non-fused";
 			plan.SetCompiledExecutionMode(JitExecutionMode::NATIVE);
 			plan.SetRegionExecutionForm(JitRegionExecutionForm::NONE);
-			plan.AddNode("source", "CONTRACT_SOURCE", JitLoweringKind::HELPER_CALL, "contract source helper boundary");
+			plan.AddNode("source", "CONTRACT_SOURCE", JitLoweringKind::FALLBACK, "contract source boundary");
 			plan.AddNode("op0", "CONTRACT_FILTER", JitLoweringKind::NATIVE, "contract native non-fused node");
-			plan.AddNode("sink", "CONTRACT_SINK", JitLoweringKind::HELPER_CALL, "contract sink helper boundary");
+			plan.AddNode("sink", "CONTRACT_SINK", JitLoweringKind::FALLBACK, "contract sink boundary");
 		return plan;
 	}
 
@@ -1209,7 +1209,7 @@ TEST_CASE("JIT manager records compile events from the selected backend", "[api]
 			REQUIRE(event.candidate_estimated_cardinality > 0);
 			REQUIRE(StringUtil::Contains(event.reason, "region-lowering:native="));
 			REQUIRE(StringUtil::Contains(event.reason, "source-fusion-gap:requires-native-source"));
-			REQUIRE(StringUtil::Contains(event.reason, "source:TABLE_SCAN:helper-call"));
+			REQUIRE(StringUtil::Contains(event.reason, "source:TABLE_SCAN:fallback"));
 			REQUIRE(StringUtil::Contains(event.reason, "op0:FILTER:native:generated typed predicate filter"));
 			REQUIRE(StringUtil::Contains(event.reason, "op1:PROJECTION:native:generated typed projection"));
 			REQUIRE(StringUtil::Contains(event.reason, "sink:RESULT_COLLECTOR:fallback:"
@@ -4930,7 +4930,7 @@ TEST_CASE("SLJIT marks full pipeline result collector unsupported without native
 			REQUIRE(event.code_size == 0);
 			REQUIRE(event.candidate_shape == "filter-projection-sink");
 			REQUIRE(StringUtil::Contains(event.reason, "source-fusion-gap:requires-native-source"));
-			REQUIRE(StringUtil::Contains(event.reason, "source:TABLE_SCAN:helper-call"));
+			REQUIRE(StringUtil::Contains(event.reason, "source:TABLE_SCAN:fallback"));
 			REQUIRE(StringUtil::Contains(event.reason, "sink:RESULT_COLLECTOR:fallback:"
 			                                           "full pipeline sink requires native sink or operator update protocol"));
 			REQUIRE(StringUtil::Contains(event.reason, "execution:unsupported"));
@@ -5249,7 +5249,7 @@ TEST_CASE("JIT dump IR and execution mode expose backend honesty", "[api][jit]")
 			REQUIRE(StringUtil::Contains(event.reason, "kernel=generic-runtime-loop"));
 			REQUIRE(StringUtil::Contains(event.reason, "execution:native-sljit-region-"));
 		}
-		if (StringUtil::Contains(event.reason, "region-lowering:native=0,helper=0") &&
+		if (StringUtil::Contains(event.reason, "region-lowering:native=0,fallback=") &&
 		    StringUtil::Contains(event.reason, "pass-through=") &&
 		    StringUtil::Contains(event.reason, "op0:PROJECTION:pass-through:typed reference projection pass-through")) {
 			found_reference_pass_through = true;

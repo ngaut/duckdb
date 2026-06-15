@@ -60,8 +60,6 @@ const char *JitLoweringKindToString(JitLoweringKind kind) {
 	switch (kind) {
 	case JitLoweringKind::NATIVE:
 		return "native";
-	case JitLoweringKind::HELPER_CALL:
-		return "helper-call";
 	case JitLoweringKind::FALLBACK:
 		return "fallback";
 	case JitLoweringKind::PASS_THROUGH:
@@ -634,16 +632,6 @@ idx_t JitRegionLoweringPlan::NativeCount() const {
 	return result;
 }
 
-idx_t JitRegionLoweringPlan::HelperCallCount() const {
-	idx_t result = 0;
-	for (auto &node : nodes) {
-		if (node.kind == JitLoweringKind::HELPER_CALL) {
-			result++;
-		}
-	}
-	return result;
-}
-
 idx_t JitRegionLoweringPlan::FallbackCount() const {
 	idx_t result = 0;
 	for (auto &node : nodes) {
@@ -682,7 +670,7 @@ JitRegionSourceExecutionKind JitRegionLoweringPlan::SelectedSourceExecution() co
 
 string JitRegionLoweringPlan::EventReason() const {
 	string result = "region-lowering:native=" + std::to_string(NativeCount()) +
-	                ",helper=" + std::to_string(HelperCallCount()) + ",fallback=" + std::to_string(FallbackCount()) +
+	                ",fallback=" + std::to_string(FallbackCount()) +
 	                ",pass-through=" + std::to_string(PassThroughCount()) +
 	                ",execution-form=" + JitRegionExecutionFormToString(region_execution_form);
 	if (selected_source_execution != JitRegionSourceExecutionKind::NONE) {

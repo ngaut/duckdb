@@ -986,13 +986,6 @@ static SljitRegionNodePlan SljitRegionFallbackNode(string reason) {
 	return result;
 }
 
-static SljitRegionNodePlan SljitRegionHelperNode(string reason) {
-	SljitRegionNodePlan result;
-	result.kind = JitLoweringKind::HELPER_CALL;
-	result.reason = std::move(reason);
-	return result;
-}
-
 static SljitRegionNodePlan PlanSljitFilterNode(const JitRegionIRNode &node, string &error) {
 	if (!node.fallback_reason.empty()) {
 		return SljitRegionFallbackNode(node.fallback_reason);
@@ -1437,29 +1430,26 @@ static SljitRegionNodePlan PlanSljitNativeStatefulSourceNode(const JitRegionIRNo
 	return result;
 }
 
-static SljitRegionNodePlan PlanSljitSourceHelperNode(const JitRegionIRNode &node,
-                                                     const JitRegionContract &contract,
-                                                     JitRegionSourceExecutionKind source_execution) {
+static SljitRegionNodePlan PlanSljitSourceNode(const JitRegionIRNode &node, const JitRegionContract &contract,
+                                               JitRegionSourceExecutionKind source_execution) {
 	if (!node.source) {
-		return SljitRegionFallbackNode("source helper requires typed source IR");
+		return SljitRegionFallbackNode("source boundary requires typed source IR");
 	}
 	auto &native_contract = node.source->native_source_contract;
 	if (native_contract.status == JitRegionNativeSourceStatus::NONE || native_contract.required_capability.empty() ||
 	    native_contract.protocol_version.empty() || native_contract.blocker.empty()) {
-		return SljitRegionFallbackNode("source helper requires native-source contract IR");
+		return SljitRegionFallbackNode("source boundary requires native-source contract IR");
 	}
 	if (source_execution == JitRegionSourceExecutionKind::DUCKDB_GETDATA_HELPER && !node.source->filters.empty()) {
 		if (!node.source->table_scan_protocol.present) {
 			return SljitRegionFallbackNode("source-pushed filters require typed table scan protocol IR");
 		}
 		auto &protocol = node.source->table_scan_protocol;
-			SljitRegionNodePlan result;
-			result.kind = JitLoweringKind::HELPER_CALL;
-			result.source_filter_count = node.source->filters.size();
-			result.source_filter_execution = SljitSourceFilterExecutionKind::DUCKDB_SOURCE_HELPER;
-			result.reason = "DuckDB source GetData helper boundary;source-fusion-gap:requires-native-source;"
-			                "source_execution=duckdb-getdata-helper";
-			result.reason += ";source-strategy=duckdb-source-helper";
+		SljitRegionNodePlan result;
+		result.kind = JitLoweringKind::FALLBACK;
+		result.reason = "DuckDB source GetData helper boundary;source-fusion-gap:requires-native-source;"
+		                "source_execution=duckdb-getdata-helper";
+		result.reason += ";source-strategy=duckdb-source-helper";
 		result.reason += ";source_filter_count=" + std::to_string(node.source->filters.size());
 		result.reason += ";source_prefix_input_columns=" + std::to_string(protocol.source_prefix_input_column_count);
 		result.reason += ";source_prefix_filter_prune_required=" +
@@ -1504,11 +1494,9 @@ static SljitRegionNodePlan PlanSljitSourceHelperNode(const JitRegionIRNode &node
 			return SljitRegionFallbackNode(std::move(reason));
 		}
 		SljitRegionNodePlan result;
-			result.kind = JitLoweringKind::HELPER_CALL;
-			result.source_filter_count = node.source->filters.size();
-			result.source_filter_execution = SljitSourceFilterExecutionKind::DUCKDB_SOURCE_HELPER;
-			result.reason = "DuckDB source GetData helper boundary;source-fusion-gap:requires-native-source;"
-			                "source_execution=duckdb-getdata-helper";
+		result.kind = JitLoweringKind::FALLBACK;
+		result.reason = "DuckDB source GetData helper boundary;source-fusion-gap:requires-native-source;"
+		                "source_execution=duckdb-getdata-helper";
 		result.reason += ";source_filter_count=" + std::to_string(node.source->filters.size());
 		result.reason += ";source_prefix_input_columns=" + std::to_string(protocol.source_prefix_input_column_count);
 		result.reason += ";source_prefix_filter_split_supported=" +
@@ -1518,7 +1506,7 @@ static SljitRegionNodePlan PlanSljitSourceHelperNode(const JitRegionIRNode &node
 	}
 	auto helper_reason = "DuckDB source GetData helper boundary;" + node.fallback_reason;
 	AppendSljitSourceIR(helper_reason, node, JitRegionSourceExecutionKind::DUCKDB_GETDATA_HELPER);
-	return SljitRegionHelperNode(std::move(helper_reason));
+	return SljitRegionFallbackNode(std::move(helper_reason));
 }
 
 static string DescribeSljitAggregateNativeUpdateContract(const JitRegionAggregateInput &aggregate) {
@@ -2490,7 +2478,6 @@ SljitRegionPlan BuildSljitRegionPlan(const JitRegionIR &region_ir, const JitRegi
 	auto native_region = make_uniq<SljitNativeRegionPlan>();
 	vector<LogicalType> current_types = candidate.input_types;
 	bool native_region_possible = true;
-	bool source_helper = false;
 	bool requires_native_source = false;
 	bool owns_source_filters = false;
 	if (candidate.EndNode() > region_ir.nodes.size()) {
@@ -2548,25 +2535,27 @@ SljitRegionPlan BuildSljitRegionPlan(const JitRegionIR &region_ir, const JitRegi
 			    candidate.source_execution != JitRegionSourceExecutionKind::NONE
 			        ? candidate.source_execution
 			        : (node.source ? node.source->execution : JitRegionSourceExecutionKind::NONE);
-			auto node_plan = executable_source
-			                     ? PlanSljitSourceHelperNode(node, contract, source_execution)
-			                     : PlanSljitRegionNode(node, current_types, plan.backend_plan->error);
-			plan.lowering_plan.AddNode(node.role, node.operator_name, node_plan.kind, std::move(node_plan.reason));
+			auto node_plan = executable_source ? PlanSljitSourceNode(node, contract, source_execution)
+			                                   : PlanSljitRegionNode(node, current_types, plan.backend_plan->error);
+			const bool source_requires_native =
+			    executable_source && node_plan.kind == JitLoweringKind::FALLBACK &&
+			    StringUtil::Contains(node_plan.reason, "source-fusion-gap:requires-native-source");
+			plan.lowering_plan.AddNode(node.role, node.operator_name, node_plan.kind, node_plan.reason);
+			if (source_requires_native) {
+				plan.lowering_plan.AddFusionBlocker(
+				    "source-fusion-gap:requires-native-source;source_execution=duckdb-getdata-helper");
+			}
 			if (executable_source && node_plan.kind != JitLoweringKind::FALLBACK) {
 				auto selected_source_execution = node_plan.requires_native_source
 				                                     ? JitRegionSourceExecutionKind::NATIVE_SOURCE
-				                                     : node_plan.kind == JitLoweringKind::HELPER_CALL
-				                                           ? JitRegionSourceExecutionKind::DUCKDB_GETDATA_HELPER
-				                                           : node.source->execution;
+				                                     : node.source->execution;
 				plan.lowering_plan.SetSelectedSourceExecution(selected_source_execution);
 			}
 			if (executable_source &&
-			    (node_plan.kind == JitLoweringKind::HELPER_CALL || node_plan.kind == JitLoweringKind::NATIVE ||
-			     node_plan.kind == JitLoweringKind::PASS_THROUGH)) {
+			    (node_plan.kind == JitLoweringKind::NATIVE || node_plan.kind == JitLoweringKind::PASS_THROUGH)) {
 				auto source_output_types = SljitRegionNodeHasNativeOps(node_plan)
 				                               ? SljitRegionNodeLastNativeOp(node_plan).output_types
 				                               : node.output_types;
-				source_helper = source_helper || node_plan.kind == JitLoweringKind::HELPER_CALL;
 				requires_native_source = requires_native_source || node_plan.requires_native_source;
 				owns_source_filters = owns_source_filters || node_plan.owns_source_filters;
 				if (native_region_possible) {
@@ -2679,25 +2668,19 @@ SljitRegionPlan BuildSljitRegionPlan(const JitRegionIR &region_ir, const JitRegi
 			plan.lowering_plan.backend_plan = plan.backend_plan;
 			return plan;
 		}
-		if (source_helper) {
-			plan.lowering_plan.AddFusionBlocker(
-			    "source-fusion-gap:requires-native-source;source_execution=duckdb-getdata-helper");
-		}
 		auto execution_form = ClassifySljitRegionExecutionForm(*native_region, contract, candidate.stage_plan);
 		if (execution_form != JitRegionExecutionForm::NONE) {
 			plan.lowering_plan.SetOwnsSourceFilters(owns_source_filters);
 			plan.lowering_plan.SetRegionExecutionForm(execution_form);
-			if (!source_helper) {
-				plan.backend_plan->native_region = std::move(native_region);
-				plan.lowering_plan.SetCompiledExecutionMode(JitExecutionMode::NATIVE);
-				plan.lowering_plan.shape_key = BuildSljitRegionShapeKey(*plan.backend_plan->native_region, contract);
-				if (JitRegionABIIsSourcePipeline(contract.abi) && candidate.traits.has_table_scan_source &&
-				    candidate.traits.source_execution == JitRegionSourceExecutionKind::NATIVE_SOURCE &&
-				    candidate.traits.source_filter_count > 0 &&
-				    plan.lowering_plan.shape_key == SLJIT_SOURCE_PREFIX_FILTER_PROJECTION_SHAPE) {
-					plan.lowering_plan.shape_key =
-					    BuildSljitRegionCandidateContextShapeKey(candidate, plan.lowering_plan.shape_key);
-				}
+			plan.backend_plan->native_region = std::move(native_region);
+			plan.lowering_plan.SetCompiledExecutionMode(JitExecutionMode::NATIVE);
+			plan.lowering_plan.shape_key = BuildSljitRegionShapeKey(*plan.backend_plan->native_region, contract);
+			if (JitRegionABIIsSourcePipeline(contract.abi) && candidate.traits.has_table_scan_source &&
+			    candidate.traits.source_execution == JitRegionSourceExecutionKind::NATIVE_SOURCE &&
+			    candidate.traits.source_filter_count > 0 &&
+			    plan.lowering_plan.shape_key == SLJIT_SOURCE_PREFIX_FILTER_PROJECTION_SHAPE) {
+				plan.lowering_plan.shape_key =
+				    BuildSljitRegionCandidateContextShapeKey(candidate, plan.lowering_plan.shape_key);
 			}
 		}
 		if (plan.lowering_plan.ExpectedRegionExecutionForm() != JitRegionExecutionForm::FUSED) {

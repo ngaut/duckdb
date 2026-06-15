@@ -925,7 +925,7 @@ unique_ptr<JitPreparedPipeline> JitManager::PreparePipelineRegions(ClientContext
 		if (lowering_plan.ExpectedCompiledExecutionMode() == JitExecutionMode::UNSUPPORTED) {
 			auto decision_time_us = candidate_decision_time_us();
 			auto unsupported_reason =
-			    lowering_plan.NativeCount() > 0 || lowering_plan.HelperCallCount() > 0
+			    lowering_plan.NativeCount() > 0
 			        ? lowering_plan.EventReason() +
 			              ";execution:unsupported;backend cannot generate executable code for "
 			              "this whole region"
@@ -1051,7 +1051,7 @@ vector<unique_ptr<JitRegionKernel>> JitManager::CompilePreparedRegions(ClientCon
 			auto expected_mode = prepared_region.lowering_plan.ExpectedCompiledExecutionMode();
 			auto expected_form = prepared_region.lowering_plan.ExpectedRegionExecutionForm();
 			if (expected_mode == JitExecutionMode::UNSUPPORTED) {
-				throw InternalException("JIT backend \"%s\" compiled region without native or helper-call nodes",
+				throw InternalException("JIT backend \"%s\" compiled region without native executable nodes",
 				                        backend_name);
 			}
 			if (expected_form == JitRegionExecutionForm::NONE) {

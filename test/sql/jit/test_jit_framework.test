@@ -298,7 +298,7 @@ WHERE backend_name='sljit'
   AND candidate_pipeline_shape LIKE '%source:source:%:scan%'
   AND candidate_pipeline_shape LIKE '%sink:sink:%:sink%'
   AND admission_shape_key IS NULL
-  AND reason LIKE '%source:TABLE_SCAN:helper-call%'
+  AND reason LIKE '%source:TABLE_SCAN:fallback%'
   AND reason LIKE '%hash aggregate sink has no aggregate payload bindings%'
   AND reason LIKE '%aggregate_count=0%'
   AND reason LIKE '%execution:unsupported%'
@@ -340,11 +340,10 @@ WHERE backend_name='sljit'
   AND candidate_end_operator_index > candidate_start_operator_index
   AND code_size = 0
   AND region_execution_form='none'
-  AND reason LIKE '%region-lowering:native=3,helper=1,fallback=0,pass-through=1%'
+  AND reason LIKE '%region-lowering:native=3,fallback=1,pass-through=1%'
   AND reason LIKE '%execution-form=none%'
   AND reason LIKE '%backend cannot generate executable code for this whole region%'
   AND reason LIKE '%fusion-blocker:source-fusion-gap:requires-native-source%'
-  AND reason LIKE '%fusion-blocker:candidate-fusion-gap:typed-helper-boundary%'
   AND reason LIKE '%op0:FILTER:native:generated typed predicate filter%'
   AND reason LIKE '%op1:PROJECTION:native:generated typed projection%'
   AND reason LIKE '%op2:PROJECTION:pass-through:typed reference projection pass-through%'
@@ -538,7 +537,7 @@ WHERE phase='decision'
   AND reason LIKE '%execution-form=none%'
   AND reason LIKE '%execution:unsupported%'
   AND reason LIKE '%fusion-blocker:source-fusion-gap:requires-native-source%'
-  AND reason LIKE '%source:TABLE_SCAN:helper-call:DuckDB source GetData helper boundary%'
+  AND reason LIKE '%source:TABLE_SCAN:fallback:DuckDB source GetData helper boundary%'
 ----
 1
 

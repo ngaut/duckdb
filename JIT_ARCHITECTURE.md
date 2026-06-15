@@ -263,7 +263,7 @@ Core JIT IR lowering
   - validity/null propagation
   - selection semantics
   - state protocol nodes
-  - helper-call nodes
+  - typed primitive helper stubs inside generated nodes
   - fallback nodes
         |
         v
@@ -706,7 +706,8 @@ Region IR nodes should use semantic operator roles:
 - `aggregate_combine`: merge of local states when supported;
 - `topn_update` or `sort_input`: ordered-state update when supported;
 - `sink_boundary`: DuckDB-owned sink consuming generated output;
-- `helper_call`: generated loop calls a typed helper stub;
+- typed primitive helper stubs inside generated nodes, for operations that
+  cannot be inlined without duplicating DuckDB semantics;
 - `fallback_boundary`: normal DuckDB executor resumes control.
 
 Each node must carry enough semantic data for backend lowering:
@@ -720,7 +721,7 @@ Each node must carry enough semantic data for backend lowering:
 - state handles for joins, aggregates, sorts, and sinks;
 - ownership of output vectors and temporary vectors;
 - exception behavior;
-- helper-call signatures;
+- typed primitive helper signatures;
 - estimated cardinality and selectivity;
 - whether the node is streaming, blocking, or stateful.
 
@@ -1451,7 +1452,7 @@ Admission inputs should include:
 - number of executor fallback crossings removed;
 - vector format conversions required at region boundaries;
 - expression complexity;
-- type families and helper-call costs;
+- type families and typed primitive helper costs;
 - state protocol cost for joins, aggregates, sorts, and sinks;
 - backend compile-cost history by shape;
 - backend runtime history by shape;
@@ -1462,7 +1463,7 @@ Admission inputs should include:
 
 - shape key and backend name;
 - minimum estimated rows and vectors;
-- minimum native/helper work removed;
+- minimum native work and executor boundary crossings removed;
 - boundary conversion cost class;
 - compile-cost estimate;
 - runtime-cost estimate or conservative speedup class;
@@ -1483,7 +1484,7 @@ Architecture support is not the same as production admission. The SLJIT
 full-pipeline source-filter/projection/ungrouped-SUM kernel is currently a
 force/debug capability. It must not be admitted in `auto` until repeated
 production timing proves positive benefit for the exact fused native-source
-shape. Similar projection-only or helper-backed shapes still need their own
+shape. Similar projection-only or fallback-boundary shapes still need their own
 benchmark proof and must fail closed until then.
 
 The policy result must explain the decision:
@@ -1492,7 +1493,7 @@ The policy result must explain the decision:
 - skipped because shape has no proof;
 - skipped because estimated rows are too low;
 - skipped because boundary conversions dominate;
-- skipped because helper-call cost dominates;
+- skipped because primitive helper or fallback boundary cost dominates;
 - skipped because runtime history shows no benefit.
 
 `jit_policy=force` remains a diagnostic mode. It may compile supported
@@ -2503,7 +2504,7 @@ Concrete DuckDB physical operators expose JIT protocol facts through
 `GetJitOperatorDescriptor()`. `BuildJitPipelineDescriptor` is the single pipeline-level discovery point. It snapshots those descriptors, unpacks role payloads, and prepares role-sliced contracts before admission inventory or region lowering runs. Region lowering consumes the pipeline descriptor and builds backend-neutral `JitRegionSourceInfo` and
 `JitRegionSinkInfo` records. Concrete operator knowledge must terminate at the descriptor adapter before the pipeline descriptor snapshots it.
 Backend implementations must consume only backend-neutral JIT IR, candidate
-metadata, helper-call nodes, fallback nodes, and deterministic reason/IR text.
+metadata, typed primitive helper signatures, fallback nodes, and deterministic reason/IR text.
 Source-boundary diagnostics such as projection pushdown, filter counts, dynamic
 filters, returned columns, and table function names therefore belong in
 operator-owned descriptors and core-lowered source boundary reason text, not in
@@ -2584,17 +2585,17 @@ success state.
 Pipeline lowering is an input to region formation, not the final long-term JIT
 target:
 
-- `native`: represented by generated code;
-- `helper-call`: represented by a typed helper boundary that is not native-fused;
+- `native`: represented by generated code, optionally calling typed primitive
+  helper stubs from generated code;
 - `fallback`: executed by the normal DuckDB path or outside the generated region.
 
 Scans, sinks, joins, aggregates, windows, and other operators are fallback or
 missing-protocol until a typed JIT node exists for the exact operator phase and
 state protocol. Hash-join build/probe and generic hash aggregate lookup/update
 are examples of native operator protocol nodes for supported shapes; unsupported
-variants must stay missing-protocol rather than falling back to a whole DuckDB
-operator helper. Reporting a normal DuckDB physical operator as `helper-call`
-without such a node is not allowed.
+variants must stay missing-protocol or fallback rather than falling back to a
+whole DuckDB operator helper. Reporting a normal DuckDB physical operator as a
+compiled helper node is not allowed.
 
 The initial native scope is filter/projection regions. That path must be moved
 behind first-class region IR before new native region families are added. The

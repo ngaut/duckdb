@@ -129,7 +129,7 @@ SOURCE_BOUNDARY_FIELD_RE = re.compile(
 )
 SOURCE_BOUNDARY_EXECUTION_RE = re.compile(r"source<kind=[^,>]+,execution=([^,>]+)")
 REGION_LOWERING_COUNT_RE = re.compile(
-    r"region-lowering:native=(\d+),helper=(\d+),fallback=(\d+),pass-through=(\d+),execution-form=([^;]+)"
+    r"region-lowering:native=(\d+),fallback=(\d+),pass-through=(\d+),execution-form=([^;]+)"
 )
 FUSION_BLOCKER_RE = re.compile(r"(?:^|;)fusion-blocker:([^;]+)")
 NATIVE_SOURCE_CONTRACT_RE = re.compile(

@@ -302,7 +302,7 @@ struct JitRuntimeMetrics {
 struct JitRegionNodeLowering {
 	string role;
 	string operator_name;
-	JitLoweringKind kind = JitLoweringKind::HELPER_CALL;
+	JitLoweringKind kind = JitLoweringKind::FALLBACK;
 	string reason;
 };
 
@@ -320,7 +320,6 @@ struct JitRegionLoweringPlan {
 	void SetSelectedSourceExecution(JitRegionSourceExecutionKind source_execution);
 	void SetOperatorStageIR(string stage_ir);
 	idx_t NativeCount() const;
-	idx_t HelperCallCount() const;
 	idx_t FallbackCount() const;
 	idx_t PassThroughCount() const;
 	JitExecutionMode ExpectedCompiledExecutionMode() const;

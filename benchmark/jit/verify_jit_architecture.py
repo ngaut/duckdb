@@ -1463,6 +1463,7 @@ def verify_region_selection_contract(root: Path) -> None:
         [Path("src/execution/jit_types.cpp")],
         [
             "has_compiled_execution_mode",
+            "HelperCallCount",
             "if (HelperCallCount() > 0)",
             "if (NativeCount() > 0)",
         ],
@@ -1509,7 +1510,7 @@ def verify_region_selection_contract(root: Path) -> None:
             "native-grouped-aggregate-update-executable=ready",
             "SljitNativeRegionOpKind::HASH_AGGREGATE_UPDATE",
             "SetCompiledExecutionMode(",
-            "source_helper",
+            "source_requires_native",
             "source-fusion-gap:requires-native-source;source_execution=duckdb-getdata-helper",
             "SetCompiledExecutionMode(JitExecutionMode::NATIVE)",
         ],
@@ -2054,10 +2055,10 @@ def verify_region_execution_form_contract(root: Path) -> None:
             "JitCompiledProtocolKindToString(stage.protocol)",
             "source-filter",
             "source_filter_count",
-                "return JitRegionExecutionForm::FUSED;",
-                "ClassifySljitRegionExecutionForm(*native_region, contract, candidate.stage_plan)",
+            "return JitRegionExecutionForm::FUSED;",
+            "ClassifySljitRegionExecutionForm(*native_region, contract, candidate.stage_plan)",
             "PlanSljitNativeSourceNode",
-            "source helper requires native-source contract IR",
+            "source boundary requires native-source contract IR",
             "return PlanSljitNativeSourceNode(node, contract);",
             "generated source-prefix table scan filters",
             "source-strategy=prepared-unfiltered-native-source",
@@ -2937,7 +2938,7 @@ def verify_core_lowering_boundary(root: Path) -> None:
         [
             "DuckDB source GetData helper boundary;",
             "+ node.fallback_reason",
-            "PlanSljitSourceHelperNode",
+            "PlanSljitSourceNode",
             "table_scan_protocol.present",
             "protocol.source_prefix_input_column_count",
             "protocol.source_prefix_requires_unfiltered_input",
@@ -3106,6 +3107,15 @@ def verify_backend_registration_boundary(root: Path) -> None:
         [
             "source-fusion-gap:requires-native-source",
             "source-strategy=duckdb-source-helper",
+        ],
+    )
+    assert_no_text(
+        root,
+        [Path("src/include/duckdb/execution/jit/common.hpp"), Path("extension/jit_sljit/sljit_region_plan.cpp")],
+        [
+            "HELPER_CALL",
+            "SljitRegionHelperNode",
+            "helper-call",
         ],
     )
     assert_no_text(
