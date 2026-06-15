@@ -28,40 +28,6 @@ static string JitRegionBool(bool value) {
 	return value ? "true" : "false";
 }
 
-static JitPipelineOperatorEntry BuildJitPipelineOperatorEntry(const PhysicalOperator &op,
-                                                              JitPipelineOperatorRole role,
-                                                              idx_t operator_index = DConstants::INVALID_INDEX) {
-	JitPipelineOperatorEntry entry;
-	entry.role = role;
-	entry.operator_index = operator_index;
-	entry.physical = op;
-	entry.type = op.type;
-	entry.operator_name = PhysicalOperatorToString(op.type);
-	entry.output_types = op.GetTypes();
-	entry.estimated_cardinality = op.estimated_cardinality;
-	entry.descriptor = op.GetJitOperatorDescriptor();
-	return entry;
-}
-
-unique_ptr<JitPipelineDescriptor> BuildJitPipelineDescriptor(Pipeline &pipeline) {
-	auto result = make_uniq<JitPipelineDescriptor>();
-	if (pipeline.GetSource()) {
-		result->source = BuildJitPipelineOperatorEntry(*pipeline.GetSource(), JitPipelineOperatorRole::SOURCE);
-	}
-	auto &operators = pipeline.GetIntermediateOperators();
-	for (idx_t op_idx = 0; op_idx < operators.size(); op_idx++) {
-		result->operators.push_back(
-		    BuildJitPipelineOperatorEntry(operators[op_idx].get(), JitPipelineOperatorRole::OPERATOR, op_idx));
-	}
-	if (pipeline.GetSink()) {
-		result->sink = BuildJitPipelineOperatorEntry(*pipeline.GetSink(), JitPipelineOperatorRole::SINK);
-	}
-	if (result->Empty()) {
-		return nullptr;
-	}
-	return result;
-}
-
 static string BuildJitLogicalTypeList(const vector<LogicalType> &types) {
 	string result = "[";
 	for (idx_t type_idx = 0; type_idx < types.size(); type_idx++) {
@@ -1270,15 +1236,6 @@ unique_ptr<JitRegionPipelineInventory> TryInspectJitRegionPipeline(const JitPipe
 		result->ir += ";estimated_cardinality=" + std::to_string(result->estimated_cardinality);
 	}
 	return result;
-}
-
-unique_ptr<JitRegionPipelineInventory> TryInspectJitRegionPipeline(Pipeline &pipeline,
-                                                                   JitRegionPipelineInventoryMode mode) {
-	auto descriptor = BuildJitPipelineDescriptor(pipeline);
-	if (!descriptor) {
-		return nullptr;
-	}
-	return TryInspectJitRegionPipeline(*descriptor, mode);
 }
 
 static string DescribeJitTypeList(const vector<LogicalType> &types) {
@@ -2821,14 +2778,6 @@ static unique_ptr<JitRegionIR> TryBuildJitRegion(const JitPipelineDescriptor &de
 		result->ir += DescribeJitRegionIRNode(node);
 	}
 	return result;
-}
-
-unique_ptr<JitRegionIR> TryLowerJitRegion(Pipeline &pipeline) {
-	auto descriptor = BuildJitPipelineDescriptor(pipeline);
-	if (!descriptor) {
-		return nullptr;
-	}
-	return TryLowerJitRegion(*descriptor);
 }
 
 unique_ptr<JitRegionIR> TryLowerJitRegion(const JitPipelineDescriptor &descriptor) {

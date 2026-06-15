@@ -2416,9 +2416,12 @@ Core module ownership follows the same trace boundary:
   lowering-plan summaries, and copy semantics for the core IR data structures;
 - `src/execution/jit_expression_ir.cpp` owns DuckDB-facing scalar expression
   lowering from planner expressions into backend-neutral typed expression IR;
-- `src/execution/jit_region_ir.cpp` owns DuckDB-facing physical pipeline
-  descriptor construction and descriptor-to-region-IR lowering. It consumes
-  expression IR through the core-only `TryLowerJitExpression` boundary;
+- `src/execution/jit_pipeline_descriptor.cpp` owns DuckDB-facing physical
+  pipeline descriptor construction. It is the single place region preparation
+  may walk `Pipeline` and call `GetJitOperatorDescriptor()`;
+- `src/execution/jit_region_ir.cpp` owns descriptor-to-region-IR lowering. It
+  consumes expression IR through the core-only `TryLowerJitExpression`
+  boundary;
 - `src/execution/jit_operator_descriptor.cpp` owns the adapter from selected
   DuckDB physical operators into backend-neutral source/sink protocol
   descriptors. Stateful operator details for table scans, hash joins, and

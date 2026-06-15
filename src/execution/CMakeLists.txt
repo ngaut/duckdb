@@ -18,6 +18,7 @@ add_library_unity(
   jit_expression_ir.cpp
   jit_join_runtime.cpp
   jit_operator_descriptor.cpp
+  jit_pipeline_descriptor.cpp
   jit_region_executor.cpp
   jit_region_ir.cpp
   jit_runtime.cpp
