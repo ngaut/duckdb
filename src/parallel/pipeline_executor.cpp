@@ -23,85 +23,7 @@ static bool HasCompiledJitPreparedSourceOwnerKernel(const vector<unique_ptr<JitR
 			continue;
 		}
 		auto &contract = kernel->TraceCandidateContract();
-		if (JitRegionABIIsSourcePrefix(contract.abi) && kernel->CanExecuteSourcePrefix()) {
-			return true;
-		}
 		if (JitRegionABIIsFullPipeline(contract.abi) && kernel->CanExecuteFullPipeline()) {
-			return true;
-		}
-	}
-	return false;
-}
-
-static string DescribeCompiledJitPreparedSourceOwnerKernels(const vector<unique_ptr<JitRegionKernel>> &kernels) {
-	string result = "kernel_count=" + std::to_string(kernels.size());
-	for (idx_t kernel_idx = 0; kernel_idx < kernels.size(); kernel_idx++) {
-		auto &kernel = kernels[kernel_idx];
-		D_ASSERT(kernel);
-		result += ";kernel";
-		result += std::to_string(kernel_idx);
-		result += "<has_candidate=";
-		result += kernel->HasTraceCandidate() ? "true" : "false";
-		result += ",scope=";
-		result += kernel->HasTraceCandidate() ? kernel->TraceCandidateScope() : "none";
-		result += ",abi=";
-		result += kernel->HasTraceCandidate() ? JitRegionABIToString(kernel->TraceCandidateContract().abi) : "none";
-		result += ",owns_source=";
-		result += kernel->HasTraceCandidate() && kernel->TraceCandidateContract().owns_source ? "true" : "false";
-		result += ",owns_sink=";
-		result += kernel->HasTraceCandidate() && kernel->TraceCandidateContract().owns_sink ? "true" : "false";
-		result += ",source_prefix_abi=";
-		result += kernel->CanExecuteSourcePrefix() ? "true" : "false";
-		result += ",full_abi=";
-		result += kernel->CanExecuteFullPipeline() ? "true" : "false";
-		result += ">";
-	}
-	return result;
-}
-
-static string DescribeJitPreparedSourceOwnerState(ClientContext &context, const JitPreparedPipeline &prepared,
-                                                  const vector<unique_ptr<JitRegionKernel>> &kernels) {
-	string result = DescribeCompiledJitPreparedSourceOwnerKernels(kernels);
-	result += ";context_jit_suppressed=";
-	result += context.IsJitSuppressed() ? "true" : "false";
-	result += ";prepared_enabled=";
-	result += prepared.enabled ? "true" : "false";
-	result += ";selected_region_count=" + std::to_string(prepared.selected_regions.size());
-	result += ";source_contract<present=";
-	result += prepared.source_contract.present ? "true" : "false";
-	result += ",selected=";
-	result += prepared.source_contract.selected ? "true" : "false";
-	result += ",owns_filters=";
-	result += prepared.source_contract.owns_filters ? "true" : "false";
-	result += ",native_source=";
-	result += prepared.source_contract.native_source ? "true" : "false";
-	result += ">";
-	for (idx_t region_idx = 0; region_idx < prepared.selected_regions.size(); region_idx++) {
-		auto &region = prepared.selected_regions[region_idx];
-		result += ";selected_region";
-		result += std::to_string(region_idx);
-		result += "<shape=";
-		result += region.lowering_plan.shape_key;
-		result += ",mode=";
-		result += JitExecutionModeToString(region.lowering_plan.ExpectedCompiledExecutionMode());
-		result += ",form=";
-		result += JitRegionExecutionFormToString(region.lowering_plan.ExpectedRegionExecutionForm());
-		result += ",owns_source_filters=";
-		result += region.lowering_plan.OwnsSourceFilters() ? "true" : "false";
-		result += ">";
-	}
-	return result;
-}
-
-static bool HasJitSourcePrefixKernelRequiringNativeSource(const vector<unique_ptr<JitRegionKernel>> &kernels) {
-	for (auto &kernel : kernels) {
-		D_ASSERT(kernel);
-		if (!kernel->HasTraceCandidate()) {
-			continue;
-		}
-		auto &contract = kernel->TraceCandidateContract();
-		if (JitRegionABIIsSourcePrefix(contract.abi) && kernel->CanExecuteSourcePrefix() &&
-		    kernel->RequiresNativeSource()) {
 			return true;
 		}
 	}
@@ -138,16 +60,10 @@ PipelineExecutor::PipelineExecutor(ClientContext &context_p, Pipeline &pipeline_
 	if (prepared_jit) {
 		jit_kernels = JitManager::Get(context_p).CompilePreparedRegions(context_p, *prepared_jit);
 	}
-	// Prepared source input changes the DuckDB source chunk shape, so it needs a compiled owner before the normal
-	// pipeline can run. Native-source state is an additive alternate fetch path and may be left unused when codegen
-	// later rejects the only native-source candidate.
-	if (prepared_jit && prepared_jit->RequiresPreparedSourceInput() &&
-	    !HasCompiledJitPreparedSourceOwnerKernel(jit_kernels)) {
-		throw InternalException("prepared JIT source input requires a compiled source-prefix owner kernel: %s",
-		                        DescribeJitPreparedSourceOwnerState(context_p, *prepared_jit, jit_kernels));
-	}
-	auto &source_input_types = prepared_jit ? prepared_jit->SourceInputTypes(pipeline.source->GetTypes())
-	                                       : pipeline.source->GetTypes();
+	auto use_prepared_source_input =
+	    prepared_jit && prepared_jit->RequiresPreparedSourceInput() && HasCompiledJitPreparedSourceOwnerKernel(jit_kernels);
+	auto &source_input_types =
+	    use_prepared_source_input ? prepared_jit->SourceInputTypes(pipeline.source->GetTypes()) : pipeline.source->GetTypes();
 	jit_source_input_chunk.Initialize(BufferAllocator::Get(context.client), source_input_types);
 	InitializeChunk(final_chunk);
 }
@@ -753,49 +669,14 @@ DataChunk &PipelineExecutor::GetSourceChunkForInitialIdx(idx_t initial_idx) {
 	return *intermediate_chunks[initial_idx];
 }
 
-SourceResultType PipelineExecutor::FetchFromSource(DataChunk *&result, bool allow_source_prefix_jit) {
-	auto source_prefix_jit = allow_source_prefix_jit && JitRegionExecutor::HasSourcePrefixKernel(*this);
-	auto prepared_jit = pipeline.GetJitPreparedPipeline();
-	auto prepared_source_input = prepared_jit && prepared_jit->RequiresPreparedSourceInput();
-	if (source_prefix_jit && HasJitSourcePrefixKernelRequiringNativeSource(jit_kernels)) {
-		std::chrono::steady_clock::time_point source_fetch_start;
-		auto trace_source_fetch = Settings::Get<JitTraceRuntimeSetting>(context.client);
-		if (trace_source_fetch) {
-			source_fetch_start = std::chrono::steady_clock::now();
-		}
-		auto res = FetchFromNativeSource(result);
-		int64_t source_fetch_time_us = 0;
-		if (trace_source_fetch) {
-			auto source_fetch_end = std::chrono::steady_clock::now();
-			source_fetch_time_us =
-			    std::chrono::duration_cast<std::chrono::microseconds>(source_fetch_end - source_fetch_start).count();
-		}
-		if (JitRegionExecutor::TryExecuteSourcePrefix(*this, *result, result, res, source_fetch_time_us,
-		                                              source_chunk_initial_idx)) {
-			return res;
-		}
-		throw InternalException("JIT native source-prefix kernel declined after native source fetch");
-	}
-
+SourceResultType PipelineExecutor::FetchFromSource(DataChunk *&result) {
 	StartOperator(*pipeline.source);
 
 	OperatorSourceInput source_input = {*pipeline.source_state, *local_source_state, interrupt_state};
 	source_chunk_initial_idx = 0;
-	auto &fetch_chunk = source_prefix_jit || prepared_source_input ? jit_source_input_chunk : *result;
+	auto &fetch_chunk = *result;
 	fetch_chunk.Reset();
-	auto trace_source_fetch = (source_prefix_jit || prepared_source_input) &&
-	                          Settings::Get<JitTraceRuntimeSetting>(context.client);
-	std::chrono::steady_clock::time_point source_fetch_start;
-	if (trace_source_fetch) {
-		source_fetch_start = std::chrono::steady_clock::now();
-	}
 	auto res = GetData(fetch_chunk, source_input);
-	int64_t source_fetch_time_us = 0;
-	if (trace_source_fetch) {
-		auto source_fetch_end = std::chrono::steady_clock::now();
-		source_fetch_time_us =
-		    std::chrono::duration_cast<std::chrono::microseconds>(source_fetch_end - source_fetch_start).count();
-	}
 
 	// Ensures sources only return empty results when Blocking or Finished
 	D_ASSERT(res != SourceResultType::BLOCKED || fetch_chunk.size() == 0);
@@ -805,23 +686,6 @@ SourceResultType PipelineExecutor::FetchFromSource(DataChunk *&result, bool allo
 		source_profiling_finalized = true;
 	}
 	EndOperator(*pipeline.source, &fetch_chunk);
-
-	if (source_prefix_jit) {
-		if (JitRegionExecutor::TryExecuteSourcePrefix(*this, fetch_chunk, result, res, source_fetch_time_us,
-		                                              source_chunk_initial_idx)) {
-			return res;
-		}
-		if (!prepared_source_input) {
-			result->Reference(fetch_chunk);
-		}
-	}
-	if (prepared_source_input) {
-		if (JitRegionExecutor::TryExecutePreparedSourceReference(*this, fetch_chunk, result, res,
-		                                                         source_fetch_time_us, source_chunk_initial_idx)) {
-			return res;
-		}
-		throw InternalException("prepared JIT source input requires source-prefix reference materialization");
-	}
 
 	return res;
 }

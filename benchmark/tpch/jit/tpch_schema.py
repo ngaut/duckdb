@@ -144,7 +144,7 @@ SORT_OPERATORS = ("ORDER_BY", "TOP_N")
 MATERIALIZATION_OPERATORS = ("CTE", "CTE_SCAN", "COLUMN_DATA_SCAN")
 REGION_DECISION_STATUSES = ("compiled", "skipped", "unsupported")
 KNOWN_CANDIDATE_SCOPES = (
-    "source_prefix",
+    "full_pipeline",
     "full_pipeline",
 )
 NO_CANDIDATE_SCOPE = "none"
@@ -155,7 +155,7 @@ KNOWN_CANDIDATE_SCOPE_SUMMARY_VALUES = (
 KNOWN_REGION_EXECUTION_FORMS = ("none", "fused")
 KNOWN_CANDIDATE_ABIS = (
     "none",
-    "source_prefix",
+    "full_pipeline",
     "full_pipeline",
     "state_scan",
 )
@@ -516,13 +516,13 @@ SOURCE_BOUNDARY_COMMON_FIELDS = (
     "output_columns",
     "returned_columns",
     "column_ids",
-    "source_prefix_input_columns",
-    "source_prefix_input_types",
-    "source_prefix_output_projection_map",
-    "source_prefix_filter_column_map",
-    "source_prefix_requires_unfiltered_input",
-    "source_prefix_filter_prune_required",
-    "source_prefix_filter_takeover_supported",
+    "native_source_input_columns",
+    "native_source_input_types",
+    "native_source_output_projection_map",
+    "native_source_filter_column_map",
+    "native_source_requires_unfiltered_input",
+    "native_source_filter_prune_required",
+    "native_source_filter_takeover_supported",
     "projected_columns",
     "projection_pushdown",
     "filter_pushdown",

@@ -18,13 +18,11 @@ EXPECTED_CASES = {
     "sql_equivalence_matrix",
 }
 KNOWN_CANDIDATE_SCOPES = {
-    "source_prefix",
     "full_pipeline",
 }
 KNOWN_REGION_EXECUTION_FORMS = {"none", "fused"}
 KNOWN_CANDIDATE_ABIS = {
     "none",
-    "source_prefix",
     "full_pipeline",
     "state_scan",
 }
@@ -153,31 +151,15 @@ def verify_executable_candidate_scope(case_name: str, row: dict) -> None:
         raise AssertionError(f"{case_name}: executable region has unknown execution form: {row}")
     if region_execution_form == "none":
         raise AssertionError(f"{case_name}: executable region did not declare an execution form: {row}")
-    if scope == "source_prefix":
-        source_execution = event_source_execution(row)
-        if source_execution == "native-source" or execution_mode == "native":
-            if execution_mode != "native":
-                raise AssertionError(f"{case_name}: native-source-prefix has invalid execution mode: {row}")
-            if region_execution_form != "fused":
-                raise AssertionError(f"{case_name}: native-source-prefix has invalid execution form: {row}")
-        else:
-            raise AssertionError(f"{case_name}: source-boundary prefix was compiled as executable JIT: {row}")
-        if abi and abi not in {"source_prefix", "state_scan"}:
-            raise AssertionError(f"{case_name}: source-prefix executable has wrong ABI: {row}")
-        if pipeline_shape and not has_source:
-            raise AssertionError(f"{case_name}: source-prefix executable has no source node: {row}")
-        if pipeline_shape and has_sink:
-            raise AssertionError(f"{case_name}: source-prefix executable contains sink boundary: {row}")
-        return
     if scope == "full_pipeline":
         if execution_mode != "native":
             raise AssertionError(f"{case_name}: full-pipeline executable has invalid execution mode: {row}")
-        if abi and abi != "full_pipeline":
-            raise AssertionError(f"{case_name}: full-pipeline executable has wrong ABI: {row}")
         if pipeline_shape and not has_source:
             raise AssertionError(f"{case_name}: full-pipeline executable has no source boundary: {row}")
-        if pipeline_shape and not has_sink:
+        if abi == "full_pipeline" and pipeline_shape and not has_sink:
             raise AssertionError(f"{case_name}: full-pipeline executable has no sink boundary: {row}")
+        if abi == "state_scan" and pipeline_shape and has_sink:
+            raise AssertionError(f"{case_name}: state-scan executable contains sink boundary: {row}")
         return
     raise AssertionError(f"{case_name}: unsupported executable candidate scope: {row}")
 
@@ -264,7 +246,7 @@ def verify_resume_state_events(rows: list) -> None:
             and row.get("status") == "unsupported"
             and row.get("execution_mode") == "unsupported"
             and row.get("region_execution_form") == "none"
-            and row.get("candidate_scope") == "source_prefix"
+            and row.get("candidate_scope") == "full_pipeline"
             and row.get("candidate_shape") == "filter"
             and "source-fusion-gap:requires-native-source" in row.get("reason", "")
             and "table-function-source-boundary" in row.get("reason", "")
@@ -274,7 +256,7 @@ def verify_resume_state_events(rows: list) -> None:
             row.get("phase") == "decision"
             and row.get("target") == "region"
             and row.get("status") == "unsupported"
-            and row.get("candidate_scope") in {"source_prefix", "full_pipeline"}
+            and row.get("candidate_scope") == "full_pipeline"
             and "UNNEST:fallback" in row.get("reason", "")
             and "DuckDB physical operator outside generated JIT region" in row.get("reason", "")
         ):
@@ -284,7 +266,7 @@ def verify_resume_state_events(rows: list) -> None:
         if row.get("status") == "compiled":
             raise AssertionError(f"region_resume_state_fallback: forbidden compiled JIT event in fallback-only trace: {row}")
     if not has_source_boundary_unsupported:
-        raise AssertionError("region_resume_state_fallback: missing unsupported source-boundary source-prefix evidence")
+        raise AssertionError("region_resume_state_fallback: missing unsupported source-boundary native-source evidence")
     if not has_unnest_fallback:
         raise AssertionError("region_resume_state_fallback: missing UNNEST executor-fallback evidence")
 

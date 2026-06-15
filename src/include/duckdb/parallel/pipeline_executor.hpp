@@ -177,7 +177,7 @@ private:
 	//! Reset the operator index to the first operator
 	void GoToSource(idx_t &current_idx, idx_t initial_idx, stack<idx_t> &operators_in_process);
 	DataChunk &GetSourceChunkForInitialIdx(idx_t initial_idx);
-	SourceResultType FetchFromSource(DataChunk *&result, bool allow_source_prefix_jit = true);
+	SourceResultType FetchFromSource(DataChunk *&result);
 	SourceResultType FetchFromNativeSource(DataChunk *&result);
 
 	void FinishProcessing(int32_t operator_idx = -1);

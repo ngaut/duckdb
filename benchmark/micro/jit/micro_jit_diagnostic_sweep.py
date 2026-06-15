@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 #
-# Sweep cardinalities for unadmitted SLJIT source-prefix diagnostic shapes.
+# Sweep cardinalities for unadmitted SLJIT native-source diagnostic shapes.
 
 import argparse
 import csv
@@ -47,7 +47,7 @@ def benchmark_text(shape: dict, row_count: int, policy: str, path: Path) -> str:
                 "              AND region_execution_form='fused'",
                 "              AND policy_decision='force'",
                 f"              AND candidate_shape='{shape['candidate_shape']}'",
-                "              AND candidate_scope='source_prefix'",
+                "              AND candidate_scope='full_pipeline'",
                 "              AND code_size > 0",
                 "        )",
             ]

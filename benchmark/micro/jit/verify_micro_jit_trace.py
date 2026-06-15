@@ -76,11 +76,11 @@ def verify_summary(trace_dir: Path, rows: list, manifest: dict) -> None:
                 raise AssertionError(f"summary.csv: off policy compiled or ran kernels: {row}")
         elif policy == "auto":
             if row_int(row, "compiled_regions") != 0:
-                raise AssertionError(f"summary.csv: auto policy compiled non-fused source-prefix region: {row}")
+                raise AssertionError(f"summary.csv: auto policy compiled non-fused native-source region: {row}")
             if row_int(row, "runtime_events") != 0:
-                raise AssertionError(f"summary.csv: auto policy ran non-fused source-prefix region: {row}")
+                raise AssertionError(f"summary.csv: auto policy ran non-fused native-source region: {row}")
             if row_int(row, "skipped_regions") <= 0:
-                raise AssertionError(f"summary.csv: expected auto non-fused source-prefix skip event: {row}")
+                raise AssertionError(f"summary.csv: expected auto non-fused native-source skip event: {row}")
             if row_int(row, "admission_time_us") <= 0:
                 raise AssertionError(f"summary.csv: expected auto admission timing: {row}")
         else:
@@ -129,11 +129,11 @@ def verify_events(trace_dir: Path, rows: list) -> None:
                 and event.get("execution_mode") == "native"
                 and event.get("region_execution_form") == "fused"
                 and event.get("candidate_shape") == expected["candidate_shape"]
-                and event.get("candidate_scope") == "source_prefix"
+                and event.get("candidate_scope") == "full_pipeline"
             ]
             if not native_compiled:
                 raise AssertionError(
-                    f"{row['events_csv']}: expected native source-prefix {row['policy']} compile event"
+                    f"{row['events_csv']}: expected native native-source {row['policy']} compile event"
                 )
             event = native_compiled[0]
             if event.get("candidate_shape") != expected["candidate_shape"]:

@@ -178,14 +178,14 @@ static string DescribeJitRegionTableScanProtocol(const JitRegionTableScanProtoco
 	result += ",projected_columns=" + std::to_string(protocol.projected_column_count);
 	result += ",column_id_bindings=" + BuildJitIdxList(protocol.column_ids);
 	result += ",projection_ids=" + BuildJitIdxList(protocol.projection_ids);
-	result += ",source_prefix_input_columns=" + std::to_string(protocol.source_prefix_input_column_count);
-	result += ",source_prefix_input_types=" + BuildJitLogicalTypeList(protocol.source_prefix_input_types);
-	result += ",source_prefix_output_projection_map=" + BuildJitIdxList(protocol.source_prefix_output_projection_map);
-	result += ",source_prefix_filter_column_map=" + BuildJitIdxList(protocol.source_prefix_filter_column_map);
+	result += ",native_source_input_columns=" + std::to_string(protocol.native_source_input_column_count);
+	result += ",native_source_input_types=" + BuildJitLogicalTypeList(protocol.native_source_input_types);
+	result += ",native_source_output_projection_map=" + BuildJitIdxList(protocol.native_source_output_projection_map);
+	result += ",native_source_filter_column_map=" + BuildJitIdxList(protocol.native_source_filter_column_map);
 	result +=
-	    ",source_prefix_requires_unfiltered_input=" + JitRegionBool(protocol.source_prefix_requires_unfiltered_input);
-	result += ",source_prefix_filter_prune_required=" + JitRegionBool(protocol.source_prefix_filter_prune_required);
-	result += ",source_prefix_filter_takeover_supported=" + JitRegionBool(protocol.source_prefix_filter_takeover_supported);
+	    ",native_source_requires_unfiltered_input=" + JitRegionBool(protocol.native_source_requires_unfiltered_input);
+	result += ",native_source_filter_prune_required=" + JitRegionBool(protocol.native_source_filter_prune_required);
+	result += ",native_source_filter_takeover_supported=" + JitRegionBool(protocol.native_source_filter_takeover_supported);
 	result += ",projection_pushdown=" + JitRegionBool(protocol.projection_pushdown);
 	result += ",filter_pushdown=" + JitRegionBool(protocol.filter_pushdown);
 	result += ",filter_prune=" + JitRegionBool(protocol.filter_prune);
@@ -1729,8 +1729,7 @@ static JitRegionABI DetermineJitRegionContractABI(const JitRegionContract &contr
 		return JitRegionABI::FULL_PIPELINE;
 	}
 	if (contract.owns_source) {
-		return contract.owns_state_scan && !contract.owns_transform ? JitRegionABI::STATE_SCAN
-		                                                            : JitRegionABI::SOURCE_PREFIX;
+		return contract.owns_state_scan && !contract.owns_transform ? JitRegionABI::STATE_SCAN : JitRegionABI::NONE;
 	}
 	return JitRegionABI::NONE;
 }
@@ -1992,7 +1991,7 @@ static JitRegionCandidateTraits BuildJitRegionUpstreamTraits(const JitRegionIR &
 	JitRegionCandidate upstream_candidate;
 	upstream_candidate.first_node = 0;
 	upstream_candidate.node_count = MinValue(candidate.first_node, NumericCast<idx_t>(region_ir.nodes.size()));
-	upstream_candidate.scope = JitRegionCandidateScope::SOURCE_PREFIX;
+	upstream_candidate.scope = JitRegionCandidateScope::FULL_PIPELINE;
 	return BuildJitRegionSpanTraits(region_ir, std::move(upstream_candidate));
 }
 
@@ -2060,11 +2059,11 @@ static string NormalizeJitRegionSignatureSegment(string input) {
 }
 
 static string GetJitRegionSignatureContext(const JitRegionContract &contract) {
-	if (JitRegionABIIsSourcePrefix(contract.abi)) {
-		return "source-prefix";
-	}
 	if (JitRegionABIIsFullPipeline(contract.abi)) {
 		return "full-pipeline";
+	}
+	if (contract.abi == JitRegionABI::STATE_SCAN) {
+		return "state-scan";
 	}
 	return "unknown";
 }
@@ -2407,10 +2406,8 @@ static JitRegionCandidateScope DetermineJitRegionCandidateScope(const JitRegionI
 	auto starts_at_source = region_ir.nodes[first_node].kind == JitRegionIRNodeKind::SOURCE;
 	auto ends_at_sink = end_node > first_node && region_ir.nodes[end_node - 1].kind == JitRegionIRNodeKind::SINK;
 	D_ASSERT(starts_at_source);
-	if (starts_at_source && ends_at_sink) {
-		return JitRegionCandidateScope::FULL_PIPELINE;
-	}
-	return JitRegionCandidateScope::SOURCE_PREFIX;
+	D_ASSERT(ends_at_sink);
+	return JitRegionCandidateScope::FULL_PIPELINE;
 }
 
 static idx_t EstimateJitRegionCandidateCardinality(const JitRegionIR &region_ir, const JitRegionCandidate &candidate) {
@@ -2501,15 +2498,6 @@ static bool HasJitRegionCandidate(const JitRegionIR &region_ir, idx_t first_node
 	return false;
 }
 
-static bool JitRegionCandidateRequiresMissingResumeProtocol(const JitRegionCandidate &candidate) {
-	switch (candidate.scope) {
-	case JitRegionCandidateScope::SOURCE_PREFIX:
-		return candidate.context_traits.operator_protocol_boundary_count > 0;
-	default:
-		return false;
-	}
-}
-
 static bool AddJitRegionCandidate(JitRegionIR &region_ir, idx_t candidate_id, idx_t first_node, idx_t node_count,
                                   idx_t start_operator_index, idx_t end_operator_index,
                                   JitRegionSourceExecutionKind source_execution = JitRegionSourceExecutionKind::NONE) {
@@ -2536,7 +2524,8 @@ static bool AddJitRegionCandidate(JitRegionIR &region_ir, idx_t candidate_id, id
 	candidate.pipeline_shape = DescribeJitRegionPipelineShape(region_ir, first_node, node_count);
 	candidate.context_pipeline_shape = region_ir.pipeline_shape;
 	candidate.contract = BuildJitRegionContract(region_ir, candidate);
-	if (!candidate.contract.owns_source) {
+	if (!candidate.contract.owns_source || !candidate.contract.owns_sink ||
+	    !JitRegionABIIsFullPipeline(candidate.contract.abi)) {
 		return false;
 	}
 	candidate.stage_plan = BuildJitRegionStagePlan(region_ir, candidate);
@@ -2545,9 +2534,6 @@ static bool AddJitRegionCandidate(JitRegionIR &region_ir, idx_t candidate_id, id
 	candidate.upstream_traits = BuildJitRegionUpstreamTraits(region_ir, candidate);
 	candidate.context_traits = BuildJitRegionContextTraits(region_ir);
 	candidate.continuation_traits = BuildJitRegionContinuationTraits(region_ir, candidate);
-	if (JitRegionCandidateRequiresMissingResumeProtocol(candidate)) {
-		return false;
-	}
 	candidate.ir = DescribeJitRegionCandidate(candidate);
 	region_ir.candidates.push_back(std::move(candidate));
 	return true;
@@ -2562,71 +2548,11 @@ static void AddJitRegionCandidateAndIncrement(JitRegionIR &region_ir, idx_t &can
 	}
 }
 
-static bool JitRegionSourceHasGeneratedPrefixWork(const JitRegionIRNode &node) {
-	if (!node.source) {
-		return false;
-	}
-	if (!node.source->projection_ids.empty()) {
-		return true;
-	}
-	for (auto &filter : node.source->filters) {
-		if (filter.expression) {
-			return true;
-		}
-	}
-	return false;
-}
-
-static bool JitRegionNodeCanStayInMaximalSourcePrefixSpan(const JitRegionIRNode &node) {
-	switch (node.kind) {
-	case JitRegionIRNodeKind::SOURCE:
-		return node.boundary == JitRegionBoundaryKind::SOURCE_NATIVE;
-	case JitRegionIRNodeKind::FILTER:
-	case JitRegionIRNodeKind::PROJECTION:
-		return node.fallback_reason.empty();
-	default:
-		return false;
-	}
-}
-
-static idx_t FindJitRegionMaximalSourcePrefixEnd(const JitRegionIR &region_ir) {
-	idx_t end_node = 0;
-	while (end_node < region_ir.nodes.size()) {
-		if (!JitRegionNodeCanStayInMaximalSourcePrefixSpan(region_ir.nodes[end_node])) {
-			break;
-		}
-		end_node++;
-	}
-	return end_node;
-}
-
-static idx_t GetJitRegionPrefixEndOperatorIndex(const JitRegionIR &region_ir, idx_t prefix_end,
-                                                idx_t operator_count) {
-	const idx_t source_offset = region_ir.nodes[0].kind == JitRegionIRNodeKind::SOURCE ? 1 : 0;
-	if (prefix_end <= source_offset) {
-		return 0;
-	}
-	return MinValue(prefix_end - source_offset, operator_count);
-}
-
-static void AddJitRegionMaximalPrefixCandidate(JitRegionIR &region_ir, idx_t &candidate_id, idx_t operator_count) {
-	const auto prefix_end = FindJitRegionMaximalSourcePrefixEnd(region_ir);
-	if (prefix_end == 0 || prefix_end >= region_ir.nodes.size()) {
-		return;
-	}
-	if (prefix_end == 1 && !JitRegionSourceHasGeneratedPrefixWork(region_ir.nodes[0])) {
-		return;
-	}
-	const auto end_operator_index = GetJitRegionPrefixEndOperatorIndex(region_ir, prefix_end, operator_count);
-	AddJitRegionCandidateAndIncrement(region_ir, candidate_id, 0, prefix_end, 0, end_operator_index);
-}
-
 static void BuildJitRegionCandidates(JitRegionIR &region_ir, idx_t operator_count) {
 	if (region_ir.nodes.empty()) {
 		return;
 	}
 	idx_t candidate_id = 0;
-	AddJitRegionMaximalPrefixCandidate(region_ir, candidate_id, operator_count);
 	AddJitRegionCandidateAndIncrement(region_ir, candidate_id, 0, region_ir.nodes.size(), 0, operator_count);
 }
 

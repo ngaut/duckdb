@@ -640,31 +640,15 @@ def verify_executable_candidate_scope(name: str, row: dict) -> None:
         raise AssertionError(f"{name}: executable region has unknown execution form: {row}")
     if region_execution_form == "none":
         raise AssertionError(f"{name}: executable region did not declare an execution form: {row}")
-    if scope == "source_prefix":
-        source_execution = event_source_execution(row)
-        if source_execution == "native-source" or execution_mode == "native":
-            if execution_mode != "native":
-                raise AssertionError(f"{name}: native-source-prefix has invalid execution mode: {row}")
-            if region_execution_form != "fused":
-                raise AssertionError(f"{name}: native-source-prefix has invalid execution form: {row}")
-        else:
-            raise AssertionError(f"{name}: source-boundary prefix was compiled as executable JIT: {row}")
-        if abi and abi not in {"source_prefix", "state_scan"}:
-            raise AssertionError(f"{name}: source-prefix executable has wrong ABI: {row}")
-        if not has_source:
-            raise AssertionError(f"{name}: source-prefix executable shape has no source node: {row}")
-        if has_sink:
-            raise AssertionError(f"{name}: source-prefix executable shape contains sink boundary: {row}")
-        return
     if scope == "full_pipeline":
         if execution_mode != "native":
             raise AssertionError(f"{name}: full-pipeline executable has invalid execution mode: {row}")
-        if abi and abi != "full_pipeline":
-            raise AssertionError(f"{name}: full-pipeline executable has wrong ABI: {row}")
         if not has_source:
             raise AssertionError(f"{name}: full-pipeline executable shape has no source node: {row}")
-        if not has_sink:
+        if abi == "full_pipeline" and not has_sink:
             raise AssertionError(f"{name}: full-pipeline executable shape has no sink node: {row}")
+        if abi == "state_scan" and has_sink:
+            raise AssertionError(f"{name}: state-scan executable shape contains sink boundary: {row}")
         return
     raise AssertionError(f"{name}: unsupported executable candidate scope: {row}")
 
@@ -1429,13 +1413,13 @@ def verify_source_boundary_summary(
                 "output_columns",
                 "returned_columns",
                 "column_ids",
-                "source_prefix_input_columns",
-                "source_prefix_input_types",
-                "source_prefix_output_projection_map",
-                "source_prefix_filter_column_map",
-                "source_prefix_requires_unfiltered_input",
-                "source_prefix_filter_prune_required",
-                "source_prefix_filter_takeover_supported",
+                "native_source_input_columns",
+                "native_source_input_types",
+                "native_source_output_projection_map",
+                "native_source_filter_column_map",
+                "native_source_requires_unfiltered_input",
+                "native_source_filter_prune_required",
+                "native_source_filter_takeover_supported",
                 "projected_columns",
                 "projection_pushdown",
                 "filter_pushdown",
@@ -1450,16 +1434,16 @@ def verify_source_boundary_summary(
                 "output_columns",
                 "returned_columns",
                 "column_ids",
-                "source_prefix_input_columns",
+                "native_source_input_columns",
                 "projected_columns",
                 "filter_count",
             ):
                 if row_int(row, field) < 0:
                     raise AssertionError(f"source_boundary_summary.csv: negative table-scan field {field}: {row}")
             for field in (
-                "source_prefix_requires_unfiltered_input",
-                "source_prefix_filter_prune_required",
-                "source_prefix_filter_takeover_supported",
+                "native_source_requires_unfiltered_input",
+                "native_source_filter_prune_required",
+                "native_source_filter_takeover_supported",
                 "projection_pushdown",
                 "filter_pushdown",
                 "filter_prune",
@@ -1472,7 +1456,7 @@ def verify_source_boundary_summary(
             if row_int(row, "filter_count") > 0:
                 has_pushed_filter = True
             expected_markers = {
-                "table_scan_generated_source_filter": "generated source-prefix table scan filters",
+                "table_scan_generated_source_filter": "generated native table scan filters",
                 "table_scan_native_source": "native table scan source protocol",
                 "table_scan_source_boundary": "DuckDB table scan source boundary",
                 "duckdb_scan_source_boundary": "DuckDB scan source boundary",
@@ -1784,13 +1768,13 @@ def source_boundary_row_key(row: dict) -> tuple:
         row["output_columns"],
         row["returned_columns"],
         row["column_ids"],
-        row["source_prefix_input_columns"],
-        row["source_prefix_input_types"],
-        row["source_prefix_output_projection_map"],
-        row["source_prefix_filter_column_map"],
-        row["source_prefix_requires_unfiltered_input"],
-        row["source_prefix_filter_prune_required"],
-        row["source_prefix_filter_takeover_supported"],
+        row["native_source_input_columns"],
+        row["native_source_input_types"],
+        row["native_source_output_projection_map"],
+        row["native_source_filter_column_map"],
+        row["native_source_requires_unfiltered_input"],
+        row["native_source_filter_prune_required"],
+        row["native_source_filter_takeover_supported"],
         row["projected_columns"],
         row["projection_pushdown"],
         row["filter_pushdown"],
@@ -2094,7 +2078,7 @@ def verify_source_fusion_gaps(
             if query_id and query_id not in expected_query_set:
                 raise AssertionError(f"source_fusion_gap_summary.csv: unexpected query example {query_id}: {row}")
         verify_scope_summary_field("source_fusion_gap_summary.csv", row, "candidate_scopes")
-        if "source_prefix" not in row["candidate_scopes"] and "full_pipeline" not in row["candidate_scopes"]:
+        if "full_pipeline" not in row["candidate_scopes"]:
             raise AssertionError(f"source_fusion_gap_summary.csv: gap row is not a source/full pipeline: {row}")
         if row["candidate_shapes"] == "":
             raise AssertionError(f"source_fusion_gap_summary.csv: missing candidate shapes: {row}")
@@ -2117,7 +2101,7 @@ def verify_source_fusion_gaps(
             "source-fusion-gap:requires-native-source" not in row["example_reason"]
             and "source-fusion-gap:downstream-operator-resume-protocol-missing" not in row["example_reason"]
             and row["native_source_blocker"] != "hash-join-source-does-not-produce-rows-for-join-type"
-            and "source-pushed filters require source-prefix filter split" not in row["example_reason"]
+            and "source-pushed filters require native-source filter split" not in row["example_reason"]
         ):
             raise AssertionError(f"source_fusion_gap_summary.csv: example reason missing source fusion root cause: {row}")
         for field in (
@@ -2293,7 +2277,7 @@ def verify_fusion_blockers(
                 raise AssertionError(f"fusion_blocker_summary.csv: unexpected query example {query_id}: {row}")
         verify_scope_summary_field("fusion_blocker_summary.csv", row, "candidate_scopes")
         if row["blocker_class"] == "source-fusion-gap":
-            if "source_prefix" not in row["candidate_scopes"] and "full_pipeline" not in row["candidate_scopes"]:
+            if "full_pipeline" not in row["candidate_scopes"]:
                 raise AssertionError(f"fusion_blocker_summary.csv: source blocker row is not source/full pipeline: {row}")
         if row["blocker_class"] == "sink-fusion-gap":
             if "full_pipeline" not in row["candidate_scopes"]:
@@ -3179,13 +3163,13 @@ def verify_source_boundary_features(
         "output_columns=",
         "returned_columns=",
         "column_ids=",
-        "source_prefix_input_columns=",
-        "source_prefix_input_types=",
-        "source_prefix_output_projection_map=",
-        "source_prefix_filter_column_map=",
-        "source_prefix_requires_unfiltered_input=",
-        "source_prefix_filter_prune_required=",
-        "source_prefix_filter_takeover_supported=",
+        "native_source_input_columns=",
+        "native_source_input_types=",
+        "native_source_output_projection_map=",
+        "native_source_filter_column_map=",
+        "native_source_requires_unfiltered_input=",
+        "native_source_filter_prune_required=",
+        "native_source_filter_takeover_supported=",
         "projection_pushdown=",
         "projected_columns=",
         "filter_pushdown=",
@@ -3209,13 +3193,13 @@ def verify_source_boundary_features(
         "table_scan_protocol<",
         "column_id_bindings=",
         "projection_ids=",
-        "source_prefix_input_columns=",
-        "source_prefix_input_types=",
-        "source_prefix_output_projection_map=",
-        "source_prefix_filter_column_map=",
-        "source_prefix_requires_unfiltered_input=",
-        "source_prefix_filter_prune_required=",
-        "source_prefix_filter_takeover_supported=",
+        "native_source_input_columns=",
+        "native_source_input_types=",
+        "native_source_output_projection_map=",
+        "native_source_filter_column_map=",
+        "native_source_requires_unfiltered_input=",
+        "native_source_filter_prune_required=",
+        "native_source_filter_takeover_supported=",
     )
     required_scan_helper_ir_features = ("execution=duckdb-source-boundary",)
     required_scan_native_ir_features = ("execution=native-source",)

@@ -82,7 +82,7 @@ def verify_admitted_template(root: Path, family: str, entry: dict) -> None:
         "status='compiled'",
         "execution_mode='native'",
         "region_execution_form='fused'",
-        "candidate_scope='source_prefix'",
+        "candidate_scope='full_pipeline'",
         "policy_decision='force'",
         "code_size > 0",
     ]

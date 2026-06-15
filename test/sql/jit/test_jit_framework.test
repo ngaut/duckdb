@@ -524,20 +524,10 @@ WHERE backend_name='sljit'
 query I
 SELECT count(*) = 0
 FROM duckdb_jit_events()
-WHERE phase='decision'
-  AND backend_name='sljit'
+WHERE backend_name='sljit'
   AND target='region'
-  AND status='unsupported'
-  AND execution_mode='unsupported'
-  AND region_execution_form='none'
-  AND candidate_shape='filter-projection'
-  AND candidate_scope='source_prefix'
-  AND candidate_start_operator_index=0
-  AND candidate_end_operator_index=2
-  AND reason LIKE '%execution-form=none%'
-  AND reason LIKE '%execution:unsupported%'
-  AND reason LIKE '%fusion-blocker:source-fusion-gap:requires-native-source%'
-  AND reason LIKE '%source:TABLE_SCAN:fallback:DuckDB source boundary%'
+  AND candidate_id IS NOT NULL
+  AND candidate_scope NOT IN ('full_pipeline', 'state_scan')
 ----
 1
 
@@ -616,9 +606,8 @@ WHERE backend_name='sljit'
   AND execution_mode='executor_fallback'
   AND region_execution_form='none'
   AND policy_decision='auto'
-  AND candidate_shape='projection-projection-projection-sink'
-  AND candidate_scope='full_pipeline'
-  AND admission_shape_key='sljit:full-pipeline:projection-projection-projection-sink:table-scan-source+ungrouped-aggregate-update'
+  AND candidate_id IS NULL
+  AND admission_shape_key='sljit:pipeline-inventory:table-scan-source+ungrouped-aggregate-update'
   AND admission_rule_present=false
   AND admission_min_cardinality IS NULL
   AND admission_score IS NULL
@@ -626,31 +615,18 @@ WHERE backend_name='sljit'
   AND decision_time_us >= 0
   AND compile_time_us = 0
   AND code_size = 0
-  AND reason LIKE '%jit_policy=auto skips region before backend analysis%'
-  AND reason LIKE '%SLJIT full-pipeline region requires measured operator-aware admission proof%'
+  AND reason LIKE '%jit_policy=auto skips pipeline before typed IR lowering%'
+  AND reason LIKE '%no SLJIT auto admission family can match pipeline inventory%'
   AND reason LIKE '%admission_rule=missing%'
-  AND ir LIKE '%native_source_contract<status=blocked,required_capability=table-function-native-source%'
-  AND ir LIKE '%blocker=table-function-source-boundary%'
-  AND reason LIKE '%source_execution=duckdb-source-boundary%'
-  AND reason LIKE '%sink_kind=ungrouped-aggregate-update%'
-  AND candidate_has_source=true
-  AND candidate_has_sink=true
-  AND candidate_has_table_scan_source=true
-  AND candidate_expression_traits_known=true
-  AND candidate_arithmetic_projection_count=2
-  AND candidate_integer_arithmetic_projection_count=2
-  AND candidate_non_integer_arithmetic_projection_count=0
-  AND candidate_reference_projection_count=1
-  AND candidate_filter_count=0
-  AND candidate_projection_count=3
-  AND ir LIKE '%traits<source=true,sink=true%'
-  AND ir LIKE '%table_scan_source=true%'
-  AND ir LIKE '%arithmetic_projections=2%'
-  AND ir LIKE '%integer_arithmetic_projections=2%'
-  AND ir LIKE '%non_integer_arithmetic_projections=0%'
-  AND ir LIKE '%reference_projections=1%'
+  AND reason LIKE '%source_filter_count=0%'
+  AND reason LIKE '%source_projected_column_count=0%'
+  AND reason LIKE '%features=table-scan-source+ungrouped-aggregate-update%'
 ----
 1
+
+statement ok
+CREATE TEMP TABLE jit_auto_filter_projection_baseline AS
+SELECT coalesce(max(event_id), 0) AS base_event_id FROM duckdb_jit_events()
 
 query I
 SELECT sum(a + b)
@@ -664,16 +640,16 @@ FROM (
 
 query I
 SELECT count(*) > 0
-FROM duckdb_jit_events()
-WHERE backend_name='sljit'
+FROM duckdb_jit_events(), jit_auto_filter_projection_baseline
+WHERE event_id > base_event_id
+  AND backend_name='sljit'
   AND target='region'
   AND status='skipped'
   AND execution_mode='executor_fallback'
   AND region_execution_form='none'
   AND policy_decision='auto'
-  AND candidate_shape='filter-projection-projection-sink'
-  AND candidate_scope='full_pipeline'
-  AND admission_shape_key='sljit:full-pipeline:filter-projection-projection-sink:table-scan-source+ungrouped-aggregate-update'
+  AND candidate_id IS NULL
+  AND admission_shape_key='sljit:pipeline-inventory:table-scan-source+ungrouped-aggregate-update'
   AND admission_rule_present=false
   AND admission_min_cardinality IS NULL
   AND admission_score IS NULL
@@ -681,16 +657,12 @@ WHERE backend_name='sljit'
   AND decision_time_us >= 0
   AND compile_time_us = 0
   AND code_size = 0
-  AND reason LIKE '%jit_policy=auto skips region before backend analysis%'
-  AND reason LIKE '%SLJIT full-pipeline region requires measured operator-aware admission proof%'
+  AND reason LIKE '%jit_policy=auto skips pipeline before typed IR lowering%'
+  AND reason LIKE '%no SLJIT auto admission family can match pipeline inventory%'
   AND reason LIKE '%admission_rule=missing%'
-  AND candidate_has_source=true
-  AND candidate_has_sink=true
-  AND candidate_has_table_scan_source=true
-  AND candidate_filter_count=1
-  AND candidate_projection_count=2
-  AND candidate_arithmetic_projection_count=2
-  AND candidate_reference_projection_count=1
+  AND reason LIKE '%source_filter_count=0%'
+  AND reason LIKE '%source_projected_column_count=0%'
+  AND reason LIKE '%features=table-scan-source+ungrouped-aggregate-update%'
 ----
 1
 

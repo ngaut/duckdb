@@ -174,10 +174,6 @@ public:
 		return CodeSize() > 0 || HasNativeProtocolBody();
 	}
 
-	bool CanExecuteSourcePrefix() const override {
-		return JitRegionABIIsSourcePrefix(abi);
-	}
-
 	bool CanExecuteFullPipeline() const override {
 		return JitRegionABIIsFullPipeline(abi);
 	}
@@ -196,18 +192,6 @@ public:
 			return false;
 		}
 		return CanBindNativeOperators(runtime, blocker);
-	}
-
-	bool TryExecute(DataChunk &input, DataChunk &result, idx_t initial_idx, OperatorResultType &execute_result) override {
-		if (JitRegionABIOwnsSink(abi)) {
-			return false;
-		}
-		if (!HasTraceCandidate() || initial_idx != TraceCandidateStartOperatorIndex()) {
-			return false;
-		}
-		ExecuteNative(input, result);
-		execute_result = OperatorResultType::NEED_MORE_INPUT;
-		return true;
 	}
 
 	bool TryExecuteFullPipeline(JitFullPipelineRuntime &runtime, JitFullPipelineResult &result) override {
@@ -282,54 +266,6 @@ private:
 			}
 		}
 		return true;
-	}
-
-	void ExecuteNative(DataChunk &input, DataChunk &result) {
-		result.Reset();
-		if (input.size() == 0) {
-			return;
-		}
-
-		DataChunk *current = &input;
-		for (idx_t op_idx = 0; op_idx < ops.size(); op_idx++) {
-			auto &op = ops[op_idx];
-			if (CanExecuteFilterProjection(op_idx)) {
-				auto &output = op_idx + 2 == ops.size() ? result : *temporary_chunks[op_idx + 1];
-				output.Reset();
-				ExecuteFilterProjection(op, ops[op_idx + 1], *current, output, *filter_selections[op_idx]);
-				current = &output;
-				op_idx++;
-				if (current->size() == 0) {
-					result.Reset();
-					return;
-				}
-				continue;
-			}
-			auto &output = op_idx + 1 == ops.size() ? result : *temporary_chunks[op_idx];
-			output.Reset();
-			switch (op.kind) {
-			case SljitNativeRegionOpKind::FILTER:
-				ExecuteFilter(op, *current, output, *filter_selections[op_idx]);
-				break;
-			case SljitNativeRegionOpKind::PROJECTION:
-				ExecuteProjection(op, *current, output);
-				break;
-			case SljitNativeRegionOpKind::HASH_JOIN_PROBE:
-				throw InternalException("SLJIT native hash join probe requires full-pipeline runtime binding");
-			case SljitNativeRegionOpKind::HASH_JOIN_BUILD:
-			case SljitNativeRegionOpKind::HASH_AGGREGATE_UPDATE:
-			case SljitNativeRegionOpKind::PERFECT_HASH_AGGREGATE_UPDATE:
-			case SljitNativeRegionOpKind::UNGROUPED_AGGREGATE_UPDATE:
-				throw InternalException("SLJIT sink operator cannot execute through the DataChunk result ABI");
-			default:
-				throw InternalException("Invalid SLJIT native region operator");
-			}
-			current = &output;
-			if (current->size() == 0) {
-				result.Reset();
-				return;
-			}
-		}
 	}
 
 	SinkResultType ExecuteNativeFullPipeline(JitFullPipelineRuntime &runtime, DataChunk &input) {

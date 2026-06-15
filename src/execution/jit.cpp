@@ -741,12 +741,12 @@ static void AccumulateJitPreparedSourceContract(JitPreparedPipeline &prepared, c
 		auto &contract = prepared.source_contract;
 		contract.present = true;
 		contract.selected = true;
-		contract.requires_unfiltered_input = protocol.source_prefix_requires_unfiltered_input;
-		contract.filter_prune_required = protocol.source_prefix_filter_prune_required;
-		contract.filter_takeover_supported = protocol.source_prefix_filter_takeover_supported;
-		contract.input_types = protocol.source_prefix_input_types;
-		contract.output_projection_map = protocol.source_prefix_output_projection_map;
-		contract.filter_column_map = protocol.source_prefix_filter_column_map;
+		contract.requires_unfiltered_input = protocol.native_source_requires_unfiltered_input;
+		contract.filter_prune_required = protocol.native_source_filter_prune_required;
+		contract.filter_takeover_supported = protocol.native_source_filter_takeover_supported;
+		contract.input_types = protocol.native_source_input_types;
+		contract.output_projection_map = protocol.native_source_output_projection_map;
+		contract.filter_column_map = protocol.native_source_filter_column_map;
 		contract.reason = source.reason;
 		contract.ir = source.ir;
 		contract.native_source = selected_source_execution == JitRegionSourceExecutionKind::NATIVE_SOURCE &&
@@ -1064,10 +1064,6 @@ vector<unique_ptr<JitRegionKernel>> JitManager::CompilePreparedRegions(ClientCon
 			}
 			if (!result.kernel || !result.kernel->HasExecutableBody()) {
 				throw InternalException("JIT backend \"%s\" compiled region without executable code", backend_name);
-			}
-			if (JitRegionABIIsSourcePrefix(candidate.contract.abi) && !result.kernel->CanExecuteSourcePrefix()) {
-				throw InternalException(
-				    "JIT backend \"%s\" compiled source-prefix without source-prefix executable ABI", backend_name);
 			}
 			if (JitRegionABIIsFullPipeline(candidate.contract.abi) && !result.kernel->CanExecuteFullPipeline()) {
 				throw InternalException(

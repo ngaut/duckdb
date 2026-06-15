@@ -488,10 +488,6 @@ const vector<LogicalType> &JitRegionKernel::TraceCandidateOutputTypes() const {
 	return trace_candidate_output_types;
 }
 
-bool JitRegionKernel::CanExecuteSourcePrefix() const {
-	return false;
-}
-
 bool JitRegionKernel::CanExecuteFullPipeline() const {
 	return false;
 }
@@ -502,10 +498,6 @@ bool JitRegionKernel::RequiresNativeSource() const {
 
 bool JitRegionKernel::CanEnterFullPipeline(JitFullPipelineRuntime &, string &) {
 	return true;
-}
-
-bool JitRegionKernel::TryExecute(DataChunk &, DataChunk &, idx_t, OperatorResultType &) {
-	return false;
 }
 
 bool JitRegionKernel::TryExecuteFullPipeline(JitFullPipelineRuntime &, JitFullPipelineResult &) {

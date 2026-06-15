@@ -74,7 +74,7 @@ TOTAL_TIME_RE = re.compile(r"Total Time:\s*([0-9.]+)s")
 EXPRESSION_FALLBACK_MARKER = "core expression lowering unsupported;"
 EXPRESSION_FALLBACK_FIELD_RE = re.compile(r"(reason|class|type|return|function)=([^;\)]+)")
 SOURCE_BOUNDARY_MARKERS = (
-    ("table_scan_generated_source_filter", "generated source-prefix table scan filters"),
+    ("table_scan_generated_source_filter", "generated native table scan filters"),
     ("table_scan_native_source", "native table scan source protocol"),
     ("table_scan_source_boundary", "DuckDB table scan source boundary"),
     ("duckdb_scan_source_boundary", "DuckDB scan source boundary"),
@@ -91,9 +91,9 @@ SOURCE_BOUNDARY_MARKERS = (
 SOURCE_BOUNDARY_FIELD_NAMES = (
     r"function|operator|fields|output_columns|returned_columns|column_ids|column_id_bindings|projection_ids|"
     r"projected_columns|projection_pushdown|"
-    r"source_prefix_input_columns|source_prefix_input_types|source_prefix_output_projection_map|"
-    r"source_prefix_filter_column_map|source_prefix_requires_unfiltered_input|source_prefix_filter_prune_required|"
-    r"source_prefix_filter_takeover_supported|"
+    r"native_source_input_columns|native_source_input_types|native_source_output_projection_map|"
+    r"native_source_filter_column_map|native_source_requires_unfiltered_input|native_source_filter_prune_required|"
+    r"native_source_filter_takeover_supported|"
     r"filter_pushdown|filter_prune|filter_count|dynamic_filters|in_out_function|join_type|condition_count|"
     r"equality_condition_count|non_equality_condition_count|null_equal_condition_count|condition_types|"
     r"comparison_ops|payload_columns|payload_column_indices|payload_types|lhs_output_columns|lhs_output_column_indices|lhs_output_types|"
@@ -522,13 +522,13 @@ def extract_source_boundary_details(trace_text: str) -> Optional[dict]:
         "output_columns": fields.get("output_columns", ""),
         "returned_columns": fields.get("returned_columns", ""),
         "column_ids": fields.get("column_ids", ""),
-        "source_prefix_input_columns": fields.get("source_prefix_input_columns", ""),
-        "source_prefix_input_types": fields.get("source_prefix_input_types", ""),
-        "source_prefix_output_projection_map": fields.get("source_prefix_output_projection_map", ""),
-        "source_prefix_filter_column_map": fields.get("source_prefix_filter_column_map", ""),
-        "source_prefix_requires_unfiltered_input": fields.get("source_prefix_requires_unfiltered_input", ""),
-        "source_prefix_filter_prune_required": fields.get("source_prefix_filter_prune_required", ""),
-        "source_prefix_filter_takeover_supported": fields.get("source_prefix_filter_takeover_supported", ""),
+        "native_source_input_columns": fields.get("native_source_input_columns", ""),
+        "native_source_input_types": fields.get("native_source_input_types", ""),
+        "native_source_output_projection_map": fields.get("native_source_output_projection_map", ""),
+        "native_source_filter_column_map": fields.get("native_source_filter_column_map", ""),
+        "native_source_requires_unfiltered_input": fields.get("native_source_requires_unfiltered_input", ""),
+        "native_source_filter_prune_required": fields.get("native_source_filter_prune_required", ""),
+        "native_source_filter_takeover_supported": fields.get("native_source_filter_takeover_supported", ""),
         "projected_columns": fields.get("projected_columns", ""),
         "projection_pushdown": fields.get("projection_pushdown", ""),
         "filter_pushdown": fields.get("filter_pushdown", ""),
@@ -670,13 +670,13 @@ def extract_native_source_contract(trace_text: str) -> dict:
 
 
 def is_source_fusion_gap_event(event: dict, trace_text: str) -> bool:
-    if event.get("candidate_scope", "") not in ("source_prefix", "full_pipeline"):
+    if event.get("candidate_scope", "") != "full_pipeline":
         return False
     if event_source_execution(event) == "native-source":
         return False
     if "source-fusion-gap:requires-native-source" in trace_text:
         return True
-    if "source-pushed filters require source-prefix filter split" in trace_text:
+    if "source-pushed filters require native-source filter split" in trace_text:
         return True
     if event.get("region_execution_form", "") != "none":
         return False
@@ -712,7 +712,7 @@ def source_fusion_gap_example_text(event_reason: str, trace_text: str, source_ma
         marker_index = trace_text.find(blocker)
         if marker_index >= 0:
             return truncate_text(source_boundary_segment(trace_text, marker_index), 260)
-    source_filter_gap = "source-pushed filters require source-prefix filter split"
+    source_filter_gap = "source-pushed filters require native-source filter split"
     marker_index = event_reason.find(source_filter_gap)
     if marker_index >= 0:
         return truncate_text(event_reason[marker_index:], 260)
@@ -784,13 +784,13 @@ def source_boundary_key(policy: str, event: dict, details: dict, source_node: di
         details["output_columns"],
         details["returned_columns"],
         details["column_ids"],
-        details["source_prefix_input_columns"],
-        details["source_prefix_input_types"],
-        details["source_prefix_output_projection_map"],
-        details["source_prefix_filter_column_map"],
-        details["source_prefix_requires_unfiltered_input"],
-        details["source_prefix_filter_prune_required"],
-        details["source_prefix_filter_takeover_supported"],
+        details["native_source_input_columns"],
+        details["native_source_input_types"],
+        details["native_source_output_projection_map"],
+        details["native_source_filter_column_map"],
+        details["native_source_requires_unfiltered_input"],
+        details["native_source_filter_prune_required"],
+        details["native_source_filter_takeover_supported"],
         details["projected_columns"],
         details["projection_pushdown"],
         details["filter_pushdown"],
@@ -966,13 +966,13 @@ def new_source_boundary_summary_entry(policy: str, event: dict, details: dict, s
         "output_columns": details["output_columns"],
         "returned_columns": details["returned_columns"],
         "column_ids": details["column_ids"],
-        "source_prefix_input_columns": details["source_prefix_input_columns"],
-        "source_prefix_input_types": details["source_prefix_input_types"],
-        "source_prefix_output_projection_map": details["source_prefix_output_projection_map"],
-        "source_prefix_filter_column_map": details["source_prefix_filter_column_map"],
-        "source_prefix_requires_unfiltered_input": details["source_prefix_requires_unfiltered_input"],
-        "source_prefix_filter_prune_required": details["source_prefix_filter_prune_required"],
-        "source_prefix_filter_takeover_supported": details["source_prefix_filter_takeover_supported"],
+        "native_source_input_columns": details["native_source_input_columns"],
+        "native_source_input_types": details["native_source_input_types"],
+        "native_source_output_projection_map": details["native_source_output_projection_map"],
+        "native_source_filter_column_map": details["native_source_filter_column_map"],
+        "native_source_requires_unfiltered_input": details["native_source_requires_unfiltered_input"],
+        "native_source_filter_prune_required": details["native_source_filter_prune_required"],
+        "native_source_filter_takeover_supported": details["native_source_filter_takeover_supported"],
         "projected_columns": details["projected_columns"],
         "projection_pushdown": details["projection_pushdown"],
         "filter_pushdown": details["filter_pushdown"],
@@ -2772,13 +2772,13 @@ def source_boundary_priority_sort_key(entry: dict) -> tuple:
         entry["output_columns"],
         entry["returned_columns"],
         entry["column_ids"],
-        entry["source_prefix_input_columns"],
-        entry["source_prefix_input_types"],
-        entry["source_prefix_output_projection_map"],
-        entry["source_prefix_filter_column_map"],
-        entry["source_prefix_requires_unfiltered_input"],
-        entry["source_prefix_filter_prune_required"],
-        entry["source_prefix_filter_takeover_supported"],
+        entry["native_source_input_columns"],
+        entry["native_source_input_types"],
+        entry["native_source_output_projection_map"],
+        entry["native_source_filter_column_map"],
+        entry["native_source_requires_unfiltered_input"],
+        entry["native_source_filter_prune_required"],
+        entry["native_source_filter_takeover_supported"],
         entry["projected_columns"],
         entry["projection_pushdown"],
         entry["filter_pushdown"],

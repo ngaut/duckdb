@@ -63,10 +63,10 @@ SELECT (
                    AND admission_shape_key='sljit:full-pipeline:filter-projection-ungrouped-aggregate-update'
                    AND admission_rule_present=false
                    AND code_size > 0
-                   AND reason LIKE '%generated source-prefix table scan filters%'
+                   AND reason LIKE '%generated native table scan filters%'
                    AND reason LIKE '%source-strategy=prepared-unfiltered-native-source%'
                    AND reason LIKE '%owns-source-filters=true%'
-                   AND reason LIKE '%source:TABLE_SCAN:native:generated source-prefix table scan filters%'
+                   AND reason LIKE '%source:TABLE_SCAN:native:generated native table scan filters%'
                    AND reason LIKE '%op0:PROJECTION:native:generated typed projection%'
                    AND reason LIKE '%sink:UNGROUPED_AGGREGATE:native:generated native ungrouped aggregate state update%')
                 AND

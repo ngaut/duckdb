@@ -37,8 +37,8 @@ def decimal_projection_ungrouped_sum_expected(row_count: int) -> str:
 
 ADMITTED_FAMILIES = {
     "native_filter_projection": {
-        "shape_constant": "SLJIT_SOURCE_PREFIX_FILTER_PROJECTION_SHAPE",
-        "shape_key": "sljit:source-prefix:filter-projection",
+        "shape_constant": "SLJIT_FULL_PIPELINE_FILTER_PROJECTION_SHAPE",
+        "shape_key": "sljit:full-pipeline:filter-projection",
         "proof": "benchmark/micro/jit/native_filter_projection",
         "template": "benchmark/micro/jit/native_filter_projection.benchmark.in",
         "min_cardinality": 1000000,
@@ -60,8 +60,8 @@ FROM (
 """,
     },
     "native_projection_chain": {
-        "shape_constant": "SLJIT_SOURCE_PREFIX_PROJECTION_CHAIN_SHAPE",
-        "shape_key": "sljit:source-prefix:projection-chain",
+        "shape_constant": "SLJIT_FULL_PIPELINE_PROJECTION_CHAIN_SHAPE",
+        "shape_key": "sljit:full-pipeline:projection-chain",
         "proof": "benchmark/micro/jit/native_projection_chain",
         "template": "benchmark/micro/jit/native_projection_chain.benchmark.in",
         "min_cardinality": 1000000,
@@ -89,7 +89,7 @@ FROM (
 
 DIAGNOSTIC_FAMILIES = {
     "native_projection": {
-        "shape_key": "sljit:source-prefix:projection",
+        "shape_key": "sljit:full-pipeline:projection",
         "template": "benchmark/micro/jit/native_projection.benchmark.in",
         "candidate_shape": "projection-projection",
         "include_in_sweep": True,
@@ -99,7 +99,7 @@ DIAGNOSTIC_FAMILIES = {
         "expected": projection_expected,
     },
     "native_filter": {
-        "shape_key": "sljit:source-prefix:filter",
+        "shape_key": "sljit:full-pipeline:filter",
         "template": "benchmark/micro/jit/native_filter.benchmark.in",
         "candidate_shape": "filter",
         "include_in_sweep": True,
@@ -109,7 +109,7 @@ DIAGNOSTIC_FAMILIES = {
         "expected": filter_expected,
     },
     "native_filter_projection_generic": {
-        "shape_key": "sljit:source-prefix:filter-projection-projection",
+        "shape_key": "sljit:full-pipeline:filter-projection-projection",
         "template": "benchmark/micro/jit/native_filter_projection_generic.benchmark.in",
         "candidate_shape": "filter-projection-projection",
         "include_in_sweep": True,

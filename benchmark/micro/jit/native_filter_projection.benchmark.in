@@ -46,7 +46,7 @@ SELECT (
               AND region_execution_form='fused'
               AND policy_decision='auto'
               AND candidate_shape='filter-projection-projection'
-              AND candidate_scope='source_prefix'
+              AND candidate_scope='full_pipeline'
               AND code_size > 0
         )
         WHEN 'force' THEN (
@@ -59,7 +59,7 @@ SELECT (
                    AND region_execution_form='fused'
                    AND policy_decision='force'
                    AND candidate_shape='filter-projection-projection'
-                   AND candidate_scope='source_prefix'
+                   AND candidate_scope='full_pipeline'
                    AND code_size > 0)
                 AND
                 (SELECT count(*) = 0

@@ -480,11 +480,9 @@ public:
 	const JitRegionCandidateTraits &TraceCandidateTraits() const;
 	const JitRegionContract &TraceCandidateContract() const;
 	const vector<LogicalType> &TraceCandidateOutputTypes() const;
-	virtual bool CanExecuteSourcePrefix() const;
 	virtual bool CanExecuteFullPipeline() const;
 	virtual bool RequiresNativeSource() const;
 	virtual bool CanEnterFullPipeline(JitFullPipelineRuntime &runtime, string &blocker);
-	virtual bool TryExecute(DataChunk &input, DataChunk &result, idx_t initial_idx, OperatorResultType &execute_result);
 	virtual bool TryExecuteFullPipeline(JitFullPipelineRuntime &runtime, JitFullPipelineResult &result);
 
 private:

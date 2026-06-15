@@ -175,9 +175,8 @@ public:
 			auto filters = table_filters ? optional_ptr<TableFilterSet>(*table_filters) : GetTableFilters(op);
 			jit_source_config = BuildTableScanJitSourceConfig(op, filters, prepared);
 			InitializeJitNativeTableScanGlobalState(context, op, jit_source_config, jit_native);
-			TableFunctionInitInput input(op.bind_data.get(), op.column_ids, jit_source_config.projection_ids,
-			                             jit_source_config.filters, op.extra_info.sample_options, &op,
-			                             jit_source_config.filter_execution_mode);
+			TableFunctionInitInput input(op.bind_data.get(), op.column_ids, op.projection_ids, filters,
+			                             op.extra_info.sample_options, &op);
 
 			global_state = op.function.init_global(context, input);
 			if (global_state) {
@@ -222,14 +221,9 @@ public:
 	TableScanLocalSourceState(ExecutionContext &context, TableScanGlobalSourceState &gstate,
 	                          const PhysicalTableScan &op) {
 		if (op.function.init_local) {
-			auto filters = gstate.jit_source_config.use_prepared_source_input ? gstate.jit_source_config.filters
-			                                                                  : gstate.GetTableFilters(op);
-			auto &projection_ids = gstate.jit_source_config.use_prepared_source_input
-			                           ? gstate.jit_source_config.projection_ids
-			                           : op.projection_ids;
-			TableFunctionInitInput input(op.bind_data.get(), op.column_ids, projection_ids, filters,
-			                             op.extra_info.sample_options, &op,
-			                             gstate.jit_source_config.filter_execution_mode);
+			auto filters = gstate.GetTableFilters(op);
+			TableFunctionInitInput input(op.bind_data.get(), op.column_ids, op.projection_ids, filters,
+			                             op.extra_info.sample_options, &op);
 			local_state = op.function.init_local(context, input, gstate.global_state.get());
 		}
 		if (gstate.jit_native.enabled) {

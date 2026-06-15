@@ -1361,15 +1361,15 @@ static JitRegionTableScanProtocol BuildJitDescriptorTableScanProtocol(const Phys
 	                                      : scan.GetTypes().size();
 	result.column_ids = BuildJitDescriptorColumnIndexList(scan.column_ids);
 	result.projection_ids = scan.projection_ids;
-	result.source_prefix_input_column_count = scan.column_ids.size();
-	result.source_prefix_input_types = BuildJitDescriptorTableScanSourceInputTypes(scan);
-	result.source_prefix_output_projection_map = BuildJitDescriptorTableScanOutputProjectionMap(scan);
-	result.source_prefix_filter_column_map = BuildJitDescriptorTableScanFilterColumnMap(scan);
-	result.source_prefix_requires_unfiltered_input = !result.source_prefix_filter_column_map.empty();
-	result.source_prefix_filter_prune_required =
-	    result.source_prefix_requires_unfiltered_input && scan.function.filter_prune && !scan.projection_ids.empty();
-	result.source_prefix_filter_takeover_supported =
-	    result.source_prefix_requires_unfiltered_input && scan.function.filter_pushdown;
+	result.native_source_input_column_count = scan.column_ids.size();
+	result.native_source_input_types = BuildJitDescriptorTableScanSourceInputTypes(scan);
+	result.native_source_output_projection_map = BuildJitDescriptorTableScanOutputProjectionMap(scan);
+	result.native_source_filter_column_map = BuildJitDescriptorTableScanFilterColumnMap(scan);
+	result.native_source_requires_unfiltered_input = !result.native_source_filter_column_map.empty();
+	result.native_source_filter_prune_required =
+	    result.native_source_requires_unfiltered_input && scan.function.filter_prune && !scan.projection_ids.empty();
+	result.native_source_filter_takeover_supported =
+	    result.native_source_requires_unfiltered_input && scan.function.filter_pushdown;
 	result.projection_pushdown = scan.function.projection_pushdown;
 	result.filter_pushdown = scan.function.filter_pushdown;
 	result.filter_prune = scan.function.filter_prune;
@@ -1394,16 +1394,16 @@ static string BuildJitDescriptorTableScanSourceBoundaryReason(const PhysicalTabl
 	result += ";column_ids=" + std::to_string(protocol.column_id_count);
 	result += ";projection_pushdown=" + JitDescriptorBool(protocol.projection_pushdown);
 	result += ";projected_columns=" + std::to_string(protocol.projected_column_count);
-	result += ";source_prefix_input_columns=" + std::to_string(protocol.source_prefix_input_column_count);
-	result += ";source_prefix_input_types=" + BuildJitDescriptorLogicalTypeList(protocol.source_prefix_input_types);
-	result += ";source_prefix_output_projection_map=" + BuildJitDescriptorIdxList(protocol.source_prefix_output_projection_map);
-	result += ";source_prefix_filter_column_map=" + BuildJitDescriptorIdxList(protocol.source_prefix_filter_column_map);
-	result += ";source_prefix_requires_unfiltered_input=" +
-	          JitDescriptorBool(protocol.source_prefix_requires_unfiltered_input);
-	result += ";source_prefix_filter_prune_required=" +
-	          JitDescriptorBool(protocol.source_prefix_filter_prune_required);
-	result += ";source_prefix_filter_takeover_supported=" +
-	          JitDescriptorBool(protocol.source_prefix_filter_takeover_supported);
+	result += ";native_source_input_columns=" + std::to_string(protocol.native_source_input_column_count);
+	result += ";native_source_input_types=" + BuildJitDescriptorLogicalTypeList(protocol.native_source_input_types);
+	result += ";native_source_output_projection_map=" + BuildJitDescriptorIdxList(protocol.native_source_output_projection_map);
+	result += ";native_source_filter_column_map=" + BuildJitDescriptorIdxList(protocol.native_source_filter_column_map);
+	result += ";native_source_requires_unfiltered_input=" +
+	          JitDescriptorBool(protocol.native_source_requires_unfiltered_input);
+	result += ";native_source_filter_prune_required=" +
+	          JitDescriptorBool(protocol.native_source_filter_prune_required);
+	result += ";native_source_filter_takeover_supported=" +
+	          JitDescriptorBool(protocol.native_source_filter_takeover_supported);
 	result += ";filter_pushdown=" + JitDescriptorBool(protocol.filter_pushdown);
 	result += ";filter_prune=" + JitDescriptorBool(protocol.filter_prune);
 	result += ";filter_count=" + std::to_string(protocol.filter_count);

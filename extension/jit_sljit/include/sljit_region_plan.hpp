@@ -15,10 +15,6 @@
 
 namespace duckdb {
 
-static constexpr const char *SLJIT_SOURCE_PREFIX_FILTER_PROJECTION_SHAPE =
-    "sljit:source-prefix:filter-projection";
-static constexpr const char *SLJIT_SOURCE_PREFIX_PROJECTION_CHAIN_SHAPE = "sljit:source-prefix:projection-chain";
-
 enum class SljitNativeRegionOpKind : uint8_t {
 	FILTER,
 	PROJECTION,

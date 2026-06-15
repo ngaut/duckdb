@@ -2,7 +2,7 @@
 
 These benchmarks measure specific SLJIT generated-body shapes. They are not
 broad JIT benchmarks, and a body speedup is not by itself proof that a whole
-source-prefix region should be admitted while the source is still a DuckDB-owned
+native-source region should be admitted while the source is still a DuckDB-owned
 source boundary.
 
 The admitted-shape templates are self-checking. Their `result_query` verifies
@@ -12,9 +12,9 @@ events and previous hot runs cannot mask or satisfy the measured-query shape
 proof:
 
 - `off` must produce no compiled region event;
-- `auto` must keep source-boundary source-prefix regions non-fused, even when a
+- `auto` must keep source-boundary native-source regions non-fused, even when a
   body shape has a non-negative admission score;
-- `force` must compile only native fused source-prefix or full-pipeline regions
+- `force` must compile only native fused native-source or full-pipeline regions
   that have executable code.
 
 This keeps benchmark results tied to the region shape they claim to measure.
@@ -97,10 +97,10 @@ shape/runtime honesty.
 `native_filter_projection_*.benchmark` measures the SLJIT generic native
 filter/projection region:
 
-- `sljit:source-prefix:filter-projection`
+- `sljit:full-pipeline:filter-projection`
 - one generated integer filter
 - one generated integer projection
-- native table-scan source-prefix execution plus normal aggregate boundary
+- native table-scan native-source execution plus normal aggregate boundary
 - single-threaded execution
 
 The template materializes a table source intentionally. DuckDB-owned range
@@ -129,7 +129,7 @@ build/release/benchmark/benchmark_runner --disable-timeout benchmark/micro/jit/n
 The exact values are machine-dependent. Do not maintain benchmark timing tables
 by hand in this README; `micro_jit_benchmark.py` writes the current repeated-run
 timings and medians to `summary.csv`. The invariant is that `force` must compile
-only native fused fragments and must leave source-boundary source-prefix regions
+only native fused fragments and must leave source-boundary native-source regions
 non-fused, the same as `auto`.
 
 ## Native Projection Chain
@@ -137,7 +137,7 @@ non-fused, the same as `auto`.
 `native_projection_chain_*.benchmark` measures the SLJIT projection-chain
 generated body:
 
-- `sljit:source-prefix:projection-chain`
+- `sljit:full-pipeline:projection-chain`
 - adjacent generated integer projections that backend lowering composes into
   one generated projection
 - normal DuckDB scan and aggregate boundaries
@@ -164,15 +164,15 @@ build/release/benchmark/benchmark_runner --disable-timeout benchmark/micro/jit/n
 
 ## Native Projection
 
-`native_projection_*.benchmark` measures a diagnostic SLJIT source-prefix shape:
+`native_projection_*.benchmark` measures a diagnostic SLJIT native-source shape:
 
-- `sljit:source-prefix:projection`
+- `sljit:full-pipeline:projection`
 - one generated integer projection followed by a native typed reference projection
 - normal DuckDB scan and aggregate boundaries
 - single-threaded execution
 
 This shape is not auto-admitted yet. The diagnostic cardinality sweep is the
-place to study whether larger source-prefix projection kernels become
+place to study whether larger native-source projection kernels become
 profitable, but promotion requires a stable threshold benchmark proof and a
 backend admission rule.
 
@@ -194,12 +194,12 @@ build/release/benchmark/benchmark_runner --disable-timeout benchmark/micro/jit/n
 
 Projection-only, filter-only, and generic multi-op regions have separate
 benchmark files but no `auto` admission rule unless their own threshold
-measurement proves a win. Backend lowering assigns deterministic source-prefix
-shape keys such as `sljit:source-prefix:projection`,
-`sljit:source-prefix:filter`, and
-`sljit:source-prefix:filter-projection-projection` so skipped regions remain attributable.
-Native table-scan source-prefix filter/projection is treated the same way:
-`sljit:source-prefix:filter-projection` is a capability/diagnostic key, not an
+measurement proves a win. Backend lowering assigns deterministic native-source
+shape keys such as `sljit:full-pipeline:projection`,
+`sljit:full-pipeline:filter`, and
+`sljit:full-pipeline:filter-projection-projection` so skipped regions remain attributable.
+Native table-scan native-source filter/projection is treated the same way:
+`sljit:full-pipeline:filter-projection` is a capability/diagnostic key, not an
 `auto` key, until a repeated production benchmark proves the whole region wins.
 
 ## Native Full-Pipeline Decimal Projection Ungrouped SUM
