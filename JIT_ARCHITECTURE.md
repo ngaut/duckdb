@@ -1039,8 +1039,8 @@ candidate includes a boundary. For SLJIT, examples are
 `sljit:source-prefix:filter-projection:table-scan-source` for a maximal native
 prefix and
 `sljit:full-pipeline:filter-projection-sink:table-scan-source+ungrouped-aggregate-update`
-for source-to-sink ownership. The current planner does not emit middle-interval
-or sink-suffix admission families. Aggregate sinks must distinguish
+for source-to-sink ownership. The current planner does not emit interior or
+sink-only admission families. Aggregate sinks must distinguish
 `hash-aggregate-update`, `perfect-hash-aggregate-update`, and
 `ungrouped-aggregate-update`. This keeps `auto` admission misses cost-rankable by
 state protocol instead of collapsing every sink to a generic sink label.
@@ -2514,7 +2514,7 @@ limited:
 
 - candidate 0 spans the full pipeline invocation boundary; if that boundary
   starts at a source and reaches a sink, it is owned by `full_pipeline`, not by
-  the source-prefix or sink-suffix ABI;
+  any source-only or sink-only ABI;
 - candidate 1 exists only when the prefix before the first hard boundary is a
   maximal native source/filter/projection span and contains real generated work.
   It reports `source_prefix` and resumes the reference executor at the exact

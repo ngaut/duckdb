@@ -1435,7 +1435,7 @@ def verify_source_boundary_summary(
                 "source_prefix_filter_column_map",
                 "source_prefix_requires_unfiltered_input",
                 "source_prefix_filter_prune_required",
-                "source_prefix_filter_split_supported",
+                "source_prefix_filter_takeover_supported",
                 "projected_columns",
                 "projection_pushdown",
                 "filter_pushdown",
@@ -1459,7 +1459,7 @@ def verify_source_boundary_summary(
             for field in (
                 "source_prefix_requires_unfiltered_input",
                 "source_prefix_filter_prune_required",
-                "source_prefix_filter_split_supported",
+                "source_prefix_filter_takeover_supported",
                 "projection_pushdown",
                 "filter_pushdown",
                 "filter_prune",
@@ -1790,7 +1790,7 @@ def source_boundary_row_key(row: dict) -> tuple:
         row["source_prefix_filter_column_map"],
         row["source_prefix_requires_unfiltered_input"],
         row["source_prefix_filter_prune_required"],
-        row["source_prefix_filter_split_supported"],
+        row["source_prefix_filter_takeover_supported"],
         row["projected_columns"],
         row["projection_pushdown"],
         row["filter_pushdown"],
@@ -3185,7 +3185,7 @@ def verify_source_boundary_features(
         "source_prefix_filter_column_map=",
         "source_prefix_requires_unfiltered_input=",
         "source_prefix_filter_prune_required=",
-        "source_prefix_filter_split_supported=",
+        "source_prefix_filter_takeover_supported=",
         "projection_pushdown=",
         "projected_columns=",
         "filter_pushdown=",
@@ -3215,7 +3215,7 @@ def verify_source_boundary_features(
         "source_prefix_filter_column_map=",
         "source_prefix_requires_unfiltered_input=",
         "source_prefix_filter_prune_required=",
-        "source_prefix_filter_split_supported=",
+        "source_prefix_filter_takeover_supported=",
     )
     required_scan_helper_ir_features = ("execution=duckdb-source-boundary",)
     required_scan_native_ir_features = ("execution=native-source",)

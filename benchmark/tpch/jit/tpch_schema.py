@@ -524,7 +524,7 @@ SOURCE_BOUNDARY_COMMON_FIELDS = (
     "source_prefix_filter_column_map",
     "source_prefix_requires_unfiltered_input",
     "source_prefix_filter_prune_required",
-    "source_prefix_filter_split_supported",
+    "source_prefix_filter_takeover_supported",
     "projected_columns",
     "projection_pushdown",
     "filter_pushdown",
