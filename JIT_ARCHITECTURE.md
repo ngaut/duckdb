@@ -857,17 +857,19 @@ analysis may explain why a candidate is blocked, but it cannot override
 while the core stage plan still contains a source-boundary, executor-fallback, or
 missing-protocol stage, `JitManager` records the candidate as unsupported and
 does not call backend code generation. This keeps fake fusion, non-fused source
-prefixes, and stale shape-specific backends from reaching runtime.
+prefixes, and shape-only backend shortcuts from reaching runtime.
 
 Pipeline shape semantic boundary labels are part of the contract. Plain `scan`,
-`sink`, `operator-protocol-boundary`, `operator-fallback`, and `expression-fallback`
-describe DuckDB-owned execution boundaries or unsupported regions. By contrast,
-`source-native`, `operator-native`, and `sink-native` mean core lowering has
-found a ready native protocol contract for that source, operator, or sink. Those
-native protocol labels must not be counted as capability gaps; if a backend
-cannot lower the surrounding candidate, the missing fact belongs in the
-candidate contract, stage plan, or backend blocker, not by relabeling a native
-protocol boundary as helper/fallback.
+`sink`, `source-boundary`, `source-executor-fallback`,
+`source-missing-protocol`, `operator-protocol-boundary`, `operator-fallback`, and
+`expression-fallback` describe DuckDB-owned execution boundaries, missing source
+protocols, or unsupported regions. By contrast, `source-native`,
+`operator-native`, and `sink-native` mean core lowering has found a ready native
+protocol contract for that source, operator, or sink. Those native protocol
+labels must not be counted as capability gaps; if a backend cannot lower the
+surrounding candidate, the missing fact belongs in the candidate contract, stage
+plan, or backend blocker, not by relabeling a native protocol boundary as
+helper/fallback.
 
 Backends must not call whole DuckDB executors from generated code.
 Typed helper stubs are acceptable only when their signatures are part of the
@@ -939,8 +941,10 @@ inventory gate described above. It may skip a pipeline before full typed IR only
 when the backend inventory rule proves no admitted measured shape can be
 reached. Query roots, CTAS, profiling wrappers, materialization sinks, and
 stateful source boundaries can change the outer pipeline shape while leaving an
-inner fused candidate valid, so the inventory gate must be conservative: false
-positives are cheap, false negatives are correctness and performance bugs.
+inner fused candidate valid, so the inventory gate must be strict: it may reject
+only when every admitted candidate family is impossible from inventory facts
+alone. If the inventory cannot prove that, full typed IR lowering must run and
+the candidate selector decides.
 
 The second level is candidate admission after full typed IR lowering. Its
 long-term invariant is:
@@ -1017,8 +1021,8 @@ masquerade as an admitted measured projection-chain family.
 
 Backend auto admission is table-driven. Each admitted family declares its
 backend shape key, measured minimum cardinality, proof artifact, candidate fact
-predicate, and conservative inventory precheck predicate in one backend-owned
-rule table. The candidate predicate must consume `JitRegionSignature`,
+predicate, and fast inventory precheck predicate in one backend-owned rule
+table. The candidate predicate must consume `JitRegionSignature`,
 `JitRegionCandidateTraits`, and `JitRegionContract`; the inventory predicate may
 only use `JitRegionPipelineInventory`. Neither predicate may parse rendered
 pipeline-shape text. This keeps policy additions local and prevents candidate
@@ -1114,7 +1118,8 @@ a hash join probe, operator protocol boundary, fallback operator, or upstream
 stateful operator span without a runtime protocol that can resume that state.
 Those shapes belong either in one `full_pipeline` candidate or in the reference
 executor. This keeps backend analysis focused on executable ownership instead of
-recording stale "resume protocol missing" candidates that can never run.
+recording non-executable "resume protocol missing" diagnostics as candidate
+success.
 
 The canonical full-pipeline missing-sink reason is
 `full pipeline sink requires native sink or operator update protocol`; backend
@@ -1212,10 +1217,9 @@ other native sink updates: `region_execution_form=fused`,
 `kernel=generic-runtime-loop`, and no
 `operator-fusion-gap:native-operator-codegen-missing`. The event must not retain
 lookup partial-ownership contracts; it is a native protocol success, not a
-source-boundary or partial operator success. It also must not report the stale "lookup ready but SLJIT
-lowering missing" blocker. Unsupported grouped hash shapes should name the
-actual missing piece, such as no aggregate payload bindings or an unsupported
-aggregate update function.
+source-boundary or partial operator success. Unsupported grouped hash shapes
+should name the actual missing piece, such as no aggregate payload bindings or
+an unsupported aggregate update function, not a generic lowering-missing blocker.
 
 Perfect-hash aggregate now has a native grouped-state update protocol, not a DuckDB sink payload callback.
 `JitBindNativePerfectHashAggregateStates`
@@ -1466,7 +1470,7 @@ Admission inputs should include:
 - minimum native work and executor boundary crossings removed;
 - boundary conversion cost class;
 - compile-cost estimate;
-- runtime-cost estimate or conservative speedup class;
+- runtime-cost estimate or measured speedup class;
 - proof identifier pointing to a benchmark or measured profile.
 
 The v1 auto policy must be deterministic for a given plan and settings.
@@ -2119,8 +2123,8 @@ that may appear in the whole-region IR text. Ownership values are
 `generated-ir`, `native-protocol`, `source-boundary`, `executor-boundary`, and
 `missing-protocol`. A region is `native_fusion_ready=true` only when its
 executable candidate has no executor boundary, no source-boundary ownership boundary, and no
-missing operator protocol. This makes legacy scope labels reporting-only: core
-selection, prepared-source contracts, runtime ABI selection, and SLJIT shape
+missing operator protocol. Scope labels are observability-only: core selection,
+prepared-source contracts, runtime ABI selection, and SLJIT shape
 classification must derive source/full-pipeline behavior from the contract, not
 from scope-name folklore. This is the long-term path from non-fused boundary diagnostics to
 operator-aware fused regions: table scans, hash-join state scans, grouped
