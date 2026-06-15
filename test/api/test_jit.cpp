@@ -336,13 +336,13 @@ public:
 		                                        "contract-test-auto-non-fused-compiled");
 	}
 
-	bool GetAutoAdmissionRule(JitCompileTarget target, const string &shape_key,
-	                          JitAutoAdmissionRule &rule) const override {
-		if (target != JitCompileTarget::REGION || shape_key != "contract:auto-non-fused") {
+	bool GetAutoAdmissionRule(JitCompileTarget target, const JitRegionCandidate &,
+	                          const JitRegionLoweringPlan &lowering_plan, JitAutoAdmissionRule &rule) const override {
+		if (target != JitCompileTarget::REGION || lowering_plan.shape_key != "contract:auto-non-fused") {
 			return false;
 		}
 		rule.target = target;
-		rule.shape_key = shape_key;
+		rule.shape_key = lowering_plan.shape_key;
 		rule.min_cardinality = 0;
 		rule.proof = "contract:auto-non-fused-proof";
 		return true;
@@ -589,17 +589,17 @@ public:
 		                                        "contract-test-auto-selected-region");
 	}
 
-	bool GetAutoAdmissionRule(JitCompileTarget target, const string &shape_key,
-	                          JitAutoAdmissionRule &rule) const override {
+	bool GetAutoAdmissionRule(JitCompileTarget target, const JitRegionCandidate &candidate,
+	                          const JitRegionLoweringPlan &lowering_plan, JitAutoAdmissionRule &rule) const override {
 		if (target != JitCompileTarget::REGION) {
 			return false;
 		}
-		if (!StringUtil::Contains(shape_key, "projection")) {
+		if (!StringUtil::Contains(candidate.shape, "projection")) {
 			return false;
 		}
 		rule.target = target;
-		rule.shape_key = shape_key;
-		rule.min_cardinality = StringUtil::Contains(shape_key, "projection-projection") ? 1 : 0;
+		rule.shape_key = lowering_plan.shape_key;
+		rule.min_cardinality = StringUtil::Contains(candidate.shape, "projection-projection") ? 1 : 0;
 		rule.proof = "contract:auto-selection";
 		return true;
 	}

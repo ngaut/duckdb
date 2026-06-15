@@ -556,8 +556,8 @@ public:
 	                                      bool explain, JitAdmissionInfo &info, string &reason) const;
 	virtual bool MayHaveAutoAdmissionRule(JitCompileTarget target, const JitRegionCandidate &candidate,
 	                                      JitAdmissionInfo &info, string &reason) const;
-	virtual bool GetAutoAdmissionRule(JitCompileTarget target, const string &shape_key,
-	                                  JitAutoAdmissionRule &rule) const;
+	virtual bool GetAutoAdmissionRule(JitCompileTarget target, const JitRegionCandidate &candidate,
+	                                  const JitRegionLoweringPlan &lowering_plan, JitAutoAdmissionRule &rule) const;
 };
 
 } // namespace duckdb

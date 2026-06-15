@@ -1201,6 +1201,8 @@ def verify_region_selection_contract(root: Path) -> None:
             "MayHaveAutoAdmissionRule(JitCompileTarget target, const JitRegionPipelineInventory",
             "bool explain",
             "MayHaveAutoAdmissionRule(JitCompileTarget target, const JitRegionCandidate",
+            "GetAutoAdmissionRule(JitCompileTarget target, const JitRegionCandidate &candidate",
+            "const JitRegionLoweringPlan &lowering_plan",
         ],
     )
     assert_required_text(
@@ -1209,6 +1211,23 @@ def verify_region_selection_contract(root: Path) -> None:
         [
             "JitBackend::MayHaveAutoAdmissionRule(JitCompileTarget, const JitRegionPipelineInventory",
             "JitBackend::MayHaveAutoAdmissionRule(JitCompileTarget, const JitRegionCandidate",
+            "JitBackend::GetAutoAdmissionRule(JitCompileTarget, const JitRegionCandidate &",
+        ],
+    )
+    assert_no_text(
+        root,
+        [
+            Path("src/include/duckdb/execution/jit/runtime.hpp"),
+            Path("src/execution/jit_runtime.cpp"),
+            Path("src/execution/jit.cpp"),
+            Path("extension/jit_sljit/sljit_backend.cpp"),
+        ],
+        [
+            "GetAutoAdmissionRule(JitCompileTarget target, const string &shape_key",
+            "GetAutoAdmissionRule(JitCompileTarget, const string &",
+            "backend.GetAutoAdmissionRule(JitCompileTarget::REGION, lowering_plan.shape_key",
+            "TryGetSljitAutoAdmissionRule",
+            "if (shape_key != entry.",
         ],
     )
     assert_required_text(
@@ -1747,8 +1766,9 @@ def verify_region_selection_contract(root: Path) -> None:
         root,
         "extension/jit_sljit/sljit_backend.cpp",
         [
-            "SLJIT_AUTO_ADMISSION_RULES",
             "SLJIT_AUTO_ADMISSION_FAMILIES",
+            "SljitAutoAdmissionRuleSpec rule",
+            "SetSljitAutoAdmissionRule",
             "candidate.traits.filter_count",
             "candidate.traits.projection_count",
             "candidate.traits.operator_count",
@@ -3159,8 +3179,10 @@ def verify_backend_registration_boundary(root: Path) -> None:
         [
             "#include \"duckdb/execution/jit/registration.hpp\"",
             "MayHaveAutoAdmissionRule",
-            "SLJIT_AUTO_ADMISSION_RULES",
             "SLJIT_AUTO_ADMISSION_FAMILIES",
+            "SljitAutoAdmissionRuleSpec rule",
+            "SetSljitAutoAdmissionRule",
+            "rule.shape_key = entry.admission_key",
             "BuildSljitRegionCandidateShapeKey(candidate)",
             "candidate.traits.has_table_scan_source",
             "candidate.traits.filter_count",

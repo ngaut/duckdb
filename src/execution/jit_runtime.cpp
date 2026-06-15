@@ -610,7 +610,8 @@ bool JitBackend::MayHaveAutoAdmissionRule(JitCompileTarget, const JitRegionCandi
 	return true;
 }
 
-bool JitBackend::GetAutoAdmissionRule(JitCompileTarget, const string &, JitAutoAdmissionRule &) const {
+bool JitBackend::GetAutoAdmissionRule(JitCompileTarget, const JitRegionCandidate &, const JitRegionLoweringPlan &,
+                                      JitAutoAdmissionRule &) const {
 	return false;
 }
 

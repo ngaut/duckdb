@@ -16,27 +16,16 @@
 namespace duckdb {
 
 struct SljitAutoAdmissionRuleSpec {
-	const char *shape_key;
+	const char *admission_key;
 	idx_t min_cardinality;
 	const char *proof;
 };
 
-static constexpr SljitAutoAdmissionRuleSpec SLJIT_AUTO_ADMISSION_RULES[] = {
-    {SLJIT_SOURCE_PREFIX_FILTER_PROJECTION_SHAPE, 1000000, "benchmark/micro/jit/native_filter_projection"},
-    {SLJIT_SOURCE_PREFIX_PROJECTION_CHAIN_SHAPE, 1000000, "benchmark/micro/jit/native_projection_chain"}};
-
-static bool TryGetSljitAutoAdmissionRule(const string &shape_key, JitAutoAdmissionRule &rule) {
-	for (auto &entry : SLJIT_AUTO_ADMISSION_RULES) {
-		if (shape_key != entry.shape_key) {
-			continue;
-		}
-		rule.target = JitCompileTarget::REGION;
-		rule.shape_key = entry.shape_key;
-		rule.min_cardinality = entry.min_cardinality;
-		rule.proof = entry.proof;
-		return true;
-	}
-	return false;
+static void SetSljitAutoAdmissionRule(const SljitAutoAdmissionRuleSpec &entry, JitAutoAdmissionRule &rule) {
+	rule.target = JitCompileTarget::REGION;
+	rule.shape_key = entry.admission_key;
+	rule.min_cardinality = entry.min_cardinality;
+	rule.proof = entry.proof;
 }
 
 static bool IsSljitNativeSourceFilterProjectionCandidate(const JitRegionCandidate &candidate) {
@@ -117,15 +106,17 @@ static bool IsSljitProjectionChainInventory(const JitRegionPipelineInventory &in
 }
 
 struct SljitAutoAdmissionFamily {
-	const char *rule_shape_key;
+	SljitAutoAdmissionRuleSpec rule;
 	bool (*candidate_matches)(const JitRegionCandidate &candidate);
 	bool (*inventory_may_match)(const JitRegionPipelineInventory &inventory);
 };
 
 static constexpr SljitAutoAdmissionFamily SLJIT_AUTO_ADMISSION_FAMILIES[] = {
-    {SLJIT_SOURCE_PREFIX_FILTER_PROJECTION_SHAPE, IsSljitSourcePrefixFilterProjectionCandidate,
+    {{SLJIT_SOURCE_PREFIX_FILTER_PROJECTION_SHAPE, 1000000, "benchmark/micro/jit/native_filter_projection"},
+     IsSljitSourcePrefixFilterProjectionCandidate,
      IsSljitFilterProjectionInventory},
-    {SLJIT_SOURCE_PREFIX_PROJECTION_CHAIN_SHAPE, IsSljitSourcePrefixProjectionChainCandidate,
+    {{SLJIT_SOURCE_PREFIX_PROJECTION_CHAIN_SHAPE, 1000000, "benchmark/micro/jit/native_projection_chain"},
+     IsSljitSourcePrefixProjectionChainCandidate,
      IsSljitProjectionChainInventory}};
 
 static bool TryGetSljitCandidateAutoAdmissionRule(const JitRegionCandidate &candidate, JitAutoAdmissionRule &rule) {
@@ -133,7 +124,8 @@ static bool TryGetSljitCandidateAutoAdmissionRule(const JitRegionCandidate &cand
 		if (!family.candidate_matches(candidate)) {
 			continue;
 		}
-		return TryGetSljitAutoAdmissionRule(family.rule_shape_key, rule);
+		SetSljitAutoAdmissionRule(family.rule, rule);
+		return true;
 	}
 	return false;
 }
@@ -284,12 +276,12 @@ public:
 		return false;
 	}
 
-	bool GetAutoAdmissionRule(JitCompileTarget target, const string &shape_key,
-	                          JitAutoAdmissionRule &rule) const override {
+	bool GetAutoAdmissionRule(JitCompileTarget target, const JitRegionCandidate &candidate,
+	                          const JitRegionLoweringPlan &, JitAutoAdmissionRule &rule) const override {
 		if (target != JitCompileTarget::REGION) {
 			return false;
 		}
-		return TryGetSljitAutoAdmissionRule(shape_key, rule);
+		return TryGetSljitCandidateAutoAdmissionRule(candidate, rule);
 	}
 };
 

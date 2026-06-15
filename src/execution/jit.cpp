@@ -364,9 +364,10 @@ static JitAdmissionDecision AdmitJitRegion(const JitBackend &backend, JitPolicyM
 	auto estimated_work = candidate.estimated_cardinality;
 	JitAutoAdmissionRule admission_rule;
 	auto has_admission_rule =
-	    backend.GetAutoAdmissionRule(JitCompileTarget::REGION, lowering_plan.shape_key, admission_rule);
+	    backend.GetAutoAdmissionRule(JitCompileTarget::REGION, candidate, lowering_plan, admission_rule);
 	decision.info.rule_present = has_admission_rule;
 	if (has_admission_rule) {
+		decision.info.shape_key = admission_rule.shape_key;
 		decision.info.min_cardinality = admission_rule.min_cardinality;
 		decision.info.proof = admission_rule.proof;
 		decision.info.has_score = true;
@@ -378,7 +379,7 @@ static JitAdmissionDecision AdmitJitRegion(const JitBackend &backend, JitPolicyM
 		decision.reason = "jit_policy=" + string(JitPolicyModeToString(policy)) +
 		                  " skips region kernel because region execution form is not fused";
 		decision.reason += ";region_execution_form=" + string(JitRegionExecutionFormToString(region_execution_form));
-		decision.reason += ";requires=fused;shape=" + lowering_plan.shape_key;
+		decision.reason += ";requires=fused;shape=" + decision.info.shape_key;
 		decision.reason += ";" + lowering_plan.EventReason();
 		if (has_admission_rule) {
 			decision.reason += ";min_cardinality=" + std::to_string(admission_rule.min_cardinality);
@@ -397,14 +398,14 @@ static JitAdmissionDecision AdmitJitRegion(const JitBackend &backend, JitPolicyM
 	D_ASSERT(policy == JitPolicyMode::AUTO);
 	if (has_admission_rule && estimated_work >= admission_rule.min_cardinality) {
 		decision.compile = true;
-		decision.reason = "jit_policy=auto admits shape=" + lowering_plan.shape_key +
+		decision.reason = "jit_policy=auto admits shape=" + decision.info.shape_key +
 		                  ";estimated_cardinality=" + std::to_string(estimated_work) + ";proof=" + admission_rule.proof;
 		return decision;
 	}
 
 	decision.reason = "jit_policy=auto skips region kernel without admitted performance proof";
-	if (!lowering_plan.shape_key.empty()) {
-		decision.reason += ": shape=" + lowering_plan.shape_key;
+	if (!decision.info.shape_key.empty()) {
+		decision.reason += ": shape=" + decision.info.shape_key;
 	}
 	decision.reason += ";estimated_cardinality=" + std::to_string(estimated_work);
 	if (has_admission_rule) {
