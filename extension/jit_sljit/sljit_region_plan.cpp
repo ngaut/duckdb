@@ -249,17 +249,26 @@ static bool SljitNativeRegionHasGenericExecutableLoop(const SljitNativeRegionPla
 		return false;
 	}
 	const bool owns_sink = JitRegionABIOwnsSink(contract.abi);
+	const bool generates_code = SljitNativeRegionGeneratesCode(region);
+	bool has_native_sink_protocol = false;
 	for (idx_t op_idx = 0; op_idx < region.ops.size(); op_idx++) {
 		auto &op = region.ops[op_idx];
 		if (SljitNativeRegionOpIsTransform(op)) {
 			continue;
 		}
 		if (SljitNativeRegionOpIsNativeSink(op)) {
-			return owns_sink && op_idx + 1 == region.ops.size();
+			if (!owns_sink || op_idx + 1 != region.ops.size()) {
+				return false;
+			}
+			has_native_sink_protocol = true;
+			continue;
 		}
 		return false;
 	}
-	return !owns_sink;
+	if (owns_sink) {
+		return has_native_sink_protocol;
+	}
+	return generates_code;
 }
 
 static JitRegionExecutionForm ClassifySljitRegionExecutionForm(const SljitNativeRegionPlan &region,

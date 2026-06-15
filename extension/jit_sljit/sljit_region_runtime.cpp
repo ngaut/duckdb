@@ -171,7 +171,7 @@ public:
 	}
 
 	bool HasExecutableBody() const override {
-		return !ops.empty();
+		return CodeSize() > 0 || HasNativeProtocolBody();
 	}
 
 	bool CanExecuteSourcePipeline() const override {
@@ -258,6 +258,15 @@ public:
 	}
 
 private:
+	bool HasNativeProtocolBody() const {
+		for (auto &op : ops) {
+			if (op.kind == SljitNativeRegionOpKind::HASH_JOIN_BUILD) {
+				return true;
+			}
+		}
+		return false;
+	}
+
 	bool CanBindNativeOperators(JitFullPipelineRuntime &runtime, string &blocker) {
 		for (idx_t op_idx = 0; op_idx < ops.size(); op_idx++) {
 			auto &op = ops[op_idx];

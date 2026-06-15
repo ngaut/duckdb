@@ -2223,7 +2223,7 @@ TEST_CASE("JIT auto admission only compiles fused region forms", "[api][jit]") {
 		REQUIRE(event.compile_time_us == 0);
 		REQUIRE(event.code_size == 0);
 		REQUIRE(StringUtil::Contains(event.reason, "region execution form is not fused"));
-			REQUIRE(StringUtil::Contains(event.reason, "region_execution_form=none"));
+		REQUIRE(StringUtil::Contains(event.reason, "region_execution_form=none"));
 		REQUIRE(StringUtil::Contains(event.reason, "requires=fused"));
 	}
 	REQUIRE(found_non_fused_auto_skip);
@@ -5285,22 +5285,16 @@ TEST_CASE("JIT dump IR and execution mode expose backend honesty", "[api][jit]")
 		if (event.backend_name != "sljit" || event.target != "region") {
 			continue;
 		}
-		if (event.status == "compiled" && event.execution_mode == "native" && event.code_size == 0) {
-			REQUIRE(event.region_execution_form == "fused");
-			REQUIRE(StringUtil::Contains(event.reason, "kernel=generic-runtime-loop"));
-			REQUIRE(StringUtil::Contains(event.reason, "execution:native-sljit-region-"));
-		}
 		if (StringUtil::Contains(event.reason, "region-lowering:native=0,fallback=") &&
 		    StringUtil::Contains(event.reason, "pass-through=") &&
 		    StringUtil::Contains(event.reason, "op0:PROJECTION:pass-through:typed reference projection pass-through")) {
 			found_reference_pass_through = true;
 			REQUIRE(event.code_size == 0);
-			if (event.status == "compiled") {
-				REQUIRE(event.execution_mode == "native");
-				REQUIRE(event.region_execution_form == "fused");
-			} else {
-				REQUIRE(event.execution_mode == "unsupported");
-			}
+			REQUIRE(event.status == "unsupported");
+			REQUIRE(event.execution_mode == "unsupported");
+			REQUIRE(event.region_execution_form == "none");
+			REQUIRE_FALSE(StringUtil::Contains(event.reason, "kernel=generic-runtime-loop"));
+			REQUIRE_FALSE(StringUtil::Contains(event.reason, "execution:native-sljit-region-"));
 		}
 	}
 	REQUIRE(found_reference_pass_through);
