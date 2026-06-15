@@ -86,7 +86,7 @@ SOURCE_BOUNDARY_MARKERS = (
     ("stateful_source_fallback", "DuckDB hash join state scan source does not produce rows"),
     ("stateful_source_fallback", "DuckDB aggregate source state protocol missing"),
     ("stateful_source_fallback", "DuckDB stateful source operator fallback boundary"),
-    ("source_getdata_helper", "DuckDB source GetData helper boundary"),
+    ("duckdb_source_boundary", "DuckDB source boundary"),
 )
 SOURCE_BOUNDARY_FIELD_NAMES = (
     r"function|operator|fields|output_columns|returned_columns|column_ids|column_id_bindings|projection_ids|"
@@ -4024,6 +4024,7 @@ SELECT
     candidate_executor_boundary_free,
     candidate_native_fusion_ready,
     candidate_generated_operator_count,
+    candidate_source_boundary_count,
     candidate_typed_helper_boundary_count,
     candidate_executor_boundary_count,
     candidate_missing_protocol_count,

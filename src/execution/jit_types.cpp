@@ -166,8 +166,8 @@ const char *JitRegionSourceExecutionKindToString(JitRegionSourceExecutionKind ki
 	switch (kind) {
 	case JitRegionSourceExecutionKind::NONE:
 		return "none";
-	case JitRegionSourceExecutionKind::DUCKDB_GETDATA_HELPER:
-		return "duckdb-getdata-helper";
+	case JitRegionSourceExecutionKind::DUCKDB_SOURCE_BOUNDARY:
+		return "duckdb-source-boundary";
 	case JitRegionSourceExecutionKind::EXECUTOR_FALLBACK:
 		return "executor-fallback";
 	case JitRegionSourceExecutionKind::NATIVE_SOURCE:
@@ -353,6 +353,8 @@ const char *JitRegionOwnershipKindToString(JitRegionOwnershipKind kind) {
 		return "generated-ir";
 	case JitRegionOwnershipKind::NATIVE_PROTOCOL:
 		return "native-protocol";
+	case JitRegionOwnershipKind::SOURCE_BOUNDARY:
+		return "source-boundary";
 	case JitRegionOwnershipKind::TYPED_HELPER:
 		return "typed-helper";
 	case JitRegionOwnershipKind::EXECUTOR_BOUNDARY:
@@ -401,6 +403,8 @@ const char *JitRegionStageExecutionKindToString(JitRegionStageExecutionKind kind
 		return "generated-ir";
 	case JitRegionStageExecutionKind::NATIVE_PROTOCOL:
 		return "native-protocol";
+	case JitRegionStageExecutionKind::SOURCE_BOUNDARY:
+		return "source-boundary";
 	case JitRegionStageExecutionKind::TYPED_HELPER:
 		return "typed-helper";
 	case JitRegionStageExecutionKind::EXECUTOR_FALLBACK:

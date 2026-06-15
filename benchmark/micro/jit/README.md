@@ -2,8 +2,8 @@
 
 These benchmarks measure specific SLJIT generated-body shapes. They are not
 broad JIT benchmarks, and a body speedup is not by itself proof that a whole
-source-prefix region should be admitted while the source is still a DuckDB
-`GetData` helper.
+source-prefix region should be admitted while the source is still a DuckDB-owned
+source boundary.
 
 The admitted-shape templates are self-checking. Their `result_query` verifies
 the SQL answer and the JIT event stream after the measured query. The templates
@@ -12,9 +12,9 @@ events and previous hot runs cannot mask or satisfy the measured-query shape
 proof:
 
 - `off` must produce no compiled region event;
-- `auto` must keep helper-backed source-prefix regions non-fused, even when a
+- `auto` must keep source-boundary source-prefix regions non-fused, even when a
   body shape has a non-negative admission score;
-- `force` must not compile helper-backed source-prefix regions; it may compile
+- `force` must not compile source-boundary source-prefix regions; it may compile
   only native fused post-source or sink fragments that have executable code.
 
 This keeps benchmark results tied to the region shape they claim to measure.
@@ -35,7 +35,7 @@ they have their own measured whole-region admission proof.
 The speed verifier reads benchmark-runner timings and checks that the reported
 speedup and `faster_than_off` flags match the raw medians. `auto` is retained as
 a policy observation and should not be interpreted as whole-region admission
-proof for helper-backed sources.
+proof for source-boundary sources.
 
 Run the diagnostic timing suite for shapes that remain deliberately unadmitted:
 
@@ -128,7 +128,7 @@ build/release/benchmark/benchmark_runner --disable-timeout benchmark/micro/jit/n
 The exact values are machine-dependent. Do not maintain benchmark timing tables
 by hand in this README; `micro_jit_benchmark.py` writes the current repeated-run
 timings and medians to `summary.csv`. The invariant is that `force` must compile
-only native fused fragments and must leave helper-backed source-prefix regions
+only native fused fragments and must leave source-boundary source-prefix regions
 non-fused, the same as `auto`.
 
 ## Native Projection Chain

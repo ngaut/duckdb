@@ -85,6 +85,7 @@ CANDIDATE_TRAIT_FIELDS = (
     "candidate_executor_boundary_free",
     "candidate_native_fusion_ready",
     "candidate_generated_operator_count",
+    "candidate_source_boundary_count",
     "candidate_typed_helper_boundary_count",
     "candidate_executor_boundary_count",
     "candidate_missing_protocol_count",

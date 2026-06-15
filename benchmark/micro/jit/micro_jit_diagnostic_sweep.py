@@ -54,7 +54,7 @@ def benchmark_text(shape: dict, row_count: int, policy: str, path: Path) -> str:
                 "                      AND code_size=0",
                 "                      AND reason LIKE '%execution:unsupported%'",
                 "                      AND reason LIKE '%source-fusion-gap:requires-native-source%'",
-                "                      AND reason LIKE '%DuckDB source GetData helper boundary%'",
+                "                      AND reason LIKE '%DuckDB source boundary%'",
                 "                )",
                 "                AND",
                 "                (",

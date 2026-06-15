@@ -289,7 +289,7 @@ def verify_resume_state_events(rows: list) -> None:
             and row.get("candidate_scope") == "source_pipeline"
             and row.get("candidate_shape") == "filter"
             and "source-fusion-gap:requires-native-source" in row.get("reason", "")
-            and "table-function-getdata-helper-boundary" in row.get("reason", "")
+            and "table-function-source-boundary" in row.get("reason", "")
         ):
             has_source_boundary_unsupported = True
         if (

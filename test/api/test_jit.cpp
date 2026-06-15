@@ -4932,7 +4932,7 @@ TEST_CASE("SLJIT marks full pipeline result collector unsupported without native
 			REQUIRE(StringUtil::Contains(event.reason, "execution:unsupported"));
 			REQUIRE(StringUtil::Contains(event.ir, "native_source_contract<status=blocked,"
 			                                       "required_capability=table-function-native-source"));
-			REQUIRE(StringUtil::Contains(event.ir, "blocker=table-function-getdata-helper-boundary"));
+			REQUIRE(StringUtil::Contains(event.ir, "blocker=table-function-source-boundary"));
 			REQUIRE(StringUtil::Contains(event.ir, "scope=full_pipeline"));
 		}
 	}

@@ -1467,7 +1467,7 @@ def verify_source_boundary_summary(
                 "table_scan_native_source": "DuckDB native table scan source runtime",
                 "table_scan_source_boundary": "DuckDB table scan source boundary",
                 "duckdb_scan_source_boundary": "DuckDB scan source boundary",
-                "source_getdata_helper": "DuckDB source GetData helper boundary",
+                "duckdb_source_boundary": "DuckDB source boundary",
             }
             expected_marker = expected_markers.get(row["source_boundary_kind"], "")
             if expected_marker == "":
@@ -2031,7 +2031,7 @@ def verify_source_fusion_gaps(
         if row["source_execution"] in ("", "native-source"):
             raise AssertionError(f"source_fusion_gap_summary.csv: gap row must name non-native source execution: {row}")
         native_ready_handoff = (
-            row["source_execution"] == "duckdb-getdata-helper" and row["native_source_status"] == "ready"
+            row["source_execution"] == "duckdb-source-boundary" and row["native_source_status"] == "ready"
         )
         if not native_ready_handoff and row["native_source_status"] != "blocked":
             raise AssertionError(f"source_fusion_gap_summary.csv: native source contract is not blocked: {row}")
@@ -2135,12 +2135,12 @@ def verify_source_fusion_gaps(
             if row["native_source_required_capability"] != "duckdb-table-scan-native-source":
                 raise AssertionError(f"source_fusion_gap_summary.csv: table scan source has wrong native capability: {row}")
             native_ready_handoff = (
-                row["source_execution"] == "duckdb-getdata-helper" and row["native_source_status"] == "ready"
+                row["source_execution"] == "duckdb-source-boundary" and row["native_source_status"] == "ready"
             )
             if (
                 row["source_fusion_gap"] == "requires_native_source"
                 and not native_ready_handoff
-                and row["native_source_blocker"] != "duckdb-getdata-helper-boundary"
+                and row["native_source_blocker"] != "duckdb-table-scan-source-boundary"
             ):
                 raise AssertionError(f"source_fusion_gap_summary.csv: table scan source has wrong native blocker: {row}")
     if require_full_lowering and "force" in policies and not has_force_evidence:
@@ -2341,7 +2341,7 @@ def verify_fusion_blockers(
                     f"fusion_blocker_summary.csv: downstream helper resume blocker lacks ready native source: {row}"
                 )
             native_ready_handoff = (
-                row["source_execution"] == "duckdb-getdata-helper" and row["native_source_status"] == "ready"
+                row["source_execution"] == "duckdb-source-boundary" and row["native_source_status"] == "ready"
             )
             if (
                 row["fusion_blocker"] == "source-fusion-gap:requires-native-source"
@@ -2358,7 +2358,7 @@ def verify_fusion_blockers(
                 if (
                     row["fusion_blocker"] == "source-fusion-gap:requires-native-source"
                     and not native_ready_handoff
-                    and row["native_source_blocker"] != "duckdb-getdata-helper-boundary"
+                    and row["native_source_blocker"] != "duckdb-table-scan-source-boundary"
                 ):
                     raise AssertionError(f"fusion_blocker_summary.csv: table scan source has wrong blocker: {row}")
         if row["blocker_class"] == "sink-fusion-gap":
@@ -3187,7 +3187,7 @@ def verify_source_boundary_features(
     )
     required_scan_helper_reason_markers = (
         "DuckDB table scan source boundary",
-        "DuckDB source GetData helper boundary",
+        "DuckDB source boundary",
     )
     required_scan_helper_reason_features = ()
     required_scan_native_runtime_reason_features = ("DuckDB native table scan source runtime",)
@@ -3208,7 +3208,7 @@ def verify_source_boundary_features(
         "source_prefix_filter_prune_required=",
         "source_prefix_filter_split_supported=",
     )
-    required_scan_helper_ir_features = ("execution=duckdb-getdata-helper",)
+    required_scan_helper_ir_features = ("execution=duckdb-source-boundary",)
     required_scan_native_ir_features = ("execution=native-source",)
     required_hash_join_features = (
         "operator=HASH_JOIN",
@@ -3378,7 +3378,7 @@ def verify_source_boundary_features(
             if not is_native_scan and not any(marker in trace_text for marker in required_scan_helper_reason_markers):
                 raise AssertionError(
                     f"{row['events_csv']}: table-scan helper source boundary event {event.get('event_id')} "
-                    f"does not expose a helper boundary marker: {event}"
+                    f"does not expose a source boundary marker: {event}"
                 )
             for feature in scan_features:
                 if feature not in trace_text:

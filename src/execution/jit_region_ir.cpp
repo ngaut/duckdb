@@ -453,24 +453,24 @@ JitRegionNativeSourceContract BuildJitRegionNativeSourceContract(JitRegionSource
 		result.required_capability = "duckdb-table-scan-native-source";
 		result.blocker = execution == JitRegionSourceExecutionKind::NATIVE_SOURCE
 		                     ? "none"
-		                     : execution == JitRegionSourceExecutionKind::DUCKDB_GETDATA_HELPER
-		                           ? "duckdb-getdata-helper-boundary"
+		                     : execution == JitRegionSourceExecutionKind::DUCKDB_SOURCE_BOUNDARY
+		                           ? "duckdb-table-scan-source-boundary"
 		                           : "duckdb-table-scan-executor-fallback-boundary";
 		break;
 	case JitRegionSourceKind::TABLE_FUNCTION_SCAN:
 		result.required_capability = "table-function-native-source";
 		result.blocker = execution == JitRegionSourceExecutionKind::NATIVE_SOURCE
 		                     ? "none"
-		                     : execution == JitRegionSourceExecutionKind::DUCKDB_GETDATA_HELPER
-		                           ? "table-function-getdata-helper-boundary"
+		                     : execution == JitRegionSourceExecutionKind::DUCKDB_SOURCE_BOUNDARY
+		                           ? "table-function-source-boundary"
 		                           : "table-function-executor-fallback-boundary";
 		break;
 	case JitRegionSourceKind::GENERIC_SCAN:
 		result.required_capability = "generic-scan-native-source";
 		result.blocker = execution == JitRegionSourceExecutionKind::NATIVE_SOURCE
 		                     ? "none"
-		                     : execution == JitRegionSourceExecutionKind::DUCKDB_GETDATA_HELPER
-		                           ? "generic-scan-getdata-helper-boundary"
+		                     : execution == JitRegionSourceExecutionKind::DUCKDB_SOURCE_BOUNDARY
+		                           ? "generic-scan-source-boundary"
 		                           : "generic-scan-executor-fallback-boundary";
 		break;
 	case JitRegionSourceKind::STATEFUL_OPERATOR:
@@ -493,9 +493,9 @@ static string JitRegionSourceBoundaryMarker(JitRegionSourceKind kind, JitRegionS
 			if (execution == JitRegionSourceExecutionKind::NATIVE_SOURCE) {
 				return "DuckDB native table scan source runtime";
 			}
-			if (execution == JitRegionSourceExecutionKind::DUCKDB_GETDATA_HELPER) {
+			if (execution == JitRegionSourceExecutionKind::DUCKDB_SOURCE_BOUNDARY) {
 				return "DuckDB table scan source boundary;source-fusion-gap:requires-native-source;"
-				       "source_execution=duckdb-getdata-helper";
+				       "source_execution=duckdb-source-boundary";
 			}
 		return "DuckDB table scan executor fallback boundary";
 	default:
@@ -705,7 +705,7 @@ static unique_ptr<JitRegionSourceInfo> BuildJitRegionGenericScanSourceInfo(const
                                                                            const string &reason) {
 	auto result = make_uniq<JitRegionSourceInfo>();
 	result->kind = JitRegionSourceKind::GENERIC_SCAN;
-	result->execution = JitRegionSourceExecutionKind::DUCKDB_GETDATA_HELPER;
+	result->execution = JitRegionSourceExecutionKind::DUCKDB_SOURCE_BOUNDARY;
 	result->function_name = StringUtil::Lower(PhysicalOperatorToString(op.type));
 	result->fields = BuildJitRegionProtocolFields(reason);
 	result->output_column_count = op.GetTypes().size();
@@ -713,7 +713,7 @@ static unique_ptr<JitRegionSourceInfo> BuildJitRegionGenericScanSourceInfo(const
 	result->native_source_contract.status = JitRegionNativeSourceStatus::BLOCKED;
 	result->native_source_contract.required_capability = "generic-scan-native-source";
 	result->native_source_contract.protocol_version = "v1";
-	result->native_source_contract.blocker = "generic-scan-getdata-helper-boundary";
+	result->native_source_contract.blocker = "generic-scan-source-boundary";
 	result->native_source_contract.ir = DescribeJitRegionNativeSourceContract(result->native_source_contract);
 	result->reason = reason;
 	result->ir = DescribeJitRegionSourceInfo(*result);
@@ -1061,7 +1061,7 @@ static void AccumulateJitRegionInventorySource(JitRegionPipelineInventory &inven
 	}
 	if (IsJitRegionScanSource(source.type)) {
 		inventory.source_kind = JitRegionSourceKind::GENERIC_SCAN;
-		inventory.source_execution = JitRegionSourceExecutionKind::DUCKDB_GETDATA_HELPER;
+		inventory.source_execution = JitRegionSourceExecutionKind::DUCKDB_SOURCE_BOUNDARY;
 		inventory.has_scan_source = true;
 		return;
 	}
@@ -1491,6 +1491,9 @@ static void RecordJitRegionContractOwnership(JitRegionContract &contract, JitReg
 	case JitRegionOwnershipKind::GENERATED_IR:
 		contract.generated_operator_count++;
 		break;
+	case JitRegionOwnershipKind::SOURCE_BOUNDARY:
+		contract.source_boundary_count++;
+		break;
 	case JitRegionOwnershipKind::TYPED_HELPER:
 		contract.typed_helper_boundary_count++;
 		break;
@@ -1526,9 +1529,9 @@ static JitRegionOwnershipKind ClassifyJitRegionNativeSourceOwnership(const JitRe
 		AddJitUniqueString(region_contract.required_capabilities, source_contract.required_capability);
 		return JitRegionOwnershipKind::NATIVE_PROTOCOL;
 	}
-	if (execution == JitRegionSourceExecutionKind::DUCKDB_GETDATA_HELPER) {
+	if (execution == JitRegionSourceExecutionKind::DUCKDB_SOURCE_BOUNDARY) {
 		AddJitUniqueString(region_contract.blockers, source_contract.blocker);
-		return JitRegionOwnershipKind::TYPED_HELPER;
+		return JitRegionOwnershipKind::SOURCE_BOUNDARY;
 	}
 	if (execution == JitRegionSourceExecutionKind::EXECUTOR_FALLBACK) {
 		AddJitUniqueString(region_contract.blockers, source_contract.blocker);
@@ -1565,6 +1568,7 @@ static JitRegionOwnershipKind ClassifyJitCompiledContractOwnership(const JitComp
 	}
 	bool saw_native = false;
 	bool saw_generated = false;
+	bool saw_source_boundary = false;
 	bool saw_helper = false;
 	bool saw_missing = false;
 	for (auto &stage : compiled_contract.stages) {
@@ -1576,6 +1580,10 @@ static JitRegionOwnershipKind ClassifyJitCompiledContractOwnership(const JitComp
 		case JitRegionStageExecutionKind::GENERATED_IR:
 		case JitRegionStageExecutionKind::PASS_THROUGH:
 			saw_generated = true;
+			break;
+		case JitRegionStageExecutionKind::SOURCE_BOUNDARY:
+			saw_source_boundary = true;
+			AddJitUniqueString(region_contract.blockers, stage.blocker.empty() ? fallback_reason : stage.blocker);
 			break;
 		case JitRegionStageExecutionKind::TYPED_HELPER:
 			saw_helper = true;
@@ -1595,6 +1603,9 @@ static JitRegionOwnershipKind ClassifyJitCompiledContractOwnership(const JitComp
 	}
 	if (saw_missing) {
 		return JitRegionOwnershipKind::MISSING_PROTOCOL;
+	}
+	if (saw_source_boundary) {
+		return JitRegionOwnershipKind::SOURCE_BOUNDARY;
 	}
 	if (saw_helper) {
 		return JitRegionOwnershipKind::TYPED_HELPER;
@@ -1684,6 +1695,7 @@ static string DescribeJitRegionContract(const JitRegionContract &contract) {
 	result += ",executor_boundary_free=" + JitRegionBool(contract.executor_boundary_free);
 	result += ",native_fusion_ready=" + JitRegionBool(contract.native_fusion_ready);
 	result += ",generated_ops=" + std::to_string(contract.generated_operator_count);
+	result += ",source_boundaries=" + std::to_string(contract.source_boundary_count);
 	result += ",typed_helper_boundaries=" + std::to_string(contract.typed_helper_boundary_count);
 	result += ",executor_boundaries=" + std::to_string(contract.executor_boundary_count);
 	result += ",missing_protocols=" + std::to_string(contract.missing_protocol_count);
@@ -1763,8 +1775,8 @@ static JitRegionContract BuildJitRegionContract(const JitRegionIR &region_ir, co
 	}
 	contract.owns_transform = has_transform;
 	contract.executor_boundary_free = contract.executor_boundary_count == 0;
-	contract.native_fusion_ready = contract.executor_boundary_count == 0 && contract.typed_helper_boundary_count == 0 &&
-	                               contract.missing_protocol_count == 0;
+	contract.native_fusion_ready = contract.executor_boundary_count == 0 && contract.source_boundary_count == 0 &&
+	                               contract.typed_helper_boundary_count == 0 && contract.missing_protocol_count == 0;
 	contract.abi = DetermineJitRegionContractABI(contract);
 	contract.ir = DescribeJitRegionContract(contract);
 	return contract;
@@ -2145,6 +2157,8 @@ JitRegionStageExecutionFromOwnership(JitRegionOwnershipKind ownership) {
 		return JitRegionStageExecutionKind::GENERATED_IR;
 	case JitRegionOwnershipKind::NATIVE_PROTOCOL:
 		return JitRegionStageExecutionKind::NATIVE_PROTOCOL;
+	case JitRegionOwnershipKind::SOURCE_BOUNDARY:
+		return JitRegionStageExecutionKind::SOURCE_BOUNDARY;
 	case JitRegionOwnershipKind::TYPED_HELPER:
 		return JitRegionStageExecutionKind::TYPED_HELPER;
 	case JitRegionOwnershipKind::EXECUTOR_BOUNDARY:
@@ -2163,6 +2177,8 @@ static JitRegionOwnershipKind JitRegionOwnershipFromStageExecution(JitRegionStag
 		return JitRegionOwnershipKind::GENERATED_IR;
 	case JitRegionStageExecutionKind::NATIVE_PROTOCOL:
 		return JitRegionOwnershipKind::NATIVE_PROTOCOL;
+	case JitRegionStageExecutionKind::SOURCE_BOUNDARY:
+		return JitRegionOwnershipKind::SOURCE_BOUNDARY;
 	case JitRegionStageExecutionKind::TYPED_HELPER:
 		return JitRegionOwnershipKind::TYPED_HELPER;
 	case JitRegionStageExecutionKind::EXECUTOR_FALLBACK:
@@ -2180,8 +2196,8 @@ JitRegionSourceStageExecution(const JitRegionIRNode &node, const JitRegionContra
 	if (contract.source_ownership == JitRegionOwnershipKind::NATIVE_PROTOCOL) {
 		return JitRegionStageExecutionKind::NATIVE_PROTOCOL;
 	}
-	if (source_execution == JitRegionSourceExecutionKind::DUCKDB_GETDATA_HELPER) {
-		return JitRegionStageExecutionKind::TYPED_HELPER;
+	if (source_execution == JitRegionSourceExecutionKind::DUCKDB_SOURCE_BOUNDARY) {
+		return JitRegionStageExecutionKind::SOURCE_BOUNDARY;
 	}
 	if (source_execution == JitRegionSourceExecutionKind::EXECUTOR_FALLBACK) {
 		return JitRegionStageExecutionKind::EXECUTOR_FALLBACK;
@@ -2329,8 +2345,8 @@ static JitRegionStagePlan BuildJitRegionStagePlan(const JitRegionIR &region_ir,
 					auto filter_ownership =
 					    filter.expression ? JitRegionOwnershipKind::GENERATED_IR : JitRegionOwnershipKind::EXECUTOR_BOUNDARY;
 					auto filter_execution =
-					    source_execution == JitRegionSourceExecutionKind::DUCKDB_GETDATA_HELPER
-					        ? JitRegionStageExecutionKind::TYPED_HELPER
+					    source_execution == JitRegionSourceExecutionKind::DUCKDB_SOURCE_BOUNDARY
+					        ? JitRegionStageExecutionKind::SOURCE_BOUNDARY
 					        : JitRegionStageExecutionFromOwnership(filter_ownership);
 					AddJitRegionStage(plan, JitRegionStageKind::SOURCE_FILTER, filter_execution, filter_ownership,
 					                  node_idx, node, filter_idx, filter.reason);

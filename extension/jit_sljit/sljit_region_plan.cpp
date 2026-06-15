@@ -1440,15 +1440,15 @@ static SljitRegionNodePlan PlanSljitSourceNode(const JitRegionIRNode &node, cons
 	    native_contract.protocol_version.empty() || native_contract.blocker.empty()) {
 		return SljitRegionFallbackNode("source boundary requires native-source contract IR");
 	}
-	if (source_execution == JitRegionSourceExecutionKind::DUCKDB_GETDATA_HELPER && !node.source->filters.empty()) {
+	if (source_execution == JitRegionSourceExecutionKind::DUCKDB_SOURCE_BOUNDARY && !node.source->filters.empty()) {
 		if (!node.source->table_scan_protocol.present) {
 			return SljitRegionFallbackNode("source-pushed filters require typed table scan protocol IR");
 		}
 		auto &protocol = node.source->table_scan_protocol;
 		SljitRegionNodePlan result;
 		result.kind = JitLoweringKind::FALLBACK;
-		result.reason = "DuckDB source GetData helper boundary;source-fusion-gap:requires-native-source;"
-		                "source_execution=duckdb-getdata-helper";
+		result.reason = "DuckDB source boundary;source-fusion-gap:requires-native-source;"
+		                "source_execution=duckdb-source-boundary";
 		result.reason += ";source-strategy=duckdb-source-boundary";
 		result.reason += ";source_filter_count=" + std::to_string(node.source->filters.size());
 		result.reason += ";source_prefix_input_columns=" + std::to_string(protocol.source_prefix_input_column_count);
@@ -1456,7 +1456,7 @@ static SljitRegionNodePlan PlanSljitSourceNode(const JitRegionIRNode &node, cons
 		                 string(protocol.source_prefix_filter_prune_required ? "true" : "false");
 		result.reason += ";source_prefix_filter_split_supported=" +
 		                 string(protocol.source_prefix_filter_split_supported ? "true" : "false");
-		AppendSljitSourceIR(result.reason, node, JitRegionSourceExecutionKind::DUCKDB_GETDATA_HELPER);
+		AppendSljitSourceIR(result.reason, node, JitRegionSourceExecutionKind::DUCKDB_SOURCE_BOUNDARY);
 		return result;
 	}
 	if (source_execution == JitRegionSourceExecutionKind::NATIVE_SOURCE &&
@@ -1495,18 +1495,18 @@ static SljitRegionNodePlan PlanSljitSourceNode(const JitRegionIRNode &node, cons
 		}
 		SljitRegionNodePlan result;
 		result.kind = JitLoweringKind::FALLBACK;
-		result.reason = "DuckDB source GetData helper boundary;source-fusion-gap:requires-native-source;"
-		                "source_execution=duckdb-getdata-helper";
+		result.reason = "DuckDB source boundary;source-fusion-gap:requires-native-source;"
+		                "source_execution=duckdb-source-boundary";
 		result.reason += ";source_filter_count=" + std::to_string(node.source->filters.size());
 		result.reason += ";source_prefix_input_columns=" + std::to_string(protocol.source_prefix_input_column_count);
 		result.reason += ";source_prefix_filter_split_supported=" +
 		                 string(protocol.source_prefix_filter_split_supported ? "true" : "false");
-		AppendSljitSourceIR(result.reason, node, JitRegionSourceExecutionKind::DUCKDB_GETDATA_HELPER);
+		AppendSljitSourceIR(result.reason, node, JitRegionSourceExecutionKind::DUCKDB_SOURCE_BOUNDARY);
 		return result;
 	}
-	auto helper_reason = "DuckDB source GetData helper boundary;" + node.fallback_reason;
-	AppendSljitSourceIR(helper_reason, node, JitRegionSourceExecutionKind::DUCKDB_GETDATA_HELPER);
-	return SljitRegionFallbackNode(std::move(helper_reason));
+	auto boundary_reason = "DuckDB source boundary;" + node.fallback_reason;
+	AppendSljitSourceIR(boundary_reason, node, JitRegionSourceExecutionKind::DUCKDB_SOURCE_BOUNDARY);
+	return SljitRegionFallbackNode(std::move(boundary_reason));
 }
 
 static string DescribeSljitAggregateNativeUpdateContract(const JitRegionAggregateInput &aggregate) {
@@ -2543,7 +2543,7 @@ SljitRegionPlan BuildSljitRegionPlan(const JitRegionIR &region_ir, const JitRegi
 			plan.lowering_plan.AddNode(node.role, node.operator_name, node_plan.kind, node_plan.reason);
 			if (source_requires_native) {
 				plan.lowering_plan.AddFusionBlocker(
-				    "source-fusion-gap:requires-native-source;source_execution=duckdb-getdata-helper");
+				    "source-fusion-gap:requires-native-source;source_execution=duckdb-source-boundary");
 			}
 			if (executable_source && node_plan.kind != JitLoweringKind::FALLBACK) {
 				auto selected_source_execution = node_plan.requires_native_source
@@ -2686,6 +2686,9 @@ SljitRegionPlan BuildSljitRegionPlan(const JitRegionIR &region_ir, const JitRegi
 		if (plan.lowering_plan.ExpectedRegionExecutionForm() != JitRegionExecutionForm::FUSED) {
 			if (!contract.executor_boundary_free) {
 				plan.lowering_plan.AddFusionBlocker("candidate-fusion-gap:executor-boundary;" + contract.ir);
+			}
+			if (contract.source_boundary_count > 0) {
+				plan.lowering_plan.AddFusionBlocker("candidate-fusion-gap:source-boundary;" + contract.ir);
 			}
 			if (contract.typed_helper_boundary_count > 0) {
 				plan.lowering_plan.AddFusionBlocker("candidate-fusion-gap:typed-helper-boundary;" + contract.ir);

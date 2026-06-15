@@ -431,8 +431,8 @@ static JitRegionStageExecutionKind JitCompiledSourceExecution(JitRegionSourceExe
 	switch (execution) {
 	case JitRegionSourceExecutionKind::NATIVE_SOURCE:
 		return JitRegionStageExecutionKind::NATIVE_PROTOCOL;
-	case JitRegionSourceExecutionKind::DUCKDB_GETDATA_HELPER:
-		return JitRegionStageExecutionKind::TYPED_HELPER;
+	case JitRegionSourceExecutionKind::DUCKDB_SOURCE_BOUNDARY:
+		return JitRegionStageExecutionKind::SOURCE_BOUNDARY;
 	case JitRegionSourceExecutionKind::EXECUTOR_FALLBACK:
 		return JitRegionStageExecutionKind::EXECUTOR_FALLBACK;
 	default:
@@ -1372,8 +1372,8 @@ static string BuildJitDescriptorTableScanSourceBoundaryReason(const PhysicalTabl
 	string result = execution == JitRegionSourceExecutionKind::NATIVE_SOURCE
 	                    ? "DuckDB native table scan source runtime"
 	                    : "DuckDB table scan source boundary";
-	if (execution == JitRegionSourceExecutionKind::DUCKDB_GETDATA_HELPER) {
-		result += ";source-fusion-gap:requires-native-source;source_execution=duckdb-getdata-helper";
+	if (execution == JitRegionSourceExecutionKind::DUCKDB_SOURCE_BOUNDARY) {
+		result += ";source-fusion-gap:requires-native-source;source_execution=duckdb-source-boundary";
 	}
 	result += ";function=" + protocol.function_name;
 	result += ";output_columns=" + std::to_string(protocol.output_column_count);
@@ -1666,7 +1666,7 @@ JitOperatorDescriptor PhysicalTableScan::GetJitOperatorDescriptor() const {
 	    function_name == "seq_scan" ? JitRegionSourceKind::DUCKDB_TABLE_SCAN : JitRegionSourceKind::TABLE_FUNCTION_SCAN;
 	result.source.execution = IsJitDescriptorNativeDuckTableScanSupported(*this)
 	                              ? JitRegionSourceExecutionKind::NATIVE_SOURCE
-	                              : JitRegionSourceExecutionKind::DUCKDB_GETDATA_HELPER;
+	                              : JitRegionSourceExecutionKind::DUCKDB_SOURCE_BOUNDARY;
 	result.source_boundary_reason = BuildJitDescriptorTableScanSourceBoundaryReason(*this, result.source.execution);
 	result.source.native_source_contract =
 	    BuildJitRegionNativeSourceContract(result.source.kind, result.source.execution);

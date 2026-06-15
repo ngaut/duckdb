@@ -537,7 +537,7 @@ WHERE phase='decision'
   AND reason LIKE '%execution-form=none%'
   AND reason LIKE '%execution:unsupported%'
   AND reason LIKE '%fusion-blocker:source-fusion-gap:requires-native-source%'
-  AND reason LIKE '%source:TABLE_SCAN:fallback:DuckDB source GetData helper boundary%'
+  AND reason LIKE '%source:TABLE_SCAN:fallback:DuckDB source boundary%'
 ----
 1
 
@@ -630,8 +630,8 @@ WHERE backend_name='sljit'
   AND reason LIKE '%SLJIT full-pipeline region requires measured operator-aware admission proof%'
   AND reason LIKE '%admission_rule=missing%'
   AND ir LIKE '%native_source_contract<status=blocked,required_capability=table-function-native-source%'
-  AND ir LIKE '%blocker=table-function-getdata-helper-boundary%'
-  AND reason LIKE '%source_execution=duckdb-getdata-helper%'
+  AND ir LIKE '%blocker=table-function-source-boundary%'
+  AND reason LIKE '%source_execution=duckdb-source-boundary%'
   AND reason LIKE '%sink_kind=ungrouped-aggregate-update%'
   AND candidate_has_source=true
   AND candidate_has_sink=true

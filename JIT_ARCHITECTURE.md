@@ -404,11 +404,11 @@ boundaries.
 
 Source boundaries are semantic IR records, not backend-side interpretations of
 DuckDB physical operators. A source node that still runs through DuckDB
-`GetData` must expose a `JitRegionSourceInfo` descriptor with:
+DuckDB source-boundary execution must expose a `JitRegionSourceInfo` descriptor with:
 
 - source kind: DuckDB table scan, table-function scan, generic scan, stateful
   operator, or none;
-- execution kind: DuckDB `GetData` helper, executor fallback, native source, or none;
+- execution kind: DuckDB source boundary, executor fallback, native source, or none;
 - native-source contract: status (`ready`, `blocked`, or `none`), required
   backend-neutral capability, protocol version, and blocker reason;
 - scan/table function name;
@@ -438,8 +438,8 @@ is required for honest operator-aware admission: the backend and cost model must
 see the actual scan/filter/projection/update region that dominates runtime.
 
 The native-source contract is not the same as current execution. A table scan
-can honestly report `execution=duckdb-getdata-helper` while also exposing
-`native_source_contract<status=blocked,required_capability=duckdb-table-scan-native-source,protocol=v1,blocker=duckdb-getdata-helper-boundary>`.
+can honestly report `execution=duckdb-source-boundary` while also exposing
+`native_source_contract<status=blocked,required_capability=duckdb-table-scan-native-source,protocol=v1,blocker=duckdb-table-scan-source-boundary>`.
 That record is the architecture handoff from physical-operator inspection to
 backend lowering. A backend may only lower a source as fused/native when the IR
 source execution is `native-source` and the native-source contract is `ready`.
@@ -467,7 +467,7 @@ aggregate updates over the unfiltered scan chunk. If the filters are not
 representable by the typed IR, the native-source fallback remains honest:
 DuckDB scan owns filtering and the reason records
 `source-filters-owned-by-duckdb-scan`. A lowered region that selects
-`duckdb-getdata-helper` is an explicit non-fused source boundary: DuckDB owns source
+`duckdb-source-boundary` is an explicit non-fused source boundary: DuckDB owns source
 filter execution and pruning, while JIT can only own the downstream body over
 surviving rows. That path must be skipped by
 compiled-region admission, including `force`; it is not native-source ownership and must not be used as proof that source-filter fusion is complete. A
@@ -852,7 +852,7 @@ Core stage ownership is a hard admission contract, not backend advice. Backend
 analysis may explain why a candidate is blocked, but it cannot override
 `JitRegionContract::native_fusion_ready` or the canonical
 `JitRegionStagePlan`. If a backend advertises `region_execution_form=fused`
-while the core stage plan still contains a typed-helper, executor-fallback, or
+while the core stage plan still contains a source-boundary, typed-helper, executor-fallback, or
 missing-protocol stage, `JitManager` records the candidate as unsupported and
 does not call backend code generation. This keeps fake fusion, non-fused helper
 source prefixes, and stale shape-specific backends from reaching runtime.
@@ -1210,7 +1210,7 @@ other native sink updates: `region_execution_form=fused`,
 `kernel=generic-runtime-loop`, and no
 `operator-fusion-gap:native-operator-codegen-missing`. The event must not retain
 typed lookup helper contracts; it is a native protocol success, not a
-helper-backed success. It also must not report the stale "lookup ready but SLJIT
+source-boundary or typed-helper success. It also must not report the stale "lookup ready but SLJIT
 lowering missing" blocker. Unsupported grouped hash shapes should name the
 actual missing piece, such as no aggregate payload bindings or an unsupported
 aggregate update function.
@@ -1321,8 +1321,8 @@ chunk through typed vector IR. The generated source-prefix output must project
 back to the normal DuckDB operator boundary.
 Every candidate has one effective source execution derived from the physical
 source contract. Native-capable table scans produce `native-source` candidates;
-helper-backed table functions or unsupported scans produce
-`duckdb-getdata-helper` candidates. Core must not manufacture a helper-source
+non-native table functions or unsupported scans produce
+`duckdb-source-boundary` candidates. Core must not manufacture a source-boundary
 alternative for an already native-capable source. Candidate IR must render deterministic `source<...>` text with that effective execution and native-source contract.
 Dynamic table filters do not block native-source ownership. They are represented
 in the backend-neutral table-scan protocol with `dynamic_filters=true` and are
@@ -1333,8 +1333,8 @@ lowered static predicates. Backends must treat dynamic filters as source
 protocol metadata, not as backend-specific DuckDB objects to inspect.
 Backends consume this layout from core IR; they must not recover it by
 inspecting `PhysicalTableScan`, `TableScanState`, or storage internals. A
-source-prefix filter/projection/projection-chain candidate that starts with
-DuckDB `GetData` is non-fused: the generated body may be expressible, but the
+source-prefix filter/projection/projection-chain candidate that starts at a
+DuckDB-owned source boundary is non-fused: the generated body may be expressible, but the
 selected region is still split by a DuckDB-owned source boundary. A
 source-prefix candidate whose source execution is `native-source` may report
 `fused` only when the selected runtime ABI can fetch the source directly and
@@ -1346,10 +1346,11 @@ generated native variant selects `native-source`, records
 `generated source-prefix table scan filters`, and increments native-source
 runtime counters for raw scan chunks plus generated-body counters for the
 filter/projection/update loop. A candidate that starts with
-`duckdb-getdata-helper` is an explicit non-fused source boundary: it must report
+`duckdb-source-boundary` is an explicit non-fused source boundary: it must report
 `region_execution_form=none`, record
 `source-fusion-gap:requires-native-source`, and stay in executor fallback until
-source fetch is represented by a native source protocol. Helper-source candidates are diagnostic proof-gap evidence, not measured admission families,
+source fetch is represented by a native source protocol. Source-boundary
+candidates are diagnostic proof-gap evidence, not measured admission families,
 not native regions, and not runtime kernels.
 
 Architecture support is not production admission. A fused shape may enter
@@ -1362,11 +1363,11 @@ repeated full-suite timing proves stable suite-level speedup. A single positive
 query-local proof gap is not an admission rule. The proof-gap shape remains
 generic and must not inspect TPCH query text.
 
-Helper-backed source-prefix regions that cannot be represented as fused must
+Source-boundary source-prefix regions that cannot be represented as fused must
 emit an explicit source-fusion blocker so the next root fix is visible as
 source protocol work, not as an admission threshold tweak.
 The valid blocker is
-`fusion-blocker:source-fusion-gap:requires-native-source`. A helper-backed
+`fusion-blocker:source-fusion-gap:requires-native-source`. A source-boundary
 source-prefix candidate must name the non-fused source boundary directly instead of
 pretending to be native source fusion. Full-pipeline regions do not have a
 generic helper sink success path; a missing native sink/operator protocol is an
@@ -1406,7 +1407,7 @@ the core IR contract. SLJIT exposes source-filter-owned aggregate regions as
 Regions where DuckDB already applied the scan filter before the native region
 executor runs use
 `execution:native-sljit-region-projection-ungrouped-aggregate-update`. The
-unsupported non-fused helper-source shape remains visible as a skipped
+unsupported non-fused source-boundary shape remains visible as a skipped
 `filter-projection-ungrouped-aggregate-update` candidate without executable code.
 
 Generated fused aggregate kernels specialize vector input format before entering
@@ -1417,14 +1418,11 @@ selection-plus-validity loop. These are vector-format contracts, not query
 special cases, and the generic path remains the semantic fallback for dictionary
 or nullable chunks that do not meet the stronger invariants.
 
-Source-prefix runtime tracing must preserve that ownership split. `GetData`
-helper fetch time is measured in `PipelineExecutor::FetchFromSource` and
-recorded as a `source_boundary` runtime event with `source_boundary_*` rows,
-invocations, and time. Generated-prefix execution records normal runtime rows
-and elapsed generated-kernel time. This prevents a DuckDB source boundary from
-being counted as native/generated row execution while still making the remaining
-scan-helper cost visible in `duckdb_jit_events()`, `duckdb_jit_counters()`, and
-`duckdb_jit_kernel_counters()`.
+Source-prefix runtime tracing must preserve that ownership split. Native source
+execution records `source_native_*` rows, invocations, and time. Generated-prefix
+execution records normal runtime rows and elapsed generated-kernel time. A
+DuckDB-owned source boundary remains decision/compile evidence only; it is not
+a JIT runtime stage and has no `source_boundary_*` runtime counter family.
 
 Candidate estimated cardinality is the estimated work entering the executable
 interval: it may use the input boundary estimate even when that boundary is not
@@ -1634,7 +1632,7 @@ timing guesses. The JIT event stream therefore has two phases:
   DuckDB operator result or runtime action. Full-pipeline region runtime records
   `source_native_output_rows`, `source_native_invocation_count`,
   `source_native_runtime_time_us`, fused stage times, and
-  `generated_body_runtime_time_us`. DuckDB `GetData` source boundaries remain
+  `generated_body_runtime_time_us`. DuckDB source boundaries remain
   decision/compile evidence until a native source protocol exists; they do not
   get their own JIT runtime counter family.
 
@@ -1896,12 +1894,12 @@ source boundary kind, source operator, scan function, projected column count,
 projection pushdown, pushed filter count, dynamic-filter presence, and
 in/out-function presence. This is the source protocol investment artifact: it
 answers whether the next architecture work should expose a native table scan
-state protocol, a DuckDB `GetData` non-fused source-boundary policy, dynamic-filter-aware
+state protocol, a DuckDB-owned non-fused source-boundary policy, dynamic-filter-aware
 scan lowering, non-table source support, stateful native source protocols such
 as CTE/materialization scan, or stateful native state-scan protocols such as
 hash-join and aggregate scan.
 Compiled source-prefix rows must be present when the backend compiles a native
-source pipeline. Helper-backed source candidates remain decision rows until a
+source pipeline. Source-boundary source candidates remain decision rows until a
 native source protocol exists, but their decision rows must still expose the
 candidate identity: query, policy, candidate id, candidate shape, candidate
 pipeline shape, candidate context pipeline shape, and candidate scope. Candidate
@@ -2056,7 +2054,7 @@ query, policy, and source operator. It is the cost-ranked version of the source
 protocol inventory: count rows explain how often a source boundary appears;
 priority rows explain whether table scans, join-as-source state, aggregate
 state, CTE/materialization sources, or non-table scan sources own the measured
-runtime. It carries the same `source_boundary_*` totals as
+runtime. It carries the same native-source runtime totals as
 `source_boundary_summary`, plus deterministic operator-profiler attribution.
 When multiple source-boundary protocol rows reference the same
 query/policy/operator profile bucket, profiler time must be allocated
@@ -2069,7 +2067,7 @@ prioritization cannot drift from the event evidence.
 Workload traces must include a source-fusion gap summary.
 `source_fusion_gap_summary` is narrower than `source_boundary_summary`: it only
 records source/full-pipeline region candidates that either already have a
-generated body but whose source execution is still a DuckDB helper or executor
+generated body but whose source execution is still a DuckDB source boundary or executor
 fallback, or have source-pushed scan predicates that are rejected until native
 source-prefix/full-pipeline fusion exists.
 Those rows must carry `source_fusion_gap=requires_native_source`, the source
@@ -2077,7 +2075,7 @@ operator, selected source execution mode, `native_source_status`,
 `native_source_required_capability`, `native_source_protocol`,
 `native_source_blocker`, admission shape keys, candidate shapes and scopes,
 profiler attribution, and measured kernel runtime fields including
-`runtime_time_us`, `source_boundary_*`, `source_native_*`, fused stage timings, and
+`runtime_time_us`, `source_native_*`, fused stage timings, and
 `generated_body_runtime_time_us`.
 This is the fused-region architecture target. A non-fused source-prefix
 filter/projection region is not an admission or threshold problem; it is the
@@ -2085,14 +2083,14 @@ intermediate step before core lowering exposes a backend-neutral native-source
 protocol whose contract is `ready`, and the backend lowers that protocol into
 the same generated loop as the filter, projection, join, aggregate, or sink
 body. The verifier must require source-fusion blocker text on every skipped
-non-fused source-prefix region, so a helper-backed region cannot silently
+non-fused source-prefix region, so a source-boundary region cannot silently
 masquerade as fused.
 
 Workload traces must also include a generic fused-region blocker summary.
 `fusion_blocker_summary` is the architecture-level priority ledger for every
 candidate that carries a blocker to fused execution. It includes skipped
 non-fused candidates and unsupported candidates whose core contract names a missing
-protocol, typed-helper ownership boundary that is not admitted as fused, or executor
+protocol, source-boundary ownership boundary, typed-helper ownership boundary that is not admitted as fused, or executor
 boundary. It parses raw event reasons for `fusion-blocker:*`, groups by blocker
 class, current source/sink contracts, candidate shape/scope, and admission shape
 key, then joins runtime counters and operator-profiler evidence when a kernel
@@ -2100,6 +2098,7 @@ actually ran. It must include source blockers such as
 `source-fusion-gap:requires-native-source`, sink blockers such as
 `sink-fusion-gap:requires-native-sink-or-operator-update`, and candidate-level
 blockers such as `candidate-fusion-gap:missing-protocol`,
+`candidate-fusion-gap:source-boundary`,
 `candidate-fusion-gap:typed-helper-boundary`, and
 `candidate-fusion-gap:executor-boundary`. The summary is not a cost model by
 itself; it is the lossless trace artifact that proves which native source,
@@ -2117,9 +2116,10 @@ the executable ownership booleans (`owns_source`, `owns_transform`,
 `source_ownership`, `state_scan_ownership`, `transform_ownership`, and
 `sink_ownership` for the candidate being analyzed, not for incidental context
 that may appear in the whole-region IR text. Ownership values are
-`generated-ir`, `native-protocol`, `typed-helper`, `executor-boundary`, and
+`generated-ir`, `native-protocol`, `source-boundary`, `typed-helper`, `executor-boundary`, and
 `missing-protocol`. A region is `native_fusion_ready=true` only when its
-executable candidate has no executor boundary, no typed-helper ownership boundary, and no
+executable candidate has no executor boundary, no source-boundary ownership boundary,
+no typed-helper ownership boundary, and no
 missing operator protocol. This makes legacy scope labels reporting-only: core
 selection, prepared-source contracts, runtime ABI selection, and SLJIT shape
 classification must derive source/full-pipeline behavior from the contract, not
@@ -2325,8 +2325,8 @@ Performance proof means benchmark evidence for the specific kernel shape and
 execution policy. Body-only SLJIT native filter/projection and projection-chain
 microbenchmarks are diagnostics for the generated transform body, but they are
 not proof for a whole source-prefix region while the source node is still a
-DuckDB `GetData` helper. `jit_policy=auto` can use those shapes only when the
-lowering plan reports a genuinely fused region; current helper-backed
+DuckDB source boundary. `jit_policy=auto` can use those shapes only when the
+lowering plan reports a genuinely fused region; current source-boundary
 source-prefix instances must stay non-fused. Source-prefix-only table-scan filter/projection regions, scan-pushed
 filters, projection-only regions, filter-only regions, and generic unfused
 multi-op regions must stay skipped by `jit_policy=auto` until separately

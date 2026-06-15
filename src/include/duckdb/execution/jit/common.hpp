@@ -31,7 +31,7 @@ enum class JitRegionSourceKind : uint8_t {
 	GENERIC_SCAN,
 	STATEFUL_OPERATOR
 };
-enum class JitRegionSourceExecutionKind : uint8_t { NONE, DUCKDB_GETDATA_HELPER, EXECUTOR_FALLBACK, NATIVE_SOURCE };
+enum class JitRegionSourceExecutionKind : uint8_t { NONE, DUCKDB_SOURCE_BOUNDARY, EXECUTOR_FALLBACK, NATIVE_SOURCE };
 enum class JitRegionNativeSourceStatus : uint8_t { NONE, READY, BLOCKED };
 enum class JitRegionStateContractStatus : uint8_t { NONE, READY, MISSING, BLOCKED };
 enum class JitRegionOperatorKind : uint8_t { NONE, HASH_JOIN_PROBE, OPERATOR };
@@ -72,6 +72,7 @@ enum class JitRegionOwnershipKind : uint8_t {
 	NONE,
 	GENERATED_IR,
 	NATIVE_PROTOCOL,
+	SOURCE_BOUNDARY,
 	TYPED_HELPER,
 	EXECUTOR_BOUNDARY,
 	MISSING_PROTOCOL
@@ -93,6 +94,7 @@ enum class JitRegionStageExecutionKind : uint8_t {
 	NONE,
 	GENERATED_IR,
 	NATIVE_PROTOCOL,
+	SOURCE_BOUNDARY,
 	TYPED_HELPER,
 	EXECUTOR_FALLBACK,
 	MISSING_PROTOCOL,
