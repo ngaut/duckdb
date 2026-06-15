@@ -20,7 +20,6 @@ EXPECTED_CASES = {
 KNOWN_CANDIDATE_SCOPES = {
     "post_source_operator_interval",
     "source_prefix",
-    "sink_pipeline",
     "full_pipeline",
 }
 KNOWN_REGION_EXECUTION_FORMS = {"none", "fused"}
@@ -28,7 +27,6 @@ KNOWN_CANDIDATE_ABIS = {
     "none",
     "chunk_transform",
     "source_prefix",
-    "sink_suffix",
     "full_pipeline",
     "state_scan",
 }
@@ -180,16 +178,6 @@ def verify_executable_candidate_scope(case_name: str, row: dict) -> None:
             raise AssertionError(f"{case_name}: post-source executable has wrong ABI: {row}")
         if pipeline_shape and (has_source or has_sink):
             raise AssertionError(f"{case_name}: post-source executable contains context boundary: {row}")
-        return
-    if scope == "sink_pipeline":
-        if execution_mode != "native":
-            raise AssertionError(f"{case_name}: sink pipeline executable has invalid execution mode: {row}")
-        if abi and abi != "sink_suffix":
-            raise AssertionError(f"{case_name}: sink pipeline executable has wrong ABI: {row}")
-        if pipeline_shape and has_source:
-            raise AssertionError(f"{case_name}: sink pipeline executable contains source boundary: {row}")
-        if pipeline_shape and not has_sink:
-            raise AssertionError(f"{case_name}: sink pipeline executable has no sink boundary: {row}")
         return
     if scope == "full_pipeline":
         if execution_mode != "native":

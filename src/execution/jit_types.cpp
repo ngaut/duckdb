@@ -92,8 +92,6 @@ const char *JitRegionABIToString(JitRegionABI abi) {
 		return "chunk_transform";
 	case JitRegionABI::SOURCE_PREFIX:
 		return "source_prefix";
-	case JitRegionABI::SINK_SUFFIX:
-		return "sink_suffix";
 	case JitRegionABI::FULL_PIPELINE:
 		return "full_pipeline";
 	case JitRegionABI::STATE_SCAN:
@@ -109,7 +107,7 @@ bool JitRegionABIOwnsSource(JitRegionABI abi) {
 }
 
 bool JitRegionABIOwnsSink(JitRegionABI abi) {
-	return abi == JitRegionABI::SINK_SUFFIX || abi == JitRegionABI::FULL_PIPELINE;
+	return abi == JitRegionABI::FULL_PIPELINE;
 }
 
 bool JitRegionABIIsChunkTransform(JitRegionABI abi) {
@@ -118,10 +116,6 @@ bool JitRegionABIIsChunkTransform(JitRegionABI abi) {
 
 bool JitRegionABIIsSourcePrefix(JitRegionABI abi) {
 	return abi == JitRegionABI::SOURCE_PREFIX || abi == JitRegionABI::STATE_SCAN;
-}
-
-bool JitRegionABIIsSinkPipeline(JitRegionABI abi) {
-	return abi == JitRegionABI::SINK_SUFFIX;
 }
 
 bool JitRegionABIIsFullPipeline(JitRegionABI abi) {
@@ -134,8 +128,6 @@ const char *JitRegionCandidateScopeToString(JitRegionCandidateScope scope) {
 		return "post_source_operator_interval";
 	case JitRegionCandidateScope::SOURCE_PREFIX:
 		return "source_prefix";
-	case JitRegionCandidateScope::SINK_PIPELINE:
-		return "sink_pipeline";
 	case JitRegionCandidateScope::FULL_PIPELINE:
 		return "full_pipeline";
 	default:

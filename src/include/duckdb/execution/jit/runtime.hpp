@@ -485,12 +485,9 @@ public:
 	const JitRegionContract &TraceCandidateContract() const;
 	const vector<LogicalType> &TraceCandidateOutputTypes() const;
 	virtual bool CanExecuteSourcePrefix() const;
-	virtual bool CanExecuteSinkPipeline() const;
 	virtual bool CanExecuteFullPipeline() const;
 	virtual bool RequiresNativeSource() const;
 	virtual bool TryExecute(DataChunk &input, DataChunk &result, idx_t initial_idx, OperatorResultType &execute_result);
-	virtual bool TrySink(ExecutionContext &context, DataChunk &input, OperatorSinkInput &sink_input,
-	                     SinkResultType &sink_result);
 	virtual bool TryExecuteFullPipeline(JitFullPipelineRuntime &runtime, JitFullPipelineResult &result);
 
 private:

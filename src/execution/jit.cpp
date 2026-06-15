@@ -1074,10 +1074,6 @@ vector<unique_ptr<JitRegionKernel>> JitManager::CompilePreparedRegions(ClientCon
 				throw InternalException(
 				    "JIT backend \"%s\" compiled source-prefix without source-prefix executable ABI", backend_name);
 			}
-			if (JitRegionABIIsSinkPipeline(candidate.contract.abi) && !result.kernel->CanExecuteSinkPipeline()) {
-				throw InternalException("JIT backend \"%s\" compiled sink pipeline without sink executable ABI",
-				                        backend_name);
-			}
 			if (JitRegionABIIsFullPipeline(candidate.contract.abi) && !result.kernel->CanExecuteFullPipeline()) {
 				throw InternalException(
 				    "JIT backend \"%s\" compiled full pipeline without full-pipeline executable ABI", backend_name);

@@ -178,10 +178,6 @@ public:
 		return JitRegionABIIsSourcePrefix(abi);
 	}
 
-	bool CanExecuteSinkPipeline() const override {
-		return JitRegionABIIsSinkPipeline(abi);
-	}
-
 	bool CanExecuteFullPipeline() const override {
 		return JitRegionABIIsFullPipeline(abi);
 	}
@@ -199,15 +195,6 @@ public:
 		}
 		ExecuteNative(input, result);
 		execute_result = OperatorResultType::NEED_MORE_INPUT;
-		return true;
-	}
-
-	bool TrySink(ExecutionContext &context, DataChunk &input, OperatorSinkInput &sink_input,
-	             SinkResultType &sink_result) override {
-		if (!JitRegionABIIsSinkPipeline(abi) || !HasTraceCandidate()) {
-			return false;
-		}
-		ExecuteNativeSink(context, input, sink_input, sink_result);
 		return true;
 	}
 

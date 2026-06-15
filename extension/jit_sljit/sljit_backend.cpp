@@ -174,13 +174,6 @@ static bool TryRejectSljitAutoAdmissionCandidate(const JitRegionCandidate &candi
 		         candidate.traits.ir;
 		return true;
 	}
-	if (JitRegionABIIsSinkPipeline(candidate.contract.abi)) {
-		reason = "jit_policy=auto skips region before backend analysis: SLJIT sink pipeline region "
-		         "requires measured operator-aware admission proof;admission_rule=missing;shape=" +
-		         info.admission_key + ";estimated_cardinality=" + std::to_string(candidate.estimated_cardinality) + ";" +
-		         candidate.traits.ir;
-		return true;
-	}
 	if (JitRegionABIIsChunkTransform(candidate.contract.abi)) {
 		reason = "jit_policy=auto skips region before backend analysis: SLJIT post-source operator intervals have no "
 		         "admitted performance proof;admission_rule=missing;shape=" +

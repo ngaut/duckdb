@@ -146,7 +146,6 @@ REGION_DECISION_STATUSES = ("compiled", "skipped", "unsupported")
 KNOWN_CANDIDATE_SCOPES = (
     "post_source_operator_interval",
     "source_prefix",
-    "sink_pipeline",
     "full_pipeline",
 )
 NO_CANDIDATE_SCOPE = "none"
@@ -159,7 +158,6 @@ KNOWN_CANDIDATE_ABIS = (
     "none",
     "chunk_transform",
     "source_prefix",
-    "sink_suffix",
     "full_pipeline",
     "state_scan",
 )

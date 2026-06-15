@@ -74,7 +74,7 @@ def benchmark_text(shape: dict, row_count: int, policy: str, path: Path) -> str:
                 "                      AND execution_mode='native'",
                 "                      AND region_execution_form='fused'",
                 "                      AND policy_decision='force'",
-                "                      AND candidate_scope IN ('post_source_operator_interval', 'sink_pipeline')",
+                "                      AND candidate_scope='post_source_operator_interval'",
                 "                      AND code_size > 0",
                 "                )",
                 "            )",

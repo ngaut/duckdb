@@ -751,10 +751,6 @@ SinkResultType PipelineExecutor::Sink(DataChunk &chunk, OperatorSinkInput &input
 		return SinkResultType::BLOCKED;
 	}
 #endif
-	SinkResultType jit_result;
-	if (JitRegionExecutor::TrySink(*this, chunk, input, jit_result)) {
-		return jit_result;
-	}
 	return pipeline.sink->Sink(context, chunk, input);
 }
 

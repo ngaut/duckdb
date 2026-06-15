@@ -24,16 +24,9 @@ static_assert(!std::is_constructible<JitRegionCompilationInput, ClientContext &,
 static_assert(std::is_same<decltype(&JitRegionKernel::TryExecute),
                            bool (JitRegionKernel::*)(DataChunk &, DataChunk &, idx_t, OperatorResultType &)>::value,
               "JIT region kernels must execute through the JIT runtime chunk ABI, not DuckDB executor internals");
-static_assert(std::is_same<decltype(&JitRegionKernel::TrySink),
-                           bool (JitRegionKernel::*)(ExecutionContext &, DataChunk &, OperatorSinkInput &,
-                                                     SinkResultType &)>::value,
-              "JIT sink kernels must execute through the JIT sink runtime ABI, not DuckDB executor internals");
 static_assert(
     std::is_same<decltype(&JitRegionKernel::CanExecuteSourcePrefix), bool (JitRegionKernel::*)() const>::value,
     "JIT source-prefix kernels must advertise the source-prefix executable ABI explicitly");
-static_assert(
-    std::is_same<decltype(&JitRegionKernel::CanExecuteSinkPipeline), bool (JitRegionKernel::*)() const>::value,
-    "JIT sink pipeline kernels must advertise the sink executable ABI explicitly");
 static_assert(
     std::is_same<decltype(&JitRegionKernel::CanExecuteFullPipeline), bool (JitRegionKernel::*)() const>::value,
     "JIT full pipeline kernels must advertise the full-pipeline executable ABI explicitly");
@@ -95,8 +88,7 @@ private:
 };
 
 static bool IsKnownJitCandidateScope(const string &scope) {
-	return scope == "post_source_operator_interval" || scope == "source_prefix" || scope == "sink_pipeline" ||
-	       scope == "full_pipeline";
+	return scope == "post_source_operator_interval" || scope == "source_prefix" || scope == "full_pipeline";
 }
 
 static bool IsCompiledRegionExecutionMode(const string &execution_mode) {
@@ -107,11 +99,6 @@ static void RequireCompiledRegionScopeHonesty(const JitEvent &event) {
 	if (event.candidate_scope == "source_prefix") {
 		REQUIRE(IsCompiledRegionExecutionMode(event.execution_mode));
 		REQUIRE(event.candidate_contract.abi == JitRegionABI::SOURCE_PREFIX);
-		return;
-	}
-	if (event.candidate_scope == "sink_pipeline") {
-		REQUIRE(IsCompiledRegionExecutionMode(event.execution_mode));
-		REQUIRE(event.candidate_contract.abi == JitRegionABI::SINK_SUFFIX);
 		return;
 	}
 	if (event.candidate_scope == "full_pipeline") {
@@ -846,56 +833,6 @@ public:
 	atomic<idx_t> region_compile_count {0};
 };
 
-class SinkAbiRejectRegionKernel : public JitRegionKernel {
-public:
-	const string &BackendName() const override {
-		return backend_name;
-	}
-
-	idx_t CodeSize() const override {
-		return 1;
-	}
-
-	bool TrySink(ExecutionContext &, DataChunk &, OperatorSinkInput &, SinkResultType &) override {
-		throw InternalException("sink ABI rejection test should not execute");
-	}
-
-private:
-	string backend_name = "contract_test_sink_abi_region_jit_backend";
-};
-
-class SinkAbiRejectRegionBackend : public JitBackend {
-public:
-	string Name() const override {
-		return "contract_test_sink_abi_region_jit_backend";
-	}
-
-	string Description() const override {
-		return "contract test sink ABI region JIT backend";
-	}
-
-	bool SupportsRegions() const override {
-		return true;
-	}
-
-	JitRegionLoweringPlan AnalyzeRegion(const JitRegionCompilationInput &input) override {
-		if (input.candidate.scope != JitRegionCandidateScope::SINK_PIPELINE) {
-			return UnsupportedContractBoundaryPlan();
-		}
-		JitRegionLoweringPlan plan;
-		plan.SetCompiledExecutionMode(JitExecutionMode::NATIVE);
-		plan.SetRegionExecutionForm(JitRegionExecutionForm::FUSED);
-		plan.AddNode("sink", "CONTRACT_SINK", JitLoweringKind::NATIVE,
-		             "contract sink pipeline node without sink executable ABI");
-		return plan;
-	}
-
-	JitRegionCompileResult CompileRegion(const JitRegionCompilationInput &) override {
-		return JitRegionCompileResult::Compiled(make_uniq<SinkAbiRejectRegionKernel>(), JitExecutionMode::NATIVE,
-		                                        "contract-test-sink-abi-region");
-	}
-};
-
 class FullPipelineAbiRejectRegionKernel : public JitRegionKernel {
 public:
 	const string &BackendName() const override {
@@ -1050,59 +987,6 @@ public:
 		return JitRegionCompileResult::Compiled(make_uniq<SideEffectDecliningFullPipelineRegionKernel>(),
 		                                        JitExecutionMode::NATIVE,
 		                                        "contract-test-side-effect-declining-full-pipeline-region");
-	}
-};
-
-class DecliningSinkRegionKernel : public JitRegionKernel {
-public:
-	const string &BackendName() const override {
-		return backend_name;
-	}
-
-	idx_t CodeSize() const override {
-		return 1;
-	}
-
-	bool CanExecuteSinkPipeline() const override {
-		return true;
-	}
-
-	bool TrySink(ExecutionContext &, DataChunk &, OperatorSinkInput &, SinkResultType &) override {
-		return false;
-	}
-
-private:
-	string backend_name = "contract_test_declining_sink_region_jit_backend";
-};
-
-class DecliningSinkRegionBackend : public JitBackend {
-public:
-	string Name() const override {
-		return "contract_test_declining_sink_region_jit_backend";
-	}
-
-	string Description() const override {
-		return "contract test declining sink region JIT backend";
-	}
-
-	bool SupportsRegions() const override {
-		return true;
-	}
-
-	JitRegionLoweringPlan AnalyzeRegion(const JitRegionCompilationInput &input) override {
-		if (input.candidate.scope != JitRegionCandidateScope::SINK_PIPELINE) {
-			return UnsupportedContractBoundaryPlan();
-		}
-		JitRegionLoweringPlan plan;
-		plan.SetCompiledExecutionMode(JitExecutionMode::NATIVE);
-		plan.SetRegionExecutionForm(JitRegionExecutionForm::FUSED);
-		plan.AddNode("sink", "CONTRACT_SINK", JitLoweringKind::NATIVE, "contract declining sink pipeline node");
-		return plan;
-	}
-
-	JitRegionCompileResult CompileRegion(const JitRegionCompilationInput &) override {
-		return JitRegionCompileResult::Compiled(make_uniq<DecliningSinkRegionKernel>(), JitExecutionMode::NATIVE,
-		                                        "contract-test-declining-sink-region");
 	}
 };
 
@@ -2250,7 +2134,10 @@ TEST_CASE("JIT region lowering exposes aggregate sinks only through maximal cand
 	bool found_full_core_ir = false;
 	bool found_aggregate_sink_protocol = false;
 	for (auto &event : manager.GetEvents()) {
-		REQUIRE_FALSE((event.has_candidate && event.candidate_scope == "sink_pipeline"));
+		if (event.has_candidate && event.candidate_contract.owns_sink) {
+			REQUIRE(event.candidate_contract.owns_source);
+			REQUIRE(event.candidate_scope == "full_pipeline");
+		}
 		if (event.target != "region" || !event.has_candidate || event.candidate_scope != "full_pipeline") {
 			continue;
 		}
@@ -4733,12 +4620,21 @@ TEST_CASE("JIT maximal region planner does not emit sink-only ABI candidates", "
 	auto &context = *con.context;
 	auto &manager = JitManager::Get(context);
 
-	manager.RegisterBackend(make_uniq<SinkAbiRejectRegionBackend>());
-	SetJitTestOptions(context, "contract_test_sink_abi_region_jit_backend");
+	REQUIRE_NO_FAIL(con.Query("LOAD jit_sljit"));
+	REQUIRE_NO_FAIL(con.Query("SET enable_jit=true"));
+	REQUIRE_NO_FAIL(con.Query("SET jit_backend='sljit'"));
+	REQUIRE_NO_FAIL(con.Query("SET jit_policy='force'"));
 
 	REQUIRE_NO_FAIL(con.Query("SELECT sum(i) FROM range(3) tbl(i)"));
 	for (auto &event : manager.GetEvents()) {
-		REQUIRE_FALSE((event.has_candidate && event.candidate_scope == "sink_pipeline"));
+		if (!event.has_candidate) {
+			continue;
+		}
+		REQUIRE(IsKnownJitCandidateScope(event.candidate_scope));
+		if (event.candidate_contract.owns_sink) {
+			REQUIRE(event.candidate_contract.owns_source);
+			REQUIRE(event.candidate_scope == "full_pipeline");
+		}
 	}
 }
 
@@ -5192,34 +5088,6 @@ TEST_CASE("JIT runtime trace separates declined kernels from executor fallback w
 		REQUIRE(counter.last_runtime_result != "fallback");
 	}
 	REQUIRE(found_split_counter);
-}
-
-TEST_CASE("JIT maximal region planner skips sink-only decline paths", "[api][jit]") {
-	DuckDB db;
-	Connection con(db);
-	auto &context = *con.context;
-	auto &manager = JitManager::Get(context);
-
-	manager.RegisterBackend(make_uniq<DecliningSinkRegionBackend>());
-	REQUIRE_NO_FAIL(con.Query("SET jit_backend='contract_test_declining_sink_region_jit_backend'"));
-	REQUIRE_NO_FAIL(con.Query("SET jit_policy='force'"));
-	REQUIRE_NO_FAIL(con.Query("SET jit_trace_runtime=true"));
-
-	manager.ClearEvents();
-	auto result = con.Query("SELECT sum(i) FROM range(16) tbl(i)");
-	REQUIRE_NO_FAIL(*result);
-	REQUIRE(CHECK_COLUMN(result, 0, {120}));
-
-	for (auto &event : manager.GetEvents()) {
-		if (event.target != "region" || event.backend_name != "contract_test_declining_sink_region_jit_backend") {
-			continue;
-		}
-		REQUIRE_FALSE((event.has_candidate && event.candidate_scope == "sink_pipeline"));
-		REQUIRE_FALSE(event.phase == "runtime");
-	}
-	for (auto &counter : manager.GetKernelCounters()) {
-		REQUIRE_FALSE((counter.has_candidate && counter.candidate_scope == "sink_pipeline"));
-	}
 }
 
 TEST_CASE("JIT dump IR and execution mode expose backend honesty", "[api][jit]") {

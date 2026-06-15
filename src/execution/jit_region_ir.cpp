@@ -1732,9 +1732,6 @@ static JitRegionABI DetermineJitRegionContractABI(const JitRegionContract &contr
 		return contract.owns_state_scan && !contract.owns_transform ? JitRegionABI::STATE_SCAN
 		                                                            : JitRegionABI::SOURCE_PREFIX;
 	}
-	if (contract.owns_sink) {
-		return JitRegionABI::SINK_SUFFIX;
-	}
 	if (contract.owns_transform) {
 		return JitRegionABI::CHUNK_TRANSFORM;
 	}
@@ -2071,9 +2068,6 @@ static string GetJitRegionSignatureContext(const JitRegionContract &contract) {
 	}
 	if (JitRegionABIIsChunkTransform(contract.abi)) {
 		return "post-source";
-	}
-	if (JitRegionABIIsSinkPipeline(contract.abi)) {
-		return "sink";
 	}
 	if (JitRegionABIIsFullPipeline(contract.abi)) {
 		return "full-pipeline";
@@ -2420,9 +2414,6 @@ static JitRegionCandidateScope DetermineJitRegionCandidateScope(const JitRegionI
 	if (starts_at_source && ends_at_sink) {
 		return JitRegionCandidateScope::FULL_PIPELINE;
 	}
-	if (ends_at_sink) {
-		return JitRegionCandidateScope::SINK_PIPELINE;
-	}
 	if (starts_at_source) {
 		return JitRegionCandidateScope::SOURCE_PREFIX;
 	}
@@ -2530,9 +2521,6 @@ static bool JitRegionCandidateRequiresMissingSplitProtocol(const JitRegionCandid
 		return JitRegionTraitsRequireOperatorResumeProtocol(candidate.upstream_traits) ||
 		       JitRegionTraitsRequireOperatorResumeProtocol(candidate.continuation_traits) ||
 		       candidate.continuation_traits.expression_fallback_count > 0;
-	case JitRegionCandidateScope::SINK_PIPELINE:
-		return JitRegionTraitsRequireOperatorResumeProtocol(candidate.upstream_traits) ||
-		       candidate.upstream_traits.expression_fallback_count > 0;
 	default:
 		return false;
 	}
@@ -2561,6 +2549,9 @@ static bool AddJitRegionCandidate(JitRegionIR &region_ir, idx_t candidate_id, id
 	candidate.pipeline_shape = DescribeJitRegionPipelineShape(region_ir, first_node, node_count);
 	candidate.context_pipeline_shape = region_ir.pipeline_shape;
 	candidate.contract = BuildJitRegionContract(region_ir, candidate);
+	if (candidate.contract.owns_sink && !candidate.contract.owns_source) {
+		return false;
+	}
 	candidate.stage_plan = BuildJitRegionStagePlan(region_ir, candidate);
 	candidate.traits = BuildJitRegionCandidateTraits(region_ir, candidate, candidate.stage_plan);
 	candidate.signature = BuildJitRegionSignature(region_ir, candidate);

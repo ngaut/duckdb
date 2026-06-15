@@ -1059,14 +1059,13 @@ source-prefix regions valid when filters or projections change column count,
 logical type, physical type, vector format, or selection semantics before the
 remaining DuckDB suffix resumes. A backend that compiles a `source_prefix`
 candidate without that source-prefix executable ABI is an architecture error.
-Sink-owned suffixes are not planner products in the current architecture.
-Existing sink ABI enum support is a reserved runtime contract, not permission to
-compile sink-only regions. Aggregate and join sinks should become native only as
-part of a full-pipeline native operator protocol.
+Sink-owned suffixes are not planner products or runtime contracts. Aggregate
+and join sinks become native only as part of a full-pipeline native operator
+protocol.
 
 `JitRegionContract::abi` is the canonical runtime entry contract. It is one of
-`chunk_transform`, `source_prefix`, `sink_suffix`, `full_pipeline`, or reserved
-`state_scan`. Runtime dispatch, backend ABI validation, source preparation, and
+`chunk_transform`, `source_prefix`, `full_pipeline`, or reserved `state_scan`.
+Runtime dispatch, backend ABI validation, source preparation, and
 backend lowering decisions must consume this ABI instead of recomputing entry
 kind from `owns_source`/`owns_sink` boolean pairs. The ownership booleans remain
 for compatibility, but they are not the semantic runtime contract. SQL
@@ -1074,17 +1073,17 @@ observability exposes this directly as `candidate_contract_abi` in
 `duckdb_jit_events()`, `duckdb_jit_decision_counters()`, and
 `duckdb_jit_kernel_counters()`, so tests and production trace tooling do not
 need to parse rendered pipeline shapes or contract IR to recover the ABI. This
-removes the old edge case where source-prefix, full-pipeline, sink-suffix, and
+removes the old edge case where source-prefix, full-pipeline, and
 chunk-transform decisions were reimplemented independently in core execution,
 backend lowering, tests, and trace helpers.
 
 ABI category checks are also centralized in the core JIT common layer through
-`JitRegionABIIsChunkTransform`, `JitRegionABIIsSourcePrefix`,
-`JitRegionABIIsSinkPipeline`, and `JitRegionABIIsFullPipeline`. Runtime dispatch,
-backend admission, and backend planning must use these helpers instead of
-defining backend-local predicates or storing parallel source/sink/full booleans.
-Compiled kernels may carry the ABI, but they must derive executable capability
-from that ABI rather than from duplicated state.
+`JitRegionABIIsChunkTransform`, `JitRegionABIIsSourcePrefix`, and
+`JitRegionABIIsFullPipeline`. Runtime dispatch, backend admission, and backend
+planning must use these helpers instead of defining backend-local predicates or
+storing parallel source/full booleans. Compiled kernels may carry the ABI, but
+they must derive executable capability from that ABI rather than from duplicated
+state.
 
 The SQL-visible candidate contract columns are declared and appended through one
 internal helper shared by `duckdb_jit_events()`,

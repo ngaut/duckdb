@@ -507,10 +507,6 @@ bool JitRegionKernel::CanExecuteSourcePrefix() const {
 	return false;
 }
 
-bool JitRegionKernel::CanExecuteSinkPipeline() const {
-	return false;
-}
-
 bool JitRegionKernel::CanExecuteFullPipeline() const {
 	return false;
 }
@@ -520,10 +516,6 @@ bool JitRegionKernel::RequiresNativeSource() const {
 }
 
 bool JitRegionKernel::TryExecute(DataChunk &, DataChunk &, idx_t, OperatorResultType &) {
-	return false;
-}
-
-bool JitRegionKernel::TrySink(ExecutionContext &, DataChunk &, OperatorSinkInput &, SinkResultType &) {
 	return false;
 }
 

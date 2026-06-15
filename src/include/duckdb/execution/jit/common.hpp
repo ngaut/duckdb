@@ -17,11 +17,10 @@ enum class JitExecutionMode : uint8_t { NONE, NATIVE, EXECUTOR_FALLBACK, UNSUPPO
 enum class JitRegionExecutionForm : uint8_t { NONE, FUSED };
 enum class JitLoweringKind : uint8_t { NATIVE, FALLBACK };
 enum class JitRegionIRNodeKind : uint8_t { SOURCE, FILTER, PROJECTION, OPERATOR, SINK };
-enum class JitRegionABI : uint8_t { NONE, CHUNK_TRANSFORM, SOURCE_PREFIX, SINK_SUFFIX, FULL_PIPELINE, STATE_SCAN };
+enum class JitRegionABI : uint8_t { NONE, CHUNK_TRANSFORM, SOURCE_PREFIX, FULL_PIPELINE, STATE_SCAN };
 enum class JitRegionCandidateScope : uint8_t {
 	POST_SOURCE_OPERATOR_INTERVAL,
 	SOURCE_PREFIX,
-	SINK_PIPELINE,
 	FULL_PIPELINE
 };
 enum class JitRegionSourceKind : uint8_t {
@@ -171,7 +170,6 @@ DUCKDB_API const char *JitRegionIRNodeKindToString(JitRegionIRNodeKind kind);
 DUCKDB_API const char *JitRegionABIToString(JitRegionABI abi);
 DUCKDB_API bool JitRegionABIIsChunkTransform(JitRegionABI abi);
 DUCKDB_API bool JitRegionABIIsSourcePrefix(JitRegionABI abi);
-DUCKDB_API bool JitRegionABIIsSinkPipeline(JitRegionABI abi);
 DUCKDB_API bool JitRegionABIIsFullPipeline(JitRegionABI abi);
 DUCKDB_API bool JitRegionABIOwnsSource(JitRegionABI abi);
 DUCKDB_API bool JitRegionABIOwnsSink(JitRegionABI abi);
