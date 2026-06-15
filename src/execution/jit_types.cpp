@@ -355,8 +355,6 @@ const char *JitRegionOwnershipKindToString(JitRegionOwnershipKind kind) {
 		return "native-protocol";
 	case JitRegionOwnershipKind::SOURCE_BOUNDARY:
 		return "source-boundary";
-	case JitRegionOwnershipKind::TYPED_HELPER:
-		return "typed-helper";
 	case JitRegionOwnershipKind::EXECUTOR_BOUNDARY:
 		return "executor-boundary";
 	case JitRegionOwnershipKind::MISSING_PROTOCOL:
@@ -405,8 +403,6 @@ const char *JitRegionStageExecutionKindToString(JitRegionStageExecutionKind kind
 		return "native-protocol";
 	case JitRegionStageExecutionKind::SOURCE_BOUNDARY:
 		return "source-boundary";
-	case JitRegionStageExecutionKind::TYPED_HELPER:
-		return "typed-helper";
 	case JitRegionStageExecutionKind::EXECUTOR_FALLBACK:
 		return "executor-fallback";
 	case JitRegionStageExecutionKind::MISSING_PROTOCOL:

@@ -125,8 +125,6 @@ static inline void AddJitCandidateTraceColumns(vector<LogicalType> &return_types
 	return_types.emplace_back(LogicalType::UBIGINT);
 	names.emplace_back("candidate_source_boundary_count");
 	return_types.emplace_back(LogicalType::UBIGINT);
-	names.emplace_back("candidate_typed_helper_boundary_count");
-	return_types.emplace_back(LogicalType::UBIGINT);
 	names.emplace_back("candidate_executor_boundary_count");
 	return_types.emplace_back(LogicalType::UBIGINT);
 	names.emplace_back("candidate_missing_protocol_count");
@@ -139,7 +137,7 @@ static inline void AddJitCandidateTraceColumns(vector<LogicalType> &return_types
 
 static inline idx_t AppendNullJitCandidateTraceColumns(DataChunk &output, idx_t column_offset) {
 	output.data[column_offset++].Append(Value(LogicalType::VARCHAR));
-	for (idx_t count_idx = 0; count_idx < 5; count_idx++) {
+	for (idx_t count_idx = 0; count_idx < 4; count_idx++) {
 		output.data[column_offset++].Append(Value(LogicalType::UBIGINT));
 	}
 	for (idx_t boolean_idx = 0; boolean_idx < 4; boolean_idx++) {
@@ -222,7 +220,6 @@ static inline idx_t AppendJitCandidateTraceColumns(DataChunk &output, idx_t colu
 	output.data[column_offset++].Append(Value::BOOLEAN(contract.native_fusion_ready));
 	output.data[column_offset++].Append(Value::UBIGINT(contract.generated_operator_count));
 	output.data[column_offset++].Append(Value::UBIGINT(contract.source_boundary_count));
-	output.data[column_offset++].Append(Value::UBIGINT(contract.typed_helper_boundary_count));
 	output.data[column_offset++].Append(Value::UBIGINT(contract.executor_boundary_count));
 	output.data[column_offset++].Append(Value::UBIGINT(contract.missing_protocol_count));
 	output.data[column_offset++].Append(Value(FormatJitTableFunctionStringList(contract.required_capabilities)));

@@ -288,7 +288,6 @@ struct JitRegionContract {
 	bool native_fusion_ready = false;
 	idx_t generated_operator_count = 0;
 	idx_t source_boundary_count = 0;
-	idx_t typed_helper_boundary_count = 0;
 	idx_t executor_boundary_count = 0;
 	idx_t missing_protocol_count = 0;
 	vector<string> required_capabilities;

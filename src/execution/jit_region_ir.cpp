@@ -1494,9 +1494,6 @@ static void RecordJitRegionContractOwnership(JitRegionContract &contract, JitReg
 	case JitRegionOwnershipKind::SOURCE_BOUNDARY:
 		contract.source_boundary_count++;
 		break;
-	case JitRegionOwnershipKind::TYPED_HELPER:
-		contract.typed_helper_boundary_count++;
-		break;
 	case JitRegionOwnershipKind::EXECUTOR_BOUNDARY:
 		contract.executor_boundary_count++;
 		break;
@@ -1569,7 +1566,6 @@ static JitRegionOwnershipKind ClassifyJitCompiledContractOwnership(const JitComp
 	bool saw_native = false;
 	bool saw_generated = false;
 	bool saw_source_boundary = false;
-	bool saw_helper = false;
 	bool saw_missing = false;
 	for (auto &stage : compiled_contract.stages) {
 		switch (stage.execution) {
@@ -1583,10 +1579,6 @@ static JitRegionOwnershipKind ClassifyJitCompiledContractOwnership(const JitComp
 			break;
 		case JitRegionStageExecutionKind::SOURCE_BOUNDARY:
 			saw_source_boundary = true;
-			AddJitUniqueString(region_contract.blockers, stage.blocker.empty() ? fallback_reason : stage.blocker);
-			break;
-		case JitRegionStageExecutionKind::TYPED_HELPER:
-			saw_helper = true;
 			AddJitUniqueString(region_contract.blockers, stage.blocker.empty() ? fallback_reason : stage.blocker);
 			break;
 		case JitRegionStageExecutionKind::MISSING_PROTOCOL:
@@ -1606,9 +1598,6 @@ static JitRegionOwnershipKind ClassifyJitCompiledContractOwnership(const JitComp
 	}
 	if (saw_source_boundary) {
 		return JitRegionOwnershipKind::SOURCE_BOUNDARY;
-	}
-	if (saw_helper) {
-		return JitRegionOwnershipKind::TYPED_HELPER;
 	}
 	if (saw_native) {
 		return JitRegionOwnershipKind::NATIVE_PROTOCOL;
@@ -1696,7 +1685,6 @@ static string DescribeJitRegionContract(const JitRegionContract &contract) {
 	result += ",native_fusion_ready=" + JitRegionBool(contract.native_fusion_ready);
 	result += ",generated_ops=" + std::to_string(contract.generated_operator_count);
 	result += ",source_boundaries=" + std::to_string(contract.source_boundary_count);
-	result += ",typed_helper_boundaries=" + std::to_string(contract.typed_helper_boundary_count);
 	result += ",executor_boundaries=" + std::to_string(contract.executor_boundary_count);
 	result += ",missing_protocols=" + std::to_string(contract.missing_protocol_count);
 	result += ",required_capabilities=" + BuildJitStringList(contract.required_capabilities);
@@ -1776,7 +1764,7 @@ static JitRegionContract BuildJitRegionContract(const JitRegionIR &region_ir, co
 	contract.owns_transform = has_transform;
 	contract.executor_boundary_free = contract.executor_boundary_count == 0;
 	contract.native_fusion_ready = contract.executor_boundary_count == 0 && contract.source_boundary_count == 0 &&
-	                               contract.typed_helper_boundary_count == 0 && contract.missing_protocol_count == 0;
+	                               contract.missing_protocol_count == 0;
 	contract.abi = DetermineJitRegionContractABI(contract);
 	contract.ir = DescribeJitRegionContract(contract);
 	return contract;
@@ -1823,8 +1811,7 @@ static bool JitRegionStageRequiresExecutorBoundary(JitRegionStageExecutionKind e
 }
 
 static bool JitRegionStageRequiresMissingProtocol(JitRegionStageExecutionKind execution) {
-	return execution == JitRegionStageExecutionKind::MISSING_PROTOCOL ||
-	       execution == JitRegionStageExecutionKind::TYPED_HELPER;
+	return execution == JitRegionStageExecutionKind::MISSING_PROTOCOL;
 }
 
 static void AccumulateJitRegionStageTraits(const JitRegionStage &stage, JitRegionCandidateTraits &traits) {
@@ -2159,8 +2146,6 @@ JitRegionStageExecutionFromOwnership(JitRegionOwnershipKind ownership) {
 		return JitRegionStageExecutionKind::NATIVE_PROTOCOL;
 	case JitRegionOwnershipKind::SOURCE_BOUNDARY:
 		return JitRegionStageExecutionKind::SOURCE_BOUNDARY;
-	case JitRegionOwnershipKind::TYPED_HELPER:
-		return JitRegionStageExecutionKind::TYPED_HELPER;
 	case JitRegionOwnershipKind::EXECUTOR_BOUNDARY:
 		return JitRegionStageExecutionKind::EXECUTOR_FALLBACK;
 	case JitRegionOwnershipKind::MISSING_PROTOCOL:
@@ -2179,8 +2164,6 @@ static JitRegionOwnershipKind JitRegionOwnershipFromStageExecution(JitRegionStag
 		return JitRegionOwnershipKind::NATIVE_PROTOCOL;
 	case JitRegionStageExecutionKind::SOURCE_BOUNDARY:
 		return JitRegionOwnershipKind::SOURCE_BOUNDARY;
-	case JitRegionStageExecutionKind::TYPED_HELPER:
-		return JitRegionOwnershipKind::TYPED_HELPER;
 	case JitRegionStageExecutionKind::EXECUTOR_FALLBACK:
 		return JitRegionOwnershipKind::EXECUTOR_BOUNDARY;
 	case JitRegionStageExecutionKind::MISSING_PROTOCOL:

@@ -443,7 +443,6 @@ static bool JitRegionStageExecutionIsFused(JitRegionStageExecutionKind execution
 
 static bool JitRegionStageExecutionIsFusionBlocker(JitRegionStageExecutionKind execution) {
 	switch (execution) {
-	case JitRegionStageExecutionKind::TYPED_HELPER:
 	case JitRegionStageExecutionKind::SOURCE_BOUNDARY:
 	case JitRegionStageExecutionKind::EXECUTOR_FALLBACK:
 	case JitRegionStageExecutionKind::MISSING_PROTOCOL:

@@ -2690,9 +2690,6 @@ SljitRegionPlan BuildSljitRegionPlan(const JitRegionIR &region_ir, const JitRegi
 			if (contract.source_boundary_count > 0) {
 				plan.lowering_plan.AddFusionBlocker("candidate-fusion-gap:source-boundary;" + contract.ir);
 			}
-			if (contract.typed_helper_boundary_count > 0) {
-				plan.lowering_plan.AddFusionBlocker("candidate-fusion-gap:typed-helper-boundary;" + contract.ir);
-			}
 			if (contract.missing_protocol_count > 0) {
 				plan.lowering_plan.AddFusionBlocker("candidate-fusion-gap:missing-protocol;" + contract.ir);
 			}

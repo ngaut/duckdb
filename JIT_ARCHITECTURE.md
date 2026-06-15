@@ -53,8 +53,8 @@ verification workload, not a design input.
   expression IR and fused region IR before any backend-specific code generation.
 - Model stateful operators as resumable producer/consumer protocols, not as
   one-input-chunk to one-output-chunk transforms.
-- Make execution mode observable and truthful: native code, generated
-  typed-helper code, executor fallback, and unsupported paths must not be
+- Make execution mode observable and truthful: native generated code, source
+  boundaries, executor fallback, and unsupported paths must not be
   conflated.
 - Scope compiled code to query/executor lifetime unless a catalog-aware
   invalidation model exists.
@@ -275,7 +275,7 @@ Region formation
         v
 Backend capability plan
   - native nodes
-  - typed helper blockers
+  - missing protocol blockers
   - fallback boundaries
   - backend-private lowering plan
         |
@@ -738,11 +738,12 @@ semantic record. The minimum core-visible payload is:
 - deterministic printable text for `jit_dump_ir=true`.
 
 Stateful operators are not special cases. They are region nodes with explicit
-state protocols. A join probe region can consume a DuckDB-built hash table
-through a typed helper API. A future generated join build region can own build
-loops only after the IR exposes the build-state contract. Aggregates follow the
-same rule: generated code may update local aggregate state through typed helper
-stubs before a backend owns full native aggregate update logic.
+state protocols. A join probe region can consume a DuckDB-built hash table only
+through a native state-scan/probe contract. A future generated join build region
+can own build loops only after the IR exposes the build-state contract.
+Aggregates follow the same rule: generated code may call primitive runtime stubs
+from a native update loop, but operator ownership exists only after core exposes
+the full native aggregate state/update protocol.
 
 The state protocol is a core ABI, not a backend shortcut into private executor
 objects. A `JitStateProtocol` must declare:
@@ -751,7 +752,7 @@ objects. A `JitStateProtocol` must declare:
   `aggregate_combine`, `aggregate_finalize`, `sort_input`, `topn_update`, or
   `sink_update`;
 - query-scoped opaque state handle lifetime;
-- typed helper entrypoints, if generated code does not own the full operation;
+- primitive runtime stub entrypoints needed by generated native code;
 - input and output vector formats;
 - selection-vector semantics;
 - validity/null semantics;
@@ -838,21 +839,21 @@ model. The same plan also exposes the region execution form explicitly:
 
 `execution_mode` and `region_execution_form` are intentionally separate. A
 compiled region can be `fused` only when generated code owns the executable
-interval and the interval has no executor boundary, no typed operator/sink
-helper ownership boundary, and no missing native protocol. Primitive stubs for hashing,
+interval and the interval has no executor boundary, no source boundary, and no
+missing native protocol. Primitive stubs for hashing,
 comparison, allocation, exceptions, and low-level value primitives are allowed
 because they do not own operator protocol. Hash-join build/probe and generic
 hash aggregate lookup/update are native contracts for supported layouts and
 join/aggregate shapes; unsupported variants must stay missing-protocol, not
-typed-helper success states. If generated code would be separated by source,
-sink, materialization, typed-helper, or whole-executor boundaries, the candidate
+partial operator success states. If generated code would be separated by source,
+sink, materialization, or whole-executor boundaries, the candidate
 is `none` and must be skipped or reported unsupported rather than compiled.
 
 Core stage ownership is a hard admission contract, not backend advice. Backend
 analysis may explain why a candidate is blocked, but it cannot override
 `JitRegionContract::native_fusion_ready` or the canonical
 `JitRegionStagePlan`. If a backend advertises `region_execution_form=fused`
-while the core stage plan still contains a source-boundary, typed-helper, executor-fallback, or
+while the core stage plan still contains a source-boundary, executor-fallback, or
 missing-protocol stage, `JitManager` records the candidate as unsupported and
 does not call backend code generation. This keeps fake fusion, non-fused helper
 source prefixes, and stale shape-specific backends from reaching runtime.
@@ -1134,7 +1135,7 @@ not include aggregate physical-operator headers or cast DuckDB local sink state.
 Native aggregate sink updates are all-or-nothing at the sink-node level. A sink
 with three aggregates is native only if every aggregate update in that sink has
 an executable native/generated contract. If any aggregate is unsupported, the
-whole sink remains a typed helper or fallback boundary. A partial native aggregate update is an architecture bug because it mutates DuckDB local state before the reference path can safely replay the same rows.
+whole sink remains a missing-protocol or fallback boundary. A partial native aggregate update is an architecture bug because it mutates DuckDB local state before the reference path can safely replay the same rows.
 The native implementations cover `count(*)` and nullable `count(x)` for
 non-optional BIGINT state, plus nullable `sum(x)` when core IR proves one
 physical INT64 payload child and an optional BIGINT or HUGEINT state. The
@@ -1162,7 +1163,7 @@ Core exposes the grouped state-address contract through flat
 `native_grouped_state_*` fields inside `JitRegionAggregateProtocol`, and it
 exposes hash-table lookup ownership through flat
 `native_hash_aggregate_lookup_*` fields inside the same protocol. It does not
-expose an operator-specific typed lookup helper contract in core IR. Backends
+expose an operator-specific partial-ownership contract in core IR. Backends
 must consume those neutral contracts instead of inspecting grouped aggregate
 internals or calling whole aggregate sink helpers. The fields are intentionally
 not nested angle-bracket IR records because TPC-H trace extraction treats each
@@ -1209,8 +1210,8 @@ aggregate sink updates through the same generic fused runtime loop used by
 other native sink updates: `region_execution_form=fused`,
 `kernel=generic-runtime-loop`, and no
 `operator-fusion-gap:native-operator-codegen-missing`. The event must not retain
-typed lookup helper contracts; it is a native protocol success, not a
-source-boundary or typed-helper success. It also must not report the stale "lookup ready but SLJIT
+lookup partial-ownership contracts; it is a native protocol success, not a
+source-boundary or partial operator success. It also must not report the stale "lookup ready but SLJIT
 lowering missing" blocker. Unsupported grouped hash shapes should name the
 actual missing piece, such as no aggregate payload bindings or an unsupported
 aggregate update function.
@@ -2089,17 +2090,15 @@ masquerade as fused.
 Workload traces must also include a generic fused-region blocker summary.
 `fusion_blocker_summary` is the architecture-level priority ledger for every
 candidate that carries a blocker to fused execution. It includes skipped
-non-fused candidates and unsupported candidates whose core contract names a missing
-protocol, source-boundary ownership boundary, typed-helper ownership boundary that is not admitted as fused, or executor
-boundary. It parses raw event reasons for `fusion-blocker:*`, groups by blocker
+non-fused candidates and unsupported candidates whose core contract names a
+missing protocol, source-boundary ownership boundary, or executor boundary. It parses raw event reasons for `fusion-blocker:*`, groups by blocker
 class, current source/sink contracts, candidate shape/scope, and admission shape
 key, then joins runtime counters and operator-profiler evidence when a kernel
 actually ran. It must include source blockers such as
 `source-fusion-gap:requires-native-source`, sink blockers such as
 `sink-fusion-gap:requires-native-sink-or-operator-update`, and candidate-level
 blockers such as `candidate-fusion-gap:missing-protocol`,
-`candidate-fusion-gap:source-boundary`,
-`candidate-fusion-gap:typed-helper-boundary`, and
+`candidate-fusion-gap:source-boundary`, and
 `candidate-fusion-gap:executor-boundary`. The summary is not a cost model by
 itself; it is the lossless trace artifact that proves which native source,
 state-scan, grouped-state, sink, or operator ABI must be implemented before a
@@ -2116,10 +2115,9 @@ the executable ownership booleans (`owns_source`, `owns_transform`,
 `source_ownership`, `state_scan_ownership`, `transform_ownership`, and
 `sink_ownership` for the candidate being analyzed, not for incidental context
 that may appear in the whole-region IR text. Ownership values are
-`generated-ir`, `native-protocol`, `source-boundary`, `typed-helper`, `executor-boundary`, and
+`generated-ir`, `native-protocol`, `source-boundary`, `executor-boundary`, and
 `missing-protocol`. A region is `native_fusion_ready=true` only when its
-executable candidate has no executor boundary, no source-boundary ownership boundary,
-no typed-helper ownership boundary, and no
+executable candidate has no executor boundary, no source-boundary ownership boundary, and no
 missing operator protocol. This makes legacy scope labels reporting-only: core
 selection, prepared-source contracts, runtime ABI selection, and SLJIT shape
 classification must derive source/full-pipeline behavior from the contract, not
@@ -2131,7 +2129,7 @@ explicit native protocols before they can be counted as fused native work.
 Backends consume this core ownership contract from `JitRegionCandidate::contract`.
 SLJIT may add backend lowering blockers such as
 `candidate-fusion-gap:missing-protocol`,
-`candidate-fusion-gap:typed-helper-boundary`, and
+`candidate-fusion-gap:source-boundary`, and
 `candidate-fusion-gap:executor-boundary`, but it must not rediscover DuckDB
 physical operator ownership by reaching back into executor internals. Stateful
 sources use `state_scan_ownership` and required capabilities such as
@@ -2547,7 +2545,7 @@ Sink suffix candidates are not executable planner products in the current
 architecture. Hash-join build/probe and generic hash aggregate lookup/update use
 backend-neutral native build/probe/lookup/update contracts for supported shapes;
 unsupported join types, layouts, aggregate states, or aggregate functions are
-missing-protocol, not typed-helper success states. Ungrouped aggregate and
+missing-protocol, not partial native success states. Ungrouped aggregate and
 perfect-hash aggregate have explicit native update paths for supported shapes.
 Other sinks remain visible through full-pipeline analysis and runtime
 diagnostics until a native protocol exists, without relabeling DuckDB sink

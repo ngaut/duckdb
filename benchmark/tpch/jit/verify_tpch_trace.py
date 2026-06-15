@@ -2241,8 +2241,8 @@ def verify_fusion_blockers(
         if row["blocker_class"] == "candidate-fusion-gap":
             if row["fusion_blocker"] not in {
                 "candidate-fusion-gap:executor-boundary",
-                "candidate-fusion-gap:typed-helper-boundary",
                 "candidate-fusion-gap:missing-protocol",
+                "candidate-fusion-gap:source-boundary",
             }:
                 raise AssertionError(f"fusion_blocker_summary.csv: unknown candidate blocker: {row}")
             if row["status"] == "compiled":
@@ -3377,7 +3377,7 @@ def verify_source_boundary_features(
                 scan_features += required_scan_native_ir_features if is_native_scan else required_scan_helper_ir_features
             if not is_native_scan and not any(marker in trace_text for marker in required_scan_helper_reason_markers):
                 raise AssertionError(
-                    f"{row['events_csv']}: table-scan helper source boundary event {event.get('event_id')} "
+                    f"{row['events_csv']}: table-scan source boundary event {event.get('event_id')} "
                     f"does not expose a source boundary marker: {event}"
                 )
             for feature in scan_features:
