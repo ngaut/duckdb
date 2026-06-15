@@ -837,7 +837,7 @@ KNOWN_ADMISSION_PROOF_STATUSES = (
     "negative_query_median",
 )
 CONTEXT_SPECIFIC_POSITIVE_ADMISSION_SHAPES = (
-    "sljit:full-pipeline:fused-filter-projection-ungrouped-sum",
+    "sljit:full-pipeline:filter-projection-ungrouped-aggregate-update",
 )
 KNOWN_ADMISSION_PROOF_ROOT_CAUSES = (
     "missing_measured_auto_admission_proof",

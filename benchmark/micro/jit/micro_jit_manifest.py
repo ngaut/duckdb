@@ -37,8 +37,8 @@ def decimal_projection_ungrouped_sum_expected(row_count: int) -> str:
 
 ADMITTED_FAMILIES = {
     "native_filter_projection": {
-        "shape_constant": "SLJIT_SOURCE_PREFIX_FUSED_FILTER_PROJECTION_SHAPE",
-        "shape_key": "sljit:source-prefix:fused-filter-projection",
+        "shape_constant": "SLJIT_SOURCE_PREFIX_FILTER_PROJECTION_SHAPE",
+        "shape_key": "sljit:source-prefix:filter-projection",
         "proof": "benchmark/micro/jit/native_filter_projection",
         "template": "benchmark/micro/jit/native_filter_projection.benchmark.in",
         "min_cardinality": 1000000,
@@ -117,7 +117,7 @@ DIAGNOSTIC_FAMILIES = {
         "expected": generic_expected,
     },
     "native_full_pipeline_decimal_projection_ungrouped_sum": {
-        "shape_key": "sljit:full-pipeline:fused-filter-projection-ungrouped-sum",
+        "shape_key": "sljit:full-pipeline:filter-projection-ungrouped-aggregate-update",
         "template": "benchmark/micro/jit/native_full_pipeline_decimal_projection_ungrouped_sum.benchmark.in",
         "candidate_shape": "scan-filter-scan-project-projection-sink",
         "include_in_sweep": False,

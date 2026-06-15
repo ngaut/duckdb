@@ -14,7 +14,7 @@ from micro_jit_manifest import DIAGNOSTIC_POLICIES as POLICIES, MIN_ADMITTED_SPE
 
 
 FAMILY = "native_full_pipeline_decimal_projection_ungrouped_sum"
-SHAPE_KEY = "sljit:full-pipeline:fused-filter-projection-ungrouped-sum"
+SHAPE_KEY = "sljit:full-pipeline:filter-projection-ungrouped-aggregate-update"
 CANDIDATE_SHAPE = "scan-filter-scan-project-projection-sink"
 
 

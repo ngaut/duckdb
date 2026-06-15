@@ -7,7 +7,6 @@
 //===----------------------------------------------------------------------===//
 
 #include "sljit_native_util.hpp"
-#include "sljit_region_codegen.hpp"
 #include "sljit_region_executable.hpp"
 #include "sljit_region_plan.hpp"
 #include "sljit_region_runtime.hpp"
@@ -19,132 +18,6 @@ namespace duckdb {
 
 static string AttachCoreRegionIR(string backend_ir, const JitRegionIR &region_ir) {
 	return std::move(backend_ir) + ";core=(" + region_ir.ir + ")";
-}
-
-static unique_ptr<JitRegionKernel> TryBuildFusedFilterProjectionRegion(const string &backend_name,
-                                                                         SljitNativeRegionPlan &&region,
-                                                                         const JitRegionIR &region_ir, string &ir,
-                                                                         string &error, JitRegionABI abi) {
-	if (!CanFuseNativeFilterProjectionRegion(region)) {
-		return nullptr;
-	}
-
-	auto &filter = region.ops[0].filter;
-	auto &projection = region.ops[1].projections[0];
-	auto projection_overflow_message = NativeIntegerBinaryOverflowMessage(projection.binary_op);
-	SljitFusedFilterProjectionFunction function = nullptr;
-	auto code = BuildSljitFusedIntegerFilterProjection(filter.integer_kind, filter.compare_op, filter.constant_on_left,
-	                                                   projection.binary_op, projection.constant_on_left, function,
-	                                                   error);
-	if (!code) {
-		return nullptr;
-	}
-
-	ir = AttachCoreRegionIR(DescribeNativeRegion(region, "native.region.fused"), region_ir);
-	return CreateSljitFusedFilterProjectionKernel(backend_name, std::move(filter), std::move(projection),
-	                                             std::move(code), function,
-	                                             std::move(projection_overflow_message), abi,
-	                                             region.native_source);
-}
-
-static unique_ptr<JitRegionKernel> TryBuildFusedFilterProjectionUngroupedSumRegion(const string &backend_name,
-                                                                                   SljitNativeRegionPlan &&region,
-                                                                                   const JitRegionIR &region_ir,
-                                                                                   string &ir, string &error,
-                                                                                   JitRegionABI abi) {
-	if (!JitRegionABIIsFullPipeline(abi) || !CanFuseNativeFilterProjectionUngroupedSumRegion(region)) {
-		return nullptr;
-	}
-
-	auto &filter = region.ops[0].filter;
-	auto &projection = region.ops[1].projections[0];
-	auto &update = region.ops[2].native_ungrouped_aggregate_updates[0];
-	auto projection_overflow_message = projection.kind == SljitNativeRegionExpressionKind::INTEGER_BINARY_REFERENCES
-	                                       ? NativeIntegerBinaryOverflowMessage(projection.binary_op)
-	                                       : string();
-	SljitFusedUngroupedAggregateFunction function = nullptr;
-	auto code = BuildSljitFusedFilterProjectionUngroupedSum(filter, projection, update, function, error);
-	if (!code || !function) {
-		return nullptr;
-	}
-
-	ir = AttachCoreRegionIR(DescribeNativeRegion(region, "native.region.fused"), region_ir);
-	return CreateSljitFusedFilterProjectionUngroupedSumKernel(
-	    backend_name, std::move(filter), std::move(projection), std::move(update), std::move(code), function,
-	    std::move(projection_overflow_message), region.native_source);
-}
-
-static unique_ptr<JitRegionKernel> TryBuildFusedProjectionUngroupedSumRegion(const string &backend_name,
-                                                                             SljitNativeRegionPlan &&region,
-                                                                             const JitRegionIR &region_ir,
-                                                                             string &ir, string &error,
-                                                                             JitRegionABI abi) {
-	if (!JitRegionABIIsFullPipeline(abi) || !CanFuseNativeProjectionUngroupedSumRegion(region)) {
-		return nullptr;
-	}
-
-	auto &projection = region.ops[0].projections[0];
-	auto &update = region.ops[1].native_ungrouped_aggregate_updates[0];
-	auto projection_overflow_message = projection.kind == SljitNativeRegionExpressionKind::INTEGER_BINARY_REFERENCES
-	                                       ? NativeIntegerBinaryOverflowMessage(projection.binary_op)
-	                                       : string();
-	SljitFusedUngroupedAggregateFunction function = nullptr;
-	auto code = BuildSljitFusedProjectionUngroupedSum(projection, update, function, error);
-	if (!code || !function) {
-		return nullptr;
-	}
-
-	ir = AttachCoreRegionIR(DescribeNativeRegion(region, "native.region.fused"), region_ir);
-	return CreateSljitFusedProjectionUngroupedSumKernel(backend_name, std::move(projection), std::move(update),
-	                                                    std::move(code), function,
-	                                                    std::move(projection_overflow_message),
-	                                                    region.native_source);
-}
-
-static unique_ptr<JitRegionKernel> TryBuildFusedPerfectHashAggregateRegion(const string &backend_name,
-                                                                           SljitNativeRegionPlan &&region,
-                                                                           const JitRegionIR &region_ir, string &ir,
-                                                                           string &error, JitRegionABI abi) {
-	if (!JitRegionABIIsFullPipeline(abi) || !CanFuseNativePerfectHashAggregateRegion(region)) {
-		return nullptr;
-	}
-
-	unique_ptr<JitCodeHandle> code;
-	SljitFusedPerfectHashAggregateFunction function = nullptr;
-	string overflow_message;
-	if (!BuildSljitFusedDirectPerfectHashAggregate(region, code, function, overflow_message, error)) {
-		return nullptr;
-	}
-	if (!code || !function) {
-		return nullptr;
-	}
-
-	ir = AttachCoreRegionIR(DescribeNativeRegion(region, "native.region.fused"), region_ir);
-	auto native_source = region.native_source;
-	return CreateSljitFusedDirectPerfectHashAggregateKernel(backend_name, std::move(region), std::move(code),
-	                                                        function, std::move(overflow_message), native_source);
-}
-
-static unique_ptr<JitRegionKernel>
-TryBuildOperatorStageKernel(const string &backend_name, SljitNativeRegionPlan &&region,
-                            const JitRegionIR &region_ir, string &ir, string &error,
-                            const JitRegionContract &contract, const SljitOperatorStageRegionPlan &stage_plan) {
-	switch (stage_plan.kernel_kind) {
-	case SljitOperatorKernelKind::FILTER_PROJECTION:
-		return TryBuildFusedFilterProjectionRegion(backend_name, std::move(region), region_ir, ir, error,
-		                                           contract.abi);
-	case SljitOperatorKernelKind::FILTER_PROJECTION_UNGROUPED_SUM:
-		return TryBuildFusedFilterProjectionUngroupedSumRegion(backend_name, std::move(region), region_ir, ir, error,
-		                                                       contract.abi);
-	case SljitOperatorKernelKind::PROJECTION_UNGROUPED_SUM:
-		return TryBuildFusedProjectionUngroupedSumRegion(backend_name, std::move(region), region_ir, ir, error,
-		                                                 contract.abi);
-	case SljitOperatorKernelKind::PERFECT_HASH_AGGREGATE:
-		return TryBuildFusedPerfectHashAggregateRegion(backend_name, std::move(region), region_ir, ir, error,
-		                                               contract.abi);
-	default:
-		return nullptr;
-	}
 }
 
 JitRegionLoweringPlan AnalyzeSljitRegion(const JitRegionCompilationInput &input) {
@@ -179,34 +52,12 @@ JitRegionCompileResult CompileSljitRegion(const string &backend_name, const JitR
 			reason += ";fused:arithmetic-projection-chain=" +
 			          std::to_string(native_region->fused_arithmetic_projection_chains);
 		}
-		if (native_region->runtime_fused_filter_projections > 0) {
+		if (native_region->runtime_combined_filter_projections > 0) {
 			reason += ";runtime-fused:filter-projection=" +
-			          std::to_string(native_region->runtime_fused_filter_projections);
+			          std::to_string(native_region->runtime_combined_filter_projections);
 		}
 		if (native_region->native_source) {
 			reason += ";source-execution:native-source";
-		}
-		auto stage_plan =
-		    BuildSljitOperatorStageRegionPlan(*native_region, contract, input.candidate.stage_plan);
-		if (stage_plan.HasImplementedKernel()) {
-			string kernel_ir;
-			auto stage_region = CopySljitNativeRegion(*native_region);
-			auto stage_kernel = TryBuildOperatorStageKernel(backend_name, std::move(*stage_region),
-			                                                input.region_ir, kernel_ir, error, contract, stage_plan);
-			if (stage_kernel) {
-				reason += ";" + stage_plan.stage_ir;
-				reason += ";" + stage_plan.execution_reason;
-				if (Settings::Get<JitVerifySetting>(input.context)) {
-					reason += ";verify:region";
-				}
-				return JitRegionCompileResult::Compiled(std::move(stage_kernel), execution_mode, std::move(reason),
-				                                          MaybeDumpIr(input.context, std::move(kernel_ir)));
-			}
-			if (stage_plan.kernel_kind == SljitOperatorKernelKind::PERFECT_HASH_AGGREGATE) {
-				reason += ";execution:unsupported;fused-perfect-hash-codegen=" +
-				          (error.empty() ? string("unsupported shape") : error);
-				return JitRegionCompileResult::Unsupported(std::move(reason));
-			}
 		}
 		SljitExecutableRegion executable_region;
 		if (!BuildSljitExecutableRegion(*native_region, executable_region, error)) {

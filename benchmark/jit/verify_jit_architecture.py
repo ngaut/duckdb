@@ -489,14 +489,6 @@ def verify_region_executor_resume_contract(root: Path) -> None:
     )
     assert_required_text(
         root,
-        "test/api/test_jit.cpp",
-        [
-            "found_multichunk_runtime",
-            "event.source_native_invocation_count > 1",
-        ],
-    )
-    assert_required_text(
-        root,
         "JIT_ARCHITECTURE.md",
         [
             "Full-pipeline kernels are already a JIT-local multi-chunk execution unit",
@@ -827,12 +819,10 @@ def verify_native_sink_update_contract(root: Path) -> None:
         [
             "STRING_SUBSTRING_IN_LIST_CONSTANT",
             "struct SljitNativeUngroupedAggregateInput",
-            "struct SljitFusedUngroupedAggregateInput",
             "state_count",
             "source_validity",
             "source_sel",
             "state_value_offset",
-            "selected_count",
         ],
     )
     assert_required_text(
@@ -864,7 +854,6 @@ def verify_native_sink_update_contract(root: Path) -> None:
         root,
         "extension/jit_sljit/sljit_region_plan.cpp",
         [
-            "CanFuseNativeUngroupedSumPredicate",
             "TryPlanSljitNativeUngroupedAggregateUpdate",
             "SLJIT native aggregate update supports count-star/count/sum only",
             "SLJIT native sum update supports optional BIGINT or HUGEINT state",
@@ -935,12 +924,6 @@ def verify_native_sink_update_contract(root: Path) -> None:
             "BuildSljitUngroupedCountStarUpdate",
             "BuildSljitUngroupedCountUpdate",
             "BuildSljitUngroupedSumInt64Update",
-            "BuildSljitFusedFilterProjectionUngroupedSum",
-            "BuildSljitFusedProjectionUngroupedSum",
-            "EmitFusedAggregateFilterBranches",
-            "EmitFusedAggregateSharedSelectionProjectionValue",
-            "shared_selection_all_valid",
-            "EmitAddFusedAggregateStateCount",
             "EmitJumpIfUngroupedSourceNull",
             "EmitAddUngroupedStateCount",
             "EmitSetUngroupedStateIsSet",
@@ -955,11 +938,38 @@ def verify_native_sink_update_contract(root: Path) -> None:
             "runtime.BindNativeUngroupedAggregateStates",
             "JitBindNativeUngroupedAggregateStates",
             "runtime.RecordNativeSinkResult",
-            "CreateSljitFusedFilterProjectionUngroupedSumKernel",
-            "CreateSljitFusedProjectionUngroupedSumKernel",
-            "SljitFusedUngroupedSumKernel",
-            "SljitFusedUngroupedSumExecutionState",
             "UnifiedVectorFormat",
+        ],
+    )
+    assert_no_text(
+        root,
+        [Path("extension/jit_sljit")],
+        [
+            "SljitFusedUngroupedAggregateInput",
+            "SljitFusedUngroupedAggregateFunction",
+            "SljitFusedUngroupedSumKernel",
+            "BuildSljitFusedFilterProjectionUngroupedSum",
+            "BuildSljitFusedProjectionUngroupedSum",
+            "SljitFusedFilterProjectionInput",
+            "SljitFusedFilterProjectionFunction",
+            "SljitFusedFilterProjectionKernel",
+            "BuildSljitFusedIntegerFilterProjection",
+            "CreateSljitFusedFilterProjectionKernel",
+            "CanFuseNativeFilterProjectionRegion",
+            "SLJIT_SOURCE_PREFIX_FUSED_FILTER_PROJECTION_SHAPE",
+            "sljit:source-prefix:fused-filter-projection",
+            "SljitFusedPerfectHashAggregateInput",
+            "SljitFusedPerfectHashAggregateFunction",
+            "SljitFusedDirectPerfectHashAggregateKernel",
+            "BuildSljitFusedDirectPerfectHashAggregate",
+            "CreateSljitFusedDirectPerfectHashAggregateKernel",
+            "CanFuseNativePerfectHashAggregateRegion",
+            "SLJIT_FULL_PIPELINE_FUSED_PERFECT_HASH_AGGREGATE_UPDATE_SHAPE",
+            "sljit:full-pipeline:fused-perfect-hash-aggregate-update",
+            "CanFuseNativeFilterProjectionUngroupedSumRegion",
+            "CanFuseNativeProjectionUngroupedSumRegion",
+            "SLJIT_FULL_PIPELINE_FILTER_PROJECTION_UNGROUPED_SUM_SHAPE",
+            "SLJIT_FULL_PIPELINE_PROJECTION_UNGROUPED_SUM_SHAPE",
         ],
     )
     assert_required_text(
@@ -968,8 +978,7 @@ def verify_native_sink_update_contract(root: Path) -> None:
         [
             "execution_mode != JitExecutionMode::NATIVE",
             "execution:native-sljit-region-",
-            "BuildSljitOperatorStageRegionPlan",
-            "TryBuildOperatorStageKernel",
+            "BuildSljitExecutableRegion",
             "SLJIT region compile requires native compiled execution mode",
         ],
     )
@@ -977,8 +986,7 @@ def verify_native_sink_update_contract(root: Path) -> None:
         root,
         "extension/jit_sljit/sljit_region_plan.cpp",
         [
-            "execution:native-sljit-region-filter-projection-ungrouped-aggregate-update",
-            "execution:native-sljit-region-projection-ungrouped-aggregate-update",
+            "result.execution_reason = \"execution:native-sljit-region-\" + DescribeNativeRegionShape(region)",
         ],
     )
     assert_required_text(
@@ -1714,7 +1722,7 @@ def verify_region_selection_contract(root: Path) -> None:
             "SLJIT_AUTO_ADMISSION_RULES",
             "SLJIT_AUTO_ADMISSION_FAMILIES",
             "candidate.signature.shape",
-            "IsSljitFusedFilterProjectionInventory",
+            "IsSljitFilterProjectionInventory",
             "IsSljitProjectionChainInventory",
             "sljit:pipeline-inventory",
         ],
@@ -2034,7 +2042,6 @@ def verify_region_execution_form_contract(root: Path) -> None:
                 "BuildSljitOperatorStageRegionPlan",
                 "operator-stage-region<",
                 "stage_plan_valid",
-                "HasImplementedKernel",
             "HasExecutableBody",
             "generic-runtime-loop",
             "kernel_blocker",
@@ -2047,11 +2054,8 @@ def verify_region_execution_form_contract(root: Path) -> None:
             "JitCompiledProtocolKindToString(stage.protocol)",
             "source-filter",
             "source_filter_count",
-            "SljitOperatorKernelKind::PERFECT_HASH_AGGREGATE",
                 "return JitRegionExecutionForm::FUSED;",
                 "ClassifySljitRegionExecutionForm(*native_region, contract, candidate.stage_plan)",
-                "CanFuseNativeFilterProjectionUngroupedSumRegion",
-            "CanFuseNativeProjectionUngroupedSumRegion",
             "PlanSljitNativeSourceNode",
             "source helper requires native-source contract IR",
             "return PlanSljitNativeSourceNode(node, contract);",
@@ -2157,7 +2161,7 @@ def verify_region_execution_form_contract(root: Path) -> None:
             "`generated source-prefix table scan filters`",
             "Architecture support is not production admission.",
             "A fused shape may enter",
-            "`sljit:full-pipeline:fused-filter-projection-ungrouped-sum`",
+            "`sljit:full-pipeline:filter-projection-ungrouped-aggregate-update`",
             "query-local proof gap is not an admission rule.",
             "must not inspect TPCH query text",
             "Core must skip `full_pipeline` candidates before backend",
@@ -3100,7 +3104,6 @@ def verify_backend_registration_boundary(root: Path) -> None:
         root,
         "extension/jit_sljit/sljit_region_plan.cpp",
         [
-            "SLJIT_FULL_PIPELINE_PROJECTION_UNGROUPED_SUM_SHAPE",
             "source-fusion-gap:requires-native-source",
             "source-strategy=duckdb-source-helper",
         ],
@@ -3114,6 +3117,7 @@ def verify_backend_registration_boundary(root: Path) -> None:
             "IsSljitFusedUngroupedAggregateUpdateCandidate",
             "IsSljitFusedUngroupedAggregateUpdateInventory",
             "SLJIT_FULL_PIPELINE_FILTER_PROJECTION_UNGROUPED_SUM_SHAPE",
+            "SLJIT_FULL_PIPELINE_PROJECTION_UNGROUPED_SUM_SHAPE",
         ],
     )
     assert_no_text(
@@ -3150,7 +3154,7 @@ def verify_backend_registration_boundary(root: Path) -> None:
             "Backend extensions should",
             "include this instead of `manager.hpp`",
             "force/debug capability",
-            "sljit:full-pipeline:fused-filter-projection-ungrouped-sum",
+            "sljit:full-pipeline:filter-projection-ungrouped-aggregate-update",
         ],
     )
 
@@ -3678,7 +3682,7 @@ def verify_trace_contracts(root: Path) -> None:
         "benchmark/micro/jit/micro_jit_full_pipeline_selectivity_sweep.py",
         [
             "micro_jit_full_pipeline_selectivity_sweep",
-            "sljit:full-pipeline:fused-filter-projection-ungrouped-sum",
+            "sljit:full-pipeline:filter-projection-ungrouped-aggregate-update",
             "scan-filter-scan-project-projection-sink",
             "selected_source_execution='native-source'",
             "candidate_sink_kind='ungrouped-aggregate-update'",
@@ -3726,7 +3730,7 @@ def verify_trace_contracts(root: Path) -> None:
             "DIAGNOSTIC_FAMILIES",
             "native_filter_projection",
             "native_projection_chain",
-            "sljit:source-prefix:fused-filter-projection",
+            "sljit:source-prefix:filter-projection",
             "sljit:source-prefix:projection-chain",
             "native_filter",
             "native_filter_projection_generic",

@@ -23,10 +23,8 @@ struct SljitAutoAdmissionRuleSpec {
 };
 
 static constexpr SljitAutoAdmissionRuleSpec SLJIT_AUTO_ADMISSION_RULES[] = {
-    {SLJIT_SOURCE_PREFIX_FUSED_FILTER_PROJECTION_SHAPE, 1000000, "benchmark/micro/jit/native_filter_projection"},
-    {SLJIT_SOURCE_PREFIX_PROJECTION_CHAIN_SHAPE, 1000000, "benchmark/micro/jit/native_projection_chain"},
-    {SLJIT_FULL_PIPELINE_FUSED_PERFECT_HASH_AGGREGATE_UPDATE_SHAPE, 1000000,
-     "benchmark/tpch/jit/fused_perfect_hash_aggregate_update"}};
+    {SLJIT_SOURCE_PREFIX_FILTER_PROJECTION_SHAPE, 1000000, "benchmark/micro/jit/native_filter_projection"},
+    {SLJIT_SOURCE_PREFIX_PROJECTION_CHAIN_SHAPE, 1000000, "benchmark/micro/jit/native_projection_chain"}};
 
 static bool TryGetSljitAutoAdmissionRule(const string &shape_key, JitAutoAdmissionRule &rule) {
 	for (auto &entry : SLJIT_AUTO_ADMISSION_RULES) {
@@ -61,7 +59,7 @@ static bool IsSljitNativeSourceFilterProjectionCandidate(const JitRegionCandidat
 	       candidate.traits.operator_fallback_count == 0;
 }
 
-static bool IsSljitSourcePrefixFusedFilterProjectionCandidate(const JitRegionCandidate &candidate) {
+static bool IsSljitSourcePrefixFilterProjectionCandidate(const JitRegionCandidate &candidate) {
 	if (!JitRegionABIIsSourcePipeline(candidate.contract.abi)) {
 		return false;
 	}
@@ -109,28 +107,7 @@ static bool IsSljitSourcePrefixProjectionChainCandidate(const JitRegionCandidate
 	                                                     candidate.traits.non_integer_arithmetic_projection_count == 0);
 }
 
-static bool IsSljitFusedPerfectHashAggregateUpdateCandidate(const JitRegionCandidate &candidate) {
-	if (!JitRegionABIIsFullPipeline(candidate.contract.abi)) {
-		return false;
-	}
-	if (!candidate.traits.has_table_scan_source ||
-	    candidate.traits.source_execution != JitRegionSourceExecutionKind::NATIVE_SOURCE) {
-		return false;
-	}
-	if (candidate.traits.sink_kind != JitRegionSinkKind::PERFECT_HASH_AGGREGATE_UPDATE) {
-		return false;
-	}
-	if (candidate.traits.source_filter_count == 0 || candidate.traits.source_filter_fallback_count > 0) {
-		return false;
-	}
-	if (candidate.traits.operator_count != 0 || candidate.traits.operator_helper_count > 0 ||
-	    candidate.traits.operator_fallback_count > 0 || candidate.traits.expression_fallback_count > 0) {
-		return false;
-	}
-	return candidate.traits.expression_traits_known && candidate.traits.projection_count > 0;
-}
-
-static bool IsSljitFusedFilterProjectionInventory(const JitRegionPipelineInventory &inventory) {
+static bool IsSljitFilterProjectionInventory(const JitRegionPipelineInventory &inventory) {
 	return inventory.has_table_scan_source && inventory.filter_operator_count == 1 &&
 	       inventory.projection_operator_count > 0 &&
 	       inventory.operator_count == inventory.filter_operator_count + inventory.projection_operator_count &&
@@ -147,13 +124,6 @@ static bool IsSljitProjectionChainInventory(const JitRegionPipelineInventory &in
 	       !inventory.has_perfect_hash_aggregate_sink;
 }
 
-static bool IsSljitFusedPerfectHashAggregateUpdateInventory(const JitRegionPipelineInventory &inventory) {
-	return inventory.has_table_scan_source && inventory.source_filter_count > 0 &&
-	       inventory.projection_operator_count > 0 && inventory.operator_count == inventory.projection_operator_count &&
-	       inventory.has_perfect_hash_aggregate_sink && !inventory.has_hash_join_operator && !inventory.has_hash_join_sink &&
-	       !inventory.has_hash_aggregate_sink && !inventory.has_ungrouped_aggregate_sink;
-}
-
 struct SljitAutoAdmissionFamily {
 	const char *rule_shape_key;
 	bool (*candidate_matches)(const JitRegionCandidate &candidate);
@@ -161,12 +131,10 @@ struct SljitAutoAdmissionFamily {
 };
 
 static constexpr SljitAutoAdmissionFamily SLJIT_AUTO_ADMISSION_FAMILIES[] = {
-    {SLJIT_SOURCE_PREFIX_FUSED_FILTER_PROJECTION_SHAPE, IsSljitSourcePrefixFusedFilterProjectionCandidate,
-     IsSljitFusedFilterProjectionInventory},
+    {SLJIT_SOURCE_PREFIX_FILTER_PROJECTION_SHAPE, IsSljitSourcePrefixFilterProjectionCandidate,
+     IsSljitFilterProjectionInventory},
     {SLJIT_SOURCE_PREFIX_PROJECTION_CHAIN_SHAPE, IsSljitSourcePrefixProjectionChainCandidate,
-     IsSljitProjectionChainInventory},
-    {SLJIT_FULL_PIPELINE_FUSED_PERFECT_HASH_AGGREGATE_UPDATE_SHAPE,
-     IsSljitFusedPerfectHashAggregateUpdateCandidate, IsSljitFusedPerfectHashAggregateUpdateInventory}};
+     IsSljitProjectionChainInventory}};
 
 static bool TryGetSljitCandidateAutoAdmissionRule(const JitRegionCandidate &candidate, JitAutoAdmissionRule &rule) {
 	for (auto &family : SLJIT_AUTO_ADMISSION_FAMILIES) {

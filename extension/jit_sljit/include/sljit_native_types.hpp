@@ -15,23 +15,6 @@
 
 namespace duckdb {
 
-struct SljitFusedFilterProjectionInput {
-	const_data_ptr_t filter_data = nullptr;
-	const sel_t *filter_sel = nullptr;
-	const validity_t *filter_validity = nullptr;
-	int64_t filter_constant = 0;
-	const_data_ptr_t projection_data = nullptr;
-	const sel_t *projection_sel = nullptr;
-	const validity_t *projection_validity = nullptr;
-	int64_t projection_constant = 0;
-	data_ptr_t result_data = nullptr;
-	validity_t *result_validity = nullptr;
-	idx_t input_count = 0;
-	idx_t output_count = 0;
-	const char *overflow_message = nullptr;
-	std::exception_ptr error;
-};
-
 struct SljitNativeUngroupedAggregateInput {
 	const_data_ptr_t source_data = nullptr;
 	const sel_t *source_sel = nullptr;
@@ -52,41 +35,6 @@ struct SljitNativeGroupedAggregateInput {
 	idx_t aggregate_state_offset = 0;
 	idx_t state_value_offset = 0;
 	idx_t state_is_set_offset = 0;
-};
-
-struct SljitFusedUngroupedAggregateInput {
-	const_data_ptr_t *source_data = nullptr;
-	const sel_t **source_sel = nullptr;
-	const validity_t **source_validity = nullptr;
-	idx_t count = 0;
-	data_ptr_t state = nullptr;
-	idx_t *state_count = nullptr;
-	idx_t state_value_offset = 0;
-	idx_t state_is_set_offset = 0;
-	idx_t selected_count = 0;
-	bool flat_all_valid = false;
-	bool shared_selection_all_valid = false;
-	const char *overflow_message = nullptr;
-	std::exception_ptr error;
-};
-
-struct SljitFusedPerfectHashAggregateInput {
-	const_data_ptr_t *source_data = nullptr;
-	const sel_t **source_sel = nullptr;
-	const validity_t **source_validity = nullptr;
-	idx_t count = 0;
-	data_ptr_t perfect_hash_data = nullptr;
-	bool *perfect_hash_group_is_set = nullptr;
-	idx_t perfect_hash_total_groups = 0;
-	idx_t perfect_hash_tuple_size = 0;
-	idx_t perfect_hash_aggregate_state_offset = 0;
-	uintptr_t invalid_group_id = 0;
-	bool flat_all_valid = false;
-	bool all_selected = false;
-	bool all_valid = false;
-	idx_t selected_count = 0;
-	const char *overflow_message = nullptr;
-	std::exception_ptr error;
 };
 
 enum class SljitNativeIntegerBinaryOp : uint8_t { ADD, SUBTRACT, MULTIPLY };

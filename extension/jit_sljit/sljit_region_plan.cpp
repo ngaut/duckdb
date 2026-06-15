@@ -126,7 +126,7 @@ unique_ptr<SljitNativeRegionPlan> CopySljitNativeRegion(const SljitNativeRegionP
 	result->elided_identity_projections = input.elided_identity_projections;
 	result->fused_projection_chains = input.fused_projection_chains;
 	result->fused_arithmetic_projection_chains = input.fused_arithmetic_projection_chains;
-	result->runtime_fused_filter_projections = input.runtime_fused_filter_projections;
+	result->runtime_combined_filter_projections = input.runtime_combined_filter_projections;
 	result->source_filter_count = input.source_filter_count;
 	result->source_filter_execution = input.source_filter_execution;
 	result->native_source = input.native_source;
@@ -486,15 +486,15 @@ static void FuseAdjacentNativeProjections(SljitNativeRegionPlan &region) {
 	}
 }
 
-static void MarkRuntimeFusedFilterProjections(SljitNativeRegionPlan &region) {
-	region.runtime_fused_filter_projections = 0;
+static void MarkRuntimeCombinedFilterProjections(SljitNativeRegionPlan &region) {
+	region.runtime_combined_filter_projections = 0;
 	if (region.ops.size() < 2) {
 		return;
 	}
 	for (idx_t op_idx = 0; op_idx + 1 < region.ops.size(); op_idx++) {
 		if (region.ops[op_idx].kind == SljitNativeRegionOpKind::FILTER &&
 		    region.ops[op_idx + 1].kind == SljitNativeRegionOpKind::PROJECTION) {
-			region.runtime_fused_filter_projections++;
+			region.runtime_combined_filter_projections++;
 		}
 	}
 }
@@ -531,13 +531,8 @@ string BuildSljitRegionCandidateContextShapeKey(const JitRegionCandidate &candid
 	return shape_key + ":context:" + candidate.signature.context_feature_shape;
 }
 
-static string BuildSljitRegionShapeKey(const SljitNativeRegionPlan &region, const JitRegionContract &contract,
-                                       const JitRegionStagePlan &core_stage_plan) {
+static string BuildSljitRegionShapeKey(const SljitNativeRegionPlan &region, const JitRegionContract &contract) {
 	const auto context = SljitRegionCandidateContext(contract);
-	auto stage_region = BuildSljitOperatorStageRegionPlan(region, contract, core_stage_plan);
-	if (stage_region.HasImplementedKernel()) {
-		return stage_region.shape_key;
-	}
 	auto shape = DescribeNativeRegionShape(region);
 	if (region.fused_arithmetic_projection_chains > 0 && shape == "projection") {
 		return "sljit:" + context + ":projection-chain";
@@ -2666,7 +2661,7 @@ SljitRegionPlan BuildSljitRegionPlan(const JitRegionIR &region_ir, const JitRegi
 	if (native_region_possible && !native_region->ops.empty()) {
 		native_region->native_source = requires_native_source;
 		FuseAdjacentNativeProjections(*native_region);
-		MarkRuntimeFusedFilterProjections(*native_region);
+		MarkRuntimeCombinedFilterProjections(*native_region);
 		auto stage_plan = BuildSljitOperatorStageRegionPlan(*native_region, contract, candidate.stage_plan);
 		if (stage_plan.IsValid()) {
 			auto stage_ir = candidate.stage_plan.ir;
@@ -2695,8 +2690,7 @@ SljitRegionPlan BuildSljitRegionPlan(const JitRegionIR &region_ir, const JitRegi
 			if (!source_helper) {
 				plan.backend_plan->native_region = std::move(native_region);
 				plan.lowering_plan.SetCompiledExecutionMode(JitExecutionMode::NATIVE);
-				plan.lowering_plan.shape_key =
-				    BuildSljitRegionShapeKey(*plan.backend_plan->native_region, contract, candidate.stage_plan);
+				plan.lowering_plan.shape_key = BuildSljitRegionShapeKey(*plan.backend_plan->native_region, contract);
 				if (JitRegionABIIsSourcePipeline(contract.abi) && candidate.traits.has_table_scan_source &&
 				    candidate.traits.source_execution == JitRegionSourceExecutionKind::NATIVE_SOURCE &&
 				    candidate.traits.source_filter_count > 0 &&
@@ -2962,235 +2956,6 @@ string DescribeNativeRegionShape(const SljitNativeRegionPlan &region) {
 	return result.empty() ? "empty" : result;
 }
 
-bool CanFuseNativeFilterProjectionRegion(const SljitNativeRegionPlan &region) {
-	if (region.ops.size() != 2 || region.ops[0].kind != SljitNativeRegionOpKind::FILTER ||
-	    region.ops[1].kind != SljitNativeRegionOpKind::PROJECTION || region.ops[1].projections.size() != 1) {
-		return false;
-	}
-	auto &filter = region.ops[0].filter;
-	auto &projection = region.ops[1].projections[0];
-	return filter.kind == SljitNativeRegionExpressionKind::INTEGER_COMPARE_CONSTANT &&
-	       projection.kind == SljitNativeRegionExpressionKind::INTEGER_BINARY_CONSTANT &&
-	       filter.integer_kind == projection.integer_kind;
-}
-
-static bool CanFuseNativeUngroupedSumPredicate(const SljitNativePredicate &predicate) {
-	switch (predicate.kind) {
-	case SljitNativePredicateKind::CONSTANT:
-	case SljitNativePredicateKind::REFERENCE:
-	case SljitNativePredicateKind::INTEGER_COMPARE_CONSTANT:
-	case SljitNativePredicateKind::INTEGER_COMPARE_REFERENCES:
-	case SljitNativePredicateKind::INTEGER_IN_LIST:
-	case SljitNativePredicateKind::INTEGER_BETWEEN:
-	case SljitNativePredicateKind::STRING_PREFIX_CONSTANT:
-	case SljitNativePredicateKind::STRING_SUFFIX_CONSTANT:
-	case SljitNativePredicateKind::STRING_CONTAINS_CONSTANT:
-	case SljitNativePredicateKind::STRING_LIKE_CONSTANT:
-	case SljitNativePredicateKind::STRING_SUBSTRING_IN_LIST_CONSTANT:
-	case SljitNativePredicateKind::NULL_CHECK:
-		return true;
-	case SljitNativePredicateKind::NOT:
-		return predicate.child && CanFuseNativeUngroupedSumPredicate(*predicate.child);
-	case SljitNativePredicateKind::CONJUNCTION:
-		for (auto &child : predicate.children) {
-			if (!child || !CanFuseNativeUngroupedSumPredicate(*child)) {
-				return false;
-			}
-		}
-		return true;
-	case SljitNativePredicateKind::CONSTANT_OR_NULL:
-		return predicate.child && CanFuseNativeUngroupedSumPredicate(*predicate.child);
-	default:
-		return false;
-	}
-}
-
-static bool CanFuseNativeUngroupedSumFilter(const SljitNativeRegionExpressionPlan &filter) {
-	return (filter.kind == SljitNativeRegionExpressionKind::PREDICATE && filter.predicate &&
-	        CanFuseNativeUngroupedSumPredicate(*filter.predicate)) ||
-	       filter.kind == SljitNativeRegionExpressionKind::INTEGER_COMPARE_CONSTANT ||
-	       filter.kind == SljitNativeRegionExpressionKind::INTEGER_COMPARE_REFERENCES ||
-	       filter.kind == SljitNativeRegionExpressionKind::INTEGER_IN_LIST ||
-	       filter.kind == SljitNativeRegionExpressionKind::INTEGER_BETWEEN ||
-	       filter.kind == SljitNativeRegionExpressionKind::NULL_CHECK;
-}
-
-static bool CanFuseNativeUngroupedSumProjection(const SljitNativeRegionExpressionPlan &projection) {
-	if (projection.integer_kind != SljitNativeIntegerKind::INT64 &&
-	    projection.integer_kind != SljitNativeIntegerKind::DECIMAL64) {
-		return false;
-	}
-	return projection.kind == SljitNativeRegionExpressionKind::REFERENCE ||
-	       projection.kind == SljitNativeRegionExpressionKind::INTEGER_BINARY_REFERENCES;
-}
-
-bool CanFuseNativeFilterProjectionUngroupedSumRegion(const SljitNativeRegionPlan &region) {
-	if (region.ops.size() != 3 || region.ops[0].kind != SljitNativeRegionOpKind::FILTER ||
-	    region.ops[1].kind != SljitNativeRegionOpKind::PROJECTION ||
-	    region.ops[2].kind != SljitNativeRegionOpKind::UNGROUPED_AGGREGATE_UPDATE) {
-		return false;
-	}
-	auto &filter = region.ops[0].filter;
-	auto &projection_op = region.ops[1];
-	auto &sink = region.ops[2];
-	if (projection_op.projections.size() != 1 || sink.native_ungrouped_aggregate_updates.size() != 1) {
-		return false;
-	}
-	auto &projection = projection_op.projections[0];
-	auto &update = sink.native_ungrouped_aggregate_updates[0];
-	return CanFuseNativeUngroupedSumFilter(filter) && CanFuseNativeUngroupedSumProjection(projection) &&
-	       update.update_kind == JitAggregateUpdateKind::SUM && update.payload_index == 0;
-}
-
-bool CanFuseNativeProjectionUngroupedSumRegion(const SljitNativeRegionPlan &region) {
-	if (region.ops.size() != 2 || region.ops[0].kind != SljitNativeRegionOpKind::PROJECTION ||
-	    region.ops[1].kind != SljitNativeRegionOpKind::UNGROUPED_AGGREGATE_UPDATE) {
-		return false;
-	}
-	auto &projection_op = region.ops[0];
-	auto &sink = region.ops[1];
-	if (projection_op.projections.size() != 1 || sink.native_ungrouped_aggregate_updates.size() != 1) {
-		return false;
-	}
-	auto &projection = projection_op.projections[0];
-	auto &update = sink.native_ungrouped_aggregate_updates[0];
-	return CanFuseNativeUngroupedSumProjection(projection) && update.update_kind == JitAggregateUpdateKind::SUM &&
-	       update.payload_index == 0;
-}
-
-static bool CanFuseNativePerfectHashType(const LogicalType &type) {
-	switch (type.InternalType()) {
-	case PhysicalType::BOOL:
-	case PhysicalType::INT8:
-	case PhysicalType::INT16:
-	case PhysicalType::INT32:
-	case PhysicalType::INT64:
-	case PhysicalType::UINT8:
-	case PhysicalType::UINT16:
-	case PhysicalType::UINT32:
-	case PhysicalType::UINT64:
-	case PhysicalType::VARCHAR:
-		return true;
-	default:
-		return false;
-	}
-}
-
-static bool CanFuseNativePerfectHashExpression(const SljitNativeRegionExpressionPlan &expr) {
-	switch (expr.kind) {
-	case SljitNativeRegionExpressionKind::REFERENCE:
-		return true;
-	case SljitNativeRegionExpressionKind::STRING_COMPRESS_UINT8:
-		return true;
-	case SljitNativeRegionExpressionKind::INTEGER_CAST:
-		return CanFuseNativePerfectHashType(expr.return_type);
-	case SljitNativeRegionExpressionKind::INTEGER_BINARY_CONSTANT:
-	case SljitNativeRegionExpressionKind::INTEGER_BINARY_REFERENCES:
-	case SljitNativeRegionExpressionKind::INTEGER_COMPARE_CONSTANT:
-	case SljitNativeRegionExpressionKind::INTEGER_COMPARE_REFERENCES:
-		return true;
-	default:
-		return false;
-	}
-}
-
-static bool CanFuseNativePerfectHashPredicate(const SljitNativePredicate &predicate) {
-	switch (predicate.kind) {
-	case SljitNativePredicateKind::INTEGER_COMPARE_CONSTANT:
-	case SljitNativePredicateKind::INTEGER_COMPARE_REFERENCES:
-		return true;
-	case SljitNativePredicateKind::CONJUNCTION:
-		if (predicate.conjunction_op != JitExpressionConjunctionOp::AND) {
-			return false;
-		}
-		for (auto &child : predicate.children) {
-			if (!child || !CanFuseNativePerfectHashPredicate(*child)) {
-				return false;
-			}
-		}
-		return true;
-	default:
-		return false;
-	}
-}
-
-static bool CanFuseNativePerfectHashFilter(const SljitNativeRegionExpressionPlan &filter) {
-	if (filter.kind == SljitNativeRegionExpressionKind::PREDICATE) {
-		return filter.predicate && CanFuseNativePerfectHashPredicate(*filter.predicate);
-	}
-	return CanFuseNativePerfectHashExpression(filter);
-}
-
-static bool CanFuseNativePerfectHashMinimum(const Value &value) {
-	if (value.IsNull()) {
-		return false;
-	}
-	switch (value.type().InternalType()) {
-	case PhysicalType::INT8:
-	case PhysicalType::INT16:
-	case PhysicalType::INT32:
-	case PhysicalType::INT64:
-	case PhysicalType::UINT8:
-	case PhysicalType::UINT16:
-	case PhysicalType::UINT32:
-		return true;
-	default:
-		return false;
-	}
-}
-
-bool CanFuseNativePerfectHashAggregateRegion(const SljitNativeRegionPlan &region) {
-	if (region.ops.empty()) {
-		return false;
-	}
-	auto &sink = region.ops.back();
-	if (sink.kind != SljitNativeRegionOpKind::PERFECT_HASH_AGGREGATE_UPDATE ||
-	    sink.native_grouped_aggregate_updates.empty() || sink.grouped_aggregate_groups.empty()) {
-		return false;
-	}
-	if (sink.perfect_hash_required_bits.size() != sink.grouped_aggregate_groups.size() ||
-	    sink.perfect_hash_group_minima.size() != sink.grouped_aggregate_groups.size()) {
-		return false;
-	}
-	for (auto &minimum : sink.perfect_hash_group_minima) {
-		if (!CanFuseNativePerfectHashMinimum(minimum)) {
-			return false;
-		}
-	}
-	for (auto &update : sink.native_grouped_aggregate_updates) {
-		if (update.update_kind != JitAggregateUpdateKind::COUNT_STAR &&
-		    update.update_kind != JitAggregateUpdateKind::COUNT && update.update_kind != JitAggregateUpdateKind::SUM) {
-			return false;
-		}
-	}
-	idx_t total_required_bits = 0;
-	for (auto bits : sink.perfect_hash_required_bits) {
-		total_required_bits += bits;
-	}
-	if (total_required_bits >= sizeof(idx_t) * 8) {
-		return false;
-	}
-	for (idx_t op_idx = 0; op_idx + 1 < region.ops.size(); op_idx++) {
-		auto &op = region.ops[op_idx];
-		if (op.kind == SljitNativeRegionOpKind::FILTER) {
-			if (!CanFuseNativePerfectHashFilter(op.filter)) {
-				return false;
-			}
-			continue;
-		}
-		if (op.kind == SljitNativeRegionOpKind::PROJECTION) {
-			for (auto &projection : op.projections) {
-				if (!CanFuseNativePerfectHashExpression(projection)) {
-					return false;
-				}
-			}
-			continue;
-		}
-		return false;
-	}
-	return true;
-}
-
 static void AppendCoreOperatorStages(SljitOperatorStageRegionPlan &result,
                                      const JitRegionStagePlan &core_stage_plan) {
 	result.stages = core_stage_plan.stages;
@@ -3199,9 +2964,7 @@ static void AppendCoreOperatorStages(SljitOperatorStageRegionPlan &result,
 static string DescribeOperatorStageRegion(const SljitOperatorStageRegionPlan &plan) {
 	string result = "operator-stage-region<";
 	result += "shape=" + plan.shape_key;
-	result += ",kernel=" + string(plan.HasImplementedKernel()      ? "implemented"
-	                              : plan.generic_runtime_loop ? "generic-runtime-loop"
-	                                                          : "missing");
+	result += ",kernel=" + string(plan.generic_runtime_loop ? "generic-runtime-loop" : "missing");
 	if (!plan.kernel_blocker.empty()) {
 		result += ",kernel_blocker=" + plan.kernel_blocker;
 	}
@@ -3250,36 +3013,6 @@ SljitOperatorStageRegionPlan BuildSljitOperatorStageRegionPlan(const SljitNative
 	if (SljitNativeRegionHasGenericExecutableLoop(region, contract)) {
 		result.generic_runtime_loop = true;
 		result.execution_reason = "execution:native-sljit-region-" + DescribeNativeRegionShape(region);
-		result.kernel_blocker.clear();
-	}
-	if (JitRegionABIIsFullPipeline(contract.abi) && CanFuseNativeFilterProjectionUngroupedSumRegion(region)) {
-		result.kernel_kind = SljitOperatorKernelKind::FILTER_PROJECTION_UNGROUPED_SUM;
-		result.shape_key = SLJIT_FULL_PIPELINE_FILTER_PROJECTION_UNGROUPED_SUM_SHAPE;
-		result.execution_reason = "execution:native-sljit-region-filter-projection-ungrouped-aggregate-update";
-		result.implemented_kernel = true;
-		result.generic_runtime_loop = false;
-		result.kernel_blocker.clear();
-	} else if (JitRegionABIIsFullPipeline(contract.abi) && CanFuseNativeProjectionUngroupedSumRegion(region)) {
-		result.kernel_kind = SljitOperatorKernelKind::PROJECTION_UNGROUPED_SUM;
-		result.shape_key = SLJIT_FULL_PIPELINE_PROJECTION_UNGROUPED_SUM_SHAPE;
-		result.execution_reason = "execution:native-sljit-region-projection-ungrouped-aggregate-update";
-		result.implemented_kernel = true;
-		result.generic_runtime_loop = false;
-		result.kernel_blocker.clear();
-	} else if (JitRegionABIIsFullPipeline(contract.abi) && CanFuseNativePerfectHashAggregateRegion(region)) {
-		result.kernel_kind = SljitOperatorKernelKind::PERFECT_HASH_AGGREGATE;
-		result.shape_key = context == "full-pipeline" ? SLJIT_FULL_PIPELINE_FUSED_PERFECT_HASH_AGGREGATE_UPDATE_SHAPE
-		                                              : "sljit:" + context + ":fused-perfect-hash-aggregate-update";
-		result.execution_reason = "execution:native-sljit-region-fused-perfect-hash-aggregate-update";
-		result.implemented_kernel = true;
-		result.generic_runtime_loop = false;
-		result.kernel_blocker.clear();
-	} else if (CanFuseNativeFilterProjectionRegion(region)) {
-		result.kernel_kind = SljitOperatorKernelKind::FILTER_PROJECTION;
-		result.shape_key = "sljit:" + context + ":fused-filter-projection";
-		result.execution_reason = "execution:native-sljit-region-fused-filter-projection";
-		result.implemented_kernel = true;
-		result.generic_runtime_loop = false;
 		result.kernel_blocker.clear();
 	}
 	if (!result.IsValid()) {

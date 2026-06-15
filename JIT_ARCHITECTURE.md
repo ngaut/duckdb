@@ -1226,7 +1226,7 @@ report `native-grouped-state-contract=ready`,
 `native_grouped_state_contract_status=ready`, and
 `native_grouped_state_blocker=none`. `perfect_hash_aggregate_update` in
 `jit_dump_ir` is native sink-state update only when those fields are ready. The
-full fused perfect-hash aggregate path additionally reports
+generic perfect-hash full-pipeline native region additionally reports
 `native_hash_aggregate_lookup_contract_status=ready`,
 `native_hash_aggregate_lookup_required_capability=
 perfect-hash-aggregate-native-lookup`, and
@@ -1238,11 +1238,12 @@ reported as `perfect-hash-aggregate-native-state-scan` with
 perfect-hash table through the operator source protocol.
 
 Perfect-hash aggregate performance also needs an explicit update-strategy
-contract, not just state addresses. The current native strategy is
-`direct_state_update`: generated code owns source/filter/projection/group-id
-evaluation and updates DuckDB's native perfect-hash aggregate state in the same
-row loop. This is the simplest correct fused shape, and it is the baseline that
-future strategies must beat.
+contract, not just state addresses. The current generic native strategy is
+`bound_state_update`: core/DuckDB protocol code owns group lookup and state
+address binding, while generated grouped update kernels update DuckDB's native
+perfect-hash aggregate state through backend-neutral state addresses. The generic
+native region executor owns source/filter/projection/sink protocol sequencing
+without a separate perfect-hash-only full-pipeline kernel.
 
 Rejected strategies are part of the architecture contract too. Per-group scratch
 accumulation and generated linked row lists both measured worse on TPC-H Q01:
@@ -1253,7 +1254,7 @@ Long-term aggregate JIT should add strategies only behind the same region
 contract and admission machinery:
 
 ```text
-direct_state_update
+bound_state_update
 generated_local_accumulate
 typed_duckdb_clustered_helper
 executor_fallback
@@ -1352,7 +1353,7 @@ not native regions, and not runtime kernels.
 
 Architecture support is not production admission. A fused shape may enter
 `auto` only when it has repeated benchmark proof. The SLJIT native-source
-`sljit:full-pipeline:fused-filter-projection-ungrouped-sum` path is the generic
+`sljit:full-pipeline:filter-projection-ungrouped-aggregate-update` path is the generic
 force/debug proof point for scan + pushed filters + projection + native
 ungrouped aggregate update. Production `auto` does not advertise this as an
 admission family; it rejects at the lightweight pipeline-inventory gate until
@@ -1386,7 +1387,7 @@ node. The backend IR marks this as `compose-reference-projection(...)`. This
 removes scan column-map projection chunks before arithmetic, casts, null checks,
 predicates, and similar typed expressions.
 
-Within a generated fused region, adjacent native `FILTER` +
+Within a generic native region executor, adjacent native `FILTER` +
 `PROJECTION` operators are a single runtime dataflow step. The backend first
 produces the filter selection vector, then passes that selection as the
 projection `execute_sel`, writing only the projected output columns. It must not
@@ -1396,11 +1397,13 @@ operators. Compile events expose this with
 fusion from merely adjacent native nodes.
 
 For full-pipeline aggregate regions, runtime filter/projection fusion is still
-not enough. The sink update must be part of the same generated loop or the region
-is not fused. SLJIT exposes source-filter-owned aggregate regions as
+not enough for production admission. The native region executor must own the
+source, transform, and sink protocols without DuckDB executor fallback. A future
+monolithic generated loop can replace the executor internals without changing
+the core IR contract. SLJIT exposes source-filter-owned aggregate regions as
 `execution:native-sljit-region-filter-projection-ungrouped-aggregate-update`.
-Regions where DuckDB already applied the scan filter before the generated body
-runs use
+Regions where DuckDB already applied the scan filter before the native region
+executor runs use
 `execution:native-sljit-region-projection-ungrouped-aggregate-update`. The
 unsupported non-fused helper-source shape remains visible as a skipped
 `filter-projection-ungrouped-aggregate-update` candidate without executable code.
@@ -2681,7 +2684,7 @@ true:
 
 - the core IR is complete and semantic;
 - the backend plan is supported and has a compiled execution mode;
-- the shape is admitted by measured evidence or a conservative hard-coded v1 rule;
+- the shape is admitted by measured evidence;
 - the estimated work exceeds the compile-cost break-even threshold;
 - verification/debug settings do not invalidate the performance expectation.
 

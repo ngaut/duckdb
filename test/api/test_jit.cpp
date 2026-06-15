@@ -2315,7 +2315,7 @@ TEST_CASE("JIT region lowering exposes typed table scan source protocol", "[api]
 			REQUIRE(StringUtil::Contains(event.reason, "full-pipeline-native-sink-update"));
 			REQUIRE(StringUtil::Contains(event.reason, "duckdb.operator-stage-region"));
 			REQUIRE(StringUtil::Contains(event.reason, "operator-stage-region"));
-			REQUIRE(StringUtil::Contains(event.reason, "kernel=implemented"));
+			REQUIRE(StringUtil::Contains(event.reason, "kernel=generic-runtime-loop"));
 			REQUIRE(StringUtil::Contains(event.reason, "source=native"));
 			REQUIRE(StringUtil::Contains(event.ir, "source_execution=native-source"));
 			REQUIRE(StringUtil::Contains(event.ir, "source=native-protocol"));
@@ -3237,7 +3237,7 @@ TEST_CASE("JIT full pipeline updates perfect hash aggregate through native sink 
 	REQUIRE(found_runtime_perfect_hash_aggregate_sink);
 }
 
-TEST_CASE("JIT auto admits measured perfect hash aggregate update", "[api][jit]") {
+TEST_CASE("JIT auto skips generic perfect hash aggregate update without admission proof", "[api][jit]") {
 	DuckDB db;
 	Connection con(db);
 	auto &context = *con.context;
@@ -3245,7 +3245,7 @@ TEST_CASE("JIT auto admits measured perfect hash aggregate update", "[api][jit]"
 
 	REQUIRE_NO_FAIL(con.Query("LOAD jit_sljit"));
 	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_auto_perfect_hash_agg AS "
-	                          "SELECT (i % 4)::INTEGER AS k, i::BIGINT AS v FROM range(6000000) tbl(i)"));
+	                          "SELECT (i % 4)::INTEGER AS k, i::BIGINT AS v FROM range(1000000) tbl(i)"));
 	REQUIRE_NO_FAIL(con.Query("SET enable_jit=true"));
 	REQUIRE_NO_FAIL(con.Query("SET jit_backend='sljit'"));
 	REQUIRE_NO_FAIL(con.Query("SET jit_policy='auto'"));
@@ -3254,68 +3254,39 @@ TEST_CASE("JIT auto admits measured perfect hash aggregate update", "[api][jit]"
 	REQUIRE_NO_FAIL(con.Query("SET jit_event_log_size=10000"));
 
 	manager.ClearEvents();
-	auto result = con.Query("SELECT k, sum(v) FROM jit_auto_perfect_hash_agg WHERE v < 5000000 GROUP BY k ORDER BY k");
+	auto result = con.Query("SELECT k, sum(v) FROM jit_auto_perfect_hash_agg WHERE v < 800000 GROUP BY k ORDER BY k");
 	REQUIRE_NO_FAIL(*result);
 	REQUIRE(CHECK_COLUMN(result, 0, {0, 1, 2, 3}));
 	REQUIRE(CHECK_COLUMN(result, 1,
-	                     {Value::BIGINT(3124997500000), Value::BIGINT(3124998750000),
-	                      Value::BIGINT(3125000000000), Value::BIGINT(3125001250000)}));
+	                     {Value::BIGINT(79999600000), Value::BIGINT(79999800000),
+	                      Value::BIGINT(80000000000), Value::BIGINT(80000200000)}));
 
-	bool found_auto_compile = false;
-	bool found_runtime_with_rows = false;
-	bool found_runtime_finished = false;
-	bool found_multichunk_runtime = false;
+	bool found_auto_skip = false;
+	bool found_compiled_region = false;
 	for (auto &event : manager.GetEvents()) {
-		if (event.backend_name != "sljit" || event.target != "region" || event.candidate_scope != "full_pipeline") {
+		if (event.backend_name != "sljit" || event.target != "region") {
 			continue;
 		}
-		if (event.status == "compiled" &&
-		    event.admission_shape_key == "sljit:full-pipeline:fused-perfect-hash-aggregate-update") {
-			found_auto_compile = true;
-			REQUIRE(event.policy_decision == "auto");
-			REQUIRE(event.execution_mode == "native");
-			REQUIRE(event.region_execution_form == "fused");
-			REQUIRE(event.selected_source_execution == JitRegionSourceExecutionKind::NATIVE_SOURCE);
-			REQUIRE(event.has_admission);
-			REQUIRE(event.admission_rule_present);
-			REQUIRE(event.admission_min_cardinality == 1000000);
-			REQUIRE(event.admission_proof == "benchmark/tpch/jit/fused_perfect_hash_aggregate_update");
-			REQUIRE(event.has_admission_score);
-			REQUIRE(event.admission_score >= 0);
-			REQUIRE(event.code_size > 0);
-			REQUIRE(StringUtil::Contains(event.reason, "jit_policy=auto admits shape="));
-			REQUIRE(StringUtil::Contains(event.reason, "sink:PERFECT_HASH_GROUP_BY:native"));
-			REQUIRE(StringUtil::Contains(event.reason, "generated native perfect hash aggregate state update"));
-			REQUIRE(StringUtil::Contains(event.reason, "full-pipeline-native-sink-update"));
-			REQUIRE(StringUtil::Contains(event.reason, "execution:native-sljit-region-fused-perfect-hash-aggregate-update"));
-			REQUIRE(StringUtil::Contains(event.ir, "perfect_hash_aggregate_update"));
-			REQUIRE(StringUtil::Contains(event.ir, "native_grouped_state_contract_status=ready"));
+		if (event.status == "compiled") {
+			found_compiled_region = true;
 		}
-		if (event.phase == "runtime" && event.status == "executed" && event.execution_mode == "native" &&
-		    event.candidate_scope == "full_pipeline" && event.selected_source_execution == JitRegionSourceExecutionKind::NATIVE_SOURCE &&
-		    StringUtil::Contains(event.reason, "full pipeline kernel executed")) {
-			REQUIRE(event.region_execution_form == "fused");
-			REQUIRE(event.source_helper_output_rows == 0);
-			REQUIRE(event.source_native_output_rows == event.input_rows);
-			REQUIRE(event.source_native_invocation_count > 0);
-			if (event.source_native_output_rows > 0) {
-				found_runtime_with_rows = true;
-				if (event.source_native_invocation_count > 1) {
-					found_multichunk_runtime = true;
-				}
-				const bool expected_runtime_result =
-				    event.runtime_result == "not_finished" || event.runtime_result == "finished";
-				REQUIRE(expected_runtime_result);
-			}
-			if (event.runtime_result == "finished") {
-				found_runtime_finished = true;
-			}
+		if (event.status == "skipped" &&
+		    event.admission_shape_key ==
+		        "sljit:pipeline-inventory:table-scan-source+perfect-hash-aggregate-update") {
+			found_auto_skip = true;
+			REQUIRE(event.policy_decision == "auto");
+			REQUIRE(event.execution_mode == "executor_fallback");
+			REQUIRE(event.region_execution_form == "none");
+			REQUIRE(event.selected_source_execution == JitRegionSourceExecutionKind::NONE);
+			REQUIRE(event.has_admission);
+			REQUIRE_FALSE(event.admission_rule_present);
+			REQUIRE(StringUtil::Contains(event.reason, "no SLJIT auto admission family can match pipeline inventory"));
+			REQUIRE(StringUtil::Contains(event.reason, "admission_rule=missing"));
+			REQUIRE(StringUtil::Contains(event.reason, "perfect-hash-aggregate-update"));
 		}
 	}
-	REQUIRE(found_auto_compile);
-	REQUIRE(found_runtime_with_rows);
-	REQUIRE(found_multichunk_runtime);
-	REQUIRE(found_runtime_finished);
+	REQUIRE(found_auto_skip);
+	REQUIRE_FALSE(found_compiled_region);
 }
 
 TEST_CASE("JIT perfect hash native aggregate update preserves null-only groups", "[api][jit]") {

@@ -94,10 +94,10 @@ shape/runtime honesty.
 
 ## Native Filter/Projection
 
-`native_filter_projection_*.benchmark` measures the SLJIT filter/projection
-generated body:
+`native_filter_projection_*.benchmark` measures the SLJIT generic native
+filter/projection region:
 
-- `sljit:source-prefix:fused-filter-projection`
+- `sljit:source-prefix:filter-projection`
 - one generated integer filter
 - one generated integer projection
 - normal DuckDB scan and aggregate boundaries
@@ -205,7 +205,7 @@ Native table-scan source-prefix filter/projection is treated the same way:
 `native_full_pipeline_decimal_projection_ungrouped_sum_*.benchmark` measures a
 diagnostic full-pipeline scan/filter/projection/aggregate shape:
 
-- `sljit:full-pipeline:fused-filter-projection-ungrouped-sum`
+- `sljit:full-pipeline:filter-projection-ungrouped-aggregate-update`
 - native DuckDB table-scan source with generated ownership of one pushed integer comparison filter
 - one generated DECIMAL64 projection
 - one generated native ungrouped aggregate SUM update

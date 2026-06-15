@@ -15,17 +15,9 @@
 
 namespace duckdb {
 
-static constexpr const char *SLJIT_SOURCE_PREFIX_FUSED_FILTER_PROJECTION_SHAPE =
-    "sljit:source-prefix:fused-filter-projection";
 static constexpr const char *SLJIT_SOURCE_PREFIX_FILTER_PROJECTION_SHAPE =
     "sljit:source-prefix:filter-projection";
 static constexpr const char *SLJIT_SOURCE_PREFIX_PROJECTION_CHAIN_SHAPE = "sljit:source-prefix:projection-chain";
-static constexpr const char *SLJIT_FULL_PIPELINE_FILTER_PROJECTION_UNGROUPED_SUM_SHAPE =
-    "sljit:full-pipeline:fused-filter-projection-ungrouped-sum";
-static constexpr const char *SLJIT_FULL_PIPELINE_PROJECTION_UNGROUPED_SUM_SHAPE =
-    "sljit:full-pipeline:fused-projection-ungrouped-sum";
-static constexpr const char *SLJIT_FULL_PIPELINE_FUSED_PERFECT_HASH_AGGREGATE_UPDATE_SHAPE =
-    "sljit:full-pipeline:fused-perfect-hash-aggregate-update";
 
 enum class SljitNativeRegionOpKind : uint8_t {
 	FILTER,
@@ -35,13 +27,6 @@ enum class SljitNativeRegionOpKind : uint8_t {
 	HASH_AGGREGATE_UPDATE,
 	PERFECT_HASH_AGGREGATE_UPDATE,
 	UNGROUPED_AGGREGATE_UPDATE
-};
-enum class SljitOperatorKernelKind : uint8_t {
-	NONE,
-	FILTER_PROJECTION,
-	FILTER_PROJECTION_UNGROUPED_SUM,
-	PROJECTION_UNGROUPED_SUM,
-	PERFECT_HASH_AGGREGATE
 };
 enum class SljitSourceFilterExecutionKind : uint8_t {
 	NONE,
@@ -184,7 +169,7 @@ struct SljitNativeRegionPlan {
 	idx_t elided_identity_projections = 0;
 	idx_t fused_projection_chains = 0;
 	idx_t fused_arithmetic_projection_chains = 0;
-	idx_t runtime_fused_filter_projections = 0;
+	idx_t runtime_combined_filter_projections = 0;
 	idx_t source_filter_count = 0;
 	SljitSourceFilterExecutionKind source_filter_execution = SljitSourceFilterExecutionKind::NONE;
 	bool native_source = false;
@@ -196,7 +181,6 @@ struct SljitNativeRegionPlan {
 };
 
 struct SljitOperatorStageRegionPlan {
-	SljitOperatorKernelKind kernel_kind = SljitOperatorKernelKind::NONE;
 	vector<JitRegionStage> stages;
 	string shape_key;
 	string execution_reason;
@@ -206,7 +190,6 @@ struct SljitOperatorStageRegionPlan {
 	bool owns_transform = false;
 	bool owns_sink = false;
 	bool stage_plan_valid = false;
-	bool implemented_kernel = false;
 	bool generic_runtime_loop = false;
 	string kernel_blocker;
 
@@ -214,12 +197,8 @@ struct SljitOperatorStageRegionPlan {
 		return stage_plan_valid;
 	}
 
-	bool HasImplementedKernel() const {
-		return implemented_kernel && kernel_kind != SljitOperatorKernelKind::NONE;
-	}
-
 	bool HasExecutableBody() const {
-		return HasImplementedKernel() || generic_runtime_loop;
+		return generic_runtime_loop;
 	}
 };
 
@@ -237,10 +216,6 @@ SljitNativeRegionExpressionPlan
 CopySljitNativeRegionExpression(const SljitNativeRegionExpressionPlan &input);
 unique_ptr<SljitNativeRegionPlan> CopySljitNativeRegion(const SljitNativeRegionPlan &input);
 
-bool CanFuseNativeFilterProjectionRegion(const SljitNativeRegionPlan &region);
-bool CanFuseNativeFilterProjectionUngroupedSumRegion(const SljitNativeRegionPlan &region);
-bool CanFuseNativeProjectionUngroupedSumRegion(const SljitNativeRegionPlan &region);
-bool CanFuseNativePerfectHashAggregateRegion(const SljitNativeRegionPlan &region);
 SljitOperatorStageRegionPlan BuildSljitOperatorStageRegionPlan(const SljitNativeRegionPlan &region,
                                                                const JitRegionContract &contract,
                                                                const JitRegionStagePlan &core_stage_plan);
