@@ -788,111 +788,15 @@ static void FinalizeJitRegionSinkInfo(JitRegionSinkInfo &sink) {
 }
 
 static unique_ptr<JitRegionSinkInfo> BuildJitRegionSinkInfo(const PhysicalOperator &op,
-                                                            const JitOperatorDescriptor &descriptor) {
-	auto result = descriptor.has_sink ? make_uniq<JitRegionSinkInfo>(descriptor.sink) : make_uniq<JitRegionSinkInfo>();
-	if (!descriptor.has_sink) {
+                                                            const JitOperatorDescriptor &descriptor,
+                                                            bool has_sink_contract) {
+	auto result = has_sink_contract ? make_uniq<JitRegionSinkInfo>(descriptor.sink) : make_uniq<JitRegionSinkInfo>();
+	if (!has_sink_contract) {
 		result->kind = GetJitGenericSinkKind(op);
 		result->reason = BuildJitGenericSinkProtocolReason(op);
 		result->fields = BuildJitRegionProtocolFields(result->reason);
 	}
 	FinalizeJitRegionSinkInfo(*result);
-	return result;
-}
-
-static bool JitCompiledContractHasNativeProtocol(const JitCompiledOperatorContract &contract,
-                                                 JitCompiledProtocolKind protocol) {
-	for (auto &stage : contract.stages) {
-		if (stage.protocol == protocol && stage.execution == JitRegionStageExecutionKind::NATIVE_PROTOCOL) {
-			return true;
-		}
-	}
-	return false;
-}
-
-static bool JitCompiledContractHasNativeSource(const JitCompiledOperatorContract &contract) {
-	return JitCompiledContractHasNativeProtocol(contract, JitCompiledProtocolKind::SCAN_CURSOR) ||
-	       JitCompiledContractHasNativeProtocol(contract, JitCompiledProtocolKind::STATE_SCAN_CURSOR);
-}
-
-static bool JitCompiledContractHasNativeOperator(const JitCompiledOperatorContract &contract) {
-	return JitCompiledContractHasNativeProtocol(contract, JitCompiledProtocolKind::HASH_JOIN_PROBE_CURSOR) ||
-	       JitCompiledContractHasNativeProtocol(contract, JitCompiledProtocolKind::AGGREGATE_LOOKUP);
-}
-
-static bool JitCompiledContractHasNativeSink(const JitCompiledOperatorContract &contract) {
-	return JitCompiledContractHasNativeProtocol(contract, JitCompiledProtocolKind::HASH_JOIN_BUILD) ||
-	       JitCompiledContractHasNativeProtocol(contract, JitCompiledProtocolKind::AGGREGATE_UPDATE) ||
-	       JitCompiledContractHasNativeProtocol(contract, JitCompiledProtocolKind::SINK_CURSOR);
-}
-
-static bool JitCompiledStageIsSourceRole(const JitCompiledStageContract &stage) {
-	return stage.stage == JitRegionStageKind::SOURCE;
-}
-
-static bool JitCompiledStageIsOperatorRole(const JitCompiledStageContract &stage) {
-	return stage.stage == JitRegionStageKind::HASH_JOIN_PROBE ||
-	       stage.stage == JitRegionStageKind::OPERATOR_BOUNDARY;
-}
-
-static bool JitCompiledStageIsSinkRole(const JitCompiledStageContract &stage) {
-	return stage.stage == JitRegionStageKind::HASH_JOIN_BUILD ||
-	       stage.stage == JitRegionStageKind::HASH_AGGREGATE_UPDATE ||
-	       stage.stage == JitRegionStageKind::PERFECT_HASH_AGGREGATE_UPDATE ||
-	       stage.stage == JitRegionStageKind::UNGROUPED_AGGREGATE_UPDATE ||
-	       stage.stage == JitRegionStageKind::SINK_BOUNDARY;
-}
-
-static bool JitCompiledStageIsBoundaryFree(const JitCompiledStageContract &stage) {
-	return stage.execution == JitRegionStageExecutionKind::NATIVE_PROTOCOL ||
-	       stage.execution == JitRegionStageExecutionKind::GENERATED_IR ||
-	       stage.execution == JitRegionStageExecutionKind::PASS_THROUGH;
-}
-
-static string DescribeJitCompiledContractSlice(const JitCompiledOperatorContract &contract, const string &role) {
-	string result = "compiled_contract<role=" + role;
-	result += ",stages=" + std::to_string(contract.stages.size());
-	result += ",source=" + JitRegionBool(contract.has_source);
-	result += ",operator=" + JitRegionBool(contract.has_operator);
-	result += ",sink=" + JitRegionBool(contract.has_sink);
-	result += ",state_scan=" + JitRegionBool(contract.has_state_scan);
-	result += ",resumable_output=" + JitRegionBool(contract.has_resumable_output);
-	result += ",executor_boundary_free=" + JitRegionBool(contract.executor_boundary_free);
-	result += ">";
-	return result;
-}
-
-static JitCompiledOperatorContract SliceJitCompiledContract(const JitCompiledOperatorContract &contract,
-                                                            const string &role) {
-	JitCompiledOperatorContract result;
-	result.present = false;
-	result.executor_boundary_free = true;
-	for (auto &stage : contract.stages) {
-		bool keep_stage = false;
-		if (role == "source") {
-			keep_stage = JitCompiledStageIsSourceRole(stage);
-		} else if (role == "operator") {
-			keep_stage = JitCompiledStageIsOperatorRole(stage);
-		} else if (role == "sink") {
-			keep_stage = JitCompiledStageIsSinkRole(stage);
-		}
-		if (!keep_stage) {
-			continue;
-		}
-		result.present = true;
-		result.has_source = result.has_source || JitCompiledStageIsSourceRole(stage);
-		result.has_operator = result.has_operator || JitCompiledStageIsOperatorRole(stage);
-		result.has_sink = result.has_sink || JitCompiledStageIsSinkRole(stage);
-		result.has_state_scan =
-		    result.has_state_scan || stage.protocol == JitCompiledProtocolKind::STATE_SCAN_CURSOR;
-		result.has_resumable_output =
-		    result.has_resumable_output || stage.drain == JitCompiledDrainKind::ZERO_OR_MANY_OUTPUT;
-		result.executor_boundary_free = result.executor_boundary_free && JitCompiledStageIsBoundaryFree(stage);
-		result.stages.push_back(stage);
-	}
-	if (!result.present) {
-		result.executor_boundary_free = false;
-	}
-	result.ir = DescribeJitCompiledContractSlice(result, role);
 	return result;
 }
 
@@ -907,7 +811,7 @@ static string BuildJitSourceBoundaryReason(const JitPipelineOperatorEntry &entry
 }
 
 static string BuildJitSinkBoundaryReason(const JitPipelineOperatorEntry &entry) {
-	if (entry.descriptor.has_sink && !entry.descriptor.sink.reason.empty()) {
+	if (entry.HasSinkContract() && !entry.descriptor.sink.reason.empty()) {
 		return entry.descriptor.sink.reason;
 	}
 	return BuildJitGenericSinkProtocolReason(entry.Physical());
@@ -1016,12 +920,12 @@ static JitRegionIRNode BuildJitRegionOperatorNode(string role, const JitPipeline
 	}
 	default: {
 		auto &descriptor = entry.descriptor;
-		if (descriptor.has_operator) {
+		if (entry.HasOperatorContract()) {
 			JitRegionIRNode node;
 			node.role = std::move(role);
 			node.operator_name = entry.operator_name;
 			node.operator_index = entry.operator_index;
-			node.compiled_contract = SliceJitCompiledContract(descriptor.compiled_contract, "operator");
+			node.compiled_contract = entry.operator_contract;
 			node.kind = JitRegionIRNodeKind::OPERATOR;
 			node.output_types = entry.output_types;
 			node.estimated_cardinality = entry.estimated_cardinality;
@@ -1029,7 +933,7 @@ static JitRegionIRNode BuildJitRegionOperatorNode(string role, const JitPipeline
 			node.output_format = JitRegionVectorFormatKind::DATA_CHUNK;
 			SetJitRegionInputDataflow(node, state);
 			node.operator_info = BuildJitRegionOperatorInfo(descriptor.operator_info);
-			if (JitCompiledContractHasNativeOperator(node.compiled_contract)) {
+			if (entry.native_operator) {
 				node.boundary = JitRegionBoundaryKind::OPERATOR_NATIVE;
 			} else {
 				node.boundary = JitRegionBoundaryKind::OPERATOR_HELPER;
@@ -1141,7 +1045,7 @@ static void AccumulateJitRegionInventorySource(JitRegionPipelineInventory &inven
 	inventory.source_operator_name = source.operator_name;
 	inventory.estimated_cardinality = MaxValue(inventory.estimated_cardinality, source.estimated_cardinality);
 	auto &descriptor = source.descriptor;
-	if (descriptor.has_source) {
+	if (source.HasSourceContract()) {
 		inventory.source_kind = descriptor.source.kind;
 		inventory.source_execution = descriptor.source.execution;
 		inventory.has_scan_source = IsJitRegionScanSource(source.type);
@@ -1195,7 +1099,7 @@ static void AccumulateJitRegionInventorySink(JitRegionPipelineInventory &invento
 	inventory.sink_operator_name = sink.operator_name;
 	inventory.estimated_cardinality = MaxValue(inventory.estimated_cardinality, sink.estimated_cardinality);
 	auto &descriptor = sink.descriptor;
-	if (descriptor.has_sink) {
+	if (sink.HasSinkContract()) {
 		inventory.sink_kind = descriptor.sink.kind;
 	} else {
 		inventory.sink_kind = JitRegionSinkKind::OPERATOR;
@@ -2730,10 +2634,10 @@ static unique_ptr<JitRegionIR> TryBuildJitRegion(const JitPipelineDescriptor &de
 		auto &source_descriptor = source.descriptor;
 		auto source_node = BuildJitRegionFallbackNode("source", source, JitRegionIRNodeKind::SOURCE,
 		                                              BuildJitSourceBoundaryReason(source));
-		source_node.compiled_contract = SliceJitCompiledContract(source_descriptor.compiled_contract, "source");
-		if (source_descriptor.has_source) {
+		source_node.compiled_contract = source.source_contract;
+		if (source.HasSourceContract()) {
 			source_node.source = BuildJitRegionSourceInfo(source_descriptor.source);
-			if (JitCompiledContractHasNativeSource(source_node.compiled_contract)) {
+			if (source.native_source) {
 				source_node.boundary = JitRegionBoundaryKind::SOURCE_NATIVE;
 			}
 		} else if (IsJitRegionScanSource(source.type)) {
@@ -2753,11 +2657,11 @@ static unique_ptr<JitRegionIR> TryBuildJitRegion(const JitPipelineDescriptor &de
 		auto &sink_descriptor = sink.descriptor;
 		auto sink_reason = BuildJitSinkBoundaryReason(sink);
 		auto sink_node = BuildJitRegionFallbackNode("sink", sink, JitRegionIRNodeKind::SINK, std::move(sink_reason));
-		sink_node.compiled_contract = SliceJitCompiledContract(sink_descriptor.compiled_contract, "sink");
-		sink_node.sink = BuildJitRegionSinkInfo(sink.Physical(), sink_descriptor);
+		sink_node.compiled_contract = sink.sink_contract;
+		sink_node.sink = BuildJitRegionSinkInfo(sink.Physical(), sink_descriptor, sink.HasSinkContract());
 		if (sink_node.sink) {
 			sink_node.fallback_reason = sink_node.sink->reason;
-			if (JitCompiledContractHasNativeSink(sink_node.compiled_contract)) {
+			if (sink.native_sink) {
 				sink_node.boundary = JitRegionBoundaryKind::SINK_NATIVE;
 			}
 		}
