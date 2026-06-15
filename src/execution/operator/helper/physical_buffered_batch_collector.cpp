@@ -25,6 +25,37 @@ public:
 BufferedBatchCollectorLocalState::BufferedBatchCollectorLocalState() {
 }
 
+JitOperatorDescriptor PhysicalBufferedBatchCollector::GetJitOperatorDescriptor() const {
+	return BuildJitResultCollectorAppendDescriptor();
+}
+
+bool PhysicalBufferedBatchCollector::BindJitNativeSink(ExecutionContext &context, DataChunk &input,
+                                                       OperatorSinkInput &sink_input,
+                                                       const JitRegionSinkInfo &sink_info,
+                                                       JitNativeSinkBinding &binding) const {
+	(void)context;
+	(void)input;
+	binding = JitNativeSinkBinding();
+	binding.kind = sink_info.kind;
+	if (sink_info.kind != JitRegionSinkKind::RESULT_COLLECTOR_APPEND) {
+		binding.blocker = "result-collector-native-runtime-kind-mismatch";
+		return false;
+	}
+	auto &gstate = sink_input.global_state.Cast<BufferedBatchCollectorGlobalState>();
+	auto &lstate = sink_input.local_state.Cast<BufferedBatchCollectorLocalState>();
+	binding.ready = true;
+	binding.result_collector_append.ready = true;
+	binding.result_collector_append.kind = JitNativeResultCollectorAppendKind::BATCHED_BUFFERED_DATA;
+	binding.result_collector_append.batched_buffered_data = &gstate.buffered_data->Cast<BatchedBufferedData>();
+	binding.result_collector_append.interrupt_state = &sink_input.interrupt_state;
+	binding.result_collector_append.batch_index = lstate.partition_info.batch_index.GetIndex();
+	binding.result_collector_append.min_batch_index = lstate.partition_info.min_batch_index.GetIndex();
+	binding.result_collector_append.current_batch = &lstate.current_batch;
+	binding.result_collector_append.blocker = "none";
+	binding.blocker = "none";
+	return true;
+}
+
 SinkResultType PhysicalBufferedBatchCollector::Sink(ExecutionContext &context, DataChunk &chunk,
                                                     OperatorSinkInput &input) const {
 	auto &gstate = input.global_state.Cast<BufferedBatchCollectorGlobalState>();

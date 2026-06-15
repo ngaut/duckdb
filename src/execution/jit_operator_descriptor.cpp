@@ -410,7 +410,7 @@ static void AddJitDescriptorProtocolField(vector<JitRegionProtocolField> &fields
 	fields.push_back(std::move(field));
 }
 
-static vector<JitRegionProtocolField> BuildJitDescriptorProtocolFields(const string &reason) {
+vector<JitRegionProtocolField> BuildJitDescriptorProtocolFields(const string &reason) {
 	vector<JitRegionProtocolField> result;
 	auto segments = StringUtil::Split(reason, ";");
 	if (!segments.empty() && !segments[0].empty()) {
@@ -505,6 +505,8 @@ static JitRegionStateContractStatus JitCompiledSinkStatus(const JitRegionSinkInf
 	case JitRegionSinkKind::UNGROUPED_AGGREGATE_UPDATE:
 		return JitCompiledAllAggregatesHaveNativeUpdates(sink.aggregates) ? JitRegionStateContractStatus::READY
 		                                                                  : JitRegionStateContractStatus::MISSING;
+	case JitRegionSinkKind::RESULT_COLLECTOR_APPEND:
+		return JitRegionStateContractStatus::READY;
 	default:
 		return JitRegionStateContractStatus::MISSING;
 	}
@@ -518,6 +520,8 @@ static JitCompiledProtocolKind JitCompiledSinkProtocol(const JitRegionSinkInfo &
 	case JitRegionSinkKind::PERFECT_HASH_AGGREGATE_UPDATE:
 	case JitRegionSinkKind::UNGROUPED_AGGREGATE_UPDATE:
 		return JitCompiledProtocolKind::AGGREGATE_UPDATE;
+	case JitRegionSinkKind::RESULT_COLLECTOR_APPEND:
+		return JitCompiledProtocolKind::SINK_CURSOR;
 	case JitRegionSinkKind::SORT:
 	case JitRegionSinkKind::MATERIALIZATION:
 	case JitRegionSinkKind::OPERATOR:
@@ -537,6 +541,8 @@ static JitRegionStageKind JitCompiledSinkStage(const JitRegionSinkInfo &sink) {
 		return JitRegionStageKind::PERFECT_HASH_AGGREGATE_UPDATE;
 	case JitRegionSinkKind::UNGROUPED_AGGREGATE_UPDATE:
 		return JitRegionStageKind::UNGROUPED_AGGREGATE_UPDATE;
+	case JitRegionSinkKind::RESULT_COLLECTOR_APPEND:
+		return JitRegionStageKind::RESULT_COLLECTOR_APPEND;
 	default:
 		return JitRegionStageKind::SINK_BOUNDARY;
 	}
@@ -573,6 +579,9 @@ static JitCompiledStageContract BuildJitCompiledSinkStage(const JitRegionSinkInf
 		stage.required_capability = "ungrouped-aggregate-native-update";
 		stage.blocker = JitCompiledAllAggregatesHaveNativeUpdates(sink.aggregates) ? "none"
 		                                                                           : "aggregate-native-update-missing";
+	} else if (sink.kind == JitRegionSinkKind::RESULT_COLLECTOR_APPEND) {
+		stage.required_capability = "result-collector-native-append";
+		stage.blocker = "none";
 	} else {
 		stage.required_capability = "sink-cursor";
 		stage.blocker = "sink-cursor-protocol-missing";

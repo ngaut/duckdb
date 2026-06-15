@@ -234,9 +234,13 @@ static bool SljitNativeRegionOpIsNativeHashJoinBuildSink(const SljitNativeRegion
 	       op.hash_join_build.sink_info.kind == JitRegionSinkKind::HASH_JOIN_BUILD;
 }
 
+static bool SljitNativeRegionOpIsNativeResultCollectorAppendSink(const SljitNativeRegionOpPlan &op) {
+	return op.kind == SljitNativeRegionOpKind::RESULT_COLLECTOR_APPEND;
+}
+
 static bool SljitNativeRegionOpIsNativeSink(const SljitNativeRegionOpPlan &op) {
 	return SljitNativeRegionOpIsNativeUngroupedSink(op) || SljitNativeRegionOpIsNativeGroupedSink(op) ||
-	       SljitNativeRegionOpIsNativeHashJoinBuildSink(op);
+	       SljitNativeRegionOpIsNativeHashJoinBuildSink(op) || SljitNativeRegionOpIsNativeResultCollectorAppendSink(op);
 }
 
 static bool SljitNativeRegionOpIsNativeProtocolSinkStage(const SljitNativeRegionOpPlan &op) {
@@ -2293,6 +2297,21 @@ static SljitRegionNodePlan PlanSljitSinkNode(const JitRegionIRNode &node) {
 		return PlanSljitPerfectHashAggregateSinkNode(node);
 	case JitRegionSinkKind::UNGROUPED_AGGREGATE_UPDATE:
 		return PlanSljitUngroupedAggregateSinkNode(node);
+	case JitRegionSinkKind::RESULT_COLLECTOR_APPEND: {
+		auto native_op = make_uniq<SljitNativeRegionOpPlan>();
+		native_op->kind = SljitNativeRegionOpKind::RESULT_COLLECTOR_APPEND;
+		string reason =
+		    "generated native result collector append protocol;requires=native_sink_runtime_binding;"
+		    "requires=native_result_collector_append";
+		if (!node.sink->ir.empty()) {
+			reason += ";" + node.sink->ir;
+		}
+		SljitRegionNodePlan result;
+		result.kind = JitLoweringKind::NATIVE;
+		result.reason = std::move(reason);
+		result.native_op = std::move(native_op);
+		return result;
+	}
 	default:
 		if (!node.fallback_reason.empty()) {
 			return SljitRegionFallbackNode(node.fallback_reason);
@@ -2840,6 +2859,9 @@ string DescribeNativeRegion(const SljitNativeRegionPlan &region, const string &m
 				}
 				result += ")";
 				break;
+		case SljitNativeRegionOpKind::RESULT_COLLECTOR_APPEND:
+			result += "result_collector_append()";
+			break;
 			default:
 				result += "unknown";
 				break;
@@ -2875,6 +2897,9 @@ string DescribeNativeRegionShape(const SljitNativeRegionPlan &region) {
 			break;
 		case SljitNativeRegionOpKind::UNGROUPED_AGGREGATE_UPDATE:
 			result += "ungrouped-aggregate-update";
+			break;
+		case SljitNativeRegionOpKind::RESULT_COLLECTOR_APPEND:
+			result += "result-collector-append";
 			break;
 		default:
 			result += "unknown";

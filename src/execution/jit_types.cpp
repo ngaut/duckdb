@@ -212,6 +212,8 @@ const char *JitRegionSinkKindToString(JitRegionSinkKind kind) {
 		return "perfect-hash-aggregate-update";
 	case JitRegionSinkKind::UNGROUPED_AGGREGATE_UPDATE:
 		return "ungrouped-aggregate-update";
+	case JitRegionSinkKind::RESULT_COLLECTOR_APPEND:
+		return "result-collector-append";
 	case JitRegionSinkKind::SORT:
 		return "sort";
 	case JitRegionSinkKind::MATERIALIZATION:
@@ -366,6 +368,8 @@ const char *JitRegionStageKindToString(JitRegionStageKind kind) {
 		return "perfect-hash-aggregate-update";
 	case JitRegionStageKind::UNGROUPED_AGGREGATE_UPDATE:
 		return "ungrouped-aggregate-update";
+	case JitRegionStageKind::RESULT_COLLECTOR_APPEND:
+		return "result-collector-append";
 	case JitRegionStageKind::SINK_BOUNDARY:
 		return "sink-boundary";
 	case JitRegionStageKind::OPERATOR_BOUNDARY:

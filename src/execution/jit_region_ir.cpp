@@ -1828,6 +1828,7 @@ static bool JitRegionStageIsSinkRole(const JitRegionStage &stage) {
 	       stage.kind == JitRegionStageKind::HASH_AGGREGATE_UPDATE ||
 	       stage.kind == JitRegionStageKind::PERFECT_HASH_AGGREGATE_UPDATE ||
 	       stage.kind == JitRegionStageKind::UNGROUPED_AGGREGATE_UPDATE ||
+	       stage.kind == JitRegionStageKind::RESULT_COLLECTOR_APPEND ||
 	       stage.kind == JitRegionStageKind::SINK_BOUNDARY;
 }
 
@@ -2073,6 +2074,8 @@ static string GetJitRegionSinkSignatureFeature(const JitRegionIRNode &node) {
 		return NormalizeJitRegionSignatureSegment(node.operator_name) + "-sink";
 	}
 	switch (node.sink->kind) {
+	case JitRegionSinkKind::RESULT_COLLECTOR_APPEND:
+		return "result-collector-append";
 	case JitRegionSinkKind::HASH_JOIN_BUILD:
 		return "hash-join-build";
 	case JitRegionSinkKind::HASH_AGGREGATE_UPDATE:

@@ -27,6 +27,20 @@ unique_ptr<PhysicalOperator> PhysicalArrowCollector::Create(ClientContext &conte
 	return make_uniq<PhysicalArrowBatchCollector>(physical_plan, data, batch_size);
 }
 
+JitOperatorDescriptor PhysicalArrowCollector::GetJitOperatorDescriptor() const {
+	JitOperatorDescriptor result;
+	result.has_sink = true;
+	result.sink.kind = JitRegionSinkKind::MATERIALIZATION;
+	result.sink.reason = "DuckDB Arrow result collector append protocol missing";
+	result.sink.reason += ";operator=RESULT_COLLECTOR";
+	result.sink.reason += ";output_columns=" + std::to_string(types.size());
+	result.sink.reason += ";arrow_result_collector_append_contract=missing";
+	result.sink.reason += ";arrow_result_collector_append_required_capability=arrow-result-collector-native-append";
+	result.sink.reason += ";arrow_result_collector_append_blocker=arrow-result-collector-native-append-unsupported";
+	result.sink.fields = BuildJitDescriptorProtocolFields(result.sink.reason);
+	return FinalizeJitOperatorDescriptor(std::move(result));
+}
+
 SinkResultType PhysicalArrowCollector::Sink(ExecutionContext &context, DataChunk &chunk,
                                             OperatorSinkInput &input) const {
 	auto &lstate = input.local_state.Cast<ArrowCollectorLocalState>();

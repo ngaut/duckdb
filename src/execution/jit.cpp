@@ -505,11 +505,6 @@ static bool JitFullPipelineRuntimeCanEnter(Pipeline &pipeline, string &reason) {
 		reason = "full pipeline runtime requires both source and sink";
 		return false;
 	}
-	auto partition_info = pipeline.GetSink()->RequiredPartitionInfo();
-	if (partition_info.AnyRequired()) {
-		reason = "full pipeline runtime requires clean source-to-sink entry;required_partition_info=true";
-		return false;
-	}
 	return true;
 }
 

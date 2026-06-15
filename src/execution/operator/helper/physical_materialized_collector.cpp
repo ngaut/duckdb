@@ -24,6 +24,33 @@ public:
 	ColumnDataAppendState append_state;
 };
 
+JitOperatorDescriptor PhysicalMaterializedCollector::GetJitOperatorDescriptor() const {
+	return BuildJitResultCollectorAppendDescriptor();
+}
+
+bool PhysicalMaterializedCollector::BindJitNativeSink(ExecutionContext &context, DataChunk &input,
+                                                      OperatorSinkInput &sink_input,
+                                                      const JitRegionSinkInfo &sink_info,
+                                                      JitNativeSinkBinding &binding) const {
+	(void)context;
+	(void)input;
+	binding = JitNativeSinkBinding();
+	binding.kind = sink_info.kind;
+	if (sink_info.kind != JitRegionSinkKind::RESULT_COLLECTOR_APPEND) {
+		binding.blocker = "result-collector-native-runtime-kind-mismatch";
+		return false;
+	}
+	auto &state = sink_input.local_state.Cast<MaterializedCollectorLocalState>();
+	binding.ready = true;
+	binding.result_collector_append.ready = true;
+	binding.result_collector_append.kind = JitNativeResultCollectorAppendKind::COLUMN_DATA_COLLECTION;
+	binding.result_collector_append.collection = state.collection.get();
+	binding.result_collector_append.append_state = &state.append_state;
+	binding.result_collector_append.blocker = "none";
+	binding.blocker = "none";
+	return true;
+}
+
 SinkResultType PhysicalMaterializedCollector::Sink(ExecutionContext &context, DataChunk &chunk,
                                                    OperatorSinkInput &input) const {
 	auto &lstate = input.local_state.Cast<MaterializedCollectorLocalState>();

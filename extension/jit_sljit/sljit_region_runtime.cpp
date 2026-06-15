@@ -257,7 +257,8 @@ public:
 private:
 	bool HasNativeProtocolBody() const {
 		for (auto &op : ops) {
-			if (op.kind == SljitNativeRegionOpKind::HASH_JOIN_BUILD) {
+			if (op.kind == SljitNativeRegionOpKind::HASH_JOIN_BUILD ||
+			    op.kind == SljitNativeRegionOpKind::RESULT_COLLECTOR_APPEND) {
 				return true;
 			}
 		}
@@ -382,6 +383,13 @@ private:
 					return runtime.RecordNativeSinkResult(*current, SinkResultType::NEED_MORE_INPUT);
 				}
 				throw InternalException("SLJIT ungrouped aggregate update reached runtime without native state update codegen");
+			}
+			if (op.kind == SljitNativeRegionOpKind::RESULT_COLLECTOR_APPEND) {
+				if (op_idx + 1 != ops.size()) {
+					throw InternalException("SLJIT result collector append sink must be the final full pipeline operator");
+				}
+				auto sink_result = ExecuteNativeResultCollectorAppend(runtime, op, *current);
+				return runtime.RecordNativeSinkResult(*current, sink_result);
 			}
 			if (CanExecuteFilterProjection(op_idx)) {
 				if (op_idx + 1 >= temporary_chunks.size()) {
@@ -1001,6 +1009,23 @@ private:
 			throw InternalException("SLJIT native hash join build sink binding did not return a ready build state");
 		}
 		return JitAppendNativeHashJoinBuild(binding.hash_join_build, input);
+	}
+
+	SinkResultType ExecuteNativeResultCollectorAppend(JitFullPipelineRuntime &runtime, SljitExecutableRegionOp &op,
+	                                                 DataChunk &input) {
+		(void)op;
+		JitNativeSinkBinding binding;
+		JitRegionSinkInfo sink_info;
+		sink_info.kind = JitRegionSinkKind::RESULT_COLLECTOR_APPEND;
+		if (!runtime.BindNativeSink(input, sink_info, binding)) {
+			auto blocker = binding.blocker.empty() ? "result-collector-native-runtime-binding-failed"
+			                                      : binding.blocker;
+			throw InternalException("SLJIT native result collector append binding failed: %s", blocker);
+		}
+		if (!binding.ready || !binding.result_collector_append.ready) {
+			throw InternalException("SLJIT native result collector append binding did not return ready append state");
+		}
+		return JitAppendNativeResultCollector(binding.result_collector_append, input);
 	}
 
 	void ExecuteNativeUngroupedAggregateUpdate(JitFullPipelineRuntime &runtime, SljitExecutableRegionOp &op,

@@ -1106,12 +1106,13 @@ reference executor.
 Full-pipeline kernels may enter only native sink/update/state protocols exposed
 by the core IR and runtime contract. There is intentionally no generic sink
 facade, no retryable sink chunk callback, and no typed sink callback. Hash join
-build/probe and generic hash aggregate lookup/update enter through their
-backend-neutral native contracts only for supported protocol shapes. Result
-collectors, materialization, sort/top-n build, and any other sink/operator
-without a native protocol must be reported as unsupported or fallback with an
-explicit missing protocol reason. Calling a whole DuckDB sink or whole DuckDB
-operator from a full-pipeline kernel is not a native-fused region.
+build/probe, generic hash aggregate lookup/update, and result collector append
+enter through backend-neutral native contracts only for supported protocol
+shapes. Materialization, sort/top-n build, and any other sink/operator without a
+native protocol must be reported as unsupported or fallback with an explicit
+missing protocol reason.
+Calling a whole DuckDB sink or whole DuckDB operator from a full-pipeline kernel
+is not a native-fused region.
 
 Stateful operator protocol ownership is unsplit in v1. Core candidate formation
 must not create split candidates that cross a hash join probe, operator protocol
@@ -1122,10 +1123,13 @@ executor. This keeps backend analysis focused on executable ownership instead of
 recording non-executable "resume protocol missing" diagnostics as candidate
 success.
 
-The canonical full-pipeline missing-sink reason is
+The canonical full-pipeline missing-sink reason for sinks that still lack a
+native protocol is
 `full pipeline sink requires native sink or operator update protocol`; backend
 events may attach typed IR and operator protocol facts after that reason, but
-they must not compile the region.
+they must not compile the region. Result collectors are not missing-sink shapes:
+they expose `result-collector-append` and bind a native append state through
+core-owned runtime state.
 
 ### Native Sink-Update ABI
 
@@ -1378,9 +1382,10 @@ The valid blocker is
 `fusion-blocker:source-fusion-gap:requires-native-source`. A source-boundary
 source-prefix candidate must name the non-fused source boundary directly instead of
 pretending to be native source fusion. Full-pipeline regions do not have a
-generic non-native sink success path; a missing native sink/operator protocol is an
-unsupported region with the exact missing protocol named in the event reason and
-IR.
+generic non-native sink success path. Result collection uses the narrow
+`result-collector-append` protocol; sinks without an exposed protocol remain
+unsupported regions with the exact missing native sink/operator protocol named
+in the event reason and IR.
 
 Source-pushed table filters are normalized in core IR and remain visible in
 candidate traits. SLJIT lowers supported pushed filters as backend-owned

@@ -65,5 +65,6 @@ struct JitOperatorDescriptor {
 };
 
 DUCKDB_API JitOperatorDescriptor FinalizeJitOperatorDescriptor(JitOperatorDescriptor descriptor);
+DUCKDB_API vector<JitRegionProtocolField> BuildJitDescriptorProtocolFields(const string &reason);
 
 } // namespace duckdb

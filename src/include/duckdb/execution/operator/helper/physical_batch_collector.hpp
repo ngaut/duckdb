@@ -26,6 +26,9 @@ public:
 	SinkCombineResultType Combine(ExecutionContext &context, OperatorSinkCombineInput &input) const override;
 	SinkFinalizeType Finalize(Pipeline &pipeline, Event &event, ClientContext &context,
 	                          OperatorSinkFinalizeInput &input) const override;
+	JitOperatorDescriptor GetJitOperatorDescriptor() const override;
+	bool BindJitNativeSink(ExecutionContext &context, DataChunk &input, OperatorSinkInput &sink_input,
+	                       const JitRegionSinkInfo &sink_info, JitNativeSinkBinding &binding) const override;
 
 	unique_ptr<LocalSinkState> GetLocalSinkState(ExecutionContext &context) const override;
 	unique_ptr<GlobalSinkState> GetGlobalSinkState(ClientContext &context) const override;

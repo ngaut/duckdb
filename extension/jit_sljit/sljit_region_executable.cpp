@@ -248,6 +248,8 @@ static bool BuildExecutableRegionOp(const SljitNativeRegionOpPlan &op, SljitExec
 	case SljitNativeRegionOpKind::HASH_JOIN_BUILD:
 		executable.hash_join_build.plan = op.hash_join_build;
 		return true;
+	case SljitNativeRegionOpKind::RESULT_COLLECTOR_APPEND:
+		return true;
 	case SljitNativeRegionOpKind::PROJECTION:
 		executable.projections.reserve(op.projections.size());
 		for (auto &projection : op.projections) {

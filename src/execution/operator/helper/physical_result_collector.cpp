@@ -12,6 +12,10 @@
 #include "duckdb/parallel/pipeline.hpp"
 #include "duckdb/storage/buffer_manager.hpp"
 #include "duckdb/main/client_context.hpp"
+#include "duckdb/common/types/batched_data_collection.hpp"
+#include "duckdb/common/types/column/column_data_collection.hpp"
+#include "duckdb/main/buffered_data/batched_buffered_data.hpp"
+#include "duckdb/main/buffered_data/simple_buffered_data.hpp"
 
 namespace duckdb {
 
@@ -48,6 +52,64 @@ unique_ptr<PhysicalOperator> PhysicalResultCollector::GetResultCollector(ClientC
 		return make_uniq<PhysicalBufferedBatchCollector>(physical_plan, data);
 	}
 	return make_uniq<PhysicalBatchCollector>(physical_plan, data);
+}
+
+JitOperatorDescriptor PhysicalResultCollector::BuildJitResultCollectorAppendDescriptor() const {
+	JitOperatorDescriptor result;
+	result.has_sink = true;
+	result.sink.kind = JitRegionSinkKind::RESULT_COLLECTOR_APPEND;
+	result.sink.reason = "DuckDB result collector native append protocol";
+	result.sink.reason += ";operator=RESULT_COLLECTOR";
+	result.sink.reason += ";output_columns=" + std::to_string(types.size());
+	result.sink.reason += ";native_result_collector_append_contract=ready";
+	result.sink.reason += ";native_result_collector_append_required_capability=result-collector-native-append";
+	result.sink.reason += ";native_result_collector_append_blocker=none";
+	result.sink.fields = BuildJitDescriptorProtocolFields(result.sink.reason);
+	return FinalizeJitOperatorDescriptor(std::move(result));
+}
+
+SinkResultType JitAppendNativeResultCollector(const JitNativeResultCollectorAppendBinding &binding, DataChunk &input) {
+	if (!binding.ready) {
+		throw InternalException("JIT native result collector append requires a ready binding");
+	}
+	switch (binding.kind) {
+	case JitNativeResultCollectorAppendKind::COLUMN_DATA_COLLECTION:
+		if (!binding.collection || !binding.append_state) {
+			throw InternalException("JIT native materialized result collector append binding is incomplete");
+		}
+		binding.collection->Append(*binding.append_state, input);
+		return SinkResultType::NEED_MORE_INPUT;
+	case JitNativeResultCollectorAppendKind::BATCHED_DATA_COLLECTION:
+		if (!binding.batched_data) {
+			throw InternalException("JIT native batched result collector append binding is incomplete");
+		}
+		binding.batched_data->Append(input, binding.batch_index);
+		return SinkResultType::NEED_MORE_INPUT;
+	case JitNativeResultCollectorAppendKind::SIMPLE_BUFFERED_DATA:
+		if (!binding.simple_buffered_data || !binding.interrupt_state) {
+			throw InternalException("JIT native simple buffered result collector append binding is incomplete");
+		}
+		if (binding.simple_buffered_data->BufferIsFull()) {
+			binding.simple_buffered_data->BlockSink(*binding.interrupt_state);
+			return SinkResultType::BLOCKED;
+		}
+		binding.simple_buffered_data->Append(input);
+		return SinkResultType::NEED_MORE_INPUT;
+	case JitNativeResultCollectorAppendKind::BATCHED_BUFFERED_DATA:
+		if (!binding.batched_buffered_data || !binding.interrupt_state || !binding.current_batch) {
+			throw InternalException("JIT native batched buffered result collector append binding is incomplete");
+		}
+		*binding.current_batch = binding.batch_index;
+		binding.batched_buffered_data->UpdateMinBatchIndex(binding.min_batch_index);
+		if (binding.batched_buffered_data->ShouldBlockBatch(binding.batch_index)) {
+			binding.batched_buffered_data->BlockSink(*binding.interrupt_state, binding.batch_index);
+			return SinkResultType::BLOCKED;
+		}
+		binding.batched_buffered_data->Append(input, binding.batch_index);
+		return SinkResultType::NEED_MORE_INPUT;
+	default:
+		throw InternalException("JIT native result collector append binding has no append kind");
+	}
 }
 
 vector<const_reference<PhysicalOperator>> PhysicalResultCollector::GetChildren() const {

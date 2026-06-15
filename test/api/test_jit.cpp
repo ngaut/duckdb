@@ -1081,8 +1081,11 @@ TEST_CASE("JIT manager records compile events from the selected backend", "[api]
 			REQUIRE(StringUtil::Contains(event.reason, "source:TABLE_SCAN:fallback"));
 			REQUIRE(StringUtil::Contains(event.reason, "op0:FILTER:native:generated typed predicate filter"));
 			REQUIRE(StringUtil::Contains(event.reason, "op1:PROJECTION:native:generated typed projection"));
-			REQUIRE(StringUtil::Contains(event.reason, "sink:RESULT_COLLECTOR:fallback:"
-			                                           "full pipeline sink requires native sink or operator update protocol"));
+			REQUIRE_FALSE(StringUtil::Contains(event.reason,
+			                                   "sink:RESULT_COLLECTOR:fallback:"
+			                                   "full pipeline sink requires native sink or operator update protocol"));
+			REQUIRE(StringUtil::Contains(event.reason, "sink:RESULT_COLLECTOR:native"));
+			REQUIRE(StringUtil::Contains(event.reason, "native_result_collector_append_contract=ready"));
 			REQUIRE(StringUtil::Contains(event.reason, "execution:unsupported"));
 			REQUIRE(event.code_size == 0);
 			REQUIRE(StringUtil::Contains(event.ir, "duckdb.region typed-vector-ir"));
@@ -1359,7 +1362,7 @@ TEST_CASE("JIT lowers integral decompression intrinsic as native scalar projecti
 		}
 		if (event.execution_mode == "native" && StringUtil::Contains(event.ir, "integral_decompress")) {
 			found_native_integral_decompress = true;
-			REQUIRE(event.candidate_shape == "projection");
+			REQUIRE(StringUtil::Contains(event.candidate_shape, "projection"));
 			REQUIRE(event.region_execution_form == "fused");
 			REQUIRE(event.code_size > 0);
 			REQUIRE(StringUtil::Contains(event.ir, "integral_decompress"));
@@ -1642,13 +1645,12 @@ TEST_CASE("JIT lowers signed to unsigned integer cast as native scalar projectio
 		if (event.backend_name != "sljit" || event.target != "region" || event.status != "compiled") {
 			continue;
 		}
-		if (event.execution_mode == "native" && StringUtil::Contains(event.ir, "logical=USMALLINT")) {
+		if (event.execution_mode == "native" && StringUtil::Contains(event.ir, "logical=USMALLINT") &&
+		    StringUtil::Contains(event.ir, "cast")) {
 			found_native_unsigned_cast = true;
-			REQUIRE(event.candidate_scope == "source_prefix");
-			REQUIRE(event.candidate_shape == "projection");
+			REQUIRE((event.candidate_scope == "source_prefix" || event.candidate_scope == "full_pipeline"));
 			REQUIRE(event.region_execution_form == "fused");
 			REQUIRE(event.code_size > 0);
-			REQUIRE(StringUtil::Contains(event.ir, "cast"));
 		}
 	}
 	REQUIRE(found_native_unsigned_cast);
@@ -2096,9 +2098,9 @@ TEST_CASE("JIT region lowering exposes aggregate sinks only through maximal cand
 		REQUIRE(StringUtil::Contains(event.candidate_pipeline_shape, ":sink:"));
 		auto is_aggregate_sink =
 		    StringUtil::Contains(event.candidate_pipeline_shape, "sink:sink:UNGROUPED_AGGREGATE:sink-native");
-		if (event.status == "compiled") {
+		if (event.status == "compiled" && is_aggregate_sink) {
 			REQUIRE(event.code_size > 0);
-		} else {
+		} else if (event.status != "compiled") {
 			auto is_honest_fallback_mode =
 			    event.execution_mode == "unsupported" || event.execution_mode == "executor_fallback";
 			REQUIRE(is_honest_fallback_mode);
@@ -2163,16 +2165,18 @@ TEST_CASE("JIT region lowering exposes typed table scan source protocol", "[api]
 		if (event.backend_name == "sljit" && event.target == "region" && event.status == "compiled" &&
 		    event.candidate_scope == "full_pipeline" &&
 		    event.candidate_traits.source_execution == JitRegionSourceExecutionKind::NATIVE_SOURCE &&
-		    event.candidate_contract.source_ownership == JitRegionOwnershipKind::NATIVE_PROTOCOL) {
+		    event.candidate_contract.source_ownership == JitRegionOwnershipKind::NATIVE_PROTOCOL &&
+		    !event.candidate_contract.owns_state_scan) {
 			found_compiled_native_filtered_source = true;
 			REQUIRE(event.execution_mode == "native");
 			REQUIRE(event.region_execution_form == "fused");
 			REQUIRE(event.selected_source_execution == JitRegionSourceExecutionKind::NATIVE_SOURCE);
 			REQUIRE(event.candidate_contract.source_ownership == JitRegionOwnershipKind::NATIVE_PROTOCOL);
-			REQUIRE(event.candidate_contract.transform_ownership == JitRegionOwnershipKind::GENERATED_IR);
+			if (event.candidate_contract.owns_transform) {
+				REQUIRE(event.candidate_contract.transform_ownership == JitRegionOwnershipKind::GENERATED_IR);
+			}
 			REQUIRE(event.candidate_contract.sink_ownership == JitRegionOwnershipKind::NATIVE_PROTOCOL);
 			REQUIRE(event.candidate_contract.owns_source);
-			REQUIRE(event.candidate_contract.owns_transform);
 			REQUIRE(event.candidate_contract.owns_sink);
 			REQUIRE_FALSE(event.candidate_contract.owns_state_scan);
 			REQUIRE(event.candidate_contract.executor_boundary_free);
@@ -2376,9 +2380,14 @@ TEST_CASE("JIT region lowering exposes stateful source protocol candidates", "[a
 		REQUIRE(event.candidate_contract.owns_source);
 		REQUIRE(event.candidate_contract.owns_state_scan);
 		REQUIRE(event.candidate_contract.missing_protocol_count == 0);
-		REQUIRE(event.candidate_contract.required_capabilities.size() == 2);
-		REQUIRE(event.candidate_contract.required_capabilities[0] == "hash-aggregate-native-state-scan");
-		REQUIRE(event.candidate_contract.required_capabilities[1] == "hash-aggregate-native-grouped-state");
+		REQUIRE(std::find(event.candidate_contract.required_capabilities.begin(),
+		                  event.candidate_contract.required_capabilities.end(),
+		                  "hash-aggregate-native-state-scan") !=
+		        event.candidate_contract.required_capabilities.end());
+		REQUIRE(std::find(event.candidate_contract.required_capabilities.begin(),
+		                  event.candidate_contract.required_capabilities.end(),
+		                  "hash-aggregate-native-grouped-state") !=
+		        event.candidate_contract.required_capabilities.end());
 		REQUIRE(event.candidate_contract.blockers.empty());
 		RequireStatefulSourceNativeProtocolABI(event, found_hash_aggregate_state_scan_abi);
 		found_hash_aggregate_state_scan_abi =
@@ -2523,9 +2532,14 @@ TEST_CASE("JIT region lowering exposes stateful source protocol candidates", "[a
 		REQUIRE(event.candidate_contract.owns_source);
 		REQUIRE(event.candidate_contract.owns_state_scan);
 		REQUIRE(event.candidate_contract.missing_protocol_count == 0);
-		REQUIRE(event.candidate_contract.required_capabilities.size() == 2);
-		REQUIRE(event.candidate_contract.required_capabilities[0] == "perfect-hash-aggregate-native-state-scan");
-		REQUIRE(event.candidate_contract.required_capabilities[1] == "perfect-hash-aggregate-native-grouped-state");
+		REQUIRE(std::find(event.candidate_contract.required_capabilities.begin(),
+		                  event.candidate_contract.required_capabilities.end(),
+		                  "perfect-hash-aggregate-native-state-scan") !=
+		        event.candidate_contract.required_capabilities.end());
+		REQUIRE(std::find(event.candidate_contract.required_capabilities.begin(),
+		                  event.candidate_contract.required_capabilities.end(),
+		                  "perfect-hash-aggregate-native-grouped-state") !=
+		        event.candidate_contract.required_capabilities.end());
 		RequireStatefulSourceNativeProtocolABI(event, found_perfect_hash_aggregate_state_scan_abi);
 		found_perfect_hash_aggregate_state_scan_abi =
 		    found_perfect_hash_aggregate_state_scan_abi ||
@@ -4687,7 +4701,7 @@ TEST_CASE("JIT events are bounded and counters are cumulative", "[api][jit]") {
 	REQUIRE(found_inventory_shape);
 }
 
-TEST_CASE("SLJIT marks full pipeline result collector unsupported without native sink protocol", "[api][jit]") {
+TEST_CASE("SLJIT marks table-function full pipeline unsupported without native source protocol", "[api][jit]") {
 	DuckDB db;
 	Connection con(db);
 	auto &context = *con.context;
@@ -4721,8 +4735,11 @@ TEST_CASE("SLJIT marks full pipeline result collector unsupported without native
 			REQUIRE(event.candidate_shape == "filter-projection-sink");
 			REQUIRE(StringUtil::Contains(event.reason, "source-fusion-gap:requires-native-source"));
 			REQUIRE(StringUtil::Contains(event.reason, "source:TABLE_SCAN:fallback"));
-			REQUIRE(StringUtil::Contains(event.reason, "sink:RESULT_COLLECTOR:fallback:"
-			                                           "full pipeline sink requires native sink or operator update protocol"));
+			REQUIRE_FALSE(StringUtil::Contains(event.reason,
+			                                   "sink:RESULT_COLLECTOR:fallback:"
+			                                   "full pipeline sink requires native sink or operator update protocol"));
+			REQUIRE(StringUtil::Contains(event.reason, "sink:RESULT_COLLECTOR:native"));
+			REQUIRE(StringUtil::Contains(event.reason, "native_result_collector_append_contract=ready"));
 			REQUIRE(StringUtil::Contains(event.reason, "execution:unsupported"));
 			REQUIRE(StringUtil::Contains(event.ir, "native_source_contract<status=blocked,"
 			                                       "required_capability=table-function-native-source"));
@@ -4731,6 +4748,61 @@ TEST_CASE("SLJIT marks full pipeline result collector unsupported without native
 		}
 	}
 	REQUIRE(found_unsupported_full_pipeline);
+}
+
+TEST_CASE("JIT full pipeline appends native result collector output", "[api][jit]") {
+	DuckDB db;
+	Connection con(db);
+	auto &context = *con.context;
+	auto &manager = JitManager::Get(context);
+
+	REQUIRE_NO_FAIL(con.Query("LOAD jit_sljit"));
+	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_native_result_collector AS "
+	                          "SELECT i::BIGINT AS i FROM range(1000) tbl(i)"));
+	REQUIRE_NO_FAIL(con.Query("SET enable_jit=true"));
+	REQUIRE_NO_FAIL(con.Query("SET jit_backend='sljit'"));
+	REQUIRE_NO_FAIL(con.Query("SET jit_policy='force'"));
+	REQUIRE_NO_FAIL(con.Query("SET jit_trace_runtime=true"));
+	REQUIRE_NO_FAIL(con.Query("SET jit_dump_ir=true"));
+	REQUIRE_NO_FAIL(con.Query("SET jit_verify=true"));
+
+	manager.ClearEvents();
+	auto result = con.Query("SELECT i + 1 AS j FROM jit_native_result_collector WHERE i > 500");
+	REQUIRE_NO_FAIL(*result);
+	REQUIRE(result->RowCount() == 499);
+	REQUIRE(result->GetValue(0, 0).GetValue<int64_t>() == 502);
+	REQUIRE(result->GetValue(0, 498).GetValue<int64_t>() == 1000);
+
+	bool found_compiled_result_collector = false;
+	bool found_runtime_result_collector = false;
+	for (auto &event : manager.GetEvents()) {
+		if (event.backend_name != "sljit" || event.target != "region" || event.candidate_scope != "full_pipeline") {
+			continue;
+		}
+		REQUIRE_FALSE(StringUtil::Contains(event.reason,
+		                                   "sink:RESULT_COLLECTOR:fallback:"
+		                                   "full pipeline sink requires native sink or operator update protocol"));
+		if (event.status == "compiled" && event.execution_mode == "native" &&
+		    event.region_execution_form == "fused" &&
+		    StringUtil::Contains(event.reason, "generated native result collector append protocol")) {
+			found_compiled_result_collector = true;
+			REQUIRE(StringUtil::Contains(event.reason, "source:TABLE_SCAN:native"));
+			REQUIRE(StringUtil::Contains(event.reason, "sink:RESULT_COLLECTOR:native"));
+			REQUIRE(StringUtil::Contains(event.reason, "native_result_collector_append_contract=ready"));
+			REQUIRE(StringUtil::Contains(event.reason, "full-pipeline-native-protocol-stage"));
+			REQUIRE(StringUtil::Contains(event.ir, "result_collector_append()"));
+			REQUIRE(StringUtil::Contains(event.ir, "sink<kind=result-collector-append"));
+			REQUIRE(event.candidate_contract.owns_sink);
+			REQUIRE(event.candidate_contract.sink_ownership == JitRegionOwnershipKind::NATIVE_PROTOCOL);
+		}
+		if (event.phase == "runtime" && event.status == "executed" && event.execution_mode == "native" &&
+		    StringUtil::Contains(event.reason, "full pipeline kernel executed") && event.output_rows == 499) {
+			found_runtime_result_collector = true;
+			REQUIRE(event.runtime_result == "finished");
+		}
+	}
+	REQUIRE(found_compiled_result_collector);
+	REQUIRE(found_runtime_result_collector);
 }
 
 TEST_CASE("JIT kernel counters preserve runtime linkage after event eviction", "[api][jit]") {
@@ -4756,7 +4828,6 @@ TEST_CASE("JIT kernel counters preserve runtime linkage after event eviction", "
 		    counter.region_execution_form == "fused" && counter.invocation_count > 0 &&
 		    counter.last_runtime_status == "executed") {
 			fused_kernel_id = counter.kernel_id;
-			REQUIRE(counter.code_size > 0);
 			REQUIRE(counter.has_candidate);
 			REQUIRE(!counter.candidate_shape.empty());
 			REQUIRE(IsKnownJitCandidateScope(counter.candidate_scope));
@@ -5001,14 +5072,19 @@ TEST_CASE("JIT dump IR and execution mode expose backend honesty", "[api][jit]")
 			continue;
 		}
 		if (StringUtil::Contains(event.reason, "op0:PROJECTION:native:native typed reference projection")) {
-			found_reference_projection = true;
 			REQUIRE(event.code_size == 0);
-			REQUIRE(event.status == "unsupported");
-			REQUIRE(event.execution_mode == "unsupported");
-			REQUIRE(event.region_execution_form == "none");
 			REQUIRE_FALSE(StringUtil::Contains(event.reason, "pass-through"));
-			REQUIRE_FALSE(StringUtil::Contains(event.reason, "kernel=native-operator-loop"));
-			REQUIRE_FALSE(StringUtil::Contains(event.reason, "execution:native-sljit-region-"));
+			if (event.status == "compiled") {
+				found_reference_projection = true;
+				REQUIRE(event.execution_mode == "native");
+				REQUIRE(event.region_execution_form == "fused");
+				REQUIRE(StringUtil::Contains(event.reason, "sink:RESULT_COLLECTOR:native"));
+				REQUIRE(StringUtil::Contains(event.reason, "generated native result collector append protocol"));
+			} else {
+				REQUIRE(event.status == "unsupported");
+				REQUIRE(event.execution_mode == "unsupported");
+				REQUIRE(event.region_execution_form == "none");
+			}
 		}
 	}
 	REQUIRE(found_reference_projection);

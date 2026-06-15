@@ -26,6 +26,7 @@ static bool JitPipelineCompiledStageIsSinkRole(const JitCompiledStageContract &s
 	       stage.stage == JitRegionStageKind::HASH_AGGREGATE_UPDATE ||
 	       stage.stage == JitRegionStageKind::PERFECT_HASH_AGGREGATE_UPDATE ||
 	       stage.stage == JitRegionStageKind::UNGROUPED_AGGREGATE_UPDATE ||
+	       stage.stage == JitRegionStageKind::RESULT_COLLECTOR_APPEND ||
 	       stage.stage == JitRegionStageKind::SINK_BOUNDARY;
 }
 

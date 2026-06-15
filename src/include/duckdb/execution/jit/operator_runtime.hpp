@@ -15,11 +15,25 @@
 namespace duckdb {
 
 class DataChunk;
+class BatchedDataCollection;
+class BatchedBufferedData;
+class ColumnDataCollection;
+class InterruptState;
+class SimpleBufferedData;
+struct ColumnDataAppendState;
 struct ExecutionContext;
 struct OperatorSinkInput;
 struct PartitionedTupleDataAppendState;
 struct JoinFilterLocalState;
 struct JoinFilterPushdownInfo;
+
+enum class JitNativeResultCollectorAppendKind : uint8_t {
+	NONE,
+	COLUMN_DATA_COLLECTION,
+	BATCHED_DATA_COLLECTION,
+	SIMPLE_BUFFERED_DATA,
+	BATCHED_BUFFERED_DATA
+};
 
 struct JitNativeHashJoinProbeBinding {
 	bool ready = false;
@@ -53,6 +67,21 @@ struct JitNativeHashJoinBuildBinding {
 	string blocker;
 };
 
+struct JitNativeResultCollectorAppendBinding {
+	bool ready = false;
+	JitNativeResultCollectorAppendKind kind = JitNativeResultCollectorAppendKind::NONE;
+	ColumnDataCollection *collection = nullptr;
+	ColumnDataAppendState *append_state = nullptr;
+	BatchedDataCollection *batched_data = nullptr;
+	SimpleBufferedData *simple_buffered_data = nullptr;
+	BatchedBufferedData *batched_buffered_data = nullptr;
+	InterruptState *interrupt_state = nullptr;
+	idx_t batch_index = 0;
+	idx_t min_batch_index = 0;
+	idx_t *current_batch = nullptr;
+	string blocker;
+};
+
 struct JitNativeOperatorBinding {
 	bool ready = false;
 	JitRegionOperatorKind kind = JitRegionOperatorKind::NONE;
@@ -64,6 +93,7 @@ struct JitNativeSinkBinding {
 	bool ready = false;
 	JitRegionSinkKind kind = JitRegionSinkKind::NONE;
 	JitNativeHashJoinBuildBinding hash_join_build;
+	JitNativeResultCollectorAppendBinding result_collector_append;
 	string blocker;
 };
 
@@ -75,5 +105,8 @@ DUCKDB_API bool JitBindNativeHashJoinBuild(ExecutionContext &context, OperatorSi
                                            const JitRegionSinkInfo &sink_info, JitNativeSinkBinding &binding);
 
 DUCKDB_API SinkResultType JitAppendNativeHashJoinBuild(const JitNativeHashJoinBuildBinding &binding, DataChunk &input);
+
+DUCKDB_API SinkResultType JitAppendNativeResultCollector(const JitNativeResultCollectorAppendBinding &binding,
+                                                         DataChunk &input);
 
 } // namespace duckdb

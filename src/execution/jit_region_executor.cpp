@@ -261,6 +261,12 @@ public:
 	}
 
 	SinkResultType RecordNativeSinkResult(DataChunk &chunk, SinkResultType sink_result) override {
+		if (sink_result == SinkResultType::BLOCKED) {
+			executor.final_chunk.Reset();
+			chunk.Copy(executor.final_chunk);
+			RecordSinkResult(chunk.size(), sink_result);
+			return sink_result;
+		}
 		return RecordNativeSinkResult(chunk.size(), sink_result);
 	}
 
@@ -955,9 +961,9 @@ bool JitRegionExecutor::TryExecuteFullPipeline(PipelineExecutor &executor, idx_t
 	auto trace_runtime = Settings::Get<JitTraceRuntimeSetting>(executor.context.client);
 	std::chrono::steady_clock::time_point trace_start;
 	bool trace_started = false;
-	if (!executor.in_process_operators.empty() || executor.required_partition_info.AnyRequired() ||
-	    executor.remaining_sink_chunk || executor.next_batch_blocked || executor.started_flushing ||
-	    executor.done_flushing || executor.exhausted_source || executor.exhausted_pipeline || executor.finalized) {
+	if (!executor.in_process_operators.empty() || executor.remaining_sink_chunk || executor.next_batch_blocked ||
+	    executor.started_flushing || executor.done_flushing || executor.exhausted_source || executor.exhausted_pipeline ||
+	    executor.finalized) {
 		if (trace_runtime) {
 			JitManager::Get(executor.context.client)
 			    .RecordRuntimeEvent(executor.context.client, *kernel, JitCompileTarget::REGION, "skipped",

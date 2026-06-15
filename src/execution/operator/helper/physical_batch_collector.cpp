@@ -10,6 +10,32 @@ PhysicalBatchCollector::PhysicalBatchCollector(PhysicalPlan &physical_plan, Prep
     : PhysicalResultCollector(physical_plan, data) {
 }
 
+JitOperatorDescriptor PhysicalBatchCollector::GetJitOperatorDescriptor() const {
+	return BuildJitResultCollectorAppendDescriptor();
+}
+
+bool PhysicalBatchCollector::BindJitNativeSink(ExecutionContext &context, DataChunk &input,
+                                               OperatorSinkInput &sink_input, const JitRegionSinkInfo &sink_info,
+                                               JitNativeSinkBinding &binding) const {
+	(void)context;
+	(void)input;
+	binding = JitNativeSinkBinding();
+	binding.kind = sink_info.kind;
+	if (sink_info.kind != JitRegionSinkKind::RESULT_COLLECTOR_APPEND) {
+		binding.blocker = "result-collector-native-runtime-kind-mismatch";
+		return false;
+	}
+	auto &state = sink_input.local_state.Cast<BatchCollectorLocalState>();
+	binding.ready = true;
+	binding.result_collector_append.ready = true;
+	binding.result_collector_append.kind = JitNativeResultCollectorAppendKind::BATCHED_DATA_COLLECTION;
+	binding.result_collector_append.batched_data = &state.data;
+	binding.result_collector_append.batch_index = state.partition_info.batch_index.GetIndex();
+	binding.result_collector_append.blocker = "none";
+	binding.blocker = "none";
+	return true;
+}
+
 SinkResultType PhysicalBatchCollector::Sink(ExecutionContext &context, DataChunk &chunk,
                                             OperatorSinkInput &input) const {
 	auto &state = input.local_state.Cast<BatchCollectorLocalState>();

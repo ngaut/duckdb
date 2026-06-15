@@ -1,6 +1,7 @@
 #include "duckdb/execution/operator/helper/physical_buffered_collector.hpp"
 #include "duckdb/main/stream_query_result.hpp"
 #include "duckdb/main/client_context.hpp"
+#include "duckdb/main/buffered_data/simple_buffered_data.hpp"
 
 namespace duckdb {
 
@@ -21,6 +22,33 @@ public:
 };
 
 class BufferedCollectorLocalState : public LocalSinkState {};
+
+JitOperatorDescriptor PhysicalBufferedCollector::GetJitOperatorDescriptor() const {
+	return BuildJitResultCollectorAppendDescriptor();
+}
+
+bool PhysicalBufferedCollector::BindJitNativeSink(ExecutionContext &context, DataChunk &input,
+                                                  OperatorSinkInput &sink_input,
+                                                  const JitRegionSinkInfo &sink_info,
+                                                  JitNativeSinkBinding &binding) const {
+	(void)context;
+	(void)input;
+	binding = JitNativeSinkBinding();
+	binding.kind = sink_info.kind;
+	if (sink_info.kind != JitRegionSinkKind::RESULT_COLLECTOR_APPEND) {
+		binding.blocker = "result-collector-native-runtime-kind-mismatch";
+		return false;
+	}
+	auto &gstate = sink_input.global_state.Cast<BufferedCollectorGlobalState>();
+	binding.ready = true;
+	binding.result_collector_append.ready = true;
+	binding.result_collector_append.kind = JitNativeResultCollectorAppendKind::SIMPLE_BUFFERED_DATA;
+	binding.result_collector_append.simple_buffered_data = &gstate.buffered_data->Cast<SimpleBufferedData>();
+	binding.result_collector_append.interrupt_state = &sink_input.interrupt_state;
+	binding.result_collector_append.blocker = "none";
+	binding.blocker = "none";
+	return true;
+}
 
 SinkResultType PhysicalBufferedCollector::Sink(ExecutionContext &context, DataChunk &chunk,
                                                OperatorSinkInput &input) const {
