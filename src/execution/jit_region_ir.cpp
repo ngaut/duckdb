@@ -788,9 +788,9 @@ static void FinalizeJitRegionSinkInfo(JitRegionSinkInfo &sink) {
 }
 
 static unique_ptr<JitRegionSinkInfo> BuildJitRegionSinkInfo(const PhysicalOperator &op,
-                                                            const JitOperatorDescriptor &descriptor,
+                                                            const JitRegionSinkInfo &sink_payload,
                                                             bool has_sink_contract) {
-	auto result = has_sink_contract ? make_uniq<JitRegionSinkInfo>(descriptor.sink) : make_uniq<JitRegionSinkInfo>();
+	auto result = has_sink_contract ? make_uniq<JitRegionSinkInfo>(sink_payload) : make_uniq<JitRegionSinkInfo>();
 	if (!has_sink_contract) {
 		result->kind = GetJitGenericSinkKind(op);
 		result->reason = BuildJitGenericSinkProtocolReason(op);
@@ -801,8 +801,8 @@ static unique_ptr<JitRegionSinkInfo> BuildJitRegionSinkInfo(const PhysicalOperat
 }
 
 static string BuildJitSourceBoundaryReason(const JitPipelineOperatorEntry &entry) {
-	if (!entry.descriptor.source_boundary_reason.empty()) {
-		return entry.descriptor.source_boundary_reason;
+	if (!entry.source_boundary_reason.empty()) {
+		return entry.source_boundary_reason;
 	}
 	if (IsJitRegionScanSource(entry.type)) {
 		return "DuckDB scan source helper boundary;operator=" + entry.operator_name;
@@ -811,8 +811,8 @@ static string BuildJitSourceBoundaryReason(const JitPipelineOperatorEntry &entry
 }
 
 static string BuildJitSinkBoundaryReason(const JitPipelineOperatorEntry &entry) {
-	if (entry.HasSinkContract() && !entry.descriptor.sink.reason.empty()) {
-		return entry.descriptor.sink.reason;
+	if (entry.HasSinkContract() && !entry.sink_payload.reason.empty()) {
+		return entry.sink_payload.reason;
 	}
 	return BuildJitGenericSinkProtocolReason(entry.Physical());
 }
@@ -919,7 +919,6 @@ static JitRegionIRNode BuildJitRegionOperatorNode(string role, const JitPipeline
 		return node;
 	}
 	default: {
-		auto &descriptor = entry.descriptor;
 		if (entry.HasOperatorContract()) {
 			JitRegionIRNode node;
 			node.role = std::move(role);
@@ -932,7 +931,7 @@ static JitRegionIRNode BuildJitRegionOperatorNode(string role, const JitPipeline
 			node.input_format = JitRegionVectorFormatKind::DATA_CHUNK;
 			node.output_format = JitRegionVectorFormatKind::DATA_CHUNK;
 			SetJitRegionInputDataflow(node, state);
-			node.operator_info = BuildJitRegionOperatorInfo(descriptor.operator_info);
+			node.operator_info = BuildJitRegionOperatorInfo(entry.operator_payload);
 			if (entry.native_operator) {
 				node.boundary = JitRegionBoundaryKind::OPERATOR_NATIVE;
 			} else {
@@ -1044,20 +1043,20 @@ static void AccumulateJitRegionInventorySource(JitRegionPipelineInventory &inven
 	inventory.has_source = true;
 	inventory.source_operator_name = source.operator_name;
 	inventory.estimated_cardinality = MaxValue(inventory.estimated_cardinality, source.estimated_cardinality);
-	auto &descriptor = source.descriptor;
 	if (source.HasSourceContract()) {
-		inventory.source_kind = descriptor.source.kind;
-		inventory.source_execution = descriptor.source.execution;
+		auto &source_payload = source.source_payload;
+		inventory.source_kind = source_payload.kind;
+		inventory.source_execution = source_payload.execution;
 		inventory.has_scan_source = IsJitRegionScanSource(source.type);
-		inventory.has_table_scan_source = descriptor.source.kind == JitRegionSourceKind::DUCKDB_TABLE_SCAN ||
+		inventory.has_table_scan_source = source_payload.kind == JitRegionSourceKind::DUCKDB_TABLE_SCAN ||
 		                                  inventory.source_operator_name == "TABLE_SCAN";
-		inventory.has_stateful_source = descriptor.source.kind == JitRegionSourceKind::STATEFUL_OPERATOR;
-		if (descriptor.source.hash_join_protocol.present) {
-			inventory.source_produces_rows = descriptor.source.hash_join_protocol.source_produces_rows;
+		inventory.has_stateful_source = source_payload.kind == JitRegionSourceKind::STATEFUL_OPERATOR;
+		if (source_payload.hash_join_protocol.present) {
+			inventory.source_produces_rows = source_payload.hash_join_protocol.source_produces_rows;
 		}
-		inventory.source_filter_count = descriptor.source.filters.size();
-		inventory.source_projected_column_count = descriptor.source.projection_ids.size();
-		inventory.source_returned_column_count = descriptor.source.returned_column_count;
+		inventory.source_filter_count = source_payload.filters.size();
+		inventory.source_projected_column_count = source_payload.projection_ids.size();
+		inventory.source_returned_column_count = source_payload.returned_column_count;
 		return;
 	}
 	if (IsJitRegionScanSource(source.type)) {
@@ -1098,9 +1097,8 @@ static void AccumulateJitRegionInventorySink(JitRegionPipelineInventory &invento
 	inventory.has_sink = true;
 	inventory.sink_operator_name = sink.operator_name;
 	inventory.estimated_cardinality = MaxValue(inventory.estimated_cardinality, sink.estimated_cardinality);
-	auto &descriptor = sink.descriptor;
 	if (sink.HasSinkContract()) {
-		inventory.sink_kind = descriptor.sink.kind;
+		inventory.sink_kind = sink.sink_payload.kind;
 	} else {
 		inventory.sink_kind = JitRegionSinkKind::OPERATOR;
 	}
@@ -2631,12 +2629,11 @@ static unique_ptr<JitRegionIR> TryBuildJitRegion(const JitPipelineDescriptor &de
 	auto result = make_uniq<JitRegionIR>();
 	if (descriptor.HasSource()) {
 		auto &source = descriptor.source;
-		auto &source_descriptor = source.descriptor;
 		auto source_node = BuildJitRegionFallbackNode("source", source, JitRegionIRNodeKind::SOURCE,
 		                                              BuildJitSourceBoundaryReason(source));
 		source_node.compiled_contract = source.source_contract;
 		if (source.HasSourceContract()) {
-			source_node.source = BuildJitRegionSourceInfo(source_descriptor.source);
+			source_node.source = BuildJitRegionSourceInfo(source.source_payload);
 			if (source.native_source) {
 				source_node.boundary = JitRegionBoundaryKind::SOURCE_NATIVE;
 			}
@@ -2654,11 +2651,10 @@ static unique_ptr<JitRegionIR> TryBuildJitRegion(const JitPipelineDescriptor &de
 	}
 	if (descriptor.HasSink()) {
 		auto &sink = descriptor.sink;
-		auto &sink_descriptor = sink.descriptor;
 		auto sink_reason = BuildJitSinkBoundaryReason(sink);
 		auto sink_node = BuildJitRegionFallbackNode("sink", sink, JitRegionIRNodeKind::SINK, std::move(sink_reason));
 		sink_node.compiled_contract = sink.sink_contract;
-		sink_node.sink = BuildJitRegionSinkInfo(sink.Physical(), sink_descriptor, sink.HasSinkContract());
+		sink_node.sink = BuildJitRegionSinkInfo(sink.Physical(), sink.sink_payload, sink.HasSinkContract());
 		if (sink_node.sink) {
 			sink_node.fallback_reason = sink_node.sink->reason;
 			if (sink.native_sink) {

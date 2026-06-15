@@ -26,7 +26,10 @@ struct JitPipelineOperatorEntry {
 	string operator_name;
 	vector<LogicalType> output_types;
 	idx_t estimated_cardinality = 0;
-	JitOperatorDescriptor descriptor;
+	string source_boundary_reason;
+	JitOperatorSourceDescriptor source_payload;
+	JitRegionOperatorInfo operator_payload;
+	JitRegionSinkInfo sink_payload;
 	JitCompiledOperatorContract source_contract;
 	JitCompiledOperatorContract operator_contract;
 	JitCompiledOperatorContract sink_contract;

@@ -155,14 +155,15 @@ does not see `PhysicalHashJoin` or `GroupedAggregateHashTable` internals.
 Pipeline analysis starts with `JitPipelineDescriptor`. DuckDB walks a physical
 `Pipeline` once, asks each source/operator/sink for its `JitOperatorDescriptor`,
 and records stable operator facts: role, pipeline index, type, name, output
-types, estimated cardinality, and role-sliced compiled contracts. It also
-records native-role flags derived from those slices. Admission inventory and
-region IR lowering both consume this descriptor. They must not independently
-re-probe the raw `Pipeline`, call `GetJitOperatorDescriptor()` as a second
-discovery path, or re-slice compiled contracts. This is the high-to-low
-boundary: DuckDB physical operators publish contracts first, the pipeline
-descriptor normalizes role views, then region planning lowers those role views
-into IR, then backends lower IR into executable code.
+types, estimated cardinality, source/operator/sink payloads, role-sliced
+compiled contracts, and native-role flags derived from those slices. Admission
+inventory and region IR lowering both consume this descriptor. They must not
+independently re-probe the raw `Pipeline`, call `GetJitOperatorDescriptor()` as
+a second discovery path, keep the whole compatibility descriptor, or re-slice
+compiled contracts. This is the high-to-low boundary: DuckDB physical operators
+publish contracts first, the pipeline descriptor normalizes role views, then
+region planning lowers those role views into IR, then backends lower IR into
+executable code.
 
 The canonical in-core object is `JitCompiledOperatorContract`. Legacy source,
 operator, and sink descriptor views are compatibility payloads derived from that
@@ -2421,7 +2422,8 @@ Core module ownership follows the same trace boundary:
 - `src/execution/jit_pipeline_descriptor.cpp` owns DuckDB-facing physical
   pipeline descriptor construction. It is the single place region preparation
   may walk `Pipeline`, call `GetJitOperatorDescriptor()`, slice compiled
-  contracts by role, and derive native-role flags;
+  contracts by role, derive native-role flags, and unpack role payloads from
+  compatibility descriptors;
 - `src/execution/jit_region_ir.cpp` owns descriptor-to-region-IR lowering. It
   consumes expression IR through the core-only `TryLowerJitExpression`
   boundary;
@@ -2495,7 +2497,7 @@ The public header surface mirrors the same dependency direction:
   should use the narrow header matching the layer they consume.
 
 Concrete DuckDB physical operators expose JIT protocol facts through
-`GetJitOperatorDescriptor()`. `BuildJitPipelineDescriptor` is the single pipeline-level discovery point. It snapshots those descriptors and prepares role-sliced contracts before admission inventory or region lowering runs. Region lowering consumes the pipeline descriptor and builds backend-neutral `JitRegionSourceInfo` and
+`GetJitOperatorDescriptor()`. `BuildJitPipelineDescriptor` is the single pipeline-level discovery point. It snapshots those descriptors, unpacks role payloads, and prepares role-sliced contracts before admission inventory or region lowering runs. Region lowering consumes the pipeline descriptor and builds backend-neutral `JitRegionSourceInfo` and
 `JitRegionSinkInfo` records. Concrete operator knowledge must terminate at the descriptor adapter before the pipeline descriptor snapshots it.
 Backend implementations must consume only backend-neutral JIT IR, candidate
 metadata, helper-call nodes, fallback nodes, and deterministic reason/IR text.

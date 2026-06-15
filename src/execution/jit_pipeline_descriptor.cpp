@@ -140,16 +140,20 @@ static JitPipelineOperatorEntry BuildJitPipelineOperatorEntry(const PhysicalOper
 	entry.operator_name = PhysicalOperatorToString(op.type);
 	entry.output_types = op.GetTypes();
 	entry.estimated_cardinality = op.estimated_cardinality;
-	entry.descriptor = op.GetJitOperatorDescriptor();
-	entry.source_contract = SliceJitPipelineCompiledContract(entry.descriptor.compiled_contract,
+	auto descriptor = op.GetJitOperatorDescriptor();
+	entry.source_contract = SliceJitPipelineCompiledContract(descriptor.compiled_contract,
 	                                                         JitPipelineOperatorRole::SOURCE);
-	entry.operator_contract = SliceJitPipelineCompiledContract(entry.descriptor.compiled_contract,
+	entry.operator_contract = SliceJitPipelineCompiledContract(descriptor.compiled_contract,
 	                                                           JitPipelineOperatorRole::OPERATOR);
-	entry.sink_contract = SliceJitPipelineCompiledContract(entry.descriptor.compiled_contract,
+	entry.sink_contract = SliceJitPipelineCompiledContract(descriptor.compiled_contract,
 	                                                       JitPipelineOperatorRole::SINK);
 	entry.native_source = JitPipelineCompiledContractHasNativeSource(entry.source_contract);
 	entry.native_operator = JitPipelineCompiledContractHasNativeOperator(entry.operator_contract);
 	entry.native_sink = JitPipelineCompiledContractHasNativeSink(entry.sink_contract);
+	entry.source_boundary_reason = std::move(descriptor.source_boundary_reason);
+	entry.source_payload = std::move(descriptor.source);
+	entry.operator_payload = std::move(descriptor.operator_info);
+	entry.sink_payload = std::move(descriptor.sink);
 	return entry;
 }
 
