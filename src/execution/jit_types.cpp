@@ -334,8 +334,8 @@ const char *JitRegionBoundaryKindToString(JitRegionBoundaryKind kind) {
 		return "sink-native";
 	case JitRegionBoundaryKind::OPERATOR_NATIVE:
 		return "operator-native";
-	case JitRegionBoundaryKind::OPERATOR_HELPER:
-		return "operator-helper";
+	case JitRegionBoundaryKind::OPERATOR_PROTOCOL_BOUNDARY:
+		return "operator-protocol-boundary";
 	case JitRegionBoundaryKind::OPERATOR_FALLBACK:
 		return "operator-fallback";
 	case JitRegionBoundaryKind::EXPRESSION_FALLBACK:

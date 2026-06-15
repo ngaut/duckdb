@@ -935,7 +935,7 @@ static JitRegionIRNode BuildJitRegionOperatorNode(string role, const JitPipeline
 			if (entry.native_operator) {
 				node.boundary = JitRegionBoundaryKind::OPERATOR_NATIVE;
 			} else {
-				node.boundary = JitRegionBoundaryKind::OPERATOR_HELPER;
+				node.boundary = JitRegionBoundaryKind::OPERATOR_PROTOCOL_BOUNDARY;
 			}
 			state.vector_source = JitRegionVectorSourceKind::OPERATOR_OUTPUT;
 			state.selection_source = JitRegionSelectionSourceKind::NONE;
@@ -1462,7 +1462,7 @@ static string DescribeJitRegionCandidateTraits(const JitRegionCandidateTraits &t
 	result += ",conjunction_filters=" + std::to_string(traits.conjunction_filter_count);
 	result += ",expression_fallbacks=" + std::to_string(traits.expression_fallback_count);
 	result += ",operator_fallbacks=" + std::to_string(traits.operator_fallback_count);
-	result += ",operator_helpers=" + std::to_string(traits.operator_helper_count);
+	result += ",operator_protocol_boundaries=" + std::to_string(traits.operator_protocol_boundary_count);
 	result += ",resumable_operators=" + std::to_string(traits.resumable_operator_count);
 	result += ",scan_boundaries=" + std::to_string(traits.scan_boundary_count);
 	result += ",sink_boundaries=" + std::to_string(traits.sink_boundary_count);
@@ -1827,7 +1827,7 @@ static void AccumulateJitRegionStageTraits(const JitRegionStage &stage, JitRegio
 		if (JitRegionStageRequiresExecutorBoundary(stage.execution)) {
 			traits.operator_fallback_count++;
 		} else if (JitRegionStageRequiresMissingProtocol(stage.execution)) {
-			traits.operator_helper_count++;
+			traits.operator_protocol_boundary_count++;
 		}
 	}
 	if (JitRegionStageIsSinkRole(stage) && stage.execution != JitRegionStageExecutionKind::NATIVE_PROTOCOL) {
@@ -2088,7 +2088,7 @@ static string GetJitRegionNodeSignatureFeature(const JitRegionIRNode &node) {
 		return GetJitRegionSinkSignatureFeature(node);
 	}
 	if (node.boundary == JitRegionBoundaryKind::OPERATOR_FALLBACK ||
-	    node.boundary == JitRegionBoundaryKind::OPERATOR_HELPER ||
+	    node.boundary == JitRegionBoundaryKind::OPERATOR_PROTOCOL_BOUNDARY ||
 	    node.boundary == JitRegionBoundaryKind::OPERATOR_NATIVE) {
 		return NormalizeJitRegionSignatureSegment(node.operator_name) + "-operator";
 	}
@@ -2487,14 +2487,14 @@ static bool HasJitRegionCandidate(const JitRegionIR &region_ir, idx_t first_node
 }
 
 static bool JitRegionTraitsRequireOperatorResumeProtocol(const JitRegionCandidateTraits &traits) {
-	return traits.resumable_operator_count > 0 || traits.operator_helper_count > 0 ||
+	return traits.resumable_operator_count > 0 || traits.operator_protocol_boundary_count > 0 ||
 	       traits.operator_fallback_count > 0;
 }
 
 static bool JitRegionCandidateRequiresMissingSplitProtocol(const JitRegionCandidate &candidate) {
 	switch (candidate.scope) {
 	case JitRegionCandidateScope::SOURCE_PIPELINE:
-		return candidate.context_traits.operator_helper_count > 0;
+		return candidate.context_traits.operator_protocol_boundary_count > 0;
 	case JitRegionCandidateScope::POST_SOURCE_OPERATOR_INTERVAL:
 		return JitRegionTraitsRequireOperatorResumeProtocol(candidate.upstream_traits) ||
 		       JitRegionTraitsRequireOperatorResumeProtocol(candidate.continuation_traits) ||

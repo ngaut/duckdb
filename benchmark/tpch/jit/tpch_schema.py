@@ -171,7 +171,7 @@ KNOWN_SOURCE_BOUNDARY_KINDS = (
     "stateful_native_state_scan",
     "stateful_native_source",
     "stateful_source_fallback",
-    "source_getdata_helper",
+    "duckdb_source_boundary",
 )
 
 OPERATOR_PROFILE_SUMMARY_FIELDS = (

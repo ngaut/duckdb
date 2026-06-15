@@ -2106,7 +2106,7 @@ def verify_source_fusion_gaps(
             raise AssertionError(f"source_fusion_gap_summary.csv: missing example reason: {row}")
         if (
             "source-fusion-gap:requires-native-source" not in row["example_reason"]
-            and "source-fusion-gap:downstream-operator-helper-resume-protocol-missing" not in row["example_reason"]
+            and "source-fusion-gap:downstream-operator-resume-protocol-missing" not in row["example_reason"]
             and row["native_source_blocker"] != "hash-join-source-does-not-produce-rows-for-join-type"
             and "source-pushed filters require source-prefix filter split" not in row["example_reason"]
         ):
@@ -2211,7 +2211,7 @@ def verify_fusion_blockers(
             row["fusion_blocker"] == "sink-fusion-gap:upstream-operator-resume-protocol-missing"
         )
         unsupported_source_resume_blocker = (
-            row["fusion_blocker"] == "source-fusion-gap:downstream-operator-helper-resume-protocol-missing"
+            row["fusion_blocker"] == "source-fusion-gap:downstream-operator-resume-protocol-missing"
         )
         if (
             row["blocker_class"] in {"source-fusion-gap", "sink-fusion-gap"}
@@ -2259,9 +2259,9 @@ def verify_fusion_blockers(
                 raise AssertionError(f"fusion_blocker_summary.csv: unexpected candidate blocker status: {row}")
         if row["blocker_class"] == "operator-fusion-gap":
             if row["fusion_blocker"] not in {
-                "operator-fusion-gap:multi-operator-helper-chain-protocol-missing",
-                "operator-fusion-gap:downstream-helper-continuation-protocol-missing",
-                "operator-fusion-gap:downstream-operator-helper-resume-protocol-missing",
+                "operator-fusion-gap:multi-operator-resume-protocol-missing",
+                "operator-fusion-gap:downstream-operator-continuation-protocol-missing",
+                "operator-fusion-gap:downstream-operator-resume-protocol-missing",
                 "operator-fusion-gap:upstream-operator-resume-protocol-missing",
                 "operator-fusion-gap:hash-join-probe-native-lowering-missing",
                 "operator-fusion-gap:hash-join-probe-protocol-missing",
@@ -2325,20 +2325,20 @@ def verify_fusion_blockers(
                     row["native_source_blocker"],
                 )
             )
-            downstream_helper_resume_blocker = (
-                row["fusion_blocker"] == "source-fusion-gap:downstream-operator-helper-resume-protocol-missing"
+            downstream_operator_resume_blocker = (
+                row["fusion_blocker"] == "source-fusion-gap:downstream-operator-resume-protocol-missing"
             )
             if row["source_execution"] == "" or (
-                row["source_execution"] == "native-source" and not downstream_helper_resume_blocker
+                row["source_execution"] == "native-source" and not downstream_operator_resume_blocker
             ):
                 raise AssertionError(f"fusion_blocker_summary.csv: source blocker lacks expected source boundary: {row}")
             if (
-                downstream_helper_resume_blocker
+                downstream_operator_resume_blocker
                 and row["source_execution"] == "native-source"
                 and row["native_source_status"] != "ready"
             ):
                 raise AssertionError(
-                    f"fusion_blocker_summary.csv: downstream helper resume blocker lacks ready native source: {row}"
+                    f"fusion_blocker_summary.csv: downstream operator resume blocker lacks ready native source: {row}"
                 )
             native_ready_handoff = (
                 row["source_execution"] == "duckdb-source-boundary" and row["native_source_status"] == "ready"

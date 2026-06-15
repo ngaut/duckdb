@@ -327,7 +327,7 @@ struct JitRegionCandidateTraits {
 	idx_t conjunction_filter_count = 0;
 	idx_t expression_fallback_count = 0;
 	idx_t operator_fallback_count = 0;
-	idx_t operator_helper_count = 0;
+	idx_t operator_protocol_boundary_count = 0;
 	idx_t resumable_operator_count = 0;
 	idx_t scan_boundary_count = 0;
 	idx_t sink_boundary_count = 0;

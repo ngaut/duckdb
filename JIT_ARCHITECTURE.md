@@ -546,7 +546,7 @@ carry the explicit region execution form declared by the lowering plan. Executio
 mode answers "what kind of compiled execution exists"; region execution form
 answers "did this compiled region remove DuckDB operator/materialization
 boundaries from the hot loop?" Core must reject any compiled region whose
-lowering plan leaves the execution form as `none`. Node counts, helper counts,
+lowering plan leaves the execution form as `none`. Node counts, boundary counts,
 and native counts are trace evidence only; they must not be used to infer
 compiled execution mode or fused-region form. Pass-through-only and
 fallback-only plans are not compilable. Region kernels use two separate facts:
@@ -566,8 +566,8 @@ For region targets, `auto` is fused-only: after backend analysis, core must
 reject any region whose `region_execution_form` is not `fused`, even if a
 backend provides an admission rule and the estimated cardinality clears that
 rule. `force` is fused-only for compiled regions as well: it bypasses
-profitability gates, but it must not compile non-fused helper or unsupported
-regions. Non-fused helper rows remain valid diagnostics only as skipped or
+profitability gates, but it must not compile non-fused boundary or unsupported
+regions. Non-fused boundary rows remain valid diagnostics only as skipped or
 unsupported events.
 
 Admission inputs belong in `JitManager`, because they are cross-backend policy:
@@ -855,11 +855,11 @@ analysis may explain why a candidate is blocked, but it cannot override
 `JitRegionStagePlan`. If a backend advertises `region_execution_form=fused`
 while the core stage plan still contains a source-boundary, executor-fallback, or
 missing-protocol stage, `JitManager` records the candidate as unsupported and
-does not call backend code generation. This keeps fake fusion, non-fused helper
-source prefixes, and stale shape-specific backends from reaching runtime.
+does not call backend code generation. This keeps fake fusion, non-fused source
+prefixes, and stale shape-specific backends from reaching runtime.
 
 Pipeline shape semantic boundary labels are part of the contract. Plain `scan`,
-`sink`, `operator-helper`, `operator-fallback`, and `expression-fallback`
+`sink`, `operator-protocol-boundary`, `operator-fallback`, and `expression-fallback`
 describe DuckDB-owned execution boundaries or unsupported regions. By contrast,
 `source-native`, `operator-native`, and `sink-native` mean core lowering has
 found a ready native protocol contract for that source, operator, or sink. Those
@@ -1281,7 +1281,7 @@ reference or binary-reference integer/decimal projection, increments the
 aggregate input-row count for rows that pass the filter, skips NULL projected
 values for SUM, and commits the bound aggregate state once per vector. Runtime
 telemetry must count those rows through the fused native sink/body stages, not
-through a helper-sink bucket.
+through a DuckDB sink boundary bucket.
 
 A sink result of `FINISHED` marks processing finished through core. A kernel
 result of `FINISHED` is finalized by core before the scheduler sees
@@ -1371,7 +1371,7 @@ The valid blocker is
 `fusion-blocker:source-fusion-gap:requires-native-source`. A source-boundary
 source-prefix candidate must name the non-fused source boundary directly instead of
 pretending to be native source fusion. Full-pipeline regions do not have a
-generic helper sink success path; a missing native sink/operator protocol is an
+generic non-native sink success path; a missing native sink/operator protocol is an
 unsupported region with the exact missing protocol named in the event reason and
 IR.
 
@@ -2688,7 +2688,7 @@ The v1 admission table should be deliberately small:
 - admit native table-scan source-prefix filter/projection regions only when the
   backend admission key includes a measured downstream operator context, not
   from the local source-prefix shape alone;
-- keep non-fused helper regions visible as operator-aware candidates, but skip
+- keep non-fused boundary regions visible as operator-aware candidates, but skip
   them in `auto` until a measured operator-aware admission proof exists for that
   exact shape family;
 - skip filter-only/projection-only regions in `auto` until separately measured;

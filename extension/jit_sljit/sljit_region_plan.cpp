@@ -2369,12 +2369,12 @@ static SljitRegionNodePlan PlanSljitRegionNode(const JitRegionIRNode &node, cons
 		if (!node.fallback_reason.empty()) {
 			return SljitRegionFallbackNode(node.fallback_reason);
 		}
-			return SljitRegionFallbackNode("operator helper kind has no SLJIT native protocol");
+		return SljitRegionFallbackNode("operator protocol boundary has no SLJIT native protocol");
 	default:
 		if (!node.fallback_reason.empty()) {
 			return SljitRegionFallbackNode(node.fallback_reason);
 		}
-			return SljitRegionFallbackNode("region IR node is outside SLJIT native region lowering");
+		return SljitRegionFallbackNode("region IR node is outside SLJIT native region lowering");
 	}
 }
 
@@ -2387,20 +2387,21 @@ static bool SljitRejectsSinkRegionContext(const JitRegionIRNode &node, const Jit
 }
 
 static bool SljitRejectsSourcePrefixResumeContext(const JitRegionCandidate &candidate) {
-	return JitRegionABIIsSourcePipeline(candidate.contract.abi) && candidate.context_traits.operator_helper_count > 0;
+	return JitRegionABIIsSourcePipeline(candidate.contract.abi) &&
+	       candidate.context_traits.operator_protocol_boundary_count > 0;
 }
 
 static bool SljitRejectsPostSourceContinuationContext(const JitRegionCandidate &candidate) {
 	if (!JitRegionABIIsChunkTransform(candidate.contract.abi)) {
 		return false;
 	}
-	return candidate.continuation_traits.operator_helper_count > 0 ||
+	return candidate.continuation_traits.operator_protocol_boundary_count > 0 ||
 	       candidate.continuation_traits.operator_fallback_count > 0 ||
 	       candidate.continuation_traits.expression_fallback_count > 0;
 }
 
 static bool SljitTraitsRequireUpstreamResumeProtocol(const JitRegionCandidateTraits &traits) {
-	return traits.resumable_operator_count > 0 || traits.operator_helper_count > 0 ||
+	return traits.resumable_operator_count > 0 || traits.operator_protocol_boundary_count > 0 ||
 	       traits.operator_fallback_count > 0;
 }
 
@@ -2487,11 +2488,11 @@ SljitRegionPlan BuildSljitRegionPlan(const JitRegionIR &region_ir, const JitRegi
 	}
 	if (SljitRejectsSourcePrefixResumeContext(candidate)) {
 		plan.backend_plan->error =
-		    "SLJIT source-prefix regions require a downstream helper-free resume protocol";
+		    "SLJIT source-prefix regions require a downstream operator resume protocol";
 		auto blocker = candidate.source_execution == JitRegionSourceExecutionKind::NATIVE_SOURCE ||
 		                       candidate.contract.native_fusion_ready
-		                   ? "operator-fusion-gap:downstream-operator-helper-resume-protocol-missing;"
-		                   : "source-fusion-gap:downstream-operator-helper-resume-protocol-missing;";
+		                   ? "operator-fusion-gap:downstream-operator-resume-protocol-missing;"
+		                   : "source-fusion-gap:downstream-operator-resume-protocol-missing;";
 		plan.lowering_plan.AddFusionBlocker(SljitAttachCandidateBoundaryIR(
 		    string(blocker) + candidate.contract.ir, region_ir, candidate));
 		plan.lowering_plan.backend_plan = plan.backend_plan;
@@ -2509,9 +2510,9 @@ SljitRegionPlan BuildSljitRegionPlan(const JitRegionIR &region_ir, const JitRegi
 	}
 	if (SljitRejectsPostSourceContinuationContext(candidate)) {
 		plan.backend_plan->error =
-		    "SLJIT post-source split regions require a downstream helper-free continuation protocol";
+		    "SLJIT post-source split regions require a downstream operator continuation protocol";
 		plan.lowering_plan.AddFusionBlocker(SljitAttachCandidateBoundaryIR(
-		    "operator-fusion-gap:downstream-helper-continuation-protocol-missing;" + candidate.contract.ir, region_ir,
+		    "operator-fusion-gap:downstream-operator-continuation-protocol-missing;" + candidate.contract.ir, region_ir,
 		    candidate));
 		plan.lowering_plan.backend_plan = plan.backend_plan;
 		return plan;
@@ -2608,7 +2609,7 @@ SljitRegionPlan BuildSljitRegionPlan(const JitRegionIR &region_ir, const JitRegi
 			    !JitRegionABIIsFullPipeline(contract.abi)) {
 				node_plan = SljitRegionFallbackNode("native operator protocol requires full-pipeline region ABI");
 			} else if (node.kind == JitRegionIRNodeKind::OPERATOR &&
-			           node.boundary == JitRegionBoundaryKind::OPERATOR_HELPER &&
+			           node.boundary == JitRegionBoundaryKind::OPERATOR_PROTOCOL_BOUNDARY &&
 			           !JitRegionABIIsFullPipeline(contract.abi)) {
 			node_plan = SljitRegionFallbackNode("native operator protocol boundary requires full-pipeline region ownership");
 		} else {
