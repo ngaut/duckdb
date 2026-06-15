@@ -31,8 +31,7 @@ static bool JitPipelineCompiledStageIsSinkRole(const JitCompiledStageContract &s
 
 static bool JitPipelineCompiledStageIsBoundaryFree(const JitCompiledStageContract &stage) {
 	return stage.execution == JitRegionStageExecutionKind::NATIVE_PROTOCOL ||
-	       stage.execution == JitRegionStageExecutionKind::GENERATED_IR ||
-	       stage.execution == JitRegionStageExecutionKind::PASS_THROUGH;
+	       stage.execution == JitRegionStageExecutionKind::GENERATED_IR;
 }
 
 static bool JitPipelineKeepCompiledStageForRole(const JitCompiledStageContract &stage,

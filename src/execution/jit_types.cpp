@@ -407,8 +407,6 @@ const char *JitRegionStageExecutionKindToString(JitRegionStageExecutionKind kind
 		return "executor-fallback";
 	case JitRegionStageExecutionKind::MISSING_PROTOCOL:
 		return "missing-protocol";
-	case JitRegionStageExecutionKind::PASS_THROUGH:
-		return "pass-through";
 	default:
 		return "unknown";
 	}

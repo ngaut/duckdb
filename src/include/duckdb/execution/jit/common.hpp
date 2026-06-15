@@ -95,8 +95,7 @@ enum class JitRegionStageExecutionKind : uint8_t {
 	NATIVE_PROTOCOL,
 	SOURCE_BOUNDARY,
 	EXECUTOR_FALLBACK,
-	MISSING_PROTOCOL,
-	PASS_THROUGH
+	MISSING_PROTOCOL
 };
 enum class JitPolicyMode : uint8_t { AUTO, FORCE, OFF };
 enum class JitFullPipelineResult : uint8_t { NOT_FINISHED, FINISHED, INTERRUPTED };

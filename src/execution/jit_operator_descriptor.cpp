@@ -633,8 +633,7 @@ JitOperatorDescriptor FinalizeJitOperatorDescriptor(JitOperatorDescriptor descri
 	contract.executor_boundary_free = contract.present;
 	for (auto &stage : contract.stages) {
 		if (stage.execution != JitRegionStageExecutionKind::NATIVE_PROTOCOL &&
-		    stage.execution != JitRegionStageExecutionKind::GENERATED_IR &&
-		    stage.execution != JitRegionStageExecutionKind::PASS_THROUGH) {
+		    stage.execution != JitRegionStageExecutionKind::GENERATED_IR) {
 			contract.executor_boundary_free = false;
 			break;
 		}

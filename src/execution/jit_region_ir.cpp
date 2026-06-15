@@ -1606,7 +1606,6 @@ static JitRegionOwnershipKind ClassifyJitCompiledContractOwnership(const JitComp
 			AddJitUniqueString(region_contract.required_capabilities, stage.required_capability);
 			break;
 		case JitRegionStageExecutionKind::GENERATED_IR:
-		case JitRegionStageExecutionKind::PASS_THROUGH:
 			saw_generated = true;
 			break;
 		case JitRegionStageExecutionKind::SOURCE_BOUNDARY:

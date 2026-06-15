@@ -2419,6 +2419,22 @@ def verify_stage_region_contract(root: Path) -> None:
             "missing-protocol",
         ],
     )
+    assert_no_text(
+        root,
+        [
+            Path("src/include/duckdb/execution/jit/common.hpp"),
+            Path("src/execution/jit_types.cpp"),
+            Path("src/execution/jit_pipeline_descriptor.cpp"),
+            Path("src/execution/jit_operator_descriptor.cpp"),
+            Path("src/execution/jit_region_ir.cpp"),
+        ],
+        [
+            "MISSING_PROTOCOL,\n\tPASS_THROUGH",
+            "case JitRegionStageExecutionKind::PASS_THROUGH",
+            "stage.execution == JitRegionStageExecutionKind::PASS_THROUGH",
+            "stage.execution != JitRegionStageExecutionKind::PASS_THROUGH",
+        ],
+    )
     assert_required_text(
         root,
         "src/execution/jit_region_ir.cpp",
