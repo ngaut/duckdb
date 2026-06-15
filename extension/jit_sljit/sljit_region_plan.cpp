@@ -512,9 +512,6 @@ static string SljitRegionCandidateContext(const JitRegionContract &contract) {
 	if (JitRegionABIIsSourcePrefix(contract.abi)) {
 		return "source-prefix";
 	}
-	if (JitRegionABIIsChunkTransform(contract.abi)) {
-		return "post-source";
-	}
 	if (JitRegionABIIsFullPipeline(contract.abi)) {
 		return "full-pipeline";
 	}
@@ -2397,25 +2394,6 @@ static bool SljitRejectsSourcePrefixResumeContext(const JitRegionCandidate &cand
 	       candidate.context_traits.operator_protocol_boundary_count > 0;
 }
 
-static bool SljitRejectsPostSourceContinuationContext(const JitRegionCandidate &candidate) {
-	if (!JitRegionABIIsChunkTransform(candidate.contract.abi)) {
-		return false;
-	}
-	return candidate.continuation_traits.operator_protocol_boundary_count > 0 ||
-	       candidate.continuation_traits.operator_fallback_count > 0 ||
-	       candidate.continuation_traits.expression_fallback_count > 0;
-}
-
-static bool SljitTraitsRequireUpstreamResumeProtocol(const JitRegionCandidateTraits &traits) {
-	return traits.resumable_operator_count > 0 || traits.operator_protocol_boundary_count > 0 ||
-	       traits.operator_fallback_count > 0;
-}
-
-static bool SljitRejectsPostSourceUpstreamResumeContext(const JitRegionCandidate &candidate) {
-	return JitRegionABIIsChunkTransform(candidate.contract.abi) &&
-	       SljitTraitsRequireUpstreamResumeProtocol(candidate.upstream_traits);
-}
-
 static bool SljitCanExecuteSourceNode(const JitRegionIRNode &node, const JitRegionContract &contract) {
 	if (!JitRegionABIOwnsSource(contract.abi) || !node.source) {
 		return false;
@@ -2493,25 +2471,6 @@ SljitRegionPlan BuildSljitRegionPlan(const JitRegionIR &region_ir, const JitRegi
 		                   : "source-fusion-gap:downstream-operator-resume-protocol-missing;";
 		plan.lowering_plan.AddFusionBlocker(SljitAttachCandidateBoundaryIR(
 		    string(blocker) + candidate.contract.ir, region_ir, candidate));
-		plan.lowering_plan.backend_plan = plan.backend_plan;
-		return plan;
-	}
-	if (SljitRejectsPostSourceUpstreamResumeContext(candidate)) {
-		plan.backend_plan->error =
-		    "SLJIT post-source split regions require an upstream operator resume protocol";
-		plan.lowering_plan.AddFusionBlocker(SljitAttachCandidateBoundaryIR(
-		    "operator-fusion-gap:upstream-operator-resume-protocol-missing;" + candidate.contract.ir +
-		        ";upstream_" + candidate.upstream_traits.ir,
-		    region_ir, candidate));
-		plan.lowering_plan.backend_plan = plan.backend_plan;
-		return plan;
-	}
-	if (SljitRejectsPostSourceContinuationContext(candidate)) {
-		plan.backend_plan->error =
-		    "SLJIT post-source split regions require a downstream operator continuation protocol";
-		plan.lowering_plan.AddFusionBlocker(SljitAttachCandidateBoundaryIR(
-		    "operator-fusion-gap:downstream-operator-continuation-protocol-missing;" + candidate.contract.ir, region_ir,
-		    candidate));
 		plan.lowering_plan.backend_plan = plan.backend_plan;
 		return plan;
 	}

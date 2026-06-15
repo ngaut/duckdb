@@ -18,14 +18,12 @@ EXPECTED_CASES = {
     "sql_equivalence_matrix",
 }
 KNOWN_CANDIDATE_SCOPES = {
-    "post_source_operator_interval",
     "source_prefix",
     "full_pipeline",
 }
 KNOWN_REGION_EXECUTION_FORMS = {"none", "fused"}
 KNOWN_CANDIDATE_ABIS = {
     "none",
-    "chunk_transform",
     "source_prefix",
     "full_pipeline",
     "state_scan",
@@ -130,7 +128,7 @@ def parse_pipeline_shape(shape: str) -> list:
     return nodes
 
 
-def verify_candidate_scope(case_name: str, row: dict, require_post_source: bool = False) -> None:
+def verify_candidate_scope(case_name: str, row: dict) -> None:
     scope = row.get("candidate_scope", "")
     abi = row.get("candidate_contract_abi", "")
     if scope == "":
@@ -139,8 +137,6 @@ def verify_candidate_scope(case_name: str, row: dict, require_post_source: bool 
         raise AssertionError(f"{case_name}: unknown candidate scope in flow row: {row}")
     if abi and abi not in KNOWN_CANDIDATE_ABIS:
         raise AssertionError(f"{case_name}: unknown candidate_contract_abi in flow row: {row}")
-    if require_post_source and scope != "post_source_operator_interval":
-        raise AssertionError(f"{case_name}: executable flow row has wrong candidate scope: {row}")
 
 
 def verify_executable_candidate_scope(case_name: str, row: dict) -> None:
@@ -172,12 +168,6 @@ def verify_executable_candidate_scope(case_name: str, row: dict) -> None:
             raise AssertionError(f"{case_name}: source-prefix executable has no source node: {row}")
         if pipeline_shape and has_sink:
             raise AssertionError(f"{case_name}: source-prefix executable contains sink boundary: {row}")
-        return
-    if scope == "post_source_operator_interval":
-        if abi and abi != "chunk_transform":
-            raise AssertionError(f"{case_name}: post-source executable has wrong ABI: {row}")
-        if pipeline_shape and (has_source or has_sink):
-            raise AssertionError(f"{case_name}: post-source executable contains context boundary: {row}")
         return
     if scope == "full_pipeline":
         if execution_mode != "native":
@@ -284,8 +274,7 @@ def verify_resume_state_events(rows: list) -> None:
             row.get("phase") == "decision"
             and row.get("target") == "region"
             and row.get("status") == "unsupported"
-            and row.get("candidate_scope") == "post_source_operator_interval"
-            and row.get("candidate_shape") == "operator"
+            and row.get("candidate_scope") in {"source_prefix", "full_pipeline"}
             and "UNNEST:fallback" in row.get("reason", "")
             and "DuckDB physical operator outside generated JIT region" in row.get("reason", "")
         ):

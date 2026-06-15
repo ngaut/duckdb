@@ -46,7 +46,7 @@ ADMITTED_FAMILIES = {
         "candidate_shape": "filter-projection-projection",
         "expected_result": "375002749993",
         "view_sql": """
-CREATE OR REPLACE VIEW jit_micro_filter_projection AS
+CREATE OR REPLACE TABLE jit_micro_filter_projection AS
 SELECT i::BIGINT AS i
 FROM range(1000000) tbl(i);
 """,
@@ -68,14 +68,18 @@ FROM (
         "threshold_row_count": 1000000,
         "candidate_shape": "projection-projection-projection",
         "expected_result": "500009500000",
-        "view_sql": "",
+        "view_sql": """
+CREATE OR REPLACE TABLE jit_micro_projection_chain AS
+SELECT i::BIGINT AS i
+FROM range(1000000) tbl(i);
+""",
         "query": """
 SELECT sum(k)
 FROM (
     SELECT j + 3 AS k
     FROM (
-        SELECT i::BIGINT + 7 AS j
-        FROM range(1000000) tbl(i)
+        SELECT i + 7 AS j
+        FROM jit_micro_projection_chain
     ) t0
 ) t1
 """,
@@ -90,7 +94,7 @@ DIAGNOSTIC_FAMILIES = {
         "candidate_shape": "projection-projection",
         "include_in_sweep": True,
         "query": lambda row_count: (
-            f"SELECT sum(j) FROM (SELECT i::BIGINT + {ADDEND} AS j FROM range({row_count}) tbl(i))"
+            f"SELECT sum(j) FROM (SELECT i + {ADDEND} AS j FROM jit_micro)"
         ),
         "expected": projection_expected,
     },
@@ -100,7 +104,7 @@ DIAGNOSTIC_FAMILIES = {
         "candidate_shape": "filter",
         "include_in_sweep": True,
         "query": lambda row_count: (
-            f"SELECT count(*) FROM range({row_count}) tbl(i) WHERE i > {filter_bound(row_count)}"
+            f"SELECT count(*) FROM jit_micro WHERE i > {filter_bound(row_count)}"
         ),
         "expected": filter_expected,
     },
@@ -111,8 +115,8 @@ DIAGNOSTIC_FAMILIES = {
         "include_in_sweep": True,
         "query": lambda row_count: (
             "SELECT sum(a + b) FROM ("
-            f"SELECT i::BIGINT AS a, i::BIGINT + {ADDEND} AS b "
-            f"FROM range({row_count}) tbl(i) WHERE i > {filter_bound(row_count)}) t"
+            f"SELECT i AS a, i + {ADDEND} AS b "
+            f"FROM jit_micro WHERE i > {filter_bound(row_count)}) t"
         ),
         "expected": generic_expected,
     },

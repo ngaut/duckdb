@@ -121,24 +121,21 @@ def verify_events(trace_dir: Path, rows: list) -> None:
 
         if row["policy"] in {"auto", "force"}:
             expected = EXPECTED_SHAPES[row["shape"]]
-            source_boundary_events = [
+            native_compiled = [
                 event
                 for event in region_events
-                if event.get("status") in {"skipped", "unsupported"}
+                if event.get("phase") == "compile"
+                and event.get("status") == "compiled"
+                and event.get("execution_mode") == "native"
+                and event.get("region_execution_form") == "fused"
                 and event.get("candidate_shape") == expected["candidate_shape"]
                 and event.get("candidate_scope") == "source_prefix"
-                and event.get("region_execution_form") == "none"
-                and "source-fusion-gap:requires-native-source" in event.get("reason", "")
             ]
-            if len(source_boundary_events) != 1:
+            if not native_compiled:
                 raise AssertionError(
-                    f"{row['events_csv']}: expected one non-fused source-boundary {row['policy']} event, found {len(source_boundary_events)}"
+                    f"{row['events_csv']}: expected native source-prefix {row['policy']} compile event"
                 )
-            event = source_boundary_events[0]
-            if event.get("execution_mode") not in {"executor_fallback", "unsupported"}:
-                raise AssertionError(f"{row['events_csv']}: source-prefix event has wrong execution mode: {event}")
-            if event.get("region_execution_form") != "none":
-                raise AssertionError(f"{row['events_csv']}: source-prefix event is not non-fused: {event}")
+            event = native_compiled[0]
             if event.get("candidate_shape") != expected["candidate_shape"]:
                 raise AssertionError(f"{row['events_csv']}: candidate shape mismatch: {event}")
             if event.get("admission_rule_present") == "true":
@@ -148,23 +145,6 @@ def verify_events(trace_dir: Path, rows: list) -> None:
                     raise AssertionError(f"{row['events_csv']}: admission proof mismatch: {event}")
                 if row_int(event, "admission_min_cardinality") != expected["min_cardinality"]:
                     raise AssertionError(f"{row['events_csv']}: admission threshold mismatch: {event}")
-            reason = event.get("reason", "")
-            if "execution-form=none" not in reason or "execution:unsupported" not in reason:
-                raise AssertionError(f"{row['events_csv']}: source-boundary reason missing unsupported contract: {event}")
-            if "fallback:DuckDB source boundary" not in reason:
-                raise AssertionError(f"{row['events_csv']}: source boundary reason missing: {event}")
-            if row["policy"] == "auto":
-                continue
-            native_compiled = [
-                event
-                for event in region_events
-                if event.get("phase") == "compile"
-                and event.get("status") == "compiled"
-                and event.get("execution_mode") == "native"
-                and event.get("region_execution_form") == "fused"
-            ]
-            if not native_compiled:
-                raise AssertionError(f"{row['events_csv']}: force did not compile a native fused region")
             continue
 
 

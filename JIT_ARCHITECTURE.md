@@ -797,12 +797,13 @@ Region formation should be deterministic:
 
 `force` bypasses the profitability gate, not the executable-region safety
 contract. It admits supported candidates for diagnostics, but the executor still
-installs a deterministic non-overlapping region set. The planner deliberately no
-longer emits arbitrary post-source intervals, sink-only suffixes, or every
-subspan of projection/filter chains. Those shapes created compile overhead and
-trace noise without removing a meaningful executor boundary. A future graph
-region planner may add more region families only when the entry ABI and
-operator-state protocol make them executable, not just diagnosable.
+installs a deterministic non-overlapping region set. The planner deliberately
+emits only source-prefix, state-scan, and full-pipeline regions. Arbitrary
+middle-of-pipeline intervals, sink-only suffixes, and every subspan of
+projection/filter chains created compile overhead and trace noise without
+removing a meaningful executor boundary. A future graph region planner may add
+more region families only when the entry ABI and operator-state protocol make
+them executable, not just diagnosable.
 
 This turns fallback into a normal region-boundary concept. Fallback boundaries
 must be coarse and visible. They should not appear between every expression and
@@ -1038,8 +1039,8 @@ candidate includes a boundary. For SLJIT, examples are
 `sljit:source-prefix:filter-projection:table-scan-source` for a maximal native
 prefix and
 `sljit:full-pipeline:filter-projection-sink:table-scan-source+ungrouped-aggregate-update`
-for source-to-sink ownership. The current planner does not emit post-source or
-sink-suffix admission families. Aggregate sinks must distinguish
+for source-to-sink ownership. The current planner does not emit middle-interval
+or sink-suffix admission families. Aggregate sinks must distinguish
 `hash-aggregate-update`, `perfect-hash-aggregate-update`, and
 `ungrouped-aggregate-update`. This keeps `auto` admission misses cost-rankable by
 state protocol instead of collapsing every sink to a generic sink label.
@@ -1064,7 +1065,7 @@ and join sinks become native only as part of a full-pipeline native operator
 protocol.
 
 `JitRegionContract::abi` is the canonical runtime entry contract. It is one of
-`chunk_transform`, `source_prefix`, `full_pipeline`, or reserved `state_scan`.
+`source_prefix`, `full_pipeline`, or reserved `state_scan`.
 Runtime dispatch, backend ABI validation, source preparation, and
 backend lowering decisions must consume this ABI instead of recomputing entry
 kind from `owns_source`/`owns_sink` boolean pairs. The ownership booleans remain
@@ -1073,17 +1074,16 @@ observability exposes this directly as `candidate_contract_abi` in
 `duckdb_jit_events()`, `duckdb_jit_decision_counters()`, and
 `duckdb_jit_kernel_counters()`, so tests and production trace tooling do not
 need to parse rendered pipeline shapes or contract IR to recover the ABI. This
-removes the old edge case where source-prefix, full-pipeline, and
-chunk-transform decisions were reimplemented independently in core execution,
-backend lowering, tests, and trace helpers.
+removes the old edge case where source-prefix, full-pipeline, and split-transform
+decisions were reimplemented independently in core execution, backend lowering,
+tests, and trace helpers.
 
 ABI category checks are also centralized in the core JIT common layer through
-`JitRegionABIIsChunkTransform`, `JitRegionABIIsSourcePrefix`, and
-`JitRegionABIIsFullPipeline`. Runtime dispatch, backend admission, and backend
-planning must use these helpers instead of defining backend-local predicates or
-storing parallel source/full booleans. Compiled kernels may carry the ABI, but
-they must derive executable capability from that ABI rather than from duplicated
-state.
+`JitRegionABIIsSourcePrefix` and `JitRegionABIIsFullPipeline`. Runtime dispatch,
+backend admission, and backend planning must use these helpers instead of
+defining backend-local predicates or storing parallel source/full booleans.
+Compiled kernels may carry the ABI, but they must derive executable capability
+from that ABI rather than from duplicated state.
 
 The SQL-visible candidate contract columns are declared and appended through one
 internal helper shared by `duckdb_jit_events()`,
@@ -1114,9 +1114,9 @@ explicit missing protocol reason. Calling a whole DuckDB sink or whole DuckDB
 operator from a full-pipeline kernel is not a native-fused region.
 
 Stateful operator protocol ownership is unsplit in v1. Core candidate formation
-must not create source-prefix, post-source, or sink-suffix candidates that cross
-a hash join probe, operator protocol boundary, fallback operator, or upstream
-stateful operator span without a runtime protocol that can resume that state.
+must not create split candidates that cross a hash join probe, operator protocol
+boundary, fallback operator, or upstream stateful operator span without a
+runtime protocol that can resume that state.
 Those shapes belong either in one `full_pipeline` candidate or in the reference
 executor. This keeps backend analysis focused on executable ownership instead of
 recording non-executable "resume protocol missing" diagnostics as candidate
@@ -1306,7 +1306,7 @@ partition/batch protocol (`RequiredPartitionInfo().AnyRequired()`): those
 pipelines may still select the maximal `source_prefix` prefix when it can
 resume cleanly, but they must not let a non-enterable full-pipeline candidate
 own scan filters or switch table scans to prune-only residual execution. They
-also must not manufacture post-source or sink-suffix candidates to hide the
+	also must not manufacture split candidates to hide the
 missing executor-entry protocol.
 Full region lowering also attaches a backend-neutral `JitRegionSinkInfo`
 protocol inventory to sink nodes. The deterministic `sink<...>` text must
@@ -2520,8 +2520,8 @@ limited:
   It reports `source_prefix` and resumes the reference executor at the exact
   next operator boundary. It never includes stateful native operator protocols
   such as hash join probe; those require the full-pipeline runtime ABI;
-- the planner does not emit interior intervals, post-source transforms,
-  sink-only suffixes, or core-suffix-plus-sink candidates. Those shapes need a
+- the planner does not emit interior intervals, sink-only suffixes, or
+  core-suffix-plus-sink candidates. Those shapes need a
   real entry ABI and state-resume protocol before they can become production
   planner products;
 - full-lowered sink candidates include deterministic `sink<...>` protocol
@@ -2565,8 +2565,8 @@ lowerable.
 Split regions that start after a physical operator also require an upstream
 operator resume protocol. Hash join probe, aggregate source scan, materialized
 scan, sort/top-n source, and other resumable/stateful operators can leave
-`PipelineExecutor::in_process_operators` populated. A post-source transform or
-sink-suffix kernel behind such an operator is not a valid v1 candidate until
+`PipelineExecutor::in_process_operators` populated. A split kernel behind such
+an operator is not a valid v1 candidate until
 that operator exposes a backend-neutral resume contract. Core candidate
 formation does not emit these split regions; backend
 `operator-fusion-gap:upstream-operator-resume-protocol-missing` and

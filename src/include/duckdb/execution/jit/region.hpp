@@ -394,7 +394,7 @@ struct JitRegionCandidate {
 	idx_t start_operator_index = 0;
 	idx_t end_operator_index = 0;
 	idx_t estimated_cardinality = 0;
-	JitRegionCandidateScope scope = JitRegionCandidateScope::POST_SOURCE_OPERATOR_INTERVAL;
+	JitRegionCandidateScope scope = JitRegionCandidateScope::SOURCE_PREFIX;
 	vector<LogicalType> input_types;
 	vector<LogicalType> output_types;
 	string shape;

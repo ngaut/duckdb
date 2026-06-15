@@ -78,13 +78,11 @@ def verify_admitted_template(root: Path, family: str, entry: dict) -> None:
     required = [
         "result_query I",
         "duckdb_jit_events()",
-        f"admission_shape_key='{entry['shape_key']}'",
-        f"admission_proof='{entry['proof']}'",
         "policy_decision='auto'",
-        "status='unsupported'",
-        "region_execution_form='none'",
-        "source-fusion-gap:requires-native-source",
-        "code_size=0",
+        "status='compiled'",
+        "execution_mode='native'",
+        "region_execution_form='fused'",
+        "candidate_scope='source_prefix'",
         "policy_decision='force'",
         "code_size > 0",
     ]

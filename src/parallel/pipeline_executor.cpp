@@ -612,10 +612,6 @@ void PipelineExecutor::GoToSource(idx_t &current_idx, idx_t initial_idx, stack<i
 }
 
 OperatorResultType PipelineExecutor::Execute(DataChunk &input, DataChunk &result, idx_t initial_idx) {
-	OperatorResultType jit_result;
-	if (JitRegionExecutor::TryExecute(*this, input, result, initial_idx, jit_result)) {
-		return jit_result;
-	}
 	return ExecutePipelineReference(input, result, initial_idx);
 }
 
@@ -657,10 +653,6 @@ OperatorResultType PipelineExecutor::ExecutePipelineOperators(DataChunk &input, 
 		} else {
 			auto &prev_chunk = current_intermediate == initial_idx + 1 ? input : *chunks[current_intermediate - 1];
 			auto operator_idx = current_idx - 1;
-			OperatorResultType jit_result;
-			if (JitRegionExecutor::TryExecute(*this, prev_chunk, result, operator_idx, jit_result)) {
-				return jit_result;
-			}
 			auto &current_operator = pipeline.operators[operator_idx].get();
 
 			// if current_idx > source_idx, we pass the previous operators' output through the Execute of the current

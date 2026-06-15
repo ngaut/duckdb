@@ -88,8 +88,6 @@ const char *JitRegionABIToString(JitRegionABI abi) {
 	switch (abi) {
 	case JitRegionABI::NONE:
 		return "none";
-	case JitRegionABI::CHUNK_TRANSFORM:
-		return "chunk_transform";
 	case JitRegionABI::SOURCE_PREFIX:
 		return "source_prefix";
 	case JitRegionABI::FULL_PIPELINE:
@@ -110,10 +108,6 @@ bool JitRegionABIOwnsSink(JitRegionABI abi) {
 	return abi == JitRegionABI::FULL_PIPELINE;
 }
 
-bool JitRegionABIIsChunkTransform(JitRegionABI abi) {
-	return abi == JitRegionABI::CHUNK_TRANSFORM;
-}
-
 bool JitRegionABIIsSourcePrefix(JitRegionABI abi) {
 	return abi == JitRegionABI::SOURCE_PREFIX || abi == JitRegionABI::STATE_SCAN;
 }
@@ -124,8 +118,6 @@ bool JitRegionABIIsFullPipeline(JitRegionABI abi) {
 
 const char *JitRegionCandidateScopeToString(JitRegionCandidateScope scope) {
 	switch (scope) {
-	case JitRegionCandidateScope::POST_SOURCE_OPERATOR_INTERVAL:
-		return "post_source_operator_interval";
 	case JitRegionCandidateScope::SOURCE_PREFIX:
 		return "source_prefix";
 	case JitRegionCandidateScope::FULL_PIPELINE:

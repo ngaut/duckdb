@@ -1732,9 +1732,6 @@ static JitRegionABI DetermineJitRegionContractABI(const JitRegionContract &contr
 		return contract.owns_state_scan && !contract.owns_transform ? JitRegionABI::STATE_SCAN
 		                                                            : JitRegionABI::SOURCE_PREFIX;
 	}
-	if (contract.owns_transform) {
-		return JitRegionABI::CHUNK_TRANSFORM;
-	}
 	return JitRegionABI::NONE;
 }
 
@@ -2006,7 +2003,6 @@ static JitRegionCandidateTraits BuildJitRegionContinuationTraits(const JitRegion
 		return JitRegionCandidateTraits();
 	}
 	continuation_candidate.node_count = region_ir.nodes.size() - continuation_candidate.first_node;
-	continuation_candidate.scope = JitRegionCandidateScope::POST_SOURCE_OPERATOR_INTERVAL;
 	return BuildJitRegionSpanTraits(region_ir, std::move(continuation_candidate));
 }
 
@@ -2065,9 +2061,6 @@ static string NormalizeJitRegionSignatureSegment(string input) {
 static string GetJitRegionSignatureContext(const JitRegionContract &contract) {
 	if (JitRegionABIIsSourcePrefix(contract.abi)) {
 		return "source-prefix";
-	}
-	if (JitRegionABIIsChunkTransform(contract.abi)) {
-		return "post-source";
 	}
 	if (JitRegionABIIsFullPipeline(contract.abi)) {
 		return "full-pipeline";
@@ -2405,19 +2398,16 @@ static JitRegionStagePlan BuildJitRegionStagePlan(const JitRegionIR &region_ir,
 
 static JitRegionCandidateScope DetermineJitRegionCandidateScope(const JitRegionIR &region_ir, idx_t first_node,
                                                                 idx_t node_count) {
-	if (node_count == 0 || first_node >= region_ir.nodes.size()) {
-		return JitRegionCandidateScope::POST_SOURCE_OPERATOR_INTERVAL;
-	}
+	D_ASSERT(node_count > 0);
+	D_ASSERT(first_node < region_ir.nodes.size());
 	auto end_node = MinValue(first_node + node_count, NumericCast<idx_t>(region_ir.nodes.size()));
 	auto starts_at_source = region_ir.nodes[first_node].kind == JitRegionIRNodeKind::SOURCE;
 	auto ends_at_sink = end_node > first_node && region_ir.nodes[end_node - 1].kind == JitRegionIRNodeKind::SINK;
+	D_ASSERT(starts_at_source);
 	if (starts_at_source && ends_at_sink) {
 		return JitRegionCandidateScope::FULL_PIPELINE;
 	}
-	if (starts_at_source) {
-		return JitRegionCandidateScope::SOURCE_PREFIX;
-	}
-	return JitRegionCandidateScope::POST_SOURCE_OPERATOR_INTERVAL;
+	return JitRegionCandidateScope::SOURCE_PREFIX;
 }
 
 static idx_t EstimateJitRegionCandidateCardinality(const JitRegionIR &region_ir, const JitRegionCandidate &candidate) {
@@ -2517,10 +2507,6 @@ static bool JitRegionCandidateRequiresMissingSplitProtocol(const JitRegionCandid
 	switch (candidate.scope) {
 	case JitRegionCandidateScope::SOURCE_PREFIX:
 		return candidate.context_traits.operator_protocol_boundary_count > 0;
-	case JitRegionCandidateScope::POST_SOURCE_OPERATOR_INTERVAL:
-		return JitRegionTraitsRequireOperatorResumeProtocol(candidate.upstream_traits) ||
-		       JitRegionTraitsRequireOperatorResumeProtocol(candidate.continuation_traits) ||
-		       candidate.continuation_traits.expression_fallback_count > 0;
 	default:
 		return false;
 	}
@@ -2532,6 +2518,9 @@ static bool AddJitRegionCandidate(JitRegionIR &region_ir, idx_t candidate_id, id
 	D_ASSERT(node_count > 0);
 	if (HasJitRegionCandidate(region_ir, first_node, node_count, start_operator_index, end_operator_index,
 	                          source_execution)) {
+		return false;
+	}
+	if (first_node >= region_ir.nodes.size() || region_ir.nodes[first_node].kind != JitRegionIRNodeKind::SOURCE) {
 		return false;
 	}
 	JitRegionCandidate candidate;
@@ -2549,7 +2538,7 @@ static bool AddJitRegionCandidate(JitRegionIR &region_ir, idx_t candidate_id, id
 	candidate.pipeline_shape = DescribeJitRegionPipelineShape(region_ir, first_node, node_count);
 	candidate.context_pipeline_shape = region_ir.pipeline_shape;
 	candidate.contract = BuildJitRegionContract(region_ir, candidate);
-	if (candidate.contract.owns_sink && !candidate.contract.owns_source) {
+	if (!candidate.contract.owns_source) {
 		return false;
 	}
 	candidate.stage_plan = BuildJitRegionStagePlan(region_ir, candidate);

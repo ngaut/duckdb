@@ -8,6 +8,9 @@ subgroup jit
 
 require jit_sljit
 
+load
+CREATE TABLE jit_micro AS SELECT i::BIGINT AS i FROM range(${ROW_COUNT}) tbl(i);
+
 init
 SET threads=1;
 SET enable_jit=true;
@@ -15,7 +18,7 @@ SET jit_backend='sljit';
 SET jit_policy='${JIT_POLICY}';
 
 run
-SELECT sum(j) FROM (SELECT i::BIGINT + ${ADDEND} AS j FROM range(${ROW_COUNT}) tbl(i));
+SELECT sum(j) FROM (SELECT i + ${ADDEND} AS j FROM jit_micro);
 
 result I
 ${EXPECTED_RESULT}

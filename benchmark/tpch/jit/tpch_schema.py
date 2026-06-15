@@ -144,7 +144,6 @@ SORT_OPERATORS = ("ORDER_BY", "TOP_N")
 MATERIALIZATION_OPERATORS = ("CTE", "CTE_SCAN", "COLUMN_DATA_SCAN")
 REGION_DECISION_STATUSES = ("compiled", "skipped", "unsupported")
 KNOWN_CANDIDATE_SCOPES = (
-    "post_source_operator_interval",
     "source_prefix",
     "full_pipeline",
 )
@@ -156,7 +155,6 @@ KNOWN_CANDIDATE_SCOPE_SUMMARY_VALUES = (
 KNOWN_REGION_EXECUTION_FORMS = ("none", "fused")
 KNOWN_CANDIDATE_ABIS = (
     "none",
-    "chunk_transform",
     "source_prefix",
     "full_pipeline",
     "state_scan",

@@ -14,8 +14,8 @@ proof:
 - `off` must produce no compiled region event;
 - `auto` must keep source-boundary source-prefix regions non-fused, even when a
   body shape has a non-negative admission score;
-- `force` must not compile source-boundary source-prefix regions; it may compile
-  only native fused post-source or sink fragments that have executable code.
+- `force` must compile only native fused source-prefix or full-pipeline regions
+  that have executable code.
 
 This keeps benchmark results tied to the region shape they claim to measure.
 
@@ -100,11 +100,12 @@ filter/projection region:
 - `sljit:source-prefix:filter-projection`
 - one generated integer filter
 - one generated integer projection
-- normal DuckDB scan and aggregate boundaries
+- native table-scan source-prefix execution plus normal aggregate boundary
 - single-threaded execution
 
-The template uses a `range()` view intentionally. A materialized table can push
-the predicate into the scan and stop measuring a generated filter node.
+The template materializes a table source intentionally. DuckDB-owned range
+sources are source boundaries and are not valid proof for generated body-only
+execution.
 
 Run the threshold proof:
 
@@ -193,8 +194,9 @@ build/release/benchmark/benchmark_runner --disable-timeout benchmark/micro/jit/n
 
 Projection-only, filter-only, and generic multi-op regions have separate
 benchmark files but no `auto` admission rule unless their own threshold
-measurement proves a win. Backend lowering still assigns deterministic shape keys such as
-`sljit:post-source:projection`, `sljit:post-source:filter`, and
+measurement proves a win. Backend lowering assigns deterministic source-prefix
+shape keys such as `sljit:source-prefix:projection`,
+`sljit:source-prefix:filter`, and
 `sljit:source-prefix:filter-projection-projection` so skipped regions remain attributable.
 Native table-scan source-prefix filter/projection is treated the same way:
 `sljit:source-prefix:filter-projection` is a capability/diagnostic key, not an

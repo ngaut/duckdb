@@ -39,45 +39,16 @@ def benchmark_text(shape: dict, row_count: int, policy: str, path: Path) -> str:
         else "\n".join(
             [
                 "(",
-                "            SELECT (",
-                "                (",
-                "                    SELECT count(*) = 1",
-                "                    FROM duckdb_jit_events()",
-                "                    WHERE target='region'",
-                "                      AND status='unsupported'",
-                "                      AND execution_mode='unsupported'",
-                "                      AND region_execution_form='none'",
-                "                      AND policy_decision='force'",
-                f"                      AND candidate_shape='{shape['candidate_shape']}'",
-                "                      AND candidate_scope='source_prefix'",
-                f"                      AND admission_shape_key='{shape['shape_key']}'",
-                "                      AND code_size=0",
-                "                      AND reason LIKE '%execution:unsupported%'",
-                "                      AND reason LIKE '%source-fusion-gap:requires-native-source%'",
-                "                      AND reason LIKE '%DuckDB source boundary%'",
-                "                )",
-                "                AND",
-                "                (",
-                "                    SELECT count(*) = 0",
-                "                    FROM duckdb_jit_events()",
-                "                    WHERE target='region'",
-                "                      AND status='compiled'",
-                "                      AND execution_mode <> 'native'",
-                "                      AND candidate_scope='source_prefix'",
-                "                )",
-                "                AND",
-                "                (",
-                "                    SELECT count(*) > 0",
-                "                    FROM duckdb_jit_events()",
-                "                    WHERE target='region'",
-                "                      AND status='compiled'",
-                "                      AND execution_mode='native'",
-                "                      AND region_execution_form='fused'",
-                "                      AND policy_decision='force'",
-                "                      AND candidate_scope='post_source_operator_interval'",
-                "                      AND code_size > 0",
-                "                )",
-                "            )",
+                "            SELECT count(*) > 0",
+                "            FROM duckdb_jit_events()",
+                "            WHERE target='region'",
+                "              AND status='compiled'",
+                "              AND execution_mode='native'",
+                "              AND region_execution_form='fused'",
+                "              AND policy_decision='force'",
+                f"              AND candidate_shape='{shape['candidate_shape']}'",
+                "              AND candidate_scope='source_prefix'",
+                "              AND code_size > 0",
                 "        )",
             ]
         )
@@ -91,6 +62,9 @@ group micro
 subgroup jit
 
 require jit_sljit
+
+load
+CREATE TABLE jit_micro AS SELECT i::BIGINT AS i FROM range({row_count}) tbl(i);
 
 init
 SET threads=1;

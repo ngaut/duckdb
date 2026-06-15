@@ -88,7 +88,7 @@ private:
 };
 
 static bool IsKnownJitCandidateScope(const string &scope) {
-	return scope == "post_source_operator_interval" || scope == "source_prefix" || scope == "full_pipeline";
+	return scope == "source_prefix" || scope == "full_pipeline";
 }
 
 static bool IsCompiledRegionExecutionMode(const string &execution_mode) {
@@ -106,9 +106,7 @@ static void RequireCompiledRegionScopeHonesty(const JitEvent &event) {
 		REQUIRE(event.candidate_contract.abi == JitRegionABI::FULL_PIPELINE);
 		return;
 	}
-	REQUIRE(event.candidate_scope == "post_source_operator_interval");
-	REQUIRE(event.execution_mode == "native");
-	REQUIRE(event.candidate_contract.abi == JitRegionABI::CHUNK_TRANSFORM);
+	FAIL("unknown compiled JIT candidate scope: " + event.candidate_scope);
 }
 
 static void RequireStatefulSourceMissingProtocolABI(const JitEvent &event, bool &found_state_scan_abi) {
@@ -171,8 +169,7 @@ static void RequireAutoInventorySkipEvent(const JitEvent &event, const string &s
 
 static bool IsMaximalTransformCandidate(const JitRegionCompilationInput &input) {
 	const auto scope = input.candidate.scope;
-	return (scope == JitRegionCandidateScope::SOURCE_PREFIX ||
-	        scope == JitRegionCandidateScope::POST_SOURCE_OPERATOR_INTERVAL) &&
+	return scope == JitRegionCandidateScope::SOURCE_PREFIX &&
 	       input.candidate.end_operator_index > input.candidate.start_operator_index;
 }
 
@@ -4975,8 +4972,9 @@ TEST_CASE("JIT kernel counters can be recreated from runtime trace identity", "[
 	runtime_event.has_candidate = true;
 	runtime_event.candidate_id = 2;
 	runtime_event.candidate_shape = "filter-projection";
-	runtime_event.candidate_scope = "post_source_operator_interval";
-	runtime_event.candidate_pipeline_shape = "pipeline;op0:filter:FILTER:none;op1:projection:PROJECTION:none";
+	runtime_event.candidate_scope = "source_prefix";
+	runtime_event.candidate_pipeline_shape =
+	    "pipeline;source:source:TABLE_SCAN:source-native;op0:filter:FILTER:none;op1:projection:PROJECTION:none";
 	runtime_event.candidate_node_count = 4;
 	runtime_event.candidate_start_operator_index = 0;
 	runtime_event.candidate_end_operator_index = 2;
@@ -5002,8 +5000,9 @@ TEST_CASE("JIT kernel counters can be recreated from runtime trace identity", "[
 	REQUIRE(counters[0].has_candidate);
 	REQUIRE(counters[0].candidate_id == 2);
 	REQUIRE(counters[0].candidate_shape == "filter-projection");
-	REQUIRE(counters[0].candidate_scope == "post_source_operator_interval");
-	REQUIRE(counters[0].candidate_pipeline_shape == "pipeline;op0:filter:FILTER:none;op1:projection:PROJECTION:none");
+	REQUIRE(counters[0].candidate_scope == "source_prefix");
+	REQUIRE(counters[0].candidate_pipeline_shape ==
+	        "pipeline;source:source:TABLE_SCAN:source-native;op0:filter:FILTER:none;op1:projection:PROJECTION:none");
 	REQUIRE(counters[0].candidate_node_count == 4);
 	REQUIRE(counters[0].candidate_start_operator_index == 0);
 	REQUIRE(counters[0].candidate_end_operator_index == 2);
