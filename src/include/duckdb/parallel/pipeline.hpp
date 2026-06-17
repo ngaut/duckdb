@@ -23,7 +23,8 @@ class Executor;
 class MetaPipeline;
 class PipelineExecutor;
 class Pipeline;
-struct JitPreparedPipeline;
+enum class ExecutionRunnerKind : uint8_t;
+struct ExecutionRegionPlan;
 
 class PipelineTask : public ExecutorTask {
 	static constexpr const idx_t PARTIAL_CHUNK_COUNT = 50;
@@ -96,7 +97,8 @@ public:
 	void ResetSinkForReschedule();
 	void ResetForReschedule(bool reset_sink);
 	void ResetSource(bool force);
-	void PrepareJitRegions();
+	void BuildExecutionRegionPlan();
+	bool PrepareExecutionRegionPlanForExecution();
 	void ClearSource();
 	void Schedule(shared_ptr<Event> &event);
 	void PrepareFinalize();
@@ -125,8 +127,16 @@ public:
 		return source;
 	}
 
-	optional_ptr<const JitPreparedPipeline> GetJitPreparedPipeline() const {
-		return jit_prepared_pipeline.get();
+	optional_ptr<ExecutionRegionPlan> GetExecutionRegionPlan() {
+		return execution_region_plan.get();
+	}
+
+	optional_ptr<const ExecutionRegionPlan> GetExecutionRegionPlan() const {
+		return execution_region_plan.get();
+	}
+
+	ExecutionRunnerKind GetExecutionRunnerKind() const {
+		return execution_runner;
 	}
 
 	//! Returns whether any of the operators in the pipeline care about preserving order
@@ -152,8 +162,12 @@ private:
 
 	//! The global source state
 	unique_ptr<GlobalSourceState> source_state;
-	//! Query/pipeline-scoped JIT region analysis selected before source state captures scan filters.
-	unique_ptr<JitPreparedPipeline> jit_prepared_pipeline;
+	//! Query/pipeline-scoped compiled execution plan selected before source state captures scan filters.
+	unique_ptr<ExecutionRegionPlan> execution_region_plan;
+	//! Protects execution region plan refreshes that can happen after stateful dependencies finish.
+	mutex execution_region_plan_lock;
+	//! Selected runner for this pipeline. Vectorized execution is an explicit runner beside compiled regions.
+	ExecutionRunnerKind execution_runner;
 
 	//! The parent pipelines (i.e. pipelines that are dependent on this pipeline to finish)
 	vector<weak_ptr<Pipeline>> parents;
@@ -176,6 +190,7 @@ private:
 
 	bool TryGetMaxThreads(idx_t &max_threads);
 	bool ScheduleParallel(shared_ptr<Event> &event);
+	void BuildExecutionRegionPlanLocked();
 };
 
 } // namespace duckdb

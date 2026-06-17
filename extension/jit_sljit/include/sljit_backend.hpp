@@ -12,6 +12,6 @@
 
 namespace duckdb {
 
-void RegisterSljitJitBackend(ExtensionLoader &loader);
+void RegisterSljitExecutionRegionBackend(ExtensionLoader &loader);
 
 } // namespace duckdb

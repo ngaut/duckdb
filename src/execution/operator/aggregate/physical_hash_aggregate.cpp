@@ -5,7 +5,7 @@
 #include "duckdb/common/optional_idx.hpp"
 #include "duckdb/common/vector_operations/vector_operations.hpp"
 #include "duckdb/execution/aggregate_hashtable.hpp"
-#include "duckdb/execution/jit/runtime.hpp"
+#include "duckdb/execution/execution_operator_runtime.hpp"
 #include "duckdb/execution/operator/aggregate/distinct_aggregate_data.hpp"
 #include "duckdb/main/client_context.hpp"
 #include "duckdb/parallel/base_pipeline_event.hpp"
@@ -107,6 +107,22 @@ bool PhysicalHashAggregate::CanSkipRegularSink() const {
 	}
 	if (!non_distinct_filter.empty()) {
 		return false;
+	}
+	return true;
+}
+
+bool PhysicalHashAggregate::CanUseDistinctSinkContract() const {
+	if (!distinct_collection_info || groupings.size() != 1 || !CanSkipRegularSink()) {
+		return false;
+	}
+	if (grouped_aggregate_data.filter_count != 0 || grouped_aggregate_data.aggregates.empty()) {
+		return false;
+	}
+	for (auto &aggregate : grouped_aggregate_data.aggregates) {
+		auto &bound_aggregate = aggregate->Cast<BoundAggregateExpression>();
+		if (!bound_aggregate.IsDistinct() || bound_aggregate.GetFilter() || bound_aggregate.GetOrderBys()) {
+			return false;
+		}
 	}
 	return true;
 }
@@ -307,6 +323,131 @@ public:
 	}
 };
 
+class HashAggregateExecutionRegionSinkState : public ExecutionAggregateUpdateState {
+public:
+	HashAggregateExecutionRegionSinkState(ExecutionContext &context_p, const PhysicalHashAggregate &op_p,
+	                                      HashAggregateGlobalSinkState &global_state_p,
+	                                      HashAggregateLocalSinkState &local_state_p, InterruptState &interrupt_state_p)
+	    : context(context_p), op(op_p), global_state(global_state_p), local_state(local_state_p),
+	      interrupt_state(interrupt_state_p) {
+	}
+
+	SinkResultType Sink(DataChunk &input) override {
+		if (op.distinct_collection_info) {
+			throw InternalException("execution region hash aggregate update received unsupported aggregate state");
+		}
+
+		DataChunk &aggregate_input_chunk = local_state.aggregate_input_chunk;
+		idx_t aggregate_input_idx = 0;
+		for (auto &aggregate : op.grouped_aggregate_data.aggregates) {
+			auto &aggr = aggregate->Cast<BoundAggregateExpression>();
+			if (aggr.IsDistinct() || aggr.GetFilter() || aggr.GetOrderBys()) {
+				throw InternalException("execution region hash aggregate update received unsupported aggregate");
+			}
+			for (auto &child_expr : aggr.GetChildren()) {
+				if (child_expr->GetExpressionClass() != ExpressionClass::BOUND_REF) {
+					throw InternalException("execution region hash aggregate payload is not a bound reference");
+				}
+				auto &bound_ref_expr = child_expr->Cast<BoundReferenceExpression>();
+				if (bound_ref_expr.Index() >= input.ColumnCount()) {
+					throw InternalException("execution region hash aggregate payload index out of range");
+				}
+				aggregate_input_chunk.data[aggregate_input_idx++].Reference(input.data[bound_ref_expr.Index()]);
+			}
+		}
+
+		aggregate_input_chunk.SetChildCardinality(input.size());
+		aggregate_input_chunk.Verify(context.client.db);
+
+		for (idx_t grouping_idx = 0; grouping_idx < op.groupings.size(); grouping_idx++) {
+			auto &grouping_global_state = global_state.grouping_states[grouping_idx];
+			auto &grouping_local_state = local_state.grouping_states[grouping_idx];
+			OperatorSinkInput sink_input {*grouping_global_state.table_state, *grouping_local_state.table_state,
+			                              interrupt_state};
+			auto &table = op.groupings[grouping_idx].table_data;
+			table.Sink(context, input, sink_input, aggregate_input_chunk, op.non_distinct_filter);
+		}
+		return SinkResultType::NEED_MORE_INPUT;
+	}
+
+	idx_t FindOrCreateAggregateStates(DataChunk &input, const vector<idx_t> &group_input_indices,
+	                                  Vector &addresses_out) override {
+		if (op.distinct_collection_info) {
+			throw InternalException("execution region hash aggregate state lookup received unsupported aggregate state");
+		}
+		if (op.groupings.size() != 1 || global_state.grouping_states.size() != 1 ||
+		    local_state.grouping_states.size() != 1) {
+			throw InternalException("execution region hash aggregate state lookup requires one grouping state");
+		}
+		auto &grouping_global_state = global_state.grouping_states[0];
+		auto &grouping_local_state = local_state.grouping_states[0];
+		OperatorSinkInput sink_input {*grouping_global_state.table_state, *grouping_local_state.table_state,
+		                              interrupt_state};
+		return op.groupings[0].table_data.FindOrCreateAggregateStatesFromBoundGroups(context, input,
+		                                                                             group_input_indices, sink_input,
+		                                                                             addresses_out);
+	}
+
+	void FinishNativeAggregateUpdate() override {
+		if (op.groupings.size() != 1 || global_state.grouping_states.size() != 1 ||
+		    local_state.grouping_states.size() != 1) {
+			throw InternalException("execution region hash aggregate native update requires one grouping state");
+		}
+		auto &grouping_global_state = global_state.grouping_states[0];
+		auto &grouping_local_state = local_state.grouping_states[0];
+		OperatorSinkInput sink_input {*grouping_global_state.table_state, *grouping_local_state.table_state,
+		                              interrupt_state};
+		op.groupings[0].table_data.FinishNativeAggregateUpdate(context, sink_input);
+	}
+
+private:
+	ExecutionContext &context;
+	const PhysicalHashAggregate &op;
+	HashAggregateGlobalSinkState &global_state;
+	HashAggregateLocalSinkState &local_state;
+	InterruptState &interrupt_state;
+};
+
+static string ValidateHashAggregateExecutionSink(const ExecutionRegionSinkInfo &sink_info) {
+	if (sink_info.kind != ExecutionRegionSinkKind::HASH_AGGREGATE_UPDATE) {
+		return "hash-aggregate-runtime-kind-mismatch";
+	}
+	auto &contract = sink_info.aggregate_contract;
+	if (contract.native_state_update_contract.status != ExecutionRegionStateContractStatus::READY) {
+		return contract.native_state_update_contract.blocker.empty() ? "hash-aggregate-state-update-contract-not-ready"
+		                                                             : contract.native_state_update_contract.blocker;
+	}
+	if (contract.distinct_aggregate_count != 0 || contract.distinct_table_count != 0 ||
+	    contract.distinct_child_count != 0 || contract.distinct_filter_count != 0) {
+		return "hash-aggregate-state-update-distinct-state";
+	}
+	if (contract.aggregate_filter_count != 0 || contract.aggregate_order_count != 0) {
+		return "hash-aggregate-state-update-filter-or-order";
+	}
+	if (contract.native_grouped_state_contract.status != ExecutionRegionStateContractStatus::READY) {
+		return contract.native_grouped_state_contract.blocker.empty() ? "hash-aggregate-grouped-state-not-ready"
+		                                                              : contract.native_grouped_state_contract.blocker;
+	}
+	for (auto &group : sink_info.groups) {
+		if (!group.supported_reference) {
+			return group.reason.empty() ? "hash-aggregate-state-update-group-reference" : group.reason;
+		}
+	}
+	for (auto &aggregate : sink_info.aggregates) {
+		if (!aggregate.reason.empty()) {
+			return aggregate.reason;
+		}
+		if (aggregate.distinct || aggregate.has_filter || aggregate.has_order_bys || aggregate.order_dependent) {
+			return "hash-aggregate-state-update-unsupported-aggregate-semantics";
+		}
+		if (!aggregate.has_state_update || !aggregate.payload_expressions_ready ||
+		    !aggregate.supported_payload_references) {
+			return "hash-aggregate-state-update-payload-contract";
+		}
+	}
+	return "none";
+}
+
 void PhysicalHashAggregate::SetMultiScan(GlobalSinkState &state) {
 	auto &gstate = state.Cast<HashAggregateGlobalSinkState>();
 	for (auto &grouping_state : gstate.grouping_states) {
@@ -323,112 +464,6 @@ unique_ptr<GlobalSinkState> PhysicalHashAggregate::GetGlobalSinkState(ClientCont
 
 unique_ptr<LocalSinkState> PhysicalHashAggregate::GetLocalSinkState(ExecutionContext &context) const {
 	return make_uniq<HashAggregateLocalSinkState>(*this, context);
-}
-
-static void ValidateJitNativeHashAggregateShape(const PhysicalHashAggregate &op,
-                                                const vector<JitGroupedAggregateGroupBinding> &group_bindings,
-                                                const vector<JitNativeGroupedAggregateStateRequest> &requests) {
-	if (op.groupings.size() != 1) {
-		throw InternalException("JIT native hash aggregate state binding requires one grouping set");
-	}
-	auto &grouping = op.groupings[0];
-	if (grouping.HasDistinct()) {
-		throw InternalException("JIT native hash aggregate state binding does not support distinct aggregates");
-	}
-	if (group_bindings.size() != op.grouped_aggregate_data.groups.size()) {
-		throw InternalException("JIT native hash aggregate group binding count mismatch");
-	}
-	for (auto &binding : group_bindings) {
-		if (binding.group_index >= op.grouped_aggregate_data.groups.size()) {
-			throw InternalException("JIT native hash aggregate group binding references group index %llu beyond %llu",
-			                        static_cast<unsigned long long>(binding.group_index),
-			                        static_cast<unsigned long long>(op.grouped_aggregate_data.groups.size()));
-		}
-	}
-	for (auto &request : requests) {
-		if (request.aggregate_index >= op.grouped_aggregate_data.aggregates.size()) {
-			throw InternalException("JIT native hash aggregate state request references aggregate index %llu beyond %llu",
-			                        static_cast<unsigned long long>(request.aggregate_index),
-			                        static_cast<unsigned long long>(op.grouped_aggregate_data.aggregates.size()));
-		}
-	}
-}
-
-static void BindJitNativeHashAggregateStateLayout(
-    const PhysicalHashAggregate &op, const vector<JitNativeGroupedAggregateStateRequest> &requested_states,
-    JitNativeGroupedAggregateStateSet &bound_states) {
-	auto &layout = op.groupings[0].table_data.GetLayout();
-	auto aggregate_offset_idx = layout.ColumnCount();
-	auto &offsets = layout.GetOffsets();
-	if (offsets.size() < aggregate_offset_idx + op.grouped_aggregate_data.aggregates.size()) {
-		throw InternalException("JIT native hash aggregate grouped state layout is incomplete");
-	}
-	const auto base_offset = layout.GetAggrOffset();
-	bound_states.states.clear();
-	bound_states.states.reserve(requested_states.size());
-	for (auto &request : requested_states) {
-		auto state_offset = offsets[aggregate_offset_idx + request.aggregate_index];
-		if (state_offset < base_offset) {
-			throw InternalException("JIT native hash aggregate state offset is before aggregate payload area");
-		}
-		JitNativeGroupedAggregateState state;
-		state.aggregate_index = request.aggregate_index;
-		state.update_kind = request.update_kind;
-		state.aggregate_state_offset = state_offset - base_offset;
-		bound_states.states.push_back(state);
-	}
-}
-
-void JitBindNativeHashAggregateStates(ExecutionContext &context, OperatorSinkInput &input, DataChunk &payload_chunk,
-                                      const vector<JitGroupedAggregateGroupBinding> &group_bindings,
-                                      const vector<JitNativeGroupedAggregateStateRequest> &requested_states,
-                                      JitNativeGroupedAggregateStateSet &bound_states) {
-	auto &local_state = input.local_state.Cast<HashAggregateLocalSinkState>();
-	auto &global_state = input.global_state.Cast<HashAggregateGlobalSinkState>();
-	auto &op = local_state.op;
-	ValidateJitNativeHashAggregateShape(op, group_bindings, requested_states);
-
-	auto &grouping = op.groupings[0];
-	auto &grouping_gstate = global_state.grouping_states[0];
-	auto &grouping_lstate = local_state.grouping_states[0];
-	vector<idx_t> group_input_indices;
-	group_input_indices.resize(group_bindings.size(), DConstants::INVALID_INDEX);
-	for (auto &binding : group_bindings) {
-		if (binding.input_index >= payload_chunk.ColumnCount()) {
-			throw InternalException("JIT native hash aggregate group binding references input column %llu beyond %llu",
-			                        static_cast<unsigned long long>(binding.input_index),
-			                        static_cast<unsigned long long>(payload_chunk.ColumnCount()));
-		}
-		group_input_indices[binding.group_index] = binding.input_index;
-	}
-	for (idx_t group_idx = 0; group_idx < group_input_indices.size(); group_idx++) {
-		if (group_input_indices[group_idx] == DConstants::INVALID_INDEX) {
-			throw InternalException("JIT native hash aggregate group binding omits group index %llu",
-			                        static_cast<unsigned long long>(group_idx));
-		}
-	}
-
-	OperatorSinkInput radix_input {*grouping_gstate.table_state, *grouping_lstate.table_state, input.interrupt_state};
-	grouping.table_data.FindOrCreateAggregateStatesFromBoundGroups(context, payload_chunk, group_input_indices,
-	                                                               radix_input, bound_states.aggregate_addresses);
-	BindJitNativeHashAggregateStateLayout(op, requested_states, bound_states);
-	bound_states.count = payload_chunk.size();
-}
-
-SinkResultType JitFinishNativeHashAggregateUpdate(ExecutionContext &context, OperatorSinkInput &input, idx_t count) {
-	(void)count;
-	auto &local_state = input.local_state.Cast<HashAggregateLocalSinkState>();
-	auto &global_state = input.global_state.Cast<HashAggregateGlobalSinkState>();
-	auto &op = local_state.op;
-	if (op.groupings.size() != 1) {
-		throw InternalException("JIT native hash aggregate finish requires one grouping set");
-	}
-	auto &grouping = op.groupings[0];
-	auto &grouping_gstate = global_state.grouping_states[0];
-	auto &grouping_lstate = local_state.grouping_states[0];
-	OperatorSinkInput radix_input {*grouping_gstate.table_state, *grouping_lstate.table_state, input.interrupt_state};
-	grouping.table_data.FinishNativeAggregateUpdate(context, radix_input);
-	return SinkResultType::NEED_MORE_INPUT;
 }
 
 void PhysicalHashAggregate::SinkDistinctGrouping(ExecutionContext &context, DataChunk &chunk, OperatorSinkInput &input,
@@ -574,6 +609,33 @@ SinkResultType PhysicalHashAggregate::Sink(ExecutionContext &context, DataChunk 
 	}
 
 	return SinkResultType::NEED_MORE_INPUT;
+}
+
+bool PhysicalHashAggregate::BindExecutionSink(ExecutionContext &context, DataChunk &input,
+                                              OperatorSinkInput &sink_input, const ExecutionRegionSinkInfo &sink_info,
+                                              ExecutionSinkBinding &binding) const {
+	(void)input;
+	binding = ExecutionSinkBinding();
+	binding.kind = sink_info.kind;
+	auto blocker = ValidateHashAggregateExecutionSink(sink_info);
+	if (blocker == "none" && CanSkipRegularSink()) {
+		blocker = "hash-aggregate-state-update-skipped-regular-sink";
+	}
+	if (blocker != "none") {
+		binding.blocker = blocker;
+		binding.aggregate_update.blocker = blocker;
+		return false;
+	}
+
+	auto &global_state = sink_input.global_state.Cast<HashAggregateGlobalSinkState>();
+	auto &local_state = sink_input.local_state.Cast<HashAggregateLocalSinkState>();
+	binding.ready = true;
+	binding.aggregate_update.ready = true;
+	binding.aggregate_update.state = make_shared_ptr<HashAggregateExecutionRegionSinkState>(
+	    context, *this, global_state, local_state, sink_input.interrupt_state);
+	binding.aggregate_update.blocker = "none";
+	binding.blocker = "none";
+	return true;
 }
 
 //===--------------------------------------------------------------------===//
@@ -1104,8 +1166,8 @@ static SourceResultType ScanHashAggregateState(ExecutionContext &context, DataCh
 	return chunk.size() == 0 ? SourceResultType::FINISHED : SourceResultType::HAVE_MORE_OUTPUT;
 }
 
-bool PhysicalHashAggregate::SupportsJitNativeSource(const JitPreparedPipeline &jit_prepared_pipeline) const {
-	return jit_prepared_pipeline.RequiresNativeSource();
+bool PhysicalHashAggregate::SupportsExecutionSourceContract(const ExecutionRegionOpenRequest &open_request) const {
+	return open_request.UsesSourceContract();
 }
 
 SourceResultType PhysicalHashAggregate::GetDataInternal(ExecutionContext &context, DataChunk &chunk,
@@ -1113,8 +1175,9 @@ SourceResultType PhysicalHashAggregate::GetDataInternal(ExecutionContext &contex
 	return ScanHashAggregateState(context, chunk, input, *this);
 }
 
-SourceResultType PhysicalHashAggregate::GetJitNativeSourceDataInternal(ExecutionContext &context, DataChunk &chunk,
-                                                                       OperatorSourceInput &input) const {
+SourceResultType PhysicalHashAggregate::GetExecutionSourceContractDataInternal(ExecutionContext &context,
+                                                                               DataChunk &chunk,
+                                                                               OperatorSourceInput &input) const {
 	return ScanHashAggregateState(context, chunk, input, *this);
 }
 

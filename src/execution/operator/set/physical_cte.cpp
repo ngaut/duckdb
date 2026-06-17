@@ -70,6 +70,20 @@ public:
 	}
 };
 
+class CTEExecutionRegionSinkState : public ExecutionAppendSinkState {
+public:
+	explicit CTEExecutionRegionSinkState(CTELocalState &state_p) : state(state_p) {
+	}
+
+	SinkResultType Append(DataChunk &input) override {
+		state.Append(input);
+		return SinkResultType::NEED_MORE_INPUT;
+	}
+
+private:
+	CTELocalState &state;
+};
+
 unique_ptr<GlobalSinkState> PhysicalCTE::GetGlobalSinkState(ClientContext &context) const {
 	return make_uniq<CTEGlobalState>(context, *this);
 }
@@ -81,9 +95,48 @@ unique_ptr<LocalSinkState> PhysicalCTE::GetLocalSinkState(ExecutionContext &cont
 
 SinkResultType PhysicalCTE::Sink(ExecutionContext &context, DataChunk &chunk, OperatorSinkInput &input) const {
 	auto &lstate = input.local_state.Cast<CTELocalState>();
-	lstate.lhs_data.Append(lstate.append_state, chunk);
+	lstate.Append(chunk);
 
 	return SinkResultType::NEED_MORE_INPUT;
+}
+
+ExecutionContract PhysicalCTE::GetExecutionContract() const {
+	ExecutionContract result;
+	result.sink.kind = ExecutionRegionSinkKind::MATERIALIZATION;
+	result.sink.reason = "DuckDB materialization append sink contract";
+	result.sink.reason += ";operator=CTE";
+	result.sink.reason += ";output_columns=" + std::to_string(types.size());
+	result.sink.native_sink_contract.status = ExecutionRegionStateContractStatus::READY;
+	result.sink.native_sink_contract.required_capability = "materialization-append-sink";
+	result.sink.native_sink_contract.contract_version = "v1";
+	result.sink.native_sink_contract.blocker = "none";
+	result.sink.reason += ";sink_contract_status=ready";
+	result.sink.reason += ";sink_required_capability=materialization-append-sink";
+	result.sink.reason += ";sink_contract_version=v1";
+	result.sink.reason += ";sink_contract_blocker=none";
+	result.sink.fields = BuildExecutionContractFields(result.sink.reason);
+	return FinalizeExecutionContract(std::move(result));
+}
+
+bool PhysicalCTE::BindExecutionSink(ExecutionContext &context, DataChunk &input, OperatorSinkInput &sink_input,
+                                    const ExecutionRegionSinkInfo &sink_info, ExecutionSinkBinding &binding) const {
+	(void)context;
+	(void)input;
+	binding = ExecutionSinkBinding();
+	binding.kind = sink_info.kind;
+	if (sink_info.kind != ExecutionRegionSinkKind::MATERIALIZATION ||
+	    sink_info.native_sink_contract.status != ExecutionRegionStateContractStatus::READY) {
+		binding.blocker = sink_info.native_sink_contract.blocker.empty() ? "materialization-append-sink-not-ready"
+		                                                                 : sink_info.native_sink_contract.blocker;
+		return false;
+	}
+	auto &state = sink_input.local_state.Cast<CTELocalState>();
+	binding.ready = true;
+	binding.append_sink.ready = true;
+	binding.append_sink.state = make_shared_ptr<CTEExecutionRegionSinkState>(state);
+	binding.append_sink.blocker = "none";
+	binding.blocker = "none";
+	return true;
 }
 
 SinkCombineResultType PhysicalCTE::Combine(ExecutionContext &context, OperatorSinkCombineInput &input) const {

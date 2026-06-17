@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 #
-# Trace focused DuckDB JIT SQL coverage cases.
+# Trace focused DuckDB compiled-region SQL coverage cases.
 #
 # TPC-H traces explain workload behavior. This script explains whether the
-# focused SQL coverage used by the JIT tests still flows through the expected
-# region, scalar-IR, fallback, event, counter, and runtime paths.
+# focused SQL coverage used by compiled-region tests still flows through the
+# expected region, scalar-IR, boundary, event, counter, and runtime paths.
 
 import argparse
 import csv
@@ -39,9 +39,14 @@ FLOW_STEP_SUMMARY_FIELDS = (
     "status",
     "execution_mode",
     "region_execution_form",
+    "execution_body",
     "policy_decision",
     "candidate_shape",
-    "candidate_scope",
+    "candidate_signature_context",
+    "candidate_signature_shape",
+    "candidate_signature_feature_shape",
+    "candidate_signature_context_feature_shape",
+    "candidate_contract_shape",
     "candidate_contract_abi",
     "event_count",
     "kernel_count",
@@ -53,14 +58,11 @@ FLOW_STEP_SUMMARY_FIELDS = (
     "output_rows",
     "invocations",
     "runtime_time_us",
-    "source_native_output_rows",
-    "source_native_invocations",
-    "source_native_runtime_time_us",
+    "source_contract_output_rows",
+    "source_contract_invocations",
+    "source_contract_runtime_time_us",
     "generated_body_runtime_time_us",
-    "fallback_input_rows",
-    "fallback_output_rows",
-    "fallback_invocations",
-    "fallback_runtime_time_us",
+    "generated_stage_runtime_breakdown",
     "decision_time_us",
     "compile_time_us",
     "code_size",
@@ -80,6 +82,10 @@ CASES = (
         "expect_runtime": True,
         "settings": "",
         "sql": """
+SELECT x + 10 AS y
+FROM (VALUES (1::BIGINT), (2::BIGINT), (3::BIGINT), (NULL::BIGINT), (5::BIGINT)) AS t(x)
+WHERE x > 2;
+
 CREATE TABLE jit_native_region AS
 SELECT x + 10 AS y
 FROM (VALUES (1::BIGINT), (2::BIGINT), (3::BIGINT), (NULL::BIGINT), (5::BIGINT)) AS t(x)
@@ -92,39 +98,13 @@ SELECT
 """,
     },
     {
-        "case": "region_unsupported_join_fallback",
+        "case": "region_unsupported_unnest_boundary",
         "expect_region_compiled": False,
         "expect_region_unsupported": True,
         "expect_runtime": False,
         "settings": "",
         "sql": """
-CREATE TABLE jit_left AS
-SELECT *
-FROM (VALUES (1), (2), (3)) AS t(i);
-CREATE TABLE jit_right AS
-SELECT *
-FROM (VALUES (1, 'one'), (3, 'three')) AS t(i, name);
-
-CREATE TABLE jit_join_result AS
-SELECT l.i, r.name
-FROM jit_left l
-JOIN jit_right r USING (i);
-""",
-        "validation": """
-SELECT
-    (SELECT count(*) FROM jit_join_result) = 2
-    AND (SELECT count(*) FROM jit_join_result WHERE i = 1 AND name = 'one') = 1
-    AND (SELECT count(*) FROM jit_join_result WHERE i = 3 AND name = 'three') = 1 AS validation_pass
-""",
-    },
-    {
-        "case": "region_resume_state_fallback",
-        "expect_region_compiled": False,
-        "expect_region_unsupported": True,
-        "expect_runtime": False,
-        "settings": "",
-        "sql": """
-CREATE TABLE jit_resume_state_trace AS
+CREATE TABLE jit_unsupported_unnest_trace AS
 SELECT count(*) AS c
 FROM (
   SELECT i + 1 AS j, [1,2,3,4,5,6,7,8,9,10] AS xs
@@ -133,7 +113,7 @@ FROM (
 ) t, UNNEST(xs) u(x);
 """,
         "validation": """
-SELECT (SELECT c FROM jit_resume_state_trace) = 40950 AS validation_pass
+SELECT (SELECT c FROM jit_unsupported_unnest_trace) = 40950 AS validation_pass
 """,
     },
     {
@@ -230,6 +210,29 @@ CREATE TABLE jit_matrix_region_i64 AS
 SELECT x + 10 AS y
 FROM (VALUES (1::BIGINT), (2::BIGINT), (3::BIGINT), (NULL::BIGINT), (5::BIGINT)) AS t(x)
 WHERE x > 2;
+
+SELECT x + 10 AS y
+FROM (VALUES (1::BIGINT), (2::BIGINT), (3::BIGINT), (NULL::BIGINT), (5::BIGINT)) AS t(x)
+WHERE x > 2;
+
+SELECT x + 5 AS y
+FROM (VALUES (1::BIGINT), (2::BIGINT), (NULL::BIGINT), (4::BIGINT)) AS t(x);
+
+SELECT x - 5 AS sub_value, x * 3 AS mul_value, constant_or_null(42::BIGINT, x) AS cor_value
+FROM (VALUES (1::BIGINT), (2::BIGINT), (3::BIGINT), (NULL::BIGINT), (5::BIGINT)) AS t(x)
+WHERE x > 2;
+
+SELECT CAST(x AS SMALLINT) AS y
+FROM (VALUES (1::INTEGER), (127::INTEGER), (-129::INTEGER), (NULL::INTEGER)) AS t(x)
+WHERE x IS NOT NULL;
+
+SELECT COALESCE(j, 0) AS y
+FROM jit_matrix_equiv
+WHERE i IS NOT NULL;
+
+SELECT a + b AS add_ab, a * b AS mul_ab
+FROM jit_matrix_refs
+WHERE a < b;
 
 CREATE TABLE jit_matrix_region_i64_sub AS
 SELECT x - 5 AS y
@@ -418,11 +421,10 @@ SQL_TEST_COVERAGE = {
     "test/sql/jit/test_jit_framework.test": {
         "trace_cases": (
             "region_native_filter_projection",
-            "region_unsupported_join_fallback",
-            "region_resume_state_fallback",
+            "region_unsupported_unnest_boundary",
             "sql_equivalence_matrix",
         ),
-        "coverage_area": "settings, backend registration, scalar IR, events, counters, runtime trace, and fallback diagnostics",
+        "coverage_area": "settings, backend registration, scalar IR, events, counters, runtime trace, and boundary trace",
     },
 }
 
@@ -441,9 +443,9 @@ def classify_api_test_case(test_name: str) -> tuple[str, tuple, str]:
     if "auto policy" in lower_name or "auto-rejected" in lower_name:
         trace_cases.add("region_native_filter_projection")
         areas.append("policy admission and skip evidence")
-    if "fallback" in lower_name or "false-returning" in lower_name or "unsupported" in lower_name:
-        trace_cases.add("region_unsupported_join_fallback")
-        areas.append("fallback/error honesty")
+    if "boundary" in lower_name or "false-returning" in lower_name or "unsupported" in lower_name:
+        trace_cases.add("region_unsupported_unnest_boundary")
+        areas.append("boundary/error honesty")
     if trace_cases:
         route = "api_unit_test_suite;focused_sql_trace"
     else:
@@ -501,6 +503,14 @@ def row_int(row: dict, field: str) -> int:
     return int(value)
 
 
+def append_metric_text(current: str, value: str) -> str:
+    if not value:
+        return current
+    if current:
+        return f"{current};{value}"
+    return value
+
+
 def truncate_text(value: str, limit: int = 120) -> str:
     value = str(value)
     if len(value) <= limit:
@@ -516,9 +526,14 @@ def flow_key(case_name: str, row: dict, phase: str, status: str, policy_decision
         status or "none",
         row.get("execution_mode", "") or "none",
         row.get("region_execution_form", "") or "none",
+        row.get("execution_body", "") or "none",
         policy_decision or "none",
         row.get("candidate_shape", "") or "none",
-        row.get("candidate_scope", "") or "none",
+        row.get("candidate_signature_context", "") or "none",
+        row.get("candidate_signature_shape", "") or "none",
+        row.get("candidate_signature_feature_shape", "") or "none",
+        row.get("candidate_signature_context_feature_shape", "") or "none",
+        row.get("candidate_contract_shape", "") or "none",
         row.get("candidate_contract_abi", "") or "none",
     )
 
@@ -531,10 +546,15 @@ def new_flow_entry(key: tuple) -> dict:
         "status": key[3],
         "execution_mode": key[4],
         "region_execution_form": key[5],
-        "policy_decision": key[6],
-        "candidate_shape": key[7],
-        "candidate_scope": key[8],
-        "candidate_contract_abi": key[9],
+        "execution_body": key[6],
+        "policy_decision": key[7],
+        "candidate_shape": key[8],
+        "candidate_signature_context": key[9],
+        "candidate_signature_shape": key[10],
+        "candidate_signature_feature_shape": key[11],
+        "candidate_signature_context_feature_shape": key[12],
+        "candidate_contract_shape": key[13],
+        "candidate_contract_abi": key[14],
         "event_count": 0,
         "kernel_count": 0,
         "reached_kernels": 0,
@@ -545,14 +565,11 @@ def new_flow_entry(key: tuple) -> dict:
         "output_rows": 0,
         "invocations": 0,
         "runtime_time_us": 0,
-        "source_native_output_rows": 0,
-        "source_native_invocations": 0,
-        "source_native_runtime_time_us": 0,
+        "source_contract_output_rows": 0,
+        "source_contract_invocations": 0,
+        "source_contract_runtime_time_us": 0,
         "generated_body_runtime_time_us": 0,
-        "fallback_input_rows": 0,
-        "fallback_output_rows": 0,
-        "fallback_invocations": 0,
-        "fallback_runtime_time_us": 0,
+        "generated_stage_runtime_breakdown": "",
         "decision_time_us": 0,
         "compile_time_us": 0,
         "code_size": 0,
@@ -584,10 +601,14 @@ def collect_flow_step_summary(out_dir: Path, rows: list) -> list:
                 entry["output_rows"] += row_int(event, "output_rows")
                 entry["invocations"] += row_int(event, "invocation_count")
                 entry["runtime_time_us"] += row_int(event, "runtime_time_us")
-                entry["source_native_output_rows"] += row_int(event, "source_native_output_rows")
-                entry["source_native_invocations"] += row_int(event, "source_native_invocation_count")
-                entry["source_native_runtime_time_us"] += row_int(event, "source_native_runtime_time_us")
+                entry["source_contract_output_rows"] += row_int(event, "source_contract_output_rows")
+                entry["source_contract_invocations"] += row_int(event, "source_contract_invocation_count")
+                entry["source_contract_runtime_time_us"] += row_int(event, "source_contract_runtime_time_us")
                 entry["generated_body_runtime_time_us"] += row_int(event, "generated_body_runtime_time_us")
+                entry["generated_stage_runtime_breakdown"] = append_metric_text(
+                    entry["generated_stage_runtime_breakdown"],
+                    event.get("generated_stage_runtime_breakdown", ""),
+                )
                 entry["decision_time_us"] += row_int(event, "decision_time_us")
                 entry["compile_time_us"] += row_int(event, "compile_time_us")
                 entry["code_size"] += row_int(event, "code_size")
@@ -624,14 +645,14 @@ def collect_flow_step_summary(out_dir: Path, rows: list) -> list:
                 entry["output_rows"] += row_int(counter, "output_rows")
                 entry["invocations"] += invocation_count
                 entry["runtime_time_us"] += row_int(counter, "runtime_time_us")
-                entry["source_native_output_rows"] += row_int(counter, "source_native_output_rows")
-                entry["source_native_invocations"] += row_int(counter, "source_native_invocation_count")
-                entry["source_native_runtime_time_us"] += row_int(counter, "source_native_runtime_time_us")
+                entry["source_contract_output_rows"] += row_int(counter, "source_contract_output_rows")
+                entry["source_contract_invocations"] += row_int(counter, "source_contract_invocation_count")
+                entry["source_contract_runtime_time_us"] += row_int(counter, "source_contract_runtime_time_us")
                 entry["generated_body_runtime_time_us"] += row_int(counter, "generated_body_runtime_time_us")
-                entry["fallback_input_rows"] += row_int(counter, "fallback_input_rows")
-                entry["fallback_output_rows"] += row_int(counter, "fallback_output_rows")
-                entry["fallback_invocations"] += row_int(counter, "fallback_invocation_count")
-                entry["fallback_runtime_time_us"] += row_int(counter, "fallback_runtime_time_us")
+                entry["generated_stage_runtime_breakdown"] = append_metric_text(
+                    entry["generated_stage_runtime_breakdown"],
+                    counter.get("generated_stage_runtime_breakdown", ""),
+                )
                 entry["compile_time_us"] += row_int(counter, "compile_time_us")
                 entry["code_size"] += row_int(counter, "code_size")
                 if not entry["example_reason"]:
@@ -646,8 +667,13 @@ def collect_flow_step_summary(out_dir: Path, rows: list) -> list:
             entry["status"],
             entry["execution_mode"],
             entry["region_execution_form"],
+            entry["execution_body"],
             entry["candidate_shape"],
-            entry["candidate_scope"],
+            entry["candidate_signature_context"],
+            entry["candidate_signature_shape"],
+            entry["candidate_signature_feature_shape"],
+            entry["candidate_signature_context_feature_shape"],
+            entry["candidate_contract_shape"],
             entry["candidate_contract_abi"],
         )
     )
@@ -676,9 +702,6 @@ SELECT
         WHERE phase='compile' AND execution_mode='unsupported'
     ) AS unsupported_compile_events,
     count(*) FILTER (
-        WHERE phase='compile' AND execution_mode='executor_fallback'
-    ) AS executor_fallback_compile_events,
-    count(*) FILTER (
         WHERE phase='compile' AND execution_mode='native' AND code_size=0
     ) AS zero_code_native_compile_events,
     count(*) FILTER (
@@ -696,15 +719,15 @@ SELECT
     coalesce(sum(runtime_time_us) FILTER (
         WHERE phase='runtime'
     ), 0) AS runtime_time_us,
-    coalesce(sum(source_native_output_rows) FILTER (
+    coalesce(sum(source_contract_output_rows) FILTER (
         WHERE phase='runtime'
-    ), 0) AS source_native_output_rows,
-    coalesce(sum(source_native_invocation_count) FILTER (
+    ), 0) AS source_contract_output_rows,
+    coalesce(sum(source_contract_invocation_count) FILTER (
         WHERE phase='runtime'
-    ), 0) AS source_native_invocations,
-    coalesce(sum(source_native_runtime_time_us) FILTER (
+    ), 0) AS source_contract_invocations,
+    coalesce(sum(source_contract_runtime_time_us) FILTER (
         WHERE phase='runtime'
-    ), 0) AS source_native_runtime_time_us,
+    ), 0) AS source_contract_runtime_time_us,
     coalesce(sum(generated_body_runtime_time_us) FILTER (
         WHERE phase='runtime'
     ), 0) AS generated_body_runtime_time_us,
@@ -726,18 +749,20 @@ SELECT
     status,
     execution_mode,
     region_execution_form,
+    execution_body,
     selected_source_execution,
     policy_decision,
     candidate_id,
     candidate_shape,
     candidate_pipeline_shape,
     candidate_context_pipeline_shape,
-    candidate_scope,
+    candidate_signature_context,
+    candidate_signature_shape,
+    candidate_signature_feature_shape,
+    candidate_signature_context_feature_shape,
+    candidate_contract_shape,
+    candidate_signature_ir,
     candidate_contract_abi,
-    candidate_contract_first_node,
-    candidate_contract_node_count,
-    candidate_contract_start_operator_index,
-    candidate_contract_end_operator_index,
     candidate_owns_source,
     candidate_owns_transform,
     candidate_owns_sink,
@@ -751,12 +776,10 @@ SELECT
     candidate_source_kind,
     candidate_source_execution,
     candidate_sink_kind,
-    candidate_has_table_scan_source,
-    candidate_has_stateful_source,
     candidate_expression_traits_known,
     candidate_source_filter_count,
     candidate_source_filter_expression_count,
-    candidate_source_filter_fallback_count,
+    candidate_source_filter_missing_count,
     candidate_source_comparison_filter_count,
     candidate_source_integer_comparison_filter_count,
     candidate_source_non_integer_comparison_filter_count,
@@ -775,20 +798,15 @@ SELECT
     candidate_integer_comparison_filter_count,
     candidate_non_integer_comparison_filter_count,
     candidate_conjunction_filter_count,
-    candidate_expression_fallback_count,
-    candidate_operator_fallback_count,
-    candidate_scan_boundary_count,
-    candidate_sink_boundary_count,
+    candidate_expression_missing_count,
+    candidate_operator_missing_count,
     candidate_source_ownership,
     candidate_state_scan_ownership,
     candidate_transform_ownership,
     candidate_sink_ownership,
-    candidate_executor_boundary_free,
-    candidate_native_fusion_ready,
     candidate_generated_operator_count,
     candidate_source_boundary_count,
-    candidate_executor_boundary_count,
-    candidate_missing_protocol_count,
+    candidate_missing_contract_count,
     candidate_required_capabilities,
     candidate_fusion_blockers,
     admission_shape_key,
@@ -806,18 +824,10 @@ SELECT
     invocation_count,
     runtime_time_us,
     runtime_result,
-    source_native_output_rows,
-    source_native_invocation_count,
-    source_native_runtime_time_us,
+    source_contract_output_rows,
+    source_contract_invocation_count,
+    source_contract_runtime_time_us,
     generated_body_runtime_time_us,
-    generated_body_flat_input_rows,
-    generated_body_flat_invocation_count,
-    generated_body_shared_selection_input_rows,
-    generated_body_shared_selection_invocation_count,
-    generated_body_selection_input_rows,
-    generated_body_selection_invocation_count,
-    native_operator_loop_input_rows,
-    native_operator_loop_invocation_count,
     ir_lowering_time_us,
     backend_analysis_time_us,
     admission_time_us,
@@ -898,12 +908,12 @@ SELECT * FROM duckdb_jit_clear_events();
 {case["sql"]}
 {copy_statement(EVENT_SUMMARY_SELECT, event_summary_path)}
 {copy_statement(EVENTS_SELECT, events_path)}
-{copy_statement("SELECT * FROM duckdb_jit_counters() ORDER BY backend_name, target, status, execution_mode, region_execution_form, policy_decision", counters_path)}
+{copy_statement("SELECT * FROM duckdb_jit_counters() ORDER BY backend_name, target, status, execution_mode, region_execution_form, execution_body, policy_decision", counters_path)}
 {copy_statement("SELECT * FROM duckdb_jit_kernel_counters() ORDER BY kernel_id", kernel_counters_path)}
 SET enable_jit=false;
 {copy_statement(case["validation"], validation_path)}
 """,
-        f"JIT SQL trace case {case_name}",
+        f"Compiled-region SQL trace case {case_name}",
     )
     event_summary = read_single_csv_row(event_summary_path)
     validation = read_single_csv_row(validation_path)
@@ -982,7 +992,7 @@ def write_manifest(
 
 def parse_args() -> argparse.Namespace:
     root = repo_root()
-    parser = argparse.ArgumentParser(description="Trace focused DuckDB JIT SQL coverage cases")
+    parser = argparse.ArgumentParser(description="Trace focused DuckDB compiled-region SQL coverage cases")
     parser.add_argument("--duckdb", type=Path, default=root / "build" / "release" / "duckdb")
     parser.add_argument("--out-dir", type=Path, default=None)
     parser.add_argument("--backend", default="sljit")

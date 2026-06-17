@@ -30,7 +30,11 @@ bool AggregateFunctionCallbacks::operator==(const AggregateFunctionCallbacks &rh
 	       combine == rhs.combine && finalize == rhs.finalize && cluster_update == rhs.cluster_update &&
 	       window == rhs.window && window_init == rhs.window_init && window_batch == rhs.window_batch &&
 	       bind == rhs.bind && destructor == rhs.destructor && statistics == rhs.statistics &&
-	       serialize == rhs.serialize && deserialize == rhs.deserialize && get_state_type == rhs.get_state_type;
+	       serialize == rhs.serialize && deserialize == rhs.deserialize && get_state_type == rhs.get_state_type &&
+	       primitive_update.kind == rhs.primitive_update.kind && primitive_update.input_type == rhs.primitive_update.input_type &&
+	       primitive_update.state_size == rhs.primitive_update.state_size &&
+	       primitive_update.state_value_offset == rhs.primitive_update.state_value_offset &&
+	       primitive_update.state_is_set_offset == rhs.primitive_update.state_is_set_offset;
 }
 
 bool AggregateFunctionCallbacks::operator!=(const AggregateFunctionCallbacks &rhs) const {

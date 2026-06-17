@@ -95,11 +95,11 @@ public:
 	unique_ptr<GlobalSourceState> GetGlobalSourceState(ClientContext &context) const override;
 	unique_ptr<LocalSourceState> GetLocalSourceState(ExecutionContext &context,
 	                                                 GlobalSourceState &gstate) const override;
-	bool SupportsJitNativeSource(const JitPreparedPipeline &jit_prepared_pipeline) const override;
+	bool SupportsExecutionSourceContract(const ExecutionRegionOpenRequest &open_request) const override;
 	SourceResultType GetDataInternal(ExecutionContext &context, DataChunk &chunk,
 	                                 OperatorSourceInput &input) const override;
-	SourceResultType GetJitNativeSourceDataInternal(ExecutionContext &context, DataChunk &chunk,
-	                                                OperatorSourceInput &input) const override;
+	SourceResultType GetExecutionSourceContractDataInternal(ExecutionContext &context, DataChunk &chunk,
+	                                                        OperatorSourceInput &input) const override;
 
 	ProgressData GetProgress(ClientContext &context, GlobalSourceState &gstate) const override;
 
@@ -122,6 +122,8 @@ public:
 	                          OperatorSinkFinalizeInput &input) const override;
 	SinkFinalizeType FinalizeInternal(Pipeline &pipeline, Event &event, ClientContext &context, GlobalSinkState &gstate,
 	                                  bool check_distinct) const;
+	bool BindExecutionSink(ExecutionContext &context, DataChunk &input, OperatorSinkInput &sink_input,
+	                       const ExecutionRegionSinkInfo &sink_info, ExecutionSinkBinding &binding) const override;
 
 	unique_ptr<LocalSinkState> GetLocalSinkState(ExecutionContext &context) const override;
 	unique_ptr<GlobalSinkState> GetGlobalSinkState(ClientContext &context) const override;
@@ -140,7 +142,8 @@ public:
 
 public:
 	InsertionOrderPreservingMap<string> ParamsToString() const override;
-	JitOperatorDescriptor GetJitOperatorDescriptor() const override;
+	ExecutionContract GetExecutionContract() const override;
+	bool CanUseDistinctSinkContract() const;
 	//! Toggle multi-scan capability on a hash table, which prevents the scan of the aggregate from being destructive
 	//! If this is not toggled the GetData method will destroy the hash table as it is scanning it
 	static void SetMultiScan(GlobalSinkState &state);

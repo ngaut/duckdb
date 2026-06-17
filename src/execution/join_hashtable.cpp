@@ -8,12 +8,14 @@
 #include "duckdb/execution/ht_entry.hpp"
 #include "duckdb/logging/log_manager.hpp"
 #include "duckdb/execution/expression_executor.hpp"
-#include "duckdb/execution/jit/join_runtime.hpp"
+#include "duckdb/execution/execution_hash_join_runtime.hpp"
 #include "duckdb/execution/operator/join/physical_hash_join.hpp"
 #include "duckdb/main/client_context.hpp"
 #include "duckdb/main/settings.hpp"
 #include "duckdb/planner/expression/bound_aggregate_expression.hpp"
 #include "duckdb/storage/buffer_manager.hpp"
+
+#include "execution_region_duckdb_type_adapter.hpp"
 
 namespace duckdb {
 
@@ -350,9 +352,9 @@ inline bool JoinHashTable::UseSalt() const {
 	return this->capacity > USE_SALT_THRESHOLD;
 }
 
-bool JoinHashTable::GetJitNativeHashJoinTableLayout(JitNativeHashJoinTableLayout &layout) const {
-	layout = JitNativeHashJoinTableLayout();
-	layout.join_type = join_type;
+bool JoinHashTable::GetExecutionHashJoinTableLayout(ExecutionHashJoinTableLayout &layout) const {
+	layout = ExecutionHashJoinTableLayout();
+	layout.join_type = ExecutionRegionJoinTypeFromDuckDB(join_type);
 	layout.finalized = finalized;
 	layout.in_memory = finalized && hash_map.get();
 	layout.needs_chain_matcher = needs_chain_matcher;
@@ -372,8 +374,8 @@ bool JoinHashTable::GetJitNativeHashJoinTableLayout(JitNativeHashJoinTableLayout
 	layout.pointer_offset = pointer_offset;
 	layout.found_match_column_present = PropagatesBuildSide(join_type);
 	layout.found_match_column_index = condition_types.size() + build_types.size();
-	layout.hash_column_index = layout.found_match_column_present ? layout.found_match_column_index + 1
-	                                                             : layout.found_match_column_index;
+	layout.hash_column_index =
+	    layout.found_match_column_present ? layout.found_match_column_index + 1 : layout.found_match_column_index;
 	layout.capacity = capacity == DConstants::INVALID_INDEX ? 0 : capacity;
 	layout.bitmask = bitmask == DConstants::INVALID_INDEX ? 0 : bitmask;
 	layout.pointer_mask = ht_entry_t::POINTER_MASK;

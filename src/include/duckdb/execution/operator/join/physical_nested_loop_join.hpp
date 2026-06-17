@@ -33,6 +33,15 @@ public:
 		return true;
 	}
 
+	ExecutionContract GetExecutionContract() const override;
+	ExecutionOperatorReadiness
+	GetExecutionOperatorReadiness(ClientContext &context,
+	                              const ExecutionRegionOperatorInfo &operator_info) const override;
+	ExecutionOperatorBindResult BindExecutionOperator(ExecutionContext &context, DataChunk &input,
+	                                                  GlobalOperatorState &gstate, OperatorState &state_p,
+	                                                  const ExecutionRegionOperatorInfo &operator_info,
+	                                                  ExecutionOperatorBinding &binding) const override;
+
 protected:
 	// CachingOperator Interface
 	OperatorResultType ExecuteInternal(ExecutionContext &context, DataChunk &input, DataChunk &chunk,
@@ -58,6 +67,8 @@ public:
 	unique_ptr<GlobalSinkState> GetGlobalSinkState(ClientContext &context) const override;
 	unique_ptr<LocalSinkState> GetLocalSinkState(ExecutionContext &context) const override;
 	SinkResultType Sink(ExecutionContext &context, DataChunk &chunk, OperatorSinkInput &input) const override;
+	bool BindExecutionSink(ExecutionContext &context, DataChunk &input, OperatorSinkInput &sink_input,
+	                       const ExecutionRegionSinkInfo &sink_info, ExecutionSinkBinding &binding) const override;
 	SinkCombineResultType Combine(ExecutionContext &context, OperatorSinkCombineInput &input) const override;
 	SinkFinalizeType Finalize(Pipeline &pipeline, Event &event, ClientContext &context,
 	                          OperatorSinkFinalizeInput &input) const override;

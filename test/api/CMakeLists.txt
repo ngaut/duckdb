@@ -34,6 +34,12 @@ set(TEST_API_OBJECTS
     test_uuid.cpp
     test_insertion_order_preserving_map.cpp
     test_jit.cpp
+    test_jit_aggregate.cpp
+    test_jit_compiler_contracts.cpp
+    test_jit_join.cpp
+    test_jit_region_contracts.cpp
+    test_jit_runtime.cpp
+    test_jit_scalar.cpp
     test_bignum.cpp
     test_threads.cpp
     test_windows_header_compatibility.cpp

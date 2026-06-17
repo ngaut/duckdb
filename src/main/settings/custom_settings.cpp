@@ -18,7 +18,7 @@
 #include "duckdb/common/string_util.hpp"
 #include "duckdb/common/file_system.hpp"
 #include "duckdb/common/operator/double_cast_operator.hpp"
-#include "duckdb/execution/jit/manager.hpp"
+#include "duckdb/execution/execution_region_manager.hpp"
 #include "duckdb/main/attached_database.hpp"
 #include "duckdb/main/client_context.hpp"
 #include "duckdb/main/client_data.hpp"
@@ -1091,7 +1091,7 @@ void InitialColumnSegmentSizeSetting::OnSet(SettingCallbackInfo &, Value &input)
 }
 
 //===----------------------------------------------------------------------===//
-// JIT Backend
+// Execution Region Backend
 //===----------------------------------------------------------------------===//
 void JitBackendSetting::OnSet(SettingCallbackInfo &info, Value &input) {
 	auto requested = StringUtil::Lower(input.ToString());
@@ -1110,20 +1110,20 @@ void JitBackendSetting::OnSet(SettingCallbackInfo &info, Value &input) {
 		return;
 	}
 
-	for (auto &backend : JitManager::Get(*db).GetBackends()) {
+	for (auto &backend : ExecutionRegionManager::Get(*db).GetBackends()) {
 		if (StringUtil::Lower(backend.name) != requested) {
 			continue;
 		}
 		if (!backend.available) {
-			throw InvalidInputException("JIT backend \"%s\" is registered but not available", requested);
+			throw InvalidInputException("Execution region backend \"%s\" is registered but not available", requested);
 		}
 		return;
 	}
-	throw InvalidInputException("JIT backend \"%s\" is not registered", requested);
+	throw InvalidInputException("Execution region backend \"%s\" is not registered", requested);
 }
 
 //===----------------------------------------------------------------------===//
-// JIT Policy
+// Execution Region Policy
 //===----------------------------------------------------------------------===//
 void JitPolicySetting::OnSet(SettingCallbackInfo &info, Value &input) {
 	auto policy = StringUtil::Lower(input.ToString());
@@ -1131,11 +1131,11 @@ void JitPolicySetting::OnSet(SettingCallbackInfo &info, Value &input) {
 		input = Value(policy);
 		return;
 	}
-	throw InvalidInputException("JIT policy must be one of auto, force, or off");
+	throw InvalidInputException("Execution region policy must be one of auto, force, or off");
 }
 
 //===----------------------------------------------------------------------===//
-// JIT Event Log Size
+// Execution Region Event Log Size
 //===----------------------------------------------------------------------===//
 void JitEventLogSizeSetting::OnSet(SettingCallbackInfo &info, Value &input) {
 	optional_ptr<DatabaseInstance> db;
@@ -1147,7 +1147,7 @@ void JitEventLogSizeSetting::OnSet(SettingCallbackInfo &info, Value &input) {
 	if (!db) {
 		return;
 	}
-	JitManager::Get(*db).ApplyEventRetentionLimit(NumericCast<idx_t>(input.GetValue<uint64_t>()));
+	ExecutionRegionManager::Get(*db).ApplyEventRetentionLimit(NumericCast<idx_t>(input.GetValue<uint64_t>()));
 }
 
 //===----------------------------------------------------------------------===//

@@ -1,6 +1,7 @@
 #include "duckdb/execution/operator/join/perfect_hash_join_executor.hpp"
 
 #include "duckdb/common/operator/subtract.hpp"
+#include "duckdb/execution/execution_hash_join_runtime.hpp"
 #include "duckdb/execution/operator/join/physical_hash_join.hpp"
 
 namespace duckdb {
@@ -146,6 +147,73 @@ bool PerfectHashJoinExecutor::BuildPerfectHashTable() {
 
 	// Now fill columns with build data
 	return FullScanHashTable();
+}
+
+static bool PerfectHashJoinValueBits(const Value &value, PhysicalType physical_type, uint64_t &bits) {
+	if (value.IsNull()) {
+		return false;
+	}
+	switch (physical_type) {
+	case PhysicalType::BOOL:
+		bits = value.GetValueUnsafe<bool>() ? 1 : 0;
+		return true;
+	case PhysicalType::INT8:
+		bits = static_cast<uint64_t>(value.GetValueUnsafe<int8_t>());
+		return true;
+	case PhysicalType::INT16:
+		bits = static_cast<uint64_t>(value.GetValueUnsafe<int16_t>());
+		return true;
+	case PhysicalType::INT32:
+		bits = static_cast<uint64_t>(value.GetValueUnsafe<int32_t>());
+		return true;
+	case PhysicalType::INT64:
+		bits = static_cast<uint64_t>(value.GetValueUnsafe<int64_t>());
+		return true;
+	case PhysicalType::UINT8:
+		bits = static_cast<uint64_t>(value.GetValueUnsafe<uint8_t>());
+		return true;
+	case PhysicalType::UINT16:
+		bits = static_cast<uint64_t>(value.GetValueUnsafe<uint16_t>());
+		return true;
+	case PhysicalType::UINT32:
+		bits = static_cast<uint64_t>(value.GetValueUnsafe<uint32_t>());
+		return true;
+	case PhysicalType::UINT64:
+		bits = value.GetValueUnsafe<uint64_t>();
+		return true;
+	default:
+		return false;
+	}
+}
+
+bool PerfectHashJoinExecutor::GetExecutionPerfectHashJoinTableLayout(
+    ExecutionPerfectHashJoinTableLayout &layout) const {
+	layout = ExecutionPerfectHashJoinTableLayout();
+	layout.key_type = GetKeyType();
+	layout.key_physical_type = layout.key_type.InternalType();
+	if (perfect_join_statistics.build_min.IsNull() || perfect_join_statistics.build_max.IsNull()) {
+		layout.blocker = "perfect-hash-join-native-layout-missing-bounds";
+		return false;
+	}
+	if (!PerfectHashJoinValueBits(perfect_join_statistics.build_min, layout.key_physical_type, layout.build_min) ||
+	    !PerfectHashJoinValueBits(perfect_join_statistics.build_max, layout.key_physical_type, layout.build_max)) {
+		layout.blocker = "perfect-hash-join-native-layout-unsupported-key-width";
+		return false;
+	}
+	layout.is_build_dense = perfect_join_statistics.is_build_dense;
+	layout.build_range = perfect_join_statistics.build_range;
+	layout.build_capacity = perfect_join_statistics.build_range + 1;
+	layout.build_validity = bitmap_build_idx.GetData();
+	layout.rhs_output_column_count = perfect_hash_table.size();
+	layout.rhs_output_types = join.rhs_output_columns.col_types;
+	layout.rhs_dictionary_buffers = perfect_hash_table;
+	if (layout.rhs_output_column_count != layout.rhs_output_types.size()) {
+		layout.blocker = "perfect-hash-join-native-layout-rhs-shape-mismatch";
+		return false;
+	}
+	layout.ready = true;
+	layout.blocker = "none";
+	return true;
 }
 
 bool PerfectHashJoinExecutor::FullScanHashTable() {

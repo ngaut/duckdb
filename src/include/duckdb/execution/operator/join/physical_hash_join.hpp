@@ -73,16 +73,20 @@ public:
 
 public:
 	InsertionOrderPreservingMap<string> ParamsToString() const override;
-	JitOperatorDescriptor GetJitOperatorDescriptor() const override;
+	ExecutionContract GetExecutionContract() const override;
 
 public:
 	// Operator Interface
 	unique_ptr<OperatorState> GetOperatorState(ExecutionContext &context) const override;
-	bool BindJitNativeOperator(ExecutionContext &context, DataChunk &input, GlobalOperatorState &gstate,
-	                           OperatorState &state, const JitRegionOperatorInfo &operator_info,
-	                           JitNativeOperatorBinding &binding) const override;
-	bool BindJitNativeSink(ExecutionContext &context, DataChunk &input, OperatorSinkInput &sink_input,
-	                       const JitRegionSinkInfo &sink_info, JitNativeSinkBinding &binding) const override;
+	ExecutionOperatorReadiness
+	GetExecutionOperatorReadiness(ClientContext &context,
+	                              const ExecutionRegionOperatorInfo &operator_info) const override;
+	ExecutionOperatorBindResult BindExecutionOperator(ExecutionContext &context, DataChunk &input,
+	                                                  GlobalOperatorState &gstate, OperatorState &state,
+	                                                  const ExecutionRegionOperatorInfo &operator_info,
+	                                                  ExecutionOperatorBinding &binding) const override;
+	bool BindExecutionSink(ExecutionContext &context, DataChunk &input, OperatorSinkInput &sink_input,
+	                       const ExecutionRegionSinkInfo &sink_info, ExecutionSinkBinding &binding) const override;
 
 	bool ParallelOperator() const override {
 		return true;
@@ -97,11 +101,11 @@ protected:
 	unique_ptr<GlobalSourceState> GetGlobalSourceState(ClientContext &context) const override;
 	unique_ptr<LocalSourceState> GetLocalSourceState(ExecutionContext &context,
 	                                                 GlobalSourceState &gstate) const override;
-	bool SupportsJitNativeSource(const JitPreparedPipeline &jit_prepared_pipeline) const override;
+	bool SupportsExecutionSourceContract(const ExecutionRegionOpenRequest &open_request) const override;
 	SourceResultType GetDataInternal(ExecutionContext &context, DataChunk &chunk,
 	                                 OperatorSourceInput &input) const override;
-	SourceResultType GetJitNativeSourceDataInternal(ExecutionContext &context, DataChunk &chunk,
-	                                                OperatorSourceInput &input) const override;
+	SourceResultType GetExecutionSourceContractDataInternal(ExecutionContext &context, DataChunk &chunk,
+	                                                        OperatorSourceInput &input) const override;
 
 	ProgressData GetProgress(ClientContext &context, GlobalSourceState &gstate) const override;
 

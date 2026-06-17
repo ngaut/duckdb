@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 #
-# Shared manifest helpers for DuckDB JIT trace artifacts.
+# Shared manifest helpers for DuckDB compiled-region trace artifacts.
 
 import csv
 import datetime

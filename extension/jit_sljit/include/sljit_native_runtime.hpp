@@ -10,7 +10,7 @@
 
 #include "sljit_native_types.hpp"
 
-#include "duckdb/execution/jit/runtime.hpp"
+#include "duckdb/common/types/data_chunk.hpp"
 
 namespace duckdb {
 

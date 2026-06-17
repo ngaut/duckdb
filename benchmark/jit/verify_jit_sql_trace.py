@@ -13,25 +13,25 @@ from trace_manifest import verify_trace_manifest
 TEST_CASE_RE = re.compile(r'TEST_CASE\("([^"]+)",\s*"([^"]*)"\)')
 EXPECTED_CASES = {
     "region_native_filter_projection",
-    "region_unsupported_join_fallback",
-    "region_resume_state_fallback",
+    "region_unsupported_unnest_boundary",
     "sql_equivalence_matrix",
 }
-KNOWN_CANDIDATE_SCOPES = {
-    "full_pipeline",
-}
 KNOWN_REGION_EXECUTION_FORMS = {"none", "fused"}
+COMPILED_EXECUTION_MODES = {"native"}
+KNOWN_EXECUTION_BODIES = {"none", "generated-machine-code", "native-operator-protocol"}
 KNOWN_CANDIDATE_ABIS = {
     "none",
     "full_pipeline",
-    "state_scan",
 }
+
+
 CANDIDATE_TRAIT_REQUIRED_COLUMNS = (
+    "candidate_signature_context",
+    "candidate_signature_shape",
+    "candidate_signature_feature_shape",
+    "candidate_signature_context_feature_shape",
+    "candidate_contract_shape",
     "candidate_contract_abi",
-    "candidate_contract_first_node",
-    "candidate_contract_node_count",
-    "candidate_contract_start_operator_index",
-    "candidate_contract_end_operator_index",
     "candidate_owns_source",
     "candidate_owns_transform",
     "candidate_owns_sink",
@@ -41,11 +41,10 @@ CANDIDATE_TRAIT_REQUIRED_COLUMNS = (
     "candidate_source_kind",
     "candidate_source_execution",
     "candidate_sink_kind",
-    "candidate_has_table_scan_source",
     "candidate_expression_traits_known",
     "candidate_source_filter_count",
     "candidate_source_filter_expression_count",
-    "candidate_source_filter_fallback_count",
+    "candidate_source_filter_missing_count",
     "candidate_source_comparison_filter_count",
     "candidate_source_integer_comparison_filter_count",
     "candidate_source_non_integer_comparison_filter_count",
@@ -71,7 +70,7 @@ MATRIX_REQUIRED_TEXT = (
     "native:int32-to-int16-cast",
     "native:int32-coalesce",
     "native:constant-or-null",
-    "scope=full_pipeline",
+    "contract<abi=full_pipeline",
     "logical=UUID",
     "logical=BLOB",
     "logical=INTERVAL",
@@ -122,27 +121,37 @@ def parse_pipeline_shape(shape: str) -> list:
         parts = segment.split(":", 3)
         if len(parts) != 4:
             continue
-        nodes.append({"role": parts[0], "node_kind": parts[1], "operator_name": parts[2], "boundary": parts[3]})
+        nodes.append({"label": parts[0], "node_kind": parts[1], "operator_name": parts[2], "boundary": parts[3]})
     return nodes
 
 
-def verify_candidate_scope(case_name: str, row: dict) -> None:
-    scope = row.get("candidate_scope", "")
+def verify_candidate_abi(case_name: str, row: dict) -> None:
     abi = row.get("candidate_contract_abi", "")
-    if scope == "":
-        raise AssertionError(f"{case_name}: missing candidate scope in flow row: {row}")
-    if scope not in KNOWN_CANDIDATE_SCOPES:
-        raise AssertionError(f"{case_name}: unknown candidate scope in flow row: {row}")
-    if abi and abi not in KNOWN_CANDIDATE_ABIS:
+    if abi == "":
+        raise AssertionError(f"{case_name}: missing candidate_contract_abi in flow row: {row}")
+    if abi not in KNOWN_CANDIDATE_ABIS:
         raise AssertionError(f"{case_name}: unknown candidate_contract_abi in flow row: {row}")
 
 
-def verify_executable_candidate_scope(case_name: str, row: dict) -> None:
-    verify_candidate_scope(case_name, row)
-    scope = row.get("candidate_scope", "")
+def verify_candidate_signature(case_name: str, row: dict) -> None:
+    for field in (
+        "candidate_signature_context",
+        "candidate_signature_shape",
+        "candidate_signature_feature_shape",
+        "candidate_signature_context_feature_shape",
+        "candidate_contract_shape",
+    ):
+        if row.get(field, "") in ("", "none"):
+            raise AssertionError(f"{case_name}: missing candidate signature field {field}: {row}")
+
+
+def verify_executable_candidate_abi(case_name: str, row: dict) -> None:
+    verify_candidate_signature(case_name, row)
+    verify_candidate_abi(case_name, row)
     abi = row.get("candidate_contract_abi", "")
     execution_mode = row.get("execution_mode", "")
     region_execution_form = row.get("region_execution_form", "")
+    execution_body = row.get("execution_body", "")
     pipeline_shape = row.get("candidate_pipeline_shape", "")
     nodes = parse_pipeline_shape(pipeline_shape)
     has_source = any(node["node_kind"] == "source" for node in nodes)
@@ -151,17 +160,37 @@ def verify_executable_candidate_scope(case_name: str, row: dict) -> None:
         raise AssertionError(f"{case_name}: executable region has unknown execution form: {row}")
     if region_execution_form == "none":
         raise AssertionError(f"{case_name}: executable region did not declare an execution form: {row}")
-    if scope == "full_pipeline":
-        if execution_mode != "native":
-            raise AssertionError(f"{case_name}: full-pipeline executable has invalid execution mode: {row}")
+    if execution_body == "none":
+        raise AssertionError(f"{case_name}: executable region did not declare an execution body: {row}")
+    if abi == "full_pipeline":
+        if execution_mode not in COMPILED_EXECUTION_MODES:
+            raise AssertionError(f"{case_name}: executable region has invalid execution mode: {row}")
         if pipeline_shape and not has_source:
             raise AssertionError(f"{case_name}: full-pipeline executable has no source boundary: {row}")
-        if abi == "full_pipeline" and pipeline_shape and not has_sink:
+        if pipeline_shape and not has_sink:
             raise AssertionError(f"{case_name}: full-pipeline executable has no sink boundary: {row}")
-        if abi == "state_scan" and pipeline_shape and has_sink:
-            raise AssertionError(f"{case_name}: state-scan executable contains sink boundary: {row}")
         return
-    raise AssertionError(f"{case_name}: unsupported executable candidate scope: {row}")
+    raise AssertionError(f"{case_name}: unsupported executable candidate ABI: {row}")
+
+
+def verify_execution_body(case_name: str, row: dict) -> None:
+    body = row.get("execution_body", "")
+    if body not in KNOWN_EXECUTION_BODIES:
+        raise AssertionError(f"{case_name}: unknown execution body: {row}")
+    status = row.get("status", "")
+    phase = row.get("phase", "")
+    mode = row.get("execution_mode", "")
+    code_size = row_int(row, "code_size")
+    if status == "compiled" or phase == "kernel_counter":
+        if code_size > 0 and body != "generated-machine-code":
+            raise AssertionError(f"{case_name}: generated-code row has wrong execution body: {row}")
+        if code_size <= 0 and body != "native-operator-protocol":
+            raise AssertionError(f"{case_name}: zero-code compiled row is not a native operator protocol body: {row}")
+    elif phase == "runtime" or status == "executed":
+        if mode in COMPILED_EXECUTION_MODES and body == "none":
+            raise AssertionError(f"{case_name}: runtime row lost execution body: {row}")
+    elif body != "none":
+        raise AssertionError(f"{case_name}: non-compiled row exposes an execution body: {row}")
 
 
 def verify_summary(trace_dir: Path, rows: list) -> None:
@@ -174,8 +203,6 @@ def verify_summary(trace_dir: Path, rows: list) -> None:
             raise AssertionError(f"summary.csv: validation failed for {case_name}")
         if row_int(row, "event_count") <= 0:
             raise AssertionError(f"summary.csv: no JIT events recorded for {case_name}")
-        if row_int(row, "zero_code_native_compile_events") != 0:
-            raise AssertionError(f"summary.csv: zero-code native compile event for {case_name}")
         if row_int(row, "non_region_events") != 0:
             raise AssertionError(f"summary.csv: non-region JIT target appeared for {case_name}")
         if row_bool(row, "expect_region_compiled") and row_int(row, "compiled_regions") <= 0:
@@ -193,6 +220,15 @@ def verify_summary(trace_dir: Path, rows: list) -> None:
                 f"{row['events_csv']}: event_count mismatch for {case_name}: "
                 f"summary={row['event_count']} actual={len(events)}"
             )
+        zero_code_native_compile_events = sum(
+            1
+            for event in events
+            if event.get("phase") == "compile"
+            and event.get("execution_mode") == "native"
+            and row_int(event, "code_size") == 0
+        )
+        if zero_code_native_compile_events != row_int(row, "zero_code_native_compile_events"):
+            raise AssertionError(f"summary.csv: zero-code native counter mismatch for {case_name}")
         verify_events(case_name, events)
         verify_kernel_counters(case_name, read_csv(trace_dir / row["kernel_counters_csv"]), row)
 
@@ -209,36 +245,41 @@ def verify_events(case_name: str, rows: list) -> None:
         region_execution_form = row.get("region_execution_form", "")
         if row.get("target") == "region" and region_execution_form not in KNOWN_REGION_EXECUTION_FORMS:
             raise AssertionError(f"{case_name}: region event has unknown execution form: {row}")
-        if row.get("status") == "compiled" and row.get("execution_mode") == "native":
-            if row_int(row, "code_size") <= 0:
-                raise AssertionError(f"{case_name}: compiled generated event has no code: {row}")
+        verify_execution_body(case_name, row)
+        if row.get("status") == "compiled" and row.get("execution_mode") in COMPILED_EXECUTION_MODES:
             if row.get("ir", "") == "":
                 raise AssertionError(f"{case_name}: compiled generated event has no IR: {row}")
             if row.get("target") == "region" and region_execution_form == "none":
                 raise AssertionError(f"{case_name}: compiled region event did not declare execution form: {row}")
+            if row.get("target") == "region":
+                verify_candidate_signature(case_name, row)
         if row.get("target") == "region" and row.get("status") in ("compiled", "skipped", "unsupported"):
-            if row.get("candidate_pipeline_shape", "") == "":
-                raise AssertionError(f"{case_name}: region event missing pipeline shape: {row}")
-            if row.get("candidate_context_pipeline_shape", "") == "":
-                raise AssertionError(f"{case_name}: region event missing context pipeline shape: {row}")
-            for field in CANDIDATE_TRAIT_REQUIRED_COLUMNS:
-                if field not in row:
-                    raise AssertionError(f"{case_name}: region event missing candidate trait column {field}: {row}")
-            if row.get("status") == "compiled":
-                verify_executable_candidate_scope(case_name, row)
-            elif row.get("status") in ("skipped", "unsupported"):
-                verify_candidate_scope(case_name, row)
+            has_candidate = row.get("candidate_shape", "") not in ("", "none")
+            if row.get("status") == "compiled" and not has_candidate:
+                raise AssertionError(f"{case_name}: compiled region event missing candidate: {row}")
+            if has_candidate:
+                if row.get("candidate_pipeline_shape", "") == "":
+                    raise AssertionError(f"{case_name}: region event missing pipeline shape: {row}")
+                if row.get("candidate_context_pipeline_shape", "") == "":
+                    raise AssertionError(f"{case_name}: region event missing context pipeline shape: {row}")
+                for field in CANDIDATE_TRAIT_REQUIRED_COLUMNS:
+                    if field not in row:
+                        raise AssertionError(f"{case_name}: region event missing candidate trait column {field}: {row}")
+                if row.get("status") == "compiled":
+                    verify_executable_candidate_abi(case_name, row)
+                elif row.get("status") in ("skipped", "unsupported"):
+                    verify_candidate_abi(case_name, row)
     if event_ids != sorted(event_ids) or len(event_ids) != len(set(event_ids)):
         raise AssertionError(f"{case_name}: event IDs are not monotonic and unique")
-    if case_name == "region_resume_state_fallback":
-        verify_resume_state_events(rows)
+    if case_name == "region_unsupported_unnest_boundary":
+        verify_unsupported_unnest_boundary_events(rows)
     if case_name == "sql_equivalence_matrix":
         verify_matrix_events(rows)
 
 
-def verify_resume_state_events(rows: list) -> None:
+def verify_unsupported_unnest_boundary_events(rows: list) -> None:
     has_source_boundary_unsupported = False
-    has_unnest_fallback = False
+    has_unnest_boundary = False
     for row in rows:
         if (
             row.get("phase") == "decision"
@@ -246,9 +287,8 @@ def verify_resume_state_events(rows: list) -> None:
             and row.get("status") == "unsupported"
             and row.get("execution_mode") == "unsupported"
             and row.get("region_execution_form") == "none"
-            and row.get("candidate_scope") == "full_pipeline"
-            and row.get("candidate_shape") == "filter"
-            and "source-fusion-gap:requires-native-source" in row.get("reason", "")
+            and row.get("candidate_contract_abi") == "full_pipeline"
+            and "source-contract-blocker:requires-source-contract" in row.get("reason", "")
             and "table-function-source-boundary" in row.get("reason", "")
         ):
             has_source_boundary_unsupported = True
@@ -256,19 +296,19 @@ def verify_resume_state_events(rows: list) -> None:
             row.get("phase") == "decision"
             and row.get("target") == "region"
             and row.get("status") == "unsupported"
-            and row.get("candidate_scope") == "full_pipeline"
-            and "UNNEST:fallback" in row.get("reason", "")
-            and "DuckDB physical operator outside generated JIT region" in row.get("reason", "")
+            and row.get("candidate_contract_abi") == "full_pipeline"
+            and "UNNEST:boundary" in row.get("reason", "")
+            and "DuckDB physical operator outside generated execution region" in row.get("reason", "")
         ):
-            has_unnest_fallback = True
+            has_unnest_boundary = True
         if row.get("phase") == "runtime":
-            raise AssertionError(f"region_resume_state_fallback: forbidden runtime JIT event in fallback-only trace: {row}")
+            raise AssertionError(f"region_unsupported_unnest_boundary: forbidden runtime JIT event: {row}")
         if row.get("status") == "compiled":
-            raise AssertionError(f"region_resume_state_fallback: forbidden compiled JIT event in fallback-only trace: {row}")
+            raise AssertionError(f"region_unsupported_unnest_boundary: forbidden compiled JIT event: {row}")
     if not has_source_boundary_unsupported:
-        raise AssertionError("region_resume_state_fallback: missing unsupported source-boundary native-source evidence")
-    if not has_unnest_fallback:
-        raise AssertionError("region_resume_state_fallback: missing UNNEST executor-fallback evidence")
+        raise AssertionError("region_unsupported_unnest_boundary: missing unsupported source-boundary source-contract evidence")
+    if not has_unnest_boundary:
+        raise AssertionError("region_unsupported_unnest_boundary: missing UNNEST unsupported-boundary evidence")
 
 
 def verify_matrix_events(rows: list) -> None:
@@ -282,7 +322,7 @@ def verify_matrix_events(rows: list) -> None:
                 "candidate_shape",
                 "candidate_pipeline_shape",
                 "candidate_context_pipeline_shape",
-                "candidate_scope",
+                "candidate_contract_abi",
                 "reason",
                 "ir",
             )
@@ -297,30 +337,33 @@ def verify_matrix_events(rows: list) -> None:
         for row in rows
         if row.get("target") == "region" and row.get("status") == "compiled"
     }
-    for shape in ("projection", "filter-projection"):
+    for shape in ("projection-sink", "filter-projection-sink"):
         if shape not in compiled_region_shapes:
             raise AssertionError(f"sql_equivalence_matrix: missing compiled region shape: {shape}")
-    has_skipped_sink_boundary = any(
+    has_unsupported_ctas_sink_boundary = any(
         row.get("target") == "region"
-        and row.get("status") == "skipped"
+        and row.get("status") == "unsupported"
         and row.get("candidate_shape") == "filter-projection-sink"
         and row.get("region_execution_form") == "none"
-        and "requires=fused" in row.get("reason", "")
+        and "CREATE_TABLE_AS" in row.get("reason", "")
+        and "missing-contract" in row.get("reason", "")
         for row in rows
     )
-    if not has_skipped_sink_boundary:
-        raise AssertionError("sql_equivalence_matrix: missing skipped non-fused filter-projection-sink evidence")
+    if not has_unsupported_ctas_sink_boundary:
+        raise AssertionError("sql_equivalence_matrix: missing unsupported CTAS sink-boundary evidence")
 
 
 def verify_kernel_counters(case_name: str, rows: list, summary_row: dict) -> None:
+    for row in rows:
+        verify_execution_body(case_name, {"status": "compiled", **row})
     if row_bool(summary_row, "expect_runtime"):
         if not rows:
             raise AssertionError(f"{case_name}: expected kernel counters")
         if sum(row_int(row, "input_rows") for row in rows) <= 0:
             raise AssertionError(f"{case_name}: expected positive kernel counter input rows")
-    if case_name == "region_resume_state_fallback":
+    if case_name == "region_unsupported_unnest_boundary":
         if rows:
-            raise AssertionError(f"region_resume_state_fallback: fallback-only case should not create kernels: {rows}")
+            raise AssertionError(f"region_unsupported_unnest_boundary: unsupported boundary should not create kernels: {rows}")
 
 
 def flow_rows_for_case(rows: list, case_name: str, include_kernel_counters: bool | None = None) -> list:
@@ -368,6 +411,7 @@ def verify_flow_step_summary(trace_dir: Path, rows: list, summary_rows: list, ma
             raise AssertionError(f"{case_name}: forbidden non-region JIT target in flow row: {row}")
         if target == "region" and region_execution_form not in KNOWN_REGION_EXECUTION_FORMS:
             raise AssertionError(f"{case_name}: flow row has unknown execution form: {row}")
+        verify_execution_body(case_name, row)
 
         if phase == "kernel_counter":
             if row_int(row, "event_count") != 0:
@@ -392,16 +436,12 @@ def verify_flow_step_summary(trace_dir: Path, rows: list, summary_rows: list, ma
             is_executable = (
                 status == "compiled"
                 or phase == "kernel_counter"
-                or (phase == "runtime" and execution_mode == "native")
+                or (phase == "runtime" and execution_mode in COMPILED_EXECUTION_MODES)
             )
             if is_executable:
-                verify_executable_candidate_scope(case_name, row)
+                verify_executable_candidate_abi(case_name, row)
             else:
-                verify_candidate_scope(case_name, row)
-        if target == "region" and status == "compiled" and execution_mode == "native":
-            if row_int(row, "code_size") <= 0:
-                raise AssertionError(f"{case_name}: compiled flow row has no code: {row}")
-
+                verify_candidate_abi(case_name, row)
     for case_name, summary_row in summary_by_case.items():
         event_rows = flow_rows_for_case(rows, case_name, include_kernel_counters=False)
         kernel_rows = flow_rows_for_case(rows, case_name, include_kernel_counters=True)
@@ -426,9 +466,9 @@ def verify_flow_step_summary(trace_dir: Path, rows: list, summary_rows: list, ma
             ("runtime_output_rows", "output_rows"),
             ("runtime_invocations", "invocations"),
             ("runtime_time_us", "runtime_time_us"),
-            ("source_native_output_rows", "source_native_output_rows"),
-            ("source_native_invocations", "source_native_invocations"),
-            ("source_native_runtime_time_us", "source_native_runtime_time_us"),
+            ("source_contract_output_rows", "source_contract_output_rows"),
+            ("source_contract_invocations", "source_contract_invocations"),
+            ("source_contract_runtime_time_us", "source_contract_runtime_time_us"),
             ("generated_body_runtime_time_us", "generated_body_runtime_time_us"),
         ):
             if sum_flow(event_rows, flow_field, phase="runtime") != row_int(summary_row, summary_field):
@@ -452,14 +492,10 @@ def verify_flow_step_summary(trace_dir: Path, rows: list, summary_rows: list, ma
             ("output_rows", "output_rows"),
             ("invocation_count", "invocations"),
             ("runtime_time_us", "runtime_time_us"),
-            ("source_native_output_rows", "source_native_output_rows"),
-            ("source_native_invocation_count", "source_native_invocations"),
-            ("source_native_runtime_time_us", "source_native_runtime_time_us"),
+            ("source_contract_output_rows", "source_contract_output_rows"),
+            ("source_contract_invocation_count", "source_contract_invocations"),
+            ("source_contract_runtime_time_us", "source_contract_runtime_time_us"),
             ("generated_body_runtime_time_us", "generated_body_runtime_time_us"),
-            ("fallback_input_rows", "fallback_input_rows"),
-            ("fallback_output_rows", "fallback_output_rows"),
-            ("fallback_invocation_count", "fallback_invocations"),
-            ("fallback_runtime_time_us", "fallback_runtime_time_us"),
             ("compile_time_us", "compile_time_us"),
             ("code_size", "code_size"),
         ):

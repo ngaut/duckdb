@@ -598,7 +598,7 @@
     },
     {
         "name": "enable_jit",
-        "description": "Attempt to compile supported execution fragments through the registered JIT backend",
+        "description": "Attempt to run supported execution fragments through a registered compiled-region backend",
         "type": "BOOLEAN",
         "default_scope": "local",
         "default_value": "true"
@@ -891,7 +891,7 @@
     },
     {
         "name": "jit_backend",
-        "description": "JIT backend to use, or auto to select the first available backend",
+        "description": "Compiled-region backend to use, or auto to select the first available backend",
         "type": "VARCHAR",
         "default_scope": "local",
         "default_value": "auto",
@@ -901,21 +901,21 @@
     },
     {
         "name": "jit_dump_ir",
-        "description": "Dump JIT lowering diagnostics for compiled fragments",
+        "description": "Expose deterministic compiled-region IR diagnostics through execution-region events",
         "type": "BOOLEAN",
         "default_scope": "local",
         "default_value": "false"
     },
     {
         "name": "jit_trace_decisions",
-        "description": "Record detailed per-candidate JIT decision counters",
+        "description": "Record detailed per-candidate compiled-region decision counters",
         "type": "BOOLEAN",
         "default_scope": "local",
         "default_value": "false"
     },
     {
         "name": "jit_event_log_size",
-        "description": "Maximum number of JIT compile events retained per database instance; zero disables retention",
+        "description": "Maximum number of compiled-region events retained per database instance; zero disables retention",
         "type": "UBIGINT",
         "scope": "global",
         "default_value": "4096",
@@ -925,7 +925,7 @@
     },
     {
         "name": "jit_policy",
-        "description": "JIT execution policy: auto runs only proven native kernels, force runs every supported kernel, off disables JIT",
+        "description": "Compiled-region execution policy: auto runs only proven native regions, force runs every supported region, off disables compiled regions",
         "type": "VARCHAR",
         "default_scope": "local",
         "default_value": "auto",
@@ -935,14 +935,14 @@
     },
     {
         "name": "jit_trace_runtime",
-        "description": "Record bounded runtime trace events for JIT kernels",
+        "description": "Record bounded runtime trace events for compiled-region kernels",
         "type": "BOOLEAN",
         "default_scope": "local",
         "default_value": "false"
     },
     {
         "name": "jit_verify",
-        "description": "Verify JIT output against the reference DuckDB execution path",
+        "description": "Verify compiled-region output against the reference DuckDB execution path",
         "type": "BOOLEAN",
         "default_scope": "local",
         "default_value": "false"

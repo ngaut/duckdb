@@ -5,7 +5,7 @@
 
 namespace duckdb {
 
-class SljitCodeHandle : public JitCodeHandle {
+class SljitCodeHandle : public ExecutionRegionCodeHandle {
 public:
 	SljitCodeHandle(void *code_p, idx_t code_size_p) : code(code_p), code_size(code_size_p) {
 	}
@@ -25,7 +25,7 @@ private:
 	idx_t code_size;
 };
 
-unique_ptr<JitCodeHandle> MakeSljitCodeHandle(void *code, idx_t code_size) {
+unique_ptr<ExecutionRegionCodeHandle> MakeSljitCodeHandle(void *code, idx_t code_size) {
 	return make_uniq<SljitCodeHandle>(code, code_size);
 }
 

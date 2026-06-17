@@ -35,11 +35,11 @@ public:
 
 public:
 	// Source interface
-	bool SupportsJitNativeSource(const JitPreparedPipeline &jit_prepared_pipeline) const override;
+	bool SupportsExecutionSourceContract(const ExecutionRegionOpenRequest &open_request) const override;
 	SourceResultType GetDataInternal(ExecutionContext &context, DataChunk &chunk,
 	                                 OperatorSourceInput &input) const override;
-	SourceResultType GetJitNativeSourceDataInternal(ExecutionContext &context, DataChunk &chunk,
-	                                                OperatorSourceInput &input) const override;
+	SourceResultType GetExecutionSourceContractDataInternal(ExecutionContext &context, DataChunk &chunk,
+	                                                        OperatorSourceInput &input) const override;
 
 	bool IsSource() const override {
 		return true;
@@ -51,12 +51,14 @@ public:
 	SinkCombineResultType Combine(ExecutionContext &context, OperatorSinkCombineInput &input) const override;
 	SinkFinalizeType Finalize(Pipeline &pipeline, Event &event, ClientContext &context,
 	                          OperatorSinkFinalizeInput &input) const override;
+	bool BindExecutionSink(ExecutionContext &context, DataChunk &input, OperatorSinkInput &sink_input,
+	                       const ExecutionRegionSinkInfo &sink_info, ExecutionSinkBinding &binding) const override;
 
 	unique_ptr<LocalSinkState> GetLocalSinkState(ExecutionContext &context) const override;
 	unique_ptr<GlobalSinkState> GetGlobalSinkState(ClientContext &context) const override;
 
 	InsertionOrderPreservingMap<string> ParamsToString() const override;
-	JitOperatorDescriptor GetJitOperatorDescriptor() const override;
+	ExecutionContract GetExecutionContract() const override;
 
 	bool IsSink() const override {
 		return true;

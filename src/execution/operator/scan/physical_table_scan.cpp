@@ -5,7 +5,6 @@
 #include "duckdb/common/mutex.hpp"
 #include "duckdb/common/optional_idx.hpp"
 #include "duckdb/common/string_util.hpp"
-#include "duckdb/execution/jit/runtime.hpp"
 #include "duckdb/function/table/table_scan.hpp"
 #include "duckdb/planner/expression/bound_conjunction_expression.hpp"
 #include "duckdb/transaction/transaction.hpp"
@@ -20,16 +19,15 @@
 
 namespace duckdb {
 
-struct TableScanJitSourceConfig {
+struct TableScanExecutionSourceConfig {
 	bool use_prepared_source_input = false;
-	bool use_native_source = false;
+	bool use_source_contract = false;
 	vector<idx_t> projection_ids;
 	optional_ptr<TableFilterSet> filters;
 	TableFilterExecutionMode filter_execution_mode = TableFilterExecutionMode::FILTER_AND_PRUNE;
 };
 
-struct TableScanJitNativeGlobalState {
-	bool enabled = false;
+struct TableScanExecutionSourceContractGlobalState {
 	DataTable *storage = nullptr;
 	DuckTransaction *transaction = nullptr;
 	ParallelTableScanState parallel_state;
@@ -49,7 +47,7 @@ static vector<idx_t> BuildIdentityTableScanProjection(idx_t column_count) {
 	return result;
 }
 
-static bool IsJitNativeDuckTableScanSupported(const PhysicalTableScan &op) {
+static bool IsExecutionTableScanSourceContractSupported(const PhysicalTableScan &op) {
 	if (StringUtil::Lower(op.function.name.GetIdentifierName()) != "seq_scan") {
 		return false;
 	}
@@ -63,18 +61,15 @@ static bool IsJitNativeDuckTableScanSupported(const PhysicalTableScan &op) {
 	return !bind_data.is_index_scan;
 }
 
-static TableScanJitSourceConfig BuildTableScanJitSourceConfig(const PhysicalTableScan &op,
-                                                              optional_ptr<TableFilterSet> filters,
-                                                              optional_ptr<const JitPreparedPipeline> prepared) {
-	TableScanJitSourceConfig result;
+static TableScanExecutionSourceConfig
+BuildTableScanExecutionSourceConfig(const PhysicalTableScan &op, optional_ptr<TableFilterSet> filters,
+                                    const ExecutionRegionOpenRequest &open_request) {
+	TableScanExecutionSourceConfig result;
 	result.projection_ids = op.projection_ids;
 	result.filters = filters;
-	result.use_native_source = prepared && prepared->RequiresNativeSource() && IsJitNativeDuckTableScanSupported(op);
-	if (!prepared || !prepared->RequiresPreparedSourceInput()) {
-		return result;
-	}
-	auto &source_contract = prepared->source_contract;
-	if (!source_contract.requires_unfiltered_input || !source_contract.filter_takeover_supported) {
+	result.use_source_contract =
+	    open_request.UsesSourceContract() && IsExecutionTableScanSourceContractSupported(op);
+	if (!open_request.UsesGeneratedFilters()) {
 		return result;
 	}
 	result.use_prepared_source_input = true;
@@ -83,7 +78,8 @@ static TableScanJitSourceConfig BuildTableScanJitSourceConfig(const PhysicalTabl
 	return result;
 }
 
-static LogicalType GetJitNativeTableScanColumnType(const PhysicalTableScan &scan, const ColumnIndex &column_index) {
+static LogicalType GetExecutionSourceContractTableScanColumnType(const PhysicalTableScan &scan,
+                                                                 const ColumnIndex &column_index) {
 	if (column_index.IsRowIdColumn() || column_index.IsRowNumberColumn()) {
 		return LogicalType::ROW_TYPE;
 	}
@@ -94,57 +90,59 @@ static LogicalType GetJitNativeTableScanColumnType(const PhysicalTableScan &scan
 	if (IsVirtualColumn(column_id)) {
 		auto entry = scan.virtual_columns.find(column_id);
 		if (entry == scan.virtual_columns.end()) {
-			throw InternalException("Virtual column not found while initializing JIT native table scan source");
+			throw InternalException(
+			    "Virtual column not found while initializing execution region table scan source contract");
 		}
 		return entry->second.type;
 	}
 	if (column_id >= scan.returned_types.size()) {
-		throw InternalException("Column index %llu is outside returned type count %llu while initializing JIT native "
-		                        "table scan source",
-		                        static_cast<unsigned long long>(column_id),
-		                        static_cast<unsigned long long>(scan.returned_types.size()));
+		throw InternalException(
+		    "Column index %llu is outside returned type count %llu while initializing execution table "
+		    "scan source contract",
+		    static_cast<unsigned long long>(column_id), static_cast<unsigned long long>(scan.returned_types.size()));
 	}
 	return scan.returned_types[column_id];
 }
 
-static void InitializeJitNativeTableScanGlobalState(ClientContext &context, const PhysicalTableScan &op,
-                                                    TableScanJitSourceConfig &jit_source_config,
-                                                    TableScanJitNativeGlobalState &native) {
-	if (!jit_source_config.use_native_source) {
+static void
+InitializeExecutionSourceContractTableScanGlobalState(ClientContext &context, const PhysicalTableScan &op,
+                                                      TableScanExecutionSourceConfig &execution_source_config,
+                                                      TableScanExecutionSourceContractGlobalState &contract_state) {
+	if (!execution_source_config.use_source_contract) {
 		return;
 	}
 	auto &bind_data = op.bind_data->Cast<TableScanBindData>();
 	auto &duck_table = bind_data.table.Cast<DuckTableEntry>();
 	auto &storage = duck_table.GetStorage();
-	native.enabled = true;
-	native.storage = &storage;
-	native.transaction = &DuckTransaction::Get(context, duck_table.catalog);
-	native.is_create_index = bind_data.is_create_index;
+	contract_state.storage = &storage;
+	contract_state.transaction = &DuckTransaction::Get(context, duck_table.catalog);
+	contract_state.is_create_index = bind_data.is_create_index;
 
 	for (auto &column_index : op.column_ids) {
-		native.storage_ids.push_back(bind_data.table.GetStorageIndex(column_index));
-		native.scanned_types.push_back(GetJitNativeTableScanColumnType(op, column_index));
+		contract_state.storage_ids.push_back(bind_data.table.GetStorageIndex(column_index));
+		contract_state.scanned_types.push_back(GetExecutionSourceContractTableScanColumnType(op, column_index));
 	}
-	native.projection_ids = jit_source_config.projection_ids;
-	native.can_remove_filter_columns = !native.projection_ids.empty() &&
-	                                   native.projection_ids.size() != op.column_ids.size();
+	contract_state.projection_ids = execution_source_config.projection_ids;
+	contract_state.can_remove_filter_columns =
+	    !contract_state.projection_ids.empty() && contract_state.projection_ids.size() != op.column_ids.size();
 
 	if (bind_data.order_options) {
-		auto transaction = TransactionData(*native.transaction);
-		native.parallel_state.scan_state.reorderer = make_uniq<RowGroupReorderer>(*bind_data.order_options, transaction);
-		native.parallel_state.local_state.reorderer =
+		auto transaction = TransactionData(*contract_state.transaction);
+		contract_state.parallel_state.scan_state.reorderer =
+		    make_uniq<RowGroupReorderer>(*bind_data.order_options, transaction);
+		contract_state.parallel_state.local_state.reorderer =
 		    make_uniq<RowGroupReorderer>(*bind_data.order_options, transaction);
 	}
 	if (bind_data.partitions_to_scan) {
-		native.parallel_state.scan_state.partitions_to_scan = bind_data.partitions_to_scan.get();
+		contract_state.parallel_state.scan_state.partitions_to_scan = bind_data.partitions_to_scan.get();
 	}
 	for (idx_t column_idx = 0; column_idx < op.column_ids.size(); column_idx++) {
 		if (op.column_ids[column_idx].GetPrimaryIndex() == COLUMN_IDENTIFIER_ROW_NUMBER) {
-			native.parallel_state.scan_state.row_number_base = 0;
+			contract_state.parallel_state.scan_state.row_number_base = 0;
 			break;
 		}
 	}
-	storage.InitializeParallelScan(context, native.parallel_state, op.column_ids);
+	storage.InitializeParallelScan(context, contract_state.parallel_state, op.column_ids);
 }
 
 PhysicalTableScan::PhysicalTableScan(PhysicalPlan &physical_plan, vector<LogicalType> types, TableFunction function_p,
@@ -164,7 +162,7 @@ PhysicalTableScan::PhysicalTableScan(PhysicalPlan &physical_plan, vector<Logical
 class TableScanGlobalSourceState : public GlobalSourceState {
 public:
 	TableScanGlobalSourceState(ClientContext &context, const PhysicalTableScan &op,
-	                           optional_ptr<const JitPreparedPipeline> prepared = nullptr) {
+	                           const ExecutionRegionOpenRequest &open_request) {
 		physical_table_scan_execution_strategy = Settings::Get<DebugPhysicalTableScanExecutionStrategySetting>(context);
 
 		if (op.dynamic_filters && op.dynamic_filters->HasFilters()) {
@@ -173,8 +171,9 @@ public:
 
 		if (op.function.init_global) {
 			auto filters = table_filters ? optional_ptr<TableFilterSet>(*table_filters) : GetTableFilters(op);
-			jit_source_config = BuildTableScanJitSourceConfig(op, filters, prepared);
-			InitializeJitNativeTableScanGlobalState(context, op, jit_source_config, jit_native);
+			execution_source_config = BuildTableScanExecutionSourceConfig(op, filters, open_request);
+			InitializeExecutionSourceContractTableScanGlobalState(context, op, execution_source_config,
+			                                                      execution_source_contract);
 			TableFunctionInitInput input(op.bind_data.get(), op.column_ids, op.projection_ids, filters,
 			                             op.extra_info.sample_options, &op);
 
@@ -205,8 +204,8 @@ public:
 	DataChunk input_chunk;
 	//! Combined table filters, if we have dynamic filters
 	unique_ptr<TableFilterSet> table_filters;
-	TableScanJitSourceConfig jit_source_config;
-	TableScanJitNativeGlobalState jit_native;
+	TableScanExecutionSourceConfig execution_source_config;
+	TableScanExecutionSourceContractGlobalState execution_source_contract;
 
 	optional_ptr<TableFilterSet> GetTableFilters(const PhysicalTableScan &op) const {
 		return table_filters ? table_filters.get() : op.table_filters.get();
@@ -226,37 +225,31 @@ public:
 			                             op.extra_info.sample_options, &op);
 			local_state = op.function.init_local(context, input, gstate.global_state.get());
 		}
-		if (gstate.jit_native.enabled) {
-			InitializeJitNativeSource(context, gstate, op);
+		if (gstate.execution_source_contract.storage) {
+			InitializeExecutionSourceContract(context, gstate, op);
 		}
 	}
 
 	unique_ptr<LocalTableFunctionState> local_state;
-	TableScanState jit_native_scan_state;
-	DataChunk jit_native_all_columns;
-	bool jit_native_initialized = false;
-	idx_t jit_native_rows_in_current_row_group = 0;
-	idx_t jit_native_row_groups_scanned = 0;
-	idx_t jit_native_rows_scanned = 0;
+	TableScanState execution_source_contract_scan_state;
+	DataChunk execution_source_contract_all_columns;
 
 private:
-	void InitializeJitNativeSource(ExecutionContext &context, TableScanGlobalSourceState &gstate,
-	                               const PhysicalTableScan &op) {
-		auto filters = gstate.jit_source_config.use_prepared_source_input ? gstate.jit_source_config.filters
-		                                                                  : gstate.GetTableFilters(op);
-		jit_native_scan_state.Initialize(gstate.jit_native.storage_ids, context.client, filters,
-		                                 op.extra_info.sample_options, gstate.jit_source_config.filter_execution_mode);
-		jit_native_rows_in_current_row_group =
-		    gstate.jit_native.storage->NextParallelScan(context.client, gstate.jit_native.parallel_state,
-		                                                jit_native_scan_state);
-		if (jit_native_rows_in_current_row_group > 0) {
-			jit_native_row_groups_scanned++;
+	void InitializeExecutionSourceContract(ExecutionContext &context, TableScanGlobalSourceState &gstate,
+	                                       const PhysicalTableScan &op) {
+		auto filters = gstate.execution_source_config.use_prepared_source_input ? gstate.execution_source_config.filters
+		                                                                        : gstate.GetTableFilters(op);
+		execution_source_contract_scan_state.Initialize(gstate.execution_source_contract.storage_ids, context.client,
+		                                                filters, op.extra_info.sample_options,
+		                                                gstate.execution_source_config.filter_execution_mode);
+		gstate.execution_source_contract.storage->NextParallelScan(
+		    context.client, gstate.execution_source_contract.parallel_state, execution_source_contract_scan_state);
+		if (gstate.execution_source_contract.can_remove_filter_columns) {
+			execution_source_contract_all_columns.Initialize(context.client,
+			                                                 gstate.execution_source_contract.scanned_types);
 		}
-		if (gstate.jit_native.can_remove_filter_columns) {
-			jit_native_all_columns.Initialize(context.client, gstate.jit_native.scanned_types);
-		}
-		jit_native_scan_state.options.force_fetch_row = Settings::Get<DebugForceFetchRowSetting>(context.client);
-		jit_native_initialized = true;
+		execution_source_contract_scan_state.options.force_fetch_row =
+		    Settings::Get<DebugForceFetchRowSetting>(context.client);
 	}
 };
 
@@ -266,52 +259,50 @@ unique_ptr<LocalSourceState> PhysicalTableScan::GetLocalSourceState(ExecutionCon
 }
 
 unique_ptr<GlobalSourceState> PhysicalTableScan::GetGlobalSourceState(ClientContext &context) const {
-	return make_uniq<TableScanGlobalSourceState>(context, *this);
+	ExecutionRegionOpenRequest open_request;
+	return make_uniq<TableScanGlobalSourceState>(context, *this, open_request);
 }
 
 unique_ptr<GlobalSourceState>
 PhysicalTableScan::GetGlobalSourceState(ClientContext &context,
-                                        optional_ptr<const JitPreparedPipeline> jit_prepared_pipeline) const {
-	return make_uniq<TableScanGlobalSourceState>(context, *this, jit_prepared_pipeline);
+                                        const ExecutionRegionOpenRequest &open_request) const {
+	return make_uniq<TableScanGlobalSourceState>(context, *this, open_request);
 }
 
-bool PhysicalTableScan::SupportsJitNativeSource(const JitPreparedPipeline &jit_prepared_pipeline) const {
-	return jit_prepared_pipeline.RequiresNativeSource() && IsJitNativeDuckTableScanSupported(*this);
+bool PhysicalTableScan::SupportsExecutionSourceContract(const ExecutionRegionOpenRequest &open_request) const {
+	return open_request.UsesSourceContract() && IsExecutionTableScanSourceContractSupported(*this);
 }
 
-SourceResultType PhysicalTableScan::GetJitNativeSourceDataInternal(ExecutionContext &context, DataChunk &chunk,
-                                                                   OperatorSourceInput &input) const {
+SourceResultType PhysicalTableScan::GetExecutionSourceContractDataInternal(ExecutionContext &context, DataChunk &chunk,
+                                                                           OperatorSourceInput &input) const {
 	auto &g_state = input.global_state.Cast<TableScanGlobalSourceState>();
 	auto &l_state = input.local_state.Cast<TableScanLocalSourceState>();
-	if (!g_state.jit_native.enabled || !l_state.jit_native_initialized) {
-		throw InternalException("JIT native table scan source was not initialized");
+	if (!g_state.execution_source_contract.storage) {
+		throw InternalException("execution region table scan source contract was not initialized");
 	}
-	auto &native = g_state.jit_native;
-	auto &scan_state = l_state.jit_native_scan_state;
+	auto &contract_state = g_state.execution_source_contract;
+	auto &scan_state = l_state.execution_source_contract_scan_state;
 	scan_state.options.force_fetch_row = Settings::Get<DebugForceFetchRowSetting>(context.client);
 
 	do {
-		if (native.is_create_index) {
-			native.storage->CreateIndexScan(scan_state, chunk);
-		} else if (native.can_remove_filter_columns) {
-			l_state.jit_native_all_columns.Reset();
-			native.storage->Scan(*native.transaction, l_state.jit_native_all_columns, scan_state);
-			chunk.ReferenceColumns(l_state.jit_native_all_columns, native.projection_ids);
+		if (contract_state.is_create_index) {
+			contract_state.storage->CreateIndexScan(scan_state, chunk);
+		} else if (contract_state.can_remove_filter_columns) {
+			l_state.execution_source_contract_all_columns.Reset();
+			contract_state.storage->Scan(*contract_state.transaction, l_state.execution_source_contract_all_columns,
+			                             scan_state);
+			chunk.ReferenceColumns(l_state.execution_source_contract_all_columns, contract_state.projection_ids);
 		} else {
-			native.storage->Scan(*native.transaction, chunk, scan_state);
+			contract_state.storage->Scan(*contract_state.transaction, chunk, scan_state);
 		}
 
 		if (chunk.size() > 0) {
-			l_state.jit_native_rows_scanned += chunk.size();
 			return SourceResultType::HAVE_MORE_OUTPUT;
 		}
 
-		l_state.jit_native_rows_in_current_row_group =
-		    native.storage->NextParallelScan(context.client, native.parallel_state, scan_state);
-		if (l_state.jit_native_rows_in_current_row_group > 0) {
-			l_state.jit_native_row_groups_scanned++;
-		}
-		if (l_state.jit_native_rows_in_current_row_group == 0) {
+		auto rows_in_current_row_group =
+		    contract_state.storage->NextParallelScan(context.client, contract_state.parallel_state, scan_state);
+		if (rows_in_current_row_group == 0) {
 			return SourceResultType::FINISHED;
 		}
 		context.client.InterruptCheck();

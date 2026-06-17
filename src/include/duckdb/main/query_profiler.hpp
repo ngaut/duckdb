@@ -65,6 +65,8 @@ struct QueryProfileResult {
 	QueryProfileResult &AddList(const string &k);
 	//! Append an anonymous OBJECT item to this LIST node; returns the new item
 	QueryProfileResult &AppendObject();
+	//! Append an anonymous VALUE item to this LIST node
+	void AppendValue(Value val);
 	//! Append an anonymous LIST item to this node; returns the new item
 	QueryProfileResult &AppendList();
 	//! Returns true if this node is a nested type (OBJECT or LIST)
@@ -121,6 +123,7 @@ public:
 	DUCKDB_API MetricsTimer StartTimerInternal(const string &key);
 
 	DUCKDB_API void StartExplainAnalyze();
+	DUCKDB_API bool IsExplainAnalyze() const;
 
 	//! Adds the timings gathered by an OperatorProfiler to this query profiler
 	DUCKDB_API void Flush(OperatorProfiler &profiler);
@@ -168,6 +171,9 @@ private:
 
 	//! Whether or not the query requires profiling
 	bool query_requires_profiling;
+	//! Telemetry cursor used to render only this query's compiled-region kernels in EXPLAIN ANALYZE.
+	idx_t execution_region_profile_start_event_id;
+	idx_t execution_region_profile_start_kernel_id;
 
 	//! The root of the query tree
 	unique_ptr<ProfilingNode> root;

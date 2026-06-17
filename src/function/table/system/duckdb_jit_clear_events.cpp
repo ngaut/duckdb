@@ -1,6 +1,6 @@
 #include "duckdb/function/table/system_functions.hpp"
 
-#include "duckdb/execution/jit/manager.hpp"
+#include "duckdb/execution/execution_region_manager.hpp"
 #include "duckdb/main/client_context.hpp"
 
 namespace duckdb {
@@ -18,8 +18,8 @@ static unique_ptr<FunctionData> DuckDBJitClearEventsBind(ClientContext &context,
 
 static unique_ptr<GlobalTableFunctionState> DuckDBJitClearEventsInit(ClientContext &context,
                                                                      TableFunctionInitInput &input) {
-	JitSuppressionGuard guard(context);
-	JitManager::Get(context).ClearEvents();
+	ExecutionRegionSuppressionGuard guard(context);
+	ExecutionRegionManager::Get(context).ClearEvents();
 	return make_uniq<DuckDBJitClearEventsData>();
 }
 
@@ -33,8 +33,10 @@ static void DuckDBJitClearEventsFunction(ClientContext &context, TableFunctionIn
 }
 
 void DuckDBJitClearEventsFun::RegisterFunction(BuiltinFunctions &set) {
-	set.AddFunction(TableFunction("duckdb_jit_clear_events", {}, DuckDBJitClearEventsFunction,
-	                              DuckDBJitClearEventsBind, DuckDBJitClearEventsInit));
+	auto function = TableFunction("duckdb_jit_clear_events", {}, DuckDBJitClearEventsFunction, DuckDBJitClearEventsBind,
+	                              DuckDBJitClearEventsInit);
+	function.suppress_compiled_execution = true;
+	set.AddFunction(function);
 }
 
 } // namespace duckdb

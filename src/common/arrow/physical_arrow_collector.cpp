@@ -27,18 +27,18 @@ unique_ptr<PhysicalOperator> PhysicalArrowCollector::Create(ClientContext &conte
 	return make_uniq<PhysicalArrowBatchCollector>(physical_plan, data, batch_size);
 }
 
-JitOperatorDescriptor PhysicalArrowCollector::GetJitOperatorDescriptor() const {
-	JitOperatorDescriptor result;
-	result.has_sink = true;
-	result.sink.kind = JitRegionSinkKind::MATERIALIZATION;
-	result.sink.reason = "DuckDB Arrow result collector append protocol missing";
+ExecutionContract PhysicalArrowCollector::GetExecutionContract() const {
+	ExecutionContract result;
+	result.sink.kind = ExecutionRegionSinkKind::MATERIALIZATION;
+	result.sink.reason = "DuckDB Arrow result collector native sink contract missing";
 	result.sink.reason += ";operator=RESULT_COLLECTOR";
 	result.sink.reason += ";output_columns=" + std::to_string(types.size());
-	result.sink.reason += ";arrow_result_collector_append_contract=missing";
-	result.sink.reason += ";arrow_result_collector_append_required_capability=arrow-result-collector-native-append";
-	result.sink.reason += ";arrow_result_collector_append_blocker=arrow-result-collector-native-append-unsupported";
-	result.sink.fields = BuildJitDescriptorProtocolFields(result.sink.reason);
-	return FinalizeJitOperatorDescriptor(std::move(result));
+	result.sink.reason += ";arrow_result_collector_sink_contract_status=missing";
+	result.sink.reason += ";arrow_result_collector_sink_contract_version=v1";
+	result.sink.reason += ";arrow_result_collector_sink_required_capability=arrow-result-collector-native-sink";
+	result.sink.reason += ";arrow_result_collector_sink_blocker=arrow-result-collector-native-sink-unsupported";
+	result.sink.fields = BuildExecutionContractFields(result.sink.reason);
+	return FinalizeExecutionContract(std::move(result));
 }
 
 SinkResultType PhysicalArrowCollector::Sink(ExecutionContext &context, DataChunk &chunk,
@@ -88,8 +88,6 @@ SinkCombineResultType PhysicalArrowCollector::Combine(ExecutionContext &context,
 		return SinkCombineResultType::FINISHED;
 	}
 	if (last_appender) {
-		// FIXME: we could set these aside and merge them in a finalize event in an effort to create more balanced
-		// chunks out of these remnants
 		lstate.FinishArray();
 	}
 	// Collect all the finished arrays

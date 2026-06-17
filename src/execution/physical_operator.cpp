@@ -100,27 +100,45 @@ bool PhysicalOperator::ResetGlobalOperatorState(ClientContext &context, GlobalOp
 	return false;
 }
 
-bool PhysicalOperator::BindJitNativeOperator(ExecutionContext &context, DataChunk &input, GlobalOperatorState &gstate,
-                                             OperatorState &state, const JitRegionOperatorInfo &operator_info,
-                                             JitNativeOperatorBinding &binding) const {
+ExecutionOperatorReadiness
+PhysicalOperator::GetExecutionOperatorReadiness(ClientContext &context,
+                                                const ExecutionRegionOperatorInfo &operator_info) const {
+	(void)context;
+	ExecutionOperatorReadiness readiness;
+	readiness.kind = operator_info.kind;
+	readiness.blocker = "execution-operator-readiness-unsupported;operator=" + GetName();
+	return readiness;
+}
+
+ExecutionOperatorBindResult PhysicalOperator::BindExecutionOperator(ExecutionContext &context, DataChunk &input,
+                                                                    GlobalOperatorState &gstate, OperatorState &state,
+                                                                    const ExecutionRegionOperatorInfo &operator_info,
+                                                                    ExecutionOperatorBinding &binding) const {
 	(void)context;
 	(void)input;
 	(void)gstate;
 	(void)state;
 	binding.ready = false;
 	binding.kind = operator_info.kind;
-	binding.blocker = "jit-native-operator-binding-unsupported;operator=" + GetName();
-	return false;
+	binding.blocker = "execution-operator-binding-unsupported;operator=" + GetName();
+	return ExecutionOperatorBindResult::INVALID;
 }
 
-bool PhysicalOperator::BindJitNativeSink(ExecutionContext &context, DataChunk &input, OperatorSinkInput &sink_input,
-                                         const JitRegionSinkInfo &sink_info, JitNativeSinkBinding &binding) const {
+bool PhysicalOperator::BindExecutionSink(ExecutionContext &context, DataChunk &input, OperatorSinkInput &sink_input,
+                                         const ExecutionRegionSinkInfo &sink_info,
+                                         ExecutionSinkBinding &binding) const {
 	(void)context;
 	(void)input;
 	(void)sink_input;
-	binding.ready = false;
+	binding = ExecutionSinkBinding();
 	binding.kind = sink_info.kind;
-	binding.blocker = "jit-native-sink-binding-unsupported;operator=" + GetName();
+	if (sink_info.native_sink_contract.status != ExecutionRegionStateContractStatus::READY) {
+		binding.blocker = sink_info.native_sink_contract.blocker.empty()
+		                      ? "native-operator-sink-contract-not-ready;operator=" + GetName()
+		                      : sink_info.native_sink_contract.blocker;
+		return false;
+	}
+	binding.blocker = "execution-sink-contract-unsupported;operator=" + GetName();
 	return false;
 }
 
@@ -154,12 +172,13 @@ unique_ptr<GlobalSourceState> PhysicalOperator::GetGlobalSourceState(ClientConte
 
 unique_ptr<GlobalSourceState>
 PhysicalOperator::GetGlobalSourceState(ClientContext &context,
-                                       optional_ptr<const JitPreparedPipeline> jit_prepared_pipeline) const {
+                                       const ExecutionRegionOpenRequest &open_request) const {
+	(void)open_request;
 	return GetGlobalSourceState(context);
 }
 
-bool PhysicalOperator::SupportsJitNativeSource(const JitPreparedPipeline &jit_prepared_pipeline) const {
-	(void)jit_prepared_pipeline;
+bool PhysicalOperator::SupportsExecutionSourceContract(const ExecutionRegionOpenRequest &open_request) const {
+	(void)open_request;
 	return false;
 }
 
@@ -169,9 +188,9 @@ SourceResultType PhysicalOperator::GetData(ExecutionContext &context, DataChunk 
 	return GetDataInternal(context, chunk, input);
 }
 
-SourceResultType PhysicalOperator::GetJitNativeSourceData(ExecutionContext &context, DataChunk &chunk,
-                                                          OperatorSourceInput &input) const {
-	return GetJitNativeSourceDataInternal(context, chunk, input);
+SourceResultType PhysicalOperator::GetExecutionSourceContractData(ExecutionContext &context, DataChunk &chunk,
+                                                                  OperatorSourceInput &input) const {
+	return GetExecutionSourceContractDataInternal(context, chunk, input);
 }
 
 SourceResultType PhysicalOperator::GetDataInternal(ExecutionContext &context, DataChunk &chunk,
@@ -179,9 +198,10 @@ SourceResultType PhysicalOperator::GetDataInternal(ExecutionContext &context, Da
 	throw InternalException("Calling GetDataInternal on a node that is not a source!");
 }
 
-SourceResultType PhysicalOperator::GetJitNativeSourceDataInternal(ExecutionContext &context, DataChunk &chunk,
-                                                                  OperatorSourceInput &input) const {
-	throw InternalException("Calling GetJitNativeSourceDataInternal on a source without a native JIT source contract");
+SourceResultType PhysicalOperator::GetExecutionSourceContractDataInternal(ExecutionContext &context, DataChunk &chunk,
+                                                                          OperatorSourceInput &input) const {
+	throw InternalException(
+	    "Calling GetExecutionSourceContractDataInternal on a source without an execution source contract");
 }
 
 OperatorPartitionData PhysicalOperator::GetPartitionData(ExecutionContext &context, DataChunk &chunk,
@@ -339,8 +359,49 @@ void PhysicalOperator::Verify() {
 #endif
 }
 
-JitOperatorDescriptor PhysicalOperator::GetJitOperatorDescriptor() const {
-	return FinalizeJitOperatorDescriptor(JitOperatorDescriptor());
+ExecutionRegionOperatorKind PhysicalOperator::GetExecutionRegionOperatorKind() const {
+	switch (type) {
+	case PhysicalOperatorType::TABLE_SCAN:
+		return ExecutionRegionOperatorKind::TABLE_SCAN;
+	case PhysicalOperatorType::DUMMY_SCAN:
+	case PhysicalOperatorType::COLUMN_DATA_SCAN:
+	case PhysicalOperatorType::CHUNK_SCAN:
+	case PhysicalOperatorType::EXPRESSION_SCAN:
+	case PhysicalOperatorType::POSITIONAL_SCAN:
+		return ExecutionRegionOperatorKind::SCAN_SOURCE;
+	case PhysicalOperatorType::FILTER:
+		return ExecutionRegionOperatorKind::FILTER;
+	case PhysicalOperatorType::PROJECTION:
+		return ExecutionRegionOperatorKind::PROJECTION;
+	case PhysicalOperatorType::HASH_JOIN:
+		return ExecutionRegionOperatorKind::HASH_JOIN;
+	case PhysicalOperatorType::NESTED_LOOP_JOIN:
+		return ExecutionRegionOperatorKind::NESTED_LOOP_JOIN;
+	case PhysicalOperatorType::UNGROUPED_AGGREGATE:
+		return ExecutionRegionOperatorKind::UNGROUPED_AGGREGATE;
+	case PhysicalOperatorType::HASH_GROUP_BY:
+		return ExecutionRegionOperatorKind::HASH_GROUP_BY;
+	case PhysicalOperatorType::PERFECT_HASH_GROUP_BY:
+		return ExecutionRegionOperatorKind::PERFECT_HASH_GROUP_BY;
+	case PhysicalOperatorType::ORDER_BY:
+		return ExecutionRegionOperatorKind::ORDER_BY;
+	case PhysicalOperatorType::TOP_N:
+		return ExecutionRegionOperatorKind::TOP_N;
+	case PhysicalOperatorType::CTE:
+		return ExecutionRegionOperatorKind::CTE;
+	case PhysicalOperatorType::RESULT_COLLECTOR:
+		return ExecutionRegionOperatorKind::RESULT_COLLECTOR;
+	case PhysicalOperatorType::EXPLAIN_ANALYZE:
+		return ExecutionRegionOperatorKind::EXPLAIN_ANALYZE;
+	case PhysicalOperatorType::CREATE_TABLE_AS:
+		return ExecutionRegionOperatorKind::CREATE_TABLE_AS;
+	default:
+		return ExecutionRegionOperatorKind::GENERIC;
+	}
+}
+
+ExecutionContract PhysicalOperator::GetExecutionContract() const {
+	return FinalizeExecutionContract(ExecutionContract());
 }
 
 bool CachingPhysicalOperator::CanCacheType(const LogicalType &type) {

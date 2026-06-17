@@ -24,29 +24,43 @@ public:
 	ColumnDataAppendState append_state;
 };
 
-JitOperatorDescriptor PhysicalMaterializedCollector::GetJitOperatorDescriptor() const {
-	return BuildJitResultCollectorAppendDescriptor();
+ExecutionContract PhysicalMaterializedCollector::GetExecutionContract() const {
+	return BuildExecutionResultCollectorSinkContract();
 }
 
-bool PhysicalMaterializedCollector::BindJitNativeSink(ExecutionContext &context, DataChunk &input,
+class MaterializedCollectorExecutionRegionSinkState : public ExecutionAppendSinkState {
+public:
+	explicit MaterializedCollectorExecutionRegionSinkState(MaterializedCollectorLocalState &state_p) : state(state_p) {
+	}
+
+	SinkResultType Append(DataChunk &input) override {
+		state.collection->Append(state.append_state, input);
+		return SinkResultType::NEED_MORE_INPUT;
+	}
+
+private:
+	MaterializedCollectorLocalState &state;
+};
+
+bool PhysicalMaterializedCollector::BindExecutionSink(ExecutionContext &context, DataChunk &input,
                                                       OperatorSinkInput &sink_input,
-                                                      const JitRegionSinkInfo &sink_info,
-                                                      JitNativeSinkBinding &binding) const {
+                                                      const ExecutionRegionSinkInfo &sink_info,
+                                                      ExecutionSinkBinding &binding) const {
 	(void)context;
 	(void)input;
-	binding = JitNativeSinkBinding();
+	binding = ExecutionSinkBinding();
 	binding.kind = sink_info.kind;
-	if (sink_info.kind != JitRegionSinkKind::RESULT_COLLECTOR_APPEND) {
-		binding.blocker = "result-collector-native-runtime-kind-mismatch";
+	if (sink_info.kind != ExecutionRegionSinkKind::RESULT_COLLECTOR_SINK ||
+	    sink_info.native_sink_contract.status != ExecutionRegionStateContractStatus::READY) {
+		binding.blocker = sink_info.native_sink_contract.blocker.empty() ? "result-collector-sink-contract-not-ready"
+		                                                                 : sink_info.native_sink_contract.blocker;
 		return false;
 	}
 	auto &state = sink_input.local_state.Cast<MaterializedCollectorLocalState>();
 	binding.ready = true;
-	binding.result_collector_append.ready = true;
-	binding.result_collector_append.kind = JitNativeResultCollectorAppendKind::COLUMN_DATA_COLLECTION;
-	binding.result_collector_append.collection = state.collection.get();
-	binding.result_collector_append.append_state = &state.append_state;
-	binding.result_collector_append.blocker = "none";
+	binding.append_sink.ready = true;
+	binding.append_sink.state = make_shared_ptr<MaterializedCollectorExecutionRegionSinkState>(state);
+	binding.append_sink.blocker = "none";
 	binding.blocker = "none";
 	return true;
 }

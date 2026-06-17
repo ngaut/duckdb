@@ -1,7 +1,6 @@
 #include "duckdb/execution/operator/aggregate/physical_perfecthash_aggregate.hpp"
 
-#include "duckdb/execution/jit/aggregate_runtime.hpp"
-#include "duckdb/execution/jit/runtime.hpp"
+#include "duckdb/execution/execution_operator_runtime.hpp"
 #include "duckdb/execution/perfect_aggregate_hashtable.hpp"
 #include "duckdb/planner/expression/bound_aggregate_expression.hpp"
 #include "duckdb/planner/expression/bound_reference_expression.hpp"
@@ -112,6 +111,120 @@ public:
 	DataChunk aggregate_input_chunk;
 };
 
+class PerfectHashAggregateExecutionRegionSinkState : public ExecutionAggregateUpdateState {
+public:
+	PerfectHashAggregateExecutionRegionSinkState(ExecutionContext &context_p, const PhysicalPerfectHashAggregate &op_p,
+	                                             PerfectHashAggregateLocalState &local_state_p)
+	    : context(context_p), op(op_p), local_state(local_state_p) {
+	}
+
+	SinkResultType Sink(DataChunk &input) override {
+		DataChunk &group_chunk = local_state.group_chunk;
+		DataChunk &aggregate_input_chunk = local_state.aggregate_input_chunk;
+
+		for (idx_t group_idx = 0; group_idx < op.groups.size(); group_idx++) {
+			auto &group = op.groups[group_idx];
+			if (group->GetExpressionClass() != ExpressionClass::BOUND_REF) {
+				throw InternalException("execution region perfect hash aggregate group is not a bound reference");
+			}
+			auto &bound_ref_expr = group->Cast<BoundReferenceExpression>();
+			if (bound_ref_expr.Index() >= input.ColumnCount()) {
+				throw InternalException("execution region perfect hash aggregate group index out of range");
+			}
+			group_chunk.data[group_idx].Reference(input.data[bound_ref_expr.Index()]);
+		}
+		idx_t aggregate_input_idx = 0;
+		for (auto &aggregate : op.aggregates) {
+			auto &aggr = aggregate->Cast<BoundAggregateExpression>();
+			if (aggr.IsDistinct() || aggr.GetFilter() || aggr.GetOrderBys()) {
+				throw InternalException(
+				    "execution region perfect hash aggregate update received unsupported aggregate");
+			}
+			for (auto &child_expr : aggr.GetChildren()) {
+				if (child_expr->GetExpressionClass() != ExpressionClass::BOUND_REF) {
+					throw InternalException("execution region perfect hash aggregate payload is not a bound reference");
+				}
+				auto &bound_ref_expr = child_expr->Cast<BoundReferenceExpression>();
+				if (bound_ref_expr.Index() >= input.ColumnCount()) {
+					throw InternalException("execution region perfect hash aggregate payload index out of range");
+				}
+				aggregate_input_chunk.data[aggregate_input_idx++].Reference(input.data[bound_ref_expr.Index()]);
+			}
+		}
+
+		group_chunk.Verify(context.client.db);
+		aggregate_input_chunk.Verify(context.client.db);
+		D_ASSERT(aggregate_input_chunk.ColumnCount() == 0 || group_chunk.size() == aggregate_input_chunk.size());
+		local_state.ht->AddChunk(group_chunk, aggregate_input_chunk);
+		return SinkResultType::NEED_MORE_INPUT;
+	}
+
+	idx_t FindOrCreateAggregateStates(DataChunk &input, const vector<idx_t> &group_input_indices,
+	                                  Vector &addresses_out) override {
+		if (group_input_indices.size() != op.groups.size()) {
+			throw InternalException("execution region perfect hash aggregate state lookup group binding mismatch");
+		}
+		DataChunk &group_chunk = local_state.group_chunk;
+		group_chunk.Reset();
+		for (idx_t group_idx = 0; group_idx < group_input_indices.size(); group_idx++) {
+			auto input_idx = group_input_indices[group_idx];
+			if (input_idx >= input.ColumnCount()) {
+				throw InternalException("execution region perfect hash aggregate state lookup group index out of range");
+			}
+			group_chunk.data[group_idx].Reference(input.data[input_idx]);
+		}
+		group_chunk.SetChildCardinality(input.size());
+		group_chunk.Verify(context.client.db);
+		return local_state.ht->FindOrCreateAggregateStates(group_chunk, addresses_out);
+	}
+
+	void FinishNativeAggregateUpdate() override {
+	}
+
+private:
+	ExecutionContext &context;
+	const PhysicalPerfectHashAggregate &op;
+	PerfectHashAggregateLocalState &local_state;
+};
+
+static string ValidatePerfectHashAggregateExecutionSink(const ExecutionRegionSinkInfo &sink_info) {
+	if (sink_info.kind != ExecutionRegionSinkKind::PERFECT_HASH_AGGREGATE_UPDATE) {
+		return "perfect-hash-aggregate-runtime-kind-mismatch";
+	}
+	auto &contract = sink_info.aggregate_contract;
+	if (contract.native_state_update_contract.status != ExecutionRegionStateContractStatus::READY) {
+		return contract.native_state_update_contract.blocker.empty()
+		           ? "perfect-hash-aggregate-state-update-contract-not-ready"
+		           : contract.native_state_update_contract.blocker;
+	}
+	if (contract.distinct_aggregate_count != 0 || contract.aggregate_filter_count != 0 ||
+	    contract.aggregate_order_count != 0) {
+		return "perfect-hash-aggregate-state-update-unsupported-aggregate-semantics";
+	}
+	if (contract.native_grouped_state_contract.status != ExecutionRegionStateContractStatus::READY) {
+		return contract.native_grouped_state_contract.blocker.empty() ? "perfect-hash-aggregate-grouped-state-not-ready"
+		                                                              : contract.native_grouped_state_contract.blocker;
+	}
+	for (auto &group : sink_info.groups) {
+		if (!group.supported_reference) {
+			return group.reason.empty() ? "perfect-hash-aggregate-state-update-group-reference" : group.reason;
+		}
+	}
+	for (auto &aggregate : sink_info.aggregates) {
+		if (!aggregate.reason.empty()) {
+			return aggregate.reason;
+		}
+		if (aggregate.distinct || aggregate.has_filter || aggregate.has_order_bys || aggregate.order_dependent) {
+			return "perfect-hash-aggregate-state-update-unsupported-aggregate-semantics";
+		}
+		if (!aggregate.has_state_update || !aggregate.payload_expressions_ready ||
+		    !aggregate.supported_payload_references) {
+			return "perfect-hash-aggregate-state-update-payload-contract";
+		}
+	}
+	return "none";
+}
+
 unique_ptr<GlobalSinkState> PhysicalPerfectHashAggregate::GetGlobalSinkState(ClientContext &context) const {
 	return make_uniq<PerfectHashAggregateGlobalState>(*this, context);
 }
@@ -158,136 +271,28 @@ SinkResultType PhysicalPerfectHashAggregate::Sink(ExecutionContext &context, Dat
 	return SinkResultType::NEED_MORE_INPUT;
 }
 
-static void
-ValidateJitNativePerfectHashAggregateGroupBindings(const PhysicalPerfectHashAggregate &op,
-                                                   const vector<JitGroupedAggregateGroupBinding> &group_bindings) {
-	if (group_bindings.size() != op.groups.size()) {
-		throw InternalException("JIT native perfect hash aggregate group binding count %llu does not match group count %llu",
-		                        static_cast<unsigned long long>(group_bindings.size()),
-		                        static_cast<unsigned long long>(op.groups.size()));
-	}
-	for (idx_t binding_idx = 0; binding_idx < group_bindings.size(); binding_idx++) {
-		auto &binding = group_bindings[binding_idx];
-		if (binding.group_index != binding_idx) {
-			throw InternalException("JIT native perfect hash aggregate requires dense group bindings");
-		}
-	}
-}
-
-static void
-ValidateJitNativePerfectHashAggregateStateRequests(const PhysicalPerfectHashAggregate &op,
-                                                   const vector<JitNativeGroupedAggregateStateRequest> &requests) {
-	if (requests.size() != op.aggregates.size()) {
-		throw InternalException(
-		    "JIT native perfect hash aggregate update request count %llu does not match aggregate count %llu",
-		    static_cast<unsigned long long>(requests.size()),
-		    static_cast<unsigned long long>(op.aggregates.size()));
-	}
-	if (!op.filter_indexes.empty()) {
-		throw InternalException("JIT native perfect hash aggregate update does not support aggregate filters");
-	}
-	for (idx_t request_idx = 0; request_idx < requests.size(); request_idx++) {
-		auto &request = requests[request_idx];
-		if (request.aggregate_index != request_idx) {
-			throw InternalException("JIT native perfect hash aggregate update requires dense aggregate state requests");
-		}
-		if (request.aggregate_index >= op.aggregates.size()) {
-			throw InternalException(
-			    "JIT native perfect hash aggregate request references aggregate index %llu beyond %llu",
-			    static_cast<unsigned long long>(request.aggregate_index),
-			    static_cast<unsigned long long>(op.aggregates.size()));
-		}
-		auto &aggregate = op.aggregates[request.aggregate_index]->Cast<BoundAggregateExpression>();
-		if (aggregate.GetFilter()) {
-			throw InternalException("JIT native perfect hash aggregate update does not support aggregate filters");
-		}
-	}
-}
-
-static void ValidateJitNativePerfectHashAggregateShape(
-    const PhysicalPerfectHashAggregate &op, const vector<JitGroupedAggregateGroupBinding> &group_bindings,
-    const vector<JitNativeGroupedAggregateStateRequest> &requests) {
-	ValidateJitNativePerfectHashAggregateGroupBindings(op, group_bindings);
-	ValidateJitNativePerfectHashAggregateStateRequests(op, requests);
-}
-
-static void BindJitNativePerfectHashAggregateStateLayout(
-    const PerfectAggregateHashTable &ht, const vector<JitNativeGroupedAggregateStateRequest> &requested_states,
-    JitNativeGroupedAggregateStateSet &bound_states) {
-	auto &layout = ht.GetLayout();
-	auto &offsets = layout.GetOffsets();
-	if (offsets.size() < requested_states.size()) {
-		throw InternalException("JIT native perfect hash aggregate update cannot bind grouped aggregate state offsets");
-	}
-	const auto base_offset = layout.GetAggrOffset();
-	bound_states.states.clear();
-	bound_states.states.reserve(requested_states.size());
-	for (auto &request : requested_states) {
-		auto state_offset = offsets[request.aggregate_index];
-		if (state_offset < base_offset) {
-			throw InternalException("JIT native perfect hash aggregate state offset is before aggregate payload area");
-		}
-		JitNativeGroupedAggregateState state;
-		state.aggregate_index = request.aggregate_index;
-		state.update_kind = request.update_kind;
-		state.aggregate_state_offset = state_offset - base_offset;
-		bound_states.states.push_back(state);
-	}
-}
-
-void JitBindNativePerfectHashAggregateStates(
-    ExecutionContext &context, OperatorSinkInput &input, DataChunk &payload_chunk,
-    const vector<JitGroupedAggregateGroupBinding> &group_bindings,
-    const vector<JitNativeGroupedAggregateStateRequest> &requested_states,
-    JitNativeGroupedAggregateStateSet &bound_states) {
-	auto &local_state = input.local_state.Cast<PerfectHashAggregateLocalState>();
-	auto &op = local_state.op;
-	ValidateJitNativePerfectHashAggregateShape(op, group_bindings, requested_states);
-
-	auto &group_chunk = local_state.group_chunk;
-	group_chunk.Reset();
-	for (idx_t binding_idx = 0; binding_idx < group_bindings.size(); binding_idx++) {
-		auto &binding = group_bindings[binding_idx];
-		if (binding.input_index >= payload_chunk.ColumnCount()) {
-			throw InternalException(
-			    "JIT native perfect hash aggregate group binding references input column %llu beyond %llu",
-			    static_cast<unsigned long long>(binding.input_index),
-			    static_cast<unsigned long long>(payload_chunk.ColumnCount()));
-		}
-		group_chunk.data[binding.group_index].Reference(payload_chunk.data[binding.input_index]);
-	}
-	group_chunk.SetChildCardinality(payload_chunk.size());
-	group_chunk.Verify(context.client.db);
-
-	local_state.ht->FindOrCreateAggregateStates(group_chunk, bound_states.aggregate_addresses);
-	BindJitNativePerfectHashAggregateStateLayout(*local_state.ht, requested_states, bound_states);
-	bound_states.count = payload_chunk.size();
-}
-
-void JitBindNativePerfectHashAggregateStateLayout(
-    ExecutionContext &context, OperatorSinkInput &input,
-    const vector<JitNativeGroupedAggregateStateRequest> &requested_states,
-    JitNativeGroupedAggregateStateSet &bound_states, JitNativePerfectHashAggregateStateLayout &state_layout) {
-	(void)context;
-	auto &local_state = input.local_state.Cast<PerfectHashAggregateLocalState>();
-	auto &op = local_state.op;
-	ValidateJitNativePerfectHashAggregateStateRequests(op, requested_states);
-	BindJitNativePerfectHashAggregateStateLayout(*local_state.ht, requested_states, bound_states);
-	auto layout = local_state.ht->GetStateLayout();
-	state_layout.data = layout.data;
-	state_layout.group_is_set = layout.group_is_set;
-	state_layout.total_groups = layout.total_groups;
-	state_layout.tuple_size = layout.tuple_size;
-	state_layout.aggregate_state_offset = layout.aggregate_state_offset;
-	bound_states.count = 0;
-}
-
-SinkResultType JitFinishNativePerfectHashAggregateUpdate(ExecutionContext &context, OperatorSinkInput &input,
-                                                         idx_t count) {
-	(void)context;
+bool PhysicalPerfectHashAggregate::BindExecutionSink(ExecutionContext &context, DataChunk &input,
+                                                     OperatorSinkInput &sink_input,
+                                                     const ExecutionRegionSinkInfo &sink_info,
+                                                     ExecutionSinkBinding &binding) const {
 	(void)input;
-	(void)count;
-	return SinkResultType::NEED_MORE_INPUT;
+	binding = ExecutionSinkBinding();
+	binding.kind = sink_info.kind;
+	auto blocker = ValidatePerfectHashAggregateExecutionSink(sink_info);
+	if (blocker != "none") {
+		binding.blocker = blocker;
+		binding.aggregate_update.blocker = blocker;
+		return false;
+	}
+
+	auto &local_state = sink_input.local_state.Cast<PerfectHashAggregateLocalState>();
+	binding.ready = true;
+	binding.aggregate_update.ready = true;
+	binding.aggregate_update.state =
+	    make_shared_ptr<PerfectHashAggregateExecutionRegionSinkState>(context, *this, local_state);
+	binding.aggregate_update.blocker = "none";
+	binding.blocker = "none";
+	return true;
 }
 
 //===--------------------------------------------------------------------===//
@@ -330,8 +335,9 @@ unique_ptr<GlobalSourceState> PhysicalPerfectHashAggregate::GetGlobalSourceState
 	return make_uniq<PerfectHashAggregateState>();
 }
 
-bool PhysicalPerfectHashAggregate::SupportsJitNativeSource(const JitPreparedPipeline &jit_prepared_pipeline) const {
-	return jit_prepared_pipeline.RequiresNativeSource();
+bool PhysicalPerfectHashAggregate::SupportsExecutionSourceContract(
+    const ExecutionRegionOpenRequest &open_request) const {
+	return open_request.UsesSourceContract();
 }
 
 SourceResultType PhysicalPerfectHashAggregate::GetDataInternal(ExecutionContext &context, DataChunk &chunk,
@@ -340,8 +346,9 @@ SourceResultType PhysicalPerfectHashAggregate::GetDataInternal(ExecutionContext 
 	return ScanPerfectHashAggregateState(chunk, input, *this);
 }
 
-SourceResultType PhysicalPerfectHashAggregate::GetJitNativeSourceDataInternal(ExecutionContext &context, DataChunk &chunk,
-                                                                              OperatorSourceInput &input) const {
+SourceResultType
+PhysicalPerfectHashAggregate::GetExecutionSourceContractDataInternal(ExecutionContext &context, DataChunk &chunk,
+                                                                     OperatorSourceInput &input) const {
 	(void)context;
 	return ScanPerfectHashAggregateState(chunk, input, *this);
 }

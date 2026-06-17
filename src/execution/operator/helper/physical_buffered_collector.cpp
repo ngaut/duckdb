@@ -23,29 +23,53 @@ public:
 
 class BufferedCollectorLocalState : public LocalSinkState {};
 
-JitOperatorDescriptor PhysicalBufferedCollector::GetJitOperatorDescriptor() const {
-	return BuildJitResultCollectorAppendDescriptor();
+ExecutionContract PhysicalBufferedCollector::GetExecutionContract() const {
+	return BuildExecutionResultCollectorSinkContract();
 }
 
-bool PhysicalBufferedCollector::BindJitNativeSink(ExecutionContext &context, DataChunk &input,
+class BufferedCollectorExecutionRegionSinkState : public ExecutionAppendSinkState {
+public:
+	BufferedCollectorExecutionRegionSinkState(BufferedCollectorGlobalState &global_state_p,
+	                                          InterruptState &interrupt_state_p)
+	    : global_state(global_state_p), interrupt_state(interrupt_state_p) {
+	}
+
+	SinkResultType Append(DataChunk &input) override {
+		lock_guard<mutex> l(global_state.glock);
+		auto &buffered_data = global_state.buffered_data->Cast<SimpleBufferedData>();
+		if (buffered_data.BufferIsFull()) {
+			buffered_data.BlockSink(interrupt_state);
+			return SinkResultType::BLOCKED;
+		}
+		buffered_data.Append(input);
+		return SinkResultType::NEED_MORE_INPUT;
+	}
+
+private:
+	BufferedCollectorGlobalState &global_state;
+	InterruptState &interrupt_state;
+};
+
+bool PhysicalBufferedCollector::BindExecutionSink(ExecutionContext &context, DataChunk &input,
                                                   OperatorSinkInput &sink_input,
-                                                  const JitRegionSinkInfo &sink_info,
-                                                  JitNativeSinkBinding &binding) const {
+                                                  const ExecutionRegionSinkInfo &sink_info,
+                                                  ExecutionSinkBinding &binding) const {
 	(void)context;
 	(void)input;
-	binding = JitNativeSinkBinding();
+	binding = ExecutionSinkBinding();
 	binding.kind = sink_info.kind;
-	if (sink_info.kind != JitRegionSinkKind::RESULT_COLLECTOR_APPEND) {
-		binding.blocker = "result-collector-native-runtime-kind-mismatch";
+	if (sink_info.kind != ExecutionRegionSinkKind::RESULT_COLLECTOR_SINK ||
+	    sink_info.native_sink_contract.status != ExecutionRegionStateContractStatus::READY) {
+		binding.blocker = sink_info.native_sink_contract.blocker.empty() ? "result-collector-sink-contract-not-ready"
+		                                                                 : sink_info.native_sink_contract.blocker;
 		return false;
 	}
-	auto &gstate = sink_input.global_state.Cast<BufferedCollectorGlobalState>();
+	auto &global_state = sink_input.global_state.Cast<BufferedCollectorGlobalState>();
 	binding.ready = true;
-	binding.result_collector_append.ready = true;
-	binding.result_collector_append.kind = JitNativeResultCollectorAppendKind::SIMPLE_BUFFERED_DATA;
-	binding.result_collector_append.simple_buffered_data = &gstate.buffered_data->Cast<SimpleBufferedData>();
-	binding.result_collector_append.interrupt_state = &sink_input.interrupt_state;
-	binding.result_collector_append.blocker = "none";
+	binding.append_sink.ready = true;
+	binding.append_sink.state =
+	    make_shared_ptr<BufferedCollectorExecutionRegionSinkState>(global_state, sink_input.interrupt_state);
+	binding.append_sink.blocker = "none";
 	binding.blocker = "none";
 	return true;
 }

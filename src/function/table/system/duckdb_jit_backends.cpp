@@ -1,12 +1,13 @@
 #include "duckdb/function/table/system_functions.hpp"
 
-#include "duckdb/execution/jit/manager.hpp"
+#include "duckdb/execution/execution_region_manager.hpp"
+#include "duckdb/execution/execution_region_telemetry.hpp"
 #include "duckdb/main/client_context.hpp"
 
 namespace duckdb {
 
 struct DuckDBJitBackendsData : public GlobalTableFunctionState {
-	vector<JitBackendInfo> backends;
+	vector<ExecutionRegionBackendInfo> backends;
 	idx_t offset = 0;
 };
 
@@ -27,9 +28,9 @@ static unique_ptr<FunctionData> DuckDBJitBackendsBind(ClientContext &context, Ta
 
 static unique_ptr<GlobalTableFunctionState> DuckDBJitBackendsInit(ClientContext &context,
                                                                   TableFunctionInitInput &input) {
-	JitSuppressionGuard guard(context);
+	ExecutionRegionSuppressionGuard guard(context);
 	auto result = make_uniq<DuckDBJitBackendsData>();
-	result->backends = JitManager::Get(context).GetBackends(&context);
+	result->backends = ExecutionRegionManager::Get(context).GetBackends(&context);
 	return std::move(result);
 }
 
@@ -48,8 +49,10 @@ static void DuckDBJitBackendsFunction(ClientContext &context, TableFunctionInput
 }
 
 void DuckDBJitBackendsFun::RegisterFunction(BuiltinFunctions &set) {
-	set.AddFunction(TableFunction("duckdb_jit_backends", {}, DuckDBJitBackendsFunction, DuckDBJitBackendsBind,
-	                              DuckDBJitBackendsInit));
+	auto function = TableFunction("duckdb_jit_backends", {}, DuckDBJitBackendsFunction, DuckDBJitBackendsBind,
+	                              DuckDBJitBackendsInit);
+	function.suppress_compiled_execution = true;
+	set.AddFunction(function);
 }
 
 } // namespace duckdb

@@ -25,33 +25,59 @@ public:
 BufferedBatchCollectorLocalState::BufferedBatchCollectorLocalState() {
 }
 
-JitOperatorDescriptor PhysicalBufferedBatchCollector::GetJitOperatorDescriptor() const {
-	return BuildJitResultCollectorAppendDescriptor();
+ExecutionContract PhysicalBufferedBatchCollector::GetExecutionContract() const {
+	return BuildExecutionResultCollectorSinkContract();
 }
 
-bool PhysicalBufferedBatchCollector::BindJitNativeSink(ExecutionContext &context, DataChunk &input,
+class BufferedBatchCollectorExecutionRegionSinkState : public ExecutionAppendSinkState {
+public:
+	BufferedBatchCollectorExecutionRegionSinkState(BufferedBatchCollectorGlobalState &global_state_p,
+	                                               BufferedBatchCollectorLocalState &local_state_p,
+	                                               InterruptState &interrupt_state_p)
+	    : global_state(global_state_p), local_state(local_state_p), interrupt_state(interrupt_state_p) {
+	}
+
+	SinkResultType Append(DataChunk &input) override {
+		local_state.current_batch = local_state.partition_info.batch_index.GetIndex();
+		auto batch = local_state.partition_info.batch_index.GetIndex();
+		auto min_batch_index = local_state.partition_info.min_batch_index.GetIndex();
+		auto &buffered_data = global_state.buffered_data->Cast<BatchedBufferedData>();
+		buffered_data.UpdateMinBatchIndex(min_batch_index);
+		if (buffered_data.ShouldBlockBatch(batch)) {
+			buffered_data.BlockSink(interrupt_state, batch);
+			return SinkResultType::BLOCKED;
+		}
+		buffered_data.Append(input, batch);
+		return SinkResultType::NEED_MORE_INPUT;
+	}
+
+private:
+	BufferedBatchCollectorGlobalState &global_state;
+	BufferedBatchCollectorLocalState &local_state;
+	InterruptState &interrupt_state;
+};
+
+bool PhysicalBufferedBatchCollector::BindExecutionSink(ExecutionContext &context, DataChunk &input,
                                                        OperatorSinkInput &sink_input,
-                                                       const JitRegionSinkInfo &sink_info,
-                                                       JitNativeSinkBinding &binding) const {
+                                                       const ExecutionRegionSinkInfo &sink_info,
+                                                       ExecutionSinkBinding &binding) const {
 	(void)context;
 	(void)input;
-	binding = JitNativeSinkBinding();
+	binding = ExecutionSinkBinding();
 	binding.kind = sink_info.kind;
-	if (sink_info.kind != JitRegionSinkKind::RESULT_COLLECTOR_APPEND) {
-		binding.blocker = "result-collector-native-runtime-kind-mismatch";
+	if (sink_info.kind != ExecutionRegionSinkKind::RESULT_COLLECTOR_SINK ||
+	    sink_info.native_sink_contract.status != ExecutionRegionStateContractStatus::READY) {
+		binding.blocker = sink_info.native_sink_contract.blocker.empty() ? "result-collector-sink-contract-not-ready"
+		                                                                 : sink_info.native_sink_contract.blocker;
 		return false;
 	}
-	auto &gstate = sink_input.global_state.Cast<BufferedBatchCollectorGlobalState>();
-	auto &lstate = sink_input.local_state.Cast<BufferedBatchCollectorLocalState>();
+	auto &global_state = sink_input.global_state.Cast<BufferedBatchCollectorGlobalState>();
+	auto &local_state = sink_input.local_state.Cast<BufferedBatchCollectorLocalState>();
 	binding.ready = true;
-	binding.result_collector_append.ready = true;
-	binding.result_collector_append.kind = JitNativeResultCollectorAppendKind::BATCHED_BUFFERED_DATA;
-	binding.result_collector_append.batched_buffered_data = &gstate.buffered_data->Cast<BatchedBufferedData>();
-	binding.result_collector_append.interrupt_state = &sink_input.interrupt_state;
-	binding.result_collector_append.batch_index = lstate.partition_info.batch_index.GetIndex();
-	binding.result_collector_append.min_batch_index = lstate.partition_info.min_batch_index.GetIndex();
-	binding.result_collector_append.current_batch = &lstate.current_batch;
-	binding.result_collector_append.blocker = "none";
+	binding.append_sink.ready = true;
+	binding.append_sink.state = make_shared_ptr<BufferedBatchCollectorExecutionRegionSinkState>(
+	    global_state, local_state, sink_input.interrupt_state);
+	binding.append_sink.blocker = "none";
 	binding.blocker = "none";
 	return true;
 }

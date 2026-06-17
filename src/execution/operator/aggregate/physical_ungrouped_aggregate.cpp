@@ -7,9 +7,8 @@
 #include "duckdb/common/unordered_set.hpp"
 #include "duckdb/common/vector/flat_vector.hpp"
 #include "duckdb/common/vector_operations/vector_operations.hpp"
+#include "duckdb/execution/execution_operator_runtime.hpp"
 #include "duckdb/execution/expression_executor.hpp"
-#include "duckdb/execution/jit/aggregate_runtime.hpp"
-#include "duckdb/execution/jit/runtime.hpp"
 #include "duckdb/execution/operator/aggregate/aggregate_object.hpp"
 #include "duckdb/execution/operator/aggregate/distinct_aggregate_data.hpp"
 #include "duckdb/execution/radix_partitioned_hashtable.hpp"
@@ -290,6 +289,124 @@ public:
 	}
 };
 
+class UngroupedAggregateExecutionRegionSinkState : public ExecutionAggregateUpdateState {
+public:
+	UngroupedAggregateExecutionRegionSinkState(const PhysicalUngroupedAggregate &op_p,
+	                                           UngroupedAggregateLocalSinkState &local_state_p)
+	    : op(op_p), local_state(local_state_p) {
+	}
+
+	SinkResultType Sink(DataChunk &input) override {
+		for (idx_t aggregate_idx = 0; aggregate_idx < op.aggregates.size(); aggregate_idx++) {
+			auto &aggregate = op.aggregates[aggregate_idx]->Cast<BoundAggregateExpression>();
+			if (aggregate.IsDistinct() || aggregate.GetFilter() || aggregate.GetOrderBys()) {
+				throw InternalException("execution region ungrouped aggregate update received unsupported aggregate");
+			}
+			auto &children = aggregate.GetChildren();
+			if (children.empty()) {
+				local_state.state.Sink(input, 0, aggregate_idx, input.size());
+				continue;
+			}
+			if (children[0]->GetExpressionClass() != ExpressionClass::BOUND_REF) {
+				throw InternalException("execution region ungrouped aggregate payload is not a bound reference");
+			}
+			auto payload_index = children[0]->Cast<BoundReferenceExpression>().Index();
+			local_state.state.Sink(input, payload_index, aggregate_idx, input.size());
+		}
+		return SinkResultType::NEED_MORE_INPUT;
+	}
+
+private:
+	const PhysicalUngroupedAggregate &op;
+	UngroupedAggregateLocalSinkState &local_state;
+};
+
+static string ValidateUngroupedAggregateExecutionSink(const ExecutionRegionSinkInfo &sink_info) {
+	if (sink_info.kind != ExecutionRegionSinkKind::UNGROUPED_AGGREGATE_UPDATE) {
+		return "ungrouped-aggregate-runtime-kind-mismatch";
+	}
+	auto &contract = sink_info.aggregate_contract.native_state_update_contract;
+	if (contract.status != ExecutionRegionStateContractStatus::READY) {
+		return contract.blocker.empty() ? "ungrouped-aggregate-state-update-contract-not-ready" : contract.blocker;
+	}
+	if (sink_info.aggregate_contract.distinct_aggregate_count != 0 ||
+	    sink_info.aggregate_contract.distinct_table_count != 0 ||
+	    sink_info.aggregate_contract.distinct_child_count != 0) {
+		return "ungrouped-aggregate-state-update-distinct-state";
+	}
+	for (auto &aggregate : sink_info.aggregates) {
+		if (!aggregate.reason.empty()) {
+			return aggregate.reason;
+		}
+		if (aggregate.distinct || aggregate.has_filter || aggregate.has_order_bys || aggregate.order_dependent) {
+			return "ungrouped-aggregate-state-update-unsupported-aggregate-semantics";
+		}
+		if (!aggregate.has_state_update || !aggregate.payload_expressions_ready ||
+		    !aggregate.supported_payload_references) {
+			return "ungrouped-aggregate-state-update-payload-contract";
+		}
+	}
+	return "none";
+}
+
+static ExecutionPrimitiveAggregateUpdateBinding
+BuildUngroupedAggregatePrimitiveUpdateBinding(const PhysicalUngroupedAggregate &op,
+                                             UngroupedAggregateLocalSinkState &local_state,
+                                             const ExecutionRegionSinkInfo &sink_info) {
+	ExecutionPrimitiveAggregateUpdateBinding result;
+	result.lanes.reserve(sink_info.aggregates.size());
+	for (auto &aggregate_info : sink_info.aggregates) {
+		if (aggregate_info.child_count != 1 || aggregate_info.child_types.empty()) {
+			result.blocker = "ungrouped-aggregate-primitive-update-requires-one-payload";
+			return result;
+		}
+		if (aggregate_info.aggregate_index >= op.aggregates.size()) {
+			result.blocker = "ungrouped-aggregate-primitive-update-aggregate-index-out-of-range";
+			return result;
+		}
+		auto &aggregate = op.aggregates[aggregate_info.aggregate_index]->Cast<BoundAggregateExpression>();
+		auto &function = aggregate.Function();
+		if (!function.HasPrimitiveUpdateABI()) {
+			result.blocker = "ungrouped-aggregate-primitive-update-abi-missing";
+			return result;
+		}
+		auto &abi = function.GetPrimitiveUpdateABI();
+		if (abi.kind != AggregatePrimitiveUpdateKind::SUM_INT64) {
+			result.blocker = "ungrouped-aggregate-primitive-update-kind-unsupported";
+			return result;
+		}
+		if (aggregate_info.child_types[0].InternalType() != abi.input_type) {
+			result.blocker = "ungrouped-aggregate-primitive-update-payload-type-mismatch";
+			return result;
+		}
+		if (function.HasStateSizeCallback() && function.GetStateSizeCallback()(function) != abi.state_size) {
+			result.blocker = "ungrouped-aggregate-primitive-update-state-size-mismatch";
+			return result;
+		}
+		if (abi.state_value_offset + sizeof(int64_t) > abi.state_size ||
+		    abi.state_is_set_offset + sizeof(bool) > abi.state_size) {
+			result.blocker = "ungrouped-aggregate-primitive-update-state-layout-invalid";
+			return result;
+		}
+
+		auto state_ptr = local_state.state.state.aggregate_data[aggregate_info.aggregate_index].get();
+		ExecutionPrimitiveAggregateUpdateLane lane;
+		lane.ready = true;
+		lane.kind = abi.kind;
+		lane.aggregate_index = aggregate_info.aggregate_index;
+		lane.payload_index = aggregate_info.payload_index;
+		lane.payload_type = aggregate_info.child_types[0].InternalType();
+		lane.sum_int64_value = reinterpret_cast<int64_t *>(state_ptr + abi.state_value_offset);
+		lane.state_is_set = reinterpret_cast<bool *>(state_ptr + abi.state_is_set_offset);
+		lane.row_count = &local_state.state.state.counts[aggregate_info.aggregate_index];
+		lane.blocker = "none";
+		result.lanes.push_back(lane);
+	}
+	result.ready = !result.lanes.empty() && result.lanes.size() == sink_info.aggregates.size();
+	result.blocker = result.ready ? "none" : "ungrouped-aggregate-primitive-update-empty";
+	return result;
+}
+
 //===--------------------------------------------------------------------===//
 // Sink
 //===--------------------------------------------------------------------===//
@@ -370,6 +487,32 @@ SinkResultType PhysicalUngroupedAggregate::Sink(ExecutionContext &context, DataC
 	return SinkResultType::NEED_MORE_INPUT;
 }
 
+bool PhysicalUngroupedAggregate::BindExecutionSink(ExecutionContext &context, DataChunk &input,
+                                                   OperatorSinkInput &sink_input,
+                                                   const ExecutionRegionSinkInfo &sink_info,
+                                                   ExecutionSinkBinding &binding) const {
+	(void)context;
+	(void)input;
+	binding = ExecutionSinkBinding();
+	binding.kind = sink_info.kind;
+	auto blocker = ValidateUngroupedAggregateExecutionSink(sink_info);
+	if (blocker != "none") {
+		binding.blocker = blocker;
+		binding.aggregate_update.blocker = blocker;
+		return false;
+	}
+
+	auto &local_state = sink_input.local_state.Cast<UngroupedAggregateLocalSinkState>();
+	binding.ready = true;
+	binding.aggregate_update.ready = true;
+	binding.aggregate_update.state = make_shared_ptr<UngroupedAggregateExecutionRegionSinkState>(*this, local_state);
+	binding.aggregate_update.primitive =
+	    BuildUngroupedAggregatePrimitiveUpdateBinding(*this, local_state, sink_info);
+	binding.aggregate_update.blocker = "none";
+	binding.blocker = "none";
+	return true;
+}
+
 void LocalUngroupedAggregateState::Sink(DataChunk &payload_chunk, idx_t payload_idx, idx_t aggr_idx, idx_t count) {
 	state.counts[aggr_idx] += count;
 	auto &func = state.functions[aggr_idx];
@@ -390,27 +533,6 @@ void LocalUngroupedAggregateState::Sink(DataChunk &payload_chunk, idx_t payload_
 			state_data.WriteValue(state_ptr);
 		}
 		func.GetStateUpdateCallback()(start_of_input, aggr_input_data, payload_cnt, repeated_state_vector, count);
-	}
-}
-
-void JitBindNativeUngroupedAggregateStates(OperatorSinkInput &input,
-                                           const vector<JitNativeUngroupedAggregateState> &requested_states,
-                                           vector<JitNativeUngroupedAggregateState> &bound_states) {
-	auto &sink = input.local_state.Cast<UngroupedAggregateLocalSinkState>();
-	bound_states.clear();
-	bound_states.reserve(requested_states.size());
-	for (auto &requested : requested_states) {
-		if (requested.aggregate_index >= sink.state.state.aggregate_data.size()) {
-			throw InternalException("JIT native ungrouped aggregate state references aggregate index %llu beyond %llu",
-			                        static_cast<unsigned long long>(requested.aggregate_index),
-			                        static_cast<unsigned long long>(sink.state.state.aggregate_data.size()));
-		}
-		JitNativeUngroupedAggregateState bound;
-		bound.aggregate_index = requested.aggregate_index;
-		bound.update_kind = requested.update_kind;
-		bound.state = sink.state.state.aggregate_data[requested.aggregate_index].get();
-		bound.count = &sink.state.state.counts[requested.aggregate_index];
-		bound_states.push_back(bound);
 	}
 }
 
@@ -725,8 +847,8 @@ static SourceResultType ScanUngroupedAggregateState(ExecutionContext &context, D
 	return SourceResultType::FINISHED;
 }
 
-bool PhysicalUngroupedAggregate::SupportsJitNativeSource(const JitPreparedPipeline &jit_prepared_pipeline) const {
-	return jit_prepared_pipeline.RequiresNativeSource();
+bool PhysicalUngroupedAggregate::SupportsExecutionSourceContract(const ExecutionRegionOpenRequest &open_request) const {
+	return open_request.UsesSourceContract();
 }
 
 SourceResultType PhysicalUngroupedAggregate::GetDataInternal(ExecutionContext &context, DataChunk &chunk,
@@ -735,8 +857,9 @@ SourceResultType PhysicalUngroupedAggregate::GetDataInternal(ExecutionContext &c
 	return ScanUngroupedAggregateState(context, chunk, *this);
 }
 
-SourceResultType PhysicalUngroupedAggregate::GetJitNativeSourceDataInternal(ExecutionContext &context, DataChunk &chunk,
-                                                                            OperatorSourceInput &input) const {
+SourceResultType PhysicalUngroupedAggregate::GetExecutionSourceContractDataInternal(ExecutionContext &context,
+                                                                                    DataChunk &chunk,
+                                                                                    OperatorSourceInput &input) const {
 	(void)input;
 	return ScanUngroupedAggregateState(context, chunk, *this);
 }

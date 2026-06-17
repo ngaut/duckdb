@@ -74,7 +74,7 @@ struct StatementProperties {
 	StatementProperties()
 	    : requires_valid_transaction(true), output_type(QueryResultOutputType::FORCE_MATERIALIZED),
 	      bound_all_parameters(true), return_type(StatementReturnType::QUERY_RESULT), parameter_count(0),
-	      always_require_rebind(false), suppress_jit(false) {
+	      always_require_rebind(false), suppress_compiled_execution(false) {
 	}
 
 	struct CatalogIdentity {
@@ -112,8 +112,9 @@ struct StatementProperties {
 	idx_t parameter_count;
 	//! Whether or not the statement ALWAYS requires a rebind
 	bool always_require_rebind;
-	//! Whether or not JIT should be suppressed for this statement and its result wrapper pipelines
-	bool suppress_jit;
+	//! Whether or not compiled execution regions should be suppressed for this statement and its result wrapper
+	//! pipelines
+	bool suppress_compiled_execution;
 
 	bool IsReadOnly() {
 		return modified_databases.empty();

@@ -4,7 +4,6 @@
 #include "duckdb/common/mutex.hpp"
 #include "duckdb/common/arena_containers/arena_vector.hpp"
 #include "duckdb/execution/expression_executor.hpp"
-#include "duckdb/execution/jit/runtime.hpp"
 #include "duckdb/function/create_sort_key.hpp"
 #include "duckdb/storage/data_table.hpp"
 #include "duckdb/planner/filter/table_filter_function_helpers.hpp"
@@ -117,6 +116,8 @@ public:
 
 public:
 	void Sink(DataChunk &input, optional_ptr<TopNBoundaryValue> boundary_value = nullptr);
+	void SinkPreparedOrderKeys(DataChunk &order_keys, DataChunk &payload,
+	                           optional_ptr<TopNBoundaryValue> boundary_value = nullptr);
 	void Combine(TopNHeap &other);
 	void Reduce();
 	void Finalize();
@@ -378,6 +379,40 @@ void TopNHeap::Sink(DataChunk &input, optional_ptr<TopNBoundaryValue> global_bou
 	}
 }
 
+void TopNHeap::SinkPreparedOrderKeys(DataChunk &order_keys, DataChunk &payload,
+                                     optional_ptr<TopNBoundaryValue> global_boundary) {
+	static constexpr idx_t SMALL_HEAP_THRESHOLD = 100;
+
+	if (order_keys.ColumnCount() != orders.size()) {
+		throw InternalException("Prepared TopN order-key count mismatch");
+	}
+	if (order_keys.size() != payload.size()) {
+		throw InternalException("Prepared TopN order-key and payload cardinality mismatch");
+	}
+
+	sort_chunk.Reference(order_keys);
+
+	if (global_boundary) {
+		if (!CheckBoundaryValues(sort_chunk, payload, *global_boundary)) {
+			return;
+		}
+	}
+
+	sort_keys.Reset();
+	auto &sort_keys_vec = sort_keys.data[0];
+	CreateSortKeyHelpers::CreateSortKey(sort_chunk, modifiers, sort_keys_vec);
+
+	if (heap_size <= SMALL_HEAP_THRESHOLD) {
+		AddSmallHeap(payload, sort_keys_vec);
+	} else {
+		AddLargeHeap(payload, sort_keys_vec);
+	}
+
+	if (heap.size() >= heap_size && global_boundary) {
+		global_boundary->UpdateValue(heap.front().sort_key);
+	}
+}
+
 void TopNHeap::Combine(TopNHeap &other) {
 	// "other" is sorted at this point
 	idx_t match_count = 0;
@@ -512,6 +547,72 @@ SinkResultType PhysicalTopN::Sink(ExecutionContext &context, DataChunk &chunk, O
 	return SinkResultType::NEED_MORE_INPUT;
 }
 
+class TopNExecutionRegionSinkState : public ExecutionOrderedSinkState {
+public:
+	TopNExecutionRegionSinkState(TopNGlobalSinkState &global_state_p, TopNLocalSinkState &local_state_p)
+	    : global_state(global_state_p), local_state(local_state_p) {
+	}
+
+	SinkResultType Sink(DataChunk &order_keys, DataChunk &payload) override {
+		local_state.heap.SinkPreparedOrderKeys(order_keys, payload, &global_state.boundary_value);
+		local_state.heap.Reduce();
+		return SinkResultType::NEED_MORE_INPUT;
+	}
+
+private:
+	TopNGlobalSinkState &global_state;
+	TopNLocalSinkState &local_state;
+};
+
+static string ValidateTopNExecutionSink(const ExecutionRegionSinkInfo &sink_info) {
+	if (sink_info.kind != ExecutionRegionSinkKind::SORT) {
+		return "top-n-sink-runtime-kind-mismatch";
+	}
+	if (sink_info.native_sink_contract.status != ExecutionRegionStateContractStatus::READY) {
+		return sink_info.native_sink_contract.blocker.empty() ? "top-n-sink-contract-not-ready"
+		                                                      : sink_info.native_sink_contract.blocker;
+	}
+	if (!sink_info.order_contract.present) {
+		return "top-n-sink-runtime-missing-order-contract";
+	}
+	if (sink_info.order_contract.kind != ExecutionRegionOperatorKind::TOP_N) {
+		return "top-n-sink-runtime-operator-kind-mismatch";
+	}
+	if (!sink_info.order_contract.all_order_keys_ready) {
+		return sink_info.order_contract.order_key_blocker.empty() ? "top-n-sink-runtime-order-key-not-ready"
+		                                                          : sink_info.order_contract.order_key_blocker;
+	}
+	return "none";
+}
+
+bool PhysicalTopN::BindExecutionSink(ExecutionContext &context, DataChunk &input, OperatorSinkInput &sink_input,
+                                     const ExecutionRegionSinkInfo &sink_info, ExecutionSinkBinding &binding) const {
+	(void)context;
+	(void)input;
+	binding = ExecutionSinkBinding();
+	binding.kind = sink_info.kind;
+	auto blocker = ValidateTopNExecutionSink(sink_info);
+	if (blocker != "none") {
+		binding.blocker = blocker;
+		binding.ordered_sink.blocker = blocker;
+		return false;
+	}
+
+	auto &gstate = sink_input.global_state.Cast<TopNGlobalSinkState>();
+	auto &lstate = sink_input.local_state.Cast<TopNLocalSinkState>();
+	binding.ready = true;
+	binding.ordered_sink.ready = true;
+	binding.ordered_sink.state = make_shared_ptr<TopNExecutionRegionSinkState>(gstate, lstate);
+	binding.ordered_sink.order_key_types.reserve(sink_info.order_contract.order_keys.size());
+	for (auto &key : sink_info.order_contract.order_keys) {
+		binding.ordered_sink.order_key_types.push_back(key.type);
+	}
+	binding.ordered_sink.payload_types = sink_info.order_contract.payload_types;
+	binding.ordered_sink.blocker = "none";
+	binding.blocker = "none";
+	return true;
+}
+
 //===--------------------------------------------------------------------===//
 // Combine
 //===--------------------------------------------------------------------===//
@@ -576,8 +677,8 @@ unique_ptr<LocalSourceState> PhysicalTopN::GetLocalSourceState(ExecutionContext 
 	return make_uniq<TopNLocalSourceState>();
 }
 
-bool PhysicalTopN::SupportsJitNativeSource(const JitPreparedPipeline &jit_prepared_pipeline) const {
-	return jit_prepared_pipeline.RequiresNativeSource();
+bool PhysicalTopN::SupportsExecutionSourceContract(const ExecutionRegionOpenRequest &open_request) const {
+	return open_request.UsesSourceContract();
 }
 
 SourceResultType PhysicalTopN::GetDataInternal(ExecutionContext &context, DataChunk &chunk,
@@ -603,8 +704,8 @@ SourceResultType PhysicalTopN::GetDataInternal(ExecutionContext &context, DataCh
 	return chunk.size() == 0 ? SourceResultType::FINISHED : SourceResultType::HAVE_MORE_OUTPUT;
 }
 
-SourceResultType PhysicalTopN::GetJitNativeSourceDataInternal(ExecutionContext &context, DataChunk &chunk,
-                                                              OperatorSourceInput &input) const {
+SourceResultType PhysicalTopN::GetExecutionSourceContractDataInternal(ExecutionContext &context, DataChunk &chunk,
+                                                                      OperatorSourceInput &input) const {
 	return GetDataInternal(context, chunk, input);
 }
 

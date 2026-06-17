@@ -2,7 +2,7 @@
 #
 # Production-style timing harness for DuckDB JIT on TPC-H.
 #
-# tpch_trace.py is the diagnostic tool: it emits compile events, runtime trace
+# tpch_trace.py is the trace tool: it emits compile events, runtime trace
 # facts, IR, capability gaps, and profile attribution. This harness answers a
 # narrower performance question with repeated runs and event retention disabled
 # by default: does a policy run faster on the actual query path?
@@ -21,13 +21,14 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "jit"))
 from trace_manifest import default_trace_output_directory, prepare_trace_output_directory, write_trace_manifest
 
 from tpch_schema import (
-    BENCHMARK_ADMISSION_PROOF_GAP_FIELDS as ADMISSION_PROOF_GAP_FIELDS,
+    BENCHMARK_ADMISSION_EVIDENCE_FIELDS as ADMISSION_EVIDENCE_FIELDS,
+    BENCHMARK_EVIDENCE_STAGE_FIELDS,
     BENCHMARK_CORRECTNESS_SUMMARY_FIELDS as CORRECTNESS_SUMMARY_FIELDS,
     BENCHMARK_POLICY_SUMMARY_FIELDS as POLICY_SUMMARY_FIELDS,
     BENCHMARK_RUN_FIELDS as RUN_FIELDS,
     BENCHMARK_SUMMARY_FIELDS as SUMMARY_FIELDS,
+    CANDIDATE_SIGNATURE_FIELDS,
     CANDIDATE_TRAIT_FIELDS,
-    CONTEXT_SPECIFIC_POSITIVE_ADMISSION_SHAPES,
     DECISION_COUNTER_SUMMARY_FIELDS,
     DEFAULT_POLICIES,
     DEFAULT_QUERIES,
@@ -54,6 +55,9 @@ from tpch_trace import (
     repo_root,
     row_int,
     run_duckdb,
+    build_candidate_admission_profile_key,
+    make_admission_profile_rule,
+    merge_admission_profile_rule,
     setting_sql,
     write_csv_rows,
 )
@@ -99,6 +103,15 @@ def sum_decision_counter(
     return total
 
 
+def is_evidence_work_counter(row: dict) -> bool:
+    return row.get("status") != "disabled"
+
+
+def evidence_stage_totals(rows: list) -> dict:
+    work_rows = [row for row in rows if is_evidence_work_counter(row)]
+    return {f"evidence_{field}": sum(row_int(row, field) for row in work_rows) for field in STAGE_FIELDS}
+
+
 def write_summary(out_dir: Path, rows: list) -> None:
     csv_rows = [{field: row[field] for field in RUN_FIELDS} for row in rows]
     write_csv_rows(out_dir / "runs.csv", RUN_FIELDS, csv_rows)
@@ -121,9 +134,9 @@ def write_summary(out_dir: Path, rows: list) -> None:
         decision_counter_rows,
     )
     write_csv_rows(
-        out_dir / "admission_proof_gap_summary.csv",
-        ADMISSION_PROOF_GAP_FIELDS,
-        collect_admission_proof_gap_summary(summary_rows, decision_counter_rows),
+        out_dir / "admission_evidence_summary.csv",
+        ADMISSION_EVIDENCE_FIELDS,
+        collect_admission_evidence_summary(summary_rows, decision_counter_rows),
     )
 
 
@@ -158,11 +171,14 @@ def collect_summary(rows: list) -> list:
                 "speedup_vs_off_median": f"{speedup:.6f}",
                 "faster_than_off_median": str(speedup >= 1.0).lower(),
                 "correctness_diff": sum(row_int(row, "correctness_diff") for row in group),
-                "compiled_regions": sum(row_int(row, "compiled_regions") for row in group),
-                "skipped_regions": sum(row_int(row, "skipped_regions") for row in group),
-                "unsupported_regions": sum(row_int(row, "unsupported_regions") for row in group),
-                "decision_count": sum(row_int(row, "decision_count") for row in group),
-                **{field: sum(row_int(row, field) for row in group) for field in STAGE_FIELDS},
+                "evidence_compiled_regions": sum(row_int(row, "evidence_compiled_regions") for row in group),
+                "evidence_skipped_regions": sum(row_int(row, "evidence_skipped_regions") for row in group),
+                "evidence_unsupported_regions": sum(row_int(row, "evidence_unsupported_regions") for row in group),
+                "evidence_decision_count": sum(row_int(row, "evidence_decision_count") for row in group),
+                **{
+                    field: sum(row_int(row, field) for row in group)
+                    for field in BENCHMARK_EVIDENCE_STAGE_FIELDS
+                },
                 "timings_s": ";".join(format_seconds(value) for value in timings),
             }
         )
@@ -191,11 +207,14 @@ def collect_policy_summary(summary_rows: list) -> list:
                 "slower_queries": sum(1 for row in group if float(row["speedup_vs_off_median"]) < 0.999999),
                 "equal_queries": sum(1 for row in group if 0.999999 <= float(row["speedup_vs_off_median"]) <= 1.000001),
                 "correctness_diff": sum(row_int(row, "correctness_diff") for row in group),
-                "compiled_regions": sum(row_int(row, "compiled_regions") for row in group),
-                "skipped_regions": sum(row_int(row, "skipped_regions") for row in group),
-                "unsupported_regions": sum(row_int(row, "unsupported_regions") for row in group),
-                "decision_count": sum(row_int(row, "decision_count") for row in group),
-                **{field: sum(row_int(row, field) for row in group) for field in STAGE_FIELDS},
+                "evidence_compiled_regions": sum(row_int(row, "evidence_compiled_regions") for row in group),
+                "evidence_skipped_regions": sum(row_int(row, "evidence_skipped_regions") for row in group),
+                "evidence_unsupported_regions": sum(row_int(row, "evidence_unsupported_regions") for row in group),
+                "evidence_decision_count": sum(row_int(row, "evidence_decision_count") for row in group),
+                **{
+                    field: sum(row_int(row, field) for row in group)
+                    for field in BENCHMARK_EVIDENCE_STAGE_FIELDS
+                },
             }
         )
     return result
@@ -243,11 +262,13 @@ def collect_decision_counter_summary(rows: list) -> list:
                     "status": counter.get("status", ""),
                     "execution_mode": counter.get("execution_mode", ""),
                     "region_execution_form": counter.get("region_execution_form", ""),
+                    "execution_body": counter.get("execution_body", ""),
                     "policy_decision": counter.get("policy_decision", ""),
                     "pipeline_shape": counter.get("pipeline_shape", ""),
                     "pipeline_estimated_cardinality": counter.get("pipeline_estimated_cardinality", "0"),
                     "candidate_shape": counter.get("candidate_shape", ""),
-                    "candidate_scope": counter.get("candidate_scope", ""),
+                    **{field: counter.get(field, "") for field in CANDIDATE_SIGNATURE_FIELDS},
+                    "candidate_contract_abi": counter.get("candidate_contract_abi", ""),
                     "admission_shape_key": counter.get("admission_shape_key", ""),
                     "admission_rule_present": counter.get("admission_rule_present", ""),
                     "admission_min_cardinality": counter.get("admission_min_cardinality", "0"),
@@ -282,13 +303,12 @@ def compact_reason(reason: str, limit: int = 360) -> str:
     return reason[:limit] + "...[truncated]"
 
 
-def classify_admission_proof_gap(
+def classify_admission_evidence(
     winning_queries: int,
     losing_queries: int,
     equal_queries: int,
     auto_rule_present: bool,
     auto_compiled_regions: int,
-    admission_shape_key: str,
 ) -> tuple:
     if winning_queries > 0 and losing_queries == 0:
         proof_status = "positive_query_median"
@@ -306,13 +326,8 @@ def classify_admission_proof_gap(
             root_cause = "auto_rule_present_but_not_selected_or_not_compiled"
         else:
             root_cause = "auto_rule_requires_cost_model_refinement"
-    elif (
-        proof_status == "positive_query_median"
-        and admission_shape_key in CONTEXT_SPECIFIC_POSITIVE_ADMISSION_SHAPES
-    ):
-        root_cause = "context_specific_positive_without_generic_admission_proof"
     elif proof_status == "positive_query_median":
-        root_cause = "missing_measured_auto_admission_proof"
+        root_cause = "positive_shape_without_auto_admission"
     elif proof_status == "mixed_query_median":
         root_cause = "shape_profitability_depends_on_context"
     elif proof_status == "neutral_query_median":
@@ -322,7 +337,7 @@ def classify_admission_proof_gap(
     return proof_status, root_cause
 
 
-def collect_admission_proof_gap_summary(summary_rows: list, decision_counter_rows: list) -> list:
+def collect_admission_evidence_summary(summary_rows: list, decision_counter_rows: list) -> list:
     speedup_by_query_policy = {
         (row["query"], row["policy"]): float(row["speedup_vs_off_median"]) for row in summary_rows
     }
@@ -350,8 +365,10 @@ def collect_admission_proof_gap_summary(summary_rows: list, decision_counter_row
             row["admission_shape_key"],
             row["execution_mode"],
             row["region_execution_form"],
+            row["execution_body"],
             row["candidate_shape"],
-            row["candidate_scope"],
+            *(row[field] for field in CANDIDATE_SIGNATURE_FIELDS),
+            row["candidate_contract_abi"],
         )
         if row["policy"] == "force" and row["status"] == "compiled":
             force_compiled_keys.add(key)
@@ -363,8 +380,10 @@ def collect_admission_proof_gap_summary(summary_rows: list, decision_counter_row
             row["admission_shape_key"],
             row["execution_mode"],
             row["region_execution_form"],
+            row["execution_body"],
             row["candidate_shape"],
-            row["candidate_scope"],
+            *(row[field] for field in CANDIDATE_SIGNATURE_FIELDS),
+            row["candidate_contract_abi"],
         )
         if key not in force_compiled_keys:
             continue
@@ -394,18 +413,29 @@ def collect_admission_proof_gap_summary(summary_rows: list, decision_counter_row
     for key, entry in grouped.items():
         if entry["force_compiled_regions"] <= 0:
             continue
-        admission_shape_key, execution_mode, region_execution_form, candidate_shape, candidate_scope = key
+        (
+            admission_shape_key,
+            execution_mode,
+            region_execution_form,
+            execution_body,
+            candidate_shape,
+            candidate_signature_context,
+            candidate_signature_shape,
+            candidate_signature_feature_shape,
+            candidate_signature_context_feature_shape,
+            candidate_contract_shape,
+            candidate_contract_abi,
+        ) = key
         speedups = list(entry["query_speedups"].values())
         winning_queries = sum(1 for speedup in speedups if speedup > 1.000001)
         losing_queries = sum(1 for speedup in speedups if speedup < 0.999999)
         equal_queries = len(speedups) - winning_queries - losing_queries
-        proof_status, root_cause = classify_admission_proof_gap(
+        proof_status, root_cause = classify_admission_evidence(
             winning_queries,
             losing_queries,
             equal_queries,
             entry["auto_rule_present"],
             entry["auto_compiled_regions"],
-            admission_shape_key,
         )
         stage_time_us = sum(entry[field] for field in STAGE_FIELDS)
         result.append(
@@ -413,8 +443,14 @@ def collect_admission_proof_gap_summary(summary_rows: list, decision_counter_row
                 "admission_shape_key": admission_shape_key,
                 "execution_mode": execution_mode,
                 "region_execution_form": region_execution_form,
+                "execution_body": execution_body,
                 "candidate_shape": candidate_shape,
-                "candidate_scope": candidate_scope,
+                "candidate_signature_context": candidate_signature_context,
+                "candidate_signature_shape": candidate_signature_shape,
+                "candidate_signature_feature_shape": candidate_signature_feature_shape,
+                "candidate_signature_context_feature_shape": candidate_signature_context_feature_shape,
+                "candidate_contract_shape": candidate_contract_shape,
+                "candidate_contract_abi": candidate_contract_abi,
                 "query_count": len(entry["queries"]),
                 "query_examples": join_unique(entry["queries"]),
                 "force_compiled_regions": entry["force_compiled_regions"],
@@ -440,16 +476,26 @@ def collect_admission_proof_gap_summary(summary_rows: list, decision_counter_row
     return sorted(
         result,
         key=lambda row: (
-            row["root_cause"] != "missing_measured_auto_admission_proof",
+            row["proof_status"] != "positive_query_median",
             -row_int(row, "force_winning_queries"),
             -row_int(row, "force_compiled_regions"),
             row["admission_shape_key"],
+            row["candidate_shape"],
+            *(row[field] for field in CANDIDATE_SIGNATURE_FIELDS),
+            row["candidate_contract_abi"],
         ),
     )
 
 
 def run_policy_benchmark(
-    args: argparse.Namespace, db_path: Path, out_dir: Path, query_id: str, query_sql: str, policy: str, repeat: int
+    args: argparse.Namespace,
+    db_path: Path,
+    out_dir: Path,
+    query_id: str,
+    query_sql: str,
+    policy: str,
+    repeat: int,
+    admission_rules: Optional[list] = None,
 ) -> dict:
     baseline_table = f"__jit_trace_baseline_q{query_id}"
     result_table = f"__jit_benchmark_result_q{query_id}_{policy}_{repeat}"
@@ -464,7 +510,7 @@ def run_policy_benchmark(
         args.duckdb,
         db_path,
         f"""
-{setting_sql(args, policy)}
+{setting_sql(args, policy, admission_rules)}
 SET jit_trace_decisions=false;
 SELECT * FROM duckdb_jit_clear_events();
 SELECT * FROM duckdb_jit_clear_counters();
@@ -488,7 +534,7 @@ SELECT
         EXCEPT ALL
         SELECT * FROM {result_table}
     )) AS baseline_minus_result
-	''', correctness_path)}
+    ''', correctness_path)}
 DROP TABLE IF EXISTS {result_table};
 """,
         f"benchmark q{query_id} {policy} repeat {repeat}",
@@ -497,7 +543,7 @@ DROP TABLE IF EXISTS {result_table};
         args.duckdb,
         db_path,
         f"""
-{setting_sql(args, policy)}
+{setting_sql(args, policy, admission_rules)}
 SET jit_trace_decisions=true;
 DROP TABLE IF EXISTS {counter_table};
 SELECT * FROM duckdb_jit_clear_events();
@@ -506,7 +552,7 @@ CREATE OR REPLACE TABLE {counter_table} AS
 {query_sql};
 {copy_statement(
     'SELECT * FROM duckdb_jit_decision_counters() ORDER BY backend_name, target, phase, status, '
-    'execution_mode, region_execution_form, policy_decision, candidate_scope, candidate_shape, admission_shape_key',
+    'execution_mode, region_execution_form, execution_body, policy_decision, candidate_contract_abi, candidate_shape, admission_shape_key',
     decision_counters_path,
 )}
 DROP TABLE IF EXISTS {counter_table};
@@ -527,29 +573,105 @@ DROP TABLE IF EXISTS {counter_table};
         "profile_operator_count": profile_operator_count(profile),
         **correctness,
         "correctness_diff": correctness_diff,
-        "compiled_regions": sum_decision_counter(decision_counter_rows, target="region", status="compiled"),
-        "skipped_regions": sum_decision_counter(decision_counter_rows, target="region", status="skipped"),
-        "unsupported_regions": sum_decision_counter(decision_counter_rows, target="region", status="unsupported"),
-        "native_region_decisions": sum_decision_counter(
+        "evidence_compiled_regions": sum_decision_counter(decision_counter_rows, target="region", status="compiled"),
+        "evidence_skipped_regions": sum_decision_counter(decision_counter_rows, target="region", status="skipped"),
+        "evidence_unsupported_regions": sum_decision_counter(
+            decision_counter_rows, target="region", status="unsupported"
+        ),
+        "evidence_native_region_decisions": sum_decision_counter(
             decision_counter_rows, target="region", execution_mode="native"
         ),
-        "non_native_region_decisions": sum(
-            row.get("target") == "region" and row.get("execution_mode") != "native"
+        "evidence_non_native_region_decisions": sum(
+            row_int(row, "count")
             for row in decision_counter_rows
+            if row.get("target") == "region" and row.get("execution_mode") != "native" and is_evidence_work_counter(row)
         ),
-        "executor_fallback_region_decisions": sum_decision_counter(
-            decision_counter_rows, target="region", execution_mode="executor_fallback"
-        ),
-        "unsupported_region_decisions": sum_decision_counter(
+        "evidence_unsupported_region_decisions": sum_decision_counter(
             decision_counter_rows, target="region", execution_mode="unsupported"
         ),
-        "decision_count": sum(row_int(row, "count") for row in decision_counter_rows),
-        **{field: sum(row_int(row, field) for row in decision_counter_rows) for field in STAGE_FIELDS},
+        "evidence_decision_count": sum(
+            row_int(row, "count") for row in decision_counter_rows if is_evidence_work_counter(row)
+        ),
+        **evidence_stage_totals(decision_counter_rows),
         "profile_json": profile_json_path.name,
         "correctness_csv": correctness_path.name,
         "decision_counters_csv": decision_counters_path.name,
         "_out_dir": out_dir,
     }
+
+
+def collect_benchmark_force_admission_profile_rules(
+    args: argparse.Namespace, out_dir: Path, off_row: dict, force_row: dict, measured_speedup: Optional[float] = None
+) -> list:
+    if row_int(off_row, "correctness_diff") != 0 or row_int(force_row, "correctness_diff") != 0:
+        return []
+    speedup = measured_speedup
+    if speedup is None:
+        off_time = row_int(off_row, "profile_query_time_us")
+        force_time = row_int(force_row, "profile_query_time_us")
+        if off_time <= 0 or force_time <= 0:
+            return []
+        speedup = float(off_time) / float(force_time)
+    if speedup < args.auto_profile_min_speedup:
+        return []
+
+    decision_counters_path = Path(force_row["decision_counters_csv"])
+    if not decision_counters_path.is_absolute():
+        decision_counters_path = out_dir / decision_counters_path
+    if not decision_counters_path.exists():
+        return []
+
+    result = []
+    for row in read_csv_rows(decision_counters_path):
+        if row.get("target") != "region" or row.get("status") != "compiled":
+            continue
+        admission_key = row.get("admission_shape_key", "")
+        if not admission_key:
+            continue
+        min_cardinality = row_int(row, "max_estimated_cardinality")
+        if min_cardinality <= 0:
+            continue
+        rule_row = dict(row)
+        if not rule_row.get("backend_name"):
+            rule_row["backend_name"] = args.backend
+        proof = (
+            "measured-auto-admission:benchmark-force-vs-off"
+            f";query={force_row['query']};repeat={force_row['repeat']};speedup={speedup:.6f}"
+        )
+        candidate_key = build_candidate_admission_profile_key(rule_row)
+        if candidate_key:
+            result.append(
+                make_admission_profile_rule(rule_row, candidate_key, min_cardinality, proof + ";key=inventory")
+            )
+        result.append(make_admission_profile_rule(rule_row, admission_key, min_cardinality, proof + ";key=lowered"))
+    return result
+
+
+def median_profile_query_time(rows: list) -> int:
+    return median_int([row_int(row, "profile_query_time_us") for row in rows])
+
+
+def calibrate_benchmark_query_admission_profile(
+    args: argparse.Namespace, out_dir: Path, admission_profile: list, off_rows: list, force_rows: list
+) -> None:
+    if not off_rows or not force_rows:
+        return
+    if any(row_int(row, "correctness_diff") != 0 for row in off_rows) or any(
+        row_int(row, "correctness_diff") != 0 for row in force_rows
+    ):
+        return
+    off_median = median_profile_query_time(off_rows)
+    force_median = median_profile_query_time(force_rows)
+    if off_median <= 0 or force_median <= 0:
+        return
+    measured_speedup = float(off_median) / float(force_median)
+    if measured_speedup < args.auto_profile_min_speedup:
+        return
+    for force_row in force_rows:
+        for rule in collect_benchmark_force_admission_profile_rules(
+            args, out_dir, off_rows[0], force_row, measured_speedup
+        ):
+            merge_admission_profile_rule(admission_profile, rule)
 
 
 def sql_quote(value) -> str:
@@ -559,7 +681,7 @@ def sql_quote(value) -> str:
 def write_report(args: argparse.Namespace, out_dir: Path) -> None:
     policy_rows = read_csv_rows(out_dir / "policy_summary.csv")
     query_rows = read_csv_rows(out_dir / "summary.csv")
-    admission_gap_rows = read_csv_rows(out_dir / "admission_proof_gap_summary.csv")
+    admission_evidence_rows = read_csv_rows(out_dir / "admission_evidence_summary.csv")
     lines = [
         "# TPC-H JIT Benchmark Report",
         "",
@@ -570,52 +692,58 @@ def write_report(args: argparse.Namespace, out_dir: Path) -> None:
         f"- repeats: {args.repeats}",
         f"- event_log_size: {args.event_log_size}",
         f"- jit_verify: {str(args.jit_verify).lower()}",
+        f"- calibrate_auto_from_force: {str(args.calibrate_auto_from_force).lower()}",
+        f"- auto_profile_min_speedup: {args.auto_profile_min_speedup}",
         "",
         "## Policy Summary",
         "",
         "| policy | total_median_s | relative_to_off | faster_queries | slower_queries | correctness_diff | "
-        "compiled_regions | skipped_regions | unsupported_regions |",
+        "evidence_compiled_regions | evidence_skipped_regions | evidence_unsupported_regions |",
         "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
     ]
     for row in policy_rows:
         lines.append(
             "| {policy} | {total_median_s} | {relative_to_off} | {faster_queries} | {slower_queries} | "
-            "{correctness_diff} | {compiled_regions} | {skipped_regions} | {unsupported_regions} |".format(**row)
+            "{correctness_diff} | {evidence_compiled_regions} | {evidence_skipped_regions} | "
+            "{evidence_unsupported_regions} |".format(**row)
         )
     lines.extend(
         [
             "",
             "## Query Summary",
             "",
-            "| query | policy | median_s | speedup_vs_off | correctness_diff | compiled_regions | skipped_regions | "
-            "unsupported_regions |",
+            "| query | policy | median_s | speedup_vs_off | correctness_diff | evidence_compiled_regions | "
+            "evidence_skipped_regions | evidence_unsupported_regions |",
             "| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |",
         ]
     )
     for row in query_rows:
         lines.append(
             "| {query} | {policy} | {median_s} | {speedup_vs_off_median} | {correctness_diff} | "
-            "{compiled_regions} | {skipped_regions} | {unsupported_regions} |".format(**row)
+            "{evidence_compiled_regions} | {evidence_skipped_regions} | {evidence_unsupported_regions} |".format(
+                **row
+            )
         )
-    if admission_gap_rows:
+    if admission_evidence_rows:
         lines.extend(
             [
                 "",
-                "## Admission Proof Gaps",
+                "## Admission Evidence",
                 "",
-                "| shape_key | mode | form | scope | queries | force_regions | median_speedup | proof_status | root_cause |",
-                "| --- | --- | --- | --- | --- | ---: | ---: | --- | --- |",
+                "| shape_key | mode | form | body | ABI | queries | force_regions | median_speedup | proof_status | root_cause |",
+                "| --- | --- | --- | --- | --- | --- | ---: | ---: | --- | --- |",
             ]
         )
-        for row in admission_gap_rows:
+        for row in admission_evidence_rows:
             lines.append(
-                "| {admission_shape_key} | {execution_mode} | {region_execution_form} | {candidate_scope} | "
+                "| {admission_shape_key} | {execution_mode} | {region_execution_form} | {execution_body} | "
+                "{candidate_contract_abi} | "
                 "{query_examples} | {force_compiled_regions} | {median_force_speedup_vs_off} | "
                 "{proof_status} | {root_cause} |".format(**row)
             )
     lines.append("")
     lines.append(
-        "This harness keeps diagnostic tracing separate from production timing. Use `tpch_trace.py` when you need IR, "
+        "This harness keeps trace collection separate from production timing. Use `tpch_trace.py` when you need IR, "
         "runtime events, capability gaps, and per-stage flow facts."
     )
     (out_dir / "report.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
@@ -630,7 +758,7 @@ def write_manifest(args: argparse.Namespace, out_dir: Path, db_path: Path, temp_
         "correctness_summary.csv",
         "operator_profile_summary.csv",
         "decision_counter_summary.csv",
-        "admission_proof_gap_summary.csv",
+        "admission_evidence_summary.csv",
         "report.md",
     ]
     for row in read_csv_rows(out_dir / "runs.csv"):
@@ -652,6 +780,8 @@ def write_manifest(args: argparse.Namespace, out_dir: Path, db_path: Path, temp_
             "repeats": args.repeats,
             "event_log_size": args.event_log_size,
             "jit_verify": args.jit_verify,
+            "calibrate_auto_from_force": args.calibrate_auto_from_force,
+            "auto_profile_min_speedup": args.auto_profile_min_speedup,
             "db_path": str(db_path),
             "temporary_db": temp_dir is not None,
             "kept_db": bool(args.keep_db),
@@ -679,6 +809,17 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--repeats", type=int, default=5)
     parser.add_argument("--event-log-size", type=int, default=0)
     parser.add_argument("--jit-verify", action="store_true")
+    parser.add_argument(
+        "--calibrate-auto-from-force",
+        action="store_true",
+        help="promote force-compiled region shapes into auto admission only after measured force-vs-off wins",
+    )
+    parser.add_argument(
+        "--auto-profile-min-speedup",
+        type=float,
+        default=1.0,
+        help="minimum per-query force/off speedup required before a compiled region shape is admitted for auto",
+    )
     parser.set_defaults(trace_runtime=False, dump_ir=False)
     return parser.parse_args()
 
@@ -689,6 +830,17 @@ def main() -> int:
     args.duckdb = args.duckdb.resolve()
     if args.repeats <= 0:
         raise TraceConfigurationError("--repeats must be positive")
+    if args.calibrate_auto_from_force:
+        policy_positions = {policy: idx for idx, policy in enumerate(args.policies)}
+        if not (
+            "off" in policy_positions
+            and "force" in policy_positions
+            and "auto" in policy_positions
+            and policy_positions["off"] < policy_positions["force"] < policy_positions["auto"]
+        ):
+            raise TraceConfigurationError("--calibrate-auto-from-force requires --policies off force auto")
+        if args.auto_profile_min_speedup < 1:
+            raise TraceConfigurationError("--auto-profile-min-speedup must be >= 1 for measured auto admission")
     if not args.duckdb.exists():
         raise RuntimeError(f"DuckDB binary does not exist: {args.duckdb}")
     if args.out_dir is None:
@@ -697,11 +849,30 @@ def main() -> int:
     db_path, temp_dir = prepare_tpch_database(args)
 
     rows = []
+    admission_profile = []
     try:
         for query_id in args.queries:
             query_id = f"{int(query_id):02d}"
             query_sql = read_query(root, query_id)
             create_baseline(args, db_path, query_id, query_sql)
+            if args.calibrate_auto_from_force:
+                query_policy_rows = collections.defaultdict(list)
+                for policy in args.policies:
+                    if policy == "auto":
+                        continue
+                    for repeat in range(1, args.repeats + 1):
+                        row = run_policy_benchmark(args, db_path, out_dir, query_id, query_sql, policy, repeat)
+                        rows.append(row)
+                        query_policy_rows[policy].append(row)
+                calibrate_benchmark_query_admission_profile(
+                    args, out_dir, admission_profile, query_policy_rows["off"], query_policy_rows["force"]
+                )
+                for repeat in range(1, args.repeats + 1):
+                    row = run_policy_benchmark(
+                        args, db_path, out_dir, query_id, query_sql, "auto", repeat, admission_profile
+                    )
+                    rows.append(row)
+                continue
             for repeat in range(1, args.repeats + 1):
                 for policy in args.policies:
                     rows.append(run_policy_benchmark(args, db_path, out_dir, query_id, query_sql, policy, repeat))
@@ -721,4 +892,8 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    try:
+        raise SystemExit(main())
+    except TraceConfigurationError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        raise SystemExit(2) from None

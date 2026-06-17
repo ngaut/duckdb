@@ -10,76 +10,109 @@
 
 #include "sljit_function_types.hpp"
 
-#include "duckdb/execution/jit/runtime.hpp"
+#include "duckdb/execution/execution_region_kernel.hpp"
 
 namespace duckdb {
 
-unique_ptr<JitCodeHandle> BuildSljitNativeNullCheck(SljitNativeNullCheckOp op, SljitNativeVectorFunction &function,
-                                                    string &error);
-unique_ptr<JitCodeHandle> BuildSljitNativeIntegerBinaryConstant(SljitNativeIntegerKind kind,
-                                                                SljitNativeIntegerBinaryOp op, bool constant_on_left,
-                                                                SljitNativeVectorFunction &function, string &error,
-                                                                bool check_result_range = false,
-                                                                int64_t result_min = 0, int64_t result_max = 0);
-unique_ptr<JitCodeHandle> BuildSljitNativeIntegerBinaryReferences(SljitNativeIntegerKind kind,
-                                                                  SljitNativeIntegerBinaryOp op,
-                                                                  SljitNativeVectorFunction &function, string &error,
-                                                                  bool check_result_range = false,
-                                                                  int64_t result_min = 0, int64_t result_max = 0);
-unique_ptr<JitCodeHandle> BuildSljitNativeDoubleBinaryConstant(SljitNativeDoubleBinaryOp op, bool constant_on_left,
-                                                               SljitNativeVectorFunction &function, string &error);
-unique_ptr<JitCodeHandle> BuildSljitNativeDoubleBinaryReferences(SljitNativeDoubleBinaryOp op,
-                                                                 SljitNativeVectorFunction &function, string &error);
-unique_ptr<JitCodeHandle> BuildSljitNativeIntegerCast(SljitNativeSignedIntegerWidth source_width,
-                                                      SljitNativeSignedIntegerWidth target_width, bool try_cast,
-                                                      SljitNativeVectorFunction &function, string &error);
-unique_ptr<JitCodeHandle> BuildSljitNativeSignedToUnsignedIntegerCast(
-    SljitNativeSignedIntegerWidth source_width, SljitNativeUnsignedIntegerWidth target_width, bool try_cast,
-    SljitNativeVectorFunction &function, string &error);
-unique_ptr<JitCodeHandle> BuildSljitNativeIntegerCoalesce(SljitNativeSignedIntegerWidth width,
-                                                          SljitNativeCoalesceRhsKind rhs_kind,
-                                                          bool constant_is_null,
-                                                          SljitNativeVectorFunction &function, string &error);
-unique_ptr<JitCodeHandle> BuildSljitNativeIntegerCompareConstant(SljitNativeIntegerKind kind,
-                                                                 SljitNativeIntegerCompareOp op,
-                                                                 bool constant_on_left,
-                                                                 SljitNativeVectorFunction &function, string &error);
-unique_ptr<JitCodeHandle> BuildSljitNativeIntegerCompareReferences(SljitNativeIntegerKind kind,
-                                                                   SljitNativeIntegerCompareOp op,
-                                                                   SljitNativeVectorFunction &function,
-                                                                   string &error);
-unique_ptr<JitCodeHandle> BuildSljitNativeIntegerSelectConstant(SljitNativeIntegerKind kind,
-                                                                SljitNativeIntegerCompareOp op, bool constant_on_left,
+unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeNullCheck(SljitNativeNullCheckOp op,
                                                                 SljitNativeVectorFunction &function, string &error);
-unique_ptr<JitCodeHandle> BuildSljitNativeIntegerSelectReferences(SljitNativeIntegerKind kind,
-                                                                  SljitNativeIntegerCompareOp op,
-                                                                  SljitNativeVectorFunction &function, string &error);
-unique_ptr<JitCodeHandle> BuildSljitNativeNullCheckSelect(SljitNativeNullCheckOp op,
-                                                          SljitNativeVectorFunction &function, string &error);
-unique_ptr<JitCodeHandle> BuildSljitNativeIntegerInList(SljitNativeIntegerKind kind, idx_t constant_count,
-                                                        bool list_has_null, bool not_in,
-                                                        SljitNativeVectorFunction &function, string &error);
-unique_ptr<JitCodeHandle> BuildSljitNativeIntegerInListSelect(SljitNativeIntegerKind kind, idx_t constant_count,
-                                                              bool list_has_null, bool not_in,
-                                                              SljitNativeVectorFunction &function, string &error);
-unique_ptr<JitCodeHandle> BuildSljitNativeIntegerBetween(SljitNativeIntegerKind kind, int64_t lower, int64_t upper,
-                                                         bool lower_inclusive, bool upper_inclusive, bool not_between,
-                                                         SljitNativeVectorFunction &function, string &error);
-unique_ptr<JitCodeHandle> BuildSljitNativeIntegerBetweenSelect(SljitNativeIntegerKind kind, int64_t lower,
-                                                               int64_t upper, bool lower_inclusive,
-                                                               bool upper_inclusive, bool not_between,
-                                                               SljitNativeVectorFunction &function, string &error);
-unique_ptr<JitCodeHandle> BuildSljitNativeStringCompressUInt8(SljitNativeVectorFunction &function, string &error);
-unique_ptr<JitCodeHandle> BuildSljitNativeIntegralCompress(SljitNativeSignedIntegerWidth source_width,
-                                                           SljitNativeUnsignedIntegerWidth target_width,
-                                                           SljitNativeVectorFunction &function, string &error);
-unique_ptr<JitCodeHandle> BuildSljitNativeIntegralDecompress(SljitNativeUnsignedIntegerWidth source_width,
-                                                             SljitNativeSignedIntegerWidth target_width,
-                                                             SljitNativeVectorFunction &function, string &error);
-unique_ptr<JitCodeHandle> BuildSljitNativeDateYear(SljitNativeVectorFunction &function, string &error);
-unique_ptr<JitCodeHandle> BuildSljitNativeConstantOrNull(const vector<idx_t> &guard_source_indices,
-                                                         SljitNativePredicateFunction &function, string &error);
-unique_ptr<JitCodeHandle> BuildSljitNativePredicate(const SljitNativePredicate &predicate, bool generate_result,
-                                                    SljitNativePredicateFunction &function, string &error);
+unique_ptr<ExecutionRegionCodeHandle>
+BuildSljitNativeIntegerBinaryConstant(SljitNativeIntegerKind kind, SljitNativeIntegerBinaryOp op, bool constant_on_left,
+                                      SljitNativeVectorFunction &function, string &error,
+                                      bool check_result_range = false, int64_t result_min = 0, int64_t result_max = 0);
+unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeIntegerBinaryReferences(
+    SljitNativeIntegerKind kind, SljitNativeIntegerBinaryOp op, SljitNativeVectorFunction &function, string &error,
+    bool check_result_range = false, int64_t result_min = 0, int64_t result_max = 0);
+unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeDoubleBinaryConstant(SljitNativeDoubleBinaryOp op,
+                                                                           bool constant_on_left,
+                                                                           SljitNativeVectorFunction &function,
+                                                                           string &error);
+unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeDoubleBinaryReferences(SljitNativeDoubleBinaryOp op,
+                                                                             SljitNativeVectorFunction &function,
+                                                                             string &error);
+unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeIntegerCast(SljitNativeSignedIntegerWidth source_width,
+                                                                  SljitNativeSignedIntegerWidth target_width,
+                                                                  bool try_cast, SljitNativeVectorFunction &function,
+                                                                  string &error);
+unique_ptr<ExecutionRegionCodeHandle>
+BuildSljitNativeSignedToUnsignedIntegerCast(SljitNativeSignedIntegerWidth source_width,
+                                            SljitNativeUnsignedIntegerWidth target_width, bool try_cast,
+                                            SljitNativeVectorFunction &function, string &error);
+unique_ptr<ExecutionRegionCodeHandle>
+BuildSljitNativeIntegerCoalesce(SljitNativeSignedIntegerWidth width, SljitNativeCoalesceRhsKind rhs_kind,
+                                bool constant_is_null, SljitNativeVectorFunction &function, string &error);
+unique_ptr<ExecutionRegionCodeHandle>
+BuildSljitNativeIntegerCompareConstant(SljitNativeIntegerKind kind, SljitNativeIntegerCompareOp op,
+                                       bool constant_on_left, SljitNativeVectorFunction &function, string &error);
+unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeIntegerCompareReferences(SljitNativeIntegerKind kind,
+                                                                               SljitNativeIntegerCompareOp op,
+                                                                               SljitNativeVectorFunction &function,
+                                                                               string &error);
+unique_ptr<ExecutionRegionCodeHandle>
+BuildSljitNativeIntegerSelectConstant(SljitNativeIntegerKind kind, SljitNativeIntegerCompareOp op,
+                                      bool constant_on_left, SljitNativeVectorFunction &function, string &error);
+unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeIntegerSelectReferences(SljitNativeIntegerKind kind,
+                                                                              SljitNativeIntegerCompareOp op,
+                                                                              SljitNativeVectorFunction &function,
+                                                                              string &error);
+unique_ptr<ExecutionRegionCodeHandle>
+BuildSljitNativeNullCheckSelect(SljitNativeNullCheckOp op, SljitNativeVectorFunction &function, string &error);
+unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeIntegerInList(SljitNativeIntegerKind kind, idx_t constant_count,
+                                                                    bool list_has_null, bool not_in,
+                                                                    SljitNativeVectorFunction &function, string &error);
+unique_ptr<ExecutionRegionCodeHandle>
+BuildSljitNativeIntegerInListSelect(SljitNativeIntegerKind kind, idx_t constant_count, bool list_has_null, bool not_in,
+                                    SljitNativeVectorFunction &function, string &error);
+unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeIntegerBetween(SljitNativeIntegerKind kind, int64_t lower,
+                                                                     int64_t upper, bool lower_inclusive,
+                                                                     bool upper_inclusive, bool not_between,
+                                                                     SljitNativeVectorFunction &function,
+                                                                     string &error);
+unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeIntegerBetweenSelect(SljitNativeIntegerKind kind, int64_t lower,
+                                                                           int64_t upper, bool lower_inclusive,
+                                                                           bool upper_inclusive, bool not_between,
+                                                                           SljitNativeVectorFunction &function,
+                                                                           string &error);
+unique_ptr<ExecutionRegionCodeHandle>
+BuildSljitNativeStringCompress(idx_t target_size, SljitNativeVectorFunction &function, string &error);
+unique_ptr<ExecutionRegionCodeHandle>
+BuildSljitNativeStringDecompress(idx_t source_size, SljitNativeVectorFunction &function, string &error);
+unique_ptr<ExecutionRegionCodeHandle>
+BuildSljitNativeExpressionTree(const ExecutionExpressionIR &root, SljitNativeVectorFunction &function, string &error);
+unique_ptr<ExecutionRegionCodeHandle>
+BuildSljitNativeUngroupedSumInt64ExpressionTree(const ExecutionExpressionIR &root,
+                                                SljitNativeAggregateUpdateFunction &function, string &error);
+unique_ptr<ExecutionRegionCodeHandle>
+BuildSljitNativeUngroupedSumInt64Reference(SljitNativeIntegerKind kind, SljitNativeAggregateUpdateFunction &function,
+                                           string &error);
+unique_ptr<ExecutionRegionCodeHandle>
+BuildSljitNativeGroupedSumInt64Reference(SljitNativeIntegerKind kind, idx_t state_value_offset,
+                                         idx_t state_is_set_offset,
+                                         SljitNativeAggregateUpdateFunction &function, string &error);
+unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeUngroupedSumInt64IntegerBinaryConstant(
+    SljitNativeIntegerKind kind, SljitNativeIntegerBinaryOp op, bool constant_on_left,
+    SljitNativeAggregateUpdateFunction &function, string &error, bool check_result_range = false,
+    int64_t result_min = 0, int64_t result_max = 0);
+unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeUngroupedSumInt64IntegerBinaryReferences(
+    SljitNativeIntegerKind kind, SljitNativeIntegerBinaryOp op, SljitNativeAggregateUpdateFunction &function,
+    string &error, bool check_result_range = false, int64_t result_min = 0, int64_t result_max = 0);
+unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeIntegralCompress(SljitNativeSignedIntegerWidth source_width,
+                                                                       SljitNativeUnsignedIntegerWidth target_width,
+                                                                       SljitNativeVectorFunction &function,
+                                                                       string &error);
+unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeIntegralDecompress(SljitNativeUnsignedIntegerWidth source_width,
+                                                                         SljitNativeSignedIntegerWidth target_width,
+                                                                         SljitNativeVectorFunction &function,
+                                                                         string &error);
+unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeDateYear(SljitNativeVectorFunction &function, string &error);
+unique_ptr<ExecutionRegionCodeHandle>
+BuildSljitNativeErrorGuardedReference(idx_t value_size, SljitNativeIntegerCompareOp guard_compare_op,
+                                      bool guard_constant_on_left, SljitNativeVectorFunction &function, string &error);
+unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeConstantOrNull(const vector<idx_t> &guard_source_indices,
+                                                                     SljitNativePredicateFunction &function,
+                                                                     string &error);
+unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativePredicate(const SljitNativePredicate &predicate,
+                                                                bool generate_result,
+                                                                SljitNativePredicateFunction &function, string &error);
 
 } // namespace duckdb

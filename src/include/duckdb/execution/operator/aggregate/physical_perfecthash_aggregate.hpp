@@ -34,11 +34,11 @@ public:
 public:
 	// Source interface
 	unique_ptr<GlobalSourceState> GetGlobalSourceState(ClientContext &context) const override;
-	bool SupportsJitNativeSource(const JitPreparedPipeline &jit_prepared_pipeline) const override;
+	bool SupportsExecutionSourceContract(const ExecutionRegionOpenRequest &open_request) const override;
 	SourceResultType GetDataInternal(ExecutionContext &context, DataChunk &chunk,
 	                                 OperatorSourceInput &input) const override;
-	SourceResultType GetJitNativeSourceDataInternal(ExecutionContext &context, DataChunk &chunk,
-	                                                OperatorSourceInput &input) const override;
+	SourceResultType GetExecutionSourceContractDataInternal(ExecutionContext &context, DataChunk &chunk,
+	                                                        OperatorSourceInput &input) const override;
 
 	bool IsSource() const override {
 		return true;
@@ -51,12 +51,14 @@ public:
 	// Sink interface
 	SinkResultType Sink(ExecutionContext &context, DataChunk &chunk, OperatorSinkInput &input) const override;
 	SinkCombineResultType Combine(ExecutionContext &context, OperatorSinkCombineInput &input) const override;
+	bool BindExecutionSink(ExecutionContext &context, DataChunk &input, OperatorSinkInput &sink_input,
+	                       const ExecutionRegionSinkInfo &sink_info, ExecutionSinkBinding &binding) const override;
 
 	unique_ptr<LocalSinkState> GetLocalSinkState(ExecutionContext &context) const override;
 	unique_ptr<GlobalSinkState> GetGlobalSinkState(ClientContext &context) const override;
 
 	InsertionOrderPreservingMap<string> ParamsToString() const override;
-	JitOperatorDescriptor GetJitOperatorDescriptor() const override;
+	ExecutionContract GetExecutionContract() const override;
 
 	//! Create a perfect aggregate hash table for this node
 	unique_ptr<PerfectAggregateHashTable> CreateHT(Allocator &allocator, ClientContext &context) const;

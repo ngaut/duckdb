@@ -10,12 +10,12 @@
 
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/string_util.hpp"
-#include "duckdb/main/settings.hpp"
+#include "duckdb/execution/execution_region_settings.hpp"
 
 namespace duckdb {
 
 string MaybeDumpIr(ClientContext &context, string ir) {
-	if (!Settings::Get<JitDumpIrSetting>(context)) {
+	if (!ExecutionRegionSettings::DumpIR(context)) {
 		return string();
 	}
 	return ir;

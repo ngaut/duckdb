@@ -1,5 +1,5 @@
 # name: test/sql/jit/test_jit_framework.test
-# description: JIT framework settings, backend registration, and fallback diagnostics
+# description: JIT framework settings, backend registration, and boundary trace
 # group: [jit]
 
 query II
@@ -35,12 +35,12 @@ SELECT name, description, available::INTEGER, supports_regions::INTEGER,
 FROM duckdb_jit_backends()
 ORDER BY name
 ----
-sljit	SLJIT backend for DuckDB JIT framework	1	1	1
+sljit	SLJIT execution region backend	1	1	1
 
 statement error
 SET jit_backend='missing_backend'
 ----
-JIT backend "missing_backend" is not registered
+Execution region backend "missing_backend" is not registered
 
 statement ok
 SET jit_backend='auto'
@@ -125,7 +125,8 @@ WHERE backend_name='sljit'
   AND target='region'
   AND status='unsupported'
   AND execution_mode='unsupported'
-  AND reason LIKE '%sljit native lowering is not implemented for this region IR node%'
+  AND reason LIKE '%region IR node is unsupported by SLJIT native contract lowering%'
+  AND reason LIKE '%backend cannot generate executable code for this whole region%'
 ----
 1
 
@@ -182,7 +183,7 @@ WHERE backend_name='sljit'
   AND status='compiled'
   AND execution_mode <> 'native'
   AND candidate_shape='filter-projection-sink'
-  AND candidate_scope='full_pipeline'
+  AND candidate_signature_context='full-pipeline'
 ----
 1
 
@@ -194,7 +195,7 @@ WHERE backend_name='sljit'
   AND status='compiled'
   AND execution_mode <> 'native'
   AND candidate_shape='filter-projection-sink'
-  AND candidate_scope='full_pipeline'
+  AND candidate_signature_context='full-pipeline'
 ----
 1
 
@@ -255,7 +256,7 @@ WHERE backend_name='sljit'
   AND status='compiled'
   AND execution_mode <> 'native'
   AND candidate_shape='filter-projection-sink'
-  AND candidate_scope='full_pipeline'
+  AND candidate_signature_context='full-pipeline'
 ----
 1
 
@@ -291,18 +292,21 @@ WHERE backend_name='sljit'
   AND policy_decision='force'
   AND region_execution_form='none'
   AND candidate_shape='projection-projection-sink'
-  AND candidate_scope='full_pipeline'
+  AND candidate_signature_context='full-pipeline'
   AND candidate_contract_abi='full_pipeline'
   AND candidate_start_operator_index=0
   AND candidate_end_operator_index=2
   AND candidate_pipeline_shape LIKE '%source:source:%:scan%'
   AND candidate_pipeline_shape LIKE '%sink:sink:%:sink%'
   AND admission_shape_key IS NULL
-  AND reason LIKE '%source:TABLE_SCAN:fallback%'
-  AND reason LIKE '%hash aggregate sink has no aggregate payload bindings%'
+  AND reason LIKE '%source:TABLE_SCAN:boundary%'
+  AND reason LIKE '%native aggregate update sink protocol%'
+  AND reason LIKE '%aggregate_state_update_contract_status=ready%'
   AND reason LIKE '%aggregate_count=0%'
   AND reason LIKE '%execution:unsupported%'
-  AND reason NOT LIKE '%hash aggregate native lookup and state update protocol missing%'
+  AND ir LIKE '%native_aggregate_state_update_contract_status=ready%'
+  AND reason NOT LIKE '%missing-native-state-update-contract%'
+  AND reason NOT LIKE '%hash-aggregate-native-state-update-boundary%'
 ----
 1
 
@@ -335,31 +339,32 @@ WHERE backend_name='sljit'
   AND status='unsupported'
   AND execution_mode='unsupported'
   AND candidate_shape='filter-projection-projection-sink'
-  AND candidate_scope='full_pipeline'
+  AND candidate_signature_context='full-pipeline'
   AND candidate_start_operator_index=0
   AND candidate_end_operator_index > candidate_start_operator_index
   AND code_size = 0
   AND region_execution_form='none'
-  AND reason LIKE '%region-lowering:native=4,fallback=1%'
+  AND reason LIKE '%region-lowering:native=4,boundary=1%'
   AND reason LIKE '%execution-form=none%'
   AND reason LIKE '%backend cannot generate executable code for this whole region%'
-  AND reason LIKE '%fusion-blocker:source-fusion-gap:requires-native-source%'
+  AND reason LIKE '%fusion-blocker:source-contract-blocker:requires-source-contract%'
   AND reason LIKE '%op0:FILTER:native:generated typed predicate filter%'
   AND reason LIKE '%op1:PROJECTION:native:generated typed projection%'
-  AND reason LIKE '%op2:PROJECTION:native:native typed reference projection%'
-  AND reason LIKE '%sink:UNGROUPED_AGGREGATE:native:generated native ungrouped aggregate state update%'
-  AND reason LIKE '%native-aggregate-update-executable=ready%'
-  AND reason LIKE '%aggregate0_state_type=HUGEINT%'
-  AND reason LIKE '%full-pipeline-native-sink-update%'
+  AND reason LIKE '%op2:PROJECTION:native:reference projection remap%'
+  AND reason LIKE '%sink:UNGROUPED_AGGREGATE:native%'
+  AND reason LIKE '%native aggregate update sink protocol%'
+  AND reason LIKE '%aggregate_state_update_contract_status=ready%'
   AND ir LIKE 'duckdb.region typed-vector-ir;%'
   AND ir LIKE '%compare_greater_than%'
   AND ir LIKE '%add%'
-  AND ir LIKE '%ungrouped_aggregate_update%'
   AND ir LIKE '%aggregate0<function=sum%'
   AND ir LIKE '%payload_index=0%'
+  AND ir LIKE '%native_aggregate_state_update_contract_status=ready%'
   AND ir LIKE '%candidate0<first_node=%'
   AND ir LIKE '%sink:sink:UNGROUPED_AGGREGATE%'
   AND ir LIKE '%op2:projection:PROJECTION%'
+  AND reason NOT LIKE '%missing-native-state-update-contract%'
+  AND reason NOT LIKE '%ungrouped-aggregate-native-state-update-boundary%'
 ----
 1
 
@@ -527,7 +532,7 @@ FROM duckdb_jit_events()
 WHERE backend_name='sljit'
   AND target='region'
   AND candidate_id IS NOT NULL
-  AND candidate_scope NOT IN ('full_pipeline', 'state_scan')
+  AND candidate_signature_context NOT IN ('full-pipeline', 'state-scan')
 ----
 1
 
@@ -603,24 +608,20 @@ FROM duckdb_jit_events()
 WHERE backend_name='sljit'
   AND target='region'
   AND status='skipped'
-  AND execution_mode='executor_fallback'
+  AND execution_mode='unsupported'
   AND region_execution_form='none'
   AND policy_decision='auto'
   AND candidate_id IS NULL
-  AND admission_shape_key='sljit:pipeline-inventory:table-scan-source+ungrouped-aggregate-update'
-  AND admission_rule_present=false
+  AND admission_shape_key IS NULL
+  AND admission_rule_present IS NULL
   AND admission_min_cardinality IS NULL
   AND admission_score IS NULL
   AND admission_proof IS NULL
   AND decision_time_us >= 0
   AND compile_time_us = 0
   AND code_size = 0
-  AND reason LIKE '%jit_policy=auto skips pipeline before typed IR lowering%'
-  AND reason LIKE '%no SLJIT auto admission family can match pipeline inventory%'
-  AND reason LIKE '%admission_rule=missing%'
-  AND reason LIKE '%source_filter_count=0%'
-  AND reason LIKE '%source_projected_column_count=0%'
-  AND reason LIKE '%features=table-scan-source+ungrouped-aggregate-update%'
+  AND reason LIKE '%execution_region_policy=auto skips pipeline before graph lowering%'
+  AND reason LIKE '%backend has no measured auto admission policy%'
 ----
 1
 
@@ -645,24 +646,20 @@ WHERE event_id > base_event_id
   AND backend_name='sljit'
   AND target='region'
   AND status='skipped'
-  AND execution_mode='executor_fallback'
+  AND execution_mode='unsupported'
   AND region_execution_form='none'
   AND policy_decision='auto'
   AND candidate_id IS NULL
-  AND admission_shape_key='sljit:pipeline-inventory:table-scan-source+ungrouped-aggregate-update'
-  AND admission_rule_present=false
+  AND admission_shape_key IS NULL
+  AND admission_rule_present IS NULL
   AND admission_min_cardinality IS NULL
   AND admission_score IS NULL
   AND admission_proof IS NULL
   AND decision_time_us >= 0
   AND compile_time_us = 0
   AND code_size = 0
-  AND reason LIKE '%jit_policy=auto skips pipeline before typed IR lowering%'
-  AND reason LIKE '%no SLJIT auto admission family can match pipeline inventory%'
-  AND reason LIKE '%admission_rule=missing%'
-  AND reason LIKE '%source_filter_count=0%'
-  AND reason LIKE '%source_projected_column_count=0%'
-  AND reason LIKE '%features=table-scan-source+ungrouped-aggregate-update%'
+  AND reason LIKE '%execution_region_policy=auto skips pipeline before graph lowering%'
+  AND reason LIKE '%backend has no measured auto admission policy%'
 ----
 1
 
@@ -687,6 +684,84 @@ WHERE backend_name='sljit'
   AND execution_mode='native'
   AND region_execution_form='fused'
   AND ir LIKE 'sljit.region native.region%'
+----
+1
+
+statement ok
+SET jit_dump_ir=true
+
+statement ok
+CREATE TEMP TABLE jit_expression_tree_input AS
+SELECT (i % 10000)::DECIMAL(15,2) AS ext_price,
+       (i % 10)::DECIMAL(15,2) AS discount
+FROM range(4096) tbl(i)
+
+statement ok
+CREATE TEMP TABLE jit_expression_tree_baseline AS
+SELECT coalesce(max(event_id), 0) AS base_event_id FROM duckdb_jit_events()
+
+statement ok
+CREATE TEMP TABLE jit_expression_tree_output AS
+SELECT ext_price * (100.00::DECIMAL(16,2) - discount) AS revenue
+FROM jit_expression_tree_input
+
+query I
+SELECT count(*) FROM jit_expression_tree_output
+----
+4096
+
+query I
+SELECT count(*) > 0
+FROM duckdb_jit_events(), jit_expression_tree_baseline
+WHERE event_id > base_event_id
+  AND backend_name='sljit'
+  AND target='region'
+  AND status='compiled'
+  AND execution_mode='native'
+  AND region_execution_form='fused'
+  AND execution_body='generated-machine-code'
+  AND code_size>0
+  AND reason LIKE '%generated typed projection%'
+  AND reason LIKE '%sink:BATCH_CREATE_TABLE_AS:native:append sink protocol%'
+  AND reason LIKE '%requires=materialization-append-sink%'
+  AND ir LIKE '%DECIMAL%'
+----
+1
+
+statement ok
+CREATE TEMP TABLE jit_grouped_batch_baseline AS
+SELECT coalesce(max(event_id), 0) AS base_event_id FROM duckdb_jit_events()
+
+query I
+SELECT sum((s1 + s2)::BIGINT)
+FROM (
+    SELECT discount, sum(ext_price) AS s1, sum(discount) AS s2
+    FROM jit_expression_tree_input
+    GROUP BY discount
+) t
+----
+8404980
+
+query I
+SELECT count(*) > 0
+FROM duckdb_jit_events(), jit_grouped_batch_baseline
+WHERE event_id > base_event_id
+  AND backend_name='sljit'
+  AND target='region'
+  AND status='compiled'
+  AND execution_mode='native'
+  AND region_execution_form='fused'
+  AND execution_body='generated-machine-code'
+  AND code_size>0
+  AND candidate_sink_kind='perfect-hash-aggregate-update'
+  AND reason LIKE '%native aggregate update sink protocol%'
+  AND reason LIKE '%perfect-hash-aggregate-native-state-update%'
+  AND reason LIKE '%aggregate_state_update_contract_status=ready%'
+  AND ir LIKE '%op1=aggregate_update(kind=perfect-hash%'
+  AND ir LIKE '%grouped_state_addresses=true%'
+  AND ir LIKE '%native_aggregate_state_update_contract_status=ready%'
+  AND reason NOT LIKE '%missing-native-state-update-contract%'
+  AND reason NOT LIKE '%perfect-hash-aggregate-native-state-update-boundary%'
 ----
 1
 

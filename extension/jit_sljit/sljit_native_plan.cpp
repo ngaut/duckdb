@@ -8,9 +8,9 @@
 #include "duckdb/common/types/decimal.hpp"
 namespace duckdb {
 
-bool TryReadNativeConstantOrNull(const JitExpressionIR &root, SljitNativeConstantOrNull &expr) {
-	if (root.kind != JitExpressionIRKind::CONSTANT_OR_NULL || root.children.size() < 2 ||
-	    root.children[0]->kind != JitExpressionIRKind::CONSTANT) {
+bool TryReadNativeConstantOrNull(const ExecutionExpressionIR &root, SljitNativeConstantOrNull &expr) {
+	if (root.kind != ExecutionExpressionIRKind::CONSTANT_OR_NULL || root.children.size() < 2 ||
+	    root.children[0]->kind != ExecutionExpressionIRKind::CONSTANT) {
 		return false;
 	}
 
@@ -22,11 +22,11 @@ bool TryReadNativeConstantOrNull(const JitExpressionIR &root, SljitNativeConstan
 
 	for (idx_t child_idx = 1; child_idx < root.children.size(); child_idx++) {
 		auto &child = *root.children[child_idx];
-		if (child.kind == JitExpressionIRKind::REFERENCE) {
+		if (child.kind == ExecutionExpressionIRKind::REFERENCE) {
 			expr.guard_source_indices.push_back(child.ref_index);
 			continue;
 		}
-		if (child.kind == JitExpressionIRKind::CONSTANT) {
+		if (child.kind == ExecutionExpressionIRKind::CONSTANT) {
 			expr.guard_has_null_constant = expr.guard_has_null_constant || child.constant.IsNull();
 			continue;
 		}
@@ -55,11 +55,11 @@ static bool TryGetNativeIntegerKind(LogicalTypeId logical_type, PhysicalType phy
 	}
 }
 
-static bool TryGetNativeIntegerKind(const JitExpressionIR &node, SljitNativeIntegerKind &kind) {
+static bool TryGetNativeIntegerKind(const ExecutionExpressionIR &node, SljitNativeIntegerKind &kind) {
 	return TryGetNativeIntegerKind(node.return_type.id(), node.physical_type, kind);
 }
 
-static bool TryGetNativeComparableIntegerKind(const JitExpressionIR &node, SljitNativeIntegerKind &kind) {
+static bool TryGetNativeComparableIntegerKind(const ExecutionExpressionIR &node, SljitNativeIntegerKind &kind) {
 	if (TryGetNativeIntegerKind(node, kind)) {
 		return true;
 	}
@@ -106,7 +106,7 @@ static bool TryGetNativeSignedIntegerWidth(LogicalTypeId logical_type, PhysicalT
 	}
 }
 
-bool TryGetNativeSignedIntegerWidth(const JitExpressionIR &node, SljitNativeSignedIntegerWidth &width) {
+bool TryGetNativeSignedIntegerWidth(const ExecutionExpressionIR &node, SljitNativeSignedIntegerWidth &width) {
 	return TryGetNativeSignedIntegerWidth(node.return_type.id(), node.physical_type, width);
 }
 
@@ -136,7 +136,7 @@ static bool TryGetNativeUnsignedIntegerWidth(LogicalTypeId logical_type, Physica
 	}
 }
 
-static bool TryGetNativeUnsignedIntegerWidth(const JitExpressionIR &node, SljitNativeUnsignedIntegerWidth &width) {
+static bool TryGetNativeUnsignedIntegerWidth(const ExecutionExpressionIR &node, SljitNativeUnsignedIntegerWidth &width) {
 	return TryGetNativeUnsignedIntegerWidth(node.return_type.id(), node.physical_type, width);
 }
 
@@ -178,10 +178,10 @@ static bool ReadNativeIntegerValue(const Value &value, SljitNativeIntegerKind ki
 	}
 }
 
-static bool TryReadNativeIntegerConstant(const JitExpressionIR &constant, SljitNativeIntegerKind kind,
+static bool TryReadNativeIntegerConstant(const ExecutionExpressionIR &constant, SljitNativeIntegerKind kind,
                                          int64_t &constant_value, bool &constant_is_null) {
 	SljitNativeIntegerKind constant_kind;
-	if (constant.kind != JitExpressionIRKind::CONSTANT) {
+	if (constant.kind != ExecutionExpressionIRKind::CONSTANT) {
 		return false;
 	}
 	constant_is_null = constant.constant.IsNull();
@@ -195,10 +195,10 @@ static bool TryReadNativeIntegerConstant(const JitExpressionIR &constant, SljitN
 	return ReadNativeIntegerValue(constant.constant, kind, constant_value);
 }
 
-static bool TryReadNativeIntegerReferenceConstant(const JitExpressionIR &candidate, const JitExpressionIR &constant,
+static bool TryReadNativeIntegerReferenceConstant(const ExecutionExpressionIR &candidate, const ExecutionExpressionIR &constant,
                                                   SljitNativeIntegerKind &kind, idx_t &source_index,
                                                   int64_t &constant_value) {
-	if (candidate.kind != JitExpressionIRKind::REFERENCE || !TryGetNativeIntegerKind(candidate, kind)) {
+	if (candidate.kind != ExecutionExpressionIRKind::REFERENCE || !TryGetNativeIntegerKind(candidate, kind)) {
 		return false;
 	}
 	bool constant_is_null;
@@ -209,11 +209,11 @@ static bool TryReadNativeIntegerReferenceConstant(const JitExpressionIR &candida
 	return true;
 }
 
-static bool TryReadNativeIntegerReferenceMaybeNullConstant(const JitExpressionIR &candidate,
-                                                          const JitExpressionIR &constant,
+static bool TryReadNativeIntegerReferenceMaybeNullConstant(const ExecutionExpressionIR &candidate,
+                                                          const ExecutionExpressionIR &constant,
                                                           SljitNativeIntegerKind &kind, idx_t &source_index,
                                                           int64_t &constant_value, bool &constant_is_null) {
-	if (candidate.kind != JitExpressionIRKind::REFERENCE || !TryGetNativeIntegerKind(candidate, kind)) {
+	if (candidate.kind != ExecutionExpressionIRKind::REFERENCE || !TryGetNativeIntegerKind(candidate, kind)) {
 		return false;
 	}
 	if (!TryReadNativeIntegerConstant(constant, kind, constant_value, constant_is_null)) {
@@ -223,11 +223,11 @@ static bool TryReadNativeIntegerReferenceMaybeNullConstant(const JitExpressionIR
 	return true;
 }
 
-static bool TryReadNativeComparableReferenceConstant(const JitExpressionIR &candidate,
-                                                    const JitExpressionIR &constant,
+static bool TryReadNativeComparableReferenceConstant(const ExecutionExpressionIR &candidate,
+                                                    const ExecutionExpressionIR &constant,
                                                     SljitNativeIntegerKind &kind, idx_t &source_index,
                                                     int64_t &constant_value) {
-	if (candidate.kind != JitExpressionIRKind::REFERENCE || !TryGetNativeComparableIntegerKind(candidate, kind)) {
+	if (candidate.kind != ExecutionExpressionIRKind::REFERENCE || !TryGetNativeComparableIntegerKind(candidate, kind)) {
 		return false;
 	}
 	bool constant_is_null;
@@ -238,11 +238,11 @@ static bool TryReadNativeComparableReferenceConstant(const JitExpressionIR &cand
 	return true;
 }
 
-static bool TryReadNativeComparableReferenceMaybeNullConstant(const JitExpressionIR &candidate,
-                                                             const JitExpressionIR &constant,
+static bool TryReadNativeComparableReferenceMaybeNullConstant(const ExecutionExpressionIR &candidate,
+                                                             const ExecutionExpressionIR &constant,
                                                              SljitNativeIntegerKind &kind, idx_t &source_index,
                                                              int64_t &constant_value, bool &constant_is_null) {
-	if (candidate.kind != JitExpressionIRKind::REFERENCE || !TryGetNativeComparableIntegerKind(candidate, kind)) {
+	if (candidate.kind != ExecutionExpressionIRKind::REFERENCE || !TryGetNativeComparableIntegerKind(candidate, kind)) {
 		return false;
 	}
 	if (!TryReadNativeIntegerConstant(constant, kind, constant_value, constant_is_null)) {
@@ -252,15 +252,15 @@ static bool TryReadNativeComparableReferenceMaybeNullConstant(const JitExpressio
 	return true;
 }
 
-static bool TryGetNativeIntegerBinaryOp(JitExpressionBinaryOp op, SljitNativeIntegerBinaryOp &native_op) {
+static bool TryGetNativeIntegerBinaryOp(ExecutionExpressionBinaryOp op, SljitNativeIntegerBinaryOp &native_op) {
 	switch (op) {
-	case JitExpressionBinaryOp::ADD:
+	case ExecutionExpressionBinaryOp::ADD:
 		native_op = SljitNativeIntegerBinaryOp::ADD;
 		return true;
-	case JitExpressionBinaryOp::SUBTRACT:
+	case ExecutionExpressionBinaryOp::SUBTRACT:
 		native_op = SljitNativeIntegerBinaryOp::SUBTRACT;
 		return true;
-	case JitExpressionBinaryOp::MULTIPLY:
+	case ExecutionExpressionBinaryOp::MULTIPLY:
 		native_op = SljitNativeIntegerBinaryOp::MULTIPLY;
 		return true;
 	default:
@@ -268,9 +268,9 @@ static bool TryGetNativeIntegerBinaryOp(JitExpressionBinaryOp op, SljitNativeInt
 	}
 }
 
-static bool TryGetNativeDoubleBinaryOp(JitExpressionBinaryOp op, SljitNativeDoubleBinaryOp &native_op) {
+static bool TryGetNativeDoubleBinaryOp(ExecutionExpressionBinaryOp op, SljitNativeDoubleBinaryOp &native_op) {
 	switch (op) {
-	case JitExpressionBinaryOp::DIVIDE:
+	case ExecutionExpressionBinaryOp::DIVIDE:
 		native_op = SljitNativeDoubleBinaryOp::DIVIDE;
 		return true;
 	default:
@@ -361,24 +361,24 @@ string NativeNullCheckReason(SljitNativeNullCheckOp op) {
 	}
 }
 
-static bool TryGetNativeIntegerCompareOp(JitExpressionBinaryOp op, SljitNativeIntegerCompareOp &compare_op) {
+static bool TryGetNativeIntegerCompareOp(ExecutionExpressionBinaryOp op, SljitNativeIntegerCompareOp &compare_op) {
 	switch (op) {
-	case JitExpressionBinaryOp::COMPARE_EQUAL:
+	case ExecutionExpressionBinaryOp::COMPARE_EQUAL:
 		compare_op = SljitNativeIntegerCompareOp::EQUAL;
 		return true;
-	case JitExpressionBinaryOp::COMPARE_NOTEQUAL:
+	case ExecutionExpressionBinaryOp::COMPARE_NOTEQUAL:
 		compare_op = SljitNativeIntegerCompareOp::NOT_EQUAL;
 		return true;
-	case JitExpressionBinaryOp::COMPARE_LESSTHAN:
+	case ExecutionExpressionBinaryOp::COMPARE_LESSTHAN:
 		compare_op = SljitNativeIntegerCompareOp::LESS_THAN;
 		return true;
-	case JitExpressionBinaryOp::COMPARE_GREATERTHAN:
+	case ExecutionExpressionBinaryOp::COMPARE_GREATERTHAN:
 		compare_op = SljitNativeIntegerCompareOp::GREATER_THAN;
 		return true;
-	case JitExpressionBinaryOp::COMPARE_LESSTHANOREQUALTO:
+	case ExecutionExpressionBinaryOp::COMPARE_LESSTHANOREQUALTO:
 		compare_op = SljitNativeIntegerCompareOp::LESS_THAN_OR_EQUAL;
 		return true;
-	case JitExpressionBinaryOp::COMPARE_GREATERTHANOREQUALTO:
+	case ExecutionExpressionBinaryOp::COMPARE_GREATERTHANOREQUALTO:
 		compare_op = SljitNativeIntegerCompareOp::GREATER_THAN_OR_EQUAL;
 		return true;
 	default:
@@ -386,10 +386,10 @@ static bool TryGetNativeIntegerCompareOp(JitExpressionBinaryOp op, SljitNativeIn
 	}
 }
 
-bool TryReadNativeIntegerBinaryConstant(const JitExpressionIR &root, SljitNativeIntegerBinaryOp &native_op,
+bool TryReadNativeIntegerBinaryConstant(const ExecutionExpressionIR &root, SljitNativeIntegerBinaryOp &native_op,
                                            SljitNativeIntegerKind &kind, idx_t &source_index, int64_t &constant_value,
                                            bool &constant_on_left) {
-	if (root.kind != JitExpressionIRKind::BINARY || !TryGetNativeIntegerKind(root, kind) || !root.left ||
+	if (root.kind != ExecutionExpressionIRKind::BINARY || !TryGetNativeIntegerKind(root, kind) || !root.left ||
 	    !root.right || !TryGetNativeIntegerBinaryOp(root.binary_op, native_op)) {
 		return false;
 	}
@@ -407,12 +407,12 @@ bool TryReadNativeIntegerBinaryConstant(const JitExpressionIR &root, SljitNative
 	return true;
 }
 
-bool TryReadNativeIntegerBinaryReferences(const JitExpressionIR &root, SljitNativeIntegerBinaryOp &native_op,
+bool TryReadNativeIntegerBinaryReferences(const ExecutionExpressionIR &root, SljitNativeIntegerBinaryOp &native_op,
                                                  SljitNativeIntegerKind &kind, idx_t &left_index,
                                                  idx_t &right_index) {
-	if (root.kind != JitExpressionIRKind::BINARY || !TryGetNativeIntegerKind(root, kind) || !root.left ||
-	    !root.right || root.left->kind != JitExpressionIRKind::REFERENCE ||
-	    root.right->kind != JitExpressionIRKind::REFERENCE || root.left->return_type != root.return_type ||
+	if (root.kind != ExecutionExpressionIRKind::BINARY || !TryGetNativeIntegerKind(root, kind) || !root.left ||
+	    !root.right || root.left->kind != ExecutionExpressionIRKind::REFERENCE ||
+	    root.right->kind != ExecutionExpressionIRKind::REFERENCE || root.left->return_type != root.return_type ||
 	    root.right->return_type != root.return_type || !TryGetNativeIntegerBinaryOp(root.binary_op, native_op)) {
 		return false;
 	}
@@ -421,13 +421,13 @@ bool TryReadNativeIntegerBinaryReferences(const JitExpressionIR &root, SljitNati
 	return true;
 }
 
-static bool IsNativeDoubleNode(const JitExpressionIR &node) {
+static bool IsNativeDoubleNode(const ExecutionExpressionIR &node) {
 	return node.return_type.id() == LogicalTypeId::DOUBLE && node.physical_type == PhysicalType::DOUBLE;
 }
 
-static bool TryReadNativeDoubleConstant(const JitExpressionIR &constant, double &constant_value,
+static bool TryReadNativeDoubleConstant(const ExecutionExpressionIR &constant, double &constant_value,
                                         bool &constant_is_null) {
-	if (constant.kind != JitExpressionIRKind::CONSTANT || !IsNativeDoubleNode(constant)) {
+	if (constant.kind != ExecutionExpressionIRKind::CONSTANT || !IsNativeDoubleNode(constant)) {
 		return false;
 	}
 	constant_is_null = constant.constant.IsNull();
@@ -439,10 +439,10 @@ static bool TryReadNativeDoubleConstant(const JitExpressionIR &constant, double 
 	return true;
 }
 
-static bool TryReadNativeDoubleReferenceConstant(const JitExpressionIR &candidate,
-                                                 const JitExpressionIR &constant, idx_t &source_index,
+static bool TryReadNativeDoubleReferenceConstant(const ExecutionExpressionIR &candidate,
+                                                 const ExecutionExpressionIR &constant, idx_t &source_index,
                                                  double &constant_value) {
-	if (candidate.kind != JitExpressionIRKind::REFERENCE || !IsNativeDoubleNode(candidate)) {
+	if (candidate.kind != ExecutionExpressionIRKind::REFERENCE || !IsNativeDoubleNode(candidate)) {
 		return false;
 	}
 	bool constant_is_null;
@@ -453,9 +453,9 @@ static bool TryReadNativeDoubleReferenceConstant(const JitExpressionIR &candidat
 	return true;
 }
 
-bool TryReadNativeDoubleBinaryConstant(const JitExpressionIR &root, SljitNativeDoubleBinaryOp &native_op,
+bool TryReadNativeDoubleBinaryConstant(const ExecutionExpressionIR &root, SljitNativeDoubleBinaryOp &native_op,
                                        idx_t &source_index, double &constant_value, bool &constant_on_left) {
-	if (root.kind != JitExpressionIRKind::BINARY || !IsNativeDoubleNode(root) || !root.left || !root.right ||
+	if (root.kind != ExecutionExpressionIRKind::BINARY || !IsNativeDoubleNode(root) || !root.left || !root.right ||
 	    !TryGetNativeDoubleBinaryOp(root.binary_op, native_op)) {
 		return false;
 	}
@@ -470,10 +470,10 @@ bool TryReadNativeDoubleBinaryConstant(const JitExpressionIR &root, SljitNativeD
 	return true;
 }
 
-bool TryReadNativeDoubleBinaryReferences(const JitExpressionIR &root, SljitNativeDoubleBinaryOp &native_op,
+bool TryReadNativeDoubleBinaryReferences(const ExecutionExpressionIR &root, SljitNativeDoubleBinaryOp &native_op,
                                          idx_t &left_index, idx_t &right_index) {
-	if (root.kind != JitExpressionIRKind::BINARY || !IsNativeDoubleNode(root) || !root.left || !root.right ||
-	    root.left->kind != JitExpressionIRKind::REFERENCE || root.right->kind != JitExpressionIRKind::REFERENCE ||
+	if (root.kind != ExecutionExpressionIRKind::BINARY || !IsNativeDoubleNode(root) || !root.left || !root.right ||
+	    root.left->kind != ExecutionExpressionIRKind::REFERENCE || root.right->kind != ExecutionExpressionIRKind::REFERENCE ||
 	    !IsNativeDoubleNode(*root.left) || !IsNativeDoubleNode(*root.right) ||
 	    !TryGetNativeDoubleBinaryOp(root.binary_op, native_op)) {
 		return false;
@@ -483,19 +483,19 @@ bool TryReadNativeDoubleBinaryReferences(const JitExpressionIR &root, SljitNativ
 	return true;
 }
 
-static bool IsNativeDecimal64Node(const JitExpressionIR &node) {
+static bool IsNativeDecimal64Node(const ExecutionExpressionIR &node) {
 	return node.return_type.id() == LogicalTypeId::DECIMAL && node.physical_type == PhysicalType::INT64;
 }
 
-static bool Decimal64BinaryHasRawSemantics(const JitExpressionIR &root) {
+static bool Decimal64BinaryHasRawSemantics(const ExecutionExpressionIR &root) {
 	D_ASSERT(root.left);
 	D_ASSERT(root.right);
 	switch (root.binary_op) {
-	case JitExpressionBinaryOp::ADD:
-	case JitExpressionBinaryOp::SUBTRACT:
+	case ExecutionExpressionBinaryOp::ADD:
+	case ExecutionExpressionBinaryOp::SUBTRACT:
 		return DecimalType::GetScale(root.return_type) == DecimalType::GetScale(root.left->return_type) &&
 		       DecimalType::GetScale(root.return_type) == DecimalType::GetScale(root.right->return_type);
-	case JitExpressionBinaryOp::MULTIPLY:
+	case ExecutionExpressionBinaryOp::MULTIPLY:
 		return DecimalType::GetScale(root.return_type) == DecimalType::GetScale(root.left->return_type) +
 		                                                   DecimalType::GetScale(root.right->return_type);
 	default:
@@ -516,11 +516,11 @@ static bool TryGetDecimal64Range(const LogicalType &type, int64_t &result_min, i
 	return true;
 }
 
-bool TryReadNativeDecimal64BinaryReferences(const JitExpressionIR &root, SljitNativeIntegerBinaryOp &native_op,
+bool TryReadNativeDecimal64BinaryReferences(const ExecutionExpressionIR &root, SljitNativeIntegerBinaryOp &native_op,
                                             idx_t &left_index, idx_t &right_index, int64_t &result_min,
                                             int64_t &result_max) {
-	if (root.kind != JitExpressionIRKind::BINARY || !IsNativeDecimal64Node(root) || !root.left || !root.right ||
-	    root.left->kind != JitExpressionIRKind::REFERENCE || root.right->kind != JitExpressionIRKind::REFERENCE ||
+	if (root.kind != ExecutionExpressionIRKind::BINARY || !IsNativeDecimal64Node(root) || !root.left || !root.right ||
+	    root.left->kind != ExecutionExpressionIRKind::REFERENCE || root.right->kind != ExecutionExpressionIRKind::REFERENCE ||
 	    !IsNativeDecimal64Node(*root.left) || !IsNativeDecimal64Node(*root.right) ||
 	    !TryGetNativeIntegerBinaryOp(root.binary_op, native_op) || !Decimal64BinaryHasRawSemantics(root) ||
 	    !TryGetDecimal64Range(root.return_type, result_min, result_max)) {
@@ -531,10 +531,10 @@ bool TryReadNativeDecimal64BinaryReferences(const JitExpressionIR &root, SljitNa
 	return true;
 }
 
-static bool TryReadNativeDecimal64ReferenceConstant(const JitExpressionIR &candidate,
-                                                    const JitExpressionIR &constant, idx_t &source_index,
+static bool TryReadNativeDecimal64ReferenceConstant(const ExecutionExpressionIR &candidate,
+                                                    const ExecutionExpressionIR &constant, idx_t &source_index,
                                                     int64_t &constant_value) {
-	if (candidate.kind != JitExpressionIRKind::REFERENCE || !IsNativeDecimal64Node(candidate) ||
+	if (candidate.kind != ExecutionExpressionIRKind::REFERENCE || !IsNativeDecimal64Node(candidate) ||
 	    !IsNativeDecimal64Node(constant)) {
 		return false;
 	}
@@ -548,10 +548,10 @@ static bool TryReadNativeDecimal64ReferenceConstant(const JitExpressionIR &candi
 	return true;
 }
 
-bool TryReadNativeDecimal64BinaryConstant(const JitExpressionIR &root, SljitNativeIntegerBinaryOp &native_op,
+bool TryReadNativeDecimal64BinaryConstant(const ExecutionExpressionIR &root, SljitNativeIntegerBinaryOp &native_op,
                                           idx_t &source_index, int64_t &constant_value, bool &constant_on_left,
                                           int64_t &result_min, int64_t &result_max) {
-	if (root.kind != JitExpressionIRKind::BINARY || !IsNativeDecimal64Node(root) || !root.left || !root.right ||
+	if (root.kind != ExecutionExpressionIRKind::BINARY || !IsNativeDecimal64Node(root) || !root.left || !root.right ||
 	    !TryGetNativeIntegerBinaryOp(root.binary_op, native_op) || !Decimal64BinaryHasRawSemantics(root) ||
 	    !TryGetDecimal64Range(root.return_type, result_min, result_max)) {
 		return false;
@@ -567,10 +567,10 @@ bool TryReadNativeDecimal64BinaryConstant(const JitExpressionIR &root, SljitNati
 	return true;
 }
 
-bool TryReadNativeIntegerCompareConstant(const JitExpressionIR &root, SljitNativeIntegerCompareOp &compare_op,
+bool TryReadNativeIntegerCompareConstant(const ExecutionExpressionIR &root, SljitNativeIntegerCompareOp &compare_op,
                                             SljitNativeIntegerKind &kind, idx_t &source_index, int64_t &constant_value,
                                             bool &constant_on_left) {
-	if (root.kind != JitExpressionIRKind::BINARY || root.return_type.id() != LogicalTypeId::BOOLEAN || !root.left ||
+	if (root.kind != ExecutionExpressionIRKind::BINARY || root.return_type.id() != LogicalTypeId::BOOLEAN || !root.left ||
 	    !root.right || !TryGetNativeIntegerCompareOp(root.binary_op, compare_op)) {
 		return false;
 	}
@@ -590,12 +590,12 @@ bool TryReadNativeIntegerCompareConstant(const JitExpressionIR &root, SljitNativ
 	return true;
 }
 
-bool TryReadNativeIntegerCompareReferences(const JitExpressionIR &root, SljitNativeIntegerCompareOp &compare_op,
+bool TryReadNativeIntegerCompareReferences(const ExecutionExpressionIR &root, SljitNativeIntegerCompareOp &compare_op,
                                                   SljitNativeIntegerKind &kind, idx_t &left_index,
                                                   idx_t &right_index) {
-	if (root.kind != JitExpressionIRKind::BINARY || root.return_type.id() != LogicalTypeId::BOOLEAN || !root.left ||
-	    !root.right || root.left->kind != JitExpressionIRKind::REFERENCE ||
-	    root.right->kind != JitExpressionIRKind::REFERENCE || root.left->return_type != root.right->return_type ||
+	if (root.kind != ExecutionExpressionIRKind::BINARY || root.return_type.id() != LogicalTypeId::BOOLEAN || !root.left ||
+	    !root.right || root.left->kind != ExecutionExpressionIRKind::REFERENCE ||
+	    root.right->kind != ExecutionExpressionIRKind::REFERENCE || root.left->return_type != root.right->return_type ||
 	    !TryGetNativeComparableIntegerKind(*root.left, kind) ||
 	    !TryGetNativeIntegerCompareOp(root.binary_op, compare_op)) {
 		return false;
@@ -605,8 +605,8 @@ bool TryReadNativeIntegerCompareReferences(const JitExpressionIR &root, SljitNat
 	return true;
 }
 
-static bool TryReadNativeIntegerCompareNullConstant(const JitExpressionIR &root) {
-	if (root.kind != JitExpressionIRKind::BINARY || root.return_type.id() != LogicalTypeId::BOOLEAN || !root.left ||
+static bool TryReadNativeIntegerCompareNullConstant(const ExecutionExpressionIR &root) {
+	if (root.kind != ExecutionExpressionIRKind::BINARY || root.return_type.id() != LogicalTypeId::BOOLEAN || !root.left ||
 	    !root.right) {
 		return false;
 	}
@@ -614,9 +614,9 @@ static bool TryReadNativeIntegerCompareNullConstant(const JitExpressionIR &root)
 	if (!TryGetNativeIntegerCompareOp(root.binary_op, compare_op)) {
 		return false;
 	}
-	auto try_read_null_compare = [](const JitExpressionIR &candidate, const JitExpressionIR &constant) {
+	auto try_read_null_compare = [](const ExecutionExpressionIR &candidate, const ExecutionExpressionIR &constant) {
 		SljitNativeIntegerKind kind;
-		if (candidate.kind != JitExpressionIRKind::REFERENCE ||
+		if (candidate.kind != ExecutionExpressionIRKind::REFERENCE ||
 		    !TryGetNativeComparableIntegerKind(candidate, kind)) {
 			return false;
 		}
@@ -627,9 +627,9 @@ static bool TryReadNativeIntegerCompareNullConstant(const JitExpressionIR &root)
 	return try_read_null_compare(*root.left, *root.right) || try_read_null_compare(*root.right, *root.left);
 }
 
-bool TryReadNativeIntegerCast(const JitExpressionIR &root, SljitNativeSignedIntegerWidth &source_width,
+bool TryReadNativeIntegerCast(const ExecutionExpressionIR &root, SljitNativeSignedIntegerWidth &source_width,
                               SljitNativeSignedIntegerWidth &target_width, idx_t &source_index, bool &try_cast) {
-	if (root.kind != JitExpressionIRKind::CAST || !root.left || root.left->kind != JitExpressionIRKind::REFERENCE ||
+	if (root.kind != ExecutionExpressionIRKind::CAST || !root.left || root.left->kind != ExecutionExpressionIRKind::REFERENCE ||
 	    !TryGetNativeSignedIntegerWidth(*root.left, source_width) ||
 	    !TryGetNativeSignedIntegerWidth(root, target_width)) {
 		return false;
@@ -639,10 +639,10 @@ bool TryReadNativeIntegerCast(const JitExpressionIR &root, SljitNativeSignedInte
 	return true;
 }
 
-bool TryReadNativeSignedToUnsignedIntegerCast(const JitExpressionIR &root, SljitNativeSignedIntegerWidth &source_width,
+bool TryReadNativeSignedToUnsignedIntegerCast(const ExecutionExpressionIR &root, SljitNativeSignedIntegerWidth &source_width,
                                               SljitNativeUnsignedIntegerWidth &target_width, idx_t &source_index,
                                               bool &try_cast) {
-	if (root.kind != JitExpressionIRKind::CAST || !root.left || root.left->kind != JitExpressionIRKind::REFERENCE ||
+	if (root.kind != ExecutionExpressionIRKind::CAST || !root.left || root.left->kind != ExecutionExpressionIRKind::REFERENCE ||
 	    !TryGetNativeSignedIntegerWidth(*root.left, source_width) ||
 	    !TryGetNativeUnsignedIntegerWidth(root, target_width)) {
 		return false;
@@ -652,9 +652,9 @@ bool TryReadNativeSignedToUnsignedIntegerCast(const JitExpressionIR &root, Sljit
 	return true;
 }
 
-static bool TryGetNativeSignedIntegerConstant(const JitExpressionIR &node, SljitNativeSignedIntegerWidth width,
+static bool TryGetNativeSignedIntegerConstant(const ExecutionExpressionIR &node, SljitNativeSignedIntegerWidth width,
                                               int64_t &constant_value, bool &constant_is_null) {
-	if (node.kind != JitExpressionIRKind::CONSTANT) {
+	if (node.kind != ExecutionExpressionIRKind::CONSTANT) {
 		return false;
 	}
 	constant_is_null = node.constant.IsNull();
@@ -680,13 +680,13 @@ static bool TryGetNativeSignedIntegerConstant(const JitExpressionIR &node, Sljit
 	}
 }
 
-bool TryReadNativeIntegralCompress(const JitExpressionIR &root, SljitNativeSignedIntegerWidth &source_width,
+bool TryReadNativeIntegralCompress(const ExecutionExpressionIR &root, SljitNativeSignedIntegerWidth &source_width,
                                    SljitNativeUnsignedIntegerWidth &target_width, idx_t &source_index,
                                    int64_t &minimum) {
-	if (root.kind != JitExpressionIRKind::INTRINSIC ||
-	    root.intrinsic != JitExpressionIntrinsicKind::INTEGRAL_COMPRESS ||
+	if (root.kind != ExecutionExpressionIRKind::INTRINSIC ||
+	    root.intrinsic != ExecutionExpressionIntrinsicKind::INTEGRAL_COMPRESS ||
 	    root.children.size() != 2 || !root.children[0] || !root.children[1] ||
-	    root.children[0]->kind != JitExpressionIRKind::REFERENCE ||
+	    root.children[0]->kind != ExecutionExpressionIRKind::REFERENCE ||
 	    !TryGetNativeSignedIntegerWidth(*root.children[0], source_width) ||
 	    !TryGetNativeUnsignedIntegerWidth(root, target_width)) {
 		return false;
@@ -700,13 +700,13 @@ bool TryReadNativeIntegralCompress(const JitExpressionIR &root, SljitNativeSigne
 	return true;
 }
 
-bool TryReadNativeIntegralDecompress(const JitExpressionIR &root, SljitNativeUnsignedIntegerWidth &source_width,
+bool TryReadNativeIntegralDecompress(const ExecutionExpressionIR &root, SljitNativeUnsignedIntegerWidth &source_width,
                                      SljitNativeSignedIntegerWidth &target_width, idx_t &source_index,
                                      int64_t &minimum) {
-	if (root.kind != JitExpressionIRKind::INTRINSIC ||
-	    root.intrinsic != JitExpressionIntrinsicKind::INTEGRAL_DECOMPRESS ||
+	if (root.kind != ExecutionExpressionIRKind::INTRINSIC ||
+	    root.intrinsic != ExecutionExpressionIntrinsicKind::INTEGRAL_DECOMPRESS ||
 	    root.children.size() != 2 || !root.children[0] || !root.children[1] ||
-	    root.children[0]->kind != JitExpressionIRKind::REFERENCE ||
+	    root.children[0]->kind != ExecutionExpressionIRKind::REFERENCE ||
 	    !TryGetNativeUnsignedIntegerWidth(*root.children[0], source_width) ||
 	    !TryGetNativeSignedIntegerWidth(root, target_width)) {
 		return false;
@@ -720,11 +720,11 @@ bool TryReadNativeIntegralDecompress(const JitExpressionIR &root, SljitNativeUns
 	return true;
 }
 
-bool TryReadNativeIntegerCoalesce(const JitExpressionIR &root, SljitNativeSignedIntegerWidth &width,
+bool TryReadNativeIntegerCoalesce(const ExecutionExpressionIR &root, SljitNativeSignedIntegerWidth &width,
                                   idx_t &source_index, SljitNativeCoalesceRhsKind &rhs_kind,
                                   idx_t &right_source_index, int64_t &constant_value, bool &constant_is_null) {
-	if (root.kind != JitExpressionIRKind::COALESCE || root.children.size() != 2 ||
-	    root.children[0]->kind != JitExpressionIRKind::REFERENCE ||
+	if (root.kind != ExecutionExpressionIRKind::COALESCE || root.children.size() != 2 ||
+	    root.children[0]->kind != ExecutionExpressionIRKind::REFERENCE ||
 	    !TryGetNativeSignedIntegerWidth(root, width) ||
 	    root.children[0]->return_type != root.return_type || root.children[1]->return_type != root.return_type) {
 		return false;
@@ -736,7 +736,7 @@ bool TryReadNativeIntegerCoalesce(const JitExpressionIR &root, SljitNativeSigned
 		right_source_index = 0;
 		return true;
 	}
-	if (rhs.kind != JitExpressionIRKind::REFERENCE) {
+	if (rhs.kind != ExecutionExpressionIRKind::REFERENCE) {
 		return false;
 	}
 	rhs_kind = SljitNativeCoalesceRhsKind::REFERENCE;
@@ -746,15 +746,15 @@ bool TryReadNativeIntegerCoalesce(const JitExpressionIR &root, SljitNativeSigned
 	return true;
 }
 
-bool TryReadNativeIntegerInList(const JitExpressionIR &root, SljitNativeIntegerKind &kind, idx_t &source_index,
+bool TryReadNativeIntegerInList(const ExecutionExpressionIR &root, SljitNativeIntegerKind &kind, idx_t &source_index,
                                 vector<int64_t> &constants, bool &list_has_null, bool &not_in) {
 	constants.clear();
 	list_has_null = false;
 	not_in = root.not_in;
 
-	if (root.kind == JitExpressionIRKind::IN_LIST) {
+	if (root.kind == ExecutionExpressionIRKind::IN_LIST) {
 		if (root.return_type.id() != LogicalTypeId::BOOLEAN || root.children.size() < 2 ||
-		    root.children[0]->kind != JitExpressionIRKind::REFERENCE ||
+		    root.children[0]->kind != ExecutionExpressionIRKind::REFERENCE ||
 		    !TryGetNativeComparableIntegerKind(*root.children[0], kind)) {
 			return false;
 		}
@@ -776,21 +776,21 @@ bool TryReadNativeIntegerInList(const JitExpressionIR &root, SljitNativeIntegerK
 	}
 
 	auto candidate = &root;
-	if (root.kind == JitExpressionIRKind::UNARY && root.unary_op == JitExpressionUnaryOp::NOT && root.left &&
-	    root.left->kind == JitExpressionIRKind::CONJUNCTION &&
-	    root.left->conjunction_op == JitExpressionConjunctionOp::OR) {
+	if (root.kind == ExecutionExpressionIRKind::UNARY && root.unary_op == ExecutionExpressionUnaryOp::NOT && root.left &&
+	    root.left->kind == ExecutionExpressionIRKind::CONJUNCTION &&
+	    root.left->conjunction_op == ExecutionExpressionConjunctionOp::OR) {
 		not_in = true;
 		candidate = root.left.get();
 	}
-	if (candidate->kind != JitExpressionIRKind::CONJUNCTION ||
-	    candidate->conjunction_op != JitExpressionConjunctionOp::OR || candidate->children.empty()) {
+	if (candidate->kind != ExecutionExpressionIRKind::CONJUNCTION ||
+	    candidate->conjunction_op != ExecutionExpressionConjunctionOp::OR || candidate->children.empty()) {
 		return false;
 	}
 
 	bool initialized = false;
 	for (auto &child_ptr : candidate->children) {
 		auto &child = *child_ptr;
-		if (child.kind != JitExpressionIRKind::BINARY || child.binary_op != JitExpressionBinaryOp::COMPARE_EQUAL ||
+		if (child.kind != ExecutionExpressionIRKind::BINARY || child.binary_op != ExecutionExpressionBinaryOp::COMPARE_EQUAL ||
 		    !child.left || !child.right) {
 			return false;
 		}
@@ -820,11 +820,11 @@ bool TryReadNativeIntegerInList(const JitExpressionIR &root, SljitNativeIntegerK
 	return initialized;
 }
 
-bool TryReadNativeIntegerBetween(const JitExpressionIR &root, SljitNativeIntegerKind &kind, idx_t &source_index,
+bool TryReadNativeIntegerBetween(const ExecutionExpressionIR &root, SljitNativeIntegerKind &kind, idx_t &source_index,
                                  int64_t &lower, int64_t &upper, bool &lower_inclusive, bool &upper_inclusive,
                                  bool &not_between) {
-	if (root.kind != JitExpressionIRKind::BETWEEN || root.return_type.id() != LogicalTypeId::BOOLEAN ||
-	    root.children.size() != 3 || root.children[0]->kind != JitExpressionIRKind::REFERENCE ||
+	if (root.kind != ExecutionExpressionIRKind::BETWEEN || root.return_type.id() != LogicalTypeId::BOOLEAN ||
+	    root.children.size() != 3 || root.children[0]->kind != ExecutionExpressionIRKind::REFERENCE ||
 	    !TryGetNativeComparableIntegerKind(*root.children[0], kind)) {
 		return false;
 	}
@@ -843,13 +843,13 @@ bool TryReadNativeIntegerBetween(const JitExpressionIR &root, SljitNativeInteger
 	return true;
 }
 
-bool TryReadNativeStringPrefixConstant(const JitExpressionIR &root, idx_t &source_index, string &prefix) {
-	if (root.kind != JitExpressionIRKind::INTRINSIC ||
-	    root.intrinsic != JitExpressionIntrinsicKind::STRING_PREFIX ||
+bool TryReadNativeStringPrefixConstant(const ExecutionExpressionIR &root, idx_t &source_index, string &prefix) {
+	if (root.kind != ExecutionExpressionIRKind::INTRINSIC ||
+	    root.intrinsic != ExecutionExpressionIntrinsicKind::STRING_PREFIX ||
 	    root.return_type.id() != LogicalTypeId::BOOLEAN || root.children.size() != 2 || !root.children[0] ||
-	    !root.children[1] || root.children[0]->kind != JitExpressionIRKind::REFERENCE ||
+	    !root.children[1] || root.children[0]->kind != ExecutionExpressionIRKind::REFERENCE ||
 	    root.children[0]->return_type.id() != LogicalTypeId::VARCHAR ||
-	    root.children[1]->kind != JitExpressionIRKind::CONSTANT ||
+	    root.children[1]->kind != ExecutionExpressionIRKind::CONSTANT ||
 	    root.children[1]->return_type.id() != LogicalTypeId::VARCHAR || root.children[1]->constant.IsNull()) {
 		return false;
 	}
@@ -858,13 +858,13 @@ bool TryReadNativeStringPrefixConstant(const JitExpressionIR &root, idx_t &sourc
 	return true;
 }
 
-static bool TryReadNativeStringMatchConstant(const JitExpressionIR &root, JitExpressionIntrinsicKind intrinsic,
+static bool TryReadNativeStringMatchConstant(const ExecutionExpressionIR &root, ExecutionExpressionIntrinsicKind intrinsic,
                                              idx_t &source_index, string &constant) {
-	if (root.kind != JitExpressionIRKind::INTRINSIC || root.intrinsic != intrinsic ||
+	if (root.kind != ExecutionExpressionIRKind::INTRINSIC || root.intrinsic != intrinsic ||
 	    root.return_type.id() != LogicalTypeId::BOOLEAN || root.children.size() != 2 || !root.children[0] ||
-	    !root.children[1] || root.children[0]->kind != JitExpressionIRKind::REFERENCE ||
+	    !root.children[1] || root.children[0]->kind != ExecutionExpressionIRKind::REFERENCE ||
 	    root.children[0]->return_type.id() != LogicalTypeId::VARCHAR ||
-	    root.children[1]->kind != JitExpressionIRKind::CONSTANT ||
+	    root.children[1]->kind != ExecutionExpressionIRKind::CONSTANT ||
 	    root.children[1]->return_type.id() != LogicalTypeId::VARCHAR || root.children[1]->constant.IsNull()) {
 		return false;
 	}
@@ -873,10 +873,67 @@ static bool TryReadNativeStringMatchConstant(const JitExpressionIR &root, JitExp
 	return true;
 }
 
-static bool TryReadNativeStringLikeConstant(const JitExpressionIR &root, idx_t &source_index,
+static bool IsNativeAsciiString(const string &value);
+
+static bool TryReadNativeStringEqualConstant(const ExecutionExpressionIR &root, idx_t &source_index,
+                                             string &constant) {
+	if (root.kind != ExecutionExpressionIRKind::BINARY ||
+	    root.binary_op != ExecutionExpressionBinaryOp::COMPARE_EQUAL ||
+	    root.return_type.id() != LogicalTypeId::BOOLEAN || !root.left || !root.right) {
+		return false;
+	}
+	auto try_read = [&](const ExecutionExpressionIR &reference, const ExecutionExpressionIR &constant_node) {
+		if (reference.kind != ExecutionExpressionIRKind::REFERENCE ||
+		    reference.return_type.id() != LogicalTypeId::VARCHAR ||
+		    constant_node.kind != ExecutionExpressionIRKind::CONSTANT ||
+		    constant_node.return_type.id() != LogicalTypeId::VARCHAR || constant_node.constant.IsNull()) {
+			return false;
+		}
+		auto value = StringValue::Get(constant_node.constant);
+		if (!IsNativeAsciiString(value)) {
+			return false;
+		}
+		source_index = reference.ref_index;
+		constant = std::move(value);
+		return true;
+	};
+	return try_read(*root.left, *root.right) || try_read(*root.right, *root.left);
+}
+
+static bool TryReadNativeStringInListConstant(const ExecutionExpressionIR &root, idx_t &source_index,
+                                              vector<string> &constants, bool &list_has_null, bool &not_in) {
+	constants.clear();
+	list_has_null = false;
+	not_in = false;
+	if (root.kind != ExecutionExpressionIRKind::IN_LIST || root.return_type.id() != LogicalTypeId::BOOLEAN ||
+	    root.children.size() < 2 || !root.children[0] || root.children[0]->kind != ExecutionExpressionIRKind::REFERENCE ||
+	    root.children[0]->return_type.id() != LogicalTypeId::VARCHAR) {
+		return false;
+	}
+	source_index = root.children[0]->ref_index;
+	not_in = root.not_in;
+	for (idx_t child_idx = 1; child_idx < root.children.size(); child_idx++) {
+		auto &child = *root.children[child_idx];
+		if (child.kind != ExecutionExpressionIRKind::CONSTANT || child.return_type.id() != LogicalTypeId::VARCHAR) {
+			return false;
+		}
+		if (child.constant.IsNull()) {
+			list_has_null = true;
+			continue;
+		}
+		auto constant = StringValue::Get(child.constant);
+		if (!IsNativeAsciiString(constant)) {
+			return false;
+		}
+		constants.push_back(std::move(constant));
+	}
+	return !constants.empty() || list_has_null;
+}
+
+static bool TryReadNativeStringLikeConstant(const ExecutionExpressionIR &root, idx_t &source_index,
                                             vector<string> &fragments, bool &anchor_start, bool &anchor_end) {
 	string pattern;
-	if (!TryReadNativeStringMatchConstant(root, JitExpressionIntrinsicKind::STRING_LIKE, source_index, pattern)) {
+	if (!TryReadNativeStringMatchConstant(root, ExecutionExpressionIntrinsicKind::STRING_LIKE, source_index, pattern)) {
 		return false;
 	}
 	anchor_start = pattern.empty() || pattern[0] != '%';
@@ -900,8 +957,8 @@ static bool TryReadNativeStringLikeConstant(const JitExpressionIR &root, idx_t &
 	return true;
 }
 
-static bool TryReadNativeInt64Constant(const JitExpressionIR &node, int64_t &value) {
-	if (node.kind != JitExpressionIRKind::CONSTANT || node.constant.IsNull() || !node.return_type.IsIntegral()) {
+static bool TryReadNativeInt64Constant(const ExecutionExpressionIR &node, int64_t &value) {
+	if (node.kind != ExecutionExpressionIRKind::CONSTANT || node.constant.IsNull() || !node.return_type.IsIntegral()) {
 		return false;
 	}
 	Value cast_value;
@@ -922,19 +979,13 @@ static bool IsNativeAsciiString(const string &value) {
 	return true;
 }
 
-bool TryReadNativeStringSubstringInListConstant(const JitExpressionIR &root, idx_t &source_index,
-                                                idx_t &substring_length, vector<string> &constants) {
-	constants.clear();
-	if (root.kind != JitExpressionIRKind::IN_LIST || root.not_in ||
-	    root.return_type.id() != LogicalTypeId::BOOLEAN || root.children.size() < 2 || !root.children[0]) {
-		return false;
-	}
-	auto &substring = *root.children[0];
-	if (substring.kind != JitExpressionIRKind::INTRINSIC ||
-	    substring.intrinsic != JitExpressionIntrinsicKind::STRING_SUBSTRING ||
+static bool TryReadNativeSubstringReference(const ExecutionExpressionIR &substring, idx_t &source_index,
+                                            idx_t &substring_length) {
+	if (substring.kind != ExecutionExpressionIRKind::INTRINSIC ||
+	    substring.intrinsic != ExecutionExpressionIntrinsicKind::STRING_SUBSTRING ||
 	    substring.return_type.id() != LogicalTypeId::VARCHAR || substring.children.size() != 3 ||
 	    !substring.children[0] || !substring.children[1] || !substring.children[2] ||
-	    substring.children[0]->kind != JitExpressionIRKind::REFERENCE ||
+	    substring.children[0]->kind != ExecutionExpressionIRKind::REFERENCE ||
 	    substring.children[0]->return_type.id() != LogicalTypeId::VARCHAR) {
 		return false;
 	}
@@ -949,28 +1000,89 @@ bool TryReadNativeStringSubstringInListConstant(const JitExpressionIR &root, idx
 
 	source_index = substring.children[0]->ref_index;
 	substring_length = UnsafeNumericCast<idx_t>(length);
-	for (idx_t child_idx = 1; child_idx < root.children.size(); child_idx++) {
-		auto &child = *root.children[child_idx];
-		if (child.kind != JitExpressionIRKind::CONSTANT || child.return_type.id() != LogicalTypeId::VARCHAR ||
-		    child.constant.IsNull()) {
+	return true;
+}
+
+static bool TryReadNativeSubstringConstant(const ExecutionExpressionIR &substring, const ExecutionExpressionIR &constant,
+                                           idx_t &source_index, idx_t &substring_length, string &value) {
+	if (!TryReadNativeSubstringReference(substring, source_index, substring_length) ||
+	    constant.kind != ExecutionExpressionIRKind::CONSTANT || constant.return_type.id() != LogicalTypeId::VARCHAR ||
+	    constant.constant.IsNull()) {
+		return false;
+	}
+	value = StringValue::Get(constant.constant);
+	return value.size() == substring_length && IsNativeAsciiString(value);
+}
+
+static bool TryReadNativeSubstringEqualConstant(const ExecutionExpressionIR &root, idx_t &source_index,
+                                                idx_t &substring_length, string &constant) {
+	if (root.kind != ExecutionExpressionIRKind::BINARY ||
+	    root.binary_op != ExecutionExpressionBinaryOp::COMPARE_EQUAL || !root.left || !root.right) {
+		return false;
+	}
+	return TryReadNativeSubstringConstant(*root.left, *root.right, source_index, substring_length, constant) ||
+	       TryReadNativeSubstringConstant(*root.right, *root.left, source_index, substring_length, constant);
+}
+
+bool TryReadNativeStringSubstringInListConstant(const ExecutionExpressionIR &root, idx_t &source_index,
+                                                idx_t &substring_length, vector<string> &constants) {
+	constants.clear();
+	if (root.return_type.id() != LogicalTypeId::BOOLEAN) {
+		return false;
+	}
+
+	if (root.kind == ExecutionExpressionIRKind::IN_LIST) {
+		if (root.not_in || root.children.size() < 2 || !root.children[0] ||
+		    !TryReadNativeSubstringReference(*root.children[0], source_index, substring_length)) {
 			return false;
 		}
-		auto constant = StringValue::Get(child.constant);
-		if (constant.size() != substring_length || !IsNativeAsciiString(constant)) {
+		for (idx_t child_idx = 1; child_idx < root.children.size(); child_idx++) {
+			auto &child = *root.children[child_idx];
+			if (child.kind != ExecutionExpressionIRKind::CONSTANT || child.return_type.id() != LogicalTypeId::VARCHAR ||
+			    child.constant.IsNull()) {
+				return false;
+			}
+			auto constant = StringValue::Get(child.constant);
+			if (constant.size() != substring_length || !IsNativeAsciiString(constant)) {
+				return false;
+			}
+			constants.push_back(std::move(constant));
+		}
+		return !constants.empty();
+	}
+
+	if (root.kind != ExecutionExpressionIRKind::CONJUNCTION ||
+	    root.conjunction_op != ExecutionExpressionConjunctionOp::OR || root.children.empty()) {
+		return false;
+	}
+
+	bool initialized = false;
+	for (auto &child : root.children) {
+		idx_t child_source_index;
+		idx_t child_substring_length;
+		string constant;
+		if (!TryReadNativeSubstringEqualConstant(*child, child_source_index, child_substring_length, constant)) {
+			return false;
+		}
+		if (!initialized) {
+			source_index = child_source_index;
+			substring_length = child_substring_length;
+			initialized = true;
+		} else if (source_index != child_source_index || substring_length != child_substring_length) {
 			return false;
 		}
 		constants.push_back(std::move(constant));
 	}
-	return !constants.empty();
+	return initialized && !constants.empty();
 }
 
-static bool TryReadNativePredicateNullGuard(const JitExpressionIR &node, vector<idx_t> &source_indices,
+static bool TryReadNativePredicateNullGuard(const ExecutionExpressionIR &node, vector<idx_t> &source_indices,
                                             bool &has_null_constant) {
-	if (node.kind == JitExpressionIRKind::REFERENCE) {
+	if (node.kind == ExecutionExpressionIRKind::REFERENCE) {
 		source_indices.push_back(node.ref_index);
 		return true;
 	}
-	if (node.kind == JitExpressionIRKind::CONSTANT) {
+	if (node.kind == ExecutionExpressionIRKind::CONSTANT) {
 		if (node.constant.IsNull()) {
 			has_null_constant = true;
 		}
@@ -979,16 +1091,16 @@ static bool TryReadNativePredicateNullGuard(const JitExpressionIR &node, vector<
 	return false;
 }
 
-bool TryReadNativeNullCheck(const JitExpressionIR &root, SljitNativeNullCheckOp &op, idx_t &source_index) {
-	if (root.kind != JitExpressionIRKind::UNARY || root.return_type.id() != LogicalTypeId::BOOLEAN || !root.left ||
-	    root.left->kind != JitExpressionIRKind::REFERENCE) {
+bool TryReadNativeNullCheck(const ExecutionExpressionIR &root, SljitNativeNullCheckOp &op, idx_t &source_index) {
+	if (root.kind != ExecutionExpressionIRKind::UNARY || root.return_type.id() != LogicalTypeId::BOOLEAN || !root.left ||
+	    root.left->kind != ExecutionExpressionIRKind::REFERENCE) {
 		return false;
 	}
 	switch (root.unary_op) {
-	case JitExpressionUnaryOp::IS_NULL:
+	case ExecutionExpressionUnaryOp::IS_NULL:
 		op = SljitNativeNullCheckOp::IS_NULL;
 		break;
-	case JitExpressionUnaryOp::IS_NOT_NULL:
+	case ExecutionExpressionUnaryOp::IS_NOT_NULL:
 		op = SljitNativeNullCheckOp::IS_NOT_NULL;
 		break;
 	default:
@@ -998,34 +1110,34 @@ bool TryReadNativeNullCheck(const JitExpressionIR &root, SljitNativeNullCheckOp 
 	return true;
 }
 
-bool ShouldTryNativePredicateRoot(const JitExpressionIR &root) {
+bool ShouldTryNativePredicateRoot(const ExecutionExpressionIR &root) {
 	if (root.return_type.id() != LogicalTypeId::BOOLEAN) {
 		return false;
 	}
-	if (root.kind == JitExpressionIRKind::CONJUNCTION) {
+	if (root.kind == ExecutionExpressionIRKind::CONJUNCTION) {
 		return true;
 	}
-	if (root.kind == JitExpressionIRKind::UNARY && root.unary_op == JitExpressionUnaryOp::NOT) {
+	if (root.kind == ExecutionExpressionIRKind::UNARY && root.unary_op == ExecutionExpressionUnaryOp::NOT) {
 		return true;
 	}
-	if (root.kind == JitExpressionIRKind::CONSTANT_OR_NULL) {
+	if (root.kind == ExecutionExpressionIRKind::CONSTANT_OR_NULL) {
 		return true;
 	}
-	if (root.kind == JitExpressionIRKind::REFERENCE) {
+	if (root.kind == ExecutionExpressionIRKind::REFERENCE) {
 		return true;
 	}
-	if (root.kind == JitExpressionIRKind::CONSTANT) {
+	if (root.kind == ExecutionExpressionIRKind::CONSTANT) {
 		return true;
 	}
-	if (root.kind == JitExpressionIRKind::IN_LIST) {
+	if (root.kind == ExecutionExpressionIRKind::IN_LIST) {
 		return true;
 	}
-	if (root.kind == JitExpressionIRKind::INTRINSIC) {
+	if (root.kind == ExecutionExpressionIRKind::INTRINSIC) {
 		switch (root.intrinsic) {
-		case JitExpressionIntrinsicKind::STRING_PREFIX:
-		case JitExpressionIntrinsicKind::STRING_SUFFIX:
-		case JitExpressionIntrinsicKind::STRING_CONTAINS:
-		case JitExpressionIntrinsicKind::STRING_LIKE:
+		case ExecutionExpressionIntrinsicKind::STRING_PREFIX:
+		case ExecutionExpressionIntrinsicKind::STRING_SUFFIX:
+		case ExecutionExpressionIntrinsicKind::STRING_CONTAINS:
+		case ExecutionExpressionIntrinsicKind::STRING_LIKE:
 			return true;
 		default:
 			break;
@@ -1034,14 +1146,14 @@ bool ShouldTryNativePredicateRoot(const JitExpressionIR &root) {
 	return false;
 }
 
-bool TryBuildNativePredicate(const JitExpressionIR &root, unique_ptr<SljitNativePredicate> &predicate) {
+bool TryBuildNativePredicate(const ExecutionExpressionIR &root, unique_ptr<SljitNativePredicate> &predicate) {
 	if (root.return_type.id() != LogicalTypeId::BOOLEAN) {
 		return false;
 	}
 	auto result = make_uniq<SljitNativePredicate>();
 	result->return_type = root.return_type;
 
-	if (root.kind == JitExpressionIRKind::CONSTANT) {
+	if (root.kind == ExecutionExpressionIRKind::CONSTANT) {
 		if (root.constant.IsNull()) {
 			result->kind = SljitNativePredicateKind::CONSTANT;
 			result->constant_is_null = true;
@@ -1057,14 +1169,14 @@ bool TryBuildNativePredicate(const JitExpressionIR &root, unique_ptr<SljitNative
 		return true;
 	}
 
-	if (root.kind == JitExpressionIRKind::REFERENCE) {
+	if (root.kind == ExecutionExpressionIRKind::REFERENCE) {
 		result->kind = SljitNativePredicateKind::REFERENCE;
 		result->source_index = root.ref_index;
 		predicate = std::move(result);
 		return true;
 	}
 
-	if (root.kind == JitExpressionIRKind::UNARY && root.unary_op == JitExpressionUnaryOp::NOT && root.left) {
+	if (root.kind == ExecutionExpressionIRKind::UNARY && root.unary_op == ExecutionExpressionUnaryOp::NOT && root.left) {
 		unique_ptr<SljitNativePredicate> child;
 		if (!TryBuildNativePredicate(*root.left, child)) {
 			return false;
@@ -1082,7 +1194,7 @@ bool TryBuildNativePredicate(const JitExpressionIR &root, unique_ptr<SljitNative
 		return true;
 	}
 
-	if (root.kind == JitExpressionIRKind::CONSTANT_OR_NULL) {
+	if (root.kind == ExecutionExpressionIRKind::CONSTANT_OR_NULL) {
 		if (root.children.empty()) {
 			return false;
 		}
@@ -1102,7 +1214,20 @@ bool TryBuildNativePredicate(const JitExpressionIR &root, unique_ptr<SljitNative
 		return true;
 	}
 
-	if (root.kind == JitExpressionIRKind::CONJUNCTION) {
+	idx_t substring_in_list_source_index;
+	idx_t substring_in_list_length;
+	vector<string> substring_in_list_constants;
+	if (TryReadNativeStringSubstringInListConstant(root, substring_in_list_source_index, substring_in_list_length,
+	                                               substring_in_list_constants)) {
+		result->kind = SljitNativePredicateKind::STRING_SUBSTRING_IN_LIST_CONSTANT;
+		result->source_index = substring_in_list_source_index;
+		result->substring_length = substring_in_list_length;
+		result->string_constants = std::move(substring_in_list_constants);
+		predicate = std::move(result);
+		return true;
+	}
+
+	if (root.kind == ExecutionExpressionIRKind::CONJUNCTION) {
 		if (root.children.empty()) {
 			return false;
 		}
@@ -1172,6 +1297,23 @@ bool TryBuildNativePredicate(const JitExpressionIR &root, unique_ptr<SljitNative
 
 	idx_t substring_length;
 	vector<string> string_constants;
+	string string_constant;
+	if (TryReadNativeStringEqualConstant(root, source_index, string_constant)) {
+		result->kind = SljitNativePredicateKind::STRING_EQUAL_CONSTANT;
+		result->source_index = source_index;
+		result->string_constant = std::move(string_constant);
+		predicate = std::move(result);
+		return true;
+	}
+	if (TryReadNativeStringInListConstant(root, source_index, string_constants, list_has_null, not_in)) {
+		result->kind = SljitNativePredicateKind::STRING_IN_LIST_CONSTANT;
+		result->source_index = source_index;
+		result->string_constants = std::move(string_constants);
+		result->list_has_null = list_has_null;
+		result->not_in = not_in;
+		predicate = std::move(result);
+		return true;
+	}
 	if (TryReadNativeStringSubstringInListConstant(root, source_index, substring_length, string_constants)) {
 		result->kind = SljitNativePredicateKind::STRING_SUBSTRING_IN_LIST_CONSTANT;
 		result->source_index = source_index;
@@ -1209,8 +1351,7 @@ bool TryBuildNativePredicate(const JitExpressionIR &root, unique_ptr<SljitNative
 		return true;
 	}
 
-	string string_constant;
-	if (TryReadNativeStringMatchConstant(root, JitExpressionIntrinsicKind::STRING_SUFFIX, source_index,
+	if (TryReadNativeStringMatchConstant(root, ExecutionExpressionIntrinsicKind::STRING_SUFFIX, source_index,
 	                                     string_constant)) {
 		result->kind = SljitNativePredicateKind::STRING_SUFFIX_CONSTANT;
 		result->source_index = source_index;
@@ -1219,7 +1360,7 @@ bool TryBuildNativePredicate(const JitExpressionIR &root, unique_ptr<SljitNative
 		return true;
 	}
 
-	if (TryReadNativeStringMatchConstant(root, JitExpressionIntrinsicKind::STRING_CONTAINS, source_index,
+	if (TryReadNativeStringMatchConstant(root, ExecutionExpressionIntrinsicKind::STRING_CONTAINS, source_index,
 	                                     string_constant)) {
 		result->kind = SljitNativePredicateKind::STRING_CONTAINS_CONSTANT;
 		result->source_index = source_index;
@@ -1238,151 +1379,6 @@ bool TryBuildNativePredicate(const JitExpressionIR &root, unique_ptr<SljitNative
 		result->string_anchor_start = anchor_start;
 		result->string_anchor_end = anchor_end;
 		predicate = std::move(result);
-		return true;
-	}
-
-	return false;
-}
-
-string SljitNativeExpressionPlanReason(const SljitNativeExpressionPlan &plan) {
-	switch (plan.kind) {
-	case SljitNativeExpressionPlanKind::NULL_CHECK:
-		return NativeNullCheckReason(plan.null_check_op);
-	case SljitNativeExpressionPlanKind::INTEGER_IN_LIST:
-		return NativeIntegerInListReason(plan.integer_kind, plan.not_in);
-	case SljitNativeExpressionPlanKind::INTEGER_BETWEEN:
-		return NativeIntegerBetweenReason(plan.integer_kind, plan.not_between);
-	case SljitNativeExpressionPlanKind::PREDICATE:
-		return "native:boolean-predicate";
-	case SljitNativeExpressionPlanKind::INTEGER_BINARY_REFERENCES:
-		return NativeIntegerBinaryReferenceReason(plan.integer_kind, plan.binary_op);
-	case SljitNativeExpressionPlanKind::DOUBLE_BINARY_REFERENCES:
-		return NativeDoubleBinaryReferenceReason(plan.double_binary_op);
-	case SljitNativeExpressionPlanKind::INTEGER_CAST:
-		return NativeIntegerCastReason(plan.cast_source_width, plan.cast_target_width, plan.try_cast);
-	case SljitNativeExpressionPlanKind::INTEGER_COALESCE:
-		return NativeIntegerCoalesceReason(plan.coalesce_width);
-	case SljitNativeExpressionPlanKind::CONSTANT_OR_NULL:
-		return "native:constant-or-null";
-	case SljitNativeExpressionPlanKind::INTEGER_COMPARE_REFERENCES:
-		return NativeIntegerCompareReferenceReason(plan.integer_kind);
-	case SljitNativeExpressionPlanKind::INTEGER_COMPARE_CONSTANT:
-		return NativeIntegerCompareReason(plan.integer_kind);
-	case SljitNativeExpressionPlanKind::INTEGER_BINARY_CONSTANT:
-		return NativeIntegerBinaryReason(plan.integer_kind, plan.binary_op);
-	case SljitNativeExpressionPlanKind::DOUBLE_BINARY_CONSTANT:
-		return NativeDoubleBinaryReason(plan.double_binary_op);
-	default:
-		throw InternalException("Unknown SLJIT native expression plan kind");
-	}
-}
-
-string SljitNativeExpressionPlanIrPrefix(const SljitNativeExpressionPlan &plan) {
-	switch (plan.kind) {
-	case SljitNativeExpressionPlanKind::PREDICATE:
-		return "sljit.expr native.predicate;";
-	case SljitNativeExpressionPlanKind::CONSTANT_OR_NULL:
-		return "sljit.expr native.constant_or_null;";
-	default:
-		return "sljit.expr native;";
-	}
-}
-
-bool TryPlanSljitNativeExpression(const JitExpressionFragment &fragment, SljitNativeExpressionPlan &plan) {
-	if (!fragment.root) {
-		return false;
-	}
-	auto &root = *fragment.root;
-
-	if (TryReadNativeNullCheck(root, plan.null_check_op, plan.source_index)) {
-		plan.kind = SljitNativeExpressionPlanKind::NULL_CHECK;
-		return true;
-	}
-
-	if (TryReadNativeIntegerInList(root, plan.integer_kind, plan.source_index, plan.constants, plan.list_has_null,
-	                               plan.not_in)) {
-		plan.kind = SljitNativeExpressionPlanKind::INTEGER_IN_LIST;
-		return true;
-	}
-
-	if (TryReadNativeIntegerBetween(root, plan.integer_kind, plan.source_index, plan.lower, plan.upper,
-	                                plan.lower_inclusive, plan.upper_inclusive, plan.not_between)) {
-		plan.kind = SljitNativeExpressionPlanKind::INTEGER_BETWEEN;
-		return true;
-	}
-
-	if (ShouldTryNativePredicateRoot(root) && TryBuildNativePredicate(root, plan.predicate)) {
-		plan.kind = SljitNativeExpressionPlanKind::PREDICATE;
-		return true;
-	}
-
-	if (TryReadNativeIntegerBinaryReferences(root, plan.binary_op, plan.integer_kind, plan.source_index,
-	                                         plan.right_source_index)) {
-		plan.kind = SljitNativeExpressionPlanKind::INTEGER_BINARY_REFERENCES;
-		return true;
-	}
-
-	if (TryReadNativeDoubleBinaryReferences(root, plan.double_binary_op, plan.source_index,
-	                                        plan.right_source_index)) {
-		plan.kind = SljitNativeExpressionPlanKind::DOUBLE_BINARY_REFERENCES;
-		return true;
-	}
-
-	if (TryReadNativeDoubleBinaryConstant(root, plan.double_binary_op, plan.source_index, plan.double_constant,
-	                                      plan.constant_on_left)) {
-		plan.kind = SljitNativeExpressionPlanKind::DOUBLE_BINARY_CONSTANT;
-		return true;
-	}
-
-	if (TryReadNativeDecimal64BinaryReferences(root, plan.binary_op, plan.source_index, plan.right_source_index,
-	                                           plan.result_min, plan.result_max)) {
-		plan.kind = SljitNativeExpressionPlanKind::INTEGER_BINARY_REFERENCES;
-		plan.integer_kind = SljitNativeIntegerKind::DECIMAL64;
-		plan.check_result_range = true;
-		return true;
-	}
-
-	if (TryReadNativeDecimal64BinaryConstant(root, plan.binary_op, plan.source_index, plan.constant,
-	                                         plan.constant_on_left, plan.result_min, plan.result_max)) {
-		plan.kind = SljitNativeExpressionPlanKind::INTEGER_BINARY_CONSTANT;
-		plan.integer_kind = SljitNativeIntegerKind::DECIMAL64;
-		plan.check_result_range = true;
-		return true;
-	}
-
-	if (TryReadNativeIntegerCast(root, plan.cast_source_width, plan.cast_target_width, plan.source_index,
-	                             plan.try_cast)) {
-		plan.kind = SljitNativeExpressionPlanKind::INTEGER_CAST;
-		return true;
-	}
-
-	if (TryReadNativeIntegerCoalesce(root, plan.coalesce_width, plan.source_index, plan.coalesce_rhs_kind,
-	                                 plan.right_source_index, plan.coalesce_constant,
-	                                 plan.coalesce_constant_is_null)) {
-		plan.kind = SljitNativeExpressionPlanKind::INTEGER_COALESCE;
-		return true;
-	}
-
-	if (TryReadNativeConstantOrNull(root, plan.constant_or_null)) {
-		plan.kind = SljitNativeExpressionPlanKind::CONSTANT_OR_NULL;
-		return true;
-	}
-
-	if (TryReadNativeIntegerCompareReferences(root, plan.compare_op, plan.integer_kind, plan.source_index,
-	                                          plan.right_source_index)) {
-		plan.kind = SljitNativeExpressionPlanKind::INTEGER_COMPARE_REFERENCES;
-		return true;
-	}
-
-	if (TryReadNativeIntegerBinaryConstant(root, plan.binary_op, plan.integer_kind, plan.source_index, plan.constant,
-	                                       plan.constant_on_left)) {
-		plan.kind = SljitNativeExpressionPlanKind::INTEGER_BINARY_CONSTANT;
-		return true;
-	}
-
-	if (TryReadNativeIntegerCompareConstant(root, plan.compare_op, plan.integer_kind, plan.source_index, plan.constant,
-	                                        plan.constant_on_left)) {
-		plan.kind = SljitNativeExpressionPlanKind::INTEGER_COMPARE_CONSTANT;
 		return true;
 	}
 

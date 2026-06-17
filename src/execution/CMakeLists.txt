@@ -14,15 +14,23 @@ add_library_unity(
   column_binding_resolver.cpp
   expression_executor.cpp
   expression_executor_state.cpp
-  jit.cpp
-  jit_expression_ir.cpp
-  jit_join_runtime.cpp
-  jit_operator_descriptor.cpp
-  jit_pipeline_descriptor.cpp
-  jit_region_executor.cpp
-  jit_region_ir.cpp
-  jit_runtime.cpp
-  jit_types.cpp
+  execution_region_admission.cpp
+  execution_region_backend.cpp
+  execution_region_planner.cpp
+  execution_region_manager.cpp
+  execution_region_kernel.cpp
+  execution_region_plan.cpp
+  execution_region_runtime.cpp
+  execution_region_settings.cpp
+  execution_hash_join_runtime.cpp
+  execution_region_telemetry.cpp
+  execution_expression_ir.cpp
+  execution_contract.cpp
+  execution_region_graph.cpp
+  execution_region_runner.cpp
+  execution_region_ir.cpp
+  execution_region_telemetry_log.cpp
+  execution_region_types.cpp
   join_hashtable.cpp
   perfect_aggregate_hashtable.cpp
   physical_operator.cpp

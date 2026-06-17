@@ -37,7 +37,7 @@ public:
 public:
 	//! The final method used to fetch the query result from this operator
 	virtual unique_ptr<QueryResult> GetResult(GlobalSinkState &state) const = 0;
-	JitOperatorDescriptor GetJitOperatorDescriptor() const override = 0;
+	ExecutionContract GetExecutionContract() const override = 0;
 
 	bool IsSink() const override {
 		return true;
@@ -59,7 +59,7 @@ public:
 
 protected:
 	unique_ptr<ColumnDataCollection> CreateCollection(ClientContext &context) const;
-	JitOperatorDescriptor BuildJitResultCollectorAppendDescriptor() const;
+	ExecutionContract BuildExecutionResultCollectorSinkContract() const;
 };
 
 } // namespace duckdb

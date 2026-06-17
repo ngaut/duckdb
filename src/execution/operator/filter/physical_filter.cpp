@@ -48,6 +48,12 @@ unique_ptr<OperatorState> PhysicalFilter::GetOperatorState(ExecutionContext &con
 	return make_uniq<FilterState>(context, *expression);
 }
 
+ExecutionContract PhysicalFilter::GetExecutionContract() const {
+	ExecutionContract result;
+	result.transform.filter_expression = optional_ptr<const Expression>(*expression);
+	return FinalizeExecutionContract(std::move(result));
+}
+
 OperatorResultType PhysicalFilter::ExecuteInternal(ExecutionContext &context, DataChunk &input, DataChunk &chunk,
                                                    GlobalOperatorState &gstate, OperatorState &state_p) const {
 	auto &state = state_p.Cast<FilterState>();

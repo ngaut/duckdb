@@ -7,11 +7,11 @@
 
 #pragma once
 
-#include "duckdb/execution/jit/runtime.hpp"
+#include "duckdb/execution/execution_region_backend.hpp"
 
 namespace duckdb {
 
-JitRegionLoweringPlan AnalyzeSljitRegion(const JitRegionCompilationInput &input);
-JitRegionCompileResult CompileSljitRegion(const string &backend_name, const JitRegionCompilationInput &input);
+ExecutionRegionLoweringPlan AnalyzeSljitRegion(const ExecutionRegionCompilationInput &input);
+ExecutionRegionCompileResult CompileSljitRegion(const string &backend_name, const ExecutionRegionCompilationInput &input);
 
 } // namespace duckdb

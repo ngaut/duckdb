@@ -9,33 +9,11 @@
 #pragma once
 
 #include "duckdb/common/vector/unified_vector_format.hpp"
-#include "duckdb/execution/jit/ir.hpp"
-
-#include <exception>
+#include "duckdb/execution/execution_expression_ir.hpp"
 
 namespace duckdb {
 
-struct SljitNativeUngroupedAggregateInput {
-	const_data_ptr_t source_data = nullptr;
-	const sel_t *source_sel = nullptr;
-	const validity_t *source_validity = nullptr;
-	idx_t count = 0;
-	data_ptr_t state = nullptr;
-	idx_t *state_count = nullptr;
-	idx_t state_value_offset = 0;
-	idx_t state_is_set_offset = 0;
-};
-
-struct SljitNativeGroupedAggregateInput {
-	const_data_ptr_t source_data = nullptr;
-	const sel_t *source_sel = nullptr;
-	const validity_t *source_validity = nullptr;
-	const data_ptr_t *state_addresses = nullptr;
-	idx_t count = 0;
-	idx_t aggregate_state_offset = 0;
-	idx_t state_value_offset = 0;
-	idx_t state_is_set_offset = 0;
-};
+class Vector;
 
 enum class SljitNativeIntegerBinaryOp : uint8_t { ADD, SUBTRACT, MULTIPLY };
 enum class SljitNativeDoubleBinaryOp : uint8_t { DIVIDE };
@@ -55,11 +33,14 @@ enum class SljitNativeHashJoinKeyKind : uint8_t {
 	INT16,
 	INT32,
 	INT64,
+	INT128,
 	UINT8,
 	UINT16,
 	UINT32,
-	UINT64
+	UINT64,
+	UINT128
 };
+enum class SljitNativeNestedLoopJoinValueKind : uint8_t { INT32, INT64, INT128, DOUBLE };
 enum class SljitNativeCoalesceRhsKind : uint8_t { CONSTANT, REFERENCE };
 enum class SljitNativeNullCheckOp : uint8_t { IS_NULL, IS_NOT_NULL };
 enum class SljitNativePredicateKind : uint8_t {
@@ -72,6 +53,8 @@ enum class SljitNativePredicateKind : uint8_t {
 	INTEGER_COMPARE_REFERENCES,
 	INTEGER_IN_LIST,
 	INTEGER_BETWEEN,
+	STRING_EQUAL_CONSTANT,
+	STRING_IN_LIST_CONSTANT,
 	STRING_PREFIX_CONSTANT,
 	STRING_SUFFIX_CONSTANT,
 	STRING_CONTAINS_CONSTANT,
@@ -85,7 +68,7 @@ struct SljitNativePredicate {
 	LogicalType return_type;
 	bool constant_value = false;
 	bool constant_is_null = false;
-	JitExpressionConjunctionOp conjunction_op = JitExpressionConjunctionOp::AND;
+	ExecutionExpressionConjunctionOp conjunction_op = ExecutionExpressionConjunctionOp::AND;
 	idx_t source_index = 0;
 	idx_t right_source_index = 0;
 	int64_t constant = 0;
@@ -121,22 +104,35 @@ struct SljitNativeConstantOrNull {
 struct SljitNativeVectorInput {
 	const_data_ptr_t source_data = nullptr;
 	const_data_ptr_t right_source_data = nullptr;
+	const_data_ptr_t *source_data_array = nullptr;
 	const sel_t *execute_sel = nullptr;
 	const sel_t *source_sel = nullptr;
 	const sel_t *right_source_sel = nullptr;
+	const sel_t **source_sel_array = nullptr;
 	const validity_t *source_validity = nullptr;
 	const validity_t *right_source_validity = nullptr;
+	const validity_t **source_validity_array = nullptr;
 	const int64_t *constants = nullptr;
 	int64_t constant = 0;
 	double double_constant = 0;
 	data_ptr_t result_data = nullptr;
+	Vector *result_vector = nullptr;
 	validity_t *result_validity = nullptr;
 	sel_t *true_sel = nullptr;
 	sel_t *false_sel = nullptr;
 	idx_t selected_count = 0;
 	const char *overflow_message = nullptr;
+	const char *error_message = nullptr;
 	int64_t overflow_value = 0;
+	idx_t string_decompress_source_size = 0;
+	idx_t active_source_index = 0;
+	idx_t active_result_index = 0;
 	idx_t count = 0;
+	int64_t *aggregate_int64_value = nullptr;
+	bool *aggregate_state_is_set = nullptr;
+	idx_t *aggregate_row_count = nullptr;
+	const data_ptr_t *aggregate_state_addresses = nullptr;
+	bool has_error = false;
 	std::exception_ptr error;
 };
 
@@ -170,12 +166,34 @@ struct SljitNativeHashJoinProbeInput {
 	idx_t pointer_offset = 0;
 	const data_ptr_t *aux_next_ptrs = nullptr;
 	sel_t *match_sel = nullptr;
+	sel_t *build_sel = nullptr;
 	data_ptr_t *row_pointers = nullptr;
 	idx_t output_capacity = 0;
+	uint64_t perfect_min = 0;
+	uint64_t perfect_max = 0;
+	const validity_t *perfect_validity = nullptr;
 	idx_t selected_count = 0;
 	idx_t input_offset = 0;
 	data_ptr_t resume_row_pointer = nullptr;
 	bool finished = false;
+};
+
+struct SljitNativeNestedLoopJoinProbeInput {
+	const_data_ptr_t left_data = nullptr;
+	const_data_ptr_t right_data = nullptr;
+	const sel_t *left_sel = nullptr;
+	const sel_t *right_sel = nullptr;
+	const validity_t *left_validity = nullptr;
+	const validity_t *right_validity = nullptr;
+	idx_t left_count = 0;
+	idx_t right_count = 0;
+	idx_t left_offset = 0;
+	idx_t right_offset = 0;
+	idx_t output_capacity = 0;
+	sel_t *left_match_sel = nullptr;
+	sel_t *right_match_sel = nullptr;
+	idx_t selected_count = 0;
+	bool right_chunk_finished = false;
 };
 
 } // namespace duckdb

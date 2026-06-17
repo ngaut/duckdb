@@ -150,7 +150,7 @@ void GroupedAggregateHashTable::Abandon() {
 	count = 0;
 
 	// Resetting the id ensures the dict state is reset properly when needed
-	state.dict_state.dictionary_id = string();
+	state.compressed_group_state.dictionary_id = string();
 }
 
 void GroupedAggregateHashTable::Repartition() {
@@ -368,8 +368,8 @@ idx_t GroupedAggregateHashTable::AddChunk(DataChunk &groups, DataChunk &payload,
 	return AddChunk(groups, payload, aggregate_filter);
 }
 
-GroupedAggregateHashTable::AggregateDictionaryState::AggregateDictionaryState()
-    : hashes(LogicalType::HASH), new_dictionary_pointers(LogicalType::POINTER), unique_entries(STANDARD_VECTOR_SIZE) {
+GroupedAggregateHashTable::AggregateCompressedGroupState::AggregateCompressedGroupState()
+    : hashes(LogicalType::HASH), unique_group_pointers(LogicalType::POINTER), unique_entries(STANDARD_VECTOR_SIZE) {
 }
 
 optional_idx GroupedAggregateHashTable::TryAddDictionaryGroups(DataChunk &groups, DataChunk &payload,
@@ -402,45 +402,45 @@ optional_idx GroupedAggregateHashTable::TryAddDictionaryGroups(DataChunk &groups
 	}
 	const auto &dictionary_vector = DictionaryVector::Child(dict_col);
 	const auto &offsets = DictionaryVector::SelVector(dict_col);
-	auto &dict_state = state.dict_state;
-	if (dict_state.dictionary_id.empty() || dict_state.dictionary_id != dictionary_id) {
+	auto &compressed_group_state = state.compressed_group_state;
+	if (compressed_group_state.dictionary_id.empty() || compressed_group_state.dictionary_id != dictionary_id) {
 		// new dictionary - initialize the index state
-		if (dict_size > dict_state.capacity) {
-			dict_state.dictionary_addresses = make_uniq<Vector>(LogicalType::POINTER, dict_size);
-			dict_state.found_entry = make_unsafe_uniq_array<bool>(dict_size);
-			dict_state.capacity = dict_size;
+		if (dict_size > compressed_group_state.capacity) {
+			compressed_group_state.dictionary_addresses = make_uniq<Vector>(LogicalType::POINTER, dict_size);
+			compressed_group_state.found_entry = make_unsafe_uniq_array<bool>(dict_size);
+			compressed_group_state.capacity = dict_size;
 		}
-		memset(dict_state.found_entry.get(), 0, dict_size * sizeof(bool));
-		dict_state.dictionary_id = dictionary_id;
-		dict_state.resolved_count = 0;
-		dict_state.address_high_bits = ~uint64_t(0);
-		dict_state.address_high_bits_uniform =
+		memset(compressed_group_state.found_entry.get(), 0, dict_size * sizeof(bool));
+		compressed_group_state.dictionary_id = dictionary_id;
+		compressed_group_state.resolved_count = 0;
+		compressed_group_state.address_high_bits = ~uint64_t(0);
+		compressed_group_state.address_high_bits_uniform =
 		    (sizeof(uintptr_t) == sizeof(uint64_t)); // only relevant on 64-bits systems
-	} else if (dict_size > dict_state.capacity) {
+	} else if (dict_size > compressed_group_state.capacity) {
 		throw InternalException("AggregateHT - using cached dictionary data but dictionary has changed (dictionary id "
 		                        "%s - dict size %d, current capacity %d)",
-		                        dict_state.dictionary_id, dict_size, dict_state.capacity);
+		                        compressed_group_state.dictionary_id, dict_size, compressed_group_state.capacity);
 	}
 
-	auto &found_entry = dict_state.found_entry;
-	auto &unique_entries = dict_state.unique_entries;
+	auto &found_entry = compressed_group_state.found_entry;
+	auto &unique_entries = compressed_group_state.unique_entries;
 	idx_t unique_count = 0;
 	// for each of the dictionary entries - check if we have already done a look-up into the hash table
 	// if we have, we can just use the cached group pointers
 	// once every dict slot has been seen the walk would produce no new entries - skip it
-	if (dict_state.resolved_count < dict_size) {
+	if (compressed_group_state.resolved_count < dict_size) {
 		for (idx_t i = 0; i < groups.size(); i++) {
 			auto dict_idx = offsets.get_index(i);
 			unique_entries.set_index(unique_count, dict_idx);
 			unique_count += !found_entry[dict_idx];
 			found_entry[dict_idx] = true;
 		}
-		dict_state.resolved_count += unique_count;
+		compressed_group_state.resolved_count += unique_count;
 	}
-	auto &new_dictionary_pointers = dict_state.new_dictionary_pointers;
+	auto &unique_group_pointers = compressed_group_state.unique_group_pointers;
 	idx_t new_group_count = 0;
 	if (unique_count > 0) {
-		auto &unique_values = dict_state.unique_values;
+		auto &unique_values = compressed_group_state.unique_values;
 		if (unique_values.ColumnCount() == 0) {
 			unique_values.InitializeEmpty(groups.GetTypes());
 		}
@@ -448,11 +448,11 @@ optional_idx GroupedAggregateHashTable::TryAddDictionaryGroups(DataChunk &groups
 		unique_values.data[0].Slice(dictionary_vector, unique_entries, unique_count);
 		unique_values.CheckCardinality(unique_count);
 		// now we know which entries we are going to add - hash them
-		auto &hashes = dict_state.hashes;
+		auto &hashes = compressed_group_state.hashes;
 		unique_values.Hash(hashes);
 
 		// add the dictionary groups to the hash table
-		new_group_count = FindOrCreateGroups(unique_values, hashes, new_dictionary_pointers, state.new_groups);
+		new_group_count = FindOrCreateGroups(unique_values, hashes, unique_group_pointers, state.new_groups);
 	}
 	auto &aggregates = layout_ptr->GetAggregates();
 	if (aggregates.empty()) {
@@ -461,20 +461,20 @@ optional_idx GroupedAggregateHashTable::TryAddDictionaryGroups(DataChunk &groups
 	}
 
 	// set the addresses that we found for each of the unique groups in the main addresses vector
-	auto new_dict_addresses = FlatVector::GetData<uintptr_t>(new_dictionary_pointers);
+	auto new_dict_addresses = FlatVector::GetData<uintptr_t>(unique_group_pointers);
 	// for each of the new groups, add them to the global (cached) list of addresses for the dictionary
-	auto &dictionary_addresses = *dict_state.dictionary_addresses;
+	auto &dictionary_addresses = *compressed_group_state.dictionary_addresses;
 	auto dict_addresses = FlatVector::ScatterWriter<uintptr_t>(dictionary_addresses);
 	for (idx_t i = 0; i < unique_count; i++) {
 		auto dict_idx = unique_entries.get_index(i);
 		const uintptr_t addr = new_dict_addresses[i] + layout_ptr->GetAggrOffset();
 		static constexpr uint64_t GID_HIGH_MASK = ~(ClusteredAggr::MAX_GID_COUNT - 1);
-		if (dict_state.address_high_bits_uniform) { // for clustered aggregation: check high bit uniformity
+		if (compressed_group_state.address_high_bits_uniform) { // for clustered aggregation: check high bit uniformity
 			const uint64_t high_bits = static_cast<uint64_t>(addr) & GID_HIGH_MASK;
-			if (dict_state.address_high_bits == ~uint64_t(0)) { // uninitialized
-				dict_state.address_high_bits = high_bits;
-			} else if (high_bits != dict_state.address_high_bits) {
-				dict_state.address_high_bits_uniform = false;
+			if (compressed_group_state.address_high_bits == ~uint64_t(0)) { // uninitialized
+				compressed_group_state.address_high_bits = high_bits;
+			} else if (high_bits != compressed_group_state.address_high_bits) {
+				compressed_group_state.address_high_bits_uniform = false;
 			}
 		}
 		dict_addresses[dict_idx] = addr;
@@ -503,8 +503,8 @@ optional_idx GroupedAggregateHashTable::TryAddConstantGroups(DataChunk &groups, 
 #endif
 	// Capture row_count before Reference+SetChildCardinality, which share the buffer and would corrupt groups.size()
 	const idx_t row_count = groups.size();
-	auto &dict_state = state.dict_state;
-	auto &unique_values = dict_state.unique_values;
+	auto &compressed_group_state = state.compressed_group_state;
+	auto &unique_values = compressed_group_state.unique_values;
 	if (unique_values.ColumnCount() == 0) {
 		unique_values.InitializeEmpty(groups.GetTypes());
 	}
@@ -516,12 +516,12 @@ optional_idx GroupedAggregateHashTable::TryAddConstantGroups(DataChunk &groups, 
 	// unique_values.Flatten() created new independent buffers, so restoring groups is safe.
 	groups.SetChildCardinality(row_count);
 
-	auto &hashes = dict_state.hashes;
+	auto &hashes = compressed_group_state.hashes;
 	unique_values.Hash(hashes);
 
 	// add the single constant group to the hash table
-	auto &new_dictionary_pointers = dict_state.new_dictionary_pointers;
-	auto new_group_count = FindOrCreateGroups(unique_values, hashes, new_dictionary_pointers, state.new_groups);
+	auto &unique_group_pointers = compressed_group_state.unique_group_pointers;
+	auto new_group_count = FindOrCreateGroups(unique_values, hashes, unique_group_pointers, state.new_groups);
 
 	auto &aggregates = layout_ptr->GetAggregates();
 	if (aggregates.empty()) {
@@ -531,12 +531,12 @@ optional_idx GroupedAggregateHashTable::TryAddConstantGroups(DataChunk &groups, 
 
 	// process the aggregates
 	// FIXME: This should just be a CONSTANT_VECTOR but subsequent operations assume FLAT_VECTOR
-	auto new_dict_addresses = FlatVector::GetData<uintptr_t>(new_dictionary_pointers);
+	auto new_dict_addresses = FlatVector::GetData<uintptr_t>(unique_group_pointers);
 	auto result_addresses = FlatVector::Writer<uintptr_t>(state.addresses, row_count);
 	uintptr_t aggregate_address = new_dict_addresses[0] + layout_ptr->GetAggrOffset();
 	static constexpr uint64_t GID_HIGH_MASK = ~(ClusteredAggr::MAX_GID_COUNT - 1);
-	dict_state.address_high_bits_uniform = (sizeof(uintptr_t) == sizeof(uint64_t));
-	dict_state.address_high_bits = static_cast<uint64_t>(aggregate_address) & GID_HIGH_MASK;
+	compressed_group_state.address_high_bits_uniform = (sizeof(uintptr_t) == sizeof(uint64_t));
+	compressed_group_state.address_high_bits = static_cast<uint64_t>(aggregate_address) & GID_HIGH_MASK;
 	for (idx_t i = 0; i < row_count; i++) {
 		result_addresses.WriteValue(aggregate_address);
 	}
@@ -560,6 +560,139 @@ optional_idx GroupedAggregateHashTable::TryAddCompressedGroups(DataChunk &groups
 		return TryAddDictionaryGroups(groups, payload, filter);
 	}
 	return optional_idx();
+}
+
+optional_idx GroupedAggregateHashTable::TryFindOrCreateConstantAggregateStates(DataChunk &groups,
+                                                                               Vector &addresses_out) {
+#ifndef DEBUG
+	if (groups.size() <= 1) {
+		return optional_idx();
+	}
+#endif
+	const idx_t row_count = groups.size();
+	auto &compressed_group_state = state.compressed_group_state;
+	auto &unique_values = compressed_group_state.unique_values;
+	if (unique_values.ColumnCount() == 0) {
+		unique_values.InitializeEmpty(groups.GetTypes());
+	}
+	unique_values.Reference(groups);
+	unique_values.SetChildCardinality(1);
+	unique_values.Flatten();
+	groups.SetChildCardinality(row_count);
+
+	auto &hashes = compressed_group_state.hashes;
+	unique_values.Hash(hashes);
+
+	auto &unique_pointers = compressed_group_state.unique_group_pointers;
+	auto new_group_count = FindOrCreateGroups(unique_values, hashes, unique_pointers, state.new_groups);
+	auto unique_addresses = FlatVector::GetData<uintptr_t>(unique_pointers);
+	auto result_addresses = FlatVector::Writer<uintptr_t>(addresses_out, row_count);
+	const auto aggregate_address = unique_addresses[0] + layout_ptr->GetAggrOffset();
+	for (idx_t row_idx = 0; row_idx < row_count; row_idx++) {
+		result_addresses.WriteValue(aggregate_address);
+	}
+	FlatVector::SetSize(addresses_out, row_count);
+	addresses_out.SetVectorType(VectorType::FLAT_VECTOR);
+	return new_group_count;
+}
+
+template <class T>
+optional_idx GroupedAggregateHashTable::TryFindOrCreateRunCompressedAggregateStatesTemplated(DataChunk &groups,
+                                                                                             Vector &addresses_out) {
+	const idx_t row_count = groups.size();
+	if (row_count <= 1) {
+		return optional_idx();
+	}
+
+	UnifiedVectorFormat group_data;
+	groups.data[0].ToUnifiedFormat(group_data);
+	if (group_data.validity.CanHaveNull()) {
+		return optional_idx();
+	}
+	auto group_values = UnifiedVectorFormat::GetData<T>(group_data);
+
+	auto &compressed_group_state = state.compressed_group_state;
+	auto &unique_values = compressed_group_state.unique_values;
+	if (unique_values.ColumnCount() == 0) {
+		unique_values.Initialize(context, groups.GetTypes());
+	} else if (!unique_values.data[0].GetBufferRef()) {
+		unique_values.Destroy();
+		unique_values.Initialize(context, groups.GetTypes());
+	}
+	unique_values.Reset();
+	auto unique_group_values = FlatVector::GetDataMutable<T>(unique_values.data[0]);
+	auto &row_to_run = compressed_group_state.unique_entries;
+
+	idx_t run_count = 0;
+	T previous_value;
+	for (idx_t row_idx = 0; row_idx < row_count; row_idx++) {
+		auto group_idx = group_data.sel->get_index(row_idx);
+		auto value = group_values[group_idx];
+		if (run_count == 0 || value != previous_value) {
+			unique_group_values[run_count++] = value;
+			previous_value = value;
+		}
+		row_to_run.set_index(row_idx, run_count - 1);
+	}
+
+	if (run_count == row_count) {
+		return optional_idx();
+	}
+
+	unique_values.SetChildCardinality(run_count);
+	auto &hashes = compressed_group_state.hashes;
+	unique_values.Hash(hashes);
+
+	auto &run_pointers = compressed_group_state.unique_group_pointers;
+	auto new_group_count = FindOrCreateGroups(unique_values, hashes, run_pointers, state.new_groups);
+	auto run_addresses = FlatVector::GetData<uintptr_t>(run_pointers);
+	auto result_addresses = FlatVector::Writer<uintptr_t>(addresses_out, row_count);
+	const auto aggregate_offset = layout_ptr->GetAggrOffset();
+	for (idx_t row_idx = 0; row_idx < row_count; row_idx++) {
+		auto run_idx = row_to_run.get_index_unsafe(row_idx);
+		result_addresses.WriteValue(run_addresses[run_idx] + aggregate_offset);
+	}
+	FlatVector::SetSize(addresses_out, row_count);
+	addresses_out.SetVectorType(VectorType::FLAT_VECTOR);
+	return new_group_count;
+}
+
+optional_idx GroupedAggregateHashTable::TryFindOrCreateRunCompressedAggregateStates(DataChunk &groups,
+                                                                                    Vector &addresses_out) {
+	if (groups.ColumnCount() != 1) {
+		return optional_idx();
+	}
+	switch (groups.data[0].GetType().InternalType()) {
+	case PhysicalType::INT8:
+		return TryFindOrCreateRunCompressedAggregateStatesTemplated<int8_t>(groups, addresses_out);
+	case PhysicalType::INT16:
+		return TryFindOrCreateRunCompressedAggregateStatesTemplated<int16_t>(groups, addresses_out);
+	case PhysicalType::INT32:
+		return TryFindOrCreateRunCompressedAggregateStatesTemplated<int32_t>(groups, addresses_out);
+	case PhysicalType::INT64:
+		return TryFindOrCreateRunCompressedAggregateStatesTemplated<int64_t>(groups, addresses_out);
+	case PhysicalType::UINT8:
+		return TryFindOrCreateRunCompressedAggregateStatesTemplated<uint8_t>(groups, addresses_out);
+	case PhysicalType::UINT16:
+		return TryFindOrCreateRunCompressedAggregateStatesTemplated<uint16_t>(groups, addresses_out);
+	case PhysicalType::UINT32:
+		return TryFindOrCreateRunCompressedAggregateStatesTemplated<uint32_t>(groups, addresses_out);
+	case PhysicalType::UINT64:
+		return TryFindOrCreateRunCompressedAggregateStatesTemplated<uint64_t>(groups, addresses_out);
+	default:
+		return optional_idx();
+	}
+}
+
+optional_idx GroupedAggregateHashTable::TryFindOrCreateCompressedAggregateStates(DataChunk &groups,
+                                                                                 Vector &addresses_out) {
+	if (groups.ColumnCount() == 0) {
+		return optional_idx();
+	}
+	if (groups.AllConstant()) {
+		return TryFindOrCreateConstantAggregateStates(groups, addresses_out);
+	}
+	return TryFindOrCreateRunCompressedAggregateStates(groups, addresses_out);
 }
 
 idx_t GroupedAggregateHashTable::AddChunk(DataChunk &groups, DataChunk &payload, const unsafe_vector<idx_t> &filter) {
@@ -602,7 +735,7 @@ bool GroupedAggregateHashTable::UpdateAggregatesClustered(DataChunk &payload, co
 		// But, we can use the "addresses as gids". ClusteredAggr only triggers on low gid counts (see above) and
 		// for speed the TryClustered method exploits that by ignoring high gid bits. When using "addresses as gids"
 		// we thus need to know that all high bits are the same (this is very typically the case).
-		if (!state.dict_state.address_high_bits_uniform) {
+		if (!state.compressed_group_state.address_high_bits_uniform) {
 			return false;
 		}
 		auto addrs = FlatVector::GetData<uint64_t>(state.addresses);
@@ -610,7 +743,7 @@ bool GroupedAggregateHashTable::UpdateAggregatesClustered(DataChunk &payload, co
 			return false;
 		}
 		clustered.InitializeStates(
-		    [&](uint64_t gid) { return reinterpret_cast<data_ptr_t>(state.dict_state.address_high_bits | gid); });
+		    [&](uint64_t gid) { return reinterpret_cast<data_ptr_t>(state.compressed_group_state.address_high_bits | gid); });
 	}
 
 	const bool skip_addresses = clustered_state.all_clustered;
@@ -922,6 +1055,10 @@ void GroupedAggregateHashTable::FindOrCreateGroups(DataChunk &groups, Vector &ad
 
 idx_t GroupedAggregateHashTable::FindOrCreateAggregateStates(DataChunk &groups, Vector &addresses_out) {
 	sink_count += groups.size();
+	auto compressed_result = TryFindOrCreateCompressedAggregateStates(groups, addresses_out);
+	if (compressed_result.IsValid()) {
+		return compressed_result.GetIndex();
+	}
 	groups.Hash(state.hashes);
 	const auto new_group_count = FindOrCreateGroups(groups, state.hashes, addresses_out, state.new_groups);
 	VectorOperations::AddInPlace(addresses_out, NumericCast<int64_t>(layout_ptr->GetAggrOffset()));
@@ -1093,7 +1230,7 @@ void GroupedAggregateHashTable::ResetForNewIteration(idx_t initial_capacity, idx
 	skip_lookups = false;
 	enable_hll = false;
 	hll = HyperLogLog();
-	state.dict_state.dictionary_id = string();
+	state.compressed_group_state.dictionary_id = string();
 
 	// Compute effective capacity based on the previous iteration's actual group count.
 	// This avoids clearing a large pointer table (O(max_capacity)) when prior iterations

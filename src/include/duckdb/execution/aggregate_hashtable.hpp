@@ -135,14 +135,14 @@ private:
 	//! Efficiently matches groups
 	RowMatcher row_matcher;
 
-	struct AggregateDictionaryState {
-		AggregateDictionaryState();
+	struct AggregateCompressedGroupState {
+		AggregateCompressedGroupState();
 
 		//! The current dictionary vector id (if any)
 		string dictionary_id;
 		DataChunk unique_values;
 		Vector hashes;
-		Vector new_dictionary_pointers;
+		Vector unique_group_pointers;
 		SelectionVector unique_entries;
 		unique_ptr<Vector> dictionary_addresses;
 		unsafe_unique_array<bool> found_entry;
@@ -212,7 +212,7 @@ private:
 		SelectionVector no_match_vector;
 		Vector addresses;
 		DataChunk group_chunk;
-		AggregateDictionaryState dict_state;
+		AggregateCompressedGroupState compressed_group_state;
 
 		RowOperationsState row_state;
 	} state;
@@ -243,6 +243,11 @@ private:
 	//! Does the actual group matching / creation
 	idx_t FindOrCreateGroupsInternal(DataChunk &groups, Vector &group_hashes, Vector &addresses,
 	                                 SelectionVector &new_groups);
+	optional_idx TryFindOrCreateCompressedAggregateStates(DataChunk &groups, Vector &addresses_out);
+	optional_idx TryFindOrCreateConstantAggregateStates(DataChunk &groups, Vector &addresses_out);
+	optional_idx TryFindOrCreateRunCompressedAggregateStates(DataChunk &groups, Vector &addresses_out);
+	template <class T>
+	optional_idx TryFindOrCreateRunCompressedAggregateStatesTemplated(DataChunk &groups, Vector &addresses_out);
 
 	//! Verify the pointer table of the HT
 	void Verify();

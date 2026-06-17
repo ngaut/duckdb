@@ -1,13 +1,13 @@
 #include "duckdb/function/table/system_functions.hpp"
 
-#include "duckdb/execution/jit/manager.hpp"
+#include "duckdb/execution/execution_region_manager.hpp"
 #include "duckdb/main/client_context.hpp"
-#include "duckdb_jit_table_function_utils.hpp"
+#include "execution_region_table_function_utils.hpp"
 
 namespace duckdb {
 
 struct DuckDBJitDecisionCountersData : public GlobalTableFunctionState {
-	vector<JitDecisionCounter> counters;
+	vector<ExecutionRegionDecisionCounter> counters;
 	idx_t offset = 0;
 };
 
@@ -26,11 +26,11 @@ static unique_ptr<FunctionData> DuckDBJitDecisionCountersBind(ClientContext &con
 	return_types.emplace_back(LogicalType::VARCHAR);
 	names.emplace_back("region_execution_form");
 	return_types.emplace_back(LogicalType::VARCHAR);
+	names.emplace_back("execution_body");
+	return_types.emplace_back(LogicalType::VARCHAR);
 	names.emplace_back("policy_decision");
 	return_types.emplace_back(LogicalType::VARCHAR);
 	names.emplace_back("candidate_shape");
-	return_types.emplace_back(LogicalType::VARCHAR);
-	names.emplace_back("candidate_scope");
 	return_types.emplace_back(LogicalType::VARCHAR);
 	names.emplace_back("admission_shape_key");
 	return_types.emplace_back(LogicalType::VARCHAR);
@@ -66,7 +66,7 @@ static unique_ptr<FunctionData> DuckDBJitDecisionCountersBind(ClientContext &con
 	return_types.emplace_back(LogicalType::BIGINT);
 	names.emplace_back("codegen_time_us");
 	return_types.emplace_back(LogicalType::BIGINT);
-	AddJitCandidateTraceColumns(return_types, names);
+	AddExecutionRegionCandidateTraceColumns(return_types, names);
 	names.emplace_back("pipeline_shape");
 	return_types.emplace_back(LogicalType::VARCHAR);
 	names.emplace_back("pipeline_estimated_cardinality");
@@ -78,9 +78,9 @@ static unique_ptr<FunctionData> DuckDBJitDecisionCountersBind(ClientContext &con
 
 static unique_ptr<GlobalTableFunctionState> DuckDBJitDecisionCountersInit(ClientContext &context,
                                                                           TableFunctionInitInput &input) {
-	JitSuppressionGuard guard(context);
+	ExecutionRegionSuppressionGuard guard(context);
 	auto result = make_uniq<DuckDBJitDecisionCountersData>();
-	result->counters = JitManager::Get(context).GetDecisionCounters();
+	result->counters = ExecutionRegionManager::Get(context).GetDecisionCounters();
 	return std::move(result);
 }
 
@@ -96,9 +96,9 @@ static void DuckDBJitDecisionCountersFunction(ClientContext &context, TableFunct
 		output.data[col++].Append(Value(entry.status));
 		output.data[col++].Append(Value(entry.execution_mode));
 		output.data[col++].Append(Value(entry.region_execution_form));
+		output.data[col++].Append(Value(entry.execution_body));
 		output.data[col++].Append(Value(entry.policy_decision));
 		output.data[col++].Append(Value(entry.candidate_shape));
-		output.data[col++].Append(Value(entry.candidate_scope));
 		output.data[col++].Append(Value(entry.admission_shape_key));
 		output.data[col++].Append(Value::BOOLEAN(entry.admission_rule_present));
 		output.data[col++].Append(Value::UBIGINT(entry.admission_min_cardinality));
@@ -116,7 +116,8 @@ static void DuckDBJitDecisionCountersFunction(ClientContext &context, TableFunct
 		output.data[col++].Append(Value::BIGINT(entry.admission_time_us));
 		output.data[col++].Append(Value::BIGINT(entry.overlap_check_time_us));
 		output.data[col++].Append(Value::BIGINT(entry.codegen_time_us));
-		col = AppendJitCandidateTraceColumns(output, col, entry.candidate_traits, entry.candidate_contract);
+		col = AppendExecutionRegionCandidateTraceColumns(output, col, entry.candidate_signature, entry.candidate_traits,
+		                                                 entry.candidate_contract);
 		if (entry.has_pipeline && !entry.pipeline_shape.empty()) {
 			output.data[col++].Append(Value(entry.pipeline_shape));
 		} else {
@@ -137,8 +138,10 @@ static void DuckDBJitDecisionCountersFunction(ClientContext &context, TableFunct
 }
 
 void DuckDBJitDecisionCountersFun::RegisterFunction(BuiltinFunctions &set) {
-	set.AddFunction(TableFunction("duckdb_jit_decision_counters", {}, DuckDBJitDecisionCountersFunction,
-	                              DuckDBJitDecisionCountersBind, DuckDBJitDecisionCountersInit));
+	auto function = TableFunction("duckdb_jit_decision_counters", {}, DuckDBJitDecisionCountersFunction,
+	                              DuckDBJitDecisionCountersBind, DuckDBJitDecisionCountersInit);
+	function.suppress_compiled_execution = true;
+	set.AddFunction(function);
 }
 
 } // namespace duckdb

@@ -10,13 +10,13 @@
 
 #include "sljit_native_types.hpp"
 
-#include "duckdb/execution/jit/runtime.hpp"
+#include "duckdb/execution/execution_region_kernel.hpp"
 
 #include "sljitLir.h"
 
 namespace duckdb {
 
-unique_ptr<JitCodeHandle> MakeSljitCodeHandle(void *code, idx_t code_size);
+unique_ptr<ExecutionRegionCodeHandle> MakeSljitCodeHandle(void *code, idx_t code_size);
 
 sljit_sw NativeIntegerDataScale(SljitNativeIntegerKind kind);
 sljit_s32 NativeIntegerLoadOp(SljitNativeIntegerKind kind);

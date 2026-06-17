@@ -3,6 +3,7 @@ add_library_unity(
   OBJECT
   async_result.cpp
   base_pipeline_event.cpp
+  execution_region_pipeline_adapter.cpp
   meta_pipeline.cpp
   executor_task.cpp
   executor.cpp

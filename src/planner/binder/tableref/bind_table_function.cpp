@@ -15,7 +15,6 @@
 #include "duckdb/function/window/rows_functions.hpp"
 #include "duckdb/catalog/catalog_entry/table_function_catalog_entry.hpp"
 #include "duckdb/catalog/catalog_entry/table_catalog_entry.hpp"
-#include "duckdb/common/string_util.hpp"
 
 #include "duckdb/planner/expression/bound_window_expression.hpp"
 #include "duckdb/planner/operator/logical_window.hpp"
@@ -23,10 +22,6 @@
 namespace duckdb {
 
 enum class TableFunctionBindType { STANDARD_TABLE_FUNCTION, TABLE_IN_OUT_FUNCTION, TABLE_PARAMETER_FUNCTION };
-
-static bool IsJitSystemTableFunction(const TableFunction &table_function) {
-	return StringUtil::StartsWith(table_function.name.GetIdentifierName(), "duckdb_jit_");
-}
 
 static TableFunctionBindType GetTableFunctionBindType(TableFunctionCatalogEntry &table_function,
                                                       vector<unique_ptr<ParsedExpression>> &expressions) {
@@ -199,8 +194,8 @@ BoundStatement Binder::BindTableFunctionInternal(TableFunction &table_function, 
 	auto function_name = GetAlias(ref);
 	auto &column_name_alias = ref.column_name_alias;
 	auto bind_index = GenerateTableIndex();
-	if (IsJitSystemTableFunction(table_function)) {
-		GetStatementProperties().suppress_jit = true;
+	if (table_function.suppress_compiled_execution) {
+		GetStatementProperties().suppress_compiled_execution = true;
 	}
 	// perform the binding
 	unique_ptr<FunctionData> bind_data;

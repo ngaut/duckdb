@@ -1,19 +1,18 @@
 #include "duckdb/function/table/system_functions.hpp"
 
-#include "duckdb/execution/jit/manager.hpp"
+#include "duckdb/execution/execution_region_manager.hpp"
 #include "duckdb/main/client_context.hpp"
-#include "duckdb_jit_table_function_utils.hpp"
+#include "execution_region_table_function_utils.hpp"
 
 namespace duckdb {
 
 struct DuckDBJitKernelCountersData : public GlobalTableFunctionState {
-	vector<JitKernelCounter> counters;
+	vector<ExecutionRegionKernelCounter> counters;
 	idx_t offset = 0;
 };
 
 static unique_ptr<FunctionData> DuckDBJitKernelCountersBind(ClientContext &context, TableFunctionBindInput &input,
-                                                            vector<LogicalType> &return_types,
-                                                            vector<string> &names) {
+                                                            vector<LogicalType> &return_types, vector<string> &names) {
 	names.emplace_back("kernel_id");
 	return_types.emplace_back(LogicalType::UBIGINT);
 	names.emplace_back("backend_name");
@@ -23,6 +22,8 @@ static unique_ptr<FunctionData> DuckDBJitKernelCountersBind(ClientContext &conte
 	names.emplace_back("execution_mode");
 	return_types.emplace_back(LogicalType::VARCHAR);
 	names.emplace_back("region_execution_form");
+	return_types.emplace_back(LogicalType::VARCHAR);
+	names.emplace_back("execution_body");
 	return_types.emplace_back(LogicalType::VARCHAR);
 	names.emplace_back("candidate_id");
 	return_types.emplace_back(LogicalType::UBIGINT);
@@ -54,63 +55,29 @@ static unique_ptr<FunctionData> DuckDBJitKernelCountersBind(ClientContext &conte
 	return_types.emplace_back(LogicalType::UBIGINT);
 	names.emplace_back("runtime_time_us");
 	return_types.emplace_back(LogicalType::BIGINT);
-	names.emplace_back("source_native_output_rows");
+	names.emplace_back("source_contract_output_rows");
 	return_types.emplace_back(LogicalType::UBIGINT);
-	names.emplace_back("source_native_invocation_count");
+	names.emplace_back("source_contract_invocation_count");
 	return_types.emplace_back(LogicalType::UBIGINT);
-	names.emplace_back("source_native_runtime_time_us");
+	names.emplace_back("source_contract_runtime_time_us");
 	return_types.emplace_back(LogicalType::BIGINT);
 	names.emplace_back("generated_body_runtime_time_us");
 	return_types.emplace_back(LogicalType::BIGINT);
-	names.emplace_back("fused_prepare_runtime_time_us");
-	return_types.emplace_back(LogicalType::BIGINT);
-	names.emplace_back("fused_group_runtime_time_us");
-	return_types.emplace_back(LogicalType::BIGINT);
-	names.emplace_back("fused_state_bind_runtime_time_us");
-	return_types.emplace_back(LogicalType::BIGINT);
-	names.emplace_back("fused_update_runtime_time_us");
-	return_types.emplace_back(LogicalType::BIGINT);
-	names.emplace_back("fused_finish_runtime_time_us");
-	return_types.emplace_back(LogicalType::BIGINT);
-	names.emplace_back("generated_body_flat_input_rows");
-	return_types.emplace_back(LogicalType::UBIGINT);
-	names.emplace_back("generated_body_flat_invocation_count");
-	return_types.emplace_back(LogicalType::UBIGINT);
-	names.emplace_back("generated_body_shared_selection_input_rows");
-	return_types.emplace_back(LogicalType::UBIGINT);
-	names.emplace_back("generated_body_shared_selection_invocation_count");
-	return_types.emplace_back(LogicalType::UBIGINT);
-	names.emplace_back("generated_body_selection_input_rows");
-	return_types.emplace_back(LogicalType::UBIGINT);
-	names.emplace_back("generated_body_selection_invocation_count");
-	return_types.emplace_back(LogicalType::UBIGINT);
-	names.emplace_back("native_operator_loop_input_rows");
-	return_types.emplace_back(LogicalType::UBIGINT);
-	names.emplace_back("native_operator_loop_invocation_count");
-	return_types.emplace_back(LogicalType::UBIGINT);
-	names.emplace_back("fallback_input_rows");
-	return_types.emplace_back(LogicalType::UBIGINT);
-	names.emplace_back("fallback_output_rows");
-	return_types.emplace_back(LogicalType::UBIGINT);
-	names.emplace_back("fallback_invocation_count");
-	return_types.emplace_back(LogicalType::UBIGINT);
-	names.emplace_back("fallback_runtime_time_us");
-	return_types.emplace_back(LogicalType::BIGINT);
+	names.emplace_back("generated_stage_runtime_breakdown");
+	return_types.emplace_back(LogicalType::VARCHAR);
 	names.emplace_back("candidate_pipeline_shape");
 	return_types.emplace_back(LogicalType::VARCHAR);
 	names.emplace_back("candidate_context_pipeline_shape");
 	return_types.emplace_back(LogicalType::VARCHAR);
-	names.emplace_back("candidate_scope");
-	return_types.emplace_back(LogicalType::VARCHAR);
-	AddJitCandidateTraceColumns(return_types, names);
+	AddExecutionRegionCandidateTraceColumns(return_types, names);
 	return nullptr;
 }
 
 static unique_ptr<GlobalTableFunctionState> DuckDBJitKernelCountersInit(ClientContext &context,
                                                                         TableFunctionInitInput &input) {
-	JitSuppressionGuard guard(context);
+	ExecutionRegionSuppressionGuard guard(context);
 	auto result = make_uniq<DuckDBJitKernelCountersData>();
-	result->counters = JitManager::Get(context).GetKernelCounters();
+	result->counters = ExecutionRegionManager::Get(context).GetKernelCounters();
 	return std::move(result);
 }
 
@@ -125,6 +92,7 @@ static void DuckDBJitKernelCountersFunction(ClientContext &context, TableFunctio
 		output.data[col++].Append(Value(entry.target));
 		output.data[col++].Append(Value(entry.execution_mode));
 		output.data[col++].Append(Value(entry.region_execution_form));
+		output.data[col++].Append(Value(entry.execution_body));
 		if (entry.has_candidate) {
 			output.data[col++].Append(Value::UBIGINT(entry.candidate_id));
 			output.data[col++].Append(Value(entry.candidate_shape));
@@ -157,27 +125,15 @@ static void DuckDBJitKernelCountersFunction(ClientContext &context, TableFunctio
 		output.data[col++].Append(Value::UBIGINT(entry.output_rows));
 		output.data[col++].Append(Value::UBIGINT(entry.invocation_count));
 		output.data[col++].Append(Value::BIGINT(entry.runtime_time_us));
-		output.data[col++].Append(Value::UBIGINT(entry.source_native_output_rows));
-		output.data[col++].Append(Value::UBIGINT(entry.source_native_invocation_count));
-		output.data[col++].Append(Value::BIGINT(entry.source_native_runtime_time_us));
+		output.data[col++].Append(Value::UBIGINT(entry.source_contract_output_rows));
+		output.data[col++].Append(Value::UBIGINT(entry.source_contract_invocation_count));
+		output.data[col++].Append(Value::BIGINT(entry.source_contract_runtime_time_us));
 		output.data[col++].Append(Value::BIGINT(entry.generated_body_runtime_time_us));
-		output.data[col++].Append(Value::BIGINT(entry.fused_prepare_runtime_time_us));
-		output.data[col++].Append(Value::BIGINT(entry.fused_group_runtime_time_us));
-		output.data[col++].Append(Value::BIGINT(entry.fused_state_bind_runtime_time_us));
-		output.data[col++].Append(Value::BIGINT(entry.fused_update_runtime_time_us));
-		output.data[col++].Append(Value::BIGINT(entry.fused_finish_runtime_time_us));
-		output.data[col++].Append(Value::UBIGINT(entry.generated_body_flat_input_rows));
-		output.data[col++].Append(Value::UBIGINT(entry.generated_body_flat_invocation_count));
-		output.data[col++].Append(Value::UBIGINT(entry.generated_body_shared_selection_input_rows));
-		output.data[col++].Append(Value::UBIGINT(entry.generated_body_shared_selection_invocation_count));
-		output.data[col++].Append(Value::UBIGINT(entry.generated_body_selection_input_rows));
-		output.data[col++].Append(Value::UBIGINT(entry.generated_body_selection_invocation_count));
-		output.data[col++].Append(Value::UBIGINT(entry.native_operator_loop_input_rows));
-		output.data[col++].Append(Value::UBIGINT(entry.native_operator_loop_invocation_count));
-		output.data[col++].Append(Value::UBIGINT(entry.fallback_input_rows));
-		output.data[col++].Append(Value::UBIGINT(entry.fallback_output_rows));
-		output.data[col++].Append(Value::UBIGINT(entry.fallback_invocation_count));
-		output.data[col++].Append(Value::BIGINT(entry.fallback_runtime_time_us));
+		if (entry.generated_stage_runtime_breakdown.empty()) {
+			output.data[col++].Append(Value(LogicalType::VARCHAR));
+		} else {
+			output.data[col++].Append(Value(entry.generated_stage_runtime_breakdown));
+		}
 		if (entry.has_candidate && !entry.candidate_pipeline_shape.empty()) {
 			output.data[col++].Append(Value(entry.candidate_pipeline_shape));
 		} else {
@@ -188,23 +144,21 @@ static void DuckDBJitKernelCountersFunction(ClientContext &context, TableFunctio
 		} else {
 			output.data[col++].Append(Value(LogicalType::VARCHAR));
 		}
-		if (entry.has_candidate && !entry.candidate_scope.empty()) {
-			output.data[col++].Append(Value(entry.candidate_scope));
-		} else {
-			output.data[col++].Append(Value(LogicalType::VARCHAR));
-		}
 		if (entry.has_candidate) {
-			AppendJitCandidateTraceColumns(output, col, entry.candidate_traits, entry.candidate_contract);
+			AppendExecutionRegionCandidateTraceColumns(output, col, entry.candidate_signature, entry.candidate_traits,
+			                                           entry.candidate_contract);
 		} else {
-			AppendNullJitCandidateTraceColumns(output, col);
+			AppendNullExecutionRegionCandidateTraceColumns(output, col);
 		}
 		count++;
 	}
 }
 
 void DuckDBJitKernelCountersFun::RegisterFunction(BuiltinFunctions &set) {
-	set.AddFunction(TableFunction("duckdb_jit_kernel_counters", {}, DuckDBJitKernelCountersFunction,
-	                              DuckDBJitKernelCountersBind, DuckDBJitKernelCountersInit));
+	auto function = TableFunction("duckdb_jit_kernel_counters", {}, DuckDBJitKernelCountersFunction,
+	                              DuckDBJitKernelCountersBind, DuckDBJitKernelCountersInit);
+	function.suppress_compiled_execution = true;
+	set.AddFunction(function);
 }
 
 } // namespace duckdb

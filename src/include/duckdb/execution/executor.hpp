@@ -124,11 +124,11 @@ public:
 	idx_t GetCompletedPipelines() const {
 		return completed_pipelines.load();
 	}
-	void SetSuppressJit(bool suppress_jit_p) {
-		suppress_jit = suppress_jit_p;
+	void SetSuppressCompiledExecution(bool suppress_compiled_execution_p) {
+		suppress_compiled_execution = suppress_compiled_execution_p;
 	}
-	bool IsJitSuppressed() const {
-		return suppress_jit;
+	bool IsCompiledExecutionSuppressed() const {
+		return suppress_compiled_execution;
 	}
 
 private:
@@ -198,7 +198,7 @@ private:
 
 	//! Total time blocked while waiting on tasks. In ticks. One tick corresponds to WAIT_TIME.
 	atomic<idx_t> blocked_thread_time;
-	//! Statement-local JIT suppression, applied to every pipeline owned by this executor.
-	bool suppress_jit = false;
+	//! Statement-local compiled execution-region suppression, applied to every pipeline owned by this executor.
+	bool suppress_compiled_execution = false;
 };
 } // namespace duckdb

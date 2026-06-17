@@ -10,28 +10,42 @@ PhysicalBatchCollector::PhysicalBatchCollector(PhysicalPlan &physical_plan, Prep
     : PhysicalResultCollector(physical_plan, data) {
 }
 
-JitOperatorDescriptor PhysicalBatchCollector::GetJitOperatorDescriptor() const {
-	return BuildJitResultCollectorAppendDescriptor();
+ExecutionContract PhysicalBatchCollector::GetExecutionContract() const {
+	return BuildExecutionResultCollectorSinkContract();
 }
 
-bool PhysicalBatchCollector::BindJitNativeSink(ExecutionContext &context, DataChunk &input,
-                                               OperatorSinkInput &sink_input, const JitRegionSinkInfo &sink_info,
-                                               JitNativeSinkBinding &binding) const {
+class BatchCollectorExecutionRegionSinkState : public ExecutionAppendSinkState {
+public:
+	explicit BatchCollectorExecutionRegionSinkState(BatchCollectorLocalState &state_p) : state(state_p) {
+	}
+
+	SinkResultType Append(DataChunk &input) override {
+		state.data.Append(input, state.partition_info.batch_index.GetIndex());
+		return SinkResultType::NEED_MORE_INPUT;
+	}
+
+private:
+	BatchCollectorLocalState &state;
+};
+
+bool PhysicalBatchCollector::BindExecutionSink(ExecutionContext &context, DataChunk &input,
+                                               OperatorSinkInput &sink_input, const ExecutionRegionSinkInfo &sink_info,
+                                               ExecutionSinkBinding &binding) const {
 	(void)context;
 	(void)input;
-	binding = JitNativeSinkBinding();
+	binding = ExecutionSinkBinding();
 	binding.kind = sink_info.kind;
-	if (sink_info.kind != JitRegionSinkKind::RESULT_COLLECTOR_APPEND) {
-		binding.blocker = "result-collector-native-runtime-kind-mismatch";
+	if (sink_info.kind != ExecutionRegionSinkKind::RESULT_COLLECTOR_SINK ||
+	    sink_info.native_sink_contract.status != ExecutionRegionStateContractStatus::READY) {
+		binding.blocker = sink_info.native_sink_contract.blocker.empty() ? "result-collector-sink-contract-not-ready"
+		                                                                 : sink_info.native_sink_contract.blocker;
 		return false;
 	}
 	auto &state = sink_input.local_state.Cast<BatchCollectorLocalState>();
 	binding.ready = true;
-	binding.result_collector_append.ready = true;
-	binding.result_collector_append.kind = JitNativeResultCollectorAppendKind::BATCHED_DATA_COLLECTION;
-	binding.result_collector_append.batched_data = &state.data;
-	binding.result_collector_append.batch_index = state.partition_info.batch_index.GetIndex();
-	binding.result_collector_append.blocker = "none";
+	binding.append_sink.ready = true;
+	binding.append_sink.state = make_shared_ptr<BatchCollectorExecutionRegionSinkState>(state);
+	binding.append_sink.blocker = "none";
 	binding.blocker = "none";
 	return true;
 }

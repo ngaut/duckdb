@@ -61,7 +61,7 @@ public:
 public:
 	string GetName() const override;
 	InsertionOrderPreservingMap<string> ParamsToString() const override;
-	JitOperatorDescriptor GetJitOperatorDescriptor() const override;
+	ExecutionContract GetExecutionContract() const override;
 
 	bool Equals(const PhysicalOperator &other) const override;
 
@@ -74,13 +74,12 @@ public:
 	                                                 GlobalSourceState &gstate) const override;
 	unique_ptr<GlobalSourceState> GetGlobalSourceState(ClientContext &context) const override;
 	unique_ptr<GlobalSourceState>
-	GetGlobalSourceState(ClientContext &context,
-	                     optional_ptr<const JitPreparedPipeline> jit_prepared_pipeline) const override;
-	bool SupportsJitNativeSource(const JitPreparedPipeline &jit_prepared_pipeline) const override;
+	GetGlobalSourceState(ClientContext &context, const ExecutionRegionOpenRequest &open_request) const override;
+	bool SupportsExecutionSourceContract(const ExecutionRegionOpenRequest &open_request) const override;
 	SourceResultType GetDataInternal(ExecutionContext &context, DataChunk &chunk,
 	                                 OperatorSourceInput &input) const override;
-	SourceResultType GetJitNativeSourceDataInternal(ExecutionContext &context, DataChunk &chunk,
-	                                                OperatorSourceInput &input) const override;
+	SourceResultType GetExecutionSourceContractDataInternal(ExecutionContext &context, DataChunk &chunk,
+	                                                        OperatorSourceInput &input) const override;
 	OperatorPartitionData GetPartitionData(ExecutionContext &context, DataChunk &chunk, GlobalSourceState &gstate,
 	                                       LocalSourceState &lstate,
 	                                       const OperatorPartitionInfo &partition_info) const override;

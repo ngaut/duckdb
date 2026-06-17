@@ -2,9 +2,10 @@
 
 #include "duckdb/common/limits.hpp"
 #include "duckdb/common/mutex.hpp"
-#include "duckdb/execution/jit/manager.hpp"
-#include "duckdb/execution/jit/region_executor.hpp"
+#include "duckdb/execution/execution_region_manager.hpp"
+#include "duckdb/execution/execution_region_runner.hpp"
 #include "duckdb/main/client_context.hpp"
+#include "duckdb/parallel/execution_region_pipeline_adapter.hpp"
 
 #include "duckdb/main/settings.hpp"
 
@@ -15,20 +16,6 @@
 #endif
 
 namespace duckdb {
-
-static bool HasCompiledJitPreparedSourceOwnerKernel(const vector<unique_ptr<JitRegionKernel>> &kernels) {
-	for (auto &kernel : kernels) {
-		D_ASSERT(kernel);
-		if (!kernel->HasTraceCandidate()) {
-			continue;
-		}
-		auto &contract = kernel->TraceCandidateContract();
-		if (JitRegionABIIsFullPipeline(contract.abi) && kernel->CanExecuteFullPipeline()) {
-			return true;
-		}
-	}
-	return false;
-}
 
 PipelineExecutor::PipelineExecutor(ClientContext &context_p, Pipeline &pipeline_p)
     : pipeline(pipeline_p), thread(context_p), context(context_p, thread, &pipeline_p) {
@@ -56,15 +43,7 @@ PipelineExecutor::PipelineExecutor(ClientContext &context_p, Pipeline &pipeline_
 			FinishProcessing();
 		}
 	}
-	auto prepared_jit = pipeline.GetJitPreparedPipeline();
-	if (prepared_jit) {
-		jit_kernels = JitManager::Get(context_p).CompilePreparedRegions(context_p, *prepared_jit);
-	}
-	auto use_prepared_source_input =
-	    prepared_jit && prepared_jit->RequiresPreparedSourceInput() && HasCompiledJitPreparedSourceOwnerKernel(jit_kernels);
-	auto &source_input_types =
-	    use_prepared_source_input ? prepared_jit->SourceInputTypes(pipeline.source->GetTypes()) : pipeline.source->GetTypes();
-	jit_source_input_chunk.Initialize(BufferAllocator::Get(context.client), source_input_types);
+	PrepareExecutionSourceInputChunk();
 	InitializeChunk(final_chunk);
 }
 
@@ -151,15 +130,31 @@ void PipelineExecutor::Reset() {
 
 	// Reset the final chunk data (keep allocation)
 	final_chunk.Reset();
-	jit_source_input_chunk.Reset();
+	PrepareExecutionSourceInputChunk();
 }
 
 void PipelineExecutor::PrepareForExecution() {
-	if (!has_executed) {
+	auto refreshed = pipeline.PrepareExecutionRegionPlanForExecution();
+	if (!has_executed && !refreshed) {
 		has_executed = true;
 		return;
 	}
+	has_executed = true;
 	Reset();
+}
+
+void PipelineExecutor::PrepareExecutionSourceInputChunk() {
+	auto region_plan = pipeline.GetExecutionRegionPlan();
+	auto use_region_source_input =
+	    region_plan && region_plan->RequiresCompiledSourceInput() && region_plan->HasExecutableFullPipeline();
+	auto &source_input_types = use_region_source_input ? region_plan->SourceInputTypes(pipeline.source->GetTypes())
+	                                                   : pipeline.source->GetTypes();
+	if (execution_source_input_chunk.GetTypes() == source_input_types) {
+		execution_source_input_chunk.Reset();
+		return;
+	}
+	execution_source_input_chunk.Destroy();
+	execution_source_input_chunk.Initialize(BufferAllocator::Get(context.client), source_input_types);
 }
 
 bool PipelineExecutor::TryFlushCachingOperators(ExecutionBudget &chunk_budget) {
@@ -300,10 +295,12 @@ SinkNextBatchType PipelineExecutor::NextBatch(DataChunk &source_chunk, const boo
 
 PipelineExecuteResult PipelineExecutor::Execute(idx_t max_chunks) {
 	D_ASSERT(pipeline.sink);
-	PipelineExecuteResult jit_result;
-	if (JitRegionExecutor::TryExecuteFullPipeline(*this, max_chunks, jit_result)) {
-		return jit_result;
-	}
+	ExecutionRegionPipelineAdapter region_pipeline(*this);
+	return ExecuteExecutionRunner(pipeline.GetExecutionRunnerKind(), region_pipeline, max_chunks);
+}
+
+PipelineExecuteResult PipelineExecutor::ExecuteVectorizedPipeline(idx_t max_chunks) {
+	D_ASSERT(pipeline.sink);
 	ExecutionBudget chunk_budget(max_chunks);
 
 	do {
@@ -690,24 +687,25 @@ SourceResultType PipelineExecutor::FetchFromSource(DataChunk *&result) {
 	return res;
 }
 
-SourceResultType PipelineExecutor::FetchFromNativeSource(DataChunk *&result) {
-	auto prepared_jit = pipeline.GetJitPreparedPipeline();
-	if (!prepared_jit || !prepared_jit->RequiresNativeSource()) {
-		throw InternalException("JIT native source fetch requires a selected native-source contract");
+SourceResultType PipelineExecutor::FetchFromSourceContract(DataChunk *&result) {
+	auto region_plan = pipeline.GetExecutionRegionPlan();
+	if (!region_plan || !region_plan->RequiresSourceContract()) {
+		throw InternalException("execution region source contract fetch requires a selected source contract");
 	}
-	if (!pipeline.source->SupportsJitNativeSource(*prepared_jit)) {
-		throw InternalException("JIT native source fetch selected for a source without native-source support");
+	if (!pipeline.source->SupportsExecutionSourceContract(region_plan->OpenRequest())) {
+		throw InternalException(
+		    "execution region source contract fetch selected for a source without source contract support");
 	}
 
 	StartOperator(*pipeline.source);
 
 	OperatorSourceInput source_input = {*pipeline.source_state, *local_source_state, interrupt_state};
 	source_chunk_initial_idx = 0;
-	auto &source_chunk = jit_source_input_chunk;
+	auto &source_chunk = execution_source_input_chunk;
 	source_chunk.Reset();
 	result = &source_chunk;
 
-	auto res = pipeline.source->GetJitNativeSourceData(context, source_chunk, source_input);
+	auto res = pipeline.source->GetExecutionSourceContractData(context, source_chunk, source_input);
 
 	D_ASSERT(res != SourceResultType::BLOCKED || source_chunk.size() == 0);
 	if (res == SourceResultType::FINISHED) {

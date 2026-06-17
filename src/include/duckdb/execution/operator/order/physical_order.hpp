@@ -35,15 +35,15 @@ public:
 	//===--------------------------------------------------------------------===//
 	unique_ptr<LocalSourceState> GetLocalSourceState(ExecutionContext &context,
 	                                                 GlobalSourceState &gstate) const override;
-		unique_ptr<GlobalSourceState> GetGlobalSourceState(ClientContext &context) const override;
-		bool SupportsJitNativeSource(const JitPreparedPipeline &jit_prepared_pipeline) const override;
-		SourceResultType GetDataInternal(ExecutionContext &context, DataChunk &chunk,
-		                                 OperatorSourceInput &input) const override;
-		SourceResultType GetJitNativeSourceDataInternal(ExecutionContext &context, DataChunk &chunk,
-		                                                OperatorSourceInput &input) const override;
-		OperatorPartitionData GetPartitionData(ExecutionContext &context, DataChunk &chunk, GlobalSourceState &gstate,
-		                                       LocalSourceState &lstate,
-		                                       const OperatorPartitionInfo &partition_info) const override;
+	unique_ptr<GlobalSourceState> GetGlobalSourceState(ClientContext &context) const override;
+	bool SupportsExecutionSourceContract(const ExecutionRegionOpenRequest &open_request) const override;
+	SourceResultType GetDataInternal(ExecutionContext &context, DataChunk &chunk,
+	                                 OperatorSourceInput &input) const override;
+	SourceResultType GetExecutionSourceContractDataInternal(ExecutionContext &context, DataChunk &chunk,
+	                                                        OperatorSourceInput &input) const override;
+	OperatorPartitionData GetPartitionData(ExecutionContext &context, DataChunk &chunk, GlobalSourceState &gstate,
+	                                       LocalSourceState &lstate,
+	                                       const OperatorPartitionInfo &partition_info) const override;
 	ProgressData GetProgress(ClientContext &context, GlobalSourceState &gstate) const override;
 
 	bool IsSource() const override {
@@ -72,6 +72,8 @@ public:
 	unique_ptr<LocalSinkState> GetLocalSinkState(ExecutionContext &context) const override;
 	unique_ptr<GlobalSinkState> GetGlobalSinkState(ClientContext &context) const override;
 	SinkResultType Sink(ExecutionContext &context, DataChunk &chunk, OperatorSinkInput &input) const override;
+	bool BindExecutionSink(ExecutionContext &context, DataChunk &input, OperatorSinkInput &sink_input,
+	                       const ExecutionRegionSinkInfo &sink_info, ExecutionSinkBinding &binding) const override;
 	SinkCombineResultType Combine(ExecutionContext &context, OperatorSinkCombineInput &input) const override;
 	SinkFinalizeType Finalize(Pipeline &pipeline, Event &event, ClientContext &context,
 	                          OperatorSinkFinalizeInput &input) const override;
@@ -88,9 +90,9 @@ public:
 		return false;
 	}
 
-	public:
-		JitOperatorDescriptor GetJitOperatorDescriptor() const override;
-		InsertionOrderPreservingMap<string> ParamsToString() const override;
-	};
+public:
+	ExecutionContract GetExecutionContract() const override;
+	InsertionOrderPreservingMap<string> ParamsToString() const override;
+};
 
 } // namespace duckdb

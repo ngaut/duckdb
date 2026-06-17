@@ -12,6 +12,7 @@
 #include "duckdb/common/vector_operations/aggregate_executor.hpp"
 #include "duckdb/function/aggregate_state.hpp"
 #include "duckdb/function/aggregate_state_layout.hpp"
+#include "duckdb/function/aggregate_primitive_update.hpp"
 #include "duckdb/planner/bound_result_modifier.hpp"
 #include "duckdb/planner/expression.hpp"
 
@@ -55,7 +56,7 @@ struct WindowPartitionInput {
 };
 
 class BindAggregateFunctionInput {
-public:
+	public:
 	BindAggregateFunctionInput(ClientContext &context_p, BoundAggregateFunction &bound_function_p,
 	                           vector<unique_ptr<Expression>> &arguments_p)
 	    : context(context_p), bound_function(bound_function_p), arguments(arguments_p) {
@@ -209,7 +210,11 @@ public:
 	aggregate_serialize_t GetSerializeCallback() const { return serialize; }
 	aggregate_deserialize_t GetDeserializeCallback() const { return deserialize; }
 
-public:
+	bool HasPrimitiveUpdateABI() const { return primitive_update.IsReady(); }
+	const AggregatePrimitiveUpdateABI &GetPrimitiveUpdateABI() const { return primitive_update; }
+	void SetPrimitiveUpdateABI(AggregatePrimitiveUpdateABI value) { primitive_update = value; }
+
+	public:
 	//! The hashed aggregate state sizing function
 	aggregate_size_t state_size = nullptr;
 	//! The hashed aggregate state initialization function
@@ -243,6 +248,8 @@ public:
 	aggregate_deserialize_t deserialize = nullptr;
 
 	aggregate_get_state_type_t get_state_type = nullptr;
+
+	AggregatePrimitiveUpdateABI primitive_update;
 
 	bool operator==(const AggregateFunctionCallbacks &rhs) const;
 	bool operator!=(const AggregateFunctionCallbacks &rhs) const;
@@ -323,6 +330,10 @@ public: // Callbacks
 	auto HasStateUpdateCallback() const -> bool { return callbacks.update != nullptr; }
 	auto GetStateUpdateCallback() const -> aggregate_update_t { return callbacks.update; }
 	auto SetStateUpdateCallback(aggregate_update_t callback) -> void { callbacks.update = callback; }
+
+	bool HasPrimitiveUpdateABI() const { return callbacks.HasPrimitiveUpdateABI(); }
+	const AggregatePrimitiveUpdateABI &GetPrimitiveUpdateABI() const { return callbacks.GetPrimitiveUpdateABI(); }
+	void SetPrimitiveUpdateABI(AggregatePrimitiveUpdateABI value) { callbacks.SetPrimitiveUpdateABI(value); }
 
 	auto HasStateClusterUpdateCallback() const -> bool { return callbacks.cluster_update != nullptr; }
 	auto GetStateClusterUpdateCallback() const -> aggregate_cluster_update_t { return callbacks.cluster_update; }

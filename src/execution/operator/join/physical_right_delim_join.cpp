@@ -87,6 +87,36 @@ public:
 	}
 };
 
+class RightDelimJoinExecutionRegionSinkState : public ExecutionDelimJoinSinkState {
+public:
+	RightDelimJoinExecutionRegionSinkState(ExecutionHashJoinBuildBinding join_sink_p, ExecutionContext &context_p,
+	                                       const PhysicalHashAggregate &distinct_p,
+	                                       GlobalSinkState &distinct_global_state_p,
+	                                       LocalSinkState &distinct_local_state_p, InterruptState &interrupt_state_p)
+	    : join_sink(std::move(join_sink_p)), context(context_p), distinct(distinct_p),
+	      distinct_global_state(distinct_global_state_p), distinct_local_state(distinct_local_state_p),
+	      interrupt_state(interrupt_state_p) {
+	}
+
+	SinkResultType Sink(DataChunk &input) override {
+		auto join_result = ExecutionSinkHashJoinBuild(join_sink, input);
+		if (join_result == SinkResultType::BLOCKED) {
+			return join_result;
+		}
+		OperatorSinkInput distinct_sink_input {distinct_global_state, distinct_local_state, interrupt_state};
+		auto distinct_result = distinct.Sink(context, input, distinct_sink_input);
+		return distinct_result == SinkResultType::BLOCKED ? distinct_result : SinkResultType::NEED_MORE_INPUT;
+	}
+
+private:
+	ExecutionHashJoinBuildBinding join_sink;
+	ExecutionContext &context;
+	const PhysicalHashAggregate &distinct;
+	GlobalSinkState &distinct_global_state;
+	LocalSinkState &distinct_local_state;
+	InterruptState &interrupt_state;
+};
+
 unique_ptr<GlobalSinkState> PhysicalRightDelimJoin::GetGlobalSinkState(ClientContext &context) const {
 	auto state = make_uniq<RightDelimJoinGlobalState>(*this);
 	join.sink_state = join.GetGlobalSinkState(context);
@@ -102,6 +132,52 @@ unique_ptr<LocalSinkState> PhysicalRightDelimJoin::GetLocalSinkState(ExecutionCo
 	state->join_state = join.GetLocalSinkState(context);
 	state->distinct_state = distinct.GetLocalSinkState(context);
 	return std::move(state);
+}
+
+bool PhysicalRightDelimJoin::BindExecutionSink(ExecutionContext &context, DataChunk &input,
+                                               OperatorSinkInput &sink_input, const ExecutionRegionSinkInfo &sink_info,
+                                               ExecutionSinkBinding &binding) const {
+	binding = ExecutionSinkBinding();
+	binding.kind = sink_info.kind;
+	if (sink_info.kind != ExecutionRegionSinkKind::DELIM_JOIN_SINK) {
+		binding.blocker =
+		    "right-delim-join-sink-kind-mismatch;kind=" + string(ExecutionRegionSinkKindToString(sink_info.kind));
+		return false;
+	}
+	if (sink_info.native_sink_contract.status != ExecutionRegionStateContractStatus::READY) {
+		binding.blocker = sink_info.native_sink_contract.blocker.empty() ? "right-delim-join-sink-contract-not-ready"
+		                                                                 : sink_info.native_sink_contract.blocker;
+		return false;
+	}
+	auto &lstate = sink_input.local_state.Cast<RightDelimJoinLocalState>();
+	if (!join.sink_state || !lstate.join_state) {
+		binding.blocker = "right-delim-join-build-sink-state-not-ready";
+		return false;
+	}
+	if (!distinct.sink_state || !lstate.distinct_state) {
+		binding.blocker = "right-delim-join-distinct-sink-state-not-ready";
+		return false;
+	}
+
+	ExecutionRegionSinkInfo join_info = sink_info;
+	join_info.kind = ExecutionRegionSinkKind::HASH_JOIN_BUILD;
+	OperatorSinkInput join_sink_input {*join.sink_state, *lstate.join_state, sink_input.interrupt_state};
+	ExecutionSinkBinding join_binding;
+	if (!join.BindExecutionSink(context, input, join_sink_input, join_info, join_binding) || !join_binding.ready ||
+	    !join_binding.hash_join_build.ready) {
+		binding.blocker =
+		    join_binding.blocker.empty() ? "right-delim-join-build-sink-binding-failed" : join_binding.blocker;
+		return false;
+	}
+
+	binding.ready = true;
+	binding.delim_join_sink.ready = true;
+	binding.delim_join_sink.state = make_shared_ptr<RightDelimJoinExecutionRegionSinkState>(
+	    std::move(join_binding.hash_join_build), context, distinct, *distinct.sink_state, *lstate.distinct_state,
+	    sink_input.interrupt_state);
+	binding.delim_join_sink.blocker = "none";
+	binding.blocker = "none";
+	return true;
 }
 
 SinkResultType PhysicalRightDelimJoin::Sink(ExecutionContext &context, DataChunk &chunk,

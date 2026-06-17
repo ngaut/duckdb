@@ -11,6 +11,7 @@
 #include "duckdb/common/types/data_chunk.hpp"
 #include "duckdb/parallel/interrupt.hpp"
 #include "duckdb/parallel/pipeline.hpp"
+#include "duckdb/parallel/pipeline_execution.hpp"
 #include "duckdb/execution/physical_operator.hpp"
 #include "duckdb/parallel/thread_context.hpp"
 #include "duckdb/execution/execution_context.hpp"
@@ -20,47 +21,11 @@
 
 namespace duckdb {
 class Executor;
-class PipelineJitFullPipelineRuntime;
-class JitRegionExecutor;
-class JitRegionKernel;
-
-//! The result of executing a PipelineExecutor
-enum class PipelineExecuteResult {
-	//! PipelineExecutor is fully executed: the source is completely exhausted
-	FINISHED,
-	//! PipelineExecutor is not yet fully executed and can be called again immediately
-	NOT_FINISHED,
-	//! The PipelineExecutor was interrupted and should not be called again until the interrupt is handled as specified
-	//! in the InterruptMode
-	INTERRUPTED
-};
-
-class ExecutionBudget {
-public:
-	explicit ExecutionBudget(idx_t maximum) : processed(0), maximum_to_process(maximum) {
-	}
-
-public:
-	bool Next() {
-		if (IsDepleted()) {
-			return false;
-		}
-		processed++;
-		return true;
-	}
-	bool IsDepleted() const {
-		return processed >= maximum_to_process;
-	}
-
-private:
-	idx_t processed;
-	idx_t maximum_to_process;
-};
+class ExecutionRegionPipelineAdapter;
 
 //! The Pipeline class represents an execution pipeline
 class PipelineExecutor {
-	friend class PipelineJitFullPipelineRuntime;
-	friend class JitRegionExecutor;
+	friend class ExecutionRegionPipelineAdapter;
 
 public:
 	PipelineExecutor(ClientContext &context, Pipeline &pipeline);
@@ -96,15 +61,17 @@ public:
 	void PrepareForExecution();
 
 private:
+	void PrepareExecutionSourceInputChunk();
 	void InitializeOperatorExecutionState(vector<unique_ptr<DataChunk>> &chunks,
 	                                      vector<unique_ptr<OperatorState>> &states,
 	                                      bool disable_operator_caching = false);
-	//! Pushes a chunk through the regular DuckDB pipeline path. Used by verification and JIT-decline paths.
+	//! Pushes a chunk through the regular DuckDB pipeline path. Used by verification and vectorized runner paths.
 	OperatorResultType ExecutePipelineReference(DataChunk &input, DataChunk &result, idx_t initial_index = 0);
 	OperatorResultType ExecutePipelineOperators(DataChunk &input, DataChunk &result, idx_t initial_idx,
 	                                            vector<unique_ptr<DataChunk>> &chunks,
 	                                            vector<unique_ptr<OperatorState>> &states,
 	                                            stack<idx_t> &operators_in_process, bool apply_finish_processing);
+	PipelineExecuteResult ExecuteVectorizedPipeline(idx_t max_chunks);
 
 	//! The pipeline to process
 	Pipeline &pipeline;
@@ -117,20 +84,16 @@ private:
 	vector<unique_ptr<DataChunk>> intermediate_chunks;
 	//! Intermediate states for the operators
 	vector<unique_ptr<OperatorState>> intermediate_states;
-	//! Optional JIT region kernels for backends that can compile non-overlapping regions of this pipeline
-	vector<unique_ptr<JitRegionKernel>> jit_kernels;
-
 	//! The local source state
 	unique_ptr<LocalSourceState> local_source_state;
 	//! The local sink state (if any)
 	unique_ptr<LocalSinkState> local_sink_state;
 	//! The interrupt state, holding required information for sink/source operators to block
 	InterruptState interrupt_state;
-
 	//! The final chunk used for moving data into the sink
 	DataChunk final_chunk;
-	//! Scratch chunk used when source-pipeline JIT fetches a source chunk before generated prefix code.
-	DataChunk jit_source_input_chunk;
+	//! Scratch chunk used when compiled source-contract execution fetches a source chunk before generated prefix code.
+	DataChunk execution_source_input_chunk;
 
 	//! The operators that are not yet finished executing and have data remaining
 	//! If the stack of in_process_operators is empty, we fetch from the source instead
@@ -178,7 +141,7 @@ private:
 	void GoToSource(idx_t &current_idx, idx_t initial_idx, stack<idx_t> &operators_in_process);
 	DataChunk &GetSourceChunkForInitialIdx(idx_t initial_idx);
 	SourceResultType FetchFromSource(DataChunk *&result);
-	SourceResultType FetchFromNativeSource(DataChunk *&result);
+	SourceResultType FetchFromSourceContract(DataChunk *&result);
 
 	void FinishProcessing(int32_t operator_idx = -1);
 	bool IsFinished();

@@ -40,6 +40,9 @@ public:
 	unique_ptr<LocalSinkState> GetLocalSinkState(ExecutionContext &context) const override;
 
 	SinkCombineResultType Combine(ExecutionContext &context, OperatorSinkCombineInput &input) const override;
+	ExecutionContract GetExecutionContract() const override;
+	bool BindExecutionSink(ExecutionContext &context, DataChunk &input, OperatorSinkInput &sink_input,
+	                       const ExecutionRegionSinkInfo &sink_info, ExecutionSinkBinding &binding) const override;
 
 	bool IsSink() const override {
 		return true;

@@ -127,12 +127,11 @@ struct TableFunctionBindInput {
 };
 
 struct TableFunctionInitInput {
-	TableFunctionInitInput(optional_ptr<const FunctionData> bind_data_p, vector<column_t> column_ids_p,
-	                       const vector<idx_t> &projection_ids_p, optional_ptr<TableFilterSet> filters_p,
-	                       optional_ptr<SampleOptions> sample_options_p = nullptr,
-	                       optional_ptr<const PhysicalOperator> op_p = nullptr,
-	                       TableFilterExecutionMode filter_execution_mode_p =
-	                           TableFilterExecutionMode::FILTER_AND_PRUNE)
+	TableFunctionInitInput(
+	    optional_ptr<const FunctionData> bind_data_p, vector<column_t> column_ids_p,
+	    const vector<idx_t> &projection_ids_p, optional_ptr<TableFilterSet> filters_p,
+	    optional_ptr<SampleOptions> sample_options_p = nullptr, optional_ptr<const PhysicalOperator> op_p = nullptr,
+	    TableFilterExecutionMode filter_execution_mode_p = TableFilterExecutionMode::FILTER_AND_PRUNE)
 	    : bind_data(bind_data_p), column_ids(std::move(column_ids_p)), projection_ids(projection_ids_p),
 	      filters(filters_p), sample_options(sample_options_p), op(op_p),
 	      filter_execution_mode(filter_execution_mode_p) {
@@ -141,12 +140,11 @@ struct TableFunctionInitInput {
 		}
 	}
 
-	TableFunctionInitInput(optional_ptr<const FunctionData> bind_data_p, vector<ColumnIndex> column_indexes_p,
-	                       const vector<idx_t> &projection_ids_p, optional_ptr<TableFilterSet> filters_p,
-	                       optional_ptr<SampleOptions> sample_options_p = nullptr,
-	                       optional_ptr<const PhysicalOperator> op_p = nullptr,
-	                       TableFilterExecutionMode filter_execution_mode_p =
-	                           TableFilterExecutionMode::FILTER_AND_PRUNE)
+	TableFunctionInitInput(
+	    optional_ptr<const FunctionData> bind_data_p, vector<ColumnIndex> column_indexes_p,
+	    const vector<idx_t> &projection_ids_p, optional_ptr<TableFilterSet> filters_p,
+	    optional_ptr<SampleOptions> sample_options_p = nullptr, optional_ptr<const PhysicalOperator> op_p = nullptr,
+	    TableFilterExecutionMode filter_execution_mode_p = TableFilterExecutionMode::FILTER_AND_PRUNE)
 	    : bind_data(bind_data_p), column_indexes(std::move(column_indexes_p)), projection_ids(projection_ids_p),
 	      filters(filters_p), sample_options(sample_options_p), op(op_p),
 	      filter_execution_mode(filter_execution_mode_p) {
@@ -516,6 +514,8 @@ public:
 	bool sampling_pushdown;
 	//! Whether or not the table function supports late materialization
 	bool late_materialization;
+	//! Whether or not compiled execution regions should be suppressed for statements that bind this function
+	bool suppress_compiled_execution;
 	TableFunctionReturnType return_type;
 	//! Additional function info, passed to the bind
 	shared_ptr<TableFunctionInfo> function_info;

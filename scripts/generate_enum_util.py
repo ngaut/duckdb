@@ -23,9 +23,15 @@ enum_util_header_file = os.path.join("..", "src", "include", "duckdb", "common",
 enum_util_source_file = os.path.join("..", "src", "common", "enum_util.cpp")
 
 blacklist_paths = [
-    # EnumUtil lives in src/common and must not include private execution/JIT headers.
-    # Keep this path-based so new JIT IR enums stay behind the same dependency boundary.
-    "duckdb/execution/jit/",
+    # EnumUtil lives in src/common and must not include private compiled-region execution headers.
+    # Keep this path-based so execution-region IR/runtime enums stay behind the same dependency boundary.
+    "duckdb/execution/execution_region_",
+    "duckdb/execution/execution_expression_ir.hpp",
+    "duckdb/execution/execution_compiled_contract.hpp",
+    "duckdb/execution/execution_contract.hpp",
+    "duckdb/execution/execution_operator_runtime.hpp",
+    "duckdb/execution/execution_aggregate_runtime.hpp",
+    "duckdb/execution/execution_hash_join_runtime.hpp",
 ]
 
 # Overrides conversions for the following enums:

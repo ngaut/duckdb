@@ -1,17 +1,17 @@
 #include "duckdb/function/table/system_functions.hpp"
 
-#include "duckdb/execution/jit/manager.hpp"
+#include "duckdb/execution/execution_region_manager.hpp"
 #include "duckdb/main/client_context.hpp"
 
 namespace duckdb {
 
 struct DuckDBJitCountersData : public GlobalTableFunctionState {
-	vector<JitCounter> counters;
+	vector<ExecutionRegionCounter> counters;
 	idx_t offset = 0;
 };
 
 static unique_ptr<FunctionData> DuckDBJitCountersBind(ClientContext &context, TableFunctionBindInput &input,
-                                                       vector<LogicalType> &return_types, vector<string> &names) {
+                                                      vector<LogicalType> &return_types, vector<string> &names) {
 	names.emplace_back("backend_name");
 	return_types.emplace_back(LogicalType::VARCHAR);
 	names.emplace_back("target");
@@ -21,6 +21,8 @@ static unique_ptr<FunctionData> DuckDBJitCountersBind(ClientContext &context, Ta
 	names.emplace_back("execution_mode");
 	return_types.emplace_back(LogicalType::VARCHAR);
 	names.emplace_back("region_execution_form");
+	return_types.emplace_back(LogicalType::VARCHAR);
+	names.emplace_back("execution_body");
 	return_types.emplace_back(LogicalType::VARCHAR);
 	names.emplace_back("policy_decision");
 	return_types.emplace_back(LogicalType::VARCHAR);
@@ -40,40 +42,16 @@ static unique_ptr<FunctionData> DuckDBJitCountersBind(ClientContext &context, Ta
 	return_types.emplace_back(LogicalType::UBIGINT);
 	names.emplace_back("runtime_time_us");
 	return_types.emplace_back(LogicalType::BIGINT);
-	names.emplace_back("source_native_output_rows");
+	names.emplace_back("source_contract_output_rows");
 	return_types.emplace_back(LogicalType::UBIGINT);
-	names.emplace_back("source_native_invocation_count");
+	names.emplace_back("source_contract_invocation_count");
 	return_types.emplace_back(LogicalType::UBIGINT);
-	names.emplace_back("source_native_runtime_time_us");
+	names.emplace_back("source_contract_runtime_time_us");
 	return_types.emplace_back(LogicalType::BIGINT);
 	names.emplace_back("generated_body_runtime_time_us");
 	return_types.emplace_back(LogicalType::BIGINT);
-	names.emplace_back("fused_prepare_runtime_time_us");
-	return_types.emplace_back(LogicalType::BIGINT);
-	names.emplace_back("fused_group_runtime_time_us");
-	return_types.emplace_back(LogicalType::BIGINT);
-	names.emplace_back("fused_state_bind_runtime_time_us");
-	return_types.emplace_back(LogicalType::BIGINT);
-	names.emplace_back("fused_update_runtime_time_us");
-	return_types.emplace_back(LogicalType::BIGINT);
-	names.emplace_back("fused_finish_runtime_time_us");
-	return_types.emplace_back(LogicalType::BIGINT);
-	names.emplace_back("generated_body_flat_input_rows");
-	return_types.emplace_back(LogicalType::UBIGINT);
-	names.emplace_back("generated_body_flat_invocation_count");
-	return_types.emplace_back(LogicalType::UBIGINT);
-	names.emplace_back("generated_body_shared_selection_input_rows");
-	return_types.emplace_back(LogicalType::UBIGINT);
-	names.emplace_back("generated_body_shared_selection_invocation_count");
-	return_types.emplace_back(LogicalType::UBIGINT);
-	names.emplace_back("generated_body_selection_input_rows");
-	return_types.emplace_back(LogicalType::UBIGINT);
-	names.emplace_back("generated_body_selection_invocation_count");
-	return_types.emplace_back(LogicalType::UBIGINT);
-	names.emplace_back("native_operator_loop_input_rows");
-	return_types.emplace_back(LogicalType::UBIGINT);
-	names.emplace_back("native_operator_loop_invocation_count");
-	return_types.emplace_back(LogicalType::UBIGINT);
+	names.emplace_back("generated_stage_runtime_breakdown");
+	return_types.emplace_back(LogicalType::VARCHAR);
 	names.emplace_back("ir_lowering_time_us");
 	return_types.emplace_back(LogicalType::BIGINT);
 	names.emplace_back("backend_analysis_time_us");
@@ -89,9 +67,9 @@ static unique_ptr<FunctionData> DuckDBJitCountersBind(ClientContext &context, Ta
 
 static unique_ptr<GlobalTableFunctionState> DuckDBJitCountersInit(ClientContext &context,
                                                                   TableFunctionInitInput &input) {
-	JitSuppressionGuard guard(context);
+	ExecutionRegionSuppressionGuard guard(context);
 	auto result = make_uniq<DuckDBJitCountersData>();
-	result->counters = JitManager::Get(context).GetCounters();
+	result->counters = ExecutionRegionManager::Get(context).GetCounters();
 	return std::move(result);
 }
 
@@ -106,6 +84,7 @@ static void DuckDBJitCountersFunction(ClientContext &context, TableFunctionInput
 		output.data[col++].Append(Value(entry.status));
 		output.data[col++].Append(Value(entry.execution_mode));
 		output.data[col++].Append(Value(entry.region_execution_form));
+		output.data[col++].Append(Value(entry.execution_body));
 		output.data[col++].Append(Value(entry.policy_decision));
 		output.data[col++].Append(Value::UBIGINT(entry.count));
 		output.data[col++].Append(Value::BIGINT(entry.decision_time_us));
@@ -115,23 +94,15 @@ static void DuckDBJitCountersFunction(ClientContext &context, TableFunctionInput
 		output.data[col++].Append(Value::UBIGINT(entry.output_rows));
 		output.data[col++].Append(Value::UBIGINT(entry.invocation_count));
 		output.data[col++].Append(Value::BIGINT(entry.runtime_time_us));
-		output.data[col++].Append(Value::UBIGINT(entry.source_native_output_rows));
-		output.data[col++].Append(Value::UBIGINT(entry.source_native_invocation_count));
-		output.data[col++].Append(Value::BIGINT(entry.source_native_runtime_time_us));
+		output.data[col++].Append(Value::UBIGINT(entry.source_contract_output_rows));
+		output.data[col++].Append(Value::UBIGINT(entry.source_contract_invocation_count));
+		output.data[col++].Append(Value::BIGINT(entry.source_contract_runtime_time_us));
 		output.data[col++].Append(Value::BIGINT(entry.generated_body_runtime_time_us));
-		output.data[col++].Append(Value::BIGINT(entry.fused_prepare_runtime_time_us));
-		output.data[col++].Append(Value::BIGINT(entry.fused_group_runtime_time_us));
-		output.data[col++].Append(Value::BIGINT(entry.fused_state_bind_runtime_time_us));
-		output.data[col++].Append(Value::BIGINT(entry.fused_update_runtime_time_us));
-		output.data[col++].Append(Value::BIGINT(entry.fused_finish_runtime_time_us));
-		output.data[col++].Append(Value::UBIGINT(entry.generated_body_flat_input_rows));
-		output.data[col++].Append(Value::UBIGINT(entry.generated_body_flat_invocation_count));
-		output.data[col++].Append(Value::UBIGINT(entry.generated_body_shared_selection_input_rows));
-		output.data[col++].Append(Value::UBIGINT(entry.generated_body_shared_selection_invocation_count));
-		output.data[col++].Append(Value::UBIGINT(entry.generated_body_selection_input_rows));
-		output.data[col++].Append(Value::UBIGINT(entry.generated_body_selection_invocation_count));
-		output.data[col++].Append(Value::UBIGINT(entry.native_operator_loop_input_rows));
-		output.data[col++].Append(Value::UBIGINT(entry.native_operator_loop_invocation_count));
+		if (entry.generated_stage_runtime_breakdown.empty()) {
+			output.data[col++].Append(Value(LogicalType::VARCHAR));
+		} else {
+			output.data[col++].Append(Value(entry.generated_stage_runtime_breakdown));
+		}
 		output.data[col++].Append(Value::BIGINT(entry.ir_lowering_time_us));
 		output.data[col++].Append(Value::BIGINT(entry.backend_analysis_time_us));
 		output.data[col++].Append(Value::BIGINT(entry.admission_time_us));
@@ -142,8 +113,10 @@ static void DuckDBJitCountersFunction(ClientContext &context, TableFunctionInput
 }
 
 void DuckDBJitCountersFun::RegisterFunction(BuiltinFunctions &set) {
-	set.AddFunction(TableFunction("duckdb_jit_counters", {}, DuckDBJitCountersFunction, DuckDBJitCountersBind,
-	                              DuckDBJitCountersInit));
+	auto function = TableFunction("duckdb_jit_counters", {}, DuckDBJitCountersFunction, DuckDBJitCountersBind,
+	                              DuckDBJitCountersInit);
+	function.suppress_compiled_execution = true;
+	set.AddFunction(function);
 }
 
 } // namespace duckdb

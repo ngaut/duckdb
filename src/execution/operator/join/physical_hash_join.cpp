@@ -8,7 +8,6 @@
 #include "duckdb/common/uhugeint.hpp"
 #include "duckdb/common/types/uhugeint.hpp"
 #include "duckdb/execution/expression_executor.hpp"
-#include "duckdb/execution/jit/runtime.hpp"
 #include "duckdb/execution/join_hashtable.hpp"
 #include "duckdb/execution/operator/aggregate/ungrouped_aggregate_state.hpp"
 #include "duckdb/execution/operator/join/perfect_hash_join_executor.hpp"
@@ -635,30 +634,28 @@ SinkResultType PhysicalHashJoin::Sink(ExecutionContext &context, DataChunk &chun
 	return SinkResultType::NEED_MORE_INPUT;
 }
 
-static bool BindJitNativeHashJoinBuildColumns(const JitRegionSinkInfo &sink_info, DataChunk &chunk,
-                                              JitNativeHashJoinBuildBinding &build, string &blocker) {
-	auto &protocol = sink_info.hash_join_protocol;
-	if (sink_info.kind != JitRegionSinkKind::HASH_JOIN_BUILD) {
+static bool BindExecutionHashJoinBuildColumns(const ExecutionRegionSinkInfo &sink_info, DataChunk &chunk,
+                                              ExecutionHashJoinBuildBinding &build, string &blocker) {
+	auto &contract = sink_info.hash_join_contract;
+	if (sink_info.kind != ExecutionRegionSinkKind::HASH_JOIN_BUILD) {
 		blocker = "hash-join-build-native-runtime-wrong-sink-kind";
 		return false;
 	}
-	if (!protocol.present) {
-		blocker = "hash-join-build-native-runtime-missing-protocol";
+	if (!contract.present) {
+		blocker = "hash-join-build-native-runtime-missing-contract";
 		return false;
 	}
-	if (protocol.native_build_contract.status != JitRegionStateContractStatus::READY) {
-		blocker = protocol.native_build_contract.blocker.empty()
-		              ? "hash-join-build-native-runtime-contract-not-ready"
-		              : protocol.native_build_contract.blocker;
+	if (contract.native_build_contract.status != ExecutionRegionStateContractStatus::READY) {
+		blocker = contract.native_build_contract.blocker.empty() ? "hash-join-build-native-runtime-contract-not-ready"
+		                                                         : contract.native_build_contract.blocker;
 		return false;
 	}
-	if (!protocol.build_append_shape_ready) {
-		blocker = protocol.build_append_shape_blocker.empty()
-		              ? "hash-join-build-native-runtime-append-shape-not-ready"
-		              : protocol.build_append_shape_blocker;
+	if (!contract.build_sink_shape_ready) {
+		blocker = contract.build_sink_shape_blocker.empty() ? "hash-join-build-native-runtime-sink-shape-not-ready"
+		                                                    : contract.build_sink_shape_blocker;
 		return false;
 	}
-	if (sink_info.hash_join_keys.size() != protocol.condition_count) {
+	if (sink_info.hash_join_keys.size() != contract.condition_count) {
 		blocker = "hash-join-build-native-runtime-key-count-mismatch";
 		return false;
 	}
@@ -674,33 +671,33 @@ static bool BindJitNativeHashJoinBuildColumns(const JitRegionSinkInfo &sink_info
 		build.key_input_indices.push_back(NumericCast<column_t>(key.input_index));
 		build.key_types.push_back(key.type);
 	}
-	if (protocol.payload_column_indices.size() != protocol.payload_types.size()) {
+	if (contract.payload_column_indices.size() != contract.payload_types.size()) {
 		blocker = "hash-join-build-native-runtime-payload-contract-mismatch";
 		return false;
 	}
-	for (idx_t payload_idx = 0; payload_idx < protocol.payload_column_indices.size(); payload_idx++) {
-		auto input_index = protocol.payload_column_indices[payload_idx];
+	for (idx_t payload_idx = 0; payload_idx < contract.payload_column_indices.size(); payload_idx++) {
+		auto input_index = contract.payload_column_indices[payload_idx];
 		if (input_index >= chunk.ColumnCount()) {
 			blocker = "hash-join-build-native-runtime-payload-input-out-of-range";
 			return false;
 		}
 		build.payload_input_indices.push_back(NumericCast<column_t>(input_index));
-		build.payload_types.push_back(protocol.payload_types[payload_idx]);
+		build.payload_types.push_back(contract.payload_types[payload_idx]);
 	}
 	return true;
 }
 
-bool JitBindNativeHashJoinBuild(ExecutionContext &context, OperatorSinkInput &input, DataChunk &chunk,
-                                const JitRegionSinkInfo &sink_info, JitNativeSinkBinding &binding) {
+bool ExecutionBindHashJoinBuild(ExecutionContext &context, OperatorSinkInput &input, DataChunk &chunk,
+                                const ExecutionRegionSinkInfo &sink_info, ExecutionSinkBinding &binding) {
 	(void)context;
-	binding = JitNativeSinkBinding();
+	binding = ExecutionSinkBinding();
 	binding.kind = sink_info.kind;
 
 	auto &gstate = input.global_state.Cast<HashJoinGlobalSinkState>();
 	auto &lstate = input.local_state.Cast<HashJoinLocalSinkState>();
 	auto &build = binding.hash_join_build;
 	string blocker;
-	if (!BindJitNativeHashJoinBuildColumns(sink_info, chunk, build, blocker)) {
+	if (!BindExecutionHashJoinBuildColumns(sink_info, chunk, build, blocker)) {
 		binding.blocker = std::move(blocker);
 		build.blocker = binding.blocker;
 		return false;
@@ -745,21 +742,22 @@ bool JitBindNativeHashJoinBuild(ExecutionContext &context, OperatorSinkInput &in
 	return true;
 }
 
-SinkResultType JitAppendNativeHashJoinBuild(const JitNativeHashJoinBuildBinding &binding, DataChunk &input) {
-	if (!binding.ready || !binding.hash_table || !binding.append_state || !binding.join_keys || !binding.payload_chunk) {
-		throw InternalException("JIT native hash join build append requires a bound hash join build state");
+SinkResultType ExecutionSinkHashJoinBuild(const ExecutionHashJoinBuildBinding &binding, DataChunk &input) {
+	if (!binding.ready || !binding.hash_table || !binding.append_state || !binding.join_keys ||
+	    !binding.payload_chunk) {
+		throw InternalException("execution native hash join build sink requires a bound hash join build state");
 	}
 	if (binding.join_keys->ColumnCount() != binding.key_input_indices.size()) {
-		throw InternalException("JIT native hash join build key count mismatch");
+		throw InternalException("execution native hash join build key count mismatch");
 	}
 	if (binding.payload_chunk->ColumnCount() != binding.payload_input_indices.size()) {
-		throw InternalException("JIT native hash join build payload count mismatch");
+		throw InternalException("execution native hash join build payload count mismatch");
 	}
 
 	binding.join_keys->ReferenceColumns(input, binding.key_input_indices);
 	if (binding.filter_pushdown && !binding.skip_filter_pushdown) {
 		if (!binding.local_filter_state) {
-			throw InternalException("JIT native hash join build filter pushdown requires local filter state");
+			throw InternalException("execution native hash join build filter pushdown requires local filter state");
 		}
 		binding.filter_pushdown->Sink(*binding.join_keys, *binding.local_filter_state);
 	}
@@ -1834,93 +1832,279 @@ unique_ptr<OperatorState> PhysicalHashJoin::GetOperatorState(ExecutionContext &c
 	return std::move(state);
 }
 
-bool PhysicalHashJoin::BindJitNativeOperator(ExecutionContext &context, DataChunk &input, GlobalOperatorState &gstate,
-                                             OperatorState &state_p, const JitRegionOperatorInfo &operator_info,
-                                             JitNativeOperatorBinding &binding) const {
+static bool ExecutionHashJoinProbeLayoutCanDefer(const string &blocker) {
+	return blocker == "hash-join-native-table-not-finalized" || blocker == "hash-join-native-pointer-table-missing" ||
+	       blocker == "hash-join-native-external-partitioned-table";
+}
+
+static bool ExecutionHashJoinProbeEmptyBuildSideSupported(ExecutionHashJoinProbeOutputMode output_mode,
+                                                          bool correlated_mark_counts_required) {
+	switch (output_mode) {
+	case ExecutionHashJoinProbeOutputMode::MATCHED_PROBE_AND_BUILD:
+	case ExecutionHashJoinProbeOutputMode::LEFT_PROBE_AND_BUILD:
+	case ExecutionHashJoinProbeOutputMode::MATCHED_PROBE_ONLY:
+	case ExecutionHashJoinProbeOutputMode::MARK_BUILD_ONLY:
+		return true;
+	case ExecutionHashJoinProbeOutputMode::MARK_PROBE:
+		return !correlated_mark_counts_required;
+	default:
+		return false;
+	}
+}
+
+static ExecutionOperatorReadiness MakeExecutionHashJoinProbeReadiness(ExecutionRegionOperatorContractKind kind,
+                                                                      ExecutionOperatorReadinessStatus status,
+                                                                      string blocker) {
+	ExecutionOperatorReadiness readiness;
+	readiness.kind = kind;
+	readiness.status = status;
+	readiness.blocker = std::move(blocker);
+	return readiness;
+}
+
+ExecutionOperatorReadiness
+PhysicalHashJoin::GetExecutionOperatorReadiness(ClientContext &context,
+                                                const ExecutionRegionOperatorInfo &operator_info) const {
+	(void)context;
+	auto invalid = [&](string blocker) {
+		return MakeExecutionHashJoinProbeReadiness(operator_info.kind, ExecutionOperatorReadinessStatus::INVALID,
+		                                           std::move(blocker));
+	};
+	auto not_ready = [&](string blocker) {
+		return MakeExecutionHashJoinProbeReadiness(operator_info.kind, ExecutionOperatorReadinessStatus::NOT_READY,
+		                                           std::move(blocker));
+	};
+	auto ready = [&]() {
+		return MakeExecutionHashJoinProbeReadiness(operator_info.kind, ExecutionOperatorReadinessStatus::READY, "none");
+	};
+
+	if (operator_info.kind != ExecutionRegionOperatorContractKind::HASH_JOIN_PROBE) {
+		return invalid("hash-join-native-readiness-wrong-operator-kind");
+	}
+	auto &contract = operator_info.hash_join_contract;
+	if (!contract.present) {
+		return invalid("hash-join-native-readiness-missing-contract");
+	}
+	if (contract.native_probe_contract.status != ExecutionRegionStateContractStatus::READY) {
+		return invalid(contract.native_probe_contract.blocker.empty()
+		                   ? "hash-join-native-readiness-probe-contract-not-ready"
+		                   : contract.native_probe_contract.blocker);
+	}
+	if (!contract.native_probe_shape_ready) {
+		return invalid(contract.native_probe_shape_blocker.empty() ? "hash-join-native-readiness-probe-shape-not-ready"
+		                                                           : contract.native_probe_shape_blocker);
+	}
+	if (operator_info.hash_join_keys.size() != contract.condition_count) {
+		return invalid("hash-join-native-readiness-probe-key-count-mismatch");
+	}
+	for (auto &key : operator_info.hash_join_keys) {
+		if (!key.supported_reference) {
+			return invalid(key.reason.empty() ? "hash-join-native-readiness-probe-key-not-reference" : key.reason);
+		}
+	}
+	if (!sink_state) {
+		return not_ready("hash-join-native-readiness-missing-sink-state");
+	}
+	auto &sink = sink_state->Cast<HashJoinGlobalSinkState>();
+	if (!sink.hash_table) {
+		return not_ready("hash-join-native-readiness-missing-hash-table");
+	}
+
+	ExecutionHashJoinTableLayout table_layout;
+	ExecutionPerfectHashJoinTableLayout perfect_layout;
+	bool perfect_hash_layout = false;
+	ExecutionGetHashJoinTableLayout(*sink.hash_table, table_layout);
+	auto output_mode = contract.native_probe_output_mode;
+	const bool native_residual_probe =
+	    (contract.residual_predicate || contract.residual_info) && contract.residual_expression_ready;
+	if (!table_layout.ready) {
+		if (sink.finalized && sink.perfect_join_executor &&
+		    table_layout.blocker == "hash-join-native-table-not-finalized") {
+			if (!contract.perfect_hash_probe_shape_ready) {
+				return invalid(contract.perfect_hash_probe_shape_blocker.empty()
+				                   ? "perfect-hash-join-native-probe-shape-not-ready"
+				                   : contract.perfect_hash_probe_shape_blocker);
+			}
+			if (!sink.perfect_join_executor->GetExecutionPerfectHashJoinTableLayout(perfect_layout)) {
+				return invalid(perfect_layout.blocker.empty() ? "perfect-hash-join-native-layout-not-ready"
+				                                              : perfect_layout.blocker);
+			}
+			if (perfect_layout.rhs_output_column_count != contract.rhs_output_column_count) {
+				return invalid("perfect-hash-join-native-rhs-output-count-mismatch");
+			}
+			perfect_hash_layout = true;
+		}
+		if (!perfect_hash_layout && table_layout.finalized && sink.hash_table->Count() == 0 &&
+		    ExecutionHashJoinProbeEmptyBuildSideSupported(output_mode, contract.correlated_mark_counts_required)) {
+			table_layout.ready = true;
+			table_layout.blocker = "none";
+		} else if (!perfect_hash_layout && native_residual_probe &&
+		           table_layout.blocker == "hash-join-native-residual-predicate") {
+			table_layout.ready = true;
+			table_layout.blocker = "none";
+		} else if (!perfect_hash_layout) {
+			auto blocker = table_layout.blocker.empty() ? "hash-join-native-readiness-table-layout-not-ready"
+			                                            : table_layout.blocker;
+			if (ExecutionHashJoinProbeLayoutCanDefer(blocker)) {
+				return not_ready(std::move(blocker));
+			}
+			return invalid(std::move(blocker));
+		}
+	}
+	if (contract.non_equality_condition_count != 0 &&
+	    contract.native_probe_output_mode != ExecutionHashJoinProbeOutputMode::MATCHED_PROBE_AND_BUILD &&
+	    contract.native_probe_output_mode != ExecutionHashJoinProbeOutputMode::LEFT_PROBE_AND_BUILD &&
+	    contract.native_probe_output_mode != ExecutionHashJoinProbeOutputMode::MATCHED_PROBE_ONLY) {
+		return invalid("hash-join-native-readiness-non-equality-output-mode-contract-invariant");
+	}
+	if (!perfect_hash_layout && table_layout.dictionary_emission && table_layout.chains_longer_than_one &&
+	    !table_layout.aux_next_ptrs &&
+	    contract.native_probe_output_mode == ExecutionHashJoinProbeOutputMode::MARK_BUILD_ONLY) {
+		return invalid("hash-join-native-readiness-dictionary-chain-layout-missing");
+	}
+	if (!perfect_hash_layout && table_layout.condition_count != contract.condition_count) {
+		return invalid("hash-join-native-readiness-condition-count-mismatch");
+	}
+	if (contract.correlated_mark_counts_required) {
+		auto &mark_info = sink.hash_table->correlated_mark_join_info;
+		if (!mark_info.correlated_counts) {
+			return invalid("hash-join-native-readiness-missing-correlated-mark-counts");
+		}
+		if (mark_info.correlated_types.size() != contract.delim_type_count) {
+			return invalid("hash-join-native-readiness-correlated-mark-count-shape-mismatch");
+		}
+	}
+	return ready();
+}
+
+ExecutionOperatorBindResult PhysicalHashJoin::BindExecutionOperator(ExecutionContext &context, DataChunk &input,
+                                                                    GlobalOperatorState &gstate, OperatorState &state_p,
+                                                                    const ExecutionRegionOperatorInfo &operator_info,
+                                                                    ExecutionOperatorBinding &binding) const {
 	(void)context;
 	(void)gstate;
 	(void)state_p;
-	binding = JitNativeOperatorBinding();
+	binding = ExecutionOperatorBinding();
 	binding.kind = operator_info.kind;
-	if (operator_info.kind != JitRegionOperatorKind::HASH_JOIN_PROBE) {
+	if (operator_info.kind != ExecutionRegionOperatorContractKind::HASH_JOIN_PROBE) {
 		binding.blocker = "hash-join-native-runtime-wrong-operator-kind";
-		return false;
+		return ExecutionOperatorBindResult::INVALID;
 	}
-	auto &protocol = operator_info.hash_join_protocol;
-	if (!protocol.present) {
-		binding.blocker = "hash-join-native-runtime-missing-protocol";
-		return false;
+	auto &contract = operator_info.hash_join_contract;
+	if (!contract.present) {
+		binding.blocker = "hash-join-native-runtime-missing-contract";
+		return ExecutionOperatorBindResult::INVALID;
 	}
-	if (protocol.native_probe_contract.status != JitRegionStateContractStatus::READY) {
-		binding.blocker = protocol.native_probe_contract.blocker.empty()
+	if (contract.native_probe_contract.status != ExecutionRegionStateContractStatus::READY) {
+		binding.blocker = contract.native_probe_contract.blocker.empty()
 		                      ? "hash-join-native-runtime-probe-contract-not-ready"
-		                      : protocol.native_probe_contract.blocker;
-		return false;
+		                      : contract.native_probe_contract.blocker;
+		return ExecutionOperatorBindResult::INVALID;
 	}
-	if (!protocol.native_probe_shape_ready) {
-		binding.blocker = protocol.native_probe_shape_blocker.empty()
-		                      ? "hash-join-native-runtime-probe-shape-not-ready"
-		                      : protocol.native_probe_shape_blocker;
-		return false;
+	if (!contract.native_probe_shape_ready) {
+		binding.blocker = contract.native_probe_shape_blocker.empty() ? "hash-join-native-runtime-probe-shape-not-ready"
+		                                                              : contract.native_probe_shape_blocker;
+		return ExecutionOperatorBindResult::INVALID;
 	}
-	if (operator_info.hash_join_keys.size() != protocol.condition_count) {
+	if (operator_info.hash_join_keys.size() != contract.condition_count) {
 		binding.blocker = "hash-join-native-runtime-probe-key-count-mismatch";
-		return false;
+		return ExecutionOperatorBindResult::INVALID;
 	}
 	vector<idx_t> probe_key_input_indices;
 	probe_key_input_indices.reserve(operator_info.hash_join_keys.size());
 	for (auto &key : operator_info.hash_join_keys) {
 		if (!key.supported_reference) {
 			binding.blocker = key.reason.empty() ? "hash-join-native-runtime-probe-key-not-reference" : key.reason;
-			return false;
+			return ExecutionOperatorBindResult::INVALID;
 		}
 		if (key.input_index >= input.ColumnCount()) {
 			binding.blocker = "hash-join-native-runtime-probe-key-input-out-of-range";
-			return false;
+			return ExecutionOperatorBindResult::INVALID;
 		}
 		probe_key_input_indices.push_back(key.input_index);
 	}
 	if (!sink_state) {
 		binding.blocker = "hash-join-native-runtime-missing-sink-state";
-		return false;
+		return ExecutionOperatorBindResult::INVALID;
 	}
 	auto &sink = sink_state->Cast<HashJoinGlobalSinkState>();
 	if (!sink.hash_table) {
 		binding.blocker = "hash-join-native-runtime-missing-hash-table";
-		return false;
+		return ExecutionOperatorBindResult::INVALID;
 	}
 
-	JitNativeHashJoinTableLayout table_layout;
-	JitGetNativeHashJoinTableLayout(*sink.hash_table, table_layout);
+	ExecutionHashJoinTableLayout table_layout;
+	ExecutionPerfectHashJoinTableLayout perfect_layout;
+	bool perfect_hash_layout = false;
+	ExecutionGetHashJoinTableLayout(*sink.hash_table, table_layout);
+	auto output_mode = contract.native_probe_output_mode;
+	const bool native_residual_probe =
+	    (contract.residual_predicate || contract.residual_info) && contract.residual_expression_ready;
+	bool empty_build_side = false;
 	if (!table_layout.ready) {
-		binding.blocker = table_layout.blocker.empty() ? "hash-join-native-runtime-table-layout-not-ready"
-		                                               : table_layout.blocker;
-		return false;
+		if (sink.finalized && sink.perfect_join_executor &&
+		    table_layout.blocker == "hash-join-native-table-not-finalized") {
+			if (!contract.perfect_hash_probe_shape_ready) {
+				binding.blocker = contract.perfect_hash_probe_shape_blocker.empty()
+				                      ? "perfect-hash-join-native-runtime-probe-shape-not-ready"
+				                      : contract.perfect_hash_probe_shape_blocker;
+				return ExecutionOperatorBindResult::INVALID;
+			}
+			if (!sink.perfect_join_executor->GetExecutionPerfectHashJoinTableLayout(perfect_layout)) {
+				binding.blocker = perfect_layout.blocker.empty() ? "perfect-hash-join-native-runtime-layout-not-ready"
+				                                                 : perfect_layout.blocker;
+				return ExecutionOperatorBindResult::INVALID;
+			}
+			if (perfect_layout.rhs_output_column_count != contract.rhs_output_column_count) {
+				binding.blocker = "perfect-hash-join-native-runtime-rhs-output-count-mismatch";
+				return ExecutionOperatorBindResult::INVALID;
+			}
+			perfect_hash_layout = true;
+		}
+		if (!perfect_hash_layout && table_layout.finalized && sink.hash_table->Count() == 0 &&
+		    ExecutionHashJoinProbeEmptyBuildSideSupported(output_mode, contract.correlated_mark_counts_required)) {
+			empty_build_side = true;
+			table_layout.ready = true;
+			table_layout.blocker = "none";
+		} else if (!perfect_hash_layout && native_residual_probe &&
+		           table_layout.blocker == "hash-join-native-residual-predicate") {
+			table_layout.ready = true;
+			table_layout.blocker = "none";
+		} else if (!perfect_hash_layout) {
+			binding.blocker =
+			    table_layout.blocker.empty() ? "hash-join-native-runtime-table-layout-not-ready" : table_layout.blocker;
+			if (ExecutionHashJoinProbeLayoutCanDefer(binding.blocker)) {
+				return ExecutionOperatorBindResult::DEFERRED;
+			}
+			return ExecutionOperatorBindResult::INVALID;
+		}
 	}
-	if (protocol.non_equality_condition_count != 0 &&
-	    protocol.native_probe_output_mode != JitRegionHashJoinProbeOutputMode::MATCHED_PROBE_AND_BUILD &&
-	    protocol.native_probe_output_mode != JitRegionHashJoinProbeOutputMode::MATCHED_PROBE_ONLY) {
-		binding.blocker = "hash-join-native-runtime-non-equality-output-mode-protocol-invariant";
-		return false;
+	if (contract.non_equality_condition_count != 0 &&
+	    contract.native_probe_output_mode != ExecutionHashJoinProbeOutputMode::MATCHED_PROBE_AND_BUILD &&
+	    contract.native_probe_output_mode != ExecutionHashJoinProbeOutputMode::LEFT_PROBE_AND_BUILD &&
+	    contract.native_probe_output_mode != ExecutionHashJoinProbeOutputMode::MATCHED_PROBE_ONLY) {
+		binding.blocker = "hash-join-native-runtime-non-equality-output-mode-contract-invariant";
+		return ExecutionOperatorBindResult::INVALID;
 	}
-	if (table_layout.dictionary_emission && table_layout.chains_longer_than_one && !table_layout.aux_next_ptrs &&
-	    protocol.native_probe_output_mode == JitRegionHashJoinProbeOutputMode::MARK_BUILD_ONLY) {
+	if (!perfect_hash_layout && table_layout.dictionary_emission && table_layout.chains_longer_than_one &&
+	    !table_layout.aux_next_ptrs &&
+	    contract.native_probe_output_mode == ExecutionHashJoinProbeOutputMode::MARK_BUILD_ONLY) {
 		binding.blocker = "hash-join-native-runtime-dictionary-chain-layout-missing";
-		return false;
+		return ExecutionOperatorBindResult::INVALID;
 	}
-	if (table_layout.condition_count != protocol.condition_count) {
+	if (!perfect_hash_layout && table_layout.condition_count != contract.condition_count) {
 		binding.blocker = "hash-join-native-runtime-condition-count-mismatch";
-		return false;
+		return ExecutionOperatorBindResult::INVALID;
 	}
-	if (protocol.correlated_mark_counts_required) {
+	if (contract.correlated_mark_counts_required) {
 		auto &mark_info = sink.hash_table->correlated_mark_join_info;
 		if (!mark_info.correlated_counts) {
 			binding.blocker = "hash-join-native-runtime-missing-correlated-mark-counts";
-			return false;
+			return ExecutionOperatorBindResult::INVALID;
 		}
-		if (mark_info.correlated_types.size() != protocol.delim_type_count) {
+		if (mark_info.correlated_types.size() != contract.delim_type_count) {
 			binding.blocker = "hash-join-native-runtime-correlated-mark-count-shape-mismatch";
-			return false;
+			return ExecutionOperatorBindResult::INVALID;
 		}
 	}
 
@@ -1928,70 +2112,76 @@ bool PhysicalHashJoin::BindJitNativeOperator(ExecutionContext &context, DataChun
 	binding.blocker = "none";
 	binding.hash_join_probe.ready = true;
 	binding.hash_join_probe.hash_table = sink.hash_table.get();
+	binding.hash_join_probe.layout_kind = perfect_hash_layout ? ExecutionHashJoinProbeLayoutKind::PERFECT_HASH_TABLE
+	                                                          : ExecutionHashJoinProbeLayoutKind::REGULAR_HASH_TABLE;
 	binding.hash_join_probe.table_layout = std::move(table_layout);
+	binding.hash_join_probe.perfect_layout = std::move(perfect_layout);
+	binding.hash_join_probe.empty_build_side = empty_build_side;
 	binding.hash_join_probe.probe_key_input_indices = std::move(probe_key_input_indices);
-	binding.hash_join_probe.lhs_output_column_indices = protocol.lhs_output_column_indices;
-	binding.hash_join_probe.rhs_output_column_count = protocol.rhs_output_column_count;
-	binding.hash_join_probe.lhs_probe_column_indices = protocol.lhs_probe_column_indices;
-	binding.hash_join_probe.lhs_probe_types = protocol.lhs_probe_types;
+	binding.hash_join_probe.lhs_output_column_indices = contract.lhs_output_column_indices;
+	binding.hash_join_probe.rhs_output_column_count = contract.rhs_output_column_count;
+	binding.hash_join_probe.lhs_probe_column_indices = contract.lhs_probe_column_indices;
+	binding.hash_join_probe.lhs_probe_types = contract.lhs_probe_types;
 	binding.hash_join_probe.output_types = types;
-	binding.hash_join_probe.output_mode = protocol.native_probe_output_mode;
-	binding.hash_join_probe.correlated_mark_counts_required = protocol.correlated_mark_counts_required;
-	binding.hash_join_probe.correlated_mark_group_count = protocol.delim_type_count;
+	binding.hash_join_probe.residual_sources = contract.residual_sources;
+	binding.hash_join_probe.output_mode = contract.native_probe_output_mode;
+	binding.hash_join_probe.correlated_mark_counts_required = contract.correlated_mark_counts_required;
+	binding.hash_join_probe.correlated_mark_group_count = contract.delim_type_count;
 	binding.hash_join_probe.blocker = "none";
-	return true;
+	return ExecutionOperatorBindResult::READY;
 }
 
-bool PhysicalHashJoin::BindJitNativeSink(ExecutionContext &context, DataChunk &input, OperatorSinkInput &sink_input,
-                                         const JitRegionSinkInfo &sink_info, JitNativeSinkBinding &binding) const {
-	return JitBindNativeHashJoinBuild(context, sink_input, input, sink_info, binding);
+bool PhysicalHashJoin::BindExecutionSink(ExecutionContext &context, DataChunk &input, OperatorSinkInput &sink_input,
+                                         const ExecutionRegionSinkInfo &sink_info,
+                                         ExecutionSinkBinding &binding) const {
+	return ExecutionBindHashJoinBuild(context, sink_input, input, sink_info, binding);
 }
 
-static void JitReferenceNativeHashJoinProbeOutputColumns(const JitNativeHashJoinProbeBinding &binding, DataChunk &input,
-                                                        DataChunk &result) {
+static void ReferenceExecutionHashJoinProbeOutputColumns(const ExecutionHashJoinProbeBinding &binding, DataChunk &input,
+                                                         DataChunk &result) {
 	for (idx_t col_idx = 0; col_idx < binding.lhs_output_column_indices.size(); col_idx++) {
 		auto input_col = binding.lhs_output_column_indices[col_idx];
 		if (input_col >= input.ColumnCount()) {
-			throw InternalException("JIT native hash join probe output column index out of range");
+			throw InternalException("execution native hash join probe output column index out of range");
 		}
 		result.data[col_idx].Reference(input.data[input_col]);
 	}
 }
 
-static void JitMaterializeNativeCorrelatedMarkJoinProbe(const JitNativeHashJoinProbeBinding &binding, DataChunk &input,
-                                                       const SelectionVector &match_sel, idx_t count,
-                                                       DataChunk &result) {
+static void MaterializeExecutionCorrelatedMarkJoinProbe(const ExecutionHashJoinProbeBinding &binding, DataChunk &input,
+                                                        const SelectionVector &match_sel, idx_t count,
+                                                        DataChunk &result) {
 	if (count != input.size()) {
-		throw InternalException("JIT native correlated MARK probe must materialize every input row");
+		throw InternalException("execution native correlated MARK probe must materialize every input row");
 	}
 	if (!binding.hash_table) {
-		throw InternalException("JIT native correlated MARK probe requires a hash table");
+		throw InternalException("execution native correlated MARK probe requires a hash table");
 	}
 	if (binding.correlated_mark_group_count + 1 != binding.probe_key_input_indices.size()) {
-		throw InternalException("JIT native correlated MARK probe key count mismatch");
+		throw InternalException("execution native correlated MARK probe key count mismatch");
 	}
 	auto &info = binding.hash_table->correlated_mark_join_info;
 	if (!info.correlated_counts || info.correlated_types.size() != binding.correlated_mark_group_count) {
-		throw InternalException("JIT native correlated MARK probe count state is missing");
+		throw InternalException("execution native correlated MARK probe count state is missing");
 	}
 
 	lock_guard<mutex> mj_lock(info.mj_lock);
 	for (idx_t group_idx = 0; group_idx < binding.correlated_mark_group_count; group_idx++) {
 		auto input_col = binding.probe_key_input_indices[group_idx];
 		if (input_col >= input.ColumnCount()) {
-			throw InternalException("JIT native correlated MARK probe group key index out of range");
+			throw InternalException("execution native correlated MARK probe group key index out of range");
 		}
 		info.group_chunk.data[group_idx].Reference(input.data[input_col]);
 	}
 	info.group_chunk.SetChildCardinality(input.size());
 	info.correlated_counts->FetchAggregates(info.group_chunk, info.result_chunk);
 
-	JitReferenceNativeHashJoinProbeOutputColumns(binding, input, result);
+	ReferenceExecutionHashJoinProbeOutputColumns(binding, input, result);
 	result.SetChildCardinality(input.size());
 
 	auto last_key_input_col = binding.probe_key_input_indices[binding.correlated_mark_group_count];
 	if (last_key_input_col >= input.ColumnCount()) {
-		throw InternalException("JIT native correlated MARK probe comparison key index out of range");
+		throw InternalException("execution native correlated MARK probe comparison key index out of range");
 	}
 	auto &last_key = input.data[last_key_input_col];
 	auto &mark_vector = result.data.back();
@@ -2039,36 +2229,40 @@ static void JitMaterializeNativeCorrelatedMarkJoinProbe(const JitNativeHashJoinP
 	}
 }
 
-void JitMaterializeNativeHashJoinProbe(const JitNativeHashJoinProbeBinding &binding, DataChunk &input,
+void ExecutionMaterializeHashJoinProbe(const ExecutionHashJoinProbeBinding &binding, DataChunk &input,
                                        Vector &row_pointers, const SelectionVector &match_sel, idx_t count,
                                        DataChunk &result) {
 	if (!binding.ready || !binding.hash_table) {
-		throw InternalException("JIT native hash join probe materialization requires a bound hash join table");
+		throw InternalException("execution native hash join probe materialization requires a bound hash join table");
 	}
-	if (binding.output_mode == JitRegionHashJoinProbeOutputMode::NONE) {
-		throw InternalException("JIT native hash join probe materialization requires an output mode");
+	if (binding.layout_kind == ExecutionHashJoinProbeLayoutKind::PERFECT_HASH_TABLE) {
+		throw InternalException("execution native regular hash join materialization received a perfect hash layout");
 	}
-	if (binding.output_mode == JitRegionHashJoinProbeOutputMode::MARK_BUILD_ONLY) {
-		throw InternalException("JIT native hash join mark-only probe does not materialize rows");
+	if (binding.output_mode == ExecutionHashJoinProbeOutputMode::NONE) {
+		throw InternalException("execution native hash join probe materialization requires an output mode");
+	}
+	if (binding.output_mode == ExecutionHashJoinProbeOutputMode::MARK_BUILD_ONLY) {
+		throw InternalException("execution native hash join mark-only probe does not materialize rows");
 	}
 	auto expected_column_count = binding.lhs_output_column_indices.size();
-	if (binding.output_mode == JitRegionHashJoinProbeOutputMode::MATCHED_PROBE_AND_BUILD) {
+	if (binding.output_mode == ExecutionHashJoinProbeOutputMode::MATCHED_PROBE_AND_BUILD ||
+	    binding.output_mode == ExecutionHashJoinProbeOutputMode::LEFT_PROBE_AND_BUILD) {
 		expected_column_count += binding.rhs_output_column_count;
-	} else if (binding.output_mode == JitRegionHashJoinProbeOutputMode::MARK_PROBE) {
+	} else if (binding.output_mode == ExecutionHashJoinProbeOutputMode::MARK_PROBE) {
 		expected_column_count++;
 	}
 	if (expected_column_count != result.ColumnCount()) {
-		throw InternalException("JIT native hash join probe output column count mismatch");
+		throw InternalException("execution native hash join probe output column count mismatch");
 	}
-	if (binding.output_mode == JitRegionHashJoinProbeOutputMode::MARK_PROBE) {
+	if (binding.output_mode == ExecutionHashJoinProbeOutputMode::MARK_PROBE) {
 		if (binding.correlated_mark_counts_required) {
-			JitMaterializeNativeCorrelatedMarkJoinProbe(binding, input, match_sel, count, result);
+			MaterializeExecutionCorrelatedMarkJoinProbe(binding, input, match_sel, count, result);
 			return;
 		}
 		if (count != input.size()) {
-			throw InternalException("JIT native hash join MARK probe must materialize every input row");
+			throw InternalException("execution native hash join MARK probe must materialize every input row");
 		}
-		JitReferenceNativeHashJoinProbeOutputColumns(binding, input, result);
+		ReferenceExecutionHashJoinProbeOutputColumns(binding, input, result);
 		auto &mark_vector = result.data.back();
 		mark_vector.SetVectorType(VectorType::FLAT_VECTOR);
 		FlatVector::SetSize(mark_vector, count_t(count));
@@ -2084,7 +2278,7 @@ void JitMaterializeNativeHashJoinProbe(const JitNativeHashJoinProbeBinding &bind
 			}
 			auto input_col = binding.probe_key_input_indices[key_idx];
 			if (input_col >= input.ColumnCount()) {
-				throw InternalException("JIT native hash join MARK probe key column index out of range");
+				throw InternalException("execution native hash join MARK probe key column index out of range");
 			}
 			UnifiedVectorFormat key_data;
 			input.data[input_col].ToUnifiedFormat(key_data);
@@ -2111,13 +2305,126 @@ void JitMaterializeNativeHashJoinProbe(const JitNativeHashJoinProbeBinding &bind
 	for (idx_t col_idx = 0; col_idx < binding.lhs_output_column_indices.size(); col_idx++) {
 		auto input_col = binding.lhs_output_column_indices[col_idx];
 		if (input_col >= input.ColumnCount()) {
-			throw InternalException("JIT native hash join probe output column index out of range");
+			throw InternalException("execution native hash join probe output column index out of range");
 		}
 		result.data[col_idx].Slice(input.data[input_col], match_sel, count);
 	}
-	if (binding.output_mode == JitRegionHashJoinProbeOutputMode::MATCHED_PROBE_AND_BUILD) {
+	if (binding.output_mode == ExecutionHashJoinProbeOutputMode::MATCHED_PROBE_AND_BUILD ||
+	    binding.output_mode == ExecutionHashJoinProbeOutputMode::LEFT_PROBE_AND_BUILD) {
 		binding.hash_table->GatherRHS(row_pointers, *FlatVector::IncrementalSelectionVector(), count, result,
 		                              binding.lhs_output_column_indices.size());
+	}
+	result.SetChildCardinality(count);
+}
+
+void ExecutionMaterializePerfectHashJoinProbe(const ExecutionHashJoinProbeBinding &binding, DataChunk &input,
+                                              const SelectionVector &probe_sel, const SelectionVector &build_sel,
+                                              idx_t count, DataChunk &result) {
+	if (!binding.ready || binding.layout_kind != ExecutionHashJoinProbeLayoutKind::PERFECT_HASH_TABLE ||
+	    !binding.perfect_layout.ready) {
+		throw InternalException("execution native perfect hash join materialization requires a perfect hash layout");
+	}
+	if (binding.output_mode != ExecutionHashJoinProbeOutputMode::MATCHED_PROBE_AND_BUILD &&
+	    binding.output_mode != ExecutionHashJoinProbeOutputMode::MATCHED_PROBE_ONLY) {
+		throw InternalException(
+		    "execution native perfect hash join materialization requires an inner probe output mode");
+	}
+	auto expected_column_count = binding.lhs_output_column_indices.size();
+	if (binding.output_mode == ExecutionHashJoinProbeOutputMode::MATCHED_PROBE_AND_BUILD) {
+		expected_column_count += binding.perfect_layout.rhs_output_column_count;
+	}
+	if (expected_column_count != result.ColumnCount()) {
+		throw InternalException("execution native perfect hash join output column count mismatch");
+	}
+	const bool all_probe_rows_selected = binding.perfect_layout.is_build_dense && count == input.size();
+	for (idx_t col_idx = 0; col_idx < binding.lhs_output_column_indices.size(); col_idx++) {
+		auto input_col = binding.lhs_output_column_indices[col_idx];
+		if (input_col >= input.ColumnCount()) {
+			throw InternalException("execution native perfect hash join output column index out of range");
+		}
+		if (all_probe_rows_selected) {
+			result.data[col_idx].Reference(input.data[input_col]);
+		} else {
+			result.data[col_idx].Slice(input.data[input_col], probe_sel, count);
+		}
+	}
+	if (binding.output_mode == ExecutionHashJoinProbeOutputMode::MATCHED_PROBE_AND_BUILD) {
+		if (binding.perfect_layout.rhs_dictionary_buffers.size() != binding.perfect_layout.rhs_output_column_count) {
+			throw InternalException("execution native perfect hash join dictionary shape mismatch");
+		}
+		auto rhs_offset = binding.lhs_output_column_indices.size();
+		for (idx_t rhs_col_idx = 0; rhs_col_idx < binding.perfect_layout.rhs_output_column_count; rhs_col_idx++) {
+			auto &result_vector = result.data[rhs_offset + rhs_col_idx];
+			if (result_vector.GetType() != binding.perfect_layout.rhs_output_types[rhs_col_idx]) {
+				throw InternalException("execution native perfect hash join RHS output type mismatch");
+			}
+			result_vector.Dictionary(binding.perfect_layout.rhs_dictionary_buffers[rhs_col_idx], build_sel, count);
+		}
+	}
+	result.SetChildCardinality(count);
+}
+
+void ExecutionMaterializeHashJoinResidualSources(const ExecutionHashJoinProbeBinding &binding, DataChunk &input,
+                                                 Vector &row_pointers, const SelectionVector &match_sel, idx_t count,
+                                                 DataChunk &residual_sources) {
+	if (!binding.ready || !binding.hash_table) {
+		throw InternalException("execution native hash join residual materialization requires a bound hash join table");
+	}
+	if (binding.residual_sources.size() != residual_sources.ColumnCount()) {
+		throw InternalException("execution native hash join residual source column count mismatch");
+	}
+	for (auto &source : binding.residual_sources) {
+		if (source.source_index >= residual_sources.ColumnCount()) {
+			throw InternalException("execution native hash join residual source index out of range");
+		}
+		auto &target = residual_sources.data[source.source_index];
+		if (target.GetType() != source.type) {
+			throw InternalException("execution native hash join residual source type mismatch");
+		}
+		switch (source.kind) {
+		case ExecutionHashJoinResidualSourceKind::PROBE:
+			if (source.input_index >= input.ColumnCount()) {
+				throw InternalException("execution native hash join residual probe source out of range");
+			}
+			target.Slice(input.data[source.input_index], match_sel, count);
+			break;
+		case ExecutionHashJoinResidualSourceKind::BUILD:
+			binding.hash_table->GetDataCollection().Gather(row_pointers, *FlatVector::IncrementalSelectionVector(),
+			                                               count, source.input_index, target,
+			                                               *FlatVector::IncrementalSelectionVector(), nullptr);
+			FlatVector::SetSize(target, count_t(count));
+			break;
+		default:
+			throw InternalException("execution native hash join residual source kind is unknown");
+		}
+	}
+	residual_sources.SetChildCardinality(count);
+}
+
+void ExecutionMaterializeHashJoinProbeLeftUnmatched(const ExecutionHashJoinProbeBinding &binding, DataChunk &input,
+                                                    const SelectionVector &unmatched_sel, idx_t count,
+                                                    DataChunk &result) {
+	if (!binding.ready || !binding.hash_table) {
+		throw InternalException(
+		    "execution native LEFT hash join unmatched materialization requires a bound hash join table");
+	}
+	if (binding.output_mode != ExecutionHashJoinProbeOutputMode::LEFT_PROBE_AND_BUILD) {
+		throw InternalException("execution native LEFT hash join unmatched materialization requires LEFT output mode");
+	}
+	auto expected_column_count = binding.lhs_output_column_indices.size() + binding.rhs_output_column_count;
+	if (expected_column_count != result.ColumnCount()) {
+		throw InternalException("execution native LEFT hash join unmatched output column count mismatch");
+	}
+	for (idx_t col_idx = 0; col_idx < binding.lhs_output_column_indices.size(); col_idx++) {
+		auto input_col = binding.lhs_output_column_indices[col_idx];
+		if (input_col >= input.ColumnCount()) {
+			throw InternalException("execution native LEFT hash join unmatched output column index out of range");
+		}
+		result.data[col_idx].Slice(input.data[input_col], unmatched_sel, count);
+	}
+	auto rhs_offset = binding.lhs_output_column_indices.size();
+	for (idx_t rhs_col_idx = 0; rhs_col_idx < binding.rhs_output_column_count; rhs_col_idx++) {
+		ConstantVector::SetNull(result.data[rhs_offset + rhs_col_idx], count_t(count));
 	}
 	result.SetChildCardinality(count);
 }
@@ -2703,12 +3010,12 @@ SourceResultType PhysicalHashJoin::GetDataInternal(ExecutionContext &context, Da
 	return ScanHashJoinSourceState(context, chunk, input, *this);
 }
 
-bool PhysicalHashJoin::SupportsJitNativeSource(const JitPreparedPipeline &jit_prepared_pipeline) const {
-	return jit_prepared_pipeline.RequiresNativeSource() && PropagatesBuildSide(join_type);
+bool PhysicalHashJoin::SupportsExecutionSourceContract(const ExecutionRegionOpenRequest &open_request) const {
+	return open_request.UsesSourceContract() && PropagatesBuildSide(join_type);
 }
 
-SourceResultType PhysicalHashJoin::GetJitNativeSourceDataInternal(ExecutionContext &context, DataChunk &chunk,
-                                                                  OperatorSourceInput &input) const {
+SourceResultType PhysicalHashJoin::GetExecutionSourceContractDataInternal(ExecutionContext &context, DataChunk &chunk,
+                                                                          OperatorSourceInput &input) const {
 	return ScanHashJoinSourceState(context, chunk, input, *this);
 }
 

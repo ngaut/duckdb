@@ -18,6 +18,7 @@ namespace duckdb {
 class HashJoinOperatorState;
 class HashJoinGlobalSinkState;
 class PhysicalHashJoin;
+struct ExecutionPerfectHashJoinTableLayout;
 
 struct PerfectHashJoinStats {
 	Value build_min;
@@ -39,6 +40,7 @@ public:
 
 	const LogicalType &GetKeyType() const;
 	bool BuildPerfectHashTable();
+	bool GetExecutionPerfectHashJoinTableLayout(ExecutionPerfectHashJoinTableLayout &layout) const;
 
 	unique_ptr<OperatorState> GetOperatorState(ExecutionContext &context);
 	OperatorResultType ProbePerfectHashTable(ExecutionContext &context, DataChunk &input, DataChunk &lhs_output_columns,

@@ -12,7 +12,7 @@
 namespace duckdb {
 
 void JitSljitExtension::Load(ExtensionLoader &loader) {
-	RegisterSljitJitBackend(loader);
+	RegisterSljitExecutionRegionBackend(loader);
 }
 
 std::string JitSljitExtension::Name() {
@@ -32,6 +32,6 @@ std::string JitSljitExtension::Version() const {
 extern "C" {
 
 DUCKDB_CPP_EXTENSION_ENTRY(jit_sljit, loader) {
-	duckdb::RegisterSljitJitBackend(loader);
+	duckdb::RegisterSljitExecutionRegionBackend(loader);
 }
 }

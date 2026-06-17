@@ -3,7 +3,9 @@
 #include "duckdb/common/algorithm.hpp"
 #include "duckdb/common/printer.hpp"
 #include "duckdb/common/tree_renderer/text_tree_renderer.hpp"
-#include "duckdb/execution/jit/manager.hpp"
+#include "duckdb/execution/execution_region_open_request.hpp"
+#include "duckdb/execution/execution_region_planner.hpp"
+#include "duckdb/execution/execution_region_runner.hpp"
 #include "duckdb/execution/executor.hpp"
 #include "duckdb/execution/operator/aggregate/physical_ungrouped_aggregate.hpp"
 #include "duckdb/execution/operator/scan/physical_table_scan.hpp"
@@ -16,6 +18,13 @@
 #include "duckdb/main/settings.hpp"
 
 namespace duckdb {
+
+static ExecutionRegionOpenRequest GetExecutionRegionOpenRequest(const unique_ptr<ExecutionRegionPlan> &plan) {
+	if (!plan) {
+		return ExecutionRegionOpenRequest();
+	}
+	return plan->OpenRequest();
+}
 
 PipelineTask::PipelineTask(Pipeline &pipeline_p, shared_ptr<Event> event_p)
     : ExecutorTask(pipeline_p.executor, std::move(event_p)), pipeline(pipeline_p) {
@@ -33,6 +42,7 @@ const PipelineExecutor &PipelineTask::GetPipelineExecutor() const {
 
 TaskExecutionResult PipelineTask::ExecuteTask(TaskExecutionMode mode) {
 	if (!pipeline_executor) {
+		pipeline.PrepareExecutionRegionPlanForExecution();
 		pipeline_executor = make_uniq<PipelineExecutor>(pipeline.GetClientContext(), pipeline);
 	}
 
@@ -67,7 +77,8 @@ TaskExecutionResult PipelineTask::ExecuteTask(TaskExecutionMode mode) {
 }
 
 Pipeline::Pipeline(Executor &executor_p)
-    : executor(executor_p), ready(false), initialized(false), source(nullptr), sink(nullptr) {
+    : executor(executor_p), ready(false), initialized(false), source(nullptr), sink(nullptr),
+      execution_runner(ExecutionRunnerKind::VECTORIZED) {
 }
 
 Pipeline::~Pipeline() {
@@ -294,9 +305,10 @@ void Pipeline::ResetForReschedule(bool reset_sink) {
 	if (source && !source->IsSource()) {
 		throw InternalException("Source of pipeline does not have IsSource set");
 	}
-	PrepareJitRegions();
+	BuildExecutionRegionPlan();
 	if (!allow_reuse || !source_state || !source_state->SupportsReuse()) {
-		source_state = source->GetGlobalSourceState(client, GetJitPreparedPipeline());
+		auto open_request = GetExecutionRegionOpenRequest(execution_region_plan);
+		source_state = source->GetGlobalSourceState(client, open_request);
 	} else {
 		source_state->Reset(client);
 	}
@@ -308,22 +320,41 @@ void Pipeline::ResetSource(bool force) {
 		throw InternalException("Source of pipeline does not have IsSource set");
 	}
 	if (force || !source_state) {
-		PrepareJitRegions();
-		source_state = source->GetGlobalSourceState(GetClientContext(), GetJitPreparedPipeline());
+		BuildExecutionRegionPlan();
+		auto open_request = GetExecutionRegionOpenRequest(execution_region_plan);
+		source_state = source->GetGlobalSourceState(GetClientContext(), open_request);
 	}
 }
 
-void Pipeline::PrepareJitRegions() {
+void Pipeline::BuildExecutionRegionPlan() {
+	lock_guard<mutex> guard(execution_region_plan_lock);
+	BuildExecutionRegionPlanLocked();
+}
+
+void Pipeline::BuildExecutionRegionPlanLocked() {
 	if (!source) {
-		jit_prepared_pipeline.reset();
+		execution_region_plan.reset();
+		execution_runner = ExecutionRunnerKind::VECTORIZED;
 		return;
 	}
 	auto &client = GetClientContext();
-	if (executor.IsJitSuppressed() || JitManager::IsJitIntrospectionPipeline(*this)) {
-		jit_prepared_pipeline.reset();
-		return;
+	execution_region_plan = ExecutionRegionPlanner::Build(client, *this);
+	execution_runner = execution_region_plan && execution_region_plan->HasExecutableFullPipeline()
+	                       ? ExecutionRunnerKind::COMPILED_VECTORIZED
+	                       : ExecutionRunnerKind::VECTORIZED;
+}
+
+bool Pipeline::PrepareExecutionRegionPlanForExecution() {
+	lock_guard<mutex> guard(execution_region_plan_lock);
+	if (!execution_region_plan || !execution_region_plan->RequiresOperatorReadinessRefresh()) {
+		return false;
 	}
-	jit_prepared_pipeline = JitManager::Get(client).PreparePipelineRegions(client, *this);
+	BuildExecutionRegionPlanLocked();
+	if (source) {
+		auto open_request = GetExecutionRegionOpenRequest(execution_region_plan);
+		source_state = source->GetGlobalSourceState(GetClientContext(), open_request);
+	}
+	return true;
 }
 
 void Pipeline::Ready() {

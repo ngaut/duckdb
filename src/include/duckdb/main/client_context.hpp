@@ -133,14 +133,14 @@ public:
 	//! Disable query profiling
 	DUCKDB_API void DisableProfiling();
 
-	//! Suppress JIT compilation for the rest of the currently active query.
-	DUCKDB_API void SuppressJitForCurrentQuery();
-	//! Temporarily suppress JIT compilation in this context.
-	DUCKDB_API void PushJitSuppression();
-	//! Release a temporary JIT suppression scope.
-	DUCKDB_API void PopJitSuppression();
-	//! True when JIT compilation should not be attempted in this context.
-	DUCKDB_API bool IsJitSuppressed() const;
+	//! Suppress compiled execution-region planning for the rest of the currently active query.
+	DUCKDB_API void SuppressCompiledExecutionForCurrentQuery();
+	//! Temporarily suppress compiled execution-region planning in this context.
+	DUCKDB_API void PushCompiledExecutionSuppression();
+	//! Release a temporary compiled execution-region suppression scope.
+	DUCKDB_API void PopCompiledExecutionSuppression();
+	//! True when compiled execution-region planning should not be attempted in this context.
+	DUCKDB_API bool IsCompiledExecutionSuppressed() const;
 
 	//! Issue a query, returning a QueryResult. The QueryResult can be either a StreamQueryResult or a
 	//! MaterializedQueryResult. The StreamQueryResult will only be returned in the case of a successful SELECT
@@ -355,8 +355,8 @@ private:
 	QueryProgress query_progress;
 	//! The connection corresponding to this client context
 	connection_t connection_id;
-	//! Query-global JIT suppression state.
-	bool jit_suppressed_for_query = false;
+	//! Query-global compiled execution-region suppression state.
+	bool compiled_execution_suppressed_for_query = false;
 	//! Routing target for SQL execution while CONNECT-ed (CONNECT/DISCONNECT). When is_connected is
 	//! true and connected_to_database can be locked, the chokepoint dispatches non-control SQL via
 	//! `Catalog::RemoteExecute(string)` and wraps the returned TableRef into a SelectStatement.

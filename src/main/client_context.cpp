@@ -78,15 +78,15 @@ static bool OsxRosettaIsActive() {
 
 namespace duckdb {
 
-static thread_local unordered_map<const ClientContext *, idx_t> jit_scoped_suppression_depth;
+static thread_local unordered_map<const ClientContext *, idx_t> compiled_execution_scoped_suppression_depth;
 
-static idx_t GetJitScopedSuppressionDepth(const ClientContext &context) {
-	auto entry = jit_scoped_suppression_depth.find(&context);
-	return entry == jit_scoped_suppression_depth.end() ? 0 : entry->second;
+static idx_t GetCompiledExecutionScopedSuppressionDepth(const ClientContext &context) {
+	auto entry = compiled_execution_scoped_suppression_depth.find(&context);
+	return entry == compiled_execution_scoped_suppression_depth.end() ? 0 : entry->second;
 }
 
-static void ClearJitScopedSuppressionDepth(const ClientContext &context) {
-	jit_scoped_suppression_depth.erase(&context);
+static void ClearCompiledExecutionScopedSuppressionDepth(const ClientContext &context) {
+	compiled_execution_scoped_suppression_depth.erase(&context);
 }
 
 struct ActiveQueryContext {
@@ -303,8 +303,8 @@ unique_ptr<T> ClientContext::ErrorResult(ErrorData error, const string &query) {
 void ClientContext::BeginQueryInternal(ClientContextLock &lock, const string &query) {
 	// check if we are on AutoCommit. In this case we should start a transaction
 	D_ASSERT(!active_query);
-	jit_suppressed_for_query = false;
-	ClearJitScopedSuppressionDepth(*this);
+	compiled_execution_suppressed_for_query = false;
+	ClearCompiledExecutionScopedSuppressionDepth(*this);
 	auto &db_inst = DatabaseInstance::GetDatabase(*this);
 	if (ValidChecker::IsInvalidated(db_inst)) {
 		throw ErrorManager::InvalidatedDatabase(*this, ValidChecker::InvalidatedMessage(db_inst));
@@ -353,8 +353,8 @@ ErrorData ClientContext::EndQueryInternal(ClientContextLock &lock, bool success,
 	active_query->progress_bar.reset();
 	D_ASSERT(active_query.get());
 	active_query.reset();
-	jit_suppressed_for_query = false;
-	ClearJitScopedSuppressionDepth(*this);
+	compiled_execution_suppressed_for_query = false;
+	ClearCompiledExecutionScopedSuppressionDepth(*this);
 	query_deadline.SetInvalid();
 	query_progress.Initialize();
 	ErrorData error;
@@ -665,7 +665,7 @@ ClientContext::PendingPreparedStatementInternal(ClientContextLock &lock,
 	// Create the query executor.
 	active_query->executor = make_uniq<Executor>(*this);
 	auto &executor = *active_query->executor;
-	executor.SetSuppressJit(statement_data.properties.suppress_jit);
+	executor.SetSuppressCompiledExecution(statement_data.properties.suppress_compiled_execution);
 
 	if (config.enable_progress_bar) {
 		progress_bar_display_create_func_t display_create_func = nullptr;
@@ -1316,28 +1316,28 @@ void ClientContext::DisableProfiling() {
 	client_config.enable_profiler = false;
 }
 
-void ClientContext::SuppressJitForCurrentQuery() {
-	jit_suppressed_for_query = true;
+void ClientContext::SuppressCompiledExecutionForCurrentQuery() {
+	compiled_execution_suppressed_for_query = true;
 }
 
-void ClientContext::PushJitSuppression() {
-	jit_scoped_suppression_depth[this]++;
+void ClientContext::PushCompiledExecutionSuppression() {
+	compiled_execution_scoped_suppression_depth[this]++;
 }
 
-void ClientContext::PopJitSuppression() {
-	auto entry = jit_scoped_suppression_depth.find(this);
-	D_ASSERT(entry != jit_scoped_suppression_depth.end() && entry->second > 0);
-	if (entry == jit_scoped_suppression_depth.end() || entry->second == 0) {
+void ClientContext::PopCompiledExecutionSuppression() {
+	auto entry = compiled_execution_scoped_suppression_depth.find(this);
+	D_ASSERT(entry != compiled_execution_scoped_suppression_depth.end() && entry->second > 0);
+	if (entry == compiled_execution_scoped_suppression_depth.end() || entry->second == 0) {
 		return;
 	}
 	entry->second--;
 	if (entry->second == 0) {
-		jit_scoped_suppression_depth.erase(entry);
+		compiled_execution_scoped_suppression_depth.erase(entry);
 	}
 }
 
-bool ClientContext::IsJitSuppressed() const {
-	return jit_suppressed_for_query || GetJitScopedSuppressionDepth(*this) > 0;
+bool ClientContext::IsCompiledExecutionSuppressed() const {
+	return compiled_execution_suppressed_for_query || GetCompiledExecutionScopedSuppressionDepth(*this) > 0;
 }
 
 void ClientContext::RegisterFunction(CreateFunctionInfo &info) {

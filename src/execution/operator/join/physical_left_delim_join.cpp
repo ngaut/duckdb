@@ -126,6 +126,32 @@ public:
 	}
 };
 
+class LeftDelimJoinExecutionRegionSinkState : public ExecutionDelimJoinSinkState {
+public:
+	LeftDelimJoinExecutionRegionSinkState(ExecutionContext &context_p, const PhysicalHashAggregate &distinct_p,
+	                                      GlobalSinkState &distinct_global_state_p,
+	                                      LocalSinkState &distinct_local_state_p, InterruptState &interrupt_state_p,
+	                                      LeftDelimJoinLocalState &state_p)
+	    : context(context_p), distinct(distinct_p), distinct_global_state(distinct_global_state_p),
+	      distinct_local_state(distinct_local_state_p), interrupt_state(interrupt_state_p), state(state_p) {
+	}
+
+	SinkResultType Sink(DataChunk &input) override {
+		state.lhs_data.Append(state.append_state, input);
+		OperatorSinkInput distinct_sink_input {distinct_global_state, distinct_local_state, interrupt_state};
+		auto distinct_result = distinct.Sink(context, input, distinct_sink_input);
+		return distinct_result == SinkResultType::BLOCKED ? distinct_result : SinkResultType::NEED_MORE_INPUT;
+	}
+
+private:
+	ExecutionContext &context;
+	const PhysicalHashAggregate &distinct;
+	GlobalSinkState &distinct_global_state;
+	LocalSinkState &distinct_local_state;
+	InterruptState &interrupt_state;
+	LeftDelimJoinLocalState &state;
+};
+
 unique_ptr<GlobalSinkState> PhysicalLeftDelimJoin::GetGlobalSinkState(ClientContext &context) const {
 	auto state = make_uniq<LeftDelimJoinGlobalState>(context, *this);
 	distinct.sink_state = distinct.GetGlobalSinkState(context);
@@ -139,6 +165,36 @@ unique_ptr<LocalSinkState> PhysicalLeftDelimJoin::GetLocalSinkState(ExecutionCon
 	auto state = make_uniq<LeftDelimJoinLocalState>(context.client, *this);
 	state->distinct_state = distinct.GetLocalSinkState(context);
 	return std::move(state);
+}
+
+bool PhysicalLeftDelimJoin::BindExecutionSink(ExecutionContext &context, DataChunk &input,
+                                              OperatorSinkInput &sink_input, const ExecutionRegionSinkInfo &sink_info,
+                                              ExecutionSinkBinding &binding) const {
+	binding = ExecutionSinkBinding();
+	binding.kind = sink_info.kind;
+	if (sink_info.kind != ExecutionRegionSinkKind::DELIM_JOIN_SINK) {
+		binding.blocker =
+		    "left-delim-join-sink-kind-mismatch;kind=" + string(ExecutionRegionSinkKindToString(sink_info.kind));
+		return false;
+	}
+	if (sink_info.native_sink_contract.status != ExecutionRegionStateContractStatus::READY) {
+		binding.blocker = sink_info.native_sink_contract.blocker.empty() ? "left-delim-join-sink-contract-not-ready"
+		                                                                 : sink_info.native_sink_contract.blocker;
+		return false;
+	}
+	auto &lstate = sink_input.local_state.Cast<LeftDelimJoinLocalState>();
+	if (!distinct.sink_state || !lstate.distinct_state) {
+		binding.blocker = "left-delim-join-distinct-sink-state-not-ready";
+		return false;
+	}
+
+	binding.ready = true;
+	binding.delim_join_sink.ready = true;
+	binding.delim_join_sink.state = make_shared_ptr<LeftDelimJoinExecutionRegionSinkState>(
+	    context, distinct, *distinct.sink_state, *lstate.distinct_state, sink_input.interrupt_state, lstate);
+	binding.delim_join_sink.blocker = "none";
+	binding.blocker = "none";
+	return true;
 }
 
 SinkResultType PhysicalLeftDelimJoin::Sink(ExecutionContext &context, DataChunk &chunk,

@@ -46,6 +46,8 @@ public:
 	}
 
 	InsertionOrderPreservingMap<string> ParamsToString() const override;
+
+	ExecutionContract GetExecutionContract() const override;
 };
 
 } // namespace duckdb

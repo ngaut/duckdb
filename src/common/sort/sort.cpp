@@ -26,6 +26,7 @@ Sort::Sort(ClientContext &client_context_p, const vector<BoundOrderByNode> &orde
 	child_list_t<LogicalType> decode_child_list;
 	for (idx_t col_idx = 0; col_idx < orders.size(); col_idx++) {
 		const auto &order = orders[col_idx];
+		key_modifiers.emplace_back(order.type, order.null_order);
 
 		// Create: for each column we have two arguments: 1. the column, 2. sort specifier
 		create_children.emplace_back(order.expression->Copy());
@@ -264,22 +265,8 @@ static bool TryFinishSink(SortGlobalSinkState &gstate, SortLocalSinkState &lstat
 	return false; // Sink is not done yet
 }
 
-SinkResultType Sort::Sink(ExecutionContext &context, DataChunk &chunk, OperatorSinkInput &input) const {
-	auto &gstate = input.global_state.Cast<SortGlobalSinkState>();
-	auto &lstate = input.local_state.Cast<SortLocalSinkState>();
-
-	if (!lstate.sorted_run) {
-		lstate.InitializeSortedRun(*this, context.client);
-		gstate.UpdateLocalState(lstate);
-	}
-
-	// Sink data into sorted run
-	lstate.key.Reset();
-	lstate.payload.Reset();
-	lstate.key_executor.Execute(chunk, lstate.key);
-	lstate.payload.ReferenceColumns(chunk, input_projection_map);
-	lstate.sorted_run->Sink(lstate.key, lstate.payload);
-
+static SinkResultType FinishSortSink(ExecutionContext &context, SortGlobalSinkState &gstate,
+                                     SortLocalSinkState &lstate, bool is_index_sort) {
 	// Try to finish this call to Sink
 	unique_lock<mutex> guard;
 	if (TryFinishSink(gstate, lstate, guard)) {
@@ -303,6 +290,54 @@ SinkResultType Sort::Sink(ExecutionContext &context, DataChunk &chunk, OperatorS
 	TryFinishSink(gstate, lstate, guard);
 
 	return SinkResultType::NEED_MORE_INPUT;
+}
+
+static void InitializeSortSinkState(ExecutionContext &context, const Sort &sort, SortGlobalSinkState &gstate,
+                                    SortLocalSinkState &lstate) {
+	if (!lstate.sorted_run) {
+		lstate.InitializeSortedRun(sort, context.client);
+		gstate.UpdateLocalState(lstate);
+	}
+}
+
+SinkResultType Sort::Sink(ExecutionContext &context, DataChunk &chunk, OperatorSinkInput &input) const {
+	auto &gstate = input.global_state.Cast<SortGlobalSinkState>();
+	auto &lstate = input.local_state.Cast<SortLocalSinkState>();
+
+	InitializeSortSinkState(context, *this, gstate, lstate);
+
+	// Sink data into sorted run
+	lstate.key.Reset();
+	lstate.payload.Reset();
+	lstate.key_executor.Execute(chunk, lstate.key);
+	lstate.payload.ReferenceColumns(chunk, input_projection_map);
+	lstate.sorted_run->Sink(lstate.key, lstate.payload);
+
+	return FinishSortSink(context, gstate, lstate, is_index_sort);
+}
+
+SinkResultType Sort::SinkPreparedOrderKeys(ExecutionContext &context, DataChunk &order_keys, DataChunk &payload,
+                                           OperatorSinkInput &input) const {
+	auto &gstate = input.global_state.Cast<SortGlobalSinkState>();
+	auto &lstate = input.local_state.Cast<SortLocalSinkState>();
+
+	if (order_keys.ColumnCount() != key_modifiers.size()) {
+		throw InternalException("Prepared sort order-key count mismatch");
+	}
+	if (order_keys.size() != payload.size()) {
+		throw InternalException("Prepared sort order-key and payload cardinality mismatch");
+	}
+
+	InitializeSortSinkState(context, *this, gstate, lstate);
+
+	lstate.key.Reset();
+	lstate.payload.Reset();
+	CreateSortKeyHelpers::CreateSortKey(order_keys, key_modifiers, lstate.key.data[0]);
+	lstate.key.SetChildCardinality(order_keys.size());
+	lstate.payload.ReferenceColumns(payload, input_projection_map);
+	lstate.sorted_run->Sink(lstate.key, lstate.payload);
+
+	return FinishSortSink(context, gstate, lstate, is_index_sort);
 }
 
 SinkCombineResultType Sort::Combine(ExecutionContext &context, OperatorSinkCombineInput &input) const {

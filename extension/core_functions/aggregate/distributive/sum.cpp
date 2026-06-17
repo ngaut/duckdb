@@ -7,6 +7,8 @@
 #include "duckdb/planner/expression/bound_aggregate_expression.hpp"
 #include "duckdb/common/serializer/deserializer.hpp"
 
+#include <cstddef>
+
 namespace duckdb {
 
 namespace {
@@ -216,6 +218,16 @@ unique_ptr<FunctionData> SumNoOverflowDeserialize(Deserializer &deserializer, Bo
 	return nullptr;
 }
 
+AggregatePrimitiveUpdateABI SumNoOverflowPrimitiveUpdateABI(PhysicalType input_type) {
+	AggregatePrimitiveUpdateABI abi;
+	abi.kind = AggregatePrimitiveUpdateKind::SUM_INT64;
+	abi.input_type = input_type;
+	abi.state_size = sizeof(SumState<int64_t>);
+	abi.state_value_offset = offsetof(SumState<int64_t>, value);
+	abi.state_is_set_offset = offsetof(SumState<int64_t>, is_set);
+	return abi;
+}
+
 AggregateFunction GetSumAggregateNoOverflow(PhysicalType type) {
 	switch (type) {
 	case PhysicalType::INT32: {
@@ -226,6 +238,7 @@ AggregateFunction GetSumAggregateNoOverflow(PhysicalType type) {
 		function.SetBindCallback(SumNoOverflowBind);
 		function.SetSerializeCallback(SumNoOverflowSerialize);
 		function.SetDeserializeCallback(SumNoOverflowDeserialize);
+		function.SetPrimitiveUpdateABI(SumNoOverflowPrimitiveUpdateABI(type));
 		return function;
 	}
 	case PhysicalType::INT64: {
@@ -236,6 +249,7 @@ AggregateFunction GetSumAggregateNoOverflow(PhysicalType type) {
 		function.SetBindCallback(SumNoOverflowBind);
 		function.SetSerializeCallback(SumNoOverflowSerialize);
 		function.SetDeserializeCallback(SumNoOverflowDeserialize);
+		function.SetPrimitiveUpdateABI(SumNoOverflowPrimitiveUpdateABI(type));
 		return function;
 	}
 	default:

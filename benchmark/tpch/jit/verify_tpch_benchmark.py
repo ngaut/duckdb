@@ -11,19 +11,21 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "jit"))
 from trace_manifest import verify_trace_manifest
 
 from tpch_schema import (
-    BENCHMARK_ADMISSION_PROOF_GAP_FIELDS,
+    BENCHMARK_ADMISSION_EVIDENCE_FIELDS,
     BENCHMARK_POLICY_SUMMARY_FIELDS,
     BENCHMARK_RUN_FIELDS,
     BENCHMARK_SUMMARY_FIELDS,
+    CANDIDATE_SIGNATURE_FIELDS,
     CANDIDATE_TRAIT_FIELDS,
-    CONTEXT_SPECIFIC_POSITIVE_ADMISSION_SHAPES,
-    KNOWN_ADMISSION_PROOF_ROOT_CAUSES,
-    KNOWN_ADMISSION_PROOF_STATUSES,
+    KNOWN_ADMISSION_EVIDENCE_ROOT_CAUSES,
+    KNOWN_ADMISSION_EVIDENCE_STATUSES,
     KNOWN_REGION_EXECUTION_FORMS,
     configure_csv_field_size_limit,
 )
 
 configure_csv_field_size_limit()
+
+KNOWN_EXECUTION_BODIES = {"none", "generated-machine-code", "native-operator-protocol"}
 
 REQUIRED_ARTIFACTS = (
     "runs.csv",
@@ -33,7 +35,7 @@ REQUIRED_ARTIFACTS = (
     "correctness_summary.csv",
     "operator_profile_summary.csv",
     "decision_counter_summary.csv",
-    "admission_proof_gap_summary.csv",
+    "admission_evidence_summary.csv",
     "report.md",
 )
 
@@ -44,23 +46,24 @@ CANDIDATE_TRAIT_REQUIRED_COLUMNS = (
     "target",
     "status",
     "region_execution_form",
+    "execution_body",
     "pipeline_shape",
     "pipeline_estimated_cardinality",
     "example_reason",
     *CANDIDATE_TRAIT_FIELDS,
 )
-ADMISSION_PROOF_GAP_REQUIRED_COLUMNS = BENCHMARK_ADMISSION_PROOF_GAP_FIELDS
+ADMISSION_EVIDENCE_REQUIRED_COLUMNS = BENCHMARK_ADMISSION_EVIDENCE_FIELDS
 AUTO_POLICY_RELATIVE_TOLERANCE = 1.005
 
 def wrapper_only_pipeline_shape(source: str, sink: str = "") -> str:
-    result = "pipeline;source:source:" + source + ":source-missing-protocol"
+    result = "pipeline;source:source:" + source + ":source-missing-contract"
     if sink:
         result += ";sink:sink:" + sink + ":sink"
     return result
 
 
 def wrapper_only_region_source_marker(source: str) -> str:
-    return "source:" + source + ":fallback"
+    return "source:" + source + ":boundary"
 
 
 WRAPPER_ONLY_PIPELINE_SHAPES = {
@@ -161,11 +164,13 @@ def verify_summary(rows: list, expected_queries: list, policies: list, repeats: 
         if faster_than_off != expected_faster_than_off:
             raise AssertionError(f"summary.csv: faster_than_off_median mismatch: {row}")
         if row["policy"] == "off":
-            if row_int(row, "compiled_regions") != 0 or row_int(row, "decision_count") != 0:
-                raise AssertionError(f"summary.csv: off policy produced JIT work: {row}")
-        if row["policy"] == "auto" and row_int(row, "compiled_regions") > 0:
+            if row_int(row, "evidence_compiled_regions") != 0 or row_int(row, "evidence_decision_count") != 0:
+                raise AssertionError(f"summary.csv: off policy produced JIT evidence work: {row}")
+        if row["policy"] == "auto" and row_int(row, "evidence_compiled_regions") > 0:
             if row_float(row, "speedup_vs_off_median") < 1.0:
-                raise AssertionError(f"summary.csv: auto compiled regions without positive production speedup: {row}")
+                raise AssertionError(
+                    f"summary.csv: auto evidence compiled regions without positive production speedup: {row}"
+                )
         timings = [value for value in row.get("timings_s", "").split(";") if value]
         if len(timings) != repeats:
             raise AssertionError(f"summary.csv: timings_s does not match repeats: {row}")
@@ -187,16 +192,16 @@ def verify_policy_summary(rows: list, expected_queries: list, policies: list, re
             raise AssertionError(f"policy_summary.csv: wrong query count: {row}")
         if row_int(row, "run_count") != len(expected_queries) * repeats:
             raise AssertionError(f"policy_summary.csv: wrong run count: {row}")
-        if row["policy"] == "auto" and row_int(row, "decision_count") <= 0:
-            raise AssertionError(f"policy_summary.csv: auto policy produced no JIT decision counters: {row}")
+        if row["policy"] == "auto" and row_int(row, "evidence_decision_count") <= 0:
+            raise AssertionError(f"policy_summary.csv: auto policy produced no compiled-region decision counters: {row}")
         if row["policy"] == "off":
-            if row_int(row, "compiled_regions") != 0 or row_int(row, "decision_count") != 0:
-                raise AssertionError(f"policy_summary.csv: off policy produced JIT work: {row}")
-        if row["policy"] == "auto" and row_int(row, "compiled_regions") > 0:
+            if row_int(row, "evidence_compiled_regions") != 0 or row_int(row, "evidence_decision_count") != 0:
+                raise AssertionError(f"policy_summary.csv: off policy produced JIT evidence work: {row}")
+        if row["policy"] == "auto" and row_int(row, "evidence_compiled_regions") > 0:
             if row_float(row, "relative_to_off") > AUTO_POLICY_RELATIVE_TOLERANCE:
                 raise AssertionError(f"policy_summary.csv: auto compiled regions but lost to off policy: {row}")
-        if row["policy"] == "force" and row_int(row, "compiled_regions") <= 0:
-            raise AssertionError(f"policy_summary.csv: force policy did not compile any diagnostic regions: {row}")
+        if row["policy"] == "force" and row_int(row, "evidence_compiled_regions") <= 0:
+            raise AssertionError(f"policy_summary.csv: force policy did not compile any traced regions: {row}")
         if row_float(row, "total_median_s") <= 0:
             raise AssertionError(f"policy_summary.csv: non-positive total median: {row}")
         if row_float(row, "relative_to_off") <= 0:
@@ -223,37 +228,44 @@ def verify_correctness(rows: list, expected_queries: list, policies: list, repea
             raise AssertionError(f"correctness_summary.csv: non-zero correctness diff: {row}")
 
 
-def admission_proof_gap_key(row: dict) -> tuple:
+def admission_evidence_key(row: dict) -> tuple:
     return (
         row["admission_shape_key"],
         row["execution_mode"],
         row["region_execution_form"],
+        row["execution_body"],
         row["candidate_shape"],
-        row["candidate_scope"],
+        *(row[field] for field in CANDIDATE_SIGNATURE_FIELDS),
+        row["candidate_contract_abi"],
     )
 
 
-def verify_admission_proof_gaps(rows: list, decision_counters: list, policy_summary: list) -> None:
-    force_compiled = sum(row_int(row, "compiled_regions") for row in policy_summary if row["policy"] == "force")
+def verify_admission_evidences(rows: list, decision_counters: list, policy_summary: list) -> None:
+    force_compiled = sum(
+        row_int(row, "evidence_compiled_regions") for row in policy_summary if row["policy"] == "force"
+    )
     if not rows:
         if force_compiled > 0:
-            raise AssertionError("admission_proof_gap_summary.csv: force compiled regions but no proof-gap rows")
+            raise AssertionError("admission_evidence_summary.csv: force compiled regions but no admission evidence rows")
         return
-    require_columns("admission_proof_gap_summary.csv", rows, ADMISSION_PROOF_GAP_REQUIRED_COLUMNS)
+    require_columns("admission_evidence_summary.csv", rows, ADMISSION_EVIDENCE_REQUIRED_COLUMNS)
 
     expected_keys = {
-        admission_proof_gap_key(row)
+        admission_evidence_key(row)
         for row in decision_counters
         if row.get("target") == "region" and row.get("policy") == "force" and row.get("status") == "compiled"
     }
     actual_keys = set()
     for row in rows:
-        key = admission_proof_gap_key(row)
+        for field in CANDIDATE_SIGNATURE_FIELDS:
+            if row.get(field, "") in ("", "none"):
+                raise AssertionError(f"admission_evidence_summary.csv: missing {field}: {row}")
+        key = admission_evidence_key(row)
         if key in actual_keys:
-            raise AssertionError(f"admission_proof_gap_summary.csv: duplicate proof-gap row: {row}")
+            raise AssertionError(f"admission_evidence_summary.csv: duplicate admission evidence row: {row}")
         actual_keys.add(key)
         if row_int(row, "force_compiled_regions") <= 0:
-            raise AssertionError(f"admission_proof_gap_summary.csv: row has no force compiled regions: {row}")
+            raise AssertionError(f"admission_evidence_summary.csv: row has no force compiled regions: {row}")
         query_count = row_int(row, "query_count")
         classified_queries = (
             row_int(row, "force_winning_queries")
@@ -261,51 +273,40 @@ def verify_admission_proof_gaps(rows: list, decision_counters: list, policy_summ
             + row_int(row, "force_equal_queries")
         )
         if query_count <= 0 or classified_queries != query_count:
-            raise AssertionError(f"admission_proof_gap_summary.csv: query classification mismatch: {row}")
-        if row["proof_status"] not in KNOWN_ADMISSION_PROOF_STATUSES:
-            raise AssertionError(f"admission_proof_gap_summary.csv: unknown proof status: {row}")
-        if row["root_cause"] not in KNOWN_ADMISSION_PROOF_ROOT_CAUSES:
-            raise AssertionError(f"admission_proof_gap_summary.csv: unknown root cause: {row}")
+            raise AssertionError(f"admission_evidence_summary.csv: query classification mismatch: {row}")
+        if row["proof_status"] not in KNOWN_ADMISSION_EVIDENCE_STATUSES:
+            raise AssertionError(f"admission_evidence_summary.csv: unknown proof status: {row}")
+        if row["root_cause"] not in KNOWN_ADMISSION_EVIDENCE_ROOT_CAUSES:
+            raise AssertionError(f"admission_evidence_summary.csv: unknown root cause: {row}")
         for field in (
             "min_force_speedup_vs_off",
             "median_force_speedup_vs_off",
             "max_force_speedup_vs_off",
         ):
             if row_float(row, field) <= 0:
-                raise AssertionError(f"admission_proof_gap_summary.csv: non-positive speedup field {field}: {row}")
+                raise AssertionError(f"admission_evidence_summary.csv: non-positive speedup field {field}: {row}")
         if row_float(row, "min_force_speedup_vs_off") > row_float(row, "median_force_speedup_vs_off"):
-            raise AssertionError(f"admission_proof_gap_summary.csv: min speedup exceeds median: {row}")
+            raise AssertionError(f"admission_evidence_summary.csv: min speedup exceeds median: {row}")
         if row_float(row, "median_force_speedup_vs_off") > row_float(row, "max_force_speedup_vs_off"):
-            raise AssertionError(f"admission_proof_gap_summary.csv: median speedup exceeds max: {row}")
-        if row["root_cause"] == "missing_measured_auto_admission_proof":
+            raise AssertionError(f"admission_evidence_summary.csv: median speedup exceeds max: {row}")
+        if row["root_cause"] == "positive_shape_without_auto_admission":
             if row["auto_rule_present"] != "false":
-                raise AssertionError(f"admission_proof_gap_summary.csv: missing-proof row has auto rule: {row}")
+                raise AssertionError(f"admission_evidence_summary.csv: positive shape without auto admission has auto rule: {row}")
             if row["proof_status"] != "positive_query_median":
-                raise AssertionError(f"admission_proof_gap_summary.csv: missing-proof row is not positive: {row}")
-            if row["admission_shape_key"] in CONTEXT_SPECIFIC_POSITIVE_ADMISSION_SHAPES:
-                raise AssertionError(f"admission_proof_gap_summary.csv: context-specific shape mislabeled: {row}")
-        if row["root_cause"] == "context_specific_positive_without_generic_admission_proof":
-            if row["auto_rule_present"] != "false":
-                raise AssertionError(f"admission_proof_gap_summary.csv: context-specific row has auto rule: {row}")
-            if row["proof_status"] != "positive_query_median":
-                raise AssertionError(f"admission_proof_gap_summary.csv: context-specific row is not positive: {row}")
-            if row["admission_shape_key"] not in CONTEXT_SPECIFIC_POSITIVE_ADMISSION_SHAPES:
-                raise AssertionError(f"admission_proof_gap_summary.csv: unknown context-specific shape: {row}")
-            if row_int(row, "force_winning_queries") <= 0 or row_int(row, "force_losing_queries") != 0:
-                raise AssertionError(
-                    f"admission_proof_gap_summary.csv: context-specific positive query counts are invalid: {row}"
-                )
+                raise AssertionError(f"admission_evidence_summary.csv: positive shape without auto admission is not positive: {row}")
         if row["root_cause"] == "auto_rule_admitted_and_compiled":
             if row["auto_rule_present"] != "true":
-                raise AssertionError(f"admission_proof_gap_summary.csv: admitted row has no auto rule: {row}")
+                raise AssertionError(f"admission_evidence_summary.csv: admitted row has no auto rule: {row}")
             if row_int(row, "auto_compiled_regions") <= 0:
-                raise AssertionError(f"admission_proof_gap_summary.csv: admitted row did not compile in auto: {row}")
+                raise AssertionError(f"admission_evidence_summary.csv: admitted row did not compile in auto: {row}")
+            if row["proof_status"] != "positive_query_median":
+                raise AssertionError(f"admission_evidence_summary.csv: auto admitted non-positive proof: {row}")
         if row["root_cause"] == "force_region_not_profitable" and row["proof_status"] != "negative_query_median":
-            raise AssertionError(f"admission_proof_gap_summary.csv: force-not-profitable row has wrong status: {row}")
+            raise AssertionError(f"admission_evidence_summary.csv: force-not-profitable row has wrong status: {row}")
 
     if actual_keys != expected_keys:
         raise AssertionError(
-            "admission_proof_gap_summary.csv: proof-gap keys do not match force compiled region keys; "
+            "admission_evidence_summary.csv: admission evidence keys do not match force compiled region keys; "
             f"missing={sorted(expected_keys - actual_keys)} extra={sorted(actual_keys - expected_keys)}"
         )
 
@@ -346,7 +347,7 @@ def main() -> int:
     policy_summary = read_csv(trace_dir / "policy_summary.csv")
     correctness = read_csv(trace_dir / "correctness_summary.csv")
     decision_counters = read_csv(trace_dir / "decision_counter_summary.csv")
-    admission_proof_gaps = read_csv(trace_dir / "admission_proof_gap_summary.csv")
+    admission_evidences = read_csv(trace_dir / "admission_evidence_summary.csv")
     operator_profile = read_csv(trace_dir / "operator_profile_summary.csv")
 
     verify_runs(trace_dir, runs, expected_queries, args.policies, args.repeats)
@@ -355,7 +356,7 @@ def main() -> int:
         raise AssertionError("query_summary.csv must match summary.csv")
     verify_policy_summary(policy_summary, expected_queries, args.policies, args.repeats)
     verify_correctness(correctness, expected_queries, args.policies, args.repeats)
-    verify_admission_proof_gaps(admission_proof_gaps, decision_counters, policy_summary)
+    verify_admission_evidences(admission_evidences, decision_counters, policy_summary)
     if not decision_counters:
         raise AssertionError("decision_counter_summary.csv: expected JIT decision counter rows")
     require_columns("decision_counter_summary.csv", decision_counters, CANDIDATE_TRAIT_REQUIRED_COLUMNS)
@@ -363,8 +364,13 @@ def main() -> int:
         region_execution_form = row.get("region_execution_form", "")
         if row.get("target") == "region" and region_execution_form not in KNOWN_REGION_EXECUTION_FORMS:
             raise AssertionError(f"decision_counter_summary.csv: unknown region execution form: {row}")
+        execution_body = row.get("execution_body", "")
+        if row.get("target") == "region" and execution_body not in KNOWN_EXECUTION_BODIES:
+            raise AssertionError(f"decision_counter_summary.csv: unknown execution body: {row}")
         if row.get("target") == "region" and row.get("status") == "compiled" and region_execution_form == "none":
             raise AssertionError(f"decision_counter_summary.csv: compiled region counter has no execution form: {row}")
+        if row.get("target") == "region" and row.get("status") == "compiled" and execution_body == "none":
+            raise AssertionError(f"decision_counter_summary.csv: compiled region counter has no execution body: {row}")
         if "source:source:SET:" in row.get("candidate_pipeline_shape", ""):
             raise AssertionError(f"decision_counter_summary.csv: setup pipeline leaked into candidate counters: {row}")
         pipeline_shape = row.get("pipeline_shape", "")
