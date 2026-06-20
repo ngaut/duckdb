@@ -61,6 +61,8 @@ public:
 public:
 	string GetName() const override;
 	InsertionOrderPreservingMap<string> ParamsToString() const override;
+	void GetExecutionRegionPreGraphSourceInfo(idx_t &estimated_source_cardinality,
+	                                          idx_t &source_filter_count) const override;
 	ExecutionContract GetExecutionContract() const override;
 
 	bool Equals(const PhysicalOperator &other) const override;

@@ -229,6 +229,14 @@ public:
 
 	//! Add the given data to the HT
 	void Build(PartitionedTupleDataAppendState &append_state, DataChunk &keys, DataChunk &input);
+	void InitializeBuildChunk(DataChunk &source_chunk) const;
+	idx_t PrepareBuildChunk(PartitionedTupleDataAppendState &append_state, DataChunk &keys, DataChunk &payload,
+	                        DataChunk &source_chunk, Vector &hash_values, SelectionVector &build_sel,
+	                        optional_ptr<const SelectionVector> &build_selection);
+	void HashBuildChunk(PartitionedTupleDataAppendState &append_state, DataChunk &keys, DataChunk &source_chunk,
+	                    Vector &hash_values, const SelectionVector &build_selection, idx_t build_count);
+	void AppendBuildChunk(PartitionedTupleDataAppendState &append_state, DataChunk &source_chunk,
+	                      const SelectionVector &build_selection, idx_t build_count);
 	//! Merge another HT into this one
 	void Merge(JoinHashTable &other);
 	//! Combines the partitions in sink_collection into data_collection, as if it were not partitioned

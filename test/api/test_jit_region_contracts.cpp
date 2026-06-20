@@ -23,17 +23,17 @@ TEST_CASE("JIT table scan source contract fuses with generated projection and ap
 		if (!IsSljitRegionEvent(event)) {
 			continue;
 		}
-		if (event.status == "compiled" &&
+		if (EventStatus(event) == "compiled" &&
 		    event.selected_source_execution == ExecutionRegionSourceExecutionKind::SOURCE_CONTRACT &&
 		    StringUtil::Contains(event.ir, "table_scan_contract<function=seq_scan")) {
 			found_source_contract = true;
 			RequireNativeFusedRegion(event);
 			RequireDuckDBScanFilteredSourceContract(event);
 			REQUIRE(StringUtil::Contains(event.ir, "source_contract<status=ready"));
-			REQUIRE(StringUtil::Contains(event.reason, "append sink protocol"));
+			REQUIRE(StringUtil::Contains(event.reason, "append sink contract"));
 			REQUIRE(StringUtil::Contains(event.reason, "sink_contract_status=ready"));
 		}
-		if (event.phase == "runtime" && event.status == "executed" && event.execution_mode == "native" &&
+		if (EventPhase(event) == "runtime" && EventStatus(event) == "executed" && EventExecutionMode(event) == "native" &&
 		    event.selected_source_execution == ExecutionRegionSourceExecutionKind::SOURCE_CONTRACT &&
 		    event.source_contract_output_rows > 0) {
 			found_runtime = true;
@@ -153,11 +153,14 @@ TEST_CASE("JIT aggregate sinks expose ready native state-update contracts", "[ap
 			continue;
 		}
 		found_aggregate_update = true;
-		RequireCompiledFusedOperatorProtocolRegion(event);
+		RequireCompiledGeneratedRegion(event);
 		REQUIRE(event.candidate_contract.missing_contract_count == 0);
-		REQUIRE(StringUtil::Contains(event.reason, "native aggregate update sink protocol"));
+		REQUIRE(StringUtil::Contains(event.reason, "native aggregate update sink contract"));
 		REQUIRE(StringUtil::Contains(event.reason, "aggregate_state_update_contract_status=ready"));
+		REQUIRE(StringUtil::Contains(event.reason, "execution:native-sljit-region-aggregate-update"));
+		REQUIRE_FALSE(StringUtil::Contains(event.reason, "whole-vectorized-operator-boundary;stage=aggregate-update"));
 		REQUIRE(StringUtil::Contains(event.ir, "native_aggregate_state_update_contract_status=ready"));
+		REQUIRE(StringUtil::Contains(event.ir, "primitive_payloads=native:reference"));
 	}
 	REQUIRE(found_aggregate_update);
 }

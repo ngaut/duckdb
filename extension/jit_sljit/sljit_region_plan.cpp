@@ -39,8 +39,15 @@ static unique_ptr<SljitNativePredicate> CopySljitNativePredicate(const unique_pt
 	result->source_index = input->source_index;
 	result->right_source_index = input->right_source_index;
 	result->constant = input->constant;
+	result->int128_constant_lower = input->int128_constant_lower;
+	result->int128_constant_upper = input->int128_constant_upper;
 	result->constant_on_left = input->constant_on_left;
 	result->integer_kind = input->integer_kind;
+	result->double_source_kind = input->double_source_kind;
+	result->double_right_source_kind = input->double_right_source_kind;
+	result->double_constant = input->double_constant;
+	result->double_source_scale = input->double_source_scale;
+	result->double_right_source_scale = input->double_right_source_scale;
 	result->compare_op = input->compare_op;
 	result->null_check_op = input->null_check_op;
 	result->constants = input->constants;
@@ -56,6 +63,7 @@ static unique_ptr<SljitNativePredicate> CopySljitNativePredicate(const unique_pt
 	result->substring_length = input->substring_length;
 	result->guard_has_null_constant = input->guard_has_null_constant;
 	result->guard_source_indices = input->guard_source_indices;
+	result->source_indices = input->source_indices;
 	result->child = CopySljitNativePredicate(input->child);
 	result->children.reserve(input->children.size());
 	for (auto &child : input->children) {
@@ -80,6 +88,10 @@ SljitNativeRegionExpressionPlan CopySljitNativeRegionExpression(const SljitNativ
 	result.check_result_range = input.check_result_range;
 	result.binary_op = input.binary_op;
 	result.double_binary_op = input.double_binary_op;
+	result.double_source_kind = input.double_source_kind;
+	result.double_right_source_kind = input.double_right_source_kind;
+	result.double_source_scale = input.double_source_scale;
+	result.double_right_source_scale = input.double_right_source_scale;
 	result.compare_op = input.compare_op;
 	result.cast_source_width = input.cast_source_width;
 	result.cast_target_width = input.cast_target_width;
@@ -168,8 +180,8 @@ static SljitNativeRegionOpPlan CopySljitNativeRegionOp(const SljitNativeRegionOp
 	result.output_types = input.output_types;
 	result.filter = CopySljitNativeRegionExpression(input.filter);
 	result.hash_join_probe = CopySljitNativeHashJoinProbePlan(input.hash_join_probe);
-	result.nested_loop_join_probe = CopySljitNativeNestedLoopJoinProbePlan(input.nested_loop_join_probe);
 	result.hash_join_build = input.hash_join_build;
+	result.nested_loop_join_probe = CopySljitNativeNestedLoopJoinProbePlan(input.nested_loop_join_probe);
 	result.nested_loop_join_build.sink_info = input.nested_loop_join_build.sink_info;
 	result.nested_loop_join_build.input_types = input.nested_loop_join_build.input_types;
 	result.nested_loop_join_build.condition_types = input.nested_loop_join_build.condition_types;
@@ -179,13 +191,12 @@ static SljitNativeRegionOpPlan CopySljitNativeRegionOp(const SljitNativeRegionOp
 		result.nested_loop_join_build.rhs_conditions.push_back(CopySljitNativeRegionExpression(condition));
 	}
 	result.append_sink = input.append_sink;
+	result.delim_join_sink = input.delim_join_sink;
 	result.aggregate_update.sink_info = input.aggregate_update.sink_info;
 	result.aggregate_update.input_types = input.aggregate_update.input_types;
-	result.aggregate_update.group_input_indices = input.aggregate_update.group_input_indices;
-	result.aggregate_update.state_value_offsets = input.aggregate_update.state_value_offsets;
-	result.aggregate_update.state_is_set_offsets = input.aggregate_update.state_is_set_offsets;
 	result.aggregate_update.use_primitive_payloads = input.aggregate_update.use_primitive_payloads;
 	result.aggregate_update.use_grouped_state_addresses = input.aggregate_update.use_grouped_state_addresses;
+	result.aggregate_update.use_perfect_hash_group_lookup = input.aggregate_update.use_perfect_hash_group_lookup;
 	result.aggregate_update.ir = input.aggregate_update.ir;
 	result.aggregate_update.payloads.reserve(input.aggregate_update.payloads.size());
 	for (auto &payload : input.aggregate_update.payloads) {
@@ -215,6 +226,7 @@ unique_ptr<SljitNativeRegionPlan> CopySljitNativeRegion(const SljitNativeRegionP
 	result->fused_primitive_aggregate_updates = input.fused_primitive_aggregate_updates;
 	result->runtime_combined_filter_projections = input.runtime_combined_filter_projections;
 	result->source_execution = input.source_execution;
+	result->summary = input.summary;
 	result->ops.reserve(input.ops.size());
 	for (auto &op : input.ops) {
 		result->ops.push_back(CopySljitNativeRegionOp(op));
@@ -249,8 +261,50 @@ static bool SljitNativeRegionExpressionGeneratesCode(const SljitNativeRegionExpr
 	}
 }
 
+static bool SljitNativeRegionExpressionsGenerateCode(const vector<SljitNativeRegionExpressionPlan> &expressions) {
+	for (auto &expr : expressions) {
+		if (SljitNativeRegionExpressionGeneratesCode(expr)) {
+			return true;
+		}
+	}
+	return false;
+}
+
 static bool IsSljitNativeTreeDecimal64Node(const ExecutionExpressionIR &node) {
 	return node.return_type.id() == LogicalTypeId::DECIMAL && node.physical_type == PhysicalType::INT64;
+}
+
+static bool IsSljitNativeTypedTreeInt64Node(const ExecutionExpressionIR &node) {
+	return node.return_type.id() != LogicalTypeId::DECIMAL && node.physical_type == PhysicalType::INT64;
+}
+
+static bool IsSljitNativeTypedTreeInt32Node(const ExecutionExpressionIR &node) {
+	return node.return_type.id() != LogicalTypeId::DECIMAL && node.physical_type == PhysicalType::INT32;
+}
+
+static bool IsSljitNativeTypedTreeBoolNode(const ExecutionExpressionIR &node) {
+	return node.return_type.id() == LogicalTypeId::BOOLEAN && node.physical_type == PhysicalType::BOOL;
+}
+
+static bool IsSljitNativeTypedTreeValueNode(const ExecutionExpressionIR &node) {
+	return IsSljitNativeTypedTreeInt64Node(node) || IsSljitNativeTypedTreeInt32Node(node) ||
+	       IsSljitNativeTypedTreeBoolNode(node);
+}
+
+static bool IsSljitNativeTypedTreeIntegerNode(const ExecutionExpressionIR &node) {
+	return IsSljitNativeTypedTreeInt64Node(node) || IsSljitNativeTypedTreeInt32Node(node);
+}
+
+static bool IsSljitNativeTypedTreeSameIntegerKind(const ExecutionExpressionIR &left,
+                                                  const ExecutionExpressionIR &right) {
+	return (IsSljitNativeTypedTreeInt64Node(left) && IsSljitNativeTypedTreeInt64Node(right)) ||
+	       (IsSljitNativeTypedTreeInt32Node(left) && IsSljitNativeTypedTreeInt32Node(right));
+}
+
+static bool SljitNativeTypedTreeSameValueKind(const ExecutionExpressionIR &left, const ExecutionExpressionIR &right) {
+	return (IsSljitNativeTypedTreeInt64Node(left) && IsSljitNativeTypedTreeInt64Node(right)) ||
+	       (IsSljitNativeTypedTreeInt32Node(left) && IsSljitNativeTypedTreeInt32Node(right)) ||
+	       (IsSljitNativeTypedTreeBoolNode(left) && IsSljitNativeTypedTreeBoolNode(right));
 }
 
 static bool SljitNativeTreeDecimal64BinaryHasRawSemantics(const ExecutionExpressionIR &node) {
@@ -281,6 +335,20 @@ static bool SljitNativeTreeBinaryOpSupported(ExecutionExpressionBinaryOp op) {
 	}
 }
 
+static bool SljitNativeTypedTreeComparisonSupported(ExecutionExpressionBinaryOp op) {
+	switch (op) {
+	case ExecutionExpressionBinaryOp::COMPARE_EQUAL:
+	case ExecutionExpressionBinaryOp::COMPARE_NOTEQUAL:
+	case ExecutionExpressionBinaryOp::COMPARE_LESSTHAN:
+	case ExecutionExpressionBinaryOp::COMPARE_GREATERTHAN:
+	case ExecutionExpressionBinaryOp::COMPARE_LESSTHANOREQUALTO:
+	case ExecutionExpressionBinaryOp::COMPARE_GREATERTHANOREQUALTO:
+		return true;
+	default:
+		return false;
+	}
+}
+
 static bool SljitNativeTreeNodeSupported(const ExecutionExpressionIR &node) {
 	if (node.kind == ExecutionExpressionIRKind::REFERENCE) {
 		return IsSljitNativeTreeDecimal64Node(node);
@@ -295,6 +363,87 @@ static bool SljitNativeTreeNodeSupported(const ExecutionExpressionIR &node) {
 		return false;
 	}
 	return SljitNativeTreeNodeSupported(*node.left) && SljitNativeTreeNodeSupported(*node.right);
+}
+
+static bool SljitNativeTypedTreeNodeSupported(const ExecutionExpressionIR &node) {
+	switch (node.kind) {
+	case ExecutionExpressionIRKind::REFERENCE:
+		return IsSljitNativeTypedTreeValueNode(node);
+	case ExecutionExpressionIRKind::CONSTANT:
+		return IsSljitNativeTypedTreeValueNode(node);
+	case ExecutionExpressionIRKind::CAST:
+		return !node.try_cast && node.exception_behavior != ExecutionExpressionExceptionKind::NULL_ON_CAST_ERROR &&
+		       node.exception_behavior != ExecutionExpressionExceptionKind::ERROR &&
+		       IsSljitNativeTypedTreeInt64Node(node) && node.left && IsSljitNativeTypedTreeIntegerNode(*node.left) &&
+		       SljitNativeTypedTreeNodeSupported(*node.left);
+	case ExecutionExpressionIRKind::UNARY:
+		if (!node.left) {
+			return false;
+		}
+		switch (node.unary_op) {
+		case ExecutionExpressionUnaryOp::NOT:
+			return IsSljitNativeTypedTreeBoolNode(node) && IsSljitNativeTypedTreeBoolNode(*node.left) &&
+			       SljitNativeTypedTreeNodeSupported(*node.left);
+		case ExecutionExpressionUnaryOp::IS_NULL:
+		case ExecutionExpressionUnaryOp::IS_NOT_NULL:
+			return IsSljitNativeTypedTreeBoolNode(node) && IsSljitNativeTypedTreeValueNode(*node.left) &&
+			       SljitNativeTypedTreeNodeSupported(*node.left);
+		default:
+			return false;
+		}
+	case ExecutionExpressionIRKind::BINARY:
+		if (!node.left || !node.right) {
+			return false;
+		}
+		if (SljitNativeTypedTreeComparisonSupported(node.binary_op)) {
+			return IsSljitNativeTypedTreeBoolNode(node) &&
+			       IsSljitNativeTypedTreeSameIntegerKind(*node.left, *node.right) &&
+			       SljitNativeTypedTreeNodeSupported(*node.left) && SljitNativeTypedTreeNodeSupported(*node.right);
+		}
+		return SljitNativeTreeBinaryOpSupported(node.binary_op) && IsSljitNativeTypedTreeIntegerNode(node) &&
+		       IsSljitNativeTypedTreeSameIntegerKind(node, *node.left) &&
+		       IsSljitNativeTypedTreeSameIntegerKind(node, *node.right) &&
+		       SljitNativeTypedTreeNodeSupported(*node.left) && SljitNativeTypedTreeNodeSupported(*node.right);
+	case ExecutionExpressionIRKind::CONJUNCTION:
+		if (!IsSljitNativeTypedTreeBoolNode(node) || node.children.empty()) {
+			return false;
+		}
+		for (auto &child : node.children) {
+			if (!child || !IsSljitNativeTypedTreeBoolNode(*child) || !SljitNativeTypedTreeNodeSupported(*child)) {
+				return false;
+			}
+		}
+		return true;
+	case ExecutionExpressionIRKind::COALESCE:
+		if (!IsSljitNativeTypedTreeValueNode(node) || node.children.empty()) {
+			return false;
+		}
+		for (auto &child : node.children) {
+			if (!child || !SljitNativeTypedTreeSameValueKind(node, *child) ||
+			    !SljitNativeTypedTreeNodeSupported(*child)) {
+				return false;
+			}
+		}
+		return true;
+	case ExecutionExpressionIRKind::CASE:
+		if (!IsSljitNativeTypedTreeValueNode(node) || !node.else_node || node.children.empty() ||
+		    node.children.size() % 2 != 0 || !SljitNativeTypedTreeSameValueKind(node, *node.else_node) ||
+		    !SljitNativeTypedTreeNodeSupported(*node.else_node)) {
+			return false;
+		}
+		for (idx_t child_idx = 0; child_idx < node.children.size(); child_idx += 2) {
+			auto &condition = node.children[child_idx];
+			auto &value = node.children[child_idx + 1];
+			if (!condition || !value || !IsSljitNativeTypedTreeBoolNode(*condition) ||
+			    !SljitNativeTypedTreeSameValueKind(node, *value) || !SljitNativeTypedTreeNodeSupported(*condition) ||
+			    !SljitNativeTypedTreeNodeSupported(*value)) {
+				return false;
+			}
+		}
+		return true;
+	default:
+		return false;
+	}
 }
 
 static void RemapSljitNativeTreeReferences(ExecutionExpressionIR &node, vector<idx_t> &source_indices) {
@@ -337,6 +486,378 @@ static bool TryBuildSljitNativeExpressionTreePlan(const ExecutionExpressionIR &r
 	return true;
 }
 
+static bool TryGetSljitTypedTreeResultKind(const ExecutionExpressionIR &root, SljitNativeIntegerKind &kind) {
+	if (IsSljitNativeTypedTreeInt64Node(root)) {
+		kind = SljitNativeIntegerKind::INT64;
+		return true;
+	}
+	if (IsSljitNativeTypedTreeBoolNode(root)) {
+		kind = SljitNativeIntegerKind::UINT8;
+		return true;
+	}
+	return false;
+}
+
+static bool TryBuildSljitNativeTypedExpressionTreePlan(const ExecutionExpressionIR &root,
+                                                       SljitNativeRegionExpressionPlan &expr) {
+	SljitNativeIntegerKind result_kind;
+	if (!SljitNativeTypedTreeNodeSupported(root) || !TryGetSljitTypedTreeResultKind(root, result_kind)) {
+		return false;
+	}
+	expr.kind = SljitNativeRegionExpressionKind::TYPED_EXPRESSION_TREE;
+	expr.integer_kind = result_kind;
+	expr.return_type = root.return_type;
+	expr.expression_tree = root.Copy();
+	expr.expression_tree_source_indices.clear();
+	RemapSljitNativeTreeReferences(*expr.expression_tree, expr.expression_tree_source_indices);
+	return true;
+}
+
+static bool TryBuildSljitNativeAnyExpressionTreePlan(const ExecutionExpressionIR &root,
+                                                     SljitNativeRegionExpressionPlan &expr) {
+	if (TryBuildSljitNativeExpressionTreePlan(root, expr)) {
+		return true;
+	}
+	return TryBuildSljitNativeTypedExpressionTreePlan(root, expr);
+}
+
+static bool SljitExpressionBinaryOpIsArithmetic(ExecutionExpressionBinaryOp op) {
+	switch (op) {
+	case ExecutionExpressionBinaryOp::ADD:
+	case ExecutionExpressionBinaryOp::SUBTRACT:
+	case ExecutionExpressionBinaryOp::MULTIPLY:
+	case ExecutionExpressionBinaryOp::DIVIDE:
+	case ExecutionExpressionBinaryOp::INTEGER_DIVIDE:
+	case ExecutionExpressionBinaryOp::MODULO:
+		return true;
+	default:
+		return false;
+	}
+}
+
+static bool SljitExpressionBinaryOpIsPredicate(ExecutionExpressionBinaryOp op) {
+	switch (op) {
+	case ExecutionExpressionBinaryOp::COMPARE_EQUAL:
+	case ExecutionExpressionBinaryOp::COMPARE_NOTEQUAL:
+	case ExecutionExpressionBinaryOp::COMPARE_LESSTHAN:
+	case ExecutionExpressionBinaryOp::COMPARE_GREATERTHAN:
+	case ExecutionExpressionBinaryOp::COMPARE_LESSTHANOREQUALTO:
+	case ExecutionExpressionBinaryOp::COMPARE_GREATERTHANOREQUALTO:
+	case ExecutionExpressionBinaryOp::COMPARE_DISTINCT_FROM:
+	case ExecutionExpressionBinaryOp::COMPARE_NOT_DISTINCT_FROM:
+		return true;
+	default:
+		return false;
+	}
+}
+
+struct SljitNativeExpressionShape {
+	idx_t total_nodes = 0;
+	idx_t arithmetic_nodes = 0;
+	idx_t predicate_nodes = 0;
+	idx_t control_nodes = 0;
+	idx_t null_control_nodes = 0;
+	idx_t helper_nodes = 0;
+
+	bool IsStraightLineArithmeticCandidate() const {
+		return arithmetic_nodes > 0 && predicate_nodes == 0 && control_nodes == 0 && null_control_nodes == 0 &&
+		       helper_nodes == 0;
+	}
+
+	bool IsBranchyArithmeticCandidate() const {
+		return arithmetic_nodes > 0 && predicate_nodes > 0 && control_nodes > 0 && helper_nodes == 0;
+	}
+};
+
+static void SljitAccumulateExecutionExpressionShape(const ExecutionExpressionIR &node,
+                                                    SljitNativeExpressionShape &shape) {
+	shape.total_nodes++;
+	switch (node.kind) {
+	case ExecutionExpressionIRKind::CONSTANT:
+	case ExecutionExpressionIRKind::REFERENCE:
+		break;
+	case ExecutionExpressionIRKind::UNARY:
+		if (node.unary_op == ExecutionExpressionUnaryOp::NEGATE) {
+			shape.arithmetic_nodes++;
+		} else {
+			shape.predicate_nodes++;
+			if (node.unary_op == ExecutionExpressionUnaryOp::IS_NULL ||
+			    node.unary_op == ExecutionExpressionUnaryOp::IS_NOT_NULL) {
+				shape.null_control_nodes++;
+			}
+		}
+		break;
+	case ExecutionExpressionIRKind::BINARY:
+		if (SljitExpressionBinaryOpIsArithmetic(node.binary_op)) {
+			shape.arithmetic_nodes++;
+		} else if (SljitExpressionBinaryOpIsPredicate(node.binary_op)) {
+			shape.predicate_nodes++;
+		} else {
+			shape.helper_nodes++;
+		}
+		break;
+	case ExecutionExpressionIRKind::CAST:
+		if (node.try_cast || node.exception_behavior == ExecutionExpressionExceptionKind::NULL_ON_CAST_ERROR ||
+		    node.exception_behavior == ExecutionExpressionExceptionKind::ERROR) {
+			shape.null_control_nodes++;
+		}
+		break;
+	case ExecutionExpressionIRKind::CONJUNCTION:
+		shape.control_nodes++;
+		shape.predicate_nodes++;
+		break;
+	case ExecutionExpressionIRKind::COALESCE:
+	case ExecutionExpressionIRKind::CONSTANT_OR_NULL:
+		shape.control_nodes++;
+		shape.null_control_nodes++;
+		break;
+	case ExecutionExpressionIRKind::IN_LIST:
+	case ExecutionExpressionIRKind::BETWEEN:
+		shape.control_nodes++;
+		shape.predicate_nodes++;
+		break;
+	case ExecutionExpressionIRKind::CASE:
+		shape.control_nodes++;
+		break;
+	case ExecutionExpressionIRKind::INTRINSIC:
+		shape.helper_nodes++;
+		if (node.intrinsic == ExecutionExpressionIntrinsicKind::ERROR) {
+			shape.control_nodes++;
+		}
+		break;
+	default:
+		shape.helper_nodes++;
+		break;
+	}
+	if (node.left) {
+		SljitAccumulateExecutionExpressionShape(*node.left, shape);
+	}
+	if (node.right) {
+		SljitAccumulateExecutionExpressionShape(*node.right, shape);
+	}
+	if (node.else_node) {
+		SljitAccumulateExecutionExpressionShape(*node.else_node, shape);
+	}
+	for (auto &child : node.children) {
+		if (child) {
+			SljitAccumulateExecutionExpressionShape(*child, shape);
+		}
+	}
+}
+
+static SljitNativeExpressionShape SljitExecutionExpressionTreeShape(const ExecutionExpressionIR &node) {
+	SljitNativeExpressionShape shape;
+	SljitAccumulateExecutionExpressionShape(node, shape);
+	return shape;
+}
+
+static SljitNativeExpressionShape SljitNativeExpressionPlanShape(const SljitNativeRegionExpressionPlan &expr) {
+	SljitNativeExpressionShape shape;
+	switch (expr.kind) {
+	case SljitNativeRegionExpressionKind::REFERENCE:
+	case SljitNativeRegionExpressionKind::CONSTANT:
+		shape.total_nodes = 1;
+		return shape;
+	case SljitNativeRegionExpressionKind::INTEGER_BINARY_CONSTANT:
+	case SljitNativeRegionExpressionKind::INTEGER_BINARY_REFERENCES:
+	case SljitNativeRegionExpressionKind::DOUBLE_BINARY_CONSTANT:
+	case SljitNativeRegionExpressionKind::DOUBLE_BINARY_REFERENCES:
+		shape.total_nodes = 3;
+		shape.arithmetic_nodes = 1;
+		return shape;
+	case SljitNativeRegionExpressionKind::INTEGER_COMPARE_CONSTANT:
+	case SljitNativeRegionExpressionKind::INTEGER_COMPARE_REFERENCES:
+		shape.total_nodes = 3;
+		shape.predicate_nodes = 1;
+		return shape;
+	case SljitNativeRegionExpressionKind::INTEGER_COALESCE:
+		shape.total_nodes = 3;
+		shape.control_nodes = 1;
+		shape.null_control_nodes = 1;
+		return shape;
+	case SljitNativeRegionExpressionKind::INTEGER_BETWEEN:
+	case SljitNativeRegionExpressionKind::INTEGER_IN_LIST:
+		shape.total_nodes = 3;
+		shape.control_nodes = 1;
+		shape.predicate_nodes = 1;
+		return shape;
+	case SljitNativeRegionExpressionKind::CONSTANT_OR_NULL:
+		shape.total_nodes = 3;
+		shape.control_nodes = 1;
+		shape.null_control_nodes = 1;
+		return shape;
+	case SljitNativeRegionExpressionKind::INTEGER_CAST:
+	case SljitNativeRegionExpressionKind::SIGNED_TO_UNSIGNED_INTEGER_CAST:
+	case SljitNativeRegionExpressionKind::DECIMAL64_TO_DOUBLE:
+	case SljitNativeRegionExpressionKind::DECIMAL128_SCALE_UP:
+		shape.total_nodes = 2;
+		return shape;
+	case SljitNativeRegionExpressionKind::INTEGRAL_COMPRESS:
+	case SljitNativeRegionExpressionKind::INTEGRAL_DECOMPRESS:
+	case SljitNativeRegionExpressionKind::STRING_COMPRESS:
+	case SljitNativeRegionExpressionKind::STRING_DECOMPRESS:
+	case SljitNativeRegionExpressionKind::DATE_YEAR:
+		shape.total_nodes = 2;
+		shape.helper_nodes = 1;
+		return shape;
+	case SljitNativeRegionExpressionKind::ERROR_GUARDED_REFERENCE:
+		shape.total_nodes = 2;
+		shape.control_nodes = 1;
+		shape.helper_nodes = 1;
+		return shape;
+	case SljitNativeRegionExpressionKind::NULL_CHECK:
+		shape.total_nodes = 2;
+		shape.predicate_nodes = 1;
+		shape.null_control_nodes = 1;
+		return shape;
+	case SljitNativeRegionExpressionKind::PREDICATE:
+		shape.total_nodes = 2;
+		shape.predicate_nodes = 1;
+		shape.control_nodes = 1;
+		return shape;
+	case SljitNativeRegionExpressionKind::EXPRESSION_TREE:
+	case SljitNativeRegionExpressionKind::TYPED_EXPRESSION_TREE:
+		return expr.expression_tree ? SljitExecutionExpressionTreeShape(*expr.expression_tree) : shape;
+	default:
+		shape.total_nodes = 1;
+		shape.helper_nodes = 1;
+		return shape;
+	}
+}
+
+static void SljitTrackNativeExpressionIntensity(const SljitNativeRegionExpressionPlan &expr,
+                                                SljitNativeExpressionIntensity &intensity) {
+	auto shape = SljitNativeExpressionPlanShape(expr);
+	if (shape.total_nodes == 0) {
+		return;
+	}
+	intensity.max_nodes = MaxValue(intensity.max_nodes, shape.total_nodes);
+	intensity.total_nodes += shape.total_nodes;
+	intensity.total_arithmetic_nodes += shape.arithmetic_nodes;
+	intensity.total_predicate_nodes += shape.predicate_nodes;
+	intensity.total_control_nodes += shape.control_nodes;
+	intensity.total_null_control_nodes += shape.null_control_nodes;
+	intensity.total_helper_nodes += shape.helper_nodes;
+	if (shape.IsStraightLineArithmeticCandidate()) {
+		intensity.max_straight_line_arithmetic_nodes =
+		    MaxValue(intensity.max_straight_line_arithmetic_nodes, shape.arithmetic_nodes);
+		intensity.straight_line_arithmetic_expression_count++;
+	}
+	if (shape.IsBranchyArithmeticCandidate()) {
+		intensity.max_branchy_arithmetic_nodes =
+		    MaxValue(intensity.max_branchy_arithmetic_nodes, shape.arithmetic_nodes);
+		intensity.branchy_arithmetic_expression_count++;
+	}
+	intensity.expression_count++;
+}
+
+static void SljitTrackNativeExpressionIntensity(const vector<SljitNativeRegionExpressionPlan> &expressions,
+                                                SljitNativeExpressionIntensity &intensity) {
+	for (auto &expr : expressions) {
+		SljitTrackNativeExpressionIntensity(expr, intensity);
+	}
+}
+
+static void SljitTrackNativeStringPredicateIntensity(const SljitNativePredicate &predicate,
+                                                     SljitNativeStringPredicateIntensity &intensity) {
+	intensity.total_predicate_nodes++;
+	switch (predicate.kind) {
+	case SljitNativePredicateKind::STRING_EQUAL_CONSTANT:
+		intensity.string_predicate_nodes++;
+		intensity.string_equality_nodes++;
+		break;
+	case SljitNativePredicateKind::STRING_IN_LIST_CONSTANT:
+		intensity.string_predicate_nodes++;
+		intensity.string_in_list_nodes++;
+		break;
+	case SljitNativePredicateKind::STRING_PREFIX_CONSTANT:
+		intensity.string_predicate_nodes++;
+		intensity.string_prefix_nodes++;
+		break;
+	case SljitNativePredicateKind::STRING_SUFFIX_CONSTANT:
+		intensity.string_predicate_nodes++;
+		intensity.string_suffix_nodes++;
+		break;
+	case SljitNativePredicateKind::STRING_CONTAINS_CONSTANT:
+		intensity.string_predicate_nodes++;
+		intensity.string_contains_nodes++;
+		break;
+	case SljitNativePredicateKind::STRING_LIKE_CONSTANT:
+		intensity.string_predicate_nodes++;
+		intensity.string_like_nodes++;
+		break;
+	case SljitNativePredicateKind::STRING_SUBSTRING_IN_LIST_CONSTANT:
+		intensity.string_predicate_nodes++;
+		intensity.string_substring_in_list_nodes++;
+		break;
+	case SljitNativePredicateKind::CONJUNCTION:
+		intensity.conjunction_nodes++;
+		break;
+	case SljitNativePredicateKind::NOT:
+		intensity.not_nodes++;
+		break;
+	default:
+		break;
+	}
+	if (predicate.child) {
+		SljitTrackNativeStringPredicateIntensity(*predicate.child, intensity);
+	}
+	for (auto &child : predicate.children) {
+		if (child) {
+			SljitTrackNativeStringPredicateIntensity(*child, intensity);
+		}
+	}
+}
+
+static void SljitTrackNativeStringPredicateIntensity(const SljitNativeRegionExpressionPlan &expr,
+                                                     SljitNativeStringPredicateIntensity &intensity) {
+	if (expr.kind != SljitNativeRegionExpressionKind::PREDICATE || !expr.predicate) {
+		return;
+	}
+	SljitTrackNativeStringPredicateIntensity(*expr.predicate, intensity);
+}
+
+static void SljitTrackNativeRegionOpSummary(const SljitNativeRegionOpPlan &op, SljitNativeRegionSummary &summary) {
+	switch (op.kind) {
+	case SljitNativeRegionOpKind::FILTER:
+		SljitTrackNativeExpressionIntensity(op.filter, summary.expression_intensity);
+		SljitTrackNativeStringPredicateIntensity(op.filter, summary.string_predicate_intensity);
+		break;
+	case SljitNativeRegionOpKind::PROJECTION:
+		if (!op.use_vectorized_projection) {
+			SljitTrackNativeExpressionIntensity(op.projections, summary.expression_intensity);
+		}
+		break;
+	case SljitNativeRegionOpKind::HASH_JOIN_PROBE:
+		if (op.hash_join_probe.residual_predicate) {
+			SljitTrackNativeExpressionIntensity(op.hash_join_probe.residual_filter, summary.expression_intensity);
+			SljitTrackNativeStringPredicateIntensity(op.hash_join_probe.residual_filter,
+			                                         summary.string_predicate_intensity);
+		}
+		break;
+	case SljitNativeRegionOpKind::HASH_JOIN_BUILD:
+		break;
+	case SljitNativeRegionOpKind::NESTED_LOOP_JOIN_PROBE:
+		for (auto &condition : op.nested_loop_join_probe.conditions) {
+			SljitTrackNativeExpressionIntensity(condition.lhs_condition, summary.expression_intensity);
+		}
+		break;
+	case SljitNativeRegionOpKind::NESTED_LOOP_JOIN_BUILD:
+		SljitTrackNativeExpressionIntensity(op.nested_loop_join_build.rhs_conditions, summary.expression_intensity);
+		break;
+	case SljitNativeRegionOpKind::ORDER_SINK:
+		SljitTrackNativeExpressionIntensity(op.order_sink.order_keys, summary.expression_intensity);
+		break;
+	case SljitNativeRegionOpKind::AGGREGATE_UPDATE:
+		if (op.aggregate_update.use_primitive_payloads) {
+			SljitTrackNativeExpressionIntensity(op.aggregate_update.payloads, summary.expression_intensity);
+		}
+		break;
+	default:
+		break;
+	}
+}
+
 static bool SljitNativeRegionOpGeneratesCode(const SljitNativeRegionOpPlan &op) {
 	switch (op.kind) {
 	case SljitNativeRegionOpKind::FILTER:
@@ -345,30 +866,19 @@ static bool SljitNativeRegionOpGeneratesCode(const SljitNativeRegionOpPlan &op) 
 		if (op.use_vectorized_projection) {
 			return false;
 		}
-		for (auto &projection : op.projections) {
-			if (SljitNativeRegionExpressionGeneratesCode(projection)) {
-				return true;
-			}
-		}
-		return false;
+		return SljitNativeRegionExpressionsGenerateCode(op.projections);
 	case SljitNativeRegionOpKind::HASH_JOIN_PROBE:
-		return true;
+		return !op.hash_join_probe.keys.empty() && op.hash_join_probe.equality_key_count > 0 &&
+		       op.hash_join_probe.equality_key_count <= op.hash_join_probe.keys.size() &&
+		       op.hash_join_probe.output_mode != ExecutionHashJoinProbeOutputMode::NONE;
+	case SljitNativeRegionOpKind::HASH_JOIN_BUILD:
+		return false;
 	case SljitNativeRegionOpKind::NESTED_LOOP_JOIN_PROBE:
-		return true;
+		return false;
 	case SljitNativeRegionOpKind::NESTED_LOOP_JOIN_BUILD:
-		for (auto &condition : op.nested_loop_join_build.rhs_conditions) {
-			if (SljitNativeRegionExpressionGeneratesCode(condition)) {
-				return true;
-			}
-		}
-		return false;
+		return SljitNativeRegionExpressionsGenerateCode(op.nested_loop_join_build.rhs_conditions);
 	case SljitNativeRegionOpKind::ORDER_SINK:
-		for (auto &order_key : op.order_sink.order_keys) {
-			if (SljitNativeRegionExpressionGeneratesCode(order_key)) {
-				return true;
-			}
-		}
-		return false;
+		return SljitNativeRegionExpressionsGenerateCode(op.order_sink.order_keys);
 	case SljitNativeRegionOpKind::DELIM_JOIN_SINK:
 		return false;
 	case SljitNativeRegionOpKind::AGGREGATE_UPDATE:
@@ -379,8 +889,78 @@ static bool SljitNativeRegionOpGeneratesCode(const SljitNativeRegionOpPlan &op) 
 }
 
 static bool SljitNativeRegionGeneratesCode(const SljitNativeRegionPlan &region) {
+	if (region.summary.finalized) {
+		return region.summary.generates_code;
+	}
 	for (auto &op : region.ops) {
 		if (SljitNativeRegionOpGeneratesCode(op)) {
+			return true;
+		}
+	}
+	return false;
+}
+
+static bool SljitNativeRegionOpGeneratesMachineCode(const SljitNativeRegionOpPlan &op) {
+	if (op.kind == SljitNativeRegionOpKind::NESTED_LOOP_JOIN_PROBE) {
+		return op.nested_loop_join_probe.join_type == ExecutionRegionJoinType::INNER &&
+		       op.nested_loop_join_probe.conditions.size() == 1;
+	}
+	return SljitNativeRegionOpGeneratesCode(op);
+}
+
+static bool SljitNativeRegionGeneratesMachineCode(const SljitNativeRegionPlan &region) {
+	if (region.summary.finalized) {
+		return region.summary.generates_machine_code;
+	}
+	for (auto &op : region.ops) {
+		if (SljitNativeRegionOpGeneratesMachineCode(op)) {
+			return true;
+		}
+	}
+	return false;
+}
+
+static idx_t SljitNativeRegionGeneratedStageCount(const SljitNativeRegionPlan &region) {
+	idx_t result = 0;
+	for (auto &op : region.ops) {
+		if (SljitNativeRegionOpGeneratesMachineCode(op)) {
+			result++;
+		}
+	}
+	return result;
+}
+
+static bool SljitNativeRegionOpHasNativeProtocolBody(const SljitNativeRegionOpPlan &op) {
+	switch (op.kind) {
+	case SljitNativeRegionOpKind::HASH_JOIN_BUILD:
+		return op.hash_join_build.sink_info.kind == ExecutionRegionSinkKind::HASH_JOIN_BUILD &&
+		       op.hash_join_build.sink_info.hash_join_contract.native_build_contract.status ==
+		           ExecutionRegionStateContractStatus::READY;
+	case SljitNativeRegionOpKind::NESTED_LOOP_JOIN_BUILD:
+		return op.nested_loop_join_build.sink_info.kind == ExecutionRegionSinkKind::NESTED_LOOP_JOIN_BUILD &&
+		       op.nested_loop_join_build.sink_info.nested_loop_join_contract.native_build_contract.status ==
+		           ExecutionRegionStateContractStatus::READY;
+	case SljitNativeRegionOpKind::APPEND_SINK:
+		return (op.append_sink.sink_info.kind == ExecutionRegionSinkKind::RESULT_COLLECTOR_SINK ||
+		        op.append_sink.sink_info.kind == ExecutionRegionSinkKind::MATERIALIZATION) &&
+		       op.append_sink.sink_info.native_sink_contract.status == ExecutionRegionStateContractStatus::READY;
+	case SljitNativeRegionOpKind::ORDER_SINK:
+		return op.order_sink.sink_info.kind == ExecutionRegionSinkKind::SORT &&
+		       op.order_sink.sink_info.native_sink_contract.status == ExecutionRegionStateContractStatus::READY;
+	case SljitNativeRegionOpKind::DELIM_JOIN_SINK:
+		return op.delim_join_sink.sink_info.kind == ExecutionRegionSinkKind::DELIM_JOIN_SINK &&
+		       op.delim_join_sink.sink_info.native_sink_contract.status == ExecutionRegionStateContractStatus::READY;
+	default:
+		return SljitNativeRegionOpGeneratesMachineCode(op);
+	}
+}
+
+static bool SljitNativeRegionHasNativeProtocolBody(const SljitNativeRegionPlan &region) {
+	if (region.summary.finalized) {
+		return region.summary.has_native_protocol_body;
+	}
+	for (auto &op : region.ops) {
+		if (SljitNativeRegionOpHasNativeProtocolBody(op)) {
 			return true;
 		}
 	}
@@ -391,21 +971,72 @@ static string SljitNativeRegionCodegenFusionBlocker() {
 	return "operator-contract-blocker:native-operator-executable-body-missing";
 }
 
+static const char *SljitNativeRegionOpKindName(SljitNativeRegionOpKind kind) {
+	switch (kind) {
+	case SljitNativeRegionOpKind::FILTER:
+		return "filter";
+	case SljitNativeRegionOpKind::PROJECTION:
+		return "projection";
+	case SljitNativeRegionOpKind::HASH_JOIN_PROBE:
+		return "hash-join-probe";
+	case SljitNativeRegionOpKind::HASH_JOIN_BUILD:
+		return "hash-join-build";
+	case SljitNativeRegionOpKind::NESTED_LOOP_JOIN_PROBE:
+		return "nested-loop-join-probe";
+	case SljitNativeRegionOpKind::NESTED_LOOP_JOIN_BUILD:
+		return "nested-loop-join-build";
+	case SljitNativeRegionOpKind::ORDER_SINK:
+		return "order-sink";
+	case SljitNativeRegionOpKind::APPEND_SINK:
+		return "append-sink";
+	case SljitNativeRegionOpKind::DELIM_JOIN_SINK:
+		return "delim-join-sink";
+	case SljitNativeRegionOpKind::AGGREGATE_UPDATE:
+		return "aggregate-update";
+	default:
+		return "unknown";
+	}
+}
+
+static string BuildSljitNativeRegionShape(const SljitNativeRegionPlan &region) {
+	string result;
+	for (idx_t op_idx = 0; op_idx < region.ops.size(); op_idx++) {
+		if (op_idx > 0) {
+			result += "-";
+		}
+		result += SljitNativeRegionOpKindName(region.ops[op_idx].kind);
+	}
+	return result.empty() ? "empty" : result;
+}
+
+static bool SljitNativeAggregateUpdateSinkHasNativeContract(const SljitNativeRegionOpPlan &op) {
+	if (op.kind != SljitNativeRegionOpKind::AGGREGATE_UPDATE) {
+		return false;
+	}
+	auto &sink = op.aggregate_update.sink_info;
+	return (sink.kind == ExecutionRegionSinkKind::HASH_AGGREGATE_UPDATE ||
+	        sink.kind == ExecutionRegionSinkKind::PERFECT_HASH_AGGREGATE_UPDATE ||
+	        sink.kind == ExecutionRegionSinkKind::UNGROUPED_AGGREGATE_UPDATE) &&
+	       sink.aggregate_contract.native_state_update_contract.status == ExecutionRegionStateContractStatus::READY;
+}
+
 static bool SljitNativeRegionOpIsTransform(const SljitNativeRegionOpPlan &op) {
 	return op.kind == SljitNativeRegionOpKind::FILTER || op.kind == SljitNativeRegionOpKind::PROJECTION ||
 	       op.kind == SljitNativeRegionOpKind::HASH_JOIN_PROBE ||
 	       op.kind == SljitNativeRegionOpKind::NESTED_LOOP_JOIN_PROBE;
 }
 
-static bool SljitNativeRegionOpIsNativeHashJoinBuildSink(const SljitNativeRegionOpPlan &op) {
-	return op.kind == SljitNativeRegionOpKind::HASH_JOIN_BUILD &&
-	       op.hash_join_build.sink_info.kind == ExecutionRegionSinkKind::HASH_JOIN_BUILD;
-}
-
 static bool SljitNativeRegionOpIsNativeNestedLoopJoinBuildSink(const SljitNativeRegionOpPlan &op) {
 	return op.kind == SljitNativeRegionOpKind::NESTED_LOOP_JOIN_BUILD &&
 	       op.nested_loop_join_build.sink_info.kind == ExecutionRegionSinkKind::NESTED_LOOP_JOIN_BUILD &&
 	       op.nested_loop_join_build.sink_info.nested_loop_join_contract.native_build_contract.status ==
+	           ExecutionRegionStateContractStatus::READY;
+}
+
+static bool SljitNativeRegionOpIsNativeHashJoinBuildSink(const SljitNativeRegionOpPlan &op) {
+	return op.kind == SljitNativeRegionOpKind::HASH_JOIN_BUILD &&
+	       op.hash_join_build.sink_info.kind == ExecutionRegionSinkKind::HASH_JOIN_BUILD &&
+	       op.hash_join_build.sink_info.hash_join_contract.native_build_contract.status ==
 	           ExecutionRegionStateContractStatus::READY;
 }
 
@@ -424,19 +1055,12 @@ static bool SljitNativeRegionOpIsNativeOrderSink(const SljitNativeRegionOpPlan &
 
 static bool SljitNativeRegionOpIsNativeDelimJoinSink(const SljitNativeRegionOpPlan &op) {
 	return op.kind == SljitNativeRegionOpKind::DELIM_JOIN_SINK &&
-	       op.append_sink.sink_info.kind == ExecutionRegionSinkKind::DELIM_JOIN_SINK &&
-	       op.append_sink.sink_info.native_sink_contract.status == ExecutionRegionStateContractStatus::READY;
+	       op.delim_join_sink.sink_info.kind == ExecutionRegionSinkKind::DELIM_JOIN_SINK &&
+	       op.delim_join_sink.sink_info.native_sink_contract.status == ExecutionRegionStateContractStatus::READY;
 }
 
 static bool SljitNativeRegionOpIsNativeAggregateUpdateSink(const SljitNativeRegionOpPlan &op) {
-	if (op.kind != SljitNativeRegionOpKind::AGGREGATE_UPDATE) {
-		return false;
-	}
-	auto &sink = op.aggregate_update.sink_info;
-	return (sink.kind == ExecutionRegionSinkKind::HASH_AGGREGATE_UPDATE ||
-	        sink.kind == ExecutionRegionSinkKind::PERFECT_HASH_AGGREGATE_UPDATE ||
-	        sink.kind == ExecutionRegionSinkKind::UNGROUPED_AGGREGATE_UPDATE) &&
-	       sink.aggregate_contract.native_state_update_contract.status == ExecutionRegionStateContractStatus::READY;
+	return SljitNativeAggregateUpdateSinkHasNativeContract(op);
 }
 
 static bool SljitNativeRegionOpIsNativeSink(const SljitNativeRegionOpPlan &op) {
@@ -445,8 +1069,43 @@ static bool SljitNativeRegionOpIsNativeSink(const SljitNativeRegionOpPlan &op) {
 	       SljitNativeRegionOpIsNativeDelimJoinSink(op) || SljitNativeRegionOpIsNativeAggregateUpdateSink(op);
 }
 
+static string SljitNativeRegionOpBoundaryBlocker(const SljitNativeRegionOpPlan &op) {
+	if (op.kind == SljitNativeRegionOpKind::FILTER || op.kind == SljitNativeRegionOpKind::PROJECTION) {
+		return string();
+	}
+	if (op.kind == SljitNativeRegionOpKind::HASH_JOIN_PROBE) {
+		return string();
+	}
+	if (op.kind == SljitNativeRegionOpKind::AGGREGATE_UPDATE && op.aggregate_update.use_primitive_payloads) {
+		return string();
+	}
+	if (SljitNativeRegionOpIsNativeSink(op)) {
+		return string();
+	}
+	return "operator-contract-blocker:whole-vectorized-operator-boundary;stage=" +
+	       string(SljitNativeRegionOpKindName(op.kind));
+}
+
+static bool SljitNativeRegionHasWholeOperatorBoundaryStage(const SljitNativeRegionPlan &region, string &blocker) {
+	if (region.summary.finalized) {
+		blocker = region.summary.whole_operator_boundary_blocker;
+		return region.summary.has_whole_operator_boundary_stage;
+	}
+	for (auto &op : region.ops) {
+		auto op_blocker = SljitNativeRegionOpBoundaryBlocker(op);
+		if (!op_blocker.empty()) {
+			blocker = std::move(op_blocker);
+			return true;
+		}
+	}
+	return false;
+}
+
 static bool SljitNativeRegionHasOperatorContractLoop(const SljitNativeRegionPlan &region,
                                                      const ExecutionRegionContract &contract) {
+	if (region.summary.finalized) {
+		return region.summary.has_operator_contract_loop;
+	}
 	if (region.ops.empty()) {
 		return false;
 	}
@@ -472,15 +1131,90 @@ static bool SljitNativeRegionHasOperatorContractLoop(const SljitNativeRegionPlan
 	return true;
 }
 
+static SljitNativeRegionSummary BuildSljitNativeRegionSummary(const SljitNativeRegionPlan &region,
+                                                              const ExecutionRegionContract &contract) {
+	SljitNativeRegionSummary summary;
+	summary.finalized = true;
+	summary.native_shape = BuildSljitNativeRegionShape(region);
+	const bool owns_sink = ExecutionRegionABIOwnsSink(contract.abi);
+	bool operator_contract_loop_possible = !region.ops.empty();
+	bool has_native_sink = false;
+	for (idx_t op_idx = 0; op_idx < region.ops.size(); op_idx++) {
+		auto &op = region.ops[op_idx];
+		summary.generates_code = summary.generates_code || SljitNativeRegionOpGeneratesCode(op);
+		summary.generates_machine_code = summary.generates_machine_code || SljitNativeRegionOpGeneratesMachineCode(op);
+		summary.has_native_protocol_body =
+		    summary.has_native_protocol_body || SljitNativeRegionOpHasNativeProtocolBody(op);
+		SljitTrackNativeRegionOpSummary(op, summary);
+		if (!summary.has_whole_operator_boundary_stage) {
+			auto op_blocker = SljitNativeRegionOpBoundaryBlocker(op);
+			if (!op_blocker.empty()) {
+				summary.has_whole_operator_boundary_stage = true;
+				summary.whole_operator_boundary_blocker = std::move(op_blocker);
+			}
+		}
+		if (!operator_contract_loop_possible) {
+			continue;
+		}
+		if (SljitNativeRegionOpIsTransform(op)) {
+			continue;
+		}
+		if (SljitNativeRegionOpIsNativeSink(op)) {
+			if (!owns_sink || op_idx + 1 != region.ops.size()) {
+				operator_contract_loop_possible = false;
+				continue;
+			}
+			has_native_sink = true;
+			continue;
+		}
+		operator_contract_loop_possible = false;
+	}
+	if (owns_sink && !has_native_sink) {
+		operator_contract_loop_possible = false;
+	}
+	summary.has_operator_contract_loop = operator_contract_loop_possible;
+	summary.has_native_protocol_body =
+	    !summary.has_whole_operator_boundary_stage && summary.has_native_protocol_body;
+	if (summary.generates_machine_code) {
+		summary.execution_body = ExecutionRegionExecutionBody::GENERATED_MACHINE_CODE;
+	}
+	return summary;
+}
+
+static void FinalizeSljitNativeRegionPlan(SljitNativeRegionPlan &region, const ExecutionRegionContract &contract) {
+	region.summary = BuildSljitNativeRegionSummary(region, contract);
+}
+
+static idx_t SljitNativeGeneratedExpressionCost(const SljitNativeExpressionIntensity &intensity) {
+	idx_t cost = 0;
+	cost += intensity.total_nodes * 2;
+	cost += intensity.total_arithmetic_nodes * 8;
+	cost += intensity.total_predicate_nodes * 8;
+	cost += intensity.total_control_nodes * 16;
+	cost += intensity.total_null_control_nodes * 8;
+	cost += intensity.total_helper_nodes * 32;
+	cost += intensity.straight_line_arithmetic_expression_count * 8;
+	cost += intensity.branchy_arithmetic_expression_count * 64;
+	return cost;
+}
+
 static bool SljitNativeRegionHasExecutableBody(const SljitNativeRegionPlan &region,
                                                const ExecutionRegionContract &contract) {
-	return SljitNativeRegionGeneratesCode(region) || SljitNativeRegionHasOperatorContractLoop(region, contract);
+	if (region.summary.finalized) {
+		return region.summary.generates_machine_code;
+	}
+	string blocker;
+	return !SljitNativeRegionHasWholeOperatorBoundaryStage(region, blocker) &&
+	       SljitNativeRegionGeneratesMachineCode(region);
 }
 
 static bool SljitNativeRegionHasExecutableBodyGap(const SljitNativeRegionPlan &region,
                                                   const ExecutionRegionContract &contract, string &blocker) {
+	if (SljitNativeRegionHasWholeOperatorBoundaryStage(region, blocker)) {
+		return true;
+	}
 	if (!SljitNativeRegionHasExecutableBody(region, contract)) {
-		blocker = "SLJIT native region has no generated machine-code body";
+		blocker = "SLJIT native region emits no generated machine code";
 		return true;
 	}
 	return false;
@@ -525,8 +1259,12 @@ TryMapNativePredicateSourcesThroughProjection(const vector<SljitNativeRegionExpr
 		return true;
 	case SljitNativePredicateKind::REFERENCE:
 	case SljitNativePredicateKind::INTEGER_COMPARE_CONSTANT:
+	case SljitNativePredicateKind::DOUBLE_COMPARE_CONSTANT:
+	case SljitNativePredicateKind::INT128_COMPARE_CONSTANT:
 	case SljitNativePredicateKind::INTEGER_IN_LIST:
 	case SljitNativePredicateKind::INTEGER_BETWEEN:
+	case SljitNativePredicateKind::STRING_EQUAL_CONSTANT:
+	case SljitNativePredicateKind::STRING_IN_LIST_CONSTANT:
 	case SljitNativePredicateKind::STRING_PREFIX_CONSTANT:
 	case SljitNativePredicateKind::STRING_SUFFIX_CONSTANT:
 	case SljitNativePredicateKind::STRING_CONTAINS_CONSTANT:
@@ -535,6 +1273,8 @@ TryMapNativePredicateSourcesThroughProjection(const vector<SljitNativeRegionExpr
 	case SljitNativePredicateKind::NULL_CHECK:
 		return TryMapNativeProjectionSourceIndex(input_projection, predicate.source_index);
 	case SljitNativePredicateKind::INTEGER_COMPARE_REFERENCES:
+	case SljitNativePredicateKind::DOUBLE_COMPARE_REFERENCES:
+	case SljitNativePredicateKind::INT128_COMPARE_REFERENCES:
 		return TryMapNativeProjectionSourceIndex(input_projection, predicate.source_index) &&
 		       TryMapNativeProjectionSourceIndex(input_projection, predicate.right_source_index);
 	case SljitNativePredicateKind::CONSTANT_OR_NULL:
@@ -605,19 +1345,16 @@ static void ExpandSljitExpressionTreeSources(ExecutionExpressionIR &node, const 
 
 static unique_ptr<ExecutionExpressionIR>
 CopySljitExpressionPlanAsInputTree(const SljitNativeRegionExpressionPlan &expr) {
+	if (expr.expression_tree) {
+		auto result = expr.expression_tree->Copy();
+		ExpandSljitExpressionTreeSources(*result, expr.expression_tree_source_indices);
+		return result;
+	}
 	switch (expr.kind) {
 	case SljitNativeRegionExpressionKind::REFERENCE:
 		return MakeSljitTreeReference(expr.source_index, expr.return_type);
 	case SljitNativeRegionExpressionKind::CONSTANT:
 		return MakeSljitTreeConstant(expr.constant_value, expr.return_type);
-	case SljitNativeRegionExpressionKind::EXPRESSION_TREE: {
-		if (!expr.expression_tree) {
-			return nullptr;
-		}
-		auto result = expr.expression_tree->Copy();
-		ExpandSljitExpressionTreeSources(*result, expr.expression_tree_source_indices);
-		return result;
-	}
 	default:
 		return nullptr;
 	}
@@ -661,7 +1398,7 @@ TryComposeNativeExpressionTreeThroughProjection(const vector<SljitNativeRegionEx
 	if (!tree || !RewriteSljitExpressionTreeReferencesThroughProjection(tree, input_projection)) {
 		return false;
 	}
-	if (!TryBuildSljitNativeExpressionTreePlan(*tree, result)) {
+	if (!TryBuildSljitNativeAnyExpressionTreePlan(*tree, result)) {
 		return false;
 	}
 	result.ir = "compose-expression-tree(" + expr.ir + ")";
@@ -718,8 +1455,13 @@ static bool TryMapNativeProjectionExpressionSources(const vector<SljitNativeRegi
 		}
 		return true;
 	case SljitNativeRegionExpressionKind::PREDICATE:
-		return expr.predicate && TryMapNativePredicateSourcesThroughProjection(input_projection, *expr.predicate);
+		if (!expr.predicate || !TryMapNativePredicateSourcesThroughProjection(input_projection, *expr.predicate)) {
+			return false;
+		}
+		FinalizeSljitNativePredicateSourceIndices(*expr.predicate);
+		return true;
 	case SljitNativeRegionExpressionKind::EXPRESSION_TREE:
+	case SljitNativeRegionExpressionKind::TYPED_EXPRESSION_TREE:
 		for (auto &source_index : expr.expression_tree_source_indices) {
 			if (!TryMapNativeProjectionSourceIndex(input_projection, source_index)) {
 				return false;
@@ -734,8 +1476,7 @@ static bool TryMapNativeProjectionExpressionSources(const vector<SljitNativeRegi
 static bool TryComposeNativeProjectionExpression(const vector<SljitNativeRegionExpressionPlan> &input_projection,
                                                  const SljitNativeRegionExpressionPlan &expr,
                                                  SljitNativeRegionExpressionPlan &result, bool &composed_arithmetic) {
-	if (expr.kind == SljitNativeRegionExpressionKind::EXPRESSION_TREE &&
-	    TryComposeNativeExpressionTreeThroughProjection(input_projection, expr, result)) {
+	if (expr.expression_tree && TryComposeNativeExpressionTreeThroughProjection(input_projection, expr, result)) {
 		composed_arithmetic = true;
 		return true;
 	}
@@ -858,18 +1599,43 @@ static bool TryGetSljitPrimitiveAggregatePayloadKind(const LogicalType &payload_
 }
 
 static bool SljitPrimitiveAggregatePayloadSupported(SljitNativeRegionExpressionPlan &payload,
-                                                    const ExecutionRegionAggregateInput &aggregate) {
+                                                    const ExecutionRegionAggregateInput &aggregate,
+                                                    bool grouped_state = false) {
+	if (aggregate.primitive_update_kind == AggregatePrimitiveUpdateKind::COUNT_STAR) {
+		return aggregate.child_count == 0 && aggregate.child_types.empty() && aggregate.primitive_update_ready;
+	}
 	if (aggregate.child_types.size() != 1 ||
 	    payload.return_type.InternalType() != aggregate.child_types[0].InternalType()) {
 		return false;
 	}
 	if (!aggregate.primitive_update_ready ||
-	    aggregate.primitive_update_kind != AggregatePrimitiveUpdateKind::SUM_INT64 ||
 	    aggregate.primitive_update_input_type != aggregate.child_types[0].InternalType()) {
 		return false;
 	}
 	SljitNativeIntegerKind aggregate_payload_kind;
 	if (!TryGetSljitPrimitiveAggregatePayloadKind(aggregate.child_types[0], aggregate_payload_kind)) {
+		return false;
+	}
+	if (aggregate.primitive_update_kind == AggregatePrimitiveUpdateKind::SUM_HUGEINT) {
+		if (grouped_state && payload.kind == SljitNativeRegionExpressionKind::REFERENCE) {
+			payload.integer_kind = aggregate_payload_kind;
+			return true;
+		}
+		if (!payload.expression_tree) {
+			return false;
+		}
+		if (aggregate_payload_kind == SljitNativeIntegerKind::INT64 &&
+		    payload.kind == SljitNativeRegionExpressionKind::TYPED_EXPRESSION_TREE) {
+			return true;
+		}
+		if (aggregate_payload_kind == SljitNativeIntegerKind::DECIMAL64) {
+			payload.kind = SljitNativeRegionExpressionKind::EXPRESSION_TREE;
+			payload.integer_kind = aggregate_payload_kind;
+			return true;
+		}
+		return false;
+	}
+	if (aggregate.primitive_update_kind != AggregatePrimitiveUpdateKind::SUM_INT64) {
 		return false;
 	}
 	switch (payload.kind) {
@@ -879,12 +1645,18 @@ static bool SljitPrimitiveAggregatePayloadSupported(SljitNativeRegionExpressionP
 	case SljitNativeRegionExpressionKind::INTEGER_BINARY_CONSTANT:
 	case SljitNativeRegionExpressionKind::INTEGER_BINARY_REFERENCES:
 		return payload.integer_kind == aggregate_payload_kind;
+	case SljitNativeRegionExpressionKind::TYPED_EXPRESSION_TREE:
+		return aggregate_payload_kind == SljitNativeIntegerKind::INT64 && payload.expression_tree != nullptr;
 	case SljitNativeRegionExpressionKind::EXPRESSION_TREE:
 		return aggregate_payload_kind == SljitNativeIntegerKind::DECIMAL64 && payload.expression_tree != nullptr;
 	default:
 		return false;
 	}
 }
+
+static bool TryBuildSljitPrimitiveReferencePayload(const vector<LogicalType> &input_types,
+                                                   const ExecutionRegionAggregateInput &aggregate,
+                                                   SljitNativeRegionExpressionPlan &payload, bool grouped_state);
 
 static bool TryFuseNativeProjectionIntoPrimitiveAggregateUpdate(const vector<LogicalType> &input_types,
                                                                 SljitNativeRegionOpPlan &projection,
@@ -900,6 +1672,14 @@ static bool TryFuseNativeProjectionIntoPrimitiveAggregateUpdate(const vector<Log
 	vector<SljitNativeRegionExpressionPlan> payloads;
 	payloads.reserve(sink.aggregates.size());
 	for (auto &aggregate : sink.aggregates) {
+		if (aggregate.primitive_update_kind == AggregatePrimitiveUpdateKind::COUNT_STAR) {
+			SljitNativeRegionExpressionPlan payload;
+			if (!TryBuildSljitPrimitiveReferencePayload(input_types, aggregate, payload, false)) {
+				return false;
+			}
+			payloads.push_back(std::move(payload));
+			continue;
+		}
 		if (aggregate.child_count != 1 || aggregate.payload_index >= projection.projections.size()) {
 			return false;
 		}
@@ -916,99 +1696,174 @@ static bool TryFuseNativeProjectionIntoPrimitiveAggregateUpdate(const vector<Log
 	if (!aggregate_update.aggregate_update.ir.empty()) {
 		aggregate_update.aggregate_update.ir += ";";
 	}
-	aggregate_update.aggregate_update.ir += "primitive_payload_update=true";
+	aggregate_update.aggregate_update.ir += "payload_update=generated-primitive";
 	aggregate_update.output_types = projection.output_types;
+	return true;
+}
+
+static bool TryComposePrimitiveAggregatePayloadsThroughProjection(const vector<LogicalType> &input_types,
+                                                                  const SljitNativeRegionOpPlan &projection,
+                                                                  SljitNativeRegionOpPlan &aggregate_update) {
+	if (projection.kind != SljitNativeRegionOpKind::PROJECTION ||
+	    aggregate_update.kind != SljitNativeRegionOpKind::AGGREGATE_UPDATE ||
+	    !aggregate_update.aggregate_update.use_primitive_payloads) {
+		return false;
+	}
+	auto &sink = aggregate_update.aggregate_update.sink_info;
+	if (sink.kind != ExecutionRegionSinkKind::UNGROUPED_AGGREGATE_UPDATE || sink.aggregates.empty() ||
+	    sink.aggregates.size() != aggregate_update.aggregate_update.payloads.size()) {
+		return false;
+	}
+
+	vector<SljitNativeRegionExpressionPlan> payloads;
+	payloads.reserve(aggregate_update.aggregate_update.payloads.size());
+	for (idx_t payload_idx = 0; payload_idx < aggregate_update.aggregate_update.payloads.size(); payload_idx++) {
+		auto &aggregate = sink.aggregates[payload_idx];
+		auto &payload = aggregate_update.aggregate_update.payloads[payload_idx];
+		if (aggregate.primitive_update_kind == AggregatePrimitiveUpdateKind::COUNT_STAR) {
+			payloads.push_back(CopySljitNativeRegionExpression(payload));
+			continue;
+		}
+		SljitNativeRegionExpressionPlan composed;
+		bool composed_arithmetic = false;
+		if (!TryComposeNativeProjectionExpression(projection.projections, payload, composed, composed_arithmetic) &&
+		    !TryComposeNativeProjectionThroughReferenceProjection(projection.projections, payload, composed,
+		                                                          composed_arithmetic)) {
+			return false;
+		}
+		if (!SljitPrimitiveAggregatePayloadSupported(composed, aggregate)) {
+			return false;
+		}
+		payloads.push_back(std::move(composed));
+	}
+
+	aggregate_update.aggregate_update.input_types = input_types;
+	aggregate_update.aggregate_update.payloads = std::move(payloads);
+	if (!aggregate_update.aggregate_update.ir.empty()) {
+		aggregate_update.aggregate_update.ir += ";";
+	}
+	aggregate_update.aggregate_update.ir += "primitive_payload_projection_composed=true";
 	return true;
 }
 
 static bool TryBuildSljitPrimitiveReferencePayload(const vector<LogicalType> &input_types,
                                                    const ExecutionRegionAggregateInput &aggregate,
-                                                   SljitNativeRegionExpressionPlan &payload) {
+                                                   SljitNativeRegionExpressionPlan &payload, bool grouped_state) {
+	if (aggregate.primitive_update_kind == AggregatePrimitiveUpdateKind::COUNT_STAR) {
+		if (aggregate.child_count != 0) {
+			return false;
+		}
+		payload.kind = SljitNativeRegionExpressionKind::CONSTANT;
+		payload.return_type = LogicalType::BIGINT;
+		payload.ir = "primitive-count-star";
+		return SljitPrimitiveAggregatePayloadSupported(payload, aggregate, grouped_state);
+	}
 	if (aggregate.child_count != 1 || aggregate.payload_index >= input_types.size()) {
 		return false;
 	}
 	payload.kind = SljitNativeRegionExpressionKind::REFERENCE;
 	payload.source_index = aggregate.payload_index;
 	payload.return_type = input_types[aggregate.payload_index];
-	payload.ir = "grouped-primitive-reference";
-	return SljitPrimitiveAggregatePayloadSupported(payload, aggregate);
+	payload.ir = "primitive-reference";
+	return SljitPrimitiveAggregatePayloadSupported(payload, aggregate, grouped_state);
 }
 
-static bool TryGetSljitGroupedAggregateStateRelativeOffset(const ExecutionRegionAggregateContract &contract,
-                                                           idx_t aggregate_index, idx_t &offset) {
-	if (!contract.grouped_state_layout_ready || aggregate_index >= contract.grouped_state_payload_sizes.size()) {
+static bool SljitPerfectHashGroupLookupSupported(const ExecutionRegionSinkInfo &sink,
+                                                 const vector<SljitNativeRegionExpressionPlan> &payloads) {
+	auto &contract = sink.aggregate_contract;
+	if (sink.kind != ExecutionRegionSinkKind::PERFECT_HASH_AGGREGATE_UPDATE ||
+	    contract.kind != ExecutionRegionAggregateOperatorKind::PERFECT_HASH || !contract.grouped_state_layout_ready ||
+	    payloads.empty() || contract.perfect_required_bits.size() != sink.groups.size() ||
+	    contract.perfect_group_minima.size() != sink.groups.size()) {
 		return false;
 	}
-	offset = 0;
-	for (idx_t state_idx = 0; state_idx < aggregate_index; state_idx++) {
-		offset += contract.grouped_state_payload_sizes[state_idx];
+	for (auto &group : sink.groups) {
+		if (!group.supported_reference) {
+			return false;
+		}
+		switch (group.type.InternalType()) {
+		case PhysicalType::INT8:
+		case PhysicalType::UINT8:
+		case PhysicalType::INT32:
+		case PhysicalType::INT64:
+			break;
+		default:
+			return false;
+		}
+	}
+	for (idx_t payload_idx = 0; payload_idx < payloads.size(); payload_idx++) {
+		auto &aggregate = sink.aggregates[payload_idx];
+		auto &payload = payloads[payload_idx];
+		if (aggregate.primitive_update_kind == AggregatePrimitiveUpdateKind::COUNT_STAR) {
+			if (aggregate.child_count != 0) {
+				return false;
+			}
+			continue;
+		}
+		if (!AggregatePrimitiveUpdateRequiresPayload(aggregate.primitive_update_kind) ||
+		    payload.kind != SljitNativeRegionExpressionKind::REFERENCE) {
+			return false;
+		}
 	}
 	return true;
 }
 
-static bool TryEnableGroupedPrimitiveAggregateUpdate(const vector<LogicalType> &input_types,
-                                                     SljitNativeRegionOpPlan &aggregate_update) {
-	if (aggregate_update.kind != SljitNativeRegionOpKind::AGGREGATE_UPDATE) {
+static bool TryUsePrimitiveReferenceAggregateUpdate(const vector<LogicalType> &input_types,
+                                                    SljitNativeRegionOpPlan &aggregate_update) {
+	if (aggregate_update.kind != SljitNativeRegionOpKind::AGGREGATE_UPDATE ||
+	    aggregate_update.aggregate_update.use_primitive_payloads) {
 		return false;
 	}
-	auto &plan = aggregate_update.aggregate_update;
-	auto &sink = plan.sink_info;
-	if (sink.kind != ExecutionRegionSinkKind::HASH_AGGREGATE_UPDATE &&
-	    sink.kind != ExecutionRegionSinkKind::PERFECT_HASH_AGGREGATE_UPDATE) {
+	auto &sink = aggregate_update.aggregate_update.sink_info;
+	if (sink.aggregates.empty()) {
 		return false;
 	}
-	if (sink.groups.empty() || sink.aggregates.empty()) {
+	const bool grouped_state =
+	    (sink.kind == ExecutionRegionSinkKind::HASH_AGGREGATE_UPDATE ||
+	     sink.kind == ExecutionRegionSinkKind::PERFECT_HASH_AGGREGATE_UPDATE) &&
+	    sink.aggregate_contract.native_grouped_state_contract.status == ExecutionRegionStateContractStatus::READY;
+	if (sink.kind != ExecutionRegionSinkKind::UNGROUPED_AGGREGATE_UPDATE && !grouped_state) {
 		return false;
-	}
-
-	vector<idx_t> group_input_indices;
-	group_input_indices.reserve(sink.groups.size());
-	for (auto &group : sink.groups) {
-		if (!group.supported_reference || group.input_index >= input_types.size()) {
-			return false;
-		}
-		group_input_indices.push_back(group.input_index);
 	}
 
 	vector<SljitNativeRegionExpressionPlan> payloads;
-	vector<idx_t> state_value_offsets;
-	vector<idx_t> state_is_set_offsets;
 	payloads.reserve(sink.aggregates.size());
-	state_value_offsets.reserve(sink.aggregates.size());
-	state_is_set_offsets.reserve(sink.aggregates.size());
 	for (auto &aggregate : sink.aggregates) {
 		SljitNativeRegionExpressionPlan payload;
-		if (!TryBuildSljitPrimitiveReferencePayload(input_types, aggregate, payload)) {
-			return false;
-		}
-		idx_t aggregate_state_offset;
-		if (!TryGetSljitGroupedAggregateStateRelativeOffset(sink.aggregate_contract, aggregate.aggregate_index,
-		                                                    aggregate_state_offset)) {
+		if (!TryBuildSljitPrimitiveReferencePayload(input_types, aggregate, payload, grouped_state)) {
 			return false;
 		}
 		payloads.push_back(std::move(payload));
-		state_value_offsets.push_back(aggregate_state_offset + aggregate.primitive_update_state_value_offset);
-		state_is_set_offsets.push_back(aggregate_state_offset + aggregate.primitive_update_state_is_set_offset);
+	}
+	const bool perfect_hash_group_lookup = grouped_state && SljitPerfectHashGroupLookupSupported(sink, payloads);
+	if (grouped_state && !perfect_hash_group_lookup) {
+		return false;
 	}
 
-	plan.payloads = std::move(payloads);
-	plan.group_input_indices = std::move(group_input_indices);
-	plan.state_value_offsets = std::move(state_value_offsets);
-	plan.state_is_set_offsets = std::move(state_is_set_offsets);
-	plan.use_primitive_payloads = true;
-	plan.use_grouped_state_addresses = true;
-	if (!plan.ir.empty()) {
-		plan.ir += ";";
+	aggregate_update.aggregate_update.input_types = input_types;
+	aggregate_update.aggregate_update.payloads = std::move(payloads);
+	aggregate_update.aggregate_update.use_primitive_payloads = true;
+	aggregate_update.aggregate_update.use_grouped_state_addresses = grouped_state;
+	aggregate_update.aggregate_update.use_perfect_hash_group_lookup = perfect_hash_group_lookup;
+	if (!aggregate_update.aggregate_update.ir.empty()) {
+		aggregate_update.aggregate_update.ir += ";";
 	}
-	plan.ir += "primitive_grouped_state_update=true";
+	aggregate_update.aggregate_update.ir += "payload_update=generated-primitive";
+	if (aggregate_update.aggregate_update.use_perfect_hash_group_lookup) {
+		aggregate_update.aggregate_update.ir += ";grouped_state_lookup=generated-perfect-hash";
+	}
 	return true;
 }
 
 static void FusePrimitiveAggregateUpdates(SljitNativeRegionPlan &region,
                                           const vector<LogicalType> &region_input_types) {
 	if (region.ops.size() < 2) {
-		if (region.ops.size() == 1) {
-			TryEnableGroupedPrimitiveAggregateUpdate(region_input_types, region.ops[0]);
+		auto input_types = region_input_types;
+		for (auto &op : region.ops) {
+			if (TryUsePrimitiveReferenceAggregateUpdate(input_types, op)) {
+				region.fused_primitive_aggregate_updates++;
+			}
+			input_types = op.output_types;
 		}
 		return;
 	}
@@ -1017,20 +1872,30 @@ static void FusePrimitiveAggregateUpdates(SljitNativeRegionPlan &region,
 	while (op_idx + 1 < region.ops.size()) {
 		auto &op = region.ops[op_idx];
 		auto &next = region.ops[op_idx + 1];
+		if (TryComposePrimitiveAggregatePayloadsThroughProjection(input_types, op, next)) {
+			region.ops.erase(region.ops.begin() + NumericCast<int64_t>(op_idx));
+			region.fused_primitive_aggregate_updates++;
+			op_idx = 0;
+			input_types = region_input_types;
+			continue;
+		}
 		if (TryFuseNativeProjectionIntoPrimitiveAggregateUpdate(input_types, op, next)) {
 			region.ops.erase(region.ops.begin() + NumericCast<int64_t>(op_idx));
 			region.fused_primitive_aggregate_updates++;
-			continue;
-		}
-		if (TryEnableGroupedPrimitiveAggregateUpdate(input_types, op)) {
-			input_types = op.output_types;
-			op_idx++;
+			op_idx = 0;
+			input_types = region_input_types;
 			continue;
 		}
 		input_types = op.output_types;
 		op_idx++;
 	}
-	TryEnableGroupedPrimitiveAggregateUpdate(input_types, region.ops.back());
+	input_types = region_input_types;
+	for (auto &op : region.ops) {
+		if (TryUsePrimitiveReferenceAggregateUpdate(input_types, op)) {
+			region.fused_primitive_aggregate_updates++;
+		}
+		input_types = op.output_types;
+	}
 }
 
 static void MarkRuntimeCombinedFilterProjections(SljitNativeRegionPlan &region) {
@@ -1053,22 +1918,9 @@ static string SljitRegionCandidateContext(const ExecutionRegionContract &contrac
 	return "unknown";
 }
 
-static void AppendSljitRegionShapeKeyPart(string &key, const string &label, const string &value) {
-	if (value.empty()) {
-		return;
-	}
-	key += ":";
-	key += label;
-	key += ":";
-	key += value;
-}
-
-static string BuildSljitRegionShapeKey(const SljitNativeRegionPlan &region, const ExecutionRegionContract &contract,
-                                       const ExecutionRegionSignature &signature) {
-	(void)region;
-	(void)contract;
-	auto result = BuildExecutionRegionAdmissionShapeKey("sljit", signature);
-	return BuildExecutionRegionAdmissionContextShapeKey(signature, result);
+static string BuildSljitRegionShapeKey(const ExecutionRegionSignature &signature) {
+	auto result = BuildExecutionRegionShapeKey("sljit", signature);
+	return BuildExecutionRegionContextShapeKey(signature, result);
 }
 
 static bool SljitGuardedReferenceCanCopyRawValue(PhysicalType physical_type) {
@@ -1360,18 +2212,31 @@ static bool TryReadNativeRegionExpression(const ExecutionExpressionIR &root, boo
 	}
 
 	SljitNativeDoubleBinaryOp double_binary_op;
+	SljitNativeDoubleSourceKind double_source_kind;
+	SljitNativeDoubleSourceKind double_right_source_kind;
+	double double_source_scale;
+	double double_right_source_scale;
 	double double_constant;
-	if (TryReadNativeDoubleBinaryReferences(root, double_binary_op, source_index, right_source_index)) {
+	if (TryReadNativeDoubleBinaryReferences(root, double_binary_op, double_source_kind, source_index,
+	                                        double_source_scale, double_right_source_kind, right_source_index,
+	                                        double_right_source_scale)) {
 		expr.kind = SljitNativeRegionExpressionKind::DOUBLE_BINARY_REFERENCES;
 		expr.double_binary_op = double_binary_op;
+		expr.double_source_kind = double_source_kind;
+		expr.double_right_source_kind = double_right_source_kind;
+		expr.double_source_scale = double_source_scale;
+		expr.double_right_source_scale = double_right_source_scale;
 		expr.return_type = root.return_type;
 		expr.source_index = source_index;
 		expr.right_source_index = right_source_index;
 		return true;
 	}
-	if (TryReadNativeDoubleBinaryConstant(root, double_binary_op, source_index, double_constant, constant_on_left)) {
+	if (TryReadNativeDoubleBinaryConstant(root, double_binary_op, double_source_kind, source_index, double_source_scale,
+	                                      double_constant, constant_on_left)) {
 		expr.kind = SljitNativeRegionExpressionKind::DOUBLE_BINARY_CONSTANT;
 		expr.double_binary_op = double_binary_op;
+		expr.double_source_kind = double_source_kind;
+		expr.double_source_scale = double_source_scale;
 		expr.return_type = root.return_type;
 		expr.source_index = source_index;
 		expr.double_constant = double_constant;
@@ -1484,7 +2349,7 @@ static bool TryReadNativeRegionExpression(const ExecutionExpressionIR &root, boo
 		expr.binary_op = binary_op;
 		return true;
 	}
-	if (TryBuildSljitNativeExpressionTreePlan(root, expr)) {
+	if (TryBuildSljitNativeAnyExpressionTreePlan(root, expr)) {
 		return true;
 	}
 	return false;
@@ -1492,8 +2357,26 @@ static bool TryReadNativeRegionExpression(const ExecutionExpressionIR &root, boo
 
 static bool TryLowerNativeRegionExpression(const ExecutionExpressionFragment &fragment, bool require_boolean,
                                            SljitNativeRegionExpressionPlan &expr, string &error) {
-	if (!fragment.root || !TryReadNativeRegionExpression(*fragment.root, require_boolean, expr)) {
+	if (!fragment.root) {
+		error = "sljit-expression-lowering-missing-root";
 		return false;
+	}
+	if (!TryReadNativeRegionExpression(*fragment.root, require_boolean, expr)) {
+		error = "sljit-expression-lowering-unsupported";
+		error += ";root_kind=" + string(ExecutionExpressionIRKindToString(fragment.root->kind));
+		error += ";logical_type=" + fragment.root->return_type.ToString();
+		error += require_boolean ? ";required=boolean" : ";required=value";
+		if (!fragment.ir.empty()) {
+			error += ";ir=" + fragment.ir;
+		}
+		return false;
+	}
+	if (!require_boolean && !expr.expression_tree) {
+		SljitNativeRegionExpressionPlan expression_tree;
+		if (TryBuildSljitNativeAnyExpressionTreePlan(*fragment.root, expression_tree)) {
+			expr.expression_tree = std::move(expression_tree.expression_tree);
+			expr.expression_tree_source_indices = std::move(expression_tree.expression_tree_source_indices);
+		}
 	}
 	expr.ir = fragment.ir;
 	return true;
@@ -1614,8 +2497,9 @@ struct SljitRegionNodePlan {
 	ExecutionRegionLoweringKind kind = ExecutionRegionLoweringKind::BOUNDARY;
 	string reason;
 	vector<SljitNativeRegionOpPlan> native_ops;
-	ExecutionRegionSourceFilterOwnershipKind source_filter_ownership = ExecutionRegionSourceFilterOwnershipKind::NONE;
+	bool uses_scan_filters = false;
 	ExecutionRegionSourceExecutionKind source_execution = ExecutionRegionSourceExecutionKind::NONE;
+	bool requires_source_contract = false;
 };
 
 static bool SljitRegionNodeHasNativeOps(const SljitRegionNodePlan &node_plan) {
@@ -1659,6 +2543,25 @@ static SljitRegionNodePlan SljitRegionBoundaryNode(string reason) {
 	return result;
 }
 
+static SljitRegionNodePlan SljitUnsupportedExpressionBoundaryNode(const string &error) {
+	string reason = SLJIT_NATIVE_CONTRACT_UNSUPPORTED;
+	if (!error.empty()) {
+		reason += ";";
+		reason += error;
+	}
+	return SljitRegionBoundaryNode(std::move(reason));
+}
+
+static bool SljitSourceContractIsBlocked(const ExecutionRegionNode &node) {
+	if (!node.source) {
+		return false;
+	}
+	auto &source_contract = node.source->source_contract;
+	return source_contract.status == ExecutionRegionSourceContractStatus::BLOCKED &&
+	       !source_contract.required_capability.empty() && !source_contract.contract_version.empty() &&
+	       !source_contract.blocker.empty();
+}
+
 static SljitRegionNodePlan PlanSljitFilterNode(const ExecutionRegionNode &node, string &error) {
 	if (!node.blocker_reason.empty()) {
 		return SljitRegionBoundaryNode(node.blocker_reason);
@@ -1671,7 +2574,7 @@ static SljitRegionNodePlan PlanSljitFilterNode(const ExecutionRegionNode &node, 
 	native_op->kind = SljitNativeRegionOpKind::FILTER;
 	native_op->output_types = node.output_types;
 	if (!TryLowerNativeRegionExpression(*node.filter, true, native_op->filter, error)) {
-		return SljitRegionBoundaryNode(SLJIT_NATIVE_CONTRACT_UNSUPPORTED);
+		return SljitUnsupportedExpressionBoundaryNode(error);
 	}
 
 	SljitRegionNodePlan result;
@@ -1700,7 +2603,7 @@ static bool TryPlanDirectSljitProjection(const ExecutionRegionNode &node,
 	return true;
 }
 
-static bool SljitProjectionExpressionPrefersVectorizedContract(const SljitNativeRegionExpressionPlan &expr) {
+static bool SljitProjectionExpressionRequiresVectorizedContract(const SljitNativeRegionExpressionPlan &expr) {
 	switch (expr.kind) {
 	case SljitNativeRegionExpressionKind::STRING_COMPRESS:
 	case SljitNativeRegionExpressionKind::STRING_DECOMPRESS:
@@ -1711,13 +2614,31 @@ static bool SljitProjectionExpressionPrefersVectorizedContract(const SljitNative
 	}
 }
 
+static bool SljitProjectionExpressionIsLowIntensityGeneratedCode(const SljitNativeRegionExpressionPlan &expr) {
+	switch (expr.kind) {
+	case SljitNativeRegionExpressionKind::INTEGER_CAST:
+	case SljitNativeRegionExpressionKind::SIGNED_TO_UNSIGNED_INTEGER_CAST:
+		return true;
+	default:
+		return false;
+	}
+}
+
 static bool SljitProjectionPrefersVectorizedContract(const SljitNativeRegionOpPlan &op) {
+	bool has_low_intensity_generated_code = false;
 	for (auto &projection : op.projections) {
-		if (SljitProjectionExpressionPrefersVectorizedContract(projection)) {
+		if (SljitProjectionExpressionRequiresVectorizedContract(projection)) {
 			return true;
 		}
+		if (!SljitNativeRegionExpressionGeneratesCode(projection)) {
+			continue;
+		}
+		if (!SljitProjectionExpressionIsLowIntensityGeneratedCode(projection)) {
+			return false;
+		}
+		has_low_intensity_generated_code = true;
 	}
-	return false;
+	return has_low_intensity_generated_code;
 }
 
 static bool TryPlanExpandedSljitProjection(const ExecutionRegionNode &node, const vector<LogicalType> &input_types,
@@ -1780,7 +2701,7 @@ static SljitRegionNodePlan PlanSljitProjectionNode(const ExecutionRegionNode &no
 
 	vector<SljitNativeRegionOpPlan> native_ops;
 	if (!TryPlanExpandedSljitProjection(node, input_types, native_ops, error)) {
-		return SljitRegionBoundaryNode(SLJIT_NATIVE_CONTRACT_UNSUPPORTED);
+		return SljitUnsupportedExpressionBoundaryNode(error);
 	}
 	SljitRegionNodePlan result;
 	result.kind = ExecutionRegionLoweringKind::NATIVE;
@@ -1814,200 +2735,6 @@ static string SljitSourceBoundaryReason(const ExecutionRegionNode &node) {
 	return result;
 }
 
-static bool RemapSljitSourcePredicate(SljitNativePredicate &predicate, idx_t source_index) {
-	switch (predicate.kind) {
-	case SljitNativePredicateKind::CONSTANT:
-		return true;
-	case SljitNativePredicateKind::REFERENCE:
-	case SljitNativePredicateKind::INTEGER_COMPARE_CONSTANT:
-	case SljitNativePredicateKind::INTEGER_IN_LIST:
-	case SljitNativePredicateKind::INTEGER_BETWEEN:
-	case SljitNativePredicateKind::STRING_PREFIX_CONSTANT:
-	case SljitNativePredicateKind::STRING_SUFFIX_CONSTANT:
-	case SljitNativePredicateKind::STRING_CONTAINS_CONSTANT:
-	case SljitNativePredicateKind::STRING_LIKE_CONSTANT:
-	case SljitNativePredicateKind::STRING_SUBSTRING_IN_LIST_CONSTANT:
-	case SljitNativePredicateKind::NULL_CHECK:
-		if (predicate.source_index != 0) {
-			return false;
-		}
-		predicate.source_index = source_index;
-		return true;
-	case SljitNativePredicateKind::INTEGER_COMPARE_REFERENCES:
-		if (predicate.source_index != 0 || predicate.right_source_index != 0) {
-			return false;
-		}
-		predicate.source_index = source_index;
-		predicate.right_source_index = source_index;
-		return true;
-	case SljitNativePredicateKind::CONSTANT_OR_NULL:
-		for (auto &guard_source_index : predicate.guard_source_indices) {
-			if (guard_source_index != 0) {
-				return false;
-			}
-			guard_source_index = source_index;
-		}
-		return predicate.child && RemapSljitSourcePredicate(*predicate.child, source_index);
-	case SljitNativePredicateKind::NOT:
-		return predicate.child && RemapSljitSourcePredicate(*predicate.child, source_index);
-	case SljitNativePredicateKind::CONJUNCTION:
-		for (auto &child : predicate.children) {
-			if (!child || !RemapSljitSourcePredicate(*child, source_index)) {
-				return false;
-			}
-		}
-		return true;
-	default:
-		return false;
-	}
-}
-
-static bool RemapSljitSourceFilterExpression(SljitNativeRegionExpressionPlan &expr, idx_t source_index) {
-	switch (expr.kind) {
-	case SljitNativeRegionExpressionKind::CONSTANT:
-		return true;
-	case SljitNativeRegionExpressionKind::REFERENCE:
-	case SljitNativeRegionExpressionKind::INTEGER_BINARY_CONSTANT:
-	case SljitNativeRegionExpressionKind::DOUBLE_BINARY_CONSTANT:
-	case SljitNativeRegionExpressionKind::INTEGER_COMPARE_CONSTANT:
-	case SljitNativeRegionExpressionKind::INTEGER_CAST:
-	case SljitNativeRegionExpressionKind::SIGNED_TO_UNSIGNED_INTEGER_CAST:
-	case SljitNativeRegionExpressionKind::DECIMAL64_TO_DOUBLE:
-	case SljitNativeRegionExpressionKind::DECIMAL128_SCALE_UP:
-	case SljitNativeRegionExpressionKind::INTEGER_COALESCE:
-	case SljitNativeRegionExpressionKind::INTEGER_IN_LIST:
-	case SljitNativeRegionExpressionKind::INTEGER_BETWEEN:
-	case SljitNativeRegionExpressionKind::INTEGRAL_COMPRESS:
-	case SljitNativeRegionExpressionKind::INTEGRAL_DECOMPRESS:
-	case SljitNativeRegionExpressionKind::STRING_COMPRESS:
-	case SljitNativeRegionExpressionKind::STRING_DECOMPRESS:
-	case SljitNativeRegionExpressionKind::DATE_YEAR:
-	case SljitNativeRegionExpressionKind::ERROR_GUARDED_REFERENCE:
-	case SljitNativeRegionExpressionKind::NULL_CHECK:
-		if (expr.kind == SljitNativeRegionExpressionKind::ERROR_GUARDED_REFERENCE) {
-			if (expr.source_index != 0 || expr.guard_source_index != 0) {
-				return false;
-			}
-			expr.source_index = source_index;
-			expr.guard_source_index = source_index;
-			return true;
-		}
-		if (expr.source_index != 0) {
-			return false;
-		}
-		expr.source_index = source_index;
-		return true;
-	case SljitNativeRegionExpressionKind::INTEGER_BINARY_REFERENCES:
-	case SljitNativeRegionExpressionKind::DOUBLE_BINARY_REFERENCES:
-	case SljitNativeRegionExpressionKind::INTEGER_COMPARE_REFERENCES:
-		if (expr.source_index != 0 || expr.right_source_index != 0) {
-			return false;
-		}
-		expr.source_index = source_index;
-		expr.right_source_index = source_index;
-		return true;
-	case SljitNativeRegionExpressionKind::CONSTANT_OR_NULL:
-		for (auto &guard_source_index : expr.constant_or_null.guard_source_indices) {
-			if (guard_source_index != 0) {
-				return false;
-			}
-			guard_source_index = source_index;
-		}
-		return true;
-	case SljitNativeRegionExpressionKind::PREDICATE:
-		return expr.predicate && RemapSljitSourcePredicate(*expr.predicate, source_index);
-	default:
-		return false;
-	}
-}
-
-static unique_ptr<SljitNativePredicate>
-BuildSljitPredicateFromFilterExpression(SljitNativeRegionExpressionPlan &&expr) {
-	if (expr.kind == SljitNativeRegionExpressionKind::PREDICATE) {
-		return std::move(expr.predicate);
-	}
-
-	auto predicate = make_uniq<SljitNativePredicate>();
-	predicate->return_type = expr.return_type;
-	predicate->source_index = expr.source_index;
-	predicate->right_source_index = expr.right_source_index;
-	predicate->constant = expr.constant;
-	predicate->constant_on_left = expr.constant_on_left;
-	predicate->integer_kind = expr.integer_kind;
-	predicate->compare_op = expr.compare_op;
-	predicate->constants = std::move(expr.constants);
-	predicate->list_has_null = expr.list_has_null;
-	predicate->not_in = expr.not_in;
-	predicate->lower = expr.lower;
-	predicate->upper = expr.upper;
-	predicate->lower_inclusive = expr.lower_inclusive;
-	predicate->upper_inclusive = expr.upper_inclusive;
-	predicate->not_between = expr.not_between;
-	predicate->null_check_op = expr.null_check_op;
-	switch (expr.kind) {
-	case SljitNativeRegionExpressionKind::REFERENCE:
-		predicate->kind = SljitNativePredicateKind::REFERENCE;
-		return predicate;
-	case SljitNativeRegionExpressionKind::INTEGER_COMPARE_CONSTANT:
-		predicate->kind = SljitNativePredicateKind::INTEGER_COMPARE_CONSTANT;
-		return predicate;
-	case SljitNativeRegionExpressionKind::INTEGER_COMPARE_REFERENCES:
-		predicate->kind = SljitNativePredicateKind::INTEGER_COMPARE_REFERENCES;
-		return predicate;
-	case SljitNativeRegionExpressionKind::INTEGER_IN_LIST:
-		predicate->kind = SljitNativePredicateKind::INTEGER_IN_LIST;
-		return predicate;
-	case SljitNativeRegionExpressionKind::INTEGER_BETWEEN:
-		predicate->kind = SljitNativePredicateKind::INTEGER_BETWEEN;
-		return predicate;
-	case SljitNativeRegionExpressionKind::NULL_CHECK:
-		predicate->kind = SljitNativePredicateKind::NULL_CHECK;
-		return predicate;
-	default:
-		return nullptr;
-	}
-}
-
-static bool TryPlanSljitGeneratedSourceFilters(const ExecutionRegionSourceInfo &source,
-                                               SljitNativeRegionExpressionPlan &filter, string &error) {
-	auto conjunction = make_uniq<SljitNativePredicate>();
-	conjunction->kind = SljitNativePredicateKind::CONJUNCTION;
-	conjunction->return_type = LogicalType::BOOLEAN;
-	conjunction->conjunction_op = ExecutionExpressionConjunctionOp::AND;
-	conjunction->children.reserve(source.filters.size());
-	string ir;
-	for (auto &source_filter : source.filters) {
-		if (!source_filter.expression || !source_filter.expression->root) {
-			error = source_filter.reason.empty() ? "source filter has no lowered JIT IR" : source_filter.reason;
-			return false;
-		}
-		SljitNativeRegionExpressionPlan filter_expr;
-		if (!TryLowerNativeRegionExpression(*source_filter.expression, true, filter_expr, error)) {
-			return false;
-		}
-		if (!RemapSljitSourceFilterExpression(filter_expr, source_filter.scan_column_index)) {
-			error = "source filter references must be local to one scan column before source-region remapping";
-			return false;
-		}
-		auto predicate = BuildSljitPredicateFromFilterExpression(std::move(filter_expr));
-		if (!predicate) {
-			error = "source filter is not representable as a generated typed predicate";
-			return false;
-		}
-		if (!ir.empty()) {
-			ir += ";";
-		}
-		ir += "source-filter#" + std::to_string(source_filter.filter_index) + ":scan-column#" +
-		      std::to_string(source_filter.scan_column_index) + "(" + source_filter.expression->ir + ")";
-		conjunction->children.push_back(std::move(predicate));
-	}
-	filter.kind = SljitNativeRegionExpressionKind::PREDICATE;
-	filter.return_type = LogicalType::BOOLEAN;
-	filter.predicate = std::move(conjunction);
-	filter.ir = std::move(ir);
-	return true;
-}
-
 static SljitNativeRegionOpPlan BuildSljitSourceOutputProjection(const ExecutionRegionNode &node,
                                                                 const ExecutionRegionTableScanContract &contract) {
 	SljitNativeRegionOpPlan projection;
@@ -2036,9 +2763,8 @@ static SljitNativeRegionOpPlan BuildSljitSourceOutputProjection(const ExecutionR
 	return projection;
 }
 
-static SljitRegionNodePlan
-PlanSljitSourceContractNode(const ExecutionRegionNode &node, const ExecutionRegionContract &contract,
-                            ExecutionRegionSourceFilterOwnershipKind requested_source_filter_ownership) {
+static SljitRegionNodePlan PlanSljitSourceContractNode(const ExecutionRegionNode &node,
+                                                       const ExecutionRegionContract &contract) {
 	D_ASSERT(node.source);
 	auto &table_scan_contract = node.source->table_scan_contract;
 	if (!table_scan_contract.present) {
@@ -2057,66 +2783,22 @@ PlanSljitSourceContractNode(const ExecutionRegionNode &node, const ExecutionRegi
 		return result;
 	}
 
-	auto source_filter_ownership = requested_source_filter_ownership;
-	if (source_filter_ownership == ExecutionRegionSourceFilterOwnershipKind::NONE &&
-	    table_scan_contract.filter_pushdown) {
-		source_filter_ownership = ExecutionRegionSourceFilterOwnershipKind::DUCKDB_SCAN;
-	}
-
-	if (source_filter_ownership == ExecutionRegionSourceFilterOwnershipKind::DUCKDB_SCAN) {
-		if (!table_scan_contract.filter_pushdown) {
-			return SljitRegionBoundaryNode("table scan source filters requested DuckDB scan ownership, but the source "
-			                               "contract does not support filter pushdown");
-		}
+	if (table_scan_contract.filter_pushdown) {
 		SljitRegionNodePlan result;
 		result.kind = ExecutionRegionLoweringKind::NATIVE;
 		result.source_execution = ExecutionRegionSourceExecutionKind::SOURCE_CONTRACT;
-		result.source_filter_ownership = ExecutionRegionSourceFilterOwnershipKind::DUCKDB_SCAN;
+		result.uses_scan_filters = true;
 		result.reason = "vectorized table scan filters";
 		result.reason += ";source-strategy=duckdb-scan-filtered-source-contract";
 		result.reason += ";source_filter_count=" + std::to_string(node.source->filters.size());
 		result.reason += ";source_contract_filter_prune_required=" +
 		                 string(table_scan_contract.source_contract_filter_prune_required ? "true" : "false");
-		result.reason += ";source_contract_filter_takeover_supported=" +
-		                 string(table_scan_contract.source_contract_filter_takeover_supported ? "true" : "false");
 		result.reason += ";source_contract_filter_pushdown=true";
 		AppendSljitSourceIR(result.reason, node, ExecutionRegionSourceExecutionKind::SOURCE_CONTRACT);
 		return result;
 	}
 
-	string generated_takeover_blocker;
-	if (source_filter_ownership == ExecutionRegionSourceFilterOwnershipKind::GENERATED) {
-		if (!table_scan_contract.source_contract_filter_takeover_supported) {
-			return SljitRegionBoundaryNode("table scan source filters requested generated predicate ownership, but the "
-			                               "source contract does not support unfiltered source input");
-		}
-		SljitNativeRegionOpPlan filter_op;
-		filter_op.kind = SljitNativeRegionOpKind::FILTER;
-		filter_op.output_types = table_scan_contract.source_contract_input_types;
-		if (TryPlanSljitGeneratedSourceFilters(*node.source, filter_op.filter, generated_takeover_blocker)) {
-			result.kind = ExecutionRegionLoweringKind::NATIVE;
-			result.source_execution = ExecutionRegionSourceExecutionKind::SOURCE_CONTRACT;
-			result.source_filter_ownership = ExecutionRegionSourceFilterOwnershipKind::GENERATED;
-			result.reason = "generated native table scan filters";
-			result.reason += ";source-strategy=compiled-unfiltered-source-contract";
-			result.reason += ";source_filter_count=" + std::to_string(node.source->filters.size());
-			result.reason += ";source_contract_filter_prune_required=" +
-			                 string(table_scan_contract.source_contract_filter_prune_required ? "true" : "false");
-			result.reason += ";source_contract_filter_takeover_supported=true";
-			AppendSljitSourceIR(result.reason, node, ExecutionRegionSourceExecutionKind::SOURCE_CONTRACT);
-			result.native_ops.push_back(std::move(filter_op));
-			result.native_ops.push_back(BuildSljitSourceOutputProjection(node, table_scan_contract));
-			return result;
-		}
-		generated_takeover_blocker =
-		    "source contract filters are not representable as generated typed predicates;" + generated_takeover_blocker;
-	}
-
-	auto boundary_reason = string("table scan source filters require an explicit legal ownership strategy");
-	if (!generated_takeover_blocker.empty()) {
-		boundary_reason += ";" + generated_takeover_blocker;
-	}
-	return SljitRegionBoundaryNode(std::move(boundary_reason));
+	return SljitRegionBoundaryNode("table scan source filters require DuckDB scan filter pushdown");
 }
 
 static SljitRegionNodePlan PlanSljitNativeStateScanSourceNode(const ExecutionRegionNode &node,
@@ -2170,8 +2852,7 @@ static SljitRegionNodePlan PlanSljitNativeStatefulSourceNode(const ExecutionRegi
 }
 
 static SljitRegionNodePlan PlanSljitSourceNode(const ExecutionRegionNode &node, const ExecutionRegionContract &contract,
-                                               ExecutionRegionSourceExecutionKind source_execution,
-                                               ExecutionRegionSourceFilterOwnershipKind source_filter_ownership) {
+                                               ExecutionRegionSourceExecutionKind source_execution) {
 	if (!node.source) {
 		return SljitRegionBoundaryNode("source boundary requires typed source IR");
 	}
@@ -2189,6 +2870,7 @@ static SljitRegionNodePlan PlanSljitSourceNode(const ExecutionRegionNode &node, 
 		auto &table_scan_contract = node.source->table_scan_contract;
 		SljitRegionNodePlan result;
 		result.kind = ExecutionRegionLoweringKind::BOUNDARY;
+		result.requires_source_contract = true;
 		result.reason = "DuckDB source boundary;source-contract-blocker:requires-source-contract;"
 		                "source_execution=duckdb-source-boundary";
 		result.reason += ";source-strategy=duckdb-source-boundary";
@@ -2197,8 +2879,6 @@ static SljitRegionNodePlan PlanSljitSourceNode(const ExecutionRegionNode &node, 
 		    ";source_contract_input_columns=" + std::to_string(table_scan_contract.source_contract_input_column_count);
 		result.reason += ";source_contract_filter_prune_required=" +
 		                 string(table_scan_contract.source_contract_filter_prune_required ? "true" : "false");
-		result.reason += ";source_contract_filter_takeover_supported=" +
-		                 string(table_scan_contract.source_contract_filter_takeover_supported ? "true" : "false");
 		AppendSljitSourceIR(result.reason, node, ExecutionRegionSourceExecutionKind::DUCKDB_SOURCE_BOUNDARY);
 		return result;
 	}
@@ -2210,7 +2890,7 @@ static SljitRegionNodePlan PlanSljitSourceNode(const ExecutionRegionNode &node, 
 			}
 			return PlanSljitNativeStatefulSourceNode(node, contract);
 		}
-		return PlanSljitSourceContractNode(node, contract, source_filter_ownership);
+		return PlanSljitSourceContractNode(node, contract);
 	}
 	if (node.operator_kind == ExecutionRegionOperatorKind::TABLE_SCAN && !node.source->table_scan_contract.present) {
 		return SljitRegionBoundaryNode("table scan source boundary requires typed table scan contract IR");
@@ -2221,16 +2901,12 @@ static SljitRegionNodePlan PlanSljitSourceNode(const ExecutionRegionNode &node, 
 		}
 		auto &table_scan_contract = node.source->table_scan_contract;
 		auto reason =
-		    "source-pushed filters require source contract-filter takeover;source_execution=" +
+		    "source-pushed filters require DuckDB scan source contract ownership;source_execution=" +
 		    string(ExecutionRegionSourceExecutionKindToString(node.source->execution)) +
 		    ";source_filter_count=" + std::to_string(node.source->filters.size()) +
 		    ";source_contract_input_columns=" + std::to_string(table_scan_contract.source_contract_input_column_count) +
-		    ";source_contract_requires_unfiltered_input=" +
-		    string(table_scan_contract.source_contract_requires_unfiltered_input ? "true" : "false") +
 		    ";source_contract_filter_prune_required=" +
-		    string(table_scan_contract.source_contract_filter_prune_required ? "true" : "false") +
-		    ";source_contract_filter_takeover_supported=" +
-		    string(table_scan_contract.source_contract_filter_takeover_supported ? "true" : "false");
+		    string(table_scan_contract.source_contract_filter_prune_required ? "true" : "false");
 		if (!ExecutionRegionABIOwnsSource(contract.abi)) {
 			reason += ";source_contract_ownership_contract=source_required";
 			AppendSljitSourceIR(reason, node, source_execution);
@@ -2238,19 +2914,20 @@ static SljitRegionNodePlan PlanSljitSourceNode(const ExecutionRegionNode &node, 
 		}
 		SljitRegionNodePlan result;
 		result.kind = ExecutionRegionLoweringKind::BOUNDARY;
+		result.requires_source_contract = true;
 		result.reason = "DuckDB source boundary;source-contract-blocker:requires-source-contract;"
 		                "source_execution=duckdb-source-boundary";
 		result.reason += ";source_filter_count=" + std::to_string(node.source->filters.size());
 		result.reason +=
 		    ";source_contract_input_columns=" + std::to_string(table_scan_contract.source_contract_input_column_count);
-		result.reason += ";source_contract_filter_takeover_supported=" +
-		                 string(table_scan_contract.source_contract_filter_takeover_supported ? "true" : "false");
 		AppendSljitSourceIR(result.reason, node, ExecutionRegionSourceExecutionKind::DUCKDB_SOURCE_BOUNDARY);
 		return result;
 	}
 	auto boundary_reason = "DuckDB source boundary;" + node.blocker_reason;
 	AppendSljitSourceIR(boundary_reason, node, ExecutionRegionSourceExecutionKind::DUCKDB_SOURCE_BOUNDARY);
-	return SljitRegionBoundaryNode(std::move(boundary_reason));
+	auto result = SljitRegionBoundaryNode(std::move(boundary_reason));
+	result.requires_source_contract = SljitSourceContractIsBlocked(node);
+	return result;
 }
 
 static string DescribeSljitAggregateSinkInput(const ExecutionRegionAggregateInput &aggregate) {
@@ -2286,33 +2963,16 @@ static string ValidateSljitAggregateUpdateSink(const ExecutionRegionSinkInfo &si
 		           ? "aggregate native state-update contract is not ready"
 		           : contract.native_state_update_contract.blocker;
 	}
-	if (sink.kind == ExecutionRegionSinkKind::HASH_AGGREGATE_UPDATE ||
-	    sink.kind == ExecutionRegionSinkKind::PERFECT_HASH_AGGREGATE_UPDATE) {
-		if (sink.groups.empty()) {
-			return "aggregate sink has no group bindings";
-		}
-		for (auto &group : sink.groups) {
-			if (!group.supported_reference) {
-				return group.reason.empty() ? "aggregate group binding unsupported" : group.reason;
-			}
-		}
-	} else if (sink.kind != ExecutionRegionSinkKind::UNGROUPED_AGGREGATE_UPDATE) {
+	if (sink.kind != ExecutionRegionSinkKind::HASH_AGGREGATE_UPDATE &&
+	    sink.kind != ExecutionRegionSinkKind::PERFECT_HASH_AGGREGATE_UPDATE &&
+	    sink.kind != ExecutionRegionSinkKind::UNGROUPED_AGGREGATE_UPDATE) {
 		return "aggregate update sink kind mismatch";
 	}
-	for (auto &aggregate : sink.aggregates) {
-		if (!aggregate.reason.empty()) {
-			return aggregate.reason;
-		}
-		if (aggregate.distinct || aggregate.has_filter || aggregate.has_order_bys || aggregate.order_dependent) {
-			return "aggregate update sink has unsupported aggregate semantics";
-		}
-		if (!aggregate.has_state_update || !aggregate.payload_expressions_ready ||
-		    !aggregate.supported_payload_references) {
-			return "aggregate update sink payload unsupported;aggregate_index=" +
-			       std::to_string(aggregate.aggregate_index);
-		}
+	auto blocker = ExecutionRegionAggregateNativeStateUpdateBlocker(contract, sink.aggregates, sink.groups);
+	if (!blocker.empty()) {
+		return blocker;
 	}
-	return "none";
+	return string();
 }
 
 static SljitRegionNodePlan PlanSljitAggregateUpdateSinkNode(const ExecutionRegionNode &node) {
@@ -2320,7 +2980,7 @@ static SljitRegionNodePlan PlanSljitAggregateUpdateSinkNode(const ExecutionRegio
 		return SljitRegionBoundaryNode("aggregate sink is missing native sink IR");
 	}
 	auto blocker = ValidateSljitAggregateUpdateSink(*node.sink);
-	if (blocker != "none") {
+	if (!blocker.empty()) {
 		return SljitRegionBoundaryNode(std::move(blocker));
 	}
 	auto native_op = make_uniq<SljitNativeRegionOpPlan>();
@@ -2329,7 +2989,7 @@ static SljitRegionNodePlan PlanSljitAggregateUpdateSinkNode(const ExecutionRegio
 	native_op->aggregate_update.ir = node.sink->ir;
 
 	auto &contract = node.sink->aggregate_contract;
-	string reason = "native aggregate update sink protocol;requires=aggregate_update_runtime_binding";
+	string reason = "native aggregate update sink contract;requires=aggregate_update_runtime_binding";
 	if (!contract.native_state_update_contract.required_capability.empty()) {
 		reason += ";requires=" + contract.native_state_update_contract.required_capability;
 	}
@@ -2358,6 +3018,23 @@ static SljitRegionNodePlan PlanSljitUngroupedAggregateSinkNode(const ExecutionRe
 }
 
 static SljitRegionNodePlan PlanSljitHashAggregateSinkNode(const ExecutionRegionNode &node) {
+	if (!node.sink) {
+		return SljitRegionBoundaryNode("hash aggregate sink is missing native sink IR");
+	}
+	auto &lookup_contract = node.sink->aggregate_contract.native_hash_lookup_contract;
+	if (lookup_contract.status != ExecutionRegionStateContractStatus::READY) {
+		auto blocker =
+		    lookup_contract.blocker.empty() ? "hash-aggregate-native-lookup-contract-missing" : lookup_contract.blocker;
+		string reason = "hash aggregate update requires generated hash lookup ownership";
+		reason += ";native_hash_aggregate_lookup_blocker=" + blocker;
+		if (!node.sink->aggregate_contract.hash_lookup_layout_ir.empty()) {
+			reason += ";" + node.sink->aggregate_contract.hash_lookup_layout_ir;
+		}
+		if (!node.sink->ir.empty()) {
+			reason += ";" + node.sink->ir;
+		}
+		return SljitRegionBoundaryNode(std::move(reason));
+	}
 	return PlanSljitAggregateUpdateSinkNode(node);
 }
 
@@ -2389,7 +3066,7 @@ static SljitRegionNodePlan PlanSljitHashAggregateDistinctSinkNode(const Executio
 		}
 	}
 
-	string reason = "hash aggregate distinct state-update native lowering requires distinct aggregate protocol";
+	string reason = "hash aggregate distinct state-update native lowering requires distinct aggregate contract";
 	reason += ";aggregate-state-update=distinct-contract-boundary";
 	reason += ";aggregate_count=" + std::to_string(node.sink->aggregate_contract.aggregate_count);
 	reason += ";group_count=" + std::to_string(node.sink->aggregate_contract.group_count);
@@ -2661,7 +3338,7 @@ static SljitRegionNodePlan PlanSljitHashJoinProbeOperatorNode(const ExecutionReg
 	if (contract.residual_predicate || contract.residual_info) {
 		if (contract.native_probe_output_mode == ExecutionHashJoinProbeOutputMode::MARK_BUILD_ONLY) {
 			return SljitRegionBoundaryNode(
-			    "hash join probe native lowering has unsupported residual mark-build-only protocol");
+			    "hash join probe native lowering has unsupported residual mark-build-only contract");
 		}
 		if (!contract.residual_expression_ready || !contract.residual_expression.root) {
 			auto reason = contract.residual_expression_blocker.empty()
@@ -2776,7 +3453,7 @@ static SljitRegionNodePlan PlanSljitNestedLoopJoinProbeOperatorNode(const Execut
 		                               string(ExecutionRegionJoinTypeToString(contract.join_type)));
 	}
 	if (!contract.complex_join || contract.simple_join) {
-		return SljitRegionBoundaryNode("nested loop join probe native lowering requires complex join protocol");
+		return SljitRegionBoundaryNode("nested loop join probe native lowering requires complex join contract");
 	}
 	if (!contract.conditions_ready) {
 		auto reason = contract.condition_blocker.empty()
@@ -2875,10 +3552,19 @@ static SljitRegionNodePlan PlanSljitHashJoinSinkNode(const ExecutionRegionNode &
 	auto native_op = make_uniq<SljitNativeRegionOpPlan>();
 	native_op->kind = SljitNativeRegionOpKind::HASH_JOIN_BUILD;
 	native_op->hash_join_build.sink_info = *node.sink;
-	native_op->hash_join_build.ir = node.sink->ir;
+	native_op->hash_join_build.ir = "hash_join_build_native<execution=primitive-protocol-build,payload_columns=" +
+	                                std::to_string(contract.payload_column_count) +
+	                                ",keys=" + std::to_string(contract.condition_count) + ">";
 
-	string reason = "native hash join build sink protocol;requires=native_sink_runtime_binding;"
-	                "requires=native_hash_join_build_sink;build_sink_shape_ready=true";
+	string reason =
+	    "native hash join build contract;requires=hash_join_build_runtime_binding;requires=hash_join_build_prepare;"
+	    "requires=hash_join_build_hash;requires=hash_join_build_append";
+	reason += ";native_hash_join_build_contract_status=";
+	reason += ExecutionRegionStateContractStatusToString(contract.native_build_contract.status);
+	reason += ";native_hash_join_build_blocker=";
+	reason += contract.native_build_contract.blocker.empty() ? string("none") : contract.native_build_contract.blocker;
+	reason += ";build_sink_shape_ready=true";
+	reason += ";" + native_op->hash_join_build.ir;
 	if (!node.sink->ir.empty()) {
 		reason += ";" + node.sink->ir;
 	}
@@ -2914,7 +3600,7 @@ static SljitRegionNodePlan PlanSljitNestedLoopJoinSinkNode(const ExecutionRegion
 		                               string(ExecutionRegionJoinTypeToString(contract.join_type)));
 	}
 	if (!contract.complex_join || contract.simple_join) {
-		return SljitRegionBoundaryNode("nested loop join build native lowering requires complex join protocol");
+		return SljitRegionBoundaryNode("nested loop join build native lowering requires complex join contract");
 	}
 	if (contract.filter_pushdown) {
 		return SljitRegionBoundaryNode("nested loop join build native lowering does not support filter pushdown state");
@@ -2954,7 +3640,7 @@ static SljitRegionNodePlan PlanSljitNestedLoopJoinSinkNode(const ExecutionRegion
 		native_op->nested_loop_join_build.rhs_conditions.push_back(std::move(rhs_condition));
 	}
 
-	string reason = "native nested loop join build sink protocol;requires=native_sink_runtime_binding;"
+	string reason = "native nested loop join build sink contract;requires=native_sink_runtime_binding;"
 	                "requires=native_nested_loop_join_build_sink;build_sink_shape_ready=true";
 	if (!node.sink->ir.empty()) {
 		reason += ";" + node.sink->ir;
@@ -2977,7 +3663,7 @@ static SljitRegionNodePlan PlanSljitAppendSinkNode(const ExecutionRegionNode &no
 	native_op->append_sink.sink_info = *node.sink;
 	native_op->append_sink.ir = node.sink->ir;
 
-	string reason = "append sink protocol;requires=append_sink_runtime_binding";
+	string reason = "append sink contract;requires=append_sink_runtime_binding";
 	if (!contract.required_capability.empty()) {
 		reason += ";requires=" + contract.required_capability;
 	}
@@ -3000,10 +3686,10 @@ static SljitRegionNodePlan PlanSljitDelimJoinSinkNode(const ExecutionRegionNode 
 	}
 	auto native_op = make_uniq<SljitNativeRegionOpPlan>();
 	native_op->kind = SljitNativeRegionOpKind::DELIM_JOIN_SINK;
-	native_op->append_sink.sink_info = *node.sink;
-	native_op->append_sink.ir = node.sink->ir;
+	native_op->delim_join_sink.sink_info = *node.sink;
+	native_op->delim_join_sink.ir = node.sink->ir;
 
-	string reason = "delimiter join sink protocol;requires=delim_join_sink_runtime_binding";
+	string reason = "delimiter join sink contract;requires=delim_join_sink_runtime_binding";
 	if (!contract.required_capability.empty()) {
 		reason += ";requires=" + contract.required_capability;
 	}
@@ -3064,7 +3750,7 @@ static SljitRegionNodePlan PlanSljitOrderSinkNode(const ExecutionRegionNode &nod
 		native_op->order_sink.order_keys.push_back(std::move(key_plan));
 	}
 
-	string reason = "ordered sink protocol;requires=ordered_sink_runtime_binding";
+	string reason = "ordered sink contract;requires=ordered_sink_runtime_binding";
 	if (!contract.required_capability.empty()) {
 		reason += ";requires=" + contract.required_capability;
 	}
@@ -3138,7 +3824,7 @@ static SljitRegionNodePlan PlanSljitFullPipelineSinkNode(const ExecutionRegionNo
 		} else if (native_op.kind == SljitNativeRegionOpKind::APPEND_SINK) {
 			native_op.append_sink.input_types = input_types;
 		} else if (native_op.kind == SljitNativeRegionOpKind::DELIM_JOIN_SINK) {
-			native_op.append_sink.input_types = input_types;
+			native_op.delim_join_sink.input_types = input_types;
 		} else if (native_op.kind == SljitNativeRegionOpKind::AGGREGATE_UPDATE) {
 			native_op.aggregate_update.input_types = input_types;
 		}
@@ -3146,7 +3832,7 @@ static SljitRegionNodePlan PlanSljitFullPipelineSinkNode(const ExecutionRegionNo
 		return native_sink;
 	}
 	if (node.sink->kind == ExecutionRegionSinkKind::HASH_JOIN_BUILD) {
-		auto reason = string("full pipeline hash join build sink requires native hash join build contract lowering");
+		auto reason = string("full pipeline hash join build sink requires native hash build primitive lowering");
 		if (!native_sink.reason.empty()) {
 			reason += ";hash-join-build-contract-boundary=" + native_sink.reason;
 		}
@@ -3200,7 +3886,9 @@ static SljitRegionNodePlan PlanSljitRegionNode(const ExecutionRegionNode &node, 
 		if (sink.kind == ExecutionRegionLoweringKind::NATIVE && SljitRegionNodeHasNativeOps(sink)) {
 			auto &native_op = SljitRegionNodeLastNativeOp(sink);
 			native_op.output_types = input_types;
-			if (native_op.kind == SljitNativeRegionOpKind::NESTED_LOOP_JOIN_BUILD) {
+			if (native_op.kind == SljitNativeRegionOpKind::HASH_JOIN_BUILD) {
+				native_op.hash_join_build.input_types = input_types;
+			} else if (native_op.kind == SljitNativeRegionOpKind::NESTED_LOOP_JOIN_BUILD) {
 				native_op.nested_loop_join_build.input_types = input_types;
 			} else if (native_op.kind == SljitNativeRegionOpKind::ORDER_SINK) {
 				native_op.order_sink.input_types = input_types;
@@ -3266,8 +3954,8 @@ struct SljitRegionLoweringCursor {
 		return selected_source_execution;
 	}
 
-	ExecutionRegionSourceFilterOwnershipKind SourceFilterOwnership() const {
-		return source_filter_ownership;
+	bool UsesScanFilters() const {
+		return uses_scan_filters;
 	}
 
 	void BreakAtBoundary(const vector<LogicalType> &boundary_output_types) {
@@ -3283,9 +3971,7 @@ struct SljitRegionLoweringCursor {
 		if (node_plan.source_execution != ExecutionRegionSourceExecutionKind::NONE) {
 			selected_source_execution = node_plan.source_execution;
 		}
-		if (node_plan.source_filter_ownership != ExecutionRegionSourceFilterOwnershipKind::NONE) {
-			source_filter_ownership = node_plan.source_filter_ownership;
-		}
+		uses_scan_filters = uses_scan_filters || node_plan.uses_scan_filters;
 		if (can_fuse) {
 			AppendSljitRegionNodeNativeOps(native_region, node_plan);
 		}
@@ -3326,7 +4012,7 @@ private:
 	SljitNativeRegionPlan &native_region;
 	bool can_fuse = true;
 	ExecutionRegionSourceExecutionKind selected_source_execution = ExecutionRegionSourceExecutionKind::NONE;
-	ExecutionRegionSourceFilterOwnershipKind source_filter_ownership = ExecutionRegionSourceFilterOwnershipKind::NONE;
+	bool uses_scan_filters = false;
 };
 
 SljitRegionPlan BuildSljitRegionPlan(const ExecutionRegionIR &region_ir, const ExecutionRegionCandidate &candidate) {
@@ -3352,13 +4038,12 @@ SljitRegionPlan BuildSljitRegionPlan(const ExecutionRegionIR &region_ir, const E
 			    candidate.source_execution != ExecutionRegionSourceExecutionKind::NONE
 			        ? candidate.source_execution
 			        : (node.source ? node.source->execution : ExecutionRegionSourceExecutionKind::NONE);
-			auto node_plan =
-			    executable_source
-			        ? PlanSljitSourceNode(node, contract, source_execution, candidate.source_filter_ownership)
-			        : PlanSljitRegionNode(node, cursor.InputTypes(), plan.backend_plan->error);
-			const bool source_requires_native =
-			    executable_source && node_plan.kind == ExecutionRegionLoweringKind::BOUNDARY &&
-			    StringUtil::Contains(node_plan.reason, "source-contract-blocker:requires-source-contract");
+			auto node_plan = executable_source
+			                     ? PlanSljitSourceNode(node, contract, source_execution)
+			                     : PlanSljitRegionNode(node, cursor.InputTypes(), plan.backend_plan->error);
+			const bool source_requires_native = executable_source &&
+			                                    node_plan.kind == ExecutionRegionLoweringKind::BOUNDARY &&
+			                                    node_plan.requires_source_contract;
 			plan.lowering_plan.AddNode(node.label, node.operator_name, node.operator_kind, node_plan.kind,
 			                           node_plan.reason);
 			if (source_requires_native) {
@@ -3475,6 +4160,11 @@ SljitRegionPlan BuildSljitRegionPlan(const ExecutionRegionIR &region_ir, const E
 		FuseAdjacentNativeProjections(*native_region);
 		FusePrimitiveAggregateUpdates(*native_region, candidate.input_types);
 		MarkRuntimeCombinedFilterProjections(*native_region);
+		FinalizeSljitNativeRegionPlan(*native_region, contract);
+		plan.lowering_plan.SetGeneratedExpressionCost(
+		    SljitNativeGeneratedExpressionCost(native_region->summary.expression_intensity));
+		plan.lowering_plan.SetGeneratedStageCount(SljitNativeRegionGeneratedStageCount(*native_region));
+		plan.lowering_plan.SetExecutionBody(SljitNativeRegionExecutionBody(*native_region, contract));
 		auto stage_plan = BuildSljitOperatorStageRegionPlan(*native_region, contract, candidate.stage_plan);
 		if (stage_plan.IsValid()) {
 			auto stage_ir = candidate.stage_plan.ir;
@@ -3483,14 +4173,20 @@ SljitRegionPlan BuildSljitRegionPlan(const ExecutionRegionIR &region_ir, const E
 			}
 			stage_ir += stage_plan.stage_ir;
 			plan.lowering_plan.SetOperatorStageIR(std::move(stage_ir));
+			plan.lowering_plan.shape_key = stage_plan.shape_key;
 		}
-		plan.lowering_plan.SetSourceFilterOwnership(cursor.SourceFilterOwnership());
-		plan.lowering_plan.shape_key = BuildSljitRegionShapeKey(*native_region, contract, candidate.signature);
+		plan.lowering_plan.SetUsesScanFilters(cursor.UsesScanFilters());
+		if (plan.lowering_plan.shape_key.empty()) {
+			plan.lowering_plan.shape_key = BuildSljitRegionShapeKey(candidate.signature);
+		}
 		string codegen_blocker;
 		if (SljitNativeRegionHasExecutableBodyGap(*native_region, contract, codegen_blocker)) {
 			plan.backend_plan->error = codegen_blocker;
-			plan.lowering_plan.AddFusionBlocker(SljitNativeRegionCodegenFusionBlocker() + ";" + codegen_blocker + ";" +
-			                                    candidate.contract.ir);
+			auto fusion_blocker = SljitNativeRegionCodegenFusionBlocker() + ";" + codegen_blocker;
+			if (!candidate.contract.ir.empty()) {
+				fusion_blocker += ";" + candidate.contract.ir;
+			}
+			plan.lowering_plan.AddFusionBlocker(std::move(fusion_blocker));
 			plan.lowering_plan.backend_plan = plan.backend_plan;
 			return plan;
 		}
@@ -3509,7 +4205,7 @@ SljitRegionPlan BuildSljitRegionPlan(const ExecutionRegionIR &region_ir, const E
 			}
 		}
 		if (plan.lowering_plan.shape_key.empty()) {
-			plan.lowering_plan.shape_key = BuildExecutionRegionAdmissionShapeKey("sljit", candidate.signature);
+			plan.lowering_plan.shape_key = BuildExecutionRegionShapeKey("sljit", candidate.signature);
 		}
 	}
 	plan.lowering_plan.backend_plan = plan.backend_plan;
@@ -3596,6 +4292,9 @@ static string DescribeNativeRegionExpression(const SljitNativeRegionExpressionPl
 	case SljitNativeRegionExpressionKind::EXPRESSION_TREE:
 		result = "native:expression-tree:sources=" + std::to_string(expr.expression_tree_source_indices.size());
 		break;
+	case SljitNativeRegionExpressionKind::TYPED_EXPRESSION_TREE:
+		result = "native:typed-expression-tree:sources=" + std::to_string(expr.expression_tree_source_indices.size());
+		break;
 	default:
 		result = "native:unknown";
 		break;
@@ -3667,6 +4366,13 @@ string DescribeNativeRegion(const SljitNativeRegionPlan &region, const string &m
 			}
 			result += ")";
 			break;
+		case SljitNativeRegionOpKind::HASH_JOIN_BUILD:
+			result += "hash_join_build(keys=";
+			result += std::to_string(op.hash_join_build.sink_info.hash_join_keys.size());
+			result += ";payload_columns=" + std::to_string(op.hash_join_build.input_types.size());
+			result += ";execution=primitive-protocol-build";
+			result += ")";
+			break;
 		case SljitNativeRegionOpKind::NESTED_LOOP_JOIN_PROBE:
 			result += "nested_loop_join_probe(conditions=";
 			for (idx_t condition_idx = 0; condition_idx < op.nested_loop_join_probe.conditions.size();
@@ -3682,27 +4388,6 @@ string DescribeNativeRegion(const SljitNativeRegionPlan &region, const string &m
 			}
 			result += ")";
 			break;
-		case SljitNativeRegionOpKind::HASH_JOIN_BUILD: {
-			result += "hash_join_build(keys=";
-			for (idx_t key_idx = 0; key_idx < op.hash_join_build.sink_info.hash_join_keys.size(); key_idx++) {
-				if (key_idx > 0) {
-					result += ",";
-				}
-				auto &key = op.hash_join_build.sink_info.hash_join_keys[key_idx];
-				result += "key" + std::to_string(key.key_index);
-				result += "<input_index=" + std::to_string(key.input_index) + ">";
-			}
-			result += ";payload_columns=";
-			auto &payload_columns = op.hash_join_build.sink_info.hash_join_contract.payload_column_indices;
-			for (idx_t payload_idx = 0; payload_idx < payload_columns.size(); payload_idx++) {
-				if (payload_idx > 0) {
-					result += ",";
-				}
-				result += std::to_string(payload_columns[payload_idx]);
-			}
-			result += ")";
-			break;
-		}
 		case SljitNativeRegionOpKind::NESTED_LOOP_JOIN_BUILD:
 			result += "nested_loop_join_build(conditions=";
 			for (idx_t condition_idx = 0; condition_idx < op.nested_loop_join_build.rhs_conditions.size();
@@ -3722,7 +4407,7 @@ string DescribeNativeRegion(const SljitNativeRegionPlan &region, const string &m
 			break;
 		case SljitNativeRegionOpKind::DELIM_JOIN_SINK:
 			result += "delim_join_sink(columns=";
-			result += std::to_string(op.append_sink.input_types.size());
+			result += std::to_string(op.delim_join_sink.input_types.size());
 			result += ")";
 			break;
 		case SljitNativeRegionOpKind::AGGREGATE_UPDATE:
@@ -3732,17 +4417,8 @@ string DescribeNativeRegion(const SljitNativeRegionPlan &region, const string &m
 			result += ";columns=" + std::to_string(op.aggregate_update.input_types.size());
 			result += ";groups=" + std::to_string(op.aggregate_update.sink_info.groups.size());
 			result += ";aggregates=" + std::to_string(op.aggregate_update.sink_info.aggregates.size());
-			if (op.aggregate_update.use_grouped_state_addresses) {
-				result += ";grouped_state_addresses=true";
-				result += ";group_inputs=";
-				for (idx_t group_idx = 0; group_idx < op.aggregate_update.group_input_indices.size(); group_idx++) {
-					if (group_idx > 0) {
-						result += ",";
-					}
-					result += std::to_string(op.aggregate_update.group_input_indices[group_idx]);
-				}
-			}
 			if (op.aggregate_update.use_primitive_payloads) {
+				result += ";payload_update=generated-primitive";
 				result += ";primitive_payloads=";
 				for (idx_t payload_idx = 0; payload_idx < op.aggregate_update.payloads.size(); payload_idx++) {
 					if (payload_idx > 0) {
@@ -3750,6 +4426,11 @@ string DescribeNativeRegion(const SljitNativeRegionPlan &region, const string &m
 					}
 					result += DescribeNativeRegionExpression(op.aggregate_update.payloads[payload_idx]);
 				}
+				if (op.aggregate_update.use_perfect_hash_group_lookup) {
+					result += ";grouped_state_lookup=generated-perfect-hash";
+				}
+			} else {
+				result += ";execution=vectorized-operator-boundary";
 			}
 			result += ")";
 			break;
@@ -3775,48 +4456,10 @@ string DescribeNativeRegion(const SljitNativeRegionPlan &region, const string &m
 }
 
 string DescribeNativeRegionShape(const SljitNativeRegionPlan &region) {
-	string result;
-	for (idx_t op_idx = 0; op_idx < region.ops.size(); op_idx++) {
-		if (op_idx > 0) {
-			result += "-";
-		}
-		switch (region.ops[op_idx].kind) {
-		case SljitNativeRegionOpKind::FILTER:
-			result += "filter";
-			break;
-		case SljitNativeRegionOpKind::PROJECTION:
-			result += "projection";
-			break;
-		case SljitNativeRegionOpKind::HASH_JOIN_PROBE:
-			result += "hash-join-probe";
-			break;
-		case SljitNativeRegionOpKind::NESTED_LOOP_JOIN_PROBE:
-			result += "nested-loop-join-probe";
-			break;
-		case SljitNativeRegionOpKind::HASH_JOIN_BUILD:
-			result += "hash-join-build";
-			break;
-		case SljitNativeRegionOpKind::NESTED_LOOP_JOIN_BUILD:
-			result += "nested-loop-join-build";
-			break;
-		case SljitNativeRegionOpKind::ORDER_SINK:
-			result += "order-sink";
-			break;
-		case SljitNativeRegionOpKind::APPEND_SINK:
-			result += "append-sink";
-			break;
-		case SljitNativeRegionOpKind::DELIM_JOIN_SINK:
-			result += "delim-join-sink";
-			break;
-		case SljitNativeRegionOpKind::AGGREGATE_UPDATE:
-			result += "aggregate-update";
-			break;
-		default:
-			result += "unknown";
-			break;
-		}
+	if (region.summary.finalized && !region.summary.native_shape.empty()) {
+		return region.summary.native_shape;
 	}
-	return result.empty() ? "empty" : result;
+	return BuildSljitNativeRegionShape(region);
 }
 
 static void AppendCoreOperatorStages(SljitOperatorStageRegionPlan &result,
@@ -3860,6 +4503,18 @@ static string DescribeOperatorStageRegion(const SljitOperatorStageRegionPlan &pl
 	return result;
 }
 
+ExecutionRegionExecutionBody SljitNativeRegionExecutionBody(const SljitNativeRegionPlan &region,
+                                                            const ExecutionRegionContract &contract) {
+	if (region.summary.finalized) {
+		return region.summary.execution_body;
+	}
+	const bool generates_code = SljitNativeRegionGeneratesMachineCode(region);
+	if (generates_code) {
+		return ExecutionRegionExecutionBody::GENERATED_MACHINE_CODE;
+	}
+	return ExecutionRegionExecutionBody::NONE;
+}
+
 SljitOperatorStageRegionPlan BuildSljitOperatorStageRegionPlan(const SljitNativeRegionPlan &region,
                                                                const ExecutionRegionContract &contract,
                                                                const ExecutionRegionStagePlan &core_stage_plan) {
@@ -3871,11 +4526,9 @@ SljitOperatorStageRegionPlan BuildSljitOperatorStageRegionPlan(const SljitNative
 		result.kernel_kind = "missing";
 		result.kernel_blocker = SljitNativeRegionCodegenFusionBlocker();
 	}
-	if (SljitNativeRegionGeneratesCode(region)) {
+	const auto execution_body = SljitNativeRegionExecutionBody(region, contract);
+	if (execution_body == ExecutionRegionExecutionBody::GENERATED_MACHINE_CODE) {
 		result.kernel_kind = "generated-machine-code";
-		result.kernel_blocker.clear();
-	} else if (SljitNativeRegionHasOperatorContractLoop(region, contract)) {
-		result.kernel_kind = "native-operator-protocol";
 		result.kernel_blocker.clear();
 	}
 	if (!result.IsValid()) {

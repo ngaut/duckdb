@@ -408,7 +408,7 @@ bool JoinHashTable::GetExecutionHashJoinTableLayout(ExecutionHashJoinTableLayout
 		return false;
 	}
 	layout.ready = true;
-	layout.blocker = "none";
+	layout.blocker.clear();
 	return true;
 }
 
@@ -454,19 +454,25 @@ static idx_t FilterNullValues(UnifiedVectorFormat &vdata, const SelectionVector 
 	return result_count;
 }
 
-void JoinHashTable::Build(PartitionedTupleDataAppendState &append_state, DataChunk &keys, DataChunk &payload) {
+void JoinHashTable::InitializeBuildChunk(DataChunk &source_chunk) const {
+	source_chunk.InitializeEmpty(layout_ptr->GetTypes());
+}
+
+idx_t JoinHashTable::PrepareBuildChunk(PartitionedTupleDataAppendState &append_state, DataChunk &keys,
+                                       DataChunk &payload, DataChunk &source_chunk, Vector &hash_values,
+                                       SelectionVector &build_sel,
+                                       optional_ptr<const SelectionVector> &build_selection) {
 	D_ASSERT(!finalized);
 	D_ASSERT(keys.size() == payload.size());
+	build_selection = FlatVector::IncrementalSelectionVector();
 	if (keys.size() == 0) {
-		return;
+		return 0;
 	}
-	// special case: correlated mark join
+
 	if (join_type == JoinType::MARK && !correlated_mark_join_info.correlated_types.empty()) {
 		auto &info = correlated_mark_join_info;
 		lock_guard<mutex> mj_lock(info.mj_lock);
-		// Correlated MARK join
-		// for the correlated mark join we need to keep track of COUNT(*) and COUNT(COLUMN) for each of the correlated
-		// columns push into the aggregate hash table
+		// Correlated MARK join tracks COUNT(*) and COUNT(column) per correlated group.
 		D_ASSERT(info.correlated_counts);
 		for (idx_t i = 0; i < info.correlated_types.size(); i++) {
 			info.group_chunk.data[i].Reference(keys.data[i]);
@@ -482,9 +488,6 @@ void JoinHashTable::Build(PartitionedTupleDataAppendState &append_state, DataChu
 		info.correlated_counts->AddChunk(info.group_chunk, info.correlated_payload, AggregateType::NON_DISTINCT);
 	}
 
-	// build a chunk to append to the data collection [keys, payload, (optional "found" boolean), hash]
-	DataChunk source_chunk;
-	source_chunk.InitializeEmpty(layout_ptr->GetTypes());
 	for (idx_t i = 0; i < keys.ColumnCount(); i++) {
 		source_chunk.data[i].Reference(keys.data[i]);
 	}
@@ -499,7 +502,6 @@ void JoinHashTable::Build(PartitionedTupleDataAppendState &append_state, DataChu
 		source_chunk.data[col_offset].Reference(vfound);
 		col_offset++;
 	}
-	Vector hash_values(LogicalType::HASH);
 	source_chunk.data[col_offset].Reference(hash_values);
 	source_chunk.SetChildCardinality(keys.size());
 
@@ -507,29 +509,48 @@ void JoinHashTable::Build(PartitionedTupleDataAppendState &append_state, DataChu
 	TupleDataCollection::ToUnifiedFormat(append_state.chunk_state, source_chunk);
 
 	// prepare the keys for processing
-	optional_ptr<const SelectionVector> current_sel;
-	SelectionVector sel(STANDARD_VECTOR_SIZE);
-	idx_t added_count = PrepareKeys(keys, append_state.chunk_state.vector_data, current_sel, sel, true);
+	idx_t added_count = PrepareKeys(keys, append_state.chunk_state.vector_data, build_selection, build_sel, true);
 	if (added_count < keys.size()) {
 		has_null = true;
 	}
-	if (added_count == 0) {
-		return;
-	}
+	return added_count;
+}
 
+void JoinHashTable::HashBuildChunk(PartitionedTupleDataAppendState &append_state, DataChunk &keys,
+                                   DataChunk &source_chunk, Vector &hash_values,
+                                   const SelectionVector &build_selection, idx_t build_count) {
 	// hash the keys and obtain an entry in the list
 	// note that we only hash the keys used in the equality comparison
-	Hash(keys, *current_sel, added_count, hash_values);
+	Hash(keys, build_selection, build_count, hash_values);
 	if (bloom_filter.IsInitialized()) {
 		bloom_filter.InsertHashes(hash_values);
 	}
 
 	// Re-reference and ToUnifiedFormat the hash column after computing it
+	auto col_offset = source_chunk.ColumnCount() - 1;
 	source_chunk.data[col_offset].Reference(hash_values);
 	hash_values.ToUnifiedFormat(append_state.chunk_state.vector_data.back().unified);
+}
 
+void JoinHashTable::AppendBuildChunk(PartitionedTupleDataAppendState &append_state, DataChunk &source_chunk,
+                                     const SelectionVector &build_selection, idx_t build_count) {
 	// We already called TupleDataCollection::ToUnifiedFormat, so we can AppendUnified here
-	sink_collection->AppendUnified(append_state, source_chunk, *current_sel, added_count);
+	sink_collection->AppendUnified(append_state, source_chunk, build_selection, build_count);
+}
+
+void JoinHashTable::Build(PartitionedTupleDataAppendState &append_state, DataChunk &keys, DataChunk &payload) {
+	DataChunk source_chunk;
+	InitializeBuildChunk(source_chunk);
+	Vector hash_values(LogicalType::HASH);
+	SelectionVector build_sel(STANDARD_VECTOR_SIZE);
+	optional_ptr<const SelectionVector> build_selection;
+	auto build_count =
+	    PrepareBuildChunk(append_state, keys, payload, source_chunk, hash_values, build_sel, build_selection);
+	if (build_count == 0) {
+		return;
+	}
+	HashBuildChunk(append_state, keys, source_chunk, hash_values, *build_selection, build_count);
+	AppendBuildChunk(append_state, source_chunk, *build_selection, build_count);
 }
 
 idx_t JoinHashTable::PrepareKeys(DataChunk &keys, vector<TupleDataVectorFormat> &vector_data,

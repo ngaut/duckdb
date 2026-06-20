@@ -8,7 +8,12 @@ namespace duckdb {
 
 static void UnpackSingle(const uint32_t *__restrict &in, uhugeint_t *__restrict out, uint16_t delta, uint16_t shr) {
 	if (delta + shr < 32) {
-		*out = ((static_cast<uhugeint_t>(in[0])) >> shr) % (uhugeint_t(1) << delta);
+		// Extract the low `delta` bits. This is a mask, not a modulo: `x % (1<<delta)` on a
+		// non-native uhugeint_t compiles to a full 128-bit software division per value (the divisor
+		// is a runtime value, so the compiler cannot reduce it to a mask), which made hugeint/wide-
+		// DECIMAL BitPacking decompression ~15-25x slower than uncompressed. The mask is equivalent
+		// for unsigned values and matches the pack side, which already uses `in & mask`.
+		*out = ((static_cast<uhugeint_t>(in[0])) >> shr) & ((uhugeint_t(1) << delta) - 1);
 	}
 
 	else if (delta + shr >= 32 && delta + shr < 64) {

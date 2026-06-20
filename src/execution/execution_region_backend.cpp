@@ -12,16 +12,22 @@ ExecutionRegionCompilationInput::ExecutionRegionCompilationInput(ClientContext &
 
 ExecutionRegionCompileResult ExecutionRegionCompileResult::Compiled(unique_ptr<ExecutionRegionKernel> kernel,
                                                                     ExecutionRegionExecutionMode execution_mode,
-                                                                    string reason, string ir) {
+                                                                    string reason, string ir,
+                                                                    ExecutionRegionExecutionBody execution_body) {
 	if (!kernel) {
 		throw InternalException("compiled region result marked compiled without a kernel");
 	}
 	if (!ExecutionRegionExecutionModeIsCompiled(execution_mode)) {
 		throw InternalException("compiled region result uses invalid compiled execution mode");
 	}
+	if (execution_body == ExecutionRegionExecutionBody::NONE) {
+		execution_body = ExecutionRegionExecutionBodyForCompileEvent(ExecutionRegionCompileStatus::COMPILED,
+		                                                             execution_mode, kernel->CodeSize());
+	}
 	ExecutionRegionCompileResult result;
 	result.status = ExecutionRegionCompileStatus::COMPILED;
 	result.execution_mode = execution_mode;
+	result.execution_body = execution_body;
 	result.reason = std::move(reason);
 	result.ir = std::move(ir);
 	result.kernel = std::move(kernel);
@@ -63,10 +69,6 @@ bool ExecutionRegionBackend::SupportsRegions() const {
 	return false;
 }
 
-bool ExecutionRegionBackend::HasAutoAdmissionRules(ExecutionRegionCompileTarget) const {
-	return false;
-}
-
 ExecutionRegionLoweringPlan ExecutionRegionBackend::AnalyzeRegion(const ExecutionRegionCompilationInput &) {
 	ExecutionRegionLoweringPlan plan;
 	plan.SetCompiledExecutionMode(ExecutionRegionExecutionMode::UNSUPPORTED);
@@ -76,23 +78,6 @@ ExecutionRegionLoweringPlan ExecutionRegionBackend::AnalyzeRegion(const Executio
 
 ExecutionRegionCompileResult ExecutionRegionBackend::CompileRegion(const ExecutionRegionCompilationInput &) {
 	return ExecutionRegionCompileResult::Unsupported("backend does not compile regions");
-}
-
-bool ExecutionRegionBackend::GetAutoAdmissionRule(ExecutionRegionCompileTarget, const ExecutionRegionCandidate &,
-                                                  ExecutionRegionAdmissionRule &) const {
-	return false;
-}
-
-bool ExecutionRegionBackend::GetAutoAdmissionRule(ExecutionRegionCompileTarget,
-                                                  const ExecutionRegionPipelineInventory &,
-                                                  ExecutionRegionAdmissionRule &) const {
-	return false;
-}
-
-bool ExecutionRegionBackend::GetAutoAdmissionRule(ExecutionRegionCompileTarget, const ExecutionRegionCandidate &,
-                                                  const ExecutionRegionLoweringPlan &,
-                                                  ExecutionRegionAdmissionRule &) const {
-	return false;
 }
 
 ExecutionRegionBackendPlan::~ExecutionRegionBackendPlan() {

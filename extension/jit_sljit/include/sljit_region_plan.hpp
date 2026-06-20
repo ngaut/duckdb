@@ -18,8 +18,8 @@ enum class SljitNativeRegionOpKind : uint8_t {
 	FILTER,
 	PROJECTION,
 	HASH_JOIN_PROBE,
-	NESTED_LOOP_JOIN_PROBE,
 	HASH_JOIN_BUILD,
+	NESTED_LOOP_JOIN_PROBE,
 	NESTED_LOOP_JOIN_BUILD,
 	ORDER_SINK,
 	APPEND_SINK,
@@ -51,7 +51,8 @@ enum class SljitNativeRegionExpressionKind : uint8_t {
 	ERROR_GUARDED_REFERENCE,
 	NULL_CHECK,
 	PREDICATE,
-	EXPRESSION_TREE
+	EXPRESSION_TREE,
+	TYPED_EXPRESSION_TREE
 };
 
 struct SljitNativeRegionExpressionPlan;
@@ -80,6 +81,10 @@ struct SljitNativeRegionExpressionPlan {
 	bool check_result_range = false;
 	SljitNativeIntegerBinaryOp binary_op = SljitNativeIntegerBinaryOp::ADD;
 	SljitNativeDoubleBinaryOp double_binary_op = SljitNativeDoubleBinaryOp::DIVIDE;
+	SljitNativeDoubleSourceKind double_source_kind = SljitNativeDoubleSourceKind::DOUBLE;
+	SljitNativeDoubleSourceKind double_right_source_kind = SljitNativeDoubleSourceKind::DOUBLE;
+	double double_source_scale = 1;
+	double double_right_source_scale = 1;
 	SljitNativeIntegerCompareOp compare_op = SljitNativeIntegerCompareOp::EQUAL;
 	SljitNativeSignedIntegerWidth cast_source_width = SljitNativeSignedIntegerWidth::INT32;
 	SljitNativeSignedIntegerWidth cast_target_width = SljitNativeSignedIntegerWidth::INT32;
@@ -132,6 +137,12 @@ struct SljitNativeHashJoinProbePlan {
 	string ir;
 };
 
+struct SljitNativeHashJoinBuildPlan {
+	ExecutionRegionSinkInfo sink_info;
+	vector<LogicalType> input_types;
+	string ir;
+};
+
 struct SljitNativeNestedLoopJoinProbeConditionPlan {
 	SljitNativeRegionExpressionPlan lhs_condition;
 	LogicalType type;
@@ -147,12 +158,6 @@ struct SljitNativeNestedLoopJoinProbePlan {
 	vector<LogicalType> condition_types;
 	ExecutionRegionJoinType join_type = ExecutionRegionJoinType::INVALID;
 	ExecutionRegionOperatorInfo operator_info;
-	string ir;
-};
-
-struct SljitNativeHashJoinBuildPlan {
-	ExecutionRegionSinkInfo sink_info;
-	vector<LogicalType> input_types;
 	string ir;
 };
 
@@ -188,11 +193,9 @@ struct SljitNativeAggregateUpdatePlan {
 	ExecutionRegionSinkInfo sink_info;
 	vector<LogicalType> input_types;
 	vector<SljitNativeRegionExpressionPlan> payloads;
-	vector<idx_t> group_input_indices;
-	vector<idx_t> state_value_offsets;
-	vector<idx_t> state_is_set_offsets;
 	bool use_primitive_payloads = false;
 	bool use_grouped_state_addresses = false;
+	bool use_perfect_hash_group_lookup = false;
 	string ir;
 };
 
@@ -202,14 +205,66 @@ struct SljitNativeRegionOpPlan {
 	vector<LogicalType> output_types;
 	SljitNativeRegionExpressionPlan filter;
 	SljitNativeHashJoinProbePlan hash_join_probe;
-	SljitNativeNestedLoopJoinProbePlan nested_loop_join_probe;
 	SljitNativeHashJoinBuildPlan hash_join_build;
+	SljitNativeNestedLoopJoinProbePlan nested_loop_join_probe;
 	SljitNativeNestedLoopJoinBuildPlan nested_loop_join_build;
 	SljitNativeAppendSinkPlan append_sink;
+	SljitNativeDelimJoinSinkPlan delim_join_sink;
 	SljitNativeOrderSinkPlan order_sink;
 	SljitNativeAggregateUpdatePlan aggregate_update;
 	vector<SljitNativeRegionExpressionPlan> projections;
 	bool use_vectorized_projection = false;
+};
+
+struct SljitNativeExpressionIntensity {
+	idx_t max_nodes = 0;
+	idx_t total_nodes = 0;
+	idx_t total_arithmetic_nodes = 0;
+	idx_t total_predicate_nodes = 0;
+	idx_t total_control_nodes = 0;
+	idx_t total_null_control_nodes = 0;
+	idx_t total_helper_nodes = 0;
+	idx_t max_straight_line_arithmetic_nodes = 0;
+	idx_t max_branchy_arithmetic_nodes = 0;
+	idx_t straight_line_arithmetic_expression_count = 0;
+	idx_t branchy_arithmetic_expression_count = 0;
+	idx_t expression_count = 0;
+};
+
+struct SljitNativeStringPredicateIntensity {
+	idx_t total_predicate_nodes = 0;
+	idx_t string_predicate_nodes = 0;
+	idx_t string_like_nodes = 0;
+	idx_t string_contains_nodes = 0;
+	idx_t string_prefix_nodes = 0;
+	idx_t string_suffix_nodes = 0;
+	idx_t string_equality_nodes = 0;
+	idx_t string_in_list_nodes = 0;
+	idx_t string_substring_in_list_nodes = 0;
+	idx_t conjunction_nodes = 0;
+	idx_t not_nodes = 0;
+
+	bool HasStringPredicate() const {
+		return string_predicate_nodes > 0;
+	}
+
+	bool HasHighCostPatternPredicate() const {
+		return string_like_nodes > 0 || string_contains_nodes > 0 || string_substring_in_list_nodes > 0;
+	}
+};
+
+struct SljitNativeRegionSummary {
+	bool finalized = false;
+	string native_shape;
+	bool generates_code = false;
+	bool generates_machine_code = false;
+	bool has_whole_operator_boundary_stage = false;
+	string whole_operator_boundary_blocker;
+	bool has_operator_contract_loop = false;
+	bool has_native_protocol_body = false;
+	ExecutionRegionExecutionBody execution_body = ExecutionRegionExecutionBody::NONE;
+	SljitNativeExpressionIntensity expression_intensity;
+	SljitNativeStringPredicateIntensity string_predicate_intensity;
 };
 
 struct SljitNativeRegionPlan {
@@ -220,6 +275,7 @@ struct SljitNativeRegionPlan {
 	idx_t fused_primitive_aggregate_updates = 0;
 	idx_t runtime_combined_filter_projections = 0;
 	ExecutionRegionSourceExecutionKind source_execution = ExecutionRegionSourceExecutionKind::NONE;
+	SljitNativeRegionSummary summary;
 
 	const vector<LogicalType> &OutputTypes() const {
 		D_ASSERT(!ops.empty());
@@ -301,6 +357,8 @@ unique_ptr<SljitNativeRegionPlan> CopySljitNativeRegion(const SljitNativeRegionP
 SljitOperatorStageRegionPlan BuildSljitOperatorStageRegionPlan(const SljitNativeRegionPlan &region,
                                                                const ExecutionRegionContract &contract,
                                                                const ExecutionRegionStagePlan &core_stage_plan);
+ExecutionRegionExecutionBody SljitNativeRegionExecutionBody(const SljitNativeRegionPlan &region,
+                                                            const ExecutionRegionContract &contract);
 string DescribeNativeRegion(const SljitNativeRegionPlan &region, const string &mode);
 string DescribeNativeRegionShape(const SljitNativeRegionPlan &region);
 SljitRegionPlan BuildSljitRegionPlan(const ExecutionRegionIR &region_ir, const ExecutionRegionCandidate &candidate);

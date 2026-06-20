@@ -31,15 +31,10 @@ void BuiltinFunctions::RegisterSQLiteFunctions() {
 	DuckDBLogContextFun::RegisterFunction(*this);
 	DuckDBIndexesFun::RegisterFunction(*this);
 	DuckDBJitBackendsFun::RegisterFunction(*this);
-	DuckDBJitAdmissionRulesFun::RegisterFunction(*this);
-	DuckDBJitAddAdmissionRuleFun::RegisterFunction(*this);
-	DuckDBJitClearAdmissionRulesFun::RegisterFunction(*this);
 	DuckDBJitClearEventsFun::RegisterFunction(*this);
 	DuckDBJitClearCountersFun::RegisterFunction(*this);
 	DuckDBJitEventsFun::RegisterFunction(*this);
 	DuckDBJitCountersFun::RegisterFunction(*this);
-	DuckDBJitDecisionCountersFun::RegisterFunction(*this);
-	DuckDBJitKernelCountersFun::RegisterFunction(*this);
 	DuckDBSchemasFun::RegisterFunction(*this);
 	DuckDBDependenciesFun::RegisterFunction(*this);
 	DuckDBExtensionsFun::RegisterFunction(*this);

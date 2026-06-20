@@ -62,6 +62,13 @@ static ExecutionRegionLoweringPlan UnsupportedContractBoundaryPlan() {
 	return plan;
 }
 
+static void SetGeneratedFusedRegion(ExecutionRegionLoweringPlan &plan) {
+	plan.SetCompiledExecutionMode(ExecutionRegionExecutionMode::NATIVE);
+	plan.SetRegionExecutionForm(ExecutionRegionForm::FUSED);
+	plan.SetExecutionBody(ExecutionRegionExecutionBody::GENERATED_MACHINE_CODE);
+	plan.SetGeneratedStageCount(1);
+}
+
 class ZeroCodeRegionKernel : public ExecutionRegionKernel {
 public:
 	const string &BackendName() const override {
@@ -99,8 +106,7 @@ public:
 			return UnsupportedContractBoundaryPlan();
 		}
 		ExecutionRegionLoweringPlan plan;
-		plan.SetCompiledExecutionMode(ExecutionRegionExecutionMode::NATIVE);
-		plan.SetRegionExecutionForm(ExecutionRegionForm::FUSED);
+		SetGeneratedFusedRegion(plan);
 		plan.AddNode("source", "CONTRACT_SOURCE", ExecutionRegionLoweringKind::BOUNDARY, "contract source boundary");
 		plan.AddNode("op0", "CONTRACT_FILTER", ExecutionRegionLoweringKind::NATIVE, "contract native node");
 		plan.AddNode("sink", "CONTRACT_SINK", ExecutionRegionLoweringKind::BOUNDARY, "contract sink boundary");
@@ -132,8 +138,7 @@ public:
 			return UnsupportedContractBoundaryPlan();
 		}
 		ExecutionRegionLoweringPlan plan;
-		plan.SetCompiledExecutionMode(ExecutionRegionExecutionMode::NATIVE);
-		plan.SetRegionExecutionForm(ExecutionRegionForm::FUSED);
+		SetGeneratedFusedRegion(plan);
 		plan.AddNode("source", "CONTRACT_SOURCE", ExecutionRegionLoweringKind::BOUNDARY, "contract source boundary");
 		plan.AddNode("op0", "CONTRACT_FILTER", ExecutionRegionLoweringKind::NATIVE, "contract native node");
 		plan.AddNode("sink", "CONTRACT_SINK", ExecutionRegionLoweringKind::BOUNDARY, "contract sink boundary");
@@ -165,12 +170,12 @@ public:
 	}
 
 	ExecutionRegionLoweringPlan AnalyzeRegion(const ExecutionRegionCompilationInput &input) override {
+		region_analyze_count++;
 		if (!IsMaximalTransformCandidate(input)) {
 			return UnsupportedContractBoundaryPlan();
 		}
 		ExecutionRegionLoweringPlan plan;
-		plan.SetCompiledExecutionMode(ExecutionRegionExecutionMode::NATIVE);
-		plan.SetRegionExecutionForm(ExecutionRegionForm::FUSED);
+		SetGeneratedFusedRegion(plan);
 		plan.AddNode("source", "CONTRACT_SOURCE", ExecutionRegionLoweringKind::BOUNDARY, "contract source boundary");
 		plan.AddNode("op0", "CONTRACT_FILTER", ExecutionRegionLoweringKind::NATIVE, "contract native node");
 		plan.AddNode("sink", "CONTRACT_SINK", ExecutionRegionLoweringKind::BOUNDARY, "contract sink boundary");
@@ -185,9 +190,10 @@ public:
 	}
 
 	atomic<idx_t> region_compile_count {0};
+	atomic<idx_t> region_analyze_count {0};
 };
 
-class AutoMissingExecutionFormAdmissionBackend : public ExecutionRegionBackend {
+class AutoMissingExecutionFormBackend : public ExecutionRegionBackend {
 public:
 	string Name() const override {
 		return "contract_test_auto_missing_execution_form_jit_backend";
@@ -198,45 +204,6 @@ public:
 	}
 
 	bool SupportsRegions() const override {
-		return true;
-	}
-
-	bool HasAutoAdmissionRules(ExecutionRegionCompileTarget target) const override {
-		return target == ExecutionRegionCompileTarget::REGION;
-	}
-
-	bool GetAutoAdmissionRule(ExecutionRegionCompileTarget target,
-	                          const ExecutionRegionPipelineInventory &inventory,
-	                          ExecutionRegionAdmissionRule &rule) const override {
-		if (target != ExecutionRegionCompileTarget::REGION || inventory.operator_count == 0) {
-			return false;
-		}
-		rule.target = ExecutionRegionCompileTarget::REGION;
-		rule.admission_key = "contract:auto-missing-execution-form";
-		rule.min_cardinality = 0;
-		rule.proof = "contract:auto-missing-execution-form-proof";
-		return true;
-	}
-
-	bool GetAutoAdmissionRule(ExecutionRegionCompileTarget target, const ExecutionRegionCandidate &candidate,
-	                          ExecutionRegionAdmissionRule &rule) const override {
-		if (target != ExecutionRegionCompileTarget::REGION || !IsMaximalTransformCandidate(candidate)) {
-			return false;
-		}
-		rule.target = ExecutionRegionCompileTarget::REGION;
-		rule.admission_key = "contract:auto-missing-execution-form";
-		rule.min_cardinality = 0;
-		rule.proof = "contract:auto-missing-execution-form-proof";
-		return true;
-	}
-
-	bool GetAutoAdmissionRule(ExecutionRegionCompileTarget target, const ExecutionRegionCandidate &candidate,
-	                          const ExecutionRegionLoweringPlan &lowering_plan,
-	                          ExecutionRegionAdmissionRule &rule) const override {
-		if (!GetAutoAdmissionRule(target, candidate, rule)) {
-			return false;
-		}
-		rule.admission_key = lowering_plan.shape_key;
 		return true;
 	}
 
@@ -339,8 +306,7 @@ public:
 			return UnsupportedContractBoundaryPlan();
 		}
 		ExecutionRegionLoweringPlan plan;
-		plan.SetCompiledExecutionMode(ExecutionRegionExecutionMode::NATIVE);
-		plan.SetRegionExecutionForm(ExecutionRegionForm::FUSED);
+		SetGeneratedFusedRegion(plan);
 		plan.AddNode("source", "CONTRACT_SOURCE", ExecutionRegionLoweringKind::BOUNDARY, "contract source boundary");
 		plan.AddNode("op0", "CONTRACT_FILTER", ExecutionRegionLoweringKind::NATIVE, "contract native node");
 		plan.AddNode("sink", "CONTRACT_SINK", ExecutionRegionLoweringKind::BOUNDARY, "contract sink boundary");
@@ -387,8 +353,7 @@ public:
 			return UnsupportedContractBoundaryPlan();
 		}
 		ExecutionRegionLoweringPlan plan;
-		plan.SetCompiledExecutionMode(ExecutionRegionExecutionMode::NATIVE);
-		plan.SetRegionExecutionForm(ExecutionRegionForm::FUSED);
+		SetGeneratedFusedRegion(plan);
 		plan.AddNode("full", "CONTRACT_FULL_PIPELINE", ExecutionRegionLoweringKind::NATIVE,
 		             "contract full pipeline node without full-pipeline executable ABI");
 		return plan;
@@ -442,8 +407,7 @@ public:
 			return UnsupportedContractBoundaryPlan();
 		}
 		ExecutionRegionLoweringPlan plan;
-		plan.SetCompiledExecutionMode(ExecutionRegionExecutionMode::NATIVE);
-		plan.SetRegionExecutionForm(ExecutionRegionForm::FUSED);
+		SetGeneratedFusedRegion(plan);
 		plan.AddNode("full", "CONTRACT_FULL_PIPELINE", ExecutionRegionLoweringKind::NATIVE,
 		             "contract false-returning full pipeline node");
 		return plan;

@@ -159,26 +159,39 @@ public:
 		return SinkResultType::NEED_MORE_INPUT;
 	}
 
-	idx_t FindOrCreateAggregateStates(DataChunk &input, const vector<idx_t> &group_input_indices,
-	                                  Vector &addresses_out) override {
-		if (group_input_indices.size() != op.groups.size()) {
-			throw InternalException("execution region perfect hash aggregate state lookup group binding mismatch");
-		}
+private:
+	ExecutionContext &context;
+	const PhysicalPerfectHashAggregate &op;
+	PerfectHashAggregateLocalState &local_state;
+};
+
+class PerfectHashAggregateStateAddressState : public ExecutionGroupedAggregateStateAddressState {
+public:
+	PerfectHashAggregateStateAddressState(ExecutionContext &context_p, const PhysicalPerfectHashAggregate &op_p,
+	                                      PerfectHashAggregateLocalState &local_state_p)
+	    : context(context_p), op(op_p), local_state(local_state_p) {
+	}
+
+	void ResolveStateAddresses(DataChunk &input, Vector &addresses,
+	                           optional_ptr<ExecutionOperatorStageRecorder> recorder = nullptr) override {
+		(void)recorder;
 		DataChunk &group_chunk = local_state.group_chunk;
-		group_chunk.Reset();
-		for (idx_t group_idx = 0; group_idx < group_input_indices.size(); group_idx++) {
-			auto input_idx = group_input_indices[group_idx];
-			if (input_idx >= input.ColumnCount()) {
-				throw InternalException("execution region perfect hash aggregate state lookup group index out of range");
+		for (idx_t group_idx = 0; group_idx < op.groups.size(); group_idx++) {
+			auto &group = op.groups[group_idx];
+			if (group->GetExpressionClass() != ExpressionClass::BOUND_REF) {
+				throw InternalException("execution region perfect hash aggregate group is not a bound reference");
 			}
-			group_chunk.data[group_idx].Reference(input.data[input_idx]);
+			auto &bound_ref_expr = group->Cast<BoundReferenceExpression>();
+			if (bound_ref_expr.Index() >= input.ColumnCount()) {
+				throw InternalException("execution region perfect hash aggregate group index out of range");
+			}
+			group_chunk.data[group_idx].Reference(input.data[bound_ref_expr.Index()]);
 		}
 		group_chunk.SetChildCardinality(input.size());
 		group_chunk.Verify(context.client.db);
-		return local_state.ht->FindOrCreateAggregateStates(group_chunk, addresses_out);
-	}
 
-	void FinishNativeAggregateUpdate() override {
+		auto layout = local_state.ht->GetStateLayout();
+		local_state.ht->ResolveStateAddresses(group_chunk, addresses, layout.aggregate_state_offset);
 	}
 
 private:
@@ -186,6 +199,80 @@ private:
 	const PhysicalPerfectHashAggregate &op;
 	PerfectHashAggregateLocalState &local_state;
 };
+
+static ExecutionPrimitiveAggregateUpdateBinding
+BuildPerfectHashAggregatePrimitiveUpdateBinding(const PhysicalPerfectHashAggregate &op,
+                                                const ExecutionRegionSinkInfo &sink_info) {
+	ExecutionPrimitiveAggregateUpdateBinding result;
+	auto &contract = sink_info.aggregate_contract;
+	if (!contract.grouped_state_layout_ready || contract.grouped_state_offsets.size() < sink_info.aggregates.size()) {
+		result.blocker = "perfect-hash-aggregate-primitive-update-grouped-state-layout";
+		return result;
+	}
+	result.lanes.reserve(sink_info.aggregates.size());
+	for (auto &aggregate_info : sink_info.aggregates) {
+		if (aggregate_info.aggregate_index >= op.aggregates.size() ||
+		    aggregate_info.aggregate_index >= contract.grouped_state_offsets.size()) {
+			result.blocker = "perfect-hash-aggregate-primitive-update-aggregate-index-out-of-range";
+			return result;
+		}
+		auto &aggregate = op.aggregates[aggregate_info.aggregate_index]->Cast<BoundAggregateExpression>();
+		auto &function = aggregate.Function();
+		if (!function.HasPrimitiveUpdateABI()) {
+			result.blocker = "perfect-hash-aggregate-primitive-update-abi-missing";
+			return result;
+		}
+		auto &abi = function.GetPrimitiveUpdateABI();
+		if (!AggregatePrimitiveUpdateKindIsSupported(abi.kind)) {
+			result.blocker = "perfect-hash-aggregate-primitive-update-kind-unsupported";
+			return result;
+		}
+		const auto requires_payload = AggregatePrimitiveUpdateRequiresPayload(abi.kind);
+		if (requires_payload) {
+			if (aggregate_info.child_count != 1 || aggregate_info.child_types.empty()) {
+				result.blocker = "perfect-hash-aggregate-primitive-update-requires-one-payload";
+				return result;
+			}
+			if (aggregate_info.child_types[0].InternalType() != abi.input_type) {
+				result.blocker = "perfect-hash-aggregate-primitive-update-payload-type-mismatch";
+				return result;
+			}
+		} else if (aggregate_info.child_count != 0) {
+			result.blocker = "perfect-hash-aggregate-primitive-update-requires-no-payload";
+			return result;
+		}
+		if (function.HasStateSizeCallback() && function.GetStateSizeCallback()(function) != abi.state_size) {
+			result.blocker = "perfect-hash-aggregate-primitive-update-state-size-mismatch";
+			return result;
+		}
+		auto value_size = AggregatePrimitiveUpdateStateValueSize(abi.kind);
+		if (value_size == 0 || abi.state_value_offset + value_size > abi.state_size) {
+			result.blocker = "perfect-hash-aggregate-primitive-update-state-layout-invalid";
+			return result;
+		}
+		if (AggregatePrimitiveUpdateHasStateIsSet(abi.kind) &&
+		    abi.state_is_set_offset + sizeof(bool) > abi.state_size) {
+			result.blocker = "perfect-hash-aggregate-primitive-update-state-layout-invalid";
+			return result;
+		}
+
+		ExecutionPrimitiveAggregateUpdateLane lane;
+		lane.ready = true;
+		lane.kind = abi.kind;
+		lane.aggregate_index = aggregate_info.aggregate_index;
+		lane.payload_index = requires_payload ? aggregate_info.payload_index : DConstants::INVALID_INDEX;
+		lane.payload_type = requires_payload ? aggregate_info.child_types[0].InternalType() : PhysicalType::INVALID;
+		lane.state_size = abi.state_size;
+		lane.state_offset = contract.grouped_state_offsets[aggregate_info.aggregate_index];
+		lane.state_value_offset = abi.state_value_offset;
+		lane.state_is_set_offset = abi.state_is_set_offset;
+		lane.blocker.clear();
+		result.lanes.push_back(lane);
+	}
+	result.ready = !result.lanes.empty() && result.lanes.size() == sink_info.aggregates.size();
+	result.blocker = result.ready ? string() : "perfect-hash-aggregate-primitive-update-empty";
+	return result;
+}
 
 static string ValidatePerfectHashAggregateExecutionSink(const ExecutionRegionSinkInfo &sink_info) {
 	if (sink_info.kind != ExecutionRegionSinkKind::PERFECT_HASH_AGGREGATE_UPDATE) {
@@ -197,32 +284,11 @@ static string ValidatePerfectHashAggregateExecutionSink(const ExecutionRegionSin
 		           ? "perfect-hash-aggregate-state-update-contract-not-ready"
 		           : contract.native_state_update_contract.blocker;
 	}
-	if (contract.distinct_aggregate_count != 0 || contract.aggregate_filter_count != 0 ||
-	    contract.aggregate_order_count != 0) {
-		return "perfect-hash-aggregate-state-update-unsupported-aggregate-semantics";
+	auto blocker = ExecutionRegionAggregateNativeStateUpdateBlocker(contract, sink_info.aggregates, sink_info.groups);
+	if (!blocker.empty()) {
+		return blocker;
 	}
-	if (contract.native_grouped_state_contract.status != ExecutionRegionStateContractStatus::READY) {
-		return contract.native_grouped_state_contract.blocker.empty() ? "perfect-hash-aggregate-grouped-state-not-ready"
-		                                                              : contract.native_grouped_state_contract.blocker;
-	}
-	for (auto &group : sink_info.groups) {
-		if (!group.supported_reference) {
-			return group.reason.empty() ? "perfect-hash-aggregate-state-update-group-reference" : group.reason;
-		}
-	}
-	for (auto &aggregate : sink_info.aggregates) {
-		if (!aggregate.reason.empty()) {
-			return aggregate.reason;
-		}
-		if (aggregate.distinct || aggregate.has_filter || aggregate.has_order_bys || aggregate.order_dependent) {
-			return "perfect-hash-aggregate-state-update-unsupported-aggregate-semantics";
-		}
-		if (!aggregate.has_state_update || !aggregate.payload_expressions_ready ||
-		    !aggregate.supported_payload_references) {
-			return "perfect-hash-aggregate-state-update-payload-contract";
-		}
-	}
-	return "none";
+	return string();
 }
 
 unique_ptr<GlobalSinkState> PhysicalPerfectHashAggregate::GetGlobalSinkState(ClientContext &context) const {
@@ -279,7 +345,7 @@ bool PhysicalPerfectHashAggregate::BindExecutionSink(ExecutionContext &context, 
 	binding = ExecutionSinkBinding();
 	binding.kind = sink_info.kind;
 	auto blocker = ValidatePerfectHashAggregateExecutionSink(sink_info);
-	if (blocker != "none") {
+	if (!blocker.empty()) {
 		binding.blocker = blocker;
 		binding.aggregate_update.blocker = blocker;
 		return false;
@@ -290,8 +356,24 @@ bool PhysicalPerfectHashAggregate::BindExecutionSink(ExecutionContext &context, 
 	binding.aggregate_update.ready = true;
 	binding.aggregate_update.state =
 	    make_shared_ptr<PerfectHashAggregateExecutionRegionSinkState>(context, *this, local_state);
-	binding.aggregate_update.blocker = "none";
-	binding.blocker = "none";
+	binding.aggregate_update.grouped_state.ready = true;
+	binding.aggregate_update.grouped_state.state =
+	    make_shared_ptr<PerfectHashAggregateStateAddressState>(context, *this, local_state);
+	binding.aggregate_update.grouped_state.aggregate_state_offsets = sink_info.aggregate_contract.grouped_state_offsets;
+	auto state_layout = local_state.ht->GetStateLayout();
+	binding.aggregate_update.grouped_state.perfect_hash_layout.ready = state_layout.data && state_layout.group_is_set;
+	binding.aggregate_update.grouped_state.perfect_hash_layout.data = state_layout.data;
+	binding.aggregate_update.grouped_state.perfect_hash_layout.group_is_set = state_layout.group_is_set;
+	binding.aggregate_update.grouped_state.perfect_hash_layout.total_groups = state_layout.total_groups;
+	binding.aggregate_update.grouped_state.perfect_hash_layout.tuple_size = state_layout.tuple_size;
+	binding.aggregate_update.grouped_state.perfect_hash_layout.aggregate_state_offset =
+	    state_layout.aggregate_state_offset;
+	binding.aggregate_update.grouped_state.perfect_hash_layout.blocker =
+	    binding.aggregate_update.grouped_state.perfect_hash_layout.ready ? "none" : "perfect-hash-state-layout-missing";
+	binding.aggregate_update.grouped_state.blocker.clear();
+	binding.aggregate_update.primitive = BuildPerfectHashAggregatePrimitiveUpdateBinding(*this, sink_info);
+	binding.aggregate_update.blocker.clear();
+	binding.blocker.clear();
 	return true;
 }
 
@@ -326,7 +408,11 @@ static SourceResultType ScanPerfectHashAggregateState(DataChunk &chunk, Operator
 	auto &state = input.global_state.Cast<PerfectHashAggregateState>();
 	auto &gstate = op.sink_state->Cast<PerfectHashAggregateGlobalState>();
 
-	gstate.ht->Scan(state.ht_scan_position, chunk);
+	{
+		ExecutionOperatorStageTimer timer(input.stage_recorder,
+		                                  "source_contract.perfect_hash_aggregate_state_scan.scan");
+		gstate.ht->Scan(state.ht_scan_position, chunk);
+	}
 
 	return chunk.size() > 0 ? SourceResultType::HAVE_MORE_OUTPUT : SourceResultType::FINISHED;
 }

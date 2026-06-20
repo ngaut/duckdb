@@ -31,6 +31,19 @@ static string CompiledFullPipelineResultToString(ExecutionRegionResult result) {
 	}
 }
 
+static string PipelineExecuteResultToString(PipelineExecuteResult result) {
+	switch (result) {
+	case PipelineExecuteResult::NOT_FINISHED:
+		return "not_finished";
+	case PipelineExecuteResult::FINISHED:
+		return "finished";
+	case PipelineExecuteResult::INTERRUPTED:
+		return "interrupted";
+	default:
+		return "unknown";
+	}
+}
+
 static PipelineExecuteResult CompiledFullPipelineResultToPipelineExecuteResult(ExecutionRegionResult result) {
 	switch (result) {
 	case ExecutionRegionResult::NOT_FINISHED:
@@ -86,7 +99,20 @@ ExecutionRunnerResult ExecutionRunnerResult::ContinueVectorized() {
 }
 
 ExecutionRunnerResult VectorizedRunner::Execute(ExecutionRegionPipelineAdapter &pipeline, idx_t max_chunks) {
-	return ExecutionRunnerResult::Executed(pipeline.ExecuteVectorizedPipeline(max_chunks));
+	auto &client = pipeline.GetClientContext();
+	auto kernel = pipeline.GetExecutableFullPipelineKernel();
+	if (!kernel || !ExecutionRegionSettings::TraceVectorizedBaseline(client) ||
+	    !ExecutionRegionSettings::TraceRuntime(client)) {
+		return ExecutionRunnerResult::Executed(pipeline.ExecuteVectorizedPipeline(max_chunks));
+	}
+	auto start = std::chrono::steady_clock::now();
+	auto result = pipeline.ExecuteVectorizedPipeline(max_chunks);
+	auto elapsed_us = ExecutionRegionElapsedMicros(start);
+	ExecutionRegionManager::Get(client).RecordVectorizedBaselineRuntimeEvent(
+	    client, *kernel, ExecutionRegionCompileTarget::REGION,
+	    "vectorized baseline pipeline executed for execution-region runtime comparison", elapsed_us,
+	    PipelineExecuteResultToString(result));
+	return ExecutionRunnerResult::Executed(result);
 }
 
 ExecutionRunnerResult CompiledVectorizedRunner::Execute(ExecutionRegionPipelineAdapter &pipeline, idx_t max_chunks) {
@@ -157,17 +183,11 @@ public:
 		return trace_runtime;
 	}
 
-	void RecordGeneratedStageRuntime(const string &stage, int64_t runtime_time_us) override {
-		if (!trace_runtime || stage.empty() || runtime_time_us < 0) {
+	void RecordGeneratedStageRuntime(ExecutionRegionStageId stage, int64_t runtime_time_us) override {
+		if (!trace_runtime) {
 			return;
 		}
-		for (auto &entry : generated_stage_runtime) {
-			if (entry.first == stage) {
-				entry.second += runtime_time_us;
-				return;
-			}
-		}
-		generated_stage_runtime.emplace_back(stage, runtime_time_us);
+		AddExecutionRegionStageRuntime(generated_stage_runtime, stage, runtime_time_us);
 	}
 
 	void Defer(string reason) override {
@@ -188,13 +208,32 @@ public:
 		if (!trace_runtime) {
 			return pipeline.FetchSourceContract(result);
 		}
+		ExecutionRegionSourceContractMetrics source_metrics;
 		auto trace_start = std::chrono::steady_clock::now();
-		auto source_result = pipeline.FetchSourceContract(result);
+		auto source_result = pipeline.FetchSourceContract(result, &source_metrics);
 		auto source_elapsed_us = ExecutionRegionElapsedMicros(trace_start);
 		source_contract_output_rows += result ? result->size() : 0;
 		source_contract_invocation_count++;
 		source_contract_runtime_time_us += source_elapsed_us;
+		RecordSourceMetrics(source_metrics);
 		return source_result;
+	}
+
+	SinkNextBatchType AdvanceSinkBatch(DataChunk &source_chunk, bool have_more_output) override {
+		if (sink_blocked) {
+			throw InternalException("compiled region runtime cannot advance sink batch after a blocked sink");
+		}
+		if (sink_finished) {
+			throw InternalException("compiled region runtime cannot advance sink batch after a finished sink");
+		}
+		if (!trace_runtime) {
+			return pipeline.AdvanceSinkBatch(source_chunk, have_more_output);
+		}
+		auto trace_start = std::chrono::steady_clock::now();
+		auto result = pipeline.AdvanceSinkBatch(source_chunk, have_more_output);
+		sink_next_batch_runtime_time_us += ExecutionRegionElapsedMicros(trace_start);
+		sink_next_batch_invocation_count++;
+		return result;
 	}
 
 	ExecutionOperatorBindResult BindOperator(idx_t operator_index, DataChunk &input,
@@ -240,24 +279,17 @@ public:
 		result.source_contract_output_rows = source_contract_output_rows;
 		result.source_contract_invocation_count = source_contract_invocation_count;
 		result.source_contract_runtime_time_us = source_contract_runtime_time_us;
+		result.source_stage_runtime = source_stage_runtime;
+		result.sink_next_batch_invocation_count = sink_next_batch_invocation_count;
+		result.sink_next_batch_runtime_time_us = sink_next_batch_runtime_time_us;
+		auto non_generated_runtime_time_us = source_contract_runtime_time_us + sink_next_batch_runtime_time_us;
 		result.generated_body_runtime_time_us =
-		    runtime_time_us > source_contract_runtime_time_us ? runtime_time_us - source_contract_runtime_time_us : 0;
-		result.generated_stage_runtime_breakdown = GeneratedStageRuntimeBreakdown();
+		    runtime_time_us > non_generated_runtime_time_us ? runtime_time_us - non_generated_runtime_time_us : 0;
+		result.generated_stage_runtime = generated_stage_runtime;
 		return result;
 	}
 
 private:
-	string GeneratedStageRuntimeBreakdown() const {
-		string result;
-		for (auto &entry : generated_stage_runtime) {
-			if (!result.empty()) {
-				result += ";";
-			}
-			result += entry.first + "=" + std::to_string(entry.second);
-		}
-		return result;
-	}
-
 	void ValidateSink() const {
 		if (sink_blocked) {
 			throw InternalException("compiled region runtime cannot sink after a blocked sink");
@@ -279,6 +311,29 @@ private:
 		}
 	}
 
+	void RecordSourceMetrics(const ExecutionRegionSourceContractMetrics &metrics) {
+		AddExecutionRegionStageRuntime(source_stage_runtime, "source_contract.setup", metrics.setup_runtime_time_us);
+		AddExecutionRegionStageRuntime(source_stage_runtime, "source_contract.start_operator",
+		                               metrics.start_operator_runtime_time_us);
+		if (metrics.get_data_stages.empty()) {
+			AddExecutionRegionStageRuntime(source_stage_runtime, "source_contract.get_data",
+			                               metrics.get_data_runtime_time_us);
+		} else {
+			for (auto &stage : metrics.get_data_stages) {
+				AddExecutionRegionStageRuntime(source_stage_runtime, stage.stage, stage.runtime_time_us, stage.count);
+			}
+			auto get_data_stage_runtime_us = metrics.GetDataStageRuntimeSum();
+			if (metrics.get_data_runtime_time_us > get_data_stage_runtime_us) {
+				AddExecutionRegionStageRuntime(source_stage_runtime, "source_contract.get_data.unattributed",
+				                               metrics.get_data_runtime_time_us - get_data_stage_runtime_us);
+			}
+		}
+		AddExecutionRegionStageRuntime(source_stage_runtime, "source_contract.finish_source",
+		                               metrics.finish_source_runtime_time_us);
+		AddExecutionRegionStageRuntime(source_stage_runtime, "source_contract.end_operator",
+		                               metrics.end_operator_runtime_time_us);
+	}
+
 private:
 	ExecutionRegionPipelineAdapter &pipeline;
 	idx_t max_chunks;
@@ -286,7 +341,10 @@ private:
 	idx_t source_contract_output_rows = 0;
 	idx_t source_contract_invocation_count = 0;
 	int64_t source_contract_runtime_time_us = 0;
-	vector<std::pair<string, int64_t>> generated_stage_runtime;
+	vector<ExecutionRegionRecordedStageRuntime> source_stage_runtime;
+	idx_t sink_next_batch_invocation_count = 0;
+	int64_t sink_next_batch_runtime_time_us = 0;
+	vector<ExecutionRegionRecordedStageRuntime> generated_stage_runtime;
 	idx_t sink_input_rows = 0;
 	bool sink_blocked = false;
 	bool sink_finished = false;
@@ -314,7 +372,7 @@ CompiledVectorizedRunStatus CompiledVectorizedRunner::ExecuteCompiledRegion(Exec
 	if (!pipeline.IsAtCleanSourceToSinkBoundary()) {
 		if (trace_runtime) {
 			ExecutionRegionManager::Get(client).RecordRuntimeEvent(
-			    client, *kernel, ExecutionRegionCompileTarget::REGION, "skipped",
+			    client, *kernel, ExecutionRegionCompileTarget::REGION, ExecutionRegionEventStatus::SKIPPED,
 			    "full pipeline kernel not entered because executor state is not at a clean "
 			    "source-to-sink boundary",
 			    0, 0, 0, "boundary");
@@ -341,8 +399,8 @@ CompiledVectorizedRunStatus CompiledVectorizedRunner::ExecuteCompiledRegion(Exec
 				                  : "full pipeline kernel deferred: " + runtime.DeferredReason();
 				auto runtime_metrics = runtime.Metrics(elapsed_us);
 				ExecutionRegionManager::Get(client).RecordRuntimeEvent(
-				    client, *kernel, ExecutionRegionCompileTarget::REGION, "skipped", std::move(reason),
-				    runtime.SourceContractOutputRows(), runtime.SinkInputRows(), elapsed_us,
+				    client, *kernel, ExecutionRegionCompileTarget::REGION, ExecutionRegionEventStatus::SKIPPED,
+				    std::move(reason), runtime.SourceContractOutputRows(), runtime.SinkInputRows(), elapsed_us,
 				    CompiledFullPipelineResultToString(compiled_result), runtime_metrics);
 			}
 			return CompiledVectorizedRunStatus::VECTORIZED_DEFERRED;
@@ -358,8 +416,8 @@ CompiledVectorizedRunStatus CompiledVectorizedRunner::ExecuteCompiledRegion(Exec
 		if (trace_runtime) {
 			auto runtime_metrics = runtime.Metrics(elapsed_us);
 			ExecutionRegionManager::Get(client).RecordRuntimeEvent(
-			    client, *kernel, ExecutionRegionCompileTarget::REGION, "executed", std::move(runtime_reason),
-			    runtime.SourceContractOutputRows(), runtime.SinkInputRows(), elapsed_us,
+			    client, *kernel, ExecutionRegionCompileTarget::REGION, ExecutionRegionEventStatus::EXECUTED,
+			    std::move(runtime_reason), runtime.SourceContractOutputRows(), runtime.SinkInputRows(), elapsed_us,
 			    CompiledFullPipelineResultToString(compiled_result), runtime_metrics);
 		}
 		return CompiledVectorizedRunStatus::EXECUTED;
@@ -368,7 +426,7 @@ CompiledVectorizedRunStatus CompiledVectorizedRunner::ExecuteCompiledRegion(Exec
 		if (trace_runtime) {
 			auto elapsed_us = trace_started ? ExecutionRegionElapsedMicros(trace_start) : 0;
 			ExecutionRegionManager::Get(client).RecordRuntimeEvent(
-			    client, *kernel, ExecutionRegionCompileTarget::REGION, "error",
+			    client, *kernel, ExecutionRegionCompileTarget::REGION, ExecutionRegionEventStatus::ERROR,
 			    "full pipeline kernel threw: " + CompiledRegionExceptionMessage(compiled_error), 0, 0, elapsed_us,
 			    "error");
 		}

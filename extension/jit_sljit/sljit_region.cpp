@@ -34,7 +34,9 @@ ExecutionRegionCompileResult CompileSljitRegion(const string &backend_name,
 		throw InternalException("SLJIT region compile received a backend plan from another execution region backend");
 	}
 	const auto &lowering_plan = *input.lowering_plan;
-	auto reason = lowering_plan.EventReason();
+	auto reason = ExecutionRegionSettings::ShouldRecordDetailedTelemetry(input.context)
+	                  ? lowering_plan.EventReason()
+	                  : lowering_plan.CompactEventReason();
 	auto native_region = sljit_plan->native_region ? CopySljitNativeRegion(*sljit_plan->native_region) : nullptr;
 	auto error = sljit_plan->error;
 	auto execution_mode = lowering_plan.ExpectedCompiledExecutionMode();
@@ -52,15 +54,15 @@ ExecutionRegionCompileResult CompileSljitRegion(const string &backend_name,
 		if (native_region->fused_projection_chains > 0) {
 			reason += ";fused:projection-chain=" + std::to_string(native_region->fused_projection_chains);
 		}
-			if (native_region->fused_arithmetic_projection_chains > 0) {
-				reason += ";fused:arithmetic-projection-chain=" +
-				          std::to_string(native_region->fused_arithmetic_projection_chains);
-			}
-			if (native_region->fused_primitive_aggregate_updates > 0) {
-				reason += ";fused:primitive-aggregate-update=" +
-				          std::to_string(native_region->fused_primitive_aggregate_updates);
-			}
-			if (native_region->runtime_combined_filter_projections > 0) {
+		if (native_region->fused_arithmetic_projection_chains > 0) {
+			reason += ";fused:arithmetic-projection-chain=" +
+			          std::to_string(native_region->fused_arithmetic_projection_chains);
+		}
+		if (native_region->fused_primitive_aggregate_updates > 0) {
+			reason +=
+			    ";fused:primitive-aggregate-update=" + std::to_string(native_region->fused_primitive_aggregate_updates);
+		}
+		if (native_region->runtime_combined_filter_projections > 0) {
 			reason += ";runtime-fused:filter-projection=" +
 			          std::to_string(native_region->runtime_combined_filter_projections);
 		}
@@ -75,22 +77,34 @@ ExecutionRegionCompileResult CompileSljitRegion(const string &backend_name,
 			throw InternalException(
 			    "SLJIT compiled region reached code generation without executable region operators");
 		}
-		const auto execution_body =
-		    executable_region.CodeSize() == 0 ? "native-operator-protocol" : "generated-machine-code";
+		const auto execution_body = SljitNativeRegionExecutionBody(*native_region, contract);
+		if (execution_body == ExecutionRegionExecutionBody::NONE) {
+			throw InternalException("SLJIT compiled region has no executable body classification");
+		}
+		auto expected_execution_body = lowering_plan.ExpectedExecutionBody();
+		if (expected_execution_body != ExecutionRegionExecutionBody::NONE &&
+		    expected_execution_body != execution_body) {
+			throw InternalException("SLJIT executable body %s does not match analyzed body %s",
+			                        ExecutionRegionExecutionBodyToString(execution_body),
+			                        ExecutionRegionExecutionBodyToString(expected_execution_body));
+		}
 		if (execution_mode != ExecutionRegionExecutionMode::NATIVE) {
 			throw InternalException("SLJIT executable mode native does not match analyzed mode %s",
 			                        ExecutionRegionExecutionModeToString(execution_mode));
 		}
 		auto shape = DescribeNativeRegionShape(*native_region);
-		auto ir = AttachCoreRegionIR(DescribeNativeRegion(*native_region, "native.region"), input.region_ir);
+		string ir;
+		if (ExecutionRegionSettings::DumpIR(input.context)) {
+			ir = AttachCoreRegionIR(DescribeNativeRegion(*native_region, "native.region"), input.region_ir);
+		}
 		reason += ";execution:native-sljit-region-" + shape;
-		reason += ";execution-body=" + string(execution_body);
+		reason += ";execution-body=" + string(ExecutionRegionExecutionBodyToString(execution_body));
 		if (ExecutionRegionSettings::Verify(input.context)) {
 			reason += ";verify:region";
 		}
 		return ExecutionRegionCompileResult::Compiled(
 		    CreateSljitNativeRegionKernel(input.context, backend_name, std::move(executable_region), contract.abi),
-		    execution_mode, std::move(reason), MaybeDumpIr(input.context, std::move(ir)));
+		    execution_mode, std::move(reason), MaybeDumpIr(input.context, std::move(ir)), execution_body);
 	}
 	if (!error.empty()) {
 		return ExecutionRegionCompileResult::Error(std::move(error));

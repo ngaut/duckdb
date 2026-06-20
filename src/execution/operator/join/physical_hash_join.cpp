@@ -7,6 +7,7 @@
 #include "duckdb/common/types/value_map.hpp"
 #include "duckdb/common/uhugeint.hpp"
 #include "duckdb/common/types/uhugeint.hpp"
+#include "duckdb/execution/execution_operator_runtime.hpp"
 #include "duckdb/execution/expression_executor.hpp"
 #include "duckdb/execution/join_hashtable.hpp"
 #include "duckdb/execution/operator/aggregate/ungrouped_aggregate_state.hpp"
@@ -36,6 +37,8 @@
 #include "duckdb/storage/buffer_manager.hpp"
 #include "duckdb/storage/temporary_memory_manager.hpp"
 #include "duckdb/planner/expression_iterator.hpp"
+
+#include <chrono>
 
 namespace duckdb {
 
@@ -729,7 +732,7 @@ bool ExecutionBindHashJoinBuild(ExecutionContext &context, OperatorSinkInput &in
 	}
 
 	binding.ready = true;
-	binding.blocker = "none";
+	binding.blocker.clear();
 	build.ready = true;
 	build.hash_table = lstate.hash_table.get();
 	build.append_state = &lstate.append_state;
@@ -738,11 +741,26 @@ bool ExecutionBindHashJoinBuild(ExecutionContext &context, OperatorSinkInput &in
 	build.filter_pushdown = lstate.op.filter_pushdown.get();
 	build.local_filter_state = lstate.local_filter_state.get();
 	build.skip_filter_pushdown = gstate.skip_filter_pushdown;
-	build.blocker = "none";
+	build.blocker.clear();
 	return true;
 }
 
-SinkResultType ExecutionSinkHashJoinBuild(const ExecutionHashJoinBuildBinding &binding, DataChunk &input) {
+static std::chrono::steady_clock::time_point
+HashJoinBuildTraceStart(optional_ptr<ExecutionOperatorStageRecorder> recorder) {
+	return recorder ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point();
+}
+
+static void RecordHashJoinBuildTraceStage(optional_ptr<ExecutionOperatorStageRecorder> recorder, const string &stage,
+                                          std::chrono::steady_clock::time_point start) {
+	if (!recorder) {
+		return;
+	}
+	auto end = std::chrono::steady_clock::now();
+	auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(end - start).count();
+	recorder->RecordStageRuntime(stage, elapsed);
+}
+
+static void AssertExecutionHashJoinBuildReady(const ExecutionHashJoinBuildBinding &binding) {
 	if (!binding.ready || !binding.hash_table || !binding.append_state || !binding.join_keys ||
 	    !binding.payload_chunk) {
 		throw InternalException("execution native hash join build sink requires a bound hash join build state");
@@ -753,21 +771,94 @@ SinkResultType ExecutionSinkHashJoinBuild(const ExecutionHashJoinBuildBinding &b
 	if (binding.payload_chunk->ColumnCount() != binding.payload_input_indices.size()) {
 		throw InternalException("execution native hash join build payload count mismatch");
 	}
+}
 
+void ExecutionHashJoinBuildReferenceKeys(const ExecutionHashJoinBuildBinding &binding, DataChunk &input) {
+	AssertExecutionHashJoinBuildReady(binding);
 	binding.join_keys->ReferenceColumns(input, binding.key_input_indices);
-	if (binding.filter_pushdown && !binding.skip_filter_pushdown) {
-		if (!binding.local_filter_state) {
-			throw InternalException("execution native hash join build filter pushdown requires local filter state");
-		}
-		binding.filter_pushdown->Sink(*binding.join_keys, *binding.local_filter_state);
-	}
+}
 
+void ExecutionHashJoinBuildApplyFilterPushdown(const ExecutionHashJoinBuildBinding &binding) {
+	AssertExecutionHashJoinBuildReady(binding);
+	if (!binding.filter_pushdown || binding.skip_filter_pushdown) {
+		return;
+	}
+	if (!binding.local_filter_state) {
+		throw InternalException("execution native hash join build filter pushdown requires local filter state");
+	}
+	binding.filter_pushdown->Sink(*binding.join_keys, *binding.local_filter_state);
+}
+
+void ExecutionHashJoinBuildReferencePayload(const ExecutionHashJoinBuildBinding &binding, DataChunk &input) {
+	AssertExecutionHashJoinBuildReady(binding);
 	if (binding.payload_input_indices.empty()) {
 		binding.payload_chunk->SetChildCardinality(input.size());
-	} else {
-		binding.payload_chunk->ReferenceColumns(input, binding.payload_input_indices);
+		return;
 	}
-	binding.hash_table->Build(*binding.append_state, *binding.join_keys, *binding.payload_chunk);
+	binding.payload_chunk->ReferenceColumns(input, binding.payload_input_indices);
+}
+
+idx_t ExecutionHashJoinBuildPrepare(const ExecutionHashJoinBuildBinding &binding, DataChunk &source_chunk,
+                                    Vector &hash_values, SelectionVector &build_sel,
+                                    optional_ptr<const SelectionVector> &build_selection) {
+	AssertExecutionHashJoinBuildReady(binding);
+	if (source_chunk.ColumnCount() == 0) {
+		binding.hash_table->InitializeBuildChunk(source_chunk);
+	} else {
+		source_chunk.Reset();
+	}
+	return binding.hash_table->PrepareBuildChunk(*binding.append_state, *binding.join_keys, *binding.payload_chunk,
+	                                             source_chunk, hash_values, build_sel, build_selection);
+}
+
+void ExecutionHashJoinBuildHash(const ExecutionHashJoinBuildBinding &binding, DataChunk &source_chunk,
+                                Vector &hash_values, const SelectionVector &build_selection, idx_t build_count) {
+	AssertExecutionHashJoinBuildReady(binding);
+	binding.hash_table->HashBuildChunk(*binding.append_state, *binding.join_keys, source_chunk, hash_values,
+	                                   build_selection, build_count);
+}
+
+void ExecutionHashJoinBuildAppend(const ExecutionHashJoinBuildBinding &binding, DataChunk &source_chunk,
+                                  const SelectionVector &build_selection, idx_t build_count) {
+	AssertExecutionHashJoinBuildReady(binding);
+	binding.hash_table->AppendBuildChunk(*binding.append_state, source_chunk, build_selection, build_count);
+}
+
+SinkResultType ExecutionSinkHashJoinBuild(const ExecutionHashJoinBuildBinding &binding, DataChunk &input,
+                                          optional_ptr<ExecutionOperatorStageRecorder> recorder) {
+	AssertExecutionHashJoinBuildReady(binding);
+
+	auto stage_start = HashJoinBuildTraceStart(recorder);
+	ExecutionHashJoinBuildReferenceKeys(binding, input);
+	RecordHashJoinBuildTraceStage(recorder, "reference_keys", stage_start);
+
+	stage_start = HashJoinBuildTraceStart(recorder);
+	ExecutionHashJoinBuildApplyFilterPushdown(binding);
+	RecordHashJoinBuildTraceStage(recorder, "filter_pushdown", stage_start);
+
+	stage_start = HashJoinBuildTraceStart(recorder);
+	ExecutionHashJoinBuildReferencePayload(binding, input);
+	RecordHashJoinBuildTraceStage(recorder, "reference_payload", stage_start);
+
+	DataChunk source_chunk;
+	Vector hash_values(LogicalType::HASH);
+	SelectionVector build_sel(STANDARD_VECTOR_SIZE);
+	optional_ptr<const SelectionVector> build_selection;
+
+	stage_start = HashJoinBuildTraceStart(recorder);
+	auto build_count = ExecutionHashJoinBuildPrepare(binding, source_chunk, hash_values, build_sel, build_selection);
+	RecordHashJoinBuildTraceStage(recorder, "hash_table_prepare", stage_start);
+	if (build_count == 0) {
+		return SinkResultType::NEED_MORE_INPUT;
+	}
+
+	stage_start = HashJoinBuildTraceStart(recorder);
+	ExecutionHashJoinBuildHash(binding, source_chunk, hash_values, *build_selection, build_count);
+	RecordHashJoinBuildTraceStage(recorder, "hash_table_hash", stage_start);
+
+	stage_start = HashJoinBuildTraceStart(recorder);
+	ExecutionHashJoinBuildAppend(binding, source_chunk, *build_selection, build_count);
+	RecordHashJoinBuildTraceStage(recorder, "hash_table_append", stage_start);
 	return SinkResultType::NEED_MORE_INPUT;
 }
 
@@ -1935,13 +2026,13 @@ PhysicalHashJoin::GetExecutionOperatorReadiness(ClientContext &context,
 			perfect_hash_layout = true;
 		}
 		if (!perfect_hash_layout && table_layout.finalized && sink.hash_table->Count() == 0 &&
-		    ExecutionHashJoinProbeEmptyBuildSideSupported(output_mode, contract.correlated_mark_counts_required)) {
-			table_layout.ready = true;
-			table_layout.blocker = "none";
-		} else if (!perfect_hash_layout && native_residual_probe &&
-		           table_layout.blocker == "hash-join-native-residual-predicate") {
-			table_layout.ready = true;
-			table_layout.blocker = "none";
+			ExecutionHashJoinProbeEmptyBuildSideSupported(output_mode, contract.correlated_mark_counts_required)) {
+		table_layout.ready = true;
+		table_layout.blocker.clear();
+	} else if (!perfect_hash_layout && native_residual_probe &&
+	           table_layout.blocker == "hash-join-native-residual-predicate") {
+		table_layout.ready = true;
+		table_layout.blocker.clear();
 		} else if (!perfect_hash_layout) {
 			auto blocker = table_layout.blocker.empty() ? "hash-join-native-readiness-table-layout-not-ready"
 			                                            : table_layout.blocker;
@@ -2062,14 +2153,14 @@ ExecutionOperatorBindResult PhysicalHashJoin::BindExecutionOperator(ExecutionCon
 			perfect_hash_layout = true;
 		}
 		if (!perfect_hash_layout && table_layout.finalized && sink.hash_table->Count() == 0 &&
-		    ExecutionHashJoinProbeEmptyBuildSideSupported(output_mode, contract.correlated_mark_counts_required)) {
-			empty_build_side = true;
-			table_layout.ready = true;
-			table_layout.blocker = "none";
-		} else if (!perfect_hash_layout && native_residual_probe &&
-		           table_layout.blocker == "hash-join-native-residual-predicate") {
-			table_layout.ready = true;
-			table_layout.blocker = "none";
+			ExecutionHashJoinProbeEmptyBuildSideSupported(output_mode, contract.correlated_mark_counts_required)) {
+		empty_build_side = true;
+		table_layout.ready = true;
+		table_layout.blocker.clear();
+	} else if (!perfect_hash_layout && native_residual_probe &&
+	           table_layout.blocker == "hash-join-native-residual-predicate") {
+		table_layout.ready = true;
+		table_layout.blocker.clear();
 		} else if (!perfect_hash_layout) {
 			binding.blocker =
 			    table_layout.blocker.empty() ? "hash-join-native-runtime-table-layout-not-ready" : table_layout.blocker;
@@ -2109,7 +2200,7 @@ ExecutionOperatorBindResult PhysicalHashJoin::BindExecutionOperator(ExecutionCon
 	}
 
 	binding.ready = true;
-	binding.blocker = "none";
+	binding.blocker.clear();
 	binding.hash_join_probe.ready = true;
 	binding.hash_join_probe.hash_table = sink.hash_table.get();
 	binding.hash_join_probe.layout_kind = perfect_hash_layout ? ExecutionHashJoinProbeLayoutKind::PERFECT_HASH_TABLE
@@ -2127,7 +2218,7 @@ ExecutionOperatorBindResult PhysicalHashJoin::BindExecutionOperator(ExecutionCon
 	binding.hash_join_probe.output_mode = contract.native_probe_output_mode;
 	binding.hash_join_probe.correlated_mark_counts_required = contract.correlated_mark_counts_required;
 	binding.hash_join_probe.correlated_mark_group_count = contract.delim_type_count;
-	binding.hash_join_probe.blocker = "none";
+	binding.hash_join_probe.blocker.clear();
 	return ExecutionOperatorBindResult::READY;
 }
 
@@ -2231,7 +2322,7 @@ static void MaterializeExecutionCorrelatedMarkJoinProbe(const ExecutionHashJoinP
 
 void ExecutionMaterializeHashJoinProbe(const ExecutionHashJoinProbeBinding &binding, DataChunk &input,
                                        Vector &row_pointers, const SelectionVector &match_sel, idx_t count,
-                                       DataChunk &result) {
+                                       DataChunk &result, optional_ptr<ExecutionOperatorStageRecorder> recorder) {
 	if (!binding.ready || !binding.hash_table) {
 		throw InternalException("execution native hash join probe materialization requires a bound hash join table");
 	}
@@ -2256,61 +2347,78 @@ void ExecutionMaterializeHashJoinProbe(const ExecutionHashJoinProbeBinding &bind
 	}
 	if (binding.output_mode == ExecutionHashJoinProbeOutputMode::MARK_PROBE) {
 		if (binding.correlated_mark_counts_required) {
+			ExecutionOperatorStageTimer timer(recorder, "correlated_mark_probe");
 			MaterializeExecutionCorrelatedMarkJoinProbe(binding, input, match_sel, count, result);
 			return;
 		}
 		if (count != input.size()) {
 			throw InternalException("execution native hash join MARK probe must materialize every input row");
 		}
-		ReferenceExecutionHashJoinProbeOutputColumns(binding, input, result);
-		auto &mark_vector = result.data.back();
-		mark_vector.SetVectorType(VectorType::FLAT_VECTOR);
-		FlatVector::SetSize(mark_vector, count_t(count));
-		auto bool_result = FlatVector::GetDataMutable<bool>(mark_vector);
-		auto &mask = FlatVector::ValidityMutable(mark_vector);
-		mask.SetAllValid(count);
-		for (idx_t i = 0; i < count; i++) {
-			bool_result[i] = match_sel.get_index(i) != 0;
+		{
+			ExecutionOperatorStageTimer timer(recorder, "reference_probe_output");
+			ReferenceExecutionHashJoinProbeOutputColumns(binding, input, result);
 		}
-		for (idx_t key_idx = 0; key_idx < binding.probe_key_input_indices.size(); key_idx++) {
-			if (binding.hash_table->NullValuesAreEqual(key_idx)) {
-				continue;
-			}
-			auto input_col = binding.probe_key_input_indices[key_idx];
-			if (input_col >= input.ColumnCount()) {
-				throw InternalException("execution native hash join MARK probe key column index out of range");
-			}
-			UnifiedVectorFormat key_data;
-			input.data[input_col].ToUnifiedFormat(key_data);
-			if (!key_data.validity.CanHaveNull()) {
-				continue;
-			}
+		auto &mark_vector = result.data.back();
+		bool *bool_result;
+		ValidityMask *mask;
+		{
+			ExecutionOperatorStageTimer timer(recorder, "mark_probe_vector");
+			mark_vector.SetVectorType(VectorType::FLAT_VECTOR);
+			FlatVector::SetSize(mark_vector, count_t(count));
+			bool_result = FlatVector::GetDataMutable<bool>(mark_vector);
+			mask = &FlatVector::ValidityMutable(mark_vector);
+			mask->SetAllValid(count);
 			for (idx_t i = 0; i < count; i++) {
-				auto key_row = key_data.sel->get_index(i);
-				if (!key_data.validity.RowIsValidUnsafe(key_row)) {
-					mask.SetInvalid(i);
+				bool_result[i] = match_sel.get_index(i) != 0;
+			}
+		}
+		{
+			ExecutionOperatorStageTimer timer(recorder, "mark_probe_key_nulls");
+			for (idx_t key_idx = 0; key_idx < binding.probe_key_input_indices.size(); key_idx++) {
+				if (binding.hash_table->NullValuesAreEqual(key_idx)) {
+					continue;
+				}
+				auto input_col = binding.probe_key_input_indices[key_idx];
+				if (input_col >= input.ColumnCount()) {
+					throw InternalException("execution native hash join MARK probe key column index out of range");
+				}
+				UnifiedVectorFormat key_data;
+				input.data[input_col].ToUnifiedFormat(key_data);
+				if (!key_data.validity.CanHaveNull()) {
+					continue;
+				}
+				for (idx_t i = 0; i < count; i++) {
+					auto key_row = key_data.sel->get_index(i);
+					if (!key_data.validity.RowIsValidUnsafe(key_row)) {
+						mask->SetInvalid(i);
+					}
 				}
 			}
 		}
 		if (binding.hash_table->has_null) {
+			ExecutionOperatorStageTimer timer(recorder, "mark_probe_build_nulls");
 			for (idx_t i = 0; i < count; i++) {
 				if (!bool_result[i]) {
-					mask.SetInvalid(i);
+					mask->SetInvalid(i);
 				}
 			}
 		}
 		result.SetChildCardinality(count);
 		return;
 	}
-	for (idx_t col_idx = 0; col_idx < binding.lhs_output_column_indices.size(); col_idx++) {
-		auto input_col = binding.lhs_output_column_indices[col_idx];
-		if (input_col >= input.ColumnCount()) {
-			throw InternalException("execution native hash join probe output column index out of range");
+	{
+		ExecutionOperatorStageTimer timer(recorder, "slice_probe_output");
+		for (idx_t col_idx = 0; col_idx < binding.lhs_output_column_indices.size(); col_idx++) {
+			auto input_col = binding.lhs_output_column_indices[col_idx];
+			if (input_col >= input.ColumnCount()) {
+				throw InternalException("execution native hash join probe output column index out of range");
+			}
+			result.data[col_idx].Slice(input.data[input_col], match_sel, count);
 		}
-		result.data[col_idx].Slice(input.data[input_col], match_sel, count);
 	}
 	if (binding.output_mode == ExecutionHashJoinProbeOutputMode::MATCHED_PROBE_AND_BUILD ||
 	    binding.output_mode == ExecutionHashJoinProbeOutputMode::LEFT_PROBE_AND_BUILD) {
+		ExecutionOperatorStageTimer timer(recorder, "gather_build_payload");
 		binding.hash_table->GatherRHS(row_pointers, *FlatVector::IncrementalSelectionVector(), count, result,
 		                              binding.lhs_output_column_indices.size());
 	}
@@ -2319,7 +2427,8 @@ void ExecutionMaterializeHashJoinProbe(const ExecutionHashJoinProbeBinding &bind
 
 void ExecutionMaterializePerfectHashJoinProbe(const ExecutionHashJoinProbeBinding &binding, DataChunk &input,
                                               const SelectionVector &probe_sel, const SelectionVector &build_sel,
-                                              idx_t count, DataChunk &result) {
+                                              idx_t count, DataChunk &result,
+                                              optional_ptr<ExecutionOperatorStageRecorder> recorder) {
 	if (!binding.ready || binding.layout_kind != ExecutionHashJoinProbeLayoutKind::PERFECT_HASH_TABLE ||
 	    !binding.perfect_layout.ready) {
 		throw InternalException("execution native perfect hash join materialization requires a perfect hash layout");
@@ -2337,18 +2446,23 @@ void ExecutionMaterializePerfectHashJoinProbe(const ExecutionHashJoinProbeBindin
 		throw InternalException("execution native perfect hash join output column count mismatch");
 	}
 	const bool all_probe_rows_selected = binding.perfect_layout.is_build_dense && count == input.size();
-	for (idx_t col_idx = 0; col_idx < binding.lhs_output_column_indices.size(); col_idx++) {
-		auto input_col = binding.lhs_output_column_indices[col_idx];
-		if (input_col >= input.ColumnCount()) {
-			throw InternalException("execution native perfect hash join output column index out of range");
-		}
-		if (all_probe_rows_selected) {
-			result.data[col_idx].Reference(input.data[input_col]);
-		} else {
-			result.data[col_idx].Slice(input.data[input_col], probe_sel, count);
+	{
+		ExecutionOperatorStageTimer timer(recorder,
+		                                  all_probe_rows_selected ? "reference_probe_output" : "slice_probe_output");
+		for (idx_t col_idx = 0; col_idx < binding.lhs_output_column_indices.size(); col_idx++) {
+			auto input_col = binding.lhs_output_column_indices[col_idx];
+			if (input_col >= input.ColumnCount()) {
+				throw InternalException("execution native perfect hash join output column index out of range");
+			}
+			if (all_probe_rows_selected) {
+				result.data[col_idx].Reference(input.data[input_col]);
+			} else {
+				result.data[col_idx].Slice(input.data[input_col], probe_sel, count);
+			}
 		}
 	}
 	if (binding.output_mode == ExecutionHashJoinProbeOutputMode::MATCHED_PROBE_AND_BUILD) {
+		ExecutionOperatorStageTimer timer(recorder, "dictionary_build_payload");
 		if (binding.perfect_layout.rhs_dictionary_buffers.size() != binding.perfect_layout.rhs_output_column_count) {
 			throw InternalException("execution native perfect hash join dictionary shape mismatch");
 		}
@@ -2366,7 +2480,8 @@ void ExecutionMaterializePerfectHashJoinProbe(const ExecutionHashJoinProbeBindin
 
 void ExecutionMaterializeHashJoinResidualSources(const ExecutionHashJoinProbeBinding &binding, DataChunk &input,
                                                  Vector &row_pointers, const SelectionVector &match_sel, idx_t count,
-                                                 DataChunk &residual_sources) {
+                                                 DataChunk &residual_sources,
+                                                 optional_ptr<ExecutionOperatorStageRecorder> recorder) {
 	if (!binding.ready || !binding.hash_table) {
 		throw InternalException("execution native hash join residual materialization requires a bound hash join table");
 	}
@@ -2382,18 +2497,22 @@ void ExecutionMaterializeHashJoinResidualSources(const ExecutionHashJoinProbeBin
 			throw InternalException("execution native hash join residual source type mismatch");
 		}
 		switch (source.kind) {
-		case ExecutionHashJoinResidualSourceKind::PROBE:
+		case ExecutionHashJoinResidualSourceKind::PROBE: {
+			ExecutionOperatorStageTimer timer(recorder, "materialize_probe_source");
 			if (source.input_index >= input.ColumnCount()) {
 				throw InternalException("execution native hash join residual probe source out of range");
 			}
 			target.Slice(input.data[source.input_index], match_sel, count);
 			break;
-		case ExecutionHashJoinResidualSourceKind::BUILD:
+		}
+		case ExecutionHashJoinResidualSourceKind::BUILD: {
+			ExecutionOperatorStageTimer timer(recorder, "materialize_build_source");
 			binding.hash_table->GetDataCollection().Gather(row_pointers, *FlatVector::IncrementalSelectionVector(),
 			                                               count, source.input_index, target,
 			                                               *FlatVector::IncrementalSelectionVector(), nullptr);
 			FlatVector::SetSize(target, count_t(count));
 			break;
+		}
 		default:
 			throw InternalException("execution native hash join residual source kind is unknown");
 		}
@@ -2403,7 +2522,8 @@ void ExecutionMaterializeHashJoinResidualSources(const ExecutionHashJoinProbeBin
 
 void ExecutionMaterializeHashJoinProbeLeftUnmatched(const ExecutionHashJoinProbeBinding &binding, DataChunk &input,
                                                     const SelectionVector &unmatched_sel, idx_t count,
-                                                    DataChunk &result) {
+                                                    DataChunk &result,
+                                                    optional_ptr<ExecutionOperatorStageRecorder> recorder) {
 	if (!binding.ready || !binding.hash_table) {
 		throw InternalException(
 		    "execution native LEFT hash join unmatched materialization requires a bound hash join table");
@@ -2415,18 +2535,121 @@ void ExecutionMaterializeHashJoinProbeLeftUnmatched(const ExecutionHashJoinProbe
 	if (expected_column_count != result.ColumnCount()) {
 		throw InternalException("execution native LEFT hash join unmatched output column count mismatch");
 	}
-	for (idx_t col_idx = 0; col_idx < binding.lhs_output_column_indices.size(); col_idx++) {
-		auto input_col = binding.lhs_output_column_indices[col_idx];
-		if (input_col >= input.ColumnCount()) {
-			throw InternalException("execution native LEFT hash join unmatched output column index out of range");
+	{
+		ExecutionOperatorStageTimer timer(recorder, "slice_probe_output");
+		for (idx_t col_idx = 0; col_idx < binding.lhs_output_column_indices.size(); col_idx++) {
+			auto input_col = binding.lhs_output_column_indices[col_idx];
+			if (input_col >= input.ColumnCount()) {
+				throw InternalException("execution native LEFT hash join unmatched output column index out of range");
+			}
+			result.data[col_idx].Slice(input.data[input_col], unmatched_sel, count);
 		}
-		result.data[col_idx].Slice(input.data[input_col], unmatched_sel, count);
 	}
-	auto rhs_offset = binding.lhs_output_column_indices.size();
-	for (idx_t rhs_col_idx = 0; rhs_col_idx < binding.rhs_output_column_count; rhs_col_idx++) {
-		ConstantVector::SetNull(result.data[rhs_offset + rhs_col_idx], count_t(count));
+	{
+		ExecutionOperatorStageTimer timer(recorder, "null_build_payload");
+		auto rhs_offset = binding.lhs_output_column_indices.size();
+		for (idx_t rhs_col_idx = 0; rhs_col_idx < binding.rhs_output_column_count; rhs_col_idx++) {
+			ConstantVector::SetNull(result.data[rhs_offset + rhs_col_idx], count_t(count));
+		}
 	}
 	result.SetChildCardinality(count);
+}
+
+ExecutionHashJoinProbeState::~ExecutionHashJoinProbeState() = default;
+
+class ExecutionHashJoinProbeStateImpl : public ExecutionHashJoinProbeState {
+public:
+	ExecutionHashJoinProbeStateImpl(const ExecutionHashJoinProbeBinding &binding, Allocator &allocator)
+	    : hash_table(binding.hash_table), scan_structure(*binding.hash_table, join_key_state) {
+		if (!binding.ready || !binding.hash_table) {
+			throw InternalException("execution hash join probe primitive requires a bound hash table");
+		}
+		if (binding.layout_kind != ExecutionHashJoinProbeLayoutKind::REGULAR_HASH_TABLE) {
+			throw InternalException("execution hash join probe primitive requires a regular hash table layout");
+		}
+		if (!binding.table_layout.ready || binding.table_layout.condition_types.empty()) {
+			throw InternalException("execution hash join probe primitive requires ready regular hash table metadata");
+		}
+		for (auto index : binding.probe_key_input_indices) {
+			key_input_indices.push_back(NumericCast<column_t>(index));
+		}
+		for (auto index : binding.lhs_probe_column_indices) {
+			lhs_probe_column_indices.push_back(NumericCast<column_t>(index));
+		}
+		lhs_join_keys.Initialize(allocator, binding.table_layout.condition_types);
+		if (!binding.lhs_probe_types.empty()) {
+			lhs_probe_data.Initialize(allocator, binding.lhs_probe_types);
+		}
+		TupleDataCollection::InitializeChunkState(join_key_state, binding.table_layout.condition_types);
+	}
+
+	void Validate(const ExecutionHashJoinProbeBinding &binding) const {
+		if (!binding.ready || !binding.hash_table) {
+			throw InternalException("execution hash join probe primitive binding is incomplete");
+		}
+		if (binding.hash_table != hash_table) {
+			throw InternalException("execution hash join probe primitive hash table changed after state creation");
+		}
+		if (binding.layout_kind != ExecutionHashJoinProbeLayoutKind::REGULAR_HASH_TABLE || binding.empty_build_side) {
+			throw InternalException("execution hash join probe primitive only handles non-empty regular hash tables");
+		}
+		if (binding.probe_key_input_indices.size() != key_input_indices.size()) {
+			throw InternalException("execution hash join probe primitive key binding changed after state creation");
+		}
+		if (binding.lhs_probe_column_indices.size() != lhs_probe_column_indices.size()) {
+			throw InternalException(
+			    "execution hash join probe primitive probe-column binding changed after state creation");
+		}
+	}
+
+public:
+	JoinHashTable *hash_table;
+	vector<column_t> key_input_indices;
+	vector<column_t> lhs_probe_column_indices;
+	DataChunk lhs_join_keys;
+	TupleDataChunkState join_key_state;
+	DataChunk lhs_probe_data;
+	JoinHashTable::ScanStructure scan_structure;
+	JoinHashTable::ProbeState probe_state;
+};
+
+unique_ptr<ExecutionHashJoinProbeState> ExecutionCreateHashJoinProbeState(const ExecutionHashJoinProbeBinding &binding,
+                                                                          Allocator &allocator) {
+	return make_uniq<ExecutionHashJoinProbeStateImpl>(binding, allocator);
+}
+
+OperatorResultType ExecutionProbeHashJoin(const ExecutionHashJoinProbeBinding &binding,
+                                          ExecutionHashJoinProbeState &state_p, DataChunk &input, DataChunk &output,
+                                          optional_ptr<ExecutionOperatorStageRecorder> recorder) {
+	auto &state = static_cast<ExecutionHashJoinProbeStateImpl &>(state_p);
+	state.Validate(binding);
+	output.Reset();
+	if (state.scan_structure.is_null) {
+		{
+			ExecutionOperatorStageTimer timer(recorder, "reference_keys");
+			state.lhs_join_keys.Reset();
+			state.lhs_join_keys.ReferenceColumns(input, state.key_input_indices);
+		}
+		{
+			ExecutionOperatorStageTimer timer(recorder, "probe");
+			binding.hash_table->Probe(state.scan_structure, state.lhs_join_keys, state.join_key_state,
+			                          state.probe_state);
+		}
+	}
+	{
+		ExecutionOperatorStageTimer timer(recorder, "reference_probe_payload");
+		state.lhs_probe_data.Reset();
+		state.lhs_probe_data.ReferenceColumns(input, state.lhs_probe_column_indices);
+	}
+	{
+		ExecutionOperatorStageTimer timer(recorder, "next");
+		state.scan_structure.Next(state.lhs_join_keys, state.lhs_probe_data, output);
+	}
+	if (state.scan_structure.PointersExhausted() && output.size() == 0) {
+		state.scan_structure.is_null = true;
+		return OperatorResultType::NEED_MORE_INPUT;
+	}
+	return OperatorResultType::HAVE_MORE_OUTPUT;
 }
 
 OperatorResultType PhysicalHashJoin::ExecuteInternal(ExecutionContext &context, DataChunk &input, DataChunk &chunk,
@@ -2970,6 +3193,8 @@ static SourceResultType ScanHashJoinSourceState(ExecutionContext &context, DataC
 	sink.scanned_data = true;
 
 	if (!sink.external && !PropagatesBuildSide(op.join_type)) {
+		ExecutionOperatorStageTimer timer(input.stage_recorder,
+		                                  "source_contract.hash_join_state_scan.finish_non_producing");
 		annotated_lock_guard<annotated_mutex> guard(gstate.lock);
 		if (gstate.global_stage != HashJoinSourceStage::DONE) {
 			gstate.global_stage = HashJoinSourceStage::DONE;
@@ -2984,19 +3209,33 @@ static SourceResultType ScanHashJoinSourceState(ExecutionContext &context, DataC
 	}
 
 	if (gstate.global_stage == HashJoinSourceStage::INIT) {
+		ExecutionOperatorStageTimer timer(input.stage_recorder, "source_contract.hash_join_state_scan.initialize");
 		gstate.Initialize(sink);
 	}
 
 	// Any call to GetData must produce tuples, otherwise the pipeline executor thinks that we're done
 	// Therefore, we loop until we've produced tuples, or until the operator is actually done
 	while (gstate.global_stage != HashJoinSourceStage::DONE && chunk.size() == 0) {
-		if (!lstate.TaskFinished() || gstate.AssignTask(sink, lstate)) {
+		bool has_task = !lstate.TaskFinished();
+		if (!has_task) {
+			ExecutionOperatorStageTimer timer(input.stage_recorder, "source_contract.hash_join_state_scan.assign_task");
+			has_task = gstate.AssignTask(sink, lstate);
+		}
+		if (has_task) {
+			ExecutionOperatorStageTimer timer(input.stage_recorder,
+			                                  "source_contract.hash_join_state_scan.execute_task");
 			lstate.ExecuteTask(sink, gstate, chunk);
 		} else {
+			ExecutionOperatorStageTimer prepare_timer(input.stage_recorder,
+			                                          "source_contract.hash_join_state_scan.prepare_next_stage");
 			annotated_lock_guard<annotated_mutex> guard(gstate.lock);
-			if (gstate.TryPrepareNextStage(sink) || gstate.global_stage == HashJoinSourceStage::DONE) {
+			bool next_stage_ready =
+			    gstate.TryPrepareNextStage(sink) || gstate.global_stage == HashJoinSourceStage::DONE;
+			if (next_stage_ready) {
 				gstate.UnblockTasks();
 			} else {
+				ExecutionOperatorStageTimer timer(input.stage_recorder,
+				                                  "source_contract.hash_join_state_scan.block_source");
 				return gstate.BlockSource(input.interrupt_state);
 			}
 		}

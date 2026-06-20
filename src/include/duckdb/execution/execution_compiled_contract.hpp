@@ -43,6 +43,7 @@ struct ExecutionCompiledStageContract {
 	ExecutionCompiledContractKind operation = ExecutionCompiledContractKind::NONE;
 	ExecutionRegionStageExecutionKind execution = ExecutionRegionStageExecutionKind::NONE;
 	ExecutionCompiledDrainKind drain = ExecutionCompiledDrainKind::NONE;
+	bool executable_work = false;
 	string required_capability;
 	string blocker;
 	string ir;
@@ -109,6 +110,15 @@ struct ExecutionCompiledOperatorContract {
 	bool HasZeroOrManyOutput() const {
 		for (auto &stage : stages) {
 			if (stage.drain == ExecutionCompiledDrainKind::ZERO_OR_MANY_OUTPUT) {
+				return true;
+			}
+		}
+		return false;
+	}
+
+	bool HasExecutableWork() const {
+		for (auto &stage : stages) {
+			if (stage.executable_work && stage.execution == ExecutionRegionStageExecutionKind::NATIVE_CONTRACT) {
 				return true;
 			}
 		}

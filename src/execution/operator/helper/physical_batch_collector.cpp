@@ -45,8 +45,8 @@ bool PhysicalBatchCollector::BindExecutionSink(ExecutionContext &context, DataCh
 	binding.ready = true;
 	binding.append_sink.ready = true;
 	binding.append_sink.state = make_shared_ptr<BatchCollectorExecutionRegionSinkState>(state);
-	binding.append_sink.blocker = "none";
-	binding.blocker = "none";
+	binding.append_sink.blocker.clear();
+	binding.blocker.clear();
 	return true;
 }
 

@@ -370,10 +370,28 @@ public:
 		return SinkResultType::NEED_MORE_INPUT;
 	}
 
-	idx_t FindOrCreateAggregateStates(DataChunk &input, const vector<idx_t> &group_input_indices,
-	                                  Vector &addresses_out) override {
+private:
+	ExecutionContext &context;
+	const PhysicalHashAggregate &op;
+	HashAggregateGlobalSinkState &global_state;
+	HashAggregateLocalSinkState &local_state;
+	InterruptState &interrupt_state;
+};
+
+class HashAggregateStateAddressState : public ExecutionGroupedAggregateStateAddressState {
+public:
+	HashAggregateStateAddressState(ExecutionContext &context_p, const PhysicalHashAggregate &op_p,
+	                               HashAggregateGlobalSinkState &global_state_p,
+	                               HashAggregateLocalSinkState &local_state_p, InterruptState &interrupt_state_p)
+	    : context(context_p), op(op_p), global_state(global_state_p), local_state(local_state_p),
+	      interrupt_state(interrupt_state_p) {
+	}
+
+	void ResolveStateAddresses(DataChunk &input, Vector &addresses,
+	                           optional_ptr<ExecutionOperatorStageRecorder> recorder = nullptr) override {
 		if (op.distinct_collection_info) {
-			throw InternalException("execution region hash aggregate state lookup received unsupported aggregate state");
+			throw InternalException(
+			    "execution region hash aggregate state lookup received unsupported aggregate state");
 		}
 		if (op.groupings.size() != 1 || global_state.grouping_states.size() != 1 ||
 		    local_state.grouping_states.size() != 1) {
@@ -383,21 +401,19 @@ public:
 		auto &grouping_local_state = local_state.grouping_states[0];
 		OperatorSinkInput sink_input {*grouping_global_state.table_state, *grouping_local_state.table_state,
 		                              interrupt_state};
-		return op.groupings[0].table_data.FindOrCreateAggregateStatesFromBoundGroups(context, input,
-		                                                                             group_input_indices, sink_input,
-		                                                                             addresses_out);
+		op.groupings[0].table_data.ResolveStateAddresses(context, input, sink_input, addresses, recorder);
 	}
 
-	void FinishNativeAggregateUpdate() override {
+	void FinishStateUpdates() override {
 		if (op.groupings.size() != 1 || global_state.grouping_states.size() != 1 ||
 		    local_state.grouping_states.size() != 1) {
-			throw InternalException("execution region hash aggregate native update requires one grouping state");
+			throw InternalException("execution region hash aggregate state update requires one grouping state");
 		}
 		auto &grouping_global_state = global_state.grouping_states[0];
 		auto &grouping_local_state = local_state.grouping_states[0];
 		OperatorSinkInput sink_input {*grouping_global_state.table_state, *grouping_local_state.table_state,
 		                              interrupt_state};
-		op.groupings[0].table_data.FinishNativeAggregateUpdate(context, sink_input);
+		op.groupings[0].table_data.FinishStateUpdates(context, sink_input);
 	}
 
 private:
@@ -408,6 +424,80 @@ private:
 	InterruptState &interrupt_state;
 };
 
+static ExecutionPrimitiveAggregateUpdateBinding
+BuildHashAggregatePrimitiveUpdateBinding(const PhysicalHashAggregate &op, const ExecutionRegionSinkInfo &sink_info) {
+	ExecutionPrimitiveAggregateUpdateBinding result;
+	auto &contract = sink_info.aggregate_contract;
+	if (!contract.grouped_state_layout_ready || contract.grouped_state_offsets.size() < sink_info.aggregates.size()) {
+		result.blocker = "hash-aggregate-primitive-update-grouped-state-layout";
+		return result;
+	}
+	result.lanes.reserve(sink_info.aggregates.size());
+	for (auto &aggregate_info : sink_info.aggregates) {
+		if (aggregate_info.aggregate_index >= op.grouped_aggregate_data.aggregates.size() ||
+		    aggregate_info.aggregate_index >= contract.grouped_state_offsets.size()) {
+			result.blocker = "hash-aggregate-primitive-update-aggregate-index-out-of-range";
+			return result;
+		}
+		auto &aggregate =
+		    op.grouped_aggregate_data.aggregates[aggregate_info.aggregate_index]->Cast<BoundAggregateExpression>();
+		auto &function = aggregate.Function();
+		if (!function.HasPrimitiveUpdateABI()) {
+			result.blocker = "hash-aggregate-primitive-update-abi-missing";
+			return result;
+		}
+		auto &abi = function.GetPrimitiveUpdateABI();
+		if (!AggregatePrimitiveUpdateKindIsSupported(abi.kind)) {
+			result.blocker = "hash-aggregate-primitive-update-kind-unsupported";
+			return result;
+		}
+		const auto requires_payload = AggregatePrimitiveUpdateRequiresPayload(abi.kind);
+		if (requires_payload) {
+			if (aggregate_info.child_count != 1 || aggregate_info.child_types.empty()) {
+				result.blocker = "hash-aggregate-primitive-update-requires-one-payload";
+				return result;
+			}
+			if (aggregate_info.child_types[0].InternalType() != abi.input_type) {
+				result.blocker = "hash-aggregate-primitive-update-payload-type-mismatch";
+				return result;
+			}
+		} else if (aggregate_info.child_count != 0) {
+			result.blocker = "hash-aggregate-primitive-update-requires-no-payload";
+			return result;
+		}
+		if (function.HasStateSizeCallback() && function.GetStateSizeCallback()(function) != abi.state_size) {
+			result.blocker = "hash-aggregate-primitive-update-state-size-mismatch";
+			return result;
+		}
+		auto value_size = AggregatePrimitiveUpdateStateValueSize(abi.kind);
+		if (value_size == 0 || abi.state_value_offset + value_size > abi.state_size) {
+			result.blocker = "hash-aggregate-primitive-update-state-layout-invalid";
+			return result;
+		}
+		if (AggregatePrimitiveUpdateHasStateIsSet(abi.kind) &&
+		    abi.state_is_set_offset + sizeof(bool) > abi.state_size) {
+			result.blocker = "hash-aggregate-primitive-update-state-layout-invalid";
+			return result;
+		}
+
+		ExecutionPrimitiveAggregateUpdateLane lane;
+		lane.ready = true;
+		lane.kind = abi.kind;
+		lane.aggregate_index = aggregate_info.aggregate_index;
+		lane.payload_index = requires_payload ? aggregate_info.payload_index : DConstants::INVALID_INDEX;
+		lane.payload_type = requires_payload ? aggregate_info.child_types[0].InternalType() : PhysicalType::INVALID;
+		lane.state_size = abi.state_size;
+		lane.state_offset = contract.grouped_state_offsets[aggregate_info.aggregate_index];
+		lane.state_value_offset = abi.state_value_offset;
+		lane.state_is_set_offset = abi.state_is_set_offset;
+		lane.blocker.clear();
+		result.lanes.push_back(lane);
+	}
+	result.ready = !result.lanes.empty() && result.lanes.size() == sink_info.aggregates.size();
+	result.blocker = result.ready ? string() : "hash-aggregate-primitive-update-empty";
+	return result;
+}
+
 static string ValidateHashAggregateExecutionSink(const ExecutionRegionSinkInfo &sink_info) {
 	if (sink_info.kind != ExecutionRegionSinkKind::HASH_AGGREGATE_UPDATE) {
 		return "hash-aggregate-runtime-kind-mismatch";
@@ -417,35 +507,11 @@ static string ValidateHashAggregateExecutionSink(const ExecutionRegionSinkInfo &
 		return contract.native_state_update_contract.blocker.empty() ? "hash-aggregate-state-update-contract-not-ready"
 		                                                             : contract.native_state_update_contract.blocker;
 	}
-	if (contract.distinct_aggregate_count != 0 || contract.distinct_table_count != 0 ||
-	    contract.distinct_child_count != 0 || contract.distinct_filter_count != 0) {
-		return "hash-aggregate-state-update-distinct-state";
+	auto blocker = ExecutionRegionAggregateNativeStateUpdateBlocker(contract, sink_info.aggregates, sink_info.groups);
+	if (!blocker.empty()) {
+		return blocker;
 	}
-	if (contract.aggregate_filter_count != 0 || contract.aggregate_order_count != 0) {
-		return "hash-aggregate-state-update-filter-or-order";
-	}
-	if (contract.native_grouped_state_contract.status != ExecutionRegionStateContractStatus::READY) {
-		return contract.native_grouped_state_contract.blocker.empty() ? "hash-aggregate-grouped-state-not-ready"
-		                                                              : contract.native_grouped_state_contract.blocker;
-	}
-	for (auto &group : sink_info.groups) {
-		if (!group.supported_reference) {
-			return group.reason.empty() ? "hash-aggregate-state-update-group-reference" : group.reason;
-		}
-	}
-	for (auto &aggregate : sink_info.aggregates) {
-		if (!aggregate.reason.empty()) {
-			return aggregate.reason;
-		}
-		if (aggregate.distinct || aggregate.has_filter || aggregate.has_order_bys || aggregate.order_dependent) {
-			return "hash-aggregate-state-update-unsupported-aggregate-semantics";
-		}
-		if (!aggregate.has_state_update || !aggregate.payload_expressions_ready ||
-		    !aggregate.supported_payload_references) {
-			return "hash-aggregate-state-update-payload-contract";
-		}
-	}
-	return "none";
+	return string();
 }
 
 void PhysicalHashAggregate::SetMultiScan(GlobalSinkState &state) {
@@ -618,10 +684,10 @@ bool PhysicalHashAggregate::BindExecutionSink(ExecutionContext &context, DataChu
 	binding = ExecutionSinkBinding();
 	binding.kind = sink_info.kind;
 	auto blocker = ValidateHashAggregateExecutionSink(sink_info);
-	if (blocker == "none" && CanSkipRegularSink()) {
+	if (blocker.empty() && CanSkipRegularSink()) {
 		blocker = "hash-aggregate-state-update-skipped-regular-sink";
 	}
-	if (blocker != "none") {
+	if (!blocker.empty()) {
 		binding.blocker = blocker;
 		binding.aggregate_update.blocker = blocker;
 		return false;
@@ -633,8 +699,16 @@ bool PhysicalHashAggregate::BindExecutionSink(ExecutionContext &context, DataChu
 	binding.aggregate_update.ready = true;
 	binding.aggregate_update.state = make_shared_ptr<HashAggregateExecutionRegionSinkState>(
 	    context, *this, global_state, local_state, sink_input.interrupt_state);
-	binding.aggregate_update.blocker = "none";
-	binding.blocker = "none";
+	binding.aggregate_update.grouped_state.ready = true;
+	binding.aggregate_update.grouped_state.state = make_shared_ptr<HashAggregateStateAddressState>(
+	    context, *this, global_state, local_state, sink_input.interrupt_state);
+	binding.aggregate_update.grouped_state.aggregate_state_offsets = sink_info.aggregate_contract.grouped_state_offsets;
+	groupings[0].table_data.GetExecutionHashAggregateLookupLayout(
+	    binding.aggregate_update.grouped_state.hash_lookup_layout);
+	binding.aggregate_update.grouped_state.blocker.clear();
+	binding.aggregate_update.primitive = BuildHashAggregatePrimitiveUpdateBinding(*this, sink_info);
+	binding.aggregate_update.blocker.clear();
+	binding.blocker.clear();
 	return true;
 }
 
@@ -1143,7 +1217,7 @@ static SourceResultType ScanHashAggregateState(ExecutionContext &context, DataCh
 		auto &grouping_gstate = sink_gstate.grouping_states[radix_idx];
 
 		OperatorSourceInput source_input {*gstate.radix_states[radix_idx], *lstate.radix_states[radix_idx],
-		                                  input.interrupt_state};
+		                                  input.interrupt_state, input.stage_recorder};
 		auto res = radix_table.GetData(context, chunk, *grouping_gstate.table_state, source_input);
 		if (res == SourceResultType::BLOCKED) {
 			return res;
@@ -1152,15 +1226,19 @@ static SourceResultType ScanHashAggregateState(ExecutionContext &context, DataCh
 			return SourceResultType::HAVE_MORE_OUTPUT;
 		}
 
-		// move to the next table
-		annotated_lock_guard<annotated_mutex> guard(gstate.lock);
-		lstate.radix_idx = lstate.radix_idx.GetIndex() + 1;
-		if (lstate.radix_idx.GetIndex() > gstate.state_index) {
-			// we have not yet worked on the table
-			// move the global index forwards
-			gstate.state_index = lstate.radix_idx.GetIndex();
+		{
+			ExecutionOperatorStageTimer timer(input.stage_recorder,
+			                                  "source_contract.hash_aggregate_state_scan.advance_radix_table");
+			// move to the next table
+			annotated_lock_guard<annotated_mutex> guard(gstate.lock);
+			lstate.radix_idx = lstate.radix_idx.GetIndex() + 1;
+			if (lstate.radix_idx.GetIndex() > gstate.state_index) {
+				// we have not yet worked on the table
+				// move the global index forwards
+				gstate.state_index = lstate.radix_idx.GetIndex();
+			}
+			lstate.radix_idx = gstate.state_index.load();
 		}
-		lstate.radix_idx = gstate.state_index.load();
 	}
 
 	return chunk.size() == 0 ? SourceResultType::FINISHED : SourceResultType::HAVE_MORE_OUTPUT;

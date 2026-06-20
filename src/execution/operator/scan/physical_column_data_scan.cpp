@@ -1,6 +1,7 @@
 #include "duckdb/execution/operator/scan/physical_column_data_scan.hpp"
 
 #include "duckdb/common/types/column/column_data_collection.hpp"
+#include "duckdb/execution/execution_operator_runtime.hpp"
 #include "duckdb/execution/operator/aggregate/physical_hash_aggregate.hpp"
 #include "duckdb/execution/operator/join/physical_delim_join.hpp"
 #include "duckdb/parallel/meta_pipeline.hpp"
@@ -69,6 +70,7 @@ SourceResultType PhysicalColumnDataScan::GetDataInternal(ExecutionContext &conte
 SourceResultType PhysicalColumnDataScan::GetExecutionSourceContractDataInternal(ExecutionContext &context,
                                                                                 DataChunk &chunk,
                                                                                 OperatorSourceInput &input) const {
+	ExecutionOperatorStageTimer timer(input.stage_recorder, "source_contract.column_data_scan.scan");
 	return GetDataInternal(context, chunk, input);
 }
 

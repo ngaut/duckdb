@@ -115,18 +115,6 @@ struct DuckDBJitBackendsFun {
 	static void RegisterFunction(BuiltinFunctions &set);
 };
 
-struct DuckDBJitAdmissionRulesFun {
-	static void RegisterFunction(BuiltinFunctions &set);
-};
-
-struct DuckDBJitAddAdmissionRuleFun {
-	static void RegisterFunction(BuiltinFunctions &set);
-};
-
-struct DuckDBJitClearAdmissionRulesFun {
-	static void RegisterFunction(BuiltinFunctions &set);
-};
-
 struct DuckDBJitClearEventsFun {
 	static void RegisterFunction(BuiltinFunctions &set);
 };
@@ -136,14 +124,6 @@ struct DuckDBJitClearCountersFun {
 };
 
 struct DuckDBJitCountersFun {
-	static void RegisterFunction(BuiltinFunctions &set);
-};
-
-struct DuckDBJitDecisionCountersFun {
-	static void RegisterFunction(BuiltinFunctions &set);
-};
-
-struct DuckDBJitKernelCountersFun {
 	static void RegisterFunction(BuiltinFunctions &set);
 };
 

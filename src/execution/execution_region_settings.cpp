@@ -2,7 +2,7 @@
 
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/string_util.hpp"
-#include "duckdb/main/query_profiler.hpp"
+#include "duckdb/main/client_context.hpp"
 #include "duckdb/main/settings.hpp"
 
 namespace duckdb {
@@ -20,14 +20,18 @@ bool ExecutionRegionSettings::TraceDecisions(ClientContext &context) {
 }
 
 bool ExecutionRegionSettings::TraceRuntime(ClientContext &context) {
-	return Settings::Get<JitTraceRuntimeSetting>(context) || QueryProfiler::Get(context).IsExplainAnalyze();
+	return Settings::Get<JitTraceRuntimeSetting>(context) || context.QueryProfilerIsExplainAnalyze();
+}
+
+bool ExecutionRegionSettings::TraceVectorizedBaseline(ClientContext &context) {
+	return Settings::Get<JitTraceVectorizedBaselineSetting>(context);
 }
 
 bool ExecutionRegionSettings::Verify(ClientContext &context) {
 	return Settings::Get<JitVerifySetting>(context);
 }
 
-bool ExecutionRegionSettings::ShouldRecordDecisionCounters(ClientContext &context) {
+bool ExecutionRegionSettings::ShouldRecordDetailedTelemetry(ClientContext &context) {
 	return TraceDecisions(context) || DumpIR(context) || TraceRuntime(context);
 }
 

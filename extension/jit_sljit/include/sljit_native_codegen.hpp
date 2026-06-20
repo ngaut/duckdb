@@ -9,6 +9,7 @@
 #pragma once
 
 #include "sljit_function_types.hpp"
+#include "sljit_region_plan.hpp"
 
 #include "duckdb/execution/execution_region_kernel.hpp"
 
@@ -23,11 +24,12 @@ BuildSljitNativeIntegerBinaryConstant(SljitNativeIntegerKind kind, SljitNativeIn
 unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeIntegerBinaryReferences(
     SljitNativeIntegerKind kind, SljitNativeIntegerBinaryOp op, SljitNativeVectorFunction &function, string &error,
     bool check_result_range = false, int64_t result_min = 0, int64_t result_max = 0);
-unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeDoubleBinaryConstant(SljitNativeDoubleBinaryOp op,
-                                                                           bool constant_on_left,
-                                                                           SljitNativeVectorFunction &function,
-                                                                           string &error);
+unique_ptr<ExecutionRegionCodeHandle>
+BuildSljitNativeDoubleBinaryConstant(SljitNativeDoubleBinaryOp op, SljitNativeDoubleSourceKind source_kind,
+                                     bool constant_on_left, SljitNativeVectorFunction &function, string &error);
 unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeDoubleBinaryReferences(SljitNativeDoubleBinaryOp op,
+                                                                             SljitNativeDoubleSourceKind left_kind,
+                                                                             SljitNativeDoubleSourceKind right_kind,
                                                                              SljitNativeVectorFunction &function,
                                                                              string &error);
 unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeIntegerCast(SljitNativeSignedIntegerWidth source_width,
@@ -79,16 +81,35 @@ unique_ptr<ExecutionRegionCodeHandle>
 BuildSljitNativeStringDecompress(idx_t source_size, SljitNativeVectorFunction &function, string &error);
 unique_ptr<ExecutionRegionCodeHandle>
 BuildSljitNativeExpressionTree(const ExecutionExpressionIR &root, SljitNativeVectorFunction &function, string &error);
+unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeTypedExpressionTree(const ExecutionExpressionIR &root,
+                                                                          SljitNativeIntegerKind result_kind,
+                                                                          SljitNativeVectorFunction &function,
+                                                                          string &error);
 unique_ptr<ExecutionRegionCodeHandle>
 BuildSljitNativeUngroupedSumInt64ExpressionTree(const ExecutionExpressionIR &root,
                                                 SljitNativeAggregateUpdateFunction &function, string &error);
 unique_ptr<ExecutionRegionCodeHandle>
+BuildSljitNativeUngroupedSumInt64TypedExpressionTree(const ExecutionExpressionIR &root,
+                                                     SljitNativeAggregateUpdateFunction &function, string &error);
+unique_ptr<ExecutionRegionCodeHandle>
+BuildSljitNativeUngroupedSumHugeintTypedExpressionTree(const ExecutionExpressionIR &root,
+                                                       SljitNativeAggregateUpdateFunction &function, string &error);
+unique_ptr<ExecutionRegionCodeHandle>
+BuildSljitNativeUngroupedSumHugeintExpressionTree(const ExecutionExpressionIR &root,
+                                                  SljitNativeAggregateUpdateFunction &function, string &error);
+unique_ptr<ExecutionRegionCodeHandle>
 BuildSljitNativeUngroupedSumInt64Reference(SljitNativeIntegerKind kind, SljitNativeAggregateUpdateFunction &function,
                                            string &error);
+unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeUngroupedCountStar(SljitNativeAggregateUpdateFunction &function,
+                                                                         string &error);
 unique_ptr<ExecutionRegionCodeHandle>
-BuildSljitNativeGroupedSumInt64Reference(SljitNativeIntegerKind kind, idx_t state_value_offset,
-                                         idx_t state_is_set_offset,
-                                         SljitNativeAggregateUpdateFunction &function, string &error);
+BuildSljitNativeGroupedSumInt64Reference(SljitNativeIntegerKind kind, SljitNativeAggregateUpdateFunction &function,
+                                         string &error);
+unique_ptr<ExecutionRegionCodeHandle>
+BuildSljitNativeGroupedSumHugeintReference(SljitNativeIntegerKind kind, SljitNativeAggregateUpdateFunction &function,
+                                           string &error);
+unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeGroupedCountStar(SljitNativeAggregateUpdateFunction &function,
+                                                                       string &error);
 unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeUngroupedSumInt64IntegerBinaryConstant(
     SljitNativeIntegerKind kind, SljitNativeIntegerBinaryOp op, bool constant_on_left,
     SljitNativeAggregateUpdateFunction &function, string &error, bool check_result_range = false,
@@ -96,6 +117,17 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeUngroupedSumInt64IntegerBi
 unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeUngroupedSumInt64IntegerBinaryReferences(
     SljitNativeIntegerKind kind, SljitNativeIntegerBinaryOp op, SljitNativeAggregateUpdateFunction &function,
     string &error, bool check_result_range = false, int64_t result_min = 0, int64_t result_max = 0);
+unique_ptr<ExecutionRegionCodeHandle>
+BuildSljitNativeUngroupedFusedPrimitiveAggregateUpdate(const vector<SljitNativeRegionExpressionPlan> &payloads,
+                                                       const vector<ExecutionRegionAggregateInput> &aggregates,
+                                                       SljitNativeAggregateUpdateFunction &function, string &error);
+unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeGroupedFusedPrimitiveAggregateUpdate(
+    const vector<SljitNativeRegionExpressionPlan> &payloads, const vector<ExecutionRegionAggregateInput> &aggregates,
+    const ExecutionRegionAggregateContract &contract, SljitNativeAggregateUpdateFunction &function, string &error);
+unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativePerfectHashGroupedFusedPrimitiveAggregateUpdate(
+    const vector<SljitNativeRegionExpressionPlan> &payloads, const vector<ExecutionRegionAggregateInput> &aggregates,
+    const vector<ExecutionRegionGroupInput> &groups, const ExecutionRegionAggregateContract &contract,
+    SljitNativeAggregateUpdateFunction &function, string &error);
 unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeIntegralCompress(SljitNativeSignedIntegerWidth source_width,
                                                                        SljitNativeUnsignedIntegerWidth target_width,
                                                                        SljitNativeVectorFunction &function,

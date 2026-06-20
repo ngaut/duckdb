@@ -1316,6 +1316,22 @@ void ClientContext::DisableProfiling() {
 	client_config.enable_profiler = false;
 }
 
+bool ClientContext::QueryProfilerIsEnabled() {
+	return QueryProfiler::Get(*this).IsEnabled();
+}
+
+bool ClientContext::QueryProfilerIsExplainAnalyze() {
+	return QueryProfiler::Get(*this).IsExplainAnalyze();
+}
+
+bool ClientContext::QueryProfilerAcceptsExecutionRegionEvents() {
+	return QueryProfiler::Get(*this).AcceptsExecutionRegionEvents();
+}
+
+void ClientContext::RecordExecutionRegionProfileEvent(const ExecutionRegionEvent &event) {
+	QueryProfiler::Get(*this).RecordExecutionRegionEvent(event);
+}
+
 void ClientContext::SuppressCompiledExecutionForCurrentQuery() {
 	compiled_execution_suppressed_for_query = true;
 }

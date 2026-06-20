@@ -36,12 +36,9 @@ public:
 	//! Add the given data to the HT
 	void AddChunk(DataChunk &groups, DataChunk &payload);
 
-	//! Finds aggregate states for the specified group keys. The addresses vector will be filled with aggregate-state
-	//! base pointers, ready for native grouped aggregate updates.
-	idx_t FindOrCreateAggregateStates(DataChunk &groups, Vector &addresses_out);
-
 	//! Expose the stable state-address layout for generated perfect-hash aggregate updates.
 	PerfectAggregateHashTableStateLayout GetStateLayout();
+	void ResolveStateAddresses(DataChunk &groups, Vector &addresses_out, idx_t state_offset);
 
 	//! Combines the target perfect aggregate HT into this one
 	void Combine(PerfectAggregateHashTable &other);

@@ -9,7 +9,6 @@
 #pragma once
 
 #include "duckdb/common/common.hpp"
-#include "duckdb/common/deque.hpp"
 #include "duckdb/common/enums/metric_type.hpp"
 #include "duckdb/common/enums/profiler_format.hpp"
 #include "duckdb/common/enums/explain_format.hpp"
@@ -21,6 +20,7 @@
 #include "duckdb/common/string_util.hpp"
 #include "duckdb/common/types/data_chunk.hpp"
 #include "duckdb/common/unordered_map.hpp"
+#include "duckdb/common/vector.hpp"
 #include "duckdb/common/winapi.hpp"
 #include "duckdb/execution/expression_executor_state.hpp"
 #include "duckdb/execution/physical_operator.hpp"
@@ -31,11 +31,14 @@ namespace duckdb {
 
 class ClientContext;
 class ExpressionExecutor;
+struct ExecutionRegionEvent;
 class ProfilingNode;
 class PhysicalOperator;
 class SQLStatement;
 struct MetricsTimer;
 class OperatorProfiler;
+
+using QueryProfilerExecutionRegionTrace = vector<ExecutionRegionEvent>;
 
 enum class ProfilingCoverage : uint8_t { SELECT = 0, ALL = 1 };
 
@@ -82,6 +85,7 @@ public:
 
 public:
 	DUCKDB_API explicit QueryProfiler(ClientContext &context);
+	DUCKDB_API ~QueryProfiler();
 
 public:
 	DUCKDB_API bool IsEnabled() const;
@@ -129,6 +133,10 @@ public:
 	DUCKDB_API void Flush(OperatorProfiler &profiler);
 	//! Adds the top level query information to the global profiler.
 	DUCKDB_API void SetBlockedTime(const double &blocked_thread_time);
+	//! Returns true when execution-region events can be captured by this query profiler.
+	DUCKDB_API bool AcceptsExecutionRegionEvents() const;
+	//! Captures one execution-region telemetry event for this query's EXPLAIN/profiler output.
+	DUCKDB_API void RecordExecutionRegionEvent(const ExecutionRegionEvent &event);
 
 	DUCKDB_API void Initialize(const PhysicalOperator &root);
 
@@ -171,9 +179,8 @@ private:
 
 	//! Whether or not the query requires profiling
 	bool query_requires_profiling;
-	//! Telemetry cursor used to render only this query's compiled-region kernels in EXPLAIN ANALYZE.
-	idx_t execution_region_profile_start_event_id;
-	idx_t execution_region_profile_start_kernel_id;
+	//! Query-local execution-region telemetry used by EXPLAIN ANALYZE/profiler output.
+	unique_ptr<QueryProfilerExecutionRegionTrace> execution_region_trace;
 
 	//! The root of the query tree
 	unique_ptr<ProfilingNode> root;

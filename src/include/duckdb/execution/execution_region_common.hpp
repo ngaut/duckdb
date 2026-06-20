@@ -13,9 +13,9 @@ namespace duckdb {
 
 enum class ExecutionRegionCompileTarget : uint8_t { REGION };
 enum class ExecutionRegionCompileStatus : uint8_t { COMPILED, SKIPPED, UNSUPPORTED, UNAVAILABLE, DISABLED, ERROR };
-enum class ExecutionRegionExecutionMode : uint8_t { NONE, NATIVE, UNSUPPORTED };
+enum class ExecutionRegionExecutionMode : uint8_t { NONE, NATIVE, VECTORIZED, UNSUPPORTED };
 enum class ExecutionRegionForm : uint8_t { NONE, FUSED };
-enum class ExecutionRegionExecutionBody : uint8_t { NONE, GENERATED_MACHINE_CODE, NATIVE_OPERATOR_PROTOCOL };
+enum class ExecutionRegionExecutionBody : uint8_t { NONE, GENERATED_MACHINE_CODE };
 enum class ExecutionRegionLoweringKind : uint8_t { NATIVE, BOUNDARY };
 enum class ExecutionRegionOperatorKind : uint8_t {
 	GENERIC,
@@ -45,7 +45,6 @@ enum class ExecutionRegionSourceKind : uint8_t {
 	STATEFUL_OPERATOR
 };
 enum class ExecutionRegionSourceExecutionKind : uint8_t { NONE, DUCKDB_SOURCE_BOUNDARY, SOURCE_CONTRACT };
-enum class ExecutionRegionSourceFilterOwnershipKind : uint8_t { NONE, GENERATED, DUCKDB_SCAN };
 enum class ExecutionRegionSourceContractStatus : uint8_t { NONE, READY, BLOCKED };
 enum class ExecutionRegionStateContractStatus : uint8_t { NONE, READY, MISSING, BLOCKED };
 enum class ExecutionRegionOperatorContractKind : uint8_t {
@@ -147,6 +146,7 @@ enum class ExecutionRegionStageExecutionKind : uint8_t {
 	SOURCE_BOUNDARY,
 	MISSING_CONTRACT
 };
+enum class ExecutionRunnerKind : uint8_t { VECTORIZED, COMPILED_VECTORIZED };
 enum class ExecutionRegionPolicyMode : uint8_t { AUTO, FORCE, OFF };
 enum class ExecutionRegionResult : uint8_t { NOT_FINISHED, FINISHED, INTERRUPTED, DEFERRED };
 enum class ExecutionExpressionValidityKind : uint8_t {
@@ -214,6 +214,37 @@ enum class ExecutionExpressionBinaryOp : uint8_t {
 };
 enum class ExecutionExpressionConjunctionOp : uint8_t { AND, OR };
 
+struct ExecutionRegionStageId {
+	idx_t key = 0;
+	string name;
+
+	ExecutionRegionStageId();
+	ExecutionRegionStageId(const char *name_p);
+	ExecutionRegionStageId(string name_p);
+
+	bool IsValid() const;
+};
+
+struct ExecutionRegionRecordedStageRuntime {
+	ExecutionRegionStageId stage;
+	int64_t runtime_time_us = 0;
+	idx_t count = 0;
+};
+
+struct ExecutionRegionOpenRequest {
+	bool present = false;
+	ExecutionRegionSourceExecutionKind source_execution = ExecutionRegionSourceExecutionKind::NONE;
+	bool uses_scan_filters = false;
+
+	bool UsesSourceContract() const {
+		return source_execution == ExecutionRegionSourceExecutionKind::SOURCE_CONTRACT;
+	}
+
+	bool UsesScanFilters() const {
+		return uses_scan_filters;
+	}
+};
+
 DUCKDB_API const char *ExecutionRegionCompileTargetToString(ExecutionRegionCompileTarget target);
 DUCKDB_API const char *ExecutionRegionCompileStatusToString(ExecutionRegionCompileStatus status);
 DUCKDB_API const char *ExecutionRegionExecutionModeToString(ExecutionRegionExecutionMode mode);
@@ -233,7 +264,6 @@ DUCKDB_API bool ExecutionRegionABIOwnsSource(ExecutionRegionABI abi);
 DUCKDB_API bool ExecutionRegionABIOwnsSink(ExecutionRegionABI abi);
 DUCKDB_API const char *ExecutionRegionSourceKindToString(ExecutionRegionSourceKind kind);
 DUCKDB_API const char *ExecutionRegionSourceExecutionKindToString(ExecutionRegionSourceExecutionKind kind);
-DUCKDB_API const char *ExecutionRegionSourceFilterOwnershipKindToString(ExecutionRegionSourceFilterOwnershipKind kind);
 DUCKDB_API const char *ExecutionRegionSourceContractStatusToString(ExecutionRegionSourceContractStatus status);
 DUCKDB_API const char *ExecutionRegionStateContractStatusToString(ExecutionRegionStateContractStatus status);
 DUCKDB_API const char *ExecutionRegionOperatorContractKindToString(ExecutionRegionOperatorContractKind kind);
@@ -249,6 +279,7 @@ DUCKDB_API const char *ExecutionRegionBoundaryKindToString(ExecutionRegionBounda
 DUCKDB_API const char *ExecutionRegionOwnershipKindToString(ExecutionRegionOwnershipKind kind);
 DUCKDB_API const char *ExecutionRegionStageKindToString(ExecutionRegionStageKind kind);
 DUCKDB_API const char *ExecutionRegionStageExecutionKindToString(ExecutionRegionStageExecutionKind kind);
+DUCKDB_API const char *ExecutionRunnerKindToString(ExecutionRunnerKind kind);
 DUCKDB_API const char *ExecutionRegionPolicyModeToString(ExecutionRegionPolicyMode mode);
 DUCKDB_API const char *ExecutionExpressionValidityKindToString(ExecutionExpressionValidityKind kind);
 DUCKDB_API const char *ExecutionExpressionSourceKindToString(ExecutionExpressionSourceKind kind);

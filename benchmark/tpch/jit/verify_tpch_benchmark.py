@@ -1,400 +1,255 @@
 #!/usr/bin/env python3
 #
-# Verify TPC-H JIT benchmark artifacts produced by tpch_benchmark.py.
+# Verify artifacts produced by tpch_benchmark.py.
 
 import argparse
-import csv
 import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "jit"))
-from trace_manifest import verify_trace_manifest
+from benchmark_common import (
+    REGION_SUMMARY_FIELDS,
+    normalize_query_ids,
+    read_csv,
+    require,
+    require_columns,
+    row_float,
+    row_int,
+    verify_profile,
+)
+from tpch_common import DEFAULT_POLICIES, DEFAULT_QUERIES
 
-from tpch_schema import (
-    BENCHMARK_ADMISSION_EVIDENCE_FIELDS,
-    BENCHMARK_POLICY_SUMMARY_FIELDS,
-    BENCHMARK_RUN_FIELDS,
-    BENCHMARK_SUMMARY_FIELDS,
-    CANDIDATE_SIGNATURE_FIELDS,
-    CANDIDATE_TRAIT_FIELDS,
-    KNOWN_ADMISSION_EVIDENCE_ROOT_CAUSES,
-    KNOWN_ADMISSION_EVIDENCE_STATUSES,
-    KNOWN_REGION_EXECUTION_FORMS,
-    configure_csv_field_size_limit,
+
+SUMMARY_COLUMNS = (
+    "query",
+    "policy",
+    "run_count",
+    "min_s",
+    "median_s",
+    "mean_s",
+    "max_s",
+    "speedup_vs_off_median",
+    "correctness_diff",
+    *REGION_SUMMARY_FIELDS,
 )
 
-configure_csv_field_size_limit()
-
-KNOWN_EXECUTION_BODIES = {"none", "generated-machine-code", "native-operator-protocol"}
-
-REQUIRED_ARTIFACTS = (
-    "runs.csv",
-    "summary.csv",
-    "query_summary.csv",
-    "policy_summary.csv",
-    "correctness_summary.csv",
-    "operator_profile_summary.csv",
-    "decision_counter_summary.csv",
-    "admission_evidence_summary.csv",
-    "report.md",
+RUN_COLUMNS = (
+    "query",
+    "policy",
+    "repeat",
+    "timing_mode",
+    "query_time_us",
+    "correctness_diff",
+    *REGION_SUMMARY_FIELDS,
+    "profile_json",
 )
 
-RUN_REQUIRED_COLUMNS = BENCHMARK_RUN_FIELDS
-SUMMARY_REQUIRED_COLUMNS = BENCHMARK_SUMMARY_FIELDS
-POLICY_REQUIRED_COLUMNS = BENCHMARK_POLICY_SUMMARY_FIELDS
-CANDIDATE_TRAIT_REQUIRED_COLUMNS = (
+COUNTER_COLUMNS = (
+    "query",
+    "policy",
+    "repeat",
+    "backend_name",
     "target",
     "status",
+    "execution_mode",
     "region_execution_form",
     "execution_body",
-    "pipeline_shape",
-    "pipeline_estimated_cardinality",
-    "example_reason",
-    *CANDIDATE_TRAIT_FIELDS,
-)
-ADMISSION_EVIDENCE_REQUIRED_COLUMNS = BENCHMARK_ADMISSION_EVIDENCE_FIELDS
-AUTO_POLICY_RELATIVE_TOLERANCE = 1.005
-
-def wrapper_only_pipeline_shape(source: str, sink: str = "") -> str:
-    result = "pipeline;source:source:" + source + ":source-missing-contract"
-    if sink:
-        result += ";sink:sink:" + sink + ":sink"
-    return result
-
-
-def wrapper_only_region_source_marker(source: str) -> str:
-    return "source:" + source + ":boundary"
-
-
-WRAPPER_ONLY_PIPELINE_SHAPES = {
-    wrapper_only_pipeline_shape("CREATE_TABLE_AS", "RESULT_COLLECTOR"),
-    wrapper_only_pipeline_shape("RESULT_COLLECTOR"),
-    wrapper_only_pipeline_shape("EXPLAIN_ANALYZE"),
-}
-WRAPPER_ONLY_REGION_SOURCE_MARKERS = tuple(
-    wrapper_only_region_source_marker(source)
-    for source in ("CREATE_TABLE_AS", "RESULT_COLLECTOR", "EXPLAIN_ANALYZE")
+    "selected_runner",
+    "requested_policy",
+    "runner_cost_profile",
+    "blocker",
+    "runner_cost_rows",
+    "runner_cost_batches",
+    "runner_cost_expression_cost",
+    "runner_cost_accelerated_stage_count",
+    "runner_cost_saved_work_per_batch",
+    "runner_cost_accelerated_runner_benefit",
+    "runner_cost_startup_cost",
+    "runner_cost_required_benefit",
+    "runner_cost_net_benefit",
+    "runner_cost_selected_accelerated_runner_count",
+    "count",
+    "decision_time_us",
+    "compile_time_us",
+    "code_size",
 )
 
+PERFORMANCE_GAP_COLUMNS = (
+    "query",
+    "off_median_s",
+    "auto_median_s",
+    "force_median_s",
+    "auto_speedup_vs_off",
+    "force_speedup_vs_off",
+    "auto_compiled_regions",
+    "force_compiled_regions",
+    "auto_unsupported_decisions",
+    "auto_skipped_decisions",
+    "auto_decision_time_us",
+    "force_unsupported_decisions",
+    "force_compile_time_us",
+    "force_decision_time_us",
+    "force_code_size",
+    "auto_primary_blocker",
+    "auto_primary_blocker_count",
+    "auto_runner_cost_benefit",
+    "auto_runner_cost_startup_cost",
+    "auto_runner_cost_required_benefit",
+    "auto_runner_cost_net_benefit",
+    "auto_runner_cost_selected_accelerated_runner_count",
+)
 
-def read_csv(path: Path) -> list:
-    with path.open(newline="", encoding="utf-8") as handle:
-        return list(csv.DictReader(handle))
+POLICY_ORDER = {policy: index for index, policy in enumerate(DEFAULT_POLICIES)}
 
 
-def row_int(row: dict, field: str) -> int:
-    value = row.get(field, "")
-    if value in ("", None):
-        return 0
-    return int(value)
+def expected_queries(rows: list[dict], requested: list[str] | None) -> list[str]:
+    if requested is not None:
+        return normalize_query_ids(requested)
+    return sorted({row["query"] for row in rows})
 
 
-def row_float(row: dict, field: str) -> float:
-    value = row.get(field, "")
-    if value in ("", None):
-        return 0.0
-    return float(value)
+def expected_policies(rows: list[dict], requested: list[str] | None) -> list[str]:
+    if requested is not None:
+        return list(requested)
+    return sorted({row["policy"] for row in rows}, key=lambda policy: POLICY_ORDER.get(policy, 100))
 
 
-def require_columns(name: str, rows: list, required: tuple) -> None:
+def expected_repeats(rows: list[dict], requested: int | None) -> int:
+    if requested is not None:
+        return requested
+    repeats = sorted({row_int(row, "repeat") for row in rows})
+    require(repeats, "runs.csv: no repeat rows")
+    expected = list(range(1, repeats[-1] + 1))
+    require(repeats == expected, f"runs.csv: repeats must be contiguous from 1, found={repeats}")
+    return repeats[-1]
+
+
+def verify_summary(summary_rows: list[dict], queries: list[str], policies: list[str]) -> None:
+    require_columns(summary_rows, SUMMARY_COLUMNS)
+    expected = {(query, policy) for query in queries for policy in policies}
+    actual = {(row["query"], row["policy"]) for row in summary_rows}
+    require(
+        actual == expected,
+        f"summary.csv: query/policy mismatch missing={sorted(expected - actual)} extra={sorted(actual - expected)}",
+    )
+    for row in summary_rows:
+        require(row_float(row, "median_s") > 0, f"summary.csv: non-positive median: {row}")
+        require(row_float(row, "speedup_vs_off_median") > 0, f"summary.csv: non-positive speedup: {row}")
+        require(row_int(row, "correctness_diff") == 0, f"summary.csv: correctness mismatch: {row}")
+        if row["policy"] == "off":
+            require(row_int(row, "compiled_regions") == 0, f"summary.csv: off policy compiled regions: {row}")
+
+
+def verify_runs(trace_dir: Path, run_rows: list[dict], queries: list[str], policies: list[str], repeats: int) -> None:
+    require_columns(run_rows, RUN_COLUMNS, "runs.csv")
+    expected = {(query, policy, str(repeat)) for query in queries for policy in policies for repeat in range(1, repeats + 1)}
+    actual = {(row["query"], row["policy"], row["repeat"]) for row in run_rows}
+    require(
+        actual == expected,
+        f"runs.csv: query/policy/repeat mismatch missing={sorted(expected - actual)} extra={sorted(actual - expected)}",
+    )
+    for row in run_rows:
+        require(row_int(row, "query_time_us") > 0, f"runs.csv: non-positive runtime: {row}")
+        require(row_int(row, "correctness_diff") == 0, f"runs.csv: correctness mismatch: {row}")
+        if row["policy"] == "off":
+            require(row_int(row, "compiled_regions") == 0, f"runs.csv: off policy compiled regions: {row}")
+        require(row["timing_mode"] in ("production", "profile"), f"runs.csv: bad timing mode: {row}")
+        if row["profile_json"]:
+            verify_profile(
+                trace_dir,
+                {"profile_json": row["profile_json"]},
+                require_regions=False,
+            )
+
+
+def verify_counters(rows: list[dict], queries: list[str], policies: list[str], repeats: int) -> None:
     if not rows:
-        raise AssertionError(f"{name}: expected at least one row")
-    missing = [field for field in required if field not in rows[0]]
-    if missing:
-        raise AssertionError(f"{name}: missing required columns {missing}")
-
-
-def expected_query_ids(count: int) -> list:
-    return [f"{query_id:02d}" for query_id in range(1, count + 1)]
-
-
-def verify_runs(trace_dir: Path, rows: list, expected_queries: list, policies: list, repeats: int) -> None:
-    require_columns("runs.csv", rows, RUN_REQUIRED_COLUMNS)
-    expected_rows = len(expected_queries) * len(policies) * repeats
-    if len(rows) != expected_rows:
-        raise AssertionError(f"runs.csv: expected {expected_rows} rows, found {len(rows)}")
-
-    seen = set()
-    for row in rows:
-        key = (row["query"], row["policy"], row["repeat"])
-        if key in seen:
-            raise AssertionError(f"runs.csv: duplicate run row {key}")
-        seen.add(key)
-        if row["query"] not in expected_queries:
-            raise AssertionError(f"runs.csv: unexpected query {row['query']}")
-        if row["policy"] not in policies:
-            raise AssertionError(f"runs.csv: unexpected policy {row['policy']}")
-        repeat = row_int(row, "repeat")
-        if repeat < 1 or repeat > repeats:
-            raise AssertionError(f"runs.csv: repeat out of range: {row}")
-        if row_int(row, "profile_query_time_us") <= 0:
-            raise AssertionError(f"runs.csv: non-positive query timing: {row}")
-        if row_int(row, "profile_operator_count") <= 0:
-            raise AssertionError(f"runs.csv: missing operator profile coverage: {row}")
-        if row_int(row, "correctness_diff") != 0:
-            raise AssertionError(f"runs.csv: non-zero correctness diff: {row}")
-        for artifact_field in ("profile_json", "correctness_csv", "decision_counters_csv"):
-            artifact = trace_dir / row[artifact_field]
-            if not artifact.exists():
-                raise AssertionError(f"runs.csv: missing per-run artifact {artifact}")
-
-
-def verify_summary(rows: list, expected_queries: list, policies: list, repeats: int) -> None:
-    require_columns("summary.csv", rows, SUMMARY_REQUIRED_COLUMNS)
-    expected_rows = len(expected_queries) * len(policies)
-    if len(rows) != expected_rows:
-        raise AssertionError(f"summary.csv: expected {expected_rows} rows, found {len(rows)}")
-    seen = set()
-    off_by_query = {}
-    for row in rows:
-        key = (row["query"], row["policy"])
-        if key in seen:
-            raise AssertionError(f"summary.csv: duplicate row {key}")
-        seen.add(key)
-        if row_int(row, "run_count") != repeats:
-            raise AssertionError(f"summary.csv: wrong run count: {row}")
-        if row_int(row, "correctness_diff") != 0:
-            raise AssertionError(f"summary.csv: non-zero correctness diff: {row}")
-        if row_float(row, "median_s") <= 0:
-            raise AssertionError(f"summary.csv: non-positive median timing: {row}")
-        if row_float(row, "speedup_vs_off_median") <= 0:
-            raise AssertionError(f"summary.csv: non-positive speedup: {row}")
-        faster_than_off = row.get("faster_than_off_median", "")
-        expected_faster_than_off = "true" if row_float(row, "speedup_vs_off_median") >= 1.0 else "false"
-        if faster_than_off != expected_faster_than_off:
-            raise AssertionError(f"summary.csv: faster_than_off_median mismatch: {row}")
-        if row["policy"] == "off":
-            if row_int(row, "evidence_compiled_regions") != 0 or row_int(row, "evidence_decision_count") != 0:
-                raise AssertionError(f"summary.csv: off policy produced JIT evidence work: {row}")
-        if row["policy"] == "auto" and row_int(row, "evidence_compiled_regions") > 0:
-            if row_float(row, "speedup_vs_off_median") < 1.0:
-                raise AssertionError(
-                    f"summary.csv: auto evidence compiled regions without positive production speedup: {row}"
-                )
-        timings = [value for value in row.get("timings_s", "").split(";") if value]
-        if len(timings) != repeats:
-            raise AssertionError(f"summary.csv: timings_s does not match repeats: {row}")
-        if row["policy"] == "off":
-            off_by_query[row["query"]] = row_float(row, "median_s")
-    for query_id in expected_queries:
-        if query_id not in off_by_query:
-            raise AssertionError(f"summary.csv: missing off baseline for q{query_id}")
-
-
-def verify_policy_summary(rows: list, expected_queries: list, policies: list, repeats: int) -> None:
-    require_columns("policy_summary.csv", rows, POLICY_REQUIRED_COLUMNS)
-    if sorted(row["policy"] for row in rows) != sorted(policies):
-        raise AssertionError(
-            f"policy_summary.csv: expected policies {policies}, found {[row['policy'] for row in rows]}"
-        )
-    for row in rows:
-        if row_int(row, "query_count") != len(expected_queries):
-            raise AssertionError(f"policy_summary.csv: wrong query count: {row}")
-        if row_int(row, "run_count") != len(expected_queries) * repeats:
-            raise AssertionError(f"policy_summary.csv: wrong run count: {row}")
-        if row["policy"] == "auto" and row_int(row, "evidence_decision_count") <= 0:
-            raise AssertionError(f"policy_summary.csv: auto policy produced no compiled-region decision counters: {row}")
-        if row["policy"] == "off":
-            if row_int(row, "evidence_compiled_regions") != 0 or row_int(row, "evidence_decision_count") != 0:
-                raise AssertionError(f"policy_summary.csv: off policy produced JIT evidence work: {row}")
-        if row["policy"] == "auto" and row_int(row, "evidence_compiled_regions") > 0:
-            if row_float(row, "relative_to_off") > AUTO_POLICY_RELATIVE_TOLERANCE:
-                raise AssertionError(f"policy_summary.csv: auto compiled regions but lost to off policy: {row}")
-        if row["policy"] == "force" and row_int(row, "evidence_compiled_regions") <= 0:
-            raise AssertionError(f"policy_summary.csv: force policy did not compile any traced regions: {row}")
-        if row_float(row, "total_median_s") <= 0:
-            raise AssertionError(f"policy_summary.csv: non-positive total median: {row}")
-        if row_float(row, "relative_to_off") <= 0:
-            raise AssertionError(f"policy_summary.csv: non-positive relative time: {row}")
-        if row_int(row, "correctness_diff") != 0:
-            raise AssertionError(f"policy_summary.csv: non-zero correctness diff: {row}")
-        classified = row_int(row, "faster_queries") + row_int(row, "slower_queries") + row_int(row, "equal_queries")
-        if classified != len(expected_queries):
-            raise AssertionError(f"policy_summary.csv: query speed classification mismatch: {row}")
-
-
-def verify_correctness(rows: list, expected_queries: list, policies: list, repeats: int) -> None:
-    require_columns(
-        "correctness_summary.csv", rows, ("query", "policy", "run_count", "baseline_rows", "correctness_diff")
-    )
-    if len(rows) != len(expected_queries) * len(policies):
-        raise AssertionError("correctness_summary.csv: wrong row count")
-    for row in rows:
-        if row_int(row, "run_count") != repeats:
-            raise AssertionError(f"correctness_summary.csv: wrong run count: {row}")
-        if row_int(row, "baseline_rows") < 0:
-            raise AssertionError(f"correctness_summary.csv: invalid baseline rows: {row}")
-        if row_int(row, "correctness_diff") != 0:
-            raise AssertionError(f"correctness_summary.csv: non-zero correctness diff: {row}")
-
-
-def admission_evidence_key(row: dict) -> tuple:
-    return (
-        row["admission_shape_key"],
-        row["execution_mode"],
-        row["region_execution_form"],
-        row["execution_body"],
-        row["candidate_shape"],
-        *(row[field] for field in CANDIDATE_SIGNATURE_FIELDS),
-        row["candidate_contract_abi"],
-    )
-
-
-def verify_admission_evidences(rows: list, decision_counters: list, policy_summary: list) -> None:
-    force_compiled = sum(
-        row_int(row, "evidence_compiled_regions") for row in policy_summary if row["policy"] == "force"
-    )
-    if not rows:
-        if force_compiled > 0:
-            raise AssertionError("admission_evidence_summary.csv: force compiled regions but no admission evidence rows")
+        require(set(policies) == {"off"}, "counters.csv: expected counter rows for JIT policies")
         return
-    require_columns("admission_evidence_summary.csv", rows, ADMISSION_EVIDENCE_REQUIRED_COLUMNS)
-
-    expected_keys = {
-        admission_evidence_key(row)
-        for row in decision_counters
-        if row.get("target") == "region" and row.get("policy") == "force" and row.get("status") == "compiled"
-    }
-    actual_keys = set()
+    require_columns(rows, COUNTER_COLUMNS, "counters.csv")
+    query_set = set(queries)
+    policy_set = set(policies)
+    saw_runner_cost_profile = False
     for row in rows:
-        for field in CANDIDATE_SIGNATURE_FIELDS:
-            if row.get(field, "") in ("", "none"):
-                raise AssertionError(f"admission_evidence_summary.csv: missing {field}: {row}")
-        key = admission_evidence_key(row)
-        if key in actual_keys:
-            raise AssertionError(f"admission_evidence_summary.csv: duplicate admission evidence row: {row}")
-        actual_keys.add(key)
-        if row_int(row, "force_compiled_regions") <= 0:
-            raise AssertionError(f"admission_evidence_summary.csv: row has no force compiled regions: {row}")
-        query_count = row_int(row, "query_count")
-        classified_queries = (
-            row_int(row, "force_winning_queries")
-            + row_int(row, "force_losing_queries")
-            + row_int(row, "force_equal_queries")
-        )
-        if query_count <= 0 or classified_queries != query_count:
-            raise AssertionError(f"admission_evidence_summary.csv: query classification mismatch: {row}")
-        if row["proof_status"] not in KNOWN_ADMISSION_EVIDENCE_STATUSES:
-            raise AssertionError(f"admission_evidence_summary.csv: unknown proof status: {row}")
-        if row["root_cause"] not in KNOWN_ADMISSION_EVIDENCE_ROOT_CAUSES:
-            raise AssertionError(f"admission_evidence_summary.csv: unknown root cause: {row}")
-        for field in (
-            "min_force_speedup_vs_off",
-            "median_force_speedup_vs_off",
-            "max_force_speedup_vs_off",
-        ):
-            if row_float(row, field) <= 0:
-                raise AssertionError(f"admission_evidence_summary.csv: non-positive speedup field {field}: {row}")
-        if row_float(row, "min_force_speedup_vs_off") > row_float(row, "median_force_speedup_vs_off"):
-            raise AssertionError(f"admission_evidence_summary.csv: min speedup exceeds median: {row}")
-        if row_float(row, "median_force_speedup_vs_off") > row_float(row, "max_force_speedup_vs_off"):
-            raise AssertionError(f"admission_evidence_summary.csv: median speedup exceeds max: {row}")
-        if row["root_cause"] == "positive_shape_without_auto_admission":
-            if row["auto_rule_present"] != "false":
-                raise AssertionError(f"admission_evidence_summary.csv: positive shape without auto admission has auto rule: {row}")
-            if row["proof_status"] != "positive_query_median":
-                raise AssertionError(f"admission_evidence_summary.csv: positive shape without auto admission is not positive: {row}")
-        if row["root_cause"] == "auto_rule_admitted_and_compiled":
-            if row["auto_rule_present"] != "true":
-                raise AssertionError(f"admission_evidence_summary.csv: admitted row has no auto rule: {row}")
-            if row_int(row, "auto_compiled_regions") <= 0:
-                raise AssertionError(f"admission_evidence_summary.csv: admitted row did not compile in auto: {row}")
-            if row["proof_status"] != "positive_query_median":
-                raise AssertionError(f"admission_evidence_summary.csv: auto admitted non-positive proof: {row}")
-        if row["root_cause"] == "force_region_not_profitable" and row["proof_status"] != "negative_query_median":
-            raise AssertionError(f"admission_evidence_summary.csv: force-not-profitable row has wrong status: {row}")
+        require(row["query"] in query_set, f"counters.csv: unexpected query: {row}")
+        require(row["policy"] in policy_set, f"counters.csv: unexpected policy: {row}")
+        repeat = row_int(row, "repeat")
+        require(1 <= repeat <= repeats, f"counters.csv: unexpected repeat: {row}")
+        require(row_int(row, "count") > 0, f"counters.csv: non-positive count: {row}")
+        if row["status"] in ("skipped", "unsupported", "unavailable", "error"):
+            require(row["blocker"], f"counters.csv: missing blocker: {row}")
+        if row["runner_cost_profile"].lower() == "true":
+            saw_runner_cost_profile = True
+            require(row_int(row, "runner_cost_startup_cost") > 0,
+                    f"counters.csv: missing runner cost: {row}")
+    if any(policy != "off" for policy in policies):
+        require(saw_runner_cost_profile, "counters.csv: missing structured runner-cost profile rows")
 
-    if actual_keys != expected_keys:
-        raise AssertionError(
-            "admission_evidence_summary.csv: admission evidence keys do not match force compiled region keys; "
-            f"missing={sorted(expected_keys - actual_keys)} extra={sorted(actual_keys - expected_keys)}"
-        )
+
+def verify_performance_gaps(rows: list[dict], queries: list[str], policies: list[str]) -> None:
+    require_columns(rows, PERFORMANCE_GAP_COLUMNS, "performance_gaps.csv")
+    expected_queries = set(queries)
+    actual_queries = {row["query"] for row in rows}
+    require(
+        actual_queries == expected_queries,
+        f"performance_gaps.csv: query mismatch missing={sorted(expected_queries - actual_queries)} "
+        f"extra={sorted(actual_queries - expected_queries)}",
+    )
+    has_auto = "auto" in policies
+    has_force = "force" in policies
+    for row in rows:
+        require(row_float(row, "off_median_s") > 0, f"performance_gaps.csv: missing off median: {row}")
+        if has_auto:
+            require(row_float(row, "auto_median_s") > 0, f"performance_gaps.csv: missing auto median: {row}")
+            require(row_float(row, "auto_speedup_vs_off") > 0, f"performance_gaps.csv: missing auto speedup: {row}")
+            require(row["auto_primary_blocker"], f"performance_gaps.csv: missing auto blocker: {row}")
+            require(row_int(row, "auto_primary_blocker_count") > 0, f"performance_gaps.csv: missing blocker count: {row}")
+            require(row_int(row, "auto_unsupported_decisions") >= 0,
+                    f"performance_gaps.csv: bad auto unsupported count: {row}")
+            require(row_int(row, "auto_skipped_decisions") >= 0,
+                    f"performance_gaps.csv: bad auto skipped count: {row}")
+            require(row_int(row, "auto_decision_time_us") >= 0,
+                    f"performance_gaps.csv: bad auto decision time: {row}")
+            require(row_int(row, "auto_runner_cost_startup_cost") >= 0,
+                    f"performance_gaps.csv: bad runner cost: {row}")
+        if has_force:
+            require(row_float(row, "force_median_s") > 0, f"performance_gaps.csv: missing force median: {row}")
+            require(row_float(row, "force_speedup_vs_off") > 0, f"performance_gaps.csv: missing force speedup: {row}")
+            require(row_int(row, "force_unsupported_decisions") >= 0,
+                    f"performance_gaps.csv: bad force unsupported count: {row}")
+            require(row_int(row, "force_compile_time_us") >= 0,
+                    f"performance_gaps.csv: bad force compile time: {row}")
+            require(row_int(row, "force_decision_time_us") >= 0,
+                    f"performance_gaps.csv: bad force decision time: {row}")
+            require(row_int(row, "force_code_size") >= 0, f"performance_gaps.csv: bad force code size: {row}")
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Verify compact TPC-H JIT benchmark artifacts")
+    parser.add_argument("trace_dir", type=Path)
+    parser.add_argument("--queries", nargs="+", default=None)
+    parser.add_argument("--policies", nargs="+", default=None, choices=DEFAULT_POLICIES)
+    parser.add_argument("--repeats", type=int, default=None)
+    return parser.parse_args()
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Verify TPC-H JIT benchmark artifacts")
-    parser.add_argument("benchmark_dir", type=Path)
-    parser.add_argument("--expected-queries", type=int, default=22)
-    parser.add_argument("--queries", nargs="+", default=None)
-    parser.add_argument("--policies", nargs="+", default=["off", "auto", "force"])
-    parser.add_argument("--repeats", type=int, default=5)
-    args = parser.parse_args()
-
-    trace_dir = args.benchmark_dir.resolve()
-    expected_queries = (
-        [f"{int(query_id):02d}" for query_id in args.queries]
-        if args.queries is not None
-        else expected_query_ids(args.expected_queries)
-    )
-    manifest = verify_trace_manifest(trace_dir, kind="tpch_jit_benchmark", required_artifacts=list(REQUIRED_ARTIFACTS))
-    configuration = manifest.get("configuration", {})
-    if configuration.get("policies") != args.policies:
-        raise AssertionError(
-            f"trace_manifest.json: expected policies {args.policies}, found {configuration.get('policies')}"
-        )
-    if configuration.get("queries") != expected_queries:
-        raise AssertionError(
-            f"trace_manifest.json: expected queries {expected_queries}, found {configuration.get('queries')}"
-        )
-    if int(configuration.get("repeats", 0)) != args.repeats:
-        raise AssertionError(
-            f"trace_manifest.json: expected repeats {args.repeats}, found {configuration.get('repeats')}"
-        )
-
-    runs = read_csv(trace_dir / "runs.csv")
-    summary = read_csv(trace_dir / "summary.csv")
-    query_summary = read_csv(trace_dir / "query_summary.csv")
-    policy_summary = read_csv(trace_dir / "policy_summary.csv")
-    correctness = read_csv(trace_dir / "correctness_summary.csv")
-    decision_counters = read_csv(trace_dir / "decision_counter_summary.csv")
-    admission_evidences = read_csv(trace_dir / "admission_evidence_summary.csv")
-    operator_profile = read_csv(trace_dir / "operator_profile_summary.csv")
-
-    verify_runs(trace_dir, runs, expected_queries, args.policies, args.repeats)
-    verify_summary(summary, expected_queries, args.policies, args.repeats)
-    if query_summary != summary:
-        raise AssertionError("query_summary.csv must match summary.csv")
-    verify_policy_summary(policy_summary, expected_queries, args.policies, args.repeats)
-    verify_correctness(correctness, expected_queries, args.policies, args.repeats)
-    verify_admission_evidences(admission_evidences, decision_counters, policy_summary)
-    if not decision_counters:
-        raise AssertionError("decision_counter_summary.csv: expected JIT decision counter rows")
-    require_columns("decision_counter_summary.csv", decision_counters, CANDIDATE_TRAIT_REQUIRED_COLUMNS)
-    for row in decision_counters:
-        region_execution_form = row.get("region_execution_form", "")
-        if row.get("target") == "region" and region_execution_form not in KNOWN_REGION_EXECUTION_FORMS:
-            raise AssertionError(f"decision_counter_summary.csv: unknown region execution form: {row}")
-        execution_body = row.get("execution_body", "")
-        if row.get("target") == "region" and execution_body not in KNOWN_EXECUTION_BODIES:
-            raise AssertionError(f"decision_counter_summary.csv: unknown execution body: {row}")
-        if row.get("target") == "region" and row.get("status") == "compiled" and region_execution_form == "none":
-            raise AssertionError(f"decision_counter_summary.csv: compiled region counter has no execution form: {row}")
-        if row.get("target") == "region" and row.get("status") == "compiled" and execution_body == "none":
-            raise AssertionError(f"decision_counter_summary.csv: compiled region counter has no execution body: {row}")
-        if "source:source:SET:" in row.get("candidate_pipeline_shape", ""):
-            raise AssertionError(f"decision_counter_summary.csv: setup pipeline leaked into candidate counters: {row}")
-        pipeline_shape = row.get("pipeline_shape", "")
-        if pipeline_shape in WRAPPER_ONLY_PIPELINE_SHAPES:
-            raise AssertionError(f"decision_counter_summary.csv: wrapper-only pipeline leaked into counters: {row}")
-        if any(marker in row.get("example_reason", "") for marker in WRAPPER_ONLY_REGION_SOURCE_MARKERS):
-            raise AssertionError(f"decision_counter_summary.csv: wrapper-only source leaked into counters: {row}")
-    if not operator_profile:
-        raise AssertionError("operator_profile_summary.csv: expected operator profile rows")
-
-    print(
-        (
-            "ok tpch_benchmark runs={runs} summary={summary} policy={policy} "
-            "decision_counter={decision} profile={profile}"
-        ).format(
-            runs=len(runs),
-            summary=len(summary),
-            policy=len(policy_summary),
-            decision=len(decision_counters),
-            profile=len(operator_profile),
-        )
-    )
+    args = parse_args()
+    trace_dir = args.trace_dir.resolve()
+    summary_rows = read_csv(trace_dir / "summary.csv")
+    run_rows = read_csv(trace_dir / "runs.csv")
+    counter_rows = read_csv(trace_dir / "counters.csv")
+    performance_gap_rows = read_csv(trace_dir / "performance_gaps.csv")
+    queries = expected_queries(summary_rows, args.queries)
+    policies = expected_policies(summary_rows, args.policies)
+    repeats = expected_repeats(run_rows, args.repeats)
+    verify_summary(summary_rows, queries, policies)
+    verify_runs(trace_dir, run_rows, queries, policies, repeats)
+    verify_counters(counter_rows, queries, policies, repeats)
+    verify_performance_gaps(performance_gap_rows, queries, policies)
+    print(f"verified TPC-H JIT benchmark: {args.trace_dir.resolve()}")
     return 0
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    raise SystemExit(main())

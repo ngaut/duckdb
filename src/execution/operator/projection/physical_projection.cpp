@@ -58,6 +58,13 @@ unique_ptr<OperatorState> PhysicalProjection::GetOperatorState(ExecutionContext 
 	return make_uniq<ProjectionState>(context, select_list);
 }
 
+void PhysicalProjection::GetExecutionRegionPreGraphTransformInfo(ExecutionTransformContract &transform) const {
+	transform.projection_expressions.reserve(select_list.size());
+	for (auto &expression : select_list) {
+		transform.projection_expressions.emplace_back(*expression);
+	}
+}
+
 ExecutionContract PhysicalProjection::GetExecutionContract() const {
 	ExecutionContract result;
 	result.transform.projection_expressions.reserve(select_list.size());
@@ -79,7 +86,7 @@ PhysicalProjection::GetExecutionOperatorReadiness(ClientContext &context,
 		return readiness;
 	}
 	readiness.status = ExecutionOperatorReadinessStatus::READY;
-	readiness.blocker = "none";
+	readiness.blocker.clear();
 	return readiness;
 }
 

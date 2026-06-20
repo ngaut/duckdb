@@ -3,11 +3,13 @@
 #include "duckdb/common/enums/metric_type.hpp"
 #include "duckdb/common/fstream.hpp"
 #include "duckdb/common/numeric_utils.hpp"
-#include "duckdb/common/optional_idx.hpp"
 #include "duckdb/common/printer.hpp"
 #include "duckdb/common/string_util.hpp"
 #include "duckdb/common/tree_renderer/text_tree_renderer.hpp"
 #include "duckdb/execution/execution_region_manager.hpp"
+#include "duckdb/execution/execution_region_runtime.hpp"
+#include "duckdb/execution/execution_region_settings.hpp"
+#include "duckdb/execution/execution_region_telemetry.hpp"
 #include "duckdb/execution/operator/scan/physical_table_scan.hpp"
 #include "duckdb/execution/physical_operator.hpp"
 #include "duckdb/main/client_config.hpp"
@@ -21,7 +23,7 @@
 #include "yyjson_utils.hpp"
 
 #include <algorithm>
-#include <cstdlib>
+#include <initializer_list>
 #include <utility>
 
 using namespace duckdb_yyjson; // NOLINT
@@ -82,10 +84,223 @@ QueryProfileResult &QueryProfileResult::AppendList() {
 	return ref;
 }
 
+static int64_t Micros(double seconds) {
+	return seconds <= 0 ? 0 : static_cast<int64_t>((seconds * 1000000.0) + 0.5);
+}
+
+static Value Text(const string &value) {
+	return Value(value);
+}
+
+static Value Text(const char *value) {
+	return Value(string(value));
+}
+
+static Value NullableText(const string &value) {
+	return value.empty() ? Value(LogicalType::VARCHAR) : Value(value);
+}
+
+static Value Count(idx_t value) {
+	return Value::UBIGINT(value);
+}
+
+static Value Time(int64_t value) {
+	return Value::BIGINT(value);
+}
+
+static int64_t RuntimeUnattributedTime(const ExecutionRegionTraceSummary &summary) {
+	auto attributed = summary.source_us + summary.sink_us + summary.generated_us;
+	if (summary.runtime_us <= attributed) {
+		return 0;
+	}
+	return summary.runtime_us - attributed;
+}
+
+static double RuntimePercent(int64_t value, int64_t runtime_us) {
+	if (runtime_us <= 0) {
+		return 0;
+	}
+	return (double(value) * 100.0) / double(runtime_us);
+}
+
+static const char *DominantRuntimeComponent(const ExecutionRegionTraceSummary &summary) {
+	auto unattributed_us = RuntimeUnattributedTime(summary);
+	if (summary.runtime_us <= 0 && summary.source_us <= 0 && summary.sink_us <= 0 && summary.generated_us <= 0) {
+		return "none";
+	}
+	auto dominant = "unattributed";
+	auto dominant_us = unattributed_us;
+	if (summary.source_us >= dominant_us) {
+		dominant = "source";
+		dominant_us = summary.source_us;
+	}
+	if (summary.generated_us >= dominant_us) {
+		dominant = "generated";
+		dominant_us = summary.generated_us;
+	}
+	if (summary.sink_us >= dominant_us) {
+		dominant = "sink";
+	}
+	return dominant;
+}
+
+static void AddFields(QueryProfileResult &node, std::initializer_list<std::pair<const char *, Value>> fields) {
+	for (const auto &field : fields) {
+		node.AddValue(field.first, field.second);
+	}
+}
+
+static string SelectedExecutionRegionBackendName(ClientContext &context) {
+	for (const auto &backend : ExecutionRegionManager::Get(context).GetBackends(&context)) {
+		if (backend.selected) {
+			return backend.name;
+		}
+	}
+	return "none";
+}
+
+static void AddExecutionRegionSummary(QueryProfileResult &node, ClientContext &context,
+                                      const ExecutionRegionTraceSummary &summary, int64_t query_runtime_us) {
+	AddFields(node,
+	          {{"jit_enabled", Value::BOOLEAN(ExecutionRegionSettings::Enabled(context))},
+	           {"jit_policy", Text(ExecutionRegionPolicyModeToString(ExecutionRegionSettings::Policy(context)))},
+	           {"jit_requested_backend", Text(ExecutionRegionSettings::RequestedBackend(context))},
+	           {"jit_selected_backend", Text(SelectedExecutionRegionBackendName(context))},
+	           {"runtime_regions", Count(summary.runtime_regions)},
+	           {"compiled_regions", Count(summary.compiled)},
+	           {"compile_errors", Count(summary.compile_errors)},
+	           {"runtime_events", Count(summary.runtime_events)},
+	           {"decisions", Count(summary.decisions)},
+	           {"unsupported_decisions", Count(summary.unsupported)},
+	           {"skipped_decisions", Count(summary.skipped)},
+	           {"unavailable_decisions", Count(summary.unavailable)},
+	           {"disabled_decisions", Count(summary.disabled)},
+	           {"code_size", Count(summary.code_size)},
+	           {"query_runtime_time_us", Time(query_runtime_us)},
+	           {"runtime_time_us", Time(summary.runtime_us)},
+	           {"source_runtime_time_us", Time(summary.source_us)},
+	           {"sink_next_batch_runtime_time_us", Time(summary.sink_us)},
+	           {"generated_runtime_time_us", Time(summary.generated_us)},
+	           {"runtime_unattributed_time_us", Time(RuntimeUnattributedTime(summary))},
+	           {"source_runtime_pct", Value::DOUBLE(RuntimePercent(summary.source_us, summary.runtime_us))},
+	           {"sink_next_batch_runtime_pct", Value::DOUBLE(RuntimePercent(summary.sink_us, summary.runtime_us))},
+	           {"generated_runtime_pct", Value::DOUBLE(RuntimePercent(summary.generated_us, summary.runtime_us))},
+	           {"runtime_unattributed_pct",
+	            Value::DOUBLE(RuntimePercent(RuntimeUnattributedTime(summary), summary.runtime_us))},
+	           {"runtime_dominant_component", Text(DominantRuntimeComponent(summary))},
+	           {"decision_time_us", Time(summary.decision_us)},
+	           {"compile_time_us", Time(summary.compile_us)}});
+}
+
+static void AddExecutionRegionEvent(QueryProfileResult &row, const ExecutionRegionEvent &event, bool is_runtime) {
+	AddFields(row, {{"entry_type", Text(is_runtime ? "runtime" : "decision")},
+	                {"event_id", Count(event.event_id)},
+	                {"kernel_id", Count(event.kernel_id)},
+	                {"status", Text(ExecutionRegionEventStatusToString(event.status_kind))},
+	                {"requested_policy", Text(ExecutionRegionEventPolicyToString(event.requested_policy_kind))},
+	                {"backend_name", Text(event.backend_name)},
+	                {"target", Text(ExecutionRegionCompileTargetToString(event.target_kind))},
+	                {"execution_mode", Text(ExecutionRegionExecutionModeToString(event.execution_mode_kind))},
+	                {"region_execution_form", Text(ExecutionRegionFormToString(event.region_execution_form_kind))},
+	                {"execution_body", Text(ExecutionRegionExecutionBodyToString(event.execution_body_kind))},
+	                {"selected_source_execution",
+	                 Text(ExecutionRegionSourceExecutionKindToString(event.selected_source_execution))},
+	                {"selected_uses_scan_filters", Value::BOOLEAN(event.selected_uses_scan_filters)},
+	                {"candidate_uses_scan_filters", Value::BOOLEAN(event.candidate_uses_scan_filters)},
+	                {"shape", Text(event.candidate_shape)},
+	                {"pipeline_shape", Text(ExecutionRegionEventPipelineShape(event))},
+	                {"estimated_cardinality", Count(ExecutionRegionEventEstimatedCardinality(event))},
+	                {"selected_runner", Text(ExecutionRunnerKindToString(event.selected_runner))},
+	                {"runner_cost_profile", Value::BOOLEAN(event.runner_cost.present)},
+	                {"runner_cost_rows", Time(event.runner_cost.rows)},
+	                {"runner_cost_batches", Time(event.runner_cost.batches)},
+	                {"runner_cost_expression_cost", Time(event.runner_cost.expression_cost)},
+	                {"runner_cost_accelerated_stage_count", Time(event.runner_cost.accelerated_stage_count)},
+	                {"runner_cost_saved_work_per_batch", Time(event.runner_cost.saved_work_per_batch)},
+	                {"runner_cost_accelerated_runner_benefit", Time(event.runner_cost.accelerated_runner_benefit)},
+	                {"runner_cost_startup_cost", Time(event.runner_cost.startup_cost)},
+	                {"runner_cost_required_benefit", Time(event.runner_cost.required_benefit)},
+	                {"runner_cost_net_benefit", Time(event.runner_cost.net_benefit)},
+	                {"runner_cost_selected_accelerated_runner",
+	                 Value::BOOLEAN(event.runner_cost.selected_accelerated_runner)},
+	                {"reason", Text(event.reason)},
+	                {"blocker", NullableText(event.blocker)},
+	                {"runtime_result", Text(event.runtime_result)},
+	                {"code_size", Count(ExecutionRegionEventProfileCodeSize(event))},
+	                {"input_rows", Count(event.input_rows)},
+	                {"output_rows", Count(event.output_rows)},
+	                {"invocation_count", Count(event.invocation_count)},
+	                {"source_contract_output_rows", Count(event.source_contract_output_rows)},
+	                {"source_contract_invocation_count", Count(event.source_contract_invocation_count)},
+	                {"sink_next_batch_invocation_count", Count(event.sink_next_batch_invocation_count)},
+	                {"decision_time_us", Time(event.decision_time_us)},
+	                {"compile_time_us", Time(ExecutionRegionEventProfileCompileTime(event))},
+	                {"ir_lowering_time_us", Time(event.ir_lowering_time_us)},
+	                {"backend_analysis_time_us", Time(event.backend_analysis_time_us)},
+	                {"codegen_time_us", Time(event.codegen_time_us)},
+	                {"runtime_time_us", Time(event.runtime_time_us)},
+	                {"source_runtime_time_us", Time(event.source_contract_runtime_time_us)},
+	                {"sink_next_batch_runtime_time_us", Time(event.sink_next_batch_runtime_time_us)},
+	                {"generated_runtime_time_us", Time(event.generated_body_runtime_time_us)},
+	                {"source_stage_runtime_breakdown",
+	                 Text(RenderExecutionRegionStageRuntimeBreakdown(event.source_stage_runtime))},
+	                {"generated_stage_runtime_breakdown",
+	                 Text(RenderExecutionRegionStageRuntimeBreakdown(event.generated_stage_runtime))}});
+	if (!event.ir.empty()) {
+		row.AddValue("ir", Text(event.ir));
+	}
+}
+
+static void AddExecutionRegionEvents(QueryProfileResult &node, const QueryProfilerExecutionRegionTrace &trace) {
+	auto &rows = node.AddList("events");
+	for (const auto &event : trace) {
+		if (!ExecutionRegionEventIsVisibleInQueryProfile(event)) {
+			continue;
+		}
+		AddExecutionRegionEvent(rows.AppendObject(), event, ExecutionRegionEventIsRuntime(event));
+	}
+}
+
+static void RenderExecutionRegionsToStream(std::ostream &ss, ClientContext &context, double query_runtime_seconds,
+                                           const QueryProfilerExecutionRegionTrace &trace) {
+	if (trace.empty()) {
+		return;
+	}
+	auto summary = SummarizeExecutionRegionTrace(trace);
+	ss << "JIT_EXECUTION_REGIONS\n";
+	ss << "  policy=" << ExecutionRegionPolicyModeToString(ExecutionRegionSettings::Policy(context))
+	   << " requested_backend=" << ExecutionRegionSettings::RequestedBackend(context)
+	   << " selected_backend=" << SelectedExecutionRegionBackendName(context)
+	   << " enabled=" << (ExecutionRegionSettings::Enabled(context) ? "true" : "false")
+	   << " compiled=" << summary.compiled << " runtime_regions=" << summary.runtime_regions
+	   << " decisions=" << summary.decisions << " unsupported=" << summary.unsupported << " skipped=" << summary.skipped
+	   << " query_runtime_us=" << Micros(query_runtime_seconds) << " region_runtime_us=" << summary.runtime_us
+	   << " source_runtime_us=" << summary.source_us << " sink_runtime_us=" << summary.sink_us
+	   << " generated_runtime_us=" << summary.generated_us
+	   << " runtime_unattributed_us=" << RuntimeUnattributedTime(summary)
+	   << " runtime_dominant=" << DominantRuntimeComponent(summary)
+	   << " source_runtime_pct=" << RuntimePercent(summary.source_us, summary.runtime_us)
+	   << " generated_runtime_pct=" << RuntimePercent(summary.generated_us, summary.runtime_us)
+	   << " decision_time_us=" << summary.decision_us << " compile_time_us=" << summary.compile_us << "\n";
+}
+
+static void AppendExecutionRegionsToResult(QueryProfileResult &result, ClientContext &context,
+                                           double query_runtime_seconds,
+                                           const QueryProfilerExecutionRegionTrace &trace) {
+	if (trace.empty()) {
+		return;
+	}
+	auto &node = result.AddObject("execution_regions");
+	AddExecutionRegionSummary(node, context, SummarizeExecutionRegionTrace(trace), Micros(query_runtime_seconds));
+	AddExecutionRegionEvents(node, trace);
+}
+
 QueryProfiler::QueryProfiler(ClientContext &context_p)
     : context(context_p), running(false), query_requires_profiling(false), is_explain_analyze(false),
-      execution_region_profile_start_event_id(0), execution_region_profile_start_kernel_id(0), metrics_finalized(false) {
+      execution_region_trace(make_uniq<QueryProfilerExecutionRegionTrace>()), metrics_finalized(false) {
 }
+
+QueryProfiler::~QueryProfiler() = default;
 
 bool QueryProfiler::IsEnabled() const {
 	return is_explain_analyze || ClientConfig::GetConfig(context).enable_profiler;
@@ -165,28 +380,10 @@ QueryProfiler &QueryProfiler::Get(ClientContext &context) {
 	return *ClientData::Get(context).profiler;
 }
 
-static idx_t ExecutionRegionMaxEventId(ClientContext &context) {
-	idx_t result = 0;
-	for (auto &event : ExecutionRegionManager::Get(context).GetEvents()) {
-		result = MaxValue(result, event.event_id);
-	}
-	return result;
-}
-
-static idx_t ExecutionRegionMaxKernelId(ClientContext &context) {
-	idx_t result = 0;
-	for (auto &counter : ExecutionRegionManager::Get(context).GetKernelCounters()) {
-		result = MaxValue(result, counter.kernel_id);
-	}
-	return result;
-}
-
 void QueryProfiler::Start(const string &query) {
 	Reset();
 	running = true;
 	query_metrics.query_sql = query;
-	execution_region_profile_start_event_id = ExecutionRegionMaxEventId(context);
-	execution_region_profile_start_kernel_id = ExecutionRegionMaxKernelId(context);
 	query_metrics.latency_timer = make_uniq<MetricsTimer>(StartTimer<MetricQueryTotalTime>());
 }
 
@@ -196,8 +393,7 @@ void QueryProfiler::Reset() {
 	metrics.reset();
 	running = false;
 	query_metrics.Reset();
-	execution_region_profile_start_event_id = 0;
-	execution_region_profile_start_kernel_id = 0;
+	execution_region_trace->clear();
 	result_tree.reset();
 	metrics_finalized = false;
 }
@@ -560,6 +756,20 @@ void QueryProfiler::SetBlockedTime(const double &blocked_thread_time) {
 	query_metrics.blocked_thread_time = blocked_thread_time;
 }
 
+bool QueryProfiler::AcceptsExecutionRegionEvents() const {
+	lock_guard<std::mutex> guard(lock);
+	return IsEnabled() && running;
+}
+
+void QueryProfiler::RecordExecutionRegionEvent(const ExecutionRegionEvent &event) {
+	lock_guard<std::mutex> guard(lock);
+	if (!IsEnabled() || !running) {
+		return;
+	}
+	execution_region_trace->push_back(event);
+	result_tree.reset();
+}
+
 string QueryProfiler::DrawPadded(const string &str, idx_t width) {
 	if (str.size() > width) {
 		return str.substr(0, width);
@@ -666,266 +876,6 @@ void PrintPhaseTimingsToStream(std::ostream &ss, const GatheredMetrics &info, id
 	}
 }
 
-static string RenderMicros(int64_t micros) {
-	if (micros >= 1000000) {
-		return StringUtil::Format("%.2fs", static_cast<double>(micros) / 1000000.0);
-	}
-	if (micros >= 1000) {
-		return StringUtil::Format("%.2fms", static_cast<double>(micros) / 1000.0);
-	}
-	return StringUtil::Format("%lldus", static_cast<long long>(micros));
-}
-
-static string TruncateProfileLine(const string &line, idx_t width) {
-	if (line.size() <= width) {
-		return line;
-	}
-	if (width <= 3) {
-		return line.substr(0, width);
-	}
-	return line.substr(0, width - 3) + "...";
-}
-
-static void RenderProfileBoxLine(std::ostream &ss, const string &line, idx_t width) {
-	ss << "│" << QueryProfiler::DrawPadded(TruncateProfileLine(line, width - 2), width - 2) << "│\n";
-}
-
-static string RepeatProfileGlyph(const string &glyph, idx_t count) {
-	string result;
-	for (idx_t i = 0; i < count; i++) {
-		result += glyph;
-	}
-	return result;
-}
-
-static void RenderProfileBox(std::ostream &ss, const string &title, const vector<string> &lines, idx_t width) {
-	auto horizontal = RepeatProfileGlyph("─", width - 2);
-	ss << "┌" << horizontal << "┐\n";
-	RenderProfileBoxLine(ss, title, width);
-	if (!lines.empty()) {
-		ss << "├" << horizontal << "┤\n";
-		for (auto &line : lines) {
-			RenderProfileBoxLine(ss, line, width);
-		}
-	}
-	ss << "└" << horizontal << "┘\n";
-}
-
-static void AccumulateGeneratedStageTimings(const string &breakdown, unordered_map<string, int64_t> &stage_timings) {
-	for (auto &segment : StringUtil::Split(breakdown, ";")) {
-		auto equals = segment.find('=');
-		if (equals == string::npos || equals + 1 >= segment.size()) {
-			continue;
-		}
-		auto stage = segment.substr(0, equals);
-		auto value_text = segment.substr(equals + 1);
-		char *end = nullptr;
-		auto value = std::strtoll(value_text.c_str(), &end, 10);
-		if (!end || *end != '\0') {
-			continue;
-		}
-		stage_timings[stage] += value;
-	}
-}
-
-static vector<pair<string, int64_t>> SortedGeneratedStageTimings(const string &breakdown) {
-	unordered_map<string, int64_t> stage_timings;
-	AccumulateGeneratedStageTimings(breakdown, stage_timings);
-	vector<pair<string, int64_t>> result;
-	result.reserve(stage_timings.size());
-	for (auto &entry : stage_timings) {
-		result.emplace_back(entry.first, entry.second);
-	}
-	std::sort(result.begin(), result.end(), [](const pair<string, int64_t> &left, const pair<string, int64_t> &right) {
-		if (left.second != right.second) {
-			return left.second > right.second;
-		}
-		return left.first < right.first;
-	});
-	return result;
-}
-
-static string RenderProfileStringList(const vector<string> &values) {
-	string result = "[";
-	for (idx_t i = 0; i < values.size(); i++) {
-		if (i > 0) {
-			result += "|";
-		}
-		result += values[i];
-	}
-	result += "]";
-	return result;
-}
-
-struct ExecutionRegionProfileKernel {
-	ExecutionRegionKernelCounter counter;
-	vector<pair<string, int64_t>> stages;
-};
-
-struct ExecutionRegionProfile {
-	idx_t compiled_count = 0;
-	idx_t runtime_count = 0;
-	idx_t runtime_rows = 0;
-	int64_t runtime_us = 0;
-	int64_t source_us = 0;
-	int64_t body_us = 0;
-	idx_t code_size = 0;
-	idx_t unsupported_decisions = 0;
-	idx_t skipped_decisions = 0;
-	vector<ExecutionRegionProfileKernel> kernels;
-};
-
-static ExecutionRegionProfile BuildExecutionRegionProfile(ClientContext &context, idx_t start_event_id,
-                                                          idx_t start_kernel_id) {
-	ExecutionRegionProfile profile;
-	vector<ExecutionRegionKernelCounter> counters;
-	for (auto &counter : ExecutionRegionManager::Get(context).GetKernelCounters()) {
-		if (counter.kernel_id <= start_kernel_id || counter.target != "region") {
-			continue;
-		}
-		counters.push_back(counter);
-	}
-	if (counters.empty()) {
-		return profile;
-	}
-	std::sort(counters.begin(), counters.end(),
-	          [](const ExecutionRegionKernelCounter &left, const ExecutionRegionKernelCounter &right) {
-		          if (left.input_rows != right.input_rows) {
-			          return left.input_rows > right.input_rows;
-		          }
-		          if (left.runtime_time_us != right.runtime_time_us) {
-			          return left.runtime_time_us > right.runtime_time_us;
-		          }
-		          return left.kernel_id < right.kernel_id;
-	          });
-
-	profile.kernels.reserve(counters.size());
-	for (auto &kernel : counters) {
-		profile.compiled_count++;
-		if (kernel.invocation_count > 0 || kernel.runtime_time_us > 0) {
-			profile.runtime_count++;
-		}
-		profile.runtime_rows += kernel.input_rows;
-		profile.runtime_us += kernel.runtime_time_us;
-		profile.source_us += kernel.source_contract_runtime_time_us;
-		profile.body_us += kernel.generated_body_runtime_time_us;
-		profile.code_size += kernel.code_size;
-
-		ExecutionRegionProfileKernel profile_kernel;
-		profile_kernel.counter = kernel;
-		profile_kernel.stages = SortedGeneratedStageTimings(kernel.generated_stage_runtime_breakdown);
-		profile.kernels.push_back(std::move(profile_kernel));
-	}
-
-	for (auto &event : ExecutionRegionManager::Get(context).GetEvents()) {
-		if (event.event_id <= start_event_id || event.target != "region" || event.phase != "decision") {
-			continue;
-		}
-		if (event.status == "unsupported") {
-			profile.unsupported_decisions++;
-		} else if (event.status == "skipped") {
-			profile.skipped_decisions++;
-		}
-	}
-	return profile;
-}
-
-static void AppendExecutionRegionProfileToResult(QueryProfileResult &result, const ExecutionRegionProfile &profile) {
-	if (profile.kernels.empty()) {
-		return;
-	}
-	auto &profile_node = result.AddObject("execution_regions");
-	profile_node.AddValue("compiled_regions", Value::UBIGINT(profile.compiled_count));
-	profile_node.AddValue("runtime_regions", Value::UBIGINT(profile.runtime_count));
-	profile_node.AddValue("input_rows", Value::UBIGINT(profile.runtime_rows));
-	profile_node.AddValue("runtime_time_us", Value::BIGINT(profile.runtime_us));
-	profile_node.AddValue("source_runtime_time_us", Value::BIGINT(profile.source_us));
-	profile_node.AddValue("generated_runtime_time_us", Value::BIGINT(profile.body_us));
-	profile_node.AddValue("code_size", Value::UBIGINT(profile.code_size));
-	profile_node.AddValue("unsupported_decisions", Value::UBIGINT(profile.unsupported_decisions));
-	profile_node.AddValue("skipped_decisions", Value::UBIGINT(profile.skipped_decisions));
-
-	auto &region_list = profile_node.AddList("regions");
-	for (auto &profile_kernel : profile.kernels) {
-		auto &kernel = profile_kernel.counter;
-		auto &region_node = region_list.AppendObject();
-		region_node.AddValue("kernel_id", Value::UBIGINT(kernel.kernel_id));
-		region_node.AddValue("backend_name", Value(kernel.backend_name));
-		region_node.AddValue("execution_mode", Value(kernel.execution_mode));
-		region_node.AddValue("region_execution_form", Value(kernel.region_execution_form));
-		region_node.AddValue("execution_body", Value(kernel.execution_body));
-		region_node.AddValue("shape", Value(kernel.candidate_shape));
-		region_node.AddValue("feature_shape", Value(kernel.candidate_signature.feature_shape));
-		region_node.AddValue("pipeline_shape", Value(kernel.candidate_pipeline_shape));
-		region_node.AddValue("context_pipeline_shape", Value(kernel.candidate_context_pipeline_shape));
-		region_node.AddValue("compile_time_us", Value::BIGINT(kernel.compile_time_us));
-		region_node.AddValue("code_size", Value::UBIGINT(kernel.code_size));
-		region_node.AddValue("input_rows", Value::UBIGINT(kernel.input_rows));
-		region_node.AddValue("output_rows", Value::UBIGINT(kernel.output_rows));
-		region_node.AddValue("invocation_count", Value::UBIGINT(kernel.invocation_count));
-		region_node.AddValue("runtime_time_us", Value::BIGINT(kernel.runtime_time_us));
-		region_node.AddValue("source_runtime_time_us", Value::BIGINT(kernel.source_contract_runtime_time_us));
-		region_node.AddValue("generated_runtime_time_us", Value::BIGINT(kernel.generated_body_runtime_time_us));
-
-		auto &capabilities = region_node.AddList("capabilities");
-		for (auto &capability : kernel.candidate_contract.required_capabilities) {
-			capabilities.AppendValue(Value(capability));
-		}
-
-		auto &stages = region_node.AddList("stages");
-		for (auto &stage : profile_kernel.stages) {
-			auto &stage_node = stages.AppendObject();
-			stage_node.AddValue("name", Value(stage.first));
-			stage_node.AddValue("runtime_time_us", Value::BIGINT(stage.second));
-		}
-	}
-}
-
-static void RenderExecutionRegionProfileToStream(std::ostream &ss, ClientContext &context, idx_t start_event_id,
-                                                 idx_t start_kernel_id) {
-	auto profile = BuildExecutionRegionProfile(context, start_event_id, start_kernel_id);
-	if (profile.kernels.empty()) {
-		return;
-	}
-
-	constexpr idx_t WIDTH = 92;
-	vector<string> summary;
-	summary.push_back("compiled regions: " + std::to_string(profile.compiled_count) +
-	                  "  runtime regions: " + std::to_string(profile.runtime_count));
-	summary.push_back("rows: " + std::to_string(profile.runtime_rows) + "  runtime: " + RenderMicros(profile.runtime_us) +
-	                  "  source: " + RenderMicros(profile.source_us) + "  generated: " + RenderMicros(profile.body_us));
-	summary.push_back("code size: " + std::to_string(profile.code_size) + " bytes  unsupported decisions: " +
-	                  std::to_string(profile.unsupported_decisions) + "  skipped decisions: " +
-	                  std::to_string(profile.skipped_decisions));
-	RenderProfileBox(ss, "JIT_COMPILED_REGIONS", summary, WIDTH);
-
-	for (auto &profile_kernel : profile.kernels) {
-		auto &kernel = profile_kernel.counter;
-		vector<string> lines;
-		lines.push_back("shape: " + (kernel.candidate_shape.empty() ? string("none") : kernel.candidate_shape));
-		if (!kernel.candidate_signature.feature_shape.empty()) {
-			lines.push_back("features: " + kernel.candidate_signature.feature_shape);
-		}
-		lines.push_back("body: " + kernel.execution_body + "  code: " + std::to_string(kernel.code_size) +
-		                " bytes  compile: " + RenderMicros(kernel.compile_time_us));
-		lines.push_back("rows: " + std::to_string(kernel.input_rows) + " -> " + std::to_string(kernel.output_rows) +
-		                "  calls: " + std::to_string(kernel.invocation_count) +
-		                "  runtime: " + RenderMicros(kernel.runtime_time_us));
-		lines.push_back("source: " + RenderMicros(kernel.source_contract_runtime_time_us) +
-		                "  generated: " + RenderMicros(kernel.generated_body_runtime_time_us));
-		if (!kernel.candidate_contract.required_capabilities.empty()) {
-			lines.push_back("capabilities: " + RenderProfileStringList(kernel.candidate_contract.required_capabilities));
-		}
-
-		const idx_t max_stages = MinValue<idx_t>(profile_kernel.stages.size(), 6);
-		for (idx_t stage_idx = 0; stage_idx < max_stages; stage_idx++) {
-			lines.push_back("stage: " + profile_kernel.stages[stage_idx].first + " " +
-			                RenderMicros(profile_kernel.stages[stage_idx].second));
-		}
-		RenderProfileBox(ss, "JIT_REGION #" + std::to_string(kernel.kernel_id), lines, WIDTH);
-	}
-}
-
 void QueryProfiler::QueryTreeToStream(std::ostream &ss) const {
 	lock_guard<std::mutex> guard(lock);
 
@@ -964,8 +914,8 @@ void QueryProfiler::QueryTreeToStream(std::ostream &ss) const {
 		if (PrintOptimizerOutput()) {
 			PrintPhaseTimingsToStream(ss, *metrics, TOTAL_BOX_WIDTH);
 		}
-		RenderExecutionRegionProfileToStream(ss, context, execution_region_profile_start_event_id,
-		                                     execution_region_profile_start_kernel_id);
+		RenderExecutionRegionsToStream(ss, context, query_metrics.GetStringMetricInSeconds("query.total_time"),
+		                               *execution_region_trace);
 		Render(*root, ss);
 	}
 }
@@ -1079,6 +1029,29 @@ static yyjson_mut_val *ValueToJSON(yyjson_mut_doc *doc, const Value &val) {
 			}
 		}
 		return obj;
+	}
+	if (type.id() == LogicalTypeId::BOOLEAN) {
+		return yyjson_mut_bool(doc, val.GetValue<bool>());
+	}
+	switch (type.id()) {
+	case LogicalTypeId::TINYINT:
+		return yyjson_mut_sint(doc, val.GetValue<int8_t>());
+	case LogicalTypeId::SMALLINT:
+		return yyjson_mut_sint(doc, val.GetValue<int16_t>());
+	case LogicalTypeId::INTEGER:
+		return yyjson_mut_sint(doc, val.GetValue<int32_t>());
+	case LogicalTypeId::BIGINT:
+		return yyjson_mut_sint(doc, val.GetValue<int64_t>());
+	case LogicalTypeId::UTINYINT:
+		return yyjson_mut_uint(doc, val.GetValue<uint8_t>());
+	case LogicalTypeId::USMALLINT:
+		return yyjson_mut_uint(doc, val.GetValue<uint16_t>());
+	case LogicalTypeId::UINTEGER:
+		return yyjson_mut_uint(doc, val.GetValue<uint32_t>());
+	case LogicalTypeId::UBIGINT:
+		return yyjson_mut_uint(doc, val.GetValue<uint64_t>());
+	default:
+		break;
 	}
 	if (type.IsIntegral()) {
 		return yyjson_mut_uint(doc, val.GetValue<uint64_t>());
@@ -1276,9 +1249,8 @@ unique_ptr<QueryProfileResult> QueryProfiler::ToLegacyResultTree() const {
 	auto &children_list = result->AddList("children");
 	auto &root_node = children_list.AppendObject();
 	LegacyOperatorToResultTree(*metrics, *root, root_node);
-	AppendExecutionRegionProfileToResult(
-	    *result, BuildExecutionRegionProfile(context, execution_region_profile_start_event_id,
-	                                         execution_region_profile_start_kernel_id));
+	AppendExecutionRegionsToResult(*result, context, query_metrics.GetStringMetricInSeconds("query.total_time"),
+	                               *execution_region_trace);
 	return result;
 }
 
@@ -1297,9 +1269,8 @@ unique_ptr<QueryProfileResult> QueryProfiler::ToResultTree() const {
 		auto &op_node = op_list.AppendObject();
 		OperatorToResultTree(*metrics, *root, op_node);
 	}
-	AppendExecutionRegionProfileToResult(
-	    *result, BuildExecutionRegionProfile(context, execution_region_profile_start_event_id,
-	                                         execution_region_profile_start_kernel_id));
+	AppendExecutionRegionsToResult(*result, context, query_metrics.GetStringMetricInSeconds("query.total_time"),
+	                               *execution_region_trace);
 	return result;
 }
 

@@ -33,8 +33,30 @@ struct ExecutionRegionRuntimeMetrics {
 	idx_t source_contract_output_rows = 0;
 	idx_t source_contract_invocation_count = 0;
 	int64_t source_contract_runtime_time_us = 0;
+	vector<ExecutionRegionRecordedStageRuntime> source_stage_runtime;
+	idx_t sink_next_batch_invocation_count = 0;
+	int64_t sink_next_batch_runtime_time_us = 0;
 	int64_t generated_body_runtime_time_us = 0;
-	string generated_stage_runtime_breakdown;
+	vector<ExecutionRegionRecordedStageRuntime> generated_stage_runtime;
+};
+
+DUCKDB_API void AddExecutionRegionStageRuntime(vector<ExecutionRegionRecordedStageRuntime> &stages,
+                                               ExecutionRegionStageId stage, int64_t runtime_time_us, idx_t count = 1);
+DUCKDB_API void MergeExecutionRegionStageRuntime(vector<ExecutionRegionRecordedStageRuntime> &target,
+                                                 const vector<ExecutionRegionRecordedStageRuntime> &source);
+DUCKDB_API string RenderExecutionRegionStageRuntimeBreakdown(const vector<ExecutionRegionRecordedStageRuntime> &stages);
+DUCKDB_API string RenderExecutionRegionStageCountBreakdown(const vector<ExecutionRegionRecordedStageRuntime> &stages);
+
+struct ExecutionRegionSourceContractMetrics : public ExecutionOperatorStageRecorder {
+	int64_t setup_runtime_time_us = 0;
+	int64_t start_operator_runtime_time_us = 0;
+	int64_t get_data_runtime_time_us = 0;
+	int64_t finish_source_runtime_time_us = 0;
+	int64_t end_operator_runtime_time_us = 0;
+	vector<ExecutionRegionRecordedStageRuntime> get_data_stages;
+
+	void RecordStageRuntime(ExecutionRegionStageId stage, int64_t runtime_time_us) override;
+	int64_t GetDataStageRuntimeSum() const;
 };
 
 class ExecutionRegionRuntime {
@@ -44,9 +66,10 @@ public:
 	virtual idx_t MaxChunks() const = 0;
 	virtual Allocator &GetAllocator() = 0;
 	virtual SourceResultType FetchSourceContract(DataChunk *&result) = 0;
+	virtual SinkNextBatchType AdvanceSinkBatch(DataChunk &source_chunk, bool have_more_output) = 0;
 	virtual ExecutionOperatorRuntime &ExecutionOperators() = 0;
 	virtual bool TraceRuntime() const = 0;
-	virtual void RecordGeneratedStageRuntime(const string &stage, int64_t runtime_time_us) = 0;
+	virtual void RecordGeneratedStageRuntime(ExecutionRegionStageId stage, int64_t runtime_time_us) = 0;
 	virtual void Defer(string reason) = 0;
 	virtual const string &DeferredReason() const = 0;
 };

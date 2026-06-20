@@ -46,6 +46,7 @@ class PreparedStatementData;
 class Relation;
 class BufferedFileWriter;
 class QueryProfiler;
+struct ExecutionRegionEvent;
 class ClientContextLock;
 struct CreateScalarFunctionInfo;
 class ScalarFunctionCatalogEntry;
@@ -132,6 +133,14 @@ public:
 	DUCKDB_API void EnableProfiling();
 	//! Disable query profiling
 	DUCKDB_API void DisableProfiling();
+	//! True when query profiling output is active for the current query.
+	DUCKDB_API bool QueryProfilerIsEnabled();
+	//! True when the active query is EXPLAIN ANALYZE.
+	DUCKDB_API bool QueryProfilerIsExplainAnalyze();
+	//! True when the active query profiler can accept execution-region telemetry events.
+	DUCKDB_API bool QueryProfilerAcceptsExecutionRegionEvents();
+	//! Capture one execution-region telemetry event in the active query profiler.
+	DUCKDB_API void RecordExecutionRegionProfileEvent(const ExecutionRegionEvent &event);
 
 	//! Suppress compiled execution-region planning for the rest of the currently active query.
 	DUCKDB_API void SuppressCompiledExecutionForCurrentQuery();

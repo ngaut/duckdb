@@ -16,6 +16,8 @@
 namespace duckdb {
 
 class GroupedAggregateHashTable;
+struct ExecutionHashAggregateLookupLayout;
+struct ExecutionOperatorStageRecorder;
 struct AggregatePartition;
 
 class RadixPartitionedHashTable {
@@ -45,12 +47,11 @@ public:
 
 	void Sink(ExecutionContext &context, DataChunk &chunk, OperatorSinkInput &input, DataChunk &aggregate_input_chunk,
 	          const unsafe_vector<idx_t> &filter) const;
-	idx_t FindOrCreateAggregateStates(ExecutionContext &context, DataChunk &chunk, OperatorSinkInput &input,
-	                                  Vector &addresses_out) const;
-	idx_t FindOrCreateAggregateStatesFromBoundGroups(ExecutionContext &context, DataChunk &chunk,
-	                                                const vector<idx_t> &group_input_indices,
-	                                                OperatorSinkInput &input, Vector &addresses_out) const;
-	void FinishNativeAggregateUpdate(ExecutionContext &context, OperatorSinkInput &input) const;
+	void ResolveStateAddresses(ExecutionContext &context, DataChunk &chunk, OperatorSinkInput &input,
+	                           Vector &addresses_out,
+	                           optional_ptr<ExecutionOperatorStageRecorder> recorder = nullptr) const;
+	bool GetExecutionHashAggregateLookupLayout(ExecutionHashAggregateLookupLayout &layout) const;
+	void FinishStateUpdates(ExecutionContext &context, OperatorSinkInput &input) const;
 	void Combine(ExecutionContext &context, GlobalSinkState &gstate, LocalSinkState &lstate) const;
 	void Finalize(ClientContext &context, GlobalSinkState &gstate) const;
 

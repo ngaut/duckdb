@@ -3,7 +3,7 @@
 #include "duckdb/common/algorithm.hpp"
 #include "duckdb/common/printer.hpp"
 #include "duckdb/common/tree_renderer/text_tree_renderer.hpp"
-#include "duckdb/execution/execution_region_open_request.hpp"
+#include "duckdb/execution/execution_region_plan.hpp"
 #include "duckdb/execution/execution_region_planner.hpp"
 #include "duckdb/execution/execution_region_runner.hpp"
 #include "duckdb/execution/executor.hpp"
@@ -24,6 +24,13 @@ static ExecutionRegionOpenRequest GetExecutionRegionOpenRequest(const unique_ptr
 		return ExecutionRegionOpenRequest();
 	}
 	return plan->OpenRequest();
+}
+
+static ExecutionRunnerKind GetExecutionRegionRunnerKind(const unique_ptr<ExecutionRegionPlan> &plan) {
+	if (!plan) {
+		return ExecutionRunnerKind::VECTORIZED;
+	}
+	return plan->SelectedRunner();
 }
 
 PipelineTask::PipelineTask(Pipeline &pipeline_p, shared_ptr<Event> event_p)
@@ -339,9 +346,7 @@ void Pipeline::BuildExecutionRegionPlanLocked() {
 	}
 	auto &client = GetClientContext();
 	execution_region_plan = ExecutionRegionPlanner::Build(client, *this);
-	execution_runner = execution_region_plan && execution_region_plan->HasExecutableFullPipeline()
-	                       ? ExecutionRunnerKind::COMPILED_VECTORIZED
-	                       : ExecutionRunnerKind::VECTORIZED;
+	execution_runner = GetExecutionRegionRunnerKind(execution_region_plan);
 }
 
 bool Pipeline::PrepareExecutionRegionPlanForExecution() {

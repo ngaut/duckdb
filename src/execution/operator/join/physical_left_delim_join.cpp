@@ -192,8 +192,8 @@ bool PhysicalLeftDelimJoin::BindExecutionSink(ExecutionContext &context, DataChu
 	binding.delim_join_sink.ready = true;
 	binding.delim_join_sink.state = make_shared_ptr<LeftDelimJoinExecutionRegionSinkState>(
 	    context, distinct, *distinct.sink_state, *lstate.distinct_state, sink_input.interrupt_state, lstate);
-	binding.delim_join_sink.blocker = "none";
-	binding.blocker = "none";
+	binding.delim_join_sink.blocker.clear();
+	binding.blocker.clear();
 	return true;
 }
 

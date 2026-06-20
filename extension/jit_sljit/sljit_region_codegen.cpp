@@ -304,12 +304,15 @@ static void EmitLoadHashJoinSourceIndex(struct sljit_compiler *compiler, idx_t k
                                         sljit_s32 scratch) {
 	sljit_emit_op1(compiler, SLJIT_MOV_P, scratch, 0, SLJIT_MEM1(SLJIT_S0),
 	               offsetof(SljitNativeHashJoinProbeInput, source_sel));
+	auto no_sel_array = sljit_emit_cmp(compiler, SLJIT_EQUAL, scratch, 0, SLJIT_IMM, 0);
 	sljit_emit_op1(compiler, SLJIT_MOV_P, scratch, 0, SLJIT_MEM1(scratch),
 	               NumericCast<sljit_sw>(key_idx * sizeof(sel_t *)));
 	auto no_sel = sljit_emit_cmp(compiler, SLJIT_EQUAL, scratch, 0, SLJIT_IMM, 0);
 	sljit_emit_op1(compiler, SLJIT_MOV_U32, target, 0, SLJIT_MEM2(scratch, SLJIT_S1), 2);
 	auto have_index = sljit_emit_jump(compiler, SLJIT_JUMP);
-	sljit_set_label(no_sel, sljit_emit_label(compiler));
+	auto use_logical_index = sljit_emit_label(compiler);
+	sljit_set_label(no_sel_array, use_logical_index);
+	sljit_set_label(no_sel, use_logical_index);
 	sljit_emit_op1(compiler, SLJIT_MOV, target, 0, SLJIT_S1, 0);
 	sljit_set_label(have_index, sljit_emit_label(compiler));
 }
@@ -318,6 +321,7 @@ static struct sljit_jump *EmitJumpIfHashJoinSourceNull(struct sljit_compiler *co
                                                        sljit_s32 source_index, sljit_s32 scratch, sljit_s32 scratch2) {
 	sljit_emit_op1(compiler, SLJIT_MOV_P, scratch, 0, SLJIT_MEM1(SLJIT_S0),
 	               offsetof(SljitNativeHashJoinProbeInput, source_validity));
+	auto source_all_valid_array = sljit_emit_cmp(compiler, SLJIT_EQUAL, scratch, 0, SLJIT_IMM, 0);
 	sljit_emit_op1(compiler, SLJIT_MOV_P, scratch, 0, SLJIT_MEM1(scratch),
 	               NumericCast<sljit_sw>(key_idx * sizeof(validity_t *)));
 	auto source_all_valid = sljit_emit_cmp(compiler, SLJIT_EQUAL, scratch, 0, SLJIT_IMM, 0);
@@ -327,7 +331,9 @@ static struct sljit_jump *EmitJumpIfHashJoinSourceNull(struct sljit_compiler *co
 	sljit_emit_op2(compiler, SLJIT_SHL, scratch, 0, SLJIT_IMM, 1, scratch, 0);
 	sljit_emit_op2(compiler, SLJIT_AND | SLJIT_SET_Z, scratch, 0, scratch, 0, scratch2, 0);
 	auto source_is_null = sljit_emit_jump(compiler, SLJIT_EQUAL);
-	sljit_set_label(source_all_valid, sljit_emit_label(compiler));
+	auto all_valid = sljit_emit_label(compiler);
+	sljit_set_label(source_all_valid_array, all_valid);
+	sljit_set_label(source_all_valid, all_valid);
 	return source_is_null;
 }
 

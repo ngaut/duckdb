@@ -46,7 +46,7 @@ static string DelimJoinNativeContractBlocker(const ExecutionContract &distinct_c
 		                                             : distinct_state_update.blocker;
 	}
 	if (type != PhysicalOperatorType::RIGHT_DELIM_JOIN) {
-		return "none";
+		return string();
 	}
 	if (!join_contract) {
 		return "delim-join-right-build-contract-missing";
@@ -59,7 +59,7 @@ static string DelimJoinNativeContractBlocker(const ExecutionContract &distinct_c
 	if (join_native.status != ExecutionRegionStateContractStatus::READY) {
 		return join_native.blocker.empty() ? "delim-join-right-build-contract-not-ready" : join_native.blocker;
 	}
-	return "none";
+	return string();
 }
 
 ExecutionContract PhysicalDelimJoin::GetExecutionContract() const {
@@ -73,7 +73,7 @@ ExecutionContract PhysicalDelimJoin::GetExecutionContract() const {
 	auto join_contract_ptr =
 	    join_contract ? optional_ptr<const ExecutionContract>(*join_contract) : optional_ptr<const ExecutionContract>();
 	auto blocker = DelimJoinNativeContractBlocker(distinct_contract, join_contract_ptr, type);
-	const bool ready = blocker == "none";
+	const bool ready = blocker.empty();
 
 	result.sink.kind = ExecutionRegionSinkKind::DELIM_JOIN_SINK;
 	result.sink.reason = "DuckDB delimiter join execution sink contract";

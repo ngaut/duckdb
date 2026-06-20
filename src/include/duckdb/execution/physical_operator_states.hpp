@@ -12,6 +12,7 @@
 #include "duckdb/common/common.hpp"
 #include "duckdb/common/enums/operator_result_type.hpp"
 #include "duckdb/common/enums/physical_operator_type.hpp"
+#include "duckdb/common/optional_ptr.hpp"
 #include "duckdb/common/types/data_chunk.hpp"
 #include "duckdb/execution/execution_context.hpp"
 #include "duckdb/optimizer/join_order/join_node.hpp"
@@ -20,6 +21,7 @@
 
 namespace duckdb {
 class Event;
+struct ExecutionOperatorStageRecorder;
 class Executor;
 class PhysicalOperator;
 class Pipeline;
@@ -205,6 +207,7 @@ struct OperatorSourceInput {
 	GlobalSourceState &global_state;
 	LocalSourceState &local_state;
 	InterruptState &interrupt_state;
+	optional_ptr<ExecutionOperatorStageRecorder> stage_recorder;
 };
 
 struct OperatorSinkCombineInput {

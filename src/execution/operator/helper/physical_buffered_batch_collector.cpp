@@ -77,8 +77,8 @@ bool PhysicalBufferedBatchCollector::BindExecutionSink(ExecutionContext &context
 	binding.append_sink.ready = true;
 	binding.append_sink.state = make_shared_ptr<BufferedBatchCollectorExecutionRegionSinkState>(
 	    global_state, local_state, sink_input.interrupt_state);
-	binding.append_sink.blocker = "none";
-	binding.blocker = "none";
+	binding.append_sink.blocker.clear();
+	binding.blocker.clear();
 	return true;
 }
 

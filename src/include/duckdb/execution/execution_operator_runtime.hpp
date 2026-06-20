@@ -9,9 +9,12 @@
 
 #include "duckdb/common/common.hpp"
 #include "duckdb/common/enums/operator_result_type.hpp"
+#include "duckdb/execution/execution_aggregate_runtime.hpp"
 #include "duckdb/execution/execution_hash_join_runtime.hpp"
 #include "duckdb/execution/execution_region_ir.hpp"
 #include "duckdb/function/aggregate_primitive_update.hpp"
+
+#include <chrono>
 
 namespace duckdb {
 
@@ -21,6 +24,8 @@ class GlobalSinkState;
 class InterruptState;
 class LocalSinkState;
 class Vector;
+class Allocator;
+class SelectionVector;
 struct ColumnDataScanState;
 struct ExecutionContext;
 struct OperatorSinkInput;
@@ -63,9 +68,45 @@ struct ExecutionAggregateUpdateState {
 	virtual ~ExecutionAggregateUpdateState() {
 	}
 	virtual SinkResultType Sink(DataChunk &input) = 0;
-	virtual idx_t FindOrCreateAggregateStates(DataChunk &input, const vector<idx_t> &group_input_indices,
-	                                          Vector &addresses_out);
-	virtual void FinishNativeAggregateUpdate();
+};
+
+struct ExecutionOperatorStageRecorder {
+	virtual ~ExecutionOperatorStageRecorder() {
+	}
+	virtual void RecordStageRuntime(ExecutionRegionStageId stage, int64_t runtime_time_us) = 0;
+};
+
+class ExecutionOperatorStageTimer {
+public:
+	ExecutionOperatorStageTimer(optional_ptr<ExecutionOperatorStageRecorder> recorder, ExecutionRegionStageId stage);
+	ExecutionOperatorStageTimer(optional_ptr<ExecutionOperatorStageRecorder> recorder, const char *stage_name);
+	~ExecutionOperatorStageTimer();
+	ExecutionOperatorStageTimer(const ExecutionOperatorStageTimer &) = delete;
+	ExecutionOperatorStageTimer &operator=(const ExecutionOperatorStageTimer &) = delete;
+
+private:
+	optional_ptr<ExecutionOperatorStageRecorder> recorder;
+	ExecutionRegionStageId stage;
+	std::chrono::steady_clock::time_point start;
+};
+
+struct ExecutionGroupedAggregateStateAddressState {
+	virtual ~ExecutionGroupedAggregateStateAddressState() {
+	}
+	virtual void ResolveStateAddresses(DataChunk &input, Vector &addresses,
+	                                   optional_ptr<ExecutionOperatorStageRecorder> recorder = nullptr) = 0;
+	virtual void FinishStateUpdates() {
+	}
+};
+
+struct ExecutionPerfectAggregateStateAddressLayout {
+	bool ready = false;
+	data_ptr_t data = nullptr;
+	bool *group_is_set = nullptr;
+	idx_t total_groups = 0;
+	idx_t tuple_size = 0;
+	idx_t aggregate_state_offset = 0;
+	string blocker;
 };
 
 struct ExecutionPrimitiveAggregateUpdateLane {
@@ -74,7 +115,12 @@ struct ExecutionPrimitiveAggregateUpdateLane {
 	idx_t aggregate_index = DConstants::INVALID_INDEX;
 	idx_t payload_index = DConstants::INVALID_INDEX;
 	PhysicalType payload_type = PhysicalType::INVALID;
+	idx_t state_size = 0;
+	idx_t state_offset = 0;
+	idx_t state_value_offset = 0;
+	idx_t state_is_set_offset = 0;
 	int64_t *sum_int64_value = nullptr;
+	hugeint_t *sum_hugeint_value = nullptr;
 	bool *state_is_set = nullptr;
 	idx_t *row_count = nullptr;
 	string blocker;
@@ -86,6 +132,15 @@ struct ExecutionPrimitiveAggregateUpdateBinding {
 	string blocker;
 
 	const ExecutionPrimitiveAggregateUpdateLane *FindLane(idx_t aggregate_index) const;
+};
+
+struct ExecutionGroupedAggregateStateAddressBinding {
+	bool ready = false;
+	shared_ptr<ExecutionGroupedAggregateStateAddressState> state;
+	vector<idx_t> aggregate_state_offsets;
+	ExecutionHashAggregateLookupLayout hash_lookup_layout;
+	ExecutionPerfectAggregateStateAddressLayout perfect_hash_layout;
+	string blocker;
 };
 
 struct ExecutionProjectionOperatorState {
@@ -119,6 +174,11 @@ struct ExecutionHashJoinProbeBinding {
 	bool correlated_mark_counts_required = false;
 	idx_t correlated_mark_group_count = 0;
 	string blocker;
+};
+
+class ExecutionHashJoinProbeState {
+public:
+	virtual ~ExecutionHashJoinProbeState();
 };
 
 struct ExecutionHashJoinBuildBinding {
@@ -190,6 +250,7 @@ struct ExecutionAggregateUpdateBinding {
 	bool ready = false;
 	shared_ptr<ExecutionAggregateUpdateState> state;
 	ExecutionPrimitiveAggregateUpdateBinding primitive;
+	ExecutionGroupedAggregateStateAddressBinding grouped_state;
 	string blocker;
 };
 
@@ -216,26 +277,50 @@ struct ExecutionSinkBinding {
 
 DUCKDB_API void ExecutionMaterializeHashJoinProbe(const ExecutionHashJoinProbeBinding &binding, DataChunk &input,
                                                   Vector &row_pointers, const SelectionVector &match_sel, idx_t count,
-                                                  DataChunk &result);
+                                                  DataChunk &result,
+                                                  optional_ptr<ExecutionOperatorStageRecorder> recorder = nullptr);
 
-DUCKDB_API void ExecutionMaterializePerfectHashJoinProbe(const ExecutionHashJoinProbeBinding &binding, DataChunk &input,
-                                                         const SelectionVector &probe_sel,
-                                                         const SelectionVector &build_sel, idx_t count,
-                                                         DataChunk &result);
+DUCKDB_API void
+ExecutionMaterializePerfectHashJoinProbe(const ExecutionHashJoinProbeBinding &binding, DataChunk &input,
+                                         const SelectionVector &probe_sel, const SelectionVector &build_sel,
+                                         idx_t count, DataChunk &result,
+                                         optional_ptr<ExecutionOperatorStageRecorder> recorder = nullptr);
 
-DUCKDB_API void ExecutionMaterializeHashJoinProbeLeftUnmatched(const ExecutionHashJoinProbeBinding &binding,
-                                                               DataChunk &input, const SelectionVector &unmatched_sel,
-                                                               idx_t count, DataChunk &result);
+DUCKDB_API void
+ExecutionMaterializeHashJoinProbeLeftUnmatched(const ExecutionHashJoinProbeBinding &binding, DataChunk &input,
+                                               const SelectionVector &unmatched_sel, idx_t count, DataChunk &result,
+                                               optional_ptr<ExecutionOperatorStageRecorder> recorder = nullptr);
 
-DUCKDB_API void ExecutionMaterializeHashJoinResidualSources(const ExecutionHashJoinProbeBinding &binding,
-                                                            DataChunk &input, Vector &row_pointers,
-                                                            const SelectionVector &match_sel, idx_t count,
-                                                            DataChunk &residual_sources);
+DUCKDB_API void
+ExecutionMaterializeHashJoinResidualSources(const ExecutionHashJoinProbeBinding &binding, DataChunk &input,
+                                            Vector &row_pointers, const SelectionVector &match_sel, idx_t count,
+                                            DataChunk &residual_sources,
+                                            optional_ptr<ExecutionOperatorStageRecorder> recorder = nullptr);
+
+DUCKDB_API unique_ptr<ExecutionHashJoinProbeState>
+ExecutionCreateHashJoinProbeState(const ExecutionHashJoinProbeBinding &binding, Allocator &allocator);
+
+DUCKDB_API OperatorResultType ExecutionProbeHashJoin(const ExecutionHashJoinProbeBinding &binding,
+                                                     ExecutionHashJoinProbeState &state, DataChunk &input,
+                                                     DataChunk &output,
+                                                     optional_ptr<ExecutionOperatorStageRecorder> recorder = nullptr);
 
 DUCKDB_API bool ExecutionBindHashJoinBuild(ExecutionContext &context, OperatorSinkInput &input, DataChunk &chunk,
                                            const ExecutionRegionSinkInfo &sink_info, ExecutionSinkBinding &binding);
 
-DUCKDB_API SinkResultType ExecutionSinkHashJoinBuild(const ExecutionHashJoinBuildBinding &binding, DataChunk &input);
+DUCKDB_API void ExecutionHashJoinBuildReferenceKeys(const ExecutionHashJoinBuildBinding &binding, DataChunk &input);
+DUCKDB_API void ExecutionHashJoinBuildApplyFilterPushdown(const ExecutionHashJoinBuildBinding &binding);
+DUCKDB_API void ExecutionHashJoinBuildReferencePayload(const ExecutionHashJoinBuildBinding &binding, DataChunk &input);
+DUCKDB_API idx_t ExecutionHashJoinBuildPrepare(const ExecutionHashJoinBuildBinding &binding, DataChunk &source_chunk,
+                                               Vector &hash_values, SelectionVector &build_sel,
+                                               optional_ptr<const SelectionVector> &build_selection);
+DUCKDB_API void ExecutionHashJoinBuildHash(const ExecutionHashJoinBuildBinding &binding, DataChunk &source_chunk,
+                                           Vector &hash_values, const SelectionVector &build_selection,
+                                           idx_t build_count);
+DUCKDB_API void ExecutionHashJoinBuildAppend(const ExecutionHashJoinBuildBinding &binding, DataChunk &source_chunk,
+                                             const SelectionVector &build_selection, idx_t build_count);
+DUCKDB_API SinkResultType ExecutionSinkHashJoinBuild(const ExecutionHashJoinBuildBinding &binding, DataChunk &input,
+                                                     optional_ptr<ExecutionOperatorStageRecorder> recorder = nullptr);
 
 DUCKDB_API bool ExecutionNestedLoopJoinProbeStartInput(const ExecutionNestedLoopJoinProbeBinding &binding);
 
@@ -258,13 +343,6 @@ DUCKDB_API SinkResultType ExecutionSinkDelimJoin(const ExecutionDelimJoinSinkBin
 
 DUCKDB_API SinkResultType ExecutionSinkAggregateUpdate(const ExecutionAggregateUpdateBinding &binding,
                                                        DataChunk &input);
-
-DUCKDB_API idx_t ExecutionFindOrCreateAggregateStates(const ExecutionAggregateUpdateBinding &binding,
-                                                      DataChunk &input,
-                                                      const vector<idx_t> &group_input_indices,
-                                                      Vector &addresses_out);
-
-DUCKDB_API void ExecutionFinishAggregateUpdate(const ExecutionAggregateUpdateBinding &binding);
 
 DUCKDB_API OperatorResultType ExecutionOperatorProject(const ExecutionProjectionBinding &binding, DataChunk &input,
                                                        DataChunk &output);

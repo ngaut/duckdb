@@ -17,6 +17,7 @@ namespace duckdb {
 
 struct SljitExecutableRegionExpression {
 	SljitNativeRegionExpressionPlan plan;
+	vector<idx_t> input_source_indices;
 	unique_ptr<ExecutionRegionCodeHandle> code;
 	SljitNativeVectorFunction function = nullptr;
 	unique_ptr<ExecutionRegionCodeHandle> select_code;
@@ -61,6 +62,10 @@ struct SljitExecutableHashJoinProbe {
 	}
 };
 
+struct SljitExecutableHashJoinBuild {
+	SljitNativeHashJoinBuildPlan plan;
+};
+
 struct SljitExecutableNestedLoopJoinProbe {
 	SljitNativeNestedLoopJoinProbePlan plan;
 	unique_ptr<ExecutionRegionCodeHandle> code;
@@ -74,10 +79,6 @@ struct SljitExecutableNestedLoopJoinProbe {
 		}
 		return result;
 	}
-};
-
-struct SljitExecutableHashJoinBuild {
-	SljitNativeHashJoinBuildPlan plan;
 };
 
 struct SljitExecutableNestedLoopJoinBuild {
@@ -117,6 +118,9 @@ struct SljitExecutableOrderSink {
 struct SljitExecutableAggregateUpdate {
 	SljitNativeAggregateUpdatePlan plan;
 	vector<SljitExecutableRegionExpression> payloads;
+	unique_ptr<ExecutionRegionCodeHandle> fused_payload_update_code;
+	SljitNativeAggregateUpdateFunction fused_payload_update_function = nullptr;
+	bool fused_payload_update_owns_group_lookup = false;
 	vector<unique_ptr<ExecutionRegionCodeHandle>> payload_update_code;
 	vector<SljitNativeAggregateUpdateFunction> payload_update_functions;
 
@@ -125,6 +129,7 @@ struct SljitExecutableAggregateUpdate {
 		for (auto &payload : payloads) {
 			result += payload.CodeSize();
 		}
+		result += fused_payload_update_code ? fused_payload_update_code->CodeSize() : 0;
 		for (auto &code : payload_update_code) {
 			result += code ? code->CodeSize() : 0;
 		}
@@ -138,8 +143,8 @@ struct SljitExecutableRegionOp {
 	vector<LogicalType> output_types;
 	SljitExecutableRegionExpression filter;
 	SljitExecutableHashJoinProbe hash_join_probe;
-	SljitExecutableNestedLoopJoinProbe nested_loop_join_probe;
 	SljitExecutableHashJoinBuild hash_join_build;
+	SljitExecutableNestedLoopJoinProbe nested_loop_join_probe;
 	SljitExecutableNestedLoopJoinBuild nested_loop_join_build;
 	SljitExecutableAppendSink append_sink;
 	SljitExecutableDelimJoinSink delim_join_sink;
@@ -162,13 +167,13 @@ struct SljitExecutableRegionOp {
 		if (kind == SljitNativeRegionOpKind::NESTED_LOOP_JOIN_BUILD) {
 			result += nested_loop_join_build.CodeSize();
 		}
-			if (kind == SljitNativeRegionOpKind::ORDER_SINK) {
-				result += order_sink.CodeSize();
-			}
-			if (kind == SljitNativeRegionOpKind::AGGREGATE_UPDATE) {
-				result += aggregate_update.CodeSize();
-			}
-			for (auto &projection : projections) {
+		if (kind == SljitNativeRegionOpKind::ORDER_SINK) {
+			result += order_sink.CodeSize();
+		}
+		if (kind == SljitNativeRegionOpKind::AGGREGATE_UPDATE) {
+			result += aggregate_update.CodeSize();
+		}
+		for (auto &projection : projections) {
 			result += projection.CodeSize();
 		}
 		return result;

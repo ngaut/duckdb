@@ -212,7 +212,7 @@ bool PerfectHashJoinExecutor::GetExecutionPerfectHashJoinTableLayout(
 		return false;
 	}
 	layout.ready = true;
-	layout.blocker = "none";
+	layout.blocker.clear();
 	return true;
 }
 

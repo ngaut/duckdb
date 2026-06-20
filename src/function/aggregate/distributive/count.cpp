@@ -1,5 +1,6 @@
 #include "duckdb/common/clustered_aggregate.hpp"
 #include "duckdb/common/exception.hpp"
+#include "duckdb/function/aggregate_primitive_update.hpp"
 #include "duckdb/function/aggregate/distributive_functions.hpp"
 #include "duckdb/function/aggregate/distributive_function_utils.hpp"
 #include "duckdb/planner/expression/bound_aggregate_expression.hpp"
@@ -260,6 +261,16 @@ AggregateStateLayout GetCountStateType(const BoundAggregateFunction &function) {
 	return AggregateStateLayout(LogicalType::BIGINT, AlignValue(function.GetStateSizeCallback()(function)));
 }
 
+AggregatePrimitiveUpdateABI CountStarPrimitiveUpdateABI() {
+	AggregatePrimitiveUpdateABI abi;
+	abi.kind = AggregatePrimitiveUpdateKind::COUNT_STAR;
+	abi.input_type = PhysicalType::INVALID;
+	abi.state_size = sizeof(int64_t);
+	abi.state_value_offset = 0;
+	abi.state_is_set_offset = 0;
+	return abi;
+}
+
 unique_ptr<BaseStatistics> CountPropagateStats(ClientContext &context, BoundAggregateExpression &expr,
                                                AggregateStatisticsInput &input) {
 	if (!expr.IsDistinct() && !input.child_stats[0].CanHaveNull()) {
@@ -292,6 +303,7 @@ AggregateFunction CountStarFun::GetFunction() {
 	fun.SetNullHandling(FunctionNullHandling::SPECIAL_HANDLING);
 	fun.SetOrderDependent(AggregateOrderDependent::NOT_ORDER_DEPENDENT);
 	fun.SetWindowBatchCallback(CountStarFunction::Window<int64_t>);
+	fun.SetPrimitiveUpdateABI(CountStarPrimitiveUpdateABI());
 	return fun;
 }
 

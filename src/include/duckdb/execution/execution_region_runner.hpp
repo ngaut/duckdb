@@ -8,13 +8,12 @@
 #pragma once
 
 #include "duckdb/common/common.hpp"
+#include "duckdb/execution/execution_region_common.hpp"
 #include "duckdb/parallel/pipeline_execution.hpp"
 
 namespace duckdb {
 
 class ExecutionRegionPipelineAdapter;
-
-enum class ExecutionRunnerKind : uint8_t { VECTORIZED, COMPILED_VECTORIZED };
 
 enum class ExecutionRunnerResultKind : uint8_t { EXECUTED, CONTINUE_VECTORIZED };
 

@@ -210,6 +210,7 @@ static string DescribeExecutionRegionTableScanContract(const ExecutionRegionTabl
 		return string();
 	}
 	string result = "table_scan_contract<function=" + contract.function_name;
+	result += ",estimated_source_cardinality=" + std::to_string(contract.estimated_source_cardinality);
 	result += ",output_columns=" + std::to_string(contract.output_column_count);
 	result += ",returned_columns=" + std::to_string(contract.returned_column_count);
 	result += ",column_ids=" + std::to_string(contract.column_id_count);
@@ -222,13 +223,7 @@ static string DescribeExecutionRegionTableScanContract(const ExecutionRegionTabl
 	result += ",source_contract_output_projection_map=" +
 	          BuildExecutionRegionIdxList(contract.source_contract_output_projection_map);
 	result +=
-	    ",source_contract_filter_column_map=" + BuildExecutionRegionIdxList(contract.source_contract_filter_column_map);
-	result += ",source_contract_requires_unfiltered_input=" +
-	          ExecutionRegionBool(contract.source_contract_requires_unfiltered_input);
-	result +=
 	    ",source_contract_filter_prune_required=" + ExecutionRegionBool(contract.source_contract_filter_prune_required);
-	result += ",source_contract_filter_takeover_supported=" +
-	          ExecutionRegionBool(contract.source_contract_filter_takeover_supported);
 	result += ",projection_pushdown=" + ExecutionRegionBool(contract.projection_pushdown);
 	result += ",filter_pushdown=" + ExecutionRegionBool(contract.filter_pushdown);
 	result += ",filter_prune=" + ExecutionRegionBool(contract.filter_prune);
@@ -450,7 +445,12 @@ static string DescribeExecutionRegionAggregateContract(const ExecutionRegionAggr
 	result += ",grouped_state_layout_ready=" + ExecutionRegionBool(contract.grouped_state_layout_ready);
 	result += ",grouped_state_offsets=" + BuildExecutionRegionIdxList(contract.grouped_state_offsets);
 	result += ",grouped_state_payload_sizes=" + BuildExecutionRegionIdxList(contract.grouped_state_payload_sizes);
+	result += ",hash_lookup_layout_present=" + ExecutionRegionBool(contract.hash_lookup_layout_present);
+	result += ",hash_lookup_layout_blocker=" + contract.hash_lookup_layout_blocker;
+	result += ",hash_lookup_layout_row_compare_blocker=" + contract.hash_lookup_layout_row_compare_blocker;
+	result += ",hash_lookup_layout_backend_lowering_blocker=" + contract.hash_lookup_layout_backend_lowering_blocker;
 	if (include_update_contracts) {
+		AppendExecutionRegionContractIR(result, contract.hash_lookup_layout_ir);
 		AppendExecutionRegionContractIR(result, contract.native_grouped_state_contract.ir);
 		AppendExecutionRegionContractIR(result, contract.native_hash_lookup_contract.ir);
 		AppendExecutionRegionContractIR(result, contract.native_state_update_contract.ir);
@@ -520,6 +520,10 @@ static string DescribeExecutionRegionPrimitiveUpdateKind(AggregatePrimitiveUpdat
 		return "none";
 	case AggregatePrimitiveUpdateKind::SUM_INT64:
 		return "sum_int64";
+	case AggregatePrimitiveUpdateKind::SUM_HUGEINT:
+		return "sum_hugeint";
+	case AggregatePrimitiveUpdateKind::COUNT_STAR:
+		return "count_star";
 	default:
 		return "unknown";
 	}
@@ -557,10 +561,8 @@ static string DescribeExecutionRegionAggregateInput(const ExecutionRegionAggrega
 	result += ",primitive_update_kind=" + DescribeExecutionRegionPrimitiveUpdateKind(aggregate.primitive_update_kind);
 	result += ",primitive_update_input_type=" + TypeIdToString(aggregate.primitive_update_input_type);
 	result += ",primitive_update_state_size=" + std::to_string(aggregate.primitive_update_state_size);
-	result +=
-	    ",primitive_update_state_value_offset=" + std::to_string(aggregate.primitive_update_state_value_offset);
-	result += ",primitive_update_state_is_set_offset=" +
-	          std::to_string(aggregate.primitive_update_state_is_set_offset);
+	result += ",primitive_update_state_value_offset=" + std::to_string(aggregate.primitive_update_state_value_offset);
+	result += ",primitive_update_state_is_set_offset=" + std::to_string(aggregate.primitive_update_state_is_set_offset);
 	if (!aggregate.primitive_update_blocker.empty()) {
 		result += ",primitive_update_blocker=" + aggregate.primitive_update_blocker;
 	}
@@ -751,6 +753,7 @@ string DescribeExecutionRegionSourceInfo(const ExecutionRegionSourceInfo &source
 		result += "," + source.native_state_scan_contract.ir;
 	}
 	result += ",function=" + source.function_name;
+	result += ",estimated_source_cardinality=" + std::to_string(source.estimated_source_cardinality);
 	result += ",fields=" + DescribeExecutionRegionContractFields(fields);
 	result += ",output_columns=" + std::to_string(source.output_column_count);
 	result += ",returned_columns=" + std::to_string(source.returned_column_count);
@@ -842,7 +845,9 @@ static string DescribeExecutionRegionSinkInfo(const ExecutionRegionSinkInfo &sin
 }
 
 static void AddExecutionRegionSourceFilters(const ExecutionSourceContract &descriptor,
-                                            ExecutionRegionSourceInfo &source) {
+                                            ExecutionRegionSourceInfo &source,
+                                            ExecutionExpressionIRMode expression_mode,
+                                            ExecutionExpressionAnalysisCache *expression_cache) {
 	for (auto &entry : descriptor.filters) {
 		ExecutionRegionSourceFilter filter;
 		filter.filter_index = entry.filter_index;
@@ -853,7 +858,9 @@ static void AddExecutionRegionSourceFilters(const ExecutionSourceContract &descr
 			source.filters.push_back(std::move(filter));
 			continue;
 		}
-		filter.expression = TryLowerExecutionExpression(*entry.expression, filter.filter_index);
+		filter.expression = expression_cache
+		                        ? expression_cache->Copy(*entry.expression, filter.filter_index, expression_mode)
+		                        : TryLowerExecutionExpression(*entry.expression, filter.filter_index, expression_mode);
 		if (!filter.expression) {
 			filter.reason = DescribeExecutionExpressionLoweringFailure(*entry.expression);
 		}
@@ -861,12 +868,19 @@ static void AddExecutionRegionSourceFilters(const ExecutionSourceContract &descr
 	}
 }
 
-static unique_ptr<ExecutionRegionSourceInfo> BuildExecutionRegionSourceInfo(const ExecutionSourceContract &descriptor) {
+static bool ExecutionRegionShouldRenderDiagnostics(ExecutionRegionIRMode mode) {
+	return mode == ExecutionRegionIRMode::TRACE;
+}
+
+static unique_ptr<ExecutionRegionSourceInfo>
+BuildExecutionRegionSourceInfo(const ExecutionSourceContract &descriptor, ExecutionExpressionIRMode expression_mode,
+                               ExecutionRegionIRMode mode, ExecutionExpressionAnalysisCache *expression_cache) {
 	auto result = make_uniq<ExecutionRegionSourceInfo>();
 	result->kind = descriptor.kind;
 	result->execution = descriptor.execution;
 	result->function_name = descriptor.function_name;
 	result->fields = descriptor.fields;
+	result->estimated_source_cardinality = descriptor.estimated_source_cardinality;
 	result->output_column_count = descriptor.output_column_count;
 	result->returned_column_count = descriptor.returned_column_count;
 	result->column_ids = descriptor.column_ids;
@@ -887,7 +901,10 @@ static unique_ptr<ExecutionRegionSourceInfo> BuildExecutionRegionSourceInfo(cons
 	result->source_contract = descriptor.source_contract;
 	result->native_state_scan_contract = descriptor.native_state_scan_contract;
 	result->reason = descriptor.reason;
-	AddExecutionRegionSourceFilters(descriptor, *result);
+	AddExecutionRegionSourceFilters(descriptor, *result, expression_mode, expression_cache);
+	if (!ExecutionRegionShouldRenderDiagnostics(mode)) {
+		return result;
+	}
 	for (auto &aggregate : result->aggregates) {
 		aggregate.ir = DescribeExecutionRegionAggregateInput(aggregate);
 	}
@@ -934,8 +951,11 @@ static unique_ptr<ExecutionRegionSourceInfo> BuildExecutionRegionSourceInfo(cons
 }
 
 static unique_ptr<ExecutionRegionOperatorInfo>
-BuildExecutionRegionOperatorInfo(const ExecutionRegionOperatorInfo &descriptor) {
+BuildExecutionRegionOperatorInfo(const ExecutionRegionOperatorInfo &descriptor, ExecutionRegionIRMode mode) {
 	auto result = make_uniq<ExecutionRegionOperatorInfo>(descriptor);
+	if (!ExecutionRegionShouldRenderDiagnostics(mode)) {
+		return result;
+	}
 	for (auto &key : result->hash_join_keys) {
 		key.ir = DescribeExecutionRegionHashJoinKeyInput(key);
 	}
@@ -958,7 +978,8 @@ BuildExecutionRegionOperatorInfo(const ExecutionRegionOperatorInfo &descriptor) 
 }
 
 static unique_ptr<ExecutionRegionSourceInfo>
-BuildExecutionRegionGenericScanSourceInfo(const ExecutionRegionOperatorEntry &entry, const string &reason) {
+BuildExecutionRegionGenericScanSourceInfo(const ExecutionRegionOperatorEntry &entry, const string &reason,
+                                          ExecutionRegionIRMode mode) {
 	auto result = make_uniq<ExecutionRegionSourceInfo>();
 	result->kind = ExecutionRegionSourceKind::GENERIC_SCAN;
 	result->execution = ExecutionRegionSourceExecutionKind::DUCKDB_SOURCE_BOUNDARY;
@@ -970,14 +991,17 @@ BuildExecutionRegionGenericScanSourceInfo(const ExecutionRegionOperatorEntry &en
 	result->source_contract.required_capability = "generic-scan-source-contract";
 	result->source_contract.contract_version = "v1";
 	result->source_contract.blocker = "generic-scan-source-boundary";
-	result->source_contract.ir = DescribeExecutionSourceProtocolContract(result->source_contract);
 	result->reason = reason;
-	result->ir = DescribeExecutionRegionSourceInfo(*result);
+	if (ExecutionRegionShouldRenderDiagnostics(mode)) {
+		result->source_contract.ir = DescribeExecutionSourceProtocolContract(result->source_contract);
+		result->ir = DescribeExecutionRegionSourceInfo(*result);
+	}
 	return result;
 }
 
 static unique_ptr<ExecutionRegionSourceInfo>
-BuildExecutionRegionStatefulSourceInfo(const ExecutionRegionOperatorEntry &entry, const string &reason) {
+BuildExecutionRegionStatefulSourceInfo(const ExecutionRegionOperatorEntry &entry, const string &reason,
+                                       ExecutionRegionIRMode mode) {
 	auto result = make_uniq<ExecutionRegionSourceInfo>();
 	result->kind = ExecutionRegionSourceKind::STATEFUL_OPERATOR;
 	result->execution = ExecutionRegionSourceExecutionKind::DUCKDB_SOURCE_BOUNDARY;
@@ -989,9 +1013,11 @@ BuildExecutionRegionStatefulSourceInfo(const ExecutionRegionOperatorEntry &entry
 	result->source_contract.required_capability = "stateful-operator-source-contract";
 	result->source_contract.contract_version = "v1";
 	result->source_contract.blocker = "stateful-source-contract-boundary";
-	result->source_contract.ir = DescribeExecutionSourceProtocolContract(result->source_contract);
 	result->reason = reason;
-	result->ir = DescribeExecutionRegionSourceInfo(*result);
+	if (ExecutionRegionShouldRenderDiagnostics(mode)) {
+		result->source_contract.ir = DescribeExecutionSourceProtocolContract(result->source_contract);
+		result->ir = DescribeExecutionRegionSourceInfo(*result);
+	}
 	return result;
 }
 
@@ -1015,7 +1041,10 @@ static ExecutionRegionSinkKind GetExecutionRegionGenericSinkKind(const Execution
 	return ExecutionRegionSinkKind::OPERATOR;
 }
 
-static void FinalizeExecutionRegionSinkInfo(ExecutionRegionSinkInfo &sink) {
+static void FinalizeExecutionRegionSinkInfo(ExecutionRegionSinkInfo &sink, ExecutionRegionIRMode mode) {
+	if (!ExecutionRegionShouldRenderDiagnostics(mode)) {
+		return;
+	}
 	for (auto &aggregate : sink.aggregates) {
 		aggregate.ir = DescribeExecutionRegionAggregateInput(aggregate);
 	}
@@ -1057,7 +1086,8 @@ static void FinalizeExecutionRegionSinkInfo(ExecutionRegionSinkInfo &sink) {
 
 static unique_ptr<ExecutionRegionSinkInfo> BuildExecutionRegionSinkInfo(const ExecutionRegionOperatorEntry &entry,
                                                                         const ExecutionRegionSinkInfo &sink_payload,
-                                                                        bool has_sink_contract) {
+                                                                        bool has_sink_contract,
+                                                                        ExecutionRegionIRMode mode) {
 	auto result =
 	    has_sink_contract ? make_uniq<ExecutionRegionSinkInfo>(sink_payload) : make_uniq<ExecutionRegionSinkInfo>();
 	if (!has_sink_contract) {
@@ -1065,7 +1095,7 @@ static unique_ptr<ExecutionRegionSinkInfo> BuildExecutionRegionSinkInfo(const Ex
 		result->reason = BuildExecutionRegionGenericSinkContractReason(entry);
 		result->fields = BuildExecutionRegionContractFields(result->reason);
 	}
-	FinalizeExecutionRegionSinkInfo(*result);
+	FinalizeExecutionRegionSinkInfo(*result, mode);
 	return result;
 }
 
@@ -1132,7 +1162,10 @@ static void SetExecutionRegionBoundaryDataflow(ExecutionRegionDataflowState &sta
 }
 
 static ExecutionRegionNode BuildExecutionRegionOperatorNode(string label, const ExecutionRegionOperatorEntry &entry,
-                                                            ExecutionRegionDataflowState &state) {
+                                                            ExecutionRegionDataflowState &state,
+                                                            ExecutionExpressionIRMode expression_mode,
+                                                            ExecutionRegionIRMode mode,
+                                                            ExecutionExpressionAnalysisCache *expression_cache) {
 	if (entry.IsFilter()) {
 		if (!entry.filter_expression) {
 			throw InternalException("Execution region filter descriptor missing expression");
@@ -1149,7 +1182,8 @@ static ExecutionRegionNode BuildExecutionRegionOperatorNode(string label, const 
 		node.input_format = ExecutionRegionVectorFormatKind::UNIFIED_VECTOR;
 		node.output_format = ExecutionRegionVectorFormatKind::SELECTION_VECTOR;
 		SetExecutionRegionInputDataflow(node, state);
-		node.filter = TryLowerExecutionExpression(filter_expression);
+		node.filter = expression_cache ? expression_cache->Copy(filter_expression, 0, expression_mode)
+		                               : TryLowerExecutionExpression(filter_expression, 0, expression_mode);
 		if (!node.filter) {
 			node.boundary = ExecutionRegionBoundaryKind::EXPRESSION_MISSING;
 			node.blocker_reason = "core filter expression lowering unsupported;" +
@@ -1175,7 +1209,9 @@ static ExecutionRegionNode BuildExecutionRegionOperatorNode(string label, const 
 		SetExecutionRegionInputDataflow(node, state);
 		for (idx_t expr_idx = 0; expr_idx < entry.projection_expressions.size(); expr_idx++) {
 			auto &projection_expression = *entry.projection_expressions[expr_idx];
-			auto fragment = TryLowerExecutionExpression(projection_expression, expr_idx);
+			auto fragment = expression_cache
+			                    ? expression_cache->Copy(projection_expression, expr_idx, expression_mode)
+			                    : TryLowerExecutionExpression(projection_expression, expr_idx, expression_mode);
 			if (!fragment) {
 				node.projections.clear();
 				node.boundary = ExecutionRegionBoundaryKind::EXPRESSION_MISSING;
@@ -1204,7 +1240,7 @@ static ExecutionRegionNode BuildExecutionRegionOperatorNode(string label, const 
 		node.input_format = ExecutionRegionVectorFormatKind::DATA_CHUNK;
 		node.output_format = ExecutionRegionVectorFormatKind::DATA_CHUNK;
 		SetExecutionRegionInputDataflow(node, state);
-		node.operator_info = BuildExecutionRegionOperatorInfo(entry.operator_payload);
+		node.operator_info = BuildExecutionRegionOperatorInfo(entry.operator_payload, mode);
 		if (entry.HasNativeOperator()) {
 			node.boundary = ExecutionRegionBoundaryKind::OPERATOR_NATIVE;
 		} else {
@@ -1230,8 +1266,29 @@ static bool ExecutionRegionInventoryHasScanSource(const ExecutionRegionPipelineI
 	       inventory.source_kind == ExecutionRegionSourceKind::GENERIC_SCAN;
 }
 
-static bool ExecutionRegionInventoryHasStatefulSource(const ExecutionRegionPipelineInventory &inventory) {
-	return inventory.source_kind == ExecutionRegionSourceKind::STATEFUL_OPERATOR;
+static ExecutionExpressionTraits
+AccumulateExecutionRegionInventoryExpression(ExecutionRegionPipelineInventory &inventory, const Expression &expression,
+                                             ExecutionExpressionAnalysisCache *expression_cache) {
+	auto local_fragment =
+	    expression_cache ? nullptr : TryLowerExecutionExpression(expression, 0, ExecutionExpressionIRMode::COMPACT);
+	auto fragment = expression_cache ? expression_cache->Get(expression) : local_fragment.get();
+	if (!fragment) {
+		return ExecutionExpressionTraits();
+	}
+	auto traits = fragment->traits;
+	inventory.expression_node_count += traits.expression_node_count;
+	inventory.reference_expression_count += traits.reference_expression_count;
+	inventory.predicate_expression_count += traits.predicate_expression_count;
+	inventory.control_expression_count += traits.control_expression_count;
+	inventory.arithmetic_expression_count += traits.arithmetic_binary_count;
+	inventory.string_predicate_expression_count += traits.string_predicate_count;
+	inventory.high_cost_string_predicate_expression_count += traits.high_cost_string_predicate_count;
+	inventory.expression_cost += traits.expression_cost;
+	inventory.string_like_expression_count += traits.string_like_count;
+	inventory.string_contains_expression_count += traits.string_contains_count;
+	inventory.string_prefix_expression_count += traits.string_prefix_count;
+	inventory.string_suffix_expression_count += traits.string_suffix_count;
+	return traits;
 }
 
 static string ExecutionRegionOperatorKindSignatureSegment(ExecutionRegionOperatorKind kind) {
@@ -1404,6 +1461,7 @@ static string DescribeExecutionRegionAggregateContractShape(const ExecutionRegio
 	result += ",filters=" + std::to_string(contract.aggregate_filter_count);
 	result += ",orders=" + std::to_string(contract.aggregate_order_count);
 	result += ",state_layout=" + ExecutionRegionBool(contract.grouped_state_layout_ready);
+	result += ",hash_lookup_layout=" + ExecutionRegionBool(contract.hash_lookup_layout_present);
 	result += ")";
 	return result;
 }
@@ -1542,33 +1600,6 @@ static string DescribeExecutionRegionInventoryPipelineShape(const ExecutionRegio
 	return result;
 }
 
-static bool IsExecutionRegionPipelineInventoryWorkloadRelevant(const ExecutionRegionPipelineInventory &inventory,
-                                                               string &reason) {
-	if (inventory.HasSource() && ExecutionRegionInventoryHasStatefulSource(inventory) &&
-	    !inventory.source_produces_rows) {
-		reason = "stateful source does not produce rows";
-		return false;
-	}
-	if (ExecutionRegionInventoryHasScanSource(inventory) || inventory.HasHashJoinOperator() ||
-	    inventory.HasNestedLoopJoinOperator() || inventory.HasHashJoinSink() || inventory.HasNestedLoopJoinSink() ||
-	    inventory.HasHashAggregateSink() || inventory.HasHashAggregateDistinctSink() ||
-	    inventory.HasPerfectHashAggregateSink() || inventory.HasUngroupedAggregateSink() ||
-	    inventory.HasFilterOperator() || inventory.HasProjectionOperator()) {
-		reason.clear();
-		return true;
-	}
-	if (ExecutionRegionInventoryHasStatefulSource(inventory) && !inventory.HasWrapperOnlySource()) {
-		reason.clear();
-		return true;
-	}
-	if (inventory.HasWrapperOnlySource()) {
-		reason = "wrapper-only source has no compiled-region workload";
-	} else {
-		reason = "pipeline has no scan, filter, projection, join, aggregate, or stateful source workload";
-	}
-	return false;
-}
-
 bool ExecutionRegionAggregateFunctionIsCount(const string &function_name) {
 	return function_name == "count" || function_name == "count_star";
 }
@@ -1610,8 +1641,79 @@ void AccumulateExecutionRegionAggregateFunctionKinds(const ExecutionRegionAggreg
 	}
 }
 
+string ExecutionRegionAggregateNativeStateUpdateBlocker(const ExecutionRegionAggregateContract &contract,
+                                                        const vector<ExecutionRegionAggregateInput> &aggregates,
+                                                        const vector<ExecutionRegionGroupInput> &groups) {
+	if (!contract.present) {
+		return "aggregate-state-update-contract-missing";
+	}
+	if (contract.distinct_aggregate_count != 0 || contract.distinct_table_count != 0 ||
+	    contract.distinct_child_count != 0 || contract.distinct_filter_count != 0) {
+		return "aggregate-state-update-distinct-state";
+	}
+	if (contract.aggregate_filter_count != 0) {
+		return "aggregate-state-update-filtered-aggregate";
+	}
+	if (contract.aggregate_order_count != 0) {
+		return "aggregate-state-update-ordered-aggregate";
+	}
+
+	switch (contract.kind) {
+	case ExecutionRegionAggregateOperatorKind::HASH:
+	case ExecutionRegionAggregateOperatorKind::PERFECT_HASH:
+		if (groups.size() != contract.group_count) {
+			return "aggregate-state-update-group-binding-count";
+		}
+		if (contract.native_grouped_state_contract.status != ExecutionRegionStateContractStatus::READY) {
+			return contract.native_grouped_state_contract.blocker.empty()
+			           ? "aggregate-state-update-grouped-state-contract"
+			           : contract.native_grouped_state_contract.blocker;
+		}
+		for (auto &group : groups) {
+			if (!group.supported_reference) {
+				return group.reason.empty() ? "aggregate-state-update-group-reference" : group.reason;
+			}
+		}
+		break;
+	case ExecutionRegionAggregateOperatorKind::UNGROUPED:
+		if (!groups.empty()) {
+			return "ungrouped-aggregate-state-update-unexpected-groups";
+		}
+		break;
+	default:
+		return "aggregate-state-update-operator-kind";
+	}
+
+	for (auto &aggregate : aggregates) {
+		if (!aggregate.reason.empty()) {
+			return aggregate.reason;
+		}
+		if (aggregate.distinct) {
+			return "aggregate-state-update-distinct-aggregate";
+		}
+		if (aggregate.has_filter) {
+			return "aggregate-state-update-filtered-aggregate";
+		}
+		if (aggregate.has_order_bys || aggregate.order_dependent) {
+			return "aggregate-state-update-ordered-aggregate";
+		}
+		if (!aggregate.has_state_update) {
+			return "aggregate-state-update-callback-missing";
+		}
+		if (!aggregate.payload_expressions_ready) {
+			return aggregate.payload_expression_blocker.empty() ? "aggregate-state-update-payload-expression"
+			                                                    : aggregate.payload_expression_blocker;
+		}
+		if (!aggregate.supported_payload_references) {
+			return "aggregate-state-update-payload-reference";
+		}
+	}
+	return string();
+}
+
 static void AccumulateExecutionRegionInventorySource(ExecutionRegionPipelineInventory &inventory,
-                                                     const ExecutionRegionOperatorEntry &source) {
+                                                     const ExecutionRegionOperatorEntry &source,
+                                                     ExecutionExpressionAnalysisCache *expression_cache) {
 	inventory.source_operator_name = source.operator_name;
 	inventory.source_operator_kind = source.operator_kind;
 	inventory.estimated_cardinality = MaxValue(inventory.estimated_cardinality, source.estimated_cardinality);
@@ -1619,6 +1721,8 @@ static void AccumulateExecutionRegionInventorySource(ExecutionRegionPipelineInve
 		auto &source_payload = source.source_payload;
 		inventory.source_kind = source_payload.kind;
 		inventory.source_execution = source_payload.execution;
+		inventory.estimated_source_cardinality =
+		    MaxValue(inventory.estimated_source_cardinality, source_payload.estimated_source_cardinality);
 		AppendExecutionRegionInventoryContractShape(inventory, ExecutionRegionNodeKind::SOURCE,
 		                                            DescribeExecutionSourceProtocolContractShape(source_payload));
 		if (source_payload.hash_join_contract.present) {
@@ -1628,6 +1732,14 @@ static void AccumulateExecutionRegionInventorySource(ExecutionRegionPipelineInve
 			inventory.source_produces_rows = source_payload.nested_loop_join_contract.source_produces_rows;
 		}
 		inventory.source_filter_count = source_payload.filters.size();
+		for (auto &filter : source_payload.filters) {
+			if (!filter.expression) {
+				inventory.source_filter_missing_count++;
+				continue;
+			}
+			inventory.source_filter_expression_count++;
+			AccumulateExecutionRegionInventoryExpression(inventory, *filter.expression, expression_cache);
+		}
 		inventory.source_projected_column_count = source_payload.projection_ids.size();
 		inventory.source_returned_column_count = source_payload.returned_column_count;
 		return;
@@ -1661,7 +1773,8 @@ static ExecutionRegionBoundaryKind GetExecutionRegionInventoryOperatorBoundary(c
 }
 
 static void AccumulateExecutionRegionInventoryOperator(ExecutionRegionPipelineInventory &inventory,
-                                                       const ExecutionRegionOperatorEntry &op) {
+                                                       const ExecutionRegionOperatorEntry &op,
+                                                       ExecutionExpressionAnalysisCache *expression_cache) {
 	inventory.operator_count++;
 	inventory.operator_names.push_back(op.operator_name);
 	inventory.operator_kinds.push_back(op.operator_kind);
@@ -1678,9 +1791,23 @@ static void AccumulateExecutionRegionInventoryOperator(ExecutionRegionPipelineIn
 	}
 	if (op.IsFilter()) {
 		inventory.filter_operator_count++;
+		if (op.filter_expression) {
+			inventory.filter_expression_count++;
+			AccumulateExecutionRegionInventoryExpression(inventory, *op.filter_expression, expression_cache);
+		}
 	}
 	if (op.IsProjection()) {
 		inventory.projection_operator_count++;
+		for (auto &projection : op.projection_expressions) {
+			if (!projection) {
+				continue;
+			}
+			inventory.projection_expression_count++;
+			auto traits = AccumulateExecutionRegionInventoryExpression(inventory, *projection, expression_cache);
+			if (traits.arithmetic_binary_count > 0) {
+				inventory.arithmetic_projection_count++;
+			}
+		}
 	}
 }
 
@@ -1701,14 +1828,53 @@ static void AccumulateExecutionRegionInventorySink(ExecutionRegionPipelineInvent
 	}
 }
 
+string RenderExecutionRegionPipelineInventoryIR(const ExecutionRegionPipelineInventory &inventory) {
+	string result = "duckdb.region planning-inventory";
+	result += ";pipeline_shape=" + inventory.pipeline_shape;
+	result += ";candidate_shape=" + inventory.candidate_shape;
+	result += ";features=" + inventory.feature_shape;
+	result += ";contract_shape=" + inventory.contract_shape;
+	result += ";estimated_source_cardinality=" + std::to_string(inventory.estimated_source_cardinality);
+	result += ";source_filters=" + std::to_string(inventory.source_filter_count);
+	result += ";source_filter_expressions=" + std::to_string(inventory.source_filter_expression_count);
+	result += ";source_filter_missing=" + std::to_string(inventory.source_filter_missing_count);
+	result += ";source_projected_columns=" + std::to_string(inventory.source_projected_column_count);
+	result += ";hash_join_operators=" + std::to_string(inventory.hash_join_operator_count);
+	result += ";right_hash_join_operators=" + std::to_string(inventory.right_hash_join_operator_count);
+	result += ";inner_hash_join_operators=" + std::to_string(inventory.inner_hash_join_operator_count);
+	result += ";filter_expressions=" + std::to_string(inventory.filter_expression_count);
+	result += ";projection_expressions=" + std::to_string(inventory.projection_expression_count);
+	result += ";expression_nodes=" + std::to_string(inventory.expression_node_count);
+	result += ";arithmetic_expressions=" + std::to_string(inventory.arithmetic_expression_count);
+	result += ";predicate_expressions=" + std::to_string(inventory.predicate_expression_count);
+	result += ";control_expressions=" + std::to_string(inventory.control_expression_count);
+	result += ";reference_expressions=" + std::to_string(inventory.reference_expression_count);
+	result += ";expression_cost=" + std::to_string(inventory.expression_cost);
+	result += ";string_predicates=" + std::to_string(inventory.string_predicate_expression_count);
+	result += ";high_cost_string_predicates=" + std::to_string(inventory.high_cost_string_predicate_expression_count);
+	result += ";string_like_expressions=" + std::to_string(inventory.string_like_expression_count);
+	result += ";string_contains_expressions=" + std::to_string(inventory.string_contains_expression_count);
+	result += ";string_prefix_expressions=" + std::to_string(inventory.string_prefix_expression_count);
+	result += ";string_suffix_expressions=" + std::to_string(inventory.string_suffix_expression_count);
+	result += ";arithmetic_projections=" + std::to_string(inventory.arithmetic_projection_count);
+	result += ";aggregates=" + std::to_string(inventory.aggregate_count);
+	result += ";aggregate_count_functions=" + std::to_string(inventory.aggregate_count_function_count);
+	result += ";aggregate_sum_functions=" + std::to_string(inventory.aggregate_sum_function_count);
+	result += ";aggregate_other_functions=" + std::to_string(inventory.aggregate_other_function_count);
+	result += ";source_produces_rows=" + string(inventory.source_produces_rows ? "true" : "false");
+	result += ";estimated_cardinality=" + std::to_string(inventory.estimated_cardinality);
+	return result;
+}
+
 unique_ptr<ExecutionRegionPipelineInventory>
-TryInspectExecutionRegionPipeline(const ExecutionRegionGraph &descriptor, ExecutionRegionPipelineInventoryMode mode) {
+TryInspectExecutionRegionPipeline(const ExecutionRegionGraph &descriptor,
+                                  ExecutionExpressionAnalysisCache *expression_cache) {
 	auto result = make_uniq<ExecutionRegionPipelineInventory>();
 	if (descriptor.HasSource()) {
-		AccumulateExecutionRegionInventorySource(*result, descriptor.source);
+		AccumulateExecutionRegionInventorySource(*result, descriptor.source, expression_cache);
 	}
 	for (auto &op : descriptor.operators) {
-		AccumulateExecutionRegionInventoryOperator(*result, op);
+		AccumulateExecutionRegionInventoryOperator(*result, op, expression_cache);
 	}
 	if (descriptor.HasSink()) {
 		AccumulateExecutionRegionInventorySink(*result, descriptor.sink);
@@ -1716,36 +1882,9 @@ TryInspectExecutionRegionPipeline(const ExecutionRegionGraph &descriptor, Execut
 	if (!result->HasSource() && result->operator_count == 0 && !result->HasSink()) {
 		return nullptr;
 	}
-	result->workload_relevant =
-	    IsExecutionRegionPipelineInventoryWorkloadRelevant(*result, result->workload_relevance_reason);
-	if (!result->workload_relevant && mode == ExecutionRegionPipelineInventoryMode::ADMISSION) {
-		return nullptr;
-	}
 	result->feature_shape = BuildExecutionRegionInventoryFeatureShape(*result);
 	result->candidate_shape = DescribeExecutionRegionInventoryCandidateShape(*result);
 	result->pipeline_shape = DescribeExecutionRegionInventoryPipelineShape(*result);
-	if (mode == ExecutionRegionPipelineInventoryMode::TRACE) {
-		result->ir = "duckdb.region admission-inventory";
-		result->ir += ";pipeline_shape=" + result->pipeline_shape;
-		result->ir += ";candidate_shape=" + result->candidate_shape;
-		result->ir += ";features=" + result->feature_shape;
-		result->ir += ";contract_shape=" + result->contract_shape;
-		result->ir += ";source_filters=" + std::to_string(result->source_filter_count);
-		result->ir += ";source_projected_columns=" + std::to_string(result->source_projected_column_count);
-		result->ir += ";hash_join_operators=" + std::to_string(result->hash_join_operator_count);
-		result->ir += ";right_hash_join_operators=" + std::to_string(result->right_hash_join_operator_count);
-		result->ir += ";inner_hash_join_operators=" + std::to_string(result->inner_hash_join_operator_count);
-		result->ir += ";aggregates=" + std::to_string(result->aggregate_count);
-		result->ir += ";aggregate_count_functions=" + std::to_string(result->aggregate_count_function_count);
-		result->ir += ";aggregate_sum_functions=" + std::to_string(result->aggregate_sum_function_count);
-		result->ir += ";aggregate_other_functions=" + std::to_string(result->aggregate_other_function_count);
-		result->ir += ";source_produces_rows=" + string(result->source_produces_rows ? "true" : "false");
-		result->ir += ";workload_relevant=" + string(result->workload_relevant ? "true" : "false");
-		if (!result->workload_relevance_reason.empty()) {
-			result->ir += ";workload_relevance_reason=" + result->workload_relevance_reason;
-		}
-		result->ir += ";estimated_cardinality=" + std::to_string(result->estimated_cardinality);
-	}
 	return result;
 }
 
@@ -1864,185 +2003,6 @@ static string DescribeExecutionRegionPipelineShape(const ExecutionRegionIR &regi
 	return result;
 }
 
-static bool IsExecutionRegionArithmeticBinaryOp(ExecutionExpressionBinaryOp op) {
-	switch (op) {
-	case ExecutionExpressionBinaryOp::ADD:
-	case ExecutionExpressionBinaryOp::SUBTRACT:
-	case ExecutionExpressionBinaryOp::MULTIPLY:
-	case ExecutionExpressionBinaryOp::INTEGER_DIVIDE:
-	case ExecutionExpressionBinaryOp::MODULO:
-		return true;
-	default:
-		return false;
-	}
-}
-
-static bool IsExecutionRegionComparisonBinaryOp(ExecutionExpressionBinaryOp op) {
-	switch (op) {
-	case ExecutionExpressionBinaryOp::COMPARE_EQUAL:
-	case ExecutionExpressionBinaryOp::COMPARE_NOTEQUAL:
-	case ExecutionExpressionBinaryOp::COMPARE_LESSTHAN:
-	case ExecutionExpressionBinaryOp::COMPARE_GREATERTHAN:
-	case ExecutionExpressionBinaryOp::COMPARE_LESSTHANOREQUALTO:
-	case ExecutionExpressionBinaryOp::COMPARE_GREATERTHANOREQUALTO:
-	case ExecutionExpressionBinaryOp::COMPARE_DISTINCT_FROM:
-	case ExecutionExpressionBinaryOp::COMPARE_NOT_DISTINCT_FROM:
-		return true;
-	default:
-		return false;
-	}
-}
-
-static bool IsExecutionRegionIntegerLogicalType(const LogicalType &type) {
-	return type.IsIntegral();
-}
-
-static bool ExecutionExpressionContainsBinaryOp(const ExecutionExpressionIR &expr,
-                                                bool (*op_matches)(ExecutionExpressionBinaryOp)) {
-	if (expr.kind == ExecutionExpressionIRKind::BINARY && op_matches(expr.binary_op)) {
-		return true;
-	}
-	if (expr.left && ExecutionExpressionContainsBinaryOp(*expr.left, op_matches)) {
-		return true;
-	}
-	if (expr.right && ExecutionExpressionContainsBinaryOp(*expr.right, op_matches)) {
-		return true;
-	}
-	if (expr.else_node && ExecutionExpressionContainsBinaryOp(*expr.else_node, op_matches)) {
-		return true;
-	}
-	for (auto &child : expr.children) {
-		if (child && ExecutionExpressionContainsBinaryOp(*child, op_matches)) {
-			return true;
-		}
-	}
-	return false;
-}
-
-static bool ExecutionExpressionContainsBinaryOpWithType(const ExecutionExpressionIR &expr,
-                                                        bool (*op_matches)(ExecutionExpressionBinaryOp),
-                                                        bool (*type_matches)(const LogicalType &)) {
-	if (expr.kind == ExecutionExpressionIRKind::BINARY && op_matches(expr.binary_op) &&
-	    type_matches(expr.return_type)) {
-		return true;
-	}
-	if (expr.left && ExecutionExpressionContainsBinaryOpWithType(*expr.left, op_matches, type_matches)) {
-		return true;
-	}
-	if (expr.right && ExecutionExpressionContainsBinaryOpWithType(*expr.right, op_matches, type_matches)) {
-		return true;
-	}
-	if (expr.else_node && ExecutionExpressionContainsBinaryOpWithType(*expr.else_node, op_matches, type_matches)) {
-		return true;
-	}
-	for (auto &child : expr.children) {
-		if (child && ExecutionExpressionContainsBinaryOpWithType(*child, op_matches, type_matches)) {
-			return true;
-		}
-	}
-	return false;
-}
-
-static bool ExecutionExpressionContainsBinaryOpWithOtherType(const ExecutionExpressionIR &expr,
-                                                             bool (*op_matches)(ExecutionExpressionBinaryOp),
-                                                             bool (*type_matches)(const LogicalType &)) {
-	if (expr.kind == ExecutionExpressionIRKind::BINARY && op_matches(expr.binary_op) &&
-	    !type_matches(expr.return_type)) {
-		return true;
-	}
-	if (expr.left && ExecutionExpressionContainsBinaryOpWithOtherType(*expr.left, op_matches, type_matches)) {
-		return true;
-	}
-	if (expr.right && ExecutionExpressionContainsBinaryOpWithOtherType(*expr.right, op_matches, type_matches)) {
-		return true;
-	}
-	if (expr.else_node && ExecutionExpressionContainsBinaryOpWithOtherType(*expr.else_node, op_matches, type_matches)) {
-		return true;
-	}
-	for (auto &child : expr.children) {
-		if (child && ExecutionExpressionContainsBinaryOpWithOtherType(*child, op_matches, type_matches)) {
-			return true;
-		}
-	}
-	return false;
-}
-
-static bool ExecutionExpressionBinaryOperandsMatchType(const ExecutionExpressionIR &expr,
-                                                       bool (*type_matches)(const LogicalType &)) {
-	return expr.left && expr.right && type_matches(expr.left->return_type) && type_matches(expr.right->return_type);
-}
-
-static bool ExecutionExpressionContainsBinaryOpWithOperandType(const ExecutionExpressionIR &expr,
-                                                               bool (*op_matches)(ExecutionExpressionBinaryOp),
-                                                               bool (*type_matches)(const LogicalType &)) {
-	if (expr.kind == ExecutionExpressionIRKind::BINARY && op_matches(expr.binary_op) &&
-	    ExecutionExpressionBinaryOperandsMatchType(expr, type_matches)) {
-		return true;
-	}
-	if (expr.left && ExecutionExpressionContainsBinaryOpWithOperandType(*expr.left, op_matches, type_matches)) {
-		return true;
-	}
-	if (expr.right && ExecutionExpressionContainsBinaryOpWithOperandType(*expr.right, op_matches, type_matches)) {
-		return true;
-	}
-	if (expr.else_node &&
-	    ExecutionExpressionContainsBinaryOpWithOperandType(*expr.else_node, op_matches, type_matches)) {
-		return true;
-	}
-	for (auto &child : expr.children) {
-		if (child && ExecutionExpressionContainsBinaryOpWithOperandType(*child, op_matches, type_matches)) {
-			return true;
-		}
-	}
-	return false;
-}
-
-static bool ExecutionExpressionContainsBinaryOpWithOtherOperandType(const ExecutionExpressionIR &expr,
-                                                                    bool (*op_matches)(ExecutionExpressionBinaryOp),
-                                                                    bool (*type_matches)(const LogicalType &)) {
-	if (expr.kind == ExecutionExpressionIRKind::BINARY && op_matches(expr.binary_op) &&
-	    !ExecutionExpressionBinaryOperandsMatchType(expr, type_matches)) {
-		return true;
-	}
-	if (expr.left && ExecutionExpressionContainsBinaryOpWithOtherOperandType(*expr.left, op_matches, type_matches)) {
-		return true;
-	}
-	if (expr.right && ExecutionExpressionContainsBinaryOpWithOtherOperandType(*expr.right, op_matches, type_matches)) {
-		return true;
-	}
-	if (expr.else_node &&
-	    ExecutionExpressionContainsBinaryOpWithOtherOperandType(*expr.else_node, op_matches, type_matches)) {
-		return true;
-	}
-	for (auto &child : expr.children) {
-		if (child && ExecutionExpressionContainsBinaryOpWithOtherOperandType(*child, op_matches, type_matches)) {
-			return true;
-		}
-	}
-	return false;
-}
-
-static bool ExecutionExpressionContainsKind(const ExecutionExpressionIR &expr, ExecutionExpressionIRKind kind) {
-	if (expr.kind == kind) {
-		return true;
-	}
-	if (expr.left && ExecutionExpressionContainsKind(*expr.left, kind)) {
-		return true;
-	}
-	if (expr.right && ExecutionExpressionContainsKind(*expr.right, kind)) {
-		return true;
-	}
-	if (expr.else_node && ExecutionExpressionContainsKind(*expr.else_node, kind)) {
-		return true;
-	}
-	for (auto &child : expr.children) {
-		if (child && ExecutionExpressionContainsKind(*child, kind)) {
-			return true;
-		}
-	}
-	return false;
-}
-
 static string DescribeExecutionRegionCandidateTraits(const ExecutionRegionCandidateTraits &traits) {
 	string result = "traits<source=" + ExecutionRegionBool(traits.HasSource());
 	result += ",sink=" + ExecutionRegionBool(traits.HasSink());
@@ -2050,9 +2010,16 @@ static string DescribeExecutionRegionCandidateTraits(const ExecutionRegionCandid
 	result += ",source_execution=" + string(ExecutionRegionSourceExecutionKindToString(traits.source_execution));
 	result += ",sink_kind=" + string(ExecutionRegionSinkKindToString(traits.sink_kind));
 	result += ",expression_traits_known=" + ExecutionRegionBool(traits.expression_traits_known);
+	result += ",estimated_source_cardinality=" + std::to_string(traits.estimated_source_cardinality);
 	result += ",source_filters=" + std::to_string(traits.source_filter_count);
 	result += ",source_filter_expressions=" + std::to_string(traits.source_filter_expression_count);
 	result += ",source_filter_missing=" + std::to_string(traits.source_filter_missing_count);
+	result += ",source_contract_input_columns=" + std::to_string(traits.source_contract_input_column_count);
+	result +=
+	    ",source_contract_filter_prune_required=" + ExecutionRegionBool(traits.source_contract_filter_prune_required);
+	result += ",source_projection_pushdown=" + ExecutionRegionBool(traits.source_projection_pushdown);
+	result += ",source_filter_pushdown=" + ExecutionRegionBool(traits.source_filter_pushdown);
+	result += ",source_filter_prune=" + ExecutionRegionBool(traits.source_filter_prune);
 	result += ",source_comparison_filters=" + std::to_string(traits.source_comparison_filter_count);
 	result += ",source_integer_comparison_filters=" + std::to_string(traits.source_integer_comparison_filter_count);
 	result +=
@@ -2079,6 +2046,17 @@ static string DescribeExecutionRegionCandidateTraits(const ExecutionRegionCandid
 	result += ",integer_comparison_filters=" + std::to_string(traits.integer_comparison_filter_count);
 	result += ",non_integer_comparison_filters=" + std::to_string(traits.non_integer_comparison_filter_count);
 	result += ",conjunction_filters=" + std::to_string(traits.conjunction_filter_count);
+	result += ",expression_nodes=" + std::to_string(traits.expression_node_count);
+	result += ",predicate_expressions=" + std::to_string(traits.predicate_expression_count);
+	result += ",control_expressions=" + std::to_string(traits.control_expression_count);
+	result += ",reference_expressions=" + std::to_string(traits.reference_expression_count);
+	result += ",expression_cost=" + std::to_string(traits.expression_cost);
+	result += ",string_predicates=" + std::to_string(traits.string_predicate_expression_count);
+	result += ",high_cost_string_predicates=" + std::to_string(traits.high_cost_string_predicate_expression_count);
+	result += ",string_like_expressions=" + std::to_string(traits.string_like_expression_count);
+	result += ",string_contains_expressions=" + std::to_string(traits.string_contains_expression_count);
+	result += ",string_prefix_expressions=" + std::to_string(traits.string_prefix_expression_count);
+	result += ",string_suffix_expressions=" + std::to_string(traits.string_suffix_expression_count);
 	result += ",expression_missing=" + std::to_string(traits.expression_missing_count);
 	result += ",operator_missing=" + std::to_string(traits.operator_missing_count);
 	result += ">";
@@ -2131,19 +2109,17 @@ GetExecutionRegionCandidateSourceExecution(const ExecutionRegionCandidate &candi
 	return node.source ? node.source->execution : ExecutionRegionSourceExecutionKind::NONE;
 }
 
-static ExecutionRegionSourceFilterOwnershipKind
-GetExecutionRegionCandidateSourceFilterOwnership(const ExecutionRegionCandidate &candidate,
-                                                 const ExecutionRegionNode &node) {
-	if (candidate.source_filter_ownership != ExecutionRegionSourceFilterOwnershipKind::NONE) {
-		return candidate.source_filter_ownership;
+static bool ExecutionRegionCandidateUsesScanFilters(const ExecutionRegionCandidate &candidate,
+                                                    const ExecutionRegionNode &node) {
+	if (candidate.uses_scan_filters) {
+		return true;
 	}
 	auto source_execution = GetExecutionRegionCandidateSourceExecution(candidate, node);
 	if (source_execution != ExecutionRegionSourceExecutionKind::SOURCE_CONTRACT || !node.source ||
 	    node.source->filters.empty() || !node.source->table_scan_contract.present) {
-		return ExecutionRegionSourceFilterOwnershipKind::NONE;
+		return false;
 	}
-	return node.source->table_scan_contract.filter_pushdown ? ExecutionRegionSourceFilterOwnershipKind::DUCKDB_SCAN
-	                                                        : ExecutionRegionSourceFilterOwnershipKind::NONE;
+	return node.source->table_scan_contract.filter_pushdown;
 }
 
 static ExecutionRegionOwnershipKind
@@ -2255,6 +2231,22 @@ ClassifyExecutionRegionSourceOwnership(const ExecutionRegionNode &node, Executio
 
 static void RecordExecutionRegionGroupedStateContract(ExecutionRegionContract &region_contract,
                                                       const ExecutionRegionAggregateContract &contract) {
+	if (contract.present) {
+		region_contract.hash_aggregate_lookup_present = true;
+		if (contract.kind == ExecutionRegionAggregateOperatorKind::PERFECT_HASH &&
+		    contract.native_hash_lookup_contract.status == ExecutionRegionStateContractStatus::READY) {
+			region_contract.hash_aggregate_lookup_mode = "generated-perfect-hash";
+		} else if (contract.native_hash_lookup_contract.status == ExecutionRegionStateContractStatus::READY) {
+			region_contract.hash_aggregate_lookup_mode = "native-contract";
+		} else {
+			region_contract.hash_aggregate_lookup_mode = "blocked";
+		}
+		region_contract.hash_aggregate_lookup_native_blocker = contract.native_hash_lookup_contract.blocker;
+		region_contract.hash_aggregate_lookup_layout_blocker = contract.hash_lookup_layout_blocker;
+		region_contract.hash_aggregate_lookup_row_compare_blocker = contract.hash_lookup_layout_row_compare_blocker;
+		region_contract.hash_aggregate_lookup_backend_lowering_blocker =
+		    contract.hash_lookup_layout_backend_lowering_blocker;
+	}
 	auto &state_contract = contract.native_grouped_state_contract;
 	if (state_contract.status == ExecutionRegionStateContractStatus::NONE ||
 	    state_contract.status == ExecutionRegionStateContractStatus::READY) {
@@ -2307,6 +2299,13 @@ static string DescribeExecutionRegionContract(const ExecutionRegionContract &con
 	result += ",missing_contracts=" + std::to_string(contract.missing_contract_count);
 	result += ",required_capabilities=" + BuildExecutionRegionStringList(contract.required_capabilities);
 	result += ",blockers=" + BuildExecutionRegionStringList(contract.blockers);
+	result += ",hash_aggregate_lookup_present=" + ExecutionRegionBool(contract.hash_aggregate_lookup_present);
+	result += ",hash_aggregate_lookup_mode=" + contract.hash_aggregate_lookup_mode;
+	result += ",hash_aggregate_lookup_native_blocker=" + contract.hash_aggregate_lookup_native_blocker;
+	result += ",hash_aggregate_lookup_layout_blocker=" + contract.hash_aggregate_lookup_layout_blocker;
+	result += ",hash_aggregate_lookup_row_compare_blocker=" + contract.hash_aggregate_lookup_row_compare_blocker;
+	result +=
+	    ",hash_aggregate_lookup_backend_lowering_blocker=" + contract.hash_aggregate_lookup_backend_lowering_blocker;
 	result += ">";
 	return result;
 }
@@ -2319,7 +2318,8 @@ static ExecutionRegionABI DetermineExecutionRegionContractABI(const ExecutionReg
 }
 
 static ExecutionRegionContract BuildExecutionRegionContract(const ExecutionRegionIR &region_ir,
-                                                            const ExecutionRegionCandidate &candidate) {
+                                                            const ExecutionRegionCandidate &candidate,
+                                                            ExecutionRegionIRMode mode) {
 	ExecutionRegionContract contract;
 	bool has_transform = false;
 	for (idx_t node_idx = candidate.first_node; node_idx < candidate.EndNode() && node_idx < region_ir.nodes.size();
@@ -2370,31 +2370,48 @@ static ExecutionRegionContract BuildExecutionRegionContract(const ExecutionRegio
 		contract.transform_ownership = ExecutionRegionOwnershipKind::NONE;
 	}
 	contract.abi = DetermineExecutionRegionContractABI(contract);
-	contract.ir = DescribeExecutionRegionContract(contract);
+	if (ExecutionRegionShouldRenderDiagnostics(mode)) {
+		contract.ir = DescribeExecutionRegionContract(contract);
+	}
 	return contract;
 }
 
 static ExecutionRegionStagePlan BuildExecutionRegionStagePlan(const ExecutionRegionIR &region_ir,
-                                                              const ExecutionRegionCandidate &candidate);
+                                                              const ExecutionRegionCandidate &candidate,
+                                                              ExecutionRegionIRMode mode);
 
-static void AccumulateExecutionRegionFilterTraits(const ExecutionExpressionIR &root, idx_t &comparison_filter_count,
+static void AccumulateExecutionRegionFilterTraits(const ExecutionExpressionTraits &expression_traits,
+                                                  idx_t &comparison_filter_count,
                                                   idx_t &integer_comparison_filter_count,
                                                   idx_t &non_integer_comparison_filter_count,
                                                   idx_t &conjunction_filter_count) {
-	if (ExecutionExpressionContainsBinaryOp(root, IsExecutionRegionComparisonBinaryOp)) {
+	if (expression_traits.has_comparison_binary) {
 		comparison_filter_count++;
 	}
-	if (ExecutionExpressionContainsBinaryOpWithOperandType(root, IsExecutionRegionComparisonBinaryOp,
-	                                                       IsExecutionRegionIntegerLogicalType)) {
+	if (expression_traits.has_integer_comparison_operands) {
 		integer_comparison_filter_count++;
 	}
-	if (ExecutionExpressionContainsBinaryOpWithOtherOperandType(root, IsExecutionRegionComparisonBinaryOp,
-	                                                            IsExecutionRegionIntegerLogicalType)) {
+	if (expression_traits.has_non_integer_comparison_operands) {
 		non_integer_comparison_filter_count++;
 	}
-	if (ExecutionExpressionContainsKind(root, ExecutionExpressionIRKind::CONJUNCTION)) {
+	if (expression_traits.has_conjunction) {
 		conjunction_filter_count++;
 	}
+}
+
+static void AccumulateExecutionRegionExpressionTraits(const ExecutionExpressionTraits &expression_traits,
+                                                      ExecutionRegionCandidateTraits &traits) {
+	traits.expression_node_count += expression_traits.expression_node_count;
+	traits.reference_expression_count += expression_traits.reference_expression_count;
+	traits.predicate_expression_count += expression_traits.predicate_expression_count;
+	traits.control_expression_count += expression_traits.control_expression_count;
+	traits.expression_cost += expression_traits.expression_cost;
+	traits.string_predicate_expression_count += expression_traits.string_predicate_count;
+	traits.high_cost_string_predicate_expression_count += expression_traits.high_cost_string_predicate_count;
+	traits.string_like_expression_count += expression_traits.string_like_count;
+	traits.string_contains_expression_count += expression_traits.string_contains_count;
+	traits.string_prefix_expression_count += expression_traits.string_prefix_count;
+	traits.string_suffix_expression_count += expression_traits.string_suffix_count;
 }
 
 static bool ExecutionRegionStageIsOperatorSlot(const ExecutionRegionStage &stage) {
@@ -2437,9 +2454,18 @@ static void AccumulateExecutionRegionSourceTraits(const ExecutionRegionNode &nod
 		return;
 	}
 
+	traits.estimated_source_cardinality = node.source->estimated_source_cardinality;
 	traits.source_projected_column_count = node.source->projection_ids.size();
 	traits.source_returned_column_count = node.source->returned_column_count;
 	traits.source_filter_count = node.source->filters.size();
+	if (node.source->table_scan_contract.present) {
+		auto &table_scan_contract = node.source->table_scan_contract;
+		traits.source_contract_input_column_count = table_scan_contract.source_contract_input_column_count;
+		traits.source_contract_filter_prune_required = table_scan_contract.source_contract_filter_prune_required;
+		traits.source_projection_pushdown = table_scan_contract.projection_pushdown;
+		traits.source_filter_pushdown = table_scan_contract.filter_pushdown;
+		traits.source_filter_prune = table_scan_contract.filter_prune;
+	}
 	for (auto &filter : node.source->filters) {
 		if (!filter.expression || !filter.expression->root) {
 			traits.source_filter_missing_count++;
@@ -2447,8 +2473,7 @@ static void AccumulateExecutionRegionSourceTraits(const ExecutionRegionNode &nod
 			continue;
 		}
 		traits.source_filter_expression_count++;
-		traits.core_expression_operator_count++;
-		AccumulateExecutionRegionFilterTraits(*filter.expression->root, traits.source_comparison_filter_count,
+		AccumulateExecutionRegionFilterTraits(filter.expression->traits, traits.source_comparison_filter_count,
 		                                      traits.source_integer_comparison_filter_count,
 		                                      traits.source_non_integer_comparison_filter_count,
 		                                      traits.source_conjunction_filter_count);
@@ -2457,7 +2482,8 @@ static void AccumulateExecutionRegionSourceTraits(const ExecutionRegionNode &nod
 
 static ExecutionRegionCandidateTraits BuildExecutionRegionCandidateTraits(const ExecutionRegionIR &region_ir,
                                                                           const ExecutionRegionCandidate &candidate,
-                                                                          const ExecutionRegionStagePlan &stage_plan) {
+                                                                          const ExecutionRegionStagePlan &stage_plan,
+                                                                          ExecutionRegionIRMode mode) {
 	ExecutionRegionCandidateTraits traits;
 	bool unknown_expression_traits = false;
 	for (idx_t node_idx = candidate.first_node; node_idx < candidate.EndNode() && node_idx < region_ir.nodes.size();
@@ -2480,8 +2506,9 @@ static ExecutionRegionCandidateTraits BuildExecutionRegionCandidateTraits(const 
 			traits.filter_count++;
 			if (node.filter && node.filter->root) {
 				traits.core_expression_operator_count++;
+				AccumulateExecutionRegionExpressionTraits(node.filter->traits, traits);
 				AccumulateExecutionRegionFilterTraits(
-				    *node.filter->root, traits.comparison_filter_count, traits.integer_comparison_filter_count,
+				    node.filter->traits, traits.comparison_filter_count, traits.integer_comparison_filter_count,
 				    traits.non_integer_comparison_filter_count, traits.conjunction_filter_count);
 			} else {
 				unknown_expression_traits = true;
@@ -2499,18 +2526,17 @@ static ExecutionRegionCandidateTraits BuildExecutionRegionCandidateTraits(const 
 					unknown_expression_traits = true;
 					continue;
 				}
-				if (projection->root->kind == ExecutionExpressionIRKind::REFERENCE) {
+				AccumulateExecutionRegionExpressionTraits(projection->traits, traits);
+				if (projection->traits.root_is_reference) {
 					traits.reference_projection_count++;
 				}
-				if (ExecutionExpressionContainsBinaryOp(*projection->root, IsExecutionRegionArithmeticBinaryOp)) {
+				if (projection->traits.arithmetic_binary_count > 0) {
 					traits.arithmetic_projection_count++;
 				}
-				if (ExecutionExpressionContainsBinaryOpWithType(*projection->root, IsExecutionRegionArithmeticBinaryOp,
-				                                                IsExecutionRegionIntegerLogicalType)) {
+				if (projection->traits.integer_arithmetic_result_count > 0) {
 					traits.integer_arithmetic_projection_count++;
 				}
-				if (ExecutionExpressionContainsBinaryOpWithOtherType(
-				        *projection->root, IsExecutionRegionArithmeticBinaryOp, IsExecutionRegionIntegerLogicalType)) {
+				if (projection->traits.non_integer_arithmetic_result_count > 0) {
 					traits.non_integer_arithmetic_projection_count++;
 				}
 			}
@@ -2530,44 +2556,50 @@ static ExecutionRegionCandidateTraits BuildExecutionRegionCandidateTraits(const 
 	}
 	AccumulateExecutionRegionStagePlanTraits(stage_plan, traits);
 	traits.expression_traits_known = !unknown_expression_traits;
-	traits.ir = DescribeExecutionRegionCandidateTraits(traits);
+	if (ExecutionRegionShouldRenderDiagnostics(mode)) {
+		traits.ir = DescribeExecutionRegionCandidateTraits(traits);
+	}
 	return traits;
 }
 
 static ExecutionRegionCandidateTraits BuildExecutionRegionSpanTraits(const ExecutionRegionIR &region_ir,
-                                                                     ExecutionRegionCandidate span_candidate) {
-	span_candidate.contract = BuildExecutionRegionContract(region_ir, span_candidate);
-	span_candidate.stage_plan = BuildExecutionRegionStagePlan(region_ir, span_candidate);
-	return BuildExecutionRegionCandidateTraits(region_ir, span_candidate, span_candidate.stage_plan);
+                                                                     ExecutionRegionCandidate span_candidate,
+                                                                     ExecutionRegionIRMode mode) {
+	span_candidate.contract = BuildExecutionRegionContract(region_ir, span_candidate, mode);
+	span_candidate.stage_plan = BuildExecutionRegionStagePlan(region_ir, span_candidate, mode);
+	return BuildExecutionRegionCandidateTraits(region_ir, span_candidate, span_candidate.stage_plan, mode);
 }
 
-static ExecutionRegionCandidateTraits BuildExecutionRegionContextTraits(const ExecutionRegionIR &region_ir) {
+static ExecutionRegionCandidateTraits BuildExecutionRegionContextTraits(const ExecutionRegionIR &region_ir,
+                                                                        ExecutionRegionIRMode mode) {
 	ExecutionRegionCandidate context_candidate;
 	context_candidate.first_node = 0;
 	context_candidate.node_count = region_ir.nodes.size();
-	return BuildExecutionRegionSpanTraits(region_ir, std::move(context_candidate));
+	return BuildExecutionRegionSpanTraits(region_ir, std::move(context_candidate), mode);
 }
 
 static ExecutionRegionCandidateTraits BuildExecutionRegionUpstreamTraits(const ExecutionRegionIR &region_ir,
-                                                                         const ExecutionRegionCandidate &candidate) {
+                                                                         const ExecutionRegionCandidate &candidate,
+                                                                         ExecutionRegionIRMode mode) {
 	if (candidate.first_node == 0 || region_ir.nodes.empty()) {
 		return ExecutionRegionCandidateTraits();
 	}
 	ExecutionRegionCandidate upstream_candidate;
 	upstream_candidate.first_node = 0;
 	upstream_candidate.node_count = MinValue(candidate.first_node, NumericCast<idx_t>(region_ir.nodes.size()));
-	return BuildExecutionRegionSpanTraits(region_ir, std::move(upstream_candidate));
+	return BuildExecutionRegionSpanTraits(region_ir, std::move(upstream_candidate), mode);
 }
 
-static ExecutionRegionCandidateTraits
-BuildExecutionRegionContinuationTraits(const ExecutionRegionIR &region_ir, const ExecutionRegionCandidate &candidate) {
+static ExecutionRegionCandidateTraits BuildExecutionRegionContinuationTraits(const ExecutionRegionIR &region_ir,
+                                                                             const ExecutionRegionCandidate &candidate,
+                                                                             ExecutionRegionIRMode mode) {
 	ExecutionRegionCandidate continuation_candidate;
 	continuation_candidate.first_node = MinValue(candidate.EndNode(), NumericCast<idx_t>(region_ir.nodes.size()));
 	if (continuation_candidate.first_node >= region_ir.nodes.size()) {
 		return ExecutionRegionCandidateTraits();
 	}
 	continuation_candidate.node_count = region_ir.nodes.size() - continuation_candidate.first_node;
-	return BuildExecutionRegionSpanTraits(region_ir, std::move(continuation_candidate));
+	return BuildExecutionRegionSpanTraits(region_ir, std::move(continuation_candidate), mode);
 }
 
 static void AppendExecutionRegionCandidateShapeSegment(string &result, const string &segment) {
@@ -2723,7 +2755,8 @@ BuildExecutionRegionContractShapeParts(const ExecutionRegionIR &region_ir, idx_t
 }
 
 static ExecutionRegionSignature BuildExecutionRegionSignature(const ExecutionRegionIR &region_ir,
-                                                              const ExecutionRegionCandidate &candidate) {
+                                                              const ExecutionRegionCandidate &candidate,
+                                                              ExecutionRegionIRMode mode) {
 	ExecutionRegionSignature signature;
 	signature.context = GetExecutionRegionSignatureContext(candidate.contract);
 	signature.shape = candidate.shape;
@@ -2732,9 +2765,11 @@ static ExecutionRegionSignature BuildExecutionRegionSignature(const ExecutionReg
 	signature.contract_shape_parts =
 	    BuildExecutionRegionContractShapeParts(region_ir, candidate.first_node, candidate.node_count);
 	signature.contract_shape = DescribeExecutionRegionContractShapeParts(signature.contract_shape_parts);
-	signature.ir = "signature<context=" + signature.context + ",shape=" + signature.shape +
-	               ",features=" + signature.feature_shape + ",context_features=" + signature.context_feature_shape +
-	               ",contract_shape=" + signature.contract_shape + ">";
+	if (ExecutionRegionShouldRenderDiagnostics(mode)) {
+		signature.ir = "signature<context=" + signature.context + ",shape=" + signature.shape +
+		               ",features=" + signature.feature_shape + ",context_features=" + signature.context_feature_shape +
+		               ",contract_shape=" + signature.contract_shape + ">";
+	}
 	return signature;
 }
 
@@ -2786,19 +2821,32 @@ ExecutionRegionSourceStageExecution(const ExecutionRegionNode &node, const Execu
 	return ExecutionRegionStageExecutionFromOwnership(contract.source_ownership);
 }
 
+static bool ExecutionRegionProjectionHasExecutableWork(const ExecutionRegionNode &node) {
+	for (auto &projection : node.projections) {
+		if (!projection || !projection->root) {
+			continue;
+		}
+		if (projection->root->kind != ExecutionExpressionIRKind::REFERENCE) {
+			return true;
+		}
+	}
+	return false;
+}
+
 static void AddExecutionRegionStage(ExecutionRegionStagePlan &plan, ExecutionRegionStageKind kind,
                                     ExecutionRegionStageExecutionKind execution, ExecutionRegionOwnershipKind ownership,
                                     idx_t node_index, const ExecutionRegionNode &node,
                                     idx_t filter_index = DConstants::INVALID_INDEX, string reason = string(),
                                     ExecutionCompiledContractKind operation = ExecutionCompiledContractKind::NONE,
                                     ExecutionCompiledDrainKind drain = ExecutionCompiledDrainKind::NONE,
-                                    string required_capability = string()) {
+                                    string required_capability = string(), bool executable_work = false) {
 	ExecutionRegionStage stage;
 	stage.kind = kind;
 	stage.execution = execution;
 	stage.ownership = ownership;
 	stage.operation = operation;
 	stage.drain = drain;
+	stage.executable_work = executable_work;
 	stage.node_index = node_index;
 	stage.operator_index = node.operator_index;
 	stage.filter_index = filter_index;
@@ -2811,8 +2859,7 @@ static void AddExecutionRegionStage(ExecutionRegionStagePlan &plan, ExecutionReg
 static string BuildExecutionRegionCompiledStageReason(const ExecutionCompiledStageContract &compiled_stage,
                                                       const ExecutionRegionNode &node) {
 	string reason = compiled_stage.ir.empty() ? node.blocker_reason : compiled_stage.ir;
-	if (!compiled_stage.blocker.empty() && compiled_stage.blocker != "none" &&
-	    !StringUtil::Contains(reason, compiled_stage.blocker)) {
+	if (!compiled_stage.blocker.empty() && !StringUtil::Contains(reason, compiled_stage.blocker)) {
 		if (!reason.empty()) {
 			reason += ";";
 		}
@@ -2828,7 +2875,8 @@ static void AddExecutionRegionCompiledStage(ExecutionRegionStagePlan &plan,
                                             ExecutionRegionOwnershipKind ownership) {
 	AddExecutionRegionStage(plan, compiled_stage.stage, execution, ownership, node_index, node,
 	                        DConstants::INVALID_INDEX, BuildExecutionRegionCompiledStageReason(compiled_stage, node),
-	                        compiled_stage.operation, compiled_stage.drain, compiled_stage.required_capability);
+	                        compiled_stage.operation, compiled_stage.drain, compiled_stage.required_capability,
+	                        compiled_stage.executable_work);
 }
 
 static bool AddExecutionRegionCompiledStages(ExecutionRegionStagePlan &plan, const ExecutionRegionNode &node,
@@ -2861,6 +2909,8 @@ static string DescribeExecutionRegionStagePlan(const ExecutionRegionStagePlan &p
 		result += ExecutionCompiledContractKindToString(stage.operation);
 		result += ":drain=";
 		result += ExecutionCompiledDrainKindToString(stage.drain);
+		result += ":executable_work=";
+		result += stage.executable_work ? "true" : "false";
 		result += "#node";
 		result += std::to_string(stage.node_index);
 		if (stage.operator_index != DConstants::INVALID_INDEX) {
@@ -2892,7 +2942,8 @@ static string DescribeExecutionRegionStagePlan(const ExecutionRegionStagePlan &p
 }
 
 static ExecutionRegionStagePlan BuildExecutionRegionStagePlan(const ExecutionRegionIR &region_ir,
-                                                              const ExecutionRegionCandidate &candidate) {
+                                                              const ExecutionRegionCandidate &candidate,
+                                                              ExecutionRegionIRMode mode) {
 	ExecutionRegionStagePlan plan;
 	plan.shape = GetExecutionRegionSignatureContext(candidate.contract) + ":" + candidate.shape;
 	const auto end_node = MinValue(candidate.EndNode(), NumericCast<idx_t>(region_ir.nodes.size()));
@@ -2922,20 +2973,21 @@ static ExecutionRegionStagePlan BuildExecutionRegionStagePlan(const ExecutionReg
 			if (node.source) {
 				for (idx_t filter_idx = 0; filter_idx < node.source->filters.size(); filter_idx++) {
 					auto &filter = node.source->filters[filter_idx];
-					auto source_filter_ownership = GetExecutionRegionCandidateSourceFilterOwnership(candidate, node);
 					ExecutionRegionOwnershipKind filter_ownership;
-					if (source_filter_ownership == ExecutionRegionSourceFilterOwnershipKind::DUCKDB_SCAN) {
+					if (ExecutionRegionCandidateUsesScanFilters(candidate, node)) {
 						filter_ownership = ExecutionRegionOwnershipKind::NATIVE_CONTRACT;
 					} else {
-						filter_ownership = filter.expression ? ExecutionRegionOwnershipKind::GENERATED_IR
-						                                     : ExecutionRegionOwnershipKind::MISSING_CONTRACT;
+						filter_ownership = ExecutionRegionOwnershipKind::MISSING_CONTRACT;
 					}
 					auto filter_execution =
 					    source_execution == ExecutionRegionSourceExecutionKind::DUCKDB_SOURCE_BOUNDARY
 					        ? ExecutionRegionStageExecutionKind::SOURCE_BOUNDARY
 					        : ExecutionRegionStageExecutionFromOwnership(filter_ownership);
 					AddExecutionRegionStage(plan, ExecutionRegionStageKind::SOURCE_FILTER, filter_execution,
-					                        filter_ownership, node_idx, node, filter_idx, filter.reason);
+					                        filter_ownership, node_idx, node, filter_idx, filter.reason,
+					                        ExecutionCompiledContractKind::FILTER_STAGE,
+					                        ExecutionCompiledDrainKind::ZERO_OR_ONE_OUTPUT, string(),
+					                        filter_execution == ExecutionRegionStageExecutionKind::GENERATED_IR);
 				}
 			}
 			break;
@@ -2946,7 +2998,9 @@ static ExecutionRegionStagePlan BuildExecutionRegionStagePlan(const ExecutionReg
 			                                                    : ExecutionRegionStageExecutionKind::MISSING_CONTRACT,
 			                        node.blocker_reason.empty() ? ExecutionRegionOwnershipKind::GENERATED_IR
 			                                                    : ExecutionRegionOwnershipKind::MISSING_CONTRACT,
-			                        node_idx, node, DConstants::INVALID_INDEX, node.blocker_reason);
+			                        node_idx, node, DConstants::INVALID_INDEX, node.blocker_reason,
+			                        ExecutionCompiledContractKind::NONE, ExecutionCompiledDrainKind::NONE, string(),
+			                        node.blocker_reason.empty());
 			break;
 		case ExecutionRegionNodeKind::PROJECTION:
 			AddExecutionRegionStage(plan, ExecutionRegionStageKind::PROJECTION,
@@ -2954,7 +3008,9 @@ static ExecutionRegionStagePlan BuildExecutionRegionStagePlan(const ExecutionReg
 			                                                    : ExecutionRegionStageExecutionKind::MISSING_CONTRACT,
 			                        node.blocker_reason.empty() ? ExecutionRegionOwnershipKind::GENERATED_IR
 			                                                    : ExecutionRegionOwnershipKind::MISSING_CONTRACT,
-			                        node_idx, node, DConstants::INVALID_INDEX, node.blocker_reason);
+			                        node_idx, node, DConstants::INVALID_INDEX, node.blocker_reason,
+			                        ExecutionCompiledContractKind::NONE, ExecutionCompiledDrainKind::NONE, string(),
+			                        node.blocker_reason.empty() && ExecutionRegionProjectionHasExecutableWork(node));
 			break;
 		case ExecutionRegionNodeKind::OPERATOR: {
 			if (!AddExecutionRegionCompiledStages(plan, node, node_idx)) {
@@ -2977,7 +3033,9 @@ static ExecutionRegionStagePlan BuildExecutionRegionStagePlan(const ExecutionReg
 			break;
 		}
 	}
-	plan.ir = DescribeExecutionRegionStagePlan(plan);
+	if (ExecutionRegionShouldRenderDiagnostics(mode)) {
+		plan.ir = DescribeExecutionRegionStagePlan(plan);
+	}
 	return plan;
 }
 
@@ -2993,6 +3051,18 @@ static idx_t EstimateExecutionRegionCandidateCardinality(const ExecutionRegionIR
 	return result;
 }
 
+static idx_t EstimateExecutionRegionCandidateSourceCardinality(const ExecutionRegionIR &region_ir,
+                                                               const ExecutionRegionCandidate &candidate) {
+	if (candidate.first_node >= region_ir.nodes.size()) {
+		return 0;
+	}
+	auto &source = region_ir.nodes[candidate.first_node];
+	if (!source.source) {
+		return source.estimated_cardinality;
+	}
+	return MaxValue(source.source->estimated_source_cardinality, source.estimated_cardinality);
+}
+
 static string DescribeExecutionRegionCandidate(const ExecutionRegionCandidate &candidate) {
 	string result = "candidate" + std::to_string(candidate.candidate_id);
 	result += "<first_node=" + std::to_string(candidate.first_node);
@@ -3000,13 +3070,13 @@ static string DescribeExecutionRegionCandidate(const ExecutionRegionCandidate &c
 	result += ",start_operator_index=" + std::to_string(candidate.start_operator_index);
 	result += ",end_operator_index=" + std::to_string(candidate.end_operator_index);
 	result += ",estimated_cardinality=" + std::to_string(candidate.estimated_cardinality);
+	result += ",estimated_source_cardinality=" + std::to_string(candidate.estimated_source_cardinality);
 	if (candidate.source_execution != ExecutionRegionSourceExecutionKind::NONE) {
 		result += ",source_execution=";
 		result += ExecutionRegionSourceExecutionKindToString(candidate.source_execution);
 	}
-	if (candidate.source_filter_ownership != ExecutionRegionSourceFilterOwnershipKind::NONE) {
-		result += ",source_filter_ownership=";
-		result += ExecutionRegionSourceFilterOwnershipKindToString(candidate.source_filter_ownership);
+	if (candidate.uses_scan_filters) {
+		result += ",uses_scan_filters=true";
 	}
 	result += ",inputs=" + DescribeExecutionRegionTypeList(candidate.input_types);
 	result += ",outputs=" + DescribeExecutionRegionTypeList(candidate.output_types);
@@ -3017,7 +3087,6 @@ static string DescribeExecutionRegionCandidate(const ExecutionRegionCandidate &c
 		result += candidate.stage_plan.ir;
 	}
 	result += ",pipeline_shape=" + candidate.pipeline_shape;
-	result += ",context_pipeline_shape=" + candidate.context_pipeline_shape;
 	result += "," + candidate.traits.ir;
 	result += "," + candidate.contract.ir;
 	if (!candidate.upstream_traits.ir.empty()) {
@@ -3062,124 +3131,204 @@ static vector<LogicalType> GetExecutionRegionCandidateOutputTypes(const Executio
 
 static bool HasExecutionRegionCandidate(const ExecutionRegionIR &region_ir, idx_t first_node, idx_t node_count,
                                         idx_t start_operator_index, idx_t end_operator_index,
-                                        ExecutionRegionSourceExecutionKind source_execution,
-                                        ExecutionRegionSourceFilterOwnershipKind source_filter_ownership) {
+                                        ExecutionRegionSourceExecutionKind source_execution) {
 	for (auto &candidate : region_ir.candidates) {
 		if (candidate.first_node == first_node && candidate.node_count == node_count &&
 		    candidate.start_operator_index == start_operator_index &&
-		    candidate.end_operator_index == end_operator_index && candidate.source_execution == source_execution &&
-		    candidate.source_filter_ownership == source_filter_ownership) {
+		    candidate.end_operator_index == end_operator_index && candidate.source_execution == source_execution) {
 			return true;
 		}
 	}
 	return false;
 }
 
-static bool AddExecutionRegionCandidate(
-    ExecutionRegionIR &region_ir, idx_t candidate_id, idx_t first_node, idx_t node_count, idx_t start_operator_index,
-    idx_t end_operator_index,
-    ExecutionRegionSourceExecutionKind source_execution = ExecutionRegionSourceExecutionKind::NONE,
-    ExecutionRegionSourceFilterOwnershipKind source_filter_ownership = ExecutionRegionSourceFilterOwnershipKind::NONE) {
-	D_ASSERT(node_count > 0);
-	if (HasExecutionRegionCandidate(region_ir, first_node, node_count, start_operator_index, end_operator_index,
-	                                source_execution, source_filter_ownership)) {
-		return false;
+static void AddExecutionRegionCandidateBlocker(ExecutionRegionIR &region_ir, string reason) {
+	if (std::find(region_ir.candidate_blockers.begin(), region_ir.candidate_blockers.end(), reason) ==
+	    region_ir.candidate_blockers.end()) {
+		region_ir.candidate_blockers.push_back(std::move(reason));
 	}
-	if (first_node >= region_ir.nodes.size() || region_ir.nodes[first_node].kind != ExecutionRegionNodeKind::SOURCE) {
-		return false;
+}
+
+static string DescribeExecutionRegionCandidateSpan(idx_t first_node, idx_t node_count, idx_t start_operator_index,
+                                                   idx_t end_operator_index,
+                                                   ExecutionRegionSourceExecutionKind source_execution) {
+	string result = "span[first_node=" + std::to_string(first_node);
+	result += ",node_count=" + std::to_string(node_count);
+	result +=
+	    ",operator_range=[" + std::to_string(start_operator_index) + "," + std::to_string(end_operator_index) + ")";
+	if (source_execution != ExecutionRegionSourceExecutionKind::NONE) {
+		result += ",source_execution=";
+		result += ExecutionRegionSourceExecutionKindToString(source_execution);
 	}
+	result += "]";
+	return result;
+}
+
+static string AppendExecutionRegionCandidateDiagnostic(string reason, const string &diagnostic) {
+	if (diagnostic.empty()) {
+		return reason;
+	}
+	return std::move(reason) + ";" + diagnostic;
+}
+
+struct ExecutionRegionCandidateSummary {
 	ExecutionRegionCandidate candidate;
+	string blocker;
+
+	bool Accepted() const {
+		return blocker.empty();
+	}
+};
+
+static bool ExecutionRegionCandidateCoversFullPipeline(const ExecutionRegionIR &region_ir,
+                                                       const ExecutionRegionCandidate &candidate) {
+	return candidate.first_node == 0 && candidate.node_count == region_ir.nodes.size();
+}
+
+static ExecutionRegionCandidateTraits
+BuildExecutionRegionCandidateContextTraits(const ExecutionRegionIR &region_ir,
+                                           const ExecutionRegionCandidate &candidate, ExecutionRegionIRMode mode) {
+	if (ExecutionRegionCandidateCoversFullPipeline(region_ir, candidate)) {
+		return candidate.traits;
+	}
+	return BuildExecutionRegionContextTraits(region_ir, mode);
+}
+
+static ExecutionRegionCandidateSummary
+BuildExecutionRegionCandidateSummary(const ExecutionRegionIR &region_ir, idx_t candidate_id, idx_t first_node,
+                                     idx_t node_count, idx_t start_operator_index, idx_t end_operator_index,
+                                     ExecutionRegionSourceExecutionKind source_execution, ExecutionRegionIRMode mode) {
+	ExecutionRegionCandidateSummary summary;
+	auto &candidate = summary.candidate;
 	candidate.candidate_id = candidate_id;
 	candidate.first_node = first_node;
 	candidate.node_count = node_count;
 	candidate.start_operator_index = start_operator_index;
 	candidate.end_operator_index = end_operator_index;
 	candidate.source_execution = source_execution;
-	candidate.source_filter_ownership = source_filter_ownership;
 	candidate.estimated_cardinality = EstimateExecutionRegionCandidateCardinality(region_ir, candidate);
+	candidate.estimated_source_cardinality = EstimateExecutionRegionCandidateSourceCardinality(region_ir, candidate);
 	candidate.input_types = GetExecutionRegionCandidateInputTypes(region_ir, candidate);
 	candidate.output_types = GetExecutionRegionCandidateOutputTypes(region_ir, candidate);
 	candidate.shape = DescribeExecutionRegionCandidateShape(region_ir, candidate);
 	candidate.pipeline_shape = DescribeExecutionRegionPipelineShape(region_ir, first_node, node_count);
-	candidate.context_pipeline_shape = region_ir.pipeline_shape;
-	candidate.contract = BuildExecutionRegionContract(region_ir, candidate);
-	if (!candidate.contract.OwnsSource() || !candidate.contract.OwnsSink() ||
-	    !ExecutionRegionABIIsFullPipeline(candidate.contract.abi)) {
+	if (candidate.first_node < region_ir.nodes.size()) {
+		candidate.uses_scan_filters = ExecutionRegionCandidateUsesScanFilters(candidate, region_ir.nodes[first_node]);
+	}
+	candidate.contract = BuildExecutionRegionContract(region_ir, candidate, mode);
+
+	auto describe_span = [&]() {
+		return DescribeExecutionRegionCandidateSpan(first_node, node_count, start_operator_index, end_operator_index,
+		                                            source_execution);
+	};
+	if (!candidate.contract.OwnsSource()) {
+		summary.blocker = AppendExecutionRegionCandidateDiagnostic(
+		    "candidate-builder-blocked:source-ownership-missing;" + describe_span(), candidate.contract.ir);
+		return summary;
+	}
+	if (!candidate.contract.OwnsSink()) {
+		summary.blocker = AppendExecutionRegionCandidateDiagnostic(
+		    "candidate-builder-blocked:sink-ownership-missing;" + describe_span(), candidate.contract.ir);
+		return summary;
+	}
+	if (!ExecutionRegionABIIsFullPipeline(candidate.contract.abi)) {
+		summary.blocker = AppendExecutionRegionCandidateDiagnostic(
+		    "candidate-builder-blocked:requires-full-pipeline-abi;" + describe_span(), candidate.contract.ir);
+		return summary;
+	}
+
+	candidate.stage_plan = BuildExecutionRegionStagePlan(region_ir, candidate, mode);
+	if (!candidate.stage_plan.HasExecutableWork()) {
+		summary.blocker = AppendExecutionRegionCandidateDiagnostic(
+		    "candidate-builder-blocked:no-executable-work;" + describe_span(), candidate.stage_plan.ir);
+		return summary;
+	}
+	candidate.traits = BuildExecutionRegionCandidateTraits(region_ir, candidate, candidate.stage_plan, mode);
+	candidate.signature = BuildExecutionRegionSignature(region_ir, candidate, mode);
+	candidate.upstream_traits = BuildExecutionRegionUpstreamTraits(region_ir, candidate, mode);
+	candidate.context_traits = BuildExecutionRegionCandidateContextTraits(region_ir, candidate, mode);
+	candidate.continuation_traits = BuildExecutionRegionContinuationTraits(region_ir, candidate, mode);
+	if (mode == ExecutionRegionIRMode::TRACE) {
+		candidate.ir = DescribeExecutionRegionCandidate(candidate);
+	}
+	return summary;
+}
+
+static bool AddExecutionRegionCandidate(
+    ExecutionRegionIR &region_ir, idx_t candidate_id, idx_t first_node, idx_t node_count, idx_t start_operator_index,
+    idx_t end_operator_index,
+    ExecutionRegionSourceExecutionKind source_execution = ExecutionRegionSourceExecutionKind::NONE,
+    ExecutionRegionIRMode mode = ExecutionRegionIRMode::COMPACT) {
+	D_ASSERT(node_count > 0);
+	if (HasExecutionRegionCandidate(region_ir, first_node, node_count, start_operator_index, end_operator_index,
+	                                source_execution)) {
 		return false;
 	}
-	candidate.stage_plan = BuildExecutionRegionStagePlan(region_ir, candidate);
-	candidate.traits = BuildExecutionRegionCandidateTraits(region_ir, candidate, candidate.stage_plan);
-	candidate.signature = BuildExecutionRegionSignature(region_ir, candidate);
-	candidate.upstream_traits = BuildExecutionRegionUpstreamTraits(region_ir, candidate);
-	candidate.context_traits = BuildExecutionRegionContextTraits(region_ir);
-	candidate.continuation_traits = BuildExecutionRegionContinuationTraits(region_ir, candidate);
-	candidate.ir = DescribeExecutionRegionCandidate(candidate);
-	region_ir.candidates.push_back(std::move(candidate));
+	if (first_node >= region_ir.nodes.size() || region_ir.nodes[first_node].kind != ExecutionRegionNodeKind::SOURCE) {
+		AddExecutionRegionCandidateBlocker(
+		    region_ir, "candidate-builder-blocked:span-does-not-start-at-source;" +
+		                   DescribeExecutionRegionCandidateSpan(first_node, node_count, start_operator_index,
+		                                                        end_operator_index, source_execution));
+		return false;
+	}
+	auto summary =
+	    BuildExecutionRegionCandidateSummary(region_ir, candidate_id, first_node, node_count, start_operator_index,
+	                                         end_operator_index, source_execution, mode);
+	if (!summary.Accepted()) {
+		AddExecutionRegionCandidateBlocker(region_ir, std::move(summary.blocker));
+		return false;
+	}
+	region_ir.candidates.push_back(std::move(summary.candidate));
 	return true;
 }
 
-static void AddExecutionRegionCandidateAndIncrement(
-    ExecutionRegionIR &region_ir, idx_t &candidate_id, idx_t first_node, idx_t node_count, idx_t start_operator_index,
-    idx_t end_operator_index,
-    ExecutionRegionSourceFilterOwnershipKind source_filter_ownership = ExecutionRegionSourceFilterOwnershipKind::NONE) {
+static bool AddExecutionRegionCandidateAndIncrement(ExecutionRegionIR &region_ir, idx_t &candidate_id, idx_t first_node,
+                                                    idx_t node_count, idx_t start_operator_index,
+                                                    idx_t end_operator_index,
+                                                    ExecutionRegionIRMode mode = ExecutionRegionIRMode::COMPACT) {
 	if (AddExecutionRegionCandidate(region_ir, candidate_id, first_node, node_count, start_operator_index,
-	                                end_operator_index, ExecutionRegionSourceExecutionKind::NONE,
-	                                source_filter_ownership)) {
+	                                end_operator_index, ExecutionRegionSourceExecutionKind::NONE, mode)) {
 		candidate_id++;
+		return true;
 	}
+	return false;
 }
 
-static bool ExecutionRegionSourceFiltersCanUseDuckDBScanOwnership(const ExecutionRegionNode &node) {
-	if (!node.source || node.source->execution != ExecutionRegionSourceExecutionKind::SOURCE_CONTRACT ||
-	    node.source->filters.empty() || !node.source->table_scan_contract.present) {
-		return false;
-	}
-	return node.source->table_scan_contract.filter_pushdown;
-}
-
-static bool ExecutionRegionSourceFiltersCanUseGeneratedOwnership(const ExecutionRegionNode &node) {
-	if (!node.source || node.source->execution != ExecutionRegionSourceExecutionKind::SOURCE_CONTRACT ||
-	    node.source->filters.empty() || !node.source->table_scan_contract.present) {
-		return false;
-	}
-	return node.source->table_scan_contract.source_contract_filter_takeover_supported;
-}
-
-static bool AddExecutionRegionSourceFilterOwnershipCandidates(ExecutionRegionIR &region_ir, idx_t &candidate_id,
-                                                              idx_t operator_count) {
-	if (region_ir.nodes.empty() || region_ir.nodes[0].kind != ExecutionRegionNodeKind::SOURCE) {
-		return false;
-	}
-	auto &source_node = region_ir.nodes[0];
-	bool added_strategy = false;
-	if (ExecutionRegionSourceFiltersCanUseDuckDBScanOwnership(source_node)) {
-		AddExecutionRegionCandidateAndIncrement(region_ir, candidate_id, 0, region_ir.nodes.size(), 0, operator_count,
-		                                        ExecutionRegionSourceFilterOwnershipKind::DUCKDB_SCAN);
-		added_strategy = true;
-	}
-	if (ExecutionRegionSourceFiltersCanUseGeneratedOwnership(source_node)) {
-		AddExecutionRegionCandidateAndIncrement(region_ir, candidate_id, 0, region_ir.nodes.size(), 0, operator_count,
-		                                        ExecutionRegionSourceFilterOwnershipKind::GENERATED);
-		added_strategy = true;
-	}
-	return added_strategy;
-}
-
-static void BuildExecutionRegionCandidates(ExecutionRegionIR &region_ir, idx_t operator_count) {
+static void BuildExecutionRegionCandidates(ExecutionRegionIR &region_ir, idx_t operator_count,
+                                           ExecutionRegionIRMode mode) {
 	if (region_ir.nodes.empty()) {
 		return;
 	}
 	idx_t candidate_id = 0;
-	if (AddExecutionRegionSourceFilterOwnershipCandidates(region_ir, candidate_id, operator_count)) {
-		return;
-	}
-	AddExecutionRegionCandidateAndIncrement(region_ir, candidate_id, 0, region_ir.nodes.size(), 0, operator_count);
+	AddExecutionRegionCandidateAndIncrement(region_ir, candidate_id, 0, region_ir.nodes.size(), 0, operator_count,
+	                                        mode);
 }
 
-static unique_ptr<ExecutionRegionIR> TryBuildExecutionRegion(const ExecutionRegionGraph &descriptor) {
-	if (!TryInspectExecutionRegionPipeline(descriptor, ExecutionRegionPipelineInventoryMode::ADMISSION)) {
+static ExecutionExpressionIRMode ExecutionExpressionModeFromRegionMode(ExecutionRegionIRMode mode) {
+	return mode == ExecutionRegionIRMode::TRACE ? ExecutionExpressionIRMode::TRACE : ExecutionExpressionIRMode::COMPACT;
+}
+
+static unique_ptr<ExecutionRegionPipelineInventory>
+TryInspectExecutionRegionPipelineForLowering(const ExecutionRegionGraph &descriptor,
+                                             const ExecutionRegionPipelineInventory *&inventory,
+                                             ExecutionExpressionAnalysisCache *expression_cache) {
+	if (inventory) {
 		return nullptr;
 	}
+	auto local_inventory = TryInspectExecutionRegionPipeline(descriptor, expression_cache);
+	inventory = local_inventory.get();
+	return local_inventory;
+}
+
+static unique_ptr<ExecutionRegionIR> TryBuildExecutionRegion(const ExecutionRegionGraph &descriptor,
+                                                             ExecutionRegionIRMode mode,
+                                                             const ExecutionRegionPipelineInventory *inventory,
+                                                             ExecutionExpressionAnalysisCache *expression_cache) {
+	auto local_inventory = TryInspectExecutionRegionPipelineForLowering(descriptor, inventory, expression_cache);
+	if (!inventory) {
+		return nullptr;
+	}
+	auto expression_mode = ExecutionExpressionModeFromRegionMode(mode);
 	auto result = make_uniq<ExecutionRegionIR>();
 	if (descriptor.HasSource()) {
 		auto &source = descriptor.source;
@@ -3187,21 +3336,23 @@ static unique_ptr<ExecutionRegionIR> TryBuildExecutionRegion(const ExecutionRegi
 		                                                    BuildExecutionRegionSourceBoundaryReason(source));
 		source_node.compiled_contract = source.source_contract;
 		if (source.HasSourceContract()) {
-			source_node.source = BuildExecutionRegionSourceInfo(source.source_payload);
+			source_node.source =
+			    BuildExecutionRegionSourceInfo(source.source_payload, expression_mode, mode, expression_cache);
 			if (source.UsesSourceContract()) {
 				source_node.boundary = ExecutionRegionBoundaryKind::SOURCE_CONTRACT;
 			}
 		} else if (source.IsScanSource()) {
-			source_node.source = BuildExecutionRegionGenericScanSourceInfo(source, source_node.blocker_reason);
+			source_node.source = BuildExecutionRegionGenericScanSourceInfo(source, source_node.blocker_reason, mode);
 		} else {
-			source_node.source = BuildExecutionRegionStatefulSourceInfo(source, source_node.blocker_reason);
+			source_node.source = BuildExecutionRegionStatefulSourceInfo(source, source_node.blocker_reason, mode);
 		}
 		result->nodes.push_back(std::move(source_node));
 	}
 	ExecutionRegionDataflowState state;
 	for (idx_t op_idx = 0; op_idx < descriptor.operators.size(); op_idx++) {
-		result->nodes.push_back(
-		    BuildExecutionRegionOperatorNode("op" + std::to_string(op_idx), descriptor.operators[op_idx], state));
+		result->nodes.push_back(BuildExecutionRegionOperatorNode("op" + std::to_string(op_idx),
+		                                                         descriptor.operators[op_idx], state, expression_mode,
+		                                                         mode, expression_cache));
 	}
 	if (descriptor.HasSink()) {
 		auto &sink = descriptor.sink;
@@ -3209,7 +3360,7 @@ static unique_ptr<ExecutionRegionIR> TryBuildExecutionRegion(const ExecutionRegi
 		auto sink_node =
 		    BuildExecutionRegionBoundaryNode("sink", sink, ExecutionRegionNodeKind::SINK, std::move(sink_reason));
 		sink_node.compiled_contract = sink.sink_contract;
-		sink_node.sink = BuildExecutionRegionSinkInfo(sink, sink.sink_payload, sink.HasSinkContract());
+		sink_node.sink = BuildExecutionRegionSinkInfo(sink, sink.sink_payload, sink.HasSinkContract(), mode);
 		if (sink_node.sink) {
 			sink_node.blocker_reason = sink_node.sink->reason;
 			if (sink.HasNativeSink()) {
@@ -3222,21 +3373,30 @@ static unique_ptr<ExecutionRegionIR> TryBuildExecutionRegion(const ExecutionRegi
 		return nullptr;
 	}
 	result->pipeline_shape = DescribeExecutionRegionPipelineShape(*result);
-	BuildExecutionRegionCandidates(*result, descriptor.OperatorCount());
-	result->ir = "duckdb.region typed-vector-ir";
-	for (auto &candidate : result->candidates) {
-		result->ir += ";";
-		result->ir += candidate.ir;
-	}
-	for (auto &node : result->nodes) {
-		result->ir += ";";
-		result->ir += DescribeExecutionRegionNode(node);
+	BuildExecutionRegionCandidates(*result, descriptor.OperatorCount(), mode);
+	if (mode == ExecutionRegionIRMode::TRACE) {
+		result->ir = "duckdb.region typed-vector-ir";
+		for (auto &candidate : result->candidates) {
+			result->ir += ";";
+			result->ir += candidate.ir;
+		}
+		for (auto &blocker : result->candidate_blockers) {
+			result->ir += ";candidate-blocker:";
+			result->ir += blocker;
+		}
+		for (auto &node : result->nodes) {
+			result->ir += ";";
+			result->ir += DescribeExecutionRegionNode(node);
+		}
 	}
 	return result;
 }
 
-unique_ptr<ExecutionRegionIR> TryLowerExecutionRegion(const ExecutionRegionGraph &descriptor) {
-	return TryBuildExecutionRegion(descriptor);
+unique_ptr<ExecutionRegionIR> TryLowerExecutionRegion(const ExecutionRegionGraph &descriptor,
+                                                      ExecutionRegionIRMode mode,
+                                                      const ExecutionRegionPipelineInventory *inventory,
+                                                      ExecutionExpressionAnalysisCache *expression_cache) {
+	return TryBuildExecutionRegion(descriptor, mode, inventory, expression_cache);
 }
 
 } // namespace duckdb

@@ -109,7 +109,7 @@ ExecutionContract PhysicalCTE::GetExecutionContract() const {
 	result.sink.native_sink_contract.status = ExecutionRegionStateContractStatus::READY;
 	result.sink.native_sink_contract.required_capability = "materialization-append-sink";
 	result.sink.native_sink_contract.contract_version = "v1";
-	result.sink.native_sink_contract.blocker = "none";
+	result.sink.native_sink_contract.blocker.clear();
 	result.sink.reason += ";sink_contract_status=ready";
 	result.sink.reason += ";sink_required_capability=materialization-append-sink";
 	result.sink.reason += ";sink_contract_version=v1";
@@ -134,8 +134,8 @@ bool PhysicalCTE::BindExecutionSink(ExecutionContext &context, DataChunk &input,
 	binding.ready = true;
 	binding.append_sink.ready = true;
 	binding.append_sink.state = make_shared_ptr<CTEExecutionRegionSinkState>(state);
-	binding.append_sink.blocker = "none";
-	binding.blocker = "none";
+	binding.append_sink.blocker.clear();
+	binding.blocker.clear();
 	return true;
 }
 

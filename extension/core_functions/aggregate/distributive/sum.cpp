@@ -228,6 +228,16 @@ AggregatePrimitiveUpdateABI SumNoOverflowPrimitiveUpdateABI(PhysicalType input_t
 	return abi;
 }
 
+AggregatePrimitiveUpdateABI SumHugeintPrimitiveUpdateABI(PhysicalType input_type) {
+	AggregatePrimitiveUpdateABI abi;
+	abi.kind = AggregatePrimitiveUpdateKind::SUM_HUGEINT;
+	abi.input_type = input_type;
+	abi.state_size = sizeof(SumState<hugeint_t>);
+	abi.state_value_offset = offsetof(SumState<hugeint_t>, value);
+	abi.state_is_set_offset = offsetof(SumState<hugeint_t>, is_set);
+	return abi;
+}
+
 AggregateFunction GetSumAggregateNoOverflow(PhysicalType type) {
 	switch (type) {
 	case PhysicalType::INT32: {
@@ -322,6 +332,7 @@ AggregateFunction GetSumAggregate(PhysicalType type) {
 		        LogicalType::INTEGER, LogicalType::HUGEINT);
 		function.SetStatisticsCallback(SumPropagateStats);
 		function.SetOrderDependent(AggregateOrderDependent::NOT_ORDER_DEPENDENT);
+		function.SetPrimitiveUpdateABI(SumHugeintPrimitiveUpdateABI(type));
 		return function;
 	}
 	case PhysicalType::INT64: {
@@ -330,6 +341,7 @@ AggregateFunction GetSumAggregate(PhysicalType type) {
 		        LogicalType::BIGINT, LogicalType::HUGEINT);
 		function.SetStatisticsCallback(SumPropagateStats);
 		function.SetOrderDependent(AggregateOrderDependent::NOT_ORDER_DEPENDENT);
+		function.SetPrimitiveUpdateABI(SumHugeintPrimitiveUpdateABI(type));
 		return function;
 	}
 	case PhysicalType::INT128: {
@@ -353,6 +365,9 @@ unique_ptr<FunctionData> BindDecimalSum(BindAggregateFunctionInput &input) {
 	function.GetArguments()[0] = decimal_type;
 	function.SetReturnType(LogicalType::DECIMAL(Decimal::MAX_WIDTH_DECIMAL, DecimalType::GetScale(decimal_type)));
 	function.SetOrderDependent(AggregateOrderDependent::NOT_ORDER_DEPENDENT);
+	if (decimal_type.InternalType() == PhysicalType::INT64) {
+		function.SetPrimitiveUpdateABI(SumHugeintPrimitiveUpdateABI(decimal_type.InternalType()));
+	}
 	return nullptr;
 }
 

@@ -161,11 +161,6 @@ idx_t PerfectAggregateHashTable::ResolveGroupStateAddresses(uintptr_t *address_d
 	return new_group_count;
 }
 
-idx_t PerfectAggregateHashTable::FindOrCreateAggregateStates(DataChunk &groups, Vector &addresses_out) {
-	auto address_data = ComputeGroupLocationIds(groups, addresses_out);
-	return ResolveGroupStateAddresses(address_data, groups.size(), layout_ptr->GetAggrOffset());
-}
-
 PerfectAggregateHashTableStateLayout PerfectAggregateHashTable::GetStateLayout() {
 	PerfectAggregateHashTableStateLayout result;
 	result.data = data;
@@ -174,6 +169,11 @@ PerfectAggregateHashTableStateLayout PerfectAggregateHashTable::GetStateLayout()
 	result.tuple_size = tuple_size;
 	result.aggregate_state_offset = layout_ptr->GetAggrOffset();
 	return result;
+}
+
+void PerfectAggregateHashTable::ResolveStateAddresses(DataChunk &groups, Vector &addresses_out, idx_t state_offset) {
+	auto address_data = ComputeGroupLocationIds(groups, addresses_out);
+	ResolveGroupStateAddresses(address_data, groups.size(), state_offset);
 }
 
 void PerfectAggregateHashTable::AddChunk(DataChunk &groups, DataChunk &payload) {

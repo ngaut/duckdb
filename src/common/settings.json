@@ -598,7 +598,7 @@
     },
     {
         "name": "enable_jit",
-        "description": "Attempt to run supported execution fragments through a registered compiled-region backend",
+        "description": "Attempt to run supported execution regions through a registered compiled-vectorized backend",
         "type": "BOOLEAN",
         "default_scope": "local",
         "default_value": "true"
@@ -891,7 +891,7 @@
     },
     {
         "name": "jit_backend",
-        "description": "Compiled-region backend to use, or auto to select the first available backend",
+        "description": "Execution-region backend to use, or auto to select the first available backend",
         "type": "VARCHAR",
         "default_scope": "local",
         "default_value": "auto",
@@ -901,21 +901,21 @@
     },
     {
         "name": "jit_dump_ir",
-        "description": "Expose deterministic compiled-region IR diagnostics through execution-region events",
+        "description": "Expose deterministic execution-region IR diagnostics through execution-region events",
         "type": "BOOLEAN",
         "default_scope": "local",
         "default_value": "false"
     },
     {
         "name": "jit_trace_decisions",
-        "description": "Record detailed per-candidate compiled-region decision counters",
+        "description": "Record detailed per-candidate physical-runner decision events",
         "type": "BOOLEAN",
         "default_scope": "local",
         "default_value": "false"
     },
     {
         "name": "jit_event_log_size",
-        "description": "Maximum number of compiled-region events retained per database instance; zero disables retention",
+        "description": "Maximum number of execution-region events retained per database instance; zero disables retention",
         "type": "UBIGINT",
         "scope": "global",
         "default_value": "4096",
@@ -925,7 +925,7 @@
     },
     {
         "name": "jit_policy",
-        "description": "Compiled-region execution policy: auto runs only proven native regions, force runs every supported region, off disables compiled regions",
+        "description": "Execution-region execution policy: auto runs only CBO-selected compiled-vectorized regions, force runs every supported region, off disables compiled-vectorized execution",
         "type": "VARCHAR",
         "default_scope": "local",
         "default_value": "auto",
@@ -935,14 +935,21 @@
     },
     {
         "name": "jit_trace_runtime",
-        "description": "Record bounded runtime trace events for compiled-region kernels",
+        "description": "Record bounded runtime trace events for compiled-vectorized kernels",
+        "type": "BOOLEAN",
+        "default_scope": "local",
+        "default_value": "false"
+    },
+    {
+        "name": "jit_trace_vectorized_baseline",
+        "description": "Build execution-region plans but execute vectorized pipelines and record per-region baseline runtime for comparison",
         "type": "BOOLEAN",
         "default_scope": "local",
         "default_value": "false"
     },
     {
         "name": "jit_verify",
-        "description": "Verify compiled-region output against the reference DuckDB execution path",
+        "description": "Verify compiled-vectorized output against the reference DuckDB execution path",
         "type": "BOOLEAN",
         "default_scope": "local",
         "default_value": "false"

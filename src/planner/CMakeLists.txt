@@ -16,6 +16,7 @@ add_library_unity(
   column_qualifier.cpp
   expression_iterator.cpp
   expression.cpp
+  cost_model.cpp
   table_binding.cpp
   expression_binder.cpp
   joinside.cpp

@@ -317,13 +317,13 @@ bool PhysicalNestedLoopJoin::BindExecutionSink(ExecutionContext &context, DataCh
 	}
 
 	binding.ready = true;
-	binding.blocker = "none";
+	binding.blocker.clear();
 	build.ready = true;
 	build.right_condition_data = &gstate.right_condition_data;
 	build.right_payload_data = &gstate.right_payload_data;
 	build.lock = &gstate.nj_lock;
 	build.condition_types = contract.condition_types;
-	build.blocker = "none";
+	build.blocker.clear();
 	return true;
 }
 
@@ -570,7 +570,7 @@ PhysicalNestedLoopJoin::BindExecutionOperator(ExecutionContext &context, DataChu
 
 	auto &state = state_p.Cast<PhysicalNestedLoopJoinState>();
 	binding.ready = true;
-	binding.blocker = "none";
+	binding.blocker.clear();
 	auto &probe = binding.nested_loop_join_probe;
 	probe.ready = true;
 	probe.join_type = contract.join_type;
@@ -588,7 +588,7 @@ PhysicalNestedLoopJoin::BindExecutionOperator(ExecutionContext &context, DataChu
 	probe.right_tuple = &state.right_tuple;
 	probe.fetch_next_left = &state.fetch_next_left;
 	probe.fetch_next_right = &state.fetch_next_right;
-	probe.blocker = "none";
+	probe.blocker.clear();
 	return ExecutionOperatorBindResult::READY;
 }
 

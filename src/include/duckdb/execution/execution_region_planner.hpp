@@ -12,6 +12,7 @@
 namespace duckdb {
 
 class ClientContext;
+class ExecutionRegionBackend;
 struct ExecutionRegionIR;
 class Pipeline;
 
@@ -23,7 +24,9 @@ public:
 	DUCKDB_API static unique_ptr<ExecutionRegionPlan> Build(ClientContext &context, Pipeline &pipeline);
 
 private:
-	static void Compile(ClientContext &context, ExecutionRegionPlan &plan, ExecutionRegionIR &region_ir,
+	static void Compile(ClientContext &context, ExecutionRegionBackend &backend, const string &backend_name,
+	                    ExecutionRegionPolicyMode requested_policy, ExecutionRegionPlan &plan,
+	                    ExecutionRegionIR &region_ir,
 	                    vector<SelectedCandidate> &selected_regions);
 };
 

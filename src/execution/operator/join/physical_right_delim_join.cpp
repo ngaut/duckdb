@@ -175,8 +175,8 @@ bool PhysicalRightDelimJoin::BindExecutionSink(ExecutionContext &context, DataCh
 	binding.delim_join_sink.state = make_shared_ptr<RightDelimJoinExecutionRegionSinkState>(
 	    std::move(join_binding.hash_join_build), context, distinct, *distinct.sink_state, *lstate.distinct_state,
 	    sink_input.interrupt_state);
-	binding.delim_join_sink.blocker = "none";
-	binding.blocker = "none";
+	binding.delim_join_sink.blocker.clear();
+	binding.blocker.clear();
 	return true;
 }
 

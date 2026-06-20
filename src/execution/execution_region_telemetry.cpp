@@ -1,6 +1,7 @@
 #include "duckdb/execution/execution_region_manager.hpp"
 
 #include "duckdb/common/exception.hpp"
+#include "duckdb/common/unordered_set.hpp"
 #include "duckdb/main/client_context.hpp"
 #include "duckdb/main/database.hpp"
 #include "duckdb/execution/execution_region_runtime.hpp"
@@ -8,8 +9,214 @@
 
 namespace duckdb {
 
-static bool ShouldRecordExecutionRegionDecisionCounters(ClientContext &context) {
-	return ExecutionRegionSettings::ShouldRecordDecisionCounters(context);
+static bool ShouldCaptureExecutionRegionQueryProfile(ClientContext &context) {
+	if (!context.QueryProfilerAcceptsExecutionRegionEvents()) {
+		return false;
+	}
+	return context.QueryProfilerIsExplainAnalyze() || ExecutionRegionSettings::ShouldRecordDetailedTelemetry(context);
+}
+
+const char *ExecutionRegionEventPhaseToString(ExecutionRegionEventPhase phase) {
+	switch (phase) {
+	case ExecutionRegionEventPhase::DECISION:
+		return "decision";
+	case ExecutionRegionEventPhase::COMPILE:
+		return "compile";
+	case ExecutionRegionEventPhase::RUNTIME:
+		return "runtime";
+	default:
+		return "none";
+	}
+}
+
+const char *ExecutionRegionEventStatusToString(ExecutionRegionEventStatus status) {
+	switch (status) {
+	case ExecutionRegionEventStatus::COMPILED:
+		return "compiled";
+	case ExecutionRegionEventStatus::SKIPPED:
+		return "skipped";
+	case ExecutionRegionEventStatus::UNSUPPORTED:
+		return "unsupported";
+	case ExecutionRegionEventStatus::UNAVAILABLE:
+		return "unavailable";
+	case ExecutionRegionEventStatus::DISABLED:
+		return "disabled";
+	case ExecutionRegionEventStatus::ERROR:
+		return "error";
+	case ExecutionRegionEventStatus::EXECUTED:
+		return "executed";
+	case ExecutionRegionEventStatus::SOURCE_CONTRACT:
+		return "source_contract";
+	default:
+		return "none";
+	}
+}
+
+const char *ExecutionRegionEventPolicyToString(ExecutionRegionEventPolicy policy) {
+	switch (policy) {
+	case ExecutionRegionEventPolicy::AUTO:
+		return "auto";
+	case ExecutionRegionEventPolicy::FORCE:
+		return "force";
+	case ExecutionRegionEventPolicy::OFF:
+		return "off";
+	case ExecutionRegionEventPolicy::RUNTIME:
+		return "runtime";
+	default:
+		return "none";
+	}
+}
+
+ExecutionRegionEventStatus ExecutionRegionEventStatusFromCompileStatus(ExecutionRegionCompileStatus status) {
+	switch (status) {
+	case ExecutionRegionCompileStatus::COMPILED:
+		return ExecutionRegionEventStatus::COMPILED;
+	case ExecutionRegionCompileStatus::SKIPPED:
+		return ExecutionRegionEventStatus::SKIPPED;
+	case ExecutionRegionCompileStatus::UNSUPPORTED:
+		return ExecutionRegionEventStatus::UNSUPPORTED;
+	case ExecutionRegionCompileStatus::UNAVAILABLE:
+		return ExecutionRegionEventStatus::UNAVAILABLE;
+	case ExecutionRegionCompileStatus::DISABLED:
+		return ExecutionRegionEventStatus::DISABLED;
+	case ExecutionRegionCompileStatus::ERROR:
+		return ExecutionRegionEventStatus::ERROR;
+	default:
+		return ExecutionRegionEventStatus::NONE;
+	}
+}
+
+ExecutionRegionEventPolicy ExecutionRegionEventPolicyFromMode(ExecutionRegionPolicyMode policy) {
+	switch (policy) {
+	case ExecutionRegionPolicyMode::AUTO:
+		return ExecutionRegionEventPolicy::AUTO;
+	case ExecutionRegionPolicyMode::FORCE:
+		return ExecutionRegionEventPolicy::FORCE;
+	case ExecutionRegionPolicyMode::OFF:
+		return ExecutionRegionEventPolicy::OFF;
+	default:
+		return ExecutionRegionEventPolicy::NONE;
+	}
+}
+
+static void SetRecordedExecutionRegionEventId(ExecutionRegionEvent &event, idx_t event_id) {
+	event.event_id = event_id;
+	if (event.kernel_id == 0 && event.status_kind == ExecutionRegionEventStatus::COMPILED) {
+		event.kernel_id = event_id;
+	}
+}
+
+static void SetDetailedExecutionRegionCandidate(ExecutionRegionEvent &event, const ExecutionRegionCandidate &candidate,
+                                                bool include_ir) {
+	event.has_candidate = true;
+	event.candidate_id = candidate.candidate_id;
+	event.candidate_shape = candidate.shape;
+	event.candidate_pipeline_shape = candidate.pipeline_shape;
+	event.candidate_signature = candidate.signature;
+	if (!include_ir) {
+		event.candidate_signature.ir.clear();
+	}
+	event.candidate_node_count = candidate.node_count;
+	event.candidate_start_operator_index = candidate.start_operator_index;
+	event.candidate_end_operator_index = candidate.end_operator_index;
+	event.candidate_estimated_cardinality = candidate.estimated_cardinality;
+	event.candidate_traits = candidate.traits;
+	event.candidate_contract = candidate.contract;
+	event.candidate_uses_scan_filters = candidate.uses_scan_filters;
+}
+
+bool ExecutionRegionEventIsRuntime(const ExecutionRegionEvent &event) {
+	return event.phase_kind == ExecutionRegionEventPhase::RUNTIME;
+}
+
+bool ExecutionRegionEventWasInvoked(const ExecutionRegionEvent &event) {
+	return event.kernel_id > 0 && (event.invocation_count > 0 || event.source_contract_invocation_count > 0 ||
+	                               event.runtime_time_us > 0 || event.source_contract_runtime_time_us > 0);
+}
+
+bool ExecutionRegionEventIsVisibleInQueryProfile(const ExecutionRegionEvent &event) {
+	return !ExecutionRegionEventIsRuntime(event) || ExecutionRegionEventWasInvoked(event);
+}
+
+const string &ExecutionRegionEventPipelineShape(const ExecutionRegionEvent &event) {
+	return event.candidate_pipeline_shape.empty() ? event.pipeline_shape : event.candidate_pipeline_shape;
+}
+
+idx_t ExecutionRegionEventEstimatedCardinality(const ExecutionRegionEvent &event) {
+	return event.candidate_estimated_cardinality > 0 ? event.candidate_estimated_cardinality
+	                                                 : event.pipeline_estimated_cardinality;
+}
+
+idx_t ExecutionRegionEventProfileCodeSize(const ExecutionRegionEvent &event) {
+	return ExecutionRegionEventIsRuntime(event) ? event.kernel_code_size : event.code_size;
+}
+
+int64_t ExecutionRegionEventProfileCompileTime(const ExecutionRegionEvent &event) {
+	return ExecutionRegionEventIsRuntime(event) ? event.kernel_compile_time_us : event.compile_time_us;
+}
+
+static void SummarizeRuntimeEvent(ExecutionRegionTraceSummary &summary, unordered_set<idx_t> &runtime_kernels,
+                                  const ExecutionRegionEvent &event) {
+	summary.runtime_events++;
+	summary.source_us += event.source_contract_runtime_time_us;
+	if (event.status_kind != ExecutionRegionEventStatus::SOURCE_CONTRACT) {
+		summary.runtime_us += event.runtime_time_us;
+		summary.sink_us += event.sink_next_batch_runtime_time_us;
+		summary.generated_us += event.generated_body_runtime_time_us;
+	}
+	if (ExecutionRegionEventWasInvoked(event)) {
+		runtime_kernels.insert(event.kernel_id);
+	}
+}
+
+static void SummarizeDecisionEvent(ExecutionRegionTraceSummary &summary, const ExecutionRegionEvent &event) {
+	summary.decisions++;
+	summary.decision_us += event.decision_time_us;
+	summary.compile_us += event.compile_time_us;
+	summary.code_size += event.code_size;
+	if (event.status_kind == ExecutionRegionEventStatus::COMPILED) {
+		summary.compiled++;
+	} else if (event.status_kind == ExecutionRegionEventStatus::ERROR) {
+		summary.compile_errors++;
+	} else if (event.status_kind == ExecutionRegionEventStatus::UNSUPPORTED) {
+		summary.unsupported++;
+	} else if (event.status_kind == ExecutionRegionEventStatus::SKIPPED) {
+		summary.skipped++;
+	} else if (event.status_kind == ExecutionRegionEventStatus::UNAVAILABLE) {
+		summary.unavailable++;
+	} else if (event.status_kind == ExecutionRegionEventStatus::DISABLED) {
+		summary.disabled++;
+	}
+}
+
+ExecutionRegionTraceSummary SummarizeExecutionRegionTrace(const vector<ExecutionRegionEvent> &trace) {
+	ExecutionRegionTraceSummary summary;
+	unordered_set<idx_t> runtime_kernels;
+	for (const auto &event : trace) {
+		if (ExecutionRegionEventIsRuntime(event)) {
+			SummarizeRuntimeEvent(summary, runtime_kernels, event);
+		} else {
+			SummarizeDecisionEvent(summary, event);
+		}
+	}
+	summary.runtime_regions = runtime_kernels.size();
+	return summary;
+}
+
+static idx_t RecordExecutionRegionTelemetryEvent(ClientContext &context, DatabaseInstance &db,
+                                                 ExecutionRegionEventLog &event_log, ExecutionRegionEvent event) {
+	auto should_capture_query_profile = ShouldCaptureExecutionRegionQueryProfile(context);
+	auto event_log_size = ExecutionRegionSettings::EventLogSize(db);
+	ExecutionRegionEvent query_profile_event;
+	if (should_capture_query_profile) {
+		query_profile_event = event;
+	}
+	auto event_id = event_log.Record(event_log_size, std::move(event));
+	if (should_capture_query_profile) {
+		SetRecordedExecutionRegionEventId(query_profile_event, event_id);
+		context.RecordExecutionRegionProfileEvent(query_profile_event);
+	}
+	return event_id;
 }
 
 vector<ExecutionRegionEvent> ExecutionRegionManager::GetEvents() const {
@@ -18,14 +225,6 @@ vector<ExecutionRegionEvent> ExecutionRegionManager::GetEvents() const {
 
 vector<ExecutionRegionCounter> ExecutionRegionManager::GetCounters() const {
 	return event_log.GetCounters();
-}
-
-vector<ExecutionRegionDecisionCounter> ExecutionRegionManager::GetDecisionCounters() const {
-	return event_log.GetDecisionCounters();
-}
-
-vector<ExecutionRegionKernelCounter> ExecutionRegionManager::GetKernelCounters() const {
-	return event_log.GetKernelCounters();
 }
 
 void ExecutionRegionManager::ClearEvents() {
@@ -42,11 +241,13 @@ void ExecutionRegionManager::ApplyEventRetentionLimit(idx_t event_log_size) {
 
 idx_t ExecutionRegionManager::RecordEvent(
     ClientContext &context, string backend_name, ExecutionRegionCompileTarget target,
-    ExecutionRegionCompileStatus status, ExecutionRegionExecutionMode execution_mode, string policy_decision,
-    string reason, string ir, int64_t decision_time_us, int64_t compile_time_us, idx_t code_size,
-    const ExecutionRegionCandidate *candidate, const ExecutionRegionAdmissionInfo *admission,
-    const ExecutionRegionStageTimings *stage_timings, ExecutionRegionForm region_execution_form,
-    ExecutionRegionSourceExecutionKind selected_source_execution, const ExecutionRegionPipelineInventory *inventory) {
+    ExecutionRegionCompileStatus status, ExecutionRegionExecutionMode execution_mode,
+    ExecutionRegionPolicyMode requested_policy, string reason, string blocker, const string *ir,
+    int64_t decision_time_us, int64_t compile_time_us, idx_t code_size, const ExecutionRegionCandidate *candidate,
+    ExecutionRunnerKind selected_runner, const ExecutionRegionStageTimings *stage_timings,
+    ExecutionRegionForm region_execution_form, ExecutionRegionSourceExecutionKind selected_source_execution,
+    bool selected_uses_scan_filters, const ExecutionRegionPipelineInventory *inventory,
+    ExecutionRegionExecutionBody execution_body, const PhysicalRunnerCostProfile *runner_cost) {
 	if (context.IsCompiledExecutionSuppressed()) {
 		return 0;
 	}
@@ -56,75 +257,64 @@ idx_t ExecutionRegionManager::RecordEvent(
 		event.pipeline_shape = inventory->pipeline_shape;
 		event.pipeline_estimated_cardinality = inventory->estimated_cardinality;
 	}
-	if (candidate) {
-		event.has_candidate = true;
-		event.candidate_id = candidate->candidate_id;
-		event.candidate_shape = candidate->shape;
-		event.candidate_pipeline_shape = candidate->pipeline_shape;
-		event.candidate_context_pipeline_shape = candidate->context_pipeline_shape;
-		event.candidate_signature = candidate->signature;
-		if (!ExecutionRegionSettings::DumpIR(context)) {
-			event.candidate_signature.ir.clear();
-		}
-		event.candidate_node_count = candidate->node_count;
-		event.candidate_start_operator_index = candidate->start_operator_index;
-		event.candidate_end_operator_index = candidate->end_operator_index;
-		event.candidate_estimated_cardinality = candidate->estimated_cardinality;
-		event.candidate_traits = candidate->traits;
-		event.candidate_contract = candidate->contract;
+	if (candidate && ExecutionRegionSettings::ShouldRecordDetailedTelemetry(context)) {
+		SetDetailedExecutionRegionCandidate(event, *candidate, ExecutionRegionSettings::DumpIR(context));
 	}
-	if (admission && admission->has_admission) {
-		event.has_admission = true;
-		event.admission_shape_key = admission->admission_key;
-		event.admission_rule_present = admission->rule_present;
-		event.admission_min_cardinality = admission->min_cardinality;
-		event.admission_proof = admission->proof;
-		event.has_admission_score = admission->has_score;
-		event.admission_score = admission->score;
+	if (candidate && !event.has_pipeline) {
+		event.has_pipeline = true;
+		event.pipeline_shape = candidate->pipeline_shape;
+		event.pipeline_estimated_cardinality = candidate->estimated_cardinality;
 	}
-	event.phase = status == ExecutionRegionCompileStatus::COMPILED || status == ExecutionRegionCompileStatus::ERROR
-	                  ? "compile"
-	                  : "decision";
+	event.selected_runner = selected_runner;
+	if (runner_cost) {
+		event.runner_cost = *runner_cost;
+	}
+	event.phase_kind = status == ExecutionRegionCompileStatus::COMPILED || status == ExecutionRegionCompileStatus::ERROR
+	                       ? ExecutionRegionEventPhase::COMPILE
+	                       : ExecutionRegionEventPhase::DECISION;
 	event.backend_name = std::move(backend_name);
-	event.target = ExecutionRegionCompileTargetToString(target);
-	event.status = ExecutionRegionCompileStatusToString(status);
-	event.execution_mode = ExecutionRegionExecutionModeToString(execution_mode);
-	event.region_execution_form = ExecutionRegionFormToString(region_execution_form);
-	event.execution_body = ExecutionRegionExecutionBodyToString(
-	    ExecutionRegionExecutionBodyForCompileEvent(status, execution_mode, code_size));
+	event.target_kind = target;
+	event.status_kind = ExecutionRegionEventStatusFromCompileStatus(status);
+	event.execution_mode_kind = execution_mode;
+	event.region_execution_form_kind = region_execution_form;
+	if (execution_body == ExecutionRegionExecutionBody::NONE) {
+		execution_body = ExecutionRegionExecutionBodyForCompileEvent(status, execution_mode, code_size);
+	}
+	event.execution_body_kind = execution_body;
 	event.selected_source_execution = selected_source_execution;
-	event.policy_decision = std::move(policy_decision);
+	event.selected_uses_scan_filters = selected_uses_scan_filters || event.candidate_uses_scan_filters;
+	event.requested_policy_kind = ExecutionRegionEventPolicyFromMode(requested_policy);
 	event.reason = std::move(reason);
-	event.ir = ExecutionRegionSettings::DumpIR(context) ? std::move(ir) : string();
+	event.blocker = std::move(blocker);
+	if (ir && ExecutionRegionSettings::DumpIR(context)) {
+		event.ir = *ir;
+	}
 	event.decision_time_us = decision_time_us;
 	event.compile_time_us = compile_time_us;
 	event.code_size = code_size;
 	if (stage_timings) {
 		event.ir_lowering_time_us = stage_timings->ir_lowering_time_us;
 		event.backend_analysis_time_us = stage_timings->backend_analysis_time_us;
-		event.admission_time_us = stage_timings->admission_time_us;
-		event.overlap_check_time_us = stage_timings->overlap_check_time_us;
 		event.codegen_time_us = stage_timings->codegen_time_us;
 	}
 
-	auto event_log_size = ExecutionRegionSettings::EventLogSize(db);
-	return event_log.Record(event_log_size, ShouldRecordExecutionRegionDecisionCounters(context), std::move(event));
+	return RecordExecutionRegionTelemetryEvent(context, db, event_log, std::move(event));
 }
 
 template <class KERNEL>
 static ExecutionRegionEvent BuildRuntimeEvent(const KERNEL &kernel, ExecutionRegionCompileTarget target,
-                                              ExecutionRegionExecutionMode execution_mode, string status, string reason,
-                                              idx_t input_rows, idx_t output_rows, int64_t runtime_time_us,
-                                              string runtime_result) {
+                                              ExecutionRegionExecutionMode execution_mode,
+                                              ExecutionRegionEventStatus status, string reason, idx_t input_rows,
+                                              idx_t output_rows, int64_t runtime_time_us, string runtime_result) {
 	ExecutionRegionEvent event;
-	event.phase = "runtime";
+	event.phase_kind = ExecutionRegionEventPhase::RUNTIME;
 	event.backend_name = kernel.BackendName();
-	event.target = ExecutionRegionCompileTargetToString(target);
-	event.status = std::move(status);
-	event.execution_mode = ExecutionRegionExecutionModeToString(execution_mode);
-	event.region_execution_form = ExecutionRegionFormToString(ExecutionRegionForm::NONE);
-	event.execution_body = ExecutionRegionExecutionBodyToString(kernel.ExecutionBody());
-	event.policy_decision = "runtime";
+	event.target_kind = target;
+	event.status_kind = status;
+	event.execution_mode_kind = execution_mode;
+	event.region_execution_form_kind = ExecutionRegionForm::NONE;
+	event.execution_body_kind = kernel.ExecutionBody();
+	event.requested_policy_kind = ExecutionRegionEventPolicy::RUNTIME;
 	event.reason = std::move(reason);
 	event.kernel_id = kernel.TraceId();
 	event.kernel_compile_reason = kernel.TraceCompileReason();
@@ -138,59 +328,53 @@ static ExecutionRegionEvent BuildRuntimeEvent(const KERNEL &kernel, ExecutionReg
 	return event;
 }
 
-static void SetRuntimeRegionCandidate(ExecutionRegionEvent &event, const ExecutionRegionKernel &kernel) {
-	if (!kernel.HasTraceCandidate()) {
+static void SetRuntimeRegionPipeline(ExecutionRegionEvent &event, const ExecutionRegionKernel &kernel) {
+	if (!kernel.HasTracePipeline()) {
 		return;
 	}
-	event.has_candidate = true;
-	event.candidate_id = kernel.TraceCandidateId();
+	event.has_pipeline = true;
+	event.pipeline_shape = kernel.TraceCandidatePipelineShape();
+	event.pipeline_estimated_cardinality = kernel.TraceCandidateEstimatedCardinality();
 	event.candidate_shape = kernel.TraceCandidateShape();
-	event.candidate_pipeline_shape = kernel.TraceCandidatePipelineShape();
-	event.candidate_context_pipeline_shape = kernel.TraceCandidateContextPipelineShape();
-	event.candidate_signature = kernel.TraceCandidateSignature();
-	event.candidate_node_count = kernel.TraceCandidateNodeCount();
-	event.candidate_start_operator_index = kernel.TraceCandidateStartOperatorIndex();
-	event.candidate_end_operator_index = kernel.TraceCandidateEndOperatorIndex();
 	event.candidate_estimated_cardinality = kernel.TraceCandidateEstimatedCardinality();
-	event.candidate_traits = kernel.TraceCandidateTraits();
-	event.candidate_contract = kernel.TraceCandidateContract();
+	event.candidate_uses_scan_filters = kernel.TraceCandidateUsesScanFilters();
 }
 
 static void SetRuntimeRegionExecutionForm(ExecutionRegionEvent &event, const ExecutionRegionKernel &kernel) {
-	event.region_execution_form = ExecutionRegionFormToString(kernel.RegionExecutionForm());
+	event.region_execution_form_kind = kernel.RegionExecutionForm();
 	event.selected_source_execution = kernel.SelectedSourceExecution();
+	event.selected_uses_scan_filters = kernel.UsesScanFilters();
 }
 
 static void SetRuntimeMetrics(ExecutionRegionEvent &event, const ExecutionRegionRuntimeMetrics &metrics) {
 	event.source_contract_output_rows = metrics.source_contract_output_rows;
 	event.source_contract_invocation_count = metrics.source_contract_invocation_count;
 	event.source_contract_runtime_time_us = metrics.source_contract_runtime_time_us;
+	event.source_stage_runtime = metrics.source_stage_runtime;
+	event.sink_next_batch_invocation_count = metrics.sink_next_batch_invocation_count;
+	event.sink_next_batch_runtime_time_us = metrics.sink_next_batch_runtime_time_us;
 	event.generated_body_runtime_time_us = metrics.generated_body_runtime_time_us;
-	event.generated_stage_runtime_breakdown = metrics.generated_stage_runtime_breakdown;
+	event.generated_stage_runtime = metrics.generated_stage_runtime;
 }
 
 void ExecutionRegionManager::RecordRuntimeEvent(ClientContext &context, const ExecutionRegionKernel &kernel,
-                                                ExecutionRegionCompileTarget target, string status, string reason,
-                                                idx_t input_rows, idx_t output_rows, int64_t runtime_time_us,
-                                                string runtime_result) {
+                                                ExecutionRegionCompileTarget target, ExecutionRegionEventStatus status,
+                                                string reason, idx_t input_rows, idx_t output_rows,
+                                                int64_t runtime_time_us, string runtime_result) {
 	if (context.IsCompiledExecutionSuppressed() || !ExecutionRegionSettings::TraceRuntime(context)) {
 		return;
 	}
 	auto event = BuildRuntimeEvent(kernel, target, kernel.ExecutionMode(), std::move(status), std::move(reason),
 	                               input_rows, output_rows, runtime_time_us, std::move(runtime_result));
 	SetRuntimeRegionExecutionForm(event, kernel);
-	SetRuntimeRegionCandidate(event, kernel);
-	if (!ExecutionRegionSettings::DumpIR(context)) {
-		event.candidate_signature.ir.clear();
-	}
-	auto event_log_size = ExecutionRegionSettings::EventLogSize(db);
-	event_log.Record(event_log_size, ShouldRecordExecutionRegionDecisionCounters(context), std::move(event));
+	SetRuntimeRegionPipeline(event, kernel);
+	RecordExecutionRegionTelemetryEvent(context, db, event_log, std::move(event));
 }
 
 void ExecutionRegionManager::RecordRuntimeEvent(ClientContext &context, const ExecutionRegionKernel &kernel,
-                                                ExecutionRegionCompileTarget target, string status, string reason,
-                                                idx_t input_rows, idx_t output_rows, int64_t runtime_time_us,
-                                                string runtime_result,
+                                                ExecutionRegionCompileTarget target, ExecutionRegionEventStatus status,
+                                                string reason, idx_t input_rows, idx_t output_rows,
+                                                int64_t runtime_time_us, string runtime_result,
                                                 const ExecutionRegionRuntimeMetrics &runtime_metrics) {
 	if (context.IsCompiledExecutionSuppressed() || !ExecutionRegionSettings::TraceRuntime(context)) {
 		return;
@@ -199,12 +383,23 @@ void ExecutionRegionManager::RecordRuntimeEvent(ClientContext &context, const Ex
 	                               input_rows, output_rows, runtime_time_us, std::move(runtime_result));
 	SetRuntimeMetrics(event, runtime_metrics);
 	SetRuntimeRegionExecutionForm(event, kernel);
-	SetRuntimeRegionCandidate(event, kernel);
-	if (!ExecutionRegionSettings::DumpIR(context)) {
-		event.candidate_signature.ir.clear();
+	SetRuntimeRegionPipeline(event, kernel);
+	RecordExecutionRegionTelemetryEvent(context, db, event_log, std::move(event));
+}
+
+void ExecutionRegionManager::RecordVectorizedBaselineRuntimeEvent(ClientContext &context,
+                                                                  const ExecutionRegionKernel &kernel,
+                                                                  ExecutionRegionCompileTarget target, string reason,
+                                                                  int64_t runtime_time_us, string runtime_result) {
+	if (context.IsCompiledExecutionSuppressed() || !ExecutionRegionSettings::TraceRuntime(context)) {
+		return;
 	}
-	auto event_log_size = ExecutionRegionSettings::EventLogSize(db);
-	event_log.Record(event_log_size, ShouldRecordExecutionRegionDecisionCounters(context), std::move(event));
+	auto event = BuildRuntimeEvent(kernel, target, ExecutionRegionExecutionMode::VECTORIZED,
+	                               ExecutionRegionEventStatus::EXECUTED, std::move(reason), 0, 0, runtime_time_us,
+	                               std::move(runtime_result));
+	SetRuntimeRegionExecutionForm(event, kernel);
+	SetRuntimeRegionPipeline(event, kernel);
+	RecordExecutionRegionTelemetryEvent(context, db, event_log, std::move(event));
 }
 
 } // namespace duckdb

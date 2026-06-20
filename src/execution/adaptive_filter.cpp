@@ -1,5 +1,5 @@
 #include "duckdb/planner/expression/bound_conjunction_expression.hpp"
-#include "duckdb/optimizer/expression_heuristics.hpp"
+#include "duckdb/planner/cost_model.hpp"
 #include "duckdb/execution/adaptive_filter.hpp"
 #include "duckdb/logging/logger.hpp"
 #include "duckdb/planner/table_filter.hpp"
@@ -29,7 +29,7 @@ AdaptiveFilter::AdaptiveFilter(const Expression &expr) : observe_interval(10), e
 
 AdaptiveFilter::AdaptiveFilter(const TableFilterSet &table_filters, vector<idx_t> filter_global_pos_p)
     : observe_interval(10), execute_interval(20), warmup(true) {
-	permutation = ExpressionHeuristics::GetInitialOrder(table_filters);
+	permutation = DuckDBCostModel::InitialFilterOrder(table_filters);
 	for (idx_t idx = 1; idx < table_filters.FilterCount(); idx++) {
 		swap_likeliness.push_back(100);
 	}

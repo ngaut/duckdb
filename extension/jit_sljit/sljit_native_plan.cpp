@@ -6,6 +6,10 @@
 #include "duckdb/common/types/cast_helpers.hpp"
 #include "duckdb/common/types/date.hpp"
 #include "duckdb/common/types/decimal.hpp"
+#include "duckdb/common/types/hugeint.hpp"
+
+#include <algorithm>
+
 namespace duckdb {
 
 bool TryReadNativeConstantOrNull(const ExecutionExpressionIR &root, SljitNativeConstantOrNull &expr) {
@@ -15,8 +19,8 @@ bool TryReadNativeConstantOrNull(const ExecutionExpressionIR &root, SljitNativeC
 	}
 
 	auto &constant_node = *root.children[0];
-	expr.constant =
-	    constant_node.constant.IsNull() ? Value(root.return_type) : constant_node.constant.DefaultCastAs(root.return_type);
+	expr.constant = constant_node.constant.IsNull() ? Value(root.return_type)
+	                                                : constant_node.constant.DefaultCastAs(root.return_type);
 	expr.guard_source_indices.clear();
 	expr.guard_has_null_constant = false;
 
@@ -72,6 +76,13 @@ static bool TryGetNativeComparableIntegerKind(const ExecutionExpressionIR &node,
 		return true;
 	}
 	return false;
+}
+
+static bool IsNativeInt128ComparableNode(const ExecutionExpressionIR &node) {
+	if (node.physical_type != PhysicalType::INT128) {
+		return false;
+	}
+	return node.return_type.id() == LogicalTypeId::DECIMAL || node.return_type.id() == LogicalTypeId::HUGEINT;
 }
 
 static bool TryGetNativeSignedIntegerWidth(LogicalTypeId logical_type, PhysicalType physical_type,
@@ -136,7 +147,8 @@ static bool TryGetNativeUnsignedIntegerWidth(LogicalTypeId logical_type, Physica
 	}
 }
 
-static bool TryGetNativeUnsignedIntegerWidth(const ExecutionExpressionIR &node, SljitNativeUnsignedIntegerWidth &width) {
+static bool TryGetNativeUnsignedIntegerWidth(const ExecutionExpressionIR &node,
+                                             SljitNativeUnsignedIntegerWidth &width) {
 	return TryGetNativeUnsignedIntegerWidth(node.return_type.id(), node.physical_type, width);
 }
 
@@ -161,8 +173,8 @@ static bool ReadNativeIntegerValue(const Value &value, SljitNativeIntegerKind ki
 		constant_value = value.GetValue<uint8_t>();
 		return true;
 	case SljitNativeIntegerKind::INT32:
-		constant_value = value.type().id() == LogicalTypeId::DATE ? value.GetValueUnsafe<date_t>().days
-		                                                          : value.GetValue<int32_t>();
+		constant_value =
+		    value.type().id() == LogicalTypeId::DATE ? value.GetValueUnsafe<date_t>().days : value.GetValue<int32_t>();
 		return true;
 	case SljitNativeIntegerKind::INT64:
 		constant_value = value.GetValue<int64_t>();
@@ -195,9 +207,9 @@ static bool TryReadNativeIntegerConstant(const ExecutionExpressionIR &constant, 
 	return ReadNativeIntegerValue(constant.constant, kind, constant_value);
 }
 
-static bool TryReadNativeIntegerReferenceConstant(const ExecutionExpressionIR &candidate, const ExecutionExpressionIR &constant,
-                                                  SljitNativeIntegerKind &kind, idx_t &source_index,
-                                                  int64_t &constant_value) {
+static bool TryReadNativeIntegerReferenceConstant(const ExecutionExpressionIR &candidate,
+                                                  const ExecutionExpressionIR &constant, SljitNativeIntegerKind &kind,
+                                                  idx_t &source_index, int64_t &constant_value) {
 	if (candidate.kind != ExecutionExpressionIRKind::REFERENCE || !TryGetNativeIntegerKind(candidate, kind)) {
 		return false;
 	}
@@ -210,9 +222,9 @@ static bool TryReadNativeIntegerReferenceConstant(const ExecutionExpressionIR &c
 }
 
 static bool TryReadNativeIntegerReferenceMaybeNullConstant(const ExecutionExpressionIR &candidate,
-                                                          const ExecutionExpressionIR &constant,
-                                                          SljitNativeIntegerKind &kind, idx_t &source_index,
-                                                          int64_t &constant_value, bool &constant_is_null) {
+                                                           const ExecutionExpressionIR &constant,
+                                                           SljitNativeIntegerKind &kind, idx_t &source_index,
+                                                           int64_t &constant_value, bool &constant_is_null) {
 	if (candidate.kind != ExecutionExpressionIRKind::REFERENCE || !TryGetNativeIntegerKind(candidate, kind)) {
 		return false;
 	}
@@ -224,9 +236,9 @@ static bool TryReadNativeIntegerReferenceMaybeNullConstant(const ExecutionExpres
 }
 
 static bool TryReadNativeComparableReferenceConstant(const ExecutionExpressionIR &candidate,
-                                                    const ExecutionExpressionIR &constant,
-                                                    SljitNativeIntegerKind &kind, idx_t &source_index,
-                                                    int64_t &constant_value) {
+                                                     const ExecutionExpressionIR &constant,
+                                                     SljitNativeIntegerKind &kind, idx_t &source_index,
+                                                     int64_t &constant_value) {
 	if (candidate.kind != ExecutionExpressionIRKind::REFERENCE || !TryGetNativeComparableIntegerKind(candidate, kind)) {
 		return false;
 	}
@@ -239,9 +251,9 @@ static bool TryReadNativeComparableReferenceConstant(const ExecutionExpressionIR
 }
 
 static bool TryReadNativeComparableReferenceMaybeNullConstant(const ExecutionExpressionIR &candidate,
-                                                             const ExecutionExpressionIR &constant,
-                                                             SljitNativeIntegerKind &kind, idx_t &source_index,
-                                                             int64_t &constant_value, bool &constant_is_null) {
+                                                              const ExecutionExpressionIR &constant,
+                                                              SljitNativeIntegerKind &kind, idx_t &source_index,
+                                                              int64_t &constant_value, bool &constant_is_null) {
 	if (candidate.kind != ExecutionExpressionIRKind::REFERENCE || !TryGetNativeComparableIntegerKind(candidate, kind)) {
 		return false;
 	}
@@ -270,6 +282,15 @@ static bool TryGetNativeIntegerBinaryOp(ExecutionExpressionBinaryOp op, SljitNat
 
 static bool TryGetNativeDoubleBinaryOp(ExecutionExpressionBinaryOp op, SljitNativeDoubleBinaryOp &native_op) {
 	switch (op) {
+	case ExecutionExpressionBinaryOp::ADD:
+		native_op = SljitNativeDoubleBinaryOp::ADD;
+		return true;
+	case ExecutionExpressionBinaryOp::SUBTRACT:
+		native_op = SljitNativeDoubleBinaryOp::SUBTRACT;
+		return true;
+	case ExecutionExpressionBinaryOp::MULTIPLY:
+		native_op = SljitNativeDoubleBinaryOp::MULTIPLY;
+		return true;
 	case ExecutionExpressionBinaryOp::DIVIDE:
 		native_op = SljitNativeDoubleBinaryOp::DIVIDE;
 		return true;
@@ -308,6 +329,12 @@ string NativeIntegerBinaryReferenceReason(SljitNativeIntegerKind kind, SljitNati
 
 string NativeDoubleBinaryReason(SljitNativeDoubleBinaryOp op) {
 	switch (op) {
+	case SljitNativeDoubleBinaryOp::ADD:
+		return "native:double-add-constant";
+	case SljitNativeDoubleBinaryOp::SUBTRACT:
+		return "native:double-subtract-constant";
+	case SljitNativeDoubleBinaryOp::MULTIPLY:
+		return "native:double-multiply-constant";
 	case SljitNativeDoubleBinaryOp::DIVIDE:
 		return "native:double-divide-constant";
 	default:
@@ -317,6 +344,12 @@ string NativeDoubleBinaryReason(SljitNativeDoubleBinaryOp op) {
 
 string NativeDoubleBinaryReferenceReason(SljitNativeDoubleBinaryOp op) {
 	switch (op) {
+	case SljitNativeDoubleBinaryOp::ADD:
+		return "native:double-add-references";
+	case SljitNativeDoubleBinaryOp::SUBTRACT:
+		return "native:double-subtract-references";
+	case SljitNativeDoubleBinaryOp::MULTIPLY:
+		return "native:double-multiply-references";
 	case SljitNativeDoubleBinaryOp::DIVIDE:
 		return "native:double-divide-references";
 	default:
@@ -332,8 +365,8 @@ string NativeIntegerCompareReferenceReason(SljitNativeIntegerKind kind) {
 	return "native:" + NativeIntegerTypeName(kind) + "-compare-references";
 }
 
-string NativeIntegerCastReason(SljitNativeSignedIntegerWidth source_width,
-                                      SljitNativeSignedIntegerWidth target_width, bool try_cast) {
+string NativeIntegerCastReason(SljitNativeSignedIntegerWidth source_width, SljitNativeSignedIntegerWidth target_width,
+                               bool try_cast) {
 	return string("native:") + (try_cast ? "try-" : "") + NativeSignedIntegerTypeName(source_width) + "-to-" +
 	       NativeSignedIntegerTypeName(target_width) + "-cast";
 }
@@ -387,8 +420,8 @@ static bool TryGetNativeIntegerCompareOp(ExecutionExpressionBinaryOp op, SljitNa
 }
 
 bool TryReadNativeIntegerBinaryConstant(const ExecutionExpressionIR &root, SljitNativeIntegerBinaryOp &native_op,
-                                           SljitNativeIntegerKind &kind, idx_t &source_index, int64_t &constant_value,
-                                           bool &constant_on_left) {
+                                        SljitNativeIntegerKind &kind, idx_t &source_index, int64_t &constant_value,
+                                        bool &constant_on_left) {
 	if (root.kind != ExecutionExpressionIRKind::BINARY || !TryGetNativeIntegerKind(root, kind) || !root.left ||
 	    !root.right || !TryGetNativeIntegerBinaryOp(root.binary_op, native_op)) {
 		return false;
@@ -408,8 +441,7 @@ bool TryReadNativeIntegerBinaryConstant(const ExecutionExpressionIR &root, Sljit
 }
 
 bool TryReadNativeIntegerBinaryReferences(const ExecutionExpressionIR &root, SljitNativeIntegerBinaryOp &native_op,
-                                                 SljitNativeIntegerKind &kind, idx_t &left_index,
-                                                 idx_t &right_index) {
+                                          SljitNativeIntegerKind &kind, idx_t &left_index, idx_t &right_index) {
 	if (root.kind != ExecutionExpressionIRKind::BINARY || !TryGetNativeIntegerKind(root, kind) || !root.left ||
 	    !root.right || root.left->kind != ExecutionExpressionIRKind::REFERENCE ||
 	    root.right->kind != ExecutionExpressionIRKind::REFERENCE || root.left->return_type != root.return_type ||
@@ -423,6 +455,49 @@ bool TryReadNativeIntegerBinaryReferences(const ExecutionExpressionIR &root, Slj
 
 static bool IsNativeDoubleNode(const ExecutionExpressionIR &node) {
 	return node.return_type.id() == LogicalTypeId::DOUBLE && node.physical_type == PhysicalType::DOUBLE;
+}
+
+static double NativeDecimalScaleFactor(const LogicalType &type) {
+	D_ASSERT(type.id() == LogicalTypeId::DECIMAL);
+	auto scale = DecimalType::GetScale(type);
+	D_ASSERT(scale < Hugeint::CACHED_POWERS_OF_TEN);
+	return Hugeint::Cast<double>(Hugeint::POWERS_OF_TEN[scale]);
+}
+
+static bool TryReadNativeDoubleReference(const ExecutionExpressionIR &node, SljitNativeDoubleSourceKind &source_kind,
+                                         idx_t &source_index, double &source_scale) {
+	source_scale = 1;
+	if (node.kind == ExecutionExpressionIRKind::REFERENCE && IsNativeDoubleNode(node)) {
+		source_kind = SljitNativeDoubleSourceKind::DOUBLE;
+		source_index = node.ref_index;
+		return true;
+	}
+	if (node.kind != ExecutionExpressionIRKind::CAST || !IsNativeDoubleNode(node) || !node.left ||
+	    node.left->kind != ExecutionExpressionIRKind::REFERENCE) {
+		return false;
+	}
+
+	auto &source = *node.left;
+	source_index = source.ref_index;
+	if (source.return_type.id() == LogicalTypeId::BIGINT && source.physical_type == PhysicalType::INT64) {
+		source_kind = SljitNativeDoubleSourceKind::INT64_TO_DOUBLE;
+		return true;
+	}
+	if (source.return_type.id() == LogicalTypeId::HUGEINT && source.physical_type == PhysicalType::INT128) {
+		source_kind = SljitNativeDoubleSourceKind::INT128_TO_DOUBLE;
+		return true;
+	}
+	if (source.return_type.id() == LogicalTypeId::DECIMAL && source.physical_type == PhysicalType::INT64) {
+		source_kind = SljitNativeDoubleSourceKind::DECIMAL64_TO_DOUBLE;
+		source_scale = NativeDecimalScaleFactor(source.return_type);
+		return true;
+	}
+	if (source.return_type.id() == LogicalTypeId::DECIMAL && source.physical_type == PhysicalType::INT128) {
+		source_kind = SljitNativeDoubleSourceKind::DECIMAL128_TO_DOUBLE;
+		source_scale = NativeDecimalScaleFactor(source.return_type);
+		return true;
+	}
+	return false;
 }
 
 static bool TryReadNativeDoubleConstant(const ExecutionExpressionIR &constant, double &constant_value,
@@ -440,30 +515,33 @@ static bool TryReadNativeDoubleConstant(const ExecutionExpressionIR &constant, d
 }
 
 static bool TryReadNativeDoubleReferenceConstant(const ExecutionExpressionIR &candidate,
-                                                 const ExecutionExpressionIR &constant, idx_t &source_index,
-                                                 double &constant_value) {
-	if (candidate.kind != ExecutionExpressionIRKind::REFERENCE || !IsNativeDoubleNode(candidate)) {
+                                                 const ExecutionExpressionIR &constant,
+                                                 SljitNativeDoubleSourceKind &source_kind, idx_t &source_index,
+                                                 double &source_scale, double &constant_value) {
+	if (!TryReadNativeDoubleReference(candidate, source_kind, source_index, source_scale)) {
 		return false;
 	}
 	bool constant_is_null;
 	if (!TryReadNativeDoubleConstant(constant, constant_value, constant_is_null) || constant_is_null) {
 		return false;
 	}
-	source_index = candidate.ref_index;
 	return true;
 }
 
 bool TryReadNativeDoubleBinaryConstant(const ExecutionExpressionIR &root, SljitNativeDoubleBinaryOp &native_op,
-                                       idx_t &source_index, double &constant_value, bool &constant_on_left) {
+                                       SljitNativeDoubleSourceKind &source_kind, idx_t &source_index,
+                                       double &source_scale, double &constant_value, bool &constant_on_left) {
 	if (root.kind != ExecutionExpressionIRKind::BINARY || !IsNativeDoubleNode(root) || !root.left || !root.right ||
 	    !TryGetNativeDoubleBinaryOp(root.binary_op, native_op)) {
 		return false;
 	}
-	if (TryReadNativeDoubleReferenceConstant(*root.left, *root.right, source_index, constant_value)) {
+	if (TryReadNativeDoubleReferenceConstant(*root.left, *root.right, source_kind, source_index, source_scale,
+	                                         constant_value)) {
 		constant_on_left = false;
 		return true;
 	}
-	if (!TryReadNativeDoubleReferenceConstant(*root.right, *root.left, source_index, constant_value)) {
+	if (!TryReadNativeDoubleReferenceConstant(*root.right, *root.left, source_kind, source_index, source_scale,
+	                                          constant_value)) {
 		return false;
 	}
 	constant_on_left = true;
@@ -471,15 +549,50 @@ bool TryReadNativeDoubleBinaryConstant(const ExecutionExpressionIR &root, SljitN
 }
 
 bool TryReadNativeDoubleBinaryReferences(const ExecutionExpressionIR &root, SljitNativeDoubleBinaryOp &native_op,
-                                         idx_t &left_index, idx_t &right_index) {
+                                         SljitNativeDoubleSourceKind &left_kind, idx_t &left_index, double &left_scale,
+                                         SljitNativeDoubleSourceKind &right_kind, idx_t &right_index,
+                                         double &right_scale) {
 	if (root.kind != ExecutionExpressionIRKind::BINARY || !IsNativeDoubleNode(root) || !root.left || !root.right ||
-	    root.left->kind != ExecutionExpressionIRKind::REFERENCE || root.right->kind != ExecutionExpressionIRKind::REFERENCE ||
-	    !IsNativeDoubleNode(*root.left) || !IsNativeDoubleNode(*root.right) ||
-	    !TryGetNativeDoubleBinaryOp(root.binary_op, native_op)) {
+	    !TryGetNativeDoubleBinaryOp(root.binary_op, native_op) ||
+	    !TryReadNativeDoubleReference(*root.left, left_kind, left_index, left_scale) ||
+	    !TryReadNativeDoubleReference(*root.right, right_kind, right_index, right_scale)) {
 		return false;
 	}
-	left_index = root.left->ref_index;
-	right_index = root.right->ref_index;
+	return true;
+}
+
+static bool TryReadNativeDoubleCompareConstant(const ExecutionExpressionIR &root,
+                                               SljitNativeIntegerCompareOp &compare_op,
+                                               SljitNativeDoubleSourceKind &source_kind, idx_t &source_index,
+                                               double &source_scale, double &constant_value, bool &constant_on_left) {
+	if (root.kind != ExecutionExpressionIRKind::BINARY || root.return_type.id() != LogicalTypeId::BOOLEAN ||
+	    !root.left || !root.right || !TryGetNativeIntegerCompareOp(root.binary_op, compare_op)) {
+		return false;
+	}
+	if (TryReadNativeDoubleReferenceConstant(*root.left, *root.right, source_kind, source_index, source_scale,
+	                                         constant_value)) {
+		constant_on_left = false;
+		return true;
+	}
+	if (!TryReadNativeDoubleReferenceConstant(*root.right, *root.left, source_kind, source_index, source_scale,
+	                                          constant_value)) {
+		return false;
+	}
+	constant_on_left = true;
+	return true;
+}
+
+static bool TryReadNativeDoubleCompareReferences(const ExecutionExpressionIR &root,
+                                                 SljitNativeIntegerCompareOp &compare_op,
+                                                 SljitNativeDoubleSourceKind &left_kind, idx_t &left_index,
+                                                 double &left_scale, SljitNativeDoubleSourceKind &right_kind,
+                                                 idx_t &right_index, double &right_scale) {
+	if (root.kind != ExecutionExpressionIRKind::BINARY || root.return_type.id() != LogicalTypeId::BOOLEAN ||
+	    !root.left || !root.right || !TryGetNativeIntegerCompareOp(root.binary_op, compare_op) ||
+	    !TryReadNativeDoubleReference(*root.left, left_kind, left_index, left_scale) ||
+	    !TryReadNativeDoubleReference(*root.right, right_kind, right_index, right_scale)) {
+		return false;
+	}
 	return true;
 }
 
@@ -496,8 +609,8 @@ static bool Decimal64BinaryHasRawSemantics(const ExecutionExpressionIR &root) {
 		return DecimalType::GetScale(root.return_type) == DecimalType::GetScale(root.left->return_type) &&
 		       DecimalType::GetScale(root.return_type) == DecimalType::GetScale(root.right->return_type);
 	case ExecutionExpressionBinaryOp::MULTIPLY:
-		return DecimalType::GetScale(root.return_type) == DecimalType::GetScale(root.left->return_type) +
-		                                                   DecimalType::GetScale(root.right->return_type);
+		return DecimalType::GetScale(root.return_type) ==
+		       DecimalType::GetScale(root.left->return_type) + DecimalType::GetScale(root.right->return_type);
 	default:
 		return false;
 	}
@@ -520,10 +633,10 @@ bool TryReadNativeDecimal64BinaryReferences(const ExecutionExpressionIR &root, S
                                             idx_t &left_index, idx_t &right_index, int64_t &result_min,
                                             int64_t &result_max) {
 	if (root.kind != ExecutionExpressionIRKind::BINARY || !IsNativeDecimal64Node(root) || !root.left || !root.right ||
-	    root.left->kind != ExecutionExpressionIRKind::REFERENCE || root.right->kind != ExecutionExpressionIRKind::REFERENCE ||
-	    !IsNativeDecimal64Node(*root.left) || !IsNativeDecimal64Node(*root.right) ||
-	    !TryGetNativeIntegerBinaryOp(root.binary_op, native_op) || !Decimal64BinaryHasRawSemantics(root) ||
-	    !TryGetDecimal64Range(root.return_type, result_min, result_max)) {
+	    root.left->kind != ExecutionExpressionIRKind::REFERENCE ||
+	    root.right->kind != ExecutionExpressionIRKind::REFERENCE || !IsNativeDecimal64Node(*root.left) ||
+	    !IsNativeDecimal64Node(*root.right) || !TryGetNativeIntegerBinaryOp(root.binary_op, native_op) ||
+	    !Decimal64BinaryHasRawSemantics(root) || !TryGetDecimal64Range(root.return_type, result_min, result_max)) {
 		return false;
 	}
 	left_index = root.left->ref_index;
@@ -539,8 +652,7 @@ static bool TryReadNativeDecimal64ReferenceConstant(const ExecutionExpressionIR 
 		return false;
 	}
 	bool constant_is_null;
-	if (!TryReadNativeIntegerConstant(constant, SljitNativeIntegerKind::DECIMAL64, constant_value,
-	                                  constant_is_null) ||
+	if (!TryReadNativeIntegerConstant(constant, SljitNativeIntegerKind::DECIMAL64, constant_value, constant_is_null) ||
 	    constant_is_null) {
 		return false;
 	}
@@ -568,10 +680,10 @@ bool TryReadNativeDecimal64BinaryConstant(const ExecutionExpressionIR &root, Slj
 }
 
 bool TryReadNativeIntegerCompareConstant(const ExecutionExpressionIR &root, SljitNativeIntegerCompareOp &compare_op,
-                                            SljitNativeIntegerKind &kind, idx_t &source_index, int64_t &constant_value,
-                                            bool &constant_on_left) {
-	if (root.kind != ExecutionExpressionIRKind::BINARY || root.return_type.id() != LogicalTypeId::BOOLEAN || !root.left ||
-	    !root.right || !TryGetNativeIntegerCompareOp(root.binary_op, compare_op)) {
+                                         SljitNativeIntegerKind &kind, idx_t &source_index, int64_t &constant_value,
+                                         bool &constant_on_left) {
+	if (root.kind != ExecutionExpressionIRKind::BINARY || root.return_type.id() != LogicalTypeId::BOOLEAN ||
+	    !root.left || !root.right || !TryGetNativeIntegerCompareOp(root.binary_op, compare_op)) {
 		return false;
 	}
 	SljitNativeIntegerKind candidate_kind;
@@ -582,7 +694,7 @@ bool TryReadNativeIntegerCompareConstant(const ExecutionExpressionIR &root, Slji
 		return true;
 	}
 	if (!TryReadNativeComparableReferenceConstant(*root.right, *root.left, candidate_kind, source_index,
-	                                             constant_value)) {
+	                                              constant_value)) {
 		return false;
 	}
 	kind = candidate_kind;
@@ -591,10 +703,9 @@ bool TryReadNativeIntegerCompareConstant(const ExecutionExpressionIR &root, Slji
 }
 
 bool TryReadNativeIntegerCompareReferences(const ExecutionExpressionIR &root, SljitNativeIntegerCompareOp &compare_op,
-                                                  SljitNativeIntegerKind &kind, idx_t &left_index,
-                                                  idx_t &right_index) {
-	if (root.kind != ExecutionExpressionIRKind::BINARY || root.return_type.id() != LogicalTypeId::BOOLEAN || !root.left ||
-	    !root.right || root.left->kind != ExecutionExpressionIRKind::REFERENCE ||
+                                           SljitNativeIntegerKind &kind, idx_t &left_index, idx_t &right_index) {
+	if (root.kind != ExecutionExpressionIRKind::BINARY || root.return_type.id() != LogicalTypeId::BOOLEAN ||
+	    !root.left || !root.right || root.left->kind != ExecutionExpressionIRKind::REFERENCE ||
 	    root.right->kind != ExecutionExpressionIRKind::REFERENCE || root.left->return_type != root.right->return_type ||
 	    !TryGetNativeComparableIntegerKind(*root.left, kind) ||
 	    !TryGetNativeIntegerCompareOp(root.binary_op, compare_op)) {
@@ -605,9 +716,78 @@ bool TryReadNativeIntegerCompareReferences(const ExecutionExpressionIR &root, Sl
 	return true;
 }
 
+static bool TryReadNativeInt128Value(const ExecutionExpressionIR &constant, const LogicalType &source_type,
+                                     uint64_t &lower, int64_t &upper, bool &constant_is_null) {
+	if (constant.kind != ExecutionExpressionIRKind::CONSTANT || !IsNativeInt128ComparableNode(constant) ||
+	    constant.return_type != source_type) {
+		return false;
+	}
+	constant_is_null = constant.constant.IsNull();
+	if (constant_is_null) {
+		lower = 0;
+		upper = 0;
+		return true;
+	}
+	if (constant.constant.type().InternalType() != PhysicalType::INT128) {
+		return false;
+	}
+	auto value = constant.constant.GetValueUnsafe<hugeint_t>();
+	lower = value.lower;
+	upper = value.upper;
+	return true;
+}
+
+static bool TryReadNativeInt128ReferenceConstant(const ExecutionExpressionIR &candidate,
+                                                 const ExecutionExpressionIR &constant, idx_t &source_index,
+                                                 uint64_t &lower, int64_t &upper) {
+	if (candidate.kind != ExecutionExpressionIRKind::REFERENCE || !IsNativeInt128ComparableNode(candidate)) {
+		return false;
+	}
+	bool constant_is_null;
+	if (!TryReadNativeInt128Value(constant, candidate.return_type, lower, upper, constant_is_null) ||
+	    constant_is_null) {
+		return false;
+	}
+	source_index = candidate.ref_index;
+	return true;
+}
+
+static bool TryReadNativeInt128CompareReferences(const ExecutionExpressionIR &root,
+                                                 SljitNativeIntegerCompareOp &compare_op, idx_t &left_index,
+                                                 idx_t &right_index) {
+	if (root.kind != ExecutionExpressionIRKind::BINARY || root.return_type.id() != LogicalTypeId::BOOLEAN ||
+	    !root.left || !root.right || root.left->kind != ExecutionExpressionIRKind::REFERENCE ||
+	    root.right->kind != ExecutionExpressionIRKind::REFERENCE || root.left->return_type != root.right->return_type ||
+	    !IsNativeInt128ComparableNode(*root.left) || !IsNativeInt128ComparableNode(*root.right) ||
+	    !TryGetNativeIntegerCompareOp(root.binary_op, compare_op)) {
+		return false;
+	}
+	left_index = root.left->ref_index;
+	right_index = root.right->ref_index;
+	return true;
+}
+
+static bool TryReadNativeInt128CompareConstant(const ExecutionExpressionIR &root,
+                                               SljitNativeIntegerCompareOp &compare_op, idx_t &source_index,
+                                               uint64_t &lower, int64_t &upper, bool &constant_on_left) {
+	if (root.kind != ExecutionExpressionIRKind::BINARY || root.return_type.id() != LogicalTypeId::BOOLEAN ||
+	    !root.left || !root.right || !TryGetNativeIntegerCompareOp(root.binary_op, compare_op)) {
+		return false;
+	}
+	if (TryReadNativeInt128ReferenceConstant(*root.left, *root.right, source_index, lower, upper)) {
+		constant_on_left = false;
+		return true;
+	}
+	if (!TryReadNativeInt128ReferenceConstant(*root.right, *root.left, source_index, lower, upper)) {
+		return false;
+	}
+	constant_on_left = true;
+	return true;
+}
+
 static bool TryReadNativeIntegerCompareNullConstant(const ExecutionExpressionIR &root) {
-	if (root.kind != ExecutionExpressionIRKind::BINARY || root.return_type.id() != LogicalTypeId::BOOLEAN || !root.left ||
-	    !root.right) {
+	if (root.kind != ExecutionExpressionIRKind::BINARY || root.return_type.id() != LogicalTypeId::BOOLEAN ||
+	    !root.left || !root.right) {
 		return false;
 	}
 	SljitNativeIntegerCompareOp compare_op;
@@ -615,21 +795,35 @@ static bool TryReadNativeIntegerCompareNullConstant(const ExecutionExpressionIR 
 		return false;
 	}
 	auto try_read_null_compare = [](const ExecutionExpressionIR &candidate, const ExecutionExpressionIR &constant) {
-		SljitNativeIntegerKind kind;
 		if (candidate.kind != ExecutionExpressionIRKind::REFERENCE ||
-		    !TryGetNativeComparableIntegerKind(candidate, kind)) {
+		    constant.kind != ExecutionExpressionIRKind::CONSTANT || !constant.constant.IsNull()) {
 			return false;
 		}
-		int64_t constant_value;
-		bool constant_is_null;
-		return TryReadNativeIntegerConstant(constant, kind, constant_value, constant_is_null) && constant_is_null;
+		SljitNativeIntegerKind kind;
+		if (TryGetNativeComparableIntegerKind(candidate, kind)) {
+			int64_t constant_value;
+			bool constant_is_null;
+			return TryReadNativeIntegerConstant(constant, kind, constant_value, constant_is_null) && constant_is_null;
+		}
+		if (IsNativeInt128ComparableNode(candidate) && IsNativeInt128ComparableNode(constant) &&
+		    candidate.return_type == constant.return_type) {
+			return true;
+		}
+		return false;
 	};
 	return try_read_null_compare(*root.left, *root.right) || try_read_null_compare(*root.right, *root.left);
 }
 
+static bool IsNativeCompareRoot(const ExecutionExpressionIR &root) {
+	SljitNativeIntegerCompareOp compare_op;
+	return root.kind == ExecutionExpressionIRKind::BINARY && root.return_type.id() == LogicalTypeId::BOOLEAN &&
+	       TryGetNativeIntegerCompareOp(root.binary_op, compare_op);
+}
+
 bool TryReadNativeIntegerCast(const ExecutionExpressionIR &root, SljitNativeSignedIntegerWidth &source_width,
                               SljitNativeSignedIntegerWidth &target_width, idx_t &source_index, bool &try_cast) {
-	if (root.kind != ExecutionExpressionIRKind::CAST || !root.left || root.left->kind != ExecutionExpressionIRKind::REFERENCE ||
+	if (root.kind != ExecutionExpressionIRKind::CAST || !root.left ||
+	    root.left->kind != ExecutionExpressionIRKind::REFERENCE ||
 	    !TryGetNativeSignedIntegerWidth(*root.left, source_width) ||
 	    !TryGetNativeSignedIntegerWidth(root, target_width)) {
 		return false;
@@ -639,10 +833,12 @@ bool TryReadNativeIntegerCast(const ExecutionExpressionIR &root, SljitNativeSign
 	return true;
 }
 
-bool TryReadNativeSignedToUnsignedIntegerCast(const ExecutionExpressionIR &root, SljitNativeSignedIntegerWidth &source_width,
+bool TryReadNativeSignedToUnsignedIntegerCast(const ExecutionExpressionIR &root,
+                                              SljitNativeSignedIntegerWidth &source_width,
                                               SljitNativeUnsignedIntegerWidth &target_width, idx_t &source_index,
                                               bool &try_cast) {
-	if (root.kind != ExecutionExpressionIRKind::CAST || !root.left || root.left->kind != ExecutionExpressionIRKind::REFERENCE ||
+	if (root.kind != ExecutionExpressionIRKind::CAST || !root.left ||
+	    root.left->kind != ExecutionExpressionIRKind::REFERENCE ||
 	    !TryGetNativeSignedIntegerWidth(*root.left, source_width) ||
 	    !TryGetNativeUnsignedIntegerWidth(root, target_width)) {
 		return false;
@@ -684,9 +880,8 @@ bool TryReadNativeIntegralCompress(const ExecutionExpressionIR &root, SljitNativ
                                    SljitNativeUnsignedIntegerWidth &target_width, idx_t &source_index,
                                    int64_t &minimum) {
 	if (root.kind != ExecutionExpressionIRKind::INTRINSIC ||
-	    root.intrinsic != ExecutionExpressionIntrinsicKind::INTEGRAL_COMPRESS ||
-	    root.children.size() != 2 || !root.children[0] || !root.children[1] ||
-	    root.children[0]->kind != ExecutionExpressionIRKind::REFERENCE ||
+	    root.intrinsic != ExecutionExpressionIntrinsicKind::INTEGRAL_COMPRESS || root.children.size() != 2 ||
+	    !root.children[0] || !root.children[1] || root.children[0]->kind != ExecutionExpressionIRKind::REFERENCE ||
 	    !TryGetNativeSignedIntegerWidth(*root.children[0], source_width) ||
 	    !TryGetNativeUnsignedIntegerWidth(root, target_width)) {
 		return false;
@@ -704,9 +899,8 @@ bool TryReadNativeIntegralDecompress(const ExecutionExpressionIR &root, SljitNat
                                      SljitNativeSignedIntegerWidth &target_width, idx_t &source_index,
                                      int64_t &minimum) {
 	if (root.kind != ExecutionExpressionIRKind::INTRINSIC ||
-	    root.intrinsic != ExecutionExpressionIntrinsicKind::INTEGRAL_DECOMPRESS ||
-	    root.children.size() != 2 || !root.children[0] || !root.children[1] ||
-	    root.children[0]->kind != ExecutionExpressionIRKind::REFERENCE ||
+	    root.intrinsic != ExecutionExpressionIntrinsicKind::INTEGRAL_DECOMPRESS || root.children.size() != 2 ||
+	    !root.children[0] || !root.children[1] || root.children[0]->kind != ExecutionExpressionIRKind::REFERENCE ||
 	    !TryGetNativeUnsignedIntegerWidth(*root.children[0], source_width) ||
 	    !TryGetNativeSignedIntegerWidth(root, target_width)) {
 		return false;
@@ -721,12 +915,12 @@ bool TryReadNativeIntegralDecompress(const ExecutionExpressionIR &root, SljitNat
 }
 
 bool TryReadNativeIntegerCoalesce(const ExecutionExpressionIR &root, SljitNativeSignedIntegerWidth &width,
-                                  idx_t &source_index, SljitNativeCoalesceRhsKind &rhs_kind,
-                                  idx_t &right_source_index, int64_t &constant_value, bool &constant_is_null) {
+                                  idx_t &source_index, SljitNativeCoalesceRhsKind &rhs_kind, idx_t &right_source_index,
+                                  int64_t &constant_value, bool &constant_is_null) {
 	if (root.kind != ExecutionExpressionIRKind::COALESCE || root.children.size() != 2 ||
 	    root.children[0]->kind != ExecutionExpressionIRKind::REFERENCE ||
-	    !TryGetNativeSignedIntegerWidth(root, width) ||
-	    root.children[0]->return_type != root.return_type || root.children[1]->return_type != root.return_type) {
+	    !TryGetNativeSignedIntegerWidth(root, width) || root.children[0]->return_type != root.return_type ||
+	    root.children[1]->return_type != root.return_type) {
 		return false;
 	}
 	source_index = root.children[0]->ref_index;
@@ -776,8 +970,8 @@ bool TryReadNativeIntegerInList(const ExecutionExpressionIR &root, SljitNativeIn
 	}
 
 	auto candidate = &root;
-	if (root.kind == ExecutionExpressionIRKind::UNARY && root.unary_op == ExecutionExpressionUnaryOp::NOT && root.left &&
-	    root.left->kind == ExecutionExpressionIRKind::CONJUNCTION &&
+	if (root.kind == ExecutionExpressionIRKind::UNARY && root.unary_op == ExecutionExpressionUnaryOp::NOT &&
+	    root.left && root.left->kind == ExecutionExpressionIRKind::CONJUNCTION &&
 	    root.left->conjunction_op == ExecutionExpressionConjunctionOp::OR) {
 		not_in = true;
 		candidate = root.left.get();
@@ -790,8 +984,8 @@ bool TryReadNativeIntegerInList(const ExecutionExpressionIR &root, SljitNativeIn
 	bool initialized = false;
 	for (auto &child_ptr : candidate->children) {
 		auto &child = *child_ptr;
-		if (child.kind != ExecutionExpressionIRKind::BINARY || child.binary_op != ExecutionExpressionBinaryOp::COMPARE_EQUAL ||
-		    !child.left || !child.right) {
+		if (child.kind != ExecutionExpressionIRKind::BINARY ||
+		    child.binary_op != ExecutionExpressionBinaryOp::COMPARE_EQUAL || !child.left || !child.right) {
 			return false;
 		}
 		SljitNativeIntegerKind child_kind;
@@ -858,8 +1052,9 @@ bool TryReadNativeStringPrefixConstant(const ExecutionExpressionIR &root, idx_t 
 	return true;
 }
 
-static bool TryReadNativeStringMatchConstant(const ExecutionExpressionIR &root, ExecutionExpressionIntrinsicKind intrinsic,
-                                             idx_t &source_index, string &constant) {
+static bool TryReadNativeStringMatchConstant(const ExecutionExpressionIR &root,
+                                             ExecutionExpressionIntrinsicKind intrinsic, idx_t &source_index,
+                                             string &constant) {
 	if (root.kind != ExecutionExpressionIRKind::INTRINSIC || root.intrinsic != intrinsic ||
 	    root.return_type.id() != LogicalTypeId::BOOLEAN || root.children.size() != 2 || !root.children[0] ||
 	    !root.children[1] || root.children[0]->kind != ExecutionExpressionIRKind::REFERENCE ||
@@ -875,8 +1070,7 @@ static bool TryReadNativeStringMatchConstant(const ExecutionExpressionIR &root, 
 
 static bool IsNativeAsciiString(const string &value);
 
-static bool TryReadNativeStringEqualConstant(const ExecutionExpressionIR &root, idx_t &source_index,
-                                             string &constant) {
+static bool TryReadNativeStringEqualConstant(const ExecutionExpressionIR &root, idx_t &source_index, string &constant) {
 	if (root.kind != ExecutionExpressionIRKind::BINARY ||
 	    root.binary_op != ExecutionExpressionBinaryOp::COMPARE_EQUAL ||
 	    root.return_type.id() != LogicalTypeId::BOOLEAN || !root.left || !root.right) {
@@ -906,7 +1100,8 @@ static bool TryReadNativeStringInListConstant(const ExecutionExpressionIR &root,
 	list_has_null = false;
 	not_in = false;
 	if (root.kind != ExecutionExpressionIRKind::IN_LIST || root.return_type.id() != LogicalTypeId::BOOLEAN ||
-	    root.children.size() < 2 || !root.children[0] || root.children[0]->kind != ExecutionExpressionIRKind::REFERENCE ||
+	    root.children.size() < 2 || !root.children[0] ||
+	    root.children[0]->kind != ExecutionExpressionIRKind::REFERENCE ||
 	    root.children[0]->return_type.id() != LogicalTypeId::VARCHAR) {
 		return false;
 	}
@@ -1003,8 +1198,9 @@ static bool TryReadNativeSubstringReference(const ExecutionExpressionIR &substri
 	return true;
 }
 
-static bool TryReadNativeSubstringConstant(const ExecutionExpressionIR &substring, const ExecutionExpressionIR &constant,
-                                           idx_t &source_index, idx_t &substring_length, string &value) {
+static bool TryReadNativeSubstringConstant(const ExecutionExpressionIR &substring,
+                                           const ExecutionExpressionIR &constant, idx_t &source_index,
+                                           idx_t &substring_length, string &value) {
 	if (!TryReadNativeSubstringReference(substring, source_index, substring_length) ||
 	    constant.kind != ExecutionExpressionIRKind::CONSTANT || constant.return_type.id() != LogicalTypeId::VARCHAR ||
 	    constant.constant.IsNull()) {
@@ -1092,8 +1288,8 @@ static bool TryReadNativePredicateNullGuard(const ExecutionExpressionIR &node, v
 }
 
 bool TryReadNativeNullCheck(const ExecutionExpressionIR &root, SljitNativeNullCheckOp &op, idx_t &source_index) {
-	if (root.kind != ExecutionExpressionIRKind::UNARY || root.return_type.id() != LogicalTypeId::BOOLEAN || !root.left ||
-	    root.left->kind != ExecutionExpressionIRKind::REFERENCE) {
+	if (root.kind != ExecutionExpressionIRKind::UNARY || root.return_type.id() != LogicalTypeId::BOOLEAN ||
+	    !root.left || root.left->kind != ExecutionExpressionIRKind::REFERENCE) {
 		return false;
 	}
 	switch (root.unary_op) {
@@ -1132,6 +1328,9 @@ bool ShouldTryNativePredicateRoot(const ExecutionExpressionIR &root) {
 	if (root.kind == ExecutionExpressionIRKind::IN_LIST) {
 		return true;
 	}
+	if (IsNativeCompareRoot(root)) {
+		return true;
+	}
 	if (root.kind == ExecutionExpressionIRKind::INTRINSIC) {
 		switch (root.intrinsic) {
 		case ExecutionExpressionIntrinsicKind::STRING_PREFIX:
@@ -1146,7 +1345,72 @@ bool ShouldTryNativePredicateRoot(const ExecutionExpressionIR &root) {
 	return false;
 }
 
-bool TryBuildNativePredicate(const ExecutionExpressionIR &root, unique_ptr<SljitNativePredicate> &predicate) {
+static void AppendSljitNativePredicateSourceIndex(vector<idx_t> &source_indices, idx_t source_index) {
+	source_indices.push_back(source_index);
+}
+
+static void CollectSljitNativePredicateSourceIndices(const SljitNativePredicate &predicate,
+                                                     vector<idx_t> &source_indices) {
+	switch (predicate.kind) {
+	case SljitNativePredicateKind::CONSTANT:
+		return;
+	case SljitNativePredicateKind::REFERENCE:
+	case SljitNativePredicateKind::INTEGER_COMPARE_CONSTANT:
+	case SljitNativePredicateKind::DOUBLE_COMPARE_CONSTANT:
+	case SljitNativePredicateKind::INT128_COMPARE_CONSTANT:
+	case SljitNativePredicateKind::INTEGER_IN_LIST:
+	case SljitNativePredicateKind::INTEGER_BETWEEN:
+	case SljitNativePredicateKind::STRING_EQUAL_CONSTANT:
+	case SljitNativePredicateKind::STRING_IN_LIST_CONSTANT:
+	case SljitNativePredicateKind::STRING_PREFIX_CONSTANT:
+	case SljitNativePredicateKind::STRING_SUFFIX_CONSTANT:
+	case SljitNativePredicateKind::STRING_CONTAINS_CONSTANT:
+	case SljitNativePredicateKind::STRING_LIKE_CONSTANT:
+	case SljitNativePredicateKind::STRING_SUBSTRING_IN_LIST_CONSTANT:
+	case SljitNativePredicateKind::NULL_CHECK:
+		AppendSljitNativePredicateSourceIndex(source_indices, predicate.source_index);
+		return;
+	case SljitNativePredicateKind::INTEGER_COMPARE_REFERENCES:
+	case SljitNativePredicateKind::DOUBLE_COMPARE_REFERENCES:
+	case SljitNativePredicateKind::INT128_COMPARE_REFERENCES:
+		AppendSljitNativePredicateSourceIndex(source_indices, predicate.source_index);
+		AppendSljitNativePredicateSourceIndex(source_indices, predicate.right_source_index);
+		return;
+	case SljitNativePredicateKind::NOT:
+		if (predicate.child) {
+			CollectSljitNativePredicateSourceIndices(*predicate.child, source_indices);
+		}
+		return;
+	case SljitNativePredicateKind::CONJUNCTION:
+		for (auto &child : predicate.children) {
+			if (child) {
+				CollectSljitNativePredicateSourceIndices(*child, source_indices);
+			}
+		}
+		return;
+	case SljitNativePredicateKind::CONSTANT_OR_NULL:
+		for (auto source_index : predicate.guard_source_indices) {
+			AppendSljitNativePredicateSourceIndex(source_indices, source_index);
+		}
+		if (predicate.child) {
+			CollectSljitNativePredicateSourceIndices(*predicate.child, source_indices);
+		}
+		return;
+	default:
+		throw InternalException("Unknown SLJIT native predicate kind");
+	}
+}
+
+void FinalizeSljitNativePredicateSourceIndices(SljitNativePredicate &predicate) {
+	vector<idx_t> source_indices;
+	CollectSljitNativePredicateSourceIndices(predicate, source_indices);
+	std::sort(source_indices.begin(), source_indices.end());
+	source_indices.erase(std::unique(source_indices.begin(), source_indices.end()), source_indices.end());
+	predicate.source_indices = std::move(source_indices);
+}
+
+static bool TryBuildNativePredicateInternal(const ExecutionExpressionIR &root,
+                                            unique_ptr<SljitNativePredicate> &predicate) {
 	if (root.return_type.id() != LogicalTypeId::BOOLEAN) {
 		return false;
 	}
@@ -1176,7 +1440,8 @@ bool TryBuildNativePredicate(const ExecutionExpressionIR &root, unique_ptr<Sljit
 		return true;
 	}
 
-	if (root.kind == ExecutionExpressionIRKind::UNARY && root.unary_op == ExecutionExpressionUnaryOp::NOT && root.left) {
+	if (root.kind == ExecutionExpressionIRKind::UNARY && root.unary_op == ExecutionExpressionUnaryOp::NOT &&
+	    root.left) {
 		unique_ptr<SljitNativePredicate> child;
 		if (!TryBuildNativePredicate(*root.left, child)) {
 			return false;
@@ -1206,7 +1471,7 @@ bool TryBuildNativePredicate(const ExecutionExpressionIR &root, unique_ptr<Sljit
 		result->child = std::move(child);
 		for (idx_t child_idx = 1; child_idx < root.children.size(); child_idx++) {
 			if (!TryReadNativePredicateNullGuard(*root.children[child_idx], result->guard_source_indices,
-			                                    result->guard_has_null_constant)) {
+			                                     result->guard_has_null_constant)) {
 				return false;
 			}
 		}
@@ -1258,12 +1523,40 @@ bool TryBuildNativePredicate(const ExecutionExpressionIR &root, unique_ptr<Sljit
 	SljitNativeIntegerKind kind;
 	SljitNativeIntegerCompareOp compare_op;
 	idx_t right_source_index;
+	SljitNativeDoubleSourceKind double_source_kind;
+	SljitNativeDoubleSourceKind double_right_source_kind;
+	double double_source_scale;
+	double double_right_source_scale;
+	double double_constant;
+	uint64_t int128_lower;
+	int64_t int128_upper;
 	if (TryReadNativeIntegerCompareReferences(root, compare_op, kind, source_index, right_source_index)) {
 		result->kind = SljitNativePredicateKind::INTEGER_COMPARE_REFERENCES;
 		result->integer_kind = kind;
 		result->compare_op = compare_op;
 		result->source_index = source_index;
 		result->right_source_index = right_source_index;
+		predicate = std::move(result);
+		return true;
+	}
+	if (TryReadNativeInt128CompareReferences(root, compare_op, source_index, right_source_index)) {
+		result->kind = SljitNativePredicateKind::INT128_COMPARE_REFERENCES;
+		result->compare_op = compare_op;
+		result->source_index = source_index;
+		result->right_source_index = right_source_index;
+		predicate = std::move(result);
+		return true;
+	}
+	if (TryReadNativeDoubleCompareReferences(root, compare_op, double_source_kind, source_index, double_source_scale,
+	                                         double_right_source_kind, right_source_index, double_right_source_scale)) {
+		result->kind = SljitNativePredicateKind::DOUBLE_COMPARE_REFERENCES;
+		result->compare_op = compare_op;
+		result->source_index = source_index;
+		result->right_source_index = right_source_index;
+		result->double_source_kind = double_source_kind;
+		result->double_right_source_kind = double_right_source_kind;
+		result->double_source_scale = double_source_scale;
+		result->double_right_source_scale = double_right_source_scale;
 		predicate = std::move(result);
 		return true;
 	}
@@ -1276,6 +1569,29 @@ bool TryBuildNativePredicate(const ExecutionExpressionIR &root, unique_ptr<Sljit
 		result->compare_op = compare_op;
 		result->source_index = source_index;
 		result->constant = constant;
+		result->constant_on_left = constant_on_left;
+		predicate = std::move(result);
+		return true;
+	}
+	if (TryReadNativeDoubleCompareConstant(root, compare_op, double_source_kind, source_index, double_source_scale,
+	                                       double_constant, constant_on_left)) {
+		result->kind = SljitNativePredicateKind::DOUBLE_COMPARE_CONSTANT;
+		result->compare_op = compare_op;
+		result->source_index = source_index;
+		result->double_source_kind = double_source_kind;
+		result->double_source_scale = double_source_scale;
+		result->double_constant = double_constant;
+		result->constant_on_left = constant_on_left;
+		predicate = std::move(result);
+		return true;
+	}
+	if (TryReadNativeInt128CompareConstant(root, compare_op, source_index, int128_lower, int128_upper,
+	                                       constant_on_left)) {
+		result->kind = SljitNativePredicateKind::INT128_COMPARE_CONSTANT;
+		result->compare_op = compare_op;
+		result->source_index = source_index;
+		result->int128_constant_lower = int128_lower;
+		result->int128_constant_upper = int128_upper;
 		result->constant_on_left = constant_on_left;
 		predicate = std::move(result);
 		return true;
@@ -1383,6 +1699,14 @@ bool TryBuildNativePredicate(const ExecutionExpressionIR &root, unique_ptr<Sljit
 	}
 
 	return false;
+}
+
+bool TryBuildNativePredicate(const ExecutionExpressionIR &root, unique_ptr<SljitNativePredicate> &predicate) {
+	if (!TryBuildNativePredicateInternal(root, predicate)) {
+		return false;
+	}
+	FinalizeSljitNativePredicateSourceIndices(*predicate);
+	return true;
 }
 
 } // namespace duckdb

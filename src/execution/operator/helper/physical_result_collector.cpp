@@ -60,7 +60,7 @@ ExecutionContract PhysicalResultCollector::BuildExecutionResultCollectorSinkCont
 	result.sink.native_sink_contract.status = ExecutionRegionStateContractStatus::READY;
 	result.sink.native_sink_contract.required_capability = "result-collector-execution-sink";
 	result.sink.native_sink_contract.contract_version = "v1";
-	result.sink.native_sink_contract.blocker = "none";
+	result.sink.native_sink_contract.blocker.clear();
 	result.sink.reason += ";sink_contract_status=ready";
 	result.sink.reason += ";sink_required_capability=result-collector-execution-sink";
 	result.sink.reason += ";sink_contract_version=v1";

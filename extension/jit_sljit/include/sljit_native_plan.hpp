@@ -33,12 +33,15 @@ bool TryReadNativeIntegerBinaryReferences(const ExecutionExpressionIR &root, Slj
                                           SljitNativeIntegerKind &kind, idx_t &left_source_index,
                                           idx_t &right_source_index);
 bool TryReadNativeDoubleBinaryConstant(const ExecutionExpressionIR &root, SljitNativeDoubleBinaryOp &native_op,
-                                       idx_t &source_index, double &constant_value, bool &constant_on_left);
+                                       SljitNativeDoubleSourceKind &source_kind, idx_t &source_index,
+                                       double &source_scale, double &constant_value, bool &constant_on_left);
 bool TryReadNativeDoubleBinaryReferences(const ExecutionExpressionIR &root, SljitNativeDoubleBinaryOp &native_op,
-                                         idx_t &left_source_index, idx_t &right_source_index);
+                                         SljitNativeDoubleSourceKind &left_kind, idx_t &left_source_index,
+                                         double &left_scale, SljitNativeDoubleSourceKind &right_kind,
+                                         idx_t &right_source_index, double &right_scale);
 bool TryReadNativeDecimal64BinaryReferences(const ExecutionExpressionIR &root, SljitNativeIntegerBinaryOp &native_op,
-                                            idx_t &left_source_index, idx_t &right_source_index,
-                                            int64_t &result_min, int64_t &result_max);
+                                            idx_t &left_source_index, idx_t &right_source_index, int64_t &result_min,
+                                            int64_t &result_max);
 bool TryReadNativeDecimal64BinaryConstant(const ExecutionExpressionIR &root, SljitNativeIntegerBinaryOp &native_op,
                                           idx_t &source_index, int64_t &constant_value, bool &constant_on_left,
                                           int64_t &result_min, int64_t &result_max);
@@ -50,7 +53,8 @@ bool TryReadNativeIntegerCompareReferences(const ExecutionExpressionIR &root, Sl
                                            idx_t &right_source_index);
 bool TryReadNativeIntegerCast(const ExecutionExpressionIR &root, SljitNativeSignedIntegerWidth &source_width,
                               SljitNativeSignedIntegerWidth &target_width, idx_t &source_index, bool &try_cast);
-bool TryReadNativeSignedToUnsignedIntegerCast(const ExecutionExpressionIR &root, SljitNativeSignedIntegerWidth &source_width,
+bool TryReadNativeSignedToUnsignedIntegerCast(const ExecutionExpressionIR &root,
+                                              SljitNativeSignedIntegerWidth &source_width,
                                               SljitNativeUnsignedIntegerWidth &target_width, idx_t &source_index,
                                               bool &try_cast);
 bool TryReadNativeIntegralCompress(const ExecutionExpressionIR &root, SljitNativeSignedIntegerWidth &source_width,
@@ -60,8 +64,8 @@ bool TryReadNativeIntegralDecompress(const ExecutionExpressionIR &root, SljitNat
                                      SljitNativeSignedIntegerWidth &target_width, idx_t &source_index,
                                      int64_t &minimum);
 bool TryReadNativeIntegerCoalesce(const ExecutionExpressionIR &root, SljitNativeSignedIntegerWidth &width,
-                                  idx_t &source_index, SljitNativeCoalesceRhsKind &rhs_kind,
-                                  idx_t &right_source_index, int64_t &constant_value, bool &constant_is_null);
+                                  idx_t &source_index, SljitNativeCoalesceRhsKind &rhs_kind, idx_t &right_source_index,
+                                  int64_t &constant_value, bool &constant_is_null);
 bool TryReadNativeIntegerInList(const ExecutionExpressionIR &root, SljitNativeIntegerKind &kind, idx_t &source_index,
                                 vector<int64_t> &constants, bool &list_has_null, bool &not_in);
 bool TryReadNativeIntegerBetween(const ExecutionExpressionIR &root, SljitNativeIntegerKind &kind, idx_t &source_index,
@@ -73,6 +77,7 @@ bool TryReadNativeStringSubstringInListConstant(const ExecutionExpressionIR &roo
 bool TryReadNativeNullCheck(const ExecutionExpressionIR &root, SljitNativeNullCheckOp &op, idx_t &source_index);
 bool TryReadNativeConstantOrNull(const ExecutionExpressionIR &root, SljitNativeConstantOrNull &expr);
 bool ShouldTryNativePredicateRoot(const ExecutionExpressionIR &root);
+void FinalizeSljitNativePredicateSourceIndices(SljitNativePredicate &predicate);
 bool TryBuildNativePredicate(const ExecutionExpressionIR &root, unique_ptr<SljitNativePredicate> &predicate);
 
 } // namespace duckdb

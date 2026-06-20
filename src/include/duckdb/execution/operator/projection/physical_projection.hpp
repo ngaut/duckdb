@@ -25,6 +25,7 @@ public:
 
 public:
 	unique_ptr<OperatorState> GetOperatorState(ExecutionContext &context) const override;
+	void GetExecutionRegionPreGraphTransformInfo(ExecutionTransformContract &transform) const override;
 	ExecutionContract GetExecutionContract() const override;
 	ExecutionOperatorReadiness
 	GetExecutionOperatorReadiness(ClientContext &context, const ExecutionRegionOperatorInfo &operator_info) const override;

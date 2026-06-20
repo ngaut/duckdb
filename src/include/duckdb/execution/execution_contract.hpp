@@ -8,7 +8,6 @@
 #pragma once
 
 #include "duckdb/execution/execution_compiled_contract.hpp"
-#include "duckdb/execution/execution_region_open_request.hpp"
 #include "duckdb/execution/execution_region_ir.hpp"
 #include "duckdb/common/common.hpp"
 #include "duckdb/common/optional_ptr.hpp"
@@ -30,6 +29,7 @@ struct ExecutionSourceContract {
 	ExecutionRegionSourceExecutionKind execution = ExecutionRegionSourceExecutionKind::NONE;
 	string function_name;
 	vector<ExecutionRegionContractField> fields;
+	idx_t estimated_source_cardinality = 0;
 	idx_t output_column_count = 0;
 	idx_t returned_column_count = 0;
 	vector<idx_t> column_ids;

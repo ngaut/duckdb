@@ -182,6 +182,7 @@ static const ConfigurationOption internal_options[] = {
     DUCKDB_SETTING_CALLBACK(JitEventLogSizeSetting),
     DUCKDB_SETTING_CALLBACK(JitPolicySetting),
     DUCKDB_SETTING(JitTraceRuntimeSetting),
+    DUCKDB_SETTING(JitTraceVectorizedBaselineSetting),
     DUCKDB_SETTING(JitVerifySetting),
     DUCKDB_SETTING_CALLBACK(LambdaSyntaxSetting),
     DUCKDB_SETTING(LateMaterializationMaxRowsSetting),

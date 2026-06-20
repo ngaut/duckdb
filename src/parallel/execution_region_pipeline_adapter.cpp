@@ -50,18 +50,24 @@ bool ExecutionRegionPipelineAdapter::IsAtCleanSourceToSinkBoundary() const {
 	       !executor.exhausted_pipeline && !executor.finalized;
 }
 
-SourceResultType ExecutionRegionPipelineAdapter::FetchSourceContract(DataChunk *&result) {
-	auto source_chunk = &executor.execution_source_input_chunk;
-	source_chunk->Reset();
-	result = source_chunk;
-	executor.source_chunk_initial_idx = 0;
+SourceResultType ExecutionRegionPipelineAdapter::FetchSourceContract(DataChunk *&result,
+                                                                     ExecutionRegionSourceContractMetrics *metrics) {
 	ExecutionRegionSuppressionGuard guard(GetClientContext());
-	auto source_result = executor.FetchFromSourceContract(result);
+	auto source_result = executor.FetchFromSourceContract(result, metrics);
 	if (source_result == SourceResultType::FINISHED) {
 		executor.exhausted_source = true;
 		executor.exhausted_pipeline = true;
 	}
 	return source_result;
+}
+
+SinkNextBatchType ExecutionRegionPipelineAdapter::AdvanceSinkBatch(DataChunk &source_chunk, bool have_more_output) {
+	if (!executor.required_partition_info.AnyRequired()) {
+		return SinkNextBatchType::READY;
+	}
+	auto result = executor.NextBatch(source_chunk, have_more_output);
+	executor.next_batch_blocked = result == SinkNextBatchType::BLOCKED;
+	return result;
 }
 
 ExecutionOperatorBindResult

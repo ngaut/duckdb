@@ -36,8 +36,21 @@ const char *ExecutionRegionExecutionModeToString(ExecutionRegionExecutionMode mo
 		return "none";
 	case ExecutionRegionExecutionMode::NATIVE:
 		return "native";
+	case ExecutionRegionExecutionMode::VECTORIZED:
+		return "vectorized";
 	case ExecutionRegionExecutionMode::UNSUPPORTED:
 		return "unsupported";
+	default:
+		return "unknown";
+	}
+}
+
+const char *ExecutionRunnerKindToString(ExecutionRunnerKind kind) {
+	switch (kind) {
+	case ExecutionRunnerKind::VECTORIZED:
+		return "vectorized";
+	case ExecutionRunnerKind::COMPILED_VECTORIZED:
+		return "compiled_vectorized";
 	default:
 		return "unknown";
 	}
@@ -64,8 +77,6 @@ const char *ExecutionRegionExecutionBodyToString(ExecutionRegionExecutionBody bo
 		return "none";
 	case ExecutionRegionExecutionBody::GENERATED_MACHINE_CODE:
 		return "generated-machine-code";
-	case ExecutionRegionExecutionBody::NATIVE_OPERATOR_PROTOCOL:
-		return "native-operator-protocol";
 	default:
 		return "unknown";
 	}
@@ -80,7 +91,7 @@ ExecutionRegionExecutionBody ExecutionRegionExecutionBodyForCompileEvent(Executi
 	if (code_size > 0) {
 		return ExecutionRegionExecutionBody::GENERATED_MACHINE_CODE;
 	}
-	return ExecutionRegionExecutionBody::NATIVE_OPERATOR_PROTOCOL;
+	return ExecutionRegionExecutionBody::NONE;
 }
 
 const char *ExecutionRegionLoweringKindToString(ExecutionRegionLoweringKind kind) {
@@ -237,19 +248,6 @@ const char *ExecutionRegionSourceExecutionKindToString(ExecutionRegionSourceExec
 		return "duckdb-source-boundary";
 	case ExecutionRegionSourceExecutionKind::SOURCE_CONTRACT:
 		return "source-contract";
-	default:
-		return "unknown";
-	}
-}
-
-const char *ExecutionRegionSourceFilterOwnershipKindToString(ExecutionRegionSourceFilterOwnershipKind kind) {
-	switch (kind) {
-	case ExecutionRegionSourceFilterOwnershipKind::NONE:
-		return "none";
-	case ExecutionRegionSourceFilterOwnershipKind::GENERATED:
-		return "generated";
-	case ExecutionRegionSourceFilterOwnershipKind::DUCKDB_SCAN:
-		return "duckdb-scan";
 	default:
 		return "unknown";
 	}
@@ -770,9 +768,12 @@ void ExecutionRegionLoweringPlan::SetRegionExecutionForm(ExecutionRegionForm exe
 	region_execution_form = execution_form;
 }
 
-void ExecutionRegionLoweringPlan::SetSourceFilterOwnership(
-    ExecutionRegionSourceFilterOwnershipKind source_filter_ownership_p) {
-	source_filter_ownership = source_filter_ownership_p;
+void ExecutionRegionLoweringPlan::SetExecutionBody(ExecutionRegionExecutionBody execution_body_p) {
+	execution_body = execution_body_p;
+}
+
+void ExecutionRegionLoweringPlan::SetUsesScanFilters(bool uses_scan_filters_p) {
+	uses_scan_filters = uses_scan_filters_p;
 }
 
 void ExecutionRegionLoweringPlan::SetSelectedSourceExecution(ExecutionRegionSourceExecutionKind source_execution) {
@@ -781,6 +782,14 @@ void ExecutionRegionLoweringPlan::SetSelectedSourceExecution(ExecutionRegionSour
 
 void ExecutionRegionLoweringPlan::SetOperatorStageIR(string stage_ir) {
 	operator_stage_ir = std::move(stage_ir);
+}
+
+void ExecutionRegionLoweringPlan::SetGeneratedExpressionCost(idx_t expression_cost) {
+	generated_expression_cost = expression_cost;
+}
+
+void ExecutionRegionLoweringPlan::SetGeneratedStageCount(idx_t stage_count) {
+	generated_stage_count = stage_count;
 }
 
 idx_t ExecutionRegionLoweringPlan::NativeCount() const {
@@ -811,26 +820,62 @@ ExecutionRegionForm ExecutionRegionLoweringPlan::ExpectedRegionExecutionForm() c
 	return region_execution_form;
 }
 
-ExecutionRegionSourceFilterOwnershipKind ExecutionRegionLoweringPlan::SourceFilterOwnership() const {
-	return source_filter_ownership;
+ExecutionRegionExecutionBody ExecutionRegionLoweringPlan::ExpectedExecutionBody() const {
+	return execution_body;
+}
+
+bool ExecutionRegionLoweringPlan::UsesScanFilters() const {
+	return uses_scan_filters;
 }
 
 ExecutionRegionSourceExecutionKind ExecutionRegionLoweringPlan::SelectedSourceExecution() const {
 	return selected_source_execution;
 }
 
-string ExecutionRegionLoweringPlan::EventReason() const {
-	string result = "region-lowering:native=" + std::to_string(NativeCount()) +
-	                ",boundary=" + std::to_string(BoundaryCount()) +
-	                ",execution-form=" + ExecutionRegionFormToString(region_execution_form);
+static string FirstExecutionRegionLoweringReasonToken(const string &reason) {
+	auto separator = reason.find(';');
+	return separator == string::npos ? reason : reason.substr(0, separator);
+}
+
+string ExecutionRegionLoweringPlan::CompactEventReason() const {
+	string result;
+	if (!fusion_blockers.empty()) {
+		result = "region-lowering-blocked:" + FirstExecutionRegionLoweringReasonToken(fusion_blockers[0]) + ";";
+	} else {
+		for (auto &node : nodes) {
+			if (node.kind == ExecutionRegionLoweringKind::BOUNDARY && !node.reason.empty()) {
+				result = "region-lowering-blocked:" + FirstExecutionRegionLoweringReasonToken(node.reason) + ";";
+				break;
+			}
+		}
+	}
+	result += "region-lowering:native=" + std::to_string(NativeCount()) +
+	          ",boundary=" + std::to_string(BoundaryCount()) +
+	          ",execution-form=" + ExecutionRegionFormToString(region_execution_form);
+	if (execution_body != ExecutionRegionExecutionBody::NONE) {
+		result += ";execution-body=";
+		result += ExecutionRegionExecutionBodyToString(execution_body);
+	}
 	if (selected_source_execution != ExecutionRegionSourceExecutionKind::NONE) {
 		result += ";selected-source-execution=";
 		result += ExecutionRegionSourceExecutionKindToString(selected_source_execution);
 	}
-	if (source_filter_ownership != ExecutionRegionSourceFilterOwnershipKind::NONE) {
-		result += ";source-filter-ownership=";
-		result += ExecutionRegionSourceFilterOwnershipKindToString(source_filter_ownership);
+	if (uses_scan_filters) {
+		result += ";uses-scan-filters=true";
 	}
+	if (generated_expression_cost > 0) {
+		result += ";generated-expression-cost=";
+		result += std::to_string(generated_expression_cost);
+	}
+	if (generated_stage_count > 0) {
+		result += ";generated-stages=";
+		result += std::to_string(generated_stage_count);
+	}
+	return result;
+}
+
+string ExecutionRegionLoweringPlan::EventReason() const {
+	auto result = CompactEventReason();
 	if (!operator_stage_ir.empty()) {
 		result += ";";
 		result += operator_stage_ir;
@@ -870,6 +915,7 @@ unique_ptr<ExecutionExpressionIR> ExecutionExpressionIR::Copy() const {
 	result->binary_op = binary_op;
 	result->conjunction_op = conjunction_op;
 	result->intrinsic = intrinsic;
+	result->arithmetic_overflow_check = arithmetic_overflow_check;
 	result->try_cast = try_cast;
 	result->not_in = not_in;
 	result->not_between = not_between;
@@ -901,6 +947,7 @@ ExecutionExpressionFragment &ExecutionExpressionFragment::operator=(const Execut
 	}
 	expression_index = other.expression_index;
 	return_type = other.return_type;
+	traits = other.traits;
 	root = other.root ? other.root->Copy() : nullptr;
 	reason = other.reason;
 	ir = other.ir;

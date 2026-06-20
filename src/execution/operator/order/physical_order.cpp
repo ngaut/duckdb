@@ -1,6 +1,7 @@
 #include "duckdb/execution/operator/order/physical_order.hpp"
 
 #include "duckdb/common/sorting/sort.hpp"
+#include "duckdb/execution/execution_operator_runtime.hpp"
 
 namespace duckdb {
 
@@ -92,7 +93,7 @@ static string ValidateOrderedExecutionSink(const ExecutionRegionSinkInfo &sink_i
 		return sink_info.order_contract.order_key_blocker.empty() ? "ordered-sink-runtime-order-key-not-ready"
 		                                                          : sink_info.order_contract.order_key_blocker;
 	}
-	return "none";
+	return string();
 }
 
 SinkResultType ExecutionSinkOrdered(const ExecutionOrderedSinkBinding &binding, DataChunk &order_keys,
@@ -115,7 +116,7 @@ bool PhysicalOrder::BindExecutionSink(ExecutionContext &context, DataChunk &inpu
 	binding = ExecutionSinkBinding();
 	binding.kind = sink_info.kind;
 	auto blocker = ValidateOrderedExecutionSink(sink_info, ExecutionRegionOperatorKind::ORDER_BY);
-	if (blocker != "none") {
+	if (!blocker.empty()) {
 		binding.blocker = blocker;
 		binding.ordered_sink.blocker = blocker;
 		return false;
@@ -135,8 +136,8 @@ bool PhysicalOrder::BindExecutionSink(ExecutionContext &context, DataChunk &inpu
 		binding.ordered_sink.order_key_types.push_back(key.type);
 	}
 	binding.ordered_sink.payload_types = sink_info.order_contract.payload_types;
-	binding.ordered_sink.blocker = "none";
-	binding.blocker = "none";
+	binding.ordered_sink.blocker.clear();
+	binding.blocker.clear();
 	return true;
 }
 
@@ -210,7 +211,8 @@ SourceResultType PhysicalOrder::GetDataInternal(ExecutionContext &context, DataC
                                                 OperatorSourceInput &input) const {
 	auto &gstate = input.global_state.Cast<OrderGlobalSourceState>();
 	auto &lstate = input.local_state.Cast<OrderLocalSourceState>();
-	OperatorSourceInput sort_input {*gstate.state, *lstate.state, input.interrupt_state};
+	OperatorSourceInput sort_input {*gstate.state, *lstate.state, input.interrupt_state, input.stage_recorder};
+	ExecutionOperatorStageTimer timer(input.stage_recorder, "source_contract.order_state_scan.sort_get_data");
 	return gstate.sort.GetData(context, chunk, sort_input);
 }
 

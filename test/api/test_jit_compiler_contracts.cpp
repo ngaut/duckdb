@@ -30,14 +30,15 @@ TEST_CASE("JIT region lowering excludes wrapper-only pipelines", "[api][jit]") {
 	};
 
 	ConfigureSljit(con, "auto");
-	REQUIRE_NO_FAIL(con.Query("SET jit_event_log_size=0"));
+	REQUIRE_NO_FAIL(con.Query("SET jit_event_log_size=10000"));
 
 	ClearJitTrace(manager, true);
 	REQUIRE_NO_FAIL(con.Query("CREATE OR REPLACE TABLE jit_inventory_wrapper_only AS SELECT 42 AS i"));
-	REQUIRE(manager.GetEvents().empty());
-	for (auto &counter : manager.GetDecisionCounters()) {
-		REQUIRE_FALSE(has_wrapper_only_pipeline_shape(counter.pipeline_shape));
-		REQUIRE_FALSE(has_wrapper_only_region_source(counter.example_reason));
+	for (auto &event : manager.GetEvents()) {
+		REQUIRE_FALSE(has_wrapper_only_pipeline_shape(event.pipeline_shape));
+		REQUIRE_FALSE(has_wrapper_only_pipeline_shape(event.candidate_pipeline_shape));
+		REQUIRE_FALSE(has_wrapper_only_region_source(event.reason));
+		REQUIRE_FALSE(has_wrapper_only_region_source(event.ir));
 	}
 
 	REQUIRE_NO_FAIL(con.Query("SET jit_policy='force'"));
@@ -49,13 +50,8 @@ TEST_CASE("JIT region lowering excludes wrapper-only pipelines", "[api][jit]") {
 	for (auto &event : manager.GetEvents()) {
 		REQUIRE_FALSE(has_wrapper_only_pipeline_shape(event.pipeline_shape));
 		REQUIRE_FALSE(has_wrapper_only_pipeline_shape(event.candidate_pipeline_shape));
-		REQUIRE_FALSE(has_wrapper_only_pipeline_shape(event.candidate_context_pipeline_shape));
 		REQUIRE_FALSE(has_wrapper_only_region_source(event.reason));
 		REQUIRE_FALSE(has_wrapper_only_region_source(event.ir));
-	}
-	for (auto &counter : manager.GetDecisionCounters()) {
-		REQUIRE_FALSE(has_wrapper_only_pipeline_shape(counter.pipeline_shape));
-		REQUIRE_FALSE(has_wrapper_only_region_source(counter.example_reason));
 	}
 }
 
@@ -76,14 +72,14 @@ TEST_CASE("JIT region capability requires explicit compiled execution mode", "[a
 
 	bool found_unsupported_region = false;
 	for (auto &event : manager.GetEvents()) {
-		if (event.backend_name != "contract_test_implicit_mode_region_jit_backend" || event.target != "region") {
+		if (event.backend_name != "contract_test_implicit_mode_region_jit_backend" || EventTarget(event) != "region") {
 			continue;
 		}
-		if (event.status == "unsupported" &&
+		if (EventStatus(event) == "unsupported" &&
 		    StringUtil::Contains(event.reason, "backend cannot generate executable code for this whole region")) {
 			found_unsupported_region = true;
-			REQUIRE(event.execution_mode == "unsupported");
-			REQUIRE(event.policy_decision == "force");
+			REQUIRE(EventExecutionMode(event) == "unsupported");
+			REQUIRE(EventRequestedPolicy(event) == "force");
 			REQUIRE(StringUtil::Contains(event.reason, "region-lowering:native=1"));
 			REQUIRE(StringUtil::Contains(event.reason, "execution:unsupported"));
 		}
@@ -131,13 +127,14 @@ TEST_CASE("Execution region compiler rejects backend-fused regions across core b
 
 	ExecutionRegionManager::Get(context).RegisterBackend(make_uniq<FullPipelineAbiRejectRegionBackend>());
 	SetJitTestOptions(context, "contract_test_full_pipeline_abi_region_jit_backend");
+	Settings::Set<JitTraceDecisionsSetting>(context, SetScope::SESSION, Value::BOOLEAN(true));
 
 	REQUIRE_NO_FAIL(con.Query("SELECT i + 1 FROM range(3) tbl(i) WHERE i > 0"));
 
 	bool found_core_gate = false;
 	for (auto &event : manager.GetEvents()) {
-		if (event.backend_name != "contract_test_full_pipeline_abi_region_jit_backend" || event.target != "region" ||
-		    event.status != "unsupported") {
+		if (event.backend_name != "contract_test_full_pipeline_abi_region_jit_backend" || EventTarget(event) != "region" ||
+		    EventStatus(event) != "unsupported") {
 			continue;
 		}
 		if (!StringUtil::Contains(event.reason,
@@ -145,8 +142,8 @@ TEST_CASE("Execution region compiler rejects backend-fused regions across core b
 			continue;
 		}
 		found_core_gate = true;
-		REQUIRE(event.execution_mode == "unsupported");
-		REQUIRE(event.region_execution_form == "fused");
+		REQUIRE(EventExecutionMode(event) == "unsupported");
+		REQUIRE(EventRegionExecutionForm(event) == "fused");
 		REQUIRE((event.candidate_contract.source_boundary_count > 0 ||
 		         event.candidate_contract.missing_contract_count > 0));
 		REQUIRE((StringUtil::Contains(event.reason, "source_boundaries=") ||
@@ -163,17 +160,21 @@ TEST_CASE("JIT maximal region planner does not emit sink-only ABI candidates", "
 	auto &manager = ExecutionRegionManager::Get(context);
 
 	ConfigureSljit(con);
+	REQUIRE_NO_FAIL(con.Query("SET jit_trace_decisions=true"));
 
 	REQUIRE_NO_FAIL(con.Query("SELECT sum(i) FROM range(3) tbl(i)"));
+	bool found_candidate = false;
 	for (auto &event : manager.GetEvents()) {
 		if (!event.has_candidate) {
 			continue;
 		}
+		found_candidate = true;
 		REQUIRE(event.candidate_contract.abi == ExecutionRegionABI::FULL_PIPELINE);
 		if (event.candidate_contract.OwnsSink()) {
 			REQUIRE(event.candidate_contract.OwnsSource());
 		}
 	}
+	REQUIRE(found_candidate);
 }
 
 TEST_CASE("Execution region compiler rejects full pipeline kernels without full-pipeline ABI", "[api][jit]") {
@@ -211,20 +212,21 @@ TEST_CASE("JIT full pipeline ABI rejects runtime false return", "[api][jit]") {
 	bool found_error_full_pipeline = false;
 	for (auto &event : manager.GetEvents()) {
 		if (event.backend_name != "contract_test_false_returning_full_pipeline_region_jit_backend" ||
-		    event.target != "region" || !event.has_candidate ||
-		    event.candidate_contract.abi != ExecutionRegionABI::FULL_PIPELINE) {
+		    EventTarget(event) != "region") {
 			continue;
 		}
-		if (event.status == "compiled") {
+		if (EventStatus(event) == "compiled") {
+			REQUIRE(event.has_candidate);
+			REQUIRE(event.candidate_contract.abi == ExecutionRegionABI::FULL_PIPELINE);
 			found_compiled_full_pipeline = true;
-			REQUIRE(event.execution_mode == "native");
+			REQUIRE(EventExecutionMode(event) == "native");
 		}
-		if (event.phase == "runtime" && event.status == "error") {
+		if (EventPhase(event) == "runtime" && EventStatus(event) == "error") {
 			found_error_full_pipeline = true;
-			REQUIRE(event.execution_mode == "native");
+			REQUIRE(EventExecutionMode(event) == "native");
 			REQUIRE(StringUtil::Contains(event.reason, "compiled full pipeline kernel returned false at runtime"));
 		}
-		REQUIRE(event.status != string("de") + "clined");
+		REQUIRE(EventStatus(event) != string("de") + "clined");
 	}
 	REQUIRE(found_compiled_full_pipeline);
 	REQUIRE(found_error_full_pipeline);

@@ -7,13 +7,31 @@
 #include "duckdb/common/types/row/tuple_data_collection.hpp"
 #include "duckdb/common/types/row/tuple_data_iterator.hpp"
 #include "duckdb/execution/aggregate_hashtable.hpp"
+#include "duckdb/execution/execution_aggregate_runtime.hpp"
+#include "duckdb/execution/execution_operator_runtime.hpp"
 #include "duckdb/execution/executor.hpp"
 #include "duckdb/execution/ht_entry.hpp"
 #include "duckdb/execution/operator/aggregate/physical_hash_aggregate.hpp"
 #include "duckdb/planner/expression/bound_reference_expression.hpp"
 #include "duckdb/storage/temporary_memory_manager.hpp"
 
+#include <chrono>
+
 namespace duckdb {
+
+static std::chrono::steady_clock::time_point RadixTraceStart(optional_ptr<ExecutionOperatorStageRecorder> recorder) {
+	return recorder ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point();
+}
+
+static void RecordRadixTraceStage(optional_ptr<ExecutionOperatorStageRecorder> recorder, const string &stage,
+                                  std::chrono::steady_clock::time_point start) {
+	if (!recorder) {
+		return;
+	}
+	auto end = std::chrono::steady_clock::now();
+	auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(end - start).count();
+	recorder->RecordStageRuntime(stage, elapsed);
+}
 
 RadixPartitionedHashTable::RadixPartitionedHashTable(GroupingSet &grouping_set_p, const GroupedAggregateData &op_p,
                                                      TupleDataValidityType group_validity_p)
@@ -668,51 +686,35 @@ void RadixPartitionedHashTable::Sink(ExecutionContext &context, DataChunk &chunk
 	FinishRadixHTSinkState(context.client, gstate, lstate);
 }
 
-idx_t RadixPartitionedHashTable::FindOrCreateAggregateStates(ExecutionContext &context, DataChunk &chunk,
-                                                             OperatorSinkInput &input, Vector &addresses_out) const {
+void RadixPartitionedHashTable::ResolveStateAddresses(ExecutionContext &context, DataChunk &chunk,
+                                                      OperatorSinkInput &input, Vector &addresses_out,
+                                                      optional_ptr<ExecutionOperatorStageRecorder> recorder) const {
 	auto &lstate = input.local_state.Cast<RadixHTLocalSinkState>();
+	auto prepare_start = RadixTraceStart(recorder);
 	auto &ht = PrepareRadixHTSinkState(context, *this, input);
+	RecordRadixTraceStage(recorder, "prepare_sink_state", prepare_start);
 
 	auto &group_chunk = lstate.group_chunk;
+	auto populate_start = RadixTraceStart(recorder);
 	PopulateGroupChunk(group_chunk, chunk);
-	return ht.FindOrCreateAggregateStates(group_chunk, addresses_out);
+	RecordRadixTraceStage(recorder, "populate_group_chunk", populate_start);
+
+	ht.FindOrCreateGroupAddresses(group_chunk, addresses_out, recorder);
 }
 
-idx_t RadixPartitionedHashTable::FindOrCreateAggregateStatesFromBoundGroups(
-    ExecutionContext &context, DataChunk &chunk, const vector<idx_t> &group_input_indices, OperatorSinkInput &input,
-    Vector &addresses_out) const {
-	auto &lstate = input.local_state.Cast<RadixHTLocalSinkState>();
-	auto &ht = PrepareRadixHTSinkState(context, *this, input);
-	if (group_input_indices.size() != group_types.size()) {
-		throw InternalException("Native radix aggregate group binding count mismatch");
+bool RadixPartitionedHashTable::GetExecutionHashAggregateLookupLayout(
+    ExecutionHashAggregateLookupLayout &layout) const {
+	if (!layout_ptr) {
+		layout = ExecutionHashAggregateLookupLayout();
+		layout.blocker = "hash-aggregate-layout-missing";
+		return false;
 	}
-
-	auto &group_chunk = lstate.group_chunk;
-	group_chunk.Reset();
-	for (idx_t group_idx = 0; group_idx < group_input_indices.size(); group_idx++) {
-		auto input_idx = group_input_indices[group_idx];
-		if (input_idx >= chunk.ColumnCount()) {
-			throw InternalException("Native radix aggregate group binding references input column %llu beyond %llu",
-			                        static_cast<unsigned long long>(input_idx),
-			                        static_cast<unsigned long long>(chunk.ColumnCount()));
-		}
-		group_chunk.data[group_idx].Reference(chunk.data[input_idx]);
-	}
-	group_chunk.SetChildCardinality(chunk.size());
-	if (group_input_indices.empty()) {
-		FlatVector::SetSize(group_chunk.data[0], count_t(chunk.size()));
-	}
-	group_chunk.Verify(context.client.db);
-	return ht.FindOrCreateAggregateStates(group_chunk, addresses_out);
+	return ExecutionBuildHashAggregateLookupLayout(*layout_ptr, layout);
 }
 
-void RadixPartitionedHashTable::FinishNativeAggregateUpdate(ExecutionContext &context,
-                                                            OperatorSinkInput &input) const {
+void RadixPartitionedHashTable::FinishStateUpdates(ExecutionContext &context, OperatorSinkInput &input) const {
 	auto &gstate = input.global_state.Cast<RadixHTGlobalSinkState>();
 	auto &lstate = input.local_state.Cast<RadixHTLocalSinkState>();
-	if (!lstate.ht) {
-		throw InternalException("Cannot finish native radix aggregate update before binding aggregate states");
-	}
 	FinishRadixHTSinkState(context.client, gstate, lstate);
 }
 
@@ -1123,6 +1125,8 @@ SourceResultType RadixPartitionedHashTable::GetData(ExecutionContext &context, D
 
 	if (sink.count_before_combining == 0) {
 		if (grouping_set.empty()) {
+			ExecutionOperatorStageTimer timer(input.stage_recorder,
+			                                  "source_contract.hash_aggregate_state_scan.empty_group_finalize");
 			// Special case hack to sort out aggregating from empty intermediates for aggregations without groups
 			D_ASSERT(chunk.ColumnCount() == null_groups.size() + op.aggregates.size() + op.grouping_functions.size());
 			// For each column in the aggregates, set to initial state
@@ -1159,13 +1163,22 @@ SourceResultType RadixPartitionedHashTable::GetData(ExecutionContext &context, D
 
 	while (!gstate.finished && chunk.size() == 0) {
 		if (lstate.TaskFinished()) {
-			const auto res = gstate.AssignTask(sink, lstate, input.interrupt_state);
+			SourceResultType res;
+			{
+				ExecutionOperatorStageTimer timer(input.stage_recorder,
+				                                  "source_contract.hash_aggregate_state_scan.assign_task");
+				res = gstate.AssignTask(sink, lstate, input.interrupt_state);
+			}
 			if (res != SourceResultType::HAVE_MORE_OUTPUT) {
 				D_ASSERT(res == SourceResultType::FINISHED || res == SourceResultType::BLOCKED);
 				return res;
 			}
 		}
-		lstate.ExecuteTask(sink, gstate, chunk);
+		{
+			ExecutionOperatorStageTimer timer(input.stage_recorder,
+			                                  "source_contract.hash_aggregate_state_scan.execute_task");
+			lstate.ExecuteTask(sink, gstate, chunk);
+		}
 	}
 
 	if (chunk.size() != 0) {

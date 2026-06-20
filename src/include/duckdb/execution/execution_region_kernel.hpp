@@ -27,31 +27,29 @@ public:
 	virtual const string &BackendName() const = 0;
 	virtual idx_t CodeSize() const;
 	virtual bool HasExecutableBody() const;
-	void SetTraceInfo(idx_t trace_id, ExecutionRegionExecutionMode execution_mode, string compile_reason,
-	                  int64_t compile_time_us, idx_t code_size);
+	void SetTraceInfo(idx_t trace_id, ExecutionRegionExecutionMode execution_mode,
+	                  ExecutionRegionExecutionBody execution_body, string compile_reason, int64_t compile_time_us,
+	                  idx_t code_size);
 	void SetTraceRegionExecutionForm(ExecutionRegionForm execution_form);
 	void SetTraceSelectedSourceExecution(ExecutionRegionSourceExecutionKind source_execution);
-	void SetTraceCandidate(const ExecutionRegionCandidate &candidate);
+	void SetTraceUsesScanFilters(bool uses_scan_filters);
+	void SetTracePipeline(const ExecutionRegionCandidate &candidate);
+	void SetExecutionABI(ExecutionRegionABI abi);
 	idx_t TraceId() const;
 	ExecutionRegionExecutionMode ExecutionMode() const;
 	ExecutionRegionForm RegionExecutionForm() const;
 	ExecutionRegionSourceExecutionKind SelectedSourceExecution() const;
+	bool UsesScanFilters() const;
 	ExecutionRegionExecutionBody ExecutionBody() const;
+	ExecutionRegionABI ExecutionABI() const;
 	const string &TraceCompileReason() const;
 	int64_t TraceCompileTime() const;
 	idx_t TraceCodeSize() const;
-	bool HasTraceCandidate() const;
-	idx_t TraceCandidateId() const;
+	bool HasTracePipeline() const;
 	const string &TraceCandidateShape() const;
 	const string &TraceCandidatePipelineShape() const;
-	const string &TraceCandidateContextPipelineShape() const;
-	const ExecutionRegionSignature &TraceCandidateSignature() const;
-	idx_t TraceCandidateNodeCount() const;
-	idx_t TraceCandidateStartOperatorIndex() const;
-	idx_t TraceCandidateEndOperatorIndex() const;
 	idx_t TraceCandidateEstimatedCardinality() const;
-	const ExecutionRegionCandidateTraits &TraceCandidateTraits() const;
-	const ExecutionRegionContract &TraceCandidateContract() const;
+	bool TraceCandidateUsesScanFilters() const;
 	virtual bool CanExecuteFullPipeline() const;
 	virtual bool TryExecuteFullPipeline(ExecutionRegionRuntime &runtime, ExecutionRegionResult &result);
 
@@ -60,22 +58,17 @@ private:
 	ExecutionRegionExecutionMode execution_mode = ExecutionRegionExecutionMode::NONE;
 	ExecutionRegionForm region_execution_form = ExecutionRegionForm::NONE;
 	ExecutionRegionSourceExecutionKind selected_source_execution = ExecutionRegionSourceExecutionKind::NONE;
+	bool uses_scan_filters = false;
 	ExecutionRegionExecutionBody execution_body = ExecutionRegionExecutionBody::NONE;
+	ExecutionRegionABI execution_abi = ExecutionRegionABI::NONE;
 	string trace_compile_reason;
 	int64_t trace_compile_time_us = 0;
 	idx_t trace_code_size = 0;
-	bool has_trace_candidate = false;
-	idx_t trace_candidate_id = 0;
+	bool has_trace_pipeline = false;
 	string trace_candidate_shape;
 	string trace_candidate_pipeline_shape;
-	string trace_candidate_context_pipeline_shape;
-	ExecutionRegionSignature trace_candidate_signature;
-	idx_t trace_candidate_node_count = 0;
-	idx_t trace_candidate_start_operator_index = 0;
-	idx_t trace_candidate_end_operator_index = 0;
 	idx_t trace_candidate_estimated_cardinality = 0;
-	ExecutionRegionCandidateTraits trace_candidate_traits;
-	ExecutionRegionContract trace_candidate_contract;
+	bool trace_candidate_uses_scan_filters = false;
 };
 
 } // namespace duckdb

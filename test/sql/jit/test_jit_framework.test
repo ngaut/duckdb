@@ -30,8 +30,7 @@ statement ok
 LOAD jit_sljit
 
 query TTIII
-SELECT name, description, available::INTEGER, supports_regions::INTEGER,
-       selected::INTEGER
+SELECT name, description, available::INTEGER, supports_regions::INTEGER, selected::INTEGER
 FROM duckdb_jit_backends()
 ORDER BY name
 ----
@@ -110,6 +109,9 @@ ORDER BY 1
 2
 3
 
+statement ok
+SET jit_dump_ir=true
+
 query I
 SELECT CASE WHEN i > 0 THEN i ELSE 0 END
 FROM jit_test
@@ -123,12 +125,28 @@ SELECT count(*) > 0
 FROM duckdb_jit_events()
 WHERE backend_name='sljit'
   AND target='region'
-  AND status='unsupported'
-  AND execution_mode='unsupported'
-  AND reason LIKE '%region IR node is unsupported by SLJIT native contract lowering%'
-  AND reason LIKE '%backend cannot generate executable code for this whole region%'
+  AND status='compiled'
+  AND execution_mode='native'
+  AND execution_body='generated-machine-code'
+  AND ir LIKE '%case%'
+  AND ir LIKE '%physical=INT64%'
 ----
 1
+
+query I
+SELECT count(*) = 0
+FROM duckdb_jit_events()
+WHERE backend_name='sljit'
+  AND target='region'
+  AND status='unsupported'
+  AND execution_mode='unsupported'
+  AND ir LIKE '%case%'
+  AND ir LIKE '%physical=INT64%'
+----
+1
+
+statement ok
+SET jit_dump_ir=false
 
 statement ok
 CREATE TEMP TABLE jit_counters_before_clear AS
@@ -182,19 +200,9 @@ WHERE backend_name='sljit'
   AND target='region'
   AND status='compiled'
   AND execution_mode <> 'native'
-  AND candidate_shape='filter-projection-sink'
-  AND candidate_signature_context='full-pipeline'
-----
-1
-
-query I
-SELECT count(*) = 0
-FROM duckdb_jit_decision_counters()
-WHERE backend_name='sljit'
-  AND target='region'
-  AND status='compiled'
-  AND execution_mode <> 'native'
-  AND candidate_shape='filter-projection-sink'
+  AND candidate_filter_count=1
+  AND candidate_projection_count=1
+  AND candidate_has_sink
   AND candidate_signature_context='full-pipeline'
 ----
 1
@@ -209,8 +217,6 @@ WHERE backend_name='sljit'
   AND region_execution_form='fused'
   AND ir_lowering_time_us >= 0
   AND backend_analysis_time_us >= 0
-  AND admission_time_us >= 0
-  AND overlap_check_time_us >= 0
   AND codegen_time_us >= 0
   AND decision_time_us >= ir_lowering_time_us
   AND compile_time_us = codegen_time_us
@@ -227,8 +233,6 @@ WHERE backend_name='sljit'
   AND count > 0
   AND ir_lowering_time_us >= 0
   AND backend_analysis_time_us >= 0
-  AND admission_time_us >= 0
-  AND overlap_check_time_us >= 0
   AND codegen_time_us >= 0
   AND compile_time_us = codegen_time_us
 ----
@@ -255,7 +259,9 @@ WHERE backend_name='sljit'
   AND target='region'
   AND status='compiled'
   AND execution_mode <> 'native'
-  AND candidate_shape='filter-projection-sink'
+  AND candidate_filter_count=1
+  AND candidate_projection_count=1
+  AND candidate_has_sink
   AND candidate_signature_context='full-pipeline'
 ----
 1
@@ -289,40 +295,21 @@ WHERE backend_name='sljit'
   AND phase='decision'
   AND status='unsupported'
   AND execution_mode='unsupported'
-  AND policy_decision='force'
+  AND requested_policy='force'
   AND region_execution_form='none'
-  AND candidate_shape='projection-projection-sink'
+  AND candidate_filter_count=0
+  AND candidate_projection_count=2
+  AND candidate_has_sink
   AND candidate_signature_context='full-pipeline'
   AND candidate_contract_abi='full_pipeline'
   AND candidate_start_operator_index=0
   AND candidate_end_operator_index=2
   AND candidate_pipeline_shape LIKE '%source:source:%:scan%'
   AND candidate_pipeline_shape LIKE '%sink:sink:%:sink%'
-  AND admission_shape_key IS NULL
-  AND reason LIKE '%source:TABLE_SCAN:boundary%'
-  AND reason LIKE '%native aggregate update sink protocol%'
-  AND reason LIKE '%aggregate_state_update_contract_status=ready%'
-  AND reason LIKE '%aggregate_count=0%'
-  AND reason LIKE '%execution:unsupported%'
+  AND ir LIKE '%native_hash_aggregate_lookup_layout%'
+  AND ir LIKE '%backend_lowering_ready=false%'
+  AND ir LIKE '%native_hash_aggregate_lookup_contract_status=blocked%'
   AND ir LIKE '%native_aggregate_state_update_contract_status=ready%'
-  AND reason NOT LIKE '%missing-native-state-update-contract%'
-  AND reason NOT LIKE '%hash-aggregate-native-state-update-boundary%'
-----
-1
-
-query I
-SELECT count(*) = 0
-FROM duckdb_jit_events()
-WHERE backend_name='sljit'
-  AND target='region'
-  AND phase='decision'
-  AND status='skipped'
-  AND execution_mode='executor_fallback'
-  AND policy_decision='force'
-  AND candidate_shape='projection'
-  AND candidate_start_operator_index=0
-  AND candidate_end_operator_index=1
-  AND reason LIKE '%overlaps an already selected non-overlapping region%'
 ----
 1
 
@@ -338,22 +325,14 @@ WHERE backend_name='sljit'
   AND target='region'
   AND status='unsupported'
   AND execution_mode='unsupported'
-  AND candidate_shape='filter-projection-projection-sink'
+  AND candidate_filter_count=1
+  AND candidate_projection_count=2
+  AND candidate_has_sink
   AND candidate_signature_context='full-pipeline'
   AND candidate_start_operator_index=0
   AND candidate_end_operator_index > candidate_start_operator_index
   AND code_size = 0
   AND region_execution_form='none'
-  AND reason LIKE '%region-lowering:native=4,boundary=1%'
-  AND reason LIKE '%execution-form=none%'
-  AND reason LIKE '%backend cannot generate executable code for this whole region%'
-  AND reason LIKE '%fusion-blocker:source-contract-blocker:requires-source-contract%'
-  AND reason LIKE '%op0:FILTER:native:generated typed predicate filter%'
-  AND reason LIKE '%op1:PROJECTION:native:generated typed projection%'
-  AND reason LIKE '%op2:PROJECTION:native:reference projection remap%'
-  AND reason LIKE '%sink:UNGROUPED_AGGREGATE:native%'
-  AND reason LIKE '%native aggregate update sink protocol%'
-  AND reason LIKE '%aggregate_state_update_contract_status=ready%'
   AND ir LIKE 'duckdb.region typed-vector-ir;%'
   AND ir LIKE '%compare_greater_than%'
   AND ir LIKE '%add%'
@@ -363,8 +342,6 @@ WHERE backend_name='sljit'
   AND ir LIKE '%candidate0<first_node=%'
   AND ir LIKE '%sink:sink:UNGROUPED_AGGREGATE%'
   AND ir LIKE '%op2:projection:PROJECTION%'
-  AND reason NOT LIKE '%missing-native-state-update-contract%'
-  AND reason NOT LIKE '%ungrouped-aggregate-native-state-update-boundary%'
 ----
 1
 
@@ -395,10 +372,11 @@ WHERE backend_name='sljit'
   AND target='region'
   AND status='unsupported'
   AND execution_mode='unsupported'
-  AND candidate_shape='filter-projection-projection'
+  AND candidate_filter_count=1
+  AND candidate_projection_count=2
+  AND NOT candidate_has_sink
   AND candidate_start_operator_index > 0
   AND candidate_end_operator_index > candidate_start_operator_index
-  AND reason LIKE '%sljit native lowering is not implemented for this region IR node%'
 ----
 1
 
@@ -431,8 +409,9 @@ WHERE phase='runtime'
   AND target='region'
   AND status='declined'
   AND execution_mode <> 'native'
-  AND candidate_shape='filter'
-  AND reason LIKE '%in-process operators%'
+  AND candidate_filter_count=1
+  AND candidate_projection_count=0
+  AND NOT candidate_has_sink
 ----
 1
 
@@ -444,8 +423,9 @@ WHERE phase='runtime'
   AND target='region'
   AND status='executed'
   AND execution_mode='executor_fallback'
-  AND candidate_shape='filter'
-  AND reason LIKE '%resumed in-process operator state%'
+  AND candidate_filter_count=1
+  AND candidate_projection_count=0
+  AND NOT candidate_has_sink
 ----
 1
 
@@ -474,11 +454,11 @@ WHERE backend_name='sljit'
   AND target='region'
   AND status='compiled'
   AND execution_mode='native'
-  AND candidate_shape='projection'
+  AND candidate_filter_count=0
+  AND candidate_projection_count=1
+  AND NOT candidate_has_sink
   AND candidate_start_operator_index=2
   AND candidate_end_operator_index=3
-  AND reason LIKE '%execution:native-sljit-region-projection%'
-  AND reason LIKE '%verify:region%'
 ----
 1
 
@@ -490,10 +470,11 @@ WHERE phase='runtime'
   AND target='region'
   AND status='executed'
   AND execution_mode='native'
-  AND candidate_shape='projection'
+  AND candidate_filter_count=0
+  AND candidate_projection_count=1
+  AND NOT candidate_has_sink
   AND candidate_start_operator_index=2
   AND candidate_end_operator_index=3
-  AND reason LIKE '%initial_idx=2%'
 ----
 1
 
@@ -518,11 +499,11 @@ WHERE backend_name='sljit'
   AND target='region'
   AND status='compiled'
   AND execution_mode='native'
-  AND candidate_shape='projection'
+  AND candidate_filter_count=0
+  AND candidate_projection_count=1
+  AND NOT candidate_has_sink
   AND candidate_start_operator_index > 0
   AND candidate_end_operator_index > candidate_start_operator_index
-  AND reason LIKE '%execution:native-sljit-region-projection%'
-  AND reason LIKE '%verify:region%'
 ----
 1
 
@@ -544,9 +525,10 @@ WHERE phase='runtime'
   AND target='region'
   AND status='executed'
   AND execution_mode='native'
-  AND candidate_shape='projection'
+  AND candidate_filter_count=0
+  AND candidate_projection_count=1
+  AND NOT candidate_has_sink
   AND candidate_start_operator_index > 0
-  AND reason LIKE '%initial_idx=3%'
 ----
 1
 
@@ -560,23 +542,47 @@ statement ok
 SET jit_policy='auto'
 
 statement ok
+SET jit_trace_decisions=true
+
+statement ok
+SET jit_dump_ir=false
+
+statement ok
+CREATE TEMP TABLE jit_auto_projection_input AS
+SELECT i::BIGINT AS i FROM range(1000000) tbl(i)
+
+statement ok
 CREATE TEMP TABLE jit_auto_projection_baseline AS
 SELECT coalesce(max(event_id), 0) AS base_event_id FROM duckdb_jit_events()
 
 query I
 SELECT sum(j)
-FROM (SELECT i::BIGINT + 7 AS j FROM range(1000000) tbl(i))
+FROM (SELECT i + 7 AS j FROM jit_auto_projection_input)
 ----
 500006500000
 
 query I
-SELECT count(*) = 0
+SELECT count(*) > 0
 FROM duckdb_jit_events(), jit_auto_projection_baseline
 WHERE event_id > base_event_id
   AND backend_name='sljit'
   AND target='region'
+  AND phase='compile'
+  AND requested_policy='auto'
   AND status='compiled'
-  AND policy_decision='auto'
+  AND selected_runner='compiled_vectorized'
+  AND candidate_id IS NOT NULL
+  AND candidate_node_count > 0
+  AND backend_analysis_time_us >= 0
+  AND ir_lowering_time_us >= 0
+  AND runner_cost_profile
+  AND execution_body='generated-machine-code'
+  AND runner_cost_accelerated_stage_count > 0
+  AND runner_cost_expression_cost > 0
+  AND runner_cost_batches > 0
+  AND runner_cost_saved_work_per_batch > 0
+  AND runner_cost_accelerated_runner_benefit > runner_cost_required_benefit
+  AND runner_cost_selected_accelerated_runner
 ----
 1
 
@@ -586,10 +592,20 @@ FROM duckdb_jit_events(), jit_auto_projection_baseline
 WHERE event_id > base_event_id
   AND backend_name='sljit'
   AND target='region'
-  AND status='skipped'
-  AND policy_decision='auto'
-  AND decision_time_us >= 0
-  AND compile_time_us = 0
+  AND phase='compile'
+  AND requested_policy='auto'
+  AND status='compiled'
+  AND selected_runner='compiled_vectorized'
+  AND candidate_id IS NOT NULL
+  AND runner_cost_profile
+  AND runner_cost_accelerated_runner_benefit > runner_cost_required_benefit
+  AND runner_cost_startup_cost > 0
+  AND runner_cost_accelerated_stage_count > 0
+  AND runner_cost_expression_cost > 0
+  AND runner_cost_batches > 0
+  AND runner_cost_saved_work_per_batch > 0
+  AND runner_cost_selected_accelerated_runner
+  AND execution_body='generated-machine-code'
 ----
 1
 
@@ -597,7 +613,7 @@ query I
 SELECT sum(k)
 FROM (
     SELECT j + 3 AS k
-    FROM (SELECT i::BIGINT + 7 AS j FROM range(1000000) tbl(i))
+    FROM (SELECT i + 7 AS j FROM jit_auto_projection_input)
 ) t
 ----
 500009500000
@@ -607,23 +623,440 @@ SELECT count(*) > 0
 FROM duckdb_jit_events()
 WHERE backend_name='sljit'
   AND target='region'
-  AND status='skipped'
-  AND execution_mode='unsupported'
-  AND region_execution_form='none'
-  AND policy_decision='auto'
-  AND candidate_id IS NULL
-  AND admission_shape_key IS NULL
-  AND admission_rule_present IS NULL
-  AND admission_min_cardinality IS NULL
-  AND admission_score IS NULL
-  AND admission_proof IS NULL
-  AND decision_time_us >= 0
-  AND compile_time_us = 0
-  AND code_size = 0
-  AND reason LIKE '%execution_region_policy=auto skips pipeline before graph lowering%'
-  AND reason LIKE '%backend has no measured auto admission policy%'
+  AND phase='compile'
+  AND status='compiled'
+  AND requested_policy='auto'
+  AND selected_runner='compiled_vectorized'
+  AND candidate_id IS NOT NULL
+  AND candidate_sink_kind='ungrouped-aggregate-update'
+  AND runner_cost_profile
+  AND execution_body='generated-machine-code'
+  AND runner_cost_accelerated_stage_count > 0
+  AND runner_cost_expression_cost > 0
+  AND runner_cost_batches > 0
+  AND runner_cost_saved_work_per_batch > 0
+  AND runner_cost_accelerated_runner_benefit > runner_cost_required_benefit
+  AND runner_cost_selected_accelerated_runner
 ----
 1
+
+statement ok
+SET jit_policy='off'
+
+statement ok
+CREATE TEMP TABLE jit_auto_complex_projection_input AS
+SELECT
+    i::BIGINT AS a,
+    (i + 1)::BIGINT AS b,
+    (i + 2)::BIGINT AS c,
+    (i + 3)::BIGINT AS d
+FROM range(1000000) tbl(i)
+
+statement ok
+SET jit_policy='force'
+
+statement ok
+CREATE TEMP TABLE jit_auto_complex_projection_baseline AS
+SELECT coalesce(max(event_id), 0) AS base_event_id FROM duckdb_jit_events()
+
+statement ok
+CREATE TEMP TABLE jit_auto_complex_projection_output AS
+SELECT CAST(((((a * 3) + (b * 5) - (c * 7) + (d * 11)) * 13)
+    + (((a - b + c) * 17) - ((a + d) * 19))
+    + (((b - c + d) * 23) - ((a - d) * 29))
+    + (((a * 31) - (b * 37) + (c * 41) - (d * 43))
+    + (((a + b + c + d) * 47) - ((a - c) * 53)))) AS BIGINT) AS v
+FROM jit_auto_complex_projection_input
+
+query I
+SELECT count(*) FROM jit_auto_complex_projection_output
+----
+1000000
+
+query I
+SELECT count(*) > 0
+FROM duckdb_jit_events(), jit_auto_complex_projection_baseline
+WHERE event_id > base_event_id
+  AND backend_name='sljit'
+  AND target='region'
+  AND phase='compile'
+  AND status='compiled'
+  AND requested_policy='force'
+  AND execution_mode='native'
+  AND execution_body='generated-machine-code'
+  AND candidate_filter_count=0
+  AND candidate_projection_count=1
+  AND candidate_has_sink
+----
+1
+
+statement ok
+SET jit_policy='off'
+
+statement ok
+CREATE TEMP TABLE jit_auto_complex_sum_reference AS
+SELECT sum(CAST(((((a * 3) + (b * 5) - (c * 7) + (d * 11)) * 13)
+    + (((a - b + c) * 17) - ((a + d) * 19))
+    + (((b - c + d) * 23) - ((a - d) * 29))
+    + (((a * 31) - (b * 37) + (c * 41) - (d * 43))
+    + (((a + b + c + d) * 47) - ((a - c) * 53)))) AS BIGINT)) AS v
+FROM jit_auto_complex_projection_input
+
+statement ok
+SET jit_policy='force'
+
+statement ok
+SET jit_dump_ir=true
+
+statement ok
+CREATE TEMP TABLE jit_auto_complex_sum_baseline AS
+SELECT coalesce(max(event_id), 0) AS base_event_id FROM duckdb_jit_events()
+
+statement ok
+CREATE TEMP TABLE jit_auto_complex_sum_output AS
+SELECT sum(CAST(((((a * 3) + (b * 5) - (c * 7) + (d * 11)) * 13)
+    + (((a - b + c) * 17) - ((a + d) * 19))
+    + (((b - c + d) * 23) - ((a - d) * 29))
+    + (((a * 31) - (b * 37) + (c * 41) - (d * 43))
+    + (((a + b + c + d) * 47) - ((a - c) * 53)))) AS BIGINT)) AS v
+FROM jit_auto_complex_projection_input
+
+query I
+SELECT CASE WHEN
+    (SELECT v FROM jit_auto_complex_sum_output) =
+    (SELECT v FROM jit_auto_complex_sum_reference)
+THEN 1 ELSE 0 END
+----
+1
+
+query I
+SELECT count(*) > 0
+FROM duckdb_jit_events(), jit_auto_complex_sum_baseline
+WHERE event_id > base_event_id
+  AND backend_name='sljit'
+  AND target='region'
+  AND phase='compile'
+  AND status='compiled'
+  AND requested_policy='force'
+  AND candidate_sink_kind='ungrouped-aggregate-update'
+  AND execution_mode='native'
+  AND execution_body='generated-machine-code'
+  AND candidate_filter_count=0
+  AND candidate_projection_count=1
+  AND candidate_has_sink
+  AND ir LIKE '%aggregate_update(kind=ungrouped%'
+----
+1
+
+statement ok
+SET jit_policy='auto'
+
+statement ok
+CREATE TEMP TABLE jit_auto_simple_sum_baseline AS
+SELECT coalesce(max(event_id), 0) AS base_event_id FROM duckdb_jit_events()
+
+query I
+SELECT sum(a + b) FROM jit_auto_complex_projection_input
+----
+1000000000000
+
+query I
+SELECT count(*) > 0
+FROM duckdb_jit_events(), jit_auto_simple_sum_baseline
+WHERE event_id > base_event_id
+  AND backend_name='sljit'
+  AND target='region'
+  AND requested_policy='auto'
+  AND phase='compile'
+  AND status='compiled'
+  AND candidate_sink_kind='ungrouped-aggregate-update'
+  AND candidate_estimated_cardinality=1000000
+  AND selected_runner='compiled_vectorized'
+  AND runner_cost_profile
+  AND runner_cost_accelerated_runner_benefit > runner_cost_required_benefit
+  AND runner_cost_startup_cost > 0
+  AND runner_cost_accelerated_stage_count=1
+  AND runner_cost_expression_cost > 0
+  AND runner_cost_batches > 0
+  AND runner_cost_saved_work_per_batch > 0
+  AND runner_cost_selected_accelerated_runner
+  AND execution_body='generated-machine-code'
+----
+1
+
+statement ok
+SET jit_dump_ir=false
+
+statement ok
+SET jit_policy='off'
+
+statement ok
+CREATE TEMP TABLE jit_auto_branchy_projection_input AS
+SELECT
+    CASE WHEN i % 97 = 0 THEN NULL ELSE (i % 100000)::BIGINT END AS a,
+    CASE WHEN i % 89 = 0 THEN NULL ELSE ((i + 11) % 100000)::BIGINT END AS b,
+    ((i + 23) % 100000)::BIGINT AS c,
+    ((i + 37) % 100000)::BIGINT AS d,
+    ((i + 53) % 100000)::BIGINT AS e
+FROM range(1000000) tbl(i)
+
+statement ok
+SET jit_policy='force'
+
+statement ok
+SET jit_dump_ir=true
+
+statement ok
+CREATE TEMP TABLE jit_auto_branchy_projection_baseline AS
+SELECT coalesce(max(event_id), 0) AS base_event_id FROM duckdb_jit_events()
+
+statement ok
+CREATE TEMP TABLE jit_auto_branchy_projection_output AS
+SELECT CASE
+    WHEN a IS NULL THEN coalesce(b, 0) + c * 3 - d
+    WHEN b IS NULL THEN a * 5 - c + e
+    WHEN a > b AND (c < d OR e > 50000) THEN
+        (((a * 3 + b * 5 - c * 7 + d * 11) * 13)
+         + ((a - b + c) * 17)
+         - ((a + d) * 19)
+         + ((b - c + e) * 23))
+    WHEN a < c OR d >= e THEN
+        ((a * 31 - b * 37 + c * 41 - d * 43)
+         + ((a + b + c + d) * 47)
+         - ((a - c) * 53)
+         + ((e - b) * 59))
+    ELSE
+        ((a + b) * 61 - (c + d) * 67 + e * 71)
+END AS v
+FROM jit_auto_branchy_projection_input
+
+query II
+SELECT count(*), sum(v) FROM jit_auto_branchy_projection_output
+----
+1000000	8813212065977
+
+query I
+SELECT count(*) = 0
+FROM duckdb_jit_events(), jit_auto_branchy_projection_baseline
+WHERE event_id > base_event_id
+  AND backend_name='sljit'
+  AND target='region'
+  AND phase='compile'
+  AND status='compiled'
+  AND execution_mode='native'
+  AND execution_body='generated-machine-code'
+  AND requested_policy='auto'
+----
+1
+
+query I
+SELECT count(*) > 0
+FROM duckdb_jit_events(), jit_auto_branchy_projection_baseline
+WHERE event_id > base_event_id
+  AND backend_name='sljit'
+  AND target='region'
+  AND phase='compile'
+  AND status='compiled'
+  AND execution_mode='native'
+  AND execution_body='generated-machine-code'
+  AND requested_policy='force'
+  AND candidate_filter_count=0
+  AND candidate_projection_count=1
+  AND candidate_has_sink
+  AND ir LIKE '%case<%'
+----
+1
+
+statement ok
+CREATE TEMP TABLE jit_auto_nullable_arithmetic_sum_baseline AS
+SELECT coalesce(max(event_id), 0) AS base_event_id FROM duckdb_jit_events()
+
+query I
+SELECT sum(CAST(((((a * 3) + (b * 5) - (c * 7) + (d * 11)) * 13)
+    + (((a - b + c) * 17) - ((a + d) * 19))
+    + (((b - c + d) * 23) - ((a - d) * 29))
+    + (((a * 31) - (b * 37) + (c * 41) - (d * 43))
+    + (((a + b + c + d) * 47) - ((a - c) * 53)))) AS BIGINT))
+FROM jit_auto_branchy_projection_input
+----
+16537664497760
+
+query I
+SELECT count(*) > 0
+FROM duckdb_jit_events(), jit_auto_nullable_arithmetic_sum_baseline
+WHERE event_id > base_event_id
+  AND backend_name='sljit'
+  AND target='region'
+  AND phase='compile'
+  AND status='compiled'
+  AND requested_policy='force'
+  AND candidate_sink_kind='ungrouped-aggregate-update'
+  AND execution_mode='native'
+  AND execution_body='generated-machine-code'
+  AND candidate_filter_count=0
+  AND candidate_projection_count=1
+  AND candidate_has_sink
+  AND ir LIKE '%aggregate_update(kind=ungrouped%'
+----
+1
+
+query I
+SELECT count(*) = 0
+FROM duckdb_jit_events(), jit_auto_nullable_arithmetic_sum_baseline
+WHERE event_id > base_event_id
+  AND backend_name='sljit'
+  AND target='region'
+  AND status='skipped'
+  AND requested_policy='auto'
+  AND candidate_node_count > 0
+  AND candidate_sink_kind='ungrouped-aggregate-update'
+  AND decision_time_us >= 0
+  AND compile_time_us = 0
+  AND backend_analysis_time_us >= 0
+  AND blocker='duckdb_selected_vectorized'
+----
+1
+
+statement ok
+SET jit_policy='force'
+
+statement ok
+CREATE TEMP TABLE jit_force_branchy_projection_baseline AS
+SELECT coalesce(max(event_id), 0) AS base_event_id FROM duckdb_jit_events()
+
+statement ok
+CREATE TEMP TABLE jit_force_branchy_projection_output AS
+SELECT CASE
+    WHEN a IS NULL THEN coalesce(b, 0) + c * 3 - d
+    WHEN b IS NULL THEN a * 5 - c + e
+    WHEN a > b AND (c < d OR e > 50000) THEN
+        (((a * 3 + b * 5 - c * 7 + d * 11) * 13)
+         + ((a - b + c) * 17)
+         - ((a + d) * 19)
+         + ((b - c + e) * 23))
+    WHEN a < c OR d >= e THEN
+        ((a * 31 - b * 37 + c * 41 - d * 43)
+         + ((a + b + c + d) * 47)
+         - ((a - c) * 53)
+         + ((e - b) * 59))
+    ELSE
+        ((a + b) * 61 - (c + d) * 67 + e * 71)
+END AS v
+FROM jit_auto_branchy_projection_input
+
+query II
+SELECT count(*), sum(v) FROM jit_force_branchy_projection_output
+----
+1000000	8813212065977
+
+query I
+SELECT count(*) > 0
+FROM duckdb_jit_events(), jit_force_branchy_projection_baseline
+WHERE event_id > base_event_id
+  AND backend_name='sljit'
+  AND target='region'
+  AND phase='compile'
+  AND status='compiled'
+  AND execution_mode='native'
+  AND execution_body='generated-machine-code'
+  AND requested_policy='force'
+  AND candidate_filter_count=0
+  AND candidate_projection_count=1
+  AND candidate_has_sink
+  AND ir LIKE '%case<%'
+  AND ir LIKE '%coalesce<%'
+----
+1
+
+statement ok
+SET jit_policy='force'
+
+statement ok
+SET jit_dump_ir=true
+
+statement ok
+CREATE TEMP TABLE jit_auto_branchy_sum_baseline AS
+SELECT coalesce(max(event_id), 0) AS base_event_id FROM duckdb_jit_events()
+
+query I
+SELECT sum(CASE
+    WHEN a IS NULL THEN coalesce(b, 0) + c * 3 - d
+    WHEN b IS NULL THEN a * 5 - c + e
+    WHEN a > b AND (c < d OR e > 50000) THEN
+        (((a * 3 + b * 5 - c * 7 + d * 11) * 13)
+         + ((a - b + c) * 17)
+         - ((a + d) * 19)
+         + ((b - c + e) * 23))
+    WHEN a < c OR d >= e THEN
+        ((a * 31 - b * 37 + c * 41 - d * 43)
+         + ((a + b + c + d) * 47)
+         - ((a - c) * 53)
+         + ((e - b) * 59))
+    ELSE
+        ((a + b) * 61 - (c + d) * 67 + e * 71)
+END)
+FROM jit_auto_branchy_projection_input
+----
+8813212065977
+
+query I
+SELECT count(*) = 0
+FROM duckdb_jit_events(), jit_auto_branchy_sum_baseline
+WHERE event_id > base_event_id
+  AND backend_name='sljit'
+  AND target='region'
+  AND phase='compile'
+  AND status='compiled'
+  AND execution_mode='native'
+  AND execution_body='generated-machine-code'
+  AND requested_policy='auto'
+----
+1
+
+query I
+SELECT count(*) > 0
+FROM duckdb_jit_events(), jit_auto_branchy_sum_baseline
+WHERE event_id > base_event_id
+  AND backend_name='sljit'
+  AND target='region'
+  AND phase='compile'
+  AND status='compiled'
+  AND execution_mode='native'
+  AND execution_body='generated-machine-code'
+  AND requested_policy='force'
+  AND candidate_filter_count=0
+  AND candidate_projection_count=1
+  AND candidate_has_sink
+  AND ir LIKE '%case<%'
+----
+1
+
+query I
+SELECT count(*) = 0
+FROM duckdb_jit_events(), jit_auto_branchy_sum_baseline
+WHERE event_id > base_event_id
+  AND backend_name='sljit'
+  AND target='region'
+  AND status='skipped'
+  AND requested_policy='auto'
+  AND candidate_node_count > 0
+  AND candidate_sink_kind='ungrouped-aggregate-update'
+  AND decision_time_us >= 0
+  AND compile_time_us = 0
+  AND backend_analysis_time_us >= 0
+  AND blocker='duckdb_selected_vectorized'
+----
+1
+
+statement ok
+SET jit_policy='auto'
+
+statement ok
+SET jit_dump_ir=false
+
+statement ok
+CREATE TEMP TABLE jit_auto_filter_projection_input AS
+SELECT i::BIGINT AS i FROM range(1000000) tbl(i)
 
 statement ok
 CREATE TEMP TABLE jit_auto_filter_projection_baseline AS
@@ -632,8 +1065,8 @@ SELECT coalesce(max(event_id), 0) AS base_event_id FROM duckdb_jit_events()
 query I
 SELECT sum(a + b)
 FROM (
-    SELECT i::BIGINT AS a, i::BIGINT + 7 AS b
-    FROM range(1000000) tbl(i)
+    SELECT i AS a, i + 7 AS b
+    FROM jit_auto_filter_projection_input
     WHERE i > 500000
 ) t
 ----
@@ -645,21 +1078,15 @@ FROM duckdb_jit_events(), jit_auto_filter_projection_baseline
 WHERE event_id > base_event_id
   AND backend_name='sljit'
   AND target='region'
+  AND requested_policy='auto'
   AND status='skipped'
-  AND execution_mode='unsupported'
-  AND region_execution_form='none'
-  AND policy_decision='auto'
-  AND candidate_id IS NULL
-  AND admission_shape_key IS NULL
-  AND admission_rule_present IS NULL
-  AND admission_min_cardinality IS NULL
-  AND admission_score IS NULL
-  AND admission_proof IS NULL
-  AND decision_time_us >= 0
-  AND compile_time_us = 0
-  AND code_size = 0
-  AND reason LIKE '%execution_region_policy=auto skips pipeline before graph lowering%'
-  AND reason LIKE '%backend has no measured auto admission policy%'
+  AND candidate_id IS NOT NULL
+  AND candidate_sink_kind='ungrouped-aggregate-update'
+  AND selected_runner='vectorized'
+  AND runner_cost_profile
+  AND runner_cost_accelerated_runner_benefit <= runner_cost_required_benefit
+  AND NOT runner_cost_selected_accelerated_runner
+  AND blocker='duckdb_selected_vectorized'
 ----
 1
 
@@ -721,12 +1148,268 @@ WHERE event_id > base_event_id
   AND region_execution_form='fused'
   AND execution_body='generated-machine-code'
   AND code_size>0
-  AND reason LIKE '%generated typed projection%'
-  AND reason LIKE '%sink:BATCH_CREATE_TABLE_AS:native:append sink protocol%'
-  AND reason LIKE '%requires=materialization-append-sink%'
   AND ir LIKE '%DECIMAL%'
 ----
 1
+
+statement ok
+SET threads=12
+
+statement ok
+CREATE TEMP TABLE jit_parallel_decimal_input AS
+SELECT i,
+       (i % 10000)::DECIMAL(15,2) AS ext_price,
+       (i % 10)::DECIMAL(15,2) AS discount,
+       (i % 7)::DECIMAL(15,2) AS quantity,
+       (i % 5)::DECIMAL(15,2) AS tax
+FROM range(200000) tbl(i)
+
+statement ok
+CREATE TEMP TABLE jit_parallel_decimal_baseline AS
+SELECT coalesce(max(event_id), 0) AS base_event_id FROM duckdb_jit_events()
+
+statement ok
+CREATE TEMP TABLE jit_parallel_decimal_output AS
+SELECT i,
+       (ext_price * (100.00::DECIMAL(16,2) - discount))
+       + (quantity * (tax + 1.00::DECIMAL(16,2)))
+       - (discount * tax)
+       + (quantity * 3.00::DECIMAL(16,2))
+       + ((ext_price - quantity) * 2.00::DECIMAL(16,2))
+       - ((tax + discount) * 4.00::DECIMAL(16,2)) AS revenue
+FROM jit_parallel_decimal_input
+
+query III
+SELECT count(*), min(i), max(i) FROM jit_parallel_decimal_output
+----
+200000	0	199999
+
+query I
+SELECT count(*) > 0
+FROM duckdb_jit_events(), jit_parallel_decimal_baseline
+WHERE event_id > base_event_id
+  AND backend_name='sljit'
+  AND target='region'
+  AND status='compiled'
+  AND execution_mode='native'
+  AND region_execution_form='fused'
+  AND execution_body='generated-machine-code'
+  AND code_size>0
+  AND candidate_filter_count=0
+  AND candidate_projection_count=1
+  AND candidate_has_sink
+  AND ir LIKE '%DECIMAL%'
+----
+1
+
+statement ok
+SET threads=1
+
+statement ok
+CREATE TEMP TABLE jit_single_decimal_baseline AS
+SELECT coalesce(max(event_id), 0) AS base_event_id FROM duckdb_jit_events()
+
+statement ok
+CREATE TEMP TABLE jit_single_decimal_output AS
+SELECT i,
+       (ext_price * (100.00::DECIMAL(16,2) - discount))
+       + (quantity * (tax + 1.00::DECIMAL(16,2)))
+       - (discount * tax)
+       + (quantity * 3.00::DECIMAL(16,2))
+       + ((ext_price - quantity) * 2.00::DECIMAL(16,2))
+       - ((tax + discount) * 4.00::DECIMAL(16,2)) AS revenue
+FROM jit_parallel_decimal_input
+
+query I
+SELECT count(*) FROM jit_single_decimal_output
+----
+200000
+
+query I
+SELECT count(*) > 0
+FROM duckdb_jit_events(), jit_single_decimal_baseline
+WHERE event_id > base_event_id
+  AND backend_name='sljit'
+  AND target='region'
+  AND status='compiled'
+  AND execution_mode='native'
+  AND region_execution_form='fused'
+  AND execution_body='generated-machine-code'
+  AND code_size>0
+  AND candidate_filter_count=0
+  AND candidate_projection_count=1
+  AND candidate_has_sink
+  AND ir LIKE '%DECIMAL%'
+----
+1
+
+statement ok
+CREATE TEMP TABLE jit_typed_case_input AS
+SELECT *
+FROM (VALUES
+    (1::BIGINT, 1::BIGINT, 2::BIGINT, 3::BIGINT, 1::BIGINT),
+    (2::BIGINT, 2::BIGINT, 1::BIGINT, 5::BIGINT, 2::BIGINT),
+    (3::BIGINT, NULL::BIGINT, 1::BIGINT, 2::BIGINT, 1::BIGINT),
+    (4::BIGINT, 5::BIGINT, NULL::BIGINT, 3::BIGINT, 1::BIGINT),
+    (5::BIGINT, 3::BIGINT, 3::BIGINT, NULL::BIGINT, 1::BIGINT),
+    (6::BIGINT, 4::BIGINT, 2::BIGINT, 1::BIGINT, NULL::BIGINT)
+) tbl(id, a, b, c, d)
+
+statement ok
+SET enable_jit=false
+
+statement ok
+CREATE TEMP TABLE jit_typed_case_reference AS
+SELECT id,
+       CASE
+           WHEN a > b AND (c < a OR d = 1) THEN (a + b) * 3 - c
+           WHEN a < b THEN (b - a) * 5 + d
+           ELSE a + c - d
+       END AS branchy_expr
+FROM jit_typed_case_input
+
+statement ok
+SET enable_jit=true
+
+statement ok
+SET jit_dump_ir=true
+
+statement ok
+CREATE TEMP TABLE jit_typed_case_baseline AS
+SELECT coalesce(max(event_id), 0) AS base_event_id FROM duckdb_jit_events()
+
+statement ok
+CREATE TEMP TABLE jit_typed_case_output AS
+SELECT id,
+       CASE
+           WHEN a > b AND (c < a OR d = 1) THEN (a + b) * 3 - c
+           WHEN a < b THEN (b - a) * 5 + d
+           ELSE a + c - d
+       END AS branchy_expr
+FROM jit_typed_case_input
+
+query I
+SELECT count(*)
+FROM jit_typed_case_reference ref
+JOIN jit_typed_case_output out USING (id)
+WHERE ref.branchy_expr IS DISTINCT FROM out.branchy_expr
+----
+0
+
+query I
+SELECT count(*) > 0
+FROM duckdb_jit_events(), jit_typed_case_baseline
+WHERE event_id > base_event_id
+  AND backend_name='sljit'
+  AND target='region'
+  AND status='compiled'
+  AND execution_mode='native'
+  AND region_execution_form='fused'
+  AND execution_body='generated-machine-code'
+  AND code_size>0
+  AND candidate_filter_count=0
+  AND candidate_projection_count=1
+  AND candidate_has_sink
+  AND ir LIKE '%case%'
+  AND ir LIKE '%conjunction%'
+  AND ir LIKE '%physical=INT64%'
+----
+1
+
+query I
+SELECT count(*) = 0
+FROM duckdb_jit_events(), jit_typed_case_baseline
+WHERE event_id > base_event_id
+  AND backend_name='sljit'
+  AND target='region'
+  AND status='unsupported'
+  AND execution_mode='unsupported'
+  AND candidate_filter_count=0
+  AND candidate_projection_count=1
+  AND candidate_has_sink
+  AND ir LIKE '%case<%'
+----
+1
+
+statement ok
+SET jit_dump_ir=false
+
+statement ok
+SET enable_jit=false
+
+query I
+SELECT count(*) = 0
+FROM jit_parallel_decimal_output out
+JOIN jit_parallel_decimal_input inp USING (i)
+WHERE out.revenue <> (
+      (inp.ext_price * (100.00::DECIMAL(16,2) - inp.discount))
+      + (inp.quantity * (inp.tax + 1.00::DECIMAL(16,2)))
+      - (inp.discount * inp.tax)
+      + (inp.quantity * 3.00::DECIMAL(16,2))
+      + ((inp.ext_price - inp.quantity) * 2.00::DECIMAL(16,2))
+      - ((inp.tax + inp.discount) * 4.00::DECIMAL(16,2)))
+----
+1
+
+statement ok
+SET enable_jit=true
+
+statement ok
+SET jit_policy='force'
+
+statement ok
+SET jit_dump_ir=true
+
+statement ok
+CREATE TEMP TABLE jit_grouped_int_input AS
+SELECT (i % 16)::TINYINT AS k,
+       i::BIGINT AS v
+FROM range(100000) tbl(i)
+
+statement ok
+CREATE TEMP TABLE jit_grouped_int_baseline AS
+SELECT coalesce(max(event_id), 0) AS base_event_id FROM duckdb_jit_events()
+
+statement ok
+CREATE TEMP TABLE jit_grouped_int_output AS
+SELECT k, sum(v) AS s
+FROM jit_grouped_int_input
+GROUP BY k
+
+query I
+SELECT count(*) FROM jit_grouped_int_output
+----
+16
+
+query I
+SELECT sum(s)::BIGINT FROM jit_grouped_int_output
+----
+4999950000
+
+query I
+SELECT count(*) > 0
+FROM duckdb_jit_events(), jit_grouped_int_baseline
+WHERE event_id > base_event_id
+  AND backend_name='sljit'
+  AND target='region'
+  AND status='compiled'
+  AND execution_mode='native'
+  AND region_execution_form='fused'
+  AND execution_body='generated-machine-code'
+  AND candidate_sink_kind='perfect-hash-aggregate-update'
+  AND candidate_filter_count=0
+  AND candidate_projection_count=1
+  AND candidate_has_sink
+  AND ir LIKE '%aggregate_update(kind=perfect-hash%'
+  AND ir LIKE '%payload_update=generated-primitive%'
+  AND ir LIKE '%grouped_state_lookup=generated-perfect-hash%'
+  AND ir LIKE '%primitive_payloads=native:reference%'
+  AND ir NOT LIKE '%execution=vectorized-operator-boundary%'
+----
+1
+
+statement ok
+SET jit_dump_ir=true
 
 statement ok
 CREATE TEMP TABLE jit_grouped_batch_baseline AS
@@ -752,16 +1435,120 @@ WHERE event_id > base_event_id
   AND execution_mode='native'
   AND region_execution_form='fused'
   AND execution_body='generated-machine-code'
-  AND code_size>0
   AND candidate_sink_kind='perfect-hash-aggregate-update'
-  AND reason LIKE '%native aggregate update sink protocol%'
-  AND reason LIKE '%perfect-hash-aggregate-native-state-update%'
-  AND reason LIKE '%aggregate_state_update_contract_status=ready%'
-  AND ir LIKE '%op1=aggregate_update(kind=perfect-hash%'
-  AND ir LIKE '%grouped_state_addresses=true%'
+  AND candidate_filter_count=0
+  AND candidate_projection_count=1
+  AND candidate_has_sink
+  AND ir LIKE '%aggregate_update(kind=perfect-hash%'
+  AND ir LIKE '%features=perfect-hash-aggregate-update+table-scan-source%'
+  AND ir LIKE '%payload_update=generated-primitive%'
+  AND ir LIKE '%grouped_state_lookup=generated-perfect-hash%'
+  AND ir LIKE '%primitive_payloads=native:reference%'
+  AND ir NOT LIKE '%execution=vectorized-operator-boundary%'
   AND ir LIKE '%native_aggregate_state_update_contract_status=ready%'
-  AND reason NOT LIKE '%missing-native-state-update-contract%'
-  AND reason NOT LIKE '%perfect-hash-aggregate-native-state-update-boundary%'
+----
+1
+
+statement ok
+SET threads=1
+
+statement ok
+SET jit_policy='off'
+
+statement ok
+CREATE TEMP TABLE jit_source_filter_probe_line AS
+SELECT i::BIGINT AS k,
+       CASE WHEN i % 3 = 0 THEN 'AIR'
+            WHEN i % 3 = 1 THEN 'AIR REG'
+            ELSE 'TRUCK' END AS mode,
+       CASE WHEN i % 5 IN (0, 1) THEN 'DELIVER IN PERSON'
+            WHEN i % 5 = 2 THEN 'COLLECT COD'
+            ELSE 'NONE' END AS instruct,
+       CASE WHEN i % 7 < 5 THEN ((i % 30) + 1)::DECIMAL(15,2)
+            ELSE 50.00::DECIMAL(15,2) END AS qty,
+       ((i % 100) + 1)::DECIMAL(15,2) AS price
+FROM range(100000) tbl(i)
+
+statement ok
+CREATE TEMP TABLE jit_source_filter_probe_part AS
+SELECT i::BIGINT AS k
+FROM range(1000) tbl(i)
+
+statement ok
+CREATE TEMP TABLE jit_source_filter_probe_reference AS
+SELECT sum(1.00::DECIMAL(15,2)) AS cnt,
+       sum(qty)::DECIMAL(18,2) AS qty_sum,
+       sum(price)::DECIMAL(18,2) AS price_sum
+FROM jit_source_filter_probe_line, jit_source_filter_probe_part
+WHERE jit_source_filter_probe_part.k = jit_source_filter_probe_line.k
+  AND mode IN ('AIR', 'AIR REG')
+  AND instruct = 'DELIVER IN PERSON'
+  AND (qty <= 11 OR (qty >= 10 AND qty <= 20) OR (qty >= 20 AND qty <= 30))
+
+statement ok
+SET jit_policy='force'
+
+statement ok
+SET jit_dump_ir=true
+
+statement ok
+CREATE TEMP TABLE jit_source_filter_probe_baseline AS
+SELECT coalesce(max(event_id), 0) AS base_event_id FROM duckdb_jit_events()
+
+statement ok
+CREATE TEMP TABLE jit_source_filter_probe_output AS
+SELECT sum(1.00::DECIMAL(15,2)) AS cnt,
+       sum(qty)::DECIMAL(18,2) AS qty_sum,
+       sum(price)::DECIMAL(18,2) AS price_sum
+FROM jit_source_filter_probe_line, jit_source_filter_probe_part
+WHERE jit_source_filter_probe_part.k = jit_source_filter_probe_line.k
+  AND mode IN ('AIR', 'AIR REG')
+  AND instruct = 'DELIVER IN PERSON'
+  AND (qty <= 11 OR (qty >= 10 AND qty <= 20) OR (qty >= 20 AND qty <= 30))
+
+query I
+SELECT count(*) = 0
+FROM (
+    (SELECT * FROM jit_source_filter_probe_output
+     EXCEPT
+     SELECT * FROM jit_source_filter_probe_reference)
+    UNION ALL
+    (SELECT * FROM jit_source_filter_probe_reference
+     EXCEPT
+     SELECT * FROM jit_source_filter_probe_output)
+) diff
+----
+1
+
+query TTT
+SELECT cnt::VARCHAR, qty_sum::VARCHAR, price_sum::VARCHAR
+FROM jit_source_filter_probe_output
+----
+193.00	2425.00	9325.00
+
+query I
+SELECT count(*) > 0
+FROM duckdb_jit_events(), jit_source_filter_probe_baseline
+WHERE event_id > base_event_id
+  AND backend_name='sljit'
+  AND target='region'
+  AND status='compiled'
+  AND execution_mode='native'
+  AND region_execution_form='fused'
+  AND execution_body='generated-machine-code'
+  AND selected_uses_scan_filters
+  AND candidate_uses_scan_filters
+  AND candidate_has_source
+  AND candidate_source_filter_count > 0
+  AND candidate_filter_count=2
+  AND candidate_projection_count=2
+  AND candidate_operator_count > 0
+  AND candidate_has_sink
+  AND candidate_source_filter_count=3
+  AND candidate_filter_count=2
+  AND candidate_projection_count=2
+  AND ir LIKE '%hash_join_probe%'
+  AND ir LIKE '%aggregate_update(kind=ungrouped%'
 ----
 1
 

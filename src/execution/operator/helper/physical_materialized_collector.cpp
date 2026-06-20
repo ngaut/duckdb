@@ -60,8 +60,8 @@ bool PhysicalMaterializedCollector::BindExecutionSink(ExecutionContext &context,
 	binding.ready = true;
 	binding.append_sink.ready = true;
 	binding.append_sink.state = make_shared_ptr<MaterializedCollectorExecutionRegionSinkState>(state);
-	binding.append_sink.blocker = "none";
-	binding.blocker = "none";
+	binding.append_sink.blocker.clear();
+	binding.blocker.clear();
 	return true;
 }
 

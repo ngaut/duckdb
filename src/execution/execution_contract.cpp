@@ -4,6 +4,7 @@
 #include "duckdb/common/enum_util.hpp"
 #include "duckdb/common/string_util.hpp"
 #include "duckdb/common/types/row/tuple_data_layout.hpp"
+#include "duckdb/execution/execution_aggregate_runtime.hpp"
 #include "duckdb/execution/execution_region_lowering.hpp"
 #include "duckdb/execution/operator/aggregate/physical_hash_aggregate.hpp"
 #include "duckdb/execution/operator/aggregate/physical_perfecthash_aggregate.hpp"
@@ -114,18 +115,6 @@ static vector<idx_t> BuildExecutionContractTableScanOutputProjectionMap(const Ph
 	return result;
 }
 
-static vector<idx_t> BuildExecutionContractTableScanFilterColumnMap(const PhysicalTableScan &scan) {
-	vector<idx_t> result;
-	if (!scan.table_filters) {
-		return result;
-	}
-	result.reserve(scan.table_filters->FilterCount());
-	for (auto &entry : *scan.table_filters) {
-		result.push_back(entry.GetIndex().GetIndex());
-	}
-	return result;
-}
-
 static ExecutionRegionNativeGroupedStateContract
 BuildExecutionContractNativeGroupedStateContract(ExecutionRegionAggregateOperatorKind kind) {
 	ExecutionRegionNativeGroupedStateContract result;
@@ -170,7 +159,7 @@ static ExecutionRegionNativeOperatorContract BuildExecutionContractNativeOperato
 
 static void MarkExecutionContractNativeOperatorContractReady(ExecutionRegionNativeOperatorContract &contract) {
 	contract.status = ExecutionRegionStateContractStatus::READY;
-	contract.blocker = "none";
+	contract.blocker.clear();
 }
 
 static void MarkExecutionContractNativeOperatorContractBlocked(ExecutionRegionNativeOperatorContract &contract,
@@ -181,13 +170,17 @@ static void MarkExecutionContractNativeOperatorContractBlocked(ExecutionRegionNa
 
 static void MarkExecutionContractNativeStateScanContractReady(ExecutionRegionNativeStateScanContract &contract) {
 	contract.status = ExecutionRegionStateContractStatus::READY;
-	contract.blocker = "none";
+	contract.blocker.clear();
 }
 
 static void MarkExecutionContractNativeStateScanContractBlocked(ExecutionRegionNativeStateScanContract &contract,
                                                                 string blocker) {
 	contract.status = ExecutionRegionStateContractStatus::BLOCKED;
 	contract.blocker = std::move(blocker);
+}
+
+static string ExecutionContractBlockerForReason(const string &blocker) {
+	return blocker.empty() ? "none" : blocker;
 }
 
 static void AppendExecutionContractNativeStateScanReason(string &reason,
@@ -199,7 +192,7 @@ static void AppendExecutionContractNativeStateScanReason(string &reason,
 	reason += ExecutionRegionStateContractStatusToString(contract.status);
 	reason += ";native_state_scan_required_capability=" + contract.required_capability;
 	reason += ";native_state_scan_contract_version=" + contract.contract_version;
-	reason += ";native_state_scan_blocker=" + contract.blocker;
+	reason += ";native_state_scan_blocker=" + ExecutionContractBlockerForReason(contract.blocker);
 }
 
 static void AppendExecutionContractNativeGroupedStateReason(string &reason,
@@ -211,7 +204,7 @@ static void AppendExecutionContractNativeGroupedStateReason(string &reason,
 	reason += ExecutionRegionStateContractStatusToString(contract.status);
 	reason += ";native_grouped_state_required_capability=" + contract.required_capability;
 	reason += ";native_grouped_state_contract_version=" + contract.contract_version;
-	reason += ";native_grouped_state_blocker=" + contract.blocker;
+	reason += ";native_grouped_state_blocker=" + ExecutionContractBlockerForReason(contract.blocker);
 }
 
 static void AppendExecutionContractNativeOperatorReason(string &reason,
@@ -224,7 +217,7 @@ static void AppendExecutionContractNativeOperatorReason(string &reason,
 	reason += ExecutionRegionStateContractStatusToString(contract.status);
 	reason += ";" + prefix + "_required_capability=" + contract.required_capability;
 	reason += ";" + prefix + "_contract_version=" + contract.contract_version;
-	reason += ";" + prefix + "_blocker=" + contract.blocker;
+	reason += ";" + prefix + "_blocker=" + ExecutionContractBlockerForReason(contract.blocker);
 }
 
 static void AppendExecutionContractGroupedStateLayoutReason(string &reason,
@@ -464,6 +457,12 @@ static ExecutionCompiledStageContract BuildExecutionCompiledSourceStage(const Ex
 	return stage;
 }
 
+static bool ExecutionHashJoinProbeIsExecutableWork(const ExecutionRegionHashJoinContract &contract) {
+	return contract.native_probe_contract.status == ExecutionRegionStateContractStatus::READY &&
+	       contract.equality_condition_count > 0 && contract.equality_condition_count <= contract.condition_count &&
+	       contract.native_probe_output_mode != ExecutionHashJoinProbeOutputMode::NONE;
+}
+
 static ExecutionCompiledStageContract
 BuildExecutionCompiledOperatorStage(const ExecutionRegionOperatorInfo &operator_info) {
 	ExecutionCompiledStageContract stage;
@@ -476,6 +475,7 @@ BuildExecutionCompiledOperatorStage(const ExecutionRegionOperatorInfo &operator_
 		        ? ExecutionRegionStageExecutionKind::NATIVE_CONTRACT
 		        : ExecutionRegionStageExecutionKind::MISSING_CONTRACT;
 		stage.drain = ExecutionCompiledDrainKind::ZERO_OR_MANY_OUTPUT;
+		stage.executable_work = ExecutionHashJoinProbeIsExecutableWork(operator_info.hash_join_contract);
 		stage.required_capability = operator_info.hash_join_contract.native_probe_contract.required_capability;
 		stage.blocker = operator_info.hash_join_contract.native_probe_contract.blocker;
 		break;
@@ -487,6 +487,7 @@ BuildExecutionCompiledOperatorStage(const ExecutionRegionOperatorInfo &operator_
 		                      ? ExecutionRegionStageExecutionKind::NATIVE_CONTRACT
 		                      : ExecutionRegionStageExecutionKind::MISSING_CONTRACT;
 		stage.drain = ExecutionCompiledDrainKind::ZERO_OR_MANY_OUTPUT;
+		stage.executable_work = false;
 		stage.required_capability = operator_info.nested_loop_join_contract.native_probe_contract.required_capability;
 		stage.blocker = operator_info.nested_loop_join_contract.native_probe_contract.blocker;
 		break;
@@ -499,6 +500,18 @@ BuildExecutionCompiledOperatorStage(const ExecutionRegionOperatorInfo &operator_
 	}
 	stage.ir = operator_info.reason;
 	return stage;
+}
+
+static bool ExecutionCompiledSinkIsExecutableWork(const ExecutionRegionSinkInfo &sink) {
+	switch (sink.kind) {
+	case ExecutionRegionSinkKind::HASH_JOIN_BUILD:
+	case ExecutionRegionSinkKind::HASH_AGGREGATE_UPDATE:
+	case ExecutionRegionSinkKind::PERFECT_HASH_AGGREGATE_UPDATE:
+	case ExecutionRegionSinkKind::UNGROUPED_AGGREGATE_UPDATE:
+		return true;
+	default:
+		return false;
+	}
 }
 
 static ExecutionRegionStateContractStatus ExecutionCompiledSinkStatus(const ExecutionRegionSinkInfo &sink) {
@@ -582,6 +595,7 @@ static ExecutionCompiledStageContract BuildExecutionCompiledSinkStage(const Exec
 	                      ? ExecutionRegionStageExecutionKind::NATIVE_CONTRACT
 	                      : ExecutionRegionStageExecutionKind::MISSING_CONTRACT;
 	stage.drain = ExecutionCompiledDrainKind::NONE;
+	stage.executable_work = ExecutionCompiledSinkIsExecutableWork(sink);
 	if (sink.kind == ExecutionRegionSinkKind::HASH_JOIN_BUILD) {
 		stage.required_capability = sink.hash_join_contract.native_build_contract.required_capability;
 		stage.blocker = sink.hash_join_contract.native_build_contract.blocker;
@@ -621,12 +635,14 @@ static string BuildExecutionCompiledContractIR(const ExecutionCompiledOperatorCo
 	result += ",sink=" + ExecutionContractBool(contract.HasSink());
 	result += ",state_scan=" + ExecutionContractBool(contract.HasStateScan());
 	result += ",zero_or_many_output=" + ExecutionContractBool(contract.HasZeroOrManyOutput());
+	result += ",executable_work=" + ExecutionContractBool(contract.HasExecutableWork());
 	for (idx_t stage_idx = 0; stage_idx < contract.stages.size(); stage_idx++) {
 		auto &stage = contract.stages[stage_idx];
 		result += ",stage" + std::to_string(stage_idx) +
 		          "=<operation=" + string(ExecutionCompiledContractKindToString(stage.operation));
 		result += ",execution=" + string(ExecutionRegionStageExecutionKindToString(stage.execution));
 		result += ",drain=" + string(ExecutionCompiledDrainKindToString(stage.drain));
+		result += ",executable_work=" + ExecutionContractBool(stage.executable_work);
 		if (!stage.required_capability.empty()) {
 			result += ",capability=" + stage.required_capability;
 		}
@@ -764,7 +780,7 @@ static string BuildExecutionContractHashJoinKeyBindingBlocker(const PhysicalHash
 			       "-key-not-reference;key_index=" + std::to_string(key_idx);
 		}
 	}
-	return "none";
+	return string();
 }
 
 static void AddExecutionContractHashJoinRegularLayout(ExecutionRegionHashJoinContract &result) {
@@ -906,7 +922,7 @@ static void AddExecutionContractHashJoinResidualExpression(const PhysicalHashJoi
 	residual->ir = "duckdb.expr typed-vector-ir;" + DescribeExecutionExpressionIR(*residual->root);
 	contract.residual_expression = std::move(*residual);
 	contract.residual_expression_ready = true;
-	contract.residual_expression_blocker = "none";
+	contract.residual_expression_blocker.clear();
 }
 
 static string BuildExecutionContractHashJoinCommonNativeBlocker(const ExecutionRegionHashJoinContract &contract) {
@@ -919,12 +935,12 @@ static string BuildExecutionContractHashJoinCommonNativeBlocker(const ExecutionR
 	if (!contract.regular_hash_table_layout_ready) {
 		return "hash-join-native-layout";
 	}
-	return "none";
+	return string();
 }
 
 static string BuildExecutionContractHashJoinProbeNativeShapeBlocker(const ExecutionRegionHashJoinContract &contract,
                                                                     const string &common_blocker) {
-	if (common_blocker != "none") {
+	if (!common_blocker.empty()) {
 		return common_blocker;
 	}
 	if (contract.equality_condition_count == 0) {
@@ -945,19 +961,19 @@ static string BuildExecutionContractHashJoinProbeNativeShapeBlocker(const Execut
 	    contract.native_probe_output_mode != ExecutionHashJoinProbeOutputMode::MATCHED_PROBE_ONLY) {
 		return "hash-join-native-non-equality-output-mode-contract-missing";
 	}
-	return "none";
+	return string();
 }
 
 static string BuildExecutionContractHashJoinProbeShapeBlocker(const ExecutionRegionHashJoinContract &contract,
                                                               const string &probe_shape_blocker) {
-	if (probe_shape_blocker != "none") {
+	if (!probe_shape_blocker.empty()) {
 		return probe_shape_blocker;
 	}
 	if (contract.native_probe_output_mode == ExecutionHashJoinProbeOutputMode::NONE) {
 		return "hash-join-native-probe-join-type;join_type=" +
 		       string(ExecutionRegionJoinTypeToString(contract.join_type));
 	}
-	return "none";
+	return string();
 }
 
 static string BuildExecutionContractPerfectHashJoinProbeShapeBlocker(const ExecutionRegionHashJoinContract &contract) {
@@ -995,31 +1011,31 @@ static string BuildExecutionContractPerfectHashJoinProbeShapeBlocker(const Execu
 	    contract.native_probe_output_mode != ExecutionHashJoinProbeOutputMode::MATCHED_PROBE_ONLY) {
 		return "perfect-hash-join-native-output-mode";
 	}
-	return "none";
+	return string();
 }
 
 static string BuildExecutionContractHashJoinBuildNativeBlocker(const PhysicalHashJoin &join,
                                                                const string &common_blocker) {
-	if (common_blocker != "none") {
+	if (!common_blocker.empty()) {
 		return common_blocker;
 	}
 	auto key_blocker = BuildExecutionContractHashJoinKeyBindingBlocker(join, true);
-	if (key_blocker != "none") {
+	if (!key_blocker.empty()) {
 		return key_blocker;
 	}
-	return "none";
+	return string();
 }
 
 static string BuildExecutionContractHashJoinProbeNativeBlocker(const PhysicalHashJoin &join,
                                                                const string &probe_shape_blocker) {
-	if (probe_shape_blocker != "none") {
+	if (!probe_shape_blocker.empty()) {
 		return probe_shape_blocker;
 	}
 	auto key_blocker = BuildExecutionContractHashJoinKeyBindingBlocker(join, false);
-	if (key_blocker != "none") {
+	if (!key_blocker.empty()) {
 		return key_blocker;
 	}
-	return "none";
+	return string();
 }
 
 static bool ExecutionContractHashJoinSourceProducesRows(ExecutionRegionJoinType join_type) {
@@ -1033,21 +1049,21 @@ static void MarkExecutionContractHashJoinNativeContracts(const PhysicalHashJoin 
 	contract.native_contract_blocker = common_blocker;
 	contract.native_probe_shape_blocker =
 	    BuildExecutionContractHashJoinProbeShapeBlocker(contract, probe_shape_blocker);
-	contract.native_probe_shape_ready = contract.native_probe_shape_blocker == "none";
+	contract.native_probe_shape_ready = contract.native_probe_shape_blocker.empty();
 	contract.perfect_hash_probe_shape_blocker = BuildExecutionContractPerfectHashJoinProbeShapeBlocker(contract);
-	contract.perfect_hash_probe_shape_ready = contract.perfect_hash_probe_shape_blocker == "none";
+	contract.perfect_hash_probe_shape_ready = contract.perfect_hash_probe_shape_blocker.empty();
 	contract.build_sink_shape_blocker = common_blocker;
-	contract.build_sink_shape_ready = contract.build_sink_shape_blocker == "none";
+	contract.build_sink_shape_ready = contract.build_sink_shape_blocker.empty();
 
 	auto build_blocker = BuildExecutionContractHashJoinBuildNativeBlocker(join, common_blocker);
-	if (build_blocker == "none") {
+	if (build_blocker.empty()) {
 		MarkExecutionContractNativeOperatorContractReady(contract.native_build_contract);
 	} else {
 		contract.native_build_contract.blocker = build_blocker;
 	}
 
 	auto probe_blocker = BuildExecutionContractHashJoinProbeNativeBlocker(join, probe_shape_blocker);
-	if (probe_blocker == "none") {
+	if (probe_blocker.empty()) {
 		MarkExecutionContractNativeOperatorContractReady(contract.native_probe_contract);
 	} else {
 		contract.native_probe_contract.blocker = probe_blocker;
@@ -1250,16 +1266,16 @@ static string BuildExecutionContractNestedLoopJoinNativeBlocker(const ExecutionR
 	if (contract.filter_pushdown) {
 		return "nested-loop-native-filter-pushdown";
 	}
-	return "none";
+	return string();
 }
 
 static void MarkExecutionContractNestedLoopJoinNativeContracts(ExecutionRegionNestedLoopJoinContract &contract) {
 	auto blocker = BuildExecutionContractNestedLoopJoinNativeBlocker(contract);
 	contract.native_probe_shape_blocker = blocker;
 	contract.build_sink_shape_blocker = blocker;
-	contract.native_probe_shape_ready = blocker == "none";
-	contract.build_sink_shape_ready = blocker == "none";
-	if (blocker == "none") {
+	contract.native_probe_shape_ready = blocker.empty();
+	contract.build_sink_shape_ready = blocker.empty();
+	if (blocker.empty()) {
 		MarkExecutionContractNativeOperatorContractReady(contract.native_probe_contract);
 		MarkExecutionContractNativeOperatorContractReady(contract.native_build_contract);
 		return;
@@ -1303,7 +1319,7 @@ BuildExecutionContractNestedLoopJoinContract(const PhysicalNestedLoopJoin &join)
 		    BuildExecutionContractNestedLoopJoinConditionInput(condition, condition_idx, condition_blocker));
 	}
 	result.conditions_ready = condition_blocker.empty() && result.comparison_condition_count == result.condition_count;
-	result.condition_blocker = condition_blocker.empty() ? "none" : condition_blocker;
+	result.condition_blocker = std::move(condition_blocker);
 	MarkExecutionContractNestedLoopJoinNativeContracts(result);
 	return result;
 }
@@ -1377,7 +1393,7 @@ static ExecutionRegionOrderKeyInput BuildExecutionContractOrderKeyInput(const Bo
 	expression->ir = "duckdb.expr typed-vector-ir;" + DescribeExecutionExpressionIR(*expression->root);
 	result.expression = std::move(*expression);
 	result.expression_ready = true;
-	result.expression_blocker = "none";
+	result.expression_blocker.clear();
 	result.reason += ";expression_ready=true;expression_blocker=none";
 	return result;
 }
@@ -1407,7 +1423,7 @@ static ExecutionRegionOrderContract BuildExecutionContractOrderContract(Physical
 		result.order_keys.push_back(BuildExecutionContractOrderKeyInput(orders[key_idx], key_idx, first_blocker));
 	}
 	result.all_order_keys_ready = first_blocker.empty();
-	result.order_key_blocker = result.all_order_keys_ready ? "none" : first_blocker;
+	result.order_key_blocker = result.all_order_keys_ready ? string() : first_blocker;
 	return result;
 }
 
@@ -1415,7 +1431,7 @@ static string BuildExecutionContractOrderSinkBlocker(const ExecutionRegionOrderC
 	if (!contract.all_order_keys_ready) {
 		return contract.order_key_blocker;
 	}
-	return "none";
+	return string();
 }
 
 static ExecutionContract BuildExecutionContractSortStateContracts(
@@ -1426,7 +1442,7 @@ static ExecutionContract BuildExecutionContractSortStateContracts(
 	ExecutionContract result;
 	auto order_contract = BuildExecutionContractOrderContract(type, orders, payload_types, projections, is_index_sort,
 	                                                          has_limit, limit, offset, dynamic_filter);
-	auto state_scan_contract = BuildExecutionContractNativeStateScanContract(native_scan_capability, "none");
+	auto state_scan_contract = BuildExecutionContractNativeStateScanContract(native_scan_capability, string());
 	MarkExecutionContractNativeStateScanContractReady(state_scan_contract);
 	result.source_boundary_reason = source_marker;
 	result.source_boundary_reason += ";operator=" + PhysicalOperatorToString(type);
@@ -1546,6 +1562,22 @@ static void AddExecutionContractHashAggregateGroupedStateLayout(ExecutionRegionA
 	result.grouped_state_layout_ready = true;
 }
 
+static void AddExecutionContractHashAggregateLookupLayout(ExecutionRegionAggregateContract &result,
+                                                          const PhysicalHashAggregate &aggregate) {
+	if (aggregate.groupings.empty()) {
+		result.hash_lookup_layout_blocker = "hash-aggregate-grouping-layout-missing";
+		return;
+	}
+	ExecutionHashAggregateLookupLayout layout;
+	ExecutionBuildHashAggregateLookupLayout(aggregate.groupings[0].table_data.GetLayout(), layout);
+	result.hash_lookup_layout_present = layout.table_layout_ready;
+	result.hash_lookup_layout_blocker =
+	    layout.blocker.empty() ? "hash-aggregate-lookup-layout-missing" : layout.blocker;
+	result.hash_lookup_layout_row_compare_blocker = layout.row_compare_contract_blocker;
+	result.hash_lookup_layout_backend_lowering_blocker = layout.backend_lowering_blocker;
+	result.hash_lookup_layout_ir = DescribeExecutionHashAggregateLookupLayout(layout);
+}
+
 static void MarkExecutionContractHashAggregateGroupedStateContract(ExecutionRegionAggregateContract &result) {
 	if (!result.grouped_state_layout_ready || result.grouping_set_count != 1 || result.radix_table_count != 1 ||
 	    result.distinct_aggregate_count != 0 || result.aggregate_filter_count != 0 ||
@@ -1553,7 +1585,21 @@ static void MarkExecutionContractHashAggregateGroupedStateContract(ExecutionRegi
 		return;
 	}
 	result.native_grouped_state_contract.status = ExecutionRegionStateContractStatus::READY;
-	result.native_grouped_state_contract.blocker = "none";
+	result.native_grouped_state_contract.blocker.clear();
+}
+
+static void MarkExecutionContractHashAggregateLookupContractBoundary(ExecutionRegionAggregateContract &result) {
+	if (result.native_grouped_state_contract.status != ExecutionRegionStateContractStatus::READY) {
+		return;
+	}
+	auto blocker = result.hash_lookup_layout_blocker.empty()
+	                   ? "hash-aggregate-generated-lookup-backend-lowering-missing"
+	                   : result.hash_lookup_layout_blocker;
+	if (blocker.empty()) {
+		MarkExecutionContractNativeOperatorContractReady(result.native_hash_lookup_contract);
+		return;
+	}
+	MarkExecutionContractNativeOperatorContractBlocked(result.native_hash_lookup_contract, std::move(blocker));
 }
 
 static bool ExecutionContractHashAggregateHasDistinctState(const ExecutionRegionAggregateContract &contract) {
@@ -1588,7 +1634,7 @@ static void MarkExecutionContractPerfectHashAggregateGroupedStateContract(Execut
 		return;
 	}
 	result.native_grouped_state_contract.status = ExecutionRegionStateContractStatus::READY;
-	result.native_grouped_state_contract.blocker = "none";
+	result.native_grouped_state_contract.blocker.clear();
 }
 
 static string
@@ -1607,14 +1653,14 @@ BuildExecutionContractPerfectHashAggregateStateScanBlocker(const ExecutionRegion
 	    contract.distinct_child_count != 0) {
 		return "perfect-hash-aggregate-state-scan-distinct-state";
 	}
-	return "none";
+	return string();
 }
 
 static void
 MarkExecutionContractPerfectHashAggregateStateScanContract(ExecutionRegionNativeStateScanContract &state_scan_contract,
                                                            const ExecutionRegionAggregateContract &aggregate_contract) {
 	auto blocker = BuildExecutionContractPerfectHashAggregateStateScanBlocker(aggregate_contract);
-	if (blocker == "none") {
+	if (blocker.empty()) {
 		MarkExecutionContractNativeStateScanContractReady(state_scan_contract);
 	} else {
 		state_scan_contract.blocker = blocker;
@@ -1629,92 +1675,25 @@ BuildExecutionContractUngroupedAggregateStateScanBlocker(const ExecutionRegionAg
 	if (contract.aggregate_count == 0) {
 		return "ungrouped-aggregate-state-scan-no-aggregates";
 	}
-	return "none";
+	return string();
 }
 
 static void
 MarkExecutionContractUngroupedAggregateStateScanContract(ExecutionRegionNativeStateScanContract &state_scan_contract,
                                                          const ExecutionRegionAggregateContract &aggregate_contract) {
 	auto blocker = BuildExecutionContractUngroupedAggregateStateScanBlocker(aggregate_contract);
-	if (blocker == "none") {
+	if (blocker.empty()) {
 		MarkExecutionContractNativeStateScanContractReady(state_scan_contract);
 	} else {
 		state_scan_contract.blocker = blocker;
 	}
 }
 
-static string BuildExecutionContractAggregateStateUpdateBlocker(const ExecutionRegionAggregateContract &contract,
-                                                                const vector<ExecutionRegionAggregateInput> &aggregates,
-                                                                const vector<ExecutionRegionGroupInput> &groups) {
-	if (!contract.present) {
-		return "aggregate-state-update-contract-missing";
-	}
-	if (contract.distinct_aggregate_count != 0 || contract.distinct_table_count != 0 ||
-	    contract.distinct_child_count != 0 || contract.distinct_filter_count != 0) {
-		return "aggregate-state-update-distinct-state";
-	}
-	if (contract.aggregate_filter_count != 0) {
-		return "aggregate-state-update-filtered-aggregate";
-	}
-	if (contract.aggregate_order_count != 0) {
-		return "aggregate-state-update-ordered-aggregate";
-	}
-
-	switch (contract.kind) {
-	case ExecutionRegionAggregateOperatorKind::HASH:
-	case ExecutionRegionAggregateOperatorKind::PERFECT_HASH:
-		if (contract.native_grouped_state_contract.status != ExecutionRegionStateContractStatus::READY) {
-			return contract.native_grouped_state_contract.blocker.empty()
-			           ? "aggregate-state-update-grouped-state-contract"
-			           : contract.native_grouped_state_contract.blocker;
-		}
-		for (auto &group : groups) {
-			if (!group.supported_reference) {
-				return group.reason.empty() ? "aggregate-state-update-group-reference" : group.reason;
-			}
-		}
-		break;
-	case ExecutionRegionAggregateOperatorKind::UNGROUPED:
-		if (!groups.empty()) {
-			return "ungrouped-aggregate-state-update-unexpected-groups";
-		}
-		break;
-	default:
-		return "aggregate-state-update-operator-kind";
-	}
-
-	for (auto &aggregate : aggregates) {
-		if (!aggregate.reason.empty()) {
-			return aggregate.reason;
-		}
-		if (aggregate.distinct) {
-			return "aggregate-state-update-distinct-aggregate";
-		}
-		if (aggregate.has_filter) {
-			return "aggregate-state-update-filtered-aggregate";
-		}
-		if (aggregate.has_order_bys || aggregate.order_dependent) {
-			return "aggregate-state-update-ordered-aggregate";
-		}
-		if (!aggregate.has_state_update) {
-			return "aggregate-state-update-callback-missing";
-		}
-		if (!aggregate.payload_expressions_ready) {
-			return aggregate.payload_expression_blocker.empty() ? "aggregate-state-update-payload-expression"
-			                                                    : aggregate.payload_expression_blocker;
-		}
-		if (!aggregate.supported_payload_references) {
-			return "aggregate-state-update-payload-reference";
-		}
-	}
-	return "none";
-}
-
 static void MarkExecutionContractAggregateStateUpdateContract(ExecutionRegionAggregateContract &contract,
                                                               const vector<ExecutionRegionAggregateInput> &aggregates,
                                                               const vector<ExecutionRegionGroupInput> &groups) {
-	auto blocker = BuildExecutionContractAggregateStateUpdateBlocker(contract, aggregates, groups);
-	if (blocker == "none") {
+	auto blocker = ExecutionRegionAggregateNativeStateUpdateBlocker(contract, aggregates, groups);
+	if (blocker.empty()) {
 		MarkExecutionContractNativeOperatorContractReady(contract.native_state_update_contract);
 	} else {
 		MarkExecutionContractNativeOperatorContractBlocked(contract.native_state_update_contract, std::move(blocker));
@@ -1768,12 +1747,11 @@ BuildExecutionContractHashAggregateContract(const PhysicalHashAggregate &aggrega
 	result.non_distinct_filter_count = aggregate.non_distinct_filter.size();
 	result.distinct_filter_count = aggregate.distinct_filter.size();
 	AddExecutionContractHashAggregateGroupedStateLayout(result, aggregate);
+	AddExecutionContractHashAggregateLookupLayout(result, aggregate);
 	MarkExecutionContractHashAggregateGroupedStateContract(result);
 	MarkExecutionContractHashAggregateDistinctStateBoundary(result);
 	MarkExecutionContractHashAggregateDistinctStateUpdateContract(result, aggregate);
-	if (result.native_grouped_state_contract.status == ExecutionRegionStateContractStatus::READY) {
-		MarkExecutionContractNativeOperatorContractReady(result.native_hash_lookup_contract);
-	}
+	MarkExecutionContractHashAggregateLookupContractBoundary(result);
 	return result;
 }
 
@@ -1900,6 +1878,10 @@ static ExecutionRegionTableScanContract BuildExecutionContractTableScanContract(
 	ExecutionRegionTableScanContract result;
 	result.present = true;
 	result.function_name = StringUtil::Lower(scan.function.name.GetIdentifierName());
+	if (scan.bind_data && result.function_name == "seq_scan") {
+		auto &bind_data = scan.bind_data->Cast<TableScanBindData>();
+		result.estimated_source_cardinality = bind_data.table.GetStorage().GetTotalRows();
+	}
 	result.output_column_count = scan.GetTypes().size();
 	result.returned_column_count = scan.returned_types.size();
 	result.column_id_count = scan.column_ids.size();
@@ -1912,12 +1894,8 @@ static ExecutionRegionTableScanContract BuildExecutionContractTableScanContract(
 	result.source_contract_input_column_count = scan.column_ids.size();
 	result.source_contract_input_types = BuildExecutionContractTableScanSourceInputTypes(scan);
 	result.source_contract_output_projection_map = BuildExecutionContractTableScanOutputProjectionMap(scan);
-	result.source_contract_filter_column_map = BuildExecutionContractTableScanFilterColumnMap(scan);
-	result.source_contract_requires_unfiltered_input = !result.source_contract_filter_column_map.empty();
 	result.source_contract_filter_prune_required =
-	    result.source_contract_requires_unfiltered_input && scan.function.filter_prune && !scan.projection_ids.empty();
-	result.source_contract_filter_takeover_supported =
-	    result.source_contract_requires_unfiltered_input && scan.function.filter_pushdown;
+	    scan.table_filters && scan.function.filter_prune && !scan.projection_ids.empty();
 	result.projection_pushdown = scan.function.projection_pushdown;
 	result.filter_pushdown = scan.function.filter_pushdown;
 	result.filter_prune = scan.function.filter_prune;
@@ -1937,6 +1915,7 @@ static string BuildExecutionContractTableScanSourceBoundaryReason(const Physical
 		result += ";source-contract-blocker:requires-source-contract;source_execution=duckdb-source-boundary";
 	}
 	result += ";function=" + contract.function_name;
+	result += ";estimated_source_cardinality=" + std::to_string(contract.estimated_source_cardinality);
 	result += ";output_columns=" + std::to_string(contract.output_column_count);
 	result += ";returned_columns=" + std::to_string(contract.returned_column_count);
 	result += ";column_ids=" + std::to_string(contract.column_id_count);
@@ -1947,14 +1926,8 @@ static string BuildExecutionContractTableScanSourceBoundaryReason(const Physical
 	    ";source_contract_input_types=" + BuildExecutionContractLogicalTypeList(contract.source_contract_input_types);
 	result += ";source_contract_output_projection_map=" +
 	          BuildExecutionContractIdxList(contract.source_contract_output_projection_map);
-	result += ";source_contract_filter_column_map=" +
-	          BuildExecutionContractIdxList(contract.source_contract_filter_column_map);
-	result += ";source_contract_requires_unfiltered_input=" +
-	          ExecutionContractBool(contract.source_contract_requires_unfiltered_input);
 	result += ";source_contract_filter_prune_required=" +
 	          ExecutionContractBool(contract.source_contract_filter_prune_required);
-	result += ";source_contract_filter_takeover_supported=" +
-	          ExecutionContractBool(contract.source_contract_filter_takeover_supported);
 	result += ";filter_pushdown=" + ExecutionContractBool(contract.filter_pushdown);
 	result += ";filter_prune=" + ExecutionContractBool(contract.filter_prune);
 	result += ";filter_count=" + std::to_string(contract.filter_count);
@@ -2249,6 +2222,7 @@ ExecutionContract PhysicalTableScan::GetExecutionContract() const {
 	result.source.dynamic_filters = dynamic_filters && dynamic_filters->HasFilters();
 	result.source.in_out_function = static_cast<bool>(function.in_out_function);
 	result.source.table_scan_contract = BuildExecutionContractTableScanContract(*this);
+	result.source.estimated_source_cardinality = result.source.table_scan_contract.estimated_source_cardinality;
 	AddExecutionContractTableScanSourceFilters(*this, result.source);
 	return FinalizeExecutionContract(std::move(result));
 }

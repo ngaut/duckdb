@@ -95,6 +95,9 @@ public:
 
 	virtual void Verify();
 	virtual ExecutionRegionOperatorKind GetExecutionRegionOperatorKind() const;
+	virtual void GetExecutionRegionPreGraphSourceInfo(idx_t &estimated_source_cardinality,
+	                                                  idx_t &source_filter_count) const;
+	virtual void GetExecutionRegionPreGraphTransformInfo(ExecutionTransformContract &transform) const;
 	virtual ExecutionContract GetExecutionContract() const;
 
 public:

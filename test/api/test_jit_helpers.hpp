@@ -7,6 +7,7 @@
 #include "duckdb/common/vector_operations/vector_operations.hpp"
 #include "duckdb/execution/execution_region_ir.hpp"
 #include "duckdb/execution/execution_region_manager.hpp"
+#include "duckdb/execution/execution_region_runtime.hpp"
 #include "duckdb/execution/execution_region_telemetry.hpp"
 #include "duckdb/main/settings.hpp"
 
@@ -20,13 +21,69 @@ static constexpr const char *JIT_HASH_JOIN_PROBE_READY_BLOCKER = "native_hash_jo
 static constexpr const char *JIT_HASH_JOIN_BUILD_READY_BLOCKER = "native_hash_join_build_blocker=none";
 static constexpr const char *JIT_HASH_JOIN_PROBE_EXECUTABLE_READY = "native-hash-join-probe-executable=ready";
 static constexpr const char *JIT_HASH_JOIN_PROBE_EXECUTABLE_REASON = "generated native hash join probe";
-static constexpr const char *JIT_HASH_JOIN_BUILD_EXECUTABLE_REASON = "native hash join build sink protocol";
+static constexpr const char *JIT_HASH_JOIN_BUILD_GENERATED_PROTOCOL_REASON =
+    "hash_join_build_native<execution=primitive-protocol-build";
 static constexpr const char *JIT_NESTED_LOOP_JOIN_PROBE_EXECUTABLE_REASON = "generated native nested loop join probe";
 static constexpr const char *JIT_NESTED_LOOP_JOIN_BUILD_EXECUTABLE_REASON =
-    "native nested loop join build sink protocol";
+    "native nested loop join build sink contract";
 
 static bool IsCompiledExecutionMode(const string &execution_mode) {
 	return execution_mode == "native";
+}
+
+static string EventPhase(const ExecutionRegionEvent &event) {
+	return ExecutionRegionEventPhaseToString(event.phase_kind);
+}
+
+static string EventTarget(const ExecutionRegionEvent &event) {
+	return ExecutionRegionCompileTargetToString(event.target_kind);
+}
+
+static string EventStatus(const ExecutionRegionEvent &event) {
+	return ExecutionRegionEventStatusToString(event.status_kind);
+}
+
+static string EventExecutionMode(const ExecutionRegionEvent &event) {
+	return ExecutionRegionExecutionModeToString(event.execution_mode_kind);
+}
+
+static string EventRegionExecutionForm(const ExecutionRegionEvent &event) {
+	return ExecutionRegionFormToString(event.region_execution_form_kind);
+}
+
+static string EventExecutionBody(const ExecutionRegionEvent &event) {
+	return ExecutionRegionExecutionBodyToString(event.execution_body_kind);
+}
+
+static string EventRequestedPolicy(const ExecutionRegionEvent &event) {
+	return ExecutionRegionEventPolicyToString(event.requested_policy_kind);
+}
+
+static bool CandidateHasStructure(const ExecutionRegionEvent &event, idx_t filters, idx_t projections,
+                                  ExecutionRegionSinkKind sink_kind) {
+	return event.has_candidate && event.candidate_traits.filter_count == filters &&
+	       event.candidate_traits.projection_count == projections && event.candidate_traits.sink_kind == sink_kind;
+}
+
+static void RequireCandidateStructure(const ExecutionRegionEvent &event, idx_t filters, idx_t projections,
+                                      ExecutionRegionSinkKind sink_kind) {
+	REQUIRE(CandidateHasStructure(event, filters, projections, sink_kind));
+}
+
+static string EventSourceStageRuntimeBreakdown(const ExecutionRegionEvent &event) {
+	return RenderExecutionRegionStageRuntimeBreakdown(event.source_stage_runtime);
+}
+
+static string EventSourceStageCountBreakdown(const ExecutionRegionEvent &event) {
+	return RenderExecutionRegionStageCountBreakdown(event.source_stage_runtime);
+}
+
+static string EventGeneratedStageRuntimeBreakdown(const ExecutionRegionEvent &event) {
+	return RenderExecutionRegionStageRuntimeBreakdown(event.generated_stage_runtime);
+}
+
+static string EventGeneratedStageCountBreakdown(const ExecutionRegionEvent &event) {
+	return RenderExecutionRegionStageCountBreakdown(event.generated_stage_runtime);
 }
 
 struct JitTestDatabase {
@@ -69,47 +126,7 @@ static void RequireStatefulSourceNativeContractABI(const ExecutionRegionEvent &e
 	REQUIRE(StringUtil::Contains(contract.ir, "contract<abi=" + string(ExecutionRegionABIToString(expected_abi))));
 }
 
-static void RequireSljitGenericAutoMissingEvent(const ExecutionRegionEvent &event, const string &shape_fragment) {
-	REQUIRE(event.backend_name == "sljit");
-	REQUIRE(event.target == "region");
-	REQUIRE(event.phase == "decision");
-	REQUIRE(event.status == "skipped");
-	REQUIRE(event.policy_decision == "auto");
-	REQUIRE(event.execution_mode == "unsupported");
-	REQUIRE(event.code_size == 0);
-	REQUIRE(event.compile_time_us == 0);
-	REQUIRE(event.has_admission);
-	REQUIRE(StringUtil::Contains(event.admission_shape_key, shape_fragment));
-	if (event.admission_rule_present) {
-		REQUIRE(event.admission_min_cardinality > 0);
-		REQUIRE(event.has_admission_score);
-		REQUIRE(StringUtil::Contains(event.admission_proof, "measured-auto-admission"));
-		REQUIRE(StringUtil::Contains(event.reason, "below measured auto admission threshold"));
-	} else {
-		REQUIRE(event.admission_min_cardinality == 0);
-		REQUIRE_FALSE(event.has_admission_score);
-		REQUIRE(event.admission_proof.empty());
-		REQUIRE(StringUtil::Contains(event.reason, "admission_rule=missing"));
-		REQUIRE(StringUtil::Contains(event.reason, "without measured auto admission"));
-	}
-	REQUIRE(StringUtil::Contains(event.reason, "before region lowering"));
-	REQUIRE_FALSE(event.has_candidate);
-	REQUIRE(event.has_pipeline);
-	if (!event.ir.empty()) {
-		REQUIRE(StringUtil::Contains(event.ir, "duckdb.region admission-inventory"));
-	}
-	REQUIRE(event.backend_analysis_time_us == 0);
-}
-
 static idx_t TotalExecutionRegionCounterCount(const vector<ExecutionRegionCounter> &counters) {
-	idx_t result = 0;
-	for (auto &counter : counters) {
-		result += counter.count;
-	}
-	return result;
-}
-
-static idx_t TotalExecutionRegionDecisionCounterCount(const vector<ExecutionRegionDecisionCounter> &counters) {
 	idx_t result = 0;
 	for (auto &counter : counters) {
 		result += counter.count;
@@ -142,16 +159,16 @@ static void RequireProjectionCoreRegionIr(const string &ir) {
 }
 
 static void RequireUnsupportedFilterProjectionSinkEvent(const ExecutionRegionEvent &event) {
-	REQUIRE(event.execution_mode == "unsupported");
-	REQUIRE(event.region_execution_form == "none");
+	REQUIRE(EventExecutionMode(event) == "unsupported");
+	REQUIRE(EventRegionExecutionForm(event) == "none");
 	REQUIRE(event.has_candidate);
 	REQUIRE(!event.candidate_pipeline_shape.empty());
 	REQUIRE(StringUtil::Contains(event.candidate_pipeline_shape, "source:source:"));
 	REQUIRE(StringUtil::Contains(event.candidate_pipeline_shape, "op0:filter:FILTER:none"));
 	REQUIRE(StringUtil::Contains(event.candidate_pipeline_shape, "op1:projection:PROJECTION:none"));
 	REQUIRE(StringUtil::Contains(event.candidate_pipeline_shape, ":sink:"));
-	REQUIRE(StringUtil::Contains(event.candidate_context_pipeline_shape, "source:source:"));
-	REQUIRE(StringUtil::Contains(event.candidate_context_pipeline_shape, "sink:sink:"));
+	REQUIRE(StringUtil::Contains(event.pipeline_shape, "source:source:"));
+	REQUIRE(StringUtil::Contains(event.pipeline_shape, "sink:sink:"));
 	REQUIRE(event.candidate_node_count > 0);
 	REQUIRE(event.candidate_start_operator_index == 0);
 	REQUIRE(event.candidate_end_operator_index >= event.candidate_start_operator_index);
@@ -162,7 +179,7 @@ static void RequireUnsupportedFilterProjectionSinkEvent(const ExecutionRegionEve
 	REQUIRE(StringUtil::Contains(event.reason, "op0:FILTER:native:generated typed predicate filter"));
 	REQUIRE(StringUtil::Contains(event.reason, "op1:PROJECTION:native:generated typed projection"));
 	REQUIRE(StringUtil::Contains(event.reason, "sink:RESULT_COLLECTOR:native"));
-	REQUIRE(StringUtil::Contains(event.reason, "append sink protocol"));
+	REQUIRE(StringUtil::Contains(event.reason, "append sink contract"));
 	REQUIRE(StringUtil::Contains(event.reason, "sink_contract_status=ready"));
 	REQUIRE(StringUtil::Contains(event.reason, "sink_required_capability=result-collector-execution-sink"));
 	REQUIRE(StringUtil::Contains(event.reason, "execution:unsupported"));
@@ -215,71 +232,72 @@ static void ClearJitTrace(ExecutionRegionManager &manager, bool counters = false
 }
 
 static bool IsSljitRegionEvent(const ExecutionRegionEvent &event) {
-	return event.backend_name == "sljit" && event.target == "region";
+	return event.backend_name == "sljit" && EventTarget(event) == "region";
 }
 
 static bool IsCompiledSljitRegionEvent(const ExecutionRegionEvent &event) {
-	return IsSljitRegionEvent(event) && event.status == "compiled";
+	return IsSljitRegionEvent(event) && EventStatus(event) == "compiled";
+}
+
+static bool HasGeneratedMachineCode(const ExecutionRegionEvent &event) {
+	return EventExecutionBody(event) == "generated-machine-code";
+}
+
+static bool HasCompiledRegionBody(const ExecutionRegionEvent &event) {
+	return EventExecutionBody(event) == "generated-machine-code";
 }
 
 static void RequireNativeFusedRegion(const ExecutionRegionEvent &event) {
-	REQUIRE(event.execution_mode == "native");
-	REQUIRE(event.region_execution_form == "fused");
-	REQUIRE(event.execution_body == "generated-machine-code");
+	REQUIRE(EventExecutionMode(event) == "native");
+	REQUIRE(EventRegionExecutionForm(event) == "fused");
+	REQUIRE(HasCompiledRegionBody(event));
 	REQUIRE(event.code_size > 0);
 }
 
 static void RequireFusedGeneratedRegion(const ExecutionRegionEvent &event) {
-	REQUIRE(event.region_execution_form == "fused");
-	REQUIRE(event.execution_body == "generated-machine-code");
+	REQUIRE(EventRegionExecutionForm(event) == "fused");
+	REQUIRE(HasGeneratedMachineCode(event));
 	REQUIRE(event.code_size > 0);
 }
 
 static void RequireCompiledFusedRegion(const ExecutionRegionEvent &event) {
-	REQUIRE(IsCompiledExecutionMode(event.execution_mode));
-	REQUIRE(event.region_execution_form == "fused");
-	REQUIRE(event.execution_mode == "native");
-	REQUIRE(event.execution_body == "generated-machine-code");
+	REQUIRE(IsCompiledExecutionMode(EventExecutionMode(event)));
+	REQUIRE(EventRegionExecutionForm(event) == "fused");
+	REQUIRE(EventExecutionMode(event) == "native");
+	REQUIRE(HasCompiledRegionBody(event));
 	REQUIRE(event.code_size > 0);
 }
 
-static void RequireCompiledFusedOperatorProtocolRegion(const ExecutionRegionEvent &event) {
-	REQUIRE(IsCompiledExecutionMode(event.execution_mode));
-	REQUIRE(event.region_execution_form == "fused");
-	REQUIRE(event.execution_mode == "native");
-	REQUIRE(event.execution_body == "native-operator-protocol");
-	REQUIRE(event.code_size == 0);
-	REQUIRE(StringUtil::Contains(event.reason, "execution-body=native-operator-protocol"));
-	REQUIRE(StringUtil::Contains(event.reason, "kernel=native-operator-protocol"));
+static void RequireCompiledGeneratedRegion(const ExecutionRegionEvent &event) {
+	REQUIRE(IsCompiledExecutionMode(EventExecutionMode(event)));
+	REQUIRE(EventRegionExecutionForm(event) == "fused");
+	REQUIRE(EventExecutionMode(event) == "native");
+	REQUIRE(EventExecutionBody(event) == "generated-machine-code");
+	REQUIRE(event.code_size > 0);
+	REQUIRE(StringUtil::Contains(event.reason, "execution-body=generated-machine-code"));
+	REQUIRE(StringUtil::Contains(event.reason, "kernel=generated-machine-code"));
 }
 
 static void RequireDuckDBScanFilteredSourceContract(const ExecutionRegionEvent &event) {
 	REQUIRE(event.selected_source_execution == ExecutionRegionSourceExecutionKind::SOURCE_CONTRACT);
+	REQUIRE(event.selected_uses_scan_filters);
+	REQUIRE(event.candidate_uses_scan_filters);
 	REQUIRE(StringUtil::Contains(event.reason, "vectorized table scan filters"));
 	REQUIRE(StringUtil::Contains(event.reason, "source-strategy=duckdb-scan-filtered-source-contract"));
-	REQUIRE(StringUtil::Contains(event.reason, "source-filter-ownership=duckdb-scan"));
-	REQUIRE_FALSE(StringUtil::Contains(event.reason, "generated native table scan filters"));
-	REQUIRE_FALSE(StringUtil::Contains(event.reason, "source-strategy=compiled-unfiltered-source-contract"));
-	REQUIRE_FALSE(StringUtil::Contains(event.reason, "source-filter-ownership=generated"));
-}
-
-static void RequireGeneratedSourceFilteredSourceContract(const ExecutionRegionEvent &event) {
-	REQUIRE(event.selected_source_execution == ExecutionRegionSourceExecutionKind::SOURCE_CONTRACT);
-	REQUIRE(StringUtil::Contains(event.reason, "generated native table scan filters"));
-	REQUIRE(StringUtil::Contains(event.reason, "source-strategy=compiled-unfiltered-source-contract"));
-	REQUIRE(StringUtil::Contains(event.reason, "source-filter-ownership=generated"));
-	REQUIRE_FALSE(StringUtil::Contains(event.reason, "vectorized table scan filters"));
-	REQUIRE_FALSE(StringUtil::Contains(event.reason, "source-strategy=duckdb-scan-filtered-source-contract"));
-	REQUIRE_FALSE(StringUtil::Contains(event.reason, "source-filter-ownership=duckdb-scan"));
+	REQUIRE(StringUtil::Contains(event.reason, "uses-scan-filters=true"));
 }
 
 static void RequireUnsupportedContractOnlyRegion(const ExecutionRegionEvent &event) {
-	REQUIRE(event.status == "unsupported");
-	REQUIRE(event.execution_mode == "unsupported");
-	REQUIRE(event.region_execution_form == "none");
-	REQUIRE(event.execution_body == "none");
+	REQUIRE(EventStatus(event) == "unsupported");
+	REQUIRE(EventExecutionMode(event) == "unsupported");
+	REQUIRE(EventRegionExecutionForm(event) == "none");
+	REQUIRE(EventExecutionBody(event) == "none");
 	REQUIRE(event.code_size == 0);
-	REQUIRE(StringUtil::Contains(event.reason, "SLJIT native region has no generated machine-code body"));
+	REQUIRE(StringUtil::Contains(event.reason, "operator-contract-blocker:"));
+	const bool has_native_body_gap =
+	    StringUtil::Contains(event.reason, "SLJIT native region emits no generated machine code") ||
+	    StringUtil::Contains(event.reason, "whole-vectorized-operator-boundary");
+	REQUIRE(has_native_body_gap);
 	REQUIRE(StringUtil::Contains(event.reason, "execution:unsupported"));
 }
 
@@ -319,7 +337,7 @@ static void RequireJitEvent(ExecutionRegionManager &manager, MATCH match) {
 
 static void RequireNoExpressionJitEvents(ExecutionRegionManager &manager) {
 	for (auto &event : manager.GetEvents()) {
-		REQUIRE(event.target != "expression");
+		REQUIRE(EventTarget(event) != "expression");
 	}
 }
 
@@ -327,7 +345,7 @@ template <class CHECK>
 static void RequireNativeSljitIr(ExecutionRegionManager &manager, const string &ir_fragment, CHECK check) {
 	bool found = false;
 	for (auto &event : manager.GetEvents()) {
-		if (!IsCompiledSljitRegionEvent(event) || event.execution_mode != "native" ||
+		if (!IsCompiledSljitRegionEvent(event) || EventExecutionMode(event) != "native" ||
 		    !StringUtil::Contains(event.ir, ir_fragment)) {
 			continue;
 		}

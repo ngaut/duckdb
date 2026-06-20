@@ -65,197 +65,189 @@ TEST_CASE("Execution region manager records compile events from the selected bac
 	RequireJitEvent(
 	    test.manager,
 	    [](const ExecutionRegionEvent &event) {
-		    return IsSljitRegionEvent(event) && event.phase == "decision" && event.status == "unsupported" &&
-		           event.candidate_shape == "filter-projection-sink";
+		    return IsSljitRegionEvent(event) && EventPhase(event) == "decision" && EventStatus(event) == "unsupported" &&
+		           CandidateHasStructure(event, 1, 1, ExecutionRegionSinkKind::RESULT_COLLECTOR_SINK);
 	    },
 	    RequireUnsupportedFilterProjectionSinkEvent);
 }
 
-TEST_CASE("JIT auto policy uses database-local admission profile", "[api][jit]") {
+TEST_CASE("JIT auto policy selects high-work materialization through planner cost selection", "[api][jit]") {
+	JitTestDatabase test;
+	auto &con = test.con;
+	auto &manager = test.manager;
+
+	ConfigureSljit(con, "auto", false, false);
+	REQUIRE_NO_FAIL(con.Query("SET jit_trace_decisions=true"));
+	REQUIRE_NO_FAIL(con.Query("CREATE TEMP TABLE jit_auto_cost_input AS "
+	                          "SELECT i::BIGINT AS a, (i + 1)::BIGINT AS b, "
+	                          "(i + 2)::BIGINT AS c, (i + 3)::BIGINT AS d "
+	                          "FROM range(1000000) tbl(i)"));
+
+	const string query = "CREATE TEMP TABLE jit_auto_cost_output AS "
+	                     "SELECT CAST(((((a * 3) + (b * 5) - (c * 7) + (d * 11)) * 13) "
+	                     "+ (((a - b + c) * 17) - ((a + d) * 19)) "
+	                     "+ (((b - c + d) * 23) - ((a - d) * 29)) "
+	                     "+ (((a * 31) - (b * 37) + (c * 41) - (d * 43)) "
+	                     "+ (((a + b + c + d) * 47) - ((a - c) * 53)))) AS BIGINT) AS v "
+	                     "FROM jit_auto_cost_input";
+
+	ClearJitTrace(manager, true);
+	REQUIRE_NO_FAIL(con.Query("DROP TABLE IF EXISTS jit_auto_cost_output"));
+	REQUIRE_NO_FAIL(con.Query(query));
+
+	RequireJitEvent(
+	    manager,
+	    [](const ExecutionRegionEvent &event) {
+		    return IsCompiledSljitRegionEvent(event) &&
+		           EventRequestedPolicy(event) == "auto" &&
+		           CandidateHasStructure(event, 0, 1, ExecutionRegionSinkKind::MATERIALIZATION);
+	    },
+	    [](const ExecutionRegionEvent &event) {
+		    REQUIRE(event.has_candidate);
+		    REQUIRE(event.selected_runner == ExecutionRunnerKind::COMPILED_VECTORIZED);
+		    REQUIRE(event.runner_cost.present);
+		    REQUIRE(event.runner_cost.accelerated_runner_benefit > event.runner_cost.required_benefit);
+		    REQUIRE(event.runner_cost.startup_cost > 0);
+		    REQUIRE(event.runner_cost.accelerated_stage_count > 0);
+		    REQUIRE(event.runner_cost.expression_cost > 0);
+		    REQUIRE(event.runner_cost.batches > 0);
+		    REQUIRE(event.runner_cost.saved_work_per_batch > 0);
+		    REQUIRE(event.runner_cost.selected_accelerated_runner);
+		    RequireCompiledGeneratedRegion(event);
+		    REQUIRE_FALSE(StringUtil::Contains(event.reason, "before region lowering"));
+	    });
+}
+
+TEST_CASE("JIT auto planner cost skips cheap projections", "[api][jit]") {
 	JitTestDatabase test;
 	auto &con = test.con;
 	auto &manager = test.manager;
 
 	ConfigureSljit(con, "auto");
 	REQUIRE_NO_FAIL(con.Query("SET jit_trace_decisions=true"));
-	REQUIRE_NO_FAIL(con.Query("CREATE TEMP TABLE jit_auto_policy_small AS "
-	                          "SELECT i::BIGINT AS i FROM range(200000) tbl(i)"));
-
-	auto require_auto_skipped_before_graph = [&]() {
-		RequireJitEvent(
-		    manager,
-		    [](const ExecutionRegionEvent &event) {
-			    return IsSljitRegionEvent(event) && event.policy_decision == "auto" &&
-			           StringUtil::Contains(event.reason, "before graph lowering");
-		    },
-		    [](const ExecutionRegionEvent &event) {
-			    REQUIRE(event.status == "skipped");
-			    REQUIRE(event.execution_mode == "unsupported");
-			    REQUIRE_FALSE(event.has_admission);
-			    REQUIRE_FALSE(event.has_pipeline);
-			    REQUIRE_FALSE(event.has_candidate);
-			    REQUIRE(event.ir.empty());
-			    REQUIRE(StringUtil::Contains(event.reason, "backend has no measured auto admission policy"));
-		    });
-	};
-	auto require_auto_skipped_before_region_lowering = [&]() {
-		RequireJitEvent(
-		    manager,
-		    [](const ExecutionRegionEvent &event) {
-			    return IsSljitRegionEvent(event) && event.policy_decision == "auto" &&
-			           StringUtil::Contains(event.reason, "before region lowering");
-		    },
-		    [](const ExecutionRegionEvent &event) {
-			    REQUIRE(event.status == "skipped");
-			    REQUIRE(event.execution_mode == "unsupported");
-			    REQUIRE(event.has_admission);
-			    REQUIRE_FALSE(event.admission_rule_present);
-			    REQUIRE(event.admission_min_cardinality == 0);
-			    REQUIRE_FALSE(event.has_candidate);
-			    REQUIRE(event.has_pipeline);
-			    REQUIRE(event.backend_analysis_time_us == 0);
-			    REQUIRE(StringUtil::Contains(event.reason, "without measured auto admission"));
-			    REQUIRE(StringUtil::Contains(event.reason, "admission_rule=missing"));
-		    });
-	};
+	REQUIRE_NO_FAIL(con.Query("CREATE TEMP TABLE jit_auto_cost_projection_input AS "
+	                          "SELECT i::BIGINT AS i FROM range(16) tbl(i)"));
 
 	ClearJitTrace(manager, true);
-	REQUIRE_NO_FAIL(con.Query("SELECT sum(j) FROM (SELECT i + 1 AS j FROM jit_auto_policy_small WHERE i > 1000)"));
-	require_auto_skipped_before_graph();
-
-	ConfigureSljitSettings(con, "force", false, true);
-	ClearJitTrace(manager);
-	REQUIRE_NO_FAIL(con.Query("SELECT sum(j) FROM (SELECT i + 1 AS j FROM jit_auto_policy_small WHERE i > 1000)"));
-
-		string admission_key;
-		idx_t min_cardinality = 0;
-		RequireJitEvent(
-		    manager,
-		    [](const ExecutionRegionEvent &event) {
-			    return IsCompiledSljitRegionEvent(event) && event.has_admission && !event.admission_shape_key.empty() &&
-			           event.candidate_estimated_cardinality > 0;
-		    },
-		    [&](const ExecutionRegionEvent &event) {
-			    admission_key = event.admission_shape_key;
-			    auto canonical_admission_key = BuildExecutionRegionAdmissionShapeKey("sljit", event.candidate_signature);
-			    canonical_admission_key =
-			        BuildExecutionRegionAdmissionContextShapeKey(event.candidate_signature, canonical_admission_key);
-			    REQUIRE(admission_key == canonical_admission_key);
-			    min_cardinality = event.candidate_estimated_cardinality;
-		    });
-		REQUIRE(!admission_key.empty());
-		REQUIRE(min_cardinality > 0);
-
-		REQUIRE_NO_FAIL(con.Query("SELECT * FROM duckdb_jit_add_admission_rule('sljit', 'region', " +
-		                          SQLString(admission_key) + ", " + to_string(min_cardinality) + "::UBIGINT" +
-		                          ", 'measured-auto-admission:test-profile')"));
-		auto rules = con.Query("SELECT count(*) FROM duckdb_jit_admission_rules()");
-		REQUIRE_NO_FAIL(*rules);
-		REQUIRE(rules->GetValue(0, 0).GetValue<int64_t>() == 1);
-
-	ConfigureSljitSettings(con, "auto", false, true);
-	ClearJitTrace(manager, true);
-	REQUIRE_NO_FAIL(con.Query("SELECT sum(j) FROM (SELECT i + 1 AS j FROM jit_auto_policy_small WHERE i > 1000)"));
+	REQUIRE_NO_FAIL(con.Query("CREATE TEMP TABLE jit_auto_cost_projection_output AS "
+	                          "SELECT i + 1 AS j FROM jit_auto_cost_projection_input"));
 
 	RequireJitEvent(
 	    manager,
-	    [&](const ExecutionRegionEvent &event) {
-		    return IsCompiledSljitRegionEvent(event) && event.policy_decision == "auto" &&
-		           event.admission_shape_key == admission_key;
+	    [](const ExecutionRegionEvent &event) {
+		    return EventTarget(event) == "region" && EventStatus(event) == "skipped" && EventRequestedPolicy(event) == "auto" &&
+		           event.has_candidate && event.candidate_estimated_cardinality == 16;
 	    },
-	    [&](const ExecutionRegionEvent &event) {
-		    REQUIRE(event.admission_rule_present);
-		    REQUIRE(event.admission_min_cardinality == min_cardinality);
-		    REQUIRE(event.admission_proof == "measured-auto-admission:test-profile");
-		    REQUIRE(event.has_admission_score);
-		    REQUIRE(event.admission_score >= 0);
-		    REQUIRE(StringUtil::Contains(event.reason, "execution_region_policy=auto admits shape="));
-		    if (event.code_size == 0) {
-			    RequireCompiledFusedOperatorProtocolRegion(event);
-		    } else {
-			    RequireNativeFusedRegion(event);
-			    REQUIRE(StringUtil::Contains(event.reason, "execution-body=generated-machine-code"));
-		    }
+	    [](const ExecutionRegionEvent &event) {
+		    REQUIRE(event.has_candidate);
+		    REQUIRE(event.candidate_estimated_cardinality == 16);
+		    REQUIRE(event.selected_runner == ExecutionRunnerKind::VECTORIZED);
 	    });
 
-	ClearJitTrace(manager, true);
-	REQUIRE_NO_FAIL(con.Query("SELECT i + 1 AS j FROM jit_auto_policy_small WHERE i > 1000"));
-	require_auto_skipped_before_region_lowering();
-
-	REQUIRE_NO_FAIL(con.Query("SELECT * FROM duckdb_jit_clear_admission_rules()"));
-	REQUIRE_NO_FAIL(con.Query("SET jit_dump_ir=false"));
-	ClearJitTrace(manager, true);
-	REQUIRE_NO_FAIL(con.Query("SELECT sum(j) FROM (SELECT i + 1 AS j FROM jit_auto_policy_small WHERE i > 1000)"));
-	require_auto_skipped_before_graph();
+	for (auto &event : manager.GetEvents()) {
+		const bool compiled_auto_region =
+		    EventTarget(event) == "region" && EventStatus(event) == "compiled" && EventRequestedPolicy(event) == "auto";
+		REQUIRE_FALSE(compiled_auto_region);
+	}
 }
 
-TEST_CASE("JIT auto admission uses canonical feature identity", "[api][jit]") {
+TEST_CASE("JIT force compiles branchy native expressions", "[api][jit]") {
 	JitTestDatabase test;
 	auto &con = test.con;
 	auto &manager = test.manager;
 
-	ConfigureSljit(con, "force", false, true);
+	ConfigureSljit(con, "off");
+	REQUIRE_NO_FAIL(con.Query("CREATE TEMP TABLE jit_auto_branchy_expression_input AS "
+	                          "SELECT i::BIGINT AS a, (i % 97)::BIGINT AS b, (i % 193)::BIGINT AS c, "
+	                          "(i % 389)::BIGINT AS d, (i % 769)::BIGINT AS e FROM range(1000000) tbl(i)"));
+
+	const string expression = "CASE WHEN (((a + b * 3 - c * 5 + d * 7 - e * 11) > 0) "
+	                          "AND ((a - b + c + 1) < (d + e + 3))) "
+	                          "THEN (a * 13 + b * 17 - c * 19 + d * 23 - e * 29) "
+	                          "ELSE (a - b + c - d + e) END";
+	auto reference = con.Query("SELECT sum(" + expression + ") FROM jit_auto_branchy_expression_input");
+	REQUIRE_NO_FAIL(*reference);
+
+	ConfigureSljitSettings(con, "force", false, true);
 	REQUIRE_NO_FAIL(con.Query("SET jit_trace_decisions=true"));
-	REQUIRE_NO_FAIL(con.Query("CREATE TEMP TABLE jit_auto_canonical_probe AS "
-	                          "SELECT (i % 4096)::BIGINT AS k, i::BIGINT AS v FROM range(200000) tbl(i)"));
-	REQUIRE_NO_FAIL(con.Query("CREATE TEMP TABLE jit_auto_canonical_build AS "
-	                          "SELECT i::BIGINT AS k FROM range(4096) tbl(i)"));
-
-	const string query = "SELECT p.k, p.v, b.k + 1 AS next_k "
-	                     "FROM jit_auto_canonical_probe p "
-	                     "JOIN jit_auto_canonical_build b ON p.k=b.k "
-	                     "WHERE p.v > 1000 AND p.v < 1100";
-
 	ClearJitTrace(manager, true);
-	REQUIRE_NO_FAIL(con.Query(query));
-
-		string candidate_admission_key;
-		string lowered_admission_key;
-	idx_t min_cardinality = 0;
-	RequireJitEvent(
-	    manager,
-	    [](const ExecutionRegionEvent &event) {
-		    return IsCompiledSljitRegionEvent(event) &&
-		           StringUtil::Contains(event.candidate_signature.feature_shape, "hash-join-operator") &&
-		           StringUtil::Contains(event.candidate_signature.feature_shape, "table-scan-source");
-	    },
-	    [&](const ExecutionRegionEvent &event) {
-		    lowered_admission_key = event.admission_shape_key;
-		    candidate_admission_key = BuildExecutionRegionAdmissionShapeKey("sljit", event.candidate_signature);
-		    candidate_admission_key =
-		        BuildExecutionRegionAdmissionContextShapeKey(event.candidate_signature, candidate_admission_key);
-		    min_cardinality = event.candidate_estimated_cardinality;
-	    });
-		REQUIRE(!lowered_admission_key.empty());
-		REQUIRE(!candidate_admission_key.empty());
-		REQUIRE(lowered_admission_key == candidate_admission_key);
-		REQUIRE(min_cardinality > 0);
-
-		REQUIRE_NO_FAIL(con.Query("SELECT * FROM duckdb_jit_clear_admission_rules()"));
-		REQUIRE_NO_FAIL(con.Query("SELECT * FROM duckdb_jit_add_admission_rule('sljit', 'region', " +
-		                          SQLString(candidate_admission_key) + ", " + to_string(min_cardinality) + "::UBIGINT" +
-		                          ", 'measured-auto-admission:canonical-feature-identity')"));
-
-		ConfigureSljitSettings(con, "auto", false, true);
-	ClearJitTrace(manager, true);
-	REQUIRE_NO_FAIL(con.Query(query));
+	REQUIRE_NO_FAIL(con.Query("CREATE TEMP TABLE jit_auto_branchy_expression_output AS "
+	                          "SELECT " +
+	                          expression + " AS v FROM jit_auto_branchy_expression_input"));
+	auto result = con.Query("SELECT sum(v) FROM jit_auto_branchy_expression_output");
+	REQUIRE_NO_FAIL(*result);
+	REQUIRE(result->GetValue(0, 0).ToString() == reference->GetValue(0, 0).ToString());
 
 	RequireJitEvent(
 	    manager,
 	    [](const ExecutionRegionEvent &event) {
-		    return IsCompiledSljitRegionEvent(event) && event.policy_decision == "auto" &&
-		           event.admission_proof == "measured-auto-admission:canonical-feature-identity";
+		    return IsCompiledSljitRegionEvent(event) && EventRequestedPolicy(event) == "force";
 	    },
-	    [&](const ExecutionRegionEvent &event) {
-		    REQUIRE(event.admission_rule_present);
-		    REQUIRE(event.admission_min_cardinality == min_cardinality);
-		    REQUIRE(event.has_admission_score);
-		    REQUIRE(event.admission_score >= 0);
-		    RequireNativeFusedRegion(event);
+	    [](const ExecutionRegionEvent &event) { RequireCompiledGeneratedRegion(event); });
+}
+
+TEST_CASE("JIT force compiles high-intensity ungrouped aggregate updates", "[api][jit]") {
+	JitTestDatabase test;
+	auto &con = test.con;
+	auto &manager = test.manager;
+
+	ConfigureSljit(con, "force");
+	REQUIRE_NO_FAIL(con.Query("SET jit_trace_decisions=true"));
+	REQUIRE_NO_FAIL(con.Query("CREATE TEMP TABLE jit_force_aggregate_cbo_input AS "
+	                          "SELECT i::BIGINT AS a, (i + 1)::BIGINT AS b, (i + 2)::BIGINT AS c, "
+	                          "(i + 3)::BIGINT AS d FROM range(1000000) tbl(i)"));
+
+	const string expression = "CAST(((((a * 3) + (b * 5) - (c * 7) + (d * 11)) * 13) "
+	                          "+ (((a - b + c) * 17) - ((a + d) * 19)) "
+	                          "+ (((b - c + d) * 23) - ((a - d) * 29))) AS BIGINT)";
+	ClearJitTrace(manager, true);
+	auto result = con.Query("SELECT sum(" + expression + ") FROM jit_force_aggregate_cbo_input");
+	REQUIRE_NO_FAIL(*result);
+
+	RequireJitEvent(
+	    manager,
+	    [](const ExecutionRegionEvent &event) {
+		    return IsCompiledSljitRegionEvent(event) && EventRequestedPolicy(event) == "force" &&
+		           event.candidate_traits.sink_kind == ExecutionRegionSinkKind::UNGROUPED_AGGREGATE_UPDATE;
+	    },
+	    [](const ExecutionRegionEvent &event) {
+		    REQUIRE(event.has_candidate);
+		    REQUIRE(event.candidate_estimated_cardinality == 1000000);
+		    REQUIRE(event.selected_runner == ExecutionRunnerKind::COMPILED_VECTORIZED);
+		    REQUIRE(EventExecutionMode(event) == "native");
+		    REQUIRE(EventExecutionBody(event) == "generated-machine-code");
+		    RequireCandidateStructure(event, 0, 1, ExecutionRegionSinkKind::UNGROUPED_AGGREGATE_UPDATE);
+		    RequireCompiledGeneratedRegion(event);
 	    });
 }
 
-TEST_CASE("JIT auto policy skips backends without measured auto admission policy", "[api][jit]") {
+TEST_CASE("JIT auto planner cost skips tiny filtered sums", "[api][jit]") {
+	JitTestDatabase test;
+	auto &con = test.con;
+	auto &manager = test.manager;
+
+	ConfigureSljit(con, "auto");
+	REQUIRE_NO_FAIL(con.Query("SET jit_trace_decisions=true"));
+	REQUIRE_NO_FAIL(con.Query("CREATE TEMP TABLE jit_auto_filtered_sum_small AS "
+	                          "SELECT i::BIGINT AS a, (i % 17)::BIGINT AS b FROM range(1024) tbl(i)"));
+
+	ClearJitTrace(manager, true);
+	auto result = con.Query("SELECT sum(a * b) FROM jit_auto_filtered_sum_small WHERE a >= 10 AND a < 1024");
+	REQUIRE_NO_FAIL(*result);
+
+	RequireJitEvent(
+	    manager,
+	    [](const ExecutionRegionEvent &event) {
+		    return EventTarget(event) == "region" && EventStatus(event) == "skipped" && EventRequestedPolicy(event) == "auto" &&
+		           event.has_candidate;
+	    },
+	    [](const ExecutionRegionEvent &event) {
+		    REQUIRE(event.has_candidate);
+		    REQUIRE(event.selected_runner == ExecutionRunnerKind::VECTORIZED);
+	    });
+}
+
+TEST_CASE("JIT auto policy selects vectorized through one DuckDB execution path", "[api][jit]") {
 	JitTestDatabase test;
 	auto &context = test.context;
 	auto &manager = test.manager;
@@ -272,40 +264,40 @@ TEST_CASE("JIT auto policy skips backends without measured auto admission policy
 	ClearJitTrace(manager);
 	REQUIRE_NO_FAIL(test.con.Query("SELECT i + 1 FROM jit_auto_reject_input WHERE i > 0"));
 
+	REQUIRE(backend_ref.region_analyze_count > 0);
 	REQUIRE(backend_ref.region_compile_count == 0);
 
 	RequireNoExpressionJitEvents(manager);
 	RequireJitEvent(
 	    manager,
 	    [](const ExecutionRegionEvent &event) {
-		    return event.backend_name == "contract_test_auto_reject_jit_backend" && event.target == "region" &&
-		           StringUtil::Contains(event.reason, "before graph lowering");
+		    return event.backend_name == "contract_test_auto_reject_jit_backend" && EventTarget(event) == "region" &&
+		           EventStatus(event) == "skipped" && EventRequestedPolicy(event) == "auto";
 	    },
 	    [](const ExecutionRegionEvent &event) {
-		    REQUIRE_FALSE(event.has_candidate);
-		    REQUIRE(event.status == "skipped");
-		    REQUIRE(event.execution_mode == "unsupported");
-		    REQUIRE(event.policy_decision == "auto");
+		    REQUIRE(event.has_candidate);
+		    REQUIRE(EventStatus(event) == "skipped");
+		    REQUIRE(EventExecutionMode(event) == "unsupported");
+		    REQUIRE(EventRequestedPolicy(event) == "auto");
 		    REQUIRE(event.decision_time_us >= 0);
 		    REQUIRE(event.compile_time_us == 0);
 		    REQUIRE(event.code_size == 0);
-		    REQUIRE(event.backend_analysis_time_us == 0);
-		    REQUIRE_FALSE(event.has_admission);
-		    REQUIRE_FALSE(event.admission_rule_present);
-		    REQUIRE(StringUtil::Contains(event.reason, "backend has no measured auto admission policy"));
+		    REQUIRE(event.backend_analysis_time_us >= 0);
+		    REQUIRE(event.selected_runner == ExecutionRunnerKind::VECTORIZED);
+		    REQUIRE_FALSE(StringUtil::Contains(event.reason, "before region lowering"));
 	    });
 }
 
-TEST_CASE("JIT auto admission only compiles fused region forms", "[api][jit]") {
+TEST_CASE("JIT compiled execution only accepts fused region forms", "[api][jit]") {
 	JitTestDatabase test;
 	auto &context = test.context;
 	auto &manager = test.manager;
 
-	auto backend = make_uniq<AutoMissingExecutionFormAdmissionBackend>();
+	auto backend = make_uniq<AutoMissingExecutionFormBackend>();
 	auto &backend_ref = *backend;
 	manager.RegisterBackend(std::move(backend));
 	SetJitTestOptions(context, "contract_test_auto_missing_execution_form_jit_backend");
-	Settings::Set<JitPolicySetting>(context, SetScope::SESSION, Value("auto"));
+	Settings::Set<JitPolicySetting>(context, SetScope::SESSION, Value("force"));
 	REQUIRE_NO_FAIL(test.con.Query("CREATE TEMP TABLE jit_auto_non_fused_input AS "
 	                               "SELECT i::BIGINT AS i FROM range(16) tbl(i)"));
 
@@ -319,19 +311,12 @@ TEST_CASE("JIT auto admission only compiles fused region forms", "[api][jit]") {
 	    manager,
 	    [](const ExecutionRegionEvent &event) {
 		    return event.backend_name == "contract_test_auto_missing_execution_form_jit_backend" &&
-		           event.target == "region" && event.has_admission &&
-		           event.admission_shape_key == "contract:auto-missing-execution-form" && event.status == "skipped" &&
-		           event.region_execution_form == "none";
+		           EventTarget(event) == "region" && EventStatus(event) == "skipped" && EventRegionExecutionForm(event) == "none" &&
+		           StringUtil::Contains(event.reason, "contract:auto-missing-execution-form");
 	    },
 	    [](const ExecutionRegionEvent &event) {
-		    REQUIRE(event.execution_mode == "unsupported");
-		    REQUIRE(event.policy_decision == "auto");
-		    REQUIRE(event.has_admission);
-		    REQUIRE(event.admission_shape_key == "contract:auto-missing-execution-form");
-		    REQUIRE(event.admission_rule_present);
-		    REQUIRE(event.admission_min_cardinality == 0);
-		    REQUIRE(event.admission_proof == "contract:auto-missing-execution-form-proof");
-		    REQUIRE(event.has_admission_score);
+		    REQUIRE(EventExecutionMode(event) == "unsupported");
+		    REQUIRE(EventRequestedPolicy(event) == "force");
 		    REQUIRE(event.compile_time_us == 0);
 		    REQUIRE(event.code_size == 0);
 		    REQUIRE(StringUtil::Contains(event.reason, "region execution form is not fused"));

@@ -400,6 +400,16 @@ ExecutionRegionOperatorKind PhysicalOperator::GetExecutionRegionOperatorKind() c
 	}
 }
 
+void PhysicalOperator::GetExecutionRegionPreGraphSourceInfo(idx_t &estimated_source_cardinality,
+                                                            idx_t &source_filter_count) const {
+	estimated_source_cardinality = estimated_cardinality;
+	source_filter_count = 0;
+}
+
+void PhysicalOperator::GetExecutionRegionPreGraphTransformInfo(ExecutionTransformContract &transform) const {
+	(void)transform;
+}
+
 ExecutionContract PhysicalOperator::GetExecutionContract() const {
 	return FinalizeExecutionContract(ExecutionContract());
 }

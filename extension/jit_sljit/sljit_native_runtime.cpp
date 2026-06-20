@@ -8,6 +8,8 @@ namespace duckdb {
 
 const_data_ptr_t NativeIntegerSourceData(UnifiedVectorFormat &format, SljitNativeIntegerKind kind) {
 	switch (kind) {
+	case SljitNativeIntegerKind::INT8:
+		return reinterpret_cast<const_data_ptr_t>(UnifiedVectorFormat::GetData<int8_t>(format));
 	case SljitNativeIntegerKind::UINT8:
 		return reinterpret_cast<const_data_ptr_t>(UnifiedVectorFormat::GetData<uint8_t>(format));
 	case SljitNativeIntegerKind::INT32:
@@ -22,6 +24,8 @@ const_data_ptr_t NativeIntegerSourceData(UnifiedVectorFormat &format, SljitNativ
 
 data_ptr_t NativeIntegerResultData(Vector &result, SljitNativeIntegerKind kind) {
 	switch (kind) {
+	case SljitNativeIntegerKind::INT8:
+		return reinterpret_cast<data_ptr_t>(FlatVector::GetDataMutable<int8_t>(result));
 	case SljitNativeIntegerKind::UINT8:
 		return reinterpret_cast<data_ptr_t>(FlatVector::GetDataMutable<uint8_t>(result));
 	case SljitNativeIntegerKind::INT32:
@@ -34,8 +38,7 @@ data_ptr_t NativeIntegerResultData(Vector &result, SljitNativeIntegerKind kind) 
 	}
 }
 
-const_data_ptr_t NativeSignedIntegerSourceData(UnifiedVectorFormat &format,
-                                               SljitNativeSignedIntegerWidth width) {
+const_data_ptr_t NativeSignedIntegerSourceData(UnifiedVectorFormat &format, SljitNativeSignedIntegerWidth width) {
 	switch (width) {
 	case SljitNativeSignedIntegerWidth::INT8:
 		return reinterpret_cast<const_data_ptr_t>(UnifiedVectorFormat::GetData<int8_t>(format));
@@ -65,8 +68,7 @@ data_ptr_t NativeSignedIntegerResultData(Vector &result, SljitNativeSignedIntege
 	}
 }
 
-const_data_ptr_t NativeUnsignedIntegerSourceData(UnifiedVectorFormat &format,
-                                                 SljitNativeUnsignedIntegerWidth width) {
+const_data_ptr_t NativeUnsignedIntegerSourceData(UnifiedVectorFormat &format, SljitNativeUnsignedIntegerWidth width) {
 	switch (width) {
 	case SljitNativeUnsignedIntegerWidth::UINT8:
 		return reinterpret_cast<const_data_ptr_t>(UnifiedVectorFormat::GetData<uint8_t>(format));
@@ -114,55 +116,42 @@ static bool NormalizedSljitSourceAllValid(const UnifiedVectorFormat &format, con
 	return true;
 }
 
-bool NativePredicateRequiresInput(const SljitNativePredicate &predicate) {
-	switch (predicate.kind) {
-	case SljitNativePredicateKind::CONSTANT:
-		return false;
-	case SljitNativePredicateKind::NOT:
-		return NativePredicateRequiresInput(*predicate.child);
-	case SljitNativePredicateKind::CONJUNCTION:
-		for (auto &child : predicate.children) {
-			if (NativePredicateRequiresInput(*child)) {
-				return true;
-			}
-		}
-		return false;
-	case SljitNativePredicateKind::CONSTANT_OR_NULL:
-		return !predicate.guard_source_indices.empty() || NativePredicateRequiresInput(*predicate.child);
-	default:
-		return true;
-	}
-}
-
-void PrepareSljitPredicateSources(DataChunk *input, bool requires_input, vector<UnifiedVectorFormat> &formats,
-                                  vector<const_data_ptr_t> &source_data, vector<const sel_t *> &source_sel,
-                                  vector<const validity_t *> &source_validity) {
-	if (!input) {
-		if (requires_input) {
-			throw InternalException("SLJIT native predicate kernel requires an input chunk");
-		}
-		source_data.clear();
-		source_sel.clear();
-		source_validity.clear();
-		return;
-	}
+void SljitNativePredicateSourceAdapter::Reset() {
 	formats.clear();
 	source_data.clear();
 	source_sel.clear();
 	source_validity.clear();
-	formats.reserve(input->ColumnCount());
-	source_data.reserve(input->ColumnCount());
-	source_sel.reserve(input->ColumnCount());
-	source_validity.reserve(input->ColumnCount());
-	for (idx_t column_idx = 0; column_idx < input->ColumnCount(); column_idx++) {
-		formats.emplace_back();
-		input->data[column_idx].ToUnifiedFormat(formats.back());
-		auto sel = NormalizedSljitSourceSelectionData(formats.back());
-		source_data.push_back(formats.back().data);
-		source_sel.push_back(sel);
-		source_validity.push_back(NormalizedSljitSourceAllValid(formats.back(), sel, input->size())
-		                              ? nullptr
-		                              : formats.back().validity.GetData());
+}
+
+void SljitNativePredicateSourceAdapter::Prepare(DataChunk *input, const vector<idx_t> &input_source_indices) {
+	if (!input) {
+		if (!input_source_indices.empty()) {
+			throw InternalException("SLJIT native predicate kernel requires an input chunk");
+		}
+		Reset();
+		return;
+	}
+	if (input_source_indices.empty()) {
+		Reset();
+		return;
+	}
+	auto source_count = input_source_indices.size();
+	formats.resize(source_count);
+	source_data.assign(source_count, nullptr);
+	source_sel.assign(source_count, nullptr);
+	source_validity.assign(source_count, nullptr);
+	for (idx_t source_idx = 0; source_idx < source_count; source_idx++) {
+		auto column_idx = input_source_indices[source_idx];
+		if (column_idx >= input->ColumnCount()) {
+			throw InternalException("SLJIT native predicate source index out of range");
+		}
+		input->data[column_idx].ToUnifiedFormat(formats[source_idx]);
+		auto sel = NormalizedSljitSourceSelectionData(formats[source_idx]);
+		source_data[source_idx] = formats[source_idx].data;
+		source_sel[source_idx] = sel;
+		source_validity[source_idx] = NormalizedSljitSourceAllValid(formats[source_idx], sel, input->size())
+		                                  ? nullptr
+		                                  : formats[source_idx].validity.GetData();
 	}
 }
 

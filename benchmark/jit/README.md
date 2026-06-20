@@ -1,49 +1,41 @@
-# DuckDB Compiled-Region SQL Trace Harness
+# DuckDB Execution-Region Verification
 
-This directory contains focused trace tooling for compiled-region SQL coverage.
-TPC-H traces answer workload performance questions; this harness answers whether
-the focused SQL test flows still produce honest region, scalar-IR, boundary,
-counter, runtime, and IR evidence through the `jit_*` SQL surface.
+This directory keeps the execution-region verification surface intentionally
+small:
 
-Run:
+- `verify_jit_architecture.py` checks source-level architecture invariants.
+- `benchmark/tpch/jit/tpch_benchmark.py` is the canonical correctness,
+  performance, and profiling harness for TPC-H execution regions.
+
+Run the architecture verifier directly:
 
 ```sh
-python3 benchmark/jit/jit_sql_trace.py --out-dir /tmp/duckdb_jit_sql_trace
-python3 benchmark/jit/verify_jit_sql_trace.py /tmp/duckdb_jit_sql_trace
 python3 benchmark/jit/verify_jit_architecture.py
 ```
 
-Use a fresh or empty `--out-dir` for each run. The harness refuses non-empty
-trace directories, and the verifier rejects files that are not listed in
-`trace_manifest.json`.
+Run the TPC-H harness when validating performance or region-selection behavior:
 
-The generated `summary.csv` has one row per focused case:
+```sh
+python3 benchmark/tpch/jit/tpch_benchmark.py --policies off auto force --out-dir /tmp/duckdb_jit_tpch_benchmark
+python3 benchmark/tpch/jit/verify_tpch_benchmark.py /tmp/duckdb_jit_tpch_benchmark
+```
 
-- `region_native_filter_projection`
-- `region_unsupported_unnest_boundary`
-- `sql_equivalence_matrix`
+`tpch_benchmark.py` defaults to `--timing-mode=production`. In that mode the
+measured query uses the DuckDB shell timer without detailed JSON profiling, while
+correctness checks and `duckdb_jit_counters()` still run after the timed
+statement. Use `--timing-mode=profile` only when the profiler JSON itself is the
+artifact under inspection.
 
-Each case also emits event, cumulative counter, and kernel-counter CSVs.
-`test_surface_coverage.csv` inventories the checked-in compiled-region
-sqllogictest files and every `TEST_CASE` in `test/api/test_jit.cpp`, mapping
-each surface to the unit/sqllogictest route and any focused trace cases that
-exercise the same flow.
-`flow_step_summary.csv` groups each focused case by target, phase, status,
-execution mode, policy decision, candidate shape, and candidate ABI, then
-reconciles event counts, stage timing, runtime rows, kernel reachability, and
-boundary counters against the raw event and kernel-counter CSVs.
-The trace directory includes `trace_manifest.json`, which records the schema
-version, configuration, database ownership mode, run-owned artifacts, CSV
-columns, row counts, byte sizes, and content hashes. The verifier checks the
-manifest and test-surface coverage before reading trace content, then checks
-validation results, flow-step reconciliation, expected compiled/unsupported
-surfaces, runtime counters, nonzero native code, deterministic region pipeline
-shape and ABI, IR presence for generated code, event ID ordering, typed scalar
-IR coverage, complex-type boundary IR coverage, and compiled
-projection-sink/filter-projection-sink region shapes.
+`tpch_benchmark.py` writes:
 
-The architecture verifier checks source-level boundaries: database-owned
-execution-region manager registration, static `jit_sljit` integration,
-core-owned source contracts, manifest-backed trace-contract presence,
-full-pipeline/source contracts, and reverse dependencies between core execution
-region code, backend code, and DuckDB executor internals.
+- `summary.csv`: per-query/per-policy timing and execution-region totals.
+- `runs.csv`: one row per measured query execution.
+- `counters.csv`: raw typed `duckdb_jit_counters()` rows annotated with query, policy, and repeat.
+- `performance_gaps.csv`: query-by-query performance summary with AUTO/FORCE speedups, compiled coverage,
+  primary AUTO blocker, aggregate AUTO runner-cost benefit/cost/net-benefit, and FORCE planning/compile/code-size
+  evidence.
+
+Production `auto` stays on DuckDB's vectorized path unless core execution has
+selected the compiled-vectorized runner. Benchmark artifacts expose the selected runner,
+region shape, blocker class, and runtime breakdown from the same core execution
+selection path.

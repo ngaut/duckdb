@@ -31,6 +31,7 @@ unique_ptr<ExecutionRegionCodeHandle> MakeSljitCodeHandle(void *code, idx_t code
 
 sljit_sw NativeIntegerDataScale(SljitNativeIntegerKind kind) {
 	switch (kind) {
+	case SljitNativeIntegerKind::INT8:
 	case SljitNativeIntegerKind::UINT8:
 		return 0;
 	case SljitNativeIntegerKind::INT32:
@@ -45,6 +46,8 @@ sljit_sw NativeIntegerDataScale(SljitNativeIntegerKind kind) {
 
 sljit_s32 NativeIntegerLoadOp(SljitNativeIntegerKind kind) {
 	switch (kind) {
+	case SljitNativeIntegerKind::INT8:
+		return SLJIT_MOV_S8;
 	case SljitNativeIntegerKind::UINT8:
 		return SLJIT_MOV_U8;
 	case SljitNativeIntegerKind::INT32:
@@ -59,6 +62,7 @@ sljit_s32 NativeIntegerLoadOp(SljitNativeIntegerKind kind) {
 
 sljit_s32 NativeIntegerStoreOp(SljitNativeIntegerKind kind) {
 	switch (kind) {
+	case SljitNativeIntegerKind::INT8:
 	case SljitNativeIntegerKind::UINT8:
 		return SLJIT_MOV_U8;
 	case SljitNativeIntegerKind::INT32:

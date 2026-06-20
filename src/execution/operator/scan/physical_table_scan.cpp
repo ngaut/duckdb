@@ -5,6 +5,7 @@
 #include "duckdb/common/mutex.hpp"
 #include "duckdb/common/optional_idx.hpp"
 #include "duckdb/common/string_util.hpp"
+#include "duckdb/execution/execution_operator_runtime.hpp"
 #include "duckdb/function/table/table_scan.hpp"
 #include "duckdb/planner/expression/bound_conjunction_expression.hpp"
 #include "duckdb/transaction/transaction.hpp"
@@ -20,11 +21,9 @@
 namespace duckdb {
 
 struct TableScanExecutionSourceConfig {
-	bool use_prepared_source_input = false;
 	bool use_source_contract = false;
 	vector<idx_t> projection_ids;
 	optional_ptr<TableFilterSet> filters;
-	TableFilterExecutionMode filter_execution_mode = TableFilterExecutionMode::FILTER_AND_PRUNE;
 };
 
 struct TableScanExecutionSourceContractGlobalState {
@@ -37,15 +36,6 @@ struct TableScanExecutionSourceContractGlobalState {
 	bool can_remove_filter_columns = false;
 	bool is_create_index = false;
 };
-
-static vector<idx_t> BuildIdentityTableScanProjection(idx_t column_count) {
-	vector<idx_t> result;
-	result.reserve(column_count);
-	for (idx_t column_idx = 0; column_idx < column_count; column_idx++) {
-		result.push_back(column_idx);
-	}
-	return result;
-}
 
 static bool IsExecutionTableScanSourceContractSupported(const PhysicalTableScan &op) {
 	if (StringUtil::Lower(op.function.name.GetIdentifierName()) != "seq_scan") {
@@ -67,14 +57,7 @@ BuildTableScanExecutionSourceConfig(const PhysicalTableScan &op, optional_ptr<Ta
 	TableScanExecutionSourceConfig result;
 	result.projection_ids = op.projection_ids;
 	result.filters = filters;
-	result.use_source_contract =
-	    open_request.UsesSourceContract() && IsExecutionTableScanSourceContractSupported(op);
-	if (!open_request.UsesGeneratedFilters()) {
-		return result;
-	}
-	result.use_prepared_source_input = true;
-	result.projection_ids = BuildIdentityTableScanProjection(op.column_ids.size());
-	result.filter_execution_mode = TableFilterExecutionMode::PRUNE_ONLY;
+	result.use_source_contract = open_request.UsesSourceContract() && IsExecutionTableScanSourceContractSupported(op);
 	return result;
 }
 
@@ -237,11 +220,9 @@ public:
 private:
 	void InitializeExecutionSourceContract(ExecutionContext &context, TableScanGlobalSourceState &gstate,
 	                                       const PhysicalTableScan &op) {
-		auto filters = gstate.execution_source_config.use_prepared_source_input ? gstate.execution_source_config.filters
-		                                                                        : gstate.GetTableFilters(op);
+		auto filters = gstate.GetTableFilters(op);
 		execution_source_contract_scan_state.Initialize(gstate.execution_source_contract.storage_ids, context.client,
-		                                                filters, op.extra_info.sample_options,
-		                                                gstate.execution_source_config.filter_execution_mode);
+		                                                filters, op.extra_info.sample_options);
 		gstate.execution_source_contract.storage->NextParallelScan(
 		    context.client, gstate.execution_source_contract.parallel_state, execution_source_contract_scan_state);
 		if (gstate.execution_source_contract.can_remove_filter_columns) {
@@ -264,9 +245,18 @@ unique_ptr<GlobalSourceState> PhysicalTableScan::GetGlobalSourceState(ClientCont
 }
 
 unique_ptr<GlobalSourceState>
-PhysicalTableScan::GetGlobalSourceState(ClientContext &context,
-                                        const ExecutionRegionOpenRequest &open_request) const {
+PhysicalTableScan::GetGlobalSourceState(ClientContext &context, const ExecutionRegionOpenRequest &open_request) const {
 	return make_uniq<TableScanGlobalSourceState>(context, *this, open_request);
+}
+
+void PhysicalTableScan::GetExecutionRegionPreGraphSourceInfo(idx_t &estimated_source_cardinality,
+                                                             idx_t &source_filter_count) const {
+	estimated_source_cardinality = estimated_cardinality;
+	if (bind_data && StringUtil::Lower(function.name.GetIdentifierName()) == "seq_scan") {
+		auto &table_scan_bind = bind_data->Cast<TableScanBindData>();
+		estimated_source_cardinality = table_scan_bind.table.GetStorage().GetTotalRows();
+	}
+	source_filter_count = table_filters ? table_filters->FilterCount() : 0;
 }
 
 bool PhysicalTableScan::SupportsExecutionSourceContract(const ExecutionRegionOpenRequest &open_request) const {
@@ -286,13 +276,24 @@ SourceResultType PhysicalTableScan::GetExecutionSourceContractDataInternal(Execu
 
 	do {
 		if (contract_state.is_create_index) {
+			ExecutionOperatorStageTimer timer(input.stage_recorder, "source_contract.table_scan.create_index_scan");
 			contract_state.storage->CreateIndexScan(scan_state, chunk);
 		} else if (contract_state.can_remove_filter_columns) {
 			l_state.execution_source_contract_all_columns.Reset();
-			contract_state.storage->Scan(*contract_state.transaction, l_state.execution_source_contract_all_columns,
-			                             scan_state);
-			chunk.ReferenceColumns(l_state.execution_source_contract_all_columns, contract_state.projection_ids);
+			{
+				ExecutionOperatorStageTimer timer(input.stage_recorder,
+				                                  "source_contract.table_scan.storage_scan_all_columns");
+				contract_state.storage->Scan(*contract_state.transaction, l_state.execution_source_contract_all_columns,
+				                             scan_state);
+			}
+			{
+				ExecutionOperatorStageTimer timer(input.stage_recorder,
+				                                  "source_contract.table_scan.reference_projection");
+				chunk.ReferenceColumns(l_state.execution_source_contract_all_columns, contract_state.projection_ids);
+			}
 		} else {
+			ExecutionOperatorStageTimer timer(input.stage_recorder,
+			                                  "source_contract.table_scan.storage_scan_projected");
 			contract_state.storage->Scan(*contract_state.transaction, chunk, scan_state);
 		}
 
@@ -300,12 +301,19 @@ SourceResultType PhysicalTableScan::GetExecutionSourceContractDataInternal(Execu
 			return SourceResultType::HAVE_MORE_OUTPUT;
 		}
 
-		auto rows_in_current_row_group =
-		    contract_state.storage->NextParallelScan(context.client, contract_state.parallel_state, scan_state);
+		idx_t rows_in_current_row_group;
+		{
+			ExecutionOperatorStageTimer timer(input.stage_recorder, "source_contract.table_scan.next_parallel_scan");
+			rows_in_current_row_group =
+			    contract_state.storage->NextParallelScan(context.client, contract_state.parallel_state, scan_state);
+		}
 		if (rows_in_current_row_group == 0) {
 			return SourceResultType::FINISHED;
 		}
-		context.client.InterruptCheck();
+		{
+			ExecutionOperatorStageTimer timer(input.stage_recorder, "source_contract.table_scan.interrupt_check");
+			context.client.InterruptCheck();
+		}
 	} while (true);
 }
 

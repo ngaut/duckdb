@@ -9,7 +9,7 @@
 
 #include "duckdb/common/common.hpp"
 #include "duckdb/common/types.hpp"
-#include "duckdb/execution/execution_region_open_request.hpp"
+#include "duckdb/execution/execution_region_common.hpp"
 
 namespace duckdb {
 
@@ -22,12 +22,17 @@ struct ExecutionRegionPlan {
 	string backend_name;
 	ExecutionRegionOpenRequest source_open_request;
 	vector<unique_ptr<ExecutionRegionKernel>> kernels;
+	ExecutionRunnerKind selected_runner = ExecutionRunnerKind::VECTORIZED;
 	bool operator_readiness_refresh = false;
 
 	bool HasExecutableRegions() const {
 		return !kernels.empty();
 	}
 	bool HasExecutableFullPipeline() const;
+	void SelectRunner(ExecutionRunnerKind runner);
+	ExecutionRunnerKind SelectedRunner() const {
+		return selected_runner;
+	}
 	optional_ptr<ExecutionRegionKernel> GetExecutableFullPipelineKernel();
 	optional_ptr<const ExecutionRegionKernel> GetExecutableFullPipelineKernel() const;
 	bool RequiresOperatorReadinessRefresh() const {
@@ -39,14 +44,8 @@ struct ExecutionRegionPlan {
 	const vector<unique_ptr<ExecutionRegionKernel>> &Kernels() const {
 		return kernels;
 	}
-	bool RequiresCompiledSourceInput() const {
-		return source_open_request.present && source_open_request.UsesGeneratedFilters();
-	}
 	bool RequiresSourceContract() const {
 		return source_open_request.present && source_open_request.UsesSourceContract();
-	}
-	const vector<LogicalType> &SourceInputTypes(const vector<LogicalType> &input_types) const {
-		return RequiresCompiledSourceInput() ? source_open_request.input_types : input_types;
 	}
 	const ExecutionRegionOpenRequest &OpenRequest() const {
 		return source_open_request;

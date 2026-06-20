@@ -3,6 +3,7 @@
 #include "duckdb/common/limits.hpp"
 #include "duckdb/common/mutex.hpp"
 #include "duckdb/execution/execution_region_manager.hpp"
+#include "duckdb/execution/execution_region_runtime.hpp"
 #include "duckdb/execution/execution_region_runner.hpp"
 #include "duckdb/main/client_context.hpp"
 #include "duckdb/parallel/execution_region_pipeline_adapter.hpp"
@@ -16,6 +17,11 @@
 #endif
 
 namespace duckdb {
+
+static int64_t PipelineExecutorElapsedMicros(std::chrono::steady_clock::time_point start) {
+	auto end = std::chrono::steady_clock::now();
+	return std::chrono::duration_cast<std::chrono::microseconds>(end - start).count();
+}
 
 PipelineExecutor::PipelineExecutor(ClientContext &context_p, Pipeline &pipeline_p)
     : pipeline(pipeline_p), thread(context_p), context(context_p, thread, &pipeline_p) {
@@ -144,11 +150,7 @@ void PipelineExecutor::PrepareForExecution() {
 }
 
 void PipelineExecutor::PrepareExecutionSourceInputChunk() {
-	auto region_plan = pipeline.GetExecutionRegionPlan();
-	auto use_region_source_input =
-	    region_plan && region_plan->RequiresCompiledSourceInput() && region_plan->HasExecutableFullPipeline();
-	auto &source_input_types = use_region_source_input ? region_plan->SourceInputTypes(pipeline.source->GetTypes())
-	                                                   : pipeline.source->GetTypes();
+	auto &source_input_types = pipeline.source->GetTypes();
 	if (execution_source_input_chunk.GetTypes() == source_input_types) {
 		execution_source_input_chunk.Reset();
 		return;
@@ -687,7 +689,8 @@ SourceResultType PipelineExecutor::FetchFromSource(DataChunk *&result) {
 	return res;
 }
 
-SourceResultType PipelineExecutor::FetchFromSourceContract(DataChunk *&result) {
+SourceResultType PipelineExecutor::FetchFromSourceContract(DataChunk *&result,
+                                                           ExecutionRegionSourceContractMetrics *metrics) {
 	auto region_plan = pipeline.GetExecutionRegionPlan();
 	if (!region_plan || !region_plan->RequiresSourceContract()) {
 		throw InternalException("execution region source contract fetch requires a selected source contract");
@@ -697,22 +700,46 @@ SourceResultType PipelineExecutor::FetchFromSourceContract(DataChunk *&result) {
 		    "execution region source contract fetch selected for a source without source contract support");
 	}
 
-	StartOperator(*pipeline.source);
-
-	OperatorSourceInput source_input = {*pipeline.source_state, *local_source_state, interrupt_state};
+	auto stage_start = metrics ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point();
 	source_chunk_initial_idx = 0;
 	auto &source_chunk = execution_source_input_chunk;
 	source_chunk.Reset();
 	result = &source_chunk;
+	if (metrics) {
+		metrics->setup_runtime_time_us += PipelineExecutorElapsedMicros(stage_start);
+	}
 
+	stage_start = metrics ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point();
+	StartOperator(*pipeline.source);
+	if (metrics) {
+		metrics->start_operator_runtime_time_us += PipelineExecutorElapsedMicros(stage_start);
+	}
+
+	OperatorSourceInput source_input = {*pipeline.source_state, *local_source_state, interrupt_state};
+	if (metrics) {
+		source_input.stage_recorder = *metrics;
+	}
+
+	stage_start = metrics ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point();
 	auto res = pipeline.source->GetExecutionSourceContractData(context, source_chunk, source_input);
+	if (metrics) {
+		metrics->get_data_runtime_time_us += PipelineExecutorElapsedMicros(stage_start);
+	}
 
 	D_ASSERT(res != SourceResultType::BLOCKED || source_chunk.size() == 0);
 	if (res == SourceResultType::FINISHED) {
+		stage_start = metrics ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point();
 		context.thread.profiler.FinishSource(*pipeline.source_state, *local_source_state);
 		source_profiling_finalized = true;
+		if (metrics) {
+			metrics->finish_source_runtime_time_us += PipelineExecutorElapsedMicros(stage_start);
+		}
 	}
+	stage_start = metrics ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point();
 	EndOperator(*pipeline.source, &source_chunk);
+	if (metrics) {
+		metrics->end_operator_runtime_time_us += PipelineExecutorElapsedMicros(stage_start);
+	}
 
 	return res;
 }

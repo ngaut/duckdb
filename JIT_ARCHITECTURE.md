@@ -17,7 +17,8 @@ DuckDB physical pipeline
   -> maximal fused region planner
   -> backend-neutral region IR
   -> backend lowering
-  -> pipeline-owned compiled plan
+  -> DuckDB CBO physical-runner decision
+  -> pipeline-owned execution-region plan
   -> executable full-pipeline kernel
 ```
 
@@ -25,14 +26,15 @@ The IR is the only contract consumed by a backend. SLJIT must not inspect
 physical operator internals directly, and core DuckDB must not depend on SLJIT
 details.
 
-`Pipeline` owns the compiled execution artifact as `ExecutionRegionPlan`.
-Planning, admission, backend lowering, and codegen happen before source state
-captures scan/source-contract decisions. Source state opens from the small
-`ExecutionRegionOpenRequest`, not from the whole selected plan, so physical
-sources do not inspect compiled-region selection, kernels, admission proof, or
-backend state. `PipelineExecutor` does not compile or own kernels; it only runs
-immutable kernels from the compiled plan at a clean source-to-sink boundary.
-Backend scratch storage is per execution, not stored in the compiled kernel.
+`Pipeline` owns the selected execution artifact as `ExecutionRegionPlan`.
+Planning, backend lowering, codegen, and the CBO physical-runner decision happen before source
+state captures scan/source-contract decisions.
+Source state opens from the small `ExecutionRegionOpenRequest`, not from the
+whole selected plan, so physical sources do not inspect runner selection,
+kernels, or backend state. `PipelineExecutor` does
+not compile, own kernels, or infer policy; it only runs the runner kind selected
+by the immutable plan at a clean source-to-sink boundary. Backend scratch storage
+is per execution, not stored in the compiled kernel.
 
 ## Region Model
 
@@ -48,7 +50,7 @@ until they are fused with a sink.
 
 ## Native Fusion Contract
 
-The core contract admits a fused native region only when all of the following are true:
+The core contract exposes a fused native region only when all of the following are true:
 
 - no source boundary or missing contract exists inside the region;
 - the source has a native contract when the region owns the source;
@@ -101,15 +103,12 @@ Table scan and scan-like sources expose a backend-neutral contract:
 - `source_contract_input_columns`
 - `source_contract_input_types`
 - `source_contract_output_projection_map`
-- `source_contract_filter_column_map`
-- `source_contract_requires_unfiltered_input`
 - `source_contract_filter_prune_required`
-- `source_contract_filter_takeover_supported`
 
-When scan filters are pushed into the source, the generated full-pipeline kernel
-must either own the source filter contract or reject the region. The selected
-event reason for a generated scan filter uses `generated native table scan
-filters`.
+Scan filters remain owned by DuckDB's scan contract. If a pushed-down table
+filter is required to produce the scan chunk, the compiled full-pipeline region
+treats that work as source-contract runtime, not generated native filter work.
+Generated source-filter execution is not part of the architecture.
 
 ## Runtime ABI
 
@@ -132,11 +131,14 @@ returns the compiled runner's explicit `VECTORIZED_DEFERRED` dispatch status.
 `INVALID` means the compiled contract and runtime state disagree on shape or
 semantics, and remains a hard error.
 
-Compiled runner selection is an invariant. `Pipeline` selects
+Runner selection is a plan invariant. `ExecutionRegionPlanner` selects
 `CompiledVectorizedRunner` only when the immutable `ExecutionRegionPlan` contains
-an executable full-pipeline kernel. If that runner observes a missing source,
-sink, plan, or kernel, it is an internal architecture error, not a quiet fallback.
-The runner receives only the executable kernel through
+an executable full-pipeline kernel and DuckDB's core execution plan selected a
+compiled runner. `Pipeline` only executes the plan's selected `ExecutionRunner`,
+currently `VectorizedRunner` or `CompiledVectorizedRunner`; it does not infer
+policy from kernel presence. If the compiled runner observes a
+missing source, sink, plan, or kernel, it is an internal architecture error, not
+a quiet fallback. The runner receives only the executable kernel through
 `ExecutionRegionPipelineAdapter`, not the whole selected plan.
 The compiled runner never calls the vectorized executor directly. It returns
 `EXECUTED` or one of the named vectorized dispatch statuses:
@@ -144,13 +146,10 @@ The compiled runner never calls the vectorized executor directly. It returns
 `ExecuteExecutionRunner` is the runner-layer coordinator that maps those
 statuses to the vectorized runner.
 
-Executable full-pipeline regions can be owned in two honest modes. `native`
-means the backend emitted generated machine code for at least one region body and
-must report `code_size > 0`. `native_contract` means the compiled runner owns a
-source/operator/sink contract loop, but this region has no generated machine-code
-body of its own; `code_size` may be zero and must not be inflated.
-
-Zero-code `native` compile events are always verification failures.
+Executable full-pipeline regions have one honest compiled body:
+`generated-machine-code`. Native DuckDB contracts are stage protocols that a
+generated region may call through, not compiled bodies. A compiled event must
+report `code_size > 0`; zero-code compiled events are verification failures.
 
 State-source contracts are source contracts for full-pipeline kernels. They do
 not create a separate executable kernel ABI and must not masquerade as native
@@ -162,8 +161,10 @@ SLJIT receives only region IR and native contract descriptors. It lowers:
 
 - typed scalar expression IR;
 - native filter and projection loops;
-- native table scan filter takeover;
-- native hash join build and probe contracts;
+- native hash join probe contracts when the build layout is exposed through a
+  native contract;
+- native hash join build contracts through the primitive build protocol when the
+  same fused region also emits generated machine code;
 - native aggregate lookup and update contracts;
 - native operator sink contracts;
 - state-source contracts where the surrounding full pipeline can own the
@@ -171,51 +172,79 @@ SLJIT receives only region IR and native contract descriptors. It lowers:
 
 If a contract is missing, SLJIT records a deterministic unsupported event. It
 does not call whole DuckDB executors from native-labeled code.
+Hash join build currently owns the typed primitive build protocol. A build-only
+contract loop is normal vectorized DuckDB execution and must not be reported as a
+compiled region. When fused with generated filter/projection/probe work, its
+trace must show the primitive build stages explicitly.
 
-## Admission
+## Execution Region Policy
 
-`force` may compile any region that is executable and honest.
+`force` may compile any fused generated-code region that is executable and
+honest. It is a diagnostic override after DuckDB has built the normal
+physical-runner cost profile; it is not an input to the CBO and must not change
+the estimated benefit/cost facts. It does not compile protocol-only regions.
 
-`auto` requires measured proof for the whole fused region shape. A fast scalar
-body is not proof for a full pipeline. Core execution-region code owns admission
-identity and matching: shape keys, context keys, contract-shape fingerprints,
-lowered-shape checks, prospect checks, and cardinality thresholds. Backends
-provide measured rule data and executable lowering, not private copies of the
-matching algorithm.
+`auto` is owned by DuckDB's normal execution planning, not by a private JIT
+threshold. In production execution, DuckDB inspects executable region
+candidates, lowers backend-neutral IR, asks the selected backend for capability
+facts, and then makes one core CBO decision. The decision compares estimated
+saved vectorized work against compile/planning cost and selects either
+`CompiledVectorizedRunner` or `VectorizedRunner`.
 
-Admission keys are backend-prefixed shape keys such as
-`sljit:full-pipeline:<shape>` plus context details where needed. Missing proof is
-reported as a skipped decision with cumulative counters, not hidden by disabling
-JIT.
+Expression cost and physical-runner decisions are shared DuckDB planner
+facts, exposed through `DuckDBCostModel`. Optimizer expression ordering,
+adaptive filter ordering, expression IR trait extraction, and execution-region
+CBO decisions all consume that one model. Region planning prepares neutral
+facts such as operator ownership, stage ownership, backend execution body, and
+runner shape; it does not keep a second expression-cost or admission model.
 
-Admission has three ordered gates:
+Backends provide capability analysis and executable lowering. They do not own
+thresholds, measured-rule tables, or private copies of the execution-policy
+algorithm. DuckDB owns the single CBO decision path:
 
-- cheap pipeline prospect matching before graph lowering;
-- exact inventory matching before region IR lowering;
-- lowered executable-shape matching after backend analysis.
+- core region lowering builds a typed candidate with capability facts;
+- backend analysis describes the exact executable runner shape and reports how
+  many stages emit generated machine code;
+- production AUTO enters graph/IR/backend analysis for every executable region
+  candidate when the selected backend supports regions. The backend reports
+  capability facts; DuckDB CBO alone selects compiled-vectorized or vectorized
+  execution;
+- a compiled-vectorized runner may be selected only by DuckDB's core execution
+  plan, for fused lowered generated-code regions whose compiled runner is
+  proven better than the vectorized runner;
+- region lowering emits the execution candidates the core plan intends to
+  consider. The execution planner does not run a second interval selector,
+  native ownership score, stage score, backend score, or admission-table score;
+- vectorized selections record the same CBO decision path as compiled selections,
+  including estimated saved work, accelerated-runner benefit, and startup cost.
 
-Inventory and candidate signatures use the same feature vocabulary for sources,
-sinks, and stateful operators. For example, a table scan feeding the result
-collector is keyed with both `table-scan-source` and `result-collector-sink` at
-the inventory and candidate levels. This keeps auto admission from drifting
-between pre-lowering and lowered-region decisions.
+Native operator contracts are not compiled-runner proof by themselves. They are
+capability facts until backend lowering reports generated machine-code stages.
+`force` may ignore estimated profitability, but it still requires generated
+work; protocol-only regions stay vectorized.
 
-The final gate separates two facts. A candidate rule can admit a region for
-backend analysis, but only a fused lowered executable rule can admit auto
-execution. If backend analysis proves the region is not fused, the skip event
-keeps the candidate proof for observability while still rejecting execution.
+Unsupported contracts are not CBO decisions. Core capability analysis may reject
+missing source, operator, or sink contracts before backend work, but it must not
+estimate private runner costs or select a runner.
+
+Diagnostic modes (`jit_trace_decisions`, `jit_dump_ir`, `jit_trace_runtime`, and
+`EXPLAIN ANALYZE`) add retained detail, IR text, and runtime profile data to the
+same production CBO path. They must not admit a region that the core CBO rejected,
+and they must not act as a second CBO.
 
 ## Observability
 
 `ExecutionRegionManager` is owned by `DatabaseInstance` and owns backend
 registration, backend selection, execution-region policy, and telemetry for the
 current `duckdb_jit_*` SQL surface. Events are bounded by `jit_event_log_size`,
-while cumulative counters remain monotonic.
+while cumulative counters remain monotonic. Setting `jit_event_log_size=0`
+disables retained event rows only; `duckdb_jit_counters()` still records compact
+decision and runtime aggregates for production-safe measurement.
 
-Selected-backend auto-admission exits are observable at every layer. Empty
-prospects, minimum-cardinality skips, prospect misses, exact inventory misses,
-graph construction failures, and region IR lowering failures all record decision
-events instead of disappearing as silent vectorized execution.
+Diagnostic inspection exits are observable at every layer. Graph construction
+failures, region IR lowering failures, backend capability failures, and AUTO
+vectorized selections all record decision events when diagnostics are enabled
+instead of disappearing as silent vectorized execution.
 
 Events and counters expose:
 
@@ -224,7 +253,7 @@ Events and counters expose:
 - ownership contract, source boundary count, and missing contract count;
 - selected source execution and region execution form;
 - compile, codegen, runtime, source-contract, generated-body, and boundary metrics;
-- admission key, proof, min cardinality, and policy decision;
+- candidate estimated cardinality, selected runner, and requested policy;
 - deterministic IR when `jit_dump_ir=true`.
 
 ## Verification Rules
@@ -245,7 +274,8 @@ The architecture verifier enforces these invariants:
 - native events must have zero source boundaries and zero missing contracts;
 - native sink success must use `full-pipeline-native-sink`;
 - source contract layout names use `source_contract_*`;
-- auto admission requires a backend proof and runtime-bindable native contracts;
+- auto CBO selection requires a lowered executable region and runtime-bindable
+  native contracts;
   runtime-layout-dependent hash join probes are skipped until their pointer-table
   layout is part of the native contract.
 

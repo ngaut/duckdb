@@ -925,7 +925,7 @@ struct EnableJitSetting {
 	using RETURN_TYPE = bool;
 	static constexpr const char *Name = "enable_jit";
 	static constexpr const char *Description =
-	    "Attempt to run supported execution fragments through a registered compiled-region backend";
+	    "Attempt to run supported execution regions through a registered compiled-vectorized backend";
 	static constexpr const char *InputType = "BOOLEAN";
 	static constexpr const char *DefaultValue = "true";
 	static constexpr SettingScopeTarget Scope = SettingScopeTarget::LOCAL_DEFAULT;
@@ -1320,7 +1320,7 @@ struct JitBackendSetting {
 	using RETURN_TYPE = string;
 	static constexpr const char *Name = "jit_backend";
 	static constexpr const char *Description =
-	    "Compiled-region backend to use, or auto to select the first available backend";
+	    "Execution-region backend to use, or auto to select the first available backend";
 	static constexpr const char *InputType = "VARCHAR";
 	static constexpr const char *DefaultValue = "auto";
 	static constexpr SettingScopeTarget Scope = SettingScopeTarget::LOCAL_DEFAULT;
@@ -1332,7 +1332,7 @@ struct JitDumpIrSetting {
 	using RETURN_TYPE = bool;
 	static constexpr const char *Name = "jit_dump_ir";
 	static constexpr const char *Description =
-	    "Expose deterministic compiled-region IR diagnostics through execution-region events";
+	    "Expose deterministic execution-region IR diagnostics through execution-region events";
 	static constexpr const char *InputType = "BOOLEAN";
 	static constexpr const char *DefaultValue = "false";
 	static constexpr SettingScopeTarget Scope = SettingScopeTarget::LOCAL_DEFAULT;
@@ -1342,7 +1342,7 @@ struct JitDumpIrSetting {
 struct JitTraceDecisionsSetting {
 	using RETURN_TYPE = bool;
 	static constexpr const char *Name = "jit_trace_decisions";
-	static constexpr const char *Description = "Record detailed per-candidate compiled-region decision counters";
+	static constexpr const char *Description = "Record detailed per-candidate physical-runner decision events";
 	static constexpr const char *InputType = "BOOLEAN";
 	static constexpr const char *DefaultValue = "false";
 	static constexpr SettingScopeTarget Scope = SettingScopeTarget::LOCAL_DEFAULT;
@@ -1353,7 +1353,7 @@ struct JitEventLogSizeSetting {
 	using RETURN_TYPE = idx_t;
 	static constexpr const char *Name = "jit_event_log_size";
 	static constexpr const char *Description =
-	    "Maximum number of compiled-region events retained per database instance; zero disables retention";
+	    "Maximum number of execution-region events retained per database instance; zero disables retention";
 	static constexpr const char *InputType = "UBIGINT";
 	static constexpr const char *DefaultValue = "4096";
 	static constexpr SettingScopeTarget Scope = SettingScopeTarget::GLOBAL_ONLY;
@@ -1365,8 +1365,8 @@ struct JitPolicySetting {
 	using RETURN_TYPE = string;
 	static constexpr const char *Name = "jit_policy";
 	static constexpr const char *Description =
-	    "Compiled-region execution policy: auto runs only proven native regions, "
-	    "force runs every supported region, off disables compiled regions";
+	    "Execution-region execution policy: auto runs only CBO-selected compiled-vectorized regions, "
+	    "force runs every supported region, off disables compiled-vectorized execution";
 	static constexpr const char *InputType = "VARCHAR";
 	static constexpr const char *DefaultValue = "auto";
 	static constexpr SettingScopeTarget Scope = SettingScopeTarget::LOCAL_DEFAULT;
@@ -1377,7 +1377,18 @@ struct JitPolicySetting {
 struct JitTraceRuntimeSetting {
 	using RETURN_TYPE = bool;
 	static constexpr const char *Name = "jit_trace_runtime";
-	static constexpr const char *Description = "Record bounded runtime trace events for compiled-region kernels";
+	static constexpr const char *Description = "Record bounded runtime trace events for compiled-vectorized kernels";
+	static constexpr const char *InputType = "BOOLEAN";
+	static constexpr const char *DefaultValue = "false";
+	static constexpr SettingScopeTarget Scope = SettingScopeTarget::LOCAL_DEFAULT;
+	static constexpr idx_t SettingIndex = NEXT_SETTING_INDEX();
+};
+
+struct JitTraceVectorizedBaselineSetting {
+	using RETURN_TYPE = bool;
+	static constexpr const char *Name = "jit_trace_vectorized_baseline";
+	static constexpr const char *Description = "Build execution-region plans but execute vectorized pipelines and "
+	                                           "record per-region baseline runtime for comparison";
 	static constexpr const char *InputType = "BOOLEAN";
 	static constexpr const char *DefaultValue = "false";
 	static constexpr SettingScopeTarget Scope = SettingScopeTarget::LOCAL_DEFAULT;
@@ -1388,7 +1399,7 @@ struct JitVerifySetting {
 	using RETURN_TYPE = bool;
 	static constexpr const char *Name = "jit_verify";
 	static constexpr const char *Description =
-	    "Verify compiled-region output against the reference DuckDB execution path";
+	    "Verify compiled-vectorized output against the reference DuckDB execution path";
 	static constexpr const char *InputType = "BOOLEAN";
 	static constexpr const char *DefaultValue = "false";
 	static constexpr SettingScopeTarget Scope = SettingScopeTarget::LOCAL_DEFAULT;

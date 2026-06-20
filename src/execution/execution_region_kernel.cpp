@@ -21,11 +21,11 @@ bool ExecutionRegionKernel::HasExecutableBody() const {
 }
 
 void ExecutionRegionKernel::SetTraceInfo(idx_t trace_id_p, ExecutionRegionExecutionMode execution_mode_p,
-                                         string compile_reason, int64_t compile_time_us, idx_t code_size) {
+                                         ExecutionRegionExecutionBody execution_body_p, string compile_reason,
+                                         int64_t compile_time_us, idx_t code_size) {
 	trace_id = trace_id_p;
 	execution_mode = execution_mode_p;
-	execution_body = ExecutionRegionExecutionBodyForCompileEvent(ExecutionRegionCompileStatus::COMPILED,
-	                                                             execution_mode_p, code_size);
+	execution_body = execution_body_p;
 	trace_compile_reason = std::move(compile_reason);
 	trace_compile_time_us = compile_time_us;
 	trace_code_size = code_size;
@@ -39,19 +39,20 @@ void ExecutionRegionKernel::SetTraceSelectedSourceExecution(ExecutionRegionSourc
 	selected_source_execution = source_execution;
 }
 
-void ExecutionRegionKernel::SetTraceCandidate(const ExecutionRegionCandidate &candidate) {
-	has_trace_candidate = true;
-	trace_candidate_id = candidate.candidate_id;
+void ExecutionRegionKernel::SetTraceUsesScanFilters(bool uses_scan_filters_p) {
+	uses_scan_filters = uses_scan_filters_p;
+}
+
+void ExecutionRegionKernel::SetTracePipeline(const ExecutionRegionCandidate &candidate) {
+	has_trace_pipeline = true;
 	trace_candidate_shape = candidate.shape;
 	trace_candidate_pipeline_shape = candidate.pipeline_shape;
-	trace_candidate_context_pipeline_shape = candidate.context_pipeline_shape;
-	trace_candidate_signature = candidate.signature;
-	trace_candidate_node_count = candidate.node_count;
-	trace_candidate_start_operator_index = candidate.start_operator_index;
-	trace_candidate_end_operator_index = candidate.end_operator_index;
 	trace_candidate_estimated_cardinality = candidate.estimated_cardinality;
-	trace_candidate_traits = candidate.traits;
-	trace_candidate_contract = candidate.contract;
+	trace_candidate_uses_scan_filters = candidate.uses_scan_filters;
+}
+
+void ExecutionRegionKernel::SetExecutionABI(ExecutionRegionABI abi) {
+	execution_abi = abi;
 }
 
 idx_t ExecutionRegionKernel::TraceId() const {
@@ -70,8 +71,16 @@ ExecutionRegionSourceExecutionKind ExecutionRegionKernel::SelectedSourceExecutio
 	return selected_source_execution;
 }
 
+bool ExecutionRegionKernel::UsesScanFilters() const {
+	return uses_scan_filters;
+}
+
 ExecutionRegionExecutionBody ExecutionRegionKernel::ExecutionBody() const {
 	return execution_body;
+}
+
+ExecutionRegionABI ExecutionRegionKernel::ExecutionABI() const {
+	return execution_abi;
 }
 
 const string &ExecutionRegionKernel::TraceCompileReason() const {
@@ -86,12 +95,8 @@ idx_t ExecutionRegionKernel::TraceCodeSize() const {
 	return trace_code_size;
 }
 
-bool ExecutionRegionKernel::HasTraceCandidate() const {
-	return has_trace_candidate;
-}
-
-idx_t ExecutionRegionKernel::TraceCandidateId() const {
-	return trace_candidate_id;
+bool ExecutionRegionKernel::HasTracePipeline() const {
+	return has_trace_pipeline;
 }
 
 const string &ExecutionRegionKernel::TraceCandidateShape() const {
@@ -102,36 +107,12 @@ const string &ExecutionRegionKernel::TraceCandidatePipelineShape() const {
 	return trace_candidate_pipeline_shape;
 }
 
-const string &ExecutionRegionKernel::TraceCandidateContextPipelineShape() const {
-	return trace_candidate_context_pipeline_shape;
-}
-
-const ExecutionRegionSignature &ExecutionRegionKernel::TraceCandidateSignature() const {
-	return trace_candidate_signature;
-}
-
-idx_t ExecutionRegionKernel::TraceCandidateNodeCount() const {
-	return trace_candidate_node_count;
-}
-
-idx_t ExecutionRegionKernel::TraceCandidateStartOperatorIndex() const {
-	return trace_candidate_start_operator_index;
-}
-
-idx_t ExecutionRegionKernel::TraceCandidateEndOperatorIndex() const {
-	return trace_candidate_end_operator_index;
-}
-
 idx_t ExecutionRegionKernel::TraceCandidateEstimatedCardinality() const {
 	return trace_candidate_estimated_cardinality;
 }
 
-const ExecutionRegionCandidateTraits &ExecutionRegionKernel::TraceCandidateTraits() const {
-	return trace_candidate_traits;
-}
-
-const ExecutionRegionContract &ExecutionRegionKernel::TraceCandidateContract() const {
-	return trace_candidate_contract;
+bool ExecutionRegionKernel::TraceCandidateUsesScanFilters() const {
+	return trace_candidate_uses_scan_filters;
 }
 
 bool ExecutionRegionKernel::CanExecuteFullPipeline() const {

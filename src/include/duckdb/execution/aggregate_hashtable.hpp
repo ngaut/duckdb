@@ -20,6 +20,8 @@
 namespace duckdb {
 
 class BlockHandle;
+struct ExecutionHashAggregateLookupLayout;
+struct ExecutionOperatorStageRecorder;
 
 struct FlushMoveState;
 
@@ -81,6 +83,9 @@ public:
 	optional_idx TryAddCompressedGroups(DataChunk &groups, DataChunk &payload, const unsafe_vector<idx_t> &filter);
 	optional_idx TryAddDictionaryGroups(DataChunk &groups, DataChunk &payload, const unsafe_vector<idx_t> &filter);
 	optional_idx TryAddConstantGroups(DataChunk &groups, DataChunk &payload, const unsafe_vector<idx_t> &filter);
+	optional_idx TryResolveCompressedGroups(DataChunk &groups, Vector &addresses_out, idx_t address_offset = 0);
+	optional_idx TryResolveDictionaryGroups(DataChunk &groups, Vector &addresses_out, idx_t address_offset = 0);
+	optional_idx TryResolveConstantGroups(DataChunk &groups, Vector &addresses_out, idx_t address_offset = 0);
 
 	//! Fetch the aggregates for specific groups from the HT and place them in the result
 	void FetchAggregates(DataChunk &groups, DataChunk &result);
@@ -92,10 +97,13 @@ public:
 	//! with pointers to the groups in the hash table, and the new_groups selection vector will point to the newly
 	//! created groups. The return value is the amount of newly created groups.
 	idx_t FindOrCreateGroups(DataChunk &groups, Vector &group_hashes, Vector &addresses_out,
-	                         SelectionVector &new_groups_out);
+	                         SelectionVector &new_groups_out,
+	                         optional_ptr<ExecutionOperatorStageRecorder> recorder = nullptr);
 	idx_t FindOrCreateGroups(DataChunk &groups, Vector &addresses_out, SelectionVector &new_groups_out);
 	void FindOrCreateGroups(DataChunk &groups, Vector &addresses_out);
-	idx_t FindOrCreateAggregateStates(DataChunk &groups, Vector &addresses_out);
+	idx_t FindOrCreateGroupAddresses(DataChunk &groups, Vector &addresses_out,
+	                                 optional_ptr<ExecutionOperatorStageRecorder> recorder = nullptr);
+	bool GetExecutionHashAggregateLookupLayout(ExecutionHashAggregateLookupLayout &layout) const;
 
 	const PartitionedTupleData &GetPartitionedData() const;
 	unique_ptr<PartitionedTupleData> AcquirePartitionedData();
@@ -225,7 +233,6 @@ private:
 	//! Destroy the HT
 	void Destroy();
 	void DestroyAggregateData(PartitionedTupleData &data, PartitionedTupleDataAppendState &append_state);
-
 	//! Initializes the PartitionedTupleData
 	void InitializePartitionedData();
 	//! Initializes the PartitionedTupleData that only has 1 partition
@@ -242,12 +249,8 @@ private:
 
 	//! Does the actual group matching / creation
 	idx_t FindOrCreateGroupsInternal(DataChunk &groups, Vector &group_hashes, Vector &addresses,
-	                                 SelectionVector &new_groups);
-	optional_idx TryFindOrCreateCompressedAggregateStates(DataChunk &groups, Vector &addresses_out);
-	optional_idx TryFindOrCreateConstantAggregateStates(DataChunk &groups, Vector &addresses_out);
-	optional_idx TryFindOrCreateRunCompressedAggregateStates(DataChunk &groups, Vector &addresses_out);
-	template <class T>
-	optional_idx TryFindOrCreateRunCompressedAggregateStatesTemplated(DataChunk &groups, Vector &addresses_out);
+	                                 SelectionVector &new_groups,
+	                                 optional_ptr<ExecutionOperatorStageRecorder> recorder);
 
 	//! Verify the pointer table of the HT
 	void Verify();

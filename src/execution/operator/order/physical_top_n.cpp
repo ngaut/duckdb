@@ -3,6 +3,7 @@
 #include "duckdb/common/assert.hpp"
 #include "duckdb/common/mutex.hpp"
 #include "duckdb/common/arena_containers/arena_vector.hpp"
+#include "duckdb/execution/execution_operator_runtime.hpp"
 #include "duckdb/execution/expression_executor.hpp"
 #include "duckdb/function/create_sort_key.hpp"
 #include "duckdb/storage/data_table.hpp"
@@ -582,7 +583,7 @@ static string ValidateTopNExecutionSink(const ExecutionRegionSinkInfo &sink_info
 		return sink_info.order_contract.order_key_blocker.empty() ? "top-n-sink-runtime-order-key-not-ready"
 		                                                          : sink_info.order_contract.order_key_blocker;
 	}
-	return "none";
+	return string();
 }
 
 bool PhysicalTopN::BindExecutionSink(ExecutionContext &context, DataChunk &input, OperatorSinkInput &sink_input,
@@ -592,7 +593,7 @@ bool PhysicalTopN::BindExecutionSink(ExecutionContext &context, DataChunk &input
 	binding = ExecutionSinkBinding();
 	binding.kind = sink_info.kind;
 	auto blocker = ValidateTopNExecutionSink(sink_info);
-	if (blocker != "none") {
+	if (!blocker.empty()) {
 		binding.blocker = blocker;
 		binding.ordered_sink.blocker = blocker;
 		return false;
@@ -608,8 +609,8 @@ bool PhysicalTopN::BindExecutionSink(ExecutionContext &context, DataChunk &input
 		binding.ordered_sink.order_key_types.push_back(key.type);
 	}
 	binding.ordered_sink.payload_types = sink_info.order_contract.payload_types;
-	binding.ordered_sink.blocker = "none";
-	binding.blocker = "none";
+	binding.ordered_sink.blocker.clear();
+	binding.blocker.clear();
 	return true;
 }
 
@@ -684,6 +685,7 @@ bool PhysicalTopN::SupportsExecutionSourceContract(const ExecutionRegionOpenRequ
 SourceResultType PhysicalTopN::GetDataInternal(ExecutionContext &context, DataChunk &chunk,
                                                OperatorSourceInput &input) const {
 	if (limit == 0) {
+		ExecutionOperatorStageTimer timer(input.stage_recorder, "source_contract.topn_state_scan.limit_zero");
 		return SourceResultType::FINISHED;
 	}
 	auto &sink = sink_state->Cast<TopNGlobalSinkState>();
@@ -692,6 +694,7 @@ SourceResultType PhysicalTopN::GetDataInternal(ExecutionContext &context, DataCh
 
 	if (lstate.pos == lstate.end) {
 		// Obtain new scan indices from the global state
+		ExecutionOperatorStageTimer timer(input.stage_recorder, "source_contract.topn_state_scan.assign_batch");
 		annotated_lock_guard<annotated_mutex> guard(gstate.lock);
 		lstate.pos = gstate.state.pos;
 		gstate.state.pos += TopNGlobalSourceState::TUPLES_PER_BATCH;
@@ -699,7 +702,10 @@ SourceResultType PhysicalTopN::GetDataInternal(ExecutionContext &context, DataCh
 		lstate.batch_index = gstate.batch_index++;
 	}
 
-	sink.heap.Scan(gstate.state, chunk, lstate.pos);
+	{
+		ExecutionOperatorStageTimer timer(input.stage_recorder, "source_contract.topn_state_scan.heap_scan");
+		sink.heap.Scan(gstate.state, chunk, lstate.pos);
+	}
 
 	return chunk.size() == 0 ? SourceResultType::FINISHED : SourceResultType::HAVE_MORE_OUTPUT;
 }

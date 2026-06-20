@@ -1,6 +1,7 @@
 #include "duckdb/execution/execution_region_lowering.hpp"
 
 #include "duckdb/common/string_util.hpp"
+#include "duckdb/planner/cost_model.hpp"
 #include "duckdb/planner/expression.hpp"
 #include "duckdb/planner/expression/bound_between_expression.hpp"
 #include "duckdb/planner/expression/bound_case_expression.hpp"
@@ -125,6 +126,24 @@ static bool ExecutionExpressionIsComparisonOp(ExecutionExpressionBinaryOp op) {
 	default:
 		return false;
 	}
+}
+
+static bool ExecutionExpressionIsArithmeticOp(ExecutionExpressionBinaryOp op) {
+	switch (op) {
+	case ExecutionExpressionBinaryOp::ADD:
+	case ExecutionExpressionBinaryOp::SUBTRACT:
+	case ExecutionExpressionBinaryOp::MULTIPLY:
+	case ExecutionExpressionBinaryOp::INTEGER_DIVIDE:
+	case ExecutionExpressionBinaryOp::MODULO:
+		return true;
+	default:
+		return false;
+	}
+}
+
+static bool ExecutionExpressionBinaryOperandsAreIntegral(const ExecutionExpressionIR &node) {
+	return node.left && node.right && ExecutionExpressionIsIntegralType(node.left->return_type) &&
+	       ExecutionExpressionIsIntegralType(node.right->return_type);
 }
 
 static bool TryInvertExecutionComparisonOp(ExecutionExpressionBinaryOp input, ExecutionExpressionBinaryOp &result) {
@@ -273,11 +292,19 @@ static string ExecutionExpressionExceptionDescriptor(const ExecutionExpressionIR
 	return "exceptions=" + string(ExecutionExpressionExceptionKindToString(node.exception_behavior));
 }
 
+static string ExecutionExpressionArithmeticDescriptor(const ExecutionExpressionIR &node) {
+	if (node.kind != ExecutionExpressionIRKind::BINARY || ExecutionExpressionIsComparisonOp(node.binary_op)) {
+		return string();
+	}
+	return ",overflow_check=" + string(node.arithmetic_overflow_check ? "true" : "false");
+}
+
 string DescribeExecutionExpressionIR(const ExecutionExpressionIR &node) {
 	string result = string(ExecutionExpressionIRKindToString(node.kind)) + "<" +
 	                ExecutionExpressionTypeDescriptor(node.return_type, node.physical_type) + "," +
 	                ExecutionExpressionValidityDescriptor(node) + "," + ExecutionExpressionSourceDescriptor(node) +
-	                "," + ExecutionExpressionExceptionDescriptor(node) + ">";
+	                "," + ExecutionExpressionExceptionDescriptor(node) + ExecutionExpressionArithmeticDescriptor(node) +
+	                ">";
 	switch (node.kind) {
 	case ExecutionExpressionIRKind::CONSTANT:
 		result += "(" + node.constant.ToString() + ")";
@@ -380,6 +407,86 @@ static string GetExecutionExpressionReason(const ExecutionExpressionIR &node) {
 	return "core-ir:arithmetic";
 }
 
+static bool ExecutionExpressionConstantEqualsInteger(const ExecutionExpressionIR &node, int64_t expected) {
+	if (node.kind != ExecutionExpressionIRKind::CONSTANT || node.constant.IsNull()) {
+		return false;
+	}
+	auto &type = node.constant.type();
+	const bool is_decimal = type.id() == LogicalTypeId::DECIMAL;
+	int64_t scaled_expected = expected;
+	if (is_decimal) {
+		const auto scale = DecimalType::GetScale(type);
+		if (scale >= NumericHelper::CACHED_POWERS_OF_TEN) {
+			return false;
+		}
+		scaled_expected *= NumericHelper::POWERS_OF_TEN[scale];
+	}
+	switch (type.InternalType()) {
+	case PhysicalType::INT8:
+		return node.constant.GetValueUnsafe<int8_t>() == scaled_expected;
+	case PhysicalType::INT16:
+		return node.constant.GetValueUnsafe<int16_t>() == scaled_expected;
+	case PhysicalType::INT32:
+		return node.constant.GetValueUnsafe<int32_t>() == scaled_expected;
+	case PhysicalType::INT64:
+		return node.constant.GetValueUnsafe<int64_t>() == scaled_expected;
+	case PhysicalType::UINT8:
+		return scaled_expected >= 0 && node.constant.GetValueUnsafe<uint8_t>() == uint64_t(scaled_expected);
+	case PhysicalType::UINT16:
+		return scaled_expected >= 0 && node.constant.GetValueUnsafe<uint16_t>() == uint64_t(scaled_expected);
+	case PhysicalType::UINT32:
+		return scaled_expected >= 0 && node.constant.GetValueUnsafe<uint32_t>() == uint64_t(scaled_expected);
+	case PhysicalType::UINT64:
+		return scaled_expected >= 0 && node.constant.GetValueUnsafe<uint64_t>() == uint64_t(scaled_expected);
+	default:
+		return false;
+	}
+}
+
+static bool ExecutionExpressionTypeMatchesParent(const ExecutionExpressionIR &parent,
+                                                 const ExecutionExpressionIR &child) {
+	return parent.return_type == child.return_type;
+}
+
+static unique_ptr<ExecutionExpressionIR>
+NormalizeExecutionExpressionArithmeticIdentity(unique_ptr<ExecutionExpressionIR> node) {
+	D_ASSERT(node);
+	if (node->kind != ExecutionExpressionIRKind::BINARY || !node->left || !node->right) {
+		return node;
+	}
+	switch (node->binary_op) {
+	case ExecutionExpressionBinaryOp::ADD:
+		if (ExecutionExpressionConstantEqualsInteger(*node->right, 0) &&
+		    ExecutionExpressionTypeMatchesParent(*node, *node->left)) {
+			return std::move(node->left);
+		}
+		if (ExecutionExpressionConstantEqualsInteger(*node->left, 0) &&
+		    ExecutionExpressionTypeMatchesParent(*node, *node->right)) {
+			return std::move(node->right);
+		}
+		break;
+	case ExecutionExpressionBinaryOp::SUBTRACT:
+		if (ExecutionExpressionConstantEqualsInteger(*node->right, 0) &&
+		    ExecutionExpressionTypeMatchesParent(*node, *node->left)) {
+			return std::move(node->left);
+		}
+		break;
+	case ExecutionExpressionBinaryOp::MULTIPLY:
+		if (ExecutionExpressionConstantEqualsInteger(*node->right, 1) &&
+		    ExecutionExpressionTypeMatchesParent(*node, *node->left)) {
+			return std::move(node->left);
+		}
+		if (ExecutionExpressionConstantEqualsInteger(*node->left, 1) &&
+		    ExecutionExpressionTypeMatchesParent(*node, *node->right)) {
+			return std::move(node->right);
+		}
+		break;
+	default:
+		break;
+	}
+	return node;
+}
+
 static unique_ptr<ExecutionExpressionIR> NormalizeExecutionExpressionIR(unique_ptr<ExecutionExpressionIR> node) {
 	if (!node) {
 		return nullptr;
@@ -409,6 +516,7 @@ static unique_ptr<ExecutionExpressionIR> NormalizeExecutionExpressionIR(unique_p
 			return constant;
 		}
 	}
+	node = NormalizeExecutionExpressionArithmeticIdentity(std::move(node));
 	return node;
 }
 
@@ -475,8 +583,10 @@ static ExecutionExpressionExceptionKind GetExecutionExpressionExceptionBehavior(
 		return node.try_cast ? ExecutionExpressionExceptionKind::NULL_ON_CAST_ERROR
 		                     : ExecutionExpressionExceptionKind::CAST;
 	case ExecutionExpressionIRKind::BINARY:
-		return ExecutionExpressionIsComparisonOp(node.binary_op) ? ExecutionExpressionExceptionKind::NONE
-		                                                         : ExecutionExpressionExceptionKind::ARITHMETIC;
+		if (ExecutionExpressionIsComparisonOp(node.binary_op) || !node.arithmetic_overflow_check) {
+			return ExecutionExpressionExceptionKind::NONE;
+		}
+		return ExecutionExpressionExceptionKind::ARITHMETIC;
 	case ExecutionExpressionIRKind::INTRINSIC:
 		if (node.intrinsic == ExecutionExpressionIntrinsicKind::ERROR) {
 			return ExecutionExpressionExceptionKind::ERROR;
@@ -493,23 +603,139 @@ static ExecutionExpressionExceptionKind GetExecutionExpressionExceptionBehavior(
 	return ExecutionExpressionExceptionKind::NONE;
 }
 
-static void AnnotateExecutionExpressionIR(ExecutionExpressionIR &node) {
+static void MergeChildExecutionExpressionTraits(ExecutionExpressionTraits &target,
+                                                const ExecutionExpressionTraits &source) {
+	target.has_arithmetic_binary = target.has_arithmetic_binary || source.has_arithmetic_binary;
+	target.has_integer_arithmetic_result = target.has_integer_arithmetic_result || source.has_integer_arithmetic_result;
+	target.has_non_integer_arithmetic_result =
+	    target.has_non_integer_arithmetic_result || source.has_non_integer_arithmetic_result;
+	target.has_comparison_binary = target.has_comparison_binary || source.has_comparison_binary;
+	target.has_integer_comparison_operands =
+	    target.has_integer_comparison_operands || source.has_integer_comparison_operands;
+	target.has_non_integer_comparison_operands =
+	    target.has_non_integer_comparison_operands || source.has_non_integer_comparison_operands;
+	target.has_conjunction = target.has_conjunction || source.has_conjunction;
+	target.expression_node_count += source.expression_node_count;
+	target.reference_expression_count += source.reference_expression_count;
+	target.predicate_expression_count += source.predicate_expression_count;
+	target.control_expression_count += source.control_expression_count;
+	target.arithmetic_binary_count += source.arithmetic_binary_count;
+	target.integer_arithmetic_result_count += source.integer_arithmetic_result_count;
+	target.non_integer_arithmetic_result_count += source.non_integer_arithmetic_result_count;
+	target.comparison_binary_count += source.comparison_binary_count;
+	target.integer_comparison_operand_count += source.integer_comparison_operand_count;
+	target.non_integer_comparison_operand_count += source.non_integer_comparison_operand_count;
+	target.conjunction_count += source.conjunction_count;
+	target.string_predicate_count += source.string_predicate_count;
+	target.high_cost_string_predicate_count += source.high_cost_string_predicate_count;
+	target.string_like_count += source.string_like_count;
+	target.string_contains_count += source.string_contains_count;
+	target.string_prefix_count += source.string_prefix_count;
+	target.string_suffix_count += source.string_suffix_count;
+}
+
+static void AnnotateExecutionExpressionStringPredicate(ExecutionExpressionTraits &traits,
+                                                       ExecutionExpressionIntrinsicKind intrinsic) {
+	switch (intrinsic) {
+	case ExecutionExpressionIntrinsicKind::STRING_LIKE:
+		traits.predicate_expression_count++;
+		traits.string_predicate_count++;
+		traits.high_cost_string_predicate_count++;
+		traits.string_like_count++;
+		break;
+	case ExecutionExpressionIntrinsicKind::STRING_CONTAINS:
+		traits.predicate_expression_count++;
+		traits.string_predicate_count++;
+		traits.high_cost_string_predicate_count++;
+		traits.string_contains_count++;
+		break;
+	case ExecutionExpressionIntrinsicKind::STRING_PREFIX:
+		traits.predicate_expression_count++;
+		traits.string_predicate_count++;
+		traits.string_prefix_count++;
+		break;
+	case ExecutionExpressionIntrinsicKind::STRING_SUFFIX:
+		traits.predicate_expression_count++;
+		traits.string_predicate_count++;
+		traits.string_suffix_count++;
+		break;
+	default:
+		break;
+	}
+}
+
+static ExecutionExpressionTraits AnnotateExecutionExpressionIR(ExecutionExpressionIR &node) {
+	ExecutionExpressionTraits traits;
 	if (node.left) {
-		AnnotateExecutionExpressionIR(*node.left);
+		MergeChildExecutionExpressionTraits(traits, AnnotateExecutionExpressionIR(*node.left));
 	}
 	if (node.right) {
-		AnnotateExecutionExpressionIR(*node.right);
+		MergeChildExecutionExpressionTraits(traits, AnnotateExecutionExpressionIR(*node.right));
 	}
 	if (node.else_node) {
-		AnnotateExecutionExpressionIR(*node.else_node);
+		MergeChildExecutionExpressionTraits(traits, AnnotateExecutionExpressionIR(*node.else_node));
 	}
 	for (auto &child : node.children) {
-		AnnotateExecutionExpressionIR(*child);
+		MergeChildExecutionExpressionTraits(traits, AnnotateExecutionExpressionIR(*child));
 	}
 	node.physical_type = node.return_type.InternalType();
 	node.validity = GetExecutionExpressionValidity(node);
 	node.source = GetExecutionExpressionSource(node);
 	node.exception_behavior = GetExecutionExpressionExceptionBehavior(node);
+
+	traits.expression_node_count++;
+	traits.root_is_reference = node.kind == ExecutionExpressionIRKind::REFERENCE;
+	if (node.kind == ExecutionExpressionIRKind::REFERENCE) {
+		traits.reference_expression_count++;
+	}
+	if (node.kind == ExecutionExpressionIRKind::BINARY) {
+		if (ExecutionExpressionIsArithmeticOp(node.binary_op)) {
+			traits.has_arithmetic_binary = true;
+			traits.arithmetic_binary_count++;
+			if (ExecutionExpressionIsIntegralType(node.return_type)) {
+				traits.has_integer_arithmetic_result = true;
+				traits.integer_arithmetic_result_count++;
+			} else {
+				traits.has_non_integer_arithmetic_result = true;
+				traits.non_integer_arithmetic_result_count++;
+			}
+		}
+		if (ExecutionExpressionIsComparisonOp(node.binary_op)) {
+			traits.has_comparison_binary = true;
+			traits.predicate_expression_count++;
+			traits.comparison_binary_count++;
+			if (ExecutionExpressionBinaryOperandsAreIntegral(node)) {
+				traits.has_integer_comparison_operands = true;
+				traits.integer_comparison_operand_count++;
+			} else {
+				traits.has_non_integer_comparison_operands = true;
+				traits.non_integer_comparison_operand_count++;
+			}
+		}
+	}
+	if (node.kind == ExecutionExpressionIRKind::CONJUNCTION) {
+		traits.has_conjunction = true;
+		traits.predicate_expression_count++;
+		traits.control_expression_count++;
+		traits.conjunction_count++;
+	}
+	if (node.kind == ExecutionExpressionIRKind::INTRINSIC) {
+		AnnotateExecutionExpressionStringPredicate(traits, node.intrinsic);
+	}
+	if (node.kind == ExecutionExpressionIRKind::UNARY &&
+	    (node.unary_op == ExecutionExpressionUnaryOp::NOT || node.unary_op == ExecutionExpressionUnaryOp::IS_NULL ||
+	     node.unary_op == ExecutionExpressionUnaryOp::IS_NOT_NULL)) {
+		traits.control_expression_count++;
+	}
+	if (node.kind == ExecutionExpressionIRKind::CASE || node.kind == ExecutionExpressionIRKind::COALESCE ||
+	    node.kind == ExecutionExpressionIRKind::CONSTANT_OR_NULL) {
+		traits.control_expression_count++;
+	}
+	if (node.kind == ExecutionExpressionIRKind::IN_LIST || node.kind == ExecutionExpressionIRKind::BETWEEN) {
+		traits.predicate_expression_count++;
+		traits.control_expression_count++;
+	}
+	return traits;
 }
 
 static bool TryGetExecutionExpressionArithmeticOp(const BoundFunctionExpression &expression,
@@ -1220,6 +1446,8 @@ static unique_ptr<ExecutionExpressionIR> TryBuildExecutionExpressionIR(const Exp
 		node->kind = ExecutionExpressionIRKind::BINARY;
 		node->return_type = expression.GetReturnType();
 		node->binary_op = op;
+		node->arithmetic_overflow_check =
+		    !is_arithmetic || function.Function().GetErrorMode() == FunctionErrors::CAN_THROW_RUNTIME_ERROR;
 		node->left = std::move(left);
 		node->right = std::move(right);
 		return node;
@@ -1894,20 +2122,57 @@ string DescribeExecutionExpressionLoweringFailure(const Expression &expression) 
 	return "core expression lowering unsupported;" + BuildExecutionExpressionFailureReason(expression);
 }
 
-unique_ptr<ExecutionExpressionFragment> TryLowerExecutionExpression(const Expression &expression,
-                                                                    idx_t expression_index) {
+unique_ptr<ExecutionExpressionFragment>
+TryLowerExecutionExpression(const Expression &expression, idx_t expression_index, ExecutionExpressionIRMode mode) {
 	auto root = TryBuildExecutionExpressionIR(expression);
 	if (!root) {
 		return nullptr;
 	}
 	root = NormalizeExecutionExpressionIR(std::move(root));
-	AnnotateExecutionExpressionIR(*root);
+	auto traits = AnnotateExecutionExpressionIR(*root);
+	traits.expression_cost = DuckDBCostModel::ExpressionCost(expression);
 	auto result = make_uniq<ExecutionExpressionFragment>();
 	result->expression_index = expression_index;
 	result->return_type = expression.GetReturnType();
+	result->traits = traits;
 	result->reason = GetExecutionExpressionReason(*root);
-	result->ir = "duckdb.expr typed-vector-ir;" + DescribeExecutionExpressionIR(*root);
+	if (mode == ExecutionExpressionIRMode::TRACE) {
+		result->ir = "duckdb.expr typed-vector-ir;" + DescribeExecutionExpressionIR(*root);
+	}
 	result->root = std::move(root);
+	return result;
+}
+
+const ExecutionExpressionFragment *ExecutionExpressionAnalysisCache::Get(const Expression &expression,
+                                                                         ExecutionExpressionIRMode mode) {
+	auto &entry = entries[&expression];
+	if (!entry.attempted) {
+		entry.fragment = TryLowerExecutionExpression(expression, 0, ExecutionExpressionIRMode::COMPACT);
+		entry.attempted = true;
+	}
+	if (!entry.fragment) {
+		return nullptr;
+	}
+	if (mode == ExecutionExpressionIRMode::TRACE && entry.fragment->ir.empty() && entry.fragment->root) {
+		entry.fragment->ir = "duckdb.expr typed-vector-ir;" + DescribeExecutionExpressionIR(*entry.fragment->root);
+	}
+	return entry.fragment.get();
+}
+
+unique_ptr<ExecutionExpressionFragment> ExecutionExpressionAnalysisCache::Copy(const Expression &expression,
+                                                                               idx_t expression_index,
+                                                                               ExecutionExpressionIRMode mode) {
+	auto fragment = Get(expression, mode);
+	if (!fragment) {
+		return nullptr;
+	}
+	auto result = make_uniq<ExecutionExpressionFragment>(*fragment);
+	result->expression_index = expression_index;
+	if (mode == ExecutionExpressionIRMode::COMPACT) {
+		result->ir.clear();
+	} else if (result->ir.empty() && result->root) {
+		result->ir = "duckdb.expr typed-vector-ir;" + DescribeExecutionExpressionIR(*result->root);
+	}
 	return result;
 }
 
