@@ -159,6 +159,7 @@ struct SljitNativeVectorInput {
 	bool expression_tree_flat_all_valid = false;
 	int64_t *aggregate_int64_value = nullptr;
 	hugeint_t *aggregate_hugeint_value = nullptr;
+	double *aggregate_double_value = nullptr;
 	int64_t **aggregate_int64_values = nullptr;
 	int64_t aggregate_local_int64 = 0;
 	hugeint_t aggregate_local_hugeint;

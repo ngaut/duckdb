@@ -83,6 +83,50 @@ TEST_CASE("JIT fuses projection payloads into primitive ungrouped aggregate redu
 	REQUIRE(found_runtime);
 }
 
+TEST_CASE("JIT preserves projection temps for double primitive aggregate payloads", "[api][jit]") {
+	DuckDB db;
+	Connection con(db);
+	auto &manager = ExecutionRegionManager::Get(*con.context);
+
+	ConfigureSljit(con, "force", false, true, true, 10000);
+	REQUIRE_NO_FAIL(con.Query("PRAGMA threads=1"));
+	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_double_aggregate_payload AS "
+	                          "SELECT i, CAST((i % 100) AS DOUBLE) + 0.25 AS x, "
+	                          "CAST(((i * 3) % 200) AS DOUBLE) + 0.5 AS y "
+	                          "FROM range(100000) tbl(i)"));
+
+	REQUIRE_NO_FAIL(con.Query("SET jit_policy='off'"));
+	auto reference = con.Query("SELECT sum(x), sum((x * 1.5) + (y / 4.0)) "
+	                           "FROM jit_double_aggregate_payload WHERE i % 7 <> 0");
+	REQUIRE_NO_FAIL(*reference);
+
+	REQUIRE_NO_FAIL(con.Query("SET jit_policy='force'"));
+	ClearJitTrace(manager, true);
+	auto result = con.Query("SELECT sum(x), sum((x * 1.5) + (y / 4.0)) "
+	                        "FROM jit_double_aggregate_payload WHERE i % 7 <> 0");
+	REQUIRE_NO_FAIL(*result);
+	REQUIRE(result->GetValue(0, 0).ToString() == reference->GetValue(0, 0).ToString());
+	REQUIRE(result->GetValue(1, 0).ToString() == reference->GetValue(1, 0).ToString());
+
+	bool found_double_payload = false;
+	for (auto &event : manager.GetEvents()) {
+		if (!IsCompiledSljitRegionEvent(event) || !event.has_candidate ||
+		    event.candidate_traits.sink_kind != ExecutionRegionSinkKind::UNGROUPED_AGGREGATE_UPDATE ||
+		    !StringUtil::Contains(event.ir, "primitive_payloads=") ||
+		    !StringUtil::Contains(event.ir, "native:double-add-references")) {
+			continue;
+		}
+		found_double_payload = true;
+		RequireCompiledFusedRegion(event);
+		REQUIRE(StringUtil::Contains(event.ir, "op0=projection("));
+		REQUIRE(StringUtil::Contains(event.ir, "op1=aggregate_update("));
+		REQUIRE(StringUtil::Contains(event.ir, "primitive_update_kind=sum_double"));
+		REQUIRE_FALSE(
+		    StringUtil::Contains(event.ir, "primitive_payloads=native:reference:region-input[compose-reference(ssa.pass#"));
+	}
+	REQUIRE(found_double_payload);
+}
+
 TEST_CASE("JIT fuses multiple primitive ungrouped aggregate payload lanes into one reducer", "[api][jit]") {
 	DuckDB db;
 	Connection con(db);

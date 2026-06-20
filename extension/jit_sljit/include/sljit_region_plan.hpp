@@ -55,6 +55,8 @@ enum class SljitNativeRegionExpressionKind : uint8_t {
 	TYPED_EXPRESSION_TREE
 };
 
+enum class SljitNativeReferenceOrigin : uint8_t { REGION_INPUT, PROJECTION_PASS_THROUGH, PROJECTION_TEMP, SOURCE_OUTPUT };
+
 struct SljitNativeRegionExpressionPlan;
 
 struct SljitNativeHashJoinProbeKeyPlan {
@@ -69,6 +71,7 @@ struct SljitNativeHashJoinProbeKeyPlan {
 
 struct SljitNativeRegionExpressionPlan {
 	SljitNativeRegionExpressionKind kind = SljitNativeRegionExpressionKind::REFERENCE;
+	SljitNativeReferenceOrigin reference_origin = SljitNativeReferenceOrigin::REGION_INPUT;
 	SljitNativeIntegerKind integer_kind = SljitNativeIntegerKind::INT64;
 	LogicalType return_type;
 	Value constant_value;

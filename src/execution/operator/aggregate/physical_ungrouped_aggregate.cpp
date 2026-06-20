@@ -399,6 +399,8 @@ BuildUngroupedAggregatePrimitiveUpdateBinding(const PhysicalUngroupedAggregate &
 			lane.sum_int64_value = reinterpret_cast<int64_t *>(state_ptr + abi.state_value_offset);
 		} else if (AggregatePrimitiveUpdateUsesHugeintState(abi.kind)) {
 			lane.sum_hugeint_value = reinterpret_cast<hugeint_t *>(state_ptr + abi.state_value_offset);
+		} else if (AggregatePrimitiveUpdateUsesDoubleState(abi.kind)) {
+			lane.sum_double_value = reinterpret_cast<double *>(state_ptr + abi.state_value_offset);
 		} else {
 			result.blocker = "ungrouped-aggregate-primitive-update-kind-unsupported";
 			return result;

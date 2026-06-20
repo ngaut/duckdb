@@ -2513,6 +2513,12 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeTypedExpressionTree(const 
 	return FinishSljitNativeVectorCode(compiler, function, error);
 }
 
+static sljit_s32 NativeDoubleBinaryOp(SljitNativeDoubleBinaryOp op);
+static bool NativeDoubleSourceUsesHelper(SljitNativeDoubleSourceKind kind);
+static void EmitLoadNativeDoubleOperand(struct sljit_compiler *compiler, SljitNativeDoubleSourceKind kind,
+                                        sljit_sw data_offset, sljit_s32 index_reg, sljit_sw scale_offset,
+                                        sljit_s32 target);
+
 enum class SljitNativeAggregateSumStateKind : uint8_t { INT64, HUGEINT };
 
 static unique_ptr<ExecutionRegionCodeHandle>
@@ -2874,6 +2880,93 @@ BuildSljitNativeUngroupedSumInt64Reference(SljitNativeIntegerKind kind, SljitNat
 	return FinishSljitNativeAggregateUpdateCode(compiler, function, error);
 }
 
+static void EmitSljitStoreZeroDoubleLocal(struct sljit_compiler *compiler, sljit_sw local_sum_offset) {
+	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_MEM1(SLJIT_SP), local_sum_offset, SLJIT_IMM, 0);
+	if (sizeof(double) > sizeof(sljit_sw)) {
+		sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_MEM1(SLJIT_SP), local_sum_offset + sizeof(sljit_sw), SLJIT_IMM, 0);
+	}
+}
+
+static void EmitSljitAggregateAccumulateDouble(struct sljit_compiler *compiler, sljit_sw local_sum_offset,
+                                               sljit_sw saw_value_offset, sljit_s32 value_freg) {
+	sljit_emit_fmem(compiler, SLJIT_MOV_F64 | SLJIT_MEM_ALIGNED_32, SLJIT_TMP_FR1, SLJIT_MEM1(SLJIT_SP),
+	                local_sum_offset);
+	sljit_emit_fop2(compiler, SLJIT_ADD_F64, SLJIT_TMP_FR1, 0, SLJIT_TMP_FR1, 0, value_freg, 0);
+	sljit_emit_fmem(compiler, SLJIT_MOV_F64 | SLJIT_MEM_STORE | SLJIT_MEM_ALIGNED_32, SLJIT_TMP_FR1,
+	                SLJIT_MEM1(SLJIT_SP), local_sum_offset);
+	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_MEM1(SLJIT_SP), saw_value_offset, SLJIT_IMM, 1);
+}
+
+static void EmitSljitAggregateCommitDouble(struct sljit_compiler *compiler, sljit_sw local_sum_offset,
+                                           sljit_sw saw_value_offset) {
+	sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_R0, 0, SLJIT_MEM1(SLJIT_S0),
+	               offsetof(SljitNativeVectorInput, aggregate_row_count));
+	auto no_count = sljit_emit_cmp(compiler, SLJIT_EQUAL, SLJIT_R0, 0, SLJIT_IMM, 0);
+	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R1, 0, SLJIT_MEM1(SLJIT_R0), 0);
+	sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_R1, 0, SLJIT_R1, 0, SLJIT_S2, 0);
+	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_MEM1(SLJIT_R0), 0, SLJIT_R1, 0);
+	sljit_set_label(no_count, sljit_emit_label(compiler));
+
+	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R2, 0, SLJIT_MEM1(SLJIT_SP), saw_value_offset);
+	auto no_value = sljit_emit_cmp(compiler, SLJIT_EQUAL, SLJIT_R2, 0, SLJIT_IMM, 0);
+	sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_R0, 0, SLJIT_MEM1(SLJIT_S0),
+	               offsetof(SljitNativeVectorInput, aggregate_double_value));
+	sljit_emit_fmem(compiler, SLJIT_MOV_F64 | SLJIT_MEM_ALIGNED_32, SLJIT_TMP_FR0, SLJIT_MEM1(SLJIT_R0), 0);
+	sljit_emit_fmem(compiler, SLJIT_MOV_F64 | SLJIT_MEM_ALIGNED_32, SLJIT_TMP_FR1, SLJIT_MEM1(SLJIT_SP),
+	                local_sum_offset);
+	sljit_emit_fop2(compiler, SLJIT_ADD_F64, SLJIT_TMP_FR0, 0, SLJIT_TMP_FR0, 0, SLJIT_TMP_FR1, 0);
+	sljit_emit_fmem(compiler, SLJIT_MOV_F64 | SLJIT_MEM_STORE | SLJIT_MEM_ALIGNED_32, SLJIT_TMP_FR0,
+	                SLJIT_MEM1(SLJIT_R0), 0);
+	sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_R0, 0, SLJIT_MEM1(SLJIT_S0),
+	               offsetof(SljitNativeVectorInput, aggregate_state_is_set));
+	sljit_emit_op1(compiler, SLJIT_MOV_U8, SLJIT_MEM1(SLJIT_R0), 0, SLJIT_IMM, 1);
+	sljit_set_label(no_value, sljit_emit_label(compiler));
+}
+
+unique_ptr<ExecutionRegionCodeHandle>
+BuildSljitNativeUngroupedSumDoubleReference(SljitNativeDoubleSourceKind kind,
+                                            SljitNativeAggregateUpdateFunction &function, string &error) {
+	auto compiler = sljit_create_compiler(nullptr);
+	if (!compiler) {
+		error = "failed to create SLJIT compiler";
+		return nullptr;
+	}
+
+	const auto local_sum_offset = NumericCast<sljit_sw>(0);
+	const auto saw_value_offset = NumericCast<sljit_sw>(sizeof(double));
+	const auto local_size = saw_value_offset + NumericCast<sljit_sw>(sizeof(sljit_sw));
+
+	sljit_emit_enter(compiler, 0, SLJIT_ARGS1V(P), 5 | SLJIT_ENTER_FLOAT(2), 5, local_size);
+	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_S1, 0, SLJIT_IMM, 0);
+	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_S2, 0, SLJIT_MEM1(SLJIT_S0), offsetof(SljitNativeVectorInput, count));
+	EmitSljitStoreZeroDoubleLocal(compiler, local_sum_offset);
+	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_MEM1(SLJIT_SP), saw_value_offset, SLJIT_IMM, 0);
+
+	auto loop = sljit_emit_label(compiler);
+	auto done = sljit_emit_cmp(compiler, SLJIT_GREATER_EQUAL, SLJIT_S1, 0, SLJIT_S2, 0);
+
+	EmitLoadSelectedIndex(compiler);
+	auto source_is_null = EmitSkipInvalidSourceRow(compiler);
+	EmitLoadNativeDoubleOperand(compiler, kind, offsetof(SljitNativeVectorInput, source_data), SLJIT_R1,
+	                            offsetof(SljitNativeVectorInput, source_double_scale), SLJIT_TMP_FR0);
+	EmitSljitAggregateAccumulateDouble(compiler, local_sum_offset, saw_value_offset, SLJIT_TMP_FR0);
+	auto next = sljit_emit_jump(compiler, SLJIT_JUMP);
+
+	auto invalid_label = sljit_emit_label(compiler);
+	sljit_set_label(source_is_null, invalid_label);
+
+	auto next_label = sljit_emit_label(compiler);
+	sljit_set_label(next, next_label);
+	EmitSljitAggregateLoopStep(compiler, loop);
+
+	auto done_label = sljit_emit_label(compiler);
+	sljit_set_label(done, done_label);
+	EmitSljitAggregateCommitDouble(compiler, local_sum_offset, saw_value_offset);
+	sljit_emit_return_void(compiler);
+
+	return FinishSljitNativeAggregateUpdateCode(compiler, function, error);
+}
+
 unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeUngroupedCountStar(SljitNativeAggregateUpdateFunction &function,
                                                                          string &error) {
 	auto compiler = sljit_create_compiler(nullptr);
@@ -3133,6 +3226,128 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeUngroupedSumInt64IntegerBi
 	sljit_set_label(done, done_label);
 	EmitSljitAggregateCommitInt64(compiler, local_sum_offset, saw_value_offset);
 	sljit_set_label(helper_done, sljit_emit_label(compiler));
+	sljit_emit_return_void(compiler);
+
+	return FinishSljitNativeAggregateUpdateCode(compiler, function, error);
+}
+
+unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeUngroupedSumDoubleDoubleBinaryConstant(
+    SljitNativeDoubleBinaryOp op, SljitNativeDoubleSourceKind source_kind, bool constant_on_left,
+    SljitNativeAggregateUpdateFunction &function, string &error) {
+	auto compiler = sljit_create_compiler(nullptr);
+	if (!compiler) {
+		error = "failed to create SLJIT compiler";
+		return nullptr;
+	}
+	auto binary_op = NativeDoubleBinaryOp(op);
+	const auto local_sum_offset = NumericCast<sljit_sw>(0);
+	const auto saw_value_offset = NumericCast<sljit_sw>(sizeof(double));
+	const auto local_size = saw_value_offset + NumericCast<sljit_sw>(sizeof(sljit_sw));
+
+	sljit_emit_enter(compiler, 0, SLJIT_ARGS1V(P), 5 | SLJIT_ENTER_FLOAT(2), 5, local_size);
+	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_S1, 0, SLJIT_IMM, 0);
+	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_S2, 0, SLJIT_MEM1(SLJIT_S0), offsetof(SljitNativeVectorInput, count));
+	EmitSljitStoreZeroDoubleLocal(compiler, local_sum_offset);
+	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_MEM1(SLJIT_SP), saw_value_offset, SLJIT_IMM, 0);
+
+	auto loop = sljit_emit_label(compiler);
+	auto done = sljit_emit_cmp(compiler, SLJIT_GREATER_EQUAL, SLJIT_S1, 0, SLJIT_S2, 0);
+
+	EmitLoadSelectedIndex(compiler);
+	auto source_is_null = EmitSkipInvalidSourceRow(compiler);
+	EmitLoadNativeDoubleOperand(compiler, source_kind, offsetof(SljitNativeVectorInput, source_data), SLJIT_R1,
+	                            offsetof(SljitNativeVectorInput, source_double_scale), SLJIT_TMP_FR0);
+	sljit_emit_fmem(compiler, SLJIT_MOV_F64 | SLJIT_MEM_ALIGNED_32, SLJIT_TMP_FR1, SLJIT_MEM1(SLJIT_S0),
+	                offsetof(SljitNativeVectorInput, double_constant));
+	if (constant_on_left) {
+		sljit_emit_fop2(compiler, binary_op, SLJIT_TMP_FR0, 0, SLJIT_TMP_FR1, 0, SLJIT_TMP_FR0, 0);
+	} else {
+		sljit_emit_fop2(compiler, binary_op, SLJIT_TMP_FR0, 0, SLJIT_TMP_FR0, 0, SLJIT_TMP_FR1, 0);
+	}
+	EmitSljitAggregateAccumulateDouble(compiler, local_sum_offset, saw_value_offset, SLJIT_TMP_FR0);
+	auto next = sljit_emit_jump(compiler, SLJIT_JUMP);
+
+	auto invalid_label = sljit_emit_label(compiler);
+	sljit_set_label(source_is_null, invalid_label);
+
+	auto next_label = sljit_emit_label(compiler);
+	sljit_set_label(next, next_label);
+	EmitSljitAggregateLoopStep(compiler, loop);
+
+	auto done_label = sljit_emit_label(compiler);
+	sljit_set_label(done, done_label);
+	EmitSljitAggregateCommitDouble(compiler, local_sum_offset, saw_value_offset);
+	sljit_emit_return_void(compiler);
+
+	return FinishSljitNativeAggregateUpdateCode(compiler, function, error);
+}
+
+unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeUngroupedSumDoubleDoubleBinaryReferences(
+    SljitNativeDoubleBinaryOp op, SljitNativeDoubleSourceKind left_kind, SljitNativeDoubleSourceKind right_kind,
+    SljitNativeAggregateUpdateFunction &function, string &error) {
+	auto compiler = sljit_create_compiler(nullptr);
+	if (!compiler) {
+		error = "failed to create SLJIT compiler";
+		return nullptr;
+	}
+	auto binary_op = NativeDoubleBinaryOp(op);
+	auto needs_helper_spill = NativeDoubleSourceUsesHelper(left_kind) || NativeDoubleSourceUsesHelper(right_kind);
+	const auto local_sum_offset = NumericCast<sljit_sw>(0);
+	const auto saw_value_offset = NumericCast<sljit_sw>(sizeof(double));
+	const auto left_spill_offset = saw_value_offset + NumericCast<sljit_sw>(sizeof(sljit_sw));
+	const auto right_spill_offset = left_spill_offset + NumericCast<sljit_sw>(sizeof(double));
+	const auto local_size = right_spill_offset + (needs_helper_spill ? NumericCast<sljit_sw>(sizeof(double)) : 0);
+
+	sljit_emit_enter(compiler, 0, SLJIT_ARGS1V(P), 5 | SLJIT_ENTER_FLOAT(2), 5, local_size);
+	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_S1, 0, SLJIT_IMM, 0);
+	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_S2, 0, SLJIT_MEM1(SLJIT_S0), offsetof(SljitNativeVectorInput, count));
+	EmitSljitStoreZeroDoubleLocal(compiler, local_sum_offset);
+	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_MEM1(SLJIT_SP), saw_value_offset, SLJIT_IMM, 0);
+
+	auto loop = sljit_emit_label(compiler);
+	auto done = sljit_emit_cmp(compiler, SLJIT_GREATER_EQUAL, SLJIT_S1, 0, SLJIT_S2, 0);
+
+	EmitLoadLogicalIndex(compiler, SLJIT_R1);
+	EmitLoadSourceIndex(compiler, offsetof(SljitNativeVectorInput, source_sel), SLJIT_R1, SLJIT_S3);
+	EmitLoadSourceIndex(compiler, offsetof(SljitNativeVectorInput, right_source_sel), SLJIT_R1, SLJIT_S4);
+	auto left_is_null = EmitJumpIfValidityNull(compiler, offsetof(SljitNativeVectorInput, source_validity), SLJIT_S3);
+	auto right_is_null =
+	    EmitJumpIfValidityNull(compiler, offsetof(SljitNativeVectorInput, right_source_validity), SLJIT_S4);
+
+	if (needs_helper_spill) {
+		EmitLoadNativeDoubleOperand(compiler, left_kind, offsetof(SljitNativeVectorInput, source_data), SLJIT_S3,
+		                            offsetof(SljitNativeVectorInput, source_double_scale), SLJIT_TMP_FR0);
+		sljit_emit_fmem(compiler, SLJIT_MOV_F64 | SLJIT_MEM_STORE | SLJIT_MEM_ALIGNED_32, SLJIT_TMP_FR0,
+		                SLJIT_MEM1(SLJIT_SP), left_spill_offset);
+		EmitLoadNativeDoubleOperand(compiler, right_kind, offsetof(SljitNativeVectorInput, right_source_data), SLJIT_S4,
+		                            offsetof(SljitNativeVectorInput, right_source_double_scale), SLJIT_TMP_FR0);
+		sljit_emit_fmem(compiler, SLJIT_MOV_F64 | SLJIT_MEM_STORE | SLJIT_MEM_ALIGNED_32, SLJIT_TMP_FR0,
+		                SLJIT_MEM1(SLJIT_SP), right_spill_offset);
+		sljit_emit_fmem(compiler, SLJIT_MOV_F64 | SLJIT_MEM_ALIGNED_32, SLJIT_TMP_FR0, SLJIT_MEM1(SLJIT_SP),
+		                left_spill_offset);
+		sljit_emit_fmem(compiler, SLJIT_MOV_F64 | SLJIT_MEM_ALIGNED_32, SLJIT_TMP_FR1, SLJIT_MEM1(SLJIT_SP),
+		                right_spill_offset);
+	} else {
+		EmitLoadNativeDoubleOperand(compiler, left_kind, offsetof(SljitNativeVectorInput, source_data), SLJIT_S3,
+		                            offsetof(SljitNativeVectorInput, source_double_scale), SLJIT_TMP_FR0);
+		EmitLoadNativeDoubleOperand(compiler, right_kind, offsetof(SljitNativeVectorInput, right_source_data), SLJIT_S4,
+		                            offsetof(SljitNativeVectorInput, right_source_double_scale), SLJIT_TMP_FR1);
+	}
+	sljit_emit_fop2(compiler, binary_op, SLJIT_TMP_FR0, 0, SLJIT_TMP_FR0, 0, SLJIT_TMP_FR1, 0);
+	EmitSljitAggregateAccumulateDouble(compiler, local_sum_offset, saw_value_offset, SLJIT_TMP_FR0);
+	auto next = sljit_emit_jump(compiler, SLJIT_JUMP);
+
+	auto invalid_label = sljit_emit_label(compiler);
+	sljit_set_label(left_is_null, invalid_label);
+	sljit_set_label(right_is_null, invalid_label);
+
+	auto next_label = sljit_emit_label(compiler);
+	sljit_set_label(next, next_label);
+	EmitSljitAggregateLoopStep(compiler, loop);
+
+	auto done_label = sljit_emit_label(compiler);
+	sljit_set_label(done, done_label);
+	EmitSljitAggregateCommitDouble(compiler, local_sum_offset, saw_value_offset);
 	sljit_emit_return_void(compiler);
 
 	return FinishSljitNativeAggregateUpdateCode(compiler, function, error);

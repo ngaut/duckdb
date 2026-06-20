@@ -14,12 +14,13 @@
 
 namespace duckdb {
 
-enum class AggregatePrimitiveUpdateKind : uint8_t { NONE, SUM_INT64, SUM_HUGEINT, COUNT_STAR };
+enum class AggregatePrimitiveUpdateKind : uint8_t { NONE, SUM_INT64, SUM_HUGEINT, SUM_DOUBLE, COUNT_STAR };
 
 static inline bool AggregatePrimitiveUpdateKindIsSupported(AggregatePrimitiveUpdateKind kind) {
 	switch (kind) {
 	case AggregatePrimitiveUpdateKind::SUM_INT64:
 	case AggregatePrimitiveUpdateKind::SUM_HUGEINT:
+	case AggregatePrimitiveUpdateKind::SUM_DOUBLE:
 	case AggregatePrimitiveUpdateKind::COUNT_STAR:
 		return true;
 	default:
@@ -31,6 +32,7 @@ static inline bool AggregatePrimitiveUpdateRequiresPayload(AggregatePrimitiveUpd
 	switch (kind) {
 	case AggregatePrimitiveUpdateKind::SUM_INT64:
 	case AggregatePrimitiveUpdateKind::SUM_HUGEINT:
+	case AggregatePrimitiveUpdateKind::SUM_DOUBLE:
 		return true;
 	default:
 		return false;
@@ -41,6 +43,7 @@ static inline bool AggregatePrimitiveUpdateHasStateIsSet(AggregatePrimitiveUpdat
 	switch (kind) {
 	case AggregatePrimitiveUpdateKind::SUM_INT64:
 	case AggregatePrimitiveUpdateKind::SUM_HUGEINT:
+	case AggregatePrimitiveUpdateKind::SUM_DOUBLE:
 		return true;
 	default:
 		return false;
@@ -61,6 +64,10 @@ static inline bool AggregatePrimitiveUpdateUsesHugeintState(AggregatePrimitiveUp
 	return kind == AggregatePrimitiveUpdateKind::SUM_HUGEINT;
 }
 
+static inline bool AggregatePrimitiveUpdateUsesDoubleState(AggregatePrimitiveUpdateKind kind) {
+	return kind == AggregatePrimitiveUpdateKind::SUM_DOUBLE;
+}
+
 static inline idx_t AggregatePrimitiveUpdateStateValueSize(AggregatePrimitiveUpdateKind kind) {
 	switch (kind) {
 	case AggregatePrimitiveUpdateKind::SUM_INT64:
@@ -68,6 +75,8 @@ static inline idx_t AggregatePrimitiveUpdateStateValueSize(AggregatePrimitiveUpd
 		return sizeof(int64_t);
 	case AggregatePrimitiveUpdateKind::SUM_HUGEINT:
 		return sizeof(hugeint_t);
+	case AggregatePrimitiveUpdateKind::SUM_DOUBLE:
+		return sizeof(double);
 	default:
 		return 0;
 	}

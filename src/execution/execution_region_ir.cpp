@@ -522,6 +522,8 @@ static string DescribeExecutionRegionPrimitiveUpdateKind(AggregatePrimitiveUpdat
 		return "sum_int64";
 	case AggregatePrimitiveUpdateKind::SUM_HUGEINT:
 		return "sum_hugeint";
+	case AggregatePrimitiveUpdateKind::SUM_DOUBLE:
+		return "sum_double";
 	case AggregatePrimitiveUpdateKind::COUNT_STAR:
 		return "count_star";
 	default:
@@ -1641,6 +1643,11 @@ void AccumulateExecutionRegionAggregateFunctionKinds(const ExecutionRegionAggreg
 	}
 }
 
+static bool ExecutionRegionOrderDependencyCoveredByPrimitiveUpdate(const ExecutionRegionAggregateInput &aggregate) {
+	return aggregate.primitive_update_ready &&
+	       aggregate.primitive_update_kind == AggregatePrimitiveUpdateKind::SUM_DOUBLE;
+}
+
 string ExecutionRegionAggregateNativeStateUpdateBlocker(const ExecutionRegionAggregateContract &contract,
                                                         const vector<ExecutionRegionAggregateInput> &aggregates,
                                                         const vector<ExecutionRegionGroupInput> &groups) {
@@ -1694,7 +1701,8 @@ string ExecutionRegionAggregateNativeStateUpdateBlocker(const ExecutionRegionAgg
 		if (aggregate.has_filter) {
 			return "aggregate-state-update-filtered-aggregate";
 		}
-		if (aggregate.has_order_bys || aggregate.order_dependent) {
+		if (aggregate.has_order_bys ||
+		    (aggregate.order_dependent && !ExecutionRegionOrderDependencyCoveredByPrimitiveUpdate(aggregate))) {
 			return "aggregate-state-update-ordered-aggregate";
 		}
 		if (!aggregate.has_state_update) {

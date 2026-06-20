@@ -75,6 +75,7 @@ static unique_ptr<SljitNativePredicate> CopySljitNativePredicate(const unique_pt
 SljitNativeRegionExpressionPlan CopySljitNativeRegionExpression(const SljitNativeRegionExpressionPlan &input) {
 	SljitNativeRegionExpressionPlan result;
 	result.kind = input.kind;
+	result.reference_origin = input.reference_origin;
 	result.integer_kind = input.integer_kind;
 	result.return_type = input.return_type;
 	result.constant_value = input.constant_value;
@@ -1612,6 +1613,21 @@ static bool SljitPrimitiveAggregatePayloadSupported(SljitNativeRegionExpressionP
 	    aggregate.primitive_update_input_type != aggregate.child_types[0].InternalType()) {
 		return false;
 	}
+	if (aggregate.primitive_update_kind == AggregatePrimitiveUpdateKind::SUM_DOUBLE) {
+		if (grouped_state || aggregate.child_types[0].InternalType() != PhysicalType::DOUBLE) {
+			return false;
+		}
+		switch (payload.kind) {
+		case SljitNativeRegionExpressionKind::REFERENCE:
+			payload.double_source_kind = SljitNativeDoubleSourceKind::DOUBLE;
+			return true;
+		case SljitNativeRegionExpressionKind::DOUBLE_BINARY_CONSTANT:
+		case SljitNativeRegionExpressionKind::DOUBLE_BINARY_REFERENCES:
+			return true;
+		default:
+			return false;
+		}
+	}
 	SljitNativeIntegerKind aggregate_payload_kind;
 	if (!TryGetSljitPrimitiveAggregatePayloadKind(aggregate.child_types[0], aggregate_payload_kind)) {
 		return false;
@@ -1658,6 +1674,14 @@ static bool TryBuildSljitPrimitiveReferencePayload(const vector<LogicalType> &in
                                                    const ExecutionRegionAggregateInput &aggregate,
                                                    SljitNativeRegionExpressionPlan &payload, bool grouped_state);
 
+static bool SljitPrimitiveAggregatePayloadCanEraseProjection(const SljitNativeRegionExpressionPlan &payload) {
+	if (payload.kind != SljitNativeRegionExpressionKind::REFERENCE) {
+		return true;
+	}
+	return payload.reference_origin == SljitNativeReferenceOrigin::REGION_INPUT ||
+	       payload.reference_origin == SljitNativeReferenceOrigin::SOURCE_OUTPUT;
+}
+
 static bool TryFuseNativeProjectionIntoPrimitiveAggregateUpdate(const vector<LogicalType> &input_types,
                                                                 SljitNativeRegionOpPlan &projection,
                                                                 SljitNativeRegionOpPlan &aggregate_update) {
@@ -1684,6 +1708,9 @@ static bool TryFuseNativeProjectionIntoPrimitiveAggregateUpdate(const vector<Log
 			return false;
 		}
 		auto payload = CopySljitNativeRegionExpression(projection.projections[aggregate.payload_index]);
+		if (!SljitPrimitiveAggregatePayloadCanEraseProjection(payload)) {
+			return false;
+		}
 		if (!SljitPrimitiveAggregatePayloadSupported(payload, aggregate)) {
 			return false;
 		}
@@ -1729,6 +1756,9 @@ static bool TryComposePrimitiveAggregatePayloadsThroughProjection(const vector<L
 		if (!TryComposeNativeProjectionExpression(projection.projections, payload, composed, composed_arithmetic) &&
 		    !TryComposeNativeProjectionThroughReferenceProjection(projection.projections, payload, composed,
 		                                                          composed_arithmetic)) {
+			return false;
+		}
+		if (!SljitPrimitiveAggregatePayloadCanEraseProjection(composed)) {
 			return false;
 		}
 		if (!SljitPrimitiveAggregatePayloadSupported(composed, aggregate)) {
@@ -1802,6 +1832,10 @@ static bool SljitPerfectHashGroupLookupSupported(const ExecutionRegionSinkInfo &
 		}
 		if (!AggregatePrimitiveUpdateRequiresPayload(aggregate.primitive_update_kind) ||
 		    payload.kind != SljitNativeRegionExpressionKind::REFERENCE) {
+			return false;
+		}
+		if (aggregate.primitive_update_kind != AggregatePrimitiveUpdateKind::SUM_INT64 &&
+		    aggregate.primitive_update_kind != AggregatePrimitiveUpdateKind::SUM_HUGEINT) {
 			return false;
 		}
 	}
@@ -2394,10 +2428,12 @@ static unique_ptr<ExecutionExpressionIR> MakeSljitReferenceExpression(idx_t sour
 	return result;
 }
 
-static SljitNativeRegionExpressionPlan MakeSljitNativeReference(idx_t source_index, const LogicalType &type,
-                                                                string ir) {
+static SljitNativeRegionExpressionPlan
+MakeSljitNativeReference(idx_t source_index, const LogicalType &type, string ir,
+                         SljitNativeReferenceOrigin origin = SljitNativeReferenceOrigin::REGION_INPUT) {
 	SljitNativeRegionExpressionPlan result;
 	result.kind = SljitNativeRegionExpressionKind::REFERENCE;
+	result.reference_origin = origin;
 	result.return_type = type;
 	result.source_index = source_index;
 	result.ir = std::move(ir);
@@ -2405,9 +2441,11 @@ static SljitNativeRegionExpressionPlan MakeSljitNativeReference(idx_t source_ind
 }
 
 struct SljitProjectionGraphLowering {
-	explicit SljitProjectionGraphLowering(const vector<LogicalType> &input_types_p) : current_types(input_types_p) {
+	explicit SljitProjectionGraphLowering(const vector<LogicalType> &input_types_p)
+	    : input_type_count(input_types_p.size()), current_types(input_types_p) {
 	}
 
+	idx_t input_type_count;
 	vector<LogicalType> current_types;
 	vector<SljitNativeRegionOpPlan> native_ops;
 };
@@ -2428,7 +2466,8 @@ static void AppendSljitNativeTempProjection(SljitProjectionGraphLowering &graph,
 	for (idx_t col_idx = 0; col_idx < graph.current_types.size(); col_idx++) {
 		temp_op.output_types.push_back(graph.current_types[col_idx]);
 		temp_op.projections.push_back(
-		    MakeSljitNativeReference(col_idx, graph.current_types[col_idx], "ssa.pass#" + std::to_string(col_idx)));
+		    MakeSljitNativeReference(col_idx, graph.current_types[col_idx], "ssa.pass#" + std::to_string(col_idx),
+		                             SljitNativeReferenceOrigin::PROJECTION_PASS_THROUGH));
 	}
 	temp_op.output_types.push_back(temp_type);
 	temp_op.projections.push_back(std::move(expression));
@@ -2483,6 +2522,10 @@ static bool TryBuildSljitProjectionGraphExpression(const ExecutionExpressionIR &
                                                    SljitProjectionGraphLowering &graph,
                                                    SljitNativeRegionExpressionPlan &expression) {
 	if (TryReadNativeRegionExpression(root, false, expression)) {
+		if (expression.kind == SljitNativeRegionExpressionKind::REFERENCE &&
+		    expression.source_index >= graph.input_type_count) {
+			expression.reference_origin = SljitNativeReferenceOrigin::PROJECTION_TEMP;
+		}
 		return true;
 	}
 
@@ -2490,7 +2533,14 @@ static bool TryBuildSljitProjectionGraphExpression(const ExecutionExpressionIR &
 	if (!RewriteSljitProjectionGraphOperands(*rewritten, graph)) {
 		return false;
 	}
-	return TryReadNativeRegionExpression(*rewritten, false, expression);
+	if (!TryReadNativeRegionExpression(*rewritten, false, expression)) {
+		return false;
+	}
+	if (expression.kind == SljitNativeRegionExpressionKind::REFERENCE &&
+	    expression.source_index >= graph.input_type_count) {
+		expression.reference_origin = SljitNativeReferenceOrigin::PROJECTION_TEMP;
+	}
+	return true;
 }
 
 struct SljitRegionNodePlan {
@@ -2758,7 +2808,8 @@ static SljitNativeRegionOpPlan BuildSljitSourceOutputProjection(const ExecutionR
 			                        "typed table scan contract");
 		}
 		projection.projections.push_back(MakeSljitNativeReference(
-		    source_index, node.output_types[output_idx], "source-output-reference#" + std::to_string(source_index)));
+		    source_index, node.output_types[output_idx], "source-output-reference#" + std::to_string(source_index),
+		    SljitNativeReferenceOrigin::SOURCE_OUTPUT));
 	}
 	return projection;
 }
@@ -4217,6 +4268,23 @@ static string DescribeNativeRegionExpression(const SljitNativeRegionExpressionPl
 	switch (expr.kind) {
 	case SljitNativeRegionExpressionKind::REFERENCE:
 		result = "native:reference";
+		switch (expr.reference_origin) {
+		case SljitNativeReferenceOrigin::REGION_INPUT:
+			result += ":region-input";
+			break;
+		case SljitNativeReferenceOrigin::PROJECTION_PASS_THROUGH:
+			result += ":projection-pass";
+			break;
+		case SljitNativeReferenceOrigin::PROJECTION_TEMP:
+			result += ":projection-temp";
+			break;
+		case SljitNativeReferenceOrigin::SOURCE_OUTPUT:
+			result += ":source-output";
+			break;
+		default:
+			result += ":unknown";
+			break;
+		}
 		break;
 	case SljitNativeRegionExpressionKind::CONSTANT:
 		result = "native:constant<" + expr.return_type.ToString() + ">(" + expr.constant_value.ToString() + ")";

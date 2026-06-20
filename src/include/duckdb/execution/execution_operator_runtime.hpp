@@ -121,6 +121,7 @@ struct ExecutionPrimitiveAggregateUpdateLane {
 	idx_t state_is_set_offset = 0;
 	int64_t *sum_int64_value = nullptr;
 	hugeint_t *sum_hugeint_value = nullptr;
+	double *sum_double_value = nullptr;
 	bool *state_is_set = nullptr;
 	idx_t *row_count = nullptr;
 	string blocker;

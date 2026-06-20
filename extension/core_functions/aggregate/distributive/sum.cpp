@@ -238,6 +238,16 @@ AggregatePrimitiveUpdateABI SumHugeintPrimitiveUpdateABI(PhysicalType input_type
 	return abi;
 }
 
+AggregatePrimitiveUpdateABI SumDoublePrimitiveUpdateABI() {
+	AggregatePrimitiveUpdateABI abi;
+	abi.kind = AggregatePrimitiveUpdateKind::SUM_DOUBLE;
+	abi.input_type = PhysicalType::DOUBLE;
+	abi.state_size = sizeof(SumState<double>);
+	abi.state_value_offset = offsetof(SumState<double>, value);
+	abi.state_is_set_offset = offsetof(SumState<double>, is_set);
+	return abi;
+}
+
 AggregateFunction GetSumAggregateNoOverflow(PhysicalType type) {
 	switch (type) {
 	case PhysicalType::INT32: {
@@ -434,8 +444,10 @@ AggregateFunctionSet SumFun::GetFunctions() {
 	sum.AddFunction(GetSumAggregate(PhysicalType::INT32));
 	sum.AddFunction(GetSumAggregate(PhysicalType::INT64));
 	sum.AddFunction(GetSumAggregate(PhysicalType::INT128));
-	sum.AddFunction(AggregateFunction::UnaryAggregate<SumState<double>, double, double, NumericSumOperation>(
-	    LogicalType::DOUBLE, LogicalType::DOUBLE));
+	auto double_sum = AggregateFunction::UnaryAggregate<SumState<double>, double, double, NumericSumOperation>(
+	    LogicalType::DOUBLE, LogicalType::DOUBLE);
+	double_sum.SetPrimitiveUpdateABI(SumDoublePrimitiveUpdateABI());
+	sum.AddFunction(double_sum);
 	sum.AddFunction(AggregateFunction::UnaryAggregate<BignumState, bignum_t, bignum_t, BignumOperation>(
 	    LogicalType::BIGNUM, LogicalType::BIGNUM));
 	return sum;

@@ -521,11 +521,14 @@ static bool BuildExecutableRegionOp(const SljitNativeRegionOpPlan &op, SljitExec
 						return false;
 					}
 				} else {
-					if (primitive_kind != AggregatePrimitiveUpdateKind::SUM_INT64) {
-						error = "SLJIT aggregate reference reducer only supports SUM_INT64";
+					if (primitive_kind == AggregatePrimitiveUpdateKind::SUM_INT64) {
+						code = BuildSljitNativeUngroupedSumInt64Reference(payload.integer_kind, function, error);
+					} else if (primitive_kind == AggregatePrimitiveUpdateKind::SUM_DOUBLE) {
+						code = BuildSljitNativeUngroupedSumDoubleReference(payload.double_source_kind, function, error);
+					} else {
+						error = "SLJIT aggregate reference reducer has no primitive state kind";
 						return false;
 					}
-					code = BuildSljitNativeUngroupedSumInt64Reference(payload.integer_kind, function, error);
 				}
 				break;
 			case SljitNativeRegionExpressionKind::INTEGER_BINARY_CONSTANT:
@@ -553,6 +556,31 @@ static bool BuildExecutableRegionOp(const SljitNativeRegionOpPlan &op, SljitExec
 				code = BuildSljitNativeUngroupedSumInt64IntegerBinaryReferences(
 				    payload.integer_kind, payload.binary_op, function, error, payload.check_result_range,
 				    payload.result_min, payload.result_max);
+				break;
+			case SljitNativeRegionExpressionKind::DOUBLE_BINARY_CONSTANT:
+				if (op.aggregate_update.use_grouped_state_addresses) {
+					error = "SLJIT grouped aggregate double binary-constant reducer is not supported";
+					return false;
+				}
+				if (primitive_kind != AggregatePrimitiveUpdateKind::SUM_DOUBLE) {
+					error = "SLJIT aggregate double binary-constant reducer only supports SUM_DOUBLE";
+					return false;
+				}
+				code = BuildSljitNativeUngroupedSumDoubleDoubleBinaryConstant(
+				    payload.double_binary_op, payload.double_source_kind, payload.constant_on_left, function, error);
+				break;
+			case SljitNativeRegionExpressionKind::DOUBLE_BINARY_REFERENCES:
+				if (op.aggregate_update.use_grouped_state_addresses) {
+					error = "SLJIT grouped aggregate double binary-reference reducer is not supported";
+					return false;
+				}
+				if (primitive_kind != AggregatePrimitiveUpdateKind::SUM_DOUBLE) {
+					error = "SLJIT aggregate double binary-reference reducer only supports SUM_DOUBLE";
+					return false;
+				}
+				code = BuildSljitNativeUngroupedSumDoubleDoubleBinaryReferences(
+				    payload.double_binary_op, payload.double_source_kind, payload.double_right_source_kind, function,
+				    error);
 				break;
 			case SljitNativeRegionExpressionKind::EXPRESSION_TREE:
 				if (op.aggregate_update.use_grouped_state_addresses) {
