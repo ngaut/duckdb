@@ -33,25 +33,17 @@ static idx_t ExecutionRegionRingIndex(idx_t start, idx_t capacity, idx_t offset)
 
 static hash_t ExecutionRegionCounterHash(const ExecutionRegionEvent &event) {
 	auto result = ExecutionRegionTelemetryHashString(event.backend_name);
-	result = ExecutionRegionTelemetryCombine(result, ExecutionRegionTelemetryHashEnum(event.target_kind));
 	result = ExecutionRegionTelemetryCombine(result, ExecutionRegionTelemetryHashEnum(event.status_kind));
 	result = ExecutionRegionTelemetryCombine(result, ExecutionRegionTelemetryHashEnum(event.execution_mode_kind));
-	result =
-	    ExecutionRegionTelemetryCombine(result, ExecutionRegionTelemetryHashEnum(event.region_execution_form_kind));
-	result = ExecutionRegionTelemetryCombine(result, ExecutionRegionTelemetryHashEnum(event.execution_body_kind));
 	result = ExecutionRegionTelemetryCombine(result, ExecutionRegionTelemetryHashEnum(event.selected_runner));
-	result = ExecutionRegionTelemetryCombine(result, ExecutionRegionTelemetryHashEnum(event.requested_policy_kind));
 	result = ExecutionRegionTelemetryCombine(result, ExecutionRegionTelemetryHashString(event.blocker));
 	return result;
 }
 
 static bool ExecutionRegionCounterMatches(const ExecutionRegionCounter &counter, const ExecutionRegionEvent &event) {
-	return counter.backend_name == event.backend_name && counter.target_kind == event.target_kind &&
-	       counter.status_kind == event.status_kind && counter.execution_mode_kind == event.execution_mode_kind &&
-	       counter.region_execution_form_kind == event.region_execution_form_kind &&
-	       counter.execution_body_kind == event.execution_body_kind &&
-	       counter.selected_runner_kind == event.selected_runner &&
-	       counter.requested_policy_kind == event.requested_policy_kind && counter.blocker == event.blocker;
+	return counter.backend_name == event.backend_name && counter.status_kind == event.status_kind &&
+	       counter.execution_mode_kind == event.execution_mode_kind &&
+	       counter.selected_runner_kind == event.selected_runner && counter.blocker == event.blocker;
 }
 
 static void AccumulateExecutionRegionCounter(ExecutionRegionCounter &counter, const ExecutionRegionEvent &event) {
@@ -61,7 +53,12 @@ static void AccumulateExecutionRegionCounter(ExecutionRegionCounter &counter, co
 		counter.runner_cost_rows += event.runner_cost.rows;
 		counter.runner_cost_batches += event.runner_cost.batches;
 		counter.runner_cost_expression_cost += event.runner_cost.expression_cost;
-		counter.runner_cost_accelerated_stage_count += event.runner_cost.accelerated_stage_count;
+		counter.runner_cost_generated_stage_count += event.runner_cost.generated_stage_count;
+		counter.runner_cost_materialization_elision_count += event.runner_cost.materialization_elision_count;
+		counter.runner_cost_native_join_stage_count += event.runner_cost.native_join_stage_count;
+		counter.runner_cost_native_aggregate_stage_count += event.runner_cost.native_aggregate_stage_count;
+		counter.runner_cost_native_sort_stage_count += event.runner_cost.native_sort_stage_count;
+		counter.runner_cost_full_pipeline = counter.runner_cost_full_pipeline || event.runner_cost.full_pipeline;
 		counter.runner_cost_saved_work_per_batch += event.runner_cost.saved_work_per_batch;
 		counter.runner_cost_accelerated_runner_benefit += event.runner_cost.accelerated_runner_benefit;
 		counter.runner_cost_startup_cost += event.runner_cost.startup_cost;
@@ -104,13 +101,9 @@ void ExecutionRegionEventLog::RecordCounter(const ExecutionRegionEvent &event) {
 	}
 	ExecutionRegionCounter counter;
 	counter.backend_name = event.backend_name;
-	counter.target_kind = event.target_kind;
 	counter.status_kind = event.status_kind;
 	counter.execution_mode_kind = event.execution_mode_kind;
-	counter.region_execution_form_kind = event.region_execution_form_kind;
-	counter.execution_body_kind = event.execution_body_kind;
 	counter.selected_runner_kind = event.selected_runner;
-	counter.requested_policy_kind = event.requested_policy_kind;
 	counter.blocker = event.blocker;
 	AccumulateExecutionRegionCounter(counter, event);
 	auto index = counters.size();

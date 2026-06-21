@@ -517,8 +517,8 @@ idx_t JoinHashTable::PrepareBuildChunk(PartitionedTupleDataAppendState &append_s
 }
 
 void JoinHashTable::HashBuildChunk(PartitionedTupleDataAppendState &append_state, DataChunk &keys,
-                                   DataChunk &source_chunk, Vector &hash_values,
-                                   const SelectionVector &build_selection, idx_t build_count) {
+                                   DataChunk &source_chunk, Vector &hash_values, const SelectionVector &build_selection,
+                                   idx_t build_count) {
 	// hash the keys and obtain an entry in the list
 	// note that we only hash the keys used in the equality comparison
 	Hash(keys, build_selection, build_count, hash_values);

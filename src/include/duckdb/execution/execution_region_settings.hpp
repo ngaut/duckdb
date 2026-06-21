@@ -23,6 +23,7 @@ public:
 	static bool TraceVectorizedBaseline(ClientContext &context);
 	static bool Verify(ClientContext &context);
 	static bool ShouldRecordDetailedTelemetry(ClientContext &context);
+	static bool ShouldRecordDecisionTelemetry(ClientContext &context);
 	static idx_t EventLogSize(DatabaseInstance &db);
 	static string RequestedBackend(ClientContext &context);
 	static ExecutionRegionPolicyMode Policy(ClientContext &context);

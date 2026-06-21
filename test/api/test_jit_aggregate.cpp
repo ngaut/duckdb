@@ -7,7 +7,7 @@ TEST_CASE("JIT ungrouped aggregate sinks use native state-update contracts", "[a
 	Connection con(db);
 	auto &manager = ExecutionRegionManager::Get(*con.context);
 
-	ConfigureSljit(con, "force", false, true, true, 10000);
+	ConfigureSljitForCompilation(con, false, true, true, 10000);
 	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_aggregate_boundary AS "
 	                          "SELECT i::BIGINT AS i, CASE WHEN i % 5 = 0 THEN NULL ELSE i::BIGINT END AS v "
 	                          "FROM range(10000) tbl(i)"));
@@ -26,7 +26,7 @@ TEST_CASE("JIT ungrouped aggregate sinks use native state-update contracts", "[a
 			continue;
 		}
 		found_aggregate_update = true;
-		RequireCompiledGeneratedRegion(event);
+		RequireGeneratedMachineCodeRegion(event);
 		RequireDuckDBScanFilteredSourceContract(event);
 		REQUIRE(event.candidate_contract.missing_contract_count == 0);
 		REQUIRE(StringUtil::Contains(event.reason, "native aggregate update sink contract"));
@@ -38,12 +38,48 @@ TEST_CASE("JIT ungrouped aggregate sinks use native state-update contracts", "[a
 	REQUIRE(found_aggregate_update);
 }
 
+TEST_CASE("JIT CBO counts aggregate protocol once in runtime planner facts", "[api][jit]") {
+	DuckDB db;
+	Connection con(db);
+	auto &manager = ExecutionRegionManager::Get(*con.context);
+
+	ConfigureSljit(con, "auto", false, true, false, 10000);
+	REQUIRE_NO_FAIL(con.Query("SET jit_trace_decisions=true"));
+	REQUIRE_NO_FAIL(con.Query("SET jit_cbo_generated_stage_benefit=10"));
+	REQUIRE_NO_FAIL(con.Query("SET jit_cbo_native_operator_stage_benefit=100"));
+	REQUIRE_NO_FAIL(con.Query("SET jit_cbo_materialization_elision_benefit=0"));
+	REQUIRE_NO_FAIL(con.Query("SET jit_cbo_full_pipeline_benefit=0"));
+	REQUIRE_NO_FAIL(con.Query("SET jit_cbo_startup_base_cost=0"));
+	REQUIRE_NO_FAIL(con.Query("SET jit_cbo_startup_margin_basis_points=0"));
+	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_aggregate_cbo_partition AS "
+	                          "SELECT i::BIGINT AS i FROM range(10000) tbl(i)"));
+
+	ClearJitTrace(manager, true);
+	auto result = con.Query("SELECT count(*) FROM jit_aggregate_cbo_partition");
+	REQUIRE_NO_FAIL(*result);
+	REQUIRE(result->GetValue(0, 0).ToString() == "10000");
+
+	RequireJitEvent(
+	    manager,
+	    [](const ExecutionRegionEvent &event) {
+		    return IsCompiledSljitRegionEvent(event) &&
+		           event.candidate_traits.sink_kind == ExecutionRegionSinkKind::UNGROUPED_AGGREGATE_UPDATE;
+	    },
+	    [](const ExecutionRegionEvent &event) {
+		    REQUIRE(event.runner_cost.present);
+		    REQUIRE(event.runner_cost.generated_stage_count == 0);
+		    REQUIRE(event.runner_cost.native_aggregate_stage_count == 1);
+		    REQUIRE(event.runner_cost.saved_work_per_batch == 100);
+		    REQUIRE(event.runner_cost.selected_accelerated_runner);
+	    });
+}
+
 TEST_CASE("JIT fuses projection payloads into primitive ungrouped aggregate reducers", "[api][jit]") {
 	DuckDB db;
 	Connection con(db);
 	auto &manager = ExecutionRegionManager::Get(*con.context);
 
-	ConfigureSljit(con, "force", false, true, true, 10000);
+	ConfigureSljitForCompilation(con, false, true, true, 10000);
 	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_aggregate_payload AS "
 	                          "SELECT (i % 1000)::BIGINT AS a, (i % 10)::BIGINT AS b "
 	                          "FROM range(10000) tbl(i)"));
@@ -56,12 +92,11 @@ TEST_CASE("JIT fuses projection payloads into primitive ungrouped aggregate redu
 	for (auto &event : manager.GetEvents()) {
 		if (!IsCompiledSljitRegionEvent(event) || !event.has_candidate ||
 		    event.candidate_traits.sink_kind != ExecutionRegionSinkKind::UNGROUPED_AGGREGATE_UPDATE ||
-		    !StringUtil::Contains(event.reason, "fused:primitive-aggregate-update=1")) {
+		    !StringUtil::Contains(event.ir, "primitive_payloads=native:")) {
 			continue;
 		}
 		found_compile = true;
-		RequireCompiledFusedRegion(event);
-		REQUIRE(StringUtil::Contains(event.reason, "operator-stage:aggregate-update"));
+		RequireGeneratedMachineCodeRegion(event);
 		REQUIRE(StringUtil::Contains(event.reason, "execution:native-sljit-region-aggregate-update"));
 		REQUIRE(StringUtil::Contains(event.ir, "primitive_payloads=native:"));
 	}
@@ -69,18 +104,204 @@ TEST_CASE("JIT fuses projection payloads into primitive ungrouped aggregate redu
 
 	bool found_runtime = false;
 	for (auto &event : manager.GetEvents()) {
-		if (EventPhase(event) != "runtime" || event.backend_name != "sljit" || EventTarget(event) != "region" ||
-		    !StringUtil::Contains(event.kernel_compile_reason, "fused:primitive-aggregate-update=1")) {
+		if (EventPhase(event) != "runtime" || event.backend_name != "sljit") {
+			continue;
+		}
+		if (!StringUtil::Contains(EventGeneratedStageCountBreakdown(event),
+		                          "aggregate_update.primitive_payload_update=")) {
 			continue;
 		}
 		found_runtime = true;
-		REQUIRE(EventExecutionBody(event) == "generated-machine-code");
+		REQUIRE(ExecutionRegionEventProfileCodeSize(event) > 0);
 		REQUIRE(event.kernel_code_size > 0);
 		REQUIRE(event.invocation_count > 0);
 		REQUIRE(StringUtil::Contains(EventGeneratedStageRuntimeBreakdown(event), "aggregate_update"));
+		REQUIRE_FALSE(StringUtil::Contains(EventGeneratedStageRuntimeBreakdown(event),
+		                                   "aggregate_update.primitive_payload_update_fused="));
 		REQUIRE_FALSE(StringUtil::Contains(EventGeneratedStageRuntimeBreakdown(event), "projection"));
 	}
 	REQUIRE(found_runtime);
+}
+
+TEST_CASE("JIT fuses generated filters into primitive ungrouped aggregate reducers", "[api][jit]") {
+	DuckDB db;
+	Connection con(db);
+	auto &manager = ExecutionRegionManager::Get(*con.context);
+
+	ConfigureSljitForCompilation(con, false, true, true, 10000);
+	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_filtered_aggregate_payload AS "
+	                          "SELECT CASE WHEN i % 9973 = 0 THEN NULL ELSE i::BIGINT END AS a, "
+	                          "CASE WHEN i % 7919 = 0 THEN NULL ELSE (i + 3)::BIGINT END AS b "
+	                          "FROM range(100000) tbl(i)"));
+
+	REQUIRE_NO_FAIL(con.Query("SET jit_policy='off'"));
+	auto reference = con.Query("SELECT sum(a * b) FROM jit_filtered_aggregate_payload WHERE (a + b) > 1000");
+	REQUIRE_NO_FAIL(*reference);
+
+	REQUIRE_NO_FAIL(con.Query("SET jit_policy='auto'"));
+	ClearJitTrace(manager, true);
+	auto result = con.Query("SELECT sum(a * b) FROM jit_filtered_aggregate_payload WHERE (a + b) > 1000");
+	REQUIRE_NO_FAIL(*result);
+	REQUIRE(result->GetValue(0, 0).ToString() == reference->GetValue(0, 0).ToString());
+
+	bool found_filtered_aggregate = false;
+	for (auto &event : manager.GetEvents()) {
+		if (EventPhase(event) != "runtime" || event.backend_name != "sljit") {
+			continue;
+		}
+		auto stage_counts = EventGeneratedStageCountBreakdown(event);
+		if (!StringUtil::Contains(stage_counts, "aggregate_update.filtered_primitive_update=")) {
+			continue;
+		}
+		found_filtered_aggregate = true;
+		REQUIRE(ExecutionRegionEventProfileCodeSize(event) > 0);
+		REQUIRE_FALSE(StringUtil::Contains(stage_counts, "filter.selection="));
+		REQUIRE_FALSE(StringUtil::Contains(stage_counts, "filter="));
+		REQUIRE_FALSE(StringUtil::Contains(stage_counts, "aggregate_update.primitive_payload_update="));
+	}
+	REQUIRE(found_filtered_aggregate);
+}
+
+TEST_CASE("JIT fuses generated filters into primitive count-star aggregate reducers", "[api][jit]") {
+	DuckDB db;
+	Connection con(db);
+	auto &manager = ExecutionRegionManager::Get(*con.context);
+
+	ConfigureSljitForCompilation(con, false, true, true, 10000);
+	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_filtered_count_star_payload AS "
+	                          "SELECT CASE WHEN i % 9973 = 0 THEN NULL ELSE i::BIGINT END AS a, "
+	                          "CASE WHEN i % 7919 = 0 THEN NULL ELSE (i + 3)::BIGINT END AS b "
+	                          "FROM range(100000) tbl(i)"));
+
+	REQUIRE_NO_FAIL(con.Query("SET jit_policy='off'"));
+	auto reference = con.Query("SELECT count(*) FROM jit_filtered_count_star_payload WHERE (a + b) > 1000");
+	REQUIRE_NO_FAIL(*reference);
+
+	REQUIRE_NO_FAIL(con.Query("SET jit_policy='auto'"));
+	ClearJitTrace(manager, true);
+	auto result = con.Query("SELECT count(*) FROM jit_filtered_count_star_payload WHERE (a + b) > 1000");
+	REQUIRE_NO_FAIL(*result);
+	REQUIRE(result->GetValue(0, 0).ToString() == reference->GetValue(0, 0).ToString());
+
+	bool found_filtered_count = false;
+	for (auto &event : manager.GetEvents()) {
+		if (EventPhase(event) != "runtime" || event.backend_name != "sljit") {
+			continue;
+		}
+		auto stage_counts = EventGeneratedStageCountBreakdown(event);
+		if (!StringUtil::Contains(stage_counts, "aggregate_update.filtered_primitive_update=")) {
+			continue;
+		}
+		found_filtered_count = true;
+		REQUIRE(ExecutionRegionEventProfileCodeSize(event) > 0);
+		REQUIRE_FALSE(StringUtil::Contains(stage_counts, "filter.selection="));
+		REQUIRE_FALSE(StringUtil::Contains(stage_counts, "filter="));
+		REQUIRE_FALSE(StringUtil::Contains(stage_counts, "aggregate_update.primitive_payload_update="));
+	}
+	REQUIRE(found_filtered_count);
+}
+
+TEST_CASE("JIT fuses generated filters into multiple primitive aggregate reducers", "[api][jit]") {
+	DuckDB db;
+	Connection con(db);
+	auto &manager = ExecutionRegionManager::Get(*con.context);
+
+	ConfigureSljitForCompilation(con, false, true, true, 10000);
+	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_filtered_multi_aggregate_payload AS "
+	                          "SELECT CASE WHEN i % 9973 = 0 THEN NULL ELSE i::BIGINT END AS a, "
+	                          "CASE WHEN i % 7919 = 0 THEN NULL ELSE (i + 3)::BIGINT END AS b, "
+	                          "CASE WHEN i % 3571 = 0 THEN NULL ELSE (i * 10)::DECIMAL(18, 2) END AS d "
+	                          "FROM range(100000) tbl(i)"));
+
+	const string query = "SELECT count(*), sum(a * b), sum(d) "
+	                     "FROM jit_filtered_multi_aggregate_payload WHERE (a + b) > 1000";
+	REQUIRE_NO_FAIL(con.Query("SET jit_policy='off'"));
+	auto reference = con.Query(query);
+	REQUIRE_NO_FAIL(*reference);
+
+	REQUIRE_NO_FAIL(con.Query("SET jit_policy='auto'"));
+	ClearJitTrace(manager, true);
+	auto result = con.Query(query);
+	REQUIRE_NO_FAIL(*result);
+	REQUIRE(result->GetValue(0, 0).ToString() == reference->GetValue(0, 0).ToString());
+	REQUIRE(result->GetValue(1, 0).ToString() == reference->GetValue(1, 0).ToString());
+	REQUIRE(result->GetValue(2, 0).ToString() == reference->GetValue(2, 0).ToString());
+
+	bool found_filtered_multi = false;
+	for (auto &event : manager.GetEvents()) {
+		if (EventPhase(event) != "runtime" || event.backend_name != "sljit") {
+			continue;
+		}
+		auto stage_counts = EventGeneratedStageCountBreakdown(event);
+		if (!StringUtil::Contains(stage_counts, "aggregate_update.filtered_primitive_update=")) {
+			continue;
+		}
+		found_filtered_multi = true;
+		REQUIRE(ExecutionRegionEventProfileCodeSize(event) > 0);
+		REQUIRE_FALSE(StringUtil::Contains(stage_counts, "filter.selection="));
+		REQUIRE_FALSE(StringUtil::Contains(stage_counts, "filter="));
+		REQUIRE_FALSE(StringUtil::Contains(stage_counts, "aggregate_update.primitive_payload_update="));
+		REQUIRE_FALSE(StringUtil::Contains(stage_counts, "aggregate_update.primitive_payload_update_fused="));
+	}
+	REQUIRE(found_filtered_multi);
+}
+
+TEST_CASE("JIT auto CBO selects high-work filtered primitive aggregate fusion", "[api][jit]") {
+	DuckDB db;
+	Connection con(db);
+	auto &manager = ExecutionRegionManager::Get(*con.context);
+
+	ConfigureSljit(con, "auto", false, true, true, 10000);
+	REQUIRE_NO_FAIL(con.Query("SET jit_trace_decisions=true"));
+	REQUIRE_NO_FAIL(con.Query("SET jit_cbo_native_operator_stage_benefit=4096"));
+	REQUIRE_NO_FAIL(con.Query("SET jit_cbo_materialization_elision_benefit=4096"));
+	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_auto_filtered_aggregate_payload AS "
+	                          "SELECT i::BIGINT AS a, (i + 3)::BIGINT AS b, (i % 97)::BIGINT AS c "
+	                          "FROM range(500000) tbl(i)"));
+
+	const string payload = "((((a * b) + (a * 7)) - (b * 13)) + ((a + c) * (b - c)))";
+	const string predicate = "((a + b) > 1000) AND (((a * 3) + (b * 5)) > 10000)";
+	REQUIRE_NO_FAIL(con.Query("SET jit_policy='off'"));
+	auto reference =
+	    con.Query("SELECT sum(" + payload + ") FROM jit_auto_filtered_aggregate_payload WHERE " + predicate);
+	REQUIRE_NO_FAIL(*reference);
+
+	REQUIRE_NO_FAIL(con.Query("SET jit_policy='auto'"));
+	ClearJitTrace(manager, true);
+	auto result = con.Query("SELECT sum(" + payload + ") FROM jit_auto_filtered_aggregate_payload WHERE " + predicate);
+	REQUIRE_NO_FAIL(*result);
+	REQUIRE(result->GetValue(0, 0).ToString() == reference->GetValue(0, 0).ToString());
+
+	RequireJitEvent(
+	    manager,
+	    [](const ExecutionRegionEvent &event) {
+		    return IsCompiledSljitRegionEvent(event) && event.has_candidate &&
+		           event.candidate_traits.sink_kind == ExecutionRegionSinkKind::UNGROUPED_AGGREGATE_UPDATE;
+	    },
+	    [](const ExecutionRegionEvent &event) {
+		    REQUIRE(event.selected_runner == ExecutionRunnerKind::COMPILED_VECTORIZED);
+		    REQUIRE(event.runner_cost.present);
+		    REQUIRE(event.runner_cost.selected_accelerated_runner);
+		    REQUIRE(event.runner_cost.materialization_elision_count == 1);
+		    REQUIRE(event.runner_cost.accelerated_runner_benefit > event.runner_cost.required_benefit);
+		    REQUIRE(StringUtil::Contains(event.reason, "duckdb_cbo selects compiled-vectorized physical runner"));
+		    REQUIRE(StringUtil::Contains(event.ir, "primitive_payloads=native:"));
+		    RequireGeneratedMachineCodeRegion(event);
+	    });
+
+	RequireJitEvent(
+	    manager,
+	    [](const ExecutionRegionEvent &event) {
+		    return EventPhase(event) == "runtime" && event.backend_name == "sljit" &&
+		           StringUtil::Contains(EventGeneratedStageRuntimeBreakdown(event),
+		                                "aggregate_update.filtered_primitive_update=");
+	    },
+	    [](const ExecutionRegionEvent &event) {
+		    REQUIRE(ExecutionRegionEventProfileCodeSize(event) > 0);
+		    REQUIRE_FALSE(StringUtil::Contains(EventGeneratedStageRuntimeBreakdown(event), "filter.selection="));
+		    REQUIRE_FALSE(StringUtil::Contains(EventGeneratedStageRuntimeBreakdown(event),
+		                                       "aggregate_update.primitive_payload_update="));
+	    });
 }
 
 TEST_CASE("JIT preserves projection temps for double primitive aggregate payloads", "[api][jit]") {
@@ -88,7 +309,7 @@ TEST_CASE("JIT preserves projection temps for double primitive aggregate payload
 	Connection con(db);
 	auto &manager = ExecutionRegionManager::Get(*con.context);
 
-	ConfigureSljit(con, "force", false, true, true, 10000);
+	ConfigureSljitForCompilation(con, false, true, true, 10000);
 	REQUIRE_NO_FAIL(con.Query("PRAGMA threads=1"));
 	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_double_aggregate_payload AS "
 	                          "SELECT i, CAST((i % 100) AS DOUBLE) + 0.25 AS x, "
@@ -100,7 +321,7 @@ TEST_CASE("JIT preserves projection temps for double primitive aggregate payload
 	                           "FROM jit_double_aggregate_payload WHERE i % 7 <> 0");
 	REQUIRE_NO_FAIL(*reference);
 
-	REQUIRE_NO_FAIL(con.Query("SET jit_policy='force'"));
+	REQUIRE_NO_FAIL(con.Query("SET jit_policy='auto'"));
 	ClearJitTrace(manager, true);
 	auto result = con.Query("SELECT sum(x), sum((x * 1.5) + (y / 4.0)) "
 	                        "FROM jit_double_aggregate_payload WHERE i % 7 <> 0");
@@ -117,12 +338,12 @@ TEST_CASE("JIT preserves projection temps for double primitive aggregate payload
 			continue;
 		}
 		found_double_payload = true;
-		RequireCompiledFusedRegion(event);
+		RequireGeneratedMachineCodeRegion(event);
 		REQUIRE(StringUtil::Contains(event.ir, "op0=projection("));
 		REQUIRE(StringUtil::Contains(event.ir, "op1=aggregate_update("));
 		REQUIRE(StringUtil::Contains(event.ir, "primitive_update_kind=sum_double"));
-		REQUIRE_FALSE(
-		    StringUtil::Contains(event.ir, "primitive_payloads=native:reference:region-input[compose-reference(ssa.pass#"));
+		REQUIRE_FALSE(StringUtil::Contains(
+		    event.ir, "primitive_payloads=native:reference:region-input[compose-reference(ssa.pass#"));
 	}
 	REQUIRE(found_double_payload);
 }
@@ -132,7 +353,7 @@ TEST_CASE("JIT fuses multiple primitive ungrouped aggregate payload lanes into o
 	Connection con(db);
 	auto &manager = ExecutionRegionManager::Get(*con.context);
 
-	ConfigureSljit(con, "force", false, true, true, 10000);
+	ConfigureSljitForCompilation(con, false, true, true, 10000);
 	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_multi_aggregate_payload AS "
 	                          "SELECT i::BIGINT AS a, (i + 1)::BIGINT AS b "
 	                          "FROM range(10000) tbl(i)"));
@@ -145,16 +366,19 @@ TEST_CASE("JIT fuses multiple primitive ungrouped aggregate payload lanes into o
 
 	bool found_fused_runtime = false;
 	for (auto &event : manager.GetEvents()) {
-		if (EventPhase(event) != "runtime" || event.backend_name != "sljit" || EventTarget(event) != "region" ||
-		    !StringUtil::Contains(event.kernel_compile_reason, "fused:primitive-aggregate-update=1")) {
+		if (EventPhase(event) != "runtime" || event.backend_name != "sljit") {
+			continue;
+		}
+		if (!StringUtil::Contains(EventGeneratedStageCountBreakdown(event),
+		                          "aggregate_update.primitive_payload_update_fused=")) {
 			continue;
 		}
 		found_fused_runtime = true;
 		REQUIRE(event.kernel_code_size > 0);
 		REQUIRE(StringUtil::Contains(EventGeneratedStageCountBreakdown(event),
 		                             "aggregate_update.primitive_payload_update_fused="));
-		REQUIRE_FALSE(
-		    StringUtil::Contains(EventGeneratedStageCountBreakdown(event), "aggregate_update.primitive_payload_update="));
+		REQUIRE_FALSE(StringUtil::Contains(EventGeneratedStageCountBreakdown(event),
+		                                   "aggregate_update.primitive_payload_update="));
 	}
 	REQUIRE(found_fused_runtime);
 }
@@ -164,7 +388,7 @@ TEST_CASE("JIT generic grouped primitive aggregate payload lanes require generat
 	Connection con(db);
 	auto &manager = ExecutionRegionManager::Get(*con.context);
 
-	ConfigureSljit(con, "force", false, true, true, 10000);
+	ConfigureSljitForCompilation(con, false, true, true, 10000);
 	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_grouped_multi_aggregate_payload AS "
 	                          "SELECT i::BIGINT AS k, i::BIGINT AS v "
 	                          "FROM range(200000) tbl(i)"));
@@ -216,7 +440,7 @@ TEST_CASE("JIT grouped aggregate uses canonical hash table lookup under high car
 	REQUIRE_NO_FAIL(*reference);
 	REQUIRE(reference->GetValue(0, 0).ToString() == "150000");
 
-	ConfigureSljitSettings(con, "force", false, true, true, 10000);
+	ConfigureSljitForCompilationSettings(con, false, true, true, 10000);
 	ClearJitTrace(manager, true);
 	auto result = con.Query("SELECT count(*), sum(c)::HUGEINT, sum(s)::HUGEINT "
 	                        "FROM (SELECT k, count(*) AS c, sum(v) AS s "
@@ -257,7 +481,7 @@ TEST_CASE("JIT fuses scaled decimal expression payloads into primitive hugeint a
 	Connection con(db);
 	auto &manager = ExecutionRegionManager::Get(*con.context);
 
-	ConfigureSljit(con, "force", false, true, true, 10000);
+	ConfigureSljitForCompilation(con, false, true, true, 10000);
 	REQUIRE_NO_FAIL(con.Query("SET disabled_optimizers='statistics_propagation'"));
 	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_decimal_aggregate_payload AS "
 	                          "SELECT i, CAST(i % 1000 AS DECIMAL(15,2)) AS d "
@@ -277,11 +501,11 @@ TEST_CASE("JIT fuses scaled decimal expression payloads into primitive hugeint a
 	for (auto &event : manager.GetEvents()) {
 		if (!IsCompiledSljitRegionEvent(event) || !event.has_candidate ||
 		    event.candidate_traits.sink_kind != ExecutionRegionSinkKind::UNGROUPED_AGGREGATE_UPDATE ||
-		    !StringUtil::Contains(event.reason, "fused:primitive-aggregate-update=1")) {
+		    !StringUtil::Contains(event.ir, "primitive_payloads=native:expression-tree")) {
 			continue;
 		}
 		found_compile = true;
-		RequireCompiledFusedRegion(event);
+		RequireGeneratedMachineCodeRegion(event);
 		REQUIRE(StringUtil::Contains(event.ir, "primitive_payloads=native:expression-tree"));
 		REQUIRE(StringUtil::Contains(event.ir, "sum_hugeint"));
 		REQUIRE(StringUtil::Contains(event.ir, "overflow_check=true"));
@@ -294,7 +518,7 @@ TEST_CASE("JIT fuses nullable BIGINT case payloads into primitive hugeint aggreg
 	Connection con(db);
 	auto &manager = ExecutionRegionManager::Get(*con.context);
 
-	ConfigureSljit(con, "force", false, true, true, 10000);
+	ConfigureSljitForCompilation(con, false, true, true, 10000);
 	REQUIRE_NO_FAIL(con.Query("SET disabled_optimizers='statistics_propagation'"));
 	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_bigint_case_aggregate_payload AS "
 	                          "SELECT i::BIGINT AS a, (i * 3 + 17)::BIGINT AS b, "
@@ -319,7 +543,7 @@ TEST_CASE("JIT fuses nullable BIGINT case payloads into primitive hugeint aggreg
 	REQUIRE_NO_FAIL(*reference);
 
 	ClearJitTrace(manager, true);
-	REQUIRE_NO_FAIL(con.Query("SET jit_policy='force'"));
+	REQUIRE_NO_FAIL(con.Query("SET jit_policy='auto'"));
 	auto result = con.Query("SELECT sum(CASE "
 	                        "WHEN ((a + (b * 2)) < (c + coalesce(d, a)) "
 	                        "      AND coalesce(d, a) BETWEEN (a + b - c - 1000000) "
@@ -340,11 +564,11 @@ TEST_CASE("JIT fuses nullable BIGINT case payloads into primitive hugeint aggreg
 	for (auto &event : manager.GetEvents()) {
 		if (!IsCompiledSljitRegionEvent(event) || !event.has_candidate ||
 		    event.candidate_traits.sink_kind != ExecutionRegionSinkKind::UNGROUPED_AGGREGATE_UPDATE ||
-		    !StringUtil::Contains(event.reason, "fused:primitive-aggregate-update=1")) {
+		    !StringUtil::Contains(event.ir, "primitive_payloads=native:typed-expression-tree")) {
 			continue;
 		}
 		found_compile = true;
-		RequireCompiledFusedRegion(event);
+		RequireGeneratedMachineCodeRegion(event);
 		REQUIRE(StringUtil::Contains(event.ir, "primitive_payloads=native:typed-expression-tree"));
 		REQUIRE(StringUtil::Contains(event.ir, "sum_hugeint"));
 		REQUIRE(StringUtil::Contains(event.ir, "case<"));
@@ -358,7 +582,7 @@ TEST_CASE("JIT generic BIGINT sum uses hugeint local accumulation", "[api][jit]"
 	Connection con(db);
 	auto &manager = ExecutionRegionManager::Get(*con.context);
 
-	ConfigureSljit(con, "force", false, true, true, 10000);
+	ConfigureSljitForCompilation(con, false, true, true, 10000);
 	REQUIRE_NO_FAIL(con.Query("SET disabled_optimizers='statistics_propagation'"));
 	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_bigint_sum_hugeint_local AS "
 	                          "SELECT i, 9223372036854775807::BIGINT AS v FROM range(4096) tbl(i)"));
@@ -369,7 +593,7 @@ TEST_CASE("JIT generic BIGINT sum uses hugeint local accumulation", "[api][jit]"
 	REQUIRE(reference->GetValue(0, 0).ToString() == "37778931862957161705472");
 
 	ClearJitTrace(manager, true);
-	REQUIRE_NO_FAIL(con.Query("SET jit_policy='force'"));
+	REQUIRE_NO_FAIL(con.Query("SET jit_policy='auto'"));
 	auto result = con.Query("SELECT sum(CASE WHEN i >= 0 THEN v ELSE 0 END) AS s "
 	                        "FROM jit_bigint_sum_hugeint_local");
 	REQUIRE_NO_FAIL(*result);
@@ -379,11 +603,11 @@ TEST_CASE("JIT generic BIGINT sum uses hugeint local accumulation", "[api][jit]"
 	for (auto &event : manager.GetEvents()) {
 		if (!IsCompiledSljitRegionEvent(event) || !event.has_candidate ||
 		    event.candidate_traits.sink_kind != ExecutionRegionSinkKind::UNGROUPED_AGGREGATE_UPDATE ||
-		    !StringUtil::Contains(event.reason, "fused:primitive-aggregate-update=1")) {
+		    !StringUtil::Contains(event.ir, "primitive_payloads=native:typed-expression-tree")) {
 			continue;
 		}
 		found_compile = true;
-		RequireCompiledFusedRegion(event);
+		RequireGeneratedMachineCodeRegion(event);
 		REQUIRE(StringUtil::Contains(event.ir, "primitive_payloads=native:typed-expression-tree"));
 		REQUIRE(StringUtil::Contains(event.ir, "sum_hugeint"));
 		REQUIRE(StringUtil::Contains(event.ir, "case<"));
@@ -396,7 +620,7 @@ TEST_CASE("JIT preserves stats-proven non-overflowing decimal arithmetic in expr
 	Connection con(db);
 	auto &manager = ExecutionRegionManager::Get(*con.context);
 
-	ConfigureSljit(con, "force", false, true, true, 10000);
+	ConfigureSljitForCompilation(con, false, true, true, 10000);
 	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_decimal_safe_aggregate_payload AS "
 	                          "SELECT i, CAST(i % 1000 AS DECIMAL(15,2)) AS d "
 	                          "FROM range(10000) tbl(i)"));
@@ -415,11 +639,11 @@ TEST_CASE("JIT preserves stats-proven non-overflowing decimal arithmetic in expr
 	for (auto &event : manager.GetEvents()) {
 		if (!IsCompiledSljitRegionEvent(event) || !event.has_candidate ||
 		    event.candidate_traits.sink_kind != ExecutionRegionSinkKind::UNGROUPED_AGGREGATE_UPDATE ||
-		    !StringUtil::Contains(event.reason, "fused:primitive-aggregate-update=1")) {
+		    !StringUtil::Contains(event.ir, "primitive_payloads=native:expression-tree")) {
 			continue;
 		}
 		found_compile = true;
-		RequireCompiledFusedRegion(event);
+		RequireGeneratedMachineCodeRegion(event);
 		REQUIRE(StringUtil::Contains(event.ir, "primitive_payloads=native:expression-tree"));
 		REQUIRE(StringUtil::Contains(event.ir, "overflow_check=false"));
 		REQUIRE_FALSE(StringUtil::Contains(event.ir, "overflow_check=true"));
@@ -432,7 +656,7 @@ TEST_CASE("JIT perfect hash aggregate generates primitive decimal sum and count 
 	Connection con(db);
 	auto &manager = ExecutionRegionManager::Get(*con.context);
 
-	ConfigureSljit(con, "force", false, true, true, 10000);
+	ConfigureSljitForCompilation(con, false, true, true, 10000);
 	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_perfect_hash_count_star AS "
 	                          "SELECT (i % 4)::UTINYINT AS g1, (i % 3)::UTINYINT AS g2, "
 	                          "CAST(i % 100 AS DECIMAL(15,2)) AS v FROM range(100000) tbl(i)"));
@@ -443,7 +667,7 @@ TEST_CASE("JIT perfect hash aggregate generates primitive decimal sum and count 
 	REQUIRE_NO_FAIL(*reference);
 	REQUIRE(reference->RowCount() == 12);
 
-	REQUIRE_NO_FAIL(con.Query("SET jit_policy='force'"));
+	REQUIRE_NO_FAIL(con.Query("SET jit_policy='auto'"));
 	ClearJitTrace(manager, true);
 	auto result =
 	    con.Query("SELECT g1, g2, sum(v), count(*) FROM jit_perfect_hash_count_star GROUP BY g1, g2 ORDER BY g1, g2");
@@ -468,7 +692,7 @@ TEST_CASE("JIT perfect hash aggregate generates primitive decimal sum and count 
 			continue;
 		}
 		found_compiled_primitive_sink = true;
-		RequireCompiledGeneratedRegion(event);
+		RequireGeneratedMachineCodeRegion(event);
 		REQUIRE(event.candidate_contract.missing_contract_count == 0);
 		REQUIRE(StringUtil::Contains(event.reason, "native aggregate update sink contract"));
 		REQUIRE(StringUtil::Contains(event.ir, "aggregate_contract<"));
@@ -477,7 +701,6 @@ TEST_CASE("JIT perfect hash aggregate generates primitive decimal sum and count 
 		REQUIRE(StringUtil::Contains(event.ir, "primitive_update_kind=count_star"));
 		REQUIRE(StringUtil::Contains(event.ir, "native_aggregate_state_update_contract_status=ready"));
 		REQUIRE(StringUtil::Contains(event.reason, "aggregate_state_update_contract_status=ready"));
-		REQUIRE(StringUtil::Contains(event.reason, "fused:primitive-aggregate-update"));
 		REQUIRE(StringUtil::Contains(event.ir, "payload_update=generated-primitive"));
 		REQUIRE(StringUtil::Contains(event.ir, "primitive_payloads=native:"));
 		REQUIRE(StringUtil::Contains(event.ir, "grouped_state_lookup=generated-perfect-hash"));
@@ -488,8 +711,11 @@ TEST_CASE("JIT perfect hash aggregate generates primitive decimal sum and count 
 
 	bool found_runtime = false;
 	for (auto &event : manager.GetEvents()) {
-		if (EventPhase(event) != "runtime" || event.backend_name != "sljit" || EventTarget(event) != "region" ||
-		    !StringUtil::Contains(event.kernel_compile_reason, "fused:primitive-aggregate-update=1")) {
+		if (EventPhase(event) != "runtime" || event.backend_name != "sljit") {
+			continue;
+		}
+		if (!StringUtil::Contains(EventGeneratedStageCountBreakdown(event),
+		                          "aggregate_update.primitive_payload_update_fused=")) {
 			continue;
 		}
 		found_runtime = true;
@@ -498,7 +724,8 @@ TEST_CASE("JIT perfect hash aggregate generates primitive decimal sum and count 
 		                             "aggregate_update.primitive_payload_update_fused="));
 		REQUIRE_FALSE(StringUtil::Contains(EventGeneratedStageCountBreakdown(event),
 		                                   "aggregate_update.resolve_grouped_state_addresses="));
-		REQUIRE_FALSE(StringUtil::Contains(EventGeneratedStageRuntimeBreakdown(event), "resolve_grouped_state_addresses"));
+		REQUIRE_FALSE(
+		    StringUtil::Contains(EventGeneratedStageRuntimeBreakdown(event), "resolve_grouped_state_addresses"));
 	}
 	REQUIRE(found_runtime);
 }
@@ -508,7 +735,7 @@ TEST_CASE("JIT hash aggregate cast-only keys require generated lookup ownership"
 	Connection con(db);
 	auto &manager = ExecutionRegionManager::Get(*con.context);
 
-	ConfigureSljit(con, "force", false, true, true, 10000);
+	ConfigureSljitForCompilation(con, false, true, true, 10000);
 	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_hash_aggregate_cast_projection AS "
 	                          "SELECT i::BIGINT AS k, CAST(i % 100 AS DECIMAL(15,2)) AS v "
 	                          "FROM range(100000) tbl(i)"));
@@ -529,14 +756,13 @@ TEST_CASE("JIT hash aggregate cast-only keys require generated lookup ownership"
 		if (event.candidate_traits.sink_kind != ExecutionRegionSinkKind::HASH_AGGREGATE_UPDATE) {
 			continue;
 		}
-		if (!StringUtil::Contains(event.reason, "vectorized projection operator contract")) {
+		if (!StringUtil::Contains(event.reason, "hash aggregate update requires generated hash lookup ownership")) {
 			continue;
 		}
 		found_hash_lookup_boundary = true;
 		REQUIRE(EventStatus(event) == "unsupported");
 		REQUIRE(EventExecutionMode(event) == "unsupported");
 		REQUIRE(event.code_size == 0);
-		REQUIRE(StringUtil::Contains(event.reason, "hash aggregate update requires generated hash lookup ownership"));
 		REQUIRE(StringUtil::Contains(event.reason, "native_hash_aggregate_lookup_blocker="
 		                                           "hash-aggregate-generated-lookup-backend-lowering-missing"));
 		REQUIRE(StringUtil::Contains(event.ir, "native_hash_aggregate_lookup_contract_status=blocked"));
@@ -549,7 +775,6 @@ TEST_CASE("JIT hash aggregate cast-only keys require generated lookup ownership"
 		REQUIRE_FALSE(StringUtil::Contains(event.reason, "hash_aggregate_lookup=vectorized-address-contract"));
 		REQUIRE_FALSE(StringUtil::Contains(event.ir, "payload_update=generated-primitive"));
 		REQUIRE_FALSE(StringUtil::Contains(event.ir, "grouped_state_lookup=vectorized-address-contract"));
-		REQUIRE_FALSE(StringUtil::Contains(event.reason, "generated typed projection"));
 	}
 	REQUIRE(found_hash_lookup_boundary);
 
@@ -585,7 +810,7 @@ TEST_CASE("JIT auto skips grouped hash aggregate updates without native lookup o
 
 	bool found_auto_hash_aggregate_decision = false;
 	for (auto &event : manager.GetEvents()) {
-		if (!IsSljitRegionEvent(event) || EventRequestedPolicy(event) != "auto") {
+		if (!IsSljitRegionEvent(event)) {
 			continue;
 		}
 		if (!(StringUtil::Contains(event.ir, "hash-aggregate-update") ||
@@ -632,7 +857,6 @@ TEST_CASE("JIT auto skips grouped hash aggregate address-only updates", "[api][j
 			continue;
 		}
 		found_hash_aggregate_decision = true;
-		REQUIRE(EventRequestedPolicy(event) == "auto");
 		REQUIRE(event.selected_runner == ExecutionRunnerKind::VECTORIZED);
 	}
 	REQUIRE(found_hash_aggregate_decision);
@@ -655,7 +879,7 @@ TEST_CASE("JIT auto planner cost does not treat filtered hash aggregates as pure
 	REQUIRE(result->GetValue(0, 0).ToString() == "1000000");
 
 	for (auto &event : manager.GetEvents()) {
-		if (!IsCompiledSljitRegionEvent(event) || !event.has_candidate || EventRequestedPolicy(event) != "auto" ||
+		if (!IsCompiledSljitRegionEvent(event) || !event.has_candidate ||
 		    event.candidate_traits.sink_kind != ExecutionRegionSinkKind::HASH_AGGREGATE_UPDATE) {
 			continue;
 		}

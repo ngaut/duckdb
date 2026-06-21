@@ -1127,11 +1127,11 @@ void JitBackendSetting::OnSet(SettingCallbackInfo &info, Value &input) {
 //===----------------------------------------------------------------------===//
 void JitPolicySetting::OnSet(SettingCallbackInfo &info, Value &input) {
 	auto policy = StringUtil::Lower(input.ToString());
-	if (policy == "auto" || policy == "force" || policy == "off") {
+	if (policy == "auto" || policy == "off") {
 		input = Value(policy);
 		return;
 	}
-	throw InvalidInputException("Execution region policy must be one of auto, force, or off");
+	throw InvalidInputException("Execution region policy must be one of auto or off");
 }
 
 //===----------------------------------------------------------------------===//

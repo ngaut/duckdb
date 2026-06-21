@@ -95,9 +95,6 @@ public:
 
 	virtual void Verify();
 	virtual ExecutionRegionOperatorKind GetExecutionRegionOperatorKind() const;
-	virtual void GetExecutionRegionPreGraphSourceInfo(idx_t &estimated_source_cardinality,
-	                                                  idx_t &source_filter_count) const;
-	virtual void GetExecutionRegionPreGraphTransformInfo(ExecutionTransformContract &transform) const;
 	virtual ExecutionContract GetExecutionContract() const;
 
 public:
@@ -142,8 +139,8 @@ public:
 	virtual unique_ptr<LocalSourceState> GetLocalSourceState(ExecutionContext &context,
 	                                                         GlobalSourceState &gstate) const;
 	virtual unique_ptr<GlobalSourceState> GetGlobalSourceState(ClientContext &context) const;
-	virtual unique_ptr<GlobalSourceState>
-	GetGlobalSourceState(ClientContext &context, const ExecutionRegionOpenRequest &open_request) const;
+	virtual unique_ptr<GlobalSourceState> GetGlobalSourceState(ClientContext &context,
+	                                                           const ExecutionRegionOpenRequest &open_request) const;
 	virtual bool SupportsExecutionSourceContract(const ExecutionRegionOpenRequest &open_request) const;
 
 protected:

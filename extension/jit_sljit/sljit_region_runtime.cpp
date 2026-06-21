@@ -132,7 +132,7 @@ static SljitNativeIntegerKind SljitTypedExpressionTreeIntegerKind(const LogicalT
 	if (type.id() != LogicalTypeId::DECIMAL && type.InternalType() == PhysicalType::INT32) {
 		return SljitNativeIntegerKind::INT32;
 	}
-	if (type.id() != LogicalTypeId::DECIMAL && type.InternalType() == PhysicalType::INT64) {
+	if (type.InternalType() == PhysicalType::INT64) {
 		return SljitNativeIntegerKind::INT64;
 	}
 	throw InternalException("Unsupported SLJIT typed expression-tree physical type");
@@ -155,14 +155,6 @@ static SljitNativeIntegerKind SljitPerfectHashGroupIntegerKind(const LogicalType
 
 static std::chrono::steady_clock::time_point SljitRegionStageStart(ExecutionRegionRuntime &runtime) {
 	return runtime.TraceRuntime() ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point();
-}
-
-static void RecordSljitRegionStageRuntime(ExecutionRegionRuntime &runtime, const string &stage,
-                                          std::chrono::steady_clock::time_point start) {
-	if (!runtime.TraceRuntime()) {
-		return;
-	}
-	runtime.RecordGeneratedStageRuntime(stage, SljitRegionElapsedMicros(start));
 }
 
 static void RecordSljitRegionStageRuntime(ExecutionRegionRuntime &runtime, idx_t op_idx, SljitNativeRegionOpKind kind,
@@ -228,7 +220,6 @@ private:
 		idx_t input_offset = 0;
 		data_ptr_t resume_row_pointer = nullptr;
 		vector<uint8_t> found_match;
-		unique_ptr<ExecutionHashJoinProbeState> vectorized_probe_state;
 		bool left_initialized = false;
 		bool left_unmatched_emitted = false;
 		bool finished = false;
@@ -254,9 +245,25 @@ private:
 			source_validity.assign(payload_count, nullptr);
 			right_source_validity.assign(payload_count, nullptr);
 			aggregate_int64_values.assign(payload_count, nullptr);
+			aggregate_hugeint_values.assign(payload_count, nullptr);
 			aggregate_state_is_sets.assign(payload_count, nullptr);
 			aggregate_row_counts.assign(payload_count, nullptr);
 			constants.assign(payload_count, 0);
+		}
+
+		void PrepareExpressionSources(idx_t source_count) {
+			source_formats.resize(source_count);
+			source_data.assign(source_count, nullptr);
+			source_sel.assign(source_count, nullptr);
+			source_validity.assign(source_count, nullptr);
+		}
+
+		void PrepareFiltered(idx_t source_count, idx_t payload_count) {
+			PrepareExpressionSources(source_count);
+			aggregate_int64_values.assign(payload_count, nullptr);
+			aggregate_hugeint_values.assign(payload_count, nullptr);
+			aggregate_state_is_sets.assign(payload_count, nullptr);
+			aggregate_row_counts.assign(payload_count, nullptr);
 		}
 
 		void PrepareGrouped(idx_t payload_count) {
@@ -287,6 +294,7 @@ private:
 		vector<const validity_t *> right_source_validity;
 		vector<const validity_t *> group_validity;
 		vector<int64_t *> aggregate_int64_values;
+		vector<hugeint_t *> aggregate_hugeint_values;
 		vector<bool *> aggregate_state_is_sets;
 		vector<idx_t *> aggregate_row_counts;
 		vector<int64_t> constants;
@@ -365,7 +373,6 @@ private:
 			nested_loop_condition_chunks.resize(ops.size());
 			order_key_chunks.resize(ops.size());
 			order_payload_chunks.resize(ops.size());
-			projection_selected_chunks.resize(ops.size());
 			aggregate_state_addresses.resize(ops.size());
 			aggregate_payload_scratch.resize(ops.size());
 			aggregate_payload_lanes.resize(ops.size());
@@ -439,20 +446,6 @@ private:
 				throw InternalException("SLJIT full pipeline transform has no stage scratch chunk");
 			}
 			return *temporary_chunks[op_idx];
-		}
-
-		// Reused per-execution scratch chunk that holds the filter-selected projection input, so the
-		// vectorized projection path does not allocate and initialize a fresh DataChunk on every chunk.
-		DataChunk &ProjectionSelectedChunk(idx_t op_idx, Allocator &allocator, const vector<LogicalType> &types) {
-			if (op_idx >= projection_selected_chunks.size()) {
-				throw InternalException("SLJIT projection has no selected-input scratch slot");
-			}
-			if (!projection_selected_chunks[op_idx]) {
-				auto chunk = make_uniq<DataChunk>();
-				chunk->Initialize(allocator, types);
-				projection_selected_chunks[op_idx] = std::move(chunk);
-			}
-			return *projection_selected_chunks[op_idx];
 		}
 
 		Vector &AggregateStateAddresses(idx_t op_idx) {
@@ -695,7 +688,6 @@ private:
 		vector<unique_ptr<DataChunk>> nested_loop_condition_chunks;
 		vector<unique_ptr<DataChunk>> order_key_chunks;
 		vector<unique_ptr<DataChunk>> order_payload_chunks;
-		vector<unique_ptr<DataChunk>> projection_selected_chunks;
 		vector<unique_ptr<Vector>> aggregate_state_addresses;
 		vector<SljitAggregatePayloadAdapterScratch> aggregate_payload_scratch;
 		vector<vector<const ExecutionPrimitiveAggregateUpdateLane *>> aggregate_payload_lanes;
@@ -902,11 +894,32 @@ public:
 				auto sink_result = ExecuteNativeAggregateUpdate(runtime, native_runtime, scratch, op_idx, op, *current);
 				return native_runtime.RecordSinkResult(*current, sink_result);
 			}
+			if (CanExecuteGeneratedFilterAggregateUpdate(op_idx)) {
+				auto &aggregate_op = ops[op_idx + 1];
+				auto sink_result = ExecuteNativeFilteredAggregateUpdate(runtime, native_runtime, scratch, op_idx + 1,
+				                                                        aggregate_op, *current);
+				return native_runtime.RecordSinkResult(*current, sink_result);
+			}
+			if (CanExecuteFilterAggregateUpdate(op_idx)) {
+				auto &aggregate_op = ops[op_idx + 1];
+				auto &filter_selection = scratch.FilterSelection(op_idx);
+				auto filter_stage_start = SljitRegionStageStart(runtime);
+				auto selected_count =
+				    SelectFilter(op, *current, filter_selection, scratch.ExpressionAdapterScratch(op_idx, 0));
+				RecordSljitRegionStageRuntime(runtime, op_idx, op.kind, "selection", filter_stage_start);
+				if (selected_count == 0) {
+					return SinkResultType::NEED_MORE_INPUT;
+				}
+				auto sink_result =
+				    ExecuteNativeAggregateUpdate(runtime, native_runtime, scratch, op_idx + 1, aggregate_op, *current,
+				                                 &filter_selection, selected_count);
+				return native_runtime.RecordSinkResult(*current, sink_result);
+			}
 			if (CanExecuteFilterProjection(op_idx)) {
 				auto &output = scratch.TemporaryChunk(op_idx + 1);
 				output.Reset();
 				auto stage_start = SljitRegionStageStart(runtime);
-				ExecuteFilterProjection(runtime, scratch, op, ops[op_idx + 1], op_idx + 1, *current, output,
+				ExecuteFilterProjection(scratch, op, ops[op_idx + 1], op_idx + 1, *current, output,
 				                        scratch.FilterSelection(op_idx));
 				RecordSljitRegionStageRuntimeWithSuffix(runtime, op_idx, op.kind, "+projection", stage_start);
 				current = &output;
@@ -928,7 +941,7 @@ public:
 			}
 			case SljitNativeRegionOpKind::PROJECTION: {
 				auto stage_start = SljitRegionStageStart(runtime);
-				ExecuteProjection(runtime, scratch, op_idx, op, *current, output);
+				ExecuteProjection(scratch, op_idx, op, *current, output);
 				RecordSljitRegionStageRuntime(runtime, op_idx, op.kind, stage_start);
 				break;
 			}
@@ -1069,6 +1082,22 @@ public:
 		       ops[op_idx + 1].kind == SljitNativeRegionOpKind::PROJECTION;
 	}
 
+	bool CanExecuteFilterAggregateUpdate(idx_t op_idx) const {
+		if (op_idx + 2 != ops.size()) {
+			return false;
+		}
+		return ops[op_idx].kind == SljitNativeRegionOpKind::FILTER &&
+		       ops[op_idx + 1].kind == SljitNativeRegionOpKind::AGGREGATE_UPDATE &&
+		       ops[op_idx + 1].aggregate_update.plan.sink_info.kind ==
+		           ExecutionRegionSinkKind::UNGROUPED_AGGREGATE_UPDATE &&
+		       ops[op_idx + 1].aggregate_update.plan.use_primitive_payloads;
+	}
+
+	bool CanExecuteGeneratedFilterAggregateUpdate(idx_t op_idx) const {
+		return CanExecuteFilterAggregateUpdate(op_idx) &&
+		       ops[op_idx + 1].aggregate_update.filtered_update.IsExecutable();
+	}
+
 	idx_t SelectFilter(SljitExecutableRegionOp &op, DataChunk &input, SelectionVector &filter_selection,
 	                   SljitExpressionAdapterScratch &adapter_scratch) {
 		auto &filter = op.filter.plan;
@@ -1088,6 +1117,24 @@ public:
 			native_input.selected_count = 0;
 			native_input.count = input.size();
 			op.filter.predicate_select_function(&native_input);
+			if (native_input.error) {
+				std::rethrow_exception(native_input.error);
+			}
+			return native_input.selected_count;
+		}
+		if (filter.kind == SljitNativeRegionExpressionKind::TYPED_EXPRESSION_TREE) {
+			if (!op.filter.select_function) {
+				throw InternalException("SLJIT typed filter expression has no generated selector");
+			}
+			SljitNativeVectorInput native_input;
+			adapter_scratch.PrepareExpressionTree(input, op.filter, native_input, nullptr);
+			native_input.execute_sel = nullptr;
+			native_input.true_sel = filter_selection.data();
+			native_input.false_sel = nullptr;
+			native_input.selected_count = 0;
+			native_input.overflow_message = op.filter.overflow_message.c_str();
+			native_input.count = input.size();
+			op.filter.select_function(&native_input);
 			if (native_input.error) {
 				std::rethrow_exception(native_input.error);
 			}
@@ -1150,31 +1197,9 @@ public:
 		}
 	}
 
-	ExecutionOperatorBinding &BindProjectionOperator(ExecutionRegionRuntime &runtime,
-	                                                 SljitRegionExecutionScratch &scratch, idx_t op_idx,
-	                                                 SljitExecutableRegionOp &op, DataChunk &input) {
-		auto &binding = scratch.OperatorBinding(op_idx);
-		if (scratch.HasOperatorBinding(op_idx)) {
-			return binding;
-		}
-		if (op.operator_index == DConstants::INVALID_INDEX) {
-			throw InternalException("SLJIT vectorized projection contract is missing an operator index");
-		}
-		ExecutionRegionOperatorInfo operator_info;
-		operator_info.kind = ExecutionRegionOperatorContractKind::PROJECTION;
-		auto bind_result = runtime.ExecutionOperators().BindOperator(op.operator_index, input, operator_info, binding);
-		if (bind_result != ExecutionOperatorBindResult::READY || !binding.ready || !binding.projection.ready) {
-			auto blocker = binding.blocker.empty() ? "projection-runtime-binding-failed" : binding.blocker;
-			throw InternalException("SLJIT projection operator binding failed: %s", blocker.c_str());
-		}
-		scratch.MarkOperatorBindingReady(op_idx);
-		return binding;
-	}
-
-	void ExecuteFilterProjection(ExecutionRegionRuntime &runtime, SljitRegionExecutionScratch &scratch,
-	                             SljitExecutableRegionOp &filter_op, SljitExecutableRegionOp &projection_op,
-	                             idx_t projection_op_idx, DataChunk &input, DataChunk &output,
-	                             SelectionVector &filter_selection) {
+	void ExecuteFilterProjection(SljitRegionExecutionScratch &scratch, SljitExecutableRegionOp &filter_op,
+	                             SljitExecutableRegionOp &projection_op, idx_t projection_op_idx, DataChunk &input,
+	                             DataChunk &output, SelectionVector &filter_selection) {
 		auto &filter_scratch = scratch.ExpressionAdapterScratch(projection_op_idx - 1, 0);
 		auto selected_count = SelectFilter(filter_op, input, filter_selection, filter_scratch);
 		if (selected_count == 0) {
@@ -1182,28 +1207,14 @@ public:
 			return;
 		}
 		auto *execute_sel = selected_count == input.size() ? nullptr : &filter_selection;
-		ExecuteProjection(runtime, scratch, projection_op_idx, projection_op, input, output, execute_sel,
-		                  selected_count);
+		ExecuteProjection(scratch, projection_op_idx, projection_op, input, output, execute_sel, selected_count);
 	}
 
-	void ExecuteProjection(ExecutionRegionRuntime &runtime, SljitRegionExecutionScratch &scratch, idx_t op_idx,
-	                       SljitExecutableRegionOp &op, DataChunk &input, DataChunk &output,
-	                       const SelectionVector *execute_sel = nullptr, idx_t count = DConstants::INVALID_INDEX) {
+	void ExecuteProjection(SljitRegionExecutionScratch &scratch, idx_t op_idx, SljitExecutableRegionOp &op,
+	                       DataChunk &input, DataChunk &output, const SelectionVector *execute_sel = nullptr,
+	                       idx_t count = DConstants::INVALID_INDEX) {
 		if (count == DConstants::INVALID_INDEX) {
 			count = input.size();
-		}
-		if (op.use_vectorized_projection) {
-			auto &binding = BindProjectionOperator(runtime, scratch, op_idx, op, input);
-			if (execute_sel) {
-				auto &selected_input =
-				    scratch.ProjectionSelectedChunk(op_idx, runtime.GetAllocator(), input.GetTypes());
-				selected_input.Reset();
-				selected_input.Slice(input, *execute_sel, count);
-				ExecutionOperatorProject(binding.projection, selected_input, output);
-			} else {
-				ExecutionOperatorProject(binding.projection, input, output);
-			}
-			return;
 		}
 		for (idx_t col_idx = 0; col_idx < op.projections.size(); col_idx++) {
 			ExecuteProjectionExpression(op.projections[col_idx], input, output.data[col_idx], execute_sel, count,
@@ -1617,10 +1628,9 @@ public:
 				throw InternalException("SLJIT aggregate primitive reference source is out of range");
 			}
 			input.data[plan.source_index].ToUnifiedFormat(source_format);
-			native_input.source_data =
-			    plan.return_type.InternalType() == PhysicalType::DOUBLE
-			        ? source_format.data
-			        : NativeIntegerSourceData(source_format, plan.integer_kind);
+			native_input.source_data = plan.return_type.InternalType() == PhysicalType::DOUBLE
+			                               ? source_format.data
+			                               : NativeIntegerSourceData(source_format, plan.integer_kind);
 			native_input.source_sel = SljitNormalizedSourceSelectionData(source_format);
 			native_input.source_validity = source_format.validity.GetData();
 			break;
@@ -2241,18 +2251,7 @@ public:
 			return ExecutionOperatorBindResult::READY;
 		}
 		if (!op.hash_join_probe.function) {
-			if (!state.vectorized_probe_state) {
-				state.vectorized_probe_state = ExecutionCreateHashJoinProbeState(probe, runtime.GetAllocator());
-			}
-			auto stage_start = SljitRegionStageStart(runtime);
-			SljitRegionStageRecorder recorder(runtime, op_idx, op.kind, "vectorized_probe_primitive");
-			auto result = ExecutionProbeHashJoin(probe, *state.vectorized_probe_state, input, output, &recorder);
-			RecordSljitRegionStageRuntime(runtime, op_idx, op.kind, "vectorized_probe_primitive", stage_start);
-			if (result == OperatorResultType::NEED_MORE_INPUT || result == OperatorResultType::FINISHED) {
-				state.finished = true;
-				state.left_unmatched_emitted = true;
-			}
-			return ExecutionOperatorBindResult::READY;
+			throw InternalException("SLJIT native hash join probe reached runtime without generated probe code");
 		}
 		auto &layout = probe.table_layout;
 		if (!layout.ready || !layout.entries || layout.layout_offsets.empty()) {
@@ -2618,10 +2617,147 @@ public:
 		return ExecutionSinkDelimJoin(binding.delim_join_sink, input);
 	}
 
+	void ExecuteFilteredPrimitiveAggregateUpdate(SljitExecutableFilteredAggregateUpdate &filtered_update,
+	                                             const vector<ExecutionRegionAggregateInput> &aggregates,
+	                                             const vector<const ExecutionPrimitiveAggregateUpdateLane *> &lanes,
+	                                             DataChunk &input, idx_t count,
+	                                             SljitAggregatePayloadAdapterScratch &adapter_scratch) {
+		if (!filtered_update.function) {
+			throw InternalException("SLJIT filtered aggregate primitive payload update is missing generated code");
+		}
+		if (aggregates.size() != filtered_update.payloads.size() || aggregates.size() != lanes.size()) {
+			throw InternalException("SLJIT filtered aggregate primitive payload count mismatch");
+		}
+
+		adapter_scratch.PrepareFiltered(filtered_update.input_source_indices.size(), aggregates.size());
+		auto &aggregate_int64_values = adapter_scratch.aggregate_int64_values;
+		auto &aggregate_hugeint_values = adapter_scratch.aggregate_hugeint_values;
+		auto &aggregate_state_is_sets = adapter_scratch.aggregate_state_is_sets;
+		auto &aggregate_row_counts = adapter_scratch.aggregate_row_counts;
+		for (idx_t payload_idx = 0; payload_idx < aggregates.size(); payload_idx++) {
+			auto lane = lanes[payload_idx];
+			if (!lane) {
+				throw InternalException("SLJIT filtered aggregate primitive lane is missing");
+			}
+			auto &aggregate = aggregates[payload_idx];
+			if (lane->kind != aggregate.primitive_update_kind) {
+				throw InternalException("SLJIT filtered aggregate primitive lane kind mismatch");
+			}
+			if (lane->kind == AggregatePrimitiveUpdateKind::COUNT_STAR) {
+				if (!lane->ready || !lane->sum_int64_value || !lane->row_count) {
+					auto blocker = lane->blocker.empty() ? "aggregate-count-star-lane-incomplete" : lane->blocker;
+					throw InternalException("SLJIT filtered aggregate count-star lane is incomplete: %s",
+					                        blocker.c_str());
+				}
+				aggregate_int64_values[payload_idx] = lane->sum_int64_value;
+				aggregate_row_counts[payload_idx] = lane->row_count;
+				continue;
+			}
+			if (lane->kind != AggregatePrimitiveUpdateKind::SUM_INT64 &&
+			    lane->kind != AggregatePrimitiveUpdateKind::SUM_HUGEINT) {
+				throw InternalException("SLJIT filtered aggregate primitive lane has unsupported state kind");
+			}
+			if (filtered_update.payloads[payload_idx].plan.return_type.InternalType() != lane->payload_type) {
+				throw InternalException("SLJIT filtered aggregate primitive payload type mismatch");
+			}
+			auto has_sum_state = (lane->kind == AggregatePrimitiveUpdateKind::SUM_INT64 && lane->sum_int64_value) ||
+			                     (lane->kind == AggregatePrimitiveUpdateKind::SUM_HUGEINT && lane->sum_hugeint_value);
+			if (!lane->ready || !has_sum_state || !lane->state_is_set || !lane->row_count) {
+				auto blocker = lane->blocker.empty() ? "aggregate-primitive-lane-incomplete" : lane->blocker;
+				throw InternalException("SLJIT filtered aggregate primitive lane is incomplete: %s", blocker.c_str());
+			}
+			if (lane->kind == AggregatePrimitiveUpdateKind::SUM_INT64) {
+				aggregate_int64_values[payload_idx] = lane->sum_int64_value;
+			} else {
+				aggregate_hugeint_values[payload_idx] = lane->sum_hugeint_value;
+			}
+			aggregate_state_is_sets[payload_idx] = lane->state_is_set;
+			aggregate_row_counts[payload_idx] = lane->row_count;
+		}
+
+		auto &source_formats = adapter_scratch.source_formats;
+		auto &source_data = adapter_scratch.source_data;
+		auto &source_sel = adapter_scratch.source_sel;
+		auto &source_validity = adapter_scratch.source_validity;
+		bool flat_no_selection = true;
+		bool flat_all_valid = true;
+		for (idx_t source_idx = 0; source_idx < filtered_update.input_source_indices.size(); source_idx++) {
+			auto input_index = filtered_update.input_source_indices[source_idx];
+			if (input_index >= input.ColumnCount()) {
+				throw InternalException("SLJIT filtered aggregate expression-tree source is out of range");
+			}
+			input.data[input_index].ToUnifiedFormat(source_formats[source_idx]);
+			auto source_kind = SljitTypedExpressionTreeIntegerKind(input.data[input_index].GetType());
+			source_data[source_idx] = NativeIntegerSourceData(source_formats[source_idx], source_kind);
+			source_sel[source_idx] = SljitNormalizedSourceSelectionData(source_formats[source_idx]);
+			source_validity[source_idx] = source_formats[source_idx].validity.GetData();
+			flat_no_selection = flat_no_selection && source_sel[source_idx] == nullptr;
+			flat_all_valid =
+			    flat_all_valid && source_sel[source_idx] == nullptr && source_validity[source_idx] == nullptr;
+		}
+
+		SljitNativeVectorInput native_input;
+		native_input.source_data_array = source_data.data();
+		native_input.source_sel_array = source_sel.data();
+		native_input.source_validity_array = source_validity.data();
+		native_input.expression_tree_flat_no_selection = flat_no_selection;
+		native_input.expression_tree_flat_all_valid = flat_all_valid;
+		native_input.aggregate_int64_values = aggregate_int64_values.data();
+		native_input.aggregate_hugeint_values = aggregate_hugeint_values.data();
+		native_input.aggregate_state_is_sets = aggregate_state_is_sets.data();
+		native_input.aggregate_row_counts = aggregate_row_counts.data();
+		native_input.count = count;
+		native_input.has_error = false;
+		filtered_update.function(&native_input);
+		if (native_input.error) {
+			std::rethrow_exception(native_input.error);
+		}
+	}
+
+	SinkResultType ExecuteNativeFilteredAggregateUpdate(ExecutionRegionRuntime &runtime,
+	                                                    ExecutionOperatorRuntime &native_runtime,
+	                                                    SljitRegionExecutionScratch &scratch, idx_t op_idx,
+	                                                    SljitExecutableRegionOp &op, DataChunk &input) {
+		auto bind_stage_start = SljitRegionStageStart(runtime);
+		bool bound = false;
+		auto &binding = BindNativeSink(native_runtime, scratch, op_idx, input, op.aggregate_update.plan.sink_info,
+		                               "aggregate-update-runtime-binding-failed", "SLJIT aggregate update sink", bound);
+		if (bound) {
+			RecordSljitRegionStageRuntime(runtime, op_idx, op.kind, "bind_sink_contract", bind_stage_start);
+		}
+		if (!binding.ready || !binding.aggregate_update.ready) {
+			throw InternalException("SLJIT aggregate update sink binding did not return a ready aggregate state");
+		}
+		auto &primitive = binding.aggregate_update.primitive;
+		if (!primitive.ready) {
+			auto blocker = primitive.blocker.empty() ? "aggregate-primitive-binding-missing" : primitive.blocker;
+			throw InternalException("SLJIT aggregate primitive update binding failed: %s", blocker.c_str());
+		}
+		auto &aggregates = op.aggregate_update.plan.sink_info.aggregates;
+		if (aggregates.empty() || aggregates.size() != op.aggregate_update.payloads.size()) {
+			throw InternalException("SLJIT filtered aggregate update requires matching primitive aggregate lanes");
+		}
+		auto &payload_lanes = scratch.AggregatePayloadLanes(op_idx, aggregates, primitive);
+		if (payload_lanes.size() != aggregates.size()) {
+			throw InternalException("SLJIT filtered aggregate primitive lane count mismatch");
+		}
+
+		auto aggregate_stage_start = SljitRegionStageStart(runtime);
+		ExecuteFilteredPrimitiveAggregateUpdate(op.aggregate_update.filtered_update, aggregates, payload_lanes, input,
+		                                        input.size(), scratch.AggregatePayloadScratch(op_idx));
+		RecordSljitRegionStageRuntime(runtime, op_idx, op.kind, "filtered_primitive_update", aggregate_stage_start);
+		return SinkResultType::NEED_MORE_INPUT;
+	}
+
 	SinkResultType ExecuteNativeAggregateUpdate(ExecutionRegionRuntime &runtime,
 	                                            ExecutionOperatorRuntime &native_runtime,
 	                                            SljitRegionExecutionScratch &scratch, idx_t op_idx,
-	                                            SljitExecutableRegionOp &op, DataChunk &input) {
+	                                            SljitExecutableRegionOp &op, DataChunk &input,
+	                                            const SelectionVector *execute_sel = nullptr,
+	                                            idx_t count = DConstants::INVALID_INDEX) {
+		if (count == DConstants::INVALID_INDEX) {
+			count = input.size();
+		}
 		auto bind_stage_start = SljitRegionStageStart(runtime);
 		bool bound = false;
 		auto &binding = BindNativeSink(native_runtime, scratch, op_idx, input, op.aggregate_update.plan.sink_info,
@@ -2693,7 +2829,7 @@ public:
 				} else {
 					ExecuteFusedPrimitiveAggregatePayloadUpdate(
 					    op.aggregate_update.payloads, op.aggregate_update.fused_payload_update_function, aggregates,
-					    payload_lanes, input, nullptr, input.size(), payload_scratch);
+					    payload_lanes, input, execute_sel, count, payload_scratch);
 				}
 				RecordSljitRegionStageRuntime(runtime, op_idx, op.kind, "primitive_payload_update_fused",
 				                              payload_stage_start);
@@ -2708,7 +2844,7 @@ public:
 					auto payload_stage_start = SljitRegionStageStart(runtime);
 					ExecutePrimitiveAggregatePayloadUpdate(
 					    op.aggregate_update.payloads[payload_idx],
-					    op.aggregate_update.payload_update_functions[payload_idx], *lane, input, nullptr, input.size(),
+					    op.aggregate_update.payload_update_functions[payload_idx], *lane, input, execute_sel, count,
 					    scratch.ExpressionAdapterScratch(op_idx, payload_idx), grouped_state_addresses);
 					RecordSljitRegionStageRuntime(runtime, op_idx, op.kind, "primitive_payload_update",
 					                              payload_stage_start);
@@ -2723,10 +2859,7 @@ public:
 			}
 			return SinkResultType::NEED_MORE_INPUT;
 		}
-		auto vectorized_stage_start = SljitRegionStageStart(runtime);
-		auto sink_result = ExecutionSinkAggregateUpdate(binding.aggregate_update, input);
-		RecordSljitRegionStageRuntime(runtime, op_idx, op.kind, "vectorized_sink_update", vectorized_stage_start);
-		return sink_result;
+		throw InternalException("SLJIT aggregate update reached runtime without generated primitive payload code");
 	}
 
 	SinkResultType ExecuteNativeOrderSink(ExecutionRegionRuntime &runtime, ExecutionOperatorRuntime &native_runtime,

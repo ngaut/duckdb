@@ -38,19 +38,17 @@ struct ExecutionRegionCompilationInput {
 	const ExecutionRegionLoweringPlan *lowering_plan = nullptr;
 };
 
-struct ExecutionRegionCompileResult {
-	static ExecutionRegionCompileResult
-	Compiled(unique_ptr<ExecutionRegionKernel> kernel, ExecutionRegionExecutionMode execution_mode,
-	         string reason = string(), string ir = string(),
-	         ExecutionRegionExecutionBody execution_body = ExecutionRegionExecutionBody::NONE);
+	struct ExecutionRegionCompileResult {
+		static ExecutionRegionCompileResult
+		Compiled(unique_ptr<ExecutionRegionKernel> kernel, ExecutionRegionExecutionMode execution_mode,
+		         string reason = string(), string ir = string());
 	static ExecutionRegionCompileResult Unsupported(string reason);
 	static ExecutionRegionCompileResult Unavailable(string reason);
 	static ExecutionRegionCompileResult Error(string reason);
 
-	ExecutionRegionCompileStatus status = ExecutionRegionCompileStatus::UNSUPPORTED;
-	ExecutionRegionExecutionMode execution_mode = ExecutionRegionExecutionMode::UNSUPPORTED;
-	ExecutionRegionExecutionBody execution_body = ExecutionRegionExecutionBody::NONE;
-	string reason;
+		ExecutionRegionCompileStatus status = ExecutionRegionCompileStatus::UNSUPPORTED;
+		ExecutionRegionExecutionMode execution_mode = ExecutionRegionExecutionMode::UNSUPPORTED;
+		string reason;
 	string ir;
 	unique_ptr<ExecutionRegionKernel> kernel;
 };

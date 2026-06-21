@@ -21,9 +21,9 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitHashJoinProbe(const vector<Sljit
                                                               ExecutionHashJoinProbeOutputMode output_mode,
                                                               SljitNativeHashJoinProbeFunction &function,
                                                               string &error);
-unique_ptr<ExecutionRegionCodeHandle>
-BuildSljitNestedLoopJoinProbe(const SljitNativeNestedLoopJoinProbePlan &plan,
-                              SljitNativeNestedLoopJoinProbeFunction &function, string &error);
+unique_ptr<ExecutionRegionCodeHandle> BuildSljitNestedLoopJoinProbe(const SljitNativeNestedLoopJoinProbePlan &plan,
+                                                                    SljitNativeNestedLoopJoinProbeFunction &function,
+                                                                    string &error);
 unique_ptr<ExecutionRegionCodeHandle> BuildSljitPerfectHashJoinProbe(const SljitNativeHashJoinProbeKeyPlan &key,
                                                                      ExecutionHashJoinProbeOutputMode output_mode,
                                                                      SljitNativeHashJoinProbeFunction &function,

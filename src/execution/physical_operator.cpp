@@ -171,8 +171,7 @@ unique_ptr<GlobalSourceState> PhysicalOperator::GetGlobalSourceState(ClientConte
 }
 
 unique_ptr<GlobalSourceState>
-PhysicalOperator::GetGlobalSourceState(ClientContext &context,
-                                       const ExecutionRegionOpenRequest &open_request) const {
+PhysicalOperator::GetGlobalSourceState(ClientContext &context, const ExecutionRegionOpenRequest &open_request) const {
 	(void)open_request;
 	return GetGlobalSourceState(context);
 }
@@ -398,16 +397,6 @@ ExecutionRegionOperatorKind PhysicalOperator::GetExecutionRegionOperatorKind() c
 	default:
 		return ExecutionRegionOperatorKind::GENERIC;
 	}
-}
-
-void PhysicalOperator::GetExecutionRegionPreGraphSourceInfo(idx_t &estimated_source_cardinality,
-                                                            idx_t &source_filter_count) const {
-	estimated_source_cardinality = estimated_cardinality;
-	source_filter_count = 0;
-}
-
-void PhysicalOperator::GetExecutionRegionPreGraphTransformInfo(ExecutionTransformContract &transform) const {
-	(void)transform;
 }
 
 ExecutionContract PhysicalOperator::GetExecutionContract() const {

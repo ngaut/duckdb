@@ -2,15 +2,6 @@
 
 namespace duckdb {
 
-const char *ExecutionRegionCompileTargetToString(ExecutionRegionCompileTarget target) {
-	switch (target) {
-	case ExecutionRegionCompileTarget::REGION:
-		return "region";
-	default:
-		return "unknown";
-	}
-}
-
 const char *ExecutionRegionCompileStatusToString(ExecutionRegionCompileStatus status) {
 	switch (status) {
 	case ExecutionRegionCompileStatus::COMPILED:
@@ -58,40 +49,6 @@ const char *ExecutionRunnerKindToString(ExecutionRunnerKind kind) {
 
 bool ExecutionRegionExecutionModeIsCompiled(ExecutionRegionExecutionMode mode) {
 	return mode == ExecutionRegionExecutionMode::NATIVE;
-}
-
-const char *ExecutionRegionFormToString(ExecutionRegionForm form) {
-	switch (form) {
-	case ExecutionRegionForm::NONE:
-		return "none";
-	case ExecutionRegionForm::FUSED:
-		return "fused";
-	default:
-		return "unknown";
-	}
-}
-
-const char *ExecutionRegionExecutionBodyToString(ExecutionRegionExecutionBody body) {
-	switch (body) {
-	case ExecutionRegionExecutionBody::NONE:
-		return "none";
-	case ExecutionRegionExecutionBody::GENERATED_MACHINE_CODE:
-		return "generated-machine-code";
-	default:
-		return "unknown";
-	}
-}
-
-ExecutionRegionExecutionBody ExecutionRegionExecutionBodyForCompileEvent(ExecutionRegionCompileStatus status,
-                                                                         ExecutionRegionExecutionMode mode,
-                                                                         idx_t code_size) {
-	if (status != ExecutionRegionCompileStatus::COMPILED || !ExecutionRegionExecutionModeIsCompiled(mode)) {
-		return ExecutionRegionExecutionBody::NONE;
-	}
-	if (code_size > 0) {
-		return ExecutionRegionExecutionBody::GENERATED_MACHINE_CODE;
-	}
-	return ExecutionRegionExecutionBody::NONE;
 }
 
 const char *ExecutionRegionLoweringKindToString(ExecutionRegionLoweringKind kind) {
@@ -285,14 +242,10 @@ const char *ExecutionRegionOperatorContractKindToString(ExecutionRegionOperatorC
 	switch (kind) {
 	case ExecutionRegionOperatorContractKind::NONE:
 		return "none";
-	case ExecutionRegionOperatorContractKind::PROJECTION:
-		return "projection";
 	case ExecutionRegionOperatorContractKind::HASH_JOIN_PROBE:
 		return "hash-join-probe";
 	case ExecutionRegionOperatorContractKind::NESTED_LOOP_JOIN_PROBE:
 		return "nested-loop-join-probe";
-	case ExecutionRegionOperatorContractKind::OPERATOR:
-		return "operator";
 	default:
 		return "unknown";
 	}
@@ -382,8 +335,6 @@ const char *ExecutionRegionSinkKindToString(ExecutionRegionSinkKind kind) {
 		return "materialization";
 	case ExecutionRegionSinkKind::DELIM_JOIN_SINK:
 		return "delim-join-sink";
-	case ExecutionRegionSinkKind::OPERATOR:
-		return "operator";
 	default:
 		return "unknown";
 	}
@@ -603,8 +554,6 @@ const char *ExecutionRegionPolicyModeToString(ExecutionRegionPolicyMode mode) {
 	switch (mode) {
 	case ExecutionRegionPolicyMode::AUTO:
 		return "auto";
-	case ExecutionRegionPolicyMode::FORCE:
-		return "force";
 	case ExecutionRegionPolicyMode::OFF:
 		return "off";
 	default:
@@ -764,12 +713,8 @@ void ExecutionRegionLoweringPlan::SetCompiledExecutionMode(ExecutionRegionExecut
 	compiled_execution_mode = execution_mode;
 }
 
-void ExecutionRegionLoweringPlan::SetRegionExecutionForm(ExecutionRegionForm execution_form) {
-	region_execution_form = execution_form;
-}
-
-void ExecutionRegionLoweringPlan::SetExecutionBody(ExecutionRegionExecutionBody execution_body_p) {
-	execution_body = execution_body_p;
+void ExecutionRegionLoweringPlan::SetFullyFused(bool fully_fused_p) {
+	fully_fused = fully_fused_p;
 }
 
 void ExecutionRegionLoweringPlan::SetUsesScanFilters(bool uses_scan_filters_p) {
@@ -782,14 +727,6 @@ void ExecutionRegionLoweringPlan::SetSelectedSourceExecution(ExecutionRegionSour
 
 void ExecutionRegionLoweringPlan::SetOperatorStageIR(string stage_ir) {
 	operator_stage_ir = std::move(stage_ir);
-}
-
-void ExecutionRegionLoweringPlan::SetGeneratedExpressionCost(idx_t expression_cost) {
-	generated_expression_cost = expression_cost;
-}
-
-void ExecutionRegionLoweringPlan::SetGeneratedStageCount(idx_t stage_count) {
-	generated_stage_count = stage_count;
 }
 
 idx_t ExecutionRegionLoweringPlan::NativeCount() const {
@@ -816,12 +753,8 @@ ExecutionRegionExecutionMode ExecutionRegionLoweringPlan::ExpectedCompiledExecut
 	return compiled_execution_mode;
 }
 
-ExecutionRegionForm ExecutionRegionLoweringPlan::ExpectedRegionExecutionForm() const {
-	return region_execution_form;
-}
-
-ExecutionRegionExecutionBody ExecutionRegionLoweringPlan::ExpectedExecutionBody() const {
-	return execution_body;
+bool ExecutionRegionLoweringPlan::IsFullyFused() const {
+	return fully_fused;
 }
 
 bool ExecutionRegionLoweringPlan::UsesScanFilters() const {
@@ -850,26 +783,13 @@ string ExecutionRegionLoweringPlan::CompactEventReason() const {
 		}
 	}
 	result += "region-lowering:native=" + std::to_string(NativeCount()) +
-	          ",boundary=" + std::to_string(BoundaryCount()) +
-	          ",execution-form=" + ExecutionRegionFormToString(region_execution_form);
-	if (execution_body != ExecutionRegionExecutionBody::NONE) {
-		result += ";execution-body=";
-		result += ExecutionRegionExecutionBodyToString(execution_body);
-	}
+	          ",boundary=" + std::to_string(BoundaryCount()) + ",fully-fused=" + (fully_fused ? string("true") : "false");
 	if (selected_source_execution != ExecutionRegionSourceExecutionKind::NONE) {
 		result += ";selected-source-execution=";
 		result += ExecutionRegionSourceExecutionKindToString(selected_source_execution);
 	}
 	if (uses_scan_filters) {
 		result += ";uses-scan-filters=true";
-	}
-	if (generated_expression_cost > 0) {
-		result += ";generated-expression-cost=";
-		result += std::to_string(generated_expression_cost);
-	}
-	if (generated_stage_count > 0) {
-		result += ";generated-stages=";
-		result += std::to_string(generated_stage_count);
 	}
 	return result;
 }

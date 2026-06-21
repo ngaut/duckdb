@@ -249,16 +249,6 @@ PhysicalTableScan::GetGlobalSourceState(ClientContext &context, const ExecutionR
 	return make_uniq<TableScanGlobalSourceState>(context, *this, open_request);
 }
 
-void PhysicalTableScan::GetExecutionRegionPreGraphSourceInfo(idx_t &estimated_source_cardinality,
-                                                             idx_t &source_filter_count) const {
-	estimated_source_cardinality = estimated_cardinality;
-	if (bind_data && StringUtil::Lower(function.name.GetIdentifierName()) == "seq_scan") {
-		auto &table_scan_bind = bind_data->Cast<TableScanBindData>();
-		estimated_source_cardinality = table_scan_bind.table.GetStorage().GetTotalRows();
-	}
-	source_filter_count = table_filters ? table_filters->FilterCount() : 0;
-}
-
 bool PhysicalTableScan::SupportsExecutionSourceContract(const ExecutionRegionOpenRequest &open_request) const {
 	return open_request.UsesSourceContract() && IsExecutionTableScanSourceContractSupported(*this);
 }

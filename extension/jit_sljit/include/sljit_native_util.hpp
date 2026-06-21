@@ -8,6 +8,8 @@
 
 #pragma once
 
+#include "duckdb/function/aggregate_primitive_update.hpp"
+
 #include "sljit_native_types.hpp"
 
 namespace duckdb {
@@ -22,5 +24,7 @@ string NativeIntegerCastOverflowMessage(SljitNativeSignedIntegerWidth source_wid
                                         SljitNativeSignedIntegerWidth target_width);
 string NativeSignedToUnsignedIntegerCastOverflowMessage(SljitNativeSignedIntegerWidth source_width,
                                                         SljitNativeUnsignedIntegerWidth target_width);
+bool SljitFilteredAggregateUsesPayloadExpression(AggregatePrimitiveUpdateKind kind);
+bool SljitFilteredAggregateKindCanGenerate(AggregatePrimitiveUpdateKind kind);
 
 } // namespace duckdb

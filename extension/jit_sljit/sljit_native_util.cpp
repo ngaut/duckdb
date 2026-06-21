@@ -76,4 +76,12 @@ string NativeSignedToUnsignedIntegerCastOverflowMessage(SljitNativeSignedInteger
 	       StringUtil::Upper(NativeUnsignedIntegerTypeName(target_width));
 }
 
+bool SljitFilteredAggregateUsesPayloadExpression(AggregatePrimitiveUpdateKind kind) {
+	return kind == AggregatePrimitiveUpdateKind::SUM_INT64 || kind == AggregatePrimitiveUpdateKind::SUM_HUGEINT;
+}
+
+bool SljitFilteredAggregateKindCanGenerate(AggregatePrimitiveUpdateKind kind) {
+	return SljitFilteredAggregateUsesPayloadExpression(kind) || kind == AggregatePrimitiveUpdateKind::COUNT_STAR;
+}
+
 } // namespace duckdb

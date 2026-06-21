@@ -52,21 +52,6 @@ const char *ExecutionRegionEventStatusToString(ExecutionRegionEventStatus status
 	}
 }
 
-const char *ExecutionRegionEventPolicyToString(ExecutionRegionEventPolicy policy) {
-	switch (policy) {
-	case ExecutionRegionEventPolicy::AUTO:
-		return "auto";
-	case ExecutionRegionEventPolicy::FORCE:
-		return "force";
-	case ExecutionRegionEventPolicy::OFF:
-		return "off";
-	case ExecutionRegionEventPolicy::RUNTIME:
-		return "runtime";
-	default:
-		return "none";
-	}
-}
-
 ExecutionRegionEventStatus ExecutionRegionEventStatusFromCompileStatus(ExecutionRegionCompileStatus status) {
 	switch (status) {
 	case ExecutionRegionCompileStatus::COMPILED:
@@ -83,19 +68,6 @@ ExecutionRegionEventStatus ExecutionRegionEventStatusFromCompileStatus(Execution
 		return ExecutionRegionEventStatus::ERROR;
 	default:
 		return ExecutionRegionEventStatus::NONE;
-	}
-}
-
-ExecutionRegionEventPolicy ExecutionRegionEventPolicyFromMode(ExecutionRegionPolicyMode policy) {
-	switch (policy) {
-	case ExecutionRegionPolicyMode::AUTO:
-		return ExecutionRegionEventPolicy::AUTO;
-	case ExecutionRegionPolicyMode::FORCE:
-		return ExecutionRegionEventPolicy::FORCE;
-	case ExecutionRegionPolicyMode::OFF:
-		return ExecutionRegionEventPolicy::OFF;
-	default:
-		return ExecutionRegionEventPolicy::NONE;
 	}
 }
 
@@ -240,23 +212,16 @@ void ExecutionRegionManager::ApplyEventRetentionLimit(idx_t event_log_size) {
 }
 
 idx_t ExecutionRegionManager::RecordEvent(
-    ClientContext &context, string backend_name, ExecutionRegionCompileTarget target,
-    ExecutionRegionCompileStatus status, ExecutionRegionExecutionMode execution_mode,
-    ExecutionRegionPolicyMode requested_policy, string reason, string blocker, const string *ir,
+    ClientContext &context, string backend_name, ExecutionRegionCompileStatus status,
+    ExecutionRegionExecutionMode execution_mode, string reason, string blocker, const string *ir,
     int64_t decision_time_us, int64_t compile_time_us, idx_t code_size, const ExecutionRegionCandidate *candidate,
     ExecutionRunnerKind selected_runner, const ExecutionRegionStageTimings *stage_timings,
-    ExecutionRegionForm region_execution_form, ExecutionRegionSourceExecutionKind selected_source_execution,
-    bool selected_uses_scan_filters, const ExecutionRegionPipelineInventory *inventory,
-    ExecutionRegionExecutionBody execution_body, const PhysicalRunnerCostProfile *runner_cost) {
+    ExecutionRegionSourceExecutionKind selected_source_execution, bool selected_uses_scan_filters,
+    const PhysicalRunnerCostProfile *runner_cost) {
 	if (context.IsCompiledExecutionSuppressed()) {
 		return 0;
 	}
 	ExecutionRegionEvent event;
-	if (inventory) {
-		event.has_pipeline = true;
-		event.pipeline_shape = inventory->pipeline_shape;
-		event.pipeline_estimated_cardinality = inventory->estimated_cardinality;
-	}
 	if (candidate && ExecutionRegionSettings::ShouldRecordDetailedTelemetry(context)) {
 		SetDetailedExecutionRegionCandidate(event, *candidate, ExecutionRegionSettings::DumpIR(context));
 	}
@@ -268,22 +233,19 @@ idx_t ExecutionRegionManager::RecordEvent(
 	event.selected_runner = selected_runner;
 	if (runner_cost) {
 		event.runner_cost = *runner_cost;
+		if (!event.has_pipeline && event.runner_cost.rows > 0) {
+			event.has_pipeline = true;
+			event.pipeline_estimated_cardinality = static_cast<idx_t>(event.runner_cost.rows);
+		}
 	}
 	event.phase_kind = status == ExecutionRegionCompileStatus::COMPILED || status == ExecutionRegionCompileStatus::ERROR
 	                       ? ExecutionRegionEventPhase::COMPILE
 	                       : ExecutionRegionEventPhase::DECISION;
 	event.backend_name = std::move(backend_name);
-	event.target_kind = target;
 	event.status_kind = ExecutionRegionEventStatusFromCompileStatus(status);
 	event.execution_mode_kind = execution_mode;
-	event.region_execution_form_kind = region_execution_form;
-	if (execution_body == ExecutionRegionExecutionBody::NONE) {
-		execution_body = ExecutionRegionExecutionBodyForCompileEvent(status, execution_mode, code_size);
-	}
-	event.execution_body_kind = execution_body;
 	event.selected_source_execution = selected_source_execution;
 	event.selected_uses_scan_filters = selected_uses_scan_filters || event.candidate_uses_scan_filters;
-	event.requested_policy_kind = ExecutionRegionEventPolicyFromMode(requested_policy);
 	event.reason = std::move(reason);
 	event.blocker = std::move(blocker);
 	if (ir && ExecutionRegionSettings::DumpIR(context)) {
@@ -302,19 +264,14 @@ idx_t ExecutionRegionManager::RecordEvent(
 }
 
 template <class KERNEL>
-static ExecutionRegionEvent BuildRuntimeEvent(const KERNEL &kernel, ExecutionRegionCompileTarget target,
-                                              ExecutionRegionExecutionMode execution_mode,
+static ExecutionRegionEvent BuildRuntimeEvent(const KERNEL &kernel, ExecutionRegionExecutionMode execution_mode,
                                               ExecutionRegionEventStatus status, string reason, idx_t input_rows,
                                               idx_t output_rows, int64_t runtime_time_us, string runtime_result) {
 	ExecutionRegionEvent event;
 	event.phase_kind = ExecutionRegionEventPhase::RUNTIME;
 	event.backend_name = kernel.BackendName();
-	event.target_kind = target;
 	event.status_kind = status;
 	event.execution_mode_kind = execution_mode;
-	event.region_execution_form_kind = ExecutionRegionForm::NONE;
-	event.execution_body_kind = kernel.ExecutionBody();
-	event.requested_policy_kind = ExecutionRegionEventPolicy::RUNTIME;
 	event.reason = std::move(reason);
 	event.kernel_id = kernel.TraceId();
 	event.kernel_compile_reason = kernel.TraceCompileReason();
@@ -340,8 +297,7 @@ static void SetRuntimeRegionPipeline(ExecutionRegionEvent &event, const Executio
 	event.candidate_uses_scan_filters = kernel.TraceCandidateUsesScanFilters();
 }
 
-static void SetRuntimeRegionExecutionForm(ExecutionRegionEvent &event, const ExecutionRegionKernel &kernel) {
-	event.region_execution_form_kind = kernel.RegionExecutionForm();
+static void SetRuntimeRegionSourceTrace(ExecutionRegionEvent &event, const ExecutionRegionKernel &kernel) {
 	event.selected_source_execution = kernel.SelectedSourceExecution();
 	event.selected_uses_scan_filters = kernel.UsesScanFilters();
 }
@@ -358,46 +314,43 @@ static void SetRuntimeMetrics(ExecutionRegionEvent &event, const ExecutionRegion
 }
 
 void ExecutionRegionManager::RecordRuntimeEvent(ClientContext &context, const ExecutionRegionKernel &kernel,
-                                                ExecutionRegionCompileTarget target, ExecutionRegionEventStatus status,
-                                                string reason, idx_t input_rows, idx_t output_rows,
-                                                int64_t runtime_time_us, string runtime_result) {
+                                                ExecutionRegionEventStatus status, string reason, idx_t input_rows,
+                                                idx_t output_rows, int64_t runtime_time_us, string runtime_result) {
 	if (context.IsCompiledExecutionSuppressed() || !ExecutionRegionSettings::TraceRuntime(context)) {
 		return;
 	}
-	auto event = BuildRuntimeEvent(kernel, target, kernel.ExecutionMode(), std::move(status), std::move(reason),
-	                               input_rows, output_rows, runtime_time_us, std::move(runtime_result));
-	SetRuntimeRegionExecutionForm(event, kernel);
+	auto event = BuildRuntimeEvent(kernel, kernel.ExecutionMode(), std::move(status), std::move(reason), input_rows,
+	                               output_rows, runtime_time_us, std::move(runtime_result));
+	SetRuntimeRegionSourceTrace(event, kernel);
 	SetRuntimeRegionPipeline(event, kernel);
 	RecordExecutionRegionTelemetryEvent(context, db, event_log, std::move(event));
 }
 
 void ExecutionRegionManager::RecordRuntimeEvent(ClientContext &context, const ExecutionRegionKernel &kernel,
-                                                ExecutionRegionCompileTarget target, ExecutionRegionEventStatus status,
-                                                string reason, idx_t input_rows, idx_t output_rows,
-                                                int64_t runtime_time_us, string runtime_result,
+                                                ExecutionRegionEventStatus status, string reason, idx_t input_rows,
+                                                idx_t output_rows, int64_t runtime_time_us, string runtime_result,
                                                 const ExecutionRegionRuntimeMetrics &runtime_metrics) {
 	if (context.IsCompiledExecutionSuppressed() || !ExecutionRegionSettings::TraceRuntime(context)) {
 		return;
 	}
-	auto event = BuildRuntimeEvent(kernel, target, kernel.ExecutionMode(), std::move(status), std::move(reason),
-	                               input_rows, output_rows, runtime_time_us, std::move(runtime_result));
+	auto event = BuildRuntimeEvent(kernel, kernel.ExecutionMode(), std::move(status), std::move(reason), input_rows,
+	                               output_rows, runtime_time_us, std::move(runtime_result));
 	SetRuntimeMetrics(event, runtime_metrics);
-	SetRuntimeRegionExecutionForm(event, kernel);
+	SetRuntimeRegionSourceTrace(event, kernel);
 	SetRuntimeRegionPipeline(event, kernel);
 	RecordExecutionRegionTelemetryEvent(context, db, event_log, std::move(event));
 }
 
 void ExecutionRegionManager::RecordVectorizedBaselineRuntimeEvent(ClientContext &context,
-                                                                  const ExecutionRegionKernel &kernel,
-                                                                  ExecutionRegionCompileTarget target, string reason,
+                                                                  const ExecutionRegionKernel &kernel, string reason,
                                                                   int64_t runtime_time_us, string runtime_result) {
 	if (context.IsCompiledExecutionSuppressed() || !ExecutionRegionSettings::TraceRuntime(context)) {
 		return;
 	}
-	auto event = BuildRuntimeEvent(kernel, target, ExecutionRegionExecutionMode::VECTORIZED,
-	                               ExecutionRegionEventStatus::EXECUTED, std::move(reason), 0, 0, runtime_time_us,
-	                               std::move(runtime_result));
-	SetRuntimeRegionExecutionForm(event, kernel);
+	auto event =
+	    BuildRuntimeEvent(kernel, ExecutionRegionExecutionMode::VECTORIZED, ExecutionRegionEventStatus::EXECUTED,
+	                      std::move(reason), 0, 0, runtime_time_us, std::move(runtime_result));
+	SetRuntimeRegionSourceTrace(event, kernel);
 	SetRuntimeRegionPipeline(event, kernel);
 	RecordExecutionRegionTelemetryEvent(context, db, event_log, std::move(event));
 }

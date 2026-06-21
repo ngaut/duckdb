@@ -25,8 +25,7 @@ public:
 
 private:
 	static void Compile(ClientContext &context, ExecutionRegionBackend &backend, const string &backend_name,
-	                    ExecutionRegionPolicyMode requested_policy, ExecutionRegionPlan &plan,
-	                    ExecutionRegionIR &region_ir,
+	                    ExecutionRegionPlan &plan, ExecutionRegionIR &region_ir,
 	                    vector<SelectedCandidate> &selected_regions);
 };
 

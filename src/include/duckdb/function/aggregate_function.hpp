@@ -56,7 +56,7 @@ struct WindowPartitionInput {
 };
 
 class BindAggregateFunctionInput {
-	public:
+public:
 	BindAggregateFunctionInput(ClientContext &context_p, BoundAggregateFunction &bound_function_p,
 	                           vector<unique_ptr<Expression>> &arguments_p)
 	    : context(context_p), bound_function(bound_function_p), arguments(arguments_p) {

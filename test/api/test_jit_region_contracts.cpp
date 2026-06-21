@@ -7,7 +7,7 @@ TEST_CASE("JIT table scan source contract fuses with generated projection and ap
 	Connection con(db);
 	auto &manager = ExecutionRegionManager::Get(*con.context);
 
-	ConfigureSljit(con, "force", false, true, true, 10000);
+	ConfigureSljitForCompilation(con, false, true, true, 10000);
 	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_scan_contract(i BIGINT, j BIGINT, p DECIMAL(15,2), d DECIMAL(15,2))"));
 	REQUIRE_NO_FAIL(con.Query("INSERT INTO jit_scan_contract SELECT i, i % 3, i::DECIMAL(15,2), "
 	                          "(i % 10)::DECIMAL(15,2) / 100 FROM range(1000) AS t(i)"));
@@ -27,13 +27,14 @@ TEST_CASE("JIT table scan source contract fuses with generated projection and ap
 		    event.selected_source_execution == ExecutionRegionSourceExecutionKind::SOURCE_CONTRACT &&
 		    StringUtil::Contains(event.ir, "table_scan_contract<function=seq_scan")) {
 			found_source_contract = true;
-			RequireNativeFusedRegion(event);
+			RequireGeneratedMachineCodeRegion(event);
 			RequireDuckDBScanFilteredSourceContract(event);
 			REQUIRE(StringUtil::Contains(event.ir, "source_contract<status=ready"));
 			REQUIRE(StringUtil::Contains(event.reason, "append sink contract"));
 			REQUIRE(StringUtil::Contains(event.reason, "sink_contract_status=ready"));
 		}
-		if (EventPhase(event) == "runtime" && EventStatus(event) == "executed" && EventExecutionMode(event) == "native" &&
+		if (EventPhase(event) == "runtime" && EventStatus(event) == "executed" &&
+		    EventExecutionMode(event) == "native" &&
 		    event.selected_source_execution == ExecutionRegionSourceExecutionKind::SOURCE_CONTRACT &&
 		    event.source_contract_output_rows > 0) {
 			found_runtime = true;
@@ -48,7 +49,7 @@ TEST_CASE("JIT aggregate state scans are native source contracts", "[api][jit]")
 	Connection con(db);
 	auto &manager = ExecutionRegionManager::Get(*con.context);
 
-	ConfigureSljit(con, "force", false, true, true, 10000);
+	ConfigureSljitForCompilation(con, false, true, true, 10000);
 	REQUIRE_NO_FAIL(con.Query("CREATE TEMP TABLE jit_stateful_perfect_hash AS "
 	                          "SELECT (i % 4)::INTEGER AS k, i::BIGINT AS v FROM range(1000) tbl(i)"));
 
@@ -103,7 +104,7 @@ TEST_CASE("JIT sort and top-n state scans are source contracts", "[api][jit]") {
 	Connection con(db);
 	auto &manager = ExecutionRegionManager::Get(*con.context);
 
-	ConfigureSljit(con, "force", false, true, true, 10000);
+	ConfigureSljitForCompilation(con, false, true, true, 10000);
 
 	auto require_sort_source = [&](const string &query, const string &function_name, const string &capability) {
 		ClearJitTrace(manager);
@@ -138,7 +139,7 @@ TEST_CASE("JIT aggregate sinks expose ready native state-update contracts", "[ap
 	Connection con(db);
 	auto &manager = ExecutionRegionManager::Get(*con.context);
 
-	ConfigureSljit(con, "force", false, true, true, 10000);
+	ConfigureSljitForCompilation(con, false, true, true, 10000);
 	REQUIRE_NO_FAIL(con.Query("CREATE TEMP TABLE jit_region_aggregate_boundary AS "
 	                          "SELECT i::BIGINT AS i FROM range(1000) tbl(i)"));
 
@@ -153,7 +154,7 @@ TEST_CASE("JIT aggregate sinks expose ready native state-update contracts", "[ap
 			continue;
 		}
 		found_aggregate_update = true;
-		RequireCompiledGeneratedRegion(event);
+		RequireGeneratedMachineCodeRegion(event);
 		REQUIRE(event.candidate_contract.missing_contract_count == 0);
 		REQUIRE(StringUtil::Contains(event.reason, "native aggregate update sink contract"));
 		REQUIRE(StringUtil::Contains(event.reason, "aggregate_state_update_contract_status=ready"));

@@ -2,12 +2,12 @@
 
 using namespace duckdb;
 
-TEST_CASE("JIT force compiles decimal projection chains through fused regions", "[api][jit]") {
+TEST_CASE("JIT auto compiles decimal projection chains through fused regions", "[api][jit]") {
 	DuckDB db;
 	Connection con(db);
 	auto &manager = ExecutionRegionManager::Get(*con.context);
 
-	ConfigureSljit(con, "force", false, true, true, 10000);
+	ConfigureSljitForCompilation(con, false, true, true, 10000);
 	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_decimal_projection_chain AS "
 	                          "SELECT i, CAST(i AS DECIMAL(15,2)) AS d FROM range(10000) t(i)"));
 
@@ -23,7 +23,7 @@ TEST_CASE("JIT force compiles decimal projection chains through fused regions", 
 		    event.candidate_traits.projection_count == 0) {
 			return false;
 		}
-		RequireNativeFusedRegion(event);
+		RequireGeneratedMachineCodeRegion(event);
 		RequireDuckDBScanFilteredSourceContract(event);
 		REQUIRE(StringUtil::Contains(event.ir, "projection(native:expression-tree"));
 		REQUIRE(!StringUtil::Contains(event.ir, "op3=projection(native"));
@@ -36,7 +36,7 @@ TEST_CASE("JIT canonicalizes type-preserving arithmetic identities before loweri
 	Connection con(db);
 	auto &manager = ExecutionRegionManager::Get(*con.context);
 
-	ConfigureSljit(con, "force", false, true, true, 10000);
+	ConfigureSljitForCompilation(con, false, true, true, 10000);
 	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_decimal_identity_projection AS "
 	                          "SELECT i, CAST(i % 1000 AS DECIMAL(18,10)) AS d FROM range(10000) tbl(i)"));
 
@@ -54,7 +54,7 @@ TEST_CASE("JIT canonicalizes type-preserving arithmetic identities before loweri
 			continue;
 		}
 		found_compile = true;
-		RequireCompiledGeneratedRegion(event);
+		RequireGeneratedMachineCodeRegion(event);
 		REQUIRE_FALSE(StringUtil::Contains(event.ir, ".multiply("));
 		REQUIRE(StringUtil::Contains(event.ir, "logical=DECIMAL(18,10),physical=INT64"));
 	}
@@ -66,7 +66,7 @@ TEST_CASE("JIT lowers date year intrinsic as native scalar projection", "[api][j
 	Connection con(db);
 	auto &manager = ExecutionRegionManager::Get(*con.context);
 
-	ConfigureSljit(con, "force", true, true, true, 10000);
+	ConfigureSljitForCompilation(con, true, true, true, 10000);
 	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_date_year_native(d DATE)"));
 	REQUIRE_NO_FAIL(con.Query("INSERT INTO jit_date_year_native VALUES "
 	                          "(DATE '1992-02-29'), (DATE '-0001-01-01'), "
@@ -92,7 +92,7 @@ TEST_CASE("JIT lowers compressed scalar intrinsics as native projections", "[api
 	Connection con(db);
 	auto &manager = ExecutionRegionManager::Get(*con.context);
 
-	ConfigureSljit(con, "force", true, true, true, 10000);
+	ConfigureSljitForCompilation(con, true, true, true, 10000);
 	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_compress_native AS "
 	                          "SELECT CASE WHEN range=10 THEN NULL ELSE (range + 1992)::BIGINT END y "
 	                          "FROM range(11)"));
@@ -111,7 +111,7 @@ TEST_CASE("JIT lowers string predicates without aggregate sink dependence", "[ap
 	Connection con(db);
 	auto &manager = ExecutionRegionManager::Get(*con.context);
 
-	ConfigureSljit(con, "force", true, true, true, 10000);
+	ConfigureSljitForCompilation(con, true, true, true, 10000);
 	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_string_native(id INTEGER, s VARCHAR)"));
 	REQUIRE_NO_FAIL(con.Query("INSERT INTO jit_string_native VALUES "
 	                          "(1, 'EUROPE BRASS'), "
@@ -140,7 +140,7 @@ TEST_CASE("JIT lowers long string predicates through packed native comparisons",
 	Connection con(db);
 	auto &manager = ExecutionRegionManager::Get(*con.context);
 
-	ConfigureSljit(con, "force", true, true, true, 10000);
+	ConfigureSljitForCompilation(con, true, true, true, 10000);
 	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_string_packed(id INTEGER, s VARCHAR)"));
 	REQUIRE_NO_FAIL(con.Query("INSERT INTO jit_string_packed VALUES "
 	                          "(1, 'abcdefghijklmnop'), "
@@ -194,7 +194,7 @@ TEST_CASE("JIT auto planner cost skips source-only string filters", "[api][jit]"
 
 	bool found_source_string_filter_decision = false;
 	for (auto &event : manager.GetEvents()) {
-		if (!IsSljitRegionEvent(event) || EventPhase(event) != "decision" || EventRequestedPolicy(event) != "auto" ||
+		if (!IsSljitRegionEvent(event) || EventPhase(event) != "decision" ||
 		    !StringUtil::Contains(event.ir, ".string_like(")) {
 			continue;
 		}
@@ -206,8 +206,7 @@ TEST_CASE("JIT auto planner cost skips source-only string filters", "[api][jit]"
 	RequireJitEvent(
 	    manager,
 	    [](const ExecutionRegionEvent &event) {
-		    return event.backend_name == "sljit" && EventTarget(event) == "region" && EventPhase(event) == "decision" &&
-		           EventRequestedPolicy(event) == "auto" && StringUtil::Contains(event.ir, ".string_like(");
+		    return event.backend_name == "sljit" && EventPhase(event) == "decision" && StringUtil::Contains(event.ir, ".string_like(");
 	    },
 	    [](const ExecutionRegionEvent &event) {
 		    REQUIRE(EventStatus(event) != "compiled");
@@ -215,61 +214,22 @@ TEST_CASE("JIT auto planner cost skips source-only string filters", "[api][jit]"
 	    });
 }
 
-TEST_CASE("JIT auto prunes protocol-only source string equality before CBO", "[api][jit]") {
+TEST_CASE("JIT auto preserves DuckDB scan ownership for cheap source string equality filters", "[api][jit]") {
 	DuckDB db;
 	Connection con(db);
 	auto &manager = ExecutionRegionManager::Get(*con.context);
 
-	ConfigureSljit(con, "auto", false, true, true, 10000);
-	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_auto_string_equality AS "
-	                          "SELECT i::INTEGER AS id, "
-	                          "CASE WHEN i % 10 = 0 THEN 'target' ELSE 'other' END AS s "
-	                          "FROM range(1000000) tbl(i)"));
-
-	ClearJitTrace(manager, true);
-	auto result = con.Query("CREATE TEMP TABLE jit_auto_string_equality_output AS "
-	                        "SELECT id FROM jit_auto_string_equality WHERE s = 'target'");
-	REQUIRE_NO_FAIL(*result);
-	REQUIRE_NO_FAIL(con.Query("SET jit_policy='off'"));
-	result = con.Query("SELECT count(*) FROM jit_auto_string_equality_output");
-	REQUIRE_NO_FAIL(*result);
-	REQUIRE(result->GetValue(0, 0).GetValue<int64_t>() == 100000);
-
-	bool found_protocol_only_prune = false;
-	for (auto &event : manager.GetEvents()) {
-		if (!IsSljitRegionEvent(event) || EventPhase(event) != "decision" || EventRequestedPolicy(event) != "auto" ||
-		    event.blocker != "no_executable_region_work" || !StringUtil::Contains(event.ir, "compare_equal") ||
-		    !StringUtil::Contains(event.ir, "materialization-append-sink")) {
-			continue;
-		}
-		found_protocol_only_prune = true;
-		REQUIRE(EventStatus(event) == "unsupported");
-		REQUIRE(EventExecutionMode(event) == "unsupported");
-		REQUIRE(event.selected_runner == ExecutionRunnerKind::VECTORIZED);
-		REQUIRE_FALSE(event.runner_cost.present);
-		REQUIRE(event.code_size == 0);
-		REQUIRE(StringUtil::Contains(event.ir, "compare_equal"));
-		REQUIRE_FALSE(StringUtil::Contains(event.ir, ".string_like("));
-	}
-	REQUIRE(found_protocol_only_prune);
-}
-
-TEST_CASE("JIT force preserves DuckDB scan ownership for cheap source string equality filters", "[api][jit]") {
-	DuckDB db;
-	Connection con(db);
-	auto &manager = ExecutionRegionManager::Get(*con.context);
-
-	ConfigureSljit(con, "force", false, true, true, 10000);
-	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_force_string_equality_source AS "
+	ConfigureSljitForCompilation(con, false, true, true, 10000);
+	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_auto_string_equality_source AS "
 	                          "SELECT i::INTEGER AS id, "
 	                          "CASE WHEN i % 4 = 0 THEN 'EUROPE' ELSE 'OTHER' END AS region "
 	                          "FROM range(10000) tbl(i)"));
 
 	ClearJitTrace(manager, true);
-	auto result = con.Query("CREATE TEMP TABLE jit_force_string_equality_output AS "
-	                        "SELECT id + 1 AS id FROM jit_force_string_equality_source WHERE region = 'EUROPE'");
+	auto result = con.Query("CREATE TEMP TABLE jit_auto_string_equality_output AS "
+	                        "SELECT id + 1 AS id FROM jit_auto_string_equality_source WHERE region = 'EUROPE'");
 	REQUIRE_NO_FAIL(*result);
-	result = con.Query("SELECT count(*), sum(id) FROM jit_force_string_equality_output");
+	result = con.Query("SELECT count(*), sum(id) FROM jit_auto_string_equality_output");
 	REQUIRE_NO_FAIL(*result);
 	REQUIRE(result->GetValue(0, 0).GetValue<int64_t>() == 2500);
 	REQUIRE(result->GetValue(1, 0).GetValue<int64_t>() == 12497500);
@@ -283,7 +243,7 @@ TEST_CASE("JIT force preserves DuckDB scan ownership for cheap source string equ
 	    },
 	    [](const ExecutionRegionEvent &event) {
 		    REQUIRE(event.selected_uses_scan_filters);
-		    RequireNativeFusedRegion(event);
+		    RequireGeneratedMachineCodeRegion(event);
 	    });
 	RequireNoUnsupportedReason(manager, "source filter references must be local to one scan column");
 }
@@ -293,7 +253,7 @@ TEST_CASE("JIT lowers signed INT128 predicates as native filters", "[api][jit]")
 	Connection con(db);
 	auto &manager = ExecutionRegionManager::Get(*con.context);
 
-	ConfigureSljit(con, "force", true, true, true, 10000);
+	ConfigureSljitForCompilation(con, true, true, true, 10000);
 	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_int128_predicate("
 	                          "id INTEGER, d DECIMAL(38,2), d2 DECIMAL(38,2), h HUGEINT, h2 HUGEINT)"));
 	REQUIRE_NO_FAIL(con.Query("INSERT INTO jit_int128_predicate VALUES "
@@ -318,7 +278,7 @@ TEST_CASE("JIT lowers signed INT128 predicates as native filters", "[api][jit]")
 		           StringUtil::Contains(event.ir, "logical=DECIMAL(38,2),physical=INT128") &&
 		           StringUtil::Contains(event.ir, "logical=HUGEINT,physical=INT128");
 	    },
-	    [](const ExecutionRegionEvent &event) { RequireNativeFusedRegion(event); });
+	    [](const ExecutionRegionEvent &event) { RequireGeneratedMachineCodeRegion(event); });
 
 	for (auto &event : manager.GetEvents()) {
 		const bool unsupported_int128_reason =
@@ -334,7 +294,7 @@ TEST_CASE("JIT lowers scalar casts and arithmetic as generated code", "[api][jit
 	Connection con(db);
 	auto &manager = ExecutionRegionManager::Get(*con.context);
 
-	ConfigureSljit(con, "force", true, true, true, 10000);
+	ConfigureSljitForCompilation(con, true, true, true, 10000);
 	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_cast_arithmetic AS "
 	                          "SELECT i::INTEGER AS i, (i + 1)::DOUBLE AS d, (i + 2)::DOUBLE AS e "
 	                          "FROM range(10) tbl(i)"));
@@ -364,7 +324,7 @@ TEST_CASE("JIT lowers casted numeric double division as generated code", "[api][
 	Connection con(db);
 	auto &manager = ExecutionRegionManager::Get(*con.context);
 
-	ConfigureSljit(con, "force", true, true, true, 10000);
+	ConfigureSljitForCompilation(con, true, true, true, 10000);
 	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_casted_double_division("
 	                          "id INTEGER, d DECIMAL(38,2), n BIGINT)"));
 	REQUIRE_NO_FAIL(con.Query("INSERT INTO jit_casted_double_division VALUES "
@@ -416,7 +376,7 @@ TEST_CASE("JIT lowers casted numeric double comparison predicates as generated c
 	Connection con(db);
 	auto &manager = ExecutionRegionManager::Get(*con.context);
 
-	ConfigureSljit(con, "force", true, true, true, 10000);
+	ConfigureSljitForCompilation(con, true, true, true, 10000);
 	REQUIRE_NO_FAIL(con.Query("SET disabled_optimizers='filter_pushdown,top_n'"));
 	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_casted_double_predicate("
 	                          "id INTEGER, d64 DECIMAL(15,2), d128 DECIMAL(38,2), x DOUBLE)"));

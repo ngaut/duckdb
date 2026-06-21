@@ -33,6 +33,12 @@ PROFILE_EVENT_FIELDS = (
     "selected_runner",
     "runner_cost_profile",
     "runner_cost_accelerated_runner_benefit",
+    "runner_cost_generated_stage_count",
+    "runner_cost_materialization_elision_count",
+    "runner_cost_native_join_stage_count",
+    "runner_cost_native_aggregate_stage_count",
+    "runner_cost_native_sort_stage_count",
+    "runner_cost_full_pipeline",
     "runner_cost_startup_cost",
     "runner_cost_required_benefit",
     "runner_cost_net_benefit",
@@ -72,6 +78,16 @@ def sql_bool(value: bool) -> str:
     return "true" if value else "false"
 
 
+def jit_cbo_setting_sql(settings: list[str]) -> list[str]:
+    statements = []
+    for setting in settings:
+        name, separator, value = setting.partition("=")
+        if not separator or not name.startswith("jit_cbo_") or not value:
+            raise ValueError(f"invalid --jit-cbo-setting {setting!r}, expected jit_cbo_name=value")
+        statements.append(f"SET {name}={value};")
+    return statements
+
+
 def discard_query_sql(select_sql: str) -> str:
     return f"CREATE OR REPLACE TEMP TABLE __jit_benchmark_discard AS {select_sql};\nDROP TABLE __jit_benchmark_discard;"
 
@@ -101,6 +117,7 @@ def jit_setup_sql(
         f"SET jit_trace_decisions={sql_bool(trace_decisions)};",
         f"SET jit_event_log_size={args.event_log_size};",
     ]
+    statements.extend(jit_cbo_setting_sql(getattr(args, "jit_cbo_setting", [])))
     if reset_events:
         statements.append(discard_query_sql("SELECT * FROM duckdb_jit_clear_events()"))
     if reset_counters:
@@ -150,6 +167,13 @@ def row_int(row: dict, field: str) -> int:
 def row_float(row: dict, field: str) -> float:
     value = row.get(field, "")
     return 0.0 if value in ("", None) else float(value)
+
+
+def row_bool(row: dict, field: str) -> bool:
+    value = row.get(field, False)
+    if isinstance(value, bool):
+        return value
+    return str(value).lower() == "true"
 
 
 def profile_query_time_us(profile: dict) -> int:

@@ -8,102 +8,33 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "jit"))
 from benchmark_common import (
-    REGION_SUMMARY_FIELDS,
     normalize_query_ids,
     read_csv,
     require,
     require_columns,
+    row_bool,
     row_float,
     row_int,
     verify_profile,
 )
-from tpch_common import DEFAULT_POLICIES, DEFAULT_QUERIES
-
-
-SUMMARY_COLUMNS = (
-    "query",
-    "policy",
-    "run_count",
-    "min_s",
-    "median_s",
-    "mean_s",
-    "max_s",
-    "speedup_vs_off_median",
-    "correctness_diff",
-    *REGION_SUMMARY_FIELDS,
-)
-
-RUN_COLUMNS = (
-    "query",
-    "policy",
-    "repeat",
-    "timing_mode",
-    "query_time_us",
-    "correctness_diff",
-    *REGION_SUMMARY_FIELDS,
-    "profile_json",
-)
-
-COUNTER_COLUMNS = (
-    "query",
-    "policy",
-    "repeat",
-    "backend_name",
-    "target",
-    "status",
-    "execution_mode",
-    "region_execution_form",
-    "execution_body",
-    "selected_runner",
-    "requested_policy",
-    "runner_cost_profile",
-    "blocker",
-    "runner_cost_rows",
-    "runner_cost_batches",
-    "runner_cost_expression_cost",
-    "runner_cost_accelerated_stage_count",
-    "runner_cost_saved_work_per_batch",
-    "runner_cost_accelerated_runner_benefit",
-    "runner_cost_startup_cost",
-    "runner_cost_required_benefit",
-    "runner_cost_net_benefit",
-    "runner_cost_selected_accelerated_runner_count",
-    "count",
-    "decision_time_us",
-    "compile_time_us",
-    "code_size",
-)
-
-PERFORMANCE_GAP_COLUMNS = (
-    "query",
-    "off_median_s",
-    "auto_median_s",
-    "force_median_s",
-    "auto_speedup_vs_off",
-    "force_speedup_vs_off",
-    "auto_compiled_regions",
-    "force_compiled_regions",
-    "auto_unsupported_decisions",
-    "auto_skipped_decisions",
-    "auto_decision_time_us",
-    "force_unsupported_decisions",
-    "force_compile_time_us",
-    "force_decision_time_us",
-    "force_code_size",
-    "auto_primary_blocker",
-    "auto_primary_blocker_count",
-    "auto_runner_cost_benefit",
-    "auto_runner_cost_startup_cost",
-    "auto_runner_cost_required_benefit",
-    "auto_runner_cost_net_benefit",
-    "auto_runner_cost_selected_accelerated_runner_count",
+from tpch_common import (
+    COUNTER_FIELDS,
+    DEFAULT_POLICIES,
+    DEFAULT_QUERIES,
+    PERFORMANCE_GAP_FIELDS,
+    RUN_FIELDS,
+    SUMMARY_FIELDS,
 )
 
 POLICY_ORDER = {policy: index for index, policy in enumerate(DEFAULT_POLICIES)}
+DEFAULT_MIN_AUTO_SPEEDUP = 0.98
+DEFAULT_AUTO_NO_DECISION_NOISE_S = 0.005
 
 
 def expected_queries(rows: list[dict], requested: list[str] | None) -> list[str]:
     if requested is not None:
+        if requested == ["all"]:
+            return list(DEFAULT_QUERIES)
         return normalize_query_ids(requested)
     return sorted({row["query"] for row in rows})
 
@@ -125,7 +56,7 @@ def expected_repeats(rows: list[dict], requested: int | None) -> int:
 
 
 def verify_summary(summary_rows: list[dict], queries: list[str], policies: list[str]) -> None:
-    require_columns(summary_rows, SUMMARY_COLUMNS)
+    require_columns(summary_rows, SUMMARY_FIELDS)
     expected = {(query, policy) for query in queries for policy in policies}
     actual = {(row["query"], row["policy"]) for row in summary_rows}
     require(
@@ -141,8 +72,10 @@ def verify_summary(summary_rows: list[dict], queries: list[str], policies: list[
 
 
 def verify_runs(trace_dir: Path, run_rows: list[dict], queries: list[str], policies: list[str], repeats: int) -> None:
-    require_columns(run_rows, RUN_COLUMNS, "runs.csv")
-    expected = {(query, policy, str(repeat)) for query in queries for policy in policies for repeat in range(1, repeats + 1)}
+    require_columns(run_rows, RUN_FIELDS, "runs.csv")
+    expected = {
+        (query, policy, str(repeat)) for query in queries for policy in policies for repeat in range(1, repeats + 1)
+    }
     actual = {(row["query"], row["policy"], row["repeat"]) for row in run_rows}
     require(
         actual == expected,
@@ -164,12 +97,10 @@ def verify_runs(trace_dir: Path, run_rows: list[dict], queries: list[str], polic
 
 def verify_counters(rows: list[dict], queries: list[str], policies: list[str], repeats: int) -> None:
     if not rows:
-        require(set(policies) == {"off"}, "counters.csv: expected counter rows for JIT policies")
         return
-    require_columns(rows, COUNTER_COLUMNS, "counters.csv")
+    require_columns(rows, COUNTER_FIELDS, "counters.csv")
     query_set = set(queries)
     policy_set = set(policies)
-    saw_runner_cost_profile = False
     for row in rows:
         require(row["query"] in query_set, f"counters.csv: unexpected query: {row}")
         require(row["policy"] in policy_set, f"counters.csv: unexpected policy: {row}")
@@ -178,16 +109,19 @@ def verify_counters(rows: list[dict], queries: list[str], policies: list[str], r
         require(row_int(row, "count") > 0, f"counters.csv: non-positive count: {row}")
         if row["status"] in ("skipped", "unsupported", "unavailable", "error"):
             require(row["blocker"], f"counters.csv: missing blocker: {row}")
-        if row["runner_cost_profile"].lower() == "true":
-            saw_runner_cost_profile = True
-            require(row_int(row, "runner_cost_startup_cost") > 0,
-                    f"counters.csv: missing runner cost: {row}")
-    if any(policy != "off" for policy in policies):
-        require(saw_runner_cost_profile, "counters.csv: missing structured runner-cost profile rows")
+        if row_bool(row, "runner_cost_profile"):
+            require(row_int(row, "runner_cost_startup_cost") > 0, f"counters.csv: missing runner cost: {row}")
 
 
-def verify_performance_gaps(rows: list[dict], queries: list[str], policies: list[str]) -> None:
-    require_columns(rows, PERFORMANCE_GAP_COLUMNS, "performance_gaps.csv")
+def verify_performance_gaps(
+    rows: list[dict],
+    queries: list[str],
+    policies: list[str],
+    require_no_auto_decisions: bool,
+    min_auto_speedup: float,
+    auto_no_decision_noise_s: float,
+) -> None:
+    require_columns(rows, PERFORMANCE_GAP_FIELDS, "performance_gaps.csv")
     expected_queries = set(queries)
     actual_queries = {row["query"] for row in rows}
     require(
@@ -196,32 +130,42 @@ def verify_performance_gaps(rows: list[dict], queries: list[str], policies: list
         f"extra={sorted(actual_queries - expected_queries)}",
     )
     has_auto = "auto" in policies
-    has_force = "force" in policies
     for row in rows:
         require(row_float(row, "off_median_s") > 0, f"performance_gaps.csv: missing off median: {row}")
         if has_auto:
             require(row_float(row, "auto_median_s") > 0, f"performance_gaps.csv: missing auto median: {row}")
             require(row_float(row, "auto_speedup_vs_off") > 0, f"performance_gaps.csv: missing auto speedup: {row}")
-            require(row["auto_primary_blocker"], f"performance_gaps.csv: missing auto blocker: {row}")
-            require(row_int(row, "auto_primary_blocker_count") > 0, f"performance_gaps.csv: missing blocker count: {row}")
-            require(row_int(row, "auto_unsupported_decisions") >= 0,
-                    f"performance_gaps.csv: bad auto unsupported count: {row}")
-            require(row_int(row, "auto_skipped_decisions") >= 0,
-                    f"performance_gaps.csv: bad auto skipped count: {row}")
-            require(row_int(row, "auto_decision_time_us") >= 0,
-                    f"performance_gaps.csv: bad auto decision time: {row}")
-            require(row_int(row, "auto_runner_cost_startup_cost") >= 0,
-                    f"performance_gaps.csv: bad runner cost: {row}")
-        if has_force:
-            require(row_float(row, "force_median_s") > 0, f"performance_gaps.csv: missing force median: {row}")
-            require(row_float(row, "force_speedup_vs_off") > 0, f"performance_gaps.csv: missing force speedup: {row}")
-            require(row_int(row, "force_unsupported_decisions") >= 0,
-                    f"performance_gaps.csv: bad force unsupported count: {row}")
-            require(row_int(row, "force_compile_time_us") >= 0,
-                    f"performance_gaps.csv: bad force compile time: {row}")
-            require(row_int(row, "force_decision_time_us") >= 0,
-                    f"performance_gaps.csv: bad force decision time: {row}")
-            require(row_int(row, "force_code_size") >= 0, f"performance_gaps.csv: bad force code size: {row}")
+            auto_decisions = (
+                row_int(row, "auto_compiled_regions")
+                + row_int(row, "auto_unsupported_decisions")
+                + row_int(row, "auto_skipped_decisions")
+            )
+            if require_no_auto_decisions:
+                require(auto_decisions == 0, f"performance_gaps.csv: auto made JIT decisions: {row}")
+            auto_slowdown_s = row_float(row, "auto_median_s") - row_float(row, "off_median_s")
+            if auto_decisions == 0:
+                require(
+                    auto_slowdown_s <= auto_no_decision_noise_s,
+                    f"performance_gaps.csv: zero-decision auto slowdown above {auto_no_decision_noise_s}s: {row}",
+                )
+            else:
+                require(
+                    row_float(row, "auto_speedup_vs_off") >= min_auto_speedup,
+                    f"performance_gaps.csv: auto speedup below {min_auto_speedup}: {row}",
+                )
+            if auto_decisions > 0:
+                require(row["auto_primary_blocker"], f"performance_gaps.csv: missing auto blocker: {row}")
+                require(
+                    row_int(row, "auto_primary_blocker_count") > 0,
+                    f"performance_gaps.csv: missing blocker count: {row}",
+                )
+            require(
+                row_int(row, "auto_unsupported_decisions") >= 0,
+                f"performance_gaps.csv: bad auto unsupported count: {row}",
+            )
+            require(row_int(row, "auto_skipped_decisions") >= 0, f"performance_gaps.csv: bad auto skipped count: {row}")
+            require(row_int(row, "auto_decision_time_us") >= 0, f"performance_gaps.csv: bad auto decision time: {row}")
+            require(row_int(row, "auto_runner_cost_startup_cost") >= 0, f"performance_gaps.csv: bad runner cost: {row}")
 
 
 def parse_args() -> argparse.Namespace:
@@ -230,6 +174,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--queries", nargs="+", default=None)
     parser.add_argument("--policies", nargs="+", default=None, choices=DEFAULT_POLICIES)
     parser.add_argument("--repeats", type=int, default=None)
+    parser.add_argument("--require-no-auto-decisions", action="store_true")
+    parser.add_argument("--min-auto-speedup", type=float, default=DEFAULT_MIN_AUTO_SPEEDUP)
+    parser.add_argument("--auto-no-decision-noise-s", type=float, default=DEFAULT_AUTO_NO_DECISION_NOISE_S)
     return parser.parse_args()
 
 
@@ -246,7 +193,14 @@ def main() -> int:
     verify_summary(summary_rows, queries, policies)
     verify_runs(trace_dir, run_rows, queries, policies, repeats)
     verify_counters(counter_rows, queries, policies, repeats)
-    verify_performance_gaps(performance_gap_rows, queries, policies)
+    verify_performance_gaps(
+        performance_gap_rows,
+        queries,
+        policies,
+        args.require_no_auto_decisions,
+        args.min_auto_speedup,
+        args.auto_no_decision_noise_s,
+    )
     print(f"verified TPC-H JIT benchmark: {args.trace_dir.resolve()}")
     return 0
 

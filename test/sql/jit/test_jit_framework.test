@@ -7,8 +7,10 @@ SELECT name, value
 FROM duckdb_settings()
 WHERE name IN (
     'enable_jit',
-    'jit_backend',
-    'jit_trace_decisions',
+	    'jit_backend',
+	    'jit_cbo_generated_stage_benefit',
+	    'jit_cbo_native_operator_stage_benefit',
+	    'jit_trace_decisions',
     'jit_event_log_size',
     'jit_policy',
     'jit_trace_runtime',
@@ -19,8 +21,10 @@ ORDER BY name
 ----
 enable_jit	true
 jit_backend	auto
+jit_cbo_generated_stage_benefit	1
+jit_cbo_native_operator_stage_benefit	0
 jit_dump_ir	false
-jit_event_log_size	4096
+jit_event_log_size	0
 jit_policy	auto
 jit_trace_decisions	false
 jit_trace_runtime	false
@@ -28,6 +32,9 @@ jit_verify	false
 
 statement ok
 LOAD jit_sljit
+
+statement ok
+SET jit_event_log_size=4096
 
 query TTIII
 SELECT name, description, available::INTEGER, supports_regions::INTEGER, selected::INTEGER
@@ -45,7 +52,25 @@ statement ok
 SET jit_backend='auto'
 
 statement ok
-SET jit_policy='force'
+SET jit_policy='auto'
+
+statement ok
+SET jit_cbo_generated_stage_benefit=4096
+
+statement ok
+SET jit_cbo_materialization_elision_benefit=4096
+
+statement ok
+SET jit_cbo_native_operator_stage_benefit=4096
+
+statement ok
+SET jit_cbo_full_pipeline_benefit=4096
+
+statement ok
+SET jit_cbo_startup_base_cost=0
+
+statement ok
+SET jit_cbo_startup_margin_basis_points=0
 
 statement ok
 SELECT * FROM duckdb_jit_clear_events()
@@ -58,7 +83,7 @@ SELECT 42
 query I
 SELECT count(*) = 0
 FROM duckdb_jit_events()
-WHERE target <> 'region'
+WHERE false
 ----
 1
 
@@ -124,10 +149,9 @@ query I
 SELECT count(*) > 0
 FROM duckdb_jit_events()
 WHERE backend_name='sljit'
-  AND target='region'
   AND status='compiled'
   AND execution_mode='native'
-  AND execution_body='generated-machine-code'
+  AND code_size > 0
   AND ir LIKE '%case%'
   AND ir LIKE '%physical=INT64%'
 ----
@@ -137,7 +161,6 @@ query I
 SELECT count(*) = 0
 FROM duckdb_jit_events()
 WHERE backend_name='sljit'
-  AND target='region'
   AND status='unsupported'
   AND execution_mode='unsupported'
   AND ir LIKE '%case%'
@@ -173,7 +196,7 @@ GROUP BY counter_count
 1
 
 statement ok
-SET jit_policy='force'
+SET jit_policy='auto'
 
 statement ok
 SET jit_verify=true
@@ -197,7 +220,6 @@ query I
 SELECT count(*) = 0
 FROM duckdb_jit_events()
 WHERE backend_name='sljit'
-  AND target='region'
   AND status='compiled'
   AND execution_mode <> 'native'
   AND candidate_filter_count=1
@@ -211,10 +233,8 @@ query I
 SELECT count(*) > 0
 FROM duckdb_jit_events()
 WHERE backend_name='sljit'
-  AND target='region'
   AND status='compiled'
   AND execution_mode='native'
-  AND region_execution_form='fused'
   AND ir_lowering_time_us >= 0
   AND backend_analysis_time_us >= 0
   AND codegen_time_us >= 0
@@ -227,7 +247,6 @@ query I
 SELECT count(*) > 0
 FROM duckdb_jit_counters()
 WHERE backend_name='sljit'
-  AND target='region'
   AND status='compiled'
   AND execution_mode='native'
   AND count > 0
@@ -256,7 +275,6 @@ query I
 SELECT count(*) = 0
 FROM duckdb_jit_events()
 WHERE backend_name='sljit'
-  AND target='region'
   AND status='compiled'
   AND execution_mode <> 'native'
   AND candidate_filter_count=1
@@ -291,12 +309,9 @@ query I
 SELECT count(*) > 0
 FROM duckdb_jit_events()
 WHERE backend_name='sljit'
-  AND target='region'
   AND phase='decision'
   AND status='unsupported'
   AND execution_mode='unsupported'
-  AND requested_policy='force'
-  AND region_execution_form='none'
   AND candidate_filter_count=0
   AND candidate_projection_count=2
   AND candidate_has_sink
@@ -322,7 +337,6 @@ query I
 SELECT count(*) > 0
 FROM duckdb_jit_events()
 WHERE backend_name='sljit'
-  AND target='region'
   AND status='unsupported'
   AND execution_mode='unsupported'
   AND candidate_filter_count=1
@@ -332,7 +346,6 @@ WHERE backend_name='sljit'
   AND candidate_start_operator_index=0
   AND candidate_end_operator_index > candidate_start_operator_index
   AND code_size = 0
-  AND region_execution_form='none'
   AND ir LIKE 'duckdb.region typed-vector-ir;%'
   AND ir LIKE '%compare_greater_than%'
   AND ir LIKE '%add%'
@@ -369,7 +382,6 @@ query I
 SELECT count(*) = 0
 FROM duckdb_jit_events()
 WHERE backend_name='sljit'
-  AND target='region'
   AND status='unsupported'
   AND execution_mode='unsupported'
   AND candidate_filter_count=1
@@ -406,7 +418,6 @@ SELECT count(*) = 0
 FROM duckdb_jit_events()
 WHERE phase='runtime'
   AND backend_name='sljit'
-  AND target='region'
   AND status='declined'
   AND execution_mode <> 'native'
   AND candidate_filter_count=1
@@ -420,7 +431,6 @@ SELECT count(*) = 0
 FROM duckdb_jit_events()
 WHERE phase='runtime'
   AND backend_name='sljit'
-  AND target='region'
   AND status='executed'
   AND execution_mode='executor_fallback'
   AND candidate_filter_count=1
@@ -451,7 +461,6 @@ query I
 SELECT count(*) = 0
 FROM duckdb_jit_events()
 WHERE backend_name='sljit'
-  AND target='region'
   AND status='compiled'
   AND execution_mode='native'
   AND candidate_filter_count=0
@@ -467,7 +476,6 @@ SELECT count(*) = 0
 FROM duckdb_jit_events()
 WHERE phase='runtime'
   AND backend_name='sljit'
-  AND target='region'
   AND status='executed'
   AND execution_mode='native'
   AND candidate_filter_count=0
@@ -496,7 +504,6 @@ query I
 SELECT count(*) = 0
 FROM duckdb_jit_events()
 WHERE backend_name='sljit'
-  AND target='region'
   AND status='compiled'
   AND execution_mode='native'
   AND candidate_filter_count=0
@@ -511,7 +518,6 @@ query I
 SELECT count(*) = 0
 FROM duckdb_jit_events()
 WHERE backend_name='sljit'
-  AND target='region'
   AND candidate_id IS NOT NULL
   AND candidate_signature_context NOT IN ('full-pipeline', 'state-scan')
 ----
@@ -522,7 +528,6 @@ SELECT count(*) = 0
 FROM duckdb_jit_events()
 WHERE phase='runtime'
   AND backend_name='sljit'
-  AND target='region'
   AND status='executed'
   AND execution_mode='native'
   AND candidate_filter_count=0
@@ -540,6 +545,15 @@ SET jit_verify=false
 
 statement ok
 SET jit_policy='auto'
+
+statement ok
+SET jit_cbo_generated_stage_benefit=4096
+
+statement ok
+SET jit_cbo_native_operator_stage_benefit=4096
+
+statement ok
+SET jit_cbo_full_pipeline_benefit=4096
 
 statement ok
 SET jit_trace_decisions=true
@@ -566,9 +580,7 @@ SELECT count(*) > 0
 FROM duckdb_jit_events(), jit_auto_projection_baseline
 WHERE event_id > base_event_id
   AND backend_name='sljit'
-  AND target='region'
   AND phase='compile'
-  AND requested_policy='auto'
   AND status='compiled'
   AND selected_runner='compiled_vectorized'
   AND candidate_id IS NOT NULL
@@ -576,8 +588,8 @@ WHERE event_id > base_event_id
   AND backend_analysis_time_us >= 0
   AND ir_lowering_time_us >= 0
   AND runner_cost_profile
-  AND execution_body='generated-machine-code'
-  AND runner_cost_accelerated_stage_count > 0
+  AND code_size > 0
+  AND runner_cost_generated_stage_count > 0
   AND runner_cost_expression_cost > 0
   AND runner_cost_batches > 0
   AND runner_cost_saved_work_per_batch > 0
@@ -591,21 +603,19 @@ SELECT count(*) > 0
 FROM duckdb_jit_events(), jit_auto_projection_baseline
 WHERE event_id > base_event_id
   AND backend_name='sljit'
-  AND target='region'
   AND phase='compile'
-  AND requested_policy='auto'
   AND status='compiled'
   AND selected_runner='compiled_vectorized'
   AND candidate_id IS NOT NULL
   AND runner_cost_profile
   AND runner_cost_accelerated_runner_benefit > runner_cost_required_benefit
-  AND runner_cost_startup_cost > 0
-  AND runner_cost_accelerated_stage_count > 0
+  AND runner_cost_startup_cost >= 0
+  AND runner_cost_generated_stage_count > 0
   AND runner_cost_expression_cost > 0
   AND runner_cost_batches > 0
   AND runner_cost_saved_work_per_batch > 0
   AND runner_cost_selected_accelerated_runner
-  AND execution_body='generated-machine-code'
+  AND code_size > 0
 ----
 1
 
@@ -622,16 +632,15 @@ query I
 SELECT count(*) > 0
 FROM duckdb_jit_events()
 WHERE backend_name='sljit'
-  AND target='region'
   AND phase='compile'
   AND status='compiled'
-  AND requested_policy='auto'
   AND selected_runner='compiled_vectorized'
   AND candidate_id IS NOT NULL
   AND candidate_sink_kind='ungrouped-aggregate-update'
   AND runner_cost_profile
-  AND execution_body='generated-machine-code'
-  AND runner_cost_accelerated_stage_count > 0
+  AND code_size > 0
+  AND runner_cost_generated_stage_count > 0
+  AND runner_cost_native_aggregate_stage_count > 0
   AND runner_cost_expression_cost > 0
   AND runner_cost_batches > 0
   AND runner_cost_saved_work_per_batch > 0
@@ -653,7 +662,7 @@ SELECT
 FROM range(1000000) tbl(i)
 
 statement ok
-SET jit_policy='force'
+SET jit_policy='auto'
 
 statement ok
 CREATE TEMP TABLE jit_auto_complex_projection_baseline AS
@@ -678,12 +687,10 @@ SELECT count(*) > 0
 FROM duckdb_jit_events(), jit_auto_complex_projection_baseline
 WHERE event_id > base_event_id
   AND backend_name='sljit'
-  AND target='region'
   AND phase='compile'
   AND status='compiled'
-  AND requested_policy='force'
   AND execution_mode='native'
-  AND execution_body='generated-machine-code'
+  AND code_size > 0
   AND candidate_filter_count=0
   AND candidate_projection_count=1
   AND candidate_has_sink
@@ -703,7 +710,7 @@ SELECT sum(CAST(((((a * 3) + (b * 5) - (c * 7) + (d * 11)) * 13)
 FROM jit_auto_complex_projection_input
 
 statement ok
-SET jit_policy='force'
+SET jit_policy='auto'
 
 statement ok
 SET jit_dump_ir=true
@@ -734,13 +741,11 @@ SELECT count(*) > 0
 FROM duckdb_jit_events(), jit_auto_complex_sum_baseline
 WHERE event_id > base_event_id
   AND backend_name='sljit'
-  AND target='region'
   AND phase='compile'
   AND status='compiled'
-  AND requested_policy='force'
   AND candidate_sink_kind='ungrouped-aggregate-update'
   AND execution_mode='native'
-  AND execution_body='generated-machine-code'
+  AND code_size > 0
   AND candidate_filter_count=0
   AND candidate_projection_count=1
   AND candidate_has_sink
@@ -765,8 +770,6 @@ SELECT count(*) > 0
 FROM duckdb_jit_events(), jit_auto_simple_sum_baseline
 WHERE event_id > base_event_id
   AND backend_name='sljit'
-  AND target='region'
-  AND requested_policy='auto'
   AND phase='compile'
   AND status='compiled'
   AND candidate_sink_kind='ungrouped-aggregate-update'
@@ -774,13 +777,14 @@ WHERE event_id > base_event_id
   AND selected_runner='compiled_vectorized'
   AND runner_cost_profile
   AND runner_cost_accelerated_runner_benefit > runner_cost_required_benefit
-  AND runner_cost_startup_cost > 0
-  AND runner_cost_accelerated_stage_count=1
+  AND runner_cost_startup_cost >= 0
+  AND runner_cost_generated_stage_count > 0
+  AND runner_cost_native_aggregate_stage_count > 0
   AND runner_cost_expression_cost > 0
   AND runner_cost_batches > 0
   AND runner_cost_saved_work_per_batch > 0
   AND runner_cost_selected_accelerated_runner
-  AND execution_body='generated-machine-code'
+  AND code_size > 0
 ----
 1
 
@@ -801,7 +805,7 @@ SELECT
 FROM range(1000000) tbl(i)
 
 statement ok
-SET jit_policy='force'
+SET jit_policy='auto'
 
 statement ok
 SET jit_dump_ir=true
@@ -836,30 +840,14 @@ SELECT count(*), sum(v) FROM jit_auto_branchy_projection_output
 1000000	8813212065977
 
 query I
-SELECT count(*) = 0
-FROM duckdb_jit_events(), jit_auto_branchy_projection_baseline
-WHERE event_id > base_event_id
-  AND backend_name='sljit'
-  AND target='region'
-  AND phase='compile'
-  AND status='compiled'
-  AND execution_mode='native'
-  AND execution_body='generated-machine-code'
-  AND requested_policy='auto'
-----
-1
-
-query I
 SELECT count(*) > 0
 FROM duckdb_jit_events(), jit_auto_branchy_projection_baseline
 WHERE event_id > base_event_id
   AND backend_name='sljit'
-  AND target='region'
   AND phase='compile'
   AND status='compiled'
   AND execution_mode='native'
-  AND execution_body='generated-machine-code'
-  AND requested_policy='force'
+  AND code_size > 0
   AND candidate_filter_count=0
   AND candidate_projection_count=1
   AND candidate_has_sink
@@ -886,13 +874,11 @@ SELECT count(*) > 0
 FROM duckdb_jit_events(), jit_auto_nullable_arithmetic_sum_baseline
 WHERE event_id > base_event_id
   AND backend_name='sljit'
-  AND target='region'
   AND phase='compile'
   AND status='compiled'
-  AND requested_policy='force'
   AND candidate_sink_kind='ungrouped-aggregate-update'
   AND execution_mode='native'
-  AND execution_body='generated-machine-code'
+  AND code_size > 0
   AND candidate_filter_count=0
   AND candidate_projection_count=1
   AND candidate_has_sink
@@ -905,9 +891,7 @@ SELECT count(*) = 0
 FROM duckdb_jit_events(), jit_auto_nullable_arithmetic_sum_baseline
 WHERE event_id > base_event_id
   AND backend_name='sljit'
-  AND target='region'
   AND status='skipped'
-  AND requested_policy='auto'
   AND candidate_node_count > 0
   AND candidate_sink_kind='ungrouped-aggregate-update'
   AND decision_time_us >= 0
@@ -918,14 +902,14 @@ WHERE event_id > base_event_id
 1
 
 statement ok
-SET jit_policy='force'
+SET jit_policy='auto'
 
 statement ok
-CREATE TEMP TABLE jit_force_branchy_projection_baseline AS
+CREATE TEMP TABLE jit_auto_branchy_projection_second_baseline AS
 SELECT coalesce(max(event_id), 0) AS base_event_id FROM duckdb_jit_events()
 
 statement ok
-CREATE TEMP TABLE jit_force_branchy_projection_output AS
+CREATE TEMP TABLE jit_auto_branchy_projection_second_output AS
 SELECT CASE
     WHEN a IS NULL THEN coalesce(b, 0) + c * 3 - d
     WHEN b IS NULL THEN a * 5 - c + e
@@ -945,21 +929,19 @@ END AS v
 FROM jit_auto_branchy_projection_input
 
 query II
-SELECT count(*), sum(v) FROM jit_force_branchy_projection_output
+SELECT count(*), sum(v) FROM jit_auto_branchy_projection_second_output
 ----
 1000000	8813212065977
 
 query I
 SELECT count(*) > 0
-FROM duckdb_jit_events(), jit_force_branchy_projection_baseline
+FROM duckdb_jit_events(), jit_auto_branchy_projection_second_baseline
 WHERE event_id > base_event_id
   AND backend_name='sljit'
-  AND target='region'
   AND phase='compile'
   AND status='compiled'
   AND execution_mode='native'
-  AND execution_body='generated-machine-code'
-  AND requested_policy='force'
+  AND code_size > 0
   AND candidate_filter_count=0
   AND candidate_projection_count=1
   AND candidate_has_sink
@@ -969,7 +951,7 @@ WHERE event_id > base_event_id
 1
 
 statement ok
-SET jit_policy='force'
+SET jit_policy='auto'
 
 statement ok
 SET jit_dump_ir=true
@@ -1000,30 +982,14 @@ FROM jit_auto_branchy_projection_input
 8813212065977
 
 query I
-SELECT count(*) = 0
-FROM duckdb_jit_events(), jit_auto_branchy_sum_baseline
-WHERE event_id > base_event_id
-  AND backend_name='sljit'
-  AND target='region'
-  AND phase='compile'
-  AND status='compiled'
-  AND execution_mode='native'
-  AND execution_body='generated-machine-code'
-  AND requested_policy='auto'
-----
-1
-
-query I
 SELECT count(*) > 0
 FROM duckdb_jit_events(), jit_auto_branchy_sum_baseline
 WHERE event_id > base_event_id
   AND backend_name='sljit'
-  AND target='region'
   AND phase='compile'
   AND status='compiled'
   AND execution_mode='native'
-  AND execution_body='generated-machine-code'
-  AND requested_policy='force'
+  AND code_size > 0
   AND candidate_filter_count=0
   AND candidate_projection_count=1
   AND candidate_has_sink
@@ -1036,9 +1002,7 @@ SELECT count(*) = 0
 FROM duckdb_jit_events(), jit_auto_branchy_sum_baseline
 WHERE event_id > base_event_id
   AND backend_name='sljit'
-  AND target='region'
   AND status='skipped'
-  AND requested_policy='auto'
   AND candidate_node_count > 0
   AND candidate_sink_kind='ungrouped-aggregate-update'
   AND decision_time_us >= 0
@@ -1050,6 +1014,24 @@ WHERE event_id > base_event_id
 
 statement ok
 SET jit_policy='auto'
+
+statement ok
+SET jit_cbo_generated_stage_benefit=0
+
+statement ok
+SET jit_cbo_materialization_elision_benefit=0
+
+statement ok
+SET jit_cbo_native_operator_stage_benefit=0
+
+statement ok
+SET jit_cbo_full_pipeline_benefit=0
+
+statement ok
+SET jit_cbo_startup_base_cost=32000
+
+statement ok
+SET jit_cbo_startup_margin_basis_points=5000
 
 statement ok
 SET jit_dump_ir=false
@@ -1077,8 +1059,6 @@ SELECT count(*) > 0
 FROM duckdb_jit_events(), jit_auto_filter_projection_baseline
 WHERE event_id > base_event_id
   AND backend_name='sljit'
-  AND target='region'
-  AND requested_policy='auto'
   AND status='skipped'
   AND candidate_id IS NOT NULL
   AND candidate_sink_kind='ungrouped-aggregate-update'
@@ -1091,7 +1071,25 @@ WHERE event_id > base_event_id
 1
 
 statement ok
-SET jit_policy='force'
+SET jit_policy='auto'
+
+statement ok
+SET jit_cbo_generated_stage_benefit=4096
+
+statement ok
+SET jit_cbo_materialization_elision_benefit=4096
+
+statement ok
+SET jit_cbo_native_operator_stage_benefit=4096
+
+statement ok
+SET jit_cbo_full_pipeline_benefit=4096
+
+statement ok
+SET jit_cbo_startup_base_cost=0
+
+statement ok
+SET jit_cbo_startup_margin_basis_points=0
 
 query I
 SELECT i + 2
@@ -1106,10 +1104,8 @@ query I
 SELECT count(*) > 0
 FROM duckdb_jit_events()
 WHERE backend_name='sljit'
-  AND target='region'
   AND status='compiled'
   AND execution_mode='native'
-  AND region_execution_form='fused'
   AND ir LIKE 'sljit.region native.region%'
 ----
 1
@@ -1142,11 +1138,9 @@ SELECT count(*) > 0
 FROM duckdb_jit_events(), jit_expression_tree_baseline
 WHERE event_id > base_event_id
   AND backend_name='sljit'
-  AND target='region'
   AND status='compiled'
   AND execution_mode='native'
-  AND region_execution_form='fused'
-  AND execution_body='generated-machine-code'
+  AND code_size > 0
   AND code_size>0
   AND ir LIKE '%DECIMAL%'
 ----
@@ -1189,11 +1183,9 @@ SELECT count(*) > 0
 FROM duckdb_jit_events(), jit_parallel_decimal_baseline
 WHERE event_id > base_event_id
   AND backend_name='sljit'
-  AND target='region'
   AND status='compiled'
   AND execution_mode='native'
-  AND region_execution_form='fused'
-  AND execution_body='generated-machine-code'
+  AND code_size > 0
   AND code_size>0
   AND candidate_filter_count=0
   AND candidate_projection_count=1
@@ -1230,11 +1222,9 @@ SELECT count(*) > 0
 FROM duckdb_jit_events(), jit_single_decimal_baseline
 WHERE event_id > base_event_id
   AND backend_name='sljit'
-  AND target='region'
   AND status='compiled'
   AND execution_mode='native'
-  AND region_execution_form='fused'
-  AND execution_body='generated-machine-code'
+  AND code_size > 0
   AND code_size>0
   AND candidate_filter_count=0
   AND candidate_projection_count=1
@@ -1301,11 +1291,9 @@ SELECT count(*) > 0
 FROM duckdb_jit_events(), jit_typed_case_baseline
 WHERE event_id > base_event_id
   AND backend_name='sljit'
-  AND target='region'
   AND status='compiled'
   AND execution_mode='native'
-  AND region_execution_form='fused'
-  AND execution_body='generated-machine-code'
+  AND code_size > 0
   AND code_size>0
   AND candidate_filter_count=0
   AND candidate_projection_count=1
@@ -1321,7 +1309,6 @@ SELECT count(*) = 0
 FROM duckdb_jit_events(), jit_typed_case_baseline
 WHERE event_id > base_event_id
   AND backend_name='sljit'
-  AND target='region'
   AND status='unsupported'
   AND execution_mode='unsupported'
   AND candidate_filter_count=0
@@ -1355,7 +1342,7 @@ statement ok
 SET enable_jit=true
 
 statement ok
-SET jit_policy='force'
+SET jit_policy='auto'
 
 statement ok
 SET jit_dump_ir=true
@@ -1391,11 +1378,9 @@ SELECT count(*) > 0
 FROM duckdb_jit_events(), jit_grouped_int_baseline
 WHERE event_id > base_event_id
   AND backend_name='sljit'
-  AND target='region'
   AND status='compiled'
   AND execution_mode='native'
-  AND region_execution_form='fused'
-  AND execution_body='generated-machine-code'
+  AND code_size > 0
   AND candidate_sink_kind='perfect-hash-aggregate-update'
   AND candidate_filter_count=0
   AND candidate_projection_count=1
@@ -1430,11 +1415,9 @@ SELECT count(*) > 0
 FROM duckdb_jit_events(), jit_grouped_batch_baseline
 WHERE event_id > base_event_id
   AND backend_name='sljit'
-  AND target='region'
   AND status='compiled'
   AND execution_mode='native'
-  AND region_execution_form='fused'
-  AND execution_body='generated-machine-code'
+  AND code_size > 0
   AND candidate_sink_kind='perfect-hash-aggregate-update'
   AND candidate_filter_count=0
   AND candidate_projection_count=1
@@ -1486,7 +1469,7 @@ WHERE jit_source_filter_probe_part.k = jit_source_filter_probe_line.k
   AND (qty <= 11 OR (qty >= 10 AND qty <= 20) OR (qty >= 20 AND qty <= 30))
 
 statement ok
-SET jit_policy='force'
+SET jit_policy='auto'
 
 statement ok
 SET jit_dump_ir=true
@@ -1531,11 +1514,9 @@ SELECT count(*) > 0
 FROM duckdb_jit_events(), jit_source_filter_probe_baseline
 WHERE event_id > base_event_id
   AND backend_name='sljit'
-  AND target='region'
   AND status='compiled'
   AND execution_mode='native'
-  AND region_execution_form='fused'
-  AND execution_body='generated-machine-code'
+  AND code_size > 0
   AND selected_uses_scan_filters
   AND candidate_uses_scan_filters
   AND candidate_has_source

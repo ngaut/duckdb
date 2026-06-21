@@ -418,6 +418,7 @@ struct ExecutionRegionCandidateTraits {
 	ExecutionRegionSourceKind source_kind = ExecutionRegionSourceKind::NONE;
 	ExecutionRegionSourceExecutionKind source_execution = ExecutionRegionSourceExecutionKind::NONE;
 	ExecutionRegionSinkKind sink_kind = ExecutionRegionSinkKind::NONE;
+	bool sink_present = false;
 	idx_t estimated_source_cardinality = 0;
 	idx_t source_filter_count = 0;
 	idx_t source_filter_expression_count = 0;
@@ -472,7 +473,7 @@ struct ExecutionRegionCandidateTraits {
 	}
 
 	bool HasSink() const {
-		return sink_kind != ExecutionRegionSinkKind::NONE;
+		return sink_present;
 	}
 };
 
@@ -532,19 +533,14 @@ struct ExecutionRegionStagePlan {
 	vector<ExecutionRegionStage> stages;
 	string shape;
 	string ir;
+	bool has_executable_work = false;
 
 	bool HasStages() const {
 		return !stages.empty();
 	}
 
 	bool HasExecutableWork() const {
-		for (auto &stage : stages) {
-			if (stage.executable_work && stage.execution != ExecutionRegionStageExecutionKind::MISSING_CONTRACT &&
-			    stage.execution != ExecutionRegionStageExecutionKind::SOURCE_BOUNDARY) {
-				return true;
-			}
-		}
-		return false;
+		return has_executable_work;
 	}
 };
 
@@ -576,119 +572,6 @@ struct ExecutionRegionCandidate {
 	}
 };
 
-struct ExecutionRegionPipelineInventory {
-	bool source_produces_rows = true;
-	ExecutionRegionSourceKind source_kind = ExecutionRegionSourceKind::NONE;
-	ExecutionRegionSourceExecutionKind source_execution = ExecutionRegionSourceExecutionKind::NONE;
-	ExecutionRegionSinkKind sink_kind = ExecutionRegionSinkKind::NONE;
-	ExecutionRegionOperatorKind source_operator_kind = ExecutionRegionOperatorKind::GENERIC;
-	ExecutionRegionOperatorKind sink_operator_kind = ExecutionRegionOperatorKind::GENERIC;
-	string source_operator_name;
-	string sink_operator_name;
-	vector<string> operator_names;
-	vector<ExecutionRegionOperatorKind> operator_kinds;
-	vector<ExecutionRegionBoundaryKind> operator_boundaries;
-	idx_t estimated_cardinality = 0;
-	idx_t estimated_source_cardinality = 0;
-	idx_t source_filter_count = 0;
-	idx_t source_filter_expression_count = 0;
-	idx_t source_filter_missing_count = 0;
-	idx_t source_projected_column_count = 0;
-	idx_t source_returned_column_count = 0;
-	idx_t operator_count = 0;
-	idx_t hash_join_operator_count = 0;
-	idx_t right_hash_join_operator_count = 0;
-	idx_t inner_hash_join_operator_count = 0;
-	idx_t filter_operator_count = 0;
-	idx_t projection_operator_count = 0;
-	idx_t filter_expression_count = 0;
-	idx_t projection_expression_count = 0;
-	idx_t expression_node_count = 0;
-	idx_t arithmetic_expression_count = 0;
-	idx_t predicate_expression_count = 0;
-	idx_t control_expression_count = 0;
-	idx_t reference_expression_count = 0;
-	idx_t string_predicate_expression_count = 0;
-	idx_t high_cost_string_predicate_expression_count = 0;
-	idx_t string_like_expression_count = 0;
-	idx_t string_contains_expression_count = 0;
-	idx_t string_prefix_expression_count = 0;
-	idx_t string_suffix_expression_count = 0;
-	idx_t expression_cost = 0;
-	idx_t arithmetic_projection_count = 0;
-	idx_t aggregate_count = 0;
-	idx_t aggregate_count_function_count = 0;
-	idx_t aggregate_sum_function_count = 0;
-	idx_t aggregate_other_function_count = 0;
-	string feature_shape;
-	string candidate_shape;
-	vector<ExecutionRegionContractShapePart> contract_shape_parts;
-	string contract_shape;
-	string pipeline_shape;
-
-	bool HasSource() const {
-		return source_kind != ExecutionRegionSourceKind::NONE;
-	}
-
-	bool HasSink() const {
-		return sink_kind != ExecutionRegionSinkKind::NONE;
-	}
-
-	bool HasFilterOperator() const {
-		return filter_operator_count > 0;
-	}
-
-	bool HasProjectionOperator() const {
-		return projection_operator_count > 0;
-	}
-
-	bool HasTableScanSource() const {
-		return source_kind == ExecutionRegionSourceKind::DUCKDB_TABLE_SCAN ||
-		       source_operator_kind == ExecutionRegionOperatorKind::TABLE_SCAN;
-	}
-
-	bool HasOperatorKind(ExecutionRegionOperatorKind kind) const {
-		for (auto operator_kind : operator_kinds) {
-			if (operator_kind == kind) {
-				return true;
-			}
-		}
-		return false;
-	}
-
-	bool HasHashJoinOperator() const {
-		return HasOperatorKind(ExecutionRegionOperatorKind::HASH_JOIN);
-	}
-
-	bool HasNestedLoopJoinOperator() const {
-		return HasOperatorKind(ExecutionRegionOperatorKind::NESTED_LOOP_JOIN);
-	}
-
-	bool HasHashJoinSink() const {
-		return sink_kind == ExecutionRegionSinkKind::HASH_JOIN_BUILD;
-	}
-
-	bool HasNestedLoopJoinSink() const {
-		return sink_kind == ExecutionRegionSinkKind::NESTED_LOOP_JOIN_BUILD;
-	}
-
-	bool HasHashAggregateSink() const {
-		return sink_kind == ExecutionRegionSinkKind::HASH_AGGREGATE_UPDATE;
-	}
-
-	bool HasHashAggregateDistinctSink() const {
-		return sink_kind == ExecutionRegionSinkKind::HASH_AGGREGATE_DISTINCT_SINK;
-	}
-
-	bool HasPerfectHashAggregateSink() const {
-		return sink_kind == ExecutionRegionSinkKind::PERFECT_HASH_AGGREGATE_UPDATE;
-	}
-
-	bool HasUngroupedAggregateSink() const {
-		return sink_kind == ExecutionRegionSinkKind::UNGROUPED_AGGREGATE_UPDATE;
-	}
-};
-
 DUCKDB_API bool ExecutionRegionAggregateFunctionIsCount(const string &function_name);
 DUCKDB_API bool ExecutionRegionAggregateFunctionIsSum(const string &function_name);
 DUCKDB_API void AccumulateExecutionRegionHashJoinKind(ExecutionRegionJoinType join_type, idx_t &hash_join_count,
@@ -696,10 +579,9 @@ DUCKDB_API void AccumulateExecutionRegionHashJoinKind(ExecutionRegionJoinType jo
 DUCKDB_API void AccumulateExecutionRegionAggregateFunctionKinds(const ExecutionRegionAggregateContract &contract,
                                                                 idx_t &aggregate_count, idx_t &count_function_count,
                                                                 idx_t &sum_function_count, idx_t &other_function_count);
-DUCKDB_API string
-ExecutionRegionAggregateNativeStateUpdateBlocker(const ExecutionRegionAggregateContract &contract,
-                                                 const vector<ExecutionRegionAggregateInput> &aggregates,
-                                                 const vector<ExecutionRegionGroupInput> &groups);
+DUCKDB_API string ExecutionRegionAggregateNativeStateUpdateBlocker(
+    const ExecutionRegionAggregateContract &contract, const vector<ExecutionRegionAggregateInput> &aggregates,
+    const vector<ExecutionRegionGroupInput> &groups);
 
 struct ExecutionRegionIR {
 	vector<ExecutionRegionNode> nodes;

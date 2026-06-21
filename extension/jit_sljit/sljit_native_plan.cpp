@@ -221,20 +221,6 @@ static bool TryReadNativeIntegerReferenceConstant(const ExecutionExpressionIR &c
 	return true;
 }
 
-static bool TryReadNativeIntegerReferenceMaybeNullConstant(const ExecutionExpressionIR &candidate,
-                                                           const ExecutionExpressionIR &constant,
-                                                           SljitNativeIntegerKind &kind, idx_t &source_index,
-                                                           int64_t &constant_value, bool &constant_is_null) {
-	if (candidate.kind != ExecutionExpressionIRKind::REFERENCE || !TryGetNativeIntegerKind(candidate, kind)) {
-		return false;
-	}
-	if (!TryReadNativeIntegerConstant(constant, kind, constant_value, constant_is_null)) {
-		return false;
-	}
-	source_index = candidate.ref_index;
-	return true;
-}
-
 static bool TryReadNativeComparableReferenceConstant(const ExecutionExpressionIR &candidate,
                                                      const ExecutionExpressionIR &constant,
                                                      SljitNativeIntegerKind &kind, idx_t &source_index,

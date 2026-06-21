@@ -20,98 +20,23 @@ from benchmark_common import (
     profile_materialized_attempt,
     profile_query_time_us,
     repo_root,
+    row_bool,
     row_int,
     timed_materialized_attempt,
     write_csv,
 )
 
 from tpch_common import (
+    COUNTER_FIELDS,
     DEFAULT_POLICIES,
     DEFAULT_QUERIES,
+    PERFORMANCE_GAP_FIELDS,
+    RUN_FIELDS,
+    SUMMARY_FIELDS,
     TPCHConfigurationError,
     cleanup_tpch_database,
     prepare_tpch_database,
     read_query,
-)
-
-
-SUMMARY_FIELDS = (
-    "query",
-    "policy",
-    "run_count",
-    "min_s",
-    "median_s",
-    "mean_s",
-    "max_s",
-    "speedup_vs_off_median",
-    "correctness_diff",
-    *REGION_SUMMARY_FIELDS,
-)
-
-RUN_FIELDS = (
-    "query",
-    "policy",
-    "repeat",
-    "timing_mode",
-    "query_time_us",
-    "correctness_diff",
-    *REGION_SUMMARY_FIELDS,
-    "profile_json",
-)
-
-COUNTER_FIELDS = (
-    "query",
-    "policy",
-    "repeat",
-    "backend_name",
-    "target",
-    "status",
-    "execution_mode",
-    "region_execution_form",
-    "execution_body",
-    "selected_runner",
-    "requested_policy",
-    "runner_cost_profile",
-    "blocker",
-    "runner_cost_rows",
-    "runner_cost_batches",
-    "runner_cost_expression_cost",
-    "runner_cost_accelerated_stage_count",
-    "runner_cost_saved_work_per_batch",
-    "runner_cost_accelerated_runner_benefit",
-    "runner_cost_startup_cost",
-    "runner_cost_required_benefit",
-    "runner_cost_net_benefit",
-    "runner_cost_selected_accelerated_runner_count",
-    "count",
-    "decision_time_us",
-    "compile_time_us",
-    "code_size",
-)
-
-PERFORMANCE_GAP_FIELDS = (
-    "query",
-    "off_median_s",
-    "auto_median_s",
-    "force_median_s",
-    "auto_speedup_vs_off",
-    "force_speedup_vs_off",
-    "auto_compiled_regions",
-    "force_compiled_regions",
-    "auto_unsupported_decisions",
-    "auto_skipped_decisions",
-    "auto_decision_time_us",
-    "force_unsupported_decisions",
-    "force_compile_time_us",
-    "force_decision_time_us",
-    "force_code_size",
-    "auto_primary_blocker",
-    "auto_primary_blocker_count",
-    "auto_runner_cost_benefit",
-    "auto_runner_cost_startup_cost",
-    "auto_runner_cost_required_benefit",
-    "auto_runner_cost_net_benefit",
-    "auto_runner_cost_selected_accelerated_runner_count",
 )
 
 
@@ -121,12 +46,6 @@ def seconds(value_us: int) -> str:
 
 def median(values: list[int]) -> int:
     return int(round(statistics.median(values))) if values else 0
-
-
-def field_bool(value) -> bool:
-    if isinstance(value, bool):
-        return value
-    return str(value).lower() == "true"
 
 
 def create_baseline(args: argparse.Namespace, db_path: Path, query_id: str, query_sql: str) -> None:
@@ -218,13 +137,22 @@ def benchmark_counter_rows(counter_rows: list[dict], query_id: str, policy: str,
                 "runner_cost_rows": counter.get("runner_cost_rows", 0),
                 "runner_cost_batches": counter.get("runner_cost_batches", 0),
                 "runner_cost_expression_cost": counter.get("runner_cost_expression_cost", 0),
-                "runner_cost_accelerated_stage_count": counter.get("runner_cost_accelerated_stage_count", 0),
+                "runner_cost_generated_stage_count": counter.get("runner_cost_generated_stage_count", 0),
+                "runner_cost_materialization_elision_count": counter.get(
+                    "runner_cost_materialization_elision_count", 0
+                ),
+                "runner_cost_native_join_stage_count": counter.get("runner_cost_native_join_stage_count", 0),
+                "runner_cost_native_aggregate_stage_count": counter.get("runner_cost_native_aggregate_stage_count", 0),
+                "runner_cost_native_sort_stage_count": counter.get("runner_cost_native_sort_stage_count", 0),
+                "runner_cost_full_pipeline": counter.get("runner_cost_full_pipeline", False),
                 "runner_cost_saved_work_per_batch": counter.get("runner_cost_saved_work_per_batch", 0),
                 "runner_cost_accelerated_runner_benefit": counter.get("runner_cost_accelerated_runner_benefit", 0),
                 "runner_cost_startup_cost": counter.get("runner_cost_startup_cost", 0),
                 "runner_cost_required_benefit": counter.get("runner_cost_required_benefit", 0),
                 "runner_cost_net_benefit": counter.get("runner_cost_net_benefit", 0),
-                "runner_cost_selected_accelerated_runner_count": counter.get("runner_cost_selected_accelerated_runner_count", 0),
+                "runner_cost_selected_accelerated_runner_count": counter.get(
+                    "runner_cost_selected_accelerated_runner_count", 0
+                ),
                 "count": counter.get("count", 0),
                 "decision_time_us": counter.get("decision_time_us", 0),
                 "compile_time_us": counter.get("compile_time_us", 0),
@@ -285,20 +213,21 @@ def performance_gap_rows(summary_rows: list[dict], counter_rows: list[dict]) -> 
         blocker = row["blocker"] or row["status"] or "unknown"
         if row["status"] in ("skipped", "unsupported", "unavailable", "error"):
             auto_blockers[query][blocker] += count
-        if field_bool(row["runner_cost_profile"]):
+        if row_bool(row, "runner_cost_profile"):
             if blocker:
                 auto_runner_blockers[query][blocker] += count
             auto_runner_cost[query]["benefit"] += row_int(row, "runner_cost_accelerated_runner_benefit")
             auto_runner_cost[query]["startup_cost"] += row_int(row, "runner_cost_startup_cost")
             auto_runner_cost[query]["required_benefit"] += row_int(row, "runner_cost_required_benefit")
             auto_runner_cost[query]["net_benefit"] += row_int(row, "runner_cost_net_benefit")
-            auto_runner_cost[query]["selected_accelerated_runner"] += row_int(row, "runner_cost_selected_accelerated_runner_count")
+            auto_runner_cost[query]["selected_accelerated_runner"] += row_int(
+                row, "runner_cost_selected_accelerated_runner_count"
+            )
 
     rows = []
     for query in queries:
         off = by_query_policy.get((query, "off"), {})
         auto = by_query_policy.get((query, "auto"), {})
-        force = by_query_policy.get((query, "force"), {})
         primary_blocker = ""
         primary_blocker_count = 0
         if auto_runner_blockers[query]:
@@ -311,18 +240,11 @@ def performance_gap_rows(summary_rows: list[dict], counter_rows: list[dict]) -> 
                 "query": query,
                 "off_median_s": off.get("median_s", ""),
                 "auto_median_s": auto.get("median_s", ""),
-                "force_median_s": force.get("median_s", ""),
                 "auto_speedup_vs_off": auto.get("speedup_vs_off_median", ""),
-                "force_speedup_vs_off": force.get("speedup_vs_off_median", ""),
                 "auto_compiled_regions": auto.get("compiled_regions", ""),
-                "force_compiled_regions": force.get("compiled_regions", ""),
                 "auto_unsupported_decisions": auto.get("unsupported_decisions", ""),
                 "auto_skipped_decisions": auto.get("skipped_decisions", ""),
                 "auto_decision_time_us": auto.get("decision_time_us", ""),
-                "force_unsupported_decisions": force.get("unsupported_decisions", ""),
-                "force_compile_time_us": force.get("compile_time_us", ""),
-                "force_decision_time_us": force.get("decision_time_us", ""),
-                "force_code_size": force.get("code_size", ""),
                 "auto_primary_blocker": primary_blocker,
                 "auto_primary_blocker_count": primary_blocker_count,
                 "auto_runner_cost_benefit": runner_cost["benefit"],
@@ -355,6 +277,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--trace-decisions", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--trace-runtime", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--jit-verify", action="store_true")
+    parser.add_argument(
+        "--jit-cbo-setting",
+        action="append",
+        default=[],
+        metavar="NAME=VALUE",
+        help="repeatable JIT CBO setting override, e.g. jit_cbo_generated_stage_benefit=4096",
+    )
     return parser.parse_args()
 
 
@@ -388,7 +317,9 @@ def main() -> int:
         write_csv(out_dir / "runs.csv", RUN_FIELDS, rows)
         write_csv(out_dir / "summary.csv", SUMMARY_FIELDS, summary_rows)
         write_csv(out_dir / "counters.csv", COUNTER_FIELDS, counter_rows)
-        write_csv(out_dir / "performance_gaps.csv", PERFORMANCE_GAP_FIELDS, performance_gap_rows(summary_rows, counter_rows))
+        write_csv(
+            out_dir / "performance_gaps.csv", PERFORMANCE_GAP_FIELDS, performance_gap_rows(summary_rows, counter_rows)
+        )
         print(f"benchmark output: {out_dir}")
         print(f"summary: {out_dir / 'summary.csv'}")
     finally:

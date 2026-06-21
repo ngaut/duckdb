@@ -85,6 +85,9 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeTypedExpressionTree(const 
                                                                           SljitNativeIntegerKind result_kind,
                                                                           SljitNativeVectorFunction &function,
                                                                           string &error);
+unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeTypedExpressionTreeSelect(const ExecutionExpressionIR &root,
+                                                                                SljitNativeVectorFunction &function,
+                                                                                string &error);
 unique_ptr<ExecutionRegionCodeHandle>
 BuildSljitNativeUngroupedSumInt64ExpressionTree(const ExecutionExpressionIR &root,
                                                 SljitNativeAggregateUpdateFunction &function, string &error);
@@ -94,6 +97,10 @@ BuildSljitNativeUngroupedSumInt64TypedExpressionTree(const ExecutionExpressionIR
 unique_ptr<ExecutionRegionCodeHandle>
 BuildSljitNativeUngroupedSumHugeintTypedExpressionTree(const ExecutionExpressionIR &root,
                                                        SljitNativeAggregateUpdateFunction &function, string &error);
+unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeFilteredUngroupedFusedPrimitiveAggregateUpdate(
+    const ExecutionExpressionIR &predicate, const vector<SljitNativeRegionExpressionPlan> &payloads,
+    const vector<ExecutionRegionAggregateInput> &aggregates, SljitNativeAggregateUpdateFunction &function,
+    string &error);
 unique_ptr<ExecutionRegionCodeHandle>
 BuildSljitNativeUngroupedSumHugeintExpressionTree(const ExecutionExpressionIR &root,
                                                   SljitNativeAggregateUpdateFunction &function, string &error);
@@ -120,9 +127,10 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeUngroupedSumInt64IntegerBi
 unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeUngroupedSumInt64IntegerBinaryReferences(
     SljitNativeIntegerKind kind, SljitNativeIntegerBinaryOp op, SljitNativeAggregateUpdateFunction &function,
     string &error, bool check_result_range = false, int64_t result_min = 0, int64_t result_max = 0);
-unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeUngroupedSumDoubleDoubleBinaryConstant(
-    SljitNativeDoubleBinaryOp op, SljitNativeDoubleSourceKind source_kind, bool constant_on_left,
-    SljitNativeAggregateUpdateFunction &function, string &error);
+unique_ptr<ExecutionRegionCodeHandle>
+BuildSljitNativeUngroupedSumDoubleDoubleBinaryConstant(SljitNativeDoubleBinaryOp op,
+                                                       SljitNativeDoubleSourceKind source_kind, bool constant_on_left,
+                                                       SljitNativeAggregateUpdateFunction &function, string &error);
 unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeUngroupedSumDoubleDoubleBinaryReferences(
     SljitNativeDoubleBinaryOp op, SljitNativeDoubleSourceKind left_kind, SljitNativeDoubleSourceKind right_kind,
     SljitNativeAggregateUpdateFunction &function, string &error);

@@ -17,6 +17,6 @@ namespace duckdb {
 class ClientContext;
 
 unique_ptr<ExecutionRegionKernel> CreateSljitNativeRegionKernel(ClientContext &context, string backend_name,
-                                                          SljitExecutableRegion &&region, ExecutionRegionABI abi);
+                                                                SljitExecutableRegion &&region, ExecutionRegionABI abi);
 
 } // namespace duckdb

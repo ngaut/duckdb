@@ -115,9 +115,26 @@ struct SljitExecutableOrderSink {
 	}
 };
 
+struct SljitExecutableFilteredAggregateUpdate {
+	SljitExecutableRegionExpression filter;
+	vector<SljitExecutableRegionExpression> payloads;
+	vector<idx_t> input_source_indices;
+	unique_ptr<ExecutionRegionCodeHandle> code;
+	SljitNativeAggregateUpdateFunction function = nullptr;
+
+	bool IsExecutable() const {
+		return code && function;
+	}
+
+	idx_t CodeSize() const {
+		return code ? code->CodeSize() : 0;
+	}
+};
+
 struct SljitExecutableAggregateUpdate {
 	SljitNativeAggregateUpdatePlan plan;
 	vector<SljitExecutableRegionExpression> payloads;
+	SljitExecutableFilteredAggregateUpdate filtered_update;
 	unique_ptr<ExecutionRegionCodeHandle> fused_payload_update_code;
 	SljitNativeAggregateUpdateFunction fused_payload_update_function = nullptr;
 	bool fused_payload_update_owns_group_lookup = false;
@@ -129,6 +146,7 @@ struct SljitExecutableAggregateUpdate {
 		for (auto &payload : payloads) {
 			result += payload.CodeSize();
 		}
+		result += filtered_update.CodeSize();
 		result += fused_payload_update_code ? fused_payload_update_code->CodeSize() : 0;
 		for (auto &code : payload_update_code) {
 			result += code ? code->CodeSize() : 0;
@@ -151,7 +169,6 @@ struct SljitExecutableRegionOp {
 	SljitExecutableOrderSink order_sink;
 	SljitExecutableAggregateUpdate aggregate_update;
 	vector<SljitExecutableRegionExpression> projections;
-	bool use_vectorized_projection = false;
 
 	idx_t CodeSize() const {
 		idx_t result = 0;

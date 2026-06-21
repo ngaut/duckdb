@@ -12,6 +12,7 @@
 namespace duckdb {
 
 ExecutionRegionLoweringPlan AnalyzeSljitRegion(const ExecutionRegionCompilationInput &input);
-ExecutionRegionCompileResult CompileSljitRegion(const string &backend_name, const ExecutionRegionCompilationInput &input);
+ExecutionRegionCompileResult CompileSljitRegion(const string &backend_name,
+                                                const ExecutionRegionCompilationInput &input);
 
 } // namespace duckdb

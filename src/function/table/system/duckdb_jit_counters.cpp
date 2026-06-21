@@ -14,127 +14,130 @@ static void AppendJitCounterColumn(Vector &output, idx_t column_id, const Execut
 		output.Append(Value(entry.backend_name));
 		return;
 	case 1:
-		output.Append(Value(ExecutionRegionCompileTargetToString(entry.target_kind)));
-		return;
-	case 2:
 		output.Append(Value(ExecutionRegionEventStatusToString(entry.status_kind)));
 		return;
-	case 3:
+	case 2:
 		output.Append(Value(ExecutionRegionExecutionModeToString(entry.execution_mode_kind)));
 		return;
-	case 4:
-		output.Append(Value(ExecutionRegionFormToString(entry.region_execution_form_kind)));
-		return;
-	case 5:
-		output.Append(Value(ExecutionRegionExecutionBodyToString(entry.execution_body_kind)));
-		return;
-	case 6:
+	case 3:
 		output.Append(Value(ExecutionRunnerKindToString(entry.selected_runner_kind)));
 		return;
-	case 7:
-		output.Append(Value(ExecutionRegionEventPolicyToString(entry.requested_policy_kind)));
-		return;
-	case 8:
+	case 4:
 		AppendExecutionRegionNullableString(output, entry.blocker);
 		return;
-	case 9:
+	case 5:
 		output.Append(Value::UBIGINT(entry.count));
 		return;
-	case 10:
+	case 6:
 		output.Append(Value::BIGINT(entry.decision_time_us));
 		return;
-	case 11:
+	case 7:
 		output.Append(Value::BIGINT(entry.compile_time_us));
 		return;
-	case 12:
+	case 8:
 		output.Append(Value::UBIGINT(entry.code_size));
 		return;
-	case 13:
+	case 9:
 		output.Append(Value::UBIGINT(entry.input_rows));
 		return;
-	case 14:
+	case 10:
 		output.Append(Value::UBIGINT(entry.output_rows));
 		return;
-	case 15:
+	case 11:
 		output.Append(Value::UBIGINT(entry.invocation_count));
 		return;
-	case 16:
+	case 12:
 		output.Append(Value::BIGINT(entry.runtime_time_us));
 		return;
-	case 17:
+	case 13:
 		output.Append(Value::UBIGINT(entry.source_contract_output_rows));
 		return;
-	case 18:
+	case 14:
 		output.Append(Value::UBIGINT(entry.source_contract_invocation_count));
 		return;
-	case 19:
+	case 15:
 		output.Append(Value::BIGINT(entry.source_contract_runtime_time_us));
 		return;
-	case 20:
+	case 16:
 		AppendExecutionRegionNullableString(output,
 		                                    RenderExecutionRegionStageRuntimeBreakdown(entry.source_stage_runtime));
 		return;
-	case 21:
+	case 17:
 		AppendExecutionRegionNullableString(output,
 		                                    RenderExecutionRegionStageCountBreakdown(entry.source_stage_runtime));
 		return;
-	case 22:
+	case 18:
 		output.Append(Value::UBIGINT(entry.sink_next_batch_invocation_count));
 		return;
-	case 23:
+	case 19:
 		output.Append(Value::BIGINT(entry.sink_next_batch_runtime_time_us));
 		return;
-	case 24:
+	case 20:
 		output.Append(Value::BIGINT(entry.generated_body_runtime_time_us));
 		return;
-	case 25:
+	case 21:
 		AppendExecutionRegionNullableString(output,
 		                                    RenderExecutionRegionStageRuntimeBreakdown(entry.generated_stage_runtime));
 		return;
-	case 26:
+	case 22:
 		AppendExecutionRegionNullableString(output,
 		                                    RenderExecutionRegionStageCountBreakdown(entry.generated_stage_runtime));
 		return;
-	case 27:
+	case 23:
 		output.Append(Value::BIGINT(entry.ir_lowering_time_us));
 		return;
-	case 28:
+	case 24:
 		output.Append(Value::BIGINT(entry.backend_analysis_time_us));
 		return;
-	case 29:
+	case 25:
 		output.Append(Value::BIGINT(entry.codegen_time_us));
 		return;
-	case 30:
+	case 26:
 		output.Append(Value::BOOLEAN(entry.has_runner_cost));
 		return;
-	case 31:
+	case 27:
 		output.Append(Value::BIGINT(entry.runner_cost_rows));
 		return;
-	case 32:
+	case 28:
 		output.Append(Value::BIGINT(entry.runner_cost_batches));
 		return;
-	case 33:
+	case 29:
 		output.Append(Value::BIGINT(entry.runner_cost_expression_cost));
 		return;
+	case 30:
+		output.Append(Value::BIGINT(entry.runner_cost_generated_stage_count));
+		return;
+	case 31:
+		output.Append(Value::BIGINT(entry.runner_cost_materialization_elision_count));
+		return;
+	case 32:
+		output.Append(Value::BIGINT(entry.runner_cost_native_join_stage_count));
+		return;
+	case 33:
+		output.Append(Value::BIGINT(entry.runner_cost_native_aggregate_stage_count));
+		return;
 	case 34:
-		output.Append(Value::BIGINT(entry.runner_cost_accelerated_stage_count));
+		output.Append(Value::BIGINT(entry.runner_cost_native_sort_stage_count));
 		return;
 	case 35:
-		output.Append(Value::BIGINT(entry.runner_cost_saved_work_per_batch));
+		output.Append(Value::BOOLEAN(entry.runner_cost_full_pipeline));
 		return;
 	case 36:
-		output.Append(Value::BIGINT(entry.runner_cost_accelerated_runner_benefit));
+		output.Append(Value::BIGINT(entry.runner_cost_saved_work_per_batch));
 		return;
 	case 37:
-		output.Append(Value::BIGINT(entry.runner_cost_startup_cost));
+		output.Append(Value::BIGINT(entry.runner_cost_accelerated_runner_benefit));
 		return;
 	case 38:
-		output.Append(Value::BIGINT(entry.runner_cost_required_benefit));
+		output.Append(Value::BIGINT(entry.runner_cost_startup_cost));
 		return;
 	case 39:
-		output.Append(Value::BIGINT(entry.runner_cost_net_benefit));
+		output.Append(Value::BIGINT(entry.runner_cost_required_benefit));
 		return;
 	case 40:
+		output.Append(Value::BIGINT(entry.runner_cost_net_benefit));
+		return;
+	case 41:
 		output.Append(Value::UBIGINT(entry.runner_cost_selected_accelerated_runner_count));
 		return;
 	default:
@@ -146,19 +149,11 @@ static unique_ptr<FunctionData> DuckDBJitCountersBind(ClientContext &context, Ta
                                                       vector<LogicalType> &return_types, vector<string> &names) {
 	names.emplace_back("backend_name");
 	return_types.emplace_back(LogicalType::VARCHAR);
-	names.emplace_back("target");
-	return_types.emplace_back(LogicalType::VARCHAR);
 	names.emplace_back("status");
 	return_types.emplace_back(LogicalType::VARCHAR);
 	names.emplace_back("execution_mode");
 	return_types.emplace_back(LogicalType::VARCHAR);
-	names.emplace_back("region_execution_form");
-	return_types.emplace_back(LogicalType::VARCHAR);
-	names.emplace_back("execution_body");
-	return_types.emplace_back(LogicalType::VARCHAR);
 	names.emplace_back("selected_runner");
-	return_types.emplace_back(LogicalType::VARCHAR);
-	names.emplace_back("requested_policy");
 	return_types.emplace_back(LogicalType::VARCHAR);
 	names.emplace_back("blocker");
 	return_types.emplace_back(LogicalType::VARCHAR);
@@ -212,8 +207,18 @@ static unique_ptr<FunctionData> DuckDBJitCountersBind(ClientContext &context, Ta
 	return_types.emplace_back(LogicalType::BIGINT);
 	names.emplace_back("runner_cost_expression_cost");
 	return_types.emplace_back(LogicalType::BIGINT);
-	names.emplace_back("runner_cost_accelerated_stage_count");
+	names.emplace_back("runner_cost_generated_stage_count");
 	return_types.emplace_back(LogicalType::BIGINT);
+	names.emplace_back("runner_cost_materialization_elision_count");
+	return_types.emplace_back(LogicalType::BIGINT);
+	names.emplace_back("runner_cost_native_join_stage_count");
+	return_types.emplace_back(LogicalType::BIGINT);
+	names.emplace_back("runner_cost_native_aggregate_stage_count");
+	return_types.emplace_back(LogicalType::BIGINT);
+	names.emplace_back("runner_cost_native_sort_stage_count");
+	return_types.emplace_back(LogicalType::BIGINT);
+	names.emplace_back("runner_cost_full_pipeline");
+	return_types.emplace_back(LogicalType::BOOLEAN);
 	names.emplace_back("runner_cost_saved_work_per_batch");
 	return_types.emplace_back(LogicalType::BIGINT);
 	names.emplace_back("runner_cost_accelerated_runner_benefit");

@@ -179,10 +179,6 @@ static void MarkExecutionContractNativeStateScanContractBlocked(ExecutionRegionN
 	contract.blocker = std::move(blocker);
 }
 
-static string ExecutionContractBlockerForReason(const string &blocker) {
-	return blocker.empty() ? "none" : blocker;
-}
-
 static void AppendExecutionContractNativeStateScanReason(string &reason,
                                                          const ExecutionRegionNativeStateScanContract &contract) {
 	if (contract.status == ExecutionRegionStateContractStatus::NONE) {
@@ -192,7 +188,9 @@ static void AppendExecutionContractNativeStateScanReason(string &reason,
 	reason += ExecutionRegionStateContractStatusToString(contract.status);
 	reason += ";native_state_scan_required_capability=" + contract.required_capability;
 	reason += ";native_state_scan_contract_version=" + contract.contract_version;
-	reason += ";native_state_scan_blocker=" + ExecutionContractBlockerForReason(contract.blocker);
+	if (!contract.blocker.empty()) {
+		reason += ";native_state_scan_blocker=" + contract.blocker;
+	}
 }
 
 static void AppendExecutionContractNativeGroupedStateReason(string &reason,
@@ -204,7 +202,9 @@ static void AppendExecutionContractNativeGroupedStateReason(string &reason,
 	reason += ExecutionRegionStateContractStatusToString(contract.status);
 	reason += ";native_grouped_state_required_capability=" + contract.required_capability;
 	reason += ";native_grouped_state_contract_version=" + contract.contract_version;
-	reason += ";native_grouped_state_blocker=" + ExecutionContractBlockerForReason(contract.blocker);
+	if (!contract.blocker.empty()) {
+		reason += ";native_grouped_state_blocker=" + contract.blocker;
+	}
 }
 
 static void AppendExecutionContractNativeOperatorReason(string &reason,
@@ -217,7 +217,9 @@ static void AppendExecutionContractNativeOperatorReason(string &reason,
 	reason += ExecutionRegionStateContractStatusToString(contract.status);
 	reason += ";" + prefix + "_required_capability=" + contract.required_capability;
 	reason += ";" + prefix + "_contract_version=" + contract.contract_version;
-	reason += ";" + prefix + "_blocker=" + ExecutionContractBlockerForReason(contract.blocker);
+	if (!contract.blocker.empty()) {
+		reason += ";" + prefix + "_blocker=" + contract.blocker;
+	}
 }
 
 static void AppendExecutionContractGroupedStateLayoutReason(string &reason,
@@ -553,7 +555,6 @@ static ExecutionCompiledContractKind ExecutionCompiledSinkOperation(const Execut
 	case ExecutionRegionSinkKind::MATERIALIZATION:
 		return ExecutionCompiledContractKind::SINK_CURSOR;
 	case ExecutionRegionSinkKind::SORT:
-	case ExecutionRegionSinkKind::OPERATOR:
 	case ExecutionRegionSinkKind::DELIM_JOIN_SINK:
 		return ExecutionCompiledContractKind::SINK_CURSOR;
 	default:
@@ -1394,7 +1395,7 @@ static ExecutionRegionOrderKeyInput BuildExecutionContractOrderKeyInput(const Bo
 	result.expression = std::move(*expression);
 	result.expression_ready = true;
 	result.expression_blocker.clear();
-	result.reason += ";expression_ready=true;expression_blocker=none";
+	result.reason += ";expression_ready=true";
 	return result;
 }
 
@@ -2020,8 +2021,9 @@ BuildExecutionContractAggregateInput(idx_t aggregate_idx, const unique_ptr<Expre
 		result.primitive_update_state_size = abi.state_size;
 		result.primitive_update_state_value_offset = abi.state_value_offset;
 		result.primitive_update_state_is_set_offset = abi.state_is_set_offset;
-		result.primitive_update_blocker =
-		    result.primitive_update_ready ? "none" : "aggregate primitive update ABI is not ready";
+		if (!result.primitive_update_ready) {
+			result.primitive_update_blocker = "aggregate primitive update ABI is not ready";
+		}
 	} else {
 		result.primitive_update_blocker = "aggregate function has no primitive update ABI";
 	}
@@ -2251,7 +2253,7 @@ ExecutionContract PhysicalColumnDataScan::GetExecutionContract() const {
 ExecutionContract PhysicalHashJoin::GetExecutionContract() const {
 	ExecutionContract result;
 	auto contract = BuildExecutionContractHashJoinContract(*this);
-	auto state_scan_contract = BuildExecutionContractNativeStateScanContract("hash-join-native-state-scan", "none");
+	auto state_scan_contract = BuildExecutionContractNativeStateScanContract("hash-join-native-state-scan", string());
 	if (contract.source_produces_rows) {
 		MarkExecutionContractNativeStateScanContractReady(state_scan_contract);
 	} else {
@@ -2363,7 +2365,7 @@ ExecutionContract PhysicalHashAggregate::GetExecutionContract() const {
 	auto sink_groups = BuildExecutionContractGroupInputs(*this);
 	MarkExecutionContractAggregateStateUpdateContract(contract, sink_aggregates, sink_groups);
 	auto state_scan_contract =
-	    BuildExecutionContractNativeStateScanContract("hash-aggregate-native-state-scan", "none");
+	    BuildExecutionContractNativeStateScanContract("hash-aggregate-native-state-scan", string());
 	MarkExecutionContractNativeStateScanContractReady(state_scan_contract);
 	result.source_boundary_reason =
 	    BuildExecutionContractHashAggregateBoundaryReason(*this, "DuckDB hash aggregate native state scan contract");

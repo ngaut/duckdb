@@ -1,6 +1,6 @@
 #include "duckdb/planner/cost_model.hpp"
 
-#include "duckdb/common/unordered_map.hpp"
+#include "duckdb/common/string_util.hpp"
 #include "duckdb/planner/expression.hpp"
 #include "duckdb/planner/expression/bound_between_expression.hpp"
 #include "duckdb/planner/expression/bound_case_expression.hpp"
@@ -23,6 +23,7 @@
 namespace duckdb {
 
 static idx_t DuckDBExpressionCost(const Expression &expr);
+static constexpr int64_t BASIS_POINT_SCALE = 10000;
 
 static int64_t SaturatingCostCast(idx_t value) {
 	auto max_value = static_cast<idx_t>(std::numeric_limits<int64_t>::max());
@@ -44,6 +45,14 @@ static int64_t MultiplyCost(int64_t left, int64_t right) {
 		return std::numeric_limits<int64_t>::max();
 	}
 	return left * right;
+}
+
+static int64_t FractionalCost(int64_t value, int64_t numerator, int64_t denominator) {
+	if (value <= 0 || numerator <= 0) {
+		return 0;
+	}
+	auto multiplied = MultiplyCost(value, numerator);
+	return multiplied / denominator;
 }
 
 static idx_t DuckDBPhysicalTypeCost(PhysicalType return_type, idx_t multiplier) {
@@ -102,6 +111,67 @@ static idx_t DuckDBConjunctionExpressionCost(const BoundConjunctionExpression &e
 	return cost;
 }
 
+static bool DuckDBKnownFunctionCost(const string &name, idx_t &cost) {
+	switch (name.size()) {
+	case 1:
+		if (name == "+" || name == "-" || name == "&" || name == "#") {
+			cost = 5;
+			return true;
+		}
+		if (name == "*" || name == "%") {
+			cost = 10;
+			return true;
+		}
+		if (name == "/") {
+			cost = 15;
+			return true;
+		}
+		return false;
+	case 2:
+		if (name == ">>" || name == "<<" || name == "~~" || name == "||") {
+			cost = name == "~~" || name == "||" ? 200 : 5;
+			return true;
+		}
+		return false;
+	case 3:
+		if (StringUtil::CIEquals(name, "abs")) {
+			cost = 5;
+			return true;
+		}
+		if (name == "!~~") {
+			cost = 200;
+			return true;
+		}
+		return false;
+	case 4:
+		if (StringUtil::CIEquals(name, "year")) {
+			cost = 20;
+			return true;
+		}
+		return false;
+	case 5:
+		if (StringUtil::CIEquals(name, "round")) {
+			cost = 100;
+			return true;
+		}
+		return false;
+	case 9:
+		if (StringUtil::CIEquals(name, "date_part")) {
+			cost = 20;
+			return true;
+		}
+		return false;
+	case 14:
+		if (StringUtil::CIEquals(name, "regexp_matches")) {
+			cost = 200;
+			return true;
+		}
+		return false;
+	default:
+		return false;
+	}
+}
+
 static idx_t DuckDBFunctionExpressionCost(const BoundFunctionExpression &expr) {
 	if (expr.GetExpressionType() == ExpressionType::COMPARE_BETWEEN) {
 		return DuckDBBetweenExpressionCost(expr);
@@ -109,20 +179,15 @@ static idx_t DuckDBFunctionExpressionCost(const BoundFunctionExpression &expr) {
 	if (BoundComparisonExpression::IsComparison(expr)) {
 		return DuckDBComparisonExpressionCost(expr);
 	}
-	identifier_map_t<idx_t> function_costs = {{"+", 5},       {"-", 5},    {"&", 5},          {"#", 5},
-	                                          {">>", 5},      {"<<", 5},   {"abs", 5},        {"*", 10},
-	                                          {"%", 10},      {"/", 15},   {"date_part", 20}, {"year", 20},
-	                                          {"round", 100}, {"~~", 200}, {"!~~", 200},      {"regexp_matches", 200},
-	                                          {"||", 200}};
 
 	idx_t cost_children = 0;
 	for (auto &child : expr.GetChildren()) {
 		cost_children += DuckDBExpressionCost(*child);
 	}
 
-	auto cost_function = function_costs.find(expr.Function().GetName());
-	if (cost_function != function_costs.end()) {
-		return cost_children + cost_function->second;
+	idx_t function_cost = 0;
+	if (DuckDBKnownFunctionCost(expr.Function().GetName().GetIdentifierName(), function_cost)) {
+		return cost_children + function_cost;
 	}
 	return cost_children + 1000;
 }
@@ -227,60 +292,83 @@ static int64_t PhysicalRunnerBatches(int64_t rows) {
 	return AddCost(rows, STANDARD_VECTOR_SIZE - 1) / STANDARD_VECTOR_SIZE;
 }
 
-static int64_t PhysicalRunnerSavedWorkPerBatch(const PhysicalRunnerCostInput &input) {
+static int64_t PhysicalRunnerSavedWorkPerBatch(const PhysicalRunnerCostInput &input,
+                                               const PhysicalRunnerCostParameters &parameters) {
 	auto work = SaturatingCostCast(input.expression_cost);
-	work = AddCost(work, MultiplyCost(SaturatingCostCast(input.accelerated_stage_count), 64));
-	if (work > 0 && input.full_pipeline) {
-		work = AddCost(work, 128);
+	work = AddCost(work, MultiplyCost(SaturatingCostCast(input.generated_stage_count),
+	                                  SaturatingCostCast(parameters.generated_stage_benefit)));
+	const auto native_operator_stage_count = AddCost(AddCost(SaturatingCostCast(input.native_join_stage_count),
+	                                                         SaturatingCostCast(input.native_aggregate_stage_count)),
+	                                                 SaturatingCostCast(input.native_sort_stage_count));
+	work = AddCost(
+	    work, MultiplyCost(native_operator_stage_count, SaturatingCostCast(parameters.native_operator_stage_benefit)));
+	if (input.materialization_elision_count > 0) {
+		auto elision_work = MultiplyCost(SaturatingCostCast(input.materialization_elision_count),
+		                                 SaturatingCostCast(parameters.materialization_elision_benefit));
+		work = AddCost(work, elision_work);
 	}
-	work = AddCost(work, 64);
+	if (input.full_pipeline) {
+		work = AddCost(work, SaturatingCostCast(parameters.full_pipeline_benefit));
+	}
 	return work;
 }
 
-static int64_t PhysicalRunnerStartupCost(const PhysicalRunnerCostInput &input) {
-	int64_t cost = 32000;
-	cost = AddCost(cost, MultiplyCost(SaturatingCostCast(input.node_count), 512));
-	cost = AddCost(cost, MultiplyCost(SaturatingCostCast(input.stage_count), 1024));
-	cost = AddCost(cost, MultiplyCost(SaturatingCostCast(input.expression_node_count), 512));
-	cost = AddCost(cost, MultiplyCost(SaturatingCostCast(input.operator_count), 2048));
-	return cost;
+static int64_t PhysicalRunnerStartupCost(const PhysicalRunnerCostParameters &parameters) {
+	return SaturatingCostCast(parameters.startup_base_cost);
 }
 
-static int64_t PhysicalRunnerRequiredBenefit(const PhysicalRunnerCostProfile &profile) {
-	auto margin = profile.startup_cost / 8;
-	auto batch_margin = MultiplyCost(profile.batches, 4);
-	if (batch_margin > margin) {
-		margin = batch_margin;
-	}
+static int64_t PhysicalRunnerRequiredBenefit(const PhysicalRunnerCostProfile &profile,
+                                             const PhysicalRunnerCostParameters &parameters) {
+	auto margin = FractionalCost(profile.startup_cost, SaturatingCostCast(parameters.startup_margin_basis_points),
+	                             BASIS_POINT_SCALE);
 	return AddCost(profile.startup_cost, margin);
 }
 
 static bool PhysicalRunnerHasAcceleratedWork(const PhysicalRunnerCostInput &input,
+                                             const PhysicalRunnerCostParameters &parameters,
                                              const PhysicalRunnerCostProfile &profile) {
-	return input.has_accelerated_work && input.accelerated_stage_count > 0 && profile.saved_work_per_batch > 0;
+	const auto native_operator_stage_count =
+	    input.native_join_stage_count + input.native_aggregate_stage_count + input.native_sort_stage_count;
+	const bool native_operator_work_is_costed = native_operator_stage_count == 0 ||
+	                                            parameters.native_operator_stage_benefit > 0 ||
+	                                            (input.full_pipeline && parameters.full_pipeline_benefit > 0);
+	const bool has_costed_acceleration =
+	    (input.generated_stage_count > 0 && parameters.generated_stage_benefit > 0) ||
+	    (native_operator_stage_count > 0 && parameters.native_operator_stage_benefit > 0) ||
+	    (input.materialization_elision_count > 0 && parameters.materialization_elision_benefit > 0) ||
+	    (input.full_pipeline && parameters.full_pipeline_benefit > 0);
+	return input.has_accelerated_work && native_operator_work_is_costed && has_costed_acceleration &&
+	       profile.saved_work_per_batch > 0;
 }
 
 static bool PhysicalRunnerShouldSelectAccelerated(const PhysicalRunnerCostInput &input,
+                                                  const PhysicalRunnerCostParameters &parameters,
                                                   const PhysicalRunnerCostProfile &profile) {
-	if (!PhysicalRunnerHasAcceleratedWork(input, profile)) {
+	if (!PhysicalRunnerHasAcceleratedWork(input, parameters, profile)) {
 		return false;
 	}
 	return profile.accelerated_runner_benefit > profile.required_benefit;
 }
 
-PhysicalRunnerCostProfile DuckDBCostModel::SelectPhysicalRunner(const PhysicalRunnerCostInput &input) {
+PhysicalRunnerCostProfile DuckDBCostModel::SelectPhysicalRunner(const PhysicalRunnerCostInput &input,
+                                                                const PhysicalRunnerCostParameters &parameters) {
 	PhysicalRunnerCostProfile profile;
 	profile.present = true;
 	profile.rows = PhysicalRunnerRows(input);
 	profile.batches = PhysicalRunnerBatches(profile.rows);
 	profile.expression_cost = SaturatingCostCast(input.expression_cost);
-	profile.accelerated_stage_count = SaturatingCostCast(input.accelerated_stage_count);
-	profile.saved_work_per_batch = PhysicalRunnerSavedWorkPerBatch(input);
+	profile.generated_stage_count = SaturatingCostCast(input.generated_stage_count);
+	profile.materialization_elision_count = SaturatingCostCast(input.materialization_elision_count);
+	profile.native_join_stage_count = SaturatingCostCast(input.native_join_stage_count);
+	profile.native_aggregate_stage_count = SaturatingCostCast(input.native_aggregate_stage_count);
+	profile.native_sort_stage_count = SaturatingCostCast(input.native_sort_stage_count);
+	profile.full_pipeline = input.full_pipeline;
+	profile.saved_work_per_batch = PhysicalRunnerSavedWorkPerBatch(input, parameters);
 	profile.accelerated_runner_benefit = MultiplyCost(profile.batches, profile.saved_work_per_batch);
-	profile.startup_cost = PhysicalRunnerStartupCost(input);
-	profile.required_benefit = PhysicalRunnerRequiredBenefit(profile);
+	profile.startup_cost = PhysicalRunnerStartupCost(parameters);
+	profile.required_benefit = PhysicalRunnerRequiredBenefit(profile, parameters);
 	profile.net_benefit = profile.accelerated_runner_benefit - profile.startup_cost;
-	profile.selected_accelerated_runner = PhysicalRunnerShouldSelectAccelerated(input, profile);
+	profile.selected_accelerated_runner = PhysicalRunnerShouldSelectAccelerated(input, parameters, profile);
 	return profile;
 }
 

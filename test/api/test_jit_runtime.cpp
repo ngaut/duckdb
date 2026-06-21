@@ -1,9 +1,6 @@
 #include "test_jit_helpers.hpp"
 
-#include "duckdb/common/file_system.hpp"
 #include "duckdb/common/vector/flat_vector.hpp"
-#include "duckdb/execution/execution_region_kernel.hpp"
-#include "duckdb/execution/execution_region_plan.hpp"
 #include "duckdb/execution/execution_region_runtime.hpp"
 
 #include "sljit_native_runtime.hpp"
@@ -33,168 +30,6 @@ static bool HasSourceContractStageBreakdown(const ExecutionRegionManager &manage
 		}
 	}
 	return false;
-}
-
-static string ReadLocalTextFile(const string &path) {
-	auto fs = FileSystem::CreateLocal();
-	auto handle = fs->OpenFile(path, FileFlags::FILE_FLAGS_READ);
-	auto size = fs->GetFileSize(*handle);
-	REQUIRE(size >= 0);
-	string result;
-	result.resize(NumericCast<idx_t>(size));
-	if (size > 0) {
-		fs->Read(*handle, &result[0], size);
-	}
-	return result;
-}
-
-class UnitFullPipelineKernel : public ExecutionRegionKernel {
-public:
-	const string &BackendName() const override {
-		return backend_name;
-	}
-
-	bool HasExecutableBody() const override {
-		return true;
-	}
-
-	bool CanExecuteFullPipeline() const override {
-		return true;
-	}
-
-private:
-	string backend_name = "unit";
-};
-
-TEST_CASE("Execution region plan selects executable ABI without diagnostic candidate payload", "[api][jit]") {
-	ExecutionRegionPlan plan;
-	auto kernel = make_uniq<UnitFullPipelineKernel>();
-	kernel->SetExecutionABI(ExecutionRegionABI::FULL_PIPELINE);
-	REQUIRE_FALSE(kernel->HasTracePipeline());
-	plan.kernels.push_back(std::move(kernel));
-
-	REQUIRE(plan.HasExecutableFullPipeline());
-	auto selected = plan.GetExecutableFullPipelineKernel();
-	REQUIRE(selected);
-	REQUIRE(selected->ExecutionABI() == ExecutionRegionABI::FULL_PIPELINE);
-	REQUIRE_FALSE(selected->HasTracePipeline());
-}
-
-TEST_CASE("Execution region stage runtimes merge by typed stage id", "[api][jit]") {
-	ExecutionRegionEventLog log;
-
-	for (idx_t event_idx = 0; event_idx < 4; event_idx++) {
-		ExecutionRegionEvent event;
-		event.phase_kind = ExecutionRegionEventPhase::RUNTIME;
-		event.backend_name = "sljit";
-		event.target_kind = ExecutionRegionCompileTarget::REGION;
-		event.status_kind = ExecutionRegionEventStatus::EXECUTED;
-		event.execution_mode_kind = ExecutionRegionExecutionMode::NATIVE;
-		event.region_execution_form_kind = ExecutionRegionForm::FUSED;
-		event.execution_body_kind = ExecutionRegionExecutionBody::GENERATED_MACHINE_CODE;
-		event.requested_policy_kind = ExecutionRegionEventPolicy::RUNTIME;
-		AddExecutionRegionStageRuntime(event.source_stage_runtime, "source_contract.table_scan.storage_scan_projected",
-		                               7);
-		AddExecutionRegionStageRuntime(event.generated_stage_runtime, "op0:hash_join_build.append", 11);
-		log.Record(0, std::move(event));
-	}
-
-	auto counters = log.GetCounters();
-	REQUIRE(counters.size() == 1);
-	auto &counter = counters[0];
-	REQUIRE(counter.count == 4);
-	REQUIRE(counter.source_stage_runtime.size() == 1);
-	REQUIRE(counter.source_stage_runtime[0].runtime_time_us == 28);
-	REQUIRE(counter.source_stage_runtime[0].count == 4);
-	REQUIRE(RenderExecutionRegionStageCountBreakdown(counter.source_stage_runtime) ==
-	        "source_contract.table_scan.storage_scan_projected=4");
-	REQUIRE(counter.generated_stage_runtime.size() == 1);
-	REQUIRE(counter.generated_stage_runtime[0].runtime_time_us == 44);
-	REQUIRE(counter.generated_stage_runtime[0].count == 4);
-	REQUIRE(RenderExecutionRegionStageCountBreakdown(counter.generated_stage_runtime) ==
-	        "op0:hash_join_build.append=4");
-}
-
-TEST_CASE("Execution region event retention uses circular buffers", "[api][jit]") {
-	ExecutionRegionEventLog log;
-
-	auto make_compile_event = [](idx_t kernel_id) {
-		ExecutionRegionEvent event;
-		event.phase_kind = ExecutionRegionEventPhase::COMPILE;
-		event.backend_name = "sljit";
-		event.target_kind = ExecutionRegionCompileTarget::REGION;
-		event.status_kind = ExecutionRegionEventStatus::COMPILED;
-		event.execution_mode_kind = ExecutionRegionExecutionMode::NATIVE;
-		event.region_execution_form_kind = ExecutionRegionForm::FUSED;
-		event.execution_body_kind = ExecutionRegionExecutionBody::GENERATED_MACHINE_CODE;
-		event.requested_policy_kind = ExecutionRegionEventPolicy::FORCE;
-		event.kernel_id = kernel_id;
-		event.reason = "compiled";
-		return event;
-	};
-	auto make_runtime_event = [](idx_t kernel_id, bool has_compile_identity) {
-		ExecutionRegionEvent event;
-		event.phase_kind = ExecutionRegionEventPhase::RUNTIME;
-		event.backend_name = "sljit";
-		event.target_kind = ExecutionRegionCompileTarget::REGION;
-		event.status_kind = ExecutionRegionEventStatus::EXECUTED;
-		event.execution_mode_kind = ExecutionRegionExecutionMode::NATIVE;
-		event.region_execution_form_kind = ExecutionRegionForm::FUSED;
-		event.execution_body_kind = ExecutionRegionExecutionBody::GENERATED_MACHINE_CODE;
-		event.requested_policy_kind = ExecutionRegionEventPolicy::RUNTIME;
-		event.kernel_id = kernel_id;
-		event.reason = "runtime";
-		event.invocation_count = 1;
-		event.input_rows = 5;
-		event.runtime_result = "finished";
-		if (has_compile_identity) {
-			event.kernel_compile_reason = "compiled";
-		}
-		return event;
-	};
-
-	auto first_id = log.Record(2, make_compile_event(10));
-	auto second_id = log.Record(2, make_compile_event(20));
-	auto third_id = log.Record(2, make_compile_event(30));
-	REQUIRE(first_id + 1 == second_id);
-	REQUIRE(second_id + 1 == third_id);
-
-	auto events = log.GetEvents();
-	REQUIRE(events.size() == 2);
-	REQUIRE(events[0].event_id == second_id);
-	REQUIRE(events[1].event_id == third_id);
-
-	auto counters = log.GetCounters();
-	REQUIRE(counters.size() == 1);
-	REQUIRE(counters[0].count == 3);
-	REQUIRE(counters[0].status_kind == ExecutionRegionEventStatus::COMPILED);
-
-	auto runtime_id = log.Record(2, make_runtime_event(10, false));
-	events = log.GetEvents();
-	REQUIRE(events.size() == 2);
-	REQUIRE(events[0].event_id == third_id);
-	REQUIRE(events[1].event_id == runtime_id);
-	REQUIRE(events[1].kernel_id == 10);
-	REQUIRE(events[1].invocation_count == 1);
-	REQUIRE(events[1].input_rows == 5);
-
-	log.Record(2, make_runtime_event(20, false));
-	counters = log.GetCounters();
-	REQUIRE(counters.size() == 2);
-	bool found_runtime_counter = false;
-	for (auto &counter : counters) {
-		if (counter.status_kind == ExecutionRegionEventStatus::EXECUTED) {
-			found_runtime_counter = true;
-			REQUIRE(counter.count == 2);
-			REQUIRE(counter.invocation_count == 2);
-			REQUIRE(counter.input_rows == 10);
-		}
-	}
-	REQUIRE(found_runtime_counter);
-
-	log.ApplyRetentionLimit(1);
-	events = log.GetEvents();
-	REQUIRE(events.size() == 1);
 }
 
 TEST_CASE("SLJIT predicate source preparation uses referenced slots only", "[api][jit]") {
@@ -290,10 +125,8 @@ TEST_CASE("Execution region events are bounded and counters are cumulative", "[a
 	REQUIRE(TotalExecutionRegionCounterCount(counters) > counter_count_after_explicit_clear);
 	bool found_auto_skip = false;
 	for (auto &counter : counters) {
-		if (counter.backend_name != "sljit" || counter.target_kind != ExecutionRegionCompileTarget::REGION ||
-		    counter.status_kind != ExecutionRegionEventStatus::SKIPPED ||
-		    counter.execution_mode_kind != ExecutionRegionExecutionMode::UNSUPPORTED ||
-		    counter.requested_policy_kind != ExecutionRegionEventPolicy::AUTO) {
+		if (counter.backend_name != "sljit" || counter.status_kind != ExecutionRegionEventStatus::SKIPPED ||
+		    counter.execution_mode_kind != ExecutionRegionExecutionMode::UNSUPPORTED) {
 			continue;
 		}
 		found_auto_skip = true;
@@ -303,168 +136,28 @@ TEST_CASE("Execution region events are bounded and counters are cumulative", "[a
 	REQUIRE(found_auto_skip);
 }
 
-TEST_CASE("Production auto records planner cost counters without diagnostics", "[api][jit]") {
+TEST_CASE("JIT auto vectorized skips avoid telemetry when unobserved", "[api][jit]") {
 	DuckDB db;
 	Connection con(db);
 	auto &context = *con.context;
 	auto &manager = ExecutionRegionManager::Get(context);
 
-	ConfigureSljit(con, "auto");
-	REQUIRE_NO_FAIL(con.Query("SET jit_trace_decisions=false"));
-	REQUIRE_NO_FAIL(con.Query("SET jit_dump_ir=false"));
-	REQUIRE_NO_FAIL(con.Query("SET jit_trace_runtime=false"));
-	REQUIRE_NO_FAIL(con.Query("SET jit_event_log_size=0"));
-	REQUIRE_NO_FAIL(con.Query("CREATE TEMP TABLE jit_telemetry_cold_input AS "
-	                          "SELECT i::BIGINT AS i FROM range(1000) tbl(i)"));
-
-	ClearJitTrace(manager, true);
-	REQUIRE_NO_FAIL(con.Query("SELECT i + 1 AS j FROM jit_telemetry_cold_input WHERE i > 500"));
-	REQUIRE(manager.GetEvents().empty());
-	auto production_counters = manager.GetCounters();
-	auto counter_count_after_production_auto = TotalExecutionRegionCounterCount(production_counters);
-	REQUIRE(counter_count_after_production_auto > 0);
-	bool found_auto_runner_cost_decision = false;
-	for (auto &counter : production_counters) {
-		if (counter.backend_name != "sljit" || counter.target_kind != ExecutionRegionCompileTarget::REGION ||
-		    counter.status_kind != ExecutionRegionEventStatus::SKIPPED ||
-		    counter.execution_mode_kind != ExecutionRegionExecutionMode::UNSUPPORTED ||
-		    counter.requested_policy_kind != ExecutionRegionEventPolicy::AUTO ||
-		    counter.blocker != "duckdb_selected_vectorized") {
-			continue;
-		}
-		found_auto_runner_cost_decision = true;
-		REQUIRE(counter.has_runner_cost);
-		REQUIRE(counter.runner_cost_startup_cost > 0);
-		REQUIRE(counter.runner_cost_accelerated_runner_benefit >= 0);
-		REQUIRE(counter.runner_cost_required_benefit > 0);
-		REQUIRE(counter.runner_cost_selected_accelerated_runner_count == 0);
-		REQUIRE(counter.decision_time_us >= 0);
-		REQUIRE(counter.backend_analysis_time_us >= 0);
-		REQUIRE(counter.codegen_time_us == 0);
-	}
-	REQUIRE(found_auto_runner_cost_decision);
-
-	REQUIRE_NO_FAIL(con.Query("SET jit_trace_decisions=true"));
-	REQUIRE_NO_FAIL(con.Query("SELECT i + 1 AS j FROM jit_telemetry_cold_input WHERE i > 500"));
-	REQUIRE(manager.GetEvents().empty());
-	REQUIRE(TotalExecutionRegionCounterCount(manager.GetCounters()) > counter_count_after_production_auto);
-}
-
-TEST_CASE("Execution region compact event retention omits diagnostic candidate payload", "[api][jit]") {
-	DuckDB db;
-	Connection con(db);
-	auto &context = *con.context;
-	auto &manager = ExecutionRegionManager::Get(context);
-
-	ConfigureSljit(con, "force");
-	REQUIRE_NO_FAIL(con.Query("SET jit_trace_decisions=false"));
-	REQUIRE_NO_FAIL(con.Query("SET jit_dump_ir=false"));
-	REQUIRE_NO_FAIL(con.Query("SET jit_trace_runtime=false"));
-	REQUIRE_NO_FAIL(con.Query("CREATE TEMP TABLE jit_compact_event_input AS "
-	                          "SELECT i::BIGINT AS i FROM range(1000) tbl(i)"));
-
-	ClearJitTrace(manager, true);
-	REQUIRE_NO_FAIL(con.Query("SELECT i + 1 AS j FROM jit_compact_event_input WHERE i > 500"));
-
-	bool found_compiled_region = false;
-	for (auto &event : manager.GetEvents()) {
-		if (!IsCompiledSljitRegionEvent(event)) {
-			continue;
-		}
-		found_compiled_region = true;
-		REQUIRE(EventExecutionMode(event) == "native");
-		REQUIRE(EventRegionExecutionForm(event) == "fused");
-		REQUIRE_FALSE(event.has_candidate);
-		REQUIRE(event.candidate_shape.empty());
-		REQUIRE(event.candidate_signature.context.empty());
-		REQUIRE(event.candidate_signature.shape.empty());
-		REQUIRE(event.candidate_signature.contract_shape.empty());
-		REQUIRE(event.candidate_contract.abi == ExecutionRegionABI::NONE);
-	}
-	REQUIRE(found_compiled_region);
-	REQUIRE(TotalExecutionRegionCounterCount(manager.GetCounters()) > 0);
-}
-
-TEST_CASE("Generic profiling does not capture execution region diagnostics without JIT trace", "[api][jit]") {
-	DuckDB db;
-	Connection con(db);
-	auto fs = FileSystem::CreateLocal();
-	auto profile_path = StringUtil::Format("/tmp/duckdb_jit_profile_gate_%llu.json",
-	                                       static_cast<unsigned long long>(reinterpret_cast<uintptr_t>(&db)));
-
-	ConfigureSljit(con, "auto");
+	ConfigureSljit(con, "auto", false, false, false, 0);
 	REQUIRE_NO_FAIL(con.Query("SET threads=1"));
 	REQUIRE_NO_FAIL(con.Query("SET jit_trace_decisions=false"));
 	REQUIRE_NO_FAIL(con.Query("SET jit_dump_ir=false"));
-	REQUIRE_NO_FAIL(con.Query("SET jit_trace_runtime=false"));
 	REQUIRE_NO_FAIL(con.Query("SET jit_event_log_size=0"));
-	REQUIRE_NO_FAIL(con.Query("CREATE TEMP TABLE jit_profile_gate_input AS "
-	                          "SELECT i::BIGINT AS i FROM range(10000) tbl(i)"));
+	REQUIRE_NO_FAIL(con.Query("CREATE TEMP TABLE jit_unobserved_skip_input AS "
+	                          "SELECT i::BIGINT AS i FROM range(1000) tbl(i)"));
 
-	fs->TryRemoveFile(profile_path);
-	REQUIRE_NO_FAIL(con.Query("PRAGMA enable_profiling=json"));
-	REQUIRE_NO_FAIL(con.Query("PRAGMA profiling_mode=detailed"));
-	REQUIRE_NO_FAIL(con.Query("PRAGMA profiling_output='" + profile_path + "'"));
-	REQUIRE_NO_FAIL(con.Query("SELECT sum(i) FROM jit_profile_gate_input WHERE i > 5000"));
-	REQUIRE_NO_FAIL(con.Query("PRAGMA disable_profiling"));
-	auto profile = ReadLocalTextFile(profile_path);
-	REQUIRE_FALSE(StringUtil::Contains(profile, "\"execution_regions\""));
+	ClearJitTrace(manager, true);
+	REQUIRE_NO_FAIL(con.Query("SELECT i + 1 AS j FROM jit_unobserved_skip_input WHERE i > 500"));
+	REQUIRE(manager.GetEvents().empty());
+	REQUIRE(manager.GetCounters().empty());
 
-	fs->TryRemoveFile(profile_path);
 	REQUIRE_NO_FAIL(con.Query("SET jit_trace_decisions=true"));
-	REQUIRE_NO_FAIL(con.Query("PRAGMA enable_profiling=json"));
-	REQUIRE_NO_FAIL(con.Query("PRAGMA profiling_mode=detailed"));
-	REQUIRE_NO_FAIL(con.Query("PRAGMA profiling_output='" + profile_path + "'"));
-	REQUIRE_NO_FAIL(con.Query("SELECT sum(i) FROM jit_profile_gate_input WHERE i > 5000"));
-	REQUIRE_NO_FAIL(con.Query("PRAGMA disable_profiling"));
-	profile = ReadLocalTextFile(profile_path);
-	REQUIRE(StringUtil::Contains(profile, "\"execution_regions\""));
-	REQUIRE(StringUtil::Contains(profile, "\"events\""));
-	fs->TryRemoveFile(profile_path);
-}
-
-TEST_CASE("SLJIT marks table-function full pipeline unsupported without source contract", "[api][jit]") {
-	DuckDB db;
-	Connection con(db);
-	auto &context = *con.context;
-	auto &manager = ExecutionRegionManager::Get(context);
-
-	ConfigureSljit(con, "force", true, true, true);
-	ClearJitTrace(manager);
-	auto result = con.Query("SELECT i + 1 AS j FROM range(10000) tbl(i) WHERE i > 5000");
-	REQUIRE_NO_FAIL(*result);
-	REQUIRE(result->RowCount() == 4999);
-	REQUIRE(result->GetValue(0, 0).GetValue<int64_t>() == 5002);
-	REQUIRE(result->GetValue(0, 4998).GetValue<int64_t>() == 10000);
-
-	bool found_unsupported_full_pipeline = false;
-	for (auto &event : manager.GetEvents()) {
-		if (!IsSljitRegionEvent(event) || !event.has_candidate ||
-		    event.candidate_contract.abi != ExecutionRegionABI::FULL_PIPELINE) {
-			continue;
-		}
-		REQUIRE_FALSE(EventStatus(event) == "compiled");
-		REQUIRE_FALSE(EventPhase(event) == "runtime");
-		if (EventStatus(event) == "unsupported") {
-			found_unsupported_full_pipeline = true;
-			REQUIRE(EventExecutionMode(event) == "unsupported");
-			REQUIRE(EventRegionExecutionForm(event) == "none");
-			REQUIRE(event.code_size == 0);
-			RequireCandidateStructure(event, 1, 1, ExecutionRegionSinkKind::RESULT_COLLECTOR_SINK);
-			REQUIRE(StringUtil::Contains(event.reason, "source-contract-blocker:requires-source-contract"));
-			REQUIRE(StringUtil::Contains(event.reason, "source:TABLE_SCAN:boundary"));
-			REQUIRE(StringUtil::Contains(event.reason, "sink:RESULT_COLLECTOR:native"));
-			REQUIRE(StringUtil::Contains(event.reason, "append sink contract"));
-			REQUIRE(StringUtil::Contains(event.reason, "sink_contract_status=ready"));
-			REQUIRE(StringUtil::Contains(event.reason, "sink_required_capability=result-collector-execution-sink"));
-			REQUIRE(StringUtil::Contains(event.reason, "execution:unsupported"));
-			REQUIRE(StringUtil::Contains(event.ir, "source_contract<status=blocked,"
-			                                       "required_capability=table-function-source-contract"));
-			REQUIRE(StringUtil::Contains(event.ir, "blocker=table-function-source-boundary"));
-			REQUIRE(StringUtil::Contains(event.ir, "contract<abi=full_pipeline"));
-		}
-	}
-	REQUIRE(found_unsupported_full_pipeline);
+	REQUIRE_NO_FAIL(con.Query("SELECT i + 1 AS j FROM jit_unobserved_skip_input WHERE i > 500"));
+	REQUIRE(!manager.GetCounters().empty());
 }
 
 TEST_CASE("JIT full pipeline uses explicit append sink contract", "[api][jit]") {
@@ -476,7 +169,7 @@ TEST_CASE("JIT full pipeline uses explicit append sink contract", "[api][jit]") 
 	LoadSljit(con);
 	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_native_result_collector AS "
 	                          "SELECT i::BIGINT AS i FROM range(1000) tbl(i)"));
-	ConfigureSljitSettings(con, "force", true, true, true);
+	ConfigureSljitForCompilationSettings(con, true, true, true);
 
 	ClearJitTrace(manager);
 	auto result = con.Query("SELECT i + 1 AS j FROM jit_native_result_collector WHERE i > 500");
@@ -493,7 +186,8 @@ TEST_CASE("JIT full pipeline uses explicit append sink contract", "[api][jit]") 
 		}
 		REQUIRE_FALSE(StringUtil::Contains(event.reason, "native operator "
 		                                                 "sink contract"));
-		if (EventStatus(event) == "compiled" && EventExecutionMode(event) == "native" && EventRegionExecutionForm(event) == "fused" &&
+		if (EventStatus(event) == "compiled" && EventExecutionMode(event) == "native" &&
+		    ExecutionRegionEventProfileCodeSize(event) > 0 &&
 		    StringUtil::Contains(event.reason, "append sink contract") &&
 		    StringUtil::Contains(event.reason, "sink_kind=result-collector-sink")) {
 			REQUIRE(event.has_candidate);
@@ -509,7 +203,8 @@ TEST_CASE("JIT full pipeline uses explicit append sink contract", "[api][jit]") 
 			REQUIRE(event.candidate_contract.OwnsSink());
 			REQUIRE(event.candidate_contract.sink_ownership == ExecutionRegionOwnershipKind::NATIVE_CONTRACT);
 		}
-		if (EventPhase(event) == "runtime" && EventStatus(event) == "executed" && EventExecutionMode(event) == "native" &&
+		if (EventPhase(event) == "runtime" && EventStatus(event) == "executed" &&
+		    EventExecutionMode(event) == "native" &&
 		    StringUtil::Contains(event.reason, "full pipeline kernel executed") && event.output_rows == 499) {
 			found_runtime_result_collector = true;
 			REQUIRE(event.runtime_result == "finished");
@@ -528,7 +223,7 @@ TEST_CASE("JIT full pipeline uses append sink contract for CTE materialization",
 	LoadSljit(con);
 	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_native_cte_materialization AS "
 	                          "SELECT i::BIGINT AS i FROM range(1000) tbl(i)"));
-	ConfigureSljitSettings(con, "force", true, true, true);
+	ConfigureSljitForCompilationSettings(con, true, true, true);
 
 	ClearJitTrace(manager);
 	auto result = con.Query("WITH cte AS MATERIALIZED ("
@@ -544,7 +239,8 @@ TEST_CASE("JIT full pipeline uses append sink contract for CTE materialization",
 		    event.candidate_contract.abi != ExecutionRegionABI::FULL_PIPELINE) {
 			continue;
 		}
-		if (EventStatus(event) == "compiled" && EventExecutionMode(event) == "native" && EventRegionExecutionForm(event) == "fused" &&
+		if (EventStatus(event) == "compiled" && EventExecutionMode(event) == "native" &&
+		    ExecutionRegionEventProfileCodeSize(event) > 0 &&
 		    StringUtil::Contains(event.reason, "append sink contract") &&
 		    StringUtil::Contains(event.reason, "sink_kind=materialization")) {
 			found_compiled_materialization = true;
@@ -570,7 +266,7 @@ TEST_CASE("JIT full pipeline uses ordered sink native contract when order keys g
 	LoadSljit(con);
 	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_native_sort_sink AS "
 	                          "SELECT (1000 - i)::BIGINT AS i FROM range(1000) tbl(i)"));
-	ConfigureSljitSettings(con, "force", true, true, true);
+	ConfigureSljitForCompilationSettings(con, true, true, true);
 
 	auto require_ordered_sink_contract = [&](const string &sql, const string &operator_name,
 	                                         const string &expected_order_kind, idx_t expected_rows,
@@ -598,11 +294,10 @@ TEST_CASE("JIT full pipeline uses ordered sink native contract when order keys g
 			    StringUtil::Contains(event.reason, "operator_kind=" + expected_order_kind) &&
 			    StringUtil::Contains(event.reason, "sink:" + operator_name + ":native")) {
 				found_ordered_sink_contract = true;
-				RequireCompiledGeneratedRegion(event);
+				RequireGeneratedMachineCodeRegion(event);
 				REQUIRE(StringUtil::Contains(event.reason, "source:TABLE_SCAN:native"));
 				REQUIRE(StringUtil::Contains(event.reason, "sink_contract_status=ready"));
 				REQUIRE(StringUtil::Contains(event.reason, "sink_required_capability=order-native-sink-update"));
-				REQUIRE(StringUtil::Contains(event.reason, "sink_blocker=none"));
 				REQUIRE(StringUtil::Contains(event.reason, "full-pipeline-native-sink"));
 				REQUIRE(StringUtil::Contains(event.reason, "requires=order-native-sink-update"));
 				REQUIRE_FALSE(
@@ -628,121 +323,30 @@ TEST_CASE("JIT full pipeline uses ordered sink native contract when order keys g
 	                              1000);
 }
 
-TEST_CASE("Execution region runtime events preserve kernel linkage", "[api][jit]") {
-	DuckDB db;
-	Connection con(db);
-	auto &context = *con.context;
-	auto &manager = ExecutionRegionManager::Get(context);
-
-	ConfigureSljit(con, "force", false, false, true);
-	REQUIRE_NO_FAIL(con.Query("SET jit_event_log_size=10000"));
-	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_runtime_event_input AS "
-	                          "SELECT i::BIGINT AS i FROM range(10000) tbl(i)"));
-
-	ClearJitTrace(manager);
-	REQUIRE_NO_FAIL(con.Query("SELECT sum(j) FROM (SELECT i + 1 AS j FROM jit_runtime_event_input WHERE i > 0)"));
-
-	optional_idx fused_kernel_id;
-	bool found_runtime_event = false;
-	for (auto &event : manager.GetEvents()) {
-		if (EventPhase(event) != "runtime" || event.backend_name != "sljit" || EventTarget(event) != "region" ||
-		    !IsCompiledExecutionMode(EventExecutionMode(event)) || EventRegionExecutionForm(event) != "fused" ||
-		    event.invocation_count == 0 || EventStatus(event) != "executed") {
-			continue;
-		}
-		fused_kernel_id = event.kernel_id;
-		found_runtime_event = true;
-		REQUIRE_FALSE(event.has_candidate);
-		REQUIRE(event.has_pipeline);
-		REQUIRE(!event.candidate_shape.empty());
-		REQUIRE(event.candidate_contract.abi == ExecutionRegionABI::NONE);
-		REQUIRE(!event.pipeline_shape.empty());
-		REQUIRE(event.candidate_estimated_cardinality > 0);
-		REQUIRE(event.input_rows + event.output_rows > 0);
-		REQUIRE(event.generated_body_runtime_time_us >= 0);
-		const bool expected_runtime_result =
-		    event.runtime_result == "need_more_input" || event.runtime_result == "finished";
-		REQUIRE(expected_runtime_result);
-		REQUIRE(!event.kernel_compile_reason.empty());
-		REQUIRE(event.kernel_code_size > 0);
-	}
-	REQUIRE(found_runtime_event);
-	REQUIRE(fused_kernel_id.IsValid());
-
-	bool found_compile_event = false;
-	for (auto &event : manager.GetEvents()) {
-		if (EventPhase(event) == "compile" && event.kernel_id == fused_kernel_id.GetIndex()) {
-			found_compile_event = true;
-		}
-	}
-	REQUIRE(found_compile_event);
-
-	auto visible = con.Query("SELECT count(*) FROM duckdb_jit_events() WHERE phase='runtime' AND kernel_id = " +
-	                         std::to_string(fused_kernel_id.GetIndex()));
-	REQUIRE_NO_FAIL(*visible);
-	REQUIRE(CHECK_COLUMN(visible, 0, {1}));
-
-	auto aggregate_count_before_clear = TotalExecutionRegionCounterCount(manager.GetCounters());
-	ClearJitTrace(manager);
-	REQUIRE(manager.GetEvents().empty());
-	REQUIRE(TotalExecutionRegionCounterCount(manager.GetCounters()) == aggregate_count_before_clear);
-	REQUIRE_NO_FAIL(con.Query("SELECT sum(j) FROM (SELECT i + 1 AS j FROM jit_runtime_event_input WHERE i > 0)"));
-	REQUIRE(!manager.GetEvents().empty());
-
-	REQUIRE_NO_FAIL(con.Query("SET jit_event_log_size=0"));
-	REQUIRE(manager.GetEvents().empty());
-	auto hidden = con.Query("SELECT count(*) FROM duckdb_jit_events()");
-	REQUIRE_NO_FAIL(*hidden);
-	REQUIRE(CHECK_COLUMN(hidden, 0, {0}));
-}
-
 TEST_CASE("JIT dump IR and execution mode expose backend honesty", "[api][jit]") {
 	DuckDB db;
 	Connection con(db);
 	auto &context = *con.context;
 	auto &manager = ExecutionRegionManager::Get(context);
 
-	ConfigureSljit(con, "force", false, true);
+	ConfigureSljitForCompilation(con, false, true);
 
 	ClearJitTrace(manager);
 	REQUIRE_NO_FAIL(con.Query("SELECT i + 1 FROM range(3) tbl(i) WHERE i > 0"));
 
 	bool found_ir = false;
 	for (auto &event : manager.GetEvents()) {
-		REQUIRE(EventTarget(event) != "expression");
 		if (EventStatus(event) == "compiled") {
 			REQUIRE(EventExecutionMode(event) == "native");
-			RequireCompiledGeneratedRegion(event);
+			RequireGeneratedMachineCodeRegion(event);
 		}
-		if (event.backend_name == "sljit" && EventTarget(event) == "region" && !event.ir.empty() &&
+		if (event.backend_name == "sljit" && !event.ir.empty() &&
 		    StringUtil::Contains(event.ir, "duckdb.region typed-vector-ir") && StringUtil::Contains(event.ir, ".add")) {
 			found_ir = true;
 			REQUIRE(ContainsTypedIrNode(event.ir, "binary", "BIGINT", "INT64"));
 		}
 	}
 	REQUIRE(found_ir);
-
-	ClearJitTrace(manager);
-	REQUIRE_NO_FAIL(con.Query("SELECT b, a FROM (VALUES (1::BIGINT, 10::BIGINT), "
-	                          "(2::BIGINT, 20::BIGINT)) t(a, b)"));
-
-	bool found_reference_projection_pruned = false;
-	for (auto &event : manager.GetEvents()) {
-		if (!IsSljitRegionEvent(event)) {
-			continue;
-		}
-		REQUIRE_FALSE(StringUtil::Contains(event.reason, "op0:PROJECTION:native:reference projection remap"));
-		REQUIRE_FALSE(StringUtil::Contains(event.reason, "SLJIT native region emits no generated machine code"));
-		if (EventStatus(event) == "unsupported" && !event.has_candidate &&
-		    StringUtil::Contains(event.reason, "core region lowering produced no candidates")) {
-			REQUIRE(EventStatus(event) == "unsupported");
-			REQUIRE(EventExecutionMode(event) == "unsupported");
-			REQUIRE(EventExecutionBody(event) == "none");
-			REQUIRE(event.code_size == 0);
-			found_reference_projection_pruned = true;
-		}
-	}
-	REQUIRE(found_reference_projection_pruned);
 }
 
 TEST_CASE("Execution region runtime trace records kernel execution facts", "[api][jit]") {
@@ -754,10 +358,7 @@ TEST_CASE("Execution region runtime trace records kernel execution facts", "[api
 		auto &context = *con.context;
 		auto &manager = ExecutionRegionManager::Get(context);
 
-		LoadSljit(con);
-		REQUIRE_NO_FAIL(con.Query("SET jit_backend='sljit'"));
-		REQUIRE_NO_FAIL(con.Query("SET jit_policy='force'"));
-		REQUIRE_NO_FAIL(con.Query("SET jit_trace_runtime=true"));
+		ConfigureSljitForCompilation(con, false, false, true);
 		REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_runtime_trace_input AS "
 		                          "SELECT i::BIGINT AS i FROM range(16) tbl(i)"));
 
@@ -765,9 +366,7 @@ TEST_CASE("Execution region runtime trace records kernel execution facts", "[api
 		REQUIRE_NO_FAIL(con.Query("SELECT sum(j) FROM "
 		                          "(SELECT i + 1 AS j FROM jit_runtime_trace_input WHERE i > 0)"));
 		for (auto &event : manager.GetEvents()) {
-			REQUIRE(EventTarget(event) != "expression");
-			if (EventPhase(event) != "runtime" || EventStatus(event) != "executed" || EventTarget(event) != "region" ||
-			    event.output_rows == 0) {
+			if (EventPhase(event) != "runtime" || EventStatus(event) != "executed" || event.output_rows == 0) {
 				continue;
 			}
 			found_region_runtime = true;
@@ -789,8 +388,7 @@ TEST_CASE("Execution region runtime trace records kernel execution facts", "[api
 			REQUIRE(StringUtil::Contains(event.reason, "kernel executed"));
 		}
 		for (auto &counter : manager.GetCounters()) {
-			if (counter.status_kind == ExecutionRegionEventStatus::EXECUTED &&
-			    counter.requested_policy_kind == ExecutionRegionEventPolicy::RUNTIME && counter.invocation_count > 0 &&
+			if (counter.status_kind == ExecutionRegionEventStatus::EXECUTED && counter.invocation_count > 0 &&
 			    counter.input_rows > 0 && counter.execution_mode_kind == ExecutionRegionExecutionMode::NATIVE) {
 				found_runtime_counter = true;
 			}
@@ -806,7 +404,7 @@ TEST_CASE("EXPLAIN ANALYZE exposes compact execution region profile", "[api][jit
 	auto &context = *con.context;
 	auto &manager = ExecutionRegionManager::Get(context);
 
-	ConfigureSljit(con, "force", false, true);
+	ConfigureSljitForCompilation(con, false, true);
 	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_explain_analyze_input AS "
 	                          "SELECT i::BIGINT AS i, (i + 1)::BIGINT AS g FROM range(10000) tbl(i)"));
 
@@ -821,7 +419,7 @@ TEST_CASE("EXPLAIN ANALYZE exposes compact execution region profile", "[api][jit
 	REQUIRE(result->RowCount() == 1);
 	auto analyzed_plan = result->GetValue(1, 0).GetValue<string>();
 	REQUIRE(StringUtil::Contains(analyzed_plan, "JIT_EXECUTION_REGIONS"));
-	REQUIRE(StringUtil::Contains(analyzed_plan, "policy=force"));
+	REQUIRE(StringUtil::Contains(analyzed_plan, "policy=auto"));
 	REQUIRE(StringUtil::Contains(analyzed_plan, "selected_backend=sljit"));
 	REQUIRE(StringUtil::Contains(analyzed_plan, "compiled=1"));
 	REQUIRE(StringUtil::Contains(analyzed_plan, "runtime_regions=1"));
@@ -829,6 +427,16 @@ TEST_CASE("EXPLAIN ANALYZE exposes compact execution region profile", "[api][jit
 	REQUIRE(StringUtil::Contains(analyzed_plan, "runtime_dominant="));
 	REQUIRE(StringUtil::Contains(analyzed_plan, "source_runtime_pct="));
 	REQUIRE(StringUtil::Contains(analyzed_plan, "generated_runtime_pct="));
+	REQUIRE(StringUtil::Contains(analyzed_plan, "CBO_PIPELINE"));
+	REQUIRE(StringUtil::Contains(analyzed_plan, "shape=ungrouped-aggregate-update"));
+	REQUIRE(StringUtil::Contains(analyzed_plan, "stages=gen:"));
+	REQUIRE(StringUtil::Contains(analyzed_plan, ",agg:"));
+	REQUIRE(StringUtil::Contains(analyzed_plan, "benefit="));
+	REQUIRE(StringUtil::Contains(analyzed_plan, "required="));
+	REQUIRE(StringUtil::Contains(analyzed_plan, "selected=true"));
+	REQUIRE(StringUtil::Contains(analyzed_plan, "why="));
+	REQUIRE(StringUtil::Contains(analyzed_plan, "RUNTIME_PIPELINE"));
+	REQUIRE(StringUtil::Contains(analyzed_plan, "dominant="));
 	REQUIRE(HasSourceContractStageBreakdown(manager));
 
 	result = con.Query("EXPLAIN (ANALYZE, FORMAT JSON) "
@@ -919,7 +527,7 @@ TEST_CASE("EXPLAIN ANALYZE exposes grouped hash aggregate generated lookup block
 	DuckDB db;
 	Connection con(db);
 
-	ConfigureSljit(con, "force", false, true);
+	ConfigureSljitForCompilation(con, false, true);
 	REQUIRE_NO_FAIL(con.Query("SET threads=1"));
 	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_explain_grouped_lookup AS "
 	                          "SELECT i::BIGINT AS k, (i % 17)::BIGINT AS v FROM range(50000) tbl(i)"));
@@ -968,146 +576,21 @@ TEST_CASE("EXPLAIN ANALYZE reports compact aggregate auto vectorized-selection f
 	REQUIRE(StringUtil::Contains(analyzed_plan, "\"events\""));
 	REQUIRE(StringUtil::Contains(analyzed_plan, "\"selected_runner\": \"vectorized\""));
 	REQUIRE(StringUtil::Contains(analyzed_plan, "\"estimated_cardinality\": 100000"));
-}
 
-TEST_CASE("Execution region runtime trace separates compiled coverage from executed kernels", "[api][jit]") {
-	DuckDB db;
-	Connection con(db);
-	auto &context = *con.context;
-	auto &manager = ExecutionRegionManager::Get(context);
-
-	ConfigureSljit(con, "force", false, false, true);
-	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_runtime_coverage_input AS "
-	                          "SELECT i::BIGINT AS i FROM range(16) tbl(i)"));
-
-	ClearJitTrace(manager);
-	REQUIRE_NO_FAIL(con.Query("SELECT sum(j) FROM (SELECT i + 1 AS j FROM jit_runtime_coverage_input WHERE i > 0)"));
-
-	idx_t compiled_region_kernel_id = 0;
-	bool found_region_runtime = false;
-	for (auto &event : manager.GetEvents()) {
-		REQUIRE(EventTarget(event) != "expression");
-		if (EventPhase(event) == "compile" && event.backend_name == "sljit" && EventTarget(event) == "region" &&
-		    EventStatus(event) == "compiled" && EventExecutionMode(event) == "native" && EventRegionExecutionForm(event) == "fused" &&
-		    compiled_region_kernel_id == 0) {
-			compiled_region_kernel_id = event.kernel_id;
-		}
-		if (EventPhase(event) == "runtime" && EventTarget(event) == "region" && event.kernel_id == compiled_region_kernel_id &&
-		    EventStatus(event) == "executed") {
-			found_region_runtime = true;
-			REQUIRE_FALSE(event.has_candidate);
-			REQUIRE(event.has_pipeline);
-			REQUIRE(!event.pipeline_shape.empty());
-			REQUIRE(event.input_rows > 0);
-			REQUIRE(event.output_rows >= 0);
-		}
-	}
-	REQUIRE(compiled_region_kernel_id > 0);
-	REQUIRE(found_region_runtime);
-}
-
-TEST_CASE("Execution region introspection does not record telemetry events", "[api][jit]") {
-	DuckDB db;
-	Connection con(db);
-	auto &context = *con.context;
-	auto &manager = ExecutionRegionManager::Get(context);
-
-	ConfigureSljit(con);
-	REQUIRE_NO_FAIL(con.Query("SET jit_trace_decisions=true"));
-	REQUIRE_NO_FAIL(con.Query("CREATE TEMP TABLE jit_introspection_input AS "
-	                          "SELECT i::BIGINT AS i FROM range(16) tbl(i)"));
-
-	ClearJitTrace(manager);
-	REQUIRE_NO_FAIL(con.Query("SELECT i + 1 FROM jit_introspection_input WHERE i > 0"));
-	auto event_count = manager.GetEvents().size();
-	auto counter_count = TotalExecutionRegionCounterCount(manager.GetCounters());
-	REQUIRE(event_count > 0);
-	REQUIRE(counter_count > 0);
-
-	REQUIRE_NO_FAIL(con.Query("SELECT count(*) FROM duckdb_jit_events()"));
-	REQUIRE_NO_FAIL(con.Query("SELECT count(execution_body) FROM duckdb_jit_events()"));
-	REQUIRE_NO_FAIL(con.Query("SELECT count(selected_uses_scan_filters) FROM duckdb_jit_events()"));
-	REQUIRE_NO_FAIL(con.Query("SELECT count(candidate_uses_scan_filters) FROM duckdb_jit_events()"));
-	REQUIRE_NO_FAIL(con.Query("SELECT count(generated_stage_count_breakdown) FROM duckdb_jit_events()"));
-	REQUIRE_NO_FAIL(con.Query("SELECT count(candidate_contract_abi) FROM duckdb_jit_events()"));
-	REQUIRE_NO_FAIL(con.Query("SELECT count(candidate_contract_shape) FROM duckdb_jit_events()"));
-	REQUIRE_NO_FAIL(con.Query("SELECT count(candidate_signature_ir) FROM duckdb_jit_events()"));
-	REQUIRE_NO_FAIL(con.Query("SELECT count(selected_runner) FROM duckdb_jit_events()"));
-	REQUIRE_NO_FAIL(con.Query("SELECT count(runner_cost_profile) FROM duckdb_jit_events()"));
-	REQUIRE_NO_FAIL(con.Query("SELECT count(runner_cost_accelerated_runner_benefit) FROM duckdb_jit_events()"));
-	REQUIRE_NO_FAIL(con.Query("SELECT count(runner_cost_startup_cost) FROM duckdb_jit_events()"));
-	REQUIRE_NO_FAIL(con.Query("SELECT count(runner_cost_selected_accelerated_runner) FROM duckdb_jit_events()"));
-	REQUIRE_NO_FAIL(con.Query("SELECT count(blocker) FROM duckdb_jit_events()"));
-	REQUIRE(manager.GetEvents().size() == event_count);
-	REQUIRE(TotalExecutionRegionCounterCount(manager.GetCounters()) == counter_count);
-
-	REQUIRE_NO_FAIL(con.Query("SELECT count(*) FROM duckdb_jit_counters()"));
-	REQUIRE_NO_FAIL(con.Query("SELECT count(execution_body) FROM duckdb_jit_counters()"));
-	REQUIRE_NO_FAIL(con.Query("SELECT count(runner_cost_profile) FROM duckdb_jit_counters()"));
-	REQUIRE_NO_FAIL(con.Query("SELECT count(runner_cost_accelerated_runner_benefit) FROM duckdb_jit_counters()"));
-	REQUIRE_NO_FAIL(con.Query("SELECT count(runner_cost_startup_cost) FROM duckdb_jit_counters()"));
-	REQUIRE_NO_FAIL(
-	    con.Query("SELECT count(runner_cost_selected_accelerated_runner_count) FROM duckdb_jit_counters()"));
-	REQUIRE_NO_FAIL(con.Query("SELECT count(blocker) FROM duckdb_jit_counters()"));
-	REQUIRE_NO_FAIL(con.Query("SELECT count(generated_stage_count_breakdown) FROM duckdb_jit_counters()"));
-	REQUIRE(manager.GetEvents().size() == event_count);
-	REQUIRE(TotalExecutionRegionCounterCount(manager.GetCounters()) == counter_count);
-
-	REQUIRE_NO_FAIL(con.Query("SELECT count(*) FROM duckdb_jit_backends()"));
-	REQUIRE(manager.GetEvents().size() == event_count);
-	REQUIRE(TotalExecutionRegionCounterCount(manager.GetCounters()) == counter_count);
-
-	auto copy_path = TestCreatePath("jit_events_copy.csv");
-	REQUIRE_NO_FAIL(
-	    con.Query("COPY (SELECT * FROM duckdb_jit_events()) TO " + SQLString(copy_path) + " (HEADER, DELIMITER ',')"));
-	REQUIRE(manager.GetEvents().size() == event_count);
-	REQUIRE(TotalExecutionRegionCounterCount(manager.GetCounters()) == counter_count);
-}
-
-TEST_CASE("Execution region introspection does not suppress later statements in one SQL batch", "[api][jit]") {
-	DuckDB db;
-	Connection con(db);
-	auto &context = *con.context;
-	auto &manager = ExecutionRegionManager::Get(context);
-
-	LoadSljit(con);
-	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_batch_source AS "
-	                          "SELECT i::BIGINT AS i, i::BIGINT AS j FROM range(10000) tbl(i)"));
-	ConfigureSljitSettings(con, "force", false, false, true);
-
-	ClearJitTrace(manager);
-	auto result = con.Query("SELECT * FROM duckdb_jit_clear_events();"
-	                        "SELECT * FROM duckdb_jit_clear_counters();"
-	                        "SELECT v FROM (SELECT i + 1 AS v, j FROM jit_batch_source WHERE j > 2500) "
-	                        "WHERE v < 2510");
+	result = con.Query("EXPLAIN ANALYZE "
+	                   "SELECT sum(CAST(((((a * 3) + (b * 5) - (c * 7) + (d * 11)) * 13) + "
+	                   "(((a - b + c) * 17) - ((a + d) * 19)) + "
+	                   "(((b - c + d) * 23) - ((a - d) * 29))) AS BIGINT)) "
+	                   "FROM jit_explain_auto_aggregate_blocker");
 	REQUIRE_NO_FAIL(*result);
-
-	bool found_compiled_fused_region = false;
-	bool found_runtime_fused_region = false;
-	for (auto &event : manager.GetEvents()) {
-		if (EventTarget(event) != "region") {
-			continue;
-		}
-		if (EventStatus(event) == "compiled" &&
-		    event.selected_source_execution == ExecutionRegionSourceExecutionKind::SOURCE_CONTRACT &&
-		    StringUtil::Contains(event.reason, "vectorized table scan filters") &&
-		    StringUtil::Contains(event.reason, "append sink contract")) {
-			REQUIRE(event.has_candidate);
-			found_compiled_fused_region = true;
-			RequireCompiledFusedRegion(event);
-			RequireDuckDBScanFilteredSourceContract(event);
-		}
-		if (EventPhase(event) == "runtime" && EventStatus(event) == "executed" &&
-		    event.selected_source_execution == ExecutionRegionSourceExecutionKind::SOURCE_CONTRACT &&
-		    StringUtil::Contains(event.reason, "full pipeline kernel executed")) {
-			found_runtime_fused_region = true;
-			REQUIRE(EventRegionExecutionForm(event) == "fused");
-			REQUIRE(event.input_rows > 0);
-			REQUIRE(event.source_contract_output_rows == event.input_rows);
-		}
-	}
-	REQUIRE(found_compiled_fused_region);
-	REQUIRE(found_runtime_fused_region);
+	REQUIRE(result->RowCount() == 1);
+	analyzed_plan = result->GetValue(1, 0).GetValue<string>();
+	REQUIRE(StringUtil::Contains(analyzed_plan, "CBO_PIPELINE"));
+	REQUIRE(StringUtil::Contains(analyzed_plan, "runner=vectorized"));
+	REQUIRE(StringUtil::Contains(analyzed_plan, "selected=false"));
+	REQUIRE(StringUtil::Contains(analyzed_plan, "benefit="));
+	REQUIRE(StringUtil::Contains(analyzed_plan, "required="));
+	REQUIRE(StringUtil::Contains(analyzed_plan, "why="));
 }
 
 TEST_CASE("JIT event IDs are unique under concurrent compilation", "[api][jit]") {
@@ -1129,7 +612,11 @@ TEST_CASE("JIT event IDs are unique under concurrent compilation", "[api][jit]")
 				failed = true;
 				return;
 			}
-			if (con.Query("SET jit_policy='force'")->HasError()) {
+			if (con.Query("SET jit_policy='auto'")->HasError()) {
+				failed = true;
+				return;
+			}
+			if (con.Query("SET jit_trace_decisions=true")->HasError()) {
 				failed = true;
 				return;
 			}

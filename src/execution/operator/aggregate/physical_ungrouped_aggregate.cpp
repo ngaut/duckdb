@@ -844,8 +844,7 @@ void GlobalUngroupedAggregateState::Finalize(DataChunk &result, idx_t column_off
 }
 
 static SourceResultType ScanUngroupedAggregateState(ExecutionContext &context, DataChunk &chunk,
-                                                    OperatorSourceInput &input,
-                                                    const PhysicalUngroupedAggregate &op) {
+                                                    OperatorSourceInput &input, const PhysicalUngroupedAggregate &op) {
 	(void)context;
 	auto &gstate = op.sink_state->Cast<UngroupedAggregateGlobalSinkState>();
 	D_ASSERT(gstate.finished);

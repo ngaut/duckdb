@@ -104,6 +104,31 @@ static void PrepareExecutableRegionExpressionInputs(SljitExecutableRegionExpress
 	}
 }
 
+static void RemapSljitExpressionTreeToCombinedInputs(ExecutionExpressionIR &node, const vector<idx_t> &local_sources,
+                                                     vector<idx_t> &combined_sources) {
+	if (node.kind == ExecutionExpressionIRKind::REFERENCE) {
+		if (node.ref_index >= local_sources.size()) {
+			throw InternalException("SLJIT expression-tree reference source is out of range");
+		}
+		node.ref_index = AddSljitExecutableInputSource(combined_sources, local_sources[node.ref_index]);
+		return;
+	}
+	if (node.left) {
+		RemapSljitExpressionTreeToCombinedInputs(*node.left, local_sources, combined_sources);
+	}
+	if (node.right) {
+		RemapSljitExpressionTreeToCombinedInputs(*node.right, local_sources, combined_sources);
+	}
+	if (node.else_node) {
+		RemapSljitExpressionTreeToCombinedInputs(*node.else_node, local_sources, combined_sources);
+	}
+	for (auto &child : node.children) {
+		if (child) {
+			RemapSljitExpressionTreeToCombinedInputs(*child, local_sources, combined_sources);
+		}
+	}
+}
+
 static bool BuildExecutableRegionExpression(const SljitNativeRegionExpressionPlan &plan, bool require_boolean,
                                             SljitExecutableRegionExpression &expr, string &error) {
 	expr.plan = CopySljitNativeRegionExpression(plan);
@@ -298,8 +323,8 @@ static bool BuildExecutableRegionExpression(const SljitNativeRegionExpressionPla
 		expr.code = BuildSljitNativeExpressionTree(*semantic.expression_tree, expr.function, error);
 		return expr.code != nullptr;
 	case SljitNativeRegionExpressionKind::TYPED_EXPRESSION_TREE:
-		if (require_boolean) {
-			error = "SLJIT typed expression tree cannot lower as a predicate";
+		if (require_boolean && semantic.return_type.id() != LogicalTypeId::BOOLEAN) {
+			error = "SLJIT typed expression tree predicate must return BOOLEAN";
 			return false;
 		}
 		if (!semantic.expression_tree) {
@@ -307,12 +332,134 @@ static bool BuildExecutableRegionExpression(const SljitNativeRegionExpressionPla
 			return false;
 		}
 		expr.overflow_message = "Overflow in arithmetic expression";
+		if (require_boolean) {
+			expr.select_code =
+			    BuildSljitNativeTypedExpressionTreeSelect(*semantic.expression_tree, expr.select_function, error);
+			return expr.select_code != nullptr;
+		}
 		expr.code =
 		    BuildSljitNativeTypedExpressionTree(*semantic.expression_tree, semantic.integer_kind, expr.function, error);
 		return expr.code != nullptr;
 	default:
 		throw InternalException("Unknown SLJIT native region expression kind");
 	}
+}
+
+static unique_ptr<ExecutionExpressionIR>
+SljitPayloadReferenceExpressionTree(const SljitNativeRegionExpressionPlan &plan) {
+	auto result = make_uniq<ExecutionExpressionIR>();
+	result->kind = ExecutionExpressionIRKind::REFERENCE;
+	result->return_type = plan.return_type;
+	result->physical_type = plan.return_type.InternalType();
+	result->validity = ExecutionExpressionValidityKind::SOURCE;
+	result->source = ExecutionExpressionSourceKind::VECTOR;
+	result->exception_behavior = ExecutionExpressionExceptionKind::NONE;
+	result->ref_index = 0;
+	return result;
+}
+
+static bool NormalizeSljitFilteredAggregatePayloadExpression(SljitExecutableRegionExpression &payload,
+                                                             vector<idx_t> &local_sources) {
+	if (payload.plan.expression_tree) {
+		local_sources = payload.input_source_indices.empty() ? payload.plan.expression_tree_source_indices
+		                                                     : payload.input_source_indices;
+		return true;
+	}
+	if (payload.plan.kind != SljitNativeRegionExpressionKind::REFERENCE ||
+	    payload.plan.source_index == DConstants::INVALID_INDEX) {
+		return false;
+	}
+	payload.plan.expression_tree = SljitPayloadReferenceExpressionTree(payload.plan);
+	local_sources.clear();
+	local_sources.push_back(payload.plan.source_index);
+	payload.plan.expression_tree_source_indices = local_sources;
+	payload.input_source_indices = local_sources;
+	return true;
+}
+
+static bool TryBuildFilteredAggregateUpdate(SljitExecutableRegionOp &filter_op, SljitExecutableRegionOp &aggregate_op,
+                                            string &error) {
+	if (filter_op.kind != SljitNativeRegionOpKind::FILTER ||
+	    aggregate_op.kind != SljitNativeRegionOpKind::AGGREGATE_UPDATE) {
+		return true;
+	}
+	auto &aggregate_update = aggregate_op.aggregate_update;
+	if (aggregate_update.filtered_update.IsExecutable() || !aggregate_update.plan.use_primitive_payloads ||
+	    aggregate_update.plan.use_grouped_state_addresses ||
+	    aggregate_update.plan.sink_info.kind != ExecutionRegionSinkKind::UNGROUPED_AGGREGATE_UPDATE ||
+	    aggregate_update.payloads.empty() ||
+	    aggregate_update.payloads.size() != aggregate_update.plan.sink_info.aggregates.size()) {
+		return true;
+	}
+	if (filter_op.filter.plan.kind != SljitNativeRegionExpressionKind::TYPED_EXPRESSION_TREE ||
+	    !filter_op.filter.plan.expression_tree) {
+		return true;
+	}
+	for (idx_t payload_idx = 0; payload_idx < aggregate_update.payloads.size(); payload_idx++) {
+		auto primitive_kind = aggregate_update.plan.sink_info.aggregates[payload_idx].primitive_update_kind;
+		if (!SljitFilteredAggregateKindCanGenerate(primitive_kind)) {
+			return true;
+		}
+	}
+
+	SljitExecutableFilteredAggregateUpdate filtered_update;
+	filtered_update.filter.plan = CopySljitNativeRegionExpression(filter_op.filter.plan);
+	filtered_update.payloads.reserve(aggregate_update.payloads.size());
+	for (auto &payload : aggregate_update.payloads) {
+		SljitExecutableRegionExpression filtered_payload;
+		filtered_payload.plan = CopySljitNativeRegionExpression(payload.plan);
+		filtered_update.payloads.push_back(std::move(filtered_payload));
+	}
+	if (!filtered_update.filter.plan.expression_tree) {
+		return true;
+	}
+
+	vector<idx_t> combined_sources;
+	auto &filter_sources = filter_op.filter.input_source_indices.empty()
+	                           ? filter_op.filter.plan.expression_tree_source_indices
+	                           : filter_op.filter.input_source_indices;
+	RemapSljitExpressionTreeToCombinedInputs(*filtered_update.filter.plan.expression_tree, filter_sources,
+	                                         combined_sources);
+	for (idx_t payload_idx = 0; payload_idx < aggregate_update.payloads.size(); payload_idx++) {
+		auto primitive_kind = aggregate_update.plan.sink_info.aggregates[payload_idx].primitive_update_kind;
+		if (!SljitFilteredAggregateUsesPayloadExpression(primitive_kind)) {
+			continue;
+		}
+		vector<idx_t> payload_sources;
+		if (!NormalizeSljitFilteredAggregatePayloadExpression(filtered_update.payloads[payload_idx], payload_sources)) {
+			return true;
+		}
+		RemapSljitExpressionTreeToCombinedInputs(*filtered_update.payloads[payload_idx].plan.expression_tree,
+		                                         payload_sources, combined_sources);
+	}
+	filtered_update.input_source_indices = combined_sources;
+	filtered_update.filter.input_source_indices = combined_sources;
+	filtered_update.filter.plan.expression_tree_source_indices = combined_sources;
+	vector<SljitNativeRegionExpressionPlan> codegen_payloads;
+	codegen_payloads.reserve(filtered_update.payloads.size());
+	for (auto &payload : filtered_update.payloads) {
+		payload.input_source_indices = combined_sources;
+		payload.plan.expression_tree_source_indices = combined_sources;
+		codegen_payloads.push_back(CopySljitNativeRegionExpression(payload.plan));
+	}
+
+	SljitNativeAggregateUpdateFunction function = nullptr;
+	string filtered_error;
+	auto code = BuildSljitNativeFilteredUngroupedFusedPrimitiveAggregateUpdate(
+	    *filtered_update.filter.plan.expression_tree, codegen_payloads, aggregate_update.plan.sink_info.aggregates,
+	    function, filtered_error);
+
+	if (code && function) {
+		filtered_update.code = std::move(code);
+		filtered_update.function = function;
+		aggregate_update.filtered_update = std::move(filtered_update);
+		return true;
+	}
+	if (!filtered_error.empty() && filtered_error.rfind("unsupported", 0) != 0) {
+		error = filtered_error;
+		return false;
+	}
+	return true;
 }
 
 static bool BuildExecutableRegionOp(const SljitNativeRegionOpPlan &op, SljitExecutableRegionOp &executable,
@@ -632,10 +779,6 @@ static bool BuildExecutableRegionOp(const SljitNativeRegionOpPlan &op, SljitExec
 		}
 		return true;
 	case SljitNativeRegionOpKind::PROJECTION:
-		executable.use_vectorized_projection = op.use_vectorized_projection;
-		if (executable.use_vectorized_projection) {
-			return true;
-		}
 		executable.projections.reserve(op.projections.size());
 		for (auto &projection : op.projections) {
 			SljitExecutableRegionExpression executable_projection;
@@ -658,6 +801,11 @@ bool BuildSljitExecutableRegion(const SljitNativeRegionPlan &region, SljitExecut
 			return false;
 		}
 		executable.ops.push_back(std::move(executable_op));
+	}
+	for (idx_t op_idx = 0; op_idx + 1 < executable.ops.size(); op_idx++) {
+		if (!TryBuildFilteredAggregateUpdate(executable.ops[op_idx], executable.ops[op_idx + 1], error)) {
+			return false;
+		}
 	}
 	return true;
 }

@@ -16,7 +16,7 @@ python3 benchmark/jit/verify_jit_architecture.py
 Run the TPC-H harness when validating performance or region-selection behavior:
 
 ```sh
-python3 benchmark/tpch/jit/tpch_benchmark.py --policies off auto force --out-dir /tmp/duckdb_jit_tpch_benchmark
+python3 benchmark/tpch/jit/tpch_benchmark.py --policies off auto --out-dir /tmp/duckdb_jit_tpch_benchmark
 python3 benchmark/tpch/jit/verify_tpch_benchmark.py /tmp/duckdb_jit_tpch_benchmark
 ```
 
@@ -31,9 +31,14 @@ artifact under inspection.
 - `summary.csv`: per-query/per-policy timing and execution-region totals.
 - `runs.csv`: one row per measured query execution.
 - `counters.csv`: raw typed `duckdb_jit_counters()` rows annotated with query, policy, and repeat.
-- `performance_gaps.csv`: query-by-query performance summary with AUTO/FORCE speedups, compiled coverage,
-  primary AUTO blocker, aggregate AUTO runner-cost benefit/cost/net-benefit, and FORCE planning/compile/code-size
-  evidence.
+- `performance_gaps.csv`: query-by-query performance summary with AUTO speedup, compiled coverage,
+  primary AUTO blocker, and aggregate AUTO runner-cost benefit/cost/net-benefit evidence.
+
+The verifier fails by default when AUTO makes JIT decisions and drops below
+0.98x of OFF median runtime. When AUTO makes no JIT decisions, the verifier
+applies an absolute 5 ms median slowdown noise floor instead; use
+`--auto-no-decision-noise-s` to adjust that tolerance for a specific machine.
+Use `--min-auto-speedup` to tighten or relax the compiled-decision gate.
 
 Production `auto` stays on DuckDB's vectorized path unless core execution has
 selected the compiled-vectorized runner. Benchmark artifacts expose the selected runner,

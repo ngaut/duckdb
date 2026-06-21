@@ -27,20 +27,16 @@ public:
 	virtual const string &BackendName() const = 0;
 	virtual idx_t CodeSize() const;
 	virtual bool HasExecutableBody() const;
-	void SetTraceInfo(idx_t trace_id, ExecutionRegionExecutionMode execution_mode,
-	                  ExecutionRegionExecutionBody execution_body, string compile_reason, int64_t compile_time_us,
-	                  idx_t code_size);
-	void SetTraceRegionExecutionForm(ExecutionRegionForm execution_form);
+	void SetTraceInfo(idx_t trace_id, ExecutionRegionExecutionMode execution_mode, string compile_reason,
+	                  int64_t compile_time_us, idx_t code_size);
 	void SetTraceSelectedSourceExecution(ExecutionRegionSourceExecutionKind source_execution);
 	void SetTraceUsesScanFilters(bool uses_scan_filters);
 	void SetTracePipeline(const ExecutionRegionCandidate &candidate);
 	void SetExecutionABI(ExecutionRegionABI abi);
 	idx_t TraceId() const;
 	ExecutionRegionExecutionMode ExecutionMode() const;
-	ExecutionRegionForm RegionExecutionForm() const;
 	ExecutionRegionSourceExecutionKind SelectedSourceExecution() const;
 	bool UsesScanFilters() const;
-	ExecutionRegionExecutionBody ExecutionBody() const;
 	ExecutionRegionABI ExecutionABI() const;
 	const string &TraceCompileReason() const;
 	int64_t TraceCompileTime() const;
@@ -56,10 +52,8 @@ public:
 private:
 	idx_t trace_id = 0;
 	ExecutionRegionExecutionMode execution_mode = ExecutionRegionExecutionMode::NONE;
-	ExecutionRegionForm region_execution_form = ExecutionRegionForm::NONE;
 	ExecutionRegionSourceExecutionKind selected_source_execution = ExecutionRegionSourceExecutionKind::NONE;
 	bool uses_scan_filters = false;
-	ExecutionRegionExecutionBody execution_body = ExecutionRegionExecutionBody::NONE;
 	ExecutionRegionABI execution_abi = ExecutionRegionABI::NONE;
 	string trace_compile_reason;
 	int64_t trace_compile_time_us = 0;

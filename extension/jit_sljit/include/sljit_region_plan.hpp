@@ -55,7 +55,12 @@ enum class SljitNativeRegionExpressionKind : uint8_t {
 	TYPED_EXPRESSION_TREE
 };
 
-enum class SljitNativeReferenceOrigin : uint8_t { REGION_INPUT, PROJECTION_PASS_THROUGH, PROJECTION_TEMP, SOURCE_OUTPUT };
+enum class SljitNativeReferenceOrigin : uint8_t {
+	REGION_INPUT,
+	PROJECTION_PASS_THROUGH,
+	PROJECTION_TEMP,
+	SOURCE_OUTPUT
+};
 
 struct SljitNativeRegionExpressionPlan;
 
@@ -216,67 +221,16 @@ struct SljitNativeRegionOpPlan {
 	SljitNativeOrderSinkPlan order_sink;
 	SljitNativeAggregateUpdatePlan aggregate_update;
 	vector<SljitNativeRegionExpressionPlan> projections;
-	bool use_vectorized_projection = false;
-};
-
-struct SljitNativeExpressionIntensity {
-	idx_t max_nodes = 0;
-	idx_t total_nodes = 0;
-	idx_t total_arithmetic_nodes = 0;
-	idx_t total_predicate_nodes = 0;
-	idx_t total_control_nodes = 0;
-	idx_t total_null_control_nodes = 0;
-	idx_t total_helper_nodes = 0;
-	idx_t max_straight_line_arithmetic_nodes = 0;
-	idx_t max_branchy_arithmetic_nodes = 0;
-	idx_t straight_line_arithmetic_expression_count = 0;
-	idx_t branchy_arithmetic_expression_count = 0;
-	idx_t expression_count = 0;
-};
-
-struct SljitNativeStringPredicateIntensity {
-	idx_t total_predicate_nodes = 0;
-	idx_t string_predicate_nodes = 0;
-	idx_t string_like_nodes = 0;
-	idx_t string_contains_nodes = 0;
-	idx_t string_prefix_nodes = 0;
-	idx_t string_suffix_nodes = 0;
-	idx_t string_equality_nodes = 0;
-	idx_t string_in_list_nodes = 0;
-	idx_t string_substring_in_list_nodes = 0;
-	idx_t conjunction_nodes = 0;
-	idx_t not_nodes = 0;
-
-	bool HasStringPredicate() const {
-		return string_predicate_nodes > 0;
-	}
-
-	bool HasHighCostPatternPredicate() const {
-		return string_like_nodes > 0 || string_contains_nodes > 0 || string_substring_in_list_nodes > 0;
-	}
 };
 
 struct SljitNativeRegionSummary {
-	bool finalized = false;
-	string native_shape;
-	bool generates_code = false;
 	bool generates_machine_code = false;
 	bool has_whole_operator_boundary_stage = false;
 	string whole_operator_boundary_blocker;
-	bool has_operator_contract_loop = false;
-	bool has_native_protocol_body = false;
-	ExecutionRegionExecutionBody execution_body = ExecutionRegionExecutionBody::NONE;
-	SljitNativeExpressionIntensity expression_intensity;
-	SljitNativeStringPredicateIntensity string_predicate_intensity;
 };
 
 struct SljitNativeRegionPlan {
 	vector<SljitNativeRegionOpPlan> ops;
-	idx_t elided_identity_projections = 0;
-	idx_t fused_projection_chains = 0;
-	idx_t fused_arithmetic_projection_chains = 0;
-	idx_t fused_primitive_aggregate_updates = 0;
-	idx_t runtime_combined_filter_projections = 0;
 	ExecutionRegionSourceExecutionKind source_execution = ExecutionRegionSourceExecutionKind::NONE;
 	SljitNativeRegionSummary summary;
 
@@ -290,80 +244,18 @@ struct SljitNativeRegionPlan {
 	}
 };
 
-struct SljitOperatorStageRegionPlan {
-	vector<ExecutionRegionStage> stages;
-	string shape_key;
-	string stage_ir;
-	bool stage_plan_valid = false;
-	string kernel_kind;
-	string kernel_blocker;
-
-	bool IsValid() const {
-		return stage_plan_valid;
-	}
-
-	bool UsesSourceContract() const {
-		for (auto &stage : stages) {
-			if (stage.kind == ExecutionRegionStageKind::SOURCE &&
-			    stage.execution == ExecutionRegionStageExecutionKind::NATIVE_CONTRACT) {
-				return true;
-			}
-		}
-		return false;
-	}
-
-	bool OwnsSource() const {
-		for (auto &stage : stages) {
-			if (stage.kind == ExecutionRegionStageKind::SOURCE) {
-				return true;
-			}
-		}
-		return false;
-	}
-
-	bool OwnsSink() const {
-		for (auto &stage : stages) {
-			switch (stage.kind) {
-			case ExecutionRegionStageKind::HASH_JOIN_BUILD:
-			case ExecutionRegionStageKind::NESTED_LOOP_JOIN_BUILD:
-			case ExecutionRegionStageKind::HASH_AGGREGATE_UPDATE:
-			case ExecutionRegionStageKind::HASH_AGGREGATE_DISTINCT_SINK:
-			case ExecutionRegionStageKind::PERFECT_HASH_AGGREGATE_UPDATE:
-			case ExecutionRegionStageKind::UNGROUPED_AGGREGATE_UPDATE:
-			case ExecutionRegionStageKind::APPEND_SINK:
-			case ExecutionRegionStageKind::SORT_SINK:
-			case ExecutionRegionStageKind::DELIM_JOIN_SINK:
-			case ExecutionRegionStageKind::SINK_BOUNDARY:
-				return true;
-			default:
-				break;
-			}
-		}
-		return false;
-	}
-};
-
 struct SljitRegionBackendPlan : public ExecutionRegionBackendPlan {
 	unique_ptr<SljitNativeRegionPlan> native_region;
 	string error;
-};
-
-struct SljitRegionPlan {
-	ExecutionRegionLoweringPlan lowering_plan;
-	shared_ptr<SljitRegionBackendPlan> backend_plan;
 };
 
 SljitNativeRegionExpressionPlan CopySljitNativeRegionExpression(const SljitNativeRegionExpressionPlan &input);
 SljitNativeHashJoinProbePlan CopySljitNativeHashJoinProbePlan(const SljitNativeHashJoinProbePlan &input);
 unique_ptr<SljitNativeRegionPlan> CopySljitNativeRegion(const SljitNativeRegionPlan &input);
 
-SljitOperatorStageRegionPlan BuildSljitOperatorStageRegionPlan(const SljitNativeRegionPlan &region,
-                                                               const ExecutionRegionContract &contract,
-                                                               const ExecutionRegionStagePlan &core_stage_plan);
-ExecutionRegionExecutionBody SljitNativeRegionExecutionBody(const SljitNativeRegionPlan &region,
-                                                            const ExecutionRegionContract &contract);
 string DescribeNativeRegion(const SljitNativeRegionPlan &region, const string &mode);
 string DescribeNativeRegionShape(const SljitNativeRegionPlan &region);
-SljitRegionPlan BuildSljitRegionPlan(const ExecutionRegionIR &region_ir, const ExecutionRegionCandidate &candidate);
+ExecutionRegionLoweringPlan BuildSljitRegionPlan(const ExecutionRegionIR &region_ir,
+                                                  const ExecutionRegionCandidate &candidate);
 
 } // namespace duckdb

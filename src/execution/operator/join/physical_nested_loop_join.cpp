@@ -276,8 +276,7 @@ SinkResultType PhysicalNestedLoopJoin::Sink(ExecutionContext &context, DataChunk
 }
 
 bool PhysicalNestedLoopJoin::BindExecutionSink(ExecutionContext &context, DataChunk &input,
-                                               OperatorSinkInput &sink_input,
-                                               const ExecutionRegionSinkInfo &sink_info,
+                                               OperatorSinkInput &sink_input, const ExecutionRegionSinkInfo &sink_info,
                                                ExecutionSinkBinding &binding) const {
 	(void)context;
 	binding = ExecutionSinkBinding();
@@ -522,8 +521,7 @@ PhysicalNestedLoopJoin::GetExecutionOperatorReadiness(ClientContext &context,
 
 ExecutionOperatorBindResult
 PhysicalNestedLoopJoin::BindExecutionOperator(ExecutionContext &context, DataChunk &input, GlobalOperatorState &gstate,
-                                              OperatorState &state_p,
-                                              const ExecutionRegionOperatorInfo &operator_info,
+                                              OperatorState &state_p, const ExecutionRegionOperatorInfo &operator_info,
                                               ExecutionOperatorBinding &binding) const {
 	(void)context;
 	(void)gstate;

@@ -114,8 +114,9 @@ bool ExecutionBuildHashAggregateLookupLayout(const TupleDataLayout &tuple_layout
 			break;
 		}
 	}
-	layout.row_compare_contract_blocker =
-	    layout.row_compare_contract_ready ? "none" : "hash-aggregate-row-compare-direct-equality-contract-missing";
+	if (!layout.row_compare_contract_ready) {
+		layout.row_compare_contract_blocker = "hash-aggregate-row-compare-direct-equality-contract-missing";
+	}
 	layout.backend_lowering_ready = false;
 	layout.backend_lowering_blocker = "hash-aggregate-generated-lookup-backend-lowering-missing";
 	layout.blocker =

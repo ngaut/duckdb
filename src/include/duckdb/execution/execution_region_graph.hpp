@@ -34,6 +34,8 @@ struct ExecutionRegionOperatorEntry {
 	ExecutionCompiledOperatorContract source_contract;
 	ExecutionCompiledOperatorContract operator_contract;
 	ExecutionCompiledOperatorContract sink_contract;
+	bool has_generated_expression = false;
+	bool has_native_operator_work = false;
 
 	bool HasSourceContract() const {
 		return source_contract.Present();
@@ -99,6 +101,8 @@ struct ExecutionRegionGraph {
 	ExecutionRegionOperatorEntry source;
 	vector<ExecutionRegionOperatorEntry> operators;
 	ExecutionRegionOperatorEntry sink;
+	bool has_generated_expression = false;
+	bool has_native_operator_work = false;
 
 	bool HasSource() const {
 		return source.present;
@@ -111,6 +115,12 @@ struct ExecutionRegionGraph {
 	}
 	idx_t OperatorCount() const {
 		return operators.size();
+	}
+	bool HasGeneratedExpression() const {
+		return has_generated_expression;
+	}
+	bool HasNativeOperatorWork() const {
+		return has_native_operator_work;
 	}
 };
 

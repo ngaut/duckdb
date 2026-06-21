@@ -28,7 +28,7 @@ The join micro benchmark set contains benchmarks that look at the speed of vario
 
 [jit]
 [JIT]
-The JIT micro benchmark set compares default, auto, and forced JIT execution for supported generated-kernel shapes.
+The JIT micro benchmark set compares default vectorized execution with auto-selected compiled regions.
 
 [order]
 [Order]

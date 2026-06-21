@@ -8,7 +8,7 @@ namespace duckdb {
 
 struct DuckDBJitEventsData : public ExecutionRegionTableFunctionState<ExecutionRegionEvent> {};
 
-static constexpr idx_t JIT_EVENT_CANDIDATE_TRACE_COLUMN_OFFSET = 56;
+static constexpr idx_t JIT_EVENT_CANDIDATE_TRACE_COLUMN_OFFSET = 57;
 static constexpr idx_t JIT_EVENT_PIPELINE_SHAPE_COLUMN =
     JIT_EVENT_CANDIDATE_TRACE_COLUMN_OFFSET + EXECUTION_REGION_CANDIDATE_TRACE_COLUMN_COUNT;
 static constexpr idx_t JIT_EVENT_PIPELINE_ESTIMATED_CARDINALITY_COLUMN = JIT_EVENT_PIPELINE_SHAPE_COLUMN + 1;
@@ -36,180 +36,183 @@ static void AppendJitEventColumn(Vector &output, idx_t column_id, const Executio
 		output.Append(Value(entry.backend_name));
 		return;
 	case 2:
-		output.Append(Value(ExecutionRegionCompileTargetToString(entry.target_kind)));
-		return;
-	case 3:
 		output.Append(Value(ExecutionRegionEventStatusToString(entry.status_kind)));
 		return;
-	case 4:
+	case 3:
 		output.Append(Value(ExecutionRegionExecutionModeToString(entry.execution_mode_kind)));
 		return;
-	case 5:
-		output.Append(Value(ExecutionRegionFormToString(entry.region_execution_form_kind)));
-		return;
-	case 6:
-		output.Append(Value(ExecutionRegionExecutionBodyToString(entry.execution_body_kind)));
-		return;
-	case 7:
+	case 4:
 		output.Append(Value(ExecutionRegionSourceExecutionKindToString(entry.selected_source_execution)));
 		return;
-	case 8:
+	case 5:
 		output.Append(Value::BOOLEAN(entry.selected_uses_scan_filters));
 		return;
-	case 9:
+	case 6:
 		output.Append(Value::BOOLEAN(entry.candidate_uses_scan_filters));
 		return;
-	case 10:
-		output.Append(Value(ExecutionRegionEventPolicyToString(entry.requested_policy_kind)));
-		return;
-	case 11:
+	case 7:
 		output.Append(Value(entry.reason));
 		return;
-	case 12:
+	case 8:
 		AppendExecutionRegionNullableString(output, entry.ir);
 		return;
-	case 13:
+	case 9:
 		output.Append(Value::BIGINT(entry.decision_time_us));
 		return;
-	case 14:
+	case 10:
 		output.Append(Value::BIGINT(entry.compile_time_us));
 		return;
-	case 15:
+	case 11:
 		output.Append(Value::UBIGINT(entry.code_size));
 		return;
-	case 16:
+	case 12:
 		output.Append(Value(ExecutionRegionEventPhaseToString(entry.phase_kind)));
 		return;
-	case 17:
+	case 13:
 		output.Append(Value::UBIGINT(entry.kernel_id));
 		return;
-	case 18:
+	case 14:
 		output.Append(Value::UBIGINT(entry.input_rows));
 		return;
-	case 19:
+	case 15:
 		output.Append(Value::UBIGINT(entry.output_rows));
 		return;
-	case 20:
+	case 16:
 		output.Append(Value::UBIGINT(entry.invocation_count));
 		return;
-	case 21:
+	case 17:
 		output.Append(Value::BIGINT(entry.runtime_time_us));
 		return;
-	case 22:
+	case 18:
 		AppendExecutionRegionNullableString(output, entry.runtime_result);
 		return;
-	case 23:
+	case 19:
 		output.Append(Value::UBIGINT(entry.source_contract_output_rows));
 		return;
-	case 24:
+	case 20:
 		output.Append(Value::UBIGINT(entry.source_contract_invocation_count));
 		return;
-	case 25:
+	case 21:
 		output.Append(Value::BIGINT(entry.source_contract_runtime_time_us));
 		return;
-	case 26:
+	case 22:
 		AppendExecutionRegionNullableString(output,
 		                                    RenderExecutionRegionStageRuntimeBreakdown(entry.source_stage_runtime));
 		return;
-	case 27:
+	case 23:
 		AppendExecutionRegionNullableString(output,
 		                                    RenderExecutionRegionStageCountBreakdown(entry.source_stage_runtime));
 		return;
-	case 28:
+	case 24:
 		output.Append(Value::UBIGINT(entry.sink_next_batch_invocation_count));
 		return;
-	case 29:
+	case 25:
 		output.Append(Value::BIGINT(entry.sink_next_batch_runtime_time_us));
 		return;
-	case 30:
+	case 26:
 		output.Append(Value::BIGINT(entry.generated_body_runtime_time_us));
 		return;
-	case 31:
+	case 27:
 		AppendExecutionRegionNullableString(output,
 		                                    RenderExecutionRegionStageRuntimeBreakdown(entry.generated_stage_runtime));
 		return;
-	case 32:
+	case 28:
 		AppendExecutionRegionNullableString(output,
 		                                    RenderExecutionRegionStageCountBreakdown(entry.generated_stage_runtime));
 		return;
-	case 33:
+	case 29:
 		output.Append(entry.has_candidate ? Value::UBIGINT(entry.candidate_id) : Value(LogicalType::UBIGINT));
 		return;
-	case 34:
+	case 30:
 		if (entry.has_candidate) {
 			output.Append(Value(entry.candidate_shape));
 		} else {
 			output.Append(Value(LogicalType::VARCHAR));
 		}
 		return;
-	case 35:
+	case 31:
 		output.Append(entry.has_candidate ? Value::UBIGINT(entry.candidate_node_count) : Value(LogicalType::UBIGINT));
 		return;
-	case 36:
+	case 32:
 		output.Append(entry.has_candidate ? Value::UBIGINT(entry.candidate_estimated_cardinality)
 		                                  : Value(LogicalType::UBIGINT));
 		return;
-	case 37:
+	case 33:
 		output.Append(entry.has_candidate ? Value::UBIGINT(entry.candidate_start_operator_index)
 		                                  : Value(LogicalType::UBIGINT));
 		return;
-	case 38:
+	case 34:
 		output.Append(entry.has_candidate ? Value::UBIGINT(entry.candidate_end_operator_index)
 		                                  : Value(LogicalType::UBIGINT));
 		return;
-	case 39:
+	case 35:
 		output.Append(Value(ExecutionRunnerKindToString(entry.selected_runner)));
 		return;
-	case 40:
+	case 36:
 		AppendExecutionRegionNullableString(output, entry.blocker);
 		return;
-	case 41:
+	case 37:
 		output.Append(Value::BIGINT(entry.ir_lowering_time_us));
 		return;
-	case 42:
+	case 38:
 		output.Append(Value::BIGINT(entry.backend_analysis_time_us));
 		return;
-	case 43:
+	case 39:
 		output.Append(Value::BIGINT(entry.codegen_time_us));
 		return;
-	case 44:
+	case 40:
 		if (entry.has_candidate) {
 			AppendExecutionRegionNullableString(output, entry.candidate_pipeline_shape);
 		} else {
 			output.Append(Value(LogicalType::VARCHAR));
 		}
 		return;
-	case 45:
+	case 41:
 		output.Append(Value::BOOLEAN(entry.runner_cost.present));
 		return;
-	case 46:
+	case 42:
 		output.Append(Value::BIGINT(entry.runner_cost.rows));
 		return;
-	case 47:
+	case 43:
 		output.Append(Value::BIGINT(entry.runner_cost.batches));
 		return;
-	case 48:
+	case 44:
 		output.Append(Value::BIGINT(entry.runner_cost.expression_cost));
 		return;
+	case 45:
+		output.Append(Value::BIGINT(entry.runner_cost.generated_stage_count));
+		return;
+	case 46:
+		output.Append(Value::BIGINT(entry.runner_cost.materialization_elision_count));
+		return;
+	case 47:
+		output.Append(Value::BIGINT(entry.runner_cost.native_join_stage_count));
+		return;
+	case 48:
+		output.Append(Value::BIGINT(entry.runner_cost.native_aggregate_stage_count));
+		return;
 	case 49:
-		output.Append(Value::BIGINT(entry.runner_cost.accelerated_stage_count));
+		output.Append(Value::BIGINT(entry.runner_cost.native_sort_stage_count));
 		return;
 	case 50:
-		output.Append(Value::BIGINT(entry.runner_cost.saved_work_per_batch));
+		output.Append(Value::BOOLEAN(entry.runner_cost.full_pipeline));
 		return;
 	case 51:
-		output.Append(Value::BIGINT(entry.runner_cost.accelerated_runner_benefit));
+		output.Append(Value::BIGINT(entry.runner_cost.saved_work_per_batch));
 		return;
 	case 52:
-		output.Append(Value::BIGINT(entry.runner_cost.startup_cost));
+		output.Append(Value::BIGINT(entry.runner_cost.accelerated_runner_benefit));
 		return;
 	case 53:
-		output.Append(Value::BIGINT(entry.runner_cost.required_benefit));
+		output.Append(Value::BIGINT(entry.runner_cost.startup_cost));
 		return;
 	case 54:
-		output.Append(Value::BIGINT(entry.runner_cost.net_benefit));
+		output.Append(Value::BIGINT(entry.runner_cost.required_benefit));
 		return;
 	case 55:
+		output.Append(Value::BIGINT(entry.runner_cost.net_benefit));
+		return;
+	case 56:
 		output.Append(Value::BOOLEAN(entry.runner_cost.selected_accelerated_runner));
 		return;
 	case JIT_EVENT_PIPELINE_SHAPE_COLUMN:
@@ -234,15 +237,9 @@ static unique_ptr<FunctionData> DuckDBJitEventsBind(ClientContext &context, Tabl
 	return_types.emplace_back(LogicalType::UBIGINT);
 	names.emplace_back("backend_name");
 	return_types.emplace_back(LogicalType::VARCHAR);
-	names.emplace_back("target");
-	return_types.emplace_back(LogicalType::VARCHAR);
 	names.emplace_back("status");
 	return_types.emplace_back(LogicalType::VARCHAR);
 	names.emplace_back("execution_mode");
-	return_types.emplace_back(LogicalType::VARCHAR);
-	names.emplace_back("region_execution_form");
-	return_types.emplace_back(LogicalType::VARCHAR);
-	names.emplace_back("execution_body");
 	return_types.emplace_back(LogicalType::VARCHAR);
 	names.emplace_back("selected_source_execution");
 	return_types.emplace_back(LogicalType::VARCHAR);
@@ -250,8 +247,6 @@ static unique_ptr<FunctionData> DuckDBJitEventsBind(ClientContext &context, Tabl
 	return_types.emplace_back(LogicalType::BOOLEAN);
 	names.emplace_back("candidate_uses_scan_filters");
 	return_types.emplace_back(LogicalType::BOOLEAN);
-	names.emplace_back("requested_policy");
-	return_types.emplace_back(LogicalType::VARCHAR);
 	names.emplace_back("reason");
 	return_types.emplace_back(LogicalType::VARCHAR);
 	names.emplace_back("ir");
@@ -328,8 +323,18 @@ static unique_ptr<FunctionData> DuckDBJitEventsBind(ClientContext &context, Tabl
 	return_types.emplace_back(LogicalType::BIGINT);
 	names.emplace_back("runner_cost_expression_cost");
 	return_types.emplace_back(LogicalType::BIGINT);
-	names.emplace_back("runner_cost_accelerated_stage_count");
+	names.emplace_back("runner_cost_generated_stage_count");
 	return_types.emplace_back(LogicalType::BIGINT);
+	names.emplace_back("runner_cost_materialization_elision_count");
+	return_types.emplace_back(LogicalType::BIGINT);
+	names.emplace_back("runner_cost_native_join_stage_count");
+	return_types.emplace_back(LogicalType::BIGINT);
+	names.emplace_back("runner_cost_native_aggregate_stage_count");
+	return_types.emplace_back(LogicalType::BIGINT);
+	names.emplace_back("runner_cost_native_sort_stage_count");
+	return_types.emplace_back(LogicalType::BIGINT);
+	names.emplace_back("runner_cost_full_pipeline");
+	return_types.emplace_back(LogicalType::BOOLEAN);
 	names.emplace_back("runner_cost_saved_work_per_batch");
 	return_types.emplace_back(LogicalType::BIGINT);
 	names.emplace_back("runner_cost_accelerated_runner_benefit");

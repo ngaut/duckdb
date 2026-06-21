@@ -265,8 +265,8 @@ static bool TryFinishSink(SortGlobalSinkState &gstate, SortLocalSinkState &lstat
 	return false; // Sink is not done yet
 }
 
-static SinkResultType FinishSortSink(ExecutionContext &context, SortGlobalSinkState &gstate,
-                                     SortLocalSinkState &lstate, bool is_index_sort) {
+static SinkResultType FinishSortSink(ExecutionContext &context, SortGlobalSinkState &gstate, SortLocalSinkState &lstate,
+                                     bool is_index_sort) {
 	// Try to finish this call to Sink
 	unique_lock<mutex> guard;
 	if (TryFinishSink(gstate, lstate, guard)) {

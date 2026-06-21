@@ -35,7 +35,6 @@ enum class ExecutionRegionEventStatus : uint8_t {
 	EXECUTED,
 	SOURCE_CONTRACT
 };
-enum class ExecutionRegionEventPolicy : uint8_t { NONE, AUTO, FORCE, OFF, RUNTIME };
 
 struct ExecutionRegionEvent {
 	idx_t event_id = 0;
@@ -57,15 +56,11 @@ struct ExecutionRegionEvent {
 	PhysicalRunnerCostProfile runner_cost;
 	ExecutionRegionEventPhase phase_kind = ExecutionRegionEventPhase::NONE;
 	string backend_name;
-	ExecutionRegionCompileTarget target_kind = ExecutionRegionCompileTarget::REGION;
 	ExecutionRegionEventStatus status_kind = ExecutionRegionEventStatus::NONE;
 	ExecutionRegionExecutionMode execution_mode_kind = ExecutionRegionExecutionMode::NONE;
-	ExecutionRegionForm region_execution_form_kind = ExecutionRegionForm::NONE;
-	ExecutionRegionExecutionBody execution_body_kind = ExecutionRegionExecutionBody::NONE;
 	ExecutionRegionSourceExecutionKind selected_source_execution = ExecutionRegionSourceExecutionKind::NONE;
 	bool selected_uses_scan_filters = false;
 	bool candidate_uses_scan_filters = false;
-	ExecutionRegionEventPolicy requested_policy_kind = ExecutionRegionEventPolicy::NONE;
 	string reason;
 	string blocker;
 	string ir;
@@ -116,9 +111,7 @@ struct ExecutionRegionTraceSummary {
 DUCKDB_API ExecutionRegionTraceSummary SummarizeExecutionRegionTrace(const vector<ExecutionRegionEvent> &trace);
 DUCKDB_API const char *ExecutionRegionEventPhaseToString(ExecutionRegionEventPhase phase);
 DUCKDB_API const char *ExecutionRegionEventStatusToString(ExecutionRegionEventStatus status);
-DUCKDB_API const char *ExecutionRegionEventPolicyToString(ExecutionRegionEventPolicy policy);
 DUCKDB_API ExecutionRegionEventStatus ExecutionRegionEventStatusFromCompileStatus(ExecutionRegionCompileStatus status);
-DUCKDB_API ExecutionRegionEventPolicy ExecutionRegionEventPolicyFromMode(ExecutionRegionPolicyMode policy);
 DUCKDB_API bool ExecutionRegionEventIsRuntime(const ExecutionRegionEvent &event);
 DUCKDB_API bool ExecutionRegionEventWasInvoked(const ExecutionRegionEvent &event);
 DUCKDB_API bool ExecutionRegionEventIsVisibleInQueryProfile(const ExecutionRegionEvent &event);
@@ -129,18 +122,19 @@ DUCKDB_API int64_t ExecutionRegionEventProfileCompileTime(const ExecutionRegionE
 
 struct ExecutionRegionCounter {
 	string backend_name;
-	ExecutionRegionCompileTarget target_kind = ExecutionRegionCompileTarget::REGION;
 	ExecutionRegionEventStatus status_kind = ExecutionRegionEventStatus::NONE;
 	ExecutionRegionExecutionMode execution_mode_kind = ExecutionRegionExecutionMode::NONE;
-	ExecutionRegionForm region_execution_form_kind = ExecutionRegionForm::NONE;
-	ExecutionRegionExecutionBody execution_body_kind = ExecutionRegionExecutionBody::NONE;
 	ExecutionRunnerKind selected_runner_kind = ExecutionRunnerKind::VECTORIZED;
-	ExecutionRegionEventPolicy requested_policy_kind = ExecutionRegionEventPolicy::NONE;
 	bool has_runner_cost = false;
 	int64_t runner_cost_rows = 0;
 	int64_t runner_cost_batches = 0;
 	int64_t runner_cost_expression_cost = 0;
-	int64_t runner_cost_accelerated_stage_count = 0;
+	int64_t runner_cost_generated_stage_count = 0;
+	int64_t runner_cost_materialization_elision_count = 0;
+	int64_t runner_cost_native_join_stage_count = 0;
+	int64_t runner_cost_native_aggregate_stage_count = 0;
+	int64_t runner_cost_native_sort_stage_count = 0;
+	bool runner_cost_full_pipeline = false;
 	int64_t runner_cost_saved_work_per_batch = 0;
 	int64_t runner_cost_accelerated_runner_benefit = 0;
 	int64_t runner_cost_startup_cost = 0;

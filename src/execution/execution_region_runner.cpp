@@ -109,8 +109,7 @@ ExecutionRunnerResult VectorizedRunner::Execute(ExecutionRegionPipelineAdapter &
 	auto result = pipeline.ExecuteVectorizedPipeline(max_chunks);
 	auto elapsed_us = ExecutionRegionElapsedMicros(start);
 	ExecutionRegionManager::Get(client).RecordVectorizedBaselineRuntimeEvent(
-	    client, *kernel, ExecutionRegionCompileTarget::REGION,
-	    "vectorized baseline pipeline executed for execution-region runtime comparison", elapsed_us,
+	    client, *kernel, "vectorized baseline pipeline executed for execution-region runtime comparison", elapsed_us,
 	    PipelineExecuteResultToString(result));
 	return ExecutionRunnerResult::Executed(result);
 }
@@ -372,7 +371,7 @@ CompiledVectorizedRunStatus CompiledVectorizedRunner::ExecuteCompiledRegion(Exec
 	if (!pipeline.IsAtCleanSourceToSinkBoundary()) {
 		if (trace_runtime) {
 			ExecutionRegionManager::Get(client).RecordRuntimeEvent(
-			    client, *kernel, ExecutionRegionCompileTarget::REGION, ExecutionRegionEventStatus::SKIPPED,
+			    client, *kernel, ExecutionRegionEventStatus::SKIPPED,
 			    "full pipeline kernel not entered because executor state is not at a clean "
 			    "source-to-sink boundary",
 			    0, 0, 0, "boundary");
@@ -399,8 +398,8 @@ CompiledVectorizedRunStatus CompiledVectorizedRunner::ExecuteCompiledRegion(Exec
 				                  : "full pipeline kernel deferred: " + runtime.DeferredReason();
 				auto runtime_metrics = runtime.Metrics(elapsed_us);
 				ExecutionRegionManager::Get(client).RecordRuntimeEvent(
-				    client, *kernel, ExecutionRegionCompileTarget::REGION, ExecutionRegionEventStatus::SKIPPED,
-				    std::move(reason), runtime.SourceContractOutputRows(), runtime.SinkInputRows(), elapsed_us,
+				    client, *kernel, ExecutionRegionEventStatus::SKIPPED, std::move(reason),
+				    runtime.SourceContractOutputRows(), runtime.SinkInputRows(), elapsed_us,
 				    CompiledFullPipelineResultToString(compiled_result), runtime_metrics);
 			}
 			return CompiledVectorizedRunStatus::VECTORIZED_DEFERRED;
@@ -416,8 +415,8 @@ CompiledVectorizedRunStatus CompiledVectorizedRunner::ExecuteCompiledRegion(Exec
 		if (trace_runtime) {
 			auto runtime_metrics = runtime.Metrics(elapsed_us);
 			ExecutionRegionManager::Get(client).RecordRuntimeEvent(
-			    client, *kernel, ExecutionRegionCompileTarget::REGION, ExecutionRegionEventStatus::EXECUTED,
-			    std::move(runtime_reason), runtime.SourceContractOutputRows(), runtime.SinkInputRows(), elapsed_us,
+			    client, *kernel, ExecutionRegionEventStatus::EXECUTED, std::move(runtime_reason),
+			    runtime.SourceContractOutputRows(), runtime.SinkInputRows(), elapsed_us,
 			    CompiledFullPipelineResultToString(compiled_result), runtime_metrics);
 		}
 		return CompiledVectorizedRunStatus::EXECUTED;
@@ -425,10 +424,10 @@ CompiledVectorizedRunStatus CompiledVectorizedRunner::ExecuteCompiledRegion(Exec
 		auto compiled_error = std::current_exception();
 		if (trace_runtime) {
 			auto elapsed_us = trace_started ? ExecutionRegionElapsedMicros(trace_start) : 0;
-			ExecutionRegionManager::Get(client).RecordRuntimeEvent(
-			    client, *kernel, ExecutionRegionCompileTarget::REGION, ExecutionRegionEventStatus::ERROR,
-			    "full pipeline kernel threw: " + CompiledRegionExceptionMessage(compiled_error), 0, 0, elapsed_us,
-			    "error");
+			ExecutionRegionManager::Get(client).RecordRuntimeEvent(client, *kernel, ExecutionRegionEventStatus::ERROR,
+			                                                       "full pipeline kernel threw: " +
+			                                                           CompiledRegionExceptionMessage(compiled_error),
+			                                                       0, 0, elapsed_us, "error");
 		}
 		throw;
 	}

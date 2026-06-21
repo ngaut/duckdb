@@ -124,6 +124,7 @@
 #include "duckdb/execution/physical_operator.hpp"
 #include "duckdb/execution/physical_table_scan_enum.hpp"
 #include "duckdb/execution/reservoir_sample.hpp"
+#include "duckdb/function/aggregate_primitive_update.hpp"
 #include "duckdb/function/aggregate_state.hpp"
 #include "duckdb/function/arg_properties.hpp"
 #include "duckdb/function/compression_function.hpp"
@@ -196,6 +197,7 @@
 #include "duckdb/planner/bound_result_modifier.hpp"
 #include "duckdb/planner/filter/table_filter_functions.hpp"
 #include "duckdb/planner/table_filter.hpp"
+#include "duckdb/planner/table_filter_set.hpp"
 #include "duckdb/storage/buffer/buffer_pool_reservation.hpp"
 #include "duckdb/storage/caching_mode.hpp"
 #include "duckdb/storage/compression/bitpacking.hpp"
@@ -400,6 +402,27 @@ const char* EnumUtil::ToChars<AggregateOrderDependent>(AggregateOrderDependent v
 template<>
 AggregateOrderDependent EnumUtil::FromString<AggregateOrderDependent>(const char *value) {
 	return static_cast<AggregateOrderDependent>(StringUtil::StringToEnum(GetAggregateOrderDependentValues(), 2, "AggregateOrderDependent", value));
+}
+
+const StringUtil::EnumStringLiteral *GetAggregatePrimitiveUpdateKindValues() {
+	static constexpr StringUtil::EnumStringLiteral values[] {
+		{ static_cast<uint32_t>(AggregatePrimitiveUpdateKind::NONE), "NONE" },
+		{ static_cast<uint32_t>(AggregatePrimitiveUpdateKind::SUM_INT64), "SUM_INT64" },
+		{ static_cast<uint32_t>(AggregatePrimitiveUpdateKind::SUM_HUGEINT), "SUM_HUGEINT" },
+		{ static_cast<uint32_t>(AggregatePrimitiveUpdateKind::SUM_DOUBLE), "SUM_DOUBLE" },
+		{ static_cast<uint32_t>(AggregatePrimitiveUpdateKind::COUNT_STAR), "COUNT_STAR" }
+	};
+	return values;
+}
+
+template<>
+const char* EnumUtil::ToChars<AggregatePrimitiveUpdateKind>(AggregatePrimitiveUpdateKind value) {
+	return StringUtil::EnumToString(GetAggregatePrimitiveUpdateKindValues(), 5, "AggregatePrimitiveUpdateKind", static_cast<uint32_t>(value));
+}
+
+template<>
+AggregatePrimitiveUpdateKind EnumUtil::FromString<AggregatePrimitiveUpdateKind>(const char *value) {
+	return static_cast<AggregatePrimitiveUpdateKind>(StringUtil::StringToEnum(GetAggregatePrimitiveUpdateKindValues(), 5, "AggregatePrimitiveUpdateKind", value));
 }
 
 const StringUtil::EnumStringLiteral *GetAggregateStateExportModeValues() {
@@ -5489,6 +5512,24 @@ const char* EnumUtil::ToChars<TableColumnType>(TableColumnType value) {
 template<>
 TableColumnType EnumUtil::FromString<TableColumnType>(const char *value) {
 	return static_cast<TableColumnType>(StringUtil::StringToEnum(GetTableColumnTypeValues(), 2, "TableColumnType", value));
+}
+
+const StringUtil::EnumStringLiteral *GetTableFilterExecutionModeValues() {
+	static constexpr StringUtil::EnumStringLiteral values[] {
+		{ static_cast<uint32_t>(TableFilterExecutionMode::FILTER_AND_PRUNE), "FILTER_AND_PRUNE" },
+		{ static_cast<uint32_t>(TableFilterExecutionMode::PRUNE_ONLY), "PRUNE_ONLY" }
+	};
+	return values;
+}
+
+template<>
+const char* EnumUtil::ToChars<TableFilterExecutionMode>(TableFilterExecutionMode value) {
+	return StringUtil::EnumToString(GetTableFilterExecutionModeValues(), 2, "TableFilterExecutionMode", static_cast<uint32_t>(value));
+}
+
+template<>
+TableFilterExecutionMode EnumUtil::FromString<TableFilterExecutionMode>(const char *value) {
+	return static_cast<TableFilterExecutionMode>(StringUtil::StringToEnum(GetTableFilterExecutionModeValues(), 2, "TableFilterExecutionMode", value));
 }
 
 const StringUtil::EnumStringLiteral *GetTableFilterTypeValues() {

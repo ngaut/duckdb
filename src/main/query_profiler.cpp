@@ -144,6 +144,87 @@ static const char *DominantRuntimeComponent(const ExecutionRegionTraceSummary &s
 	return dominant;
 }
 
+static string ExecutionRegionProfileToken(string value, idx_t max_length = 96) {
+	if (value.empty()) {
+		return "none";
+	}
+	value = StringUtil::Replace(value, "\n", " ");
+	value = StringUtil::Replace(value, "\r", " ");
+	value = StringUtil::Replace(value, "\t", " ");
+	if (value.size() <= max_length) {
+		return value;
+	}
+	if (max_length <= 3) {
+		return value.substr(0, max_length);
+	}
+	return value.substr(0, max_length - 3) + "...";
+}
+
+static string ExecutionRegionProfileShape(const ExecutionRegionEvent &event) {
+	if (event.has_candidate && event.candidate_traits.sink_kind != ExecutionRegionSinkKind::NONE) {
+		return ExecutionRegionSinkKindToString(event.candidate_traits.sink_kind);
+	}
+	if (event.has_candidate && !event.candidate_shape.empty()) {
+		return event.candidate_shape;
+	}
+	auto pipeline_shape = ExecutionRegionEventPipelineShape(event);
+	if (!pipeline_shape.empty()) {
+		return pipeline_shape;
+	}
+	return "none";
+}
+
+static string ExecutionRegionProfileStageCosts(const PhysicalRunnerCostProfile &cost) {
+	string result = "gen:" + std::to_string(cost.generated_stage_count);
+	result += ",join:" + std::to_string(cost.native_join_stage_count);
+	result += ",agg:" + std::to_string(cost.native_aggregate_stage_count);
+	result += ",sort:" + std::to_string(cost.native_sort_stage_count);
+	result += ",mat:" + std::to_string(cost.materialization_elision_count);
+	result += ",full:";
+	result += cost.full_pipeline ? "true" : "false";
+	result += ",expr:" + std::to_string(cost.expression_cost);
+	return result;
+}
+
+static string FindExecutionRegionProfileReasonToken(const string &reason, const string &marker) {
+	idx_t start = 0;
+	while (start < reason.size()) {
+		auto end = reason.find(';', start);
+		auto length = end == string::npos ? reason.size() - start : end - start;
+		auto token = reason.substr(start, length);
+		if (token.find(marker) != string::npos) {
+			return token;
+		}
+		if (end == string::npos) {
+			break;
+		}
+		start = end + 1;
+	}
+	return string();
+}
+
+static string FirstExecutionRegionProfileReasonToken(const string &reason) {
+	if (reason.empty()) {
+		return "none";
+	}
+	auto separator = reason.find(';');
+	if (separator == string::npos) {
+		return reason;
+	}
+	return reason.substr(0, separator);
+}
+
+static string ExecutionRegionProfileReason(const string &reason) {
+	for (const auto marker : {":boundary:", "native_hash_aggregate_lookup_blocker=", "candidate-builder-blocked:",
+	                          "region-lowering-blocked:"}) {
+		auto token = FindExecutionRegionProfileReasonToken(reason, marker);
+		if (!token.empty()) {
+			return token;
+		}
+	}
+	return FirstExecutionRegionProfileReasonToken(reason);
+}
+
 static void AddFields(QueryProfileResult &node, std::initializer_list<std::pair<const char *, Value>> fields) {
 	for (const auto &field : fields) {
 		node.AddValue(field.first, field.second);
@@ -193,59 +274,61 @@ static void AddExecutionRegionSummary(QueryProfileResult &node, ClientContext &c
 }
 
 static void AddExecutionRegionEvent(QueryProfileResult &row, const ExecutionRegionEvent &event, bool is_runtime) {
-	AddFields(row, {{"entry_type", Text(is_runtime ? "runtime" : "decision")},
-	                {"event_id", Count(event.event_id)},
-	                {"kernel_id", Count(event.kernel_id)},
-	                {"status", Text(ExecutionRegionEventStatusToString(event.status_kind))},
-	                {"requested_policy", Text(ExecutionRegionEventPolicyToString(event.requested_policy_kind))},
-	                {"backend_name", Text(event.backend_name)},
-	                {"target", Text(ExecutionRegionCompileTargetToString(event.target_kind))},
-	                {"execution_mode", Text(ExecutionRegionExecutionModeToString(event.execution_mode_kind))},
-	                {"region_execution_form", Text(ExecutionRegionFormToString(event.region_execution_form_kind))},
-	                {"execution_body", Text(ExecutionRegionExecutionBodyToString(event.execution_body_kind))},
-	                {"selected_source_execution",
-	                 Text(ExecutionRegionSourceExecutionKindToString(event.selected_source_execution))},
-	                {"selected_uses_scan_filters", Value::BOOLEAN(event.selected_uses_scan_filters)},
-	                {"candidate_uses_scan_filters", Value::BOOLEAN(event.candidate_uses_scan_filters)},
-	                {"shape", Text(event.candidate_shape)},
-	                {"pipeline_shape", Text(ExecutionRegionEventPipelineShape(event))},
-	                {"estimated_cardinality", Count(ExecutionRegionEventEstimatedCardinality(event))},
-	                {"selected_runner", Text(ExecutionRunnerKindToString(event.selected_runner))},
-	                {"runner_cost_profile", Value::BOOLEAN(event.runner_cost.present)},
-	                {"runner_cost_rows", Time(event.runner_cost.rows)},
-	                {"runner_cost_batches", Time(event.runner_cost.batches)},
-	                {"runner_cost_expression_cost", Time(event.runner_cost.expression_cost)},
-	                {"runner_cost_accelerated_stage_count", Time(event.runner_cost.accelerated_stage_count)},
-	                {"runner_cost_saved_work_per_batch", Time(event.runner_cost.saved_work_per_batch)},
-	                {"runner_cost_accelerated_runner_benefit", Time(event.runner_cost.accelerated_runner_benefit)},
-	                {"runner_cost_startup_cost", Time(event.runner_cost.startup_cost)},
-	                {"runner_cost_required_benefit", Time(event.runner_cost.required_benefit)},
-	                {"runner_cost_net_benefit", Time(event.runner_cost.net_benefit)},
-	                {"runner_cost_selected_accelerated_runner",
-	                 Value::BOOLEAN(event.runner_cost.selected_accelerated_runner)},
-	                {"reason", Text(event.reason)},
-	                {"blocker", NullableText(event.blocker)},
-	                {"runtime_result", Text(event.runtime_result)},
-	                {"code_size", Count(ExecutionRegionEventProfileCodeSize(event))},
-	                {"input_rows", Count(event.input_rows)},
-	                {"output_rows", Count(event.output_rows)},
-	                {"invocation_count", Count(event.invocation_count)},
-	                {"source_contract_output_rows", Count(event.source_contract_output_rows)},
-	                {"source_contract_invocation_count", Count(event.source_contract_invocation_count)},
-	                {"sink_next_batch_invocation_count", Count(event.sink_next_batch_invocation_count)},
-	                {"decision_time_us", Time(event.decision_time_us)},
-	                {"compile_time_us", Time(ExecutionRegionEventProfileCompileTime(event))},
-	                {"ir_lowering_time_us", Time(event.ir_lowering_time_us)},
-	                {"backend_analysis_time_us", Time(event.backend_analysis_time_us)},
-	                {"codegen_time_us", Time(event.codegen_time_us)},
-	                {"runtime_time_us", Time(event.runtime_time_us)},
-	                {"source_runtime_time_us", Time(event.source_contract_runtime_time_us)},
-	                {"sink_next_batch_runtime_time_us", Time(event.sink_next_batch_runtime_time_us)},
-	                {"generated_runtime_time_us", Time(event.generated_body_runtime_time_us)},
-	                {"source_stage_runtime_breakdown",
-	                 Text(RenderExecutionRegionStageRuntimeBreakdown(event.source_stage_runtime))},
-	                {"generated_stage_runtime_breakdown",
-	                 Text(RenderExecutionRegionStageRuntimeBreakdown(event.generated_stage_runtime))}});
+	AddFields(
+	    row,
+	    {{"entry_type", Text(is_runtime ? "runtime" : "decision")},
+	     {"event_id", Count(event.event_id)},
+	     {"kernel_id", Count(event.kernel_id)},
+	     {"status", Text(ExecutionRegionEventStatusToString(event.status_kind))},
+	     {"backend_name", Text(event.backend_name)},
+	     {"execution_mode", Text(ExecutionRegionExecutionModeToString(event.execution_mode_kind))},
+	     {"selected_source_execution",
+	      Text(ExecutionRegionSourceExecutionKindToString(event.selected_source_execution))},
+	     {"selected_uses_scan_filters", Value::BOOLEAN(event.selected_uses_scan_filters)},
+	     {"candidate_uses_scan_filters", Value::BOOLEAN(event.candidate_uses_scan_filters)},
+	     {"shape", Text(event.candidate_shape)},
+	     {"pipeline_shape", Text(ExecutionRegionEventPipelineShape(event))},
+	     {"estimated_cardinality", Count(ExecutionRegionEventEstimatedCardinality(event))},
+	     {"selected_runner", Text(ExecutionRunnerKindToString(event.selected_runner))},
+	     {"runner_cost_profile", Value::BOOLEAN(event.runner_cost.present)},
+	     {"runner_cost_rows", Time(event.runner_cost.rows)},
+	     {"runner_cost_batches", Time(event.runner_cost.batches)},
+	     {"runner_cost_expression_cost", Time(event.runner_cost.expression_cost)},
+	     {"runner_cost_generated_stage_count", Time(event.runner_cost.generated_stage_count)},
+	     {"runner_cost_materialization_elision_count", Time(event.runner_cost.materialization_elision_count)},
+	     {"runner_cost_native_join_stage_count", Time(event.runner_cost.native_join_stage_count)},
+	     {"runner_cost_native_aggregate_stage_count", Time(event.runner_cost.native_aggregate_stage_count)},
+	     {"runner_cost_native_sort_stage_count", Time(event.runner_cost.native_sort_stage_count)},
+	     {"runner_cost_full_pipeline", Value::BOOLEAN(event.runner_cost.full_pipeline)},
+	     {"runner_cost_saved_work_per_batch", Time(event.runner_cost.saved_work_per_batch)},
+	     {"runner_cost_accelerated_runner_benefit", Time(event.runner_cost.accelerated_runner_benefit)},
+	     {"runner_cost_startup_cost", Time(event.runner_cost.startup_cost)},
+	     {"runner_cost_required_benefit", Time(event.runner_cost.required_benefit)},
+	     {"runner_cost_net_benefit", Time(event.runner_cost.net_benefit)},
+	     {"runner_cost_selected_accelerated_runner", Value::BOOLEAN(event.runner_cost.selected_accelerated_runner)},
+	     {"reason", Text(event.reason)},
+	     {"blocker", NullableText(event.blocker)},
+	     {"runtime_result", Text(event.runtime_result)},
+	     {"code_size", Count(ExecutionRegionEventProfileCodeSize(event))},
+	     {"input_rows", Count(event.input_rows)},
+	     {"output_rows", Count(event.output_rows)},
+	     {"invocation_count", Count(event.invocation_count)},
+	     {"source_contract_output_rows", Count(event.source_contract_output_rows)},
+	     {"source_contract_invocation_count", Count(event.source_contract_invocation_count)},
+	     {"sink_next_batch_invocation_count", Count(event.sink_next_batch_invocation_count)},
+	     {"decision_time_us", Time(event.decision_time_us)},
+	     {"compile_time_us", Time(ExecutionRegionEventProfileCompileTime(event))},
+	     {"ir_lowering_time_us", Time(event.ir_lowering_time_us)},
+	     {"backend_analysis_time_us", Time(event.backend_analysis_time_us)},
+	     {"codegen_time_us", Time(event.codegen_time_us)},
+	     {"runtime_time_us", Time(event.runtime_time_us)},
+	     {"source_runtime_time_us", Time(event.source_contract_runtime_time_us)},
+	     {"sink_next_batch_runtime_time_us", Time(event.sink_next_batch_runtime_time_us)},
+	     {"generated_runtime_time_us", Time(event.generated_body_runtime_time_us)},
+	     {"source_stage_runtime_breakdown",
+	      Text(RenderExecutionRegionStageRuntimeBreakdown(event.source_stage_runtime))},
+	     {"generated_stage_runtime_breakdown",
+	      Text(RenderExecutionRegionStageRuntimeBreakdown(event.generated_stage_runtime))}});
 	if (!event.ir.empty()) {
 		row.AddValue("ir", Text(event.ir));
 	}
@@ -260,6 +343,10 @@ static void AddExecutionRegionEvents(QueryProfileResult &node, const QueryProfil
 		AddExecutionRegionEvent(rows.AppendObject(), event, ExecutionRegionEventIsRuntime(event));
 	}
 }
+
+static void RenderExecutionRegionCboPipelineToStream(std::ostream &ss, const QueryProfilerExecutionRegionTrace &trace);
+static void RenderExecutionRegionRuntimePipelineToStream(std::ostream &ss,
+                                                         const QueryProfilerExecutionRegionTrace &trace);
 
 static void RenderExecutionRegionsToStream(std::ostream &ss, ClientContext &context, double query_runtime_seconds,
                                            const QueryProfilerExecutionRegionTrace &trace) {
@@ -282,6 +369,71 @@ static void RenderExecutionRegionsToStream(std::ostream &ss, ClientContext &cont
 	   << " source_runtime_pct=" << RuntimePercent(summary.source_us, summary.runtime_us)
 	   << " generated_runtime_pct=" << RuntimePercent(summary.generated_us, summary.runtime_us)
 	   << " decision_time_us=" << summary.decision_us << " compile_time_us=" << summary.compile_us << "\n";
+	RenderExecutionRegionCboPipelineToStream(ss, trace);
+	RenderExecutionRegionRuntimePipelineToStream(ss, trace);
+}
+
+static void RenderExecutionRegionCboPipelineToStream(std::ostream &ss, const QueryProfilerExecutionRegionTrace &trace) {
+	bool wrote_header = false;
+	for (const auto &event : trace) {
+		if (ExecutionRegionEventIsRuntime(event) || !ExecutionRegionEventIsVisibleInQueryProfile(event)) {
+			continue;
+		}
+		if (!wrote_header) {
+			ss << "  CBO_PIPELINE\n";
+			wrote_header = true;
+		}
+		ss << "    id=" << event.event_id << " phase=" << ExecutionRegionEventPhaseToString(event.phase_kind)
+		   << " status=" << ExecutionRegionEventStatusToString(event.status_kind)
+		   << " mode=" << ExecutionRegionExecutionModeToString(event.execution_mode_kind)
+		   << " runner=" << ExecutionRunnerKindToString(event.selected_runner)
+		   << " shape=" << ExecutionRegionProfileToken(ExecutionRegionProfileShape(event), 64)
+		   << " rows=" << ExecutionRegionEventEstimatedCardinality(event);
+		if (event.runner_cost.present) {
+			ss << " batches=" << event.runner_cost.batches
+			   << " stages=" << ExecutionRegionProfileStageCosts(event.runner_cost)
+			   << " saved=" << event.runner_cost.saved_work_per_batch
+			   << " benefit=" << event.runner_cost.accelerated_runner_benefit
+			   << " required=" << event.runner_cost.required_benefit << " net=" << event.runner_cost.net_benefit
+			   << " selected=" << (event.runner_cost.selected_accelerated_runner ? "true" : "false");
+		} else {
+			ss << " cost=none";
+		}
+		ss << " decision_us=" << event.decision_time_us
+		   << " compile_us=" << ExecutionRegionEventProfileCompileTime(event)
+		   << " code_size=" << ExecutionRegionEventProfileCodeSize(event)
+		   << " blocker=" << ExecutionRegionProfileToken(event.blocker)
+		   << " why=" << ExecutionRegionProfileToken(ExecutionRegionProfileReason(event.reason), 128) << "\n";
+	}
+}
+
+static void RenderExecutionRegionRuntimePipelineToStream(std::ostream &ss,
+                                                         const QueryProfilerExecutionRegionTrace &trace) {
+	bool wrote_header = false;
+	for (const auto &event : trace) {
+		if (!ExecutionRegionEventIsRuntime(event) || !ExecutionRegionEventIsVisibleInQueryProfile(event)) {
+			continue;
+		}
+		if (!wrote_header) {
+			ss << "  RUNTIME_PIPELINE\n";
+			wrote_header = true;
+		}
+		ExecutionRegionTraceSummary event_summary;
+		event_summary.runtime_us = event.runtime_time_us;
+		event_summary.source_us = event.source_contract_runtime_time_us;
+		event_summary.sink_us = event.sink_next_batch_runtime_time_us;
+		event_summary.generated_us = event.generated_body_runtime_time_us;
+		ss << "    id=" << event.event_id << " kernel=" << event.kernel_id
+		   << " status=" << ExecutionRegionEventStatusToString(event.status_kind)
+		   << " result=" << ExecutionRegionProfileToken(event.runtime_result, 32)
+		   << " mode=" << ExecutionRegionExecutionModeToString(event.execution_mode_kind)
+		   << " shape=" << ExecutionRegionProfileToken(ExecutionRegionProfileShape(event), 64)
+		   << " rows=" << event.input_rows << "->" << event.output_rows << " calls=" << event.invocation_count
+		   << " runtime_us=" << event.runtime_time_us << " source_us=" << event.source_contract_runtime_time_us
+		   << " generated_us=" << event.generated_body_runtime_time_us
+		   << " sink_us=" << event.sink_next_batch_runtime_time_us
+		   << " dominant=" << DominantRuntimeComponent(event_summary) << "\n";
+	}
 }
 
 static void AppendExecutionRegionsToResult(QueryProfileResult &result, ClientContext &context,

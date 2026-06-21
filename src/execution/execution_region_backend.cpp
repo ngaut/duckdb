@@ -11,23 +11,17 @@ ExecutionRegionCompilationInput::ExecutionRegionCompilationInput(ClientContext &
 }
 
 ExecutionRegionCompileResult ExecutionRegionCompileResult::Compiled(unique_ptr<ExecutionRegionKernel> kernel,
-                                                                    ExecutionRegionExecutionMode execution_mode,
-                                                                    string reason, string ir,
-                                                                    ExecutionRegionExecutionBody execution_body) {
+                                                                     ExecutionRegionExecutionMode execution_mode,
+                                                                     string reason, string ir) {
 	if (!kernel) {
 		throw InternalException("compiled region result marked compiled without a kernel");
 	}
 	if (!ExecutionRegionExecutionModeIsCompiled(execution_mode)) {
 		throw InternalException("compiled region result uses invalid compiled execution mode");
 	}
-	if (execution_body == ExecutionRegionExecutionBody::NONE) {
-		execution_body = ExecutionRegionExecutionBodyForCompileEvent(ExecutionRegionCompileStatus::COMPILED,
-		                                                             execution_mode, kernel->CodeSize());
-	}
 	ExecutionRegionCompileResult result;
 	result.status = ExecutionRegionCompileStatus::COMPILED;
 	result.execution_mode = execution_mode;
-	result.execution_body = execution_body;
 	result.reason = std::move(reason);
 	result.ir = std::move(ir);
 	result.kernel = std::move(kernel);

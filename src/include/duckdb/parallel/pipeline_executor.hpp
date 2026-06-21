@@ -142,7 +142,8 @@ private:
 	void GoToSource(idx_t &current_idx, idx_t initial_idx, stack<idx_t> &operators_in_process);
 	DataChunk &GetSourceChunkForInitialIdx(idx_t initial_idx);
 	SourceResultType FetchFromSource(DataChunk *&result);
-	SourceResultType FetchFromSourceContract(DataChunk *&result, ExecutionRegionSourceContractMetrics *metrics = nullptr);
+	SourceResultType FetchFromSourceContract(DataChunk *&result,
+	                                         ExecutionRegionSourceContractMetrics *metrics = nullptr);
 
 	void FinishProcessing(int32_t operator_idx = -1);
 	bool IsFinished();

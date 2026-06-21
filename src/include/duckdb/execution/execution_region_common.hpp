@@ -11,11 +11,8 @@
 
 namespace duckdb {
 
-enum class ExecutionRegionCompileTarget : uint8_t { REGION };
 enum class ExecutionRegionCompileStatus : uint8_t { COMPILED, SKIPPED, UNSUPPORTED, UNAVAILABLE, DISABLED, ERROR };
 enum class ExecutionRegionExecutionMode : uint8_t { NONE, NATIVE, VECTORIZED, UNSUPPORTED };
-enum class ExecutionRegionForm : uint8_t { NONE, FUSED };
-enum class ExecutionRegionExecutionBody : uint8_t { NONE, GENERATED_MACHINE_CODE };
 enum class ExecutionRegionLoweringKind : uint8_t { NATIVE, BOUNDARY };
 enum class ExecutionRegionOperatorKind : uint8_t {
 	GENERIC,
@@ -47,13 +44,7 @@ enum class ExecutionRegionSourceKind : uint8_t {
 enum class ExecutionRegionSourceExecutionKind : uint8_t { NONE, DUCKDB_SOURCE_BOUNDARY, SOURCE_CONTRACT };
 enum class ExecutionRegionSourceContractStatus : uint8_t { NONE, READY, BLOCKED };
 enum class ExecutionRegionStateContractStatus : uint8_t { NONE, READY, MISSING, BLOCKED };
-enum class ExecutionRegionOperatorContractKind : uint8_t {
-	NONE,
-	PROJECTION,
-	HASH_JOIN_PROBE,
-	NESTED_LOOP_JOIN_PROBE,
-	OPERATOR
-};
+enum class ExecutionRegionOperatorContractKind : uint8_t { NONE, HASH_JOIN_PROBE, NESTED_LOOP_JOIN_PROBE };
 enum class ExecutionRegionJoinType : uint8_t {
 	INVALID,
 	LEFT,
@@ -88,8 +79,7 @@ enum class ExecutionRegionSinkKind : uint8_t {
 	RESULT_COLLECTOR_SINK,
 	SORT,
 	MATERIALIZATION,
-	DELIM_JOIN_SINK,
-	OPERATOR
+	DELIM_JOIN_SINK
 };
 enum class ExecutionRegionAggregateOperatorKind : uint8_t { NONE, HASH, PERFECT_HASH, UNGROUPED };
 enum class ExecutionRegionVectorFormatKind : uint8_t {
@@ -147,7 +137,7 @@ enum class ExecutionRegionStageExecutionKind : uint8_t {
 	MISSING_CONTRACT
 };
 enum class ExecutionRunnerKind : uint8_t { VECTORIZED, COMPILED_VECTORIZED };
-enum class ExecutionRegionPolicyMode : uint8_t { AUTO, FORCE, OFF };
+enum class ExecutionRegionPolicyMode : uint8_t { AUTO, OFF };
 enum class ExecutionRegionResult : uint8_t { NOT_FINISHED, FINISHED, INTERRUPTED, DEFERRED };
 enum class ExecutionExpressionValidityKind : uint8_t {
 	UNKNOWN,
@@ -245,15 +235,9 @@ struct ExecutionRegionOpenRequest {
 	}
 };
 
-DUCKDB_API const char *ExecutionRegionCompileTargetToString(ExecutionRegionCompileTarget target);
 DUCKDB_API const char *ExecutionRegionCompileStatusToString(ExecutionRegionCompileStatus status);
 DUCKDB_API const char *ExecutionRegionExecutionModeToString(ExecutionRegionExecutionMode mode);
 DUCKDB_API bool ExecutionRegionExecutionModeIsCompiled(ExecutionRegionExecutionMode mode);
-DUCKDB_API const char *ExecutionRegionFormToString(ExecutionRegionForm form);
-DUCKDB_API const char *ExecutionRegionExecutionBodyToString(ExecutionRegionExecutionBody body);
-DUCKDB_API ExecutionRegionExecutionBody ExecutionRegionExecutionBodyForCompileEvent(ExecutionRegionCompileStatus status,
-                                                                                    ExecutionRegionExecutionMode mode,
-                                                                                    idx_t code_size);
 DUCKDB_API const char *ExecutionRegionLoweringKindToString(ExecutionRegionLoweringKind kind);
 DUCKDB_API const char *ExecutionRegionOperatorKindToString(ExecutionRegionOperatorKind kind);
 DUCKDB_API const char *ExecutionRegionOperatorKindToTraceLabel(ExecutionRegionOperatorKind kind);

@@ -900,15 +900,50 @@
         ]
     },
     {
-        "name": "jit_dump_ir",
-        "description": "Expose deterministic execution-region IR diagnostics through execution-region events",
-        "type": "BOOLEAN",
+        "name": "jit_cbo_full_pipeline_benefit",
+        "description": "Per-vector benefit for full-pipeline ownership used by the JIT CBO physical-runner decision",
+        "type": "UBIGINT",
         "default_scope": "local",
-        "default_value": "false"
+        "default_value": "0"
     },
     {
-        "name": "jit_trace_decisions",
-        "description": "Record detailed per-candidate physical-runner decision events",
+        "name": "jit_cbo_generated_stage_benefit",
+        "description": "Per-vector benefit per generated stage used by the JIT CBO physical-runner decision",
+        "type": "UBIGINT",
+        "default_scope": "local",
+        "default_value": "1"
+    },
+    {
+        "name": "jit_cbo_materialization_elision_benefit",
+        "description": "Per-vector benefit per eliminated vector materialization boundary used by the JIT CBO physical-runner decision",
+        "type": "UBIGINT",
+        "default_scope": "local",
+        "default_value": "0"
+    },
+    {
+        "name": "jit_cbo_native_operator_stage_benefit",
+        "description": "Per-vector benefit per native operator protocol stage used by the JIT CBO physical-runner decision",
+        "type": "UBIGINT",
+        "default_scope": "local",
+        "default_value": "0"
+    },
+    {
+        "name": "jit_cbo_startup_base_cost",
+        "description": "Base startup cost used by the JIT CBO physical-runner decision",
+        "type": "UBIGINT",
+        "default_scope": "local",
+        "default_value": "32000"
+    },
+    {
+        "name": "jit_cbo_startup_margin_basis_points",
+        "description": "Required-benefit margin over startup cost in basis points used by the JIT CBO physical-runner decision",
+        "type": "UBIGINT",
+        "default_scope": "local",
+        "default_value": "5000"
+    },
+    {
+        "name": "jit_dump_ir",
+        "description": "Expose deterministic execution-region IR diagnostics through execution-region events",
         "type": "BOOLEAN",
         "default_scope": "local",
         "default_value": "false"
@@ -918,20 +953,27 @@
         "description": "Maximum number of execution-region events retained per database instance; zero disables retention",
         "type": "UBIGINT",
         "scope": "global",
-        "default_value": "4096",
+        "default_value": "0",
         "on_callbacks": [
             "set"
         ]
     },
     {
         "name": "jit_policy",
-        "description": "Execution-region execution policy: auto runs only CBO-selected compiled-vectorized regions, force runs every supported region, off disables compiled-vectorized execution",
+        "description": "Execution-region execution policy: auto runs only CBO-selected compiled-vectorized regions, off disables compiled-vectorized execution",
         "type": "VARCHAR",
         "default_scope": "local",
         "default_value": "auto",
         "on_callbacks": [
             "set"
         ]
+    },
+    {
+        "name": "jit_trace_decisions",
+        "description": "Record detailed per-candidate physical-runner decision events",
+        "type": "BOOLEAN",
+        "default_scope": "local",
+        "default_value": "false"
     },
     {
         "name": "jit_trace_runtime",

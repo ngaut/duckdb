@@ -14,7 +14,6 @@ namespace duckdb {
 
 class ClientContext;
 class DatabaseInstance;
-struct ExecutionRegionPipelineInventory;
 struct ExecutionRegionRuntimeMetrics;
 struct ExecutionRegionStageTimings;
 
@@ -31,16 +30,14 @@ public:
 	DUCKDB_API void ClearCounters();
 	DUCKDB_API void ApplyEventRetentionLimit(idx_t event_log_size);
 	DUCKDB_API void RecordRuntimeEvent(ClientContext &context, const ExecutionRegionKernel &kernel,
-	                                   ExecutionRegionCompileTarget target, ExecutionRegionEventStatus status,
-	                                   string reason, idx_t input_rows, idx_t output_rows, int64_t runtime_time_us,
-	                                   string runtime_result);
+	                                   ExecutionRegionEventStatus status, string reason, idx_t input_rows,
+	                                   idx_t output_rows, int64_t runtime_time_us, string runtime_result);
 	DUCKDB_API void RecordRuntimeEvent(ClientContext &context, const ExecutionRegionKernel &kernel,
-	                                   ExecutionRegionCompileTarget target, ExecutionRegionEventStatus status,
-	                                   string reason, idx_t input_rows, idx_t output_rows, int64_t runtime_time_us,
-	                                   string runtime_result, const ExecutionRegionRuntimeMetrics &runtime_metrics);
+	                                   ExecutionRegionEventStatus status, string reason, idx_t input_rows,
+	                                   idx_t output_rows, int64_t runtime_time_us, string runtime_result,
+	                                   const ExecutionRegionRuntimeMetrics &runtime_metrics);
 	DUCKDB_API void RecordVectorizedBaselineRuntimeEvent(ClientContext &context, const ExecutionRegionKernel &kernel,
-	                                                     ExecutionRegionCompileTarget target, string reason,
-	                                                     int64_t runtime_time_us, string runtime_result);
+	                                                     string reason, int64_t runtime_time_us, string runtime_result);
 
 	DUCKDB_API static ExecutionRegionManager &Get(DatabaseInstance &db);
 	DUCKDB_API static ExecutionRegionManager &Get(ClientContext &context);
@@ -49,18 +46,14 @@ private:
 	friend class ExecutionRegionPlanner;
 
 	idx_t
-	RecordEvent(ClientContext &context, string backend_name, ExecutionRegionCompileTarget target,
-	            ExecutionRegionCompileStatus status, ExecutionRegionExecutionMode execution_mode,
-	            ExecutionRegionPolicyMode requested_policy, string reason, string blocker, const string *ir,
+	RecordEvent(ClientContext &context, string backend_name, ExecutionRegionCompileStatus status,
+	            ExecutionRegionExecutionMode execution_mode, string reason, string blocker, const string *ir,
 	            int64_t decision_time_us, int64_t compile_time_us, idx_t code_size,
 	            const ExecutionRegionCandidate *candidate = nullptr,
 	            ExecutionRunnerKind selected_runner = ExecutionRunnerKind::VECTORIZED,
 	            const ExecutionRegionStageTimings *stage_timings = nullptr,
-	            ExecutionRegionForm region_execution_form = ExecutionRegionForm::NONE,
 	            ExecutionRegionSourceExecutionKind selected_source_execution = ExecutionRegionSourceExecutionKind::NONE,
-	            bool selected_uses_scan_filters = false, const ExecutionRegionPipelineInventory *inventory = nullptr,
-	            ExecutionRegionExecutionBody execution_body = ExecutionRegionExecutionBody::NONE,
-	            const PhysicalRunnerCostProfile *runner_cost = nullptr);
+	            bool selected_uses_scan_filters = false, const PhysicalRunnerCostProfile *runner_cost = nullptr);
 
 private:
 	DatabaseInstance &db;

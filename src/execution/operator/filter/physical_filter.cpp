@@ -48,10 +48,6 @@ unique_ptr<OperatorState> PhysicalFilter::GetOperatorState(ExecutionContext &con
 	return make_uniq<FilterState>(context, *expression);
 }
 
-void PhysicalFilter::GetExecutionRegionPreGraphTransformInfo(ExecutionTransformContract &transform) const {
-	transform.filter_expression = optional_ptr<const Expression>(*expression);
-}
-
 ExecutionContract PhysicalFilter::GetExecutionContract() const {
 	ExecutionContract result;
 	result.transform.filter_expression = optional_ptr<const Expression>(*expression);

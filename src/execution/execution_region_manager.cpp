@@ -36,7 +36,7 @@ optional_ptr<ExecutionRegionBackend> ExecutionRegionManager::SelectBackend(Clien
                                                                            string &backend_name) const {
 	auto requested = ExecutionRegionSettings::RequestedBackend(context);
 	lock_guard<mutex> guard(lock);
-	if (requested == "auto") {
+	if (StringUtil::CIEquals(requested, "auto")) {
 		for (auto &backend : backends) {
 			if (backend->IsAvailable()) {
 				backend_name = backend->Name();
@@ -47,7 +47,7 @@ optional_ptr<ExecutionRegionBackend> ExecutionRegionManager::SelectBackend(Clien
 		return nullptr;
 	}
 	for (auto &backend : backends) {
-		if (StringUtil::Lower(backend->Name()) != requested) {
+		if (!StringUtil::CIEquals(backend->Name(), requested)) {
 			continue;
 		}
 		backend_name = backend->Name();
@@ -68,7 +68,6 @@ vector<ExecutionRegionBackendInfo> ExecutionRegionManager::GetBackends(ClientCon
 			selected_name.clear();
 		}
 	}
-	selected_name = StringUtil::Lower(selected_name);
 
 	lock_guard<mutex> guard(lock);
 	vector<ExecutionRegionBackendInfo> result;
@@ -79,7 +78,7 @@ vector<ExecutionRegionBackendInfo> ExecutionRegionManager::GetBackends(ClientCon
 		info.description = backend->Description();
 		info.available = backend->IsAvailable();
 		info.supports_regions = backend->SupportsRegions();
-		info.selected = StringUtil::Lower(info.name) == selected_name;
+		info.selected = StringUtil::CIEquals(info.name, selected_name);
 		result.push_back(std::move(info));
 	}
 	return result;

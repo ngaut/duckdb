@@ -94,6 +94,69 @@ static void SetExecutionRegionOperatorExpressions(ExecutionRegionOperatorEntry &
 	entry.projection_expressions = transform.projection_expressions;
 }
 
+static bool ExecutionRegionAggregateInputsHaveGeneratedExpression(const vector<ExecutionRegionAggregateInput> &inputs) {
+	for (auto &input : inputs) {
+		if (input.has_filter || !input.child_expressions.empty()) {
+			return true;
+		}
+	}
+	return false;
+}
+
+static bool ExecutionRegionGroupsHaveGeneratedExpression(const vector<ExecutionRegionGroupInput> &groups) {
+	for (auto &group : groups) {
+		if (group.expression_ready) {
+			return true;
+		}
+	}
+	return false;
+}
+
+static bool ExecutionRegionOrderKeysHaveGeneratedExpression(const vector<ExecutionRegionOrderKeyInput> &order_keys) {
+	for (auto &order_key : order_keys) {
+		if (order_key.expression_ready) {
+			return true;
+		}
+	}
+	return false;
+}
+
+static bool ExecutionRegionSourceFiltersHaveGeneratedExpression(const vector<ExecutionSourceFilterContract> &filters) {
+	for (auto &filter : filters) {
+		if (filter.expression) {
+			return true;
+		}
+	}
+	return false;
+}
+
+static bool ExecutionRegionProjectionListHasGeneratedExpression(
+    const vector<optional_ptr<const Expression>> &projection_expressions) {
+	for (auto &expression : projection_expressions) {
+		if (expression) {
+			return true;
+		}
+	}
+	return false;
+}
+
+static bool ExecutionRegionGraphEntryHasGeneratedExpression(const ExecutionRegionOperatorEntry &entry) {
+	return entry.filter_expression ||
+	       ExecutionRegionProjectionListHasGeneratedExpression(entry.projection_expressions) ||
+	       ExecutionRegionSourceFiltersHaveGeneratedExpression(entry.source_payload.filters) ||
+	       ExecutionRegionAggregateInputsHaveGeneratedExpression(entry.source_payload.aggregates) ||
+	       ExecutionRegionGroupsHaveGeneratedExpression(entry.source_payload.groups) ||
+	       ExecutionRegionOrderKeysHaveGeneratedExpression(entry.source_payload.order_contract.order_keys) ||
+	       ExecutionRegionAggregateInputsHaveGeneratedExpression(entry.sink_payload.aggregates) ||
+	       ExecutionRegionGroupsHaveGeneratedExpression(entry.sink_payload.groups) ||
+	       ExecutionRegionOrderKeysHaveGeneratedExpression(entry.sink_payload.order_contract.order_keys);
+}
+
+static void SetExecutionRegionOperatorFacts(ExecutionRegionOperatorEntry &entry) {
+	entry.has_generated_expression = ExecutionRegionGraphEntryHasGeneratedExpression(entry);
+	entry.has_native_operator_work = entry.HasNativeOperator() || entry.HasNativeSink();
+}
+
 static ExecutionRegionOperatorEntry
 BuildExecutionRegionOperatorEntry(const PhysicalOperator &op, ExecutionRegionOperatorSlot slot,
                                   idx_t operator_index = DConstants::INVALID_INDEX) {
@@ -120,21 +183,31 @@ BuildExecutionRegionOperatorEntry(const PhysicalOperator &op, ExecutionRegionOpe
 	entry.source_payload = std::move(descriptor.source);
 	entry.operator_payload = std::move(descriptor.operator_info);
 	entry.sink_payload = std::move(descriptor.sink);
+	SetExecutionRegionOperatorFacts(entry);
 	return entry;
+}
+
+static void AccumulateExecutionRegionGraphFacts(ExecutionRegionGraph &graph,
+                                                const ExecutionRegionOperatorEntry &entry) {
+	graph.has_generated_expression = graph.has_generated_expression || entry.has_generated_expression;
+	graph.has_native_operator_work = graph.has_native_operator_work || entry.has_native_operator_work;
 }
 
 unique_ptr<ExecutionRegionGraph> BuildExecutionRegionGraph(Pipeline &pipeline) {
 	auto result = make_uniq<ExecutionRegionGraph>();
 	if (pipeline.GetSource()) {
 		result->source = BuildExecutionRegionOperatorEntry(*pipeline.GetSource(), ExecutionRegionOperatorSlot::SOURCE);
+		AccumulateExecutionRegionGraphFacts(*result, result->source);
 	}
 	auto &operators = pipeline.GetIntermediateOperators();
 	for (idx_t op_idx = 0; op_idx < operators.size(); op_idx++) {
 		result->operators.push_back(
 		    BuildExecutionRegionOperatorEntry(operators[op_idx].get(), ExecutionRegionOperatorSlot::OPERATOR, op_idx));
+		AccumulateExecutionRegionGraphFacts(*result, result->operators.back());
 	}
 	if (pipeline.GetSink()) {
 		result->sink = BuildExecutionRegionOperatorEntry(*pipeline.GetSink(), ExecutionRegionOperatorSlot::SINK);
+		AccumulateExecutionRegionGraphFacts(*result, result->sink);
 	}
 	if (result->Empty()) {
 		return nullptr;

@@ -179,17 +179,19 @@ trace must show the primitive build stages explicitly.
 
 ## Execution Region Policy
 
-`force` may compile any fused generated-code region that is executable and
-honest. It is a diagnostic override after DuckDB has built the normal
-physical-runner cost profile; it is not an input to the CBO and must not change
-the estimated benefit/cost facts. It does not compile protocol-only regions.
-
 `auto` is owned by DuckDB's normal execution planning, not by a private JIT
-threshold. In production execution, DuckDB inspects executable region
-candidates, lowers backend-neutral IR, asks the selected backend for capability
-facts, and then makes one core CBO decision. The decision compares estimated
-saved vectorized work against compile/planning cost and selects either
-`CompiledVectorizedRunner` or `VectorizedRunner`.
+threshold. Production execution first runs a cheap DuckDB-owned eligibility gate
+before backend selection: if no active benefit knob can pay for the physical
+operator family in the pipeline, AUTO exits without graph construction or backend
+analysis. That gate is rule-based capability pruning, not a second cost model and
+not the compiled/vectorized runner decision. Diagnostics may still enter deeper
+graph/IR/backend analysis to explain the decision, but tracing never admits a
+compiled runner that production CBO would reject. DuckDB-owned scan filters stay
+source-contract work and do not count as generated expression benefit. The
+selected backend reports capability facts for executable candidates that pass the
+eligibility gate, and DuckDB's CBO compares estimated saved vectorized work
+against compile/planning cost before selecting either `CompiledVectorizedRunner`
+or `VectorizedRunner`.
 
 Expression cost and physical-runner decisions are shared DuckDB planner
 facts, exposed through `DuckDBCostModel`. Optimizer expression ordering,
@@ -197,6 +199,9 @@ adaptive filter ordering, expression IR trait extraction, and execution-region
 CBO decisions all consume that one model. Region planning prepares neutral
 facts such as operator ownership, stage ownership, backend execution body, and
 runner shape; it does not keep a second expression-cost or admission model.
+Generated expression cost can select expression-only regions. It cannot by
+itself select regions that require native join, aggregate, or sort protocol
+ownership while that protocol family has zero configured benefit.
 
 Backends provide capability analysis and executable lowering. They do not own
 thresholds, measured-rule tables, or private copies of the execution-policy
@@ -205,10 +210,9 @@ algorithm. DuckDB owns the single CBO decision path:
 - core region lowering builds a typed candidate with capability facts;
 - backend analysis describes the exact executable runner shape and reports how
   many stages emit generated machine code;
-- production AUTO enters graph/IR/backend analysis for every executable region
-  candidate when the selected backend supports regions. The backend reports
-  capability facts; DuckDB CBO alone selects compiled-vectorized or vectorized
-  execution;
+- production `auto` first runs the eligibility gate, then graph/IR/backend
+  analysis only for pipelines whose active benefit knobs can plausibly win.
+  DuckDB CBO alone selects compiled-vectorized or vectorized execution;
 - a compiled-vectorized runner may be selected only by DuckDB's core execution
   plan, for fused lowered generated-code regions whose compiled runner is
   proven better than the vectorized runner;
@@ -220,8 +224,7 @@ algorithm. DuckDB owns the single CBO decision path:
 
 Native operator contracts are not compiled-runner proof by themselves. They are
 capability facts until backend lowering reports generated machine-code stages.
-`force` may ignore estimated profitability, but it still requires generated
-work; protocol-only regions stay vectorized.
+protocol-only regions stay vectorized.
 
 Unsupported contracts are not CBO decisions. Core capability analysis may reject
 missing source, operator, or sink contracts before backend work, but it must not
@@ -260,24 +263,16 @@ Events and counters expose:
 
 The architecture verifier enforces these invariants:
 
-- the region ABI enum contains only `NONE` and `FULL_PIPELINE`;
-- candidate identity is represented by the region ABI and contract fields, not a
-  separate ABI enum;
-- the pipeline executor dispatches full-pipeline kernels only from a clean
-  source-to-sink boundary;
-- the pipeline owns `ExecutionRegionPlan`; executors must not compile or own
-  region kernels;
-- backends cannot compile a full-pipeline candidate without
-  `CanExecuteFullPipeline()`;
-- native operator runtime binding exposes `READY`, `DEFERRED`, and `INVALID`,
-  not a boolean failure channel;
-- native events must have zero source boundaries and zero missing contracts;
-- native sink success must use `full-pipeline-native-sink`;
-- source contract layout names use `source_contract_*`;
-- auto CBO selection requires a lowered executable region and runtime-bindable
-  native contracts;
-  runtime-layout-dependent hash join probes are skipped until their pointer-table
-  layout is part of the native contract.
+- core execution owns the region graph, plan, runner dispatch, telemetry, and
+  DuckDB CBO physical-runner decision;
+- `PipelineExecutor` dispatches only through `ExecutionRunner`;
+- SLJIT does not leak into DuckDB core and does not include physical operator or
+  pipeline internals;
+- compiled layers do not call whole-expression, whole-operator, or whole-executor
+  fallback paths;
+- backend lowering does not keep private admission rules or a duplicate CBO;
+- observability stores typed state and renders labels at the edge;
+- production planning has no duplicate workload-relevance selector.
 
 Correctness gates are focused unit tests, SQLLogic JIT equivalence tests,
 architecture verification, TPCH tracing, and full DuckDB test runs when the

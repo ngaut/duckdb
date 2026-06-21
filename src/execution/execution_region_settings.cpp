@@ -32,7 +32,17 @@ bool ExecutionRegionSettings::Verify(ClientContext &context) {
 }
 
 bool ExecutionRegionSettings::ShouldRecordDetailedTelemetry(ClientContext &context) {
-	return TraceDecisions(context) || DumpIR(context) || TraceRuntime(context);
+	return TraceDecisions(context) || DumpIR(context);
+}
+
+bool ExecutionRegionSettings::ShouldRecordDecisionTelemetry(ClientContext &context) {
+	if (ShouldRecordDetailedTelemetry(context)) {
+		return true;
+	}
+	if (context.QueryProfilerAcceptsExecutionRegionEvents() && context.QueryProfilerIsExplainAnalyze()) {
+		return true;
+	}
+	return EventLogSize(*context.db) > 0;
 }
 
 idx_t ExecutionRegionSettings::EventLogSize(DatabaseInstance &db) {
@@ -40,18 +50,15 @@ idx_t ExecutionRegionSettings::EventLogSize(DatabaseInstance &db) {
 }
 
 string ExecutionRegionSettings::RequestedBackend(ClientContext &context) {
-	return StringUtil::Lower(Settings::Get<JitBackendSetting>(context));
+	return Settings::Get<JitBackendSetting>(context);
 }
 
 ExecutionRegionPolicyMode ExecutionRegionSettings::Policy(ClientContext &context) {
-	auto policy = StringUtil::Lower(Settings::Get<JitPolicySetting>(context));
-	if (policy == "auto") {
+	auto policy = Settings::Get<JitPolicySetting>(context);
+	if (StringUtil::CIEquals(policy, "auto")) {
 		return ExecutionRegionPolicyMode::AUTO;
 	}
-	if (policy == "force") {
-		return ExecutionRegionPolicyMode::FORCE;
-	}
-	if (policy == "off") {
+	if (StringUtil::CIEquals(policy, "off")) {
 		return ExecutionRegionPolicyMode::OFF;
 	}
 	throw InvalidInputException("Invalid execution region policy \"%s\"", policy);

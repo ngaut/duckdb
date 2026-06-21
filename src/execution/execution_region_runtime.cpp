@@ -160,21 +160,6 @@ SinkResultType ExecutionSinkDelimJoin(const ExecutionDelimJoinSinkBinding &bindi
 	return binding.state->Sink(input);
 }
 
-SinkResultType ExecutionSinkAggregateUpdate(const ExecutionAggregateUpdateBinding &binding, DataChunk &input) {
-	if (!binding.ready || !binding.state) {
-		throw InternalException("execution aggregate update binding is incomplete");
-	}
-	return binding.state->Sink(input);
-}
-
-OperatorResultType ExecutionOperatorProject(const ExecutionProjectionBinding &binding, DataChunk &input,
-                                            DataChunk &output) {
-	if (!binding.ready || !binding.state) {
-		throw InternalException("execution projection operator binding is incomplete");
-	}
-	return binding.state->Project(input, output);
-}
-
 ExecutionOperatorRuntime::~ExecutionOperatorRuntime() {
 }
 

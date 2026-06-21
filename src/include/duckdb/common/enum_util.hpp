@@ -52,6 +52,8 @@ enum class AggregateHandling : uint8_t;
 
 enum class AggregateOrderDependent : uint8_t;
 
+enum class AggregatePrimitiveUpdateKind : uint8_t;
+
 enum class AggregateStateExportMode : uint8_t;
 
 enum class AggregateType : uint8_t;
@@ -488,6 +490,8 @@ enum class SuggestionState : uint8_t;
 
 enum class TableColumnType : uint8_t;
 
+enum class TableFilterExecutionMode : uint8_t;
+
 enum class TableFilterType : uint8_t;
 
 enum class TableFunctionParallelism : uint8_t;
@@ -588,6 +592,9 @@ const char* EnumUtil::ToChars<AggregateHandling>(AggregateHandling value);
 
 template<>
 const char* EnumUtil::ToChars<AggregateOrderDependent>(AggregateOrderDependent value);
+
+template<>
+const char* EnumUtil::ToChars<AggregatePrimitiveUpdateKind>(AggregatePrimitiveUpdateKind value);
 
 template<>
 const char* EnumUtil::ToChars<AggregateStateExportMode>(AggregateStateExportMode value);
@@ -1244,6 +1251,9 @@ template<>
 const char* EnumUtil::ToChars<TableColumnType>(TableColumnType value);
 
 template<>
+const char* EnumUtil::ToChars<TableFilterExecutionMode>(TableFilterExecutionMode value);
+
+template<>
 const char* EnumUtil::ToChars<TableFilterType>(TableFilterType value);
 
 template<>
@@ -1378,6 +1388,9 @@ AggregateHandling EnumUtil::FromString<AggregateHandling>(const char *value);
 
 template<>
 AggregateOrderDependent EnumUtil::FromString<AggregateOrderDependent>(const char *value);
+
+template<>
+AggregatePrimitiveUpdateKind EnumUtil::FromString<AggregatePrimitiveUpdateKind>(const char *value);
 
 template<>
 AggregateStateExportMode EnumUtil::FromString<AggregateStateExportMode>(const char *value);
@@ -2032,6 +2045,9 @@ SuggestionState EnumUtil::FromString<SuggestionState>(const char *value);
 
 template<>
 TableColumnType EnumUtil::FromString<TableColumnType>(const char *value);
+
+template<>
+TableFilterExecutionMode EnumUtil::FromString<TableFilterExecutionMode>(const char *value);
 
 template<>
 TableFilterType EnumUtil::FromString<TableFilterType>(const char *value);

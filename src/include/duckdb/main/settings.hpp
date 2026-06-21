@@ -1328,21 +1328,76 @@ struct JitBackendSetting {
 	static void OnSet(SettingCallbackInfo &info, Value &input);
 };
 
+struct JitCboFullPipelineBenefitSetting {
+	using RETURN_TYPE = idx_t;
+	static constexpr const char *Name = "jit_cbo_full_pipeline_benefit";
+	static constexpr const char *Description =
+	    "Per-vector benefit for full-pipeline ownership used by the JIT CBO physical-runner decision";
+	static constexpr const char *InputType = "UBIGINT";
+	static constexpr const char *DefaultValue = "0";
+	static constexpr SettingScopeTarget Scope = SettingScopeTarget::LOCAL_DEFAULT;
+	static constexpr idx_t SettingIndex = NEXT_SETTING_INDEX();
+};
+
+struct JitCboGeneratedStageBenefitSetting {
+	using RETURN_TYPE = idx_t;
+	static constexpr const char *Name = "jit_cbo_generated_stage_benefit";
+	static constexpr const char *Description =
+	    "Per-vector benefit per generated stage used by the JIT CBO physical-runner decision";
+	static constexpr const char *InputType = "UBIGINT";
+	static constexpr const char *DefaultValue = "1";
+	static constexpr SettingScopeTarget Scope = SettingScopeTarget::LOCAL_DEFAULT;
+	static constexpr idx_t SettingIndex = NEXT_SETTING_INDEX();
+};
+
+struct JitCboMaterializationElisionBenefitSetting {
+	using RETURN_TYPE = idx_t;
+	static constexpr const char *Name = "jit_cbo_materialization_elision_benefit";
+	static constexpr const char *Description = "Per-vector benefit per eliminated vector materialization boundary used "
+	                                           "by the JIT CBO physical-runner decision";
+	static constexpr const char *InputType = "UBIGINT";
+	static constexpr const char *DefaultValue = "0";
+	static constexpr SettingScopeTarget Scope = SettingScopeTarget::LOCAL_DEFAULT;
+	static constexpr idx_t SettingIndex = NEXT_SETTING_INDEX();
+};
+
+struct JitCboNativeOperatorStageBenefitSetting {
+	using RETURN_TYPE = idx_t;
+	static constexpr const char *Name = "jit_cbo_native_operator_stage_benefit";
+	static constexpr const char *Description =
+	    "Per-vector benefit per native operator protocol stage used by the JIT CBO physical-runner decision";
+	static constexpr const char *InputType = "UBIGINT";
+	static constexpr const char *DefaultValue = "0";
+	static constexpr SettingScopeTarget Scope = SettingScopeTarget::LOCAL_DEFAULT;
+	static constexpr idx_t SettingIndex = NEXT_SETTING_INDEX();
+};
+
+struct JitCboStartupBaseCostSetting {
+	using RETURN_TYPE = idx_t;
+	static constexpr const char *Name = "jit_cbo_startup_base_cost";
+	static constexpr const char *Description = "Base startup cost used by the JIT CBO physical-runner decision";
+	static constexpr const char *InputType = "UBIGINT";
+	static constexpr const char *DefaultValue = "32000";
+	static constexpr SettingScopeTarget Scope = SettingScopeTarget::LOCAL_DEFAULT;
+	static constexpr idx_t SettingIndex = NEXT_SETTING_INDEX();
+};
+
+struct JitCboStartupMarginBasisPointsSetting {
+	using RETURN_TYPE = idx_t;
+	static constexpr const char *Name = "jit_cbo_startup_margin_basis_points";
+	static constexpr const char *Description =
+	    "Required-benefit margin over startup cost in basis points used by the JIT CBO physical-runner decision";
+	static constexpr const char *InputType = "UBIGINT";
+	static constexpr const char *DefaultValue = "5000";
+	static constexpr SettingScopeTarget Scope = SettingScopeTarget::LOCAL_DEFAULT;
+	static constexpr idx_t SettingIndex = NEXT_SETTING_INDEX();
+};
+
 struct JitDumpIrSetting {
 	using RETURN_TYPE = bool;
 	static constexpr const char *Name = "jit_dump_ir";
 	static constexpr const char *Description =
 	    "Expose deterministic execution-region IR diagnostics through execution-region events";
-	static constexpr const char *InputType = "BOOLEAN";
-	static constexpr const char *DefaultValue = "false";
-	static constexpr SettingScopeTarget Scope = SettingScopeTarget::LOCAL_DEFAULT;
-	static constexpr idx_t SettingIndex = NEXT_SETTING_INDEX();
-};
-
-struct JitTraceDecisionsSetting {
-	using RETURN_TYPE = bool;
-	static constexpr const char *Name = "jit_trace_decisions";
-	static constexpr const char *Description = "Record detailed per-candidate physical-runner decision events";
 	static constexpr const char *InputType = "BOOLEAN";
 	static constexpr const char *DefaultValue = "false";
 	static constexpr SettingScopeTarget Scope = SettingScopeTarget::LOCAL_DEFAULT;
@@ -1355,7 +1410,7 @@ struct JitEventLogSizeSetting {
 	static constexpr const char *Description =
 	    "Maximum number of execution-region events retained per database instance; zero disables retention";
 	static constexpr const char *InputType = "UBIGINT";
-	static constexpr const char *DefaultValue = "4096";
+	static constexpr const char *DefaultValue = "0";
 	static constexpr SettingScopeTarget Scope = SettingScopeTarget::GLOBAL_ONLY;
 	static constexpr idx_t SettingIndex = NEXT_SETTING_INDEX();
 	static void OnSet(SettingCallbackInfo &info, Value &input);
@@ -1365,13 +1420,23 @@ struct JitPolicySetting {
 	using RETURN_TYPE = string;
 	static constexpr const char *Name = "jit_policy";
 	static constexpr const char *Description =
-	    "Execution-region execution policy: auto runs only CBO-selected compiled-vectorized regions, "
-	    "force runs every supported region, off disables compiled-vectorized execution";
+	    "Execution-region execution policy: auto runs only CBO-selected compiled-vectorized regions, off disables "
+	    "compiled-vectorized execution";
 	static constexpr const char *InputType = "VARCHAR";
 	static constexpr const char *DefaultValue = "auto";
 	static constexpr SettingScopeTarget Scope = SettingScopeTarget::LOCAL_DEFAULT;
 	static constexpr idx_t SettingIndex = NEXT_SETTING_INDEX();
 	static void OnSet(SettingCallbackInfo &info, Value &input);
+};
+
+struct JitTraceDecisionsSetting {
+	using RETURN_TYPE = bool;
+	static constexpr const char *Name = "jit_trace_decisions";
+	static constexpr const char *Description = "Record detailed per-candidate physical-runner decision events";
+	static constexpr const char *InputType = "BOOLEAN";
+	static constexpr const char *DefaultValue = "false";
+	static constexpr SettingScopeTarget Scope = SettingScopeTarget::LOCAL_DEFAULT;
+	static constexpr idx_t SettingIndex = NEXT_SETTING_INDEX();
 };
 
 struct JitTraceRuntimeSetting {

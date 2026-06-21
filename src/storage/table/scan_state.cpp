@@ -17,8 +17,7 @@ TableScanState::~TableScanState() {
 }
 
 void TableScanState::Initialize(vector<StorageIndex> column_ids_p, optional_ptr<ClientContext> context,
-                                optional_ptr<TableFilterSet> table_filters,
-                                optional_ptr<SampleOptions> table_sampling,
+                                optional_ptr<TableFilterSet> table_filters, optional_ptr<SampleOptions> table_sampling,
                                 TableFilterExecutionMode filter_execution_mode) {
 	this->column_ids = std::move(column_ids_p);
 	if (table_filters) {
@@ -56,8 +55,7 @@ ScanFilter::ScanFilter(ClientContext &context, idx_t filter_index_p, ProjectionI
 	filter_state = TableFilterState::Initialize(context, filter);
 }
 
-void ScanFilterInfo::Initialize(ClientContext &context, TableFilterSet &filters,
-                                const vector<StorageIndex> &column_ids,
+void ScanFilterInfo::Initialize(ClientContext &context, TableFilterSet &filters, const vector<StorageIndex> &column_ids,
                                 TableFilterExecutionMode execution_mode) {
 	D_ASSERT(filters.HasFilters());
 	table_filters = &filters;

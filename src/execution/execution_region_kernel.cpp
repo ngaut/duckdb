@@ -21,18 +21,12 @@ bool ExecutionRegionKernel::HasExecutableBody() const {
 }
 
 void ExecutionRegionKernel::SetTraceInfo(idx_t trace_id_p, ExecutionRegionExecutionMode execution_mode_p,
-                                         ExecutionRegionExecutionBody execution_body_p, string compile_reason,
-                                         int64_t compile_time_us, idx_t code_size) {
+                                         string compile_reason, int64_t compile_time_us, idx_t code_size) {
 	trace_id = trace_id_p;
 	execution_mode = execution_mode_p;
-	execution_body = execution_body_p;
 	trace_compile_reason = std::move(compile_reason);
 	trace_compile_time_us = compile_time_us;
 	trace_code_size = code_size;
-}
-
-void ExecutionRegionKernel::SetTraceRegionExecutionForm(ExecutionRegionForm execution_form_p) {
-	region_execution_form = execution_form_p;
 }
 
 void ExecutionRegionKernel::SetTraceSelectedSourceExecution(ExecutionRegionSourceExecutionKind source_execution) {
@@ -63,20 +57,12 @@ ExecutionRegionExecutionMode ExecutionRegionKernel::ExecutionMode() const {
 	return execution_mode;
 }
 
-ExecutionRegionForm ExecutionRegionKernel::RegionExecutionForm() const {
-	return region_execution_form;
-}
-
 ExecutionRegionSourceExecutionKind ExecutionRegionKernel::SelectedSourceExecution() const {
 	return selected_source_execution;
 }
 
 bool ExecutionRegionKernel::UsesScanFilters() const {
 	return uses_scan_filters;
-}
-
-ExecutionRegionExecutionBody ExecutionRegionKernel::ExecutionBody() const {
-	return execution_body;
 }
 
 ExecutionRegionABI ExecutionRegionKernel::ExecutionABI() const {

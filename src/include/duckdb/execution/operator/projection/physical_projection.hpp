@@ -25,14 +25,7 @@ public:
 
 public:
 	unique_ptr<OperatorState> GetOperatorState(ExecutionContext &context) const override;
-	void GetExecutionRegionPreGraphTransformInfo(ExecutionTransformContract &transform) const override;
 	ExecutionContract GetExecutionContract() const override;
-	ExecutionOperatorReadiness
-	GetExecutionOperatorReadiness(ClientContext &context, const ExecutionRegionOperatorInfo &operator_info) const override;
-	ExecutionOperatorBindResult BindExecutionOperator(ExecutionContext &context, DataChunk &input,
-	                                                  GlobalOperatorState &gstate, OperatorState &state,
-	                                                  const ExecutionRegionOperatorInfo &operator_info,
-	                                                  ExecutionOperatorBinding &binding) const override;
 	OperatorResultType Execute(ExecutionContext &context, DataChunk &input, DataChunk &chunk,
 	                           GlobalOperatorState &gstate, OperatorState &state) const override;
 

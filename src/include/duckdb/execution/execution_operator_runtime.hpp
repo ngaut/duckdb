@@ -144,19 +144,6 @@ struct ExecutionGroupedAggregateStateAddressBinding {
 	string blocker;
 };
 
-struct ExecutionProjectionOperatorState {
-	virtual ~ExecutionProjectionOperatorState() {
-	}
-	virtual OperatorResultType Project(DataChunk &input, DataChunk &output) = 0;
-};
-
-struct ExecutionProjectionBinding {
-	bool ready = false;
-	shared_ptr<ExecutionProjectionOperatorState> state;
-	vector<LogicalType> output_types;
-	string blocker;
-};
-
 struct ExecutionHashJoinProbeBinding {
 	bool ready = false;
 	JoinHashTable *hash_table = nullptr;
@@ -175,11 +162,6 @@ struct ExecutionHashJoinProbeBinding {
 	bool correlated_mark_counts_required = false;
 	idx_t correlated_mark_group_count = 0;
 	string blocker;
-};
-
-class ExecutionHashJoinProbeState {
-public:
-	virtual ~ExecutionHashJoinProbeState();
 };
 
 struct ExecutionHashJoinBuildBinding {
@@ -258,7 +240,6 @@ struct ExecutionAggregateUpdateBinding {
 struct ExecutionOperatorBinding {
 	bool ready = false;
 	ExecutionRegionOperatorContractKind kind = ExecutionRegionOperatorContractKind::NONE;
-	ExecutionProjectionBinding projection;
 	ExecutionHashJoinProbeBinding hash_join_probe;
 	ExecutionNestedLoopJoinProbeBinding nested_loop_join_probe;
 	string blocker;
@@ -298,14 +279,6 @@ ExecutionMaterializeHashJoinResidualSources(const ExecutionHashJoinProbeBinding 
                                             DataChunk &residual_sources,
                                             optional_ptr<ExecutionOperatorStageRecorder> recorder = nullptr);
 
-DUCKDB_API unique_ptr<ExecutionHashJoinProbeState>
-ExecutionCreateHashJoinProbeState(const ExecutionHashJoinProbeBinding &binding, Allocator &allocator);
-
-DUCKDB_API OperatorResultType ExecutionProbeHashJoin(const ExecutionHashJoinProbeBinding &binding,
-                                                     ExecutionHashJoinProbeState &state, DataChunk &input,
-                                                     DataChunk &output,
-                                                     optional_ptr<ExecutionOperatorStageRecorder> recorder = nullptr);
-
 DUCKDB_API bool ExecutionBindHashJoinBuild(ExecutionContext &context, OperatorSinkInput &input, DataChunk &chunk,
                                            const ExecutionRegionSinkInfo &sink_info, ExecutionSinkBinding &binding);
 
@@ -341,11 +314,5 @@ DUCKDB_API SinkResultType ExecutionSinkOrdered(const ExecutionOrderedSinkBinding
                                                DataChunk &payload);
 
 DUCKDB_API SinkResultType ExecutionSinkDelimJoin(const ExecutionDelimJoinSinkBinding &binding, DataChunk &input);
-
-DUCKDB_API SinkResultType ExecutionSinkAggregateUpdate(const ExecutionAggregateUpdateBinding &binding,
-                                                       DataChunk &input);
-
-DUCKDB_API OperatorResultType ExecutionOperatorProject(const ExecutionProjectionBinding &binding, DataChunk &input,
-                                                       DataChunk &output);
 
 } // namespace duckdb

@@ -61,8 +61,6 @@ public:
 public:
 	string GetName() const override;
 	InsertionOrderPreservingMap<string> ParamsToString() const override;
-	void GetExecutionRegionPreGraphSourceInfo(idx_t &estimated_source_cardinality,
-	                                          idx_t &source_filter_count) const override;
 	ExecutionContract GetExecutionContract() const override;
 
 	bool Equals(const PhysicalOperator &other) const override;
@@ -75,8 +73,8 @@ public:
 	unique_ptr<LocalSourceState> GetLocalSourceState(ExecutionContext &context,
 	                                                 GlobalSourceState &gstate) const override;
 	unique_ptr<GlobalSourceState> GetGlobalSourceState(ClientContext &context) const override;
-	unique_ptr<GlobalSourceState>
-	GetGlobalSourceState(ClientContext &context, const ExecutionRegionOpenRequest &open_request) const override;
+	unique_ptr<GlobalSourceState> GetGlobalSourceState(ClientContext &context,
+	                                                   const ExecutionRegionOpenRequest &open_request) const override;
 	bool SupportsExecutionSourceContract(const ExecutionRegionOpenRequest &open_request) const override;
 	SourceResultType GetDataInternal(ExecutionContext &context, DataChunk &chunk,
 	                                 OperatorSourceInput &input) const override;

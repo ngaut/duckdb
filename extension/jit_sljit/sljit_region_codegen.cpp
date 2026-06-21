@@ -39,8 +39,8 @@ static unique_ptr<ExecutionRegionCodeHandle> FinishSljitHashJoinProbeCode(struct
 }
 
 static unique_ptr<ExecutionRegionCodeHandle>
-FinishSljitNestedLoopJoinProbeCode(struct sljit_compiler *compiler,
-                                   SljitNativeNestedLoopJoinProbeFunction &function, string &error) {
+FinishSljitNestedLoopJoinProbeCode(struct sljit_compiler *compiler, SljitNativeNestedLoopJoinProbeFunction &function,
+                                   string &error) {
 	auto compiler_error = sljit_get_compiler_error(compiler);
 	if (compiler_error != SLJIT_SUCCESS) {
 		error = "SLJIT compiler failed with error code " + std::to_string(compiler_error);
@@ -974,9 +974,9 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitHashJoinProbe(const vector<Sljit
 	return FinishSljitHashJoinProbeCode(compiler, function, error);
 }
 
-unique_ptr<ExecutionRegionCodeHandle>
-BuildSljitNestedLoopJoinProbe(const SljitNativeNestedLoopJoinProbePlan &plan,
-                              SljitNativeNestedLoopJoinProbeFunction &function, string &error) {
+unique_ptr<ExecutionRegionCodeHandle> BuildSljitNestedLoopJoinProbe(const SljitNativeNestedLoopJoinProbePlan &plan,
+                                                                    SljitNativeNestedLoopJoinProbeFunction &function,
+                                                                    string &error) {
 	auto helper = SelectSljitNestedLoopJoinProbeHelper(plan, error);
 	if (!helper) {
 		if (error.empty()) {
@@ -997,6 +997,5 @@ BuildSljitNestedLoopJoinProbe(const SljitNativeNestedLoopJoinProbePlan &plan,
 	sljit_emit_return_void(compiler);
 	return FinishSljitNestedLoopJoinProbeCode(compiler, function, error);
 }
-
 
 } // namespace duckdb

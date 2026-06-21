@@ -926,6 +926,12 @@ static void EmitSljitAggregateCommitHugeint(struct sljit_compiler *compiler, slj
 	sljit_set_label(no_value, sljit_emit_label(compiler));
 }
 
+static void EmitSljitAggregateIncrementLocalCount(struct sljit_compiler *compiler, sljit_sw local_count_offset) {
+	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R0, 0, SLJIT_MEM1(SLJIT_SP), local_count_offset);
+	sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_R0, 0, SLJIT_R0, 0, SLJIT_IMM, 1);
+	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_MEM1(SLJIT_SP), local_count_offset, SLJIT_R0, 0);
+}
+
 static void EmitSljitGroupedAggregateStatePointer(struct sljit_compiler *compiler, sljit_s32 logical_index,
                                                   sljit_s32 target) {
 	sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_R0, 0, SLJIT_MEM1(SLJIT_S0),
@@ -1371,21 +1377,10 @@ static SljitNativeIntegerKind SljitTypedExpressionTreeIntegerKind(const Executio
 	if (SljitTypedExpressionTreeIsInt32Node(node)) {
 		return SljitNativeIntegerKind::INT32;
 	}
-	if (SljitTypedExpressionTreeIsInt64Node(node)) {
+	if (SljitTypedExpressionTreeIsInt64Node(node) || node.physical_type == PhysicalType::INT64) {
 		return SljitNativeIntegerKind::INT64;
 	}
 	throw InternalException("Unsupported SLJIT typed expression-tree node type");
-}
-
-static SljitNativeIntegerKind SljitTypedExpressionTreeCastSourceKind(const ExecutionExpressionIR &node) {
-	switch (node.physical_type) {
-	case PhysicalType::INT32:
-		return SljitNativeIntegerKind::INT32;
-	case PhysicalType::INT64:
-		return SljitNativeIntegerKind::INT64;
-	default:
-		throw InternalException("Unsupported SLJIT typed expression-tree cast source type");
-	}
 }
 
 static SljitNativeIntegerCompareOp SljitTypedExpressionTreeCompareOp(ExecutionExpressionBinaryOp op) {
@@ -2513,6 +2508,146 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeTypedExpressionTree(const 
 	return FinishSljitNativeVectorCode(compiler, function, error);
 }
 
+static void EmitStoreTypedExpressionTreeTrueSelection(struct sljit_compiler *compiler, sljit_s32 index_reg) {
+	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R2, 0, SLJIT_MEM1(SLJIT_S0),
+	               offsetof(SljitNativeVectorInput, selected_count));
+	sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_R0, 0, SLJIT_MEM1(SLJIT_S0),
+	               offsetof(SljitNativeVectorInput, true_sel));
+	auto no_true_sel = sljit_emit_cmp(compiler, SLJIT_EQUAL, SLJIT_R0, 0, SLJIT_IMM, 0);
+	sljit_emit_op1(compiler, SLJIT_MOV_U32, SLJIT_MEM2(SLJIT_R0, SLJIT_R2), 2, index_reg, 0);
+	sljit_set_label(no_true_sel, sljit_emit_label(compiler));
+	sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_R2, 0, SLJIT_R2, 0, SLJIT_IMM, 1);
+	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_MEM1(SLJIT_S0), offsetof(SljitNativeVectorInput, selected_count),
+	               SLJIT_R2, 0);
+}
+
+unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeTypedExpressionTreeSelect(const ExecutionExpressionIR &root,
+                                                                                SljitNativeVectorFunction &function,
+                                                                                string &error) {
+	if (!SljitTypedExpressionTreeIsSupported(root) || !SljitTypedExpressionTreeIsBoolNode(root)) {
+		error = "SLJIT typed expression-tree select codegen only supports BOOLEAN typed expression-tree predicates";
+		return nullptr;
+	}
+
+	auto compiler = sljit_create_compiler(nullptr);
+	if (!compiler) {
+		error = "failed to create SLJIT compiler";
+		return nullptr;
+	}
+
+	const auto fast_path_supported = SljitTypedExpressionTreeFastPathSupported(root);
+	auto local_size = NumericCast<sljit_sw>(CountSljitTypedExpressionTreeNodes(root) * sizeof(sljit_sw) * 3);
+	sljit_emit_enter(compiler, 0, SLJIT_ARGS1V(P), 5, 7, local_size);
+	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_S1, 0, SLJIT_IMM, 0);
+	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_S2, 0, SLJIT_MEM1(SLJIT_S0), offsetof(SljitNativeVectorInput, count));
+	sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_S4, 0, SLJIT_MEM1(SLJIT_S0),
+	               offsetof(SljitNativeVectorInput, source_sel_array));
+	sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_S5, 0, SLJIT_MEM1(SLJIT_S0),
+	               offsetof(SljitNativeVectorInput, source_data_array));
+	sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_S6, 0, SLJIT_MEM1(SLJIT_S0),
+	               offsetof(SljitNativeVectorInput, source_validity_array));
+	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_MEM1(SLJIT_S0), offsetof(SljitNativeVectorInput, selected_count),
+	               SLJIT_IMM, 0);
+
+	vector<SljitExpressionTreeOverflowJumps> overflows;
+	vector<idx_t> source_refs;
+	CollectSljitTypedExpressionTreeReferences(root, source_refs);
+	const auto precheck_nulls_supported =
+	    fast_path_supported && SljitTypedExpressionTreeCanPrecheckNulls(root) && !source_refs.empty();
+	sljit_emit_op1(compiler, SLJIT_MOV_U8, SLJIT_R0, 0, SLJIT_MEM1(SLJIT_S0),
+	               offsetof(SljitNativeVectorInput, expression_tree_flat_all_valid));
+	struct sljit_jump *use_slow_loop = nullptr;
+	if (fast_path_supported) {
+		use_slow_loop = sljit_emit_cmp(compiler, SLJIT_EQUAL, SLJIT_R0, 0, SLJIT_IMM, 0);
+	} else {
+		use_slow_loop = sljit_emit_jump(compiler, SLJIT_JUMP);
+	}
+
+	auto fast_loop = sljit_emit_label(compiler);
+	auto fast_done = sljit_emit_cmp(compiler, SLJIT_GREATER_EQUAL, SLJIT_S1, 0, SLJIT_S2, 0);
+	idx_t fast_spill_index = 0;
+	EmitSljitTypedExpressionTreeFastValueReg(compiler, root, fast_spill_index, overflows);
+	auto fast_false = sljit_emit_cmp(compiler, SLJIT_EQUAL, SLJIT_R2, 0, SLJIT_IMM, 0);
+	EmitStoreTypedExpressionTreeTrueSelection(compiler, SLJIT_S1);
+	sljit_set_label(fast_false, sljit_emit_label(compiler));
+	sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_S1, 0, SLJIT_S1, 0, SLJIT_IMM, 1);
+	auto fast_repeat = sljit_emit_jump(compiler, SLJIT_JUMP);
+	sljit_set_label(fast_repeat, fast_loop);
+
+	sljit_set_label(use_slow_loop, sljit_emit_label(compiler));
+	struct sljit_jump *flat_nullable_done = nullptr;
+	struct sljit_jump *use_generic_loop = nullptr;
+	if (precheck_nulls_supported) {
+		sljit_emit_op1(compiler, SLJIT_MOV_U8, SLJIT_R0, 0, SLJIT_MEM1(SLJIT_S0),
+		               offsetof(SljitNativeVectorInput, expression_tree_flat_no_selection));
+		use_generic_loop = sljit_emit_cmp(compiler, SLJIT_EQUAL, SLJIT_R0, 0, SLJIT_IMM, 0);
+		sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_S1, 0, SLJIT_IMM, 0);
+		auto flat_nullable_loop = sljit_emit_label(compiler);
+		flat_nullable_done = sljit_emit_cmp(compiler, SLJIT_GREATER_EQUAL, SLJIT_S1, 0, SLJIT_S2, 0);
+		vector<sljit_jump *> source_null_jumps;
+		for (auto source_index : source_refs) {
+			source_null_jumps.push_back(EmitJumpIfSljitExpressionTreeFlatSourceNull(compiler, source_index));
+		}
+		idx_t flat_nullable_spill_index = 0;
+		EmitSljitTypedExpressionTreeFastValueReg(compiler, root, flat_nullable_spill_index, overflows);
+		auto flat_nullable_false = sljit_emit_cmp(compiler, SLJIT_EQUAL, SLJIT_R2, 0, SLJIT_IMM, 0);
+		EmitStoreTypedExpressionTreeTrueSelection(compiler, SLJIT_S1);
+		sljit_set_label(flat_nullable_false, sljit_emit_label(compiler));
+		auto flat_nullable_next = sljit_emit_jump(compiler, SLJIT_JUMP);
+		auto flat_nullable_invalid = sljit_emit_label(compiler);
+		for (auto source_null_jump : source_null_jumps) {
+			sljit_set_label(source_null_jump, flat_nullable_invalid);
+		}
+		sljit_set_label(flat_nullable_next, sljit_emit_label(compiler));
+		sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_S1, 0, SLJIT_S1, 0, SLJIT_IMM, 1);
+		auto flat_nullable_repeat = sljit_emit_jump(compiler, SLJIT_JUMP);
+		sljit_set_label(flat_nullable_repeat, flat_nullable_loop);
+		sljit_set_label(use_generic_loop, sljit_emit_label(compiler));
+	}
+
+	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_S1, 0, SLJIT_IMM, 0);
+	auto loop = sljit_emit_label(compiler);
+	auto done = sljit_emit_cmp(compiler, SLJIT_GREATER_EQUAL, SLJIT_S1, 0, SLJIT_S2, 0);
+	EmitLoadSljitExpressionTreeLogicalIndex(compiler);
+	idx_t slot_index = 0;
+	auto root_slot = EmitSljitTypedExpressionTreeValue(compiler, root, slot_index, overflows);
+	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R3, 0, SLJIT_MEM1(SLJIT_SP), root_slot.valid_offset);
+	auto root_invalid = sljit_emit_cmp(compiler, SLJIT_EQUAL, SLJIT_R3, 0, SLJIT_IMM, 0);
+	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R2, 0, SLJIT_MEM1(SLJIT_SP), root_slot.value_offset);
+	auto root_false = sljit_emit_cmp(compiler, SLJIT_EQUAL, SLJIT_R2, 0, SLJIT_IMM, 0);
+	EmitStoreTypedExpressionTreeTrueSelection(compiler, SLJIT_S3);
+	auto row_done = sljit_emit_jump(compiler, SLJIT_JUMP);
+	sljit_set_label(root_invalid, sljit_emit_label(compiler));
+	sljit_set_label(root_false, sljit_emit_label(compiler));
+	sljit_set_label(row_done, sljit_emit_label(compiler));
+	sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_S1, 0, SLJIT_S1, 0, SLJIT_IMM, 1);
+	auto repeat = sljit_emit_jump(compiler, SLJIT_JUMP);
+	sljit_set_label(repeat, loop);
+
+	vector<sljit_jump *> helper_done;
+	for (auto &overflow : overflows) {
+		auto overflow_label = sljit_emit_label(compiler);
+		for (auto jump : overflow.jumps) {
+			sljit_set_label(jump, overflow_label);
+		}
+		EmitSljitExpressionTreeOverflowCall(compiler, overflow.op);
+		helper_done.push_back(sljit_emit_jump(compiler, SLJIT_JUMP));
+	}
+
+	auto done_label = sljit_emit_label(compiler);
+	sljit_set_label(fast_done, done_label);
+	if (flat_nullable_done) {
+		sljit_set_label(flat_nullable_done, done_label);
+	}
+	sljit_set_label(done, done_label);
+	for (auto jump : helper_done) {
+		sljit_set_label(jump, done_label);
+	}
+	sljit_emit_return_void(compiler);
+
+	return FinishSljitNativeVectorCode(compiler, function, error);
+}
+
 static sljit_s32 NativeDoubleBinaryOp(SljitNativeDoubleBinaryOp op);
 static bool NativeDoubleSourceUsesHelper(SljitNativeDoubleSourceKind kind);
 static void EmitLoadNativeDoubleOperand(struct sljit_compiler *compiler, SljitNativeDoubleSourceKind kind,
@@ -3231,9 +3366,10 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeUngroupedSumInt64IntegerBi
 	return FinishSljitNativeAggregateUpdateCode(compiler, function, error);
 }
 
-unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeUngroupedSumDoubleDoubleBinaryConstant(
-    SljitNativeDoubleBinaryOp op, SljitNativeDoubleSourceKind source_kind, bool constant_on_left,
-    SljitNativeAggregateUpdateFunction &function, string &error) {
+unique_ptr<ExecutionRegionCodeHandle>
+BuildSljitNativeUngroupedSumDoubleDoubleBinaryConstant(SljitNativeDoubleBinaryOp op,
+                                                       SljitNativeDoubleSourceKind source_kind, bool constant_on_left,
+                                                       SljitNativeAggregateUpdateFunction &function, string &error) {
 	auto compiler = sljit_create_compiler(nullptr);
 	if (!compiler) {
 		error = "failed to create SLJIT compiler";
@@ -3485,6 +3621,77 @@ static void EmitFusedAggregateCommitSumInt64(struct sljit_compiler *compiler, id
 	sljit_set_label(no_value, sljit_emit_label(compiler));
 }
 
+static void EmitFusedFilteredAggregateCommitLocalCount(struct sljit_compiler *compiler, idx_t lane_idx,
+                                                       sljit_sw local_count_offset) {
+	EmitLoadFusedAggregatePointer(compiler, offsetof(SljitNativeVectorInput, aggregate_row_counts), lane_idx, SLJIT_R0);
+	auto no_count = sljit_emit_cmp(compiler, SLJIT_EQUAL, SLJIT_R0, 0, SLJIT_IMM, 0);
+	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R1, 0, SLJIT_MEM1(SLJIT_R0), 0);
+	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R2, 0, SLJIT_MEM1(SLJIT_SP), local_count_offset);
+	sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_R1, 0, SLJIT_R1, 0, SLJIT_R2, 0);
+	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_MEM1(SLJIT_R0), 0, SLJIT_R1, 0);
+	sljit_set_label(no_count, sljit_emit_label(compiler));
+}
+
+static void EmitFusedFilteredAggregateCommitCountStar(struct sljit_compiler *compiler, idx_t lane_idx,
+                                                      sljit_sw local_count_offset) {
+	EmitFusedFilteredAggregateCommitLocalCount(compiler, lane_idx, local_count_offset);
+
+	EmitLoadFusedAggregatePointer(compiler, offsetof(SljitNativeVectorInput, aggregate_int64_values), lane_idx,
+	                              SLJIT_R0);
+	auto no_value = sljit_emit_cmp(compiler, SLJIT_EQUAL, SLJIT_R0, 0, SLJIT_IMM, 0);
+	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R1, 0, SLJIT_MEM1(SLJIT_R0), 0);
+	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R2, 0, SLJIT_MEM1(SLJIT_SP), local_count_offset);
+	sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_R1, 0, SLJIT_R1, 0, SLJIT_R2, 0);
+	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_MEM1(SLJIT_R0), 0, SLJIT_R1, 0);
+	sljit_set_label(no_value, sljit_emit_label(compiler));
+}
+
+static void EmitFusedFilteredAggregateCommitSumInt64(struct sljit_compiler *compiler, idx_t lane_idx,
+                                                     sljit_sw local_sum_offset, sljit_sw saw_value_offset,
+                                                     sljit_sw local_count_offset) {
+	EmitFusedFilteredAggregateCommitLocalCount(compiler, lane_idx, local_count_offset);
+
+	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R2, 0, SLJIT_MEM1(SLJIT_SP), saw_value_offset);
+	auto no_value = sljit_emit_cmp(compiler, SLJIT_EQUAL, SLJIT_R2, 0, SLJIT_IMM, 0);
+	EmitLoadFusedAggregatePointer(compiler, offsetof(SljitNativeVectorInput, aggregate_int64_values), lane_idx,
+	                              SLJIT_R0);
+	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R1, 0, SLJIT_MEM1(SLJIT_R0), 0);
+	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R2, 0, SLJIT_MEM1(SLJIT_SP), local_sum_offset);
+	sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_R1, 0, SLJIT_R1, 0, SLJIT_R2, 0);
+	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_MEM1(SLJIT_R0), 0, SLJIT_R1, 0);
+	EmitLoadFusedAggregatePointer(compiler, offsetof(SljitNativeVectorInput, aggregate_state_is_sets), lane_idx,
+	                              SLJIT_R0);
+	sljit_emit_op1(compiler, SLJIT_MOV_U8, SLJIT_MEM1(SLJIT_R0), 0, SLJIT_IMM, 1);
+	sljit_set_label(no_value, sljit_emit_label(compiler));
+}
+
+static void EmitFusedFilteredAggregateCommitSumHugeint(struct sljit_compiler *compiler, idx_t lane_idx,
+                                                       sljit_sw local_lower_offset, sljit_sw local_upper_offset,
+                                                       sljit_sw saw_value_offset, sljit_sw local_count_offset) {
+	EmitFusedFilteredAggregateCommitLocalCount(compiler, lane_idx, local_count_offset);
+
+	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R2, 0, SLJIT_MEM1(SLJIT_SP), saw_value_offset);
+	auto no_value = sljit_emit_cmp(compiler, SLJIT_EQUAL, SLJIT_R2, 0, SLJIT_IMM, 0);
+	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R2, 0, SLJIT_MEM1(SLJIT_SP), local_lower_offset);
+	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_MEM1(SLJIT_S0),
+	               offsetof(SljitNativeVectorInput, aggregate_local_hugeint) + offsetof(hugeint_t, lower), SLJIT_R2, 0);
+	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R2, 0, SLJIT_MEM1(SLJIT_SP), local_upper_offset);
+	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_MEM1(SLJIT_S0),
+	               offsetof(SljitNativeVectorInput, aggregate_local_hugeint) + offsetof(hugeint_t, upper), SLJIT_R2, 0);
+	EmitLoadFusedAggregatePointer(compiler, offsetof(SljitNativeVectorInput, aggregate_hugeint_values), lane_idx,
+	                              SLJIT_R0);
+	sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_MEM1(SLJIT_S0),
+	               offsetof(SljitNativeVectorInput, aggregate_hugeint_value), SLJIT_R0, 0);
+	EmitLoadFusedAggregatePointer(compiler, offsetof(SljitNativeVectorInput, aggregate_state_is_sets), lane_idx,
+	                              SLJIT_R0);
+	sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_MEM1(SLJIT_S0),
+	               offsetof(SljitNativeVectorInput, aggregate_state_is_set), SLJIT_R0, 0);
+	sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_R0, 0, SLJIT_S0, 0);
+	sljit_emit_icall(compiler, SLJIT_CALL, SLJIT_ARGS1V(P), SLJIT_IMM,
+	                 SLJIT_FUNC_ADDR(SljitNativeAggregateHugeintCommit));
+	sljit_set_label(no_value, sljit_emit_label(compiler));
+}
+
 unique_ptr<ExecutionRegionCodeHandle>
 BuildSljitNativeUngroupedFusedPrimitiveAggregateUpdate(const vector<SljitNativeRegionExpressionPlan> &payloads,
                                                        const vector<ExecutionRegionAggregateInput> &aggregates,
@@ -3626,6 +3833,255 @@ BuildSljitNativeUngroupedFusedPrimitiveAggregateUpdate(const vector<SljitNativeR
 	auto return_label = sljit_emit_label(compiler);
 	for (auto jump : helper_done) {
 		sljit_set_label(jump, return_label);
+	}
+	sljit_emit_return_void(compiler);
+
+	return FinishSljitNativeAggregateUpdateCode(compiler, function, error);
+}
+
+static bool SljitFilteredFusedPrimitiveAggregatePayloadSupported(const SljitNativeRegionExpressionPlan &payload,
+                                                                 const ExecutionRegionAggregateInput &aggregate) {
+	if (!aggregate.primitive_update_ready) {
+		return false;
+	}
+	if (aggregate.primitive_update_kind == AggregatePrimitiveUpdateKind::COUNT_STAR) {
+		return aggregate.child_count == 0 && aggregate.child_types.empty();
+	}
+	if (aggregate.primitive_update_kind != AggregatePrimitiveUpdateKind::SUM_INT64 &&
+	    aggregate.primitive_update_kind != AggregatePrimitiveUpdateKind::SUM_HUGEINT) {
+		return false;
+	}
+	if (aggregate.child_types.size() != 1 ||
+	    aggregate.primitive_update_input_type != aggregate.child_types[0].InternalType() ||
+	    payload.return_type.InternalType() != aggregate.child_types[0].InternalType() || !payload.expression_tree) {
+		return false;
+	}
+	if ((aggregate.primitive_update_kind == AggregatePrimitiveUpdateKind::SUM_INT64 ||
+	     aggregate.primitive_update_kind == AggregatePrimitiveUpdateKind::SUM_HUGEINT) &&
+	    payload.expression_tree->kind == ExecutionExpressionIRKind::REFERENCE &&
+	    payload.expression_tree->physical_type == PhysicalType::INT64) {
+		return true;
+	}
+	return SljitTypedExpressionTreeIsSupported(*payload.expression_tree) &&
+	       SljitTypedExpressionTreeIsInt64Node(*payload.expression_tree);
+}
+
+static idx_t
+SljitFilteredFusedPrimitiveAggregateTreeNodeCount(const ExecutionExpressionIR &predicate,
+                                                  const vector<SljitNativeRegionExpressionPlan> &payloads,
+                                                  const vector<ExecutionRegionAggregateInput> &aggregates) {
+	idx_t result = CountSljitTypedExpressionTreeNodes(predicate);
+	for (idx_t payload_idx = 0; payload_idx < payloads.size(); payload_idx++) {
+		if (aggregates[payload_idx].primitive_update_kind == AggregatePrimitiveUpdateKind::COUNT_STAR) {
+			continue;
+		}
+		result += CountSljitTypedExpressionTreeNodes(*payloads[payload_idx].expression_tree);
+	}
+	return result;
+}
+
+static bool
+SljitFilteredFusedPrimitiveAggregateFastPathSupported(const ExecutionExpressionIR &predicate,
+                                                      const vector<SljitNativeRegionExpressionPlan> &payloads,
+                                                      const vector<ExecutionRegionAggregateInput> &aggregates) {
+	if (!SljitTypedExpressionTreeFastPathSupported(predicate)) {
+		return false;
+	}
+	for (idx_t payload_idx = 0; payload_idx < payloads.size(); payload_idx++) {
+		if (aggregates[payload_idx].primitive_update_kind == AggregatePrimitiveUpdateKind::COUNT_STAR) {
+			continue;
+		}
+		if (!SljitTypedExpressionTreeFastPathSupported(*payloads[payload_idx].expression_tree)) {
+			return false;
+		}
+	}
+	return true;
+}
+
+unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeFilteredUngroupedFusedPrimitiveAggregateUpdate(
+    const ExecutionExpressionIR &predicate, const vector<SljitNativeRegionExpressionPlan> &payloads,
+    const vector<ExecutionRegionAggregateInput> &aggregates, SljitNativeAggregateUpdateFunction &function,
+    string &error) {
+	if (payloads.empty() || payloads.size() != aggregates.size() || !SljitTypedExpressionTreeIsSupported(predicate) ||
+	    !SljitTypedExpressionTreeIsBoolNode(predicate)) {
+		error = "unsupported filtered fused aggregate payload shape";
+		return nullptr;
+	}
+	for (idx_t payload_idx = 0; payload_idx < payloads.size(); payload_idx++) {
+		if (!SljitFilteredFusedPrimitiveAggregatePayloadSupported(payloads[payload_idx], aggregates[payload_idx])) {
+			error = "unsupported filtered fused aggregate payload shape";
+			return nullptr;
+		}
+	}
+
+	auto compiler = sljit_create_compiler(nullptr);
+	if (!compiler) {
+		error = "failed to create SLJIT compiler";
+		return nullptr;
+	}
+
+	const auto tree_node_count = SljitFilteredFusedPrimitiveAggregateTreeNodeCount(predicate, payloads, aggregates);
+	const auto tree_local_size = NumericCast<sljit_sw>(tree_node_count * sizeof(sljit_sw) * 3);
+	vector<sljit_sw> local_count_offsets(payloads.size(), -1);
+	vector<sljit_sw> local_sum_offsets(payloads.size(), -1);
+	vector<sljit_sw> local_sum_upper_offsets(payloads.size(), -1);
+	vector<sljit_sw> saw_value_offsets(payloads.size(), -1);
+	sljit_sw local_size = tree_local_size;
+	for (idx_t payload_idx = 0; payload_idx < payloads.size(); payload_idx++) {
+		local_count_offsets[payload_idx] = local_size;
+		local_size += NumericCast<sljit_sw>(sizeof(sljit_sw));
+		auto kind = aggregates[payload_idx].primitive_update_kind;
+		if (kind == AggregatePrimitiveUpdateKind::COUNT_STAR) {
+			continue;
+		}
+		local_sum_offsets[payload_idx] = local_size;
+		local_size += NumericCast<sljit_sw>(sizeof(sljit_sw));
+		if (kind == AggregatePrimitiveUpdateKind::SUM_HUGEINT) {
+			local_sum_upper_offsets[payload_idx] = local_size;
+			local_size += NumericCast<sljit_sw>(sizeof(sljit_sw));
+		}
+		saw_value_offsets[payload_idx] = local_size;
+		local_size += NumericCast<sljit_sw>(sizeof(sljit_sw));
+	}
+
+	sljit_emit_enter(compiler, 0, SLJIT_ARGS1V(P), 5, 7, local_size);
+	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_S1, 0, SLJIT_IMM, 0);
+	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_S2, 0, SLJIT_MEM1(SLJIT_S0), offsetof(SljitNativeVectorInput, count));
+	for (idx_t payload_idx = 0; payload_idx < payloads.size(); payload_idx++) {
+		sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_MEM1(SLJIT_SP), local_count_offsets[payload_idx], SLJIT_IMM, 0);
+		if (local_sum_offsets[payload_idx] >= 0) {
+			sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_MEM1(SLJIT_SP), local_sum_offsets[payload_idx], SLJIT_IMM, 0);
+			if (local_sum_upper_offsets[payload_idx] >= 0) {
+				sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_MEM1(SLJIT_SP), local_sum_upper_offsets[payload_idx],
+				               SLJIT_IMM, 0);
+			}
+			sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_MEM1(SLJIT_SP), saw_value_offsets[payload_idx], SLJIT_IMM, 0);
+		}
+	}
+	sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_S4, 0, SLJIT_MEM1(SLJIT_S0),
+	               offsetof(SljitNativeVectorInput, source_sel_array));
+	sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_S5, 0, SLJIT_MEM1(SLJIT_S0),
+	               offsetof(SljitNativeVectorInput, source_data_array));
+	sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_S6, 0, SLJIT_MEM1(SLJIT_S0),
+	               offsetof(SljitNativeVectorInput, source_validity_array));
+
+	vector<SljitExpressionTreeOverflowJumps> overflows;
+	struct sljit_jump *fast_done = nullptr;
+	if (SljitFilteredFusedPrimitiveAggregateFastPathSupported(predicate, payloads, aggregates)) {
+		sljit_emit_op1(compiler, SLJIT_MOV_U8, SLJIT_R0, 0, SLJIT_MEM1(SLJIT_S0),
+		               offsetof(SljitNativeVectorInput, expression_tree_flat_all_valid));
+		auto use_generic_loop = sljit_emit_cmp(compiler, SLJIT_EQUAL, SLJIT_R0, 0, SLJIT_IMM, 0);
+
+		auto fast_loop = sljit_emit_label(compiler);
+		fast_done = sljit_emit_cmp(compiler, SLJIT_GREATER_EQUAL, SLJIT_S1, 0, SLJIT_S2, 0);
+		idx_t predicate_spill_index = 0;
+		EmitSljitTypedExpressionTreeFastValueReg(compiler, predicate, predicate_spill_index, overflows);
+		auto predicate_false = sljit_emit_cmp(compiler, SLJIT_EQUAL, SLJIT_R2, 0, SLJIT_IMM, 0);
+		for (idx_t payload_idx = 0; payload_idx < payloads.size(); payload_idx++) {
+			auto kind = aggregates[payload_idx].primitive_update_kind;
+			if (kind == AggregatePrimitiveUpdateKind::COUNT_STAR) {
+				EmitSljitAggregateIncrementLocalCount(compiler, local_count_offsets[payload_idx]);
+				continue;
+			}
+			idx_t payload_spill_index = 0;
+			EmitSljitTypedExpressionTreeFastValueReg(compiler, *payloads[payload_idx].expression_tree,
+			                                         payload_spill_index, overflows);
+			if (kind == AggregatePrimitiveUpdateKind::SUM_HUGEINT) {
+				EmitSljitAggregateAccumulateHugeintInt64(compiler, local_sum_offsets[payload_idx],
+				                                         local_sum_upper_offsets[payload_idx],
+				                                         saw_value_offsets[payload_idx], SLJIT_R2);
+			} else {
+				EmitSljitAggregateAccumulateInt64(compiler, local_sum_offsets[payload_idx],
+				                                  saw_value_offsets[payload_idx], SLJIT_R2);
+			}
+			EmitSljitAggregateIncrementLocalCount(compiler, local_count_offsets[payload_idx]);
+		}
+		sljit_set_label(predicate_false, sljit_emit_label(compiler));
+		EmitSljitAggregateLoopStep(compiler, fast_loop);
+
+		sljit_set_label(use_generic_loop, sljit_emit_label(compiler));
+		sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_S1, 0, SLJIT_IMM, 0);
+	}
+
+	auto loop = sljit_emit_label(compiler);
+	auto done = sljit_emit_cmp(compiler, SLJIT_GREATER_EQUAL, SLJIT_S1, 0, SLJIT_S2, 0);
+	EmitLoadSljitExpressionTreeLogicalIndex(compiler);
+
+	vector<sljit_jump *> row_skip_jumps;
+	idx_t predicate_slot_index = 0;
+	auto predicate_slot = EmitSljitTypedExpressionTreeValue(compiler, predicate, predicate_slot_index, overflows);
+	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R3, 0, SLJIT_MEM1(SLJIT_SP), predicate_slot.valid_offset);
+	row_skip_jumps.push_back(sljit_emit_cmp(compiler, SLJIT_EQUAL, SLJIT_R3, 0, SLJIT_IMM, 0));
+	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R2, 0, SLJIT_MEM1(SLJIT_SP), predicate_slot.value_offset);
+	row_skip_jumps.push_back(sljit_emit_cmp(compiler, SLJIT_EQUAL, SLJIT_R2, 0, SLJIT_IMM, 0));
+
+	for (idx_t payload_idx = 0; payload_idx < payloads.size(); payload_idx++) {
+		auto kind = aggregates[payload_idx].primitive_update_kind;
+		if (kind == AggregatePrimitiveUpdateKind::COUNT_STAR) {
+			EmitSljitAggregateIncrementLocalCount(compiler, local_count_offsets[payload_idx]);
+			continue;
+		}
+		vector<sljit_jump *> payload_skip_jumps;
+		idx_t payload_slot_index = 0;
+		auto payload_slot = EmitSljitTypedExpressionTreeValue(compiler, *payloads[payload_idx].expression_tree,
+		                                                      payload_slot_index, overflows);
+		sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R3, 0, SLJIT_MEM1(SLJIT_SP), payload_slot.valid_offset);
+		payload_skip_jumps.push_back(sljit_emit_cmp(compiler, SLJIT_EQUAL, SLJIT_R3, 0, SLJIT_IMM, 0));
+		sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R2, 0, SLJIT_MEM1(SLJIT_SP), payload_slot.value_offset);
+		if (kind == AggregatePrimitiveUpdateKind::SUM_HUGEINT) {
+			EmitSljitAggregateAccumulateHugeintInt64(compiler, local_sum_offsets[payload_idx],
+			                                         local_sum_upper_offsets[payload_idx],
+			                                         saw_value_offsets[payload_idx], SLJIT_R2);
+		} else {
+			EmitSljitAggregateAccumulateInt64(compiler, local_sum_offsets[payload_idx], saw_value_offsets[payload_idx],
+			                                  SLJIT_R2);
+		}
+		EmitSljitAggregateIncrementLocalCount(compiler, local_count_offsets[payload_idx]);
+		auto payload_done = sljit_emit_jump(compiler, SLJIT_JUMP);
+		auto payload_skip_label = sljit_emit_label(compiler);
+		for (auto payload_skip : payload_skip_jumps) {
+			sljit_set_label(payload_skip, payload_skip_label);
+		}
+		sljit_set_label(payload_done, sljit_emit_label(compiler));
+	}
+	auto row_done = sljit_emit_jump(compiler, SLJIT_JUMP);
+	auto row_skip_label = sljit_emit_label(compiler);
+	for (auto row_skip : row_skip_jumps) {
+		sljit_set_label(row_skip, row_skip_label);
+	}
+	sljit_set_label(row_done, sljit_emit_label(compiler));
+	EmitSljitAggregateLoopStep(compiler, loop);
+
+	vector<sljit_jump *> helper_done;
+	for (auto &overflow : overflows) {
+		auto overflow_label = sljit_emit_label(compiler);
+		for (auto jump : overflow.jumps) {
+			sljit_set_label(jump, overflow_label);
+		}
+		EmitSljitAggregateExpressionTreeOverflowCall(compiler, overflow.op);
+		helper_done.push_back(sljit_emit_jump(compiler, SLJIT_JUMP));
+	}
+
+	auto done_label = sljit_emit_label(compiler);
+	if (fast_done) {
+		sljit_set_label(fast_done, done_label);
+	}
+	sljit_set_label(done, done_label);
+	for (idx_t payload_idx = 0; payload_idx < payloads.size(); payload_idx++) {
+		auto kind = aggregates[payload_idx].primitive_update_kind;
+		if (kind == AggregatePrimitiveUpdateKind::COUNT_STAR) {
+			EmitFusedFilteredAggregateCommitCountStar(compiler, payload_idx, local_count_offsets[payload_idx]);
+		} else if (kind == AggregatePrimitiveUpdateKind::SUM_HUGEINT) {
+			EmitFusedFilteredAggregateCommitSumHugeint(
+			    compiler, payload_idx, local_sum_offsets[payload_idx], local_sum_upper_offsets[payload_idx],
+			    saw_value_offsets[payload_idx], local_count_offsets[payload_idx]);
+		} else {
+			EmitFusedFilteredAggregateCommitSumInt64(compiler, payload_idx, local_sum_offsets[payload_idx],
+			                                         saw_value_offsets[payload_idx], local_count_offsets[payload_idx]);
+		}
+	}
+	for (auto jump : helper_done) {
+		sljit_set_label(jump, sljit_emit_label(compiler));
 	}
 	sljit_emit_return_void(compiler);
 
