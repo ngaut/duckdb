@@ -84,9 +84,15 @@ struct ExecutionRegionEvent {
 	string kernel_compile_reason;
 	int64_t kernel_compile_time_us = 0;
 	idx_t kernel_code_size = 0;
+	int64_t pipeline_cbo_time_us = 0;
+	int64_t graph_build_time_us = 0;
+	int64_t candidate_cbo_time_us = 0;
 	int64_t ir_lowering_time_us = 0;
 	int64_t backend_analysis_time_us = 0;
 	int64_t codegen_time_us = 0;
+	int64_t executable_build_time_us = 0;
+	int64_t machine_codegen_time_us = 0;
+	int64_t kernel_build_time_us = 0;
 };
 
 struct ExecutionRegionTraceSummary {
@@ -106,6 +112,15 @@ struct ExecutionRegionTraceSummary {
 	int64_t generated_us = 0;
 	int64_t decision_us = 0;
 	int64_t compile_us = 0;
+	int64_t pipeline_cbo_us = 0;
+	int64_t graph_build_us = 0;
+	int64_t candidate_cbo_us = 0;
+	int64_t ir_lowering_us = 0;
+	int64_t backend_analysis_us = 0;
+	int64_t codegen_us = 0;
+	int64_t executable_build_us = 0;
+	int64_t machine_codegen_us = 0;
+	int64_t kernel_build_us = 0;
 };
 
 DUCKDB_API ExecutionRegionTraceSummary SummarizeExecutionRegionTrace(const vector<ExecutionRegionEvent> &trace);
@@ -158,15 +173,27 @@ struct ExecutionRegionCounter {
 	int64_t sink_next_batch_runtime_time_us = 0;
 	int64_t generated_body_runtime_time_us = 0;
 	vector<ExecutionRegionRecordedStageRuntime> generated_stage_runtime;
+	int64_t pipeline_cbo_time_us = 0;
+	int64_t graph_build_time_us = 0;
+	int64_t candidate_cbo_time_us = 0;
 	int64_t ir_lowering_time_us = 0;
 	int64_t backend_analysis_time_us = 0;
 	int64_t codegen_time_us = 0;
+	int64_t executable_build_time_us = 0;
+	int64_t machine_codegen_time_us = 0;
+	int64_t kernel_build_time_us = 0;
 };
 
 struct ExecutionRegionStageTimings {
+	int64_t pipeline_cbo_time_us = 0;
+	int64_t graph_build_time_us = 0;
+	int64_t candidate_cbo_time_us = 0;
 	int64_t ir_lowering_time_us = 0;
 	int64_t backend_analysis_time_us = 0;
 	int64_t codegen_time_us = 0;
+	int64_t executable_build_time_us = 0;
+	int64_t machine_codegen_time_us = 0;
+	int64_t kernel_build_time_us = 0;
 };
 
 class ExecutionRegionSuppressionGuard {

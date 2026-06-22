@@ -8,7 +8,7 @@ namespace duckdb {
 
 struct DuckDBJitEventsData : public ExecutionRegionTableFunctionState<ExecutionRegionEvent> {};
 
-static constexpr idx_t JIT_EVENT_CANDIDATE_TRACE_COLUMN_OFFSET = 57;
+static constexpr idx_t JIT_EVENT_CANDIDATE_TRACE_COLUMN_OFFSET = 63;
 static constexpr idx_t JIT_EVENT_PIPELINE_SHAPE_COLUMN =
     JIT_EVENT_CANDIDATE_TRACE_COLUMN_OFFSET + EXECUTION_REGION_CANDIDATE_TRACE_COLUMN_COUNT;
 static constexpr idx_t JIT_EVENT_PIPELINE_ESTIMATED_CARDINALITY_COLUMN = JIT_EVENT_PIPELINE_SHAPE_COLUMN + 1;
@@ -161,58 +161,76 @@ static void AppendJitEventColumn(Vector &output, idx_t column_id, const Executio
 		output.Append(Value::BIGINT(entry.codegen_time_us));
 		return;
 	case 40:
+		output.Append(Value::BIGINT(entry.pipeline_cbo_time_us));
+		return;
+	case 41:
+		output.Append(Value::BIGINT(entry.graph_build_time_us));
+		return;
+	case 42:
+		output.Append(Value::BIGINT(entry.candidate_cbo_time_us));
+		return;
+	case 43:
+		output.Append(Value::BIGINT(entry.executable_build_time_us));
+		return;
+	case 44:
+		output.Append(Value::BIGINT(entry.machine_codegen_time_us));
+		return;
+	case 45:
+		output.Append(Value::BIGINT(entry.kernel_build_time_us));
+		return;
+	case 46:
 		if (entry.has_candidate) {
 			AppendExecutionRegionNullableString(output, entry.candidate_pipeline_shape);
 		} else {
 			output.Append(Value(LogicalType::VARCHAR));
 		}
 		return;
-	case 41:
+	case 47:
 		output.Append(Value::BOOLEAN(entry.runner_cost.present));
 		return;
-	case 42:
+	case 48:
 		output.Append(Value::BIGINT(entry.runner_cost.rows));
 		return;
-	case 43:
+	case 49:
 		output.Append(Value::BIGINT(entry.runner_cost.batches));
 		return;
-	case 44:
+	case 50:
 		output.Append(Value::BIGINT(entry.runner_cost.expression_cost));
 		return;
-	case 45:
+	case 51:
 		output.Append(Value::BIGINT(entry.runner_cost.generated_stage_count));
 		return;
-	case 46:
+	case 52:
 		output.Append(Value::BIGINT(entry.runner_cost.materialization_elision_count));
 		return;
-	case 47:
+	case 53:
 		output.Append(Value::BIGINT(entry.runner_cost.native_join_stage_count));
 		return;
-	case 48:
+	case 54:
 		output.Append(Value::BIGINT(entry.runner_cost.native_aggregate_stage_count));
 		return;
-	case 49:
+	case 55:
 		output.Append(Value::BIGINT(entry.runner_cost.native_sort_stage_count));
 		return;
-	case 50:
+	case 56:
 		output.Append(Value::BOOLEAN(entry.runner_cost.full_pipeline));
 		return;
-	case 51:
+	case 57:
 		output.Append(Value::BIGINT(entry.runner_cost.saved_work_per_batch));
 		return;
-	case 52:
+	case 58:
 		output.Append(Value::BIGINT(entry.runner_cost.accelerated_runner_benefit));
 		return;
-	case 53:
+	case 59:
 		output.Append(Value::BIGINT(entry.runner_cost.startup_cost));
 		return;
-	case 54:
+	case 60:
 		output.Append(Value::BIGINT(entry.runner_cost.required_benefit));
 		return;
-	case 55:
+	case 61:
 		output.Append(Value::BIGINT(entry.runner_cost.net_benefit));
 		return;
-	case 56:
+	case 62:
 		output.Append(Value::BOOLEAN(entry.runner_cost.selected_accelerated_runner));
 		return;
 	case JIT_EVENT_PIPELINE_SHAPE_COLUMN:
@@ -312,6 +330,18 @@ static unique_ptr<FunctionData> DuckDBJitEventsBind(ClientContext &context, Tabl
 	names.emplace_back("backend_analysis_time_us");
 	return_types.emplace_back(LogicalType::BIGINT);
 	names.emplace_back("codegen_time_us");
+	return_types.emplace_back(LogicalType::BIGINT);
+	names.emplace_back("pipeline_cbo_time_us");
+	return_types.emplace_back(LogicalType::BIGINT);
+	names.emplace_back("graph_build_time_us");
+	return_types.emplace_back(LogicalType::BIGINT);
+	names.emplace_back("candidate_cbo_time_us");
+	return_types.emplace_back(LogicalType::BIGINT);
+	names.emplace_back("executable_build_time_us");
+	return_types.emplace_back(LogicalType::BIGINT);
+	names.emplace_back("machine_codegen_time_us");
+	return_types.emplace_back(LogicalType::BIGINT);
+	names.emplace_back("kernel_build_time_us");
 	return_types.emplace_back(LogicalType::BIGINT);
 	names.emplace_back("candidate_pipeline_shape");
 	return_types.emplace_back(LogicalType::VARCHAR);

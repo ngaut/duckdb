@@ -226,6 +226,10 @@ static bool ExecutionRegionProductionEligibilityAllowsPlanning(ClientContext &co
 }
 
 static bool ExecutionRegionPlanningNeedsBackendDiagnostics(ClientContext &context) {
+	return ExecutionRegionSettings::DumpIR(context);
+}
+
+static bool ExecutionRegionPlanningNeedsCandidateDiagnostics(ClientContext &context) {
 	return ExecutionRegionSettings::TraceDecisions(context) || ExecutionRegionSettings::DumpIR(context);
 }
 
@@ -779,6 +783,7 @@ unique_ptr<ExecutionRegionPlan> ExecutionRegionPlanner::Build(ClientContext &con
 	auto should_record_detailed_telemetry = ExecutionRegionSettings::ShouldRecordDetailedTelemetry(context);
 	auto should_record_decision_telemetry = ExecutionRegionSettings::ShouldRecordDecisionTelemetry(context);
 	auto needs_backend_diagnostics = ExecutionRegionPlanningNeedsBackendDiagnostics(context);
+	auto needs_candidate_diagnostics = ExecutionRegionPlanningNeedsCandidateDiagnostics(context);
 	string backend_name;
 	optional_ptr<ExecutionRegionBackend> backend;
 	auto select_backend = [&]() -> bool {
@@ -820,9 +825,12 @@ unique_ptr<ExecutionRegionPlan> ExecutionRegionPlanner::Build(ClientContext &con
 	if (!ExecutionRegionProductionEligibilityAllowsPlanning(context, cost_parameters)) {
 		return nullptr;
 	}
-	if (!needs_backend_diagnostics) {
+	ExecutionRegionStageTimings shared_stage_timings;
+	if (!needs_candidate_diagnostics) {
 		auto pipeline_decision_start = std::chrono::steady_clock::now();
 		auto physical_runner = SelectExecutionRegionPipelinePhysicalRunner(cost_parameters, pipeline);
+		auto pipeline_cbo_time_us = ExecutionRegionPlannerElapsedMicros(pipeline_decision_start);
+		shared_stage_timings.pipeline_cbo_time_us = pipeline_cbo_time_us;
 		if (!physical_runner.UsesCompiledRunner()) {
 			if (should_record_decision_telemetry) {
 				if (!select_backend()) {
@@ -832,7 +840,7 @@ unique_ptr<ExecutionRegionPlan> ExecutionRegionPlanner::Build(ClientContext &con
 				execution_region_manager.RecordEvent(
 				    context, backend_name, ExecutionRegionCompileStatus::SKIPPED,
 				    ExecutionRegionExecutionMode::UNSUPPORTED, physical_runner.reason, physical_runner.blocker, nullptr,
-				    decision_time_us, 0, 0, nullptr, physical_runner.SelectedRunner(), nullptr,
+				    decision_time_us, 0, 0, nullptr, physical_runner.SelectedRunner(), &shared_stage_timings,
 				    ExecutionRegionSourceExecutionKind::NONE, false, &physical_runner.runner_cost);
 			}
 			return nullptr;
@@ -847,36 +855,43 @@ unique_ptr<ExecutionRegionPlan> ExecutionRegionPlanner::Build(ClientContext &con
 	auto graph_build_start = std::chrono::steady_clock::now();
 	auto pipeline_descriptor = BuildExecutionRegionGraph(pipeline, region_ir_mode == ExecutionRegionIRMode::TRACE);
 	auto graph_build_time_us = ExecutionRegionPlannerElapsedMicros(graph_build_start);
+	shared_stage_timings.graph_build_time_us = graph_build_time_us;
 	if (!pipeline_descriptor) {
 		if (should_record_decision_telemetry) {
 			execution_region_manager.RecordEvent(context, backend_name, ExecutionRegionCompileStatus::UNSUPPORTED,
 			                                     ExecutionRegionExecutionMode::UNSUPPORTED,
 			                                     "core region graph builder produced no execution-region graph",
-			                                     "no_execution_region_graph", nullptr, graph_build_time_us, 0, 0);
+			                                     "no_execution_region_graph", nullptr,
+			                                     shared_stage_timings.pipeline_cbo_time_us + graph_build_time_us, 0, 0,
+			                                     nullptr, ExecutionRunnerKind::VECTORIZED, &shared_stage_timings);
 		}
 		return nullptr;
 	}
-	if (!needs_backend_diagnostics &&
+	if (!needs_candidate_diagnostics &&
 	    !ExecutionRegionGraphMayHaveCostedAcceleration(*pipeline_descriptor, cost_parameters)) {
 		if (should_record_decision_telemetry) {
 			string reason = "duckdb_cbo skips region lowering because pipeline has no costed acceleration";
 			reason += ";region_lowering=skipped";
 			execution_region_manager.RecordEvent(context, backend_name, ExecutionRegionCompileStatus::SKIPPED,
 			                                     ExecutionRegionExecutionMode::UNSUPPORTED, std::move(reason),
-			                                     "duckdb_selected_vectorized", nullptr, graph_build_time_us, 0, 0);
+			                                     "duckdb_selected_vectorized", nullptr,
+			                                     shared_stage_timings.pipeline_cbo_time_us + graph_build_time_us, 0, 0,
+			                                     nullptr, ExecutionRunnerKind::VECTORIZED, &shared_stage_timings);
 		}
 		return nullptr;
 	}
 	auto region_decision_start = std::chrono::steady_clock::now();
 	auto region_ir = TryLowerExecutionRegion(*pipeline_descriptor, region_ir_mode, &expression_analysis_cache);
 	auto region_lowering_time_us = ExecutionRegionPlannerElapsedMicros(region_decision_start);
+	shared_stage_timings.ir_lowering_time_us = region_lowering_time_us;
 	if (!region_ir) {
 		if (should_record_decision_telemetry) {
 			auto rejected_reason = DescribeExecutionRegionLoweringRejection(*pipeline_descriptor);
 			execution_region_manager.RecordEvent(
 			    context, backend_name, ExecutionRegionCompileStatus::UNSUPPORTED,
 			    ExecutionRegionExecutionMode::UNSUPPORTED, std::move(rejected_reason), "no_typed_region_ir", nullptr,
-			    graph_build_time_us + region_lowering_time_us, 0, 0, nullptr, ExecutionRunnerKind::VECTORIZED, nullptr,
+			    shared_stage_timings.pipeline_cbo_time_us + graph_build_time_us + region_lowering_time_us, 0, 0,
+			    nullptr, ExecutionRunnerKind::VECTORIZED, &shared_stage_timings,
 			    ExecutionRegionSourceExecutionKind::NONE, false);
 		}
 		return nullptr;
@@ -893,7 +908,9 @@ unique_ptr<ExecutionRegionPlan> ExecutionRegionPlanner::Build(ClientContext &con
 			execution_region_manager.RecordEvent(
 			    context, std::move(backend_name), ExecutionRegionCompileStatus::UNSUPPORTED,
 			    ExecutionRegionExecutionMode::UNSUPPORTED, reason, ExecutionRegionCandidateBlockerCode(lowered_region),
-			    &lowered_region.ir, graph_build_time_us + region_lowering_time_us, 0, 0);
+			    &lowered_region.ir,
+			    shared_stage_timings.pipeline_cbo_time_us + graph_build_time_us + region_lowering_time_us, 0, 0,
+			    nullptr, ExecutionRunnerKind::VECTORIZED, &shared_stage_timings);
 		}
 		return nullptr;
 	}
@@ -904,13 +921,16 @@ unique_ptr<ExecutionRegionPlan> ExecutionRegionPlanner::Build(ClientContext &con
 		auto &candidate = lowered_region.candidates[candidate_index];
 		auto candidate_decision_start = std::chrono::steady_clock::now();
 		ExecutionRegionStageTimings stage_timings;
-		stage_timings.ir_lowering_time_us = region_lowering_time_us;
 		ExecutionRegionPhysicalRunnerSelection cost_only_physical_runner;
 		bool has_cost_only_physical_runner = false;
 		auto candidate_decision_time_us = [&]() -> int64_t {
 			auto decision_time_us = ExecutionRegionPlannerElapsedMicros(candidate_decision_start);
 			if (!shared_decision_time_recorded) {
-				decision_time_us += graph_build_time_us + region_lowering_time_us;
+				decision_time_us +=
+				    shared_stage_timings.pipeline_cbo_time_us + graph_build_time_us + region_lowering_time_us;
+				stage_timings.pipeline_cbo_time_us = shared_stage_timings.pipeline_cbo_time_us;
+				stage_timings.graph_build_time_us = graph_build_time_us;
+				stage_timings.ir_lowering_time_us = region_lowering_time_us;
 				shared_decision_time_recorded = true;
 			}
 			return decision_time_us;
@@ -932,7 +952,9 @@ unique_ptr<ExecutionRegionPlan> ExecutionRegionPlanner::Build(ClientContext &con
 			}
 		}
 		if (!needs_backend_diagnostics) {
+			auto candidate_cbo_start = std::chrono::steady_clock::now();
 			auto physical_runner = SelectExecutionRegionCostOnlyPhysicalRunner(cost_parameters, candidate);
+			stage_timings.candidate_cbo_time_us += ExecutionRegionPlannerElapsedMicros(candidate_cbo_start);
 			if (!physical_runner.UsesCompiledRunner()) {
 				if (should_record_decision_telemetry) {
 					auto decision_time_us = candidate_decision_time_us();
@@ -969,7 +991,7 @@ unique_ptr<ExecutionRegionPlan> ExecutionRegionPlanner::Build(ClientContext &con
 		auto lowering_plan = backend->AnalyzeRegion(input);
 		stage_timings.backend_analysis_time_us = ExecutionRegionPlannerElapsedMicros(analysis_start);
 		input.lowering_plan = &lowering_plan;
-		if (lowering_plan.nodes.empty()) {
+		if (!lowering_plan.HasNodes()) {
 			if (should_record_decision_telemetry) {
 				auto decision_time_us = candidate_decision_time_us();
 				string empty_analysis_reason = "backend produced an empty execution-region capability analysis";
@@ -1058,8 +1080,10 @@ unique_ptr<ExecutionRegionPlan> ExecutionRegionPlanner::Build(ClientContext &con
 			physical_runner = std::move(cost_only_physical_runner);
 			physical_runner.reason = "duckdb_cbo selects compiled-vectorized physical runner";
 		} else {
+			auto candidate_cbo_start = std::chrono::steady_clock::now();
 			physical_runner = SelectExecutionRegionPhysicalRunner(cost_parameters, candidate, lowering_plan,
 			                                                      should_record_detailed_telemetry);
+			stage_timings.candidate_cbo_time_us += ExecutionRegionPlannerElapsedMicros(candidate_cbo_start);
 		}
 		if (!physical_runner.UsesCompiledRunner()) {
 			if (should_record_decision_telemetry) {
@@ -1080,8 +1104,8 @@ unique_ptr<ExecutionRegionPlan> ExecutionRegionPlanner::Build(ClientContext &con
 		selected_region.candidate_index = candidate_index;
 		selected_region.lowering_plan = std::move(lowering_plan);
 		selected_region.physical_runner = std::move(physical_runner);
-		selected_region.stage_timings = stage_timings;
 		selected_region.decision_time_us = candidate_decision_time_us();
+		selected_region.stage_timings = stage_timings;
 		AccumulateExecutionRegionOpenRequest(*plan, lowered_region, candidate, selected_region.lowering_plan);
 		selected_regions.push_back(std::move(selected_region));
 	}
@@ -1112,6 +1136,9 @@ void ExecutionRegionPlanner::Compile(ClientContext &context, ExecutionRegionBack
 		auto result = backend.CompileRegion(input);
 		auto compile_time_us = ExecutionRegionPlannerElapsedMicros(start);
 		stage_timings.codegen_time_us = compile_time_us;
+		stage_timings.executable_build_time_us = result.timings.executable_build_time_us;
+		stage_timings.machine_codegen_time_us = result.timings.machine_codegen_time_us;
+		stage_timings.kernel_build_time_us = result.timings.kernel_build_time_us;
 
 		idx_t code_size = result.kernel ? result.kernel->CodeSize() : 0;
 		auto status = result.status;

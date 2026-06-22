@@ -274,7 +274,7 @@ FinishSljitNativeVectorCode(struct sljit_compiler *compiler, SljitNativeVectorFu
 		return nullptr;
 	}
 
-	auto code = sljit_generate_code(compiler, 0, nullptr);
+	auto code = GenerateSljitCode(compiler);
 	auto code_size = LossyNumericCast<idx_t>(sljit_get_generated_code_size(compiler));
 	sljit_free_compiler(compiler);
 	if (!code) {
@@ -296,7 +296,7 @@ FinishSljitNativeAggregateUpdateCode(struct sljit_compiler *compiler, SljitNativ
 		return nullptr;
 	}
 
-	auto code = sljit_generate_code(compiler, 0, nullptr);
+	auto code = GenerateSljitCode(compiler);
 	auto code_size = LossyNumericCast<idx_t>(sljit_get_generated_code_size(compiler));
 	sljit_free_compiler(compiler);
 	if (!code) {
@@ -308,9 +308,10 @@ FinishSljitNativeAggregateUpdateCode(struct sljit_compiler *compiler, SljitNativ
 	return MakeSljitCodeHandle(code, code_size);
 }
 
-static unique_ptr<ExecutionRegionCodeHandle>
-FinishSljitNativePredicateCode(struct sljit_compiler *compiler, SljitNativePredicateFunction &function, string &error,
-                               vector<shared_ptr<void>> owned_data = {}) {
+static unique_ptr<ExecutionRegionCodeHandle> FinishSljitNativePredicateCode(struct sljit_compiler *compiler,
+                                                                            SljitNativePredicateFunction &function,
+                                                                            string &error,
+                                                                            vector<shared_ptr<void>> owned_data = {}) {
 	auto compiler_error = sljit_get_compiler_error(compiler);
 	if (compiler_error != SLJIT_SUCCESS) {
 		error = "SLJIT compiler failed with error code " + std::to_string(compiler_error);
@@ -318,7 +319,7 @@ FinishSljitNativePredicateCode(struct sljit_compiler *compiler, SljitNativePredi
 		return nullptr;
 	}
 
-	auto code = sljit_generate_code(compiler, 0, nullptr);
+	auto code = GenerateSljitCode(compiler);
 	auto code_size = LossyNumericCast<idx_t>(sljit_get_generated_code_size(compiler));
 	sljit_free_compiler(compiler);
 	if (!code) {
@@ -6519,8 +6520,7 @@ static void EmitStringInListInlineBranches(struct sljit_compiler *compiler, cons
 }
 
 static void EmitStringInListHelperBranches(struct sljit_compiler *compiler, const SljitNativePredicate &predicate,
-                                           SljitPredicateBranches &result,
-                                           vector<shared_ptr<void>> &owned_data) {
+                                           SljitPredicateBranches &result, vector<shared_ptr<void>> &owned_data) {
 	auto constants = AddStringConstantListCodeData(owned_data, predicate.string_constants);
 	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R0, 0, SLJIT_R4, 0);
 	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R1, 0, SLJIT_R2, 0);

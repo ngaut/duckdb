@@ -26,7 +26,7 @@ static unique_ptr<ExecutionRegionCodeHandle> FinishSljitHashJoinProbeCode(struct
 		return nullptr;
 	}
 
-	auto code = sljit_generate_code(compiler, 0, nullptr);
+	auto code = GenerateSljitCode(compiler);
 	auto code_size = LossyNumericCast<idx_t>(sljit_get_generated_code_size(compiler));
 	sljit_free_compiler(compiler);
 	if (!code) {
@@ -48,7 +48,7 @@ FinishSljitNestedLoopJoinProbeCode(struct sljit_compiler *compiler, SljitNativeN
 		return nullptr;
 	}
 
-	auto code = sljit_generate_code(compiler, 0, nullptr);
+	auto code = GenerateSljitCode(compiler);
 	auto code_size = LossyNumericCast<idx_t>(sljit_get_generated_code_size(compiler));
 	sljit_free_compiler(compiler);
 	if (!code) {

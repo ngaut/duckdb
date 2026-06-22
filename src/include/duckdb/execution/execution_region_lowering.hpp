@@ -46,7 +46,9 @@ struct ExecutionRegionLoweringPlan {
 	void AddNode(string label, string operator_name, ExecutionRegionLoweringKind kind, string reason);
 	void AddNode(string label, string operator_name, ExecutionRegionOperatorKind operator_kind,
 	             ExecutionRegionLoweringKind kind, string reason);
+	void AddCompactNode(ExecutionRegionLoweringKind kind, const string &reason);
 	void AddFusionBlocker(string reason);
+	void SetRecordDetailedNodes(bool record_detailed_nodes);
 	void SetCompiledExecutionMode(ExecutionRegionExecutionMode execution_mode);
 	void SetFullyFused(bool fully_fused);
 	void SetUsesScanFilters(bool uses_scan_filters);
@@ -54,6 +56,8 @@ struct ExecutionRegionLoweringPlan {
 	void SetOperatorStageIR(string stage_ir);
 	idx_t NativeCount() const;
 	idx_t BoundaryCount() const;
+	bool HasNodes() const;
+	bool RecordDetailedNodes() const;
 	ExecutionRegionExecutionMode ExpectedCompiledExecutionMode() const;
 	bool IsFullyFused() const;
 	bool UsesScanFilters() const;
@@ -65,12 +69,16 @@ struct ExecutionRegionLoweringPlan {
 	vector<string> fusion_blockers;
 	shared_ptr<ExecutionRegionBackendPlan> backend_plan;
 	ExecutionRegionExecutionMode compiled_execution_mode = ExecutionRegionExecutionMode::UNSUPPORTED;
+	idx_t node_count = 0;
 	idx_t native_count = 0;
 	idx_t boundary_count = 0;
+	bool record_detailed_nodes = true;
 	bool fully_fused = false;
 	ExecutionRegionSourceExecutionKind selected_source_execution = ExecutionRegionSourceExecutionKind::NONE;
 	bool uses_scan_filters = false;
 	string operator_stage_ir;
+	string first_boundary_reason;
+	string first_fusion_blocker;
 };
 
 DUCKDB_API unique_ptr<ExecutionExpressionFragment>

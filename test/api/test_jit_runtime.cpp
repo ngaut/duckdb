@@ -130,8 +130,14 @@ TEST_CASE("Execution region events are bounded and counters are cumulative", "[a
 			continue;
 		}
 		found_auto_skip = true;
+		REQUIRE(counter.pipeline_cbo_time_us >= 0);
+		REQUIRE(counter.graph_build_time_us >= 0);
+		REQUIRE(counter.candidate_cbo_time_us >= 0);
 		REQUIRE(counter.backend_analysis_time_us >= 0);
 		REQUIRE(counter.codegen_time_us == 0);
+		REQUIRE(counter.executable_build_time_us == 0);
+		REQUIRE(counter.machine_codegen_time_us == 0);
+		REQUIRE(counter.kernel_build_time_us == 0);
 	}
 	REQUIRE(found_auto_skip);
 }
@@ -470,9 +476,15 @@ TEST_CASE("EXPLAIN ANALYZE exposes compact execution region profile", "[api][jit
 	REQUIRE(StringUtil::Contains(analyzed_plan, "\"sink_next_batch_runtime_time_us\""));
 	REQUIRE(StringUtil::Contains(analyzed_plan, "\"sink_next_batch_invocation_count\""));
 	REQUIRE(StringUtil::Contains(analyzed_plan, "\"estimated_cardinality\""));
+	REQUIRE(StringUtil::Contains(analyzed_plan, "\"pipeline_cbo_time_us\""));
+	REQUIRE(StringUtil::Contains(analyzed_plan, "\"graph_build_time_us\""));
+	REQUIRE(StringUtil::Contains(analyzed_plan, "\"candidate_cbo_time_us\""));
 	REQUIRE(StringUtil::Contains(analyzed_plan, "\"ir_lowering_time_us\""));
 	REQUIRE(StringUtil::Contains(analyzed_plan, "\"backend_analysis_time_us\""));
 	REQUIRE(StringUtil::Contains(analyzed_plan, "\"codegen_time_us\""));
+	REQUIRE(StringUtil::Contains(analyzed_plan, "\"executable_build_time_us\""));
+	REQUIRE(StringUtil::Contains(analyzed_plan, "\"machine_codegen_time_us\""));
+	REQUIRE(StringUtil::Contains(analyzed_plan, "\"kernel_build_time_us\""));
 	REQUIRE(StringUtil::Contains(analyzed_plan, "\"runner_cost_profile\""));
 	REQUIRE(StringUtil::Contains(analyzed_plan, "\"runner_cost_accelerated_runner_benefit\""));
 	REQUIRE(StringUtil::Contains(analyzed_plan, "\"runner_cost_startup_cost\""));

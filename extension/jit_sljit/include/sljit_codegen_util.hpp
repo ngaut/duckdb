@@ -16,6 +16,18 @@
 
 namespace duckdb {
 
+struct ExecutionRegionCompileTimings;
+
+class SljitCodegenTimingScope {
+public:
+	explicit SljitCodegenTimingScope(ExecutionRegionCompileTimings *timings);
+	~SljitCodegenTimingScope();
+
+private:
+	ExecutionRegionCompileTimings *previous_timings;
+};
+
+void *GenerateSljitCode(struct sljit_compiler *compiler);
 unique_ptr<ExecutionRegionCodeHandle> MakeSljitCodeHandle(void *code, idx_t code_size,
                                                           vector<shared_ptr<void>> owned_data = {});
 

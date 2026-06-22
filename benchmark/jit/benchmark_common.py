@@ -21,6 +21,15 @@ REGION_SUMMARY_FIELDS = (
     "disabled_decisions",
     "decision_time_us",
     "compile_time_us",
+    "pipeline_cbo_time_us",
+    "graph_build_time_us",
+    "candidate_cbo_time_us",
+    "ir_lowering_time_us",
+    "backend_analysis_time_us",
+    "codegen_time_us",
+    "executable_build_time_us",
+    "machine_codegen_time_us",
+    "kernel_build_time_us",
     "code_size",
     "runtime_time_us",
     "source_runtime_time_us",
@@ -44,6 +53,15 @@ PROFILE_EVENT_FIELDS = (
     "runner_cost_net_benefit",
     "runner_cost_selected_accelerated_runner",
     "blocker",
+    "pipeline_cbo_time_us",
+    "graph_build_time_us",
+    "candidate_cbo_time_us",
+    "ir_lowering_time_us",
+    "backend_analysis_time_us",
+    "codegen_time_us",
+    "executable_build_time_us",
+    "machine_codegen_time_us",
+    "kernel_build_time_us",
     "selected_source_execution",
     "selected_uses_scan_filters",
     "candidate_uses_scan_filters",
@@ -204,6 +222,15 @@ def counter_region_summary(counter_rows: list[dict]) -> dict:
                 summary["runtime_regions"] += count
         summary["decision_time_us"] += row_int(row, "decision_time_us")
         summary["compile_time_us"] += row_int(row, "compile_time_us")
+        summary["pipeline_cbo_time_us"] += row_int(row, "pipeline_cbo_time_us")
+        summary["graph_build_time_us"] += row_int(row, "graph_build_time_us")
+        summary["candidate_cbo_time_us"] += row_int(row, "candidate_cbo_time_us")
+        summary["ir_lowering_time_us"] += row_int(row, "ir_lowering_time_us")
+        summary["backend_analysis_time_us"] += row_int(row, "backend_analysis_time_us")
+        summary["codegen_time_us"] += row_int(row, "codegen_time_us")
+        summary["executable_build_time_us"] += row_int(row, "executable_build_time_us")
+        summary["machine_codegen_time_us"] += row_int(row, "machine_codegen_time_us")
+        summary["kernel_build_time_us"] += row_int(row, "kernel_build_time_us")
         summary["code_size"] += row_int(row, "code_size")
         summary["runtime_time_us"] += row_int(row, "runtime_time_us")
         summary["source_runtime_time_us"] += row_int(row, "source_contract_runtime_time_us")

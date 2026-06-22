@@ -215,6 +215,9 @@ TEST_CASE("JIT auto planner skips region graph when CBO already selects vectoriz
 		    REQUIRE(event.selected_runner == ExecutionRunnerKind::VECTORIZED);
 		    REQUIRE(event.runner_cost.present);
 		    REQUIRE_FALSE(event.runner_cost.selected_accelerated_runner);
+		    REQUIRE(event.pipeline_cbo_time_us >= 0);
+		    REQUIRE(event.graph_build_time_us == 0);
+		    REQUIRE(event.candidate_cbo_time_us == 0);
 		    REQUIRE(event.ir_lowering_time_us == 0);
 		    REQUIRE(event.backend_analysis_time_us == 0);
 		    REQUIRE(StringUtil::Contains(event.reason, "before region graph"));
@@ -253,6 +256,8 @@ TEST_CASE("JIT auto planner skips region graph when pipeline has no costed accel
 		    REQUIRE(event.selected_runner == ExecutionRunnerKind::VECTORIZED);
 		    REQUIRE(event.runner_cost.present);
 		    REQUIRE_FALSE(event.runner_cost.selected_accelerated_runner);
+		    REQUIRE(event.graph_build_time_us >= 0);
+		    REQUIRE(event.candidate_cbo_time_us == 0);
 		    REQUIRE(event.ir_lowering_time_us == 0);
 		    REQUIRE(event.backend_analysis_time_us == 0);
 	    });

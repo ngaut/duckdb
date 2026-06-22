@@ -238,6 +238,12 @@ WHERE backend_name='sljit'
   AND ir_lowering_time_us >= 0
   AND backend_analysis_time_us >= 0
   AND codegen_time_us >= 0
+  AND pipeline_cbo_time_us >= 0
+  AND graph_build_time_us >= 0
+  AND candidate_cbo_time_us >= 0
+  AND executable_build_time_us >= 0
+  AND machine_codegen_time_us >= 0
+  AND kernel_build_time_us >= 0
   AND decision_time_us >= ir_lowering_time_us
   AND compile_time_us = codegen_time_us
 ----
@@ -253,6 +259,12 @@ WHERE backend_name='sljit'
   AND ir_lowering_time_us >= 0
   AND backend_analysis_time_us >= 0
   AND codegen_time_us >= 0
+  AND pipeline_cbo_time_us >= 0
+  AND graph_build_time_us >= 0
+  AND candidate_cbo_time_us >= 0
+  AND executable_build_time_us >= 0
+  AND machine_codegen_time_us >= 0
+  AND kernel_build_time_us >= 0
   AND compile_time_us = codegen_time_us
 ----
 1
@@ -587,6 +599,10 @@ WHERE event_id > base_event_id
   AND candidate_node_count > 0
   AND backend_analysis_time_us >= 0
   AND ir_lowering_time_us >= 0
+  AND candidate_cbo_time_us >= 0
+  AND executable_build_time_us >= 0
+  AND machine_codegen_time_us >= 0
+  AND kernel_build_time_us >= 0
   AND runner_cost_profile
   AND code_size > 0
   AND runner_cost_generated_stage_count > 0
@@ -897,6 +913,7 @@ WHERE event_id > base_event_id
   AND decision_time_us >= 0
   AND compile_time_us = 0
   AND backend_analysis_time_us >= 0
+  AND candidate_cbo_time_us >= 0
   AND blocker='duckdb_selected_vectorized'
 ----
 1
@@ -1008,6 +1025,7 @@ WHERE event_id > base_event_id
   AND decision_time_us >= 0
   AND compile_time_us = 0
   AND backend_analysis_time_us >= 0
+  AND candidate_cbo_time_us >= 0
   AND blocker='duckdb_selected_vectorized'
 ----
 1
@@ -1530,6 +1548,77 @@ WHERE event_id > base_event_id
   AND candidate_projection_count=2
   AND ir LIKE '%hash_join_probe%'
   AND ir LIKE '%aggregate_update(kind=ungrouped%'
+----
+1
+
+statement ok
+SET jit_dump_ir=false
+
+statement ok
+SET jit_trace_runtime=true
+
+statement ok
+SET jit_policy='off'
+
+statement ok
+CREATE TEMP TABLE jit_perfect_join_fact AS
+SELECT i::BIGINT AS i, (i % 32)::BIGINT AS k
+FROM range(4096) tbl(i)
+
+statement ok
+CREATE TEMP TABLE jit_perfect_join_dim AS
+SELECT i::BIGINT AS k, (i * 101)::BIGINT AS payload
+FROM range(32) tbl(i)
+
+statement ok
+ANALYZE jit_perfect_join_fact
+
+statement ok
+ANALYZE jit_perfect_join_dim
+
+statement ok
+CREATE TEMP TABLE jit_perfect_join_reference AS
+SELECT sum(f.i + d.payload) AS total
+FROM jit_perfect_join_fact f
+JOIN jit_perfect_join_dim d ON f.k = d.k
+
+statement ok
+SET jit_policy='auto'
+
+statement ok
+CREATE TEMP TABLE jit_perfect_join_baseline AS
+SELECT coalesce(max(event_id), 0) AS base_event_id FROM duckdb_jit_events()
+
+statement ok
+CREATE TEMP TABLE jit_perfect_join_output AS
+SELECT sum(f.i + d.payload) AS total
+FROM jit_perfect_join_fact f
+JOIN jit_perfect_join_dim d ON f.k = d.k
+
+query I
+SELECT count(*) = 0
+FROM (
+    (SELECT * FROM jit_perfect_join_output
+     EXCEPT
+     SELECT * FROM jit_perfect_join_reference)
+    UNION ALL
+    (SELECT * FROM jit_perfect_join_reference
+     EXCEPT
+     SELECT * FROM jit_perfect_join_output)
+) diff
+----
+1
+
+query I
+SELECT count(*) > 0
+FROM duckdb_jit_events(), jit_perfect_join_baseline
+WHERE event_id > base_event_id
+  AND backend_name='sljit'
+  AND phase='runtime'
+  AND status='executed'
+  AND execution_mode='native'
+  AND generated_stage_runtime_breakdown LIKE '%hash_join_probe.materialize_output.dictionary_build_payload%'
+  AND generated_stage_runtime_breakdown NOT LIKE '%hash_join_probe.vector_setup%'
 ----
 1
 

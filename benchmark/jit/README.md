@@ -4,6 +4,8 @@ This directory keeps the execution-region verification surface intentionally
 small:
 
 - `verify_jit_architecture.py` checks source-level architecture invariants.
+- `compile_overhead_benchmark.py` measures small-query decision and compile overhead
+  with focused execution-region workloads.
 - `benchmark/tpch/jit/tpch_benchmark.py` is the canonical correctness,
   performance, and profiling harness for TPC-H execution regions.
 
@@ -19,6 +21,16 @@ Run the TPC-H harness when validating performance or region-selection behavior:
 python3 benchmark/tpch/jit/tpch_benchmark.py --policies off auto --out-dir /tmp/duckdb_jit_tpch_benchmark
 python3 benchmark/tpch/jit/verify_tpch_benchmark.py /tmp/duckdb_jit_tpch_benchmark
 ```
+
+Run the compile-overhead harness when optimizing planner or SLJIT code generation:
+
+```sh
+python3 benchmark/jit/compile_overhead_benchmark.py --policies off auto --out-dir /tmp/duckdb_jit_compile_overhead
+```
+
+`compile_overhead_benchmark.py` writes `summary.csv`, `runs.csv`, and
+`counters.csv` for scalar filter/projection, filtered aggregate, grouped
+aggregate, hash join probe, and full-pipeline scan/project/sink workloads.
 
 `tpch_benchmark.py` defaults to `--timing-mode=production`. In that mode the
 measured query uses the DuckDB shell timer without detailed JSON profiling, while

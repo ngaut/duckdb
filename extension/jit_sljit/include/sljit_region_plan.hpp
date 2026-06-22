@@ -251,8 +251,10 @@ struct SljitRegionBackendPlan : public ExecutionRegionBackendPlan {
 };
 
 SljitNativeRegionExpressionPlan CopySljitNativeRegionExpression(const SljitNativeRegionExpressionPlan &input,
-                                                                bool copy_auxiliary_expression_tree = true);
-SljitNativeHashJoinProbePlan CopySljitNativeHashJoinProbePlan(const SljitNativeHashJoinProbePlan &input);
+                                                                bool copy_auxiliary_expression_tree = true,
+                                                                bool copy_ir = true);
+SljitNativeHashJoinProbePlan CopySljitNativeHashJoinProbePlan(const SljitNativeHashJoinProbePlan &input,
+                                                              bool copy_ir = true);
 unique_ptr<SljitNativeRegionPlan> CopySljitNativeRegion(const SljitNativeRegionPlan &input);
 
 string DescribeNativeRegion(const SljitNativeRegionPlan &region, const string &mode);

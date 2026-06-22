@@ -145,10 +145,14 @@ static string NativeRegionIntegerBinaryOverflowMessage(SljitNativeIntegerKind ki
 	}
 }
 
-static bool BuildExecutableRegionExpression(const SljitNativeRegionExpressionPlan &plan, bool require_boolean,
-                                            SljitExecutableRegionExpression &expr, string &error) {
-	expr.plan = CopySljitNativeRegionExpression(plan, false);
+static void PrepareExecutableRegionExpression(const SljitNativeRegionExpressionPlan &plan,
+                                              SljitExecutableRegionExpression &expr) {
+	expr.plan = CopySljitNativeRegionExpression(plan, false, false);
 	PrepareExecutableRegionExpressionInputs(expr);
+}
+
+static bool BuildExecutableRegionExpressionCode(SljitExecutableRegionExpression &expr, bool require_boolean,
+                                                string &error) {
 	auto &semantic = expr.plan;
 	switch (semantic.kind) {
 	case SljitNativeRegionExpressionKind::REFERENCE:
@@ -349,6 +353,12 @@ static bool BuildExecutableRegionExpression(const SljitNativeRegionExpressionPla
 	}
 }
 
+static bool BuildExecutableRegionExpression(const SljitNativeRegionExpressionPlan &plan, bool require_boolean,
+                                            SljitExecutableRegionExpression &expr, string &error) {
+	PrepareExecutableRegionExpression(plan, expr);
+	return BuildExecutableRegionExpressionCode(expr, require_boolean, error);
+}
+
 static unique_ptr<ExecutionExpressionIR>
 SljitPayloadReferenceExpressionTree(const SljitNativeRegionExpressionPlan &plan) {
 	auto result = make_uniq<ExecutionExpressionIR>();
@@ -407,11 +417,11 @@ static bool TryBuildFilteredAggregateUpdate(SljitExecutableRegionOp &filter_op, 
 	}
 
 	SljitExecutableFilteredAggregateUpdate filtered_update;
-	filtered_update.filter.plan = CopySljitNativeRegionExpression(filter_op.filter.plan);
+	filtered_update.filter.plan = CopySljitNativeRegionExpression(filter_op.filter.plan, true, false);
 	filtered_update.payloads.reserve(aggregate_update.payloads.size());
 	for (auto &payload : aggregate_update.payloads) {
 		SljitExecutableRegionExpression filtered_payload;
-		filtered_payload.plan = CopySljitNativeRegionExpression(payload.plan);
+		filtered_payload.plan = CopySljitNativeRegionExpression(payload.plan, true, false);
 		filtered_update.payloads.push_back(std::move(filtered_payload));
 	}
 	if (!filtered_update.filter.plan.expression_tree) {
@@ -444,7 +454,7 @@ static bool TryBuildFilteredAggregateUpdate(SljitExecutableRegionOp &filter_op, 
 	for (auto &payload : filtered_update.payloads) {
 		payload.input_source_indices = combined_sources;
 		payload.plan.expression_tree_source_indices = combined_sources;
-		codegen_payloads.push_back(CopySljitNativeRegionExpression(payload.plan));
+		codegen_payloads.push_back(CopySljitNativeRegionExpression(payload.plan, true, false));
 	}
 
 	SljitNativeAggregateUpdateFunction function = nullptr;
@@ -473,11 +483,10 @@ static void BuildExecutableAggregateUpdateMetadata(const SljitNativeAggregateUpd
 	executable.plan.use_primitive_payloads = op.use_primitive_payloads;
 	executable.plan.use_grouped_state_addresses = op.use_grouped_state_addresses;
 	executable.plan.use_perfect_hash_group_lookup = op.use_perfect_hash_group_lookup;
-	executable.plan.ir = op.ir;
 	executable.payloads.reserve(op.payloads.size());
 	for (auto &payload : op.payloads) {
 		SljitExecutableRegionExpression executable_payload;
-		executable_payload.plan = CopySljitNativeRegionExpression(payload);
+		executable_payload.plan = CopySljitNativeRegionExpression(payload, true, false);
 		executable.payloads.push_back(std::move(executable_payload));
 	}
 }
@@ -681,15 +690,20 @@ static bool BuildExecutableAggregateUpdatePayloadCode(const SljitNativeAggregate
 }
 
 static bool BuildExecutableRegionOp(const SljitNativeRegionOpPlan &op, SljitExecutableRegionOp &executable,
-                                    string &error, bool build_aggregate_update_payload_code = true) {
+                                    string &error, bool build_filter_code = true,
+                                    bool build_aggregate_update_payload_code = true) {
 	executable.kind = op.kind;
 	executable.operator_index = op.operator_index;
 	executable.output_types = op.output_types;
 	switch (op.kind) {
 	case SljitNativeRegionOpKind::FILTER:
-		return BuildExecutableRegionExpression(op.filter, true, executable.filter, error);
+		PrepareExecutableRegionExpression(op.filter, executable.filter);
+		if (!build_filter_code) {
+			return true;
+		}
+		return BuildExecutableRegionExpressionCode(executable.filter, true, error);
 	case SljitNativeRegionOpKind::HASH_JOIN_PROBE:
-		executable.hash_join_probe.plan = CopySljitNativeHashJoinProbePlan(op.hash_join_probe);
+		executable.hash_join_probe.plan = CopySljitNativeHashJoinProbePlan(op.hash_join_probe, false);
 		if (op.hash_join_probe.residual_predicate &&
 		    !BuildExecutableRegionExpression(op.hash_join_probe.residual_filter, true,
 		                                     executable.hash_join_probe.residual_filter, error)) {
@@ -699,19 +713,10 @@ static bool BuildExecutableRegionOp(const SljitNativeRegionOpPlan &op, SljitExec
 		    op.hash_join_probe.keys, op.hash_join_probe.equality_key_count, op.hash_join_probe.mark_build_match,
 		    op.hash_join_probe.found_match_offset, op.hash_join_probe.pointer_offset, op.hash_join_probe.output_mode,
 		    executable.hash_join_probe.function, error);
-		if (!executable.hash_join_probe.code || !executable.hash_join_probe.function) {
-			return false;
-		}
-		if (op.hash_join_probe.perfect_hash_probe) {
-			executable.hash_join_probe.perfect_code =
-			    BuildSljitPerfectHashJoinProbe(op.hash_join_probe.keys[0], op.hash_join_probe.output_mode,
-			                                   executable.hash_join_probe.perfect_function, error);
-			return executable.hash_join_probe.perfect_code != nullptr &&
-			       executable.hash_join_probe.perfect_function != nullptr;
-		}
-		return true;
+		return executable.hash_join_probe.code != nullptr && executable.hash_join_probe.function != nullptr;
 	case SljitNativeRegionOpKind::HASH_JOIN_BUILD:
-		executable.hash_join_build.plan = op.hash_join_build;
+		executable.hash_join_build.plan.sink_info = op.hash_join_build.sink_info;
+		executable.hash_join_build.plan.input_types = op.hash_join_build.input_types;
 		return true;
 	case SljitNativeRegionOpKind::NESTED_LOOP_JOIN_PROBE:
 		executable.nested_loop_join_probe.plan.operator_index = op.nested_loop_join_probe.operator_index;
@@ -719,7 +724,6 @@ static bool BuildExecutableRegionOp(const SljitNativeRegionOpPlan &op, SljitExec
 		executable.nested_loop_join_probe.plan.condition_types = op.nested_loop_join_probe.condition_types;
 		executable.nested_loop_join_probe.plan.join_type = op.nested_loop_join_probe.join_type;
 		executable.nested_loop_join_probe.plan.operator_info = op.nested_loop_join_probe.operator_info;
-		executable.nested_loop_join_probe.plan.ir = op.nested_loop_join_probe.ir;
 		executable.nested_loop_join_probe.plan.conditions.reserve(op.nested_loop_join_probe.conditions.size());
 		executable.nested_loop_join_probe.lhs_conditions.reserve(op.nested_loop_join_probe.conditions.size());
 		for (auto &condition : op.nested_loop_join_probe.conditions) {
@@ -727,8 +731,7 @@ static bool BuildExecutableRegionOp(const SljitNativeRegionOpPlan &op, SljitExec
 			condition_plan.type = condition.type;
 			condition_plan.comparison_type = condition.comparison_type;
 			condition_plan.value_kind = condition.value_kind;
-			condition_plan.ir = condition.ir;
-			condition_plan.lhs_condition = CopySljitNativeRegionExpression(condition.lhs_condition, false);
+			condition_plan.lhs_condition = CopySljitNativeRegionExpression(condition.lhs_condition, false, false);
 			executable.nested_loop_join_probe.plan.conditions.push_back(std::move(condition_plan));
 
 			SljitExecutableRegionExpression executable_condition;
@@ -745,7 +748,6 @@ static bool BuildExecutableRegionOp(const SljitNativeRegionOpPlan &op, SljitExec
 		executable.nested_loop_join_build.plan.sink_info = op.nested_loop_join_build.sink_info;
 		executable.nested_loop_join_build.plan.input_types = op.nested_loop_join_build.input_types;
 		executable.nested_loop_join_build.plan.condition_types = op.nested_loop_join_build.condition_types;
-		executable.nested_loop_join_build.plan.ir = op.nested_loop_join_build.ir;
 		executable.nested_loop_join_build.rhs_conditions.reserve(op.nested_loop_join_build.rhs_conditions.size());
 		for (auto &condition : op.nested_loop_join_build.rhs_conditions) {
 			SljitExecutableRegionExpression executable_condition;
@@ -759,7 +761,6 @@ static bool BuildExecutableRegionOp(const SljitNativeRegionOpPlan &op, SljitExec
 		executable.order_sink.plan.sink_info = op.order_sink.sink_info;
 		executable.order_sink.plan.input_types = op.order_sink.input_types;
 		executable.order_sink.plan.key_types = op.order_sink.key_types;
-		executable.order_sink.plan.ir = op.order_sink.ir;
 		executable.order_sink.order_keys.reserve(op.order_sink.order_keys.size());
 		for (auto &order_key : op.order_sink.order_keys) {
 			SljitExecutableRegionExpression executable_order_key;
@@ -770,14 +771,16 @@ static bool BuildExecutableRegionOp(const SljitNativeRegionOpPlan &op, SljitExec
 		}
 		return true;
 	case SljitNativeRegionOpKind::APPEND_SINK:
-		executable.append_sink.plan = op.append_sink;
+		executable.append_sink.plan.sink_info = op.append_sink.sink_info;
+		executable.append_sink.plan.input_types = op.append_sink.input_types;
 		return true;
 	case SljitNativeRegionOpKind::DELIM_JOIN_SINK:
 		if (op.delim_join_sink.sink_info.kind != ExecutionRegionSinkKind::DELIM_JOIN_SINK) {
 			error = "SLJIT delimiter join sink executable is missing delimiter sink info";
 			return false;
 		}
-		executable.delim_join_sink.plan = op.delim_join_sink;
+		executable.delim_join_sink.plan.sink_info = op.delim_join_sink.sink_info;
+		executable.delim_join_sink.plan.input_types = op.delim_join_sink.input_types;
 		return true;
 	case SljitNativeRegionOpKind::AGGREGATE_UPDATE:
 		BuildExecutableAggregateUpdateMetadata(op.aggregate_update, executable.aggregate_update);
@@ -813,7 +816,9 @@ bool BuildSljitExecutableRegion(const SljitNativeRegionPlan &region, SljitExecut
 		auto &op = region.ops[op_idx];
 		SljitExecutableRegionOp executable_op;
 		auto defer_aggregate_payload_code = SljitCanDeferAggregateUpdatePayloadCode(region.ops, op_idx);
-		if (!BuildExecutableRegionOp(op, executable_op, error, !defer_aggregate_payload_code)) {
+		const auto defer_filter_code = op.kind == SljitNativeRegionOpKind::FILTER && op_idx + 1 < region.ops.size() &&
+		                               SljitCanDeferAggregateUpdatePayloadCode(region.ops, op_idx + 1);
+		if (!BuildExecutableRegionOp(op, executable_op, error, !defer_filter_code, !defer_aggregate_payload_code)) {
 			return false;
 		}
 		executable.ops.push_back(std::move(executable_op));
@@ -823,9 +828,14 @@ bool BuildSljitExecutableRegion(const SljitNativeRegionPlan &region, SljitExecut
 				return false;
 			}
 			if (!aggregate_update_op.aggregate_update.filtered_update.IsExecutable() &&
-			    !BuildExecutableAggregateUpdatePayloadCode(op.aggregate_update, aggregate_update_op.aggregate_update,
-			                                               error)) {
+			    !BuildExecutableRegionExpressionCode(executable.ops[op_idx - 1].filter, true, error)) {
 				return false;
+			}
+			if (!aggregate_update_op.aggregate_update.filtered_update.IsExecutable()) {
+				if (!BuildExecutableAggregateUpdatePayloadCode(op.aggregate_update,
+				                                               aggregate_update_op.aggregate_update, error)) {
+					return false;
+				}
 			}
 		}
 	}

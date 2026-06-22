@@ -696,6 +696,7 @@ void ExecutionRegionLoweringPlan::AddNode(string label, string operator_name, Ex
 
 void ExecutionRegionLoweringPlan::AddNode(string label, string operator_name, ExecutionRegionOperatorKind operator_kind,
                                           ExecutionRegionLoweringKind kind, string reason) {
+	node_count++;
 	ExecutionRegionNodeLowering node;
 	node.label = std::move(label);
 	node.operator_name = std::move(operator_name);
@@ -706,12 +707,38 @@ void ExecutionRegionLoweringPlan::AddNode(string label, string operator_name, Ex
 		native_count++;
 	} else if (node.kind == ExecutionRegionLoweringKind::BOUNDARY) {
 		boundary_count++;
+		if (first_boundary_reason.empty() && !node.reason.empty()) {
+			first_boundary_reason = node.reason;
+		}
 	}
-	nodes.push_back(std::move(node));
+	if (record_detailed_nodes) {
+		nodes.push_back(std::move(node));
+	}
+}
+
+void ExecutionRegionLoweringPlan::AddCompactNode(ExecutionRegionLoweringKind kind, const string &reason) {
+	node_count++;
+	if (kind == ExecutionRegionLoweringKind::NATIVE) {
+		native_count++;
+	} else if (kind == ExecutionRegionLoweringKind::BOUNDARY) {
+		boundary_count++;
+		if (first_boundary_reason.empty() && !reason.empty()) {
+			first_boundary_reason = reason;
+		}
+	}
 }
 
 void ExecutionRegionLoweringPlan::AddFusionBlocker(string reason) {
-	fusion_blockers.push_back(std::move(reason));
+	if (first_fusion_blocker.empty()) {
+		first_fusion_blocker = reason;
+	}
+	if (record_detailed_nodes) {
+		fusion_blockers.push_back(std::move(reason));
+	}
+}
+
+void ExecutionRegionLoweringPlan::SetRecordDetailedNodes(bool record_detailed_nodes_p) {
+	record_detailed_nodes = record_detailed_nodes_p;
 }
 
 void ExecutionRegionLoweringPlan::SetCompiledExecutionMode(ExecutionRegionExecutionMode execution_mode) {
@@ -742,6 +769,14 @@ idx_t ExecutionRegionLoweringPlan::BoundaryCount() const {
 	return boundary_count;
 }
 
+bool ExecutionRegionLoweringPlan::HasNodes() const {
+	return node_count > 0;
+}
+
+bool ExecutionRegionLoweringPlan::RecordDetailedNodes() const {
+	return record_detailed_nodes;
+}
+
 ExecutionRegionExecutionMode ExecutionRegionLoweringPlan::ExpectedCompiledExecutionMode() const {
 	return compiled_execution_mode;
 }
@@ -769,19 +804,14 @@ static void AppendFirstExecutionRegionLoweringReasonToken(string &result, const 
 
 string ExecutionRegionLoweringPlan::CompactEventReason() const {
 	string result;
-	if (!fusion_blockers.empty()) {
+	if (!first_fusion_blocker.empty()) {
 		result = "region-lowering-blocked:";
-		AppendFirstExecutionRegionLoweringReasonToken(result, fusion_blockers[0]);
+		AppendFirstExecutionRegionLoweringReasonToken(result, first_fusion_blocker);
 		result += ";";
-	}
-	for (auto &node : nodes) {
-		if (node.kind == ExecutionRegionLoweringKind::BOUNDARY) {
-			if (fusion_blockers.empty() && result.empty() && !node.reason.empty()) {
-				result = "region-lowering-blocked:";
-				AppendFirstExecutionRegionLoweringReasonToken(result, node.reason);
-				result += ";";
-			}
-		}
+	} else if (!first_boundary_reason.empty()) {
+		result = "region-lowering-blocked:";
+		AppendFirstExecutionRegionLoweringReasonToken(result, first_boundary_reason);
+		result += ";";
 	}
 	result += "region-lowering:native=" + std::to_string(native_count) + ",boundary=" + std::to_string(boundary_count) +
 	          ",fully-fused=" + (fully_fused ? string("true") : "false");

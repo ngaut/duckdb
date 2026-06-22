@@ -165,6 +165,16 @@ def verify_performance_gaps(
             )
             require(row_int(row, "auto_skipped_decisions") >= 0, f"performance_gaps.csv: bad auto skipped count: {row}")
             require(row_int(row, "auto_decision_time_us") >= 0, f"performance_gaps.csv: bad auto decision time: {row}")
+            require(row_int(row, "auto_compile_time_us") >= 0, f"performance_gaps.csv: bad auto compile time: {row}")
+            require(row_int(row, "auto_codegen_time_us") >= 0, f"performance_gaps.csv: bad auto codegen time: {row}")
+            require(
+                row_int(row, "auto_executable_build_time_us") >= 0,
+                f"performance_gaps.csv: bad auto executable build time: {row}",
+            )
+            require(
+                row_int(row, "auto_machine_codegen_time_us") >= 0,
+                f"performance_gaps.csv: bad auto machine codegen time: {row}",
+            )
             require(row_int(row, "auto_runner_cost_startup_cost") >= 0, f"performance_gaps.csv: bad runner cost: {row}")
 
 

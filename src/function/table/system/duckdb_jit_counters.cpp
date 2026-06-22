@@ -93,51 +93,69 @@ static void AppendJitCounterColumn(Vector &output, idx_t column_id, const Execut
 		output.Append(Value::BIGINT(entry.codegen_time_us));
 		return;
 	case 26:
-		output.Append(Value::BOOLEAN(entry.has_runner_cost));
+		output.Append(Value::BIGINT(entry.pipeline_cbo_time_us));
 		return;
 	case 27:
-		output.Append(Value::BIGINT(entry.runner_cost_rows));
+		output.Append(Value::BIGINT(entry.graph_build_time_us));
 		return;
 	case 28:
-		output.Append(Value::BIGINT(entry.runner_cost_batches));
+		output.Append(Value::BIGINT(entry.candidate_cbo_time_us));
 		return;
 	case 29:
-		output.Append(Value::BIGINT(entry.runner_cost_expression_cost));
+		output.Append(Value::BIGINT(entry.executable_build_time_us));
 		return;
 	case 30:
-		output.Append(Value::BIGINT(entry.runner_cost_generated_stage_count));
+		output.Append(Value::BIGINT(entry.machine_codegen_time_us));
 		return;
 	case 31:
-		output.Append(Value::BIGINT(entry.runner_cost_materialization_elision_count));
+		output.Append(Value::BIGINT(entry.kernel_build_time_us));
 		return;
 	case 32:
-		output.Append(Value::BIGINT(entry.runner_cost_native_join_stage_count));
+		output.Append(Value::BOOLEAN(entry.has_runner_cost));
 		return;
 	case 33:
-		output.Append(Value::BIGINT(entry.runner_cost_native_aggregate_stage_count));
+		output.Append(Value::BIGINT(entry.runner_cost_rows));
 		return;
 	case 34:
-		output.Append(Value::BIGINT(entry.runner_cost_native_sort_stage_count));
+		output.Append(Value::BIGINT(entry.runner_cost_batches));
 		return;
 	case 35:
-		output.Append(Value::BOOLEAN(entry.runner_cost_full_pipeline));
+		output.Append(Value::BIGINT(entry.runner_cost_expression_cost));
 		return;
 	case 36:
-		output.Append(Value::BIGINT(entry.runner_cost_saved_work_per_batch));
+		output.Append(Value::BIGINT(entry.runner_cost_generated_stage_count));
 		return;
 	case 37:
-		output.Append(Value::BIGINT(entry.runner_cost_accelerated_runner_benefit));
+		output.Append(Value::BIGINT(entry.runner_cost_materialization_elision_count));
 		return;
 	case 38:
-		output.Append(Value::BIGINT(entry.runner_cost_startup_cost));
+		output.Append(Value::BIGINT(entry.runner_cost_native_join_stage_count));
 		return;
 	case 39:
-		output.Append(Value::BIGINT(entry.runner_cost_required_benefit));
+		output.Append(Value::BIGINT(entry.runner_cost_native_aggregate_stage_count));
 		return;
 	case 40:
-		output.Append(Value::BIGINT(entry.runner_cost_net_benefit));
+		output.Append(Value::BIGINT(entry.runner_cost_native_sort_stage_count));
 		return;
 	case 41:
+		output.Append(Value::BOOLEAN(entry.runner_cost_full_pipeline));
+		return;
+	case 42:
+		output.Append(Value::BIGINT(entry.runner_cost_saved_work_per_batch));
+		return;
+	case 43:
+		output.Append(Value::BIGINT(entry.runner_cost_accelerated_runner_benefit));
+		return;
+	case 44:
+		output.Append(Value::BIGINT(entry.runner_cost_startup_cost));
+		return;
+	case 45:
+		output.Append(Value::BIGINT(entry.runner_cost_required_benefit));
+		return;
+	case 46:
+		output.Append(Value::BIGINT(entry.runner_cost_net_benefit));
+		return;
+	case 47:
 		output.Append(Value::UBIGINT(entry.runner_cost_selected_accelerated_runner_count));
 		return;
 	default:
@@ -198,6 +216,18 @@ static unique_ptr<FunctionData> DuckDBJitCountersBind(ClientContext &context, Ta
 	names.emplace_back("backend_analysis_time_us");
 	return_types.emplace_back(LogicalType::BIGINT);
 	names.emplace_back("codegen_time_us");
+	return_types.emplace_back(LogicalType::BIGINT);
+	names.emplace_back("pipeline_cbo_time_us");
+	return_types.emplace_back(LogicalType::BIGINT);
+	names.emplace_back("graph_build_time_us");
+	return_types.emplace_back(LogicalType::BIGINT);
+	names.emplace_back("candidate_cbo_time_us");
+	return_types.emplace_back(LogicalType::BIGINT);
+	names.emplace_back("executable_build_time_us");
+	return_types.emplace_back(LogicalType::BIGINT);
+	names.emplace_back("machine_codegen_time_us");
+	return_types.emplace_back(LogicalType::BIGINT);
+	names.emplace_back("kernel_build_time_us");
 	return_types.emplace_back(LogicalType::BIGINT);
 	names.emplace_back("runner_cost_profile");
 	return_types.emplace_back(LogicalType::BOOLEAN);

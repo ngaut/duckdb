@@ -283,11 +283,41 @@ def verify_typed_observability_state() -> None:
     )
 
 
+def verify_candidate_stage_timing_attribution() -> None:
+    planner = "src/execution/execution_region_planner.cpp"
+    data = read_text(planner)
+    candidate_loop = data[
+        data.index("for (idx_t candidate_index = 0; candidate_index < lowered_region.candidates.size();") : data.index(
+            "Compile(context, *backend, backend_name, *plan, lowered_region, selected_regions);"
+        )
+    ]
+    if "auto stage_timings = shared_stage_timings;" in candidate_loop:
+        raise AssertionError(f"{planner}: candidate loop copies shared stage timings into every candidate")
+    required = (
+        "ExecutionRegionStageTimings stage_timings;",
+        "shared_stage_timings.pipeline_cbo_time_us + graph_build_time_us + region_lowering_time_us",
+        "stage_timings.pipeline_cbo_time_us = shared_stage_timings.pipeline_cbo_time_us;",
+        "stage_timings.graph_build_time_us = graph_build_time_us;",
+        "stage_timings.ir_lowering_time_us = region_lowering_time_us;",
+        "shared_decision_time_recorded = true;",
+    )
+    missing = [snippet for snippet in required if snippet not in candidate_loop]
+    if missing:
+        raise AssertionError(f"{planner}: candidate shared stage timing attribution missing {missing}")
+    stage_copy = "selected_region.stage_timings = stage_timings;"
+    decision_copy = "selected_region.decision_time_us = candidate_decision_time_us();"
+    if candidate_loop.index(stage_copy) < candidate_loop.index(decision_copy):
+        raise AssertionError(
+            f"{planner}: compiled candidate copies stage timings before shared decision timing is attributed"
+        )
+
+
 def main() -> None:
     verify_files()
     verify_required_text()
     verify_regex_rules()
     verify_typed_observability_state()
+    verify_candidate_stage_timing_attribution()
     print("Execution-region architecture verification passed")
 
 

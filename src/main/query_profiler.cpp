@@ -270,7 +270,16 @@ static void AddExecutionRegionSummary(QueryProfileResult &node, ClientContext &c
 	            Value::DOUBLE(RuntimePercent(RuntimeUnattributedTime(summary), summary.runtime_us))},
 	           {"runtime_dominant_component", Text(DominantRuntimeComponent(summary))},
 	           {"decision_time_us", Time(summary.decision_us)},
-	           {"compile_time_us", Time(summary.compile_us)}});
+	           {"compile_time_us", Time(summary.compile_us)},
+	           {"pipeline_cbo_time_us", Time(summary.pipeline_cbo_us)},
+	           {"graph_build_time_us", Time(summary.graph_build_us)},
+	           {"candidate_cbo_time_us", Time(summary.candidate_cbo_us)},
+	           {"ir_lowering_time_us", Time(summary.ir_lowering_us)},
+	           {"backend_analysis_time_us", Time(summary.backend_analysis_us)},
+	           {"codegen_time_us", Time(summary.codegen_us)},
+	           {"executable_build_time_us", Time(summary.executable_build_us)},
+	           {"machine_codegen_time_us", Time(summary.machine_codegen_us)},
+	           {"kernel_build_time_us", Time(summary.kernel_build_us)}});
 }
 
 static void AddExecutionRegionEvent(QueryProfileResult &row, const ExecutionRegionEvent &event, bool is_runtime) {
@@ -318,9 +327,15 @@ static void AddExecutionRegionEvent(QueryProfileResult &row, const ExecutionRegi
 	     {"sink_next_batch_invocation_count", Count(event.sink_next_batch_invocation_count)},
 	     {"decision_time_us", Time(event.decision_time_us)},
 	     {"compile_time_us", Time(ExecutionRegionEventProfileCompileTime(event))},
+	     {"pipeline_cbo_time_us", Time(event.pipeline_cbo_time_us)},
+	     {"graph_build_time_us", Time(event.graph_build_time_us)},
+	     {"candidate_cbo_time_us", Time(event.candidate_cbo_time_us)},
 	     {"ir_lowering_time_us", Time(event.ir_lowering_time_us)},
 	     {"backend_analysis_time_us", Time(event.backend_analysis_time_us)},
 	     {"codegen_time_us", Time(event.codegen_time_us)},
+	     {"executable_build_time_us", Time(event.executable_build_time_us)},
+	     {"machine_codegen_time_us", Time(event.machine_codegen_time_us)},
+	     {"kernel_build_time_us", Time(event.kernel_build_time_us)},
 	     {"runtime_time_us", Time(event.runtime_time_us)},
 	     {"source_runtime_time_us", Time(event.source_contract_runtime_time_us)},
 	     {"sink_next_batch_runtime_time_us", Time(event.sink_next_batch_runtime_time_us)},
@@ -368,7 +383,12 @@ static void RenderExecutionRegionsToStream(std::ostream &ss, ClientContext &cont
 	   << " runtime_dominant=" << DominantRuntimeComponent(summary)
 	   << " source_runtime_pct=" << RuntimePercent(summary.source_us, summary.runtime_us)
 	   << " generated_runtime_pct=" << RuntimePercent(summary.generated_us, summary.runtime_us)
-	   << " decision_time_us=" << summary.decision_us << " compile_time_us=" << summary.compile_us << "\n";
+	   << " decision_time_us=" << summary.decision_us << " compile_time_us=" << summary.compile_us
+	   << " pipeline_cbo_us=" << summary.pipeline_cbo_us << " graph_build_us=" << summary.graph_build_us
+	   << " candidate_cbo_us=" << summary.candidate_cbo_us << " ir_lowering_us=" << summary.ir_lowering_us
+	   << " backend_analysis_us=" << summary.backend_analysis_us << " codegen_us=" << summary.codegen_us
+	   << " executable_build_us=" << summary.executable_build_us << " machine_codegen_us=" << summary.machine_codegen_us
+	   << " kernel_build_us=" << summary.kernel_build_us << "\n";
 	RenderExecutionRegionCboPipelineToStream(ss, trace);
 	RenderExecutionRegionRuntimePipelineToStream(ss, trace);
 }
@@ -399,8 +419,14 @@ static void RenderExecutionRegionCboPipelineToStream(std::ostream &ss, const Que
 		} else {
 			ss << " cost=none";
 		}
-		ss << " decision_us=" << event.decision_time_us
-		   << " compile_us=" << ExecutionRegionEventProfileCompileTime(event)
+		ss << " decision_us=" << event.decision_time_us << " pipeline_cbo_us=" << event.pipeline_cbo_time_us
+		   << " graph_build_us=" << event.graph_build_time_us << " candidate_cbo_us=" << event.candidate_cbo_time_us
+		   << " ir_lowering_us=" << event.ir_lowering_time_us
+		   << " backend_analysis_us=" << event.backend_analysis_time_us
+		   << " compile_us=" << ExecutionRegionEventProfileCompileTime(event) << " codegen_us=" << event.codegen_time_us
+		   << " executable_build_us=" << event.executable_build_time_us
+		   << " machine_codegen_us=" << event.machine_codegen_time_us
+		   << " kernel_build_us=" << event.kernel_build_time_us
 		   << " code_size=" << ExecutionRegionEventProfileCodeSize(event)
 		   << " blocker=" << ExecutionRegionProfileToken(event.blocker)
 		   << " why=" << ExecutionRegionProfileToken(ExecutionRegionProfileReason(event.reason), 128) << "\n";

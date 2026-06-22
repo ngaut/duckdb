@@ -9,9 +9,11 @@
 #include "sljit_region_runtime.hpp"
 
 #include "sljit_native_runtime.hpp"
+#include "sljit_region_codegen.hpp"
 
 #include "duckdb/common/allocator.hpp"
 #include "duckdb/common/exception.hpp"
+#include "duckdb/common/mutex.hpp"
 #include "duckdb/common/types/hugeint.hpp"
 #include "duckdb/common/types/uhugeint.hpp"
 #include "duckdb/common/vector/flat_vector.hpp"
@@ -777,6 +779,50 @@ public:
 
 	bool CanExecuteFullPipeline() const override {
 		return ExecutionRegionABIIsFullPipeline(abi);
+	}
+
+	void RefreshTraceCodeSize() {
+		SetTraceInfo(TraceId(), ExecutionMode(), TraceCompileReason(), TraceCompileTime(), CodeSize());
+	}
+
+	void EnsurePerfectHashJoinProbeCode(SljitExecutableHashJoinProbe &probe) {
+		if (probe.perfect_function) {
+			return;
+		}
+		lock_guard<mutex> guard(codegen_lock);
+		if (probe.perfect_function) {
+			return;
+		}
+		if (probe.plan.keys.empty()) {
+			throw InternalException("SLJIT native perfect hash join probe has no key plan");
+		}
+		string error;
+		probe.perfect_code =
+		    BuildSljitPerfectHashJoinProbe(probe.plan.keys[0], probe.plan.output_mode, probe.perfect_function, error);
+		if (!probe.perfect_code || !probe.perfect_function) {
+			throw InternalException("SLJIT native perfect hash join probe lazy code generation failed: %s",
+			                        error.empty() ? "unknown error" : error);
+		}
+		RefreshTraceCodeSize();
+	}
+
+	void EnsureHashJoinProbeCode(SljitExecutableHashJoinProbe &probe) {
+		if (probe.function) {
+			return;
+		}
+		lock_guard<mutex> guard(codegen_lock);
+		if (probe.function) {
+			return;
+		}
+		string error;
+		probe.code = BuildSljitHashJoinProbe(probe.plan.keys, probe.plan.equality_key_count,
+		                                     probe.plan.mark_build_match, probe.plan.found_match_offset,
+		                                     probe.plan.pointer_offset, probe.plan.output_mode, probe.function, error);
+		if (!probe.code || !probe.function) {
+			throw InternalException("SLJIT native hash join probe lazy code generation failed: %s",
+			                        error.empty() ? "unknown error" : error);
+		}
+		RefreshTraceCodeSize();
 	}
 
 	bool TryExecuteFullPipeline(ExecutionRegionRuntime &runtime, ExecutionRegionResult &result) override {
@@ -2151,16 +2197,13 @@ public:
 				RecordSljitRegionStageRuntime(runtime, op_idx, op.kind, "materialize_left_unmatched",
 				                              materialize_stage_start);
 			} break;
-			case ExecutionHashJoinProbeOutputMode::MARK_PROBE:
-				{
-					auto materialize_stage_start = SljitRegionStageStart(runtime);
-					SljitRegionStageRecorder recorder(runtime, op_idx, op.kind, "materialize_output");
-					ExecutionMaterializeHashJoinProbe(probe, input, row_pointers, match_selection, input.size(), output,
-					                                  &recorder);
-					RecordSljitRegionStageRuntime(runtime, op_idx, op.kind, "materialize_output",
-					                              materialize_stage_start);
-				}
-				break;
+			case ExecutionHashJoinProbeOutputMode::MARK_PROBE: {
+				auto materialize_stage_start = SljitRegionStageStart(runtime);
+				SljitRegionStageRecorder recorder(runtime, op_idx, op.kind, "materialize_output");
+				ExecutionMaterializeHashJoinProbe(probe, input, row_pointers, match_selection, input.size(), output,
+				                                  &recorder);
+				RecordSljitRegionStageRuntime(runtime, op_idx, op.kind, "materialize_output", materialize_stage_start);
+			} break;
 			case ExecutionHashJoinProbeOutputMode::MATCHED_PROBE_AND_BUILD:
 			case ExecutionHashJoinProbeOutputMode::MATCHED_PROBE_ONLY:
 			case ExecutionHashJoinProbeOutputMode::MARK_BUILD_ONLY:
@@ -2172,9 +2215,10 @@ public:
 			return ExecutionOperatorBindResult::READY;
 		}
 		if (probe.layout_kind == ExecutionHashJoinProbeLayoutKind::PERFECT_HASH_TABLE) {
-			if (!op.hash_join_probe.plan.perfect_hash_probe || !op.hash_join_probe.perfect_function) {
+			if (!op.hash_join_probe.plan.perfect_hash_probe) {
 				throw InternalException("SLJIT native hash join probe received a perfect layout without perfect code");
 			}
+			EnsurePerfectHashJoinProbeCode(op.hash_join_probe);
 			if (op.hash_join_probe.plan.residual_predicate) {
 				throw InternalException("SLJIT native perfect hash join probe does not support residual predicates");
 			}
@@ -2233,9 +2277,7 @@ public:
 			RecordSljitRegionStageRuntime(runtime, op_idx, op.kind, "materialize_output", materialize_stage_start);
 			return ExecutionOperatorBindResult::READY;
 		}
-		if (!op.hash_join_probe.function) {
-			throw InternalException("SLJIT native hash join probe reached runtime without generated probe code");
-		}
+		EnsureHashJoinProbeCode(op.hash_join_probe);
 		auto &layout = probe.table_layout;
 		if (!layout.ready || !layout.entries || layout.layout_offsets.empty()) {
 			throw InternalException("SLJIT native hash join probe received an incomplete hash table layout");
@@ -2878,6 +2920,7 @@ private:
 	string backend_name;
 	vector<SljitExecutableRegionOp> ops;
 	ExecutionRegionABI abi;
+	mutex codegen_lock;
 };
 
 unique_ptr<ExecutionRegionKernel> CreateSljitNativeRegionKernel(ClientContext &context, string backend_name,

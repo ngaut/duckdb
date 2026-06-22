@@ -146,6 +146,15 @@ static void SummarizeDecisionEvent(ExecutionRegionTraceSummary &summary, const E
 	summary.decision_us += event.decision_time_us;
 	summary.compile_us += event.compile_time_us;
 	summary.code_size += event.code_size;
+	summary.pipeline_cbo_us += event.pipeline_cbo_time_us;
+	summary.graph_build_us += event.graph_build_time_us;
+	summary.candidate_cbo_us += event.candidate_cbo_time_us;
+	summary.ir_lowering_us += event.ir_lowering_time_us;
+	summary.backend_analysis_us += event.backend_analysis_time_us;
+	summary.codegen_us += event.codegen_time_us;
+	summary.executable_build_us += event.executable_build_time_us;
+	summary.machine_codegen_us += event.machine_codegen_time_us;
+	summary.kernel_build_us += event.kernel_build_time_us;
 	if (event.status_kind == ExecutionRegionEventStatus::COMPILED) {
 		summary.compiled++;
 	} else if (event.status_kind == ExecutionRegionEventStatus::ERROR) {
@@ -255,9 +264,15 @@ idx_t ExecutionRegionManager::RecordEvent(
 	event.compile_time_us = compile_time_us;
 	event.code_size = code_size;
 	if (stage_timings) {
+		event.pipeline_cbo_time_us = stage_timings->pipeline_cbo_time_us;
+		event.graph_build_time_us = stage_timings->graph_build_time_us;
+		event.candidate_cbo_time_us = stage_timings->candidate_cbo_time_us;
 		event.ir_lowering_time_us = stage_timings->ir_lowering_time_us;
 		event.backend_analysis_time_us = stage_timings->backend_analysis_time_us;
 		event.codegen_time_us = stage_timings->codegen_time_us;
+		event.executable_build_time_us = stage_timings->executable_build_time_us;
+		event.machine_codegen_time_us = stage_timings->machine_codegen_time_us;
+		event.kernel_build_time_us = stage_timings->kernel_build_time_us;
 	}
 
 	return RecordExecutionRegionTelemetryEvent(context, db, event_log, std::move(event));

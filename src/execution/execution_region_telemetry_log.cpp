@@ -81,9 +81,15 @@ static void AccumulateExecutionRegionCounter(ExecutionRegionCounter &counter, co
 	counter.sink_next_batch_runtime_time_us += event.sink_next_batch_runtime_time_us;
 	counter.generated_body_runtime_time_us += event.generated_body_runtime_time_us;
 	MergeExecutionRegionStageRuntime(counter.generated_stage_runtime, event.generated_stage_runtime);
+	counter.pipeline_cbo_time_us += event.pipeline_cbo_time_us;
+	counter.graph_build_time_us += event.graph_build_time_us;
+	counter.candidate_cbo_time_us += event.candidate_cbo_time_us;
 	counter.ir_lowering_time_us += event.ir_lowering_time_us;
 	counter.backend_analysis_time_us += event.backend_analysis_time_us;
 	counter.codegen_time_us += event.codegen_time_us;
+	counter.executable_build_time_us += event.executable_build_time_us;
+	counter.machine_codegen_time_us += event.machine_codegen_time_us;
+	counter.kernel_build_time_us += event.kernel_build_time_us;
 }
 
 void ExecutionRegionEventLog::RecordCounter(const ExecutionRegionEvent &event) {

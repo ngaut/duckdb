@@ -2,8 +2,36 @@
 
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/numeric_utils.hpp"
+#include "duckdb/execution/execution_region_backend.hpp"
+
+#include <chrono>
 
 namespace duckdb {
+
+static thread_local ExecutionRegionCompileTimings *active_sljit_codegen_timings = nullptr;
+
+static int64_t SljitCodegenElapsedMicros(std::chrono::steady_clock::time_point start) {
+	auto end = std::chrono::steady_clock::now();
+	return std::chrono::duration_cast<std::chrono::microseconds>(end - start).count();
+}
+
+SljitCodegenTimingScope::SljitCodegenTimingScope(ExecutionRegionCompileTimings *timings)
+    : previous_timings(active_sljit_codegen_timings) {
+	active_sljit_codegen_timings = timings;
+}
+
+SljitCodegenTimingScope::~SljitCodegenTimingScope() {
+	active_sljit_codegen_timings = previous_timings;
+}
+
+void *GenerateSljitCode(struct sljit_compiler *compiler) {
+	auto start = std::chrono::steady_clock::now();
+	auto code = sljit_generate_code(compiler, 0, nullptr);
+	if (active_sljit_codegen_timings) {
+		active_sljit_codegen_timings->machine_codegen_time_us += SljitCodegenElapsedMicros(start);
+	}
+	return code;
+}
 
 class SljitCodeHandle : public ExecutionRegionCodeHandle {
 public:
