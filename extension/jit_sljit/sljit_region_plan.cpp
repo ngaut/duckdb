@@ -3393,11 +3393,11 @@ static bool SljitNativeContractReady(bool present, const ExecutionRegionNativeOp
 	return present && native_contract.status == ExecutionRegionStateContractStatus::READY;
 }
 
-static void AddSljitContractBlocker(ExecutionRegionLoweringPlan &lowering_plan, SljitRegionBackendPlan &backend_plan,
+static void AddSljitContractBlocker(ExecutionRegionLoweringPlan &lowering_plan, string &backend_error,
                                     bool contract_ready, const char *ready_error, const char *missing_error,
                                     const char *ready_blocker, const char *missing_blocker,
                                     const string &ready_reason = string()) {
-	backend_plan.error = contract_ready ? ready_error : missing_error;
+	backend_error = contract_ready ? ready_error : missing_error;
 	if (!contract_ready) {
 		lowering_plan.AddFusionBlocker(missing_blocker);
 		return;
@@ -3411,7 +3411,7 @@ static void AddSljitContractBlocker(ExecutionRegionLoweringPlan &lowering_plan, 
 }
 
 static void AddSljitFullPipelineSinkBlockers(ExecutionRegionLoweringPlan &lowering_plan,
-                                             SljitRegionBackendPlan &backend_plan, const ExecutionRegionNode &node,
+                                             string &backend_error, const ExecutionRegionNode &node,
                                              const SljitRegionNodePlan &node_plan,
                                              const ExecutionRegionContract &contract) {
 	if (!SljitNodePlanIsBoundary(node_plan) || !ExecutionRegionABIIsFullPipeline(contract.abi) || !node.sink) {
@@ -3421,17 +3421,18 @@ static void AddSljitFullPipelineSinkBlockers(ExecutionRegionLoweringPlan &loweri
 	case ExecutionRegionSinkKind::HASH_JOIN_BUILD: {
 		auto build_contract_ready = SljitNativeContractReady(node.sink->hash_join_contract.present,
 		                                                     node.sink->hash_join_contract.native_build_contract);
-		AddSljitContractBlocker(lowering_plan, backend_plan, build_contract_ready,
-		                        "SLJIT full-pipeline hash join build sink rejected by native hash join build lowering",
-		                        "SLJIT full-pipeline hash join build sink requires a native hash join build contract",
-		                        "sink-contract-blocker:hash-join-build-native-lowering",
-		                        "sink-contract-blocker:hash-join-build-contract-missing");
+		AddSljitContractBlocker(
+		    lowering_plan, backend_error, build_contract_ready,
+		    "SLJIT full-pipeline hash join build sink rejected by native hash join build lowering",
+		    "SLJIT full-pipeline hash join build sink requires a native hash join build contract",
+		    "sink-contract-blocker:hash-join-build-native-lowering",
+		    "sink-contract-blocker:hash-join-build-contract-missing");
 		break;
 	}
 	case ExecutionRegionSinkKind::NESTED_LOOP_JOIN_BUILD: {
 		auto build_contract_ready = SljitNativeContractReady(
 		    node.sink->nested_loop_join_contract.present, node.sink->nested_loop_join_contract.native_build_contract);
-		AddSljitContractBlocker(lowering_plan, backend_plan, build_contract_ready,
+		AddSljitContractBlocker(lowering_plan, backend_error, build_contract_ready,
 		                        "SLJIT full-pipeline nested loop join build sink rejected by native lowering",
 		                        "SLJIT full-pipeline nested loop join build sink requires a native build contract",
 		                        "sink-contract-blocker:nested-loop-join-build-native-lowering-missing",
@@ -3444,7 +3445,7 @@ static void AddSljitFullPipelineSinkBlockers(ExecutionRegionLoweringPlan &loweri
 }
 
 static void AddSljitOperatorContractBlockers(ExecutionRegionLoweringPlan &lowering_plan,
-                                             SljitRegionBackendPlan &backend_plan, const ExecutionRegionNode &node,
+                                             string &backend_error, const ExecutionRegionNode &node,
                                              const SljitRegionNodePlan &node_plan) {
 	if (!SljitNodePlanIsBoundary(node_plan) || !node.operator_info) {
 		return;
@@ -3454,7 +3455,7 @@ static void AddSljitOperatorContractBlockers(ExecutionRegionLoweringPlan &loweri
 		auto probe_contract_ready =
 		    SljitNativeContractReady(node.operator_info->hash_join_contract.present,
 		                             node.operator_info->hash_join_contract.native_probe_contract);
-		AddSljitContractBlocker(lowering_plan, backend_plan, probe_contract_ready,
+		AddSljitContractBlocker(lowering_plan, backend_error, probe_contract_ready,
 		                        "SLJIT hash join probe rejected by native hash join lowering",
 		                        "SLJIT hash join probe requires a native hash join probe contract",
 		                        "operator-contract-blocker:hash-join-probe-native-lowering-missing",
@@ -3465,7 +3466,7 @@ static void AddSljitOperatorContractBlockers(ExecutionRegionLoweringPlan &loweri
 		auto probe_contract_ready =
 		    SljitNativeContractReady(node.operator_info->nested_loop_join_contract.present,
 		                             node.operator_info->nested_loop_join_contract.native_probe_contract);
-		AddSljitContractBlocker(lowering_plan, backend_plan, probe_contract_ready,
+		AddSljitContractBlocker(lowering_plan, backend_error, probe_contract_ready,
 		                        "SLJIT nested loop join probe rejected by native lowering",
 		                        "SLJIT nested loop join probe requires a native probe contract",
 		                        "operator-contract-blocker:nested-loop-join-probe-native-lowering-missing",
@@ -3554,7 +3555,7 @@ private:
 ExecutionRegionLoweringPlan BuildSljitRegionPlan(const ExecutionRegionIR &region_ir,
                                                  const ExecutionRegionCandidate &candidate, bool render_diagnostics) {
 	ExecutionRegionLoweringPlan lowering_plan;
-	auto backend_plan = make_shared_ptr<SljitRegionBackendPlan>();
+	string backend_error;
 	lowering_plan.SetCompiledExecutionMode(ExecutionRegionExecutionMode::UNSUPPORTED);
 	if (candidate.stage_plan.HasStages()) {
 		lowering_plan.SetOperatorStageIR(candidate.stage_plan.ir);
@@ -3562,8 +3563,7 @@ ExecutionRegionLoweringPlan BuildSljitRegionPlan(const ExecutionRegionIR &region
 	SljitNativeRegionPlan native_region;
 	SljitRegionLoweringCursor cursor(candidate.input_types, native_region);
 	if (candidate.EndNode() > region_ir.nodes.size()) {
-		backend_plan->error = "SLJIT region candidate references nodes outside the region IR";
-		lowering_plan.backend_plan = backend_plan;
+		backend_error = "SLJIT region candidate references nodes outside the region IR";
 		return lowering_plan;
 	}
 	auto &contract = candidate.contract;
@@ -3576,9 +3576,8 @@ ExecutionRegionLoweringPlan BuildSljitRegionPlan(const ExecutionRegionIR &region
 			        ? candidate.source_execution
 			        : (node.source ? node.source->execution : ExecutionRegionSourceExecutionKind::NONE);
 			auto node_plan =
-			    executable_source
-			        ? PlanSljitSourceNode(node, contract, source_execution, render_diagnostics)
-			        : PlanSljitRegionNode(node, cursor.InputTypes(), backend_plan->error, render_diagnostics);
+			    executable_source ? PlanSljitSourceNode(node, contract, source_execution, render_diagnostics)
+			                      : PlanSljitRegionNode(node, cursor.InputTypes(), backend_error, render_diagnostics);
 			const bool source_requires_native = executable_source &&
 			                                    node_plan.kind == ExecutionRegionLoweringKind::BOUNDARY &&
 			                                    node_plan.requires_source_contract;
@@ -3606,9 +3605,9 @@ ExecutionRegionLoweringPlan BuildSljitRegionPlan(const ExecutionRegionIR &region
 			        ? PlanSljitFullPipelineSinkNode(node, cursor.InputTypes(), render_diagnostics)
 			    : SljitRejectsSinkRegionContext(node, candidate)
 			        ? SljitRegionBoundaryNode("sink region requires upstream operators with native contracts")
-			        : PlanSljitRegionNode(node, cursor.InputTypes(), backend_plan->error, render_diagnostics);
+			        : PlanSljitRegionNode(node, cursor.InputTypes(), backend_error, render_diagnostics);
 			AddSljitLoweredNode(lowering_plan, node, node_plan);
-			AddSljitFullPipelineSinkBlockers(lowering_plan, *backend_plan, node, node_plan, contract);
+			AddSljitFullPipelineSinkBlockers(lowering_plan, backend_error, node, node_plan, contract);
 			if (node_plan.kind == ExecutionRegionLoweringKind::NATIVE && SljitRegionNodeHasNativeOps(node_plan)) {
 				cursor.AcceptSink(node_plan);
 			} else {
@@ -3627,10 +3626,10 @@ ExecutionRegionLoweringPlan BuildSljitRegionPlan(const ExecutionRegionIR &region
 			node_plan =
 			    SljitRegionBoundaryNode("native operator contract boundary requires full-pipeline region ownership");
 		} else {
-			node_plan = PlanSljitRegionNode(node, cursor.InputTypes(), backend_plan->error, render_diagnostics);
+			node_plan = PlanSljitRegionNode(node, cursor.InputTypes(), backend_error, render_diagnostics);
 		}
 		AddSljitLoweredNode(lowering_plan, node, node_plan);
-		AddSljitOperatorContractBlockers(lowering_plan, *backend_plan, node, node_plan);
+		AddSljitOperatorContractBlockers(lowering_plan, backend_error, node, node_plan);
 		if (node_plan.kind != ExecutionRegionLoweringKind::NATIVE || !SljitRegionNodeHasNativeOps(node_plan)) {
 			cursor.BreakAtBoundary(node.output_types);
 			continue;
@@ -3645,18 +3644,20 @@ ExecutionRegionLoweringPlan BuildSljitRegionPlan(const ExecutionRegionIR &region
 		lowering_plan.SetUsesScanFilters(cursor.UsesScanFilters());
 		string codegen_blocker;
 		if (SljitNativeRegionHasExecutableBodyGap(native_region, codegen_blocker)) {
-			backend_plan->error = codegen_blocker;
+			backend_error = codegen_blocker;
 			auto fusion_blocker = SljitNativeRegionCodegenFusionBlocker() + ";" + codegen_blocker;
 			if (!candidate.contract.ir.empty()) {
 				fusion_blocker += ";" + candidate.contract.ir;
 			}
 			lowering_plan.AddFusionBlocker(std::move(fusion_blocker));
-			lowering_plan.backend_plan = backend_plan;
 			return lowering_plan;
 		}
 		if (SljitRegionIsFullyFused(native_region, contract)) {
 			lowering_plan.SetFullyFused(true);
+			auto backend_plan = make_shared_ptr<SljitRegionBackendPlan>();
+			backend_plan->error = std::move(backend_error);
 			backend_plan->native_region = make_uniq<SljitNativeRegionPlan>(std::move(native_region));
+			lowering_plan.backend_plan = std::move(backend_plan);
 			lowering_plan.SetCompiledExecutionMode(ExecutionRegionExecutionMode::NATIVE);
 		}
 		if (!lowering_plan.IsFullyFused()) {
@@ -3668,7 +3669,6 @@ ExecutionRegionLoweringPlan BuildSljitRegionPlan(const ExecutionRegionIR &region
 			}
 		}
 	}
-	lowering_plan.backend_plan = backend_plan;
 	return lowering_plan;
 }
 
