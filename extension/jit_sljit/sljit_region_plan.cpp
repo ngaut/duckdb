@@ -167,7 +167,7 @@ SljitNativeHashJoinProbePlan CopySljitNativeHashJoinProbePlan(const SljitNativeH
 	result.output_mode = input.output_mode;
 	result.input_types = input.input_types;
 	result.residual_source_types = input.residual_source_types;
-	result.residual_filter = CopySljitNativeRegionExpression(input.residual_filter);
+	result.residual_filter = CopySljitNativeRegionExpression(input.residual_filter, false);
 	result.operator_info = input.operator_info;
 	result.ir = input.ir;
 	return result;
