@@ -702,6 +702,11 @@ void ExecutionRegionLoweringPlan::AddNode(string label, string operator_name, Ex
 	node.operator_kind = operator_kind;
 	node.kind = kind;
 	node.reason = std::move(reason);
+	if (node.kind == ExecutionRegionLoweringKind::NATIVE) {
+		native_count++;
+	} else if (node.kind == ExecutionRegionLoweringKind::BOUNDARY) {
+		boundary_count++;
+	}
 	nodes.push_back(std::move(node));
 }
 
@@ -730,23 +735,11 @@ void ExecutionRegionLoweringPlan::SetOperatorStageIR(string stage_ir) {
 }
 
 idx_t ExecutionRegionLoweringPlan::NativeCount() const {
-	idx_t result = 0;
-	for (auto &node : nodes) {
-		if (node.kind == ExecutionRegionLoweringKind::NATIVE) {
-			result++;
-		}
-	}
-	return result;
+	return native_count;
 }
 
 idx_t ExecutionRegionLoweringPlan::BoundaryCount() const {
-	idx_t result = 0;
-	for (auto &node : nodes) {
-		if (node.kind == ExecutionRegionLoweringKind::BOUNDARY) {
-			result++;
-		}
-	}
-	return result;
+	return boundary_count;
 }
 
 ExecutionRegionExecutionMode ExecutionRegionLoweringPlan::ExpectedCompiledExecutionMode() const {
@@ -781,13 +774,8 @@ string ExecutionRegionLoweringPlan::CompactEventReason() const {
 		AppendFirstExecutionRegionLoweringReasonToken(result, fusion_blockers[0]);
 		result += ";";
 	}
-	idx_t native_count = 0;
-	idx_t boundary_count = 0;
 	for (auto &node : nodes) {
-		if (node.kind == ExecutionRegionLoweringKind::NATIVE) {
-			native_count++;
-		} else if (node.kind == ExecutionRegionLoweringKind::BOUNDARY) {
-			boundary_count++;
+		if (node.kind == ExecutionRegionLoweringKind::BOUNDARY) {
 			if (fusion_blockers.empty() && result.empty() && !node.reason.empty()) {
 				result = "region-lowering-blocked:";
 				AppendFirstExecutionRegionLoweringReasonToken(result, node.reason);

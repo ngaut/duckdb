@@ -554,6 +554,20 @@ struct ExecutionRegionFusedStageContractDecision {
 };
 
 static ExecutionRegionFusedStageContractDecision
+BuildExecutionRegionFusedContractBoundaryDecision(const ExecutionRegionContract &contract) {
+	ExecutionRegionFusedStageContractDecision decision;
+	decision.valid = false;
+	decision.blocker = "fused_region_contract_has_boundaries";
+	decision.reason = "backend advertised fused region but core contract still has boundaries";
+	decision.reason += ";source_boundaries=" + std::to_string(contract.source_boundary_count);
+	decision.reason += ";missing_contracts=" + std::to_string(contract.missing_contract_count);
+	if (!contract.ir.empty()) {
+		decision.reason += ";" + contract.ir;
+	}
+	return decision;
+}
+
+static ExecutionRegionFusedStageContractDecision
 ValidateExecutionRegionFusedStageContract(const ExecutionRegionCandidate &candidate,
                                           const ExecutionRegionLoweringPlan &lowering_plan) {
 	ExecutionRegionFusedStageContractDecision decision;
@@ -561,15 +575,7 @@ ValidateExecutionRegionFusedStageContract(const ExecutionRegionCandidate &candid
 		return decision;
 	}
 	if (!ExecutionRegionContractHasOnlyNativeStages(candidate.contract)) {
-		decision.valid = false;
-		decision.blocker = "fused_region_contract_has_boundaries";
-		decision.reason = "backend advertised fused region but core contract still has boundaries";
-		decision.reason += ";source_boundaries=" + std::to_string(candidate.contract.source_boundary_count);
-		decision.reason += ";missing_contracts=" + std::to_string(candidate.contract.missing_contract_count);
-		if (!candidate.contract.ir.empty()) {
-			decision.reason += ";" + candidate.contract.ir;
-		}
-		return decision;
+		return BuildExecutionRegionFusedContractBoundaryDecision(candidate.contract);
 	}
 	if (!candidate.stage_plan.HasStages()) {
 		decision.valid = false;
@@ -899,6 +905,8 @@ unique_ptr<ExecutionRegionPlan> ExecutionRegionPlanner::Build(ClientContext &con
 		auto candidate_decision_start = std::chrono::steady_clock::now();
 		ExecutionRegionStageTimings stage_timings;
 		stage_timings.ir_lowering_time_us = region_lowering_time_us;
+		ExecutionRegionPhysicalRunnerSelection cost_only_physical_runner;
+		bool has_cost_only_physical_runner = false;
 		auto candidate_decision_time_us = [&]() -> int64_t {
 			auto decision_time_us = ExecutionRegionPlannerElapsedMicros(candidate_decision_start);
 			if (!shared_decision_time_recorded) {
@@ -939,6 +947,22 @@ unique_ptr<ExecutionRegionPlan> ExecutionRegionPlanner::Build(ClientContext &con
 				}
 				continue;
 			}
+			cost_only_physical_runner = std::move(physical_runner);
+			has_cost_only_physical_runner = true;
+		}
+		if (!ExecutionRegionContractHasOnlyNativeStages(candidate.contract)) {
+			if (should_record_decision_telemetry) {
+				auto contract_decision = BuildExecutionRegionFusedContractBoundaryDecision(candidate.contract);
+				auto decision_time_us = candidate_decision_time_us();
+				execution_region_manager.RecordEvent(
+				    context, backend_name, ExecutionRegionCompileStatus::UNSUPPORTED,
+				    ExecutionRegionExecutionMode::UNSUPPORTED,
+				    AttachExecutionRegionCandidateReason(candidate, std::move(contract_decision.reason),
+				                                         should_record_detailed_telemetry),
+				    contract_decision.blocker, &lowered_region.ir, decision_time_us, 0, 0, &candidate,
+				    ExecutionRunnerKind::VECTORIZED, &stage_timings);
+			}
+			continue;
 		}
 		ExecutionRegionCompilationInput input(context, lowered_region, candidate);
 		auto analysis_start = std::chrono::steady_clock::now();
@@ -1029,8 +1053,14 @@ unique_ptr<ExecutionRegionPlan> ExecutionRegionPlanner::Build(ClientContext &con
 			}
 			continue;
 		}
-		auto physical_runner = SelectExecutionRegionPhysicalRunner(cost_parameters, candidate, lowering_plan,
-		                                                           should_record_detailed_telemetry);
+		ExecutionRegionPhysicalRunnerSelection physical_runner;
+		if (has_cost_only_physical_runner && lowering_plan.IsFullyFused()) {
+			physical_runner = std::move(cost_only_physical_runner);
+			physical_runner.reason = "duckdb_cbo selects compiled-vectorized physical runner";
+		} else {
+			physical_runner = SelectExecutionRegionPhysicalRunner(cost_parameters, candidate, lowering_plan,
+			                                                      should_record_detailed_telemetry);
+		}
 		if (!physical_runner.UsesCompiledRunner()) {
 			if (should_record_decision_telemetry) {
 				auto decision_time_us = candidate_decision_time_us();

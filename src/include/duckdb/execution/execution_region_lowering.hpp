@@ -65,6 +65,8 @@ struct ExecutionRegionLoweringPlan {
 	vector<string> fusion_blockers;
 	shared_ptr<ExecutionRegionBackendPlan> backend_plan;
 	ExecutionRegionExecutionMode compiled_execution_mode = ExecutionRegionExecutionMode::UNSUPPORTED;
+	idx_t native_count = 0;
+	idx_t boundary_count = 0;
 	bool fully_fused = false;
 	ExecutionRegionSourceExecutionKind selected_source_execution = ExecutionRegionSourceExecutionKind::NONE;
 	bool uses_scan_filters = false;
