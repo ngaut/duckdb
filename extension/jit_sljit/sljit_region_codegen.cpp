@@ -636,28 +636,36 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitPerfectHashJoinProbe(const Sljit
 	return FinishSljitHashJoinProbeCode(compiler, function, error);
 }
 
+bool ValidateSljitHashJoinProbe(const vector<SljitNativeHashJoinProbeKeyPlan> &keys, idx_t equality_key_count,
+                                ExecutionHashJoinProbeOutputMode output_mode, string &error) {
+	if (keys.empty()) {
+		error = "SLJIT hash join probe requires at least one key";
+		return false;
+	}
+	if (equality_key_count == 0 || equality_key_count > keys.size()) {
+		error = "SLJIT hash join probe requires an equality-key prefix";
+		return false;
+	}
+	for (idx_t key_idx = 0; key_idx < keys.size(); key_idx++) {
+		if ((key_idx < equality_key_count) != keys[key_idx].equality_key) {
+			error = "SLJIT hash join probe key plan is not an equality-key prefix";
+			return false;
+		}
+	}
+	if (output_mode == ExecutionHashJoinProbeOutputMode::NONE) {
+		error = "SLJIT hash join probe requires an output mode";
+		return false;
+	}
+	return true;
+}
+
 unique_ptr<ExecutionRegionCodeHandle> BuildSljitHashJoinProbe(const vector<SljitNativeHashJoinProbeKeyPlan> &keys,
                                                               idx_t equality_key_count, bool mark_build_match,
                                                               idx_t found_match_offset, idx_t pointer_offset,
                                                               ExecutionHashJoinProbeOutputMode output_mode,
                                                               SljitNativeHashJoinProbeFunction &function,
                                                               string &error) {
-	if (keys.empty()) {
-		error = "SLJIT hash join probe requires at least one key";
-		return nullptr;
-	}
-	if (equality_key_count == 0 || equality_key_count > keys.size()) {
-		error = "SLJIT hash join probe requires an equality-key prefix";
-		return nullptr;
-	}
-	for (idx_t key_idx = 0; key_idx < keys.size(); key_idx++) {
-		if ((key_idx < equality_key_count) != keys[key_idx].equality_key) {
-			error = "SLJIT hash join probe key plan is not an equality-key prefix";
-			return nullptr;
-		}
-	}
-	if (output_mode == ExecutionHashJoinProbeOutputMode::NONE) {
-		error = "SLJIT hash join probe requires an output mode";
+	if (!ValidateSljitHashJoinProbe(keys, equality_key_count, output_mode, error)) {
 		return nullptr;
 	}
 	const bool mark_build_only = output_mode == ExecutionHashJoinProbeOutputMode::MARK_BUILD_ONLY;

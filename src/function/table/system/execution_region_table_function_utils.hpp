@@ -26,6 +26,12 @@ struct ExecutionRegionTableFunctionState : public GlobalTableFunctionState {
 	idx_t offset = 0;
 };
 
+static inline void AddExecutionRegionTableFunctionColumn(vector<LogicalType> &return_types, vector<string> &names,
+                                                         const char *name, LogicalType type) {
+	names.emplace_back(name);
+	return_types.emplace_back(type);
+}
+
 static constexpr ExecutionRegionTraceColumn EXECUTION_REGION_CANDIDATE_TRACE_COLUMNS[] = {
     {"candidate_signature_context", LogicalTypeId::VARCHAR},
     {"candidate_signature_shape", LogicalTypeId::VARCHAR},

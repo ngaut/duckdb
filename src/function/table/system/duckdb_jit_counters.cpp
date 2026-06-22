@@ -8,154 +8,222 @@ namespace duckdb {
 
 struct DuckDBJitCountersData : public ExecutionRegionTableFunctionState<ExecutionRegionCounter> {};
 
+enum JitCounterColumn : idx_t {
+	JIT_COUNTER_BACKEND_NAME,
+	JIT_COUNTER_STATUS,
+	JIT_COUNTER_EXECUTION_MODE,
+	JIT_COUNTER_SELECTED_RUNNER,
+	JIT_COUNTER_BLOCKER,
+	JIT_COUNTER_COUNT,
+	JIT_COUNTER_DECISION_TIME_US,
+	JIT_COUNTER_COMPILE_TIME_US,
+	JIT_COUNTER_CODE_SIZE,
+	JIT_COUNTER_INPUT_ROWS,
+	JIT_COUNTER_OUTPUT_ROWS,
+	JIT_COUNTER_INVOCATION_COUNT,
+	JIT_COUNTER_RUNTIME_TIME_US,
+	JIT_COUNTER_SOURCE_CONTRACT_OUTPUT_ROWS,
+	JIT_COUNTER_SOURCE_CONTRACT_INVOCATION_COUNT,
+	JIT_COUNTER_SOURCE_CONTRACT_RUNTIME_TIME_US,
+	JIT_COUNTER_SOURCE_STAGE_RUNTIME_BREAKDOWN,
+	JIT_COUNTER_SOURCE_STAGE_COUNT_BREAKDOWN,
+	JIT_COUNTER_SINK_NEXT_BATCH_INVOCATION_COUNT,
+	JIT_COUNTER_SINK_NEXT_BATCH_RUNTIME_TIME_US,
+	JIT_COUNTER_GENERATED_BODY_RUNTIME_TIME_US,
+	JIT_COUNTER_GENERATED_STAGE_RUNTIME_BREAKDOWN,
+	JIT_COUNTER_GENERATED_STAGE_COUNT_BREAKDOWN,
+	JIT_COUNTER_IR_LOWERING_TIME_US,
+	JIT_COUNTER_BACKEND_ANALYSIS_TIME_US,
+	JIT_COUNTER_CODEGEN_TIME_US,
+	JIT_COUNTER_PIPELINE_CBO_TIME_US,
+	JIT_COUNTER_GRAPH_BUILD_TIME_US,
+	JIT_COUNTER_CANDIDATE_CBO_TIME_US,
+	JIT_COUNTER_EXECUTABLE_BUILD_TIME_US,
+	JIT_COUNTER_MACHINE_CODEGEN_TIME_US,
+	JIT_COUNTER_KERNEL_BUILD_TIME_US,
+	JIT_COUNTER_LAZY_CODEGEN_TIME_US,
+	JIT_COUNTER_LAZY_MACHINE_CODEGEN_TIME_US,
+	JIT_COUNTER_LAZY_CODE_SIZE,
+	JIT_COUNTER_HASH_JOIN_PROBE_LAYOUT,
+	JIT_COUNTER_RUNNER_COST_PROFILE,
+	JIT_COUNTER_RUNNER_COST_ROWS,
+	JIT_COUNTER_RUNNER_COST_BATCHES,
+	JIT_COUNTER_RUNNER_COST_EXPRESSION_COST,
+	JIT_COUNTER_RUNNER_COST_GENERATED_STAGE_COUNT,
+	JIT_COUNTER_RUNNER_COST_MATERIALIZATION_ELISION_COUNT,
+	JIT_COUNTER_RUNNER_COST_NATIVE_JOIN_STAGE_COUNT,
+	JIT_COUNTER_RUNNER_COST_NATIVE_AGGREGATE_STAGE_COUNT,
+	JIT_COUNTER_RUNNER_COST_NATIVE_SORT_STAGE_COUNT,
+	JIT_COUNTER_RUNNER_COST_FULL_PIPELINE,
+	JIT_COUNTER_RUNNER_COST_SAVED_WORK_PER_BATCH,
+	JIT_COUNTER_RUNNER_COST_ACCELERATED_RUNNER_BENEFIT,
+	JIT_COUNTER_RUNNER_COST_STARTUP_COST,
+	JIT_COUNTER_RUNNER_COST_REQUIRED_BENEFIT,
+	JIT_COUNTER_RUNNER_COST_NET_BENEFIT,
+	JIT_COUNTER_RUNNER_COST_SELECTED_ACCELERATED_RUNNER_COUNT,
+	JIT_COUNTER_COLUMN_COUNT
+};
+
 static void AppendJitCounterColumn(Vector &output, idx_t column_id, const ExecutionRegionCounter &entry) {
 	switch (column_id) {
-	case 0:
+	case JIT_COUNTER_BACKEND_NAME:
 		output.Append(Value(entry.backend_name));
 		return;
-	case 1:
+	case JIT_COUNTER_STATUS:
 		output.Append(Value(ExecutionRegionEventStatusToString(entry.status_kind)));
 		return;
-	case 2:
+	case JIT_COUNTER_EXECUTION_MODE:
 		output.Append(Value(ExecutionRegionExecutionModeToString(entry.execution_mode_kind)));
 		return;
-	case 3:
+	case JIT_COUNTER_SELECTED_RUNNER:
 		output.Append(Value(ExecutionRunnerKindToString(entry.selected_runner_kind)));
 		return;
-	case 4:
+	case JIT_COUNTER_BLOCKER:
 		AppendExecutionRegionNullableString(output, entry.blocker);
 		return;
-	case 5:
+	case JIT_COUNTER_COUNT:
 		output.Append(Value::UBIGINT(entry.count));
 		return;
-	case 6:
+	case JIT_COUNTER_DECISION_TIME_US:
 		output.Append(Value::BIGINT(entry.decision_time_us));
 		return;
-	case 7:
+	case JIT_COUNTER_COMPILE_TIME_US:
 		output.Append(Value::BIGINT(entry.compile_time_us));
 		return;
-	case 8:
+	case JIT_COUNTER_CODE_SIZE:
 		output.Append(Value::UBIGINT(entry.code_size));
 		return;
-	case 9:
+	case JIT_COUNTER_INPUT_ROWS:
 		output.Append(Value::UBIGINT(entry.input_rows));
 		return;
-	case 10:
+	case JIT_COUNTER_OUTPUT_ROWS:
 		output.Append(Value::UBIGINT(entry.output_rows));
 		return;
-	case 11:
+	case JIT_COUNTER_INVOCATION_COUNT:
 		output.Append(Value::UBIGINT(entry.invocation_count));
 		return;
-	case 12:
+	case JIT_COUNTER_RUNTIME_TIME_US:
 		output.Append(Value::BIGINT(entry.runtime_time_us));
 		return;
-	case 13:
+	case JIT_COUNTER_SOURCE_CONTRACT_OUTPUT_ROWS:
 		output.Append(Value::UBIGINT(entry.source_contract_output_rows));
 		return;
-	case 14:
+	case JIT_COUNTER_SOURCE_CONTRACT_INVOCATION_COUNT:
 		output.Append(Value::UBIGINT(entry.source_contract_invocation_count));
 		return;
-	case 15:
+	case JIT_COUNTER_SOURCE_CONTRACT_RUNTIME_TIME_US:
 		output.Append(Value::BIGINT(entry.source_contract_runtime_time_us));
 		return;
-	case 16:
+	case JIT_COUNTER_SOURCE_STAGE_RUNTIME_BREAKDOWN:
 		AppendExecutionRegionNullableString(output,
 		                                    RenderExecutionRegionStageRuntimeBreakdown(entry.source_stage_runtime));
 		return;
-	case 17:
+	case JIT_COUNTER_SOURCE_STAGE_COUNT_BREAKDOWN:
 		AppendExecutionRegionNullableString(output,
 		                                    RenderExecutionRegionStageCountBreakdown(entry.source_stage_runtime));
 		return;
-	case 18:
+	case JIT_COUNTER_SINK_NEXT_BATCH_INVOCATION_COUNT:
 		output.Append(Value::UBIGINT(entry.sink_next_batch_invocation_count));
 		return;
-	case 19:
+	case JIT_COUNTER_SINK_NEXT_BATCH_RUNTIME_TIME_US:
 		output.Append(Value::BIGINT(entry.sink_next_batch_runtime_time_us));
 		return;
-	case 20:
+	case JIT_COUNTER_GENERATED_BODY_RUNTIME_TIME_US:
 		output.Append(Value::BIGINT(entry.generated_body_runtime_time_us));
 		return;
-	case 21:
+	case JIT_COUNTER_GENERATED_STAGE_RUNTIME_BREAKDOWN:
 		AppendExecutionRegionNullableString(output,
 		                                    RenderExecutionRegionStageRuntimeBreakdown(entry.generated_stage_runtime));
 		return;
-	case 22:
+	case JIT_COUNTER_GENERATED_STAGE_COUNT_BREAKDOWN:
 		AppendExecutionRegionNullableString(output,
 		                                    RenderExecutionRegionStageCountBreakdown(entry.generated_stage_runtime));
 		return;
-	case 23:
+	case JIT_COUNTER_IR_LOWERING_TIME_US:
 		output.Append(Value::BIGINT(entry.ir_lowering_time_us));
 		return;
-	case 24:
+	case JIT_COUNTER_BACKEND_ANALYSIS_TIME_US:
 		output.Append(Value::BIGINT(entry.backend_analysis_time_us));
 		return;
-	case 25:
+	case JIT_COUNTER_CODEGEN_TIME_US:
 		output.Append(Value::BIGINT(entry.codegen_time_us));
 		return;
-	case 26:
+	case JIT_COUNTER_PIPELINE_CBO_TIME_US:
 		output.Append(Value::BIGINT(entry.pipeline_cbo_time_us));
 		return;
-	case 27:
+	case JIT_COUNTER_GRAPH_BUILD_TIME_US:
 		output.Append(Value::BIGINT(entry.graph_build_time_us));
 		return;
-	case 28:
+	case JIT_COUNTER_CANDIDATE_CBO_TIME_US:
 		output.Append(Value::BIGINT(entry.candidate_cbo_time_us));
 		return;
-	case 29:
+	case JIT_COUNTER_EXECUTABLE_BUILD_TIME_US:
 		output.Append(Value::BIGINT(entry.executable_build_time_us));
 		return;
-	case 30:
+	case JIT_COUNTER_MACHINE_CODEGEN_TIME_US:
 		output.Append(Value::BIGINT(entry.machine_codegen_time_us));
 		return;
-	case 31:
+	case JIT_COUNTER_KERNEL_BUILD_TIME_US:
 		output.Append(Value::BIGINT(entry.kernel_build_time_us));
 		return;
-	case 32:
+	case JIT_COUNTER_LAZY_CODEGEN_TIME_US:
+		output.Append(Value::BIGINT(entry.jit_runtime.lazy_codegen.codegen_time_us));
+		return;
+	case JIT_COUNTER_LAZY_MACHINE_CODEGEN_TIME_US:
+		output.Append(Value::BIGINT(entry.jit_runtime.lazy_codegen.machine_codegen_time_us));
+		return;
+	case JIT_COUNTER_LAZY_CODE_SIZE:
+		output.Append(Value::UBIGINT(entry.jit_runtime.lazy_codegen.code_size));
+		return;
+	case JIT_COUNTER_HASH_JOIN_PROBE_LAYOUT:
+		AppendExecutionRegionNullableString(output, entry.jit_runtime.hash_join_probe_layout);
+		return;
+	case JIT_COUNTER_RUNNER_COST_PROFILE:
 		output.Append(Value::BOOLEAN(entry.has_runner_cost));
 		return;
-	case 33:
+	case JIT_COUNTER_RUNNER_COST_ROWS:
 		output.Append(Value::BIGINT(entry.runner_cost_rows));
 		return;
-	case 34:
+	case JIT_COUNTER_RUNNER_COST_BATCHES:
 		output.Append(Value::BIGINT(entry.runner_cost_batches));
 		return;
-	case 35:
+	case JIT_COUNTER_RUNNER_COST_EXPRESSION_COST:
 		output.Append(Value::BIGINT(entry.runner_cost_expression_cost));
 		return;
-	case 36:
+	case JIT_COUNTER_RUNNER_COST_GENERATED_STAGE_COUNT:
 		output.Append(Value::BIGINT(entry.runner_cost_generated_stage_count));
 		return;
-	case 37:
+	case JIT_COUNTER_RUNNER_COST_MATERIALIZATION_ELISION_COUNT:
 		output.Append(Value::BIGINT(entry.runner_cost_materialization_elision_count));
 		return;
-	case 38:
+	case JIT_COUNTER_RUNNER_COST_NATIVE_JOIN_STAGE_COUNT:
 		output.Append(Value::BIGINT(entry.runner_cost_native_join_stage_count));
 		return;
-	case 39:
+	case JIT_COUNTER_RUNNER_COST_NATIVE_AGGREGATE_STAGE_COUNT:
 		output.Append(Value::BIGINT(entry.runner_cost_native_aggregate_stage_count));
 		return;
-	case 40:
+	case JIT_COUNTER_RUNNER_COST_NATIVE_SORT_STAGE_COUNT:
 		output.Append(Value::BIGINT(entry.runner_cost_native_sort_stage_count));
 		return;
-	case 41:
+	case JIT_COUNTER_RUNNER_COST_FULL_PIPELINE:
 		output.Append(Value::BOOLEAN(entry.runner_cost_full_pipeline));
 		return;
-	case 42:
+	case JIT_COUNTER_RUNNER_COST_SAVED_WORK_PER_BATCH:
 		output.Append(Value::BIGINT(entry.runner_cost_saved_work_per_batch));
 		return;
-	case 43:
+	case JIT_COUNTER_RUNNER_COST_ACCELERATED_RUNNER_BENEFIT:
 		output.Append(Value::BIGINT(entry.runner_cost_accelerated_runner_benefit));
 		return;
-	case 44:
+	case JIT_COUNTER_RUNNER_COST_STARTUP_COST:
 		output.Append(Value::BIGINT(entry.runner_cost_startup_cost));
 		return;
-	case 45:
+	case JIT_COUNTER_RUNNER_COST_REQUIRED_BENEFIT:
 		output.Append(Value::BIGINT(entry.runner_cost_required_benefit));
 		return;
-	case 46:
+	case JIT_COUNTER_RUNNER_COST_NET_BENEFIT:
 		output.Append(Value::BIGINT(entry.runner_cost_net_benefit));
 		return;
-	case 47:
+	case JIT_COUNTER_RUNNER_COST_SELECTED_ACCELERATED_RUNNER_COUNT:
 		output.Append(Value::UBIGINT(entry.runner_cost_selected_accelerated_runner_count));
 		return;
 	default:
@@ -165,102 +233,70 @@ static void AppendJitCounterColumn(Vector &output, idx_t column_id, const Execut
 
 static unique_ptr<FunctionData> DuckDBJitCountersBind(ClientContext &context, TableFunctionBindInput &input,
                                                       vector<LogicalType> &return_types, vector<string> &names) {
-	names.emplace_back("backend_name");
-	return_types.emplace_back(LogicalType::VARCHAR);
-	names.emplace_back("status");
-	return_types.emplace_back(LogicalType::VARCHAR);
-	names.emplace_back("execution_mode");
-	return_types.emplace_back(LogicalType::VARCHAR);
-	names.emplace_back("selected_runner");
-	return_types.emplace_back(LogicalType::VARCHAR);
-	names.emplace_back("blocker");
-	return_types.emplace_back(LogicalType::VARCHAR);
-	names.emplace_back("count");
-	return_types.emplace_back(LogicalType::UBIGINT);
-	names.emplace_back("decision_time_us");
-	return_types.emplace_back(LogicalType::BIGINT);
-	names.emplace_back("compile_time_us");
-	return_types.emplace_back(LogicalType::BIGINT);
-	names.emplace_back("code_size");
-	return_types.emplace_back(LogicalType::UBIGINT);
-	names.emplace_back("input_rows");
-	return_types.emplace_back(LogicalType::UBIGINT);
-	names.emplace_back("output_rows");
-	return_types.emplace_back(LogicalType::UBIGINT);
-	names.emplace_back("invocation_count");
-	return_types.emplace_back(LogicalType::UBIGINT);
-	names.emplace_back("runtime_time_us");
-	return_types.emplace_back(LogicalType::BIGINT);
-	names.emplace_back("source_contract_output_rows");
-	return_types.emplace_back(LogicalType::UBIGINT);
-	names.emplace_back("source_contract_invocation_count");
-	return_types.emplace_back(LogicalType::UBIGINT);
-	names.emplace_back("source_contract_runtime_time_us");
-	return_types.emplace_back(LogicalType::BIGINT);
-	names.emplace_back("source_stage_runtime_breakdown");
-	return_types.emplace_back(LogicalType::VARCHAR);
-	names.emplace_back("source_stage_count_breakdown");
-	return_types.emplace_back(LogicalType::VARCHAR);
-	names.emplace_back("sink_next_batch_invocation_count");
-	return_types.emplace_back(LogicalType::UBIGINT);
-	names.emplace_back("sink_next_batch_runtime_time_us");
-	return_types.emplace_back(LogicalType::BIGINT);
-	names.emplace_back("generated_body_runtime_time_us");
-	return_types.emplace_back(LogicalType::BIGINT);
-	names.emplace_back("generated_stage_runtime_breakdown");
-	return_types.emplace_back(LogicalType::VARCHAR);
-	names.emplace_back("generated_stage_count_breakdown");
-	return_types.emplace_back(LogicalType::VARCHAR);
-	names.emplace_back("ir_lowering_time_us");
-	return_types.emplace_back(LogicalType::BIGINT);
-	names.emplace_back("backend_analysis_time_us");
-	return_types.emplace_back(LogicalType::BIGINT);
-	names.emplace_back("codegen_time_us");
-	return_types.emplace_back(LogicalType::BIGINT);
-	names.emplace_back("pipeline_cbo_time_us");
-	return_types.emplace_back(LogicalType::BIGINT);
-	names.emplace_back("graph_build_time_us");
-	return_types.emplace_back(LogicalType::BIGINT);
-	names.emplace_back("candidate_cbo_time_us");
-	return_types.emplace_back(LogicalType::BIGINT);
-	names.emplace_back("executable_build_time_us");
-	return_types.emplace_back(LogicalType::BIGINT);
-	names.emplace_back("machine_codegen_time_us");
-	return_types.emplace_back(LogicalType::BIGINT);
-	names.emplace_back("kernel_build_time_us");
-	return_types.emplace_back(LogicalType::BIGINT);
-	names.emplace_back("runner_cost_profile");
-	return_types.emplace_back(LogicalType::BOOLEAN);
-	names.emplace_back("runner_cost_rows");
-	return_types.emplace_back(LogicalType::BIGINT);
-	names.emplace_back("runner_cost_batches");
-	return_types.emplace_back(LogicalType::BIGINT);
-	names.emplace_back("runner_cost_expression_cost");
-	return_types.emplace_back(LogicalType::BIGINT);
-	names.emplace_back("runner_cost_generated_stage_count");
-	return_types.emplace_back(LogicalType::BIGINT);
-	names.emplace_back("runner_cost_materialization_elision_count");
-	return_types.emplace_back(LogicalType::BIGINT);
-	names.emplace_back("runner_cost_native_join_stage_count");
-	return_types.emplace_back(LogicalType::BIGINT);
-	names.emplace_back("runner_cost_native_aggregate_stage_count");
-	return_types.emplace_back(LogicalType::BIGINT);
-	names.emplace_back("runner_cost_native_sort_stage_count");
-	return_types.emplace_back(LogicalType::BIGINT);
-	names.emplace_back("runner_cost_full_pipeline");
-	return_types.emplace_back(LogicalType::BOOLEAN);
-	names.emplace_back("runner_cost_saved_work_per_batch");
-	return_types.emplace_back(LogicalType::BIGINT);
-	names.emplace_back("runner_cost_accelerated_runner_benefit");
-	return_types.emplace_back(LogicalType::BIGINT);
-	names.emplace_back("runner_cost_startup_cost");
-	return_types.emplace_back(LogicalType::BIGINT);
-	names.emplace_back("runner_cost_required_benefit");
-	return_types.emplace_back(LogicalType::BIGINT);
-	names.emplace_back("runner_cost_net_benefit");
-	return_types.emplace_back(LogicalType::BIGINT);
-	names.emplace_back("runner_cost_selected_accelerated_runner_count");
-	return_types.emplace_back(LogicalType::UBIGINT);
+	AddExecutionRegionTableFunctionColumn(return_types, names, "backend_name", LogicalType::VARCHAR);
+	AddExecutionRegionTableFunctionColumn(return_types, names, "status", LogicalType::VARCHAR);
+	AddExecutionRegionTableFunctionColumn(return_types, names, "execution_mode", LogicalType::VARCHAR);
+	AddExecutionRegionTableFunctionColumn(return_types, names, "selected_runner", LogicalType::VARCHAR);
+	AddExecutionRegionTableFunctionColumn(return_types, names, "blocker", LogicalType::VARCHAR);
+	AddExecutionRegionTableFunctionColumn(return_types, names, "count", LogicalType::UBIGINT);
+	AddExecutionRegionTableFunctionColumn(return_types, names, "decision_time_us", LogicalType::BIGINT);
+	AddExecutionRegionTableFunctionColumn(return_types, names, "compile_time_us", LogicalType::BIGINT);
+	AddExecutionRegionTableFunctionColumn(return_types, names, "code_size", LogicalType::UBIGINT);
+	AddExecutionRegionTableFunctionColumn(return_types, names, "input_rows", LogicalType::UBIGINT);
+	AddExecutionRegionTableFunctionColumn(return_types, names, "output_rows", LogicalType::UBIGINT);
+	AddExecutionRegionTableFunctionColumn(return_types, names, "invocation_count", LogicalType::UBIGINT);
+	AddExecutionRegionTableFunctionColumn(return_types, names, "runtime_time_us", LogicalType::BIGINT);
+	AddExecutionRegionTableFunctionColumn(return_types, names, "source_contract_output_rows", LogicalType::UBIGINT);
+	AddExecutionRegionTableFunctionColumn(return_types, names, "source_contract_invocation_count",
+	                                      LogicalType::UBIGINT);
+	AddExecutionRegionTableFunctionColumn(return_types, names, "source_contract_runtime_time_us", LogicalType::BIGINT);
+	AddExecutionRegionTableFunctionColumn(return_types, names, "source_stage_runtime_breakdown", LogicalType::VARCHAR);
+	AddExecutionRegionTableFunctionColumn(return_types, names, "source_stage_count_breakdown", LogicalType::VARCHAR);
+	AddExecutionRegionTableFunctionColumn(return_types, names, "sink_next_batch_invocation_count",
+	                                      LogicalType::UBIGINT);
+	AddExecutionRegionTableFunctionColumn(return_types, names, "sink_next_batch_runtime_time_us", LogicalType::BIGINT);
+	AddExecutionRegionTableFunctionColumn(return_types, names, "generated_body_runtime_time_us", LogicalType::BIGINT);
+	AddExecutionRegionTableFunctionColumn(return_types, names, "generated_stage_runtime_breakdown",
+	                                      LogicalType::VARCHAR);
+	AddExecutionRegionTableFunctionColumn(return_types, names, "generated_stage_count_breakdown", LogicalType::VARCHAR);
+	AddExecutionRegionTableFunctionColumn(return_types, names, "ir_lowering_time_us", LogicalType::BIGINT);
+	AddExecutionRegionTableFunctionColumn(return_types, names, "backend_analysis_time_us", LogicalType::BIGINT);
+	AddExecutionRegionTableFunctionColumn(return_types, names, "codegen_time_us", LogicalType::BIGINT);
+	AddExecutionRegionTableFunctionColumn(return_types, names, "pipeline_cbo_time_us", LogicalType::BIGINT);
+	AddExecutionRegionTableFunctionColumn(return_types, names, "graph_build_time_us", LogicalType::BIGINT);
+	AddExecutionRegionTableFunctionColumn(return_types, names, "candidate_cbo_time_us", LogicalType::BIGINT);
+	AddExecutionRegionTableFunctionColumn(return_types, names, "executable_build_time_us", LogicalType::BIGINT);
+	AddExecutionRegionTableFunctionColumn(return_types, names, "machine_codegen_time_us", LogicalType::BIGINT);
+	AddExecutionRegionTableFunctionColumn(return_types, names, "kernel_build_time_us", LogicalType::BIGINT);
+	AddExecutionRegionTableFunctionColumn(return_types, names, "lazy_codegen_time_us", LogicalType::BIGINT);
+	AddExecutionRegionTableFunctionColumn(return_types, names, "lazy_machine_codegen_time_us", LogicalType::BIGINT);
+	AddExecutionRegionTableFunctionColumn(return_types, names, "lazy_code_size", LogicalType::UBIGINT);
+	AddExecutionRegionTableFunctionColumn(return_types, names, "hash_join_probe_layout", LogicalType::VARCHAR);
+	AddExecutionRegionTableFunctionColumn(return_types, names, "runner_cost_profile", LogicalType::BOOLEAN);
+	AddExecutionRegionTableFunctionColumn(return_types, names, "runner_cost_rows", LogicalType::BIGINT);
+	AddExecutionRegionTableFunctionColumn(return_types, names, "runner_cost_batches", LogicalType::BIGINT);
+	AddExecutionRegionTableFunctionColumn(return_types, names, "runner_cost_expression_cost", LogicalType::BIGINT);
+	AddExecutionRegionTableFunctionColumn(return_types, names, "runner_cost_generated_stage_count",
+	                                      LogicalType::BIGINT);
+	AddExecutionRegionTableFunctionColumn(return_types, names, "runner_cost_materialization_elision_count",
+	                                      LogicalType::BIGINT);
+	AddExecutionRegionTableFunctionColumn(return_types, names, "runner_cost_native_join_stage_count",
+	                                      LogicalType::BIGINT);
+	AddExecutionRegionTableFunctionColumn(return_types, names, "runner_cost_native_aggregate_stage_count",
+	                                      LogicalType::BIGINT);
+	AddExecutionRegionTableFunctionColumn(return_types, names, "runner_cost_native_sort_stage_count",
+	                                      LogicalType::BIGINT);
+	AddExecutionRegionTableFunctionColumn(return_types, names, "runner_cost_full_pipeline", LogicalType::BOOLEAN);
+	AddExecutionRegionTableFunctionColumn(return_types, names, "runner_cost_saved_work_per_batch", LogicalType::BIGINT);
+	AddExecutionRegionTableFunctionColumn(return_types, names, "runner_cost_accelerated_runner_benefit",
+	                                      LogicalType::BIGINT);
+	AddExecutionRegionTableFunctionColumn(return_types, names, "runner_cost_startup_cost", LogicalType::BIGINT);
+	AddExecutionRegionTableFunctionColumn(return_types, names, "runner_cost_required_benefit", LogicalType::BIGINT);
+	AddExecutionRegionTableFunctionColumn(return_types, names, "runner_cost_net_benefit", LogicalType::BIGINT);
+	AddExecutionRegionTableFunctionColumn(return_types, names, "runner_cost_selected_accelerated_runner_count",
+	                                      LogicalType::UBIGINT);
+	D_ASSERT(names.size() == JIT_COUNTER_COLUMN_COUNT);
+	D_ASSERT(return_types.size() == JIT_COUNTER_COLUMN_COUNT);
 	return nullptr;
 }
 

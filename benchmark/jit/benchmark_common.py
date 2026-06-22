@@ -30,6 +30,9 @@ REGION_SUMMARY_FIELDS = (
     "executable_build_time_us",
     "machine_codegen_time_us",
     "kernel_build_time_us",
+    "lazy_codegen_time_us",
+    "lazy_machine_codegen_time_us",
+    "lazy_code_size",
     "code_size",
     "runtime_time_us",
     "source_runtime_time_us",
@@ -62,6 +65,10 @@ PROFILE_EVENT_FIELDS = (
     "executable_build_time_us",
     "machine_codegen_time_us",
     "kernel_build_time_us",
+    "lazy_codegen_time_us",
+    "lazy_machine_codegen_time_us",
+    "lazy_code_size",
+    "hash_join_probe_layout",
     "selected_source_execution",
     "selected_uses_scan_filters",
     "candidate_uses_scan_filters",
@@ -231,6 +238,9 @@ def counter_region_summary(counter_rows: list[dict]) -> dict:
         summary["executable_build_time_us"] += row_int(row, "executable_build_time_us")
         summary["machine_codegen_time_us"] += row_int(row, "machine_codegen_time_us")
         summary["kernel_build_time_us"] += row_int(row, "kernel_build_time_us")
+        summary["lazy_codegen_time_us"] += row_int(row, "lazy_codegen_time_us")
+        summary["lazy_machine_codegen_time_us"] += row_int(row, "lazy_machine_codegen_time_us")
+        summary["lazy_code_size"] += row_int(row, "lazy_code_size")
         summary["code_size"] += row_int(row, "code_size")
         summary["runtime_time_us"] += row_int(row, "runtime_time_us")
         summary["source_runtime_time_us"] += row_int(row, "source_contract_runtime_time_us")

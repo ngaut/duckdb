@@ -138,6 +138,9 @@ TEST_CASE("Execution region events are bounded and counters are cumulative", "[a
 		REQUIRE(counter.executable_build_time_us == 0);
 		REQUIRE(counter.machine_codegen_time_us == 0);
 		REQUIRE(counter.kernel_build_time_us == 0);
+		REQUIRE(counter.jit_runtime.lazy_codegen.codegen_time_us == 0);
+		REQUIRE(counter.jit_runtime.lazy_codegen.machine_codegen_time_us == 0);
+		REQUIRE(counter.jit_runtime.lazy_codegen.code_size == 0);
 	}
 	REQUIRE(found_auto_skip);
 }
@@ -385,6 +388,8 @@ TEST_CASE("Execution region runtime trace records kernel execution facts", "[api
 			REQUIRE(event.has_pipeline);
 			REQUIRE(!event.pipeline_shape.empty());
 			REQUIRE(event.generated_body_runtime_time_us >= 0);
+			REQUIRE(event.jit_runtime.lazy_codegen.codegen_time_us >= 0);
+			REQUIRE(event.jit_runtime.lazy_codegen.machine_codegen_time_us >= 0);
 			REQUIRE(event.generated_body_runtime_time_us + event.source_contract_runtime_time_us <=
 			        event.runtime_time_us);
 			const bool expected_runtime_result = event.runtime_result == "need_more_input" ||
@@ -430,6 +435,7 @@ TEST_CASE("EXPLAIN ANALYZE exposes compact execution region profile", "[api][jit
 	REQUIRE(StringUtil::Contains(analyzed_plan, "compiled=1"));
 	REQUIRE(StringUtil::Contains(analyzed_plan, "runtime_regions=1"));
 	REQUIRE(StringUtil::Contains(analyzed_plan, "generated_runtime_us="));
+	REQUIRE(StringUtil::Contains(analyzed_plan, "lazy_codegen_us="));
 	REQUIRE(StringUtil::Contains(analyzed_plan, "runtime_dominant="));
 	REQUIRE(StringUtil::Contains(analyzed_plan, "source_runtime_pct="));
 	REQUIRE(StringUtil::Contains(analyzed_plan, "generated_runtime_pct="));
@@ -485,6 +491,10 @@ TEST_CASE("EXPLAIN ANALYZE exposes compact execution region profile", "[api][jit
 	REQUIRE(StringUtil::Contains(analyzed_plan, "\"executable_build_time_us\""));
 	REQUIRE(StringUtil::Contains(analyzed_plan, "\"machine_codegen_time_us\""));
 	REQUIRE(StringUtil::Contains(analyzed_plan, "\"kernel_build_time_us\""));
+	REQUIRE(StringUtil::Contains(analyzed_plan, "\"lazy_codegen_time_us\""));
+	REQUIRE(StringUtil::Contains(analyzed_plan, "\"lazy_machine_codegen_time_us\""));
+	REQUIRE(StringUtil::Contains(analyzed_plan, "\"lazy_code_size\""));
+	REQUIRE(StringUtil::Contains(analyzed_plan, "\"hash_join_probe_layout\""));
 	REQUIRE(StringUtil::Contains(analyzed_plan, "\"runner_cost_profile\""));
 	REQUIRE(StringUtil::Contains(analyzed_plan, "\"runner_cost_accelerated_runner_benefit\""));
 	REQUIRE(StringUtil::Contains(analyzed_plan, "\"runner_cost_startup_cost\""));

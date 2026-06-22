@@ -151,8 +151,8 @@ static void PrepareExecutableRegionExpression(const SljitNativeRegionExpressionP
 	PrepareExecutableRegionExpressionInputs(expr);
 }
 
-static bool BuildExecutableRegionExpressionCode(SljitExecutableRegionExpression &expr, bool require_boolean,
-                                                string &error) {
+static bool CompilePreparedExecutableRegionExpression(SljitExecutableRegionExpression &expr, bool require_boolean,
+                                                      string &error) {
 	auto &semantic = expr.plan;
 	switch (semantic.kind) {
 	case SljitNativeRegionExpressionKind::REFERENCE:
@@ -353,10 +353,11 @@ static bool BuildExecutableRegionExpressionCode(SljitExecutableRegionExpression 
 	}
 }
 
-static bool BuildExecutableRegionExpression(const SljitNativeRegionExpressionPlan &plan, bool require_boolean,
-                                            SljitExecutableRegionExpression &expr, string &error) {
+static bool PrepareAndCompileExecutableRegionExpression(const SljitNativeRegionExpressionPlan &plan,
+                                                        bool require_boolean, SljitExecutableRegionExpression &expr,
+                                                        string &error) {
 	PrepareExecutableRegionExpression(plan, expr);
-	return BuildExecutableRegionExpressionCode(expr, require_boolean, error);
+	return CompilePreparedExecutableRegionExpression(expr, require_boolean, error);
 }
 
 static unique_ptr<ExecutionExpressionIR>
@@ -701,19 +702,16 @@ static bool BuildExecutableRegionOp(const SljitNativeRegionOpPlan &op, SljitExec
 		if (!build_filter_code) {
 			return true;
 		}
-		return BuildExecutableRegionExpressionCode(executable.filter, true, error);
+		return CompilePreparedExecutableRegionExpression(executable.filter, true, error);
 	case SljitNativeRegionOpKind::HASH_JOIN_PROBE:
 		executable.hash_join_probe.plan = CopySljitNativeHashJoinProbePlan(op.hash_join_probe, false);
 		if (op.hash_join_probe.residual_predicate &&
-		    !BuildExecutableRegionExpression(op.hash_join_probe.residual_filter, true,
-		                                     executable.hash_join_probe.residual_filter, error)) {
+		    !PrepareAndCompileExecutableRegionExpression(op.hash_join_probe.residual_filter, true,
+		                                                 executable.hash_join_probe.residual_filter, error)) {
 			return false;
 		}
-		executable.hash_join_probe.code = BuildSljitHashJoinProbe(
-		    op.hash_join_probe.keys, op.hash_join_probe.equality_key_count, op.hash_join_probe.mark_build_match,
-		    op.hash_join_probe.found_match_offset, op.hash_join_probe.pointer_offset, op.hash_join_probe.output_mode,
-		    executable.hash_join_probe.function, error);
-		return executable.hash_join_probe.code != nullptr && executable.hash_join_probe.function != nullptr;
+		return ValidateSljitHashJoinProbe(op.hash_join_probe.keys, op.hash_join_probe.equality_key_count,
+		                                  op.hash_join_probe.output_mode, error);
 	case SljitNativeRegionOpKind::HASH_JOIN_BUILD:
 		executable.hash_join_build.plan.sink_info = op.hash_join_build.sink_info;
 		executable.hash_join_build.plan.input_types = op.hash_join_build.input_types;
@@ -735,7 +733,8 @@ static bool BuildExecutableRegionOp(const SljitNativeRegionOpPlan &op, SljitExec
 			executable.nested_loop_join_probe.plan.conditions.push_back(std::move(condition_plan));
 
 			SljitExecutableRegionExpression executable_condition;
-			if (!BuildExecutableRegionExpression(condition.lhs_condition, false, executable_condition, error)) {
+			if (!PrepareAndCompileExecutableRegionExpression(condition.lhs_condition, false, executable_condition,
+			                                                 error)) {
 				return false;
 			}
 			executable.nested_loop_join_probe.lhs_conditions.push_back(std::move(executable_condition));
@@ -751,7 +750,7 @@ static bool BuildExecutableRegionOp(const SljitNativeRegionOpPlan &op, SljitExec
 		executable.nested_loop_join_build.rhs_conditions.reserve(op.nested_loop_join_build.rhs_conditions.size());
 		for (auto &condition : op.nested_loop_join_build.rhs_conditions) {
 			SljitExecutableRegionExpression executable_condition;
-			if (!BuildExecutableRegionExpression(condition, false, executable_condition, error)) {
+			if (!PrepareAndCompileExecutableRegionExpression(condition, false, executable_condition, error)) {
 				return false;
 			}
 			executable.nested_loop_join_build.rhs_conditions.push_back(std::move(executable_condition));
@@ -764,7 +763,7 @@ static bool BuildExecutableRegionOp(const SljitNativeRegionOpPlan &op, SljitExec
 		executable.order_sink.order_keys.reserve(op.order_sink.order_keys.size());
 		for (auto &order_key : op.order_sink.order_keys) {
 			SljitExecutableRegionExpression executable_order_key;
-			if (!BuildExecutableRegionExpression(order_key, false, executable_order_key, error)) {
+			if (!PrepareAndCompileExecutableRegionExpression(order_key, false, executable_order_key, error)) {
 				return false;
 			}
 			executable.order_sink.order_keys.push_back(std::move(executable_order_key));
@@ -792,7 +791,7 @@ static bool BuildExecutableRegionOp(const SljitNativeRegionOpPlan &op, SljitExec
 		executable.projections.reserve(op.projections.size());
 		for (auto &projection : op.projections) {
 			SljitExecutableRegionExpression executable_projection;
-			if (!BuildExecutableRegionExpression(projection, false, executable_projection, error)) {
+			if (!PrepareAndCompileExecutableRegionExpression(projection, false, executable_projection, error)) {
 				return false;
 			}
 			executable.projections.push_back(std::move(executable_projection));
@@ -828,7 +827,7 @@ bool BuildSljitExecutableRegion(const SljitNativeRegionPlan &region, SljitExecut
 				return false;
 			}
 			if (!aggregate_update_op.aggregate_update.filtered_update.IsExecutable() &&
-			    !BuildExecutableRegionExpressionCode(executable.ops[op_idx - 1].filter, true, error)) {
+			    !CompilePreparedExecutableRegionExpression(executable.ops[op_idx - 1].filter, true, error)) {
 				return false;
 			}
 			if (!aggregate_update_op.aggregate_update.filtered_update.IsExecutable()) {

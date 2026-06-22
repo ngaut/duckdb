@@ -37,13 +37,16 @@ static hash_t ExecutionRegionCounterHash(const ExecutionRegionEvent &event) {
 	result = ExecutionRegionTelemetryCombine(result, ExecutionRegionTelemetryHashEnum(event.execution_mode_kind));
 	result = ExecutionRegionTelemetryCombine(result, ExecutionRegionTelemetryHashEnum(event.selected_runner));
 	result = ExecutionRegionTelemetryCombine(result, ExecutionRegionTelemetryHashString(event.blocker));
+	result = ExecutionRegionTelemetryCombine(
+	    result, ExecutionRegionTelemetryHashString(event.jit_runtime.hash_join_probe_layout));
 	return result;
 }
 
 static bool ExecutionRegionCounterMatches(const ExecutionRegionCounter &counter, const ExecutionRegionEvent &event) {
 	return counter.backend_name == event.backend_name && counter.status_kind == event.status_kind &&
 	       counter.execution_mode_kind == event.execution_mode_kind &&
-	       counter.selected_runner_kind == event.selected_runner && counter.blocker == event.blocker;
+	       counter.selected_runner_kind == event.selected_runner && counter.blocker == event.blocker &&
+	       counter.jit_runtime.hash_join_probe_layout == event.jit_runtime.hash_join_probe_layout;
 }
 
 static void AccumulateExecutionRegionCounter(ExecutionRegionCounter &counter, const ExecutionRegionEvent &event) {
@@ -90,6 +93,7 @@ static void AccumulateExecutionRegionCounter(ExecutionRegionCounter &counter, co
 	counter.executable_build_time_us += event.executable_build_time_us;
 	counter.machine_codegen_time_us += event.machine_codegen_time_us;
 	counter.kernel_build_time_us += event.kernel_build_time_us;
+	AddExecutionRegionLazyCodegenMetrics(counter.jit_runtime.lazy_codegen, event.jit_runtime.lazy_codegen);
 }
 
 void ExecutionRegionEventLog::RecordCounter(const ExecutionRegionEvent &event) {
@@ -111,6 +115,7 @@ void ExecutionRegionEventLog::RecordCounter(const ExecutionRegionEvent &event) {
 	counter.execution_mode_kind = event.execution_mode_kind;
 	counter.selected_runner_kind = event.selected_runner;
 	counter.blocker = event.blocker;
+	counter.jit_runtime.hash_join_probe_layout = event.jit_runtime.hash_join_probe_layout;
 	AccumulateExecutionRegionCounter(counter, event);
 	auto index = counters.size();
 	counters.push_back(std::move(counter));

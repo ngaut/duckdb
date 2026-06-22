@@ -81,7 +81,11 @@ COUNTER_FIELDS = (
     "executable_build_time_us",
     "machine_codegen_time_us",
     "kernel_build_time_us",
+    "lazy_codegen_time_us",
+    "lazy_machine_codegen_time_us",
+    "lazy_code_size",
     "code_size",
+    "hash_join_probe_layout",
 )
 
 PERFORMANCE_GAP_FIELDS = (
@@ -103,6 +107,9 @@ PERFORMANCE_GAP_FIELDS = (
     "auto_executable_build_time_us",
     "auto_machine_codegen_time_us",
     "auto_kernel_build_time_us",
+    "auto_lazy_codegen_time_us",
+    "auto_lazy_machine_codegen_time_us",
+    "auto_lazy_code_size",
     "auto_primary_blocker",
     "auto_primary_blocker_count",
     "auto_runner_cost_benefit",

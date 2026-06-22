@@ -8,7 +8,78 @@ namespace duckdb {
 
 struct DuckDBJitEventsData : public ExecutionRegionTableFunctionState<ExecutionRegionEvent> {};
 
-static constexpr idx_t JIT_EVENT_CANDIDATE_TRACE_COLUMN_OFFSET = 63;
+enum JitEventColumn : idx_t {
+	JIT_EVENT_EVENT_ID,
+	JIT_EVENT_BACKEND_NAME,
+	JIT_EVENT_STATUS,
+	JIT_EVENT_EXECUTION_MODE,
+	JIT_EVENT_SELECTED_SOURCE_EXECUTION,
+	JIT_EVENT_SELECTED_USES_SCAN_FILTERS,
+	JIT_EVENT_CANDIDATE_USES_SCAN_FILTERS,
+	JIT_EVENT_REASON,
+	JIT_EVENT_IR,
+	JIT_EVENT_DECISION_TIME_US,
+	JIT_EVENT_COMPILE_TIME_US,
+	JIT_EVENT_CODE_SIZE,
+	JIT_EVENT_PHASE,
+	JIT_EVENT_KERNEL_ID,
+	JIT_EVENT_INPUT_ROWS,
+	JIT_EVENT_OUTPUT_ROWS,
+	JIT_EVENT_INVOCATION_COUNT,
+	JIT_EVENT_RUNTIME_TIME_US,
+	JIT_EVENT_RUNTIME_RESULT,
+	JIT_EVENT_SOURCE_CONTRACT_OUTPUT_ROWS,
+	JIT_EVENT_SOURCE_CONTRACT_INVOCATION_COUNT,
+	JIT_EVENT_SOURCE_CONTRACT_RUNTIME_TIME_US,
+	JIT_EVENT_SOURCE_STAGE_RUNTIME_BREAKDOWN,
+	JIT_EVENT_SOURCE_STAGE_COUNT_BREAKDOWN,
+	JIT_EVENT_SINK_NEXT_BATCH_INVOCATION_COUNT,
+	JIT_EVENT_SINK_NEXT_BATCH_RUNTIME_TIME_US,
+	JIT_EVENT_GENERATED_BODY_RUNTIME_TIME_US,
+	JIT_EVENT_GENERATED_STAGE_RUNTIME_BREAKDOWN,
+	JIT_EVENT_GENERATED_STAGE_COUNT_BREAKDOWN,
+	JIT_EVENT_CANDIDATE_ID,
+	JIT_EVENT_CANDIDATE_SHAPE,
+	JIT_EVENT_CANDIDATE_NODE_COUNT,
+	JIT_EVENT_CANDIDATE_ESTIMATED_CARDINALITY,
+	JIT_EVENT_CANDIDATE_START_OPERATOR_INDEX,
+	JIT_EVENT_CANDIDATE_END_OPERATOR_INDEX,
+	JIT_EVENT_SELECTED_RUNNER,
+	JIT_EVENT_BLOCKER,
+	JIT_EVENT_IR_LOWERING_TIME_US,
+	JIT_EVENT_BACKEND_ANALYSIS_TIME_US,
+	JIT_EVENT_CODEGEN_TIME_US,
+	JIT_EVENT_PIPELINE_CBO_TIME_US,
+	JIT_EVENT_GRAPH_BUILD_TIME_US,
+	JIT_EVENT_CANDIDATE_CBO_TIME_US,
+	JIT_EVENT_EXECUTABLE_BUILD_TIME_US,
+	JIT_EVENT_MACHINE_CODEGEN_TIME_US,
+	JIT_EVENT_KERNEL_BUILD_TIME_US,
+	JIT_EVENT_LAZY_CODEGEN_TIME_US,
+	JIT_EVENT_LAZY_MACHINE_CODEGEN_TIME_US,
+	JIT_EVENT_LAZY_CODE_SIZE,
+	JIT_EVENT_HASH_JOIN_PROBE_LAYOUT,
+	JIT_EVENT_CANDIDATE_PIPELINE_SHAPE,
+	JIT_EVENT_RUNNER_COST_PROFILE,
+	JIT_EVENT_RUNNER_COST_ROWS,
+	JIT_EVENT_RUNNER_COST_BATCHES,
+	JIT_EVENT_RUNNER_COST_EXPRESSION_COST,
+	JIT_EVENT_RUNNER_COST_GENERATED_STAGE_COUNT,
+	JIT_EVENT_RUNNER_COST_MATERIALIZATION_ELISION_COUNT,
+	JIT_EVENT_RUNNER_COST_NATIVE_JOIN_STAGE_COUNT,
+	JIT_EVENT_RUNNER_COST_NATIVE_AGGREGATE_STAGE_COUNT,
+	JIT_EVENT_RUNNER_COST_NATIVE_SORT_STAGE_COUNT,
+	JIT_EVENT_RUNNER_COST_FULL_PIPELINE,
+	JIT_EVENT_RUNNER_COST_SAVED_WORK_PER_BATCH,
+	JIT_EVENT_RUNNER_COST_ACCELERATED_RUNNER_BENEFIT,
+	JIT_EVENT_RUNNER_COST_STARTUP_COST,
+	JIT_EVENT_RUNNER_COST_REQUIRED_BENEFIT,
+	JIT_EVENT_RUNNER_COST_NET_BENEFIT,
+	JIT_EVENT_RUNNER_COST_SELECTED_ACCELERATED_RUNNER,
+	JIT_EVENT_COLUMN_COUNT
+};
+
+static constexpr idx_t JIT_EVENT_CANDIDATE_TRACE_COLUMN_OFFSET = JIT_EVENT_COLUMN_COUNT;
 static constexpr idx_t JIT_EVENT_PIPELINE_SHAPE_COLUMN =
     JIT_EVENT_CANDIDATE_TRACE_COLUMN_OFFSET + EXECUTION_REGION_CANDIDATE_TRACE_COLUMN_COUNT;
 static constexpr idx_t JIT_EVENT_PIPELINE_ESTIMATED_CARDINALITY_COLUMN = JIT_EVENT_PIPELINE_SHAPE_COLUMN + 1;
@@ -29,208 +100,220 @@ static void AppendJitEventColumn(Vector &output, idx_t column_id, const Executio
 		return;
 	}
 	switch (column_id) {
-	case 0:
+	case JIT_EVENT_EVENT_ID:
 		output.Append(Value::UBIGINT(entry.event_id));
 		return;
-	case 1:
+	case JIT_EVENT_BACKEND_NAME:
 		output.Append(Value(entry.backend_name));
 		return;
-	case 2:
+	case JIT_EVENT_STATUS:
 		output.Append(Value(ExecutionRegionEventStatusToString(entry.status_kind)));
 		return;
-	case 3:
+	case JIT_EVENT_EXECUTION_MODE:
 		output.Append(Value(ExecutionRegionExecutionModeToString(entry.execution_mode_kind)));
 		return;
-	case 4:
+	case JIT_EVENT_SELECTED_SOURCE_EXECUTION:
 		output.Append(Value(ExecutionRegionSourceExecutionKindToString(entry.selected_source_execution)));
 		return;
-	case 5:
+	case JIT_EVENT_SELECTED_USES_SCAN_FILTERS:
 		output.Append(Value::BOOLEAN(entry.selected_uses_scan_filters));
 		return;
-	case 6:
+	case JIT_EVENT_CANDIDATE_USES_SCAN_FILTERS:
 		output.Append(Value::BOOLEAN(entry.candidate_uses_scan_filters));
 		return;
-	case 7:
+	case JIT_EVENT_REASON:
 		output.Append(Value(entry.reason));
 		return;
-	case 8:
+	case JIT_EVENT_IR:
 		AppendExecutionRegionNullableString(output, entry.ir);
 		return;
-	case 9:
+	case JIT_EVENT_DECISION_TIME_US:
 		output.Append(Value::BIGINT(entry.decision_time_us));
 		return;
-	case 10:
+	case JIT_EVENT_COMPILE_TIME_US:
 		output.Append(Value::BIGINT(entry.compile_time_us));
 		return;
-	case 11:
+	case JIT_EVENT_CODE_SIZE:
 		output.Append(Value::UBIGINT(entry.code_size));
 		return;
-	case 12:
+	case JIT_EVENT_PHASE:
 		output.Append(Value(ExecutionRegionEventPhaseToString(entry.phase_kind)));
 		return;
-	case 13:
+	case JIT_EVENT_KERNEL_ID:
 		output.Append(Value::UBIGINT(entry.kernel_id));
 		return;
-	case 14:
+	case JIT_EVENT_INPUT_ROWS:
 		output.Append(Value::UBIGINT(entry.input_rows));
 		return;
-	case 15:
+	case JIT_EVENT_OUTPUT_ROWS:
 		output.Append(Value::UBIGINT(entry.output_rows));
 		return;
-	case 16:
+	case JIT_EVENT_INVOCATION_COUNT:
 		output.Append(Value::UBIGINT(entry.invocation_count));
 		return;
-	case 17:
+	case JIT_EVENT_RUNTIME_TIME_US:
 		output.Append(Value::BIGINT(entry.runtime_time_us));
 		return;
-	case 18:
+	case JIT_EVENT_RUNTIME_RESULT:
 		AppendExecutionRegionNullableString(output, entry.runtime_result);
 		return;
-	case 19:
+	case JIT_EVENT_SOURCE_CONTRACT_OUTPUT_ROWS:
 		output.Append(Value::UBIGINT(entry.source_contract_output_rows));
 		return;
-	case 20:
+	case JIT_EVENT_SOURCE_CONTRACT_INVOCATION_COUNT:
 		output.Append(Value::UBIGINT(entry.source_contract_invocation_count));
 		return;
-	case 21:
+	case JIT_EVENT_SOURCE_CONTRACT_RUNTIME_TIME_US:
 		output.Append(Value::BIGINT(entry.source_contract_runtime_time_us));
 		return;
-	case 22:
+	case JIT_EVENT_SOURCE_STAGE_RUNTIME_BREAKDOWN:
 		AppendExecutionRegionNullableString(output,
 		                                    RenderExecutionRegionStageRuntimeBreakdown(entry.source_stage_runtime));
 		return;
-	case 23:
+	case JIT_EVENT_SOURCE_STAGE_COUNT_BREAKDOWN:
 		AppendExecutionRegionNullableString(output,
 		                                    RenderExecutionRegionStageCountBreakdown(entry.source_stage_runtime));
 		return;
-	case 24:
+	case JIT_EVENT_SINK_NEXT_BATCH_INVOCATION_COUNT:
 		output.Append(Value::UBIGINT(entry.sink_next_batch_invocation_count));
 		return;
-	case 25:
+	case JIT_EVENT_SINK_NEXT_BATCH_RUNTIME_TIME_US:
 		output.Append(Value::BIGINT(entry.sink_next_batch_runtime_time_us));
 		return;
-	case 26:
+	case JIT_EVENT_GENERATED_BODY_RUNTIME_TIME_US:
 		output.Append(Value::BIGINT(entry.generated_body_runtime_time_us));
 		return;
-	case 27:
+	case JIT_EVENT_GENERATED_STAGE_RUNTIME_BREAKDOWN:
 		AppendExecutionRegionNullableString(output,
 		                                    RenderExecutionRegionStageRuntimeBreakdown(entry.generated_stage_runtime));
 		return;
-	case 28:
+	case JIT_EVENT_GENERATED_STAGE_COUNT_BREAKDOWN:
 		AppendExecutionRegionNullableString(output,
 		                                    RenderExecutionRegionStageCountBreakdown(entry.generated_stage_runtime));
 		return;
-	case 29:
+	case JIT_EVENT_CANDIDATE_ID:
 		output.Append(entry.has_candidate ? Value::UBIGINT(entry.candidate_id) : Value(LogicalType::UBIGINT));
 		return;
-	case 30:
+	case JIT_EVENT_CANDIDATE_SHAPE:
 		if (entry.has_candidate) {
 			output.Append(Value(entry.candidate_shape));
 		} else {
 			output.Append(Value(LogicalType::VARCHAR));
 		}
 		return;
-	case 31:
+	case JIT_EVENT_CANDIDATE_NODE_COUNT:
 		output.Append(entry.has_candidate ? Value::UBIGINT(entry.candidate_node_count) : Value(LogicalType::UBIGINT));
 		return;
-	case 32:
+	case JIT_EVENT_CANDIDATE_ESTIMATED_CARDINALITY:
 		output.Append(entry.has_candidate ? Value::UBIGINT(entry.candidate_estimated_cardinality)
 		                                  : Value(LogicalType::UBIGINT));
 		return;
-	case 33:
+	case JIT_EVENT_CANDIDATE_START_OPERATOR_INDEX:
 		output.Append(entry.has_candidate ? Value::UBIGINT(entry.candidate_start_operator_index)
 		                                  : Value(LogicalType::UBIGINT));
 		return;
-	case 34:
+	case JIT_EVENT_CANDIDATE_END_OPERATOR_INDEX:
 		output.Append(entry.has_candidate ? Value::UBIGINT(entry.candidate_end_operator_index)
 		                                  : Value(LogicalType::UBIGINT));
 		return;
-	case 35:
+	case JIT_EVENT_SELECTED_RUNNER:
 		output.Append(Value(ExecutionRunnerKindToString(entry.selected_runner)));
 		return;
-	case 36:
+	case JIT_EVENT_BLOCKER:
 		AppendExecutionRegionNullableString(output, entry.blocker);
 		return;
-	case 37:
+	case JIT_EVENT_IR_LOWERING_TIME_US:
 		output.Append(Value::BIGINT(entry.ir_lowering_time_us));
 		return;
-	case 38:
+	case JIT_EVENT_BACKEND_ANALYSIS_TIME_US:
 		output.Append(Value::BIGINT(entry.backend_analysis_time_us));
 		return;
-	case 39:
+	case JIT_EVENT_CODEGEN_TIME_US:
 		output.Append(Value::BIGINT(entry.codegen_time_us));
 		return;
-	case 40:
+	case JIT_EVENT_PIPELINE_CBO_TIME_US:
 		output.Append(Value::BIGINT(entry.pipeline_cbo_time_us));
 		return;
-	case 41:
+	case JIT_EVENT_GRAPH_BUILD_TIME_US:
 		output.Append(Value::BIGINT(entry.graph_build_time_us));
 		return;
-	case 42:
+	case JIT_EVENT_CANDIDATE_CBO_TIME_US:
 		output.Append(Value::BIGINT(entry.candidate_cbo_time_us));
 		return;
-	case 43:
+	case JIT_EVENT_EXECUTABLE_BUILD_TIME_US:
 		output.Append(Value::BIGINT(entry.executable_build_time_us));
 		return;
-	case 44:
+	case JIT_EVENT_MACHINE_CODEGEN_TIME_US:
 		output.Append(Value::BIGINT(entry.machine_codegen_time_us));
 		return;
-	case 45:
+	case JIT_EVENT_KERNEL_BUILD_TIME_US:
 		output.Append(Value::BIGINT(entry.kernel_build_time_us));
 		return;
-	case 46:
+	case JIT_EVENT_LAZY_CODEGEN_TIME_US:
+		output.Append(Value::BIGINT(entry.jit_runtime.lazy_codegen.codegen_time_us));
+		return;
+	case JIT_EVENT_LAZY_MACHINE_CODEGEN_TIME_US:
+		output.Append(Value::BIGINT(entry.jit_runtime.lazy_codegen.machine_codegen_time_us));
+		return;
+	case JIT_EVENT_LAZY_CODE_SIZE:
+		output.Append(Value::UBIGINT(entry.jit_runtime.lazy_codegen.code_size));
+		return;
+	case JIT_EVENT_HASH_JOIN_PROBE_LAYOUT:
+		AppendExecutionRegionNullableString(output, entry.jit_runtime.hash_join_probe_layout);
+		return;
+	case JIT_EVENT_CANDIDATE_PIPELINE_SHAPE:
 		if (entry.has_candidate) {
 			AppendExecutionRegionNullableString(output, entry.candidate_pipeline_shape);
 		} else {
 			output.Append(Value(LogicalType::VARCHAR));
 		}
 		return;
-	case 47:
+	case JIT_EVENT_RUNNER_COST_PROFILE:
 		output.Append(Value::BOOLEAN(entry.runner_cost.present));
 		return;
-	case 48:
+	case JIT_EVENT_RUNNER_COST_ROWS:
 		output.Append(Value::BIGINT(entry.runner_cost.rows));
 		return;
-	case 49:
+	case JIT_EVENT_RUNNER_COST_BATCHES:
 		output.Append(Value::BIGINT(entry.runner_cost.batches));
 		return;
-	case 50:
+	case JIT_EVENT_RUNNER_COST_EXPRESSION_COST:
 		output.Append(Value::BIGINT(entry.runner_cost.expression_cost));
 		return;
-	case 51:
+	case JIT_EVENT_RUNNER_COST_GENERATED_STAGE_COUNT:
 		output.Append(Value::BIGINT(entry.runner_cost.generated_stage_count));
 		return;
-	case 52:
+	case JIT_EVENT_RUNNER_COST_MATERIALIZATION_ELISION_COUNT:
 		output.Append(Value::BIGINT(entry.runner_cost.materialization_elision_count));
 		return;
-	case 53:
+	case JIT_EVENT_RUNNER_COST_NATIVE_JOIN_STAGE_COUNT:
 		output.Append(Value::BIGINT(entry.runner_cost.native_join_stage_count));
 		return;
-	case 54:
+	case JIT_EVENT_RUNNER_COST_NATIVE_AGGREGATE_STAGE_COUNT:
 		output.Append(Value::BIGINT(entry.runner_cost.native_aggregate_stage_count));
 		return;
-	case 55:
+	case JIT_EVENT_RUNNER_COST_NATIVE_SORT_STAGE_COUNT:
 		output.Append(Value::BIGINT(entry.runner_cost.native_sort_stage_count));
 		return;
-	case 56:
+	case JIT_EVENT_RUNNER_COST_FULL_PIPELINE:
 		output.Append(Value::BOOLEAN(entry.runner_cost.full_pipeline));
 		return;
-	case 57:
+	case JIT_EVENT_RUNNER_COST_SAVED_WORK_PER_BATCH:
 		output.Append(Value::BIGINT(entry.runner_cost.saved_work_per_batch));
 		return;
-	case 58:
+	case JIT_EVENT_RUNNER_COST_ACCELERATED_RUNNER_BENEFIT:
 		output.Append(Value::BIGINT(entry.runner_cost.accelerated_runner_benefit));
 		return;
-	case 59:
+	case JIT_EVENT_RUNNER_COST_STARTUP_COST:
 		output.Append(Value::BIGINT(entry.runner_cost.startup_cost));
 		return;
-	case 60:
+	case JIT_EVENT_RUNNER_COST_REQUIRED_BENEFIT:
 		output.Append(Value::BIGINT(entry.runner_cost.required_benefit));
 		return;
-	case 61:
+	case JIT_EVENT_RUNNER_COST_NET_BENEFIT:
 		output.Append(Value::BIGINT(entry.runner_cost.net_benefit));
 		return;
-	case 62:
+	case JIT_EVENT_RUNNER_COST_SELECTED_ACCELERATED_RUNNER:
 		output.Append(Value::BOOLEAN(entry.runner_cost.selected_accelerated_runner));
 		return;
 	case JIT_EVENT_PIPELINE_SHAPE_COLUMN:
@@ -251,137 +334,91 @@ static void AppendJitEventColumn(Vector &output, idx_t column_id, const Executio
 
 static unique_ptr<FunctionData> DuckDBJitEventsBind(ClientContext &context, TableFunctionBindInput &input,
                                                     vector<LogicalType> &return_types, vector<string> &names) {
-	names.emplace_back("event_id");
-	return_types.emplace_back(LogicalType::UBIGINT);
-	names.emplace_back("backend_name");
-	return_types.emplace_back(LogicalType::VARCHAR);
-	names.emplace_back("status");
-	return_types.emplace_back(LogicalType::VARCHAR);
-	names.emplace_back("execution_mode");
-	return_types.emplace_back(LogicalType::VARCHAR);
-	names.emplace_back("selected_source_execution");
-	return_types.emplace_back(LogicalType::VARCHAR);
-	names.emplace_back("selected_uses_scan_filters");
-	return_types.emplace_back(LogicalType::BOOLEAN);
-	names.emplace_back("candidate_uses_scan_filters");
-	return_types.emplace_back(LogicalType::BOOLEAN);
-	names.emplace_back("reason");
-	return_types.emplace_back(LogicalType::VARCHAR);
-	names.emplace_back("ir");
-	return_types.emplace_back(LogicalType::VARCHAR);
-	names.emplace_back("decision_time_us");
-	return_types.emplace_back(LogicalType::BIGINT);
-	names.emplace_back("compile_time_us");
-	return_types.emplace_back(LogicalType::BIGINT);
-	names.emplace_back("code_size");
-	return_types.emplace_back(LogicalType::UBIGINT);
-	names.emplace_back("phase");
-	return_types.emplace_back(LogicalType::VARCHAR);
-	names.emplace_back("kernel_id");
-	return_types.emplace_back(LogicalType::UBIGINT);
-	names.emplace_back("input_rows");
-	return_types.emplace_back(LogicalType::UBIGINT);
-	names.emplace_back("output_rows");
-	return_types.emplace_back(LogicalType::UBIGINT);
-	names.emplace_back("invocation_count");
-	return_types.emplace_back(LogicalType::UBIGINT);
-	names.emplace_back("runtime_time_us");
-	return_types.emplace_back(LogicalType::BIGINT);
-	names.emplace_back("runtime_result");
-	return_types.emplace_back(LogicalType::VARCHAR);
-	names.emplace_back("source_contract_output_rows");
-	return_types.emplace_back(LogicalType::UBIGINT);
-	names.emplace_back("source_contract_invocation_count");
-	return_types.emplace_back(LogicalType::UBIGINT);
-	names.emplace_back("source_contract_runtime_time_us");
-	return_types.emplace_back(LogicalType::BIGINT);
-	names.emplace_back("source_stage_runtime_breakdown");
-	return_types.emplace_back(LogicalType::VARCHAR);
-	names.emplace_back("source_stage_count_breakdown");
-	return_types.emplace_back(LogicalType::VARCHAR);
-	names.emplace_back("sink_next_batch_invocation_count");
-	return_types.emplace_back(LogicalType::UBIGINT);
-	names.emplace_back("sink_next_batch_runtime_time_us");
-	return_types.emplace_back(LogicalType::BIGINT);
-	names.emplace_back("generated_body_runtime_time_us");
-	return_types.emplace_back(LogicalType::BIGINT);
-	names.emplace_back("generated_stage_runtime_breakdown");
-	return_types.emplace_back(LogicalType::VARCHAR);
-	names.emplace_back("generated_stage_count_breakdown");
-	return_types.emplace_back(LogicalType::VARCHAR);
-	names.emplace_back("candidate_id");
-	return_types.emplace_back(LogicalType::UBIGINT);
-	names.emplace_back("candidate_shape");
-	return_types.emplace_back(LogicalType::VARCHAR);
-	names.emplace_back("candidate_node_count");
-	return_types.emplace_back(LogicalType::UBIGINT);
-	names.emplace_back("candidate_estimated_cardinality");
-	return_types.emplace_back(LogicalType::UBIGINT);
-	names.emplace_back("candidate_start_operator_index");
-	return_types.emplace_back(LogicalType::UBIGINT);
-	names.emplace_back("candidate_end_operator_index");
-	return_types.emplace_back(LogicalType::UBIGINT);
-	names.emplace_back("selected_runner");
-	return_types.emplace_back(LogicalType::VARCHAR);
-	names.emplace_back("blocker");
-	return_types.emplace_back(LogicalType::VARCHAR);
-	names.emplace_back("ir_lowering_time_us");
-	return_types.emplace_back(LogicalType::BIGINT);
-	names.emplace_back("backend_analysis_time_us");
-	return_types.emplace_back(LogicalType::BIGINT);
-	names.emplace_back("codegen_time_us");
-	return_types.emplace_back(LogicalType::BIGINT);
-	names.emplace_back("pipeline_cbo_time_us");
-	return_types.emplace_back(LogicalType::BIGINT);
-	names.emplace_back("graph_build_time_us");
-	return_types.emplace_back(LogicalType::BIGINT);
-	names.emplace_back("candidate_cbo_time_us");
-	return_types.emplace_back(LogicalType::BIGINT);
-	names.emplace_back("executable_build_time_us");
-	return_types.emplace_back(LogicalType::BIGINT);
-	names.emplace_back("machine_codegen_time_us");
-	return_types.emplace_back(LogicalType::BIGINT);
-	names.emplace_back("kernel_build_time_us");
-	return_types.emplace_back(LogicalType::BIGINT);
-	names.emplace_back("candidate_pipeline_shape");
-	return_types.emplace_back(LogicalType::VARCHAR);
-	names.emplace_back("runner_cost_profile");
-	return_types.emplace_back(LogicalType::BOOLEAN);
-	names.emplace_back("runner_cost_rows");
-	return_types.emplace_back(LogicalType::BIGINT);
-	names.emplace_back("runner_cost_batches");
-	return_types.emplace_back(LogicalType::BIGINT);
-	names.emplace_back("runner_cost_expression_cost");
-	return_types.emplace_back(LogicalType::BIGINT);
-	names.emplace_back("runner_cost_generated_stage_count");
-	return_types.emplace_back(LogicalType::BIGINT);
-	names.emplace_back("runner_cost_materialization_elision_count");
-	return_types.emplace_back(LogicalType::BIGINT);
-	names.emplace_back("runner_cost_native_join_stage_count");
-	return_types.emplace_back(LogicalType::BIGINT);
-	names.emplace_back("runner_cost_native_aggregate_stage_count");
-	return_types.emplace_back(LogicalType::BIGINT);
-	names.emplace_back("runner_cost_native_sort_stage_count");
-	return_types.emplace_back(LogicalType::BIGINT);
-	names.emplace_back("runner_cost_full_pipeline");
-	return_types.emplace_back(LogicalType::BOOLEAN);
-	names.emplace_back("runner_cost_saved_work_per_batch");
-	return_types.emplace_back(LogicalType::BIGINT);
-	names.emplace_back("runner_cost_accelerated_runner_benefit");
-	return_types.emplace_back(LogicalType::BIGINT);
-	names.emplace_back("runner_cost_startup_cost");
-	return_types.emplace_back(LogicalType::BIGINT);
-	names.emplace_back("runner_cost_required_benefit");
-	return_types.emplace_back(LogicalType::BIGINT);
-	names.emplace_back("runner_cost_net_benefit");
-	return_types.emplace_back(LogicalType::BIGINT);
-	names.emplace_back("runner_cost_selected_accelerated_runner");
-	return_types.emplace_back(LogicalType::BOOLEAN);
+	AddExecutionRegionTableFunctionColumn(return_types, names, "event_id", LogicalType::UBIGINT);
+	AddExecutionRegionTableFunctionColumn(return_types, names, "backend_name", LogicalType::VARCHAR);
+	AddExecutionRegionTableFunctionColumn(return_types, names, "status", LogicalType::VARCHAR);
+	AddExecutionRegionTableFunctionColumn(return_types, names, "execution_mode", LogicalType::VARCHAR);
+	AddExecutionRegionTableFunctionColumn(return_types, names, "selected_source_execution", LogicalType::VARCHAR);
+	AddExecutionRegionTableFunctionColumn(return_types, names, "selected_uses_scan_filters", LogicalType::BOOLEAN);
+	AddExecutionRegionTableFunctionColumn(return_types, names, "candidate_uses_scan_filters", LogicalType::BOOLEAN);
+	AddExecutionRegionTableFunctionColumn(return_types, names, "reason", LogicalType::VARCHAR);
+	AddExecutionRegionTableFunctionColumn(return_types, names, "ir", LogicalType::VARCHAR);
+	AddExecutionRegionTableFunctionColumn(return_types, names, "decision_time_us", LogicalType::BIGINT);
+	AddExecutionRegionTableFunctionColumn(return_types, names, "compile_time_us", LogicalType::BIGINT);
+	AddExecutionRegionTableFunctionColumn(return_types, names, "code_size", LogicalType::UBIGINT);
+	AddExecutionRegionTableFunctionColumn(return_types, names, "phase", LogicalType::VARCHAR);
+	AddExecutionRegionTableFunctionColumn(return_types, names, "kernel_id", LogicalType::UBIGINT);
+	AddExecutionRegionTableFunctionColumn(return_types, names, "input_rows", LogicalType::UBIGINT);
+	AddExecutionRegionTableFunctionColumn(return_types, names, "output_rows", LogicalType::UBIGINT);
+	AddExecutionRegionTableFunctionColumn(return_types, names, "invocation_count", LogicalType::UBIGINT);
+	AddExecutionRegionTableFunctionColumn(return_types, names, "runtime_time_us", LogicalType::BIGINT);
+	AddExecutionRegionTableFunctionColumn(return_types, names, "runtime_result", LogicalType::VARCHAR);
+	AddExecutionRegionTableFunctionColumn(return_types, names, "source_contract_output_rows", LogicalType::UBIGINT);
+	AddExecutionRegionTableFunctionColumn(return_types, names, "source_contract_invocation_count",
+	                                      LogicalType::UBIGINT);
+	AddExecutionRegionTableFunctionColumn(return_types, names, "source_contract_runtime_time_us", LogicalType::BIGINT);
+	AddExecutionRegionTableFunctionColumn(return_types, names, "source_stage_runtime_breakdown", LogicalType::VARCHAR);
+	AddExecutionRegionTableFunctionColumn(return_types, names, "source_stage_count_breakdown", LogicalType::VARCHAR);
+	AddExecutionRegionTableFunctionColumn(return_types, names, "sink_next_batch_invocation_count",
+	                                      LogicalType::UBIGINT);
+	AddExecutionRegionTableFunctionColumn(return_types, names, "sink_next_batch_runtime_time_us", LogicalType::BIGINT);
+	AddExecutionRegionTableFunctionColumn(return_types, names, "generated_body_runtime_time_us", LogicalType::BIGINT);
+	AddExecutionRegionTableFunctionColumn(return_types, names, "generated_stage_runtime_breakdown",
+	                                      LogicalType::VARCHAR);
+	AddExecutionRegionTableFunctionColumn(return_types, names, "generated_stage_count_breakdown", LogicalType::VARCHAR);
+	AddExecutionRegionTableFunctionColumn(return_types, names, "candidate_id", LogicalType::UBIGINT);
+	AddExecutionRegionTableFunctionColumn(return_types, names, "candidate_shape", LogicalType::VARCHAR);
+	AddExecutionRegionTableFunctionColumn(return_types, names, "candidate_node_count", LogicalType::UBIGINT);
+	AddExecutionRegionTableFunctionColumn(return_types, names, "candidate_estimated_cardinality", LogicalType::UBIGINT);
+	AddExecutionRegionTableFunctionColumn(return_types, names, "candidate_start_operator_index", LogicalType::UBIGINT);
+	AddExecutionRegionTableFunctionColumn(return_types, names, "candidate_end_operator_index", LogicalType::UBIGINT);
+	AddExecutionRegionTableFunctionColumn(return_types, names, "selected_runner", LogicalType::VARCHAR);
+	AddExecutionRegionTableFunctionColumn(return_types, names, "blocker", LogicalType::VARCHAR);
+	AddExecutionRegionTableFunctionColumn(return_types, names, "ir_lowering_time_us", LogicalType::BIGINT);
+	AddExecutionRegionTableFunctionColumn(return_types, names, "backend_analysis_time_us", LogicalType::BIGINT);
+	AddExecutionRegionTableFunctionColumn(return_types, names, "codegen_time_us", LogicalType::BIGINT);
+	AddExecutionRegionTableFunctionColumn(return_types, names, "pipeline_cbo_time_us", LogicalType::BIGINT);
+	AddExecutionRegionTableFunctionColumn(return_types, names, "graph_build_time_us", LogicalType::BIGINT);
+	AddExecutionRegionTableFunctionColumn(return_types, names, "candidate_cbo_time_us", LogicalType::BIGINT);
+	AddExecutionRegionTableFunctionColumn(return_types, names, "executable_build_time_us", LogicalType::BIGINT);
+	AddExecutionRegionTableFunctionColumn(return_types, names, "machine_codegen_time_us", LogicalType::BIGINT);
+	AddExecutionRegionTableFunctionColumn(return_types, names, "kernel_build_time_us", LogicalType::BIGINT);
+	AddExecutionRegionTableFunctionColumn(return_types, names, "lazy_codegen_time_us", LogicalType::BIGINT);
+	AddExecutionRegionTableFunctionColumn(return_types, names, "lazy_machine_codegen_time_us", LogicalType::BIGINT);
+	AddExecutionRegionTableFunctionColumn(return_types, names, "lazy_code_size", LogicalType::UBIGINT);
+	AddExecutionRegionTableFunctionColumn(return_types, names, "hash_join_probe_layout", LogicalType::VARCHAR);
+	AddExecutionRegionTableFunctionColumn(return_types, names, "candidate_pipeline_shape", LogicalType::VARCHAR);
+	AddExecutionRegionTableFunctionColumn(return_types, names, "runner_cost_profile", LogicalType::BOOLEAN);
+	AddExecutionRegionTableFunctionColumn(return_types, names, "runner_cost_rows", LogicalType::BIGINT);
+	AddExecutionRegionTableFunctionColumn(return_types, names, "runner_cost_batches", LogicalType::BIGINT);
+	AddExecutionRegionTableFunctionColumn(return_types, names, "runner_cost_expression_cost", LogicalType::BIGINT);
+	AddExecutionRegionTableFunctionColumn(return_types, names, "runner_cost_generated_stage_count",
+	                                      LogicalType::BIGINT);
+	AddExecutionRegionTableFunctionColumn(return_types, names, "runner_cost_materialization_elision_count",
+	                                      LogicalType::BIGINT);
+	AddExecutionRegionTableFunctionColumn(return_types, names, "runner_cost_native_join_stage_count",
+	                                      LogicalType::BIGINT);
+	AddExecutionRegionTableFunctionColumn(return_types, names, "runner_cost_native_aggregate_stage_count",
+	                                      LogicalType::BIGINT);
+	AddExecutionRegionTableFunctionColumn(return_types, names, "runner_cost_native_sort_stage_count",
+	                                      LogicalType::BIGINT);
+	AddExecutionRegionTableFunctionColumn(return_types, names, "runner_cost_full_pipeline", LogicalType::BOOLEAN);
+	AddExecutionRegionTableFunctionColumn(return_types, names, "runner_cost_saved_work_per_batch", LogicalType::BIGINT);
+	AddExecutionRegionTableFunctionColumn(return_types, names, "runner_cost_accelerated_runner_benefit",
+	                                      LogicalType::BIGINT);
+	AddExecutionRegionTableFunctionColumn(return_types, names, "runner_cost_startup_cost", LogicalType::BIGINT);
+	AddExecutionRegionTableFunctionColumn(return_types, names, "runner_cost_required_benefit", LogicalType::BIGINT);
+	AddExecutionRegionTableFunctionColumn(return_types, names, "runner_cost_net_benefit", LogicalType::BIGINT);
+	AddExecutionRegionTableFunctionColumn(return_types, names, "runner_cost_selected_accelerated_runner",
+	                                      LogicalType::BOOLEAN);
 	AddExecutionRegionCandidateTraceColumns(return_types, names);
-	names.emplace_back("pipeline_shape");
-	return_types.emplace_back(LogicalType::VARCHAR);
-	names.emplace_back("pipeline_estimated_cardinality");
-	return_types.emplace_back(LogicalType::UBIGINT);
+	D_ASSERT(names.size() == JIT_EVENT_CANDIDATE_TRACE_COLUMN_OFFSET + EXECUTION_REGION_CANDIDATE_TRACE_COLUMN_COUNT);
+	D_ASSERT(return_types.size() ==
+	         JIT_EVENT_CANDIDATE_TRACE_COLUMN_OFFSET + EXECUTION_REGION_CANDIDATE_TRACE_COLUMN_COUNT);
+	AddExecutionRegionTableFunctionColumn(return_types, names, "pipeline_shape", LogicalType::VARCHAR);
+	AddExecutionRegionTableFunctionColumn(return_types, names, "pipeline_estimated_cardinality", LogicalType::UBIGINT);
+	D_ASSERT(names.size() == JIT_EVENT_PIPELINE_ESTIMATED_CARDINALITY_COLUMN + 1);
+	D_ASSERT(return_types.size() == JIT_EVENT_PIPELINE_ESTIMATED_CARDINALITY_COLUMN + 1);
 	return nullptr;
 }
 

@@ -165,7 +165,11 @@ def benchmark_counter_rows(counter_rows: list[dict], query_id: str, policy: str,
                 "executable_build_time_us": counter.get("executable_build_time_us", 0),
                 "machine_codegen_time_us": counter.get("machine_codegen_time_us", 0),
                 "kernel_build_time_us": counter.get("kernel_build_time_us", 0),
+                "lazy_codegen_time_us": counter.get("lazy_codegen_time_us", 0),
+                "lazy_machine_codegen_time_us": counter.get("lazy_machine_codegen_time_us", 0),
+                "lazy_code_size": counter.get("lazy_code_size", 0),
                 "code_size": counter.get("code_size", 0),
+                "hash_join_probe_layout": counter.get("hash_join_probe_layout", ""),
             }
         )
     return rows
@@ -264,6 +268,9 @@ def performance_gap_rows(summary_rows: list[dict], counter_rows: list[dict]) -> 
                 "auto_executable_build_time_us": auto.get("executable_build_time_us", ""),
                 "auto_machine_codegen_time_us": auto.get("machine_codegen_time_us", ""),
                 "auto_kernel_build_time_us": auto.get("kernel_build_time_us", ""),
+                "auto_lazy_codegen_time_us": auto.get("lazy_codegen_time_us", ""),
+                "auto_lazy_machine_codegen_time_us": auto.get("lazy_machine_codegen_time_us", ""),
+                "auto_lazy_code_size": auto.get("lazy_code_size", ""),
                 "auto_primary_blocker": primary_blocker,
                 "auto_primary_blocker_count": primary_blocker_count,
                 "auto_runner_cost_benefit": runner_cost["benefit"],

@@ -140,6 +140,39 @@ static bool ExecutionRegionStageIsSortCostWork(const ExecutionRegionStage &stage
 	       stage.kind == ExecutionRegionStageKind::SORT_SINK;
 }
 
+static bool ExecutionRegionStageMayAnchorCompiledBody(const ExecutionRegionStage &stage) {
+	if (!ExecutionRegionStageIsExecutable(stage)) {
+		return false;
+	}
+	if (stage.execution == ExecutionRegionStageExecutionKind::GENERATED_IR) {
+		return true;
+	}
+	if (stage.execution != ExecutionRegionStageExecutionKind::NATIVE_CONTRACT) {
+		return false;
+	}
+	switch (stage.kind) {
+	case ExecutionRegionStageKind::HASH_JOIN_PROBE:
+	case ExecutionRegionStageKind::NESTED_LOOP_JOIN_PROBE:
+	case ExecutionRegionStageKind::NESTED_LOOP_JOIN_BUILD:
+	case ExecutionRegionStageKind::HASH_AGGREGATE_UPDATE:
+	case ExecutionRegionStageKind::PERFECT_HASH_AGGREGATE_UPDATE:
+	case ExecutionRegionStageKind::UNGROUPED_AGGREGATE_UPDATE:
+	case ExecutionRegionStageKind::SORT_SINK:
+		return true;
+	default:
+		return false;
+	}
+}
+
+static bool ExecutionRegionStagePlanMayAnchorCompiledBody(const ExecutionRegionStagePlan &stage_plan) {
+	for (auto &stage : stage_plan.stages) {
+		if (ExecutionRegionStageMayAnchorCompiledBody(stage)) {
+			return true;
+		}
+	}
+	return false;
+}
+
 static bool ExecutionRegionStageIsGeneratedCostWork(const ExecutionRegionStage &stage) {
 	if (!ExecutionRegionStageIsExecutable(stage)) {
 		return false;
@@ -187,17 +220,18 @@ static PhysicalRunnerCostInput BuildPhysicalRunnerCostInput(const ExecutionRegio
 	PhysicalRunnerCostInput result;
 	result.estimated_cardinality = candidate.estimated_cardinality;
 	result.expression_cost = candidate.traits.expression_cost;
+	const auto may_anchor_compiled_body = ExecutionRegionStagePlanMayAnchorCompiledBody(candidate.stage_plan);
 	for (auto &stage : candidate.stage_plan.stages) {
 		AccumulateExecutionRegionPhysicalRunnerStageCost(stage, result);
 	}
 	result.materialization_elision_count = CountExecutionRegionMaterializationElisions(candidate.stage_plan);
-	result.full_pipeline =
-	    ExecutionRegionABIIsFullPipeline(candidate.contract.abi) && candidate.stage_plan.HasExecutableWork();
+	result.full_pipeline = ExecutionRegionABIIsFullPipeline(candidate.contract.abi) &&
+	                       candidate.stage_plan.HasExecutableWork() && may_anchor_compiled_body;
 	result.node_count = candidate.node_count;
 	result.stage_count = candidate.stage_plan.stages.size();
 	result.expression_node_count = candidate.traits.expression_node_count;
 	result.operator_count = candidate.traits.operator_count;
-	result.has_accelerated_work = candidate.stage_plan.HasExecutableWork();
+	result.has_accelerated_work = candidate.stage_plan.HasExecutableWork() && may_anchor_compiled_body;
 	return result;
 }
 
@@ -562,11 +596,42 @@ BuildExecutionRegionFusedContractBoundaryDecision(const ExecutionRegionContract 
 	ExecutionRegionFusedStageContractDecision decision;
 	decision.valid = false;
 	decision.blocker = "fused_region_contract_has_boundaries";
-	decision.reason = "backend advertised fused region but core contract still has boundaries";
+	decision.reason = "core region contract cannot form fused region";
 	decision.reason += ";source_boundaries=" + std::to_string(contract.source_boundary_count);
 	decision.reason += ";missing_contracts=" + std::to_string(contract.missing_contract_count);
 	if (!contract.ir.empty()) {
 		decision.reason += ";" + contract.ir;
+	}
+	return decision;
+}
+
+static ExecutionRegionFusedStageContractDecision
+ValidateExecutionRegionFusedStagePlan(const ExecutionRegionStagePlan &stage_plan) {
+	ExecutionRegionFusedStageContractDecision decision;
+	if (!stage_plan.HasStages()) {
+		decision.valid = false;
+		decision.blocker = "fused_region_stage_plan_empty";
+		decision.reason = "core operator-stage plan is empty";
+		return decision;
+	}
+	bool has_executable_stage = false;
+	for (auto &stage : stage_plan.stages) {
+		if (ExecutionRegionStageExecutionIsFusionBlocker(stage.execution)) {
+			decision.valid = false;
+			decision.blocker = stage.execution == ExecutionRegionStageExecutionKind::SOURCE_BOUNDARY
+			                       ? "fused_region_source_boundary"
+			                       : "fused_region_missing_contract";
+			decision.reason = "core operator-stage plan contains a boundary stage;";
+			decision.reason += DescribeExecutionRegionStageFusionBlocker(stage);
+			return decision;
+		}
+		has_executable_stage = has_executable_stage || ExecutionRegionStageExecutionIsFused(stage.execution);
+	}
+	if (!has_executable_stage) {
+		decision.valid = false;
+		decision.blocker = "fused_region_no_executable_stage";
+		decision.reason = "core operator-stage plan has no generated or native stage";
+		return decision;
 	}
 	return decision;
 }
@@ -581,33 +646,7 @@ ValidateExecutionRegionFusedStageContract(const ExecutionRegionCandidate &candid
 	if (!ExecutionRegionContractHasOnlyNativeStages(candidate.contract)) {
 		return BuildExecutionRegionFusedContractBoundaryDecision(candidate.contract);
 	}
-	if (!candidate.stage_plan.HasStages()) {
-		decision.valid = false;
-		decision.blocker = "fused_region_stage_plan_empty";
-		decision.reason = "backend advertised fused region but core operator-stage plan is empty";
-		return decision;
-	}
-	bool has_executable_stage = false;
-	for (auto &stage : candidate.stage_plan.stages) {
-		if (ExecutionRegionStageExecutionIsFusionBlocker(stage.execution)) {
-			decision.valid = false;
-			decision.blocker = stage.execution == ExecutionRegionStageExecutionKind::SOURCE_BOUNDARY
-			                       ? "fused_region_source_boundary"
-			                       : "fused_region_missing_contract";
-			decision.reason = "backend advertised fused region across core boundary stage;";
-			decision.reason += DescribeExecutionRegionStageFusionBlocker(stage);
-			return decision;
-		}
-		has_executable_stage = has_executable_stage || ExecutionRegionStageExecutionIsFused(stage.execution);
-	}
-	if (!has_executable_stage) {
-		decision.valid = false;
-		decision.blocker = "fused_region_no_executable_stage";
-		decision.reason =
-		    "backend advertised fused region but core operator-stage plan has no generated or native stage";
-		return decision;
-	}
-	return decision;
+	return ValidateExecutionRegionFusedStagePlan(candidate.stage_plan);
 }
 
 static bool ExecutionRegionStageNeedsOperatorReadiness(const ExecutionRegionStage &stage) {
@@ -985,6 +1024,22 @@ unique_ptr<ExecutionRegionPlan> ExecutionRegionPlanner::Build(ClientContext &con
 				    ExecutionRunnerKind::VECTORIZED, &stage_timings);
 			}
 			continue;
+		}
+		if (!needs_backend_diagnostics) {
+			auto stage_plan_decision = ValidateExecutionRegionFusedStagePlan(candidate.stage_plan);
+			if (!stage_plan_decision.valid) {
+				if (should_record_decision_telemetry) {
+					auto decision_time_us = candidate_decision_time_us();
+					execution_region_manager.RecordEvent(
+					    context, backend_name, ExecutionRegionCompileStatus::UNSUPPORTED,
+					    ExecutionRegionExecutionMode::UNSUPPORTED,
+					    AttachExecutionRegionCandidateReason(candidate, std::move(stage_plan_decision.reason),
+					                                         should_record_detailed_telemetry),
+					    stage_plan_decision.blocker, &lowered_region.ir, decision_time_us, 0, 0, &candidate,
+					    ExecutionRunnerKind::VECTORIZED, &stage_timings);
+				}
+				continue;
+			}
 		}
 		ExecutionRegionCompilationInput input(context, lowered_region, candidate);
 		auto analysis_start = std::chrono::steady_clock::now();

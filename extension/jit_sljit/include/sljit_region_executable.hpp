@@ -9,6 +9,7 @@
 #pragma once
 
 #include "sljit_function_types.hpp"
+#include "sljit_region_codegen.hpp"
 #include "sljit_region_plan.hpp"
 
 #include "duckdb/execution/execution_region_kernel.hpp"
@@ -53,6 +54,11 @@ struct SljitExecutableHashJoinProbe {
 	unique_ptr<ExecutionRegionCodeHandle> perfect_code;
 	SljitNativeHashJoinProbeFunction perfect_function = nullptr;
 	SljitExecutableRegionExpression residual_filter;
+
+	bool HasDeferredProbeCodegen() const {
+		string error;
+		return ValidateSljitHashJoinProbe(plan.keys, plan.equality_key_count, plan.output_mode, error);
+	}
 
 	idx_t CodeSize() const {
 		idx_t result = code ? code->CodeSize() : 0;
@@ -195,6 +201,13 @@ struct SljitExecutableRegionOp {
 		}
 		return result;
 	}
+
+	bool HasExecutableBody() const {
+		if (CodeSize() > 0) {
+			return true;
+		}
+		return kind == SljitNativeRegionOpKind::HASH_JOIN_PROBE && hash_join_probe.HasDeferredProbeCodegen();
+	}
 };
 
 struct SljitExecutableRegion {
@@ -206,6 +219,15 @@ struct SljitExecutableRegion {
 			result += op.CodeSize();
 		}
 		return result;
+	}
+
+	bool HasExecutableBody() const {
+		for (auto &op : ops) {
+			if (op.HasExecutableBody()) {
+				return true;
+			}
+		}
+		return false;
 	}
 };
 

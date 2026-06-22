@@ -189,6 +189,27 @@ public:
 		AddExecutionRegionStageRuntime(generated_stage_runtime, stage, runtime_time_us);
 	}
 
+	void RecordHashJoinProbeLayout(const char *layout) override {
+		if (!trace_runtime || !layout || !layout[0]) {
+			return;
+		}
+		auto &hash_join_probe_layout = jit_runtime.hash_join_probe_layout;
+		if (hash_join_probe_layout.empty()) {
+			hash_join_probe_layout = layout;
+			return;
+		}
+		if (hash_join_probe_layout != layout) {
+			hash_join_probe_layout = "mixed";
+		}
+	}
+
+	void RecordLazyCodegen(const ExecutionRegionLazyCodegenMetrics &metrics) override {
+		if (!trace_runtime) {
+			return;
+		}
+		AddExecutionRegionLazyCodegenMetrics(jit_runtime.lazy_codegen, metrics);
+	}
+
 	void Defer(string reason) override {
 		deferred_reason = std::move(reason);
 	}
@@ -285,6 +306,7 @@ public:
 		result.generated_body_runtime_time_us =
 		    runtime_time_us > non_generated_runtime_time_us ? runtime_time_us - non_generated_runtime_time_us : 0;
 		result.generated_stage_runtime = generated_stage_runtime;
+		result.jit_runtime = jit_runtime;
 		return result;
 	}
 
@@ -344,6 +366,7 @@ private:
 	idx_t sink_next_batch_invocation_count = 0;
 	int64_t sink_next_batch_runtime_time_us = 0;
 	vector<ExecutionRegionRecordedStageRuntime> generated_stage_runtime;
+	ExecutionRegionJitRuntimeMetrics jit_runtime;
 	idx_t sink_input_rows = 0;
 	bool sink_blocked = false;
 	bool sink_finished = false;

@@ -244,6 +244,9 @@ WHERE backend_name='sljit'
   AND executable_build_time_us >= 0
   AND machine_codegen_time_us >= 0
   AND kernel_build_time_us >= 0
+  AND lazy_codegen_time_us >= 0
+  AND lazy_machine_codegen_time_us >= 0
+  AND lazy_code_size >= 0
   AND decision_time_us >= ir_lowering_time_us
   AND compile_time_us = codegen_time_us
 ----
@@ -265,6 +268,9 @@ WHERE backend_name='sljit'
   AND executable_build_time_us >= 0
   AND machine_codegen_time_us >= 0
   AND kernel_build_time_us >= 0
+  AND lazy_codegen_time_us >= 0
+  AND lazy_machine_codegen_time_us >= 0
+  AND lazy_code_size >= 0
   AND compile_time_us = codegen_time_us
 ----
 1
@@ -603,6 +609,9 @@ WHERE event_id > base_event_id
   AND executable_build_time_us >= 0
   AND machine_codegen_time_us >= 0
   AND kernel_build_time_us >= 0
+  AND lazy_codegen_time_us >= 0
+  AND lazy_machine_codegen_time_us >= 0
+  AND lazy_code_size >= 0
   AND runner_cost_profile
   AND code_size > 0
   AND runner_cost_generated_stage_count > 0
@@ -1617,6 +1626,11 @@ WHERE event_id > base_event_id
   AND phase='runtime'
   AND status='executed'
   AND execution_mode='native'
+  AND hash_join_probe_layout='perfect_hash_table'
+  AND lazy_codegen_time_us >= 0
+  AND lazy_machine_codegen_time_us >= 0
+  AND lazy_code_size > 0
+  AND generated_stage_runtime_breakdown LIKE '%hash_join_probe.generated_perfect_probe_function%'
   AND generated_stage_runtime_breakdown LIKE '%hash_join_probe.materialize_output.dictionary_build_payload%'
   AND generated_stage_runtime_breakdown NOT LIKE '%hash_join_probe.vector_setup%'
 ----

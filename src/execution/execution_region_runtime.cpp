@@ -102,6 +102,13 @@ void MergeExecutionRegionStageRuntime(vector<ExecutionRegionRecordedStageRuntime
 	}
 }
 
+void AddExecutionRegionLazyCodegenMetrics(ExecutionRegionLazyCodegenMetrics &target,
+                                          const ExecutionRegionLazyCodegenMetrics &source) {
+	target.codegen_time_us += source.codegen_time_us;
+	target.machine_codegen_time_us += source.machine_codegen_time_us;
+	target.code_size += source.code_size;
+}
+
 string RenderExecutionRegionStageRuntimeBreakdown(const vector<ExecutionRegionRecordedStageRuntime> &stages) {
 	string result;
 	for (auto &entry : stages) {
@@ -164,6 +171,12 @@ ExecutionOperatorRuntime::~ExecutionOperatorRuntime() {
 }
 
 ExecutionRegionRuntime::~ExecutionRegionRuntime() {
+}
+
+void ExecutionRegionRuntime::RecordHashJoinProbeLayout(const char *) {
+}
+
+void ExecutionRegionRuntime::RecordLazyCodegen(const ExecutionRegionLazyCodegenMetrics &) {
 }
 
 } // namespace duckdb

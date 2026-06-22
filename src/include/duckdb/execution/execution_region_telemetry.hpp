@@ -8,6 +8,7 @@
 #pragma once
 
 #include "duckdb/execution/execution_region_ir.hpp"
+#include "duckdb/execution/execution_region_runtime.hpp"
 #include "duckdb/planner/cost_model.hpp"
 
 #include "duckdb/common/enums/operator_result_type.hpp"
@@ -93,6 +94,7 @@ struct ExecutionRegionEvent {
 	int64_t executable_build_time_us = 0;
 	int64_t machine_codegen_time_us = 0;
 	int64_t kernel_build_time_us = 0;
+	ExecutionRegionJitRuntimeMetrics jit_runtime;
 };
 
 struct ExecutionRegionTraceSummary {
@@ -121,6 +123,7 @@ struct ExecutionRegionTraceSummary {
 	int64_t executable_build_us = 0;
 	int64_t machine_codegen_us = 0;
 	int64_t kernel_build_us = 0;
+	ExecutionRegionLazyCodegenMetrics lazy_codegen;
 };
 
 DUCKDB_API ExecutionRegionTraceSummary SummarizeExecutionRegionTrace(const vector<ExecutionRegionEvent> &trace);
@@ -182,6 +185,7 @@ struct ExecutionRegionCounter {
 	int64_t executable_build_time_us = 0;
 	int64_t machine_codegen_time_us = 0;
 	int64_t kernel_build_time_us = 0;
+	ExecutionRegionJitRuntimeMetrics jit_runtime;
 };
 
 struct ExecutionRegionStageTimings {

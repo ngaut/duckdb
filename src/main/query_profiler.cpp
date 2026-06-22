@@ -279,7 +279,10 @@ static void AddExecutionRegionSummary(QueryProfileResult &node, ClientContext &c
 	           {"codegen_time_us", Time(summary.codegen_us)},
 	           {"executable_build_time_us", Time(summary.executable_build_us)},
 	           {"machine_codegen_time_us", Time(summary.machine_codegen_us)},
-	           {"kernel_build_time_us", Time(summary.kernel_build_us)}});
+	           {"kernel_build_time_us", Time(summary.kernel_build_us)},
+	           {"lazy_codegen_time_us", Time(summary.lazy_codegen.codegen_time_us)},
+	           {"lazy_machine_codegen_time_us", Time(summary.lazy_codegen.machine_codegen_time_us)},
+	           {"lazy_code_size", Count(summary.lazy_codegen.code_size)}});
 }
 
 static void AddExecutionRegionEvent(QueryProfileResult &row, const ExecutionRegionEvent &event, bool is_runtime) {
@@ -336,6 +339,10 @@ static void AddExecutionRegionEvent(QueryProfileResult &row, const ExecutionRegi
 	     {"executable_build_time_us", Time(event.executable_build_time_us)},
 	     {"machine_codegen_time_us", Time(event.machine_codegen_time_us)},
 	     {"kernel_build_time_us", Time(event.kernel_build_time_us)},
+	     {"lazy_codegen_time_us", Time(event.jit_runtime.lazy_codegen.codegen_time_us)},
+	     {"lazy_machine_codegen_time_us", Time(event.jit_runtime.lazy_codegen.machine_codegen_time_us)},
+	     {"lazy_code_size", Count(event.jit_runtime.lazy_codegen.code_size)},
+	     {"hash_join_probe_layout", NullableText(event.jit_runtime.hash_join_probe_layout)},
 	     {"runtime_time_us", Time(event.runtime_time_us)},
 	     {"source_runtime_time_us", Time(event.source_contract_runtime_time_us)},
 	     {"sink_next_batch_runtime_time_us", Time(event.sink_next_batch_runtime_time_us)},
@@ -388,7 +395,9 @@ static void RenderExecutionRegionsToStream(std::ostream &ss, ClientContext &cont
 	   << " candidate_cbo_us=" << summary.candidate_cbo_us << " ir_lowering_us=" << summary.ir_lowering_us
 	   << " backend_analysis_us=" << summary.backend_analysis_us << " codegen_us=" << summary.codegen_us
 	   << " executable_build_us=" << summary.executable_build_us << " machine_codegen_us=" << summary.machine_codegen_us
-	   << " kernel_build_us=" << summary.kernel_build_us << "\n";
+	   << " kernel_build_us=" << summary.kernel_build_us << " lazy_codegen_us=" << summary.lazy_codegen.codegen_time_us
+	   << " lazy_machine_codegen_us=" << summary.lazy_codegen.machine_codegen_time_us
+	   << " lazy_code_size=" << summary.lazy_codegen.code_size << "\n";
 	RenderExecutionRegionCboPipelineToStream(ss, trace);
 	RenderExecutionRegionRuntimePipelineToStream(ss, trace);
 }
@@ -458,6 +467,10 @@ static void RenderExecutionRegionRuntimePipelineToStream(std::ostream &ss,
 		   << " runtime_us=" << event.runtime_time_us << " source_us=" << event.source_contract_runtime_time_us
 		   << " generated_us=" << event.generated_body_runtime_time_us
 		   << " sink_us=" << event.sink_next_batch_runtime_time_us
+		   << " hash_join_probe_layout=" << ExecutionRegionProfileToken(event.jit_runtime.hash_join_probe_layout)
+		   << " lazy_codegen_us=" << event.jit_runtime.lazy_codegen.codegen_time_us
+		   << " lazy_machine_codegen_us=" << event.jit_runtime.lazy_codegen.machine_codegen_time_us
+		   << " lazy_code_size=" << event.jit_runtime.lazy_codegen.code_size
 		   << " dominant=" << DominantRuntimeComponent(event_summary) << "\n";
 	}
 }

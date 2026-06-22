@@ -174,6 +174,7 @@ ExecutionRegionTraceSummary SummarizeExecutionRegionTrace(const vector<Execution
 	ExecutionRegionTraceSummary summary;
 	unordered_set<idx_t> runtime_kernels;
 	for (const auto &event : trace) {
+		AddExecutionRegionLazyCodegenMetrics(summary.lazy_codegen, event.jit_runtime.lazy_codegen);
 		if (ExecutionRegionEventIsRuntime(event)) {
 			SummarizeRuntimeEvent(summary, runtime_kernels, event);
 		} else {
@@ -326,6 +327,7 @@ static void SetRuntimeMetrics(ExecutionRegionEvent &event, const ExecutionRegion
 	event.sink_next_batch_runtime_time_us = metrics.sink_next_batch_runtime_time_us;
 	event.generated_body_runtime_time_us = metrics.generated_body_runtime_time_us;
 	event.generated_stage_runtime = metrics.generated_stage_runtime;
+	event.jit_runtime = metrics.jit_runtime;
 }
 
 void ExecutionRegionManager::RecordRuntimeEvent(ClientContext &context, const ExecutionRegionKernel &kernel,

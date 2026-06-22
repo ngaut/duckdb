@@ -175,6 +175,18 @@ def verify_performance_gaps(
                 row_int(row, "auto_machine_codegen_time_us") >= 0,
                 f"performance_gaps.csv: bad auto machine codegen time: {row}",
             )
+            require(
+                row_int(row, "auto_lazy_codegen_time_us") >= 0,
+                f"performance_gaps.csv: bad auto lazy codegen time: {row}",
+            )
+            require(
+                row_int(row, "auto_lazy_machine_codegen_time_us") >= 0,
+                f"performance_gaps.csv: bad auto lazy machine codegen time: {row}",
+            )
+            require(
+                row_int(row, "auto_lazy_code_size") >= 0,
+                f"performance_gaps.csv: bad auto lazy code size: {row}",
+            )
             require(row_int(row, "auto_runner_cost_startup_cost") >= 0, f"performance_gaps.csv: bad runner cost: {row}")
 
 

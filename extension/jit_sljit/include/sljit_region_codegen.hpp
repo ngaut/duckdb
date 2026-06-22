@@ -15,6 +15,8 @@
 
 namespace duckdb {
 
+bool ValidateSljitHashJoinProbe(const vector<SljitNativeHashJoinProbeKeyPlan> &keys, idx_t equality_key_count,
+                                ExecutionHashJoinProbeOutputMode output_mode, string &error);
 unique_ptr<ExecutionRegionCodeHandle> BuildSljitHashJoinProbe(const vector<SljitNativeHashJoinProbeKeyPlan> &keys,
                                                               idx_t equality_key_count, bool mark_build_match,
                                                               idx_t found_match_offset, idx_t pointer_offset,

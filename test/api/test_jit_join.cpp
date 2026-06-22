@@ -97,6 +97,43 @@ TEST_CASE("JIT CBO admits generated hash-build regions through native join proto
 	    });
 }
 
+TEST_CASE("JIT CBO skips bodyless native hash-build candidates before backend analysis", "[api][jit]") {
+	DuckDB db;
+	Connection con(db);
+	auto &manager = ExecutionRegionManager::Get(*con.context);
+
+	ConfigureSljitForCompilation(con, false, false, false, 10000);
+	REQUIRE_NO_FAIL(con.Query("SET jit_trace_decisions=true"));
+	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_hash_bodyless_fact AS "
+	                          "SELECT i::BIGINT AS i, (i % 32)::BIGINT AS g, "
+	                          "(i * 13 % 997)::BIGINT AS payload FROM range(4096) tbl(i)"));
+	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_hash_bodyless_dim AS "
+	                          "SELECT g::BIGINT AS g, (g * 101)::BIGINT AS payload FROM range(32) tbl(g)"));
+
+	ClearJitTrace(manager, true);
+	auto result = con.Query("SELECT sum(f.i + d.payload) FROM jit_hash_bodyless_fact f "
+	                        "JOIN jit_hash_bodyless_dim d ON f.g = d.g WHERE f.i % 3 = 0");
+	REQUIRE_NO_FAIL(*result);
+	REQUIRE(result->GetValue(0, 0).ToString() == "4935358");
+
+	RequireJitEvent(
+	    manager,
+	    [](const ExecutionRegionEvent &event) {
+		    return IsSljitRegionEvent(event) && EventPhase(event) == "decision" && EventStatus(event) == "skipped" &&
+		           event.candidate_traits.sink_kind == ExecutionRegionSinkKind::HASH_JOIN_BUILD;
+	    },
+	    [](const ExecutionRegionEvent &event) {
+		    REQUIRE(event.selected_runner == ExecutionRunnerKind::VECTORIZED);
+		    REQUIRE(event.blocker == "duckdb_selected_vectorized");
+		    REQUIRE(event.backend_analysis_time_us == 0);
+		    REQUIRE(event.runner_cost.present);
+		    REQUIRE(event.runner_cost.native_join_stage_count > 0);
+		    REQUIRE_FALSE(event.runner_cost.full_pipeline);
+		    REQUIRE_FALSE(event.runner_cost.selected_accelerated_runner);
+		    REQUIRE(StringUtil::Contains(event.reason, "backend_analysis=skipped"));
+	    });
+}
+
 TEST_CASE("JIT auto skips hash join regions through planner cost selection", "[api][jit]") {
 	DuckDB db;
 	Connection con(db);
@@ -195,8 +232,12 @@ TEST_CASE("JIT hash join probe generates native probe with append sink", "[api][
 		    StringUtil::Contains(event.reason, "full pipeline kernel executed") && event.input_rows > 0 &&
 		    event.output_rows > 0) {
 			found_runtime = true;
+			REQUIRE(event.jit_runtime.hash_join_probe_layout == "regular_hash_table");
+			REQUIRE(event.jit_runtime.lazy_codegen.codegen_time_us >= 0);
+			REQUIRE(event.jit_runtime.lazy_codegen.machine_codegen_time_us >= 0);
+			REQUIRE(event.jit_runtime.lazy_codegen.code_size > 0);
 			if (StringUtil::Contains(EventGeneratedStageRuntimeBreakdown(event),
-			                         "hash_join_probe.generated_probe_function=")) {
+			                         "hash_join_probe.generated_regular_probe_function=")) {
 				found_generated_probe_stage = true;
 			}
 		}
@@ -212,6 +253,8 @@ TEST_CASE("JIT hash join probe generates native probe with append sink", "[api][
 	REQUIRE(explain->RowCount() == 1);
 	auto analyzed_plan = explain->GetValue(1, 0).GetValue<string>();
 	REQUIRE(StringUtil::Contains(analyzed_plan, "\"events\""));
-	REQUIRE(StringUtil::Contains(analyzed_plan, "hash_join_probe.generated_probe_function"));
+	REQUIRE(StringUtil::Contains(analyzed_plan, "hash_join_probe.generated_regular_probe_function"));
+	REQUIRE(StringUtil::Contains(analyzed_plan, "\"hash_join_probe_layout\""));
+	REQUIRE(StringUtil::Contains(analyzed_plan, "\"lazy_codegen_time_us\""));
 	REQUIRE(StringUtil::Contains(analyzed_plan, "\"generated_stage_runtime_breakdown\""));
 }

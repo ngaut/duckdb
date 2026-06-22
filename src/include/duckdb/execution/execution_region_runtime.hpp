@@ -29,6 +29,17 @@ public:
 	virtual SinkResultType RecordSinkResult(idx_t input_rows, SinkResultType sink_result) = 0;
 };
 
+struct ExecutionRegionLazyCodegenMetrics {
+	int64_t codegen_time_us = 0;
+	int64_t machine_codegen_time_us = 0;
+	idx_t code_size = 0;
+};
+
+struct ExecutionRegionJitRuntimeMetrics {
+	string hash_join_probe_layout;
+	ExecutionRegionLazyCodegenMetrics lazy_codegen;
+};
+
 struct ExecutionRegionRuntimeMetrics {
 	idx_t source_contract_output_rows = 0;
 	idx_t source_contract_invocation_count = 0;
@@ -38,12 +49,15 @@ struct ExecutionRegionRuntimeMetrics {
 	int64_t sink_next_batch_runtime_time_us = 0;
 	int64_t generated_body_runtime_time_us = 0;
 	vector<ExecutionRegionRecordedStageRuntime> generated_stage_runtime;
+	ExecutionRegionJitRuntimeMetrics jit_runtime;
 };
 
 DUCKDB_API void AddExecutionRegionStageRuntime(vector<ExecutionRegionRecordedStageRuntime> &stages,
                                                ExecutionRegionStageId stage, int64_t runtime_time_us, idx_t count = 1);
 DUCKDB_API void MergeExecutionRegionStageRuntime(vector<ExecutionRegionRecordedStageRuntime> &target,
                                                  const vector<ExecutionRegionRecordedStageRuntime> &source);
+DUCKDB_API void AddExecutionRegionLazyCodegenMetrics(ExecutionRegionLazyCodegenMetrics &target,
+                                                     const ExecutionRegionLazyCodegenMetrics &source);
 DUCKDB_API string RenderExecutionRegionStageRuntimeBreakdown(const vector<ExecutionRegionRecordedStageRuntime> &stages);
 DUCKDB_API string RenderExecutionRegionStageCountBreakdown(const vector<ExecutionRegionRecordedStageRuntime> &stages);
 
@@ -70,6 +84,8 @@ public:
 	virtual ExecutionOperatorRuntime &ExecutionOperators() = 0;
 	virtual bool TraceRuntime() const = 0;
 	virtual void RecordGeneratedStageRuntime(ExecutionRegionStageId stage, int64_t runtime_time_us) = 0;
+	virtual void RecordHashJoinProbeLayout(const char *layout);
+	virtual void RecordLazyCodegen(const ExecutionRegionLazyCodegenMetrics &metrics);
 	virtual void Defer(string reason) = 0;
 	virtual const string &DeferredReason() const = 0;
 };
