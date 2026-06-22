@@ -37,6 +37,13 @@ static int64_t AddCost(int64_t left, int64_t right) {
 	return left + right;
 }
 
+static int64_t SubtractCost(int64_t left, int64_t right) {
+	if (right > 0 && left < std::numeric_limits<int64_t>::min() + right) {
+		return std::numeric_limits<int64_t>::min();
+	}
+	return left - right;
+}
+
 static int64_t MultiplyCost(int64_t left, int64_t right) {
 	if (left <= 0 || right <= 0) {
 		return 0;
@@ -168,6 +175,10 @@ static bool DuckDBKnownFunctionCost(const string &name, idx_t &cost) {
 		}
 		return false;
 	default:
+		if (StringUtil::StartsWith(name, "__internal_compress_string_") || name == "__internal_decompress_string") {
+			cost = 0;
+			return true;
+		}
 		return false;
 	}
 }
@@ -292,25 +303,61 @@ static int64_t PhysicalRunnerBatches(int64_t rows) {
 	return AddCost(rows, STANDARD_VECTOR_SIZE - 1) / STANDARD_VECTOR_SIZE;
 }
 
-static int64_t PhysicalRunnerSavedWorkPerBatch(const PhysicalRunnerCostInput &input,
-                                               const PhysicalRunnerCostParameters &parameters) {
-	auto work = SaturatingCostCast(input.expression_cost);
-	work = AddCost(work, MultiplyCost(SaturatingCostCast(input.generated_stage_count),
-	                                  SaturatingCostCast(parameters.generated_stage_benefit)));
-	const auto native_operator_stage_count = AddCost(AddCost(SaturatingCostCast(input.native_join_stage_count),
-	                                                         SaturatingCostCast(input.native_aggregate_stage_count)),
-	                                                 SaturatingCostCast(input.native_sort_stage_count));
-	work = AddCost(
-	    work, MultiplyCost(native_operator_stage_count, SaturatingCostCast(parameters.native_operator_stage_benefit)));
+static bool PhysicalRunnerIsNativeContractProjectionGlue(const PhysicalRunnerCostInput &input) {
+	return input.full_pipeline &&
+	       input.native_protocol_class == PhysicalRunnerNativeProtocolClass::STATEFUL_SOURCE_SINK_PROTOCOL &&
+	       input.generated_work_class == PhysicalRunnerGeneratedWorkClass::PROJECTION_GLUE &&
+	       input.native_join_stage_count == 0 && input.native_aggregate_stage_count == 0 &&
+	       input.native_sort_stage_count == 0 && input.materialization_elision_count == 0;
+}
+
+static void PhysicalRunnerComputeWorkComponents(const PhysicalRunnerCostInput &input,
+                                                const PhysicalRunnerCostParameters &parameters,
+                                                PhysicalRunnerCostProfile &profile) {
+	if (PhysicalRunnerIsNativeContractProjectionGlue(input)) {
+		return;
+	}
+	const auto expression_cost = SaturatingCostCast(input.expression_cost);
+	profile.generated_expression_work = expression_cost;
+	auto generated_stage_work = MultiplyCost(SaturatingCostCast(input.generated_stage_count),
+	                                         SaturatingCostCast(parameters.generated_stage_benefit));
+	if (expression_cost > 0 && generated_stage_work > expression_cost) {
+		generated_stage_work = expression_cost;
+	}
+	profile.generated_stage_work = generated_stage_work;
+	const auto native_join_stage_count = SaturatingCostCast(input.native_join_stage_count);
+	const auto native_aggregate_stage_count = SaturatingCostCast(input.native_aggregate_stage_count);
+	const auto native_grouped_aggregate_stage_count = SaturatingCostCast(input.native_grouped_aggregate_stage_count);
+	const auto native_sort_stage_count = SaturatingCostCast(input.native_sort_stage_count);
+	D_ASSERT(native_aggregate_stage_count >= native_grouped_aggregate_stage_count);
+	const auto native_operator_stage_count =
+	    AddCost(AddCost(native_join_stage_count, native_aggregate_stage_count), native_sort_stage_count);
+	const auto native_operator_stage_benefit = SaturatingCostCast(parameters.native_operator_stage_benefit);
+	profile.native_operator_work = MultiplyCost(native_operator_stage_count, native_operator_stage_benefit);
 	if (input.materialization_elision_count > 0) {
-		auto elision_work = MultiplyCost(SaturatingCostCast(input.materialization_elision_count),
-		                                 SaturatingCostCast(parameters.materialization_elision_benefit));
-		work = AddCost(work, elision_work);
+		profile.materialization_elision_work =
+		    MultiplyCost(SaturatingCostCast(input.materialization_elision_count),
+		                 SaturatingCostCast(parameters.materialization_elision_benefit));
 	}
 	if (input.full_pipeline) {
-		work = AddCost(work, SaturatingCostCast(parameters.full_pipeline_benefit));
+		const auto full_pipeline_benefit = SaturatingCostCast(parameters.full_pipeline_benefit);
+		const auto stateful_protocol_stage_count =
+		    AddCost(native_join_stage_count, native_grouped_aggregate_stage_count);
+		if (stateful_protocol_stage_count > 0) {
+			profile.stateful_protocol_penalty = MultiplyCost(
+			    AddCost(stateful_protocol_stage_count, stateful_protocol_stage_count), native_operator_stage_benefit);
+			profile.stateful_protocol_penalty = AddCost(profile.stateful_protocol_penalty, full_pipeline_benefit);
+		} else {
+			profile.full_pipeline_work = full_pipeline_benefit;
+		}
 	}
-	return work;
+	auto work = profile.generated_expression_work;
+	work = AddCost(work, profile.generated_stage_work);
+	work = AddCost(work, profile.native_operator_work);
+	work = AddCost(work, profile.materialization_elision_work);
+	work = AddCost(work, profile.full_pipeline_work);
+	work = SubtractCost(work, profile.stateful_protocol_penalty);
+	profile.saved_work_per_batch = work;
 }
 
 static int64_t PhysicalRunnerStartupCost(const PhysicalRunnerCostParameters &parameters) {
@@ -327,6 +374,9 @@ static int64_t PhysicalRunnerRequiredBenefit(const PhysicalRunnerCostProfile &pr
 static bool PhysicalRunnerHasAcceleratedWork(const PhysicalRunnerCostInput &input,
                                              const PhysicalRunnerCostParameters &parameters,
                                              const PhysicalRunnerCostProfile &profile) {
+	if (PhysicalRunnerIsNativeContractProjectionGlue(input)) {
+		return false;
+	}
 	const auto native_operator_stage_count =
 	    input.native_join_stage_count + input.native_aggregate_stage_count + input.native_sort_stage_count;
 	const bool native_operator_work_is_costed = native_operator_stage_count == 0 ||
@@ -361,15 +411,44 @@ PhysicalRunnerCostProfile DuckDBCostModel::SelectPhysicalRunner(const PhysicalRu
 	profile.materialization_elision_count = SaturatingCostCast(input.materialization_elision_count);
 	profile.native_join_stage_count = SaturatingCostCast(input.native_join_stage_count);
 	profile.native_aggregate_stage_count = SaturatingCostCast(input.native_aggregate_stage_count);
+	profile.native_grouped_aggregate_stage_count = SaturatingCostCast(input.native_grouped_aggregate_stage_count);
 	profile.native_sort_stage_count = SaturatingCostCast(input.native_sort_stage_count);
 	profile.full_pipeline = input.full_pipeline;
-	profile.saved_work_per_batch = PhysicalRunnerSavedWorkPerBatch(input, parameters);
+	profile.generated_work_class = input.generated_work_class;
+	profile.native_protocol_class = input.native_protocol_class;
+	PhysicalRunnerComputeWorkComponents(input, parameters, profile);
 	profile.accelerated_runner_benefit = MultiplyCost(profile.batches, profile.saved_work_per_batch);
 	profile.startup_cost = PhysicalRunnerStartupCost(parameters);
 	profile.required_benefit = PhysicalRunnerRequiredBenefit(profile, parameters);
 	profile.net_benefit = profile.accelerated_runner_benefit - profile.startup_cost;
 	profile.selected_accelerated_runner = PhysicalRunnerShouldSelectAccelerated(input, parameters, profile);
 	return profile;
+}
+
+const char *PhysicalRunnerGeneratedWorkClassToString(PhysicalRunnerGeneratedWorkClass work_class) {
+	switch (work_class) {
+	case PhysicalRunnerGeneratedWorkClass::NONE:
+		return "none";
+	case PhysicalRunnerGeneratedWorkClass::PROJECTION_GLUE:
+		return "projection_glue";
+	case PhysicalRunnerGeneratedWorkClass::HIGH_COST_PROJECTION:
+		return "high_cost_projection";
+	case PhysicalRunnerGeneratedWorkClass::COMPUTE:
+		return "compute";
+	default:
+		return "unknown";
+	}
+}
+
+const char *PhysicalRunnerNativeProtocolClassToString(PhysicalRunnerNativeProtocolClass protocol_class) {
+	switch (protocol_class) {
+	case PhysicalRunnerNativeProtocolClass::NONE:
+		return "none";
+	case PhysicalRunnerNativeProtocolClass::STATEFUL_SOURCE_SINK_PROTOCOL:
+		return "stateful_source_sink_protocol";
+	default:
+		return "unknown";
+	}
 }
 
 } // namespace duckdb

@@ -53,8 +53,15 @@ enum JitCounterColumn : idx_t {
 	JIT_COUNTER_RUNNER_COST_MATERIALIZATION_ELISION_COUNT,
 	JIT_COUNTER_RUNNER_COST_NATIVE_JOIN_STAGE_COUNT,
 	JIT_COUNTER_RUNNER_COST_NATIVE_AGGREGATE_STAGE_COUNT,
+	JIT_COUNTER_RUNNER_COST_NATIVE_GROUPED_AGGREGATE_STAGE_COUNT,
 	JIT_COUNTER_RUNNER_COST_NATIVE_SORT_STAGE_COUNT,
 	JIT_COUNTER_RUNNER_COST_FULL_PIPELINE,
+	JIT_COUNTER_RUNNER_COST_GENERATED_EXPRESSION_WORK,
+	JIT_COUNTER_RUNNER_COST_GENERATED_STAGE_WORK,
+	JIT_COUNTER_RUNNER_COST_NATIVE_OPERATOR_WORK,
+	JIT_COUNTER_RUNNER_COST_MATERIALIZATION_ELISION_WORK,
+	JIT_COUNTER_RUNNER_COST_FULL_PIPELINE_WORK,
+	JIT_COUNTER_RUNNER_COST_STATEFUL_PROTOCOL_PENALTY,
 	JIT_COUNTER_RUNNER_COST_SAVED_WORK_PER_BATCH,
 	JIT_COUNTER_RUNNER_COST_ACCELERATED_RUNNER_BENEFIT,
 	JIT_COUNTER_RUNNER_COST_STARTUP_COST,
@@ -63,6 +70,17 @@ enum JitCounterColumn : idx_t {
 	JIT_COUNTER_RUNNER_COST_SELECTED_ACCELERATED_RUNNER_COUNT,
 	JIT_COUNTER_COLUMN_COUNT
 };
+
+static void AddJitCounterRunnerCostColumns(vector<LogicalType> &return_types, vector<string> &names) {
+	AddExecutionRegionTableFunctionColumns(return_types, names, EXECUTION_REGION_RUNNER_COST_PROFILE_COLUMNS,
+	                                       EXECUTION_REGION_RUNNER_COST_PROFILE_COLUMN_COUNT);
+	AddExecutionRegionTableFunctionColumns(return_types, names, EXECUTION_REGION_RUNNER_COST_WORK_COLUMNS,
+	                                       EXECUTION_REGION_RUNNER_COST_WORK_COLUMN_COUNT);
+	AddExecutionRegionTableFunctionColumn(return_types, names, "runner_cost_selected_accelerated_runner_count",
+	                                      LogicalType::UBIGINT);
+	D_ASSERT(names.size() == JIT_COUNTER_COLUMN_COUNT);
+	D_ASSERT(return_types.size() == JIT_COUNTER_COLUMN_COUNT);
+}
 
 static void AppendJitCounterColumn(Vector &output, idx_t column_id, const ExecutionRegionCounter &entry) {
 	switch (column_id) {
@@ -202,11 +220,32 @@ static void AppendJitCounterColumn(Vector &output, idx_t column_id, const Execut
 	case JIT_COUNTER_RUNNER_COST_NATIVE_AGGREGATE_STAGE_COUNT:
 		output.Append(Value::BIGINT(entry.runner_cost_native_aggregate_stage_count));
 		return;
+	case JIT_COUNTER_RUNNER_COST_NATIVE_GROUPED_AGGREGATE_STAGE_COUNT:
+		output.Append(Value::BIGINT(entry.runner_cost_native_grouped_aggregate_stage_count));
+		return;
 	case JIT_COUNTER_RUNNER_COST_NATIVE_SORT_STAGE_COUNT:
 		output.Append(Value::BIGINT(entry.runner_cost_native_sort_stage_count));
 		return;
 	case JIT_COUNTER_RUNNER_COST_FULL_PIPELINE:
 		output.Append(Value::BOOLEAN(entry.runner_cost_full_pipeline));
+		return;
+	case JIT_COUNTER_RUNNER_COST_GENERATED_EXPRESSION_WORK:
+		output.Append(Value::BIGINT(entry.runner_cost_generated_expression_work));
+		return;
+	case JIT_COUNTER_RUNNER_COST_GENERATED_STAGE_WORK:
+		output.Append(Value::BIGINT(entry.runner_cost_generated_stage_work));
+		return;
+	case JIT_COUNTER_RUNNER_COST_NATIVE_OPERATOR_WORK:
+		output.Append(Value::BIGINT(entry.runner_cost_native_operator_work));
+		return;
+	case JIT_COUNTER_RUNNER_COST_MATERIALIZATION_ELISION_WORK:
+		output.Append(Value::BIGINT(entry.runner_cost_materialization_elision_work));
+		return;
+	case JIT_COUNTER_RUNNER_COST_FULL_PIPELINE_WORK:
+		output.Append(Value::BIGINT(entry.runner_cost_full_pipeline_work));
+		return;
+	case JIT_COUNTER_RUNNER_COST_STATEFUL_PROTOCOL_PENALTY:
+		output.Append(Value::BIGINT(entry.runner_cost_stateful_protocol_penalty));
 		return;
 	case JIT_COUNTER_RUNNER_COST_SAVED_WORK_PER_BATCH:
 		output.Append(Value::BIGINT(entry.runner_cost_saved_work_per_batch));
@@ -272,31 +311,7 @@ static unique_ptr<FunctionData> DuckDBJitCountersBind(ClientContext &context, Ta
 	AddExecutionRegionTableFunctionColumn(return_types, names, "lazy_machine_codegen_time_us", LogicalType::BIGINT);
 	AddExecutionRegionTableFunctionColumn(return_types, names, "lazy_code_size", LogicalType::UBIGINT);
 	AddExecutionRegionTableFunctionColumn(return_types, names, "hash_join_probe_layout", LogicalType::VARCHAR);
-	AddExecutionRegionTableFunctionColumn(return_types, names, "runner_cost_profile", LogicalType::BOOLEAN);
-	AddExecutionRegionTableFunctionColumn(return_types, names, "runner_cost_rows", LogicalType::BIGINT);
-	AddExecutionRegionTableFunctionColumn(return_types, names, "runner_cost_batches", LogicalType::BIGINT);
-	AddExecutionRegionTableFunctionColumn(return_types, names, "runner_cost_expression_cost", LogicalType::BIGINT);
-	AddExecutionRegionTableFunctionColumn(return_types, names, "runner_cost_generated_stage_count",
-	                                      LogicalType::BIGINT);
-	AddExecutionRegionTableFunctionColumn(return_types, names, "runner_cost_materialization_elision_count",
-	                                      LogicalType::BIGINT);
-	AddExecutionRegionTableFunctionColumn(return_types, names, "runner_cost_native_join_stage_count",
-	                                      LogicalType::BIGINT);
-	AddExecutionRegionTableFunctionColumn(return_types, names, "runner_cost_native_aggregate_stage_count",
-	                                      LogicalType::BIGINT);
-	AddExecutionRegionTableFunctionColumn(return_types, names, "runner_cost_native_sort_stage_count",
-	                                      LogicalType::BIGINT);
-	AddExecutionRegionTableFunctionColumn(return_types, names, "runner_cost_full_pipeline", LogicalType::BOOLEAN);
-	AddExecutionRegionTableFunctionColumn(return_types, names, "runner_cost_saved_work_per_batch", LogicalType::BIGINT);
-	AddExecutionRegionTableFunctionColumn(return_types, names, "runner_cost_accelerated_runner_benefit",
-	                                      LogicalType::BIGINT);
-	AddExecutionRegionTableFunctionColumn(return_types, names, "runner_cost_startup_cost", LogicalType::BIGINT);
-	AddExecutionRegionTableFunctionColumn(return_types, names, "runner_cost_required_benefit", LogicalType::BIGINT);
-	AddExecutionRegionTableFunctionColumn(return_types, names, "runner_cost_net_benefit", LogicalType::BIGINT);
-	AddExecutionRegionTableFunctionColumn(return_types, names, "runner_cost_selected_accelerated_runner_count",
-	                                      LogicalType::UBIGINT);
-	D_ASSERT(names.size() == JIT_COUNTER_COLUMN_COUNT);
-	D_ASSERT(return_types.size() == JIT_COUNTER_COLUMN_COUNT);
+	AddJitCounterRunnerCostColumns(return_types, names);
 	return nullptr;
 }
 

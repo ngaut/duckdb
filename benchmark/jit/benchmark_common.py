@@ -9,7 +9,6 @@ import subprocess
 import tempfile
 from pathlib import Path
 
-
 REGION_SUMMARY_FIELDS = (
     "compiled_regions",
     "compile_errors",
@@ -49,8 +48,17 @@ PROFILE_EVENT_FIELDS = (
     "runner_cost_materialization_elision_count",
     "runner_cost_native_join_stage_count",
     "runner_cost_native_aggregate_stage_count",
+    "runner_cost_native_grouped_aggregate_stage_count",
     "runner_cost_native_sort_stage_count",
     "runner_cost_full_pipeline",
+    "runner_cost_generated_work_class",
+    "runner_cost_native_protocol_class",
+    "runner_cost_generated_expression_work",
+    "runner_cost_generated_stage_work",
+    "runner_cost_native_operator_work",
+    "runner_cost_materialization_elision_work",
+    "runner_cost_full_pipeline_work",
+    "runner_cost_stateful_protocol_penalty",
     "runner_cost_startup_cost",
     "runner_cost_required_benefit",
     "runner_cost_net_benefit",
@@ -178,6 +186,13 @@ def write_csv(path: Path, fields: tuple[str, ...], rows: list[dict]) -> None:
         writer = csv.DictWriter(handle, fieldnames=list(fields))
         writer.writeheader()
         writer.writerows(rows)
+
+
+def require_fields(row: dict, fields: tuple[str, ...]) -> dict:
+    missing = [field for field in fields if field not in row]
+    if missing:
+        raise KeyError(f"missing required fields: {', '.join(missing)}")
+    return {field: row[field] for field in fields}
 
 
 def read_profile_json(path: Path) -> dict | list[dict]:

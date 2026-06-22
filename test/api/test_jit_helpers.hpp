@@ -102,25 +102,26 @@ static void ConfigureSljit(Connection &con, const string &policy = "auto", bool 
 	ConfigureSljitSettings(con, policy, verify, dump_ir, trace_runtime, event_log_size);
 }
 
-static void CalibrateJitTestCbo(Connection &con) {
+static void ConfigureJitCoverageCbo(Connection &con) {
+	// Coverage tests must reach generated code paths even when production CBO would reject stateful protocol glue.
 	REQUIRE_NO_FAIL(con.Query("SET jit_cbo_generated_stage_benefit=4096"));
 	REQUIRE_NO_FAIL(con.Query("SET jit_cbo_materialization_elision_benefit=4096"));
-	REQUIRE_NO_FAIL(con.Query("SET jit_cbo_native_operator_stage_benefit=4096"));
-	REQUIRE_NO_FAIL(con.Query("SET jit_cbo_full_pipeline_benefit=4096"));
+	REQUIRE_NO_FAIL(con.Query("SET jit_cbo_native_operator_stage_benefit=1"));
+	REQUIRE_NO_FAIL(con.Query("SET jit_cbo_full_pipeline_benefit=0"));
 	REQUIRE_NO_FAIL(con.Query("SET jit_cbo_startup_base_cost=0"));
 	REQUIRE_NO_FAIL(con.Query("SET jit_cbo_startup_margin_basis_points=0"));
 }
 
-static void ConfigureSljitForCompilationSettings(Connection &con, bool verify = false, bool dump_ir = false,
-                                                 bool trace_runtime = false, idx_t event_log_size = 10000) {
+static void ConfigureSljitForCoverageSettings(Connection &con, bool verify = false, bool dump_ir = false,
+                                              bool trace_runtime = false, idx_t event_log_size = 10000) {
 	ConfigureSljitSettings(con, "auto", verify, dump_ir, trace_runtime, event_log_size);
-	CalibrateJitTestCbo(con);
+	ConfigureJitCoverageCbo(con);
 }
 
-static void ConfigureSljitForCompilation(Connection &con, bool verify = false, bool dump_ir = false,
-                                         bool trace_runtime = false, idx_t event_log_size = 10000) {
+static void ConfigureSljitForCoverage(Connection &con, bool verify = false, bool dump_ir = false,
+                                      bool trace_runtime = false, idx_t event_log_size = 10000) {
 	LoadSljit(con);
-	ConfigureSljitForCompilationSettings(con, verify, dump_ir, trace_runtime, event_log_size);
+	ConfigureSljitForCoverageSettings(con, verify, dump_ir, trace_runtime, event_log_size);
 }
 
 static void ClearJitTrace(ExecutionRegionManager &manager, bool counters = false) {

@@ -7,7 +7,7 @@ TEST_CASE("JIT hash join build protocol compiles only inside generated fused reg
 	Connection con(db);
 	auto &manager = ExecutionRegionManager::Get(*con.context);
 
-	ConfigureSljitForCompilation(con, false, true, true, 10000);
+	ConfigureSljitForCoverage(con, false, true, true, 10000);
 	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_hash_build_l AS SELECT i::BIGINT AS i FROM range(10000) tbl(i)"));
 	REQUIRE_NO_FAIL(con.Query(
 	    "CREATE TABLE jit_hash_build_r AS SELECT i::BIGINT AS j, (i + 1)::BIGINT AS x FROM range(10000) tbl(i)"));
@@ -58,17 +58,15 @@ TEST_CASE("JIT hash join build protocol compiles only inside generated fused reg
 	REQUIRE(found_build_runtime);
 }
 
-TEST_CASE("JIT CBO admits generated hash-build regions through native join protocol benefit", "[api][jit]") {
+TEST_CASE("JIT CBO admits generated hash-build regions after generated work pays native join protocol", "[api][jit]") {
 	DuckDB db;
 	Connection con(db);
 	auto &manager = ExecutionRegionManager::Get(*con.context);
 
 	ConfigureSljit(con, "auto", false, true, false, 10000);
 	REQUIRE_NO_FAIL(con.Query("SET jit_trace_decisions=true"));
-	REQUIRE_NO_FAIL(con.Query("SET jit_cbo_generated_stage_benefit=0"));
-	REQUIRE_NO_FAIL(con.Query("SET jit_cbo_native_operator_stage_benefit=4096"));
+	ConfigureJitCoverageCbo(con);
 	REQUIRE_NO_FAIL(con.Query("SET jit_cbo_materialization_elision_benefit=0"));
-	REQUIRE_NO_FAIL(con.Query("SET jit_cbo_full_pipeline_benefit=0"));
 	REQUIRE_NO_FAIL(con.Query("SET jit_cbo_startup_base_cost=0"));
 	REQUIRE_NO_FAIL(con.Query("SET jit_cbo_startup_margin_basis_points=0"));
 	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_hash_build_cbo_l AS "
@@ -92,7 +90,7 @@ TEST_CASE("JIT CBO admits generated hash-build regions through native join proto
 		    REQUIRE(event.runner_cost.present);
 		    REQUIRE(event.runner_cost.generated_stage_count > 0);
 		    REQUIRE(event.runner_cost.native_join_stage_count > 0);
-		    REQUIRE(event.runner_cost.saved_work_per_batch >= 4096);
+		    REQUIRE(event.runner_cost.saved_work_per_batch > 0);
 		    REQUIRE(event.runner_cost.selected_accelerated_runner);
 	    });
 }
@@ -102,7 +100,7 @@ TEST_CASE("JIT CBO skips bodyless native hash-build candidates before backend an
 	Connection con(db);
 	auto &manager = ExecutionRegionManager::Get(*con.context);
 
-	ConfigureSljitForCompilation(con, false, false, false, 10000);
+	ConfigureSljitForCoverage(con, false, false, false, 10000);
 	REQUIRE_NO_FAIL(con.Query("SET jit_trace_decisions=true"));
 	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_hash_bodyless_fact AS "
 	                          "SELECT i::BIGINT AS i, (i % 32)::BIGINT AS g, "
@@ -193,7 +191,7 @@ TEST_CASE("JIT hash join probe generates native probe with append sink", "[api][
 	Connection con(db);
 	auto &manager = ExecutionRegionManager::Get(*con.context);
 
-	ConfigureSljitForCompilation(con, false, true, true, 10000);
+	ConfigureSljitForCoverage(con, false, true, true, 10000);
 	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_hash_probe_l AS "
 	                          "SELECT ((i % 32) * 1000003)::BIGINT AS k, i::BIGINT AS v "
 	                          "FROM range(65536) tbl(i)"));

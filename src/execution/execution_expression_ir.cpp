@@ -133,6 +133,7 @@ static bool ExecutionExpressionIsArithmeticOp(ExecutionExpressionBinaryOp op) {
 	case ExecutionExpressionBinaryOp::ADD:
 	case ExecutionExpressionBinaryOp::SUBTRACT:
 	case ExecutionExpressionBinaryOp::MULTIPLY:
+	case ExecutionExpressionBinaryOp::DIVIDE:
 	case ExecutionExpressionBinaryOp::INTEGER_DIVIDE:
 	case ExecutionExpressionBinaryOp::MODULO:
 		return true;

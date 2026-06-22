@@ -23,6 +23,7 @@ from tpch_common import (
     DEFAULT_QUERIES,
     PERFORMANCE_GAP_FIELDS,
     RUN_FIELDS,
+    RUNNER_COST_COMPONENT_FIELDS,
     SUMMARY_FIELDS,
 )
 
@@ -110,7 +111,12 @@ def verify_counters(rows: list[dict], queries: list[str], policies: list[str], r
         if row["status"] in ("skipped", "unsupported", "unavailable", "error"):
             require(row["blocker"], f"counters.csv: missing blocker: {row}")
         if row_bool(row, "runner_cost_profile"):
-            require(row_int(row, "runner_cost_startup_cost") > 0, f"counters.csv: missing runner cost: {row}")
+            require(row_int(row, "runner_cost_startup_cost") >= 0, f"counters.csv: invalid runner cost: {row}")
+            require(row_int(row, "runner_cost_rows") > 0, f"counters.csv: missing runner cost rows: {row}")
+            require(row_int(row, "runner_cost_batches") > 0, f"counters.csv: missing runner cost batches: {row}")
+            if row_int(row, "runner_cost_saved_work_per_batch") != 0:
+                has_cost_evidence = any(row_int(row, field) != 0 for field in RUNNER_COST_COMPONENT_FIELDS)
+                require(has_cost_evidence, f"counters.csv: missing runner cost components: {row}")
 
 
 def verify_performance_gaps(

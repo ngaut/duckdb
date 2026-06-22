@@ -22,7 +22,7 @@ TEST_CASE("JIT auto compiles decimal projection chains through fused regions", "
 	Connection con(db);
 	auto &manager = ExecutionRegionManager::Get(*con.context);
 
-	ConfigureSljitForCompilation(con, false, true, true, 10000);
+	ConfigureSljitForCoverage(con, false, true, true, 10000);
 	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_decimal_projection_chain AS "
 	                          "SELECT i, CAST(i AS DECIMAL(15,2)) AS d FROM range(10000) t(i)"));
 
@@ -51,7 +51,7 @@ TEST_CASE("JIT canonicalizes type-preserving arithmetic identities before loweri
 	Connection con(db);
 	auto &manager = ExecutionRegionManager::Get(*con.context);
 
-	ConfigureSljitForCompilation(con, false, true, true, 10000);
+	ConfigureSljitForCoverage(con, false, true, true, 10000);
 	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_decimal_identity_projection AS "
 	                          "SELECT i, CAST(i % 1000 AS DECIMAL(18,10)) AS d FROM range(10000) tbl(i)"));
 
@@ -81,7 +81,7 @@ TEST_CASE("JIT omits flat nullable typed-tree path for small generated regions",
 	Connection con(db);
 	auto &manager = ExecutionRegionManager::Get(*con.context);
 
-	ConfigureSljitForCompilation(con, false, true, false, 10000);
+	ConfigureSljitForCoverage(con, false, true, false, 10000);
 	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_typed_tree_small AS "
 	                          "SELECT i::BIGINT AS i, (i % 32)::BIGINT AS g FROM range(4096) tbl(i)"));
 	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_typed_tree_large AS "
@@ -105,7 +105,7 @@ TEST_CASE("JIT lowers date year intrinsic as native scalar projection", "[api][j
 	Connection con(db);
 	auto &manager = ExecutionRegionManager::Get(*con.context);
 
-	ConfigureSljitForCompilation(con, true, true, true, 10000);
+	ConfigureSljitForCoverage(con, true, true, true, 10000);
 	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_date_year_native(d DATE)"));
 	REQUIRE_NO_FAIL(con.Query("INSERT INTO jit_date_year_native VALUES "
 	                          "(DATE '1992-02-29'), (DATE '-0001-01-01'), "
@@ -131,7 +131,7 @@ TEST_CASE("JIT lowers compressed scalar intrinsics as native projections", "[api
 	Connection con(db);
 	auto &manager = ExecutionRegionManager::Get(*con.context);
 
-	ConfigureSljitForCompilation(con, true, true, true, 10000);
+	ConfigureSljitForCoverage(con, true, true, true, 10000);
 	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_compress_native AS "
 	                          "SELECT CASE WHEN range=10 THEN NULL ELSE (range + 1992)::BIGINT END y "
 	                          "FROM range(11)"));
@@ -150,7 +150,7 @@ TEST_CASE("JIT lowers string predicates without aggregate sink dependence", "[ap
 	Connection con(db);
 	auto &manager = ExecutionRegionManager::Get(*con.context);
 
-	ConfigureSljitForCompilation(con, true, true, true, 10000);
+	ConfigureSljitForCoverage(con, true, true, true, 10000);
 	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_string_native(id INTEGER, s VARCHAR)"));
 	REQUIRE_NO_FAIL(con.Query("INSERT INTO jit_string_native VALUES "
 	                          "(1, 'EUROPE BRASS'), "
@@ -238,7 +238,7 @@ TEST_CASE("JIT lowers long string predicates through packed native comparisons",
 	Connection con(db);
 	auto &manager = ExecutionRegionManager::Get(*con.context);
 
-	ConfigureSljitForCompilation(con, true, true, true, 10000);
+	ConfigureSljitForCoverage(con, true, true, true, 10000);
 	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_string_packed(id INTEGER, s VARCHAR)"));
 	REQUIRE_NO_FAIL(con.Query("INSERT INTO jit_string_packed VALUES "
 	                          "(1, 'abcdefghijklmnop'), "
@@ -318,7 +318,7 @@ TEST_CASE("JIT auto preserves DuckDB scan ownership for cheap source string equa
 	Connection con(db);
 	auto &manager = ExecutionRegionManager::Get(*con.context);
 
-	ConfigureSljitForCompilation(con, false, true, true, 10000);
+	ConfigureSljitForCoverage(con, false, true, true, 10000);
 	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_auto_string_equality_source AS "
 	                          "SELECT i::INTEGER AS id, "
 	                          "CASE WHEN i % 4 = 0 THEN 'EUROPE' ELSE 'OTHER' END AS region "
@@ -352,7 +352,7 @@ TEST_CASE("JIT lowers signed INT128 predicates as native filters", "[api][jit]")
 	Connection con(db);
 	auto &manager = ExecutionRegionManager::Get(*con.context);
 
-	ConfigureSljitForCompilation(con, true, true, true, 10000);
+	ConfigureSljitForCoverage(con, true, true, true, 10000);
 	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_int128_predicate("
 	                          "id INTEGER, d DECIMAL(38,2), d2 DECIMAL(38,2), h HUGEINT, h2 HUGEINT)"));
 	REQUIRE_NO_FAIL(con.Query("INSERT INTO jit_int128_predicate VALUES "
@@ -393,7 +393,7 @@ TEST_CASE("JIT lowers scalar casts and arithmetic as generated code", "[api][jit
 	Connection con(db);
 	auto &manager = ExecutionRegionManager::Get(*con.context);
 
-	ConfigureSljitForCompilation(con, true, true, true, 10000);
+	ConfigureSljitForCoverage(con, true, true, true, 10000);
 	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_cast_arithmetic AS "
 	                          "SELECT i::INTEGER AS i, (i + 1)::DOUBLE AS d, (i + 2)::DOUBLE AS e "
 	                          "FROM range(10) tbl(i)"));
@@ -423,7 +423,7 @@ TEST_CASE("JIT lowers semantics-independent casted numeric double division as ge
 	Connection con(db);
 	auto &manager = ExecutionRegionManager::Get(*con.context);
 
-	ConfigureSljitForCompilation(con, true, true, true, 10000);
+	ConfigureSljitForCoverage(con, true, true, true, 10000);
 	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_casted_double_division("
 	                          "id INTEGER, d DECIMAL(38,2), n BIGINT)"));
 	REQUIRE_NO_FAIL(con.Query("INSERT INTO jit_casted_double_division VALUES "
@@ -476,7 +476,7 @@ TEST_CASE("JIT lowers casted numeric double comparison predicates as generated c
 	Connection con(db);
 	auto &manager = ExecutionRegionManager::Get(*con.context);
 
-	ConfigureSljitForCompilation(con, true, true, true, 10000);
+	ConfigureSljitForCoverage(con, true, true, true, 10000);
 	REQUIRE_NO_FAIL(con.Query("SET disabled_optimizers='filter_pushdown,top_n'"));
 	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_casted_double_predicate("
 	                          "id INTEGER, d64 DECIMAL(15,2), d128 DECIMAL(38,2), x DOUBLE)"));

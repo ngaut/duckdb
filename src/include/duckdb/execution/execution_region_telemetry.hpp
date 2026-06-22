@@ -151,8 +151,15 @@ struct ExecutionRegionCounter {
 	int64_t runner_cost_materialization_elision_count = 0;
 	int64_t runner_cost_native_join_stage_count = 0;
 	int64_t runner_cost_native_aggregate_stage_count = 0;
+	int64_t runner_cost_native_grouped_aggregate_stage_count = 0;
 	int64_t runner_cost_native_sort_stage_count = 0;
 	bool runner_cost_full_pipeline = false;
+	int64_t runner_cost_generated_expression_work = 0;
+	int64_t runner_cost_generated_stage_work = 0;
+	int64_t runner_cost_native_operator_work = 0;
+	int64_t runner_cost_materialization_elision_work = 0;
+	int64_t runner_cost_full_pipeline_work = 0;
+	int64_t runner_cost_stateful_protocol_penalty = 0;
 	int64_t runner_cost_saved_work_per_batch = 0;
 	int64_t runner_cost_accelerated_runner_benefit = 0;
 	int64_t runner_cost_startup_cost = 0;

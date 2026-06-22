@@ -19,6 +19,7 @@ from benchmark_common import (
     materialize_query,
     profile_materialized_attempt,
     profile_query_time_us,
+    require_fields,
     repo_root,
     row_bool,
     row_int,
@@ -38,6 +39,8 @@ from tpch_common import (
     prepare_tpch_database,
     read_query,
 )
+
+COUNTER_VALUE_FIELDS = COUNTER_FIELDS[3:]
 
 
 def seconds(value_us: int) -> str:
@@ -124,52 +127,7 @@ def benchmark_counter_rows(counter_rows: list[dict], query_id: str, policy: str,
                 "query": query_id,
                 "policy": policy,
                 "repeat": repeat,
-                "backend_name": counter.get("backend_name", ""),
-                "target": counter.get("target", ""),
-                "status": counter.get("status", ""),
-                "execution_mode": counter.get("execution_mode", ""),
-                "region_execution_form": counter.get("region_execution_form", ""),
-                "execution_body": counter.get("execution_body", ""),
-                "selected_runner": counter.get("selected_runner", ""),
-                "requested_policy": counter.get("requested_policy", ""),
-                "runner_cost_profile": counter.get("runner_cost_profile", False),
-                "blocker": counter.get("blocker", ""),
-                "runner_cost_rows": counter.get("runner_cost_rows", 0),
-                "runner_cost_batches": counter.get("runner_cost_batches", 0),
-                "runner_cost_expression_cost": counter.get("runner_cost_expression_cost", 0),
-                "runner_cost_generated_stage_count": counter.get("runner_cost_generated_stage_count", 0),
-                "runner_cost_materialization_elision_count": counter.get(
-                    "runner_cost_materialization_elision_count", 0
-                ),
-                "runner_cost_native_join_stage_count": counter.get("runner_cost_native_join_stage_count", 0),
-                "runner_cost_native_aggregate_stage_count": counter.get("runner_cost_native_aggregate_stage_count", 0),
-                "runner_cost_native_sort_stage_count": counter.get("runner_cost_native_sort_stage_count", 0),
-                "runner_cost_full_pipeline": counter.get("runner_cost_full_pipeline", False),
-                "runner_cost_saved_work_per_batch": counter.get("runner_cost_saved_work_per_batch", 0),
-                "runner_cost_accelerated_runner_benefit": counter.get("runner_cost_accelerated_runner_benefit", 0),
-                "runner_cost_startup_cost": counter.get("runner_cost_startup_cost", 0),
-                "runner_cost_required_benefit": counter.get("runner_cost_required_benefit", 0),
-                "runner_cost_net_benefit": counter.get("runner_cost_net_benefit", 0),
-                "runner_cost_selected_accelerated_runner_count": counter.get(
-                    "runner_cost_selected_accelerated_runner_count", 0
-                ),
-                "count": counter.get("count", 0),
-                "decision_time_us": counter.get("decision_time_us", 0),
-                "compile_time_us": counter.get("compile_time_us", 0),
-                "pipeline_cbo_time_us": counter.get("pipeline_cbo_time_us", 0),
-                "graph_build_time_us": counter.get("graph_build_time_us", 0),
-                "candidate_cbo_time_us": counter.get("candidate_cbo_time_us", 0),
-                "ir_lowering_time_us": counter.get("ir_lowering_time_us", 0),
-                "backend_analysis_time_us": counter.get("backend_analysis_time_us", 0),
-                "codegen_time_us": counter.get("codegen_time_us", 0),
-                "executable_build_time_us": counter.get("executable_build_time_us", 0),
-                "machine_codegen_time_us": counter.get("machine_codegen_time_us", 0),
-                "kernel_build_time_us": counter.get("kernel_build_time_us", 0),
-                "lazy_codegen_time_us": counter.get("lazy_codegen_time_us", 0),
-                "lazy_machine_codegen_time_us": counter.get("lazy_machine_codegen_time_us", 0),
-                "lazy_code_size": counter.get("lazy_code_size", 0),
-                "code_size": counter.get("code_size", 0),
-                "hash_join_probe_layout": counter.get("hash_join_probe_layout", ""),
+                **require_fields(counter, COUNTER_VALUE_FIELDS),
             }
         )
     return rows

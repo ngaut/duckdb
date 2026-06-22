@@ -1374,6 +1374,13 @@ SET jit_policy='auto'
 statement ok
 SET jit_dump_ir=true
 
+# Coverage-mode CBO economics for exercising grouped aggregate codegen; reset below.
+statement ok
+SET jit_cbo_native_operator_stage_benefit=1
+
+statement ok
+SET jit_cbo_full_pipeline_benefit=0
+
 statement ok
 CREATE TEMP TABLE jit_grouped_int_input AS
 SELECT (i % 16)::TINYINT AS k,
@@ -1420,6 +1427,24 @@ WHERE event_id > base_event_id
 ----
 1
 
+query I
+SELECT count(*) > 0
+FROM duckdb_jit_events(), jit_grouped_int_baseline
+WHERE event_id > base_event_id
+  AND backend_name='sljit'
+  AND status='compiled'
+  AND runner_cost_native_grouped_aggregate_stage_count > 0
+  AND runner_cost_native_aggregate_stage_count >= runner_cost_native_grouped_aggregate_stage_count
+----
+1
+
+query I
+SELECT coalesce(sum(runner_cost_native_grouped_aggregate_stage_count), 0) > 0
+FROM duckdb_jit_counters()
+WHERE backend_name='sljit'
+----
+1
+
 statement ok
 SET jit_dump_ir=true
 
@@ -1458,6 +1483,12 @@ WHERE event_id > base_event_id
   AND ir LIKE '%native_aggregate_state_update_contract_status=ready%'
 ----
 1
+
+statement ok
+SET jit_cbo_native_operator_stage_benefit=4096
+
+statement ok
+SET jit_cbo_full_pipeline_benefit=4096
 
 statement ok
 SET threads=1
@@ -1591,6 +1622,13 @@ SELECT sum(f.i + d.payload) AS total
 FROM jit_perfect_join_fact f
 JOIN jit_perfect_join_dim d ON f.k = d.k
 
+# Coverage-mode CBO economics for exercising perfect-hash join lazy codegen; reset below.
+statement ok
+SET jit_cbo_native_operator_stage_benefit=1
+
+statement ok
+SET jit_cbo_full_pipeline_benefit=0
+
 statement ok
 SET jit_policy='auto'
 
@@ -1635,6 +1673,12 @@ WHERE event_id > base_event_id
   AND generated_stage_runtime_breakdown NOT LIKE '%hash_join_probe.vector_setup%'
 ----
 1
+
+statement ok
+SET jit_cbo_native_operator_stage_benefit=4096
+
+statement ok
+SET jit_cbo_full_pipeline_benefit=4096
 
 statement ok
 SET jit_dump_ir=false

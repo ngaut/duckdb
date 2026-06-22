@@ -1707,6 +1707,7 @@ static string DescribeExecutionRegionCandidateTraits(const ExecutionRegionCandid
 	result += ",arithmetic_projections=" + std::to_string(traits.arithmetic_projection_count);
 	result += ",integer_arithmetic_projections=" + std::to_string(traits.integer_arithmetic_projection_count);
 	result += ",non_integer_arithmetic_projections=" + std::to_string(traits.non_integer_arithmetic_projection_count);
+	result += ",high_cost_projections=" + std::to_string(traits.high_cost_projection_count);
 	result += ",reference_projections=" + std::to_string(traits.reference_projection_count);
 	result += ",comparison_filters=" + std::to_string(traits.comparison_filter_count);
 	result += ",integer_comparison_filters=" + std::to_string(traits.integer_comparison_filter_count);
@@ -2205,6 +2206,9 @@ static ExecutionRegionCandidateTraits BuildExecutionRegionCandidateTraits(const 
 				}
 				if (projection->traits.non_integer_arithmetic_result_count > 0) {
 					traits.non_integer_arithmetic_projection_count++;
+				}
+				if (projection->traits.expression_cost >= HIGH_COST_GENERATED_PROJECTION_EXPRESSION_COST) {
+					traits.high_cost_projection_count++;
 				}
 			}
 			break;

@@ -11,7 +11,6 @@ from typing import Optional
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "jit"))
 from benchmark_common import REGION_SUMMARY_FIELDS, run_duckdb
 
-
 DEFAULT_QUERIES = tuple(f"{query_id:02d}" for query_id in range(1, 23))
 DEFAULT_POLICIES = ("off", "auto")
 TPCH_TABLES = ("nation", "region", "part", "supplier", "partsupp", "customer", "orders", "lineitem")
@@ -45,13 +44,9 @@ COUNTER_FIELDS = (
     "policy",
     "repeat",
     "backend_name",
-    "target",
     "status",
     "execution_mode",
-    "region_execution_form",
-    "execution_body",
     "selected_runner",
-    "requested_policy",
     "runner_cost_profile",
     "blocker",
     "runner_cost_rows",
@@ -61,8 +56,15 @@ COUNTER_FIELDS = (
     "runner_cost_materialization_elision_count",
     "runner_cost_native_join_stage_count",
     "runner_cost_native_aggregate_stage_count",
+    "runner_cost_native_grouped_aggregate_stage_count",
     "runner_cost_native_sort_stage_count",
     "runner_cost_full_pipeline",
+    "runner_cost_generated_expression_work",
+    "runner_cost_generated_stage_work",
+    "runner_cost_native_operator_work",
+    "runner_cost_materialization_elision_work",
+    "runner_cost_full_pipeline_work",
+    "runner_cost_stateful_protocol_penalty",
     "runner_cost_saved_work_per_batch",
     "runner_cost_accelerated_runner_benefit",
     "runner_cost_startup_cost",
@@ -86,6 +88,15 @@ COUNTER_FIELDS = (
     "lazy_code_size",
     "code_size",
     "hash_join_probe_layout",
+)
+
+RUNNER_COST_COMPONENT_FIELDS = (
+    "runner_cost_generated_expression_work",
+    "runner_cost_generated_stage_work",
+    "runner_cost_native_operator_work",
+    "runner_cost_materialization_elision_work",
+    "runner_cost_full_pipeline_work",
+    "runner_cost_stateful_protocol_penalty",
 )
 
 PERFORMANCE_GAP_FIELDS = (

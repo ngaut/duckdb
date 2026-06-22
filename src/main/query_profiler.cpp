@@ -178,11 +178,26 @@ static string ExecutionRegionProfileStageCosts(const PhysicalRunnerCostProfile &
 	string result = "gen:" + std::to_string(cost.generated_stage_count);
 	result += ",join:" + std::to_string(cost.native_join_stage_count);
 	result += ",agg:" + std::to_string(cost.native_aggregate_stage_count);
+	result += ",grouped_agg:" + std::to_string(cost.native_grouped_aggregate_stage_count);
 	result += ",sort:" + std::to_string(cost.native_sort_stage_count);
 	result += ",mat:" + std::to_string(cost.materialization_elision_count);
 	result += ",full:";
 	result += cost.full_pipeline ? "true" : "false";
 	result += ",expr:" + std::to_string(cost.expression_cost);
+	result += ",gen_class:";
+	result += PhysicalRunnerGeneratedWorkClassToString(cost.generated_work_class);
+	result += ",native_protocol:";
+	result += PhysicalRunnerNativeProtocolClassToString(cost.native_protocol_class);
+	return result;
+}
+
+static string ExecutionRegionProfileCostComponents(const PhysicalRunnerCostProfile &cost) {
+	string result = "expr:" + std::to_string(cost.generated_expression_work);
+	result += ",gen_stage:" + std::to_string(cost.generated_stage_work);
+	result += ",native:" + std::to_string(cost.native_operator_work);
+	result += ",mat:" + std::to_string(cost.materialization_elision_work);
+	result += ",full:" + std::to_string(cost.full_pipeline_work);
+	result += ",protocol_penalty:" + std::to_string(cost.stateful_protocol_penalty);
 	return result;
 }
 
@@ -310,8 +325,20 @@ static void AddExecutionRegionEvent(QueryProfileResult &row, const ExecutionRegi
 	     {"runner_cost_materialization_elision_count", Time(event.runner_cost.materialization_elision_count)},
 	     {"runner_cost_native_join_stage_count", Time(event.runner_cost.native_join_stage_count)},
 	     {"runner_cost_native_aggregate_stage_count", Time(event.runner_cost.native_aggregate_stage_count)},
+	     {"runner_cost_native_grouped_aggregate_stage_count",
+	      Time(event.runner_cost.native_grouped_aggregate_stage_count)},
 	     {"runner_cost_native_sort_stage_count", Time(event.runner_cost.native_sort_stage_count)},
 	     {"runner_cost_full_pipeline", Value::BOOLEAN(event.runner_cost.full_pipeline)},
+	     {"runner_cost_generated_work_class",
+	      Text(PhysicalRunnerGeneratedWorkClassToString(event.runner_cost.generated_work_class))},
+	     {"runner_cost_native_protocol_class",
+	      Text(PhysicalRunnerNativeProtocolClassToString(event.runner_cost.native_protocol_class))},
+	     {"runner_cost_generated_expression_work", Time(event.runner_cost.generated_expression_work)},
+	     {"runner_cost_generated_stage_work", Time(event.runner_cost.generated_stage_work)},
+	     {"runner_cost_native_operator_work", Time(event.runner_cost.native_operator_work)},
+	     {"runner_cost_materialization_elision_work", Time(event.runner_cost.materialization_elision_work)},
+	     {"runner_cost_full_pipeline_work", Time(event.runner_cost.full_pipeline_work)},
+	     {"runner_cost_stateful_protocol_penalty", Time(event.runner_cost.stateful_protocol_penalty)},
 	     {"runner_cost_saved_work_per_batch", Time(event.runner_cost.saved_work_per_batch)},
 	     {"runner_cost_accelerated_runner_benefit", Time(event.runner_cost.accelerated_runner_benefit)},
 	     {"runner_cost_startup_cost", Time(event.runner_cost.startup_cost)},
@@ -421,6 +448,7 @@ static void RenderExecutionRegionCboPipelineToStream(std::ostream &ss, const Que
 		if (event.runner_cost.present) {
 			ss << " batches=" << event.runner_cost.batches
 			   << " stages=" << ExecutionRegionProfileStageCosts(event.runner_cost)
+			   << " work=" << ExecutionRegionProfileCostComponents(event.runner_cost)
 			   << " saved=" << event.runner_cost.saved_work_per_batch
 			   << " benefit=" << event.runner_cost.accelerated_runner_benefit
 			   << " required=" << event.runner_cost.required_benefit << " net=" << event.runner_cost.net_benefit

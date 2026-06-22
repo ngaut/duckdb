@@ -60,8 +60,16 @@ static void AccumulateExecutionRegionCounter(ExecutionRegionCounter &counter, co
 		counter.runner_cost_materialization_elision_count += event.runner_cost.materialization_elision_count;
 		counter.runner_cost_native_join_stage_count += event.runner_cost.native_join_stage_count;
 		counter.runner_cost_native_aggregate_stage_count += event.runner_cost.native_aggregate_stage_count;
+		counter.runner_cost_native_grouped_aggregate_stage_count +=
+		    event.runner_cost.native_grouped_aggregate_stage_count;
 		counter.runner_cost_native_sort_stage_count += event.runner_cost.native_sort_stage_count;
 		counter.runner_cost_full_pipeline = counter.runner_cost_full_pipeline || event.runner_cost.full_pipeline;
+		counter.runner_cost_generated_expression_work += event.runner_cost.generated_expression_work;
+		counter.runner_cost_generated_stage_work += event.runner_cost.generated_stage_work;
+		counter.runner_cost_native_operator_work += event.runner_cost.native_operator_work;
+		counter.runner_cost_materialization_elision_work += event.runner_cost.materialization_elision_work;
+		counter.runner_cost_full_pipeline_work += event.runner_cost.full_pipeline_work;
+		counter.runner_cost_stateful_protocol_penalty += event.runner_cost.stateful_protocol_penalty;
 		counter.runner_cost_saved_work_per_batch += event.runner_cost.saved_work_per_batch;
 		counter.runner_cost_accelerated_runner_benefit += event.runner_cost.accelerated_runner_benefit;
 		counter.runner_cost_startup_cost += event.runner_cost.startup_cost;

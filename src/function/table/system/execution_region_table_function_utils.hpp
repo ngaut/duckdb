@@ -32,6 +32,49 @@ static inline void AddExecutionRegionTableFunctionColumn(vector<LogicalType> &re
 	return_types.emplace_back(type);
 }
 
+static inline void AddExecutionRegionTableFunctionColumns(vector<LogicalType> &return_types, vector<string> &names,
+                                                          const ExecutionRegionTraceColumn *columns,
+                                                          idx_t column_count) {
+	for (idx_t column_idx = 0; column_idx < column_count; column_idx++) {
+		AddExecutionRegionTableFunctionColumn(return_types, names, columns[column_idx].name,
+		                                      LogicalType(columns[column_idx].type));
+	}
+}
+
+static constexpr ExecutionRegionTraceColumn EXECUTION_REGION_RUNNER_COST_PROFILE_COLUMNS[] = {
+    {"runner_cost_profile", LogicalTypeId::BOOLEAN},
+    {"runner_cost_rows", LogicalTypeId::BIGINT},
+    {"runner_cost_batches", LogicalTypeId::BIGINT},
+    {"runner_cost_expression_cost", LogicalTypeId::BIGINT},
+    {"runner_cost_generated_stage_count", LogicalTypeId::BIGINT},
+    {"runner_cost_materialization_elision_count", LogicalTypeId::BIGINT},
+    {"runner_cost_native_join_stage_count", LogicalTypeId::BIGINT},
+    {"runner_cost_native_aggregate_stage_count", LogicalTypeId::BIGINT},
+    {"runner_cost_native_grouped_aggregate_stage_count", LogicalTypeId::BIGINT},
+    {"runner_cost_native_sort_stage_count", LogicalTypeId::BIGINT},
+    {"runner_cost_full_pipeline", LogicalTypeId::BOOLEAN},
+};
+
+static constexpr idx_t EXECUTION_REGION_RUNNER_COST_PROFILE_COLUMN_COUNT =
+    sizeof(EXECUTION_REGION_RUNNER_COST_PROFILE_COLUMNS) / sizeof(ExecutionRegionTraceColumn);
+
+static constexpr ExecutionRegionTraceColumn EXECUTION_REGION_RUNNER_COST_WORK_COLUMNS[] = {
+    {"runner_cost_generated_expression_work", LogicalTypeId::BIGINT},
+    {"runner_cost_generated_stage_work", LogicalTypeId::BIGINT},
+    {"runner_cost_native_operator_work", LogicalTypeId::BIGINT},
+    {"runner_cost_materialization_elision_work", LogicalTypeId::BIGINT},
+    {"runner_cost_full_pipeline_work", LogicalTypeId::BIGINT},
+    {"runner_cost_stateful_protocol_penalty", LogicalTypeId::BIGINT},
+    {"runner_cost_saved_work_per_batch", LogicalTypeId::BIGINT},
+    {"runner_cost_accelerated_runner_benefit", LogicalTypeId::BIGINT},
+    {"runner_cost_startup_cost", LogicalTypeId::BIGINT},
+    {"runner_cost_required_benefit", LogicalTypeId::BIGINT},
+    {"runner_cost_net_benefit", LogicalTypeId::BIGINT},
+};
+
+static constexpr idx_t EXECUTION_REGION_RUNNER_COST_WORK_COLUMN_COUNT =
+    sizeof(EXECUTION_REGION_RUNNER_COST_WORK_COLUMNS) / sizeof(ExecutionRegionTraceColumn);
+
 static constexpr ExecutionRegionTraceColumn EXECUTION_REGION_CANDIDATE_TRACE_COLUMNS[] = {
     {"candidate_signature_context", LogicalTypeId::VARCHAR},
     {"candidate_signature_shape", LogicalTypeId::VARCHAR},

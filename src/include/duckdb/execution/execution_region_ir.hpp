@@ -15,6 +15,8 @@
 
 namespace duckdb {
 
+static constexpr idx_t HIGH_COST_GENERATED_PROJECTION_EXPRESSION_COST = 1000;
+
 struct ExecutionRegionSourceFilter {
 	idx_t filter_index = 0;
 	idx_t scan_column_index = 0;
@@ -448,6 +450,7 @@ struct ExecutionRegionCandidateTraits {
 	idx_t arithmetic_projection_count = 0;
 	idx_t integer_arithmetic_projection_count = 0;
 	idx_t non_integer_arithmetic_projection_count = 0;
+	idx_t high_cost_projection_count = 0;
 	idx_t reference_projection_count = 0;
 	idx_t comparison_filter_count = 0;
 	idx_t integer_comparison_filter_count = 0;

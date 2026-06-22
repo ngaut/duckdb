@@ -7,7 +7,7 @@ TEST_CASE("JIT ungrouped aggregate sinks use native state-update contracts", "[a
 	Connection con(db);
 	auto &manager = ExecutionRegionManager::Get(*con.context);
 
-	ConfigureSljitForCompilation(con, false, true, true, 10000);
+	ConfigureSljitForCoverage(con, false, true, true, 10000);
 	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_aggregate_boundary AS "
 	                          "SELECT i::BIGINT AS i, CASE WHEN i % 5 = 0 THEN NULL ELSE i::BIGINT END AS v "
 	                          "FROM range(10000) tbl(i)"));
@@ -79,7 +79,7 @@ TEST_CASE("JIT fuses projection payloads into primitive ungrouped aggregate redu
 	Connection con(db);
 	auto &manager = ExecutionRegionManager::Get(*con.context);
 
-	ConfigureSljitForCompilation(con, false, true, true, 10000);
+	ConfigureSljitForCoverage(con, false, true, true, 10000);
 	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_aggregate_payload AS "
 	                          "SELECT (i % 1000)::BIGINT AS a, (i % 10)::BIGINT AS b "
 	                          "FROM range(10000) tbl(i)"));
@@ -128,7 +128,7 @@ TEST_CASE("JIT fuses generated filters into primitive ungrouped aggregate reduce
 	Connection con(db);
 	auto &manager = ExecutionRegionManager::Get(*con.context);
 
-	ConfigureSljitForCompilation(con, false, true, true, 10000);
+	ConfigureSljitForCoverage(con, false, true, true, 10000);
 	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_filtered_aggregate_payload AS "
 	                          "SELECT CASE WHEN i % 9973 = 0 THEN NULL ELSE i::BIGINT END AS a, "
 	                          "CASE WHEN i % 7919 = 0 THEN NULL ELSE (i + 3)::BIGINT END AS b "
@@ -167,7 +167,7 @@ TEST_CASE("JIT fuses generated filters into primitive count-star aggregate reduc
 	Connection con(db);
 	auto &manager = ExecutionRegionManager::Get(*con.context);
 
-	ConfigureSljitForCompilation(con, false, true, true, 10000);
+	ConfigureSljitForCoverage(con, false, true, true, 10000);
 	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_filtered_count_star_payload AS "
 	                          "SELECT CASE WHEN i % 9973 = 0 THEN NULL ELSE i::BIGINT END AS a, "
 	                          "CASE WHEN i % 7919 = 0 THEN NULL ELSE (i + 3)::BIGINT END AS b "
@@ -206,7 +206,7 @@ TEST_CASE("JIT fuses generated filters into multiple primitive aggregate reducer
 	Connection con(db);
 	auto &manager = ExecutionRegionManager::Get(*con.context);
 
-	ConfigureSljitForCompilation(con, false, true, true, 10000);
+	ConfigureSljitForCoverage(con, false, true, true, 10000);
 	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_filtered_multi_aggregate_payload AS "
 	                          "SELECT CASE WHEN i % 9973 = 0 THEN NULL ELSE i::BIGINT END AS a, "
 	                          "CASE WHEN i % 7919 = 0 THEN NULL ELSE (i + 3)::BIGINT END AS b, "
@@ -309,7 +309,7 @@ TEST_CASE("JIT preserves projection temps for double primitive aggregate payload
 	Connection con(db);
 	auto &manager = ExecutionRegionManager::Get(*con.context);
 
-	ConfigureSljitForCompilation(con, false, true, true, 10000);
+	ConfigureSljitForCoverage(con, false, true, true, 10000);
 	REQUIRE_NO_FAIL(con.Query("PRAGMA threads=1"));
 	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_double_aggregate_payload AS "
 	                          "SELECT i, CAST((i % 100) AS DOUBLE) + 0.25 AS x, "
@@ -353,7 +353,7 @@ TEST_CASE("JIT fuses multiple primitive ungrouped aggregate payload lanes into o
 	Connection con(db);
 	auto &manager = ExecutionRegionManager::Get(*con.context);
 
-	ConfigureSljitForCompilation(con, false, true, true, 10000);
+	ConfigureSljitForCoverage(con, false, true, true, 10000);
 	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_multi_aggregate_payload AS "
 	                          "SELECT i::BIGINT AS a, (i + 1)::BIGINT AS b "
 	                          "FROM range(10000) tbl(i)"));
@@ -388,7 +388,7 @@ TEST_CASE("JIT generic grouped primitive aggregate payload lanes require generat
 	Connection con(db);
 	auto &manager = ExecutionRegionManager::Get(*con.context);
 
-	ConfigureSljitForCompilation(con, false, true, true, 10000);
+	ConfigureSljitForCoverage(con, false, true, true, 10000);
 	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_grouped_multi_aggregate_payload AS "
 	                          "SELECT i::BIGINT AS k, i::BIGINT AS v "
 	                          "FROM range(200000) tbl(i)"));
@@ -440,7 +440,7 @@ TEST_CASE("JIT grouped aggregate uses canonical hash table lookup under high car
 	REQUIRE_NO_FAIL(*reference);
 	REQUIRE(reference->GetValue(0, 0).ToString() == "150000");
 
-	ConfigureSljitForCompilationSettings(con, false, true, true, 10000);
+	ConfigureSljitForCoverageSettings(con, false, true, true, 10000);
 	ClearJitTrace(manager, true);
 	auto result = con.Query("SELECT count(*), sum(c)::HUGEINT, sum(s)::HUGEINT "
 	                        "FROM (SELECT k, count(*) AS c, sum(v) AS s "
@@ -481,7 +481,7 @@ TEST_CASE("JIT fuses scaled decimal expression payloads into primitive hugeint a
 	Connection con(db);
 	auto &manager = ExecutionRegionManager::Get(*con.context);
 
-	ConfigureSljitForCompilation(con, false, true, true, 10000);
+	ConfigureSljitForCoverage(con, false, true, true, 10000);
 	REQUIRE_NO_FAIL(con.Query("SET disabled_optimizers='statistics_propagation'"));
 	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_decimal_aggregate_payload AS "
 	                          "SELECT i, CAST(i % 1000 AS DECIMAL(15,2)) AS d "
@@ -518,7 +518,7 @@ TEST_CASE("JIT fuses nullable BIGINT case payloads into primitive hugeint aggreg
 	Connection con(db);
 	auto &manager = ExecutionRegionManager::Get(*con.context);
 
-	ConfigureSljitForCompilation(con, false, true, true, 10000);
+	ConfigureSljitForCoverage(con, false, true, true, 10000);
 	REQUIRE_NO_FAIL(con.Query("SET disabled_optimizers='statistics_propagation'"));
 	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_bigint_case_aggregate_payload AS "
 	                          "SELECT i::BIGINT AS a, (i * 3 + 17)::BIGINT AS b, "
@@ -582,7 +582,7 @@ TEST_CASE("JIT typed-tree aggregate payloads preserve all-NULL branch results", 
 	Connection con(db);
 	auto &manager = ExecutionRegionManager::Get(*con.context);
 
-	ConfigureSljitForCompilation(con, false, true, true, 10000);
+	ConfigureSljitForCoverage(con, false, true, true, 10000);
 	REQUIRE_NO_FAIL(con.Query("SET disabled_optimizers='statistics_propagation'"));
 	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_typed_tree_sum_null_branch AS "
 	                          "SELECT i::BIGINT AS a FROM range(10000) tbl(i)"));
@@ -621,7 +621,7 @@ TEST_CASE("JIT generic BIGINT sum uses hugeint local accumulation", "[api][jit]"
 	Connection con(db);
 	auto &manager = ExecutionRegionManager::Get(*con.context);
 
-	ConfigureSljitForCompilation(con, false, true, true, 10000);
+	ConfigureSljitForCoverage(con, false, true, true, 10000);
 	REQUIRE_NO_FAIL(con.Query("SET disabled_optimizers='statistics_propagation'"));
 	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_bigint_sum_hugeint_local AS "
 	                          "SELECT i, 9223372036854775807::BIGINT AS v FROM range(4096) tbl(i)"));
@@ -659,7 +659,7 @@ TEST_CASE("JIT preserves stats-proven non-overflowing decimal arithmetic in expr
 	Connection con(db);
 	auto &manager = ExecutionRegionManager::Get(*con.context);
 
-	ConfigureSljitForCompilation(con, false, true, true, 10000);
+	ConfigureSljitForCoverage(con, false, true, true, 10000);
 	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_decimal_safe_aggregate_payload AS "
 	                          "SELECT i, CAST(i % 1000 AS DECIMAL(15,2)) AS d "
 	                          "FROM range(10000) tbl(i)"));
@@ -695,7 +695,7 @@ TEST_CASE("JIT perfect hash aggregate generates primitive decimal sum and count 
 	Connection con(db);
 	auto &manager = ExecutionRegionManager::Get(*con.context);
 
-	ConfigureSljitForCompilation(con, false, true, true, 10000);
+	ConfigureSljitForCoverage(con, false, true, true, 10000);
 	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_perfect_hash_count_star AS "
 	                          "SELECT (i % 4)::UTINYINT AS g1, (i % 3)::UTINYINT AS g2, "
 	                          "CAST(i % 100 AS DECIMAL(15,2)) AS v FROM range(100000) tbl(i)"));
@@ -774,7 +774,7 @@ TEST_CASE("JIT hash aggregate cast-only keys require generated lookup ownership"
 	Connection con(db);
 	auto &manager = ExecutionRegionManager::Get(*con.context);
 
-	ConfigureSljitForCompilation(con, false, true, true, 10000);
+	ConfigureSljitForCoverage(con, false, true, true, 10000);
 	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_hash_aggregate_cast_projection AS "
 	                          "SELECT i::BIGINT AS k, CAST(i % 100 AS DECIMAL(15,2)) AS v "
 	                          "FROM range(100000) tbl(i)"));

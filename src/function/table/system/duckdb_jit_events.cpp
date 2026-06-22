@@ -68,8 +68,17 @@ enum JitEventColumn : idx_t {
 	JIT_EVENT_RUNNER_COST_MATERIALIZATION_ELISION_COUNT,
 	JIT_EVENT_RUNNER_COST_NATIVE_JOIN_STAGE_COUNT,
 	JIT_EVENT_RUNNER_COST_NATIVE_AGGREGATE_STAGE_COUNT,
+	JIT_EVENT_RUNNER_COST_NATIVE_GROUPED_AGGREGATE_STAGE_COUNT,
 	JIT_EVENT_RUNNER_COST_NATIVE_SORT_STAGE_COUNT,
 	JIT_EVENT_RUNNER_COST_FULL_PIPELINE,
+	JIT_EVENT_RUNNER_COST_GENERATED_WORK_CLASS,
+	JIT_EVENT_RUNNER_COST_NATIVE_PROTOCOL_CLASS,
+	JIT_EVENT_RUNNER_COST_GENERATED_EXPRESSION_WORK,
+	JIT_EVENT_RUNNER_COST_GENERATED_STAGE_WORK,
+	JIT_EVENT_RUNNER_COST_NATIVE_OPERATOR_WORK,
+	JIT_EVENT_RUNNER_COST_MATERIALIZATION_ELISION_WORK,
+	JIT_EVENT_RUNNER_COST_FULL_PIPELINE_WORK,
+	JIT_EVENT_RUNNER_COST_STATEFUL_PROTOCOL_PENALTY,
 	JIT_EVENT_RUNNER_COST_SAVED_WORK_PER_BATCH,
 	JIT_EVENT_RUNNER_COST_ACCELERATED_RUNNER_BENEFIT,
 	JIT_EVENT_RUNNER_COST_STARTUP_COST,
@@ -83,6 +92,21 @@ static constexpr idx_t JIT_EVENT_CANDIDATE_TRACE_COLUMN_OFFSET = JIT_EVENT_COLUM
 static constexpr idx_t JIT_EVENT_PIPELINE_SHAPE_COLUMN =
     JIT_EVENT_CANDIDATE_TRACE_COLUMN_OFFSET + EXECUTION_REGION_CANDIDATE_TRACE_COLUMN_COUNT;
 static constexpr idx_t JIT_EVENT_PIPELINE_ESTIMATED_CARDINALITY_COLUMN = JIT_EVENT_PIPELINE_SHAPE_COLUMN + 1;
+
+static void AddJitEventRunnerCostColumns(vector<LogicalType> &return_types, vector<string> &names) {
+	AddExecutionRegionTableFunctionColumns(return_types, names, EXECUTION_REGION_RUNNER_COST_PROFILE_COLUMNS,
+	                                       EXECUTION_REGION_RUNNER_COST_PROFILE_COLUMN_COUNT);
+	AddExecutionRegionTableFunctionColumn(return_types, names, "runner_cost_generated_work_class",
+	                                      LogicalType::VARCHAR);
+	AddExecutionRegionTableFunctionColumn(return_types, names, "runner_cost_native_protocol_class",
+	                                      LogicalType::VARCHAR);
+	AddExecutionRegionTableFunctionColumns(return_types, names, EXECUTION_REGION_RUNNER_COST_WORK_COLUMNS,
+	                                       EXECUTION_REGION_RUNNER_COST_WORK_COLUMN_COUNT);
+	AddExecutionRegionTableFunctionColumn(return_types, names, "runner_cost_selected_accelerated_runner",
+	                                      LogicalType::BOOLEAN);
+	D_ASSERT(names.size() == JIT_EVENT_COLUMN_COUNT);
+	D_ASSERT(return_types.size() == JIT_EVENT_COLUMN_COUNT);
+}
 
 static void AppendJitEventCandidateColumn(Vector &output, idx_t column_id, const ExecutionRegionEvent &entry) {
 	auto candidate_column_id = column_id - JIT_EVENT_CANDIDATE_TRACE_COLUMN_OFFSET;
@@ -292,11 +316,38 @@ static void AppendJitEventColumn(Vector &output, idx_t column_id, const Executio
 	case JIT_EVENT_RUNNER_COST_NATIVE_AGGREGATE_STAGE_COUNT:
 		output.Append(Value::BIGINT(entry.runner_cost.native_aggregate_stage_count));
 		return;
+	case JIT_EVENT_RUNNER_COST_NATIVE_GROUPED_AGGREGATE_STAGE_COUNT:
+		output.Append(Value::BIGINT(entry.runner_cost.native_grouped_aggregate_stage_count));
+		return;
 	case JIT_EVENT_RUNNER_COST_NATIVE_SORT_STAGE_COUNT:
 		output.Append(Value::BIGINT(entry.runner_cost.native_sort_stage_count));
 		return;
 	case JIT_EVENT_RUNNER_COST_FULL_PIPELINE:
 		output.Append(Value::BOOLEAN(entry.runner_cost.full_pipeline));
+		return;
+	case JIT_EVENT_RUNNER_COST_GENERATED_WORK_CLASS:
+		output.Append(Value(PhysicalRunnerGeneratedWorkClassToString(entry.runner_cost.generated_work_class)));
+		return;
+	case JIT_EVENT_RUNNER_COST_NATIVE_PROTOCOL_CLASS:
+		output.Append(Value(PhysicalRunnerNativeProtocolClassToString(entry.runner_cost.native_protocol_class)));
+		return;
+	case JIT_EVENT_RUNNER_COST_GENERATED_EXPRESSION_WORK:
+		output.Append(Value::BIGINT(entry.runner_cost.generated_expression_work));
+		return;
+	case JIT_EVENT_RUNNER_COST_GENERATED_STAGE_WORK:
+		output.Append(Value::BIGINT(entry.runner_cost.generated_stage_work));
+		return;
+	case JIT_EVENT_RUNNER_COST_NATIVE_OPERATOR_WORK:
+		output.Append(Value::BIGINT(entry.runner_cost.native_operator_work));
+		return;
+	case JIT_EVENT_RUNNER_COST_MATERIALIZATION_ELISION_WORK:
+		output.Append(Value::BIGINT(entry.runner_cost.materialization_elision_work));
+		return;
+	case JIT_EVENT_RUNNER_COST_FULL_PIPELINE_WORK:
+		output.Append(Value::BIGINT(entry.runner_cost.full_pipeline_work));
+		return;
+	case JIT_EVENT_RUNNER_COST_STATEFUL_PROTOCOL_PENALTY:
+		output.Append(Value::BIGINT(entry.runner_cost.stateful_protocol_penalty));
 		return;
 	case JIT_EVENT_RUNNER_COST_SAVED_WORK_PER_BATCH:
 		output.Append(Value::BIGINT(entry.runner_cost.saved_work_per_batch));
@@ -388,29 +439,7 @@ static unique_ptr<FunctionData> DuckDBJitEventsBind(ClientContext &context, Tabl
 	AddExecutionRegionTableFunctionColumn(return_types, names, "lazy_code_size", LogicalType::UBIGINT);
 	AddExecutionRegionTableFunctionColumn(return_types, names, "hash_join_probe_layout", LogicalType::VARCHAR);
 	AddExecutionRegionTableFunctionColumn(return_types, names, "candidate_pipeline_shape", LogicalType::VARCHAR);
-	AddExecutionRegionTableFunctionColumn(return_types, names, "runner_cost_profile", LogicalType::BOOLEAN);
-	AddExecutionRegionTableFunctionColumn(return_types, names, "runner_cost_rows", LogicalType::BIGINT);
-	AddExecutionRegionTableFunctionColumn(return_types, names, "runner_cost_batches", LogicalType::BIGINT);
-	AddExecutionRegionTableFunctionColumn(return_types, names, "runner_cost_expression_cost", LogicalType::BIGINT);
-	AddExecutionRegionTableFunctionColumn(return_types, names, "runner_cost_generated_stage_count",
-	                                      LogicalType::BIGINT);
-	AddExecutionRegionTableFunctionColumn(return_types, names, "runner_cost_materialization_elision_count",
-	                                      LogicalType::BIGINT);
-	AddExecutionRegionTableFunctionColumn(return_types, names, "runner_cost_native_join_stage_count",
-	                                      LogicalType::BIGINT);
-	AddExecutionRegionTableFunctionColumn(return_types, names, "runner_cost_native_aggregate_stage_count",
-	                                      LogicalType::BIGINT);
-	AddExecutionRegionTableFunctionColumn(return_types, names, "runner_cost_native_sort_stage_count",
-	                                      LogicalType::BIGINT);
-	AddExecutionRegionTableFunctionColumn(return_types, names, "runner_cost_full_pipeline", LogicalType::BOOLEAN);
-	AddExecutionRegionTableFunctionColumn(return_types, names, "runner_cost_saved_work_per_batch", LogicalType::BIGINT);
-	AddExecutionRegionTableFunctionColumn(return_types, names, "runner_cost_accelerated_runner_benefit",
-	                                      LogicalType::BIGINT);
-	AddExecutionRegionTableFunctionColumn(return_types, names, "runner_cost_startup_cost", LogicalType::BIGINT);
-	AddExecutionRegionTableFunctionColumn(return_types, names, "runner_cost_required_benefit", LogicalType::BIGINT);
-	AddExecutionRegionTableFunctionColumn(return_types, names, "runner_cost_net_benefit", LogicalType::BIGINT);
-	AddExecutionRegionTableFunctionColumn(return_types, names, "runner_cost_selected_accelerated_runner",
-	                                      LogicalType::BOOLEAN);
+	AddJitEventRunnerCostColumns(return_types, names);
 	AddExecutionRegionCandidateTraceColumns(return_types, names);
 	D_ASSERT(names.size() == JIT_EVENT_CANDIDATE_TRACE_COLUMN_OFFSET + EXECUTION_REGION_CANDIDATE_TRACE_COLUMN_COUNT);
 	D_ASSERT(return_types.size() ==

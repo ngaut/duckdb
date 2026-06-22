@@ -178,7 +178,7 @@ TEST_CASE("JIT full pipeline uses explicit append sink contract", "[api][jit]") 
 	LoadSljit(con);
 	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_native_result_collector AS "
 	                          "SELECT i::BIGINT AS i FROM range(1000) tbl(i)"));
-	ConfigureSljitForCompilationSettings(con, true, true, true);
+	ConfigureSljitForCoverageSettings(con, true, true, true);
 
 	ClearJitTrace(manager);
 	auto result = con.Query("SELECT i + 1 AS j FROM jit_native_result_collector WHERE i > 500");
@@ -232,7 +232,7 @@ TEST_CASE("JIT full pipeline uses append sink contract for CTE materialization",
 	LoadSljit(con);
 	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_native_cte_materialization AS "
 	                          "SELECT i::BIGINT AS i FROM range(1000) tbl(i)"));
-	ConfigureSljitForCompilationSettings(con, true, true, true);
+	ConfigureSljitForCoverageSettings(con, true, true, true);
 
 	ClearJitTrace(manager);
 	auto result = con.Query("WITH cte AS MATERIALIZED ("
@@ -275,7 +275,7 @@ TEST_CASE("JIT full pipeline uses ordered sink native contract when order keys g
 	LoadSljit(con);
 	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_native_sort_sink AS "
 	                          "SELECT (1000 - i)::BIGINT AS i FROM range(1000) tbl(i)"));
-	ConfigureSljitForCompilationSettings(con, true, true, true);
+	ConfigureSljitForCoverageSettings(con, true, true, true);
 
 	auto require_ordered_sink_contract = [&](const string &sql, const string &operator_name,
 	                                         const string &expected_order_kind, idx_t expected_rows,
@@ -338,7 +338,7 @@ TEST_CASE("JIT dump IR and execution mode expose backend honesty", "[api][jit]")
 	auto &context = *con.context;
 	auto &manager = ExecutionRegionManager::Get(context);
 
-	ConfigureSljitForCompilation(con, false, true);
+	ConfigureSljitForCoverage(con, false, true);
 
 	ClearJitTrace(manager);
 	REQUIRE_NO_FAIL(con.Query("SELECT i + 1 FROM range(3) tbl(i) WHERE i > 0"));
@@ -367,7 +367,7 @@ TEST_CASE("Execution region runtime trace records kernel execution facts", "[api
 		auto &context = *con.context;
 		auto &manager = ExecutionRegionManager::Get(context);
 
-		ConfigureSljitForCompilation(con, false, false, true);
+		ConfigureSljitForCoverage(con, false, false, true);
 		REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_runtime_trace_input AS "
 		                          "SELECT i::BIGINT AS i FROM range(16) tbl(i)"));
 
@@ -415,7 +415,7 @@ TEST_CASE("EXPLAIN ANALYZE exposes compact execution region profile", "[api][jit
 	auto &context = *con.context;
 	auto &manager = ExecutionRegionManager::Get(context);
 
-	ConfigureSljitForCompilation(con, false, true);
+	ConfigureSljitForCoverage(con, false, true);
 	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_explain_analyze_input AS "
 	                          "SELECT i::BIGINT AS i, (i + 1)::BIGINT AS g FROM range(10000) tbl(i)"));
 
@@ -549,7 +549,7 @@ TEST_CASE("EXPLAIN ANALYZE exposes grouped hash aggregate generated lookup block
 	DuckDB db;
 	Connection con(db);
 
-	ConfigureSljitForCompilation(con, false, true);
+	ConfigureSljitForCoverage(con, false, true);
 	REQUIRE_NO_FAIL(con.Query("SET threads=1"));
 	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_explain_grouped_lookup AS "
 	                          "SELECT i::BIGINT AS k, (i % 17)::BIGINT AS v FROM range(50000) tbl(i)"));
