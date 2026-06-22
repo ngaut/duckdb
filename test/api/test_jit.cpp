@@ -258,6 +258,39 @@ TEST_CASE("JIT auto planner skips region graph when pipeline has no costed accel
 	    });
 }
 
+TEST_CASE("JIT diagnostic tracing analyzes fused contract boundary regions", "[api][jit]") {
+	JitTestDatabase test;
+	auto &con = test.con;
+	auto &manager = test.manager;
+
+	ConfigureSljitForCompilation(con, false, true);
+	REQUIRE_NO_FAIL(con.Query("SET threads=1"));
+	REQUIRE_NO_FAIL(con.Query("SET jit_trace_decisions=true"));
+
+	ClearJitTrace(manager, true);
+	auto result = con.Query("SELECT sum(i) FROM range(1000) tbl(i)");
+	REQUIRE_NO_FAIL(*result);
+	REQUIRE(result->GetValue(0, 0).ToString() == "499500");
+
+	RequireJitEvent(
+	    manager,
+	    [](const ExecutionRegionEvent &event) {
+		    return IsSljitRegionEvent(event) && EventStatus(event) == "unsupported" && event.has_candidate &&
+		           StringUtil::Contains(event.reason, "region-lowering");
+	    },
+	    [](const ExecutionRegionEvent &event) {
+		    REQUIRE(event.selected_runner == ExecutionRunnerKind::VECTORIZED);
+		    REQUIRE(StringUtil::Contains(event.reason, "source-contract-blocker"));
+	    });
+
+	for (auto &event : manager.GetEvents()) {
+		if (!IsSljitRegionEvent(event) || event.blocker != "fused_region_contract_has_boundaries") {
+			continue;
+		}
+		REQUIRE(StringUtil::Contains(event.reason, "region-lowering"));
+	}
+}
+
 TEST_CASE("JIT auto planner cost skips default uncalibrated aggregate codegen", "[api][jit]") {
 	JitTestDatabase test;
 	auto &con = test.con;

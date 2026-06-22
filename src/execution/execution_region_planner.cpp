@@ -950,7 +950,7 @@ unique_ptr<ExecutionRegionPlan> ExecutionRegionPlanner::Build(ClientContext &con
 			cost_only_physical_runner = std::move(physical_runner);
 			has_cost_only_physical_runner = true;
 		}
-		if (!ExecutionRegionContractHasOnlyNativeStages(candidate.contract)) {
+		if (!needs_backend_diagnostics && !ExecutionRegionContractHasOnlyNativeStages(candidate.contract)) {
 			if (should_record_decision_telemetry) {
 				auto contract_decision = BuildExecutionRegionFusedContractBoundaryDecision(candidate.contract);
 				auto decision_time_us = candidate_decision_time_us();
