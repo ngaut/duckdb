@@ -9,6 +9,7 @@
 #include "sljit_region_plan.hpp"
 
 #include "duckdb/common/exception.hpp"
+#include "duckdb/common/constants.hpp"
 #include "duckdb/common/operator/add.hpp"
 #include "duckdb/common/string_util.hpp"
 #include "duckdb/common/types/value.hpp"
@@ -22,6 +23,7 @@ namespace duckdb {
 
 static constexpr const char *SLJIT_NATIVE_CONTRACT_UNSUPPORTED =
     "region IR node is unsupported by SLJIT native contract lowering";
+static constexpr idx_t SLJIT_FLAT_NULLABLE_FAST_PATH_MIN_CARDINALITY = STANDARD_VECTOR_SIZE * 4;
 
 static bool TryGetSljitHashJoinKeyKind(const LogicalType &type, SljitNativeHashJoinKeyKind &kind);
 static const char *SljitHashJoinKeyKindToString(SljitNativeHashJoinKeyKind kind);
@@ -139,6 +141,7 @@ SljitNativeRegionExpressionPlan CopySljitNativeRegionExpression(const SljitNativ
 		result.expression_tree_source_indices = input.expression_tree_source_indices;
 	}
 	result.constant_or_null = input.constant_or_null;
+	result.emit_flat_nullable_fast_path = input.emit_flat_nullable_fast_path;
 	if (copy_ir) {
 		result.ir = input.ir;
 	}
@@ -681,6 +684,36 @@ static SljitNativeRegionSummary BuildSljitNativeRegionSummary(const SljitNativeR
 		}
 	}
 	return summary;
+}
+
+static bool SljitShouldEmitFlatNullableFastPath(const ExecutionRegionCandidate &candidate) {
+	return candidate.estimated_cardinality >= SLJIT_FLAT_NULLABLE_FAST_PATH_MIN_CARDINALITY;
+}
+
+static void SetSljitExpressionFlatNullableFastPath(SljitNativeRegionExpressionPlan &expr,
+                                                   bool emit_flat_nullable_fast_path) {
+	expr.emit_flat_nullable_fast_path = emit_flat_nullable_fast_path;
+}
+
+static void SetSljitExpressionsFlatNullableFastPath(vector<SljitNativeRegionExpressionPlan> &expressions,
+                                                    bool emit_flat_nullable_fast_path) {
+	for (auto &expr : expressions) {
+		SetSljitExpressionFlatNullableFastPath(expr, emit_flat_nullable_fast_path);
+	}
+}
+
+static void SetSljitRegionFlatNullableFastPath(SljitNativeRegionPlan &region, bool emit_flat_nullable_fast_path) {
+	for (auto &op : region.ops) {
+		SetSljitExpressionFlatNullableFastPath(op.filter, emit_flat_nullable_fast_path);
+		SetSljitExpressionFlatNullableFastPath(op.hash_join_probe.residual_filter, emit_flat_nullable_fast_path);
+		for (auto &condition : op.nested_loop_join_probe.conditions) {
+			SetSljitExpressionFlatNullableFastPath(condition.lhs_condition, emit_flat_nullable_fast_path);
+		}
+		SetSljitExpressionsFlatNullableFastPath(op.nested_loop_join_build.rhs_conditions, emit_flat_nullable_fast_path);
+		SetSljitExpressionsFlatNullableFastPath(op.order_sink.order_keys, emit_flat_nullable_fast_path);
+		SetSljitExpressionsFlatNullableFastPath(op.aggregate_update.payloads, emit_flat_nullable_fast_path);
+		SetSljitExpressionsFlatNullableFastPath(op.projections, emit_flat_nullable_fast_path);
+	}
 }
 
 static void FinalizeSljitNativeRegionPlan(SljitNativeRegionPlan &region) {
@@ -3646,6 +3679,7 @@ ExecutionRegionLoweringPlan BuildSljitRegionPlan(const ExecutionRegionIR &region
 		native_region.source_execution = cursor.SelectedSourceExecution();
 		FuseAdjacentNativeProjections(native_region, render_diagnostics);
 		FusePrimitiveAggregateUpdates(native_region, candidate.input_types, render_diagnostics);
+		SetSljitRegionFlatNullableFastPath(native_region, SljitShouldEmitFlatNullableFastPath(candidate));
 		FinalizeSljitNativeRegionPlan(native_region);
 		lowering_plan.SetUsesScanFilters(cursor.UsesScanFilters());
 		string codegen_blocker;

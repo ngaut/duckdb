@@ -125,6 +125,7 @@ struct SljitNativeRegionExpressionPlan {
 	unique_ptr<ExecutionExpressionIR> expression_tree;
 	vector<idx_t> expression_tree_source_indices;
 	SljitNativeConstantOrNull constant_or_null;
+	bool emit_flat_nullable_fast_path = true;
 	string ir;
 };
 

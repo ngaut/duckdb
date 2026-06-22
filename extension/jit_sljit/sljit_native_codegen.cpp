@@ -2470,7 +2470,8 @@ static void EmitSljitTypedExpressionTreeFastValueReg(struct sljit_compiler *comp
 unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeTypedExpressionTree(const ExecutionExpressionIR &root,
                                                                           SljitNativeIntegerKind result_kind,
                                                                           SljitNativeVectorFunction &function,
-                                                                          string &error) {
+                                                                          string &error,
+                                                                          bool emit_flat_nullable_fast_path) {
 	if (!SljitTypedExpressionTreeIsSupported(root)) {
 		error =
 		    "SLJIT typed expression-tree codegen only supports INT64/BOOLEAN arithmetic, comparisons, conjunctions, "
@@ -2499,8 +2500,8 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeTypedExpressionTree(const 
 	vector<SljitExpressionTreeOverflowJumps> overflows;
 	vector<idx_t> source_refs;
 	CollectSljitTypedExpressionTreeReferences(root, source_refs);
-	const auto precheck_nulls_supported =
-	    fast_path_supported && SljitTypedExpressionTreeCanPrecheckNulls(root) && !source_refs.empty();
+	const auto precheck_nulls_supported = emit_flat_nullable_fast_path && fast_path_supported &&
+	                                      SljitTypedExpressionTreeCanPrecheckNulls(root) && !source_refs.empty();
 	sljit_emit_op1(compiler, SLJIT_MOV_U8, SLJIT_R0, 0, SLJIT_MEM1(SLJIT_S0),
 	               offsetof(SljitNativeVectorInput, expression_tree_flat_all_valid));
 	struct sljit_jump *use_slow_loop = nullptr;
@@ -2615,7 +2616,8 @@ static void EmitStoreTypedExpressionTreeTrueSelection(struct sljit_compiler *com
 
 unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeTypedExpressionTreeSelect(const ExecutionExpressionIR &root,
                                                                                 SljitNativeVectorFunction &function,
-                                                                                string &error) {
+                                                                                string &error,
+                                                                                bool emit_flat_nullable_fast_path) {
 	if (!SljitTypedExpressionTreeIsSupported(root) || !SljitTypedExpressionTreeIsBoolNode(root)) {
 		error = "SLJIT typed expression-tree select codegen only supports BOOLEAN typed expression-tree predicates";
 		return nullptr;
@@ -2644,8 +2646,8 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeTypedExpressionTreeSelect(
 	vector<SljitExpressionTreeOverflowJumps> overflows;
 	vector<idx_t> source_refs;
 	CollectSljitTypedExpressionTreeReferences(root, source_refs);
-	const auto precheck_nulls_supported =
-	    fast_path_supported && SljitTypedExpressionTreeCanPrecheckNulls(root) && !source_refs.empty();
+	const auto precheck_nulls_supported = emit_flat_nullable_fast_path && fast_path_supported &&
+	                                      SljitTypedExpressionTreeCanPrecheckNulls(root) && !source_refs.empty();
 	sljit_emit_op1(compiler, SLJIT_MOV_U8, SLJIT_R0, 0, SLJIT_MEM1(SLJIT_S0),
 	               offsetof(SljitNativeVectorInput, expression_tree_flat_all_valid));
 	struct sljit_jump *use_slow_loop = nullptr;
@@ -2900,10 +2902,9 @@ BuildSljitNativeUngroupedSumInt64ExpressionTree(const ExecutionExpressionIR &roo
 	return BuildSljitNativeUngroupedSumExpressionTree(root, function, error, SljitNativeAggregateSumStateKind::INT64);
 }
 
-static unique_ptr<ExecutionRegionCodeHandle>
-BuildSljitNativeUngroupedSumTypedExpressionTree(const ExecutionExpressionIR &root,
-                                                SljitNativeAggregateUpdateFunction &function, string &error,
-                                                SljitNativeAggregateSumStateKind state_kind) {
+static unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeUngroupedSumTypedExpressionTree(
+    const ExecutionExpressionIR &root, SljitNativeAggregateUpdateFunction &function, string &error,
+    SljitNativeAggregateSumStateKind state_kind, bool emit_flat_nullable_fast_path) {
 	if (!SljitTypedExpressionTreeIsSupported(root) || !SljitTypedExpressionTreeIsInt64Node(root)) {
 		error = "SLJIT aggregate typed expression-tree reducer only supports INT64 expression trees";
 		return nullptr;
@@ -2941,7 +2942,8 @@ BuildSljitNativeUngroupedSumTypedExpressionTree(const ExecutionExpressionIR &roo
 	vector<SljitExpressionTreeOverflowJumps> overflows;
 	vector<idx_t> source_refs;
 	CollectSljitTypedExpressionTreeReferences(root, source_refs);
-	const auto precheck_nulls_supported = SljitTypedExpressionTreeFastPathSupported(root) &&
+	const auto precheck_nulls_supported = emit_flat_nullable_fast_path &&
+	                                      SljitTypedExpressionTreeFastPathSupported(root) &&
 	                                      SljitTypedExpressionTreeCanPrecheckNulls(root) && !source_refs.empty();
 	sljit_emit_op1(compiler, SLJIT_MOV_U8, SLJIT_R0, 0, SLJIT_MEM1(SLJIT_S0),
 	               offsetof(SljitNativeVectorInput, expression_tree_flat_all_valid));
@@ -3042,16 +3044,18 @@ BuildSljitNativeUngroupedSumTypedExpressionTree(const ExecutionExpressionIR &roo
 
 unique_ptr<ExecutionRegionCodeHandle>
 BuildSljitNativeUngroupedSumInt64TypedExpressionTree(const ExecutionExpressionIR &root,
-                                                     SljitNativeAggregateUpdateFunction &function, string &error) {
-	return BuildSljitNativeUngroupedSumTypedExpressionTree(root, function, error,
-	                                                       SljitNativeAggregateSumStateKind::INT64);
+                                                     SljitNativeAggregateUpdateFunction &function, string &error,
+                                                     bool emit_flat_nullable_fast_path) {
+	return BuildSljitNativeUngroupedSumTypedExpressionTree(
+	    root, function, error, SljitNativeAggregateSumStateKind::INT64, emit_flat_nullable_fast_path);
 }
 
 unique_ptr<ExecutionRegionCodeHandle>
 BuildSljitNativeUngroupedSumHugeintTypedExpressionTree(const ExecutionExpressionIR &root,
-                                                       SljitNativeAggregateUpdateFunction &function, string &error) {
-	return BuildSljitNativeUngroupedSumTypedExpressionTree(root, function, error,
-	                                                       SljitNativeAggregateSumStateKind::HUGEINT);
+                                                       SljitNativeAggregateUpdateFunction &function, string &error,
+                                                       bool emit_flat_nullable_fast_path) {
+	return BuildSljitNativeUngroupedSumTypedExpressionTree(
+	    root, function, error, SljitNativeAggregateSumStateKind::HUGEINT, emit_flat_nullable_fast_path);
 }
 
 unique_ptr<ExecutionRegionCodeHandle>

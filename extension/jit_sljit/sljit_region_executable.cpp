@@ -341,12 +341,12 @@ static bool CompilePreparedExecutableRegionExpression(SljitExecutableRegionExpre
 		}
 		expr.overflow_message = "Overflow in arithmetic expression";
 		if (require_boolean) {
-			expr.select_code =
-			    BuildSljitNativeTypedExpressionTreeSelect(*semantic.expression_tree, expr.select_function, error);
+			expr.select_code = BuildSljitNativeTypedExpressionTreeSelect(
+			    *semantic.expression_tree, expr.select_function, error, semantic.emit_flat_nullable_fast_path);
 			return expr.select_code != nullptr;
 		}
-		expr.code =
-		    BuildSljitNativeTypedExpressionTree(*semantic.expression_tree, semantic.integer_kind, expr.function, error);
+		expr.code = BuildSljitNativeTypedExpressionTree(*semantic.expression_tree, semantic.integer_kind, expr.function,
+		                                                error, semantic.emit_flat_nullable_fast_path);
 		return expr.code != nullptr;
 	default:
 		throw InternalException("Unknown SLJIT native region expression kind");
@@ -664,11 +664,11 @@ static bool BuildExecutableAggregateUpdatePayloadCode(const SljitNativeAggregate
 			}
 			if (payload.expression_tree) {
 				if (primitive_kind == AggregatePrimitiveUpdateKind::SUM_INT64) {
-					code =
-					    BuildSljitNativeUngroupedSumInt64TypedExpressionTree(*payload.expression_tree, function, error);
+					code = BuildSljitNativeUngroupedSumInt64TypedExpressionTree(
+					    *payload.expression_tree, function, error, payload.emit_flat_nullable_fast_path);
 				} else if (primitive_kind == AggregatePrimitiveUpdateKind::SUM_HUGEINT) {
-					code = BuildSljitNativeUngroupedSumHugeintTypedExpressionTree(*payload.expression_tree, function,
-					                                                              error);
+					code = BuildSljitNativeUngroupedSumHugeintTypedExpressionTree(
+					    *payload.expression_tree, function, error, payload.emit_flat_nullable_fast_path);
 				} else {
 					error = "SLJIT aggregate typed expression-tree reducer has no primitive state kind";
 					return false;

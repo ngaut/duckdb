@@ -84,19 +84,22 @@ BuildSljitNativeExpressionTree(const ExecutionExpressionIR &root, SljitNativeVec
 unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeTypedExpressionTree(const ExecutionExpressionIR &root,
                                                                           SljitNativeIntegerKind result_kind,
                                                                           SljitNativeVectorFunction &function,
-                                                                          string &error);
-unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeTypedExpressionTreeSelect(const ExecutionExpressionIR &root,
-                                                                                SljitNativeVectorFunction &function,
-                                                                                string &error);
+                                                                          string &error,
+                                                                          bool emit_flat_nullable_fast_path = true);
+unique_ptr<ExecutionRegionCodeHandle>
+BuildSljitNativeTypedExpressionTreeSelect(const ExecutionExpressionIR &root, SljitNativeVectorFunction &function,
+                                          string &error, bool emit_flat_nullable_fast_path = true);
 unique_ptr<ExecutionRegionCodeHandle>
 BuildSljitNativeUngroupedSumInt64ExpressionTree(const ExecutionExpressionIR &root,
                                                 SljitNativeAggregateUpdateFunction &function, string &error);
 unique_ptr<ExecutionRegionCodeHandle>
 BuildSljitNativeUngroupedSumInt64TypedExpressionTree(const ExecutionExpressionIR &root,
-                                                     SljitNativeAggregateUpdateFunction &function, string &error);
+                                                     SljitNativeAggregateUpdateFunction &function, string &error,
+                                                     bool emit_flat_nullable_fast_path = true);
 unique_ptr<ExecutionRegionCodeHandle>
 BuildSljitNativeUngroupedSumHugeintTypedExpressionTree(const ExecutionExpressionIR &root,
-                                                       SljitNativeAggregateUpdateFunction &function, string &error);
+                                                       SljitNativeAggregateUpdateFunction &function, string &error,
+                                                       bool emit_flat_nullable_fast_path = true);
 unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeFilteredUngroupedFusedPrimitiveAggregateUpdate(
     const ExecutionExpressionIR &predicate, const vector<SljitNativeRegionExpressionPlan> &payloads,
     const vector<ExecutionRegionAggregateInput> &aggregates, SljitNativeAggregateUpdateFunction &function,

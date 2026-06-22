@@ -2,6 +2,21 @@
 
 using namespace duckdb;
 
+static idx_t CompiledTypedExpressionProjectionCodeSize(ExecutionRegionManager &manager) {
+	idx_t code_size = 0;
+	for (auto &event : manager.GetEvents()) {
+		if (!IsCompiledSljitRegionEvent(event) || event.candidate_traits.projection_count == 0 ||
+		    !StringUtil::Contains(event.ir, "typed-expression-tree")) {
+			continue;
+		}
+		RequireGeneratedMachineCodeRegion(event);
+		REQUIRE(code_size == 0);
+		code_size = ExecutionRegionEventProfileCodeSize(event);
+	}
+	REQUIRE(code_size > 0);
+	return code_size;
+}
+
 TEST_CASE("JIT auto compiles decimal projection chains through fused regions", "[api][jit]") {
 	DuckDB db;
 	Connection con(db);
@@ -59,6 +74,30 @@ TEST_CASE("JIT canonicalizes type-preserving arithmetic identities before loweri
 		REQUIRE(StringUtil::Contains(event.ir, "logical=DECIMAL(18,10),physical=INT64"));
 	}
 	REQUIRE(found_compile);
+}
+
+TEST_CASE("JIT omits flat nullable typed-tree path for small generated regions", "[api][jit]") {
+	DuckDB db;
+	Connection con(db);
+	auto &manager = ExecutionRegionManager::Get(*con.context);
+
+	ConfigureSljitForCompilation(con, false, true, false, 10000);
+	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_typed_tree_small AS "
+	                          "SELECT i::BIGINT AS i, (i % 32)::BIGINT AS g FROM range(4096) tbl(i)"));
+	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_typed_tree_large AS "
+	                          "SELECT i::BIGINT AS i, (i % 32)::BIGINT AS g FROM range(20000) tbl(i)"));
+
+	ClearJitTrace(manager, true);
+	REQUIRE_NO_FAIL(con.Query("CREATE TEMP TABLE jit_typed_tree_small_out AS "
+	                          "SELECT (i * 3) - g AS adjusted FROM jit_typed_tree_small"));
+	auto small_code_size = CompiledTypedExpressionProjectionCodeSize(manager);
+
+	ClearJitTrace(manager, true);
+	REQUIRE_NO_FAIL(con.Query("CREATE TEMP TABLE jit_typed_tree_large_out AS "
+	                          "SELECT (i * 3) - g AS adjusted FROM jit_typed_tree_large"));
+	auto large_code_size = CompiledTypedExpressionProjectionCodeSize(manager);
+
+	REQUIRE(large_code_size > small_code_size);
 }
 
 TEST_CASE("JIT lowers date year intrinsic as native scalar projection", "[api][jit]") {
@@ -265,7 +304,8 @@ TEST_CASE("JIT auto planner cost skips source-only string filters", "[api][jit]"
 	RequireJitEvent(
 	    manager,
 	    [](const ExecutionRegionEvent &event) {
-		    return event.backend_name == "sljit" && EventPhase(event) == "decision" && StringUtil::Contains(event.ir, ".string_like(");
+		    return event.backend_name == "sljit" && EventPhase(event) == "decision" &&
+		           StringUtil::Contains(event.ir, ".string_like(");
 	    },
 	    [](const ExecutionRegionEvent &event) {
 		    REQUIRE(EventStatus(event) != "compiled");
@@ -406,9 +446,9 @@ TEST_CASE("JIT lowers semantics-independent casted numeric double division as ge
 	REQUIRE(result->GetValue(0, 3).IsNull());
 
 	for (auto &event : manager.GetEvents()) {
-		const auto generated_double_reference_divide =
-		    IsCompiledSljitRegionEvent(event) && EventExecutionMode(event) == "native" &&
-		    StringUtil::Contains(event.ir, "double-divide-references");
+		const auto generated_double_reference_divide = IsCompiledSljitRegionEvent(event) &&
+		                                               EventExecutionMode(event) == "native" &&
+		                                               StringUtil::Contains(event.ir, "double-divide-references");
 		REQUIRE_FALSE(generated_double_reference_divide);
 	}
 
