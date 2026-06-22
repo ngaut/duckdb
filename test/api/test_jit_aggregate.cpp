@@ -577,6 +577,45 @@ TEST_CASE("JIT fuses nullable BIGINT case payloads into primitive hugeint aggreg
 	REQUIRE(found_compile);
 }
 
+TEST_CASE("JIT typed-tree aggregate payloads preserve all-NULL branch results", "[api][jit]") {
+	DuckDB db;
+	Connection con(db);
+	auto &manager = ExecutionRegionManager::Get(*con.context);
+
+	ConfigureSljitForCompilation(con, false, true, true, 10000);
+	REQUIRE_NO_FAIL(con.Query("SET disabled_optimizers='statistics_propagation'"));
+	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_typed_tree_sum_null_branch AS "
+	                          "SELECT i::BIGINT AS a FROM range(10000) tbl(i)"));
+
+	const string query = "SELECT sum(CASE WHEN a < 0 THEN a ELSE NULL::BIGINT END) "
+	                     "FROM jit_typed_tree_sum_null_branch";
+	REQUIRE_NO_FAIL(con.Query("SET jit_policy='off'"));
+	auto reference = con.Query(query);
+	REQUIRE_NO_FAIL(*reference);
+	REQUIRE(reference->GetValue(0, 0).IsNull());
+
+	ClearJitTrace(manager, true);
+	REQUIRE_NO_FAIL(con.Query("SET jit_policy='auto'"));
+	auto result = con.Query(query);
+	REQUIRE_NO_FAIL(*result);
+	REQUIRE(result->GetValue(0, 0).IsNull());
+
+	bool found_compile = false;
+	for (auto &event : manager.GetEvents()) {
+		if (!IsCompiledSljitRegionEvent(event) || !event.has_candidate ||
+		    event.candidate_traits.sink_kind != ExecutionRegionSinkKind::UNGROUPED_AGGREGATE_UPDATE ||
+		    !StringUtil::Contains(event.ir, "primitive_payloads=native:typed-expression-tree")) {
+			continue;
+		}
+		found_compile = true;
+		RequireGeneratedMachineCodeRegion(event);
+		REQUIRE(StringUtil::Contains(event.ir, "case<"));
+		REQUIRE(StringUtil::Contains(event.ir, "validity=constant-null"));
+		REQUIRE(StringUtil::Contains(event.ir, "sum_hugeint"));
+	}
+	REQUIRE(found_compile);
+}
+
 TEST_CASE("JIT generic BIGINT sum uses hugeint local accumulation", "[api][jit]") {
 	DuckDB db;
 	Connection con(db);

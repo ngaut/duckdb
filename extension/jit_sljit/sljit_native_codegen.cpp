@@ -2089,6 +2089,25 @@ static void CollectSljitTypedExpressionTreeReferences(const ExecutionExpressionI
 	}
 }
 
+struct SljitTypedExpressionTreeFastPathPlan {
+	bool fast_path_supported = false;
+	bool precheck_nulls_supported = false;
+	vector<idx_t> source_refs;
+};
+
+static SljitTypedExpressionTreeFastPathPlan
+BuildSljitTypedExpressionTreeFastPathPlan(const ExecutionExpressionIR &root, bool emit_flat_nullable_fast_path) {
+	SljitTypedExpressionTreeFastPathPlan result;
+	result.fast_path_supported = SljitTypedExpressionTreeFastPathSupported(root);
+	const auto precheck_nulls_candidate =
+	    emit_flat_nullable_fast_path && result.fast_path_supported && SljitTypedExpressionTreeCanPrecheckNulls(root);
+	if (precheck_nulls_candidate) {
+		CollectSljitTypedExpressionTreeReferences(root, result.source_refs);
+	}
+	result.precheck_nulls_supported = precheck_nulls_candidate && !result.source_refs.empty();
+	return result;
+}
+
 static void CollectSljitTypedExpressionTreeTrueFacts(const ExecutionExpressionIR &node,
                                                      vector<idx_t> &known_valid_sources) {
 	if (node.kind == ExecutionExpressionIRKind::UNARY && node.left &&
@@ -2485,7 +2504,7 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeTypedExpressionTree(const 
 		return nullptr;
 	}
 
-	const auto fast_path_supported = SljitTypedExpressionTreeFastPathSupported(root);
+	const auto fast_path = BuildSljitTypedExpressionTreeFastPathPlan(root, emit_flat_nullable_fast_path);
 	auto local_size = NumericCast<sljit_sw>(CountSljitTypedExpressionTreeNodes(root) * sizeof(sljit_sw) * 3);
 	sljit_emit_enter(compiler, 0, SLJIT_ARGS1V(P), 5, 7, local_size);
 	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_S1, 0, SLJIT_IMM, 0);
@@ -2498,17 +2517,10 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeTypedExpressionTree(const 
 	               offsetof(SljitNativeVectorInput, source_validity_array));
 
 	vector<SljitExpressionTreeOverflowJumps> overflows;
-	vector<idx_t> source_refs;
-	const auto precheck_nulls_candidate =
-	    emit_flat_nullable_fast_path && fast_path_supported && SljitTypedExpressionTreeCanPrecheckNulls(root);
-	if (precheck_nulls_candidate) {
-		CollectSljitTypedExpressionTreeReferences(root, source_refs);
-	}
-	const auto precheck_nulls_supported = precheck_nulls_candidate && !source_refs.empty();
 	sljit_emit_op1(compiler, SLJIT_MOV_U8, SLJIT_R0, 0, SLJIT_MEM1(SLJIT_S0),
 	               offsetof(SljitNativeVectorInput, expression_tree_flat_all_valid));
 	struct sljit_jump *use_slow_loop = nullptr;
-	if (fast_path_supported) {
+	if (fast_path.fast_path_supported) {
 		use_slow_loop = sljit_emit_cmp(compiler, SLJIT_EQUAL, SLJIT_R0, 0, SLJIT_IMM, 0);
 	} else {
 		use_slow_loop = sljit_emit_jump(compiler, SLJIT_JUMP);
@@ -2529,7 +2541,7 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeTypedExpressionTree(const 
 	sljit_set_label(use_slow_loop, sljit_emit_label(compiler));
 	struct sljit_jump *flat_nullable_done = nullptr;
 	struct sljit_jump *use_generic_loop = nullptr;
-	if (precheck_nulls_supported) {
+	if (fast_path.precheck_nulls_supported) {
 		sljit_emit_op1(compiler, SLJIT_MOV_U8, SLJIT_R0, 0, SLJIT_MEM1(SLJIT_S0),
 		               offsetof(SljitNativeVectorInput, expression_tree_flat_no_selection));
 		use_generic_loop = sljit_emit_cmp(compiler, SLJIT_EQUAL, SLJIT_R0, 0, SLJIT_IMM, 0);
@@ -2537,7 +2549,7 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeTypedExpressionTree(const 
 		auto flat_nullable_loop = sljit_emit_label(compiler);
 		flat_nullable_done = sljit_emit_cmp(compiler, SLJIT_GREATER_EQUAL, SLJIT_S1, 0, SLJIT_S2, 0);
 		vector<sljit_jump *> source_null_jumps;
-		for (auto source_index : source_refs) {
+		for (auto source_index : fast_path.source_refs) {
 			source_null_jumps.push_back(EmitJumpIfSljitExpressionTreeFlatSourceNull(compiler, source_index));
 		}
 		idx_t flat_nullable_spill_index = 0;
@@ -2632,7 +2644,7 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeTypedExpressionTreeSelect(
 		return nullptr;
 	}
 
-	const auto fast_path_supported = SljitTypedExpressionTreeFastPathSupported(root);
+	const auto fast_path = BuildSljitTypedExpressionTreeFastPathPlan(root, emit_flat_nullable_fast_path);
 	auto local_size = NumericCast<sljit_sw>(CountSljitTypedExpressionTreeNodes(root) * sizeof(sljit_sw) * 3);
 	sljit_emit_enter(compiler, 0, SLJIT_ARGS1V(P), 5, 7, local_size);
 	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_S1, 0, SLJIT_IMM, 0);
@@ -2647,17 +2659,10 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeTypedExpressionTreeSelect(
 	               SLJIT_IMM, 0);
 
 	vector<SljitExpressionTreeOverflowJumps> overflows;
-	vector<idx_t> source_refs;
-	const auto precheck_nulls_candidate =
-	    emit_flat_nullable_fast_path && fast_path_supported && SljitTypedExpressionTreeCanPrecheckNulls(root);
-	if (precheck_nulls_candidate) {
-		CollectSljitTypedExpressionTreeReferences(root, source_refs);
-	}
-	const auto precheck_nulls_supported = precheck_nulls_candidate && !source_refs.empty();
 	sljit_emit_op1(compiler, SLJIT_MOV_U8, SLJIT_R0, 0, SLJIT_MEM1(SLJIT_S0),
 	               offsetof(SljitNativeVectorInput, expression_tree_flat_all_valid));
 	struct sljit_jump *use_slow_loop = nullptr;
-	if (fast_path_supported) {
+	if (fast_path.fast_path_supported) {
 		use_slow_loop = sljit_emit_cmp(compiler, SLJIT_EQUAL, SLJIT_R0, 0, SLJIT_IMM, 0);
 	} else {
 		use_slow_loop = sljit_emit_jump(compiler, SLJIT_JUMP);
@@ -2677,7 +2682,7 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeTypedExpressionTreeSelect(
 	sljit_set_label(use_slow_loop, sljit_emit_label(compiler));
 	struct sljit_jump *flat_nullable_done = nullptr;
 	struct sljit_jump *use_generic_loop = nullptr;
-	if (precheck_nulls_supported) {
+	if (fast_path.precheck_nulls_supported) {
 		sljit_emit_op1(compiler, SLJIT_MOV_U8, SLJIT_R0, 0, SLJIT_MEM1(SLJIT_S0),
 		               offsetof(SljitNativeVectorInput, expression_tree_flat_no_selection));
 		use_generic_loop = sljit_emit_cmp(compiler, SLJIT_EQUAL, SLJIT_R0, 0, SLJIT_IMM, 0);
@@ -2685,7 +2690,7 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeTypedExpressionTreeSelect(
 		auto flat_nullable_loop = sljit_emit_label(compiler);
 		flat_nullable_done = sljit_emit_cmp(compiler, SLJIT_GREATER_EQUAL, SLJIT_S1, 0, SLJIT_S2, 0);
 		vector<sljit_jump *> source_null_jumps;
-		for (auto source_index : source_refs) {
+		for (auto source_index : fast_path.source_refs) {
 			source_null_jumps.push_back(EmitJumpIfSljitExpressionTreeFlatSourceNull(compiler, source_index));
 		}
 		idx_t flat_nullable_spill_index = 0;
@@ -2946,17 +2951,15 @@ static unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeUngroupedSumTypedEx
 	               offsetof(SljitNativeVectorInput, source_validity_array));
 
 	vector<SljitExpressionTreeOverflowJumps> overflows;
-	vector<idx_t> source_refs;
-	const auto precheck_nulls_candidate = emit_flat_nullable_fast_path &&
-	                                      SljitTypedExpressionTreeFastPathSupported(root) &&
-	                                      SljitTypedExpressionTreeCanPrecheckNulls(root);
-	if (precheck_nulls_candidate) {
-		CollectSljitTypedExpressionTreeReferences(root, source_refs);
-	}
-	const auto precheck_nulls_supported = precheck_nulls_candidate && !source_refs.empty();
+	const auto fast_path = BuildSljitTypedExpressionTreeFastPathPlan(root, emit_flat_nullable_fast_path);
 	sljit_emit_op1(compiler, SLJIT_MOV_U8, SLJIT_R0, 0, SLJIT_MEM1(SLJIT_S0),
 	               offsetof(SljitNativeVectorInput, expression_tree_flat_all_valid));
-	auto use_slow_loop = sljit_emit_cmp(compiler, SLJIT_EQUAL, SLJIT_R0, 0, SLJIT_IMM, 0);
+	struct sljit_jump *use_slow_loop = nullptr;
+	if (fast_path.fast_path_supported) {
+		use_slow_loop = sljit_emit_cmp(compiler, SLJIT_EQUAL, SLJIT_R0, 0, SLJIT_IMM, 0);
+	} else {
+		use_slow_loop = sljit_emit_jump(compiler, SLJIT_JUMP);
+	}
 
 	auto fast_loop = sljit_emit_label(compiler);
 	auto fast_done = sljit_emit_cmp(compiler, SLJIT_GREATER_EQUAL, SLJIT_S1, 0, SLJIT_S2, 0);
@@ -2973,7 +2976,7 @@ static unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeUngroupedSumTypedEx
 	sljit_set_label(use_slow_loop, sljit_emit_label(compiler));
 	struct sljit_jump *flat_nullable_done = nullptr;
 	struct sljit_jump *use_generic_loop = nullptr;
-	if (precheck_nulls_supported) {
+	if (fast_path.precheck_nulls_supported) {
 		sljit_emit_op1(compiler, SLJIT_MOV_U8, SLJIT_R0, 0, SLJIT_MEM1(SLJIT_S0),
 		               offsetof(SljitNativeVectorInput, expression_tree_flat_no_selection));
 		use_generic_loop = sljit_emit_cmp(compiler, SLJIT_EQUAL, SLJIT_R0, 0, SLJIT_IMM, 0);
@@ -2981,7 +2984,7 @@ static unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeUngroupedSumTypedEx
 		auto flat_nullable_loop = sljit_emit_label(compiler);
 		flat_nullable_done = sljit_emit_cmp(compiler, SLJIT_GREATER_EQUAL, SLJIT_S1, 0, SLJIT_S2, 0);
 		vector<sljit_jump *> source_null_jumps;
-		for (auto source_index : source_refs) {
+		for (auto source_index : fast_path.source_refs) {
 			source_null_jumps.push_back(EmitJumpIfSljitExpressionTreeFlatSourceNull(compiler, source_index));
 		}
 		idx_t flat_nullable_spill_index = 0;
