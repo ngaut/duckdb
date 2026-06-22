@@ -2059,12 +2059,11 @@ static void AppendSljitRegionNodeNativeOps(SljitNativeRegionPlan &region, SljitR
 	}
 }
 
-static SljitRegionNodePlan SljitNativeNode(unique_ptr<SljitNativeRegionOpPlan> native_op, string reason) {
-	D_ASSERT(native_op);
+static SljitRegionNodePlan SljitNativeNode(SljitNativeRegionOpPlan &&native_op, string reason) {
 	SljitRegionNodePlan result;
 	result.kind = ExecutionRegionLoweringKind::NATIVE;
 	result.reason = std::move(reason);
-	result.native_ops.push_back(std::move(*native_op));
+	result.native_ops.push_back(std::move(native_op));
 	return result;
 }
 
@@ -2127,28 +2126,27 @@ static SljitRegionNodePlan PlanSljitFilterNode(const ExecutionRegionNode &node, 
 		return SljitNodeBlockerBoundary(node, "filter expression unsupported by SLJIT IR lowering");
 	}
 
-	auto native_op = make_uniq<SljitNativeRegionOpPlan>();
-	native_op->kind = SljitNativeRegionOpKind::FILTER;
-	native_op->output_types = node.output_types;
-	if (!TryLowerNativeRegionExpression(*node.filter, true, native_op->filter, error, render_diagnostics)) {
+	SljitNativeRegionOpPlan native_op;
+	native_op.kind = SljitNativeRegionOpKind::FILTER;
+	native_op.output_types = node.output_types;
+	if (!TryLowerNativeRegionExpression(*node.filter, true, native_op.filter, error, render_diagnostics)) {
 		return SljitUnsupportedExpressionBoundaryNode(error);
 	}
 
 	return SljitNativeNode(std::move(native_op), "generated typed predicate filter");
 }
 
-static bool TryPlanDirectSljitProjection(const ExecutionRegionNode &node,
-                                         unique_ptr<SljitNativeRegionOpPlan> &native_op, string &error,
-                                         bool render_diagnostics) {
-	native_op = make_uniq<SljitNativeRegionOpPlan>();
-	native_op->kind = SljitNativeRegionOpKind::PROJECTION;
-	native_op->output_types = node.output_types;
+static bool TryPlanDirectSljitProjection(const ExecutionRegionNode &node, SljitNativeRegionOpPlan &native_op,
+                                         string &error, bool render_diagnostics) {
+	native_op = SljitNativeRegionOpPlan();
+	native_op.kind = SljitNativeRegionOpKind::PROJECTION;
+	native_op.output_types = node.output_types;
 	for (auto &expression : node.projections) {
 		SljitNativeRegionExpressionPlan native_expression;
 		if (!TryLowerNativeRegionExpression(*expression, false, native_expression, error, render_diagnostics)) {
 			return false;
 		}
-		native_op->projections.push_back(std::move(native_expression));
+		native_op.projections.push_back(std::move(native_expression));
 	}
 	return true;
 }
@@ -2195,10 +2193,10 @@ static SljitRegionNodePlan PlanSljitProjectionNode(const ExecutionRegionNode &no
 		return SljitNodeBlockerBoundary(node, "projection has no lowered JIT IR expressions");
 	}
 
-	unique_ptr<SljitNativeRegionOpPlan> native_op;
+	SljitNativeRegionOpPlan native_op;
 	if (TryPlanDirectSljitProjection(node, native_op, error, render_diagnostics)) {
 		const auto reason =
-		    SljitNativeRegionOpGeneratesCode(*native_op) ? "generated typed projection" : "reference projection remap";
+		    SljitNativeRegionOpGeneratesCode(native_op) ? "generated typed projection" : "reference projection remap";
 		return SljitNativeNode(std::move(native_op), reason);
 	}
 
@@ -2463,11 +2461,11 @@ static SljitRegionNodePlan PlanSljitAggregateUpdateSinkNode(const ExecutionRegio
 	if (!blocker.empty()) {
 		return SljitRegionBoundaryNode(std::move(blocker));
 	}
-	auto native_op = make_uniq<SljitNativeRegionOpPlan>();
-	native_op->kind = SljitNativeRegionOpKind::AGGREGATE_UPDATE;
-	native_op->aggregate_update.sink_info = *node.sink;
+	SljitNativeRegionOpPlan native_op;
+	native_op.kind = SljitNativeRegionOpKind::AGGREGATE_UPDATE;
+	native_op.aggregate_update.sink_info = *node.sink;
 	if (render_diagnostics) {
-		native_op->aggregate_update.ir = node.sink->ir;
+		native_op.aggregate_update.ir = node.sink->ir;
 	}
 
 	auto &contract = node.sink->aggregate_contract;
@@ -2808,32 +2806,32 @@ static SljitRegionNodePlan PlanSljitHashJoinProbeOperatorNode(const ExecutionReg
 		keys.push_back(std::move(key_plan));
 	}
 
-	auto native_op = make_uniq<SljitNativeRegionOpPlan>();
-	native_op->kind = SljitNativeRegionOpKind::HASH_JOIN_PROBE;
-	native_op->operator_index = node.operator_index;
-	native_op->output_types = node.output_types;
-	native_op->hash_join_probe.operator_index = node.operator_index;
-	native_op->hash_join_probe.input_types = input_types;
-	native_op->hash_join_probe.keys = std::move(keys);
-	native_op->hash_join_probe.equality_key_count = contract.equality_condition_count;
-	native_op->hash_join_probe.found_match_offset = contract.tuple_size;
-	native_op->hash_join_probe.pointer_offset = contract.pointer_offset;
-	native_op->hash_join_probe.output_mode = contract.native_probe_output_mode;
-	native_op->hash_join_probe.operator_info = *node.operator_info;
+	SljitNativeRegionOpPlan native_op;
+	native_op.kind = SljitNativeRegionOpKind::HASH_JOIN_PROBE;
+	native_op.operator_index = node.operator_index;
+	native_op.output_types = node.output_types;
+	native_op.hash_join_probe.operator_index = node.operator_index;
+	native_op.hash_join_probe.input_types = input_types;
+	native_op.hash_join_probe.keys = std::move(keys);
+	native_op.hash_join_probe.equality_key_count = contract.equality_condition_count;
+	native_op.hash_join_probe.found_match_offset = contract.tuple_size;
+	native_op.hash_join_probe.pointer_offset = contract.pointer_offset;
+	native_op.hash_join_probe.output_mode = contract.native_probe_output_mode;
+	native_op.hash_join_probe.operator_info = *node.operator_info;
 	if (contract.perfect_hash_probe_shape_ready) {
-		if (native_op->hash_join_probe.keys.size() != 1 || native_op->hash_join_probe.equality_key_count != 1) {
+		if (native_op.hash_join_probe.keys.size() != 1 || native_op.hash_join_probe.equality_key_count != 1) {
 			return SljitRegionBoundaryNode("perfect hash join probe native lowering requires one equality key");
 		}
-		auto perfect_key_kind = native_op->hash_join_probe.keys[0].key_kind;
+		auto perfect_key_kind = native_op.hash_join_probe.keys[0].key_kind;
 		if (perfect_key_kind == SljitNativeHashJoinKeyKind::INT128 ||
 		    perfect_key_kind == SljitNativeHashJoinKeyKind::UINT128) {
 			return SljitRegionBoundaryNode("perfect hash join probe native lowering does not support 128-bit keys");
 		}
-		if (native_op->hash_join_probe.output_mode != ExecutionHashJoinProbeOutputMode::MATCHED_PROBE_AND_BUILD &&
-		    native_op->hash_join_probe.output_mode != ExecutionHashJoinProbeOutputMode::MATCHED_PROBE_ONLY) {
+		if (native_op.hash_join_probe.output_mode != ExecutionHashJoinProbeOutputMode::MATCHED_PROBE_AND_BUILD &&
+		    native_op.hash_join_probe.output_mode != ExecutionHashJoinProbeOutputMode::MATCHED_PROBE_ONLY) {
 			return SljitRegionBoundaryNode("perfect hash join probe native lowering requires inner output mode");
 		}
-		native_op->hash_join_probe.perfect_hash_probe = true;
+		native_op.hash_join_probe.perfect_hash_probe = true;
 	}
 	if (contract.residual_predicate || contract.residual_info) {
 		if (contract.native_probe_output_mode == ExecutionHashJoinProbeOutputMode::MARK_BUILD_ONLY) {
@@ -2849,55 +2847,55 @@ static SljitRegionNodePlan PlanSljitHashJoinProbeOperatorNode(const ExecutionReg
 		if (!TryReadNativeRegionExpression(*contract.residual_expression.root, true, residual_filter)) {
 			return SljitRegionBoundaryNode("hash join probe native lowering has unsupported residual predicate");
 		}
-		native_op->hash_join_probe.residual_predicate = true;
-		native_op->hash_join_probe.residual_filter = std::move(residual_filter);
-		native_op->hash_join_probe.residual_source_types.resize(contract.residual_sources.size());
+		native_op.hash_join_probe.residual_predicate = true;
+		native_op.hash_join_probe.residual_filter = std::move(residual_filter);
+		native_op.hash_join_probe.residual_source_types.resize(contract.residual_sources.size());
 		for (auto &source : contract.residual_sources) {
-			if (source.source_index >= native_op->hash_join_probe.residual_source_types.size()) {
+			if (source.source_index >= native_op.hash_join_probe.residual_source_types.size()) {
 				return SljitRegionBoundaryNode("hash join probe native lowering residual source index is out of range");
 			}
 			if (source.kind == ExecutionHashJoinResidualSourceKind::PROBE && source.input_index >= input_types.size()) {
 				return SljitRegionBoundaryNode(
 				    "hash join probe native lowering residual probe source is outside operator input");
 			}
-			native_op->hash_join_probe.residual_source_types[source.source_index] = source.type;
+			native_op.hash_join_probe.residual_source_types[source.source_index] = source.type;
 		}
 	}
 	auto mark_build_match = ExecutionRegionJoinTypePropagatesBuildSide(contract.join_type);
-	native_op->hash_join_probe.mark_build_match = mark_build_match && !native_op->hash_join_probe.residual_predicate;
-	native_op->hash_join_probe.mark_build_match_after_residual =
-	    mark_build_match && native_op->hash_join_probe.residual_predicate;
+	native_op.hash_join_probe.mark_build_match = mark_build_match && !native_op.hash_join_probe.residual_predicate;
+	native_op.hash_join_probe.mark_build_match_after_residual =
+	    mark_build_match && native_op.hash_join_probe.residual_predicate;
 	if (render_diagnostics) {
-		native_op->hash_join_probe.ir =
-		    "hash_join_probe_native<hash_keys=" + std::to_string(native_op->hash_join_probe.equality_key_count) +
+		native_op.hash_join_probe.ir =
+		    "hash_join_probe_native<hash_keys=" + std::to_string(native_op.hash_join_probe.equality_key_count) +
 		    ",conditions=";
-		native_op->hash_join_probe.ir += DescribeSljitHashJoinProbeKeys(native_op->hash_join_probe.keys, "|");
-		native_op->hash_join_probe.ir += ",probe_shape=native";
-		if (native_op->hash_join_probe.perfect_hash_probe) {
-			native_op->hash_join_probe.ir += ",perfect_hash_probe_shape=native";
+		native_op.hash_join_probe.ir += DescribeSljitHashJoinProbeKeys(native_op.hash_join_probe.keys, "|");
+		native_op.hash_join_probe.ir += ",probe_shape=native";
+		if (native_op.hash_join_probe.perfect_hash_probe) {
+			native_op.hash_join_probe.ir += ",perfect_hash_probe_shape=native";
 		} else {
-			native_op->hash_join_probe.ir +=
+			native_op.hash_join_probe.ir +=
 			    ",perfect_hash_probe_shape=" + (contract.perfect_hash_probe_shape_blocker.empty()
 			                                        ? string("not_applicable")
 			                                        : contract.perfect_hash_probe_shape_blocker);
 		}
-		native_op->hash_join_probe.ir +=
-		    ",output_mode=" + string(SljitHashJoinProbeOutputModeToString(native_op->hash_join_probe.output_mode));
-		if (native_op->hash_join_probe.mark_build_match) {
-			AppendSljitHashJoinProbeMarkOffsets(native_op->hash_join_probe.ir, "mark_build_match",
-			                                    native_op->hash_join_probe);
+		native_op.hash_join_probe.ir +=
+		    ",output_mode=" + string(SljitHashJoinProbeOutputModeToString(native_op.hash_join_probe.output_mode));
+		if (native_op.hash_join_probe.mark_build_match) {
+			AppendSljitHashJoinProbeMarkOffsets(native_op.hash_join_probe.ir, "mark_build_match",
+			                                    native_op.hash_join_probe);
 		}
-		if (native_op->hash_join_probe.mark_build_match_after_residual) {
-			AppendSljitHashJoinProbeMarkOffsets(native_op->hash_join_probe.ir, "mark_build_match_after_residual",
-			                                    native_op->hash_join_probe);
+		if (native_op.hash_join_probe.mark_build_match_after_residual) {
+			AppendSljitHashJoinProbeMarkOffsets(native_op.hash_join_probe.ir, "mark_build_match_after_residual",
+			                                    native_op.hash_join_probe);
 		}
-		if (native_op->hash_join_probe.residual_predicate) {
-			native_op->hash_join_probe.ir += ",residual_predicate=true";
-			native_op->hash_join_probe.ir +=
-			    ",residual_sources=" + std::to_string(native_op->hash_join_probe.residual_source_types.size());
-			native_op->hash_join_probe.ir += ",residual_ir=(" + native_op->hash_join_probe.residual_filter.ir + ")";
+		if (native_op.hash_join_probe.residual_predicate) {
+			native_op.hash_join_probe.ir += ",residual_predicate=true";
+			native_op.hash_join_probe.ir +=
+			    ",residual_sources=" + std::to_string(native_op.hash_join_probe.residual_source_types.size());
+			native_op.hash_join_probe.ir += ",residual_ir=(" + native_op.hash_join_probe.residual_filter.ir + ")";
 		}
-		native_op->hash_join_probe.ir += ">";
+		native_op.hash_join_probe.ir += ">";
 	}
 
 	string reason = "generated native hash join probe";
@@ -2969,15 +2967,15 @@ static SljitRegionNodePlan PlanSljitNestedLoopJoinProbeOperatorNode(const Execut
 		return SljitRegionBoundaryNode(std::move(reason));
 	}
 
-	auto native_op = make_uniq<SljitNativeRegionOpPlan>();
-	native_op->kind = SljitNativeRegionOpKind::NESTED_LOOP_JOIN_PROBE;
-	native_op->operator_index = node.operator_index;
-	native_op->output_types = node.output_types;
-	native_op->nested_loop_join_probe.operator_index = node.operator_index;
-	native_op->nested_loop_join_probe.input_types = input_types;
-	native_op->nested_loop_join_probe.condition_types = contract.condition_types;
-	native_op->nested_loop_join_probe.join_type = contract.join_type;
-	native_op->nested_loop_join_probe.operator_info = *node.operator_info;
+	SljitNativeRegionOpPlan native_op;
+	native_op.kind = SljitNativeRegionOpKind::NESTED_LOOP_JOIN_PROBE;
+	native_op.operator_index = node.operator_index;
+	native_op.output_types = node.output_types;
+	native_op.nested_loop_join_probe.operator_index = node.operator_index;
+	native_op.nested_loop_join_probe.input_types = input_types;
+	native_op.nested_loop_join_probe.condition_types = contract.condition_types;
+	native_op.nested_loop_join_probe.join_type = contract.join_type;
+	native_op.nested_loop_join_probe.operator_info = *node.operator_info;
 
 	SljitNativeNestedLoopJoinProbeConditionPlan condition_plan;
 	condition_plan.lhs_condition = std::move(lhs_condition);
@@ -2989,9 +2987,9 @@ static SljitRegionNodePlan PlanSljitNestedLoopJoinProbeOperatorNode(const Execut
 		                    ",comparison=" + string(SljitHashJoinComparisonToString(condition.comparison_type)) +
 		                    ",lhs=(" + condition_plan.lhs_condition.ir + ")>";
 	}
-	native_op->nested_loop_join_probe.conditions.push_back(std::move(condition_plan));
+	native_op.nested_loop_join_probe.conditions.push_back(std::move(condition_plan));
 	if (render_diagnostics) {
-		native_op->nested_loop_join_probe.ir =
+		native_op.nested_loop_join_probe.ir =
 		    "nested_loop_join_probe_native<join_type=" + string(ExecutionRegionJoinTypeToString(contract.join_type)) +
 		    ",conditions=1,value_kind=" + string(SljitNestedLoopJoinValueKindToString(value_kind)) +
 		    ",comparison=" + string(SljitHashJoinComparisonToString(condition.comparison_type)) + ">";
@@ -3022,13 +3020,13 @@ static SljitRegionNodePlan PlanSljitHashJoinSinkNode(const ExecutionRegionNode &
 		return SljitBlockedContractBoundary(contract.build_sink_shape_blocker,
 		                                    "hash join build native sink shape is not ready");
 	}
-	auto native_op = make_uniq<SljitNativeRegionOpPlan>();
-	native_op->kind = SljitNativeRegionOpKind::HASH_JOIN_BUILD;
-	native_op->hash_join_build.sink_info = *node.sink;
+	SljitNativeRegionOpPlan native_op;
+	native_op.kind = SljitNativeRegionOpKind::HASH_JOIN_BUILD;
+	native_op.hash_join_build.sink_info = *node.sink;
 	if (render_diagnostics) {
-		native_op->hash_join_build.ir = "hash_join_build_native<execution=primitive-protocol-build,payload_columns=" +
-		                                std::to_string(contract.payload_column_count) +
-		                                ",keys=" + std::to_string(contract.condition_count) + ">";
+		native_op.hash_join_build.ir = "hash_join_build_native<execution=primitive-protocol-build,payload_columns=" +
+		                               std::to_string(contract.payload_column_count) +
+		                               ",keys=" + std::to_string(contract.condition_count) + ">";
 	}
 
 	string reason = "native hash join build contract";
@@ -3042,7 +3040,7 @@ static SljitRegionNodePlan PlanSljitHashJoinSinkNode(const ExecutionRegionNode &
 		}
 		reason += ";build_sink_shape_ready=true";
 	}
-	AppendSljitReasonPart(reason, native_op->hash_join_build.ir, render_diagnostics);
+	AppendSljitReasonPart(reason, native_op.hash_join_build.ir, render_diagnostics);
 	AppendSljitReasonPart(reason, node.sink->ir, render_diagnostics);
 	return SljitNativeNode(std::move(native_op), std::move(reason));
 }
@@ -3081,14 +3079,14 @@ static SljitRegionNodePlan PlanSljitNestedLoopJoinSinkNode(const ExecutionRegion
 		return SljitRegionBoundaryNode("nested loop join build native lowering condition count mismatch");
 	}
 
-	auto native_op = make_uniq<SljitNativeRegionOpPlan>();
-	native_op->kind = SljitNativeRegionOpKind::NESTED_LOOP_JOIN_BUILD;
-	native_op->nested_loop_join_build.sink_info = *node.sink;
-	native_op->nested_loop_join_build.condition_types = contract.condition_types;
+	SljitNativeRegionOpPlan native_op;
+	native_op.kind = SljitNativeRegionOpKind::NESTED_LOOP_JOIN_BUILD;
+	native_op.nested_loop_join_build.sink_info = *node.sink;
+	native_op.nested_loop_join_build.condition_types = contract.condition_types;
 	if (render_diagnostics) {
-		native_op->nested_loop_join_build.ir = node.sink->ir;
+		native_op.nested_loop_join_build.ir = node.sink->ir;
 	}
-	native_op->nested_loop_join_build.rhs_conditions.reserve(contract.conditions.size());
+	native_op.nested_loop_join_build.rhs_conditions.reserve(contract.conditions.size());
 	for (auto &condition : contract.conditions) {
 		if (!condition.rhs_expression_ready || !condition.rhs_expression.root) {
 			return SljitBlockedContractBoundary(
@@ -3105,7 +3103,7 @@ static SljitRegionNodePlan PlanSljitNestedLoopJoinSinkNode(const ExecutionRegion
 			}
 			return SljitRegionBoundaryNode(std::move(reason));
 		}
-		native_op->nested_loop_join_build.rhs_conditions.push_back(std::move(rhs_condition));
+		native_op.nested_loop_join_build.rhs_conditions.push_back(std::move(rhs_condition));
 	}
 
 	string reason = "native nested loop join build sink contract";
@@ -3149,19 +3147,19 @@ static SljitRegionNodePlan PlanSljitSimpleNativeSinkNode(const ExecutionRegionNo
 	if (contract.status != ExecutionRegionStateContractStatus::READY) {
 		return SljitBlockedContractBoundary(contract.blocker, blocked_reason);
 	}
-	auto native_op = make_uniq<SljitNativeRegionOpPlan>();
-	native_op->kind = native_kind;
+	SljitNativeRegionOpPlan native_op;
+	native_op.kind = native_kind;
 	switch (native_kind) {
 	case SljitNativeRegionOpKind::APPEND_SINK:
-		native_op->append_sink.sink_info = *node.sink;
+		native_op.append_sink.sink_info = *node.sink;
 		if (render_diagnostics) {
-			native_op->append_sink.ir = node.sink->ir;
+			native_op.append_sink.ir = node.sink->ir;
 		}
 		break;
 	case SljitNativeRegionOpKind::DELIM_JOIN_SINK:
-		native_op->delim_join_sink.sink_info = *node.sink;
+		native_op.delim_join_sink.sink_info = *node.sink;
 		if (render_diagnostics) {
-			native_op->delim_join_sink.ir = node.sink->ir;
+			native_op.delim_join_sink.ir = node.sink->ir;
 		}
 		break;
 	default:
@@ -3194,14 +3192,14 @@ static SljitRegionNodePlan PlanSljitOrderSinkNode(const ExecutionRegionNode &nod
 		return SljitBlockedContractBoundary(order_contract.order_key_blocker, "ordered-sink-order-keys-not-ready");
 	}
 
-	auto native_op = make_uniq<SljitNativeRegionOpPlan>();
-	native_op->kind = SljitNativeRegionOpKind::ORDER_SINK;
-	native_op->order_sink.sink_info = *node.sink;
+	SljitNativeRegionOpPlan native_op;
+	native_op.kind = SljitNativeRegionOpKind::ORDER_SINK;
+	native_op.order_sink.sink_info = *node.sink;
 	if (render_diagnostics) {
-		native_op->order_sink.ir = node.sink->ir;
+		native_op.order_sink.ir = node.sink->ir;
 	}
-	native_op->order_sink.order_keys.reserve(order_contract.order_keys.size());
-	native_op->order_sink.key_types.reserve(order_contract.order_keys.size());
+	native_op.order_sink.order_keys.reserve(order_contract.order_keys.size());
+	native_op.order_sink.key_types.reserve(order_contract.order_keys.size());
 	for (auto &key : order_contract.order_keys) {
 		SljitNativeRegionExpressionPlan key_plan;
 		string error;
@@ -3215,15 +3213,15 @@ static SljitRegionNodePlan PlanSljitOrderSinkNode(const ExecutionRegionNode &nod
 			}
 			return SljitRegionBoundaryNode(std::move(reason));
 		}
-		native_op->order_sink.key_types.push_back(key.type);
-		native_op->order_sink.order_keys.push_back(std::move(key_plan));
+		native_op.order_sink.key_types.push_back(key.type);
+		native_op.order_sink.order_keys.push_back(std::move(key_plan));
 	}
 
 	auto reason = BuildSljitNativeSinkReason("ordered sink contract", "ordered_sink_runtime_binding", *node.sink,
 	                                         contract, render_diagnostics);
 	if (render_diagnostics) {
 		reason += ";operator_kind=" + string(ExecutionRegionOperatorKindToString(order_contract.kind));
-		reason += ";order_keys=" + std::to_string(native_op->order_sink.order_keys.size());
+		reason += ";order_keys=" + std::to_string(native_op.order_sink.order_keys.size());
 	}
 	AppendSljitSinkIR(reason, *node.sink, render_diagnostics);
 	return SljitNativeNode(std::move(native_op), std::move(reason));
