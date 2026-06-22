@@ -3559,8 +3559,8 @@ ExecutionRegionLoweringPlan BuildSljitRegionPlan(const ExecutionRegionIR &region
 	if (candidate.stage_plan.HasStages()) {
 		lowering_plan.SetOperatorStageIR(candidate.stage_plan.ir);
 	}
-	auto native_region = make_uniq<SljitNativeRegionPlan>();
-	SljitRegionLoweringCursor cursor(candidate.input_types, *native_region);
+	SljitNativeRegionPlan native_region;
+	SljitRegionLoweringCursor cursor(candidate.input_types, native_region);
 	if (candidate.EndNode() > region_ir.nodes.size()) {
 		backend_plan->error = "SLJIT region candidate references nodes outside the region IR";
 		lowering_plan.backend_plan = backend_plan;
@@ -3637,14 +3637,14 @@ ExecutionRegionLoweringPlan BuildSljitRegionPlan(const ExecutionRegionIR &region
 		}
 		cursor.AcceptOperator(node, node_plan);
 	}
-	if (cursor.CanFuse() && !native_region->ops.empty()) {
-		native_region->source_execution = cursor.SelectedSourceExecution();
-		FuseAdjacentNativeProjections(*native_region, render_diagnostics);
-		FusePrimitiveAggregateUpdates(*native_region, candidate.input_types, render_diagnostics);
-		FinalizeSljitNativeRegionPlan(*native_region);
+	if (cursor.CanFuse() && !native_region.ops.empty()) {
+		native_region.source_execution = cursor.SelectedSourceExecution();
+		FuseAdjacentNativeProjections(native_region, render_diagnostics);
+		FusePrimitiveAggregateUpdates(native_region, candidate.input_types, render_diagnostics);
+		FinalizeSljitNativeRegionPlan(native_region);
 		lowering_plan.SetUsesScanFilters(cursor.UsesScanFilters());
 		string codegen_blocker;
-		if (SljitNativeRegionHasExecutableBodyGap(*native_region, codegen_blocker)) {
+		if (SljitNativeRegionHasExecutableBodyGap(native_region, codegen_blocker)) {
 			backend_plan->error = codegen_blocker;
 			auto fusion_blocker = SljitNativeRegionCodegenFusionBlocker() + ";" + codegen_blocker;
 			if (!candidate.contract.ir.empty()) {
@@ -3654,9 +3654,9 @@ ExecutionRegionLoweringPlan BuildSljitRegionPlan(const ExecutionRegionIR &region
 			lowering_plan.backend_plan = backend_plan;
 			return lowering_plan;
 		}
-		if (SljitRegionIsFullyFused(*native_region, contract)) {
+		if (SljitRegionIsFullyFused(native_region, contract)) {
 			lowering_plan.SetFullyFused(true);
-			backend_plan->native_region = std::move(native_region);
+			backend_plan->native_region = make_uniq<SljitNativeRegionPlan>(std::move(native_region));
 			lowering_plan.SetCompiledExecutionMode(ExecutionRegionExecutionMode::NATIVE);
 		}
 		if (!lowering_plan.IsFullyFused()) {
