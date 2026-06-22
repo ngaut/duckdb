@@ -2499,9 +2499,12 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeTypedExpressionTree(const 
 
 	vector<SljitExpressionTreeOverflowJumps> overflows;
 	vector<idx_t> source_refs;
-	CollectSljitTypedExpressionTreeReferences(root, source_refs);
-	const auto precheck_nulls_supported = emit_flat_nullable_fast_path && fast_path_supported &&
-	                                      SljitTypedExpressionTreeCanPrecheckNulls(root) && !source_refs.empty();
+	const auto precheck_nulls_candidate =
+	    emit_flat_nullable_fast_path && fast_path_supported && SljitTypedExpressionTreeCanPrecheckNulls(root);
+	if (precheck_nulls_candidate) {
+		CollectSljitTypedExpressionTreeReferences(root, source_refs);
+	}
+	const auto precheck_nulls_supported = precheck_nulls_candidate && !source_refs.empty();
 	sljit_emit_op1(compiler, SLJIT_MOV_U8, SLJIT_R0, 0, SLJIT_MEM1(SLJIT_S0),
 	               offsetof(SljitNativeVectorInput, expression_tree_flat_all_valid));
 	struct sljit_jump *use_slow_loop = nullptr;
@@ -2645,9 +2648,12 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeTypedExpressionTreeSelect(
 
 	vector<SljitExpressionTreeOverflowJumps> overflows;
 	vector<idx_t> source_refs;
-	CollectSljitTypedExpressionTreeReferences(root, source_refs);
-	const auto precheck_nulls_supported = emit_flat_nullable_fast_path && fast_path_supported &&
-	                                      SljitTypedExpressionTreeCanPrecheckNulls(root) && !source_refs.empty();
+	const auto precheck_nulls_candidate =
+	    emit_flat_nullable_fast_path && fast_path_supported && SljitTypedExpressionTreeCanPrecheckNulls(root);
+	if (precheck_nulls_candidate) {
+		CollectSljitTypedExpressionTreeReferences(root, source_refs);
+	}
+	const auto precheck_nulls_supported = precheck_nulls_candidate && !source_refs.empty();
 	sljit_emit_op1(compiler, SLJIT_MOV_U8, SLJIT_R0, 0, SLJIT_MEM1(SLJIT_S0),
 	               offsetof(SljitNativeVectorInput, expression_tree_flat_all_valid));
 	struct sljit_jump *use_slow_loop = nullptr;
@@ -2941,10 +2947,13 @@ static unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeUngroupedSumTypedEx
 
 	vector<SljitExpressionTreeOverflowJumps> overflows;
 	vector<idx_t> source_refs;
-	CollectSljitTypedExpressionTreeReferences(root, source_refs);
-	const auto precheck_nulls_supported = emit_flat_nullable_fast_path &&
+	const auto precheck_nulls_candidate = emit_flat_nullable_fast_path &&
 	                                      SljitTypedExpressionTreeFastPathSupported(root) &&
-	                                      SljitTypedExpressionTreeCanPrecheckNulls(root) && !source_refs.empty();
+	                                      SljitTypedExpressionTreeCanPrecheckNulls(root);
+	if (precheck_nulls_candidate) {
+		CollectSljitTypedExpressionTreeReferences(root, source_refs);
+	}
+	const auto precheck_nulls_supported = precheck_nulls_candidate && !source_refs.empty();
 	sljit_emit_op1(compiler, SLJIT_MOV_U8, SLJIT_R0, 0, SLJIT_MEM1(SLJIT_S0),
 	               offsetof(SljitNativeVectorInput, expression_tree_flat_all_valid));
 	auto use_slow_loop = sljit_emit_cmp(compiler, SLJIT_EQUAL, SLJIT_R0, 0, SLJIT_IMM, 0);
