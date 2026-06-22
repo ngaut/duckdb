@@ -2320,6 +2320,31 @@ static void MaterializeExecutionCorrelatedMarkJoinProbe(const ExecutionHashJoinP
 	}
 }
 
+static void MaterializeExecutionEmptyMarkJoinProbe(const ExecutionHashJoinProbeBinding &binding, DataChunk &input,
+                                                  idx_t count, DataChunk &result,
+                                                  optional_ptr<ExecutionOperatorStageRecorder> recorder) {
+	if (count != input.size()) {
+		throw InternalException("execution native empty MARK probe must materialize every input row");
+	}
+	{
+		ExecutionOperatorStageTimer timer(recorder, "reference_probe_output");
+		ReferenceExecutionHashJoinProbeOutputColumns(binding, input, result);
+	}
+	{
+		ExecutionOperatorStageTimer timer(recorder, "empty_mark_probe_vector");
+		auto &mark_vector = result.data.back();
+		mark_vector.SetVectorType(VectorType::FLAT_VECTOR);
+		FlatVector::SetSize(mark_vector, count_t(count));
+		auto bool_result = FlatVector::GetDataMutable<bool>(mark_vector);
+		auto &mask = FlatVector::ValidityMutable(mark_vector);
+		mask.SetAllValid(count);
+		for (idx_t i = 0; i < count; i++) {
+			bool_result[i] = false;
+		}
+	}
+	result.SetChildCardinality(count);
+}
+
 void ExecutionMaterializeHashJoinProbe(const ExecutionHashJoinProbeBinding &binding, DataChunk &input,
                                        Vector &row_pointers, const SelectionVector &match_sel, idx_t count,
                                        DataChunk &result, optional_ptr<ExecutionOperatorStageRecorder> recorder) {
@@ -2349,6 +2374,10 @@ void ExecutionMaterializeHashJoinProbe(const ExecutionHashJoinProbeBinding &bind
 		if (binding.correlated_mark_counts_required) {
 			ExecutionOperatorStageTimer timer(recorder, "correlated_mark_probe");
 			MaterializeExecutionCorrelatedMarkJoinProbe(binding, input, match_sel, count, result);
+			return;
+		}
+		if (binding.empty_build_side) {
+			MaterializeExecutionEmptyMarkJoinProbe(binding, input, count, result, recorder);
 			return;
 		}
 		if (count != input.size()) {

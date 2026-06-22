@@ -1098,12 +1098,12 @@ public:
 		       ops[op_idx + 1].aggregate_update.filtered_update.IsExecutable();
 	}
 
-	idx_t SelectFilter(SljitExecutableRegionOp &op, DataChunk &input, SelectionVector &filter_selection,
-	                   SljitExpressionAdapterScratch &adapter_scratch) {
-		auto &filter = op.filter.plan;
+	idx_t SelectExpression(SljitExecutableRegionExpression &expression, DataChunk &input,
+	                       SelectionVector &filter_selection, SljitExpressionAdapterScratch &adapter_scratch) {
+		auto &filter = expression.plan;
 		if (filter.kind == SljitNativeRegionExpressionKind::PREDICATE) {
 			auto &predicate_sources = adapter_scratch.predicate_sources;
-			predicate_sources.Prepare(&input, op.filter.input_source_indices);
+			predicate_sources.Prepare(&input, expression.input_source_indices);
 
 			SljitNativePredicateInput native_input;
 			native_input.source_data = predicate_sources.source_data.data();
@@ -1116,25 +1116,26 @@ public:
 			native_input.false_sel = nullptr;
 			native_input.selected_count = 0;
 			native_input.count = input.size();
-			op.filter.predicate_select_function(&native_input);
+			expression.predicate_select_function(&native_input);
 			if (native_input.error) {
 				std::rethrow_exception(native_input.error);
 			}
 			return native_input.selected_count;
 		}
 		if (filter.kind == SljitNativeRegionExpressionKind::TYPED_EXPRESSION_TREE) {
-			if (!op.filter.select_function) {
+			if (!expression.select_function) {
 				throw InternalException("SLJIT typed filter expression has no generated selector");
 			}
 			SljitNativeVectorInput native_input;
-			adapter_scratch.PrepareExpressionTree(input, op.filter, native_input, nullptr);
+			adapter_scratch.PrepareExpressionTree(input, expression, native_input, nullptr);
 			native_input.execute_sel = nullptr;
 			native_input.true_sel = filter_selection.data();
 			native_input.false_sel = nullptr;
 			native_input.selected_count = 0;
-			native_input.overflow_message = op.filter.overflow_message.c_str();
+			native_input.overflow_message = expression.overflow_message.c_str();
+			native_input.query_location = filter.query_location;
 			native_input.count = input.size();
-			op.filter.select_function(&native_input);
+			expression.select_function(&native_input);
 			if (native_input.error) {
 				std::rethrow_exception(native_input.error);
 			}
@@ -1179,12 +1180,17 @@ public:
 		native_input.selected_count = 0;
 		native_input.overflow_message = nullptr;
 		native_input.count = input.size();
-		op.filter.select_function(&native_input);
+		expression.select_function(&native_input);
 		if (native_input.error) {
 			std::rethrow_exception(native_input.error);
 		}
 
 		return native_input.selected_count;
+	}
+
+	idx_t SelectFilter(SljitExecutableRegionOp &op, DataChunk &input, SelectionVector &filter_selection,
+	                   SljitExpressionAdapterScratch &adapter_scratch) {
+		return SelectExpression(op.filter, input, filter_selection, adapter_scratch);
 	}
 
 	void ExecuteFilter(SljitExecutableRegionOp &op, DataChunk &input, DataChunk &output,
@@ -1325,6 +1331,7 @@ public:
 			native_input.result_data = NativeIntegerResultData(result, result_kind);
 			native_input.result_validity = result_validity_data;
 			native_input.overflow_message = expr.overflow_message.c_str();
+			native_input.query_location = plan.query_location;
 			native_input.count = count;
 			expr.function(&native_input);
 			if (native_input.error) {
@@ -1531,6 +1538,7 @@ public:
 		native_input.error_message = plan.kind == SljitNativeRegionExpressionKind::ERROR_GUARDED_REFERENCE
 		                                 ? plan.error_message.c_str()
 		                                 : nullptr;
+		native_input.query_location = plan.query_location;
 		native_input.overflow_value = 0;
 		native_input.string_decompress_source_size = plan.string_decompress_source_size;
 		native_input.active_source_index = 0;
@@ -2021,10 +2029,6 @@ public:
 			throw InternalException("SLJIT native hash join residual predicate requires residual scratch state");
 		}
 		auto &residual_filter = op.hash_join_probe.residual_filter;
-		if (residual_filter.plan.kind != SljitNativeRegionExpressionKind::PREDICATE ||
-		    !residual_filter.predicate_select_function) {
-			throw InternalException("SLJIT native hash join residual predicate reached runtime without generated code");
-		}
 		if (count == 0) {
 			return 0;
 		}
@@ -2033,26 +2037,8 @@ public:
 		ExecutionMaterializeHashJoinResidualSources(probe, input, row_pointers, match_selection, count, *residual_chunk,
 		                                            recorder);
 
-		auto &predicate_sources = adapter_scratch->predicate_sources;
-		predicate_sources.Prepare(residual_chunk, residual_filter.input_source_indices);
-
-		SljitNativePredicateInput native_input;
-		native_input.source_data = predicate_sources.source_data.data();
-		native_input.source_sel = predicate_sources.source_sel.data();
-		native_input.source_validity = predicate_sources.source_validity.data();
-		native_input.execute_sel = nullptr;
-		native_input.result_data = nullptr;
-		native_input.result_validity = nullptr;
-		native_input.true_sel = residual_selection->data();
-		native_input.false_sel = nullptr;
-		native_input.selected_count = 0;
-		native_input.count = count;
-		residual_filter.predicate_select_function(&native_input);
-		if (native_input.error) {
-			std::rethrow_exception(native_input.error);
-		}
-
-		const auto selected_count = native_input.selected_count;
+		const auto selected_count =
+		    SelectExpression(residual_filter, *residual_chunk, *residual_selection, *adapter_scratch);
 		compact_row_pointers->SetVectorType(VectorType::FLAT_VECTOR);
 		auto row_pointer_data = FlatVector::GetDataMutable<data_ptr_t>(row_pointers);
 		auto compact_row_pointer_data = FlatVector::GetDataMutable<data_ptr_t>(*compact_row_pointers);
@@ -2166,9 +2152,6 @@ public:
 				                              materialize_stage_start);
 			} break;
 			case ExecutionHashJoinProbeOutputMode::MARK_PROBE:
-				for (idx_t input_idx = 0; input_idx < input.size(); input_idx++) {
-					match_selection.set_index(input_idx, 0);
-				}
 				{
 					auto materialize_stage_start = SljitRegionStageStart(runtime);
 					SljitRegionStageRecorder recorder(runtime, op_idx, op.kind, "materialize_output");

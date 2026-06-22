@@ -312,11 +312,12 @@ void Pipeline::ResetForReschedule(bool reset_sink) {
 	if (source && !source->IsSource()) {
 		throw InternalException("Source of pipeline does not have IsSource set");
 	}
-	BuildExecutionRegionPlan();
 	if (!allow_reuse || !source_state || !source_state->SupportsReuse()) {
-		auto open_request = GetExecutionRegionOpenRequest(execution_region_plan);
-		source_state = source->GetGlobalSourceState(client, open_request);
+		lock_guard<mutex> guard(execution_region_plan_lock);
+		BuildExecutionRegionPlanLocked();
+		InitializeSourceStateFromExecutionRegionPlanLocked(client);
 	} else {
+		BuildExecutionRegionPlan();
 		source_state->Reset(client);
 	}
 	initialized = true;
@@ -327,9 +328,9 @@ void Pipeline::ResetSource(bool force) {
 		throw InternalException("Source of pipeline does not have IsSource set");
 	}
 	if (force || !source_state) {
-		BuildExecutionRegionPlan();
-		auto open_request = GetExecutionRegionOpenRequest(execution_region_plan);
-		source_state = source->GetGlobalSourceState(GetClientContext(), open_request);
+		lock_guard<mutex> guard(execution_region_plan_lock);
+		BuildExecutionRegionPlanLocked();
+		InitializeSourceStateFromExecutionRegionPlanLocked(GetClientContext());
 	}
 }
 
@@ -349,16 +350,33 @@ void Pipeline::BuildExecutionRegionPlanLocked() {
 	execution_runner = GetExecutionRegionRunnerKind(execution_region_plan);
 }
 
+void Pipeline::InitializeSourceStateFromExecutionRegionPlanLocked(ClientContext &client) {
+	if (!source) {
+		source_state.reset();
+		return;
+	}
+	auto open_request = GetExecutionRegionOpenRequest(execution_region_plan);
+	source_state = source->GetGlobalSourceState(client, open_request);
+	if (!open_request.UsesSourceContract() || source->SupportsExecutionSourceContract(open_request)) {
+		return;
+	}
+
+	BuildExecutionRegionPlanLocked();
+	open_request = GetExecutionRegionOpenRequest(execution_region_plan);
+	source_state = source->GetGlobalSourceState(client, open_request);
+	if (open_request.UsesSourceContract() && !source->SupportsExecutionSourceContract(open_request)) {
+		throw InternalException("Execution region source contract remained selected after source initialization made "
+		                        "the source contract unsupported");
+	}
+}
+
 bool Pipeline::PrepareExecutionRegionPlanForExecution() {
 	lock_guard<mutex> guard(execution_region_plan_lock);
 	if (!execution_region_plan || !execution_region_plan->RequiresOperatorReadinessRefresh()) {
 		return false;
 	}
 	BuildExecutionRegionPlanLocked();
-	if (source) {
-		auto open_request = GetExecutionRegionOpenRequest(execution_region_plan);
-		source_state = source->GetGlobalSourceState(GetClientContext(), open_request);
-	}
+	InitializeSourceStateFromExecutionRegionPlanLocked(GetClientContext());
 	return true;
 }
 

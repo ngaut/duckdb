@@ -21,6 +21,7 @@ struct ExecutionExpressionIR {
 	ExecutionExpressionValidityKind validity = ExecutionExpressionValidityKind::UNKNOWN;
 	ExecutionExpressionSourceKind source = ExecutionExpressionSourceKind::UNKNOWN;
 	ExecutionExpressionExceptionKind exception_behavior = ExecutionExpressionExceptionKind::UNKNOWN;
+	optional_idx query_location;
 	Value constant;
 	idx_t ref_index = 0;
 	ExecutionExpressionUnaryOp unary_op = ExecutionExpressionUnaryOp::NOT;

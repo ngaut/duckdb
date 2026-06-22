@@ -765,25 +765,38 @@ ExecutionRegionSourceExecutionKind ExecutionRegionLoweringPlan::SelectedSourceEx
 	return selected_source_execution;
 }
 
-static string FirstExecutionRegionLoweringReasonToken(const string &reason) {
+static void AppendFirstExecutionRegionLoweringReasonToken(string &result, const string &reason) {
 	auto separator = reason.find(';');
-	return separator == string::npos ? reason : reason.substr(0, separator);
+	if (separator == string::npos) {
+		result += reason;
+		return;
+	}
+	result.append(reason, 0, separator);
 }
 
 string ExecutionRegionLoweringPlan::CompactEventReason() const {
 	string result;
 	if (!fusion_blockers.empty()) {
-		result = "region-lowering-blocked:" + FirstExecutionRegionLoweringReasonToken(fusion_blockers[0]) + ";";
-	} else {
-		for (auto &node : nodes) {
-			if (node.kind == ExecutionRegionLoweringKind::BOUNDARY && !node.reason.empty()) {
-				result = "region-lowering-blocked:" + FirstExecutionRegionLoweringReasonToken(node.reason) + ";";
-				break;
+		result = "region-lowering-blocked:";
+		AppendFirstExecutionRegionLoweringReasonToken(result, fusion_blockers[0]);
+		result += ";";
+	}
+	idx_t native_count = 0;
+	idx_t boundary_count = 0;
+	for (auto &node : nodes) {
+		if (node.kind == ExecutionRegionLoweringKind::NATIVE) {
+			native_count++;
+		} else if (node.kind == ExecutionRegionLoweringKind::BOUNDARY) {
+			boundary_count++;
+			if (fusion_blockers.empty() && result.empty() && !node.reason.empty()) {
+				result = "region-lowering-blocked:";
+				AppendFirstExecutionRegionLoweringReasonToken(result, node.reason);
+				result += ";";
 			}
 		}
 	}
-	result += "region-lowering:native=" + std::to_string(NativeCount()) +
-	          ",boundary=" + std::to_string(BoundaryCount()) + ",fully-fused=" + (fully_fused ? string("true") : "false");
+	result += "region-lowering:native=" + std::to_string(native_count) + ",boundary=" + std::to_string(boundary_count) +
+	          ",fully-fused=" + (fully_fused ? string("true") : "false");
 	if (selected_source_execution != ExecutionRegionSourceExecutionKind::NONE) {
 		result += ";selected-source-execution=";
 		result += ExecutionRegionSourceExecutionKindToString(selected_source_execution);
@@ -829,6 +842,7 @@ unique_ptr<ExecutionExpressionIR> ExecutionExpressionIR::Copy() const {
 	result->validity = validity;
 	result->source = source;
 	result->exception_behavior = exception_behavior;
+	result->query_location = query_location;
 	result->constant = constant;
 	result->ref_index = ref_index;
 	result->unary_op = unary_op;

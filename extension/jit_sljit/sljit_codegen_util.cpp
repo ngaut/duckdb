@@ -7,7 +7,8 @@ namespace duckdb {
 
 class SljitCodeHandle : public ExecutionRegionCodeHandle {
 public:
-	SljitCodeHandle(void *code_p, idx_t code_size_p) : code(code_p), code_size(code_size_p) {
+	SljitCodeHandle(void *code_p, idx_t code_size_p, vector<shared_ptr<void>> owned_data_p)
+	    : code(code_p), code_size(code_size_p), owned_data(std::move(owned_data_p)) {
 	}
 
 	~SljitCodeHandle() override {
@@ -23,10 +24,12 @@ public:
 private:
 	void *code;
 	idx_t code_size;
+	vector<shared_ptr<void>> owned_data;
 };
 
-unique_ptr<ExecutionRegionCodeHandle> MakeSljitCodeHandle(void *code, idx_t code_size) {
-	return make_uniq<SljitCodeHandle>(code, code_size);
+unique_ptr<ExecutionRegionCodeHandle> MakeSljitCodeHandle(void *code, idx_t code_size,
+                                                          vector<shared_ptr<void>> owned_data) {
+	return make_uniq<SljitCodeHandle>(code, code_size, std::move(owned_data));
 }
 
 sljit_sw NativeIntegerDataScale(SljitNativeIntegerKind kind) {

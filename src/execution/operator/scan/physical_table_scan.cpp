@@ -33,6 +33,7 @@ struct TableScanExecutionSourceContractGlobalState {
 	vector<StorageIndex> storage_ids;
 	vector<LogicalType> scanned_types;
 	vector<idx_t> projection_ids;
+	idx_t total_row_groups_to_scan = 0;
 	bool can_remove_filter_columns = false;
 	bool is_create_index = false;
 };
@@ -100,6 +101,7 @@ InitializeExecutionSourceContractTableScanGlobalState(ClientContext &context, co
 	contract_state.storage = &storage;
 	contract_state.transaction = &DuckTransaction::Get(context, duck_table.catalog);
 	contract_state.is_create_index = bind_data.is_create_index;
+	contract_state.total_row_groups_to_scan = storage.GetRowGroupCountWithLocalStorage(context);
 
 	for (auto &column_index : op.column_ids) {
 		contract_state.storage_ids.push_back(bind_data.table.GetStorageIndex(column_index));
@@ -154,9 +156,6 @@ public:
 
 		if (op.function.init_global) {
 			auto filters = table_filters ? optional_ptr<TableFilterSet>(*table_filters) : GetTableFilters(op);
-			execution_source_config = BuildTableScanExecutionSourceConfig(op, filters, open_request);
-			InitializeExecutionSourceContractTableScanGlobalState(context, op, execution_source_config,
-			                                                      execution_source_contract);
 			TableFunctionInitInput input(op.bind_data.get(), op.column_ids, op.projection_ids, filters,
 			                             op.extra_info.sample_options, &op);
 
@@ -164,6 +163,9 @@ public:
 			if (global_state) {
 				max_threads = global_state->MaxThreads();
 			}
+			execution_source_config = BuildTableScanExecutionSourceConfig(op, filters, open_request);
+			InitializeExecutionSourceContractTableScanGlobalState(context, op, execution_source_config,
+			                                                      execution_source_contract);
 		} else {
 			max_threads = 1;
 		}
@@ -216,6 +218,7 @@ public:
 	unique_ptr<LocalTableFunctionState> local_state;
 	TableScanState execution_source_contract_scan_state;
 	DataChunk execution_source_contract_all_columns;
+	idx_t execution_source_contract_row_groups_scanned = 0;
 
 private:
 	void InitializeExecutionSourceContract(ExecutionContext &context, TableScanGlobalSourceState &gstate,
@@ -223,8 +226,11 @@ private:
 		auto filters = gstate.GetTableFilters(op);
 		execution_source_contract_scan_state.Initialize(gstate.execution_source_contract.storage_ids, context.client,
 		                                                filters, op.extra_info.sample_options);
-		gstate.execution_source_contract.storage->NextParallelScan(
+		auto rows_in_current_row_group = gstate.execution_source_contract.storage->NextParallelScan(
 		    context.client, gstate.execution_source_contract.parallel_state, execution_source_contract_scan_state);
+		if (rows_in_current_row_group > 0) {
+			execution_source_contract_row_groups_scanned++;
+		}
 		if (gstate.execution_source_contract.can_remove_filter_columns) {
 			execution_source_contract_all_columns.Initialize(context.client,
 			                                                 gstate.execution_source_contract.scanned_types);
@@ -296,6 +302,9 @@ SourceResultType PhysicalTableScan::GetExecutionSourceContractDataInternal(Execu
 			ExecutionOperatorStageTimer timer(input.stage_recorder, "source_contract.table_scan.next_parallel_scan");
 			rows_in_current_row_group =
 			    contract_state.storage->NextParallelScan(context.client, contract_state.parallel_state, scan_state);
+		}
+		if (rows_in_current_row_group > 0) {
+			l_state.execution_source_contract_row_groups_scanned++;
 		}
 		if (rows_in_current_row_group == 0) {
 			return SourceResultType::FINISHED;
@@ -468,6 +477,16 @@ bool PhysicalTableScan::SupportsPartitioning(const OperatorPartitionInfo &partit
 	return true;
 }
 
+static OperatorPartitionData GetExecutionSourceContractTableScanPartitionData(const TableScanState &scan_state) {
+	if (scan_state.table_state.row_group) {
+		return OperatorPartitionData(scan_state.table_state.batch_index);
+	}
+	if (scan_state.local_state.row_group) {
+		return OperatorPartitionData(scan_state.table_state.batch_index + scan_state.local_state.batch_index);
+	}
+	return OperatorPartitionData(0);
+}
+
 OperatorPartitionData PhysicalTableScan::GetPartitionData(ExecutionContext &context, DataChunk &chunk,
                                                           GlobalSourceState &gstate_p, LocalSourceState &lstate,
                                                           const OperatorPartitionInfo &partition_info) const {
@@ -475,6 +494,12 @@ OperatorPartitionData PhysicalTableScan::GetPartitionData(ExecutionContext &cont
 	D_ASSERT(function.get_partition_data);
 	auto &gstate = gstate_p.Cast<TableScanGlobalSourceState>();
 	auto &state = lstate.Cast<TableScanLocalSourceState>();
+	if (gstate.execution_source_contract.storage) {
+		return GetExecutionSourceContractTableScanPartitionData(state.execution_source_contract_scan_state);
+	}
+	if (!state.local_state) {
+		throw InternalException("PhysicalTableScan::GetPartitionData called without local table function state");
+	}
 	TableFunctionGetPartitionInput input(bind_data.get(), state.local_state.get(), gstate.global_state.get(),
 	                                     partition_info);
 	return function.get_partition_data(context.client, input);
@@ -630,6 +655,13 @@ void PhysicalTableScan::GetMetrics(ClientContext &context, GlobalSourceState &gs
 	}
 	auto &gstate = gstate_p.Cast<TableScanGlobalSourceState>();
 	auto &state = lstate.Cast<TableScanLocalSourceState>();
+	if (gstate.execution_source_contract.storage) {
+		auto &scan_state = state.execution_source_contract_scan_state;
+		operator_metrics.rows_scanned = scan_state.table_state.rows_scanned + scan_state.local_state.rows_scanned;
+		operator_metrics.row_groups_scanned = state.execution_source_contract_row_groups_scanned;
+		operator_metrics.total_row_groups_to_scan = gstate.execution_source_contract.total_row_groups_to_scan;
+		return;
+	}
 	TableFunctionGetMetricsInput input(context, bind_data.get(), state.local_state.get(), gstate.global_state.get(),
 	                                   operator_metrics);
 	function.get_metrics(input);

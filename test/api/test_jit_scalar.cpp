@@ -133,6 +133,65 @@ TEST_CASE("JIT lowers string predicates without aggregate sink dependence", "[ap
 	RequireNativeSljitIr(manager, "string_suffix");
 	RequireNativeSljitIr(manager, "string_contains");
 	RequireNativeSljitIr(manager, "string_like");
+
+	REQUIRE_NO_FAIL(con.Query("SET disabled_optimizers='in_clause'"));
+	ClearJitTrace(manager, true);
+	result = con.Query("CREATE TEMP TABLE jit_string_projected_predicates AS "
+	                   "WITH t AS MATERIALIZED (SELECT id, s FROM jit_string_native) "
+	                   "SELECT id, "
+	                   "       s LIKE '%special%requests%' AS like_hit, "
+	                   "       s IN ('EUROPE BRASS', 'forest green part', "
+	                   "             'ordinary special shipping requests here', NULL) AS in_hit, "
+	                   "       s NOT IN ('EUROPE BRASS', 'forest green part', "
+	                   "                 'ordinary special shipping requests here', NULL) AS not_in_hit "
+	                   "FROM t");
+	REQUIRE_NO_FAIL(*result);
+	REQUIRE_NO_FAIL(con.Query("SET disabled_optimizers=''"));
+	result = con.Query("SELECT count(*) FILTER (WHERE like_hit), "
+	                   "       count(*) FILTER (WHERE like_hit IS NULL), "
+	                   "       count(*) FILTER (WHERE in_hit), "
+	                   "       count(*) FILTER (WHERE in_hit IS NULL), "
+	                   "       count(*) FILTER (WHERE not_in_hit), "
+	                   "       count(*) FILTER (WHERE not_in_hit IS NULL) "
+	                   "FROM jit_string_projected_predicates");
+	REQUIRE_NO_FAIL(*result);
+	REQUIRE(result->GetValue(0, 0).GetValue<int64_t>() == 1);
+	REQUIRE(result->GetValue(1, 0).GetValue<int64_t>() == 1);
+	REQUIRE(result->GetValue(2, 0).GetValue<int64_t>() == 3);
+	REQUIRE(result->GetValue(3, 0).GetValue<int64_t>() == 2);
+	REQUIRE(result->GetValue(4, 0).GetValue<int64_t>() == 0);
+	REQUIRE(result->GetValue(5, 0).GetValue<int64_t>() == 2);
+	RequireNativeSljitIr(manager, "string_like", [](const ExecutionRegionEvent &event) {
+		REQUIRE(event.candidate_traits.projection_count > 0);
+	});
+	RequireNativeSljitIr(manager, "in_list", [](const ExecutionRegionEvent &event) {
+		REQUIRE(event.candidate_traits.projection_count > 0);
+	});
+
+	ClearJitTrace(manager, true);
+	result = con.Query("WITH t AS MATERIALIZED (SELECT id, s FROM jit_string_native) "
+	                   "SELECT id FROM t "
+	                   "WHERE s = 'EUROPE BRASS' OR s = 'forest green part' OR s = 'special only'");
+	REQUIRE_NO_FAIL(*result);
+	REQUIRE(CHECK_COLUMN(result, 0, {1, 2, 4}));
+	RequireJitEvent(
+	    manager,
+	    [](const ExecutionRegionEvent &event) {
+		    return IsCompiledSljitRegionEvent(event) && event.candidate_traits.filter_count > 0 &&
+		           StringUtil::Contains(event.ir, "EUROPE BRASS");
+	    },
+	    [](const ExecutionRegionEvent &event) { REQUIRE(ExecutionRegionEventProfileCodeSize(event) < 1000); });
+
+	ClearJitTrace(manager, true);
+	result = con.Query("WITH t AS MATERIALIZED (SELECT id, s FROM jit_string_native) "
+	                   "SELECT id FROM t WHERE s LIKE 'ordinary%special%ship_ing%'");
+	REQUIRE_NO_FAIL(*result);
+	REQUIRE(CHECK_COLUMN(result, 0, {3}));
+	for (auto &event : manager.GetEvents()) {
+		const auto generated_percent_only_like =
+		    IsCompiledSljitRegionEvent(event) && StringUtil::Contains(event.ir, "string_like");
+		REQUIRE_FALSE(generated_percent_only_like);
+	}
 }
 
 TEST_CASE("JIT lowers long string predicates through packed native comparisons", "[api][jit]") {
@@ -319,7 +378,7 @@ TEST_CASE("JIT lowers scalar casts and arithmetic as generated code", "[api][jit
 	RequireNativeSljitIr(manager, "double-divide-constant");
 }
 
-TEST_CASE("JIT lowers casted numeric double division as generated code", "[api][jit]") {
+TEST_CASE("JIT lowers semantics-independent casted numeric double division as generated code", "[api][jit]") {
 	DuckDB db;
 	Connection con(db);
 	auto &manager = ExecutionRegionManager::Get(*con.context);
@@ -346,11 +405,12 @@ TEST_CASE("JIT lowers casted numeric double division as generated code", "[api][
 	REQUIRE(result->GetValue(0, 2).IsNull());
 	REQUIRE(result->GetValue(0, 3).IsNull());
 
-	RequireNativeSljitIr(manager, "double-divide-references", [](const ExecutionRegionEvent &event) {
-		REQUIRE(StringUtil::Contains(event.ir, "logical=DECIMAL(38,2),physical=INT128"));
-		REQUIRE(StringUtil::Contains(event.ir, "logical=BIGINT,physical=INT64"));
-		REQUIRE_FALSE(StringUtil::Contains(event.reason, "sljit-expression-lowering-unsupported"));
-	});
+	for (auto &event : manager.GetEvents()) {
+		const auto generated_double_reference_divide =
+		    IsCompiledSljitRegionEvent(event) && EventExecutionMode(event) == "native" &&
+		    StringUtil::Contains(event.ir, "double-divide-references");
+		REQUIRE_FALSE(generated_double_reference_divide);
+	}
 
 	ClearJitTrace(manager, true);
 	result = con.Query("CREATE TEMP TABLE jit_casted_double_constant_division_result AS "

@@ -41,15 +41,15 @@ static void SljitNativeTreeOverflow(SljitNativeVectorInput *input, const char *m
 }
 
 static void SLJIT_FUNC SljitNativeTreeAddOverflow(SljitNativeVectorInput *input) {
-	SljitNativeTreeOverflow(input, "Overflow in addition");
+	SljitNativeTreeOverflow(input, "Overflow in addition of DECIMAL");
 }
 
 static void SLJIT_FUNC SljitNativeTreeSubtractOverflow(SljitNativeVectorInput *input) {
-	SljitNativeTreeOverflow(input, "Overflow in subtraction");
+	SljitNativeTreeOverflow(input, "Overflow in subtract of DECIMAL");
 }
 
 static void SLJIT_FUNC SljitNativeTreeMultiplyOverflow(SljitNativeVectorInput *input) {
-	SljitNativeTreeOverflow(input, "Overflow in multiplication");
+	SljitNativeTreeOverflow(input, "Overflow in multiplication of DECIMAL");
 }
 
 static void SljitNativeAggregateTreeOverflow(SljitNativeVectorInput *input, const char *message) {
@@ -68,16 +68,105 @@ static double SLJIT_FUNC SljitNativeHugeintToDouble(uint64_t lower, int64_t uppe
 	return Hugeint::Cast<double>(value);
 }
 
+struct SljitNativeStringConstant {
+	explicit SljitNativeStringConstant(string value_p) : value(std::move(value_p)) {
+	}
+
+	string value;
+};
+
+struct SljitNativeStringConstantList {
+	explicit SljitNativeStringConstantList(vector<string> values_p) : values(std::move(values_p)) {
+	}
+
+	vector<string> values;
+};
+
+static sljit_sw SLJIT_FUNC SljitNativeStringLikePercentOnly(const char *sdata, idx_t slen,
+                                                            const SljitNativeStringConstant *pattern) {
+	const auto &pattern_value = pattern->value;
+	const auto pdata = pattern_value.data();
+	const auto plen = pattern_value.size();
+	const bool anchor_start = plen == 0 || pdata[0] != '%';
+	const bool anchor_end = plen == 0 || pdata[plen - 1] != '%';
+	idx_t position = 0;
+	idx_t pattern_idx = 0;
+	bool saw_fragment = false;
+
+	while (pattern_idx < plen) {
+		while (pattern_idx < plen && pdata[pattern_idx] == '%') {
+			pattern_idx++;
+		}
+		auto fragment_start = pattern_idx;
+		while (pattern_idx < plen && pdata[pattern_idx] != '%') {
+			pattern_idx++;
+		}
+		auto fragment_length = pattern_idx - fragment_start;
+		if (fragment_length == 0) {
+			continue;
+		}
+		const bool first_fragment = !saw_fragment;
+		const bool last_fragment = pattern_idx == plen;
+		saw_fragment = true;
+
+		if (first_fragment && anchor_start) {
+			if (slen < fragment_length || memcmp(sdata, pdata + fragment_start, fragment_length) != 0) {
+				return false;
+			}
+			position = fragment_length;
+			if (last_fragment && anchor_end) {
+				return position == slen;
+			}
+			continue;
+		}
+		if (last_fragment && anchor_end) {
+			if (slen < fragment_length) {
+				return false;
+			}
+			auto suffix_position = slen - fragment_length;
+			return suffix_position >= position &&
+			       memcmp(sdata + suffix_position, pdata + fragment_start, fragment_length) == 0;
+		}
+
+		bool found = false;
+		while (position + fragment_length <= slen) {
+			if (memcmp(sdata + position, pdata + fragment_start, fragment_length) == 0) {
+				position += fragment_length;
+				found = true;
+				break;
+			}
+			position++;
+		}
+		if (!found) {
+			return false;
+		}
+	}
+	return saw_fragment || !anchor_start || !anchor_end || slen == 0;
+}
+
+static sljit_sw SLJIT_FUNC SljitNativeStringInListConstant(const char *sdata, idx_t slen,
+                                                           const SljitNativeStringConstantList *list) {
+	for (auto &constant : list->values) {
+		if (constant.empty() && slen == 0) {
+			return true;
+		}
+		if (constant.size() == slen && memcmp(sdata, constant.data(), slen) == 0) {
+			return true;
+		}
+	}
+	return false;
+}
+
 static void SLJIT_FUNC SljitNativeAggregateTreeAddOverflow(SljitNativeVectorInput *input) {
-	SljitNativeAggregateTreeOverflow(input, "Overflow in addition");
+	SljitNativeAggregateTreeOverflow(input, "Overflow in addition of DECIMAL");
 }
 
 static void SLJIT_FUNC SljitNativeAggregateTreeSubtractOverflow(SljitNativeVectorInput *input) {
-	SljitNativeAggregateTreeOverflow(input, "Overflow in subtraction");
+	SljitNativeAggregateTreeOverflow(input, "Overflow in subtract of DECIMAL");
 }
 
 static void SLJIT_FUNC SljitNativeAggregateTreeMultiplyOverflow(SljitNativeVectorInput *input) {
-	SljitNativeAggregateTreeOverflow(input, "Overflow in multiplication");
+	SljitNativeAggregateTreeOverflow(input, "Overflow in multiplication of DECIMAL");
 }
 
 static void SLJIT_FUNC SljitNativeAggregateHugeintCommit(SljitNativeVectorInput *input) {
@@ -95,8 +184,9 @@ static void SLJIT_FUNC SljitNativeAggregateHugeintCommit(SljitNativeVectorInput 
 
 static void SLJIT_FUNC SljitNativeIntegerCastOverflow(SljitNativeVectorInput *input) {
 	try {
-		throw ConversionException(input->overflow_message, input->overflow_value);
+		throw ConversionException(input->query_location, input->overflow_message, input->overflow_value);
 	} catch (...) {
+		input->has_error = true;
 		input->error = std::current_exception();
 	}
 }
@@ -219,7 +309,8 @@ FinishSljitNativeAggregateUpdateCode(struct sljit_compiler *compiler, SljitNativ
 }
 
 static unique_ptr<ExecutionRegionCodeHandle>
-FinishSljitNativePredicateCode(struct sljit_compiler *compiler, SljitNativePredicateFunction &function, string &error) {
+FinishSljitNativePredicateCode(struct sljit_compiler *compiler, SljitNativePredicateFunction &function, string &error,
+                               vector<shared_ptr<void>> owned_data = {}) {
 	auto compiler_error = sljit_get_compiler_error(compiler);
 	if (compiler_error != SLJIT_SUCCESS) {
 		error = "SLJIT compiler failed with error code " + std::to_string(compiler_error);
@@ -236,7 +327,7 @@ FinishSljitNativePredicateCode(struct sljit_compiler *compiler, SljitNativePredi
 	}
 
 	function = reinterpret_cast<SljitNativePredicateFunction>(code);
-	return MakeSljitCodeHandle(code, code_size);
+	return MakeSljitCodeHandle(code, code_size, std::move(owned_data));
 }
 
 static void EmitLoadLogicalIndex(struct sljit_compiler *compiler, sljit_s32 target) {
@@ -1191,11 +1282,11 @@ BuildSljitNativeExpressionTree(const ExecutionExpressionIR &root, SljitNativeVec
 }
 
 static bool SljitTypedExpressionTreeIsInt64Node(const ExecutionExpressionIR &node) {
-	return node.return_type.id() != LogicalTypeId::DECIMAL && node.physical_type == PhysicalType::INT64;
+	return node.return_type.IsIntegral() && node.physical_type == PhysicalType::INT64;
 }
 
 static bool SljitTypedExpressionTreeIsInt32Node(const ExecutionExpressionIR &node) {
-	return node.return_type.id() != LogicalTypeId::DECIMAL && node.physical_type == PhysicalType::INT32;
+	return node.return_type.IsIntegral() && node.physical_type == PhysicalType::INT32;
 }
 
 static bool SljitTypedExpressionTreeIsBoolNode(const ExecutionExpressionIR &node) {
@@ -6381,8 +6472,28 @@ static void EmitStringEqualBranches(struct sljit_compiler *compiler, const strin
 	result.true_jumps.push_back(sljit_emit_jump(compiler, SLJIT_JUMP));
 }
 
-static void EmitStringInListBranches(struct sljit_compiler *compiler, const SljitNativePredicate &predicate,
-                                     SljitPredicateBranches &result) {
+static const SljitNativeStringConstant *AddStringConstantCodeData(vector<shared_ptr<void>> &owned_data,
+                                                                  const string &value) {
+	auto data = make_shared_ptr<SljitNativeStringConstant>(value);
+	auto result = data.get();
+	owned_data.push_back(std::move(data));
+	return result;
+}
+
+static const SljitNativeStringConstantList *AddStringConstantListCodeData(vector<shared_ptr<void>> &owned_data,
+                                                                          const vector<string> &values) {
+	auto data = make_shared_ptr<SljitNativeStringConstantList>(values);
+	auto result = data.get();
+	owned_data.push_back(std::move(data));
+	return result;
+}
+
+static bool StringInListShouldUseHelper(const SljitNativePredicate &predicate) {
+	return predicate.string_constants.size() > 2;
+}
+
+static void EmitStringInListInlineBranches(struct sljit_compiler *compiler, const SljitNativePredicate &predicate,
+                                           SljitPredicateBranches &result) {
 	for (auto &constant : predicate.string_constants) {
 		vector<sljit_jump *> next_candidate_jumps;
 		next_candidate_jumps.push_back(
@@ -6405,6 +6516,39 @@ static void EmitStringInListBranches(struct sljit_compiler *compiler, const Slji
 	} else {
 		result.false_jumps.push_back(sljit_emit_jump(compiler, SLJIT_JUMP));
 	}
+}
+
+static void EmitStringInListHelperBranches(struct sljit_compiler *compiler, const SljitNativePredicate &predicate,
+                                           SljitPredicateBranches &result,
+                                           vector<shared_ptr<void>> &owned_data) {
+	auto constants = AddStringConstantListCodeData(owned_data, predicate.string_constants);
+	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R0, 0, SLJIT_R4, 0);
+	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R1, 0, SLJIT_R2, 0);
+	sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_R2, 0, SLJIT_IMM, CastPointerToValue(constants));
+	sljit_emit_icall(compiler, SLJIT_CALL, SLJIT_ARGS3(W, P, W, P), SLJIT_IMM,
+	                 SLJIT_FUNC_ADDR(SljitNativeStringInListConstant));
+	auto match = sljit_emit_cmp(compiler, SLJIT_NOT_EQUAL, SLJIT_RETURN_REG, 0, SLJIT_IMM, 0);
+	if (predicate.not_in) {
+		result.false_jumps.push_back(match);
+	} else {
+		result.true_jumps.push_back(match);
+	}
+	if (predicate.list_has_null) {
+		result.null_jumps.push_back(sljit_emit_jump(compiler, SLJIT_JUMP));
+	} else if (predicate.not_in) {
+		result.true_jumps.push_back(sljit_emit_jump(compiler, SLJIT_JUMP));
+	} else {
+		result.false_jumps.push_back(sljit_emit_jump(compiler, SLJIT_JUMP));
+	}
+}
+
+static void EmitStringInListBranches(struct sljit_compiler *compiler, const SljitNativePredicate &predicate,
+                                     SljitPredicateBranches &result, vector<shared_ptr<void>> &owned_data) {
+	if (StringInListShouldUseHelper(predicate)) {
+		EmitStringInListHelperBranches(compiler, predicate, result, owned_data);
+		return;
+	}
+	EmitStringInListInlineBranches(compiler, predicate, result);
 }
 
 static void EmitStringSuffixBranches(struct sljit_compiler *compiler, const string &suffix,
@@ -6456,45 +6600,6 @@ static void EmitStringContainsBranches(struct sljit_compiler *compiler, const st
 	}
 	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_S4, 0, SLJIT_IMM, 0);
 	EmitStringFindFromCurrentPosition(compiler, needle, SLJIT_R4, SLJIT_R2, SLJIT_S4, result.false_jumps);
-	result.true_jumps.push_back(sljit_emit_jump(compiler, SLJIT_JUMP));
-}
-
-static void EmitStringLikeBranches(struct sljit_compiler *compiler, const SljitNativePredicate &predicate,
-                                   SljitPredicateBranches &result) {
-	if (predicate.string_constants.empty()) {
-		if (predicate.string_anchor_start && predicate.string_anchor_end) {
-			result.true_jumps.push_back(sljit_emit_cmp(compiler, SLJIT_EQUAL, SLJIT_R2, 0, SLJIT_IMM, 0));
-			result.false_jumps.push_back(sljit_emit_jump(compiler, SLJIT_JUMP));
-		} else {
-			result.true_jumps.push_back(sljit_emit_jump(compiler, SLJIT_JUMP));
-		}
-		return;
-	}
-	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_S4, 0, SLJIT_IMM, 0);
-	idx_t fragment_idx = 0;
-	if (predicate.string_anchor_start) {
-		auto &prefix = predicate.string_constants[0];
-		result.false_jumps.push_back(
-		    sljit_emit_cmp(compiler, SLJIT_LESS, SLJIT_R2, 0, SLJIT_IMM, NumericCast<sljit_sw>(prefix.size())));
-		EmitStringEqualsAtPosition(compiler, prefix, SLJIT_R4, SLJIT_S4, result.false_jumps);
-		sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_S4, 0, SLJIT_IMM, NumericCast<sljit_sw>(prefix.size()));
-		fragment_idx = 1;
-	}
-	for (; fragment_idx < predicate.string_constants.size(); fragment_idx++) {
-		auto &fragment = predicate.string_constants[fragment_idx];
-		const bool is_last = fragment_idx + 1 == predicate.string_constants.size();
-		if (is_last && predicate.string_anchor_end) {
-			result.false_jumps.push_back(
-			    sljit_emit_cmp(compiler, SLJIT_LESS, SLJIT_R2, 0, SLJIT_IMM, NumericCast<sljit_sw>(fragment.size())));
-			sljit_emit_op2(compiler, SLJIT_SUB, SLJIT_R1, 0, SLJIT_R2, 0, SLJIT_IMM,
-			               NumericCast<sljit_sw>(fragment.size()));
-			result.false_jumps.push_back(sljit_emit_cmp(compiler, SLJIT_LESS, SLJIT_R1, 0, SLJIT_S4, 0));
-			sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_S4, 0, SLJIT_R1, 0);
-			EmitStringEqualsAtPosition(compiler, fragment, SLJIT_R4, SLJIT_S4, result.false_jumps);
-		} else {
-			EmitStringFindFromCurrentPosition(compiler, fragment, SLJIT_R4, SLJIT_R2, SLJIT_S4, result.false_jumps);
-		}
-	}
 	result.true_jumps.push_back(sljit_emit_jump(compiler, SLJIT_JUMP));
 }
 
@@ -6574,7 +6679,8 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeConstantOrNull(const vecto
 }
 
 static SljitPredicateBranches EmitSljitPredicateBranches(struct sljit_compiler *compiler,
-                                                         const SljitNativePredicate &predicate);
+                                                         const SljitNativePredicate &predicate,
+                                                         vector<shared_ptr<void>> &owned_data);
 
 static bool PredicateDoubleCompareUsesHelper(const SljitNativePredicate &predicate) {
 	switch (predicate.kind) {
@@ -6600,7 +6706,7 @@ static bool PredicateDoubleCompareUsesHelper(const SljitNativePredicate &predica
 
 static SljitPredicateBranches EmitSljitConjunctionBranches(struct sljit_compiler *compiler,
                                                            const SljitNativePredicate &predicate, idx_t child_index,
-                                                           bool null_pending) {
+                                                           bool null_pending, vector<shared_ptr<void>> &owned_data) {
 	SljitPredicateBranches result;
 	if (child_index >= predicate.children.size()) {
 		if (null_pending) {
@@ -6613,16 +6719,16 @@ static SljitPredicateBranches EmitSljitConjunctionBranches(struct sljit_compiler
 		return result;
 	}
 
-	auto child = EmitSljitPredicateBranches(compiler, *predicate.children[child_index]);
+	auto child = EmitSljitPredicateBranches(compiler, *predicate.children[child_index], owned_data);
 	if (predicate.conjunction_op == ExecutionExpressionConjunctionOp::AND) {
 		auto true_label = sljit_emit_label(compiler);
 		SetPredicateJumpLabels(child.true_jumps, true_label);
-		auto true_rest = EmitSljitConjunctionBranches(compiler, predicate, child_index + 1, null_pending);
+		auto true_rest = EmitSljitConjunctionBranches(compiler, predicate, child_index + 1, null_pending, owned_data);
 		AppendPredicateBranches(result, std::move(true_rest));
 
 		auto null_label = sljit_emit_label(compiler);
 		SetPredicateJumpLabels(child.null_jumps, null_label);
-		auto null_rest = EmitSljitConjunctionBranches(compiler, predicate, child_index + 1, true);
+		auto null_rest = EmitSljitConjunctionBranches(compiler, predicate, child_index + 1, true, owned_data);
 		AppendPredicateBranches(result, std::move(null_rest));
 
 		AppendPredicateJumps(result.false_jumps, std::move(child.false_jumps));
@@ -6631,12 +6737,12 @@ static SljitPredicateBranches EmitSljitConjunctionBranches(struct sljit_compiler
 
 	auto false_label = sljit_emit_label(compiler);
 	SetPredicateJumpLabels(child.false_jumps, false_label);
-	auto false_rest = EmitSljitConjunctionBranches(compiler, predicate, child_index + 1, null_pending);
+	auto false_rest = EmitSljitConjunctionBranches(compiler, predicate, child_index + 1, null_pending, owned_data);
 	AppendPredicateBranches(result, std::move(false_rest));
 
 	auto null_label = sljit_emit_label(compiler);
 	SetPredicateJumpLabels(child.null_jumps, null_label);
-	auto null_rest = EmitSljitConjunctionBranches(compiler, predicate, child_index + 1, true);
+	auto null_rest = EmitSljitConjunctionBranches(compiler, predicate, child_index + 1, true, owned_data);
 	AppendPredicateBranches(result, std::move(null_rest));
 
 	AppendPredicateJumps(result.true_jumps, std::move(child.true_jumps));
@@ -6644,7 +6750,8 @@ static SljitPredicateBranches EmitSljitConjunctionBranches(struct sljit_compiler
 }
 
 static SljitPredicateBranches EmitSljitPredicateBranches(struct sljit_compiler *compiler,
-                                                         const SljitNativePredicate &predicate) {
+                                                         const SljitNativePredicate &predicate,
+                                                         vector<shared_ptr<void>> &owned_data) {
 	SljitPredicateBranches result;
 	switch (predicate.kind) {
 	case SljitNativePredicateKind::CONSTANT:
@@ -6665,14 +6772,14 @@ static SljitPredicateBranches EmitSljitPredicateBranches(struct sljit_compiler *
 		return result;
 	}
 	case SljitNativePredicateKind::NOT: {
-		auto child = EmitSljitPredicateBranches(compiler, *predicate.child);
+		auto child = EmitSljitPredicateBranches(compiler, *predicate.child, owned_data);
 		result.true_jumps = std::move(child.false_jumps);
 		result.false_jumps = std::move(child.true_jumps);
 		result.null_jumps = std::move(child.null_jumps);
 		return result;
 	}
 	case SljitNativePredicateKind::CONJUNCTION:
-		return EmitSljitConjunctionBranches(compiler, predicate, 0, false);
+		return EmitSljitConjunctionBranches(compiler, predicate, 0, false, owned_data);
 	case SljitNativePredicateKind::CONSTANT_OR_NULL: {
 		if (predicate.guard_has_null_constant) {
 			result.null_jumps.push_back(sljit_emit_jump(compiler, SLJIT_JUMP));
@@ -6682,7 +6789,7 @@ static SljitPredicateBranches EmitSljitPredicateBranches(struct sljit_compiler *
 			EmitLoadPredicateSourceIndex(compiler, source_index, SLJIT_S3, SLJIT_R1);
 			result.null_jumps.push_back(EmitJumpIfPredicateSourceNull(compiler, source_index, SLJIT_R1));
 		}
-		auto child = EmitSljitPredicateBranches(compiler, *predicate.child);
+		auto child = EmitSljitPredicateBranches(compiler, *predicate.child, owned_data);
 		AppendPredicateBranches(result, std::move(child));
 		return result;
 	}
@@ -6848,7 +6955,7 @@ static SljitPredicateBranches EmitSljitPredicateBranches(struct sljit_compiler *
 	}
 	case SljitNativePredicateKind::STRING_IN_LIST_CONSTANT: {
 		EmitLoadPredicateStringForMatch(compiler, predicate.source_index, result);
-		EmitStringInListBranches(compiler, predicate, result);
+		EmitStringInListBranches(compiler, predicate, result, owned_data);
 		return result;
 	}
 	case SljitNativePredicateKind::STRING_PREFIX_CONSTANT: {
@@ -6868,7 +6975,14 @@ static SljitPredicateBranches EmitSljitPredicateBranches(struct sljit_compiler *
 	}
 	case SljitNativePredicateKind::STRING_LIKE_CONSTANT: {
 		EmitLoadPredicateStringForMatch(compiler, predicate.source_index, result);
-		EmitStringLikeBranches(compiler, predicate, result);
+		auto pattern = AddStringConstantCodeData(owned_data, predicate.string_constant);
+		sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R0, 0, SLJIT_R4, 0);
+		sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R1, 0, SLJIT_R2, 0);
+		sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_R2, 0, SLJIT_IMM, CastPointerToValue(pattern));
+		sljit_emit_icall(compiler, SLJIT_CALL, SLJIT_ARGS3(W, P, W, P), SLJIT_IMM,
+		                 SLJIT_FUNC_ADDR(SljitNativeStringLikePercentOnly));
+		result.true_jumps.push_back(sljit_emit_cmp(compiler, SLJIT_NOT_EQUAL, SLJIT_RETURN_REG, 0, SLJIT_IMM, 0));
+		result.false_jumps.push_back(sljit_emit_jump(compiler, SLJIT_JUMP));
 		return result;
 	}
 	case SljitNativePredicateKind::STRING_SUBSTRING_IN_LIST_CONSTANT: {
@@ -6951,7 +7065,8 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativePredicate(const SljitNativ
 		EmitLoadPredicateResultAndLogicalIndexForSelect(compiler);
 	}
 
-	auto branches = EmitSljitPredicateBranches(compiler, predicate);
+	vector<shared_ptr<void>> owned_data;
+	auto branches = EmitSljitPredicateBranches(compiler, predicate, owned_data);
 	auto false_label = sljit_emit_label(compiler);
 	SetPredicateJumpLabels(branches.false_jumps, false_label);
 	if (materialize_result) {
@@ -7000,7 +7115,7 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativePredicate(const SljitNativ
 	}
 	sljit_emit_return_void(compiler);
 
-	return FinishSljitNativePredicateCode(compiler, function, error);
+	return FinishSljitNativePredicateCode(compiler, function, error, std::move(owned_data));
 }
 
 } // namespace duckdb

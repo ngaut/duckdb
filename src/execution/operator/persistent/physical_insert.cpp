@@ -140,7 +140,6 @@ ExecutionContract PhysicalInsert::GetExecutionContract() const {
 	result.sink.reason += ";sink_contract_status=ready";
 	result.sink.reason += ";sink_required_capability=materialization-append-sink";
 	result.sink.reason += ";sink_contract_version=v1";
-	result.sink.fields = BuildExecutionContractFields(result.sink.reason);
 	return FinalizeExecutionContract(std::move(result));
 }
 

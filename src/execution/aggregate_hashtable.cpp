@@ -501,6 +501,7 @@ optional_idx GroupedAggregateHashTable::TryResolveDictionaryGroups(DataChunk &gr
 		dict_addresses[dict_idx] = new_dict_addresses[i];
 	}
 	// now set up the addresses for the aggregates
+	addresses_out.SetVectorType(VectorType::FLAT_VECTOR);
 	auto result_addresses = FlatVector::Writer<uintptr_t>(addresses_out, groups.size());
 	if (address_offset > 0) {
 		compressed_group_state.address_high_bits_uniform =
@@ -534,6 +535,7 @@ optional_idx GroupedAggregateHashTable::TryAddConstantGroups(DataChunk &groups, 
 	}
 	auto &aggregates = layout_ptr->GetAggregates();
 	if (aggregates.empty()) {
+		state.addresses.SetVectorType(VectorType::FLAT_VECTOR);
 		return result;
 	}
 
@@ -574,6 +576,7 @@ optional_idx GroupedAggregateHashTable::TryResolveConstantGroups(DataChunk &grou
 
 	// FIXME: This should just be a CONSTANT_VECTOR but subsequent operations assume FLAT_VECTOR
 	auto new_dict_addresses = FlatVector::GetData<uintptr_t>(unique_group_pointers);
+	addresses_out.SetVectorType(VectorType::FLAT_VECTOR);
 	auto result_addresses = FlatVector::Writer<uintptr_t>(addresses_out, row_count);
 	uintptr_t aggregate_address = new_dict_addresses[0] + address_offset;
 	if (address_offset > 0) {

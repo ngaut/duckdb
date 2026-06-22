@@ -1471,6 +1471,7 @@ static unique_ptr<ExecutionExpressionIR> TryBuildExecutionExpressionIR(const Exp
 		auto node = make_uniq<ExecutionExpressionIR>();
 		node->kind = ExecutionExpressionIRKind::CAST;
 		node->return_type = cast.TargetType();
+		node->query_location = expression.GetQueryLocation();
 		node->try_cast = cast.IsTryCast();
 		node->left = std::move(child);
 		return node;

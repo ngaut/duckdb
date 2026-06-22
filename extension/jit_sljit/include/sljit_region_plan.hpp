@@ -98,6 +98,7 @@ struct SljitNativeRegionExpressionPlan {
 	SljitNativeSignedIntegerWidth cast_target_width = SljitNativeSignedIntegerWidth::INT32;
 	SljitNativeUnsignedIntegerWidth unsigned_source_width = SljitNativeUnsignedIntegerWidth::UINT8;
 	SljitNativeUnsignedIntegerWidth unsigned_cast_target_width = SljitNativeUnsignedIntegerWidth::UINT16;
+	optional_idx query_location;
 	idx_t string_compress_target_size = 0;
 	idx_t string_decompress_source_size = 0;
 	idx_t guard_source_index = 0;
@@ -249,13 +250,15 @@ struct SljitRegionBackendPlan : public ExecutionRegionBackendPlan {
 	string error;
 };
 
-SljitNativeRegionExpressionPlan CopySljitNativeRegionExpression(const SljitNativeRegionExpressionPlan &input);
+SljitNativeRegionExpressionPlan CopySljitNativeRegionExpression(const SljitNativeRegionExpressionPlan &input,
+                                                                bool copy_auxiliary_expression_tree = true);
 SljitNativeHashJoinProbePlan CopySljitNativeHashJoinProbePlan(const SljitNativeHashJoinProbePlan &input);
 unique_ptr<SljitNativeRegionPlan> CopySljitNativeRegion(const SljitNativeRegionPlan &input);
 
 string DescribeNativeRegion(const SljitNativeRegionPlan &region, const string &mode);
 string DescribeNativeRegionShape(const SljitNativeRegionPlan &region);
 ExecutionRegionLoweringPlan BuildSljitRegionPlan(const ExecutionRegionIR &region_ir,
-                                                  const ExecutionRegionCandidate &candidate);
+                                                 const ExecutionRegionCandidate &candidate,
+                                                 bool render_diagnostics = false);
 
 } // namespace duckdb

@@ -524,6 +524,9 @@ bool TryReadNativeDoubleBinaryConstant(const ExecutionExpressionIR &root, SljitN
 	if (TryReadNativeDoubleReferenceConstant(*root.left, *root.right, source_kind, source_index, source_scale,
 	                                         constant_value)) {
 		constant_on_left = false;
+		if (native_op == SljitNativeDoubleBinaryOp::DIVIDE && constant_value == 0.0) {
+			return false;
+		}
 		return true;
 	}
 	if (!TryReadNativeDoubleReferenceConstant(*root.right, *root.left, source_kind, source_index, source_scale,
@@ -531,6 +534,9 @@ bool TryReadNativeDoubleBinaryConstant(const ExecutionExpressionIR &root, SljitN
 		return false;
 	}
 	constant_on_left = true;
+	if (native_op == SljitNativeDoubleBinaryOp::DIVIDE) {
+		return false;
+	}
 	return true;
 }
 
@@ -542,6 +548,9 @@ bool TryReadNativeDoubleBinaryReferences(const ExecutionExpressionIR &root, Slji
 	    !TryGetNativeDoubleBinaryOp(root.binary_op, native_op) ||
 	    !TryReadNativeDoubleReference(*root.left, left_kind, left_index, left_scale) ||
 	    !TryReadNativeDoubleReference(*root.right, right_kind, right_index, right_scale)) {
+		return false;
+	}
+	if (native_op == SljitNativeDoubleBinaryOp::DIVIDE) {
 		return false;
 	}
 	return true;
@@ -1054,7 +1063,35 @@ static bool TryReadNativeStringMatchConstant(const ExecutionExpressionIR &root,
 	return true;
 }
 
+static bool NativeLikePatternIsPercentOnly(const string &pattern) {
+	for (auto character : pattern) {
+		if (character == '_') {
+			return false;
+		}
+	}
+	return true;
+}
+
 static bool IsNativeAsciiString(const string &value);
+
+static bool TryReadNativeStringReferenceMaybeNullConstant(const ExecutionExpressionIR &reference,
+                                                          const ExecutionExpressionIR &constant_node,
+                                                          idx_t &source_index, string &constant,
+                                                          bool &constant_is_null) {
+	if (reference.kind != ExecutionExpressionIRKind::REFERENCE || reference.return_type.id() != LogicalTypeId::VARCHAR ||
+	    constant_node.kind != ExecutionExpressionIRKind::CONSTANT ||
+	    constant_node.return_type.id() != LogicalTypeId::VARCHAR) {
+		return false;
+	}
+	source_index = reference.ref_index;
+	constant.clear();
+	constant_is_null = constant_node.constant.IsNull();
+	if (constant_is_null) {
+		return true;
+	}
+	constant = StringValue::Get(constant_node.constant);
+	return IsNativeAsciiString(constant);
+}
 
 static bool TryReadNativeStringEqualConstant(const ExecutionExpressionIR &root, idx_t &source_index, string &constant) {
 	if (root.kind != ExecutionExpressionIRKind::BINARY ||
@@ -1063,18 +1100,12 @@ static bool TryReadNativeStringEqualConstant(const ExecutionExpressionIR &root, 
 		return false;
 	}
 	auto try_read = [&](const ExecutionExpressionIR &reference, const ExecutionExpressionIR &constant_node) {
-		if (reference.kind != ExecutionExpressionIRKind::REFERENCE ||
-		    reference.return_type.id() != LogicalTypeId::VARCHAR ||
-		    constant_node.kind != ExecutionExpressionIRKind::CONSTANT ||
-		    constant_node.return_type.id() != LogicalTypeId::VARCHAR || constant_node.constant.IsNull()) {
+		bool constant_is_null;
+		if (!TryReadNativeStringReferenceMaybeNullConstant(reference, constant_node, source_index, constant,
+		                                                   constant_is_null) ||
+		    constant_is_null) {
 			return false;
 		}
-		auto value = StringValue::Get(constant_node.constant);
-		if (!IsNativeAsciiString(value)) {
-			return false;
-		}
-		source_index = reference.ref_index;
-		constant = std::move(value);
 		return true;
 	};
 	return try_read(*root.left, *root.right) || try_read(*root.right, *root.left);
@@ -1085,57 +1116,73 @@ static bool TryReadNativeStringInListConstant(const ExecutionExpressionIR &root,
 	constants.clear();
 	list_has_null = false;
 	not_in = false;
-	if (root.kind != ExecutionExpressionIRKind::IN_LIST || root.return_type.id() != LogicalTypeId::BOOLEAN ||
-	    root.children.size() < 2 || !root.children[0] ||
-	    root.children[0]->kind != ExecutionExpressionIRKind::REFERENCE ||
-	    root.children[0]->return_type.id() != LogicalTypeId::VARCHAR) {
-		return false;
-	}
-	source_index = root.children[0]->ref_index;
-	not_in = root.not_in;
-	for (idx_t child_idx = 1; child_idx < root.children.size(); child_idx++) {
-		auto &child = *root.children[child_idx];
-		if (child.kind != ExecutionExpressionIRKind::CONSTANT || child.return_type.id() != LogicalTypeId::VARCHAR) {
+	if (root.kind == ExecutionExpressionIRKind::IN_LIST) {
+		if (root.return_type.id() != LogicalTypeId::BOOLEAN || root.children.size() < 2 || !root.children[0] ||
+		    root.children[0]->kind != ExecutionExpressionIRKind::REFERENCE ||
+		    root.children[0]->return_type.id() != LogicalTypeId::VARCHAR) {
 			return false;
 		}
-		if (child.constant.IsNull()) {
-			list_has_null = true;
-			continue;
-		}
-		auto constant = StringValue::Get(child.constant);
-		if (!IsNativeAsciiString(constant)) {
-			return false;
-		}
-		constants.push_back(std::move(constant));
-	}
-	return !constants.empty() || list_has_null;
-}
-
-static bool TryReadNativeStringLikeConstant(const ExecutionExpressionIR &root, idx_t &source_index,
-                                            vector<string> &fragments, bool &anchor_start, bool &anchor_end) {
-	string pattern;
-	if (!TryReadNativeStringMatchConstant(root, ExecutionExpressionIntrinsicKind::STRING_LIKE, source_index, pattern)) {
-		return false;
-	}
-	anchor_start = pattern.empty() || pattern[0] != '%';
-	anchor_end = pattern.empty() || pattern[pattern.size() - 1] != '%';
-	fragments.clear();
-	idx_t fragment_start = 0;
-	for (idx_t pattern_idx = 0; pattern_idx <= pattern.size(); pattern_idx++) {
-		if (pattern_idx < pattern.size()) {
-			if (pattern[pattern_idx] == '_') {
+		source_index = root.children[0]->ref_index;
+		not_in = root.not_in;
+		for (idx_t child_idx = 1; child_idx < root.children.size(); child_idx++) {
+			auto &child = *root.children[child_idx];
+			if (child.kind != ExecutionExpressionIRKind::CONSTANT || child.return_type.id() != LogicalTypeId::VARCHAR) {
 				return false;
 			}
-			if (pattern[pattern_idx] != '%') {
+			if (child.constant.IsNull()) {
+				list_has_null = true;
 				continue;
 			}
+			auto constant = StringValue::Get(child.constant);
+			if (!IsNativeAsciiString(constant)) {
+				return false;
+			}
+			constants.push_back(std::move(constant));
 		}
-		if (pattern_idx > fragment_start) {
-			fragments.push_back(pattern.substr(fragment_start, pattern_idx - fragment_start));
-		}
-		fragment_start = pattern_idx + 1;
+		return !constants.empty() || list_has_null;
 	}
-	return true;
+
+	auto candidate = &root;
+	if (root.kind == ExecutionExpressionIRKind::UNARY && root.unary_op == ExecutionExpressionUnaryOp::NOT &&
+	    root.left && root.left->kind == ExecutionExpressionIRKind::CONJUNCTION &&
+	    root.left->conjunction_op == ExecutionExpressionConjunctionOp::OR) {
+		not_in = true;
+		candidate = root.left.get();
+	}
+	if (candidate->kind != ExecutionExpressionIRKind::CONJUNCTION ||
+	    candidate->conjunction_op != ExecutionExpressionConjunctionOp::OR || candidate->children.empty()) {
+		return false;
+	}
+
+	bool initialized = false;
+	for (auto &child_ptr : candidate->children) {
+		auto &child = *child_ptr;
+		if (child.kind != ExecutionExpressionIRKind::BINARY ||
+		    child.binary_op != ExecutionExpressionBinaryOp::COMPARE_EQUAL || !child.left || !child.right) {
+			return false;
+		}
+		idx_t child_source_index;
+		string constant;
+		bool constant_is_null;
+		if (!TryReadNativeStringReferenceMaybeNullConstant(*child.left, *child.right, child_source_index, constant,
+		                                                   constant_is_null) &&
+		    !TryReadNativeStringReferenceMaybeNullConstant(*child.right, *child.left, child_source_index, constant,
+		                                                   constant_is_null)) {
+			return false;
+		}
+		if (!initialized) {
+			source_index = child_source_index;
+			initialized = true;
+		} else if (source_index != child_source_index) {
+			return false;
+		}
+		if (constant_is_null) {
+			list_has_null = true;
+		} else {
+			constants.push_back(std::move(constant));
+		}
+	}
+	return initialized && (!constants.empty() || list_has_null);
 }
 
 static bool TryReadNativeInt64Constant(const ExecutionExpressionIR &node, int64_t &value) {
@@ -1478,6 +1525,21 @@ static bool TryBuildNativePredicateInternal(const ExecutionExpressionIR &root,
 		return true;
 	}
 
+	idx_t early_string_in_list_source_index;
+	vector<string> early_string_in_list_constants;
+	bool early_string_in_list_has_null;
+	bool early_string_not_in;
+	if (TryReadNativeStringInListConstant(root, early_string_in_list_source_index, early_string_in_list_constants,
+	                                      early_string_in_list_has_null, early_string_not_in)) {
+		result->kind = SljitNativePredicateKind::STRING_IN_LIST_CONSTANT;
+		result->source_index = early_string_in_list_source_index;
+		result->string_constants = std::move(early_string_in_list_constants);
+		result->list_has_null = early_string_in_list_has_null;
+		result->not_in = early_string_not_in;
+		predicate = std::move(result);
+		return true;
+	}
+
 	if (root.kind == ExecutionExpressionIRKind::CONJUNCTION) {
 		if (root.children.empty()) {
 			return false;
@@ -1671,15 +1733,12 @@ static bool TryBuildNativePredicateInternal(const ExecutionExpressionIR &root,
 		return true;
 	}
 
-	vector<string> like_fragments;
-	bool anchor_start;
-	bool anchor_end;
-	if (TryReadNativeStringLikeConstant(root, source_index, like_fragments, anchor_start, anchor_end)) {
+	if (TryReadNativeStringMatchConstant(root, ExecutionExpressionIntrinsicKind::STRING_LIKE, source_index,
+	                                     string_constant) &&
+	    NativeLikePatternIsPercentOnly(string_constant)) {
 		result->kind = SljitNativePredicateKind::STRING_LIKE_CONSTANT;
 		result->source_index = source_index;
-		result->string_constants = std::move(like_fragments);
-		result->string_anchor_start = anchor_start;
-		result->string_anchor_end = anchor_end;
+		result->string_constant = std::move(string_constant);
 		predicate = std::move(result);
 		return true;
 	}

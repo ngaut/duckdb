@@ -16,7 +16,8 @@
 
 namespace duckdb {
 
-unique_ptr<ExecutionRegionCodeHandle> MakeSljitCodeHandle(void *code, idx_t code_size);
+unique_ptr<ExecutionRegionCodeHandle> MakeSljitCodeHandle(void *code, idx_t code_size,
+                                                          vector<shared_ptr<void>> owned_data = {});
 
 sljit_sw NativeIntegerDataScale(SljitNativeIntegerKind kind);
 sljit_s32 NativeIntegerLoadOp(SljitNativeIntegerKind kind);

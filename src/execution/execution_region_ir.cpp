@@ -215,6 +215,16 @@ static string DescribeExecutionRegionNativeOperatorContract(const ExecutionRegio
                                                             const string &prefix);
 static void AppendExecutionRegionContractIR(string &result, const string &ir);
 
+static string DescribeExecutionRegionExpressionFragmentIR(const ExecutionExpressionFragment &fragment) {
+	if (!fragment.ir.empty()) {
+		return fragment.ir;
+	}
+	if (!fragment.root) {
+		return string();
+	}
+	return "duckdb.expr typed-vector-ir;" + DescribeExecutionExpressionIR(*fragment.root);
+}
+
 static string DescribeExecutionRegionHashJoinContract(const ExecutionRegionHashJoinContract &contract) {
 	if (!contract.present) {
 		return string();
@@ -245,8 +255,11 @@ static string DescribeExecutionRegionHashJoinContract(const ExecutionRegionHashJ
 	result += ",residual_expression_ready=" + ExecutionRegionBool(contract.residual_expression_ready);
 	result += ",residual_expression_blocker=" + contract.residual_expression_blocker;
 	result += ",residual_sources=" + DescribeExecutionHashJoinResidualSources(contract.residual_sources);
-	if (contract.residual_expression_ready && !contract.residual_expression.ir.empty()) {
-		result += ",residual_expression_ir=(" + contract.residual_expression.ir + ")";
+	if (contract.residual_expression_ready) {
+		auto expression_ir = DescribeExecutionRegionExpressionFragmentIR(contract.residual_expression);
+		if (!expression_ir.empty()) {
+			result += ",residual_expression_ir=(" + expression_ir + ")";
+		}
 	}
 	result += ",filter_pushdown=" + ExecutionRegionBool(contract.filter_pushdown);
 	result += ",filter_pushdown_condition_count=" + std::to_string(contract.filter_pushdown_condition_count);
@@ -285,15 +298,21 @@ DescribeExecutionRegionNestedLoopJoinCondition(const ExecutionRegionNestedLoopJo
 	if (!condition.lhs_expression_blocker.empty()) {
 		result += ",lhs_blocker=" + condition.lhs_expression_blocker;
 	}
-	if (condition.lhs_expression_ready && !condition.lhs_expression.ir.empty()) {
-		result += ",lhs_ir=(" + condition.lhs_expression.ir + ")";
+	if (condition.lhs_expression_ready) {
+		auto lhs_ir = DescribeExecutionRegionExpressionFragmentIR(condition.lhs_expression);
+		if (!lhs_ir.empty()) {
+			result += ",lhs_ir=(" + lhs_ir + ")";
+		}
 	}
 	result += ",rhs_ready=" + ExecutionRegionBool(condition.rhs_expression_ready);
 	if (!condition.rhs_expression_blocker.empty()) {
 		result += ",rhs_blocker=" + condition.rhs_expression_blocker;
 	}
-	if (condition.rhs_expression_ready && !condition.rhs_expression.ir.empty()) {
-		result += ",rhs_ir=(" + condition.rhs_expression.ir + ")";
+	if (condition.rhs_expression_ready) {
+		auto rhs_ir = DescribeExecutionRegionExpressionFragmentIR(condition.rhs_expression);
+		if (!rhs_ir.empty()) {
+			result += ",rhs_ir=(" + rhs_ir + ")";
+		}
 	}
 	result += ">";
 	return result;
@@ -450,8 +469,11 @@ static string DescribeExecutionRegionOrderKeyInput(const ExecutionRegionOrderKey
 	result += ",null_order=" + EnumUtil::ToString(key.null_order);
 	result += ",expression_ready=" + ExecutionRegionBool(key.expression_ready);
 	result += ",expression_blocker=" + key.expression_blocker;
-	if (key.expression_ready && !key.expression.ir.empty()) {
-		result += ",expression_ir=(" + key.expression.ir + ")";
+	if (key.expression_ready) {
+		auto expression_ir = DescribeExecutionRegionExpressionFragmentIR(key.expression);
+		if (!expression_ir.empty()) {
+			result += ",expression_ir=(" + expression_ir + ")";
+		}
 	}
 	if (!key.reason.empty()) {
 		result += ",reason=" + key.reason;
@@ -527,7 +549,7 @@ static string DescribeExecutionRegionAggregateInput(const ExecutionRegionAggrega
 			if (child_idx > 0) {
 				result += "|";
 			}
-			result += aggregate.child_expressions[child_idx].ir;
+			result += DescribeExecutionRegionExpressionFragmentIR(aggregate.child_expressions[child_idx]);
 		}
 		result += "]";
 	}
@@ -601,8 +623,11 @@ static string DescribeExecutionRegionGroupInput(const ExecutionRegionGroupInput 
 	result += ",type=" + group.type.ToString();
 	result += ",supported_reference=" + ExecutionRegionBool(group.supported_reference);
 	result += ",expression_ready=" + ExecutionRegionBool(group.expression_ready);
-	if (group.expression_ready && !group.expression.ir.empty()) {
-		result += ",expression_ir=(" + group.expression.ir + ")";
+	if (group.expression_ready) {
+		auto expression_ir = DescribeExecutionRegionExpressionFragmentIR(group.expression);
+		if (!expression_ir.empty()) {
+			result += ",expression_ir=(" + expression_ir + ")";
+		}
 	}
 	if (!group.expression_blocker.empty()) {
 		result += ",expression_blocker=" + group.expression_blocker;
@@ -858,6 +883,14 @@ static bool ExecutionRegionShouldRenderDiagnostics(ExecutionRegionIRMode mode) {
 	return mode == ExecutionRegionIRMode::TRACE;
 }
 
+static void MaterializeExecutionRegionDiagnosticFields(vector<ExecutionRegionContractField> &fields,
+                                                       const string &reason) {
+	if (!fields.empty() || reason.empty()) {
+		return;
+	}
+	fields = BuildExecutionContractFields(reason);
+}
+
 static unique_ptr<ExecutionRegionSourceInfo>
 BuildExecutionRegionSourceInfo(const ExecutionSourceContract &descriptor, ExecutionExpressionIRMode expression_mode,
                                ExecutionRegionIRMode mode, ExecutionExpressionAnalysisCache *expression_cache) {
@@ -865,7 +898,6 @@ BuildExecutionRegionSourceInfo(const ExecutionSourceContract &descriptor, Execut
 	result->kind = descriptor.kind;
 	result->execution = descriptor.execution;
 	result->function_name = descriptor.function_name;
-	result->fields = descriptor.fields;
 	result->estimated_source_cardinality = descriptor.estimated_source_cardinality;
 	result->output_column_count = descriptor.output_column_count;
 	result->returned_column_count = descriptor.returned_column_count;
@@ -891,6 +923,8 @@ BuildExecutionRegionSourceInfo(const ExecutionSourceContract &descriptor, Execut
 	if (!ExecutionRegionShouldRenderDiagnostics(mode)) {
 		return result;
 	}
+	result->fields = descriptor.fields;
+	MaterializeExecutionRegionDiagnosticFields(result->fields, result->reason);
 	for (auto &aggregate : result->aggregates) {
 		aggregate.ir = DescribeExecutionRegionAggregateInput(aggregate);
 	}
@@ -942,6 +976,7 @@ BuildExecutionRegionOperatorInfo(const ExecutionRegionOperatorInfo &descriptor, 
 	if (!ExecutionRegionShouldRenderDiagnostics(mode)) {
 		return result;
 	}
+	MaterializeExecutionRegionDiagnosticFields(result->fields, result->reason);
 	for (auto &key : result->hash_join_keys) {
 		key.ir = DescribeExecutionRegionHashJoinKeyInput(key);
 	}
@@ -970,7 +1005,6 @@ BuildExecutionRegionGenericScanSourceInfo(const ExecutionRegionOperatorEntry &en
 	result->kind = ExecutionRegionSourceKind::GENERIC_SCAN;
 	result->execution = ExecutionRegionSourceExecutionKind::DUCKDB_SOURCE_BOUNDARY;
 	result->function_name = StringUtil::Lower(entry.operator_name);
-	result->fields = BuildExecutionContractFields(reason);
 	result->output_column_count = entry.output_types.size();
 	result->returned_column_count = entry.output_types.size();
 	result->source_contract.status = ExecutionRegionSourceContractStatus::BLOCKED;
@@ -979,6 +1013,7 @@ BuildExecutionRegionGenericScanSourceInfo(const ExecutionRegionOperatorEntry &en
 	result->source_contract.blocker = "generic-scan-source-boundary";
 	result->reason = reason;
 	if (ExecutionRegionShouldRenderDiagnostics(mode)) {
+		MaterializeExecutionRegionDiagnosticFields(result->fields, result->reason);
 		result->source_contract.ir = DescribeExecutionSourceProtocolContract(result->source_contract);
 		result->ir = DescribeExecutionRegionSourceInfo(*result);
 	}
@@ -992,7 +1027,6 @@ BuildExecutionRegionStatefulSourceInfo(const ExecutionRegionOperatorEntry &entry
 	result->kind = ExecutionRegionSourceKind::STATEFUL_OPERATOR;
 	result->execution = ExecutionRegionSourceExecutionKind::DUCKDB_SOURCE_BOUNDARY;
 	result->function_name = StringUtil::Lower(entry.operator_name);
-	result->fields = BuildExecutionContractFields(reason);
 	result->output_column_count = entry.output_types.size();
 	result->returned_column_count = entry.output_types.size();
 	result->source_contract.status = ExecutionRegionSourceContractStatus::BLOCKED;
@@ -1001,6 +1035,7 @@ BuildExecutionRegionStatefulSourceInfo(const ExecutionRegionOperatorEntry &entry
 	result->source_contract.blocker = "stateful-source-contract-boundary";
 	result->reason = reason;
 	if (ExecutionRegionShouldRenderDiagnostics(mode)) {
+		MaterializeExecutionRegionDiagnosticFields(result->fields, result->reason);
 		result->source_contract.ir = DescribeExecutionSourceProtocolContract(result->source_contract);
 		result->ir = DescribeExecutionRegionSourceInfo(*result);
 	}
@@ -1021,6 +1056,7 @@ static void FinalizeExecutionRegionSinkInfo(ExecutionRegionSinkInfo &sink, Execu
 	if (!ExecutionRegionShouldRenderDiagnostics(mode)) {
 		return;
 	}
+	MaterializeExecutionRegionDiagnosticFields(sink.fields, sink.reason);
 	for (auto &aggregate : sink.aggregates) {
 		aggregate.ir = DescribeExecutionRegionAggregateInput(aggregate);
 	}
@@ -1068,7 +1104,6 @@ static unique_ptr<ExecutionRegionSinkInfo> BuildExecutionRegionSinkInfo(const Ex
 	    has_sink_contract ? make_uniq<ExecutionRegionSinkInfo>(sink_payload) : make_uniq<ExecutionRegionSinkInfo>();
 	if (!has_sink_contract) {
 		result->reason = BuildExecutionRegionGenericSinkContractReason(entry);
-		result->fields = BuildExecutionContractFields(result->reason);
 	}
 	FinalizeExecutionRegionSinkInfo(*result, mode);
 	return result;

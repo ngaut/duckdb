@@ -104,8 +104,6 @@ struct SljitNativePredicate {
 	bool not_between = false;
 	string string_constant;
 	vector<string> string_constants;
-	bool string_anchor_start = false;
-	bool string_anchor_end = false;
 	idx_t substring_length = 0;
 	bool guard_has_null_constant = false;
 	vector<idx_t> guard_source_indices;
@@ -150,6 +148,7 @@ struct SljitNativeVectorInput {
 	idx_t selected_count = 0;
 	const char *overflow_message = nullptr;
 	const char *error_message = nullptr;
+	optional_idx query_location;
 	int64_t overflow_value = 0;
 	idx_t string_decompress_source_size = 0;
 	idx_t active_source_index = 0;

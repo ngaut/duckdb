@@ -10,6 +10,8 @@
 #include "duckdb/execution/operator/aggregate/physical_perfecthash_aggregate.hpp"
 #include "duckdb/execution/operator/aggregate/physical_ungrouped_aggregate.hpp"
 #include "duckdb/execution/operator/filter/physical_filter.hpp"
+#include "duckdb/execution/operator/join/physical_hash_join.hpp"
+#include "duckdb/execution/operator/join/physical_nested_loop_join.hpp"
 #include "duckdb/execution/operator/projection/physical_projection.hpp"
 #include "duckdb/execution/operator/scan/physical_table_scan.hpp"
 #include "duckdb/execution/physical_operator.hpp"
@@ -17,6 +19,8 @@
 #include "duckdb/main/settings.hpp"
 #include "duckdb/parallel/pipeline.hpp"
 #include "duckdb/planner/cost_model.hpp"
+
+#include "execution_region_duckdb_type_adapter.hpp"
 
 #include <chrono>
 
@@ -379,9 +383,48 @@ static bool TryBuildExecutionRegionPipelineCostInput(Pipeline &pipeline, Physica
 	return true;
 }
 
+static bool ExecutionRegionStatefulSourceProducesRows(const PhysicalOperator &source) {
+	switch (source.type) {
+	case PhysicalOperatorType::HASH_JOIN: {
+		auto &join = source.Cast<PhysicalHashJoin>();
+		return ExecutionRegionJoinTypePropagatesBuildSide(ExecutionRegionJoinTypeFromDuckDB(join.join_type));
+	}
+	case PhysicalOperatorType::NESTED_LOOP_JOIN: {
+		auto &join = source.Cast<PhysicalNestedLoopJoin>();
+		return ExecutionRegionJoinTypePropagatesBuildSide(ExecutionRegionJoinTypeFromDuckDB(join.join_type));
+	}
+	default:
+		return true;
+	}
+}
+
+static bool ExecutionRegionPipelineHasNonProducingSource(Pipeline &pipeline) {
+	auto source = pipeline.GetSource();
+	return source && !ExecutionRegionStatefulSourceProducesRows(*source);
+}
+
+static PhysicalRunnerCostInput BuildExecutionRegionNonProducingSourceCostInput(const PhysicalOperator &source) {
+	PhysicalRunnerCostInput result;
+	result.estimated_cardinality = source.estimated_cardinality;
+	result.node_count = 1;
+	result.stage_count = 1;
+	result.operator_count = 1;
+	return result;
+}
+
 static ExecutionRegionPhysicalRunnerSelection
 SelectExecutionRegionPipelinePhysicalRunner(const PhysicalRunnerCostParameters &cost_parameters, Pipeline &pipeline) {
 	ExecutionRegionPhysicalRunnerSelection selection;
+	if (ExecutionRegionPipelineHasNonProducingSource(pipeline)) {
+		auto source = pipeline.GetSource();
+		D_ASSERT(source);
+		auto cost_input = BuildExecutionRegionNonProducingSourceCostInput(*source);
+		selection.runner_cost = DuckDBCostModel::SelectPhysicalRunner(cost_input, cost_parameters);
+		selection.reason = "duckdb_cbo selects vectorized physical runner before region graph";
+		selection.reason += ";region_graph=skipped;source_produces_rows=false";
+		selection.blocker = "duckdb_selected_vectorized";
+		return selection;
+	}
 	PhysicalRunnerCostInput cost_input;
 	if (!TryBuildExecutionRegionPipelineCostInput(pipeline, cost_input)) {
 		selection.use_compiled_runner = true;
@@ -793,8 +836,10 @@ unique_ptr<ExecutionRegionPlan> ExecutionRegionPlanner::Build(ClientContext &con
 		return nullptr;
 	}
 	ExecutionExpressionAnalysisCache expression_analysis_cache;
+	auto region_ir_mode =
+	    ExecutionRegionSettings::DumpIR(context) ? ExecutionRegionIRMode::TRACE : ExecutionRegionIRMode::COMPACT;
 	auto graph_build_start = std::chrono::steady_clock::now();
-	auto pipeline_descriptor = BuildExecutionRegionGraph(pipeline);
+	auto pipeline_descriptor = BuildExecutionRegionGraph(pipeline, region_ir_mode == ExecutionRegionIRMode::TRACE);
 	auto graph_build_time_us = ExecutionRegionPlannerElapsedMicros(graph_build_start);
 	if (!pipeline_descriptor) {
 		if (should_record_decision_telemetry) {
@@ -817,8 +862,6 @@ unique_ptr<ExecutionRegionPlan> ExecutionRegionPlanner::Build(ClientContext &con
 		return nullptr;
 	}
 	auto region_decision_start = std::chrono::steady_clock::now();
-	auto region_ir_mode =
-	    ExecutionRegionSettings::DumpIR(context) ? ExecutionRegionIRMode::TRACE : ExecutionRegionIRMode::COMPACT;
 	auto region_ir = TryLowerExecutionRegion(*pipeline_descriptor, region_ir_mode, &expression_analysis_cache);
 	auto region_lowering_time_us = ExecutionRegionPlannerElapsedMicros(region_decision_start);
 	if (!region_ir) {

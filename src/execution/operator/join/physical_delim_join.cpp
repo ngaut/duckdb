@@ -113,7 +113,6 @@ ExecutionContract PhysicalDelimJoin::GetExecutionContract() const {
 	result.sink.reason += ";sink_required_capability=delim-join-execution-sink";
 	result.sink.reason += ";sink_contract_version=v1";
 	result.sink.reason += ";sink_contract_blocker=" + blocker;
-	result.sink.fields = BuildExecutionContractFields(result.sink.reason);
 	return FinalizeExecutionContract(std::move(result));
 }
 

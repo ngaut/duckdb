@@ -191,6 +191,7 @@ private:
 	bool TryGetMaxThreads(idx_t &max_threads);
 	bool ScheduleParallel(shared_ptr<Event> &event);
 	void BuildExecutionRegionPlanLocked();
+	void InitializeSourceStateFromExecutionRegionPlanLocked(ClientContext &client);
 };
 
 } // namespace duckdb

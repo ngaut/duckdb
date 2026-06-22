@@ -21,7 +21,8 @@ static string AttachCoreRegionIR(string backend_ir, const ExecutionRegionIR &reg
 }
 
 ExecutionRegionLoweringPlan AnalyzeSljitRegion(const ExecutionRegionCompilationInput &input) {
-	return BuildSljitRegionPlan(input.region_ir, input.candidate);
+	return BuildSljitRegionPlan(input.region_ir, input.candidate,
+	                            ExecutionRegionSettings::ShouldRecordDetailedTelemetry(input.context));
 }
 
 ExecutionRegionCompileResult CompileSljitRegion(const string &backend_name,
@@ -37,7 +38,7 @@ ExecutionRegionCompileResult CompileSljitRegion(const string &backend_name,
 	auto reason = ExecutionRegionSettings::ShouldRecordDetailedTelemetry(input.context)
 	                  ? lowering_plan.EventReason()
 	                  : lowering_plan.CompactEventReason();
-	auto native_region = sljit_plan->native_region ? CopySljitNativeRegion(*sljit_plan->native_region) : nullptr;
+	auto native_region = sljit_plan->native_region.get();
 	auto error = sljit_plan->error;
 	auto execution_mode = lowering_plan.ExpectedCompiledExecutionMode();
 	auto &contract = input.candidate.contract;

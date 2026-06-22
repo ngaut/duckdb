@@ -455,7 +455,6 @@ static ExecutionCompiledStageContract BuildExecutionCompiledSourceStage(const Ex
 	stage.blocker = source.native_state_scan_contract.status != ExecutionRegionStateContractStatus::NONE
 	                    ? source.native_state_scan_contract.blocker
 	                    : source.source_contract.blocker;
-	stage.ir = source.reason;
 	return stage;
 }
 
@@ -500,7 +499,6 @@ BuildExecutionCompiledOperatorStage(const ExecutionRegionOperatorInfo &operator_
 		stage.drain = ExecutionCompiledDrainKind::NONE;
 		break;
 	}
-	stage.ir = operator_info.reason;
 	return stage;
 }
 
@@ -625,35 +623,7 @@ static ExecutionCompiledStageContract BuildExecutionCompiledSinkStage(const Exec
 		stage.required_capability = "sink-cursor";
 		stage.blocker = "sink-cursor-contract-missing";
 	}
-	stage.ir = sink.reason;
 	return stage;
-}
-
-static string BuildExecutionCompiledContractIR(const ExecutionCompiledOperatorContract &contract) {
-	string result = "compiled_contract<stages=" + std::to_string(contract.stages.size());
-	result += ",source=" + ExecutionContractBool(contract.HasSource());
-	result += ",operator=" + ExecutionContractBool(contract.HasOperator());
-	result += ",sink=" + ExecutionContractBool(contract.HasSink());
-	result += ",state_scan=" + ExecutionContractBool(contract.HasStateScan());
-	result += ",zero_or_many_output=" + ExecutionContractBool(contract.HasZeroOrManyOutput());
-	result += ",executable_work=" + ExecutionContractBool(contract.HasExecutableWork());
-	for (idx_t stage_idx = 0; stage_idx < contract.stages.size(); stage_idx++) {
-		auto &stage = contract.stages[stage_idx];
-		result += ",stage" + std::to_string(stage_idx) +
-		          "=<operation=" + string(ExecutionCompiledContractKindToString(stage.operation));
-		result += ",execution=" + string(ExecutionRegionStageExecutionKindToString(stage.execution));
-		result += ",drain=" + string(ExecutionCompiledDrainKindToString(stage.drain));
-		result += ",executable_work=" + ExecutionContractBool(stage.executable_work);
-		if (!stage.required_capability.empty()) {
-			result += ",capability=" + stage.required_capability;
-		}
-		if (!stage.blocker.empty()) {
-			result += ",blocker=" + stage.blocker;
-		}
-		result += ">";
-	}
-	result += ">";
-	return result;
 }
 
 ExecutionContract FinalizeExecutionContract(ExecutionContract descriptor) {
@@ -670,7 +640,6 @@ ExecutionContract FinalizeExecutionContract(ExecutionContract descriptor) {
 		contract.stages.push_back(BuildExecutionCompiledSinkStage(descriptor.sink));
 	}
 
-	contract.ir = BuildExecutionCompiledContractIR(contract);
 	return descriptor;
 }
 
@@ -884,7 +853,7 @@ static void AddExecutionContractHashJoinResidualExpression(const PhysicalHashJoi
 		contract.residual_expression_blocker = "hash-join-native-residual-predicate-metadata-missing";
 		return;
 	}
-	auto residual = TryLowerExecutionExpression(*join.predicate, 0);
+	auto residual = TryLowerExecutionExpression(*join.predicate, 0, ExecutionExpressionIRMode::COMPACT);
 	if (!residual || !residual->root) {
 		contract.residual_expression_blocker = DescribeExecutionExpressionLoweringFailure(*join.predicate);
 		return;
@@ -920,7 +889,6 @@ static void AddExecutionContractHashJoinResidualExpression(const PhysicalHashJoi
 		contract.residual_expression_blocker = blocker;
 		return;
 	}
-	residual->ir = "duckdb.expr typed-vector-ir;" + DescribeExecutionExpressionIR(*residual->root);
 	contract.residual_expression = std::move(*residual);
 	contract.residual_expression_ready = true;
 	contract.residual_expression_blocker.clear();
@@ -1128,8 +1096,9 @@ static ExecutionRegionHashJoinContract BuildExecutionContractHashJoinContract(co
 	return result;
 }
 
-static string BuildExecutionContractHashJoinBoundaryReason(const PhysicalHashJoin &join, const string &marker) {
-	auto contract = BuildExecutionContractHashJoinContract(join);
+static string BuildExecutionContractHashJoinBoundaryReason(const PhysicalHashJoin &join,
+                                                           const ExecutionRegionHashJoinContract &contract,
+                                                           const string &marker) {
 	string result = marker;
 	result += ";operator=" + PhysicalOperatorToString(join.type);
 	result += ";join_type=" + string(ExecutionRegionJoinTypeToString(contract.join_type));
@@ -1220,12 +1189,11 @@ BuildExecutionContractNestedLoopJoinConditionInput(const JoinCondition &conditio
 	}
 
 	result.comparison_type = ExecutionRegionComparisonTypeFromDuckDB(condition.GetComparisonType());
-	auto lhs_expression = TryLowerExecutionExpression(condition.GetLHS(), condition_idx);
+	auto lhs_expression =
+	    TryLowerExecutionExpression(condition.GetLHS(), condition_idx, ExecutionExpressionIRMode::COMPACT);
 	if (lhs_expression && lhs_expression->root) {
 		result.lhs_expression_ready = true;
 		result.lhs_expression = std::move(*lhs_expression);
-		result.lhs_expression.ir =
-		    "duckdb.expr typed-vector-ir;" + DescribeExecutionExpressionIR(*result.lhs_expression.root);
 	} else {
 		result.lhs_expression_blocker = DescribeExecutionExpressionLoweringFailure(condition.GetLHS());
 		if (condition_blocker.empty()) {
@@ -1234,12 +1202,11 @@ BuildExecutionContractNestedLoopJoinConditionInput(const JoinCondition &conditio
 		}
 	}
 
-	auto rhs_expression = TryLowerExecutionExpression(condition.GetRHS(), condition_idx);
+	auto rhs_expression =
+	    TryLowerExecutionExpression(condition.GetRHS(), condition_idx, ExecutionExpressionIRMode::COMPACT);
 	if (rhs_expression && rhs_expression->root) {
 		result.rhs_expression_ready = true;
 		result.rhs_expression = std::move(*rhs_expression);
-		result.rhs_expression.ir =
-		    "duckdb.expr typed-vector-ir;" + DescribeExecutionExpressionIR(*result.rhs_expression.root);
 	} else {
 		result.rhs_expression_blocker = DescribeExecutionExpressionLoweringFailure(condition.GetRHS());
 		if (condition_blocker.empty()) {
@@ -1326,8 +1293,8 @@ BuildExecutionContractNestedLoopJoinContract(const PhysicalNestedLoopJoin &join)
 }
 
 static string BuildExecutionContractNestedLoopJoinBoundaryReason(const PhysicalNestedLoopJoin &join,
+                                                                 const ExecutionRegionNestedLoopJoinContract &contract,
                                                                  const string &marker) {
-	auto contract = BuildExecutionContractNestedLoopJoinContract(join);
 	string result = marker;
 	result += ";operator=" + PhysicalOperatorToString(join.type);
 	result += ";join_type=" + string(ExecutionRegionJoinTypeToString(contract.join_type));
@@ -1381,7 +1348,7 @@ static ExecutionRegionOrderKeyInput BuildExecutionContractOrderKeyInput(const Bo
 	result.reason += ";physical_type=" + TypeIdToString(result.physical_type);
 	result.reason += ";order_type=" + EnumUtil::ToString(result.order_type);
 	result.reason += ";null_order=" + EnumUtil::ToString(result.null_order);
-	auto expression = TryLowerExecutionExpression(*order.expression, key_index);
+	auto expression = TryLowerExecutionExpression(*order.expression, key_index, ExecutionExpressionIRMode::COMPACT);
 	if (!expression || !expression->root) {
 		result.expression_blocker =
 		    "order-native-key-expression;" + DescribeExecutionExpressionLoweringFailure(*order.expression);
@@ -1391,7 +1358,6 @@ static ExecutionRegionOrderKeyInput BuildExecutionContractOrderKeyInput(const Bo
 		result.reason += ";expression_ready=false;expression_blocker=" + result.expression_blocker;
 		return result;
 	}
-	expression->ir = "duckdb.expr typed-vector-ir;" + DescribeExecutionExpressionIR(*expression->root);
 	result.expression = std::move(*expression);
 	result.expression_ready = true;
 	result.expression_blocker.clear();
@@ -1460,7 +1426,6 @@ static ExecutionContract BuildExecutionContractSortStateContracts(
 	result.source.output_column_count = output_column_count;
 	result.source.returned_column_count = output_column_count;
 	result.source.reason = result.source_boundary_reason;
-	result.source.fields = BuildExecutionContractFields(result.source.reason);
 
 	result.sink.kind = ExecutionRegionSinkKind::SORT;
 	result.sink.reason = "DuckDB ordered sink contract";
@@ -1480,7 +1445,6 @@ static ExecutionContract BuildExecutionContractSortStateContracts(
 	}
 	result.sink.order_contract = std::move(order_contract);
 	AppendExecutionContractNativeOperatorReason(result.sink.reason, result.sink.native_sink_contract, "sink");
-	result.sink.fields = BuildExecutionContractFields(result.sink.reason);
 	return result;
 }
 
@@ -1952,7 +1916,7 @@ static bool TryReadExecutionContractAggregateInput(const BoundAggregateExpressio
 	for (idx_t child_idx = 0; child_idx < children.size(); child_idx++) {
 		auto &child = *children[child_idx];
 		result.child_types.push_back(child.GetReturnType());
-		auto child_expression = TryLowerExecutionExpression(child, child_idx);
+		auto child_expression = TryLowerExecutionExpression(child, child_idx, ExecutionExpressionIRMode::COMPACT);
 		if (!child_expression) {
 			result.payload_expression_blocker =
 			    "aggregate child expression lowering unsupported;child_index=" + std::to_string(child_idx) + ";" +
@@ -2132,7 +2096,8 @@ static ExecutionRegionGroupInput BuildExecutionContractGroupInput(const vector<u
 	result.group_index = group_idx;
 	result.type = group_types[group_idx];
 	auto &group_expression = *groups[group_idx];
-	auto lowered_expression = TryLowerExecutionExpression(group_expression, group_idx);
+	auto lowered_expression =
+	    TryLowerExecutionExpression(group_expression, group_idx, ExecutionExpressionIRMode::COMPACT);
 	if (lowered_expression) {
 		result.expression = std::move(*lowered_expression);
 		result.expression_ready = true;
@@ -2212,7 +2177,6 @@ ExecutionContract PhysicalTableScan::GetExecutionContract() const {
 	result.source_boundary_reason = BuildExecutionContractTableScanSourceBoundaryReason(*this, result.source.execution);
 	result.source.source_contract = BuildExecutionSourceProtocolContract(result.source.kind, result.source.execution);
 	result.source.reason = result.source_boundary_reason;
-	result.source.fields = BuildExecutionContractFields(result.source.reason);
 	result.source.function_name = function_name;
 	result.source.output_column_count = GetTypes().size();
 	result.source.returned_column_count = returned_types.size();
@@ -2246,13 +2210,14 @@ ExecutionContract PhysicalColumnDataScan::GetExecutionContract() const {
 	result.source_boundary_reason += ";output_columns=" + std::to_string(result.source.output_column_count);
 	result.source_boundary_reason += ";returned_columns=" + std::to_string(result.source.returned_column_count);
 	result.source.reason = result.source_boundary_reason;
-	result.source.fields = BuildExecutionContractFields(result.source.reason);
 	return FinalizeExecutionContract(std::move(result));
 }
 
 ExecutionContract PhysicalHashJoin::GetExecutionContract() const {
 	ExecutionContract result;
 	auto contract = BuildExecutionContractHashJoinContract(*this);
+	auto probe_keys = BuildExecutionContractHashJoinProbeKeyInputs(*this);
+	auto build_keys = BuildExecutionContractHashJoinBuildKeyInputs(*this);
 	auto state_scan_contract = BuildExecutionContractNativeStateScanContract("hash-join-native-state-scan", string());
 	if (contract.source_produces_rows) {
 		MarkExecutionContractNativeStateScanContractReady(state_scan_contract);
@@ -2261,14 +2226,14 @@ ExecutionContract PhysicalHashJoin::GetExecutionContract() const {
 		                                                    HASH_JOIN_SOURCE_NON_PRODUCING_BLOCKER);
 	}
 	result.source_boundary_reason = BuildExecutionContractHashJoinBoundaryReason(
-	    *this, contract.source_produces_rows ? "DuckDB hash join native state scan contract"
-	                                         : "DuckDB hash join state scan source does not produce rows");
+	    *this, contract,
+	    contract.source_produces_rows ? "DuckDB hash join native state scan contract"
+	                                  : "DuckDB hash join state scan source does not produce rows");
 	result.operator_info.kind = ExecutionRegionOperatorContractKind::HASH_JOIN_PROBE;
-	result.operator_info.reason =
-	    BuildExecutionContractHashJoinBoundaryReason(*this, "DuckDB hash join probe operator contract boundary");
-	result.operator_info.fields = BuildExecutionContractFields(result.operator_info.reason);
+	result.operator_info.reason = BuildExecutionContractHashJoinBoundaryReason(
+	    *this, contract, "DuckDB hash join probe operator contract boundary");
 	result.operator_info.hash_join_contract = contract;
-	result.operator_info.hash_join_keys = BuildExecutionContractHashJoinProbeKeyInputs(*this);
+	result.operator_info.hash_join_keys = probe_keys;
 	result.source.kind = ExecutionRegionSourceKind::STATEFUL_OPERATOR;
 	result.source.execution = contract.source_produces_rows
 	                              ? ExecutionRegionSourceExecutionKind::SOURCE_CONTRACT
@@ -2284,14 +2249,13 @@ ExecutionContract PhysicalHashJoin::GetExecutionContract() const {
 	result.source.output_column_count = GetTypes().size();
 	result.source.returned_column_count = GetTypes().size();
 	result.source.reason = result.source_boundary_reason;
-	result.source.fields = BuildExecutionContractFields(result.source.reason);
 	result.source.hash_join_contract = contract;
-	result.source.hash_join_keys = BuildExecutionContractHashJoinProbeKeyInputs(*this);
+	result.source.hash_join_keys = std::move(probe_keys);
 	result.sink.kind = ExecutionRegionSinkKind::HASH_JOIN_BUILD;
-	result.sink.reason = BuildExecutionContractHashJoinBoundaryReason(*this, "DuckDB hash join build sink contract");
-	result.sink.fields = BuildExecutionContractFields(result.sink.reason);
+	result.sink.reason =
+	    BuildExecutionContractHashJoinBoundaryReason(*this, contract, "DuckDB hash join build sink contract");
 	result.sink.hash_join_contract = std::move(contract);
-	result.sink.hash_join_keys = BuildExecutionContractHashJoinBuildKeyInputs(*this);
+	result.sink.hash_join_keys = std::move(build_keys);
 	return FinalizeExecutionContract(std::move(result));
 }
 
@@ -2300,12 +2264,12 @@ ExecutionContract PhysicalNestedLoopJoin::GetExecutionContract() const {
 	auto contract = BuildExecutionContractNestedLoopJoinContract(*this);
 
 	result.source_boundary_reason = BuildExecutionContractNestedLoopJoinBoundaryReason(
-	    *this, contract.source_produces_rows ? "DuckDB nested loop join state scan boundary"
-	                                         : "DuckDB nested loop join source does not produce rows");
+	    *this, contract,
+	    contract.source_produces_rows ? "DuckDB nested loop join state scan boundary"
+	                                  : "DuckDB nested loop join source does not produce rows");
 	result.operator_info.kind = ExecutionRegionOperatorContractKind::NESTED_LOOP_JOIN_PROBE;
-	result.operator_info.reason =
-	    BuildExecutionContractNestedLoopJoinBoundaryReason(*this, "DuckDB nested loop join probe operator contract");
-	result.operator_info.fields = BuildExecutionContractFields(result.operator_info.reason);
+	result.operator_info.reason = BuildExecutionContractNestedLoopJoinBoundaryReason(
+	    *this, contract, "DuckDB nested loop join probe operator contract");
 	result.operator_info.nested_loop_join_contract = contract;
 
 	result.source.kind = ExecutionRegionSourceKind::STATEFUL_OPERATOR;
@@ -2318,13 +2282,11 @@ ExecutionContract PhysicalNestedLoopJoin::GetExecutionContract() const {
 	result.source.output_column_count = GetTypes().size();
 	result.source.returned_column_count = GetTypes().size();
 	result.source.reason = result.source_boundary_reason;
-	result.source.fields = BuildExecutionContractFields(result.source.reason);
 	result.source.nested_loop_join_contract = contract;
 
 	result.sink.kind = ExecutionRegionSinkKind::NESTED_LOOP_JOIN_BUILD;
-	result.sink.reason =
-	    BuildExecutionContractNestedLoopJoinBoundaryReason(*this, "DuckDB nested loop join build sink contract");
-	result.sink.fields = BuildExecutionContractFields(result.sink.reason);
+	result.sink.reason = BuildExecutionContractNestedLoopJoinBoundaryReason(
+	    *this, contract, "DuckDB nested loop join build sink contract");
 	result.sink.nested_loop_join_contract = std::move(contract);
 	return FinalizeExecutionContract(std::move(result));
 }
@@ -2335,9 +2297,7 @@ ExecutionContract PhysicalOrder::GetExecutionContract() const {
 	    "order-by-native-state-scan", "DuckDB order by native state scan contract", is_index_sort, false, 0, 0, false);
 	result.source_boundary_reason += ";is_index_sort=" + ExecutionContractBool(is_index_sort);
 	result.source.reason = result.source_boundary_reason;
-	result.source.fields = BuildExecutionContractFields(result.source.reason);
 	result.sink.reason += ";is_index_sort=" + ExecutionContractBool(is_index_sort);
-	result.sink.fields = BuildExecutionContractFields(result.sink.reason);
 	return FinalizeExecutionContract(std::move(result));
 }
 
@@ -2350,11 +2310,9 @@ ExecutionContract PhysicalTopN::GetExecutionContract() const {
 	result.source_boundary_reason += ";offset=" + std::to_string(offset);
 	result.source_boundary_reason += ";dynamic_filter=" + ExecutionContractBool(static_cast<bool>(dynamic_filter));
 	result.source.reason = result.source_boundary_reason;
-	result.source.fields = BuildExecutionContractFields(result.source.reason);
 	result.sink.reason += ";limit=" + std::to_string(limit);
 	result.sink.reason += ";offset=" + std::to_string(offset);
 	result.sink.reason += ";dynamic_filter=" + ExecutionContractBool(static_cast<bool>(dynamic_filter));
-	result.sink.fields = BuildExecutionContractFields(result.sink.reason);
 	return FinalizeExecutionContract(std::move(result));
 }
 
@@ -2380,10 +2338,9 @@ ExecutionContract PhysicalHashAggregate::GetExecutionContract() const {
 	result.source.output_column_count = GetTypes().size();
 	result.source.returned_column_count = GetTypes().size();
 	result.source.reason = result.source_boundary_reason;
-	result.source.fields = BuildExecutionContractFields(result.source.reason);
 	result.source.aggregate_contract = contract;
-	result.source.aggregates = BuildExecutionContractHashAggregateInputs(*this);
-	result.source.groups = BuildExecutionContractGroupInputs(*this);
+	result.source.aggregates = sink_aggregates;
+	result.source.groups = sink_groups;
 	result.sink.kind =
 	    contract.native_distinct_state_update_contract.status == ExecutionRegionStateContractStatus::READY
 	        ? ExecutionRegionSinkKind::HASH_AGGREGATE_DISTINCT_SINK
@@ -2396,7 +2353,6 @@ ExecutionContract PhysicalHashAggregate::GetExecutionContract() const {
 	                                                ? contract.native_distinct_state_update_contract
 	                                                : contract.native_state_update_contract,
 	                                            "aggregate_state_update");
-	result.sink.fields = BuildExecutionContractFields(result.sink.reason);
 	result.sink.aggregate_contract = std::move(contract);
 	result.sink.aggregates = std::move(sink_aggregates);
 	result.sink.groups = std::move(sink_groups);
@@ -2429,16 +2385,14 @@ ExecutionContract PhysicalPerfectHashAggregate::GetExecutionContract() const {
 	result.source.output_column_count = GetTypes().size();
 	result.source.returned_column_count = GetTypes().size();
 	result.source.reason = result.source_boundary_reason;
-	result.source.fields = BuildExecutionContractFields(result.source.reason);
 	result.source.aggregate_contract = contract;
-	result.source.aggregates = BuildExecutionContractPerfectHashAggregateInputs(*this);
-	result.source.groups = BuildExecutionContractGroupInputs(*this);
+	result.source.aggregates = sink_aggregates;
+	result.source.groups = sink_groups;
 	result.sink.kind = ExecutionRegionSinkKind::PERFECT_HASH_AGGREGATE_UPDATE;
 	result.sink.reason = BuildExecutionContractPerfectHashAggregateBoundaryReason(
 	    *this, "DuckDB perfect hash aggregate sink update contract");
 	AppendExecutionContractNativeOperatorReason(result.sink.reason, contract.native_state_update_contract,
 	                                            "aggregate_state_update");
-	result.sink.fields = BuildExecutionContractFields(result.sink.reason);
 	result.sink.aggregate_contract = std::move(contract);
 	result.sink.aggregates = std::move(sink_aggregates);
 	result.sink.groups = std::move(sink_groups);
@@ -2470,15 +2424,13 @@ ExecutionContract PhysicalUngroupedAggregate::GetExecutionContract() const {
 	result.source.output_column_count = GetTypes().size();
 	result.source.returned_column_count = GetTypes().size();
 	result.source.reason = result.source_boundary_reason;
-	result.source.fields = BuildExecutionContractFields(result.source.reason);
 	result.source.aggregate_contract = contract;
-	result.source.aggregates = BuildExecutionContractUngroupedAggregateInputs(*this);
+	result.source.aggregates = sink_aggregates;
 	result.sink.kind = ExecutionRegionSinkKind::UNGROUPED_AGGREGATE_UPDATE;
 	result.sink.reason = BuildExecutionContractUngroupedAggregateBoundaryReason(
 	    *this, "DuckDB ungrouped aggregate payload update contract");
 	AppendExecutionContractNativeOperatorReason(result.sink.reason, contract.native_state_update_contract,
 	                                            "aggregate_state_update");
-	result.sink.fields = BuildExecutionContractFields(result.sink.reason);
 	result.sink.aggregate_contract = std::move(contract);
 	result.sink.aggregates = std::move(sink_aggregates);
 	result.sink.groups = std::move(sink_groups);

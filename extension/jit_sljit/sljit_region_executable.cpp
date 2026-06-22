@@ -129,9 +129,25 @@ static void RemapSljitExpressionTreeToCombinedInputs(ExecutionExpressionIR &node
 	}
 }
 
+static string NativeRegionIntegerBinaryOverflowMessage(SljitNativeIntegerKind kind, SljitNativeIntegerBinaryOp op) {
+	if (kind != SljitNativeIntegerKind::DECIMAL64) {
+		return NativeIntegerBinaryOverflowMessage(op);
+	}
+	switch (op) {
+	case SljitNativeIntegerBinaryOp::ADD:
+		return "Overflow in addition of DECIMAL";
+	case SljitNativeIntegerBinaryOp::SUBTRACT:
+		return "Overflow in subtract of DECIMAL";
+	case SljitNativeIntegerBinaryOp::MULTIPLY:
+		return "Overflow in multiplication of DECIMAL";
+	default:
+		throw InternalException("Unknown SLJIT native integer binary operator");
+	}
+}
+
 static bool BuildExecutableRegionExpression(const SljitNativeRegionExpressionPlan &plan, bool require_boolean,
                                             SljitExecutableRegionExpression &expr, string &error) {
-	expr.plan = CopySljitNativeRegionExpression(plan);
+	expr.plan = CopySljitNativeRegionExpression(plan, false);
 	PrepareExecutableRegionExpressionInputs(expr);
 	auto &semantic = expr.plan;
 	switch (semantic.kind) {
@@ -144,13 +160,13 @@ static bool BuildExecutableRegionExpression(const SljitNativeRegionExpressionPla
 		}
 		return true;
 	case SljitNativeRegionExpressionKind::INTEGER_BINARY_CONSTANT:
-		expr.overflow_message = NativeIntegerBinaryOverflowMessage(semantic.binary_op);
+		expr.overflow_message = NativeRegionIntegerBinaryOverflowMessage(semantic.integer_kind, semantic.binary_op);
 		expr.code = BuildSljitNativeIntegerBinaryConstant(
 		    semantic.integer_kind, semantic.binary_op, semantic.constant_on_left, expr.function, error,
 		    semantic.check_result_range, semantic.result_min, semantic.result_max);
 		return expr.code != nullptr;
 	case SljitNativeRegionExpressionKind::INTEGER_BINARY_REFERENCES:
-		expr.overflow_message = NativeIntegerBinaryOverflowMessage(semantic.binary_op);
+		expr.overflow_message = NativeRegionIntegerBinaryOverflowMessage(semantic.integer_kind, semantic.binary_op);
 		expr.code = BuildSljitNativeIntegerBinaryReferences(semantic.integer_kind, semantic.binary_op, expr.function,
 		                                                    error, semantic.check_result_range, semantic.result_min,
 		                                                    semantic.result_max);
@@ -164,27 +180,23 @@ static bool BuildExecutableRegionExpression(const SljitNativeRegionExpressionPla
 		                                                   semantic.double_right_source_kind, expr.function, error);
 		return expr.code != nullptr;
 	case SljitNativeRegionExpressionKind::INTEGER_COMPARE_CONSTANT:
-		if (!require_boolean) {
-			expr.code = BuildSljitNativeIntegerCompareConstant(semantic.integer_kind, semantic.compare_op,
-			                                                   semantic.constant_on_left, expr.function, error);
-			if (!expr.code) {
-				return false;
-			}
+		if (require_boolean) {
+			expr.select_code = BuildSljitNativeIntegerSelectConstant(
+			    semantic.integer_kind, semantic.compare_op, semantic.constant_on_left, expr.select_function, error);
+			return expr.select_code != nullptr;
 		}
-		expr.select_code = BuildSljitNativeIntegerSelectConstant(
-		    semantic.integer_kind, semantic.compare_op, semantic.constant_on_left, expr.select_function, error);
-		return expr.select_code != nullptr;
+		expr.code = BuildSljitNativeIntegerCompareConstant(semantic.integer_kind, semantic.compare_op,
+		                                                   semantic.constant_on_left, expr.function, error);
+		return expr.code != nullptr;
 	case SljitNativeRegionExpressionKind::INTEGER_COMPARE_REFERENCES:
-		if (!require_boolean) {
-			expr.code = BuildSljitNativeIntegerCompareReferences(semantic.integer_kind, semantic.compare_op,
-			                                                     expr.function, error);
-			if (!expr.code) {
-				return false;
-			}
+		if (require_boolean) {
+			expr.select_code = BuildSljitNativeIntegerSelectReferences(semantic.integer_kind, semantic.compare_op,
+			                                                           expr.select_function, error);
+			return expr.select_code != nullptr;
 		}
-		expr.select_code = BuildSljitNativeIntegerSelectReferences(semantic.integer_kind, semantic.compare_op,
-		                                                           expr.select_function, error);
-		return expr.select_code != nullptr;
+		expr.code =
+		    BuildSljitNativeIntegerCompareReferences(semantic.integer_kind, semantic.compare_op, expr.function, error);
+		return expr.code != nullptr;
 	case SljitNativeRegionExpressionKind::INTEGER_CAST:
 		expr.overflow_message =
 		    NativeIntegerCastOverflowMessage(semantic.cast_source_width, semantic.cast_target_width);
@@ -214,30 +226,26 @@ static bool BuildExecutableRegionExpression(const SljitNativeRegionExpressionPla
 		                                            semantic.coalesce_constant_is_null, expr.function, error);
 		return expr.code != nullptr;
 	case SljitNativeRegionExpressionKind::INTEGER_IN_LIST:
-		if (!require_boolean) {
-			expr.code = BuildSljitNativeIntegerInList(semantic.integer_kind, semantic.constants.size(),
-			                                          semantic.list_has_null, semantic.not_in, expr.function, error);
-			if (!expr.code) {
-				return false;
-			}
+		if (require_boolean) {
+			expr.select_code = BuildSljitNativeIntegerInListSelect(semantic.integer_kind, semantic.constants.size(),
+			                                                       semantic.list_has_null, semantic.not_in,
+			                                                       expr.select_function, error);
+			return expr.select_code != nullptr;
 		}
-		expr.select_code =
-		    BuildSljitNativeIntegerInListSelect(semantic.integer_kind, semantic.constants.size(),
-		                                        semantic.list_has_null, semantic.not_in, expr.select_function, error);
-		return expr.select_code != nullptr;
+		expr.code = BuildSljitNativeIntegerInList(semantic.integer_kind, semantic.constants.size(),
+		                                          semantic.list_has_null, semantic.not_in, expr.function, error);
+		return expr.code != nullptr;
 	case SljitNativeRegionExpressionKind::INTEGER_BETWEEN:
-		if (!require_boolean) {
-			expr.code = BuildSljitNativeIntegerBetween(semantic.integer_kind, semantic.lower, semantic.upper,
-			                                           semantic.lower_inclusive, semantic.upper_inclusive,
-			                                           semantic.not_between, expr.function, error);
-			if (!expr.code) {
-				return false;
-			}
+		if (require_boolean) {
+			expr.select_code = BuildSljitNativeIntegerBetweenSelect(
+			    semantic.integer_kind, semantic.lower, semantic.upper, semantic.lower_inclusive,
+			    semantic.upper_inclusive, semantic.not_between, expr.select_function, error);
+			return expr.select_code != nullptr;
 		}
-		expr.select_code = BuildSljitNativeIntegerBetweenSelect(semantic.integer_kind, semantic.lower, semantic.upper,
-		                                                        semantic.lower_inclusive, semantic.upper_inclusive,
-		                                                        semantic.not_between, expr.select_function, error);
-		return expr.select_code != nullptr;
+		expr.code = BuildSljitNativeIntegerBetween(semantic.integer_kind, semantic.lower, semantic.upper,
+		                                           semantic.lower_inclusive, semantic.upper_inclusive,
+		                                           semantic.not_between, expr.function, error);
+		return expr.code != nullptr;
 	case SljitNativeRegionExpressionKind::CONSTANT_OR_NULL:
 		if (require_boolean) {
 			error = "SLJIT constant_or_null cannot lower as a predicate";
@@ -292,24 +300,20 @@ static bool BuildExecutableRegionExpression(const SljitNativeRegionExpressionPla
 		                                                  semantic.guard_constant_on_left, expr.function, error);
 		return expr.code != nullptr;
 	case SljitNativeRegionExpressionKind::NULL_CHECK:
-		if (!require_boolean) {
-			expr.code = BuildSljitNativeNullCheck(semantic.null_check_op, expr.function, error);
-			if (!expr.code) {
-				return false;
-			}
+		if (require_boolean) {
+			expr.select_code = BuildSljitNativeNullCheckSelect(semantic.null_check_op, expr.select_function, error);
+			return expr.select_code != nullptr;
 		}
-		expr.select_code = BuildSljitNativeNullCheckSelect(semantic.null_check_op, expr.select_function, error);
-		return expr.select_code != nullptr;
+		expr.code = BuildSljitNativeNullCheck(semantic.null_check_op, expr.function, error);
+		return expr.code != nullptr;
 	case SljitNativeRegionExpressionKind::PREDICATE:
-		if (!require_boolean) {
-			expr.predicate_code = BuildSljitNativePredicate(*semantic.predicate, true, expr.predicate_function, error);
-			if (!expr.predicate_code) {
-				return false;
-			}
+		if (require_boolean) {
+			expr.predicate_select_code =
+			    BuildSljitNativePredicate(*semantic.predicate, false, expr.predicate_select_function, error);
+			return expr.predicate_select_code != nullptr;
 		}
-		expr.predicate_select_code =
-		    BuildSljitNativePredicate(*semantic.predicate, false, expr.predicate_select_function, error);
-		return expr.predicate_select_code != nullptr;
+		expr.predicate_code = BuildSljitNativePredicate(*semantic.predicate, true, expr.predicate_function, error);
+		return expr.predicate_code != nullptr;
 	case SljitNativeRegionExpressionKind::EXPRESSION_TREE:
 		if (require_boolean) {
 			error = "SLJIT expression tree cannot lower as a predicate";
@@ -510,7 +514,7 @@ static bool BuildExecutableRegionOp(const SljitNativeRegionOpPlan &op, SljitExec
 			condition_plan.comparison_type = condition.comparison_type;
 			condition_plan.value_kind = condition.value_kind;
 			condition_plan.ir = condition.ir;
-			condition_plan.lhs_condition = CopySljitNativeRegionExpression(condition.lhs_condition);
+			condition_plan.lhs_condition = CopySljitNativeRegionExpression(condition.lhs_condition, false);
 			executable.nested_loop_join_probe.plan.conditions.push_back(std::move(condition_plan));
 
 			SljitExecutableRegionExpression executable_condition;
@@ -569,12 +573,8 @@ static bool BuildExecutableRegionOp(const SljitNativeRegionOpPlan &op, SljitExec
 		executable.aggregate_update.plan.use_perfect_hash_group_lookup =
 		    op.aggregate_update.use_perfect_hash_group_lookup;
 		executable.aggregate_update.plan.ir = op.aggregate_update.ir;
-		executable.aggregate_update.plan.payloads.reserve(op.aggregate_update.payloads.size());
 		executable.aggregate_update.payloads.reserve(op.aggregate_update.payloads.size());
-		executable.aggregate_update.payload_update_code.reserve(op.aggregate_update.payloads.size());
-		executable.aggregate_update.payload_update_functions.reserve(op.aggregate_update.payloads.size());
 		for (auto &payload : op.aggregate_update.payloads) {
-			executable.aggregate_update.plan.payloads.push_back(CopySljitNativeRegionExpression(payload));
 			SljitExecutableRegionExpression executable_payload;
 			executable_payload.plan = CopySljitNativeRegionExpression(payload);
 			executable.aggregate_update.payloads.push_back(std::move(executable_payload));
@@ -631,6 +631,8 @@ static bool BuildExecutableRegionOp(const SljitNativeRegionOpPlan &op, SljitExec
 				return false;
 			}
 		}
+		executable.aggregate_update.payload_update_code.reserve(op.aggregate_update.payloads.size());
+		executable.aggregate_update.payload_update_functions.reserve(op.aggregate_update.payloads.size());
 		for (idx_t payload_idx = 0; payload_idx < op.aggregate_update.payloads.size(); payload_idx++) {
 			auto &payload = op.aggregate_update.payloads[payload_idx];
 			if (payload_idx >= op.aggregate_update.sink_info.aggregates.size()) {

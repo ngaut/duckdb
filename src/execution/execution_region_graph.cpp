@@ -74,17 +74,44 @@ static string ExecutionRegionOperatorSlotName(ExecutionRegionOperatorSlot slot) 
 	}
 }
 
-static ExecutionCompiledOperatorContract
-SliceExecutionRegionCompiledContract(const ExecutionCompiledOperatorContract &contract,
-                                     ExecutionRegionOperatorSlot slot) {
+static string ExecutionRegionCompiledStageIR(const ExecutionContract &contract,
+                                             const ExecutionCompiledStageContract &stage) {
+	if (ExecutionRegionCompiledStageIsSourceSlot(stage)) {
+		return contract.source.reason;
+	}
+	if (ExecutionRegionCompiledStageIsOperatorSlot(stage)) {
+		return contract.operator_info.reason;
+	}
+	if (ExecutionRegionCompiledStageIsSinkSlot(stage)) {
+		return contract.sink.reason;
+	}
+	return string();
+}
+
+static ExecutionCompiledOperatorContract SliceExecutionRegionCompiledContract(const ExecutionContract &contract,
+                                                                              ExecutionRegionOperatorSlot slot,
+                                                                              bool render_diagnostics) {
 	ExecutionCompiledOperatorContract result;
-	for (auto &stage : contract.stages) {
+	for (auto &stage : contract.compiled_contract.stages) {
 		if (!ExecutionRegionKeepCompiledStageForSlot(stage, slot)) {
 			continue;
 		}
-		result.stages.push_back(stage);
+		ExecutionCompiledStageContract sliced_stage;
+		sliced_stage.stage = stage.stage;
+		sliced_stage.operation = stage.operation;
+		sliced_stage.execution = stage.execution;
+		sliced_stage.drain = stage.drain;
+		sliced_stage.executable_work = stage.executable_work;
+		sliced_stage.required_capability = stage.required_capability;
+		sliced_stage.blocker = stage.blocker;
+		if (render_diagnostics) {
+			sliced_stage.ir = ExecutionRegionCompiledStageIR(contract, stage);
+		}
+		result.stages.push_back(std::move(sliced_stage));
 	}
-	result.ir = DescribeExecutionRegionCompiledContractSlice(result, ExecutionRegionOperatorSlotName(slot));
+	if (render_diagnostics) {
+		result.ir = DescribeExecutionRegionCompiledContractSlice(result, ExecutionRegionOperatorSlotName(slot));
+	}
 	return result;
 }
 
@@ -158,7 +185,7 @@ static void SetExecutionRegionOperatorFacts(ExecutionRegionOperatorEntry &entry)
 }
 
 static ExecutionRegionOperatorEntry
-BuildExecutionRegionOperatorEntry(const PhysicalOperator &op, ExecutionRegionOperatorSlot slot,
+BuildExecutionRegionOperatorEntry(const PhysicalOperator &op, ExecutionRegionOperatorSlot slot, bool render_diagnostics,
                                   idx_t operator_index = DConstants::INVALID_INDEX) {
 	ExecutionRegionOperatorEntry entry;
 	entry.present = true;
@@ -174,11 +201,11 @@ BuildExecutionRegionOperatorEntry(const PhysicalOperator &op, ExecutionRegionOpe
 	auto descriptor = op.GetExecutionContract();
 	SetExecutionRegionOperatorExpressions(entry, descriptor.transform);
 	entry.source_contract =
-	    SliceExecutionRegionCompiledContract(descriptor.compiled_contract, ExecutionRegionOperatorSlot::SOURCE);
+	    SliceExecutionRegionCompiledContract(descriptor, ExecutionRegionOperatorSlot::SOURCE, render_diagnostics);
 	entry.operator_contract =
-	    SliceExecutionRegionCompiledContract(descriptor.compiled_contract, ExecutionRegionOperatorSlot::OPERATOR);
+	    SliceExecutionRegionCompiledContract(descriptor, ExecutionRegionOperatorSlot::OPERATOR, render_diagnostics);
 	entry.sink_contract =
-	    SliceExecutionRegionCompiledContract(descriptor.compiled_contract, ExecutionRegionOperatorSlot::SINK);
+	    SliceExecutionRegionCompiledContract(descriptor, ExecutionRegionOperatorSlot::SINK, render_diagnostics);
 	entry.source_boundary_reason = std::move(descriptor.source_boundary_reason);
 	entry.source_payload = std::move(descriptor.source);
 	entry.operator_payload = std::move(descriptor.operator_info);
@@ -193,20 +220,22 @@ static void AccumulateExecutionRegionGraphFacts(ExecutionRegionGraph &graph,
 	graph.has_native_operator_work = graph.has_native_operator_work || entry.has_native_operator_work;
 }
 
-unique_ptr<ExecutionRegionGraph> BuildExecutionRegionGraph(Pipeline &pipeline) {
+unique_ptr<ExecutionRegionGraph> BuildExecutionRegionGraph(Pipeline &pipeline, bool render_diagnostics) {
 	auto result = make_uniq<ExecutionRegionGraph>();
 	if (pipeline.GetSource()) {
-		result->source = BuildExecutionRegionOperatorEntry(*pipeline.GetSource(), ExecutionRegionOperatorSlot::SOURCE);
+		result->source = BuildExecutionRegionOperatorEntry(*pipeline.GetSource(), ExecutionRegionOperatorSlot::SOURCE,
+		                                                   render_diagnostics);
 		AccumulateExecutionRegionGraphFacts(*result, result->source);
 	}
 	auto &operators = pipeline.GetIntermediateOperators();
 	for (idx_t op_idx = 0; op_idx < operators.size(); op_idx++) {
-		result->operators.push_back(
-		    BuildExecutionRegionOperatorEntry(operators[op_idx].get(), ExecutionRegionOperatorSlot::OPERATOR, op_idx));
+		result->operators.push_back(BuildExecutionRegionOperatorEntry(
+		    operators[op_idx].get(), ExecutionRegionOperatorSlot::OPERATOR, render_diagnostics, op_idx));
 		AccumulateExecutionRegionGraphFacts(*result, result->operators.back());
 	}
 	if (pipeline.GetSink()) {
-		result->sink = BuildExecutionRegionOperatorEntry(*pipeline.GetSink(), ExecutionRegionOperatorSlot::SINK);
+		result->sink = BuildExecutionRegionOperatorEntry(*pipeline.GetSink(), ExecutionRegionOperatorSlot::SINK,
+		                                                 render_diagnostics);
 		AccumulateExecutionRegionGraphFacts(*result, result->sink);
 	}
 	if (result->Empty()) {

@@ -1,0 +1,57 @@
+{
+  "description": "Run with JIT enabled and CBO calibrated to prefer compiled-vectorized regions for correctness verification.",
+  "statically_loaded_extensions": [
+    "core_functions",
+    "jit_sljit"
+  ],
+  "settings": [
+    {
+      "name": "enable_jit",
+      "value": "true"
+    },
+    {
+      "name": "jit_policy",
+      "value": "auto"
+    },
+    {
+      "name": "jit_verify",
+      "value": "true"
+    },
+    {
+      "name": "jit_event_log_size",
+      "value": "10000"
+    },
+    {
+      "name": "jit_cbo_generated_stage_benefit",
+      "value": "4096"
+    },
+    {
+      "name": "jit_cbo_materialization_elision_benefit",
+      "value": "4096"
+    },
+    {
+      "name": "jit_cbo_native_operator_stage_benefit",
+      "value": "4096"
+    },
+    {
+      "name": "jit_cbo_full_pipeline_benefit",
+      "value": "4096"
+    },
+    {
+      "name": "jit_cbo_startup_base_cost",
+      "value": "0"
+    },
+    {
+      "name": "jit_cbo_startup_margin_basis_points",
+      "value": "0"
+    }
+  ],
+  "skip_tests": [
+    {
+      "reason": "This config intentionally overrides default JIT settings asserted by the framework smoke test.",
+      "paths": [
+        "test/sql/jit/test_jit_framework.test"
+      ]
+    }
+  ]
+}
