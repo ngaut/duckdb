@@ -466,8 +466,222 @@ static bool TryBuildFilteredAggregateUpdate(SljitExecutableRegionOp &filter_op, 
 	return true;
 }
 
+static void BuildExecutableAggregateUpdateMetadata(const SljitNativeAggregateUpdatePlan &op,
+                                                   SljitExecutableAggregateUpdate &executable) {
+	executable.plan.sink_info = op.sink_info;
+	executable.plan.input_types = op.input_types;
+	executable.plan.use_primitive_payloads = op.use_primitive_payloads;
+	executable.plan.use_grouped_state_addresses = op.use_grouped_state_addresses;
+	executable.plan.use_perfect_hash_group_lookup = op.use_perfect_hash_group_lookup;
+	executable.plan.ir = op.ir;
+	executable.payloads.reserve(op.payloads.size());
+	for (auto &payload : op.payloads) {
+		SljitExecutableRegionExpression executable_payload;
+		executable_payload.plan = CopySljitNativeRegionExpression(payload);
+		executable.payloads.push_back(std::move(executable_payload));
+	}
+}
+
+static bool BuildExecutableAggregateUpdatePayloadCode(const SljitNativeAggregateUpdatePlan &op,
+                                                      SljitExecutableAggregateUpdate &executable, string &error) {
+	if (op.use_primitive_payloads && !op.use_grouped_state_addresses && op.payloads.size() > 1) {
+		SljitNativeAggregateUpdateFunction fused_function = nullptr;
+		string fused_error;
+		auto fused_code = BuildSljitNativeUngroupedFusedPrimitiveAggregateUpdate(op.payloads, op.sink_info.aggregates,
+		                                                                         fused_function, fused_error);
+		if (fused_code && fused_function) {
+			executable.fused_payload_update_code = std::move(fused_code);
+			executable.fused_payload_update_function = fused_function;
+			return true;
+		}
+		if (!fused_error.empty() && fused_error.rfind("unsupported", 0) != 0) {
+			error = fused_error;
+			return false;
+		}
+	}
+	if (op.use_primitive_payloads && op.use_perfect_hash_group_lookup && !op.payloads.empty()) {
+		SljitNativeAggregateUpdateFunction fused_function = nullptr;
+		string fused_error;
+		auto fused_code = BuildSljitNativePerfectHashGroupedFusedPrimitiveAggregateUpdate(
+		    op.payloads, op.sink_info.aggregates, op.sink_info.groups, op.sink_info.aggregate_contract, fused_function,
+		    fused_error);
+		if (fused_code && fused_function) {
+			executable.fused_payload_update_code = std::move(fused_code);
+			executable.fused_payload_update_function = fused_function;
+			executable.fused_payload_update_owns_group_lookup = true;
+			return true;
+		}
+		if (!fused_error.empty()) {
+			error = fused_error;
+			return false;
+		}
+	}
+	if (op.use_primitive_payloads && op.use_grouped_state_addresses && op.payloads.size() > 1) {
+		SljitNativeAggregateUpdateFunction fused_function = nullptr;
+		string fused_error;
+		auto fused_code = BuildSljitNativeGroupedFusedPrimitiveAggregateUpdate(
+		    op.payloads, op.sink_info.aggregates, op.sink_info.aggregate_contract, fused_function, fused_error);
+		if (fused_code && fused_function) {
+			executable.fused_payload_update_code = std::move(fused_code);
+			executable.fused_payload_update_function = fused_function;
+			return true;
+		}
+		if (!fused_error.empty() && fused_error.rfind("unsupported", 0) != 0) {
+			error = fused_error;
+			return false;
+		}
+	}
+	executable.payload_update_code.reserve(op.payloads.size());
+	executable.payload_update_functions.reserve(op.payloads.size());
+	for (idx_t payload_idx = 0; payload_idx < op.payloads.size(); payload_idx++) {
+		auto &payload = op.payloads[payload_idx];
+		if (payload_idx >= op.sink_info.aggregates.size()) {
+			error = "SLJIT aggregate update payload has no aggregate contract";
+			return false;
+		}
+		auto primitive_kind = op.sink_info.aggregates[payload_idx].primitive_update_kind;
+		SljitNativeAggregateUpdateFunction function = nullptr;
+		unique_ptr<ExecutionRegionCodeHandle> code;
+		if (primitive_kind == AggregatePrimitiveUpdateKind::COUNT_STAR) {
+			if (op.use_grouped_state_addresses) {
+				code = BuildSljitNativeGroupedCountStar(function, error);
+			} else {
+				code = BuildSljitNativeUngroupedCountStar(function, error);
+			}
+			if (!code || !function) {
+				if (error.empty()) {
+					error = "SLJIT count-star aggregate update has no native primitive reducer";
+				}
+				return false;
+			}
+			executable.payload_update_code.push_back(std::move(code));
+			executable.payload_update_functions.push_back(function);
+			continue;
+		}
+		switch (payload.kind) {
+		case SljitNativeRegionExpressionKind::REFERENCE:
+			if (op.use_grouped_state_addresses) {
+				if (primitive_kind == AggregatePrimitiveUpdateKind::SUM_INT64) {
+					code = BuildSljitNativeGroupedSumInt64Reference(payload.integer_kind, function, error);
+				} else if (primitive_kind == AggregatePrimitiveUpdateKind::SUM_HUGEINT) {
+					code = BuildSljitNativeGroupedSumHugeintReference(payload.integer_kind, function, error);
+				} else {
+					error = "SLJIT grouped aggregate reference reducer has no primitive state kind";
+					return false;
+				}
+			} else {
+				if (primitive_kind == AggregatePrimitiveUpdateKind::SUM_INT64) {
+					code = BuildSljitNativeUngroupedSumInt64Reference(payload.integer_kind, function, error);
+				} else if (primitive_kind == AggregatePrimitiveUpdateKind::SUM_DOUBLE) {
+					code = BuildSljitNativeUngroupedSumDoubleReference(payload.double_source_kind, function, error);
+				} else {
+					error = "SLJIT aggregate reference reducer has no primitive state kind";
+					return false;
+				}
+			}
+			break;
+		case SljitNativeRegionExpressionKind::INTEGER_BINARY_CONSTANT:
+			if (op.use_grouped_state_addresses) {
+				error = "SLJIT grouped aggregate binary-constant reducer is not supported";
+				return false;
+			}
+			if (primitive_kind != AggregatePrimitiveUpdateKind::SUM_INT64) {
+				error = "SLJIT aggregate binary-constant reducer only supports SUM_INT64";
+				return false;
+			}
+			code = BuildSljitNativeUngroupedSumInt64IntegerBinaryConstant(
+			    payload.integer_kind, payload.binary_op, payload.constant_on_left, function, error,
+			    payload.check_result_range, payload.result_min, payload.result_max);
+			break;
+		case SljitNativeRegionExpressionKind::INTEGER_BINARY_REFERENCES:
+			if (op.use_grouped_state_addresses) {
+				error = "SLJIT grouped aggregate binary-reference reducer is not supported";
+				return false;
+			}
+			if (primitive_kind != AggregatePrimitiveUpdateKind::SUM_INT64) {
+				error = "SLJIT aggregate binary-reference reducer only supports SUM_INT64";
+				return false;
+			}
+			code = BuildSljitNativeUngroupedSumInt64IntegerBinaryReferences(payload.integer_kind, payload.binary_op,
+			                                                                function, error, payload.check_result_range,
+			                                                                payload.result_min, payload.result_max);
+			break;
+		case SljitNativeRegionExpressionKind::DOUBLE_BINARY_CONSTANT:
+			if (op.use_grouped_state_addresses) {
+				error = "SLJIT grouped aggregate double binary-constant reducer is not supported";
+				return false;
+			}
+			if (primitive_kind != AggregatePrimitiveUpdateKind::SUM_DOUBLE) {
+				error = "SLJIT aggregate double binary-constant reducer only supports SUM_DOUBLE";
+				return false;
+			}
+			code = BuildSljitNativeUngroupedSumDoubleDoubleBinaryConstant(
+			    payload.double_binary_op, payload.double_source_kind, payload.constant_on_left, function, error);
+			break;
+		case SljitNativeRegionExpressionKind::DOUBLE_BINARY_REFERENCES:
+			if (op.use_grouped_state_addresses) {
+				error = "SLJIT grouped aggregate double binary-reference reducer is not supported";
+				return false;
+			}
+			if (primitive_kind != AggregatePrimitiveUpdateKind::SUM_DOUBLE) {
+				error = "SLJIT aggregate double binary-reference reducer only supports SUM_DOUBLE";
+				return false;
+			}
+			code = BuildSljitNativeUngroupedSumDoubleDoubleBinaryReferences(
+			    payload.double_binary_op, payload.double_source_kind, payload.double_right_source_kind, function,
+			    error);
+			break;
+		case SljitNativeRegionExpressionKind::EXPRESSION_TREE:
+			if (op.use_grouped_state_addresses) {
+				error = "SLJIT grouped aggregate expression-tree reducer is not supported";
+				return false;
+			}
+			if (payload.expression_tree) {
+				if (primitive_kind == AggregatePrimitiveUpdateKind::SUM_INT64) {
+					code = BuildSljitNativeUngroupedSumInt64ExpressionTree(*payload.expression_tree, function, error);
+				} else if (primitive_kind == AggregatePrimitiveUpdateKind::SUM_HUGEINT) {
+					code = BuildSljitNativeUngroupedSumHugeintExpressionTree(*payload.expression_tree, function, error);
+				} else {
+					error = "SLJIT aggregate expression-tree reducer has no primitive state kind";
+					return false;
+				}
+			}
+			break;
+		case SljitNativeRegionExpressionKind::TYPED_EXPRESSION_TREE:
+			if (op.use_grouped_state_addresses) {
+				error = "SLJIT grouped aggregate typed expression-tree reducer is not supported";
+				return false;
+			}
+			if (payload.expression_tree) {
+				if (primitive_kind == AggregatePrimitiveUpdateKind::SUM_INT64) {
+					code =
+					    BuildSljitNativeUngroupedSumInt64TypedExpressionTree(*payload.expression_tree, function, error);
+				} else if (primitive_kind == AggregatePrimitiveUpdateKind::SUM_HUGEINT) {
+					code = BuildSljitNativeUngroupedSumHugeintTypedExpressionTree(*payload.expression_tree, function,
+					                                                              error);
+				} else {
+					error = "SLJIT aggregate typed expression-tree reducer has no primitive state kind";
+					return false;
+				}
+			}
+			break;
+		default:
+			break;
+		}
+		if (!code || !function) {
+			if (error.empty()) {
+				error = "SLJIT aggregate update payload has no native primitive reducer";
+			}
+			return false;
+		}
+		executable.payload_update_code.push_back(std::move(code));
+		executable.payload_update_functions.push_back(function);
+	}
+	return true;
+}
+
 static bool BuildExecutableRegionOp(const SljitNativeRegionOpPlan &op, SljitExecutableRegionOp &executable,
-                                    string &error) {
+                                    string &error, bool build_aggregate_update_payload_code = true) {
 	executable.kind = op.kind;
 	executable.operator_index = op.operator_index;
 	executable.output_types = op.output_types;
@@ -566,220 +780,11 @@ static bool BuildExecutableRegionOp(const SljitNativeRegionOpPlan &op, SljitExec
 		executable.delim_join_sink.plan = op.delim_join_sink;
 		return true;
 	case SljitNativeRegionOpKind::AGGREGATE_UPDATE:
-		executable.aggregate_update.plan.sink_info = op.aggregate_update.sink_info;
-		executable.aggregate_update.plan.input_types = op.aggregate_update.input_types;
-		executable.aggregate_update.plan.use_primitive_payloads = op.aggregate_update.use_primitive_payloads;
-		executable.aggregate_update.plan.use_grouped_state_addresses = op.aggregate_update.use_grouped_state_addresses;
-		executable.aggregate_update.plan.use_perfect_hash_group_lookup =
-		    op.aggregate_update.use_perfect_hash_group_lookup;
-		executable.aggregate_update.plan.ir = op.aggregate_update.ir;
-		executable.aggregate_update.payloads.reserve(op.aggregate_update.payloads.size());
-		for (auto &payload : op.aggregate_update.payloads) {
-			SljitExecutableRegionExpression executable_payload;
-			executable_payload.plan = CopySljitNativeRegionExpression(payload);
-			executable.aggregate_update.payloads.push_back(std::move(executable_payload));
+		BuildExecutableAggregateUpdateMetadata(op.aggregate_update, executable.aggregate_update);
+		if (!build_aggregate_update_payload_code) {
+			return true;
 		}
-		if (op.aggregate_update.use_primitive_payloads && !op.aggregate_update.use_grouped_state_addresses &&
-		    op.aggregate_update.payloads.size() > 1) {
-			SljitNativeAggregateUpdateFunction fused_function = nullptr;
-			string fused_error;
-			auto fused_code = BuildSljitNativeUngroupedFusedPrimitiveAggregateUpdate(
-			    op.aggregate_update.payloads, op.aggregate_update.sink_info.aggregates, fused_function, fused_error);
-			if (fused_code && fused_function) {
-				executable.aggregate_update.fused_payload_update_code = std::move(fused_code);
-				executable.aggregate_update.fused_payload_update_function = fused_function;
-				return true;
-			}
-			if (!fused_error.empty() && fused_error.rfind("unsupported", 0) != 0) {
-				error = fused_error;
-				return false;
-			}
-		}
-		if (op.aggregate_update.use_primitive_payloads && op.aggregate_update.use_perfect_hash_group_lookup &&
-		    !op.aggregate_update.payloads.empty()) {
-			SljitNativeAggregateUpdateFunction fused_function = nullptr;
-			string fused_error;
-			auto fused_code = BuildSljitNativePerfectHashGroupedFusedPrimitiveAggregateUpdate(
-			    op.aggregate_update.payloads, op.aggregate_update.sink_info.aggregates,
-			    op.aggregate_update.sink_info.groups, op.aggregate_update.sink_info.aggregate_contract, fused_function,
-			    fused_error);
-			if (fused_code && fused_function) {
-				executable.aggregate_update.fused_payload_update_code = std::move(fused_code);
-				executable.aggregate_update.fused_payload_update_function = fused_function;
-				executable.aggregate_update.fused_payload_update_owns_group_lookup = true;
-				return true;
-			}
-			if (!fused_error.empty()) {
-				error = fused_error;
-				return false;
-			}
-		}
-		if (op.aggregate_update.use_primitive_payloads && op.aggregate_update.use_grouped_state_addresses &&
-		    op.aggregate_update.payloads.size() > 1) {
-			SljitNativeAggregateUpdateFunction fused_function = nullptr;
-			string fused_error;
-			auto fused_code = BuildSljitNativeGroupedFusedPrimitiveAggregateUpdate(
-			    op.aggregate_update.payloads, op.aggregate_update.sink_info.aggregates,
-			    op.aggregate_update.sink_info.aggregate_contract, fused_function, fused_error);
-			if (fused_code && fused_function) {
-				executable.aggregate_update.fused_payload_update_code = std::move(fused_code);
-				executable.aggregate_update.fused_payload_update_function = fused_function;
-				return true;
-			}
-			if (!fused_error.empty() && fused_error.rfind("unsupported", 0) != 0) {
-				error = fused_error;
-				return false;
-			}
-		}
-		executable.aggregate_update.payload_update_code.reserve(op.aggregate_update.payloads.size());
-		executable.aggregate_update.payload_update_functions.reserve(op.aggregate_update.payloads.size());
-		for (idx_t payload_idx = 0; payload_idx < op.aggregate_update.payloads.size(); payload_idx++) {
-			auto &payload = op.aggregate_update.payloads[payload_idx];
-			if (payload_idx >= op.aggregate_update.sink_info.aggregates.size()) {
-				error = "SLJIT aggregate update payload has no aggregate contract";
-				return false;
-			}
-			auto primitive_kind = op.aggregate_update.sink_info.aggregates[payload_idx].primitive_update_kind;
-			SljitNativeAggregateUpdateFunction function = nullptr;
-			unique_ptr<ExecutionRegionCodeHandle> code;
-			if (primitive_kind == AggregatePrimitiveUpdateKind::COUNT_STAR) {
-				if (op.aggregate_update.use_grouped_state_addresses) {
-					code = BuildSljitNativeGroupedCountStar(function, error);
-				} else {
-					code = BuildSljitNativeUngroupedCountStar(function, error);
-				}
-				if (!code || !function) {
-					if (error.empty()) {
-						error = "SLJIT count-star aggregate update has no native primitive reducer";
-					}
-					return false;
-				}
-				executable.aggregate_update.payload_update_code.push_back(std::move(code));
-				executable.aggregate_update.payload_update_functions.push_back(function);
-				continue;
-			}
-			switch (payload.kind) {
-			case SljitNativeRegionExpressionKind::REFERENCE:
-				if (op.aggregate_update.use_grouped_state_addresses) {
-					if (primitive_kind == AggregatePrimitiveUpdateKind::SUM_INT64) {
-						code = BuildSljitNativeGroupedSumInt64Reference(payload.integer_kind, function, error);
-					} else if (primitive_kind == AggregatePrimitiveUpdateKind::SUM_HUGEINT) {
-						code = BuildSljitNativeGroupedSumHugeintReference(payload.integer_kind, function, error);
-					} else {
-						error = "SLJIT grouped aggregate reference reducer has no primitive state kind";
-						return false;
-					}
-				} else {
-					if (primitive_kind == AggregatePrimitiveUpdateKind::SUM_INT64) {
-						code = BuildSljitNativeUngroupedSumInt64Reference(payload.integer_kind, function, error);
-					} else if (primitive_kind == AggregatePrimitiveUpdateKind::SUM_DOUBLE) {
-						code = BuildSljitNativeUngroupedSumDoubleReference(payload.double_source_kind, function, error);
-					} else {
-						error = "SLJIT aggregate reference reducer has no primitive state kind";
-						return false;
-					}
-				}
-				break;
-			case SljitNativeRegionExpressionKind::INTEGER_BINARY_CONSTANT:
-				if (op.aggregate_update.use_grouped_state_addresses) {
-					error = "SLJIT grouped aggregate binary-constant reducer is not supported";
-					return false;
-				}
-				if (primitive_kind != AggregatePrimitiveUpdateKind::SUM_INT64) {
-					error = "SLJIT aggregate binary-constant reducer only supports SUM_INT64";
-					return false;
-				}
-				code = BuildSljitNativeUngroupedSumInt64IntegerBinaryConstant(
-				    payload.integer_kind, payload.binary_op, payload.constant_on_left, function, error,
-				    payload.check_result_range, payload.result_min, payload.result_max);
-				break;
-			case SljitNativeRegionExpressionKind::INTEGER_BINARY_REFERENCES:
-				if (op.aggregate_update.use_grouped_state_addresses) {
-					error = "SLJIT grouped aggregate binary-reference reducer is not supported";
-					return false;
-				}
-				if (primitive_kind != AggregatePrimitiveUpdateKind::SUM_INT64) {
-					error = "SLJIT aggregate binary-reference reducer only supports SUM_INT64";
-					return false;
-				}
-				code = BuildSljitNativeUngroupedSumInt64IntegerBinaryReferences(
-				    payload.integer_kind, payload.binary_op, function, error, payload.check_result_range,
-				    payload.result_min, payload.result_max);
-				break;
-			case SljitNativeRegionExpressionKind::DOUBLE_BINARY_CONSTANT:
-				if (op.aggregate_update.use_grouped_state_addresses) {
-					error = "SLJIT grouped aggregate double binary-constant reducer is not supported";
-					return false;
-				}
-				if (primitive_kind != AggregatePrimitiveUpdateKind::SUM_DOUBLE) {
-					error = "SLJIT aggregate double binary-constant reducer only supports SUM_DOUBLE";
-					return false;
-				}
-				code = BuildSljitNativeUngroupedSumDoubleDoubleBinaryConstant(
-				    payload.double_binary_op, payload.double_source_kind, payload.constant_on_left, function, error);
-				break;
-			case SljitNativeRegionExpressionKind::DOUBLE_BINARY_REFERENCES:
-				if (op.aggregate_update.use_grouped_state_addresses) {
-					error = "SLJIT grouped aggregate double binary-reference reducer is not supported";
-					return false;
-				}
-				if (primitive_kind != AggregatePrimitiveUpdateKind::SUM_DOUBLE) {
-					error = "SLJIT aggregate double binary-reference reducer only supports SUM_DOUBLE";
-					return false;
-				}
-				code = BuildSljitNativeUngroupedSumDoubleDoubleBinaryReferences(
-				    payload.double_binary_op, payload.double_source_kind, payload.double_right_source_kind, function,
-				    error);
-				break;
-			case SljitNativeRegionExpressionKind::EXPRESSION_TREE:
-				if (op.aggregate_update.use_grouped_state_addresses) {
-					error = "SLJIT grouped aggregate expression-tree reducer is not supported";
-					return false;
-				}
-				if (payload.expression_tree) {
-					if (primitive_kind == AggregatePrimitiveUpdateKind::SUM_INT64) {
-						code =
-						    BuildSljitNativeUngroupedSumInt64ExpressionTree(*payload.expression_tree, function, error);
-					} else if (primitive_kind == AggregatePrimitiveUpdateKind::SUM_HUGEINT) {
-						code = BuildSljitNativeUngroupedSumHugeintExpressionTree(*payload.expression_tree, function,
-						                                                         error);
-					} else {
-						error = "SLJIT aggregate expression-tree reducer has no primitive state kind";
-						return false;
-					}
-				}
-				break;
-			case SljitNativeRegionExpressionKind::TYPED_EXPRESSION_TREE:
-				if (op.aggregate_update.use_grouped_state_addresses) {
-					error = "SLJIT grouped aggregate typed expression-tree reducer is not supported";
-					return false;
-				}
-				if (payload.expression_tree) {
-					if (primitive_kind == AggregatePrimitiveUpdateKind::SUM_INT64) {
-						code = BuildSljitNativeUngroupedSumInt64TypedExpressionTree(*payload.expression_tree, function,
-						                                                            error);
-					} else if (primitive_kind == AggregatePrimitiveUpdateKind::SUM_HUGEINT) {
-						code = BuildSljitNativeUngroupedSumHugeintTypedExpressionTree(*payload.expression_tree,
-						                                                              function, error);
-					} else {
-						error = "SLJIT aggregate typed expression-tree reducer has no primitive state kind";
-						return false;
-					}
-				}
-				break;
-			default:
-				break;
-			}
-			if (!code || !function) {
-				if (error.empty()) {
-					error = "SLJIT aggregate update payload has no native primitive reducer";
-				}
-				return false;
-			}
-			executable.aggregate_update.payload_update_code.push_back(std::move(code));
-			executable.aggregate_update.payload_update_functions.push_back(function);
-		}
-		return true;
+		return BuildExecutableAggregateUpdatePayloadCode(op.aggregate_update, executable.aggregate_update, error);
 	case SljitNativeRegionOpKind::PROJECTION:
 		executable.projections.reserve(op.projections.size());
 		for (auto &projection : op.projections) {
@@ -795,18 +800,33 @@ static bool BuildExecutableRegionOp(const SljitNativeRegionOpPlan &op, SljitExec
 	}
 }
 
+static bool SljitCanDeferAggregateUpdatePayloadCode(const vector<SljitNativeRegionOpPlan> &ops, idx_t op_idx) {
+	if (op_idx == 0 || op_idx + 1 != ops.size() || ops[op_idx].kind != SljitNativeRegionOpKind::AGGREGATE_UPDATE) {
+		return false;
+	}
+	return ops[op_idx - 1].kind == SljitNativeRegionOpKind::FILTER;
+}
+
 bool BuildSljitExecutableRegion(const SljitNativeRegionPlan &region, SljitExecutableRegion &executable, string &error) {
 	executable.ops.reserve(region.ops.size());
-	for (auto &op : region.ops) {
+	for (idx_t op_idx = 0; op_idx < region.ops.size(); op_idx++) {
+		auto &op = region.ops[op_idx];
 		SljitExecutableRegionOp executable_op;
-		if (!BuildExecutableRegionOp(op, executable_op, error)) {
+		auto defer_aggregate_payload_code = SljitCanDeferAggregateUpdatePayloadCode(region.ops, op_idx);
+		if (!BuildExecutableRegionOp(op, executable_op, error, !defer_aggregate_payload_code)) {
 			return false;
 		}
 		executable.ops.push_back(std::move(executable_op));
-	}
-	for (idx_t op_idx = 0; op_idx + 1 < executable.ops.size(); op_idx++) {
-		if (!TryBuildFilteredAggregateUpdate(executable.ops[op_idx], executable.ops[op_idx + 1], error)) {
-			return false;
+		if (defer_aggregate_payload_code) {
+			auto &aggregate_update_op = executable.ops[op_idx];
+			if (!TryBuildFilteredAggregateUpdate(executable.ops[op_idx - 1], aggregate_update_op, error)) {
+				return false;
+			}
+			if (!aggregate_update_op.aggregate_update.filtered_update.IsExecutable() &&
+			    !BuildExecutableAggregateUpdatePayloadCode(op.aggregate_update, aggregate_update_op.aggregate_update,
+			                                               error)) {
+				return false;
+			}
 		}
 	}
 	return true;
