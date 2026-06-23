@@ -147,7 +147,7 @@ static string NativeRegionIntegerBinaryOverflowMessage(SljitNativeIntegerKind ki
 
 static void PrepareExecutableRegionExpression(const SljitNativeRegionExpressionPlan &plan,
                                               SljitExecutableRegionExpression &expr) {
-	expr.plan = CopySljitNativeRegionExpression(plan, false, false);
+	expr.plan = plan.Copy(false, false);
 	PrepareExecutableRegionExpressionInputs(expr);
 }
 
@@ -418,11 +418,11 @@ static bool TryBuildFilteredAggregateUpdate(SljitExecutableRegionOp &filter_op, 
 	}
 
 	SljitExecutableFilteredAggregateUpdate filtered_update;
-	filtered_update.filter.plan = CopySljitNativeRegionExpression(filter_op.filter.plan, true, false);
+	filtered_update.filter.plan = filter_op.filter.plan.Copy(true, false);
 	filtered_update.payloads.reserve(aggregate_update.payloads.size());
 	for (auto &payload : aggregate_update.payloads) {
 		SljitExecutableRegionExpression filtered_payload;
-		filtered_payload.plan = CopySljitNativeRegionExpression(payload.plan, true, false);
+		filtered_payload.plan = payload.plan.Copy(true, false);
 		filtered_update.payloads.push_back(std::move(filtered_payload));
 	}
 	if (!filtered_update.filter.plan.expression_tree) {
@@ -455,7 +455,7 @@ static bool TryBuildFilteredAggregateUpdate(SljitExecutableRegionOp &filter_op, 
 	for (auto &payload : filtered_update.payloads) {
 		payload.input_source_indices = combined_sources;
 		payload.plan.expression_tree_source_indices = combined_sources;
-		codegen_payloads.push_back(CopySljitNativeRegionExpression(payload.plan, true, false));
+		codegen_payloads.push_back(payload.plan.Copy(true, false));
 	}
 
 	SljitNativeAggregateUpdateFunction function = nullptr;
@@ -487,7 +487,7 @@ static void BuildExecutableAggregateUpdateMetadata(const SljitNativeAggregateUpd
 	executable.payloads.reserve(op.payloads.size());
 	for (auto &payload : op.payloads) {
 		SljitExecutableRegionExpression executable_payload;
-		executable_payload.plan = CopySljitNativeRegionExpression(payload, true, false);
+		executable_payload.plan = payload.Copy(true, false);
 		executable.payloads.push_back(std::move(executable_payload));
 	}
 }
@@ -704,7 +704,7 @@ static bool BuildExecutableRegionOp(const SljitNativeRegionOpPlan &op, SljitExec
 		}
 		return CompilePreparedExecutableRegionExpression(executable.filter, true, error);
 	case SljitNativeRegionOpKind::HASH_JOIN_PROBE:
-		executable.hash_join_probe.plan = CopySljitNativeHashJoinProbePlan(op.hash_join_probe, false);
+		executable.hash_join_probe.plan = op.hash_join_probe.Copy(false);
 		if (op.hash_join_probe.residual_predicate &&
 		    !PrepareAndCompileExecutableRegionExpression(op.hash_join_probe.residual_filter, true,
 		                                                 executable.hash_join_probe.residual_filter, error)) {
@@ -729,7 +729,7 @@ static bool BuildExecutableRegionOp(const SljitNativeRegionOpPlan &op, SljitExec
 			condition_plan.type = condition.type;
 			condition_plan.comparison_type = condition.comparison_type;
 			condition_plan.value_kind = condition.value_kind;
-			condition_plan.lhs_condition = CopySljitNativeRegionExpression(condition.lhs_condition, false, false);
+			condition_plan.lhs_condition = condition.lhs_condition.Copy(false, false);
 			executable.nested_loop_join_probe.plan.conditions.push_back(std::move(condition_plan));
 
 			SljitExecutableRegionExpression executable_condition;

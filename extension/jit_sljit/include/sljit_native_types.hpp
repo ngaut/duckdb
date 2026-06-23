@@ -110,6 +110,8 @@ struct SljitNativePredicate {
 	vector<idx_t> source_indices;
 	unique_ptr<SljitNativePredicate> child;
 	vector<unique_ptr<SljitNativePredicate>> children;
+
+	unique_ptr<SljitNativePredicate> Copy() const;
 };
 
 struct SljitNativeConstantOrNull {

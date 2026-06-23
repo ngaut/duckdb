@@ -127,6 +127,8 @@ struct SljitNativeRegionExpressionPlan {
 	SljitNativeConstantOrNull constant_or_null;
 	bool emit_flat_nullable_fast_path = true;
 	string ir;
+
+	SljitNativeRegionExpressionPlan Copy(bool copy_auxiliary_expression_tree = true, bool copy_ir = true) const;
 };
 
 struct SljitNativeHashJoinProbePlan {
@@ -145,6 +147,8 @@ struct SljitNativeHashJoinProbePlan {
 	SljitNativeRegionExpressionPlan residual_filter;
 	ExecutionRegionOperatorInfo operator_info;
 	string ir;
+
+	SljitNativeHashJoinProbePlan Copy(bool copy_ir = true) const;
 };
 
 struct SljitNativeHashJoinBuildPlan {
@@ -244,19 +248,14 @@ struct SljitNativeRegionPlan {
 	bool UsesSourceContract() const {
 		return source_execution == ExecutionRegionSourceExecutionKind::SOURCE_CONTRACT;
 	}
+
+	unique_ptr<SljitNativeRegionPlan> Copy() const;
 };
 
 struct SljitRegionBackendPlan : public ExecutionRegionBackendPlan {
 	unique_ptr<SljitNativeRegionPlan> native_region;
 	string error;
 };
-
-SljitNativeRegionExpressionPlan CopySljitNativeRegionExpression(const SljitNativeRegionExpressionPlan &input,
-                                                                bool copy_auxiliary_expression_tree = true,
-                                                                bool copy_ir = true);
-SljitNativeHashJoinProbePlan CopySljitNativeHashJoinProbePlan(const SljitNativeHashJoinProbePlan &input,
-                                                              bool copy_ir = true);
-unique_ptr<SljitNativeRegionPlan> CopySljitNativeRegion(const SljitNativeRegionPlan &input);
 
 string DescribeNativeRegion(const SljitNativeRegionPlan &region, const string &mode);
 string DescribeNativeRegionShape(const SljitNativeRegionPlan &region);
