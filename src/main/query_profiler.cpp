@@ -357,15 +357,15 @@ static void AddExecutionRegionEvent(QueryProfileResult &row, const ExecutionRegi
 	     {"sink_next_batch_invocation_count", Count(event.sink_next_batch_invocation_count)},
 	     {"decision_time_us", Time(event.decision_time_us)},
 	     {"compile_time_us", Time(ExecutionRegionEventProfileCompileTime(event))},
-	     {"pipeline_cbo_time_us", Time(event.pipeline_cbo_time_us)},
-	     {"graph_build_time_us", Time(event.graph_build_time_us)},
-	     {"candidate_cbo_time_us", Time(event.candidate_cbo_time_us)},
-	     {"ir_lowering_time_us", Time(event.ir_lowering_time_us)},
-	     {"backend_analysis_time_us", Time(event.backend_analysis_time_us)},
-	     {"codegen_time_us", Time(event.codegen_time_us)},
-	     {"executable_build_time_us", Time(event.executable_build_time_us)},
-	     {"machine_codegen_time_us", Time(event.machine_codegen_time_us)},
-	     {"kernel_build_time_us", Time(event.kernel_build_time_us)},
+	     {"pipeline_cbo_time_us", Time(event.stage_timings.pipeline_cbo_time_us)},
+	     {"graph_build_time_us", Time(event.stage_timings.graph_build_time_us)},
+	     {"candidate_cbo_time_us", Time(event.stage_timings.candidate_cbo_time_us)},
+	     {"ir_lowering_time_us", Time(event.stage_timings.ir_lowering_time_us)},
+	     {"backend_analysis_time_us", Time(event.stage_timings.backend_analysis_time_us)},
+	     {"codegen_time_us", Time(event.stage_timings.codegen_time_us)},
+	     {"executable_build_time_us", Time(event.stage_timings.executable_build_time_us)},
+	     {"machine_codegen_time_us", Time(event.stage_timings.machine_codegen_time_us)},
+	     {"kernel_build_time_us", Time(event.stage_timings.kernel_build_time_us)},
 	     {"lazy_codegen_time_us", Time(event.jit_runtime.lazy_codegen.codegen_time_us)},
 	     {"lazy_machine_codegen_time_us", Time(event.jit_runtime.lazy_codegen.machine_codegen_time_us)},
 	     {"lazy_code_size", Count(event.jit_runtime.lazy_codegen.code_size)},
@@ -456,14 +456,17 @@ static void RenderExecutionRegionCboPipelineToStream(std::ostream &ss, const Que
 		} else {
 			ss << " cost=none";
 		}
-		ss << " decision_us=" << event.decision_time_us << " pipeline_cbo_us=" << event.pipeline_cbo_time_us
-		   << " graph_build_us=" << event.graph_build_time_us << " candidate_cbo_us=" << event.candidate_cbo_time_us
-		   << " ir_lowering_us=" << event.ir_lowering_time_us
-		   << " backend_analysis_us=" << event.backend_analysis_time_us
-		   << " compile_us=" << ExecutionRegionEventProfileCompileTime(event) << " codegen_us=" << event.codegen_time_us
-		   << " executable_build_us=" << event.executable_build_time_us
-		   << " machine_codegen_us=" << event.machine_codegen_time_us
-		   << " kernel_build_us=" << event.kernel_build_time_us
+		ss << " decision_us=" << event.decision_time_us
+		   << " pipeline_cbo_us=" << event.stage_timings.pipeline_cbo_time_us
+		   << " graph_build_us=" << event.stage_timings.graph_build_time_us
+		   << " candidate_cbo_us=" << event.stage_timings.candidate_cbo_time_us
+		   << " ir_lowering_us=" << event.stage_timings.ir_lowering_time_us
+		   << " backend_analysis_us=" << event.stage_timings.backend_analysis_time_us
+		   << " compile_us=" << ExecutionRegionEventProfileCompileTime(event)
+		   << " codegen_us=" << event.stage_timings.codegen_time_us
+		   << " executable_build_us=" << event.stage_timings.executable_build_time_us
+		   << " machine_codegen_us=" << event.stage_timings.machine_codegen_time_us
+		   << " kernel_build_us=" << event.stage_timings.kernel_build_time_us
 		   << " code_size=" << ExecutionRegionEventProfileCodeSize(event)
 		   << " blocker=" << ExecutionRegionProfileToken(event.blocker)
 		   << " why=" << ExecutionRegionProfileToken(ExecutionRegionProfileReason(event.reason), 128) << "\n";

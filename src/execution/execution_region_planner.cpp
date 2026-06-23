@@ -6,840 +6,59 @@
 #include "duckdb/execution/execution_region_lowering.hpp"
 #include "duckdb/execution/execution_region_manager.hpp"
 #include "duckdb/execution/execution_region_settings.hpp"
-#include "duckdb/execution/operator/aggregate/physical_hash_aggregate.hpp"
-#include "duckdb/execution/operator/aggregate/physical_perfecthash_aggregate.hpp"
-#include "duckdb/execution/operator/aggregate/physical_ungrouped_aggregate.hpp"
-#include "duckdb/execution/operator/filter/physical_filter.hpp"
-#include "duckdb/execution/operator/join/physical_hash_join.hpp"
-#include "duckdb/execution/operator/join/physical_nested_loop_join.hpp"
-#include "duckdb/execution/operator/projection/physical_projection.hpp"
-#include "duckdb/execution/operator/scan/physical_table_scan.hpp"
 #include "duckdb/execution/physical_operator.hpp"
 #include "duckdb/main/client_context.hpp"
-#include "duckdb/main/settings.hpp"
 #include "duckdb/parallel/pipeline.hpp"
-#include "duckdb/planner/cost_model.hpp"
-#include "duckdb/planner/expression/bound_function_expression.hpp"
-#include "duckdb/planner/expression_iterator.hpp"
 
-#include "execution_region_duckdb_type_adapter.hpp"
+#include "execution_region_decision.hpp"
 
 #include <chrono>
 
 namespace duckdb {
-
-struct ExecutionRegionPhysicalRunnerSelection {
-	PhysicalRunnerCostProfile runner_cost;
-	bool use_compiled_runner = false;
-	string reason;
-	string blocker;
-
-	bool UsesCompiledRunner() const {
-		return use_compiled_runner;
-	}
-
-	ExecutionRunnerKind SelectedRunner() const {
-		return UsesCompiledRunner() ? ExecutionRunnerKind::COMPILED_VECTORIZED : ExecutionRunnerKind::VECTORIZED;
-	}
-};
-
-static string ComposeExecutionRegionCompileEventReason(const ExecutionRegionPhysicalRunnerSelection &selection,
-                                                       const string &compile_reason) {
-	if (selection.reason.empty()) {
-		return compile_reason;
-	}
-	if (compile_reason.empty()) {
-		return selection.reason;
-	}
-	return selection.reason + ";" + compile_reason;
-}
-
-static string AttachExecutionRegionCandidateReason(const ExecutionRegionCandidate &candidate, string reason,
-                                                   bool record_detailed_telemetry) {
-	if (!record_detailed_telemetry) {
-		return reason;
-	}
-	if (!reason.empty()) {
-		reason += ";";
-	}
-	reason += "candidate_id=" + std::to_string(candidate.candidate_id);
-	reason += ";candidate_shape=" + candidate.shape;
-	return reason;
-}
-
-static string FirstExecutionRegionReasonToken(const string &reason) {
-	auto separator = reason.find(';');
-	return separator == string::npos ? reason : reason.substr(0, separator);
-}
-
-static string ExecutionRegionCandidateBlockerCode(const ExecutionRegionIR &region_ir) {
-	if (region_ir.candidate_blockers.empty()) {
-		return "no_execution_region_candidates";
-	}
-	if (region_ir.candidate_blockers[0].find("candidate-builder-blocked:no-executable-work") != string::npos) {
-		return "no_executable_region_work";
-	}
-	return "no_execution_region_candidates";
-}
-
-static string ExecutionRegionUnsupportedBlockerCode(const ExecutionRegionLoweringPlan &lowering_plan) {
-	return lowering_plan.NativeCount() > 0 ? "unsupported_region_execution" : "region_contains_no_native_nodes";
-}
-
-static string ExecutionRegionCompileResultBlockerCode(ExecutionRegionCompileStatus status) {
-	if (status == ExecutionRegionCompileStatus::COMPILED) {
-		return string();
-	}
-	string result = "backend_compile_";
-	result += ExecutionRegionCompileStatusToString(status);
-	return result;
-}
-
-static string ExecutionRegionLoweringEventReason(const ExecutionRegionLoweringPlan &lowering_plan,
-                                                 bool record_detailed_telemetry) {
-	return record_detailed_telemetry ? lowering_plan.EventReason() : lowering_plan.CompactEventReason();
-}
 
 static int64_t ExecutionRegionPlannerElapsedMicros(std::chrono::steady_clock::time_point start) {
 	auto end = std::chrono::steady_clock::now();
 	return std::chrono::duration_cast<std::chrono::microseconds>(end - start).count();
 }
 
-static bool ExecutionRegionStageIsExecutable(const ExecutionRegionStage &stage) {
-	return stage.executable_work && stage.execution != ExecutionRegionStageExecutionKind::MISSING_CONTRACT &&
-	       stage.execution != ExecutionRegionStageExecutionKind::SOURCE_BOUNDARY;
-}
-
-enum class ExecutionRegionStageCostWorkKind : uint8_t {
-	NONE,
-	GENERATED,
-	NATIVE_JOIN,
-	NATIVE_GROUPED_AGGREGATE,
-	NATIVE_UNGROUPED_AGGREGATE,
-	NATIVE_SORT
+struct ExecutionRegionPlannerCandidateDecisionTrace {
+	std::chrono::steady_clock::time_point start;
+	ExecutionRegionStageTimings stage_timings;
 };
 
-enum class ExecutionRegionStageCostRole : uint8_t { NONE, FILTER };
+class ExecutionRegionPlannerDecisionRecorder {
+public:
+	ExecutionRegionStageTimings &SharedStageTimings() {
+		return shared_stage_timings;
+	}
 
-struct ExecutionRegionStageCostFact {
-	ExecutionRegionStageCostWorkKind work_kind = ExecutionRegionStageCostWorkKind::NONE;
-	ExecutionRegionStageCostRole role = ExecutionRegionStageCostRole::NONE;
-	bool may_anchor_compiled_body = false;
-};
+	int64_t SharedDecisionTime() const {
+		return shared_stage_timings.pipeline_cbo_time_us + shared_stage_timings.graph_build_time_us +
+		       shared_stage_timings.ir_lowering_time_us;
+	}
 
-struct ExecutionRegionCostFacts {
-	idx_t generated_stage_count = 0;
-	idx_t materialization_elision_count = 0;
-	idx_t native_join_stage_count = 0;
-	idx_t native_aggregate_stage_count = 0;
-	idx_t native_grouped_aggregate_stage_count = 0;
-	idx_t native_sort_stage_count = 0;
-	bool may_anchor_compiled_body = false;
-	PhysicalRunnerGeneratedWorkClass generated_work_class = PhysicalRunnerGeneratedWorkClass::NONE;
-	PhysicalRunnerNativeProtocolClass native_protocol_class = PhysicalRunnerNativeProtocolClass::NONE;
-};
-
-static ExecutionRegionStageCostFact GetExecutionRegionStageCostFact(const ExecutionRegionStage &stage) {
-	ExecutionRegionStageCostFact result;
-	if (!ExecutionRegionStageIsExecutable(stage)) {
+	ExecutionRegionPlannerCandidateDecisionTrace BeginCandidate() const {
+		ExecutionRegionPlannerCandidateDecisionTrace result;
+		result.start = std::chrono::steady_clock::now();
 		return result;
 	}
-	if (stage.kind == ExecutionRegionStageKind::FILTER || stage.kind == ExecutionRegionStageKind::SOURCE_FILTER) {
-		result.role = ExecutionRegionStageCostRole::FILTER;
-	}
-	if (stage.execution == ExecutionRegionStageExecutionKind::GENERATED_IR) {
-		result.work_kind = ExecutionRegionStageCostWorkKind::GENERATED;
-		result.may_anchor_compiled_body = true;
-		return result;
-	}
-	if (stage.execution != ExecutionRegionStageExecutionKind::NATIVE_CONTRACT) {
-		return result;
-	}
-	switch (stage.kind) {
-	case ExecutionRegionStageKind::HASH_JOIN_BUILD:
-		result.work_kind = ExecutionRegionStageCostWorkKind::NATIVE_JOIN;
-		break;
-	case ExecutionRegionStageKind::HASH_JOIN_PROBE:
-	case ExecutionRegionStageKind::NESTED_LOOP_JOIN_PROBE:
-	case ExecutionRegionStageKind::NESTED_LOOP_JOIN_BUILD:
-		result.work_kind = ExecutionRegionStageCostWorkKind::NATIVE_JOIN;
-		result.may_anchor_compiled_body = true;
-		break;
-	case ExecutionRegionStageKind::HASH_AGGREGATE_UPDATE:
-	case ExecutionRegionStageKind::HASH_AGGREGATE_DISTINCT_SINK:
-	case ExecutionRegionStageKind::PERFECT_HASH_AGGREGATE_UPDATE:
-		result.work_kind = ExecutionRegionStageCostWorkKind::NATIVE_GROUPED_AGGREGATE;
-		result.may_anchor_compiled_body = true;
-		break;
-	case ExecutionRegionStageKind::UNGROUPED_AGGREGATE_UPDATE:
-		result.work_kind = ExecutionRegionStageCostWorkKind::NATIVE_UNGROUPED_AGGREGATE;
-		result.may_anchor_compiled_body = true;
-		break;
-	case ExecutionRegionStageKind::SORT_SINK:
-		result.work_kind = ExecutionRegionStageCostWorkKind::NATIVE_SORT;
-		result.may_anchor_compiled_body = true;
-		break;
-	default:
-		break;
-	}
-	return result;
-}
 
-static bool ExecutionRegionCandidateHasGeneratedFilterOrOperatorWork(const ExecutionRegionCandidateTraits &traits) {
-	return traits.source_filter_expression_count > 0 || traits.filter_count > 0 || traits.comparison_filter_count > 0 ||
-	       traits.conjunction_filter_count > 0 || traits.hash_join_operator_count > 0 || traits.aggregate_count > 0;
-}
-
-static bool ExecutionRegionCandidateHasGeneratedProjectionWork(const ExecutionRegionCandidateTraits &traits) {
-	return traits.arithmetic_projection_count > 0 || traits.high_cost_projection_count > 0 ||
-	       (traits.projection_count > 0 &&
-	        (traits.predicate_expression_count > 0 || traits.control_expression_count > 0));
-}
-
-static PhysicalRunnerGeneratedWorkClass
-ClassifyExecutionRegionGeneratedWork(const ExecutionRegionCandidateTraits &traits) {
-	if (ExecutionRegionCandidateHasGeneratedFilterOrOperatorWork(traits)) {
-		return PhysicalRunnerGeneratedWorkClass::COMPUTE;
-	}
-	if (traits.projection_count == 0) {
-		return PhysicalRunnerGeneratedWorkClass::NONE;
-	}
-	const bool projection_only = traits.filter_count == 0 && traits.operator_count == 0;
-	if (projection_only && traits.high_cost_projection_count > 0) {
-		return PhysicalRunnerGeneratedWorkClass::HIGH_COST_PROJECTION;
-	}
-	if (ExecutionRegionCandidateHasGeneratedProjectionWork(traits)) {
-		return PhysicalRunnerGeneratedWorkClass::COMPUTE;
-	}
-	if (projection_only) {
-		return PhysicalRunnerGeneratedWorkClass::PROJECTION_GLUE;
-	}
-	return PhysicalRunnerGeneratedWorkClass::NONE;
-}
-
-static PhysicalRunnerNativeProtocolClass
-ClassifyExecutionRegionNativeProtocol(const ExecutionRegionCandidateTraits &traits) {
-	if (traits.source_kind == ExecutionRegionSourceKind::STATEFUL_OPERATOR &&
-	    traits.source_execution == ExecutionRegionSourceExecutionKind::SOURCE_CONTRACT && traits.HasSink()) {
-		return PhysicalRunnerNativeProtocolClass::STATEFUL_SOURCE_SINK_PROTOCOL;
-	}
-	return PhysicalRunnerNativeProtocolClass::NONE;
-}
-
-static bool ExecutionRegionStageCostWorkIsNativeAggregate(ExecutionRegionStageCostWorkKind work_kind) {
-	return work_kind == ExecutionRegionStageCostWorkKind::NATIVE_GROUPED_AGGREGATE ||
-	       work_kind == ExecutionRegionStageCostWorkKind::NATIVE_UNGROUPED_AGGREGATE;
-}
-
-static void AccumulateExecutionRegionCostFact(const ExecutionRegionStageCostFact &fact,
-                                              ExecutionRegionCostFacts &result, bool &has_filter) {
-	result.may_anchor_compiled_body = result.may_anchor_compiled_body || fact.may_anchor_compiled_body;
-	has_filter = has_filter || fact.role == ExecutionRegionStageCostRole::FILTER;
-	if (has_filter && result.materialization_elision_count == 0 &&
-	    ExecutionRegionStageCostWorkIsNativeAggregate(fact.work_kind)) {
-		result.materialization_elision_count = 1;
-	}
-	switch (fact.work_kind) {
-	case ExecutionRegionStageCostWorkKind::GENERATED:
-		result.generated_stage_count++;
-		return;
-	case ExecutionRegionStageCostWorkKind::NATIVE_JOIN:
-		result.native_join_stage_count++;
-		return;
-	case ExecutionRegionStageCostWorkKind::NATIVE_GROUPED_AGGREGATE:
-		result.native_aggregate_stage_count++;
-		result.native_grouped_aggregate_stage_count++;
-		return;
-	case ExecutionRegionStageCostWorkKind::NATIVE_UNGROUPED_AGGREGATE:
-		result.native_aggregate_stage_count++;
-		return;
-	case ExecutionRegionStageCostWorkKind::NATIVE_SORT:
-		result.native_sort_stage_count++;
-		return;
-	case ExecutionRegionStageCostWorkKind::NONE:
-		return;
-	}
-}
-
-static ExecutionRegionCostFacts BuildExecutionRegionCostFacts(const ExecutionRegionCandidate &candidate) {
-	ExecutionRegionCostFacts result;
-	bool has_filter = false;
-	for (auto &stage : candidate.stage_plan.stages) {
-		AccumulateExecutionRegionCostFact(GetExecutionRegionStageCostFact(stage), result, has_filter);
-	}
-	result.generated_work_class = ClassifyExecutionRegionGeneratedWork(candidate.traits);
-	result.native_protocol_class = ClassifyExecutionRegionNativeProtocol(candidate.traits);
-	return result;
-}
-
-static PhysicalRunnerCostInput BuildPhysicalRunnerCostInput(const ExecutionRegionCandidate &candidate) {
-	auto cost_facts = BuildExecutionRegionCostFacts(candidate);
-	PhysicalRunnerCostInput result;
-	result.estimated_cardinality = candidate.estimated_cardinality;
-	result.expression_cost = candidate.traits.expression_cost;
-	result.generated_stage_count = cost_facts.generated_stage_count;
-	result.materialization_elision_count = cost_facts.materialization_elision_count;
-	result.native_join_stage_count = cost_facts.native_join_stage_count;
-	result.native_aggregate_stage_count = cost_facts.native_aggregate_stage_count;
-	result.native_grouped_aggregate_stage_count = cost_facts.native_grouped_aggregate_stage_count;
-	result.native_sort_stage_count = cost_facts.native_sort_stage_count;
-	result.full_pipeline =
-	    ExecutionRegionABIIsFullPipeline(candidate.contract.abi) && cost_facts.may_anchor_compiled_body;
-	result.node_count = candidate.node_count;
-	result.stage_count = candidate.stage_plan.stages.size();
-	result.expression_node_count = candidate.traits.expression_node_count;
-	result.operator_count = candidate.traits.operator_count;
-	result.generated_work_class = cost_facts.generated_work_class;
-	result.native_protocol_class = cost_facts.native_protocol_class;
-	result.has_accelerated_work = cost_facts.may_anchor_compiled_body;
-	return result;
-}
-
-static PhysicalRunnerCostParameters BuildPhysicalRunnerCostParameters(ClientContext &context) {
-	PhysicalRunnerCostParameters result;
-	result.generated_stage_benefit = Settings::Get<JitCboGeneratedStageBenefitSetting>(context);
-	result.native_operator_stage_benefit = Settings::Get<JitCboNativeOperatorStageBenefitSetting>(context);
-	result.materialization_elision_benefit = Settings::Get<JitCboMaterializationElisionBenefitSetting>(context);
-	result.full_pipeline_benefit = Settings::Get<JitCboFullPipelineBenefitSetting>(context);
-	result.startup_base_cost = Settings::Get<JitCboStartupBaseCostSetting>(context);
-	result.startup_margin_basis_points = Settings::Get<JitCboStartupMarginBasisPointsSetting>(context);
-	return result;
-}
-
-static bool PhysicalRunnerCostingHasEnabledBenefit(const PhysicalRunnerCostParameters &parameters) {
-	return parameters.generated_stage_benefit > 0 || parameters.native_operator_stage_benefit > 0 ||
-	       parameters.materialization_elision_benefit > 0 || parameters.full_pipeline_benefit > 0;
-}
-
-static bool ExecutionRegionProductionEligibilityAllowsPlanning(ClientContext &context,
-                                                               const PhysicalRunnerCostParameters &parameters) {
-	if (ExecutionRegionSettings::ShouldRecordDetailedTelemetry(context)) {
-		return true;
-	}
-	return PhysicalRunnerCostingHasEnabledBenefit(parameters);
-}
-
-static bool ExecutionRegionPlanningNeedsBackendDiagnostics(ClientContext &context) {
-	return ExecutionRegionSettings::DumpIR(context);
-}
-
-static bool ExecutionRegionPlanningNeedsCandidateDiagnostics(ClientContext &context) {
-	return ExecutionRegionSettings::TraceDecisions(context) || ExecutionRegionSettings::DumpIR(context);
-}
-
-static bool ExecutionRegionGraphMayHaveCostedAcceleration(const ExecutionRegionGraph &graph,
-                                                          const PhysicalRunnerCostParameters &parameters) {
-	if (parameters.generated_stage_benefit > 0 && graph.HasGeneratedExpression()) {
-		return true;
-	}
-	if (parameters.native_operator_stage_benefit > 0 && graph.HasNativeOperatorWork()) {
-		return true;
-	}
-	if (parameters.materialization_elision_benefit > 0 && graph.HasGeneratedExpression() && graph.HasSink()) {
-		return true;
-	}
-	if (parameters.full_pipeline_benefit > 0 && graph.HasSource() && graph.HasSink()) {
-		return true;
-	}
-	return false;
-}
-
-static idx_t ExecutionRegionPhysicalExpressionListCost(const vector<unique_ptr<Expression>> &expressions) {
-	idx_t result = 0;
-	for (auto &expression : expressions) {
-		if (expression) {
-			result += DuckDBCostModel::ExpressionCost(*expression);
+	int64_t ClaimCandidateDecisionTime(ExecutionRegionPlannerCandidateDecisionTrace &trace) {
+		auto decision_time_us = ExecutionRegionPlannerElapsedMicros(trace.start);
+		if (!shared_decision_time_recorded) {
+			decision_time_us += SharedDecisionTime();
+			trace.stage_timings.pipeline_cbo_time_us = shared_stage_timings.pipeline_cbo_time_us;
+			trace.stage_timings.graph_build_time_us = shared_stage_timings.graph_build_time_us;
+			trace.stage_timings.ir_lowering_time_us = shared_stage_timings.ir_lowering_time_us;
+			shared_decision_time_recorded = true;
 		}
+		return decision_time_us;
 	}
-	return result;
-}
 
-enum class ExecutionRegionPhysicalPipelineSlot : uint8_t { SOURCE, OPERATOR, SINK };
-
-struct ExecutionRegionPhysicalPipelineCostFacts {
-	PhysicalRunnerCostInput runner_cost;
-	ExecutionRegionCandidateTraits traits;
+private:
+	ExecutionRegionStageTimings shared_stage_timings;
+	bool shared_decision_time_recorded = false;
 };
-
-static bool ExecutionRegionPhysicalExpressionIsReference(const Expression &expression) {
-	auto expression_class = expression.GetExpressionClass();
-	return expression_class == ExpressionClass::BOUND_REF || expression_class == ExpressionClass::BOUND_COLUMN_REF;
-}
-
-static bool ExecutionRegionPhysicalExpressionTypeIsComparison(ExpressionType expression_type) {
-	return expression_type >= ExpressionType::COMPARE_BOUNDARY_START &&
-	       expression_type <= ExpressionType::COMPARE_BOUNDARY_END;
-}
-
-static bool ExecutionRegionPhysicalExpressionTypeIsConjunction(ExpressionType expression_type) {
-	return expression_type == ExpressionType::CONJUNCTION_AND || expression_type == ExpressionType::CONJUNCTION_OR;
-}
-
-static bool ExecutionRegionPhysicalExpressionIsIntegralType(const LogicalType &type) {
-	return type.IsIntegral();
-}
-
-static bool ExecutionRegionPhysicalExpressionIsFloatingType(const LogicalType &type) {
-	return type.id() == LogicalTypeId::FLOAT || type.id() == LogicalTypeId::DOUBLE;
-}
-
-static bool ExecutionRegionPhysicalExpressionIsArithmeticType(const LogicalType &type) {
-	return ExecutionRegionPhysicalExpressionIsIntegralType(type) ||
-	       ExecutionRegionPhysicalExpressionIsFloatingType(type) || type.id() == LogicalTypeId::DECIMAL;
-}
-
-static bool ExecutionRegionPhysicalFunctionIsArithmetic(const BoundFunctionExpression &expression) {
-	if (expression.GetChildren().size() != 2) {
-		return false;
-	}
-	auto name = expression.Function().GetName().GetIdentifierName();
-	if (name == "+" || name == "-" || name == "*") {
-		return ExecutionRegionPhysicalExpressionIsArithmeticType(expression.GetReturnType());
-	}
-	if (name == "/") {
-		return ExecutionRegionPhysicalExpressionIsFloatingType(expression.GetReturnType());
-	}
-	if (name == "//" || name == "%") {
-		return ExecutionRegionPhysicalExpressionIsIntegralType(expression.GetReturnType());
-	}
-	return false;
-}
-
-static void AccumulateExecutionRegionPhysicalExpressionShapeTraits(const Expression &expression,
-                                                                   ExecutionRegionCandidateTraits &traits) {
-	auto expression_type = expression.GetExpressionType();
-	if (ExecutionRegionPhysicalExpressionTypeIsComparison(expression_type) ||
-	    expression_type == ExpressionType::OPERATOR_IS_NULL ||
-	    expression_type == ExpressionType::OPERATOR_IS_NOT_NULL || expression_type == ExpressionType::OPERATOR_NOT) {
-		traits.predicate_expression_count++;
-	}
-	if (ExecutionRegionPhysicalExpressionTypeIsConjunction(expression_type)) {
-		traits.predicate_expression_count++;
-		traits.control_expression_count++;
-	}
-	switch (expression.GetExpressionClass()) {
-	case ExpressionClass::BOUND_CASE:
-		traits.control_expression_count++;
-		break;
-	case ExpressionClass::BOUND_FUNCTION:
-		if (ExecutionRegionPhysicalFunctionIsArithmetic(expression.Cast<BoundFunctionExpression>())) {
-			traits.arithmetic_projection_count++;
-		}
-		break;
-	default:
-		break;
-	}
-	ExpressionIterator::EnumerateChildren(expression, [&](const Expression &child) {
-		AccumulateExecutionRegionPhysicalExpressionShapeTraits(child, traits);
-	});
-}
-
-static void AccumulateExecutionRegionPhysicalProjectionTraits(const Expression &expression,
-                                                              ExecutionRegionCandidateTraits &traits) {
-	auto expression_cost = DuckDBCostModel::ExpressionCost(expression);
-	traits.expression_cost += expression_cost;
-	if (ExecutionRegionPhysicalExpressionIsReference(expression)) {
-		traits.reference_projection_count++;
-		return;
-	}
-	if (expression_cost == 0) {
-		return;
-	}
-	if (expression_cost >= HIGH_COST_GENERATED_PROJECTION_EXPRESSION_COST) {
-		traits.high_cost_projection_count++;
-		return;
-	}
-	AccumulateExecutionRegionPhysicalExpressionShapeTraits(expression, traits);
-}
-
-static void AccumulateExecutionRegionPhysicalProjectionListTraits(const vector<unique_ptr<Expression>> &expressions,
-                                                                  ExecutionRegionCandidateTraits &traits) {
-	for (auto &expression : expressions) {
-		if (expression) {
-			AccumulateExecutionRegionPhysicalProjectionTraits(*expression, traits);
-		}
-	}
-}
-
-static void ExecutionRegionAccumulateGeneratedPhysicalExpressions(idx_t expression_cost,
-                                                                  PhysicalRunnerCostInput &cost_input) {
-	if (expression_cost == 0) {
-		return;
-	}
-	cost_input.expression_cost += expression_cost;
-	cost_input.generated_stage_count++;
-}
-
-static bool TryAccumulateExecutionRegionPhysicalScanCost(const PhysicalOperator &op,
-                                                         ExecutionRegionPhysicalPipelineCostFacts &facts) {
-	if (op.type != PhysicalOperatorType::TABLE_SCAN) {
-		return true;
-	}
-	auto &scan = op.Cast<PhysicalTableScan>();
-	if (scan.dynamic_filters && scan.dynamic_filters->HasFilters()) {
-		return false;
-	}
-	if (!scan.table_filters || !scan.table_filters->HasFilters()) {
-		return true;
-	}
-	idx_t filter_cost = 0;
-	idx_t filter_count = 0;
-	for (auto &filter : *scan.table_filters) {
-		filter_cost += DuckDBCostModel::FilterCost(filter.Filter());
-		filter_count++;
-	}
-	facts.traits.source_filter_expression_count += filter_count;
-	ExecutionRegionAccumulateGeneratedPhysicalExpressions(filter_cost, facts.runner_cost);
-	return true;
-}
-
-static void AccumulateExecutionRegionPhysicalSourceTraits(const PhysicalOperator &source,
-                                                          ExecutionRegionCandidateTraits &traits) {
-	switch (source.type) {
-	case PhysicalOperatorType::TABLE_SCAN:
-		traits.source_kind = ExecutionRegionSourceKind::DUCKDB_TABLE_SCAN;
-		return;
-	case PhysicalOperatorType::DUMMY_SCAN:
-	case PhysicalOperatorType::COLUMN_DATA_SCAN:
-	case PhysicalOperatorType::CHUNK_SCAN:
-	case PhysicalOperatorType::CTE_SCAN:
-	case PhysicalOperatorType::POSITIONAL_SCAN:
-		traits.source_kind = ExecutionRegionSourceKind::GENERIC_SCAN;
-		return;
-	case PhysicalOperatorType::HASH_JOIN:
-	case PhysicalOperatorType::NESTED_LOOP_JOIN:
-	case PhysicalOperatorType::UNGROUPED_AGGREGATE:
-	case PhysicalOperatorType::HASH_GROUP_BY:
-	case PhysicalOperatorType::PERFECT_HASH_GROUP_BY:
-	case PhysicalOperatorType::ORDER_BY:
-	case PhysicalOperatorType::TOP_N:
-		traits.source_kind = ExecutionRegionSourceKind::STATEFUL_OPERATOR;
-		return;
-	default:
-		traits.source_kind = ExecutionRegionSourceKind::NONE;
-		return;
-	}
-}
-
-static bool ExecutionRegionPhysicalOperatorIsStatefulSource(const PhysicalOperator &op) {
-	switch (op.type) {
-	case PhysicalOperatorType::HASH_JOIN:
-	case PhysicalOperatorType::NESTED_LOOP_JOIN:
-	case PhysicalOperatorType::UNGROUPED_AGGREGATE:
-	case PhysicalOperatorType::HASH_GROUP_BY:
-	case PhysicalOperatorType::PERFECT_HASH_GROUP_BY:
-	case PhysicalOperatorType::ORDER_BY:
-	case PhysicalOperatorType::TOP_N:
-		return true;
-	default:
-		return false;
-	}
-}
-
-static void AccumulateExecutionRegionPhysicalSinkTraits(const PhysicalOperator &sink,
-                                                        ExecutionRegionCandidateTraits &traits) {
-	traits.sink_present = true;
-	switch (sink.type) {
-	case PhysicalOperatorType::HASH_GROUP_BY:
-		traits.sink_kind = ExecutionRegionSinkKind::HASH_AGGREGATE_UPDATE;
-		return;
-	case PhysicalOperatorType::PERFECT_HASH_GROUP_BY:
-		traits.sink_kind = ExecutionRegionSinkKind::PERFECT_HASH_AGGREGATE_UPDATE;
-		return;
-	case PhysicalOperatorType::UNGROUPED_AGGREGATE:
-		traits.sink_kind = ExecutionRegionSinkKind::UNGROUPED_AGGREGATE_UPDATE;
-		return;
-	case PhysicalOperatorType::HASH_JOIN:
-		traits.sink_kind = ExecutionRegionSinkKind::HASH_JOIN_BUILD;
-		return;
-	case PhysicalOperatorType::NESTED_LOOP_JOIN:
-		traits.sink_kind = ExecutionRegionSinkKind::NESTED_LOOP_JOIN_BUILD;
-		return;
-	case PhysicalOperatorType::ORDER_BY:
-	case PhysicalOperatorType::TOP_N:
-		traits.sink_kind = ExecutionRegionSinkKind::SORT;
-		return;
-	default:
-		traits.sink_kind = ExecutionRegionSinkKind::NONE;
-		return;
-	}
-}
-
-static bool TryAccumulateExecutionRegionPhysicalOperatorCost(const PhysicalOperator &op,
-                                                             ExecutionRegionPhysicalPipelineCostFacts &facts,
-                                                             ExecutionRegionPhysicalPipelineSlot slot) {
-	auto &cost_input = facts.runner_cost;
-	auto &traits = facts.traits;
-	cost_input.estimated_cardinality = MaxValue(cost_input.estimated_cardinality, op.estimated_cardinality);
-	cost_input.node_count++;
-	cost_input.stage_count++;
-	cost_input.operator_count++;
-	if (slot == ExecutionRegionPhysicalPipelineSlot::SOURCE) {
-		AccumulateExecutionRegionPhysicalSourceTraits(op, traits);
-	}
-	if (slot == ExecutionRegionPhysicalPipelineSlot::SINK) {
-		AccumulateExecutionRegionPhysicalSinkTraits(op, traits);
-	}
-	if (slot == ExecutionRegionPhysicalPipelineSlot::SOURCE && ExecutionRegionPhysicalOperatorIsStatefulSource(op)) {
-		return true;
-	}
-	switch (op.type) {
-	case PhysicalOperatorType::TABLE_SCAN:
-		return TryAccumulateExecutionRegionPhysicalScanCost(op, facts);
-	case PhysicalOperatorType::FILTER: {
-		auto &filter = op.Cast<PhysicalFilter>();
-		if (!filter.expression) {
-			return false;
-		}
-		traits.filter_count++;
-		ExecutionRegionAccumulateGeneratedPhysicalExpressions(DuckDBCostModel::ExpressionCost(*filter.expression),
-		                                                      cost_input);
-		return true;
-	}
-	case PhysicalOperatorType::PROJECTION: {
-		auto &projection = op.Cast<PhysicalProjection>();
-		traits.projection_count++;
-		AccumulateExecutionRegionPhysicalProjectionListTraits(projection.select_list, traits);
-		ExecutionRegionAccumulateGeneratedPhysicalExpressions(
-		    ExecutionRegionPhysicalExpressionListCost(projection.select_list), cost_input);
-		return true;
-	}
-	case PhysicalOperatorType::UNGROUPED_AGGREGATE: {
-		auto &aggregate = op.Cast<PhysicalUngroupedAggregate>();
-		ExecutionRegionAccumulateGeneratedPhysicalExpressions(
-		    ExecutionRegionPhysicalExpressionListCost(aggregate.aggregates), cost_input);
-		if (slot != ExecutionRegionPhysicalPipelineSlot::SOURCE) {
-			traits.aggregate_count++;
-		}
-		cost_input.native_aggregate_stage_count++;
-		return true;
-	}
-	case PhysicalOperatorType::HASH_GROUP_BY: {
-		auto &aggregate = op.Cast<PhysicalHashAggregate>();
-		auto expression_cost = ExecutionRegionPhysicalExpressionListCost(aggregate.grouped_aggregate_data.groups);
-		expression_cost += ExecutionRegionPhysicalExpressionListCost(aggregate.grouped_aggregate_data.aggregates);
-		ExecutionRegionAccumulateGeneratedPhysicalExpressions(expression_cost, cost_input);
-		if (slot != ExecutionRegionPhysicalPipelineSlot::SOURCE) {
-			traits.aggregate_count++;
-		}
-		cost_input.native_aggregate_stage_count++;
-		cost_input.native_grouped_aggregate_stage_count++;
-		return true;
-	}
-	case PhysicalOperatorType::PERFECT_HASH_GROUP_BY: {
-		auto &aggregate = op.Cast<PhysicalPerfectHashAggregate>();
-		auto expression_cost = ExecutionRegionPhysicalExpressionListCost(aggregate.groups);
-		expression_cost += ExecutionRegionPhysicalExpressionListCost(aggregate.aggregates);
-		ExecutionRegionAccumulateGeneratedPhysicalExpressions(expression_cost, cost_input);
-		if (slot != ExecutionRegionPhysicalPipelineSlot::SOURCE) {
-			traits.aggregate_count++;
-		}
-		cost_input.native_aggregate_stage_count++;
-		cost_input.native_grouped_aggregate_stage_count++;
-		return true;
-	}
-	case PhysicalOperatorType::HASH_JOIN:
-		if (slot == ExecutionRegionPhysicalPipelineSlot::OPERATOR) {
-			traits.operator_count++;
-			traits.hash_join_operator_count++;
-		}
-		cost_input.native_join_stage_count++;
-		return true;
-	case PhysicalOperatorType::NESTED_LOOP_JOIN:
-		if (slot == ExecutionRegionPhysicalPipelineSlot::OPERATOR) {
-			traits.operator_count++;
-		}
-		cost_input.native_join_stage_count++;
-		return true;
-	case PhysicalOperatorType::ORDER_BY:
-	case PhysicalOperatorType::TOP_N:
-		cost_input.native_sort_stage_count++;
-		return true;
-	case PhysicalOperatorType::DUMMY_SCAN:
-	case PhysicalOperatorType::COLUMN_DATA_SCAN:
-	case PhysicalOperatorType::CHUNK_SCAN:
-	case PhysicalOperatorType::CTE_SCAN:
-	case PhysicalOperatorType::POSITIONAL_SCAN:
-	case PhysicalOperatorType::CTE:
-	case PhysicalOperatorType::RESULT_COLLECTOR:
-	case PhysicalOperatorType::EXPLAIN_ANALYZE:
-	case PhysicalOperatorType::CREATE_TABLE_AS:
-	case PhysicalOperatorType::INSERT:
-	case PhysicalOperatorType::BATCH_INSERT:
-		return true;
-	default:
-		return false;
-	}
-}
-
-static bool ExecutionRegionPhysicalSourceUsesReadySourceContract(const PhysicalOperator &source) {
-	auto contract = source.GetExecutionContract();
-	return contract.source.execution == ExecutionRegionSourceExecutionKind::SOURCE_CONTRACT &&
-	       contract.source.source_contract.status == ExecutionRegionSourceContractStatus::READY;
-}
-
-static void FinalizeExecutionRegionPhysicalPipelineCostInput(Pipeline &pipeline,
-                                                             ExecutionRegionPhysicalPipelineCostFacts &facts) {
-	auto &cost_input = facts.runner_cost;
-	cost_input.full_pipeline = pipeline.GetSource() && pipeline.GetSink();
-	facts.traits.source_execution = ExecutionRegionSourceExecutionKind::NONE;
-	cost_input.generated_work_class = ClassifyExecutionRegionGeneratedWork(facts.traits);
-	if (cost_input.full_pipeline &&
-	    cost_input.generated_work_class == PhysicalRunnerGeneratedWorkClass::PROJECTION_GLUE &&
-	    facts.traits.source_kind == ExecutionRegionSourceKind::STATEFUL_OPERATOR) {
-		auto source = pipeline.GetSource();
-		D_ASSERT(source);
-		if (ExecutionRegionPhysicalSourceUsesReadySourceContract(*source)) {
-			facts.traits.source_execution = ExecutionRegionSourceExecutionKind::SOURCE_CONTRACT;
-			cost_input.native_protocol_class = ClassifyExecutionRegionNativeProtocol(facts.traits);
-		}
-	}
-	if (cost_input.native_protocol_class == PhysicalRunnerNativeProtocolClass::STATEFUL_SOURCE_SINK_PROTOCOL &&
-	    cost_input.generated_work_class == PhysicalRunnerGeneratedWorkClass::PROJECTION_GLUE &&
-	    facts.traits.sink_kind == ExecutionRegionSinkKind::SORT) {
-		cost_input.native_sort_stage_count = 0;
-	}
-	if (cost_input.generated_stage_count > 0 && cost_input.native_aggregate_stage_count > 0) {
-		cost_input.materialization_elision_count = 1;
-	}
-	cost_input.has_accelerated_work = cost_input.generated_stage_count > 0 || cost_input.native_join_stage_count > 0 ||
-	                                  cost_input.native_aggregate_stage_count > 0 ||
-	                                  cost_input.native_sort_stage_count > 0 || cost_input.full_pipeline;
-}
-
-static bool TryBuildExecutionRegionPipelineCostInput(Pipeline &pipeline, PhysicalRunnerCostInput &cost_input) {
-	if (!pipeline.GetSource()) {
-		return false;
-	}
-	ExecutionRegionPhysicalPipelineCostFacts facts;
-	if (!TryAccumulateExecutionRegionPhysicalOperatorCost(*pipeline.GetSource(), facts,
-	                                                      ExecutionRegionPhysicalPipelineSlot::SOURCE)) {
-		return false;
-	}
-	for (auto &op : pipeline.GetIntermediateOperators()) {
-		if (!TryAccumulateExecutionRegionPhysicalOperatorCost(op.get(), facts,
-		                                                      ExecutionRegionPhysicalPipelineSlot::OPERATOR)) {
-			return false;
-		}
-	}
-	if (pipeline.GetSink() && !TryAccumulateExecutionRegionPhysicalOperatorCost(
-	                              *pipeline.GetSink(), facts, ExecutionRegionPhysicalPipelineSlot::SINK)) {
-		return false;
-	}
-	FinalizeExecutionRegionPhysicalPipelineCostInput(pipeline, facts);
-	cost_input = facts.runner_cost;
-	return true;
-}
-
-static bool ExecutionRegionStatefulSourceProducesRows(const PhysicalOperator &source) {
-	switch (source.type) {
-	case PhysicalOperatorType::HASH_JOIN: {
-		auto &join = source.Cast<PhysicalHashJoin>();
-		return ExecutionRegionJoinTypePropagatesBuildSide(ExecutionRegionJoinTypeFromDuckDB(join.join_type));
-	}
-	case PhysicalOperatorType::NESTED_LOOP_JOIN: {
-		auto &join = source.Cast<PhysicalNestedLoopJoin>();
-		return ExecutionRegionJoinTypePropagatesBuildSide(ExecutionRegionJoinTypeFromDuckDB(join.join_type));
-	}
-	default:
-		return true;
-	}
-}
-
-static bool ExecutionRegionPipelineHasNonProducingSource(Pipeline &pipeline) {
-	auto source = pipeline.GetSource();
-	return source && !ExecutionRegionStatefulSourceProducesRows(*source);
-}
-
-static PhysicalRunnerCostInput BuildExecutionRegionNonProducingSourceCostInput(const PhysicalOperator &source) {
-	PhysicalRunnerCostInput result;
-	result.estimated_cardinality = source.estimated_cardinality;
-	result.node_count = 1;
-	result.stage_count = 1;
-	result.operator_count = 1;
-	return result;
-}
-
-static ExecutionRegionPhysicalRunnerSelection
-SelectExecutionRegionPipelinePhysicalRunner(const PhysicalRunnerCostParameters &cost_parameters, Pipeline &pipeline) {
-	ExecutionRegionPhysicalRunnerSelection selection;
-	if (ExecutionRegionPipelineHasNonProducingSource(pipeline)) {
-		auto source = pipeline.GetSource();
-		D_ASSERT(source);
-		auto cost_input = BuildExecutionRegionNonProducingSourceCostInput(*source);
-		selection.runner_cost = DuckDBCostModel::SelectPhysicalRunner(cost_input, cost_parameters);
-		selection.reason = "duckdb_cbo selects vectorized physical runner before region graph";
-		selection.reason += ";region_graph=skipped;source_produces_rows=false";
-		selection.blocker = "duckdb_selected_vectorized";
-		return selection;
-	}
-	PhysicalRunnerCostInput cost_input;
-	if (!TryBuildExecutionRegionPipelineCostInput(pipeline, cost_input)) {
-		selection.use_compiled_runner = true;
-		selection.reason = "duckdb_cbo requires execution-region graph for physical runner decision";
-		return selection;
-	}
-	selection.runner_cost = DuckDBCostModel::SelectPhysicalRunner(cost_input, cost_parameters);
-	if (selection.runner_cost.selected_accelerated_runner) {
-		selection.use_compiled_runner = true;
-		selection.reason = "duckdb_cbo physical pipeline cost admits region graph analysis";
-		return selection;
-	}
-	selection.reason = "duckdb_cbo selects vectorized physical runner before region graph";
-	selection.reason += ";region_graph=skipped";
-	selection.blocker = "duckdb_selected_vectorized";
-	return selection;
-}
-
-static string DescribeExecutionRegionLoweringRejection(const ExecutionRegionGraph &graph) {
-	string reason = "core region lowering did not produce typed region IR";
-	reason += ";graph_shape=" + DescribeExecutionRegionGraphShape(graph);
-	return reason;
-}
-
-static ExecutionRegionPhysicalRunnerSelection
-SelectExecutionRegionCostOnlyPhysicalRunner(const PhysicalRunnerCostParameters &cost_parameters,
-                                            const ExecutionRegionCandidate &candidate) {
-	ExecutionRegionPhysicalRunnerSelection selection;
-	auto cost_input = BuildPhysicalRunnerCostInput(candidate);
-	selection.runner_cost = DuckDBCostModel::SelectPhysicalRunner(cost_input, cost_parameters);
-	if (selection.runner_cost.selected_accelerated_runner) {
-		selection.use_compiled_runner = true;
-		selection.reason = "duckdb_cbo cost model admits backend capability analysis";
-		return selection;
-	}
-
-	selection.reason = "duckdb_cbo selects vectorized physical runner before backend analysis";
-	selection.reason += ";backend_analysis=skipped";
-	selection.blocker = "duckdb_selected_vectorized";
-	return selection;
-}
-
-static ExecutionRegionPhysicalRunnerSelection
-SelectExecutionRegionPhysicalRunner(const PhysicalRunnerCostParameters &cost_parameters,
-                                    const ExecutionRegionCandidate &candidate,
-                                    const ExecutionRegionLoweringPlan &lowering_plan, bool record_detailed_telemetry) {
-	ExecutionRegionPhysicalRunnerSelection selection;
-	if (!lowering_plan.IsFullyFused()) {
-		selection.reason = "duckdb_cbo skips compiled-vectorized runner because region is not fully fused";
-		selection.reason += ";requires=fused";
-		selection.reason += ";" + ExecutionRegionLoweringEventReason(lowering_plan, record_detailed_telemetry);
-		selection.blocker = "region_not_fully_fused";
-		return selection;
-	}
-	auto cost_input = BuildPhysicalRunnerCostInput(candidate);
-	selection.runner_cost = DuckDBCostModel::SelectPhysicalRunner(cost_input, cost_parameters);
-	if (selection.runner_cost.selected_accelerated_runner) {
-		selection.use_compiled_runner = true;
-		selection.reason = "duckdb_cbo selects compiled-vectorized physical runner";
-		return selection;
-	}
-
-	selection.reason = "duckdb_cbo selects vectorized physical runner;";
-	selection.reason += ExecutionRegionLoweringEventReason(lowering_plan, record_detailed_telemetry);
-	selection.blocker = "duckdb_selected_vectorized";
-	return selection;
-}
 
 struct ExecutionRegionPlanner::SelectedCandidate {
 	idx_t candidate_index = 0;
@@ -905,7 +124,7 @@ static ExecutionRegionFusedStageContractDecision
 BuildExecutionRegionFusedContractBoundaryDecision(const ExecutionRegionContract &contract) {
 	ExecutionRegionFusedStageContractDecision decision;
 	decision.valid = false;
-	decision.blocker = "fused_region_contract_has_boundaries";
+	decision.blocker = EXECUTION_REGION_BLOCKER_FUSED_REGION_CONTRACT_HAS_BOUNDARIES;
 	decision.reason = "core region contract cannot form fused region";
 	decision.reason += ";source_boundaries=" + std::to_string(contract.source_boundary_count);
 	decision.reason += ";missing_contracts=" + std::to_string(contract.missing_contract_count);
@@ -1135,6 +354,18 @@ unique_ptr<ExecutionRegionPlan> ExecutionRegionPlanner::Build(ClientContext &con
 	auto needs_candidate_diagnostics = ExecutionRegionPlanningNeedsCandidateDiagnostics(context);
 	string backend_name;
 	optional_ptr<ExecutionRegionBackend> backend;
+	auto record_decision_event =
+	    [&](string event_backend_name, ExecutionRegionCompileStatus status, ExecutionRegionExecutionMode execution_mode,
+	        string reason, string blocker, const string *ir, int64_t decision_time_us,
+	        const ExecutionRegionCandidate *candidate, ExecutionRunnerKind selected_runner,
+	        const ExecutionRegionStageTimings *stage_timings,
+	        ExecutionRegionSourceExecutionKind selected_source_execution, bool selected_uses_scan_filters,
+	        const PhysicalRunnerCostProfile *runner_cost) -> idx_t {
+		return execution_region_manager.RecordEvent(context, std::move(event_backend_name), status, execution_mode,
+		                                            std::move(reason), std::move(blocker), ir, decision_time_us, 0, 0,
+		                                            candidate, selected_runner, stage_timings,
+		                                            selected_source_execution, selected_uses_scan_filters, runner_cost);
+	};
 	auto select_backend = [&]() -> bool {
 		if (backend) {
 			return true;
@@ -1143,19 +374,19 @@ unique_ptr<ExecutionRegionPlan> ExecutionRegionPlanner::Build(ClientContext &con
 		plan->backend_name = backend_name;
 		if (!backend) {
 			if (should_record_decision_telemetry) {
-				execution_region_manager.RecordEvent(
-				    context, std::move(backend_name), ExecutionRegionCompileStatus::UNAVAILABLE,
-				    ExecutionRegionExecutionMode::NONE, "no available execution region backend", "backend_unavailable",
-				    nullptr, 0, 0, 0);
+				record_decision_event(backend_name, ExecutionRegionCompileStatus::UNAVAILABLE,
+				                      ExecutionRegionExecutionMode::NONE, "no available execution region backend",
+				                      "backend_unavailable", nullptr, 0, nullptr, ExecutionRunnerKind::VECTORIZED,
+				                      nullptr, ExecutionRegionSourceExecutionKind::NONE, false, nullptr);
 			}
 			return false;
 		}
 		if (!backend->SupportsRegions()) {
 			if (should_record_decision_telemetry) {
-				execution_region_manager.RecordEvent(context, backend_name, ExecutionRegionCompileStatus::UNSUPPORTED,
-				                                     ExecutionRegionExecutionMode::UNSUPPORTED,
-				                                     "backend does not compile regions",
-				                                     "backend_does_not_compile_regions", nullptr, 0, 0, 0);
+				record_decision_event(
+				    backend_name, ExecutionRegionCompileStatus::UNSUPPORTED, ExecutionRegionExecutionMode::UNSUPPORTED,
+				    "backend does not compile regions", "backend_does_not_compile_regions", nullptr, 0, nullptr,
+				    ExecutionRunnerKind::VECTORIZED, nullptr, ExecutionRegionSourceExecutionKind::NONE, false, nullptr);
 			}
 			return false;
 		}
@@ -1165,16 +396,18 @@ unique_ptr<ExecutionRegionPlan> ExecutionRegionPlanner::Build(ClientContext &con
 		if (!should_record_decision_telemetry) {
 			return nullptr;
 		}
-		execution_region_manager.RecordEvent(context, "policy", ExecutionRegionCompileStatus::DISABLED,
-		                                     ExecutionRegionExecutionMode::NONE, "execution_region_policy=off",
-		                                     "policy_off", nullptr, 0, 0, 0);
+		record_decision_event("policy", ExecutionRegionCompileStatus::DISABLED, ExecutionRegionExecutionMode::NONE,
+		                      "execution_region_policy=off", "policy_off", nullptr, 0, nullptr,
+		                      ExecutionRunnerKind::VECTORIZED, nullptr, ExecutionRegionSourceExecutionKind::NONE, false,
+		                      nullptr);
 		return nullptr;
 	}
 	auto cost_parameters = BuildPhysicalRunnerCostParameters(context);
 	if (!ExecutionRegionProductionEligibilityAllowsPlanning(context, cost_parameters)) {
 		return nullptr;
 	}
-	ExecutionRegionStageTimings shared_stage_timings;
+	ExecutionRegionPlannerDecisionRecorder decision_recorder;
+	auto &shared_stage_timings = decision_recorder.SharedStageTimings();
 	if (!needs_candidate_diagnostics) {
 		auto pipeline_decision_start = std::chrono::steady_clock::now();
 		auto physical_runner = SelectExecutionRegionPipelinePhysicalRunner(cost_parameters, pipeline);
@@ -1186,11 +419,11 @@ unique_ptr<ExecutionRegionPlan> ExecutionRegionPlanner::Build(ClientContext &con
 					return nullptr;
 				}
 				auto decision_time_us = ExecutionRegionPlannerElapsedMicros(pipeline_decision_start);
-				execution_region_manager.RecordEvent(
-				    context, backend_name, ExecutionRegionCompileStatus::SKIPPED,
-				    ExecutionRegionExecutionMode::UNSUPPORTED, physical_runner.reason, physical_runner.blocker, nullptr,
-				    decision_time_us, 0, 0, nullptr, physical_runner.SelectedRunner(), &shared_stage_timings,
-				    ExecutionRegionSourceExecutionKind::NONE, false, &physical_runner.runner_cost);
+				record_decision_event(backend_name, ExecutionRegionCompileStatus::SKIPPED,
+				                      ExecutionRegionExecutionMode::UNSUPPORTED, physical_runner.reason,
+				                      physical_runner.blocker, nullptr, decision_time_us, nullptr,
+				                      physical_runner.SelectedRunner(), &shared_stage_timings,
+				                      ExecutionRegionSourceExecutionKind::NONE, false, &physical_runner.runner_cost);
 			}
 			return nullptr;
 		}
@@ -1207,12 +440,12 @@ unique_ptr<ExecutionRegionPlan> ExecutionRegionPlanner::Build(ClientContext &con
 	shared_stage_timings.graph_build_time_us = graph_build_time_us;
 	if (!pipeline_descriptor) {
 		if (should_record_decision_telemetry) {
-			execution_region_manager.RecordEvent(context, backend_name, ExecutionRegionCompileStatus::UNSUPPORTED,
-			                                     ExecutionRegionExecutionMode::UNSUPPORTED,
-			                                     "core region graph builder produced no execution-region graph",
-			                                     "no_execution_region_graph", nullptr,
-			                                     shared_stage_timings.pipeline_cbo_time_us + graph_build_time_us, 0, 0,
-			                                     nullptr, ExecutionRunnerKind::VECTORIZED, &shared_stage_timings);
+			record_decision_event(
+			    backend_name, ExecutionRegionCompileStatus::UNSUPPORTED, ExecutionRegionExecutionMode::UNSUPPORTED,
+			    "core region graph builder produced no execution-region graph", "no_execution_region_graph", nullptr,
+			    shared_stage_timings.pipeline_cbo_time_us + graph_build_time_us, nullptr,
+			    ExecutionRunnerKind::VECTORIZED, &shared_stage_timings, ExecutionRegionSourceExecutionKind::NONE, false,
+			    nullptr);
 		}
 		return nullptr;
 	}
@@ -1221,11 +454,12 @@ unique_ptr<ExecutionRegionPlan> ExecutionRegionPlanner::Build(ClientContext &con
 		if (should_record_decision_telemetry) {
 			string reason = "duckdb_cbo skips region lowering because pipeline has no costed acceleration";
 			reason += ";region_lowering=skipped";
-			execution_region_manager.RecordEvent(context, backend_name, ExecutionRegionCompileStatus::SKIPPED,
-			                                     ExecutionRegionExecutionMode::UNSUPPORTED, std::move(reason),
-			                                     "duckdb_selected_vectorized", nullptr,
-			                                     shared_stage_timings.pipeline_cbo_time_us + graph_build_time_us, 0, 0,
-			                                     nullptr, ExecutionRunnerKind::VECTORIZED, &shared_stage_timings);
+			record_decision_event(backend_name, ExecutionRegionCompileStatus::SKIPPED,
+			                      ExecutionRegionExecutionMode::UNSUPPORTED, std::move(reason),
+			                      EXECUTION_REGION_BLOCKER_DUCKDB_SELECTED_VECTORIZED, nullptr,
+			                      shared_stage_timings.pipeline_cbo_time_us + graph_build_time_us, nullptr,
+			                      ExecutionRunnerKind::VECTORIZED, &shared_stage_timings,
+			                      ExecutionRegionSourceExecutionKind::NONE, false, nullptr);
 		}
 		return nullptr;
 	}
@@ -1236,12 +470,11 @@ unique_ptr<ExecutionRegionPlan> ExecutionRegionPlanner::Build(ClientContext &con
 	if (!region_ir) {
 		if (should_record_decision_telemetry) {
 			auto rejected_reason = DescribeExecutionRegionLoweringRejection(*pipeline_descriptor);
-			execution_region_manager.RecordEvent(
-			    context, backend_name, ExecutionRegionCompileStatus::UNSUPPORTED,
-			    ExecutionRegionExecutionMode::UNSUPPORTED, std::move(rejected_reason), "no_typed_region_ir", nullptr,
-			    shared_stage_timings.pipeline_cbo_time_us + graph_build_time_us + region_lowering_time_us, 0, 0,
-			    nullptr, ExecutionRunnerKind::VECTORIZED, &shared_stage_timings,
-			    ExecutionRegionSourceExecutionKind::NONE, false);
+			record_decision_event(backend_name, ExecutionRegionCompileStatus::UNSUPPORTED,
+			                      ExecutionRegionExecutionMode::UNSUPPORTED, std::move(rejected_reason),
+			                      "no_typed_region_ir", nullptr, decision_recorder.SharedDecisionTime(), nullptr,
+			                      ExecutionRunnerKind::VECTORIZED, &shared_stage_timings,
+			                      ExecutionRegionSourceExecutionKind::NONE, false, nullptr);
 		}
 		return nullptr;
 	}
@@ -1254,48 +487,34 @@ unique_ptr<ExecutionRegionPlan> ExecutionRegionPlanner::Build(ClientContext &con
 				         FirstExecutionRegionReasonToken(lowered_region.candidate_blockers[0]) + ";" + reason + ";" +
 				         lowered_region.candidate_blockers[0];
 			}
-			execution_region_manager.RecordEvent(
-			    context, std::move(backend_name), ExecutionRegionCompileStatus::UNSUPPORTED,
-			    ExecutionRegionExecutionMode::UNSUPPORTED, reason, ExecutionRegionCandidateBlockerCode(lowered_region),
-			    &lowered_region.ir,
-			    shared_stage_timings.pipeline_cbo_time_us + graph_build_time_us + region_lowering_time_us, 0, 0,
-			    nullptr, ExecutionRunnerKind::VECTORIZED, &shared_stage_timings);
+			record_decision_event(backend_name, ExecutionRegionCompileStatus::UNSUPPORTED,
+			                      ExecutionRegionExecutionMode::UNSUPPORTED, reason,
+			                      ExecutionRegionCandidateBlockerCode(lowered_region), &lowered_region.ir,
+			                      decision_recorder.SharedDecisionTime(), nullptr, ExecutionRunnerKind::VECTORIZED,
+			                      &shared_stage_timings, ExecutionRegionSourceExecutionKind::NONE, false, nullptr);
 		}
 		return nullptr;
 	}
 
 	vector<SelectedCandidate> selected_regions;
-	bool shared_decision_time_recorded = false;
 	for (idx_t candidate_index = 0; candidate_index < lowered_region.candidates.size(); candidate_index++) {
 		auto &candidate = lowered_region.candidates[candidate_index];
-		auto candidate_decision_start = std::chrono::steady_clock::now();
-		ExecutionRegionStageTimings stage_timings;
+		auto candidate_trace = decision_recorder.BeginCandidate();
+		auto &stage_timings = candidate_trace.stage_timings;
 		ExecutionRegionPhysicalRunnerSelection cost_only_physical_runner;
 		bool has_cost_only_physical_runner = false;
-		auto candidate_decision_time_us = [&]() -> int64_t {
-			auto decision_time_us = ExecutionRegionPlannerElapsedMicros(candidate_decision_start);
-			if (!shared_decision_time_recorded) {
-				decision_time_us +=
-				    shared_stage_timings.pipeline_cbo_time_us + graph_build_time_us + region_lowering_time_us;
-				stage_timings.pipeline_cbo_time_us = shared_stage_timings.pipeline_cbo_time_us;
-				stage_timings.graph_build_time_us = graph_build_time_us;
-				stage_timings.ir_lowering_time_us = region_lowering_time_us;
-				shared_decision_time_recorded = true;
-			}
-			return decision_time_us;
-		};
 		if (ExecutionRegionABIIsFullPipeline(candidate.contract.abi)) {
 			string full_pipeline_entry_reason;
 			if (!ExecutionRegionRuntimeCanEnter(pipeline, full_pipeline_entry_reason)) {
 				if (should_record_decision_telemetry) {
-					auto decision_time_us = candidate_decision_time_us();
-					execution_region_manager.RecordEvent(
-					    context, backend_name, ExecutionRegionCompileStatus::SKIPPED,
-					    ExecutionRegionExecutionMode::UNSUPPORTED,
+					auto decision_time_us = decision_recorder.ClaimCandidateDecisionTime(candidate_trace);
+					record_decision_event(
+					    backend_name, ExecutionRegionCompileStatus::SKIPPED, ExecutionRegionExecutionMode::UNSUPPORTED,
 					    AttachExecutionRegionCandidateReason(candidate, std::move(full_pipeline_entry_reason),
 					                                         should_record_detailed_telemetry),
-					    "full_pipeline_runtime_missing_source_or_sink", &lowered_region.ir, decision_time_us, 0, 0,
-					    &candidate, ExecutionRunnerKind::VECTORIZED, &stage_timings);
+					    "full_pipeline_runtime_missing_source_or_sink", &lowered_region.ir, decision_time_us,
+					    &candidate, ExecutionRunnerKind::VECTORIZED, &stage_timings,
+					    ExecutionRegionSourceExecutionKind::NONE, false, nullptr);
 				}
 				continue;
 			}
@@ -1306,13 +525,12 @@ unique_ptr<ExecutionRegionPlan> ExecutionRegionPlanner::Build(ClientContext &con
 			stage_timings.candidate_cbo_time_us += ExecutionRegionPlannerElapsedMicros(candidate_cbo_start);
 			if (!physical_runner.UsesCompiledRunner()) {
 				if (should_record_decision_telemetry) {
-					auto decision_time_us = candidate_decision_time_us();
-					execution_region_manager.RecordEvent(
-					    context, backend_name, ExecutionRegionCompileStatus::SKIPPED,
-					    ExecutionRegionExecutionMode::UNSUPPORTED,
+					auto decision_time_us = decision_recorder.ClaimCandidateDecisionTime(candidate_trace);
+					record_decision_event(
+					    backend_name, ExecutionRegionCompileStatus::SKIPPED, ExecutionRegionExecutionMode::UNSUPPORTED,
 					    AttachExecutionRegionCandidateReason(candidate, physical_runner.reason,
 					                                         should_record_detailed_telemetry),
-					    physical_runner.blocker, &lowered_region.ir, decision_time_us, 0, 0, &candidate,
+					    physical_runner.blocker, &lowered_region.ir, decision_time_us, &candidate,
 					    physical_runner.SelectedRunner(), &stage_timings, ExecutionRegionSourceExecutionKind::NONE,
 					    false, &physical_runner.runner_cost);
 				}
@@ -1324,14 +542,14 @@ unique_ptr<ExecutionRegionPlan> ExecutionRegionPlanner::Build(ClientContext &con
 		if (!needs_backend_diagnostics && !ExecutionRegionContractHasOnlyNativeStages(candidate.contract)) {
 			if (should_record_decision_telemetry) {
 				auto contract_decision = BuildExecutionRegionFusedContractBoundaryDecision(candidate.contract);
-				auto decision_time_us = candidate_decision_time_us();
-				execution_region_manager.RecordEvent(
-				    context, backend_name, ExecutionRegionCompileStatus::UNSUPPORTED,
-				    ExecutionRegionExecutionMode::UNSUPPORTED,
+				auto decision_time_us = decision_recorder.ClaimCandidateDecisionTime(candidate_trace);
+				record_decision_event(
+				    backend_name, ExecutionRegionCompileStatus::UNSUPPORTED, ExecutionRegionExecutionMode::UNSUPPORTED,
 				    AttachExecutionRegionCandidateReason(candidate, std::move(contract_decision.reason),
 				                                         should_record_detailed_telemetry),
-				    contract_decision.blocker, &lowered_region.ir, decision_time_us, 0, 0, &candidate,
-				    ExecutionRunnerKind::VECTORIZED, &stage_timings);
+				    contract_decision.blocker, &lowered_region.ir, decision_time_us, &candidate,
+				    ExecutionRunnerKind::VECTORIZED, &stage_timings, ExecutionRegionSourceExecutionKind::NONE, false,
+				    nullptr);
 			}
 			continue;
 		}
@@ -1339,14 +557,15 @@ unique_ptr<ExecutionRegionPlan> ExecutionRegionPlanner::Build(ClientContext &con
 			auto stage_plan_decision = ValidateExecutionRegionFusedStagePlan(candidate.stage_plan);
 			if (!stage_plan_decision.valid) {
 				if (should_record_decision_telemetry) {
-					auto decision_time_us = candidate_decision_time_us();
-					execution_region_manager.RecordEvent(
-					    context, backend_name, ExecutionRegionCompileStatus::UNSUPPORTED,
-					    ExecutionRegionExecutionMode::UNSUPPORTED,
-					    AttachExecutionRegionCandidateReason(candidate, std::move(stage_plan_decision.reason),
-					                                         should_record_detailed_telemetry),
-					    stage_plan_decision.blocker, &lowered_region.ir, decision_time_us, 0, 0, &candidate,
-					    ExecutionRunnerKind::VECTORIZED, &stage_timings);
+					auto decision_time_us = decision_recorder.ClaimCandidateDecisionTime(candidate_trace);
+					record_decision_event(backend_name, ExecutionRegionCompileStatus::UNSUPPORTED,
+					                      ExecutionRegionExecutionMode::UNSUPPORTED,
+					                      AttachExecutionRegionCandidateReason(candidate,
+					                                                           std::move(stage_plan_decision.reason),
+					                                                           should_record_detailed_telemetry),
+					                      stage_plan_decision.blocker, &lowered_region.ir, decision_time_us, &candidate,
+					                      ExecutionRunnerKind::VECTORIZED, &stage_timings,
+					                      ExecutionRegionSourceExecutionKind::NONE, false, nullptr);
 				}
 				continue;
 			}
@@ -1358,7 +577,7 @@ unique_ptr<ExecutionRegionPlan> ExecutionRegionPlanner::Build(ClientContext &con
 		input.lowering_plan = &lowering_plan;
 		if (!lowering_plan.HasNodes()) {
 			if (should_record_decision_telemetry) {
-				auto decision_time_us = candidate_decision_time_us();
+				auto decision_time_us = decision_recorder.ClaimCandidateDecisionTime(candidate_trace);
 				string empty_analysis_reason = "backend produced an empty execution-region capability analysis";
 				auto lowering_reason =
 				    ExecutionRegionLoweringEventReason(lowering_plan, should_record_detailed_telemetry);
@@ -1366,20 +585,19 @@ unique_ptr<ExecutionRegionPlan> ExecutionRegionPlanner::Build(ClientContext &con
 					empty_analysis_reason += ";";
 					empty_analysis_reason += lowering_reason;
 				}
-				execution_region_manager.RecordEvent(
-				    context, backend_name, ExecutionRegionCompileStatus::UNSUPPORTED,
-				    ExecutionRegionExecutionMode::UNSUPPORTED,
+				record_decision_event(
+				    backend_name, ExecutionRegionCompileStatus::UNSUPPORTED, ExecutionRegionExecutionMode::UNSUPPORTED,
 				    AttachExecutionRegionCandidateReason(candidate, std::move(empty_analysis_reason),
 				                                         should_record_detailed_telemetry),
-				    "backend_empty_analysis", &lowered_region.ir, decision_time_us, 0, 0, &candidate,
+				    "backend_empty_analysis", &lowered_region.ir, decision_time_us, &candidate,
 				    ExecutionRunnerKind::VECTORIZED, &stage_timings, lowering_plan.SelectedSourceExecution(),
-				    lowering_plan.UsesScanFilters());
+				    lowering_plan.UsesScanFilters(), nullptr);
 			}
 			continue;
 		}
 		if (lowering_plan.ExpectedCompiledExecutionMode() == ExecutionRegionExecutionMode::UNSUPPORTED) {
 			if (should_record_decision_telemetry) {
-				auto decision_time_us = candidate_decision_time_us();
+				auto decision_time_us = decision_recorder.ClaimCandidateDecisionTime(candidate_trace);
 				auto unsupported_reason =
 				    ExecutionRegionLoweringEventReason(lowering_plan, should_record_detailed_telemetry);
 				if (lowering_plan.NativeCount() > 0) {
@@ -1389,31 +607,29 @@ unique_ptr<ExecutionRegionPlan> ExecutionRegionPlanner::Build(ClientContext &con
 					unsupported_reason = "region lowering contains no native executable nodes: " + unsupported_reason +
 					                     ";execution:unsupported";
 				}
-				execution_region_manager.RecordEvent(
-				    context, backend_name, ExecutionRegionCompileStatus::UNSUPPORTED,
-				    ExecutionRegionExecutionMode::UNSUPPORTED,
+				record_decision_event(
+				    backend_name, ExecutionRegionCompileStatus::UNSUPPORTED, ExecutionRegionExecutionMode::UNSUPPORTED,
 				    AttachExecutionRegionCandidateReason(candidate, std::move(unsupported_reason),
 				                                         should_record_detailed_telemetry),
-				    ExecutionRegionUnsupportedBlockerCode(lowering_plan), &lowered_region.ir, decision_time_us, 0, 0,
+				    ExecutionRegionUnsupportedBlockerCode(lowering_plan), &lowered_region.ir, decision_time_us,
 				    &candidate, ExecutionRunnerKind::VECTORIZED, &stage_timings,
-				    lowering_plan.SelectedSourceExecution(), lowering_plan.UsesScanFilters());
+				    lowering_plan.SelectedSourceExecution(), lowering_plan.UsesScanFilters(), nullptr);
 			}
 			continue;
 		}
 		auto fused_contract_decision = ValidateExecutionRegionFusedStageContract(candidate, lowering_plan);
 		if (!fused_contract_decision.valid) {
 			if (should_record_decision_telemetry) {
-				auto decision_time_us = candidate_decision_time_us();
+				auto decision_time_us = decision_recorder.ClaimCandidateDecisionTime(candidate_trace);
 				auto reason = ExecutionRegionLoweringEventReason(lowering_plan, should_record_detailed_telemetry) +
 				              ";execution:unsupported;" + std::move(fused_contract_decision.reason);
-				execution_region_manager.RecordEvent(
-				    context, backend_name, ExecutionRegionCompileStatus::UNSUPPORTED,
-				    ExecutionRegionExecutionMode::UNSUPPORTED,
+				record_decision_event(
+				    backend_name, ExecutionRegionCompileStatus::UNSUPPORTED, ExecutionRegionExecutionMode::UNSUPPORTED,
 				    AttachExecutionRegionCandidateReason(candidate, std::move(reason),
 				                                         should_record_detailed_telemetry),
-				    fused_contract_decision.blocker, &lowered_region.ir, decision_time_us, 0, 0, &candidate,
+				    fused_contract_decision.blocker, &lowered_region.ir, decision_time_us, &candidate,
 				    ExecutionRunnerKind::VECTORIZED, &stage_timings, lowering_plan.SelectedSourceExecution(),
-				    lowering_plan.UsesScanFilters());
+				    lowering_plan.UsesScanFilters(), nullptr);
 			}
 			continue;
 		}
@@ -1424,19 +640,19 @@ unique_ptr<ExecutionRegionPlan> ExecutionRegionPlanner::Build(ClientContext &con
 				plan->operator_readiness_refresh = true;
 			}
 			if (should_record_decision_telemetry) {
-				auto decision_time_us = candidate_decision_time_us();
+				auto decision_time_us = decision_recorder.ClaimCandidateDecisionTime(candidate_trace);
 				auto reason = ExecutionRegionLoweringEventReason(lowering_plan, should_record_detailed_telemetry) + ";";
 				reason += readiness_decision.status == ExecutionRegionCompileStatus::SKIPPED
 				              ? "execution:state-not-ready;"
 				              : "execution:unsupported;";
 				reason += std::move(readiness_decision.reason);
-				execution_region_manager.RecordEvent(
-				    context, backend_name, readiness_decision.status, ExecutionRegionExecutionMode::UNSUPPORTED,
+				record_decision_event(
+				    backend_name, readiness_decision.status, ExecutionRegionExecutionMode::UNSUPPORTED,
 				    AttachExecutionRegionCandidateReason(candidate, std::move(reason),
 				                                         should_record_detailed_telemetry),
-				    readiness_decision.blocker, &lowered_region.ir, decision_time_us, 0, 0, &candidate,
+				    readiness_decision.blocker, &lowered_region.ir, decision_time_us, &candidate,
 				    ExecutionRunnerKind::VECTORIZED, &stage_timings, lowering_plan.SelectedSourceExecution(),
-				    lowering_plan.UsesScanFilters());
+				    lowering_plan.UsesScanFilters(), nullptr);
 			}
 			continue;
 		}
@@ -1452,13 +668,12 @@ unique_ptr<ExecutionRegionPlan> ExecutionRegionPlanner::Build(ClientContext &con
 		}
 		if (!physical_runner.UsesCompiledRunner()) {
 			if (should_record_decision_telemetry) {
-				auto decision_time_us = candidate_decision_time_us();
-				execution_region_manager.RecordEvent(
-				    context, backend_name, ExecutionRegionCompileStatus::SKIPPED,
-				    ExecutionRegionExecutionMode::UNSUPPORTED,
+				auto decision_time_us = decision_recorder.ClaimCandidateDecisionTime(candidate_trace);
+				record_decision_event(
+				    backend_name, ExecutionRegionCompileStatus::SKIPPED, ExecutionRegionExecutionMode::UNSUPPORTED,
 				    AttachExecutionRegionCandidateReason(candidate, physical_runner.reason,
 				                                         should_record_detailed_telemetry),
-				    physical_runner.blocker, &lowered_region.ir, decision_time_us, 0, 0, &candidate,
+				    physical_runner.blocker, &lowered_region.ir, decision_time_us, &candidate,
 				    physical_runner.SelectedRunner(), &stage_timings, lowering_plan.SelectedSourceExecution(),
 				    lowering_plan.UsesScanFilters(), &physical_runner.runner_cost);
 			}
@@ -1469,7 +684,7 @@ unique_ptr<ExecutionRegionPlan> ExecutionRegionPlanner::Build(ClientContext &con
 		selected_region.candidate_index = candidate_index;
 		selected_region.lowering_plan = std::move(lowering_plan);
 		selected_region.physical_runner = std::move(physical_runner);
-		selected_region.decision_time_us = candidate_decision_time_us();
+		selected_region.decision_time_us = decision_recorder.ClaimCandidateDecisionTime(candidate_trace);
 		selected_region.stage_timings = stage_timings;
 		AccumulateExecutionRegionOpenRequest(*plan, lowered_region, candidate, selected_region.lowering_plan);
 		selected_regions.push_back(std::move(selected_region));

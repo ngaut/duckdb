@@ -14,6 +14,17 @@ namespace duckdb {
 enum class ExecutionRegionCompileStatus : uint8_t { COMPILED, SKIPPED, UNSUPPORTED, UNAVAILABLE, DISABLED, ERROR };
 enum class ExecutionRegionExecutionMode : uint8_t { NONE, NATIVE, VECTORIZED, UNSUPPORTED };
 enum class ExecutionRegionLoweringKind : uint8_t { NATIVE, BOUNDARY };
+
+static constexpr const char *EXECUTION_REGION_BLOCKER_DUCKDB_SELECTED_VECTORIZED = "duckdb_selected_vectorized";
+static constexpr const char *EXECUTION_REGION_BLOCKER_NOT_FULLY_FUSED = "region_not_fully_fused";
+static constexpr const char *EXECUTION_REGION_BLOCKER_NO_EXECUTION_REGION_CANDIDATES = "no_execution_region_candidates";
+static constexpr const char *EXECUTION_REGION_BLOCKER_NO_EXECUTABLE_REGION_WORK = "no_executable_region_work";
+static constexpr const char *EXECUTION_REGION_BLOCKER_UNSUPPORTED_REGION_EXECUTION = "unsupported_region_execution";
+static constexpr const char *EXECUTION_REGION_BLOCKER_REGION_CONTAINS_NO_NATIVE_NODES =
+    "region_contains_no_native_nodes";
+static constexpr const char *EXECUTION_REGION_BLOCKER_FUSED_REGION_CONTRACT_HAS_BOUNDARIES =
+    "fused_region_contract_has_boundaries";
+
 enum class ExecutionRegionOperatorKind : uint8_t {
 	GENERIC,
 	TABLE_SCAN,

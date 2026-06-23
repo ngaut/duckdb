@@ -69,7 +69,7 @@ TEST_CASE("Execution region events are bounded and counters are cumulative", "[a
 	auto &manager = ExecutionRegionManager::Get(context);
 
 	ConfigureSljit(con, "auto");
-	REQUIRE_NO_FAIL(con.Query("SET jit_trace_decisions=true"));
+	ConfigureJitDecisionTrace(con);
 	REQUIRE_NO_FAIL(con.Query("SET jit_event_log_size=3"));
 	REQUIRE_NO_FAIL(con.Query("CREATE TEMP TABLE jit_event_bound_input AS "
 	                          "SELECT i::BIGINT AS i FROM range(1000) tbl(i)"));
@@ -130,14 +130,14 @@ TEST_CASE("Execution region events are bounded and counters are cumulative", "[a
 			continue;
 		}
 		found_auto_skip = true;
-		REQUIRE(counter.pipeline_cbo_time_us >= 0);
-		REQUIRE(counter.graph_build_time_us >= 0);
-		REQUIRE(counter.candidate_cbo_time_us >= 0);
-		REQUIRE(counter.backend_analysis_time_us >= 0);
-		REQUIRE(counter.codegen_time_us == 0);
-		REQUIRE(counter.executable_build_time_us == 0);
-		REQUIRE(counter.machine_codegen_time_us == 0);
-		REQUIRE(counter.kernel_build_time_us == 0);
+		REQUIRE(counter.stage_timings.pipeline_cbo_time_us >= 0);
+		REQUIRE(counter.stage_timings.graph_build_time_us >= 0);
+		REQUIRE(counter.stage_timings.candidate_cbo_time_us >= 0);
+		REQUIRE(counter.stage_timings.backend_analysis_time_us >= 0);
+		REQUIRE(counter.stage_timings.codegen_time_us == 0);
+		REQUIRE(counter.stage_timings.executable_build_time_us == 0);
+		REQUIRE(counter.stage_timings.machine_codegen_time_us == 0);
+		REQUIRE(counter.stage_timings.kernel_build_time_us == 0);
 		REQUIRE(counter.jit_runtime.lazy_codegen.codegen_time_us == 0);
 		REQUIRE(counter.jit_runtime.lazy_codegen.machine_codegen_time_us == 0);
 		REQUIRE(counter.jit_runtime.lazy_codegen.code_size == 0);
@@ -164,7 +164,7 @@ TEST_CASE("JIT auto vectorized skips avoid telemetry when unobserved", "[api][ji
 	REQUIRE(manager.GetEvents().empty());
 	REQUIRE(manager.GetCounters().empty());
 
-	REQUIRE_NO_FAIL(con.Query("SET jit_trace_decisions=true"));
+	ConfigureJitDecisionTrace(con);
 	REQUIRE_NO_FAIL(con.Query("SELECT i + 1 AS j FROM jit_unobserved_skip_input WHERE i > 500"));
 	REQUIRE(!manager.GetCounters().empty());
 }

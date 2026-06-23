@@ -88,6 +88,15 @@ enum JitEventColumn : idx_t {
 	JIT_EVENT_COLUMN_COUNT
 };
 
+static constexpr idx_t JIT_EVENT_STAGE_TIMING_COLUMN_OFFSET = JIT_EVENT_IR_LOWERING_TIME_US;
+static_assert(JIT_EVENT_KERNEL_BUILD_TIME_US - JIT_EVENT_STAGE_TIMING_COLUMN_OFFSET + 1 ==
+              EXECUTION_REGION_STAGE_TIMING_COLUMN_COUNT);
+static constexpr idx_t JIT_EVENT_RUNNER_COST_PROFILE_COLUMN_OFFSET = JIT_EVENT_RUNNER_COST_PROFILE;
+static_assert(JIT_EVENT_RUNNER_COST_FULL_PIPELINE - JIT_EVENT_RUNNER_COST_PROFILE_COLUMN_OFFSET + 1 ==
+              EXECUTION_REGION_RUNNER_COST_PROFILE_COLUMN_COUNT);
+static constexpr idx_t JIT_EVENT_RUNNER_COST_WORK_COLUMN_OFFSET = JIT_EVENT_RUNNER_COST_GENERATED_EXPRESSION_WORK;
+static_assert(JIT_EVENT_RUNNER_COST_NET_BENEFIT - JIT_EVENT_RUNNER_COST_WORK_COLUMN_OFFSET + 1 ==
+              EXECUTION_REGION_RUNNER_COST_WORK_COLUMN_COUNT);
 static constexpr idx_t JIT_EVENT_CANDIDATE_TRACE_COLUMN_OFFSET = JIT_EVENT_COLUMN_COUNT;
 static constexpr idx_t JIT_EVENT_PIPELINE_SHAPE_COLUMN =
     JIT_EVENT_CANDIDATE_TRACE_COLUMN_OFFSET + EXECUTION_REGION_CANDIDATE_TRACE_COLUMN_COUNT;
@@ -121,6 +130,24 @@ static void AppendJitEventCandidateColumn(Vector &output, idx_t column_id, const
 static void AppendJitEventColumn(Vector &output, idx_t column_id, const ExecutionRegionEvent &entry) {
 	if (column_id >= JIT_EVENT_CANDIDATE_TRACE_COLUMN_OFFSET && column_id < JIT_EVENT_PIPELINE_SHAPE_COLUMN) {
 		AppendJitEventCandidateColumn(output, column_id, entry);
+		return;
+	}
+	if (column_id >= JIT_EVENT_STAGE_TIMING_COLUMN_OFFSET &&
+	    column_id < JIT_EVENT_STAGE_TIMING_COLUMN_OFFSET + EXECUTION_REGION_STAGE_TIMING_COLUMN_COUNT) {
+		AppendExecutionRegionStageTimingColumn(output, column_id - JIT_EVENT_STAGE_TIMING_COLUMN_OFFSET,
+		                                       entry.stage_timings);
+		return;
+	}
+	if (column_id >= JIT_EVENT_RUNNER_COST_PROFILE_COLUMN_OFFSET &&
+	    column_id < JIT_EVENT_RUNNER_COST_PROFILE_COLUMN_OFFSET + EXECUTION_REGION_RUNNER_COST_PROFILE_COLUMN_COUNT) {
+		AppendExecutionRegionRunnerCostProfileColumn(output, column_id - JIT_EVENT_RUNNER_COST_PROFILE_COLUMN_OFFSET,
+		                                             entry.runner_cost);
+		return;
+	}
+	if (column_id >= JIT_EVENT_RUNNER_COST_WORK_COLUMN_OFFSET &&
+	    column_id < JIT_EVENT_RUNNER_COST_WORK_COLUMN_OFFSET + EXECUTION_REGION_RUNNER_COST_WORK_COLUMN_COUNT) {
+		AppendExecutionRegionRunnerCostWorkColumn(output, column_id - JIT_EVENT_RUNNER_COST_WORK_COLUMN_OFFSET,
+		                                          entry.runner_cost);
 		return;
 	}
 	switch (column_id) {
@@ -246,33 +273,6 @@ static void AppendJitEventColumn(Vector &output, idx_t column_id, const Executio
 	case JIT_EVENT_BLOCKER:
 		AppendExecutionRegionNullableString(output, entry.blocker);
 		return;
-	case JIT_EVENT_IR_LOWERING_TIME_US:
-		output.Append(Value::BIGINT(entry.ir_lowering_time_us));
-		return;
-	case JIT_EVENT_BACKEND_ANALYSIS_TIME_US:
-		output.Append(Value::BIGINT(entry.backend_analysis_time_us));
-		return;
-	case JIT_EVENT_CODEGEN_TIME_US:
-		output.Append(Value::BIGINT(entry.codegen_time_us));
-		return;
-	case JIT_EVENT_PIPELINE_CBO_TIME_US:
-		output.Append(Value::BIGINT(entry.pipeline_cbo_time_us));
-		return;
-	case JIT_EVENT_GRAPH_BUILD_TIME_US:
-		output.Append(Value::BIGINT(entry.graph_build_time_us));
-		return;
-	case JIT_EVENT_CANDIDATE_CBO_TIME_US:
-		output.Append(Value::BIGINT(entry.candidate_cbo_time_us));
-		return;
-	case JIT_EVENT_EXECUTABLE_BUILD_TIME_US:
-		output.Append(Value::BIGINT(entry.executable_build_time_us));
-		return;
-	case JIT_EVENT_MACHINE_CODEGEN_TIME_US:
-		output.Append(Value::BIGINT(entry.machine_codegen_time_us));
-		return;
-	case JIT_EVENT_KERNEL_BUILD_TIME_US:
-		output.Append(Value::BIGINT(entry.kernel_build_time_us));
-		return;
 	case JIT_EVENT_LAZY_CODEGEN_TIME_US:
 		output.Append(Value::BIGINT(entry.jit_runtime.lazy_codegen.codegen_time_us));
 		return;
@@ -292,77 +292,11 @@ static void AppendJitEventColumn(Vector &output, idx_t column_id, const Executio
 			output.Append(Value(LogicalType::VARCHAR));
 		}
 		return;
-	case JIT_EVENT_RUNNER_COST_PROFILE:
-		output.Append(Value::BOOLEAN(entry.runner_cost.present));
-		return;
-	case JIT_EVENT_RUNNER_COST_ROWS:
-		output.Append(Value::BIGINT(entry.runner_cost.rows));
-		return;
-	case JIT_EVENT_RUNNER_COST_BATCHES:
-		output.Append(Value::BIGINT(entry.runner_cost.batches));
-		return;
-	case JIT_EVENT_RUNNER_COST_EXPRESSION_COST:
-		output.Append(Value::BIGINT(entry.runner_cost.expression_cost));
-		return;
-	case JIT_EVENT_RUNNER_COST_GENERATED_STAGE_COUNT:
-		output.Append(Value::BIGINT(entry.runner_cost.generated_stage_count));
-		return;
-	case JIT_EVENT_RUNNER_COST_MATERIALIZATION_ELISION_COUNT:
-		output.Append(Value::BIGINT(entry.runner_cost.materialization_elision_count));
-		return;
-	case JIT_EVENT_RUNNER_COST_NATIVE_JOIN_STAGE_COUNT:
-		output.Append(Value::BIGINT(entry.runner_cost.native_join_stage_count));
-		return;
-	case JIT_EVENT_RUNNER_COST_NATIVE_AGGREGATE_STAGE_COUNT:
-		output.Append(Value::BIGINT(entry.runner_cost.native_aggregate_stage_count));
-		return;
-	case JIT_EVENT_RUNNER_COST_NATIVE_GROUPED_AGGREGATE_STAGE_COUNT:
-		output.Append(Value::BIGINT(entry.runner_cost.native_grouped_aggregate_stage_count));
-		return;
-	case JIT_EVENT_RUNNER_COST_NATIVE_SORT_STAGE_COUNT:
-		output.Append(Value::BIGINT(entry.runner_cost.native_sort_stage_count));
-		return;
-	case JIT_EVENT_RUNNER_COST_FULL_PIPELINE:
-		output.Append(Value::BOOLEAN(entry.runner_cost.full_pipeline));
-		return;
 	case JIT_EVENT_RUNNER_COST_GENERATED_WORK_CLASS:
 		output.Append(Value(PhysicalRunnerGeneratedWorkClassToString(entry.runner_cost.generated_work_class)));
 		return;
 	case JIT_EVENT_RUNNER_COST_NATIVE_PROTOCOL_CLASS:
 		output.Append(Value(PhysicalRunnerNativeProtocolClassToString(entry.runner_cost.native_protocol_class)));
-		return;
-	case JIT_EVENT_RUNNER_COST_GENERATED_EXPRESSION_WORK:
-		output.Append(Value::BIGINT(entry.runner_cost.generated_expression_work));
-		return;
-	case JIT_EVENT_RUNNER_COST_GENERATED_STAGE_WORK:
-		output.Append(Value::BIGINT(entry.runner_cost.generated_stage_work));
-		return;
-	case JIT_EVENT_RUNNER_COST_NATIVE_OPERATOR_WORK:
-		output.Append(Value::BIGINT(entry.runner_cost.native_operator_work));
-		return;
-	case JIT_EVENT_RUNNER_COST_MATERIALIZATION_ELISION_WORK:
-		output.Append(Value::BIGINT(entry.runner_cost.materialization_elision_work));
-		return;
-	case JIT_EVENT_RUNNER_COST_FULL_PIPELINE_WORK:
-		output.Append(Value::BIGINT(entry.runner_cost.full_pipeline_work));
-		return;
-	case JIT_EVENT_RUNNER_COST_STATEFUL_PROTOCOL_PENALTY:
-		output.Append(Value::BIGINT(entry.runner_cost.stateful_protocol_penalty));
-		return;
-	case JIT_EVENT_RUNNER_COST_SAVED_WORK_PER_BATCH:
-		output.Append(Value::BIGINT(entry.runner_cost.saved_work_per_batch));
-		return;
-	case JIT_EVENT_RUNNER_COST_ACCELERATED_RUNNER_BENEFIT:
-		output.Append(Value::BIGINT(entry.runner_cost.accelerated_runner_benefit));
-		return;
-	case JIT_EVENT_RUNNER_COST_STARTUP_COST:
-		output.Append(Value::BIGINT(entry.runner_cost.startup_cost));
-		return;
-	case JIT_EVENT_RUNNER_COST_REQUIRED_BENEFIT:
-		output.Append(Value::BIGINT(entry.runner_cost.required_benefit));
-		return;
-	case JIT_EVENT_RUNNER_COST_NET_BENEFIT:
-		output.Append(Value::BIGINT(entry.runner_cost.net_benefit));
 		return;
 	case JIT_EVENT_RUNNER_COST_SELECTED_ACCELERATED_RUNNER:
 		output.Append(Value::BOOLEAN(entry.runner_cost.selected_accelerated_runner));
@@ -425,15 +359,7 @@ static unique_ptr<FunctionData> DuckDBJitEventsBind(ClientContext &context, Tabl
 	AddExecutionRegionTableFunctionColumn(return_types, names, "candidate_end_operator_index", LogicalType::UBIGINT);
 	AddExecutionRegionTableFunctionColumn(return_types, names, "selected_runner", LogicalType::VARCHAR);
 	AddExecutionRegionTableFunctionColumn(return_types, names, "blocker", LogicalType::VARCHAR);
-	AddExecutionRegionTableFunctionColumn(return_types, names, "ir_lowering_time_us", LogicalType::BIGINT);
-	AddExecutionRegionTableFunctionColumn(return_types, names, "backend_analysis_time_us", LogicalType::BIGINT);
-	AddExecutionRegionTableFunctionColumn(return_types, names, "codegen_time_us", LogicalType::BIGINT);
-	AddExecutionRegionTableFunctionColumn(return_types, names, "pipeline_cbo_time_us", LogicalType::BIGINT);
-	AddExecutionRegionTableFunctionColumn(return_types, names, "graph_build_time_us", LogicalType::BIGINT);
-	AddExecutionRegionTableFunctionColumn(return_types, names, "candidate_cbo_time_us", LogicalType::BIGINT);
-	AddExecutionRegionTableFunctionColumn(return_types, names, "executable_build_time_us", LogicalType::BIGINT);
-	AddExecutionRegionTableFunctionColumn(return_types, names, "machine_codegen_time_us", LogicalType::BIGINT);
-	AddExecutionRegionTableFunctionColumn(return_types, names, "kernel_build_time_us", LogicalType::BIGINT);
+	AddExecutionRegionStageTimingColumns(return_types, names);
 	AddExecutionRegionTableFunctionColumn(return_types, names, "lazy_codegen_time_us", LogicalType::BIGINT);
 	AddExecutionRegionTableFunctionColumn(return_types, names, "lazy_machine_codegen_time_us", LogicalType::BIGINT);
 	AddExecutionRegionTableFunctionColumn(return_types, names, "lazy_code_size", LogicalType::UBIGINT);

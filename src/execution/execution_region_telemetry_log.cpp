@@ -49,34 +49,52 @@ static bool ExecutionRegionCounterMatches(const ExecutionRegionCounter &counter,
 	       counter.jit_runtime.hash_join_probe_layout == event.jit_runtime.hash_join_probe_layout;
 }
 
+static void AccumulateExecutionRegionRunnerCostTotals(ExecutionRegionRunnerCostTotals &target,
+                                                      const PhysicalRunnerCostProfile &source) {
+	if (!source.present) {
+		return;
+	}
+	target.present = true;
+	target.rows += source.rows;
+	target.batches += source.batches;
+	target.expression_cost += source.expression_cost;
+	target.generated_stage_count += source.generated_stage_count;
+	target.materialization_elision_count += source.materialization_elision_count;
+	target.native_join_stage_count += source.native_join_stage_count;
+	target.native_aggregate_stage_count += source.native_aggregate_stage_count;
+	target.native_grouped_aggregate_stage_count += source.native_grouped_aggregate_stage_count;
+	target.native_sort_stage_count += source.native_sort_stage_count;
+	target.full_pipeline = target.full_pipeline || source.full_pipeline;
+	target.generated_expression_work += source.generated_expression_work;
+	target.generated_stage_work += source.generated_stage_work;
+	target.native_operator_work += source.native_operator_work;
+	target.materialization_elision_work += source.materialization_elision_work;
+	target.full_pipeline_work += source.full_pipeline_work;
+	target.stateful_protocol_penalty += source.stateful_protocol_penalty;
+	target.saved_work_per_batch += source.saved_work_per_batch;
+	target.accelerated_runner_benefit += source.accelerated_runner_benefit;
+	target.startup_cost += source.startup_cost;
+	target.required_benefit += source.required_benefit;
+	target.net_benefit += source.net_benefit;
+	target.selected_accelerated_runner_count += source.selected_accelerated_runner ? 1 : 0;
+}
+
+static void AccumulateExecutionRegionStageTimings(ExecutionRegionStageTimings &target,
+                                                  const ExecutionRegionStageTimings &source) {
+	target.pipeline_cbo_time_us += source.pipeline_cbo_time_us;
+	target.graph_build_time_us += source.graph_build_time_us;
+	target.candidate_cbo_time_us += source.candidate_cbo_time_us;
+	target.ir_lowering_time_us += source.ir_lowering_time_us;
+	target.backend_analysis_time_us += source.backend_analysis_time_us;
+	target.codegen_time_us += source.codegen_time_us;
+	target.executable_build_time_us += source.executable_build_time_us;
+	target.machine_codegen_time_us += source.machine_codegen_time_us;
+	target.kernel_build_time_us += source.kernel_build_time_us;
+}
+
 static void AccumulateExecutionRegionCounter(ExecutionRegionCounter &counter, const ExecutionRegionEvent &event) {
 	counter.count++;
-	if (event.runner_cost.present) {
-		counter.has_runner_cost = true;
-		counter.runner_cost_rows += event.runner_cost.rows;
-		counter.runner_cost_batches += event.runner_cost.batches;
-		counter.runner_cost_expression_cost += event.runner_cost.expression_cost;
-		counter.runner_cost_generated_stage_count += event.runner_cost.generated_stage_count;
-		counter.runner_cost_materialization_elision_count += event.runner_cost.materialization_elision_count;
-		counter.runner_cost_native_join_stage_count += event.runner_cost.native_join_stage_count;
-		counter.runner_cost_native_aggregate_stage_count += event.runner_cost.native_aggregate_stage_count;
-		counter.runner_cost_native_grouped_aggregate_stage_count +=
-		    event.runner_cost.native_grouped_aggregate_stage_count;
-		counter.runner_cost_native_sort_stage_count += event.runner_cost.native_sort_stage_count;
-		counter.runner_cost_full_pipeline = counter.runner_cost_full_pipeline || event.runner_cost.full_pipeline;
-		counter.runner_cost_generated_expression_work += event.runner_cost.generated_expression_work;
-		counter.runner_cost_generated_stage_work += event.runner_cost.generated_stage_work;
-		counter.runner_cost_native_operator_work += event.runner_cost.native_operator_work;
-		counter.runner_cost_materialization_elision_work += event.runner_cost.materialization_elision_work;
-		counter.runner_cost_full_pipeline_work += event.runner_cost.full_pipeline_work;
-		counter.runner_cost_stateful_protocol_penalty += event.runner_cost.stateful_protocol_penalty;
-		counter.runner_cost_saved_work_per_batch += event.runner_cost.saved_work_per_batch;
-		counter.runner_cost_accelerated_runner_benefit += event.runner_cost.accelerated_runner_benefit;
-		counter.runner_cost_startup_cost += event.runner_cost.startup_cost;
-		counter.runner_cost_required_benefit += event.runner_cost.required_benefit;
-		counter.runner_cost_net_benefit += event.runner_cost.net_benefit;
-		counter.runner_cost_selected_accelerated_runner_count += event.runner_cost.selected_accelerated_runner ? 1 : 0;
-	}
+	AccumulateExecutionRegionRunnerCostTotals(counter.runner_cost, event.runner_cost);
 	counter.decision_time_us += event.decision_time_us;
 	counter.compile_time_us += event.compile_time_us;
 	counter.code_size += event.code_size;
@@ -92,15 +110,7 @@ static void AccumulateExecutionRegionCounter(ExecutionRegionCounter &counter, co
 	counter.sink_next_batch_runtime_time_us += event.sink_next_batch_runtime_time_us;
 	counter.generated_body_runtime_time_us += event.generated_body_runtime_time_us;
 	MergeExecutionRegionStageRuntime(counter.generated_stage_runtime, event.generated_stage_runtime);
-	counter.pipeline_cbo_time_us += event.pipeline_cbo_time_us;
-	counter.graph_build_time_us += event.graph_build_time_us;
-	counter.candidate_cbo_time_us += event.candidate_cbo_time_us;
-	counter.ir_lowering_time_us += event.ir_lowering_time_us;
-	counter.backend_analysis_time_us += event.backend_analysis_time_us;
-	counter.codegen_time_us += event.codegen_time_us;
-	counter.executable_build_time_us += event.executable_build_time_us;
-	counter.machine_codegen_time_us += event.machine_codegen_time_us;
-	counter.kernel_build_time_us += event.kernel_build_time_us;
+	AccumulateExecutionRegionStageTimings(counter.stage_timings, event.stage_timings);
 	AddExecutionRegionLazyCodegenMetrics(counter.jit_runtime.lazy_codegen, event.jit_runtime.lazy_codegen);
 }
 

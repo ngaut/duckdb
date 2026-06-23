@@ -37,6 +37,44 @@ enum class ExecutionRegionEventStatus : uint8_t {
 	SOURCE_CONTRACT
 };
 
+struct ExecutionRegionStageTimings {
+	int64_t pipeline_cbo_time_us = 0;
+	int64_t graph_build_time_us = 0;
+	int64_t candidate_cbo_time_us = 0;
+	int64_t ir_lowering_time_us = 0;
+	int64_t backend_analysis_time_us = 0;
+	int64_t codegen_time_us = 0;
+	int64_t executable_build_time_us = 0;
+	int64_t machine_codegen_time_us = 0;
+	int64_t kernel_build_time_us = 0;
+};
+
+struct ExecutionRegionRunnerCostTotals {
+	bool present = false;
+	int64_t rows = 0;
+	int64_t batches = 0;
+	int64_t expression_cost = 0;
+	int64_t generated_stage_count = 0;
+	int64_t materialization_elision_count = 0;
+	int64_t native_join_stage_count = 0;
+	int64_t native_aggregate_stage_count = 0;
+	int64_t native_grouped_aggregate_stage_count = 0;
+	int64_t native_sort_stage_count = 0;
+	bool full_pipeline = false;
+	int64_t generated_expression_work = 0;
+	int64_t generated_stage_work = 0;
+	int64_t native_operator_work = 0;
+	int64_t materialization_elision_work = 0;
+	int64_t full_pipeline_work = 0;
+	int64_t stateful_protocol_penalty = 0;
+	int64_t saved_work_per_batch = 0;
+	int64_t accelerated_runner_benefit = 0;
+	int64_t startup_cost = 0;
+	int64_t required_benefit = 0;
+	int64_t net_benefit = 0;
+	idx_t selected_accelerated_runner_count = 0;
+};
+
 struct ExecutionRegionEvent {
 	idx_t event_id = 0;
 	bool has_pipeline = false;
@@ -85,15 +123,7 @@ struct ExecutionRegionEvent {
 	string kernel_compile_reason;
 	int64_t kernel_compile_time_us = 0;
 	idx_t kernel_code_size = 0;
-	int64_t pipeline_cbo_time_us = 0;
-	int64_t graph_build_time_us = 0;
-	int64_t candidate_cbo_time_us = 0;
-	int64_t ir_lowering_time_us = 0;
-	int64_t backend_analysis_time_us = 0;
-	int64_t codegen_time_us = 0;
-	int64_t executable_build_time_us = 0;
-	int64_t machine_codegen_time_us = 0;
-	int64_t kernel_build_time_us = 0;
+	ExecutionRegionStageTimings stage_timings;
 	ExecutionRegionJitRuntimeMetrics jit_runtime;
 };
 
@@ -143,29 +173,7 @@ struct ExecutionRegionCounter {
 	ExecutionRegionEventStatus status_kind = ExecutionRegionEventStatus::NONE;
 	ExecutionRegionExecutionMode execution_mode_kind = ExecutionRegionExecutionMode::NONE;
 	ExecutionRunnerKind selected_runner_kind = ExecutionRunnerKind::VECTORIZED;
-	bool has_runner_cost = false;
-	int64_t runner_cost_rows = 0;
-	int64_t runner_cost_batches = 0;
-	int64_t runner_cost_expression_cost = 0;
-	int64_t runner_cost_generated_stage_count = 0;
-	int64_t runner_cost_materialization_elision_count = 0;
-	int64_t runner_cost_native_join_stage_count = 0;
-	int64_t runner_cost_native_aggregate_stage_count = 0;
-	int64_t runner_cost_native_grouped_aggregate_stage_count = 0;
-	int64_t runner_cost_native_sort_stage_count = 0;
-	bool runner_cost_full_pipeline = false;
-	int64_t runner_cost_generated_expression_work = 0;
-	int64_t runner_cost_generated_stage_work = 0;
-	int64_t runner_cost_native_operator_work = 0;
-	int64_t runner_cost_materialization_elision_work = 0;
-	int64_t runner_cost_full_pipeline_work = 0;
-	int64_t runner_cost_stateful_protocol_penalty = 0;
-	int64_t runner_cost_saved_work_per_batch = 0;
-	int64_t runner_cost_accelerated_runner_benefit = 0;
-	int64_t runner_cost_startup_cost = 0;
-	int64_t runner_cost_required_benefit = 0;
-	int64_t runner_cost_net_benefit = 0;
-	idx_t runner_cost_selected_accelerated_runner_count = 0;
+	ExecutionRegionRunnerCostTotals runner_cost;
 	string blocker;
 	idx_t count = 0;
 	int64_t decision_time_us = 0;
@@ -183,28 +191,8 @@ struct ExecutionRegionCounter {
 	int64_t sink_next_batch_runtime_time_us = 0;
 	int64_t generated_body_runtime_time_us = 0;
 	vector<ExecutionRegionRecordedStageRuntime> generated_stage_runtime;
-	int64_t pipeline_cbo_time_us = 0;
-	int64_t graph_build_time_us = 0;
-	int64_t candidate_cbo_time_us = 0;
-	int64_t ir_lowering_time_us = 0;
-	int64_t backend_analysis_time_us = 0;
-	int64_t codegen_time_us = 0;
-	int64_t executable_build_time_us = 0;
-	int64_t machine_codegen_time_us = 0;
-	int64_t kernel_build_time_us = 0;
+	ExecutionRegionStageTimings stage_timings;
 	ExecutionRegionJitRuntimeMetrics jit_runtime;
-};
-
-struct ExecutionRegionStageTimings {
-	int64_t pipeline_cbo_time_us = 0;
-	int64_t graph_build_time_us = 0;
-	int64_t candidate_cbo_time_us = 0;
-	int64_t ir_lowering_time_us = 0;
-	int64_t backend_analysis_time_us = 0;
-	int64_t codegen_time_us = 0;
-	int64_t executable_build_time_us = 0;
-	int64_t machine_codegen_time_us = 0;
-	int64_t kernel_build_time_us = 0;
 };
 
 class ExecutionRegionSuppressionGuard {

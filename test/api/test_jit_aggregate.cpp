@@ -44,7 +44,7 @@ TEST_CASE("JIT CBO counts aggregate protocol once in runtime planner facts", "[a
 	auto &manager = ExecutionRegionManager::Get(*con.context);
 
 	ConfigureSljit(con, "auto", false, true, false, 10000);
-	REQUIRE_NO_FAIL(con.Query("SET jit_trace_decisions=true"));
+	ConfigureJitDecisionTrace(con);
 	REQUIRE_NO_FAIL(con.Query("SET jit_cbo_generated_stage_benefit=10"));
 	REQUIRE_NO_FAIL(con.Query("SET jit_cbo_native_operator_stage_benefit=100"));
 	REQUIRE_NO_FAIL(con.Query("SET jit_cbo_materialization_elision_benefit=0"));
@@ -252,7 +252,7 @@ TEST_CASE("JIT auto CBO selects high-work filtered primitive aggregate fusion", 
 	auto &manager = ExecutionRegionManager::Get(*con.context);
 
 	ConfigureSljit(con, "auto", false, true, true, 10000);
-	REQUIRE_NO_FAIL(con.Query("SET jit_trace_decisions=true"));
+	ConfigureJitDecisionTrace(con);
 	REQUIRE_NO_FAIL(con.Query("SET jit_cbo_native_operator_stage_benefit=4096"));
 	REQUIRE_NO_FAIL(con.Query("SET jit_cbo_materialization_elision_benefit=4096"));
 	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_auto_filtered_aggregate_payload AS "

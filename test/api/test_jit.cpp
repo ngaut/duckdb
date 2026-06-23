@@ -76,11 +76,9 @@ TEST_CASE("JIT CBO keeps generated and native protocol stage costs partitioned",
 	input.full_pipeline = true;
 	input.has_accelerated_work = true;
 
-	PhysicalRunnerCostParameters parameters;
+	auto parameters = ZeroStartupRunnerCostParameters();
 	parameters.generated_stage_benefit = 10;
 	parameters.native_operator_stage_benefit = 100;
-	parameters.startup_base_cost = 0;
-	parameters.startup_margin_basis_points = 0;
 
 	auto profile = DuckDBCostModel::SelectPhysicalRunner(input, parameters);
 	REQUIRE(profile.generated_stage_count == 0);
@@ -97,10 +95,8 @@ TEST_CASE("JIT CBO charges full-pipeline native join glue before admitting nativ
 	input.full_pipeline = true;
 	input.has_accelerated_work = true;
 
-	PhysicalRunnerCostParameters parameters;
+	auto parameters = ZeroStartupRunnerCostParameters();
 	parameters.generated_stage_benefit = 100;
-	parameters.startup_base_cost = 0;
-	parameters.startup_margin_basis_points = 0;
 
 	auto profile = DuckDBCostModel::SelectPhysicalRunner(input, parameters);
 	REQUIRE(profile.saved_work_per_batch == 100);
@@ -126,10 +122,8 @@ TEST_CASE("JIT CBO admits explicit full-pipeline proof without duplicate stage c
 	input.full_pipeline = true;
 	input.has_accelerated_work = true;
 
-	PhysicalRunnerCostParameters parameters;
+	auto parameters = ZeroStartupRunnerCostParameters();
 	parameters.full_pipeline_benefit = 100;
-	parameters.startup_base_cost = 0;
-	parameters.startup_margin_basis_points = 0;
 
 	auto profile = DuckDBCostModel::SelectPhysicalRunner(input, parameters);
 	REQUIRE(profile.generated_stage_count == 0);
@@ -151,11 +145,9 @@ TEST_CASE("JIT CBO does not count native-contract projection glue as accelerated
 	input.native_protocol_class = PhysicalRunnerNativeProtocolClass::STATEFUL_SOURCE_SINK_PROTOCOL;
 	input.has_accelerated_work = true;
 
-	PhysicalRunnerCostParameters parameters;
+	auto parameters = ZeroStartupRunnerCostParameters();
 	parameters.generated_stage_benefit = 4096;
 	parameters.full_pipeline_benefit = 4096;
-	parameters.startup_base_cost = 0;
-	parameters.startup_margin_basis_points = 0;
 
 	auto profile = DuckDBCostModel::SelectPhysicalRunner(input, parameters);
 	REQUIRE(profile.full_pipeline);
@@ -197,12 +189,10 @@ TEST_CASE("JIT CBO charges full-pipeline grouped aggregate glue before admission
 	input.full_pipeline = true;
 	input.has_accelerated_work = true;
 
-	PhysicalRunnerCostParameters parameters;
+	auto parameters = ZeroStartupRunnerCostParameters();
 	parameters.generated_stage_benefit = 4096;
 	parameters.native_operator_stage_benefit = 4096;
 	parameters.full_pipeline_benefit = 4096;
-	parameters.startup_base_cost = 0;
-	parameters.startup_margin_basis_points = 0;
 
 	auto profile = DuckDBCostModel::SelectPhysicalRunner(input, parameters);
 	REQUIRE(profile.generated_expression_work == 100);
@@ -225,7 +215,7 @@ TEST_CASE("JIT auto policy selects high-work materialization through planner cos
 	auto &manager = test.manager;
 
 	ConfigureSljit(con, "auto", false, false);
-	REQUIRE_NO_FAIL(con.Query("SET jit_trace_decisions=true"));
+	ConfigureJitDecisionTrace(con);
 	REQUIRE_NO_FAIL(con.Query("SET jit_cbo_generated_stage_benefit=4096"));
 	REQUIRE_NO_FAIL(con.Query("SET jit_cbo_full_pipeline_benefit=4096"));
 	REQUIRE_NO_FAIL(con.Query("CREATE TEMP TABLE jit_auto_cost_input AS "
@@ -273,7 +263,7 @@ TEST_CASE("JIT auto planner cost skips cheap projections", "[api][jit]") {
 	auto &manager = test.manager;
 
 	ConfigureSljit(con, "auto");
-	REQUIRE_NO_FAIL(con.Query("SET jit_trace_decisions=true"));
+	ConfigureJitDecisionTrace(con);
 	REQUIRE_NO_FAIL(con.Query("CREATE TEMP TABLE jit_auto_cost_projection_input AS "
 	                          "SELECT i::BIGINT AS i FROM range(16) tbl(i)"));
 
@@ -305,7 +295,7 @@ TEST_CASE("JIT auto planner skips native-contract projection glue before sort", 
 	auto &manager = test.manager;
 
 	ConfigureSljitForCoverage(con, false, false, false, 10000);
-	REQUIRE_NO_FAIL(con.Query("SET jit_trace_decisions=true"));
+	ConfigureJitDecisionTrace(con);
 	CreateJitStatefulSortInput(con);
 
 	ClearJitTrace(manager, true);
@@ -315,38 +305,13 @@ TEST_CASE("JIT auto planner skips native-contract projection glue before sort", 
 	RequireJitEvent(
 	    manager,
 	    [](const ExecutionRegionEvent &event) {
-		    return IsSljitRegionEvent(event) && EventStatus(event) == "skipped" && event.has_candidate &&
-		           event.candidate_traits.source_kind == ExecutionRegionSourceKind::STATEFUL_OPERATOR &&
-		           event.candidate_traits.source_execution == ExecutionRegionSourceExecutionKind::SOURCE_CONTRACT &&
-		           event.candidate_traits.sink_kind == ExecutionRegionSinkKind::SORT &&
-		           event.candidate_traits.projection_count > 0 && event.candidate_traits.filter_count == 0 &&
-		           event.candidate_traits.operator_count == 0;
+		    return IsSljitRegionEvent(event) && EventStatus(event) == "skipped" &&
+		           IsStatefulSortProjectionGlueCandidate(event);
 	    },
-	    [](const ExecutionRegionEvent &event) {
-		    REQUIRE(event.runner_cost.present);
-		    REQUIRE(event.runner_cost.full_pipeline);
-		    REQUIRE(event.runner_cost.generated_work_class == PhysicalRunnerGeneratedWorkClass::PROJECTION_GLUE);
-		    REQUIRE(event.runner_cost.native_protocol_class ==
-		            PhysicalRunnerNativeProtocolClass::STATEFUL_SOURCE_SINK_PROTOCOL);
-		    REQUIRE(event.runner_cost.generated_expression_work == 0);
-		    REQUIRE(event.runner_cost.generated_stage_work == 0);
-		    REQUIRE(event.runner_cost.full_pipeline_work == 0);
-		    REQUIRE(event.runner_cost.stateful_protocol_penalty == 0);
-		    REQUIRE(event.runner_cost.saved_work_per_batch == 0);
-		    REQUIRE_FALSE(event.runner_cost.selected_accelerated_runner);
-		    REQUIRE(event.selected_runner == ExecutionRunnerKind::VECTORIZED);
-		    REQUIRE(event.blocker == "duckdb_selected_vectorized");
-	    });
+	    [](const ExecutionRegionEvent &event) { RequireNativeContractProjectionGlueSkipped(event); });
 
 	for (auto &event : manager.GetEvents()) {
-		const bool compiled_projection_glue =
-		    IsCompiledSljitRegionEvent(event) && event.has_candidate &&
-		    event.candidate_traits.source_kind == ExecutionRegionSourceKind::STATEFUL_OPERATOR &&
-		    event.candidate_traits.source_execution == ExecutionRegionSourceExecutionKind::SOURCE_CONTRACT &&
-		    event.candidate_traits.sink_kind == ExecutionRegionSinkKind::SORT &&
-		    event.candidate_traits.projection_count > 0 && event.candidate_traits.filter_count == 0 &&
-		    event.candidate_traits.operator_count == 0;
-		REQUIRE_FALSE(compiled_projection_glue);
+		REQUIRE_FALSE((IsCompiledSljitRegionEvent(event) && IsStatefulSortProjectionGlueCandidate(event)));
 	}
 }
 
@@ -365,8 +330,7 @@ TEST_CASE("JIT auto planner skips native-contract projection glue before region 
 	RequireJitEvent(
 	    manager,
 	    [](const ExecutionRegionEvent &event) {
-		    return IsSljitRegionEvent(event) && EventStatus(event) == "skipped" &&
-		           event.blocker == "duckdb_selected_vectorized" && event.runner_cost.present &&
+		    return IsSljitRegionEvent(event) && EventStatus(event) == "skipped" && IsVectorizedCboSkipEvent(event) &&
 		           event.runner_cost.generated_work_class == PhysicalRunnerGeneratedWorkClass::PROJECTION_GLUE &&
 		           event.runner_cost.native_protocol_class ==
 		               PhysicalRunnerNativeProtocolClass::STATEFUL_SOURCE_SINK_PROTOCOL &&
@@ -374,18 +338,13 @@ TEST_CASE("JIT auto planner skips native-contract projection glue before region 
 	    },
 	    [](const ExecutionRegionEvent &event) {
 		    REQUIRE_FALSE(event.has_candidate);
-		    REQUIRE(event.selected_runner == ExecutionRunnerKind::VECTORIZED);
-		    REQUIRE_FALSE(event.runner_cost.selected_accelerated_runner);
+		    RequireVectorizedCboSkip(event);
 		    REQUIRE(event.runner_cost.full_pipeline);
 		    REQUIRE(event.runner_cost.generated_stage_count == 1);
 		    REQUIRE(event.runner_cost.native_sort_stage_count == 0);
 		    REQUIRE(event.runner_cost.materialization_elision_count == 0);
 		    REQUIRE(event.runner_cost.saved_work_per_batch == 0);
-		    REQUIRE(event.pipeline_cbo_time_us >= 0);
-		    REQUIRE(event.graph_build_time_us == 0);
-		    REQUIRE(event.ir_lowering_time_us == 0);
-		    REQUIRE(event.candidate_cbo_time_us == 0);
-		    REQUIRE(event.backend_analysis_time_us == 0);
+		    RequirePipelineCboOnlyTiming(event);
 	    });
 }
 
@@ -395,7 +354,7 @@ TEST_CASE("JIT auto planner keeps division projection as compute before region g
 	auto &manager = test.manager;
 
 	ConfigureSljitForCoverage(con, false, false, false, 10000);
-	REQUIRE_NO_FAIL(con.Query("SET jit_trace_decisions=true"));
+	ConfigureJitDecisionTrace(con);
 	CreateJitStatefulSortInput(con);
 
 	ClearJitTrace(manager, true);
@@ -419,8 +378,8 @@ TEST_CASE("JIT auto planner keeps division projection as compute before region g
 	    },
 	    [](const ExecutionRegionEvent &event) {
 		    REQUIRE(event.runner_cost.generated_work_class == PhysicalRunnerGeneratedWorkClass::COMPUTE);
-		    REQUIRE(event.graph_build_time_us >= 0);
-		    REQUIRE(event.ir_lowering_time_us >= 0);
+		    REQUIRE(event.stage_timings.graph_build_time_us >= 0);
+		    REQUIRE(event.stage_timings.ir_lowering_time_us >= 0);
 	    });
 }
 
@@ -430,7 +389,7 @@ TEST_CASE("JIT generated work class does not label source-filter compute as proj
 	auto &manager = test.manager;
 
 	ConfigureSljitForCoverage(con, false, false, false, 10000);
-	REQUIRE_NO_FAIL(con.Query("SET jit_trace_decisions=true"));
+	ConfigureJitDecisionTrace(con);
 	REQUIRE_NO_FAIL(con.Query("CREATE TEMP TABLE jit_source_filter_class_input AS "
 	                          "SELECT i::BIGINT AS i FROM range(10000) tbl(i)"));
 
@@ -477,18 +436,11 @@ TEST_CASE("JIT auto planner skips region graph when CBO already selects vectoriz
 	RequireJitEvent(
 	    manager,
 	    [](const ExecutionRegionEvent &event) {
-		    return IsSljitRegionEvent(event) && EventStatus(event) == "skipped" &&
-		           event.blocker == "duckdb_selected_vectorized" && event.runner_cost.present;
+		    return IsSljitRegionEvent(event) && EventStatus(event) == "skipped" && IsVectorizedCboSkipEvent(event);
 	    },
 	    [](const ExecutionRegionEvent &event) {
-		    REQUIRE(event.selected_runner == ExecutionRunnerKind::VECTORIZED);
-		    REQUIRE(event.runner_cost.present);
-		    REQUIRE_FALSE(event.runner_cost.selected_accelerated_runner);
-		    REQUIRE(event.pipeline_cbo_time_us >= 0);
-		    REQUIRE(event.graph_build_time_us == 0);
-		    REQUIRE(event.candidate_cbo_time_us == 0);
-		    REQUIRE(event.ir_lowering_time_us == 0);
-		    REQUIRE(event.backend_analysis_time_us == 0);
+		    RequireVectorizedCboSkip(event);
+		    RequirePipelineCboOnlyTiming(event);
 		    REQUIRE(StringUtil::Contains(event.reason, "before region graph"));
 		    REQUIRE(StringUtil::Contains(event.reason, "region_graph=skipped"));
 	    });
@@ -517,18 +469,15 @@ TEST_CASE("JIT auto planner skips region graph when pipeline has no costed accel
 	RequireJitEvent(
 	    manager,
 	    [](const ExecutionRegionEvent &event) {
-		    return IsSljitRegionEvent(event) && EventStatus(event) == "skipped" &&
-		           event.blocker == "duckdb_selected_vectorized" &&
+		    return IsSljitRegionEvent(event) && EventStatus(event) == "skipped" && IsVectorizedCboSkipEvent(event) &&
 		           StringUtil::Contains(event.reason, "region_graph=skipped");
 	    },
 	    [](const ExecutionRegionEvent &event) {
-		    REQUIRE(event.selected_runner == ExecutionRunnerKind::VECTORIZED);
-		    REQUIRE(event.runner_cost.present);
-		    REQUIRE_FALSE(event.runner_cost.selected_accelerated_runner);
-		    REQUIRE(event.graph_build_time_us >= 0);
-		    REQUIRE(event.candidate_cbo_time_us == 0);
-		    REQUIRE(event.ir_lowering_time_us == 0);
-		    REQUIRE(event.backend_analysis_time_us == 0);
+		    RequireVectorizedCboSkip(event);
+		    REQUIRE(event.stage_timings.graph_build_time_us >= 0);
+		    REQUIRE(event.stage_timings.candidate_cbo_time_us == 0);
+		    REQUIRE(event.stage_timings.ir_lowering_time_us == 0);
+		    REQUIRE(event.stage_timings.backend_analysis_time_us == 0);
 	    });
 }
 
@@ -539,7 +488,7 @@ TEST_CASE("JIT diagnostic tracing analyzes fused contract boundary regions", "[a
 
 	ConfigureSljitForCoverage(con, false, true);
 	REQUIRE_NO_FAIL(con.Query("SET threads=1"));
-	REQUIRE_NO_FAIL(con.Query("SET jit_trace_decisions=true"));
+	ConfigureJitDecisionTrace(con);
 
 	ClearJitTrace(manager, true);
 	auto result = con.Query("SELECT sum(i) FROM range(1000) tbl(i)");
@@ -558,7 +507,8 @@ TEST_CASE("JIT diagnostic tracing analyzes fused contract boundary regions", "[a
 	    });
 
 	for (auto &event : manager.GetEvents()) {
-		if (!IsSljitRegionEvent(event) || event.blocker != "fused_region_contract_has_boundaries") {
+		if (!IsSljitRegionEvent(event) ||
+		    event.blocker != EXECUTION_REGION_BLOCKER_FUSED_REGION_CONTRACT_HAS_BOUNDARIES) {
 			continue;
 		}
 		REQUIRE(StringUtil::Contains(event.reason, "region-lowering"));
@@ -571,7 +521,7 @@ TEST_CASE("JIT auto planner cost skips default uncalibrated aggregate codegen", 
 	auto &manager = test.manager;
 
 	ConfigureSljit(con, "auto", false, false);
-	REQUIRE_NO_FAIL(con.Query("SET jit_trace_decisions=true"));
+	ConfigureJitDecisionTrace(con);
 	REQUIRE_NO_FAIL(con.Query("CREATE TEMP TABLE jit_auto_default_aggregate_input AS "
 	                          "SELECT (i % 5)::BIGINT AS i FROM range(1000000) tbl(i)"));
 
@@ -606,7 +556,7 @@ TEST_CASE("JIT auto planner cost uses configurable CBO settings", "[api][jit]") 
 	auto &manager = test.manager;
 
 	ConfigureSljit(con, "auto", false, false);
-	REQUIRE_NO_FAIL(con.Query("SET jit_trace_decisions=true"));
+	ConfigureJitDecisionTrace(con);
 	REQUIRE_NO_FAIL(con.Query("SET jit_cbo_generated_stage_benefit=4096"));
 	REQUIRE_NO_FAIL(con.Query("SET jit_cbo_startup_base_cost=1000000000"));
 	REQUIRE_NO_FAIL(con.Query("CREATE TEMP TABLE jit_auto_configured_cbo_input AS "
@@ -657,7 +607,7 @@ TEST_CASE("JIT auto compiles branchy native expressions", "[api][jit]") {
 	REQUIRE_NO_FAIL(*reference);
 
 	ConfigureSljitForCoverageSettings(con, false, true);
-	REQUIRE_NO_FAIL(con.Query("SET jit_trace_decisions=true"));
+	ConfigureJitDecisionTrace(con);
 	ClearJitTrace(manager, true);
 	REQUIRE_NO_FAIL(con.Query("CREATE TEMP TABLE jit_auto_branchy_expression_output AS "
 	                          "SELECT " +
@@ -678,7 +628,7 @@ TEST_CASE("JIT auto policy selects high-work ungrouped aggregate updates through
 	auto &manager = test.manager;
 
 	ConfigureSljit(con, "auto", false, true, true, 10000);
-	REQUIRE_NO_FAIL(con.Query("SET jit_trace_decisions=true"));
+	ConfigureJitDecisionTrace(con);
 	REQUIRE_NO_FAIL(con.Query("SET jit_cbo_native_operator_stage_benefit=4096"));
 	REQUIRE_NO_FAIL(con.Query("SET jit_cbo_full_pipeline_benefit=4096"));
 	REQUIRE_NO_FAIL(con.Query("CREATE TEMP TABLE jit_auto_aggregate_cbo_input AS "
@@ -734,7 +684,7 @@ TEST_CASE("JIT auto planner cost skips tiny filtered sums", "[api][jit]") {
 	auto &manager = test.manager;
 
 	ConfigureSljit(con, "auto");
-	REQUIRE_NO_FAIL(con.Query("SET jit_trace_decisions=true"));
+	ConfigureJitDecisionTrace(con);
 	REQUIRE_NO_FAIL(con.Query("CREATE TEMP TABLE jit_auto_filtered_sum_small AS "
 	                          "SELECT i::BIGINT AS a, (i % 17)::BIGINT AS b FROM range(1024) tbl(i)"));
 

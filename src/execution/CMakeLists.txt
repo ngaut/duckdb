@@ -15,6 +15,8 @@ add_library_unity(
   expression_executor.cpp
   expression_executor_state.cpp
   execution_region_backend.cpp
+  execution_region_cost_input.cpp
+  execution_region_decision.cpp
   execution_region_planner.cpp
   execution_region_manager.cpp
   execution_region_kernel.cpp

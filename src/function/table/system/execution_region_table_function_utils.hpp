@@ -10,6 +10,7 @@
 #include "duckdb/common/types/data_chunk.hpp"
 #include "duckdb/execution/execution_region_ir.hpp"
 #include "duckdb/execution/execution_region_runtime.hpp"
+#include "duckdb/execution/execution_region_telemetry.hpp"
 #include "duckdb/function/table_function.hpp"
 
 namespace duckdb {
@@ -74,6 +75,17 @@ static constexpr ExecutionRegionTraceColumn EXECUTION_REGION_RUNNER_COST_WORK_CO
 
 static constexpr idx_t EXECUTION_REGION_RUNNER_COST_WORK_COLUMN_COUNT =
     sizeof(EXECUTION_REGION_RUNNER_COST_WORK_COLUMNS) / sizeof(ExecutionRegionTraceColumn);
+
+static constexpr ExecutionRegionTraceColumn EXECUTION_REGION_STAGE_TIMING_COLUMNS[] = {
+    {"ir_lowering_time_us", LogicalTypeId::BIGINT},      {"backend_analysis_time_us", LogicalTypeId::BIGINT},
+    {"codegen_time_us", LogicalTypeId::BIGINT},          {"pipeline_cbo_time_us", LogicalTypeId::BIGINT},
+    {"graph_build_time_us", LogicalTypeId::BIGINT},      {"candidate_cbo_time_us", LogicalTypeId::BIGINT},
+    {"executable_build_time_us", LogicalTypeId::BIGINT}, {"machine_codegen_time_us", LogicalTypeId::BIGINT},
+    {"kernel_build_time_us", LogicalTypeId::BIGINT},
+};
+
+static constexpr idx_t EXECUTION_REGION_STAGE_TIMING_COLUMN_COUNT =
+    sizeof(EXECUTION_REGION_STAGE_TIMING_COLUMNS) / sizeof(ExecutionRegionTraceColumn);
 
 static constexpr ExecutionRegionTraceColumn EXECUTION_REGION_CANDIDATE_TRACE_COLUMNS[] = {
     {"candidate_signature_context", LogicalTypeId::VARCHAR},
@@ -152,6 +164,129 @@ static inline void AppendExecutionRegionNullableString(Vector &output, const str
 		output.Append(Value(LogicalType::VARCHAR));
 	} else {
 		output.Append(Value(value));
+	}
+}
+
+static inline void AddExecutionRegionStageTimingColumns(vector<LogicalType> &return_types, vector<string> &names) {
+	AddExecutionRegionTableFunctionColumns(return_types, names, EXECUTION_REGION_STAGE_TIMING_COLUMNS,
+	                                       EXECUTION_REGION_STAGE_TIMING_COLUMN_COUNT);
+}
+
+static inline void AppendExecutionRegionStageTimingColumn(Vector &output, idx_t column_id,
+                                                          const ExecutionRegionStageTimings &timings) {
+	switch (column_id) {
+	case 0:
+		output.Append(Value::BIGINT(timings.ir_lowering_time_us));
+		return;
+	case 1:
+		output.Append(Value::BIGINT(timings.backend_analysis_time_us));
+		return;
+	case 2:
+		output.Append(Value::BIGINT(timings.codegen_time_us));
+		return;
+	case 3:
+		output.Append(Value::BIGINT(timings.pipeline_cbo_time_us));
+		return;
+	case 4:
+		output.Append(Value::BIGINT(timings.graph_build_time_us));
+		return;
+	case 5:
+		output.Append(Value::BIGINT(timings.candidate_cbo_time_us));
+		return;
+	case 6:
+		output.Append(Value::BIGINT(timings.executable_build_time_us));
+		return;
+	case 7:
+		output.Append(Value::BIGINT(timings.machine_codegen_time_us));
+		return;
+	case 8:
+		output.Append(Value::BIGINT(timings.kernel_build_time_us));
+		return;
+	default:
+		throw InternalException("Unsupported execution region stage timing column index");
+	}
+}
+
+template <class RUNNER_COST>
+static inline void AppendExecutionRegionRunnerCostProfileColumn(Vector &output, idx_t column_id,
+                                                                const RUNNER_COST &cost) {
+	switch (column_id) {
+	case 0:
+		output.Append(Value::BOOLEAN(cost.present));
+		return;
+	case 1:
+		output.Append(Value::BIGINT(cost.rows));
+		return;
+	case 2:
+		output.Append(Value::BIGINT(cost.batches));
+		return;
+	case 3:
+		output.Append(Value::BIGINT(cost.expression_cost));
+		return;
+	case 4:
+		output.Append(Value::BIGINT(cost.generated_stage_count));
+		return;
+	case 5:
+		output.Append(Value::BIGINT(cost.materialization_elision_count));
+		return;
+	case 6:
+		output.Append(Value::BIGINT(cost.native_join_stage_count));
+		return;
+	case 7:
+		output.Append(Value::BIGINT(cost.native_aggregate_stage_count));
+		return;
+	case 8:
+		output.Append(Value::BIGINT(cost.native_grouped_aggregate_stage_count));
+		return;
+	case 9:
+		output.Append(Value::BIGINT(cost.native_sort_stage_count));
+		return;
+	case 10:
+		output.Append(Value::BOOLEAN(cost.full_pipeline));
+		return;
+	default:
+		throw InternalException("Unsupported execution region runner cost profile column index");
+	}
+}
+
+template <class RUNNER_COST>
+static inline void AppendExecutionRegionRunnerCostWorkColumn(Vector &output, idx_t column_id, const RUNNER_COST &cost) {
+	switch (column_id) {
+	case 0:
+		output.Append(Value::BIGINT(cost.generated_expression_work));
+		return;
+	case 1:
+		output.Append(Value::BIGINT(cost.generated_stage_work));
+		return;
+	case 2:
+		output.Append(Value::BIGINT(cost.native_operator_work));
+		return;
+	case 3:
+		output.Append(Value::BIGINT(cost.materialization_elision_work));
+		return;
+	case 4:
+		output.Append(Value::BIGINT(cost.full_pipeline_work));
+		return;
+	case 5:
+		output.Append(Value::BIGINT(cost.stateful_protocol_penalty));
+		return;
+	case 6:
+		output.Append(Value::BIGINT(cost.saved_work_per_batch));
+		return;
+	case 7:
+		output.Append(Value::BIGINT(cost.accelerated_runner_benefit));
+		return;
+	case 8:
+		output.Append(Value::BIGINT(cost.startup_cost));
+		return;
+	case 9:
+		output.Append(Value::BIGINT(cost.required_benefit));
+		return;
+	case 10:
+		output.Append(Value::BIGINT(cost.net_benefit));
+		return;
+	default:
+		throw InternalException("Unsupported execution region runner cost work column index");
 	}
 }
 

@@ -112,6 +112,10 @@ static void ConfigureJitCoverageCbo(Connection &con) {
 	REQUIRE_NO_FAIL(con.Query("SET jit_cbo_startup_margin_basis_points=0"));
 }
 
+static void ConfigureJitDecisionTrace(Connection &con) {
+	REQUIRE_NO_FAIL(con.Query("SET jit_trace_decisions=true"));
+}
+
 static void ConfigureSljitForCoverageSettings(Connection &con, bool verify = false, bool dump_ir = false,
                                               bool trace_runtime = false, idx_t event_log_size = 10000) {
 	ConfigureSljitSettings(con, "auto", verify, dump_ir, trace_runtime, event_log_size);
@@ -122,6 +126,13 @@ static void ConfigureSljitForCoverage(Connection &con, bool verify = false, bool
                                       bool trace_runtime = false, idx_t event_log_size = 10000) {
 	LoadSljit(con);
 	ConfigureSljitForCoverageSettings(con, verify, dump_ir, trace_runtime, event_log_size);
+}
+
+static PhysicalRunnerCostParameters ZeroStartupRunnerCostParameters() {
+	PhysicalRunnerCostParameters parameters;
+	parameters.startup_base_cost = 0;
+	parameters.startup_margin_basis_points = 0;
+	return parameters;
 }
 
 static void ClearJitTrace(ExecutionRegionManager &manager, bool counters = false) {
@@ -139,9 +150,50 @@ static bool IsCompiledSljitRegionEvent(const ExecutionRegionEvent &event) {
 	return IsSljitRegionEvent(event) && EventStatus(event) == "compiled";
 }
 
+static bool IsVectorizedCboSkipEvent(const ExecutionRegionEvent &event) {
+	return event.blocker == EXECUTION_REGION_BLOCKER_DUCKDB_SELECTED_VECTORIZED && event.runner_cost.present;
+}
+
+static bool IsStatefulSortProjectionGlueCandidate(const ExecutionRegionEvent &event) {
+	return event.has_candidate && event.candidate_traits.source_kind == ExecutionRegionSourceKind::STATEFUL_OPERATOR &&
+	       event.candidate_traits.source_execution == ExecutionRegionSourceExecutionKind::SOURCE_CONTRACT &&
+	       event.candidate_traits.sink_kind == ExecutionRegionSinkKind::SORT &&
+	       event.candidate_traits.projection_count > 0 && event.candidate_traits.filter_count == 0 &&
+	       event.candidate_traits.operator_count == 0;
+}
+
 static void RequireGeneratedMachineCodeRegion(const ExecutionRegionEvent &event) {
 	REQUIRE(EventExecutionMode(event) == "native");
 	REQUIRE(ExecutionRegionEventProfileCodeSize(event) > 0);
+}
+
+static void RequireVectorizedCboSkip(const ExecutionRegionEvent &event) {
+	REQUIRE(event.selected_runner == ExecutionRunnerKind::VECTORIZED);
+	REQUIRE(event.runner_cost.present);
+	REQUIRE_FALSE(event.runner_cost.selected_accelerated_runner);
+	REQUIRE(event.blocker == EXECUTION_REGION_BLOCKER_DUCKDB_SELECTED_VECTORIZED);
+}
+
+static void RequirePipelineCboOnlyTiming(const ExecutionRegionEvent &event) {
+	REQUIRE(event.stage_timings.pipeline_cbo_time_us >= 0);
+	REQUIRE(event.stage_timings.graph_build_time_us == 0);
+	REQUIRE(event.stage_timings.candidate_cbo_time_us == 0);
+	REQUIRE(event.stage_timings.ir_lowering_time_us == 0);
+	REQUIRE(event.stage_timings.backend_analysis_time_us == 0);
+}
+
+static void RequireNativeContractProjectionGlueSkipped(const ExecutionRegionEvent &event) {
+	REQUIRE(event.runner_cost.present);
+	REQUIRE(event.runner_cost.full_pipeline);
+	REQUIRE(event.runner_cost.generated_work_class == PhysicalRunnerGeneratedWorkClass::PROJECTION_GLUE);
+	REQUIRE(event.runner_cost.native_protocol_class ==
+	        PhysicalRunnerNativeProtocolClass::STATEFUL_SOURCE_SINK_PROTOCOL);
+	REQUIRE(event.runner_cost.generated_expression_work == 0);
+	REQUIRE(event.runner_cost.generated_stage_work == 0);
+	REQUIRE(event.runner_cost.full_pipeline_work == 0);
+	REQUIRE(event.runner_cost.stateful_protocol_penalty == 0);
+	REQUIRE(event.runner_cost.saved_work_per_batch == 0);
+	RequireVectorizedCboSkip(event);
 }
 
 static void RequireDuckDBScanFilteredSourceContract(const ExecutionRegionEvent &event) {

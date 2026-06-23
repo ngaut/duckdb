@@ -25,6 +25,10 @@ REQUIRED_FILES = (
     "src/include/duckdb/execution/execution_region_telemetry.hpp",
     "src/include/duckdb/parallel/execution_region_pipeline_adapter.hpp",
     "src/execution/execution_region_backend.cpp",
+    "src/execution/execution_region_cost_input.cpp",
+    "src/execution/execution_region_cost_input.hpp",
+    "src/execution/execution_region_decision.cpp",
+    "src/execution/execution_region_decision.hpp",
     "src/execution/execution_region_graph.cpp",
     "src/execution/execution_region_ir.cpp",
     "src/execution/execution_region_manager.cpp",
@@ -62,14 +66,44 @@ REQUIRED_TEXT = {
         "profile.saved_work_per_batch > 0",
     ),
     "src/execution/execution_region_planner.cpp": (
-        "BuildPhysicalRunnerCostInput",
+        "ExecutionRegionPlanner::Build",
+        "ExecutionRegionPlannerDecisionRecorder",
+        "SelectExecutionRegionPhysicalRunner",
+        "physical_runner.runner_cost",
+        "RecordEvent",
+    ),
+    "src/function/table/system/execution_region_table_function_utils.hpp": (
+        "AddExecutionRegionStageTimingColumns",
+        "AppendExecutionRegionStageTimingColumn",
+        "AppendExecutionRegionRunnerCostProfileColumn",
+        "AppendExecutionRegionRunnerCostWorkColumn",
+    ),
+    "src/function/table/system/duckdb_jit_events.cpp": (
+        "JIT_EVENT_STAGE_TIMING_COLUMN_OFFSET",
+        "AppendExecutionRegionStageTimingColumn",
+        "AppendExecutionRegionRunnerCostProfileColumn",
+        "AppendExecutionRegionRunnerCostWorkColumn",
+    ),
+    "src/function/table/system/duckdb_jit_counters.cpp": (
+        "JIT_COUNTER_STAGE_TIMING_COLUMN_OFFSET",
+        "AppendExecutionRegionStageTimingColumn",
+        "AppendExecutionRegionRunnerCostProfileColumn",
+        "AppendExecutionRegionRunnerCostWorkColumn",
+    ),
+    "src/execution/execution_region_decision.cpp": (
         "BuildPhysicalRunnerCostParameters",
         "SelectExecutionRegionPhysicalRunner",
-        "candidate.traits.expression_cost",
-        "candidate.stage_plan.stages",
         "DuckDBCostModel::SelectPhysicalRunner",
         "selection.runner_cost.selected_accelerated_runner",
         "duckdb_cbo selects compiled-vectorized physical runner",
+    ),
+    "src/execution/execution_region_cost_input.cpp": (
+        "ExecutionRegionRunnerCostInputBuilder",
+        "BuildExecutionRegionCandidateCostInput",
+        "TryBuildExecutionRegionPipelineCostInput",
+        "candidate.traits.expression_cost",
+        "candidate.stage_plan.stages",
+        "AddGeneratedExpressionWork",
     ),
     "src/include/duckdb/execution/execution_region_common.hpp": (
         "enum class ExecutionRegionABI",
@@ -293,19 +327,28 @@ def verify_candidate_stage_timing_attribution() -> None:
     ]
     if "auto stage_timings = shared_stage_timings;" in candidate_loop:
         raise AssertionError(f"{planner}: candidate loop copies shared stage timings into every candidate")
+    if "candidate_decision_time_us" in candidate_loop:
+        raise AssertionError(f"{planner}: candidate loop still uses inline shared timing attribution")
     required = (
-        "ExecutionRegionStageTimings stage_timings;",
-        "shared_stage_timings.pipeline_cbo_time_us + graph_build_time_us + region_lowering_time_us",
-        "stage_timings.pipeline_cbo_time_us = shared_stage_timings.pipeline_cbo_time_us;",
-        "stage_timings.graph_build_time_us = graph_build_time_us;",
-        "stage_timings.ir_lowering_time_us = region_lowering_time_us;",
-        "shared_decision_time_recorded = true;",
+        "auto candidate_trace = decision_recorder.BeginCandidate();",
+        "auto &stage_timings = candidate_trace.stage_timings;",
+        "decision_recorder.ClaimCandidateDecisionTime(candidate_trace)",
     )
     missing = [snippet for snippet in required if snippet not in candidate_loop]
     if missing:
         raise AssertionError(f"{planner}: candidate shared stage timing attribution missing {missing}")
+    recorder_required = (
+        "class ExecutionRegionPlannerDecisionRecorder",
+        "trace.stage_timings.pipeline_cbo_time_us = shared_stage_timings.pipeline_cbo_time_us;",
+        "trace.stage_timings.graph_build_time_us = shared_stage_timings.graph_build_time_us;",
+        "trace.stage_timings.ir_lowering_time_us = shared_stage_timings.ir_lowering_time_us;",
+        "shared_decision_time_recorded = true;",
+    )
+    missing = [snippet for snippet in recorder_required if snippet not in data]
+    if missing:
+        raise AssertionError(f"{planner}: candidate shared stage timing attribution missing {missing}")
     stage_copy = "selected_region.stage_timings = stage_timings;"
-    decision_copy = "selected_region.decision_time_us = candidate_decision_time_us();"
+    decision_copy = "selected_region.decision_time_us = decision_recorder.ClaimCandidateDecisionTime(candidate_trace);"
     if candidate_loop.index(stage_copy) < candidate_loop.index(decision_copy):
         raise AssertionError(
             f"{planner}: compiled candidate copies stage timings before shared decision timing is attributed"

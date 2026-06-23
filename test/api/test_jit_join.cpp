@@ -64,7 +64,7 @@ TEST_CASE("JIT CBO admits generated hash-build regions after generated work pays
 	auto &manager = ExecutionRegionManager::Get(*con.context);
 
 	ConfigureSljit(con, "auto", false, true, false, 10000);
-	REQUIRE_NO_FAIL(con.Query("SET jit_trace_decisions=true"));
+	ConfigureJitDecisionTrace(con);
 	ConfigureJitCoverageCbo(con);
 	REQUIRE_NO_FAIL(con.Query("SET jit_cbo_materialization_elision_benefit=0"));
 	REQUIRE_NO_FAIL(con.Query("SET jit_cbo_startup_base_cost=0"));
@@ -101,7 +101,7 @@ TEST_CASE("JIT CBO skips bodyless native hash-build candidates before backend an
 	auto &manager = ExecutionRegionManager::Get(*con.context);
 
 	ConfigureSljitForCoverage(con, false, false, false, 10000);
-	REQUIRE_NO_FAIL(con.Query("SET jit_trace_decisions=true"));
+	ConfigureJitDecisionTrace(con);
 	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_hash_bodyless_fact AS "
 	                          "SELECT i::BIGINT AS i, (i % 32)::BIGINT AS g, "
 	                          "(i * 13 % 997)::BIGINT AS payload FROM range(4096) tbl(i)"));
@@ -121,13 +121,10 @@ TEST_CASE("JIT CBO skips bodyless native hash-build candidates before backend an
 		           event.candidate_traits.sink_kind == ExecutionRegionSinkKind::HASH_JOIN_BUILD;
 	    },
 	    [](const ExecutionRegionEvent &event) {
-		    REQUIRE(event.selected_runner == ExecutionRunnerKind::VECTORIZED);
-		    REQUIRE(event.blocker == "duckdb_selected_vectorized");
-		    REQUIRE(event.backend_analysis_time_us == 0);
-		    REQUIRE(event.runner_cost.present);
+		    RequireVectorizedCboSkip(event);
+		    REQUIRE(event.stage_timings.backend_analysis_time_us == 0);
 		    REQUIRE(event.runner_cost.native_join_stage_count > 0);
 		    REQUIRE_FALSE(event.runner_cost.full_pipeline);
-		    REQUIRE_FALSE(event.runner_cost.selected_accelerated_runner);
 		    REQUIRE(StringUtil::Contains(event.reason, "backend_analysis=skipped"));
 	    });
 }
