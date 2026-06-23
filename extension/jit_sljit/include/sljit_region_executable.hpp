@@ -21,6 +21,8 @@ struct SljitExecutableRegionExpression {
 	vector<idx_t> input_source_indices;
 	unique_ptr<ExecutionRegionCodeHandle> code;
 	SljitNativeVectorFunction function = nullptr;
+	unique_ptr<ExecutionRegionCodeHandle> flat_code;
+	SljitNativeVectorFunction flat_function = nullptr;
 	unique_ptr<ExecutionRegionCodeHandle> select_code;
 	SljitNativeVectorFunction select_function = nullptr;
 	unique_ptr<ExecutionRegionCodeHandle> predicate_code;
@@ -33,6 +35,9 @@ struct SljitExecutableRegionExpression {
 		idx_t result = 0;
 		if (code) {
 			result += code->CodeSize();
+		}
+		if (flat_code) {
+			result += flat_code->CodeSize();
 		}
 		if (select_code) {
 			result += select_code->CodeSize();
@@ -175,6 +180,10 @@ struct SljitExecutableRegionOp {
 	SljitExecutableOrderSink order_sink;
 	SljitExecutableAggregateUpdate aggregate_update;
 	vector<SljitExecutableRegionExpression> projections;
+	vector<idx_t> flat_fused_projection_indices;
+	unique_ptr<ExecutionRegionCodeHandle> flat_fused_projection_code;
+	SljitNativeVectorFunction flat_fused_projection_function = nullptr;
+	bool flat_fused_projection_single_precision = false;
 
 	idx_t CodeSize() const {
 		idx_t result = 0;
@@ -195,6 +204,9 @@ struct SljitExecutableRegionOp {
 		}
 		if (kind == SljitNativeRegionOpKind::AGGREGATE_UPDATE) {
 			result += aggregate_update.CodeSize();
+		}
+		if (flat_fused_projection_code) {
+			result += flat_fused_projection_code->CodeSize();
 		}
 		for (auto &projection : projections) {
 			result += projection.CodeSize();

@@ -30,6 +30,8 @@
 #include "duckdb/storage/table/append_state.hpp"
 #include "duckdb/storage/table/scan_state.hpp"
 
+#include <cstring>
+
 namespace duckdb {
 
 static bool IsDirectNullCheckFilter(const TableFilter &filter) {
@@ -629,6 +631,314 @@ void ColumnData::AppendData(ColumnAppendState &state, UnifiedVectorFormat &vdata
 		offset += copied_elements;
 		append_count -= copied_elements;
 	}
+}
+
+static bool DirectAppendFixedSizeSupported(const LogicalType &type, idx_t &type_size) {
+	if (!DirectAppendSupportsFixedSizeType(type)) {
+		return false;
+	}
+	type_size = GetTypeIdSize(type.InternalType());
+	return true;
+}
+
+static bool DirectAppendSegmentReady(ColumnAppendState &state) {
+	if (!state.current || !state.append_state || !state.append_stats) {
+		return false;
+	}
+	auto &append_segment = state.current->GetNode();
+	if (append_segment.GetSegmentType() != ColumnSegmentType::TRANSIENT) {
+		return false;
+	}
+	auto &function = append_segment.GetCompressionFunction();
+	return function.type == CompressionType::COMPRESSION_UNCOMPRESSED && function.append;
+}
+
+static idx_t DirectAppendAvailableTupleCount(ColumnSegment &append_segment, idx_t max_tuple_count) {
+	return append_segment.count < max_tuple_count ? max_tuple_count - append_segment.count : 0;
+}
+
+static bool DirectAppendShouldStartNextSegment(ColumnSegment &append_segment, idx_t append_count,
+                                               idx_t max_tuple_count) {
+	return append_count > DirectAppendAvailableTupleCount(append_segment, max_tuple_count) &&
+	       append_segment.SegmentSize() >= append_segment.GetBlockSize();
+}
+
+static bool DirectAppendHasTupleCapacity(ColumnSegment &append_segment, idx_t append_count, idx_t max_tuple_count) {
+	return append_segment.count <= max_tuple_count && append_count <= max_tuple_count - append_segment.count;
+}
+
+bool ColumnData::TryStartNextDirectAppendSegment(ColumnAppendState &state) {
+	if (!DirectAppendSegmentReady(state)) {
+		return false;
+	}
+	auto &append_segment = state.current->GetNode();
+	auto next_start = state.current->GetRowStart() + append_segment.count;
+	{
+		lock_guard<mutex> guard(stats_lock);
+		state.FlushSegmentStats();
+	}
+	state.InitializeStats(GetType());
+	{
+		auto l = data.Lock();
+		AppendTransientSegment(l, next_start, append_segment);
+		state.current = data.GetLastSegment(l);
+		state.current->GetNode().InitializeAppend(state);
+	}
+	return DirectAppendSegmentReady(state);
+}
+
+bool ColumnData::TryGrowDirectAppendSegment(ColumnAppendState &state, idx_t required_segment_size,
+                                            bool initialize_validity) {
+	if (!DirectAppendSegmentReady(state)) {
+		return false;
+	}
+	auto &append_segment = state.current->GetNode();
+	if (append_segment.GetBlockOffset() != 0) {
+		return false;
+	}
+	auto segment_size = append_segment.SegmentSize();
+	if (required_segment_size <= segment_size) {
+		return true;
+	}
+	auto block_size = append_segment.GetBlockSize();
+	if (required_segment_size > block_size) {
+		return false;
+	}
+	auto grow_segment_size = required_segment_size;
+	if (segment_size < block_size) {
+		auto doubled_segment_size = segment_size <= block_size / 2 ? segment_size * 2 : block_size;
+		grow_segment_size = MaxValue(grow_segment_size, doubled_segment_size);
+	}
+	grow_segment_size = MinValue(grow_segment_size, block_size);
+	state.append_state.reset();
+	append_segment.Resize(grow_segment_size);
+	append_segment.InitializeAppend(state);
+	allocation_size += append_segment.SegmentSize() - segment_size;
+	if (initialize_validity) {
+		memset(state.append_state->handle.GetDataMutable() + segment_size, 0xFF,
+		       append_segment.SegmentSize() - segment_size);
+	}
+	return true;
+}
+
+bool ColumnData::TryPrepareDirectAppend(ColumnAppendState &state, idx_t append_count, data_ptr_t &target) {
+	target = nullptr;
+	idx_t type_size;
+	if (!DirectAppendFixedSizeSupported(GetType(), type_size) || !DirectAppendSegmentReady(state)) {
+		return false;
+	}
+	auto append_segment_ptr = state.current;
+	auto &append_segment = append_segment_ptr->GetNode();
+	if (append_segment.GetBlockOffset() != 0) {
+		return false;
+	}
+	auto max_tuple_count = append_segment.SegmentSize() / type_size;
+	if (DirectAppendShouldStartNextSegment(append_segment, append_count, max_tuple_count)) {
+		if (!TryStartNextDirectAppendSegment(state)) {
+			return false;
+		}
+		append_segment_ptr = state.current;
+	}
+	auto &target_segment = append_segment_ptr->GetNode();
+	auto required_segment_size = (target_segment.count + append_count) * type_size;
+	if (!TryGrowDirectAppendSegment(state, required_segment_size, false)) {
+		return false;
+	}
+	max_tuple_count = target_segment.SegmentSize() / type_size;
+	if (!DirectAppendHasTupleCapacity(target_segment, append_count, max_tuple_count)) {
+		return false;
+	}
+	target = state.append_state->handle.GetDataMutable() + target_segment.count * type_size;
+	return true;
+}
+
+template <class T>
+static void UpdateDirectAppendNumericStats(BaseStatistics &stats, const data_ptr_t target, idx_t count) {
+	auto values = reinterpret_cast<const T *>(target);
+	stats.SetHasNoNullFast();
+	for (idx_t row_idx = 0; row_idx < count; row_idx++) {
+		stats.UpdateNumericStats<T>(values[row_idx]);
+	}
+}
+
+template <class T>
+static void UpdateDirectAppendTypedStats(BaseStatistics &stats, T min, T max) {
+	stats.SetHasNoNullFast();
+	stats.UpdateNumericStats<T>(min);
+	stats.UpdateNumericStats<T>(max);
+}
+
+static bool CanUseDirectAppendTypedStats(optional_ptr<const DirectAppendColumnStats> direct_stats,
+                                         PhysicalType physical_type) {
+	if (!direct_stats || !direct_stats->has_stats) {
+		return false;
+	}
+	if (direct_stats->physical_type != physical_type) {
+		throw InternalException("ColumnData direct append stats type mismatch");
+	}
+	return true;
+}
+
+static void UpdateDirectAppendFloatStats(BaseStatistics &stats, const DirectAppendColumnStats &direct_stats) {
+	stats.SetHasNoNullFast();
+	stats.UpdateNumericStats<float>(direct_stats.float_min);
+	stats.UpdateNumericStats<float>(direct_stats.float_max);
+}
+
+static void UpdateDirectAppendDoubleStats(BaseStatistics &stats, const DirectAppendColumnStats &direct_stats) {
+	stats.SetHasNoNullFast();
+	stats.UpdateNumericStats<double>(direct_stats.double_min);
+	stats.UpdateNumericStats<double>(direct_stats.double_max);
+}
+
+void ColumnData::CommitDirectAppend(ColumnAppendState &state, data_ptr_t target, idx_t append_count,
+                                    optional_ptr<const DirectAppendColumnStats> direct_stats) {
+	if (!target || !DirectAppendSegmentReady(state)) {
+		throw InternalException("ColumnData direct append commit called without a prepared target");
+	}
+	switch (GetType().InternalType()) {
+	case PhysicalType::BOOL:
+		UpdateDirectAppendNumericStats<bool>(*state.append_stats, target, append_count);
+		break;
+	case PhysicalType::INT8:
+		if (CanUseDirectAppendTypedStats(direct_stats, GetType().InternalType())) {
+			UpdateDirectAppendTypedStats<int8_t>(*state.append_stats, int8_t(direct_stats->signed_min),
+			                                     int8_t(direct_stats->signed_max));
+		} else {
+			UpdateDirectAppendNumericStats<int8_t>(*state.append_stats, target, append_count);
+		}
+		break;
+	case PhysicalType::INT16:
+		if (CanUseDirectAppendTypedStats(direct_stats, GetType().InternalType())) {
+			UpdateDirectAppendTypedStats<int16_t>(*state.append_stats, int16_t(direct_stats->signed_min),
+			                                      int16_t(direct_stats->signed_max));
+		} else {
+			UpdateDirectAppendNumericStats<int16_t>(*state.append_stats, target, append_count);
+		}
+		break;
+	case PhysicalType::INT32:
+		if (CanUseDirectAppendTypedStats(direct_stats, GetType().InternalType())) {
+			UpdateDirectAppendTypedStats<int32_t>(*state.append_stats, int32_t(direct_stats->signed_min),
+			                                      int32_t(direct_stats->signed_max));
+		} else {
+			UpdateDirectAppendNumericStats<int32_t>(*state.append_stats, target, append_count);
+		}
+		break;
+	case PhysicalType::INT64:
+		if (CanUseDirectAppendTypedStats(direct_stats, GetType().InternalType())) {
+			UpdateDirectAppendTypedStats<int64_t>(*state.append_stats, direct_stats->signed_min,
+			                                      direct_stats->signed_max);
+		} else {
+			UpdateDirectAppendNumericStats<int64_t>(*state.append_stats, target, append_count);
+		}
+		break;
+	case PhysicalType::UINT8:
+		if (CanUseDirectAppendTypedStats(direct_stats, GetType().InternalType())) {
+			UpdateDirectAppendTypedStats<uint8_t>(*state.append_stats, uint8_t(direct_stats->unsigned_min),
+			                                      uint8_t(direct_stats->unsigned_max));
+		} else {
+			UpdateDirectAppendNumericStats<uint8_t>(*state.append_stats, target, append_count);
+		}
+		break;
+	case PhysicalType::UINT16:
+		if (CanUseDirectAppendTypedStats(direct_stats, GetType().InternalType())) {
+			UpdateDirectAppendTypedStats<uint16_t>(*state.append_stats, uint16_t(direct_stats->unsigned_min),
+			                                       uint16_t(direct_stats->unsigned_max));
+		} else {
+			UpdateDirectAppendNumericStats<uint16_t>(*state.append_stats, target, append_count);
+		}
+		break;
+	case PhysicalType::UINT32:
+		if (CanUseDirectAppendTypedStats(direct_stats, GetType().InternalType())) {
+			UpdateDirectAppendTypedStats<uint32_t>(*state.append_stats, uint32_t(direct_stats->unsigned_min),
+			                                       uint32_t(direct_stats->unsigned_max));
+		} else {
+			UpdateDirectAppendNumericStats<uint32_t>(*state.append_stats, target, append_count);
+		}
+		break;
+	case PhysicalType::UINT64:
+		if (CanUseDirectAppendTypedStats(direct_stats, GetType().InternalType())) {
+			UpdateDirectAppendTypedStats<uint64_t>(*state.append_stats, direct_stats->unsigned_min,
+			                                       direct_stats->unsigned_max);
+		} else {
+			UpdateDirectAppendNumericStats<uint64_t>(*state.append_stats, target, append_count);
+		}
+		break;
+	case PhysicalType::INT128:
+		if (CanUseDirectAppendTypedStats(direct_stats, GetType().InternalType())) {
+			UpdateDirectAppendTypedStats<hugeint_t>(*state.append_stats, direct_stats->hugeint_min,
+			                                        direct_stats->hugeint_max);
+		} else {
+			UpdateDirectAppendNumericStats<hugeint_t>(*state.append_stats, target, append_count);
+		}
+		break;
+	case PhysicalType::UINT128:
+		if (CanUseDirectAppendTypedStats(direct_stats, GetType().InternalType())) {
+			UpdateDirectAppendTypedStats<uhugeint_t>(*state.append_stats, direct_stats->uhugeint_min,
+			                                         direct_stats->uhugeint_max);
+		} else {
+			UpdateDirectAppendNumericStats<uhugeint_t>(*state.append_stats, target, append_count);
+		}
+		break;
+	case PhysicalType::FLOAT:
+		if (CanUseDirectAppendTypedStats(direct_stats, PhysicalType::FLOAT)) {
+			UpdateDirectAppendFloatStats(*state.append_stats, *direct_stats);
+		} else {
+			UpdateDirectAppendNumericStats<float>(*state.append_stats, target, append_count);
+		}
+		break;
+	case PhysicalType::DOUBLE:
+		if (CanUseDirectAppendTypedStats(direct_stats, PhysicalType::DOUBLE)) {
+			UpdateDirectAppendDoubleStats(*state.append_stats, *direct_stats);
+		} else {
+			UpdateDirectAppendNumericStats<double>(*state.append_stats, target, append_count);
+		}
+		break;
+	default:
+		throw InternalException("ColumnData direct append commit called for unsupported type");
+	}
+	auto &append_segment = state.current->GetNode();
+	append_segment.count += append_count;
+	this->count += append_count;
+}
+
+bool ColumnData::TryPrepareDirectAppendAllValid(ColumnAppendState &state, idx_t append_count) {
+	if (GetType().id() != LogicalTypeId::VALIDITY || !DirectAppendSegmentReady(state)) {
+		return false;
+	}
+	auto append_segment_ptr = state.current;
+	auto &append_segment = append_segment_ptr->GetNode();
+	auto max_tuple_count = append_segment.SegmentSize() / ValidityMask::STANDARD_MASK_SIZE * STANDARD_VECTOR_SIZE;
+	if (DirectAppendShouldStartNextSegment(append_segment, append_count, max_tuple_count)) {
+		if (!TryStartNextDirectAppendSegment(state)) {
+			return false;
+		}
+		append_segment_ptr = state.current;
+	}
+	auto &target_segment = append_segment_ptr->GetNode();
+	auto total_count = target_segment.count + append_count;
+	auto required_vectors = (total_count + STANDARD_VECTOR_SIZE - 1) / STANDARD_VECTOR_SIZE;
+	auto required_segment_size =
+	    MaxValue<idx_t>(ValidityMask::STANDARD_MASK_SIZE, required_vectors * ValidityMask::STANDARD_MASK_SIZE);
+	if (!TryGrowDirectAppendSegment(state, required_segment_size, true)) {
+		return false;
+	}
+	max_tuple_count = target_segment.SegmentSize() / ValidityMask::STANDARD_MASK_SIZE * STANDARD_VECTOR_SIZE;
+	return DirectAppendHasTupleCapacity(target_segment, append_count, max_tuple_count);
+}
+
+void ColumnData::CommitDirectAppendAllValid(ColumnAppendState &state, idx_t append_count) {
+	if (GetType().id() != LogicalTypeId::VALIDITY || !DirectAppendSegmentReady(state)) {
+		throw InternalException("ColumnData direct all-valid append commit called without a prepared validity segment");
+	}
+	auto &append_segment = state.current->GetNode();
+	auto max_tuple_count = append_segment.SegmentSize() / ValidityMask::STANDARD_MASK_SIZE * STANDARD_VECTOR_SIZE;
+	if (!DirectAppendHasTupleCapacity(append_segment, append_count, max_tuple_count)) {
+		throw InternalException("ColumnData direct all-valid append commit called without capacity");
+	}
+	state.append_stats->SetHasNoNullFast();
+	append_segment.count += append_count;
+	this->count += append_count;
 }
 
 void ColumnData::RevertAppend(row_t new_count_p) {

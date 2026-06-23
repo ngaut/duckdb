@@ -1141,6 +1141,151 @@ statement ok
 SET jit_dump_ir=true
 
 statement ok
+CREATE TEMP TABLE jit_float_projection_input AS
+SELECT i,
+       (i % 1000)::FLOAT AS a,
+       ((i % 17) + 1)::FLOAT AS b
+FROM range(4096) tbl(i)
+
+statement ok
+CREATE TEMP TABLE jit_float_projection_baseline AS
+SELECT coalesce(max(event_id), 0) AS base_event_id FROM duckdb_jit_events()
+
+statement ok
+CREATE TEMP TABLE jit_float_projection_output AS
+SELECT i,
+       a + b AS add_value,
+       a * b AS multiply_value,
+       a - b AS subtract_value,
+       a / 2::FLOAT AS divide_value
+FROM jit_float_projection_input
+
+statement ok
+SET enable_jit=false
+
+query I
+SELECT count(*)
+FROM (
+    SELECT * FROM jit_float_projection_output
+    EXCEPT ALL
+    SELECT i,
+           a + b AS add_value,
+           a * b AS multiply_value,
+           a - b AS subtract_value,
+           a / 2::FLOAT AS divide_value
+    FROM jit_float_projection_input
+) diff
+----
+0
+
+statement ok
+SET enable_jit=true
+
+query I
+SELECT count(*) > 0
+FROM duckdb_jit_events(), jit_float_projection_baseline
+WHERE event_id > base_event_id
+  AND backend_name='sljit'
+  AND status='compiled'
+  AND execution_mode='native'
+  AND code_size > 0
+  AND ir LIKE '%FLOAT%'
+----
+1
+
+statement ok
+SET jit_trace_runtime=true
+
+statement ok
+CREATE TEMP TABLE jit_float_direct_projection_baseline AS
+SELECT coalesce(max(event_id), 0) AS base_event_id FROM duckdb_jit_events()
+
+statement ok
+CREATE TEMP TABLE jit_float_direct_projection_output AS
+SELECT a + b AS add_value,
+       a * b AS multiply_value,
+       a - b AS subtract_value,
+       a / 2::FLOAT AS divide_value
+FROM jit_float_projection_input
+
+statement ok
+SET enable_jit=false
+
+query I
+SELECT count(*)
+FROM (
+    SELECT * FROM jit_float_direct_projection_output
+    EXCEPT ALL
+    SELECT a + b AS add_value,
+           a * b AS multiply_value,
+           a - b AS subtract_value,
+           a / 2::FLOAT AS divide_value
+    FROM jit_float_projection_input
+) diff
+----
+0
+
+statement ok
+SET enable_jit=true
+
+query I
+SELECT count(*) > 0
+FROM duckdb_jit_events(), jit_float_direct_projection_baseline
+WHERE event_id > base_event_id
+  AND backend_name='sljit'
+  AND phase='runtime'
+  AND status='executed'
+  AND execution_mode='native'
+  AND generated_stage_runtime_breakdown LIKE '%projection.direct_materialize_generated%'
+----
+1
+
+statement ok
+SET jit_trace_runtime=false
+
+statement ok
+CREATE TEMP TABLE jit_float_filter_baseline AS
+SELECT coalesce(max(event_id), 0) AS base_event_id FROM duckdb_jit_events()
+
+statement ok
+CREATE TEMP TABLE jit_float_filter_output AS
+SELECT i, a, b
+FROM jit_float_projection_input
+WHERE a > b
+  AND b <= 9::FLOAT
+
+statement ok
+SET enable_jit=false
+
+query I
+SELECT count(*)
+FROM (
+    SELECT * FROM jit_float_filter_output
+    EXCEPT ALL
+    SELECT i, a, b
+    FROM jit_float_projection_input
+    WHERE a > b
+      AND b <= 9::FLOAT
+) diff
+----
+0
+
+statement ok
+SET enable_jit=true
+
+query I
+SELECT count(*) > 0
+FROM duckdb_jit_events(), jit_float_filter_baseline
+WHERE event_id > base_event_id
+  AND backend_name='sljit'
+  AND status='compiled'
+  AND execution_mode='native'
+  AND code_size > 0
+  AND ir LIKE '%FLOAT%'
+----
+1
+
+statement ok
 CREATE TEMP TABLE jit_expression_tree_input AS
 SELECT (i % 10000)::DECIMAL(15,2) AS ext_price,
        (i % 10)::DECIMAL(15,2) AS discount

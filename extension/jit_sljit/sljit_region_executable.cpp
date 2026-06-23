@@ -145,6 +145,87 @@ static string NativeRegionIntegerBinaryOverflowMessage(SljitNativeIntegerKind ki
 	}
 }
 
+static bool IsDirectNativeFloatingSource(SljitNativeDoubleSourceKind kind) {
+	return kind == SljitNativeDoubleSourceKind::FLOAT || kind == SljitNativeDoubleSourceKind::DOUBLE;
+}
+
+static bool SljitProjectionReturnIsSinglePrecision(const SljitNativeRegionExpressionPlan &plan,
+                                                   bool &single_precision) {
+	switch (plan.return_type.InternalType()) {
+	case PhysicalType::FLOAT:
+		single_precision = true;
+		return true;
+	case PhysicalType::DOUBLE:
+		single_precision = false;
+		return true;
+	default:
+		return false;
+	}
+}
+
+static bool SljitCanUseFlatFusedFloatingProjection(const SljitExecutableRegionExpression &expr, bool single_precision) {
+	if (!expr.flat_function) {
+		return false;
+	}
+	auto &plan = expr.plan;
+	bool plan_single_precision;
+	if (!SljitProjectionReturnIsSinglePrecision(plan, plan_single_precision) ||
+	    plan_single_precision != single_precision) {
+		return false;
+	}
+	switch (plan.kind) {
+	case SljitNativeRegionExpressionKind::DOUBLE_BINARY_CONSTANT:
+		return IsDirectNativeFloatingSource(plan.double_source_kind);
+	case SljitNativeRegionExpressionKind::DOUBLE_BINARY_REFERENCES:
+		return IsDirectNativeFloatingSource(plan.double_source_kind) &&
+		       IsDirectNativeFloatingSource(plan.double_right_source_kind);
+	default:
+		return false;
+	}
+}
+
+static bool TryBuildFlatFusedFloatingProjection(SljitExecutableRegionOp &op, string &error) {
+	if (op.projections.size() < 2) {
+		return true;
+	}
+	vector<idx_t> float_indices;
+	vector<idx_t> double_indices;
+	for (idx_t projection_idx = 0; projection_idx < op.projections.size(); projection_idx++) {
+		auto &projection = op.projections[projection_idx];
+		if (SljitCanUseFlatFusedFloatingProjection(projection, true)) {
+			float_indices.push_back(projection_idx);
+		} else if (SljitCanUseFlatFusedFloatingProjection(projection, false)) {
+			double_indices.push_back(projection_idx);
+		}
+	}
+	auto single_precision = float_indices.size() >= double_indices.size();
+	auto &projection_indices = single_precision ? float_indices : double_indices;
+	if (projection_indices.size() < 2) {
+		return true;
+	}
+
+	vector<SljitNativeRegionExpressionPlan> projection_plans;
+	projection_plans.reserve(op.projections.size());
+	for (auto &projection : op.projections) {
+		projection_plans.push_back(projection.plan.Copy(false, false));
+	}
+	SljitNativeVectorFunction function = nullptr;
+	string fused_error;
+	auto code = BuildSljitNativeFlatDoubleProjection(projection_plans, projection_indices, function, fused_error);
+	if (!code || !function) {
+		if (fused_error.empty() || fused_error.rfind("SLJIT flat floating projection", 0) == 0) {
+			return true;
+		}
+		error = fused_error;
+		return false;
+	}
+	op.flat_fused_projection_indices = projection_indices;
+	op.flat_fused_projection_code = std::move(code);
+	op.flat_fused_projection_function = function;
+	op.flat_fused_projection_single_precision = single_precision;
+	return true;
+}
+
 static void PrepareExecutableRegionExpression(const SljitNativeRegionExpressionPlan &plan,
                                               SljitExecutableRegionExpression &expr) {
 	expr.plan = plan.Copy(false, false);
@@ -167,22 +248,76 @@ static bool CompilePreparedExecutableRegionExpression(SljitExecutableRegionExpre
 		expr.overflow_message = NativeRegionIntegerBinaryOverflowMessage(semantic.integer_kind, semantic.binary_op);
 		expr.code = BuildSljitNativeIntegerBinaryConstant(
 		    semantic.integer_kind, semantic.binary_op, semantic.constant_on_left, expr.function, error,
-		    semantic.check_result_range, semantic.result_min, semantic.result_max);
-		return expr.code != nullptr;
+		    semantic.check_arithmetic_overflow, semantic.check_result_range, semantic.result_min, semantic.result_max);
+		if (!expr.code) {
+			return false;
+		}
+		if (!semantic.check_arithmetic_overflow && !semantic.check_result_range &&
+		    (semantic.integer_kind == SljitNativeIntegerKind::INT32 ||
+		     semantic.integer_kind == SljitNativeIntegerKind::INT64)) {
+			expr.flat_code = BuildSljitNativeFlatIntegerBinaryConstant(
+			    semantic.integer_kind, semantic.binary_op, semantic.constant_on_left, expr.flat_function, error);
+			if (!expr.flat_code) {
+				return false;
+			}
+		}
+		return true;
 	case SljitNativeRegionExpressionKind::INTEGER_BINARY_REFERENCES:
 		expr.overflow_message = NativeRegionIntegerBinaryOverflowMessage(semantic.integer_kind, semantic.binary_op);
 		expr.code = BuildSljitNativeIntegerBinaryReferences(semantic.integer_kind, semantic.binary_op, expr.function,
-		                                                    error, semantic.check_result_range, semantic.result_min,
+		                                                    error, semantic.check_arithmetic_overflow,
+		                                                    semantic.check_result_range, semantic.result_min,
 		                                                    semantic.result_max);
-		return expr.code != nullptr;
-	case SljitNativeRegionExpressionKind::DOUBLE_BINARY_CONSTANT:
-		expr.code = BuildSljitNativeDoubleBinaryConstant(semantic.double_binary_op, semantic.double_source_kind,
-		                                                 semantic.constant_on_left, expr.function, error);
-		return expr.code != nullptr;
-	case SljitNativeRegionExpressionKind::DOUBLE_BINARY_REFERENCES:
+		if (!expr.code) {
+			return false;
+		}
+		if (!semantic.check_arithmetic_overflow && !semantic.check_result_range &&
+		    (semantic.integer_kind == SljitNativeIntegerKind::INT32 ||
+		     semantic.integer_kind == SljitNativeIntegerKind::INT64)) {
+			expr.flat_code = BuildSljitNativeFlatIntegerBinaryReferences(semantic.integer_kind, semantic.binary_op,
+			                                                             expr.flat_function, error);
+			if (!expr.flat_code) {
+				return false;
+			}
+		}
+		return true;
+	case SljitNativeRegionExpressionKind::DOUBLE_BINARY_CONSTANT: {
+		auto single_precision = semantic.return_type.InternalType() == PhysicalType::FLOAT;
+		expr.code =
+		    BuildSljitNativeDoubleBinaryConstant(semantic.double_binary_op, semantic.double_source_kind,
+		                                         semantic.constant_on_left, single_precision, expr.function, error);
+		if (!expr.code) {
+			return false;
+		}
+		if (IsDirectNativeFloatingSource(semantic.double_source_kind)) {
+			expr.flat_code = BuildSljitNativeFlatDoubleBinaryConstant(
+			    semantic.double_binary_op, semantic.double_source_kind, semantic.constant_on_left, single_precision,
+			    expr.flat_function, error);
+			if (!expr.flat_code) {
+				return false;
+			}
+		}
+		return true;
+	}
+	case SljitNativeRegionExpressionKind::DOUBLE_BINARY_REFERENCES: {
+		auto single_precision = semantic.return_type.InternalType() == PhysicalType::FLOAT;
 		expr.code = BuildSljitNativeDoubleBinaryReferences(semantic.double_binary_op, semantic.double_source_kind,
-		                                                   semantic.double_right_source_kind, expr.function, error);
-		return expr.code != nullptr;
+		                                                   semantic.double_right_source_kind, single_precision,
+		                                                   expr.function, error);
+		if (!expr.code) {
+			return false;
+		}
+		if (IsDirectNativeFloatingSource(semantic.double_source_kind) &&
+		    IsDirectNativeFloatingSource(semantic.double_right_source_kind)) {
+			expr.flat_code = BuildSljitNativeFlatDoubleBinaryReferences(
+			    semantic.double_binary_op, semantic.double_source_kind, semantic.double_right_source_kind,
+			    single_precision, expr.flat_function, error);
+			if (!expr.flat_code) {
+				return false;
+			}
+		}
+		return true;
+	}
 	case SljitNativeRegionExpressionKind::INTEGER_COMPARE_CONSTANT:
 		if (require_boolean) {
 			expr.select_code = BuildSljitNativeIntegerSelectConstant(
@@ -601,7 +736,7 @@ static bool BuildExecutableAggregateUpdatePayloadCode(const SljitNativeAggregate
 			}
 			code = BuildSljitNativeUngroupedSumInt64IntegerBinaryConstant(
 			    payload.integer_kind, payload.binary_op, payload.constant_on_left, function, error,
-			    payload.check_result_range, payload.result_min, payload.result_max);
+			    payload.check_arithmetic_overflow, payload.check_result_range, payload.result_min, payload.result_max);
 			break;
 		case SljitNativeRegionExpressionKind::INTEGER_BINARY_REFERENCES:
 			if (op.use_grouped_state_addresses) {
@@ -613,7 +748,9 @@ static bool BuildExecutableAggregateUpdatePayloadCode(const SljitNativeAggregate
 				return false;
 			}
 			code = BuildSljitNativeUngroupedSumInt64IntegerBinaryReferences(payload.integer_kind, payload.binary_op,
-			                                                                function, error, payload.check_result_range,
+			                                                                function, error,
+			                                                                payload.check_arithmetic_overflow,
+			                                                                payload.check_result_range,
 			                                                                payload.result_min, payload.result_max);
 			break;
 		case SljitNativeRegionExpressionKind::DOUBLE_BINARY_CONSTANT:
@@ -795,6 +932,9 @@ static bool BuildExecutableRegionOp(const SljitNativeRegionOpPlan &op, SljitExec
 				return false;
 			}
 			executable.projections.push_back(std::move(executable_projection));
+		}
+		if (!TryBuildFlatFusedFloatingProjection(executable, error)) {
+			return false;
 		}
 		return true;
 	default:

@@ -1103,6 +1103,56 @@ void RowGroup::Append(RowGroupAppendState &state, DataChunk &chunk, idx_t append
 	state.offset_in_row_group += append_count;
 }
 
+bool RowGroup::TryPrepareDirectAppend(RowGroupAppendState &state, const vector<LogicalType> &types, idx_t append_count,
+                                      vector<data_ptr_t> &targets) {
+	if (types.size() != GetColumnCount()) {
+		return false;
+	}
+	if (state.offset_in_row_group > GetRowGroupSize()) {
+		return false;
+	}
+	if (append_count > GetRowGroupSize() - state.offset_in_row_group) {
+		return false;
+	}
+	targets.assign(types.size(), nullptr);
+	for (idx_t i = 0; i < GetColumnCount(); i++) {
+		if (GetColumn(i).GetType() != types[i]) {
+			targets.clear();
+			return false;
+		}
+		auto &col_data = GetColumn(i);
+		auto prev_allocation_size = col_data.GetAllocationSize();
+		if (!col_data.TryPrepareDirectAppend(state.states[i], append_count, targets[i])) {
+			allocation_size += col_data.GetAllocationSize() - prev_allocation_size;
+			targets.clear();
+			return false;
+		}
+		allocation_size += col_data.GetAllocationSize() - prev_allocation_size;
+	}
+	return true;
+}
+
+void RowGroup::CommitDirectAppend(RowGroupAppendState &state, const vector<data_ptr_t> &targets, idx_t append_count,
+                                  optional_ptr<const vector<DirectAppendColumnStats>> stats) {
+	if (targets.size() != GetColumnCount()) {
+		throw InternalException("RowGroup direct append target count mismatch");
+	}
+	if (stats && stats->size() != GetColumnCount()) {
+		throw InternalException("RowGroup direct append stats count mismatch");
+	}
+	for (idx_t i = 0; i < GetColumnCount(); i++) {
+		auto &col_data = GetColumn(i);
+		auto prev_allocation_size = col_data.GetAllocationSize();
+		optional_ptr<const DirectAppendColumnStats> column_stats;
+		if (stats) {
+			column_stats = &(*stats)[i];
+		}
+		col_data.CommitDirectAppend(state.states[i], targets[i], append_count, column_stats);
+		allocation_size += col_data.GetAllocationSize() - prev_allocation_size;
+	}
+	state.offset_in_row_group += append_count;
+}
+
 void RowGroup::FinalizeAppend(RowGroupAppendState &state) {
 	auto &parent_stats = state.parent.stats;
 	if (parent_stats.Empty()) {

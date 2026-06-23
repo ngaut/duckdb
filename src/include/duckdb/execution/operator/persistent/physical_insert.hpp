@@ -48,6 +48,8 @@ public:
 	//! The chunk containing the tuples that become an update (if DO UPDATE)
 	DataChunk update_chunk;
 	TableAppendState local_append_state;
+	LocalAppendState direct_append_state;
+	bool direct_append_initialized = false;
 	//! An index to the optimistic row group collection vector of the local table storage for this transaction.
 	PhysicalIndex collection_index;
 	unique_ptr<OptimisticDataWriter> optimistic_writer;

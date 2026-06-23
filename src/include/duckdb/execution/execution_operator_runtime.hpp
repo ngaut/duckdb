@@ -13,6 +13,7 @@
 #include "duckdb/execution/execution_hash_join_runtime.hpp"
 #include "duckdb/execution/execution_region_ir.hpp"
 #include "duckdb/function/aggregate_primitive_update.hpp"
+#include "duckdb/storage/table/direct_append_stats.hpp"
 
 #include <chrono>
 
@@ -50,6 +51,9 @@ struct ExecutionAppendSinkState {
 	virtual ~ExecutionAppendSinkState() {
 	}
 	virtual SinkResultType Append(DataChunk &input) = 0;
+	virtual ExecutionOperatorBindResult PrepareDirectAppend(const vector<LogicalType> &types, idx_t count,
+	                                                        DirectAppendReservation &reservation, string &blocker);
+	virtual SinkResultType CommitDirectAppend(const DirectAppendReservation &reservation);
 };
 
 struct ExecutionOrderedSinkState {
@@ -309,6 +313,12 @@ DUCKDB_API SinkResultType ExecutionSinkNestedLoopJoinBuild(const ExecutionNested
                                                            DataChunk &input, DataChunk &right_condition);
 
 DUCKDB_API SinkResultType ExecutionSinkAppend(const ExecutionAppendSinkBinding &binding, DataChunk &input);
+DUCKDB_API ExecutionOperatorBindResult ExecutionPrepareDirectAppend(const ExecutionAppendSinkBinding &binding,
+                                                                    const vector<LogicalType> &types, idx_t count,
+                                                                    DirectAppendReservation &reservation,
+                                                                    string &blocker);
+DUCKDB_API SinkResultType ExecutionCommitDirectAppend(const ExecutionAppendSinkBinding &binding,
+                                                      const DirectAppendReservation &reservation);
 
 DUCKDB_API SinkResultType ExecutionSinkOrdered(const ExecutionOrderedSinkBinding &binding, DataChunk &order_keys,
                                                DataChunk &payload);

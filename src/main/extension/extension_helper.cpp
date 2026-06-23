@@ -36,6 +36,10 @@
 #define DUCKDB_EXTENSION_JIT_SLJIT_LINKED false
 #endif
 
+#ifndef DUCKDB_EXTENSION_JIT_METAL_LINKED
+#define DUCKDB_EXTENSION_JIT_METAL_LINKED false
+#endif
+
 #ifndef DUCKDB_EXTENSION_TPCH_LINKED
 #define DUCKDB_EXTENSION_TPCH_LINKED false
 #endif
@@ -74,6 +78,10 @@
 #include "parquet_extension.hpp"
 #endif
 
+#if DUCKDB_EXTENSION_JIT_METAL_LINKED
+#include "jit_metal_extension.hpp"
+#endif
+
 #if DUCKDB_EXTENSION_TPCH_LINKED
 #include "tpch_extension.hpp"
 #endif
@@ -102,6 +110,7 @@ static const DefaultExtension internal_extensions[] = {
     {"icu", "Adds support for time zones and collations using the ICU library", DUCKDB_EXTENSION_ICU_LINKED},
     {"excel", "Adds support for Excel-like format strings", DUCKDB_EXTENSION_EXCEL_LINKED},
     {"jit_sljit", "Adds SLJIT support for the DuckDB JIT framework", DUCKDB_EXTENSION_JIT_SLJIT_LINKED},
+    {"jit_metal", "Adds Apple Metal GPU support for the DuckDB JIT framework", DUCKDB_EXTENSION_JIT_METAL_LINKED},
     {"parquet", "Adds support for reading and writing parquet files", DUCKDB_EXTENSION_PARQUET_LINKED},
     {"tpch", "Adds TPC-H data generation and query support", DUCKDB_EXTENSION_TPCH_LINKED},
     {"tpcds", "Adds TPC-DS data generation and query support", DUCKDB_EXTENSION_TPCDS_LINKED},

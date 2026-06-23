@@ -27,6 +27,8 @@ const char *ExecutionRegionExecutionModeToString(ExecutionRegionExecutionMode mo
 		return "none";
 	case ExecutionRegionExecutionMode::NATIVE:
 		return "native";
+	case ExecutionRegionExecutionMode::GPU:
+		return "gpu";
 	case ExecutionRegionExecutionMode::VECTORIZED:
 		return "vectorized";
 	case ExecutionRegionExecutionMode::UNSUPPORTED:
@@ -42,13 +44,15 @@ const char *ExecutionRunnerKindToString(ExecutionRunnerKind kind) {
 		return "vectorized";
 	case ExecutionRunnerKind::COMPILED_VECTORIZED:
 		return "compiled_vectorized";
+	case ExecutionRunnerKind::COMPILED_GPU:
+		return "compiled_gpu";
 	default:
 		return "unknown";
 	}
 }
 
 bool ExecutionRegionExecutionModeIsCompiled(ExecutionRegionExecutionMode mode) {
-	return mode == ExecutionRegionExecutionMode::NATIVE;
+	return mode == ExecutionRegionExecutionMode::NATIVE || mode == ExecutionRegionExecutionMode::GPU;
 }
 
 const char *ExecutionRegionLoweringKindToString(ExecutionRegionLoweringKind kind) {

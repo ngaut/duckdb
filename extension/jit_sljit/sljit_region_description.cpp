@@ -192,9 +192,15 @@ static string DescribeNativeRegionExpression(const SljitNativeRegionExpressionPl
 		break;
 	case SljitNativeRegionExpressionKind::INTEGER_BINARY_CONSTANT:
 		result = NativeIntegerBinaryReason(expr.integer_kind, expr.binary_op);
+		if (!expr.check_arithmetic_overflow) {
+			result += ":no-overflow";
+		}
 		break;
 	case SljitNativeRegionExpressionKind::INTEGER_BINARY_REFERENCES:
 		result = NativeIntegerBinaryReferenceReason(expr.integer_kind, expr.binary_op);
+		if (!expr.check_arithmetic_overflow) {
+			result += ":no-overflow";
+		}
 		break;
 	case SljitNativeRegionExpressionKind::DOUBLE_BINARY_CONSTANT:
 		result = NativeDoubleBinaryReason(expr.double_binary_op);

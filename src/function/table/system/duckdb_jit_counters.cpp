@@ -67,7 +67,18 @@ enum JitCounterColumn : idx_t {
 	JIT_COUNTER_RUNNER_COST_STARTUP_COST,
 	JIT_COUNTER_RUNNER_COST_REQUIRED_BENEFIT,
 	JIT_COUNTER_RUNNER_COST_NET_BENEFIT,
+	JIT_COUNTER_RUNNER_COST_COMPILED_VECTORIZED_RUNNER_BENEFIT,
+	JIT_COUNTER_RUNNER_COST_COMPILED_VECTORIZED_STARTUP_COST,
+	JIT_COUNTER_RUNNER_COST_COMPILED_VECTORIZED_REQUIRED_BENEFIT,
+	JIT_COUNTER_RUNNER_COST_COMPILED_VECTORIZED_NET_BENEFIT,
+	JIT_COUNTER_RUNNER_COST_GPU_RUNNER_BENEFIT,
+	JIT_COUNTER_RUNNER_COST_GPU_TRANSFER_COST,
+	JIT_COUNTER_RUNNER_COST_GPU_STARTUP_COST,
+	JIT_COUNTER_RUNNER_COST_GPU_REQUIRED_BENEFIT,
+	JIT_COUNTER_RUNNER_COST_GPU_NET_BENEFIT,
 	JIT_COUNTER_RUNNER_COST_SELECTED_ACCELERATED_RUNNER_COUNT,
+	JIT_COUNTER_RUNNER_COST_SELECTED_COMPILED_VECTORIZED_RUNNER_COUNT,
+	JIT_COUNTER_RUNNER_COST_SELECTED_GPU_RUNNER_COUNT,
 	JIT_COUNTER_COLUMN_COUNT
 };
 
@@ -78,7 +89,7 @@ static constexpr idx_t JIT_COUNTER_RUNNER_COST_PROFILE_COLUMN_OFFSET = JIT_COUNT
 static_assert(JIT_COUNTER_RUNNER_COST_FULL_PIPELINE - JIT_COUNTER_RUNNER_COST_PROFILE_COLUMN_OFFSET + 1 ==
               EXECUTION_REGION_RUNNER_COST_PROFILE_COLUMN_COUNT);
 static constexpr idx_t JIT_COUNTER_RUNNER_COST_WORK_COLUMN_OFFSET = JIT_COUNTER_RUNNER_COST_GENERATED_EXPRESSION_WORK;
-static_assert(JIT_COUNTER_RUNNER_COST_NET_BENEFIT - JIT_COUNTER_RUNNER_COST_WORK_COLUMN_OFFSET + 1 ==
+static_assert(JIT_COUNTER_RUNNER_COST_GPU_NET_BENEFIT - JIT_COUNTER_RUNNER_COST_WORK_COLUMN_OFFSET + 1 ==
               EXECUTION_REGION_RUNNER_COST_WORK_COLUMN_COUNT);
 
 static void AddJitCounterRunnerCostColumns(vector<LogicalType> &return_types, vector<string> &names) {
@@ -87,6 +98,10 @@ static void AddJitCounterRunnerCostColumns(vector<LogicalType> &return_types, ve
 	AddExecutionRegionTableFunctionColumns(return_types, names, EXECUTION_REGION_RUNNER_COST_WORK_COLUMNS,
 	                                       EXECUTION_REGION_RUNNER_COST_WORK_COLUMN_COUNT);
 	AddExecutionRegionTableFunctionColumn(return_types, names, "runner_cost_selected_accelerated_runner_count",
+	                                      LogicalType::UBIGINT);
+	AddExecutionRegionTableFunctionColumn(return_types, names, "runner_cost_selected_compiled_vectorized_runner_count",
+	                                      LogicalType::UBIGINT);
+	AddExecutionRegionTableFunctionColumn(return_types, names, "runner_cost_selected_gpu_runner_count",
 	                                      LogicalType::UBIGINT);
 	D_ASSERT(names.size() == JIT_COUNTER_COLUMN_COUNT);
 	D_ASSERT(return_types.size() == JIT_COUNTER_COLUMN_COUNT);
@@ -199,6 +214,12 @@ static void AppendJitCounterColumn(Vector &output, idx_t column_id, const Execut
 		return;
 	case JIT_COUNTER_RUNNER_COST_SELECTED_ACCELERATED_RUNNER_COUNT:
 		output.Append(Value::UBIGINT(entry.runner_cost.selected_accelerated_runner_count));
+		return;
+	case JIT_COUNTER_RUNNER_COST_SELECTED_COMPILED_VECTORIZED_RUNNER_COUNT:
+		output.Append(Value::UBIGINT(entry.runner_cost.selected_compiled_vectorized_runner_count));
+		return;
+	case JIT_COUNTER_RUNNER_COST_SELECTED_GPU_RUNNER_COUNT:
+		output.Append(Value::UBIGINT(entry.runner_cost.selected_gpu_runner_count));
 		return;
 	default:
 		throw InternalException("Unsupported column index for duckdb_jit_counters");

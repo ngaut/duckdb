@@ -127,6 +127,23 @@ void StandardColumnData::AppendData(ColumnAppendState &state, UnifiedVectorForma
 	validity->AppendData(state.child_appends[0], vdata, count);
 }
 
+bool StandardColumnData::TryPrepareDirectAppend(ColumnAppendState &state, idx_t count, data_ptr_t &target) {
+	if (state.child_appends.size() != 1) {
+		return false;
+	}
+	return ColumnData::TryPrepareDirectAppend(state, count, target) &&
+	       validity->TryPrepareDirectAppendAllValid(state.child_appends[0], count);
+}
+
+void StandardColumnData::CommitDirectAppend(ColumnAppendState &state, data_ptr_t target, idx_t count,
+                                            optional_ptr<const DirectAppendColumnStats> stats) {
+	if (state.child_appends.size() != 1) {
+		throw InternalException("StandardColumnData direct append missing validity append state");
+	}
+	ColumnData::CommitDirectAppend(state, target, count, stats);
+	validity->CommitDirectAppendAllValid(state.child_appends[0], count);
+}
+
 void StandardColumnData::FinalizeAppend(ColumnDataFinalizeAppendState &finalize_state, ColumnAppendState &state) {
 	ColumnData::FinalizeAppend(finalize_state, state);
 	validity->FinalizeAppendLocked(finalize_state, state.child_appends[0]);

@@ -8,6 +8,7 @@
 #pragma once
 
 #include "duckdb/common/common.hpp"
+#include "duckdb/execution/execution_region_common.hpp"
 
 namespace duckdb {
 
@@ -39,16 +40,26 @@ struct PhysicalRunnerCostInput {
 };
 
 struct PhysicalRunnerCostParameters {
+	bool compiled_vectorized_runner_available = true;
 	idx_t generated_stage_benefit = 0;
 	idx_t native_operator_stage_benefit = 0;
 	idx_t materialization_elision_benefit = 0;
 	idx_t full_pipeline_benefit = 0;
 	idx_t startup_base_cost = 0;
 	idx_t startup_margin_basis_points = 0;
+	bool gpu_runner_available = false;
+	idx_t gpu_generated_stage_benefit = 0;
+	idx_t gpu_native_operator_stage_benefit = 0;
+	idx_t gpu_materialization_elision_benefit = 0;
+	idx_t gpu_full_pipeline_benefit = 0;
+	idx_t gpu_startup_base_cost = 0;
+	idx_t gpu_startup_margin_basis_points = 0;
+	idx_t gpu_transfer_cost_per_batch = 0;
 };
 
 struct PhysicalRunnerCostProfile {
 	bool present = false;
+	ExecutionRunnerKind selected_runner = ExecutionRunnerKind::VECTORIZED;
 	int64_t rows = 0;
 	int64_t batches = 0;
 	int64_t expression_cost = 0;
@@ -68,11 +79,22 @@ struct PhysicalRunnerCostProfile {
 	int64_t full_pipeline_work = 0;
 	int64_t stateful_protocol_penalty = 0;
 	int64_t saved_work_per_batch = 0;
+	int64_t compiled_vectorized_runner_benefit = 0;
+	int64_t compiled_vectorized_startup_cost = 0;
+	int64_t compiled_vectorized_required_benefit = 0;
+	int64_t compiled_vectorized_net_benefit = 0;
+	int64_t gpu_runner_benefit = 0;
+	int64_t gpu_transfer_cost = 0;
+	int64_t gpu_startup_cost = 0;
+	int64_t gpu_required_benefit = 0;
+	int64_t gpu_net_benefit = 0;
 	int64_t accelerated_runner_benefit = 0;
 	int64_t startup_cost = 0;
 	int64_t required_benefit = 0;
 	int64_t net_benefit = 0;
 	bool selected_accelerated_runner = false;
+	bool selected_compiled_vectorized_runner = false;
+	bool selected_gpu_runner = false;
 };
 
 class DuckDBCostModel {

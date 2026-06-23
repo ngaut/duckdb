@@ -84,7 +84,18 @@ enum JitEventColumn : idx_t {
 	JIT_EVENT_RUNNER_COST_STARTUP_COST,
 	JIT_EVENT_RUNNER_COST_REQUIRED_BENEFIT,
 	JIT_EVENT_RUNNER_COST_NET_BENEFIT,
+	JIT_EVENT_RUNNER_COST_COMPILED_VECTORIZED_RUNNER_BENEFIT,
+	JIT_EVENT_RUNNER_COST_COMPILED_VECTORIZED_STARTUP_COST,
+	JIT_EVENT_RUNNER_COST_COMPILED_VECTORIZED_REQUIRED_BENEFIT,
+	JIT_EVENT_RUNNER_COST_COMPILED_VECTORIZED_NET_BENEFIT,
+	JIT_EVENT_RUNNER_COST_GPU_RUNNER_BENEFIT,
+	JIT_EVENT_RUNNER_COST_GPU_TRANSFER_COST,
+	JIT_EVENT_RUNNER_COST_GPU_STARTUP_COST,
+	JIT_EVENT_RUNNER_COST_GPU_REQUIRED_BENEFIT,
+	JIT_EVENT_RUNNER_COST_GPU_NET_BENEFIT,
 	JIT_EVENT_RUNNER_COST_SELECTED_ACCELERATED_RUNNER,
+	JIT_EVENT_RUNNER_COST_SELECTED_COMPILED_VECTORIZED_RUNNER,
+	JIT_EVENT_RUNNER_COST_SELECTED_GPU_RUNNER,
 	JIT_EVENT_COLUMN_COUNT
 };
 
@@ -95,7 +106,7 @@ static constexpr idx_t JIT_EVENT_RUNNER_COST_PROFILE_COLUMN_OFFSET = JIT_EVENT_R
 static_assert(JIT_EVENT_RUNNER_COST_FULL_PIPELINE - JIT_EVENT_RUNNER_COST_PROFILE_COLUMN_OFFSET + 1 ==
               EXECUTION_REGION_RUNNER_COST_PROFILE_COLUMN_COUNT);
 static constexpr idx_t JIT_EVENT_RUNNER_COST_WORK_COLUMN_OFFSET = JIT_EVENT_RUNNER_COST_GENERATED_EXPRESSION_WORK;
-static_assert(JIT_EVENT_RUNNER_COST_NET_BENEFIT - JIT_EVENT_RUNNER_COST_WORK_COLUMN_OFFSET + 1 ==
+static_assert(JIT_EVENT_RUNNER_COST_GPU_NET_BENEFIT - JIT_EVENT_RUNNER_COST_WORK_COLUMN_OFFSET + 1 ==
               EXECUTION_REGION_RUNNER_COST_WORK_COLUMN_COUNT);
 static constexpr idx_t JIT_EVENT_CANDIDATE_TRACE_COLUMN_OFFSET = JIT_EVENT_COLUMN_COUNT;
 static constexpr idx_t JIT_EVENT_PIPELINE_SHAPE_COLUMN =
@@ -113,6 +124,9 @@ static void AddJitEventRunnerCostColumns(vector<LogicalType> &return_types, vect
 	                                       EXECUTION_REGION_RUNNER_COST_WORK_COLUMN_COUNT);
 	AddExecutionRegionTableFunctionColumn(return_types, names, "runner_cost_selected_accelerated_runner",
 	                                      LogicalType::BOOLEAN);
+	AddExecutionRegionTableFunctionColumn(return_types, names, "runner_cost_selected_compiled_vectorized_runner",
+	                                      LogicalType::BOOLEAN);
+	AddExecutionRegionTableFunctionColumn(return_types, names, "runner_cost_selected_gpu_runner", LogicalType::BOOLEAN);
 	D_ASSERT(names.size() == JIT_EVENT_COLUMN_COUNT);
 	D_ASSERT(return_types.size() == JIT_EVENT_COLUMN_COUNT);
 }
@@ -300,6 +314,12 @@ static void AppendJitEventColumn(Vector &output, idx_t column_id, const Executio
 		return;
 	case JIT_EVENT_RUNNER_COST_SELECTED_ACCELERATED_RUNNER:
 		output.Append(Value::BOOLEAN(entry.runner_cost.selected_accelerated_runner));
+		return;
+	case JIT_EVENT_RUNNER_COST_SELECTED_COMPILED_VECTORIZED_RUNNER:
+		output.Append(Value::BOOLEAN(entry.runner_cost.selected_compiled_vectorized_runner));
+		return;
+	case JIT_EVENT_RUNNER_COST_SELECTED_GPU_RUNNER:
+		output.Append(Value::BOOLEAN(entry.runner_cost.selected_gpu_runner));
 		return;
 	case JIT_EVENT_PIPELINE_SHAPE_COLUMN:
 		if (entry.has_pipeline) {

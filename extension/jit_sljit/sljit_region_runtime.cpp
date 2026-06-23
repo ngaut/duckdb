@@ -25,6 +25,7 @@
 #include "duckdb/main/client_context.hpp"
 
 #include <chrono>
+#include <cstring>
 #include <exception>
 
 namespace duckdb {
@@ -146,6 +147,10 @@ static string SljitRegionStageName(idx_t op_idx, SljitNativeRegionOpKind kind) {
 
 static string SljitRegionStageName(idx_t op_idx, SljitNativeRegionOpKind kind, const string &phase) {
 	return SljitRegionStageName(op_idx, kind) + "." + phase;
+}
+
+static bool SljitUnifiedFormatHasIdentitySelection(const UnifiedVectorFormat &format) {
+	return !format.sel || format.sel == FlatVector::IncrementalSelectionVector();
 }
 
 static constexpr const char *SLJIT_GENERATED_REGULAR_HASH_JOIN_PROBE_STAGE = "generated_regular_probe_function";
@@ -339,6 +344,80 @@ private:
 		vector<int64_t> constants;
 	};
 
+	struct SljitProjectionAdapterScratch {
+		void Prepare(idx_t projection_count, bool track_fused) {
+			source_formats.resize(projection_count);
+			right_source_formats.resize(projection_count);
+			source_data.assign(projection_count, nullptr);
+			right_source_data.assign(projection_count, nullptr);
+			result_data.assign(projection_count, nullptr);
+			float_constants.assign(projection_count, 0);
+			double_constants.assign(projection_count, 0);
+			collect_floating_stats = false;
+			if (track_fused) {
+				fused.assign(projection_count, 0);
+			} else {
+				fused.clear();
+			}
+			prepared_input_indices.clear();
+			prepared_input_data.clear();
+		}
+
+		void PrepareFloatingStats(idx_t projection_count, bool single_precision) {
+			collect_floating_stats = true;
+			if (single_precision) {
+				float_stats_min.assign(projection_count, 0);
+				float_stats_max.assign(projection_count, 0);
+				double_stats_min.clear();
+				double_stats_max.clear();
+			} else {
+				double_stats_min.assign(projection_count, 0);
+				double_stats_max.assign(projection_count, 0);
+				float_stats_min.clear();
+				float_stats_max.clear();
+			}
+			direct_append_stats.assign(projection_count, DirectAppendColumnStats());
+		}
+
+		void FinishFloatingStats(const vector<SljitExecutableRegionExpression> &projections, bool single_precision) {
+			if (!collect_floating_stats) {
+				direct_append_stats.clear();
+				return;
+			}
+			direct_append_stats.resize(projections.size());
+			for (idx_t projection_idx = 0; projection_idx < projections.size(); projection_idx++) {
+				auto &stats = direct_append_stats[projection_idx];
+				stats.has_stats = true;
+				if (single_precision) {
+					stats.physical_type = PhysicalType::FLOAT;
+					stats.float_min = float_stats_min[projection_idx];
+					stats.float_max = float_stats_max[projection_idx];
+				} else {
+					stats.physical_type = PhysicalType::DOUBLE;
+					stats.double_min = double_stats_min[projection_idx];
+					stats.double_max = double_stats_max[projection_idx];
+				}
+			}
+		}
+
+		vector<UnifiedVectorFormat> source_formats;
+		vector<UnifiedVectorFormat> right_source_formats;
+		vector<const_data_ptr_t> source_data;
+		vector<const_data_ptr_t> right_source_data;
+		vector<data_ptr_t> result_data;
+		vector<float> float_constants;
+		vector<double> double_constants;
+		vector<float> float_stats_min;
+		vector<float> float_stats_max;
+		vector<double> double_stats_min;
+		vector<double> double_stats_max;
+		vector<DirectAppendColumnStats> direct_append_stats;
+		vector<uint8_t> fused;
+		vector<idx_t> prepared_input_indices;
+		vector<const_data_ptr_t> prepared_input_data;
+		bool collect_floating_stats = false;
+	};
+
 	struct SljitExpressionAdapterScratch {
 		void PrepareExpressionTree(DataChunk &input, const SljitExecutableRegionExpression &expr,
 		                           SljitNativeVectorInput &native_input, const SelectionVector *execute_sel) {
@@ -416,6 +495,7 @@ private:
 			aggregate_payload_scratch.resize(ops.size());
 			aggregate_payload_lanes.resize(ops.size());
 			aggregate_payload_lanes_ready.resize(ops.size());
+			projection_adapter_scratch.resize(ops.size());
 			expression_adapter_scratch.resize(ops.size());
 			for (idx_t op_idx = 0; op_idx < ops.size(); op_idx++) {
 				auto &op = ops[op_idx];
@@ -532,6 +612,13 @@ private:
 				throw InternalException("SLJIT expression has no adapter scratch");
 			}
 			return expression_adapter_scratch[op_idx][expression_idx];
+		}
+
+		SljitProjectionAdapterScratch &ProjectionScratch(idx_t op_idx) {
+			if (op_idx >= projection_adapter_scratch.size()) {
+				throw InternalException("SLJIT projection has no adapter scratch");
+			}
+			return projection_adapter_scratch[op_idx];
 		}
 
 		SelectionVector &FilterSelection(idx_t op_idx) {
@@ -731,7 +818,9 @@ private:
 		vector<SljitAggregatePayloadAdapterScratch> aggregate_payload_scratch;
 		vector<vector<const ExecutionPrimitiveAggregateUpdateLane *>> aggregate_payload_lanes;
 		vector<bool> aggregate_payload_lanes_ready;
+		vector<SljitProjectionAdapterScratch> projection_adapter_scratch;
 		vector<vector<SljitExpressionAdapterScratch>> expression_adapter_scratch;
+		DirectAppendReservation direct_append_reservation;
 
 	private:
 		void InitializeExpressionAdapterScratch(idx_t op_idx, const SljitExecutableRegionOp &op) {
@@ -1032,6 +1121,14 @@ public:
 				}
 				continue;
 			}
+			SinkResultType direct_append_result;
+			if (TryExecuteProjectionDirectAppend(runtime, native_runtime, scratch, op_idx, op, *current,
+			                                     direct_append_result)) {
+				if (direct_append_result == SinkResultType::BLOCKED && !runtime.DeferredReason().empty()) {
+					return direct_append_result;
+				}
+				return native_runtime.RecordSinkResult(*current, direct_append_result);
+			}
 			auto &output = scratch.TemporaryChunk(op_idx);
 			output.Reset();
 			switch (op.kind) {
@@ -1319,17 +1416,738 @@ public:
 		ExecuteProjection(scratch, projection_op_idx, projection_op, input, output, execute_sel, selected_count);
 	}
 
+	static const_data_ptr_t OffsetFixedSizeData(const_data_ptr_t data, const LogicalType &type, idx_t offset) {
+		return data + offset * GetTypeIdSize(type.InternalType());
+	}
+
+	struct FixedDirectAppendSourceCache {
+		void Reset(idx_t column_count) {
+			source_indices.clear();
+			source_formats.clear();
+			source_indices.reserve(column_count);
+			source_formats.reserve(column_count);
+		}
+
+		vector<idx_t> source_indices;
+		vector<UnifiedVectorFormat> source_formats;
+	};
+
+	static bool PrepareFixedDirectAppendSource(DataChunk &input, idx_t source_index, idx_t source_offset, idx_t count,
+	                                           UnifiedVectorFormat &source_format) {
+		if (source_index >= input.ColumnCount()) {
+			throw InternalException("SLJIT fixed direct append source is out of range");
+		}
+		input.data[source_index].ToUnifiedFormat(source_format);
+		if (!SljitUnifiedFormatHasIdentitySelection(source_format)) {
+			return false;
+		}
+		if (source_format.validity.CanHaveNull() &&
+		    !source_format.validity.CheckAllValid(source_offset + count, source_offset)) {
+			return false;
+		}
+		return true;
+	}
+
+	static bool PrepareFixedDirectAppendFullSource(DataChunk &input, idx_t source_index,
+	                                               UnifiedVectorFormat &source_format) {
+		if (source_index >= input.ColumnCount()) {
+			throw InternalException("SLJIT fixed direct append source is out of range");
+		}
+		input.data[source_index].ToUnifiedFormat(source_format);
+		if (!SljitUnifiedFormatHasIdentitySelection(source_format)) {
+			return false;
+		}
+		if (source_format.validity.CanHaveNull() && !source_format.validity.CheckAllValid(input.size())) {
+			return false;
+		}
+		return true;
+	}
+
+	static bool PrepareFixedDirectAppendSource(DataChunk &input, idx_t source_index, idx_t source_offset, idx_t count,
+	                                           optional_ptr<FixedDirectAppendSourceCache> source_cache,
+	                                           UnifiedVectorFormat &local_source_format,
+	                                           UnifiedVectorFormat *&source_format) {
+		source_format = nullptr;
+		if (!source_cache) {
+			if (!PrepareFixedDirectAppendSource(input, source_index, source_offset, count, local_source_format)) {
+				return false;
+			}
+			source_format = &local_source_format;
+			return true;
+		}
+		for (idx_t prepared_idx = 0; prepared_idx < source_cache->source_indices.size(); prepared_idx++) {
+			if (source_cache->source_indices[prepared_idx] == source_index) {
+				source_format = &source_cache->source_formats[prepared_idx];
+				return true;
+			}
+		}
+		source_cache->source_formats.emplace_back();
+		auto &prepared_format = source_cache->source_formats.back();
+		if (!PrepareFixedDirectAppendFullSource(input, source_index, prepared_format)) {
+			source_cache->source_formats.pop_back();
+			return false;
+		}
+		source_cache->source_indices.push_back(source_index);
+		source_format = &prepared_format;
+		return true;
+	}
+
+	static bool FixedDirectAppendSignedStatsType(PhysicalType physical_type) {
+		switch (physical_type) {
+		case PhysicalType::INT8:
+		case PhysicalType::INT16:
+		case PhysicalType::INT32:
+		case PhysicalType::INT64:
+			return true;
+		default:
+			return false;
+		}
+	}
+
+	template <class T>
+	static void ScanFixedDirectAppendSignedStats(const UnifiedVectorFormat &source_format, idx_t source_offset,
+	                                             idx_t count, int64_t &min_value, int64_t &max_value) {
+		D_ASSERT(count > 0);
+		auto values = reinterpret_cast<const T *>(source_format.data) + source_offset;
+		auto local_min = values[0];
+		auto local_max = values[0];
+		for (idx_t row_idx = 1; row_idx < count; row_idx++) {
+			auto value = values[row_idx];
+			local_min = MinValue<T>(local_min, value);
+			local_max = MaxValue<T>(local_max, value);
+		}
+		min_value = int64_t(local_min);
+		max_value = int64_t(local_max);
+	}
+
+	static bool TryScanFixedDirectAppendSourceStats(DataChunk &input, idx_t source_index, idx_t source_offset,
+	                                                idx_t count, vector<DirectAppendColumnStats> &source_stats,
+	                                                optional_ptr<FixedDirectAppendSourceCache> source_cache) {
+		if (source_index >= input.ColumnCount() || source_index >= source_stats.size() || count == 0) {
+			return false;
+		}
+		auto &cached_stats = source_stats[source_index];
+		if (cached_stats.has_stats) {
+			return true;
+		}
+		auto physical_type = input.data[source_index].GetType().InternalType();
+		if (!FixedDirectAppendSignedStatsType(physical_type)) {
+			return false;
+		}
+		UnifiedVectorFormat local_source_format;
+		UnifiedVectorFormat *source_format;
+		if (!PrepareFixedDirectAppendSource(input, source_index, source_offset, count, source_cache,
+		                                    local_source_format, source_format)) {
+			return false;
+		}
+		cached_stats.has_stats = true;
+		cached_stats.physical_type = physical_type;
+		switch (physical_type) {
+		case PhysicalType::INT8:
+			ScanFixedDirectAppendSignedStats<int8_t>(*source_format, source_offset, count, cached_stats.signed_min,
+			                                         cached_stats.signed_max);
+			return true;
+		case PhysicalType::INT16:
+			ScanFixedDirectAppendSignedStats<int16_t>(*source_format, source_offset, count, cached_stats.signed_min,
+			                                          cached_stats.signed_max);
+			return true;
+		case PhysicalType::INT32:
+			ScanFixedDirectAppendSignedStats<int32_t>(*source_format, source_offset, count, cached_stats.signed_min,
+			                                          cached_stats.signed_max);
+			return true;
+		case PhysicalType::INT64:
+			ScanFixedDirectAppendSignedStats<int64_t>(*source_format, source_offset, count, cached_stats.signed_min,
+			                                          cached_stats.signed_max);
+			return true;
+		default:
+			cached_stats = DirectAppendColumnStats();
+			return false;
+		}
+	}
+
+	static bool TryAddFixedStatsBound(int64_t left, int64_t right, int64_t &result) {
+		if ((right > 0 && left > NumericLimits<int64_t>::Maximum() - right) ||
+		    (right < 0 && left < NumericLimits<int64_t>::Minimum() - right)) {
+			return false;
+		}
+		result = left + right;
+		return true;
+	}
+
+	static bool TrySubtractFixedStatsBound(int64_t left, int64_t right, int64_t &result) {
+		if ((right < 0 && left > NumericLimits<int64_t>::Maximum() + right) ||
+		    (right > 0 && left < NumericLimits<int64_t>::Minimum() + right)) {
+			return false;
+		}
+		result = left - right;
+		return true;
+	}
+
+	static bool SetFixedSignedDirectAppendStats(DirectAppendColumnStats &stats, PhysicalType physical_type,
+	                                            int64_t min_value, int64_t max_value) {
+		if (!FixedDirectAppendSignedStatsType(physical_type)) {
+			return false;
+		}
+		stats = DirectAppendColumnStats();
+		stats.has_stats = true;
+		stats.physical_type = physical_type;
+		stats.signed_min = min_value;
+		stats.signed_max = max_value;
+		return true;
+	}
+
+	static bool TryDeriveFixedBinaryConstantStats(const SljitNativeRegionExpressionPlan &plan,
+	                                              const DirectAppendColumnStats &source_stats,
+	                                              DirectAppendColumnStats &result_stats) {
+		int64_t min_value;
+		int64_t max_value;
+		switch (plan.binary_op) {
+		case SljitNativeIntegerBinaryOp::ADD:
+			if (!TryAddFixedStatsBound(source_stats.signed_min, plan.constant, min_value) ||
+			    !TryAddFixedStatsBound(source_stats.signed_max, plan.constant, max_value)) {
+				return false;
+			}
+			break;
+		case SljitNativeIntegerBinaryOp::SUBTRACT:
+			if (plan.constant_on_left) {
+				if (!TrySubtractFixedStatsBound(plan.constant, source_stats.signed_max, min_value) ||
+				    !TrySubtractFixedStatsBound(plan.constant, source_stats.signed_min, max_value)) {
+					return false;
+				}
+			} else {
+				if (!TrySubtractFixedStatsBound(source_stats.signed_min, plan.constant, min_value) ||
+				    !TrySubtractFixedStatsBound(source_stats.signed_max, plan.constant, max_value)) {
+					return false;
+				}
+			}
+			break;
+		default:
+			return false;
+		}
+		return SetFixedSignedDirectAppendStats(result_stats, plan.return_type.InternalType(), min_value, max_value);
+	}
+
+	static bool TryDeriveFixedBinaryReferenceStats(const SljitNativeRegionExpressionPlan &plan,
+	                                               const DirectAppendColumnStats &left_stats,
+	                                               const DirectAppendColumnStats &right_stats,
+	                                               DirectAppendColumnStats &result_stats) {
+		int64_t min_value;
+		int64_t max_value;
+		switch (plan.binary_op) {
+		case SljitNativeIntegerBinaryOp::ADD:
+			if (!TryAddFixedStatsBound(left_stats.signed_min, right_stats.signed_min, min_value) ||
+			    !TryAddFixedStatsBound(left_stats.signed_max, right_stats.signed_max, max_value)) {
+				return false;
+			}
+			break;
+		case SljitNativeIntegerBinaryOp::SUBTRACT:
+			if (!TrySubtractFixedStatsBound(left_stats.signed_min, right_stats.signed_max, min_value) ||
+			    !TrySubtractFixedStatsBound(left_stats.signed_max, right_stats.signed_min, max_value)) {
+				return false;
+			}
+			break;
+		default:
+			return false;
+		}
+		return SetFixedSignedDirectAppendStats(result_stats, plan.return_type.InternalType(), min_value, max_value);
+	}
+
+	static bool TryComputeFixedDirectAppendStats(const SljitExecutableRegionExpression &expr, DataChunk &input,
+	                                             idx_t source_offset, idx_t count,
+	                                             vector<DirectAppendColumnStats> &source_stats,
+	                                             DirectAppendColumnStats &result_stats,
+	                                             optional_ptr<FixedDirectAppendSourceCache> source_cache) {
+		auto &plan = expr.plan;
+		if (!FixedDirectAppendSignedStatsType(plan.return_type.InternalType())) {
+			return false;
+		}
+		switch (plan.kind) {
+		case SljitNativeRegionExpressionKind::REFERENCE:
+			if (!TryScanFixedDirectAppendSourceStats(input, plan.source_index, source_offset, count, source_stats,
+			                                         source_cache)) {
+				return false;
+			}
+			if (source_stats[plan.source_index].physical_type != plan.return_type.InternalType()) {
+				return false;
+			}
+			result_stats = source_stats[plan.source_index];
+			return true;
+		case SljitNativeRegionExpressionKind::INTEGER_BINARY_CONSTANT:
+			if (plan.check_arithmetic_overflow || plan.check_result_range ||
+			    !TryScanFixedDirectAppendSourceStats(input, plan.source_index, source_offset, count, source_stats,
+			                                         source_cache)) {
+				return false;
+			}
+			return TryDeriveFixedBinaryConstantStats(plan, source_stats[plan.source_index], result_stats);
+		case SljitNativeRegionExpressionKind::INTEGER_BINARY_REFERENCES:
+			if (plan.check_arithmetic_overflow || plan.check_result_range ||
+			    !TryScanFixedDirectAppendSourceStats(input, plan.source_index, source_offset, count, source_stats,
+			                                         source_cache) ||
+			    !TryScanFixedDirectAppendSourceStats(input, plan.right_source_index, source_offset, count,
+			                                         source_stats, source_cache)) {
+				return false;
+			}
+			return TryDeriveFixedBinaryReferenceStats(plan, source_stats[plan.source_index],
+			                                          source_stats[plan.right_source_index], result_stats);
+		default:
+			return false;
+		}
+	}
+
+	static bool IsFixedDirectAppendGeneratedExpression(const SljitExecutableRegionExpression &expr) {
+		auto &plan = expr.plan;
+		if (!expr.function || !DirectAppendSupportsFixedSizeType(plan.return_type)) {
+			return false;
+		}
+		switch (plan.kind) {
+		case SljitNativeRegionExpressionKind::INTEGER_BINARY_CONSTANT:
+		case SljitNativeRegionExpressionKind::INTEGER_BINARY_REFERENCES:
+		case SljitNativeRegionExpressionKind::INTEGRAL_COMPRESS:
+		case SljitNativeRegionExpressionKind::INTEGRAL_DECOMPRESS:
+			return true;
+		case SljitNativeRegionExpressionKind::INTEGER_CAST:
+		case SljitNativeRegionExpressionKind::SIGNED_TO_UNSIGNED_INTEGER_CAST:
+			return !plan.try_cast;
+		default:
+			return false;
+		}
+	}
+
+	static bool TryDirectMaterializeFixedReference(const SljitExecutableRegionExpression &expr, DataChunk &input,
+	                                               data_ptr_t target, idx_t source_offset, idx_t count, bool execute,
+	                                               optional_ptr<FixedDirectAppendSourceCache> source_cache) {
+		auto &plan = expr.plan;
+		if (plan.source_index >= input.ColumnCount() || input.data[plan.source_index].GetType() != plan.return_type ||
+		    !DirectAppendSupportsFixedSizeType(plan.return_type)) {
+			return false;
+		}
+
+		UnifiedVectorFormat local_source_format;
+		UnifiedVectorFormat *source_format;
+		if (!PrepareFixedDirectAppendSource(input, plan.source_index, source_offset, count, source_cache,
+		                                    local_source_format, source_format)) {
+			return false;
+		}
+		if (!execute) {
+			return true;
+		}
+		if (!target) {
+			throw InternalException("SLJIT fixed direct append reference target is null");
+		}
+		auto source_data = OffsetFixedSizeData(source_format->data, plan.return_type, source_offset);
+		memcpy(target, source_data, count * GetTypeIdSize(plan.return_type.InternalType()));
+		return true;
+	}
+
+	static data_ptr_t FixedDirectAppendResultData(const SljitExecutableRegionExpression &expr, data_ptr_t target) {
+		if (!target) {
+			throw InternalException("SLJIT fixed direct append generated target is null");
+		}
+		auto &plan = expr.plan;
+		switch (plan.kind) {
+		case SljitNativeRegionExpressionKind::INTEGER_BINARY_CONSTANT:
+		case SljitNativeRegionExpressionKind::INTEGER_BINARY_REFERENCES:
+			return target;
+		case SljitNativeRegionExpressionKind::INTEGER_CAST:
+		case SljitNativeRegionExpressionKind::SIGNED_TO_UNSIGNED_INTEGER_CAST:
+		case SljitNativeRegionExpressionKind::INTEGRAL_COMPRESS:
+		case SljitNativeRegionExpressionKind::INTEGRAL_DECOMPRESS:
+			return target;
+		default:
+			throw InternalException("SLJIT fixed direct append generated expression has no direct result pointer");
+		}
+	}
+
+	static bool TryDirectMaterializeFixedGenerated(const SljitExecutableRegionExpression &expr, DataChunk &input,
+	                                               data_ptr_t target, idx_t source_offset, idx_t count, bool execute,
+	                                               optional_ptr<FixedDirectAppendSourceCache> source_cache) {
+		if (!IsFixedDirectAppendGeneratedExpression(expr)) {
+			return false;
+		}
+		auto &plan = expr.plan;
+		UnifiedVectorFormat local_source_format;
+		UnifiedVectorFormat *source_format;
+		if (!PrepareFixedDirectAppendSource(input, plan.source_index, source_offset, count, source_cache,
+		                                    local_source_format, source_format)) {
+			return false;
+		}
+		const bool has_right_source = plan.kind == SljitNativeRegionExpressionKind::INTEGER_BINARY_REFERENCES;
+		UnifiedVectorFormat local_right_source_format;
+		UnifiedVectorFormat *right_source_format = nullptr;
+		if (has_right_source) {
+			if (!PrepareFixedDirectAppendSource(input, plan.right_source_index, source_offset, count, source_cache,
+			                                    local_right_source_format, right_source_format)) {
+				return false;
+			}
+		}
+		if (!execute) {
+			return true;
+		}
+
+		SljitNativeVectorInput native_input;
+		if (plan.kind == SljitNativeRegionExpressionKind::INTEGRAL_DECOMPRESS) {
+			native_input.source_data = NativeUnsignedIntegerSourceData(*source_format, plan.unsigned_source_width);
+		} else if (plan.kind == SljitNativeRegionExpressionKind::INTEGRAL_COMPRESS ||
+		           plan.kind == SljitNativeRegionExpressionKind::SIGNED_TO_UNSIGNED_INTEGER_CAST ||
+		           plan.kind == SljitNativeRegionExpressionKind::INTEGER_CAST) {
+			native_input.source_data = NativeSignedIntegerSourceData(*source_format, plan.cast_source_width);
+		} else {
+			native_input.source_data = NativeIntegerSourceData(*source_format, plan.integer_kind);
+		}
+		native_input.source_data =
+		    OffsetFixedSizeData(native_input.source_data, input.data[plan.source_index].GetType(), source_offset);
+		if (has_right_source) {
+			native_input.right_source_data = NativeIntegerSourceData(*right_source_format, plan.integer_kind);
+			native_input.right_source_data = OffsetFixedSizeData(
+			    native_input.right_source_data, input.data[plan.right_source_index].GetType(), source_offset);
+		}
+		native_input.constants = plan.constants.data();
+		native_input.constant = plan.constant;
+		native_input.result_data = FixedDirectAppendResultData(expr, target);
+		native_input.overflow_message =
+		    plan.kind == SljitNativeRegionExpressionKind::INTEGER_BINARY_CONSTANT ||
+		            plan.kind == SljitNativeRegionExpressionKind::INTEGER_BINARY_REFERENCES ||
+		            plan.kind == SljitNativeRegionExpressionKind::INTEGER_CAST ||
+		            plan.kind == SljitNativeRegionExpressionKind::SIGNED_TO_UNSIGNED_INTEGER_CAST
+		        ? expr.overflow_message.c_str()
+		        : nullptr;
+		native_input.query_location = plan.query_location;
+		native_input.count = count;
+		native_input.has_error = false;
+		auto function = expr.flat_function ? expr.flat_function : expr.function;
+		function(&native_input);
+		if (native_input.error) {
+			std::rethrow_exception(native_input.error);
+		}
+		return true;
+	}
+
+	static bool TryDirectMaterializeFixedExpression(const SljitExecutableRegionExpression &expr, DataChunk &input,
+	                                                data_ptr_t target, idx_t source_offset, idx_t count, bool execute,
+	                                                optional_ptr<FixedDirectAppendSourceCache> source_cache) {
+		if (expr.plan.kind == SljitNativeRegionExpressionKind::REFERENCE) {
+			return TryDirectMaterializeFixedReference(expr, input, target, source_offset, count, execute, source_cache);
+		}
+		return TryDirectMaterializeFixedGenerated(expr, input, target, source_offset, count, execute, source_cache);
+	}
+
+	bool TryDirectMaterializeFixedProjection(SljitExecutableRegionOp &op, DataChunk &input,
+	                                         optional_ptr<DirectAppendSlice> slice,
+	                                         optional_ptr<FixedDirectAppendSourceCache> source_cache = nullptr) {
+		if (op.kind != SljitNativeRegionOpKind::PROJECTION || op.projections.empty()) {
+			return false;
+		}
+		const bool execute = slice != nullptr;
+		const auto source_offset = execute ? slice->source_offset : 0;
+		const auto count = execute ? slice->count : input.size();
+		for (idx_t projection_idx = 0; projection_idx < op.projections.size(); projection_idx++) {
+			data_ptr_t target = nullptr;
+			if (execute) {
+				if (slice->targets.size() != op.projections.size()) {
+					throw InternalException("SLJIT fixed direct append target count mismatch");
+				}
+				target = slice->targets[projection_idx];
+			}
+			if (!TryDirectMaterializeFixedExpression(op.projections[projection_idx], input, target, source_offset,
+			                                         count, execute, source_cache)) {
+				return false;
+			}
+		}
+		return true;
+	}
+
+	bool TryExecuteProjectionDirectAppend(ExecutionRegionRuntime &runtime, ExecutionOperatorRuntime &native_runtime,
+	                                      SljitRegionExecutionScratch &scratch, idx_t op_idx,
+	                                      SljitExecutableRegionOp &op, DataChunk &input, SinkResultType &sink_result) {
+		if (op.kind != SljitNativeRegionOpKind::PROJECTION || op_idx + 1 >= ops.size()) {
+			return false;
+		}
+		auto &sink_op = ops[op_idx + 1];
+		if (sink_op.kind != SljitNativeRegionOpKind::APPEND_SINK || op_idx + 2 != ops.size()) {
+			return false;
+		}
+		const bool use_floating_direct_append =
+		    op.flat_fused_projection_function && op.flat_fused_projection_indices.size() == op.projections.size();
+		auto &projection_scratch = scratch.ProjectionScratch(op_idx);
+		auto preflight_stage_start = SljitRegionStageStart(runtime);
+		if (use_floating_direct_append &&
+		    !PrepareFlatFusedFloatingProjectionSources(op, input, nullptr, input.size(), projection_scratch, false)) {
+			return false;
+		}
+		if (use_floating_direct_append) {
+			RecordSljitRegionStageRuntime(runtime, op_idx, op.kind, "direct_append_floating_preflight",
+			                              preflight_stage_start);
+		}
+		preflight_stage_start = SljitRegionStageStart(runtime);
+		FixedDirectAppendSourceCache fixed_source_cache;
+		fixed_source_cache.Reset(input.ColumnCount());
+		auto fixed_source_cache_ptr = optional_ptr<FixedDirectAppendSourceCache>(&fixed_source_cache);
+		const bool use_fixed_direct_append =
+		    !use_floating_direct_append && TryDirectMaterializeFixedProjection(op, input, nullptr, fixed_source_cache_ptr);
+		if (!use_floating_direct_append && use_fixed_direct_append) {
+			RecordSljitRegionStageRuntime(runtime, op_idx, op.kind, "direct_append_fixed_preflight",
+			                              preflight_stage_start);
+		}
+		if (!use_floating_direct_append && !use_fixed_direct_append) {
+			return false;
+		}
+
+		auto bind_stage_start = SljitRegionStageStart(runtime);
+		bool bound = false;
+		auto &binding = BindNativeSink(native_runtime, scratch, op_idx + 1, input, sink_op.append_sink.plan.sink_info,
+		                               "append-sink-runtime-binding-failed", "SLJIT append sink", bound);
+		if (bound) {
+			RecordSljitRegionStageRuntime(runtime, op_idx + 1, sink_op.kind, "bind_sink_contract", bind_stage_start);
+		}
+		if (!binding.ready || !binding.append_sink.ready) {
+			throw InternalException("SLJIT append sink binding did not return a ready append state");
+		}
+
+		idx_t source_offset = 0;
+		while (source_offset < input.size()) {
+			string blocker;
+			auto &reservation = scratch.direct_append_reservation;
+			auto prepare_stage_start = SljitRegionStageStart(runtime);
+			auto direct_result = ExecutionPrepareDirectAppend(binding.append_sink, op.output_types,
+			                                                  input.size() - source_offset, reservation, blocker);
+			RecordSljitRegionStageRuntime(runtime, op_idx + 1, sink_op.kind, "direct_append_prepare",
+			                              prepare_stage_start);
+			if (direct_result == ExecutionOperatorBindResult::DEFERRED) {
+				if (source_offset > 0) {
+					throw InternalException("SLJIT direct append became deferred after a partial commit: %s",
+					                        blocker.c_str());
+				}
+				runtime.Defer(blocker.empty() ? "direct-append-deferred" : blocker);
+				sink_result = SinkResultType::BLOCKED;
+				return true;
+			}
+			if (direct_result != ExecutionOperatorBindResult::READY) {
+				if (source_offset > 0) {
+					throw InternalException("SLJIT direct append became unavailable after a partial commit: %s",
+					                        blocker.c_str());
+				}
+				return false;
+			}
+			if (reservation.slices.size() != 1) {
+				throw InternalException("SLJIT direct append expected exactly one storage reservation slice");
+			}
+			auto &slice = reservation.slices[0];
+			slice.source_offset = source_offset;
+			if (slice.count == 0 || source_offset + slice.count > input.size()) {
+				throw InternalException("SLJIT direct append reservation slice is out of range");
+			}
+			if (slice.targets.size() != op.projections.size()) {
+				throw InternalException("SLJIT direct append target count mismatch");
+			}
+			auto generated_stage_start = SljitRegionStageStart(runtime);
+			if (use_floating_direct_append) {
+				auto source_stage_start = SljitRegionStageStart(runtime);
+				if (!PrepareFlatFusedFloatingProjectionSources(op, input, nullptr, slice.count, projection_scratch,
+				                                               false, slice.source_offset)) {
+					throw InternalException("SLJIT direct append source shape changed after direct-append preflight");
+				}
+				RecordSljitRegionStageRuntime(runtime, op_idx, op.kind, "direct_append_floating_source_prepare",
+				                              source_stage_start);
+
+				for (auto projection_idx : op.flat_fused_projection_indices) {
+					auto &plan = op.projections[projection_idx].plan;
+					if (!slice.targets[projection_idx]) {
+						throw InternalException("SLJIT direct append target pointer is null");
+					}
+					projection_scratch.result_data[projection_idx] = slice.targets[projection_idx];
+					if (plan.return_type.InternalType() == PhysicalType::FLOAT) {
+						projection_scratch.float_constants[projection_idx] = static_cast<float>(plan.double_constant);
+					} else {
+						projection_scratch.double_constants[projection_idx] = plan.double_constant;
+					}
+				}
+				projection_scratch.PrepareFloatingStats(op.projections.size(),
+				                                        op.flat_fused_projection_single_precision);
+
+				auto run_stage_start = SljitRegionStageStart(runtime);
+				RunFlatFusedFloatingProjection(op, slice.count, projection_scratch);
+				RecordSljitRegionStageRuntime(runtime, op_idx, op.kind, "direct_append_floating_run",
+				                              run_stage_start);
+				RecordSljitRegionStageRuntime(runtime, op_idx, op.kind, "direct_materialize_generated",
+				                              generated_stage_start);
+				auto stats_stage_start = SljitRegionStageStart(runtime);
+				projection_scratch.FinishFloatingStats(op.projections, op.flat_fused_projection_single_precision);
+				RecordSljitRegionStageRuntime(runtime, op_idx, op.kind, "direct_append_floating_finish_stats",
+				                              stats_stage_start);
+				slice.stats = projection_scratch.direct_append_stats;
+			} else {
+				if (!TryDirectMaterializeFixedProjection(op, input, &slice, fixed_source_cache_ptr)) {
+					throw InternalException(
+					    "SLJIT fixed direct append source shape changed after direct-append preflight");
+				}
+				RecordSljitRegionStageRuntime(runtime, op_idx, op.kind, "direct_materialize_fixed_generated",
+				                              generated_stage_start);
+				slice.stats.assign(op.projections.size(), DirectAppendColumnStats());
+				vector<DirectAppendColumnStats> fixed_source_stats(input.ColumnCount());
+				for (idx_t projection_idx = 0; projection_idx < op.projections.size(); projection_idx++) {
+					TryComputeFixedDirectAppendStats(op.projections[projection_idx], input, slice.source_offset,
+					                                 slice.count, fixed_source_stats, slice.stats[projection_idx],
+					                                 fixed_source_cache_ptr);
+				}
+			}
+			auto commit_stage_start = SljitRegionStageStart(runtime);
+			sink_result = ExecutionCommitDirectAppend(binding.append_sink, reservation);
+			RecordSljitRegionStageRuntime(runtime, op_idx + 1, sink_op.kind, "direct_append_commit",
+			                              commit_stage_start);
+			if (sink_result != SinkResultType::NEED_MORE_INPUT) {
+				return true;
+			}
+			source_offset += slice.count;
+		}
+		return true;
+	}
+
 	void ExecuteProjection(SljitRegionExecutionScratch &scratch, idx_t op_idx, SljitExecutableRegionOp &op,
 	                       DataChunk &input, DataChunk &output, const SelectionVector *execute_sel = nullptr,
 	                       idx_t count = DConstants::INVALID_INDEX) {
 		if (count == DConstants::INVALID_INDEX) {
 			count = input.size();
 		}
+		auto &projection_scratch = scratch.ProjectionScratch(op_idx);
+		auto fused_projection_executed =
+		    ExecuteFlatFusedFloatingProjection(op, input, output, execute_sel, count, projection_scratch);
+		if (fused_projection_executed && op.flat_fused_projection_indices.size() == op.projections.size()) {
+			output.SetChildCardinality(count);
+			return;
+		}
 		for (idx_t col_idx = 0; col_idx < op.projections.size(); col_idx++) {
+			if (fused_projection_executed && projection_scratch.fused[col_idx]) {
+				continue;
+			}
 			ExecuteProjectionExpression(op.projections[col_idx], input, output.data[col_idx], execute_sel, count,
 			                            scratch.ExpressionAdapterScratch(op_idx, col_idx));
 		}
 		output.SetChildCardinality(count);
+	}
+
+	bool ExecuteFlatFusedFloatingProjection(SljitExecutableRegionOp &op, DataChunk &input, DataChunk &output,
+	                                        const SelectionVector *execute_sel, idx_t count,
+	                                        SljitProjectionAdapterScratch &adapter_scratch) {
+		auto all_projections_fused = op.flat_fused_projection_indices.size() == op.projections.size();
+		if (!PrepareFlatFusedFloatingProjectionSources(op, input, execute_sel, count, adapter_scratch,
+		                                               !all_projections_fused)) {
+			return false;
+		}
+
+		for (auto projection_idx : op.flat_fused_projection_indices) {
+			auto &plan = op.projections[projection_idx].plan;
+			auto &result = output.data[projection_idx];
+			result.SetVectorType(VectorType::FLAT_VECTOR);
+			FlatVector::ValidityMutable(result).Reset(count);
+			if (plan.return_type.InternalType() == PhysicalType::FLOAT) {
+				adapter_scratch.result_data[projection_idx] =
+				    reinterpret_cast<data_ptr_t>(FlatVector::GetDataMutable<float>(result));
+				adapter_scratch.float_constants[projection_idx] = static_cast<float>(plan.double_constant);
+			} else {
+				adapter_scratch.result_data[projection_idx] =
+				    reinterpret_cast<data_ptr_t>(FlatVector::GetDataMutable<double>(result));
+				adapter_scratch.double_constants[projection_idx] = plan.double_constant;
+			}
+			FlatVector::SetSize(result, count_t(count));
+			if (!all_projections_fused) {
+				adapter_scratch.fused[projection_idx] = 1;
+			}
+		}
+
+		RunFlatFusedFloatingProjection(op, count, adapter_scratch);
+		return true;
+	}
+
+	bool PrepareFlatFusedFloatingProjectionSources(SljitExecutableRegionOp &op, DataChunk &input,
+	                                               const SelectionVector *execute_sel, idx_t count,
+	                                               SljitProjectionAdapterScratch &adapter_scratch, bool track_fused,
+	                                               idx_t source_offset = 0) {
+		if (!op.flat_fused_projection_function || execute_sel) {
+			return false;
+		}
+		adapter_scratch.Prepare(op.projections.size(), track_fused);
+		for (auto projection_idx : op.flat_fused_projection_indices) {
+			auto &plan = op.projections[projection_idx].plan;
+			D_ASSERT(plan.kind == SljitNativeRegionExpressionKind::DOUBLE_BINARY_CONSTANT ||
+			         plan.kind == SljitNativeRegionExpressionKind::DOUBLE_BINARY_REFERENCES);
+			if (!PrepareFlatFusedFloatingSource(input, plan.source_index, projection_idx, false, count, adapter_scratch,
+			                                    source_offset)) {
+				return false;
+			}
+			if (plan.kind == SljitNativeRegionExpressionKind::DOUBLE_BINARY_REFERENCES) {
+				if (!PrepareFlatFusedFloatingSource(input, plan.right_source_index, projection_idx, true, count,
+				                                    adapter_scratch, source_offset)) {
+					return false;
+				}
+			}
+		}
+		return true;
+	}
+
+	void RunFlatFusedFloatingProjection(SljitExecutableRegionOp &op, idx_t count,
+	                                    SljitProjectionAdapterScratch &adapter_scratch) {
+		SljitNativeVectorInput native_input;
+		native_input.source_data_array = adapter_scratch.source_data.data();
+		native_input.right_source_data_array = adapter_scratch.right_source_data.data();
+		native_input.result_data_array = adapter_scratch.result_data.data();
+		native_input.floating_constants =
+		    op.flat_fused_projection_single_precision
+		        ? reinterpret_cast<const_data_ptr_t>(adapter_scratch.float_constants.data())
+		        : reinterpret_cast<const_data_ptr_t>(adapter_scratch.double_constants.data());
+		if (adapter_scratch.collect_floating_stats) {
+			native_input.floating_stats_min =
+			    op.flat_fused_projection_single_precision
+			        ? reinterpret_cast<data_ptr_t>(adapter_scratch.float_stats_min.data())
+			        : reinterpret_cast<data_ptr_t>(adapter_scratch.double_stats_min.data());
+			native_input.floating_stats_max =
+			    op.flat_fused_projection_single_precision
+			        ? reinterpret_cast<data_ptr_t>(adapter_scratch.float_stats_max.data())
+			        : reinterpret_cast<data_ptr_t>(adapter_scratch.double_stats_max.data());
+		}
+		native_input.count = count;
+		native_input.has_error = false;
+		op.flat_fused_projection_function(&native_input);
+		if (native_input.error) {
+			std::rethrow_exception(native_input.error);
+		}
+	}
+
+	bool PrepareFlatFusedFloatingSource(DataChunk &input, idx_t source_index, idx_t projection_idx, bool right_source,
+	                                    idx_t count, SljitProjectionAdapterScratch &adapter_scratch,
+	                                    idx_t source_offset = 0) {
+		if (source_index >= input.ColumnCount()) {
+			throw InternalException("SLJIT fused projection source is out of range");
+		}
+		for (idx_t prepared_idx = 0; prepared_idx < adapter_scratch.prepared_input_indices.size(); prepared_idx++) {
+			if (adapter_scratch.prepared_input_indices[prepared_idx] == source_index) {
+				auto source_data = adapter_scratch.prepared_input_data[prepared_idx];
+				if (right_source) {
+					adapter_scratch.right_source_data[projection_idx] = source_data;
+				} else {
+					adapter_scratch.source_data[projection_idx] = source_data;
+				}
+				return true;
+			}
+		}
+
+		auto &source_format = right_source ? adapter_scratch.right_source_formats[projection_idx]
+		                                   : adapter_scratch.source_formats[projection_idx];
+		input.data[source_index].ToUnifiedFormat(source_format);
+		if (!SljitUnifiedFormatHasIdentitySelection(source_format) ||
+		    (source_format.validity.CanHaveNull() &&
+		     !source_format.validity.CheckAllValid(source_offset + count, source_offset))) {
+			return false;
+		}
+		auto source_data =
+		    source_format.data + source_offset * GetTypeIdSize(input.data[source_index].GetType().InternalType());
+		adapter_scratch.prepared_input_indices.push_back(source_index);
+		adapter_scratch.prepared_input_data.push_back(source_data);
+		if (right_source) {
+			adapter_scratch.right_source_data[projection_idx] = source_data;
+		} else {
+			adapter_scratch.source_data[projection_idx] = source_data;
+		}
+		return true;
 	}
 
 	void ExecuteProjectionExpression(SljitExecutableRegionExpression &expr, DataChunk &input, Vector &result,
@@ -1616,7 +2434,11 @@ public:
 			native_input.result_data = reinterpret_cast<data_ptr_t>(FlatVector::GetDataMutable<int64_t>(result));
 		} else if (plan.kind == SljitNativeRegionExpressionKind::DOUBLE_BINARY_CONSTANT ||
 		           plan.kind == SljitNativeRegionExpressionKind::DOUBLE_BINARY_REFERENCES) {
-			native_input.result_data = reinterpret_cast<data_ptr_t>(FlatVector::GetDataMutable<double>(result));
+			if (plan.return_type.InternalType() == PhysicalType::FLOAT) {
+				native_input.result_data = reinterpret_cast<data_ptr_t>(FlatVector::GetDataMutable<float>(result));
+			} else {
+				native_input.result_data = reinterpret_cast<data_ptr_t>(FlatVector::GetDataMutable<double>(result));
+			}
 		} else if (plan.kind == SljitNativeRegionExpressionKind::ERROR_GUARDED_REFERENCE) {
 			native_input.result_data = FlatVector::GetDataMutable(result);
 		} else if (plan.kind == SljitNativeRegionExpressionKind::INTEGER_BINARY_CONSTANT ||
@@ -1648,7 +2470,13 @@ public:
 		native_input.active_result_index = 0;
 		native_input.count = count;
 		native_input.has_error = false;
-		expr.function(&native_input);
+		auto use_flat_function = expr.flat_function && !execute_sel &&
+		                         SljitUnifiedFormatHasIdentitySelection(source_format) &&
+		                         source_format.validity.CannotHaveNull() &&
+		                         (!has_right_source || (SljitUnifiedFormatHasIdentitySelection(right_source_format) &&
+		                                                right_source_format.validity.CannotHaveNull()));
+		auto vector_function = use_flat_function ? expr.flat_function : expr.function;
+		vector_function(&native_input);
 		if (native_input.error) {
 			std::rethrow_exception(native_input.error);
 		}

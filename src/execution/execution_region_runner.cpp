@@ -136,6 +136,7 @@ ExecutionRunner &GetExecutionRunner(ExecutionRunnerKind kind) {
 	case ExecutionRunnerKind::VECTORIZED:
 		return vectorized_runner;
 	case ExecutionRunnerKind::COMPILED_VECTORIZED:
+	case ExecutionRunnerKind::COMPILED_GPU:
 		return compiled_vectorized_runner;
 	default:
 		throw InternalException("Unknown execution runner kind");

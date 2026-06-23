@@ -77,11 +77,12 @@ void EmitSljitAggregateLoopStep(struct sljit_compiler *compiler, struct sljit_la
 double SLJIT_FUNC SljitNativeHugeintToDouble(uint64_t lower, int64_t upper);
 void SLJIT_FUNC SljitNativeAggregateHugeintCommit(SljitNativeVectorInput *input);
 void SLJIT_FUNC SljitNativeRuntimeError(SljitNativeVectorInput *input);
-sljit_s32 NativeDoubleBinaryOp(SljitNativeDoubleBinaryOp op);
+sljit_s32 NativeDoubleBinaryOp(SljitNativeDoubleBinaryOp op, bool single_precision = false);
 bool NativeDoubleSourceHasDecimalScale(SljitNativeDoubleSourceKind kind);
 bool NativeDoubleSourceUsesHelper(SljitNativeDoubleSourceKind kind);
 void EmitLoadNativeDoubleOperand(struct sljit_compiler *compiler, SljitNativeDoubleSourceKind kind,
-                                 sljit_sw data_offset, sljit_s32 index_reg, sljit_sw scale_offset, sljit_s32 target);
+                                 sljit_sw data_offset, sljit_s32 index_reg, sljit_sw scale_offset, sljit_s32 target,
+                                 bool single_precision = false);
 sljit_s32 NativeIntegerLowerBoundFailureJump(SljitNativeIntegerKind kind, bool inclusive);
 sljit_s32 NativeIntegerUpperBoundFailureJump(SljitNativeIntegerKind kind, bool inclusive);
 

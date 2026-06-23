@@ -11,8 +11,8 @@ ExecutionRegionCompilationInput::ExecutionRegionCompilationInput(ClientContext &
 }
 
 ExecutionRegionCompileResult ExecutionRegionCompileResult::Compiled(unique_ptr<ExecutionRegionKernel> kernel,
-                                                                     ExecutionRegionExecutionMode execution_mode,
-                                                                     string reason, string ir) {
+                                                                    ExecutionRegionExecutionMode execution_mode,
+                                                                    string reason, string ir) {
 	if (!kernel) {
 		throw InternalException("compiled region result marked compiled without a kernel");
 	}
@@ -53,6 +53,10 @@ ExecutionRegionCompileResult ExecutionRegionCompileResult::Error(string reason) 
 }
 
 ExecutionRegionBackend::~ExecutionRegionBackend() {
+}
+
+ExecutionRunnerKind ExecutionRegionBackend::RunnerKind() const {
+	return ExecutionRunnerKind::COMPILED_VECTORIZED;
 }
 
 bool ExecutionRegionBackend::IsAvailable() const {

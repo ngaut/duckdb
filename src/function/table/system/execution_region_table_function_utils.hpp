@@ -71,6 +71,15 @@ static constexpr ExecutionRegionTraceColumn EXECUTION_REGION_RUNNER_COST_WORK_CO
     {"runner_cost_startup_cost", LogicalTypeId::BIGINT},
     {"runner_cost_required_benefit", LogicalTypeId::BIGINT},
     {"runner_cost_net_benefit", LogicalTypeId::BIGINT},
+    {"runner_cost_compiled_vectorized_runner_benefit", LogicalTypeId::BIGINT},
+    {"runner_cost_compiled_vectorized_startup_cost", LogicalTypeId::BIGINT},
+    {"runner_cost_compiled_vectorized_required_benefit", LogicalTypeId::BIGINT},
+    {"runner_cost_compiled_vectorized_net_benefit", LogicalTypeId::BIGINT},
+    {"runner_cost_gpu_runner_benefit", LogicalTypeId::BIGINT},
+    {"runner_cost_gpu_transfer_cost", LogicalTypeId::BIGINT},
+    {"runner_cost_gpu_startup_cost", LogicalTypeId::BIGINT},
+    {"runner_cost_gpu_required_benefit", LogicalTypeId::BIGINT},
+    {"runner_cost_gpu_net_benefit", LogicalTypeId::BIGINT},
 };
 
 static constexpr idx_t EXECUTION_REGION_RUNNER_COST_WORK_COLUMN_COUNT =
@@ -284,6 +293,33 @@ static inline void AppendExecutionRegionRunnerCostWorkColumn(Vector &output, idx
 		return;
 	case 10:
 		output.Append(Value::BIGINT(cost.net_benefit));
+		return;
+	case 11:
+		output.Append(Value::BIGINT(cost.compiled_vectorized_runner_benefit));
+		return;
+	case 12:
+		output.Append(Value::BIGINT(cost.compiled_vectorized_startup_cost));
+		return;
+	case 13:
+		output.Append(Value::BIGINT(cost.compiled_vectorized_required_benefit));
+		return;
+	case 14:
+		output.Append(Value::BIGINT(cost.compiled_vectorized_net_benefit));
+		return;
+	case 15:
+		output.Append(Value::BIGINT(cost.gpu_runner_benefit));
+		return;
+	case 16:
+		output.Append(Value::BIGINT(cost.gpu_transfer_cost));
+		return;
+	case 17:
+		output.Append(Value::BIGINT(cost.gpu_startup_cost));
+		return;
+	case 18:
+		output.Append(Value::BIGINT(cost.gpu_required_benefit));
+		return;
+	case 19:
+		output.Append(Value::BIGINT(cost.gpu_net_benefit));
 		return;
 	default:
 		throw InternalException("Unsupported execution region runner cost work column index");

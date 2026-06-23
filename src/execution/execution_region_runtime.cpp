@@ -153,11 +153,38 @@ ExecutionPrimitiveAggregateUpdateBinding::FindLane(idx_t aggregate_index) const 
 	return nullptr;
 }
 
+ExecutionOperatorBindResult ExecutionAppendSinkState::PrepareDirectAppend(const vector<LogicalType> &, idx_t,
+                                                                          DirectAppendReservation &, string &blocker) {
+	blocker = "direct-append-not-supported";
+	return ExecutionOperatorBindResult::INVALID;
+}
+
+SinkResultType ExecutionAppendSinkState::CommitDirectAppend(const DirectAppendReservation &) {
+	throw InternalException("direct append commit called on a sink without direct append support");
+}
+
 SinkResultType ExecutionSinkAppend(const ExecutionAppendSinkBinding &binding, DataChunk &input) {
 	if (!binding.ready || !binding.state) {
 		throw InternalException("execution append sink binding is incomplete");
 	}
 	return binding.state->Append(input);
+}
+
+ExecutionOperatorBindResult ExecutionPrepareDirectAppend(const ExecutionAppendSinkBinding &binding,
+                                                         const vector<LogicalType> &types, idx_t count,
+                                                         DirectAppendReservation &reservation, string &blocker) {
+	if (!binding.ready || !binding.state) {
+		throw InternalException("execution append sink binding is incomplete");
+	}
+	return binding.state->PrepareDirectAppend(types, count, reservation, blocker);
+}
+
+SinkResultType ExecutionCommitDirectAppend(const ExecutionAppendSinkBinding &binding,
+                                           const DirectAppendReservation &reservation) {
+	if (!binding.ready || !binding.state) {
+		throw InternalException("execution append sink binding is incomplete");
+	}
+	return binding.state->CommitDirectAppend(reservation);
 }
 
 SinkResultType ExecutionSinkDelimJoin(const ExecutionDelimJoinSinkBinding &binding, DataChunk &input) {

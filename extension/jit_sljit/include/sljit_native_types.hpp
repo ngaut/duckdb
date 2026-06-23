@@ -18,6 +18,7 @@ class Vector;
 enum class SljitNativeIntegerBinaryOp : uint8_t { ADD, SUBTRACT, MULTIPLY };
 enum class SljitNativeDoubleBinaryOp : uint8_t { ADD, SUBTRACT, MULTIPLY, DIVIDE };
 enum class SljitNativeDoubleSourceKind : uint8_t {
+	FLOAT,
 	DOUBLE,
 	INT64_TO_DOUBLE,
 	DECIMAL64_TO_DOUBLE,
@@ -126,6 +127,10 @@ struct SljitNativeVectorInput {
 	const_data_ptr_t *source_data_array = nullptr;
 	const_data_ptr_t *right_source_data_array = nullptr;
 	const_data_ptr_t *group_data_array = nullptr;
+	data_ptr_t *result_data_array = nullptr;
+	const_data_ptr_t floating_constants = nullptr;
+	data_ptr_t floating_stats_min = nullptr;
+	data_ptr_t floating_stats_max = nullptr;
 	const sel_t *execute_sel = nullptr;
 	const sel_t *source_sel = nullptr;
 	const sel_t *right_source_sel = nullptr;

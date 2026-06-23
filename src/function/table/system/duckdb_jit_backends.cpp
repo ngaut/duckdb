@@ -17,6 +17,8 @@ static unique_ptr<FunctionData> DuckDBJitBackendsBind(ClientContext &context, Ta
 	return_types.emplace_back(LogicalType::VARCHAR);
 	names.emplace_back("description");
 	return_types.emplace_back(LogicalType::VARCHAR);
+	names.emplace_back("runner_kind");
+	return_types.emplace_back(LogicalType::VARCHAR);
 	names.emplace_back("available");
 	return_types.emplace_back(LogicalType::BOOLEAN);
 	names.emplace_back("supports_regions");
@@ -41,9 +43,10 @@ static void DuckDBJitBackendsFunction(ClientContext &context, TableFunctionInput
 		auto &entry = data.backends[data.offset++];
 		output.data[0].Append(Value(entry.name));
 		output.data[1].Append(Value(entry.description));
-		output.data[2].Append(Value::BOOLEAN(entry.available));
-		output.data[3].Append(Value::BOOLEAN(entry.supports_regions));
-		output.data[4].Append(Value::BOOLEAN(entry.selected));
+		output.data[2].Append(Value(ExecutionRunnerKindToString(entry.runner_kind)));
+		output.data[3].Append(Value::BOOLEAN(entry.available));
+		output.data[4].Append(Value::BOOLEAN(entry.supports_regions));
+		output.data[5].Append(Value::BOOLEAN(entry.selected));
 		count++;
 	}
 }

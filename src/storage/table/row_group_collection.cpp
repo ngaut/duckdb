@@ -670,6 +670,70 @@ optional_idx RowGroupCollection::Append(DataChunk &chunk, TableAppendState &stat
 	return flushed_row_group_idx;
 }
 
+bool RowGroupCollection::TryPrepareDirectAppend(TableAppendState &state, idx_t count,
+                                                DirectAppendReservation &reservation) {
+	reservation.Clear();
+	if (count == 0) {
+		return false;
+	}
+	const idx_t row_group_size = GetRowGroupSize();
+	if (state.row_group_append_state.offset_in_row_group >= row_group_size) {
+		auto &current_row_group = state.row_group_append_state.row_group->GetNode();
+		current_row_group.FinalizeAppend(state.row_group_append_state);
+
+		auto next_start = state.row_group_start + state.row_group_append_state.offset_in_row_group;
+		auto l = state.row_groups->Lock();
+		AppendRowGroup(l, next_start);
+		auto last_row_group = state.row_groups->GetLastSegment(l);
+		RowGroup::InitializeAppend(*last_row_group, state.row_group_append_state);
+		state.row_group_start = next_start;
+	}
+	auto &current_row_group = state.row_group_append_state.row_group->GetNode();
+	auto append_count = MinValue<idx_t>(count, row_group_size - state.row_group_append_state.offset_in_row_group);
+	if (append_count == 0) {
+		return false;
+	}
+	vector<data_ptr_t> targets;
+	auto previous_allocation_size = current_row_group.GetAllocationSize();
+	auto result = current_row_group.TryPrepareDirectAppend(state.row_group_append_state, types, append_count, targets);
+	allocation_size += current_row_group.GetAllocationSize() - previous_allocation_size;
+	if (result) {
+		DirectAppendSlice slice;
+		slice.count = append_count;
+		slice.targets = std::move(targets);
+		reservation.slices.push_back(std::move(slice));
+	}
+	return result;
+}
+
+void RowGroupCollection::CommitDirectAppend(TableAppendState &state, const DirectAppendReservation &reservation) {
+	for (auto &slice : reservation.slices) {
+		if (slice.targets.size() != types.size()) {
+			throw InternalException("RowGroupCollection direct append target count mismatch");
+		}
+		optional_ptr<const vector<DirectAppendColumnStats>> stats;
+		if (!slice.stats.empty()) {
+			if (slice.stats.size() != types.size()) {
+				throw InternalException("RowGroupCollection direct append stats count mismatch");
+			}
+			stats = &slice.stats;
+		}
+		auto &current_row_group = state.row_group_append_state.row_group->GetNode();
+		state.total_append_count += slice.count;
+		auto previous_allocation_size = current_row_group.GetAllocationSize();
+		current_row_group.CommitDirectAppend(state.row_group_append_state, slice.targets, slice.count, stats);
+		allocation_size += current_row_group.GetAllocationSize() - previous_allocation_size;
+		state.current_row += row_t(slice.count);
+
+		auto local_stats_lock = state.stats.GetLock();
+		for (idx_t col_idx = 0; col_idx < types.size(); col_idx++) {
+			Vector direct_vector(types[col_idx], slice.targets[col_idx], slice.count);
+			auto &column_stats = state.stats.GetStats(*local_stats_lock, col_idx);
+			column_stats.UpdateDistinctStatistics(direct_vector, slice.count, state.hashes);
+		}
+	}
+}
+
 void RowGroupCollection::FinalizeAppend(TransactionData transaction, TableAppendState &state) {
 	// first finalize the append of the final row group we appended to
 	auto &last_row_group = state.row_group_append_state.row_group->GetNode();

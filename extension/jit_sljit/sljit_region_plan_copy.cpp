@@ -80,6 +80,7 @@ SljitNativeRegionExpressionPlan SljitNativeRegionExpressionPlan::Copy(bool copy_
 	result.result_min = result_min;
 	result.result_max = result_max;
 	result.constant_on_left = constant_on_left;
+	result.check_arithmetic_overflow = check_arithmetic_overflow;
 	result.check_result_range = check_result_range;
 	result.binary_op = binary_op;
 	result.double_binary_op = double_binary_op;

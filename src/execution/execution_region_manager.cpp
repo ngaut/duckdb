@@ -32,13 +32,36 @@ void RegisterExecutionRegionBackend(DatabaseInstance &db, unique_ptr<ExecutionRe
 	ExecutionRegionManager::Get(db).RegisterBackend(std::move(backend));
 }
 
-optional_ptr<ExecutionRegionBackend> ExecutionRegionManager::SelectBackend(ClientContext &context,
-                                                                           string &backend_name) const {
+static bool ExecutionRegionBackendMatchesRunner(const ExecutionRegionBackend &backend,
+                                                ExecutionRunnerKind runner_kind) {
+	return backend.RunnerKind() == runner_kind;
+}
+
+bool ExecutionRegionManager::HasAvailableBackendForRunner(ClientContext &context,
+                                                          ExecutionRunnerKind runner_kind) const {
+	auto requested = ExecutionRegionSettings::RequestedBackend(context);
+	lock_guard<mutex> guard(lock);
+	for (auto &backend : backends) {
+		if (!StringUtil::CIEquals(requested, "auto") && !StringUtil::CIEquals(backend->Name(), requested)) {
+			continue;
+		}
+		if (!ExecutionRegionBackendMatchesRunner(*backend, runner_kind)) {
+			continue;
+		}
+		if (backend->IsAvailable() && backend->SupportsRegions()) {
+			return true;
+		}
+	}
+	return false;
+}
+
+optional_ptr<ExecutionRegionBackend> ExecutionRegionManager::SelectBackend(ClientContext &context, string &backend_name,
+                                                                           ExecutionRunnerKind runner_kind) const {
 	auto requested = ExecutionRegionSettings::RequestedBackend(context);
 	lock_guard<mutex> guard(lock);
 	if (StringUtil::CIEquals(requested, "auto")) {
 		for (auto &backend : backends) {
-			if (backend->IsAvailable()) {
+			if (backend->IsAvailable() && ExecutionRegionBackendMatchesRunner(*backend, runner_kind)) {
 				backend_name = backend->Name();
 				return *backend;
 			}
@@ -54,6 +77,9 @@ optional_ptr<ExecutionRegionBackend> ExecutionRegionManager::SelectBackend(Clien
 		if (!backend->IsAvailable()) {
 			throw InvalidInputException("Execution region backend \"%s\" is registered but not available", requested);
 		}
+		if (!ExecutionRegionBackendMatchesRunner(*backend, runner_kind)) {
+			return nullptr;
+		}
 		return *backend;
 	}
 	throw InvalidInputException("Execution region backend \"%s\" is not registered", requested);
@@ -64,6 +90,9 @@ vector<ExecutionRegionBackendInfo> ExecutionRegionManager::GetBackends(ClientCon
 	if (context && ExecutionRegionSettings::Enabled(*context)) {
 		try {
 			SelectBackend(*context, selected_name);
+			if (StringUtil::CIEquals(selected_name, "auto")) {
+				SelectBackend(*context, selected_name, ExecutionRunnerKind::COMPILED_GPU);
+			}
 		} catch (...) {
 			selected_name.clear();
 		}
@@ -76,6 +105,7 @@ vector<ExecutionRegionBackendInfo> ExecutionRegionManager::GetBackends(ClientCon
 		ExecutionRegionBackendInfo info;
 		info.name = backend->Name();
 		info.description = backend->Description();
+		info.runner_kind = backend->RunnerKind();
 		info.available = backend->IsAvailable();
 		info.supports_regions = backend->SupportsRegions();
 		info.selected = StringUtil::CIEquals(info.name, selected_name);

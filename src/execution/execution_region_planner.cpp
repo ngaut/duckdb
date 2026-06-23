@@ -2,6 +2,7 @@
 
 #include "duckdb/common/constants.hpp"
 #include "duckdb/common/exception.hpp"
+#include "duckdb/common/string_util.hpp"
 #include "duckdb/execution/executor.hpp"
 #include "duckdb/execution/execution_region_lowering.hpp"
 #include "duckdb/execution/execution_region_manager.hpp"
@@ -366,11 +367,11 @@ unique_ptr<ExecutionRegionPlan> ExecutionRegionPlanner::Build(ClientContext &con
 		                                            candidate, selected_runner, stage_timings,
 		                                            selected_source_execution, selected_uses_scan_filters, runner_cost);
 	};
-	auto select_backend = [&]() -> bool {
+	auto select_backend_for_runner = [&](ExecutionRunnerKind runner_kind) -> bool {
 		if (backend) {
-			return true;
+			return backend->RunnerKind() == runner_kind;
 		}
-		backend = execution_region_manager.SelectBackend(context, backend_name);
+		backend = execution_region_manager.SelectBackend(context, backend_name, runner_kind);
 		plan->backend_name = backend_name;
 		if (!backend) {
 			if (should_record_decision_telemetry) {
@@ -406,6 +407,67 @@ unique_ptr<ExecutionRegionPlan> ExecutionRegionPlanner::Build(ClientContext &con
 	if (!ExecutionRegionProductionEligibilityAllowsPlanning(context, cost_parameters)) {
 		return nullptr;
 	}
+	auto restrict_cost_parameters_to_backend = [&]() {
+		if (!backend) {
+			return;
+		}
+		auto runner_kind = backend->RunnerKind();
+		cost_parameters.compiled_vectorized_runner_available = runner_kind == ExecutionRunnerKind::COMPILED_VECTORIZED;
+		cost_parameters.gpu_runner_available = runner_kind == ExecutionRunnerKind::COMPILED_GPU;
+	};
+	auto requested_backend_is_auto = StringUtil::CIEquals(ExecutionRegionSettings::RequestedBackend(context), "auto");
+	auto desired_runner = ExecutionRunnerKind::COMPILED_VECTORIZED;
+	auto decision_event_backend_name = [&](ExecutionRunnerKind runner_kind) {
+		if (!backend_name.empty()) {
+			return backend_name;
+		}
+		if (!requested_backend_is_auto) {
+			return ExecutionRegionSettings::RequestedBackend(context);
+		}
+		string selected_name;
+		try {
+			if (execution_region_manager.SelectBackend(context, selected_name, runner_kind)) {
+				return selected_name;
+			}
+		} catch (...) {
+		}
+		return string("auto");
+	};
+	auto select_requested_backend = [&]() -> bool {
+		if (requested_backend_is_auto) {
+			return true;
+		}
+		backend =
+		    execution_region_manager.SelectBackend(context, backend_name, ExecutionRunnerKind::COMPILED_VECTORIZED);
+		if (!backend) {
+			backend = execution_region_manager.SelectBackend(context, backend_name, ExecutionRunnerKind::COMPILED_GPU);
+		}
+		plan->backend_name = backend_name;
+		if (!backend) {
+			if (should_record_decision_telemetry) {
+				record_decision_event(backend_name, ExecutionRegionCompileStatus::UNAVAILABLE,
+				                      ExecutionRegionExecutionMode::NONE, "no available execution region backend",
+				                      "backend_unavailable", nullptr, 0, nullptr, ExecutionRunnerKind::VECTORIZED,
+				                      nullptr, ExecutionRegionSourceExecutionKind::NONE, false, nullptr);
+			}
+			return false;
+		}
+		if (!backend->SupportsRegions()) {
+			if (should_record_decision_telemetry) {
+				record_decision_event(
+				    backend_name, ExecutionRegionCompileStatus::UNSUPPORTED, ExecutionRegionExecutionMode::UNSUPPORTED,
+				    "backend does not compile regions", "backend_does_not_compile_regions", nullptr, 0, nullptr,
+				    ExecutionRunnerKind::VECTORIZED, nullptr, ExecutionRegionSourceExecutionKind::NONE, false, nullptr);
+			}
+			return false;
+		}
+		desired_runner = backend->RunnerKind();
+		restrict_cost_parameters_to_backend();
+		return true;
+	};
+	if (!select_requested_backend()) {
+		return nullptr;
+	}
 	ExecutionRegionPlannerDecisionRecorder decision_recorder;
 	auto &shared_stage_timings = decision_recorder.SharedStageTimings();
 	if (!needs_candidate_diagnostics) {
@@ -415,7 +477,7 @@ unique_ptr<ExecutionRegionPlan> ExecutionRegionPlanner::Build(ClientContext &con
 		shared_stage_timings.pipeline_cbo_time_us = pipeline_cbo_time_us;
 		if (!physical_runner.UsesCompiledRunner()) {
 			if (should_record_decision_telemetry) {
-				if (!select_backend()) {
+				if (!backend && !select_backend_for_runner(ExecutionRunnerKind::COMPILED_VECTORIZED)) {
 					return nullptr;
 				}
 				auto decision_time_us = ExecutionRegionPlannerElapsedMicros(pipeline_decision_start);
@@ -427,9 +489,16 @@ unique_ptr<ExecutionRegionPlan> ExecutionRegionPlanner::Build(ClientContext &con
 			}
 			return nullptr;
 		}
+		desired_runner = physical_runner.SelectedRunner();
+		if (!select_backend_for_runner(physical_runner.SelectedRunner())) {
+			return nullptr;
+		}
 	}
-	if (!select_backend()) {
+	if (!requested_backend_is_auto && !select_backend_for_runner(desired_runner)) {
 		return nullptr;
+	}
+	if (!requested_backend_is_auto) {
+		restrict_cost_parameters_to_backend();
 	}
 	ExecutionExpressionAnalysisCache expression_analysis_cache;
 	auto region_ir_mode =
@@ -527,7 +596,8 @@ unique_ptr<ExecutionRegionPlan> ExecutionRegionPlanner::Build(ClientContext &con
 				if (should_record_decision_telemetry) {
 					auto decision_time_us = decision_recorder.ClaimCandidateDecisionTime(candidate_trace);
 					record_decision_event(
-					    backend_name, ExecutionRegionCompileStatus::SKIPPED, ExecutionRegionExecutionMode::UNSUPPORTED,
+					    decision_event_backend_name(ExecutionRunnerKind::COMPILED_VECTORIZED),
+					    ExecutionRegionCompileStatus::SKIPPED, ExecutionRegionExecutionMode::UNSUPPORTED,
 					    AttachExecutionRegionCandidateReason(candidate, physical_runner.reason,
 					                                         should_record_detailed_telemetry),
 					    physical_runner.blocker, &lowered_region.ir, decision_time_us, &candidate,
@@ -538,6 +608,13 @@ unique_ptr<ExecutionRegionPlan> ExecutionRegionPlanner::Build(ClientContext &con
 			}
 			cost_only_physical_runner = std::move(physical_runner);
 			has_cost_only_physical_runner = true;
+		}
+		if (has_cost_only_physical_runner &&
+		    (!backend || backend->RunnerKind() != cost_only_physical_runner.SelectedRunner())) {
+			if (!select_backend_for_runner(cost_only_physical_runner.SelectedRunner())) {
+				return nullptr;
+			}
+			restrict_cost_parameters_to_backend();
 		}
 		if (!needs_backend_diagnostics && !ExecutionRegionContractHasOnlyNativeStages(candidate.contract)) {
 			if (should_record_decision_telemetry) {
@@ -569,6 +646,12 @@ unique_ptr<ExecutionRegionPlan> ExecutionRegionPlanner::Build(ClientContext &con
 				}
 				continue;
 			}
+		}
+		if (!backend) {
+			if (!select_backend_for_runner(desired_runner)) {
+				return nullptr;
+			}
+			restrict_cost_parameters_to_backend();
 		}
 		ExecutionRegionCompilationInput input(context, lowered_region, candidate);
 		auto analysis_start = std::chrono::steady_clock::now();
@@ -659,7 +742,9 @@ unique_ptr<ExecutionRegionPlan> ExecutionRegionPlanner::Build(ClientContext &con
 		ExecutionRegionPhysicalRunnerSelection physical_runner;
 		if (has_cost_only_physical_runner && lowering_plan.IsFullyFused()) {
 			physical_runner = std::move(cost_only_physical_runner);
-			physical_runner.reason = "duckdb_cbo selects compiled-vectorized physical runner";
+			physical_runner.reason = "duckdb_cbo selects ";
+			physical_runner.reason += ExecutionRegionDecisionRunnerName(physical_runner.SelectedRunner());
+			physical_runner.reason += " physical runner";
 		} else {
 			auto candidate_cbo_start = std::chrono::steady_clock::now();
 			physical_runner = SelectExecutionRegionPhysicalRunner(cost_parameters, candidate, lowering_plan,
@@ -689,9 +774,14 @@ unique_ptr<ExecutionRegionPlan> ExecutionRegionPlanner::Build(ClientContext &con
 		AccumulateExecutionRegionOpenRequest(*plan, lowered_region, candidate, selected_region.lowering_plan);
 		selected_regions.push_back(std::move(selected_region));
 	}
+	if (selected_regions.empty()) {
+		return KeepExecutableExecutionRegionPlan(std::move(plan));
+	}
 	Compile(context, *backend, backend_name, *plan, lowered_region, selected_regions);
 	if (plan->HasExecutableFullPipeline() && !ExecutionRegionSettings::TraceVectorizedBaseline(context)) {
-		plan->SelectRunner(ExecutionRunnerKind::COMPILED_VECTORIZED);
+		auto runner = selected_regions.empty() ? ExecutionRunnerKind::COMPILED_VECTORIZED
+		                                       : selected_regions[0].physical_runner.SelectedRunner();
+		plan->SelectRunner(runner);
 	}
 	return KeepExecutableExecutionRegionPlan(std::move(plan));
 }

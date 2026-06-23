@@ -461,7 +461,71 @@ public:
 		return op.Sink(context, input, sink_input);
 	}
 
+	ExecutionOperatorBindResult PrepareDirectAppend(const vector<LogicalType> &types, idx_t count,
+	                                                DirectAppendReservation &reservation, string &blocker) override {
+		reservation.Clear();
+		if (!CanUseDirectAppend(types)) {
+			blocker = "batch-insert-direct-append-type-or-constraint-mismatch";
+			return ExecutionOperatorBindResult::INVALID;
+		}
+		auto &gstate = global_state.Cast<BatchInsertGlobalState>();
+		auto &lstate = local_state.Cast<BatchInsertLocalState>();
+		auto &memory_manager = gstate.memory_manager;
+		auto &table = gstate.table;
+		auto batch_index = lstate.partition_info.batch_index.GetIndex();
+		if (!memory_manager.IsMinimumBatchIndex(batch_index)) {
+			memory_manager.UpdateMinBatchIndex(lstate.partition_info.min_batch_index.GetIndex());
+			if (memory_manager.OutOfMemory(batch_index)) {
+				while (auto task = gstate.task_manager.GetTask()) {
+					task->Execute(op, context.client, gstate, lstate);
+				}
+
+				const annotated_lock_guard<annotated_mutex> guard {memory_manager.lock};
+				if (!memory_manager.IsMinimumBatchIndex(batch_index)) {
+					blocker = "batch-insert-direct-append-batch-not-ready";
+					return ExecutionOperatorBindResult::INVALID;
+				}
+			}
+		}
+		if (!lstate.collection_index.IsValid()) {
+			annotated_lock_guard<annotated_mutex> l(gstate.lock);
+			lstate.CreateNewCollection(context.client, table, op.insert_types);
+		}
+		if (lstate.current_index != batch_index) {
+			throw InternalException("Current batch differs from batch - but NextBatch was not called!?");
+		}
+		auto &optimistic_collection =
+		    table.GetStorage().GetOptimisticCollection(context.client, lstate.collection_index);
+		auto &collection = *optimistic_collection.collection;
+		if (!collection.TryPrepareDirectAppend(lstate.current_append_state, count, reservation)) {
+			blocker = "batch-insert-direct-append-segment-capacity";
+			return ExecutionOperatorBindResult::INVALID;
+		}
+		blocker.clear();
+		return ExecutionOperatorBindResult::READY;
+	}
+
+	SinkResultType CommitDirectAppend(const DirectAppendReservation &reservation) override {
+		auto &gstate = global_state.Cast<BatchInsertGlobalState>();
+		auto &lstate = local_state.Cast<BatchInsertLocalState>();
+		if (!lstate.collection_index.IsValid()) {
+			throw InternalException("batch insert direct append commit without an active collection");
+		}
+		auto &optimistic_collection =
+		    gstate.table.GetStorage().GetOptimisticCollection(context.client, lstate.collection_index);
+		auto &collection = *optimistic_collection.collection;
+		collection.CommitDirectAppend(lstate.current_append_state, reservation);
+		return SinkResultType::NEED_MORE_INPUT;
+	}
+
 private:
+	bool CanUseDirectAppend(const vector<LogicalType> &types) const {
+		if (!op.bound_constraints.empty()) {
+			return false;
+		}
+		return DirectAppendSupportsFixedSizeTypes(types, op.insert_types);
+	}
+
 	const PhysicalBatchInsert &op;
 	ExecutionContext &context;
 	GlobalSinkState &global_state;

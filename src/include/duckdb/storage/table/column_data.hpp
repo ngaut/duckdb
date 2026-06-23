@@ -14,6 +14,7 @@
 #include "duckdb/storage/statistics/segment_statistics.hpp"
 #include "duckdb/storage/table/segment_tree.hpp"
 #include "duckdb/storage/table/column_segment_tree.hpp"
+#include "duckdb/storage/table/direct_append_stats.hpp"
 #include "duckdb/common/mutex.hpp"
 #include "duckdb/common/enums/scan_vector_type.hpp"
 #include "duckdb/common/serializer/serialization_traits.hpp"
@@ -157,6 +158,11 @@ public:
 	//! Append a vector of type [type] to the end of the column
 	virtual void Append(ColumnAppendState &state, const Vector &vector, idx_t count);
 	virtual void AppendData(ColumnAppendState &state, UnifiedVectorFormat &vdata, idx_t count);
+	virtual bool TryPrepareDirectAppend(ColumnAppendState &state, idx_t count, data_ptr_t &target);
+	virtual void CommitDirectAppend(ColumnAppendState &state, data_ptr_t target, idx_t count,
+	                                optional_ptr<const DirectAppendColumnStats> stats = nullptr);
+	bool TryPrepareDirectAppendAllValid(ColumnAppendState &state, idx_t count);
+	void CommitDirectAppendAllValid(ColumnAppendState &state, idx_t count);
 	//! Finalize appending
 	virtual void FinalizeAppend(ColumnDataFinalizeAppendState &finalize_state, ColumnAppendState &state);
 	void FinalizeAppend(optional_ptr<BaseStatistics> table_stats, ColumnAppendState &state);
@@ -221,6 +227,8 @@ public:
 	const BaseStatistics &GetStatisticsRef() const;
 
 protected:
+	bool TryStartNextDirectAppendSegment(ColumnAppendState &state);
+	bool TryGrowDirectAppendSegment(ColumnAppendState &state, idx_t required_segment_size, bool initialize_validity);
 	//! Append a transient segment
 	void AppendTransientSegment(SegmentLock &l, idx_t start_row, optional_ptr<ColumnSegment> prev_segment);
 	void AppendSegment(SegmentLock &l, unique_ptr<ColumnSegment> segment);

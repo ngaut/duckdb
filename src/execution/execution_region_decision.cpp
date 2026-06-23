@@ -10,6 +10,7 @@
 #include "duckdb/execution/execution_region_graph.hpp"
 #include "duckdb/execution/execution_region_ir.hpp"
 #include "duckdb/execution/execution_region_lowering.hpp"
+#include "duckdb/execution/execution_region_manager.hpp"
 #include "duckdb/execution/execution_region_settings.hpp"
 #include "duckdb/main/client_context.hpp"
 #include "duckdb/main/settings.hpp"
@@ -85,18 +86,36 @@ string DescribeExecutionRegionLoweringRejection(const ExecutionRegionGraph &grap
 
 PhysicalRunnerCostParameters BuildPhysicalRunnerCostParameters(ClientContext &context) {
 	PhysicalRunnerCostParameters result;
+	auto &manager = ExecutionRegionManager::Get(context);
+	result.compiled_vectorized_runner_available =
+	    manager.HasAvailableBackendForRunner(context, ExecutionRunnerKind::COMPILED_VECTORIZED);
 	result.generated_stage_benefit = Settings::Get<JitCboGeneratedStageBenefitSetting>(context);
 	result.native_operator_stage_benefit = Settings::Get<JitCboNativeOperatorStageBenefitSetting>(context);
 	result.materialization_elision_benefit = Settings::Get<JitCboMaterializationElisionBenefitSetting>(context);
 	result.full_pipeline_benefit = Settings::Get<JitCboFullPipelineBenefitSetting>(context);
 	result.startup_base_cost = Settings::Get<JitCboStartupBaseCostSetting>(context);
 	result.startup_margin_basis_points = Settings::Get<JitCboStartupMarginBasisPointsSetting>(context);
+	result.gpu_runner_available = manager.HasAvailableBackendForRunner(context, ExecutionRunnerKind::COMPILED_GPU);
+	result.gpu_generated_stage_benefit = Settings::Get<GpuCboGeneratedStageBenefitSetting>(context);
+	result.gpu_native_operator_stage_benefit = Settings::Get<GpuCboNativeOperatorStageBenefitSetting>(context);
+	result.gpu_materialization_elision_benefit = Settings::Get<GpuCboMaterializationElisionBenefitSetting>(context);
+	result.gpu_full_pipeline_benefit = Settings::Get<GpuCboFullPipelineBenefitSetting>(context);
+	result.gpu_startup_base_cost = Settings::Get<GpuCboStartupBaseCostSetting>(context);
+	result.gpu_startup_margin_basis_points = Settings::Get<GpuCboStartupMarginBasisPointsSetting>(context);
+	result.gpu_transfer_cost_per_batch = Settings::Get<GpuCboTransferCostPerBatchSetting>(context);
 	return result;
 }
 
 static bool PhysicalRunnerCostingHasEnabledBenefit(const PhysicalRunnerCostParameters &parameters) {
-	return parameters.generated_stage_benefit > 0 || parameters.native_operator_stage_benefit > 0 ||
-	       parameters.materialization_elision_benefit > 0 || parameters.full_pipeline_benefit > 0;
+	const bool compiled_vectorized_costing =
+	    parameters.compiled_vectorized_runner_available &&
+	    (parameters.generated_stage_benefit > 0 || parameters.native_operator_stage_benefit > 0 ||
+	     parameters.materialization_elision_benefit > 0 || parameters.full_pipeline_benefit > 0);
+	const bool gpu_costing =
+	    parameters.gpu_runner_available &&
+	    (parameters.gpu_generated_stage_benefit > 0 || parameters.gpu_native_operator_stage_benefit > 0 ||
+	     parameters.gpu_materialization_elision_benefit > 0 || parameters.gpu_full_pipeline_benefit > 0);
+	return compiled_vectorized_costing || gpu_costing;
 }
 
 bool ExecutionRegionProductionEligibilityAllowsPlanning(ClientContext &context,
@@ -117,19 +136,47 @@ bool ExecutionRegionPlanningNeedsCandidateDiagnostics(ClientContext &context) {
 
 bool ExecutionRegionGraphMayHaveCostedAcceleration(const ExecutionRegionGraph &graph,
                                                    const PhysicalRunnerCostParameters &parameters) {
-	if (parameters.generated_stage_benefit > 0 && graph.HasGeneratedExpression()) {
+	const auto generated_stage_benefit =
+	    MaxValue(parameters.compiled_vectorized_runner_available ? parameters.generated_stage_benefit : 0,
+	             parameters.gpu_runner_available ? parameters.gpu_generated_stage_benefit : 0);
+	const auto native_operator_stage_benefit =
+	    MaxValue(parameters.compiled_vectorized_runner_available ? parameters.native_operator_stage_benefit : 0,
+	             parameters.gpu_runner_available ? parameters.gpu_native_operator_stage_benefit : 0);
+	const auto materialization_elision_benefit =
+	    MaxValue(parameters.compiled_vectorized_runner_available ? parameters.materialization_elision_benefit : 0,
+	             parameters.gpu_runner_available ? parameters.gpu_materialization_elision_benefit : 0);
+	const auto full_pipeline_benefit =
+	    MaxValue(parameters.compiled_vectorized_runner_available ? parameters.full_pipeline_benefit : 0,
+	             parameters.gpu_runner_available ? parameters.gpu_full_pipeline_benefit : 0);
+	if (generated_stage_benefit > 0 && graph.HasGeneratedExpression()) {
 		return true;
 	}
-	if (parameters.native_operator_stage_benefit > 0 && graph.HasNativeOperatorWork()) {
+	if (native_operator_stage_benefit > 0 && graph.HasNativeOperatorWork()) {
 		return true;
 	}
-	if (parameters.materialization_elision_benefit > 0 && graph.HasGeneratedExpression() && graph.HasSink()) {
+	if (materialization_elision_benefit > 0 && graph.HasGeneratedExpression() && graph.HasSink()) {
 		return true;
 	}
-	if (parameters.full_pipeline_benefit > 0 && graph.HasSource() && graph.HasSink()) {
+	if (full_pipeline_benefit > 0 && graph.HasSource() && graph.HasSink()) {
 		return true;
 	}
 	return false;
+}
+
+static void SelectExecutionRegionAcceleratedRunner(ExecutionRegionPhysicalRunnerSelection &selection) {
+	selection.selected_runner = selection.runner_cost.selected_runner;
+	selection.use_compiled_runner = selection.selected_runner != ExecutionRunnerKind::VECTORIZED;
+}
+
+string ExecutionRegionDecisionRunnerName(ExecutionRunnerKind runner) {
+	switch (runner) {
+	case ExecutionRunnerKind::COMPILED_VECTORIZED:
+		return "compiled-vectorized";
+	case ExecutionRunnerKind::COMPILED_GPU:
+		return "compiled-gpu";
+	default:
+		return ExecutionRunnerKindToString(runner);
+	}
 }
 
 ExecutionRegionPhysicalRunnerSelection
@@ -148,12 +195,13 @@ SelectExecutionRegionPipelinePhysicalRunner(const PhysicalRunnerCostParameters &
 	PhysicalRunnerCostInput cost_input;
 	if (!TryBuildExecutionRegionPipelineCostInput(pipeline, cost_input)) {
 		selection.use_compiled_runner = true;
+		selection.selected_runner = ExecutionRunnerKind::COMPILED_VECTORIZED;
 		selection.reason = "duckdb_cbo requires execution-region graph for physical runner decision";
 		return selection;
 	}
 	selection.runner_cost = DuckDBCostModel::SelectPhysicalRunner(cost_input, cost_parameters);
 	if (selection.runner_cost.selected_accelerated_runner) {
-		selection.use_compiled_runner = true;
+		SelectExecutionRegionAcceleratedRunner(selection);
 		selection.reason = "duckdb_cbo physical pipeline cost admits region graph analysis";
 		return selection;
 	}
@@ -170,7 +218,7 @@ SelectExecutionRegionCostOnlyPhysicalRunner(const PhysicalRunnerCostParameters &
 	auto cost_input = BuildExecutionRegionCandidateCostInput(candidate);
 	selection.runner_cost = DuckDBCostModel::SelectPhysicalRunner(cost_input, cost_parameters);
 	if (selection.runner_cost.selected_accelerated_runner) {
-		selection.use_compiled_runner = true;
+		SelectExecutionRegionAcceleratedRunner(selection);
 		selection.reason = "duckdb_cbo cost model admits backend capability analysis";
 		return selection;
 	}
@@ -196,8 +244,10 @@ SelectExecutionRegionPhysicalRunner(const PhysicalRunnerCostParameters &cost_par
 	auto cost_input = BuildExecutionRegionCandidateCostInput(candidate);
 	selection.runner_cost = DuckDBCostModel::SelectPhysicalRunner(cost_input, cost_parameters);
 	if (selection.runner_cost.selected_accelerated_runner) {
-		selection.use_compiled_runner = true;
-		selection.reason = "duckdb_cbo selects compiled-vectorized physical runner";
+		SelectExecutionRegionAcceleratedRunner(selection);
+		selection.reason = "duckdb_cbo selects ";
+		selection.reason += ExecutionRegionDecisionRunnerName(selection.SelectedRunner());
+		selection.reason += " physical runner";
 		return selection;
 	}
 

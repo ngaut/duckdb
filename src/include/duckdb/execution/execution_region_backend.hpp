@@ -18,6 +18,7 @@ class DatabaseInstance;
 struct ExecutionRegionBackendInfo {
 	string name;
 	string description;
+	ExecutionRunnerKind runner_kind = ExecutionRunnerKind::COMPILED_VECTORIZED;
 	bool available = false;
 	bool supports_regions = false;
 	bool selected = false;
@@ -66,6 +67,7 @@ public:
 
 	virtual string Name() const = 0;
 	virtual string Description() const = 0;
+	virtual ExecutionRunnerKind RunnerKind() const;
 	virtual bool IsAvailable() const;
 	virtual bool SupportsRegions() const;
 	virtual ExecutionRegionLoweringPlan AnalyzeRegion(const ExecutionRegionCompilationInput &input);

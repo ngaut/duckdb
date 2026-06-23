@@ -78,6 +78,17 @@ static void SetRecordedExecutionRegionEventId(ExecutionRegionEvent &event, idx_t
 	}
 }
 
+static ExecutionRunnerKind ExecutionRegionRunnerFromExecutionMode(ExecutionRegionExecutionMode execution_mode) {
+	switch (execution_mode) {
+	case ExecutionRegionExecutionMode::GPU:
+		return ExecutionRunnerKind::COMPILED_GPU;
+	case ExecutionRegionExecutionMode::NATIVE:
+		return ExecutionRunnerKind::COMPILED_VECTORIZED;
+	default:
+		return ExecutionRunnerKind::VECTORIZED;
+	}
+}
+
 static void SetDetailedExecutionRegionCandidate(ExecutionRegionEvent &event, const ExecutionRegionCandidate &candidate,
                                                 bool include_ir) {
 	event.has_candidate = true;
@@ -280,6 +291,7 @@ static ExecutionRegionEvent BuildRuntimeEvent(const KERNEL &kernel, ExecutionReg
 	event.backend_name = kernel.BackendName();
 	event.status_kind = status;
 	event.execution_mode_kind = execution_mode;
+	event.selected_runner = ExecutionRegionRunnerFromExecutionMode(execution_mode);
 	event.reason = std::move(reason);
 	event.kernel_id = kernel.TraceId();
 	event.kernel_compile_reason = kernel.TraceCompileReason();

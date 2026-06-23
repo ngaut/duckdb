@@ -131,8 +131,8 @@ def jit_setup_sql(
     *,
     dump_ir=False,
     jit_verify=False,
-    trace_runtime=True,
-    trace_decisions=True,
+    trace_runtime=False,
+    trace_decisions=False,
     reset_events=False,
     reset_counters=False,
 ) -> str:

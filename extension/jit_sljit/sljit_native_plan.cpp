@@ -439,8 +439,21 @@ bool TryReadNativeIntegerBinaryReferences(const ExecutionExpressionIR &root, Slj
 	return true;
 }
 
+static bool IsNativeFloatingNode(const ExecutionExpressionIR &node) {
+	return (node.return_type.id() == LogicalTypeId::FLOAT && node.physical_type == PhysicalType::FLOAT) ||
+	       (node.return_type.id() == LogicalTypeId::DOUBLE && node.physical_type == PhysicalType::DOUBLE);
+}
+
 static bool IsNativeDoubleNode(const ExecutionExpressionIR &node) {
 	return node.return_type.id() == LogicalTypeId::DOUBLE && node.physical_type == PhysicalType::DOUBLE;
+}
+
+static bool IsNativeFloatNode(const ExecutionExpressionIR &node) {
+	return node.return_type.id() == LogicalTypeId::FLOAT && node.physical_type == PhysicalType::FLOAT;
+}
+
+static bool IsNativeFloatSource(SljitNativeDoubleSourceKind kind) {
+	return kind == SljitNativeDoubleSourceKind::FLOAT;
 }
 
 static double NativeDecimalScaleFactor(const LogicalType &type) {
@@ -453,13 +466,21 @@ static double NativeDecimalScaleFactor(const LogicalType &type) {
 static bool TryReadNativeDoubleReference(const ExecutionExpressionIR &node, SljitNativeDoubleSourceKind &source_kind,
                                          idx_t &source_index, double &source_scale) {
 	source_scale = 1;
+	if (node.kind == ExecutionExpressionIRKind::REFERENCE && IsNativeFloatNode(node)) {
+		source_kind = SljitNativeDoubleSourceKind::FLOAT;
+		source_index = node.ref_index;
+		return true;
+	}
 	if (node.kind == ExecutionExpressionIRKind::REFERENCE && IsNativeDoubleNode(node)) {
 		source_kind = SljitNativeDoubleSourceKind::DOUBLE;
 		source_index = node.ref_index;
 		return true;
 	}
-	if (node.kind != ExecutionExpressionIRKind::CAST || !IsNativeDoubleNode(node) || !node.left ||
+	if (node.kind != ExecutionExpressionIRKind::CAST || !IsNativeFloatingNode(node) || !node.left ||
 	    node.left->kind != ExecutionExpressionIRKind::REFERENCE) {
+		return false;
+	}
+	if (IsNativeFloatNode(node)) {
 		return false;
 	}
 
@@ -488,7 +509,7 @@ static bool TryReadNativeDoubleReference(const ExecutionExpressionIR &node, Slji
 
 static bool TryReadNativeDoubleConstant(const ExecutionExpressionIR &constant, double &constant_value,
                                         bool &constant_is_null) {
-	if (constant.kind != ExecutionExpressionIRKind::CONSTANT || !IsNativeDoubleNode(constant)) {
+	if (constant.kind != ExecutionExpressionIRKind::CONSTANT || !IsNativeFloatingNode(constant)) {
 		return false;
 	}
 	constant_is_null = constant.constant.IsNull();
@@ -496,7 +517,11 @@ static bool TryReadNativeDoubleConstant(const ExecutionExpressionIR &constant, d
 		constant_value = 0;
 		return true;
 	}
-	constant_value = constant.constant.GetValue<double>();
+	if (IsNativeFloatNode(constant)) {
+		constant_value = constant.constant.GetValue<float>();
+	} else {
+		constant_value = constant.constant.GetValue<double>();
+	}
 	return true;
 }
 
@@ -511,13 +536,16 @@ static bool TryReadNativeDoubleReferenceConstant(const ExecutionExpressionIR &ca
 	if (!TryReadNativeDoubleConstant(constant, constant_value, constant_is_null) || constant_is_null) {
 		return false;
 	}
+	if (IsNativeFloatSource(source_kind) != IsNativeFloatNode(constant)) {
+		return false;
+	}
 	return true;
 }
 
 bool TryReadNativeDoubleBinaryConstant(const ExecutionExpressionIR &root, SljitNativeDoubleBinaryOp &native_op,
                                        SljitNativeDoubleSourceKind &source_kind, idx_t &source_index,
                                        double &source_scale, double &constant_value, bool &constant_on_left) {
-	if (root.kind != ExecutionExpressionIRKind::BINARY || !IsNativeDoubleNode(root) || !root.left || !root.right ||
+	if (root.kind != ExecutionExpressionIRKind::BINARY || !IsNativeFloatingNode(root) || !root.left || !root.right ||
 	    !TryGetNativeDoubleBinaryOp(root.binary_op, native_op)) {
 		return false;
 	}
@@ -544,13 +572,16 @@ bool TryReadNativeDoubleBinaryReferences(const ExecutionExpressionIR &root, Slji
                                          SljitNativeDoubleSourceKind &left_kind, idx_t &left_index, double &left_scale,
                                          SljitNativeDoubleSourceKind &right_kind, idx_t &right_index,
                                          double &right_scale) {
-	if (root.kind != ExecutionExpressionIRKind::BINARY || !IsNativeDoubleNode(root) || !root.left || !root.right ||
+	if (root.kind != ExecutionExpressionIRKind::BINARY || !IsNativeFloatingNode(root) || !root.left || !root.right ||
 	    !TryGetNativeDoubleBinaryOp(root.binary_op, native_op) ||
 	    !TryReadNativeDoubleReference(*root.left, left_kind, left_index, left_scale) ||
 	    !TryReadNativeDoubleReference(*root.right, right_kind, right_index, right_scale)) {
 		return false;
 	}
 	if (native_op == SljitNativeDoubleBinaryOp::DIVIDE) {
+		return false;
+	}
+	if (IsNativeFloatSource(left_kind) != IsNativeFloatSource(right_kind)) {
 		return false;
 	}
 	return true;
@@ -586,6 +617,9 @@ static bool TryReadNativeDoubleCompareReferences(const ExecutionExpressionIR &ro
 	    !root.left || !root.right || !TryGetNativeIntegerCompareOp(root.binary_op, compare_op) ||
 	    !TryReadNativeDoubleReference(*root.left, left_kind, left_index, left_scale) ||
 	    !TryReadNativeDoubleReference(*root.right, right_kind, right_index, right_scale)) {
+		return false;
+	}
+	if (IsNativeFloatSource(left_kind) != IsNativeFloatSource(right_kind)) {
 		return false;
 	}
 	return true;
@@ -1078,7 +1112,8 @@ static bool TryReadNativeStringReferenceMaybeNullConstant(const ExecutionExpress
                                                           const ExecutionExpressionIR &constant_node,
                                                           idx_t &source_index, string &constant,
                                                           bool &constant_is_null) {
-	if (reference.kind != ExecutionExpressionIRKind::REFERENCE || reference.return_type.id() != LogicalTypeId::VARCHAR ||
+	if (reference.kind != ExecutionExpressionIRKind::REFERENCE ||
+	    reference.return_type.id() != LogicalTypeId::VARCHAR ||
 	    constant_node.kind != ExecutionExpressionIRKind::CONSTANT ||
 	    constant_node.return_type.id() != LogicalTypeId::VARCHAR) {
 		return false;

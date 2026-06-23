@@ -364,11 +364,39 @@ static int64_t PhysicalRunnerStartupCost(const PhysicalRunnerCostParameters &par
 	return SaturatingCostCast(parameters.startup_base_cost);
 }
 
+static PhysicalRunnerCostParameters PhysicalRunnerGpuCostParameters(const PhysicalRunnerCostParameters &parameters) {
+	PhysicalRunnerCostParameters result;
+	result.compiled_vectorized_runner_available = false;
+	result.generated_stage_benefit = parameters.gpu_generated_stage_benefit;
+	result.native_operator_stage_benefit = parameters.gpu_native_operator_stage_benefit;
+	result.materialization_elision_benefit = parameters.gpu_materialization_elision_benefit;
+	result.full_pipeline_benefit = parameters.gpu_full_pipeline_benefit;
+	result.startup_base_cost = parameters.gpu_startup_base_cost;
+	result.startup_margin_basis_points = parameters.gpu_startup_margin_basis_points;
+	return result;
+}
+
 static int64_t PhysicalRunnerRequiredBenefit(const PhysicalRunnerCostProfile &profile,
                                              const PhysicalRunnerCostParameters &parameters) {
 	auto margin = FractionalCost(profile.startup_cost, SaturatingCostCast(parameters.startup_margin_basis_points),
 	                             BASIS_POINT_SCALE);
 	return AddCost(profile.startup_cost, margin);
+}
+
+static void PhysicalRunnerInitializeProfile(const PhysicalRunnerCostInput &input, PhysicalRunnerCostProfile &profile) {
+	profile.present = true;
+	profile.rows = PhysicalRunnerRows(input);
+	profile.batches = PhysicalRunnerBatches(profile.rows);
+	profile.expression_cost = SaturatingCostCast(input.expression_cost);
+	profile.generated_stage_count = SaturatingCostCast(input.generated_stage_count);
+	profile.materialization_elision_count = SaturatingCostCast(input.materialization_elision_count);
+	profile.native_join_stage_count = SaturatingCostCast(input.native_join_stage_count);
+	profile.native_aggregate_stage_count = SaturatingCostCast(input.native_aggregate_stage_count);
+	profile.native_grouped_aggregate_stage_count = SaturatingCostCast(input.native_grouped_aggregate_stage_count);
+	profile.native_sort_stage_count = SaturatingCostCast(input.native_sort_stage_count);
+	profile.full_pipeline = input.full_pipeline;
+	profile.generated_work_class = input.generated_work_class;
+	profile.native_protocol_class = input.native_protocol_class;
 }
 
 static bool PhysicalRunnerHasAcceleratedWork(const PhysicalRunnerCostInput &input,
@@ -393,7 +421,10 @@ static bool PhysicalRunnerHasAcceleratedWork(const PhysicalRunnerCostInput &inpu
 
 static bool PhysicalRunnerShouldSelectAccelerated(const PhysicalRunnerCostInput &input,
                                                   const PhysicalRunnerCostParameters &parameters,
-                                                  const PhysicalRunnerCostProfile &profile) {
+                                                  const PhysicalRunnerCostProfile &profile, bool runner_available) {
+	if (!runner_available) {
+		return false;
+	}
 	if (!PhysicalRunnerHasAcceleratedWork(input, parameters, profile)) {
 		return false;
 	}
@@ -402,26 +433,65 @@ static bool PhysicalRunnerShouldSelectAccelerated(const PhysicalRunnerCostInput 
 
 PhysicalRunnerCostProfile DuckDBCostModel::SelectPhysicalRunner(const PhysicalRunnerCostInput &input,
                                                                 const PhysicalRunnerCostParameters &parameters) {
-	PhysicalRunnerCostProfile profile;
-	profile.present = true;
-	profile.rows = PhysicalRunnerRows(input);
-	profile.batches = PhysicalRunnerBatches(profile.rows);
-	profile.expression_cost = SaturatingCostCast(input.expression_cost);
-	profile.generated_stage_count = SaturatingCostCast(input.generated_stage_count);
-	profile.materialization_elision_count = SaturatingCostCast(input.materialization_elision_count);
-	profile.native_join_stage_count = SaturatingCostCast(input.native_join_stage_count);
-	profile.native_aggregate_stage_count = SaturatingCostCast(input.native_aggregate_stage_count);
-	profile.native_grouped_aggregate_stage_count = SaturatingCostCast(input.native_grouped_aggregate_stage_count);
-	profile.native_sort_stage_count = SaturatingCostCast(input.native_sort_stage_count);
-	profile.full_pipeline = input.full_pipeline;
-	profile.generated_work_class = input.generated_work_class;
-	profile.native_protocol_class = input.native_protocol_class;
-	PhysicalRunnerComputeWorkComponents(input, parameters, profile);
-	profile.accelerated_runner_benefit = MultiplyCost(profile.batches, profile.saved_work_per_batch);
-	profile.startup_cost = PhysicalRunnerStartupCost(parameters);
-	profile.required_benefit = PhysicalRunnerRequiredBenefit(profile, parameters);
-	profile.net_benefit = profile.accelerated_runner_benefit - profile.startup_cost;
-	profile.selected_accelerated_runner = PhysicalRunnerShouldSelectAccelerated(input, parameters, profile);
+	PhysicalRunnerCostProfile compiled_profile;
+	PhysicalRunnerInitializeProfile(input, compiled_profile);
+	PhysicalRunnerComputeWorkComponents(input, parameters, compiled_profile);
+	compiled_profile.accelerated_runner_benefit =
+	    MultiplyCost(compiled_profile.batches, compiled_profile.saved_work_per_batch);
+	compiled_profile.startup_cost = PhysicalRunnerStartupCost(parameters);
+	compiled_profile.required_benefit = PhysicalRunnerRequiredBenefit(compiled_profile, parameters);
+	compiled_profile.net_benefit =
+	    SubtractCost(compiled_profile.accelerated_runner_benefit, compiled_profile.startup_cost);
+
+	auto gpu_parameters = PhysicalRunnerGpuCostParameters(parameters);
+	PhysicalRunnerCostProfile gpu_profile;
+	PhysicalRunnerInitializeProfile(input, gpu_profile);
+	PhysicalRunnerComputeWorkComponents(input, gpu_parameters, gpu_profile);
+	gpu_profile.accelerated_runner_benefit = MultiplyCost(gpu_profile.batches, gpu_profile.saved_work_per_batch);
+	gpu_profile.gpu_transfer_cost =
+	    MultiplyCost(gpu_profile.batches, SaturatingCostCast(parameters.gpu_transfer_cost_per_batch));
+	gpu_profile.startup_cost = PhysicalRunnerStartupCost(gpu_parameters);
+	gpu_profile.required_benefit =
+	    AddCost(PhysicalRunnerRequiredBenefit(gpu_profile, gpu_parameters), gpu_profile.gpu_transfer_cost);
+	gpu_profile.net_benefit = SubtractCost(
+	    SubtractCost(gpu_profile.accelerated_runner_benefit, gpu_profile.startup_cost), gpu_profile.gpu_transfer_cost);
+
+	const bool compiled_selected = PhysicalRunnerShouldSelectAccelerated(
+	    input, parameters, compiled_profile, parameters.compiled_vectorized_runner_available);
+	const bool gpu_selected =
+	    PhysicalRunnerShouldSelectAccelerated(input, gpu_parameters, gpu_profile, parameters.gpu_runner_available);
+
+	bool use_gpu_profile = parameters.gpu_runner_available && (!parameters.compiled_vectorized_runner_available ||
+	                                                           gpu_profile.net_benefit > compiled_profile.net_benefit);
+	PhysicalRunnerCostProfile profile = use_gpu_profile ? gpu_profile : compiled_profile;
+	profile.compiled_vectorized_runner_benefit = compiled_profile.accelerated_runner_benefit;
+	profile.compiled_vectorized_startup_cost = compiled_profile.startup_cost;
+	profile.compiled_vectorized_required_benefit = compiled_profile.required_benefit;
+	profile.compiled_vectorized_net_benefit = compiled_profile.net_benefit;
+	profile.gpu_runner_benefit = gpu_profile.accelerated_runner_benefit;
+	profile.gpu_transfer_cost = gpu_profile.gpu_transfer_cost;
+	profile.gpu_startup_cost = gpu_profile.startup_cost;
+	profile.gpu_required_benefit = gpu_profile.required_benefit;
+	profile.gpu_net_benefit = gpu_profile.net_benefit;
+	if (gpu_selected && (!compiled_selected || gpu_profile.net_benefit > compiled_profile.net_benefit)) {
+		profile = gpu_profile;
+		profile.selected_runner = ExecutionRunnerKind::COMPILED_GPU;
+		profile.selected_gpu_runner = true;
+	} else if (compiled_selected) {
+		profile = compiled_profile;
+		profile.selected_runner = ExecutionRunnerKind::COMPILED_VECTORIZED;
+		profile.selected_compiled_vectorized_runner = true;
+	}
+	profile.compiled_vectorized_runner_benefit = compiled_profile.accelerated_runner_benefit;
+	profile.compiled_vectorized_startup_cost = compiled_profile.startup_cost;
+	profile.compiled_vectorized_required_benefit = compiled_profile.required_benefit;
+	profile.compiled_vectorized_net_benefit = compiled_profile.net_benefit;
+	profile.gpu_runner_benefit = gpu_profile.accelerated_runner_benefit;
+	profile.gpu_transfer_cost = gpu_profile.gpu_transfer_cost;
+	profile.gpu_startup_cost = gpu_profile.startup_cost;
+	profile.gpu_required_benefit = gpu_profile.required_benefit;
+	profile.gpu_net_benefit = gpu_profile.net_benefit;
+	profile.selected_accelerated_runner = profile.selected_runner != ExecutionRunnerKind::VECTORIZED;
 	return profile;
 }
 

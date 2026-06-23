@@ -798,6 +798,55 @@
         "struct": "GeometryMinimumShreddingSize"
     },
     {
+        "name": "gpu_cbo_full_pipeline_benefit",
+        "description": "Per-vector benefit for full-pipeline ownership used by the GPU CBO physical-runner decision",
+        "type": "UBIGINT",
+        "default_scope": "local",
+        "default_value": "0"
+    },
+    {
+        "name": "gpu_cbo_generated_stage_benefit",
+        "description": "Per-vector benefit per generated stage used by the GPU CBO physical-runner decision",
+        "type": "UBIGINT",
+        "default_scope": "local",
+        "default_value": "0"
+    },
+    {
+        "name": "gpu_cbo_materialization_elision_benefit",
+        "description": "Per-vector benefit per eliminated vector materialization boundary used by the GPU CBO physical-runner decision",
+        "type": "UBIGINT",
+        "default_scope": "local",
+        "default_value": "0"
+    },
+    {
+        "name": "gpu_cbo_native_operator_stage_benefit",
+        "description": "Per-vector benefit per native operator protocol stage used by the GPU CBO physical-runner decision",
+        "type": "UBIGINT",
+        "default_scope": "local",
+        "default_value": "0"
+    },
+    {
+        "name": "gpu_cbo_startup_base_cost",
+        "description": "Base startup cost used by the GPU CBO physical-runner decision",
+        "type": "UBIGINT",
+        "default_scope": "local",
+        "default_value": "0"
+    },
+    {
+        "name": "gpu_cbo_startup_margin_basis_points",
+        "description": "Required-benefit margin over startup cost in basis points used by the GPU CBO physical-runner decision",
+        "type": "UBIGINT",
+        "default_scope": "local",
+        "default_value": "0"
+    },
+    {
+        "name": "gpu_cbo_transfer_cost_per_batch",
+        "description": "Per-vector transfer cost charged by the GPU CBO physical-runner decision",
+        "type": "UBIGINT",
+        "default_scope": "local",
+        "default_value": "0"
+    },
+    {
         "name": "home_directory",
         "description": "Sets the home directory used by the system",
         "type": "VARCHAR",

@@ -38,6 +38,9 @@ public:
 
 	void InitializeAppend(ColumnAppendState &state) override;
 	void AppendData(ColumnAppendState &state, UnifiedVectorFormat &vdata, idx_t count) override;
+	bool TryPrepareDirectAppend(ColumnAppendState &state, idx_t count, data_ptr_t &target) override;
+	void CommitDirectAppend(ColumnAppendState &state, data_ptr_t target, idx_t count,
+	                        optional_ptr<const DirectAppendColumnStats> stats = nullptr) override;
 	void FinalizeAppend(ColumnDataFinalizeAppendState &finalize_state, ColumnAppendState &state) override;
 	void RevertAppend(row_t new_count) override;
 	idx_t Fetch(ColumnScanState &state, row_t row_id, Vector &result) override;

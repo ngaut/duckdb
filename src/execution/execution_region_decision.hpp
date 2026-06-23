@@ -23,6 +23,7 @@ struct ExecutionRegionLoweringPlan;
 struct ExecutionRegionPhysicalRunnerSelection {
 	PhysicalRunnerCostProfile runner_cost;
 	bool use_compiled_runner = false;
+	ExecutionRunnerKind selected_runner = ExecutionRunnerKind::VECTORIZED;
 	string reason;
 	string blocker;
 
@@ -31,7 +32,7 @@ struct ExecutionRegionPhysicalRunnerSelection {
 	}
 
 	ExecutionRunnerKind SelectedRunner() const {
-		return UsesCompiledRunner() ? ExecutionRunnerKind::COMPILED_VECTORIZED : ExecutionRunnerKind::VECTORIZED;
+		return selected_runner;
 	}
 };
 
@@ -46,6 +47,7 @@ string ExecutionRegionCompileResultBlockerCode(ExecutionRegionCompileStatus stat
 string ExecutionRegionLoweringEventReason(const ExecutionRegionLoweringPlan &lowering_plan,
                                           bool record_detailed_telemetry);
 string DescribeExecutionRegionLoweringRejection(const ExecutionRegionGraph &graph);
+string ExecutionRegionDecisionRunnerName(ExecutionRunnerKind runner);
 
 PhysicalRunnerCostParameters BuildPhysicalRunnerCostParameters(ClientContext &context);
 bool ExecutionRegionProductionEligibilityAllowsPlanning(ClientContext &context,

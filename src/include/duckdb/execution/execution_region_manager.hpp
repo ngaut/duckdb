@@ -23,7 +23,10 @@ public:
 
 	DUCKDB_API void RegisterBackend(unique_ptr<ExecutionRegionBackend> backend);
 	DUCKDB_API vector<ExecutionRegionBackendInfo> GetBackends(ClientContext *context = nullptr) const;
-	DUCKDB_API optional_ptr<ExecutionRegionBackend> SelectBackend(ClientContext &context, string &backend_name) const;
+	DUCKDB_API bool HasAvailableBackendForRunner(ClientContext &context, ExecutionRunnerKind runner_kind) const;
+	DUCKDB_API optional_ptr<ExecutionRegionBackend>
+	SelectBackend(ClientContext &context, string &backend_name,
+	              ExecutionRunnerKind runner_kind = ExecutionRunnerKind::COMPILED_VECTORIZED) const;
 	DUCKDB_API vector<ExecutionRegionEvent> GetEvents() const;
 	DUCKDB_API vector<ExecutionRegionCounter> GetCounters() const;
 	DUCKDB_API void ClearEvents();

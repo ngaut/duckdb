@@ -38,8 +38,8 @@ bool ExecutionRegionPlan::HasExecutableFullPipeline() const {
 }
 
 void ExecutionRegionPlan::SelectRunner(ExecutionRunnerKind runner) {
-	if (runner == ExecutionRunnerKind::COMPILED_VECTORIZED && !HasExecutableFullPipeline()) {
-		throw InternalException("compiled-vectorized execution selected without an executable full-pipeline region");
+	if (runner != ExecutionRunnerKind::VECTORIZED && !HasExecutableFullPipeline()) {
+		throw InternalException("compiled execution selected without an executable full-pipeline region");
 	}
 	selected_runner = runner;
 }

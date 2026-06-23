@@ -12,7 +12,7 @@
 namespace duckdb {
 
 enum class ExecutionRegionCompileStatus : uint8_t { COMPILED, SKIPPED, UNSUPPORTED, UNAVAILABLE, DISABLED, ERROR };
-enum class ExecutionRegionExecutionMode : uint8_t { NONE, NATIVE, VECTORIZED, UNSUPPORTED };
+enum class ExecutionRegionExecutionMode : uint8_t { NONE, NATIVE, GPU, VECTORIZED, UNSUPPORTED };
 enum class ExecutionRegionLoweringKind : uint8_t { NATIVE, BOUNDARY };
 
 static constexpr const char *EXECUTION_REGION_BLOCKER_DUCKDB_SELECTED_VECTORIZED = "duckdb_selected_vectorized";
@@ -147,7 +147,7 @@ enum class ExecutionRegionStageExecutionKind : uint8_t {
 	SOURCE_BOUNDARY,
 	MISSING_CONTRACT
 };
-enum class ExecutionRunnerKind : uint8_t { VECTORIZED, COMPILED_VECTORIZED };
+enum class ExecutionRunnerKind : uint8_t { VECTORIZED, COMPILED_VECTORIZED, COMPILED_GPU };
 enum class ExecutionRegionPolicyMode : uint8_t { AUTO, OFF };
 enum class ExecutionRegionResult : uint8_t { NOT_FINISHED, FINISHED, INTERRUPTED, DEFERRED };
 enum class ExecutionExpressionValidityKind : uint8_t {

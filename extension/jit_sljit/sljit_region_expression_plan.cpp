@@ -1226,6 +1226,7 @@ static bool TryReadNativeRegionExpression(const ExecutionExpressionIR &root, boo
 		expr.source_index = source_index;
 		expr.right_source_index = right_source_index;
 		expr.binary_op = binary_op;
+		expr.check_arithmetic_overflow = root.arithmetic_overflow_check;
 		expr.check_result_range = true;
 		expr.result_min = result_min;
 		expr.result_max = result_max;
@@ -1241,6 +1242,7 @@ static bool TryReadNativeRegionExpression(const ExecutionExpressionIR &root, boo
 		expr.constant = constant;
 		expr.constant_on_left = constant_on_left;
 		expr.binary_op = binary_op;
+		expr.check_arithmetic_overflow = root.arithmetic_overflow_check;
 		expr.check_result_range = true;
 		expr.result_min = result_min;
 		expr.result_max = result_max;
@@ -1254,6 +1256,7 @@ static bool TryReadNativeRegionExpression(const ExecutionExpressionIR &root, boo
 		expr.source_index = source_index;
 		expr.right_source_index = right_source_index;
 		expr.binary_op = binary_op;
+		expr.check_arithmetic_overflow = root.arithmetic_overflow_check;
 		AttachSljitNativeExpressionTree(root, expr);
 		return true;
 	}
@@ -1265,6 +1268,7 @@ static bool TryReadNativeRegionExpression(const ExecutionExpressionIR &root, boo
 		expr.constant = constant;
 		expr.constant_on_left = constant_on_left;
 		expr.binary_op = binary_op;
+		expr.check_arithmetic_overflow = root.arithmetic_overflow_check;
 		AttachSljitNativeExpressionTree(root, expr);
 		return true;
 	}

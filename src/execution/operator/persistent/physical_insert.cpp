@@ -17,6 +17,7 @@
 #include "duckdb/storage/table_io_manager.hpp"
 #include "duckdb/storage/table/append_state.hpp"
 #include "duckdb/storage/table/data_table_info.hpp"
+#include "duckdb/storage/table/row_group_collection.hpp"
 #include "duckdb/storage/table/scan_state.hpp"
 #include "duckdb/storage/table/update_state.hpp"
 #include "duckdb/transaction/duck_transaction.hpp"
@@ -153,11 +154,75 @@ public:
 	}
 
 	SinkResultType Append(DataChunk &input) override {
+		auto &lstate = local_state.Cast<InsertLocalState>();
+		if (lstate.direct_append_initialized) {
+			auto &gstate = global_state.Cast<InsertGlobalState>();
+			gstate.table.GetStorage().FinalizeLocalAppend(lstate.direct_append_state);
+			lstate.direct_append_initialized = false;
+		}
 		OperatorSinkInput sink_input {global_state, local_state, interrupt_state};
 		return op.Sink(context, input, sink_input);
 	}
 
+	ExecutionOperatorBindResult PrepareDirectAppend(const vector<LogicalType> &types, idx_t count,
+	                                                DirectAppendReservation &reservation, string &blocker) override {
+		reservation.Clear();
+		if (!CanUseDirectAppend(types)) {
+			blocker = "insert-direct-append-type-or-constraint-mismatch";
+			return ExecutionOperatorBindResult::INVALID;
+		}
+		auto &gstate = global_state.Cast<InsertGlobalState>();
+		auto &lstate = local_state.Cast<InsertLocalState>();
+		if (!lstate.direct_append_initialized) {
+			gstate.table.GetStorage().InitializeLocalAppend(lstate.direct_append_state, gstate.table, context.client,
+			                                                op.bound_constraints);
+			lstate.direct_append_initialized = true;
+		}
+		auto storage = lstate.direct_append_state.storage;
+		if (!storage || !storage->append_indexes.Empty()) {
+			blocker = "insert-direct-append-indexes-not-supported";
+			FinalizeDirectAppend(gstate, lstate);
+			return ExecutionOperatorBindResult::INVALID;
+		}
+		auto &collection = storage->GetCollection();
+		if (!collection.TryPrepareDirectAppend(lstate.direct_append_state.append_state, count, reservation)) {
+			blocker = "insert-direct-append-segment-capacity";
+			FinalizeDirectAppend(gstate, lstate);
+			return ExecutionOperatorBindResult::INVALID;
+		}
+		blocker.clear();
+		return ExecutionOperatorBindResult::READY;
+	}
+
+	SinkResultType CommitDirectAppend(const DirectAppendReservation &reservation) override {
+		auto &gstate = global_state.Cast<InsertGlobalState>();
+		auto &lstate = local_state.Cast<InsertLocalState>();
+		if (!lstate.direct_append_initialized || !lstate.direct_append_state.storage) {
+			throw InternalException("insert direct append commit without an active append state");
+		}
+		auto &collection = lstate.direct_append_state.storage->GetCollection();
+		collection.CommitDirectAppend(lstate.direct_append_state.append_state, reservation);
+		gstate.insert_count += reservation.Count();
+		return SinkResultType::NEED_MORE_INPUT;
+	}
+
 private:
+	bool CanUseDirectAppend(const vector<LogicalType> &types) const {
+		if (!op.info || op.return_chunk || op.parallel || op.action_type != OnConflictAction::THROW ||
+		    !op.bound_constraints.empty()) {
+			return false;
+		}
+		return DirectAppendSupportsFixedSizeTypes(types, op.insert_types);
+	}
+
+	static void FinalizeDirectAppend(InsertGlobalState &gstate, InsertLocalState &lstate) {
+		if (!lstate.direct_append_initialized) {
+			return;
+		}
+		gstate.table.GetStorage().FinalizeLocalAppend(lstate.direct_append_state);
+		lstate.direct_append_initialized = false;
+	}
+
 	const PhysicalInsert &op;
 	ExecutionContext &context;
 	GlobalSinkState &global_state;
@@ -731,6 +796,11 @@ SinkCombineResultType PhysicalInsert::Combine(ExecutionContext &context, Operato
 	auto &client_profiler = QueryProfiler::Get(context.client);
 	context.thread.profiler.Flush(*this);
 	client_profiler.Flush(context.thread.profiler);
+
+	if (lstate.direct_append_initialized) {
+		gstate.table.GetStorage().FinalizeLocalAppend(lstate.direct_append_state);
+		lstate.direct_append_initialized = false;
+	}
 
 	if (!parallel || !lstate.collection_index.IsValid()) {
 		return SinkCombineResultType::FINISHED;

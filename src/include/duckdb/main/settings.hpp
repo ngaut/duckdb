@@ -1191,6 +1191,82 @@ struct GeometryMinimumShreddingSize {
 	static constexpr idx_t SettingIndex = NEXT_SETTING_INDEX();
 };
 
+struct GpuCboFullPipelineBenefitSetting {
+	using RETURN_TYPE = idx_t;
+	static constexpr const char *Name = "gpu_cbo_full_pipeline_benefit";
+	static constexpr const char *Description =
+	    "Per-vector benefit for full-pipeline ownership used by the GPU CBO physical-runner decision";
+	static constexpr const char *InputType = "UBIGINT";
+	static constexpr const char *DefaultValue = "0";
+	static constexpr SettingScopeTarget Scope = SettingScopeTarget::LOCAL_DEFAULT;
+	static constexpr idx_t SettingIndex = NEXT_SETTING_INDEX();
+};
+
+struct GpuCboGeneratedStageBenefitSetting {
+	using RETURN_TYPE = idx_t;
+	static constexpr const char *Name = "gpu_cbo_generated_stage_benefit";
+	static constexpr const char *Description =
+	    "Per-vector benefit per generated stage used by the GPU CBO physical-runner decision";
+	static constexpr const char *InputType = "UBIGINT";
+	static constexpr const char *DefaultValue = "0";
+	static constexpr SettingScopeTarget Scope = SettingScopeTarget::LOCAL_DEFAULT;
+	static constexpr idx_t SettingIndex = NEXT_SETTING_INDEX();
+};
+
+struct GpuCboMaterializationElisionBenefitSetting {
+	using RETURN_TYPE = idx_t;
+	static constexpr const char *Name = "gpu_cbo_materialization_elision_benefit";
+	static constexpr const char *Description = "Per-vector benefit per eliminated vector materialization boundary used "
+	                                           "by the GPU CBO physical-runner decision";
+	static constexpr const char *InputType = "UBIGINT";
+	static constexpr const char *DefaultValue = "0";
+	static constexpr SettingScopeTarget Scope = SettingScopeTarget::LOCAL_DEFAULT;
+	static constexpr idx_t SettingIndex = NEXT_SETTING_INDEX();
+};
+
+struct GpuCboNativeOperatorStageBenefitSetting {
+	using RETURN_TYPE = idx_t;
+	static constexpr const char *Name = "gpu_cbo_native_operator_stage_benefit";
+	static constexpr const char *Description =
+	    "Per-vector benefit per native operator protocol stage used by the GPU CBO physical-runner decision";
+	static constexpr const char *InputType = "UBIGINT";
+	static constexpr const char *DefaultValue = "0";
+	static constexpr SettingScopeTarget Scope = SettingScopeTarget::LOCAL_DEFAULT;
+	static constexpr idx_t SettingIndex = NEXT_SETTING_INDEX();
+};
+
+struct GpuCboStartupBaseCostSetting {
+	using RETURN_TYPE = idx_t;
+	static constexpr const char *Name = "gpu_cbo_startup_base_cost";
+	static constexpr const char *Description = "Base startup cost used by the GPU CBO physical-runner decision";
+	static constexpr const char *InputType = "UBIGINT";
+	static constexpr const char *DefaultValue = "0";
+	static constexpr SettingScopeTarget Scope = SettingScopeTarget::LOCAL_DEFAULT;
+	static constexpr idx_t SettingIndex = NEXT_SETTING_INDEX();
+};
+
+struct GpuCboStartupMarginBasisPointsSetting {
+	using RETURN_TYPE = idx_t;
+	static constexpr const char *Name = "gpu_cbo_startup_margin_basis_points";
+	static constexpr const char *Description =
+	    "Required-benefit margin over startup cost in basis points used by the GPU CBO physical-runner decision";
+	static constexpr const char *InputType = "UBIGINT";
+	static constexpr const char *DefaultValue = "0";
+	static constexpr SettingScopeTarget Scope = SettingScopeTarget::LOCAL_DEFAULT;
+	static constexpr idx_t SettingIndex = NEXT_SETTING_INDEX();
+};
+
+struct GpuCboTransferCostPerBatchSetting {
+	using RETURN_TYPE = idx_t;
+	static constexpr const char *Name = "gpu_cbo_transfer_cost_per_batch";
+	static constexpr const char *Description =
+	    "Per-vector transfer cost charged by the GPU CBO physical-runner decision";
+	static constexpr const char *InputType = "UBIGINT";
+	static constexpr const char *DefaultValue = "0";
+	static constexpr SettingScopeTarget Scope = SettingScopeTarget::LOCAL_DEFAULT;
+	static constexpr idx_t SettingIndex = NEXT_SETTING_INDEX();
+};
+
 struct HomeDirectorySetting {
 	using RETURN_TYPE = string;
 	static constexpr const char *Name = "home_directory";

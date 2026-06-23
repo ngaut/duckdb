@@ -86,6 +86,7 @@ struct SljitNativeRegionExpressionPlan {
 	int64_t result_min = 0;
 	int64_t result_max = 0;
 	bool constant_on_left = false;
+	bool check_arithmetic_overflow = true;
 	bool check_result_range = false;
 	SljitNativeIntegerBinaryOp binary_op = SljitNativeIntegerBinaryOp::ADD;
 	SljitNativeDoubleBinaryOp double_binary_op = SljitNativeDoubleBinaryOp::DIVIDE;

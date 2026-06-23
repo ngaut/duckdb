@@ -20,18 +20,39 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeNullCheck(SljitNativeNullC
 unique_ptr<ExecutionRegionCodeHandle>
 BuildSljitNativeIntegerBinaryConstant(SljitNativeIntegerKind kind, SljitNativeIntegerBinaryOp op, bool constant_on_left,
                                       SljitNativeVectorFunction &function, string &error,
-                                      bool check_result_range = false, int64_t result_min = 0, int64_t result_max = 0);
+                                      bool check_arithmetic_overflow = true, bool check_result_range = false,
+                                      int64_t result_min = 0, int64_t result_max = 0);
+unique_ptr<ExecutionRegionCodeHandle>
+BuildSljitNativeFlatIntegerBinaryConstant(SljitNativeIntegerKind kind, SljitNativeIntegerBinaryOp op,
+                                          bool constant_on_left, SljitNativeVectorFunction &function, string &error);
 unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeIntegerBinaryReferences(
     SljitNativeIntegerKind kind, SljitNativeIntegerBinaryOp op, SljitNativeVectorFunction &function, string &error,
-    bool check_result_range = false, int64_t result_min = 0, int64_t result_max = 0);
+    bool check_arithmetic_overflow = true, bool check_result_range = false, int64_t result_min = 0,
+    int64_t result_max = 0);
 unique_ptr<ExecutionRegionCodeHandle>
-BuildSljitNativeDoubleBinaryConstant(SljitNativeDoubleBinaryOp op, SljitNativeDoubleSourceKind source_kind,
-                                     bool constant_on_left, SljitNativeVectorFunction &function, string &error);
-unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeDoubleBinaryReferences(SljitNativeDoubleBinaryOp op,
-                                                                             SljitNativeDoubleSourceKind left_kind,
-                                                                             SljitNativeDoubleSourceKind right_kind,
-                                                                             SljitNativeVectorFunction &function,
-                                                                             string &error);
+BuildSljitNativeFlatIntegerBinaryReferences(SljitNativeIntegerKind kind, SljitNativeIntegerBinaryOp op,
+                                            SljitNativeVectorFunction &function, string &error);
+unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeDoubleBinaryConstant(SljitNativeDoubleBinaryOp op,
+                                                                           SljitNativeDoubleSourceKind source_kind,
+                                                                           bool constant_on_left, bool single_precision,
+                                                                           SljitNativeVectorFunction &function,
+                                                                           string &error);
+unique_ptr<ExecutionRegionCodeHandle>
+BuildSljitNativeFlatDoubleBinaryConstant(SljitNativeDoubleBinaryOp op, SljitNativeDoubleSourceKind source_kind,
+                                         bool constant_on_left, bool single_precision,
+                                         SljitNativeVectorFunction &function, string &error);
+unique_ptr<ExecutionRegionCodeHandle>
+BuildSljitNativeDoubleBinaryReferences(SljitNativeDoubleBinaryOp op, SljitNativeDoubleSourceKind left_kind,
+                                       SljitNativeDoubleSourceKind right_kind, bool single_precision,
+                                       SljitNativeVectorFunction &function, string &error);
+unique_ptr<ExecutionRegionCodeHandle>
+BuildSljitNativeFlatDoubleBinaryReferences(SljitNativeDoubleBinaryOp op, SljitNativeDoubleSourceKind left_kind,
+                                           SljitNativeDoubleSourceKind right_kind, bool single_precision,
+                                           SljitNativeVectorFunction &function, string &error);
+unique_ptr<ExecutionRegionCodeHandle>
+BuildSljitNativeFlatDoubleProjection(const vector<SljitNativeRegionExpressionPlan> &plans,
+                                     const vector<idx_t> &projection_indices, SljitNativeVectorFunction &function,
+                                     string &error);
 unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeIntegerCast(SljitNativeSignedIntegerWidth source_width,
                                                                   SljitNativeSignedIntegerWidth target_width,
                                                                   bool try_cast, SljitNativeVectorFunction &function,
@@ -125,11 +146,12 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeGroupedCountStar(SljitNati
                                                                        string &error);
 unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeUngroupedSumInt64IntegerBinaryConstant(
     SljitNativeIntegerKind kind, SljitNativeIntegerBinaryOp op, bool constant_on_left,
-    SljitNativeAggregateUpdateFunction &function, string &error, bool check_result_range = false,
-    int64_t result_min = 0, int64_t result_max = 0);
+    SljitNativeAggregateUpdateFunction &function, string &error, bool check_arithmetic_overflow = true,
+    bool check_result_range = false, int64_t result_min = 0, int64_t result_max = 0);
 unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeUngroupedSumInt64IntegerBinaryReferences(
     SljitNativeIntegerKind kind, SljitNativeIntegerBinaryOp op, SljitNativeAggregateUpdateFunction &function,
-    string &error, bool check_result_range = false, int64_t result_min = 0, int64_t result_max = 0);
+    string &error, bool check_arithmetic_overflow = true, bool check_result_range = false, int64_t result_min = 0,
+    int64_t result_max = 0);
 unique_ptr<ExecutionRegionCodeHandle>
 BuildSljitNativeUngroupedSumDoubleDoubleBinaryConstant(SljitNativeDoubleBinaryOp op,
                                                        SljitNativeDoubleSourceKind source_kind, bool constant_on_left,

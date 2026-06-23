@@ -229,12 +229,19 @@ static void EmitScalePredicateDoubleOperand(struct sljit_compiler *compiler, Slj
 	sljit_emit_fop2(compiler, SLJIT_DIV_F64, target, 0, target, 0, SLJIT_FR2, 0);
 }
 
+static bool PredicateDoubleSourceIsSinglePrecision(SljitNativeDoubleSourceKind kind) {
+	return kind == SljitNativeDoubleSourceKind::FLOAT;
+}
+
 static void EmitLoadPredicateDoubleOperand(struct sljit_compiler *compiler, SljitNativeDoubleSourceKind kind,
                                            idx_t source_index, sljit_s32 index_reg, double scale, sljit_s32 target) {
 	sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_R0, 0, SLJIT_MEM1(SLJIT_S0),
 	               offsetof(SljitNativePredicateInput, source_data));
 	sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_R0, 0, SLJIT_MEM1(SLJIT_R0), SljitPointerArrayOffset(source_index));
 	switch (kind) {
+	case SljitNativeDoubleSourceKind::FLOAT:
+		sljit_emit_fmem(compiler, SLJIT_MOV_F32 | SLJIT_MEM_ALIGNED_16, target, SLJIT_MEM2(SLJIT_R0, index_reg), 2);
+		return;
 	case SljitNativeDoubleSourceKind::DOUBLE:
 		sljit_emit_fmem(compiler, SLJIT_MOV_F64 | SLJIT_MEM_ALIGNED_32, target, SLJIT_MEM2(SLJIT_R0, index_reg), 3);
 		return;
@@ -870,12 +877,17 @@ static SljitPredicateBranches EmitSljitPredicateBranches(struct sljit_compiler *
 		return result;
 	}
 	case SljitNativePredicateKind::DOUBLE_COMPARE_CONSTANT: {
-		auto compare_type = NativeDoubleCompareJumpType(predicate.compare_op);
+		auto single_precision = PredicateDoubleSourceIsSinglePrecision(predicate.double_source_kind);
+		auto compare_type = NativeDoubleCompareJumpType(predicate.compare_op) | (single_precision ? SLJIT_32 : 0);
 		EmitLoadPredicateSourceIndex(compiler, predicate.source_index, SLJIT_S3, SLJIT_R1);
 		result.null_jumps.push_back(EmitJumpIfPredicateSourceNull(compiler, predicate.source_index, SLJIT_R1));
 		EmitLoadPredicateDoubleOperand(compiler, predicate.double_source_kind, predicate.source_index, SLJIT_R1,
 		                               predicate.double_source_scale, SLJIT_FR0);
-		sljit_emit_fset64(compiler, SLJIT_FR1, predicate.double_constant);
+		if (single_precision) {
+			sljit_emit_fset32(compiler, SLJIT_FR1, static_cast<sljit_f32>(predicate.double_constant));
+		} else {
+			sljit_emit_fset64(compiler, SLJIT_FR1, predicate.double_constant);
+		}
 		if (predicate.constant_on_left) {
 			result.true_jumps.push_back(sljit_emit_fcmp(compiler, compare_type, SLJIT_FR1, 0, SLJIT_FR0, 0));
 		} else {
@@ -887,7 +899,8 @@ static SljitPredicateBranches EmitSljitPredicateBranches(struct sljit_compiler *
 	case SljitNativePredicateKind::DOUBLE_COMPARE_REFERENCES: {
 		static constexpr sljit_sw LEFT_SPILL_OFFSET = SLJIT_SELECT_LOCAL_SIZE;
 		static constexpr sljit_sw RIGHT_SPILL_OFFSET = SLJIT_SELECT_LOCAL_SIZE + sizeof(double);
-		auto compare_type = NativeDoubleCompareJumpType(predicate.compare_op);
+		auto single_precision = PredicateDoubleSourceIsSinglePrecision(predicate.double_source_kind);
+		auto compare_type = NativeDoubleCompareJumpType(predicate.compare_op) | (single_precision ? SLJIT_32 : 0);
 		EmitLoadPredicateSourceIndex(compiler, predicate.source_index, SLJIT_S3, SLJIT_R1);
 		EmitLoadPredicateSourceIndex(compiler, predicate.right_source_index, SLJIT_S3, SLJIT_S4);
 		result.null_jumps.push_back(EmitJumpIfPredicateSourceNull(compiler, predicate.source_index, SLJIT_R1));
