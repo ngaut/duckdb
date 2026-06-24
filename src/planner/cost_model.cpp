@@ -312,6 +312,13 @@ static bool PhysicalRunnerIsNativeContractProjectionGlue(const PhysicalRunnerCos
 	       input.native_sort_stage_count == 0 && input.materialization_elision_count == 0;
 }
 
+static bool PhysicalRunnerGeneratedWorkPaysUngroupedAggregateProtocol(const PhysicalRunnerCostInput &input) {
+	return input.generated_stage_count > 0 && input.generated_work_class != PhysicalRunnerGeneratedWorkClass::NONE &&
+	       input.generated_work_class != PhysicalRunnerGeneratedWorkClass::PROJECTION_GLUE &&
+	       input.native_aggregate_stage_count > 0 && input.native_grouped_aggregate_stage_count == 0 &&
+	       input.native_sort_stage_count == 0;
+}
+
 static void PhysicalRunnerComputeWorkComponents(const PhysicalRunnerCostInput &input,
                                                 const PhysicalRunnerCostParameters &parameters,
                                                 PhysicalRunnerCostProfile &profile) {
@@ -416,7 +423,8 @@ static bool PhysicalRunnerHasAcceleratedWork(const PhysicalRunnerCostInput &inpu
 	    input.native_join_stage_count + input.native_aggregate_stage_count + input.native_sort_stage_count;
 	const bool native_operator_work_is_costed = native_operator_stage_count == 0 ||
 	                                            parameters.native_operator_stage_benefit > 0 ||
-	                                            (input.full_pipeline && parameters.full_pipeline_benefit > 0);
+	                                            (input.full_pipeline && parameters.full_pipeline_benefit > 0) ||
+	                                            PhysicalRunnerGeneratedWorkPaysUngroupedAggregateProtocol(input);
 	const bool has_costed_acceleration =
 	    (input.generated_stage_count > 0 && parameters.generated_stage_benefit > 0) ||
 	    (native_operator_stage_count > 0 && parameters.native_operator_stage_benefit > 0) ||
