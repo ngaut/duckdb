@@ -176,10 +176,20 @@ static SljitNativeIntegerKind SljitTypedExpressionTreeIntegerKind(const LogicalT
 	if (type.id() != LogicalTypeId::DECIMAL && type.InternalType() == PhysicalType::INT32) {
 		return SljitNativeIntegerKind::INT32;
 	}
+	if (type.id() == LogicalTypeId::DECIMAL && type.InternalType() == PhysicalType::INT64) {
+		return SljitNativeIntegerKind::DECIMAL64;
+	}
 	if (type.InternalType() == PhysicalType::INT64) {
 		return SljitNativeIntegerKind::INT64;
 	}
 	throw InternalException("Unsupported SLJIT typed expression-tree physical type");
+}
+
+static const_data_ptr_t SljitTypedExpressionTreeSourceData(UnifiedVectorFormat &format, const LogicalType &type) {
+	if (type.id() == LogicalTypeId::VARCHAR) {
+		return reinterpret_cast<const_data_ptr_t>(format.data);
+	}
+	return NativeIntegerSourceData(format, SljitTypedExpressionTreeIntegerKind(type));
 }
 
 static SljitNativeIntegerKind SljitPerfectHashGroupIntegerKind(const LogicalType &type) {
@@ -520,10 +530,10 @@ private:
 					throw InternalException("SLJIT expression-tree source is out of range");
 				}
 				input.data[input_index].ToUnifiedFormat(formats[source_idx]);
-				auto source_kind = plan.kind == SljitNativeRegionExpressionKind::EXPRESSION_TREE
-				                       ? SljitNativeIntegerKind::DECIMAL64
-				                       : SljitTypedExpressionTreeIntegerKind(input.data[input_index].GetType());
-				source_data[source_idx] = NativeIntegerSourceData(formats[source_idx], source_kind);
+				source_data[source_idx] =
+				    plan.kind == SljitNativeRegionExpressionKind::EXPRESSION_TREE
+				        ? NativeIntegerSourceData(formats[source_idx], SljitNativeIntegerKind::DECIMAL64)
+				        : SljitTypedExpressionTreeSourceData(formats[source_idx], input.data[input_index].GetType());
 				source_sel[source_idx] = SljitNormalizedSourceSelectionData(formats[source_idx]);
 				source_validity[source_idx] = formats[source_idx].validity.GetData();
 				source_can_have_null = source_can_have_null || formats[source_idx].validity.CanHaveNull();
@@ -4069,8 +4079,8 @@ public:
 				throw InternalException("SLJIT filtered aggregate expression-tree source is out of range");
 			}
 			input.data[input_index].ToUnifiedFormat(source_formats[source_idx]);
-			auto source_kind = SljitTypedExpressionTreeIntegerKind(input.data[input_index].GetType());
-			source_data[source_idx] = NativeIntegerSourceData(source_formats[source_idx], source_kind);
+			source_data[source_idx] =
+			    SljitTypedExpressionTreeSourceData(source_formats[source_idx], input.data[input_index].GetType());
 			source_sel[source_idx] = SljitNormalizedSourceSelectionData(source_formats[source_idx]);
 			source_validity[source_idx] = source_formats[source_idx].validity.GetData();
 			flat_no_selection = flat_no_selection && source_sel[source_idx] == nullptr;

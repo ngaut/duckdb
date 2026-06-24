@@ -32,12 +32,17 @@ struct SljitTypedExpressionTreePlan {
 bool SljitExpressionTreeBinaryOpSupported(ExecutionExpressionBinaryOp op);
 bool SljitTypedExpressionTreeComparisonSupported(ExecutionExpressionBinaryOp op);
 bool SljitTypedExpressionTreeIsInt64Node(const ExecutionExpressionIR &node);
+bool SljitTypedExpressionTreeIsDecimal64Node(const ExecutionExpressionIR &node);
+bool TryGetSljitTypedExpressionTreeDecimal64Range(const LogicalType &type, int64_t &result_min,
+                                                  int64_t &result_max);
 bool SljitTypedExpressionTreeIsInt32Node(const ExecutionExpressionIR &node);
 bool SljitTypedExpressionTreeIsBoolNode(const ExecutionExpressionIR &node);
 bool SljitTypedExpressionTreeIsValueNode(const ExecutionExpressionIR &node);
 bool SljitTypedExpressionTreeIsIntegerNode(const ExecutionExpressionIR &node);
 bool SljitTypedExpressionTreeSameIntegerKind(const ExecutionExpressionIR &left, const ExecutionExpressionIR &right);
 bool SljitTypedExpressionTreeSameValueKind(const ExecutionExpressionIR &left, const ExecutionExpressionIR &right);
+bool TryReadSljitTypedExpressionTreeStringPrefixConstant(const ExecutionExpressionIR &node, idx_t &source_index,
+                                                         string &prefix);
 bool SljitTypedExpressionTreeIsSupported(const ExecutionExpressionIR &node);
 bool SljitTypedExpressionTreeInt64CastSupported(const ExecutionExpressionIR &node);
 bool SljitTypedExpressionTreeFastPathSupported(const ExecutionExpressionIR &node);

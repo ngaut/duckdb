@@ -49,10 +49,13 @@ static bool SljitNativeTreeNodeSupported(const ExecutionExpressionIR &node) {
 	if (node.kind == ExecutionExpressionIRKind::CONSTANT) {
 		return !node.constant.IsNull() && IsSljitNativeTreeDecimal64Node(node);
 	}
+	int64_t result_min;
+	int64_t result_max;
 	if (node.kind != ExecutionExpressionIRKind::BINARY || !node.left || !node.right ||
 	    !SljitExpressionTreeBinaryOpSupported(node.binary_op) || !IsSljitNativeTreeDecimal64Node(node) ||
 	    !IsSljitNativeTreeDecimal64Node(*node.left) || !IsSljitNativeTreeDecimal64Node(*node.right) ||
-	    !SljitNativeTreeDecimal64BinaryHasRawSemantics(node)) {
+	    !SljitNativeTreeDecimal64BinaryHasRawSemantics(node) ||
+	    !TryGetSljitTypedExpressionTreeDecimal64Range(node.return_type, result_min, result_max)) {
 		return false;
 	}
 	return SljitNativeTreeNodeSupported(*node.left) && SljitNativeTreeNodeSupported(*node.right);
@@ -534,9 +537,11 @@ static bool SljitPrimitiveAggregatePayloadSupported(SljitNativeRegionExpressionP
 			return false;
 		}
 		SljitNativeIntegerKind typed_tree_kind;
-		if (aggregate_payload_kind == SljitNativeIntegerKind::INT64 &&
+		if ((aggregate_payload_kind == SljitNativeIntegerKind::INT64 ||
+		     aggregate_payload_kind == SljitNativeIntegerKind::DECIMAL64) &&
+		    SljitTypedExpressionTreeIsSupported(*payload.expression_tree) &&
 		    TryGetSljitTypedExpressionTreeResultKind(*payload.expression_tree, typed_tree_kind) &&
-		    typed_tree_kind == SljitNativeIntegerKind::INT64) {
+		    typed_tree_kind == aggregate_payload_kind) {
 			payload.kind = SljitNativeRegionExpressionKind::TYPED_EXPRESSION_TREE;
 			payload.integer_kind = typed_tree_kind;
 			return true;

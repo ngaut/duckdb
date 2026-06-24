@@ -9,6 +9,9 @@
 #include "sljit_typed_expression_plan.hpp"
 
 #include "duckdb/common/exception.hpp"
+#include "duckdb/common/types/cast_helpers.hpp"
+#include "duckdb/common/types/decimal.hpp"
+#include "duckdb/common/types/string_type.hpp"
 
 namespace duckdb {
 
@@ -41,6 +44,24 @@ bool SljitTypedExpressionTreeIsInt64Node(const ExecutionExpressionIR &node) {
 	return node.return_type.IsIntegral() && node.physical_type == PhysicalType::INT64;
 }
 
+bool SljitTypedExpressionTreeIsDecimal64Node(const ExecutionExpressionIR &node) {
+	return node.return_type.id() == LogicalTypeId::DECIMAL && node.physical_type == PhysicalType::INT64;
+}
+
+bool TryGetSljitTypedExpressionTreeDecimal64Range(const LogicalType &type, int64_t &result_min,
+                                                  int64_t &result_max) {
+	if (type.id() != LogicalTypeId::DECIMAL || type.InternalType() != PhysicalType::INT64) {
+		return false;
+	}
+	auto width = DecimalType::GetWidth(type);
+	if (width == 0 || width >= NumericHelper::CACHED_POWERS_OF_TEN) {
+		return false;
+	}
+	result_max = NumericHelper::POWERS_OF_TEN[width] - 1;
+	result_min = -result_max;
+	return true;
+}
+
 bool SljitTypedExpressionTreeIsInt32Node(const ExecutionExpressionIR &node) {
 	return node.return_type.IsIntegral() && node.physical_type == PhysicalType::INT32;
 }
@@ -51,11 +72,15 @@ bool SljitTypedExpressionTreeIsBoolNode(const ExecutionExpressionIR &node) {
 
 bool SljitTypedExpressionTreeIsValueNode(const ExecutionExpressionIR &node) {
 	return SljitTypedExpressionTreeIsInt64Node(node) || SljitTypedExpressionTreeIsInt32Node(node) ||
-	       SljitTypedExpressionTreeIsBoolNode(node);
+	       SljitTypedExpressionTreeIsBoolNode(node) || SljitTypedExpressionTreeIsDecimal64Node(node);
 }
 
 bool SljitTypedExpressionTreeIsIntegerNode(const ExecutionExpressionIR &node) {
 	return SljitTypedExpressionTreeIsInt64Node(node) || SljitTypedExpressionTreeIsInt32Node(node);
+}
+
+static bool SljitTypedExpressionTreeIsArithmeticNode(const ExecutionExpressionIR &node) {
+	return SljitTypedExpressionTreeIsIntegerNode(node) || SljitTypedExpressionTreeIsDecimal64Node(node);
 }
 
 bool SljitTypedExpressionTreeSameIntegerKind(const ExecutionExpressionIR &left, const ExecutionExpressionIR &right) {
@@ -63,10 +88,78 @@ bool SljitTypedExpressionTreeSameIntegerKind(const ExecutionExpressionIR &left, 
 	       (SljitTypedExpressionTreeIsInt32Node(left) && SljitTypedExpressionTreeIsInt32Node(right));
 }
 
+static bool SljitTypedExpressionTreeSameArithmeticKind(const ExecutionExpressionIR &left,
+                                                       const ExecutionExpressionIR &right) {
+	return SljitTypedExpressionTreeSameIntegerKind(left, right) ||
+	       (SljitTypedExpressionTreeIsDecimal64Node(left) && SljitTypedExpressionTreeIsDecimal64Node(right));
+}
+
+static bool SljitTypedExpressionTreeDecimal64BinaryHasRawSemantics(const ExecutionExpressionIR &node) {
+	if (!node.left || !node.right) {
+		return false;
+	}
+	const auto left_decimal = SljitTypedExpressionTreeIsDecimal64Node(*node.left);
+	const auto right_decimal = SljitTypedExpressionTreeIsDecimal64Node(*node.right);
+	if (!left_decimal && !right_decimal) {
+		return true;
+	}
+	if (left_decimal != right_decimal) {
+		return false;
+	}
+	switch (node.binary_op) {
+	case ExecutionExpressionBinaryOp::ADD:
+	case ExecutionExpressionBinaryOp::SUBTRACT:
+	{
+		int64_t result_min;
+		int64_t result_max;
+		return SljitTypedExpressionTreeIsDecimal64Node(node) &&
+		       DecimalType::GetScale(node.return_type) == DecimalType::GetScale(node.left->return_type) &&
+		       DecimalType::GetScale(node.return_type) == DecimalType::GetScale(node.right->return_type) &&
+		       TryGetSljitTypedExpressionTreeDecimal64Range(node.return_type, result_min, result_max);
+	}
+	case ExecutionExpressionBinaryOp::MULTIPLY:
+	{
+		int64_t result_min;
+		int64_t result_max;
+		return SljitTypedExpressionTreeIsDecimal64Node(node) &&
+		       DecimalType::GetScale(node.return_type) ==
+		           DecimalType::GetScale(node.left->return_type) + DecimalType::GetScale(node.right->return_type) &&
+		       TryGetSljitTypedExpressionTreeDecimal64Range(node.return_type, result_min, result_max);
+	}
+	case ExecutionExpressionBinaryOp::COMPARE_EQUAL:
+	case ExecutionExpressionBinaryOp::COMPARE_NOTEQUAL:
+	case ExecutionExpressionBinaryOp::COMPARE_LESSTHAN:
+	case ExecutionExpressionBinaryOp::COMPARE_GREATERTHAN:
+	case ExecutionExpressionBinaryOp::COMPARE_LESSTHANOREQUALTO:
+	case ExecutionExpressionBinaryOp::COMPARE_GREATERTHANOREQUALTO:
+		return SljitTypedExpressionTreeIsBoolNode(node) &&
+		       DecimalType::GetScale(node.left->return_type) == DecimalType::GetScale(node.right->return_type);
+	default:
+		return false;
+	}
+}
+
 bool SljitTypedExpressionTreeSameValueKind(const ExecutionExpressionIR &left, const ExecutionExpressionIR &right) {
 	return (SljitTypedExpressionTreeIsInt64Node(left) && SljitTypedExpressionTreeIsInt64Node(right)) ||
 	       (SljitTypedExpressionTreeIsInt32Node(left) && SljitTypedExpressionTreeIsInt32Node(right)) ||
-	       (SljitTypedExpressionTreeIsBoolNode(left) && SljitTypedExpressionTreeIsBoolNode(right));
+	       (SljitTypedExpressionTreeIsBoolNode(left) && SljitTypedExpressionTreeIsBoolNode(right)) ||
+	       (SljitTypedExpressionTreeIsDecimal64Node(left) && SljitTypedExpressionTreeIsDecimal64Node(right));
+}
+
+bool TryReadSljitTypedExpressionTreeStringPrefixConstant(const ExecutionExpressionIR &node, idx_t &source_index,
+                                                         string &prefix) {
+	if (node.kind != ExecutionExpressionIRKind::INTRINSIC ||
+	    node.intrinsic != ExecutionExpressionIntrinsicKind::STRING_PREFIX ||
+	    node.return_type.id() != LogicalTypeId::BOOLEAN || node.children.size() != 2 || !node.children[0] ||
+	    !node.children[1] || node.children[0]->kind != ExecutionExpressionIRKind::REFERENCE ||
+	    node.children[0]->return_type.id() != LogicalTypeId::VARCHAR ||
+	    node.children[1]->kind != ExecutionExpressionIRKind::CONSTANT ||
+	    node.children[1]->return_type.id() != LogicalTypeId::VARCHAR || node.children[1]->constant.IsNull()) {
+		return false;
+	}
+	source_index = node.children[0]->ref_index;
+	prefix = StringValue::Get(node.children[1]->constant);
+	return true;
 }
 
 bool SljitTypedExpressionTreeIsSupported(const ExecutionExpressionIR &node) {
@@ -100,13 +193,15 @@ bool SljitTypedExpressionTreeIsSupported(const ExecutionExpressionIR &node) {
 		}
 		if (SljitTypedExpressionTreeComparisonSupported(node.binary_op)) {
 			return SljitTypedExpressionTreeIsBoolNode(node) &&
-			       SljitTypedExpressionTreeSameIntegerKind(*node.left, *node.right) &&
+			       SljitTypedExpressionTreeSameArithmeticKind(*node.left, *node.right) &&
+			       SljitTypedExpressionTreeDecimal64BinaryHasRawSemantics(node) &&
 			       SljitTypedExpressionTreeIsSupported(*node.left) && SljitTypedExpressionTreeIsSupported(*node.right);
 		}
-		return SljitTypedExpressionTreeIsIntegerNode(node) &&
-		       SljitTypedExpressionTreeSameIntegerKind(node, *node.left) &&
-		       SljitTypedExpressionTreeSameIntegerKind(node, *node.right) &&
+		return SljitTypedExpressionTreeIsArithmeticNode(node) &&
+		       SljitTypedExpressionTreeSameArithmeticKind(node, *node.left) &&
+		       SljitTypedExpressionTreeSameArithmeticKind(node, *node.right) &&
 		       SljitExpressionTreeBinaryOpSupported(node.binary_op) &&
+		       SljitTypedExpressionTreeDecimal64BinaryHasRawSemantics(node) &&
 		       SljitTypedExpressionTreeIsSupported(*node.left) && SljitTypedExpressionTreeIsSupported(*node.right);
 	case ExecutionExpressionIRKind::CONJUNCTION:
 		if (!SljitTypedExpressionTreeIsBoolNode(node) || node.children.empty()) {
@@ -145,6 +240,11 @@ bool SljitTypedExpressionTreeIsSupported(const ExecutionExpressionIR &node) {
 			}
 		}
 		return true;
+	case ExecutionExpressionIRKind::INTRINSIC: {
+		idx_t source_index;
+		string prefix;
+		return TryReadSljitTypedExpressionTreeStringPrefixConstant(node, source_index, prefix);
+	}
 	default:
 		return false;
 	}
@@ -157,6 +257,11 @@ bool SljitTypedExpressionTreeInt64CastSupported(const ExecutionExpressionIR &nod
 bool SljitTypedExpressionTreeFastPathSupported(const ExecutionExpressionIR &node) {
 	if (SljitTypedExpressionTreeInt64CastSupported(node)) {
 		return true;
+	}
+	if (node.kind == ExecutionExpressionIRKind::INTRINSIC) {
+		idx_t source_index;
+		string prefix;
+		return TryReadSljitTypedExpressionTreeStringPrefixConstant(node, source_index, prefix);
 	}
 	if (node.kind == ExecutionExpressionIRKind::CONSTANT && node.constant.IsNull()) {
 		return false;
@@ -203,7 +308,10 @@ SljitNativeIntegerKind SljitTypedExpressionTreeIntegerKind(const ExecutionExpres
 	if (SljitTypedExpressionTreeIsInt32Node(node)) {
 		return SljitNativeIntegerKind::INT32;
 	}
-	if (SljitTypedExpressionTreeIsInt64Node(node) || node.physical_type == PhysicalType::INT64) {
+	if (SljitTypedExpressionTreeIsDecimal64Node(node)) {
+		return SljitNativeIntegerKind::DECIMAL64;
+	}
+	if (SljitTypedExpressionTreeIsInt64Node(node)) {
 		return SljitNativeIntegerKind::INT64;
 	}
 	throw InternalException("Unsupported SLJIT typed expression-tree node type");
@@ -340,6 +448,10 @@ bool TryGetSljitTypedExpressionTreeResultKind(const ExecutionExpressionIR &root,
 		kind = SljitNativeIntegerKind::INT64;
 		return true;
 	}
+	if (SljitTypedExpressionTreeIsDecimal64Node(root)) {
+		kind = SljitNativeIntegerKind::DECIMAL64;
+		return true;
+	}
 	if (SljitTypedExpressionTreeIsBoolNode(root)) {
 		kind = SljitNativeIntegerKind::UINT8;
 		return true;
@@ -356,7 +468,7 @@ SljitTypedExpressionTreePlan BuildSljitTypedExpressionTreePlan(const ExecutionEx
 		return result;
 	}
 	result.result_is_bool = SljitTypedExpressionTreeIsBoolNode(root);
-	result.result_is_int64 = SljitTypedExpressionTreeIsInt64Node(root);
+	result.result_is_int64 = SljitTypedExpressionTreeIsInt64Node(root) || SljitTypedExpressionTreeIsDecimal64Node(root);
 	result.node_count = CountSljitTypedExpressionTreeNodes(root);
 	result.fast_path = BuildSljitTypedExpressionTreeFastPathPlan(root, emit_flat_nullable_fast_path);
 	return result;

@@ -501,12 +501,12 @@ TEST_CASE("JIT fuses scaled decimal expression payloads into primitive hugeint a
 	for (auto &event : manager.GetEvents()) {
 		if (!IsCompiledSljitRegionEvent(event) || !event.has_candidate ||
 		    event.candidate_traits.sink_kind != ExecutionRegionSinkKind::UNGROUPED_AGGREGATE_UPDATE ||
-		    !StringUtil::Contains(event.ir, "primitive_payloads=native:expression-tree")) {
+		    !StringUtil::Contains(event.ir, "primitive_payloads=native:typed-expression-tree")) {
 			continue;
 		}
 		found_compile = true;
 		RequireGeneratedMachineCodeRegion(event);
-		REQUIRE(StringUtil::Contains(event.ir, "primitive_payloads=native:expression-tree"));
+		REQUIRE(StringUtil::Contains(event.ir, "primitive_payloads=native:typed-expression-tree"));
 		REQUIRE(StringUtil::Contains(event.ir, "sum_hugeint"));
 		REQUIRE(StringUtil::Contains(event.ir, "overflow_check=true"));
 	}

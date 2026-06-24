@@ -233,6 +233,97 @@ TEST_CASE("JIT lowers string predicates without aggregate sink dependence", "[ap
 	}
 }
 
+TEST_CASE("JIT lowers decimal CASE payloads with string prefix conditions", "[api][jit]") {
+	DuckDB db;
+	Connection con(db);
+	auto &manager = ExecutionRegionManager::Get(*con.context);
+
+	ConfigureSljitForCoverage(con, true, true, true, 10000);
+	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_q14_case_shape("
+	                          "id INTEGER, p_type VARCHAR, "
+	                          "l_extendedprice DECIMAL(15,2), l_discount DECIMAL(15,2))"));
+	REQUIRE_NO_FAIL(con.Query("INSERT INTO jit_q14_case_shape VALUES "
+	                          "(1, 'PROMO BRUSHED STEEL', 100.00, 0.10), "
+	                          "(2, 'STANDARD BRUSHED STEEL', 50.00, 0.05), "
+	                          "(3, 'PROMO ANODIZED COPPER', 200.00, 0.25), "
+	                          "(4, NULL, 30.00, 0.10)"));
+
+	ClearJitTrace(manager, true);
+	auto result = con.Query("CREATE TEMP TABLE jit_q14_case_shape_out AS "
+	                        "SELECT id, "
+	                        "       CASE WHEN prefix(p_type, 'PROMO') "
+	                        "            THEN l_extendedprice * (1.00 - l_discount) "
+	                        "            ELSE 0.0000 END AS promo_revenue, "
+	                        "       l_extendedprice * (1.00 - l_discount) AS total_revenue "
+	                        "FROM jit_q14_case_shape");
+	REQUIRE_NO_FAIL(*result);
+	result = con.Query("SELECT promo_revenue, total_revenue FROM jit_q14_case_shape_out ORDER BY id");
+	REQUIRE_NO_FAIL(*result);
+	REQUIRE(CHECK_COLUMN(result, 0, {"90.0000", "0.0000", "150.0000", "0.0000"}));
+	REQUIRE(CHECK_COLUMN(result, 1, {"90.0000", "47.5000", "150.0000", "27.0000"}));
+
+	RequireJitEvent(
+	    manager,
+	    [](const ExecutionRegionEvent &event) {
+		    return IsCompiledSljitRegionEvent(event) && event.candidate_traits.projection_count > 0 &&
+		           StringUtil::Contains(event.ir, "string_prefix") &&
+		           StringUtil::Contains(event.ir, "case<logical=DECIMAL") &&
+		           StringUtil::Contains(event.ir, "logical=DECIMAL(18,4),physical=INT64");
+	    },
+	    [](const ExecutionRegionEvent &event) {
+		    RequireGeneratedMachineCodeRegion(event);
+		    REQUIRE_FALSE(StringUtil::Contains(event.reason, "sljit-expression-lowering-unsupported"));
+	    });
+	RequireNoUnsupportedReason(manager, "root_kind=case;logical_type=DECIMAL(18,4);required=value");
+}
+
+TEST_CASE("JIT CASE branch fast path respects selected hash join sources", "[api][jit]") {
+	DuckDB db;
+	Connection con(db);
+	auto &manager = ExecutionRegionManager::Get(*con.context);
+
+	ConfigureSljitForCoverage(con, true, true, true, 10000);
+	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_q14_join_probe AS "
+	                          "SELECT i::BIGINT AS partkey, "
+	                          "       100.00::DECIMAL(15,2) + (i % 13)::DECIMAL(15,2) AS l_extendedprice, "
+	                          "       0.10::DECIMAL(15,2) AS l_discount "
+	                          "FROM range(0, 20000) tbl(i)"));
+	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_q14_join_part AS "
+	                          "SELECT i::BIGINT AS partkey, "
+	                          "       CASE WHEN i % 7 IN (0, 3) THEN 'PROMO BRUSHED STEEL' "
+	                          "            ELSE 'STANDARD ANODIZED COPPER' END AS p_type "
+	                          "FROM range(0, 20000) tbl(i)"));
+
+	const string aggregate_sql =
+	    "SELECT sum(CASE WHEN p_type LIKE 'PROMO%' "
+	    "                THEN l_extendedprice * (1.00 - l_discount) "
+	    "                ELSE 0.0000 END) AS promo_sum "
+	    "FROM jit_q14_join_probe, jit_q14_join_part "
+	    "WHERE jit_q14_join_probe.partkey = jit_q14_join_part.partkey";
+
+	REQUIRE_NO_FAIL(con.Query("SET enable_jit=false"));
+	auto expected = con.Query(aggregate_sql);
+	REQUIRE_NO_FAIL(*expected);
+	REQUIRE_NO_FAIL(con.Query("SET enable_jit=true"));
+
+	ClearJitTrace(manager, true);
+	auto actual = con.Query(aggregate_sql);
+	REQUIRE_NO_FAIL(*actual);
+	REQUIRE(actual->GetValue(0, 0).ToString() == expected->GetValue(0, 0).ToString());
+
+	RequireJitEvent(
+	    manager,
+	    [](const ExecutionRegionEvent &event) {
+		   return IsCompiledSljitRegionEvent(event) && event.has_candidate &&
+		           event.candidate_traits.operator_count > 0 &&
+		           event.candidate_traits.sink_kind == ExecutionRegionSinkKind::UNGROUPED_AGGREGATE_UPDATE &&
+		           StringUtil::Contains(event.ir, "hash_join_probe") &&
+		           StringUtil::Contains(event.ir, "string_prefix") &&
+		           StringUtil::Contains(event.ir, "case<logical=DECIMAL");
+	    },
+	    [](const ExecutionRegionEvent &event) { RequireGeneratedMachineCodeRegion(event); });
+}
+
 TEST_CASE("JIT lowers long string predicates through packed native comparisons", "[api][jit]") {
 	DuckDB db;
 	Connection con(db);
