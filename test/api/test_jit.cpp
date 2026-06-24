@@ -961,7 +961,7 @@ TEST_CASE("SLJIT fixed direct append fuses mixed INTEGER and BIGINT groups", "[a
 		    REQUIRE(fused_direct_count >= 49);
 		    REQUIRE(fallback_projection_count == 0);
 		    REQUIRE(fallback_append_count == 0);
-		    });
+	    });
 }
 
 TEST_CASE("SLJIT fixed direct append fuses DECIMAL64 groups with checks", "[api][jit]") {
@@ -1273,12 +1273,12 @@ TEST_CASE("SLJIT direct fixed-width materialization handles INTEGER BIGINT DECIM
 		    return IsSljitRegionEvent(event) && EventPhase(event) == "runtime" && EventStatus(event) == "executed" &&
 		           event.output_rows == 10000 &&
 		           StringUtil::Contains(EventGeneratedStageCountBreakdown(event),
-		                                "op0:projection.direct_materialize_fixed_generated");
+		                                "op0:projection.direct_materialize_fixed_fused_generated");
 	    },
 	    [](const ExecutionRegionEvent &event) {
 		    idx_t direct_materialize_count = 0;
 		    for (auto &stage : event.generated_stage_runtime) {
-			    if (stage.stage.name == "op0:projection.direct_materialize_fixed_generated") {
+			    if (stage.stage.name == "op0:projection.direct_materialize_fixed_fused_generated") {
 				    direct_materialize_count += stage.count;
 			    }
 		    }
@@ -1346,7 +1346,7 @@ TEST_CASE("SLJIT direct append source-appends VARCHAR with fixed projections", "
 		    return IsSljitRegionEvent(event) && EventPhase(event) == "runtime" && EventStatus(event) == "executed" &&
 		           event.output_rows == 10000 &&
 		           StringUtil::Contains(EventGeneratedStageCountBreakdown(event),
-		                                "op0:projection.direct_materialize_fixed_generated");
+		                                "op0:projection.direct_materialize_fixed_fused_generated");
 	    },
 	    [](const ExecutionRegionEvent &event) {
 		    idx_t direct_materialize_count = 0;

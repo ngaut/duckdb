@@ -187,9 +187,6 @@ static bool TryAddSljitDirectProjectionSource(SljitDirectProjectionPlan &direct_
 static bool TryPlanSljitDirectProjectionSources(const vector<SljitExecutableRegionExpression> &projections,
                                                 SljitDirectProjectionPlan &direct_plan) {
 	direct_plan.sources.clear();
-	if (direct_plan.projection_indices.size() < 2) {
-		return false;
-	}
 	for (auto projection_idx : direct_plan.projection_indices) {
 		if (projection_idx >= projections.size()) {
 			return false;
@@ -363,7 +360,7 @@ static bool TryPlanFlatFusedFixedProjection(SljitExecutableRegionOp &op, SljitNa
 			projection_indices.push_back(projection_idx);
 		}
 	}
-	if (projection_indices.size() < 2) {
+	if (projection_indices.empty()) {
 		return false;
 	}
 	direct_plan = SljitDirectProjectionPlan();

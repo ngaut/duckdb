@@ -1471,9 +1471,9 @@ static bool TryAddSljitFlatProjectionSource(SljitFlatProjectionSharedSourcePlan 
 static bool TryPlanSljitFlatProjectionSharedSources(const vector<SljitNativeRegionExpressionPlan> &plans,
                                                     const vector<idx_t> &projection_indices,
                                                     SljitNativeRegionExpressionKind references_kind,
-                                                    idx_t max_projection_count,
+                                                    idx_t min_projection_count, idx_t max_projection_count,
                                                     SljitFlatProjectionSharedSourcePlan &shared_plan) {
-	if (projection_indices.size() < 2 ||
+	if (projection_indices.size() < min_projection_count ||
 	    (max_projection_count != DConstants::INVALID_INDEX && projection_indices.size() > max_projection_count)) {
 		return false;
 	}
@@ -1513,6 +1513,18 @@ static sljit_s32 SljitFlatIntegerProjectionSourceScalarRegister(idx_t source_idx
 	}
 }
 
+static constexpr idx_t SljitFlatIntegerProjectionGroupSize() {
+#if SLJIT_NUMBER_OF_SAVED_REGISTERS >= 9
+	return 4;
+#else
+	return 2;
+#endif
+}
+
+static constexpr sljit_s32 SljitFlatIntegerProjectionSavedRegisterCount() {
+	return static_cast<sljit_s32>(5 + SljitFlatIntegerProjectionGroupSize());
+}
+
 static unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeFlatIntegerProjectionSharedSources(
     const vector<SljitNativeRegionExpressionPlan> &plans, const vector<idx_t> &projection_indices,
     const SljitFlatProjectionSharedSourcePlan &shared_plan, SljitNativeIntegerKind integer_kind,
@@ -1535,7 +1547,8 @@ static unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeFlatIntegerProjecti
 		           SljitArm64NeonIntegerBinarySupported(integer_kind, plan.binary_op);
 	}
 
-	sljit_emit_enter(compiler, 0, SLJIT_ARGS1V(P), use_simd ? 5 | SLJIT_ENTER_VECTOR(3) : 5, 7, 0);
+	sljit_emit_enter(compiler, 0, SLJIT_ARGS1V(P), use_simd ? 5 | SLJIT_ENTER_VECTOR(3) : 5,
+	                 SljitFlatIntegerProjectionSavedRegisterCount(), 0);
 	vector<SljitFlatProjectionOverflowJump> overflow_jumps;
 
 	auto emit_scalar_sources = [&]() {
@@ -1652,13 +1665,25 @@ static unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeFlatIntegerProjecti
 		}
 	};
 	auto result_pointer_register = [](idx_t group_idx) {
-		return group_idx == 0 ? SLJIT_S5 : SLJIT_S6;
+		switch (group_idx) {
+		case 0:
+			return SLJIT_S5;
+		case 1:
+			return SLJIT_S6;
+		case 2:
+			return SLJIT_S7;
+		case 3:
+			return SLJIT_S8;
+		default:
+			throw InternalException("SLJIT flat integer projection result register is out of range");
+		}
 	};
 
+	const auto group_size = SljitFlatIntegerProjectionGroupSize();
 	auto data_width = sljit_sw(1) << data_scale;
 	auto simd_bytes = sljit_sw(16);
-	for (idx_t group_begin = 0; group_begin < projection_indices.size(); group_begin += 2) {
-		auto group_end = MinValue<idx_t>(group_begin + 2, projection_indices.size());
+	for (idx_t group_begin = 0; group_begin < projection_indices.size(); group_begin += group_size) {
+		auto group_end = MinValue<idx_t>(group_begin + group_size, projection_indices.size());
 		sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_S1, 0, SLJIT_MEM1(SLJIT_S0), offsetof(SljitNativeVectorInput, count));
 		sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_S2, 0, SLJIT_MEM1(SLJIT_S0),
 		               offsetof(SljitNativeVectorInput, constants));
@@ -1761,7 +1786,7 @@ BuildSljitNativeFlatIntegerProjection(const vector<SljitNativeRegionExpressionPl
 
 	SljitFlatProjectionSharedSourcePlan shared_source_plan;
 	if (!TryPlanSljitFlatProjectionSharedSources(plans, projection_indices,
-	                                             SljitNativeRegionExpressionKind::INTEGER_BINARY_REFERENCES,
+	                                             SljitNativeRegionExpressionKind::INTEGER_BINARY_REFERENCES, 1,
 	                                             DConstants::INVALID_INDEX, shared_source_plan)) {
 		error = "SLJIT flat integer projection only supports projections with at most two input sources";
 		return nullptr;
@@ -2380,7 +2405,7 @@ BuildSljitNativeFlatDoubleProjection(const vector<SljitNativeRegionExpressionPla
 
 	SljitFlatProjectionSharedSourcePlan shared_source_plan;
 	if (TryPlanSljitFlatProjectionSharedSources(plans, projection_indices,
-	                                            SljitNativeRegionExpressionKind::DOUBLE_BINARY_REFERENCES, 8,
+	                                            SljitNativeRegionExpressionKind::DOUBLE_BINARY_REFERENCES, 2, 8,
 	                                            shared_source_plan)) {
 		return BuildSljitNativeFlatDoubleProjectionSharedSources(plans, projection_indices, shared_source_plan,
 		                                                         single_precision, function, error);

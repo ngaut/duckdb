@@ -210,7 +210,7 @@ SELECT
     flag
 FROM jit_direct_mixed_fixed_input
 """,
-        "expected_stage": DIRECT_FIXED_STAGE,
+        "expected_stage": DIRECT_FIXED_FUSED_STAGE,
     },
     "mixed_fixed_varchar": {
         "input": "jit_direct_mixed_fixed_varchar_input",
@@ -237,7 +237,7 @@ SELECT
     name
 FROM jit_direct_mixed_fixed_varchar_input
 """,
-        "expected_stage": DIRECT_FIXED_STAGE,
+        "expected_stage": DIRECT_FIXED_FUSED_STAGE,
     },
     "mixed_fixed_varchar_short_not_null": {
         "input": "jit_direct_mixed_fixed_varchar_short_not_null_input",
@@ -262,7 +262,7 @@ SELECT
     name
 FROM jit_direct_mixed_fixed_varchar_short_not_null_input
 """,
-        "expected_stage": DIRECT_FIXED_STAGE,
+        "expected_stage": DIRECT_FIXED_FUSED_STAGE,
     },
     "mixed_fixed_varchar_short_nullable": {
         "input": "jit_direct_mixed_fixed_varchar_short_nullable_input",
@@ -288,7 +288,7 @@ SELECT
     name
 FROM jit_direct_mixed_fixed_varchar_short_nullable_input
 """,
-        "expected_stage": DIRECT_FIXED_STAGE,
+        "expected_stage": DIRECT_FIXED_FUSED_STAGE,
     },
     "mixed_fixed_varchar_long_not_null": {
         "input": "jit_direct_mixed_fixed_varchar_long_not_null_input",
@@ -314,7 +314,7 @@ SELECT
     name
 FROM jit_direct_mixed_fixed_varchar_long_not_null_input
 """,
-        "expected_stage": DIRECT_FIXED_STAGE,
+        "expected_stage": DIRECT_FIXED_FUSED_STAGE,
     },
 }
 
