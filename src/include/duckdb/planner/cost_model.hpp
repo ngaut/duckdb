@@ -25,6 +25,7 @@ struct PhysicalRunnerCostInput {
 	idx_t expression_cost = 0;
 	idx_t generated_stage_count = 0;
 	idx_t materialization_elision_count = 0;
+	idx_t materialization_source_append_count = 0;
 	idx_t native_join_stage_count = 0;
 	idx_t native_aggregate_stage_count = 0;
 	idx_t native_grouped_aggregate_stage_count = 0;
@@ -65,6 +66,7 @@ struct PhysicalRunnerCostProfile {
 	int64_t expression_cost = 0;
 	int64_t generated_stage_count = 0;
 	int64_t materialization_elision_count = 0;
+	int64_t materialization_source_append_count = 0;
 	int64_t native_join_stage_count = 0;
 	int64_t native_aggregate_stage_count = 0;
 	int64_t native_grouped_aggregate_stage_count = 0;
@@ -76,6 +78,7 @@ struct PhysicalRunnerCostProfile {
 	int64_t generated_stage_work = 0;
 	int64_t native_operator_work = 0;
 	int64_t materialization_elision_work = 0;
+	int64_t materialization_source_append_penalty = 0;
 	int64_t full_pipeline_work = 0;
 	int64_t stateful_protocol_penalty = 0;
 	int64_t saved_work_per_batch = 0;

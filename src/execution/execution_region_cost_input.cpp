@@ -54,6 +54,10 @@ public:
 		input.materialization_elision_count = materialization_elision_count;
 	}
 
+	void SetMaterializationSourceAppendCount(idx_t materialization_source_append_count) {
+		input.materialization_source_append_count = materialization_source_append_count;
+	}
+
 	void SetNativeJoinStageCount(idx_t native_join_stage_count) {
 		input.native_join_stage_count = native_join_stage_count;
 	}
@@ -317,6 +321,9 @@ PhysicalRunnerCostInput BuildExecutionRegionCandidateCostInput(const ExecutionRe
 	builder.SetExpressionCost(candidate.traits.expression_cost);
 	builder.SetGeneratedStageCount(cost_facts.generated_stage_count);
 	builder.SetMaterializationElisionCount(cost_facts.materialization_elision_count);
+	builder.SetMaterializationSourceAppendCount(candidate.traits.sink_kind == ExecutionRegionSinkKind::MATERIALIZATION
+	                                                ? candidate.traits.reference_varchar_projection_count
+	                                                : 0);
 	builder.SetNativeJoinStageCount(cost_facts.native_join_stage_count);
 	builder.SetNativeAggregateStageCount(cost_facts.native_aggregate_stage_count);
 	builder.SetNativeGroupedAggregateStageCount(cost_facts.native_grouped_aggregate_stage_count);
@@ -353,6 +360,11 @@ struct ExecutionRegionPhysicalPipelineCostFacts {
 static bool ExecutionRegionPhysicalExpressionIsReference(const Expression &expression) {
 	auto expression_class = expression.GetExpressionClass();
 	return expression_class == ExpressionClass::BOUND_REF || expression_class == ExpressionClass::BOUND_COLUMN_REF;
+}
+
+static bool ExecutionRegionPhysicalExpressionIsReferenceVarchar(const Expression &expression) {
+	return ExecutionRegionPhysicalExpressionIsReference(expression) &&
+	       expression.GetReturnType().id() == LogicalTypeId::VARCHAR;
 }
 
 static bool ExecutionRegionPhysicalExpressionTypeIsComparison(ExpressionType expression_type) {
@@ -429,6 +441,9 @@ static void AccumulateExecutionRegionPhysicalProjectionTraits(const Expression &
 	traits.expression_cost += expression_cost;
 	if (ExecutionRegionPhysicalExpressionIsReference(expression)) {
 		traits.reference_projection_count++;
+		if (ExecutionRegionPhysicalExpressionIsReferenceVarchar(expression)) {
+			traits.reference_varchar_projection_count++;
+		}
 		return;
 	}
 	if (expression_cost == 0) {
@@ -520,6 +535,12 @@ static void AccumulateExecutionRegionPhysicalSinkTraits(const PhysicalOperator &
                                                         ExecutionRegionCandidateTraits &traits) {
 	traits.sink_present = true;
 	switch (sink.type) {
+	case PhysicalOperatorType::CREATE_TABLE_AS:
+	case PhysicalOperatorType::BATCH_CREATE_TABLE_AS:
+	case PhysicalOperatorType::INSERT:
+	case PhysicalOperatorType::BATCH_INSERT:
+		traits.sink_kind = ExecutionRegionSinkKind::MATERIALIZATION;
+		return;
 	case PhysicalOperatorType::HASH_GROUP_BY:
 		traits.sink_kind = ExecutionRegionSinkKind::HASH_AGGREGATE_UPDATE;
 		return;
@@ -637,6 +658,7 @@ static bool TryAccumulateExecutionRegionPhysicalOperatorCost(const PhysicalOpera
 	case PhysicalOperatorType::RESULT_COLLECTOR:
 	case PhysicalOperatorType::EXPLAIN_ANALYZE:
 	case PhysicalOperatorType::CREATE_TABLE_AS:
+	case PhysicalOperatorType::BATCH_CREATE_TABLE_AS:
 	case PhysicalOperatorType::INSERT:
 	case PhysicalOperatorType::BATCH_INSERT:
 		return true;
@@ -676,6 +698,9 @@ static void FinalizeExecutionRegionPhysicalPipelineCostInput(Pipeline &pipeline,
 	if (cost_input.generated_stage_count > 0 && cost_input.native_aggregate_stage_count > 0) {
 		builder.SetMaterializationElisionCount(1);
 	}
+	builder.SetMaterializationSourceAppendCount(facts.traits.sink_kind == ExecutionRegionSinkKind::MATERIALIZATION
+	                                                ? facts.traits.reference_varchar_projection_count
+	                                                : 0);
 	builder.SetHasAcceleratedWork(cost_input.generated_stage_count > 0 || cost_input.native_join_stage_count > 0 ||
 	                              cost_input.native_aggregate_stage_count > 0 ||
 	                              cost_input.native_sort_stage_count > 0 || cost_input.full_pipeline);

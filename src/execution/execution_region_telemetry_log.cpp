@@ -60,6 +60,7 @@ static void AccumulateExecutionRegionRunnerCostTotals(ExecutionRegionRunnerCostT
 	target.expression_cost += source.expression_cost;
 	target.generated_stage_count += source.generated_stage_count;
 	target.materialization_elision_count += source.materialization_elision_count;
+	target.materialization_source_append_count += source.materialization_source_append_count;
 	target.native_join_stage_count += source.native_join_stage_count;
 	target.native_aggregate_stage_count += source.native_aggregate_stage_count;
 	target.native_grouped_aggregate_stage_count += source.native_grouped_aggregate_stage_count;
@@ -69,6 +70,7 @@ static void AccumulateExecutionRegionRunnerCostTotals(ExecutionRegionRunnerCostT
 	target.generated_stage_work += source.generated_stage_work;
 	target.native_operator_work += source.native_operator_work;
 	target.materialization_elision_work += source.materialization_elision_work;
+	target.materialization_source_append_penalty += source.materialization_source_append_penalty;
 	target.full_pipeline_work += source.full_pipeline_work;
 	target.stateful_protocol_penalty += source.stateful_protocol_penalty;
 	target.saved_work_per_batch += source.saved_work_per_batch;

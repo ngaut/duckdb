@@ -392,6 +392,7 @@ COUNTER_FIELDS = (
     "runner_cost_expression_cost",
     "runner_cost_generated_stage_count",
     "runner_cost_materialization_elision_count",
+    "runner_cost_materialization_source_append_count",
     "runner_cost_native_join_stage_count",
     "runner_cost_native_aggregate_stage_count",
     "runner_cost_native_grouped_aggregate_stage_count",
@@ -401,6 +402,7 @@ COUNTER_FIELDS = (
     "runner_cost_generated_stage_work",
     "runner_cost_native_operator_work",
     "runner_cost_materialization_elision_work",
+    "runner_cost_materialization_source_append_penalty",
     "runner_cost_full_pipeline_work",
     "runner_cost_stateful_protocol_penalty",
     "runner_cost_saved_work_per_batch",
@@ -583,7 +585,7 @@ def run_once(
     correctness = correctness_from_rows(attempt["validation"], result_table)
     expected_stage = workload_expected_stage(workload)
     stage, stage_counts, stage_runtime = observed_stage(attempt["counters"], expected_stage)
-    if args.verify_stages and policy != "off" and stage != expected_stage:
+    if args.verify_stages and policy != "off" and not args.production_cbo and stage != expected_stage:
         raise RuntimeError(
             f"{workload} {policy} repeat {repeat}: expected generated stage {expected_stage!r}, "
             f"observed {stage!r}; generated_stage_count_breakdown={stage_counts!r}"

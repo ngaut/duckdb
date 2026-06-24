@@ -24,6 +24,7 @@ namespace duckdb {
 
 static idx_t DuckDBExpressionCost(const Expression &expr);
 static constexpr int64_t BASIS_POINT_SCALE = 10000;
+static constexpr int64_t MATERIALIZATION_SOURCE_APPEND_PENALTY = 80;
 
 static int64_t SaturatingCostCast(idx_t value) {
 	auto max_value = static_cast<idx_t>(std::numeric_limits<int64_t>::max());
@@ -339,6 +340,10 @@ static void PhysicalRunnerComputeWorkComponents(const PhysicalRunnerCostInput &i
 		    MultiplyCost(SaturatingCostCast(input.materialization_elision_count),
 		                 SaturatingCostCast(parameters.materialization_elision_benefit));
 	}
+	if (input.materialization_source_append_count > 0) {
+		profile.materialization_source_append_penalty = MultiplyCost(
+		    SaturatingCostCast(input.materialization_source_append_count), MATERIALIZATION_SOURCE_APPEND_PENALTY);
+	}
 	if (input.full_pipeline) {
 		const auto full_pipeline_benefit = SaturatingCostCast(parameters.full_pipeline_benefit);
 		const auto stateful_protocol_stage_count =
@@ -356,6 +361,7 @@ static void PhysicalRunnerComputeWorkComponents(const PhysicalRunnerCostInput &i
 	work = AddCost(work, profile.native_operator_work);
 	work = AddCost(work, profile.materialization_elision_work);
 	work = AddCost(work, profile.full_pipeline_work);
+	work = SubtractCost(work, profile.materialization_source_append_penalty);
 	work = SubtractCost(work, profile.stateful_protocol_penalty);
 	profile.saved_work_per_batch = work;
 }
@@ -390,6 +396,7 @@ static void PhysicalRunnerInitializeProfile(const PhysicalRunnerCostInput &input
 	profile.expression_cost = SaturatingCostCast(input.expression_cost);
 	profile.generated_stage_count = SaturatingCostCast(input.generated_stage_count);
 	profile.materialization_elision_count = SaturatingCostCast(input.materialization_elision_count);
+	profile.materialization_source_append_count = SaturatingCostCast(input.materialization_source_append_count);
 	profile.native_join_stage_count = SaturatingCostCast(input.native_join_stage_count);
 	profile.native_aggregate_stage_count = SaturatingCostCast(input.native_aggregate_stage_count);
 	profile.native_grouped_aggregate_stage_count = SaturatingCostCast(input.native_grouped_aggregate_stage_count);

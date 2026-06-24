@@ -453,6 +453,7 @@ struct ExecutionRegionCandidateTraits {
 	idx_t non_integer_arithmetic_projection_count = 0;
 	idx_t high_cost_projection_count = 0;
 	idx_t reference_projection_count = 0;
+	idx_t reference_varchar_projection_count = 0;
 	idx_t comparison_filter_count = 0;
 	idx_t integer_comparison_filter_count = 0;
 	idx_t non_integer_comparison_filter_count = 0;

@@ -49,6 +49,7 @@ static constexpr ExecutionRegionTraceColumn EXECUTION_REGION_RUNNER_COST_PROFILE
     {"runner_cost_expression_cost", LogicalTypeId::BIGINT},
     {"runner_cost_generated_stage_count", LogicalTypeId::BIGINT},
     {"runner_cost_materialization_elision_count", LogicalTypeId::BIGINT},
+    {"runner_cost_materialization_source_append_count", LogicalTypeId::BIGINT},
     {"runner_cost_native_join_stage_count", LogicalTypeId::BIGINT},
     {"runner_cost_native_aggregate_stage_count", LogicalTypeId::BIGINT},
     {"runner_cost_native_grouped_aggregate_stage_count", LogicalTypeId::BIGINT},
@@ -64,6 +65,7 @@ static constexpr ExecutionRegionTraceColumn EXECUTION_REGION_RUNNER_COST_WORK_CO
     {"runner_cost_generated_stage_work", LogicalTypeId::BIGINT},
     {"runner_cost_native_operator_work", LogicalTypeId::BIGINT},
     {"runner_cost_materialization_elision_work", LogicalTypeId::BIGINT},
+    {"runner_cost_materialization_source_append_penalty", LogicalTypeId::BIGINT},
     {"runner_cost_full_pipeline_work", LogicalTypeId::BIGINT},
     {"runner_cost_stateful_protocol_penalty", LogicalTypeId::BIGINT},
     {"runner_cost_saved_work_per_batch", LogicalTypeId::BIGINT},
@@ -151,6 +153,7 @@ static constexpr ExecutionRegionTraceColumn EXECUTION_REGION_CANDIDATE_TRACE_COL
     {"candidate_missing_contract_count", LogicalTypeId::UBIGINT},
     {"candidate_required_capabilities", LogicalTypeId::VARCHAR},
     {"candidate_fusion_blockers", LogicalTypeId::VARCHAR},
+    {"candidate_reference_varchar_projection_count", LogicalTypeId::UBIGINT},
 };
 
 static constexpr idx_t EXECUTION_REGION_CANDIDATE_TRACE_COLUMN_COUNT =
@@ -239,18 +242,21 @@ static inline void AppendExecutionRegionRunnerCostProfileColumn(Vector &output, 
 		output.Append(Value::BIGINT(cost.materialization_elision_count));
 		return;
 	case 6:
-		output.Append(Value::BIGINT(cost.native_join_stage_count));
+		output.Append(Value::BIGINT(cost.materialization_source_append_count));
 		return;
 	case 7:
-		output.Append(Value::BIGINT(cost.native_aggregate_stage_count));
+		output.Append(Value::BIGINT(cost.native_join_stage_count));
 		return;
 	case 8:
-		output.Append(Value::BIGINT(cost.native_grouped_aggregate_stage_count));
+		output.Append(Value::BIGINT(cost.native_aggregate_stage_count));
 		return;
 	case 9:
-		output.Append(Value::BIGINT(cost.native_sort_stage_count));
+		output.Append(Value::BIGINT(cost.native_grouped_aggregate_stage_count));
 		return;
 	case 10:
+		output.Append(Value::BIGINT(cost.native_sort_stage_count));
+		return;
+	case 11:
 		output.Append(Value::BOOLEAN(cost.full_pipeline));
 		return;
 	default:
@@ -274,51 +280,54 @@ static inline void AppendExecutionRegionRunnerCostWorkColumn(Vector &output, idx
 		output.Append(Value::BIGINT(cost.materialization_elision_work));
 		return;
 	case 4:
-		output.Append(Value::BIGINT(cost.full_pipeline_work));
+		output.Append(Value::BIGINT(cost.materialization_source_append_penalty));
 		return;
 	case 5:
-		output.Append(Value::BIGINT(cost.stateful_protocol_penalty));
+		output.Append(Value::BIGINT(cost.full_pipeline_work));
 		return;
 	case 6:
-		output.Append(Value::BIGINT(cost.saved_work_per_batch));
+		output.Append(Value::BIGINT(cost.stateful_protocol_penalty));
 		return;
 	case 7:
-		output.Append(Value::BIGINT(cost.accelerated_runner_benefit));
+		output.Append(Value::BIGINT(cost.saved_work_per_batch));
 		return;
 	case 8:
-		output.Append(Value::BIGINT(cost.startup_cost));
+		output.Append(Value::BIGINT(cost.accelerated_runner_benefit));
 		return;
 	case 9:
-		output.Append(Value::BIGINT(cost.required_benefit));
+		output.Append(Value::BIGINT(cost.startup_cost));
 		return;
 	case 10:
-		output.Append(Value::BIGINT(cost.net_benefit));
+		output.Append(Value::BIGINT(cost.required_benefit));
 		return;
 	case 11:
-		output.Append(Value::BIGINT(cost.compiled_vectorized_runner_benefit));
+		output.Append(Value::BIGINT(cost.net_benefit));
 		return;
 	case 12:
-		output.Append(Value::BIGINT(cost.compiled_vectorized_startup_cost));
+		output.Append(Value::BIGINT(cost.compiled_vectorized_runner_benefit));
 		return;
 	case 13:
-		output.Append(Value::BIGINT(cost.compiled_vectorized_required_benefit));
+		output.Append(Value::BIGINT(cost.compiled_vectorized_startup_cost));
 		return;
 	case 14:
-		output.Append(Value::BIGINT(cost.compiled_vectorized_net_benefit));
+		output.Append(Value::BIGINT(cost.compiled_vectorized_required_benefit));
 		return;
 	case 15:
-		output.Append(Value::BIGINT(cost.gpu_runner_benefit));
+		output.Append(Value::BIGINT(cost.compiled_vectorized_net_benefit));
 		return;
 	case 16:
-		output.Append(Value::BIGINT(cost.gpu_transfer_cost));
+		output.Append(Value::BIGINT(cost.gpu_runner_benefit));
 		return;
 	case 17:
-		output.Append(Value::BIGINT(cost.gpu_startup_cost));
+		output.Append(Value::BIGINT(cost.gpu_transfer_cost));
 		return;
 	case 18:
-		output.Append(Value::BIGINT(cost.gpu_required_benefit));
+		output.Append(Value::BIGINT(cost.gpu_startup_cost));
 		return;
 	case 19:
+		output.Append(Value::BIGINT(cost.gpu_required_benefit));
+		return;
+	case 20:
 		output.Append(Value::BIGINT(cost.gpu_net_benefit));
 		return;
 	default:
@@ -521,6 +530,9 @@ static inline void AppendExecutionRegionCandidateTraceColumn(Vector &output, idx
 		return;
 	case 53:
 		output.Append(Value(FormatExecutionRegionStringList(contract.blockers)));
+		return;
+	case 54:
+		output.Append(Value::UBIGINT(traits.reference_varchar_projection_count));
 		return;
 	default:
 		throw InternalException("Unsupported execution region candidate trace column index");

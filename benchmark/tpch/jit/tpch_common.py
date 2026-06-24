@@ -54,6 +54,7 @@ COUNTER_FIELDS = (
     "runner_cost_expression_cost",
     "runner_cost_generated_stage_count",
     "runner_cost_materialization_elision_count",
+    "runner_cost_materialization_source_append_count",
     "runner_cost_native_join_stage_count",
     "runner_cost_native_aggregate_stage_count",
     "runner_cost_native_grouped_aggregate_stage_count",
@@ -63,6 +64,7 @@ COUNTER_FIELDS = (
     "runner_cost_generated_stage_work",
     "runner_cost_native_operator_work",
     "runner_cost_materialization_elision_work",
+    "runner_cost_materialization_source_append_penalty",
     "runner_cost_full_pipeline_work",
     "runner_cost_stateful_protocol_penalty",
     "runner_cost_saved_work_per_batch",
@@ -95,6 +97,7 @@ RUNNER_COST_COMPONENT_FIELDS = (
     "runner_cost_generated_stage_work",
     "runner_cost_native_operator_work",
     "runner_cost_materialization_elision_work",
+    "runner_cost_materialization_source_append_penalty",
     "runner_cost_full_pipeline_work",
     "runner_cost_stateful_protocol_penalty",
 )
