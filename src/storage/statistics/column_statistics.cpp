@@ -19,9 +19,32 @@ shared_ptr<ColumnStatistics> ColumnStatistics::CreateEmptyStats(const LogicalTyp
 }
 
 void ColumnStatistics::Merge(ColumnStatistics &other) {
+	const bool this_had_values = stats.CanHaveNoNull();
+	const bool other_had_values = other.stats.CanHaveNoNull();
+	const auto this_distinct_count = GetDistinctCount();
+	const auto other_distinct_count = other.GetDistinctCount();
+	const bool this_has_hll = distinct_stats.get();
+	const bool other_has_hll = other.distinct_stats.get();
 	stats.Merge(other.stats);
-	if (distinct_stats && other.distinct_stats) {
+	if (this_has_hll && other_has_hll) {
 		distinct_stats->Merge(*other.distinct_stats);
+		stats.SetDistinctCount(0);
+		return;
+	}
+	if (!this_had_values) {
+		if (other_distinct_count > 0) {
+			SetDistinctCount(other_distinct_count);
+		}
+		return;
+	}
+	if (!other_had_values) {
+		if (this_distinct_count > 0 && !this_has_hll) {
+			SetDistinctCount(this_distinct_count);
+		}
+		return;
+	}
+	if (this_distinct_count > 0 || other_distinct_count > 0) {
+		ClearDistinctCount();
 	}
 }
 
@@ -40,8 +63,28 @@ DistinctStatistics &ColumnStatistics::DistinctStats() {
 	return *distinct_stats;
 }
 
+idx_t ColumnStatistics::GetDistinctCount() {
+	if (distinct_stats) {
+		return distinct_stats->GetCount();
+	}
+	return stats.GetDistinctCount();
+}
+
+void ColumnStatistics::SetDistinctCount(idx_t count) {
+	stats.SetDistinctCount(count);
+	distinct_stats.reset();
+}
+
+void ColumnStatistics::ClearDistinctCount() {
+	stats.SetDistinctCount(0);
+	distinct_stats.reset();
+}
+
 void ColumnStatistics::SetDistinct(unique_ptr<DistinctStatistics> distinct) {
 	this->distinct_stats = std::move(distinct);
+	if (this->distinct_stats) {
+		stats.SetDistinctCount(0);
+	}
 }
 
 void ColumnStatistics::UpdateDistinctStatistics(const Vector &v, idx_t count, Vector &hashes) {

@@ -30,6 +30,9 @@ public:
 
 	bool HasDistinctStats();
 	DistinctStatistics &DistinctStats();
+	idx_t GetDistinctCount();
+	void SetDistinctCount(idx_t count);
+	void ClearDistinctCount();
 	void SetDistinct(unique_ptr<DistinctStatistics> distinct_stats);
 
 	shared_ptr<ColumnStatistics> Copy() const;

@@ -239,6 +239,7 @@ struct SljitNativeRegionSummary {
 struct SljitNativeRegionPlan {
 	vector<SljitNativeRegionOpPlan> ops;
 	ExecutionRegionSourceExecutionKind source_execution = ExecutionRegionSourceExecutionKind::NONE;
+	vector<idx_t> source_distinct_counts;
 	SljitNativeRegionSummary summary;
 
 	const vector<LogicalType> &OutputTypes() const {

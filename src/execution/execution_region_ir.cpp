@@ -197,6 +197,8 @@ static string DescribeExecutionRegionTableScanContract(const ExecutionRegionTabl
 	result += ",source_contract_input_columns=" + std::to_string(contract.source_contract_input_column_count);
 	result +=
 	    ",source_contract_input_types=" + BuildExecutionRegionLogicalTypeList(contract.source_contract_input_types);
+	result += ",source_contract_input_distinct_counts=" +
+	          BuildExecutionRegionIdxList(contract.source_contract_input_distinct_counts);
 	result += ",source_contract_output_projection_map=" +
 	          BuildExecutionRegionIdxList(contract.source_contract_output_projection_map);
 	result +=

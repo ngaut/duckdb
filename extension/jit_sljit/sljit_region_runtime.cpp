@@ -883,8 +883,10 @@ private:
 	};
 
 public:
-	SljitNativeRegionKernel(string backend_name_p, vector<SljitExecutableRegionOp> ops_p, ExecutionRegionABI abi_p)
-	    : backend_name(std::move(backend_name_p)), ops(std::move(ops_p)), abi(abi_p) {
+	SljitNativeRegionKernel(string backend_name_p, vector<SljitExecutableRegionOp> ops_p,
+	                        vector<idx_t> source_distinct_counts_p, ExecutionRegionABI abi_p)
+	    : backend_name(std::move(backend_name_p)), ops(std::move(ops_p)),
+	      source_distinct_counts(std::move(source_distinct_counts_p)), abi(abi_p) {
 	}
 
 	const string &BackendName() const override {
@@ -1596,6 +1598,15 @@ public:
 		return true;
 	}
 
+	static void TrySetDirectAppendDistinctCount(DirectAppendColumnStats &stats, idx_t source_index,
+	                                            const vector<idx_t> &source_distinct_counts) {
+		if (source_index >= source_distinct_counts.size() || source_distinct_counts[source_index] == 0) {
+			return;
+		}
+		stats.has_distinct_count = true;
+		stats.distinct_count = source_distinct_counts[source_index];
+	}
+
 	static bool TryDeriveFixedBinaryConstantStats(const SljitNativeRegionExpressionPlan &plan,
 	                                              const DirectAppendColumnStats &source_stats,
 	                                              DirectAppendColumnStats &result_stats) {
@@ -1656,7 +1667,8 @@ public:
 	                                             idx_t source_offset, idx_t count,
 	                                             vector<DirectAppendColumnStats> &source_stats,
 	                                             DirectAppendColumnStats &result_stats,
-	                                             optional_ptr<FixedDirectAppendSourceCache> source_cache) {
+	                                             optional_ptr<FixedDirectAppendSourceCache> source_cache,
+	                                             const vector<idx_t> &source_distinct_counts) {
 		auto &plan = expr.plan;
 		if (!FixedDirectAppendSignedStatsType(plan.return_type.InternalType())) {
 			return false;
@@ -1671,6 +1683,7 @@ public:
 				return false;
 			}
 			result_stats = source_stats[plan.source_index];
+			TrySetDirectAppendDistinctCount(result_stats, plan.source_index, source_distinct_counts);
 			return true;
 		case SljitNativeRegionExpressionKind::INTEGER_BINARY_CONSTANT:
 			if (plan.check_arithmetic_overflow || plan.check_result_range ||
@@ -1678,7 +1691,11 @@ public:
 			                                         source_cache)) {
 				return false;
 			}
-			return TryDeriveFixedBinaryConstantStats(plan, source_stats[plan.source_index], result_stats);
+			if (!TryDeriveFixedBinaryConstantStats(plan, source_stats[plan.source_index], result_stats)) {
+				return false;
+			}
+			TrySetDirectAppendDistinctCount(result_stats, plan.source_index, source_distinct_counts);
+			return true;
 		case SljitNativeRegionExpressionKind::INTEGER_BINARY_REFERENCES:
 			if (plan.check_arithmetic_overflow || plan.check_result_range ||
 			    !TryScanFixedDirectAppendSourceStats(input, plan.source_index, source_offset, count, source_stats,
@@ -1984,10 +2001,12 @@ public:
 				                              generated_stage_start);
 				slice.stats.assign(op.projections.size(), DirectAppendColumnStats());
 				vector<DirectAppendColumnStats> fixed_source_stats(input.ColumnCount());
+				vector<idx_t> empty_distinct_counts;
+				const auto &direct_distinct_counts = op_idx == 0 ? source_distinct_counts : empty_distinct_counts;
 				for (idx_t projection_idx = 0; projection_idx < op.projections.size(); projection_idx++) {
 					TryComputeFixedDirectAppendStats(op.projections[projection_idx], input, slice.source_offset,
 					                                 slice.count, fixed_source_stats, slice.stats[projection_idx],
-					                                 fixed_source_cache_ptr);
+					                                 fixed_source_cache_ptr, direct_distinct_counts);
 				}
 			}
 			auto commit_stage_start = SljitRegionStageStart(runtime);
@@ -3843,6 +3862,7 @@ public:
 private:
 	string backend_name;
 	vector<SljitExecutableRegionOp> ops;
+	vector<idx_t> source_distinct_counts;
 	ExecutionRegionABI abi;
 	mutex codegen_lock;
 };
@@ -3851,7 +3871,8 @@ unique_ptr<ExecutionRegionKernel> CreateSljitNativeRegionKernel(ClientContext &c
                                                                 SljitExecutableRegion &&region,
                                                                 ExecutionRegionABI abi) {
 	(void)context;
-	return make_uniq<SljitNativeRegionKernel>(std::move(backend_name), std::move(region.ops), abi);
+	return make_uniq<SljitNativeRegionKernel>(std::move(backend_name), std::move(region.ops),
+	                                          std::move(region.source_distinct_counts), abi);
 }
 
 } // namespace duckdb

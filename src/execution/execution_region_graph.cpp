@@ -7,8 +7,12 @@
 
 #include "duckdb/execution/execution_region_graph.hpp"
 
+#include "duckdb/execution/operator/scan/physical_table_scan.hpp"
 #include "duckdb/execution/physical_operator.hpp"
+#include "duckdb/function/table_function.hpp"
+#include "duckdb/main/client_context.hpp"
 #include "duckdb/parallel/pipeline.hpp"
+#include "duckdb/storage/statistics/base_statistics.hpp"
 
 namespace duckdb {
 
@@ -184,9 +188,49 @@ static void SetExecutionRegionOperatorFacts(ExecutionRegionOperatorEntry &entry)
 	entry.has_native_operator_work = entry.HasNativeOperator() || entry.HasNativeSink();
 }
 
+static unique_ptr<BaseStatistics> TryGetExecutionRegionScanColumnStatistics(const PhysicalTableScan &scan,
+                                                                            ClientContext &context,
+                                                                            const ColumnIndex &column_id) {
+	if (!scan.bind_data || (!scan.function.statistics && !scan.function.statistics_extended)) {
+		return nullptr;
+	}
+	if (column_id.IsRowIdColumn() || column_id.IsRowNumberColumn()) {
+		return nullptr;
+	}
+	if (scan.function.statistics_extended) {
+		TableFunctionGetStatisticsInput input(scan.bind_data.get(), column_id);
+		return scan.function.statistics_extended(context, input);
+	}
+	if (!column_id.HasPrimaryIndex()) {
+		return nullptr;
+	}
+	return scan.function.statistics(context, scan.bind_data.get(), column_id.GetPrimaryIndex());
+}
+
+static void AddExecutionRegionTableScanColumnStats(const PhysicalOperator &op, ExecutionContract &descriptor,
+                                                   ClientContext &context) {
+	if (op.type != PhysicalOperatorType::TABLE_SCAN || !descriptor.source.table_scan_contract.present) {
+		return;
+	}
+	auto &scan = op.Cast<PhysicalTableScan>();
+	auto &contract = descriptor.source.table_scan_contract;
+	if (contract.function_name != "seq_scan") {
+		return;
+	}
+	contract.source_contract_input_distinct_counts.assign(scan.column_ids.size(), 0);
+	for (idx_t column_idx = 0; column_idx < scan.column_ids.size(); column_idx++) {
+		auto stats = TryGetExecutionRegionScanColumnStatistics(scan, context, scan.column_ids[column_idx]);
+		if (!stats) {
+			continue;
+		}
+		contract.source_contract_input_distinct_counts[column_idx] = stats->GetDistinctCount();
+	}
+}
+
 static ExecutionRegionOperatorEntry
 BuildExecutionRegionOperatorEntry(const PhysicalOperator &op, ExecutionRegionOperatorSlot slot, bool render_diagnostics,
-                                  idx_t operator_index = DConstants::INVALID_INDEX) {
+                                  idx_t operator_index = DConstants::INVALID_INDEX,
+                                  optional_ptr<ClientContext> context = nullptr) {
 	ExecutionRegionOperatorEntry entry;
 	entry.present = true;
 	entry.slot = slot;
@@ -199,6 +243,9 @@ BuildExecutionRegionOperatorEntry(const PhysicalOperator &op, ExecutionRegionOpe
 	                          ? op.GetName()
 	                          : ExecutionRegionOperatorKindToTraceLabel(entry.operator_kind);
 	auto descriptor = op.GetExecutionContract();
+	if (context) {
+		AddExecutionRegionTableScanColumnStats(op, descriptor, *context);
+	}
 	SetExecutionRegionOperatorExpressions(entry, descriptor.transform);
 	entry.source_contract =
 	    SliceExecutionRegionCompiledContract(descriptor, ExecutionRegionOperatorSlot::SOURCE, render_diagnostics);
@@ -222,20 +269,21 @@ static void AccumulateExecutionRegionGraphFacts(ExecutionRegionGraph &graph,
 
 unique_ptr<ExecutionRegionGraph> BuildExecutionRegionGraph(Pipeline &pipeline, bool render_diagnostics) {
 	auto result = make_uniq<ExecutionRegionGraph>();
+	auto &context = pipeline.GetClientContext();
 	if (pipeline.GetSource()) {
 		result->source = BuildExecutionRegionOperatorEntry(*pipeline.GetSource(), ExecutionRegionOperatorSlot::SOURCE,
-		                                                   render_diagnostics);
+		                                                   render_diagnostics, DConstants::INVALID_INDEX, context);
 		AccumulateExecutionRegionGraphFacts(*result, result->source);
 	}
 	auto &operators = pipeline.GetIntermediateOperators();
 	for (idx_t op_idx = 0; op_idx < operators.size(); op_idx++) {
 		result->operators.push_back(BuildExecutionRegionOperatorEntry(
-		    operators[op_idx].get(), ExecutionRegionOperatorSlot::OPERATOR, render_diagnostics, op_idx));
+		    operators[op_idx].get(), ExecutionRegionOperatorSlot::OPERATOR, render_diagnostics, op_idx, context));
 		AccumulateExecutionRegionGraphFacts(*result, result->operators.back());
 	}
 	if (pipeline.GetSink()) {
 		result->sink = BuildExecutionRegionOperatorEntry(*pipeline.GetSink(), ExecutionRegionOperatorSlot::SINK,
-		                                                 render_diagnostics);
+		                                                 render_diagnostics, DConstants::INVALID_INDEX, context);
 		AccumulateExecutionRegionGraphFacts(*result, result->sink);
 	}
 	if (result->Empty()) {

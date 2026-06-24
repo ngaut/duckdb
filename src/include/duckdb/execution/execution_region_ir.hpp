@@ -84,6 +84,7 @@ struct ExecutionRegionTableScanContract {
 	vector<idx_t> projection_ids;
 	idx_t source_contract_input_column_count = 0;
 	vector<LogicalType> source_contract_input_types;
+	vector<idx_t> source_contract_input_distinct_counts;
 	vector<idx_t> source_contract_output_projection_map;
 	bool source_contract_filter_prune_required = false;
 	bool projection_pushdown = false;

@@ -28,6 +28,8 @@ struct DirectAppendColumnStats {
 	float float_max = 0;
 	double double_min = 0;
 	double double_max = 0;
+	bool has_distinct_count = false;
+	idx_t distinct_count = 0;
 };
 
 struct DirectAppendSlice {

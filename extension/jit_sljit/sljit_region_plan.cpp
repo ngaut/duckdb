@@ -479,6 +479,10 @@ ExecutionRegionLoweringPlan BuildSljitRegionPlan(const ExecutionRegionIR &region
 			}
 			if (executable_source && node_plan.kind == ExecutionRegionLoweringKind::NATIVE) {
 				cursor.AcceptSource(node, node_plan);
+				if (node.source && node.source->table_scan_contract.present) {
+					native_region.source_distinct_counts =
+					    node.source->table_scan_contract.source_contract_input_distinct_counts;
+				}
 			} else {
 				cursor.BreakAtBoundary(node.output_types);
 			}

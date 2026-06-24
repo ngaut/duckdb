@@ -727,8 +727,12 @@ void RowGroupCollection::CommitDirectAppend(TableAppendState &state, const Direc
 
 		auto local_stats_lock = state.stats.GetLock();
 		for (idx_t col_idx = 0; col_idx < types.size(); col_idx++) {
-			Vector direct_vector(types[col_idx], slice.targets[col_idx], slice.count);
 			auto &column_stats = state.stats.GetStats(*local_stats_lock, col_idx);
+			if (stats && (*stats)[col_idx].has_distinct_count) {
+				column_stats.SetDistinctCount((*stats)[col_idx].distinct_count);
+				continue;
+			}
+			Vector direct_vector(types[col_idx], slice.targets[col_idx], slice.count);
 			column_stats.UpdateDistinctStatistics(direct_vector, slice.count, state.hashes);
 		}
 	}

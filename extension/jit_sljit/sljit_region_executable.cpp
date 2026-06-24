@@ -950,6 +950,7 @@ static bool SljitCanDeferAggregateUpdatePayloadCode(const vector<SljitNativeRegi
 }
 
 bool BuildSljitExecutableRegion(const SljitNativeRegionPlan &region, SljitExecutableRegion &executable, string &error) {
+	executable.source_distinct_counts = region.source_distinct_counts;
 	executable.ops.reserve(region.ops.size());
 	for (idx_t op_idx = 0; op_idx < region.ops.size(); op_idx++) {
 		auto &op = region.ops[op_idx];

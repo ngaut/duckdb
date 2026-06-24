@@ -224,6 +224,7 @@ struct SljitExecutableRegionOp {
 
 struct SljitExecutableRegion {
 	vector<SljitExecutableRegionOp> ops;
+	vector<idx_t> source_distinct_counts;
 
 	idx_t CodeSize() const {
 		idx_t result = 0;

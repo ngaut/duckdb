@@ -44,9 +44,7 @@ void TableStatistics::InitializeEmpty(const TableStatistics &other) {
 		}
 
 		auto &base_stats = new_column_stats->Statistics();
-		if (new_column_stats->HasDistinctStats()) {
-			base_stats.SetDistinctCount(new_column_stats->DistinctStats().GetCount());
-		}
+		base_stats.SetDistinctCount(new_column_stats->GetDistinctCount());
 		column_stats.push_back(new_column_stats);
 	}
 }
@@ -204,9 +202,7 @@ unique_ptr<BaseStatistics> TableStatistics::CopyStats(const StorageIndex &index)
 	auto column_index = index.GetPrimaryIndex();
 	auto &stats = *column_stats[column_index];
 	auto result = stats.Statistics().Copy();
-	if (stats.HasDistinctStats()) {
-		result.SetDistinctCount(stats.DistinctStats().GetCount());
-	}
+	result.SetDistinctCount(stats.GetDistinctCount());
 	if (index.IsPushdownExtract()) {
 		return result.PushdownExtract(index.GetChildIndexes()[0]);
 	}

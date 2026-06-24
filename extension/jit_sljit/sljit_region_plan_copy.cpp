@@ -223,6 +223,7 @@ static SljitNativeRegionOpPlan CopySljitNativeRegionOp(const SljitNativeRegionOp
 unique_ptr<SljitNativeRegionPlan> SljitNativeRegionPlan::Copy() const {
 	auto result = make_uniq<SljitNativeRegionPlan>();
 	result->source_execution = source_execution;
+	result->source_distinct_counts = source_distinct_counts;
 	result->summary = summary;
 	result->ops.reserve(ops.size());
 	for (auto &op : ops) {
