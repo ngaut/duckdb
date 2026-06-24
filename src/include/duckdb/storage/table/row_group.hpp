@@ -201,7 +201,8 @@ public:
 	void Append(RowGroupAppendState &append_state, DataChunk &chunk, idx_t append_count);
 	bool TryPrepareDirectAppend(RowGroupAppendState &append_state, const vector<LogicalType> &types, idx_t append_count,
 	                            vector<data_ptr_t> &targets);
-	void CommitDirectAppend(RowGroupAppendState &append_state, const vector<data_ptr_t> &targets, idx_t append_count,
+	void CommitDirectAppend(RowGroupAppendState &append_state, const vector<data_ptr_t> &targets,
+	                        const vector<DirectAppendColumnSource> &sources, idx_t append_count,
 	                        optional_ptr<const vector<DirectAppendColumnStats>> stats = nullptr);
 	void FinalizeAppend(RowGroupAppendState &append_state);
 

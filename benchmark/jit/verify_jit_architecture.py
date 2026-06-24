@@ -95,7 +95,8 @@ REQUIRED_TEXT = {
         "SelectExecutionRegionPhysicalRunner",
         "DuckDBCostModel::SelectPhysicalRunner",
         "selection.runner_cost.selected_accelerated_runner",
-        "duckdb_cbo selects compiled-vectorized physical runner",
+        "ExecutionRegionDecisionRunnerName(selection.SelectedRunner())",
+        'selection.reason = "duckdb_cbo selects ";',
     ),
     "src/execution/execution_region_cost_input.cpp": (
         "ExecutionRegionRunnerCostInputBuilder",

@@ -77,6 +77,29 @@ static unique_ptr<QueryResult> RunJitStatefulSortQuery(Connection &con) {
 	                 ") grouped ORDER BY s DESC LIMIT 20");
 }
 
+static void RunPersistentJitDirectAppendSQL(const string &db_path, const string &sql, bool enable_direct_append_jit) {
+	DuckDB db(db_path);
+	Connection con(db);
+	LoadSljit(con);
+	REQUIRE_NO_FAIL(con.Query("SET threads=1"));
+	REQUIRE_NO_FAIL(con.Query("SET jit_backend='sljit'"));
+	if (!enable_direct_append_jit) {
+		REQUIRE_NO_FAIL(con.Query("SET enable_jit=false"));
+		REQUIRE_NO_FAIL(con.Query("SET jit_policy='off'"));
+		REQUIRE_NO_FAIL(con.Query(sql));
+		return;
+	}
+	REQUIRE_NO_FAIL(con.Query("SET enable_jit=true"));
+	REQUIRE_NO_FAIL(con.Query("SET jit_policy='auto'"));
+	REQUIRE_NO_FAIL(con.Query("SET jit_cbo_generated_stage_benefit=4096"));
+	REQUIRE_NO_FAIL(con.Query("SET jit_cbo_materialization_elision_benefit=4096"));
+	REQUIRE_NO_FAIL(con.Query("SET jit_cbo_native_operator_stage_benefit=1"));
+	REQUIRE_NO_FAIL(con.Query("SET jit_cbo_full_pipeline_benefit=0"));
+	REQUIRE_NO_FAIL(con.Query("SET jit_cbo_startup_base_cost=0"));
+	REQUIRE_NO_FAIL(con.Query("SET jit_cbo_startup_margin_basis_points=0"));
+	REQUIRE_NO_FAIL(con.Query(sql));
+}
+
 #if defined(__APPLE__)
 static bool IsMetalRegionEvent(const ExecutionRegionEvent &event) {
 	return event.backend_name == "jit_metal";
@@ -789,11 +812,11 @@ TEST_CASE("SLJIT native integer projection elides proven overflow checks", "[api
 		    return IsSljitRegionEvent(event) && EventPhase(event) == "runtime" && EventStatus(event) == "executed" &&
 		           event.output_rows == 10000 &&
 		           StringUtil::Contains(EventGeneratedStageCountBreakdown(event),
-		                                "op0:projection.direct_materialize_fixed_generated");
+		                                "op0:projection.direct_materialize_fixed_fused_generated");
 	    },
 	    [](const ExecutionRegionEvent &event) {
 		    REQUIRE(StringUtil::Contains(EventGeneratedStageRuntimeBreakdown(event),
-		                                 "op0:projection.direct_materialize_fixed_generated"));
+		                                 "op0:projection.direct_materialize_fixed_fused_generated"));
 	    });
 }
 
@@ -864,12 +887,309 @@ TEST_CASE("SLJIT native integer flat arithmetic handles SIMD-width tails", "[api
 		    return IsSljitRegionEvent(event) && EventPhase(event) == "runtime" && EventStatus(event) == "executed" &&
 		           event.output_rows == 2053 &&
 		           StringUtil::Contains(EventGeneratedStageCountBreakdown(event),
-		                                "op0:projection.direct_materialize_fixed_generated");
+		                                "op0:projection.direct_materialize_fixed_fused_generated");
 	    },
 	    [](const ExecutionRegionEvent &event) {
 		    REQUIRE(StringUtil::Contains(EventGeneratedStageRuntimeBreakdown(event),
-		                                 "op0:projection.direct_materialize_fixed_generated"));
+		                                 "op0:projection.direct_materialize_fixed_fused_generated"));
 	    });
+}
+
+TEST_CASE("SLJIT fixed direct append fuses mixed INTEGER and BIGINT groups", "[api][jit]") {
+	JitTestDatabase test;
+	auto &con = test.con;
+	auto &manager = test.manager;
+
+	ConfigureSljitForCoverage(con, false, true, true, 10000);
+	REQUIRE_NO_FAIL(con.Query("SET threads=1"));
+	ConfigureJitDecisionTrace(con);
+	REQUIRE_NO_FAIL(con.Query("CREATE TEMP TABLE jit_mixed_integer_groups_input AS "
+	                          "SELECT i::BIGINT AS i, "
+	                          "(i % 1000)::INTEGER AS a, "
+	                          "((i * 3) % 1000)::INTEGER AS c, "
+	                          "i::BIGINT AS b, "
+	                          "(i * 2)::BIGINT AS d, "
+	                          "DATE '1992-01-01' + ((i % 365)::INTEGER) AS dt "
+	                          "FROM range(100000) tbl(i)"));
+
+	ClearJitTrace(manager, true);
+	auto result = con.Query("CREATE TEMP TABLE jit_mixed_integer_groups_output AS "
+	                        "SELECT i, "
+	                        "(a + 7) AS a7, "
+	                        "(c - 5) AS c5, "
+	                        "(a + c) AS ac, "
+	                        "(b + 11) AS b11, "
+	                        "(d - 13) AS d13, "
+	                        "(b + d) AS bd, "
+	                        "dt "
+	                        "FROM jit_mixed_integer_groups_input");
+	REQUIRE_NO_FAIL(*result);
+
+	auto check = con.Query("SELECT count(*) "
+	                       "FROM jit_mixed_integer_groups_output "
+	                       "WHERE a7 <> ((i % 1000)::INTEGER + 7) "
+	                       "OR c5 <> (((i * 3) % 1000)::INTEGER - 5) "
+	                       "OR ac <> ((i % 1000)::INTEGER + ((i * 3) % 1000)::INTEGER) "
+	                       "OR b11 <> (i + 11) "
+	                       "OR d13 <> ((i * 2) - 13) "
+	                       "OR bd <> (i + (i * 2)) "
+	                       "OR dt <> DATE '1992-01-01' + ((i % 365)::INTEGER)");
+	REQUIRE_NO_FAIL(*check);
+	REQUIRE(check->GetValue(0, 0).GetValue<int64_t>() == 0);
+
+	RequireJitEvent(
+	    manager,
+	    [](const ExecutionRegionEvent &event) {
+		    return IsSljitRegionEvent(event) && EventPhase(event) == "runtime" && EventStatus(event) == "executed" &&
+		           event.output_rows == 100000 &&
+		           StringUtil::Contains(EventGeneratedStageCountBreakdown(event),
+		                                "op0:projection.direct_materialize_fixed_fused_generated");
+	    },
+	    [](const ExecutionRegionEvent &event) {
+		    idx_t fused_direct_count = 0;
+		    idx_t fallback_projection_count = 0;
+		    idx_t fallback_append_count = 0;
+		    for (auto &stage : event.generated_stage_runtime) {
+			    if (stage.stage.name == "op0:projection.direct_materialize_fixed_fused_generated") {
+				    fused_direct_count += stage.count;
+			    } else if (stage.stage.name == "op0:projection") {
+				    fallback_projection_count += stage.count;
+			    } else if (stage.stage.name == "op1:append_sink") {
+				    fallback_append_count += stage.count;
+			    }
+		    }
+		    REQUIRE(fused_direct_count >= 49);
+		    REQUIRE(fallback_projection_count == 0);
+		    REQUIRE(fallback_append_count == 0);
+		    });
+}
+
+TEST_CASE("SLJIT fixed direct append fuses DECIMAL64 groups with checks", "[api][jit]") {
+	JitTestDatabase test;
+	auto &con = test.con;
+	auto &manager = test.manager;
+
+	ConfigureSljitForCoverage(con, false, true, true, 10000);
+	REQUIRE_NO_FAIL(con.Query("SET threads=1"));
+	ConfigureJitDecisionTrace(con);
+	REQUIRE_NO_FAIL(con.Query("CREATE TEMP TABLE jit_decimal_fused_input AS "
+	                          "SELECT i::BIGINT AS i, "
+	                          "(i % 100000)::DECIMAL(15,2) AS d1, "
+	                          "((i * 3) % 100000)::DECIMAL(15,2) AS d2 "
+	                          "FROM range(100000) tbl(i)"));
+
+	ClearJitTrace(manager, true);
+	auto result = con.Query("CREATE TEMP TABLE jit_decimal_fused_output AS "
+	                        "SELECT i, "
+	                        "(d1 + 1.25::DECIMAL(15,2)) AS d1p, "
+	                        "(d2 - 2.50::DECIMAL(15,2)) AS d2m, "
+	                        "(d1 + d2) AS dsum, "
+	                        "(d2 - d1) AS ddiff "
+	                        "FROM jit_decimal_fused_input");
+	REQUIRE_NO_FAIL(*result);
+
+	auto check = con.Query("SELECT count(*) "
+	                       "FROM jit_decimal_fused_output "
+	                       "WHERE d1p <> ((i % 100000)::DECIMAL(15,2) + 1.25::DECIMAL(15,2)) "
+	                       "OR d2m <> (((i * 3) % 100000)::DECIMAL(15,2) - 2.50::DECIMAL(15,2)) "
+	                       "OR dsum <> ((i % 100000)::DECIMAL(15,2) + "
+	                       "((i * 3) % 100000)::DECIMAL(15,2)) "
+	                       "OR ddiff <> (((i * 3) % 100000)::DECIMAL(15,2) - "
+	                       "(i % 100000)::DECIMAL(15,2))");
+	REQUIRE_NO_FAIL(*check);
+	REQUIRE(check->GetValue(0, 0).GetValue<int64_t>() == 0);
+
+	RequireJitEvent(
+	    manager,
+	    [](const ExecutionRegionEvent &event) {
+		    return IsCompiledSljitRegionEvent(event) &&
+		           CandidateHasStructure(event, 0, 1, ExecutionRegionSinkKind::MATERIALIZATION) &&
+		           StringUtil::Contains(event.ir, "native:decimal64-add-constant") &&
+		           StringUtil::Contains(event.ir, "native:decimal64-subtract-constant") &&
+		           StringUtil::Contains(event.ir, "native:decimal64-add-references") &&
+		           StringUtil::Contains(event.ir, "native:decimal64-subtract-references");
+	    },
+	    [](const ExecutionRegionEvent &event) {
+		    RequireGeneratedMachineCodeRegion(event);
+		    REQUIRE(event.candidate_traits.arithmetic_projection_count == 4);
+		    REQUIRE(event.candidate_traits.non_integer_arithmetic_projection_count == 4);
+		    REQUIRE(event.candidate_traits.reference_projection_count == 1);
+	    });
+
+	RequireJitEvent(
+	    manager,
+	    [](const ExecutionRegionEvent &event) {
+		    return IsSljitRegionEvent(event) && EventPhase(event) == "runtime" && EventStatus(event) == "executed" &&
+		           event.output_rows == 100000 &&
+		           StringUtil::Contains(EventGeneratedStageCountBreakdown(event),
+		                                "op0:projection.direct_materialize_fixed_fused_generated");
+	    },
+	    [](const ExecutionRegionEvent &event) {
+		    idx_t fused_direct_count = 0;
+		    idx_t fallback_projection_count = 0;
+		    idx_t fallback_append_count = 0;
+		    for (auto &stage : event.generated_stage_runtime) {
+			    if (stage.stage.name == "op0:projection.direct_materialize_fixed_fused_generated") {
+				    fused_direct_count += stage.count;
+			    } else if (stage.stage.name == "op0:projection") {
+				    fallback_projection_count += stage.count;
+			    } else if (stage.stage.name == "op1:append_sink") {
+				    fallback_append_count += stage.count;
+			    }
+		    }
+		    REQUIRE(fused_direct_count >= 49);
+		    REQUIRE(fallback_projection_count == 0);
+		    REQUIRE(fallback_append_count == 0);
+	    });
+}
+
+TEST_CASE("SLJIT fused DECIMAL64 direct append preserves projection overflow message", "[api][jit]") {
+	JitTestDatabase test;
+	auto &con = test.con;
+	auto &manager = test.manager;
+
+	ConfigureSljitForCoverage(con, false, true, true, 10000);
+	REQUIRE_NO_FAIL(con.Query("SET threads=1"));
+	ConfigureJitDecisionTrace(con);
+	REQUIRE_NO_FAIL(con.Query("CREATE TEMP TABLE jit_decimal_fused_overflow_input AS "
+	                          "SELECT (-999999999999999999)::DECIMAL(18,0) AS d "
+	                          "FROM range(10000) tbl(i)"));
+
+	ClearJitTrace(manager, true);
+	auto overflow = con.Query("CREATE TEMP TABLE jit_decimal_fused_overflow_output AS "
+	                          "SELECT (d + 1::DECIMAL(18,0)) AS ok, "
+	                          "(d - 1::DECIMAL(18,0)) AS lo "
+	                          "FROM jit_decimal_fused_overflow_input");
+	REQUIRE_FAIL(overflow);
+	REQUIRE(StringUtil::Contains(overflow->GetError(), "Overflow in subtract of DECIMAL"));
+
+	RequireJitEvent(
+	    manager,
+	    [](const ExecutionRegionEvent &event) {
+		    return IsCompiledSljitRegionEvent(event) &&
+		           CandidateHasStructure(event, 0, 1, ExecutionRegionSinkKind::MATERIALIZATION) &&
+		           StringUtil::Contains(event.ir, "native:decimal64-add-constant") &&
+		           StringUtil::Contains(event.ir, "native:decimal64-subtract-constant");
+	    },
+	    [](const ExecutionRegionEvent &event) { RequireGeneratedMachineCodeRegion(event); });
+
+	RequireJitEvent(
+	    manager,
+	    [](const ExecutionRegionEvent &event) {
+		    return IsSljitRegionEvent(event) && EventPhase(event) == "runtime" && EventStatus(event) == "error" &&
+		           StringUtil::Contains(event.reason, "Overflow in subtract of DECIMAL");
+	    },
+	    NoExtraJitEventCheck());
+}
+
+TEST_CASE("SLJIT fixed direct append fuses DATE arithmetic groups with checks", "[api][jit]") {
+	JitTestDatabase test;
+	auto &con = test.con;
+	auto &manager = test.manager;
+
+	ConfigureSljitForCoverage(con, false, true, true, 10000);
+	REQUIRE_NO_FAIL(con.Query("SET threads=1"));
+	ConfigureJitDecisionTrace(con);
+	REQUIRE_NO_FAIL(con.Query("CREATE TEMP TABLE jit_date_fused_input AS "
+	                          "SELECT i::BIGINT AS i, "
+	                          "((i % 11)::INTEGER - 5) AS off, "
+	                          "CASE WHEN i = 0 THEN DATE 'infinity' "
+	                          "WHEN i = 1 THEN DATE '-infinity' "
+	                          "ELSE DATE '1992-01-01' + ((i % 365)::INTEGER) END AS dt "
+	                          "FROM range(100000) tbl(i)"));
+
+	ClearJitTrace(manager, true);
+	auto result = con.Query("CREATE TEMP TABLE jit_date_fused_output AS "
+	                        "SELECT i, dt, "
+	                        "(dt + 7) AS dtp, "
+	                        "(dt - 5) AS dtm, "
+	                        "(off + dt) AS dtoff_l, "
+	                        "(dt + off) AS dtoff_r "
+	                        "FROM jit_date_fused_input");
+	REQUIRE_NO_FAIL(*result);
+
+	auto check = con.Query("SELECT count(*) "
+	                       "FROM jit_date_fused_output o "
+	                       "JOIN jit_date_fused_input i USING (i) "
+	                       "WHERE o.dtp <> i.dt + 7 "
+	                       "OR o.dtm <> i.dt - 5 "
+	                       "OR o.dtoff_l <> i.off + i.dt "
+	                       "OR o.dtoff_r <> i.dt + i.off "
+	                       "OR o.dt <> i.dt");
+	REQUIRE_NO_FAIL(*check);
+	REQUIRE(check->GetValue(0, 0).GetValue<int64_t>() == 0);
+
+	RequireJitEvent(
+	    manager,
+	    [](const ExecutionRegionEvent &event) {
+		    return IsCompiledSljitRegionEvent(event) &&
+		           CandidateHasStructure(event, 0, 1, ExecutionRegionSinkKind::MATERIALIZATION) &&
+		           StringUtil::Contains(event.ir, "native:date-add-constant") &&
+		           StringUtil::Contains(event.ir, "native:date-subtract-constant") &&
+		           StringUtil::Contains(event.ir, "native:date-add-references");
+	    },
+	    [](const ExecutionRegionEvent &event) { RequireGeneratedMachineCodeRegion(event); });
+
+	RequireJitEvent(
+	    manager,
+	    [](const ExecutionRegionEvent &event) {
+		    return IsSljitRegionEvent(event) && EventPhase(event) == "runtime" && EventStatus(event) == "executed" &&
+		           event.output_rows == 100000 &&
+		           StringUtil::Contains(EventGeneratedStageCountBreakdown(event),
+		                                "op0:projection.direct_materialize_fixed_fused_generated");
+	    },
+	    [](const ExecutionRegionEvent &event) {
+		    idx_t fused_direct_count = 0;
+		    idx_t fallback_projection_count = 0;
+		    idx_t fallback_append_count = 0;
+		    for (auto &stage : event.generated_stage_runtime) {
+			    if (stage.stage.name == "op0:projection.direct_materialize_fixed_fused_generated") {
+				    fused_direct_count += stage.count;
+			    } else if (stage.stage.name == "op0:projection") {
+				    fallback_projection_count += stage.count;
+			    } else if (stage.stage.name == "op1:append_sink") {
+				    fallback_append_count += stage.count;
+			    }
+		    }
+		    REQUIRE(fused_direct_count >= 49);
+		    REQUIRE(fallback_projection_count == 0);
+		    REQUIRE(fallback_append_count == 0);
+	    });
+}
+
+TEST_CASE("SLJIT fused DATE direct append preserves date range errors", "[api][jit]") {
+	JitTestDatabase test;
+	auto &con = test.con;
+	auto &manager = test.manager;
+
+	ConfigureSljitForCoverage(con, false, true, true, 10000);
+	REQUIRE_NO_FAIL(con.Query("SET threads=1"));
+	ConfigureJitDecisionTrace(con);
+	REQUIRE_NO_FAIL(con.Query("CREATE TEMP TABLE jit_date_fused_overflow_input AS "
+	                          "SELECT DATE '5881580-07-10' AS dt FROM range(10000) tbl(i)"));
+
+	ClearJitTrace(manager, true);
+	auto overflow = con.Query("CREATE TEMP TABLE jit_date_fused_overflow_output AS "
+	                          "SELECT (dt + 1) AS bad FROM jit_date_fused_overflow_input");
+	REQUIRE_FAIL(overflow);
+	REQUIRE(StringUtil::Contains(overflow->GetError(), "Date out of range"));
+
+	RequireJitEvent(
+	    manager,
+	    [](const ExecutionRegionEvent &event) {
+		    return IsCompiledSljitRegionEvent(event) &&
+		           CandidateHasStructure(event, 0, 1, ExecutionRegionSinkKind::MATERIALIZATION) &&
+		           StringUtil::Contains(event.ir, "native:date-add-constant");
+	    },
+	    [](const ExecutionRegionEvent &event) { RequireGeneratedMachineCodeRegion(event); });
+
+	RequireJitEvent(
+	    manager,
+	    [](const ExecutionRegionEvent &event) {
+		    return IsSljitRegionEvent(event) && EventPhase(event) == "runtime" && EventStatus(event) == "error" &&
+		           StringUtil::Contains(event.reason, "Date out of range");
+	    },
+	    NoExtraJitEventCheck());
 }
 
 TEST_CASE("SLJIT native integer projection preserves required overflow checks", "[api][jit]") {
@@ -967,6 +1287,87 @@ TEST_CASE("SLJIT direct fixed-width materialization handles INTEGER BIGINT DECIM
 	    });
 }
 
+TEST_CASE("SLJIT direct append source-appends VARCHAR with fixed projections", "[api][jit]") {
+	JitTestDatabase test;
+	auto &con = test.con;
+	auto &manager = test.manager;
+
+	ConfigureSljitForCoverage(con, false, false, true, 10000);
+	REQUIRE_NO_FAIL(con.Query("SET threads=1"));
+	ConfigureJitDecisionTrace(con);
+
+	auto db_path = TestCreatePath("jit_direct_varchar_append.db");
+	TestDeleteFile(db_path);
+	TestDeleteFile(db_path + ".wal");
+	REQUIRE_NO_FAIL(con.Query("ATTACH " + SQLString(db_path) + " AS rg (ROW_GROUP_SIZE 2048)"));
+	REQUIRE_NO_FAIL(con.Query("CREATE TABLE rg.jit_direct_varchar_input AS "
+	                          "SELECT i::INTEGER AS id, "
+	                          "(i % 1000)::INTEGER AS a, "
+	                          "i::BIGINT AS b, "
+	                          "(i % 100000)::DECIMAL(15,2) AS d, "
+	                          "DATE '1992-01-01' + ((i % 365)::INTEGER) AS dt, "
+	                          "CASE WHEN (i % 997) = 0 THEN NULL "
+	                          "     WHEN (i % 251) = 0 THEN 'long-' || repeat((i::VARCHAR || '-'), 128) "
+	                          "     ELSE 'customer-' || ((i % 1024)::VARCHAR) END AS name "
+	                          "FROM range(10000) tbl(i)"));
+
+	ClearJitTrace(manager, true);
+	auto result = con.Query("CREATE TABLE rg.jit_direct_varchar_output AS "
+	                        "SELECT id, "
+	                        "(a + 1) AS a2, "
+	                        "(b - 3) AS b2, "
+	                        "(d + 1.25::DECIMAL(15,2)) AS d2, "
+	                        "dt, "
+	                        "name "
+	                        "FROM rg.jit_direct_varchar_input");
+	REQUIRE_NO_FAIL(*result);
+
+	auto check = con.Query("SELECT count(*), "
+	                       "sum(CASE WHEN o.name IS NOT DISTINCT FROM i.name THEN 1 ELSE 0 END)::BIGINT, "
+	                       "sum(CASE WHEN o.name IS NULL THEN 1 ELSE 0 END)::BIGINT, "
+	                       "max(length(o.name)), "
+	                       "sum(o.a2)::BIGINT, "
+	                       "sum(o.b2)::BIGINT, "
+	                       "sum(o.d2)::VARCHAR "
+	                       "FROM rg.jit_direct_varchar_output o "
+	                       "JOIN rg.jit_direct_varchar_input i USING (id)");
+	REQUIRE_NO_FAIL(*check);
+	REQUIRE(check->GetValue(0, 0).GetValue<int64_t>() == 10000);
+	REQUIRE(check->GetValue(1, 0).GetValue<int64_t>() == 10000);
+	REQUIRE(check->GetValue(2, 0).GetValue<int64_t>() == 11);
+	REQUIRE(check->GetValue(3, 0).GetValue<int64_t>() > 512);
+	REQUIRE(check->GetValue(4, 0).GetValue<int64_t>() == 5005000);
+	REQUIRE(check->GetValue(5, 0).GetValue<int64_t>() == 49965000);
+	REQUIRE(check->GetValue(6, 0).ToString() == "50007500.00");
+
+	RequireJitEvent(
+	    manager,
+	    [](const ExecutionRegionEvent &event) {
+		    return IsSljitRegionEvent(event) && EventPhase(event) == "runtime" && EventStatus(event) == "executed" &&
+		           event.output_rows == 10000 &&
+		           StringUtil::Contains(EventGeneratedStageCountBreakdown(event),
+		                                "op0:projection.direct_materialize_fixed_generated");
+	    },
+	    [](const ExecutionRegionEvent &event) {
+		    idx_t direct_materialize_count = 0;
+		    idx_t fallback_projection_count = 0;
+		    idx_t fallback_append_count = 0;
+		    for (auto &stage : event.generated_stage_runtime) {
+			    if (stage.stage.name == "op0:projection.direct_materialize_fixed_generated" ||
+			        stage.stage.name == "op0:projection.direct_materialize_fixed_fused_generated") {
+				    direct_materialize_count += stage.count;
+			    } else if (stage.stage.name == "op0:projection") {
+				    fallback_projection_count += stage.count;
+			    } else if (stage.stage.name == "op1:append_sink") {
+				    fallback_append_count += stage.count;
+			    }
+		    }
+		    REQUIRE(direct_materialize_count >= 5);
+		    REQUIRE(fallback_projection_count == 0);
+		    REQUIRE(fallback_append_count == 0);
+	    });
+}
+
 TEST_CASE("SLJIT direct fixed-width materialization rolls over column segments without fallback", "[api][jit]") {
 	JitTestDatabase test;
 	auto &con = test.con;
@@ -1023,6 +1424,65 @@ TEST_CASE("SLJIT direct fixed-width materialization rolls over column segments w
 		    REQUIRE(fallback_projection_count == 0);
 		    REQUIRE(fallback_append_count == 0);
 	    });
+}
+
+TEST_CASE("SLJIT direct append resized transient segments survive reopen and drop", "[api][jit]") {
+	auto db_path = TestCreatePath("jit_direct_append_reopen_drop.db");
+	TestDeleteFile(db_path);
+	TestDeleteFile(db_path + ".wal");
+
+	const string float_projection = "SELECT "
+	                                "(x + 1.0::FLOAT) AS a, "
+	                                "(x * 1.0001::FLOAT) AS b, "
+	                                "(y - 3.0::FLOAT) AS c, "
+	                                "(x + y) AS d, "
+	                                "(x - y) AS e, "
+	                                "(y * 1.25::FLOAT) AS f, "
+	                                "(x / 1.5::FLOAT) AS g, "
+	                                "(y + 9.0::FLOAT) AS h "
+	                                "FROM float_in";
+	const string double_projection = "SELECT "
+	                                 "(x + 1.0::DOUBLE) AS a, "
+	                                 "(x * 1.0001::DOUBLE) AS b, "
+	                                 "(y - 3.0::DOUBLE) AS c, "
+	                                 "(x + y) AS d, "
+	                                 "(x - y) AS e, "
+	                                 "(y * 1.25::DOUBLE) AS f, "
+	                                 "(x / 1.5::DOUBLE) AS g, "
+	                                 "(y + 9.0::DOUBLE) AS h "
+	                                 "FROM double_in";
+
+	RunPersistentJitDirectAppendSQL(db_path,
+	                                "CREATE OR REPLACE TABLE float_in AS "
+	                                "SELECT i::FLOAT AS x, (i * 0.5)::FLOAT AS y FROM range(1024) tbl(i);"
+	                                "CREATE OR REPLACE TABLE double_in AS "
+	                                "SELECT i::DOUBLE AS x, (i * 0.5)::DOUBLE AS y FROM range(1024) tbl(i);",
+	                                false);
+	RunPersistentJitDirectAppendSQL(db_path, "CREATE OR REPLACE TABLE base_float AS " + float_projection, false);
+	RunPersistentJitDirectAppendSQL(db_path, "CREATE OR REPLACE TABLE base_double AS " + double_projection, false);
+	RunPersistentJitDirectAppendSQL(db_path,
+	                                "CREATE OR REPLACE TABLE result_float_off AS " + float_projection +
+	                                    ";"
+	                                    "DROP TABLE result_float_off;",
+	                                false);
+	RunPersistentJitDirectAppendSQL(db_path,
+	                                "CREATE OR REPLACE TABLE result_float_auto AS " + float_projection +
+	                                    ";"
+	                                    "DROP TABLE result_float_auto;",
+	                                true);
+	RunPersistentJitDirectAppendSQL(db_path,
+	                                "CREATE OR REPLACE TABLE result_double_off AS " + double_projection +
+	                                    ";"
+	                                    "DROP TABLE result_double_off;",
+	                                false);
+	RunPersistentJitDirectAppendSQL(db_path,
+	                                "CREATE OR REPLACE TABLE result_double_auto AS " + double_projection +
+	                                    ";"
+	                                    "DROP TABLE result_double_auto;",
+	                                true);
+
+	TestDeleteFile(db_path);
+	TestDeleteFile(db_path + ".wal");
 }
 
 TEST_CASE("JIT auto planner skips native-contract projection glue before sort", "[api][jit]") {

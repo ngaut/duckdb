@@ -386,6 +386,7 @@ private:
 			source_data.assign(projection_count, nullptr);
 			right_source_data.assign(projection_count, nullptr);
 			result_data.assign(projection_count, nullptr);
+			overflow_messages.assign(projection_count, nullptr);
 			integer_constants.assign(projection_count, 0);
 			float_constants.assign(projection_count, 0);
 			double_constants.assign(projection_count, 0);
@@ -441,6 +442,7 @@ private:
 		vector<const_data_ptr_t> source_data;
 		vector<const_data_ptr_t> right_source_data;
 		vector<data_ptr_t> result_data;
+		vector<const char *> overflow_messages;
 		vector<int64_t> integer_constants;
 		vector<float> float_constants;
 		vector<double> double_constants;
@@ -1803,6 +1805,38 @@ public:
 		}
 	}
 
+	static bool IsSourceAppendDirectProjection(const SljitExecutableRegionExpression &expr, DataChunk &input) {
+		auto &plan = expr.plan;
+		return plan.kind == SljitNativeRegionExpressionKind::REFERENCE && plan.source_index < input.ColumnCount() &&
+		       input.data[plan.source_index].GetType() == plan.return_type &&
+		       DirectAppendSupportsSourceAppendType(plan.return_type);
+	}
+
+	static bool TryBindDirectAppendSourceProjection(const SljitExecutableRegionExpression &expr, DataChunk &input,
+	                                                optional_ptr<DirectAppendSlice> slice, idx_t projection_idx,
+	                                                idx_t source_offset, idx_t count, bool execute) {
+		if (!IsSourceAppendDirectProjection(expr, input)) {
+			return false;
+		}
+		if (!execute) {
+			return true;
+		}
+		if (!slice) {
+			throw InternalException("SLJIT source direct append projection missing reservation slice");
+		}
+		if (slice->sources.size() != slice->targets.size() || projection_idx >= slice->sources.size()) {
+			throw InternalException("SLJIT source direct append source count mismatch");
+		}
+		auto &plan = expr.plan;
+		auto &source_vector = input.data[plan.source_index];
+		if (source_offset + count > source_vector.size()) {
+			throw InternalException("SLJIT source direct append source slice out of range");
+		}
+		slice->sources[projection_idx].vector = &source_vector;
+		slice->sources[projection_idx].offset = source_offset;
+		return true;
+	}
+
 	static bool TryDirectMaterializeFixedReference(const SljitExecutableRegionExpression &expr, DataChunk &input,
 	                                               data_ptr_t target, idx_t source_offset, idx_t count, bool execute,
 	                                               optional_ptr<FixedDirectAppendSourceCache> source_cache) {
@@ -1923,7 +1957,8 @@ public:
 
 	bool TryDirectMaterializeFixedProjection(SljitExecutableRegionOp &op, DataChunk &input,
 	                                         optional_ptr<DirectAppendSlice> slice,
-	                                         optional_ptr<FixedDirectAppendSourceCache> source_cache = nullptr) {
+	                                         optional_ptr<FixedDirectAppendSourceCache> source_cache = nullptr,
+	                                         optional_ptr<vector<uint8_t>> skip_projection = nullptr) {
 		if (op.kind != SljitNativeRegionOpKind::PROJECTION || op.projections.empty()) {
 			return false;
 		}
@@ -1931,6 +1966,13 @@ public:
 		const auto source_offset = execute ? slice->source_offset : 0;
 		const auto count = execute ? slice->count : input.size();
 		for (idx_t projection_idx = 0; projection_idx < op.projections.size(); projection_idx++) {
+			if (skip_projection && projection_idx < skip_projection->size() && (*skip_projection)[projection_idx]) {
+				continue;
+			}
+			if (TryBindDirectAppendSourceProjection(op.projections[projection_idx], input, slice, projection_idx,
+			                                        source_offset, count, execute)) {
+				continue;
+			}
 			data_ptr_t target = nullptr;
 			if (execute) {
 				if (slice->targets.size() != op.projections.size()) {
@@ -1969,10 +2011,13 @@ public:
 
 		preflight_stage_start = SljitRegionStageStart(runtime);
 		if (TryPrepareFlatFusedFixedProjectionSources(op, input, 0, input.size(), source_cache, projection_scratch)) {
+			if (!TryDirectMaterializeFixedProjection(op, input, nullptr, source_cache, &projection_scratch.fused)) {
+				return false;
+			}
 			RecordSljitRegionStageRuntime(runtime, op_idx, op.kind, "direct_append_fixed_preflight",
 			                              preflight_stage_start);
 			candidate.kind = SljitDirectProjectionMaterializerKind::FIXED_FUSED;
-			candidate.stats_mode = op.flat_fused_fixed_projection_plan.stats_mode;
+			candidate.stats_mode = SljitDirectProjectionStatsMode::POSTPASS_FIXED_STATS;
 			candidate.shape_changed_message =
 			    "SLJIT fixed fused direct append source shape changed after direct-append preflight";
 			return true;
@@ -2062,7 +2107,7 @@ public:
 			}
 			BindFlatFusedFixedProjectionTargets(op, slice, projection_scratch);
 			RunFlatFusedFixedProjection(op, slice.count, projection_scratch);
-			return true;
+			return TryDirectMaterializeFixedProjection(op, input, &slice, source_cache, &projection_scratch.fused);
 		case SljitDirectProjectionMaterializerKind::FIXED_SCALAR:
 			return TryDirectMaterializeFixedProjection(op, input, &slice, source_cache);
 		default:
@@ -2211,6 +2256,9 @@ public:
 			if (slice.targets.size() != op.projections.size()) {
 				throw InternalException("SLJIT direct append target count mismatch");
 			}
+			if (slice.sources.size() != op.projections.size()) {
+				throw InternalException("SLJIT direct append source count mismatch");
+			}
 			auto generated_stage_start = SljitRegionStageStart(runtime);
 			if (!TryMaterializeDirectProjectionSlice(runtime, direct_candidate, op, input, slice,
 			                                         fixed_source_cache_ptr, projection_scratch,
@@ -2329,64 +2377,75 @@ public:
 	bool TryPrepareFlatFusedFixedProjectionSources(SljitExecutableRegionOp &op, DataChunk &input, idx_t source_offset,
 	                                               idx_t count, optional_ptr<FixedDirectAppendSourceCache> source_cache,
 	                                               SljitProjectionAdapterScratch &adapter_scratch) {
-		auto &direct_plan = op.flat_fused_fixed_projection_plan;
-		if (!op.flat_fused_fixed_projection_function || !direct_plan.covers_all_projections ||
-		    direct_plan.sources.empty()) {
+		if (op.flat_fused_fixed_projection_plans.empty() ||
+		    op.flat_fused_fixed_projection_plans.size() != op.flat_fused_fixed_projection_functions.size()) {
 			return false;
 		}
-		adapter_scratch.Prepare(op.projections.size(), false);
-		for (auto &source : direct_plan.sources) {
-			if (source.projection_index >= op.projections.size()) {
-				throw InternalException("SLJIT fixed fused direct append source projection is out of range");
-			}
-			auto &plan = op.projections[source.projection_index].plan;
-			UnifiedVectorFormat local_source_format;
-			UnifiedVectorFormat *source_format;
-			if (!PrepareFixedDirectAppendSource(input, source.input_index, source_offset, count, source_cache,
-			                                    local_source_format, source_format)) {
+		adapter_scratch.Prepare(op.projections.size(), true);
+		for (idx_t plan_idx = 0; plan_idx < op.flat_fused_fixed_projection_plans.size(); plan_idx++) {
+			if (!op.flat_fused_fixed_projection_functions[plan_idx]) {
 				return false;
 			}
-			auto source_data = NativeIntegerSourceData(*source_format, plan.integer_kind);
-			auto source_pointer =
-			    OffsetFixedSizeData(source_data, input.data[source.input_index].GetType(), source_offset);
-			if (source.right_source) {
-				adapter_scratch.right_source_data[source.projection_index] = source_pointer;
-			} else {
-				adapter_scratch.source_data[source.projection_index] = source_pointer;
-			}
-		}
-		for (auto projection_idx : direct_plan.projection_indices) {
-			auto &expr = op.projections[projection_idx];
-			auto &plan = expr.plan;
-			if (plan.kind != SljitNativeRegionExpressionKind::INTEGER_BINARY_CONSTANT &&
-			    plan.kind != SljitNativeRegionExpressionKind::INTEGER_BINARY_REFERENCES) {
+			auto &direct_plan = op.flat_fused_fixed_projection_plans[plan_idx];
+			if (direct_plan.sources.empty()) {
 				return false;
 			}
-			if (!HasDirectProjectionSourceRef(direct_plan, plan.source_index)) {
-				return false;
-			}
-			if (plan.kind == SljitNativeRegionExpressionKind::INTEGER_BINARY_REFERENCES) {
-				if (!HasDirectProjectionSourceRef(direct_plan, plan.right_source_index)) {
+			for (auto &source : direct_plan.sources) {
+				if (source.projection_index >= op.projections.size()) {
+					throw InternalException("SLJIT fixed fused direct append source projection is out of range");
+				}
+				auto &plan = op.projections[source.projection_index].plan;
+				UnifiedVectorFormat local_source_format;
+				UnifiedVectorFormat *source_format;
+				if (!PrepareFixedDirectAppendSource(input, source.input_index, source_offset, count, source_cache,
+				                                    local_source_format, source_format)) {
 					return false;
 				}
+				auto source_data = NativeIntegerSourceData(*source_format, plan.integer_kind);
+				auto source_pointer =
+				    OffsetFixedSizeData(source_data, input.data[source.input_index].GetType(), source_offset);
+				if (source.right_source) {
+					adapter_scratch.right_source_data[source.projection_index] = source_pointer;
+				} else {
+					adapter_scratch.source_data[source.projection_index] = source_pointer;
+				}
 			}
-			adapter_scratch.integer_constants[projection_idx] = plan.constant;
+			for (auto projection_idx : direct_plan.projection_indices) {
+				auto &expr = op.projections[projection_idx];
+				auto &plan = expr.plan;
+				if (plan.kind != SljitNativeRegionExpressionKind::INTEGER_BINARY_CONSTANT &&
+				    plan.kind != SljitNativeRegionExpressionKind::INTEGER_BINARY_REFERENCES) {
+					return false;
+				}
+				if (!HasDirectProjectionSourceRef(direct_plan, plan.source_index)) {
+					return false;
+				}
+				if (plan.kind == SljitNativeRegionExpressionKind::INTEGER_BINARY_REFERENCES) {
+					if (!HasDirectProjectionSourceRef(direct_plan, plan.right_source_index)) {
+						return false;
+					}
+				}
+				adapter_scratch.integer_constants[projection_idx] = plan.constant;
+				adapter_scratch.overflow_messages[projection_idx] = expr.overflow_message.c_str();
+				adapter_scratch.fused[projection_idx] = 1;
+			}
 		}
 		return true;
 	}
 
 	void BindFlatFusedFixedProjectionTargets(SljitExecutableRegionOp &op, DirectAppendSlice &slice,
 	                                         SljitProjectionAdapterScratch &adapter_scratch) {
-		auto &direct_plan = op.flat_fused_fixed_projection_plan;
 		if (slice.targets.size() != op.projections.size()) {
 			throw InternalException("SLJIT fixed fused direct append target count mismatch");
 		}
-		for (auto projection_idx : direct_plan.projection_indices) {
-			auto target = slice.targets[projection_idx];
-			if (!target) {
-				throw InternalException("SLJIT fixed fused direct append target pointer is null");
+		for (auto &direct_plan : op.flat_fused_fixed_projection_plans) {
+			for (auto projection_idx : direct_plan.projection_indices) {
+				auto target = slice.targets[projection_idx];
+				if (!target) {
+					throw InternalException("SLJIT fixed fused direct append target pointer is null");
+				}
+				adapter_scratch.result_data[projection_idx] = target;
 			}
-			adapter_scratch.result_data[projection_idx] = target;
 		}
 	}
 
@@ -2397,11 +2456,15 @@ public:
 		native_input.right_source_data_array = adapter_scratch.right_source_data.data();
 		native_input.result_data_array = adapter_scratch.result_data.data();
 		native_input.constants = adapter_scratch.integer_constants.data();
+		native_input.overflow_messages = adapter_scratch.overflow_messages.data();
 		native_input.count = count;
 		native_input.has_error = false;
-		op.flat_fused_fixed_projection_function(&native_input);
-		if (native_input.error) {
-			std::rethrow_exception(native_input.error);
+		for (auto function : op.flat_fused_fixed_projection_functions) {
+			native_input.error = nullptr;
+			function(&native_input);
+			if (native_input.error) {
+				std::rethrow_exception(native_input.error);
+			}
 		}
 	}
 

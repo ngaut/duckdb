@@ -33,7 +33,7 @@ enum class SljitNativeIntegerCompareOp : uint8_t {
 	LESS_THAN_OR_EQUAL,
 	GREATER_THAN_OR_EQUAL
 };
-enum class SljitNativeIntegerKind : uint8_t { INT8, UINT8, INT32, INT64, DECIMAL64 };
+enum class SljitNativeIntegerKind : uint8_t { INT8, UINT8, INT32, INT64, DECIMAL64, DATE };
 enum class SljitNativeSignedIntegerWidth : uint8_t { INT8, INT16, INT32, INT64 };
 enum class SljitNativeUnsignedIntegerWidth : uint8_t { UINT8, UINT16, UINT32 };
 enum class SljitNativeHashJoinKeyKind : uint8_t {
@@ -131,6 +131,7 @@ struct SljitNativeVectorInput {
 	const_data_ptr_t floating_constants = nullptr;
 	data_ptr_t floating_stats_min = nullptr;
 	data_ptr_t floating_stats_max = nullptr;
+	const char **overflow_messages = nullptr;
 	const sel_t *execute_sel = nullptr;
 	const sel_t *source_sel = nullptr;
 	const sel_t *right_source_sel = nullptr;

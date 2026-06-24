@@ -37,7 +37,11 @@ void ValidityColumnData::UpdateWithBase(TransactionData transaction, DuckTableEn
 }
 
 void ValidityColumnData::AppendData(ColumnAppendState &state, UnifiedVectorFormat &vdata, idx_t count) {
-	ColumnData::AppendData(state, vdata, count);
+	AppendData(state, vdata, 0, count);
+}
+
+void ValidityColumnData::AppendData(ColumnAppendState &state, UnifiedVectorFormat &vdata, idx_t offset, idx_t count) {
+	ColumnData::AppendData(state, vdata, offset, count);
 }
 
 struct ValidityColumnCheckpointState : public ColumnCheckpointState {

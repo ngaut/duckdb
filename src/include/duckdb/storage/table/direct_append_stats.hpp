@@ -9,9 +9,12 @@
 #pragma once
 
 #include "duckdb/common/common.hpp"
+#include "duckdb/common/optional_ptr.hpp"
 #include "duckdb/common/types.hpp"
 
 namespace duckdb {
+
+class Vector;
 
 struct DirectAppendColumnStats {
 	bool has_stats = false;
@@ -32,10 +35,20 @@ struct DirectAppendColumnStats {
 	idx_t distinct_count = 0;
 };
 
+struct DirectAppendColumnSource {
+	optional_ptr<const Vector> vector;
+	idx_t offset = 0;
+
+	bool IsSet() const {
+		return vector;
+	}
+};
+
 struct DirectAppendSlice {
 	idx_t source_offset = 0;
 	idx_t count = 0;
 	vector<data_ptr_t> targets;
+	vector<DirectAppendColumnSource> sources;
 	vector<DirectAppendColumnStats> stats;
 };
 
@@ -81,6 +94,29 @@ inline bool DirectAppendSupportsFixedSizeType(const LogicalType &type) {
 	default:
 		return false;
 	}
+}
+
+inline bool DirectAppendSupportsSourceAppendType(const LogicalType &type) {
+	return type.id() == LogicalTypeId::VARCHAR;
+}
+
+inline bool DirectAppendSupportsType(const LogicalType &type) {
+	return DirectAppendSupportsFixedSizeType(type) || DirectAppendSupportsSourceAppendType(type);
+}
+
+inline bool DirectAppendSupportsTypes(const vector<LogicalType> &source_types, const vector<LogicalType> &target_types) {
+	if (source_types.size() != target_types.size()) {
+		return false;
+	}
+	for (idx_t type_idx = 0; type_idx < source_types.size(); type_idx++) {
+		if (source_types[type_idx] != target_types[type_idx]) {
+			return false;
+		}
+		if (!DirectAppendSupportsType(source_types[type_idx])) {
+			return false;
+		}
+	}
+	return true;
 }
 
 inline bool DirectAppendSupportsFixedSizeTypes(const vector<LogicalType> &source_types,

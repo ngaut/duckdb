@@ -1120,6 +1120,9 @@ bool RowGroup::TryPrepareDirectAppend(RowGroupAppendState &state, const vector<L
 			targets.clear();
 			return false;
 		}
+		if (DirectAppendSupportsSourceAppendType(types[i])) {
+			continue;
+		}
 		auto &col_data = GetColumn(i);
 		auto prev_allocation_size = col_data.GetAllocationSize();
 		if (!col_data.TryPrepareDirectAppend(state.states[i], append_count, targets[i])) {
@@ -1132,10 +1135,14 @@ bool RowGroup::TryPrepareDirectAppend(RowGroupAppendState &state, const vector<L
 	return true;
 }
 
-void RowGroup::CommitDirectAppend(RowGroupAppendState &state, const vector<data_ptr_t> &targets, idx_t append_count,
+void RowGroup::CommitDirectAppend(RowGroupAppendState &state, const vector<data_ptr_t> &targets,
+                                  const vector<DirectAppendColumnSource> &sources, idx_t append_count,
                                   optional_ptr<const vector<DirectAppendColumnStats>> stats) {
 	if (targets.size() != GetColumnCount()) {
 		throw InternalException("RowGroup direct append target count mismatch");
+	}
+	if (!sources.empty() && sources.size() != GetColumnCount()) {
+		throw InternalException("RowGroup direct append source count mismatch");
 	}
 	if (stats && stats->size() != GetColumnCount()) {
 		throw InternalException("RowGroup direct append stats count mismatch");
@@ -1143,6 +1150,23 @@ void RowGroup::CommitDirectAppend(RowGroupAppendState &state, const vector<data_
 	for (idx_t i = 0; i < GetColumnCount(); i++) {
 		auto &col_data = GetColumn(i);
 		auto prev_allocation_size = col_data.GetAllocationSize();
+		if (!sources.empty() && sources[i].IsSet()) {
+			if (targets[i]) {
+				throw InternalException("RowGroup direct append column cannot have both target and source");
+			}
+			auto &source_vector = *sources[i].vector;
+			if (source_vector.GetType() != col_data.GetType()) {
+				throw InternalException("RowGroup direct append source type mismatch");
+			}
+			if (sources[i].offset + append_count > source_vector.size()) {
+				throw InternalException("RowGroup direct append source slice out of range");
+			}
+			UnifiedVectorFormat source_format;
+			source_vector.ToUnifiedFormat(source_format);
+			col_data.AppendData(state.states[i], source_format, sources[i].offset, append_count);
+			allocation_size += col_data.GetAllocationSize() - prev_allocation_size;
+			continue;
+		}
 		optional_ptr<const DirectAppendColumnStats> column_stats;
 		if (stats) {
 			column_stats = &(*stats)[i];

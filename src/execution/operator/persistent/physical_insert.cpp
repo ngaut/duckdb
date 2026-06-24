@@ -212,7 +212,7 @@ private:
 		    !op.bound_constraints.empty()) {
 			return false;
 		}
-		return DirectAppendSupportsFixedSizeTypes(types, op.insert_types);
+		return DirectAppendSupportsTypes(types, op.insert_types);
 	}
 
 	static void FinalizeDirectAppend(InsertGlobalState &gstate, InsertLocalState &lstate) {

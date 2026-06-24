@@ -45,6 +45,10 @@ bool TryReadNativeDecimal64BinaryReferences(const ExecutionExpressionIR &root, S
 bool TryReadNativeDecimal64BinaryConstant(const ExecutionExpressionIR &root, SljitNativeIntegerBinaryOp &native_op,
                                           idx_t &source_index, int64_t &constant_value, bool &constant_on_left,
                                           int64_t &result_min, int64_t &result_max);
+bool TryReadNativeDateBinaryReferences(const ExecutionExpressionIR &root, SljitNativeIntegerBinaryOp &native_op,
+                                       idx_t &date_source_index, idx_t &integer_source_index);
+bool TryReadNativeDateBinaryConstant(const ExecutionExpressionIR &root, SljitNativeIntegerBinaryOp &native_op,
+                                     idx_t &date_source_index, int64_t &constant_value, bool &constant_on_left);
 bool TryReadNativeIntegerCompareConstant(const ExecutionExpressionIR &root, SljitNativeIntegerCompareOp &compare_op,
                                          SljitNativeIntegerKind &kind, idx_t &source_index, int64_t &constant_value,
                                          bool &constant_on_left);

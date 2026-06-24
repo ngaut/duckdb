@@ -6,6 +6,10 @@ small:
 - `verify_jit_architecture.py` checks source-level architecture invariants.
 - `compile_overhead_benchmark.py` measures small-query decision and compile overhead
   with focused execution-region workloads.
+- `direct_ctas_benchmark.py` measures CTAS direct materialization fast paths for
+  FLOAT, DOUBLE, homogeneous INTEGER, mixed INTEGER/BIGINT fused groups,
+  DECIMAL64 fused groups, DATE fused groups, and mixed fixed-width TPC-H-like
+  projections with and without VARCHAR source append.
 - `benchmark/tpch/jit/tpch_benchmark.py` is the canonical correctness,
   performance, and profiling harness for TPC-H execution regions.
 
@@ -18,9 +22,25 @@ python3 benchmark/jit/verify_jit_architecture.py
 Run the TPC-H harness when validating performance or region-selection behavior:
 
 ```sh
-python3 benchmark/tpch/jit/tpch_benchmark.py --policies off auto --out-dir /tmp/duckdb_jit_tpch_benchmark
+python3 benchmark/tpch/jit/tpch_benchmark.py --duckdb build/reldebug/duckdb --queries 1 6 12 --policies off auto --out-dir /tmp/duckdb_jit_tpch_benchmark
 python3 benchmark/tpch/jit/verify_tpch_benchmark.py /tmp/duckdb_jit_tpch_benchmark
 ```
+
+Run the CTAS direct-materialization harness when changing projection append codegen:
+
+```sh
+python3 benchmark/jit/direct_ctas_benchmark.py --rows 5000000 --policies off auto --out-dir /tmp/duckdb_jit_direct_ctas
+```
+
+`direct_ctas_benchmark.py` writes `summary.csv`, `runs.csv`, and `counters.csv`.
+By default it uses coverage-style JIT CBO settings so the direct-materialization
+stages are reached and verified. Use `--production-cbo` to measure the current
+production CBO decision instead. The harness fails when AUTO silently misses the
+expected generated stage:
+
+- FLOAT/DOUBLE: `op0:projection.direct_materialize_generated`
+- homogeneous INTEGER, mixed INTEGER/BIGINT groups, DECIMAL64 groups, and DATE groups: `op0:projection.direct_materialize_fixed_fused_generated`
+- mixed fixed-width, including VARCHAR source append: `op0:projection.direct_materialize_fixed_generated`
 
 Run the compile-overhead harness when optimizing planner or SLJIT code generation:
 

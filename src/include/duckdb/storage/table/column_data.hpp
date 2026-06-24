@@ -158,6 +158,7 @@ public:
 	//! Append a vector of type [type] to the end of the column
 	virtual void Append(ColumnAppendState &state, const Vector &vector, idx_t count);
 	virtual void AppendData(ColumnAppendState &state, UnifiedVectorFormat &vdata, idx_t count);
+	virtual void AppendData(ColumnAppendState &state, UnifiedVectorFormat &vdata, idx_t offset, idx_t count);
 	virtual bool TryPrepareDirectAppend(ColumnAppendState &state, idx_t count, data_ptr_t &target);
 	virtual void CommitDirectAppend(ColumnAppendState &state, data_ptr_t target, idx_t count,
 	                                optional_ptr<const DirectAppendColumnStats> stats = nullptr);

@@ -166,7 +166,7 @@ struct SljitExecutableAggregateUpdate {
 	}
 };
 
-enum class SljitDirectProjectionKind : uint8_t { NONE, FLOAT, DOUBLE, INT32, INT64 };
+enum class SljitDirectProjectionKind : uint8_t { NONE, FLOAT, DOUBLE, INT32, INT64, DECIMAL64, DATE };
 
 enum class SljitDirectProjectionStatsMode : uint8_t { NONE, GENERATED_FLOATING_MIN_MAX, POSTPASS_FIXED_STATS };
 
@@ -205,9 +205,9 @@ struct SljitExecutableRegionOp {
 	SljitDirectProjectionPlan flat_fused_floating_projection_plan;
 	unique_ptr<ExecutionRegionCodeHandle> flat_fused_floating_projection_code;
 	SljitNativeVectorFunction flat_fused_floating_projection_function = nullptr;
-	SljitDirectProjectionPlan flat_fused_fixed_projection_plan;
-	unique_ptr<ExecutionRegionCodeHandle> flat_fused_fixed_projection_code;
-	SljitNativeVectorFunction flat_fused_fixed_projection_function = nullptr;
+	vector<SljitDirectProjectionPlan> flat_fused_fixed_projection_plans;
+	vector<unique_ptr<ExecutionRegionCodeHandle>> flat_fused_fixed_projection_codes;
+	vector<SljitNativeVectorFunction> flat_fused_fixed_projection_functions;
 
 	idx_t CodeSize() const {
 		idx_t result = 0;
@@ -232,8 +232,8 @@ struct SljitExecutableRegionOp {
 		if (flat_fused_floating_projection_code) {
 			result += flat_fused_floating_projection_code->CodeSize();
 		}
-		if (flat_fused_fixed_projection_code) {
-			result += flat_fused_fixed_projection_code->CodeSize();
+		for (auto &code : flat_fused_fixed_projection_codes) {
+			result += code ? code->CodeSize() : 0;
 		}
 		for (auto &projection : projections) {
 			result += projection.CodeSize();

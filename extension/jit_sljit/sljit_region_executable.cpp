@@ -130,6 +130,9 @@ static void RemapSljitExpressionTreeToCombinedInputs(ExecutionExpressionIR &node
 }
 
 static string NativeRegionIntegerBinaryOverflowMessage(SljitNativeIntegerKind kind, SljitNativeIntegerBinaryOp op) {
+	if (kind == SljitNativeIntegerKind::DATE) {
+		return "Date out of range";
+	}
 	if (kind != SljitNativeIntegerKind::DECIMAL64) {
 		return NativeIntegerBinaryOverflowMessage(op);
 	}
@@ -289,21 +292,35 @@ static bool TryBuildFlatFusedFloatingProjection(SljitExecutableRegionOp &op, str
 
 static bool SljitCanUseFlatFusedFixedProjection(const SljitExecutableRegionExpression &expr,
                                                 SljitNativeIntegerKind integer_kind) {
-	if (!expr.flat_function) {
-		return false;
-	}
 	auto &plan = expr.plan;
-	if (plan.integer_kind != integer_kind || plan.check_arithmetic_overflow || plan.check_result_range) {
+	if (plan.integer_kind != integer_kind) {
 		return false;
 	}
 	switch (integer_kind) {
 	case SljitNativeIntegerKind::INT32:
+		if (!expr.flat_function || plan.check_arithmetic_overflow || plan.check_result_range) {
+			return false;
+		}
 		if (plan.return_type.InternalType() != PhysicalType::INT32) {
 			return false;
 		}
 		break;
 	case SljitNativeIntegerKind::INT64:
+		if (!expr.flat_function || plan.check_arithmetic_overflow || plan.check_result_range) {
+			return false;
+		}
 		if (plan.return_type.InternalType() != PhysicalType::INT64) {
+			return false;
+		}
+		break;
+	case SljitNativeIntegerKind::DECIMAL64:
+		if (plan.return_type.id() != LogicalTypeId::DECIMAL ||
+		    plan.return_type.InternalType() != PhysicalType::INT64) {
+			return false;
+		}
+		break;
+	case SljitNativeIntegerKind::DATE:
+		if (plan.return_type.id() != LogicalTypeId::DATE || plan.return_type.InternalType() != PhysicalType::INT32) {
 			return false;
 		}
 		break;
@@ -319,30 +336,41 @@ static bool SljitCanUseFlatFusedFixedProjection(const SljitExecutableRegionExpre
 	}
 }
 
-static bool TryPlanFlatFusedFixedProjection(SljitExecutableRegionOp &op, SljitDirectProjectionPlan &direct_plan) {
+static SljitDirectProjectionKind SljitDirectProjectionKindFromIntegerKind(SljitNativeIntegerKind integer_kind) {
+	switch (integer_kind) {
+	case SljitNativeIntegerKind::INT32:
+		return SljitDirectProjectionKind::INT32;
+	case SljitNativeIntegerKind::INT64:
+		return SljitDirectProjectionKind::INT64;
+	case SljitNativeIntegerKind::DECIMAL64:
+		return SljitDirectProjectionKind::DECIMAL64;
+	case SljitNativeIntegerKind::DATE:
+		return SljitDirectProjectionKind::DATE;
+	default:
+		throw InternalException("Unsupported SLJIT fixed fused projection integer kind");
+	}
+}
+
+static bool TryPlanFlatFusedFixedProjection(SljitExecutableRegionOp &op, SljitNativeIntegerKind integer_kind,
+                                            SljitDirectProjectionPlan &direct_plan) {
 	if (op.projections.size() < 2) {
 		return false;
 	}
-	vector<idx_t> int32_indices;
-	vector<idx_t> int64_indices;
+	vector<idx_t> projection_indices;
 	for (idx_t projection_idx = 0; projection_idx < op.projections.size(); projection_idx++) {
 		auto &projection = op.projections[projection_idx];
-		if (SljitCanUseFlatFusedFixedProjection(projection, SljitNativeIntegerKind::INT32)) {
-			int32_indices.push_back(projection_idx);
-		} else if (SljitCanUseFlatFusedFixedProjection(projection, SljitNativeIntegerKind::INT64)) {
-			int64_indices.push_back(projection_idx);
+		if (SljitCanUseFlatFusedFixedProjection(projection, integer_kind)) {
+			projection_indices.push_back(projection_idx);
 		}
 	}
-	auto use_int32 = int32_indices.size() >= int64_indices.size();
-	auto &projection_indices = use_int32 ? int32_indices : int64_indices;
-	if (projection_indices.size() < 2 || projection_indices.size() != op.projections.size()) {
+	if (projection_indices.size() < 2) {
 		return false;
 	}
 	direct_plan = SljitDirectProjectionPlan();
-	direct_plan.kind = use_int32 ? SljitDirectProjectionKind::INT32 : SljitDirectProjectionKind::INT64;
+	direct_plan.kind = SljitDirectProjectionKindFromIntegerKind(integer_kind);
 	direct_plan.stats_mode = SljitDirectProjectionStatsMode::POSTPASS_FIXED_STATS;
 	direct_plan.projection_indices = projection_indices;
-	direct_plan.covers_all_projections = true;
+	direct_plan.covers_all_projections = projection_indices.size() == op.projections.size();
 	if (!TryPlanSljitDirectProjectionSources(op.projections, direct_plan)) {
 		return false;
 	}
@@ -350,26 +378,33 @@ static bool TryPlanFlatFusedFixedProjection(SljitExecutableRegionOp &op, SljitDi
 }
 
 static bool TryBuildFlatFusedFixedProjection(SljitExecutableRegionOp &op, string &error) {
-	SljitDirectProjectionPlan direct_plan;
-	if (!TryPlanFlatFusedFixedProjection(op, direct_plan)) {
-		return true;
-	}
+	static constexpr SljitNativeIntegerKind FIXED_FUSED_KINDS[] = {SljitNativeIntegerKind::INT32,
+	                                                               SljitNativeIntegerKind::INT64,
+	                                                               SljitNativeIntegerKind::DECIMAL64,
+	                                                               SljitNativeIntegerKind::DATE};
 
 	auto projection_plans = BuildSljitProjectionPlans(op.projections);
-	SljitNativeVectorFunction function = nullptr;
-	string fused_error;
-	auto code =
-	    BuildSljitNativeFlatIntegerProjection(projection_plans, direct_plan.projection_indices, function, fused_error);
-	if (!code || !function) {
-		if (fused_error.empty() || fused_error.rfind("SLJIT flat integer projection", 0) == 0) {
-			return true;
+	for (auto integer_kind : FIXED_FUSED_KINDS) {
+		SljitDirectProjectionPlan direct_plan;
+		if (!TryPlanFlatFusedFixedProjection(op, integer_kind, direct_plan)) {
+			continue;
 		}
-		error = fused_error;
-		return false;
+
+		SljitNativeVectorFunction function = nullptr;
+		string fused_error;
+		auto code = BuildSljitNativeFlatIntegerProjection(projection_plans, direct_plan.projection_indices, function,
+		                                                  fused_error);
+		if (!code || !function) {
+			if (fused_error.empty() || fused_error.rfind("SLJIT flat integer projection", 0) == 0) {
+				continue;
+			}
+			error = fused_error;
+			return false;
+		}
+		op.flat_fused_fixed_projection_plans.push_back(std::move(direct_plan));
+		op.flat_fused_fixed_projection_codes.push_back(std::move(code));
+		op.flat_fused_fixed_projection_functions.push_back(function);
 	}
-	op.flat_fused_fixed_projection_plan = std::move(direct_plan);
-	op.flat_fused_fixed_projection_code = std::move(code);
-	op.flat_fused_fixed_projection_function = function;
 	return true;
 }
 

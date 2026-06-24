@@ -398,7 +398,7 @@ void ColumnData::Skip(ColumnScanState &state, idx_t s_count) {
 void ColumnData::Append(ColumnAppendState &state, const Vector &vector, idx_t append_count) {
 	UnifiedVectorFormat vdata;
 	vector.ToUnifiedFormat(vdata);
-	AppendData(state, vdata, append_count);
+	AppendData(state, vdata, 0, append_count);
 }
 
 void ColumnData::FinalizeAppend(ColumnDataFinalizeAppendState &finalize_state, ColumnAppendState &state) {
@@ -602,7 +602,10 @@ void ColumnData::InitializeAppend(ColumnAppendState &state) {
 }
 
 void ColumnData::AppendData(ColumnAppendState &state, UnifiedVectorFormat &vdata, idx_t append_count) {
-	idx_t offset = 0;
+	AppendData(state, vdata, 0, append_count);
+}
+
+void ColumnData::AppendData(ColumnAppendState &state, UnifiedVectorFormat &vdata, idx_t offset, idx_t append_count) {
 	while (true) {
 		// append the data from the vector
 		auto &append_segment = state.current->GetNode();

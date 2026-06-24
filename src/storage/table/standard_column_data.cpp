@@ -123,8 +123,12 @@ void StandardColumnData::InitializeAppend(ColumnAppendState &state) {
 }
 
 void StandardColumnData::AppendData(ColumnAppendState &state, UnifiedVectorFormat &vdata, idx_t count) {
-	ColumnData::AppendData(state, vdata, count);
-	validity->AppendData(state.child_appends[0], vdata, count);
+	AppendData(state, vdata, 0, count);
+}
+
+void StandardColumnData::AppendData(ColumnAppendState &state, UnifiedVectorFormat &vdata, idx_t offset, idx_t count) {
+	ColumnData::AppendData(state, vdata, offset, count);
+	validity->AppendData(state.child_appends[0], vdata, offset, count);
 }
 
 bool StandardColumnData::TryPrepareDirectAppend(ColumnAppendState &state, idx_t count, data_ptr_t &target) {

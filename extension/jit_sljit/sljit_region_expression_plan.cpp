@@ -18,6 +18,9 @@
 
 namespace duckdb {
 
+static constexpr int64_t SLJIT_DATE_MIN_DAYS = -2147483646;
+static constexpr int64_t SLJIT_DATE_MAX_DAYS = 2147483646;
+
 static bool IsSljitNativeTreeDecimal64Node(const ExecutionExpressionIR &node) {
 	return node.return_type.id() == LogicalTypeId::DECIMAL && node.physical_type == PhysicalType::INT64;
 }
@@ -1218,6 +1221,35 @@ static bool TryReadNativeRegionExpression(const ExecutionExpressionIR &root, boo
 	SljitNativeIntegerBinaryOp binary_op;
 	int64_t result_min;
 	int64_t result_max;
+	if (TryReadNativeDateBinaryReferences(root, binary_op, source_index, right_source_index)) {
+		expr.kind = SljitNativeRegionExpressionKind::INTEGER_BINARY_REFERENCES;
+		expr.integer_kind = SljitNativeIntegerKind::DATE;
+		expr.return_type = root.return_type;
+		expr.source_index = source_index;
+		expr.right_source_index = right_source_index;
+		expr.binary_op = binary_op;
+		expr.check_arithmetic_overflow = true;
+		expr.check_result_range = true;
+		expr.result_min = SLJIT_DATE_MIN_DAYS;
+		expr.result_max = SLJIT_DATE_MAX_DAYS;
+		AttachSljitNativeExpressionTree(root, expr);
+		return true;
+	}
+	if (TryReadNativeDateBinaryConstant(root, binary_op, source_index, constant, constant_on_left)) {
+		expr.kind = SljitNativeRegionExpressionKind::INTEGER_BINARY_CONSTANT;
+		expr.integer_kind = SljitNativeIntegerKind::DATE;
+		expr.return_type = root.return_type;
+		expr.source_index = source_index;
+		expr.constant = constant;
+		expr.constant_on_left = constant_on_left;
+		expr.binary_op = binary_op;
+		expr.check_arithmetic_overflow = true;
+		expr.check_result_range = true;
+		expr.result_min = SLJIT_DATE_MIN_DAYS;
+		expr.result_max = SLJIT_DATE_MAX_DAYS;
+		AttachSljitNativeExpressionTree(root, expr);
+		return true;
+	}
 	if (TryReadNativeDecimal64BinaryReferences(root, binary_op, source_index, right_source_index, result_min,
 	                                           result_max)) {
 		expr.kind = SljitNativeRegionExpressionKind::INTEGER_BINARY_REFERENCES;

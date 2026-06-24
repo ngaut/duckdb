@@ -178,7 +178,8 @@ void ColumnSegment::Resize(idx_t new_size) {
 	auto new_block = new_handle.GetBlockHandle();
 	memcpy(new_handle.GetDataMutable(), old_handle.Ptr(), segment_size);
 
-	this->block_id = new_block->BlockId();
+	D_ASSERT(segment_type == ColumnSegmentType::TRANSIENT);
+	this->block_id = INVALID_BLOCK;
 	this->block = std::move(new_block);
 	this->segment_size = new_size;
 }

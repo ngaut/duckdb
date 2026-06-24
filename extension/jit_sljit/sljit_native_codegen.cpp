@@ -21,6 +21,13 @@
 
 namespace duckdb {
 
+static constexpr sljit_sw SLJIT_DATE_NEGATIVE_INFINITY_DAYS = -2147483647;
+static constexpr sljit_sw SLJIT_DATE_POSITIVE_INFINITY_DAYS = 2147483647;
+
+static bool SljitNativeIntegerKindPreservesSourceDateInfinity(SljitNativeIntegerKind kind) {
+	return kind == SljitNativeIntegerKind::DATE;
+}
+
 static void SLJIT_FUNC SljitNativeIntegerOverflow(SljitNativeVectorInput *input) {
 	try {
 		throw OutOfRangeException("%s", input->overflow_message);
@@ -898,6 +905,16 @@ BuildSljitNativeIntegerBinaryConstant(SljitNativeIntegerKind kind, SljitNativeIn
 	sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_R0, 0, SLJIT_MEM1(SLJIT_S0),
 	               offsetof(SljitNativeVectorInput, source_data));
 	sljit_emit_op1(compiler, load_op, SLJIT_R2, 0, SLJIT_MEM2(SLJIT_R0, SLJIT_R1), data_scale);
+	struct sljit_jump *date_is_negative_infinity = nullptr;
+	struct sljit_jump *date_is_positive_infinity = nullptr;
+	if (SljitNativeIntegerKindPreservesSourceDateInfinity(kind)) {
+		date_is_negative_infinity =
+		    sljit_emit_cmp(compiler, SLJIT_EQUAL | SLJIT_32, SLJIT_R2, 0, SLJIT_IMM,
+		                   SLJIT_DATE_NEGATIVE_INFINITY_DAYS);
+		date_is_positive_infinity =
+		    sljit_emit_cmp(compiler, SLJIT_EQUAL | SLJIT_32, SLJIT_R2, 0, SLJIT_IMM,
+		                   SLJIT_DATE_POSITIVE_INFINITY_DAYS);
+	}
 	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R3, 0, SLJIT_MEM1(SLJIT_S0), offsetof(SljitNativeVectorInput, constant));
 	auto emit_binary_op = check_arithmetic_overflow ? binary_op | SLJIT_SET_OVERFLOW : binary_op;
 	switch (op) {
@@ -928,6 +945,11 @@ BuildSljitNativeIntegerBinaryConstant(SljitNativeIntegerKind kind, SljitNativeIn
 		    sljit_emit_cmp(compiler, SLJIT_SIG_LESS, SLJIT_R2, 0, SLJIT_IMM, NumericCast<sljit_sw>(result_min));
 		range_too_large =
 		    sljit_emit_cmp(compiler, SLJIT_SIG_GREATER, SLJIT_R2, 0, SLJIT_IMM, NumericCast<sljit_sw>(result_max));
+	}
+	if (SljitNativeIntegerKindPreservesSourceDateInfinity(kind)) {
+		auto store_date_result = sljit_emit_label(compiler);
+		sljit_set_label(date_is_negative_infinity, store_date_result);
+		sljit_set_label(date_is_positive_infinity, store_date_result);
 	}
 	sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_R0, 0, SLJIT_MEM1(SLJIT_S0),
 	               offsetof(SljitNativeVectorInput, result_data));
@@ -1194,6 +1216,16 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeIntegerBinaryReferences(
 	sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_R0, 0, SLJIT_MEM1(SLJIT_S0),
 	               offsetof(SljitNativeVectorInput, right_source_data));
 	sljit_emit_op1(compiler, load_op, SLJIT_R3, 0, SLJIT_MEM2(SLJIT_R0, SLJIT_S4), data_scale);
+	struct sljit_jump *date_is_negative_infinity = nullptr;
+	struct sljit_jump *date_is_positive_infinity = nullptr;
+	if (SljitNativeIntegerKindPreservesSourceDateInfinity(kind)) {
+		date_is_negative_infinity =
+		    sljit_emit_cmp(compiler, SLJIT_EQUAL | SLJIT_32, SLJIT_R2, 0, SLJIT_IMM,
+		                   SLJIT_DATE_NEGATIVE_INFINITY_DAYS);
+		date_is_positive_infinity =
+		    sljit_emit_cmp(compiler, SLJIT_EQUAL | SLJIT_32, SLJIT_R2, 0, SLJIT_IMM,
+		                   SLJIT_DATE_POSITIVE_INFINITY_DAYS);
+	}
 
 	sljit_emit_op2(compiler, check_arithmetic_overflow ? binary_op | SLJIT_SET_OVERFLOW : binary_op, SLJIT_R2, 0,
 	               SLJIT_R2, 0, SLJIT_R3, 0);
@@ -1208,6 +1240,11 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeIntegerBinaryReferences(
 		    sljit_emit_cmp(compiler, SLJIT_SIG_LESS, SLJIT_R2, 0, SLJIT_IMM, NumericCast<sljit_sw>(result_min));
 		range_too_large =
 		    sljit_emit_cmp(compiler, SLJIT_SIG_GREATER, SLJIT_R2, 0, SLJIT_IMM, NumericCast<sljit_sw>(result_max));
+	}
+	if (SljitNativeIntegerKindPreservesSourceDateInfinity(kind)) {
+		auto store_date_result = sljit_emit_label(compiler);
+		sljit_set_label(date_is_negative_infinity, store_date_result);
+		sljit_set_label(date_is_positive_infinity, store_date_result);
 	}
 	sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_R0, 0, SLJIT_MEM1(SLJIT_S0),
 	               offsetof(SljitNativeVectorInput, result_data));
@@ -1336,33 +1373,46 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeFlatIntegerBinaryReference
 
 static bool ValidateNativeFlatIntegerProjectionExpression(const SljitNativeRegionExpressionPlan &plan,
                                                           SljitNativeIntegerKind kind, string &error) {
-	if (kind != SljitNativeIntegerKind::INT32 && kind != SljitNativeIntegerKind::INT64) {
-		error = "SLJIT flat integer projection only supports INTEGER/BIGINT result types";
-		return false;
-	}
 	if (plan.integer_kind != kind) {
 		error = "SLJIT flat integer projection cannot mix integer widths";
 		return false;
 	}
-	if (plan.check_arithmetic_overflow || plan.check_result_range) {
-		error = "SLJIT flat integer projection only supports unchecked integer expressions";
-		return false;
-	}
-	switch (plan.return_type.InternalType()) {
-	case PhysicalType::INT32:
-		if (kind != SljitNativeIntegerKind::INT32) {
+	switch (kind) {
+	case SljitNativeIntegerKind::INT32:
+		if (plan.check_arithmetic_overflow || plan.check_result_range) {
+			error = "SLJIT flat integer projection only supports unchecked INTEGER expressions";
+			return false;
+		}
+		if (plan.return_type.InternalType() != PhysicalType::INT32) {
 			error = "SLJIT flat integer projection result type does not match integer width";
 			return false;
 		}
 		break;
-	case PhysicalType::INT64:
-		if (kind != SljitNativeIntegerKind::INT64) {
+	case SljitNativeIntegerKind::INT64:
+		if (plan.check_arithmetic_overflow || plan.check_result_range) {
+			error = "SLJIT flat integer projection only supports unchecked BIGINT expressions";
+			return false;
+		}
+		if (plan.return_type.InternalType() != PhysicalType::INT64) {
 			error = "SLJIT flat integer projection result type does not match integer width";
+			return false;
+		}
+		break;
+	case SljitNativeIntegerKind::DECIMAL64:
+		if (plan.return_type.id() != LogicalTypeId::DECIMAL ||
+		    plan.return_type.InternalType() != PhysicalType::INT64) {
+			error = "SLJIT flat integer projection DECIMAL64 result type does not match storage width";
+			return false;
+		}
+		break;
+	case SljitNativeIntegerKind::DATE:
+		if (plan.return_type.id() != LogicalTypeId::DATE || plan.return_type.InternalType() != PhysicalType::INT32) {
+			error = "SLJIT flat integer projection DATE result type does not match storage width";
 			return false;
 		}
 		break;
 	default:
-		error = "SLJIT flat integer projection only supports INTEGER/BIGINT result types";
+		error = "SLJIT flat integer projection only supports INTEGER/BIGINT/DECIMAL64/DATE result types";
 		return false;
 	}
 	switch (plan.kind) {
@@ -1383,6 +1433,11 @@ struct SljitFlatProjectionSourceRef {
 
 struct SljitFlatProjectionSharedSourcePlan {
 	vector<SljitFlatProjectionSourceRef> sources;
+};
+
+struct SljitFlatProjectionOverflowJump {
+	idx_t projection_index;
+	struct sljit_jump *jump;
 };
 
 static idx_t SljitFlatProjectionSourceRegisterIndex(const vector<SljitFlatProjectionSourceRef> &sources,
@@ -1471,11 +1526,17 @@ static unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeFlatIntegerProjecti
 	auto load_op = NativeIntegerLoadOp(integer_kind);
 	auto store_op = NativeIntegerStoreOp(integer_kind);
 	bool use_simd = true;
+	bool needs_overflow_handling = false;
 	for (auto projection_index : projection_indices) {
-		use_simd = use_simd && SljitArm64NeonIntegerBinarySupported(integer_kind, plans[projection_index].binary_op);
+		auto &plan = plans[projection_index];
+		auto projection_needs_overflow_handling = plan.check_arithmetic_overflow || plan.check_result_range;
+		needs_overflow_handling = needs_overflow_handling || projection_needs_overflow_handling;
+		use_simd = use_simd && !projection_needs_overflow_handling &&
+		           SljitArm64NeonIntegerBinarySupported(integer_kind, plan.binary_op);
 	}
 
 	sljit_emit_enter(compiler, 0, SLJIT_ARGS1V(P), use_simd ? 5 | SLJIT_ENTER_VECTOR(3) : 5, 7, 0);
+	vector<SljitFlatProjectionOverflowJump> overflow_jumps;
 
 	auto emit_scalar_sources = [&]() {
 		for (idx_t source_idx = 0; source_idx < shared_plan.sources.size(); source_idx++) {
@@ -1497,6 +1558,16 @@ static unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeFlatIntegerProjecti
 		auto left_source_idx =
 		    SljitFlatProjectionSourceRegisterIndex(shared_plan.sources, plan.source_index, "integer");
 		auto left_reg = SljitFlatIntegerProjectionSourceScalarRegister(left_source_idx);
+		struct sljit_jump *date_is_negative_infinity = nullptr;
+		struct sljit_jump *date_is_positive_infinity = nullptr;
+		if (SljitNativeIntegerKindPreservesSourceDateInfinity(integer_kind)) {
+			date_is_negative_infinity =
+			    sljit_emit_cmp(compiler, SLJIT_EQUAL | SLJIT_32, left_reg, 0, SLJIT_IMM,
+			                   SLJIT_DATE_NEGATIVE_INFINITY_DAYS);
+			date_is_positive_infinity =
+			    sljit_emit_cmp(compiler, SLJIT_EQUAL | SLJIT_32, left_reg, 0, SLJIT_IMM,
+			                   SLJIT_DATE_POSITIVE_INFINITY_DAYS);
+		}
 		sljit_s32 right_reg;
 		if (plan.kind == SljitNativeRegionExpressionKind::INTEGER_BINARY_REFERENCES) {
 			auto right_source_idx =
@@ -1508,10 +1579,33 @@ static unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeFlatIntegerProjecti
 			right_reg = SLJIT_R1;
 		}
 		auto binary_op = NativeIntegerBinaryOp(integer_kind, plan.binary_op);
+		auto emit_binary_op = plan.check_arithmetic_overflow ? binary_op | SLJIT_SET_OVERFLOW : binary_op;
 		if (plan.kind == SljitNativeRegionExpressionKind::INTEGER_BINARY_CONSTANT && plan.constant_on_left) {
-			sljit_emit_op2(compiler, binary_op, SLJIT_R4, 0, right_reg, 0, left_reg, 0);
+			sljit_emit_op2(compiler, emit_binary_op, SLJIT_R4, 0, right_reg, 0, left_reg, 0);
 		} else {
-			sljit_emit_op2(compiler, binary_op, SLJIT_R4, 0, left_reg, 0, right_reg, 0);
+			sljit_emit_op2(compiler, emit_binary_op, SLJIT_R4, 0, left_reg, 0, right_reg, 0);
+		}
+		if (plan.check_arithmetic_overflow) {
+			overflow_jumps.push_back({projection_index, sljit_emit_jump(compiler, SLJIT_OVERFLOW)});
+		}
+		if (plan.check_result_range) {
+			overflow_jumps.push_back(
+			    {projection_index,
+			     sljit_emit_cmp(compiler, SLJIT_SIG_LESS, SLJIT_R4, 0, SLJIT_IMM,
+			                    NumericCast<sljit_sw>(plan.result_min))});
+			overflow_jumps.push_back(
+			    {projection_index,
+			     sljit_emit_cmp(compiler, SLJIT_SIG_GREATER, SLJIT_R4, 0, SLJIT_IMM,
+			                    NumericCast<sljit_sw>(plan.result_max))});
+		}
+		struct sljit_jump *arithmetic_done = nullptr;
+		if (SljitNativeIntegerKindPreservesSourceDateInfinity(integer_kind)) {
+			arithmetic_done = sljit_emit_jump(compiler, SLJIT_JUMP);
+			auto date_infinity_label = sljit_emit_label(compiler);
+			sljit_set_label(date_is_negative_infinity, date_infinity_label);
+			sljit_set_label(date_is_positive_infinity, date_infinity_label);
+			sljit_emit_op1(compiler, SLJIT_MOV32, SLJIT_R4, 0, left_reg, 0);
+			sljit_set_label(arithmetic_done, sljit_emit_label(compiler));
 		}
 		sljit_emit_op1(compiler, store_op, SLJIT_MEM1(result_pointer_reg), 0, SLJIT_R4, 0);
 	};
@@ -1611,6 +1705,29 @@ static unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeFlatIntegerProjecti
 		auto repeat = sljit_emit_jump(compiler, SLJIT_JUMP);
 		sljit_set_label(repeat, tail_loop);
 		sljit_set_label(done, sljit_emit_label(compiler));
+	}
+	auto success = sljit_emit_jump(compiler, SLJIT_JUMP);
+	vector<struct sljit_jump *> overflow_returns;
+	if (needs_overflow_handling) {
+		for (auto &overflow_jump : overflow_jumps) {
+			auto overflow_label = sljit_emit_label(compiler);
+			sljit_set_label(overflow_jump.jump, overflow_label);
+			auto overflow_message_offset = SljitPointerArrayOffset(overflow_jump.projection_index);
+			sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_R0, 0, SLJIT_MEM1(SLJIT_S0),
+			               offsetof(SljitNativeVectorInput, overflow_messages));
+			sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_R1, 0, SLJIT_MEM1(SLJIT_R0), overflow_message_offset);
+			sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_MEM1(SLJIT_S0),
+			               offsetof(SljitNativeVectorInput, overflow_message), SLJIT_R1, 0);
+			sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_R0, 0, SLJIT_S0, 0);
+			sljit_emit_icall(compiler, SLJIT_CALL, SLJIT_ARGS1V(P), SLJIT_IMM,
+			                 SLJIT_FUNC_ADDR(SljitNativeIntegerOverflow));
+			overflow_returns.push_back(sljit_emit_jump(compiler, SLJIT_JUMP));
+		}
+	}
+	auto done_label = sljit_emit_label(compiler);
+	sljit_set_label(success, done_label);
+	for (auto overflow_return : overflow_returns) {
+		sljit_set_label(overflow_return, done_label);
 	}
 	sljit_emit_return_void(compiler);
 

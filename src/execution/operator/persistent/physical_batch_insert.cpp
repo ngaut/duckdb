@@ -523,7 +523,7 @@ private:
 		if (!op.bound_constraints.empty()) {
 			return false;
 		}
-		return DirectAppendSupportsFixedSizeTypes(types, op.insert_types);
+		return DirectAppendSupportsTypes(types, op.insert_types);
 	}
 
 	const PhysicalBatchInsert &op;

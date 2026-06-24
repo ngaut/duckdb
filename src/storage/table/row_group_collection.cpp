@@ -701,6 +701,7 @@ bool RowGroupCollection::TryPrepareDirectAppend(TableAppendState &state, idx_t c
 		DirectAppendSlice slice;
 		slice.count = append_count;
 		slice.targets = std::move(targets);
+		slice.sources.assign(types.size(), DirectAppendColumnSource());
 		reservation.slices.push_back(std::move(slice));
 	}
 	return result;
@@ -721,7 +722,8 @@ void RowGroupCollection::CommitDirectAppend(TableAppendState &state, const Direc
 		auto &current_row_group = state.row_group_append_state.row_group->GetNode();
 		state.total_append_count += slice.count;
 		auto previous_allocation_size = current_row_group.GetAllocationSize();
-		current_row_group.CommitDirectAppend(state.row_group_append_state, slice.targets, slice.count, stats);
+		current_row_group.CommitDirectAppend(state.row_group_append_state, slice.targets, slice.sources, slice.count,
+		                                     stats);
 		allocation_size += current_row_group.GetAllocationSize() - previous_allocation_size;
 		state.current_row += row_t(slice.count);
 
@@ -732,8 +734,17 @@ void RowGroupCollection::CommitDirectAppend(TableAppendState &state, const Direc
 				column_stats.SetDistinctCount((*stats)[col_idx].distinct_count);
 				continue;
 			}
-			Vector direct_vector(types[col_idx], slice.targets[col_idx], slice.count);
-			column_stats.UpdateDistinctStatistics(direct_vector, slice.count, state.hashes);
+			if (!slice.sources.empty() && slice.sources[col_idx].IsSet()) {
+				auto &source = slice.sources[col_idx];
+				if (source.offset + slice.count > source.vector->size()) {
+					throw InternalException("RowGroupCollection direct append source slice out of range");
+				}
+				Vector direct_vector(*source.vector, source.offset, source.offset + slice.count);
+				column_stats.UpdateDistinctStatistics(direct_vector, slice.count, state.hashes);
+			} else {
+				Vector direct_vector(types[col_idx], slice.targets[col_idx], slice.count);
+				column_stats.UpdateDistinctStatistics(direct_vector, slice.count, state.hashes);
+			}
 		}
 	}
 }

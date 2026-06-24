@@ -64,7 +64,7 @@ static bool ExecutionExpressionIsFloatingType(const LogicalType &type) {
 
 static bool ExecutionExpressionIsArithmeticType(const LogicalType &type) {
 	return ExecutionExpressionIsIntegralType(type) || ExecutionExpressionIsFloatingType(type) ||
-	       type.id() == LogicalTypeId::DECIMAL;
+	       type.id() == LogicalTypeId::DECIMAL || type.id() == LogicalTypeId::DATE;
 }
 
 static bool ExecutionExpressionIsNegatableType(const LogicalType &type) {

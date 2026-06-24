@@ -66,6 +66,7 @@ sljit_sw NativeIntegerDataScale(SljitNativeIntegerKind kind) {
 	case SljitNativeIntegerKind::UINT8:
 		return 0;
 	case SljitNativeIntegerKind::INT32:
+	case SljitNativeIntegerKind::DATE:
 		return 2;
 	case SljitNativeIntegerKind::INT64:
 	case SljitNativeIntegerKind::DECIMAL64:
@@ -82,6 +83,7 @@ sljit_s32 NativeIntegerLoadOp(SljitNativeIntegerKind kind) {
 	case SljitNativeIntegerKind::UINT8:
 		return SLJIT_MOV_U8;
 	case SljitNativeIntegerKind::INT32:
+	case SljitNativeIntegerKind::DATE:
 		return SLJIT_MOV_S32;
 	case SljitNativeIntegerKind::INT64:
 	case SljitNativeIntegerKind::DECIMAL64:
@@ -97,6 +99,7 @@ sljit_s32 NativeIntegerStoreOp(SljitNativeIntegerKind kind) {
 	case SljitNativeIntegerKind::UINT8:
 		return SLJIT_MOV_U8;
 	case SljitNativeIntegerKind::INT32:
+	case SljitNativeIntegerKind::DATE:
 		return SLJIT_MOV32;
 	case SljitNativeIntegerKind::INT64:
 	case SljitNativeIntegerKind::DECIMAL64:
@@ -121,7 +124,7 @@ sljit_s32 NativeIntegerBinaryOp(SljitNativeIntegerKind kind, SljitNativeIntegerB
 	default:
 		throw InternalException("Unknown SLJIT native integer binary operator");
 	}
-	if (kind == SljitNativeIntegerKind::INT32) {
+	if (kind == SljitNativeIntegerKind::INT32 || kind == SljitNativeIntegerKind::DATE) {
 		result |= SLJIT_32;
 	}
 	return result;
@@ -151,7 +154,7 @@ sljit_s32 NativeIntegerCompareJumpType(SljitNativeIntegerKind kind, SljitNativeI
 	default:
 		throw InternalException("Unknown SLJIT native integer comparison operator");
 	}
-	if (kind == SljitNativeIntegerKind::INT32) {
+	if (kind == SljitNativeIntegerKind::INT32 || kind == SljitNativeIntegerKind::DATE) {
 		result |= SLJIT_32;
 	}
 	return result;
