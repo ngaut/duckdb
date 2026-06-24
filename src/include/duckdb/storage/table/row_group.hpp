@@ -200,10 +200,11 @@ public:
 	static void InitializeAppend(SegmentNode<RowGroup> &row_group, RowGroupAppendState &append_state);
 	void Append(RowGroupAppendState &append_state, DataChunk &chunk, idx_t append_count);
 	bool TryPrepareDirectAppend(RowGroupAppendState &append_state, const vector<LogicalType> &types, idx_t append_count,
-	                            vector<data_ptr_t> &targets);
+	                            vector<data_ptr_t> &targets, optional_ptr<DirectAppendProfile> profile = nullptr);
 	void CommitDirectAppend(RowGroupAppendState &append_state, const vector<data_ptr_t> &targets,
 	                        const vector<DirectAppendColumnSource> &sources, idx_t append_count,
-	                        optional_ptr<const vector<DirectAppendColumnStats>> stats = nullptr);
+	                        optional_ptr<const vector<DirectAppendColumnStats>> stats = nullptr,
+	                        optional_ptr<DirectAppendProfile> profile = nullptr);
 	void FinalizeAppend(RowGroupAppendState &append_state);
 
 	void Update(TransactionData transaction, DuckTableEntry &table_entry, DataChunk &updates, row_t *ids, idx_t offset,

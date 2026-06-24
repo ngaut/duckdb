@@ -34,7 +34,21 @@
 #include "duckdb/planner/expression/bound_cast_expression.hpp"
 #include "duckdb/planner/expression/bound_reference_expression.hpp"
 
+#include <chrono>
+
 namespace duckdb {
+
+static std::chrono::steady_clock::time_point RowGroupDirectAppendProfileStart(optional_ptr<DirectAppendProfile> profile) {
+	return profile ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point();
+}
+
+static int64_t RowGroupDirectAppendProfileElapsed(std::chrono::steady_clock::time_point start) {
+	if (start == std::chrono::steady_clock::time_point()) {
+		return 0;
+	}
+	auto end = std::chrono::steady_clock::now();
+	return std::chrono::duration_cast<std::chrono::microseconds>(end - start).count();
+}
 
 RowGroup::RowGroup(RowGroupCollection &collection_p, idx_t count)
     : SegmentBase<RowGroup>(count), collection(collection_p), version_info(nullptr), deletes_is_loaded(false),
@@ -1104,7 +1118,7 @@ void RowGroup::Append(RowGroupAppendState &state, DataChunk &chunk, idx_t append
 }
 
 bool RowGroup::TryPrepareDirectAppend(RowGroupAppendState &state, const vector<LogicalType> &types, idx_t append_count,
-                                      vector<data_ptr_t> &targets) {
+                                      vector<data_ptr_t> &targets, optional_ptr<DirectAppendProfile> profile) {
 	if (types.size() != GetColumnCount()) {
 		return false;
 	}
@@ -1125,19 +1139,29 @@ bool RowGroup::TryPrepareDirectAppend(RowGroupAppendState &state, const vector<L
 		}
 		auto &col_data = GetColumn(i);
 		auto prev_allocation_size = col_data.GetAllocationSize();
+		auto profile_start = RowGroupDirectAppendProfileStart(profile);
 		if (!col_data.TryPrepareDirectAppend(state.states[i], append_count, targets[i])) {
 			allocation_size += col_data.GetAllocationSize() - prev_allocation_size;
+			if (profile) {
+				profile->prepare_fixed_column_time_us += RowGroupDirectAppendProfileElapsed(profile_start);
+				profile->prepare_fixed_column_count++;
+			}
 			targets.clear();
 			return false;
 		}
 		allocation_size += col_data.GetAllocationSize() - prev_allocation_size;
+		if (profile) {
+			profile->prepare_fixed_column_time_us += RowGroupDirectAppendProfileElapsed(profile_start);
+			profile->prepare_fixed_column_count++;
+		}
 	}
 	return true;
 }
 
 void RowGroup::CommitDirectAppend(RowGroupAppendState &state, const vector<data_ptr_t> &targets,
                                   const vector<DirectAppendColumnSource> &sources, idx_t append_count,
-                                  optional_ptr<const vector<DirectAppendColumnStats>> stats) {
+                                  optional_ptr<const vector<DirectAppendColumnStats>> stats,
+                                  optional_ptr<DirectAppendProfile> profile) {
 	if (targets.size() != GetColumnCount()) {
 		throw InternalException("RowGroup direct append target count mismatch");
 	}
@@ -1161,18 +1185,32 @@ void RowGroup::CommitDirectAppend(RowGroupAppendState &state, const vector<data_
 			if (sources[i].offset + append_count > source_vector.size()) {
 				throw InternalException("RowGroup direct append source slice out of range");
 			}
+			auto format_start = RowGroupDirectAppendProfileStart(profile);
 			UnifiedVectorFormat source_format;
 			source_vector.ToUnifiedFormat(source_format);
+			if (profile) {
+				profile->commit_source_format_time_us += RowGroupDirectAppendProfileElapsed(format_start);
+			}
+			auto append_start = RowGroupDirectAppendProfileStart(profile);
 			col_data.AppendData(state.states[i], source_format, sources[i].offset, append_count);
 			allocation_size += col_data.GetAllocationSize() - prev_allocation_size;
+			if (profile) {
+				profile->commit_source_append_time_us += RowGroupDirectAppendProfileElapsed(append_start);
+				profile->commit_source_append_column_count++;
+			}
 			continue;
 		}
 		optional_ptr<const DirectAppendColumnStats> column_stats;
 		if (stats) {
 			column_stats = &(*stats)[i];
 		}
+		auto commit_start = RowGroupDirectAppendProfileStart(profile);
 		col_data.CommitDirectAppend(state.states[i], targets[i], append_count, column_stats);
 		allocation_size += col_data.GetAllocationSize() - prev_allocation_size;
+		if (profile) {
+			profile->commit_fixed_column_time_us += RowGroupDirectAppendProfileElapsed(commit_start);
+			profile->commit_fixed_column_count++;
+		}
 	}
 	state.offset_in_row_group += append_count;
 }

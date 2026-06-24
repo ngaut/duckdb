@@ -110,8 +110,10 @@ public:
 	//! Appends to the row group collection. Returns the finished row group index if a new row group has been appended
 	//! to
 	optional_idx Append(DataChunk &chunk, TableAppendState &state);
-	bool TryPrepareDirectAppend(TableAppendState &state, idx_t count, DirectAppendReservation &reservation);
-	void CommitDirectAppend(TableAppendState &state, const DirectAppendReservation &reservation);
+	bool TryPrepareDirectAppend(TableAppendState &state, idx_t count, DirectAppendReservation &reservation,
+	                            optional_ptr<DirectAppendProfile> profile = nullptr);
+	void CommitDirectAppend(TableAppendState &state, const DirectAppendReservation &reservation,
+	                        optional_ptr<DirectAppendProfile> profile = nullptr);
 	//! FinalizeAppend flushes an append with a variable number of rows.
 	void FinalizeAppend(TransactionData transaction, TableAppendState &state);
 	void CommitAppend(transaction_t commit_id, idx_t row_start, idx_t count);

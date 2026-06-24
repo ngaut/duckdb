@@ -52,8 +52,10 @@ struct ExecutionAppendSinkState {
 	}
 	virtual SinkResultType Append(DataChunk &input) = 0;
 	virtual ExecutionOperatorBindResult PrepareDirectAppend(const vector<LogicalType> &types, idx_t count,
-	                                                        DirectAppendReservation &reservation, string &blocker);
-	virtual SinkResultType CommitDirectAppend(const DirectAppendReservation &reservation);
+	                                                        DirectAppendReservation &reservation, string &blocker,
+	                                                        optional_ptr<DirectAppendProfile> profile = nullptr);
+	virtual SinkResultType CommitDirectAppend(const DirectAppendReservation &reservation,
+	                                          optional_ptr<DirectAppendProfile> profile = nullptr);
 };
 
 struct ExecutionOrderedSinkState {
@@ -316,9 +318,11 @@ DUCKDB_API SinkResultType ExecutionSinkAppend(const ExecutionAppendSinkBinding &
 DUCKDB_API ExecutionOperatorBindResult ExecutionPrepareDirectAppend(const ExecutionAppendSinkBinding &binding,
                                                                     const vector<LogicalType> &types, idx_t count,
                                                                     DirectAppendReservation &reservation,
-                                                                    string &blocker);
+                                                                    string &blocker,
+                                                                    optional_ptr<DirectAppendProfile> profile = nullptr);
 DUCKDB_API SinkResultType ExecutionCommitDirectAppend(const ExecutionAppendSinkBinding &binding,
-                                                      const DirectAppendReservation &reservation);
+                                                      const DirectAppendReservation &reservation,
+                                                      optional_ptr<DirectAppendProfile> profile = nullptr);
 
 DUCKDB_API SinkResultType ExecutionSinkOrdered(const ExecutionOrderedSinkBinding &binding, DataChunk &order_keys,
                                                DataChunk &payload);

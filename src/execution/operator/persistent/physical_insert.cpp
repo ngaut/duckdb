@@ -165,7 +165,8 @@ public:
 	}
 
 	ExecutionOperatorBindResult PrepareDirectAppend(const vector<LogicalType> &types, idx_t count,
-	                                                DirectAppendReservation &reservation, string &blocker) override {
+	                                                DirectAppendReservation &reservation, string &blocker,
+	                                                optional_ptr<DirectAppendProfile> profile) override {
 		reservation.Clear();
 		if (!CanUseDirectAppend(types)) {
 			blocker = "insert-direct-append-type-or-constraint-mismatch";
@@ -185,7 +186,7 @@ public:
 			return ExecutionOperatorBindResult::INVALID;
 		}
 		auto &collection = storage->GetCollection();
-		if (!collection.TryPrepareDirectAppend(lstate.direct_append_state.append_state, count, reservation)) {
+		if (!collection.TryPrepareDirectAppend(lstate.direct_append_state.append_state, count, reservation, profile)) {
 			blocker = "insert-direct-append-segment-capacity";
 			FinalizeDirectAppend(gstate, lstate);
 			return ExecutionOperatorBindResult::INVALID;
@@ -194,14 +195,15 @@ public:
 		return ExecutionOperatorBindResult::READY;
 	}
 
-	SinkResultType CommitDirectAppend(const DirectAppendReservation &reservation) override {
+	SinkResultType CommitDirectAppend(const DirectAppendReservation &reservation,
+	                                  optional_ptr<DirectAppendProfile> profile) override {
 		auto &gstate = global_state.Cast<InsertGlobalState>();
 		auto &lstate = local_state.Cast<InsertLocalState>();
 		if (!lstate.direct_append_initialized || !lstate.direct_append_state.storage) {
 			throw InternalException("insert direct append commit without an active append state");
 		}
 		auto &collection = lstate.direct_append_state.storage->GetCollection();
-		collection.CommitDirectAppend(lstate.direct_append_state.append_state, reservation);
+		collection.CommitDirectAppend(lstate.direct_append_state.append_state, reservation, profile);
 		gstate.insert_count += reservation.Count();
 		return SinkResultType::NEED_MORE_INPUT;
 	}

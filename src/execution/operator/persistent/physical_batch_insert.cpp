@@ -462,7 +462,8 @@ public:
 	}
 
 	ExecutionOperatorBindResult PrepareDirectAppend(const vector<LogicalType> &types, idx_t count,
-	                                                DirectAppendReservation &reservation, string &blocker) override {
+	                                                DirectAppendReservation &reservation, string &blocker,
+	                                                optional_ptr<DirectAppendProfile> profile) override {
 		reservation.Clear();
 		if (!CanUseDirectAppend(types)) {
 			blocker = "batch-insert-direct-append-type-or-constraint-mismatch";
@@ -497,7 +498,7 @@ public:
 		auto &optimistic_collection =
 		    table.GetStorage().GetOptimisticCollection(context.client, lstate.collection_index);
 		auto &collection = *optimistic_collection.collection;
-		if (!collection.TryPrepareDirectAppend(lstate.current_append_state, count, reservation)) {
+		if (!collection.TryPrepareDirectAppend(lstate.current_append_state, count, reservation, profile)) {
 			blocker = "batch-insert-direct-append-segment-capacity";
 			return ExecutionOperatorBindResult::INVALID;
 		}
@@ -505,7 +506,8 @@ public:
 		return ExecutionOperatorBindResult::READY;
 	}
 
-	SinkResultType CommitDirectAppend(const DirectAppendReservation &reservation) override {
+	SinkResultType CommitDirectAppend(const DirectAppendReservation &reservation,
+	                                  optional_ptr<DirectAppendProfile> profile) override {
 		auto &gstate = global_state.Cast<BatchInsertGlobalState>();
 		auto &lstate = local_state.Cast<BatchInsertLocalState>();
 		if (!lstate.collection_index.IsValid()) {
@@ -514,7 +516,7 @@ public:
 		auto &optimistic_collection =
 		    gstate.table.GetStorage().GetOptimisticCollection(context.client, lstate.collection_index);
 		auto &collection = *optimistic_collection.collection;
-		collection.CommitDirectAppend(lstate.current_append_state, reservation);
+		collection.CommitDirectAppend(lstate.current_append_state, reservation, profile);
 		return SinkResultType::NEED_MORE_INPUT;
 	}
 

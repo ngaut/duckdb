@@ -72,6 +72,26 @@ struct DirectAppendReservation {
 	vector<DirectAppendSlice> slices;
 };
 
+struct DirectAppendProfile {
+	int64_t prepare_finalize_row_group_time_us = 0;
+	int64_t prepare_new_row_group_time_us = 0;
+	int64_t prepare_fixed_column_time_us = 0;
+	int64_t commit_source_format_time_us = 0;
+	int64_t commit_source_append_time_us = 0;
+	int64_t commit_fixed_column_time_us = 0;
+	int64_t commit_distinct_lock_time_us = 0;
+	int64_t commit_source_distinct_stats_time_us = 0;
+	int64_t commit_target_distinct_stats_time_us = 0;
+	int64_t commit_provided_distinct_count_time_us = 0;
+
+	idx_t prepare_fixed_column_count = 0;
+	idx_t commit_source_append_column_count = 0;
+	idx_t commit_fixed_column_count = 0;
+	idx_t commit_source_distinct_stats_column_count = 0;
+	idx_t commit_target_distinct_stats_column_count = 0;
+	idx_t commit_provided_distinct_count_column_count = 0;
+};
+
 inline bool DirectAppendSupportsFixedSizeType(const LogicalType &type) {
 	if (type.id() == LogicalTypeId::SQLNULL) {
 		return false;

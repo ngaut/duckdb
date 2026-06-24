@@ -332,6 +332,27 @@ COUNTER_FIELDS = (
 
 COUNTER_VALUE_FIELDS = COUNTER_FIELDS[3:]
 
+STAGE_FIELDS = (
+    "workload",
+    "policy",
+    "repeat",
+    "stage",
+    "runtime_us",
+    "count",
+)
+
+STAGE_SUMMARY_FIELDS = (
+    "workload",
+    "policy",
+    "stage",
+    "run_count",
+    "total_runtime_us",
+    "median_runtime_us",
+    "mean_runtime_us",
+    "max_runtime_us",
+    "total_count",
+)
+
 
 def seconds(value_us: int) -> str:
     return f"{float(value_us) / 1_000_000.0:.9f}"
@@ -396,6 +417,40 @@ def counter_rows(raw_rows: list[dict], workload: str, policy: str, repeat: int) 
                 **require_fields(counter, COUNTER_VALUE_FIELDS),
             }
         )
+    return rows
+
+
+def parse_stage_breakdown(value: str) -> dict[str, int]:
+    stages = {}
+    for entry in (value or "").split(";"):
+        if not entry or "=" not in entry:
+            continue
+        stage, raw_value = entry.rsplit("=", 1)
+        if not stage:
+            continue
+        try:
+            stages[stage] = stages.get(stage, 0) + int(raw_value)
+        except ValueError:
+            continue
+    return stages
+
+
+def stage_rows(counters: list[dict]) -> list[dict]:
+    rows = []
+    for counter in counters:
+        runtimes = parse_stage_breakdown(counter.get("generated_stage_runtime_breakdown", ""))
+        counts = parse_stage_breakdown(counter.get("generated_stage_count_breakdown", ""))
+        for stage, runtime_us in sorted(runtimes.items()):
+            rows.append(
+                {
+                    "workload": counter["workload"],
+                    "policy": counter["policy"],
+                    "repeat": counter["repeat"],
+                    "stage": stage,
+                    "runtime_us": runtime_us,
+                    "count": counts.get(stage, 0),
+                }
+            )
     return rows
 
 
@@ -505,6 +560,31 @@ def summarize(rows: list[dict]) -> list[dict]:
     return summary
 
 
+def summarize_stages(rows: list[dict]) -> list[dict]:
+    grouped = collections.defaultdict(list)
+    for row in rows:
+        grouped[(row["workload"], row["policy"], row["stage"])].append(row)
+
+    summary = []
+    for (workload, policy, stage), group in sorted(grouped.items()):
+        runtimes = [row_int(row, "runtime_us") for row in group]
+        counts = [row_int(row, "count") for row in group]
+        summary.append(
+            {
+                "workload": workload,
+                "policy": policy,
+                "stage": stage,
+                "run_count": len(group),
+                "total_runtime_us": sum(runtimes),
+                "median_runtime_us": median(runtimes),
+                "mean_runtime_us": int(round(statistics.mean(runtimes))) if runtimes else 0,
+                "max_runtime_us": max(runtimes) if runtimes else 0,
+                "total_count": sum(counts),
+            }
+        )
+    return summary
+
+
 def parse_args() -> argparse.Namespace:
     root = repo_root()
     parser = argparse.ArgumentParser(description="Benchmark SLJIT CTAS direct materialization")
@@ -572,8 +652,12 @@ def main() -> int:
         write_csv(out_dir / "runs.csv", RUN_FIELDS, rows)
         write_csv(out_dir / "summary.csv", SUMMARY_FIELDS, summarize(rows))
         write_csv(out_dir / "counters.csv", COUNTER_FIELDS, counters)
+        stages = stage_rows(counters)
+        write_csv(out_dir / "stages.csv", STAGE_FIELDS, stages)
+        write_csv(out_dir / "stage_summary.csv", STAGE_SUMMARY_FIELDS, summarize_stages(stages))
         print(f"benchmark output: {out_dir}")
         print(f"summary: {out_dir / 'summary.csv'}")
+        print(f"stage summary: {out_dir / 'stage_summary.csv'}")
     finally:
         if temp_dir is not None:
             temp_dir.cleanup()

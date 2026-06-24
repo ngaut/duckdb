@@ -226,6 +226,50 @@ static void RecordSljitRegionStageRuntimeWithSuffix(ExecutionRegionRuntime &runt
 	runtime.RecordGeneratedStageRuntime(SljitRegionStageName(op_idx, kind) + suffix, SljitRegionElapsedMicros(start));
 }
 
+static void RecordSljitDirectAppendProfileStage(ExecutionRegionRuntime &runtime, const string &stage_prefix,
+                                                const char *stage_name, int64_t runtime_time_us,
+                                                idx_t count = 1) {
+	if (!runtime.TraceRuntime() || runtime_time_us <= 0 || count == 0) {
+		return;
+	}
+	runtime.RecordGeneratedStageRuntime(stage_prefix + "." + stage_name, runtime_time_us, count);
+}
+
+static void RecordSljitDirectAppendProfile(ExecutionRegionRuntime &runtime, idx_t op_idx,
+                                           SljitNativeRegionOpKind kind, const DirectAppendProfile &profile) {
+	if (!runtime.TraceRuntime()) {
+		return;
+	}
+	auto prepare_prefix = SljitRegionStageName(op_idx, kind, "direct_append_prepare");
+	RecordSljitDirectAppendProfileStage(runtime, prepare_prefix, "storage_finalize_row_group",
+	                                    profile.prepare_finalize_row_group_time_us);
+	RecordSljitDirectAppendProfileStage(runtime, prepare_prefix, "storage_new_row_group",
+	                                    profile.prepare_new_row_group_time_us);
+	RecordSljitDirectAppendProfileStage(runtime, prepare_prefix, "storage_fixed_column_prepare",
+	                                    profile.prepare_fixed_column_time_us, profile.prepare_fixed_column_count);
+
+	auto commit_prefix = SljitRegionStageName(op_idx, kind, "direct_append_commit");
+	RecordSljitDirectAppendProfileStage(runtime, commit_prefix, "storage_source_format",
+	                                    profile.commit_source_format_time_us,
+	                                    profile.commit_source_append_column_count);
+	RecordSljitDirectAppendProfileStage(runtime, commit_prefix, "storage_source_append",
+	                                    profile.commit_source_append_time_us,
+	                                    profile.commit_source_append_column_count);
+	RecordSljitDirectAppendProfileStage(runtime, commit_prefix, "storage_fixed_column_commit",
+	                                    profile.commit_fixed_column_time_us, profile.commit_fixed_column_count);
+	RecordSljitDirectAppendProfileStage(runtime, commit_prefix, "storage_distinct_lock",
+	                                    profile.commit_distinct_lock_time_us);
+	RecordSljitDirectAppendProfileStage(runtime, commit_prefix, "storage_source_distinct_stats",
+	                                    profile.commit_source_distinct_stats_time_us,
+	                                    profile.commit_source_distinct_stats_column_count);
+	RecordSljitDirectAppendProfileStage(runtime, commit_prefix, "storage_target_distinct_stats",
+	                                    profile.commit_target_distinct_stats_time_us,
+	                                    profile.commit_target_distinct_stats_column_count);
+	RecordSljitDirectAppendProfileStage(runtime, commit_prefix, "storage_provided_distinct_count",
+	                                    profile.commit_provided_distinct_count_time_us,
+	                                    profile.commit_provided_distinct_count_column_count);
+}
+
 class SljitRegionStageAccumulator {
 public:
 	SljitRegionStageAccumulator(ExecutionRegionRuntime &runtime_p, idx_t op_idx, SljitNativeRegionOpKind kind,
@@ -2223,9 +2267,11 @@ public:
 		while (source_offset < input.size()) {
 			string blocker;
 			auto &reservation = scratch.direct_append_reservation;
+			DirectAppendProfile direct_append_profile;
 			auto prepare_stage_start = SljitRegionStageStart(runtime);
 			auto direct_result = ExecutionPrepareDirectAppend(binding.append_sink, op.output_types,
-			                                                  input.size() - source_offset, reservation, blocker);
+			                                                  input.size() - source_offset, reservation, blocker,
+			                                                  &direct_append_profile);
 			prepare_stage_accumulator.Add(prepare_stage_start);
 			if (direct_result == ExecutionOperatorBindResult::DEFERRED) {
 				if (source_offset > 0) {
@@ -2234,6 +2280,7 @@ public:
 				}
 				runtime.Defer(blocker.empty() ? "direct-append-deferred" : blocker);
 				sink_result = SinkResultType::BLOCKED;
+				RecordSljitDirectAppendProfile(runtime, op_idx + 1, sink_op.kind, direct_append_profile);
 				flush_direct_append_stage_accumulators();
 				return true;
 			}
@@ -2242,6 +2289,7 @@ public:
 					throw InternalException("SLJIT direct append became unavailable after a partial commit: %s",
 					                        blocker.c_str());
 				}
+				RecordSljitDirectAppendProfile(runtime, op_idx + 1, sink_op.kind, direct_append_profile);
 				flush_direct_append_stage_accumulators();
 				return false;
 			}
@@ -2271,8 +2319,9 @@ public:
 			                            projection_scratch);
 			direct_stage_accumulators.stats->Add(stats_stage_start);
 			auto commit_stage_start = SljitRegionStageStart(runtime);
-			sink_result = ExecutionCommitDirectAppend(binding.append_sink, reservation);
+			sink_result = ExecutionCommitDirectAppend(binding.append_sink, reservation, &direct_append_profile);
 			commit_stage_accumulator.Add(commit_stage_start);
+			RecordSljitDirectAppendProfile(runtime, op_idx + 1, sink_op.kind, direct_append_profile);
 			if (sink_result != SinkResultType::NEED_MORE_INPUT) {
 				flush_direct_append_stage_accumulators();
 				return true;
