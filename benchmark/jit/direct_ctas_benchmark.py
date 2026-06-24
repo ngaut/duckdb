@@ -35,6 +35,12 @@ DEFAULT_WORKLOADS = (
     "mixed_fixed",
     "mixed_fixed_varchar",
 )
+DIAGNOSTIC_WORKLOADS = (
+    "mixed_fixed_varchar_short_not_null",
+    "mixed_fixed_varchar_short_nullable",
+    "mixed_fixed_varchar_long_not_null",
+)
+ALL_WORKLOADS = DEFAULT_WORKLOADS + DIAGNOSTIC_WORKLOADS
 DIRECT_CBO_SETTINGS = (
     "jit_cbo_generated_stage_benefit=4096",
     "jit_cbo_materialization_elision_benefit=4096",
@@ -230,6 +236,83 @@ SELECT
     dt,
     name
 FROM jit_direct_mixed_fixed_varchar_input
+""",
+        "expected_stage": DIRECT_FIXED_STAGE,
+    },
+    "mixed_fixed_varchar_short_not_null": {
+        "input": "jit_direct_mixed_fixed_varchar_short_not_null_input",
+        "setup": """
+CREATE OR REPLACE TABLE jit_direct_mixed_fixed_varchar_short_not_null_input AS
+SELECT
+    i::INTEGER AS id,
+    (i % 1000)::INTEGER AS a,
+    i::BIGINT AS b,
+    (i % 100000)::DECIMAL(15,2) AS d,
+    DATE '1992-01-01' + ((i % 365)::INTEGER) AS dt,
+    'customer-' || ((i % 1024)::VARCHAR) AS name
+FROM range({rows}) tbl(i);
+""",
+        "query": """
+SELECT
+    id,
+    (a + 1) AS a2,
+    (b - 3) AS b2,
+    (d + 1.25::DECIMAL(15,2)) AS d2,
+    dt,
+    name
+FROM jit_direct_mixed_fixed_varchar_short_not_null_input
+""",
+        "expected_stage": DIRECT_FIXED_STAGE,
+    },
+    "mixed_fixed_varchar_short_nullable": {
+        "input": "jit_direct_mixed_fixed_varchar_short_nullable_input",
+        "setup": """
+CREATE OR REPLACE TABLE jit_direct_mixed_fixed_varchar_short_nullable_input AS
+SELECT
+    i::INTEGER AS id,
+    (i % 1000)::INTEGER AS a,
+    i::BIGINT AS b,
+    (i % 100000)::DECIMAL(15,2) AS d,
+    DATE '1992-01-01' + ((i % 365)::INTEGER) AS dt,
+    CASE WHEN (i % 997) = 0 THEN NULL
+         ELSE 'customer-' || ((i % 1024)::VARCHAR) END AS name
+FROM range({rows}) tbl(i);
+""",
+        "query": """
+SELECT
+    id,
+    (a + 1) AS a2,
+    (b - 3) AS b2,
+    (d + 1.25::DECIMAL(15,2)) AS d2,
+    dt,
+    name
+FROM jit_direct_mixed_fixed_varchar_short_nullable_input
+""",
+        "expected_stage": DIRECT_FIXED_STAGE,
+    },
+    "mixed_fixed_varchar_long_not_null": {
+        "input": "jit_direct_mixed_fixed_varchar_long_not_null_input",
+        "setup": """
+CREATE OR REPLACE TABLE jit_direct_mixed_fixed_varchar_long_not_null_input AS
+SELECT
+    i::INTEGER AS id,
+    (i % 1000)::INTEGER AS a,
+    i::BIGINT AS b,
+    (i % 100000)::DECIMAL(15,2) AS d,
+    DATE '1992-01-01' + ((i % 365)::INTEGER) AS dt,
+    CASE WHEN (i % 251) = 0 THEN 'long-' || repeat((i::VARCHAR || '-'), 128)
+         ELSE 'customer-' || ((i % 1024)::VARCHAR) END AS name
+FROM range({rows}) tbl(i);
+""",
+        "query": """
+SELECT
+    id,
+    (a + 1) AS a2,
+    (b - 3) AS b2,
+    (d + 1.25::DECIMAL(15,2)) AS d2,
+    dt,
+    name
+FROM jit_direct_mixed_fixed_varchar_long_not_null_input
 """,
         "expected_stage": DIRECT_FIXED_STAGE,
     },
@@ -532,9 +615,10 @@ def summarize(rows: list[dict]) -> list[dict]:
         if policy == "off"
     }
     policy_order = {policy: index for index, policy in enumerate(DEFAULT_POLICIES)}
+    workload_order = {workload: index for index, workload in enumerate(ALL_WORKLOADS)}
     summary = []
     for (workload, policy), group in sorted(
-        grouped.items(), key=lambda item: (DEFAULT_WORKLOADS.index(item[0][0]), policy_order.get(item[0][1], 100))
+        grouped.items(), key=lambda item: (workload_order.get(item[0][0], 1000), policy_order.get(item[0][1], 100))
     ):
         timings = [row_int(row, "query_time_us") for row in group]
         median_us = median(timings)
@@ -592,7 +676,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--db", type=Path, default=None)
     parser.add_argument("--out-dir", type=Path, default=None)
     parser.add_argument("--rows", type=int, default=5_000_000)
-    parser.add_argument("--workloads", nargs="+", default=list(DEFAULT_WORKLOADS), choices=DEFAULT_WORKLOADS)
+    parser.add_argument("--workloads", nargs="+", default=list(DEFAULT_WORKLOADS), choices=ALL_WORKLOADS)
     parser.add_argument("--policies", nargs="+", default=list(DEFAULT_POLICIES), choices=DEFAULT_POLICIES)
     parser.add_argument("--backend", default="sljit")
     parser.add_argument("--jit-extension", default="jit_sljit")
