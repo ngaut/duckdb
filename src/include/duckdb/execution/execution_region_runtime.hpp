@@ -83,7 +83,8 @@ public:
 	virtual SinkNextBatchType AdvanceSinkBatch(DataChunk &source_chunk, bool have_more_output) = 0;
 	virtual ExecutionOperatorRuntime &ExecutionOperators() = 0;
 	virtual bool TraceRuntime() const = 0;
-	virtual void RecordGeneratedStageRuntime(ExecutionRegionStageId stage, int64_t runtime_time_us) = 0;
+	virtual void RecordGeneratedStageRuntime(ExecutionRegionStageId stage, int64_t runtime_time_us,
+	                                         idx_t count = 1) = 0;
 	virtual void RecordHashJoinProbeLayout(const char *layout);
 	virtual void RecordLazyCodegen(const ExecutionRegionLazyCodegenMetrics &metrics);
 	virtual void Defer(string reason) = 0;

@@ -166,6 +166,28 @@ struct SljitExecutableAggregateUpdate {
 	}
 };
 
+enum class SljitDirectProjectionKind : uint8_t { NONE, FLOAT, DOUBLE, INT32, INT64 };
+
+enum class SljitDirectProjectionStatsMode : uint8_t { NONE, GENERATED_FLOATING_MIN_MAX, POSTPASS_FIXED_STATS };
+
+struct SljitDirectProjectionSourceRef {
+	idx_t input_index = DConstants::INVALID_INDEX;
+	idx_t projection_index = DConstants::INVALID_INDEX;
+	bool right_source = false;
+};
+
+struct SljitDirectProjectionPlan {
+	SljitDirectProjectionKind kind = SljitDirectProjectionKind::NONE;
+	SljitDirectProjectionStatsMode stats_mode = SljitDirectProjectionStatsMode::NONE;
+	vector<idx_t> projection_indices;
+	vector<SljitDirectProjectionSourceRef> sources;
+	bool covers_all_projections = false;
+
+	bool SinglePrecision() const {
+		return kind == SljitDirectProjectionKind::FLOAT;
+	}
+};
+
 struct SljitExecutableRegionOp {
 	SljitNativeRegionOpKind kind;
 	idx_t operator_index = DConstants::INVALID_INDEX;
@@ -180,10 +202,12 @@ struct SljitExecutableRegionOp {
 	SljitExecutableOrderSink order_sink;
 	SljitExecutableAggregateUpdate aggregate_update;
 	vector<SljitExecutableRegionExpression> projections;
-	vector<idx_t> flat_fused_projection_indices;
-	unique_ptr<ExecutionRegionCodeHandle> flat_fused_projection_code;
-	SljitNativeVectorFunction flat_fused_projection_function = nullptr;
-	bool flat_fused_projection_single_precision = false;
+	SljitDirectProjectionPlan flat_fused_floating_projection_plan;
+	unique_ptr<ExecutionRegionCodeHandle> flat_fused_floating_projection_code;
+	SljitNativeVectorFunction flat_fused_floating_projection_function = nullptr;
+	SljitDirectProjectionPlan flat_fused_fixed_projection_plan;
+	unique_ptr<ExecutionRegionCodeHandle> flat_fused_fixed_projection_code;
+	SljitNativeVectorFunction flat_fused_fixed_projection_function = nullptr;
 
 	idx_t CodeSize() const {
 		idx_t result = 0;
@@ -205,8 +229,11 @@ struct SljitExecutableRegionOp {
 		if (kind == SljitNativeRegionOpKind::AGGREGATE_UPDATE) {
 			result += aggregate_update.CodeSize();
 		}
-		if (flat_fused_projection_code) {
-			result += flat_fused_projection_code->CodeSize();
+		if (flat_fused_floating_projection_code) {
+			result += flat_fused_floating_projection_code->CodeSize();
+		}
+		if (flat_fused_fixed_projection_code) {
+			result += flat_fused_fixed_projection_code->CodeSize();
 		}
 		for (auto &projection : projections) {
 			result += projection.CodeSize();

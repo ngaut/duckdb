@@ -25,13 +25,19 @@ BuildSljitNativeIntegerBinaryConstant(SljitNativeIntegerKind kind, SljitNativeIn
 unique_ptr<ExecutionRegionCodeHandle>
 BuildSljitNativeFlatIntegerBinaryConstant(SljitNativeIntegerKind kind, SljitNativeIntegerBinaryOp op,
                                           bool constant_on_left, SljitNativeVectorFunction &function, string &error);
-unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeIntegerBinaryReferences(
-    SljitNativeIntegerKind kind, SljitNativeIntegerBinaryOp op, SljitNativeVectorFunction &function, string &error,
-    bool check_arithmetic_overflow = true, bool check_result_range = false, int64_t result_min = 0,
-    int64_t result_max = 0);
 unique_ptr<ExecutionRegionCodeHandle>
-BuildSljitNativeFlatIntegerBinaryReferences(SljitNativeIntegerKind kind, SljitNativeIntegerBinaryOp op,
-                                            SljitNativeVectorFunction &function, string &error);
+BuildSljitNativeIntegerBinaryReferences(SljitNativeIntegerKind kind, SljitNativeIntegerBinaryOp op,
+                                        SljitNativeVectorFunction &function, string &error,
+                                        bool check_arithmetic_overflow = true, bool check_result_range = false,
+                                        int64_t result_min = 0, int64_t result_max = 0);
+unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeFlatIntegerBinaryReferences(SljitNativeIntegerKind kind,
+                                                                                  SljitNativeIntegerBinaryOp op,
+                                                                                  SljitNativeVectorFunction &function,
+                                                                                  string &error);
+unique_ptr<ExecutionRegionCodeHandle>
+BuildSljitNativeFlatIntegerProjection(const vector<SljitNativeRegionExpressionPlan> &plans,
+                                      const vector<idx_t> &projection_indices, SljitNativeVectorFunction &function,
+                                      string &error);
 unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeDoubleBinaryConstant(SljitNativeDoubleBinaryOp op,
                                                                            SljitNativeDoubleSourceKind source_kind,
                                                                            bool constant_on_left, bool single_precision,

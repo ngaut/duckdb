@@ -954,8 +954,7 @@ BuildSljitNativeIntegerBinaryConstant(SljitNativeIntegerKind kind, SljitNativeIn
 			sljit_set_label(range_too_large, overflow_label);
 		}
 		sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_R0, 0, SLJIT_S0, 0);
-		sljit_emit_icall(compiler, SLJIT_CALL, SLJIT_ARGS1V(P), SLJIT_IMM,
-		                 SLJIT_FUNC_ADDR(SljitNativeIntegerOverflow));
+		sljit_emit_icall(compiler, SLJIT_CALL, SLJIT_ARGS1V(P), SLJIT_IMM, SLJIT_FUNC_ADDR(SljitNativeIntegerOverflow));
 	}
 	sljit_set_label(done, sljit_emit_label(compiler));
 	sljit_emit_return_void(compiler);
@@ -1050,9 +1049,9 @@ static void EmitSljitArm64NeonIntegerBinary(struct sljit_compiler *compiler, Slj
 	if (dst < 0 || left < 0 || right < 0) {
 		throw InternalException("SLJIT ARM64 NEON register mapping is unavailable");
 	}
-	auto instruction = SljitArm64NeonIntegerBinaryInstruction(kind, op, UnsafeNumericCast<uint32_t>(dst),
-	                                                          UnsafeNumericCast<uint32_t>(left),
-	                                                          UnsafeNumericCast<uint32_t>(right));
+	auto instruction =
+	    SljitArm64NeonIntegerBinaryInstruction(kind, op, UnsafeNumericCast<uint32_t>(dst),
+	                                           UnsafeNumericCast<uint32_t>(left), UnsafeNumericCast<uint32_t>(right));
 	sljit_emit_op_custom(compiler, &instruction, sizeof(instruction));
 }
 
@@ -1162,14 +1161,9 @@ BuildSljitNativeFlatIntegerBinaryConstant(SljitNativeIntegerKind kind, SljitNati
 	return FinishSljitNativeVectorCode(compiler, function, error);
 }
 
-unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeIntegerBinaryReferences(SljitNativeIntegerKind kind,
-                                                                              SljitNativeIntegerBinaryOp op,
-                                                                              SljitNativeVectorFunction &function,
-                                                                              string &error,
-                                                                              bool check_arithmetic_overflow,
-                                                                              bool check_result_range,
-                                                                              int64_t result_min,
-                                                                              int64_t result_max) {
+unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeIntegerBinaryReferences(
+    SljitNativeIntegerKind kind, SljitNativeIntegerBinaryOp op, SljitNativeVectorFunction &function, string &error,
+    bool check_arithmetic_overflow, bool check_result_range, int64_t result_min, int64_t result_max) {
 	auto compiler = sljit_create_compiler(nullptr);
 	if (!compiler) {
 		error = "failed to create SLJIT compiler";
@@ -1241,8 +1235,7 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeIntegerBinaryReferences(Sl
 			sljit_set_label(range_too_large, overflow_label);
 		}
 		sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_R0, 0, SLJIT_S0, 0);
-		sljit_emit_icall(compiler, SLJIT_CALL, SLJIT_ARGS1V(P), SLJIT_IMM,
-		                 SLJIT_FUNC_ADDR(SljitNativeIntegerOverflow));
+		sljit_emit_icall(compiler, SLJIT_CALL, SLJIT_ARGS1V(P), SLJIT_IMM, SLJIT_FUNC_ADDR(SljitNativeIntegerOverflow));
 	}
 
 	sljit_set_label(done, sljit_emit_label(compiler));
@@ -1251,9 +1244,10 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeIntegerBinaryReferences(Sl
 	return FinishSljitNativeVectorCode(compiler, function, error);
 }
 
-unique_ptr<ExecutionRegionCodeHandle>
-BuildSljitNativeFlatIntegerBinaryReferences(SljitNativeIntegerKind kind, SljitNativeIntegerBinaryOp op,
-                                            SljitNativeVectorFunction &function, string &error) {
+unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeFlatIntegerBinaryReferences(SljitNativeIntegerKind kind,
+                                                                                  SljitNativeIntegerBinaryOp op,
+                                                                                  SljitNativeVectorFunction &function,
+                                                                                  string &error) {
 	auto compiler = sljit_create_compiler(nullptr);
 	if (!compiler) {
 		error = "failed to create SLJIT compiler";
@@ -1338,6 +1332,325 @@ BuildSljitNativeFlatIntegerBinaryReferences(SljitNativeIntegerKind kind, SljitNa
 	sljit_emit_return_void(compiler);
 
 	return FinishSljitNativeVectorCode(compiler, function, error);
+}
+
+static bool ValidateNativeFlatIntegerProjectionExpression(const SljitNativeRegionExpressionPlan &plan,
+                                                          SljitNativeIntegerKind kind, string &error) {
+	if (kind != SljitNativeIntegerKind::INT32 && kind != SljitNativeIntegerKind::INT64) {
+		error = "SLJIT flat integer projection only supports INTEGER/BIGINT result types";
+		return false;
+	}
+	if (plan.integer_kind != kind) {
+		error = "SLJIT flat integer projection cannot mix integer widths";
+		return false;
+	}
+	if (plan.check_arithmetic_overflow || plan.check_result_range) {
+		error = "SLJIT flat integer projection only supports unchecked integer expressions";
+		return false;
+	}
+	switch (plan.return_type.InternalType()) {
+	case PhysicalType::INT32:
+		if (kind != SljitNativeIntegerKind::INT32) {
+			error = "SLJIT flat integer projection result type does not match integer width";
+			return false;
+		}
+		break;
+	case PhysicalType::INT64:
+		if (kind != SljitNativeIntegerKind::INT64) {
+			error = "SLJIT flat integer projection result type does not match integer width";
+			return false;
+		}
+		break;
+	default:
+		error = "SLJIT flat integer projection only supports INTEGER/BIGINT result types";
+		return false;
+	}
+	switch (plan.kind) {
+	case SljitNativeRegionExpressionKind::INTEGER_BINARY_CONSTANT:
+	case SljitNativeRegionExpressionKind::INTEGER_BINARY_REFERENCES:
+		return true;
+	default:
+		error = "SLJIT flat integer projection only supports integer binary expressions";
+		return false;
+	}
+}
+
+struct SljitFlatProjectionSourceRef {
+	idx_t input_index = DConstants::INVALID_INDEX;
+	idx_t projection_index = DConstants::INVALID_INDEX;
+	bool right_source = false;
+};
+
+struct SljitFlatProjectionSharedSourcePlan {
+	vector<SljitFlatProjectionSourceRef> sources;
+};
+
+static idx_t SljitFlatProjectionSourceRegisterIndex(const vector<SljitFlatProjectionSourceRef> &sources,
+                                                    idx_t input_index, const char *projection_kind) {
+	for (idx_t source_idx = 0; source_idx < sources.size(); source_idx++) {
+		if (sources[source_idx].input_index == input_index) {
+			return source_idx;
+		}
+	}
+	throw InternalException("SLJIT flat %s projection source index is not registered", projection_kind);
+}
+
+static bool TryAddSljitFlatProjectionSource(SljitFlatProjectionSharedSourcePlan &shared_plan, idx_t input_index,
+                                            idx_t projection_index, bool right_source) {
+	for (auto &source : shared_plan.sources) {
+		if (source.input_index == input_index) {
+			return true;
+		}
+	}
+	if (shared_plan.sources.size() >= 2) {
+		return false;
+	}
+	SljitFlatProjectionSourceRef source;
+	source.input_index = input_index;
+	source.projection_index = projection_index;
+	source.right_source = right_source;
+	shared_plan.sources.push_back(source);
+	return true;
+}
+
+static bool TryPlanSljitFlatProjectionSharedSources(const vector<SljitNativeRegionExpressionPlan> &plans,
+                                                    const vector<idx_t> &projection_indices,
+                                                    SljitNativeRegionExpressionKind references_kind,
+                                                    idx_t max_projection_count,
+                                                    SljitFlatProjectionSharedSourcePlan &shared_plan) {
+	if (projection_indices.size() < 2 ||
+	    (max_projection_count != DConstants::INVALID_INDEX && projection_indices.size() > max_projection_count)) {
+		return false;
+	}
+	shared_plan = SljitFlatProjectionSharedSourcePlan();
+	for (auto projection_index : projection_indices) {
+		auto &plan = plans[projection_index];
+		if (!TryAddSljitFlatProjectionSource(shared_plan, plan.source_index, projection_index, false)) {
+			return false;
+		}
+		if (plan.kind == references_kind &&
+		    !TryAddSljitFlatProjectionSource(shared_plan, plan.right_source_index, projection_index, true)) {
+			return false;
+		}
+	}
+	return !shared_plan.sources.empty();
+}
+
+static sljit_s32 SljitFlatIntegerProjectionSourceVectorRegister(idx_t source_idx) {
+	switch (source_idx) {
+	case 0:
+		return SLJIT_VR0;
+	case 1:
+		return SLJIT_VR1;
+	default:
+		throw InternalException("SLJIT flat integer projection source vector register is out of range");
+	}
+}
+
+static sljit_s32 SljitFlatIntegerProjectionSourceScalarRegister(idx_t source_idx) {
+	switch (source_idx) {
+	case 0:
+		return SLJIT_R2;
+	case 1:
+		return SLJIT_R3;
+	default:
+		throw InternalException("SLJIT flat integer projection source scalar register is out of range");
+	}
+}
+
+static unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeFlatIntegerProjectionSharedSources(
+    const vector<SljitNativeRegionExpressionPlan> &plans, const vector<idx_t> &projection_indices,
+    const SljitFlatProjectionSharedSourcePlan &shared_plan, SljitNativeIntegerKind integer_kind,
+    SljitNativeVectorFunction &function, string &error) {
+	auto compiler = sljit_create_compiler(nullptr);
+	if (!compiler) {
+		error = "failed to create SLJIT compiler";
+		return nullptr;
+	}
+	auto data_scale = NativeIntegerDataScale(integer_kind);
+	auto load_op = NativeIntegerLoadOp(integer_kind);
+	auto store_op = NativeIntegerStoreOp(integer_kind);
+	bool use_simd = true;
+	for (auto projection_index : projection_indices) {
+		use_simd = use_simd && SljitArm64NeonIntegerBinarySupported(integer_kind, plans[projection_index].binary_op);
+	}
+
+	sljit_emit_enter(compiler, 0, SLJIT_ARGS1V(P), use_simd ? 5 | SLJIT_ENTER_VECTOR(3) : 5, 7, 0);
+
+	auto emit_scalar_sources = [&]() {
+		for (idx_t source_idx = 0; source_idx < shared_plan.sources.size(); source_idx++) {
+			auto source_pointer_reg = source_idx == 0 ? SLJIT_S3 : SLJIT_S4;
+			auto source_value_reg = SljitFlatIntegerProjectionSourceScalarRegister(source_idx);
+			sljit_emit_op1(compiler, load_op, source_value_reg, 0, SLJIT_MEM1(source_pointer_reg), 0);
+		}
+	};
+	auto emit_simd_sources = [&]() {
+		auto simd_type = SljitArm64NeonIntegerSimdType(integer_kind);
+		for (idx_t source_idx = 0; source_idx < shared_plan.sources.size(); source_idx++) {
+			auto source_pointer_reg = source_idx == 0 ? SLJIT_S3 : SLJIT_S4;
+			auto source_vector_reg = SljitFlatIntegerProjectionSourceVectorRegister(source_idx);
+			sljit_emit_simd_mov(compiler, simd_type, source_vector_reg, SLJIT_MEM1(source_pointer_reg), 0);
+		}
+	};
+	auto emit_scalar_projection = [&](idx_t projection_index, sljit_s32 result_pointer_reg) {
+		auto &plan = plans[projection_index];
+		auto left_source_idx =
+		    SljitFlatProjectionSourceRegisterIndex(shared_plan.sources, plan.source_index, "integer");
+		auto left_reg = SljitFlatIntegerProjectionSourceScalarRegister(left_source_idx);
+		sljit_s32 right_reg;
+		if (plan.kind == SljitNativeRegionExpressionKind::INTEGER_BINARY_REFERENCES) {
+			auto right_source_idx =
+			    SljitFlatProjectionSourceRegisterIndex(shared_plan.sources, plan.right_source_index, "integer");
+			right_reg = SljitFlatIntegerProjectionSourceScalarRegister(right_source_idx);
+		} else {
+			auto constant_offset = NumericCast<sljit_sw>(projection_index * sizeof(int64_t));
+			sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R1, 0, SLJIT_MEM1(SLJIT_S2), constant_offset);
+			right_reg = SLJIT_R1;
+		}
+		auto binary_op = NativeIntegerBinaryOp(integer_kind, plan.binary_op);
+		if (plan.kind == SljitNativeRegionExpressionKind::INTEGER_BINARY_CONSTANT && plan.constant_on_left) {
+			sljit_emit_op2(compiler, binary_op, SLJIT_R4, 0, right_reg, 0, left_reg, 0);
+		} else {
+			sljit_emit_op2(compiler, binary_op, SLJIT_R4, 0, left_reg, 0, right_reg, 0);
+		}
+		sljit_emit_op1(compiler, store_op, SLJIT_MEM1(result_pointer_reg), 0, SLJIT_R4, 0);
+	};
+	auto emit_simd_projection = [&](idx_t projection_index, sljit_s32 result_pointer_reg) {
+		auto &plan = plans[projection_index];
+		auto simd_type = SljitArm64NeonIntegerSimdType(integer_kind);
+		auto left_source_idx =
+		    SljitFlatProjectionSourceRegisterIndex(shared_plan.sources, plan.source_index, "integer");
+		auto left_reg = SljitFlatIntegerProjectionSourceVectorRegister(left_source_idx);
+		sljit_s32 right_reg;
+		if (plan.kind == SljitNativeRegionExpressionKind::INTEGER_BINARY_REFERENCES) {
+			auto right_source_idx =
+			    SljitFlatProjectionSourceRegisterIndex(shared_plan.sources, plan.right_source_index, "integer");
+			right_reg = SljitFlatIntegerProjectionSourceVectorRegister(right_source_idx);
+		} else {
+			auto constant_offset = NumericCast<sljit_sw>(projection_index * sizeof(int64_t));
+			sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R1, 0, SLJIT_MEM1(SLJIT_S2), constant_offset);
+			sljit_emit_simd_replicate(compiler, simd_type, SLJIT_VR2, SLJIT_R1, 0);
+			right_reg = SLJIT_VR2;
+		}
+		if (plan.kind == SljitNativeRegionExpressionKind::INTEGER_BINARY_CONSTANT && plan.constant_on_left) {
+			EmitSljitArm64NeonIntegerBinary(compiler, integer_kind, plan.binary_op, SLJIT_VR2, right_reg, left_reg);
+		} else {
+			EmitSljitArm64NeonIntegerBinary(compiler, integer_kind, plan.binary_op, SLJIT_VR2, left_reg, right_reg);
+		}
+		sljit_emit_simd_mov(compiler, simd_type | SLJIT_SIMD_STORE, SLJIT_VR2, SLJIT_MEM1(result_pointer_reg), 0);
+	};
+
+	auto load_source_pointers = [&]() {
+		for (idx_t source_idx = 0; source_idx < shared_plan.sources.size(); source_idx++) {
+			auto &source = shared_plan.sources[source_idx];
+			auto source_array_offset = source.right_source ? offsetof(SljitNativeVectorInput, right_source_data_array)
+			                                               : offsetof(SljitNativeVectorInput, source_data_array);
+			auto source_pointer_offset = SljitPointerArrayOffset(source.projection_index);
+			auto source_pointer_reg = source_idx == 0 ? SLJIT_S3 : SLJIT_S4;
+			sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_R0, 0, SLJIT_MEM1(SLJIT_S0), source_array_offset);
+			sljit_emit_op1(compiler, SLJIT_MOV_P, source_pointer_reg, 0, SLJIT_MEM1(SLJIT_R0), source_pointer_offset);
+		}
+	};
+	auto increment_source_pointers = [&](sljit_sw bytes) {
+		for (idx_t source_idx = 0; source_idx < shared_plan.sources.size(); source_idx++) {
+			auto source_pointer_reg = source_idx == 0 ? SLJIT_S3 : SLJIT_S4;
+			sljit_emit_op2(compiler, SLJIT_ADD, source_pointer_reg, 0, source_pointer_reg, 0, SLJIT_IMM, bytes);
+		}
+	};
+	auto result_pointer_register = [](idx_t group_idx) {
+		return group_idx == 0 ? SLJIT_S5 : SLJIT_S6;
+	};
+
+	auto data_width = sljit_sw(1) << data_scale;
+	auto simd_bytes = sljit_sw(16);
+	for (idx_t group_begin = 0; group_begin < projection_indices.size(); group_begin += 2) {
+		auto group_end = MinValue<idx_t>(group_begin + 2, projection_indices.size());
+		sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_S1, 0, SLJIT_MEM1(SLJIT_S0), offsetof(SljitNativeVectorInput, count));
+		sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_S2, 0, SLJIT_MEM1(SLJIT_S0),
+		               offsetof(SljitNativeVectorInput, constants));
+		load_source_pointers();
+		sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_R0, 0, SLJIT_MEM1(SLJIT_S0),
+		               offsetof(SljitNativeVectorInput, result_data_array));
+		for (idx_t group_idx = 0; group_begin + group_idx < group_end; group_idx++) {
+			auto projection_index = projection_indices[group_begin + group_idx];
+			auto result_pointer_offset = SljitPointerArrayOffset(projection_index);
+			sljit_emit_op1(compiler, SLJIT_MOV_P, result_pointer_register(group_idx), 0, SLJIT_MEM1(SLJIT_R0),
+			               result_pointer_offset);
+		}
+		if (use_simd) {
+			auto simd_lanes = NumericCast<sljit_sw>(SljitArm64NeonIntegerLaneCount(integer_kind));
+			auto vector_loop = sljit_emit_label(compiler);
+			auto tail = sljit_emit_cmp(compiler, SLJIT_LESS, SLJIT_S1, 0, SLJIT_IMM, simd_lanes);
+			emit_simd_sources();
+			for (idx_t group_idx = 0; group_begin + group_idx < group_end; group_idx++) {
+				emit_simd_projection(projection_indices[group_begin + group_idx], result_pointer_register(group_idx));
+			}
+			increment_source_pointers(simd_bytes);
+			for (idx_t group_idx = 0; group_begin + group_idx < group_end; group_idx++) {
+				auto result_reg = result_pointer_register(group_idx);
+				sljit_emit_op2(compiler, SLJIT_ADD, result_reg, 0, result_reg, 0, SLJIT_IMM, simd_bytes);
+			}
+			sljit_emit_op2(compiler, SLJIT_SUB, SLJIT_S1, 0, SLJIT_S1, 0, SLJIT_IMM, simd_lanes);
+			auto repeat = sljit_emit_jump(compiler, SLJIT_JUMP);
+			sljit_set_label(repeat, vector_loop);
+			sljit_set_label(tail, sljit_emit_label(compiler));
+		}
+
+		auto tail_loop = sljit_emit_label(compiler);
+		auto done = sljit_emit_cmp(compiler, SLJIT_EQUAL, SLJIT_S1, 0, SLJIT_IMM, 0);
+		emit_scalar_sources();
+		for (idx_t group_idx = 0; group_begin + group_idx < group_end; group_idx++) {
+			emit_scalar_projection(projection_indices[group_begin + group_idx], result_pointer_register(group_idx));
+		}
+		increment_source_pointers(data_width);
+		for (idx_t group_idx = 0; group_begin + group_idx < group_end; group_idx++) {
+			auto result_reg = result_pointer_register(group_idx);
+			sljit_emit_op2(compiler, SLJIT_ADD, result_reg, 0, result_reg, 0, SLJIT_IMM, data_width);
+		}
+		sljit_emit_op2(compiler, SLJIT_SUB, SLJIT_S1, 0, SLJIT_S1, 0, SLJIT_IMM, 1);
+		auto repeat = sljit_emit_jump(compiler, SLJIT_JUMP);
+		sljit_set_label(repeat, tail_loop);
+		sljit_set_label(done, sljit_emit_label(compiler));
+	}
+	sljit_emit_return_void(compiler);
+
+	return FinishSljitNativeVectorCode(compiler, function, error);
+}
+
+unique_ptr<ExecutionRegionCodeHandle>
+BuildSljitNativeFlatIntegerProjection(const vector<SljitNativeRegionExpressionPlan> &plans,
+                                      const vector<idx_t> &projection_indices, SljitNativeVectorFunction &function,
+                                      string &error) {
+	if (projection_indices.empty()) {
+		error = "SLJIT flat integer projection has no expressions";
+		return nullptr;
+	}
+	auto first_projection_index = projection_indices[0];
+	if (first_projection_index >= plans.size()) {
+		error = "SLJIT flat integer projection index is out of range";
+		return nullptr;
+	}
+	auto integer_kind = plans[first_projection_index].integer_kind;
+	for (auto projection_index : projection_indices) {
+		if (projection_index >= plans.size()) {
+			error = "SLJIT flat integer projection index is out of range";
+			return nullptr;
+		}
+		auto &plan = plans[projection_index];
+		if (!ValidateNativeFlatIntegerProjectionExpression(plan, integer_kind, error)) {
+			return nullptr;
+		}
+	}
+
+	SljitFlatProjectionSharedSourcePlan shared_source_plan;
+	if (!TryPlanSljitFlatProjectionSharedSources(plans, projection_indices,
+	                                             SljitNativeRegionExpressionKind::INTEGER_BINARY_REFERENCES,
+	                                             DConstants::INVALID_INDEX, shared_source_plan)) {
+		error = "SLJIT flat integer projection only supports projections with at most two input sources";
+		return nullptr;
+	}
+	return BuildSljitNativeFlatIntegerProjectionSharedSources(plans, projection_indices, shared_source_plan,
+	                                                          integer_kind, function, error);
 }
 
 sljit_s32 NativeDoubleBinaryOp(SljitNativeDoubleBinaryOp op, bool single_precision) {
@@ -1715,64 +2028,6 @@ static bool ValidateNativeFlatDoubleProjectionExpression(const SljitNativeRegion
 	}
 }
 
-struct SljitFlatDoubleProjectionSourceRef {
-	idx_t input_index = DConstants::INVALID_INDEX;
-	idx_t projection_index = DConstants::INVALID_INDEX;
-	bool right_source = false;
-};
-
-struct SljitFlatDoubleProjectionSharedSourcePlan {
-	vector<SljitFlatDoubleProjectionSourceRef> sources;
-};
-
-static idx_t SljitFlatDoubleProjectionSourceRegisterIndex(const vector<SljitFlatDoubleProjectionSourceRef> &sources,
-                                                          idx_t input_index) {
-	for (idx_t source_idx = 0; source_idx < sources.size(); source_idx++) {
-		if (sources[source_idx].input_index == input_index) {
-			return source_idx;
-		}
-	}
-	throw InternalException("SLJIT flat floating projection source index is not registered");
-}
-
-static bool TryAddSljitFlatDoubleProjectionSource(SljitFlatDoubleProjectionSharedSourcePlan &shared_plan,
-                                                  idx_t input_index, idx_t projection_index, bool right_source) {
-	for (auto &source : shared_plan.sources) {
-		if (source.input_index == input_index) {
-			return true;
-		}
-	}
-	if (shared_plan.sources.size() >= 2) {
-		return false;
-	}
-	SljitFlatDoubleProjectionSourceRef source;
-	source.input_index = input_index;
-	source.projection_index = projection_index;
-	source.right_source = right_source;
-	shared_plan.sources.push_back(source);
-	return true;
-}
-
-static bool TryPlanSljitFlatDoubleProjectionSharedSources(const vector<SljitNativeRegionExpressionPlan> &plans,
-                                                          const vector<idx_t> &projection_indices,
-                                                          SljitFlatDoubleProjectionSharedSourcePlan &shared_plan) {
-	if (projection_indices.size() < 2 || projection_indices.size() > 8) {
-		return false;
-	}
-	shared_plan = SljitFlatDoubleProjectionSharedSourcePlan();
-	for (auto projection_index : projection_indices) {
-		auto &plan = plans[projection_index];
-		if (!TryAddSljitFlatDoubleProjectionSource(shared_plan, plan.source_index, projection_index, false)) {
-			return false;
-		}
-		if (plan.kind == SljitNativeRegionExpressionKind::DOUBLE_BINARY_REFERENCES &&
-		    !TryAddSljitFlatDoubleProjectionSource(shared_plan, plan.right_source_index, projection_index, true)) {
-			return false;
-		}
-	}
-	return !shared_plan.sources.empty();
-}
-
 static sljit_s32 SljitFlatDoubleProjectionSourceFloatRegister(idx_t source_idx) {
 	switch (source_idx) {
 	case 0:
@@ -1847,8 +2102,8 @@ static void EmitSljitStoreFloatingStats(struct sljit_compiler *compiler, idx_t p
 
 static unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeFlatDoubleProjectionSharedSources(
     const vector<SljitNativeRegionExpressionPlan> &plans, const vector<idx_t> &projection_indices,
-    const SljitFlatDoubleProjectionSharedSourcePlan &shared_plan, bool single_precision,
-    SljitNativeVectorFunction &function, string &error) {
+    const SljitFlatProjectionSharedSourcePlan &shared_plan, bool single_precision, SljitNativeVectorFunction &function,
+    string &error) {
 	auto compiler = sljit_create_compiler(nullptr);
 	if (!compiler) {
 		error = "failed to create SLJIT compiler";
@@ -1890,12 +2145,13 @@ static unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeFlatDoubleProjectio
 	auto emit_projection = [&](idx_t fused_idx, bool initialize_stats, bool collect_stats) {
 		auto projection_index = projection_indices[fused_idx];
 		auto &plan = plans[projection_index];
-		auto left_source_idx = SljitFlatDoubleProjectionSourceRegisterIndex(shared_plan.sources, plan.source_index);
+		auto left_source_idx =
+		    SljitFlatProjectionSourceRegisterIndex(shared_plan.sources, plan.source_index, "floating");
 		auto left_reg = SljitFlatDoubleProjectionSourceFloatRegister(left_source_idx);
 		sljit_s32 right_reg;
 		if (plan.kind == SljitNativeRegionExpressionKind::DOUBLE_BINARY_REFERENCES) {
 			auto right_source_idx =
-			    SljitFlatDoubleProjectionSourceRegisterIndex(shared_plan.sources, plan.right_source_index);
+			    SljitFlatProjectionSourceRegisterIndex(shared_plan.sources, plan.right_source_index, "floating");
 			right_reg = SljitFlatDoubleProjectionSourceFloatRegister(right_source_idx);
 		} else {
 			right_reg = SLJIT_FR3;
@@ -1912,8 +2168,8 @@ static unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeFlatDoubleProjectio
 		}
 		auto result_pointer_offset = SljitPointerArrayOffset(projection_index);
 		sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_R4, 0, SLJIT_MEM1(SLJIT_S5), result_pointer_offset);
-		sljit_emit_fmem(compiler, move_op | SLJIT_MEM_STORE | fmem_align, SLJIT_FR2,
-		                SLJIT_MEM2(SLJIT_R4, SLJIT_S1), data_scale);
+		sljit_emit_fmem(compiler, move_op | SLJIT_MEM_STORE | fmem_align, SLJIT_FR2, SLJIT_MEM2(SLJIT_R4, SLJIT_S1),
+		                data_scale);
 		if (!collect_stats) {
 			return;
 		}
@@ -2005,8 +2261,10 @@ BuildSljitNativeFlatDoubleProjection(const vector<SljitNativeRegionExpressionPla
 		}
 	}
 
-	SljitFlatDoubleProjectionSharedSourcePlan shared_source_plan;
-	if (TryPlanSljitFlatDoubleProjectionSharedSources(plans, projection_indices, shared_source_plan)) {
+	SljitFlatProjectionSharedSourcePlan shared_source_plan;
+	if (TryPlanSljitFlatProjectionSharedSources(plans, projection_indices,
+	                                            SljitNativeRegionExpressionKind::DOUBLE_BINARY_REFERENCES, 8,
+	                                            shared_source_plan)) {
 		return BuildSljitNativeFlatDoubleProjectionSharedSources(plans, projection_indices, shared_source_plan,
 		                                                         single_precision, function, error);
 	}

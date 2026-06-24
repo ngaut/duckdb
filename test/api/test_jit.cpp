@@ -734,7 +734,7 @@ TEST_CASE("SLJIT direct FLOAT materialization crosses row group boundaries", "[a
 		    }
 		    REQUIRE(direct_materialize_count >= 5);
 		    REQUIRE(StringUtil::Contains(EventGeneratedStageRuntimeBreakdown(event), "op1:append_sink"));
-	});
+	    });
 }
 
 TEST_CASE("SLJIT native integer projection elides proven overflow checks", "[api][jit]") {
@@ -1000,15 +1000,18 @@ TEST_CASE("SLJIT direct fixed-width materialization rolls over column segments w
 	    [](const ExecutionRegionEvent &event) {
 		    return IsSljitRegionEvent(event) && EventPhase(event) == "runtime" && EventStatus(event) == "executed" &&
 		           event.output_rows == 100000 &&
-		           StringUtil::Contains(EventGeneratedStageCountBreakdown(event),
-		                                "op0:projection.direct_materialize_fixed_generated");
+		           (StringUtil::Contains(EventGeneratedStageCountBreakdown(event),
+		                                 "op0:projection.direct_materialize_fixed_generated") ||
+		            StringUtil::Contains(EventGeneratedStageCountBreakdown(event),
+		                                 "op0:projection.direct_materialize_fixed_fused_generated"));
 	    },
 	    [](const ExecutionRegionEvent &event) {
 		    idx_t direct_materialize_count = 0;
 		    idx_t fallback_projection_count = 0;
 		    idx_t fallback_append_count = 0;
 		    for (auto &stage : event.generated_stage_runtime) {
-			    if (stage.stage.name == "op0:projection.direct_materialize_fixed_generated") {
+			    if (stage.stage.name == "op0:projection.direct_materialize_fixed_generated" ||
+			        stage.stage.name == "op0:projection.direct_materialize_fixed_fused_generated") {
 				    direct_materialize_count += stage.count;
 			    } else if (stage.stage.name == "op0:projection") {
 				    fallback_projection_count += stage.count;

@@ -226,6 +226,41 @@ static void RecordSljitRegionStageRuntimeWithSuffix(ExecutionRegionRuntime &runt
 	runtime.RecordGeneratedStageRuntime(SljitRegionStageName(op_idx, kind) + suffix, SljitRegionElapsedMicros(start));
 }
 
+class SljitRegionStageAccumulator {
+public:
+	SljitRegionStageAccumulator(ExecutionRegionRuntime &runtime_p, idx_t op_idx, SljitNativeRegionOpKind kind,
+	                            const char *phase)
+	    : runtime(runtime_p), enabled(runtime.TraceRuntime()) {
+		if (enabled) {
+			stage = SljitRegionStageName(op_idx, kind, phase);
+		}
+	}
+
+	void Add(std::chrono::steady_clock::time_point start) {
+		if (!enabled) {
+			return;
+		}
+		runtime_time_us += SljitRegionElapsedMicros(start);
+		count++;
+	}
+
+	void Flush() {
+		if (!enabled || count == 0) {
+			return;
+		}
+		runtime.RecordGeneratedStageRuntime(stage, runtime_time_us, count);
+		runtime_time_us = 0;
+		count = 0;
+	}
+
+private:
+	ExecutionRegionRuntime &runtime;
+	string stage;
+	int64_t runtime_time_us = 0;
+	idx_t count = 0;
+	bool enabled;
+};
+
 class SljitRegionStageRecorder : public ExecutionOperatorStageRecorder {
 public:
 	SljitRegionStageRecorder(ExecutionRegionRuntime &runtime_p, string stage_prefix_p)
@@ -351,6 +386,7 @@ private:
 			source_data.assign(projection_count, nullptr);
 			right_source_data.assign(projection_count, nullptr);
 			result_data.assign(projection_count, nullptr);
+			integer_constants.assign(projection_count, 0);
 			float_constants.assign(projection_count, 0);
 			double_constants.assign(projection_count, 0);
 			collect_floating_stats = false;
@@ -405,6 +441,7 @@ private:
 		vector<const_data_ptr_t> source_data;
 		vector<const_data_ptr_t> right_source_data;
 		vector<data_ptr_t> result_data;
+		vector<int64_t> integer_constants;
 		vector<float> float_constants;
 		vector<double> double_constants;
 		vector<float> float_stats_min;
@@ -1700,8 +1737,8 @@ public:
 			if (plan.check_arithmetic_overflow || plan.check_result_range ||
 			    !TryScanFixedDirectAppendSourceStats(input, plan.source_index, source_offset, count, source_stats,
 			                                         source_cache) ||
-			    !TryScanFixedDirectAppendSourceStats(input, plan.right_source_index, source_offset, count,
-			                                         source_stats, source_cache)) {
+			    !TryScanFixedDirectAppendSourceStats(input, plan.right_source_index, source_offset, count, source_stats,
+			                                         source_cache)) {
 				return false;
 			}
 			return TryDeriveFixedBinaryReferenceStats(plan, source_stats[plan.source_index],
@@ -1710,6 +1747,42 @@ public:
 			return false;
 		}
 	}
+
+	enum class SljitDirectProjectionMaterializerKind : uint8_t { NONE, FLOATING_FUSED, FIXED_FUSED, FIXED_SCALAR };
+
+	struct SljitDirectProjectionCandidate {
+		SljitDirectProjectionMaterializerKind kind = SljitDirectProjectionMaterializerKind::NONE;
+		SljitDirectProjectionStatsMode stats_mode = SljitDirectProjectionStatsMode::NONE;
+		const char *shape_changed_message = nullptr;
+
+		bool IsSet() const {
+			return kind != SljitDirectProjectionMaterializerKind::NONE;
+		}
+
+		bool IsFloatingFused() const {
+			return kind == SljitDirectProjectionMaterializerKind::FLOATING_FUSED;
+		}
+
+		bool IsFixedFused() const {
+			return kind == SljitDirectProjectionMaterializerKind::FIXED_FUSED;
+		}
+
+		bool IsFixedScalar() const {
+			return kind == SljitDirectProjectionMaterializerKind::FIXED_SCALAR;
+		}
+
+		const char *ShapeChangedMessage() const {
+			return shape_changed_message ? shape_changed_message
+			                             : "SLJIT direct append source shape changed after preflight";
+		}
+	};
+
+	struct SljitDirectProjectionStageAccumulators {
+		SljitRegionStageAccumulator *source_prepare = nullptr;
+		SljitRegionStageAccumulator *run = nullptr;
+		SljitRegionStageAccumulator *generated = nullptr;
+		SljitRegionStageAccumulator *stats = nullptr;
+	};
 
 	static bool IsFixedDirectAppendGeneratedExpression(const SljitExecutableRegionExpression &expr) {
 		auto &plan = expr.plan;
@@ -1873,6 +1946,167 @@ public:
 		return true;
 	}
 
+	bool TrySelectDirectProjectionCandidate(ExecutionRegionRuntime &runtime, idx_t op_idx, SljitExecutableRegionOp &op,
+	                                        DataChunk &input, optional_ptr<FixedDirectAppendSourceCache> source_cache,
+	                                        SljitProjectionAdapterScratch &projection_scratch,
+	                                        SljitDirectProjectionCandidate &candidate) {
+		candidate = SljitDirectProjectionCandidate();
+		const bool use_floating_direct_append =
+		    op.flat_fused_floating_projection_function && op.flat_fused_floating_projection_plan.covers_all_projections;
+		auto preflight_stage_start = SljitRegionStageStart(runtime);
+		if (use_floating_direct_append) {
+			if (!PrepareFlatFusedFloatingProjectionSources(op, input, nullptr, input.size(), projection_scratch,
+			                                               false)) {
+				return false;
+			}
+			RecordSljitRegionStageRuntime(runtime, op_idx, op.kind, "direct_append_floating_preflight",
+			                              preflight_stage_start);
+			candidate.kind = SljitDirectProjectionMaterializerKind::FLOATING_FUSED;
+			candidate.stats_mode = op.flat_fused_floating_projection_plan.stats_mode;
+			candidate.shape_changed_message = "SLJIT direct append source shape changed after direct-append preflight";
+			return true;
+		}
+
+		preflight_stage_start = SljitRegionStageStart(runtime);
+		if (TryPrepareFlatFusedFixedProjectionSources(op, input, 0, input.size(), source_cache, projection_scratch)) {
+			RecordSljitRegionStageRuntime(runtime, op_idx, op.kind, "direct_append_fixed_preflight",
+			                              preflight_stage_start);
+			candidate.kind = SljitDirectProjectionMaterializerKind::FIXED_FUSED;
+			candidate.stats_mode = op.flat_fused_fixed_projection_plan.stats_mode;
+			candidate.shape_changed_message =
+			    "SLJIT fixed fused direct append source shape changed after direct-append preflight";
+			return true;
+		}
+		if (TryDirectMaterializeFixedProjection(op, input, nullptr, source_cache)) {
+			RecordSljitRegionStageRuntime(runtime, op_idx, op.kind, "direct_append_fixed_preflight",
+			                              preflight_stage_start);
+			candidate.kind = SljitDirectProjectionMaterializerKind::FIXED_SCALAR;
+			candidate.stats_mode = SljitDirectProjectionStatsMode::POSTPASS_FIXED_STATS;
+			candidate.shape_changed_message =
+			    "SLJIT fixed direct append source shape changed after direct-append preflight";
+			return true;
+		}
+		return false;
+	}
+
+	SljitDirectProjectionStageAccumulators DirectProjectionStageAccumulatorsFor(
+	    const SljitDirectProjectionCandidate &candidate, SljitRegionStageAccumulator &floating_source_prepare,
+	    SljitRegionStageAccumulator &floating_run, SljitRegionStageAccumulator &floating_generated,
+	    SljitRegionStageAccumulator &floating_stats, SljitRegionStageAccumulator &fixed_generated,
+	    SljitRegionStageAccumulator &fixed_fused_generated, SljitRegionStageAccumulator &fixed_stats) {
+		SljitDirectProjectionStageAccumulators result;
+		switch (candidate.kind) {
+		case SljitDirectProjectionMaterializerKind::FLOATING_FUSED:
+			result.source_prepare = &floating_source_prepare;
+			result.run = &floating_run;
+			result.generated = &floating_generated;
+			result.stats = &floating_stats;
+			break;
+		case SljitDirectProjectionMaterializerKind::FIXED_FUSED:
+			result.generated = &fixed_fused_generated;
+			result.stats = &fixed_stats;
+			break;
+		case SljitDirectProjectionMaterializerKind::FIXED_SCALAR:
+			result.generated = &fixed_generated;
+			result.stats = &fixed_stats;
+			break;
+		default:
+			break;
+		}
+		return result;
+	}
+
+	bool TryMaterializeDirectProjectionSlice(ExecutionRegionRuntime &runtime,
+	                                         const SljitDirectProjectionCandidate &candidate,
+	                                         SljitExecutableRegionOp &op, DataChunk &input, DirectAppendSlice &slice,
+	                                         optional_ptr<FixedDirectAppendSourceCache> source_cache,
+	                                         SljitProjectionAdapterScratch &projection_scratch,
+	                                         SljitDirectProjectionStageAccumulators &stage_accumulators) {
+		switch (candidate.kind) {
+		case SljitDirectProjectionMaterializerKind::FLOATING_FUSED: {
+			auto source_stage_start = SljitRegionStageStart(runtime);
+			if (!PrepareFlatFusedFloatingProjectionSources(op, input, nullptr, slice.count, projection_scratch, false,
+			                                               slice.source_offset)) {
+				return false;
+			}
+			if (stage_accumulators.source_prepare) {
+				stage_accumulators.source_prepare->Add(source_stage_start);
+			}
+
+			for (auto projection_idx : op.flat_fused_floating_projection_plan.projection_indices) {
+				auto &plan = op.projections[projection_idx].plan;
+				if (!slice.targets[projection_idx]) {
+					throw InternalException("SLJIT direct append target pointer is null");
+				}
+				projection_scratch.result_data[projection_idx] = slice.targets[projection_idx];
+				if (plan.return_type.InternalType() == PhysicalType::FLOAT) {
+					projection_scratch.float_constants[projection_idx] = static_cast<float>(plan.double_constant);
+				} else {
+					projection_scratch.double_constants[projection_idx] = plan.double_constant;
+				}
+			}
+			projection_scratch.PrepareFloatingStats(op.projections.size(),
+			                                        op.flat_fused_floating_projection_plan.SinglePrecision());
+
+			auto run_stage_start = SljitRegionStageStart(runtime);
+			RunFlatFusedFloatingProjection(op, slice.count, projection_scratch);
+			if (stage_accumulators.run) {
+				stage_accumulators.run->Add(run_stage_start);
+			}
+			return true;
+		}
+		case SljitDirectProjectionMaterializerKind::FIXED_FUSED:
+			if (!TryPrepareFlatFusedFixedProjectionSources(op, input, slice.source_offset, slice.count, source_cache,
+			                                               projection_scratch)) {
+				return false;
+			}
+			BindFlatFusedFixedProjectionTargets(op, slice, projection_scratch);
+			RunFlatFusedFixedProjection(op, slice.count, projection_scratch);
+			return true;
+		case SljitDirectProjectionMaterializerKind::FIXED_SCALAR:
+			return TryDirectMaterializeFixedProjection(op, input, &slice, source_cache);
+		default:
+			return false;
+		}
+	}
+
+	void FinishDirectProjectionStats(const SljitDirectProjectionCandidate &candidate, SljitExecutableRegionOp &op,
+	                                 DataChunk &input, DirectAppendSlice &slice, idx_t op_idx,
+	                                 optional_ptr<FixedDirectAppendSourceCache> source_cache,
+	                                 SljitProjectionAdapterScratch &projection_scratch) {
+		switch (candidate.stats_mode) {
+		case SljitDirectProjectionStatsMode::NONE:
+			slice.stats.clear();
+			return;
+		case SljitDirectProjectionStatsMode::GENERATED_FLOATING_MIN_MAX:
+			if (!candidate.IsFloatingFused()) {
+				throw InternalException(
+				    "SLJIT generated floating stats requested for a non-floating direct append path");
+			}
+			projection_scratch.FinishFloatingStats(op.projections,
+			                                       op.flat_fused_floating_projection_plan.SinglePrecision());
+			slice.stats = projection_scratch.direct_append_stats;
+			return;
+		case SljitDirectProjectionStatsMode::POSTPASS_FIXED_STATS: {
+			if (!candidate.IsFixedFused() && !candidate.IsFixedScalar()) {
+				throw InternalException("SLJIT fixed postpass stats requested for a non-fixed direct append path");
+			}
+			slice.stats.assign(op.projections.size(), DirectAppendColumnStats());
+			vector<DirectAppendColumnStats> fixed_source_stats(input.ColumnCount());
+			vector<idx_t> empty_distinct_counts;
+			const auto &direct_distinct_counts = op_idx == 0 ? source_distinct_counts : empty_distinct_counts;
+			for (idx_t projection_idx = 0; projection_idx < op.projections.size(); projection_idx++) {
+				TryComputeFixedDirectAppendStats(op.projections[projection_idx], input, slice.source_offset,
+				                                 slice.count, fixed_source_stats, slice.stats[projection_idx],
+				                                 source_cache, direct_distinct_counts);
+			}
+			return;
+		}
+		default:
+			throw InternalException("Unsupported SLJIT direct projection stats mode");
+		}
+	}
+
 	bool TryExecuteProjectionDirectAppend(ExecutionRegionRuntime &runtime, ExecutionOperatorRuntime &native_runtime,
 	                                      SljitRegionExecutionScratch &scratch, idx_t op_idx,
 	                                      SljitExecutableRegionOp &op, DataChunk &input, SinkResultType &sink_result) {
@@ -1883,31 +2117,16 @@ public:
 		if (sink_op.kind != SljitNativeRegionOpKind::APPEND_SINK || op_idx + 2 != ops.size()) {
 			return false;
 		}
-		const bool use_floating_direct_append =
-		    op.flat_fused_projection_function && op.flat_fused_projection_indices.size() == op.projections.size();
 		auto &projection_scratch = scratch.ProjectionScratch(op_idx);
-		auto preflight_stage_start = SljitRegionStageStart(runtime);
-		if (use_floating_direct_append &&
-		    !PrepareFlatFusedFloatingProjectionSources(op, input, nullptr, input.size(), projection_scratch, false)) {
-			return false;
-		}
-		if (use_floating_direct_append) {
-			RecordSljitRegionStageRuntime(runtime, op_idx, op.kind, "direct_append_floating_preflight",
-			                              preflight_stage_start);
-		}
-		preflight_stage_start = SljitRegionStageStart(runtime);
 		FixedDirectAppendSourceCache fixed_source_cache;
 		fixed_source_cache.Reset(input.ColumnCount());
 		auto fixed_source_cache_ptr = optional_ptr<FixedDirectAppendSourceCache>(&fixed_source_cache);
-		const bool use_fixed_direct_append =
-		    !use_floating_direct_append && TryDirectMaterializeFixedProjection(op, input, nullptr, fixed_source_cache_ptr);
-		if (!use_floating_direct_append && use_fixed_direct_append) {
-			RecordSljitRegionStageRuntime(runtime, op_idx, op.kind, "direct_append_fixed_preflight",
-			                              preflight_stage_start);
-		}
-		if (!use_floating_direct_append && !use_fixed_direct_append) {
+		SljitDirectProjectionCandidate direct_candidate;
+		if (!TrySelectDirectProjectionCandidate(runtime, op_idx, op, input, fixed_source_cache_ptr, projection_scratch,
+		                                        direct_candidate)) {
 			return false;
 		}
+		D_ASSERT(direct_candidate.IsSet());
 
 		auto bind_stage_start = SljitRegionStageStart(runtime);
 		bool bound = false;
@@ -1920,6 +2139,41 @@ public:
 			throw InternalException("SLJIT append sink binding did not return a ready append state");
 		}
 
+		SljitRegionStageAccumulator prepare_stage_accumulator(runtime, op_idx + 1, sink_op.kind,
+		                                                      "direct_append_prepare");
+		SljitRegionStageAccumulator floating_source_prepare_stage_accumulator(runtime, op_idx, op.kind,
+		                                                                      "direct_append_floating_source_prepare");
+		SljitRegionStageAccumulator floating_run_stage_accumulator(runtime, op_idx, op.kind,
+		                                                           "direct_append_floating_run");
+		SljitRegionStageAccumulator floating_generated_stage_accumulator(runtime, op_idx, op.kind,
+		                                                                 "direct_materialize_generated");
+		SljitRegionStageAccumulator floating_stats_stage_accumulator(runtime, op_idx, op.kind,
+		                                                             "direct_append_floating_finish_stats");
+		SljitRegionStageAccumulator fixed_generated_stage_accumulator(runtime, op_idx, op.kind,
+		                                                              "direct_materialize_fixed_generated");
+		SljitRegionStageAccumulator fixed_fused_generated_stage_accumulator(runtime, op_idx, op.kind,
+		                                                                    "direct_materialize_fixed_fused_generated");
+		SljitRegionStageAccumulator fixed_stats_stage_accumulator(runtime, op_idx, op.kind,
+		                                                          "direct_append_fixed_stats");
+		SljitRegionStageAccumulator commit_stage_accumulator(runtime, op_idx + 1, sink_op.kind, "direct_append_commit");
+		auto flush_direct_append_stage_accumulators = [&]() {
+			prepare_stage_accumulator.Flush();
+			floating_source_prepare_stage_accumulator.Flush();
+			floating_run_stage_accumulator.Flush();
+			floating_generated_stage_accumulator.Flush();
+			floating_stats_stage_accumulator.Flush();
+			fixed_generated_stage_accumulator.Flush();
+			fixed_fused_generated_stage_accumulator.Flush();
+			fixed_stats_stage_accumulator.Flush();
+			commit_stage_accumulator.Flush();
+		};
+		auto direct_stage_accumulators = DirectProjectionStageAccumulatorsFor(
+		    direct_candidate, floating_source_prepare_stage_accumulator, floating_run_stage_accumulator,
+		    floating_generated_stage_accumulator, floating_stats_stage_accumulator, fixed_generated_stage_accumulator,
+		    fixed_fused_generated_stage_accumulator, fixed_stats_stage_accumulator);
+		D_ASSERT(direct_stage_accumulators.generated);
+		D_ASSERT(direct_stage_accumulators.stats);
+
 		idx_t source_offset = 0;
 		while (source_offset < input.size()) {
 			string blocker;
@@ -1927,8 +2181,7 @@ public:
 			auto prepare_stage_start = SljitRegionStageStart(runtime);
 			auto direct_result = ExecutionPrepareDirectAppend(binding.append_sink, op.output_types,
 			                                                  input.size() - source_offset, reservation, blocker);
-			RecordSljitRegionStageRuntime(runtime, op_idx + 1, sink_op.kind, "direct_append_prepare",
-			                              prepare_stage_start);
+			prepare_stage_accumulator.Add(prepare_stage_start);
 			if (direct_result == ExecutionOperatorBindResult::DEFERRED) {
 				if (source_offset > 0) {
 					throw InternalException("SLJIT direct append became deferred after a partial commit: %s",
@@ -1936,6 +2189,7 @@ public:
 				}
 				runtime.Defer(blocker.empty() ? "direct-append-deferred" : blocker);
 				sink_result = SinkResultType::BLOCKED;
+				flush_direct_append_stage_accumulators();
 				return true;
 			}
 			if (direct_result != ExecutionOperatorBindResult::READY) {
@@ -1943,6 +2197,7 @@ public:
 					throw InternalException("SLJIT direct append became unavailable after a partial commit: %s",
 					                        blocker.c_str());
 				}
+				flush_direct_append_stage_accumulators();
 				return false;
 			}
 			if (reservation.slices.size() != 1) {
@@ -1957,67 +2212,26 @@ public:
 				throw InternalException("SLJIT direct append target count mismatch");
 			}
 			auto generated_stage_start = SljitRegionStageStart(runtime);
-			if (use_floating_direct_append) {
-				auto source_stage_start = SljitRegionStageStart(runtime);
-				if (!PrepareFlatFusedFloatingProjectionSources(op, input, nullptr, slice.count, projection_scratch,
-				                                               false, slice.source_offset)) {
-					throw InternalException("SLJIT direct append source shape changed after direct-append preflight");
-				}
-				RecordSljitRegionStageRuntime(runtime, op_idx, op.kind, "direct_append_floating_source_prepare",
-				                              source_stage_start);
-
-				for (auto projection_idx : op.flat_fused_projection_indices) {
-					auto &plan = op.projections[projection_idx].plan;
-					if (!slice.targets[projection_idx]) {
-						throw InternalException("SLJIT direct append target pointer is null");
-					}
-					projection_scratch.result_data[projection_idx] = slice.targets[projection_idx];
-					if (plan.return_type.InternalType() == PhysicalType::FLOAT) {
-						projection_scratch.float_constants[projection_idx] = static_cast<float>(plan.double_constant);
-					} else {
-						projection_scratch.double_constants[projection_idx] = plan.double_constant;
-					}
-				}
-				projection_scratch.PrepareFloatingStats(op.projections.size(),
-				                                        op.flat_fused_projection_single_precision);
-
-				auto run_stage_start = SljitRegionStageStart(runtime);
-				RunFlatFusedFloatingProjection(op, slice.count, projection_scratch);
-				RecordSljitRegionStageRuntime(runtime, op_idx, op.kind, "direct_append_floating_run",
-				                              run_stage_start);
-				RecordSljitRegionStageRuntime(runtime, op_idx, op.kind, "direct_materialize_generated",
-				                              generated_stage_start);
-				auto stats_stage_start = SljitRegionStageStart(runtime);
-				projection_scratch.FinishFloatingStats(op.projections, op.flat_fused_projection_single_precision);
-				RecordSljitRegionStageRuntime(runtime, op_idx, op.kind, "direct_append_floating_finish_stats",
-				                              stats_stage_start);
-				slice.stats = projection_scratch.direct_append_stats;
-			} else {
-				if (!TryDirectMaterializeFixedProjection(op, input, &slice, fixed_source_cache_ptr)) {
-					throw InternalException(
-					    "SLJIT fixed direct append source shape changed after direct-append preflight");
-				}
-				RecordSljitRegionStageRuntime(runtime, op_idx, op.kind, "direct_materialize_fixed_generated",
-				                              generated_stage_start);
-				slice.stats.assign(op.projections.size(), DirectAppendColumnStats());
-				vector<DirectAppendColumnStats> fixed_source_stats(input.ColumnCount());
-				vector<idx_t> empty_distinct_counts;
-				const auto &direct_distinct_counts = op_idx == 0 ? source_distinct_counts : empty_distinct_counts;
-				for (idx_t projection_idx = 0; projection_idx < op.projections.size(); projection_idx++) {
-					TryComputeFixedDirectAppendStats(op.projections[projection_idx], input, slice.source_offset,
-					                                 slice.count, fixed_source_stats, slice.stats[projection_idx],
-					                                 fixed_source_cache_ptr, direct_distinct_counts);
-				}
+			if (!TryMaterializeDirectProjectionSlice(runtime, direct_candidate, op, input, slice,
+			                                         fixed_source_cache_ptr, projection_scratch,
+			                                         direct_stage_accumulators)) {
+				throw InternalException(direct_candidate.ShapeChangedMessage());
 			}
+			direct_stage_accumulators.generated->Add(generated_stage_start);
+			auto stats_stage_start = SljitRegionStageStart(runtime);
+			FinishDirectProjectionStats(direct_candidate, op, input, slice, op_idx, fixed_source_cache_ptr,
+			                            projection_scratch);
+			direct_stage_accumulators.stats->Add(stats_stage_start);
 			auto commit_stage_start = SljitRegionStageStart(runtime);
 			sink_result = ExecutionCommitDirectAppend(binding.append_sink, reservation);
-			RecordSljitRegionStageRuntime(runtime, op_idx + 1, sink_op.kind, "direct_append_commit",
-			                              commit_stage_start);
+			commit_stage_accumulator.Add(commit_stage_start);
 			if (sink_result != SinkResultType::NEED_MORE_INPUT) {
+				flush_direct_append_stage_accumulators();
 				return true;
 			}
 			source_offset += slice.count;
 		}
+		flush_direct_append_stage_accumulators();
 		return true;
 	}
 
@@ -2030,7 +2244,7 @@ public:
 		auto &projection_scratch = scratch.ProjectionScratch(op_idx);
 		auto fused_projection_executed =
 		    ExecuteFlatFusedFloatingProjection(op, input, output, execute_sel, count, projection_scratch);
-		if (fused_projection_executed && op.flat_fused_projection_indices.size() == op.projections.size()) {
+		if (fused_projection_executed && op.flat_fused_floating_projection_plan.covers_all_projections) {
 			output.SetChildCardinality(count);
 			return;
 		}
@@ -2047,13 +2261,13 @@ public:
 	bool ExecuteFlatFusedFloatingProjection(SljitExecutableRegionOp &op, DataChunk &input, DataChunk &output,
 	                                        const SelectionVector *execute_sel, idx_t count,
 	                                        SljitProjectionAdapterScratch &adapter_scratch) {
-		auto all_projections_fused = op.flat_fused_projection_indices.size() == op.projections.size();
+		auto all_projections_fused = op.flat_fused_floating_projection_plan.covers_all_projections;
 		if (!PrepareFlatFusedFloatingProjectionSources(op, input, execute_sel, count, adapter_scratch,
 		                                               !all_projections_fused)) {
 			return false;
 		}
 
-		for (auto projection_idx : op.flat_fused_projection_indices) {
+		for (auto projection_idx : op.flat_fused_floating_projection_plan.projection_indices) {
 			auto &plan = op.projections[projection_idx].plan;
 			auto &result = output.data[projection_idx];
 			result.SetVectorType(VectorType::FLAT_VECTOR);
@@ -2081,11 +2295,11 @@ public:
 	                                               const SelectionVector *execute_sel, idx_t count,
 	                                               SljitProjectionAdapterScratch &adapter_scratch, bool track_fused,
 	                                               idx_t source_offset = 0) {
-		if (!op.flat_fused_projection_function || execute_sel) {
+		if (!op.flat_fused_floating_projection_function || execute_sel) {
 			return false;
 		}
 		adapter_scratch.Prepare(op.projections.size(), track_fused);
-		for (auto projection_idx : op.flat_fused_projection_indices) {
+		for (auto projection_idx : op.flat_fused_floating_projection_plan.projection_indices) {
 			auto &plan = op.projections[projection_idx].plan;
 			D_ASSERT(plan.kind == SljitNativeRegionExpressionKind::DOUBLE_BINARY_CONSTANT ||
 			         plan.kind == SljitNativeRegionExpressionKind::DOUBLE_BINARY_REFERENCES);
@@ -2103,6 +2317,94 @@ public:
 		return true;
 	}
 
+	static bool HasDirectProjectionSourceRef(const SljitDirectProjectionPlan &direct_plan, idx_t source_index) {
+		for (auto &source : direct_plan.sources) {
+			if (source.input_index == source_index) {
+				return true;
+			}
+		}
+		return false;
+	}
+
+	bool TryPrepareFlatFusedFixedProjectionSources(SljitExecutableRegionOp &op, DataChunk &input, idx_t source_offset,
+	                                               idx_t count, optional_ptr<FixedDirectAppendSourceCache> source_cache,
+	                                               SljitProjectionAdapterScratch &adapter_scratch) {
+		auto &direct_plan = op.flat_fused_fixed_projection_plan;
+		if (!op.flat_fused_fixed_projection_function || !direct_plan.covers_all_projections ||
+		    direct_plan.sources.empty()) {
+			return false;
+		}
+		adapter_scratch.Prepare(op.projections.size(), false);
+		for (auto &source : direct_plan.sources) {
+			if (source.projection_index >= op.projections.size()) {
+				throw InternalException("SLJIT fixed fused direct append source projection is out of range");
+			}
+			auto &plan = op.projections[source.projection_index].plan;
+			UnifiedVectorFormat local_source_format;
+			UnifiedVectorFormat *source_format;
+			if (!PrepareFixedDirectAppendSource(input, source.input_index, source_offset, count, source_cache,
+			                                    local_source_format, source_format)) {
+				return false;
+			}
+			auto source_data = NativeIntegerSourceData(*source_format, plan.integer_kind);
+			auto source_pointer =
+			    OffsetFixedSizeData(source_data, input.data[source.input_index].GetType(), source_offset);
+			if (source.right_source) {
+				adapter_scratch.right_source_data[source.projection_index] = source_pointer;
+			} else {
+				adapter_scratch.source_data[source.projection_index] = source_pointer;
+			}
+		}
+		for (auto projection_idx : direct_plan.projection_indices) {
+			auto &expr = op.projections[projection_idx];
+			auto &plan = expr.plan;
+			if (plan.kind != SljitNativeRegionExpressionKind::INTEGER_BINARY_CONSTANT &&
+			    plan.kind != SljitNativeRegionExpressionKind::INTEGER_BINARY_REFERENCES) {
+				return false;
+			}
+			if (!HasDirectProjectionSourceRef(direct_plan, plan.source_index)) {
+				return false;
+			}
+			if (plan.kind == SljitNativeRegionExpressionKind::INTEGER_BINARY_REFERENCES) {
+				if (!HasDirectProjectionSourceRef(direct_plan, plan.right_source_index)) {
+					return false;
+				}
+			}
+			adapter_scratch.integer_constants[projection_idx] = plan.constant;
+		}
+		return true;
+	}
+
+	void BindFlatFusedFixedProjectionTargets(SljitExecutableRegionOp &op, DirectAppendSlice &slice,
+	                                         SljitProjectionAdapterScratch &adapter_scratch) {
+		auto &direct_plan = op.flat_fused_fixed_projection_plan;
+		if (slice.targets.size() != op.projections.size()) {
+			throw InternalException("SLJIT fixed fused direct append target count mismatch");
+		}
+		for (auto projection_idx : direct_plan.projection_indices) {
+			auto target = slice.targets[projection_idx];
+			if (!target) {
+				throw InternalException("SLJIT fixed fused direct append target pointer is null");
+			}
+			adapter_scratch.result_data[projection_idx] = target;
+		}
+	}
+
+	void RunFlatFusedFixedProjection(SljitExecutableRegionOp &op, idx_t count,
+	                                 SljitProjectionAdapterScratch &adapter_scratch) {
+		SljitNativeVectorInput native_input;
+		native_input.source_data_array = adapter_scratch.source_data.data();
+		native_input.right_source_data_array = adapter_scratch.right_source_data.data();
+		native_input.result_data_array = adapter_scratch.result_data.data();
+		native_input.constants = adapter_scratch.integer_constants.data();
+		native_input.count = count;
+		native_input.has_error = false;
+		op.flat_fused_fixed_projection_function(&native_input);
+		if (native_input.error) {
+			std::rethrow_exception(native_input.error);
+		}
+	}
+
 	void RunFlatFusedFloatingProjection(SljitExecutableRegionOp &op, idx_t count,
 	                                    SljitProjectionAdapterScratch &adapter_scratch) {
 		SljitNativeVectorInput native_input;
@@ -2110,22 +2412,22 @@ public:
 		native_input.right_source_data_array = adapter_scratch.right_source_data.data();
 		native_input.result_data_array = adapter_scratch.result_data.data();
 		native_input.floating_constants =
-		    op.flat_fused_projection_single_precision
+		    op.flat_fused_floating_projection_plan.SinglePrecision()
 		        ? reinterpret_cast<const_data_ptr_t>(adapter_scratch.float_constants.data())
 		        : reinterpret_cast<const_data_ptr_t>(adapter_scratch.double_constants.data());
 		if (adapter_scratch.collect_floating_stats) {
 			native_input.floating_stats_min =
-			    op.flat_fused_projection_single_precision
+			    op.flat_fused_floating_projection_plan.SinglePrecision()
 			        ? reinterpret_cast<data_ptr_t>(adapter_scratch.float_stats_min.data())
 			        : reinterpret_cast<data_ptr_t>(adapter_scratch.double_stats_min.data());
 			native_input.floating_stats_max =
-			    op.flat_fused_projection_single_precision
+			    op.flat_fused_floating_projection_plan.SinglePrecision()
 			        ? reinterpret_cast<data_ptr_t>(adapter_scratch.float_stats_max.data())
 			        : reinterpret_cast<data_ptr_t>(adapter_scratch.double_stats_max.data());
 		}
 		native_input.count = count;
 		native_input.has_error = false;
-		op.flat_fused_projection_function(&native_input);
+		op.flat_fused_floating_projection_function(&native_input);
 		if (native_input.error) {
 			std::rethrow_exception(native_input.error);
 		}

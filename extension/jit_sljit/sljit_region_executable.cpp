@@ -163,6 +163,57 @@ static bool SljitProjectionReturnIsSinglePrecision(const SljitNativeRegionExpres
 	}
 }
 
+static bool TryAddSljitDirectProjectionSource(SljitDirectProjectionPlan &direct_plan, idx_t input_index,
+                                              idx_t projection_index, bool right_source) {
+	for (auto &source : direct_plan.sources) {
+		if (source.input_index == input_index) {
+			return true;
+		}
+	}
+	if (direct_plan.sources.size() >= 2) {
+		return false;
+	}
+	SljitDirectProjectionSourceRef source;
+	source.input_index = input_index;
+	source.projection_index = projection_index;
+	source.right_source = right_source;
+	direct_plan.sources.push_back(source);
+	return true;
+}
+
+static bool TryPlanSljitDirectProjectionSources(const vector<SljitExecutableRegionExpression> &projections,
+                                                SljitDirectProjectionPlan &direct_plan) {
+	direct_plan.sources.clear();
+	if (direct_plan.projection_indices.size() < 2) {
+		return false;
+	}
+	for (auto projection_idx : direct_plan.projection_indices) {
+		if (projection_idx >= projections.size()) {
+			return false;
+		}
+		auto &plan = projections[projection_idx].plan;
+		if (!TryAddSljitDirectProjectionSource(direct_plan, plan.source_index, projection_idx, false)) {
+			return false;
+		}
+		if ((plan.kind == SljitNativeRegionExpressionKind::DOUBLE_BINARY_REFERENCES ||
+		     plan.kind == SljitNativeRegionExpressionKind::INTEGER_BINARY_REFERENCES) &&
+		    !TryAddSljitDirectProjectionSource(direct_plan, plan.right_source_index, projection_idx, true)) {
+			return false;
+		}
+	}
+	return !direct_plan.sources.empty();
+}
+
+static vector<SljitNativeRegionExpressionPlan>
+BuildSljitProjectionPlans(const vector<SljitExecutableRegionExpression> &projections) {
+	vector<SljitNativeRegionExpressionPlan> projection_plans;
+	projection_plans.reserve(projections.size());
+	for (auto &projection : projections) {
+		projection_plans.push_back(projection.plan.Copy(false, false));
+	}
+	return projection_plans;
+}
+
 static bool SljitCanUseFlatFusedFloatingProjection(const SljitExecutableRegionExpression &expr, bool single_precision) {
 	if (!expr.flat_function) {
 		return false;
@@ -184,9 +235,9 @@ static bool SljitCanUseFlatFusedFloatingProjection(const SljitExecutableRegionEx
 	}
 }
 
-static bool TryBuildFlatFusedFloatingProjection(SljitExecutableRegionOp &op, string &error) {
+static bool TryPlanFlatFusedFloatingProjection(SljitExecutableRegionOp &op, SljitDirectProjectionPlan &direct_plan) {
 	if (op.projections.size() < 2) {
-		return true;
+		return false;
 	}
 	vector<idx_t> float_indices;
 	vector<idx_t> double_indices;
@@ -201,17 +252,28 @@ static bool TryBuildFlatFusedFloatingProjection(SljitExecutableRegionOp &op, str
 	auto single_precision = float_indices.size() >= double_indices.size();
 	auto &projection_indices = single_precision ? float_indices : double_indices;
 	if (projection_indices.size() < 2) {
+		return false;
+	}
+	direct_plan = SljitDirectProjectionPlan();
+	direct_plan.kind = single_precision ? SljitDirectProjectionKind::FLOAT : SljitDirectProjectionKind::DOUBLE;
+	direct_plan.stats_mode = SljitDirectProjectionStatsMode::GENERATED_FLOATING_MIN_MAX;
+	direct_plan.projection_indices = projection_indices;
+	direct_plan.covers_all_projections = projection_indices.size() == op.projections.size();
+	TryPlanSljitDirectProjectionSources(op.projections, direct_plan);
+	return true;
+}
+
+static bool TryBuildFlatFusedFloatingProjection(SljitExecutableRegionOp &op, string &error) {
+	SljitDirectProjectionPlan direct_plan;
+	if (!TryPlanFlatFusedFloatingProjection(op, direct_plan)) {
 		return true;
 	}
 
-	vector<SljitNativeRegionExpressionPlan> projection_plans;
-	projection_plans.reserve(op.projections.size());
-	for (auto &projection : op.projections) {
-		projection_plans.push_back(projection.plan.Copy(false, false));
-	}
+	auto projection_plans = BuildSljitProjectionPlans(op.projections);
 	SljitNativeVectorFunction function = nullptr;
 	string fused_error;
-	auto code = BuildSljitNativeFlatDoubleProjection(projection_plans, projection_indices, function, fused_error);
+	auto code =
+	    BuildSljitNativeFlatDoubleProjection(projection_plans, direct_plan.projection_indices, function, fused_error);
 	if (!code || !function) {
 		if (fused_error.empty() || fused_error.rfind("SLJIT flat floating projection", 0) == 0) {
 			return true;
@@ -219,10 +281,95 @@ static bool TryBuildFlatFusedFloatingProjection(SljitExecutableRegionOp &op, str
 		error = fused_error;
 		return false;
 	}
-	op.flat_fused_projection_indices = projection_indices;
-	op.flat_fused_projection_code = std::move(code);
-	op.flat_fused_projection_function = function;
-	op.flat_fused_projection_single_precision = single_precision;
+	op.flat_fused_floating_projection_plan = std::move(direct_plan);
+	op.flat_fused_floating_projection_code = std::move(code);
+	op.flat_fused_floating_projection_function = function;
+	return true;
+}
+
+static bool SljitCanUseFlatFusedFixedProjection(const SljitExecutableRegionExpression &expr,
+                                                SljitNativeIntegerKind integer_kind) {
+	if (!expr.flat_function) {
+		return false;
+	}
+	auto &plan = expr.plan;
+	if (plan.integer_kind != integer_kind || plan.check_arithmetic_overflow || plan.check_result_range) {
+		return false;
+	}
+	switch (integer_kind) {
+	case SljitNativeIntegerKind::INT32:
+		if (plan.return_type.InternalType() != PhysicalType::INT32) {
+			return false;
+		}
+		break;
+	case SljitNativeIntegerKind::INT64:
+		if (plan.return_type.InternalType() != PhysicalType::INT64) {
+			return false;
+		}
+		break;
+	default:
+		return false;
+	}
+	switch (plan.kind) {
+	case SljitNativeRegionExpressionKind::INTEGER_BINARY_CONSTANT:
+	case SljitNativeRegionExpressionKind::INTEGER_BINARY_REFERENCES:
+		return true;
+	default:
+		return false;
+	}
+}
+
+static bool TryPlanFlatFusedFixedProjection(SljitExecutableRegionOp &op, SljitDirectProjectionPlan &direct_plan) {
+	if (op.projections.size() < 2) {
+		return false;
+	}
+	vector<idx_t> int32_indices;
+	vector<idx_t> int64_indices;
+	for (idx_t projection_idx = 0; projection_idx < op.projections.size(); projection_idx++) {
+		auto &projection = op.projections[projection_idx];
+		if (SljitCanUseFlatFusedFixedProjection(projection, SljitNativeIntegerKind::INT32)) {
+			int32_indices.push_back(projection_idx);
+		} else if (SljitCanUseFlatFusedFixedProjection(projection, SljitNativeIntegerKind::INT64)) {
+			int64_indices.push_back(projection_idx);
+		}
+	}
+	auto use_int32 = int32_indices.size() >= int64_indices.size();
+	auto &projection_indices = use_int32 ? int32_indices : int64_indices;
+	if (projection_indices.size() < 2 || projection_indices.size() != op.projections.size()) {
+		return false;
+	}
+	direct_plan = SljitDirectProjectionPlan();
+	direct_plan.kind = use_int32 ? SljitDirectProjectionKind::INT32 : SljitDirectProjectionKind::INT64;
+	direct_plan.stats_mode = SljitDirectProjectionStatsMode::POSTPASS_FIXED_STATS;
+	direct_plan.projection_indices = projection_indices;
+	direct_plan.covers_all_projections = true;
+	if (!TryPlanSljitDirectProjectionSources(op.projections, direct_plan)) {
+		return false;
+	}
+	return true;
+}
+
+static bool TryBuildFlatFusedFixedProjection(SljitExecutableRegionOp &op, string &error) {
+	SljitDirectProjectionPlan direct_plan;
+	if (!TryPlanFlatFusedFixedProjection(op, direct_plan)) {
+		return true;
+	}
+
+	auto projection_plans = BuildSljitProjectionPlans(op.projections);
+	SljitNativeVectorFunction function = nullptr;
+	string fused_error;
+	auto code =
+	    BuildSljitNativeFlatIntegerProjection(projection_plans, direct_plan.projection_indices, function, fused_error);
+	if (!code || !function) {
+		if (fused_error.empty() || fused_error.rfind("SLJIT flat integer projection", 0) == 0) {
+			return true;
+		}
+		error = fused_error;
+		return false;
+	}
+	op.flat_fused_fixed_projection_plan = std::move(direct_plan);
+	op.flat_fused_fixed_projection_code = std::move(code);
+	op.flat_fused_fixed_projection_function = function;
 	return true;
 }
 
@@ -264,10 +411,9 @@ static bool CompilePreparedExecutableRegionExpression(SljitExecutableRegionExpre
 		return true;
 	case SljitNativeRegionExpressionKind::INTEGER_BINARY_REFERENCES:
 		expr.overflow_message = NativeRegionIntegerBinaryOverflowMessage(semantic.integer_kind, semantic.binary_op);
-		expr.code = BuildSljitNativeIntegerBinaryReferences(semantic.integer_kind, semantic.binary_op, expr.function,
-		                                                    error, semantic.check_arithmetic_overflow,
-		                                                    semantic.check_result_range, semantic.result_min,
-		                                                    semantic.result_max);
+		expr.code = BuildSljitNativeIntegerBinaryReferences(
+		    semantic.integer_kind, semantic.binary_op, expr.function, error, semantic.check_arithmetic_overflow,
+		    semantic.check_result_range, semantic.result_min, semantic.result_max);
 		if (!expr.code) {
 			return false;
 		}
@@ -747,11 +893,9 @@ static bool BuildExecutableAggregateUpdatePayloadCode(const SljitNativeAggregate
 				error = "SLJIT aggregate binary-reference reducer only supports SUM_INT64";
 				return false;
 			}
-			code = BuildSljitNativeUngroupedSumInt64IntegerBinaryReferences(payload.integer_kind, payload.binary_op,
-			                                                                function, error,
-			                                                                payload.check_arithmetic_overflow,
-			                                                                payload.check_result_range,
-			                                                                payload.result_min, payload.result_max);
+			code = BuildSljitNativeUngroupedSumInt64IntegerBinaryReferences(
+			    payload.integer_kind, payload.binary_op, function, error, payload.check_arithmetic_overflow,
+			    payload.check_result_range, payload.result_min, payload.result_max);
 			break;
 		case SljitNativeRegionExpressionKind::DOUBLE_BINARY_CONSTANT:
 			if (op.use_grouped_state_addresses) {
@@ -934,6 +1078,9 @@ static bool BuildExecutableRegionOp(const SljitNativeRegionOpPlan &op, SljitExec
 			executable.projections.push_back(std::move(executable_projection));
 		}
 		if (!TryBuildFlatFusedFloatingProjection(executable, error)) {
+			return false;
+		}
+		if (!TryBuildFlatFusedFixedProjection(executable, error)) {
 			return false;
 		}
 		return true;

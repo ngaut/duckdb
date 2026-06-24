@@ -183,11 +183,11 @@ public:
 		return trace_runtime;
 	}
 
-	void RecordGeneratedStageRuntime(ExecutionRegionStageId stage, int64_t runtime_time_us) override {
+	void RecordGeneratedStageRuntime(ExecutionRegionStageId stage, int64_t runtime_time_us, idx_t count) override {
 		if (!trace_runtime) {
 			return;
 		}
-		AddExecutionRegionStageRuntime(generated_stage_runtime, stage, runtime_time_us);
+		AddExecutionRegionStageRuntime(generated_stage_runtime, stage, runtime_time_us, count);
 	}
 
 	void RecordHashJoinProbeLayout(const char *layout) override {
