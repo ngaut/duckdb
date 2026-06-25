@@ -97,6 +97,14 @@ public:
 		input.full_pipeline = full_pipeline;
 	}
 
+	void SetUsesScanFilters(bool uses_scan_filters) {
+		input.uses_scan_filters = uses_scan_filters;
+	}
+
+	void SetSourceFilterCount(idx_t source_filter_count) {
+		input.source_filter_count = source_filter_count;
+	}
+
 	void SetNodeCount(idx_t node_count) {
 		input.node_count = node_count;
 	}
@@ -328,8 +336,10 @@ PhysicalRunnerCostInput BuildExecutionRegionCandidateCostInput(const ExecutionRe
 	builder.SetNativeAggregateStageCount(cost_facts.native_aggregate_stage_count);
 	builder.SetNativeGroupedAggregateStageCount(cost_facts.native_grouped_aggregate_stage_count);
 	builder.SetNativeSortStageCount(cost_facts.native_sort_stage_count);
+	builder.SetSourceFilterCount(candidate.traits.source_filter_count);
 	builder.SetFullPipeline(ExecutionRegionABIIsFullPipeline(candidate.contract.abi) &&
 	                        cost_facts.may_anchor_compiled_body);
+	builder.SetUsesScanFilters(candidate.uses_scan_filters);
 	builder.SetNodeCount(candidate.node_count);
 	builder.SetStageCount(candidate.stage_plan.stages.size());
 	builder.SetExpressionNodeCount(candidate.traits.expression_node_count);
@@ -483,6 +493,7 @@ static bool TryAccumulateExecutionRegionPhysicalScanCost(const PhysicalOperator 
 		filter_cost += DuckDBCostModel::FilterCost(filter.Filter());
 		filter_count++;
 	}
+	facts.traits.source_filter_count += filter_count;
 	facts.traits.source_filter_expression_count += filter_count;
 	facts.builder.AddGeneratedExpressionWork(filter_cost);
 	return true;
@@ -698,6 +709,7 @@ static void FinalizeExecutionRegionPhysicalPipelineCostInput(Pipeline &pipeline,
 	if (cost_input.generated_stage_count > 0 && cost_input.native_aggregate_stage_count > 0) {
 		builder.SetMaterializationElisionCount(1);
 	}
+	builder.SetSourceFilterCount(facts.traits.source_filter_count);
 	builder.SetMaterializationSourceAppendCount(facts.traits.sink_kind == ExecutionRegionSinkKind::MATERIALIZATION
 	                                                ? facts.traits.reference_varchar_projection_count
 	                                                : 0);

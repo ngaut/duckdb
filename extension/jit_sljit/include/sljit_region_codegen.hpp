@@ -22,7 +22,13 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitHashJoinProbe(const vector<Sljit
                                                               idx_t found_match_offset, idx_t pointer_offset,
                                                               ExecutionHashJoinProbeOutputMode output_mode,
                                                               SljitNativeHashJoinProbeFunction &function,
-                                                              string &error);
+                                                              string &error, bool assume_flat_all_valid = false,
+                                                              bool use_salt_is_constant = false,
+                                                              bool constant_use_salt = false,
+                                                              bool chain_layout_is_constant = false,
+                                                              bool constant_chains_longer_than_one = false,
+                                                              bool constant_dictionary_emission = false,
+                                                              bool assume_common_selection_all_valid = false);
 unique_ptr<ExecutionRegionCodeHandle> BuildSljitNestedLoopJoinProbe(const SljitNativeNestedLoopJoinProbePlan &plan,
                                                                     SljitNativeNestedLoopJoinProbeFunction &function,
                                                                     string &error);

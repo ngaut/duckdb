@@ -48,8 +48,7 @@ bool SljitTypedExpressionTreeIsDecimal64Node(const ExecutionExpressionIR &node) 
 	return node.return_type.id() == LogicalTypeId::DECIMAL && node.physical_type == PhysicalType::INT64;
 }
 
-bool TryGetSljitTypedExpressionTreeDecimal64Range(const LogicalType &type, int64_t &result_min,
-                                                  int64_t &result_max) {
+bool TryGetSljitTypedExpressionTreeDecimal64Range(const LogicalType &type, int64_t &result_min, int64_t &result_max) {
 	if (type.id() != LogicalTypeId::DECIMAL || type.InternalType() != PhysicalType::INT64) {
 		return false;
 	}
@@ -63,7 +62,8 @@ bool TryGetSljitTypedExpressionTreeDecimal64Range(const LogicalType &type, int64
 }
 
 bool SljitTypedExpressionTreeIsInt32Node(const ExecutionExpressionIR &node) {
-	return node.return_type.IsIntegral() && node.physical_type == PhysicalType::INT32;
+	return (node.return_type.IsIntegral() || node.return_type.id() == LogicalTypeId::DATE) &&
+	       node.physical_type == PhysicalType::INT32;
 }
 
 bool SljitTypedExpressionTreeIsBoolNode(const ExecutionExpressionIR &node) {
@@ -108,8 +108,7 @@ static bool SljitTypedExpressionTreeDecimal64BinaryHasRawSemantics(const Executi
 	}
 	switch (node.binary_op) {
 	case ExecutionExpressionBinaryOp::ADD:
-	case ExecutionExpressionBinaryOp::SUBTRACT:
-	{
+	case ExecutionExpressionBinaryOp::SUBTRACT: {
 		int64_t result_min;
 		int64_t result_max;
 		return SljitTypedExpressionTreeIsDecimal64Node(node) &&
@@ -117,8 +116,7 @@ static bool SljitTypedExpressionTreeDecimal64BinaryHasRawSemantics(const Executi
 		       DecimalType::GetScale(node.return_type) == DecimalType::GetScale(node.right->return_type) &&
 		       TryGetSljitTypedExpressionTreeDecimal64Range(node.return_type, result_min, result_max);
 	}
-	case ExecutionExpressionBinaryOp::MULTIPLY:
-	{
+	case ExecutionExpressionBinaryOp::MULTIPLY: {
 		int64_t result_min;
 		int64_t result_max;
 		return SljitTypedExpressionTreeIsDecimal64Node(node) &&

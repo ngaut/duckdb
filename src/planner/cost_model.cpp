@@ -297,6 +297,14 @@ static int64_t PhysicalRunnerRows(const PhysicalRunnerCostInput &input) {
 	if (rows == 0) {
 		rows = 1;
 	}
+	if (input.uses_scan_filters) {
+		// DuckDB-owned scan filters run before the accelerated body, so cost the
+		// generated/native work on a conservative post-filter row estimate.
+		const auto filter_count = MaxValue<idx_t>(input.source_filter_count, 1);
+		for (idx_t filter_idx = 0; filter_idx < filter_count; filter_idx++) {
+			rows = MaxValue<idx_t>((rows + 9) / 10, 1);
+		}
+	}
 	return SaturatingCostCast(rows);
 }
 
@@ -312,9 +320,42 @@ static bool PhysicalRunnerIsNativeContractProjectionGlue(const PhysicalRunnerCos
 	       input.native_sort_stage_count == 0 && input.materialization_elision_count == 0;
 }
 
-static bool PhysicalRunnerGeneratedWorkPaysUngroupedAggregateProtocol(const PhysicalRunnerCostInput &input) {
+static bool PhysicalRunnerGeneratedWorkPaysStandaloneUngroupedAggregateProtocol(const PhysicalRunnerCostInput &input) {
 	return input.generated_stage_count > 0 && input.generated_work_class != PhysicalRunnerGeneratedWorkClass::NONE &&
 	       input.generated_work_class != PhysicalRunnerGeneratedWorkClass::PROJECTION_GLUE &&
+	       input.native_join_stage_count == 0 && input.native_aggregate_stage_count > 0 &&
+	       input.native_grouped_aggregate_stage_count == 0 && input.native_sort_stage_count == 0;
+}
+
+static bool PhysicalRunnerGeneratedWorkPaysStandaloneGroupedAggregateProtocol(const PhysicalRunnerCostInput &input) {
+	return input.generated_stage_count >= 2 && input.generated_work_class != PhysicalRunnerGeneratedWorkClass::NONE &&
+	       input.generated_work_class != PhysicalRunnerGeneratedWorkClass::PROJECTION_GLUE &&
+	       input.native_join_stage_count == 0 && input.native_grouped_aggregate_stage_count > 0 &&
+	       input.native_aggregate_stage_count == input.native_grouped_aggregate_stage_count &&
+	       input.native_sort_stage_count == 0;
+}
+
+static bool PhysicalRunnerGeneratedWorkPaysJoinGroupedAggregateProtocol(const PhysicalRunnerCostInput &input) {
+	if (!input.full_pipeline || input.uses_scan_filters || input.generated_stage_count < 3 ||
+	    input.generated_work_class == PhysicalRunnerGeneratedWorkClass::NONE ||
+	    input.generated_work_class == PhysicalRunnerGeneratedWorkClass::PROJECTION_GLUE ||
+	    input.native_grouped_aggregate_stage_count == 0 ||
+	    input.native_aggregate_stage_count != input.native_grouped_aggregate_stage_count ||
+	    input.native_sort_stage_count > 0) {
+		return false;
+	}
+	if (input.native_join_stage_count == 1) {
+		return true;
+	}
+	return input.native_join_stage_count == 2 && input.source_filter_count == 0;
+}
+
+static bool
+PhysicalRunnerGeneratedWorkPaysScanFilteredJoinUngroupedAggregateProtocol(const PhysicalRunnerCostInput &input) {
+	return input.full_pipeline && input.uses_scan_filters && input.generated_stage_count > 0 &&
+	       input.generated_work_class != PhysicalRunnerGeneratedWorkClass::NONE &&
+	       input.generated_work_class != PhysicalRunnerGeneratedWorkClass::PROJECTION_GLUE &&
+	       input.native_join_stage_count > 0 && input.native_join_stage_count <= 2 &&
 	       input.native_aggregate_stage_count > 0 && input.native_grouped_aggregate_stage_count == 0 &&
 	       input.native_sort_stage_count == 0;
 }
@@ -408,6 +449,7 @@ static void PhysicalRunnerInitializeProfile(const PhysicalRunnerCostInput &input
 	profile.native_aggregate_stage_count = SaturatingCostCast(input.native_aggregate_stage_count);
 	profile.native_grouped_aggregate_stage_count = SaturatingCostCast(input.native_grouped_aggregate_stage_count);
 	profile.native_sort_stage_count = SaturatingCostCast(input.native_sort_stage_count);
+	profile.source_filter_count = SaturatingCostCast(input.source_filter_count);
 	profile.full_pipeline = input.full_pipeline;
 	profile.generated_work_class = input.generated_work_class;
 	profile.native_protocol_class = input.native_protocol_class;
@@ -421,10 +463,19 @@ static bool PhysicalRunnerHasAcceleratedWork(const PhysicalRunnerCostInput &inpu
 	}
 	const auto native_operator_stage_count =
 	    input.native_join_stage_count + input.native_aggregate_stage_count + input.native_sort_stage_count;
+	const bool generated_work_pays_standalone_aggregate =
+	    PhysicalRunnerGeneratedWorkPaysStandaloneUngroupedAggregateProtocol(input) ||
+	    PhysicalRunnerGeneratedWorkPaysStandaloneGroupedAggregateProtocol(input);
+	const bool generated_work_pays_join_grouped_aggregate =
+	    PhysicalRunnerGeneratedWorkPaysJoinGroupedAggregateProtocol(input);
+	const bool generated_work_pays_scan_filtered_join_aggregate =
+	    PhysicalRunnerGeneratedWorkPaysScanFilteredJoinUngroupedAggregateProtocol(input);
 	const bool native_operator_work_is_costed = native_operator_stage_count == 0 ||
 	                                            parameters.native_operator_stage_benefit > 0 ||
 	                                            (input.full_pipeline && parameters.full_pipeline_benefit > 0) ||
-	                                            PhysicalRunnerGeneratedWorkPaysUngroupedAggregateProtocol(input);
+	                                            generated_work_pays_standalone_aggregate ||
+	                                            generated_work_pays_join_grouped_aggregate ||
+	                                            generated_work_pays_scan_filtered_join_aggregate;
 	const bool has_costed_acceleration =
 	    (input.generated_stage_count > 0 && parameters.generated_stage_benefit > 0) ||
 	    (native_operator_stage_count > 0 && parameters.native_operator_stage_benefit > 0) ||

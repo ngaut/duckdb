@@ -63,6 +63,7 @@ SljitRegionNodePlan PlanSljitProjectionNode(const ExecutionRegionNode &node, con
                                             string &error, bool render_diagnostics);
 string SljitSourceBoundaryReason(const ExecutionRegionNode &node, bool render_diagnostics);
 SljitRegionNodePlan PlanSljitSourceNode(const ExecutionRegionNode &node, const ExecutionRegionContract &contract,
+                                        const ExecutionRegionCandidateTraits &candidate_traits,
                                         ExecutionRegionSourceExecutionKind source_execution, bool render_diagnostics);
 bool SljitCanExecuteSourceNode(const ExecutionRegionNode &node, const ExecutionRegionContract &contract);
 SljitRegionNodePlan PlanSljitHashJoinProbeOperatorNode(const ExecutionRegionNode &node,

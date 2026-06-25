@@ -137,6 +137,7 @@ void PipelineExecutor::Reset() {
 	// Reset the final chunk data (keep allocation)
 	final_chunk.Reset();
 	PrepareExecutionSourceInputChunk();
+	ResetSourceContractBatch();
 }
 
 void PipelineExecutor::PrepareForExecution() {
@@ -746,6 +747,36 @@ SourceResultType PipelineExecutor::FetchFromSourceContract(DataChunk *&result,
 	}
 
 	return res;
+}
+
+optional_ptr<DataChunk> PipelineExecutor::PendingSourceContractBatch() {
+	if (!execution_source_output_batch_initialized || execution_source_output_batch.size() == 0) {
+		return nullptr;
+	}
+	return execution_source_output_batch;
+}
+
+DataChunk &PipelineExecutor::PrepareSourceContractBatch(const vector<LogicalType> &types) {
+	if (!execution_source_output_batch_initialized) {
+		execution_source_output_batch.Initialize(BufferAllocator::Get(context.client), types);
+		execution_source_output_batch_initialized = true;
+		return execution_source_output_batch;
+	}
+	if (execution_source_output_batch.GetTypes() == types) {
+		return execution_source_output_batch;
+	}
+	if (execution_source_output_batch.size() != 0) {
+		throw InternalException("Cannot change source-contract batch type while buffered rows are pending");
+	}
+	execution_source_output_batch.Destroy();
+	execution_source_output_batch.Initialize(BufferAllocator::Get(context.client), types);
+	return execution_source_output_batch;
+}
+
+void PipelineExecutor::ResetSourceContractBatch() {
+	if (execution_source_output_batch_initialized) {
+		execution_source_output_batch.Reset();
+	}
 }
 
 void PipelineExecutor::InitializeChunk(DataChunk &chunk) {

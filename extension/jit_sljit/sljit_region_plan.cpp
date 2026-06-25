@@ -477,7 +477,8 @@ ExecutionRegionLoweringPlan BuildSljitRegionPlan(const ExecutionRegionIR &region
 			        ? candidate.source_execution
 			        : (node.source ? node.source->execution : ExecutionRegionSourceExecutionKind::NONE);
 			auto node_plan = executable_source
-			                     ? PlanSljitSourceNode(node, contract, source_execution, render_diagnostics)
+			                     ? PlanSljitSourceNode(node, contract, candidate.traits, source_execution,
+			                                           render_diagnostics)
 			                     : PlanSljitRegionNode(node, cursor.InputTypes(), backend_error, render_diagnostics);
 			const bool source_requires_native = executable_source &&
 			                                    node_plan.kind == ExecutionRegionLoweringKind::BOUNDARY &&

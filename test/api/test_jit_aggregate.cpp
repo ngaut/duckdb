@@ -447,7 +447,7 @@ TEST_CASE("JIT fuses Q14 shaped decimal CASE aggregate payload lanes", "[api][ji
 	REQUIRE(found_fused_runtime);
 }
 
-TEST_CASE("JIT generic grouped primitive aggregate payload lanes require generated lookup", "[api][jit]") {
+TEST_CASE("JIT generic grouped primitive aggregate payload lanes use native state addresses", "[api][jit]") {
 	DuckDB db;
 	Connection con(db);
 	auto &manager = ExecutionRegionManager::Get(*con.context);
@@ -462,34 +462,41 @@ TEST_CASE("JIT generic grouped primitive aggregate payload lanes require generat
 	REQUIRE_NO_FAIL(*result);
 	REQUIRE(result->RowCount() == 200000);
 
-	bool found_hash_lookup_boundary = false;
+	bool found_hash_state_address_update = false;
 	for (auto &event : manager.GetEvents()) {
 		if (IsCompiledSljitRegionEvent(event) && event.has_candidate &&
 		    event.candidate_traits.sink_kind == ExecutionRegionSinkKind::HASH_AGGREGATE_UPDATE) {
-			FAIL("generic hash aggregate primitive payload update must not compile without generated lookup ownership");
+			found_hash_state_address_update = true;
+			RequireGeneratedMachineCodeRegion(event);
+			REQUIRE(StringUtil::Contains(event.reason, "grouped_state_lookup=native-state-address"));
+			REQUIRE(StringUtil::Contains(event.reason, "native_hash_aggregate_lookup_blocker="
+			                                           "hash-aggregate-generated-lookup-backend-lowering-missing"));
+			REQUIRE(StringUtil::Contains(event.ir, "native_grouped_state_contract_status=ready"));
+			REQUIRE(StringUtil::Contains(event.ir, "native_hash_aggregate_lookup_contract_status=blocked"));
+			REQUIRE(StringUtil::Contains(event.ir, "hash_aggregate_lookup_mode=blocked"));
+			REQUIRE(StringUtil::Contains(event.ir, "payload_update=generated-primitive"));
+			REQUIRE_FALSE(StringUtil::Contains(event.reason, "hash_aggregate_lookup=vectorized-address-contract"));
+			REQUIRE_FALSE(StringUtil::Contains(event.ir, "grouped_state_lookup=vectorized-address-contract"));
 		}
 	}
+	REQUIRE(found_hash_state_address_update);
+
+	bool found_fused_runtime = false;
 	for (auto &event : manager.GetEvents()) {
-		if (!IsSljitRegionEvent(event) || !event.has_candidate ||
-		    event.candidate_traits.sink_kind != ExecutionRegionSinkKind::HASH_AGGREGATE_UPDATE) {
+		if (EventPhase(event) != "runtime" || event.backend_name != "sljit") {
 			continue;
 		}
-		found_hash_lookup_boundary = true;
-		REQUIRE(EventStatus(event) == "unsupported");
-		REQUIRE(EventExecutionMode(event) == "unsupported");
-		REQUIRE(event.code_size == 0);
-		REQUIRE(StringUtil::Contains(event.reason, "hash aggregate update requires generated hash lookup ownership"));
-		REQUIRE(StringUtil::Contains(event.reason, "native_hash_aggregate_lookup_blocker="
-		                                           "hash-aggregate-generated-lookup-backend-lowering-missing"));
-		REQUIRE(StringUtil::Contains(event.ir, "native_hash_aggregate_lookup_contract_status=blocked"));
-		REQUIRE(StringUtil::Contains(event.ir, "hash_aggregate_lookup_mode=blocked"));
-		REQUIRE_FALSE(StringUtil::Contains(event.reason, "hash_aggregate_lookup=vectorized-address-contract"));
-		REQUIRE_FALSE(StringUtil::Contains(event.ir, "grouped_state_lookup=vectorized-address-contract"));
+		auto stage_counts = EventGeneratedStageCountBreakdown(event);
+		if (!StringUtil::Contains(stage_counts, "aggregate_update.primitive_payload_update_fused=")) {
+			continue;
+		}
+		found_fused_runtime = true;
+		REQUIRE(StringUtil::Contains(stage_counts, "aggregate_update.resolve_grouped_state_addresses."));
 	}
-	REQUIRE(found_hash_lookup_boundary);
+	REQUIRE(found_fused_runtime);
 }
 
-TEST_CASE("JIT grouped aggregate uses canonical hash table lookup under high cardinality", "[api][jit]") {
+TEST_CASE("JIT grouped aggregate uses native state addresses under high cardinality", "[api][jit]") {
 	DuckDB db;
 	Connection con(db);
 	auto &manager = ExecutionRegionManager::Get(*con.context);
@@ -514,30 +521,25 @@ TEST_CASE("JIT grouped aggregate uses canonical hash table lookup under high car
 	REQUIRE(result->GetValue(1, 0).ToString() == reference->GetValue(1, 0).ToString());
 	REQUIRE(result->GetValue(2, 0).ToString() == reference->GetValue(2, 0).ToString());
 
-	bool found_high_cardinality_boundary = false;
+	bool found_high_cardinality_state_address_update = false;
 	for (auto &event : manager.GetEvents()) {
 		if (IsCompiledSljitRegionEvent(event) && event.has_candidate &&
 		    event.candidate_traits.sink_kind == ExecutionRegionSinkKind::HASH_AGGREGATE_UPDATE) {
-			FAIL("hash aggregate lookup without generated lookup ownership must not create a compiled kernel");
+			found_high_cardinality_state_address_update = true;
+			RequireGeneratedMachineCodeRegion(event);
+			REQUIRE(StringUtil::Contains(event.reason, "grouped_state_lookup=native-state-address"));
+			REQUIRE(StringUtil::Contains(event.reason, "native_hash_aggregate_lookup_blocker="
+			                                           "hash-aggregate-generated-lookup-backend-lowering-missing"));
+			REQUIRE(StringUtil::Contains(event.ir, "native_grouped_state_contract_status=ready"));
+			REQUIRE(StringUtil::Contains(event.ir, "native_hash_aggregate_lookup_contract_status=blocked"));
+			REQUIRE(StringUtil::Contains(event.ir, "native_hash_aggregate_lookup_layout"));
+			REQUIRE(StringUtil::Contains(event.ir, "hash_aggregate_lookup_mode=blocked"));
+			REQUIRE(StringUtil::Contains(event.ir, "payload_update=generated-primitive"));
+			REQUIRE_FALSE(StringUtil::Contains(event.reason, "hash_aggregate_lookup=vectorized-address-contract"));
+			REQUIRE_FALSE(StringUtil::Contains(event.ir, "grouped_state_lookup=vectorized-address-contract"));
 		}
-		if (!IsSljitRegionEvent(event) || !event.has_candidate ||
-		    event.candidate_traits.sink_kind != ExecutionRegionSinkKind::HASH_AGGREGATE_UPDATE) {
-			continue;
-		}
-		found_high_cardinality_boundary = true;
-		REQUIRE(EventStatus(event) == "unsupported");
-		REQUIRE(EventExecutionMode(event) == "unsupported");
-		REQUIRE(event.code_size == 0);
-		REQUIRE(StringUtil::Contains(event.reason, "hash aggregate update requires generated hash lookup ownership"));
-		REQUIRE(StringUtil::Contains(event.reason, "native_hash_aggregate_lookup_blocker="
-		                                           "hash-aggregate-generated-lookup-backend-lowering-missing"));
-		REQUIRE(StringUtil::Contains(event.ir, "native_hash_aggregate_lookup_contract_status=blocked"));
-		REQUIRE(StringUtil::Contains(event.ir, "native_hash_aggregate_lookup_layout"));
-		REQUIRE(StringUtil::Contains(event.ir, "hash_aggregate_lookup_mode=blocked"));
-		REQUIRE_FALSE(StringUtil::Contains(event.reason, "hash_aggregate_lookup=vectorized-address-contract"));
-		REQUIRE_FALSE(StringUtil::Contains(event.ir, "grouped_state_lookup=vectorized-address-contract"));
 	}
-	REQUIRE(found_high_cardinality_boundary);
+	REQUIRE(found_high_cardinality_state_address_update);
 }
 
 TEST_CASE("JIT fuses scaled decimal expression payloads into primitive hugeint aggregate reducers", "[api][jit]") {
@@ -828,6 +830,83 @@ TEST_CASE("JIT fuses TPC-H Q1 shaped perfect-hash aggregate payloads", "[api][ji
 	    });
 }
 
+TEST_CASE("JIT gates Q1 shaped perfect-hash aggregate updates with generated source filters", "[api][jit]") {
+	DuckDB db;
+	Connection con(db);
+	auto &manager = ExecutionRegionManager::Get(*con.context);
+
+	ConfigureSljitForCoverage(con, false, true, true, 10000);
+	REQUIRE_NO_FAIL(con.Query("PRAGMA threads=1"));
+	REQUIRE_NO_FAIL(
+	    con.Query("CREATE TABLE jit_q1_filtered_perfect_hash_payload AS "
+	              "SELECT CASE WHEN i % 3 = 0 THEN 'A' WHEN i % 3 = 1 THEN 'N' ELSE 'R' END AS l_returnflag, "
+	              "       CASE WHEN i % 2 = 0 THEN 'F' ELSE 'O' END AS l_linestatus, "
+	              "       DATE '1998-08-30' + CAST(i % 8 AS INTEGER) AS l_shipdate, "
+	              "       CAST(1 + (i % 50) AS DECIMAL(15,2)) AS l_quantity, "
+	              "       CAST(100 + (i % 1000) AS DECIMAL(15,2)) AS l_extendedprice, "
+	              "       CAST(i % 10 AS DECIMAL(15,2)) AS l_discount, "
+	              "       CAST(i % 8 AS DECIMAL(15,2)) AS l_tax "
+	              "FROM range(120000) tbl(i)"));
+
+	const string query = "SELECT l_returnflag, l_linestatus, "
+	                     "       sum(l_quantity), "
+	                     "       sum(l_extendedprice), "
+	                     "       sum(l_extendedprice * (1.00::DECIMAL(15,2) - l_discount)), "
+	                     "       sum(l_extendedprice * (1.00::DECIMAL(15,2) - l_discount) * "
+	                     "           (1.00::DECIMAL(15,2) + l_tax)), "
+	                     "       sum(l_discount), "
+	                     "       count(*) "
+	                     "FROM jit_q1_filtered_perfect_hash_payload "
+	                     "WHERE l_shipdate <= DATE '1998-09-02' "
+	                     "GROUP BY l_returnflag, l_linestatus "
+	                     "ORDER BY l_returnflag, l_linestatus";
+	REQUIRE_NO_FAIL(con.Query("SET jit_policy='off'"));
+	auto reference = con.Query(query);
+	REQUIRE_NO_FAIL(*reference);
+	REQUIRE(reference->RowCount() == 6);
+
+	REQUIRE_NO_FAIL(con.Query("SET jit_policy='auto'"));
+	ClearJitTrace(manager, true);
+	auto result = con.Query(query);
+	REQUIRE_NO_FAIL(*result);
+	REQUIRE(result->RowCount() == reference->RowCount());
+	for (idx_t row_idx = 0; row_idx < result->RowCount(); row_idx++) {
+		for (idx_t col_idx = 0; col_idx < result->ColumnCount(); col_idx++) {
+			REQUIRE(result->GetValue(col_idx, row_idx).ToString() == reference->GetValue(col_idx, row_idx).ToString());
+		}
+	}
+
+	RequireJitEvent(
+	    manager,
+	    [](const ExecutionRegionEvent &event) {
+		    return IsCompiledSljitRegionEvent(event) && event.has_candidate &&
+		           event.candidate_traits.sink_kind == ExecutionRegionSinkKind::PERFECT_HASH_AGGREGATE_UPDATE &&
+		           StringUtil::Contains(event.ir, "grouped_state_lookup=generated-perfect-hash");
+	    },
+	    [](const ExecutionRegionEvent &event) {
+		    RequireGeneratedMachineCodeRegion(event);
+		    REQUIRE(StringUtil::Contains(event.ir, "native:typed-expression-tree"));
+		    REQUIRE(StringUtil::Contains(event.ir, "op0=filter("));
+		    REQUIRE(StringUtil::Contains(event.ir, "op1=aggregate_update(kind=perfect-hash"));
+	    });
+
+	bool found_filtered_perfect_hash = false;
+	for (auto &event : manager.GetEvents()) {
+		if (EventPhase(event) != "runtime" || event.backend_name != "sljit") {
+			continue;
+		}
+		auto stage_counts = EventGeneratedStageCountBreakdown(event);
+		if (!StringUtil::Contains(stage_counts, "aggregate_update.filtered_perfect_hash_update=")) {
+			continue;
+		}
+		found_filtered_perfect_hash = true;
+		REQUIRE(ExecutionRegionEventProfileCodeSize(event) > 0);
+		REQUIRE_FALSE(StringUtil::Contains(stage_counts, "filter.selection="));
+		REQUIRE_FALSE(StringUtil::Contains(stage_counts, "aggregate_update.primitive_payload_update_fused="));
+	}
+	REQUIRE(found_filtered_perfect_hash);
+}
+
 TEST_CASE("JIT perfect hash aggregate generates primitive decimal sum and count star updates", "[api][jit]") {
 	DuckDB db;
 	Connection con(db);
@@ -907,7 +986,7 @@ TEST_CASE("JIT perfect hash aggregate generates primitive decimal sum and count 
 	REQUIRE(found_runtime);
 }
 
-TEST_CASE("JIT hash aggregate cast-only keys require generated lookup ownership", "[api][jit]") {
+TEST_CASE("JIT hash aggregate cast-only keys use native state addresses", "[api][jit]") {
 	DuckDB db;
 	Connection con(db);
 	auto &manager = ExecutionRegionManager::Get(*con.context);
@@ -925,7 +1004,7 @@ TEST_CASE("JIT hash aggregate cast-only keys require generated lookup ownership"
 	REQUIRE_NO_FAIL(*result);
 	REQUIRE(result->RowCount() == 100000);
 
-	bool found_hash_lookup_boundary = false;
+	bool found_hash_state_address_update = false;
 	for (auto &event : manager.GetEvents()) {
 		if (!IsSljitRegionEvent(event) || !event.has_candidate || !event.candidate_contract.OwnsSink()) {
 			continue;
@@ -933,34 +1012,26 @@ TEST_CASE("JIT hash aggregate cast-only keys require generated lookup ownership"
 		if (event.candidate_traits.sink_kind != ExecutionRegionSinkKind::HASH_AGGREGATE_UPDATE) {
 			continue;
 		}
-		if (!StringUtil::Contains(event.reason, "hash aggregate update requires generated hash lookup ownership")) {
+		if (!IsCompiledSljitRegionEvent(event)) {
 			continue;
 		}
-		found_hash_lookup_boundary = true;
-		REQUIRE(EventStatus(event) == "unsupported");
-		REQUIRE(EventExecutionMode(event) == "unsupported");
-		REQUIRE(event.code_size == 0);
+		found_hash_state_address_update = true;
+		RequireGeneratedMachineCodeRegion(event);
+		REQUIRE(StringUtil::Contains(event.reason, "grouped_state_lookup=native-state-address"));
 		REQUIRE(StringUtil::Contains(event.reason, "native_hash_aggregate_lookup_blocker="
 		                                           "hash-aggregate-generated-lookup-backend-lowering-missing"));
+		REQUIRE(StringUtil::Contains(event.ir, "native_grouped_state_contract_status=ready"));
 		REQUIRE(StringUtil::Contains(event.ir, "native_hash_aggregate_lookup_contract_status=blocked"));
 		REQUIRE(StringUtil::Contains(event.ir, "native_hash_aggregate_lookup_blocker="
 		                                       "hash-aggregate-generated-lookup-backend-lowering-missing"));
 		REQUIRE(StringUtil::Contains(event.ir, "native_hash_aggregate_lookup_layout"));
 		REQUIRE(StringUtil::Contains(event.ir, "append_contract_ready=true"));
-		REQUIRE(StringUtil::Contains(event.ir, "backend_lowering_ready=false"));
 		REQUIRE(StringUtil::Contains(event.ir, "hash_aggregate_lookup_mode=blocked"));
 		REQUIRE_FALSE(StringUtil::Contains(event.reason, "hash_aggregate_lookup=vectorized-address-contract"));
-		REQUIRE_FALSE(StringUtil::Contains(event.ir, "payload_update=generated-primitive"));
+		REQUIRE(StringUtil::Contains(event.ir, "payload_update=generated-primitive"));
 		REQUIRE_FALSE(StringUtil::Contains(event.ir, "grouped_state_lookup=vectorized-address-contract"));
 	}
-	REQUIRE(found_hash_lookup_boundary);
-
-	for (auto &event : manager.GetEvents()) {
-		if (IsCompiledSljitRegionEvent(event) && event.has_candidate &&
-		    event.candidate_traits.sink_kind == ExecutionRegionSinkKind::HASH_AGGREGATE_UPDATE) {
-			FAIL("hash aggregate lookup without generated lookup ownership must not create a compiled kernel");
-		}
-	}
+	REQUIRE(found_hash_state_address_update);
 }
 
 TEST_CASE("JIT auto skips grouped hash aggregate updates without native lookup ownership", "[api][jit]") {

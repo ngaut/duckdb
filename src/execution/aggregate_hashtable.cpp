@@ -7,6 +7,8 @@
 #include "duckdb/common/row_operations/row_operations.hpp"
 #include "duckdb/common/types/null_value.hpp"
 #include "duckdb/common/types/row/tuple_data_iterator.hpp"
+#include "duckdb/common/types/string_type.hpp"
+#include "duckdb/common/vector/flat_vector.hpp"
 #include "duckdb/common/vector_operations/vector_operations.hpp"
 #include "duckdb/execution/execution_operator_runtime.hpp"
 #include "duckdb/execution/execution_aggregate_runtime.hpp"
@@ -14,6 +16,7 @@
 #include "duckdb/execution/ht_entry.hpp"
 #include "duckdb/planner/expression/bound_aggregate_expression.hpp"
 
+#include <array>
 #include <chrono>
 
 namespace duckdb {
@@ -33,6 +36,38 @@ static void RecordAggregateTraceStage(optional_ptr<ExecutionOperatorStageRecorde
 	auto end = std::chrono::steady_clock::now();
 	auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(end - start).count();
 	recorder->RecordStageRuntime(stage, elapsed);
+}
+
+static bool AggregateFastExistingMatchType(PhysicalType type) {
+	switch (type) {
+	case PhysicalType::BOOL:
+	case PhysicalType::UINT8:
+	case PhysicalType::INT8:
+	case PhysicalType::UINT16:
+	case PhysicalType::INT16:
+	case PhysicalType::UINT32:
+	case PhysicalType::INT32:
+	case PhysicalType::UINT64:
+	case PhysicalType::INT64:
+	case PhysicalType::UINT128:
+	case PhysicalType::INT128:
+	case PhysicalType::INTERVAL:
+	case PhysicalType::VARCHAR:
+		return true;
+	default:
+		return false;
+	}
+}
+
+static bool AggregateFastExistingValueMatches(const_data_ptr_t source_data, const data_ptr_t row_data,
+                                              PhysicalType type, idx_t source_idx, idx_t layout_offset,
+                                              idx_t value_size) {
+	if (type == PhysicalType::VARCHAR) {
+		const auto source_values = reinterpret_cast<const string_t *>(source_data);
+		const auto row_value = Load<string_t>(row_data + layout_offset);
+		return source_values[source_idx] == row_value;
+	}
+	return memcmp(source_data + source_idx * value_size, row_data + layout_offset, value_size) == 0;
 }
 
 GroupedAggregateHashTable::GroupedAggregateHashTable(ClientContext &context, Allocator &allocator,
@@ -985,6 +1020,84 @@ idx_t GroupedAggregateHashTable::FindOrCreateGroupsInternal(DataChunk &groups, V
 	return new_group_count;
 }
 
+bool GroupedAggregateHashTable::TryResolveExistingGroupsFast(DataChunk &groups, Vector &group_hashes,
+                                                             Vector &addresses_v) {
+	static constexpr idx_t MAX_FAST_GROUPS = 8;
+
+	const auto chunk_size = groups.size();
+	const auto group_count = groups.ColumnCount();
+	if (chunk_size == 0) {
+		FlatVector::SetSize(addresses_v, 0);
+		return true;
+	}
+	if (skip_lookups || enable_hll || count == 0 || !entries || !layout_ptr->CannotHaveNull() ||
+	    group_count == 0 || group_count > MAX_FAST_GROUPS || group_hashes.GetVectorType() != VectorType::FLAT_VECTOR) {
+		return false;
+	}
+	D_ASSERT(group_count + 1 == layout_ptr->ColumnCount());
+
+	const auto &layout_types = layout_ptr->GetTypes();
+	const auto &layout_offsets = layout_ptr->GetOffsets();
+	std::array<const_data_ptr_t, MAX_FAST_GROUPS> source_data;
+	std::array<PhysicalType, MAX_FAST_GROUPS> physical_types;
+	std::array<idx_t, MAX_FAST_GROUPS> value_sizes;
+	for (idx_t group_idx = 0; group_idx < group_count; group_idx++) {
+		auto &source = groups.data[group_idx];
+		if (source.GetVectorType() != VectorType::FLAT_VECTOR) {
+			return false;
+		}
+		if (!FlatVector::Validity(source).CheckAllValid(chunk_size)) {
+			return false;
+		}
+		auto physical_type = layout_types[group_idx].InternalType();
+		if (source.GetType().InternalType() != physical_type || !AggregateFastExistingMatchType(physical_type)) {
+			return false;
+		}
+		source_data[group_idx] = FlatVector::GetData(source);
+		physical_types[group_idx] = physical_type;
+		value_sizes[group_idx] = physical_type == PhysicalType::VARCHAR ? sizeof(string_t) : GetTypeIdSize(physical_type);
+	}
+
+	addresses_v.SetVectorType(VectorType::FLAT_VECTOR);
+	auto addresses = FlatVector::GetDataMutable<data_ptr_t>(addresses_v);
+	const auto hashes = FlatVector::GetData<hash_t>(group_hashes);
+	for (idx_t row_idx = 0; row_idx < chunk_size; row_idx++) {
+		const auto hash = hashes[row_idx];
+		const auto salt = ht_entry_t::ExtractSalt(hash);
+		auto ht_offset = ApplyBitMask(hash);
+
+		idx_t iteration_count;
+		for (iteration_count = 0; iteration_count < capacity; iteration_count++) {
+			auto &entry = entries[ht_offset];
+			if (!entry.IsOccupied()) {
+				return false;
+			}
+			if (entry.GetSalt() == salt) {
+				auto row_location = entry.GetPointer();
+				bool row_matches = true;
+				for (idx_t group_idx = 0; group_idx < group_count; group_idx++) {
+					if (!AggregateFastExistingValueMatches(source_data[group_idx], row_location,
+					                                       physical_types[group_idx], row_idx,
+					                                       layout_offsets[group_idx], value_sizes[group_idx])) {
+						row_matches = false;
+						break;
+					}
+				}
+				if (row_matches) {
+					addresses[row_idx] = row_location;
+					break;
+				}
+			}
+			SaltIncrementAndWrap(ht_offset, salt, bitmask);
+		}
+		if (iteration_count == capacity) {
+			throw InternalException("Maximum fast existing-group iteration count reached in GroupedAggregateHashTable");
+		}
+	}
+	FlatVector::SetSize(addresses_v, chunk_size);
+	return true;
+}
+
 // this is to support distinct aggregations where we need to record whether we
 // have already seen a value for a group
 idx_t GroupedAggregateHashTable::FindOrCreateGroups(DataChunk &groups, Vector &group_hashes, Vector &addresses_out,
@@ -1011,6 +1124,12 @@ idx_t GroupedAggregateHashTable::FindOrCreateGroupAddresses(DataChunk &groups, V
 	auto hash_start = AggregateTraceStart(recorder);
 	groups.Hash(state.hashes);
 	RecordAggregateTraceStage(recorder, "find_or_create.hash", hash_start);
+	auto fast_existing_start = AggregateTraceStart(recorder);
+	if (TryResolveExistingGroupsFast(groups, state.hashes, addresses_out)) {
+		RecordAggregateTraceStage(recorder, "find_or_create.fast_existing", fast_existing_start);
+		return 0;
+	}
+	RecordAggregateTraceStage(recorder, "find_or_create.fast_existing_miss", fast_existing_start);
 	return FindOrCreateGroups(groups, state.hashes, addresses_out, state.new_groups, recorder);
 }
 

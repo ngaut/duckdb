@@ -81,6 +81,9 @@ public:
 	virtual Allocator &GetAllocator() = 0;
 	virtual SourceResultType FetchSourceContract(DataChunk *&result) = 0;
 	virtual SinkNextBatchType AdvanceSinkBatch(DataChunk &source_chunk, bool have_more_output) = 0;
+	virtual optional_ptr<DataChunk> PendingSourceContractBatch() = 0;
+	virtual DataChunk &PrepareSourceContractBatch(const vector<LogicalType> &types) = 0;
+	virtual void ResetSourceContractBatch() = 0;
 	virtual ExecutionOperatorRuntime &ExecutionOperators() = 0;
 	virtual bool TraceRuntime() const = 0;
 	virtual void RecordGeneratedStageRuntime(ExecutionRegionStageId stage, int64_t runtime_time_us,

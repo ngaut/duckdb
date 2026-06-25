@@ -99,14 +99,21 @@ static SljitRegionNodePlan PlanSljitHashAggregateSinkNode(const ExecutionRegionN
 	}
 	auto &lookup_contract = node.sink->aggregate_contract.native_hash_lookup_contract;
 	if (lookup_contract.status != ExecutionRegionStateContractStatus::READY) {
-		auto blocker = SljitBlockerOrReason(lookup_contract.blocker, "hash-aggregate-native-lookup-contract-missing");
-		string reason = "hash aggregate update requires generated hash lookup ownership";
-		if (render_diagnostics) {
-			reason += ";native_hash_aggregate_lookup_blocker=" + blocker;
+		auto sink = PlanSljitAggregateUpdateSinkNode(node, render_diagnostics);
+		if (render_diagnostics && sink.kind == ExecutionRegionLoweringKind::NATIVE && SljitRegionNodeHasNativeOps(sink)) {
+			auto blocker = SljitBlockerOrReason(lookup_contract.blocker, "hash-aggregate-native-lookup-contract-missing");
+			auto &native_op = SljitRegionNodeLastNativeOp(sink);
+			if (!native_op.aggregate_update.ir.empty()) {
+				native_op.aggregate_update.ir += ";";
+			}
+			native_op.aggregate_update.ir += "grouped_state_lookup=native-state-address";
+			native_op.aggregate_update.ir += ";native_hash_aggregate_lookup_blocker=" + blocker;
+			AppendSljitReasonPart(native_op.aggregate_update.ir, node.sink->aggregate_contract.hash_lookup_layout_ir,
+			                       render_diagnostics);
+			sink.reason += ";grouped_state_lookup=native-state-address";
+			sink.reason += ";native_hash_aggregate_lookup_blocker=" + blocker;
 		}
-		AppendSljitReasonPart(reason, node.sink->aggregate_contract.hash_lookup_layout_ir, render_diagnostics);
-		AppendSljitReasonPart(reason, node.sink->ir, render_diagnostics);
-		return SljitRegionBoundaryNode(std::move(reason));
+		return sink;
 	}
 	return PlanSljitAggregateUpdateSinkNode(node, render_diagnostics);
 }

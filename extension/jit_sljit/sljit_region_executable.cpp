@@ -135,39 +135,34 @@ static idx_t AddSljitCombinedInputSource(idx_t source_index, vector<idx_t> &comb
                                          const vector<Value> *input_min_values = nullptr,
                                          const vector<Value> *input_max_values = nullptr);
 
-static void RemapSljitExpressionTreeToCombinedInputs(ExecutionExpressionIR &node, const vector<idx_t> &local_sources,
-                                                     vector<idx_t> &combined_sources,
-                                                     vector<bool> *combined_source_not_null = nullptr,
-                                                     const vector<bool> *input_not_null = nullptr,
-                                                     vector<Value> *combined_source_min_values = nullptr,
-                                                     vector<Value> *combined_source_max_values = nullptr,
-                                                     const vector<Value> *input_min_values = nullptr,
-                                                     const vector<Value> *input_max_values = nullptr) {
+static void RemapSljitExpressionTreeToCombinedInputs(
+    ExecutionExpressionIR &node, const vector<idx_t> &local_sources, vector<idx_t> &combined_sources,
+    vector<bool> *combined_source_not_null = nullptr, const vector<bool> *input_not_null = nullptr,
+    vector<Value> *combined_source_min_values = nullptr, vector<Value> *combined_source_max_values = nullptr,
+    const vector<Value> *input_min_values = nullptr, const vector<Value> *input_max_values = nullptr) {
 	if (node.kind == ExecutionExpressionIRKind::REFERENCE) {
 		if (node.ref_index >= local_sources.size()) {
 			throw InternalException("SLJIT expression-tree reference source is out of range");
 		}
-		node.ref_index = AddSljitCombinedInputSource(local_sources[node.ref_index], combined_sources,
-		                                             combined_source_not_null, input_not_null,
-		                                             combined_source_min_values, combined_source_max_values,
-		                                             input_min_values, input_max_values);
+		node.ref_index = AddSljitCombinedInputSource(
+		    local_sources[node.ref_index], combined_sources, combined_source_not_null, input_not_null,
+		    combined_source_min_values, combined_source_max_values, input_min_values, input_max_values);
 		return;
 	}
 	if (node.left) {
 		RemapSljitExpressionTreeToCombinedInputs(*node.left, local_sources, combined_sources, combined_source_not_null,
-		                                         input_not_null, combined_source_min_values,
-		                                         combined_source_max_values, input_min_values, input_max_values);
+		                                         input_not_null, combined_source_min_values, combined_source_max_values,
+		                                         input_min_values, input_max_values);
 	}
 	if (node.right) {
 		RemapSljitExpressionTreeToCombinedInputs(*node.right, local_sources, combined_sources, combined_source_not_null,
-		                                         input_not_null, combined_source_min_values,
-		                                         combined_source_max_values, input_min_values, input_max_values);
+		                                         input_not_null, combined_source_min_values, combined_source_max_values,
+		                                         input_min_values, input_max_values);
 	}
 	if (node.else_node) {
 		RemapSljitExpressionTreeToCombinedInputs(*node.else_node, local_sources, combined_sources,
-		                                         combined_source_not_null, input_not_null,
-		                                         combined_source_min_values, combined_source_max_values,
-		                                         input_min_values, input_max_values);
+		                                         combined_source_not_null, input_not_null, combined_source_min_values,
+		                                         combined_source_max_values, input_min_values, input_max_values);
 	}
 	for (auto &child : node.children) {
 		if (child) {
@@ -181,8 +176,8 @@ static void RemapSljitExpressionTreeToCombinedInputs(ExecutionExpressionIR &node
 static idx_t AddSljitCombinedInputSource(idx_t source_index, vector<idx_t> &combined_sources,
                                          vector<bool> *combined_source_not_null, const vector<bool> *input_not_null,
                                          vector<Value> *combined_source_min_values,
-                                         vector<Value> *combined_source_max_values, const vector<Value> *input_min_values,
-                                         const vector<Value> *input_max_values) {
+                                         vector<Value> *combined_source_max_values,
+                                         const vector<Value> *input_min_values, const vector<Value> *input_max_values) {
 	for (idx_t combined_idx = 0; combined_idx < combined_sources.size(); combined_idx++) {
 		if (combined_sources[combined_idx] == source_index) {
 			return combined_idx;
@@ -195,14 +190,12 @@ static idx_t AddSljitCombinedInputSource(idx_t source_index, vector<idx_t> &comb
 		    input_not_null && source_index < input_not_null->size() ? (*input_not_null)[source_index] : false);
 	}
 	if (combined_source_min_values) {
-		combined_source_min_values->push_back(input_min_values && source_index < input_min_values->size()
-		                                          ? (*input_min_values)[source_index]
-		                                          : Value());
+		combined_source_min_values->push_back(
+		    input_min_values && source_index < input_min_values->size() ? (*input_min_values)[source_index] : Value());
 	}
 	if (combined_source_max_values) {
-		combined_source_max_values->push_back(input_max_values && source_index < input_max_values->size()
-		                                          ? (*input_max_values)[source_index]
-		                                          : Value());
+		combined_source_max_values->push_back(
+		    input_max_values && source_index < input_max_values->size() ? (*input_max_values)[source_index] : Value());
 	}
 	return combined_idx;
 }
@@ -483,8 +476,9 @@ static bool TryBuildFlatFusedFixedProjection(SljitExecutableRegionOp &op, string
 
 static void PrepareExecutableRegionExpression(const SljitNativeRegionExpressionPlan &plan,
                                               SljitExecutableRegionExpression &expr,
-                                              const vector<bool> *input_not_null = nullptr) {
-	expr.plan = plan.Copy(false, false);
+                                              const vector<bool> *input_not_null = nullptr,
+                                              bool copy_auxiliary_expression_tree = false) {
+	expr.plan = plan.Copy(copy_auxiliary_expression_tree, false);
 	PrepareExecutableRegionExpressionInputs(expr, input_not_null);
 }
 
@@ -783,21 +777,113 @@ static bool NormalizeSljitFilteredAggregatePayloadExpression(SljitExecutableRegi
 }
 
 static bool TryBuildFilteredAggregateUpdate(SljitExecutableRegionOp &filter_op, SljitExecutableRegionOp &aggregate_op,
-                                            string &error) {
+                                            string &error, const vector<bool> &input_not_null,
+                                            const vector<Value> &input_min_values,
+                                            const vector<Value> &input_max_values) {
 	if (filter_op.kind != SljitNativeRegionOpKind::FILTER ||
 	    aggregate_op.kind != SljitNativeRegionOpKind::AGGREGATE_UPDATE) {
 		return true;
 	}
 	auto &aggregate_update = aggregate_op.aggregate_update;
 	if (aggregate_update.filtered_update.IsExecutable() || !aggregate_update.plan.use_primitive_payloads ||
-	    aggregate_update.plan.use_grouped_state_addresses ||
-	    aggregate_update.plan.sink_info.kind != ExecutionRegionSinkKind::UNGROUPED_AGGREGATE_UPDATE ||
 	    aggregate_update.payloads.empty() ||
 	    aggregate_update.payloads.size() != aggregate_update.plan.sink_info.aggregates.size()) {
 		return true;
 	}
-	if (filter_op.filter.plan.kind != SljitNativeRegionExpressionKind::TYPED_EXPRESSION_TREE ||
-	    !filter_op.filter.plan.expression_tree) {
+	if (!filter_op.filter.plan.expression_tree) {
+		return true;
+	}
+
+	if (aggregate_update.plan.use_perfect_hash_group_lookup &&
+	    aggregate_update.plan.sink_info.kind == ExecutionRegionSinkKind::PERFECT_HASH_AGGREGATE_UPDATE) {
+		SljitExecutableFilteredAggregateUpdate filtered_update;
+		filtered_update.filter.plan = filter_op.filter.plan.Copy(true, false);
+		filtered_update.payloads.reserve(aggregate_update.payloads.size());
+		for (auto &payload : aggregate_update.payloads) {
+			SljitExecutableRegionExpression filtered_payload;
+			filtered_payload.plan = payload.plan.Copy(true, false);
+			filtered_update.payloads.push_back(std::move(filtered_payload));
+		}
+		if (!filtered_update.filter.plan.expression_tree) {
+			return true;
+		}
+
+		vector<idx_t> combined_sources;
+		vector<bool> combined_source_not_null;
+		vector<Value> combined_source_min_values;
+		vector<Value> combined_source_max_values;
+		auto &filter_sources = filter_op.filter.input_source_indices.empty()
+		                           ? filter_op.filter.plan.expression_tree_source_indices
+		                           : filter_op.filter.input_source_indices;
+		RemapSljitExpressionTreeToCombinedInputs(*filtered_update.filter.plan.expression_tree, filter_sources,
+		                                         combined_sources, &combined_source_not_null, &input_not_null,
+		                                         &combined_source_min_values, &combined_source_max_values,
+		                                         &input_min_values, &input_max_values);
+
+		bool has_typed_payload = false;
+		for (idx_t payload_idx = 0; payload_idx < aggregate_update.payloads.size(); payload_idx++) {
+			auto &aggregate = aggregate_update.plan.sink_info.aggregates[payload_idx];
+			auto &payload = filtered_update.payloads[payload_idx];
+			if (aggregate.primitive_update_kind == AggregatePrimitiveUpdateKind::COUNT_STAR) {
+				continue;
+			}
+			if (payload.plan.kind == SljitNativeRegionExpressionKind::REFERENCE) {
+				payload.plan.source_index = AddSljitCombinedInputSource(
+				    payload.plan.source_index, combined_sources, &combined_source_not_null, &input_not_null,
+				    &combined_source_min_values, &combined_source_max_values, &input_min_values, &input_max_values);
+				continue;
+			}
+			if (payload.plan.kind != SljitNativeRegionExpressionKind::TYPED_EXPRESSION_TREE ||
+			    !payload.plan.expression_tree) {
+				return true;
+			}
+			has_typed_payload = true;
+			vector<idx_t> local_sources = payload.plan.expression_tree_source_indices;
+			if (local_sources.empty()) {
+				return true;
+			}
+			RemapSljitExpressionTreeToCombinedInputs(*payload.plan.expression_tree, local_sources, combined_sources,
+			                                         &combined_source_not_null, &input_not_null,
+			                                         &combined_source_min_values, &combined_source_max_values,
+			                                         &input_min_values, &input_max_values);
+		}
+		if (!has_typed_payload) {
+			return true;
+		}
+
+		filtered_update.input_source_indices = combined_sources;
+		filtered_update.filter.input_source_indices = combined_sources;
+		filtered_update.filter.plan.expression_tree_source_indices = combined_sources;
+		vector<SljitNativeRegionExpressionPlan> codegen_payloads;
+		codegen_payloads.reserve(filtered_update.payloads.size());
+		for (auto &payload : filtered_update.payloads) {
+			payload.input_source_indices = combined_sources;
+			payload.plan.expression_tree_source_indices = combined_sources;
+			codegen_payloads.push_back(payload.plan.Copy(true, false));
+		}
+
+		SljitNativeAggregateUpdateFunction function = nullptr;
+		string filtered_error;
+		auto code = BuildSljitNativeFilteredPerfectHashGroupedFusedTypedExpressionAggregateUpdate(
+		    *filtered_update.filter.plan.expression_tree, codegen_payloads, aggregate_update.plan.sink_info.aggregates,
+		    aggregate_update.plan.sink_info.groups, aggregate_update.plan.group_expressions,
+		    aggregate_update.plan.sink_info.aggregate_contract, combined_source_not_null, combined_source_min_values,
+		    combined_source_max_values, function, filtered_error);
+		if (code && function) {
+			filtered_update.code = std::move(code);
+			filtered_update.function = function;
+			filtered_update.owns_perfect_hash_group_lookup = true;
+			aggregate_update.filtered_update = std::move(filtered_update);
+			return true;
+		}
+		if (!filtered_error.empty() && filtered_error.rfind("unsupported", 0) != 0) {
+			error = filtered_error;
+			return false;
+		}
+	}
+
+	if (aggregate_update.plan.use_grouped_state_addresses ||
+	    aggregate_update.plan.sink_info.kind != ExecutionRegionSinkKind::UNGROUPED_AGGREGATE_UPDATE) {
 		return true;
 	}
 	for (idx_t payload_idx = 0; payload_idx < aggregate_update.payloads.size(); payload_idx++) {
@@ -935,12 +1021,9 @@ static bool TryBuildUngroupedFusedTypedExpressionAggregateUpdate(const SljitNati
 	return true;
 }
 
-static bool TryBuildPerfectHashGroupedFusedTypedExpressionAggregateUpdate(const SljitNativeAggregateUpdatePlan &op,
-                                                                          SljitExecutableAggregateUpdate &executable,
-                                                                          string &error,
-                                                                          const vector<bool> &input_not_null,
-                                                                          const vector<Value> &input_min_values,
-                                                                          const vector<Value> &input_max_values) {
+static bool TryBuildPerfectHashGroupedFusedTypedExpressionAggregateUpdate(
+    const SljitNativeAggregateUpdatePlan &op, SljitExecutableAggregateUpdate &executable, string &error,
+    const vector<bool> &input_not_null, const vector<Value> &input_min_values, const vector<Value> &input_max_values) {
 	if (!op.use_primitive_payloads || !op.use_perfect_hash_group_lookup || op.payloads.empty() ||
 	    op.payloads.size() != op.sink_info.aggregates.size()) {
 		return true;
@@ -1061,7 +1144,7 @@ static bool BuildExecutableAggregateUpdatePayloadCode(const SljitNativeAggregate
 		return true;
 	}
 	if (!TryBuildPerfectHashGroupedFusedTypedExpressionAggregateUpdate(op, executable, error, input_not_null,
-	                                                                  input_min_values, input_max_values)) {
+	                                                                   input_min_values, input_max_values)) {
 		return false;
 	}
 	if (executable.fused_payload_update_function) {
@@ -1321,8 +1404,7 @@ static bool SljitExecutableValueToHugeint(const Value &value, const LogicalType 
 }
 
 static bool SljitExecutableRangeFromInput(idx_t source_index, const LogicalType &expected_type,
-                                          const vector<Value> &input_min_values,
-                                          const vector<Value> &input_max_values,
+                                          const vector<Value> &input_min_values, const vector<Value> &input_max_values,
                                           SljitExecutableInt128Range &result) {
 	if (source_index >= input_min_values.size() || source_index >= input_max_values.size()) {
 		return false;
@@ -1333,8 +1415,7 @@ static bool SljitExecutableRangeFromInput(idx_t source_index, const LogicalType 
 	       result.min <= result.max;
 }
 
-static bool SljitExecutableRangeAdd(const SljitExecutableInt128Range &left,
-                                    const SljitExecutableInt128Range &right,
+static bool SljitExecutableRangeAdd(const SljitExecutableInt128Range &left, const SljitExecutableInt128Range &right,
                                     const LogicalType &result_type, SljitExecutableInt128Range &result) {
 	result.type = result_type;
 	result.min = left.min;
@@ -1343,8 +1424,8 @@ static bool SljitExecutableRangeAdd(const SljitExecutableInt128Range &left,
 }
 
 static bool SljitExecutableRangeSubtract(const SljitExecutableInt128Range &left,
-                                         const SljitExecutableInt128Range &right,
-                                         const LogicalType &result_type, SljitExecutableInt128Range &result) {
+                                         const SljitExecutableInt128Range &right, const LogicalType &result_type,
+                                         SljitExecutableInt128Range &result) {
 	result.type = result_type;
 	result.min = left.min;
 	result.max = left.max;
@@ -1352,8 +1433,8 @@ static bool SljitExecutableRangeSubtract(const SljitExecutableInt128Range &left,
 }
 
 static bool SljitExecutableRangeMultiply(const SljitExecutableInt128Range &left,
-                                         const SljitExecutableInt128Range &right,
-                                         const LogicalType &result_type, SljitExecutableInt128Range &result) {
+                                         const SljitExecutableInt128Range &right, const LogicalType &result_type,
+                                         SljitExecutableInt128Range &result) {
 	hugeint_t values[4];
 	if (!Hugeint::TryMultiply(left.min, right.min, values[0]) ||
 	    !Hugeint::TryMultiply(left.min, right.max, values[1]) ||
@@ -1407,12 +1488,10 @@ static bool SljitExecutableScaleRangeByPowerOfTen(SljitExecutableInt128Range &ra
 		return false;
 	}
 	auto scale = Hugeint::Convert(NumericHelper::POWERS_OF_TEN[scale_delta]);
-	return Hugeint::TryMultiply(range.min, scale, range.min) &&
-	       Hugeint::TryMultiply(range.max, scale, range.max);
+	return Hugeint::TryMultiply(range.min, scale, range.min) && Hugeint::TryMultiply(range.max, scale, range.max);
 }
 
-static bool SljitExecutableRangeCast(const ExecutionExpressionIR &node,
-                                     const SljitExecutableInt128Range &child,
+static bool SljitExecutableRangeCast(const ExecutionExpressionIR &node, const SljitExecutableInt128Range &child,
                                      SljitExecutableInt128Range &result) {
 	if (!node.left) {
 		return false;
@@ -1444,8 +1523,7 @@ static bool SljitExecutableRangeCast(const ExecutionExpressionIR &node,
 	return false;
 }
 
-static bool SljitExecutableExpressionTreeRange(const ExecutionExpressionIR &node,
-                                               const vector<Value> &input_min_values,
+static bool SljitExecutableExpressionTreeRange(const ExecutionExpressionIR &node, const vector<Value> &input_min_values,
                                                const vector<Value> &input_max_values,
                                                SljitExecutableInt128Range &result) {
 	switch (node.kind) {
@@ -1456,8 +1534,7 @@ static bool SljitExecutableExpressionTreeRange(const ExecutionExpressionIR &node
 	case ExecutionExpressionIRKind::REFERENCE:
 		return SljitExecutableRangeFromInput(node.ref_index, node.return_type, input_min_values, input_max_values,
 		                                     result);
-	case ExecutionExpressionIRKind::CAST:
-	{
+	case ExecutionExpressionIRKind::CAST: {
 		if (!node.left) {
 			return false;
 		}
@@ -1465,8 +1542,7 @@ static bool SljitExecutableExpressionTreeRange(const ExecutionExpressionIR &node
 		return SljitExecutableExpressionTreeRange(*node.left, input_min_values, input_max_values, child) &&
 		       SljitExecutableRangeCast(node, child, result);
 	}
-	case ExecutionExpressionIRKind::BINARY:
-	{
+	case ExecutionExpressionIRKind::BINARY: {
 		if (!node.left || !node.right || !SljitExecutableDecimal64BinaryHasRawSemantics(node)) {
 			return false;
 		}
@@ -1502,8 +1578,7 @@ static bool SljitExecutableRangeValue(const LogicalType &type, const hugeint_t &
 		return true;
 	}
 	switch (type.InternalType()) {
-	case PhysicalType::INT8:
-	{
+	case PhysicalType::INT8: {
 		int8_t value;
 		if (!Hugeint::TryCast(input, value)) {
 			return false;
@@ -1511,8 +1586,7 @@ static bool SljitExecutableRangeValue(const LogicalType &type, const hugeint_t &
 		result = Value::TINYINT(value);
 		return true;
 	}
-	case PhysicalType::INT16:
-	{
+	case PhysicalType::INT16: {
 		int16_t value;
 		if (!Hugeint::TryCast(input, value)) {
 			return false;
@@ -1522,8 +1596,7 @@ static bool SljitExecutableRangeValue(const LogicalType &type, const hugeint_t &
 		             : Value::SMALLINT(value);
 		return true;
 	}
-	case PhysicalType::INT32:
-	{
+	case PhysicalType::INT32: {
 		int32_t value;
 		if (!Hugeint::TryCast(input, value)) {
 			return false;
@@ -1533,8 +1606,7 @@ static bool SljitExecutableRangeValue(const LogicalType &type, const hugeint_t &
 		             : Value::INTEGER(value);
 		return true;
 	}
-	case PhysicalType::INT64:
-	{
+	case PhysicalType::INT64: {
 		int64_t value;
 		if (!Hugeint::TryCast(input, value)) {
 			return false;
@@ -1557,8 +1629,7 @@ static bool SljitExecutableRangeValue(const LogicalType &type, const hugeint_t &
 }
 
 static bool SljitExpressionRangeValues(const SljitNativeRegionExpressionPlan &expr,
-                                       const vector<Value> &input_min_values,
-                                       const vector<Value> &input_max_values,
+                                       const vector<Value> &input_min_values, const vector<Value> &input_max_values,
                                        Value &min_value, Value &max_value) {
 	switch (expr.kind) {
 	case SljitNativeRegionExpressionKind::CONSTANT:
@@ -1579,8 +1650,7 @@ static bool SljitExpressionRangeValues(const SljitNativeRegionExpressionPlan &ex
 		max_value = input_max_values[expr.source_index];
 		return true;
 	case SljitNativeRegionExpressionKind::EXPRESSION_TREE:
-	case SljitNativeRegionExpressionKind::TYPED_EXPRESSION_TREE:
-	{
+	case SljitNativeRegionExpressionKind::TYPED_EXPRESSION_TREE: {
 		if (!expr.expression_tree) {
 			return false;
 		}
@@ -1631,8 +1701,7 @@ static void UpdateSljitCurrentRanges(const SljitNativeRegionOpPlan &op, vector<V
 	switch (op.kind) {
 	case SljitNativeRegionOpKind::FILTER:
 		return;
-	case SljitNativeRegionOpKind::PROJECTION:
-	{
+	case SljitNativeRegionOpKind::PROJECTION: {
 		auto next_min_values = BuildSljitProjectionOutputRanges(op, current_min_values, current_max_values, true);
 		auto next_max_values = BuildSljitProjectionOutputRanges(op, current_min_values, current_max_values, false);
 		current_min_values = std::move(next_min_values);
@@ -1649,14 +1718,13 @@ static void UpdateSljitCurrentRanges(const SljitNativeRegionOpPlan &op, vector<V
 static bool BuildExecutableRegionOp(const SljitNativeRegionOpPlan &op, SljitExecutableRegionOp &executable,
                                     string &error, const vector<bool> &input_not_null,
                                     const vector<Value> &input_min_values, const vector<Value> &input_max_values,
-                                    bool build_filter_code = true,
-                                    bool build_aggregate_update_payload_code = true) {
+                                    bool build_filter_code = true, bool build_aggregate_update_payload_code = true) {
 	executable.kind = op.kind;
 	executable.operator_index = op.operator_index;
 	executable.output_types = op.output_types;
 	switch (op.kind) {
 	case SljitNativeRegionOpKind::FILTER:
-		PrepareExecutableRegionExpression(op.filter, executable.filter, &input_not_null);
+		PrepareExecutableRegionExpression(op.filter, executable.filter, &input_not_null, !build_filter_code);
 		if (!build_filter_code) {
 			return true;
 		}
@@ -1792,14 +1860,15 @@ bool BuildSljitExecutableRegion(const SljitNativeRegionPlan &region, SljitExecut
 		auto defer_aggregate_payload_code = SljitCanDeferAggregateUpdatePayloadCode(region.ops, op_idx);
 		const auto defer_filter_code = op.kind == SljitNativeRegionOpKind::FILTER && op_idx + 1 < region.ops.size() &&
 		                               SljitCanDeferAggregateUpdatePayloadCode(region.ops, op_idx + 1);
-		if (!BuildExecutableRegionOp(op, executable_op, error, current_not_null, current_min_values,
-		                             current_max_values, !defer_filter_code, !defer_aggregate_payload_code)) {
+		if (!BuildExecutableRegionOp(op, executable_op, error, current_not_null, current_min_values, current_max_values,
+		                             !defer_filter_code, !defer_aggregate_payload_code)) {
 			return false;
 		}
 		executable.ops.push_back(std::move(executable_op));
 		if (defer_aggregate_payload_code) {
 			auto &aggregate_update_op = executable.ops[op_idx];
-			if (!TryBuildFilteredAggregateUpdate(executable.ops[op_idx - 1], aggregate_update_op, error)) {
+			if (!TryBuildFilteredAggregateUpdate(executable.ops[op_idx - 1], aggregate_update_op, error,
+			                                     current_not_null, current_min_values, current_max_values)) {
 				return false;
 			}
 			if (!aggregate_update_op.aggregate_update.filtered_update.IsExecutable() &&

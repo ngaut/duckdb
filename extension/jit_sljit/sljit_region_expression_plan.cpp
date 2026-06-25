@@ -1287,9 +1287,6 @@ static bool TryUsePrimitiveReferenceAggregateUpdate(const vector<LogicalType> &i
 		payloads.push_back(std::move(payload));
 	}
 	const bool perfect_hash_group_lookup = grouped_state && SljitPerfectHashGroupLookupSupported(sink, payloads);
-	if (grouped_state && !perfect_hash_group_lookup) {
-		return false;
-	}
 
 	aggregate_update.aggregate_update.input_types = input_types;
 	aggregate_update.aggregate_update.payloads = std::move(payloads);
@@ -1303,6 +1300,8 @@ static bool TryUsePrimitiveReferenceAggregateUpdate(const vector<LogicalType> &i
 		aggregate_update.aggregate_update.ir += "payload_update=generated-primitive";
 		if (aggregate_update.aggregate_update.use_perfect_hash_group_lookup) {
 			aggregate_update.aggregate_update.ir += ";grouped_state_lookup=generated-perfect-hash";
+		} else if (aggregate_update.aggregate_update.use_grouped_state_addresses) {
+			aggregate_update.aggregate_update.ir += ";grouped_state_lookup=native-state-address";
 		}
 	}
 	return true;
@@ -1848,6 +1847,13 @@ bool TryLowerNativeRegionExpression(const ExecutionExpressionFragment &fragment,
 			error += ";ir=" + fragment.ir;
 		}
 		return false;
+	}
+	if (!expr.expression_tree && require_boolean) {
+		SljitNativeRegionExpressionPlan expression_tree;
+		if (TryBuildSljitNativeTypedExpressionTreePlan(*fragment.root, expression_tree)) {
+			expr.expression_tree = std::move(expression_tree.expression_tree);
+			expr.expression_tree_source_indices = std::move(expression_tree.expression_tree_source_indices);
+		}
 	}
 	if (!require_boolean && !expr.expression_tree) {
 		SljitNativeRegionExpressionPlan expression_tree;

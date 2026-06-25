@@ -264,8 +264,16 @@ static bool TryPlanSljitGeneratedSourceFilters(const ExecutionRegionNode &node,
 	return true;
 }
 
+static bool SljitSourceFiltersPreferDuckDBScanFilter(const ExecutionRegionCandidateTraits &traits) {
+	const bool complex_scan_filter = traits.source_filter_count > 1 || traits.source_conjunction_filter_count > 0;
+	const bool native_join_ungrouped_aggregate =
+	    traits.hash_join_operator_count > 0 && traits.sink_kind == ExecutionRegionSinkKind::UNGROUPED_AGGREGATE_UPDATE;
+	return complex_scan_filter && native_join_ungrouped_aggregate;
+}
+
 static SljitRegionNodePlan PlanSljitSourceContractNode(const ExecutionRegionNode &node,
                                                        const ExecutionRegionContract &contract,
+                                                       const ExecutionRegionCandidateTraits &candidate_traits,
                                                        bool render_diagnostics) {
 	D_ASSERT(node.source);
 	auto &table_scan_contract = node.source->table_scan_contract;
@@ -282,6 +290,15 @@ static SljitRegionNodePlan PlanSljitSourceContractNode(const ExecutionRegionNode
 	}
 
 	if (table_scan_contract.filter_pushdown) {
+		if (SljitSourceFiltersPreferDuckDBScanFilter(candidate_traits)) {
+			string reason = "vectorized table scan filters;source-strategy=duckdb-scan-filtered-source-contract";
+			AppendSljitSourceFilterFacts(reason, node, table_scan_contract, false);
+			reason += ";source_contract_filter_pushdown=true";
+			reason += ";source_contract_complex_filter=true";
+			reason += ";source_contract_native_join_ungrouped_aggregate=true";
+			return SljitNativeSourceNode(std::move(reason), node, ExecutionRegionSourceExecutionKind::SOURCE_CONTRACT,
+			                             render_diagnostics, true);
+		}
 		vector<SljitNativeRegionOpPlan> native_ops;
 		string error;
 		if (TryPlanSljitGeneratedSourceFilters(node, native_ops, error, render_diagnostics)) {
@@ -352,6 +369,7 @@ static SljitRegionNodePlan PlanSljitNativeStatefulSourceNode(const ExecutionRegi
 }
 
 SljitRegionNodePlan PlanSljitSourceNode(const ExecutionRegionNode &node, const ExecutionRegionContract &contract,
+                                        const ExecutionRegionCandidateTraits &candidate_traits,
                                         ExecutionRegionSourceExecutionKind source_execution, bool render_diagnostics) {
 	if (!node.source) {
 		return SljitRegionBoundaryNode("source boundary requires typed source IR");
@@ -378,7 +396,7 @@ SljitRegionNodePlan PlanSljitSourceNode(const ExecutionRegionNode &node, const E
 			}
 			return PlanSljitNativeStatefulSourceNode(node, contract, render_diagnostics);
 		}
-		return PlanSljitSourceContractNode(node, contract, render_diagnostics);
+		return PlanSljitSourceContractNode(node, contract, candidate_traits, render_diagnostics);
 	}
 	if (node.operator_kind == ExecutionRegionOperatorKind::TABLE_SCAN && !node.source->table_scan_contract.present) {
 		return SljitRegionBoundaryNode("table scan source boundary requires typed table scan contract IR");

@@ -242,6 +242,7 @@ SelectExecutionRegionPhysicalRunner(const PhysicalRunnerCostParameters &cost_par
 		return selection;
 	}
 	auto cost_input = BuildExecutionRegionCandidateCostInput(candidate);
+	cost_input.uses_scan_filters = lowering_plan.UsesScanFilters();
 	selection.runner_cost = DuckDBCostModel::SelectPhysicalRunner(cost_input, cost_parameters);
 	if (selection.runner_cost.selected_accelerated_runner) {
 		SelectExecutionRegionAcceleratedRunner(selection);

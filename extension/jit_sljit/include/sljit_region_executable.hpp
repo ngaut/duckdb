@@ -56,9 +56,35 @@ struct SljitExecutableHashJoinProbe {
 	SljitNativeHashJoinProbePlan plan;
 	unique_ptr<ExecutionRegionCodeHandle> code;
 	SljitNativeHashJoinProbeFunction function = nullptr;
+	struct AllValidVariant {
+		unique_ptr<ExecutionRegionCodeHandle> code;
+		SljitNativeHashJoinProbeFunction function = nullptr;
+
+		idx_t CodeSize() const {
+			return code ? code->CodeSize() : 0;
+		}
+	};
+	static constexpr idx_t ALL_VALID_VARIANT_COUNT = 8;
+	AllValidVariant flat_all_valid_variants[ALL_VALID_VARIANT_COUNT];
+	AllValidVariant selected_all_valid_variants[ALL_VALID_VARIANT_COUNT];
 	unique_ptr<ExecutionRegionCodeHandle> perfect_code;
 	SljitNativeHashJoinProbeFunction perfect_function = nullptr;
 	SljitExecutableRegionExpression residual_filter;
+
+	static idx_t FlatAllValidVariantIndex(bool use_salt, bool chains_longer_than_one, bool dictionary_emission) {
+		return (use_salt ? 4 : 0) + (chains_longer_than_one ? 2 : 0) + (dictionary_emission ? 1 : 0);
+	}
+
+	AllValidVariant &FlatAllValidVariantFor(bool use_salt, bool chains_longer_than_one, bool dictionary_emission) {
+		return flat_all_valid_variants[FlatAllValidVariantIndex(use_salt, chains_longer_than_one,
+		                                                        dictionary_emission)];
+	}
+
+	AllValidVariant &SelectedAllValidVariantFor(bool use_salt, bool chains_longer_than_one,
+	                                            bool dictionary_emission) {
+		return selected_all_valid_variants[FlatAllValidVariantIndex(use_salt, chains_longer_than_one,
+		                                                            dictionary_emission)];
+	}
 
 	bool HasDeferredProbeCodegen() const {
 		string error;
@@ -67,6 +93,12 @@ struct SljitExecutableHashJoinProbe {
 
 	idx_t CodeSize() const {
 		idx_t result = code ? code->CodeSize() : 0;
+		for (auto &variant : flat_all_valid_variants) {
+			result += variant.CodeSize();
+		}
+		for (auto &variant : selected_all_valid_variants) {
+			result += variant.CodeSize();
+		}
 		result += perfect_code ? perfect_code->CodeSize() : 0;
 		result += residual_filter.CodeSize();
 		return result;
@@ -132,6 +164,7 @@ struct SljitExecutableFilteredAggregateUpdate {
 	vector<idx_t> input_source_indices;
 	unique_ptr<ExecutionRegionCodeHandle> code;
 	SljitNativeAggregateUpdateFunction function = nullptr;
+	bool owns_perfect_hash_group_lookup = false;
 
 	bool IsExecutable() const {
 		return code && function;

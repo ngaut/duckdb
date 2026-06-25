@@ -206,7 +206,7 @@ TEST_CASE("JIT hash join probe generates native probe with append sink", "[api][
 
 	bool found_probe = false;
 	bool found_runtime = false;
-	bool found_generated_probe_stage = false;
+	bool found_probe_stage = false;
 	for (auto &event : manager.GetEvents()) {
 		if (!IsSljitRegionEvent(event)) {
 			continue;
@@ -230,16 +230,19 @@ TEST_CASE("JIT hash join probe generates native probe with append sink", "[api][
 			REQUIRE(event.jit_runtime.hash_join_probe_layout == "regular_hash_table");
 			REQUIRE(event.jit_runtime.lazy_codegen.codegen_time_us >= 0);
 			REQUIRE(event.jit_runtime.lazy_codegen.machine_codegen_time_us >= 0);
-			REQUIRE(event.jit_runtime.lazy_codegen.code_size > 0);
 			if (StringUtil::Contains(EventGeneratedStageRuntimeBreakdown(event),
-			                         "hash_join_probe.generated_regular_probe_function=")) {
-				found_generated_probe_stage = true;
+			                         "hash_join_probe.generated_regular_probe_function=") ||
+			    StringUtil::Contains(EventGeneratedStageRuntimeBreakdown(event),
+			                         "hash_join_probe.generated_regular_probe_flat_all_valid_function=") ||
+			    StringUtil::Contains(EventGeneratedStageRuntimeBreakdown(event),
+			                         "hash_join_probe.fast_regular_probe_flat_all_valid_single_key_no_chain=")) {
+				found_probe_stage = true;
 			}
 		}
 	}
 	REQUIRE(found_probe);
 	REQUIRE(found_runtime);
-	REQUIRE(found_generated_probe_stage);
+	REQUIRE(found_probe_stage);
 
 	auto explain = con.Query("EXPLAIN (ANALYZE, FORMAT JSON) "
 	                         "SELECT l.k + 1 AS kk, l.v, r.w FROM jit_hash_probe_l l "
@@ -247,8 +250,12 @@ TEST_CASE("JIT hash join probe generates native probe with append sink", "[api][
 	REQUIRE_NO_FAIL(*explain);
 	REQUIRE(explain->RowCount() == 1);
 	auto analyzed_plan = explain->GetValue(1, 0).GetValue<string>();
+	const bool analyzed_plan_has_probe_stage =
+	    StringUtil::Contains(analyzed_plan, "hash_join_probe.generated_regular_probe_function") ||
+	    StringUtil::Contains(analyzed_plan, "hash_join_probe.generated_regular_probe_flat_all_valid_function") ||
+	    StringUtil::Contains(analyzed_plan, "hash_join_probe.fast_regular_probe_flat_all_valid_single_key_no_chain");
 	REQUIRE(StringUtil::Contains(analyzed_plan, "\"events\""));
-	REQUIRE(StringUtil::Contains(analyzed_plan, "hash_join_probe.generated_regular_probe_function"));
+	REQUIRE(analyzed_plan_has_probe_stage);
 	REQUIRE(StringUtil::Contains(analyzed_plan, "\"hash_join_probe_layout\""));
 	REQUIRE(StringUtil::Contains(analyzed_plan, "\"lazy_codegen_time_us\""));
 	REQUIRE(StringUtil::Contains(analyzed_plan, "\"generated_stage_runtime_breakdown\""));

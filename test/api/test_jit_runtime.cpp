@@ -545,7 +545,7 @@ TEST_CASE("EXPLAIN ANALYZE exposes compact execution region profile", "[api][jit
 	REQUIRE(trace_setting->GetValue(0, 0).ToString() == "false");
 }
 
-TEST_CASE("EXPLAIN ANALYZE exposes grouped hash aggregate generated lookup blocker", "[api][jit]") {
+TEST_CASE("EXPLAIN ANALYZE exposes grouped hash aggregate native state-address lookup", "[api][jit]") {
 	DuckDB db;
 	Connection con(db);
 
@@ -559,19 +559,19 @@ TEST_CASE("EXPLAIN ANALYZE exposes grouped hash aggregate generated lookup block
 	REQUIRE_NO_FAIL(*result);
 	REQUIRE(result->RowCount() == 1);
 	auto analyzed_plan = result->GetValue(1, 0).GetValue<string>();
-	REQUIRE(StringUtil::Contains(analyzed_plan, "\"compiled_regions\": 0"));
-	REQUIRE(StringUtil::Contains(analyzed_plan, "\"runtime_regions\": 0"));
-	REQUIRE(StringUtil::Contains(analyzed_plan, "\"status\": \"unsupported\""));
-	REQUIRE(StringUtil::Contains(analyzed_plan, "\"execution_mode\": \"unsupported\""));
-	REQUIRE(StringUtil::Contains(analyzed_plan, "hash aggregate update requires generated hash lookup ownership"));
+	REQUIRE(StringUtil::Contains(analyzed_plan, "\"compiled_regions\": 1"));
+	REQUIRE(StringUtil::Contains(analyzed_plan, "\"runtime_regions\": 1"));
+	REQUIRE(StringUtil::Contains(analyzed_plan, "\"status\": \"compiled\""));
+	REQUIRE(StringUtil::Contains(analyzed_plan, "\"execution_mode\": \"native\""));
+	REQUIRE(StringUtil::Contains(analyzed_plan, "grouped_state_lookup=native-state-address"));
 	REQUIRE(StringUtil::Contains(analyzed_plan,
 	                             "native_hash_aggregate_lookup_blocker=hash-aggregate-generated-lookup-backend-"
 	                             "lowering-missing"));
 	REQUIRE(StringUtil::Contains(analyzed_plan, "native_hash_aggregate_lookup_layout"));
 	REQUIRE(StringUtil::Contains(analyzed_plan, "hash_aggregate_lookup_mode=blocked"));
 	REQUIRE_FALSE(StringUtil::Contains(analyzed_plan, "hash_aggregate_lookup=vectorized-address-contract"));
-	REQUIRE_FALSE(StringUtil::Contains(analyzed_plan, "aggregate_update.resolve_grouped_state_addresses"));
-	REQUIRE_FALSE(StringUtil::Contains(analyzed_plan, "aggregate_update.primitive_payload_update"));
+	REQUIRE(StringUtil::Contains(analyzed_plan, "aggregate_update.resolve_grouped_state_addresses"));
+	REQUIRE(StringUtil::Contains(analyzed_plan, "aggregate_update.primitive_payload_update"));
 }
 
 TEST_CASE("EXPLAIN ANALYZE reports compact aggregate auto vectorized-selection facts", "[api][jit]") {

@@ -15,6 +15,7 @@
 #include "duckdb/common/allocator.hpp"
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/mutex.hpp"
+#include "duckdb/common/types/hash.hpp"
 #include "duckdb/common/types/hugeint.hpp"
 #include "duckdb/common/types/uhugeint.hpp"
 #include "duckdb/common/vector/flat_vector.hpp"
@@ -104,6 +105,62 @@ static const validity_t *SljitNormalizedSourceValidityData(const UnifiedVectorFo
 	return SljitNormalizedSourceAllValid(format, source_sel, execute_sel, count) ? nullptr : format.validity.GetData();
 }
 
+static bool SljitTryFastAppendFixedFlatAllValid(DataChunk &target, DataChunk &source) {
+	const auto append_count = source.size();
+	if (append_count == 0) {
+		return true;
+	}
+	if (target.ColumnCount() != source.ColumnCount()) {
+		return false;
+	}
+	const auto target_count = target.size();
+	const auto new_count = target_count + append_count;
+	if (new_count > STANDARD_VECTOR_SIZE) {
+		return false;
+	}
+	for (idx_t col_idx = 0; col_idx < target.ColumnCount(); col_idx++) {
+		auto &target_vector = target.data[col_idx];
+		auto &source_vector = source.data[col_idx];
+		if (target_vector.GetType() != source_vector.GetType()) {
+			return false;
+		}
+		if (!TypeIsConstantSize(target_vector.GetType().InternalType())) {
+			return false;
+		}
+		if (target_vector.GetVectorType() != VectorType::FLAT_VECTOR ||
+		    source_vector.GetVectorType() != VectorType::FLAT_VECTOR) {
+			return false;
+		}
+		if (FlatVector::GetCapacity(target_vector) < new_count) {
+			return false;
+		}
+		if (FlatVector::Validity(target_vector).CanHaveNull() ||
+		    !FlatVector::Validity(source_vector).CheckAllValid(append_count)) {
+			return false;
+		}
+	}
+	for (idx_t col_idx = 0; col_idx < target.ColumnCount(); col_idx++) {
+		auto &target_vector = target.data[col_idx];
+		auto &source_vector = source.data[col_idx];
+		const auto type_size = GetTypeIdSize(target_vector.GetType().InternalType());
+		auto target_data = FlatVector::GetDataMutable(target_vector) + target_count * type_size;
+		auto source_data = FlatVector::GetData(source_vector);
+		memcpy(target_data, source_data, append_count * type_size);
+		FlatVector::SetSize(target_vector, new_count);
+	}
+	target.CheckCardinality(new_count);
+	return true;
+}
+
+static idx_t SljitBatchedSourceContractFetchBudget(idx_t max_chunks) {
+	constexpr idx_t SOURCE_FETCHES_PER_DOWNSTREAM_BATCH = 64;
+	const auto max_idx = NumericLimits<idx_t>::Maximum();
+	if (max_chunks >= max_idx / SOURCE_FETCHES_PER_DOWNSTREAM_BATCH) {
+		return max_idx;
+	}
+	return max_chunks * SOURCE_FETCHES_PER_DOWNSTREAM_BATCH;
+}
+
 static const sel_t *SljitCanonicalizeCommonSelection(vector<const sel_t *> &source_sel,
                                                      vector<const sel_t *> &group_sel) {
 	const sel_t *common_sel = nullptr;
@@ -160,6 +217,21 @@ static const sel_t *SljitCanonicalizeCommonSourceSelection(vector<const sel_t *>
 	return common_sel;
 }
 
+static const sel_t *SljitCommonSelectionOrNull(const vector<const sel_t *> &source_sel) {
+	const sel_t *common_sel = nullptr;
+	for (auto sel : source_sel) {
+		if (!sel) {
+			return nullptr;
+		}
+		if (!common_sel) {
+			common_sel = sel;
+		} else if (common_sel != sel) {
+			return nullptr;
+		}
+	}
+	return common_sel;
+}
+
 static bool SljitAllSelectionsPresent(const vector<const sel_t *> &selections) {
 	if (selections.empty()) {
 		return false;
@@ -206,6 +278,212 @@ static const_data_ptr_t NativeHashJoinKeySourceData(UnifiedVectorFormat &format,
 		return reinterpret_cast<const_data_ptr_t>(UnifiedVectorFormat::GetData<uhugeint_t>(format));
 	default:
 		throw InternalException("Unknown SLJIT native hash join key kind");
+	}
+}
+
+static inline hash_t SljitHashJoinCombineHashScalar(hash_t left, hash_t right) {
+	left ^= left >> 32;
+	left *= 0xd6e8feb86659fd93U;
+	return left ^ right;
+}
+
+template <class T>
+static inline bool SljitHashJoinKeysEqual(const data_ptr_t row_location, idx_t layout_offset, T probe_key) {
+	return Load<T>(row_location + layout_offset) == probe_key;
+}
+
+static inline void SljitPrefetchHashJoinEntry(const ht_entry_t *entries, idx_t ht_offset) {
+#if defined(__GNUC__) || defined(__clang__)
+	__builtin_prefetch(entries + ht_offset, 0, 3);
+#else
+	(void)entries;
+	(void)ht_offset;
+#endif
+}
+
+static inline void SljitPrefetchHashJoinRow(data_ptr_t row_location, idx_t layout_offset) {
+#if defined(__GNUC__) || defined(__clang__)
+	__builtin_prefetch(row_location + layout_offset, 0, 3);
+#else
+	(void)row_location;
+	(void)layout_offset;
+#endif
+}
+
+static bool SljitHashJoinMatchedProbeOutputMode(ExecutionHashJoinProbeOutputMode mode) {
+	return mode == ExecutionHashJoinProbeOutputMode::MATCHED_PROBE_AND_BUILD ||
+	       mode == ExecutionHashJoinProbeOutputMode::MATCHED_PROBE_ONLY;
+}
+
+static bool SljitHashJoinCanUseFlatAllValidNoChainProbe(const SljitNativeHashJoinProbePlan &plan,
+                                                        const ExecutionHashJoinTableLayout &layout,
+                                                        const SljitNativeHashJoinProbeInput &input) {
+	return !plan.residual_predicate && !plan.mark_build_match &&
+	       SljitHashJoinMatchedProbeOutputMode(plan.output_mode) && !layout.chains_longer_than_one &&
+	       !input.source_sel && !input.source_validity && !input.resume_row_pointer &&
+	       input.count <= input.output_capacity;
+}
+
+static bool TryExecuteFlatAllValidInt64PairNoChainProbe(const SljitNativeHashJoinProbePlan &plan,
+                                                        const ExecutionHashJoinTableLayout &layout,
+                                                        SljitNativeHashJoinProbeInput &input) {
+	if (plan.keys.size() != 2 || plan.equality_key_count != 2 ||
+	    !SljitHashJoinCanUseFlatAllValidNoChainProbe(plan, layout, input)) {
+		return false;
+	}
+	for (auto &key : plan.keys) {
+		if (!key.equality_key || key.null_equal || key.comparison_type != ExecutionRegionComparisonType::EQUAL) {
+			return false;
+		}
+		if (key.key_kind != SljitNativeHashJoinKeyKind::INT64 && key.key_kind != SljitNativeHashJoinKeyKind::UINT64) {
+			return false;
+		}
+	}
+
+	const auto key0_data = reinterpret_cast<const uint64_t *>(input.source_data[0]);
+	const auto key1_data = reinterpret_cast<const uint64_t *>(input.source_data[1]);
+	const auto entries = reinterpret_cast<const ht_entry_t *>(input.entries);
+	auto selected_count = input.selected_count;
+	const auto key0_offset = plan.keys[0].key_layout_offset;
+	const auto key1_offset = plan.keys[1].key_layout_offset;
+
+	auto row_idx = input.input_offset;
+	if (row_idx < input.count) {
+		auto key0 = key0_data[row_idx];
+		auto key1 = key1_data[row_idx];
+		auto hash = SljitHashJoinCombineHashScalar(Hash<uint64_t>(key0), Hash<uint64_t>(key1));
+		auto salt = ht_entry_t::ExtractSalt(hash);
+		auto ht_offset = UnsafeNumericCast<idx_t>(hash & input.bitmask);
+		while (true) {
+			const auto next_row_idx = row_idx + 1;
+			const bool has_next = next_row_idx < input.count;
+			uint64_t next_key0 = 0;
+			uint64_t next_key1 = 0;
+			hash_t next_hash = 0;
+			hash_t next_salt = 0;
+			idx_t next_ht_offset = 0;
+			if (has_next) {
+				next_key0 = key0_data[next_row_idx];
+				next_key1 = key1_data[next_row_idx];
+				next_hash = SljitHashJoinCombineHashScalar(Hash<uint64_t>(next_key0), Hash<uint64_t>(next_key1));
+				next_salt = ht_entry_t::ExtractSalt(next_hash);
+				next_ht_offset = UnsafeNumericCast<idx_t>(next_hash & input.bitmask);
+				SljitPrefetchHashJoinEntry(entries, next_ht_offset);
+			}
+			while (true) {
+				const auto &entry = entries[ht_offset];
+				if (!entry.IsOccupied()) {
+					break;
+				}
+				if (!input.use_salt || entry.GetSalt() == salt) {
+					auto row_location = entry.GetPointer();
+					if (SljitHashJoinKeysEqual<uint64_t>(row_location, key0_offset, key0) &&
+					    SljitHashJoinKeysEqual<uint64_t>(row_location, key1_offset, key1)) {
+						input.row_pointers[selected_count] = row_location;
+						input.match_sel[selected_count] = UnsafeNumericCast<sel_t>(row_idx);
+						selected_count++;
+						break;
+					}
+				}
+				ht_offset = UnsafeNumericCast<idx_t>((ht_offset + 1) & input.bitmask);
+			}
+			if (!has_next) {
+				break;
+			}
+			row_idx = next_row_idx;
+			key0 = next_key0;
+			key1 = next_key1;
+			hash = next_hash;
+			salt = next_salt;
+			ht_offset = next_ht_offset;
+		}
+	}
+
+	input.selected_count = selected_count;
+	input.input_offset = input.count;
+	input.resume_row_pointer = nullptr;
+	input.finished = true;
+	return true;
+}
+
+template <class T>
+static void ExecuteFlatAllValidSingleKeyNoChainProbe(const SljitNativeHashJoinProbePlan &plan,
+                                                     SljitNativeHashJoinProbeInput &input) {
+	const auto key_data = reinterpret_cast<const T *>(input.source_data[0]);
+	const auto entries = reinterpret_cast<const ht_entry_t *>(input.entries);
+	auto selected_count = input.selected_count;
+	const auto key_offset = plan.keys[0].key_layout_offset;
+
+	for (idx_t row_idx = input.input_offset; row_idx < input.count; row_idx++) {
+		const auto key = key_data[row_idx];
+		auto hash = Hash<T>(key);
+		const auto salt = ht_entry_t::ExtractSalt(hash);
+		auto ht_offset = UnsafeNumericCast<idx_t>(hash & input.bitmask);
+
+		while (true) {
+			const auto &entry = entries[ht_offset];
+			if (!entry.IsOccupied()) {
+				break;
+			}
+			if (!input.use_salt || entry.GetSalt() == salt) {
+				auto row_location = entry.GetPointer();
+				SljitPrefetchHashJoinRow(row_location, key_offset);
+				if (SljitHashJoinKeysEqual<T>(row_location, key_offset, key)) {
+					input.row_pointers[selected_count] = row_location;
+					input.match_sel[selected_count] = UnsafeNumericCast<sel_t>(row_idx);
+					selected_count++;
+					break;
+				}
+			}
+			ht_offset = UnsafeNumericCast<idx_t>((ht_offset + 1) & input.bitmask);
+		}
+	}
+
+	input.selected_count = selected_count;
+	input.input_offset = input.count;
+	input.resume_row_pointer = nullptr;
+	input.finished = true;
+}
+
+static bool TryExecuteFlatAllValidSingleKeyNoChainProbe(const SljitNativeHashJoinProbePlan &plan,
+                                                        const ExecutionHashJoinTableLayout &layout,
+                                                        SljitNativeHashJoinProbeInput &input) {
+	if (plan.keys.size() != 1 || plan.equality_key_count != 1 ||
+	    !SljitHashJoinCanUseFlatAllValidNoChainProbe(plan, layout, input)) {
+		return false;
+	}
+	auto &key = plan.keys[0];
+	if (!key.equality_key || key.null_equal || key.comparison_type != ExecutionRegionComparisonType::EQUAL) {
+		return false;
+	}
+
+	switch (key.key_kind) {
+	case SljitNativeHashJoinKeyKind::INT8:
+		ExecuteFlatAllValidSingleKeyNoChainProbe<int8_t>(plan, input);
+		return true;
+	case SljitNativeHashJoinKeyKind::UINT8:
+		ExecuteFlatAllValidSingleKeyNoChainProbe<uint8_t>(plan, input);
+		return true;
+	case SljitNativeHashJoinKeyKind::INT16:
+		ExecuteFlatAllValidSingleKeyNoChainProbe<int16_t>(plan, input);
+		return true;
+	case SljitNativeHashJoinKeyKind::UINT16:
+		ExecuteFlatAllValidSingleKeyNoChainProbe<uint16_t>(plan, input);
+		return true;
+	case SljitNativeHashJoinKeyKind::INT32:
+		ExecuteFlatAllValidSingleKeyNoChainProbe<int32_t>(plan, input);
+		return true;
+	case SljitNativeHashJoinKeyKind::UINT32:
+		ExecuteFlatAllValidSingleKeyNoChainProbe<uint32_t>(plan, input);
+		return true;
+	case SljitNativeHashJoinKeyKind::INT64:
+		ExecuteFlatAllValidSingleKeyNoChainProbe<int64_t>(plan, input);
+		return true;
+	case SljitNativeHashJoinKeyKind::UINT64:
+		ExecuteFlatAllValidSingleKeyNoChainProbe<uint64_t>(plan, input);
+		return true;
+	default:
+		return false;
 	}
 }
 
@@ -265,6 +543,14 @@ static bool SljitUnifiedFormatHasIdentitySelection(const UnifiedVectorFormat &fo
 }
 
 static constexpr const char *SLJIT_GENERATED_REGULAR_HASH_JOIN_PROBE_STAGE = "generated_regular_probe_function";
+static constexpr const char *SLJIT_GENERATED_FLAT_ALL_VALID_HASH_JOIN_PROBE_STAGE =
+    "generated_regular_probe_flat_all_valid_function";
+static constexpr const char *SLJIT_FAST_FLAT_ALL_VALID_INT64_PAIR_HASH_JOIN_PROBE_STAGE =
+    "fast_regular_probe_flat_all_valid_int64_pair_no_chain";
+static constexpr const char *SLJIT_FAST_FLAT_ALL_VALID_SINGLE_KEY_HASH_JOIN_PROBE_STAGE =
+    "fast_regular_probe_flat_all_valid_single_key_no_chain";
+static constexpr const char *SLJIT_GENERATED_SELECTED_ALL_VALID_HASH_JOIN_PROBE_STAGE =
+    "generated_regular_probe_selected_all_valid_function";
 static constexpr const char *SLJIT_GENERATED_PERFECT_HASH_JOIN_PROBE_STAGE = "generated_perfect_probe_function";
 
 static const char *SljitHashJoinProbeLayoutName(ExecutionHashJoinProbeLayoutKind kind) {
@@ -1182,14 +1468,142 @@ public:
 		RecordLazyHashJoinProbeCodegen(runtime, timing, probe.code->CodeSize());
 	}
 
+	SljitNativeHashJoinProbeFunction
+	EnsureFlatAllValidRegularHashJoinProbeCode(ExecutionRegionRuntime &runtime, SljitExecutableHashJoinProbe &probe,
+	                                           bool use_salt, bool chains_longer_than_one, bool dictionary_emission) {
+		auto &variant = probe.FlatAllValidVariantFor(use_salt, chains_longer_than_one, dictionary_emission);
+		if (variant.function) {
+			return variant.function;
+		}
+		lock_guard<mutex> guard(codegen_lock);
+		if (variant.function) {
+			return variant.function;
+		}
+		string error;
+		SljitLazyCodegenTiming timing;
+		timing = TimeSljitLazyCodegen([&]() {
+			variant.code = BuildSljitHashJoinProbe(
+			    probe.plan.keys, probe.plan.equality_key_count, probe.plan.mark_build_match,
+			    probe.plan.found_match_offset, probe.plan.pointer_offset, probe.plan.output_mode, variant.function,
+			    error, true, true, use_salt, true, chains_longer_than_one, dictionary_emission);
+		});
+		if (!variant.code || !variant.function) {
+			throw InternalException("SLJIT native flat all-valid hash join probe codegen failed: %s", error);
+		}
+		RecordLazyHashJoinProbeCodegen(runtime, timing, variant.code->CodeSize());
+		return variant.function;
+	}
+
+	SljitNativeHashJoinProbeFunction EnsureSelectedAllValidRegularHashJoinProbeCode(ExecutionRegionRuntime &runtime,
+	                                                                                SljitExecutableHashJoinProbe &probe,
+	                                                                                bool use_salt,
+	                                                                                bool chains_longer_than_one,
+	                                                                                bool dictionary_emission) {
+		auto &variant = probe.SelectedAllValidVariantFor(use_salt, chains_longer_than_one, dictionary_emission);
+		if (variant.function) {
+			return variant.function;
+		}
+		lock_guard<mutex> guard(codegen_lock);
+		if (variant.function) {
+			return variant.function;
+		}
+		string error;
+		SljitLazyCodegenTiming timing;
+		timing = TimeSljitLazyCodegen([&]() {
+			variant.code = BuildSljitHashJoinProbe(
+			    probe.plan.keys, probe.plan.equality_key_count, probe.plan.mark_build_match,
+			    probe.plan.found_match_offset, probe.plan.pointer_offset, probe.plan.output_mode, variant.function,
+			    error, false, true, use_salt, true, chains_longer_than_one, dictionary_emission, true);
+		});
+		if (!variant.code || !variant.function) {
+			throw InternalException("SLJIT native selected all-valid hash join probe codegen failed: %s", error);
+		}
+		RecordLazyHashJoinProbeCodegen(runtime, timing, variant.code->CodeSize());
+		return variant.function;
+	}
+
+	bool CanBatchFilteredSourceFullPipeline() const {
+		return UsesScanFilters() && ops.size() == 2 && ops[0].kind == SljitNativeRegionOpKind::HASH_JOIN_PROBE &&
+		       ops[1].kind == SljitNativeRegionOpKind::AGGREGATE_UPDATE &&
+		       ops[1].aggregate_update.plan.sink_info.kind == ExecutionRegionSinkKind::UNGROUPED_AGGREGATE_UPDATE;
+	}
+
+	bool CanBatchGeneratedFilterProjectionFullPipeline() const {
+		return ops.size() == 4 && ops[0].kind == SljitNativeRegionOpKind::FILTER &&
+		       ops[1].kind == SljitNativeRegionOpKind::PROJECTION &&
+		       ops[2].kind == SljitNativeRegionOpKind::HASH_JOIN_PROBE &&
+		       ops[3].kind == SljitNativeRegionOpKind::AGGREGATE_UPDATE &&
+		       ops[3].aggregate_update.plan.sink_info.kind == ExecutionRegionSinkKind::UNGROUPED_AGGREGATE_UPDATE;
+	}
+
+	bool CanUseExtendedRegularHashAggregateSourceBudget() const {
+		bool has_hash_join_probe = false;
+		for (auto &op : ops) {
+			if (op.kind == SljitNativeRegionOpKind::HASH_JOIN_PROBE) {
+				has_hash_join_probe = true;
+				continue;
+			}
+			if (op.kind == SljitNativeRegionOpKind::AGGREGATE_UPDATE) {
+				return has_hash_join_probe &&
+				       op.aggregate_update.plan.sink_info.kind == ExecutionRegionSinkKind::HASH_AGGREGATE_UPDATE;
+			}
+		}
+		return false;
+	}
+
+	bool TryAppendReferenceProjectionToBatch(DataChunk &batch, DataChunk &input,
+	                                         const SljitExecutableRegionOp &projection_op,
+	                                         const SelectionVector &selection, idx_t count) {
+		if (projection_op.kind != SljitNativeRegionOpKind::PROJECTION ||
+		    projection_op.projections.size() != batch.ColumnCount()) {
+			return false;
+		}
+		const auto current_size = batch.size();
+		if (current_size + count > STANDARD_VECTOR_SIZE) {
+			return false;
+		}
+		for (idx_t projection_idx = 0; projection_idx < projection_op.projections.size(); projection_idx++) {
+			auto &projection = projection_op.projections[projection_idx].plan;
+			if (projection.kind != SljitNativeRegionExpressionKind::REFERENCE ||
+			    projection.source_index >= input.ColumnCount()) {
+				return false;
+			}
+			auto &target = batch.data[projection_idx];
+			auto &source = input.data[projection.source_index];
+			if (target.size() != current_size || target.GetType() != source.GetType() ||
+			    projection.return_type != source.GetType()) {
+				return false;
+			}
+		}
+		for (idx_t projection_idx = 0; projection_idx < projection_op.projections.size(); projection_idx++) {
+			auto &projection = projection_op.projections[projection_idx].plan;
+			batch.data[projection_idx].Append(input.data[projection.source_index], selection, count);
+		}
+		batch.CheckCardinality(current_size + count);
+		return true;
+	}
+
 	bool TryExecuteFullPipeline(ExecutionRegionRuntime &runtime, ExecutionRegionResult &result) override {
 		if (!ExecutionRegionABIIsFullPipeline(abi)) {
 			throw InternalException("SLJIT full pipeline kernel entered without full-pipeline ABI");
 		}
+		if (CanBatchFilteredSourceFullPipeline()) {
+			return TryExecuteFullPipelineBatched(runtime, result);
+		}
+		if (CanBatchGeneratedFilterProjectionFullPipeline()) {
+			return TryExecuteFullPipelineGeneratedFilterBatched(runtime, result);
+		}
+		return TryExecuteFullPipelineUnbatched(runtime, result);
+	}
+
+	bool TryExecuteFullPipelineUnbatched(ExecutionRegionRuntime &runtime, ExecutionRegionResult &result) {
 		SljitRegionExecutionScratch scratch(runtime.GetAllocator(), ops);
 		idx_t processed_chunks = 0;
+		const auto max_chunks = CanUseExtendedRegularHashAggregateSourceBudget()
+		                            ? SljitBatchedSourceContractFetchBudget(runtime.MaxChunks())
+		                            : runtime.MaxChunks();
 		while (true) {
-			if (processed_chunks >= runtime.MaxChunks()) {
+			if (processed_chunks >= max_chunks) {
 				result = ExecutionRegionResult::NOT_FINISHED;
 				return true;
 			}
@@ -1222,6 +1636,193 @@ public:
 				processed_chunks++;
 			}
 			if (source_result == SourceResultType::FINISHED) {
+				result = ExecutionRegionResult::FINISHED;
+				return true;
+			}
+		}
+	}
+
+	bool TryExecuteFullPipelineBatched(ExecutionRegionRuntime &runtime, ExecutionRegionResult &result) {
+		SljitRegionExecutionScratch scratch(runtime.GetAllocator(), ops);
+		idx_t fetched_chunks = 0;
+		idx_t processed_batches = 0;
+		const auto max_source_fetches = SljitBatchedSourceContractFetchBudget(runtime.MaxChunks());
+
+		auto execute_chunk = [&](DataChunk &input, bool have_more_output) -> bool {
+			if (input.size() == 0) {
+				return false;
+			}
+			auto next_batch_result = runtime.AdvanceSinkBatch(input, have_more_output);
+			if (next_batch_result == SinkNextBatchType::BLOCKED) {
+				result = ExecutionRegionResult::INTERRUPTED;
+				return true;
+			}
+			auto sink_result = ExecuteNativeFullPipeline(runtime, scratch, input);
+			if (sink_result == SinkResultType::BLOCKED) {
+				result = runtime.DeferredReason().empty() ? ExecutionRegionResult::INTERRUPTED
+				                                          : ExecutionRegionResult::DEFERRED;
+				return true;
+			}
+			if (sink_result == SinkResultType::FINISHED) {
+				result = ExecutionRegionResult::FINISHED;
+				return true;
+			}
+			processed_batches++;
+			return false;
+		};
+
+		auto flush_batch = [&](bool have_more_output) -> bool {
+			auto batch = runtime.PendingSourceContractBatch();
+			if (!batch) {
+				return false;
+			}
+			if (execute_chunk(*batch, have_more_output)) {
+				return true;
+			}
+			runtime.ResetSourceContractBatch();
+			return false;
+		};
+
+		while (true) {
+			if (processed_batches >= runtime.MaxChunks() || fetched_chunks >= max_source_fetches) {
+				result = ExecutionRegionResult::NOT_FINISHED;
+				return true;
+			}
+
+			DataChunk *source_chunk = nullptr;
+			auto source_result = runtime.FetchSourceContract(source_chunk);
+			if (source_result == SourceResultType::BLOCKED) {
+				result = ExecutionRegionResult::INTERRUPTED;
+				return true;
+			}
+			fetched_chunks++;
+
+			if (source_chunk && source_chunk->size() > 0) {
+				auto &batch = runtime.PrepareSourceContractBatch(source_chunk->GetTypes());
+				if (batch.size() + source_chunk->size() > STANDARD_VECTOR_SIZE) {
+					if (flush_batch(true)) {
+						return true;
+					}
+				}
+				if (source_chunk->size() == STANDARD_VECTOR_SIZE && batch.size() == 0) {
+					if (execute_chunk(*source_chunk, source_result == SourceResultType::HAVE_MORE_OUTPUT)) {
+						return true;
+					}
+				} else {
+					if (!SljitTryFastAppendFixedFlatAllValid(batch, *source_chunk)) {
+						batch.Append(*source_chunk);
+					}
+					if (batch.size() == STANDARD_VECTOR_SIZE) {
+						if (flush_batch(source_result == SourceResultType::HAVE_MORE_OUTPUT)) {
+							return true;
+						}
+					}
+				}
+			}
+			if (source_result == SourceResultType::FINISHED) {
+				if (flush_batch(false)) {
+					return true;
+				}
+				result = ExecutionRegionResult::FINISHED;
+				return true;
+			}
+		}
+	}
+
+	bool TryExecuteFullPipelineGeneratedFilterBatched(ExecutionRegionRuntime &runtime, ExecutionRegionResult &result) {
+		SljitRegionExecutionScratch scratch(runtime.GetAllocator(), ops);
+		idx_t fetched_chunks = 0;
+		idx_t processed_batches = 0;
+		const auto max_source_fetches = SljitBatchedSourceContractFetchBudget(runtime.MaxChunks());
+
+		auto execute_batch = [&](DataChunk &input) -> bool {
+			if (input.size() == 0) {
+				return false;
+			}
+			auto sink_result = ExecuteNativeFullPipelineFrom(runtime, scratch, 2, input);
+			if (sink_result == SinkResultType::BLOCKED) {
+				result = runtime.DeferredReason().empty() ? ExecutionRegionResult::INTERRUPTED
+				                                          : ExecutionRegionResult::DEFERRED;
+				return true;
+			}
+			if (sink_result == SinkResultType::FINISHED) {
+				result = ExecutionRegionResult::FINISHED;
+				return true;
+			}
+			processed_batches++;
+			return false;
+		};
+
+		auto flush_batch = [&]() -> bool {
+			auto batch = runtime.PendingSourceContractBatch();
+			if (!batch) {
+				return false;
+			}
+			if (execute_batch(*batch)) {
+				return true;
+			}
+			runtime.ResetSourceContractBatch();
+			return false;
+		};
+
+		while (true) {
+			if (processed_batches >= runtime.MaxChunks() || fetched_chunks >= max_source_fetches) {
+				result = ExecutionRegionResult::NOT_FINISHED;
+				return true;
+			}
+
+			DataChunk *source_chunk = nullptr;
+			auto source_result = runtime.FetchSourceContract(source_chunk);
+			if (source_result == SourceResultType::BLOCKED) {
+				result = ExecutionRegionResult::INTERRUPTED;
+				return true;
+			}
+			fetched_chunks++;
+
+			if (source_chunk) {
+				auto next_batch_result =
+				    runtime.AdvanceSinkBatch(*source_chunk, source_result == SourceResultType::HAVE_MORE_OUTPUT);
+				if (next_batch_result == SinkNextBatchType::BLOCKED) {
+					result = ExecutionRegionResult::INTERRUPTED;
+					return true;
+				}
+			}
+			if (source_chunk && source_chunk->size() > 0) {
+				auto &filter_selection = scratch.FilterSelection(0);
+				auto filter_stage_start = SljitRegionStageStart(runtime);
+				auto selected_count =
+				    SelectFilter(ops[0], *source_chunk, filter_selection, scratch.ExpressionAdapterScratch(0, 0));
+				RecordSljitRegionStageRuntime(runtime, 0, ops[0].kind, "selection", filter_stage_start);
+				if (selected_count > 0) {
+					auto &batch = runtime.PrepareSourceContractBatch(ops[1].output_types);
+					if (batch.size() + selected_count > STANDARD_VECTOR_SIZE) {
+						if (flush_batch()) {
+							return true;
+						}
+					}
+					auto append_stage_start = SljitRegionStageStart(runtime);
+					if (!TryAppendReferenceProjectionToBatch(batch, *source_chunk, ops[1], filter_selection,
+					                                         selected_count)) {
+						auto &filtered = scratch.TemporaryChunk(1);
+						filtered.Reset();
+						ExecuteProjection(scratch, 1, ops[1], *source_chunk, filtered, &filter_selection,
+						                  selected_count);
+						if (!SljitTryFastAppendFixedFlatAllValid(batch, filtered)) {
+							batch.Append(filtered);
+						}
+					}
+					RecordSljitRegionStageRuntime(runtime, 1, ops[1].kind, "batch_append", append_stage_start);
+					if (batch.size() == STANDARD_VECTOR_SIZE) {
+						if (flush_batch()) {
+							return true;
+						}
+					}
+				}
+			}
+			if (source_result == SourceResultType::FINISHED) {
+				if (flush_batch()) {
+					return true;
+				}
 				result = ExecutionRegionResult::FINISHED;
 				return true;
 			}
@@ -3559,9 +4160,8 @@ public:
 	    const vector<SljitNativeRegionExpressionPlan> &group_expressions,
 	    const ExecutionRegionAggregateContract &contract,
 	    const vector<const ExecutionPrimitiveAggregateUpdateLane *> &lanes,
-	    const ExecutionPerfectAggregateStateAddressLayout &layout, DataChunk &input,
-	    const SelectionVector *execute_sel, idx_t count,
-	    SljitAggregatePayloadAdapterScratch &adapter_scratch) {
+	    const ExecutionPerfectAggregateStateAddressLayout &layout, DataChunk &input, const SelectionVector *execute_sel,
+	    idx_t count, SljitAggregatePayloadAdapterScratch &adapter_scratch) {
 		if (!function) {
 			throw InternalException("SLJIT fused perfect-hash aggregate update is missing generated code");
 		}
@@ -3661,9 +4261,8 @@ public:
 				source_data[source_idx] =
 				    SljitTypedExpressionTreeSourceData(source_formats[source_idx], input.data[input_index].GetType());
 				source_sel[source_idx] = SljitNormalizedSourceSelectionData(source_formats[source_idx]);
-				source_validity[source_idx] =
-				    SljitNormalizedSourceValidityData(source_formats[source_idx], source_sel[source_idx], execute_sel,
-				                                      count);
+				source_validity[source_idx] = SljitNormalizedSourceValidityData(
+				    source_formats[source_idx], source_sel[source_idx], execute_sel, count);
 				flat_all_valid =
 				    flat_all_valid && source_sel[source_idx] == nullptr && source_validity[source_idx] == nullptr;
 				all_valid = all_valid && source_validity[source_idx] == nullptr;
@@ -3720,9 +4319,8 @@ public:
 			input.data[plan.source_index].ToUnifiedFormat(source_formats[payload_idx]);
 			source_data[payload_idx] = NativeIntegerSourceData(source_formats[payload_idx], plan.integer_kind);
 			source_sel[payload_idx] = SljitNormalizedSourceSelectionData(source_formats[payload_idx]);
-			source_validity[payload_idx] =
-			    SljitNormalizedSourceValidityData(source_formats[payload_idx], source_sel[payload_idx], execute_sel,
-			                                      count);
+			source_validity[payload_idx] = SljitNormalizedSourceValidityData(
+			    source_formats[payload_idx], source_sel[payload_idx], execute_sel, count);
 		}
 
 		const auto native_execute_sel =
@@ -3938,7 +4536,6 @@ public:
 	    vector<const validity_t *> &source_validity, DataChunk *residual_chunk, SelectionVector *residual_selection,
 	    SelectionVector *compact_match_selection, Vector *compact_row_pointers, SljitHashJoinProbeDrainState &state,
 	    bool left_probe_output) {
-		EnsureRegularHashJoinProbeCode(runtime, op.hash_join_probe);
 		auto &layout = probe.table_layout;
 		if (!layout.ready || !layout.entries || layout.layout_offsets.empty()) {
 			throw InternalException("SLJIT native hash join probe received an incomplete hash table layout");
@@ -3983,18 +4580,24 @@ public:
 			input.data[key.key_input_index].ToUnifiedFormat(source_formats[key_idx]);
 			source_data[key_idx] = NativeHashJoinKeySourceData(source_formats[key_idx], key.key_kind);
 			source_sel[key_idx] = SljitNormalizedSourceSelectionData(source_formats[key_idx]);
-			source_validity[key_idx] = source_formats[key_idx].validity.CannotHaveNull()
-			                               ? nullptr
-			                               : source_formats[key_idx].validity.GetData();
+			source_validity[key_idx] =
+			    SljitNormalizedSourceValidityData(source_formats[key_idx], source_sel[key_idx], input.size());
 		}
 		row_pointers.SetVectorType(VectorType::FLAT_VECTOR);
 		auto row_pointer_data = FlatVector::GetDataMutable<data_ptr_t>(row_pointers);
 		RecordSljitRegionStageRuntime(runtime, op_idx, op.kind, "vector_setup", vector_setup_stage_start);
+		auto source_sel_array = SljitPointerArrayOrNull(source_sel);
+		auto source_validity_array = SljitPointerArrayOrNull(source_validity);
+		const bool rhs_keys_all_valid =
+		    !layout.can_have_null || (layout.null_keys_are_filtered && !layout.found_match_column_present);
+		const bool use_flat_all_valid_probe = !source_sel_array && !source_validity_array && rhs_keys_all_valid;
+		const bool use_selected_all_valid_probe =
+		    source_sel_array && SljitCommonSelectionOrNull(source_sel) && !source_validity_array && rhs_keys_all_valid;
 
 		SljitNativeHashJoinProbeInput native_input;
 		native_input.source_data = source_data.data();
-		native_input.source_sel = SljitPointerArrayOrNull(source_sel);
-		native_input.source_validity = SljitPointerArrayOrNull(source_validity);
+		native_input.source_sel = source_sel_array;
+		native_input.source_validity = source_validity_array;
 		native_input.count = input.size();
 		native_input.entries = reinterpret_cast<const_data_ptr_t>(layout.entries);
 		native_input.bitmask = layout.bitmask;
@@ -4015,9 +4618,38 @@ public:
 		native_input.finished = false;
 
 		auto generated_stage_start = SljitRegionStageStart(runtime);
-		op.hash_join_probe.function(&native_input);
-		RecordSljitRegionStageRuntime(runtime, op_idx, op.kind, SLJIT_GENERATED_REGULAR_HASH_JOIN_PROBE_STAGE,
-		                              generated_stage_start);
+		if (use_flat_all_valid_probe) {
+			if (TryExecuteFlatAllValidInt64PairNoChainProbe(op.hash_join_probe.plan, layout, native_input)) {
+				RecordSljitRegionStageRuntime(runtime, op_idx, op.kind,
+				                              SLJIT_FAST_FLAT_ALL_VALID_INT64_PAIR_HASH_JOIN_PROBE_STAGE,
+				                              generated_stage_start);
+			} else if (TryExecuteFlatAllValidSingleKeyNoChainProbe(op.hash_join_probe.plan, layout, native_input)) {
+				RecordSljitRegionStageRuntime(runtime, op_idx, op.kind,
+				                              SLJIT_FAST_FLAT_ALL_VALID_SINGLE_KEY_HASH_JOIN_PROBE_STAGE,
+				                              generated_stage_start);
+			} else {
+				auto function = EnsureFlatAllValidRegularHashJoinProbeCode(runtime, op.hash_join_probe, layout.use_salt,
+				                                                           layout.chains_longer_than_one,
+				                                                           layout.dictionary_emission);
+				function(&native_input);
+				RecordSljitRegionStageRuntime(runtime, op_idx, op.kind,
+				                              SLJIT_GENERATED_FLAT_ALL_VALID_HASH_JOIN_PROBE_STAGE,
+				                              generated_stage_start);
+			}
+		} else if (use_selected_all_valid_probe) {
+			auto function = EnsureSelectedAllValidRegularHashJoinProbeCode(runtime, op.hash_join_probe, layout.use_salt,
+			                                                               layout.chains_longer_than_one,
+			                                                               layout.dictionary_emission);
+			function(&native_input);
+			RecordSljitRegionStageRuntime(runtime, op_idx, op.kind,
+			                              SLJIT_GENERATED_SELECTED_ALL_VALID_HASH_JOIN_PROBE_STAGE,
+			                              generated_stage_start);
+		} else {
+			EnsureRegularHashJoinProbeCode(runtime, op.hash_join_probe);
+			op.hash_join_probe.function(&native_input);
+			RecordSljitRegionStageRuntime(runtime, op_idx, op.kind, SLJIT_GENERATED_REGULAR_HASH_JOIN_PROBE_STAGE,
+			                              generated_stage_start);
+		}
 		state.input_offset = native_input.input_offset;
 		state.resume_row_pointer = native_input.resume_row_pointer;
 		state.finished = native_input.finished;
@@ -4526,9 +5158,21 @@ public:
 		}
 
 		auto aggregate_stage_start = SljitRegionStageStart(runtime);
-		ExecuteFilteredPrimitiveAggregateUpdate(op.aggregate_update.filtered_update, aggregates, payload_lanes, input,
-		                                        input.size(), scratch.AggregatePayloadScratch(op_idx));
-		RecordSljitRegionStageRuntime(runtime, op_idx, op.kind, "filtered_primitive_update", aggregate_stage_start);
+		auto &payload_scratch = scratch.AggregatePayloadScratch(op_idx);
+		if (op.aggregate_update.filtered_update.owns_perfect_hash_group_lookup) {
+			auto &grouped_state = binding.aggregate_update.grouped_state;
+			ExecuteFusedPerfectHashGroupedPrimitiveAggregatePayloadUpdate(
+			    op.aggregate_update.filtered_update.payloads, op.aggregate_update.filtered_update.function, aggregates,
+			    op.aggregate_update.plan.sink_info.groups, op.aggregate_update.plan.group_expressions,
+			    op.aggregate_update.plan.sink_info.aggregate_contract, payload_lanes, grouped_state.perfect_hash_layout,
+			    input, nullptr, input.size(), payload_scratch);
+			RecordSljitRegionStageRuntime(runtime, op_idx, op.kind, "filtered_perfect_hash_update",
+			                              aggregate_stage_start);
+		} else {
+			ExecuteFilteredPrimitiveAggregateUpdate(op.aggregate_update.filtered_update, aggregates, payload_lanes,
+			                                        input, input.size(), payload_scratch);
+			RecordSljitRegionStageRuntime(runtime, op_idx, op.kind, "filtered_primitive_update", aggregate_stage_start);
+		}
 		return SinkResultType::NEED_MORE_INPUT;
 	}
 

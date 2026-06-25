@@ -251,6 +251,7 @@ private:
 	idx_t FindOrCreateGroupsInternal(DataChunk &groups, Vector &group_hashes, Vector &addresses,
 	                                 SelectionVector &new_groups,
 	                                 optional_ptr<ExecutionOperatorStageRecorder> recorder);
+	bool TryResolveExistingGroupsFast(DataChunk &groups, Vector &group_hashes, Vector &addresses);
 
 	//! Verify the pointer table of the HT
 	void Verify();

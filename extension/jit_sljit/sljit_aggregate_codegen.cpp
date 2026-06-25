@@ -4086,11 +4086,12 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativePerfectHashGroupedFusedPri
 	return FinishSljitNativeAggregateUpdateCode(compiler, function, error);
 }
 
-unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativePerfectHashGroupedFusedTypedExpressionAggregateUpdate(
-    const vector<SljitNativeRegionExpressionPlan> &payloads, const vector<ExecutionRegionAggregateInput> &aggregates,
-    const vector<ExecutionRegionGroupInput> &groups, const vector<SljitNativeRegionExpressionPlan> &group_expressions,
-    const ExecutionRegionAggregateContract &contract, const vector<bool> &source_not_null,
-    const vector<Value> &source_min_values, const vector<Value> &source_max_values,
+static unique_ptr<ExecutionRegionCodeHandle>
+BuildSljitNativePerfectHashGroupedFusedTypedExpressionAggregateUpdateInternal(
+    const ExecutionExpressionIR *predicate, const vector<SljitNativeRegionExpressionPlan> &payloads,
+    const vector<ExecutionRegionAggregateInput> &aggregates, const vector<ExecutionRegionGroupInput> &groups,
+    const vector<SljitNativeRegionExpressionPlan> &group_expressions, const ExecutionRegionAggregateContract &contract,
+    const vector<bool> &source_not_null, const vector<Value> &source_min_values, const vector<Value> &source_max_values,
     SljitNativeAggregateUpdateFunction &function, string &error) {
 	vector<SljitPerfectHashGroupPlan> group_plans;
 	SljitUngroupedFusedTypedAggregateCodegenPlan codegen_plan;
@@ -4099,6 +4100,17 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativePerfectHashGroupedFusedTyp
 	    !BuildSljitUngroupedFusedTypedAggregateCodegenPlan(payloads, aggregates, codegen_plan)) {
 		error = "unsupported fused perfect-hash typed aggregate payload shape";
 		return nullptr;
+	}
+	SljitTypedExpressionTreePlan predicate_plan;
+	if (predicate) {
+		predicate_plan = BuildSljitTypedExpressionTreePlan(*predicate, false);
+		if (!predicate_plan.supported || !predicate_plan.result_is_bool) {
+			error = "unsupported filtered fused perfect-hash aggregate predicate shape";
+			return nullptr;
+		}
+		codegen_plan.tree_node_count += predicate_plan.node_count;
+		codegen_plan.fast_path_supported =
+		    codegen_plan.fast_path_supported && predicate_plan.fast_path.fast_path_supported;
 	}
 	if (contract.perfect_required_bits_total >= 8 * sizeof(idx_t)) {
 		error = "unsupported fused perfect-hash typed aggregate domain size";
@@ -4134,9 +4146,9 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativePerfectHashGroupedFusedTyp
 	AnnotateSljitLocalPerfectHashAggregatePlan(local_aggregate_plan, payloads, aggregates, source_min_values,
 	                                           source_max_values);
 	vector<SljitSparseLocalRunCachedLane> sparse_run_cached_lanes;
-	const bool sparse_run_cache_enabled = codegen_plan.fast_path_supported && SLJIT_HAS_SPARSE_LOCAL_RUN_CACHE_REGS &&
-	                                      local_aggregate_plan.enabled && local_aggregate_plan.sparse &&
-	                                      !local_aggregate_plan.sparse_eager_zero &&
+	const bool sparse_run_cache_enabled = !predicate && codegen_plan.fast_path_supported &&
+	                                      SLJIT_HAS_SPARSE_LOCAL_RUN_CACHE_REGS && local_aggregate_plan.enabled &&
+	                                      local_aggregate_plan.sparse && !local_aggregate_plan.sparse_eager_zero &&
 	                                      SljitSparseLocalUsesCountSeen(local_aggregate_plan);
 	if (sparse_run_cache_enabled) {
 		sparse_run_cached_lanes = BuildSljitSparseLocalRunCachedLanes(local_aggregate_plan, aggregates);
@@ -4237,6 +4249,54 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativePerfectHashGroupedFusedTyp
 		}
 		sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_PERFECT_HASH_STATE_REG, 0, SLJIT_MEM1(SLJIT_S0),
 		               offsetof(SljitNativeVectorInput, group_data_array));
+	};
+	auto emit_predicate_skip_jumps =
+	    [&](bool fast_path, bool all_valid, bool no_source_selection,
+	        const vector<SljitTypedExpressionTreeDataPointerHoist> *predicate_data_hoists) {
+		    vector<sljit_jump *> result;
+		    if (!predicate) {
+			    return result;
+		    }
+		    if (fast_path) {
+			    idx_t predicate_spill_index = 0;
+			    EmitSljitTypedExpressionTreeFastValueReg(compiler, *predicate, predicate_spill_index, overflows,
+			                                             predicate_data_hoists);
+			    result.push_back(sljit_emit_cmp(compiler, SLJIT_EQUAL, SLJIT_R2, 0, SLJIT_IMM, 0));
+			    return result;
+		    }
+		    if (all_valid && no_source_selection) {
+			    idx_t predicate_spill_index = 0;
+			    EmitSljitTypedExpressionTreeLogicalFastValueReg(compiler, *predicate, predicate_spill_index, overflows,
+			                                                    predicate_data_hoists);
+			    result.push_back(sljit_emit_cmp(compiler, SLJIT_EQUAL, SLJIT_R2, 0, SLJIT_IMM, 0));
+			    return result;
+		    }
+		    sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_S4, 0, SLJIT_MEM1(SLJIT_S0),
+		                   offsetof(SljitNativeVectorInput, source_sel_array));
+		    if (all_valid) {
+			    idx_t predicate_spill_index = 0;
+			    EmitSljitTypedExpressionTreeSelectedFastValueReg(compiler, *predicate, predicate_spill_index, overflows,
+			                                                     predicate_data_hoists);
+			    result.push_back(sljit_emit_cmp(compiler, SLJIT_EQUAL, SLJIT_R2, 0, SLJIT_IMM, 0));
+			    return result;
+		    }
+		    idx_t predicate_slot_index = 0;
+		    auto predicate_slot =
+		        EmitSljitTypedExpressionTreeValue(compiler, *predicate, predicate_slot_index, overflows);
+		    sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R3, 0, SLJIT_MEM1(SLJIT_SP), predicate_slot.valid_offset);
+		    result.push_back(sljit_emit_cmp(compiler, SLJIT_EQUAL, SLJIT_R3, 0, SLJIT_IMM, 0));
+		    sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R2, 0, SLJIT_MEM1(SLJIT_SP), predicate_slot.value_offset);
+		    result.push_back(sljit_emit_cmp(compiler, SLJIT_EQUAL, SLJIT_R2, 0, SLJIT_IMM, 0));
+		    return result;
+	    };
+	auto emit_predicate_skip_label = [&](const vector<sljit_jump *> &predicate_skip_jumps) {
+		if (predicate_skip_jumps.empty()) {
+			return;
+		}
+		auto predicate_skip_label = sljit_emit_label(compiler);
+		for (auto jump : predicate_skip_jumps) {
+			sljit_set_label(jump, predicate_skip_label);
+		}
 	};
 
 	auto emit_group_lookup = [&](bool check_group_validity, bool materialize_state_pointer, bool defer_flags,
@@ -4477,6 +4537,7 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativePerfectHashGroupedFusedTyp
 		auto fast_loop = sljit_emit_label(compiler);
 		fast_done = sljit_emit_cmp(compiler, SLJIT_GREATER_EQUAL, SLJIT_S1, 0, SLJIT_S2, 0);
 		EmitLoadFusedAggregateExecuteIndex(compiler, true);
+		auto predicate_skip_jumps = emit_predicate_skip_jumps(true, true, false, fast_data_hoists);
 		if (sparse_run_cache_enabled) {
 			emit_fast_group_data_array_base();
 			emit_group_lookup(false, false, deferred_flag_plan.enabled, true, false, hoist_fast_group_data_array_base,
@@ -4486,6 +4547,7 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativePerfectHashGroupedFusedTyp
 			sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_PERFECT_HASH_STATE_REG, 0, SLJIT_MEM1(SLJIT_SP),
 			               sparse_run_cached_pointer_offset);
 			emit_payload_updates(true, true, false, fast_data_hoists, &sparse_run_cached_lanes);
+			emit_predicate_skip_label(predicate_skip_jumps);
 			EmitSljitAggregateLoopStep(compiler, fast_loop);
 
 			sljit_set_label(group_changed, sljit_emit_label(compiler));
@@ -4510,6 +4572,7 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativePerfectHashGroupedFusedTyp
 			emit_group_lookup(false, !local_aggregate_plan.enabled, deferred_flag_plan.enabled, true,
 			                  local_aggregate_plan.sparse, hoist_fast_group_data_array_base);
 			emit_payload_updates(true, true, false, fast_data_hoists);
+			emit_predicate_skip_label(predicate_skip_jumps);
 			EmitSljitAggregateLoopStep(compiler, fast_loop);
 		}
 
@@ -4525,9 +4588,11 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativePerfectHashGroupedFusedTyp
 		auto logical_fast_loop = sljit_emit_label(compiler);
 		logical_fast_done = sljit_emit_cmp(compiler, SLJIT_GREATER_EQUAL, SLJIT_S1, 0, SLJIT_S2, 0);
 		EmitLoadFusedAggregateExecuteIndex(compiler);
+		predicate_skip_jumps = emit_predicate_skip_jumps(false, true, true, fast_data_hoists);
 		emit_group_lookup(false, !local_aggregate_plan.enabled, deferred_flag_plan.enabled, true,
 		                  local_aggregate_plan.sparse, false);
 		emit_payload_updates(false, true, true, fast_data_hoists);
+		emit_predicate_skip_label(predicate_skip_jumps);
 		EmitSljitAggregateLoopStep(compiler, logical_fast_loop);
 
 		sljit_set_label(use_source_selected_loop, sljit_emit_label(compiler));
@@ -4549,6 +4614,7 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativePerfectHashGroupedFusedTyp
 		common_selected_group_present_fast_done =
 		    sljit_emit_cmp(compiler, SLJIT_GREATER_EQUAL, SLJIT_S1, 0, SLJIT_S2, 0);
 		EmitLoadFusedAggregateExecuteIndex(compiler, true);
+		predicate_skip_jumps = emit_predicate_skip_jumps(false, true, false, data_hoists);
 		if (can_use_common_selected_group_data_base_reg) {
 			sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_PERFECT_HASH_STATE_REG, 0, SLJIT_MEM1(SLJIT_S0),
 			               offsetof(SljitNativeVectorInput, group_data_array));
@@ -4558,6 +4624,7 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativePerfectHashGroupedFusedTyp
 		                  can_use_common_selected_group_data_base_reg ? SLJIT_PERFECT_HASH_STATE_REG : 0);
 		emit_load_common_source_index();
 		emit_payload_updates(false, true, true, data_hoists);
+		emit_predicate_skip_label(predicate_skip_jumps);
 		EmitSljitAggregateLoopStep(compiler, common_selected_group_present_fast_loop);
 
 		sljit_set_label(use_nullable_common_selected_loop, sljit_emit_label(compiler));
@@ -4565,12 +4632,14 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativePerfectHashGroupedFusedTyp
 		auto common_selected_fast_loop = sljit_emit_label(compiler);
 		common_selected_fast_done = sljit_emit_cmp(compiler, SLJIT_GREATER_EQUAL, SLJIT_S1, 0, SLJIT_S2, 0);
 		EmitLoadFusedAggregateExecuteIndex(compiler, true);
+		predicate_skip_jumps = emit_predicate_skip_jumps(false, true, false, fast_data_hoists);
 		emit_group_lookup(false, !local_aggregate_plan.enabled, deferred_flag_plan.enabled, false,
 		                  local_aggregate_plan.sparse, false);
 		sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_R0, 0, SLJIT_MEM1(SLJIT_S0),
 		               offsetof(SljitNativeVectorInput, source_common_sel));
 		sljit_emit_op1(compiler, SLJIT_MOV_U32, SLJIT_S3, 0, SLJIT_MEM2(SLJIT_R0, SLJIT_S3), 2);
 		emit_payload_updates(false, true, true, fast_data_hoists);
+		emit_predicate_skip_label(predicate_skip_jumps);
 		EmitSljitAggregateLoopStep(compiler, common_selected_fast_loop);
 
 		sljit_set_label(use_per_source_selected_loop, sljit_emit_label(compiler));
@@ -4578,9 +4647,11 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativePerfectHashGroupedFusedTyp
 		auto selected_fast_loop = sljit_emit_label(compiler);
 		selected_fast_done = sljit_emit_cmp(compiler, SLJIT_GREATER_EQUAL, SLJIT_S1, 0, SLJIT_S2, 0);
 		EmitLoadFusedAggregateExecuteIndex(compiler);
+		predicate_skip_jumps = emit_predicate_skip_jumps(false, true, false, fast_data_hoists);
 		emit_group_lookup(false, !local_aggregate_plan.enabled, deferred_flag_plan.enabled, false,
 		                  local_aggregate_plan.sparse, false);
 		emit_payload_updates(false, true, false, fast_data_hoists);
+		emit_predicate_skip_label(predicate_skip_jumps);
 		EmitSljitAggregateLoopStep(compiler, selected_fast_loop);
 
 		sljit_set_label(use_generic_selected_loop, sljit_emit_label(compiler));
@@ -4590,8 +4661,10 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativePerfectHashGroupedFusedTyp
 	auto loop = sljit_emit_label(compiler);
 	done = sljit_emit_cmp(compiler, SLJIT_GREATER_EQUAL, SLJIT_S1, 0, SLJIT_S2, 0);
 	EmitLoadFusedAggregateExecuteIndex(compiler);
+	auto predicate_skip_jumps = emit_predicate_skip_jumps(false, false, false, data_hoists);
 	emit_group_lookup(true, !local_aggregate_plan.enabled, false, false, false, false);
 	emit_payload_updates(false, false, false, data_hoists);
+	emit_predicate_skip_label(predicate_skip_jumps);
 	EmitSljitAggregateLoopStep(compiler, loop);
 
 	sljit_jump *fast_run_cache_flushed = nullptr;
@@ -4646,6 +4719,28 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativePerfectHashGroupedFusedTyp
 	sljit_emit_return_void(compiler);
 
 	return FinishSljitNativeAggregateUpdateCode(compiler, function, error);
+}
+
+unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativePerfectHashGroupedFusedTypedExpressionAggregateUpdate(
+    const vector<SljitNativeRegionExpressionPlan> &payloads, const vector<ExecutionRegionAggregateInput> &aggregates,
+    const vector<ExecutionRegionGroupInput> &groups, const vector<SljitNativeRegionExpressionPlan> &group_expressions,
+    const ExecutionRegionAggregateContract &contract, const vector<bool> &source_not_null,
+    const vector<Value> &source_min_values, const vector<Value> &source_max_values,
+    SljitNativeAggregateUpdateFunction &function, string &error) {
+	return BuildSljitNativePerfectHashGroupedFusedTypedExpressionAggregateUpdateInternal(
+	    nullptr, payloads, aggregates, groups, group_expressions, contract, source_not_null, source_min_values,
+	    source_max_values, function, error);
+}
+
+unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeFilteredPerfectHashGroupedFusedTypedExpressionAggregateUpdate(
+    const ExecutionExpressionIR &predicate, const vector<SljitNativeRegionExpressionPlan> &payloads,
+    const vector<ExecutionRegionAggregateInput> &aggregates, const vector<ExecutionRegionGroupInput> &groups,
+    const vector<SljitNativeRegionExpressionPlan> &group_expressions, const ExecutionRegionAggregateContract &contract,
+    const vector<bool> &source_not_null, const vector<Value> &source_min_values, const vector<Value> &source_max_values,
+    SljitNativeAggregateUpdateFunction &function, string &error) {
+	return BuildSljitNativePerfectHashGroupedFusedTypedExpressionAggregateUpdateInternal(
+	    &predicate, payloads, aggregates, groups, group_expressions, contract, source_not_null, source_min_values,
+	    source_max_values, function, error);
 }
 
 } // namespace duckdb

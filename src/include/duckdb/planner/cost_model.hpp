@@ -30,7 +30,9 @@ struct PhysicalRunnerCostInput {
 	idx_t native_aggregate_stage_count = 0;
 	idx_t native_grouped_aggregate_stage_count = 0;
 	idx_t native_sort_stage_count = 0;
+	idx_t source_filter_count = 0;
 	bool full_pipeline = false;
+	bool uses_scan_filters = false;
 	idx_t node_count = 0;
 	idx_t stage_count = 0;
 	idx_t expression_node_count = 0;
@@ -71,6 +73,7 @@ struct PhysicalRunnerCostProfile {
 	int64_t native_aggregate_stage_count = 0;
 	int64_t native_grouped_aggregate_stage_count = 0;
 	int64_t native_sort_stage_count = 0;
+	int64_t source_filter_count = 0;
 	bool full_pipeline = false;
 	PhysicalRunnerGeneratedWorkClass generated_work_class = PhysicalRunnerGeneratedWorkClass::NONE;
 	PhysicalRunnerNativeProtocolClass native_protocol_class = PhysicalRunnerNativeProtocolClass::NONE;

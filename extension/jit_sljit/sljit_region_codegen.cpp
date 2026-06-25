@@ -282,18 +282,27 @@ static sljit_sw DuckDBNullHashImmediate() {
 	return static_cast<sljit_sw>(0xbf58476d1ce4e5b9ULL);
 }
 
-static void EmitDuckDBMurmurHash64(struct sljit_compiler *compiler, sljit_s32 target, sljit_s32 scratch) {
+static void EmitDuckDBMurmurMultiply(struct sljit_compiler *compiler, sljit_s32 target, sljit_s32 scratch,
+                                     sljit_s32 multiplier_reg) {
+	if (multiplier_reg != 0) {
+		sljit_emit_op2(compiler, SLJIT_MUL, target, 0, target, 0, multiplier_reg, 0);
+		return;
+	}
+	sljit_emit_op1(compiler, SLJIT_MOV, scratch, 0, SLJIT_IMM, DuckDBMurmurHashMultiplierImmediate());
+	sljit_emit_op2(compiler, SLJIT_MUL, target, 0, target, 0, scratch, 0);
+}
+
+static void EmitDuckDBMurmurHash64(struct sljit_compiler *compiler, sljit_s32 target, sljit_s32 scratch,
+                                   sljit_s32 multiplier_reg = 0) {
 	sljit_emit_op1(compiler, SLJIT_MOV, scratch, 0, target, 0);
 	sljit_emit_op2(compiler, SLJIT_LSHR, scratch, 0, scratch, 0, SLJIT_IMM, 32);
 	sljit_emit_op2(compiler, SLJIT_XOR, target, 0, target, 0, scratch, 0);
-	sljit_emit_op1(compiler, SLJIT_MOV, scratch, 0, SLJIT_IMM, DuckDBMurmurHashMultiplierImmediate());
-	sljit_emit_op2(compiler, SLJIT_MUL, target, 0, target, 0, scratch, 0);
+	EmitDuckDBMurmurMultiply(compiler, target, scratch, multiplier_reg);
 
 	sljit_emit_op1(compiler, SLJIT_MOV, scratch, 0, target, 0);
 	sljit_emit_op2(compiler, SLJIT_LSHR, scratch, 0, scratch, 0, SLJIT_IMM, 32);
 	sljit_emit_op2(compiler, SLJIT_XOR, target, 0, target, 0, scratch, 0);
-	sljit_emit_op1(compiler, SLJIT_MOV, scratch, 0, SLJIT_IMM, DuckDBMurmurHashMultiplierImmediate());
-	sljit_emit_op2(compiler, SLJIT_MUL, target, 0, target, 0, scratch, 0);
+	EmitDuckDBMurmurMultiply(compiler, target, scratch, multiplier_reg);
 
 	sljit_emit_op1(compiler, SLJIT_MOV, scratch, 0, target, 0);
 	sljit_emit_op2(compiler, SLJIT_LSHR, scratch, 0, scratch, 0, SLJIT_IMM, 32);
@@ -301,7 +310,11 @@ static void EmitDuckDBMurmurHash64(struct sljit_compiler *compiler, sljit_s32 ta
 }
 
 static void EmitLoadHashJoinSourceIndex(struct sljit_compiler *compiler, idx_t key_idx, sljit_s32 target,
-                                        sljit_s32 scratch) {
+                                        sljit_s32 scratch, bool assume_identity_selection = false) {
+	if (assume_identity_selection) {
+		sljit_emit_op1(compiler, SLJIT_MOV, target, 0, SLJIT_S1, 0);
+		return;
+	}
 	sljit_emit_op1(compiler, SLJIT_MOV_P, scratch, 0, SLJIT_MEM1(SLJIT_S0),
 	               offsetof(SljitNativeHashJoinProbeInput, source_sel));
 	auto no_sel_array = sljit_emit_cmp(compiler, SLJIT_EQUAL, scratch, 0, SLJIT_IMM, 0);
@@ -318,7 +331,11 @@ static void EmitLoadHashJoinSourceIndex(struct sljit_compiler *compiler, idx_t k
 }
 
 static struct sljit_jump *EmitJumpIfHashJoinSourceNull(struct sljit_compiler *compiler, idx_t key_idx,
-                                                       sljit_s32 source_index, sljit_s32 scratch, sljit_s32 scratch2) {
+                                                       sljit_s32 source_index, sljit_s32 scratch, sljit_s32 scratch2,
+                                                       bool assume_source_all_valid = false) {
+	if (assume_source_all_valid) {
+		return nullptr;
+	}
 	sljit_emit_op1(compiler, SLJIT_MOV_P, scratch, 0, SLJIT_MEM1(SLJIT_S0),
 	               offsetof(SljitNativeHashJoinProbeInput, source_validity));
 	auto source_all_valid_array = sljit_emit_cmp(compiler, SLJIT_EQUAL, scratch, 0, SLJIT_IMM, 0);
@@ -338,7 +355,11 @@ static struct sljit_jump *EmitJumpIfHashJoinSourceNull(struct sljit_compiler *co
 }
 
 static struct sljit_jump *EmitJumpIfHashJoinRhsKeyNull(struct sljit_compiler *compiler, idx_t key_idx,
-                                                       sljit_s32 row_pointer, sljit_s32 scratch, sljit_s32 scratch2) {
+                                                       sljit_s32 row_pointer, sljit_s32 scratch, sljit_s32 scratch2,
+                                                       bool assume_rhs_all_valid = false) {
+	if (assume_rhs_all_valid) {
+		return nullptr;
+	}
 	sljit_emit_op1(compiler, SLJIT_MOV_U8, scratch, 0, SLJIT_MEM1(SLJIT_S0),
 	               offsetof(SljitNativeHashJoinProbeInput, rhs_keys_have_validity));
 	auto rhs_all_valid = sljit_emit_cmp(compiler, SLJIT_EQUAL, scratch, 0, SLJIT_IMM, 0);
@@ -349,11 +370,25 @@ static struct sljit_jump *EmitJumpIfHashJoinRhsKeyNull(struct sljit_compiler *co
 	return rhs_is_null;
 }
 
-static void EmitLoadHashJoinSourceData(struct sljit_compiler *compiler, idx_t key_idx, sljit_s32 target) {
+static void EmitLoadHashJoinSourceData(struct sljit_compiler *compiler, idx_t key_idx, sljit_s32 target,
+                                       const vector<sljit_s32> &source_data_regs) {
+	if (key_idx < source_data_regs.size() && source_data_regs[key_idx] != 0) {
+		sljit_emit_op1(compiler, SLJIT_MOV_P, target, 0, source_data_regs[key_idx], 0);
+		return;
+	}
 	sljit_emit_op1(compiler, SLJIT_MOV_P, target, 0, SLJIT_MEM1(SLJIT_S0),
 	               offsetof(SljitNativeHashJoinProbeInput, source_data));
 	sljit_emit_op1(compiler, SLJIT_MOV_P, target, 0, SLJIT_MEM1(target),
 	               NumericCast<sljit_sw>(key_idx * sizeof(const_data_ptr_t)));
+}
+
+static sljit_s32 EmitPrepareHashJoinSourceData(struct sljit_compiler *compiler, idx_t key_idx, sljit_s32 target,
+                                               const vector<sljit_s32> &source_data_regs) {
+	if (key_idx < source_data_regs.size() && source_data_regs[key_idx] != 0) {
+		return source_data_regs[key_idx];
+	}
+	EmitLoadHashJoinSourceData(compiler, key_idx, target, source_data_regs);
+	return target;
 }
 
 static void EmitLoadHashJoinKey(struct sljit_compiler *compiler, SljitNativeHashJoinKeyKind kind, sljit_s32 target,
@@ -389,60 +424,62 @@ static void EmitLoadHashJoinKeyWord(struct sljit_compiler *compiler, sljit_s32 t
 }
 
 static void EmitHashJoinKeyHash(struct sljit_compiler *compiler, SljitNativeHashJoinKeyKind key_kind,
-                                sljit_s32 hash_reg, sljit_s32 scratch) {
+                                sljit_s32 hash_reg, sljit_s32 scratch, sljit_s32 multiplier_reg = 0) {
 	if (SljitHashJoinKeyHashesAsUInt32(key_kind)) {
 		sljit_emit_op2(compiler, SLJIT_AND, hash_reg, 0, hash_reg, 0, SLJIT_IMM, 0xffffffffULL);
 	}
-	EmitDuckDBMurmurHash64(compiler, hash_reg, scratch);
+	EmitDuckDBMurmurHash64(compiler, hash_reg, scratch, multiplier_reg);
 }
 
 static void EmitHashJoinKeyHashFromSourceData(struct sljit_compiler *compiler, SljitNativeHashJoinKeyKind key_kind,
                                               sljit_s32 hash_reg, sljit_s32 source_data, sljit_s32 source_index,
-                                              sljit_s32 scratch) {
+                                              sljit_s32 scratch, sljit_s32 multiplier_reg = 0) {
 	if (!SljitHashJoinKeyKindIs128(key_kind)) {
 		EmitLoadHashJoinKey(compiler, key_kind, hash_reg, source_data, source_index, 0);
-		EmitHashJoinKeyHash(compiler, key_kind, hash_reg, scratch);
+		EmitHashJoinKeyHash(compiler, key_kind, hash_reg, scratch, multiplier_reg);
 		return;
 	}
 
 	EmitLoadHashJoinKeyWord(compiler, hash_reg, source_data, source_index, offsetof(hugeint_t, lower), scratch);
-	EmitDuckDBMurmurHash64(compiler, hash_reg, scratch);
+	EmitDuckDBMurmurHash64(compiler, hash_reg, scratch, multiplier_reg);
 	EmitLoadHashJoinKeyWord(compiler, scratch, source_data, source_index, offsetof(hugeint_t, upper), scratch);
-	EmitDuckDBMurmurHash64(compiler, scratch, source_data);
+	EmitDuckDBMurmurHash64(compiler, scratch, source_data, multiplier_reg);
 	sljit_emit_op2(compiler, SLJIT_XOR, hash_reg, 0, hash_reg, 0, scratch, 0);
 }
 
 static void EmitHashJoinEqualityKeyMismatch(struct sljit_compiler *compiler, idx_t key_idx,
                                             SljitNativeHashJoinKeyKind key_kind, sljit_sw key_layout_offset,
-                                            vector<struct sljit_jump *> &equality_key_mismatches) {
-	EmitLoadHashJoinSourceData(compiler, key_idx, SLJIT_R4);
+                                            vector<struct sljit_jump *> &equality_key_mismatches,
+                                            const vector<sljit_s32> &source_data_regs, sljit_s32 source_index_reg) {
+	auto source_data_reg = EmitPrepareHashJoinSourceData(compiler, key_idx, SLJIT_R4, source_data_regs);
 	if (!SljitHashJoinKeyKindIs128(key_kind)) {
-		EmitLoadHashJoinKey(compiler, key_kind, SLJIT_R2, SLJIT_R4, SLJIT_R1, 0);
+		EmitLoadHashJoinKey(compiler, key_kind, SLJIT_R2, source_data_reg, source_index_reg, 0);
 		sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_R4, 0, SLJIT_R0, 0, SLJIT_IMM, key_layout_offset);
 		EmitLoadHashJoinKey(compiler, key_kind, SLJIT_R4, SLJIT_R4, SLJIT_IMM, 0);
 		equality_key_mismatches.push_back(sljit_emit_cmp(compiler, SLJIT_NOT_EQUAL, SLJIT_R4, 0, SLJIT_R2, 0));
 		return;
 	}
 
-	EmitLoadHashJoinKeyWord(compiler, SLJIT_R2, SLJIT_R4, SLJIT_R1, offsetof(hugeint_t, lower), SLJIT_R2);
+	EmitLoadHashJoinKeyWord(compiler, SLJIT_R2, source_data_reg, source_index_reg, offsetof(hugeint_t, lower),
+	                        SLJIT_R2);
 	EmitLoadHashJoinKeyWord(compiler, SLJIT_R4, SLJIT_R0, SLJIT_IMM,
 	                        key_layout_offset + NumericCast<sljit_sw>(offsetof(hugeint_t, lower)), SLJIT_R4);
 	equality_key_mismatches.push_back(sljit_emit_cmp(compiler, SLJIT_NOT_EQUAL, SLJIT_R4, 0, SLJIT_R2, 0));
 
-	EmitLoadHashJoinSourceData(compiler, key_idx, SLJIT_R4);
-	EmitLoadHashJoinKeyWord(compiler, SLJIT_R2, SLJIT_R4, SLJIT_R1, offsetof(hugeint_t, upper), SLJIT_R2);
+	source_data_reg = EmitPrepareHashJoinSourceData(compiler, key_idx, SLJIT_R4, source_data_regs);
+	EmitLoadHashJoinKeyWord(compiler, SLJIT_R2, source_data_reg, source_index_reg, offsetof(hugeint_t, upper),
+	                        SLJIT_R2);
 	EmitLoadHashJoinKeyWord(compiler, SLJIT_R4, SLJIT_R0, SLJIT_IMM,
 	                        key_layout_offset + NumericCast<sljit_sw>(offsetof(hugeint_t, upper)), SLJIT_R4);
 	equality_key_mismatches.push_back(sljit_emit_cmp(compiler, SLJIT_NOT_EQUAL, SLJIT_R4, 0, SLJIT_R2, 0));
 }
 
 static void EmitDuckDBCombineHashScalar(struct sljit_compiler *compiler, sljit_s32 current_hash, sljit_s32 other_hash,
-                                        sljit_s32 scratch) {
+                                        sljit_s32 scratch, sljit_s32 multiplier_reg = 0) {
 	sljit_emit_op1(compiler, SLJIT_MOV, scratch, 0, current_hash, 0);
 	sljit_emit_op2(compiler, SLJIT_LSHR, scratch, 0, scratch, 0, SLJIT_IMM, 32);
 	sljit_emit_op2(compiler, SLJIT_XOR, current_hash, 0, current_hash, 0, scratch, 0);
-	sljit_emit_op1(compiler, SLJIT_MOV, scratch, 0, SLJIT_IMM, DuckDBMurmurHashMultiplierImmediate());
-	sljit_emit_op2(compiler, SLJIT_MUL, current_hash, 0, current_hash, 0, scratch, 0);
+	EmitDuckDBMurmurMultiply(compiler, current_hash, scratch, multiplier_reg);
 	sljit_emit_op2(compiler, SLJIT_XOR, current_hash, 0, current_hash, 0, other_hash, 0);
 }
 
@@ -455,6 +492,17 @@ static void EmitSaveHashJoinProbeOffset(struct sljit_compiler *compiler) {
 
 static void EmitRestoreHashJoinProbeOffset(struct sljit_compiler *compiler) {
 	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R1, 0, SLJIT_MEM1(SLJIT_SP), SLJIT_HASH_JOIN_PROBE_OFFSET_LOCAL);
+}
+
+static void EmitApplyHashJoinBitmask(struct sljit_compiler *compiler, sljit_s32 target, sljit_s32 scratch,
+                                     bool bitmask_reg_available) {
+	if (bitmask_reg_available) {
+		sljit_emit_op2(compiler, SLJIT_AND, target, 0, target, 0, SLJIT_S6, 0);
+		return;
+	}
+	sljit_emit_op1(compiler, SLJIT_MOV, scratch, 0, SLJIT_MEM1(SLJIT_S0),
+	               offsetof(SljitNativeHashJoinProbeInput, bitmask));
+	sljit_emit_op2(compiler, SLJIT_AND, target, 0, target, 0, scratch, 0);
 }
 
 static void EmitStoreHashJoinMarkProbeFlag(struct sljit_compiler *compiler, sljit_sw value) {
@@ -482,7 +530,33 @@ static void EmitPauseHashJoinProbe(struct sljit_compiler *compiler, sljit_s32 re
 }
 
 static void EmitLoadHashJoinNextPointer(struct sljit_compiler *compiler, sljit_s32 row_pointer, sljit_s32 scratch,
-                                        sljit_s32 next_pointer, idx_t pointer_offset) {
+                                        sljit_s32 next_pointer, idx_t pointer_offset,
+                                        bool chain_layout_is_constant = false,
+                                        bool constant_chains_longer_than_one = false,
+                                        bool constant_dictionary_emission = false,
+                                        sljit_s32 aux_next_ptrs_reg = 0) {
+	if (chain_layout_is_constant) {
+		if (!constant_chains_longer_than_one) {
+			sljit_emit_op1(compiler, SLJIT_MOV_P, row_pointer, 0, SLJIT_IMM, 0);
+			return;
+		}
+		if (constant_dictionary_emission) {
+			sljit_emit_op1(compiler, SLJIT_MOV_U32, scratch, 0, SLJIT_MEM1(row_pointer),
+			               NumericCast<sljit_sw>(pointer_offset));
+			if (aux_next_ptrs_reg != 0) {
+				sljit_emit_op1(compiler, SLJIT_MOV_P, row_pointer, 0, SLJIT_MEM2(aux_next_ptrs_reg, scratch), 3);
+			} else {
+				sljit_emit_op1(compiler, SLJIT_MOV_P, next_pointer, 0, SLJIT_MEM1(SLJIT_S0),
+				               offsetof(SljitNativeHashJoinProbeInput, aux_next_ptrs));
+				sljit_emit_op1(compiler, SLJIT_MOV_P, row_pointer, 0, SLJIT_MEM2(next_pointer, scratch), 3);
+			}
+			return;
+		}
+		sljit_emit_op1(compiler, SLJIT_MOV_P, row_pointer, 0, SLJIT_MEM1(row_pointer),
+		               NumericCast<sljit_sw>(pointer_offset));
+		return;
+	}
+
 	sljit_emit_op1(compiler, SLJIT_MOV_U8, scratch, 0, SLJIT_MEM1(SLJIT_S0),
 	               offsetof(SljitNativeHashJoinProbeInput, chains_longer_than_one));
 	auto no_chain = sljit_emit_cmp(compiler, SLJIT_EQUAL, scratch, 0, SLJIT_IMM, 0);
@@ -664,7 +738,12 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitHashJoinProbe(const vector<Sljit
                                                               idx_t found_match_offset, idx_t pointer_offset,
                                                               ExecutionHashJoinProbeOutputMode output_mode,
                                                               SljitNativeHashJoinProbeFunction &function,
-                                                              string &error) {
+                                                              string &error, bool assume_flat_all_valid,
+                                                              bool use_salt_is_constant, bool constant_use_salt,
+                                                              bool chain_layout_is_constant,
+                                                              bool constant_chains_longer_than_one,
+                                                              bool constant_dictionary_emission,
+                                                              bool assume_common_selection_all_valid) {
 	if (!ValidateSljitHashJoinProbe(keys, equality_key_count, output_mode, error)) {
 		return nullptr;
 	}
@@ -677,7 +756,43 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitHashJoinProbe(const vector<Sljit
 		return nullptr;
 	}
 
-	sljit_emit_enter(compiler, 0, SLJIT_ARGS1V(P), 5, 5, SLJIT_HASH_JOIN_PROBE_LOCAL_SIZE);
+	static constexpr bool BITMASK_REG_AVAILABLE = SLJIT_NUMBER_OF_SAVED_REGISTERS >= 7;
+	static constexpr sljit_s32 BASE_SAVED_REG_COUNT = BITMASK_REG_AVAILABLE ? 7 : 6;
+	const bool assume_all_keys_valid = assume_flat_all_valid || assume_common_selection_all_valid;
+	sljit_s32 saved_reg_count = BASE_SAVED_REG_COUNT;
+	sljit_s32 hash_multiplier_reg = 0;
+	sljit_s32 common_source_index_reg = 0;
+	vector<sljit_s32> source_data_regs(keys.size(), 0);
+	sljit_s32 aux_next_ptrs_reg = 0;
+	auto allocate_saved_reg = [&]() -> sljit_s32 {
+		if (saved_reg_count >= SLJIT_NUMBER_OF_SAVED_REGISTERS) {
+			return 0;
+		}
+		return SLJIT_S(saved_reg_count++);
+	};
+	hash_multiplier_reg = allocate_saved_reg();
+	if (assume_common_selection_all_valid) {
+		common_source_index_reg = allocate_saved_reg();
+		if (common_source_index_reg == 0) {
+			error = "not enough saved registers for selected all-valid hash join probe";
+			sljit_free_compiler(compiler);
+			return nullptr;
+		}
+	}
+	if (assume_all_keys_valid) {
+		for (idx_t key_idx = 0; key_idx < keys.size(); key_idx++) {
+			auto reg = allocate_saved_reg();
+			if (reg == 0) {
+				break;
+			}
+			source_data_regs[key_idx] = reg;
+		}
+	}
+	if (chain_layout_is_constant && constant_chains_longer_than_one && constant_dictionary_emission) {
+		aux_next_ptrs_reg = allocate_saved_reg();
+	}
+
+	sljit_emit_enter(compiler, 0, SLJIT_ARGS1V(P), 5, saved_reg_count, SLJIT_HASH_JOIN_PROBE_LOCAL_SIZE);
 	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_S1, 0, SLJIT_MEM1(SLJIT_S0),
 	               offsetof(SljitNativeHashJoinProbeInput, input_offset));
 	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_S3, 0, SLJIT_IMM, 0);
@@ -685,6 +800,30 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitHashJoinProbe(const vector<Sljit
 	               offsetof(SljitNativeHashJoinProbeInput, count));
 	sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_S4, 0, SLJIT_MEM1(SLJIT_S0),
 	               offsetof(SljitNativeHashJoinProbeInput, entries));
+	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_S5, 0, SLJIT_MEM1(SLJIT_S0),
+	               offsetof(SljitNativeHashJoinProbeInput, pointer_mask));
+	if (BITMASK_REG_AVAILABLE) {
+		sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_S6, 0, SLJIT_MEM1(SLJIT_S0),
+		               offsetof(SljitNativeHashJoinProbeInput, bitmask));
+	}
+	if (hash_multiplier_reg != 0) {
+		sljit_emit_op1(compiler, SLJIT_MOV, hash_multiplier_reg, 0, SLJIT_IMM,
+		               DuckDBMurmurHashMultiplierImmediate());
+	}
+	for (idx_t key_idx = 0; key_idx < source_data_regs.size(); key_idx++) {
+		auto reg = source_data_regs[key_idx];
+		if (reg == 0) {
+			continue;
+		}
+		sljit_emit_op1(compiler, SLJIT_MOV_P, reg, 0, SLJIT_MEM1(SLJIT_S0),
+		               offsetof(SljitNativeHashJoinProbeInput, source_data));
+		sljit_emit_op1(compiler, SLJIT_MOV_P, reg, 0, SLJIT_MEM1(reg),
+		               NumericCast<sljit_sw>(key_idx * sizeof(const_data_ptr_t)));
+	}
+	if (aux_next_ptrs_reg != 0) {
+		sljit_emit_op1(compiler, SLJIT_MOV_P, aux_next_ptrs_reg, 0, SLJIT_MEM1(SLJIT_S0),
+		               offsetof(SljitNativeHashJoinProbeInput, aux_next_ptrs));
+	}
 
 	sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_R0, 0, SLJIT_MEM1(SLJIT_S0),
 	               offsetof(SljitNativeHashJoinProbeInput, resume_row_pointer));
@@ -697,18 +836,34 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitHashJoinProbe(const vector<Sljit
 	if (mark_probe) {
 		EmitStoreHashJoinMarkProbeFlag(compiler, 0);
 	}
+	if (assume_common_selection_all_valid) {
+		sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_R0, 0, SLJIT_MEM1(SLJIT_S0),
+		               offsetof(SljitNativeHashJoinProbeInput, source_sel));
+		sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_R0, 0, SLJIT_MEM1(SLJIT_R0), 0);
+		sljit_emit_op1(compiler, SLJIT_MOV_U32, common_source_index_reg, 0, SLJIT_MEM2(SLJIT_R0, SLJIT_S1), 2);
+	}
 	vector<struct sljit_jump *> source_is_null;
 	for (idx_t key_idx = 0; key_idx < equality_key_count; key_idx++) {
 		auto &key = keys[key_idx];
-		EmitLoadHashJoinSourceIndex(compiler, key_idx, SLJIT_R1, SLJIT_R0);
-		auto source_null = EmitJumpIfHashJoinSourceNull(compiler, key_idx, SLJIT_R1, SLJIT_R0, SLJIT_R4);
-		if (!key.null_equal) {
-			source_is_null.push_back(source_null);
-			EmitLoadHashJoinSourceData(compiler, key_idx, SLJIT_R0);
-			EmitHashJoinKeyHashFromSourceData(compiler, key.key_kind, SLJIT_R2, SLJIT_R0, SLJIT_R1, SLJIT_R4);
+		const auto source_index_reg =
+		    assume_flat_all_valid ? SLJIT_S1 : (assume_common_selection_all_valid ? common_source_index_reg : SLJIT_R1);
+		if (!assume_all_keys_valid) {
+			EmitLoadHashJoinSourceIndex(compiler, key_idx, SLJIT_R1, SLJIT_R0);
+		}
+		auto source_null =
+		    EmitJumpIfHashJoinSourceNull(compiler, key_idx, source_index_reg, SLJIT_R0, SLJIT_R4,
+		                                 assume_all_keys_valid);
+		if (!key.null_equal || assume_all_keys_valid) {
+			if (source_null) {
+				source_is_null.push_back(source_null);
+			}
+			auto source_data_reg = EmitPrepareHashJoinSourceData(compiler, key_idx, SLJIT_R0, source_data_regs);
+			EmitHashJoinKeyHashFromSourceData(compiler, key.key_kind, SLJIT_R2, source_data_reg, source_index_reg,
+			                                  SLJIT_R4, hash_multiplier_reg);
 		} else {
-			EmitLoadHashJoinSourceData(compiler, key_idx, SLJIT_R0);
-			EmitHashJoinKeyHashFromSourceData(compiler, key.key_kind, SLJIT_R2, SLJIT_R0, SLJIT_R1, SLJIT_R4);
+			auto source_data_reg = EmitPrepareHashJoinSourceData(compiler, key_idx, SLJIT_R0, source_data_regs);
+			EmitHashJoinKeyHashFromSourceData(compiler, key.key_kind, SLJIT_R2, source_data_reg, source_index_reg,
+			                                  SLJIT_R4, hash_multiplier_reg);
 			auto source_hash_ready = sljit_emit_jump(compiler, SLJIT_JUMP);
 			sljit_set_label(source_null, sljit_emit_label(compiler));
 			sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R2, 0, SLJIT_IMM, DuckDBNullHashImmediate());
@@ -717,60 +872,78 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitHashJoinProbe(const vector<Sljit
 		if (key_idx == 0) {
 			sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R3, 0, SLJIT_R2, 0);
 		} else {
-			EmitDuckDBCombineHashScalar(compiler, SLJIT_R3, SLJIT_R2, SLJIT_R4);
+			EmitDuckDBCombineHashScalar(compiler, SLJIT_R3, SLJIT_R2, SLJIT_R4, hash_multiplier_reg);
 		}
 	}
 	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R1, 0, SLJIT_R3, 0);
-	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R4, 0, SLJIT_MEM1(SLJIT_S0),
-	               offsetof(SljitNativeHashJoinProbeInput, pointer_mask));
-	sljit_emit_op2(compiler, SLJIT_OR, SLJIT_R3, 0, SLJIT_R3, 0, SLJIT_R4, 0);
-	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R4, 0, SLJIT_MEM1(SLJIT_S0),
-	               offsetof(SljitNativeHashJoinProbeInput, bitmask));
-	sljit_emit_op2(compiler, SLJIT_AND, SLJIT_R1, 0, SLJIT_R1, 0, SLJIT_R4, 0);
+	sljit_emit_op2(compiler, SLJIT_OR, SLJIT_R3, 0, SLJIT_R3, 0, SLJIT_S5, 0);
+	EmitApplyHashJoinBitmask(compiler, SLJIT_R1, SLJIT_R4, BITMASK_REG_AVAILABLE);
 
 	auto probe_loop = sljit_emit_label(compiler);
 	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R0, 0, SLJIT_MEM2(SLJIT_S4, SLJIT_R1), 3);
 	auto empty_slot = sljit_emit_cmp(compiler, SLJIT_EQUAL, SLJIT_R0, 0, SLJIT_IMM, 0);
 
-	sljit_emit_op1(compiler, SLJIT_MOV_U8, SLJIT_R4, 0, SLJIT_MEM1(SLJIT_S0),
-	               offsetof(SljitNativeHashJoinProbeInput, use_salt));
-	auto skip_salt = sljit_emit_cmp(compiler, SLJIT_EQUAL, SLJIT_R4, 0, SLJIT_IMM, 0);
-	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R4, 0, SLJIT_MEM1(SLJIT_S0),
-	               offsetof(SljitNativeHashJoinProbeInput, pointer_mask));
-	sljit_emit_op2(compiler, SLJIT_OR, SLJIT_R4, 0, SLJIT_R0, 0, SLJIT_R4, 0);
-	auto salt_mismatch = sljit_emit_cmp(compiler, SLJIT_NOT_EQUAL, SLJIT_R4, 0, SLJIT_R3, 0);
-	sljit_set_label(skip_salt, sljit_emit_label(compiler));
+	struct sljit_jump *salt_mismatch = nullptr;
+	if (!use_salt_is_constant || constant_use_salt) {
+		struct sljit_jump *skip_salt = nullptr;
+		if (!use_salt_is_constant) {
+			sljit_emit_op1(compiler, SLJIT_MOV_U8, SLJIT_R4, 0, SLJIT_MEM1(SLJIT_S0),
+			               offsetof(SljitNativeHashJoinProbeInput, use_salt));
+			skip_salt = sljit_emit_cmp(compiler, SLJIT_EQUAL, SLJIT_R4, 0, SLJIT_IMM, 0);
+		}
+		sljit_emit_op2(compiler, SLJIT_OR, SLJIT_R4, 0, SLJIT_R0, 0, SLJIT_S5, 0);
+		salt_mismatch = sljit_emit_cmp(compiler, SLJIT_NOT_EQUAL, SLJIT_R4, 0, SLJIT_R3, 0);
+		if (skip_salt) {
+			sljit_set_label(skip_salt, sljit_emit_label(compiler));
+		}
+	}
 
-	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R4, 0, SLJIT_MEM1(SLJIT_S0),
-	               offsetof(SljitNativeHashJoinProbeInput, pointer_mask));
-	sljit_emit_op2(compiler, SLJIT_AND, SLJIT_R0, 0, SLJIT_R0, 0, SLJIT_R4, 0);
-	EmitSaveHashJoinProbeOffset(compiler);
+	sljit_emit_op2(compiler, SLJIT_AND, SLJIT_R0, 0, SLJIT_R0, 0, SLJIT_S5, 0);
+	if (equality_key_count > 0) {
+		sljit_emit_op_src(compiler, SLJIT_PREFETCH_L1, SLJIT_MEM1(SLJIT_R0),
+		                  NumericCast<sljit_sw>(keys[0].key_layout_offset));
+	}
+	if (!assume_all_keys_valid) {
+		EmitSaveHashJoinProbeOffset(compiler);
+	}
 	auto row_pointer_ready = sljit_emit_label(compiler);
 	sljit_set_label(resume_row_pointer_ready, row_pointer_ready);
 	vector<struct sljit_jump *> equality_key_mismatches;
 	vector<struct sljit_jump *> predicate_key_mismatches;
 	for (idx_t key_idx = 0; key_idx < keys.size(); key_idx++) {
 		auto &key = keys[key_idx];
-		EmitLoadHashJoinSourceIndex(compiler, key_idx, SLJIT_R1, SLJIT_R4);
+		const auto source_index_reg =
+		    assume_flat_all_valid ? SLJIT_S1 : (assume_common_selection_all_valid ? common_source_index_reg : SLJIT_R1);
+		if (!assume_all_keys_valid) {
+			EmitLoadHashJoinSourceIndex(compiler, key_idx, SLJIT_R1, SLJIT_R4);
+		}
 		if (key_idx >= equality_key_count) {
-			predicate_key_mismatches.push_back(
-			    EmitJumpIfHashJoinSourceNull(compiler, key_idx, SLJIT_R1, SLJIT_R2, SLJIT_R4));
-			predicate_key_mismatches.push_back(
-			    EmitJumpIfHashJoinRhsKeyNull(compiler, key_idx, SLJIT_R0, SLJIT_R2, SLJIT_R4));
-			EmitLoadHashJoinSourceData(compiler, key_idx, SLJIT_R4);
-			EmitLoadHashJoinKey(compiler, key.key_kind, SLJIT_R2, SLJIT_R4, SLJIT_R1, 0);
+			auto source_null =
+			    EmitJumpIfHashJoinSourceNull(compiler, key_idx, source_index_reg, SLJIT_R2, SLJIT_R4,
+			                                 assume_all_keys_valid);
+			if (source_null) {
+				predicate_key_mismatches.push_back(source_null);
+			}
+			auto rhs_null =
+			    EmitJumpIfHashJoinRhsKeyNull(compiler, key_idx, SLJIT_R0, SLJIT_R2, SLJIT_R4, assume_all_keys_valid);
+			if (rhs_null) {
+				predicate_key_mismatches.push_back(rhs_null);
+			}
+			auto source_data_reg = EmitPrepareHashJoinSourceData(compiler, key_idx, SLJIT_R4, source_data_regs);
+			EmitLoadHashJoinKey(compiler, key.key_kind, SLJIT_R2, source_data_reg, source_index_reg, 0);
 			sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_R4, 0, SLJIT_R0, 0, SLJIT_IMM,
 			               NumericCast<sljit_sw>(key.key_layout_offset));
 			EmitLoadHashJoinKey(compiler, key.key_kind, SLJIT_R4, SLJIT_R4, SLJIT_IMM, 0);
 			predicate_key_mismatches.push_back(
 			    sljit_emit_cmp(compiler, SljitHashJoinPredicateMismatchComparison(key.comparison_type, key.key_kind),
 			                   SLJIT_R2, 0, SLJIT_R4, 0));
-		} else if (key.null_equal) {
+		} else if (key.null_equal && !assume_all_keys_valid) {
 			auto source_null = EmitJumpIfHashJoinSourceNull(compiler, key_idx, SLJIT_R1, SLJIT_R2, SLJIT_R4);
 			equality_key_mismatches.push_back(
 			    EmitJumpIfHashJoinRhsKeyNull(compiler, key_idx, SLJIT_R0, SLJIT_R2, SLJIT_R4));
 			EmitHashJoinEqualityKeyMismatch(compiler, key_idx, key.key_kind,
-			                                NumericCast<sljit_sw>(key.key_layout_offset), equality_key_mismatches);
+			                                NumericCast<sljit_sw>(key.key_layout_offset), equality_key_mismatches,
+			                                source_data_regs, source_index_reg);
 			auto key_done = sljit_emit_jump(compiler, SLJIT_JUMP);
 
 			sljit_set_label(source_null, sljit_emit_label(compiler));
@@ -780,10 +953,14 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitHashJoinProbe(const vector<Sljit
 			sljit_set_label(rhs_null_match, nulls_match);
 			sljit_set_label(key_done, nulls_match);
 		} else {
-			equality_key_mismatches.push_back(
-			    EmitJumpIfHashJoinRhsKeyNull(compiler, key_idx, SLJIT_R0, SLJIT_R2, SLJIT_R4));
+			auto rhs_null =
+			    EmitJumpIfHashJoinRhsKeyNull(compiler, key_idx, SLJIT_R0, SLJIT_R2, SLJIT_R4, assume_all_keys_valid);
+			if (rhs_null) {
+				equality_key_mismatches.push_back(rhs_null);
+			}
 			EmitHashJoinEqualityKeyMismatch(compiler, key_idx, key.key_kind,
-			                                NumericCast<sljit_sw>(key.key_layout_offset), equality_key_mismatches);
+			                                NumericCast<sljit_sw>(key.key_layout_offset), equality_key_mismatches,
+			                                source_data_regs, source_index_reg);
 		}
 	}
 	if (mark_build_match) {
@@ -803,13 +980,15 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitHashJoinProbe(const vector<Sljit
 		for (auto &key_mismatch : predicate_key_mismatches) {
 			sljit_set_label(key_mismatch, restore_hash_offset);
 		}
-		EmitRestoreHashJoinProbeOffset(compiler);
+		if (!assume_all_keys_valid) {
+			EmitRestoreHashJoinProbeOffset(compiler);
+		}
 		auto next_slot = sljit_emit_label(compiler);
-		sljit_set_label(salt_mismatch, next_slot);
+		if (salt_mismatch) {
+			sljit_set_label(salt_mismatch, next_slot);
+		}
 		sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_R1, 0, SLJIT_R1, 0, SLJIT_IMM, 1);
-		sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R4, 0, SLJIT_MEM1(SLJIT_S0),
-		               offsetof(SljitNativeHashJoinProbeInput, bitmask));
-		sljit_emit_op2(compiler, SLJIT_AND, SLJIT_R1, 0, SLJIT_R1, 0, SLJIT_R4, 0);
+		EmitApplyHashJoinBitmask(compiler, SLJIT_R1, SLJIT_R4, BITMASK_REG_AVAILABLE);
 		auto repeat_probe = sljit_emit_jump(compiler, SLJIT_JUMP);
 		sljit_set_label(repeat_probe, probe_loop);
 
@@ -842,13 +1021,15 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitHashJoinProbe(const vector<Sljit
 		for (auto &key_mismatch : predicate_key_mismatches) {
 			sljit_set_label(key_mismatch, restore_hash_offset);
 		}
-		EmitRestoreHashJoinProbeOffset(compiler);
+		if (!assume_all_keys_valid) {
+			EmitRestoreHashJoinProbeOffset(compiler);
+		}
 		auto next_slot = sljit_emit_label(compiler);
-		sljit_set_label(salt_mismatch, next_slot);
+		if (salt_mismatch) {
+			sljit_set_label(salt_mismatch, next_slot);
+		}
 		sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_R1, 0, SLJIT_R1, 0, SLJIT_IMM, 1);
-		sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R4, 0, SLJIT_MEM1(SLJIT_S0),
-		               offsetof(SljitNativeHashJoinProbeInput, bitmask));
-		sljit_emit_op2(compiler, SLJIT_AND, SLJIT_R1, 0, SLJIT_R1, 0, SLJIT_R4, 0);
+		EmitApplyHashJoinBitmask(compiler, SLJIT_R1, SLJIT_R4, BITMASK_REG_AVAILABLE);
 		auto repeat_probe = sljit_emit_jump(compiler, SLJIT_JUMP);
 		sljit_set_label(repeat_probe, probe_loop);
 
@@ -883,7 +1064,9 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitHashJoinProbe(const vector<Sljit
 		for (auto &key_mismatch : predicate_key_mismatches) {
 			sljit_set_label(key_mismatch, predicate_mismatch);
 		}
-		EmitLoadHashJoinNextPointer(compiler, SLJIT_R0, SLJIT_R2, SLJIT_R4, pointer_offset);
+		EmitLoadHashJoinNextPointer(compiler, SLJIT_R0, SLJIT_R2, SLJIT_R4, pointer_offset,
+		                            chain_layout_is_constant, constant_chains_longer_than_one,
+		                            constant_dictionary_emission, aux_next_ptrs_reg);
 		auto continue_chain = sljit_emit_cmp(compiler, SLJIT_NOT_EQUAL, SLJIT_R0, 0, SLJIT_IMM, 0);
 		auto advance_after_predicate = sljit_emit_jump(compiler, SLJIT_JUMP);
 
@@ -891,13 +1074,15 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitHashJoinProbe(const vector<Sljit
 		for (auto &key_mismatch : equality_key_mismatches) {
 			sljit_set_label(key_mismatch, restore_hash_offset);
 		}
-		EmitRestoreHashJoinProbeOffset(compiler);
+		if (!assume_all_keys_valid) {
+			EmitRestoreHashJoinProbeOffset(compiler);
+		}
 		auto next_slot = sljit_emit_label(compiler);
-		sljit_set_label(salt_mismatch, next_slot);
+		if (salt_mismatch) {
+			sljit_set_label(salt_mismatch, next_slot);
+		}
 		sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_R1, 0, SLJIT_R1, 0, SLJIT_IMM, 1);
-		sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R4, 0, SLJIT_MEM1(SLJIT_S0),
-		               offsetof(SljitNativeHashJoinProbeInput, bitmask));
-		sljit_emit_op2(compiler, SLJIT_AND, SLJIT_R1, 0, SLJIT_R1, 0, SLJIT_R4, 0);
+		EmitApplyHashJoinBitmask(compiler, SLJIT_R1, SLJIT_R4, BITMASK_REG_AVAILABLE);
 		auto repeat_probe = sljit_emit_jump(compiler, SLJIT_JUMP);
 		sljit_set_label(repeat_probe, probe_loop);
 
@@ -921,14 +1106,69 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitHashJoinProbe(const vector<Sljit
 		return FinishSljitHashJoinProbeCode(compiler, function, error);
 	}
 
-	EmitLoadHashJoinNextPointer(compiler, SLJIT_R0, SLJIT_R2, SLJIT_R4, pointer_offset);
-	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R4, 0, SLJIT_MEM1(SLJIT_S0),
-	               offsetof(SljitNativeHashJoinProbeInput, output_capacity));
-	auto output_has_capacity = sljit_emit_cmp(compiler, SLJIT_LESS, SLJIT_S3, 0, SLJIT_R4, 0);
-	auto pause_same_row = sljit_emit_cmp(compiler, SLJIT_NOT_EQUAL, SLJIT_R0, 0, SLJIT_IMM, 0);
+	const bool no_chain_specialized = chain_layout_is_constant && !constant_chains_longer_than_one;
+	if (no_chain_specialized) {
+		sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_S1, 0, SLJIT_S1, 0, SLJIT_IMM, 1);
+		auto repeat_after_match = sljit_emit_jump(compiler, SLJIT_JUMP);
+		sljit_set_label(repeat_after_match, loop);
+
+		auto predicate_mismatch = sljit_emit_label(compiler);
+		for (auto &key_mismatch : predicate_key_mismatches) {
+			sljit_set_label(key_mismatch, predicate_mismatch);
+		}
+		auto advance_after_predicate = sljit_emit_jump(compiler, SLJIT_JUMP);
+
+		auto restore_hash_offset = sljit_emit_label(compiler);
+		for (auto &key_mismatch : equality_key_mismatches) {
+			sljit_set_label(key_mismatch, restore_hash_offset);
+		}
+		if (!assume_all_keys_valid) {
+			EmitRestoreHashJoinProbeOffset(compiler);
+		}
+		auto next_slot = sljit_emit_label(compiler);
+		if (salt_mismatch) {
+			sljit_set_label(salt_mismatch, next_slot);
+		}
+		sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_R1, 0, SLJIT_R1, 0, SLJIT_IMM, 1);
+		EmitApplyHashJoinBitmask(compiler, SLJIT_R1, SLJIT_R4, BITMASK_REG_AVAILABLE);
+		auto repeat_probe = sljit_emit_jump(compiler, SLJIT_JUMP);
+		sljit_set_label(repeat_probe, probe_loop);
+
+		auto skip_row = sljit_emit_label(compiler);
+		sljit_set_label(empty_slot, skip_row);
+		for (auto &null_jump : source_is_null) {
+			sljit_set_label(null_jump, skip_row);
+		}
+		sljit_set_label(advance_after_predicate, skip_row);
+		sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_S1, 0, SLJIT_S1, 0, SLJIT_IMM, 1);
+		auto repeat_rows = sljit_emit_jump(compiler, SLJIT_JUMP);
+		sljit_set_label(repeat_rows, loop);
+
+		sljit_set_label(done, sljit_emit_label(compiler));
+		sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_MEM1(SLJIT_S0),
+		               offsetof(SljitNativeHashJoinProbeInput, selected_count), SLJIT_S3, 0);
+		EmitFinishHashJoinProbe(compiler);
+		sljit_emit_return_void(compiler);
+		return FinishSljitHashJoinProbeCode(compiler, function, error);
+	}
+	if (!no_chain_specialized) {
+		EmitLoadHashJoinNextPointer(compiler, SLJIT_R0, SLJIT_R2, SLJIT_R4, pointer_offset,
+		                            chain_layout_is_constant, constant_chains_longer_than_one,
+		                            constant_dictionary_emission, aux_next_ptrs_reg);
+	}
+	auto output_has_capacity =
+	    sljit_emit_cmp(compiler, SLJIT_LESS, SLJIT_S3, 0, SLJIT_IMM, STANDARD_VECTOR_SIZE);
+	struct sljit_jump *pause_same_row = nullptr;
+	if (no_chain_specialized) {
+		sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_R0, 0, SLJIT_IMM, 0);
+	} else {
+		pause_same_row = sljit_emit_cmp(compiler, SLJIT_NOT_EQUAL, SLJIT_R0, 0, SLJIT_IMM, 0);
+	}
 	sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_S1, 0, SLJIT_S1, 0, SLJIT_IMM, 1);
 	auto pause_output = sljit_emit_label(compiler);
-	sljit_set_label(pause_same_row, pause_output);
+	if (pause_same_row) {
+		sljit_set_label(pause_same_row, pause_output);
+	}
 	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_MEM1(SLJIT_S0), offsetof(SljitNativeHashJoinProbeInput, selected_count),
 	               SLJIT_S3, 0);
 	EmitPauseHashJoinProbe(compiler, SLJIT_R0);
@@ -936,28 +1176,38 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitHashJoinProbe(const vector<Sljit
 
 	auto output_has_capacity_label = sljit_emit_label(compiler);
 	sljit_set_label(output_has_capacity, output_has_capacity_label);
-	auto continue_chain_after_match = sljit_emit_cmp(compiler, SLJIT_NOT_EQUAL, SLJIT_R0, 0, SLJIT_IMM, 0);
+	struct sljit_jump *continue_chain_after_match = nullptr;
+	if (!no_chain_specialized) {
+		continue_chain_after_match = sljit_emit_cmp(compiler, SLJIT_NOT_EQUAL, SLJIT_R0, 0, SLJIT_IMM, 0);
+	}
 	auto advance_row = sljit_emit_jump(compiler, SLJIT_JUMP);
 
 	auto predicate_mismatch = sljit_emit_label(compiler);
 	for (auto &key_mismatch : predicate_key_mismatches) {
 		sljit_set_label(key_mismatch, predicate_mismatch);
 	}
-	EmitLoadHashJoinNextPointer(compiler, SLJIT_R0, SLJIT_R2, SLJIT_R4, pointer_offset);
-	auto continue_chain_after_predicate = sljit_emit_cmp(compiler, SLJIT_NOT_EQUAL, SLJIT_R0, 0, SLJIT_IMM, 0);
+	struct sljit_jump *continue_chain_after_predicate = nullptr;
+	if (!no_chain_specialized) {
+		EmitLoadHashJoinNextPointer(compiler, SLJIT_R0, SLJIT_R2, SLJIT_R4, pointer_offset,
+		                            chain_layout_is_constant, constant_chains_longer_than_one,
+		                            constant_dictionary_emission, aux_next_ptrs_reg);
+		continue_chain_after_predicate = sljit_emit_cmp(compiler, SLJIT_NOT_EQUAL, SLJIT_R0, 0, SLJIT_IMM, 0);
+	}
 	auto advance_after_predicate = sljit_emit_jump(compiler, SLJIT_JUMP);
 
 	auto restore_hash_offset = sljit_emit_label(compiler);
 	for (auto &key_mismatch : equality_key_mismatches) {
 		sljit_set_label(key_mismatch, restore_hash_offset);
 	}
-	EmitRestoreHashJoinProbeOffset(compiler);
+	if (!assume_all_keys_valid) {
+		EmitRestoreHashJoinProbeOffset(compiler);
+	}
 	auto next_slot = sljit_emit_label(compiler);
-	sljit_set_label(salt_mismatch, next_slot);
+	if (salt_mismatch) {
+		sljit_set_label(salt_mismatch, next_slot);
+	}
 	sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_R1, 0, SLJIT_R1, 0, SLJIT_IMM, 1);
-	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R4, 0, SLJIT_MEM1(SLJIT_S0),
-	               offsetof(SljitNativeHashJoinProbeInput, bitmask));
-	sljit_emit_op2(compiler, SLJIT_AND, SLJIT_R1, 0, SLJIT_R1, 0, SLJIT_R4, 0);
+	EmitApplyHashJoinBitmask(compiler, SLJIT_R1, SLJIT_R4, BITMASK_REG_AVAILABLE);
 	auto repeat_probe = sljit_emit_jump(compiler, SLJIT_JUMP);
 	sljit_set_label(repeat_probe, probe_loop);
 
@@ -971,8 +1221,12 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitHashJoinProbe(const vector<Sljit
 	sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_S1, 0, SLJIT_S1, 0, SLJIT_IMM, 1);
 	auto repeat_rows = sljit_emit_jump(compiler, SLJIT_JUMP);
 	sljit_set_label(repeat_rows, loop);
-	sljit_set_label(continue_chain_after_match, row_pointer_ready);
-	sljit_set_label(continue_chain_after_predicate, row_pointer_ready);
+	if (continue_chain_after_match) {
+		sljit_set_label(continue_chain_after_match, row_pointer_ready);
+	}
+	if (continue_chain_after_predicate) {
+		sljit_set_label(continue_chain_after_predicate, row_pointer_ready);
+	}
 
 	sljit_set_label(done, sljit_emit_label(compiler));
 	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_MEM1(SLJIT_S0), offsetof(SljitNativeHashJoinProbeInput, selected_count),
