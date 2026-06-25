@@ -236,6 +236,7 @@ struct ExecutionRegionOpenRequest {
 	bool present = false;
 	ExecutionRegionSourceExecutionKind source_execution = ExecutionRegionSourceExecutionKind::NONE;
 	bool uses_scan_filters = false;
+	vector<LogicalType> source_contract_input_types;
 
 	bool UsesSourceContract() const {
 		return source_execution == ExecutionRegionSourceExecutionKind::SOURCE_CONTRACT;
@@ -243,6 +244,10 @@ struct ExecutionRegionOpenRequest {
 
 	bool UsesScanFilters() const {
 		return uses_scan_filters;
+	}
+
+	bool UsesSourceContractInputLayout() const {
+		return UsesSourceContract() && !source_contract_input_types.empty();
 	}
 };
 

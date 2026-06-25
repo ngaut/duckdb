@@ -311,6 +311,7 @@ static void AccumulateExecutionRegionOpenRequest(ExecutionRegionPlan &plan, cons
 			        ? ExecutionRegionSourceExecutionKind::SOURCE_CONTRACT
 			        : ExecutionRegionSourceExecutionKind::NONE;
 			contract.uses_scan_filters = false;
+			contract.source_contract_input_types.clear();
 			return;
 		}
 		if (!source.table_scan_contract.present) {
@@ -327,6 +328,10 @@ static void AccumulateExecutionRegionOpenRequest(ExecutionRegionPlan &plan, cons
 		        : ExecutionRegionSourceExecutionKind::NONE;
 		plan_contract.uses_scan_filters =
 		    !source.filters.empty() && native_fused_source_owner && lowering_plan.UsesScanFilters();
+		plan_contract.source_contract_input_types.clear();
+		if (plan_contract.UsesSourceContract() && !plan_contract.uses_scan_filters && !source.filters.empty()) {
+			plan_contract.source_contract_input_types = table_scan_contract.source_contract_input_types;
+		}
 		return;
 	}
 }

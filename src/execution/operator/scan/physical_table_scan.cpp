@@ -23,7 +23,9 @@ namespace duckdb {
 struct TableScanExecutionSourceConfig {
 	bool use_source_contract = false;
 	vector<idx_t> projection_ids;
+	vector<LogicalType> source_contract_input_types;
 	optional_ptr<TableFilterSet> filters;
+	bool return_source_contract_input = false;
 };
 
 struct TableScanExecutionSourceContractGlobalState {
@@ -34,6 +36,7 @@ struct TableScanExecutionSourceContractGlobalState {
 	vector<LogicalType> scanned_types;
 	vector<idx_t> projection_ids;
 	idx_t total_row_groups_to_scan = 0;
+	bool return_source_contract_input = false;
 	bool can_remove_filter_columns = false;
 	bool is_create_index = false;
 };
@@ -59,6 +62,10 @@ BuildTableScanExecutionSourceConfig(const PhysicalTableScan &op, optional_ptr<Ta
 	result.projection_ids = op.projection_ids;
 	result.filters = filters;
 	result.use_source_contract = open_request.UsesSourceContract() && IsExecutionTableScanSourceContractSupported(op);
+	if (result.use_source_contract && open_request.UsesSourceContractInputLayout()) {
+		result.source_contract_input_types = open_request.source_contract_input_types;
+		result.return_source_contract_input = true;
+	}
 	if (result.use_source_contract && !open_request.UsesScanFilters()) {
 		result.filters = nullptr;
 	}
@@ -110,9 +117,15 @@ InitializeExecutionSourceContractTableScanGlobalState(ClientContext &context, co
 		contract_state.storage_ids.push_back(bind_data.table.GetStorageIndex(column_index));
 		contract_state.scanned_types.push_back(GetExecutionSourceContractTableScanColumnType(op, column_index));
 	}
+	contract_state.return_source_contract_input = execution_source_config.return_source_contract_input;
+	if (contract_state.return_source_contract_input &&
+	    execution_source_config.source_contract_input_types != contract_state.scanned_types) {
+		throw InternalException("execution region table scan source contract input layout does not match scan layout");
+	}
 	contract_state.projection_ids = execution_source_config.projection_ids;
-	contract_state.can_remove_filter_columns =
-	    !contract_state.projection_ids.empty() && contract_state.projection_ids.size() != op.column_ids.size();
+	contract_state.can_remove_filter_columns = !contract_state.return_source_contract_input &&
+	                                           !contract_state.projection_ids.empty() &&
+	                                           contract_state.projection_ids.size() != op.column_ids.size();
 
 	if (bind_data.order_options) {
 		auto transaction = TransactionData(*contract_state.transaction);
@@ -277,6 +290,10 @@ SourceResultType PhysicalTableScan::GetExecutionSourceContractDataInternal(Execu
 		if (contract_state.is_create_index) {
 			ExecutionOperatorStageTimer timer(input.stage_recorder, "source_contract.table_scan.create_index_scan");
 			contract_state.storage->CreateIndexScan(scan_state, chunk);
+		} else if (contract_state.return_source_contract_input) {
+			ExecutionOperatorStageTimer timer(input.stage_recorder,
+			                                  "source_contract.table_scan.storage_scan_source_input");
+			contract_state.storage->Scan(*contract_state.transaction, chunk, scan_state);
 		} else if (contract_state.can_remove_filter_columns) {
 			l_state.execution_source_contract_all_columns.Reset();
 			{

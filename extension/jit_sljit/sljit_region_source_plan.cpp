@@ -223,17 +223,6 @@ static bool TryPlanSljitGeneratedSourceFilters(const ExecutionRegionNode &node,
 		error = "generated source filters require source filter expressions";
 		return false;
 	}
-	auto &projection_map = contract.source_contract_output_projection_map;
-	if (projection_map.size() != contract.source_contract_input_types.size()) {
-		error = "generated source filters require filter columns in the source output";
-		return false;
-	}
-	for (idx_t projection_idx = 0; projection_idx < projection_map.size(); projection_idx++) {
-		if (projection_map[projection_idx] != projection_idx) {
-			error = "generated source filters require identity source projection";
-			return false;
-		}
-	}
 	auto current_types = contract.source_contract_input_types;
 	for (auto &filter : node.source->filters) {
 		if (!filter.generated_source_stage_candidate) {
@@ -251,7 +240,7 @@ static bool TryPlanSljitGeneratedSourceFilters(const ExecutionRegionNode &node,
 			return false;
 		}
 		if (filter.scan_column_index >= current_types.size()) {
-			error = "source filter references column outside source output";
+			error = "source filter references column outside source input";
 			return false;
 		}
 		SljitNativeRegionExpressionPlan source_reference;
@@ -261,7 +250,7 @@ static bool TryPlanSljitGeneratedSourceFilters(const ExecutionRegionNode &node,
 		vector<SljitNativeRegionExpressionPlan> source_filter_projection;
 		source_filter_projection.push_back(std::move(source_reference));
 		if (!TryMapNativeProjectionExpressionSources(source_filter_projection, filter_op.filter)) {
-			error = "source filter expression could not be mapped to source output column";
+			error = "source filter expression could not be mapped to source input column";
 			return false;
 		}
 		native_ops.push_back(std::move(filter_op));

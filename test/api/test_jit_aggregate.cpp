@@ -27,7 +27,7 @@ TEST_CASE("JIT ungrouped aggregate sinks use native state-update contracts", "[a
 		}
 		found_aggregate_update = true;
 		RequireGeneratedMachineCodeRegion(event);
-		RequireDuckDBScanFilteredSourceContract(event);
+		RequireGeneratedSourceFilteredSourceContract(event);
 		REQUIRE(event.candidate_contract.missing_contract_count == 0);
 		REQUIRE(StringUtil::Contains(event.reason, "native aggregate update sink contract"));
 		REQUIRE(StringUtil::Contains(event.reason, "ungrouped-aggregate-native-state-update"));
@@ -761,27 +761,27 @@ TEST_CASE("JIT fuses TPC-H Q1 shaped perfect-hash aggregate payloads", "[api][ji
 
 	ConfigureSljitForCoverage(con, false, true, true, 10000);
 	REQUIRE_NO_FAIL(con.Query("PRAGMA threads=1"));
-	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_q1_perfect_hash_payload AS "
-	                          "SELECT CASE WHEN i % 3 = 0 THEN 'A' WHEN i % 3 = 1 THEN 'N' ELSE 'R' END AS l_returnflag, "
-	                          "       CASE WHEN i % 2 = 0 THEN 'F' ELSE 'O' END AS l_linestatus, "
-	                          "       CAST(1 + (i % 50) AS DECIMAL(15,2)) AS l_quantity, "
-	                          "       CAST(100 + (i % 1000) AS DECIMAL(15,2)) AS l_extendedprice, "
-	                          "       CAST(i % 10 AS DECIMAL(15,2)) AS l_discount, "
-	                          "       CAST(i % 8 AS DECIMAL(15,2)) AS l_tax "
-	                          "FROM range(120000) tbl(i)"));
+	REQUIRE_NO_FAIL(
+	    con.Query("CREATE TABLE jit_q1_perfect_hash_payload AS "
+	              "SELECT CASE WHEN i % 3 = 0 THEN 'A' WHEN i % 3 = 1 THEN 'N' ELSE 'R' END AS l_returnflag, "
+	              "       CASE WHEN i % 2 = 0 THEN 'F' ELSE 'O' END AS l_linestatus, "
+	              "       CAST(1 + (i % 50) AS DECIMAL(15,2)) AS l_quantity, "
+	              "       CAST(100 + (i % 1000) AS DECIMAL(15,2)) AS l_extendedprice, "
+	              "       CAST(i % 10 AS DECIMAL(15,2)) AS l_discount, "
+	              "       CAST(i % 8 AS DECIMAL(15,2)) AS l_tax "
+	              "FROM range(120000) tbl(i)"));
 
-	const string query =
-	    "SELECT l_returnflag, l_linestatus, "
-	    "       sum(l_quantity), "
-	    "       sum(l_extendedprice), "
-	    "       sum(l_extendedprice * (1.00::DECIMAL(15,2) - l_discount)), "
-	    "       sum(l_extendedprice * (1.00::DECIMAL(15,2) - l_discount) * "
-	    "           (1.00::DECIMAL(15,2) + l_tax)), "
-	    "       sum(l_discount), "
-	    "       count(*) "
-	    "FROM jit_q1_perfect_hash_payload "
-	    "GROUP BY l_returnflag, l_linestatus "
-	    "ORDER BY l_returnflag, l_linestatus";
+	const string query = "SELECT l_returnflag, l_linestatus, "
+	                     "       sum(l_quantity), "
+	                     "       sum(l_extendedprice), "
+	                     "       sum(l_extendedprice * (1.00::DECIMAL(15,2) - l_discount)), "
+	                     "       sum(l_extendedprice * (1.00::DECIMAL(15,2) - l_discount) * "
+	                     "           (1.00::DECIMAL(15,2) + l_tax)), "
+	                     "       sum(l_discount), "
+	                     "       count(*) "
+	                     "FROM jit_q1_perfect_hash_payload "
+	                     "GROUP BY l_returnflag, l_linestatus "
+	                     "ORDER BY l_returnflag, l_linestatus";
 	REQUIRE_NO_FAIL(con.Query("SET jit_policy='off'"));
 	auto reference = con.Query(query);
 	REQUIRE_NO_FAIL(*reference);
@@ -823,8 +823,8 @@ TEST_CASE("JIT fuses TPC-H Q1 shaped perfect-hash aggregate payloads", "[api][ji
 	    [](const ExecutionRegionEvent &event) {
 		    REQUIRE(ExecutionRegionEventProfileCodeSize(event) > 0);
 		    REQUIRE_FALSE(StringUtil::Contains(EventGeneratedStageRuntimeBreakdown(event), "projection"));
-		    REQUIRE_FALSE(StringUtil::Contains(EventGeneratedStageCountBreakdown(event),
-		                                       "resolve_grouped_state_addresses="));
+		    REQUIRE_FALSE(
+		        StringUtil::Contains(EventGeneratedStageCountBreakdown(event), "resolve_grouped_state_addresses="));
 	    });
 }
 

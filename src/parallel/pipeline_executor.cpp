@@ -150,13 +150,17 @@ void PipelineExecutor::PrepareForExecution() {
 }
 
 void PipelineExecutor::PrepareExecutionSourceInputChunk() {
-	auto &source_input_types = pipeline.source->GetTypes();
-	if (execution_source_input_chunk.GetTypes() == source_input_types) {
+	auto source_input_types = &pipeline.source->GetTypes();
+	auto region_plan = pipeline.GetExecutionRegionPlan();
+	if (region_plan && region_plan->OpenRequest().UsesSourceContractInputLayout()) {
+		source_input_types = &region_plan->OpenRequest().source_contract_input_types;
+	}
+	if (execution_source_input_chunk.GetTypes() == *source_input_types) {
 		execution_source_input_chunk.Reset();
 		return;
 	}
 	execution_source_input_chunk.Destroy();
-	execution_source_input_chunk.Initialize(BufferAllocator::Get(context.client), source_input_types);
+	execution_source_input_chunk.Initialize(BufferAllocator::Get(context.client), *source_input_types);
 }
 
 bool PipelineExecutor::TryFlushCachingOperators(ExecutionBudget &chunk_budget) {

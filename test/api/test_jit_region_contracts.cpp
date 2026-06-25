@@ -28,7 +28,7 @@ TEST_CASE("JIT table scan source contract fuses with generated projection and ap
 		    StringUtil::Contains(event.ir, "table_scan_contract<function=seq_scan")) {
 			found_source_contract = true;
 			RequireGeneratedMachineCodeRegion(event);
-			RequireDuckDBScanFilteredSourceContract(event);
+			RequireGeneratedSourceFilteredSourceContract(event);
 			REQUIRE(StringUtil::Contains(event.ir, "source_contract<status=ready"));
 			REQUIRE(StringUtil::Contains(event.reason, "append sink contract"));
 			REQUIRE(StringUtil::Contains(event.reason, "sink_contract_status=ready"));

@@ -41,7 +41,7 @@ TEST_CASE("JIT auto compiles decimal projection chains through fused regions", "
 			return false;
 		}
 		RequireGeneratedMachineCodeRegion(event);
-		RequireDuckDBScanFilteredSourceContract(event);
+		RequireGeneratedSourceFilteredSourceContract(event);
 		REQUIRE(StringUtil::Contains(event.ir, "projection(native:expression-tree"));
 		REQUIRE(!StringUtil::Contains(event.ir, "op3=projection(native"));
 		return true;
@@ -380,6 +380,38 @@ TEST_CASE("JIT lowers retained table scan filters as generated source stages", "
 	    manager,
 	    [](const ExecutionRegionEvent &event) {
 		    return IsCompiledSljitRegionEvent(event) && event.candidate_traits.source_filter_count > 0 &&
+		           StringUtil::Contains(event.reason, "generated table scan source filters");
+	    },
+	    [](const ExecutionRegionEvent &event) {
+		    REQUIRE_FALSE(event.selected_uses_scan_filters);
+		    REQUIRE_FALSE(event.candidate_uses_scan_filters);
+		    REQUIRE(event.runner_cost.generated_stage_count > 0);
+		    REQUIRE(event.runner_cost.native_aggregate_stage_count > 0);
+		    RequireGeneratedMachineCodeRegion(event);
+	    });
+}
+
+TEST_CASE("JIT lowers pruned table scan filters as generated source stages", "[api][jit]") {
+	DuckDB db;
+	Connection con(db);
+	auto &manager = ExecutionRegionManager::Get(*con.context);
+
+	ConfigureSljitForCoverage(con, false, true, false, 10000);
+	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_generated_pruned_source_filter AS "
+	                          "SELECT i::BIGINT AS i, "
+	                          "(DATE '1998-01-01' + ((i % 10)::INTEGER)) AS d "
+	                          "FROM range(10000) tbl(i)"));
+
+	ClearJitTrace(manager, true);
+	auto result = con.Query("SELECT sum(i) FROM jit_generated_pruned_source_filter WHERE d <= DATE '1998-01-05'");
+	REQUIRE_NO_FAIL(*result);
+	REQUIRE(result->GetValue(0, 0).ToString() == "24985000");
+
+	RequireJitEvent(
+	    manager,
+	    [](const ExecutionRegionEvent &event) {
+		    return IsCompiledSljitRegionEvent(event) && event.candidate_traits.source_filter_count > 0 &&
+		           event.candidate_traits.source_contract_filter_prune_required &&
 		           StringUtil::Contains(event.reason, "generated table scan source filters");
 	    },
 	    [](const ExecutionRegionEvent &event) {

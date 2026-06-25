@@ -178,6 +178,38 @@ static bool ExecutionRegionExpressionCanUseGeneratedSourceStage(const ExecutionE
 	return !expression.traits.has_arithmetic_binary;
 }
 
+static bool ExecutionRegionTypeCanUseGeneratedSourceStage(const LogicalType &type) {
+	switch (type.InternalType()) {
+	case PhysicalType::BOOL:
+	case PhysicalType::INT8:
+	case PhysicalType::INT16:
+	case PhysicalType::INT32:
+	case PhysicalType::INT64:
+	case PhysicalType::INT128:
+	case PhysicalType::UINT8:
+	case PhysicalType::UINT16:
+	case PhysicalType::UINT32:
+	case PhysicalType::UINT64:
+	case PhysicalType::FLOAT:
+	case PhysicalType::DOUBLE:
+		return true;
+	default:
+		return false;
+	}
+}
+
+static bool ExecutionRegionSourceFilterCanUseGeneratedSourceStage(const ExecutionSourceContract &descriptor,
+                                                                  const ExecutionRegionSourceFilter &filter) {
+	if (!filter.expression || !ExecutionRegionExpressionCanUseGeneratedSourceStage(*filter.expression)) {
+		return false;
+	}
+	auto &input_types = descriptor.table_scan_contract.source_contract_input_types;
+	if (filter.scan_column_index >= input_types.size()) {
+		return false;
+	}
+	return ExecutionRegionTypeCanUseGeneratedSourceStage(input_types[filter.scan_column_index]);
+}
+
 static string DescribeExecutionRegionContractFields(const vector<ExecutionRegionContractField> &fields) {
 	string result = "[";
 	for (idx_t field_idx = 0; field_idx < fields.size(); field_idx++) {
@@ -892,7 +924,7 @@ static void AddExecutionRegionSourceFilters(const ExecutionSourceContract &descr
 			filter.reason = DescribeExecutionExpressionLoweringFailure(*entry.expression);
 		} else {
 			filter.generated_source_stage_candidate =
-			    ExecutionRegionExpressionCanUseGeneratedSourceStage(*filter.expression);
+			    ExecutionRegionSourceFilterCanUseGeneratedSourceStage(descriptor, filter);
 		}
 		source.filters.push_back(std::move(filter));
 	}
@@ -1802,16 +1834,23 @@ static bool ExecutionRegionSourceFiltersCanUseGeneratedOutput(const ExecutionReg
 	}
 	auto &contract = node.source->table_scan_contract;
 	auto &projection_map = contract.source_contract_output_projection_map;
-	if (projection_map.size() != contract.source_contract_input_types.size()) {
+	if (projection_map.size() != node.output_types.size()) {
 		return false;
 	}
-	for (idx_t projection_idx = 0; projection_idx < projection_map.size(); projection_idx++) {
-		if (projection_map[projection_idx] != projection_idx) {
+	for (idx_t output_idx = 0; output_idx < projection_map.size(); output_idx++) {
+		auto input_idx = projection_map[output_idx];
+		if (input_idx >= contract.source_contract_input_types.size()) {
+			return false;
+		}
+		if (contract.source_contract_input_types[input_idx] != node.output_types[output_idx]) {
 			return false;
 		}
 	}
 	for (auto &filter : node.source->filters) {
 		if (!filter.generated_source_stage_candidate) {
+			return false;
+		}
+		if (filter.scan_column_index >= contract.source_contract_input_types.size()) {
 			return false;
 		}
 	}
