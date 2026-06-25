@@ -25,6 +25,7 @@ namespace duckdb {
 static idx_t DuckDBExpressionCost(const Expression &expr);
 static constexpr int64_t BASIS_POINT_SCALE = 10000;
 static constexpr int64_t MATERIALIZATION_SOURCE_APPEND_PENALTY = 80;
+static constexpr idx_t JOIN_UNGROUPED_AGGREGATE_MIN_EXPRESSION_COST = 512;
 
 static int64_t SaturatingCostCast(idx_t value) {
 	auto max_value = static_cast<idx_t>(std::numeric_limits<int64_t>::max());
@@ -360,6 +361,15 @@ PhysicalRunnerGeneratedWorkPaysScanFilteredJoinUngroupedAggregateProtocol(const 
 	       input.native_sort_stage_count == 0;
 }
 
+static bool PhysicalRunnerGeneratedWorkPaysJoinUngroupedAggregateProtocol(const PhysicalRunnerCostInput &input) {
+	return input.full_pipeline && input.generated_stage_count >= 2 && input.materialization_elision_count > 0 &&
+	       input.expression_cost >= JOIN_UNGROUPED_AGGREGATE_MIN_EXPRESSION_COST &&
+	       input.generated_work_class != PhysicalRunnerGeneratedWorkClass::NONE &&
+	       input.generated_work_class != PhysicalRunnerGeneratedWorkClass::PROJECTION_GLUE &&
+	       input.native_join_stage_count == 1 && input.native_aggregate_stage_count == 1 &&
+	       input.native_grouped_aggregate_stage_count == 0 && input.native_sort_stage_count == 0;
+}
+
 static void PhysicalRunnerComputeWorkComponents(const PhysicalRunnerCostInput &input,
                                                 const PhysicalRunnerCostParameters &parameters,
                                                 PhysicalRunnerCostProfile &profile) {
@@ -470,12 +480,13 @@ static bool PhysicalRunnerHasAcceleratedWork(const PhysicalRunnerCostInput &inpu
 	    PhysicalRunnerGeneratedWorkPaysJoinGroupedAggregateProtocol(input);
 	const bool generated_work_pays_scan_filtered_join_aggregate =
 	    PhysicalRunnerGeneratedWorkPaysScanFilteredJoinUngroupedAggregateProtocol(input);
-	const bool native_operator_work_is_costed = native_operator_stage_count == 0 ||
-	                                            parameters.native_operator_stage_benefit > 0 ||
-	                                            (input.full_pipeline && parameters.full_pipeline_benefit > 0) ||
-	                                            generated_work_pays_standalone_aggregate ||
-	                                            generated_work_pays_join_grouped_aggregate ||
-	                                            generated_work_pays_scan_filtered_join_aggregate;
+	const bool generated_work_pays_join_ungrouped_aggregate =
+	    PhysicalRunnerGeneratedWorkPaysJoinUngroupedAggregateProtocol(input);
+	const bool native_operator_work_is_costed =
+	    native_operator_stage_count == 0 || parameters.native_operator_stage_benefit > 0 ||
+	    (input.full_pipeline && parameters.full_pipeline_benefit > 0) || generated_work_pays_standalone_aggregate ||
+	    generated_work_pays_join_grouped_aggregate || generated_work_pays_scan_filtered_join_aggregate ||
+	    generated_work_pays_join_ungrouped_aggregate;
 	const bool has_costed_acceleration =
 	    (input.generated_stage_count > 0 && parameters.generated_stage_benefit > 0) ||
 	    (native_operator_stage_count > 0 && parameters.native_operator_stage_benefit > 0) ||

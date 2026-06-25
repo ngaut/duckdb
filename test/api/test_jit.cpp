@@ -507,6 +507,60 @@ TEST_CASE("JIT CBO skips generated ungrouped aggregate fusion behind unfunded na
 	REQUIRE_FALSE(profile.selected_accelerated_runner);
 }
 
+TEST_CASE("JIT CBO admits direct join ungrouped aggregate materialization-elision fusion", "[api][jit]") {
+	PhysicalRunnerCostInput input;
+	input.estimated_cardinality = 1256746;
+	input.expression_cost = 1110;
+	input.generated_stage_count = 2;
+	input.materialization_elision_count = 1;
+	input.native_join_stage_count = 1;
+	input.native_aggregate_stage_count = 1;
+	input.full_pipeline = true;
+	input.generated_work_class = PhysicalRunnerGeneratedWorkClass::COMPUTE;
+	input.has_accelerated_work = true;
+
+	PhysicalRunnerCostParameters parameters;
+	parameters.compiled_vectorized_runner_available = true;
+	parameters.generated_stage_benefit = 1;
+	parameters.startup_base_cost = 32000;
+	parameters.startup_margin_basis_points = 5000;
+
+	auto profile = DuckDBCostModel::SelectPhysicalRunner(input, parameters);
+	REQUIRE(profile.generated_expression_work == 1110);
+	REQUIRE(profile.generated_stage_work == 2);
+	REQUIRE(profile.native_operator_work == 0);
+	REQUIRE(profile.materialization_elision_work == 0);
+	REQUIRE(profile.native_join_stage_count == 1);
+	REQUIRE(profile.native_aggregate_stage_count == 1);
+	REQUIRE(profile.native_grouped_aggregate_stage_count == 0);
+	REQUIRE(profile.accelerated_runner_benefit > profile.required_benefit);
+	REQUIRE(profile.selected_accelerated_runner);
+
+	input.expression_cost = 164;
+	profile = DuckDBCostModel::SelectPhysicalRunner(input, parameters);
+	REQUIRE_FALSE(profile.selected_accelerated_runner);
+
+	input.expression_cost = 1110;
+	input.materialization_elision_count = 0;
+	profile = DuckDBCostModel::SelectPhysicalRunner(input, parameters);
+	REQUIRE_FALSE(profile.selected_accelerated_runner);
+
+	input.materialization_elision_count = 1;
+	input.native_join_stage_count = 2;
+	profile = DuckDBCostModel::SelectPhysicalRunner(input, parameters);
+	REQUIRE_FALSE(profile.selected_accelerated_runner);
+
+	input.native_join_stage_count = 1;
+	input.native_aggregate_stage_count = 2;
+	profile = DuckDBCostModel::SelectPhysicalRunner(input, parameters);
+	REQUIRE_FALSE(profile.selected_accelerated_runner);
+
+	input.native_aggregate_stage_count = 1;
+	input.generated_work_class = PhysicalRunnerGeneratedWorkClass::PROJECTION_GLUE;
+	profile = DuckDBCostModel::SelectPhysicalRunner(input, parameters);
+	REQUIRE_FALSE(profile.selected_accelerated_runner);
+}
+
 TEST_CASE("JIT CBO admits standalone generated grouped aggregate fusion", "[api][jit]") {
 	PhysicalRunnerCostInput input;
 	input.estimated_cardinality = 1200243;

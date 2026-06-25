@@ -691,6 +691,53 @@ Exit criteria:
 - done: all-query TPC-H SF1 verifier passed with correctness diff 0
 - done: `[api][jit]`, architecture verifier, and build passed after formatting
 
+### 2j. Pre-Backend CBO Admission Needs Runtime-Proven Shape Guards
+
+Q14 exposed a two-phase CBO blind spot. The profitable backend path is found
+only after lowering: source-contract table scan, one native hash join probe, one
+typed projection, and one native ungrouped aggregate update. Default auto first
+runs a cost-only gate before backend analysis, and that pre-backend gate does
+not yet know that lowering will select DuckDB scan filters. The old
+scan-filter-specific admission rule therefore could not fire, even though a
+forced trace proved the lowered runtime path was already cheap enough.
+
+The fix was not to fund generic native joins. The cost-only gate now admits only
+the runtime-proven direct materialization shape:
+
+- full pipeline
+- generated compute, not projection glue
+- materialization elision into the aggregate sink
+- exactly one native join stage
+- exactly one native ungrouped aggregate stage
+- no grouped aggregate and no sort stage
+- high generated expression work
+
+The last guard matters. The first version admitted Q17 too because it has the
+same one-join/one-ungrouped-aggregate skeleton, but only 164 expression-cost
+units per batch. It was correctness-clean and roughly neutral, not a real win.
+Adding a high-expression-work floor keeps Q14 (`1110`) admitted and blocks Q17.
+
+Verified result:
+
+| Workload | Result |
+| --- | ---: |
+| TPC-H Q14 SF1, 20 repeats | off 0.039s, auto 0.037s, 1.054x |
+| TPC-H all queries SF1, 5 repeats | strict verifier passed |
+
+All-query negative controls after the guard:
+
+- Q14 compiles by default and remains correctness-clean
+- Q17 stays vectorized after the shallow-work guard
+- Q6, Q7, Q8, Q20, Q21, and Q22 do not inherit this admission rule
+
+Exit criteria:
+
+- done: default-auto Q14 reaches backend lowering and compiles the intended
+  one-join/one-ungrouped-aggregate region
+- done: Q14 20-repeat production median remains a small repeatable win
+- done: Q17 shallow-work shape is rejected by the pre-backend CBO
+- done: all-query TPC-H SF1 verifier passes with correctness diff 0
+
 ### 3. SIMD After Fusion
 
 SIMD support is worth benchmarking seriously only after the fused loop is regular
