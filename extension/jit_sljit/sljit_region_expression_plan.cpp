@@ -145,6 +145,20 @@ static bool TryMapNativeProjectionSourceIndex(const vector<SljitNativeRegionExpr
 }
 
 static bool
+TryMapNativeExpressionTreeSourceIndicesThroughProjection(const vector<SljitNativeRegionExpressionPlan> &input_projection,
+                                                         SljitNativeRegionExpressionPlan &expr) {
+	if (!expr.expression_tree) {
+		return true;
+	}
+	for (auto &source_index : expr.expression_tree_source_indices) {
+		if (!TryMapNativeProjectionSourceIndex(input_projection, source_index)) {
+			return false;
+		}
+	}
+	return true;
+}
+
+static bool
 TryMapNativePredicateSourcesThroughProjection(const vector<SljitNativeRegionExpressionPlan> &input_projection,
                                               SljitNativePredicate &predicate) {
 	switch (predicate.kind) {
@@ -304,7 +318,7 @@ bool TryMapNativeProjectionExpressionSources(const vector<SljitNativeRegionExpre
                                              SljitNativeRegionExpressionPlan &expr) {
 	switch (expr.kind) {
 	case SljitNativeRegionExpressionKind::CONSTANT:
-		return true;
+		return TryMapNativeExpressionTreeSourceIndicesThroughProjection(input_projection, expr);
 	case SljitNativeRegionExpressionKind::REFERENCE:
 	case SljitNativeRegionExpressionKind::INTEGER_BINARY_CONSTANT:
 	case SljitNativeRegionExpressionKind::DOUBLE_BINARY_CONSTANT:
@@ -325,7 +339,8 @@ bool TryMapNativeProjectionExpressionSources(const vector<SljitNativeRegionExpre
 	case SljitNativeRegionExpressionKind::NULL_CHECK:
 		if (expr.kind == SljitNativeRegionExpressionKind::ERROR_GUARDED_REFERENCE) {
 			return TryMapNativeProjectionSourceIndex(input_projection, expr.source_index) &&
-			       TryMapNativeProjectionSourceIndex(input_projection, expr.guard_source_index);
+			       TryMapNativeProjectionSourceIndex(input_projection, expr.guard_source_index) &&
+			       TryMapNativeExpressionTreeSourceIndicesThroughProjection(input_projection, expr);
 		}
 		if (expr.kind == SljitNativeRegionExpressionKind::CONSTANT_OR_NULL) {
 			for (auto &source_index : expr.constant_or_null.guard_source_indices) {
@@ -333,36 +348,34 @@ bool TryMapNativeProjectionExpressionSources(const vector<SljitNativeRegionExpre
 					return false;
 				}
 			}
-			return true;
+			return TryMapNativeExpressionTreeSourceIndicesThroughProjection(input_projection, expr);
 		}
-		return TryMapNativeProjectionSourceIndex(input_projection, expr.source_index);
+		return TryMapNativeProjectionSourceIndex(input_projection, expr.source_index) &&
+		       TryMapNativeExpressionTreeSourceIndicesThroughProjection(input_projection, expr);
 	case SljitNativeRegionExpressionKind::INTEGER_BINARY_REFERENCES:
 	case SljitNativeRegionExpressionKind::DOUBLE_BINARY_REFERENCES:
 	case SljitNativeRegionExpressionKind::INTEGER_COMPARE_REFERENCES:
 		return TryMapNativeProjectionSourceIndex(input_projection, expr.source_index) &&
-		       TryMapNativeProjectionSourceIndex(input_projection, expr.right_source_index);
+		       TryMapNativeProjectionSourceIndex(input_projection, expr.right_source_index) &&
+		       TryMapNativeExpressionTreeSourceIndicesThroughProjection(input_projection, expr);
 	case SljitNativeRegionExpressionKind::INTEGER_COALESCE:
 		if (!TryMapNativeProjectionSourceIndex(input_projection, expr.source_index)) {
 			return false;
 		}
 		if (expr.coalesce_rhs_kind == SljitNativeCoalesceRhsKind::REFERENCE) {
-			return TryMapNativeProjectionSourceIndex(input_projection, expr.right_source_index);
+			return TryMapNativeProjectionSourceIndex(input_projection, expr.right_source_index) &&
+			       TryMapNativeExpressionTreeSourceIndicesThroughProjection(input_projection, expr);
 		}
-		return true;
+		return TryMapNativeExpressionTreeSourceIndicesThroughProjection(input_projection, expr);
 	case SljitNativeRegionExpressionKind::PREDICATE:
 		if (!expr.predicate || !TryMapNativePredicateSourcesThroughProjection(input_projection, *expr.predicate)) {
 			return false;
 		}
 		FinalizeSljitNativePredicateSourceIndices(*expr.predicate);
-		return true;
+		return TryMapNativeExpressionTreeSourceIndicesThroughProjection(input_projection, expr);
 	case SljitNativeRegionExpressionKind::EXPRESSION_TREE:
 	case SljitNativeRegionExpressionKind::TYPED_EXPRESSION_TREE:
-		for (auto &source_index : expr.expression_tree_source_indices) {
-			if (!TryMapNativeProjectionSourceIndex(input_projection, source_index)) {
-				return false;
-			}
-		}
-		return true;
+		return TryMapNativeExpressionTreeSourceIndicesThroughProjection(input_projection, expr);
 	default:
 		return false;
 	}

@@ -838,6 +838,40 @@ Exit criteria:
 - GPU loses correctly on simple low-intensity projections
 - cost model decisions match measured break-even points
 
+### 5. Fused Filter Metadata Must Move As One Unit
+
+Q6 exposed a correctness root cause in the filtered aggregate fusion path:
+
+- table-scan source filters are planned against source-contract input columns
+- simple filter plans can also carry a typed expression tree for later fusion
+- the projection remapper updated `source_index`, but left
+  `expression_tree_source_indices` stale
+- normal filter execution used the remapped `source_index` and looked correct
+- fused filtered aggregate execution used the stale expression-tree source list
+  and read the wrong column after scan filter/projection pruning
+
+The fix is structural: source remapping must update every parallel source
+representation carried by an expression plan. This is better than adding a
+special Q6 guard because it eliminates the edge case for all fused expression
+plans that carry both a compact operator form and an expression-tree form.
+
+Performance lesson:
+
+- fixing the remap makes forced Q6 correct, but not fast
+- selected all-valid filtered aggregate fast path is useful groundwork, but Q6
+  remains dominated by repeated source-filter passes before the aggregate
+- the next root performance move is to fuse generated source filters into one
+  data-centric predicate pass, then feed the filtered aggregate
+
+Exit criteria:
+
+- done: focused API regression covers scan-filter projection remap plus filtered
+  primitive aggregate update
+- done: Q6 predicate matrix matches vectorized results for date, discount,
+  quantity, and their combinations
+- next: combine generated source filters so Q6 stops scanning/slicing the same
+  vector through multiple filter operators
+
 ## Bottom Line
 
 The proven path is aggressive fusion that removes materialization and keeps data

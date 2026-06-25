@@ -162,6 +162,58 @@ TEST_CASE("JIT fuses generated filters into primitive ungrouped aggregate reduce
 	REQUIRE(found_filtered_aggregate);
 }
 
+TEST_CASE("JIT filtered aggregate remaps expression-tree sources after scan filter projection", "[api][jit]") {
+	DuckDB db;
+	Connection con(db);
+	auto &manager = ExecutionRegionManager::Get(*con.context);
+
+	ConfigureSljitForCoverage(con, false, true, true, 10000);
+	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_filtered_aggregate_source_remap AS "
+	                          "SELECT CASE i % 10 "
+	                          "       WHEN 0 THEN 0.00::DECIMAL(15,2) "
+	                          "       WHEN 1 THEN 0.01::DECIMAL(15,2) "
+	                          "       WHEN 2 THEN 0.02::DECIMAL(15,2) "
+	                          "       WHEN 3 THEN 0.03::DECIMAL(15,2) "
+	                          "       WHEN 4 THEN 0.04::DECIMAL(15,2) "
+	                          "       WHEN 5 THEN 0.05::DECIMAL(15,2) "
+	                          "       WHEN 6 THEN 0.06::DECIMAL(15,2) "
+	                          "       WHEN 7 THEN 0.07::DECIMAL(15,2) "
+	                          "       WHEN 8 THEN 0.08::DECIMAL(15,2) "
+	                          "       ELSE 0.09::DECIMAL(15,2) END AS discount, "
+	                          "       CAST(1 + (i % 50) AS DECIMAL(15,2)) AS quantity, "
+	                          "       CAST(100 + (i % 1000) AS DECIMAL(15,2)) AS extendedprice "
+	                          "FROM range(100000) tbl(i)"));
+
+	const string query = "SELECT sum(extendedprice * discount) "
+	                     "FROM jit_filtered_aggregate_source_remap "
+	                     "WHERE discount BETWEEN 0.05::DECIMAL(15,2) AND 0.07::DECIMAL(15,2) "
+	                     "  AND quantity < 24::DECIMAL(15,2)";
+	REQUIRE_NO_FAIL(con.Query("SET jit_policy='off'"));
+	auto reference = con.Query(query);
+	REQUIRE_NO_FAIL(*reference);
+
+	REQUIRE_NO_FAIL(con.Query("SET jit_policy='auto'"));
+	ClearJitTrace(manager, true);
+	auto result = con.Query(query);
+	REQUIRE_NO_FAIL(*result);
+	REQUIRE(result->GetValue(0, 0).ToString() == reference->GetValue(0, 0).ToString());
+
+	bool found_filtered_aggregate = false;
+	for (auto &event : manager.GetEvents()) {
+		if (EventPhase(event) != "runtime" || event.backend_name != "sljit") {
+			continue;
+		}
+		auto stage_counts = EventGeneratedStageCountBreakdown(event);
+		if (!StringUtil::Contains(stage_counts, "aggregate_update.filtered_primitive_update=")) {
+			continue;
+		}
+		found_filtered_aggregate = true;
+		REQUIRE(StringUtil::Contains(stage_counts, "filter="));
+		REQUIRE_FALSE(StringUtil::Contains(stage_counts, "filter.selection="));
+	}
+	REQUIRE(found_filtered_aggregate);
+}
+
 TEST_CASE("JIT fuses generated filters into primitive count-star aggregate reducers", "[api][jit]") {
 	DuckDB db;
 	Connection con(db);

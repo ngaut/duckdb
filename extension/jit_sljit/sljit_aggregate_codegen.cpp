@@ -1860,6 +1860,7 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeFilteredUngroupedFusedPrim
 
 	vector<SljitExpressionTreeOverflowJumps> overflows;
 	struct sljit_jump *fast_done = nullptr;
+	struct sljit_jump *selected_fast_done = nullptr;
 	if (codegen_plan.fast_path_supported) {
 		sljit_emit_op1(compiler, SLJIT_MOV_U8, SLJIT_R0, 0, SLJIT_MEM1(SLJIT_S0),
 		               offsetof(SljitNativeVectorInput, expression_tree_flat_all_valid));
@@ -1893,6 +1894,40 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeFilteredUngroupedFusedPrim
 		EmitSljitAggregateLoopStep(compiler, fast_loop);
 
 		sljit_set_label(use_generic_loop, sljit_emit_label(compiler));
+		sljit_emit_op1(compiler, SLJIT_MOV_U8, SLJIT_R0, 0, SLJIT_MEM1(SLJIT_S0),
+		               offsetof(SljitNativeVectorInput, expression_tree_all_valid));
+		auto use_generic_selected_loop = sljit_emit_cmp(compiler, SLJIT_EQUAL, SLJIT_R0, 0, SLJIT_IMM, 0);
+		sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_S1, 0, SLJIT_IMM, 0);
+		auto selected_fast_loop = sljit_emit_label(compiler);
+		selected_fast_done = sljit_emit_cmp(compiler, SLJIT_GREATER_EQUAL, SLJIT_S1, 0, SLJIT_S2, 0);
+		EmitLoadSljitExpressionTreeLogicalIndex(compiler);
+		idx_t selected_predicate_spill_index = 0;
+		EmitSljitTypedExpressionTreeSelectedFastValueReg(compiler, predicate, selected_predicate_spill_index,
+		                                                 overflows);
+		auto selected_predicate_false = sljit_emit_cmp(compiler, SLJIT_EQUAL, SLJIT_R2, 0, SLJIT_IMM, 0);
+		for (idx_t payload_idx = 0; payload_idx < payloads.size(); payload_idx++) {
+			auto kind = aggregates[payload_idx].primitive_update_kind;
+			if (kind == AggregatePrimitiveUpdateKind::COUNT_STAR) {
+				EmitSljitAggregateIncrementLocalCount(compiler, local_count_offsets[payload_idx]);
+				continue;
+			}
+			idx_t payload_spill_index = 0;
+			EmitSljitTypedExpressionTreeSelectedFastValueReg(compiler, *payloads[payload_idx].expression_tree,
+			                                                 payload_spill_index, overflows);
+			if (kind == AggregatePrimitiveUpdateKind::SUM_HUGEINT) {
+				EmitSljitAggregateAccumulateHugeintInt64(compiler, local_sum_offsets[payload_idx],
+				                                         local_sum_upper_offsets[payload_idx],
+				                                         saw_value_offsets[payload_idx], SLJIT_R2);
+			} else {
+				EmitSljitAggregateAccumulateInt64(compiler, local_sum_offsets[payload_idx],
+				                                  saw_value_offsets[payload_idx], SLJIT_R2);
+			}
+			EmitSljitAggregateIncrementLocalCount(compiler, local_count_offsets[payload_idx]);
+		}
+		sljit_set_label(selected_predicate_false, sljit_emit_label(compiler));
+		EmitSljitAggregateLoopStep(compiler, selected_fast_loop);
+
+		sljit_set_label(use_generic_selected_loop, sljit_emit_label(compiler));
 		sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_S1, 0, SLJIT_IMM, 0);
 	}
 
@@ -1958,6 +1993,9 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeFilteredUngroupedFusedPrim
 	auto done_label = sljit_emit_label(compiler);
 	if (fast_done) {
 		sljit_set_label(fast_done, done_label);
+	}
+	if (selected_fast_done) {
+		sljit_set_label(selected_fast_done, done_label);
 	}
 	sljit_set_label(done, done_label);
 	for (idx_t payload_idx = 0; payload_idx < payloads.size(); payload_idx++) {
