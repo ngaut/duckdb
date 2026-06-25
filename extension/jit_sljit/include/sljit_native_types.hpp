@@ -109,6 +109,7 @@ struct SljitNativePredicate {
 	bool guard_has_null_constant = false;
 	vector<idx_t> guard_source_indices;
 	vector<idx_t> source_indices;
+	vector<bool> source_not_null;
 	unique_ptr<SljitNativePredicate> child;
 	vector<unique_ptr<SljitNativePredicate>> children;
 
@@ -137,6 +138,7 @@ struct SljitNativeVectorInput {
 	const sel_t *right_source_sel = nullptr;
 	const sel_t **source_sel_array = nullptr;
 	const sel_t **right_source_sel_array = nullptr;
+	const sel_t *source_common_sel = nullptr;
 	const sel_t **group_sel_array = nullptr;
 	const validity_t *source_validity = nullptr;
 	const validity_t *right_source_validity = nullptr;
@@ -164,6 +166,8 @@ struct SljitNativeVectorInput {
 	idx_t count = 0;
 	bool expression_tree_flat_no_selection = false;
 	bool expression_tree_flat_all_valid = false;
+	bool expression_tree_all_valid = false;
+	bool group_selection_all_present = false;
 	int64_t *aggregate_int64_value = nullptr;
 	hugeint_t *aggregate_hugeint_value = nullptr;
 	double *aggregate_double_value = nullptr;
@@ -199,6 +203,7 @@ struct SljitNativePredicateInput {
 	sel_t *false_sel = nullptr;
 	idx_t selected_count = 0;
 	idx_t count = 0;
+	bool sources_all_valid = false;
 	std::exception_ptr error;
 };
 

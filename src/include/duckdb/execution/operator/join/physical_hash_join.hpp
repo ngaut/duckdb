@@ -18,6 +18,8 @@ class JoinHashTable;
 struct ResidualPredicateInfo {
 	unordered_map<idx_t, idx_t> build_input_to_layout_map;
 	unordered_map<idx_t, idx_t> probe_input_to_probe_map;
+	unordered_map<idx_t, bool> build_input_not_null_map;
+	unordered_map<idx_t, bool> probe_input_not_null_map;
 	vector<LogicalType> probe_types;
 
 	ResidualPredicateInfo() = default;
@@ -25,6 +27,8 @@ struct ResidualPredicateInfo {
 		auto result = make_uniq<ResidualPredicateInfo>();
 		result->build_input_to_layout_map = build_input_to_layout_map;
 		result->probe_input_to_probe_map = probe_input_to_probe_map;
+		result->build_input_not_null_map = build_input_not_null_map;
+		result->probe_input_not_null_map = probe_input_not_null_map;
 		result->probe_types = probe_types;
 		return result;
 	}
@@ -142,12 +146,14 @@ private:
 	static void ExtractResidualPredicateColumns(unique_ptr<Expression> &predicate, idx_t probe_column_count,
 	                                            vector<idx_t> &probe_column_ids, vector<idx_t> &build_column_ids);
 
-	void InitializeResidualPredicate(const vector<LogicalType> &lhs_input_types, const vector<idx_t> &probe_cols);
+	void InitializeResidualPredicate(const vector<LogicalType> &lhs_input_types, const vector<bool> &lhs_input_not_null,
+	                                 const vector<idx_t> &probe_cols);
 
 	void InitializeBuildSide(const vector<LogicalType> &lhs_input_types, const vector<LogicalType> &rhs_input_types,
+	                         const vector<bool> &rhs_input_not_null,
 	                         const vector<ProjectionIndex> &right_projection_map, const vector<idx_t> &build_cols);
 	void MapResidualBuildColumns(const vector<LogicalType> &lhs_input_types, const vector<LogicalType> &rhs_input_types,
-	                             const vector<idx_t> &build_cols,
+	                             const vector<bool> &rhs_input_not_null, const vector<idx_t> &build_cols,
 	                             const unordered_map<idx_t, idx_t> &build_columns_in_conditions,
 	                             unordered_map<idx_t, idx_t> &build_input_to_layout);
 };

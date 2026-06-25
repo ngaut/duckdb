@@ -98,6 +98,7 @@ static string DescribeExecutionHashJoinResidualSources(const vector<ExecutionHas
 		result += ":";
 		result += ExecutionHashJoinResidualSourceKindToString(source.kind);
 		result += ":input=" + std::to_string(source.input_index);
+		result += ":not_null=" + ExecutionRegionBool(source.not_null);
 		result += ":";
 		const auto &source_logical_type = source.type;
 		result += ExecutionRegionTypeDescriptor(source_logical_type);
@@ -199,6 +200,10 @@ static string DescribeExecutionRegionTableScanContract(const ExecutionRegionTabl
 	    ",source_contract_input_types=" + BuildExecutionRegionLogicalTypeList(contract.source_contract_input_types);
 	result += ",source_contract_input_distinct_counts=" +
 	          BuildExecutionRegionIdxList(contract.source_contract_input_distinct_counts);
+	result += ",source_contract_input_min_values=" +
+	          BuildExecutionRegionValueList(contract.source_contract_input_min_values);
+	result += ",source_contract_input_max_values=" +
+	          BuildExecutionRegionValueList(contract.source_contract_input_max_values);
 	result += ",source_contract_output_projection_map=" +
 	          BuildExecutionRegionIdxList(contract.source_contract_output_projection_map);
 	result +=

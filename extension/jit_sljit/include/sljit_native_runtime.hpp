@@ -29,6 +29,7 @@ struct SljitNativePredicateSourceAdapter {
 	vector<const_data_ptr_t> source_data;
 	vector<const sel_t *> source_sel;
 	vector<const validity_t *> source_validity;
+	bool sources_all_valid = false;
 };
 
 } // namespace duckdb

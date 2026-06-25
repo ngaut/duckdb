@@ -145,6 +145,37 @@ static sljit_sw SljitTypedStringChunkImmediate(const string &constant, idx_t con
 	return NumericCast<sljit_sw>(value);
 }
 
+enum class SljitTypedExpressionTreeFastIndexMode : uint8_t { FLAT, LOGICAL, SELECTED };
+
+static bool
+TryGetSljitTypedExpressionTreeDataPointerHoist(const vector<SljitTypedExpressionTreeDataPointerHoist> *data_hoists,
+                                               idx_t source_index, sljit_s32 &data_reg) {
+	if (!data_hoists) {
+		return false;
+	}
+	for (auto &hoist : *data_hoists) {
+		if (hoist.source_index == source_index) {
+			data_reg = hoist.data_reg;
+			return true;
+		}
+	}
+	return false;
+}
+
+static void EmitLoadSljitTypedExpressionTreeFastSourceIndex(struct sljit_compiler *compiler, idx_t source_index,
+                                                            sljit_s32 target,
+                                                            SljitTypedExpressionTreeFastIndexMode index_mode) {
+	if (index_mode == SljitTypedExpressionTreeFastIndexMode::FLAT) {
+		sljit_emit_op1(compiler, SLJIT_MOV, target, 0, SLJIT_S1, 0);
+		return;
+	}
+	if (index_mode == SljitTypedExpressionTreeFastIndexMode::LOGICAL) {
+		sljit_emit_op1(compiler, SLJIT_MOV, target, 0, SLJIT_S3, 0);
+		return;
+	}
+	EmitLoadSljitExpressionTreeSourceIndex(compiler, source_index, target);
+}
+
 static void EmitLoadSljitTypedExpressionTreeStringForPrefix(struct sljit_compiler *compiler, idx_t source_index,
                                                             vector<sljit_jump *> &null_jumps) {
 	static_assert(sizeof(string_t) == 16, "SLJIT typed expression-tree string prefix expects DuckDB string_t ABI size");
@@ -161,8 +192,8 @@ static void EmitLoadSljitTypedExpressionTreeStringForPrefix(struct sljit_compile
 	sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_R0, 0, SLJIT_R0, 0, SLJIT_R4, 0);
 	sljit_emit_op1(compiler, SLJIT_MOV_U32, SLJIT_R2, 0, SLJIT_MEM1(SLJIT_R0), STRING_LENGTH_OFFSET);
 
-	auto non_inlined = sljit_emit_cmp(compiler, SLJIT_GREATER, SLJIT_R2, 0, SLJIT_IMM,
-	                                  NumericCast<sljit_sw>(string_t::INLINE_LENGTH));
+	auto non_inlined =
+	    sljit_emit_cmp(compiler, SLJIT_GREATER, SLJIT_R2, 0, SLJIT_IMM, NumericCast<sljit_sw>(string_t::INLINE_LENGTH));
 	sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_R4, 0, SLJIT_R0, 0, SLJIT_IMM, STRING_INLINE_PREFIX_OFFSET);
 	auto have_data = sljit_emit_jump(compiler, SLJIT_JUMP);
 	sljit_set_label(non_inlined, sljit_emit_label(compiler));
@@ -170,21 +201,23 @@ static void EmitLoadSljitTypedExpressionTreeStringForPrefix(struct sljit_compile
 	sljit_set_label(have_data, sljit_emit_label(compiler));
 }
 
-static void EmitLoadSljitTypedExpressionTreeFastStringForPrefix(struct sljit_compiler *compiler, idx_t source_index) {
+static void EmitLoadSljitTypedExpressionTreeFastStringForPrefix(struct sljit_compiler *compiler, idx_t source_index,
+                                                                SljitTypedExpressionTreeFastIndexMode index_mode) {
 	static_assert(sizeof(string_t) == 16, "SLJIT typed expression-tree string prefix expects DuckDB string_t ABI size");
 	static constexpr sljit_sw STRING_T_SHIFT = 4;
 	static constexpr sljit_sw STRING_LENGTH_OFFSET = 0;
 	static constexpr sljit_sw STRING_INLINE_PREFIX_OFFSET = sizeof(uint32_t);
 	static constexpr sljit_sw STRING_POINTER_OFFSET = sizeof(uint32_t) + string_t::PREFIX_BYTES;
 
+	EmitLoadSljitTypedExpressionTreeFastSourceIndex(compiler, source_index, SLJIT_R1, index_mode);
 	sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_R0, 0, SLJIT_MEM1(SLJIT_S5),
 	               NumericCast<sljit_sw>(source_index * sizeof(const_data_ptr_t)));
-	sljit_emit_op2(compiler, SLJIT_SHL, SLJIT_R4, 0, SLJIT_S1, 0, SLJIT_IMM, STRING_T_SHIFT);
+	sljit_emit_op2(compiler, SLJIT_SHL, SLJIT_R4, 0, SLJIT_R1, 0, SLJIT_IMM, STRING_T_SHIFT);
 	sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_R0, 0, SLJIT_R0, 0, SLJIT_R4, 0);
 	sljit_emit_op1(compiler, SLJIT_MOV_U32, SLJIT_R2, 0, SLJIT_MEM1(SLJIT_R0), STRING_LENGTH_OFFSET);
 
-	auto non_inlined = sljit_emit_cmp(compiler, SLJIT_GREATER, SLJIT_R2, 0, SLJIT_IMM,
-	                                  NumericCast<sljit_sw>(string_t::INLINE_LENGTH));
+	auto non_inlined =
+	    sljit_emit_cmp(compiler, SLJIT_GREATER, SLJIT_R2, 0, SLJIT_IMM, NumericCast<sljit_sw>(string_t::INLINE_LENGTH));
 	sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_R4, 0, SLJIT_R0, 0, SLJIT_IMM, STRING_INLINE_PREFIX_OFFSET);
 	auto have_data = sljit_emit_jump(compiler, SLJIT_JUMP);
 	sljit_set_label(non_inlined, sljit_emit_label(compiler));
@@ -192,8 +225,7 @@ static void EmitLoadSljitTypedExpressionTreeFastStringForPrefix(struct sljit_com
 	sljit_set_label(have_data, sljit_emit_label(compiler));
 }
 
-static void EmitSljitTypedExpressionTreeStringPrefixFalseBranches(struct sljit_compiler *compiler,
-                                                                  const string &prefix,
+static void EmitSljitTypedExpressionTreeStringPrefixFalseBranches(struct sljit_compiler *compiler, const string &prefix,
                                                                   vector<sljit_jump *> &false_jumps) {
 	false_jumps.push_back(
 	    sljit_emit_cmp(compiler, SLJIT_LESS, SLJIT_R2, 0, SLJIT_IMM, NumericCast<sljit_sw>(prefix.size())));
@@ -204,16 +236,15 @@ static void EmitSljitTypedExpressionTreeStringPrefixFalseBranches(struct sljit_c
 		const auto chunk_size = SljitTypedStringCompareChunkSize(prefix.size() - byte_idx);
 		sljit_emit_mem(compiler, SljitTypedStringChunkLoadOp(chunk_size) | SLJIT_MEM_UNALIGNED, SLJIT_R3,
 		               SLJIT_MEM1(SLJIT_R4), NumericCast<sljit_sw>(byte_idx));
-		false_jumps.push_back(
-		    sljit_emit_cmp(compiler, SLJIT_NOT_EQUAL, SLJIT_R3, 0, SLJIT_IMM,
-		                   SljitTypedStringChunkImmediate(prefix, byte_idx, chunk_size)));
+		false_jumps.push_back(sljit_emit_cmp(compiler, SLJIT_NOT_EQUAL, SLJIT_R3, 0, SLJIT_IMM,
+		                                     SljitTypedStringChunkImmediate(prefix, byte_idx, chunk_size)));
 		byte_idx += chunk_size;
 	}
 }
 
-static SljitTypedExpressionTreeSlot
-EmitSljitTypedExpressionTreeStringPrefix(struct sljit_compiler *compiler, const ExecutionExpressionIR &node,
-                                         idx_t &slot_index) {
+static SljitTypedExpressionTreeSlot EmitSljitTypedExpressionTreeStringPrefix(struct sljit_compiler *compiler,
+                                                                             const ExecutionExpressionIR &node,
+                                                                             idx_t &slot_index) {
 	idx_t source_index;
 	string prefix;
 	if (!TryReadSljitTypedExpressionTreeStringPrefixConstant(node, source_index, prefix)) {
@@ -249,7 +280,8 @@ EmitSljitTypedExpressionTreeStringPrefix(struct sljit_compiler *compiler, const 
 }
 
 static void EmitSljitTypedExpressionTreeFastStringPrefixReg(struct sljit_compiler *compiler,
-                                                            const ExecutionExpressionIR &node) {
+                                                            const ExecutionExpressionIR &node,
+                                                            SljitTypedExpressionTreeFastIndexMode index_mode) {
 	idx_t source_index;
 	string prefix;
 	if (!TryReadSljitTypedExpressionTreeStringPrefixConstant(node, source_index, prefix)) {
@@ -257,7 +289,7 @@ static void EmitSljitTypedExpressionTreeFastStringPrefixReg(struct sljit_compile
 	}
 
 	vector<sljit_jump *> false_jumps;
-	EmitLoadSljitTypedExpressionTreeFastStringForPrefix(compiler, source_index);
+	EmitLoadSljitTypedExpressionTreeFastStringForPrefix(compiler, source_index, index_mode);
 	EmitSljitTypedExpressionTreeStringPrefixFalseBranches(compiler, prefix, false_jumps);
 	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R2, 0, SLJIT_IMM, 1);
 	auto done_from_true = sljit_emit_jump(compiler, SLJIT_JUMP);
@@ -884,8 +916,15 @@ static bool SljitTypedExpressionTreeFastIsLeaf(const ExecutionExpressionIR &node
 	return node.kind == ExecutionExpressionIRKind::CONSTANT || node.kind == ExecutionExpressionIRKind::REFERENCE;
 }
 
-static void EmitSljitTypedExpressionTreeFastLeafReg(struct sljit_compiler *compiler, const ExecutionExpressionIR &node,
-                                                    sljit_s32 target) {
+static void EmitSljitTypedExpressionTreeFastValueRegInternal(
+    struct sljit_compiler *compiler, const ExecutionExpressionIR &node, idx_t &spill_index,
+    vector<SljitExpressionTreeOverflowJumps> &overflows, SljitTypedExpressionTreeFastIndexMode index_mode,
+    const vector<SljitTypedExpressionTreeDataPointerHoist> *data_hoists);
+
+static void
+EmitSljitTypedExpressionTreeFastLeafReg(struct sljit_compiler *compiler, const ExecutionExpressionIR &node,
+                                        sljit_s32 target, SljitTypedExpressionTreeFastIndexMode index_mode,
+                                        const vector<SljitTypedExpressionTreeDataPointerHoist> *data_hoists) {
 	if (node.kind == ExecutionExpressionIRKind::CONSTANT) {
 		sljit_emit_op1(compiler, SLJIT_MOV, target, 0, SLJIT_IMM,
 		               NumericCast<sljit_sw>(SljitTypedExpressionTreeConstantValue(node)));
@@ -893,53 +932,94 @@ static void EmitSljitTypedExpressionTreeFastLeafReg(struct sljit_compiler *compi
 	}
 	D_ASSERT(node.kind == ExecutionExpressionIRKind::REFERENCE);
 	auto source_kind = SljitTypedExpressionTreeIntegerKind(node);
-	sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_R0, 0, SLJIT_MEM1(SLJIT_S5),
-	               NumericCast<sljit_sw>(node.ref_index * sizeof(const_data_ptr_t)));
-	sljit_emit_op1(compiler, NativeIntegerLoadOp(source_kind), target, 0, SLJIT_MEM2(SLJIT_R0, SLJIT_S1),
+	EmitLoadSljitTypedExpressionTreeFastSourceIndex(compiler, node.ref_index, SLJIT_R1, index_mode);
+	sljit_s32 data_reg;
+	if (TryGetSljitTypedExpressionTreeDataPointerHoist(data_hoists, node.ref_index, data_reg)) {
+		sljit_emit_op1(compiler, NativeIntegerLoadOp(source_kind), target, 0, SLJIT_MEM2(data_reg, SLJIT_R1),
+		               NativeIntegerDataScale(source_kind));
+		return;
+	} else {
+		sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_R0, 0, SLJIT_MEM1(SLJIT_S5),
+		               NumericCast<sljit_sw>(node.ref_index * sizeof(const_data_ptr_t)));
+	}
+	sljit_emit_op1(compiler, NativeIntegerLoadOp(source_kind), target, 0, SLJIT_MEM2(SLJIT_R0, SLJIT_R1),
 	               NativeIntegerDataScale(source_kind));
 }
 
-static void EmitSljitTypedExpressionTreeFastBinaryReg(struct sljit_compiler *compiler,
-                                                      const ExecutionExpressionIR &node, idx_t &spill_index,
-                                                      vector<SljitExpressionTreeOverflowJumps> &overflows) {
+static void EmitSljitTypedExpressionTreeFastBinaryOpReg(struct sljit_compiler *compiler,
+                                                        const ExecutionExpressionIR &node, sljit_s32 left_reg,
+                                                        sljit_s32 right_reg, sljit_s32 target_reg,
+                                                        vector<SljitExpressionTreeOverflowJumps> &overflows) {
+	if (SljitTypedExpressionTreeComparisonSupported(node.binary_op)) {
+		auto compare_type = NativeIntegerCompareJumpType(SljitTypedExpressionTreeIntegerKind(*node.left),
+		                                                 SljitTypedExpressionTreeCompareOp(node.binary_op));
+		auto compare_true = sljit_emit_cmp(compiler, compare_type, left_reg, 0, right_reg, 0);
+		sljit_emit_op1(compiler, SLJIT_MOV, target_reg, 0, SLJIT_IMM, 0);
+		auto compare_done = sljit_emit_jump(compiler, SLJIT_JUMP);
+		sljit_set_label(compare_true, sljit_emit_label(compiler));
+		sljit_emit_op1(compiler, SLJIT_MOV, target_reg, 0, SLJIT_IMM, 1);
+		sljit_set_label(compare_done, sljit_emit_label(compiler));
+		return;
+	}
+	SljitNativeIntegerBinaryOp native_op;
+	if (!TryGetSljitExpressionTreeBinaryOp(node.binary_op, native_op)) {
+		throw InternalException("Unsupported SLJIT typed expression-tree binary operator");
+	}
+	auto binary_kind = SljitTypedExpressionTreeIntegerKind(node);
+	auto binary_op = NativeIntegerBinaryOp(binary_kind, native_op);
+	if (node.arithmetic_overflow_check) {
+		sljit_emit_op2(compiler, binary_op | SLJIT_SET_OVERFLOW, target_reg, 0, left_reg, 0, right_reg, 0);
+		AddSljitExpressionOverflowJump(overflows, native_op, sljit_emit_jump(compiler, SLJIT_OVERFLOW));
+	} else {
+		sljit_emit_op2(compiler, binary_op, target_reg, 0, left_reg, 0, right_reg, 0);
+	}
+	AddSljitTypedExpressionTreeDecimal64RangeJumps(compiler, node, target_reg, overflows, native_op);
+	if (binary_kind == SljitNativeIntegerKind::INT32) {
+		sljit_emit_op1(compiler, SLJIT_MOV_S32, target_reg, 0, target_reg, 0);
+	}
+}
+
+static bool SljitTypedExpressionTreeFastIsLeafBinary(const ExecutionExpressionIR &node) {
+	return node.kind == ExecutionExpressionIRKind::BINARY && node.left && node.right &&
+	       SljitTypedExpressionTreeFastIsLeaf(*node.left) && SljitTypedExpressionTreeFastIsLeaf(*node.right);
+}
+
+static void
+EmitSljitTypedExpressionTreeFastLeafBinaryReg(struct sljit_compiler *compiler, const ExecutionExpressionIR &node,
+                                              sljit_s32 target, SljitTypedExpressionTreeFastIndexMode index_mode,
+                                              vector<SljitExpressionTreeOverflowJumps> &overflows,
+                                              const vector<SljitTypedExpressionTreeDataPointerHoist> *data_hoists) {
+	D_ASSERT(SljitTypedExpressionTreeFastIsLeafBinary(node));
+	EmitSljitTypedExpressionTreeFastLeafReg(compiler, *node.left, target, index_mode, data_hoists);
+	EmitSljitTypedExpressionTreeFastLeafReg(compiler, *node.right, SLJIT_R3, index_mode, data_hoists);
+	EmitSljitTypedExpressionTreeFastBinaryOpReg(compiler, node, target, SLJIT_R3, target, overflows);
+}
+
+static void
+EmitSljitTypedExpressionTreeFastBinaryReg(struct sljit_compiler *compiler, const ExecutionExpressionIR &node,
+                                          idx_t &spill_index, vector<SljitExpressionTreeOverflowJumps> &overflows,
+                                          SljitTypedExpressionTreeFastIndexMode index_mode,
+                                          const vector<SljitTypedExpressionTreeDataPointerHoist> *data_hoists) {
 	D_ASSERT(node.left);
 	D_ASSERT(node.right);
-	EmitSljitTypedExpressionTreeFastValueReg(compiler, *node.left, spill_index, overflows);
+	EmitSljitTypedExpressionTreeFastValueRegInternal(compiler, *node.left, spill_index, overflows, index_mode,
+	                                                 data_hoists);
+	if (SljitTypedExpressionTreeFastIsLeafBinary(*node.right)) {
+		EmitSljitTypedExpressionTreeFastLeafBinaryReg(compiler, *node.right, SLJIT_R4, index_mode, overflows,
+		                                              data_hoists);
+		EmitSljitTypedExpressionTreeFastBinaryOpReg(compiler, node, SLJIT_R2, SLJIT_R4, SLJIT_R2, overflows);
+		return;
+	}
 	if (SljitTypedExpressionTreeFastIsLeaf(*node.right)) {
-		EmitSljitTypedExpressionTreeFastLeafReg(compiler, *node.right, SLJIT_R4);
-		if (SljitTypedExpressionTreeComparisonSupported(node.binary_op)) {
-			auto compare_type = NativeIntegerCompareJumpType(SljitTypedExpressionTreeIntegerKind(*node.left),
-			                                                 SljitTypedExpressionTreeCompareOp(node.binary_op));
-			auto compare_true = sljit_emit_cmp(compiler, compare_type, SLJIT_R2, 0, SLJIT_R4, 0);
-			sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R2, 0, SLJIT_IMM, 0);
-			auto compare_done = sljit_emit_jump(compiler, SLJIT_JUMP);
-			sljit_set_label(compare_true, sljit_emit_label(compiler));
-			sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R2, 0, SLJIT_IMM, 1);
-			sljit_set_label(compare_done, sljit_emit_label(compiler));
-			return;
-		}
-		SljitNativeIntegerBinaryOp native_op;
-		if (!TryGetSljitExpressionTreeBinaryOp(node.binary_op, native_op)) {
-			throw InternalException("Unsupported SLJIT typed expression-tree binary operator");
-		}
-		auto binary_kind = SljitTypedExpressionTreeIntegerKind(node);
-		auto binary_op = NativeIntegerBinaryOp(binary_kind, native_op);
-		if (node.arithmetic_overflow_check) {
-			sljit_emit_op2(compiler, binary_op | SLJIT_SET_OVERFLOW, SLJIT_R2, 0, SLJIT_R2, 0, SLJIT_R4, 0);
-			AddSljitExpressionOverflowJump(overflows, native_op, sljit_emit_jump(compiler, SLJIT_OVERFLOW));
-		} else {
-			sljit_emit_op2(compiler, binary_op, SLJIT_R2, 0, SLJIT_R2, 0, SLJIT_R4, 0);
-		}
-		AddSljitTypedExpressionTreeDecimal64RangeJumps(compiler, node, SLJIT_R2, overflows, native_op);
-		if (binary_kind == SljitNativeIntegerKind::INT32) {
-			sljit_emit_op1(compiler, SLJIT_MOV_S32, SLJIT_R2, 0, SLJIT_R2, 0);
-		}
+		EmitSljitTypedExpressionTreeFastLeafReg(compiler, *node.right, SLJIT_R4, index_mode, data_hoists);
+		EmitSljitTypedExpressionTreeFastBinaryOpReg(compiler, node, SLJIT_R2, SLJIT_R4, SLJIT_R2, overflows);
 		return;
 	}
 
 	auto left_offset = NumericCast<sljit_sw>(spill_index++ * sizeof(sljit_sw));
 	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_MEM1(SLJIT_SP), left_offset, SLJIT_R2, 0);
-	EmitSljitTypedExpressionTreeFastValueReg(compiler, *node.right, spill_index, overflows);
+	EmitSljitTypedExpressionTreeFastValueRegInternal(compiler, *node.right, spill_index, overflows, index_mode,
+	                                                 data_hoists);
 	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R4, 0, SLJIT_MEM1(SLJIT_SP), left_offset);
 	if (SljitTypedExpressionTreeComparisonSupported(node.binary_op)) {
 		auto compare_type = NativeIntegerCompareJumpType(SljitTypedExpressionTreeIntegerKind(*node.left),
@@ -952,39 +1032,29 @@ static void EmitSljitTypedExpressionTreeFastBinaryReg(struct sljit_compiler *com
 		sljit_set_label(compare_done, sljit_emit_label(compiler));
 		return;
 	}
-	SljitNativeIntegerBinaryOp native_op;
-	if (!TryGetSljitExpressionTreeBinaryOp(node.binary_op, native_op)) {
-		throw InternalException("Unsupported SLJIT typed expression-tree binary operator");
-	}
-	auto binary_kind = SljitTypedExpressionTreeIntegerKind(node);
-	auto binary_op = NativeIntegerBinaryOp(binary_kind, native_op);
-	if (node.arithmetic_overflow_check) {
-		sljit_emit_op2(compiler, binary_op | SLJIT_SET_OVERFLOW, SLJIT_R2, 0, SLJIT_R4, 0, SLJIT_R2, 0);
-		AddSljitExpressionOverflowJump(overflows, native_op, sljit_emit_jump(compiler, SLJIT_OVERFLOW));
-	} else {
-		sljit_emit_op2(compiler, binary_op, SLJIT_R2, 0, SLJIT_R4, 0, SLJIT_R2, 0);
-	}
-	AddSljitTypedExpressionTreeDecimal64RangeJumps(compiler, node, SLJIT_R2, overflows, native_op);
-	if (binary_kind == SljitNativeIntegerKind::INT32) {
-		sljit_emit_op1(compiler, SLJIT_MOV_S32, SLJIT_R2, 0, SLJIT_R2, 0);
-	}
+	EmitSljitTypedExpressionTreeFastBinaryOpReg(compiler, node, SLJIT_R4, SLJIT_R2, SLJIT_R2, overflows);
 }
 
-static void EmitSljitTypedExpressionTreeFastUnaryReg(struct sljit_compiler *compiler, const ExecutionExpressionIR &node,
-                                                     idx_t &spill_index,
-                                                     vector<SljitExpressionTreeOverflowJumps> &overflows) {
+static void
+EmitSljitTypedExpressionTreeFastUnaryReg(struct sljit_compiler *compiler, const ExecutionExpressionIR &node,
+                                         idx_t &spill_index, vector<SljitExpressionTreeOverflowJumps> &overflows,
+                                         SljitTypedExpressionTreeFastIndexMode index_mode,
+                                         const vector<SljitTypedExpressionTreeDataPointerHoist> *data_hoists) {
 	D_ASSERT(node.left);
 	switch (node.unary_op) {
 	case ExecutionExpressionUnaryOp::IS_NULL:
-		EmitSljitTypedExpressionTreeFastValueReg(compiler, *node.left, spill_index, overflows);
+		EmitSljitTypedExpressionTreeFastValueRegInternal(compiler, *node.left, spill_index, overflows, index_mode,
+		                                                 data_hoists);
 		sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R2, 0, SLJIT_IMM, 0);
 		return;
 	case ExecutionExpressionUnaryOp::IS_NOT_NULL:
-		EmitSljitTypedExpressionTreeFastValueReg(compiler, *node.left, spill_index, overflows);
+		EmitSljitTypedExpressionTreeFastValueRegInternal(compiler, *node.left, spill_index, overflows, index_mode,
+		                                                 data_hoists);
 		sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R2, 0, SLJIT_IMM, 1);
 		return;
 	case ExecutionExpressionUnaryOp::NOT:
-		EmitSljitTypedExpressionTreeFastValueReg(compiler, *node.left, spill_index, overflows);
+		EmitSljitTypedExpressionTreeFastValueRegInternal(compiler, *node.left, spill_index, overflows, index_mode,
+		                                                 data_hoists);
 		{
 			auto child_false = sljit_emit_cmp(compiler, SLJIT_EQUAL, SLJIT_R2, 0, SLJIT_IMM, 0);
 			sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R2, 0, SLJIT_IMM, 0);
@@ -999,23 +1069,29 @@ static void EmitSljitTypedExpressionTreeFastUnaryReg(struct sljit_compiler *comp
 	}
 }
 
-static void EmitSljitTypedExpressionTreeFastCastReg(struct sljit_compiler *compiler, const ExecutionExpressionIR &node,
-                                                    idx_t &spill_index,
-                                                    vector<SljitExpressionTreeOverflowJumps> &overflows) {
+static void
+EmitSljitTypedExpressionTreeFastCastReg(struct sljit_compiler *compiler, const ExecutionExpressionIR &node,
+                                        idx_t &spill_index, vector<SljitExpressionTreeOverflowJumps> &overflows,
+                                        SljitTypedExpressionTreeFastIndexMode index_mode,
+                                        const vector<SljitTypedExpressionTreeDataPointerHoist> *data_hoists) {
 	D_ASSERT(node.left);
 	D_ASSERT(SljitTypedExpressionTreeInt64CastSupported(node));
-	EmitSljitTypedExpressionTreeFastValueReg(compiler, *node.left, spill_index, overflows);
+	EmitSljitTypedExpressionTreeFastValueRegInternal(compiler, *node.left, spill_index, overflows, index_mode,
+	                                                 data_hoists);
 	if (SljitTypedExpressionTreeIsInt32Node(*node.left)) {
 		sljit_emit_op1(compiler, SLJIT_MOV_S32, SLJIT_R2, 0, SLJIT_R2, 0);
 	}
 }
 
-static void EmitSljitTypedExpressionTreeFastConjunctionReg(struct sljit_compiler *compiler,
-                                                           const ExecutionExpressionIR &node, idx_t &spill_index,
-                                                           vector<SljitExpressionTreeOverflowJumps> &overflows) {
+static void
+EmitSljitTypedExpressionTreeFastConjunctionReg(struct sljit_compiler *compiler, const ExecutionExpressionIR &node,
+                                               idx_t &spill_index, vector<SljitExpressionTreeOverflowJumps> &overflows,
+                                               SljitTypedExpressionTreeFastIndexMode index_mode,
+                                               const vector<SljitTypedExpressionTreeDataPointerHoist> *data_hoists) {
 	vector<sljit_jump *> decisive_jumps;
 	for (auto &child : node.children) {
-		EmitSljitTypedExpressionTreeFastValueReg(compiler, *child, spill_index, overflows);
+		EmitSljitTypedExpressionTreeFastValueRegInternal(compiler, *child, spill_index, overflows, index_mode,
+		                                                 data_hoists);
 		if (node.conjunction_op == ExecutionExpressionConjunctionOp::AND) {
 			decisive_jumps.push_back(sljit_emit_cmp(compiler, SLJIT_EQUAL, SLJIT_R2, 0, SLJIT_IMM, 0));
 		} else {
@@ -1034,66 +1110,99 @@ static void EmitSljitTypedExpressionTreeFastConjunctionReg(struct sljit_compiler
 	sljit_set_label(done_from_default, sljit_emit_label(compiler));
 }
 
-static void EmitSljitTypedExpressionTreeFastCoalesceReg(struct sljit_compiler *compiler,
-                                                        const ExecutionExpressionIR &node, idx_t &spill_index,
-                                                        vector<SljitExpressionTreeOverflowJumps> &overflows) {
+static void
+EmitSljitTypedExpressionTreeFastCoalesceReg(struct sljit_compiler *compiler, const ExecutionExpressionIR &node,
+                                            idx_t &spill_index, vector<SljitExpressionTreeOverflowJumps> &overflows,
+                                            SljitTypedExpressionTreeFastIndexMode index_mode,
+                                            const vector<SljitTypedExpressionTreeDataPointerHoist> *data_hoists) {
 	D_ASSERT(!node.children.empty());
-	EmitSljitTypedExpressionTreeFastValueReg(compiler, *node.children[0], spill_index, overflows);
+	EmitSljitTypedExpressionTreeFastValueRegInternal(compiler, *node.children[0], spill_index, overflows, index_mode,
+	                                                 data_hoists);
 }
 
-static void EmitSljitTypedExpressionTreeFastCaseReg(struct sljit_compiler *compiler, const ExecutionExpressionIR &node,
-                                                    idx_t &spill_index,
-                                                    vector<SljitExpressionTreeOverflowJumps> &overflows) {
+static void
+EmitSljitTypedExpressionTreeFastCaseReg(struct sljit_compiler *compiler, const ExecutionExpressionIR &node,
+                                        idx_t &spill_index, vector<SljitExpressionTreeOverflowJumps> &overflows,
+                                        SljitTypedExpressionTreeFastIndexMode index_mode,
+                                        const vector<SljitTypedExpressionTreeDataPointerHoist> *data_hoists) {
 	D_ASSERT(node.else_node);
 	D_ASSERT(node.children.size() % 2 == 0);
 	vector<sljit_jump *> done_jumps;
 	for (idx_t child_idx = 0; child_idx < node.children.size(); child_idx += 2) {
 		auto &condition = node.children[child_idx];
 		auto &value = node.children[child_idx + 1];
-		EmitSljitTypedExpressionTreeFastValueReg(compiler, *condition, spill_index, overflows);
+		EmitSljitTypedExpressionTreeFastValueRegInternal(compiler, *condition, spill_index, overflows, index_mode,
+		                                                 data_hoists);
 		auto condition_false = sljit_emit_cmp(compiler, SLJIT_EQUAL, SLJIT_R2, 0, SLJIT_IMM, 0);
-		EmitSljitTypedExpressionTreeFastValueReg(compiler, *value, spill_index, overflows);
+		EmitSljitTypedExpressionTreeFastValueRegInternal(compiler, *value, spill_index, overflows, index_mode,
+		                                                 data_hoists);
 		done_jumps.push_back(sljit_emit_jump(compiler, SLJIT_JUMP));
 		sljit_set_label(condition_false, sljit_emit_label(compiler));
 	}
-	EmitSljitTypedExpressionTreeFastValueReg(compiler, *node.else_node, spill_index, overflows);
+	EmitSljitTypedExpressionTreeFastValueRegInternal(compiler, *node.else_node, spill_index, overflows, index_mode,
+	                                                 data_hoists);
 	auto done_label = sljit_emit_label(compiler);
 	for (auto jump : done_jumps) {
 		sljit_set_label(jump, done_label);
 	}
 }
 
-void EmitSljitTypedExpressionTreeFastValueReg(struct sljit_compiler *compiler, const ExecutionExpressionIR &node,
-                                              idx_t &spill_index, vector<SljitExpressionTreeOverflowJumps> &overflows) {
+static void EmitSljitTypedExpressionTreeFastValueRegInternal(
+    struct sljit_compiler *compiler, const ExecutionExpressionIR &node, idx_t &spill_index,
+    vector<SljitExpressionTreeOverflowJumps> &overflows, SljitTypedExpressionTreeFastIndexMode index_mode,
+    const vector<SljitTypedExpressionTreeDataPointerHoist> *data_hoists) {
 	switch (node.kind) {
 	case ExecutionExpressionIRKind::CONSTANT:
 	case ExecutionExpressionIRKind::REFERENCE:
-		EmitSljitTypedExpressionTreeFastLeafReg(compiler, node, SLJIT_R2);
+		EmitSljitTypedExpressionTreeFastLeafReg(compiler, node, SLJIT_R2, index_mode, data_hoists);
 		return;
 	case ExecutionExpressionIRKind::CAST:
-		EmitSljitTypedExpressionTreeFastCastReg(compiler, node, spill_index, overflows);
+		EmitSljitTypedExpressionTreeFastCastReg(compiler, node, spill_index, overflows, index_mode, data_hoists);
 		return;
 	case ExecutionExpressionIRKind::UNARY:
-		EmitSljitTypedExpressionTreeFastUnaryReg(compiler, node, spill_index, overflows);
+		EmitSljitTypedExpressionTreeFastUnaryReg(compiler, node, spill_index, overflows, index_mode, data_hoists);
 		return;
 	case ExecutionExpressionIRKind::BINARY:
-		EmitSljitTypedExpressionTreeFastBinaryReg(compiler, node, spill_index, overflows);
+		EmitSljitTypedExpressionTreeFastBinaryReg(compiler, node, spill_index, overflows, index_mode, data_hoists);
 		return;
 	case ExecutionExpressionIRKind::CONJUNCTION:
-		EmitSljitTypedExpressionTreeFastConjunctionReg(compiler, node, spill_index, overflows);
+		EmitSljitTypedExpressionTreeFastConjunctionReg(compiler, node, spill_index, overflows, index_mode, data_hoists);
 		return;
 	case ExecutionExpressionIRKind::COALESCE:
-		EmitSljitTypedExpressionTreeFastCoalesceReg(compiler, node, spill_index, overflows);
+		EmitSljitTypedExpressionTreeFastCoalesceReg(compiler, node, spill_index, overflows, index_mode, data_hoists);
 		return;
 	case ExecutionExpressionIRKind::CASE:
-		EmitSljitTypedExpressionTreeFastCaseReg(compiler, node, spill_index, overflows);
+		EmitSljitTypedExpressionTreeFastCaseReg(compiler, node, spill_index, overflows, index_mode, data_hoists);
 		return;
 	case ExecutionExpressionIRKind::INTRINSIC:
-		EmitSljitTypedExpressionTreeFastStringPrefixReg(compiler, node);
+		EmitSljitTypedExpressionTreeFastStringPrefixReg(compiler, node, index_mode);
 		return;
 	default:
 		throw InternalException("Unsupported SLJIT typed expression-tree fast node kind");
 	}
+}
+
+void EmitSljitTypedExpressionTreeFastValueReg(struct sljit_compiler *compiler, const ExecutionExpressionIR &node,
+                                              idx_t &spill_index, vector<SljitExpressionTreeOverflowJumps> &overflows,
+                                              const vector<SljitTypedExpressionTreeDataPointerHoist> *data_hoists) {
+	EmitSljitTypedExpressionTreeFastValueRegInternal(compiler, node, spill_index, overflows,
+	                                                 SljitTypedExpressionTreeFastIndexMode::FLAT, data_hoists);
+}
+
+void EmitSljitTypedExpressionTreeSelectedFastValueReg(
+    struct sljit_compiler *compiler, const ExecutionExpressionIR &node, idx_t &spill_index,
+    vector<SljitExpressionTreeOverflowJumps> &overflows,
+    const vector<SljitTypedExpressionTreeDataPointerHoist> *data_hoists) {
+	EmitSljitTypedExpressionTreeFastValueRegInternal(compiler, node, spill_index, overflows,
+	                                                 SljitTypedExpressionTreeFastIndexMode::SELECTED, data_hoists);
+}
+
+void EmitSljitTypedExpressionTreeLogicalFastValueReg(
+    struct sljit_compiler *compiler, const ExecutionExpressionIR &node, idx_t &spill_index,
+    vector<SljitExpressionTreeOverflowJumps> &overflows,
+    const vector<SljitTypedExpressionTreeDataPointerHoist> *data_hoists) {
+	EmitSljitTypedExpressionTreeFastValueRegInternal(compiler, node, spill_index, overflows,
+	                                                 SljitTypedExpressionTreeFastIndexMode::LOGICAL, data_hoists);
 }
 
 unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeTypedExpressionTree(const ExecutionExpressionIR &root,

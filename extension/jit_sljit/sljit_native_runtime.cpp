@@ -123,6 +123,7 @@ void SljitNativePredicateSourceAdapter::Reset() {
 	source_data.clear();
 	source_sel.clear();
 	source_validity.clear();
+	sources_all_valid = false;
 }
 
 void SljitNativePredicateSourceAdapter::Prepare(DataChunk *input, const vector<idx_t> &input_source_indices) {
@@ -142,6 +143,7 @@ void SljitNativePredicateSourceAdapter::Prepare(DataChunk *input, const vector<i
 	source_data.assign(source_count, nullptr);
 	source_sel.assign(source_count, nullptr);
 	source_validity.assign(source_count, nullptr);
+	sources_all_valid = true;
 	for (idx_t source_idx = 0; source_idx < source_count; source_idx++) {
 		auto column_idx = input_source_indices[source_idx];
 		if (column_idx >= input->ColumnCount()) {
@@ -154,6 +156,7 @@ void SljitNativePredicateSourceAdapter::Prepare(DataChunk *input, const vector<i
 		source_validity[source_idx] = NormalizedSljitSourceAllValid(formats[source_idx], sel, input->size())
 		                                  ? nullptr
 		                                  : formats[source_idx].validity.GetData();
+		sources_all_valid = sources_all_valid && source_validity[source_idx] == nullptr;
 	}
 }
 

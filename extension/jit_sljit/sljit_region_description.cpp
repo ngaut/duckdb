@@ -379,6 +379,10 @@ string DescribeNativeRegion(const SljitNativeRegionPlan &region, const string &m
 				result += ";primitive_payloads=" + DescribeNativeRegionExpressionList(op.aggregate_update.payloads);
 				if (op.aggregate_update.use_perfect_hash_group_lookup) {
 					result += ";grouped_state_lookup=generated-perfect-hash";
+					if (!op.aggregate_update.group_expressions.empty()) {
+						result += ";group_expressions=" +
+						          DescribeNativeRegionExpressionList(op.aggregate_update.group_expressions);
+					}
 				}
 			} else {
 				result += ";execution=vectorized-operator-boundary";

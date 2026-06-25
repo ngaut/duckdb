@@ -202,6 +202,7 @@ SljitRegionNodePlan PlanSljitHashJoinProbeOperatorNode(const ExecutionRegionNode
 		native_op.hash_join_probe.residual_predicate = true;
 		native_op.hash_join_probe.residual_filter = std::move(residual_filter);
 		native_op.hash_join_probe.residual_source_types.resize(contract.residual_sources.size());
+		native_op.hash_join_probe.residual_source_not_null.resize(contract.residual_sources.size(), false);
 		for (auto &source : contract.residual_sources) {
 			if (source.source_index >= native_op.hash_join_probe.residual_source_types.size()) {
 				return SljitRegionBoundaryNode("hash join probe native lowering residual source index is out of range");
@@ -211,6 +212,7 @@ SljitRegionNodePlan PlanSljitHashJoinProbeOperatorNode(const ExecutionRegionNode
 				    "hash join probe native lowering residual probe source is outside operator input");
 			}
 			native_op.hash_join_probe.residual_source_types[source.source_index] = source.type;
+			native_op.hash_join_probe.residual_source_not_null[source.source_index] = source.not_null;
 		}
 	}
 	auto mark_build_match = ExecutionRegionJoinTypePropagatesBuildSide(contract.join_type);

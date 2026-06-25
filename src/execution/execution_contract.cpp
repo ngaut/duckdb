@@ -17,6 +17,7 @@
 #include "duckdb/execution/operator/scan/physical_table_scan.hpp"
 #include "duckdb/function/aggregate_state.hpp"
 #include "duckdb/function/table/table_scan.hpp"
+#include "duckdb/parser/constraints/not_null_constraint.hpp"
 #include "duckdb/planner/expression/bound_aggregate_expression.hpp"
 #include "duckdb/planner/expression/bound_reference_expression.hpp"
 #include "duckdb/planner/filter/expression_filter.hpp"
@@ -51,6 +52,18 @@ static string BuildExecutionContractIdxList(const vector<idx_t> &values) {
 			result += "|";
 		}
 		result += std::to_string(values[value_idx]);
+	}
+	result += "]";
+	return result;
+}
+
+static string BuildExecutionContractBoolList(const vector<bool> &values) {
+	string result = "[";
+	for (idx_t value_idx = 0; value_idx < values.size(); value_idx++) {
+		if (value_idx > 0) {
+			result += "|";
+		}
+		result += ExecutionContractBool(values[value_idx]);
 	}
 	result += "]";
 	return result;
@@ -95,6 +108,28 @@ static vector<LogicalType> BuildExecutionContractTableScanSourceInputTypes(const
 	result.reserve(scan.column_ids.size());
 	for (auto &column_index : scan.column_ids) {
 		result.push_back(BuildExecutionContractTableScanColumnType(scan, column_index));
+	}
+	return result;
+}
+
+static vector<bool> BuildExecutionContractTableScanSourceInputNotNull(const PhysicalTableScan &scan) {
+	vector<bool> result;
+	result.assign(scan.column_ids.size(), false);
+	if (StringUtil::Lower(scan.function.name.GetIdentifierName()) != "seq_scan" || !scan.bind_data) {
+		return result;
+	}
+	auto &bind_data = scan.bind_data->Cast<TableScanBindData>();
+	for (auto &constraint : bind_data.table.GetConstraints()) {
+		if (constraint->type != ConstraintType::NOT_NULL) {
+			continue;
+		}
+		auto &not_null = constraint->Cast<NotNullConstraint>();
+		for (idx_t column_idx = 0; column_idx < scan.column_ids.size(); column_idx++) {
+			auto &column_id = scan.column_ids[column_idx];
+			if (column_id.HasPrimaryIndex() && column_id.GetPrimaryIndex() == not_null.index.index) {
+				result[column_idx] = true;
+			}
+		}
 	}
 	return result;
 }
@@ -821,7 +856,7 @@ static bool RemapExecutionContractExpressionReferences(ExecutionExpressionIR &no
 static void AddExecutionContractHashJoinResidualSource(ExecutionRegionHashJoinContract &contract,
                                                        unordered_map<idx_t, idx_t> &source_map,
                                                        ExecutionHashJoinResidualSourceKind kind, idx_t original_index,
-                                                       idx_t input_index, const LogicalType &type) {
+                                                       idx_t input_index, const LogicalType &type, bool not_null) {
 	if (source_map.find(original_index) != source_map.end()) {
 		return;
 	}
@@ -830,6 +865,7 @@ static void AddExecutionContractHashJoinResidualSource(ExecutionRegionHashJoinCo
 	source.source_index = contract.residual_sources.size();
 	source.input_index = input_index;
 	source.type = type;
+	source.not_null = not_null;
 	source_map[original_index] = source.source_index;
 	contract.residual_sources.push_back(std::move(source));
 }
@@ -868,9 +904,11 @@ static void AddExecutionContractHashJoinResidualExpression(const PhysicalHashJoi
 			contract.residual_expression_blocker = "hash-join-native-residual-probe-source-out-of-range";
 			return;
 		}
+		auto not_null_entry = join.residual_info->probe_input_not_null_map.find(original_index);
+		auto not_null = not_null_entry != join.residual_info->probe_input_not_null_map.end() && not_null_entry->second;
 		AddExecutionContractHashJoinResidualSource(contract, source_map, ExecutionHashJoinResidualSourceKind::PROBE,
 		                                           original_index, join.lhs_probe_columns.col_idxs[probe_index],
-		                                           join.residual_info->probe_types[probe_index]);
+		                                           join.residual_info->probe_types[probe_index], not_null);
 	}
 	for (auto &entry : SortExecutionContractResidualMap(join.residual_info->build_input_to_layout_map)) {
 		auto original_index = entry.first;
@@ -880,8 +918,10 @@ static void AddExecutionContractHashJoinResidualExpression(const PhysicalHashJoi
 			contract.residual_expression_blocker = "hash-join-native-residual-build-source-out-of-range";
 			return;
 		}
+		auto not_null_entry = join.residual_info->build_input_not_null_map.find(original_index);
+		auto not_null = not_null_entry != join.residual_info->build_input_not_null_map.end() && not_null_entry->second;
 		AddExecutionContractHashJoinResidualSource(contract, source_map, ExecutionHashJoinResidualSourceKind::BUILD,
-		                                           original_index, layout_index, type);
+		                                           original_index, layout_index, type, not_null);
 	}
 
 	string blocker;
@@ -1132,6 +1172,7 @@ static string BuildExecutionContractHashJoinBoundaryReason(const PhysicalHashJoi
 		result += ExecutionContractHashJoinResidualSourceKindToString(source.kind);
 		result += ":input=" + std::to_string(source.input_index);
 		result += ":type=" + source.type.ToString();
+		result += ":not_null=" + ExecutionContractBool(source.not_null);
 	}
 	result += ";filter_pushdown=" + ExecutionContractBool(contract.filter_pushdown);
 	result += ";filter_pushdown_condition_count=" + std::to_string(contract.filter_pushdown_condition_count);
@@ -1858,6 +1899,7 @@ static ExecutionRegionTableScanContract BuildExecutionContractTableScanContract(
 	result.projection_ids = scan.projection_ids;
 	result.source_contract_input_column_count = scan.column_ids.size();
 	result.source_contract_input_types = BuildExecutionContractTableScanSourceInputTypes(scan);
+	result.source_contract_input_not_null = BuildExecutionContractTableScanSourceInputNotNull(scan);
 	result.source_contract_output_projection_map = BuildExecutionContractTableScanOutputProjectionMap(scan);
 	result.source_contract_filter_prune_required =
 	    scan.table_filters && scan.function.filter_prune && !scan.projection_ids.empty();
@@ -1889,6 +1931,8 @@ static string BuildExecutionContractTableScanSourceBoundaryReason(const Physical
 	result += ";source_contract_input_columns=" + std::to_string(contract.source_contract_input_column_count);
 	result +=
 	    ";source_contract_input_types=" + BuildExecutionContractLogicalTypeList(contract.source_contract_input_types);
+	result +=
+	    ";source_contract_input_not_null=" + BuildExecutionContractBoolList(contract.source_contract_input_not_null);
 	result += ";source_contract_output_projection_map=" +
 	          BuildExecutionContractIdxList(contract.source_contract_output_projection_map);
 	result += ";source_contract_filter_prune_required=" +

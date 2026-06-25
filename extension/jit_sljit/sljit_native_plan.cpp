@@ -679,9 +679,6 @@ bool TryReadNativeDoubleBinaryReferences(const ExecutionExpressionIR &root, Slji
 	    !TryReadNativeDoubleReference(*root.right, right_kind, right_index, right_scale)) {
 		return false;
 	}
-	if (native_op == SljitNativeDoubleBinaryOp::DIVIDE) {
-		return false;
-	}
 	if (IsNativeFloatSource(left_kind) != IsNativeFloatSource(right_kind)) {
 		return false;
 	}

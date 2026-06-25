@@ -45,6 +45,7 @@ struct ExecutionHashJoinResidualSource {
 	ExecutionHashJoinResidualSourceKind kind = ExecutionHashJoinResidualSourceKind::PROBE;
 	idx_t source_index = 0;
 	idx_t input_index = 0;
+	bool not_null = false;
 	LogicalType type;
 };
 
@@ -84,7 +85,10 @@ struct ExecutionRegionTableScanContract {
 	vector<idx_t> projection_ids;
 	idx_t source_contract_input_column_count = 0;
 	vector<LogicalType> source_contract_input_types;
+	vector<bool> source_contract_input_not_null;
 	vector<idx_t> source_contract_input_distinct_counts;
+	vector<Value> source_contract_input_min_values;
+	vector<Value> source_contract_input_max_values;
 	vector<idx_t> source_contract_output_projection_map;
 	bool source_contract_filter_prune_required = false;
 	bool projection_pushdown = false;

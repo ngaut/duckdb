@@ -45,6 +45,7 @@ unique_ptr<SljitNativePredicate> SljitNativePredicate::Copy() const {
 	result->guard_has_null_constant = guard_has_null_constant;
 	result->guard_source_indices = guard_source_indices;
 	result->source_indices = source_indices;
+	result->source_not_null = source_not_null;
 	result->child = child ? child->Copy() : nullptr;
 	result->children.reserve(children.size());
 	for (auto &child_entry : children) {
@@ -152,6 +153,7 @@ SljitNativeHashJoinProbePlan SljitNativeHashJoinProbePlan::Copy(bool copy_ir) co
 	result.output_mode = output_mode;
 	result.input_types = input_types;
 	result.residual_source_types = residual_source_types;
+	result.residual_source_not_null = residual_source_not_null;
 	result.residual_filter = residual_filter.Copy(false, copy_ir);
 	result.operator_info = operator_info;
 	if (copy_ir) {
@@ -211,6 +213,7 @@ static SljitNativeRegionOpPlan CopySljitNativeRegionOp(const SljitNativeRegionOp
 	result.aggregate_update.use_perfect_hash_group_lookup = input.aggregate_update.use_perfect_hash_group_lookup;
 	result.aggregate_update.ir = input.aggregate_update.ir;
 	result.aggregate_update.payloads = CopySljitNativeRegionExpressions(input.aggregate_update.payloads);
+	result.aggregate_update.group_expressions = CopySljitNativeRegionExpressions(input.aggregate_update.group_expressions);
 	result.order_sink.sink_info = input.order_sink.sink_info;
 	result.order_sink.input_types = input.order_sink.input_types;
 	result.order_sink.key_types = input.order_sink.key_types;
@@ -224,6 +227,9 @@ unique_ptr<SljitNativeRegionPlan> SljitNativeRegionPlan::Copy() const {
 	auto result = make_uniq<SljitNativeRegionPlan>();
 	result->source_execution = source_execution;
 	result->source_distinct_counts = source_distinct_counts;
+	result->source_min_values = source_min_values;
+	result->source_max_values = source_max_values;
+	result->source_not_null = source_not_null;
 	result->summary = summary;
 	result->ops.reserve(ops.size());
 	for (auto &op : ops) {

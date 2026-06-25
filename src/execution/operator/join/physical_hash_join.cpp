@@ -7,14 +7,19 @@
 #include "duckdb/common/types/value_map.hpp"
 #include "duckdb/common/uhugeint.hpp"
 #include "duckdb/common/types/uhugeint.hpp"
+#include "duckdb/catalog/catalog_entry/table_catalog_entry.hpp"
 #include "duckdb/execution/execution_operator_runtime.hpp"
 #include "duckdb/execution/expression_executor.hpp"
 #include "duckdb/execution/join_hashtable.hpp"
 #include "duckdb/execution/operator/aggregate/ungrouped_aggregate_state.hpp"
+#include "duckdb/execution/operator/filter/physical_filter.hpp"
 #include "duckdb/execution/operator/join/perfect_hash_join_executor.hpp"
+#include "duckdb/execution/operator/projection/physical_projection.hpp"
+#include "duckdb/execution/operator/scan/physical_table_scan.hpp"
 #include "duckdb/function/aggregate/distributive_function_utils.hpp"
 #include "duckdb/function/aggregate/distributive_functions.hpp"
 #include "duckdb/function/function_binder.hpp"
+#include "duckdb/function/table/table_scan.hpp"
 #include "duckdb/main/client_context.hpp"
 #include "duckdb/main/query_profiler.hpp"
 #include "duckdb/main/settings.hpp"
@@ -24,6 +29,7 @@
 #include "duckdb/parallel/interrupt.hpp"
 #include "duckdb/parallel/pipeline.hpp"
 #include "duckdb/parallel/thread_context.hpp"
+#include "duckdb/parser/constraints/not_null_constraint.hpp"
 #include "duckdb/planner/expression/bound_aggregate_expression.hpp"
 #include "duckdb/planner/expression/bound_cast_expression.hpp"
 #include "duckdb/planner/expression/bound_comparison_expression.hpp"
@@ -42,6 +48,86 @@
 
 namespace duckdb {
 
+static vector<bool> UnknownPhysicalOutputNotNull(const PhysicalOperator &op) {
+	return vector<bool>(op.GetTypes().size(), false);
+}
+
+static vector<bool> BuildPhysicalOperatorOutputNotNull(const PhysicalOperator &op);
+
+static vector<bool> BuildPhysicalTableScanOutputNotNull(const PhysicalTableScan &scan) {
+	vector<bool> input_not_null(scan.column_ids.size(), false);
+	if (StringUtil::Lower(scan.function.name.GetIdentifierName()) == "seq_scan" && scan.bind_data) {
+		auto &bind_data = scan.bind_data->Cast<TableScanBindData>();
+		for (auto &constraint : bind_data.table.GetConstraints()) {
+			if (constraint->type != ConstraintType::NOT_NULL) {
+				continue;
+			}
+			auto &not_null = constraint->Cast<NotNullConstraint>();
+			for (idx_t column_idx = 0; column_idx < scan.column_ids.size(); column_idx++) {
+				auto &column_id = scan.column_ids[column_idx];
+				if (column_id.HasPrimaryIndex() && column_id.GetPrimaryIndex() == not_null.index.index) {
+					input_not_null[column_idx] = true;
+				}
+			}
+		}
+	}
+
+	vector<bool> result;
+	result.reserve(scan.GetTypes().size());
+	if (!scan.projection_ids.empty()) {
+		for (auto projection_id : scan.projection_ids) {
+			result.push_back(projection_id < input_not_null.size() ? input_not_null[projection_id] : false);
+		}
+		return result;
+	}
+	for (idx_t output_idx = 0; output_idx < scan.GetTypes().size(); output_idx++) {
+		result.push_back(output_idx < input_not_null.size() ? input_not_null[output_idx] : false);
+	}
+	return result;
+}
+
+static bool PhysicalExpressionResultNotNull(const Expression &expr, const vector<bool> &input_not_null) {
+	switch (expr.GetExpressionClass()) {
+	case ExpressionClass::BOUND_CONSTANT:
+		return !expr.Cast<BoundConstantExpression>().GetValue().IsNull();
+	case ExpressionClass::BOUND_REF: {
+		auto source_index = expr.Cast<BoundReferenceExpression>().Index();
+		return source_index < input_not_null.size() && input_not_null[source_index];
+	}
+	default:
+		return false;
+	}
+}
+
+static vector<bool> BuildPhysicalProjectionOutputNotNull(const PhysicalProjection &projection) {
+	if (projection.children.size() != 1) {
+		return UnknownPhysicalOutputNotNull(projection);
+	}
+	auto input_not_null = BuildPhysicalOperatorOutputNotNull(projection.children[0].get());
+	vector<bool> result;
+	result.reserve(projection.select_list.size());
+	for (auto &expr : projection.select_list) {
+		result.push_back(PhysicalExpressionResultNotNull(*expr, input_not_null));
+	}
+	return result;
+}
+
+static vector<bool> BuildPhysicalOperatorOutputNotNull(const PhysicalOperator &op) {
+	switch (op.type) {
+	case PhysicalOperatorType::TABLE_SCAN:
+		return BuildPhysicalTableScanOutputNotNull(op.Cast<PhysicalTableScan>());
+	case PhysicalOperatorType::FILTER:
+		if (op.children.size() == 1) {
+			return BuildPhysicalOperatorOutputNotNull(op.children[0].get());
+		}
+		return UnknownPhysicalOutputNotNull(op);
+	case PhysicalOperatorType::PROJECTION:
+		return BuildPhysicalProjectionOutputNotNull(op.Cast<PhysicalProjection>());
+	default:
+		return UnknownPhysicalOutputNotNull(op);
+	}
+}
+
 PhysicalHashJoin::PhysicalHashJoin(PhysicalPlan &physical_plan, LogicalOperator &op, PhysicalOperator &left,
                                    PhysicalOperator &right, vector<JoinCondition> conds, JoinType join_type,
                                    const vector<ProjectionIndex> &left_projection_map,
@@ -57,6 +143,8 @@ PhysicalHashJoin::PhysicalHashJoin(PhysicalPlan &physical_plan, LogicalOperator 
 
 	auto &lhs_input_types = children[0].get().GetTypes();
 	auto &rhs_input_types = children[1].get().GetTypes();
+	auto lhs_input_not_null = BuildPhysicalOperatorOutputNotNull(children[0].get());
+	auto rhs_input_not_null = BuildPhysicalOperatorOutputNotNull(children[1].get());
 
 	for (auto &condition : conditions) {
 		D_ASSERT(condition.IsComparison());
@@ -79,7 +167,7 @@ PhysicalHashJoin::PhysicalHashJoin(PhysicalPlan &physical_plan, LogicalOperator 
 
 	// initialize residual predicate structures if present
 	if (residual_info) {
-		InitializeResidualPredicate(lhs_input_types, probe_cols);
+		InitializeResidualPredicate(lhs_input_types, lhs_input_not_null, probe_cols);
 	} else {
 		// lhs_probe_columns = lhs_output_columns
 		lhs_probe_columns = lhs_output_columns;
@@ -95,7 +183,7 @@ PhysicalHashJoin::PhysicalHashJoin(PhysicalPlan &physical_plan, LogicalOperator 
 	}
 
 	// handle build side (RHS)
-	InitializeBuildSide(lhs_input_types, rhs_input_types, right_projection_map, build_cols);
+	InitializeBuildSide(lhs_input_types, rhs_input_types, rhs_input_not_null, right_projection_map, build_cols);
 }
 
 PhysicalHashJoin::PhysicalHashJoin(PhysicalPlan &physical_plan, LogicalOperator &op, PhysicalOperator &left,
@@ -131,6 +219,7 @@ void PhysicalHashJoin::ExtractResidualPredicateColumns(unique_ptr<Expression> &p
 }
 
 void PhysicalHashJoin::InitializeResidualPredicate(const vector<LogicalType> &lhs_input_types,
+                                                   const vector<bool> &lhs_input_not_null,
                                                    const vector<idx_t> &probe_cols) {
 	D_ASSERT(residual_info);
 	// build lhs_probe_columns (output + predicate columns)
@@ -154,6 +243,8 @@ void PhysicalHashJoin::InitializeResidualPredicate(const vector<LogicalType> &lh
 		for (idx_t i = 0; i < lhs_probe_columns.col_idxs.size(); i++) {
 			if (lhs_probe_columns.col_idxs[i] == predicate_col_idx) {
 				residual_info->probe_input_to_probe_map[predicate_col_idx] = i;
+				residual_info->probe_input_not_null_map[predicate_col_idx] =
+				    predicate_col_idx < lhs_input_not_null.size() && lhs_input_not_null[predicate_col_idx];
 				break;
 			}
 		}
@@ -173,6 +264,7 @@ void PhysicalHashJoin::InitializeResidualPredicate(const vector<LogicalType> &lh
 
 void PhysicalHashJoin::InitializeBuildSide(const vector<LogicalType> &lhs_input_types,
                                            const vector<LogicalType> &rhs_input_types,
+                                           const vector<bool> &rhs_input_not_null,
                                            const vector<ProjectionIndex> &right_projection_map,
                                            const vector<idx_t> &build_cols) {
 	unordered_map<idx_t, idx_t> build_columns_in_conditions;
@@ -190,8 +282,8 @@ void PhysicalHashJoin::InitializeBuildSide(const vector<LogicalType> &lhs_input_
 
 	// handle SEMI/ANTI/MARK joins
 	if (join_type == JoinType::ANTI || join_type == JoinType::SEMI || join_type == JoinType::MARK) {
-		MapResidualBuildColumns(lhs_input_types, rhs_input_types, build_cols, build_columns_in_conditions,
-		                        build_input_to_layout);
+		MapResidualBuildColumns(lhs_input_types, rhs_input_types, rhs_input_not_null, build_cols,
+		                        build_columns_in_conditions, build_input_to_layout);
 
 		if (residual_info) {
 			residual_info->build_input_to_layout_map = std::move(build_input_to_layout);
@@ -203,8 +295,8 @@ void PhysicalHashJoin::InitializeBuildSide(const vector<LogicalType> &lhs_input_
 	auto right_projection_map_copy = FillProjectionMap(children[1].get(), right_projection_map);
 
 	// map ALL predicate columns (both in conditions and not)
-	MapResidualBuildColumns(lhs_input_types, rhs_input_types, build_cols, build_columns_in_conditions,
-	                        build_input_to_layout);
+	MapResidualBuildColumns(lhs_input_types, rhs_input_types, rhs_input_not_null, build_cols,
+	                        build_columns_in_conditions, build_input_to_layout);
 
 	// build rhs_output_columns
 	for (auto &rhs_col : right_projection_map_copy) {
@@ -238,7 +330,7 @@ void PhysicalHashJoin::InitializeBuildSide(const vector<LogicalType> &lhs_input_
 
 void PhysicalHashJoin::MapResidualBuildColumns(const vector<LogicalType> &lhs_input_types,
                                                const vector<LogicalType> &rhs_input_types,
-                                               const vector<idx_t> &build_cols,
+                                               const vector<bool> &rhs_input_not_null, const vector<idx_t> &build_cols,
                                                const unordered_map<idx_t, idx_t> &build_columns_in_conditions,
                                                unordered_map<idx_t, idx_t> &build_input_to_layout) {
 	if (!residual_info) {
@@ -247,6 +339,8 @@ void PhysicalHashJoin::MapResidualBuildColumns(const vector<LogicalType> &lhs_in
 
 	for (auto rhs_idx_with_offset : build_cols) {
 		idx_t rhs_idx = rhs_idx_with_offset - lhs_input_types.size();
+		residual_info->build_input_not_null_map[rhs_idx_with_offset] =
+		    rhs_idx < rhs_input_not_null.size() && rhs_input_not_null[rhs_idx];
 		auto it = build_columns_in_conditions.find(rhs_idx);
 
 		if (it != build_columns_in_conditions.end()) {
@@ -2321,8 +2415,8 @@ static void MaterializeExecutionCorrelatedMarkJoinProbe(const ExecutionHashJoinP
 }
 
 static void MaterializeExecutionEmptyMarkJoinProbe(const ExecutionHashJoinProbeBinding &binding, DataChunk &input,
-                                                  idx_t count, DataChunk &result,
-                                                  optional_ptr<ExecutionOperatorStageRecorder> recorder) {
+                                                   idx_t count, DataChunk &result,
+                                                   optional_ptr<ExecutionOperatorStageRecorder> recorder) {
 	if (count != input.size()) {
 		throw InternalException("execution native empty MARK probe must materialize every input row");
 	}

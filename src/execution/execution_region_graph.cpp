@@ -13,6 +13,7 @@
 #include "duckdb/main/client_context.hpp"
 #include "duckdb/parallel/pipeline.hpp"
 #include "duckdb/storage/statistics/base_statistics.hpp"
+#include "duckdb/storage/statistics/numeric_stats.hpp"
 
 namespace duckdb {
 
@@ -218,12 +219,18 @@ static void AddExecutionRegionTableScanColumnStats(const PhysicalOperator &op, E
 		return;
 	}
 	contract.source_contract_input_distinct_counts.assign(scan.column_ids.size(), 0);
+	contract.source_contract_input_min_values.assign(scan.column_ids.size(), Value());
+	contract.source_contract_input_max_values.assign(scan.column_ids.size(), Value());
 	for (idx_t column_idx = 0; column_idx < scan.column_ids.size(); column_idx++) {
 		auto stats = TryGetExecutionRegionScanColumnStatistics(scan, context, scan.column_ids[column_idx]);
 		if (!stats) {
 			continue;
 		}
 		contract.source_contract_input_distinct_counts[column_idx] = stats->GetDistinctCount();
+		if (stats->GetStatsType() == StatisticsType::NUMERIC_STATS && NumericStats::HasMinMax(*stats)) {
+			contract.source_contract_input_min_values[column_idx] = NumericStats::Min(*stats);
+			contract.source_contract_input_max_values[column_idx] = NumericStats::Max(*stats);
+		}
 	}
 }
 

@@ -1077,6 +1077,70 @@ static void EmitSljitArm64NeonIntegerBinary(struct sljit_compiler *compiler, Slj
 	sljit_emit_op_custom(compiler, &instruction, sizeof(instruction));
 }
 
+static bool SljitArm64NeonFloatingBinarySupported(SljitNativeDoubleBinaryOp op) {
+#if defined(SLJIT_CONFIG_ARM_64) && SLJIT_CONFIG_ARM_64
+	if (!sljit_has_cpu_feature(SLJIT_HAS_SIMD)) {
+		return false;
+	}
+	switch (op) {
+	case SljitNativeDoubleBinaryOp::ADD:
+	case SljitNativeDoubleBinaryOp::SUBTRACT:
+	case SljitNativeDoubleBinaryOp::MULTIPLY:
+	case SljitNativeDoubleBinaryOp::DIVIDE:
+		return true;
+	default:
+		return false;
+	}
+#else
+	return false;
+#endif
+}
+
+static sljit_s32 SljitArm64NeonFloatingSimdType(bool single_precision) {
+	return SLJIT_SIMD_REG_128 | SLJIT_SIMD_FLOAT | (single_precision ? SLJIT_SIMD_ELEM_32 : SLJIT_SIMD_ELEM_64);
+}
+
+static idx_t SljitArm64NeonFloatingLaneCount(bool single_precision) {
+	return single_precision ? 4 : 2;
+}
+
+static uint32_t SljitArm64NeonFloatingBinaryInstruction(bool single_precision, SljitNativeDoubleBinaryOp op,
+                                                        uint32_t dst, uint32_t left, uint32_t right) {
+	uint32_t base;
+	switch (op) {
+	case SljitNativeDoubleBinaryOp::ADD:
+		base = single_precision ? 0x4e20d400 : 0x4e60d400;
+		break;
+	case SljitNativeDoubleBinaryOp::SUBTRACT:
+		base = single_precision ? 0x4ea0d400 : 0x4ee0d400;
+		break;
+	case SljitNativeDoubleBinaryOp::MULTIPLY:
+		base = single_precision ? 0x6e20dc00 : 0x6e60dc00;
+		break;
+	case SljitNativeDoubleBinaryOp::DIVIDE:
+		base = single_precision ? 0x6e20fc00 : 0x6e60fc00;
+		break;
+	default:
+		throw InternalException("Unsupported ARM64 NEON floating binary op");
+	}
+	return base | (right << 16) | (left << 5) | dst;
+}
+
+static void EmitSljitArm64NeonFloatingBinary(struct sljit_compiler *compiler, bool single_precision,
+                                             SljitNativeDoubleBinaryOp op, sljit_s32 dst_vreg, sljit_s32 left_vreg,
+                                             sljit_s32 right_vreg) {
+	auto dst = sljit_get_register_index(SLJIT_SIMD_REG_128, dst_vreg);
+	auto left = sljit_get_register_index(SLJIT_SIMD_REG_128, left_vreg);
+	auto right = sljit_get_register_index(SLJIT_SIMD_REG_128, right_vreg);
+	if (dst < 0 || left < 0 || right < 0) {
+		throw InternalException("SLJIT ARM64 NEON register mapping is unavailable");
+	}
+	auto instruction =
+	    SljitArm64NeonFloatingBinaryInstruction(single_precision, op, UnsafeNumericCast<uint32_t>(dst),
+	                                            UnsafeNumericCast<uint32_t>(left), UnsafeNumericCast<uint32_t>(right));
+	sljit_emit_op_custom(compiler, &instruction, sizeof(instruction));
+}
+
 unique_ptr<ExecutionRegionCodeHandle>
 BuildSljitNativeFlatIntegerBinaryConstant(SljitNativeIntegerKind kind, SljitNativeIntegerBinaryOp op,
                                           bool constant_on_left, SljitNativeVectorFunction &function, string &error) {
@@ -1973,9 +2037,11 @@ BuildSljitNativeFlatDoubleBinaryConstant(SljitNativeDoubleBinaryOp op, SljitNati
 	auto binary_op = NativeDoubleBinaryOp(op, single_precision);
 	auto move_op = NativeDirectFloatingMoveOp(single_precision);
 	auto fmem_align = NativeDirectFloatingMemoryAlignment(single_precision);
-	auto data_scale = NativeDirectFloatingDataScale(single_precision);
+	auto data_width = NativeDirectFloatingDataWidth(single_precision);
+	auto use_simd = SljitArm64NeonFloatingBinarySupported(op);
 
-	sljit_emit_enter(compiler, 0, SLJIT_ARGS1V(P), 5 | SLJIT_ENTER_FLOAT(2), 5, 0);
+	sljit_emit_enter(compiler, 0, SLJIT_ARGS1V(P), 5 | SLJIT_ENTER_FLOAT(2) | (use_simd ? SLJIT_ENTER_VECTOR(3) : 0), 5,
+	                 0);
 	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_S1, 0, SLJIT_IMM, 0);
 	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_S2, 0, SLJIT_MEM1(SLJIT_S0), offsetof(SljitNativeVectorInput, count));
 	sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_S3, 0, SLJIT_MEM1(SLJIT_S0),
@@ -1988,21 +2054,58 @@ BuildSljitNativeFlatDoubleBinaryConstant(SljitNativeDoubleBinaryOp op, SljitNati
 		sljit_emit_fop1(compiler, SLJIT_CONV_F32_FROM_F64, SLJIT_TMP_FR1, 0, SLJIT_TMP_FR1, 0);
 	}
 
-	auto loop = sljit_emit_label(compiler);
-	auto done = sljit_emit_cmp(compiler, SLJIT_GREATER_EQUAL, SLJIT_S1, 0, SLJIT_S2, 0);
-	sljit_emit_fmem(compiler, move_op | fmem_align, SLJIT_TMP_FR0, SLJIT_MEM2(SLJIT_S3, SLJIT_S1), data_scale);
-	if (constant_on_left) {
-		sljit_emit_fop2(compiler, binary_op, SLJIT_TMP_FR0, 0, SLJIT_TMP_FR1, 0, SLJIT_TMP_FR0, 0);
-	} else {
-		sljit_emit_fop2(compiler, binary_op, SLJIT_TMP_FR0, 0, SLJIT_TMP_FR0, 0, SLJIT_TMP_FR1, 0);
-	}
-	sljit_emit_fmem(compiler, move_op | SLJIT_MEM_STORE | fmem_align, SLJIT_TMP_FR0, SLJIT_MEM2(SLJIT_S4, SLJIT_S1),
-	                data_scale);
-	sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_S1, 0, SLJIT_S1, 0, SLJIT_IMM, 1);
-	auto repeat = sljit_emit_jump(compiler, SLJIT_JUMP);
-	sljit_set_label(repeat, loop);
+	auto emit_row = [&]() {
+		sljit_emit_fmem(compiler, move_op | fmem_align, SLJIT_TMP_FR0, SLJIT_MEM1(SLJIT_S3), 0);
+		if (constant_on_left) {
+			sljit_emit_fop2(compiler, binary_op, SLJIT_TMP_FR0, 0, SLJIT_TMP_FR1, 0, SLJIT_TMP_FR0, 0);
+		} else {
+			sljit_emit_fop2(compiler, binary_op, SLJIT_TMP_FR0, 0, SLJIT_TMP_FR0, 0, SLJIT_TMP_FR1, 0);
+		}
+		sljit_emit_fmem(compiler, move_op | SLJIT_MEM_STORE | fmem_align, SLJIT_TMP_FR0, SLJIT_MEM1(SLJIT_S4), 0);
+	};
 
-	sljit_set_label(done, sljit_emit_label(compiler));
+	if (use_simd) {
+		auto simd_type = SljitArm64NeonFloatingSimdType(single_precision);
+		auto simd_lanes = NumericCast<sljit_sw>(SljitArm64NeonFloatingLaneCount(single_precision));
+		sljit_emit_simd_replicate(compiler, simd_type, SLJIT_VR1, SLJIT_TMP_FR1, 0);
+
+		auto vector_loop = sljit_emit_label(compiler);
+		auto tail = sljit_emit_cmp(compiler, SLJIT_LESS, SLJIT_S2, 0, SLJIT_IMM, simd_lanes);
+		sljit_emit_simd_mov(compiler, simd_type, SLJIT_VR0, SLJIT_MEM1(SLJIT_S3), 0);
+		if (constant_on_left) {
+			EmitSljitArm64NeonFloatingBinary(compiler, single_precision, op, SLJIT_VR2, SLJIT_VR1, SLJIT_VR0);
+		} else {
+			EmitSljitArm64NeonFloatingBinary(compiler, single_precision, op, SLJIT_VR2, SLJIT_VR0, SLJIT_VR1);
+		}
+		sljit_emit_simd_mov(compiler, simd_type | SLJIT_SIMD_STORE, SLJIT_VR2, SLJIT_MEM1(SLJIT_S4), 0);
+		sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_S3, 0, SLJIT_S3, 0, SLJIT_IMM, 16);
+		sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_S4, 0, SLJIT_S4, 0, SLJIT_IMM, 16);
+		sljit_emit_op2(compiler, SLJIT_SUB, SLJIT_S2, 0, SLJIT_S2, 0, SLJIT_IMM, simd_lanes);
+		auto repeat = sljit_emit_jump(compiler, SLJIT_JUMP);
+		sljit_set_label(repeat, vector_loop);
+
+		auto tail_loop = sljit_emit_label(compiler);
+		sljit_set_label(tail, tail_loop);
+		auto done = sljit_emit_cmp(compiler, SLJIT_EQUAL, SLJIT_S2, 0, SLJIT_IMM, 0);
+		emit_row();
+		sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_S3, 0, SLJIT_S3, 0, SLJIT_IMM, data_width);
+		sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_S4, 0, SLJIT_S4, 0, SLJIT_IMM, data_width);
+		sljit_emit_op2(compiler, SLJIT_SUB, SLJIT_S2, 0, SLJIT_S2, 0, SLJIT_IMM, 1);
+		repeat = sljit_emit_jump(compiler, SLJIT_JUMP);
+		sljit_set_label(repeat, tail_loop);
+		sljit_set_label(done, sljit_emit_label(compiler));
+	} else {
+		auto loop = sljit_emit_label(compiler);
+		auto done = sljit_emit_cmp(compiler, SLJIT_GREATER_EQUAL, SLJIT_S1, 0, SLJIT_S2, 0);
+		emit_row();
+		sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_S1, 0, SLJIT_S1, 0, SLJIT_IMM, 1);
+		sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_S3, 0, SLJIT_S3, 0, SLJIT_IMM, data_width);
+		sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_S4, 0, SLJIT_S4, 0, SLJIT_IMM, data_width);
+		auto repeat = sljit_emit_jump(compiler, SLJIT_JUMP);
+		sljit_set_label(repeat, loop);
+		sljit_set_label(done, sljit_emit_label(compiler));
+	}
+
 	sljit_emit_return_void(compiler);
 
 	return FinishSljitNativeVectorCode(compiler, function, error);
@@ -2104,9 +2207,11 @@ BuildSljitNativeFlatDoubleBinaryReferences(SljitNativeDoubleBinaryOp op, SljitNa
 	auto binary_op = NativeDoubleBinaryOp(op, single_precision);
 	auto move_op = NativeDirectFloatingMoveOp(single_precision);
 	auto fmem_align = NativeDirectFloatingMemoryAlignment(single_precision);
-	auto data_scale = NativeDirectFloatingDataScale(single_precision);
+	auto data_width = NativeDirectFloatingDataWidth(single_precision);
+	auto use_simd = SljitArm64NeonFloatingBinarySupported(op);
 
-	sljit_emit_enter(compiler, 0, SLJIT_ARGS1V(P), 5 | SLJIT_ENTER_FLOAT(2), 6, 0);
+	sljit_emit_enter(compiler, 0, SLJIT_ARGS1V(P), 5 | SLJIT_ENTER_FLOAT(2) | (use_simd ? SLJIT_ENTER_VECTOR(3) : 0), 6,
+	                 0);
 	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_S1, 0, SLJIT_IMM, 0);
 	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_S2, 0, SLJIT_MEM1(SLJIT_S0), offsetof(SljitNativeVectorInput, count));
 	sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_S3, 0, SLJIT_MEM1(SLJIT_S0),
@@ -2116,18 +2221,54 @@ BuildSljitNativeFlatDoubleBinaryReferences(SljitNativeDoubleBinaryOp op, SljitNa
 	sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_S5, 0, SLJIT_MEM1(SLJIT_S0),
 	               offsetof(SljitNativeVectorInput, result_data));
 
-	auto loop = sljit_emit_label(compiler);
-	auto done = sljit_emit_cmp(compiler, SLJIT_GREATER_EQUAL, SLJIT_S1, 0, SLJIT_S2, 0);
-	sljit_emit_fmem(compiler, move_op | fmem_align, SLJIT_TMP_FR0, SLJIT_MEM2(SLJIT_S3, SLJIT_S1), data_scale);
-	sljit_emit_fmem(compiler, move_op | fmem_align, SLJIT_TMP_FR1, SLJIT_MEM2(SLJIT_S4, SLJIT_S1), data_scale);
-	sljit_emit_fop2(compiler, binary_op, SLJIT_TMP_FR0, 0, SLJIT_TMP_FR0, 0, SLJIT_TMP_FR1, 0);
-	sljit_emit_fmem(compiler, move_op | SLJIT_MEM_STORE | fmem_align, SLJIT_TMP_FR0, SLJIT_MEM2(SLJIT_S5, SLJIT_S1),
-	                data_scale);
-	sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_S1, 0, SLJIT_S1, 0, SLJIT_IMM, 1);
-	auto repeat = sljit_emit_jump(compiler, SLJIT_JUMP);
-	sljit_set_label(repeat, loop);
+	auto emit_row = [&]() {
+		sljit_emit_fmem(compiler, move_op | fmem_align, SLJIT_TMP_FR0, SLJIT_MEM1(SLJIT_S3), 0);
+		sljit_emit_fmem(compiler, move_op | fmem_align, SLJIT_TMP_FR1, SLJIT_MEM1(SLJIT_S4), 0);
+		sljit_emit_fop2(compiler, binary_op, SLJIT_TMP_FR0, 0, SLJIT_TMP_FR0, 0, SLJIT_TMP_FR1, 0);
+		sljit_emit_fmem(compiler, move_op | SLJIT_MEM_STORE | fmem_align, SLJIT_TMP_FR0, SLJIT_MEM1(SLJIT_S5), 0);
+	};
 
-	sljit_set_label(done, sljit_emit_label(compiler));
+	if (use_simd) {
+		auto simd_type = SljitArm64NeonFloatingSimdType(single_precision);
+		auto simd_lanes = NumericCast<sljit_sw>(SljitArm64NeonFloatingLaneCount(single_precision));
+
+		auto vector_loop = sljit_emit_label(compiler);
+		auto tail = sljit_emit_cmp(compiler, SLJIT_LESS, SLJIT_S2, 0, SLJIT_IMM, simd_lanes);
+		sljit_emit_simd_mov(compiler, simd_type, SLJIT_VR0, SLJIT_MEM1(SLJIT_S3), 0);
+		sljit_emit_simd_mov(compiler, simd_type, SLJIT_VR1, SLJIT_MEM1(SLJIT_S4), 0);
+		EmitSljitArm64NeonFloatingBinary(compiler, single_precision, op, SLJIT_VR2, SLJIT_VR0, SLJIT_VR1);
+		sljit_emit_simd_mov(compiler, simd_type | SLJIT_SIMD_STORE, SLJIT_VR2, SLJIT_MEM1(SLJIT_S5), 0);
+		sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_S3, 0, SLJIT_S3, 0, SLJIT_IMM, 16);
+		sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_S4, 0, SLJIT_S4, 0, SLJIT_IMM, 16);
+		sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_S5, 0, SLJIT_S5, 0, SLJIT_IMM, 16);
+		sljit_emit_op2(compiler, SLJIT_SUB, SLJIT_S2, 0, SLJIT_S2, 0, SLJIT_IMM, simd_lanes);
+		auto repeat = sljit_emit_jump(compiler, SLJIT_JUMP);
+		sljit_set_label(repeat, vector_loop);
+
+		auto tail_loop = sljit_emit_label(compiler);
+		sljit_set_label(tail, tail_loop);
+		auto done = sljit_emit_cmp(compiler, SLJIT_EQUAL, SLJIT_S2, 0, SLJIT_IMM, 0);
+		emit_row();
+		sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_S3, 0, SLJIT_S3, 0, SLJIT_IMM, data_width);
+		sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_S4, 0, SLJIT_S4, 0, SLJIT_IMM, data_width);
+		sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_S5, 0, SLJIT_S5, 0, SLJIT_IMM, data_width);
+		sljit_emit_op2(compiler, SLJIT_SUB, SLJIT_S2, 0, SLJIT_S2, 0, SLJIT_IMM, 1);
+		repeat = sljit_emit_jump(compiler, SLJIT_JUMP);
+		sljit_set_label(repeat, tail_loop);
+		sljit_set_label(done, sljit_emit_label(compiler));
+	} else {
+		auto loop = sljit_emit_label(compiler);
+		auto done = sljit_emit_cmp(compiler, SLJIT_GREATER_EQUAL, SLJIT_S1, 0, SLJIT_S2, 0);
+		emit_row();
+		sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_S1, 0, SLJIT_S1, 0, SLJIT_IMM, 1);
+		sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_S3, 0, SLJIT_S3, 0, SLJIT_IMM, data_width);
+		sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_S4, 0, SLJIT_S4, 0, SLJIT_IMM, data_width);
+		sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_S5, 0, SLJIT_S5, 0, SLJIT_IMM, data_width);
+		auto repeat = sljit_emit_jump(compiler, SLJIT_JUMP);
+		sljit_set_label(repeat, loop);
+		sljit_set_label(done, sljit_emit_label(compiler));
+	}
+
 	sljit_emit_return_void(compiler);
 
 	return FinishSljitNativeVectorCode(compiler, function, error);

@@ -145,6 +145,7 @@ struct SljitNativeHashJoinProbePlan {
 	ExecutionHashJoinProbeOutputMode output_mode = ExecutionHashJoinProbeOutputMode::NONE;
 	vector<LogicalType> input_types;
 	vector<LogicalType> residual_source_types;
+	vector<bool> residual_source_not_null;
 	SljitNativeRegionExpressionPlan residual_filter;
 	ExecutionRegionOperatorInfo operator_info;
 	string ir;
@@ -208,6 +209,7 @@ struct SljitNativeAggregateUpdatePlan {
 	ExecutionRegionSinkInfo sink_info;
 	vector<LogicalType> input_types;
 	vector<SljitNativeRegionExpressionPlan> payloads;
+	vector<SljitNativeRegionExpressionPlan> group_expressions;
 	bool use_primitive_payloads = false;
 	bool use_grouped_state_addresses = false;
 	bool use_perfect_hash_group_lookup = false;
@@ -240,6 +242,9 @@ struct SljitNativeRegionPlan {
 	vector<SljitNativeRegionOpPlan> ops;
 	ExecutionRegionSourceExecutionKind source_execution = ExecutionRegionSourceExecutionKind::NONE;
 	vector<idx_t> source_distinct_counts;
+	vector<Value> source_min_values;
+	vector<Value> source_max_values;
+	vector<bool> source_not_null;
 	SljitNativeRegionSummary summary;
 
 	const vector<LogicalType> &OutputTypes() const {

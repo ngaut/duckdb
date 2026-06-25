@@ -932,6 +932,68 @@ TEST_CASE("SLJIT native integer flat arithmetic handles SIMD-width tails", "[api
 	    });
 }
 
+TEST_CASE("SLJIT native floating flat arithmetic handles SIMD-width tails", "[api][jit]") {
+	JitTestDatabase test;
+	auto &con = test.con;
+	auto &manager = test.manager;
+
+	ConfigureSljitForCoverage(con, false, true, true, 10000);
+	REQUIRE_NO_FAIL(con.Query("SET threads=1"));
+	ConfigureJitDecisionTrace(con);
+	REQUIRE_NO_FAIL(con.Query("CREATE TEMP TABLE jit_floating_tail_input AS "
+	                          "SELECT i::BIGINT AS i, "
+	                          "       (i::FLOAT + 0.5::FLOAT) AS f, "
+	                          "       ((i % 13)::FLOAT + 1.0::FLOAT) AS g, "
+	                          "       (i::DOUBLE + 0.25::DOUBLE) AS d, "
+	                          "       ((i % 17)::DOUBLE + 1.5::DOUBLE) AS e "
+	                          "FROM range(2053) tbl(i)"));
+
+	ClearJitTrace(manager, true);
+	REQUIRE_NO_FAIL(con.Query("CREATE TEMP TABLE jit_floating_tail_f_const AS "
+	                          "SELECT i, f + 1.25::FLOAT AS v FROM jit_floating_tail_input"));
+	REQUIRE_NO_FAIL(con.Query("CREATE TEMP TABLE jit_floating_tail_f_ref AS "
+	                          "SELECT i, f / g AS v FROM jit_floating_tail_input"));
+	REQUIRE_NO_FAIL(con.Query("CREATE TEMP TABLE jit_floating_tail_d_const AS "
+	                          "SELECT i, 2.5::DOUBLE - d AS v FROM jit_floating_tail_input"));
+	REQUIRE_NO_FAIL(con.Query("CREATE TEMP TABLE jit_floating_tail_d_ref AS "
+	                          "SELECT i, d / e AS v FROM jit_floating_tail_input"));
+
+	REQUIRE_NO_FAIL(con.Query("SET enable_jit=false"));
+	auto check = con.Query("SELECT "
+	                       "(SELECT count(*) FROM jit_floating_tail_f_const out "
+	                       " JOIN jit_floating_tail_input src USING (i) "
+	                       " WHERE abs(out.v::DOUBLE - ((src.f + 1.25::FLOAT)::DOUBLE)) > 0.001), "
+	                       "(SELECT count(*) FROM jit_floating_tail_f_ref out "
+	                       " JOIN jit_floating_tail_input src USING (i) "
+	                       " WHERE abs(out.v::DOUBLE - ((src.f / src.g)::DOUBLE)) > 0.001), "
+	                       "(SELECT count(*) FROM jit_floating_tail_d_const out "
+	                       " JOIN jit_floating_tail_input src USING (i) "
+	                       " WHERE abs(out.v - (2.5::DOUBLE - src.d)) > 1e-12), "
+	                       "(SELECT count(*) FROM jit_floating_tail_d_ref out "
+	                       " JOIN jit_floating_tail_input src USING (i) "
+	                       " WHERE abs(out.v - (src.d / src.e)) > 1e-12)");
+	REQUIRE_NO_FAIL(*check);
+	for (idx_t col = 0; col < 4; col++) {
+		REQUIRE(check->GetValue(col, 0).GetValue<int64_t>() == 0);
+	}
+	REQUIRE_NO_FAIL(con.Query("SET enable_jit=true"));
+
+	RequireNativeSljitIr(manager, "double-add-constant");
+	RequireNativeSljitIr(manager, "double-divide-references");
+	RequireNativeSljitIr(manager, "double-subtract-constant");
+
+	RequireJitEvent(
+	    manager,
+	    [](const ExecutionRegionEvent &event) {
+		    return IsSljitRegionEvent(event) && EventPhase(event) == "runtime" && EventStatus(event) == "executed" &&
+		           event.output_rows == 2053 &&
+		           StringUtil::Contains(EventGeneratedStageCountBreakdown(event), "op0:projection");
+	    },
+	    [](const ExecutionRegionEvent &event) {
+		    REQUIRE(StringUtil::Contains(EventGeneratedStageRuntimeBreakdown(event), "op0:projection"));
+	    });
+}
+
 TEST_CASE("SLJIT fixed direct append fuses mixed INTEGER and BIGINT groups", "[api][jit]") {
 	JitTestDatabase test;
 	auto &con = test.con;

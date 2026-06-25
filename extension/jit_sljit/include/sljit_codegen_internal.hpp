@@ -26,6 +26,11 @@ struct SljitTypedExpressionTreeSlot {
 	sljit_sw valid_offset;
 };
 
+struct SljitTypedExpressionTreeDataPointerHoist {
+	idx_t source_index = 0;
+	sljit_s32 data_reg = 0;
+};
+
 enum class SljitNativeAggregateSumStateKind : uint8_t { INT64, HUGEINT };
 
 static constexpr sljit_sw SLJIT_SELECT_TRUE_COUNT_OFFSET = 0;
@@ -90,7 +95,17 @@ SljitTypedExpressionTreeSlot EmitSljitTypedExpressionTreeValue(struct sljit_comp
                                                                const ExecutionExpressionIR &node, idx_t &slot_index,
                                                                vector<SljitExpressionTreeOverflowJumps> &overflows,
                                                                const vector<idx_t> *known_valid_sources = nullptr);
-void EmitSljitTypedExpressionTreeFastValueReg(struct sljit_compiler *compiler, const ExecutionExpressionIR &node,
-                                              idx_t &spill_index, vector<SljitExpressionTreeOverflowJumps> &overflows);
+void EmitSljitTypedExpressionTreeFastValueReg(
+    struct sljit_compiler *compiler, const ExecutionExpressionIR &node, idx_t &spill_index,
+    vector<SljitExpressionTreeOverflowJumps> &overflows,
+    const vector<SljitTypedExpressionTreeDataPointerHoist> *data_hoists = nullptr);
+void EmitSljitTypedExpressionTreeSelectedFastValueReg(
+    struct sljit_compiler *compiler, const ExecutionExpressionIR &node, idx_t &spill_index,
+    vector<SljitExpressionTreeOverflowJumps> &overflows,
+    const vector<SljitTypedExpressionTreeDataPointerHoist> *data_hoists = nullptr);
+void EmitSljitTypedExpressionTreeLogicalFastValueReg(
+    struct sljit_compiler *compiler, const ExecutionExpressionIR &node, idx_t &spill_index,
+    vector<SljitExpressionTreeOverflowJumps> &overflows,
+    const vector<SljitTypedExpressionTreeDataPointerHoist> *data_hoists = nullptr);
 
 } // namespace duckdb

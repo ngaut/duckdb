@@ -61,6 +61,117 @@ static const sel_t *SljitNormalizedSourceSelectionData(const UnifiedVectorFormat
 	return format.sel->data();
 }
 
+static bool SljitNormalizedSourceAllValid(const UnifiedVectorFormat &format, const sel_t *sel, idx_t count) {
+	if (format.validity.CannotHaveNull()) {
+		return true;
+	}
+	if (!sel) {
+		return format.validity.CheckAllValid(count);
+	}
+	for (idx_t row_idx = 0; row_idx < count; row_idx++) {
+		if (!format.validity.RowIsValid(sel[row_idx])) {
+			return false;
+		}
+	}
+	return true;
+}
+
+static bool SljitNormalizedSourceAllValid(const UnifiedVectorFormat &format, const sel_t *source_sel,
+                                          const SelectionVector *execute_sel, idx_t count) {
+	if (!execute_sel) {
+		return SljitNormalizedSourceAllValid(format, source_sel, count);
+	}
+	if (format.validity.CannotHaveNull()) {
+		return true;
+	}
+	for (idx_t row_idx = 0; row_idx < count; row_idx++) {
+		auto logical_idx = execute_sel->get_index(row_idx);
+		auto source_idx = source_sel ? source_sel[logical_idx] : logical_idx;
+		if (!format.validity.RowIsValid(source_idx)) {
+			return false;
+		}
+	}
+	return true;
+}
+
+static const validity_t *SljitNormalizedSourceValidityData(const UnifiedVectorFormat &format, const sel_t *sel,
+                                                           idx_t count) {
+	return SljitNormalizedSourceAllValid(format, sel, count) ? nullptr : format.validity.GetData();
+}
+
+static const validity_t *SljitNormalizedSourceValidityData(const UnifiedVectorFormat &format, const sel_t *source_sel,
+                                                           const SelectionVector *execute_sel, idx_t count) {
+	return SljitNormalizedSourceAllValid(format, source_sel, execute_sel, count) ? nullptr : format.validity.GetData();
+}
+
+static const sel_t *SljitCanonicalizeCommonSelection(vector<const sel_t *> &source_sel,
+                                                     vector<const sel_t *> &group_sel) {
+	const sel_t *common_sel = nullptr;
+	for (auto sel : group_sel) {
+		if (!sel) {
+			return nullptr;
+		}
+		if (!common_sel) {
+			common_sel = sel;
+		} else if (common_sel != sel) {
+			return nullptr;
+		}
+	}
+	for (auto sel : source_sel) {
+		if (!sel) {
+			return nullptr;
+		}
+		if (!common_sel) {
+			common_sel = sel;
+		} else if (common_sel != sel) {
+			return nullptr;
+		}
+	}
+	if (!common_sel) {
+		return nullptr;
+	}
+	for (auto &sel : group_sel) {
+		sel = nullptr;
+	}
+	for (auto &sel : source_sel) {
+		sel = nullptr;
+	}
+	return common_sel;
+}
+
+static const sel_t *SljitCanonicalizeCommonSourceSelection(vector<const sel_t *> &source_sel) {
+	const sel_t *common_sel = nullptr;
+	for (auto sel : source_sel) {
+		if (!sel) {
+			return nullptr;
+		}
+		if (!common_sel) {
+			common_sel = sel;
+		} else if (common_sel != sel) {
+			return nullptr;
+		}
+	}
+	if (!common_sel) {
+		return nullptr;
+	}
+	for (auto &sel : source_sel) {
+		sel = nullptr;
+	}
+	return common_sel;
+}
+
+static bool SljitAllSelectionsPresent(const vector<const sel_t *> &selections) {
+	if (selections.empty()) {
+		return false;
+	}
+	for (auto sel : selections) {
+		if (!sel) {
+			return false;
+		}
+	}
+	return true;
+}
+
 template <class T>
 static T **SljitPointerArrayOrNull(vector<T *> &values) {
 	for (auto value : values) {
@@ -237,16 +348,15 @@ static void RecordSljitRegionStageRuntimeWithSuffix(ExecutionRegionRuntime &runt
 }
 
 static void RecordSljitDirectAppendProfileStage(ExecutionRegionRuntime &runtime, const string &stage_prefix,
-                                                const char *stage_name, int64_t runtime_time_us,
-                                                idx_t count = 1) {
+                                                const char *stage_name, int64_t runtime_time_us, idx_t count = 1) {
 	if (!runtime.TraceRuntime() || runtime_time_us <= 0 || count == 0) {
 		return;
 	}
 	runtime.RecordGeneratedStageRuntime(stage_prefix + "." + stage_name, runtime_time_us, count);
 }
 
-static void RecordSljitDirectAppendProfile(ExecutionRegionRuntime &runtime, idx_t op_idx,
-                                           SljitNativeRegionOpKind kind, const DirectAppendProfile &profile) {
+static void RecordSljitDirectAppendProfile(ExecutionRegionRuntime &runtime, idx_t op_idx, SljitNativeRegionOpKind kind,
+                                           const DirectAppendProfile &profile) {
 	if (!runtime.TraceRuntime()) {
 		return;
 	}
@@ -513,7 +623,8 @@ private:
 
 	struct SljitExpressionAdapterScratch {
 		void PrepareExpressionTree(DataChunk &input, const SljitExecutableRegionExpression &expr,
-		                           SljitNativeVectorInput &native_input, const SelectionVector *execute_sel) {
+		                           SljitNativeVectorInput &native_input, const SelectionVector *execute_sel,
+		                           idx_t count) {
 			auto &plan = expr.plan;
 			auto &source_indices =
 			    expr.input_source_indices.empty() ? plan.expression_tree_source_indices : expr.input_source_indices;
@@ -524,6 +635,7 @@ private:
 			source_can_have_null = false;
 			flat_no_selection = execute_sel == nullptr;
 			flat_all_valid = execute_sel == nullptr;
+			all_valid = true;
 			for (idx_t source_idx = 0; source_idx < source_indices.size(); source_idx++) {
 				auto input_index = source_indices[source_idx];
 				if (input_index >= input.ColumnCount()) {
@@ -535,17 +647,20 @@ private:
 				        ? NativeIntegerSourceData(formats[source_idx], SljitNativeIntegerKind::DECIMAL64)
 				        : SljitTypedExpressionTreeSourceData(formats[source_idx], input.data[input_index].GetType());
 				source_sel[source_idx] = SljitNormalizedSourceSelectionData(formats[source_idx]);
-				source_validity[source_idx] = formats[source_idx].validity.GetData();
-				source_can_have_null = source_can_have_null || formats[source_idx].validity.CanHaveNull();
+				source_validity[source_idx] =
+				    SljitNormalizedSourceValidityData(formats[source_idx], source_sel[source_idx], execute_sel, count);
+				source_can_have_null = source_can_have_null || source_validity[source_idx] != nullptr;
 				flat_no_selection = flat_no_selection && source_sel[source_idx] == nullptr;
 				flat_all_valid =
 				    flat_all_valid && source_sel[source_idx] == nullptr && source_validity[source_idx] == nullptr;
+				all_valid = all_valid && source_validity[source_idx] == nullptr;
 			}
 			native_input.source_data_array = source_data.data();
 			native_input.source_sel_array = source_sel.data();
 			native_input.source_validity_array = source_validity.data();
 			native_input.expression_tree_flat_no_selection = flat_no_selection;
 			native_input.expression_tree_flat_all_valid = flat_all_valid;
+			native_input.expression_tree_all_valid = all_valid;
 		}
 
 		SljitNativePredicateSourceAdapter predicate_sources;
@@ -556,6 +671,7 @@ private:
 		bool source_can_have_null = false;
 		bool flat_no_selection = false;
 		bool flat_all_valid = false;
+		bool all_valid = false;
 	};
 
 	struct SljitRegionExecutionScratch {
@@ -1404,6 +1520,7 @@ public:
 			native_input.source_data = predicate_sources.source_data.data();
 			native_input.source_sel = predicate_sources.source_sel.data();
 			native_input.source_validity = predicate_sources.source_validity.data();
+			native_input.sources_all_valid = predicate_sources.sources_all_valid;
 			native_input.execute_sel = nullptr;
 			native_input.result_data = nullptr;
 			native_input.result_validity = nullptr;
@@ -1422,7 +1539,7 @@ public:
 				throw InternalException("SLJIT typed filter expression has no generated selector");
 			}
 			SljitNativeVectorInput native_input;
-			adapter_scratch.PrepareExpressionTree(input, expression, native_input, nullptr);
+			adapter_scratch.PrepareExpressionTree(input, expression, native_input, nullptr, input.size());
 			native_input.execute_sel = nullptr;
 			native_input.true_sel = filter_selection.data();
 			native_input.false_sel = nullptr;
@@ -2279,9 +2396,9 @@ public:
 			auto &reservation = scratch.direct_append_reservation;
 			DirectAppendProfile direct_append_profile;
 			auto prepare_stage_start = SljitRegionStageStart(runtime);
-			auto direct_result = ExecutionPrepareDirectAppend(binding.append_sink, op.output_types,
-			                                                  input.size() - source_offset, reservation, blocker,
-			                                                  &direct_append_profile);
+			auto direct_result =
+			    ExecutionPrepareDirectAppend(binding.append_sink, op.output_types, input.size() - source_offset,
+			                                 reservation, blocker, &direct_append_profile);
 			prepare_stage_accumulator.Add(prepare_stage_start);
 			if (direct_result == ExecutionOperatorBindResult::DEFERRED) {
 				if (source_offset > 0) {
@@ -2626,6 +2743,7 @@ public:
 			native_input.source_data = predicate_sources.source_data.data();
 			native_input.source_sel = predicate_sources.source_sel.data();
 			native_input.source_validity = predicate_sources.source_validity.data();
+			native_input.sources_all_valid = predicate_sources.sources_all_valid;
 			native_input.execute_sel = execute_sel ? execute_sel->data() : nullptr;
 			native_input.result_data = reinterpret_cast<data_ptr_t>(FlatVector::GetDataMutable<bool>(result));
 			native_input.result_validity = result_validity.GetData();
@@ -2657,6 +2775,7 @@ public:
 				native_input.source_data = predicate_sources.source_data.data();
 				native_input.source_sel = predicate_sources.source_sel.data();
 				native_input.source_validity = predicate_sources.source_validity.data();
+				native_input.sources_all_valid = predicate_sources.sources_all_valid;
 				native_input.execute_sel = execute_sel ? execute_sel->data() : nullptr;
 				native_input.result_data = nullptr;
 				native_input.result_validity = result_validity.GetData();
@@ -2675,7 +2794,7 @@ public:
 		if (plan.kind == SljitNativeRegionExpressionKind::EXPRESSION_TREE ||
 		    plan.kind == SljitNativeRegionExpressionKind::TYPED_EXPRESSION_TREE) {
 			SljitNativeVectorInput native_input;
-			adapter_scratch.PrepareExpressionTree(input, expr, native_input, execute_sel);
+			adapter_scratch.PrepareExpressionTree(input, expr, native_input, execute_sel, count);
 			auto result_kind = plan.kind == SljitNativeRegionExpressionKind::EXPRESSION_TREE
 			                       ? SljitNativeIntegerKind::DECIMAL64
 			                       : plan.integer_kind;
@@ -3070,13 +3189,160 @@ public:
 			if (!plan.expression_tree) {
 				throw InternalException("SLJIT aggregate primitive expression-tree payload is missing IR");
 			}
-			adapter_scratch.PrepareExpressionTree(input, payload, native_input, execute_sel);
+			adapter_scratch.PrepareExpressionTree(input, payload, native_input, execute_sel, count);
 			break;
 		}
 		default:
 			throw InternalException("SLJIT aggregate primitive payload has no runtime input adapter");
 		}
 
+		function(&native_input);
+		if (native_input.error) {
+			std::rethrow_exception(native_input.error);
+		}
+	}
+
+	bool FusedAggregatePayloadsUseTypedExpressionTrees(vector<SljitExecutableRegionExpression> &payloads,
+	                                                   const vector<ExecutionRegionAggregateInput> &aggregates) {
+		if (payloads.size() != aggregates.size()) {
+			return false;
+		}
+		bool has_typed_payload = false;
+		for (idx_t payload_idx = 0; payload_idx < payloads.size(); payload_idx++) {
+			if (aggregates[payload_idx].primitive_update_kind == AggregatePrimitiveUpdateKind::COUNT_STAR) {
+				continue;
+			}
+			if (payloads[payload_idx].plan.kind == SljitNativeRegionExpressionKind::TYPED_EXPRESSION_TREE) {
+				has_typed_payload = true;
+				continue;
+			}
+			if (payloads[payload_idx].plan.kind == SljitNativeRegionExpressionKind::REFERENCE) {
+				continue;
+			}
+			return false;
+		}
+		return has_typed_payload;
+	}
+
+	void ExecuteFusedTypedExpressionAggregatePayloadUpdate(
+	    vector<SljitExecutableRegionExpression> &payloads, SljitNativeAggregateUpdateFunction function,
+	    const vector<ExecutionRegionAggregateInput> &aggregates,
+	    const vector<const ExecutionPrimitiveAggregateUpdateLane *> &lanes, DataChunk &input,
+	    const SelectionVector *execute_sel, idx_t count, SljitAggregatePayloadAdapterScratch &adapter_scratch) {
+		optional_ptr<const vector<idx_t>> combined_sources;
+		for (idx_t payload_idx = 0; payload_idx < payloads.size(); payload_idx++) {
+			if (aggregates[payload_idx].primitive_update_kind == AggregatePrimitiveUpdateKind::COUNT_STAR) {
+				continue;
+			}
+			if (payloads[payload_idx].input_source_indices.empty()) {
+				throw InternalException("SLJIT fused typed aggregate payload is missing combined sources");
+			}
+			if (!combined_sources) {
+				combined_sources = payloads[payload_idx].input_source_indices;
+			} else if (*combined_sources != payloads[payload_idx].input_source_indices) {
+				throw InternalException("SLJIT fused typed aggregate payload sources are not normalized");
+			}
+		}
+		if (!combined_sources) {
+			throw InternalException("SLJIT fused typed aggregate payload has no typed payloads");
+		}
+
+		adapter_scratch.PrepareFiltered(combined_sources->size(), aggregates.size());
+		auto &source_formats = adapter_scratch.source_formats;
+		auto &source_data = adapter_scratch.source_data;
+		auto &source_sel = adapter_scratch.source_sel;
+		auto &source_validity = adapter_scratch.source_validity;
+		auto &aggregate_int64_values = adapter_scratch.aggregate_int64_values;
+		auto &aggregate_hugeint_values = adapter_scratch.aggregate_hugeint_values;
+		auto &aggregate_state_is_sets = adapter_scratch.aggregate_state_is_sets;
+		auto &aggregate_row_counts = adapter_scratch.aggregate_row_counts;
+
+		for (idx_t payload_idx = 0; payload_idx < aggregates.size(); payload_idx++) {
+			auto lane = lanes[payload_idx];
+			if (!lane) {
+				throw InternalException("SLJIT fused typed aggregate primitive lane missing for aggregate %llu",
+				                        static_cast<unsigned long long>(aggregates[payload_idx].aggregate_index));
+			}
+			auto &aggregate = aggregates[payload_idx];
+			if (lane->kind != aggregate.primitive_update_kind) {
+				throw InternalException("SLJIT fused typed aggregate primitive lane kind mismatch");
+			}
+			if (lane->kind == AggregatePrimitiveUpdateKind::COUNT_STAR) {
+				if (!lane->ready || !lane->sum_int64_value || !lane->row_count) {
+					auto blocker = lane->blocker.empty() ? "aggregate-count-star-lane-incomplete" : lane->blocker;
+					throw InternalException("SLJIT fused typed aggregate count-star lane is incomplete: %s",
+					                        blocker.c_str());
+				}
+				aggregate_int64_values[payload_idx] = lane->sum_int64_value;
+				aggregate_row_counts[payload_idx] = lane->row_count;
+				continue;
+			}
+			if (lane->kind != AggregatePrimitiveUpdateKind::SUM_INT64 &&
+			    lane->kind != AggregatePrimitiveUpdateKind::SUM_HUGEINT) {
+				throw InternalException("SLJIT fused typed aggregate primitive lane has unsupported state kind");
+			}
+			if (payloads[payload_idx].plan.return_type.InternalType() != lane->payload_type) {
+				throw InternalException("SLJIT fused typed aggregate primitive payload type mismatch");
+			}
+			if (payloads[payload_idx].plan.kind == SljitNativeRegionExpressionKind::REFERENCE) {
+				if (payloads[payload_idx].plan.source_index >= combined_sources->size()) {
+					throw InternalException("SLJIT fused typed aggregate reference source is out of range");
+				}
+			} else if (payloads[payload_idx].plan.kind != SljitNativeRegionExpressionKind::TYPED_EXPRESSION_TREE ||
+			           !payloads[payload_idx].plan.expression_tree) {
+				throw InternalException("SLJIT fused typed aggregate payload is unsupported");
+			}
+			const auto has_sum_state =
+			    (lane->kind == AggregatePrimitiveUpdateKind::SUM_INT64 && lane->sum_int64_value) ||
+			    (lane->kind == AggregatePrimitiveUpdateKind::SUM_HUGEINT && lane->sum_hugeint_value);
+			if (!lane->ready || !has_sum_state || !lane->state_is_set || !lane->row_count) {
+				auto blocker = lane->blocker.empty() ? "aggregate-primitive-lane-incomplete" : lane->blocker;
+				throw InternalException("SLJIT fused typed aggregate primitive lane is incomplete: %s",
+				                        blocker.c_str());
+			}
+			if (lane->kind == AggregatePrimitiveUpdateKind::SUM_INT64) {
+				aggregate_int64_values[payload_idx] = lane->sum_int64_value;
+			} else {
+				aggregate_hugeint_values[payload_idx] = lane->sum_hugeint_value;
+			}
+			aggregate_state_is_sets[payload_idx] = lane->state_is_set;
+			aggregate_row_counts[payload_idx] = lane->row_count;
+		}
+
+		bool flat_no_selection = execute_sel == nullptr;
+		bool flat_all_valid = execute_sel == nullptr;
+		bool all_valid = true;
+		for (idx_t source_idx = 0; source_idx < combined_sources->size(); source_idx++) {
+			auto input_index = (*combined_sources)[source_idx];
+			if (input_index >= input.ColumnCount()) {
+				throw InternalException("SLJIT fused typed aggregate expression-tree source is out of range");
+			}
+			input.data[input_index].ToUnifiedFormat(source_formats[source_idx]);
+			source_data[source_idx] =
+			    SljitTypedExpressionTreeSourceData(source_formats[source_idx], input.data[input_index].GetType());
+			source_sel[source_idx] = SljitNormalizedSourceSelectionData(source_formats[source_idx]);
+			source_validity[source_idx] = SljitNormalizedSourceValidityData(source_formats[source_idx],
+			                                                                source_sel[source_idx], execute_sel, count);
+			flat_no_selection = flat_no_selection && source_sel[source_idx] == nullptr;
+			flat_all_valid =
+			    flat_all_valid && source_sel[source_idx] == nullptr && source_validity[source_idx] == nullptr;
+			all_valid = all_valid && source_validity[source_idx] == nullptr;
+		}
+
+		SljitNativeVectorInput native_input;
+		native_input.execute_sel = execute_sel ? execute_sel->data() : nullptr;
+		native_input.source_data_array = source_data.data();
+		native_input.source_sel_array = source_sel.data();
+		native_input.source_validity_array = source_validity.data();
+		native_input.expression_tree_flat_no_selection = flat_no_selection;
+		native_input.expression_tree_flat_all_valid = flat_all_valid;
+		native_input.expression_tree_all_valid = all_valid;
+		native_input.aggregate_int64_values = aggregate_int64_values.data();
+		native_input.aggregate_hugeint_values = aggregate_hugeint_values.data();
+		native_input.aggregate_state_is_sets = aggregate_state_is_sets.data();
+		native_input.aggregate_row_counts = aggregate_row_counts.data();
+		native_input.count = count;
+		native_input.has_error = false;
 		function(&native_input);
 		if (native_input.error) {
 			std::rethrow_exception(native_input.error);
@@ -3094,6 +3360,11 @@ public:
 		}
 		if (aggregates.size() != payloads.size()) {
 			throw InternalException("SLJIT fused aggregate primitive payload count mismatch");
+		}
+		if (FusedAggregatePayloadsUseTypedExpressionTrees(payloads, aggregates)) {
+			ExecuteFusedTypedExpressionAggregatePayloadUpdate(payloads, function, aggregates, lanes, input, execute_sel,
+			                                                  count, adapter_scratch);
+			return;
 		}
 
 		adapter_scratch.PrepareUngrouped(payloads.size());
@@ -3148,7 +3419,8 @@ public:
 				input.data[plan.source_index].ToUnifiedFormat(source_formats[payload_idx]);
 				source_data[payload_idx] = NativeIntegerSourceData(source_formats[payload_idx], plan.integer_kind);
 				source_sel[payload_idx] = SljitNormalizedSourceSelectionData(source_formats[payload_idx]);
-				source_validity[payload_idx] = source_formats[payload_idx].validity.GetData();
+				source_validity[payload_idx] = SljitNormalizedSourceValidityData(
+				    source_formats[payload_idx], source_sel[payload_idx], execute_sel, count);
 				break;
 			case SljitNativeRegionExpressionKind::INTEGER_BINARY_CONSTANT:
 				if (plan.source_index >= input.ColumnCount()) {
@@ -3157,7 +3429,8 @@ public:
 				input.data[plan.source_index].ToUnifiedFormat(source_formats[payload_idx]);
 				source_data[payload_idx] = NativeIntegerSourceData(source_formats[payload_idx], plan.integer_kind);
 				source_sel[payload_idx] = SljitNormalizedSourceSelectionData(source_formats[payload_idx]);
-				source_validity[payload_idx] = source_formats[payload_idx].validity.GetData();
+				source_validity[payload_idx] = SljitNormalizedSourceValidityData(
+				    source_formats[payload_idx], source_sel[payload_idx], execute_sel, count);
 				constants[payload_idx] = plan.constant;
 				break;
 			case SljitNativeRegionExpressionKind::INTEGER_BINARY_REFERENCES:
@@ -3168,11 +3441,13 @@ public:
 				input.data[plan.right_source_index].ToUnifiedFormat(right_source_formats[payload_idx]);
 				source_data[payload_idx] = NativeIntegerSourceData(source_formats[payload_idx], plan.integer_kind);
 				source_sel[payload_idx] = SljitNormalizedSourceSelectionData(source_formats[payload_idx]);
-				source_validity[payload_idx] = source_formats[payload_idx].validity.GetData();
+				source_validity[payload_idx] = SljitNormalizedSourceValidityData(
+				    source_formats[payload_idx], source_sel[payload_idx], execute_sel, count);
 				right_source_data[payload_idx] =
 				    NativeIntegerSourceData(right_source_formats[payload_idx], plan.integer_kind);
 				right_source_sel[payload_idx] = SljitNormalizedSourceSelectionData(right_source_formats[payload_idx]);
-				right_source_validity[payload_idx] = right_source_formats[payload_idx].validity.GetData();
+				right_source_validity[payload_idx] = SljitNormalizedSourceValidityData(
+				    right_source_formats[payload_idx], right_source_sel[payload_idx], execute_sel, count);
 				break;
 			default:
 				throw InternalException("SLJIT fused aggregate primitive payload has no runtime input adapter");
@@ -3262,7 +3537,8 @@ public:
 			input.data[plan.source_index].ToUnifiedFormat(source_formats[payload_idx]);
 			source_data[payload_idx] = NativeIntegerSourceData(source_formats[payload_idx], plan.integer_kind);
 			source_sel[payload_idx] = SljitNormalizedSourceSelectionData(source_formats[payload_idx]);
-			source_validity[payload_idx] = source_formats[payload_idx].validity.GetData();
+			source_validity[payload_idx] =
+			    SljitNormalizedSourceValidityData(source_formats[payload_idx], source_sel[payload_idx], input.size());
 		}
 
 		grouped_state_addresses.Flatten();
@@ -3282,6 +3558,7 @@ public:
 	void ExecuteFusedPerfectHashGroupedPrimitiveAggregatePayloadUpdate(
 	    vector<SljitExecutableRegionExpression> &payloads, SljitNativeAggregateUpdateFunction function,
 	    const vector<ExecutionRegionAggregateInput> &aggregates, const vector<ExecutionRegionGroupInput> &groups,
+	    const vector<SljitNativeRegionExpressionPlan> &group_expressions,
 	    const ExecutionRegionAggregateContract &contract,
 	    const vector<const ExecutionPrimitiveAggregateUpdateLane *> &lanes,
 	    const ExecutionPerfectAggregateStateAddressLayout &layout, DataChunk &input, idx_t count,
@@ -3305,28 +3582,93 @@ public:
 		    contract.perfect_group_minima.size() != groups.size()) {
 			throw InternalException("SLJIT fused perfect-hash aggregate group contract is incomplete");
 		}
+		if (!group_expressions.empty() && group_expressions.size() != groups.size()) {
+			throw InternalException("SLJIT fused perfect-hash aggregate group expression count mismatch");
+		}
 
-		adapter_scratch.PreparePerfectHash(payloads.size(), groups.size());
+		const bool typed_payloads = FusedAggregatePayloadsUseTypedExpressionTrees(payloads, aggregates);
+		optional_ptr<const vector<idx_t>> combined_sources;
+		if (typed_payloads) {
+			for (idx_t payload_idx = 0; payload_idx < payloads.size(); payload_idx++) {
+				if (aggregates[payload_idx].primitive_update_kind == AggregatePrimitiveUpdateKind::COUNT_STAR) {
+					continue;
+				}
+				if (payloads[payload_idx].input_source_indices.empty()) {
+					throw InternalException("SLJIT fused perfect-hash typed aggregate payload is missing sources");
+				}
+				if (!combined_sources) {
+					combined_sources = payloads[payload_idx].input_source_indices;
+				} else if (*combined_sources != payloads[payload_idx].input_source_indices) {
+					throw InternalException(
+					    "SLJIT fused perfect-hash typed aggregate payload sources are not normalized");
+				}
+			}
+			if (!combined_sources) {
+				throw InternalException("SLJIT fused perfect-hash typed aggregate payload has no typed payloads");
+			}
+			adapter_scratch.PreparePerfectHash(combined_sources->size(), groups.size());
+		} else {
+			adapter_scratch.PreparePerfectHash(payloads.size(), groups.size());
+		}
 		auto &group_formats = adapter_scratch.group_formats;
 		auto &group_data = adapter_scratch.group_data;
 		auto &group_sel = adapter_scratch.group_sel;
 		auto &group_validity = adapter_scratch.group_validity;
+		bool flat_all_valid = true;
+		bool all_valid = true;
 		for (idx_t group_idx = 0; group_idx < groups.size(); group_idx++) {
 			auto &group = groups[group_idx];
-			if (!group.supported_reference || group.input_index >= input.ColumnCount()) {
+			if (!group.supported_reference) {
 				throw InternalException("SLJIT fused perfect-hash aggregate group source is unsupported");
 			}
-			input.data[group.input_index].ToUnifiedFormat(group_formats[group_idx]);
-			group_data[group_idx] =
-			    NativeIntegerSourceData(group_formats[group_idx], SljitPerfectHashGroupIntegerKind(group.type));
+			SljitNativeRegionExpressionPlan reference_group;
+			reference_group.kind = SljitNativeRegionExpressionKind::REFERENCE;
+			reference_group.return_type = group.type;
+			reference_group.source_index = group.input_index;
+			auto &group_expression = group_expressions.empty() ? reference_group : group_expressions[group_idx];
+			if (group_expression.return_type.InternalType() != group.type.InternalType() ||
+			    group_expression.source_index >= input.ColumnCount()) {
+				throw InternalException("SLJIT fused perfect-hash aggregate group expression is unsupported");
+			}
+			input.data[group_expression.source_index].ToUnifiedFormat(group_formats[group_idx]);
+			if (group_expression.kind == SljitNativeRegionExpressionKind::REFERENCE) {
+				group_data[group_idx] =
+				    NativeIntegerSourceData(group_formats[group_idx], SljitPerfectHashGroupIntegerKind(group.type));
+			} else if (group_expression.kind == SljitNativeRegionExpressionKind::STRING_COMPRESS &&
+			           group.type.InternalType() == PhysicalType::UINT8 &&
+			           group_expression.string_compress_target_size == sizeof(uint8_t)) {
+				group_data[group_idx] = reinterpret_cast<const_data_ptr_t>(group_formats[group_idx].data);
+			} else {
+				throw InternalException("SLJIT fused perfect-hash aggregate group expression is unsupported");
+			}
 			group_sel[group_idx] = SljitNormalizedSourceSelectionData(group_formats[group_idx]);
-			group_validity[group_idx] = group_formats[group_idx].validity.GetData();
+			group_validity[group_idx] =
+			    SljitNormalizedSourceValidityData(group_formats[group_idx], group_sel[group_idx], input.size());
+			flat_all_valid = flat_all_valid && group_sel[group_idx] == nullptr && group_validity[group_idx] == nullptr;
+			all_valid = all_valid && group_validity[group_idx] == nullptr;
 		}
 
 		auto &source_formats = adapter_scratch.source_formats;
 		auto &source_data = adapter_scratch.source_data;
 		auto &source_sel = adapter_scratch.source_sel;
 		auto &source_validity = adapter_scratch.source_validity;
+		if (typed_payloads) {
+			for (idx_t source_idx = 0; source_idx < combined_sources->size(); source_idx++) {
+				auto input_index = (*combined_sources)[source_idx];
+				if (input_index >= input.ColumnCount()) {
+					throw InternalException("SLJIT fused perfect-hash typed aggregate source is out of range");
+				}
+				input.data[input_index].ToUnifiedFormat(source_formats[source_idx]);
+				source_data[source_idx] =
+				    SljitTypedExpressionTreeSourceData(source_formats[source_idx], input.data[input_index].GetType());
+				source_sel[source_idx] = SljitNormalizedSourceSelectionData(source_formats[source_idx]);
+				source_validity[source_idx] =
+				    SljitNormalizedSourceValidityData(source_formats[source_idx], source_sel[source_idx], input.size());
+				flat_all_valid =
+				    flat_all_valid && source_sel[source_idx] == nullptr && source_validity[source_idx] == nullptr;
+				all_valid = all_valid && source_validity[source_idx] == nullptr;
+			}
+		}
 		for (idx_t payload_idx = 0; payload_idx < payloads.size(); payload_idx++) {
 			auto &aggregate = aggregates[payload_idx];
 			auto lane = lanes[payload_idx];
@@ -3354,25 +3696,68 @@ public:
 			if (!AggregatePrimitiveUpdateRequiresPayload(lane->kind)) {
 				throw InternalException("SLJIT fused perfect-hash aggregate primitive lane has unsupported state kind");
 			}
-			if (plan.kind != SljitNativeRegionExpressionKind::REFERENCE || plan.source_index >= input.ColumnCount()) {
-				throw InternalException("SLJIT fused perfect-hash aggregate payload source is unsupported");
+			if (typed_payloads) {
+				if (plan.kind == SljitNativeRegionExpressionKind::REFERENCE) {
+					if (plan.source_index >= combined_sources->size()) {
+						throw InternalException("SLJIT fused perfect-hash typed aggregate source is out of range");
+					}
+				} else if (plan.kind != SljitNativeRegionExpressionKind::TYPED_EXPRESSION_TREE ||
+				           !plan.expression_tree) {
+					throw InternalException("SLJIT fused perfect-hash typed aggregate payload is unsupported");
+				}
+			} else {
+				if (plan.kind != SljitNativeRegionExpressionKind::REFERENCE ||
+				    plan.source_index >= input.ColumnCount()) {
+					throw InternalException("SLJIT fused perfect-hash aggregate payload source is unsupported");
+				}
 			}
 			if (plan.return_type.InternalType() != lane->payload_type) {
 				throw InternalException("SLJIT fused perfect-hash aggregate primitive payload type mismatch");
 			}
+			if (typed_payloads) {
+				continue;
+			}
 			input.data[plan.source_index].ToUnifiedFormat(source_formats[payload_idx]);
 			source_data[payload_idx] = NativeIntegerSourceData(source_formats[payload_idx], plan.integer_kind);
 			source_sel[payload_idx] = SljitNormalizedSourceSelectionData(source_formats[payload_idx]);
-			source_validity[payload_idx] = source_formats[payload_idx].validity.GetData();
+			source_validity[payload_idx] =
+			    SljitNormalizedSourceValidityData(source_formats[payload_idx], source_sel[payload_idx], input.size());
 		}
 
+		const auto execute_sel = SljitCanonicalizeCommonSelection(source_sel, group_sel);
+		const auto source_common_sel =
+		    typed_payloads && !execute_sel ? SljitCanonicalizeCommonSourceSelection(source_sel) : nullptr;
+		bool flat_no_selection = source_common_sel == nullptr;
+		flat_all_valid = execute_sel == nullptr && source_common_sel == nullptr;
+		all_valid = true;
+		for (idx_t group_idx = 0; group_idx < groups.size(); group_idx++) {
+			flat_no_selection = flat_no_selection && group_sel[group_idx] == nullptr;
+			flat_all_valid = flat_all_valid && group_sel[group_idx] == nullptr && group_validity[group_idx] == nullptr;
+			all_valid = all_valid && group_validity[group_idx] == nullptr;
+		}
+		for (idx_t source_idx = 0; source_idx < source_sel.size(); source_idx++) {
+			flat_no_selection = flat_no_selection && source_sel[source_idx] == nullptr;
+			flat_all_valid =
+			    flat_all_valid && source_sel[source_idx] == nullptr && source_validity[source_idx] == nullptr;
+			all_valid = all_valid && source_validity[source_idx] == nullptr;
+		}
+		const auto group_selection_all_present = SljitAllSelectionsPresent(group_sel);
+
 		SljitNativeVectorInput native_input;
+		native_input.execute_sel = execute_sel;
 		native_input.source_data_array = source_data.data();
 		native_input.source_sel_array = SljitPointerArrayOrNull(source_sel);
+		native_input.source_common_sel = source_common_sel;
 		native_input.source_validity_array = SljitPointerArrayOrNull(source_validity);
 		native_input.group_data_array = group_data.data();
 		native_input.group_sel_array = SljitPointerArrayOrNull(group_sel);
 		native_input.group_validity_array = SljitPointerArrayOrNull(group_validity);
+		if (typed_payloads) {
+			native_input.expression_tree_flat_no_selection = flat_no_selection;
+			native_input.expression_tree_flat_all_valid = flat_all_valid;
+			native_input.expression_tree_all_valid = all_valid;
+			native_input.group_selection_all_present = group_selection_all_present;
+		}
 		native_input.perfect_hash_state_data = layout.data;
 		native_input.perfect_hash_group_is_set = layout.group_is_set;
 		native_input.perfect_hash_total_groups = layout.total_groups;
@@ -4073,6 +4458,7 @@ public:
 		auto &source_validity = adapter_scratch.source_validity;
 		bool flat_no_selection = true;
 		bool flat_all_valid = true;
+		bool all_valid = true;
 		for (idx_t source_idx = 0; source_idx < filtered_update.input_source_indices.size(); source_idx++) {
 			auto input_index = filtered_update.input_source_indices[source_idx];
 			if (input_index >= input.ColumnCount()) {
@@ -4082,10 +4468,12 @@ public:
 			source_data[source_idx] =
 			    SljitTypedExpressionTreeSourceData(source_formats[source_idx], input.data[input_index].GetType());
 			source_sel[source_idx] = SljitNormalizedSourceSelectionData(source_formats[source_idx]);
-			source_validity[source_idx] = source_formats[source_idx].validity.GetData();
+			source_validity[source_idx] =
+			    SljitNormalizedSourceValidityData(source_formats[source_idx], source_sel[source_idx], count);
 			flat_no_selection = flat_no_selection && source_sel[source_idx] == nullptr;
 			flat_all_valid =
 			    flat_all_valid && source_sel[source_idx] == nullptr && source_validity[source_idx] == nullptr;
+			all_valid = all_valid && source_validity[source_idx] == nullptr;
 		}
 
 		SljitNativeVectorInput native_input;
@@ -4094,6 +4482,7 @@ public:
 		native_input.source_validity_array = source_validity.data();
 		native_input.expression_tree_flat_no_selection = flat_no_selection;
 		native_input.expression_tree_flat_all_valid = flat_all_valid;
+		native_input.expression_tree_all_valid = all_valid;
 		native_input.aggregate_int64_values = aggregate_int64_values.data();
 		native_input.aggregate_hugeint_values = aggregate_hugeint_values.data();
 		native_input.aggregate_state_is_sets = aggregate_state_is_sets.data();
@@ -4207,7 +4596,7 @@ public:
 					auto &grouped_state = binding.aggregate_update.grouped_state;
 					ExecuteFusedPerfectHashGroupedPrimitiveAggregatePayloadUpdate(
 					    op.aggregate_update.payloads, op.aggregate_update.fused_payload_update_function, aggregates,
-					    op.aggregate_update.plan.sink_info.groups,
+					    op.aggregate_update.plan.sink_info.groups, op.aggregate_update.plan.group_expressions,
 					    op.aggregate_update.plan.sink_info.aggregate_contract, payload_lanes,
 					    grouped_state.perfect_hash_layout, input, input.size(), payload_scratch);
 				} else if (op.aggregate_update.plan.use_grouped_state_addresses) {

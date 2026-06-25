@@ -1,5 +1,7 @@
 #include "test_jit_helpers.hpp"
 
+#include <cmath>
+
 using namespace duckdb;
 
 static idx_t CompiledTypedExpressionProjectionCodeSize(ExecutionRegionManager &manager) {
@@ -491,7 +493,7 @@ TEST_CASE("JIT lowers scalar casts and arithmetic as generated code", "[api][jit
 
 	ClearJitTrace(manager, true);
 	auto result = con.Query("SELECT i::UTINYINT AS u, d + e AS add_ref, d - 2.0 AS sub_const, "
-	                        "       10.0 - d AS sub_left_const, d * e AS mul_ref, d / 2.0 AS half "
+	                        "       10.0 - d AS sub_left_const, d * e AS mul_ref, d / 2.0 AS half, d / e AS ratio "
 	                        "FROM jit_cast_arithmetic WHERE i < 5 ORDER BY i");
 	REQUIRE_NO_FAIL(*result);
 	REQUIRE(result->RowCount() == 5);
@@ -501,15 +503,17 @@ TEST_CASE("JIT lowers scalar casts and arithmetic as generated code", "[api][jit
 	REQUIRE(result->GetValue(3, 4).GetValue<double>() == 5.0);
 	REQUIRE(result->GetValue(4, 4).GetValue<double>() == 30.0);
 	REQUIRE(result->GetValue(5, 4).GetValue<double>() == 2.5);
+	REQUIRE(result->GetValue(6, 4).GetValue<double>() == 5.0 / 6.0);
 
 	RequireNativeSljitIr(manager, "signed-to-unsigned-cast");
 	RequireNativeSljitIr(manager, "double-add-references");
 	RequireNativeSljitIr(manager, "double-subtract-constant");
 	RequireNativeSljitIr(manager, "double-multiply-references");
 	RequireNativeSljitIr(manager, "double-divide-constant");
+	RequireNativeSljitIr(manager, "double-divide-references");
 }
 
-TEST_CASE("JIT lowers semantics-independent casted numeric double division as generated code", "[api][jit]") {
+TEST_CASE("JIT lowers casted numeric double division as generated code", "[api][jit]") {
 	DuckDB db;
 	Connection con(db);
 	auto &manager = ExecutionRegionManager::Get(*con.context);
@@ -521,7 +525,8 @@ TEST_CASE("JIT lowers semantics-independent casted numeric double division as ge
 	                          "(1, 100.00, 4), "
 	                          "(2, 12.50, 5), "
 	                          "(3, NULL, 2), "
-	                          "(4, 7.00, NULL)"));
+	                          "(4, 7.00, NULL), "
+	                          "(5, 8.00, 0)"));
 
 	ClearJitTrace(manager, true);
 	auto result = con.Query("CREATE TEMP TABLE jit_casted_double_division_result AS "
@@ -530,18 +535,18 @@ TEST_CASE("JIT lowers semantics-independent casted numeric double division as ge
 	REQUIRE_NO_FAIL(*result);
 	result = con.Query("SELECT ratio FROM jit_casted_double_division_result ORDER BY id");
 	REQUIRE_NO_FAIL(*result);
-	REQUIRE(result->RowCount() == 4);
+	REQUIRE(result->RowCount() == 5);
 	REQUIRE(result->GetValue(0, 0).GetValue<double>() == 25.0);
 	REQUIRE(result->GetValue(0, 1).GetValue<double>() == 2.5);
 	REQUIRE(result->GetValue(0, 2).IsNull());
 	REQUIRE(result->GetValue(0, 3).IsNull());
+	REQUIRE(std::isinf(result->GetValue(0, 4).GetValue<double>()));
 
-	for (auto &event : manager.GetEvents()) {
-		const auto generated_double_reference_divide = IsCompiledSljitRegionEvent(event) &&
-		                                               EventExecutionMode(event) == "native" &&
-		                                               StringUtil::Contains(event.ir, "double-divide-references");
-		REQUIRE_FALSE(generated_double_reference_divide);
-	}
+	RequireNativeSljitIr(manager, "double-divide-references", [](const ExecutionRegionEvent &event) {
+		REQUIRE(StringUtil::Contains(event.ir, "logical=DECIMAL(38,2),physical=INT128"));
+		REQUIRE(StringUtil::Contains(event.ir, "logical=BIGINT,physical=INT64"));
+		REQUIRE_FALSE(StringUtil::Contains(event.reason, "sljit-expression-lowering-unsupported"));
+	});
 
 	ClearJitTrace(manager, true);
 	result = con.Query("CREATE TEMP TABLE jit_casted_double_constant_division_result AS "
@@ -550,11 +555,12 @@ TEST_CASE("JIT lowers semantics-independent casted numeric double division as ge
 	REQUIRE_NO_FAIL(*result);
 	result = con.Query("SELECT ratio FROM jit_casted_double_constant_division_result ORDER BY id");
 	REQUIRE_NO_FAIL(*result);
-	REQUIRE(result->RowCount() == 4);
+	REQUIRE(result->RowCount() == 5);
 	REQUIRE(result->GetValue(0, 0).GetValue<double>() == 100.0 / 7.0);
 	REQUIRE(result->GetValue(0, 1).GetValue<double>() == 12.5 / 7.0);
 	REQUIRE(result->GetValue(0, 2).IsNull());
 	REQUIRE(result->GetValue(0, 3).GetValue<double>() == 1.0);
+	REQUIRE(result->GetValue(0, 4).GetValue<double>() == 8.0 / 7.0);
 
 	RequireNativeSljitIr(manager, "double-divide-constant", [](const ExecutionRegionEvent &event) {
 		REQUIRE(StringUtil::Contains(event.ir, "logical=DECIMAL(38,2),physical=INT128"));
