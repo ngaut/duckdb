@@ -324,6 +324,15 @@ static bool SljitHashJoinCanUseFlatAllValidNoChainProbe(const SljitNativeHashJoi
 	       input.count <= input.output_capacity;
 }
 
+static bool SljitHashJoinCanUseSelectedAllValidNoChainProbe(const SljitNativeHashJoinProbePlan &plan,
+                                                            const ExecutionHashJoinTableLayout &layout,
+                                                            const SljitNativeHashJoinProbeInput &input) {
+	return !plan.residual_predicate && !plan.mark_build_match &&
+	       SljitHashJoinMatchedProbeOutputMode(plan.output_mode) && !layout.chains_longer_than_one &&
+	       input.source_sel && !input.source_validity && !input.resume_row_pointer &&
+	       input.count <= input.output_capacity;
+}
+
 static bool TryExecuteFlatAllValidInt64PairNoChainProbe(const SljitNativeHashJoinProbePlan &plan,
                                                         const ExecutionHashJoinTableLayout &layout,
                                                         SljitNativeHashJoinProbeInput &input) {
@@ -407,6 +416,113 @@ static bool TryExecuteFlatAllValidInt64PairNoChainProbe(const SljitNativeHashJoi
 }
 
 template <class T>
+static void ExecuteSelectedAllValidSingleKeyNoChainProbe(const SljitNativeHashJoinProbePlan &plan,
+                                                         SljitNativeHashJoinProbeInput &input) {
+	const auto key_data = reinterpret_cast<const T *>(input.source_data[0]);
+	const auto key_sel = input.source_sel[0];
+	const auto entries = reinterpret_cast<const ht_entry_t *>(input.entries);
+	auto selected_count = input.selected_count;
+	const auto key_offset = plan.keys[0].key_layout_offset;
+
+	auto row_idx = input.input_offset;
+	if (row_idx < input.count) {
+		auto source_idx = key_sel[row_idx];
+		auto key = key_data[source_idx];
+		auto current_hash = Hash<T>(key);
+		auto salt = ht_entry_t::ExtractSalt(current_hash);
+		auto ht_offset = UnsafeNumericCast<idx_t>(current_hash & input.bitmask);
+
+		while (true) {
+			const auto next_row_idx = row_idx + 1;
+			const bool has_next = next_row_idx < input.count;
+			T next_key = 0;
+			hash_t next_hash = 0;
+			hash_t next_salt = 0;
+			idx_t next_ht_offset = 0;
+			if (has_next) {
+				next_key = key_data[key_sel[next_row_idx]];
+				next_hash = Hash<T>(next_key);
+				next_salt = ht_entry_t::ExtractSalt(next_hash);
+				next_ht_offset = UnsafeNumericCast<idx_t>(next_hash & input.bitmask);
+				SljitPrefetchHashJoinEntry(entries, next_ht_offset);
+			}
+
+			while (true) {
+				const auto &entry = entries[ht_offset];
+				if (!entry.IsOccupied()) {
+					break;
+				}
+				if (!input.use_salt || entry.GetSalt() == salt) {
+					auto row_location = entry.GetPointer();
+					SljitPrefetchHashJoinRow(row_location, key_offset);
+					if (SljitHashJoinKeysEqual<T>(row_location, key_offset, key)) {
+						input.row_pointers[selected_count] = row_location;
+						input.match_sel[selected_count] = UnsafeNumericCast<sel_t>(row_idx);
+						selected_count++;
+						break;
+					}
+				}
+				ht_offset = UnsafeNumericCast<idx_t>((ht_offset + 1) & input.bitmask);
+			}
+			if (!has_next) {
+				break;
+			}
+			row_idx = next_row_idx;
+			key = next_key;
+			salt = next_salt;
+			ht_offset = next_ht_offset;
+		}
+	}
+
+	input.selected_count = selected_count;
+	input.input_offset = input.count;
+	input.resume_row_pointer = nullptr;
+	input.finished = true;
+}
+
+static bool TryExecuteSelectedAllValidSingleKeyNoChainProbe(const SljitNativeHashJoinProbePlan &plan,
+                                                            const ExecutionHashJoinTableLayout &layout,
+                                                            SljitNativeHashJoinProbeInput &input) {
+	if (plan.keys.size() != 1 || plan.equality_key_count != 1 ||
+	    !SljitHashJoinCanUseSelectedAllValidNoChainProbe(plan, layout, input) || !input.source_sel[0]) {
+		return false;
+	}
+	auto &key = plan.keys[0];
+	if (!key.equality_key || key.null_equal || key.comparison_type != ExecutionRegionComparisonType::EQUAL) {
+		return false;
+	}
+
+	switch (key.key_kind) {
+	case SljitNativeHashJoinKeyKind::INT8:
+		ExecuteSelectedAllValidSingleKeyNoChainProbe<int8_t>(plan, input);
+		return true;
+	case SljitNativeHashJoinKeyKind::UINT8:
+		ExecuteSelectedAllValidSingleKeyNoChainProbe<uint8_t>(plan, input);
+		return true;
+	case SljitNativeHashJoinKeyKind::INT16:
+		ExecuteSelectedAllValidSingleKeyNoChainProbe<int16_t>(plan, input);
+		return true;
+	case SljitNativeHashJoinKeyKind::UINT16:
+		ExecuteSelectedAllValidSingleKeyNoChainProbe<uint16_t>(plan, input);
+		return true;
+	case SljitNativeHashJoinKeyKind::INT32:
+		ExecuteSelectedAllValidSingleKeyNoChainProbe<int32_t>(plan, input);
+		return true;
+	case SljitNativeHashJoinKeyKind::UINT32:
+		ExecuteSelectedAllValidSingleKeyNoChainProbe<uint32_t>(plan, input);
+		return true;
+	case SljitNativeHashJoinKeyKind::INT64:
+		ExecuteSelectedAllValidSingleKeyNoChainProbe<int64_t>(plan, input);
+		return true;
+	case SljitNativeHashJoinKeyKind::UINT64:
+		ExecuteSelectedAllValidSingleKeyNoChainProbe<uint64_t>(plan, input);
+		return true;
+	default:
+		return false;
+	}
+}
+
+template <class T>
 static void ExecuteFlatAllValidSingleKeyNoChainProbe(const SljitNativeHashJoinProbePlan &plan,
                                                      SljitNativeHashJoinProbeInput &input) {
 	const auto key_data = reinterpret_cast<const T *>(input.source_data[0]);
@@ -414,28 +530,52 @@ static void ExecuteFlatAllValidSingleKeyNoChainProbe(const SljitNativeHashJoinPr
 	auto selected_count = input.selected_count;
 	const auto key_offset = plan.keys[0].key_layout_offset;
 
-	for (idx_t row_idx = input.input_offset; row_idx < input.count; row_idx++) {
-		const auto key = key_data[row_idx];
-		auto hash = Hash<T>(key);
-		const auto salt = ht_entry_t::ExtractSalt(hash);
-		auto ht_offset = UnsafeNumericCast<idx_t>(hash & input.bitmask);
+	auto row_idx = input.input_offset;
+	if (row_idx < input.count) {
+		auto key = key_data[row_idx];
+		auto current_hash = Hash<T>(key);
+		auto salt = ht_entry_t::ExtractSalt(current_hash);
+		auto ht_offset = UnsafeNumericCast<idx_t>(current_hash & input.bitmask);
 
 		while (true) {
-			const auto &entry = entries[ht_offset];
-			if (!entry.IsOccupied()) {
-				break;
+			const auto next_row_idx = row_idx + 1;
+			const bool has_next = next_row_idx < input.count;
+			T next_key = 0;
+			hash_t next_hash = 0;
+			hash_t next_salt = 0;
+			idx_t next_ht_offset = 0;
+			if (has_next) {
+				next_key = key_data[next_row_idx];
+				next_hash = Hash<T>(next_key);
+				next_salt = ht_entry_t::ExtractSalt(next_hash);
+				next_ht_offset = UnsafeNumericCast<idx_t>(next_hash & input.bitmask);
+				SljitPrefetchHashJoinEntry(entries, next_ht_offset);
 			}
-			if (!input.use_salt || entry.GetSalt() == salt) {
-				auto row_location = entry.GetPointer();
-				SljitPrefetchHashJoinRow(row_location, key_offset);
-				if (SljitHashJoinKeysEqual<T>(row_location, key_offset, key)) {
-					input.row_pointers[selected_count] = row_location;
-					input.match_sel[selected_count] = UnsafeNumericCast<sel_t>(row_idx);
-					selected_count++;
+
+			while (true) {
+				const auto &entry = entries[ht_offset];
+				if (!entry.IsOccupied()) {
 					break;
 				}
+				if (!input.use_salt || entry.GetSalt() == salt) {
+					auto row_location = entry.GetPointer();
+					SljitPrefetchHashJoinRow(row_location, key_offset);
+					if (SljitHashJoinKeysEqual<T>(row_location, key_offset, key)) {
+						input.row_pointers[selected_count] = row_location;
+						input.match_sel[selected_count] = UnsafeNumericCast<sel_t>(row_idx);
+						selected_count++;
+						break;
+					}
+				}
+				ht_offset = UnsafeNumericCast<idx_t>((ht_offset + 1) & input.bitmask);
 			}
-			ht_offset = UnsafeNumericCast<idx_t>((ht_offset + 1) & input.bitmask);
+			if (!has_next) {
+				break;
+			}
+			row_idx = next_row_idx;
+			key = next_key;
+			salt = next_salt;
+			ht_offset = next_ht_offset;
 		}
 	}
 
@@ -549,6 +689,8 @@ static constexpr const char *SLJIT_FAST_FLAT_ALL_VALID_INT64_PAIR_HASH_JOIN_PROB
     "fast_regular_probe_flat_all_valid_int64_pair_no_chain";
 static constexpr const char *SLJIT_FAST_FLAT_ALL_VALID_SINGLE_KEY_HASH_JOIN_PROBE_STAGE =
     "fast_regular_probe_flat_all_valid_single_key_no_chain";
+static constexpr const char *SLJIT_FAST_SELECTED_ALL_VALID_SINGLE_KEY_HASH_JOIN_PROBE_STAGE =
+    "fast_regular_probe_selected_all_valid_single_key_no_chain";
 static constexpr const char *SLJIT_GENERATED_SELECTED_ALL_VALID_HASH_JOIN_PROBE_STAGE =
     "generated_regular_probe_selected_all_valid_function";
 static constexpr const char *SLJIT_GENERATED_PERFECT_HASH_JOIN_PROBE_STAGE = "generated_perfect_probe_function";
@@ -4637,13 +4779,19 @@ public:
 				                              generated_stage_start);
 			}
 		} else if (use_selected_all_valid_probe) {
-			auto function = EnsureSelectedAllValidRegularHashJoinProbeCode(runtime, op.hash_join_probe, layout.use_salt,
-			                                                               layout.chains_longer_than_one,
-			                                                               layout.dictionary_emission);
-			function(&native_input);
-			RecordSljitRegionStageRuntime(runtime, op_idx, op.kind,
-			                              SLJIT_GENERATED_SELECTED_ALL_VALID_HASH_JOIN_PROBE_STAGE,
-			                              generated_stage_start);
+			if (TryExecuteSelectedAllValidSingleKeyNoChainProbe(op.hash_join_probe.plan, layout, native_input)) {
+				RecordSljitRegionStageRuntime(runtime, op_idx, op.kind,
+				                              SLJIT_FAST_SELECTED_ALL_VALID_SINGLE_KEY_HASH_JOIN_PROBE_STAGE,
+				                              generated_stage_start);
+			} else {
+				auto function = EnsureSelectedAllValidRegularHashJoinProbeCode(
+				    runtime, op.hash_join_probe, layout.use_salt, layout.chains_longer_than_one,
+				    layout.dictionary_emission);
+				function(&native_input);
+				RecordSljitRegionStageRuntime(runtime, op_idx, op.kind,
+				                              SLJIT_GENERATED_SELECTED_ALL_VALID_HASH_JOIN_PROBE_STAGE,
+				                              generated_stage_start);
+			}
 		} else {
 			EnsureRegularHashJoinProbeCode(runtime, op.hash_join_probe);
 			op.hash_join_probe.function(&native_input);

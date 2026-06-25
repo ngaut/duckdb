@@ -235,7 +235,9 @@ TEST_CASE("JIT hash join probe generates native probe with append sink", "[api][
 			    StringUtil::Contains(EventGeneratedStageRuntimeBreakdown(event),
 			                         "hash_join_probe.generated_regular_probe_flat_all_valid_function=") ||
 			    StringUtil::Contains(EventGeneratedStageRuntimeBreakdown(event),
-			                         "hash_join_probe.fast_regular_probe_flat_all_valid_single_key_no_chain=")) {
+			                         "hash_join_probe.fast_regular_probe_flat_all_valid_single_key_no_chain=") ||
+			    StringUtil::Contains(EventGeneratedStageRuntimeBreakdown(event),
+			                         "hash_join_probe.fast_regular_probe_selected_all_valid_single_key_no_chain=")) {
 				found_probe_stage = true;
 			}
 		}
@@ -253,10 +255,55 @@ TEST_CASE("JIT hash join probe generates native probe with append sink", "[api][
 	const bool analyzed_plan_has_probe_stage =
 	    StringUtil::Contains(analyzed_plan, "hash_join_probe.generated_regular_probe_function") ||
 	    StringUtil::Contains(analyzed_plan, "hash_join_probe.generated_regular_probe_flat_all_valid_function") ||
-	    StringUtil::Contains(analyzed_plan, "hash_join_probe.fast_regular_probe_flat_all_valid_single_key_no_chain");
+	    StringUtil::Contains(analyzed_plan, "hash_join_probe.fast_regular_probe_flat_all_valid_single_key_no_chain") ||
+	    StringUtil::Contains(analyzed_plan,
+	                         "hash_join_probe.fast_regular_probe_selected_all_valid_single_key_no_chain");
 	REQUIRE(StringUtil::Contains(analyzed_plan, "\"events\""));
 	REQUIRE(analyzed_plan_has_probe_stage);
 	REQUIRE(StringUtil::Contains(analyzed_plan, "\"hash_join_probe_layout\""));
 	REQUIRE(StringUtil::Contains(analyzed_plan, "\"lazy_codegen_time_us\""));
 	REQUIRE(StringUtil::Contains(analyzed_plan, "\"generated_stage_runtime_breakdown\""));
+}
+
+TEST_CASE("JIT hash join probe uses selected all-valid single-key fast path", "[api][jit]") {
+	DuckDB db;
+	Connection con(db);
+	auto &manager = ExecutionRegionManager::Get(*con.context);
+
+	ConfigureSljitForCoverage(con, false, true, true, 10000);
+	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_hash_selected_probe_l AS "
+	                          "SELECT ((i % 10000) * 1000003)::BIGINT AS k, i::BIGINT AS v, "
+	                          "DATE '1992-01-01' + (i % 2000)::INTEGER AS d FROM range(65536) tbl(i)"));
+	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_hash_selected_probe_r AS "
+	                          "SELECT (i * 1000003)::BIGINT AS k, (i * 3)::BIGINT AS w FROM range(10000) tbl(i)"));
+
+	const string query = "SELECT l.k, sum(l.v + r.w) FROM jit_hash_selected_probe_l l "
+	                     "JOIN jit_hash_selected_probe_r r ON l.k = r.k "
+	                     "WHERE l.d > DATE '1994-01-01' GROUP BY l.k ORDER BY l.k LIMIT 3";
+	REQUIRE_NO_FAIL(con.Query("SET jit_policy='off'"));
+	auto reference = con.Query(query);
+	REQUIRE_NO_FAIL(*reference);
+
+	REQUIRE_NO_FAIL(con.Query("SET jit_policy='auto'"));
+	ClearJitTrace(manager);
+	auto result = con.Query(query);
+	REQUIRE_NO_FAIL(*result);
+	REQUIRE(result->RowCount() == reference->RowCount());
+	for (idx_t row_idx = 0; row_idx < result->RowCount(); row_idx++) {
+		REQUIRE(result->GetValue(0, row_idx).ToString() == reference->GetValue(0, row_idx).ToString());
+		REQUIRE(result->GetValue(1, row_idx).ToString() == reference->GetValue(1, row_idx).ToString());
+	}
+
+	RequireJitEvent(
+	    manager,
+	    [](const ExecutionRegionEvent &event) {
+		    return EventPhase(event) == "runtime" && EventStatus(event) == "executed" &&
+		           EventExecutionMode(event) == "native" &&
+		           StringUtil::Contains(EventGeneratedStageRuntimeBreakdown(event),
+		                                "hash_join_probe.fast_regular_probe_selected_all_valid_single_key_no_chain=");
+	    },
+	    [](const ExecutionRegionEvent &event) {
+		    REQUIRE(event.jit_runtime.hash_join_probe_layout == "regular_hash_table");
+		    REQUIRE(StringUtil::Contains(EventGeneratedStageRuntimeBreakdown(event), "filter+projection="));
+	    });
 }

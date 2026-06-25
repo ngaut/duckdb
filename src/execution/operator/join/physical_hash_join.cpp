@@ -2333,6 +2333,15 @@ static void ReferenceExecutionHashJoinProbeOutputColumns(const ExecutionHashJoin
 	}
 }
 
+static bool ExecutionHashJoinProbeSelectionIsIdentity(const SelectionVector &match_sel, idx_t count) {
+	for (idx_t row_idx = 0; row_idx < count; row_idx++) {
+		if (match_sel.get_index(row_idx) != row_idx) {
+			return false;
+		}
+	}
+	return true;
+}
+
 static void MaterializeExecutionCorrelatedMarkJoinProbe(const ExecutionHashJoinProbeBinding &binding, DataChunk &input,
                                                         const SelectionVector &match_sel, idx_t count,
                                                         DataChunk &result) {
@@ -2529,14 +2538,21 @@ void ExecutionMaterializeHashJoinProbe(const ExecutionHashJoinProbeBinding &bind
 		result.SetChildCardinality(count);
 		return;
 	}
+	const bool all_probe_rows_selected =
+	    count == input.size() && ExecutionHashJoinProbeSelectionIsIdentity(match_sel, count);
 	{
-		ExecutionOperatorStageTimer timer(recorder, "slice_probe_output");
-		for (idx_t col_idx = 0; col_idx < binding.lhs_output_column_indices.size(); col_idx++) {
-			auto input_col = binding.lhs_output_column_indices[col_idx];
-			if (input_col >= input.ColumnCount()) {
-				throw InternalException("execution native hash join probe output column index out of range");
+		ExecutionOperatorStageTimer timer(recorder,
+		                                  all_probe_rows_selected ? "reference_probe_output" : "slice_probe_output");
+		if (all_probe_rows_selected) {
+			ReferenceExecutionHashJoinProbeOutputColumns(binding, input, result);
+		} else {
+			for (idx_t col_idx = 0; col_idx < binding.lhs_output_column_indices.size(); col_idx++) {
+				auto input_col = binding.lhs_output_column_indices[col_idx];
+				if (input_col >= input.ColumnCount()) {
+					throw InternalException("execution native hash join probe output column index out of range");
+				}
+				result.data[col_idx].Slice(input.data[input_col], match_sel, count);
 			}
-			result.data[col_idx].Slice(input.data[input_col], match_sel, count);
 		}
 	}
 	if (binding.output_mode == ExecutionHashJoinProbeOutputMode::MATCHED_PROBE_AND_BUILD ||

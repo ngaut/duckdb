@@ -738,6 +738,72 @@ Exit criteria:
 - done: Q17 shallow-work shape is rejected by the pre-backend CBO
 - done: all-query TPC-H SF1 verifier passes with correctness diff 0
 
+### 2k. Regular Join Output Copies And Selected Probes Are Real, But Aggregate Lookup Is The Next Root
+
+Q3 and Q9 both had avoidable regular hash-join overhead after the first native
+join helpers landed. The important distinction was not "join helper exists";
+it was which data shape reached the probe and materialization boundary.
+
+Fixes that survived measurement:
+
+- regular hash join probe output now references probe columns directly when the
+  match selection is an identity selection over the full input chunk, matching
+  the existing perfect-hash shortcut
+- selected all-valid, single-key, no-chain regular probes now use a native fast
+  helper instead of the generic generated selected probe
+- the single-key flat and selected helpers prefetch the next hash-table bucket,
+  matching the pair-key helper's lookahead style
+- coverage for the selected helper must use a grouped aggregate shape; an
+  ungrouped aggregate triggers the generated-filter batching path, compacts the
+  filtered rows, and correctly uses the flat helper instead
+
+Measured effects:
+
+| Workload | Result |
+| --- | ---: |
+| Q9 op2 materialization in trace | ~8.9 ms -> ~0.6 ms over 3 traced repeats |
+| Q3 20-repeat production after selected helper + prefetch | off 0.073s, auto 0.055s, 1.327x |
+| Q9 20-repeat production after regular reference + prefetch | off 0.165s, auto 0.129s, 1.279x |
+| TPC-H all queries SF1, 5 repeats | strict verifier passed |
+
+All-query SF1 after this pass:
+
+- Q1: 1.190x, compiled
+- Q3: 1.263x, compiled
+- Q9: 1.273x, compiled
+- Q14: 1.056x, compiled
+- all other queries: vectorized, with only noise-level movement
+
+Root cause that remains:
+
+- Q3 grouped aggregation creates many new groups, so the hot cost is real hash
+  aggregate insertion and state-address resolution, not a stale JIT wrapper
+  branch
+- Q9 still spends meaningful time in the pair-key random hash-table probe and
+  grouped aggregate state lookup
+- the existing grouped aggregate fast-existing resolver only helps when all
+  groups are already present and vectors are flat/all-valid; it does not solve
+  high-new-group Q3
+
+Next root solution:
+
+- lower grouped aggregate lookup itself into data-centric generated/native code
+  that owns group hashing, probing, append, and state-address production
+- preserve or pass through hash values when a preceding join already computed a
+  compatible group key hash
+- only benchmark SIMD after this lookup/materialization work is fused enough
+  that arithmetic, not state lookup, is the bottleneck
+
+Exit criteria:
+
+- done: selected all-valid helper fires in focused API coverage
+- done: `[api][jit]`, `*hash join*`, architecture verifier, and TPC-H verifier
+  all pass
+- done: Q3/Q9 focused production medians remain better than the prior compiled
+  baseline
+- next: grouped aggregate lookup ownership must move from wrapper calls into
+  fused generated/native execution
+
 ### 3. SIMD After Fusion
 
 SIMD support is worth benchmarking seriously only after the fused loop is regular
