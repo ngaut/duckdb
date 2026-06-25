@@ -35,6 +35,8 @@ struct SljitRegionNodePlan {
 
 bool TryLowerNativeRegionExpression(const ExecutionExpressionFragment &fragment, bool require_boolean,
                                     SljitNativeRegionExpressionPlan &expr, string &error, bool render_diagnostics);
+bool TryMapNativeProjectionExpressionSources(const vector<SljitNativeRegionExpressionPlan> &input_projection,
+                                             SljitNativeRegionExpressionPlan &expr);
 bool TryBuildSljitProjectionGraphExpression(const ExecutionExpressionIR &root, SljitProjectionGraphLowering &graph,
                                             SljitNativeRegionExpressionPlan &expression);
 void FuseAdjacentNativeProjections(SljitNativeRegionPlan &region, bool render_diagnostics);

@@ -59,6 +59,9 @@ BuildTableScanExecutionSourceConfig(const PhysicalTableScan &op, optional_ptr<Ta
 	result.projection_ids = op.projection_ids;
 	result.filters = filters;
 	result.use_source_contract = open_request.UsesSourceContract() && IsExecutionTableScanSourceContractSupported(op);
+	if (result.use_source_contract && !open_request.UsesScanFilters()) {
+		result.filters = nullptr;
+	}
 	return result;
 }
 
@@ -223,7 +226,7 @@ public:
 private:
 	void InitializeExecutionSourceContract(ExecutionContext &context, TableScanGlobalSourceState &gstate,
 	                                       const PhysicalTableScan &op) {
-		auto filters = gstate.GetTableFilters(op);
+		auto filters = gstate.execution_source_config.filters;
 		execution_source_contract_scan_state.Initialize(gstate.execution_source_contract.storage_ids, context.client,
 		                                                filters, op.extra_info.sample_options);
 		auto rows_in_current_row_group = gstate.execution_source_contract.storage->NextParallelScan(

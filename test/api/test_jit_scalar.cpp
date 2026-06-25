@@ -296,12 +296,11 @@ TEST_CASE("JIT CASE branch fast path respects selected hash join sources", "[api
 	                          "            ELSE 'STANDARD ANODIZED COPPER' END AS p_type "
 	                          "FROM range(0, 20000) tbl(i)"));
 
-	const string aggregate_sql =
-	    "SELECT sum(CASE WHEN p_type LIKE 'PROMO%' "
-	    "                THEN l_extendedprice * (1.00 - l_discount) "
-	    "                ELSE 0.0000 END) AS promo_sum "
-	    "FROM jit_q14_join_probe, jit_q14_join_part "
-	    "WHERE jit_q14_join_probe.partkey = jit_q14_join_part.partkey";
+	const string aggregate_sql = "SELECT sum(CASE WHEN p_type LIKE 'PROMO%' "
+	                             "                THEN l_extendedprice * (1.00 - l_discount) "
+	                             "                ELSE 0.0000 END) AS promo_sum "
+	                             "FROM jit_q14_join_probe, jit_q14_join_part "
+	                             "WHERE jit_q14_join_probe.partkey = jit_q14_join_part.partkey";
 
 	REQUIRE_NO_FAIL(con.Query("SET enable_jit=false"));
 	auto expected = con.Query(aggregate_sql);
@@ -316,7 +315,7 @@ TEST_CASE("JIT CASE branch fast path respects selected hash join sources", "[api
 	RequireJitEvent(
 	    manager,
 	    [](const ExecutionRegionEvent &event) {
-		   return IsCompiledSljitRegionEvent(event) && event.has_candidate &&
+		    return IsCompiledSljitRegionEvent(event) && event.has_candidate &&
 		           event.candidate_traits.operator_count > 0 &&
 		           event.candidate_traits.sink_kind == ExecutionRegionSinkKind::UNGROUPED_AGGREGATE_UPDATE &&
 		           StringUtil::Contains(event.ir, "hash_join_probe") &&
@@ -361,6 +360,35 @@ TEST_CASE("JIT lowers long string predicates through packed native comparisons",
 	RequireNoUnsupportedReason(manager, "function=prefix");
 	RequireNoUnsupportedReason(manager, "function=suffix");
 	RequireNoUnsupportedReason(manager, "function=substring");
+}
+
+TEST_CASE("JIT lowers retained table scan filters as generated source stages", "[api][jit]") {
+	DuckDB db;
+	Connection con(db);
+	auto &manager = ExecutionRegionManager::Get(*con.context);
+
+	ConfigureSljitForCoverage(con, false, true, false, 10000);
+	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_generated_source_filter AS "
+	                          "SELECT i::BIGINT AS i FROM range(10000) tbl(i)"));
+
+	ClearJitTrace(manager, true);
+	auto result = con.Query("SELECT sum(i) FROM jit_generated_source_filter WHERE i > 10");
+	REQUIRE_NO_FAIL(*result);
+	REQUIRE(result->GetValue(0, 0).ToString() == "49994945");
+
+	RequireJitEvent(
+	    manager,
+	    [](const ExecutionRegionEvent &event) {
+		    return IsCompiledSljitRegionEvent(event) && event.candidate_traits.source_filter_count > 0 &&
+		           StringUtil::Contains(event.reason, "generated table scan source filters");
+	    },
+	    [](const ExecutionRegionEvent &event) {
+		    REQUIRE_FALSE(event.selected_uses_scan_filters);
+		    REQUIRE_FALSE(event.candidate_uses_scan_filters);
+		    REQUIRE(event.runner_cost.generated_stage_count > 0);
+		    REQUIRE(event.runner_cost.native_aggregate_stage_count > 0);
+		    RequireGeneratedMachineCodeRegion(event);
+	    });
 }
 
 TEST_CASE("JIT auto planner cost skips source-only string filters", "[api][jit]") {

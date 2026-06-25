@@ -22,6 +22,7 @@ struct ExecutionRegionSourceFilter {
 	idx_t scan_column_index = 0;
 	idx_t table_column_index = 0;
 	unique_ptr<ExecutionExpressionFragment> expression;
+	bool generated_source_stage_candidate = false;
 	string reason;
 };
 

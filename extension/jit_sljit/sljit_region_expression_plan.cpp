@@ -300,8 +300,8 @@ TryComposeNativeExpressionTreeThroughProjection(const vector<SljitNativeRegionEx
 	return true;
 }
 
-static bool TryMapNativeProjectionExpressionSources(const vector<SljitNativeRegionExpressionPlan> &input_projection,
-                                                    SljitNativeRegionExpressionPlan &expr) {
+bool TryMapNativeProjectionExpressionSources(const vector<SljitNativeRegionExpressionPlan> &input_projection,
+                                             SljitNativeRegionExpressionPlan &expr) {
 	switch (expr.kind) {
 	case SljitNativeRegionExpressionKind::CONSTANT:
 		return true;

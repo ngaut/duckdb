@@ -173,6 +173,108 @@ static SljitRegionNodePlan SljitSourceBoundaryRequiresContract(const ExecutionRe
 	return result;
 }
 
+static bool TryBuildSljitSourceContractOutputProjection(const ExecutionRegionNode &node,
+                                                        const ExecutionRegionTableScanContract &contract,
+                                                        SljitNativeRegionOpPlan &projection, string &error,
+                                                        bool render_diagnostics) {
+	auto &input_types = contract.source_contract_input_types;
+	auto &projection_map = contract.source_contract_output_projection_map;
+	if (projection_map.size() != node.output_types.size()) {
+		error = "source contract projection map does not match source output column count";
+		return false;
+	}
+	projection = SljitNativeRegionOpPlan();
+	projection.kind = SljitNativeRegionOpKind::PROJECTION;
+	projection.output_types.reserve(projection_map.size());
+	projection.projections.reserve(projection_map.size());
+	for (idx_t output_idx = 0; output_idx < projection_map.size(); output_idx++) {
+		auto input_idx = projection_map[output_idx];
+		if (input_idx >= input_types.size()) {
+			error = "source contract projection references column outside source input";
+			return false;
+		}
+		if (input_types[input_idx] != node.output_types[output_idx]) {
+			error = "source contract projection type does not match source output type";
+			return false;
+		}
+		SljitNativeRegionExpressionPlan reference;
+		reference.kind = SljitNativeRegionExpressionKind::REFERENCE;
+		reference.return_type = input_types[input_idx];
+		reference.source_index = input_idx;
+		if (render_diagnostics) {
+			reference.ir = "source-contract-output-reference";
+		}
+		projection.projections.push_back(std::move(reference));
+		projection.output_types.push_back(input_types[input_idx]);
+	}
+	return true;
+}
+
+static bool TryPlanSljitGeneratedSourceFilters(const ExecutionRegionNode &node,
+                                               vector<SljitNativeRegionOpPlan> &native_ops, string &error,
+                                               bool render_diagnostics) {
+	D_ASSERT(node.source);
+	auto &contract = node.source->table_scan_contract;
+	if (!contract.present || contract.source_contract_input_types.empty()) {
+		error = "generated source filters require source contract input types";
+		return false;
+	}
+	if (node.source->filters.empty()) {
+		error = "generated source filters require source filter expressions";
+		return false;
+	}
+	auto &projection_map = contract.source_contract_output_projection_map;
+	if (projection_map.size() != contract.source_contract_input_types.size()) {
+		error = "generated source filters require filter columns in the source output";
+		return false;
+	}
+	for (idx_t projection_idx = 0; projection_idx < projection_map.size(); projection_idx++) {
+		if (projection_map[projection_idx] != projection_idx) {
+			error = "generated source filters require identity source projection";
+			return false;
+		}
+	}
+	auto current_types = contract.source_contract_input_types;
+	for (auto &filter : node.source->filters) {
+		if (!filter.generated_source_stage_candidate) {
+			error = "source filter is not a generated source stage candidate";
+			return false;
+		}
+		if (!filter.expression || !filter.expression->root) {
+			error = filter.reason.empty() ? "source filter has no lowered expression IR" : filter.reason;
+			return false;
+		}
+		SljitNativeRegionOpPlan filter_op;
+		filter_op.kind = SljitNativeRegionOpKind::FILTER;
+		filter_op.output_types = current_types;
+		if (!TryLowerNativeRegionExpression(*filter.expression, true, filter_op.filter, error, render_diagnostics)) {
+			return false;
+		}
+		if (filter.scan_column_index >= current_types.size()) {
+			error = "source filter references column outside source output";
+			return false;
+		}
+		SljitNativeRegionExpressionPlan source_reference;
+		source_reference.kind = SljitNativeRegionExpressionKind::REFERENCE;
+		source_reference.return_type = current_types[filter.scan_column_index];
+		source_reference.source_index = filter.scan_column_index;
+		vector<SljitNativeRegionExpressionPlan> source_filter_projection;
+		source_filter_projection.push_back(std::move(source_reference));
+		if (!TryMapNativeProjectionExpressionSources(source_filter_projection, filter_op.filter)) {
+			error = "source filter expression could not be mapped to source output column";
+			return false;
+		}
+		native_ops.push_back(std::move(filter_op));
+	}
+
+	SljitNativeRegionOpPlan projection;
+	if (!TryBuildSljitSourceContractOutputProjection(node, contract, projection, error, render_diagnostics)) {
+		return false;
+	}
+	native_ops.push_back(std::move(projection));
+	return true;
+}
+
 static SljitRegionNodePlan PlanSljitSourceContractNode(const ExecutionRegionNode &node,
                                                        const ExecutionRegionContract &contract,
                                                        bool render_diagnostics) {
@@ -191,6 +293,15 @@ static SljitRegionNodePlan PlanSljitSourceContractNode(const ExecutionRegionNode
 	}
 
 	if (table_scan_contract.filter_pushdown) {
+		vector<SljitNativeRegionOpPlan> native_ops;
+		string error;
+		if (TryPlanSljitGeneratedSourceFilters(node, native_ops, error, render_diagnostics)) {
+			auto result =
+			    SljitNativeSourceNode("generated table scan source filters", node,
+			                          ExecutionRegionSourceExecutionKind::SOURCE_CONTRACT, render_diagnostics);
+			result.native_ops = std::move(native_ops);
+			return result;
+		}
 		string reason = "vectorized table scan filters;source-strategy=duckdb-scan-filtered-source-contract";
 		AppendSljitSourceFilterFacts(reason, node, table_scan_contract, false);
 		reason += ";source_contract_filter_pushdown=true";

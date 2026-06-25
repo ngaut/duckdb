@@ -159,6 +159,8 @@ static string DescribeExecutionRegionSourceFilter(const ExecutionRegionSourceFil
 	string result = "filter<index=" + std::to_string(filter.filter_index);
 	result += ",scan_column=" + std::to_string(filter.scan_column_index);
 	result += ",table_column=" + std::to_string(filter.table_column_index);
+	result += ",generated_source_stage_candidate=";
+	result += ExecutionRegionBool(filter.generated_source_stage_candidate);
 	result += ">(";
 	if (filter.expression) {
 		result += filter.expression->ir;
@@ -167,6 +169,13 @@ static string DescribeExecutionRegionSourceFilter(const ExecutionRegionSourceFil
 	}
 	result += ")";
 	return result;
+}
+
+static bool ExecutionRegionExpressionCanUseGeneratedSourceStage(const ExecutionExpressionFragment &expression) {
+	if (!expression.root) {
+		return false;
+	}
+	return !expression.traits.has_arithmetic_binary;
 }
 
 static string DescribeExecutionRegionContractFields(const vector<ExecutionRegionContractField> &fields) {
@@ -200,10 +209,10 @@ static string DescribeExecutionRegionTableScanContract(const ExecutionRegionTabl
 	    ",source_contract_input_types=" + BuildExecutionRegionLogicalTypeList(contract.source_contract_input_types);
 	result += ",source_contract_input_distinct_counts=" +
 	          BuildExecutionRegionIdxList(contract.source_contract_input_distinct_counts);
-	result += ",source_contract_input_min_values=" +
-	          BuildExecutionRegionValueList(contract.source_contract_input_min_values);
-	result += ",source_contract_input_max_values=" +
-	          BuildExecutionRegionValueList(contract.source_contract_input_max_values);
+	result +=
+	    ",source_contract_input_min_values=" + BuildExecutionRegionValueList(contract.source_contract_input_min_values);
+	result +=
+	    ",source_contract_input_max_values=" + BuildExecutionRegionValueList(contract.source_contract_input_max_values);
 	result += ",source_contract_output_projection_map=" +
 	          BuildExecutionRegionIdxList(contract.source_contract_output_projection_map);
 	result +=
@@ -881,6 +890,9 @@ static void AddExecutionRegionSourceFilters(const ExecutionSourceContract &descr
 		                        : TryLowerExecutionExpression(*entry.expression, filter.filter_index, expression_mode);
 		if (!filter.expression) {
 			filter.reason = DescribeExecutionExpressionLoweringFailure(*entry.expression);
+		} else {
+			filter.generated_source_stage_candidate =
+			    ExecutionRegionExpressionCanUseGeneratedSourceStage(*filter.expression);
 		}
 		source.filters.push_back(std::move(filter));
 	}
@@ -1784,6 +1796,28 @@ GetExecutionRegionCandidateSourceExecution(const ExecutionRegionCandidate &candi
 	return node.source ? node.source->execution : ExecutionRegionSourceExecutionKind::NONE;
 }
 
+static bool ExecutionRegionSourceFiltersCanUseGeneratedOutput(const ExecutionRegionNode &node) {
+	if (!node.source || node.source->filters.empty() || !node.source->table_scan_contract.present) {
+		return false;
+	}
+	auto &contract = node.source->table_scan_contract;
+	auto &projection_map = contract.source_contract_output_projection_map;
+	if (projection_map.size() != contract.source_contract_input_types.size()) {
+		return false;
+	}
+	for (idx_t projection_idx = 0; projection_idx < projection_map.size(); projection_idx++) {
+		if (projection_map[projection_idx] != projection_idx) {
+			return false;
+		}
+	}
+	for (auto &filter : node.source->filters) {
+		if (!filter.generated_source_stage_candidate) {
+			return false;
+		}
+	}
+	return true;
+}
+
 static bool ExecutionRegionCandidateUsesScanFilters(const ExecutionRegionCandidate &candidate,
                                                     const ExecutionRegionNode &node) {
 	if (candidate.uses_scan_filters) {
@@ -1792,6 +1826,9 @@ static bool ExecutionRegionCandidateUsesScanFilters(const ExecutionRegionCandida
 	auto source_execution = GetExecutionRegionCandidateSourceExecution(candidate, node);
 	if (source_execution != ExecutionRegionSourceExecutionKind::SOURCE_CONTRACT || !node.source ||
 	    node.source->filters.empty() || !node.source->table_scan_contract.present) {
+		return false;
+	}
+	if (ExecutionRegionSourceFiltersCanUseGeneratedOutput(node)) {
 		return false;
 	}
 	return node.source->table_scan_contract.filter_pushdown;
@@ -2515,6 +2552,10 @@ static bool ExecutionRegionProjectionHasExecutableWork(const ExecutionRegionNode
 	return false;
 }
 
+static bool ExecutionRegionSourceFilterHasGeneratedExpression(const ExecutionRegionSourceFilter &filter) {
+	return filter.generated_source_stage_candidate;
+}
+
 static bool ExecutionRegionStageHasExecutableWork(ExecutionRegionStageExecutionKind execution, bool executable_work) {
 	return executable_work && execution != ExecutionRegionStageExecutionKind::MISSING_CONTRACT &&
 	       execution != ExecutionRegionStageExecutionKind::SOURCE_BOUNDARY;
@@ -2665,6 +2706,8 @@ static ExecutionRegionStagePlan BuildExecutionRegionStagePlan(const ExecutionReg
 					ExecutionRegionOwnershipKind filter_ownership;
 					if (ExecutionRegionCandidateUsesScanFilters(candidate, node)) {
 						filter_ownership = ExecutionRegionOwnershipKind::NATIVE_CONTRACT;
+					} else if (ExecutionRegionSourceFilterHasGeneratedExpression(filter)) {
+						filter_ownership = ExecutionRegionOwnershipKind::GENERATED_IR;
 					} else {
 						filter_ownership = ExecutionRegionOwnershipKind::MISSING_CONTRACT;
 					}

@@ -192,11 +192,11 @@ static void SetSljitRegionFlatNullableFastPath(SljitNativeRegionPlan &region, bo
 		for (auto &condition : op.nested_loop_join_probe.conditions) {
 			SetSljitExpressionFlatNullableFastPath(condition.lhs_condition, emit_flat_nullable_fast_path);
 		}
-			SetSljitExpressionsFlatNullableFastPath(op.nested_loop_join_build.rhs_conditions, emit_flat_nullable_fast_path);
-			SetSljitExpressionsFlatNullableFastPath(op.order_sink.order_keys, emit_flat_nullable_fast_path);
-			SetSljitExpressionsFlatNullableFastPath(op.aggregate_update.payloads, emit_flat_nullable_fast_path);
-			SetSljitExpressionsFlatNullableFastPath(op.aggregate_update.group_expressions, emit_flat_nullable_fast_path);
-			SetSljitExpressionsFlatNullableFastPath(op.projections, emit_flat_nullable_fast_path);
+		SetSljitExpressionsFlatNullableFastPath(op.nested_loop_join_build.rhs_conditions, emit_flat_nullable_fast_path);
+		SetSljitExpressionsFlatNullableFastPath(op.order_sink.order_keys, emit_flat_nullable_fast_path);
+		SetSljitExpressionsFlatNullableFastPath(op.aggregate_update.payloads, emit_flat_nullable_fast_path);
+		SetSljitExpressionsFlatNullableFastPath(op.aggregate_update.group_expressions, emit_flat_nullable_fast_path);
+		SetSljitExpressionsFlatNullableFastPath(op.projections, emit_flat_nullable_fast_path);
 	}
 }
 
@@ -494,15 +494,18 @@ ExecutionRegionLoweringPlan BuildSljitRegionPlan(const ExecutionRegionIR &region
 				lowering_plan.SetSelectedSourceExecution(selected_source_execution);
 			}
 			if (executable_source && node_plan.kind == ExecutionRegionLoweringKind::NATIVE) {
+				const bool generated_source_filters = node.source && !node.source->filters.empty() &&
+				                                      !node_plan.uses_scan_filters &&
+				                                      SljitRegionNodeHasNativeOps(node_plan);
 				cursor.AcceptSource(node, node_plan);
 				if (node.source && node.source->table_scan_contract.present) {
 					native_region.source_distinct_counts =
 					    node.source->table_scan_contract.source_contract_input_distinct_counts;
-					native_region.source_min_values =
-					    node.source->table_scan_contract.source_contract_input_min_values;
-					native_region.source_max_values =
-					    node.source->table_scan_contract.source_contract_input_max_values;
-					native_region.source_not_null = BuildSljitSourceOutputNotNull(*node.source);
+					native_region.source_min_values = node.source->table_scan_contract.source_contract_input_min_values;
+					native_region.source_max_values = node.source->table_scan_contract.source_contract_input_max_values;
+					native_region.source_not_null =
+					    generated_source_filters ? node.source->table_scan_contract.source_contract_input_not_null
+					                             : BuildSljitSourceOutputNotNull(*node.source);
 				}
 			} else {
 				cursor.BreakAtBoundary(node.output_types);
