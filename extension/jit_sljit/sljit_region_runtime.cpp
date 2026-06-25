@@ -1499,8 +1499,6 @@ public:
 		}
 		return ops[op_idx].kind == SljitNativeRegionOpKind::FILTER &&
 		       ops[op_idx + 1].kind == SljitNativeRegionOpKind::AGGREGATE_UPDATE &&
-		       ops[op_idx + 1].aggregate_update.plan.sink_info.kind ==
-		           ExecutionRegionSinkKind::UNGROUPED_AGGREGATE_UPDATE &&
 		       ops[op_idx + 1].aggregate_update.plan.use_primitive_payloads;
 	}
 
@@ -3561,7 +3559,8 @@ public:
 	    const vector<SljitNativeRegionExpressionPlan> &group_expressions,
 	    const ExecutionRegionAggregateContract &contract,
 	    const vector<const ExecutionPrimitiveAggregateUpdateLane *> &lanes,
-	    const ExecutionPerfectAggregateStateAddressLayout &layout, DataChunk &input, idx_t count,
+	    const ExecutionPerfectAggregateStateAddressLayout &layout, DataChunk &input,
+	    const SelectionVector *execute_sel, idx_t count,
 	    SljitAggregatePayloadAdapterScratch &adapter_scratch) {
 		if (!function) {
 			throw InternalException("SLJIT fused perfect-hash aggregate update is missing generated code");
@@ -3643,7 +3642,7 @@ public:
 			}
 			group_sel[group_idx] = SljitNormalizedSourceSelectionData(group_formats[group_idx]);
 			group_validity[group_idx] =
-			    SljitNormalizedSourceValidityData(group_formats[group_idx], group_sel[group_idx], input.size());
+			    SljitNormalizedSourceValidityData(group_formats[group_idx], group_sel[group_idx], execute_sel, count);
 			flat_all_valid = flat_all_valid && group_sel[group_idx] == nullptr && group_validity[group_idx] == nullptr;
 			all_valid = all_valid && group_validity[group_idx] == nullptr;
 		}
@@ -3663,7 +3662,8 @@ public:
 				    SljitTypedExpressionTreeSourceData(source_formats[source_idx], input.data[input_index].GetType());
 				source_sel[source_idx] = SljitNormalizedSourceSelectionData(source_formats[source_idx]);
 				source_validity[source_idx] =
-				    SljitNormalizedSourceValidityData(source_formats[source_idx], source_sel[source_idx], input.size());
+				    SljitNormalizedSourceValidityData(source_formats[source_idx], source_sel[source_idx], execute_sel,
+				                                      count);
 				flat_all_valid =
 				    flat_all_valid && source_sel[source_idx] == nullptr && source_validity[source_idx] == nullptr;
 				all_valid = all_valid && source_validity[source_idx] == nullptr;
@@ -3721,14 +3721,16 @@ public:
 			source_data[payload_idx] = NativeIntegerSourceData(source_formats[payload_idx], plan.integer_kind);
 			source_sel[payload_idx] = SljitNormalizedSourceSelectionData(source_formats[payload_idx]);
 			source_validity[payload_idx] =
-			    SljitNormalizedSourceValidityData(source_formats[payload_idx], source_sel[payload_idx], input.size());
+			    SljitNormalizedSourceValidityData(source_formats[payload_idx], source_sel[payload_idx], execute_sel,
+			                                      count);
 		}
 
-		const auto execute_sel = SljitCanonicalizeCommonSelection(source_sel, group_sel);
+		const auto native_execute_sel =
+		    execute_sel ? execute_sel->data() : SljitCanonicalizeCommonSelection(source_sel, group_sel);
 		const auto source_common_sel =
-		    typed_payloads && !execute_sel ? SljitCanonicalizeCommonSourceSelection(source_sel) : nullptr;
-		bool flat_no_selection = source_common_sel == nullptr;
-		flat_all_valid = execute_sel == nullptr && source_common_sel == nullptr;
+		    typed_payloads && !native_execute_sel ? SljitCanonicalizeCommonSourceSelection(source_sel) : nullptr;
+		bool flat_no_selection = native_execute_sel == nullptr && source_common_sel == nullptr;
+		flat_all_valid = native_execute_sel == nullptr && source_common_sel == nullptr;
 		all_valid = true;
 		for (idx_t group_idx = 0; group_idx < groups.size(); group_idx++) {
 			flat_no_selection = flat_no_selection && group_sel[group_idx] == nullptr;
@@ -3744,7 +3746,7 @@ public:
 		const auto group_selection_all_present = SljitAllSelectionsPresent(group_sel);
 
 		SljitNativeVectorInput native_input;
-		native_input.execute_sel = execute_sel;
+		native_input.execute_sel = native_execute_sel;
 		native_input.source_data_array = source_data.data();
 		native_input.source_sel_array = SljitPointerArrayOrNull(source_sel);
 		native_input.source_common_sel = source_common_sel;
@@ -4598,7 +4600,7 @@ public:
 					    op.aggregate_update.payloads, op.aggregate_update.fused_payload_update_function, aggregates,
 					    op.aggregate_update.plan.sink_info.groups, op.aggregate_update.plan.group_expressions,
 					    op.aggregate_update.plan.sink_info.aggregate_contract, payload_lanes,
-					    grouped_state.perfect_hash_layout, input, input.size(), payload_scratch);
+					    grouped_state.perfect_hash_layout, input, execute_sel, count, payload_scratch);
 				} else if (op.aggregate_update.plan.use_grouped_state_addresses) {
 					if (!grouped_state_addresses) {
 						throw InternalException("SLJIT fused grouped aggregate update is missing state addresses");
