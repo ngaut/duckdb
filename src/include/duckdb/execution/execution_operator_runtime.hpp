@@ -34,6 +34,8 @@ struct PartitionedTupleDataAppendState;
 struct JoinFilterLocalState;
 struct JoinFilterPushdownInfo;
 
+typedef void (*ExecutionGroupedAggregateStateAddressUpdateFunction)(Vector &addresses, void *state);
+
 enum class ExecutionOperatorBindResult : uint8_t { READY, DEFERRED, INVALID };
 enum class ExecutionOperatorReadinessStatus : uint8_t { READY, NOT_READY, INVALID };
 
@@ -46,6 +48,8 @@ struct ExecutionOperatorReadiness {
 		return status == ExecutionOperatorReadinessStatus::READY;
 	}
 };
+
+struct ExecutionPrimitiveAggregateUpdateLane;
 
 struct ExecutionAppendSinkState {
 	virtual ~ExecutionAppendSinkState() {
@@ -101,6 +105,74 @@ struct ExecutionGroupedAggregateStateAddressState {
 	}
 	virtual void ResolveStateAddresses(DataChunk &input, Vector &addresses,
 	                                   optional_ptr<ExecutionOperatorStageRecorder> recorder = nullptr) = 0;
+	virtual bool TryUpdateExistingGroups(DataChunk &input, const ExecutionRegionSinkInfo &sink_info,
+	                                     const vector<const ExecutionPrimitiveAggregateUpdateLane *> &lanes,
+	                                     optional_ptr<ExecutionOperatorStageRecorder> recorder = nullptr,
+	                                     bool finish = true) {
+		(void)input;
+		(void)sink_info;
+		(void)lanes;
+		(void)recorder;
+		(void)finish;
+		return false;
+	}
+	virtual bool TryUpdateNewGroups(DataChunk &input, const ExecutionRegionSinkInfo &sink_info,
+	                                const vector<const ExecutionPrimitiveAggregateUpdateLane *> &lanes,
+	                                optional_ptr<ExecutionOperatorStageRecorder> recorder = nullptr,
+	                                bool finish = true) {
+		(void)input;
+		(void)sink_info;
+		(void)lanes;
+		(void)recorder;
+		(void)finish;
+		return false;
+	}
+	virtual bool TryUpdateExistingGroupsWithStateAddresses(
+	    DataChunk &input, const ExecutionRegionSinkInfo &sink_info,
+	    ExecutionGroupedAggregateStateAddressUpdateFunction update_function, void *update_state,
+	    optional_ptr<ExecutionOperatorStageRecorder> recorder = nullptr, bool finish = true) {
+		(void)input;
+		(void)sink_info;
+		(void)update_function;
+		(void)update_state;
+		(void)recorder;
+		(void)finish;
+		return false;
+	}
+	virtual bool TryUpdateNewGroupsWithStateAddresses(
+	    DataChunk &input, const ExecutionRegionSinkInfo &sink_info,
+	    ExecutionGroupedAggregateStateAddressUpdateFunction update_function, void *update_state,
+	    optional_ptr<ExecutionOperatorStageRecorder> recorder = nullptr, bool finish = true) {
+		(void)input;
+		(void)sink_info;
+		(void)update_function;
+		(void)update_state;
+		(void)recorder;
+		(void)finish;
+		return false;
+	}
+	virtual bool TryAppendNewGroupsWithStateAddresses(
+	    DataChunk &input, const ExecutionRegionSinkInfo &sink_info,
+	    ExecutionGroupedAggregateStateAddressUpdateFunction update_function, void *update_state,
+	    optional_ptr<ExecutionOperatorStageRecorder> recorder = nullptr, bool finish = true) {
+		(void)input;
+		(void)sink_info;
+		(void)update_function;
+		(void)update_state;
+		(void)recorder;
+		(void)finish;
+		return false;
+	}
+	virtual bool TryResolveNewGroups(DataChunk &input, const ExecutionRegionSinkInfo &sink_info, Vector &addresses,
+	                                 optional_ptr<ExecutionOperatorStageRecorder> recorder = nullptr,
+	                                 bool finish = true) {
+		(void)input;
+		(void)sink_info;
+		(void)addresses;
+		(void)recorder;
+		(void)finish;
+		return false;
+	}
 	virtual void FinishStateUpdates() {
 	}
 };
@@ -315,11 +387,9 @@ DUCKDB_API SinkResultType ExecutionSinkNestedLoopJoinBuild(const ExecutionNested
                                                            DataChunk &input, DataChunk &right_condition);
 
 DUCKDB_API SinkResultType ExecutionSinkAppend(const ExecutionAppendSinkBinding &binding, DataChunk &input);
-DUCKDB_API ExecutionOperatorBindResult ExecutionPrepareDirectAppend(const ExecutionAppendSinkBinding &binding,
-                                                                    const vector<LogicalType> &types, idx_t count,
-                                                                    DirectAppendReservation &reservation,
-                                                                    string &blocker,
-                                                                    optional_ptr<DirectAppendProfile> profile = nullptr);
+DUCKDB_API ExecutionOperatorBindResult ExecutionPrepareDirectAppend(
+    const ExecutionAppendSinkBinding &binding, const vector<LogicalType> &types, idx_t count,
+    DirectAppendReservation &reservation, string &blocker, optional_ptr<DirectAppendProfile> profile = nullptr);
 DUCKDB_API SinkResultType ExecutionCommitDirectAppend(const ExecutionAppendSinkBinding &binding,
                                                       const DirectAppendReservation &reservation,
                                                       optional_ptr<DirectAppendProfile> profile = nullptr);

@@ -43,6 +43,8 @@ bool SljitTypedExpressionTreeSameIntegerKind(const ExecutionExpressionIR &left, 
 bool SljitTypedExpressionTreeSameValueKind(const ExecutionExpressionIR &left, const ExecutionExpressionIR &right);
 bool TryReadSljitTypedExpressionTreeStringPrefixConstant(const ExecutionExpressionIR &node, idx_t &source_index,
                                                          string &prefix);
+bool TryReadSljitTypedExpressionTreeStringCompareConstant(const ExecutionExpressionIR &node, idx_t &source_index,
+                                                          string &constant, bool &compare_equal);
 bool SljitTypedExpressionTreeIsSupported(const ExecutionExpressionIR &node);
 bool SljitTypedExpressionTreeInt64CastSupported(const ExecutionExpressionIR &node);
 bool SljitTypedExpressionTreeFastPathSupported(const ExecutionExpressionIR &node);

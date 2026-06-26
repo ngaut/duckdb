@@ -30,6 +30,8 @@ namespace duckdb {
 
 namespace {
 
+static constexpr idx_t METAL_MAX_BATCH_CHUNKS = 64;
+
 static int64_t MetalElapsedMicros(std::chrono::steady_clock::time_point start) {
     auto end = std::chrono::steady_clock::now();
     return std::chrono::duration_cast<std::chrono::microseconds>(end - start).count();
@@ -705,7 +707,9 @@ class MetalProjectionKernel : public ExecutionRegionKernel {
             }
 
             const auto chunk_budget = runtime.MaxChunks() - processed_chunks;
-            const auto batch_chunk_budget = ShouldBatchSourceChunks() ? chunk_budget : MinValue<idx_t>(chunk_budget, 1);
+            const auto batch_chunk_budget =
+                ShouldBatchSourceChunks() ? MinValue<idx_t>(chunk_budget, METAL_MAX_BATCH_CHUNKS)
+                                          : MinValue<idx_t>(chunk_budget, 1);
             bool source_finished = false;
             auto fetch_result = FetchProjectionBatch(runtime, scratch, batch_chunk_budget, source_finished);
             processed_chunks += scratch.batch_chunks;

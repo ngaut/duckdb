@@ -5,13 +5,19 @@
 #include "duckdb/common/limits.hpp"
 #include "duckdb/common/types/null_value.hpp"
 #include "duckdb/common/types/vector.hpp"
+#include "duckdb/common/vector/dictionary_vector.hpp"
+#include "duckdb/common/vector/flat_vector.hpp"
 #include "duckdb/common/vector_operations/vector_operations.hpp"
 #include "duckdb/main/config.hpp"
 #include "duckdb/planner/expression/bound_comparison_expression.hpp"
 #include "duckdb/planner/expression/bound_constant_expression.hpp"
+#include "duckdb/planner/expression/bound_cast_expression.hpp"
+#include "duckdb/planner/expression/bound_conjunction_expression.hpp"
+#include "duckdb/planner/expression/bound_operator_expression.hpp"
 #include "duckdb/planner/expression/bound_reference_expression.hpp"
 #include "duckdb/planner/expression_iterator.hpp"
 #include "duckdb/planner/filter/expression_filter.hpp"
+#include "duckdb/planner/filter/table_filter_functions.hpp"
 #include "duckdb/planner/table_filter.hpp"
 #include "duckdb/storage/data_pointer.hpp"
 #include "duckdb/storage/table/append_state.hpp"
@@ -19,6 +25,7 @@
 #include "duckdb/planner/table_filter_state.hpp"
 #include "duckdb/planner/filter/bloom_filter.hpp"
 
+#include <algorithm>
 #include <cstring>
 
 namespace duckdb {
@@ -290,6 +297,13 @@ void ColumnSegment::VisitBlockIds(BlockIdVisitor &visitor) const {
 //===--------------------------------------------------------------------===//
 // Filter Selection
 //===--------------------------------------------------------------------===//
+static SelectionVector &GetFastFilterSelection(ExpressionFilterState &state, idx_t count) {
+	if (state.fast_filter_sel.Capacity() < count) {
+		state.fast_filter_sel.Initialize(MaxValue<idx_t>(count, STANDARD_VECTOR_SIZE));
+	}
+	return state.fast_filter_sel;
+}
+
 template <class T, class OP, bool HAS_NULL>
 static idx_t TemplatedFilterSelection(const UnifiedVectorFormat &vdata, T predicate, const SelectionVector &sel,
                                       const idx_t approved_tuple_count, SelectionVector &result_sel) {
@@ -472,11 +486,414 @@ static idx_t ExecuteExpressionFilterSelection(SelectionVector &sel, Vector &vect
 	return approved_tuple_count;
 }
 
+template <class T, bool HAS_NULL>
+static idx_t TemplatedSignedNumericRangeSelection(const UnifiedVectorFormat &vdata, const SelectionVector &sel,
+                                                  const idx_t approved_tuple_count, SelectionVector &result_sel,
+                                                  const bool has_lower, const int64_t lower, const bool has_upper,
+                                                  const int64_t upper) {
+	auto &mask = vdata.validity;
+	const auto vec = UnifiedVectorFormat::GetData<const T>(vdata);
+	const auto lower_value = static_cast<T>(lower);
+	const auto upper_value = static_cast<T>(upper);
+	idx_t result_count = 0;
+	for (idx_t i = 0; i < approved_tuple_count; i++) {
+		const auto idx = sel.get_index(i);
+		const auto vector_idx = vdata.sel->get_index(idx);
+		const auto value = vec[vector_idx];
+		const bool comparison_result = (!HAS_NULL || mask.RowIsValidUnsafe(vector_idx)) &&
+		                               (!has_lower || value >= lower_value) && (!has_upper || value <= upper_value);
+		if (comparison_result) {
+			result_sel.set_index(result_count++, idx);
+		}
+	}
+	return result_count;
+}
+
+template <class T>
+static void SignedNumericRangeSelectionSwitch(ExpressionFilterState &state, const UnifiedVectorFormat &vdata,
+                                              SelectionVector &sel,
+                                              idx_t &approved_tuple_count, const bool has_lower,
+                                              const int64_t lower, const bool has_upper, const int64_t upper) {
+	auto &result_sel = GetFastFilterSelection(state, approved_tuple_count);
+	auto &mask = vdata.validity;
+	if (mask.CannotHaveNull()) {
+		approved_tuple_count = TemplatedSignedNumericRangeSelection<T, false>(
+		    vdata, sel, approved_tuple_count, result_sel, has_lower, lower, has_upper, upper);
+	} else {
+		approved_tuple_count = TemplatedSignedNumericRangeSelection<T, true>(
+		    vdata, sel, approved_tuple_count, result_sel, has_lower, lower, has_upper, upper);
+	}
+	sel.Initialize(result_sel);
+}
+
+static bool TryFastSignedNumericRangeFilter(SelectionVector &sel, Vector &input_vector, UnifiedVectorFormat &vdata,
+                                            const TableFilter &filter, ExpressionFilterState &state,
+                                            idx_t &approved_tuple_count) {
+	if (approved_tuple_count == 0 || filter.filter_type != TableFilterType::EXPRESSION_FILTER) {
+		return false;
+	}
+	auto &expression_filter = filter.Cast<ExpressionFilter>();
+	SignedNumericRangeFilterData range;
+	if (!TryGetSignedNumericRange(expression_filter, state, input_vector.GetType(), range)) {
+		return false;
+	}
+	if (range.empty) {
+		approved_tuple_count = 0;
+		return true;
+	}
+
+	switch (input_vector.GetType().InternalType()) {
+	case PhysicalType::INT8:
+		SignedNumericRangeSelectionSwitch<int8_t>(state, vdata, sel, approved_tuple_count, range.has_lower,
+		                                          range.lower, range.has_upper, range.upper);
+		return true;
+	case PhysicalType::INT16:
+		SignedNumericRangeSelectionSwitch<int16_t>(state, vdata, sel, approved_tuple_count, range.has_lower,
+		                                           range.lower, range.has_upper, range.upper);
+		return true;
+	case PhysicalType::INT32:
+		SignedNumericRangeSelectionSwitch<int32_t>(state, vdata, sel, approved_tuple_count, range.has_lower,
+		                                           range.lower, range.has_upper, range.upper);
+		return true;
+	case PhysicalType::INT64:
+		SignedNumericRangeSelectionSwitch<int64_t>(state, vdata, sel, approved_tuple_count, range.has_lower,
+		                                           range.lower, range.has_upper, range.upper);
+		return true;
+	default:
+		return false;
+	}
+}
+
+static optional_ptr<const Expression> TryGetSelectivityOptionalChild(const Expression &expr) {
+	if (expr.GetExpressionClass() != ExpressionClass::BOUND_FUNCTION) {
+		return nullptr;
+	}
+	auto &function_expr = expr.Cast<BoundFunctionExpression>();
+	if (function_expr.Function().GetName() != SelectivityOptionalFilterScalarFun::NAME || !function_expr.BindInfo()) {
+		return nullptr;
+	}
+	auto &data = function_expr.BindInfo()->Cast<SelectivityOptionalFilterFunctionData>();
+	return data.child_filter_expr.get();
+}
+
+static optional_ptr<const PrefixRangeFunctionData> TryGetPrefixRangeFunctionData(const Expression &expr) {
+	if (expr.GetExpressionClass() != ExpressionClass::BOUND_FUNCTION) {
+		return nullptr;
+	}
+	auto &function_expr = expr.Cast<BoundFunctionExpression>();
+	if (function_expr.Function().GetName() != PrefixRangeScalarFun::NAME || !function_expr.BindInfo()) {
+		return nullptr;
+	}
+	return &function_expr.BindInfo()->Cast<PrefixRangeFunctionData>();
+}
+
+static bool PrefixRangeMatchesInputType(const PrefixRangeFunctionData &data, const LogicalType &target_type) {
+	return data.key_type == target_type;
+}
+
+static bool CanBuildFastSignedNumericRange(const Expression &expr, const LogicalType &target_type) {
+	SignedNumericRangeFilterData range;
+	return TryGetSignedNumericRange(expr, target_type, range);
+}
+
+static bool CanEvaluateFastInternalFilterExpression(const Expression &expr, const LogicalType &target_type) {
+	if (CanBuildFastSignedNumericRange(expr, target_type)) {
+		return true;
+	}
+	if (auto child = TryGetSelectivityOptionalChild(expr)) {
+		return !child || CanEvaluateFastInternalFilterExpression(*child, target_type);
+	}
+	if (auto prefix_data = TryGetPrefixRangeFunctionData(expr)) {
+		if (!PrefixRangeMatchesInputType(*prefix_data, target_type)) {
+			return false;
+		}
+		return true;
+	}
+	if (expr.GetExpressionClass() == ExpressionClass::BOUND_CONJUNCTION &&
+	    expr.GetExpressionType() == ExpressionType::CONJUNCTION_AND) {
+		auto &conjunction = expr.Cast<BoundConjunctionExpression>();
+		for (auto &child : conjunction.GetChildren()) {
+			if (!CanEvaluateFastInternalFilterExpression(*child, target_type)) {
+				return false;
+			}
+		}
+		return true;
+	}
+	return false;
+}
+
+static bool TryApplyFastSignedNumericRangeExpression(ExpressionFilterState &state, SelectionVector &sel,
+                                                     UnifiedVectorFormat &vdata,
+                                                     const Expression &expr, const LogicalType &target_type,
+                                                     idx_t &approved_tuple_count) {
+	SignedNumericRangeFilterData merged_range;
+	if (!TryGetSignedNumericRange(expr, target_type, merged_range)) {
+		return false;
+	}
+	if (merged_range.empty) {
+		approved_tuple_count = 0;
+		return true;
+	}
+
+	switch (target_type.InternalType()) {
+	case PhysicalType::INT8:
+		SignedNumericRangeSelectionSwitch<int8_t>(state, vdata, sel, approved_tuple_count, merged_range.has_lower,
+		                                          merged_range.lower, merged_range.has_upper, merged_range.upper);
+		return true;
+	case PhysicalType::INT16:
+		SignedNumericRangeSelectionSwitch<int16_t>(state, vdata, sel, approved_tuple_count, merged_range.has_lower,
+		                                           merged_range.lower, merged_range.has_upper, merged_range.upper);
+		return true;
+	case PhysicalType::INT32:
+		SignedNumericRangeSelectionSwitch<int32_t>(state, vdata, sel, approved_tuple_count, merged_range.has_lower,
+		                                           merged_range.lower, merged_range.has_upper, merged_range.upper);
+		return true;
+	case PhysicalType::INT64:
+		SignedNumericRangeSelectionSwitch<int64_t>(state, vdata, sel, approved_tuple_count, merged_range.has_lower,
+		                                           merged_range.lower, merged_range.has_upper, merged_range.upper);
+		return true;
+	default:
+		return false;
+	}
+}
+
+static bool TryApplyFastPrefixRangeFilter(ExpressionFilterState &state, SelectionVector &sel, Vector &input_vector,
+                                          const PrefixRangeFunctionData &data,
+                                          idx_t &approved_tuple_count) {
+	if (!data.filter || !data.filter->IsInitialized()) {
+		return true;
+	}
+	if (!PrefixRangeMatchesInputType(data, input_vector.GetType())) {
+		return false;
+	}
+
+	auto &result_sel = GetFastFilterSelection(state, approved_tuple_count);
+	const auto local_count = data.filter->LookupKeys(input_vector, sel, result_sel, approved_tuple_count);
+	sel.Initialize(result_sel);
+	approved_tuple_count = local_count;
+	return true;
+}
+
+static bool TryApplyFastInternalFilterExpression(ExpressionFilterState &state, SelectionVector &sel,
+                                                 Vector &input_vector, UnifiedVectorFormat &vdata,
+                                                 const Expression &expr, idx_t &approved_tuple_count) {
+	if (approved_tuple_count == 0) {
+		return true;
+	}
+	auto &target_type = input_vector.GetType();
+	if (TryApplyFastSignedNumericRangeExpression(state, sel, vdata, expr, target_type, approved_tuple_count)) {
+		return true;
+	}
+	if (auto child = TryGetSelectivityOptionalChild(expr)) {
+		if (!child) {
+			return true;
+		}
+		return TryApplyFastInternalFilterExpression(state, sel, input_vector, vdata, *child, approved_tuple_count);
+	}
+	if (auto prefix_data = TryGetPrefixRangeFunctionData(expr)) {
+		return TryApplyFastPrefixRangeFilter(state, sel, input_vector, *prefix_data, approved_tuple_count);
+	}
+	if (expr.GetExpressionClass() == ExpressionClass::BOUND_CONJUNCTION &&
+	    expr.GetExpressionType() == ExpressionType::CONJUNCTION_AND) {
+		auto &conjunction = expr.Cast<BoundConjunctionExpression>();
+		for (auto &child : conjunction.GetChildren()) {
+			if (!TryApplyFastInternalFilterExpression(state, sel, input_vector, vdata, *child, approved_tuple_count)) {
+				return false;
+			}
+			if (approved_tuple_count == 0) {
+				return true;
+			}
+		}
+		return true;
+	}
+	return false;
+}
+
+static bool TryFastInternalFilterExpression(SelectionVector &sel, Vector &input_vector, UnifiedVectorFormat &vdata,
+                                            const TableFilter &filter, ExpressionFilterState &state,
+                                            idx_t &approved_tuple_count) {
+	if (approved_tuple_count == 0 || filter.filter_type != TableFilterType::EXPRESSION_FILTER) {
+		return false;
+	}
+	auto &expression_filter = filter.Cast<ExpressionFilter>();
+	auto &expr = *expression_filter.expr;
+	if (!CanEvaluateFastInternalFilterExpression(expr, input_vector.GetType())) {
+		return false;
+	}
+	return TryApplyFastInternalFilterExpression(state, sel, input_vector, vdata, expr, approved_tuple_count);
+}
+
+static bool TryAddStringEqualityConstant(const Expression &expr, vector<string> &constants) {
+	if (!BoundComparisonExpression::IsComparison(expr) ||
+	    expr.GetExpressionType() != ExpressionType::COMPARE_EQUAL) {
+		return false;
+	}
+	auto &comparison = expr.Cast<BoundFunctionExpression>();
+	auto &left = BoundComparisonExpression::Left(comparison);
+	auto &right = BoundComparisonExpression::Right(comparison);
+	optional_ptr<const BoundConstantExpression> constant;
+	if (left.GetExpressionType() == ExpressionType::BOUND_REF && right.GetExpressionType() == ExpressionType::VALUE_CONSTANT) {
+		constant = &right.Cast<BoundConstantExpression>();
+	} else if (right.GetExpressionType() == ExpressionType::BOUND_REF &&
+	           left.GetExpressionType() == ExpressionType::VALUE_CONSTANT) {
+		constant = &left.Cast<BoundConstantExpression>();
+	} else {
+		return false;
+	}
+	auto &value = constant->GetValue();
+	if (value.IsNull() || value.type().id() != LogicalTypeId::VARCHAR) {
+		return false;
+	}
+	constants.push_back(value.GetValue<string>());
+	return true;
+}
+
+static optional_ptr<const Expression> TryGetExactOptionalStringFilterChild(const Expression &expr) {
+	if (expr.GetExpressionClass() != ExpressionClass::BOUND_FUNCTION) {
+		return nullptr;
+	}
+	auto &function_expr = expr.Cast<BoundFunctionExpression>();
+	if (function_expr.Function().GetName() != OptionalFilterScalarFun::NAME || !function_expr.BindInfo()) {
+		return nullptr;
+	}
+	auto &data = function_expr.BindInfo()->Cast<OptionalFilterFunctionData>();
+	return data.child_filter_expr.get();
+}
+
+static bool TryCollectStringEqualityConstants(const Expression &expr, vector<string> &constants) {
+	if (auto child = TryGetExactOptionalStringFilterChild(expr)) {
+		return TryCollectStringEqualityConstants(*child, constants);
+	}
+	if (expr.GetExpressionClass() == ExpressionClass::BOUND_CONJUNCTION &&
+	    expr.GetExpressionType() == ExpressionType::CONJUNCTION_OR) {
+		auto &conjunction = expr.Cast<BoundConjunctionExpression>();
+		for (auto &child : conjunction.GetChildren()) {
+			if (!TryCollectStringEqualityConstants(*child, constants)) {
+				return false;
+			}
+		}
+		return true;
+	}
+	if (expr.GetExpressionClass() == ExpressionClass::BOUND_OPERATOR &&
+	    expr.GetExpressionType() == ExpressionType::COMPARE_IN) {
+		auto &in_expr = expr.Cast<BoundOperatorExpression>();
+		auto &children = in_expr.GetChildren();
+		if (children.size() < 2 || children[0]->GetExpressionType() != ExpressionType::BOUND_REF) {
+			return false;
+		}
+		for (idx_t child_idx = 1; child_idx < children.size(); child_idx++) {
+			if (children[child_idx]->GetExpressionType() != ExpressionType::VALUE_CONSTANT) {
+				return false;
+			}
+			auto &value = children[child_idx]->Cast<BoundConstantExpression>().GetValue();
+			if (value.IsNull() || value.type().id() != LogicalTypeId::VARCHAR) {
+				return false;
+			}
+			constants.push_back(value.GetValue<string>());
+		}
+		return true;
+	}
+	return TryAddStringEqualityConstant(expr, constants);
+}
+
+static bool GetFastStringEqualityConstants(const ExpressionFilter &filter, ExpressionFilterState &state,
+                                           const vector<string> *&constants) {
+	if (!state.fast_string_equality_filter_initialized) {
+		state.fast_string_equality_filter_initialized = true;
+		state.fast_string_equality_filter_supported =
+		    TryCollectStringEqualityConstants(*filter.expr, state.fast_string_equality_constants) &&
+		    !state.fast_string_equality_constants.empty();
+		if (!state.fast_string_equality_filter_supported) {
+			state.fast_string_equality_constants.clear();
+		}
+	}
+	if (!state.fast_string_equality_filter_supported) {
+		return false;
+	}
+	constants = &state.fast_string_equality_constants;
+	return true;
+}
+
+static bool TryFastDictionaryStringEqualityFilter(SelectionVector &sel, Vector &input_vector, const TableFilter &filter,
+                                                  ExpressionFilterState &state, idx_t &approved_tuple_count) {
+	if (approved_tuple_count == 0 || input_vector.GetVectorType() != VectorType::DICTIONARY_VECTOR ||
+	    input_vector.GetType().id() != LogicalTypeId::VARCHAR ||
+	    filter.filter_type != TableFilterType::EXPRESSION_FILTER) {
+		return false;
+	}
+	auto dictionary_size = DictionaryVector::DictionarySize(input_vector);
+	if (!dictionary_size.IsValid()) {
+		return false;
+	}
+	auto &dictionary = DictionaryVector::Child(input_vector);
+	if (dictionary.GetVectorType() != VectorType::FLAT_VECTOR || dictionary.GetType().id() != LogicalTypeId::VARCHAR) {
+		return false;
+	}
+	auto &dict_buffer = input_vector.Buffer().Cast<DictionaryBuffer>();
+	auto &dict_entry = dict_buffer.GetEntry();
+	const bool can_cache_matches = !dict_buffer.GetDictionaryId().empty();
+	auto &expression_filter = filter.Cast<ExpressionFilter>();
+	const vector<string> *constants;
+	if (!GetFastStringEqualityConstants(expression_filter, state, constants)) {
+		return false;
+	}
+
+	const auto dict_count = dictionary_size.GetIndex();
+	auto &dictionary_matches = state.fast_dictionary_matches;
+	const bool cache_hit = can_cache_matches && state.fast_dictionary_matches_entry == &dict_entry &&
+	                       state.fast_dictionary_matches_count == dict_count;
+	if (!cache_hit) {
+		auto dict_data = FlatVector::GetData<string_t>(dictionary);
+		auto &dict_validity = FlatVector::Validity(dictionary);
+		if (dictionary_matches.size() < dict_count) {
+			dictionary_matches.resize(dict_count);
+		}
+		std::fill(dictionary_matches.begin(), dictionary_matches.begin() + dict_count, 0);
+		for (idx_t dict_idx = 0; dict_idx < dict_count; dict_idx++) {
+			if (!dict_validity.RowIsValid(dict_idx)) {
+				continue;
+			}
+			auto &dict_value = dict_data[dict_idx];
+			for (auto &constant : *constants) {
+				string_t constant_value(constant);
+				if (string_t::StringComparisonOperators::Equals(dict_value, constant_value)) {
+					dictionary_matches[dict_idx] = 1;
+					break;
+				}
+			}
+		}
+		state.fast_dictionary_matches_entry = can_cache_matches ? &dict_entry : nullptr;
+		state.fast_dictionary_matches_count = can_cache_matches ? dict_count : 0;
+	}
+
+	auto &dict_sel = DictionaryVector::SelVector(input_vector);
+	auto &result_sel = GetFastFilterSelection(state, approved_tuple_count);
+	idx_t result_count = 0;
+	for (idx_t i = 0; i < approved_tuple_count; i++) {
+		const auto row_idx = sel.get_index(i);
+		const auto dict_idx = dict_sel.get_index(row_idx);
+		if (dict_idx < dict_count && dictionary_matches[dict_idx]) {
+			result_sel.set_index(result_count++, row_idx);
+		}
+	}
+	sel.Initialize(result_sel);
+	approved_tuple_count = result_count;
+	return true;
+}
+
 idx_t ColumnSegment::FilterSelection(SelectionVector &sel, Vector &vector, UnifiedVectorFormat &vdata,
                                      const TableFilter &filter, TableFilterState &filter_state, idx_t scan_count,
                                      idx_t &approved_tuple_count) {
-	(void)vdata;
 	auto &state = filter_state.Cast<ExpressionFilterState>();
+	if (TryFastSignedNumericRangeFilter(sel, vector, vdata, filter, state, approved_tuple_count)) {
+		return approved_tuple_count;
+	}
+	if (TryFastInternalFilterExpression(sel, vector, vdata, filter, state, approved_tuple_count)) {
+		return approved_tuple_count;
+	}
+	if (TryFastDictionaryStringEqualityFilter(sel, vector, filter, state, approved_tuple_count)) {
+		return approved_tuple_count;
+	}
 	return ExecuteExpressionFilterSelection(sel, vector, state, scan_count, approved_tuple_count);
 }
 

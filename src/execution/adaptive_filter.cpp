@@ -2,7 +2,9 @@
 #include "duckdb/planner/cost_model.hpp"
 #include "duckdb/execution/adaptive_filter.hpp"
 #include "duckdb/logging/logger.hpp"
+#include "duckdb/planner/filter/expression_filter.hpp"
 #include "duckdb/planner/table_filter.hpp"
+#include "duckdb/planner/filter/table_filter_functions.hpp"
 #include "duckdb/common/enum_util.hpp"
 #include "duckdb/common/numeric_utils.hpp"
 #include "duckdb/common/string_util.hpp"
@@ -11,6 +13,26 @@
 #include "duckdb/planner/table_filter_set.hpp"
 
 namespace duckdb {
+
+static bool ContainsRuntimeDynamicFilter(const Expression &expr) {
+	return ExpressionFilter::ContainsInternalFunction(expr, BloomFilterScalarFun::NAME) ||
+	       ExpressionFilter::ContainsInternalFunction(expr, DynamicFilterScalarFun::NAME) ||
+	       ExpressionFilter::ContainsInternalFunction(expr, PerfectHashJoinScalarFun::NAME) ||
+	       ExpressionFilter::ContainsInternalFunction(expr, PrefixRangeScalarFun::NAME);
+}
+
+static bool ContainsRuntimeDynamicFilter(const TableFilterSet &table_filters) {
+	for (auto &entry : table_filters) {
+		if (entry.Filter().filter_type != TableFilterType::EXPRESSION_FILTER) {
+			continue;
+		}
+		auto &expr_filter = entry.Filter().Cast<ExpressionFilter>();
+		if (expr_filter.expr && ContainsRuntimeDynamicFilter(*expr_filter.expr)) {
+			return true;
+		}
+	}
+	return false;
+}
 
 AdaptiveFilter::AdaptiveFilter(const Expression &expr) : observe_interval(10), execute_interval(20), warmup(true) {
 	auto &conj_expr = expr.Cast<BoundConjunctionExpression>();
@@ -30,6 +52,7 @@ AdaptiveFilter::AdaptiveFilter(const Expression &expr) : observe_interval(10), e
 AdaptiveFilter::AdaptiveFilter(const TableFilterSet &table_filters, vector<idx_t> filter_global_pos_p)
     : observe_interval(10), execute_interval(20), warmup(true) {
 	permutation = DuckDBCostModel::InitialFilterOrder(table_filters);
+	disable_permutations = ContainsRuntimeDynamicFilter(table_filters);
 	for (idx_t idx = 1; idx < table_filters.FilterCount(); idx++) {
 		swap_likeliness.push_back(100);
 	}

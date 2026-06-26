@@ -382,6 +382,7 @@ bool JoinHashTable::GetExecutionHashJoinTableLayout(ExecutionHashJoinTableLayout
 	layout.salt_mask = ht_entry_t::SALT_MASK;
 	layout.entries = hash_map.get() ? reinterpret_cast<const ht_entry_t *>(hash_map.get()) : nullptr;
 	layout.aux_next_ptrs = aux_next_ptrs_data;
+	layout.bloom_filter = bloom_filter.IsInitialized() ? &bloom_filter : nullptr;
 
 	layout.null_keys_are_filtered = true;
 	for (idx_t condition_idx = 0; condition_idx < null_values_are_equal.size(); condition_idx++) {

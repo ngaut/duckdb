@@ -326,8 +326,8 @@ static void AccumulateExecutionRegionOpenRequest(ExecutionRegionPlan &plan, cons
 		            native_fused_source_owner
 		        ? ExecutionRegionSourceExecutionKind::SOURCE_CONTRACT
 		        : ExecutionRegionSourceExecutionKind::NONE;
-		plan_contract.uses_scan_filters =
-		    !source.filters.empty() && native_fused_source_owner && lowering_plan.UsesScanFilters();
+		plan_contract.uses_scan_filters = native_fused_source_owner && lowering_plan.UsesScanFilters() &&
+		                                  (!source.filters.empty() || table_scan_contract.dynamic_filters);
 		plan_contract.source_contract_input_types.clear();
 		if (plan_contract.UsesSourceContract() && !plan_contract.uses_scan_filters && !source.filters.empty()) {
 			plan_contract.source_contract_input_types = table_scan_contract.source_contract_input_types;
@@ -745,7 +745,10 @@ unique_ptr<ExecutionRegionPlan> ExecutionRegionPlanner::Build(ClientContext &con
 			continue;
 		}
 		ExecutionRegionPhysicalRunnerSelection physical_runner;
-		if (has_cost_only_physical_runner && lowering_plan.IsFullyFused()) {
+		const bool cost_only_shape_matches_lowering =
+		    has_cost_only_physical_runner && lowering_plan.IsFullyFused() &&
+		    candidate.uses_scan_filters == lowering_plan.UsesScanFilters();
+		if (cost_only_shape_matches_lowering) {
 			physical_runner = std::move(cost_only_physical_runner);
 			physical_runner.reason = "duckdb_cbo selects ";
 			physical_runner.reason += ExecutionRegionDecisionRunnerName(physical_runner.SelectedRunner());

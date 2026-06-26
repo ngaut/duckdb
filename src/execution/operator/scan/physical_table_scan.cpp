@@ -113,17 +113,36 @@ InitializeExecutionSourceContractTableScanGlobalState(ClientContext &context, co
 	contract_state.is_create_index = bind_data.is_create_index;
 	contract_state.total_row_groups_to_scan = storage.GetRowGroupCountWithLocalStorage(context);
 
-	for (auto &column_index : op.column_ids) {
+	const auto can_scan_projected_layout = !execution_source_config.return_source_contract_input &&
+	                                       !execution_source_config.filters &&
+	                                       !execution_source_config.projection_ids.empty() &&
+	                                       execution_source_config.projection_ids.size() != op.column_ids.size();
+	auto append_column = [&](const ColumnIndex &column_index) {
 		contract_state.storage_ids.push_back(bind_data.table.GetStorageIndex(column_index));
 		contract_state.scanned_types.push_back(GetExecutionSourceContractTableScanColumnType(op, column_index));
+	};
+	if (can_scan_projected_layout) {
+		for (auto projection_id : execution_source_config.projection_ids) {
+			if (projection_id >= op.column_ids.size()) {
+				throw InternalException("execution region table scan projection id is outside scan layout");
+			}
+			append_column(op.column_ids[projection_id]);
+		}
+	} else {
+		for (auto &column_index : op.column_ids) {
+			append_column(column_index);
+		}
 	}
 	contract_state.return_source_contract_input = execution_source_config.return_source_contract_input;
 	if (contract_state.return_source_contract_input &&
 	    execution_source_config.source_contract_input_types != contract_state.scanned_types) {
 		throw InternalException("execution region table scan source contract input layout does not match scan layout");
 	}
-	contract_state.projection_ids = execution_source_config.projection_ids;
+	if (!can_scan_projected_layout) {
+		contract_state.projection_ids = execution_source_config.projection_ids;
+	}
 	contract_state.can_remove_filter_columns = !contract_state.return_source_contract_input &&
+	                                           !can_scan_projected_layout &&
 	                                           !contract_state.projection_ids.empty() &&
 	                                           contract_state.projection_ids.size() != op.column_ids.size();
 

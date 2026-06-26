@@ -21,6 +21,7 @@ namespace duckdb {
 
 class BaseStatistics;
 class Expression;
+class ExpressionFilter;
 class PerfectHashJoinExecutor;
 class PrefixRangeFilter;
 struct DynamicFilterData;
@@ -73,6 +74,20 @@ unique_ptr<Expression> CreateSelectivityOptionalFilterExpression(unique_ptr<Expr
 unique_ptr<Expression> CreateDynamicFilterExpression(shared_ptr<DynamicFilterData> filter_data,
                                                      const LogicalType &target_type);
 
+struct SignedNumericRangeFilterData {
+	bool empty = false;
+	bool has_lower = false;
+	bool has_upper = false;
+	int64_t lower = 0;
+	int64_t upper = 0;
+};
+
+bool IsSignedNumericRangePhysicalType(PhysicalType physical_type);
+bool TryGetSignedNumericRange(const Expression &expr, const LogicalType &target_type,
+                              SignedNumericRangeFilterData &range);
+bool TryGetSignedNumericRange(const ExpressionFilter &filter, ExpressionFilterState &state,
+                              const LogicalType &target_type, SignedNumericRangeFilterData &range);
+
 //! Bind function that prevents user access to internal tablefilter functions
 struct TableFilterFunctions {
 	static unique_ptr<FunctionData> Bind(BindScalarFunctionInput &input);
@@ -92,12 +107,20 @@ public:
 	idx_t LookupHashes(const Vector &hashes_v, SelectionVector &result_sel, idx_t count) const;
 
 	void InsertOne(hash_t hash) const;
-	bool LookupOne(hash_t hash) const;
+	DUCKDB_API bool LookupOne(hash_t hash) const;
 	void Merge(const BloomFilter &other);
 	void Reset();
 
 	bool IsInitialized() const {
 		return initialized;
+	}
+
+	const uint64_t *Data() const {
+		return bf;
+	}
+
+	uint64_t Bitmask() const {
+		return bitmask;
 	}
 
 private:
@@ -141,6 +164,13 @@ struct PerfectHashJoinFunctionData : public FunctionData {
 };
 
 //! Runtime prefix-range filter state used by join pushdown and internal tablefilter functions.
+struct PrefixRangeLookupData {
+	uint64_t min = 0;
+	uint64_t span = 0;
+	idx_t shift = 0;
+	const uint64_t *bitmap = nullptr;
+};
+
 class PrefixRangeFilter {
 public:
 	struct BuildState {
@@ -164,6 +194,8 @@ public:
 	virtual void InsertKeys(Vector &keys, BuildState &state) const = 0;
 	virtual void MergeBuildState(BuildState &state) = 0;
 	virtual idx_t LookupKeys(Vector &keys, SelectionVector &result_sel, idx_t count) const = 0;
+	virtual idx_t LookupKeys(Vector &keys, const SelectionVector &sel, SelectionVector &result_sel, idx_t count) const = 0;
+	virtual bool GetSignedLookupData(PrefixRangeLookupData &result) const = 0;
 	virtual FilterPropagateResult LookupRange(const Value &lower_bound, const Value &upper_bound) const = 0;
 	virtual bool IsInitialized() const = 0;
 	static bool SupportedType(const LogicalType &type);

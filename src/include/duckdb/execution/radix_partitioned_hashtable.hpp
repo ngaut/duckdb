@@ -17,6 +17,8 @@ namespace duckdb {
 
 class GroupedAggregateHashTable;
 struct ExecutionHashAggregateLookupLayout;
+struct ExecutionPrimitiveAggregateUpdateLane;
+struct ExecutionRegionSinkInfo;
 struct ExecutionOperatorStageRecorder;
 struct AggregatePartition;
 
@@ -50,6 +52,38 @@ public:
 	void ResolveStateAddresses(ExecutionContext &context, DataChunk &chunk, OperatorSinkInput &input,
 	                           Vector &addresses_out,
 	                           optional_ptr<ExecutionOperatorStageRecorder> recorder = nullptr) const;
+	bool TryUpdateExistingPrimitiveGroups(ExecutionContext &context, DataChunk &chunk, OperatorSinkInput &input,
+	                                      const ExecutionRegionSinkInfo &sink_info,
+	                                      const vector<const ExecutionPrimitiveAggregateUpdateLane *> &lanes,
+	                                      optional_ptr<ExecutionOperatorStageRecorder> recorder = nullptr,
+	                                      bool finish = true) const;
+	bool TryUpdateNewPrimitiveGroups(ExecutionContext &context, DataChunk &chunk, OperatorSinkInput &input,
+	                                 const ExecutionRegionSinkInfo &sink_info,
+	                                 const vector<const ExecutionPrimitiveAggregateUpdateLane *> &lanes,
+	                                 optional_ptr<ExecutionOperatorStageRecorder> recorder = nullptr,
+	                                 bool finish = true) const;
+	bool TryUpdateExistingGroupsWithStateAddresses(ExecutionContext &context, DataChunk &chunk,
+	                                               OperatorSinkInput &input, const ExecutionRegionSinkInfo &sink_info,
+	                                               void (*update_function)(Vector &addresses, void *state),
+	                                               void *update_state,
+	                                               optional_ptr<ExecutionOperatorStageRecorder> recorder = nullptr,
+	                                               bool finish = true) const;
+	bool TryUpdateNewGroupsWithStateAddresses(ExecutionContext &context, DataChunk &chunk, OperatorSinkInput &input,
+	                                          const ExecutionRegionSinkInfo &sink_info,
+	                                          void (*update_function)(Vector &addresses, void *state),
+	                                          void *update_state,
+	                                          optional_ptr<ExecutionOperatorStageRecorder> recorder = nullptr,
+	                                          bool finish = true) const;
+	bool TryAppendNewGroupsWithStateAddresses(ExecutionContext &context, DataChunk &chunk, OperatorSinkInput &input,
+	                                          const ExecutionRegionSinkInfo &sink_info,
+	                                          void (*update_function)(Vector &addresses, void *state),
+	                                          void *update_state,
+	                                          optional_ptr<ExecutionOperatorStageRecorder> recorder = nullptr,
+	                                          bool finish = true) const;
+	bool TryResolveNewGroupAddresses(ExecutionContext &context, DataChunk &chunk, OperatorSinkInput &input,
+	                                 const ExecutionRegionSinkInfo &sink_info, Vector &addresses_out,
+	                                 optional_ptr<ExecutionOperatorStageRecorder> recorder = nullptr,
+	                                 bool finish = true) const;
 	bool GetExecutionHashAggregateLookupLayout(ExecutionHashAggregateLookupLayout &layout) const;
 	void FinishStateUpdates(ExecutionContext &context, OperatorSinkInput &input) const;
 	void Combine(ExecutionContext &context, GlobalSinkState &gstate, LocalSinkState &lstate) const;

@@ -49,6 +49,7 @@ void CompressedStringScanState::Initialize(ColumnSegment &segment, bool initiali
 	}
 
 	dictionary = DictionaryVector::CreateReusableDictionary(segment.GetType(), index_buffer_count);
+	dictionary->id = "dictionary:" + to_string(segment.GetBlockId()) + ":" + to_string(segment.GetBlockOffset());
 	dictionary_size = index_buffer_count;
 	auto dict_child_data = FlatVector::Writer<string_t>(dictionary->data, index_buffer_count);
 	dict_child_data.WriteNull();
@@ -87,24 +88,17 @@ void CompressedStringScanState::ScanToFlatVector(Vector &result, idx_t result_of
 	}
 }
 
-void CompressedStringScanState::ScanToDictionaryVector(ColumnSegment &segment, Vector &result, idx_t result_offset,
-                                                       idx_t start, idx_t scan_count) {
-	D_ASSERT(scan_count == STANDARD_VECTOR_SIZE);
-	D_ASSERT(result_offset == 0);
-
+const SelectionVector &CompressedStringScanState::GetSelVec(idx_t start, idx_t scan_count) {
 	idx_t start_offset = start % BitpackingPrimitives::BITPACKING_ALGORITHM_GROUP_SIZE;
 	idx_t decompress_count = BitpackingPrimitives::RoundUpToAlgorithmGroupSize(scan_count + start_offset);
 
-	// Create a selection vector of sufficient size if we don't already have one.
 	if (!sel_vec || sel_vec_size < decompress_count) {
 		sel_vec_size = decompress_count;
 		sel_vec = make_buffer<SelectionVector>(decompress_count);
 	}
 
-	// Scanning 2048 values, emitting a dict vector
 	data_ptr_t dst = data_ptr_cast(sel_vec->data());
 	data_ptr_t src = data_ptr_cast(&base_data[((start - start_offset) * current_width) / 8]);
-
 	BitpackingPrimitives::UnPackBuffer<sel_t>(dst, src, decompress_count, current_width);
 
 	if (start_offset != 0) {
@@ -112,8 +106,16 @@ void CompressedStringScanState::ScanToDictionaryVector(ColumnSegment &segment, V
 			sel_vec->set_index(i, sel_vec->get_index(i + start_offset));
 		}
 	}
+	return *sel_vec;
+}
 
-	result.Dictionary(dictionary, *sel_vec, scan_count);
+void CompressedStringScanState::ScanToDictionaryVector(ColumnSegment &segment, Vector &result, idx_t result_offset,
+                                                       idx_t start, idx_t scan_count) {
+	D_ASSERT(scan_count == STANDARD_VECTOR_SIZE);
+	D_ASSERT(result_offset == 0);
+
+	auto &sel_vec = GetSelVec(start, scan_count);
+	result.Dictionary(dictionary, sel_vec, scan_count);
 }
 
 } // namespace duckdb

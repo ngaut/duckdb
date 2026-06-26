@@ -160,6 +160,28 @@ bool TryReadSljitTypedExpressionTreeStringPrefixConstant(const ExecutionExpressi
 	return true;
 }
 
+bool TryReadSljitTypedExpressionTreeStringCompareConstant(const ExecutionExpressionIR &node, idx_t &source_index,
+                                                          string &constant, bool &compare_equal) {
+	if (node.kind != ExecutionExpressionIRKind::BINARY || node.return_type.id() != LogicalTypeId::BOOLEAN ||
+	    (node.binary_op != ExecutionExpressionBinaryOp::COMPARE_EQUAL &&
+	     node.binary_op != ExecutionExpressionBinaryOp::COMPARE_NOTEQUAL) ||
+	    !node.left || !node.right) {
+		return false;
+	}
+	auto try_read = [&](const ExecutionExpressionIR &reference, const ExecutionExpressionIR &constant_node) {
+		if (reference.kind != ExecutionExpressionIRKind::REFERENCE || reference.return_type.id() != LogicalTypeId::VARCHAR ||
+		    constant_node.kind != ExecutionExpressionIRKind::CONSTANT ||
+		    constant_node.return_type.id() != LogicalTypeId::VARCHAR || constant_node.constant.IsNull()) {
+			return false;
+		}
+		source_index = reference.ref_index;
+		constant = StringValue::Get(constant_node.constant);
+		compare_equal = node.binary_op == ExecutionExpressionBinaryOp::COMPARE_EQUAL;
+		return true;
+	};
+	return try_read(*node.left, *node.right) || try_read(*node.right, *node.left);
+}
+
 bool SljitTypedExpressionTreeIsSupported(const ExecutionExpressionIR &node) {
 	switch (node.kind) {
 	case ExecutionExpressionIRKind::REFERENCE:
@@ -188,6 +210,15 @@ bool SljitTypedExpressionTreeIsSupported(const ExecutionExpressionIR &node) {
 	case ExecutionExpressionIRKind::BINARY:
 		if (!node.left || !node.right) {
 			return false;
+		}
+		{
+			idx_t source_index;
+			string string_constant;
+			bool compare_equal;
+			if (TryReadSljitTypedExpressionTreeStringCompareConstant(node, source_index, string_constant,
+			                                                         compare_equal)) {
+				return true;
+			}
 		}
 		if (SljitTypedExpressionTreeComparisonSupported(node.binary_op)) {
 			return SljitTypedExpressionTreeIsBoolNode(node) &&
@@ -452,6 +483,10 @@ bool TryGetSljitTypedExpressionTreeResultKind(const ExecutionExpressionIR &root,
 	}
 	if (SljitTypedExpressionTreeIsBoolNode(root)) {
 		kind = SljitNativeIntegerKind::UINT8;
+		return true;
+	}
+	if (SljitTypedExpressionTreeIsInt32Node(root)) {
+		kind = SljitNativeIntegerKind::INT32;
 		return true;
 	}
 	return false;

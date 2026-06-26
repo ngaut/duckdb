@@ -10,6 +10,10 @@
 #include "duckdb/function/compression_function.hpp"
 #include "duckdb/main/config.hpp"
 #include "duckdb/main/settings.hpp"
+#include "duckdb/planner/expression/bound_conjunction_expression.hpp"
+#include "duckdb/planner/expression/bound_function_expression.hpp"
+#include "duckdb/planner/filter/expression_filter.hpp"
+#include "duckdb/planner/filter/table_filter_functions.hpp"
 #include "duckdb/storage/buffer_manager.hpp"
 #include "duckdb/storage/compression/bitpacking.hpp"
 #include "duckdb/storage/compression/standard_compression_state.hpp"
@@ -18,6 +22,7 @@
 #include "duckdb/storage/table/scan_state.hpp"
 
 #include <functional>
+#include <type_traits>
 
 namespace duckdb {
 
@@ -603,6 +608,7 @@ public:
 	ColumnSegment &current_segment;
 
 	T decompression_buffer[BITPACKING_METADATA_GROUP_SIZE];
+	SelectionVector filter_sel;
 
 	bitpacking_metadata_t current_group;
 	bitpacking_width_t current_width;
@@ -667,14 +673,18 @@ public:
 		}
 	}
 
-	void Skip(ColumnSegment &segment, idx_t skip_count) {
+	void SkipInternal(ColumnSegment &segment, idx_t skip_count, bool allow_group_boundary) {
 		bool skip_sign_extend = true;
 
 		idx_t skipped = 0;
 		idx_t initial_group_offset = current_group_offset;
 
 		// This skips straight to the correct metadata group
-		idx_t meta_groups_to_skip = (skip_count + current_group_offset) / BITPACKING_METADATA_GROUP_SIZE;
+		const auto target_group_offset = skip_count + current_group_offset;
+		idx_t meta_groups_to_skip = target_group_offset / BITPACKING_METADATA_GROUP_SIZE;
+		if (allow_group_boundary && meta_groups_to_skip && target_group_offset % BITPACKING_METADATA_GROUP_SIZE == 0) {
+			meta_groups_to_skip--;
+		}
 		if (meta_groups_to_skip) {
 			// bitpacking_metadata_ptr points to the next metadata: this means we need to advance the pointer by n-1
 			bitpacking_metadata_ptr -= (meta_groups_to_skip - 1) * sizeof(bitpacking_metadata_encoded_t);
@@ -687,7 +697,11 @@ public:
 
 		// Assert we can are in the correct metadata group
 		idx_t remaining_to_skip = skip_count - skipped;
-		D_ASSERT(current_group_offset + remaining_to_skip < BITPACKING_METADATA_GROUP_SIZE);
+		if (allow_group_boundary) {
+			D_ASSERT(current_group_offset + remaining_to_skip <= BITPACKING_METADATA_GROUP_SIZE);
+		} else {
+			D_ASSERT(current_group_offset + remaining_to_skip < BITPACKING_METADATA_GROUP_SIZE);
+		}
 
 		if (current_group.mode == BitpackingMode::CONSTANT || current_group.mode == BitpackingMode::CONSTANT_DELTA ||
 		    current_group.mode == BitpackingMode::FOR) {
@@ -729,6 +743,14 @@ public:
 		}
 
 		D_ASSERT(skipped == skip_count);
+	}
+
+	void Skip(ColumnSegment &segment, idx_t skip_count) {
+		SkipInternal(segment, skip_count, false);
+	}
+
+	void Consume(ColumnSegment &segment, idx_t skip_count) {
+		SkipInternal(segment, skip_count, true);
 	}
 
 	data_ptr_t GetPtr(bitpacking_metadata_t group) {
@@ -841,6 +863,1003 @@ void BitpackingScan(ColumnSegment &segment, ColumnScanState &state, idx_t scan_c
 	BitpackingScanPartial<T>(segment, state, scan_count, result, 0);
 }
 
+template <class T, class T_U = typename MakeUnsigned<T>::type>
+static T BitpackingConstantDeltaValue(const BitpackingScanState<T> &scan_state, idx_t group_offset) {
+	return static_cast<T>((static_cast<T_U>(scan_state.current_constant) * group_offset) +
+	                      static_cast<T_U>(scan_state.current_frame_of_reference));
+}
+
+static bool SelectionVectorIsOrdered(const SelectionVector &sel, idx_t sel_count) {
+	if (!sel.IsSet()) {
+		return true;
+	}
+	if (sel_count < 2) {
+		return true;
+	}
+	auto previous_idx = sel.get_index(0);
+	for (idx_t i = 1; i < sel_count; i++) {
+		auto current_idx = sel.get_index(i);
+		if (current_idx < previous_idx) {
+			return false;
+		}
+		previous_idx = current_idx;
+	}
+	return true;
+}
+
+template <class T, class T_S = typename MakeSigned<T>::type>
+void BitpackingScanSelected(ColumnSegment &segment, ColumnScanState &state, idx_t vector_count, Vector &result,
+                            const SelectionVector &sel, idx_t sel_count) {
+	auto &scan_state = state.scan_state->Cast<BitpackingScanState<T>>();
+	auto result_data = FlatVector::GetDataMutable<T>(result);
+	result.SetVectorType(VectorType::FLAT_VECTOR);
+
+	bool skip_sign_extend = true;
+	idx_t selected_idx = 0;
+	idx_t scanned = 0;
+	while (scanned < vector_count) {
+		if (selected_idx == sel_count) {
+			scan_state.Consume(segment, vector_count - scanned);
+			return;
+		}
+		const auto next_selected = sel.get_index(selected_idx);
+		D_ASSERT(next_selected >= scanned);
+		if (next_selected > scanned) {
+			const auto skip_count = next_selected - scanned;
+			scan_state.Skip(segment, skip_count);
+			scanned += skip_count;
+			continue;
+		}
+
+		D_ASSERT(scan_state.current_group_offset <= BITPACKING_METADATA_GROUP_SIZE);
+		if (scan_state.current_group_offset == BITPACKING_METADATA_GROUP_SIZE) {
+			scan_state.LoadNextGroup();
+		}
+
+		if (scan_state.current_group.mode == BitpackingMode::CONSTANT) {
+			const auto scan_unit_remaining =
+			    MinValue<idx_t>(vector_count - scanned, BITPACKING_METADATA_GROUP_SIZE - scan_state.current_group_offset);
+			idx_t selected_end = selected_idx + 1;
+			while (selected_end < sel_count && sel.get_index(selected_end) < scanned + scan_unit_remaining) {
+				selected_end++;
+			}
+			const auto last_selected = sel.get_index(selected_end - 1);
+			const auto to_scan = last_selected - scanned + 1;
+			for (idx_t i = selected_idx; i < selected_end; i++) {
+				result_data[sel.get_index(i)] = scan_state.current_constant;
+			}
+			scan_state.current_group_offset += to_scan;
+			scanned += to_scan;
+			selected_idx = selected_end;
+			continue;
+		}
+		if (scan_state.current_group.mode == BitpackingMode::CONSTANT_DELTA) {
+			const auto scan_unit_remaining =
+			    MinValue<idx_t>(vector_count - scanned, BITPACKING_METADATA_GROUP_SIZE - scan_state.current_group_offset);
+			idx_t selected_end = selected_idx + 1;
+			while (selected_end < sel_count && sel.get_index(selected_end) < scanned + scan_unit_remaining) {
+				selected_end++;
+			}
+			const auto last_selected = sel.get_index(selected_end - 1);
+			const auto to_scan = last_selected - scanned + 1;
+			const auto base_offset = scan_state.current_group_offset;
+			for (idx_t i = selected_idx; i < selected_end; i++) {
+				const auto row_idx = sel.get_index(i);
+				result_data[row_idx] = BitpackingConstantDeltaValue<T>(scan_state, base_offset + row_idx - scanned);
+			}
+			scan_state.current_group_offset += to_scan;
+			scanned += to_scan;
+			selected_idx = selected_end;
+			continue;
+		}
+
+		D_ASSERT(scan_state.current_group.mode == BitpackingMode::FOR ||
+		         scan_state.current_group.mode == BitpackingMode::DELTA_FOR);
+
+		const auto offset_in_compression_group =
+		    scan_state.current_group_offset % BitpackingPrimitives::BITPACKING_ALGORITHM_GROUP_SIZE;
+		const auto scan_unit_remaining =
+		    MinValue<idx_t>(vector_count - scanned,
+		                    BitpackingPrimitives::BITPACKING_ALGORITHM_GROUP_SIZE - offset_in_compression_group);
+		idx_t selected_end = selected_idx + 1;
+		while (selected_end < sel_count && sel.get_index(selected_end) < scanned + scan_unit_remaining) {
+			selected_end++;
+		}
+		const auto last_selected = sel.get_index(selected_end - 1);
+		const auto to_scan = last_selected - scanned + 1;
+		data_ptr_t current_position_ptr =
+		    scan_state.current_group_ptr + scan_state.current_group_offset * scan_state.current_width / 8;
+		data_ptr_t decompression_group_start_pointer =
+		    current_position_ptr - offset_in_compression_group * scan_state.current_width / 8;
+
+		BitpackingPrimitives::UnPackBlock<T>(data_ptr_cast(scan_state.decompression_buffer),
+		                                     decompression_group_start_pointer, scan_state.current_width,
+		                                     skip_sign_extend);
+
+		auto decompression_ptr = scan_state.decompression_buffer + offset_in_compression_group;
+		if (scan_state.current_group.mode == BitpackingMode::DELTA_FOR) {
+			ApplyFrameOfReference<T_S>(reinterpret_cast<T_S *>(decompression_ptr),
+			                           static_cast<T_S>(scan_state.current_frame_of_reference), to_scan);
+			DeltaDecode<T_S>(reinterpret_cast<T_S *>(decompression_ptr),
+			                 static_cast<T_S>(scan_state.current_delta_offset), to_scan);
+			scan_state.current_delta_offset = decompression_ptr[to_scan - 1];
+		} else {
+			ApplyFrameOfReference<T>(decompression_ptr, scan_state.current_frame_of_reference, to_scan);
+		}
+
+		for (idx_t i = selected_idx; i < selected_end; i++) {
+			const auto row_idx = sel.get_index(i);
+			result_data[row_idx] = decompression_ptr[row_idx - scanned];
+		}
+		scan_state.current_group_offset += to_scan;
+		scanned += to_scan;
+		selected_idx = selected_end;
+	}
+}
+
+static bool ShouldUseBitpackingSelectedFilter(idx_t vector_count, idx_t sel_count) {
+	return sel_count < vector_count / 2;
+}
+
+template <class T>
+static SelectionVector &BitpackingFilterSelection(BitpackingScanState<T> &scan_state, idx_t count) {
+	if (scan_state.filter_sel.Capacity() < count) {
+		scan_state.filter_sel.Initialize(MaxValue<idx_t>(count, STANDARD_VECTOR_SIZE));
+	}
+	return scan_state.filter_sel;
+}
+
+template <class T, class T_S = typename MakeSigned<T>::type>
+void BitpackingSelect(ColumnSegment &segment, ColumnScanState &state, idx_t vector_count, Vector &result,
+                      const SelectionVector &sel, idx_t sel_count) {
+	if (sel_count == 0) {
+		auto &scan_state = state.scan_state->Cast<BitpackingScanState<T>>();
+		scan_state.Consume(segment, vector_count);
+		FlatVector::SetSize(result, 0);
+		return;
+	}
+	if (!ShouldUseBitpackingSelectedFilter(vector_count, sel_count) || !SelectionVectorIsOrdered(sel, sel_count)) {
+		BitpackingScanPartial<T>(segment, state, vector_count, result, 0);
+		FlatVector::SetSize(result, count_t(vector_count));
+		result.Slice(sel, sel_count);
+		return;
+	}
+
+	auto &scan_state = state.scan_state->Cast<BitpackingScanState<T>>();
+	auto result_data = FlatVector::GetDataMutable<T>(result);
+	result.SetVectorType(VectorType::FLAT_VECTOR);
+
+	bool skip_sign_extend = true;
+	idx_t selected_idx = 0;
+	idx_t scanned = 0;
+	idx_t output_idx = 0;
+	while (scanned < vector_count) {
+		if (selected_idx == sel_count) {
+			scan_state.Consume(segment, vector_count - scanned);
+			break;
+		}
+		const auto next_selected = sel.get_index(selected_idx);
+		D_ASSERT(next_selected >= scanned);
+		if (next_selected > scanned) {
+			const auto skip_count = next_selected - scanned;
+			scan_state.Skip(segment, skip_count);
+			scanned += skip_count;
+			continue;
+		}
+
+		D_ASSERT(scan_state.current_group_offset <= BITPACKING_METADATA_GROUP_SIZE);
+		if (scan_state.current_group_offset == BITPACKING_METADATA_GROUP_SIZE) {
+			scan_state.LoadNextGroup();
+		}
+
+		if (scan_state.current_group.mode == BitpackingMode::CONSTANT) {
+			const auto scan_unit_remaining =
+			    MinValue<idx_t>(vector_count - scanned, BITPACKING_METADATA_GROUP_SIZE - scan_state.current_group_offset);
+			idx_t selected_end = selected_idx + 1;
+			while (selected_end < sel_count && sel.get_index(selected_end) < scanned + scan_unit_remaining) {
+				selected_end++;
+			}
+			const auto last_selected = sel.get_index(selected_end - 1);
+			const auto to_scan = last_selected - scanned + 1;
+			for (idx_t i = selected_idx; i < selected_end; i++) {
+				result_data[output_idx++] = scan_state.current_constant;
+			}
+			scan_state.current_group_offset += to_scan;
+			scanned += to_scan;
+			selected_idx = selected_end;
+			continue;
+		}
+		if (scan_state.current_group.mode == BitpackingMode::CONSTANT_DELTA) {
+			const auto scan_unit_remaining =
+			    MinValue<idx_t>(vector_count - scanned, BITPACKING_METADATA_GROUP_SIZE - scan_state.current_group_offset);
+			idx_t selected_end = selected_idx + 1;
+			while (selected_end < sel_count && sel.get_index(selected_end) < scanned + scan_unit_remaining) {
+				selected_end++;
+			}
+			const auto last_selected = sel.get_index(selected_end - 1);
+			const auto to_scan = last_selected - scanned + 1;
+			const auto base_offset = scan_state.current_group_offset;
+			for (idx_t i = selected_idx; i < selected_end; i++) {
+				const auto row_idx = sel.get_index(i);
+				result_data[output_idx++] = BitpackingConstantDeltaValue<T>(scan_state, base_offset + row_idx - scanned);
+			}
+			scan_state.current_group_offset += to_scan;
+			scanned += to_scan;
+			selected_idx = selected_end;
+			continue;
+		}
+
+		D_ASSERT(scan_state.current_group.mode == BitpackingMode::FOR ||
+		         scan_state.current_group.mode == BitpackingMode::DELTA_FOR);
+		const auto offset_in_compression_group =
+		    scan_state.current_group_offset % BitpackingPrimitives::BITPACKING_ALGORITHM_GROUP_SIZE;
+		const auto scan_unit_remaining =
+		    MinValue<idx_t>(vector_count - scanned,
+		                    BitpackingPrimitives::BITPACKING_ALGORITHM_GROUP_SIZE - offset_in_compression_group);
+		idx_t selected_end = selected_idx + 1;
+		while (selected_end < sel_count && sel.get_index(selected_end) < scanned + scan_unit_remaining) {
+			selected_end++;
+		}
+		const auto last_selected = sel.get_index(selected_end - 1);
+		const auto to_scan = last_selected - scanned + 1;
+
+		data_ptr_t current_position_ptr =
+		    scan_state.current_group_ptr + scan_state.current_group_offset * scan_state.current_width / 8;
+		data_ptr_t decompression_group_start_pointer =
+		    current_position_ptr - offset_in_compression_group * scan_state.current_width / 8;
+
+		BitpackingPrimitives::UnPackBlock<T>(data_ptr_cast(scan_state.decompression_buffer),
+		                                     decompression_group_start_pointer, scan_state.current_width,
+		                                     skip_sign_extend);
+
+		auto decompression_ptr = scan_state.decompression_buffer + offset_in_compression_group;
+		if (scan_state.current_group.mode == BitpackingMode::DELTA_FOR) {
+			ApplyFrameOfReference<T_S>(reinterpret_cast<T_S *>(decompression_ptr),
+			                           static_cast<T_S>(scan_state.current_frame_of_reference), to_scan);
+			DeltaDecode<T_S>(reinterpret_cast<T_S *>(decompression_ptr),
+			                 static_cast<T_S>(scan_state.current_delta_offset), to_scan);
+			scan_state.current_delta_offset = decompression_ptr[to_scan - 1];
+		} else {
+			ApplyFrameOfReference<T>(decompression_ptr, scan_state.current_frame_of_reference, to_scan);
+		}
+
+		for (idx_t i = selected_idx; i < selected_end; i++) {
+			const auto row_idx = sel.get_index(i);
+			result_data[output_idx++] = decompression_ptr[row_idx - scanned];
+		}
+		scan_state.current_group_offset += to_scan;
+		scanned += to_scan;
+		selected_idx = selected_end;
+	}
+	D_ASSERT(output_idx == sel_count);
+	FlatVector::SetSize(result, count_t(sel_count));
+}
+
+static optional_ptr<const Expression> TryGetBitpackingSelectivityOptionalChild(const Expression &expr) {
+	if (expr.GetExpressionClass() != ExpressionClass::BOUND_FUNCTION) {
+		return nullptr;
+	}
+	auto &function_expr = expr.Cast<BoundFunctionExpression>();
+	if (function_expr.Function().GetName() != SelectivityOptionalFilterScalarFun::NAME || !function_expr.BindInfo()) {
+		return nullptr;
+	}
+	auto &data = function_expr.BindInfo()->Cast<SelectivityOptionalFilterFunctionData>();
+	return data.child_filter_expr.get();
+}
+
+static optional_ptr<const PrefixRangeFunctionData> TryGetBitpackingPrefixRangeData(const Expression &expr) {
+	if (expr.GetExpressionClass() != ExpressionClass::BOUND_FUNCTION) {
+		return nullptr;
+	}
+	auto &function_expr = expr.Cast<BoundFunctionExpression>();
+	if (function_expr.Function().GetName() != PrefixRangeScalarFun::NAME || !function_expr.BindInfo()) {
+		return nullptr;
+	}
+	return &function_expr.BindInfo()->Cast<PrefixRangeFunctionData>();
+}
+
+struct BitpackingPrefixRangeCandidate {
+	optional_ptr<const PrefixRangeFunctionData> data;
+	bool covers_filter = false;
+};
+
+static BitpackingPrefixRangeCandidate TryFindBitpackingPrefixRangeFilter(const Expression &expr) {
+	if (auto prefix_data = TryGetBitpackingPrefixRangeData(expr)) {
+		return {prefix_data, true};
+	}
+	if (auto child = TryGetBitpackingSelectivityOptionalChild(expr)) {
+		if (!child) {
+			return {};
+		}
+		auto child_candidate = TryFindBitpackingPrefixRangeFilter(*child);
+		child_candidate.covers_filter = child_candidate.data && child_candidate.covers_filter;
+		return child_candidate;
+	}
+	if (expr.GetExpressionClass() == ExpressionClass::BOUND_CONJUNCTION &&
+	    expr.GetExpressionType() == ExpressionType::CONJUNCTION_AND) {
+		auto &conjunction = expr.Cast<BoundConjunctionExpression>();
+		for (auto &child : conjunction.GetChildren()) {
+			auto child_candidate = TryFindBitpackingPrefixRangeFilter(*child);
+			if (child_candidate.data) {
+				child_candidate.covers_filter = false;
+				return child_candidate;
+			}
+		}
+	}
+	return {};
+}
+
+static BitpackingPrefixRangeCandidate TryGetBitpackingPrefixRangeFilter(const TableFilter &filter,
+                                                                        TableFilterState &filter_state) {
+	if (filter.filter_type != TableFilterType::EXPRESSION_FILTER) {
+		return {};
+	}
+	auto &expression_filter = filter.Cast<ExpressionFilter>();
+	auto &state = filter_state.Cast<ExpressionFilterState>();
+	if (!state.fast_prefix_range_filter_initialized) {
+		state.fast_prefix_range_filter_initialized = true;
+		auto candidate = TryFindBitpackingPrefixRangeFilter(*expression_filter.expr);
+		state.fast_prefix_range_filter_supported = !!candidate.data;
+		state.fast_prefix_range_filter_covers_filter = candidate.covers_filter;
+		state.fast_prefix_range_filter_data = candidate.data.get();
+	}
+	if (!state.fast_prefix_range_filter_supported) {
+		return {};
+	}
+	return {optional_ptr<const PrefixRangeFunctionData>(state.fast_prefix_range_filter_data),
+	        state.fast_prefix_range_filter_covers_filter};
+}
+
+static bool TryGetPrefixLookupSignedInterval(const PrefixRangeLookupData &lookup, int64_t &lower, int64_t &upper) {
+	const auto max_signed = static_cast<uint64_t>(NumericLimits<int64_t>::Maximum());
+	if (!lookup.bitmap || lookup.min > max_signed || lookup.span > max_signed - lookup.min) {
+		return false;
+	}
+	lower = static_cast<int64_t>(lookup.min);
+	upper = static_cast<int64_t>(lookup.min + lookup.span);
+	return lower <= upper;
+}
+
+static bool SignedRangeContainsPrefixLookup(const SignedNumericRangeFilterData &range,
+                                            const PrefixRangeLookupData &lookup) {
+	if (range.empty) {
+		return false;
+	}
+	int64_t lookup_lower;
+	int64_t lookup_upper;
+	if (!TryGetPrefixLookupSignedInterval(lookup, lookup_lower, lookup_upper)) {
+		return false;
+	}
+	return (!range.has_lower || range.lower <= lookup_lower) && (!range.has_upper || range.upper >= lookup_upper);
+}
+
+static bool PrefixRangeExpressionCoversFilter(const Expression &expr, const LogicalType &target_type,
+                                              const PrefixRangeFunctionData &prefix_data,
+                                              const PrefixRangeLookupData &lookup) {
+	if (auto expr_prefix_data = TryGetBitpackingPrefixRangeData(expr)) {
+		return expr_prefix_data.get() == &prefix_data;
+	}
+	if (auto child = TryGetBitpackingSelectivityOptionalChild(expr)) {
+		return !child || PrefixRangeExpressionCoversFilter(*child, target_type, prefix_data, lookup);
+	}
+
+	SignedNumericRangeFilterData range;
+	if (TryGetSignedNumericRange(expr, target_type, range)) {
+		return SignedRangeContainsPrefixLookup(range, lookup);
+	}
+
+	if (expr.GetExpressionClass() == ExpressionClass::BOUND_CONJUNCTION &&
+	    expr.GetExpressionType() == ExpressionType::CONJUNCTION_AND) {
+		auto &conjunction = expr.Cast<BoundConjunctionExpression>();
+		for (auto &child : conjunction.GetChildren()) {
+			if (!PrefixRangeExpressionCoversFilter(*child, target_type, prefix_data, lookup)) {
+				return false;
+			}
+		}
+		return true;
+	}
+	return false;
+}
+
+static bool PrefixRangeFilterCoversResidual(const TableFilter &filter, TableFilterState &filter_state,
+                                            const LogicalType &target_type,
+                                            const PrefixRangeFunctionData &prefix_data,
+                                            const PrefixRangeLookupData &lookup) {
+	if (filter.filter_type != TableFilterType::EXPRESSION_FILTER) {
+		return false;
+	}
+	auto &state = filter_state.Cast<ExpressionFilterState>();
+	if (!state.fast_prefix_range_residual_coverage_initialized) {
+		state.fast_prefix_range_residual_coverage_initialized = true;
+		auto &expression_filter = filter.Cast<ExpressionFilter>();
+		state.fast_prefix_range_residual_covers_filter =
+		    PrefixRangeExpressionCoversFilter(*expression_filter.expr, target_type, prefix_data, lookup);
+	}
+	return state.fast_prefix_range_residual_covers_filter;
+}
+
+template <class T>
+struct BitpackingSignedNumericComparable {
+	static constexpr bool SUPPORTED = std::is_integral<T>::value && std::is_signed<T>::value &&
+	                                  sizeof(T) <= sizeof(int64_t);
+
+	static int64_t Convert(const T &value) {
+		return static_cast<int64_t>(value);
+	}
+};
+
+template <>
+struct BitpackingSignedNumericComparable<hugeint_t> {
+	static constexpr bool SUPPORTED = false;
+
+	static int64_t Convert(const hugeint_t &value) {
+		return 0;
+	}
+};
+
+template <>
+struct BitpackingSignedNumericComparable<uhugeint_t> {
+	static constexpr bool SUPPORTED = false;
+
+	static int64_t Convert(const uhugeint_t &value) {
+		return 0;
+	}
+};
+
+static bool TryGetBitpackingSignedNumericRangeFilter(const TableFilter &filter, TableFilterState &filter_state,
+                                                     const LogicalType &target_type,
+                                                     SignedNumericRangeFilterData &range) {
+	if (filter.filter_type != TableFilterType::EXPRESSION_FILTER) {
+		return false;
+	}
+	auto &expression_filter = filter.Cast<ExpressionFilter>();
+	auto &state = filter_state.Cast<ExpressionFilterState>();
+	return TryGetSignedNumericRange(expression_filter, state, target_type, range);
+}
+
+template <class T>
+static inline bool BitpackingSignedNumericRangeMatch(const SignedNumericRangeFilterData &range, const T &value) {
+	const auto comparable = BitpackingSignedNumericComparable<T>::Convert(value);
+	return (!range.has_lower || comparable >= range.lower) && (!range.has_upper || comparable <= range.upper);
+}
+
+template <class T, class T_U = typename MakeUnsigned<T>::type>
+static idx_t BitpackingSignedNumericRangeFilterConstantDelta(const BitpackingScanState<T> &scan_state,
+                                                             const SignedNumericRangeFilterData &range,
+                                                             T *result_data, SelectionVector &result_sel,
+                                                             idx_t result_count, const SelectionVector &sel,
+                                                             idx_t selected_idx, idx_t selected_end, idx_t scanned) {
+	const auto base_offset = scan_state.current_group_offset;
+	for (idx_t i = selected_idx; i < selected_end; i++) {
+		const auto row_idx = sel.get_index(i);
+		auto value = BitpackingConstantDeltaValue<T, T_U>(scan_state, base_offset + row_idx - scanned);
+		if (BitpackingSignedNumericRangeMatch(range, value)) {
+			result_data[row_idx] = value;
+			result_sel.set_index(result_count++, row_idx);
+		}
+	}
+	return result_count;
+}
+
+template <class T, class T_S = typename MakeSigned<T>::type>
+static bool TryBitpackingSignedNumericRangeFilter(ColumnSegment &segment, ColumnScanState &state, idx_t vector_count,
+                                                  Vector &result, SelectionVector &sel, idx_t &sel_count,
+                                                  const SignedNumericRangeFilterData &range) {
+	if (!BitpackingSignedNumericComparable<T>::SUPPORTED ||
+	    !IsSignedNumericRangePhysicalType(result.GetType().InternalType())) {
+		return false;
+	}
+	if (!SelectionVectorIsOrdered(sel, sel_count)) {
+		return false;
+	}
+
+	auto &scan_state = state.scan_state->Cast<BitpackingScanState<T>>();
+	if (range.empty) {
+		scan_state.Consume(segment, vector_count);
+		sel_count = 0;
+		FlatVector::SetSize(result, count_t(vector_count));
+		return true;
+	}
+
+	auto result_data = FlatVector::GetDataMutable<T>(result);
+	result.SetVectorType(VectorType::FLAT_VECTOR);
+
+	auto &result_sel = BitpackingFilterSelection(scan_state, sel_count);
+	idx_t result_count = 0;
+	idx_t selected_idx = 0;
+	idx_t scanned = 0;
+	bool skip_sign_extend = true;
+	while (scanned < vector_count) {
+		if (selected_idx == sel_count) {
+			scan_state.Consume(segment, vector_count - scanned);
+			break;
+		}
+		const auto next_selected = sel.get_index(selected_idx);
+		D_ASSERT(next_selected >= scanned);
+		if (next_selected > scanned) {
+			const auto skip_count = next_selected - scanned;
+			scan_state.Skip(segment, skip_count);
+			scanned += skip_count;
+			continue;
+		}
+
+		D_ASSERT(scan_state.current_group_offset <= BITPACKING_METADATA_GROUP_SIZE);
+		if (scan_state.current_group_offset == BITPACKING_METADATA_GROUP_SIZE) {
+			scan_state.LoadNextGroup();
+		}
+
+		if (scan_state.current_group.mode == BitpackingMode::CONSTANT) {
+			const auto scan_unit_remaining =
+			    MinValue<idx_t>(vector_count - scanned, BITPACKING_METADATA_GROUP_SIZE - scan_state.current_group_offset);
+			idx_t selected_end = selected_idx + 1;
+			while (selected_end < sel_count && sel.get_index(selected_end) < scanned + scan_unit_remaining) {
+				selected_end++;
+			}
+			const auto last_selected = sel.get_index(selected_end - 1);
+			const auto to_scan = last_selected - scanned + 1;
+			if (BitpackingSignedNumericRangeMatch(range, scan_state.current_constant)) {
+				for (idx_t i = selected_idx; i < selected_end; i++) {
+					const auto row_idx = sel.get_index(i);
+					result_data[row_idx] = scan_state.current_constant;
+					result_sel.set_index(result_count++, row_idx);
+				}
+			}
+			scan_state.current_group_offset += to_scan;
+			scanned += to_scan;
+			selected_idx = selected_end;
+			continue;
+		}
+		if (scan_state.current_group.mode == BitpackingMode::CONSTANT_DELTA) {
+			const auto scan_unit_remaining =
+			    MinValue<idx_t>(vector_count - scanned, BITPACKING_METADATA_GROUP_SIZE - scan_state.current_group_offset);
+			idx_t selected_end = selected_idx + 1;
+			while (selected_end < sel_count && sel.get_index(selected_end) < scanned + scan_unit_remaining) {
+				selected_end++;
+			}
+			const auto last_selected = sel.get_index(selected_end - 1);
+			const auto to_scan = last_selected - scanned + 1;
+			result_count = BitpackingSignedNumericRangeFilterConstantDelta<T>(
+			    scan_state, range, result_data, result_sel, result_count, sel, selected_idx, selected_end, scanned);
+			scan_state.current_group_offset += to_scan;
+			scanned += to_scan;
+			selected_idx = selected_end;
+			continue;
+		}
+
+		D_ASSERT(scan_state.current_group.mode == BitpackingMode::FOR ||
+		         scan_state.current_group.mode == BitpackingMode::DELTA_FOR);
+		const auto offset_in_compression_group =
+		    scan_state.current_group_offset % BitpackingPrimitives::BITPACKING_ALGORITHM_GROUP_SIZE;
+		const auto scan_unit_remaining =
+		    MinValue<idx_t>(vector_count - scanned,
+		                    BitpackingPrimitives::BITPACKING_ALGORITHM_GROUP_SIZE - offset_in_compression_group);
+		idx_t selected_end = selected_idx + 1;
+		while (selected_end < sel_count && sel.get_index(selected_end) < scanned + scan_unit_remaining) {
+			selected_end++;
+		}
+		const auto last_selected = sel.get_index(selected_end - 1);
+		const auto to_scan = last_selected - scanned + 1;
+
+		data_ptr_t current_position_ptr =
+		    scan_state.current_group_ptr + scan_state.current_group_offset * scan_state.current_width / 8;
+		data_ptr_t decompression_group_start_pointer =
+		    current_position_ptr - offset_in_compression_group * scan_state.current_width / 8;
+
+		BitpackingPrimitives::UnPackBlock<T>(data_ptr_cast(scan_state.decompression_buffer),
+		                                     decompression_group_start_pointer, scan_state.current_width,
+		                                     skip_sign_extend);
+
+		auto decompression_ptr = scan_state.decompression_buffer + offset_in_compression_group;
+		if (scan_state.current_group.mode == BitpackingMode::DELTA_FOR) {
+			ApplyFrameOfReference<T_S>(reinterpret_cast<T_S *>(decompression_ptr),
+			                           static_cast<T_S>(scan_state.current_frame_of_reference), to_scan);
+			DeltaDecode<T_S>(reinterpret_cast<T_S *>(decompression_ptr),
+			                 static_cast<T_S>(scan_state.current_delta_offset), to_scan);
+			scan_state.current_delta_offset = decompression_ptr[to_scan - 1];
+		} else {
+			ApplyFrameOfReference<T>(decompression_ptr, scan_state.current_frame_of_reference, to_scan);
+		}
+
+		for (idx_t i = selected_idx; i < selected_end; i++) {
+			const auto row_idx = sel.get_index(i);
+			auto value = decompression_ptr[row_idx - scanned];
+			if (BitpackingSignedNumericRangeMatch(range, value)) {
+				result_data[row_idx] = value;
+				result_sel.set_index(result_count++, row_idx);
+			}
+		}
+		scan_state.current_group_offset += to_scan;
+		scanned += to_scan;
+		selected_idx = selected_end;
+	}
+	sel.Initialize(result_sel);
+	sel_count = result_count;
+	FlatVector::SetSize(result, count_t(vector_count));
+	return true;
+}
+
+template <class T>
+struct BitpackingPrefixComparable {
+	static constexpr bool SUPPORTED = std::is_integral<T>::value && sizeof(T) <= sizeof(uint64_t);
+
+	static uint64_t Convert(const T &value) {
+		using UNSIGNED_T = typename MakeUnsigned<T>::type;
+		return static_cast<uint64_t>(static_cast<UNSIGNED_T>(value));
+	}
+};
+
+template <>
+struct BitpackingPrefixComparable<hugeint_t> {
+	static constexpr bool SUPPORTED = false;
+
+	static uint64_t Convert(const hugeint_t &value) {
+		return 0;
+	}
+};
+
+template <>
+struct BitpackingPrefixComparable<uhugeint_t> {
+	static constexpr bool SUPPORTED = false;
+
+	static uint64_t Convert(const uhugeint_t &value) {
+		return 0;
+	}
+};
+
+#if defined(_MSC_VER)
+#define DUCKDB_BITPACKING_FORCE_INLINE __forceinline
+#elif defined(__GNUC__) || defined(__clang__)
+#define DUCKDB_BITPACKING_FORCE_INLINE inline __attribute__((always_inline))
+#else
+#define DUCKDB_BITPACKING_FORCE_INLINE inline
+#endif
+
+template <bool EXACT>
+static DUCKDB_BITPACKING_FORCE_INLINE bool BitpackingPrefixRangeMatch(uint64_t lookup_min, uint64_t lookup_span,
+                                                                      idx_t lookup_shift,
+                                                                      const uint64_t *lookup_bitmap,
+                                                                      uint64_t comparable) {
+	const uint64_t y = comparable - lookup_min;
+	if (EXACT) {
+		if (y > lookup_span) {
+			return false;
+		}
+		return (lookup_bitmap[y >> 6U] >> (y & 63U)) & 1ULL;
+	}
+	const uint64_t bit_idx = y >> lookup_shift;
+	const uint8_t in_range = y <= lookup_span;
+	const uint64_t word_idx = (bit_idx >> 6U) & (0ULL - static_cast<uint64_t>(in_range));
+	const uint8_t bit = (lookup_bitmap[word_idx] >> (bit_idx & 63U)) & 1ULL;
+	return bit & in_range;
+}
+
+template <class T, bool EXACT, class T_U = typename MakeUnsigned<T>::type>
+static idx_t BitpackingPrefixRangeFilterConstantDelta(const BitpackingScanState<T> &scan_state,
+                                                      uint64_t lookup_min, uint64_t lookup_span, idx_t lookup_shift,
+                                                      const uint64_t *lookup_bitmap, T *result_data,
+                                                      SelectionVector &result_sel, idx_t result_count,
+                                                      const SelectionVector &sel, idx_t selected_idx,
+                                                      idx_t selected_end, idx_t scanned) {
+	const auto base_offset = scan_state.current_group_offset;
+	for (idx_t i = selected_idx; i < selected_end; i++) {
+		const auto row_idx = sel.get_index(i);
+		auto value = BitpackingConstantDeltaValue<T, T_U>(scan_state, base_offset + row_idx - scanned);
+		const auto comparable = BitpackingPrefixComparable<T>::Convert(value);
+		if (BitpackingPrefixRangeMatch<EXACT>(lookup_min, lookup_span, lookup_shift, lookup_bitmap, comparable)) {
+			result_data[row_idx] = value;
+			result_sel.set_index(result_count++, row_idx);
+		}
+	}
+	return result_count;
+}
+
+template <class T, bool EXACT, class T_U = typename MakeUnsigned<T>::type>
+static idx_t BitpackingPrefixRangeFilterConstantDeltaDense(const BitpackingScanState<T> &scan_state,
+                                                           uint64_t lookup_min, uint64_t lookup_span,
+                                                           idx_t lookup_shift, const uint64_t *lookup_bitmap,
+                                                           T *result_data,
+                                                           SelectionVector &result_sel, idx_t result_count,
+                                                           idx_t scanned, idx_t to_scan) {
+	const auto base_offset = scan_state.current_group_offset;
+	for (idx_t i = 0; i < to_scan; i++) {
+		const auto row_idx = scanned + i;
+		auto value = BitpackingConstantDeltaValue<T, T_U>(scan_state, base_offset + i);
+		const auto comparable = BitpackingPrefixComparable<T>::Convert(value);
+		if (BitpackingPrefixRangeMatch<EXACT>(lookup_min, lookup_span, lookup_shift, lookup_bitmap, comparable)) {
+			result_data[row_idx] = value;
+			result_sel.set_index(result_count++, row_idx);
+		}
+	}
+	return result_count;
+}
+
+template <class T, bool EXACT, class T_S = typename MakeSigned<T>::type>
+static bool TryBitpackingPrefixRangeFilterInternal(ColumnSegment &segment, ColumnScanState &state, idx_t vector_count,
+                                                   Vector &result, SelectionVector &sel, idx_t &sel_count,
+                                                   const PrefixRangeLookupData &lookup) {
+	auto &scan_state = state.scan_state->Cast<BitpackingScanState<T>>();
+	auto result_data = FlatVector::GetDataMutable<T>(result);
+	result.SetVectorType(VectorType::FLAT_VECTOR);
+
+	auto &result_sel = BitpackingFilterSelection(scan_state, sel_count);
+	idx_t result_count = 0;
+	const auto lookup_min = lookup.min;
+	const auto lookup_span = lookup.span;
+	const auto lookup_shift = lookup.shift;
+	const auto lookup_bitmap = lookup.bitmap;
+
+	if (!sel.IsSet() && sel_count == vector_count) {
+		idx_t scanned = 0;
+		bool skip_sign_extend = true;
+		while (scanned < vector_count) {
+			D_ASSERT(scan_state.current_group_offset <= BITPACKING_METADATA_GROUP_SIZE);
+			if (scan_state.current_group_offset == BITPACKING_METADATA_GROUP_SIZE) {
+				scan_state.LoadNextGroup();
+			}
+
+			if (scan_state.current_group.mode == BitpackingMode::CONSTANT) {
+				const auto to_scan =
+				    MinValue<idx_t>(vector_count - scanned,
+				                    BITPACKING_METADATA_GROUP_SIZE - scan_state.current_group_offset);
+				const auto comparable = BitpackingPrefixComparable<T>::Convert(scan_state.current_constant);
+				if (BitpackingPrefixRangeMatch<EXACT>(lookup_min, lookup_span, lookup_shift, lookup_bitmap,
+				                                      comparable)) {
+					for (idx_t i = 0; i < to_scan; i++) {
+						const auto row_idx = scanned + i;
+						result_data[row_idx] = scan_state.current_constant;
+						result_sel.set_index(result_count++, row_idx);
+					}
+				}
+				scan_state.current_group_offset += to_scan;
+				scanned += to_scan;
+				continue;
+			}
+			if (scan_state.current_group.mode == BitpackingMode::CONSTANT_DELTA) {
+				const auto to_scan =
+				    MinValue<idx_t>(vector_count - scanned,
+				                    BITPACKING_METADATA_GROUP_SIZE - scan_state.current_group_offset);
+				result_count = BitpackingPrefixRangeFilterConstantDeltaDense<T, EXACT>(
+				    scan_state, lookup_min, lookup_span, lookup_shift, lookup_bitmap, result_data, result_sel,
+				    result_count, scanned, to_scan);
+				scan_state.current_group_offset += to_scan;
+				scanned += to_scan;
+				continue;
+			}
+
+			D_ASSERT(scan_state.current_group.mode == BitpackingMode::FOR ||
+			         scan_state.current_group.mode == BitpackingMode::DELTA_FOR);
+			const auto offset_in_compression_group =
+			    scan_state.current_group_offset % BitpackingPrimitives::BITPACKING_ALGORITHM_GROUP_SIZE;
+			const auto to_scan =
+			    MinValue<idx_t>(vector_count - scanned,
+			                    BitpackingPrimitives::BITPACKING_ALGORITHM_GROUP_SIZE - offset_in_compression_group);
+			data_ptr_t current_position_ptr =
+			    scan_state.current_group_ptr + scan_state.current_group_offset * scan_state.current_width / 8;
+			data_ptr_t decompression_group_start_pointer =
+			    current_position_ptr - offset_in_compression_group * scan_state.current_width / 8;
+
+			BitpackingPrimitives::UnPackBlock<T>(data_ptr_cast(scan_state.decompression_buffer),
+			                                     decompression_group_start_pointer, scan_state.current_width,
+			                                     skip_sign_extend);
+
+			auto decompression_ptr = scan_state.decompression_buffer + offset_in_compression_group;
+			if (scan_state.current_group.mode == BitpackingMode::DELTA_FOR) {
+				ApplyFrameOfReference<T_S>(reinterpret_cast<T_S *>(decompression_ptr),
+				                           static_cast<T_S>(scan_state.current_frame_of_reference), to_scan);
+				DeltaDecode<T_S>(reinterpret_cast<T_S *>(decompression_ptr),
+				                 static_cast<T_S>(scan_state.current_delta_offset), to_scan);
+				scan_state.current_delta_offset = decompression_ptr[to_scan - 1];
+			} else {
+				ApplyFrameOfReference<T>(decompression_ptr, scan_state.current_frame_of_reference, to_scan);
+			}
+
+			for (idx_t i = 0; i < to_scan; i++) {
+				const auto row_idx = scanned + i;
+				auto value = decompression_ptr[i];
+				const auto comparable = BitpackingPrefixComparable<T>::Convert(value);
+				if (BitpackingPrefixRangeMatch<EXACT>(lookup_min, lookup_span, lookup_shift, lookup_bitmap,
+				                                      comparable)) {
+					result_data[row_idx] = value;
+					result_sel.set_index(result_count++, row_idx);
+				}
+			}
+			scan_state.current_group_offset += to_scan;
+			scanned += to_scan;
+		}
+		sel.Initialize(result_sel);
+		sel_count = result_count;
+		FlatVector::SetSize(result, count_t(vector_count));
+		return true;
+	}
+
+	idx_t selected_idx = 0;
+	idx_t scanned = 0;
+	bool skip_sign_extend = true;
+	while (scanned < vector_count) {
+		if (selected_idx == sel_count) {
+			scan_state.Consume(segment, vector_count - scanned);
+			break;
+		}
+		const auto next_selected = sel.get_index(selected_idx);
+		D_ASSERT(next_selected >= scanned);
+		if (next_selected > scanned) {
+			const auto skip_count = next_selected - scanned;
+			scan_state.Skip(segment, skip_count);
+			scanned += skip_count;
+			continue;
+		}
+
+		D_ASSERT(scan_state.current_group_offset <= BITPACKING_METADATA_GROUP_SIZE);
+		if (scan_state.current_group_offset == BITPACKING_METADATA_GROUP_SIZE) {
+			scan_state.LoadNextGroup();
+		}
+
+		if (scan_state.current_group.mode == BitpackingMode::CONSTANT) {
+			const auto scan_unit_remaining =
+			    MinValue<idx_t>(vector_count - scanned, BITPACKING_METADATA_GROUP_SIZE - scan_state.current_group_offset);
+			idx_t selected_end = selected_idx + 1;
+			while (selected_end < sel_count && sel.get_index(selected_end) < scanned + scan_unit_remaining) {
+				selected_end++;
+			}
+			const auto last_selected = sel.get_index(selected_end - 1);
+			const auto to_scan = last_selected - scanned + 1;
+			const auto comparable = BitpackingPrefixComparable<T>::Convert(scan_state.current_constant);
+			if (BitpackingPrefixRangeMatch<EXACT>(lookup_min, lookup_span, lookup_shift, lookup_bitmap, comparable)) {
+				for (idx_t i = selected_idx; i < selected_end; i++) {
+					const auto row_idx = sel.get_index(i);
+					result_data[row_idx] = scan_state.current_constant;
+					result_sel.set_index(result_count++, row_idx);
+				}
+			}
+			scan_state.current_group_offset += to_scan;
+			scanned += to_scan;
+			selected_idx = selected_end;
+			continue;
+		}
+		if (scan_state.current_group.mode == BitpackingMode::CONSTANT_DELTA) {
+			const auto scan_unit_remaining =
+			    MinValue<idx_t>(vector_count - scanned, BITPACKING_METADATA_GROUP_SIZE - scan_state.current_group_offset);
+			idx_t selected_end = selected_idx + 1;
+			while (selected_end < sel_count && sel.get_index(selected_end) < scanned + scan_unit_remaining) {
+				selected_end++;
+			}
+			const auto last_selected = sel.get_index(selected_end - 1);
+			const auto to_scan = last_selected - scanned + 1;
+			result_count = BitpackingPrefixRangeFilterConstantDelta<T, EXACT>(
+			    scan_state, lookup_min, lookup_span, lookup_shift, lookup_bitmap, result_data, result_sel, result_count,
+			    sel, selected_idx, selected_end, scanned);
+			scan_state.current_group_offset += to_scan;
+			scanned += to_scan;
+			selected_idx = selected_end;
+			continue;
+		}
+
+		D_ASSERT(scan_state.current_group.mode == BitpackingMode::FOR ||
+		         scan_state.current_group.mode == BitpackingMode::DELTA_FOR);
+		const auto offset_in_compression_group =
+		    scan_state.current_group_offset % BitpackingPrimitives::BITPACKING_ALGORITHM_GROUP_SIZE;
+		const auto scan_unit_remaining =
+		    MinValue<idx_t>(vector_count - scanned,
+		                    BitpackingPrimitives::BITPACKING_ALGORITHM_GROUP_SIZE - offset_in_compression_group);
+		idx_t selected_end = selected_idx + 1;
+		while (selected_end < sel_count && sel.get_index(selected_end) < scanned + scan_unit_remaining) {
+			selected_end++;
+		}
+		const auto last_selected = sel.get_index(selected_end - 1);
+		const auto to_scan = last_selected - scanned + 1;
+
+		data_ptr_t current_position_ptr =
+		    scan_state.current_group_ptr + scan_state.current_group_offset * scan_state.current_width / 8;
+		data_ptr_t decompression_group_start_pointer =
+		    current_position_ptr - offset_in_compression_group * scan_state.current_width / 8;
+
+		BitpackingPrimitives::UnPackBlock<T>(data_ptr_cast(scan_state.decompression_buffer),
+		                                     decompression_group_start_pointer, scan_state.current_width,
+		                                     skip_sign_extend);
+
+		auto decompression_ptr = scan_state.decompression_buffer + offset_in_compression_group;
+		if (scan_state.current_group.mode == BitpackingMode::DELTA_FOR) {
+			ApplyFrameOfReference<T_S>(reinterpret_cast<T_S *>(decompression_ptr),
+			                           static_cast<T_S>(scan_state.current_frame_of_reference), to_scan);
+			DeltaDecode<T_S>(reinterpret_cast<T_S *>(decompression_ptr),
+			                 static_cast<T_S>(scan_state.current_delta_offset), to_scan);
+			scan_state.current_delta_offset = decompression_ptr[to_scan - 1];
+		} else {
+			ApplyFrameOfReference<T>(decompression_ptr, scan_state.current_frame_of_reference, to_scan);
+		}
+
+		for (idx_t i = selected_idx; i < selected_end; i++) {
+			const auto row_idx = sel.get_index(i);
+			auto value = decompression_ptr[row_idx - scanned];
+			const auto comparable = BitpackingPrefixComparable<T>::Convert(value);
+			if (BitpackingPrefixRangeMatch<EXACT>(lookup_min, lookup_span, lookup_shift, lookup_bitmap, comparable)) {
+				result_data[row_idx] = value;
+				result_sel.set_index(result_count++, row_idx);
+			}
+		}
+		scan_state.current_group_offset += to_scan;
+		scanned += to_scan;
+		selected_idx = selected_end;
+	}
+	sel.Initialize(result_sel);
+	sel_count = result_count;
+	FlatVector::SetSize(result, count_t(vector_count));
+	return true;
+}
+
+template <class T>
+static bool TryBitpackingPrefixRangeFilter(ColumnSegment &segment, ColumnScanState &state, idx_t vector_count,
+                                           Vector &result, SelectionVector &sel, idx_t &sel_count,
+                                           const TableFilter &filter, TableFilterState &filter_state,
+                                           const PrefixRangeFunctionData &prefix_data, bool &covers_filter) {
+	if (!prefix_data.filter || !prefix_data.filter->IsInitialized()) {
+		return false;
+	}
+	if (prefix_data.key_type != result.GetType()) {
+		return false;
+	}
+	if (!BitpackingPrefixComparable<T>::SUPPORTED) {
+		return false;
+	}
+	if (!SelectionVectorIsOrdered(sel, sel_count)) {
+		return false;
+	}
+
+	PrefixRangeLookupData lookup;
+	if (!prefix_data.filter->GetSignedLookupData(lookup) || !lookup.bitmap) {
+		return false;
+	}
+	if (!covers_filter) {
+		covers_filter = PrefixRangeFilterCoversResidual(filter, filter_state, result.GetType(), prefix_data, lookup);
+	}
+	if (lookup.shift == 0) {
+		return TryBitpackingPrefixRangeFilterInternal<T, true>(segment, state, vector_count, result, sel, sel_count,
+		                                                       lookup);
+	}
+	return TryBitpackingPrefixRangeFilterInternal<T, false>(segment, state, vector_count, result, sel, sel_count,
+	                                                        lookup);
+}
+
+template <class T>
+void BitpackingFilter(ColumnSegment &segment, ColumnScanState &state, idx_t vector_count, Vector &result,
+                      SelectionVector &sel, idx_t &sel_count, const TableFilter &filter,
+                      TableFilterState &filter_state) {
+	if (sel_count == 0) {
+		auto &scan_state = state.scan_state->Cast<BitpackingScanState<T>>();
+		scan_state.Consume(segment, vector_count);
+		return;
+	}
+	SignedNumericRangeFilterData signed_range;
+	if (TryGetBitpackingSignedNumericRangeFilter(filter, filter_state, result.GetType(), signed_range) &&
+	    TryBitpackingSignedNumericRangeFilter<T>(segment, state, vector_count, result, sel, sel_count, signed_range)) {
+		return;
+	}
+	auto prefix_candidate = TryGetBitpackingPrefixRangeFilter(filter, filter_state);
+	if (prefix_candidate.data) {
+		if (TryBitpackingPrefixRangeFilter<T>(segment, state, vector_count, result, sel, sel_count,
+		                                      filter, filter_state, *prefix_candidate.data,
+		                                      prefix_candidate.covers_filter)) {
+			if (prefix_candidate.covers_filter) {
+				return;
+			}
+			UnifiedVectorFormat vdata;
+			result.ToUnifiedFormat(vdata);
+			ColumnSegment::FilterSelection(sel, result, vdata, filter, filter_state, vector_count, sel_count);
+			return;
+		}
+	}
+	if (ShouldUseBitpackingSelectedFilter(vector_count, sel_count) && SelectionVectorIsOrdered(sel, sel_count)) {
+		BitpackingScanSelected<T>(segment, state, vector_count, result, sel, sel_count);
+	} else {
+		BitpackingScanPartial<T>(segment, state, vector_count, result, 0);
+	}
+	FlatVector::SetSize(result, count_t(vector_count));
+
+	UnifiedVectorFormat vdata;
+	result.ToUnifiedFormat(vdata);
+	ColumnSegment::FilterSelection(sel, result, vdata, filter, filter_state, vector_count, sel_count);
+}
+
 //===--------------------------------------------------------------------===//
 // Fetch
 //===--------------------------------------------------------------------===//
@@ -941,6 +1960,8 @@ CompressionFunction GetBitpackingFunction(PhysicalType data_type) {
 	    BitpackingFinalAnalyze<T>, BitpackingInitCompression<T, WRITE_STATISTICS>,
 	    BitpackingCompress<T, WRITE_STATISTICS>, BitpackingFinalizeCompress<T, WRITE_STATISTICS>, BitpackingInitScan<T>,
 	    BitpackingScan<T>, BitpackingScanPartial<T>, BitpackingFetchRow<T>, BitpackingSkip<T>);
+	bitpacking.filter = BitpackingFilter<T>;
+	bitpacking.select = BitpackingSelect<T>;
 	bitpacking.get_segment_info = BitpackingGetSegmentInfo<T>;
 	return bitpacking;
 }

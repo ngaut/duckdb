@@ -21,6 +21,7 @@ public:
 	void ScanToFlatVector(Vector &result, idx_t result_offset, idx_t start, idx_t scan_count);
 	void ScanToDictionaryVector(ColumnSegment &segment, Vector &result, idx_t result_offset, idx_t start,
 	                            idx_t scan_count);
+	const SelectionVector &GetSelVec(idx_t start, idx_t scan_count);
 
 private:
 	string_t FetchStringFromDict(int32_t dict_offset, uint16_t string_len);
@@ -31,8 +32,9 @@ public:
 	optional_ptr<BufferHandle> handle;
 
 	bitpacking_width_t current_width;
-	buffer_ptr<SelectionVector> sel_vec;
-	idx_t sel_vec_size = 0;
+		buffer_ptr<SelectionVector> sel_vec;
+		idx_t sel_vec_size = 0;
+		SelectionVector filter_sel;
 
 	//! Start of the block (pointing to the dictionary_header)
 	data_ptr_t baseptr;
@@ -41,10 +43,11 @@ public:
 	uint32_t *index_buffer_ptr;
 	uint32_t index_buffer_count;
 
-	buffer_ptr<DictionaryEntry> dictionary;
-	idx_t dictionary_size;
-	StringDictionaryContainer dict;
-	idx_t block_size;
-};
+		buffer_ptr<DictionaryEntry> dictionary;
+		idx_t dictionary_size;
+		unsafe_unique_array<bool> filter_result;
+		StringDictionaryContainer dict;
+		idx_t block_size;
+	};
 
 } // namespace duckdb

@@ -109,7 +109,12 @@ public:
 			return false;
 		}
 
-		const U comparable = CONVERTER::Convert(value.GetValueUnsafe<T>());
+		return LookupValue<T, CONVERTER>(value.GetValueUnsafe<T>());
+	}
+
+	template <typename T, typename CONVERTER>
+	inline bool LookupValue(const T &value) const {
+		const U comparable = CONVERTER::Convert(value);
 		const U y = comparable - min;
 		const U bit_idx = y >> shift;
 		const uint8_t in_range = y <= span;
@@ -129,8 +134,35 @@ public:
 			const uint32_t word_idx = (bit_idx >> WORD_SHIFT) & (0U - in_range);
 			const uint8_t bit = (bitmap[word_idx] >> (bit_idx & WORD_MASK)) & 1ULL;
 
-			result_sel.set_index(found_count, entry.GetIndex());
-			found_count += bit & in_range;
+			if (bit & in_range) {
+				result_sel.set_index(found_count++, entry.GetIndex());
+			}
+		}
+		return found_count;
+	}
+
+	template <typename T, typename CONVERTER>
+	idx_t LookupKeys(Vector &keys, const SelectionVector &sel, SelectionVector &result_sel, idx_t count) const {
+		UnifiedVectorFormat key_data;
+		keys.ToUnifiedFormat(key_data);
+		auto values = UnifiedVectorFormat::GetData<const T>(key_data);
+		idx_t found_count = 0;
+		for (idx_t i = 0; i < count; i++) {
+			const auto row_idx = sel.get_index(i);
+			const auto vector_idx = key_data.sel->get_index(row_idx);
+			if (!key_data.validity.RowIsValid(vector_idx)) {
+				continue;
+			}
+			const U comparable = CONVERTER::Convert(values[vector_idx]);
+			const U y = comparable - min;
+			const U bit_idx = y >> shift;
+			const uint8_t in_range = y <= span;
+			const uint32_t word_idx = (bit_idx >> WORD_SHIFT) & (0U - in_range);
+			const uint8_t bit = (bitmap[word_idx] >> (bit_idx & WORD_MASK)) & 1ULL;
+
+			if (bit & in_range) {
+				result_sel.set_index(found_count++, row_idx);
+			}
 		}
 		return found_count;
 	}
@@ -186,6 +218,14 @@ public:
 
 	U Span() const {
 		return span;
+	}
+
+	idx_t Shift() const {
+		return shift;
+	}
+
+	const uint64_t *BitmapData() const {
+		return bitmap;
 	}
 
 private:
@@ -272,6 +312,30 @@ public:
 		return bitmap.template LookupKeys<T, NumericConverter<T>>(keys, result_sel, count);
 	}
 
+	idx_t LookupKeys(Vector &keys, const SelectionVector &sel, SelectionVector &result_sel, idx_t count) const override {
+		if (keys.GetVectorType() == VectorType::CONSTANT_VECTOR) {
+			if (!bitmap.template LookupOne<T, NumericConverter<T>>(keys.GetValue(0))) {
+				return 0;
+			}
+			for (idx_t i = 0; i < count; i++) {
+				result_sel.set_index(i, sel.get_index(i));
+			}
+			return count;
+		}
+		return bitmap.template LookupKeys<T, NumericConverter<T>>(keys, sel, result_sel, count);
+	}
+
+	bool GetSignedLookupData(PrefixRangeLookupData &result) const override {
+		if (!bitmap.IsInitialized()) {
+			return false;
+		}
+		result.min = static_cast<uint64_t>(bitmap.Min());
+		result.span = static_cast<uint64_t>(bitmap.Span());
+		result.shift = bitmap.Shift();
+		result.bitmap = bitmap.BitmapData();
+		return true;
+	}
+
 	FilterPropagateResult LookupRange(const Value &lower_bound, const Value &upper_bound) const override {
 		const auto lb = lower_bound.GetValueUnsafe<T>();
 		const auto ub = upper_bound.GetValueUnsafe<T>();
@@ -324,6 +388,23 @@ public:
 			return bitmap.template LookupOne<string_t, StringPrefixConverter>(keys.GetValue(0)) ? count : 0;
 		}
 		return bitmap.template LookupKeys<string_t, StringPrefixConverter>(keys, result_sel, count);
+	}
+
+	idx_t LookupKeys(Vector &keys, const SelectionVector &sel, SelectionVector &result_sel, idx_t count) const override {
+		if (keys.GetVectorType() == VectorType::CONSTANT_VECTOR) {
+			if (!bitmap.template LookupOne<string_t, StringPrefixConverter>(keys.GetValue(0))) {
+				return 0;
+			}
+			for (idx_t i = 0; i < count; i++) {
+				result_sel.set_index(i, sel.get_index(i));
+			}
+			return count;
+		}
+		return bitmap.template LookupKeys<string_t, StringPrefixConverter>(keys, sel, result_sel, count);
+	}
+
+	bool GetSignedLookupData(PrefixRangeLookupData &result) const override {
+		return false;
 	}
 
 	FilterPropagateResult LookupRange(const Value &lower_bound, const Value &upper_bound) const override {

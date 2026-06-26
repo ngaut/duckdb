@@ -423,6 +423,62 @@ TEST_CASE("JIT lowers pruned table scan filters as generated source stages", "[a
 	    });
 }
 
+TEST_CASE("JIT canonicalizes generated date range source filters as native between", "[api][jit]") {
+	DuckDB db;
+	Connection con(db);
+	auto &manager = ExecutionRegionManager::Get(*con.context);
+
+	ConfigureSljitForCoverage(con, false, true, false, 10000);
+	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_generated_date_range_source_filter AS "
+	                          "SELECT i::BIGINT AS i, "
+	                          "(DATE '1995-09-01' + ((i % 60)::INTEGER)) AS d "
+	                          "FROM range(20000) tbl(i)"));
+
+	ClearJitTrace(manager, true);
+	auto result = con.Query("SELECT sum(i) FROM jit_generated_date_range_source_filter "
+	                        "WHERE d >= DATE '1995-09-10' AND d < DATE '1995-09-20'");
+	REQUIRE_NO_FAIL(*result);
+	REQUIRE(result->GetValue(0, 0).ToString() == "33411690");
+
+	RequireNativeSljitIr(manager, "native:date-between", [](const ExecutionRegionEvent &event) {
+		REQUIRE(event.candidate_traits.source_filter_count > 0);
+		REQUIRE(StringUtil::Contains(event.reason, "generated table scan source filters"));
+		REQUIRE_FALSE(event.selected_uses_scan_filters);
+		REQUIRE_FALSE(event.candidate_uses_scan_filters);
+	});
+}
+
+TEST_CASE("JIT keeps large complex scan filters in DuckDB for ungrouped aggregates", "[api][jit]") {
+	DuckDB db;
+	Connection con(db);
+	auto &manager = ExecutionRegionManager::Get(*con.context);
+
+	ConfigureSljitForCoverage(con, false, true, false, 10000);
+	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_large_complex_source_filter AS "
+	                          "SELECT i::BIGINT AS i, "
+	                          "(DATE '1998-01-01' + ((i % 31)::INTEGER)) AS d, "
+	                          "CAST(i % 1000 AS DECIMAL(15,2)) AS v "
+	                          "FROM range(1100000) tbl(i)"));
+
+	ClearJitTrace(manager, true);
+	auto result = con.Query("SELECT sum(v) FROM jit_large_complex_source_filter "
+	                        "WHERE i >= 1000 AND i < 900000 AND d <= DATE '1998-01-15'");
+	REQUIRE_NO_FAIL(*result);
+
+	RequireJitEvent(
+	    manager,
+	    [](const ExecutionRegionEvent &event) {
+		    return IsCompiledSljitRegionEvent(event) && event.candidate_traits.source_filter_count > 1 &&
+		           event.candidate_traits.sink_kind == ExecutionRegionSinkKind::UNGROUPED_AGGREGATE_UPDATE &&
+		           StringUtil::Contains(event.reason, "vectorized table scan filters");
+	    },
+	    [](const ExecutionRegionEvent &event) {
+		    REQUIRE(event.selected_uses_scan_filters);
+		    REQUIRE_FALSE(StringUtil::Contains(event.reason, "generated table scan source filters"));
+		    RequireGeneratedMachineCodeRegion(event);
+	    });
+}
+
 TEST_CASE("JIT auto planner cost skips source-only string filters", "[api][jit]") {
 	DuckDB db;
 	Connection con(db);

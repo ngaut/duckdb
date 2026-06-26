@@ -383,6 +383,8 @@ string DescribeNativeRegion(const SljitNativeRegionPlan &region, const string &m
 						result += ";group_expressions=" +
 						          DescribeNativeRegionExpressionList(op.aggregate_update.group_expressions);
 					}
+				} else if (op.aggregate_update.use_grouped_state_addresses) {
+					result += ";grouped_state_lookup=native-state-address";
 				}
 			} else {
 				result += ";execution=vectorized-operator-boundary";

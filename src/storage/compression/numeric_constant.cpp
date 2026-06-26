@@ -68,10 +68,11 @@ static bool TryComparisonFiltersNullValues(const BoundFunctionExpression &compar
 	return true;
 }
 
-static bool TryExpressionFiltersNullValues(const Expression &expression, bool &filters_nulls,
-                                           bool &filters_valid_values) {
+static bool TryExpressionFiltersNullValuesInternal(const Expression &expression, bool &filters_nulls,
+                                                   bool &filters_valid_values, bool &cacheable) {
 	filters_nulls = false;
 	filters_valid_values = false;
+	cacheable = true;
 
 	if (expression.GetExpressionClass() == ExpressionClass::BOUND_CONJUNCTION) {
 		auto &conjunction = expression.Cast<BoundConjunctionExpression>();
@@ -79,9 +80,12 @@ static bool TryExpressionFiltersNullValues(const Expression &expression, bool &f
 			for (auto &child : conjunction.GetChildren()) {
 				bool child_filters_nulls = false;
 				bool child_filters_valid_values = false;
-				if (!TryExpressionFiltersNullValues(*child, child_filters_nulls, child_filters_valid_values)) {
+				bool child_cacheable = false;
+				if (!TryExpressionFiltersNullValuesInternal(*child, child_filters_nulls, child_filters_valid_values,
+				                                            child_cacheable)) {
 					return false;
 				}
+				cacheable = cacheable && child_cacheable;
 				filters_nulls = filters_nulls || child_filters_nulls;
 				filters_valid_values = filters_valid_values || child_filters_valid_values;
 			}
@@ -93,9 +97,12 @@ static bool TryExpressionFiltersNullValues(const Expression &expression, bool &f
 			for (auto &child : conjunction.GetChildren()) {
 				bool child_filters_nulls = false;
 				bool child_filters_valid_values = false;
-				if (!TryExpressionFiltersNullValues(*child, child_filters_nulls, child_filters_valid_values)) {
+				bool child_cacheable = false;
+				if (!TryExpressionFiltersNullValuesInternal(*child, child_filters_nulls, child_filters_valid_values,
+				                                            child_cacheable)) {
 					return false;
 				}
+				cacheable = cacheable && child_cacheable;
 				filters_nulls = filters_nulls && child_filters_nulls;
 				filters_valid_values = filters_valid_values && child_filters_valid_values;
 			}
@@ -137,10 +144,12 @@ static bool TryExpressionFiltersNullValues(const Expression &expression, bool &f
 	}
 	if (function_name == BloomFilterScalarFun::NAME) {
 		if (!func_expr->BindInfo()) {
+			cacheable = false;
 			return true;
 		}
 		auto &data = func_expr->BindInfo()->Cast<BloomFilterFunctionData>();
 		if (!data.filter) {
+			cacheable = false;
 			return true;
 		}
 		filters_nulls = data.filters_null_values;
@@ -148,20 +157,25 @@ static bool TryExpressionFiltersNullValues(const Expression &expression, bool &f
 	}
 	if (function_name == SelectivityOptionalFilterScalarFun::NAME) {
 		if (!func_expr->BindInfo()) {
+			cacheable = false;
 			return false;
 		}
 		auto &data = func_expr->BindInfo()->Cast<SelectivityOptionalFilterFunctionData>();
 		if (!data.child_filter_expr) {
+			cacheable = false;
 			return false;
 		}
-		return TryExpressionFiltersNullValues(*data.child_filter_expr, filters_nulls, filters_valid_values);
+		return TryExpressionFiltersNullValuesInternal(*data.child_filter_expr, filters_nulls, filters_valid_values,
+		                                              cacheable);
 	}
 	if (function_name == PerfectHashJoinScalarFun::NAME) {
 		if (!func_expr->BindInfo()) {
+			cacheable = false;
 			return true;
 		}
 		auto &data = func_expr->BindInfo()->Cast<PerfectHashJoinFunctionData>();
 		if (!data.executor) {
+			cacheable = false;
 			return true;
 		}
 		filters_nulls = true;
@@ -169,10 +183,12 @@ static bool TryExpressionFiltersNullValues(const Expression &expression, bool &f
 	}
 	if (function_name == PrefixRangeScalarFun::NAME) {
 		if (!func_expr->BindInfo()) {
+			cacheable = false;
 			return true;
 		}
 		auto &data = func_expr->BindInfo()->Cast<PrefixRangeFunctionData>();
 		if (!data.filter || !data.filter->IsInitialized()) {
+			cacheable = false;
 			return true;
 		}
 		filters_nulls = true;
@@ -180,16 +196,23 @@ static bool TryExpressionFiltersNullValues(const Expression &expression, bool &f
 	}
 	if (function_name == DynamicFilterScalarFun::NAME) {
 		if (!func_expr->BindInfo()) {
+			cacheable = false;
 			return true;
 		}
 		auto &data = func_expr->BindInfo()->Cast<DynamicFilterFunctionData>();
 		if (!data.filter_data || !data.filter_data->initialized.load()) {
+			cacheable = false;
 			return true;
 		}
 		filters_nulls = true;
 		return true;
 	}
 	return false;
+}
+
+static bool TryExpressionFiltersNullValues(const Expression &expression, bool &filters_nulls,
+                                           bool &filters_valid_values, bool &cacheable) {
+	return TryExpressionFiltersNullValuesInternal(expression, filters_nulls, filters_valid_values, cacheable);
 }
 
 //===--------------------------------------------------------------------===//
@@ -297,10 +320,22 @@ void ConstantFun::FiltersNullValues(const LogicalType &type, const TableFilter &
 
 	auto &expr_filter = ExpressionFilter::GetExpressionFilter(filter, "ConstantFun::FiltersNullValues");
 	auto &state = filter_state.Cast<ExpressionFilterState>();
-	if (!TryExpressionFiltersNullValues(*expr_filter.expr, filters_nulls, filters_valid_values)) {
+	if (state.constant_filter_null_effect_initialized) {
+		filters_nulls = state.constant_filter_filters_nulls;
+		filters_valid_values = state.constant_filter_filters_valid_values;
+		return;
+	}
+	bool cacheable = false;
+	if (!TryExpressionFiltersNullValues(*expr_filter.expr, filters_nulls, filters_valid_values, cacheable)) {
 		Value val(type);
 		filters_nulls = !expr_filter.EvaluateWithConstant(*state.executor, val);
 		filters_valid_values = false;
+		cacheable = false;
+	}
+	if (cacheable) {
+		state.constant_filter_null_effect_initialized = true;
+		state.constant_filter_filters_nulls = filters_nulls;
+		state.constant_filter_filters_valid_values = filters_valid_values;
 	}
 }
 

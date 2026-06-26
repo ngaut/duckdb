@@ -103,6 +103,12 @@ public:
 	void FindOrCreateGroups(DataChunk &groups, Vector &addresses_out);
 	idx_t FindOrCreateGroupAddresses(DataChunk &groups, Vector &addresses_out,
 	                                 optional_ptr<ExecutionOperatorStageRecorder> recorder = nullptr);
+	bool TryFindExistingGroupAddresses(DataChunk &groups, Vector &addresses_out,
+	                                   optional_ptr<ExecutionOperatorStageRecorder> recorder = nullptr);
+	bool TryFindOrCreateGroupAddressesFast(DataChunk &groups, Vector &addresses_out,
+	                                       optional_ptr<ExecutionOperatorStageRecorder> recorder = nullptr);
+	bool TryAppendNewGroupAddressesFast(DataChunk &groups, Vector &addresses_out,
+	                                    optional_ptr<ExecutionOperatorStageRecorder> recorder = nullptr);
 	bool GetExecutionHashAggregateLookupLayout(ExecutionHashAggregateLookupLayout &layout) const;
 
 	const PartitionedTupleData &GetPartitionedData() const;

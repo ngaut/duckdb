@@ -61,7 +61,15 @@ void ScanFilterInfo::Initialize(ClientContext &context, TableFilterSet &filters,
 	table_filters = &filters;
 	execute_residual_filters = execution_mode == TableFilterExecutionMode::FILTER_AND_PRUNE;
 	adaptive_filter = make_uniq<AdaptiveFilter>(filters);
-	adaptive_filter->SetLogger(context.logger);
+	vector<idx_t> filter_identities;
+	filter_identities.reserve(filters.FilterCount());
+	for (auto &entry : filters) {
+		auto projection_index = entry.GetIndex().GetIndex();
+		filter_identities.push_back(column_ids[projection_index].HasPrimaryIndex()
+		                                ? column_ids[projection_index].GetPrimaryIndex()
+		                                : projection_index);
+	}
+	adaptive_filter->SetLogger(context.logger, "", AdaptiveFilterSource::INITIAL, filter_identities);
 	filter_list.reserve(filters.FilterCount());
 	idx_t filter_index = 0;
 	for (auto &entry : filters) {

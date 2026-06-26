@@ -564,6 +564,13 @@ FilterPushdownResult FilterCombiner::TryPushdownInFilter(TableFilterSet &table_f
 		D_ASSERT(!const_value_expr.GetValue().IsNull());
 		in_list.push_back(const_value_expr.GetValue());
 	}
+	if (type.id() == LogicalTypeId::VARCHAR &&
+	    in_list.size() < InClauseRewriter::IN_CLAUSE_REWRITE_THRESHOLD) {
+		auto in_expr =
+		    ExpressionFilter::CreateInExpression(CreateFilterTargetExpression(*func.GetChildren()[0]), std::move(in_list));
+		table_filters.PushFilter(proj_index, make_uniq<ExpressionFilter>(std::move(in_expr)));
+		return FilterPushdownResult::PUSHED_DOWN_FULLY;
+	}
 	if (type.IsIntegral() && IsDenseRange(in_list)) {
 		// dense range! turn this into x >= min AND x <= max
 		// IsDenseRange sorts in_list, so the front element is the min and the back element is the max

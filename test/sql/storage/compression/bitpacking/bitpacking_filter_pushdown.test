@@ -48,6 +48,13 @@ SELECT MIN(id), MAX(id), SUM(col), MIN(col), MAX(col), COUNT(*) FROM test WHERE 
 ----
 5000	5000	5000	5000	5000	1
 
+# sparse selection from a non-bitpacking filter followed by a bitpacked filter
+query IIII
+SELECT SUM(col), MIN(col), MAX(col), COUNT(*) FROM test
+WHERE id IN ('35', '5000', '25000', '35000') AND col BETWEEN 1000 AND 40000
+----
+41337	1337	35000	3
+
 # filter on non-bitpacking column
 query IIIIII
 SELECT MIN(id), MAX(id), SUM(col), MIN(col), MAX(col), COUNT(*) FROM test WHERE id::INT64%1000=0;

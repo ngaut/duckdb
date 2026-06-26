@@ -32,7 +32,13 @@
 
 #include "duckdb/common/storage_compatibility.hpp"
 #include "duckdb/planner/expression/bound_cast_expression.hpp"
+#include "duckdb/planner/expression/bound_comparison_expression.hpp"
+#include "duckdb/planner/expression/bound_conjunction_expression.hpp"
+#include "duckdb/planner/expression/bound_constant_expression.hpp"
+#include "duckdb/planner/expression/bound_function_expression.hpp"
+#include "duckdb/planner/expression/bound_operator_expression.hpp"
 #include "duckdb/planner/expression/bound_reference_expression.hpp"
+#include "duckdb/planner/filter/table_filter_functions.hpp"
 
 #include <chrono>
 
@@ -679,6 +685,89 @@ FilterPropagateResult RowGroup::CheckRowIdFilter(const TableFilter &filter, idx_
 	return expr_filter.CheckStatistics(dummy_stats);
 }
 
+static bool IsSimpleOptionalStringFilterRef(const Expression &expression) {
+	return expression.GetExpressionType() == ExpressionType::BOUND_REF ||
+	       expression.GetExpressionClass() == ExpressionClass::BOUND_COLUMN_REF;
+}
+
+static bool IsExactStringEqualityFilter(const Expression &expr);
+
+static optional_ptr<const Expression> TryGetRootOptionalFilterChild(const Expression &expr) {
+	if (expr.GetExpressionClass() != ExpressionClass::BOUND_FUNCTION) {
+		return nullptr;
+	}
+	auto &func_expr = expr.Cast<BoundFunctionExpression>();
+	if (func_expr.Function().GetName() != OptionalFilterScalarFun::NAME || !func_expr.BindInfo()) {
+		return nullptr;
+	}
+	auto &data = func_expr.BindInfo()->Cast<OptionalFilterFunctionData>();
+	return data.child_filter_expr.get();
+}
+
+static bool IsExactStringEqualityComparison(const Expression &expr) {
+	if (!BoundComparisonExpression::IsComparison(expr) || expr.GetExpressionType() != ExpressionType::COMPARE_EQUAL) {
+		return false;
+	}
+	auto &comparison = expr.Cast<BoundFunctionExpression>();
+	auto &left = BoundComparisonExpression::Left(comparison);
+	auto &right = BoundComparisonExpression::Right(comparison);
+	optional_ptr<const BoundConstantExpression> constant;
+	if (IsSimpleOptionalStringFilterRef(left) && right.GetExpressionType() == ExpressionType::VALUE_CONSTANT) {
+		constant = right.Cast<BoundConstantExpression>();
+	} else if (IsSimpleOptionalStringFilterRef(right) && left.GetExpressionType() == ExpressionType::VALUE_CONSTANT) {
+		constant = left.Cast<BoundConstantExpression>();
+	} else {
+		return false;
+	}
+	auto &value = constant->GetValue();
+	return !value.IsNull() && value.type().id() == LogicalTypeId::VARCHAR;
+}
+
+static bool IsExactStringInFilter(const Expression &expr) {
+	if (expr.GetExpressionClass() != ExpressionClass::BOUND_OPERATOR ||
+	    expr.GetExpressionType() != ExpressionType::COMPARE_IN) {
+		return false;
+	}
+	auto &in_expr = expr.Cast<BoundOperatorExpression>();
+	auto &children = in_expr.GetChildren();
+	if (children.size() < 2 || !IsSimpleOptionalStringFilterRef(*children[0])) {
+		return false;
+	}
+	for (idx_t child_idx = 1; child_idx < children.size(); child_idx++) {
+		if (children[child_idx]->GetExpressionType() != ExpressionType::VALUE_CONSTANT) {
+			return false;
+		}
+		auto &value = children[child_idx]->Cast<BoundConstantExpression>().GetValue();
+		if (value.IsNull() || value.type().id() != LogicalTypeId::VARCHAR) {
+			return false;
+		}
+	}
+	return true;
+}
+
+static bool IsExactStringEqualityFilter(const Expression &expr) {
+	if (expr.GetExpressionClass() == ExpressionClass::BOUND_CONJUNCTION &&
+	    expr.GetExpressionType() == ExpressionType::CONJUNCTION_OR) {
+		auto &conjunction = expr.Cast<BoundConjunctionExpression>();
+		for (auto &child : conjunction.GetChildren()) {
+			if (!IsExactStringEqualityFilter(*child)) {
+				return false;
+			}
+		}
+		return !conjunction.GetChildren().empty();
+	}
+	return IsExactStringEqualityComparison(expr) || IsExactStringInFilter(expr);
+}
+
+static bool IsExecutableExactRootOptionalStringFilter(const TableFilter &filter) {
+	if (filter.filter_type != TableFilterType::EXPRESSION_FILTER) {
+		return false;
+	}
+	auto &expr_filter = filter.Cast<ExpressionFilter>();
+	auto child = TryGetRootOptionalFilterChild(*expr_filter.expr);
+	return child && IsExactStringEqualityFilter(*child);
+}
+
 bool RowGroup::CheckZonemap(optional_ptr<ClientContext> context, ScanFilterInfo &filters) {
 	auto &filter_list = filters.GetFilterList();
 	// new row group - label all filters as up for grabs again
@@ -692,7 +781,7 @@ bool RowGroup::CheckZonemap(optional_ptr<ClientContext> context, ScanFilterInfo 
 		if (prune_result == FilterPropagateResult::FILTER_ALWAYS_FALSE) {
 			return false;
 		}
-		if (ExpressionFilter::IsRootOptionalFilter(filter)) {
+		if (ExpressionFilter::IsRootOptionalFilter(filter) && !IsExecutableExactRootOptionalStringFilter(filter)) {
 			// these are only for row group checking, set as always true so we don't check it
 			filters.SetFilterAlwaysTrue(i);
 		} else if (prune_result == FilterPropagateResult::FILTER_ALWAYS_TRUE) {

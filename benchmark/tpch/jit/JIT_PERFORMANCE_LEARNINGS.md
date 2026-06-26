@@ -872,6 +872,542 @@ Exit criteria:
 - next: combine generated source filters so Q6 stops scanning/slicing the same
   vector through multiple filter operators
 
+### 6. Latest Cleaned-State Correction: Source Fusion Helped, Lookup Ownership Still Blocks Coverage
+
+The latest cleaned-state verification changed two important facts.
+
+First, Q6's source-filter correctness fix was necessary but not sufficient for
+performance. Fusing multiple generated table-scan filters into one predicate
+removed repeated filter operators and improved forced Q6 from the earlier
+~46 ms range to ~37-38 ms. Keeping large complex scan filters in DuckDB's scan
+filter path improved the forced shape again to ~35 ms, but vectorized/off
+remained about 30 ms. The root cause is now clear: after source-filter work is
+made correct and less fragmented, Q6 is still source-scan/filter dominated. It
+should stay vectorized by default until the source path itself is natively owned
+or the aggregate work becomes large enough to pay for the extra boundary.
+
+Second, regular hash aggregate lookup must be treated as an unfunded native
+protocol until generated/native lookup ownership exists. In the current cleaned
+state, Q3-shaped regions with blocked hash aggregate lookup can be correctness
+clean but slower than vectorized because they still call DuckDB to resolve
+grouped state addresses. The CBO now charges blocked regular hash aggregate
+lookup, which keeps Q3 neutral/vectorized while preserving high-work wins such
+as Q1 and Q9. This is an honesty fix, not the root performance fix.
+
+Current root solution for more TPC-H coverage:
+
+- implement regular hash aggregate lookup ownership: hash, probe, append, and
+  produce aggregate state addresses inside the fused native/JIT path
+- keep source filters generated only when they feed a fused loop that deletes a
+  pass; otherwise let DuckDB's scan filter path own selective scans
+- use forced compilation as a profiler, not as a CBO policy; if forced is still
+  slower after fusion, locate the dominant stage before funding the shape
+
+Latest measured cleaned-state checkpoints:
+
+| Workload | Result |
+| --- | ---: |
+| Q1 SF1 default auto subset | ~1.11x |
+| Q9 SF1 default auto subset | ~1.08x |
+| Q3 SF1 after blocked-lookup charge | vectorized/neutral |
+| Q6 SF1 forced generated source filters | ~0.80x |
+| Q6 SF1 forced large scan-filter strategy | ~0.86x |
+
+### 7. Q12 String CASE Support Exposed Sparse Join Probe as the Real Blocker
+
+Adding native typed-tree support for `VARCHAR = constant`, `VARCHAR <> constant`,
+and `CASE ... THEN 1 ELSE 0` made the Q12 aggregate payload lower cleanly. The
+forced Q12 trace then showed the important performance fact: the CASE projection
+is cheap. On SF1 it was about 0.6 ms, while the native regular hash join probe
+over the 1.5M-row orders side was about 13 ms. Grouped aggregate state update
+work was also sub-millisecond.
+
+The root cause was not string codegen. Q12 builds a small filtered lineitem hash
+table, but its `l_orderkey` range is sparse: about 31K build rows spread across
+nearly 6M key values. DuckDB's perfect hash join correctly rejects that shape,
+so the native path falls back to regular hash probing. Until sparse regular
+probe and grouped aggregate lookup are owned better, auto-funding this shape is
+wrong.
+
+The CBO rule is now narrower: single-join grouped aggregates with only two
+generated stages do not pay for a blocked grouped hash aggregate lookup. This
+keeps the new string CASE support available for forced/profiling paths and
+future fused lookup work, but prevents Q12 from regressing in auto mode.
+
+Measured checkpoint:
+
+| Workload | Result |
+| --- | ---: |
+| Q12 forced string CASE/native join probe | ~0.82-0.88x |
+| Q12 auto after guard | neutral, compiled regions 0 |
+| Q1/Q9/Q14 subset after guard | Q1 ~1.19x, Q9 ~1.29x, Q14 small/noisy-to-~1.08x |
+
+Q6 was also force-admitted with zero startup cost after the source-filter fixes.
+It compiled cleanly but stayed flat at about 29 ms. That confirms Q6 is not a
+CBO-threshold problem; the remaining work is still source/filter-path ownership,
+not cheaper admission.
+
+Metal lesson: batching many vectors per launch is correct, but the batch budget
+must be finite. Using `runtime.MaxChunks()` directly can request an impossible
+Metal buffer before reading the source, even with `STANDARD_VECTOR_SIZE=2048`.
+Cap the per-launch batch to a practical number of vectors and reuse buffers.
+
+### 8. Q3 Was a Startup-Accounting Miss, Not a Backend Regression
+
+The earlier blocked-lookup lesson was too conservative for Q3. Re-running the
+full forced-admission sweep showed that Q3 has one profitable compiled region:
+a generated compute region that fuses a single hash join into a grouped
+aggregate with materialization elision and three generated stages. With default
+startup it missed admission because the modeled benefit was about 26K, just
+below the 32K startup plus 50% margin requirement. With a 16K startup boundary
+the same region compiled and Q3 improved from about 69 ms to 53-54 ms on SF1.
+
+The important distinction is shape, not a global threshold. Lowering startup
+globally also admits Q17's standalone ungrouped aggregate region, which forced
+neutral/slower. The safe rule is narrower: discount startup only for one-join
+grouped aggregate fusion with materialization elision and at least three
+generated stages. This admits Q3 while keeping Q4, Q15, and Q17 at zero compiled
+regions.
+
+Measured checkpoint after the startup discount:
+
+| Workload | Result |
+| --- | ---: |
+| Q3 SF1 default auto, 20 repeats | 0.069s -> 0.054s, ~1.28x, compiled regions 20 |
+| Q4 SF1 default auto, 20 repeats | neutral, compiled regions 0 |
+| Q15 SF1 default auto, 20 repeats | compiled regions 0; residual timing noise only |
+| Q17 SF1 default auto, 20 repeats | compiled regions 0 |
+| Full TPC-H SF1 default auto, 9 repeats | Q1 ~1.19x, Q3 ~1.28x, Q9 ~1.29x, Q14 ~1.06x |
+
+Principle: do not let one blocked native protocol become a blanket veto. If
+forced execution shows a clean, repeated win, find the narrower shape that pays
+and fund that shape only. Keep the larger unfused sparse-join and lookup-heavy
+families unfunded until their backend path is genuinely faster.
+
+### 9. Chained Hash Probe Fast Path Is Groundwork, Not Q7/Q12 Admission Yet
+
+Regular hash join probing had an avoidable gap: single-key all-valid duplicate
+key chains still fell back to generated probe code, while no-chain tables had
+C++ fast helpers. A native helper can follow DuckDB's chain contract directly:
+probe the pointer table, walk duplicate-key chains, pause with
+`input_offset` plus `resume_row_pointer` when output fills, and resume the same
+probe row on the next drain. The helper is safe only for the simple matched
+output cases: one equality key, all-valid sources, no residual predicate, no
+build marking, and no chain matcher.
+
+The focused API test now verifies a real chained hash table with duplicate
+build keys and requires the runtime stage
+`fast_regular_probe_flat_all_valid_single_key_chain`, with no generated regular
+probe fallback. This removes one backend gap and is the right direction for
+sparse/chained joins.
+
+It does not by itself make Q7/Q12 profitable. Forced native-operator funding
+after the helper still left Q7 slightly slower and Q12 uncompiled/neutral in the
+current shape. The remaining root blocker is broader: sparse join-heavy
+pipelines still need better data-centric ownership of the join + grouped
+aggregate lookup path, not just a faster duplicate-chain loop.
+
+### 10. Q19 Is a Narrow One-Vector Admission, Not a General Startup Cut
+
+Q19 has a small but repeatable shape: DuckDB scan filters prune the source down
+to roughly one vector, then SLJIT fuses a single join into an ungrouped aggregate
+with materialization elision. Forcing zero startup cost showed a stable small
+median shift over 50 repeats:
+
+| Workload | Result |
+| --- | ---: |
+| Q19 SF1 forced startup waiver, 50 repeats | 0.047s -> 0.045s, ~1.04x |
+
+The safe admission rule is deliberately narrow: full-pipeline, scan filters
+owned by DuckDB, at least three source filters, one join, one ungrouped
+aggregate, no grouped aggregate, no sort, materialization elision, and
+post-filter rows no larger than one vector. The default all-query check after
+the waiver kept Q4/Q15/Q17 at zero compiled regions and admitted Q19. However,
+the win is small enough to treat as a boundary-policy improvement, not a major
+performance result.
+
+### 11. Q12 Proved Bloom-Aware Probe Helps a Stage, But Not Enough to Admit
+
+Q12 was the right deeper probe case because the CBO was not the root blocker.
+With a tiny native-operator protocol cost, Q12 lowered and compiled, but the
+initial runtime was much slower than DuckDB vectorized execution:
+
+| Forced Q12 variant | Result |
+| --- | ---: |
+| Before chained-probe tuning | 0.056s -> 0.064s, ~0.88x |
+| Pipelined chained probe | 0.055s -> 0.061s, ~0.90x |
+| Bloom-aware chained probe, fixed | 0.057s -> 0.055s, ~1.04x |
+
+The stage-level root cause was clear. In the forced traced run, Q12 probes 1.5M
+orders rows into a small filtered lineitem build and returns only 30,988 matches.
+The all-valid single-key chain probe dominated generated runtime:
+
+| Probe path | Hash-probe stage |
+| --- | ---: |
+| Original chain helper | ~13.3 ms |
+| Pipelined next-row prefetch | ~10.7 ms |
+| Bloom-aware precheck | ~2.9 ms |
+
+The first bloom implementation was fast but wrong: it returned tiny counts
+because the pipelined loop advanced `key`, `salt`, and `ht_offset` without
+advancing the full `hash` used for the bloom lookup. The hash table still worked
+without bloom because it used the advanced offset/salt, but bloom saw a stale
+hash and introduced false negatives. The fix is a useful principle: when a
+pipelined loop carries derived state, every consumer must advance from the same
+row, or a new optimization can silently corrupt filtering.
+
+Even after the fix, Q12 is not a default-admission candidate. A 50-repeat run
+with minimal native protocol cost showed only `0.056s -> 0.055s`; that is
+noise-level for our bar. The backend improvement is still worth keeping because
+it removes a real miss-heavy probe bottleneck and can help future fused join
+shapes, but the CBO should continue skipping Q12 by default until the whole
+pipeline is clearly faster.
+
+### 12. Q9 Pair-Key Bloom Is a Real Probe-Side Win
+
+Q9's remaining dominant stage was the first regular hash join probe:
+lineitem probes the partsupp build with two `BIGINT` equality keys and returns
+only about 319K matches from 6.0M probe rows. The existing typed pair-key helper
+already removed generic probe overhead, but it still paid a random pointer-table
+probe for nearly every miss.
+
+The important root-cause detail is that build-side hash generation already
+computes the exact combined two-key hash. Preparing a bloom filter for sparse
+two-key JIT probes reuses that existing hash stream; the native pair probe can
+then reject most misses before touching the pointer table. This is not a generic
+"compile more joins" change. It is gated to JIT-enabled inner joins with exactly
+two plain equality keys, no residual predicate, a large probe side, and a build
+side no more than one quarter of the probe estimate.
+
+| Q9 SF1 checkpoint | Result |
+| --- | ---: |
+| Previous default all-query run | ~1.29x |
+| Pair-key bloom, 20 repeats | `0.1555s -> 0.1040s`, ~1.50x |
+| Full TPC-H SF1 default, 9 repeats | Q9 `0.155s -> 0.105s`, ~1.48x |
+
+The stage trace explains the gain:
+
+| Q9 op0 pair-key probe stage | Runtime |
+| --- | ---: |
+| Before pair-key bloom | ~36.4 ms |
+| After pair-key bloom | ~20.3 ms |
+
+Principle: sparse native joins should spend cycles on deterministic, local
+rejects before random hash-table probes. If the build path already owns a hash
+stream, reuse it. Do not create a second data structure or loosen CBO admission
+until the miss path itself is cheaper.
+
+### 13. Q20 Needs the Two-Stage Blocked Grouped-Aggregate Exception
+
+Q20 exposed a too-conservative edge in the CBO. The profitable region has only
+two generated stages, one native hash join, one grouped hash aggregate, and a
+blocked grouped-aggregate lookup. The old rule intentionally refused that shape
+because similar blocked lookup paths had regressed in Q12/Q17. The forced run
+showed Q20 is different: it is long enough that even a small modeled per-batch
+win is real.
+
+Measured checkpoint:
+
+| Workload | Result |
+| --- | ---: |
+| Q20 default before rule | compiled regions 0; ~0.986x/noise |
+| Q20 default after rule, 20 repeats | `0.071s -> 0.060s`, ~1.18x |
+| Full TPC-H SF1 after rule, 10 repeats | Q20 `0.071s -> 0.061s`, ~1.16x |
+
+The admission rule is narrow: full pipeline, exactly two generated stages,
+materialization elision, one native join, grouped aggregate only, blocked hash
+aggregate lookup, no sort, no DuckDB-owned scan-filter discount, and at least
+512 vectors of modeled work. This admits Q20 but keeps the known bad small
+blocked grouped-aggregate shapes skipped.
+
+The next tempting forced win was Q3's extra two-join/no-aggregate region, but
+the same surface traits appear in Q5, Q7, and Q8. Broad native-join funding made
+Q7 and Q8 much slower, so the right next step there is backend/root-path work,
+not a CBO rule. We need a better discriminator or a faster native join pipeline
+before funding that family.
+
+### 14. Q3 Join-Build Admission Needs Data-Centric Width and Payload Facts
+
+Q3's next real win was not generic "more joins". The useful extra region is an
+upstream source-filtered hash-join build chain that keeps the filtered scan rows
+inside one generated/native pipeline before building the next hash table. The
+first broad startup waiver admitted every long one-stage/two-join build chain
+and immediately proved too loose:
+
+| Broad join-build waiver | Result |
+| --- | ---: |
+| Q3 | faster, `~1.15x` |
+| Q4 | regressed, `~0.61x` |
+| Q8 | regressed, `~0.89x` |
+| Q21 | regressed, `~0.75x` |
+
+The root cause was missing cost facts. The bad Q4/Q21 regions had no generated
+source filter. Q8 did have a generated source filter, but carried a wider
+hash-build payload (`payload_columns=4`) and used a regular/chain probe at
+runtime. Q5/Q7 had narrow payloads but only projected two source columns and
+were noise-level at best. Q3 had all the profitable data-centric traits: a
+generated source filter, a perfect-hash probe shape, a narrow build payload
+(`<= 2` columns), and at least four projected source columns worth keeping in
+the fused pipeline.
+
+The final rule therefore threads those facts into the CBO and waives startup
+only for long generated join-build chains with:
+
+- one generated stage
+- exactly two native join stages and no aggregate/sort
+- generated source filters
+- perfect-hash probe shape present
+- hash-build payload width `1..2`
+- at least four projected source columns
+- at least 128 vectors
+
+Measured checkpoint:
+
+| Workload | Result |
+| --- | ---: |
+| Targeted Q3/Q5/Q7/Q8/Q21, 20 repeats | Q3 `0.066s -> 0.0585s`, ~1.13x; Q5/Q7/Q8/Q21 compile zero regions |
+| Full TPC-H SF1 default, 10 repeats | Q3 `0.065s -> 0.059s`, ~1.10x; only Q1/Q3/Q9/Q14/Q19/Q20 compile |
+
+Principle: a CBO exception needs the actual data path facts, not only operator
+counts. For join-build fusion, width and payload decide whether keeping rows hot
+is useful or whether JIT just adds probe/build bookkeeping around DuckDB's
+already-good vectorized path.
+
+### 15. Perfect-Hash Chains Are Admissible; Regular-Hash Chains Need Backend Ownership
+
+Q22 showed a real no-generated-work win: a long native two-join chain with
+perfect-hash probes and no aggregate, sort, materialization elision, or scan
+filter ownership. The important discriminator was the hash-table layout. The
+same broad two-join startup waiver also admitted Q21, but Q21 used regular hash
+tables and regressed. The rule therefore requires a perfect-hash probe for this
+long native two-join shape.
+
+Measured checkpoint:
+
+| Workload | Result |
+| --- | ---: |
+| Q21/Q22 after perfect-hash gate | Q21 compiled regions 0; Q22 `0.0255s -> 0.0230s`, ~1.11x |
+| Full TPC-H SF1 after gate | Q22 stays admitted; Q21 stays skipped |
+
+The deeper Q21 root cause was not "two keys". Its hot regular-hash probe was
+one equality key plus one `<>` predicate key, which forces DuckDB's chain
+matcher contract. SLJIT now has flat and selected all-valid single-key
+notequal-chain helpers, so forced Q21 no longer falls back to generated regular
+probe code for that exact stage. Q21 still is not production-admissible because
+the forced query remains dominated by source filter/projection work and multiple
+compiled regions around regular hash tables.
+
+The next broad sweep reinforced the same rule. Forcing the skipped TPC-H
+queries with zero startup did not reveal a clean hidden win: Q4, Q7, Q8, and
+Q17 compiled but were slower; Q6 was break-even; most other skipped queries
+still had no executable region. That is a backend/root-path signal, not a CBO
+threshold signal.
+
+The useful backend cleanup from that sweep was another data-centric probe
+specialization: selected all-valid two-key regular hash probes now have native
+helpers for both no-chain and chained layouts. This removes lazy generated probe
+code for filtered two-key join batches while preserving the selection-vector
+contract (`match_sel` remains the selected-row index). Focused API tests require
+the new stages:
+
+- `fast_regular_probe_selected_all_valid_int64_pair_no_chain`
+- `fast_regular_probe_selected_all_valid_int64_pair_chain`
+
+Full TPC-H SF1 after this helper preserved the production admitted set:
+Q1/Q3/Q9/Q14/Q19/Q20/Q22 compile and win, Q21 remains skipped. The selected
+pair helper is groundwork for more filtered two-key joins; it is not enough by
+itself to admit the regular-hash-heavy Q21 family.
+
+### 16. Grouped Aggregate Fast Paths Must Split Existing-Group and New-Group Cases
+
+The first regular hash aggregate shortcut only handled all-existing groups. It
+was correct for low-cardinality aggregates, but TPC-H Q20 and synthetic
+high-cardinality grouped aggregates spend real time creating new groups. The
+next data-centric step is a separate fixed-width all-new fast path:
+
+- probe the pointer table for the batch
+- claim empty slots with normal linear probing
+- append group rows and initialize aggregate states once
+- update primitive aggregate state directly
+- fall back before semantic mutation on same-salt matches, duplicates, NULL
+  semantics, VARCHAR keys, or unsupported payloads
+
+This keeps the state-address contract centralized in DuckDB's aggregate hash
+table instead of teaching SLJIT how to own tuple-data layout. The JIT runtime
+now tries existing groups first for reuse-heavy batches, then fixed-width new
+groups for creation-heavy batches, then falls back to the generic
+`ResolveStateAddresses` path.
+
+Measured checkpoint:
+
+| Workload | Result |
+| --- | ---: |
+| Focused API coverage | `direct_existing_grouped_primitive_update` and `direct_new_grouped_primitive_update` both verified |
+| Forced Q5/Q10/Q18/Q20, 7 repeats | Q20 `0.069s -> 0.056s`, ~1.23x; Q18 forced improves modestly; Q5/Q10 remain non-admissible |
+| Full TPC-H SF1 default, 5 repeats | Q20 `0.071s -> 0.057s`, ~1.25x; admitted set remains Q1/Q3/Q9/Q14/Q19/Q20/Q22 |
+
+The important root-cause split: Q20 has fixed-width group keys where new-group
+creation can be made cheaper without changing query shape. Q10/Q5 have
+string-heavy or wide grouped aggregates where a blind direct-new attempt adds
+overhead and still cannot own the row-match semantics. Those need real
+generated/native lookup ownership or upstream data-flow fusion, not a wider
+runtime retry budget.
+
+### 17. Post-Join Batching Must Preserve the Fast Aggregate Lookup Path
+
+TPC-H Q10 exposed a sharper version of the data-centric rule. The final join
+emits many tiny chunks into a projection plus regular hash aggregate. A copied
+batch reduced aggregate invocations from thousands to dozens, but it copied
+VARCHAR group keys into a temporary batch before the aggregate copied them again.
+That violated the real data path and regressed production timing.
+
+A safer streamed variant deferred `FinishStateUpdates()` across the tiny chunks
+and avoided the copied batch. That removed the double string materialization and
+kept correctness, but Q10 still remained below vectorized execution because the
+hot work was still thousands of standalone `FindOrCreateGroupAddressesFast`
+calls plus projection dispatch. The remaining root solution is not a CBO change:
+the join-to-aggregate handoff needs to keep row selections, build row pointers,
+group keys, and payload inputs in one data-centric path.
+
+An attempted regular-hash payload partial fusion also found an important guard:
+if payload fusion forces `ResolveStateAddresses()` through the generic grouped
+aggregate lookup for those tiny chunks, the query becomes dramatically slower.
+Regular hash aggregate payload fusion is only admissible when it can prove the
+direct fast group-address path is used, or when it owns generated hash lookup
+semantics outright. The reusable lower-level hook is an address-only fast path;
+the planner must not select it blindly.
+
+### 18. Regular Hash Payload Fusion Must Remap Copied Payloads Directly
+
+The grouped regular-hash DECIMAL payload path exposed a source-index bug that
+looked like a planner miss but was really a double-composition problem. Once an
+aggregate payload is copied out of a projection expression, its expression-tree
+source indices are already in the original region-input coordinate space. The
+partial-fusion helper must remap those direct input sources into the shortened
+projection; it must not compose them through the projection again as if they
+were projection output indices. The failed shape was:
+
+- group key kept in the shortened projection
+- payload copied as `p * (1.00 - d)`
+- copied payload source indices still refer to input columns `p` and `d`
+- old rewrite tried to interpret source `#2` as a projection output slot
+
+The root fix is direct-source remapping for partial aggregate fusion. This also
+keeps the data-centric goal intact: retain only the grouping projection needed
+for DuckDB's state-address path, while evaluating the aggregate payload directly
+inside the fused SLJIT aggregate update.
+
+The same investigation found a runtime ABI rule for generic typed payload
+codegen: pointer arrays for selection and validity must be non-null when the JIT
+dereferences the array base. Individual entries may be null to represent flat or
+all-valid input, but the array object itself must exist on the generic path.
+Passing a null array base caused raw JIT code to crash before the payload math
+ran.
+
+The first correct version was still slower on simple grouped payloads because it
+was not data-centric enough: regular-hash grouped typed payloads resolved or
+created state addresses in one pass, then ran a separate generated payload
+update pass over the address array. Dense payload arithmetic needs a flat
+all-valid fast loop inside the grouped typed aggregate kernel; otherwise the
+generic typed tree evaluator burns cycles on per-reference validity checks and
+stack slots. After adding the grouped flat/all-valid fast loop, the synthetic
+regular-hash DECIMAL break-even moved from slower-than-vectorized to parity at
+four payload expressions and a small win at eight payload expressions. Simple
+one-payload grouped aggregates remain vectorized territory until regular hash
+lookup and payload update are fused into one generated data-centric loop.
+
+### 19. Callback State-Address Updates Are a Useful Half-Step, Not the Root
+
+The next regular-hash grouped aggregate improvement was to let DuckDB's hash
+table own the existing/new group lookup fast paths while SLJIT owns the typed
+payload update. The clean boundary is a state-address callback: the hash table
+finds or creates group state addresses, then invokes the generated grouped
+payload updater immediately on that address vector. This keeps typed payloads
+off the old materialized-reference-only primitive update path without teaching
+the hash table about SLJIT expression trees.
+
+Measured on a 1M-row, single-thread synthetic DECIMAL grouped aggregate with
+regular hash forced and coverage CBO settings:
+
+| Shape | Vectorized median | SLJIT median | Speedup |
+| --- | ---: | ---: | ---: |
+| high cardinality, 1 expression | 0.0335s | 0.0320s | 1.05x |
+| high cardinality, 4 expressions | 0.0655s | 0.0610s | 1.07x |
+| high cardinality, 8 expressions | 0.1170s | 0.1055s | 1.11x |
+| low cardinality, 1 expression | 0.0060s | 0.0080s | 0.75x |
+| low cardinality, 4 expressions | 0.0110s | 0.0110s | 1.00x |
+| low cardinality, 8 expressions | 0.0220s | 0.0160s | 1.38x |
+
+The result is directionally useful but not a license to lower production CBO
+thresholds. The simple low-cardinality case regressed because vectorized/native
+direct update is already extremely cheap when there is little arithmetic. The
+callback path wins when expression density is high enough to amortize grouped
+state-address glue, especially after existing groups are established. The root
+solution is still a generated data-centric regular-hash aggregate loop that
+keeps the group state pointer hot while evaluating payload expressions, rather
+than a callback over a produced address vector.
+
+### 20. Large Scale Needs Shape-Specific CBO, Not SF1 Noise Chasing
+
+SF10 exposed a useful missed win in TPC-H Q5 that SF1-style testing would not
+have justified confidently. The profitable region is narrow and data-centric:
+two native hash-join probes, two generated projections, and one grouped hash
+aggregate over about 60M estimated rows. It has only modest per-batch modeled
+work, but the row count is high enough to pay startup. A narrow CBO protocol for
+this shape made Q5 compile one region and moved SF10 targeted timing to roughly
+1.09x-1.10x.
+
+The same run also showed why the rule must stay narrow. Q7's previously bad
+multi-join grouped aggregate remains the wrong target because wide/string group
+materialization and native join/group lookup dominate. A separate false positive
+appeared in Q7 after the aggregate: a 46-batch stateful hash-aggregate scan into
+ORDER BY with high-cost projections. The model saw enough expression work, but
+the fixed stateful source/order sink protocol overhead dominated at that batch
+count. The fix was not to ban high-cost projections; it was to carry `sort_sink`
+into the cost input and reject only small stateful standalone projections feeding
+sort sinks.
+
+The two-join batched runtime path for the Q5 shape was correct but did not
+materially improve beyond the CBO admission. That is a root-cause signal: Q5's
+remaining time is mostly native join and grouped aggregate work, not final
+projected batch packing. The next root solution for more TPC-H coverage is not
+more blind batching; it is generated data-centric join/grouped-aggregate loops
+that keep row pointers, projected values, and aggregate state addresses hot
+across the join-to-aggregate boundary.
+
+Full-suite SF10 verification must distinguish compiled-region regressions from
+zero-compile auto-policy timing noise. Q15/Q22 can fail a strict 0.98 gate in a
+short all-query run even with zero compiled regions, while targeted r9 runs are
+neutral. Treat those as planning overhead/noise to reduce, but do not confuse
+them with runtime JIT regressions.
+
+### 21. Q5 Needed The Scan-Filtered Narrow Two-Join Rule
+
+The Q5 large-scale root cause was not missing code generation. The profitable
+region was already executable, but the production CBO rejected it before backend
+analysis because `uses_scan_filters=true` excluded it from the existing narrow
+two-join grouped-aggregate protocol. The observed SF10 shape is narrow:
+
+- scan-filtered source with no generated source filters
+- exactly two native hash-join probe stages
+- exactly two generated projection stages
+- exactly one grouped aggregate update stage
+- one grouped key and no reference VARCHAR projection payload
+- enough post-scan-filter batches to amortize startup
+
+Adding a separate scan-filtered narrow two-join grouped-aggregate protocol made
+Q5 compile without weakening the wide/string guards that protect Q7-like shapes.
+Targeted SF10 production timing after the change:
+
+| Query | Repeats | OFF median | AUTO median | Speedup |
+| --- | ---: | ---: | ---: | ---: |
+| TPC-H Q5 SF10 | 9 | 0.603s | 0.539s | 1.119x |
+
+Runtime tracing made the same path look bad because traced native join and
+grouped aggregate stages pay large instrumentation overhead. Use traced runs for
+admission and stage evidence, but use production-timing runs for performance
+claims.
+
 ## Bottom Line
 
 The proven path is aggressive fusion that removes materialization and keeps data

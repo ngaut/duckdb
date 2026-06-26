@@ -68,7 +68,7 @@ static bool TryGetNativeComparableIntegerKind(const ExecutionExpressionIR &node,
 		return true;
 	}
 	if (node.return_type.id() == LogicalTypeId::DATE && node.physical_type == PhysicalType::INT32) {
-		kind = SljitNativeIntegerKind::INT32;
+		kind = SljitNativeIntegerKind::DATE;
 		return true;
 	}
 	if (node.return_type.id() == LogicalTypeId::DECIMAL && node.physical_type == PhysicalType::INT64) {
@@ -1144,24 +1144,99 @@ bool TryReadNativeIntegerInList(const ExecutionExpressionIR &root, SljitNativeIn
 bool TryReadNativeIntegerBetween(const ExecutionExpressionIR &root, SljitNativeIntegerKind &kind, idx_t &source_index,
                                  int64_t &lower, int64_t &upper, bool &lower_inclusive, bool &upper_inclusive,
                                  bool &not_between) {
-	if (root.kind != ExecutionExpressionIRKind::BETWEEN || root.return_type.id() != LogicalTypeId::BOOLEAN ||
-	    root.children.size() != 3 || root.children[0]->kind != ExecutionExpressionIRKind::REFERENCE ||
-	    !TryGetNativeComparableIntegerKind(*root.children[0], kind)) {
+	if (root.kind == ExecutionExpressionIRKind::BETWEEN) {
+		if (root.return_type.id() != LogicalTypeId::BOOLEAN || root.children.size() != 3 ||
+		    root.children[0]->kind != ExecutionExpressionIRKind::REFERENCE ||
+		    !TryGetNativeComparableIntegerKind(*root.children[0], kind)) {
+			return false;
+		}
+		auto &lower_node = *root.children[1];
+		auto &upper_node = *root.children[2];
+		bool lower_is_null;
+		bool upper_is_null;
+		if (!TryReadNativeIntegerConstant(lower_node, kind, lower, lower_is_null) ||
+		    !TryReadNativeIntegerConstant(upper_node, kind, upper, upper_is_null) || lower_is_null ||
+		    upper_is_null) {
+			return false;
+		}
+		source_index = root.children[0]->ref_index;
+		lower_inclusive = root.lower_inclusive;
+		upper_inclusive = root.upper_inclusive;
+		not_between = root.not_between;
+		return true;
+	}
+
+	if (root.kind != ExecutionExpressionIRKind::CONJUNCTION ||
+	    root.conjunction_op != ExecutionExpressionConjunctionOp::AND ||
+	    root.return_type.id() != LogicalTypeId::BOOLEAN || root.children.size() != 2) {
 		return false;
 	}
-	auto &lower_node = *root.children[1];
-	auto &upper_node = *root.children[2];
-	bool lower_is_null;
-	bool upper_is_null;
-	if (!TryReadNativeIntegerConstant(lower_node, kind, lower, lower_is_null) ||
-	    !TryReadNativeIntegerConstant(upper_node, kind, upper, upper_is_null) || lower_is_null || upper_is_null) {
-		return false;
+
+	bool initialized = false;
+	bool has_lower = false;
+	bool has_upper = false;
+	for (auto &child_ptr : root.children) {
+		if (!child_ptr) {
+			return false;
+		}
+		SljitNativeIntegerCompareOp compare_op;
+		SljitNativeIntegerKind child_kind;
+		idx_t child_source_index;
+		int64_t child_constant;
+		bool constant_on_left;
+		if (!TryReadNativeIntegerCompareConstant(*child_ptr, compare_op, child_kind, child_source_index,
+		                                         child_constant, constant_on_left)) {
+			return false;
+		}
+		if (!initialized) {
+			kind = child_kind;
+			source_index = child_source_index;
+			initialized = true;
+		} else if (kind != child_kind || source_index != child_source_index) {
+			return false;
+		}
+
+		bool child_is_lower;
+		bool child_inclusive;
+		switch (compare_op) {
+		case SljitNativeIntegerCompareOp::LESS_THAN:
+			child_is_lower = constant_on_left;
+			child_inclusive = false;
+			break;
+		case SljitNativeIntegerCompareOp::LESS_THAN_OR_EQUAL:
+			child_is_lower = constant_on_left;
+			child_inclusive = true;
+			break;
+		case SljitNativeIntegerCompareOp::GREATER_THAN:
+			child_is_lower = !constant_on_left;
+			child_inclusive = false;
+			break;
+		case SljitNativeIntegerCompareOp::GREATER_THAN_OR_EQUAL:
+			child_is_lower = !constant_on_left;
+			child_inclusive = true;
+			break;
+		default:
+			return false;
+		}
+
+		if (child_is_lower) {
+			if (has_lower) {
+				return false;
+			}
+			lower = child_constant;
+			lower_inclusive = child_inclusive;
+			has_lower = true;
+		} else {
+			if (has_upper) {
+				return false;
+			}
+			upper = child_constant;
+			upper_inclusive = child_inclusive;
+			has_upper = true;
+		}
 	}
-	source_index = root.children[0]->ref_index;
-	lower_inclusive = root.lower_inclusive;
-	upper_inclusive = root.upper_inclusive;
-	not_between = root.not_between;
-	return true;
+	not_between = false;
+	return initialized && has_lower && has_upper;
 }
 
 bool TryReadNativeStringPrefixConstant(const ExecutionExpressionIR &root, idx_t &source_index, string &prefix) {
@@ -1671,6 +1746,29 @@ static bool TryBuildNativePredicateInternal(const ExecutionExpressionIR &root,
 		result->not_in = early_string_not_in;
 		predicate = std::move(result);
 		return true;
+	}
+
+	{
+		SljitNativeIntegerKind between_kind;
+		idx_t between_source_index;
+		int64_t lower;
+		int64_t upper;
+		bool lower_inclusive;
+		bool upper_inclusive;
+		bool not_between;
+		if (TryReadNativeIntegerBetween(root, between_kind, between_source_index, lower, upper, lower_inclusive,
+		                                upper_inclusive, not_between)) {
+			result->kind = SljitNativePredicateKind::INTEGER_BETWEEN;
+			result->integer_kind = between_kind;
+			result->source_index = between_source_index;
+			result->lower = lower;
+			result->upper = upper;
+			result->lower_inclusive = lower_inclusive;
+			result->upper_inclusive = upper_inclusive;
+			result->not_between = not_between;
+			predicate = std::move(result);
+			return true;
+		}
 	}
 
 	if (root.kind == ExecutionExpressionIRKind::CONJUNCTION) {

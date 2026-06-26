@@ -123,7 +123,7 @@ bool PerfectHashJoinExecutor::CanDoPerfectHashJoin(const PhysicalHashJoin &op, c
 	perfect_join_statistics.build_range = NumericCast<idx_t>(build_range);
 
 	// If count is larger than range (duplicates), we bail out
-	if (ht.Count() > perfect_join_statistics.build_range) {
+	if (ht.Count() > perfect_join_statistics.build_range + 1) {
 		return false;
 	}
 

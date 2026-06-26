@@ -15,6 +15,7 @@
 
 namespace duckdb {
 
+class BloomFilter;
 class JoinHashTable;
 
 enum class ExecutionHashJoinProbeLayoutKind : uint8_t { NONE, REGULAR_HASH_TABLE, PERFECT_HASH_TABLE };
@@ -49,6 +50,7 @@ struct ExecutionHashJoinTableLayout {
 	uint64_t salt_mask = 0;
 	const ht_entry_t *entries = nullptr;
 	const data_ptr_t *aux_next_ptrs = nullptr;
+	const BloomFilter *bloom_filter = nullptr;
 	string blocker;
 };
 

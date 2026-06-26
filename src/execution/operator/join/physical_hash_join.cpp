@@ -9,6 +9,7 @@
 #include "duckdb/common/types/uhugeint.hpp"
 #include "duckdb/catalog/catalog_entry/table_catalog_entry.hpp"
 #include "duckdb/execution/execution_operator_runtime.hpp"
+#include "duckdb/execution/execution_region_settings.hpp"
 #include "duckdb/execution/expression_executor.hpp"
 #include "duckdb/execution/join_hashtable.hpp"
 #include "duckdb/execution/operator/aggregate/ungrouped_aggregate_state.hpp"
@@ -377,6 +378,117 @@ static bool CanUsePerfectHashJoin(const PhysicalHashJoin &op, PerfectHashJoinExe
 	                                                  NumericStats::Max(right_stats));
 }
 
+struct PerfectHashJoinBuildBounds {
+	LogicalType key_type;
+	bool initialized = false;
+	bool has_value = false;
+	int64_t min = 0;
+	int64_t max = 0;
+
+	void Initialize(const LogicalType &type) {
+		key_type = type;
+		initialized = true;
+		has_value = false;
+		min = 0;
+		max = 0;
+	}
+
+	void Update(int64_t value) {
+		if (!has_value) {
+			min = value;
+			max = value;
+			has_value = true;
+			return;
+		}
+		min = MinValue(min, value);
+		max = MaxValue(max, value);
+	}
+
+	void Combine(const PerfectHashJoinBuildBounds &other) {
+		if (!other.has_value) {
+			return;
+		}
+		D_ASSERT(initialized && other.initialized);
+		Update(other.min);
+		Update(other.max);
+	}
+
+	Value Min() const {
+		D_ASSERT(initialized && has_value);
+		return Value::Numeric(key_type, min);
+	}
+
+	Value Max() const {
+		D_ASSERT(initialized && has_value);
+		return Value::Numeric(key_type, max);
+	}
+};
+
+static bool CanCollectPerfectHashJoinBuildBounds(const PhysicalHashJoin &op) {
+	if (op.predicate || op.join_type != JoinType::INNER || op.conditions.size() != 1 ||
+	    op.conditions[0].GetComparisonType() != ExpressionType::COMPARE_EQUAL) {
+		return false;
+	}
+	switch (op.condition_types[0].InternalType()) {
+	case PhysicalType::INT8:
+	case PhysicalType::INT16:
+	case PhysicalType::INT32:
+	case PhysicalType::INT64:
+		break;
+	default:
+		return false;
+	}
+	for (auto &type : op.children[1].get().GetTypes()) {
+		switch (type.InternalType()) {
+		case PhysicalType::STRUCT:
+		case PhysicalType::LIST:
+		case PhysicalType::ARRAY:
+			return false;
+		default:
+			break;
+		}
+	}
+	return true;
+}
+
+template <class T>
+static void UpdatePerfectHashJoinBuildBounds(UnifiedVectorFormat &format, idx_t count,
+                                             PerfectHashJoinBuildBounds &bounds) {
+	auto data = UnifiedVectorFormat::GetData<T>(format);
+	auto all_valid = format.validity.CannotHaveNull();
+	for (idx_t row_idx = 0; row_idx < count; row_idx++) {
+		auto source_idx = format.sel->get_index(row_idx);
+		if (!all_valid && !format.validity.RowIsValid(source_idx)) {
+			continue;
+		}
+		bounds.Update(NumericCast<int64_t>(data[source_idx]));
+	}
+}
+
+static void UpdatePerfectHashJoinBuildBounds(Vector &keys, idx_t count, PerfectHashJoinBuildBounds &bounds) {
+	if (count == 0) {
+		return;
+	}
+	UnifiedVectorFormat format;
+	keys.ToUnifiedFormat(format);
+	switch (keys.GetType().InternalType()) {
+	case PhysicalType::INT8:
+		UpdatePerfectHashJoinBuildBounds<int8_t>(format, count, bounds);
+		break;
+	case PhysicalType::INT16:
+		UpdatePerfectHashJoinBuildBounds<int16_t>(format, count, bounds);
+		break;
+	case PhysicalType::INT32:
+		UpdatePerfectHashJoinBuildBounds<int32_t>(format, count, bounds);
+		break;
+	case PhysicalType::INT64:
+		UpdatePerfectHashJoinBuildBounds<int64_t>(format, count, bounds);
+		break;
+	default:
+		throw InternalException("perfect hash join build bounds received unsupported key type");
+	}
+}
+
 unique_ptr<JoinFilterGlobalState> JoinFilterPushdownInfo::GetGlobalState(ClientContext &context,
                                                                          const PhysicalOperator &op) const {
 	// clear any previously set filters
@@ -403,6 +515,10 @@ public:
 		// For perfect hash join
 		perfect_join_executor = make_uniq<PerfectHashJoinExecutor>(op, *hash_table);
 		auto use_perfect_hash = CanUsePerfectHashJoin(op, *perfect_join_executor);
+		collect_perfect_join_bounds = CanCollectPerfectHashJoinBuildBounds(op);
+		if (collect_perfect_join_bounds) {
+			perfect_join_bounds.Initialize(op.condition_types[0]);
+		}
 		// For external hash join
 		external = Settings::Get<DebugForceExternalSetting>(context);
 		// Set probe types
@@ -435,6 +551,12 @@ public:
 		hash_table->ResetForNewIterationSinglePartition();
 		perfect_join_executor = make_uniq<PerfectHashJoinExecutor>(op, *hash_table);
 		auto use_perfect_hash = CanUsePerfectHashJoin(op, *perfect_join_executor);
+		collect_perfect_join_bounds = CanCollectPerfectHashJoinBuildBounds(op);
+		if (collect_perfect_join_bounds) {
+			perfect_join_bounds.Initialize(op.condition_types[0]);
+		} else {
+			perfect_join_bounds = PerfectHashJoinBuildBounds();
+		}
 		finalized = false;
 		active_local_states = 0;
 		external = Settings::Get<DebugForceExternalSetting>(context);
@@ -503,6 +625,8 @@ public:
 	bool skip_filter_pushdown = false;
 	unique_ptr<JoinFilterGlobalState> global_filter_state;
 	bool keep_local_hash_tables = false;
+	bool collect_perfect_join_bounds = false;
+	PerfectHashJoinBuildBounds perfect_join_bounds;
 };
 
 unique_ptr<JoinFilterLocalState> JoinFilterPushdownInfo::GetLocalState(JoinFilterGlobalState &gstate) const {
@@ -535,6 +659,9 @@ public:
 		if (op.filter_pushdown) {
 			local_filter_state = op.filter_pushdown->GetLocalState(*gstate.global_filter_state);
 		}
+		if (gstate.collect_perfect_join_bounds) {
+			perfect_join_bounds.Initialize(op.condition_types[0]);
+		}
 	}
 
 public:
@@ -551,6 +678,7 @@ public:
 	bool keep_hash_table = false;
 
 	unique_ptr<JoinFilterLocalState> local_filter_state;
+	PerfectHashJoinBuildBounds perfect_join_bounds;
 
 	bool SupportsReuse() const override {
 		return true;
@@ -572,6 +700,11 @@ public:
 			local_filter_state = op.filter_pushdown->GetLocalState(*gstate.global_filter_state);
 		} else {
 			local_filter_state.reset();
+		}
+		if (gstate.collect_perfect_join_bounds) {
+			perfect_join_bounds.Initialize(op.condition_types[0]);
+		} else {
+			perfect_join_bounds = PerfectHashJoinBuildBounds();
 		}
 	}
 };
@@ -610,13 +743,46 @@ static bool ShouldPrepareBloomFilterBuild(const PhysicalHashJoin &op) {
 	return true;
 }
 
+static bool ShouldPrepareJitProbeBloomFilterBuild(ClientContext &context, const PhysicalHashJoin &op) {
+	if (!ExecutionRegionSettings::Enabled(context) || op.join_type != JoinType::INNER || op.residual_info) {
+		return false;
+	}
+	if (op.conditions.size() != 2) {
+		return false;
+	}
+	for (auto &cond : op.conditions) {
+		if (cond.GetComparisonType() != ExpressionType::COMPARE_EQUAL) {
+			return false;
+		}
+		auto key_type = cond.GetLHS().GetReturnType().InternalType();
+		if (key_type != PhysicalType::INT64 && key_type != PhysicalType::UINT64) {
+			return false;
+		}
+	}
+	auto probe_estimated_cardinality = op.children[0].get().estimated_cardinality;
+	auto build_estimated_cardinality = op.children[1].get().estimated_cardinality;
+	if (probe_estimated_cardinality == 0 || build_estimated_cardinality == 0) {
+		return false;
+	}
+
+	static constexpr idx_t MIN_PROBE_CARDINALITY = 262144;
+	if (probe_estimated_cardinality < MIN_PROBE_CARDINALITY) {
+		return false;
+	}
+
+	static constexpr double BUILD_TO_PROBE_RATIO_THRESHOLD = 0.25;
+	const double build_to_probe_ratio =
+	    static_cast<double>(build_estimated_cardinality) / static_cast<double>(probe_estimated_cardinality);
+	return build_to_probe_ratio <= BUILD_TO_PROBE_RATIO_THRESHOLD;
+}
+
 unique_ptr<JoinHashTable> PhysicalHashJoin::InitializeHashTable(ClientContext &context,
                                                                 const idx_t initial_radix_bits) const {
 	auto result =
 	    make_uniq<JoinHashTable>(context, *this, conditions, payload_columns.col_types, join_type, initial_radix_bits,
 	                             rhs_output_columns.col_idxs, residual_info ? residual_info->Copy() : nullptr,
 	                             predicate ? predicate.get() : nullptr, lhs_output_in_probe);
-	if (ShouldPrepareBloomFilterBuild(*this)) {
+	if (ShouldPrepareBloomFilterBuild(*this) || ShouldPrepareJitProbeBloomFilterBuild(context, *this)) {
 		result->PrepareBuildBloomFilter(children[1].get().estimated_cardinality);
 	}
 
@@ -717,6 +883,10 @@ SinkResultType PhysicalHashJoin::Sink(ExecutionContext &context, DataChunk &chun
 
 	if (filter_pushdown && !gstate.skip_filter_pushdown) {
 		filter_pushdown->Sink(lstate.join_keys, *lstate.local_filter_state);
+	}
+	if (gstate.collect_perfect_join_bounds) {
+		UpdatePerfectHashJoinBuildBounds(lstate.join_keys.data[0], lstate.join_keys.size(),
+		                                 lstate.perfect_join_bounds);
 	}
 
 	if (payload_columns.col_types.empty()) { // there are only keys: place an empty chunk in the payload
@@ -982,6 +1152,9 @@ SinkCombineResultType PhysicalHashJoin::Combine(ExecutionContext &context, Opera
 	client_profiler.Flush(context.thread.profiler);
 	if (filter_pushdown && !gstate.skip_filter_pushdown) {
 		filter_pushdown->Combine(*gstate.global_filter_state, *lstate.local_filter_state);
+	}
+	if (gstate.collect_perfect_join_bounds) {
+		gstate.perfect_join_bounds.Combine(lstate.perfect_join_bounds);
 	}
 
 	return SinkCombineResultType::FINISHED;
@@ -1863,6 +2036,9 @@ SinkFinalizeType PhysicalHashJoin::Finalize(Pipeline &pipeline, Event &event, Cl
 		filter_min_max = filter_pushdown->FinalizeMinMax(*sink.global_filter_state);
 		min = filter_min_max->data[0].GetValue(0);
 		max = filter_min_max->data[1].GetValue(0);
+	} else if (sink.collect_perfect_join_bounds && sink.perfect_join_bounds.has_value) {
+		min = sink.perfect_join_bounds.Min();
+		max = sink.perfect_join_bounds.Max();
 	} else if (TypeIsIntegral(conditions[0].GetRHS().GetReturnType().InternalType())) {
 		min = Value::MinimumValue(conditions[0].GetRHS().GetReturnType());
 		max = Value::MaximumValue(conditions[0].GetRHS().GetReturnType());
@@ -2047,6 +2223,23 @@ static ExecutionOperatorReadiness MakeExecutionHashJoinProbeReadiness(ExecutionR
 	return readiness;
 }
 
+static bool TryGetNativePerfectHashJoinProbeLayout(const HashJoinGlobalSinkState &sink,
+                                                   const ExecutionRegionHashJoinContract &contract,
+                                                   ExecutionPerfectHashJoinTableLayout &perfect_layout) {
+	perfect_layout = ExecutionPerfectHashJoinTableLayout();
+	if (!sink.finalized || !sink.perfect_join_executor || !contract.perfect_hash_probe_shape_ready) {
+		return false;
+	}
+	if (!sink.perfect_join_executor->GetExecutionPerfectHashJoinTableLayout(perfect_layout)) {
+		return false;
+	}
+	if (perfect_layout.rhs_output_column_count != contract.rhs_output_column_count) {
+		perfect_layout.blocker = "perfect-hash-join-native-runtime-rhs-output-count-mismatch";
+		return false;
+	}
+	return true;
+}
+
 ExecutionOperatorReadiness
 PhysicalHashJoin::GetExecutionOperatorReadiness(ClientContext &context,
                                                 const ExecutionRegionOperatorInfo &operator_info) const {
@@ -2098,11 +2291,14 @@ PhysicalHashJoin::GetExecutionOperatorReadiness(ClientContext &context,
 	ExecutionHashJoinTableLayout table_layout;
 	ExecutionPerfectHashJoinTableLayout perfect_layout;
 	bool perfect_hash_layout = false;
-	ExecutionGetHashJoinTableLayout(*sink.hash_table, table_layout);
+	perfect_hash_layout = TryGetNativePerfectHashJoinProbeLayout(sink, contract, perfect_layout);
+	if (!perfect_hash_layout) {
+		ExecutionGetHashJoinTableLayout(*sink.hash_table, table_layout);
+	}
 	auto output_mode = contract.native_probe_output_mode;
 	const bool native_residual_probe =
 	    (contract.residual_predicate || contract.residual_info) && contract.residual_expression_ready;
-	if (!table_layout.ready) {
+	if (!perfect_hash_layout && !table_layout.ready) {
 		if (sink.finalized && sink.perfect_join_executor &&
 		    table_layout.blocker == "hash-join-native-table-not-finalized") {
 			if (!contract.perfect_hash_probe_shape_ready) {
@@ -2221,12 +2417,15 @@ ExecutionOperatorBindResult PhysicalHashJoin::BindExecutionOperator(ExecutionCon
 	ExecutionHashJoinTableLayout table_layout;
 	ExecutionPerfectHashJoinTableLayout perfect_layout;
 	bool perfect_hash_layout = false;
-	ExecutionGetHashJoinTableLayout(*sink.hash_table, table_layout);
+	perfect_hash_layout = TryGetNativePerfectHashJoinProbeLayout(sink, contract, perfect_layout);
+	if (!perfect_hash_layout) {
+		ExecutionGetHashJoinTableLayout(*sink.hash_table, table_layout);
+	}
 	auto output_mode = contract.native_probe_output_mode;
 	const bool native_residual_probe =
 	    (contract.residual_predicate || contract.residual_info) && contract.residual_expression_ready;
 	bool empty_build_side = false;
-	if (!table_layout.ready) {
+	if (!perfect_hash_layout && !table_layout.ready) {
 		if (sink.finalized && sink.perfect_join_executor &&
 		    table_layout.blocker == "hash-join-native-table-not-finalized") {
 			if (!contract.perfect_hash_probe_shape_ready) {

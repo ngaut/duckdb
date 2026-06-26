@@ -102,7 +102,7 @@ inline void BloomFilter::InsertOne(const hash_t hash) const {
 	slot.fetch_or(mask, std::memory_order_relaxed);
 }
 
-inline bool BloomFilter::LookupOne(const uint64_t hash) const {
+bool BloomFilter::LookupOne(const hash_t hash) const {
 	D_ASSERT(initialized);
 	const uint64_t bf_offset = hash & bitmask;
 	const uint64_t mask = GetMask(hash);

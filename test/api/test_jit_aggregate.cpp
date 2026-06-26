@@ -198,6 +198,19 @@ TEST_CASE("JIT filtered aggregate remaps expression-tree sources after scan filt
 	REQUIRE_NO_FAIL(*result);
 	REQUIRE(result->GetValue(0, 0).ToString() == reference->GetValue(0, 0).ToString());
 
+	bool found_fused_source_filters = false;
+	for (auto &event : manager.GetEvents()) {
+		if (!IsCompiledSljitRegionEvent(event) || event.candidate_traits.source_filter_count <= 1 ||
+		    !StringUtil::Contains(event.reason, "generated table scan source filters")) {
+			continue;
+		}
+		found_fused_source_filters = true;
+		REQUIRE(StringUtil::Contains(event.ir, "op0=filter("));
+		REQUIRE(StringUtil::Contains(event.ir, "fused-generated-source-filters"));
+		REQUIRE_FALSE(StringUtil::Contains(event.ir, "op1=filter("));
+	}
+	REQUIRE(found_fused_source_filters);
+
 	bool found_filtered_aggregate = false;
 	for (auto &event : manager.GetEvents()) {
 		if (EventPhase(event) != "runtime" || event.backend_name != "sljit") {
@@ -208,8 +221,8 @@ TEST_CASE("JIT filtered aggregate remaps expression-tree sources after scan filt
 			continue;
 		}
 		found_filtered_aggregate = true;
-		REQUIRE(StringUtil::Contains(stage_counts, "filter="));
 		REQUIRE_FALSE(StringUtil::Contains(stage_counts, "filter.selection="));
+		REQUIRE_FALSE(StringUtil::Contains(stage_counts, "filter="));
 	}
 	REQUIRE(found_filtered_aggregate);
 }
@@ -548,6 +561,241 @@ TEST_CASE("JIT generic grouped primitive aggregate payload lanes use native stat
 	REQUIRE(found_fused_runtime);
 }
 
+TEST_CASE("JIT regular hash aggregate updates existing groups directly", "[api][jit]") {
+	DuckDB db;
+	Connection con(db);
+	auto &manager = ExecutionRegionManager::Get(*con.context);
+
+	ConfigureSljitForCoverage(con, false, true, true, 10000);
+	REQUIRE_NO_FAIL(con.Query("PRAGMA threads=1"));
+	REQUIRE_NO_FAIL(con.Query("SET perfect_ht_threshold=0"));
+	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_existing_grouped_update AS "
+	                          "SELECT CASE WHEN i % 4 = 0 THEN 'A' "
+	                          "            WHEN i % 4 = 1 THEN 'B' "
+	                          "            WHEN i % 4 = 2 THEN 'C' ELSE 'D' END AS k, "
+	                          "       (i % 100)::BIGINT AS v "
+	                          "FROM range(200000) tbl(i)"));
+
+	const string query = "SELECT k, sum(v), count(*) FROM jit_existing_grouped_update GROUP BY k ORDER BY k";
+	REQUIRE_NO_FAIL(con.Query("SET jit_policy='off'"));
+	auto reference = con.Query(query);
+	REQUIRE_NO_FAIL(*reference);
+	REQUIRE(reference->RowCount() == 4);
+
+	ConfigureSljitForCoverageSettings(con, false, true, true, 10000);
+	ClearJitTrace(manager, true);
+	auto result = con.Query(query);
+	REQUIRE_NO_FAIL(*result);
+	REQUIRE(result->RowCount() == reference->RowCount());
+	for (idx_t row_idx = 0; row_idx < result->RowCount(); row_idx++) {
+		for (idx_t col_idx = 0; col_idx < result->ColumnCount(); col_idx++) {
+			REQUIRE(result->GetValue(col_idx, row_idx).ToString() == reference->GetValue(col_idx, row_idx).ToString());
+		}
+	}
+
+	RequireJitEvent(
+	    manager,
+	    [](const ExecutionRegionEvent &event) {
+		    return IsCompiledSljitRegionEvent(event) && event.has_candidate &&
+		           event.candidate_traits.sink_kind == ExecutionRegionSinkKind::HASH_AGGREGATE_UPDATE;
+	    },
+	    [](const ExecutionRegionEvent &event) { RequireGeneratedMachineCodeRegion(event); });
+
+	RequireJitEvent(
+	    manager,
+	    [](const ExecutionRegionEvent &event) {
+		    if (EventPhase(event) != "runtime" || event.backend_name != "sljit") {
+			    return false;
+		    }
+		    auto stage_counts = EventGeneratedStageCountBreakdown(event);
+		    return StringUtil::Contains(stage_counts, "direct_existing_grouped_primitive_update=") &&
+		           StringUtil::Contains(stage_counts, "find_existing.fast_existing=");
+	    },
+	    [](const ExecutionRegionEvent &event) {
+		    REQUIRE(
+		        StringUtil::Contains(EventGeneratedStageCountBreakdown(event), "direct_existing.primitive_update="));
+	    });
+}
+
+TEST_CASE("JIT regular hash aggregate appends new groups directly", "[api][jit]") {
+	DuckDB db;
+	Connection con(db);
+	auto &manager = ExecutionRegionManager::Get(*con.context);
+
+	ConfigureSljitForCoverage(con, false, true, true, 10000);
+	REQUIRE_NO_FAIL(con.Query("PRAGMA threads=1"));
+	REQUIRE_NO_FAIL(con.Query("SET perfect_ht_threshold=0"));
+	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_new_grouped_update AS "
+	                          "SELECT i::BIGINT AS k, (i % 17)::BIGINT AS v "
+	                          "FROM range(64) tbl(i)"));
+
+	const string query = "SELECT k, sum(v), count(*) FROM jit_new_grouped_update GROUP BY k ORDER BY k";
+	REQUIRE_NO_FAIL(con.Query("SET jit_policy='off'"));
+	auto reference = con.Query(query);
+	REQUIRE_NO_FAIL(*reference);
+	REQUIRE(reference->RowCount() == 64);
+
+	ConfigureSljitForCoverageSettings(con, false, true, true, 10000);
+	ClearJitTrace(manager, true);
+	auto result = con.Query(query);
+	REQUIRE_NO_FAIL(*result);
+	REQUIRE(result->RowCount() == reference->RowCount());
+	for (idx_t row_idx = 0; row_idx < result->RowCount(); row_idx++) {
+		for (idx_t col_idx = 0; col_idx < result->ColumnCount(); col_idx++) {
+			REQUIRE(result->GetValue(col_idx, row_idx).ToString() == reference->GetValue(col_idx, row_idx).ToString());
+		}
+	}
+
+	RequireJitEvent(
+	    manager,
+	    [](const ExecutionRegionEvent &event) {
+		    if (EventPhase(event) != "runtime" || event.backend_name != "sljit") {
+			    return false;
+		    }
+		    auto stage_counts = EventGeneratedStageCountBreakdown(event);
+		    return StringUtil::Contains(stage_counts, "direct_new_grouped_primitive_update=") &&
+		           StringUtil::Contains(stage_counts, "find_or_create_fast.append_new_groups=");
+	    },
+	    [](const ExecutionRegionEvent &event) {
+		    REQUIRE(StringUtil::Contains(EventGeneratedStageCountBreakdown(event), "direct_new.primitive_update="));
+	    });
+}
+
+TEST_CASE("JIT regular hash aggregate fuses typed expression payloads with native state addresses", "[api][jit]") {
+	DuckDB db;
+	Connection con(db);
+	auto &manager = ExecutionRegionManager::Get(*con.context);
+
+	ConfigureSljit(con, "off");
+	REQUIRE_NO_FAIL(con.Query("PRAGMA threads=1"));
+	REQUIRE_NO_FAIL(con.Query("SET perfect_ht_threshold=0"));
+	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_regular_hash_typed_payload AS "
+	                          "SELECT i::BIGINT AS k, "
+	                          "       CAST(100 + (i % 1000) AS DECIMAL(15,2)) AS p, "
+	                          "       CAST(i % 10 AS DECIMAL(15,2)) AS d "
+	                          "FROM range(10000) tbl(i)"));
+
+	const string query = "SELECT count(*), sum(s)::HUGEINT, sum(s2)::HUGEINT, sum(s3)::HUGEINT, sum(s4)::HUGEINT "
+	                     "FROM (SELECT k, "
+	                     "             sum(p * (1.00::DECIMAL(15,2) - d)) AS s, "
+	                     "             sum((p + 3.00::DECIMAL(15,2)) * (d + 1.00::DECIMAL(15,2))) AS s2, "
+	                     "             sum((p - d) * (p + d)) AS s3, "
+	                     "             sum(((p * 2.00::DECIMAL(15,2)) + (d * 7.00::DECIMAL(15,2))) - "
+	                     "                 11.00::DECIMAL(15,2)) AS s4 "
+	                     "      FROM jit_regular_hash_typed_payload GROUP BY k)";
+	auto reference = con.Query(query);
+	REQUIRE_NO_FAIL(*reference);
+	REQUIRE(reference->GetValue(0, 0).ToString() == "10000");
+
+	ConfigureSljitForCoverageSettings(con, false, true, true, 10000);
+	ClearJitTrace(manager, true);
+	auto result = con.Query(query);
+	REQUIRE_NO_FAIL(*result);
+	for (idx_t col_idx = 0; col_idx < result->ColumnCount(); col_idx++) {
+		REQUIRE(result->GetValue(col_idx, 0).ToString() == reference->GetValue(col_idx, 0).ToString());
+	}
+
+	RequireJitEvent(
+	    manager,
+	    [](const ExecutionRegionEvent &event) {
+		    return IsCompiledSljitRegionEvent(event) && event.has_candidate &&
+		           event.candidate_traits.sink_kind == ExecutionRegionSinkKind::HASH_AGGREGATE_UPDATE &&
+		           StringUtil::Contains(event.ir, "primitive_payloads=native:typed-expression-tree");
+	    },
+	    [](const ExecutionRegionEvent &event) {
+		    RequireGeneratedMachineCodeRegion(event);
+		    REQUIRE(StringUtil::Contains(event.ir, "grouped_state_lookup=native-state-address"));
+		    REQUIRE(StringUtil::Contains(event.ir, "columns=3"));
+		    REQUIRE(StringUtil::Contains(event.ir, "aggregates=4"));
+		    REQUIRE(StringUtil::Contains(event.ir, "DECIMAL(18,4)"));
+		    REQUIRE_FALSE(StringUtil::Contains(event.ir, "primitive_payloads=native:reference"));
+	    });
+
+	RequireJitEvent(
+	    manager,
+	    [](const ExecutionRegionEvent &event) {
+		    if (EventPhase(event) != "runtime" || event.backend_name != "sljit") {
+			    return false;
+		    }
+		    auto stage_counts = EventGeneratedStageCountBreakdown(event);
+		    return StringUtil::Contains(stage_counts,
+		                                "aggregate_update.direct_append_new_grouped_fused_payload_update=") ||
+		           StringUtil::Contains(stage_counts, "aggregate_update.direct_new_grouped_fused_payload_update=");
+	    },
+	    [](const ExecutionRegionEvent &event) {
+		    auto stage_counts = EventGeneratedStageCountBreakdown(event);
+		    const bool has_fused_grouped_update =
+		        StringUtil::Contains(stage_counts, "aggregate_update.direct_append_new_grouped_fused_payload_update") ||
+		        StringUtil::Contains(stage_counts, "aggregate_update.direct_new_grouped_fused_payload_update");
+		    REQUIRE(has_fused_grouped_update);
+		    REQUIRE_FALSE(StringUtil::Contains(stage_counts, "aggregate_update.direct_new_grouped_state_addresses"));
+		    REQUIRE_FALSE(StringUtil::Contains(stage_counts, "aggregate_update.primitive_payload_update_fused="));
+		    REQUIRE_FALSE(StringUtil::Contains(stage_counts, "aggregate_update.resolve_grouped_state_addresses="));
+	    });
+}
+
+TEST_CASE("JIT regular hash aggregate fuses typed expression payloads for existing groups", "[api][jit]") {
+	DuckDB db;
+	Connection con(db);
+	auto &manager = ExecutionRegionManager::Get(*con.context);
+
+	ConfigureSljit(con, "off");
+	REQUIRE_NO_FAIL(con.Query("PRAGMA threads=1"));
+	REQUIRE_NO_FAIL(con.Query("SET perfect_ht_threshold=0"));
+	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_regular_hash_existing_typed_payload AS "
+	                          "SELECT (i % 100)::BIGINT AS k, "
+	                          "       CAST(100 + (i % 1000) AS DECIMAL(15,2)) AS p, "
+	                          "       CAST(i % 10 AS DECIMAL(15,2)) AS d "
+	                          "FROM range(10000) tbl(i)"));
+
+	const string query = "SELECT count(*), sum(s)::HUGEINT, sum(s2)::HUGEINT, sum(s3)::HUGEINT, sum(s4)::HUGEINT "
+	                     "FROM (SELECT k, "
+	                     "             sum(p * (1.00::DECIMAL(15,2) - d)) AS s, "
+	                     "             sum((p + 3.00::DECIMAL(15,2)) * (d + 1.00::DECIMAL(15,2))) AS s2, "
+	                     "             sum((p - d) * (p + d)) AS s3, "
+	                     "             sum(((p * 2.00::DECIMAL(15,2)) + (d * 7.00::DECIMAL(15,2))) - "
+	                     "                 11.00::DECIMAL(15,2)) AS s4 "
+	                     "      FROM jit_regular_hash_existing_typed_payload GROUP BY k)";
+	auto reference = con.Query(query);
+	REQUIRE_NO_FAIL(*reference);
+	REQUIRE(reference->GetValue(0, 0).ToString() == "100");
+
+	ConfigureSljitForCoverageSettings(con, false, true, true, 10000);
+	ClearJitTrace(manager, true);
+	auto result = con.Query(query);
+	REQUIRE_NO_FAIL(*result);
+	for (idx_t col_idx = 0; col_idx < result->ColumnCount(); col_idx++) {
+		REQUIRE(result->GetValue(col_idx, 0).ToString() == reference->GetValue(col_idx, 0).ToString());
+	}
+
+	RequireJitEvent(
+	    manager,
+	    [](const ExecutionRegionEvent &event) {
+		    return IsCompiledSljitRegionEvent(event) && event.has_candidate &&
+		           event.candidate_traits.sink_kind == ExecutionRegionSinkKind::HASH_AGGREGATE_UPDATE &&
+		           StringUtil::Contains(event.ir, "primitive_payloads=native:typed-expression-tree") &&
+		           StringUtil::Contains(event.ir, "grouped_state_lookup=native-state-address");
+	    },
+	    [](const ExecutionRegionEvent &event) {
+		    RequireGeneratedMachineCodeRegion(event);
+		    REQUIRE_FALSE(StringUtil::Contains(event.ir, "primitive_payloads=native:reference"));
+	    });
+
+	RequireJitEvent(
+	    manager,
+	    [](const ExecutionRegionEvent &event) {
+		    return EventPhase(event) == "runtime" && event.backend_name == "sljit" &&
+		           StringUtil::Contains(EventGeneratedStageCountBreakdown(event),
+		                                "aggregate_update.direct_existing_grouped_fused_payload_update=");
+	    },
+	    [](const ExecutionRegionEvent &event) {
+		    auto stage_counts = EventGeneratedStageCountBreakdown(event);
+		    REQUIRE(
+		        StringUtil::Contains(stage_counts, "aggregate_update.direct_existing_grouped_fused_payload_update"));
+		    REQUIRE_FALSE(StringUtil::Contains(stage_counts, "aggregate_update.resolve_grouped_state_addresses="));
+	    });
+}
+
 TEST_CASE("JIT grouped aggregate uses native state addresses under high cardinality", "[api][jit]") {
 	DuckDB db;
 	Connection con(db);
@@ -879,6 +1127,76 @@ TEST_CASE("JIT fuses TPC-H Q1 shaped perfect-hash aggregate payloads", "[api][ji
 		    REQUIRE_FALSE(StringUtil::Contains(EventGeneratedStageRuntimeBreakdown(event), "projection"));
 		    REQUIRE_FALSE(
 		        StringUtil::Contains(EventGeneratedStageCountBreakdown(event), "resolve_grouped_state_addresses="));
+	    });
+}
+
+TEST_CASE("JIT Q8 shaped perfect-hash aggregate payloads survive join selections", "[api][jit]") {
+	DuckDB db;
+	Connection con(db);
+	auto &manager = ExecutionRegionManager::Get(*con.context);
+
+	ConfigureSljitForCoverage(con, false, true, true, 10000);
+	REQUIRE_NO_FAIL(con.Query("PRAGMA threads=1"));
+	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_q8_join_perfect_hash_payload AS "
+	                          "SELECT (1995 + (i % 2))::INTEGER AS o_year, "
+	                          "       (i % 5)::INTEGER AS nation_id, "
+	                          "       CAST(100 + (i % 1000) AS DECIMAL(15,2)) AS volume "
+	                          "FROM range(10000) tbl(i)"));
+	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_q8_join_nation AS "
+	                          "SELECT i::INTEGER AS nation_id, "
+	                          "       CASE WHEN i = 0 THEN 'BRAZIL' ELSE 'ARGENTINA' END AS nation "
+	                          "FROM range(5) tbl(i)"));
+
+	const string query = "SELECT o_year, "
+	                     "       sum(CASE WHEN nation = 'BRAZIL' "
+	                     "                THEN volume ELSE 0.00::DECIMAL(15,2) END) AS brazil_sum, "
+	                     "       sum(volume) AS total_sum "
+	                     "FROM jit_q8_join_perfect_hash_payload "
+	                     "JOIN jit_q8_join_nation USING (nation_id) "
+	                     "GROUP BY o_year "
+	                     "ORDER BY o_year";
+	REQUIRE_NO_FAIL(con.Query("SET jit_policy='off'"));
+	auto reference = con.Query(query);
+	REQUIRE_NO_FAIL(*reference);
+	REQUIRE(reference->RowCount() == 2);
+
+	REQUIRE_NO_FAIL(con.Query("SET jit_policy='auto'"));
+	ClearJitTrace(manager, true);
+	auto result = con.Query(query);
+	REQUIRE_NO_FAIL(*result);
+	REQUIRE(result->RowCount() == reference->RowCount());
+	for (idx_t row_idx = 0; row_idx < result->RowCount(); row_idx++) {
+		for (idx_t col_idx = 0; col_idx < result->ColumnCount(); col_idx++) {
+			REQUIRE(result->GetValue(col_idx, row_idx).ToString() == reference->GetValue(col_idx, row_idx).ToString());
+		}
+	}
+
+	RequireJitEvent(
+	    manager,
+	    [](const ExecutionRegionEvent &event) {
+		    return IsCompiledSljitRegionEvent(event) && event.has_candidate &&
+		           event.candidate_traits.sink_kind == ExecutionRegionSinkKind::PERFECT_HASH_AGGREGATE_UPDATE &&
+		           StringUtil::Contains(event.ir, "grouped_state_lookup=generated-perfect-hash");
+	    },
+	    [](const ExecutionRegionEvent &event) {
+		    RequireGeneratedMachineCodeRegion(event);
+		    REQUIRE(StringUtil::Contains(event.ir, "hash_join_probe"));
+		    REQUIRE(StringUtil::Contains(event.ir, "primitive_payloads=native:typed-expression-tree"));
+		    REQUIRE(StringUtil::Contains(event.ir, "case<"));
+		    REQUIRE(StringUtil::Contains(event.ir, "sum_hugeint"));
+	    });
+
+	RequireJitEvent(
+	    manager,
+	    [](const ExecutionRegionEvent &event) {
+		    return EventPhase(event) == "runtime" && event.backend_name == "sljit" &&
+		           StringUtil::Contains(EventGeneratedStageCountBreakdown(event),
+		                                "aggregate_update.primitive_payload_update_fused=");
+	    },
+	    [](const ExecutionRegionEvent &event) {
+		    REQUIRE(ExecutionRegionEventProfileCodeSize(event) > 0);
+		    REQUIRE_FALSE(StringUtil::Contains(EventGeneratedStageCountBreakdown(event),
+		                                       "aggregate_update.resolve_grouped_state_addresses="));
 	    });
 }
 

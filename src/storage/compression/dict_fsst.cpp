@@ -187,6 +187,9 @@ static void DictFSSTFilter(ColumnSegment &segment, ColumnScanState &state, idx_t
 			// no filter result yet - apply filter to the dictionary
 			// initialize the filter result - setting everything to false
 			scan_state.filter_result = make_unsafe_uniq_array<bool>(scan_state.dict_count);
+			for (idx_t i = 0; i < scan_state.dict_count; i++) {
+				scan_state.filter_result[i] = false;
+			}
 
 			// apply the filter
 			auto &dict_data = scan_state.dictionary->data;

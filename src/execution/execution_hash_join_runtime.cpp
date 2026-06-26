@@ -73,6 +73,7 @@ string DescribeExecutionHashJoinTableLayout(const ExecutionHashJoinTableLayout &
 	result += ",salt_mask=" + std::to_string(layout.salt_mask);
 	result += ",entries=" + ExecutionHashJoinBool(layout.entries != nullptr);
 	result += ",aux_next_ptrs=" + ExecutionHashJoinBool(layout.aux_next_ptrs != nullptr);
+	result += ",bloom_filter=" + ExecutionHashJoinBool(layout.bloom_filter != nullptr);
 	result += ",blocker=" + layout.blocker;
 	result += ">";
 	return result;

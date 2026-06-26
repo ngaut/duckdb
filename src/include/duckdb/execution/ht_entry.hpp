@@ -50,6 +50,10 @@ public:
 		return value != 0;
 	}
 
+	inline hash_t GetValue() const {
+		return value;
+	}
+
 	//! Returns a pointer based on the stored value (asserts if the cell is occupied)
 	inline data_ptr_t GetPointer() const {
 		D_ASSERT(IsOccupied());

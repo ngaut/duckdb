@@ -253,7 +253,8 @@ ON ((n1.n_name = 'FRANCE'
 ----
 physical_plan	<REGEX>:.*Filters.*Filters.*
 
-# there should be 2 filter operators instead of just one, because we derived one
+# the derived filters should be pushed down: one explicit filter remains for the
+# residual join-dependent condition, and both scans carry table filters
 query II
 EXPLAIN SELECT
     sum(l_extendedprice * (1 - l_discount)) AS revenue
@@ -285,7 +286,7 @@ WHERE (p_partkey = l_partkey
         AND l_shipmode IN ('AIR', 'AIR REG')
         AND l_shipinstruct = 'DELIVER IN PERSON');
 ----
-physical_plan	<REGEX>:.*FILTER.*FILTER.*
+physical_plan	<REGEX>:.*FILTER.*Filters.*Filters.*
 
 # results should still be the same
 query IIII

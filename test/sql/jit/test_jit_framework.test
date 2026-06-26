@@ -1724,13 +1724,13 @@ WHERE event_id > base_event_id
   AND candidate_uses_scan_filters
   AND candidate_has_source
   AND candidate_source_filter_count > 0
-  AND candidate_filter_count=2
-  AND candidate_projection_count=2
+  AND candidate_filter_count=1
+  AND candidate_projection_count=1
   AND candidate_operator_count > 0
   AND candidate_has_sink
   AND candidate_source_filter_count=3
-  AND candidate_filter_count=2
-  AND candidate_projection_count=2
+  AND candidate_filter_count=1
+  AND candidate_projection_count=1
   AND ir LIKE '%hash_join_probe%'
   AND ir LIKE '%aggregate_update(kind=ungrouped%'
 ----

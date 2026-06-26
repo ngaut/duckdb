@@ -25,7 +25,22 @@ namespace duckdb {
 static idx_t DuckDBExpressionCost(const Expression &expr);
 static constexpr int64_t BASIS_POINT_SCALE = 10000;
 static constexpr int64_t MATERIALIZATION_SOURCE_APPEND_PENALTY = 80;
+static constexpr int64_t BLOCKED_HASH_AGGREGATE_LOOKUP_PENALTY = 64;
+static constexpr int64_t DISCOUNTED_JOIN_BLOCKED_HASH_AGGREGATE_LOOKUP_PENALTY = 64;
 static constexpr idx_t JOIN_UNGROUPED_AGGREGATE_MIN_EXPRESSION_COST = 512;
+static constexpr idx_t SCAN_FILTERED_JOIN_GROUPED_AGGREGATE_MIN_EXPRESSION_COST = 384;
+static constexpr idx_t JOIN_BUILD_CHAIN_MIN_EXPRESSION_COST = 64;
+static constexpr int64_t LONG_BLOCKED_JOIN_GROUPED_AGGREGATE_MIN_BATCHES = 512;
+static constexpr int64_t STATEFUL_STANDALONE_PROJECTION_MIN_BATCHES = 128;
+static constexpr int64_t JOIN_BUILD_CHAIN_MIN_BATCHES = 128;
+static constexpr int64_t LONG_NATIVE_JOIN_CHAIN_MIN_BATCHES = 512;
+static constexpr idx_t LONG_NATIVE_JOIN_CHAIN_MIN_EXPRESSION_COST = 64;
+static constexpr idx_t HIGH_EXPRESSION_BLOCKED_JOIN_GROUPED_AGGREGATE_MIN_COST = 256;
+static constexpr idx_t NARROW_TWO_JOIN_GROUPED_AGGREGATE_MIN_EXPRESSION_COST = 96;
+static constexpr idx_t WIDE_TWO_JOIN_GROUPED_AGGREGATE_MIN_EXPRESSION_COST = 1024;
+static constexpr int64_t SCAN_FILTERED_NARROW_TWO_JOIN_GROUPED_AGGREGATE_MIN_BATCHES = 512;
+static constexpr idx_t JOIN_BUILD_CHAIN_MAX_PAYLOAD_COLUMNS = 2;
+static constexpr idx_t JOIN_BUILD_CHAIN_MIN_SOURCE_PROJECTED_COLUMNS = 4;
 
 static int64_t SaturatingCostCast(idx_t value) {
 	auto max_value = static_cast<idx_t>(std::numeric_limits<int64_t>::max());
@@ -321,6 +336,17 @@ static bool PhysicalRunnerIsNativeContractProjectionGlue(const PhysicalRunnerCos
 	       input.native_sort_stage_count == 0 && input.materialization_elision_count == 0;
 }
 
+static bool PhysicalRunnerIsSmallStatefulStandaloneProjection(const PhysicalRunnerCostInput &input) {
+	return input.full_pipeline &&
+	       input.native_protocol_class == PhysicalRunnerNativeProtocolClass::STATEFUL_SOURCE_SINK_PROTOCOL &&
+	       input.sort_sink && input.generated_stage_count > 0 &&
+	       input.generated_work_class != PhysicalRunnerGeneratedWorkClass::NONE &&
+	       input.generated_work_class != PhysicalRunnerGeneratedWorkClass::PROJECTION_GLUE &&
+	       input.native_join_stage_count == 0 && input.native_aggregate_stage_count == 0 &&
+	       input.native_sort_stage_count == 0 && input.materialization_elision_count == 0 &&
+	       PhysicalRunnerBatches(PhysicalRunnerRows(input)) < STATEFUL_STANDALONE_PROJECTION_MIN_BATCHES;
+}
+
 static bool PhysicalRunnerGeneratedWorkPaysStandaloneUngroupedAggregateProtocol(const PhysicalRunnerCostInput &input) {
 	return input.generated_stage_count > 0 && input.generated_work_class != PhysicalRunnerGeneratedWorkClass::NONE &&
 	       input.generated_work_class != PhysicalRunnerGeneratedWorkClass::PROJECTION_GLUE &&
@@ -336,8 +362,22 @@ static bool PhysicalRunnerGeneratedWorkPaysStandaloneGroupedAggregateProtocol(co
 	       input.native_sort_stage_count == 0;
 }
 
+static bool PhysicalRunnerHasWideStringGroupedAggregate(const PhysicalRunnerCostInput &input) {
+	if (input.native_grouped_aggregate_stage_count == 0) {
+		return false;
+	}
+	if (input.grouped_aggregate_varchar_group_count >= 2) {
+		return true;
+	}
+	if (input.grouped_aggregate_group_count >= 5 && input.reference_varchar_projection_count > 0) {
+		return true;
+	}
+	return input.native_join_stage_count >= 2 && input.grouped_aggregate_group_count >= 3 &&
+	       input.reference_varchar_projection_count >= 2;
+}
+
 static bool PhysicalRunnerGeneratedWorkPaysJoinGroupedAggregateProtocol(const PhysicalRunnerCostInput &input) {
-	if (!input.full_pipeline || input.uses_scan_filters || input.generated_stage_count < 3 ||
+	if (!input.full_pipeline || input.uses_scan_filters || input.generated_stage_count < 2 ||
 	    input.generated_work_class == PhysicalRunnerGeneratedWorkClass::NONE ||
 	    input.generated_work_class == PhysicalRunnerGeneratedWorkClass::PROJECTION_GLUE ||
 	    input.native_grouped_aggregate_stage_count == 0 ||
@@ -345,15 +385,134 @@ static bool PhysicalRunnerGeneratedWorkPaysJoinGroupedAggregateProtocol(const Ph
 	    input.native_sort_stage_count > 0) {
 		return false;
 	}
+	if (PhysicalRunnerHasWideStringGroupedAggregate(input)) {
+		return false;
+	}
 	if (input.native_join_stage_count == 1) {
+		if (input.generated_stage_count < 3 && input.blocked_hash_aggregate_lookup_count > 0) {
+			return false;
+		}
 		return true;
 	}
+	if (input.generated_stage_count < 3) {
+		return false;
+	}
 	return input.native_join_stage_count == 2 && input.source_filter_count == 0;
+}
+
+static bool PhysicalRunnerGeneratedWorkPaysLongBlockedJoinGroupedAggregateProtocol(
+    const PhysicalRunnerCostInput &input) {
+	return input.full_pipeline && !input.uses_scan_filters && input.generated_stage_count == 2 &&
+	       input.materialization_elision_count > 0 &&
+	       input.generated_work_class != PhysicalRunnerGeneratedWorkClass::NONE &&
+	       input.generated_work_class != PhysicalRunnerGeneratedWorkClass::PROJECTION_GLUE &&
+	       input.native_join_stage_count == 1 && input.native_grouped_aggregate_stage_count > 0 &&
+	       input.native_aggregate_stage_count == input.native_grouped_aggregate_stage_count &&
+	       input.blocked_hash_aggregate_lookup_count > 0 && input.native_sort_stage_count == 0 &&
+	       !PhysicalRunnerHasWideStringGroupedAggregate(input);
+}
+
+static bool PhysicalRunnerGeneratedWorkPaysHighExpressionBlockedJoinGroupedAggregateProtocol(
+    const PhysicalRunnerCostInput &input) {
+	return input.full_pipeline && !input.uses_scan_filters && input.generated_stage_count >= 2 &&
+	       input.materialization_elision_count == 0 &&
+	       input.expression_cost >= HIGH_EXPRESSION_BLOCKED_JOIN_GROUPED_AGGREGATE_MIN_COST &&
+	       input.generated_work_class != PhysicalRunnerGeneratedWorkClass::NONE &&
+	       input.generated_work_class != PhysicalRunnerGeneratedWorkClass::PROJECTION_GLUE &&
+	       input.native_join_stage_count == 1 && input.native_grouped_aggregate_stage_count > 0 &&
+	       input.native_aggregate_stage_count == input.native_grouped_aggregate_stage_count &&
+	       input.blocked_hash_aggregate_lookup_count > 0 && input.native_sort_stage_count == 0 &&
+	       !PhysicalRunnerHasWideStringGroupedAggregate(input);
+}
+
+static bool PhysicalRunnerGeneratedWorkPaysNarrowTwoJoinGroupedAggregateProtocol(
+    const PhysicalRunnerCostInput &input) {
+	return input.full_pipeline && !input.uses_scan_filters && input.generated_stage_count == 2 &&
+	       input.materialization_elision_count == 0 &&
+	       input.expression_cost >= NARROW_TWO_JOIN_GROUPED_AGGREGATE_MIN_EXPRESSION_COST &&
+	       input.generated_work_class != PhysicalRunnerGeneratedWorkClass::NONE &&
+	       input.generated_work_class != PhysicalRunnerGeneratedWorkClass::PROJECTION_GLUE &&
+	       input.native_join_stage_count == 2 && input.native_grouped_aggregate_stage_count == 1 &&
+	       input.native_aggregate_stage_count == input.native_grouped_aggregate_stage_count &&
+	       input.grouped_aggregate_group_count <= 2 && input.grouped_aggregate_varchar_group_count <= 1 &&
+	       input.reference_varchar_projection_count == 0 && input.blocked_hash_aggregate_lookup_count > 0 &&
+	       input.native_sort_stage_count == 0 && !PhysicalRunnerHasWideStringGroupedAggregate(input);
+}
+
+static bool PhysicalRunnerGeneratedWorkPaysScanFilteredNarrowTwoJoinGroupedAggregateProtocol(
+    const PhysicalRunnerCostInput &input) {
+	return input.full_pipeline && input.uses_scan_filters && input.source_filter_count == 0 &&
+	       input.generated_stage_count == 2 && input.materialization_elision_count == 0 &&
+	       input.expression_cost >= NARROW_TWO_JOIN_GROUPED_AGGREGATE_MIN_EXPRESSION_COST &&
+	       input.generated_work_class != PhysicalRunnerGeneratedWorkClass::NONE &&
+	       input.generated_work_class != PhysicalRunnerGeneratedWorkClass::PROJECTION_GLUE &&
+	       input.native_join_stage_count == 2 && input.native_grouped_aggregate_stage_count == 1 &&
+	       input.native_aggregate_stage_count == input.native_grouped_aggregate_stage_count &&
+	       input.grouped_aggregate_group_count <= 2 && input.grouped_aggregate_varchar_group_count <= 1 &&
+	       input.reference_varchar_projection_count == 0 && input.blocked_hash_aggregate_lookup_count > 0 &&
+	       input.native_sort_stage_count == 0 && !PhysicalRunnerHasWideStringGroupedAggregate(input) &&
+	       PhysicalRunnerBatches(PhysicalRunnerRows(input)) >=
+	           SCAN_FILTERED_NARROW_TWO_JOIN_GROUPED_AGGREGATE_MIN_BATCHES;
+}
+
+static bool PhysicalRunnerGeneratedWorkPaysWideTwoJoinGroupedAggregateProtocol(
+    const PhysicalRunnerCostInput &input) {
+	return input.full_pipeline && !input.uses_scan_filters && input.generated_stage_count >= 4 &&
+	       input.materialization_elision_count == 0 &&
+	       input.expression_cost >= WIDE_TWO_JOIN_GROUPED_AGGREGATE_MIN_EXPRESSION_COST &&
+	       input.generated_work_class != PhysicalRunnerGeneratedWorkClass::NONE &&
+	       input.generated_work_class != PhysicalRunnerGeneratedWorkClass::PROJECTION_GLUE &&
+	       input.native_join_stage_count == 2 && input.native_grouped_aggregate_stage_count == 1 &&
+	       input.native_aggregate_stage_count == input.native_grouped_aggregate_stage_count &&
+	       input.grouped_aggregate_group_count >= 3 && input.reference_varchar_projection_count >= 2 &&
+	       input.blocked_hash_aggregate_lookup_count > 0 && input.native_sort_stage_count == 0 &&
+	       PhysicalRunnerHasWideStringGroupedAggregate(input);
+}
+
+static bool PhysicalRunnerGeneratedWorkPaysScanFilteredWideTwoJoinGroupedAggregateProtocol(
+    const PhysicalRunnerCostInput &input) {
+	return input.full_pipeline && input.uses_scan_filters && input.source_filter_count == 0 &&
+	       input.generated_stage_count >= 4 && input.materialization_elision_count == 0 &&
+	       input.expression_cost >= WIDE_TWO_JOIN_GROUPED_AGGREGATE_MIN_EXPRESSION_COST &&
+	       input.generated_work_class != PhysicalRunnerGeneratedWorkClass::NONE &&
+	       input.generated_work_class != PhysicalRunnerGeneratedWorkClass::PROJECTION_GLUE &&
+	       input.native_join_stage_count == 2 && input.native_grouped_aggregate_stage_count == 1 &&
+	       input.native_aggregate_stage_count == input.native_grouped_aggregate_stage_count &&
+	       input.grouped_aggregate_group_count >= 3 && input.reference_varchar_projection_count >= 2 &&
+	       input.blocked_hash_aggregate_lookup_count > 0 && input.native_sort_stage_count == 0 &&
+	       PhysicalRunnerHasWideStringGroupedAggregate(input);
+}
+
+static bool
+PhysicalRunnerGeneratedWorkPaysScanFilteredJoinGroupedAggregateProtocol(const PhysicalRunnerCostInput &input) {
+	return input.full_pipeline && input.uses_scan_filters && input.source_filter_count == 0 &&
+	       input.generated_stage_count >= 4 && input.materialization_elision_count == 0 &&
+	       input.expression_cost >= SCAN_FILTERED_JOIN_GROUPED_AGGREGATE_MIN_EXPRESSION_COST &&
+	       input.generated_work_class != PhysicalRunnerGeneratedWorkClass::NONE &&
+	       input.generated_work_class != PhysicalRunnerGeneratedWorkClass::PROJECTION_GLUE &&
+	       input.native_join_stage_count == 1 && input.native_grouped_aggregate_stage_count == 1 &&
+	       input.native_aggregate_stage_count == input.native_grouped_aggregate_stage_count &&
+	       input.native_sort_stage_count == 0 && !PhysicalRunnerHasWideStringGroupedAggregate(input);
+}
+
+static bool PhysicalRunnerGeneratedWorkPaysJoinBuildChainProtocol(const PhysicalRunnerCostInput &input) {
+	return input.full_pipeline && input.generated_stage_count == 1 &&
+	       input.materialization_elision_count == 0 &&
+	       input.expression_cost >= JOIN_BUILD_CHAIN_MIN_EXPRESSION_COST && input.source_filter_count > 0 &&
+	       input.perfect_hash_join_probe_count > 0 &&
+	       input.source_projected_column_count >= JOIN_BUILD_CHAIN_MIN_SOURCE_PROJECTED_COLUMNS &&
+	       input.hash_join_build_payload_column_count > 0 &&
+	       input.hash_join_build_payload_column_count <= JOIN_BUILD_CHAIN_MAX_PAYLOAD_COLUMNS &&
+	       input.generated_work_class != PhysicalRunnerGeneratedWorkClass::NONE &&
+	       input.generated_work_class != PhysicalRunnerGeneratedWorkClass::PROJECTION_GLUE &&
+	       input.native_join_stage_count == 2 && input.native_aggregate_stage_count == 0 &&
+	       input.native_sort_stage_count == 0;
 }
 
 static bool
 PhysicalRunnerGeneratedWorkPaysScanFilteredJoinUngroupedAggregateProtocol(const PhysicalRunnerCostInput &input) {
 	return input.full_pipeline && input.uses_scan_filters && input.generated_stage_count > 0 &&
+	       input.source_filter_count > 0 &&
 	       input.generated_work_class != PhysicalRunnerGeneratedWorkClass::NONE &&
 	       input.generated_work_class != PhysicalRunnerGeneratedWorkClass::PROJECTION_GLUE &&
 	       input.native_join_stage_count > 0 && input.native_join_stage_count <= 2 &&
@@ -368,6 +527,63 @@ static bool PhysicalRunnerGeneratedWorkPaysJoinUngroupedAggregateProtocol(const 
 	       input.generated_work_class != PhysicalRunnerGeneratedWorkClass::PROJECTION_GLUE &&
 	       input.native_join_stage_count == 1 && input.native_aggregate_stage_count == 1 &&
 	       input.native_grouped_aggregate_stage_count == 0 && input.native_sort_stage_count == 0;
+}
+
+static bool
+PhysicalRunnerGeneratedWorkPaysGeneratedSourceFilterJoinUngroupedAggregateProtocol(const PhysicalRunnerCostInput &input) {
+	return input.full_pipeline && !input.uses_scan_filters && input.source_filter_count > 0 &&
+	       input.generated_stage_count >= 2 && input.materialization_elision_count == 0 &&
+	       input.expression_cost >= JOIN_UNGROUPED_AGGREGATE_MIN_EXPRESSION_COST &&
+	       input.generated_work_class != PhysicalRunnerGeneratedWorkClass::NONE &&
+	       input.generated_work_class != PhysicalRunnerGeneratedWorkClass::PROJECTION_GLUE &&
+	       input.native_join_stage_count == 1 && input.native_aggregate_stage_count == 1 &&
+	       input.native_grouped_aggregate_stage_count == 0 && input.native_sort_stage_count == 0;
+}
+
+static bool PhysicalRunnerLongNativeJoinChainProtocol(const PhysicalRunnerCostInput &input) {
+	return input.full_pipeline && !input.uses_scan_filters && input.generated_stage_count == 0 &&
+	       input.materialization_elision_count == 0 && input.source_filter_count == 0 &&
+	       input.expression_cost >= LONG_NATIVE_JOIN_CHAIN_MIN_EXPRESSION_COST &&
+	       input.native_join_stage_count == 2 && input.perfect_hash_join_probe_count > 0 &&
+	       input.native_aggregate_stage_count == 0 && input.native_grouped_aggregate_stage_count == 0 &&
+	       input.native_sort_stage_count == 0;
+}
+
+static bool PhysicalRunnerUsesDiscountedJoinGroupedAggregateStartup(const PhysicalRunnerCostInput &input) {
+	return input.generated_stage_count >= 3 && input.materialization_elision_count > 0 &&
+	       input.native_join_stage_count == 1 && PhysicalRunnerGeneratedWorkPaysJoinGroupedAggregateProtocol(input);
+}
+
+static bool PhysicalRunnerUsesScanFilteredJoinUngroupedAggregateStartupWaiver(const PhysicalRunnerCostInput &input) {
+	return input.full_pipeline && input.uses_scan_filters && input.source_filter_count >= 3 &&
+	       PhysicalRunnerRows(input) <= SaturatingCostCast(STANDARD_VECTOR_SIZE * 32ULL) &&
+	       PhysicalRunnerGeneratedWorkPaysScanFilteredJoinUngroupedAggregateProtocol(input) &&
+	       input.native_join_stage_count <= 2 && input.native_aggregate_stage_count == 1 &&
+	       input.native_grouped_aggregate_stage_count == 0 && input.native_sort_stage_count == 0;
+}
+
+static bool PhysicalRunnerUsesLongBlockedJoinGroupedAggregateStartupWaiver(const PhysicalRunnerCostInput &input) {
+	if (!PhysicalRunnerGeneratedWorkPaysLongBlockedJoinGroupedAggregateProtocol(input)) {
+		return false;
+	}
+	auto rows = PhysicalRunnerRows(input);
+	return PhysicalRunnerBatches(rows) >= LONG_BLOCKED_JOIN_GROUPED_AGGREGATE_MIN_BATCHES;
+}
+
+static bool PhysicalRunnerUsesJoinBuildChainStartupWaiver(const PhysicalRunnerCostInput &input) {
+	if (!PhysicalRunnerGeneratedWorkPaysJoinBuildChainProtocol(input)) {
+		return false;
+	}
+	auto rows = PhysicalRunnerRows(input);
+	return PhysicalRunnerBatches(rows) >= JOIN_BUILD_CHAIN_MIN_BATCHES;
+}
+
+static bool PhysicalRunnerUsesLongNativeJoinChainStartupWaiver(const PhysicalRunnerCostInput &input) {
+	if (!PhysicalRunnerLongNativeJoinChainProtocol(input)) {
+		return false;
+	}
+	auto rows = PhysicalRunnerRows(input);
+	return PhysicalRunnerBatches(rows) >= LONG_NATIVE_JOIN_CHAIN_MIN_BATCHES;
 }
 
 static void PhysicalRunnerComputeWorkComponents(const PhysicalRunnerCostInput &input,
@@ -414,6 +630,18 @@ static void PhysicalRunnerComputeWorkComponents(const PhysicalRunnerCostInput &i
 			profile.full_pipeline_work = full_pipeline_benefit;
 		}
 	}
+	if (input.blocked_hash_aggregate_lookup_count > 0) {
+		profile.stateful_protocol_penalty =
+		    AddCost(profile.stateful_protocol_penalty,
+		            MultiplyCost(SaturatingCostCast(input.blocked_hash_aggregate_lookup_count),
+		                         BLOCKED_HASH_AGGREGATE_LOOKUP_PENALTY));
+		if (PhysicalRunnerUsesDiscountedJoinGroupedAggregateStartup(input)) {
+			profile.stateful_protocol_penalty =
+			    AddCost(profile.stateful_protocol_penalty,
+			            MultiplyCost(SaturatingCostCast(input.blocked_hash_aggregate_lookup_count),
+			                         DISCOUNTED_JOIN_BLOCKED_HASH_AGGREGATE_LOOKUP_PENALTY));
+		}
+	}
 	auto work = profile.generated_expression_work;
 	work = AddCost(work, profile.generated_stage_work);
 	work = AddCost(work, profile.native_operator_work);
@@ -424,8 +652,25 @@ static void PhysicalRunnerComputeWorkComponents(const PhysicalRunnerCostInput &i
 	profile.saved_work_per_batch = work;
 }
 
-static int64_t PhysicalRunnerStartupCost(const PhysicalRunnerCostParameters &parameters) {
-	return SaturatingCostCast(parameters.startup_base_cost);
+static int64_t PhysicalRunnerStartupCost(const PhysicalRunnerCostInput &input,
+                                         const PhysicalRunnerCostParameters &parameters) {
+	auto startup_cost = SaturatingCostCast(parameters.startup_base_cost);
+	if (PhysicalRunnerUsesDiscountedJoinGroupedAggregateStartup(input)) {
+		startup_cost /= 2;
+	}
+	if (PhysicalRunnerUsesScanFilteredJoinUngroupedAggregateStartupWaiver(input)) {
+		startup_cost = 0;
+	}
+	if (PhysicalRunnerUsesLongBlockedJoinGroupedAggregateStartupWaiver(input)) {
+		startup_cost = 0;
+	}
+	if (PhysicalRunnerUsesJoinBuildChainStartupWaiver(input)) {
+		startup_cost = 0;
+	}
+	if (PhysicalRunnerUsesLongNativeJoinChainStartupWaiver(input)) {
+		startup_cost = 0;
+	}
+	return startup_cost;
 }
 
 static PhysicalRunnerCostParameters PhysicalRunnerGpuCostParameters(const PhysicalRunnerCostParameters &parameters) {
@@ -471,6 +716,9 @@ static bool PhysicalRunnerHasAcceleratedWork(const PhysicalRunnerCostInput &inpu
 	if (PhysicalRunnerIsNativeContractProjectionGlue(input)) {
 		return false;
 	}
+	if (PhysicalRunnerIsSmallStatefulStandaloneProjection(input)) {
+		return false;
+	}
 	const auto native_operator_stage_count =
 	    input.native_join_stage_count + input.native_aggregate_stage_count + input.native_sort_stage_count;
 	const bool generated_work_pays_standalone_aggregate =
@@ -478,20 +726,48 @@ static bool PhysicalRunnerHasAcceleratedWork(const PhysicalRunnerCostInput &inpu
 	    PhysicalRunnerGeneratedWorkPaysStandaloneGroupedAggregateProtocol(input);
 	const bool generated_work_pays_join_grouped_aggregate =
 	    PhysicalRunnerGeneratedWorkPaysJoinGroupedAggregateProtocol(input);
+	const bool generated_work_pays_long_blocked_join_grouped_aggregate =
+	    PhysicalRunnerGeneratedWorkPaysLongBlockedJoinGroupedAggregateProtocol(input);
+	const bool generated_work_pays_high_expression_blocked_join_grouped_aggregate =
+	    PhysicalRunnerGeneratedWorkPaysHighExpressionBlockedJoinGroupedAggregateProtocol(input);
+	const bool generated_work_pays_narrow_two_join_grouped_aggregate =
+	    PhysicalRunnerGeneratedWorkPaysNarrowTwoJoinGroupedAggregateProtocol(input);
+	const bool generated_work_pays_scan_filtered_narrow_two_join_grouped_aggregate =
+	    PhysicalRunnerGeneratedWorkPaysScanFilteredNarrowTwoJoinGroupedAggregateProtocol(input);
+	const bool generated_work_pays_wide_two_join_grouped_aggregate =
+	    PhysicalRunnerGeneratedWorkPaysWideTwoJoinGroupedAggregateProtocol(input);
+	const bool generated_work_pays_scan_filtered_wide_two_join_grouped_aggregate =
+	    PhysicalRunnerGeneratedWorkPaysScanFilteredWideTwoJoinGroupedAggregateProtocol(input);
+	const bool generated_work_pays_scan_filtered_join_grouped_aggregate =
+	    PhysicalRunnerGeneratedWorkPaysScanFilteredJoinGroupedAggregateProtocol(input);
+	const bool generated_work_pays_join_build_chain =
+	    PhysicalRunnerGeneratedWorkPaysJoinBuildChainProtocol(input);
 	const bool generated_work_pays_scan_filtered_join_aggregate =
 	    PhysicalRunnerGeneratedWorkPaysScanFilteredJoinUngroupedAggregateProtocol(input);
 	const bool generated_work_pays_join_ungrouped_aggregate =
 	    PhysicalRunnerGeneratedWorkPaysJoinUngroupedAggregateProtocol(input);
+	const bool generated_work_pays_generated_source_filter_join_aggregate =
+	    PhysicalRunnerGeneratedWorkPaysGeneratedSourceFilterJoinUngroupedAggregateProtocol(input);
+	const bool native_work_pays_long_join_chain = PhysicalRunnerUsesLongNativeJoinChainStartupWaiver(input);
 	const bool native_operator_work_is_costed =
 	    native_operator_stage_count == 0 || parameters.native_operator_stage_benefit > 0 ||
 	    (input.full_pipeline && parameters.full_pipeline_benefit > 0) || generated_work_pays_standalone_aggregate ||
-	    generated_work_pays_join_grouped_aggregate || generated_work_pays_scan_filtered_join_aggregate ||
-	    generated_work_pays_join_ungrouped_aggregate;
+	    generated_work_pays_join_grouped_aggregate ||
+	    generated_work_pays_long_blocked_join_grouped_aggregate ||
+	    generated_work_pays_high_expression_blocked_join_grouped_aggregate ||
+	    generated_work_pays_narrow_two_join_grouped_aggregate ||
+	    generated_work_pays_scan_filtered_narrow_two_join_grouped_aggregate ||
+	    generated_work_pays_wide_two_join_grouped_aggregate ||
+	    generated_work_pays_scan_filtered_wide_two_join_grouped_aggregate ||
+	    generated_work_pays_scan_filtered_join_grouped_aggregate ||
+	    generated_work_pays_join_build_chain || generated_work_pays_scan_filtered_join_aggregate ||
+	    generated_work_pays_join_ungrouped_aggregate ||
+	    generated_work_pays_generated_source_filter_join_aggregate || native_work_pays_long_join_chain;
 	const bool has_costed_acceleration =
 	    (input.generated_stage_count > 0 && parameters.generated_stage_benefit > 0) ||
 	    (native_operator_stage_count > 0 && parameters.native_operator_stage_benefit > 0) ||
 	    (input.materialization_elision_count > 0 && parameters.materialization_elision_benefit > 0) ||
-	    (input.full_pipeline && parameters.full_pipeline_benefit > 0);
+	    (input.full_pipeline && parameters.full_pipeline_benefit > 0) || native_work_pays_long_join_chain;
 	return input.has_accelerated_work && native_operator_work_is_costed && has_costed_acceleration &&
 	       profile.saved_work_per_batch > 0;
 }
@@ -515,7 +791,7 @@ PhysicalRunnerCostProfile DuckDBCostModel::SelectPhysicalRunner(const PhysicalRu
 	PhysicalRunnerComputeWorkComponents(input, parameters, compiled_profile);
 	compiled_profile.accelerated_runner_benefit =
 	    MultiplyCost(compiled_profile.batches, compiled_profile.saved_work_per_batch);
-	compiled_profile.startup_cost = PhysicalRunnerStartupCost(parameters);
+	compiled_profile.startup_cost = PhysicalRunnerStartupCost(input, parameters);
 	compiled_profile.required_benefit = PhysicalRunnerRequiredBenefit(compiled_profile, parameters);
 	compiled_profile.net_benefit =
 	    SubtractCost(compiled_profile.accelerated_runner_benefit, compiled_profile.startup_cost);
@@ -527,7 +803,7 @@ PhysicalRunnerCostProfile DuckDBCostModel::SelectPhysicalRunner(const PhysicalRu
 	gpu_profile.accelerated_runner_benefit = MultiplyCost(gpu_profile.batches, gpu_profile.saved_work_per_batch);
 	gpu_profile.gpu_transfer_cost =
 	    MultiplyCost(gpu_profile.batches, SaturatingCostCast(parameters.gpu_transfer_cost_per_batch));
-	gpu_profile.startup_cost = PhysicalRunnerStartupCost(gpu_parameters);
+	gpu_profile.startup_cost = PhysicalRunnerStartupCost(input, gpu_parameters);
 	gpu_profile.required_benefit =
 	    AddCost(PhysicalRunnerRequiredBenefit(gpu_profile, gpu_parameters), gpu_profile.gpu_transfer_cost);
 	gpu_profile.net_benefit = SubtractCost(

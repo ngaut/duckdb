@@ -175,7 +175,7 @@ static bool ExecutionRegionExpressionCanUseGeneratedSourceStage(const ExecutionE
 	if (!expression.root) {
 		return false;
 	}
-	return !expression.traits.has_arithmetic_binary;
+	return !expression.traits.has_arithmetic_binary && expression.traits.high_cost_string_predicate_count == 0;
 }
 
 static bool ExecutionRegionTypeCanUseGeneratedSourceStage(const LogicalType &type) {
@@ -1748,6 +1748,8 @@ static string DescribeExecutionRegionCandidateTraits(const ExecutionRegionCandid
 	result += ",projections=" + std::to_string(traits.projection_count);
 	result += ",operators=" + std::to_string(traits.operator_count);
 	result += ",hash_join_operators=" + std::to_string(traits.hash_join_operator_count);
+	result += ",perfect_hash_join_probes=" + std::to_string(traits.perfect_hash_join_probe_count);
+	result += ",hash_join_build_payload_columns=" + std::to_string(traits.hash_join_build_payload_column_count);
 	result += ",right_hash_join_operators=" + std::to_string(traits.right_hash_join_operator_count);
 	result += ",inner_hash_join_operators=" + std::to_string(traits.inner_hash_join_operator_count);
 	result += ",aggregates=" + std::to_string(traits.aggregate_count);
@@ -1864,7 +1866,13 @@ static bool ExecutionRegionCandidateUsesScanFilters(const ExecutionRegionCandida
 	}
 	auto source_execution = GetExecutionRegionCandidateSourceExecution(candidate, node);
 	if (source_execution != ExecutionRegionSourceExecutionKind::SOURCE_CONTRACT || !node.source ||
-	    node.source->filters.empty() || !node.source->table_scan_contract.present) {
+	    !node.source->table_scan_contract.present) {
+		return false;
+	}
+	if (node.source->table_scan_contract.dynamic_filters) {
+		return node.source->table_scan_contract.filter_pushdown;
+	}
+	if (node.source->filters.empty()) {
 		return false;
 	}
 	if (ExecutionRegionSourceFiltersCanUseGeneratedOutput(node)) {
@@ -2249,9 +2257,21 @@ static ExecutionRegionCandidateTraits BuildExecutionRegionCandidateTraits(const 
 			traits.sink_present = true;
 			traits.sink_kind = node.sink ? node.sink->kind : ExecutionRegionSinkKind::NONE;
 			if (node.sink) {
+				if (node.sink->hash_join_contract.present) {
+					traits.hash_join_build_payload_column_count += node.sink->hash_join_contract.payload_column_count;
+				}
 				AccumulateExecutionRegionAggregateFunctionKinds(
 				    node.sink->aggregate_contract, traits.aggregate_count, traits.aggregate_count_function_count,
 				    traits.aggregate_sum_function_count, traits.aggregate_other_function_count);
+				if (node.sink->aggregate_contract.kind == ExecutionRegionAggregateOperatorKind::HASH &&
+				    node.sink->aggregate_contract.group_count > 0) {
+					traits.grouped_aggregate_group_count += node.sink->aggregate_contract.group_count;
+					for (auto &group_type : node.sink->aggregate_contract.group_types) {
+						if (group_type.id() == LogicalTypeId::VARCHAR) {
+							traits.grouped_aggregate_varchar_group_count++;
+						}
+					}
+				}
 			}
 			break;
 		case ExecutionRegionNodeKind::FILTER:
@@ -2305,6 +2325,9 @@ static ExecutionRegionCandidateTraits BuildExecutionRegionCandidateTraits(const 
 				AccumulateExecutionRegionHashJoinKind(
 				    node.operator_info->hash_join_contract.join_type, traits.hash_join_operator_count,
 				    traits.right_hash_join_operator_count, traits.inner_hash_join_operator_count);
+				if (node.operator_info->hash_join_contract.perfect_hash_probe_shape_ready) {
+					traits.perfect_hash_join_probe_count++;
+				}
 			}
 			break;
 		default:

@@ -13,6 +13,7 @@
 
 namespace duckdb {
 
+class BloomFilter;
 class Vector;
 
 enum class SljitNativeIntegerBinaryOp : uint8_t { ADD, SUBTRACT, MULTIPLY };
@@ -211,6 +212,8 @@ struct SljitNativeHashJoinProbeInput {
 	const_data_ptr_t *source_data = nullptr;
 	const sel_t **source_sel = nullptr;
 	const validity_t **source_validity = nullptr;
+	bool source_key0_int64_to_int32 = false;
+	bool source_key0_int64_to_int32_unchecked = false;
 	idx_t count = 0;
 	const_data_ptr_t entries = nullptr;
 	uint64_t bitmask = 0;
@@ -222,6 +225,9 @@ struct SljitNativeHashJoinProbeInput {
 	idx_t key_offset = 0;
 	idx_t pointer_offset = 0;
 	const data_ptr_t *aux_next_ptrs = nullptr;
+	const BloomFilter *bloom_filter = nullptr;
+	const uint64_t *bloom_filter_bits = nullptr;
+	uint64_t bloom_filter_bitmask = 0;
 	sel_t *match_sel = nullptr;
 	sel_t *build_sel = nullptr;
 	data_ptr_t *row_pointers = nullptr;

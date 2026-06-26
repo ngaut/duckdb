@@ -446,12 +446,16 @@ struct ExecutionRegionCandidateTraits {
 	idx_t projection_count = 0;
 	idx_t operator_count = 0;
 	idx_t hash_join_operator_count = 0;
+	idx_t perfect_hash_join_probe_count = 0;
+	idx_t hash_join_build_payload_column_count = 0;
 	idx_t right_hash_join_operator_count = 0;
 	idx_t inner_hash_join_operator_count = 0;
 	idx_t aggregate_count = 0;
 	idx_t aggregate_count_function_count = 0;
 	idx_t aggregate_sum_function_count = 0;
 	idx_t aggregate_other_function_count = 0;
+	idx_t grouped_aggregate_group_count = 0;
+	idx_t grouped_aggregate_varchar_group_count = 0;
 	idx_t core_expression_operator_count = 0;
 	idx_t arithmetic_projection_count = 0;
 	idx_t integer_arithmetic_projection_count = 0;
