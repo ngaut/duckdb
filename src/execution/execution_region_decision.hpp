@@ -38,6 +38,7 @@ struct ExecutionRegionPhysicalRunnerSelection {
 
 string ComposeExecutionRegionCompileEventReason(const ExecutionRegionPhysicalRunnerSelection &selection,
                                                 const string &compile_reason);
+string ExecutionRegionCboCostReasonToken(const PhysicalRunnerCostProfile &cost);
 string AttachExecutionRegionCandidateReason(const ExecutionRegionCandidate &candidate, string reason,
                                             bool record_detailed_telemetry);
 string FirstExecutionRegionReasonToken(const string &reason);

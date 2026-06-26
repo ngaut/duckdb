@@ -104,6 +104,45 @@ the predicate tree. The fix was to treat DATE as an INT32-compatible typed-tree
 value and preserve auxiliary trees only for deferred filters. That eliminated
 the edge case instead of adding a runtime fallback.
 
+### Q3 Join-To-Aggregate Boundary Removal
+
+The Q3 one-join grouped-aggregate forced/profile path now proves two more
+data-centric lessons.
+
+First, removing `hash_join_probe.final_output` was necessary but not sufficient.
+The probe can keep row pointers live, but a projection-source chunk still costs
+work unless downstream stages consume references directly.
+
+Second, grouped aggregate state pointers must stay owned by DuckDB's hash-table
+runtime. The useful ABI is not a per-row C++ callback and not a full source-order
+address vector. The new selected state-address updater gives generated code a
+compact state-address span plus the source-row selection while DuckDB still owns
+probing, appending, duplicate-new resolution, and tuple layout.
+
+Verified forced/profile Q3 evidence:
+
+| Removed | Replacement |
+| --- | --- |
+| `aggregate_update.address_buffer_callback_new_update=30519` | `aggregate_update.state_address_selection_new_update=30519` |
+| full regular hash join output | `hash_join_probe.direct_row_pointer_reference=30519` |
+| simple RHS reference projection through the source chunk | `projection.direct_post_join_reference_projection=30519` |
+
+The same selected state-address ABI now covers existing-group fused typed
+payload updates. The all-existing grouped aggregate telemetry test requires
+`aggregate_update.state_address_selection_existing_update` and forbids
+`aggregate_update.address_buffer_callback_existing_update`. That matters because
+the ABI is now symmetric for new and existing fixed-width typed payload routes:
+the generated updater receives state-address spans, while DuckDB owns lookup and
+tuple layout.
+
+The direct reference projection slice reduced traced
+`hash_join_probe.materialize_projection_sources` runtime from about `2541 us` to
+about `170 us` in the Q3 forced/profile run. End-to-end forced timing was still
+below vectorized in a single-repeat trace run, so this is not a CBO admission
+result. It is structural evidence that the next root work is to fuse computed
+post-join payload expressions from join input and row pointers without forming a
+projection-source chunk.
+
 ## What Failed And Why
 
 ### Per-Vector GPU Launch
@@ -777,7 +816,7 @@ All-query SF1 after this pass:
 Root cause that remains:
 
 - Q3 grouped aggregation creates many new groups, so the hot cost is real hash
-  aggregate insertion and state-address resolution, not a stale JIT wrapper
+  aggregate insertion and state-address resolution, not an obsolete JIT wrapper
   branch
 - Q9 still spends meaningful time in the pair-key random hash-table probe and
   grouped aggregate state lookup
@@ -845,9 +884,9 @@ Q6 exposed a correctness root cause in the filtered aggregate fusion path:
 - table-scan source filters are planned against source-contract input columns
 - simple filter plans can also carry a typed expression tree for later fusion
 - the projection remapper updated `source_index`, but left
-  `expression_tree_source_indices` stale
+  `expression_tree_source_indices` out of date
 - normal filter execution used the remapped `source_index` and looked correct
-- fused filtered aggregate execution used the stale expression-tree source list
+- fused filtered aggregate execution used the outdated expression-tree source list
   and read the wrong column after scan filter/projection pruning
 
 The fix is structural: source remapping must update every parallel source
@@ -1051,8 +1090,8 @@ The all-valid single-key chain probe dominated generated runtime:
 The first bloom implementation was fast but wrong: it returned tiny counts
 because the pipelined loop advanced `key`, `salt`, and `ht_offset` without
 advancing the full `hash` used for the bloom lookup. The hash table still worked
-without bloom because it used the advanced offset/salt, but bloom saw a stale
-hash and introduced false negatives. The fix is a useful principle: when a
+without bloom because it used the advanced offset/salt, but bloom saw the prior
+row's hash and introduced false negatives. The fix is a useful principle: when a
 pipelined loop carries derived state, every consumer must advance from the same
 row, or a new optimization can silently corrupt filtering.
 
@@ -1218,12 +1257,12 @@ Q1/Q3/Q9/Q14/Q19/Q20/Q22 compile and win, Q21 remains skipped. The selected
 pair helper is groundwork for more filtered two-key joins; it is not enough by
 itself to admit the regular-hash-heavy Q21 family.
 
-### 16. Grouped Aggregate Fast Paths Must Split Existing-Group and New-Group Cases
+### 16. Grouped Aggregate Fast Paths Must Own Mutation Policy
 
 The first regular hash aggregate shortcut only handled all-existing groups. It
 was correct for low-cardinality aggregates, but TPC-H Q20 and synthetic
 high-cardinality grouped aggregates spend real time creating new groups. The
-next data-centric step is a separate fixed-width all-new fast path:
+next data-centric step was a separate fixed-width all-new fast path:
 
 - probe the pointer table for the batch
 - claim empty slots with normal linear probing
@@ -1232,17 +1271,20 @@ next data-centric step is a separate fixed-width all-new fast path:
 - fall back before semantic mutation on same-salt matches, duplicates, NULL
   semantics, VARCHAR keys, or unsupported payloads
 
-This keeps the state-address contract centralized in DuckDB's aggregate hash
-table instead of teaching SLJIT how to own tuple-data layout. The JIT runtime
-now tries existing groups first for reuse-heavy batches, then fixed-width new
-groups for creation-heavy batches, then falls back to the generic
-`ResolveStateAddresses` path.
+This kept the state-address contract centralized in DuckDB's aggregate hash
+table instead of teaching SLJIT how to own tuple-data layout. The follow-on
+cleanup removed the primitive existing-group address-vector route: append-only
+primitive update is tried first for all-new batches, then find-or-create
+primitive update owns mixed existing/new batches and updates aggregate state
+while the row's state pointer is live. That removes the partial-update trap
+where an existing-only speculative primitive route could mutate some rows before
+discovering a normal miss and falling through.
 
 Measured checkpoint:
 
 | Workload | Result |
 | --- | ---: |
-| Focused API coverage | `direct_existing_grouped_primitive_update` and `direct_new_grouped_primitive_update` both verified |
+| Focused API coverage | append-only primitive update and find-or-create primitive update both verified |
 | Forced Q5/Q10/Q18/Q20, 7 repeats | Q20 `0.069s -> 0.056s`, ~1.23x; Q18 forced improves modestly; Q5/Q10 remain non-admissible |
 | Full TPC-H SF1 default, 5 repeats | Q20 `0.071s -> 0.057s`, ~1.25x; admitted set remains Q1/Q3/Q9/Q14/Q19/Q20/Q22 |
 
@@ -1407,6 +1449,1446 @@ Runtime tracing made the same path look bad because traced native join and
 grouped aggregate stages pay large instrumentation overhead. Use traced runs for
 admission and stage evidence, but use production-timing runs for performance
 claims.
+
+### 22. Shape Inventory Needs A First-Class No-Decision Class
+
+Milestone 1 added `shape_inventory.csv` and `shape_inventory.md` to the TPC-H JIT
+benchmark output. The first real smoke exposed an important measurement edge:
+small valid runs can produce `summary.csv` and `runs.csv` rows with zero
+`duckdb_jit_counters()` rows. That is not a compiled-region regression and not a
+backend blocker. It means no execution-region counter was recorded for that
+query/policy pair.
+
+The inventory now emits those rows as `no_jit_decision`. This keeps the benchmark
+audit honest:
+
+- compiled-region regressions remain tied to real compiled/runtime counter rows
+- zero-counter movement is separated as planning/no-decision noise
+- every requested query/policy pair still appears in the artifact
+- later CBO work cannot hide missing evidence behind an empty inventory
+
+This matters for the broader plan because CBO, backend, and runtime-limited
+classes should be proven from explicit telemetry. If the telemetry is absent, the
+right classification is absence of a JIT decision, not an inferred root cause.
+
+### 23. Refactor CBO Policy Before Changing CBO Policy
+
+The first Milestone 2 step moved funded-protocol admission and startup policy into
+named rule tables without changing thresholds or predicates. That sequencing is
+important. When the cost model already has many similar shape gates, mixing
+structural cleanup with policy changes makes regressions hard to attribute.
+
+The useful pattern is:
+
+- keep existing predicates intact first
+- introduce named rules and one shared evaluator
+- verify the admitted/skipped behavior with the existing unit suite
+- only then expose matched rule names and change policy
+
+This turns future CBO changes into auditable decisions instead of another layer of
+anonymous booleans.
+
+### 24. CBO Rule Names Must Be Counter Keys, Not Just Columns
+
+Milestone 2 exposed the matched funded-protocol rule and startup rules through
+cost-profile telemetry, `duckdb_jit_events()`, `duckdb_jit_counters()`, profiler
+JSON, and `shape_inventory.csv`.
+
+The important detail is that rule names are part of the counter aggregation key.
+If they are only accumulated as output columns, two different admitted shapes can
+collapse into one counter row and show up as `multiple`. That is acceptable as a
+defensive fallback, but it is too weak for the shape inventory. The inventory needs
+stable evidence for which CBO rule funded each shape.
+
+Verified smoke:
+
+- TPC-H Q1 SF1 production mode produced a compiled native
+  `compiled_vectorized` row with
+  `runner_cost_funded_protocol_rule=standalone_grouped_aggregate`.
+- The generated shape signature now includes
+  `rule=standalone_grouped_aggregate,startup=none`.
+- TPC-H Q1 SF1 profile mode produced the same rule in profiler JSON event data.
+
+This keeps the next CBO changes honest. Policy changes can now be reviewed as
+named admission changes instead of inferred from anonymous cost totals.
+
+### 25. Shape Facts Should Be Derived Once Per Decision
+
+The next Milestone 2 step introduced `PhysicalRunnerShapeFacts` in the cost model.
+The first facts are deliberately boring: effective rows, batches, native operator
+stage count, generated compute work, no native join, no native sort, grouped-only
+aggregate, and wide string grouped aggregate.
+
+That is the right level for the first refactor because it preserves policy while
+removing repeated predicate fragments. The rule table still calls named predicate
+functions, but those predicates now read shared facts instead of recomputing the
+same shape concepts in slightly different ways.
+
+Verified after the refactor:
+
+- `make reldebug -j12` passed.
+- Full `build/reldebug/test/unittest --print-failing-tests` passed.
+- TPC-H Q1 SF1 production and profile smokes still produced the
+  `standalone_grouped_aggregate` funded rule.
+
+The principle is sequencing: derive facts first, preserve behavior, then make
+policy changes from those facts. That keeps future aggressive admission changes
+reviewable instead of blending them into a structural rewrite.
+
+### 26. Admission Reasons Must Survive Every Planner Path
+
+Milestone 2 now emits one stable CBO selection token:
+
+- `runner_cost_selection_reason`
+
+The value starts with `admitted_...` for accelerated-runner selection and
+`rejected_...` for vectorized selection.
+
+Those fields are carried through cost-profile telemetry, `duckdb_jit_events()`,
+`duckdb_jit_counters()`, profiler JSON, decision reason strings, and
+`shape_inventory.csv`.
+
+The bug found during verification was not in the cost model. The cost profile had
+the right `admitted_funded_protocol_rule:standalone_grouped_aggregate` token, but
+the cost-only planner path rebuilt the final selected-runner reason after backend
+lowering and dropped the token from the human-readable event reason. The fix was
+to make CBO cost-reason token formatting a shared helper and use it on that path
+too.
+
+Verified after the fix:
+
+- TPC-H Q1 SF1 production inventory contains
+  `runner_cost_selection_reason=admitted_funded_protocol_rule:standalone_grouped_aggregate|generated_stage_benefit`.
+- TPC-H Q1 SF1 profile JSON contains the same structured field.
+- The profile event reason string also contains
+  `cbo_selection_reason=admitted_funded_protocol_rule:standalone_grouped_aggregate...`.
+- Full `build/reldebug/test/unittest --print-failing-tests` passed.
+
+The lesson is that stable reasons are only useful if every planner path preserves
+them. A token present in a cost object but missing from the final event reason is
+still an observability bug.
+
+### 27. Backend Capability Facts Start At Lowering, Not In String Parsers
+
+Milestone 3 started with a compact structured capability surface: native and
+boundary operator-kind counts accumulated during lowering, data-shape facts from
+native SLJIT nodes, plus join and aggregate capability facts read from the
+finalized SLJIT native-region plan. The important design choice is where the
+facts are born. They are recorded from structured `ExecutionRegionOperatorKind`,
+`ExecutionRegionLoweringKind`, vector/selection metadata, and finalized SLJIT
+native op values, not inferred later by parsing human-readable event reasons.
+
+That keeps the data path clean:
+
+- detailed and compact lowering share one count/update helper
+- compact lowering must pass the operator kind, so it cannot silently lose backend
+  facts
+- lowering capability counters live under one `capability_facts` member, keeping
+  `ExecutionRegionLoweringPlan` from growing a flat list of unrelated fields
+- `CompactEventReason()` emits stable `backend_native=...` and
+  `backend_boundary=...` tokens from the structured counters
+- native SLJIT nodes add `backend_input_format=...`,
+  `backend_output_format=...`, `backend_vector_source=...`, and
+  `backend_selection_source=...`
+- finalized SLJIT native ops add `backend_join=...` and `backend_aggregate=...`
+  facts after projection and primitive aggregate fusion have made the aggregate
+  lookup path known
+- production CBO admission remains unchanged until inventory proves a capability
+  fact should become a guard
+
+Verified examples:
+
+- TPC-H Q1 SF1 profile mode emitted
+  `backend_native=table-scan:1|projection:3|perfect-hash-group-by:1`.
+- The same profile emitted
+  `backend_input_format=unified-vector:3|boundary:2` and
+  `backend_selection_source=none:2|input-selection:1|boundary:2`.
+- The same profile emitted
+  `backend_aggregate=perfect_hash_update:1|primitive_payload_update:1|grouped_state_address_lookup:1|generated_perfect_hash_lookup:1`.
+- The fused-contract boundary diagnostic emitted
+  `backend_native=projection:1|ungrouped-aggregate:1` and
+  `backend_boundary=table-scan:1`.
+- API coverage now also asserts regular hash aggregate native state-address lookup
+  with
+  `backend_aggregate=hash_update:1|primitive_payload_update:1|grouped_state_address_lookup:1|native_state_address_lookup:1`.
+- `make reldebug -j12`, focused `[api][jit]`, architecture verification, and full
+  `build/reldebug/test/unittest --print-failing-tests` passed.
+
+The principle is the same as the CBO refactor: introduce structured facts first,
+preserve policy, then use the facts to make aggressive changes. Backend capability
+facts should eventually drive runtime variant selection and admission guards, but
+they should not be reverse-engineered from trace text.
+
+### 28. Type And Validity Facts Must Preserve The Backend's Real View
+
+The next Milestone 3 pass extended backend capability facts with type, validity,
+and hash-probe layout information, still without changing production admission.
+The facts are recorded from finalized SLJIT native plans:
+
+- hash join probe/build keys add `backend_join_key_type=...`
+- aggregate group inputs add `backend_group_key_type=...`
+- finalized aggregate payload expressions add `backend_payload_type=...`
+- native source not-null facts add `backend_source_validity=...`
+- hash probes now distinguish regular, perfect-hash, residual, equality-key, and
+  non-equality-key facts under `backend_join=...`
+
+The important design point is that these facts describe what the backend actually
+executes, not the user's original SQL spelling. A Q1-shaped perfect-hash
+aggregate compresses VARCHAR group keys before generated group lookup, so the
+compiled fact is `backend_group_key_type=uint8:2`, while the payload facts are
+`backend_payload_type=int64:1|decimal64:5`. That distinction is useful: it tells
+the CBO that this path is not generic VARCHAR grouping; it is compressed fixed
+width grouping with DECIMAL payloads.
+
+Verified examples:
+
+- The Q1-shaped aggregate smoke emitted
+  `backend_source_validity=may-have-null:6`,
+  `backend_group_key_type=uint8:2`, and
+  `backend_payload_type=int64:1|decimal64:5`.
+- The focused hash-join probe API test now asserts `backend_join_key_type=int64:1`,
+  `backend_join=hash_probe:1`, and `equality_key:1`.
+- `make reldebug -j12`, focused `[api][jit]`, architecture verification, full
+  `build/reldebug/test/unittest --print-failing-tests`, and a Q1-shaped telemetry
+  smoke passed.
+
+What remains is intentionally not hidden in lowering. Chain/no-chain probe layout,
+flat versus selected all-valid execution, and existing/new grouped aggregate
+outcomes are runtime facts. They should be recorded from the executed runtime
+stage and then used to select traits. Guessing them during lowering would create
+the same kind of optimistic CBO fiction this plan is trying to remove.
+
+### 29. Runtime Facts Need Counted Telemetry, Not Stage-Name Archaeology
+
+The next Milestone 3 pass moved chain/no-chain, flat/selected all-valid, and
+existing/new aggregate outcomes out of generated-stage strings and into a counted
+runtime metric: `jit_runtime_path_counts`. The key design decision is that
+runtime facts are recorded at the actual branch that executed, then carried as
+typed counters through events, counters, profiler JSON/text, benchmark CSVs, and
+shape inventory signatures.
+
+This avoids two bad outcomes:
+
+- lowering does not guess runtime-only outcomes such as selected versus flat
+  input, chain versus no-chain probe, or existing versus new grouped aggregate
+  batches
+- benchmark tooling no longer needs to parse timed stage names to know which
+  runtime data path actually ran
+
+Verified runtime facts now include:
+
+- `hash_join_probe.fast_regular_probe_selected_all_valid_single_key_no_chain=32`
+  from a hash-join CTAS smoke
+- `aggregate_update.primitive_payload_update=32` from the aggregate update path
+  in the same smoke
+- `aggregate_update.direct_append_new_grouped_primitive_update=...` and
+  `aggregate_update.direct_new_grouped_primitive_update=...` in focused API tests
+
+The next performance move should consume these facts instead of adding another
+manual branch ladder. If a path repeatedly reports
+`aggregate_update.resolve_grouped_state_addresses` or
+`aggregate_update.fused_payload_update_with_grouped_state_addresses`, the root
+problem is still materialized address vectors. If it reports a fast hash-probe
+path but the query is still slow, the root problem is likely downstream
+materialization or aggregate lookup, not probe codegen.
+
+Verification for this pass:
+
+- `make reldebug -j12`
+- `build/reldebug/test/unittest "[api][jit]" --print-failing-tests`
+- `python3 benchmark/jit/verify_jit_architecture.py`
+- SQL runtime-path smoke against `duckdb_jit_events()`
+- full `build/reldebug/test/unittest --print-failing-tests`
+
+### 30. Boundary Facts Should Count Rows Crossing The Boundary
+
+The runtime-path facts say which branch ran. That is not enough for performance.
+The next pass added `jit_materialization_boundary_counts`, a row-counted boundary
+metric that records how much data crossed each runtime boundary.
+
+The important distinction:
+
+- `jit_runtime_path_counts` answers "which path executed?"
+- `jit_materialization_boundary_counts` answers "how many rows crossed a
+  materialization, address-vector, row-pointer, or copied-batch boundary?"
+
+Recorded boundary examples now include:
+
+- `hash_join_probe.row_pointer_reference=...`
+- `hash_join_probe.final_output=...`
+- `hash_join_probe.residual_source_chunk=...`
+- `aggregate_update.direct_state_update=...`
+- `aggregate_update.address_vector_direct_new=...`
+- `aggregate_update.address_vector_resolve=...`
+- `aggregate_update.address_vector_payload_update=...`
+- `aggregate_update.address_buffer_callback_existing_update=...`
+- `aggregate_update.address_buffer_callback_new_update=...`
+- `aggregate_update.state_address_selection_append_new_update=...`
+- `projection.copied_post_join_projection=...`
+- `projection.copied_post_join_batch=...`
+- `projection.reference_post_join_projection=...`
+
+The smoke result made the distinction concrete:
+
+- hash join runtime path:
+  `hash_join_probe.fast_regular_probe_selected_all_valid_single_key_no_chain=32`
+- materialization rows:
+  `hash_join_probe.row_pointer_reference=65536;hash_join_probe.final_output=65536`
+- aggregate runtime path:
+  `aggregate_update.primitive_payload_update=32`
+- aggregate boundary rows:
+  `aggregate_update.direct_state_update=65536`
+
+This is the right signal for aggressive work. A query can be on a fast probe path
+and still lose if the boundary rows show large final-output materialization,
+copied post-join batches, or address-vector payload updates. The next refactor
+should consume these facts to choose runtime variants and to prove when CBO
+negative controls are about real data movement rather than branch names.
+
+Verification for this pass:
+
+- `make reldebug -j12`
+- `build/reldebug/test/unittest "[api][jit]" --print-failing-tests`
+- `python3 benchmark/jit/verify_jit_architecture.py`
+- SQL smoke against `duckdb_jit_events()` for boundary counts
+
+### 31. Runtime Variants Should Be Trait-Selected, Not Branch-Ladder Cloned
+
+The first Milestone 4 refactor moved regular hash-join probe input selection
+behind `SljitRegularHashJoinProbeRuntimeTraits`. The executed code path is still
+the same: flat all-valid probes, selected all-valid probes, and generic probes
+keep their previous fast-path order and stage tokens. The difference is that the
+choice is now named once and executed by shared variant helpers.
+
+This matters because broader query support will otherwise copy the same branch
+ladder for every new key type, validity shape, selection shape, and chain shape.
+The root design is:
+
+- derive the input/table traits once from vector format and hash-table layout
+- choose one runtime variant from those traits
+- preserve counted runtime-path and materialization-boundary telemetry
+- add future fixed-width type support inside common variant helpers, not as a
+  parallel probe loop tree
+
+This slice is structural, not a standalone performance claim. Its value is that
+the next aggressive work can add real data-path ownership with less duplicated
+control flow.
+
+Verification for this pass:
+
+- `make reldebug -j12`
+- `build/reldebug/test/unittest "[api][jit]" --print-failing-tests`
+- `python3 benchmark/jit/verify_jit_architecture.py`
+- SQL smoke preserving
+  `hash_join_probe.fast_regular_probe_selected_all_valid_single_key_no_chain=32`
+  and boundary counts
+- full `build/reldebug/test/unittest --print-failing-tests`
+
+### 32. Aggregate Direct Routes Need One Owner Before Deeper Fusion
+
+The second Milestone 4 slice did the same cleanup for grouped aggregate routing.
+Before address-vector resolution, the runtime tries a fixed sequence of direct
+routes:
+
+- direct append-new primitive update
+- direct find-or-create primitive update
+- direct existing-group fused payload update
+- direct append-new fused payload update
+- direct new-group fused payload update
+- fallback to grouped state-address resolution
+
+That order is now centralized in one helper and guarded by
+`SljitGroupedAggregateRuntimeTraits`. Behavior and telemetry are intentionally
+unchanged; the refactor only gives the direct-route policy one owner.
+
+This matters because the next root performance fix is not another side path
+around `ResolveStateAddresses`. It is making fixed-width grouped aggregate loops
+keep the state pointer live and update payloads before an address vector exists.
+Having one route owner makes it clear which cases still fall through to
+`aggregate_update.address_vector_resolve` and
+`aggregate_update.address_vector_payload_update`.
+
+Follow-on cleanup removed the primitive existing-group address-vector route from
+that owner. The route was redundant after find-or-create primitive update could
+handle existing and new rows while the state pointer was live, and it carried an
+unhelpful partial-update risk on normal misses. Primitive grouped update now has
+one mutation policy: append-only when the whole batch is provably new, otherwise
+find-or-create.
+
+The next cleanup removed the append-new fused payload address-vector copy. The
+hash table already has row locations in append order and a reverse partition
+selection that maps source rows to those row locations. Passing both to generated
+batch code lets SLJIT load `addresses[address_sel[i]]` and keeps the update
+vectorized without exposing tuple-data layout or making a per-row C++ call.
+
+Verification for this pass:
+
+- `make reldebug -j12`
+- `build/reldebug/test/unittest "[api][jit]" --print-failing-tests`
+- `python3 benchmark/jit/verify_jit_architecture.py`
+- SQL smoke preserving aggregate runtime path and boundary counts
+- full `build/reldebug/test/unittest --print-failing-tests`
+
+### 33. Address-Callback Routes Are Not The Root Endpoint
+
+The grouped fused payload callback route is better than falling back to full
+`ResolveStateAddresses` plus a separate payload pass, but it still produces an
+address buffer before SLJIT updates payloads. The callback API now passes a raw
+state-address span instead of a `Vector`, and the telemetry split makes the
+remaining buffer explicit:
+
+- `aggregate_update.address_buffer_callback_existing_update=...`
+- `aggregate_update.address_buffer_callback_new_update=...`
+- `aggregate_update.state_address_selection_append_new_update=...`
+- `aggregate_update.address_vector_resolve=...`
+- `aggregate_update.address_vector_payload_update=...`
+
+This distinction matters. Existing/new callback routes are direct routes through
+the aggregate hash table, but they are still address-buffer based. Append-new can
+use row locations plus a reverse partition selection instead. The span callback
+removes the callback `Vector` boundary; it does not eliminate address buffering
+for existing and mixed new-group paths. The root solution is a lower
+`GroupedAggregateHashTable`
+updater API that calls a payload updater while the lookup path still has each
+row's state pointer. SLJIT should consume that API rather than duplicating tuple
+layout or adding another wrapper around the address buffer.
+
+Verification for this pass:
+
+- `make reldebug -j12`
+- `build/reldebug/test/unittest "[api][jit]" --print-failing-tests`
+- `python3 benchmark/jit/verify_jit_architecture.py`
+- full `build/reldebug/test/unittest --print-failing-tests`
+
+### 34. In-Lookup Updates Must Respect Miss Semantics
+
+The next grouped aggregate slices added a lower
+`GroupedAggregateHashTable` row-state updater for fast fixed-width paths. The
+first consumers are the direct-new and append-new primitive aggregate routes.
+They now update payloads while each row's aggregate state pointer is live,
+instead of first materializing a state-address vector and then walking a second
+update pass.
+
+The important correctness detail is where this is safe:
+
+- direct-new find-or-create validates the shape up front and then resolves every
+  row, so existing rows can be updated during probe and newly appended or
+  duplicate rows can be updated after the append step
+- append-new validates duplicate absence before state mutation, then appends and
+  updates each row from the live state pointer
+- existing-group lookup can return a normal miss after seeing earlier matching
+  rows, so it must not mutate state in the lookup loop until there is a stronger
+  no-miss proof or a two-phase design that does not reintroduce the address
+  vector
+
+This is why existing-group mutation has not moved into the lookup loop yet. It is
+not a retreat from data-centric fusion; it is the edge case that has to disappear
+before broader in-loop mutation is correct. The next step is to give
+existing-group routes a fact that proves all rows exist, or to restructure the
+route so miss detection happens before mutation without producing an address
+vector.
+
+Verified smoke:
+
+- runtime path contained
+  `aggregate_update.direct_append_new_grouped_primitive_update=1`
+- materialization boundary contained `aggregate_update.direct_state_update=64`
+- no `address_vector_*` boundary was emitted for the append-new primitive route
+
+Verification for this pass:
+
+- `make reldebug -j12`
+- `build/reldebug/test/unittest "[api][jit]" --print-failing-tests`
+- `python3 benchmark/jit/verify_jit_architecture.py`
+- SQL smoke against `duckdb_jit_events()` for the append-new route
+- full `build/reldebug/test/unittest --print-failing-tests`
+
+### 35. Delete The Post-Join Copy Without Deleting Batching
+
+The first attempt to remove `projection.copied_post_join_batch` fed each tiny
+post-join projected chunk directly into grouped aggregate update. That was the
+wrong deletion. It removed one copy, but it also destroyed full-vector aggregate
+batching and increased hot update invocations. Forced/profile timing regressed
+to Q3 `0.760x` and Q20 `0.947x`.
+
+The correct boundary deletion keeps the pending aggregate input batch and writes
+fixed-width post-join projection output directly into that batch. This removes
+the scratch projected chunk plus append copy while preserving vector-sized
+aggregate updates.
+
+The important root cause was not only expression support. Post-join output often
+arrives as selected or dictionary-backed vectors, so a direct path that only
+accepts flat identity sources will silently miss the hot shape. The direct batch
+adapter now falls back to the normal SLJIT expression executor for selected or
+unified-format sources, but points the result vector at the final aggregate
+batch slice. Reference outputs copy directly into their final columns; generated
+fixed-width outputs write into the batch memory.
+
+Verified forced/profile evidence:
+
+- Q3 moved from `projection.copied_post_join_projection=30519` and
+  `projection.copied_post_join_batch=30519` to
+  `projection.direct_post_join_batch_projection=30519`
+- Q20 moved from `projection.copied_post_join_projection=9741` and
+  `projection.copied_post_join_batch=9741` to
+  `projection.direct_post_join_batch_projection=9741`
+
+The aggregate update invocation count stayed batched:
+
+- Q3 kept `aggregate_update.direct_new_grouped_fused_payload_update=15`
+- Q20 kept `aggregate_update.direct_new_grouped_primitive_update=5`
+
+This is structural progress, not a CBO admission change. Production SF1 with
+default policy still skipped the Q3/Q20 regions in the focused run, and the
+verifier passed with correctness diff 0. The next root blocker is still below
+this boundary: Q3 has `aggregate_update.address_buffer_callback_new_update`, and
+both Q3/Q20 still materialize `hash_join_probe.final_output`.
+
+Verification for this pass:
+
+- `make reldebug -j12`
+- new API telemetry test for direct post-join batch projection
+- `build/reldebug/test/unittest "[api][jit]" --print-failing-tests`
+- `python3 benchmark/jit/verify_jit_architecture.py`
+- forced/profile TPC-H Q3/Q20 with runtime and boundary counters
+- production TPC-H Q3/Q20 focused verifier
+
+### 36. Delete Full Join Output, Then Measure The Replacement Boundary
+
+The next one-join grouped-aggregate slice removed
+`hash_join_probe.final_output` for regular hash joins without teaching SLJIT
+hash-table tuple layout. The probe runs in row-pointer mode, and a DuckDB-owned
+projection-source materializer fills only the join output columns required by
+the downstream fixed-width projection. The existing direct-to-batch projection
+then writes into the pending aggregate input batch, preserving vector-sized
+aggregate update calls.
+
+Verified forced/profile boundary movement:
+
+| Query | Before | After |
+| --- | --- | --- |
+| Q3 | `hash_join_probe.final_output=30519` | `hash_join_probe.direct_row_pointer_reference=30519`; `hash_join_probe.projection_source=30519` |
+| Q20 | `hash_join_probe.final_output=9741` | `hash_join_probe.direct_row_pointer_reference=9741`; `hash_join_probe.projection_source=9741` |
+
+The aggregate update count stayed batched:
+
+- Q3 kept `aggregate_update.direct_new_grouped_fused_payload_update=15`
+- Q20 kept `aggregate_update.direct_new_grouped_primitive_update=5`
+
+The performance interpretation is deliberately conservative. Forced/profile
+timing was Q3 `0.899x` and Q20 `1.116x`. Q20 remains useful because the primitive
+aggregate update path is direct-state. Q3 is still not a production win because
+the old full-output boundary has become a narrower projection-source gather, and
+Q3 still reports `aggregate_update.address_buffer_callback_new_update=30519`.
+Production default Q3/Q20 compiled zero regions after this pass; focused SF1
+medians were Q3 `1.000x` and Q20 `0.985x`, so the Q20 movement is zero-compiled
+policy noise rather than a runtime JIT regression.
+
+The root solution is therefore still one level deeper:
+
+- fuse projection-source gathering into the grouped aggregate update path where
+  the row pointer and match selection are already live
+- extend the grouped aggregate row-state updater to fixed-width fused typed
+  payloads so Q3 does not build an address buffer before payload update
+- keep the current projection-source boundary as a measured intermediate state,
+  not a CBO admission reason
+
+Verification for this pass:
+
+- `make reldebug -j12`
+- focused API telemetry test requiring `hash_join_probe.projection_source` and
+  forbidding `hash_join_probe.final_output`
+- `build/reldebug/test/unittest "[api][jit]" --print-failing-tests`
+- `python3 benchmark/jit/verify_jit_architecture.py`
+- forced/profile TPC-H Q3/Q20 with runtime and boundary counters
+- production TPC-H Q3/Q20 focused verifier
+- `python3 benchmark/tpch/jit/verify_tpch_benchmark.py`
+
+### 37. Row-Pointer Grouped Lookup Deletes The Boundary, But Probe Cost Still Dominates
+
+The direct row-pointer grouped lookup/update route now fires for Q3's fixed key
+family without copying hash-table tuple layout into SLJIT. The route loads RHS
+group keys from DuckDB row pointers, checks row-level validity, hashes the
+`[INTEGER, DATE, TINYINT]` key family, asks DuckDB to find/create aggregate
+groups, and calls the generated selected state-address payload updater with a
+compact LHS payload source override.
+
+Verified Q3 SF1 forced/profile evidence:
+
+- `aggregate_update.direct_row_pointer_grouped_lookup_update=15`
+- `aggregate_update.row_pointer_grouped_lookup_update=30519`
+- no `projection.direct_post_join_reference_projection`
+- no `projection.direct_post_join_computed_projection`
+- no `projection.direct_post_join_batch_projection`
+- no `aggregate_update.state_address_selection_new_update`
+- median `0.063062s` vectorized/off versus `0.061738s` forced JIT/auto,
+  or `1.021x`, with correctness diff 0
+
+The route also exposed two implementation rules:
+
+- Payload source remapping must use the hash-join binding's LHS output indices.
+  The pending probe batch is the join input, not a payload-only chunk.
+- Nullable join tuple layout is not a route blocker. It is a row-level validity
+  fact that must be checked before mutation.
+
+The remaining hot work is not projection anymore. Trace timing is now dominated
+by DuckDB grouped aggregate lookup/update internals:
+
+- `find_or_create_row_pointer_keys.fill_and_hash` is about `0.22 ms`
+- `find_or_create_fast.probe` is about `2.5-2.7 ms`
+- total `direct_row_pointer_grouped_lookup_update` is about `3.2 ms`
+
+This is not enough for CBO broadening. The next root solution is to reduce the
+grouped lookup/update work itself: keep the row-pointer key descriptor live
+through compare/append, avoid group-vector representation when possible, and
+centralize fixed-width key compare/append in DuckDB-owned runtime helpers.
+
+### 38. Keep Useful Key Caches, Delete Repeated Duplicate Probes
+
+The first deeper Q3 row-pointer grouped lookup attempt tried to avoid building
+the full key cache and probe directly from row pointers. That regressed the hot
+probe stage: repeated row-pointer loads and checked-cast recovery pushed the
+probe from the prior `2.5-2.7 ms` range to about `2.85-2.90 ms`. The key cache
+was not stale materialization; it was buying locality.
+
+The corrected fix kept the DuckDB-owned fixed-width key cache, still avoided the
+generic projection-fed grouped update path, compacted append-only new keys, and
+kept the previous resolved group target live across consecutive duplicate keys.
+For Q3's lineitem-driven order, duplicate group rows are adjacent often enough
+that a repeated key should not re-enter the pointer-table probe at all.
+
+Verified Q3 SF1 forced/profile evidence after the fix:
+
+- `aggregate_update.direct_row_pointer_grouped_lookup_update=15`
+- `aggregate_update.row_pointer_grouped_lookup_update=30519`
+- no `hash_join_probe.final_output`
+- no `hash_join_probe.projection_source`
+- no copied post-join projection boundaries
+- `find_or_create_row_pointer_keys.fill_and_hash` about `0.22-0.23 ms`
+- `find_or_create_row_pointer_keys.probe` about `0.17-0.18 ms`
+- total `direct_row_pointer_grouped_lookup_update` about `0.78-0.81 ms`
+- median `0.062720s` vectorized/off versus `0.060045s` forced JIT/auto,
+  or `1.045x`, with correctness diff 0
+
+Production-timing Q3 SF1 with the same forced CBO settings over 7 repeats was
+`0.062s` vectorized/off median versus `0.051s` forced JIT/auto median, or
+`1.216x`, with correctness diff 0.
+
+A focused Q3/Q9/Q20 SF1 production smoke with the same forced CBO settings over
+3 repeats stayed correct and showed Q9/Q20 still have useful adjacent wins:
+
+| Query | Vectorized/off median | Forced JIT/auto median | Speedup |
+| --- | ---: | ---: | ---: |
+| Q3 | 0.062s | 0.050s | 1.240x |
+| Q9 | 0.141s | 0.116s | 1.216x |
+| Q20 | 0.066s | 0.046s | 1.435x |
+
+The next blockers differ by query. Q9 profile still reports
+`hash_join_probe.final_output=638808`, so the next Q9 work is join-output
+boundary deletion, not grouped aggregate micro-tuning. Q20 profile reports
+`aggregate_update.direct_row_pointer_grouped_lookup_update_unsupported.group_key_sources=5`
+and remains on the primitive direct-state aggregate path, so its row-pointer
+group-key support should only be extended through shared fixed-width descriptors.
+
+The principle is sharper now: deleting work does not mean deleting every
+temporary. Delete the temporary only if it is actually the stale boundary. In
+this case, the stale work was repeated hash-table probing for consecutive
+duplicate keys after the state target was already known.
+
+### 39. Mixed VARCHAR References Should Not Block Direct Join-To-Join Projection
+
+Q9's next blocker was `hash_join_probe.final_output=638808`. The first attempted
+fix added a six-op direct first-join-to-second-join path, but it did not fire.
+The root cause was not the operator count. Lowered IR showed the hot region as:
+
+```text
+hash_join -> projection -> hash_join -> projection -> projection -> aggregate
+```
+
+with the between-join projection carrying five fixed-width values plus
+`n_name` as a `VARCHAR` reference. The old direct projection helper rejected the
+whole route because it required every projection output to be fixed-width.
+
+The correct fix was to relax only the reference path:
+
+- direct reference projection can copy/slice/gather non-fixed values such as
+  `VARCHAR` when validity is proven all-valid
+- computed direct projection remains fixed-width unless a specific generated
+  path owns the variable-width result
+- unsupported mixed projections still fall back with visible materialization
+  counters
+
+Verified Q9 SF1 forced/profile evidence after the fix:
+
+- `projection.direct_between_join_projection=319404`
+- `hash_join_probe.direct_row_pointer_reference=319404`
+- `hash_join_probe.final_output` fell from `638808` to `319404`
+- first join no longer reports `op0:hash_join_probe.materialize_output`
+- the remaining `hash_join_probe.final_output=319404` belongs to the second
+  join
+- correctness diff 0
+
+The focused Q9 SF1 forced production run over 7 repeats measured
+`0.141s` vectorized/off median versus `0.112s` forced JIT/auto median, or
+`1.259x`, with correctness diff 0.
+
+A focused Q3/Q9/Q20 SF1 forced production smoke after the shared helper change
+showed no adjacent regression over 3 repeats:
+
+| Query | Vectorized/off median | Forced JIT/auto median | Speedup |
+| --- | ---: | ---: | ---: |
+| Q3 | 0.062s | 0.051s | 1.216x |
+| Q9 | 0.144s | 0.115s | 1.252x |
+| Q20 | 0.066s | 0.046s | 1.435x |
+
+The next Q9 blocker is now the second join and final projection chain:
+`hash_join_probe.final_output=319404`,
+`projection.copied_post_join_projection=638808`, and
+`projection.copied_post_join_batch=315308`. The next root step is to keep the
+second join row pointers live into the post-second-join projection and grouped
+aggregate update, not to tune the first join further.
+
+### 40. Q9 Second Join Can Stay Selection-Only, But The Source Gather Remains
+
+The next Q9 slice removed the second regular hash join's full output boundary.
+The root fix was data-centric: run the second join in selection-only mode, keep
+the selected LHS rows and RHS row pointers live, and direct-project the
+post-second-join projection from those references. The second join should only
+materialize output as a visible fallback.
+
+Verified Q9 SF1 forced/profile evidence after the fix:
+
+- `projection.direct_between_join_projection=319404`
+- `projection.direct_second_join_projection=319404`
+- `hash_join_probe.direct_row_pointer_reference=638808`
+- no `hash_join_probe.final_output` for the Q9 fused region
+- `projection.copied_post_join_projection` dropped from `638808` to `319404`
+- `projection.copied_post_join_batch=315308` remains
+- `hash_join_probe.projection_source=319404` remains
+- correctness diff 0
+
+The important root cause is now narrower. The second join itself is no longer the
+materialization boundary. The remaining work is the source-gather and copied
+projection chain between the second join's live row pointers and aggregate
+update. The next fix should feed the post-second-join projection directly into
+the aggregate batch or row-pointer grouped update path while preserving
+vector-sized aggregate calls.
+
+A synthetic two-join coverage query also exposed a real edge in fallback logic:
+perfect-hash join probe ignored selection-only mode. The runtime now dispatches
+selection-only fallback materialization by actual hash-table layout, and the
+perfect-hash selection-only path records
+`hash_join_probe.direct_selection_reference`. This keeps the fallback honest
+without pretending the synthetic perfect-hash route is the real Q9 regular-hash
+route.
+
+### 41. Q9 RHS DATE_YEAR Can Read Row Pointers Directly
+
+The next Q9 slice removed the hidden RHS generated-source gather for
+`year(o_orderdate)`. The previous structurally clean path still gathered the
+second join's RHS DATE column into a temporary vector before running the native
+`DATE_YEAR` projection. That was better than full join-output materialization,
+but it was not value-lifetime fusion.
+
+The fix is shared and descriptor-based:
+
+- use `ExecutionHashJoinRHSFixedColumnSource` to prove the RHS layout, type,
+  offset, nullability, and column count
+- read DATE directly from second-join RHS row pointers
+- preserve SQL NULL and infinite DATE semantics by marking the result invalid
+- extract finite years inline instead of calling `Date::ExtractYear` once per
+  row
+- record the route as
+  `projection.direct_rhs_row_pointer_generated_projection`
+
+Verified Q9 SF1 forced/profile evidence:
+
+- `projection.direct_rhs_row_pointer_generated_projection=319404`
+- `hash_join_probe.direct_row_pointer_reference=638808`
+- no `hash_join_probe.final_output`
+- no `hash_join_probe.projection_source`
+- no `projection.copied_post_join_projection`
+- no `projection.copied_post_join_batch`
+- `projection.direct_post_join_batch_projection=958212`
+- correctness diff 0
+
+The trace showed a real but small local improvement after inlining finite DATE
+year extraction:
+
+| Q9 forced/profile stage | Before inline DATE | After inline DATE |
+| --- | ---: | ---: |
+| `op3:projection.post_join_direct_computed_projection` median | ~1972 us | ~1849 us |
+| `op4:projection.post_join_direct_batch_projection` median | ~1382 us | ~1365 us |
+| `op5:aggregate_update.direct_new_grouped_primitive_update` median | ~4342 us | ~4284 us |
+
+Focused Q9 SF1 forced production over 7 repeats measured `0.144s` vectorized/off
+median versus `0.115s` forced JIT/auto median, or `1.252x`, with correctness
+diff 0. A focused Q3/Q9/Q20 SF1 forced production smoke stayed correct:
+
+| Query | Vectorized/off median | Forced JIT/auto median | Speedup |
+| --- | ---: | ---: | ---: |
+| Q3 | 0.061s | 0.052s | 1.173x |
+| Q9 | 0.145s | 0.118s | 1.229x |
+| Q20 | 0.066s | 0.046s | 1.435x |
+
+Interpretation: this was the right cleanup, but it was not the next large Q9
+speedup by itself. The row-pointer DATE path removed a hidden gather and made the
+stage cleaner, but the Q9 trace is now dominated by pair-key regular probing,
+between-join reference projection, final projection into an aggregate batch, and
+grouped aggregate state/update work. The next root solution is to stop treating
+`projection.direct_post_join_batch_projection=958212` as the endpoint: compressed
+group keys, amount payload, and the aggregate state target need to stay live
+through grouped lookup/update.
+
+### 42. Q9 Final Projection Telemetry Shows Aggregate Lookup Is The Next Boundary
+
+The next slice split direct fixed projection-to-batch timing by expression kind.
+This is trace-only observability: it does not change production execution, but it
+prevents guessing about whether the final projection or grouped aggregate update
+is the next root problem.
+
+Verified Q9 SF1 forced/profile medians over three traced repeats:
+
+| Stage | Median |
+| --- | ---: |
+| `op4:projection.post_join_direct_batch_projection` | ~1431 us |
+| `op4:projection.direct_batch_expression.string_compress` | ~955 us |
+| `op4:projection.direct_batch_expression.integral_compress` | ~161 us |
+| `op5:aggregate_update.direct_new_grouped_primitive_update` | ~4278 us |
+| `op5:aggregate_update.direct_new_grouped_primitive_update.find_or_create_fast.probe` | ~3381 us |
+| `op5:aggregate_update.direct_new_grouped_primitive_update.find_or_create_fast.hash` | ~321 us |
+
+The useful lesson is that Q9's final projection is not the largest remaining
+cost. The grouped regular hash aggregate still hashes and probes projected group
+vectors after the projection boundary. A generic adjacent-key state-target reuse
+experiment was structurally aligned with the root plan, but traced Q9 did not
+show enough consecutive group-key locality for an always-on hot-loop check to
+pay. The implementation was tightened to sample per chunk before enabling
+consecutive reuse, and production Q9 remained stable:
+
+| Check | Result |
+| --- | ---: |
+| Focused Q9 SF1 forced production, 7 repeats | `0.144s -> 0.114s`, ~1.263x |
+| Focused Q3/Q9/Q20 SF1 forced production, 3 repeats | Q3 ~1.192x, Q9 ~1.261x, Q20 ~1.435x |
+
+Do not treat the adjacent-key cleanup as the Q9 root win. The next real deletion
+is descriptor/hash ownership across final projection and grouped aggregate
+lookup: compute compressed keys and amount payload once, keep the hash or state
+target live, and fall back with a named unsupported descriptor fact when that is
+not possible.
+
+### 43. Q9 Final Projection Can Feed Grouped Aggregate Without Payload Batch
+
+The next Q9 slice stopped treating the final projection output batch as the
+aggregate boundary. The first implementation missed with
+`direct_projected_group_payload_update_unsupported.payload_not_final_reference`:
+Q9-like generated payloads are not always plain references from the final
+projection. The second miss was `group_key_projection`: the old direct batch
+projection helper preflighted the whole projection and rejected a compact
+group-key-only batch.
+
+The root fix was to split the boundary by value lifetime:
+
+- direct-project only the grouped keys into a compact group-key batch
+- keep payload sources in the live pre-final-projection input
+- remap fused typed payload expression sources through final-projection
+  references when the aggregate owns a generated DECIMAL payload
+- let DuckDB grouped aggregate lookup/update own hash-table layout, append,
+  duplicate-new resolution, and state mutation
+- update payloads through the selected state-address callback while state targets
+  are live
+- record unsupported descriptor facts before falling back
+
+Verified Q9-like API coverage now requires the new route:
+
+- `aggregate_update.direct_projected_group_payload_update`
+- `projection.direct_remap_post_join_batch_projection`
+- `aggregate_update.projected_group_payload_update`
+- no `aggregate_update.address_vector_payload_update`
+- no `aggregate_update.state_address_selection_new_update`
+- no `aggregate_update.state_address_selection_existing_update`
+- no `direct_projected_group_payload_update_unsupported.*`
+
+Verified TPC-H Q9 SF1 forced/profile evidence over three traced repeats:
+
+- `aggregate_update.direct_projected_group_payload_update=319404`
+- `projection.direct_remap_post_join_batch_projection=319404`
+- `aggregate_update.projected_group_payload_update=319404`
+- no `hash_join_probe.final_output`
+- no `hash_join_probe.projection_source`
+- no `projection.copied_post_join_projection`
+- no `projection.copied_post_join_batch`
+- correctness diff 0
+
+The final projection is now a compact key remap, not a full aggregate input
+payload batch. Profile timing was `0.1496s -> 0.1310s`, about `1.14x`; traced
+runs are useful for stage evidence but not admission claims.
+
+Production timing stayed stable:
+
+| Check | Result |
+| --- | ---: |
+| Focused Q9 SF1 forced production, 7 repeats | `0.145s -> 0.115s`, ~1.261x |
+| Focused Q3/Q9/Q20 SF1 forced production, 3 repeats | Q3 ~1.216x, Q9 ~1.252x, Q20 ~1.383x |
+
+The next root blocker is lower: Q9 still builds a compact group-key vector and
+then hashes/probes it in the regular grouped aggregate. The trace still shows
+`find_or_create_fast.probe` around `3.6-3.7 ms` for this stage, while pair-key
+regular join probing remains a larger cost. The next deletion is to carry or
+reuse hash/state-target facts across the final projection and grouped aggregate
+lookup, not to add another query-shaped branch.
+
+### 44. Q3 Row-Pointer Keys And Q20 Probe-Side Keys Are One Descriptor Problem
+
+Q20 proved that the Q3 row-pointer grouped lookup was still too query-shaped.
+The old path only recognized `[INT32, INT32, INT8]` keys loaded from build-side
+row pointers. Q20's grouped keys are probe-side casts such as `BIGINT ->
+SMALLINT` and `BIGINT -> INTEGER`, so the runtime reported
+`direct_row_pointer_grouped_lookup_update_unsupported.group_key_sources`.
+
+The root fix was to delete the Q3-shaped key path and make key lifetime
+descriptor-driven:
+
+- a grouped key source is now either a row-pointer field or an input vector
+- casts are explicit descriptor facts, including `BIGINT -> SMALLINT`
+- key fill rejects nulls and cast overflow before hash-table mutation
+- the aggregate hash table fills a compact descriptor key chunk, hashes once, and
+  reuses the centralized fast find-or-create helper
+- the Q3-specific key struct, hash/equality/load helpers, and local append/probe
+  loop are gone
+
+That cleanup exposed the next Q20 blocker: primitive DECIMAL payload lifetime.
+The fix followed the same value-lifetime rule used for Q9, but for the one-join
+path:
+
+- direct-project only compact group keys from the final projection
+- remap the payload reference through the join LHS output mapping back to the
+  live pending probe input
+- accept expression-tree wrappers around references as reference-like payloads
+- call DuckDB's primitive split-payload grouped update helper
+- avoid building the full aggregate payload batch
+
+Verified API coverage now requires the probe-side primitive split route:
+
+- `aggregate_update.direct_projected_group_payload_update`
+- `projection.direct_remap_post_join_batch_projection`
+- `aggregate_update.projected_group_payload_update`
+- no `direct_projected_group_payload_update_unsupported.*`
+- no `hash_join_probe.final_output`
+- no `hash_join_probe.projection_source`
+- no copied post-join projection or batch
+- no `aggregate_update.direct_state_update`
+
+Verified Q3/Q20 SF1 forced/profile smoke:
+
+| Query | Runtime evidence |
+| --- | --- |
+| Q3 | `aggregate_update.direct_row_pointer_grouped_lookup_update=15`, descriptor key fill/hash stages present |
+| Q20 | `aggregate_update.direct_projected_group_payload_update=9741`, `projected_group_payload_update=9741` |
+
+Correctness diff was 0 for both. The Q20 profile speedup stayed around `1.23x`
+for a single traced run; that is route evidence, not a production admission
+claim. The remaining grouped-aggregate cost is still hash/probe/append over the
+compact group-key chunk. The next root deletion is to carry hash/state-target
+facts deeper, not to add another TPC-H-specific branch.
+
+### 45. Carry Hashes With Compact Keys, Then Prove Whether State Targets Matter
+
+The split-payload route was still stopping one step too early. It projected
+compact group keys and then asked the aggregate hash table to hash those vectors
+again. The clean fix was not an SLJIT hash-table shortcut: projection now emits a
+precomputed hash vector for the compact key batch, and DuckDB grouped aggregate
+lookup consumes that hash through the normal state-owned API.
+
+This removed a real stage for both Q9/Q20 split-payload routes:
+
+- `projection.post_join_direct_remap_batch_projection_hash` records hash
+  production while compact keys are hot
+- `find_or_create_fast.hash` disappears under
+  `aggregate_update.direct_projected_group_payload_update`
+- the grouped aggregate still owns probing, append, duplicate handling, and
+  state mutation
+
+Q9 then exposed a second safe deletion. After the first batch creates the groups,
+most split-payload batches are existing-only. The new existing-only split update
+resolves every state target first and only then calls the primitive updater, so a
+miss falls back before mutation. SF1 forced/profile showed the intended shape:
+
+| Stage | Count |
+| --- | ---: |
+| `direct_existing_split_payload.update` | 163 |
+| `direct_new_split_payload.append` | 1 |
+| `find_or_create_fast.hash` under split payload | 0 |
+
+Production timing stayed honest:
+
+| Check | Result |
+| --- | ---: |
+| Q3/Q9/Q20 SF1 forced production, 7 repeats | Q3 `0.062s -> 0.052s`, Q9 `0.145s -> 0.117s`, Q20 `0.066s -> 0.047s` |
+| Q9/Q20 SF10 forced production, 3 repeats | Q9 `1.499s -> 1.427s`, ~1.05x; Q20 `0.586s -> 0.406s`, ~1.44x |
+
+The lesson is that carrying hashes was the right value-lifetime cleanup, and
+existing-only state updates are the right mutation policy. But Q9 at larger
+scale is still not solved by this layer. The next Q9 root work must carry or
+reuse the resolved state target deeper, and it must reduce pair-key regular join
+probe or grouped probe cost enough to move SF10 beyond noise.
+
+### 46. Q9 Full Shape Needed Variable-Width Direct Projection, Not A Q9 Branch
+
+The stale CBO cleanup admitted the real SF10 Q9 full shape, but the first traced
+run regressed badly: vectorized/off was `1.635336s`, auto was `1.992021s`, and
+the runtime counters showed the real boundary:
+
+- `hash_join_probe.final_output=3261613`
+- `hash_join_probe.projection_source=3261613`
+- `projection.copied_post_join_projection=3261613`
+
+The synthetic two-projection coverage test was already green, so the root cause
+was not simply "two projections between joins". The real Q9 `op1` IR had one
+unhandled computed variable-width output:
+
+```text
+STRING_DECOMPRESS(UHUGEINT nation) -> VARCHAR
+```
+
+Direct reference projection handled all-valid `VARCHAR` references, and direct
+computed projection handled fixed-width casts/DECIMAL references. But the
+computed `VARCHAR` output could not write into the pending second-join batch, so
+one unhandled output forced projection-source materialization and then full
+first-join output fallback.
+
+The fix was shared, not Q9-shaped:
+
+- keep fixed-width direct projection writing in place
+- let computed `VARCHAR` projection write a temporary result vector
+- copy that result into the pending batch so string ownership stays with the
+  target vector
+- route LHS, RHS, and mixed hash-join computed projection through the same
+  expression-to-batch helper
+
+Verified Q9 SF10 profile after the fix:
+
+| Check | Result |
+| --- | ---: |
+| Profile, 1 repeat | off `1.607866s`, auto `1.499500s`, ~1.07x |
+| Production, 5 repeats | off `1.609s`, auto `1.347s`, ~1.19x |
+
+Correctness diff was 0. Runtime counters for the full Q9 fused region now show:
+
+- `projection.direct_between_join_projection=3261613`
+- `hash_join_probe.direct_row_pointer_reference=6523226`
+- `projection.direct_post_join_reference_projection=6523226`
+- `projection.direct_post_join_computed_projection=6523226`
+- no first-join `hash_join_probe.final_output`
+- no first-join `hash_join_probe.projection_source`
+
+This is a structural win because it deletes the first-join boundary in the real
+SF10 shape. It is not the final Q9 root solution: the trace still has
+`projection.direct_post_join_batch_projection` and compact group-key remap before
+grouped aggregate lookup. The next deletion is to carry grouped hash/state-target
+facts deeper, not to add another query-specific projection branch.
+
+### 47. Q9 Compressed Group-Key Passthrough Deletes Recompression, But Not The Root Cost
+
+The next Q9 slice followed the value-lifetime chain one step further. The final
+group-key projection was recomputing:
+
+```text
+STRING_COMPRESS(STRING_DECOMPRESS(compressed_nation))
+```
+
+The fix is descriptor-gated, not query-name gated:
+
+- detect `STRING_DECOMPRESS(compressed fixed-width string)` in the between-join
+  projection
+- carry the compressed fixed-width value in a sidecar aligned with the
+  second-join input batch
+- prove the final grouped key is `STRING_COMPRESS` of the same projected value
+- fill that grouped key from the compressed sidecar and leave the normal
+  expression path as fallback
+
+The grouped aggregate existing-only path also now shares fast group-key source
+validation with mixed find-or-create and can reuse the last resolved existing
+state target for consecutive duplicate keys. That keeps the state-target rule
+generic, but Q9 still does not show enough adjacent-key locality for this to be
+the main win.
+
+Verified Q9 SF10 trace after the compressed passthrough:
+
+| Stage | Before | After |
+| --- | ---: | ---: |
+| `op4:projection.direct_batch_expression.string_compress` | ~10.1 ms | 0 |
+| `op4:projection.direct_batch_expression.compressed_passthrough` | 0 | ~1.3 ms |
+| `op4:projection.post_join_direct_remap_batch_projection` | ~19.4 ms | ~10.3 ms |
+
+Runtime counters now show:
+
+- `projection.direct_between_join_compressed_passthrough_projection=3261613`
+- `projection.direct_batch_passthrough_projection=3261613`
+- no `op4:projection.direct_batch_expression.string_compress` in the Q9 fused
+  region
+- first-join `final_output` and `projection_source` remain absent
+
+Production timing stayed honest. Q9 SF10 production over 5 repeats measured
+off `1.606s`, auto `1.359s`, or ~`1.18x`. That is still correct and faster than
+vectorized/off, but it is not a clean improvement over the prior `1.347s` auto
+checkpoint. The structural deletion is useful groundwork, but the root Q9 cost
+is still earlier: pair-key regular probing and the between-join projection still
+dominate. The next deletion should carry compressed nation earlier, so the
+pipeline avoids the `STRING_DECOMPRESS` side of the round trip, or it should
+remove more regular probe work.
+
+### 48. Q9 Needed Early Compressed-Key Lifetime, Not Just Late Passthrough
+
+The compressed passthrough in section 47 deleted the final recompress, but the
+wall-clock result showed that was not enough. A deeper profiler pass found the
+actual leak: the route still materialized the decompressed `nation` value in the
+between-join batch and only recovered the compressed value later.
+
+Pre-fix xtrace evidence pointed inside the generated Q9 region at
+`SljitNativeStringDecompress`, regular hash probe work, bloom checks, and
+aggregate lookup/update. The fix was to carry the compressed group-key fact
+earlier and skip the normal decompressed `nation` projection when the final
+grouped key is proven to consume the same value as a compressed passthrough.
+
+The guard is descriptor-driven:
+
+- the skipped between-join projection must be a compressed key passthrough source
+- the skipped output must not be a second-join probe key
+- the final grouped key must map back to the same compressed source
+- payload expressions must not read the skipped decompressed output
+- any failure records a specific unsupported fact before fallback
+
+That last condition found the root cause during implementation. The first
+preflight rejected real Q9 as `payload_dependency` because it conservatively
+treated complex payload expressions as unknown. Using the existing expression
+source collector proved the DECIMAL amount expression does not read `nation`, so
+the skip became legal without a Q9-specific branch.
+
+Verified Q9 SF10 trace after the early compressed-key skip:
+
+| Stage or counter | Result |
+| --- | ---: |
+| `op1:projection.post_join_direct_computed_projection` | about `96-99 ms` before, `0.53 ms` after |
+| `projection.direct_between_join_compressed_group_key_skip_projection` | `3261613` |
+| `projection.direct_between_join_compressed_passthrough_projection` | `3261613` |
+| `projection.direct_batch_passthrough_projection` | `3261613` |
+| `aggregate_update.direct_projected_group_payload_update` | `3261613` |
+
+Q9 SF10 production over 5 repeats after this deletion measured vectorized/off
+`1.722s` median versus auto `1.300s` median, speedup `1.324615`, correctness
+diff 0. Compared with the prior auto checkpoint around `1.359s`, the JIT path
+itself improved by roughly 4%.
+
+Post-change xtrace Time Profiler bundles were empty for this binary on this
+macOS run, so the useful post-change stack evidence came from xtrace's automatic
+`sample` fallback over an eight-query Q9 loop. That sample no longer contained
+`SljitNativeStringDecompress`. The active DuckDB frames moved to:
+
+- `ExecuteSelectedAllValidRegularHashJoinProbeVariant`
+- `ExecuteFlatAllValidRegularHashJoinProbeVariant`
+- `JoinHashTable::InsertHashes`
+- scan decompression and filter code such as `BitpackingScanPartial`,
+  `duckdb_fsst_decompress`, and numeric range selection
+- `GroupedAggregateHashTable::TryResolveExistingGroupsFastInternal`
+- `RadixUpdatePrimitiveGroup`
+
+This changes the next root target. Q9 is no longer primarily paying for the
+decompress/recompress round trip in the fused route. The measured remaining
+work is regular hash join probe ownership, build/probe hash-table traffic,
+source scan decompression outside the generated region, and grouped aggregate
+state lookup/update.
+
+### 49. Q9 Pair Probe Needed Salt Lifetime Behind Bloom, Not Bloom Helper Churn
+
+The next Q9 SF10 pass used xtrace-style CPU profiling again. Direct Time
+Profiler traces were empty on this macOS run, so the useful profile came from an
+attach-style `sample` run over a long Q9 loop. The stack was consistent with the
+runtime counters: the main generated-region CPU was still in regular hash join
+pair probing.
+
+The failed experiment was instructive. Splitting and unrolling the bloom helper
+looked locally cleaner, but it increased code shape/register pressure and made
+the pair-probe counters worse. The root fix was not a new helper. It was value
+lifetime: the no-chain fast probes were computing salt for every source row
+before the bloom check, even when bloom rejected the row and no hash-table entry
+would be inspected.
+
+The retained fix moves salt extraction behind the bloom gate for the fast
+no-chain pair probe, no-chain single-key probes, and pair chain probes. It also
+removes the carried `next_salt` state from the lookahead path. `ht_entry_t`
+`ExtractSalt` now takes the hash scalar by value, which matches the operation
+and avoids passing a hot 64-bit value through a reference.
+
+Verified Q9 SF10 profile counters:
+
+| Stage | Before pair-probe work | After scalar salt | After salt-after-bloom |
+| --- | ---: | ---: | ---: |
+| total runtime | `1023.8 ms` | `973.0 ms` | `954.3 ms` |
+| generated runtime | `719.3 ms` | `681.9 ms` | `663.0 ms` |
+| `op0` selected pair no-chain probe | `178.2 ms` | `163.5 ms` | `149.4 ms` |
+| `op0` flat pair no-chain probe | `138.4 ms` | `132.3 ms` | `119.1 ms` |
+| `op0` regular hash probe total | `367.4 ms` | `343.8 ms` | `316.9 ms` |
+
+Production Q9 SF10 over 5 repeats moved from the scalar-salt-only checkpoint
+auto median `1.307s` to salt-after-bloom auto median `1.257s`; vectorized/off
+median was `1.643s`, so auto speedup was `1.307x`, correctness diff 0.
+
+Post-fix sample top stacks moved in the right direction:
+
+- selected regular probe top samples: `1384 -> 992`
+- flat regular probe top samples: `1082 -> 816`
+- `ExtractSalt` no longer appears in the top-stack list
+- remaining major work is pair probing, `JoinHashTable::InsertHashes`, scan
+  decompression/filtering, and aggregate state lookup/update
+
+Principle: in data-centric fusion, do not compute derived metadata until the
+next consumer is proven live. Bloom-rejected rows have no salt consumer.
+
+### 50. Q9 Bloom Is Selective; The Remaining Win Is Amount Value Lifetime
+
+The next deep dive used a real xtrace Time Profiler run over an eight-query Q9
+SF10 loop:
+
+```text
+/tmp/trace_duckdb_20260626_122041.trace
+```
+
+This trace produced useful symbolized samples. It also corrected an easy
+misread: `ht_entry_t::ExtractSalt` was hot, but the collapsed stacks showed it
+was owned by `JoinHashTable::Finalize`, not by the generated probe path. The
+generated probe hotspot was the bloom check and entry probing:
+
+- `BloomFilter::GetMask` under
+  `SljitNativeRegionKernel::ExecuteRegularHashJoinProbeVariant`
+- `ht_entry_t::GetValue`
+- selected and flat `ExecuteAllValidInt64PairNoChainProbe`
+
+Three experiments were measured and rejected:
+
+| Experiment | Result | Root Cause |
+| --- | ---: | --- |
+| Disable no-chain bloom in generated probes | generated runtime `659 ms -> 1000 ms`, op0 probe `320 ms -> 654 ms` | Bloom is expensive but highly selective; removing it floods the hash table with misses. |
+| Replace four variable shifts with a 4096-entry two-bit-pair mask table | generated runtime `659 ms -> 701 ms`, op0 probe `320 ms -> 361 ms` | On this CPU, two table loads are worse than the variable shifts and increase probe pressure. |
+| Skip selected all-valid proof before direct reference copy | op1 reference projection `74.4 ms -> 69.5 ms`, total generated runtime flat/noisy | The proof is not the root cost, and the generalized version needs careful nullable partial-projection invariants. |
+
+The current Q9 SF10 baseline after restoring the losing experiments is still:
+
+| Check | Result |
+| --- | ---: |
+| Q9 production, 5 repeats | off `1.648s`, auto `1.261s`, speedup `1.306899`, correctness diff 0 |
+| Q9 profile, 1 repeat | generated runtime about `659 ms` |
+| op0 regular pair probe | about `320 ms` |
+| op1 between-join direct reference projection | about `74 ms` |
+| op3 final amount/date projection | about `18 ms` |
+| aggregate direct projected update | about `45 ms` |
+
+The xtrace lesson is that bloom/filter/probe micro-ops are now near the local
+limit. The next root solution is value lifetime across the two joins: Q9 copies
+four DECIMAL inputs through the second-join batch only to compute one `amount`
+payload later. A data-centric path should compose the amount expression across
+the between-join projection, compute or carry one payload value, and stop
+materializing the four amount inputs. That is broader and safer than tuning
+`Vector::Copy` or weakening the bloom filter.
+
+### 51. Q9 Amount Sidecar Is Real; Generic Sidecars And Probe Accessor Rewrites Are Not
+
+The next Q9 slice implemented the value-lifetime plan from lesson 50. The fused
+two-join aggregate now detects final aggregate payloads whose inputs come only
+from the second join's LHS, remaps those inputs through reference-like
+between-join projections, computes the Q9 DECIMAL64 amount while the first join
+row pointers and source vectors are still live, and carries a one-column
+sidecar into the second-join projection. The second projection then copies the
+precomputed payload instead of materializing the four amount inputs only to
+recompute the payload later.
+
+This only becomes a win when the sidecar has a direct kernel. The generic
+expression-adapter sidecar and a linear interpreted DECIMAL program were both
+measured and rejected: they moved work earlier but paid too much selected-input
+adapter and per-node dispatch overhead. The retained descriptor requires a
+direct DECIMAL64 discounted-amount program before it can skip the original
+projection columns.
+
+Verified traced profile checkpoints:
+
+| Check | Result |
+| --- | ---: |
+| Baseline profile before amount sidecar | Q9 `1.406252s`, generated `659952 us`, source `288843 us` |
+| Baseline amount materialization | op1 reference projection `73793 us`, op3 amount projection `18425 us` |
+| Generic sidecar profile | Q9 `1.438068s`, generated `681405 us`, op1 sidecar `77951 us` |
+| Direct DECIMAL64 sidecar profile | Q9 `1.371368s`, generated `623287 us`, source `292242 us` |
+| Direct sidecar amount stages | op1 sidecar `29125 us`, op3 payload passthrough `2055 us`, op3 remaining computed projection `6690 us` |
+
+Final production verification on SF10 single-thread, 7 repeats:
+
+```text
+/private/tmp/duckdb_jit_q9_sf10_final_payload_prod
+off  median 1.649s
+auto median 1.209s
+speedup 1.363937x
+correctness_diff 0
+```
+
+A real xtrace Time Profiler run over a repeated Q9 loop was also captured:
+
+```text
+/tmp/trace_duckdb_20260626_130538.trace
+duration 7.15395s
+samples 4767
+```
+
+The global top samples after the payload fix were in hash-table/probe work:
+`ht_entry_t::ExtractSalt`, `BloomFilter::GetMask`, `ht_entry_t::GetValue`, and
+the selected/flat int64-pair no-chain probe variants. That evidence was useful,
+but it also showed a trap. A probe micro-optimization that replaced entry
+accessors with raw `Load<hash_t>`, local bloom-mask code, and salt-bit compares
+regressed the traced run:
+
+| Probe Experiment | Result |
+| --- | ---: |
+| Direct amount sidecar profile | Q9 `1.371368s`, generated `623287 us`, selected pair probe `148131 us` |
+| Raw entry/salt-bit probe rewrite | Q9 `1.392368s`, generated `632898 us`, selected pair probe `152539 us` |
+
+Root cause: Instruments attributed samples to tiny inline helpers, but that did
+not mean the fix was to bypass the helpers. The raw-load rewrite increased hot
+loop pressure and did not remove meaningful work. The change was removed after
+measurement. The next root target remains the data path around probe/build and
+aggregate state lifetime, not accessor churn.
+
+### 52. Q5 Needs Compressed String Group Keys In The Row-Pointer Aggregate Path
+
+Q5 exposed a different two-join aggregate boundary from Q9. The first attempt
+removed second-join output materialization by direct-projecting the selected
+second probe rows. That proved the route but did not improve production timing
+enough, because the projection still compressed and copied the string group key
+before the aggregate consumed it.
+
+The root cause was visible in the lowered IR:
+
+```text
+op2=projection(
+  native:string-compress:16[reference<VARCHAR source=vector#2>(#2)],
+  native:reference:region-input[...],
+  native:reference:region-input[...])
+op3=aggregate_update(kind=hash;groups=1;aggregates=1;payload_update=generated-primitive)
+```
+
+The group key is not raw `VARCHAR`; it is a `UHUGEINT` compressed string derived
+from an input-vector `VARCHAR` carried through the second join. The existing
+row-pointer aggregate descriptor only knew plain references and numeric casts,
+so it reported `direct_row_pointer_grouped_lookup_update_unsupported.group_key_sources`
+and fell back to projection/materialization.
+
+The retained fix makes `STRING_COMPRESS` a normal row-pointer group-key cast:
+`VARCHAR -> UINT8/UINT16/UINT32/UINT64/UINT128`. The aggregate descriptor now
+fills the temporary group chunk with the same compressed string encoding used by
+compressed materialization, and the two-join Q5 route tries the row-pointer
+aggregate path before the direct-projection fallback.
+
+Runtime shape check after the fix:
+
+```text
+aggregate_update.direct_row_pointer_grouped_lookup_update=37
+hash_join_probe.direct_row_pointer_reference=72985
+hash_join_probe.pending_probe_batch=72985
+aggregate_update.row_pointer_grouped_lookup_update=72985
+hash_join_probe.final_output=1825856
+```
+
+The important result is that the second join no longer produces a
+`hash_join_probe.final_output` or `projection.direct_second_join_projection`
+boundary. The remaining `final_output=1825856` is the first join boundary, which
+is the next data-lifetime target.
+
+Production verification on SF10 single-thread, 9 repeats:
+
+```text
+/private/tmp/duckdb_jit_q5_rowptr_string_compress_prod
+off  median 0.568s
+auto median 0.497s
+speedup 1.142857x
+correctness_diff 0
+```
+
+The xtrace Time Profiler run for the fixed path is:
+
+```text
+/tmp/trace_duckdb_20260626_134048.trace
+duration 3.20s
+samples 573
+```
+
+Top samples were dominated by scan and storage work: `pread`,
+`BitpackingSelect`, `TryBitpackingPrefixRangeFilter`, `madvise`, and selection
+vector operations. JIT code appeared as unsymbolicated executable memory, but
+the counters explain the relevant region boundary more clearly than the global
+sample view. The next Q5 root solution is to remove the first-join batch
+materialization and feed the second join from the first join's selected rows and
+row pointers directly, keeping `n_name`, `extendedprice`, and `discount` live
+until the aggregate update consumes them.
+
+### 53. Q9 No-Chain Probe Aliasing Cleanup Helps, But It Is Not The Root Fix
+
+After the Q9 first-join materialization and late payload boundaries were removed,
+the measured hot path moved to regular hash join probing. A pre-change xtrace
+run over repeated Q9 showed top samples in `ht_entry_t::ExtractSalt`,
+`BloomFilter::GetMask`, `ht_entry_t::GetValue`, the selected/flat int64-pair
+no-chain probe variants, `JoinHashTable::InsertHashes`, storage decompression,
+and string predicate work.
+
+The retained cleanup is deliberately small and generic: the no-chain fast probe
+variants now keep key arrays, hash-table entries, row-pointer output, and match
+selection output in restricted local pointers. This gives the compiler a clearer
+aliasing contract inside the vector-sized scalar loops without changing DuckDB's
+hash-table ABI, adding query-shaped rules, or removing bloom/salt checks.
+
+Trace counters before versus after the cleanup on SF10 Q9:
+
+| Counter | Before | After |
+| --- | ---: | ---: |
+| `runtime_time_us` | 918113 | 909710 |
+| `source_contract_runtime_time_us` | 291586 | 286475 |
+| `generated_body_runtime_time_us` | 626525 | 623220 |
+| `op0:hash_join_probe` | 328543 | 325010 |
+| `op0:selected int64-pair no-chain` | 157046 | 154438 |
+| `op0:flat int64-pair no-chain` | 122692 | 122105 |
+
+Production verification was stable but must be read honestly. Two independent
+7-repeat SF10 Q9 runs measured:
+
+```text
+/private/tmp/duckdb_jit_q9_restrict_prod
+off  median 1.595s
+auto median 1.147s
+speedup 1.390584x
+correctness_diff 0
+
+/private/tmp/duckdb_jit_q9_restrict_prod2
+off  median 1.599s
+auto median 1.159s
+speedup 1.379638x
+correctness_diff 0
+```
+
+The post-change Instruments xtrace attempt attached but captured only one useful
+sample, so the deep-dive evidence came from live macOS `sample` against the same
+DuckDB process running a 20-query Q9 loop:
+
+```text
+/private/tmp/sample_duckdb_q9_post_restrict.txt
+selected regular hash join probe: 1707 stack-top samples
+flat regular hash join probe:     1287 stack-top samples
+JoinHashTable::InsertHashes:      1608 stack-top samples
+Bitpacking scan/filter/decode, FSST, memchr, and grouped lookup/update remain visible.
+```
+
+The root cause did not change: this cleanup improves compiler ownership of the
+current loops, but it does not delete a boundary. Q9 still spends real time in
+regular probe output ownership, hash build/finalize, storage/filtering, and
+grouped lookup/update. The next root step is not another accessor rewrite. It is
+to keep match rows, row pointers, group hashes, and aggregate state targets live
+across probe -> projection -> grouped lookup -> payload update, materializing
+only when a real DuckDB boundary requires it.
 
 ## Bottom Line
 

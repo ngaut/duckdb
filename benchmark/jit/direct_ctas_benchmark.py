@@ -386,6 +386,8 @@ COUNTER_FIELDS = (
     "lazy_machine_codegen_time_us",
     "lazy_code_size",
     "hash_join_probe_layout",
+    "jit_runtime_path_counts",
+    "jit_materialization_boundary_counts",
     "runner_cost_profile",
     "runner_cost_rows",
     "runner_cost_batches",

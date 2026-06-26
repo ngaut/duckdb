@@ -45,6 +45,8 @@ enum JitCounterColumn : idx_t {
 	JIT_COUNTER_LAZY_MACHINE_CODEGEN_TIME_US,
 	JIT_COUNTER_LAZY_CODE_SIZE,
 	JIT_COUNTER_HASH_JOIN_PROBE_LAYOUT,
+	JIT_COUNTER_JIT_RUNTIME_PATH_COUNTS,
+	JIT_COUNTER_JIT_MATERIALIZATION_BOUNDARY_COUNTS,
 	JIT_COUNTER_RUNNER_COST_PROFILE,
 	JIT_COUNTER_RUNNER_COST_ROWS,
 	JIT_COUNTER_RUNNER_COST_BATCHES,
@@ -57,6 +59,9 @@ enum JitCounterColumn : idx_t {
 	JIT_COUNTER_RUNNER_COST_NATIVE_GROUPED_AGGREGATE_STAGE_COUNT,
 	JIT_COUNTER_RUNNER_COST_NATIVE_SORT_STAGE_COUNT,
 	JIT_COUNTER_RUNNER_COST_FULL_PIPELINE,
+	JIT_COUNTER_RUNNER_COST_FUNDED_PROTOCOL_RULE,
+	JIT_COUNTER_RUNNER_COST_STARTUP_RULES,
+	JIT_COUNTER_RUNNER_COST_SELECTION_REASON,
 	JIT_COUNTER_RUNNER_COST_GENERATED_EXPRESSION_WORK,
 	JIT_COUNTER_RUNNER_COST_GENERATED_STAGE_WORK,
 	JIT_COUNTER_RUNNER_COST_NATIVE_OPERATOR_WORK,
@@ -88,7 +93,7 @@ static constexpr idx_t JIT_COUNTER_STAGE_TIMING_COLUMN_OFFSET = JIT_COUNTER_IR_L
 static_assert(JIT_COUNTER_KERNEL_BUILD_TIME_US - JIT_COUNTER_STAGE_TIMING_COLUMN_OFFSET + 1 ==
               EXECUTION_REGION_STAGE_TIMING_COLUMN_COUNT);
 static constexpr idx_t JIT_COUNTER_RUNNER_COST_PROFILE_COLUMN_OFFSET = JIT_COUNTER_RUNNER_COST_PROFILE;
-static_assert(JIT_COUNTER_RUNNER_COST_FULL_PIPELINE - JIT_COUNTER_RUNNER_COST_PROFILE_COLUMN_OFFSET + 1 ==
+static_assert(JIT_COUNTER_RUNNER_COST_SELECTION_REASON - JIT_COUNTER_RUNNER_COST_PROFILE_COLUMN_OFFSET + 1 ==
               EXECUTION_REGION_RUNNER_COST_PROFILE_COLUMN_COUNT);
 static constexpr idx_t JIT_COUNTER_RUNNER_COST_WORK_COLUMN_OFFSET = JIT_COUNTER_RUNNER_COST_GENERATED_EXPRESSION_WORK;
 static_assert(JIT_COUNTER_RUNNER_COST_GPU_NET_BENEFIT - JIT_COUNTER_RUNNER_COST_WORK_COLUMN_OFFSET + 1 ==
@@ -214,6 +219,14 @@ static void AppendJitCounterColumn(Vector &output, idx_t column_id, const Execut
 	case JIT_COUNTER_HASH_JOIN_PROBE_LAYOUT:
 		AppendExecutionRegionNullableString(output, entry.jit_runtime.hash_join_probe_layout);
 		return;
+	case JIT_COUNTER_JIT_RUNTIME_PATH_COUNTS:
+		AppendExecutionRegionNullableString(
+		    output, RenderExecutionRegionCounterBreakdown(entry.jit_runtime.runtime_path_counts));
+		return;
+	case JIT_COUNTER_JIT_MATERIALIZATION_BOUNDARY_COUNTS:
+		AppendExecutionRegionNullableString(
+		    output, RenderExecutionRegionCounterBreakdown(entry.jit_runtime.materialization_boundary_counts));
+		return;
 	case JIT_COUNTER_RUNNER_COST_SELECTED_ACCELERATED_RUNNER_COUNT:
 		output.Append(Value::UBIGINT(entry.runner_cost.selected_accelerated_runner_count));
 		return;
@@ -261,6 +274,9 @@ static unique_ptr<FunctionData> DuckDBJitCountersBind(ClientContext &context, Ta
 	AddExecutionRegionTableFunctionColumn(return_types, names, "lazy_machine_codegen_time_us", LogicalType::BIGINT);
 	AddExecutionRegionTableFunctionColumn(return_types, names, "lazy_code_size", LogicalType::UBIGINT);
 	AddExecutionRegionTableFunctionColumn(return_types, names, "hash_join_probe_layout", LogicalType::VARCHAR);
+	AddExecutionRegionTableFunctionColumn(return_types, names, "jit_runtime_path_counts", LogicalType::VARCHAR);
+	AddExecutionRegionTableFunctionColumn(return_types, names, "jit_materialization_boundary_counts",
+	                                      LogicalType::VARCHAR);
 	AddJitCounterRunnerCostColumns(return_types, names);
 	return nullptr;
 }

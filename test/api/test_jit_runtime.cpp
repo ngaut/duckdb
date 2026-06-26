@@ -420,31 +420,31 @@ TEST_CASE("JIT source contracts preserve Q7 table scan filter contracts", "[api]
 	REQUIRE_NO_FAIL(con.Query("CALL dbgen(sf=0.01)"));
 
 	ClearJitTrace(manager, true);
-	auto result = con.Query(
-	    "SELECT supp_nation, cust_nation, l_year, sum(volume) AS revenue "
-	    "FROM ("
-	    "    SELECT n1.n_name AS supp_nation, n2.n_name AS cust_nation, "
-	    "           extract(year FROM l_shipdate) AS l_year, "
-	    "           l_extendedprice * (1 - l_discount) AS volume "
-	    "    FROM supplier, lineitem, orders, customer, nation n1, nation n2 "
-	    "    WHERE s_suppkey = l_suppkey "
-	    "      AND o_orderkey = l_orderkey "
-	    "      AND c_custkey = o_custkey "
-	    "      AND s_nationkey = n1.n_nationkey "
-	    "      AND c_nationkey = n2.n_nationkey "
-	    "      AND ((n1.n_name = 'FRANCE' AND n2.n_name = 'GERMANY') "
-	    "        OR (n1.n_name = 'GERMANY' AND n2.n_name = 'FRANCE')) "
-	    "      AND l_shipdate BETWEEN CAST('1995-01-01' AS date) AND CAST('1996-12-31' AS date)"
-	    ") AS shipping "
-	    "GROUP BY supp_nation, cust_nation, l_year "
-	    "ORDER BY supp_nation, cust_nation, l_year");
+	auto result = con.Query("SELECT supp_nation, cust_nation, l_year, sum(volume) AS revenue "
+	                        "FROM ("
+	                        "    SELECT n1.n_name AS supp_nation, n2.n_name AS cust_nation, "
+	                        "           extract(year FROM l_shipdate) AS l_year, "
+	                        "           l_extendedprice * (1 - l_discount) AS volume "
+	                        "    FROM supplier, lineitem, orders, customer, nation n1, nation n2 "
+	                        "    WHERE s_suppkey = l_suppkey "
+	                        "      AND o_orderkey = l_orderkey "
+	                        "      AND c_custkey = o_custkey "
+	                        "      AND s_nationkey = n1.n_nationkey "
+	                        "      AND c_nationkey = n2.n_nationkey "
+	                        "      AND ((n1.n_name = 'FRANCE' AND n2.n_name = 'GERMANY') "
+	                        "        OR (n1.n_name = 'GERMANY' AND n2.n_name = 'FRANCE')) "
+	                        "      AND l_shipdate BETWEEN CAST('1995-01-01' AS date) AND CAST('1996-12-31' AS date)"
+	                        ") AS shipping "
+	                        "GROUP BY supp_nation, cust_nation, l_year "
+	                        "ORDER BY supp_nation, cust_nation, l_year");
 	REQUIRE_NO_FAIL(*result);
 	REQUIRE(result->RowCount() == 4);
 
 	RequireJitEvent(
 	    manager,
 	    [](const ExecutionRegionEvent &event) {
-		    return IsCompiledSljitRegionEvent(event) && event.has_candidate && event.candidate_traits.operator_count >= 2 &&
+		    return IsCompiledSljitRegionEvent(event) && event.has_candidate &&
+		           event.candidate_traits.operator_count >= 2 &&
 		           event.candidate_traits.sink_kind == ExecutionRegionSinkKind::HASH_AGGREGATE_UPDATE &&
 		           StringUtil::Contains(event.ir, "dynamic_filters=true") &&
 		           StringUtil::Contains(event.reason, "source-execution:source-contract");
@@ -454,13 +454,11 @@ TEST_CASE("JIT source contracts preserve Q7 table scan filter contracts", "[api]
 		    REQUIRE(event.selected_uses_scan_filters);
 		    RequireGeneratedMachineCodeRegion(event);
 	    });
-	RequireJitEvent(
-	    manager,
-	    [](const ExecutionRegionEvent &event) {
-		    return IsSljitRegionEvent(event) && EventPhase(event) == "runtime" && EventStatus(event) == "executed" &&
-		           event.selected_uses_scan_filters && event.source_contract_output_rows > 0 &&
-		           event.input_rows == event.source_contract_output_rows;
-	    });
+	RequireJitEvent(manager, [](const ExecutionRegionEvent &event) {
+		return IsSljitRegionEvent(event) && EventPhase(event) == "runtime" && EventStatus(event) == "executed" &&
+		       event.selected_uses_scan_filters && event.source_contract_output_rows > 0 &&
+		       event.input_rows == event.source_contract_output_rows;
+	});
 }
 
 TEST_CASE("EXPLAIN ANALYZE exposes compact execution region profile", "[api][jit]") {
@@ -549,6 +547,8 @@ TEST_CASE("EXPLAIN ANALYZE exposes compact execution region profile", "[api][jit
 	REQUIRE(StringUtil::Contains(analyzed_plan, "\"lazy_machine_codegen_time_us\""));
 	REQUIRE(StringUtil::Contains(analyzed_plan, "\"lazy_code_size\""));
 	REQUIRE(StringUtil::Contains(analyzed_plan, "\"hash_join_probe_layout\""));
+	REQUIRE(StringUtil::Contains(analyzed_plan, "\"jit_runtime_path_counts\""));
+	REQUIRE(StringUtil::Contains(analyzed_plan, "\"jit_materialization_boundary_counts\""));
 	REQUIRE(StringUtil::Contains(analyzed_plan, "\"runner_cost_profile\""));
 	REQUIRE(StringUtil::Contains(analyzed_plan, "\"runner_cost_accelerated_runner_benefit\""));
 	REQUIRE(StringUtil::Contains(analyzed_plan, "\"runner_cost_startup_cost\""));
@@ -627,10 +627,11 @@ TEST_CASE("EXPLAIN ANALYZE exposes grouped hash aggregate native state-address l
 	const auto used_grouped_state_addresses =
 	    StringUtil::Contains(analyzed_plan, "aggregate_update.resolve_grouped_state_addresses");
 	const auto used_direct_new_update =
-	    StringUtil::Contains(analyzed_plan, "aggregate_update.direct_new_grouped_primitive_update");
+	    StringUtil::Contains(analyzed_plan, "aggregate_update.direct_new_grouped_primitive_update") ||
+	    StringUtil::Contains(analyzed_plan, "aggregate_update.direct_append_new_grouped_primitive_update");
 	REQUIRE((used_grouped_state_addresses || used_direct_new_update));
-	REQUIRE((StringUtil::Contains(analyzed_plan, "aggregate_update.primitive_payload_update") ||
-	         used_direct_new_update));
+	REQUIRE(
+	    (StringUtil::Contains(analyzed_plan, "aggregate_update.primitive_payload_update") || used_direct_new_update));
 }
 
 TEST_CASE("EXPLAIN ANALYZE reports compact aggregate auto vectorized-selection facts", "[api][jit]") {

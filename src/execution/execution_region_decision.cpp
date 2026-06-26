@@ -168,6 +168,24 @@ static void SelectExecutionRegionAcceleratedRunner(ExecutionRegionPhysicalRunner
 	selection.use_compiled_runner = selection.selected_runner != ExecutionRunnerKind::VECTORIZED;
 }
 
+string ExecutionRegionCboCostReasonToken(const PhysicalRunnerCostProfile &cost) {
+	if (!cost.selection_reason.empty()) {
+		return "cbo_selection_reason=" + cost.selection_reason;
+	}
+	return string();
+}
+
+static void AppendExecutionRegionCboCostReason(string &reason, const PhysicalRunnerCostProfile &cost) {
+	auto token = ExecutionRegionCboCostReasonToken(cost);
+	if (token.empty()) {
+		return;
+	}
+	if (!reason.empty() && reason.back() != ';') {
+		reason += ";";
+	}
+	reason += token;
+}
+
 string ExecutionRegionDecisionRunnerName(ExecutionRunnerKind runner) {
 	switch (runner) {
 	case ExecutionRunnerKind::COMPILED_VECTORIZED:
@@ -189,6 +207,7 @@ SelectExecutionRegionPipelinePhysicalRunner(const PhysicalRunnerCostParameters &
 		selection.runner_cost = DuckDBCostModel::SelectPhysicalRunner(cost_input, cost_parameters);
 		selection.reason = "duckdb_cbo selects vectorized physical runner before region graph";
 		selection.reason += ";region_graph=skipped;source_produces_rows=false";
+		AppendExecutionRegionCboCostReason(selection.reason, selection.runner_cost);
 		selection.blocker = EXECUTION_REGION_BLOCKER_DUCKDB_SELECTED_VECTORIZED;
 		return selection;
 	}
@@ -203,10 +222,12 @@ SelectExecutionRegionPipelinePhysicalRunner(const PhysicalRunnerCostParameters &
 	if (selection.runner_cost.selected_accelerated_runner) {
 		SelectExecutionRegionAcceleratedRunner(selection);
 		selection.reason = "duckdb_cbo physical pipeline cost admits region graph analysis";
+		AppendExecutionRegionCboCostReason(selection.reason, selection.runner_cost);
 		return selection;
 	}
 	selection.reason = "duckdb_cbo selects vectorized physical runner before region graph";
 	selection.reason += ";region_graph=skipped";
+	AppendExecutionRegionCboCostReason(selection.reason, selection.runner_cost);
 	selection.blocker = EXECUTION_REGION_BLOCKER_DUCKDB_SELECTED_VECTORIZED;
 	return selection;
 }
@@ -220,11 +241,13 @@ SelectExecutionRegionCostOnlyPhysicalRunner(const PhysicalRunnerCostParameters &
 	if (selection.runner_cost.selected_accelerated_runner) {
 		SelectExecutionRegionAcceleratedRunner(selection);
 		selection.reason = "duckdb_cbo cost model admits backend capability analysis";
+		AppendExecutionRegionCboCostReason(selection.reason, selection.runner_cost);
 		return selection;
 	}
 
 	selection.reason = "duckdb_cbo selects vectorized physical runner before backend analysis";
 	selection.reason += ";backend_analysis=skipped";
+	AppendExecutionRegionCboCostReason(selection.reason, selection.runner_cost);
 	selection.blocker = EXECUTION_REGION_BLOCKER_DUCKDB_SELECTED_VECTORIZED;
 	return selection;
 }
@@ -249,11 +272,13 @@ SelectExecutionRegionPhysicalRunner(const PhysicalRunnerCostParameters &cost_par
 		selection.reason = "duckdb_cbo selects ";
 		selection.reason += ExecutionRegionDecisionRunnerName(selection.SelectedRunner());
 		selection.reason += " physical runner";
+		AppendExecutionRegionCboCostReason(selection.reason, selection.runner_cost);
 		return selection;
 	}
 
-	selection.reason = "duckdb_cbo selects vectorized physical runner;";
-	selection.reason += ExecutionRegionLoweringEventReason(lowering_plan, record_detailed_telemetry);
+	selection.reason = "duckdb_cbo selects vectorized physical runner";
+	AppendExecutionRegionCboCostReason(selection.reason, selection.runner_cost);
+	selection.reason += ";" + ExecutionRegionLoweringEventReason(lowering_plan, record_detailed_telemetry);
 	selection.blocker = EXECUTION_REGION_BLOCKER_DUCKDB_SELECTED_VECTORIZED;
 	return selection;
 }

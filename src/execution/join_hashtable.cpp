@@ -1499,19 +1499,202 @@ void ScanStructure::GatherResult(Vector &result, const idx_t count, const idx_t 
 
 void JoinHashTable::GatherRHS(Vector &row_ptrs, const SelectionVector &ptr_sel, const idx_t count, DataChunk &result,
                               idx_t rhs_col_offset) const {
+	for (idx_t col_idx = 0; col_idx < output_columns.size(); col_idx++) {
+		GatherRHSColumn(row_ptrs, ptr_sel, count, col_idx, result.data[rhs_col_offset + col_idx]);
+	}
+}
+
+static bool CanGatherRHSColumnFlat(const LogicalType &type) {
+	switch (type.InternalType()) {
+	case PhysicalType::BOOL:
+	case PhysicalType::INT8:
+	case PhysicalType::INT16:
+	case PhysicalType::INT32:
+	case PhysicalType::INT64:
+	case PhysicalType::INT128:
+	case PhysicalType::UINT8:
+	case PhysicalType::UINT16:
+	case PhysicalType::UINT32:
+	case PhysicalType::UINT64:
+	case PhysicalType::UINT128:
+	case PhysicalType::FLOAT:
+	case PhysicalType::DOUBLE:
+	case PhysicalType::INTERVAL:
+		return true;
+	default:
+		return false;
+	}
+}
+
+static bool CanExposeRHSColumnSource(const LogicalType &type) {
+	if (CanGatherRHSColumnFlat(type)) {
+		return true;
+	}
+	return type.InternalType() == PhysicalType::VARCHAR;
+}
+
+template <class T>
+static void GatherRHSFixedColumnFromRows(Vector &row_ptrs, const SelectionVector &ptr_sel, idx_t count,
+                                         idx_t layout_offset, Vector &result) {
+	result.SetVectorType(VectorType::FLAT_VECTOR);
+	FlatVector::ValidityMutable(result).Reset(count);
+	auto row_pointer_data = FlatVector::GetData<data_ptr_t>(row_ptrs);
+	auto result_data = FlatVector::GetDataMutable<T>(result);
+	for (idx_t row_idx = 0; row_idx < count; row_idx++) {
+		const auto ptr_idx = ptr_sel.get_index(row_idx);
+		memcpy(result_data + row_idx, row_pointer_data[ptr_idx] + layout_offset, sizeof(T));
+	}
+	FlatVector::SetSize(result, count_t(count));
+}
+
+static bool GatherRHSFixedColumnFromRows(Vector &row_ptrs, const SelectionVector &ptr_sel, idx_t count,
+                                         idx_t layout_offset, Vector &result) {
+	switch (result.GetType().InternalType()) {
+	case PhysicalType::BOOL:
+		GatherRHSFixedColumnFromRows<bool>(row_ptrs, ptr_sel, count, layout_offset, result);
+		return true;
+	case PhysicalType::INT8:
+		GatherRHSFixedColumnFromRows<int8_t>(row_ptrs, ptr_sel, count, layout_offset, result);
+		return true;
+	case PhysicalType::INT16:
+		GatherRHSFixedColumnFromRows<int16_t>(row_ptrs, ptr_sel, count, layout_offset, result);
+		return true;
+	case PhysicalType::INT32:
+		GatherRHSFixedColumnFromRows<int32_t>(row_ptrs, ptr_sel, count, layout_offset, result);
+		return true;
+	case PhysicalType::INT64:
+		GatherRHSFixedColumnFromRows<int64_t>(row_ptrs, ptr_sel, count, layout_offset, result);
+		return true;
+	case PhysicalType::INT128:
+		GatherRHSFixedColumnFromRows<hugeint_t>(row_ptrs, ptr_sel, count, layout_offset, result);
+		return true;
+	case PhysicalType::UINT8:
+		GatherRHSFixedColumnFromRows<uint8_t>(row_ptrs, ptr_sel, count, layout_offset, result);
+		return true;
+	case PhysicalType::UINT16:
+		GatherRHSFixedColumnFromRows<uint16_t>(row_ptrs, ptr_sel, count, layout_offset, result);
+		return true;
+	case PhysicalType::UINT32:
+		GatherRHSFixedColumnFromRows<uint32_t>(row_ptrs, ptr_sel, count, layout_offset, result);
+		return true;
+	case PhysicalType::UINT64:
+		GatherRHSFixedColumnFromRows<uint64_t>(row_ptrs, ptr_sel, count, layout_offset, result);
+		return true;
+	case PhysicalType::UINT128:
+		GatherRHSFixedColumnFromRows<uhugeint_t>(row_ptrs, ptr_sel, count, layout_offset, result);
+		return true;
+	case PhysicalType::FLOAT:
+		GatherRHSFixedColumnFromRows<float>(row_ptrs, ptr_sel, count, layout_offset, result);
+		return true;
+	case PhysicalType::DOUBLE:
+		GatherRHSFixedColumnFromRows<double>(row_ptrs, ptr_sel, count, layout_offset, result);
+		return true;
+	case PhysicalType::INTERVAL:
+		GatherRHSFixedColumnFromRows<interval_t>(row_ptrs, ptr_sel, count, layout_offset, result);
+		return true;
+	default:
+		return false;
+	}
+}
+
+bool JoinHashTable::TryGatherRHSColumnFlat(Vector &row_ptrs, const SelectionVector &ptr_sel, const idx_t count,
+                                           idx_t rhs_output_idx, Vector &result) const {
+	if (rhs_output_idx >= output_columns.size() || row_ptrs.GetVectorType() != VectorType::FLAT_VECTOR) {
+		return false;
+	}
+	const auto output_col_idx = output_columns[rhs_output_idx];
+	const auto &result_type = layout_ptr->GetTypes()[output_col_idx];
+	if (result.GetType() != result_type || !CanGatherRHSColumnFlat(result_type)) {
+		return false;
+	}
+	if (count == 0) {
+		result.SetVectorType(VectorType::FLAT_VECTOR);
+		FlatVector::SetSize(result, 0);
+		return true;
+	}
+	if (use_dict_emission) {
+		if (rhs_output_idx >= dict_arrays.size()) {
+			throw InternalException("JoinHashTable RHS dictionary output column index out of range");
+		}
+		const auto ptrs = FlatVector::GetData<data_ptr_t>(row_ptrs);
+		SelectionVector build_sel_vec(count);
+		for (idx_t row_idx = 0; row_idx < count; row_idx++) {
+			const auto ptr_idx = ptr_sel.get_index(row_idx);
+			build_sel_vec.set_index(row_idx, Load<uint32_t>(ptrs[ptr_idx] + pointer_offset));
+		}
+		result.SetVectorType(VectorType::FLAT_VECTOR);
+		VectorOperations::Copy(dict_arrays[rhs_output_idx]->data, result, build_sel_vec,
+		                       dict_arrays[rhs_output_idx]->data.size(), 0, 0, count);
+		FlatVector::SetSize(result, count_t(count));
+		return true;
+	}
+	if (layout_ptr->CanHaveNull()) {
+		return false;
+	}
+	return GatherRHSFixedColumnFromRows(row_ptrs, ptr_sel, count, layout_ptr->GetOffsets()[output_col_idx], result);
+}
+
+bool JoinHashTable::TryGetRHSFixedColumnSource(idx_t rhs_output_idx,
+                                               ExecutionHashJoinRHSFixedColumnSource &source) const {
+	source = ExecutionHashJoinRHSFixedColumnSource();
+	if (rhs_output_idx >= output_columns.size()) {
+		source.blocker = "hash-join-rhs-output-index-out-of-range";
+		return false;
+	}
+	if (use_dict_emission) {
+		source.blocker = "hash-join-rhs-source-dictionary-emission";
+		return false;
+	}
+	if (!layout_ptr) {
+		source.blocker = "hash-join-rhs-source-missing-layout";
+		return false;
+	}
+	const auto output_col_idx = output_columns[rhs_output_idx];
+	const auto &layout_types = layout_ptr->GetTypes();
+	const auto &layout_offsets = layout_ptr->GetOffsets();
+	if (output_col_idx >= layout_types.size() || output_col_idx >= layout_offsets.size()) {
+		source.blocker = "hash-join-rhs-source-layout-index-out-of-range";
+		return false;
+	}
+	const auto &type = layout_types[output_col_idx];
+	if (!CanExposeRHSColumnSource(type)) {
+		source.blocker = "hash-join-rhs-source-unsupported-type";
+		return false;
+	}
+	source.ready = true;
+	source.type = type;
+	source.physical_type = type.InternalType();
+	source.rhs_output_idx = rhs_output_idx;
+	source.layout_column_idx = output_col_idx;
+	source.layout_column_count = layout_ptr->ColumnCount();
+	source.layout_offset = layout_offsets[output_col_idx];
+	source.all_valid = layout_ptr->CannotHaveNull();
+	return true;
+}
+
+void JoinHashTable::GatherRHSColumn(Vector &row_ptrs, const SelectionVector &ptr_sel, const idx_t count,
+                                    idx_t rhs_output_idx, Vector &result) const {
+	if (rhs_output_idx >= output_columns.size()) {
+		throw InternalException("JoinHashTable RHS output column index out of range");
+	}
 	if (use_dict_emission) {
 		const auto ptrs = FlatVector::GetData<data_ptr_t>(row_ptrs);
-		EmitDictVectors(ptrs, ptr_sel, count, result, rhs_col_offset);
+		if (rhs_output_idx >= dict_arrays.size()) {
+			throw InternalException("JoinHashTable RHS dictionary output column index out of range");
+		}
+		SelectionVector build_sel_vec(count);
+		for (idx_t row_idx = 0; row_idx < count; row_idx++) {
+			const auto ptr_idx = ptr_sel.get_index(row_idx);
+			build_sel_vec.set_index(row_idx, Load<uint32_t>(ptrs[ptr_idx] + pointer_offset));
+		}
+		result.Dictionary(dict_arrays[rhs_output_idx], build_sel_vec, count);
 		return;
 	}
 	const auto &result_sel = *FlatVector::IncrementalSelectionVector();
-	for (idx_t col_idx = 0; col_idx < output_columns.size(); col_idx++) {
-		auto &vector = result.data[rhs_col_offset + col_idx];
-		const auto output_col_idx = output_columns[col_idx];
-		D_ASSERT(vector.GetType() == layout_ptr->GetTypes()[output_col_idx]);
-		data_collection->Gather(row_ptrs, ptr_sel, count, output_col_idx, vector, result_sel, nullptr);
-		FlatVector::SetSize(vector, count_t(count));
-	}
+	const auto output_col_idx = output_columns[rhs_output_idx];
+	D_ASSERT(result.GetType() == layout_ptr->GetTypes()[output_col_idx]);
+	data_collection->Gather(row_ptrs, ptr_sel, count, output_col_idx, result, result_sel, nullptr);
+	FlatVector::SetSize(result, count_t(count));
 }
 
 void ScanStructure::UpdateCompactionBuffer(idx_t base_count, SelectionVector &result_vector, idx_t result_count) {

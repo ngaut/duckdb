@@ -1038,6 +1038,16 @@ TEST_CASE("JIT CBO admits large scan-filtered narrow two-join grouped aggregate 
 	REQUIRE_FALSE(profile.selected_accelerated_runner);
 
 	input.estimated_cardinality = 59986052;
+	input.generated_stage_count = 4;
+	input.expression_cost = 1425;
+	input.reference_varchar_projection_count = 3;
+	profile = DuckDBCostModel::SelectPhysicalRunner(input, parameters);
+	REQUIRE(profile.funded_protocol_rule == "scan_filtered_narrow_two_join_grouped_aggregate");
+	REQUIRE(profile.selected_accelerated_runner);
+
+	input.generated_stage_count = 2;
+	input.expression_cost = 122;
+	input.reference_varchar_projection_count = 0;
 	input.source_filter_count = 1;
 	profile = DuckDBCostModel::SelectPhysicalRunner(input, parameters);
 	REQUIRE_FALSE(profile.selected_accelerated_runner);
@@ -1651,6 +1661,10 @@ TEST_CASE("SLJIT native integer projection elides proven overflow checks", "[api
 	    [](const ExecutionRegionEvent &event) {
 		    RequireGeneratedMachineCodeRegion(event);
 		    REQUIRE(StringUtil::Contains(event.reason, "region-lowering:native=3"));
+		    REQUIRE(StringUtil::Contains(event.reason, "backend_native="));
+		    REQUIRE(StringUtil::Contains(event.reason, "backend_input_format="));
+		    REQUIRE(StringUtil::Contains(event.reason, "backend_output_format="));
+		    REQUIRE(StringUtil::Contains(event.reason, "backend_selection_source="));
 		    REQUIRE(StringUtil::Contains(event.ir, "native:integer-add-constant:no-overflow"));
 		    REQUIRE(StringUtil::Contains(event.ir, "native:integer-add-references:no-overflow"));
 		    REQUIRE(StringUtil::Contains(event.ir, "native:bigint-add-constant:no-overflow"));
@@ -2613,6 +2627,8 @@ TEST_CASE("JIT diagnostic tracing analyzes fused contract boundary regions", "[a
 	    [](const ExecutionRegionEvent &event) {
 		    REQUIRE(event.selected_runner == ExecutionRunnerKind::VECTORIZED);
 		    REQUIRE(StringUtil::Contains(event.reason, "source-contract-blocker"));
+		    REQUIRE(StringUtil::Contains(event.reason, "backend_native=projection:1|ungrouped-aggregate:1"));
+		    REQUIRE(StringUtil::Contains(event.reason, "backend_boundary=table-scan:1"));
 	    });
 
 	for (auto &event : manager.GetEvents()) {

@@ -561,7 +561,7 @@ TEST_CASE("JIT generic grouped primitive aggregate payload lanes use native stat
 	REQUIRE(found_fused_runtime);
 }
 
-TEST_CASE("JIT regular hash aggregate updates existing groups directly", "[api][jit]") {
+TEST_CASE("JIT regular hash aggregate updates existing groups through find-or-create", "[api][jit]") {
 	DuckDB db;
 	Connection con(db);
 	auto &manager = ExecutionRegionManager::Get(*con.context);
@@ -608,12 +608,15 @@ TEST_CASE("JIT regular hash aggregate updates existing groups directly", "[api][
 			    return false;
 		    }
 		    auto stage_counts = EventGeneratedStageCountBreakdown(event);
-		    return StringUtil::Contains(stage_counts, "direct_existing_grouped_primitive_update=") &&
-		           StringUtil::Contains(stage_counts, "find_existing.fast_existing=");
+		    return StringUtil::Contains(stage_counts, "direct_new_grouped_primitive_update=") &&
+		           StringUtil::Contains(stage_counts, "find_or_create_fast.probe=");
 	    },
 	    [](const ExecutionRegionEvent &event) {
-		    REQUIRE(
-		        StringUtil::Contains(EventGeneratedStageCountBreakdown(event), "direct_existing.primitive_update="));
+		    REQUIRE(StringUtil::Contains(EventGeneratedStageCountBreakdown(event), "direct_new.primitive_update="));
+		    REQUIRE(StringUtil::Contains(EventJitRuntimePathCounts(event),
+		                                 "aggregate_update.direct_new_grouped_primitive_update="));
+		    REQUIRE(StringUtil::Contains(EventJitMaterializationBoundaryCounts(event),
+		                                 "aggregate_update.direct_state_update="));
 	    });
 }
 
@@ -653,11 +656,16 @@ TEST_CASE("JIT regular hash aggregate appends new groups directly", "[api][jit]"
 			    return false;
 		    }
 		    auto stage_counts = EventGeneratedStageCountBreakdown(event);
-		    return StringUtil::Contains(stage_counts, "direct_new_grouped_primitive_update=") &&
-		           StringUtil::Contains(stage_counts, "find_or_create_fast.append_new_groups=");
+		    return StringUtil::Contains(stage_counts, "direct_append_new_grouped_primitive_update=") &&
+		           StringUtil::Contains(stage_counts, "find_new.append_new_groups=");
 	    },
 	    [](const ExecutionRegionEvent &event) {
-		    REQUIRE(StringUtil::Contains(EventGeneratedStageCountBreakdown(event), "direct_new.primitive_update="));
+		    REQUIRE(
+		        StringUtil::Contains(EventGeneratedStageCountBreakdown(event), "direct_append_new.primitive_update="));
+		    REQUIRE(StringUtil::Contains(EventJitRuntimePathCounts(event),
+		                                 "aggregate_update.direct_append_new_grouped_primitive_update="));
+		    REQUIRE(StringUtil::Contains(EventJitMaterializationBoundaryCounts(event),
+		                                 "aggregate_update.direct_state_update="));
 	    });
 }
 
@@ -724,13 +732,25 @@ TEST_CASE("JIT regular hash aggregate fuses typed expression payloads with nativ
 	    },
 	    [](const ExecutionRegionEvent &event) {
 		    auto stage_counts = EventGeneratedStageCountBreakdown(event);
-		    const bool has_fused_grouped_update =
-		        StringUtil::Contains(stage_counts, "aggregate_update.direct_append_new_grouped_fused_payload_update") ||
+		    const bool has_append_new_update =
+		        StringUtil::Contains(stage_counts, "aggregate_update.direct_append_new_grouped_fused_payload_update");
+		    const bool has_new_update =
 		        StringUtil::Contains(stage_counts, "aggregate_update.direct_new_grouped_fused_payload_update");
+		    const bool has_fused_grouped_update = has_append_new_update || has_new_update;
 		    REQUIRE(has_fused_grouped_update);
 		    REQUIRE_FALSE(StringUtil::Contains(stage_counts, "aggregate_update.direct_new_grouped_state_addresses"));
 		    REQUIRE_FALSE(StringUtil::Contains(stage_counts, "aggregate_update.primitive_payload_update_fused="));
 		    REQUIRE_FALSE(StringUtil::Contains(stage_counts, "aggregate_update.resolve_grouped_state_addresses="));
+		    auto boundary_counts = EventJitMaterializationBoundaryCounts(event);
+		    if (has_append_new_update) {
+			    REQUIRE(StringUtil::Contains(boundary_counts,
+			                                 "aggregate_update.state_address_selection_append_new_update="));
+		    }
+		    if (has_new_update) {
+			    REQUIRE(StringUtil::Contains(boundary_counts, "aggregate_update.state_address_selection_new_update="));
+			    REQUIRE_FALSE(
+			        StringUtil::Contains(boundary_counts, "aggregate_update.address_buffer_callback_new_update="));
+		    }
 	    });
 }
 
@@ -786,6 +806,22 @@ TEST_CASE("JIT regular hash aggregate fuses typed expression payloads for existi
 	    [](const ExecutionRegionEvent &event) {
 		    return EventPhase(event) == "runtime" && event.backend_name == "sljit" &&
 		           StringUtil::Contains(EventGeneratedStageCountBreakdown(event),
+		                                "aggregate_update.direct_new_grouped_fused_payload_update=");
+	    },
+	    [](const ExecutionRegionEvent &event) {
+		    auto stage_counts = EventGeneratedStageCountBreakdown(event);
+		    REQUIRE(StringUtil::Contains(stage_counts, "aggregate_update.direct_new_grouped_fused_payload_update"));
+		    REQUIRE_FALSE(StringUtil::Contains(stage_counts, "aggregate_update.resolve_grouped_state_addresses="));
+		    auto boundary_counts = EventJitMaterializationBoundaryCounts(event);
+		    REQUIRE(StringUtil::Contains(boundary_counts, "aggregate_update.state_address_selection_new_update="));
+		    REQUIRE_FALSE(StringUtil::Contains(boundary_counts, "aggregate_update.address_buffer_callback_new_update="));
+	    });
+
+	RequireJitEvent(
+	    manager,
+	    [](const ExecutionRegionEvent &event) {
+		    return EventPhase(event) == "runtime" && event.backend_name == "sljit" &&
+		           StringUtil::Contains(EventGeneratedStageCountBreakdown(event),
 		                                "aggregate_update.direct_existing_grouped_fused_payload_update=");
 	    },
 	    [](const ExecutionRegionEvent &event) {
@@ -793,6 +829,11 @@ TEST_CASE("JIT regular hash aggregate fuses typed expression payloads for existi
 		    REQUIRE(
 		        StringUtil::Contains(stage_counts, "aggregate_update.direct_existing_grouped_fused_payload_update"));
 		    REQUIRE_FALSE(StringUtil::Contains(stage_counts, "aggregate_update.resolve_grouped_state_addresses="));
+		    auto boundary_counts = EventJitMaterializationBoundaryCounts(event);
+		    REQUIRE(StringUtil::Contains(boundary_counts,
+		                                 "aggregate_update.state_address_selection_existing_update="));
+		    REQUIRE_FALSE(
+		        StringUtil::Contains(boundary_counts, "aggregate_update.address_buffer_callback_existing_update="));
 	    });
 }
 
@@ -1109,6 +1150,13 @@ TEST_CASE("JIT fuses TPC-H Q1 shaped perfect-hash aggregate payloads", "[api][ji
 	    },
 	    [](const ExecutionRegionEvent &event) {
 		    RequireGeneratedMachineCodeRegion(event);
+		    REQUIRE(StringUtil::Contains(event.reason, "backend_source_validity=may-have-null:6"));
+		    REQUIRE(StringUtil::Contains(event.reason, "backend_group_key_type=uint8:2"));
+		    REQUIRE(StringUtil::Contains(event.reason, "backend_payload_type=int64:1|decimal64:5"));
+		    REQUIRE(StringUtil::Contains(
+		        event.reason,
+		        "backend_aggregate=perfect_hash_update:1|primitive_payload_update:1|grouped_state_address_lookup:1|"
+		        "generated_perfect_hash_lookup:1"));
 		    REQUIRE(StringUtil::Contains(event.ir, "group_expressions=native:string-compress"));
 		    REQUIRE(StringUtil::Contains(event.ir, "primitive_payloads=native:reference"));
 		    REQUIRE(StringUtil::Contains(event.ir, "native:typed-expression-tree"));
@@ -1387,6 +1435,8 @@ TEST_CASE("JIT hash aggregate cast-only keys use native state addresses", "[api]
 		}
 		found_hash_state_address_update = true;
 		RequireGeneratedMachineCodeRegion(event);
+		REQUIRE(StringUtil::Contains(event.reason, "backend_aggregate=hash_update:1|primitive_payload_update:1|"
+		                                           "grouped_state_address_lookup:1|native_state_address_lookup:1"));
 		REQUIRE(StringUtil::Contains(event.reason, "grouped_state_lookup=native-state-address"));
 		REQUIRE(StringUtil::Contains(event.reason, "native_hash_aggregate_lookup_blocker="
 		                                           "hash-aggregate-generated-lookup-backend-lowering-missing"));

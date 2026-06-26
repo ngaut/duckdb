@@ -26,6 +26,7 @@ from tpch_common import (
     RUNNER_COST_COMPONENT_FIELDS,
     SUMMARY_FIELDS,
 )
+from shape_inventory import verify_shape_inventory
 
 POLICY_ORDER = {policy: index for index, policy in enumerate(DEFAULT_POLICIES)}
 DEFAULT_MIN_AUTO_SPEEDUP = 0.98
@@ -114,6 +115,18 @@ def verify_counters(rows: list[dict], queries: list[str], policies: list[str], r
             require(row_int(row, "runner_cost_startup_cost") >= 0, f"counters.csv: invalid runner cost: {row}")
             require(row_int(row, "runner_cost_rows") > 0, f"counters.csv: missing runner cost rows: {row}")
             require(row_int(row, "runner_cost_batches") > 0, f"counters.csv: missing runner cost batches: {row}")
+            selection_reason = row.get("runner_cost_selection_reason", "")
+            require(selection_reason, f"counters.csv: missing runner cost reason: {row}")
+            if row_int(row, "runner_cost_selected_accelerated_runner_count") > 0:
+                require(
+                    selection_reason.startswith("admitted_"),
+                    f"counters.csv: selected runner missing admission reason: {row}",
+                )
+            else:
+                require(
+                    selection_reason.startswith("rejected_"),
+                    f"counters.csv: vectorized runner missing rejection reason: {row}",
+                )
             if row_int(row, "runner_cost_saved_work_per_batch") != 0:
                 has_cost_evidence = any(row_int(row, field) != 0 for field in RUNNER_COST_COMPONENT_FIELDS)
                 require(has_cost_evidence, f"counters.csv: missing runner cost components: {row}")
@@ -229,6 +242,7 @@ def main() -> int:
         args.min_auto_speedup,
         args.auto_no_decision_noise_s,
     )
+    verify_shape_inventory(trace_dir, queries, policies)
     print(f"verified TPC-H JIT benchmark: {args.trace_dir.resolve()}")
     return 0
 

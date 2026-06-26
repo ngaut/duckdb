@@ -15,6 +15,8 @@
 #include "duckdb/common/allocator.hpp"
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/mutex.hpp"
+#include "duckdb/common/operator/cast_operators.hpp"
+#include "duckdb/common/types/date.hpp"
 #include "duckdb/common/types/hash.hpp"
 #include "duckdb/common/types/hugeint.hpp"
 #include "duckdb/common/types/uhugeint.hpp"
@@ -23,6 +25,7 @@
 #include "duckdb/execution/execution_region_backend.hpp"
 #include "duckdb/execution/execution_operator_runtime.hpp"
 #include "duckdb/execution/execution_region_runtime.hpp"
+#include "duckdb/execution/join_hashtable.hpp"
 #include "duckdb/main/client_context.hpp"
 #include "duckdb/planner/filter/table_filter_functions.hpp"
 
@@ -160,6 +163,23 @@ static idx_t SljitBatchedSourceContractFetchBudget(idx_t max_chunks) {
 		return max_idx;
 	}
 	return max_chunks * SOURCE_FETCHES_PER_DOWNSTREAM_BATCH;
+}
+
+static void SljitChargeDownstreamRows(idx_t &processed_rows, idx_t rows) {
+	const auto max_idx = NumericLimits<idx_t>::Maximum();
+	if (processed_rows >= max_idx - rows) {
+		processed_rows = max_idx;
+		return;
+	}
+	processed_rows += rows;
+}
+
+static bool SljitDownstreamRowBudgetReached(idx_t processed_rows, idx_t max_chunks) {
+	const auto max_idx = NumericLimits<idx_t>::Maximum();
+	if (max_chunks >= max_idx / STANDARD_VECTOR_SIZE) {
+		return false;
+	}
+	return processed_rows >= max_chunks * STANDARD_VECTOR_SIZE;
 }
 
 static const sel_t *SljitCanonicalizeCommonSelection(vector<const sel_t *> &source_sel,
@@ -320,24 +340,27 @@ static inline int32_t SljitCastHashJoinKeyInt64ToInt32(const SljitNativeHashJoin
 }
 
 static inline uint64_t SljitBloomFilterMask(hash_t hash) {
-	static constexpr idx_t N_BITS = 4;
-	static constexpr uint64_t SHIFT_MASK = 0x3F3F3F3F3F3F3F3F;
-	const uint64_t shifts = hash & SHIFT_MASK;
-	const auto shifts_8 = reinterpret_cast<const uint8_t *>(&shifts);
-	uint64_t mask = 0;
-	for (idx_t bit_idx = 8 - N_BITS; bit_idx < 8; bit_idx++) {
-		mask |= (1ULL << shifts_8[bit_idx]);
-	}
-	return mask;
+	return BloomFilter::GetMask(hash);
+}
+
+static inline bool SljitBloomFilterMayContainKnownPresent(const uint64_t *bits, uint64_t bitmask, hash_t hash) {
+	const auto slot = bits[hash & bitmask];
+	const auto mask = SljitBloomFilterMask(hash);
+	return (slot & mask) == mask;
 }
 
 static inline bool SljitBloomFilterMayContain(const SljitNativeHashJoinProbeInput &input, hash_t hash) {
-	if (!input.bloom_filter_bits) {
+	return !input.bloom_filter_bits ||
+	       SljitBloomFilterMayContainKnownPresent(input.bloom_filter_bits, input.bloom_filter_bitmask, hash);
+}
+
+template <bool HAS_BLOOM>
+static inline bool SljitBloomFilterMayContainTemplated(const SljitNativeHashJoinProbeInput &input, hash_t hash) {
+	if constexpr (!HAS_BLOOM) {
 		return true;
+	} else {
+		return SljitBloomFilterMayContainKnownPresent(input.bloom_filter_bits, input.bloom_filter_bitmask, hash);
 	}
-	const auto slot = input.bloom_filter_bits[hash & input.bloom_filter_bitmask];
-	const auto mask = SljitBloomFilterMask(hash);
-	return (slot & mask) == mask;
 }
 
 static bool SljitHashJoinMatchedProbeOutputMode(ExecutionHashJoinProbeOutputMode mode) {
@@ -436,13 +459,15 @@ static bool SljitHashJoinCanUseInt64PairProbe(const SljitNativeHashJoinProbePlan
 template <bool SELECTED, bool USE_SALT, bool HAS_BLOOM>
 static void ExecuteAllValidInt64PairNoChainProbe(const SljitNativeHashJoinProbePlan &plan,
                                                  SljitNativeHashJoinProbeInput &input) {
-	const auto key0_data = reinterpret_cast<const uint64_t *>(input.source_data[0]);
-	const auto key1_data = reinterpret_cast<const uint64_t *>(input.source_data[1]);
-	const auto entries = reinterpret_cast<const ht_entry_t *>(input.entries);
-	const sel_t *key_sel = nullptr;
+	const auto key0_data = reinterpret_cast<const uint64_t *__restrict>(input.source_data[0]);
+	const auto key1_data = reinterpret_cast<const uint64_t *__restrict>(input.source_data[1]);
+	const auto entries = reinterpret_cast<const ht_entry_t *__restrict>(input.entries);
+	const sel_t *__restrict key_sel = nullptr;
 	if (SELECTED) {
 		key_sel = input.source_sel[0];
 	}
+	data_ptr_t *__restrict row_pointers = input.row_pointers;
+	sel_t *__restrict match_sel = input.match_sel;
 	auto selected_count = input.selected_count;
 	const auto key0_offset = plan.keys[0].key_layout_offset;
 	const auto key1_offset = plan.keys[1].key_layout_offset;
@@ -454,7 +479,6 @@ static void ExecuteAllValidInt64PairNoChainProbe(const SljitNativeHashJoinProbeP
 		auto key0 = key0_data[source_idx];
 		auto key1 = key1_data[source_idx];
 		auto hash = SljitHashJoinCombineHashScalar(Hash<uint64_t>(key0), Hash<uint64_t>(key1));
-		auto salt = ht_entry_t::ExtractSalt(hash);
 		auto ht_offset = UnsafeNumericCast<idx_t>(hash & bitmask);
 		while (true) {
 			const auto next_row_idx = row_idx + 1;
@@ -462,18 +486,20 @@ static void ExecuteAllValidInt64PairNoChainProbe(const SljitNativeHashJoinProbeP
 			uint64_t next_key0 = 0;
 			uint64_t next_key1 = 0;
 			hash_t next_hash = 0;
-			hash_t next_salt = 0;
 			idx_t next_ht_offset = 0;
 			if (has_next) {
 				const auto next_source_idx = SELECTED ? key_sel[next_row_idx] : UnsafeNumericCast<sel_t>(next_row_idx);
 				next_key0 = key0_data[next_source_idx];
 				next_key1 = key1_data[next_source_idx];
 				next_hash = SljitHashJoinCombineHashScalar(Hash<uint64_t>(next_key0), Hash<uint64_t>(next_key1));
-				next_salt = ht_entry_t::ExtractSalt(next_hash);
 				next_ht_offset = UnsafeNumericCast<idx_t>(next_hash & bitmask);
 				SljitPrefetchHashJoinEntry(entries, next_ht_offset);
 			}
-			if (!HAS_BLOOM || SljitBloomFilterMayContain(input, hash)) {
+			if (SljitBloomFilterMayContainTemplated<HAS_BLOOM>(input, hash)) {
+				hash_t salt = 0;
+				if constexpr (USE_SALT) {
+					salt = ht_entry_t::ExtractSalt(hash);
+				}
 				while (true) {
 					const auto entry_value = entries[ht_offset].GetValue();
 					if (!entry_value) {
@@ -483,8 +509,8 @@ static void ExecuteAllValidInt64PairNoChainProbe(const SljitNativeHashJoinProbeP
 						auto row_location = SljitHashJoinEntryPointer(entry_value);
 						if (SljitHashJoinKeysEqual<uint64_t>(row_location, key0_offset, key0) &&
 						    SljitHashJoinKeysEqual<uint64_t>(row_location, key1_offset, key1)) {
-							input.row_pointers[selected_count] = row_location;
-							input.match_sel[selected_count] = UnsafeNumericCast<sel_t>(row_idx);
+							row_pointers[selected_count] = row_location;
+							match_sel[selected_count] = UnsafeNumericCast<sel_t>(row_idx);
 							selected_count++;
 							break;
 						}
@@ -499,7 +525,6 @@ static void ExecuteAllValidInt64PairNoChainProbe(const SljitNativeHashJoinProbeP
 			key0 = next_key0;
 			key1 = next_key1;
 			hash = next_hash;
-			salt = next_salt;
 			ht_offset = next_ht_offset;
 		}
 	}
@@ -581,9 +606,12 @@ static bool TryExecuteFlatAllValidInt64PairChainProbe(const SljitNativeHashJoinP
 		resume_row_pointer = nullptr;
 		if (!row_location) {
 			const auto hash = SljitHashJoinCombineHashScalar(Hash<uint64_t>(key0), Hash<uint64_t>(key1));
-			const auto salt = ht_entry_t::ExtractSalt(hash);
 			auto ht_offset = UnsafeNumericCast<idx_t>(hash & input.bitmask);
 			if (SljitBloomFilterMayContain(input, hash)) {
+				hash_t salt = 0;
+				if (input.use_salt) {
+					salt = ht_entry_t::ExtractSalt(hash);
+				}
 				while (true) {
 					const auto &entry = entries[ht_offset];
 					if (!entry.IsOccupied()) {
@@ -691,9 +719,12 @@ static bool TryExecuteSelectedAllValidInt64PairChainProbe(const SljitNativeHashJ
 		resume_row_pointer = nullptr;
 		if (!row_location) {
 			const auto hash = SljitHashJoinCombineHashScalar(Hash<uint64_t>(key0), Hash<uint64_t>(key1));
-			const auto salt = ht_entry_t::ExtractSalt(hash);
 			auto ht_offset = UnsafeNumericCast<idx_t>(hash & input.bitmask);
 			if (SljitBloomFilterMayContain(input, hash)) {
+				hash_t salt = 0;
+				if (input.use_salt) {
+					salt = ht_entry_t::ExtractSalt(hash);
+				}
 				while (true) {
 					const auto &entry = entries[ht_offset];
 					if (!entry.IsOccupied()) {
@@ -881,12 +912,14 @@ static bool TryExecuteAllValidSingleKeyNotEqualPredicateChainProbe(const SljitNa
 template <class T, bool SELECTED, bool USE_SALT, bool HAS_BLOOM>
 static void ExecuteAllValidSingleKeyNoChainProbe(const SljitNativeHashJoinProbePlan &plan,
                                                  SljitNativeHashJoinProbeInput &input) {
-	const auto key_data = reinterpret_cast<const T *>(input.source_data[0]);
-	const auto entries = reinterpret_cast<const ht_entry_t *>(input.entries);
-	const sel_t *key_sel = nullptr;
+	const auto key_data = reinterpret_cast<const T *__restrict>(input.source_data[0]);
+	const auto entries = reinterpret_cast<const ht_entry_t *__restrict>(input.entries);
+	const sel_t *__restrict key_sel = nullptr;
 	if (SELECTED) {
 		key_sel = input.source_sel[0];
 	}
+	data_ptr_t *__restrict row_pointers = input.row_pointers;
+	sel_t *__restrict match_sel = input.match_sel;
 	auto selected_count = input.selected_count;
 	const auto key_offset = plan.keys[0].key_layout_offset;
 	const auto bitmask = input.bitmask;
@@ -896,7 +929,6 @@ static void ExecuteAllValidSingleKeyNoChainProbe(const SljitNativeHashJoinProbeP
 		auto source_idx = SELECTED ? key_sel[row_idx] : UnsafeNumericCast<sel_t>(row_idx);
 		auto key = key_data[source_idx];
 		auto hash = Hash<T>(key);
-		auto salt = ht_entry_t::ExtractSalt(hash);
 		auto ht_offset = UnsafeNumericCast<idx_t>(hash & bitmask);
 
 		while (true) {
@@ -904,18 +936,20 @@ static void ExecuteAllValidSingleKeyNoChainProbe(const SljitNativeHashJoinProbeP
 			const bool has_next = next_row_idx < input.count;
 			T next_key = 0;
 			hash_t next_hash = 0;
-			hash_t next_salt = 0;
 			idx_t next_ht_offset = 0;
 			if (has_next) {
 				const auto next_source_idx = SELECTED ? key_sel[next_row_idx] : UnsafeNumericCast<sel_t>(next_row_idx);
 				next_key = key_data[next_source_idx];
 				next_hash = Hash<T>(next_key);
-				next_salt = ht_entry_t::ExtractSalt(next_hash);
 				next_ht_offset = UnsafeNumericCast<idx_t>(next_hash & bitmask);
 				SljitPrefetchHashJoinEntry(entries, next_ht_offset);
 			}
 
-			if (!HAS_BLOOM || SljitBloomFilterMayContain(input, hash)) {
+			if (SljitBloomFilterMayContainTemplated<HAS_BLOOM>(input, hash)) {
+				hash_t salt = 0;
+				if constexpr (USE_SALT) {
+					salt = ht_entry_t::ExtractSalt(hash);
+				}
 				while (true) {
 					const auto entry_value = entries[ht_offset].GetValue();
 					if (!entry_value) {
@@ -925,8 +959,8 @@ static void ExecuteAllValidSingleKeyNoChainProbe(const SljitNativeHashJoinProbeP
 						auto row_location = SljitHashJoinEntryPointer(entry_value);
 						SljitPrefetchHashJoinRow(row_location, key_offset);
 						if (SljitHashJoinKeysEqual<T>(row_location, key_offset, key)) {
-							input.row_pointers[selected_count] = row_location;
-							input.match_sel[selected_count] = UnsafeNumericCast<sel_t>(row_idx);
+							row_pointers[selected_count] = row_location;
+							match_sel[selected_count] = UnsafeNumericCast<sel_t>(row_idx);
 							selected_count++;
 							break;
 						}
@@ -940,7 +974,6 @@ static void ExecuteAllValidSingleKeyNoChainProbe(const SljitNativeHashJoinProbeP
 			row_idx = next_row_idx;
 			key = next_key;
 			hash = next_hash;
-			salt = next_salt;
 			ht_offset = next_ht_offset;
 		}
 	}
@@ -953,8 +986,10 @@ static void ExecuteAllValidSingleKeyNoChainProbe(const SljitNativeHashJoinProbeP
 
 static void ExecuteFlatAllValidSingleKeyNoChainProbeInt64ToInt32(const SljitNativeHashJoinProbePlan &plan,
                                                                  SljitNativeHashJoinProbeInput &input) {
-	const auto key_data = reinterpret_cast<const int64_t *>(input.source_data[0]);
-	const auto entries = reinterpret_cast<const ht_entry_t *>(input.entries);
+	const auto key_data = reinterpret_cast<const int64_t *__restrict>(input.source_data[0]);
+	const auto entries = reinterpret_cast<const ht_entry_t *__restrict>(input.entries);
+	data_ptr_t *__restrict row_pointers = input.row_pointers;
+	sel_t *__restrict match_sel = input.match_sel;
 	auto selected_count = input.selected_count;
 	const auto key_offset = plan.keys[0].key_layout_offset;
 	const auto bitmask = input.bitmask;
@@ -963,7 +998,6 @@ static void ExecuteFlatAllValidSingleKeyNoChainProbeInt64ToInt32(const SljitNati
 	if (row_idx < input.count) {
 		auto key = SljitCastHashJoinKeyInt64ToInt32(input, key_data[row_idx]);
 		auto hash = Hash<int32_t>(key);
-		auto salt = ht_entry_t::ExtractSalt(hash);
 		auto ht_offset = UnsafeNumericCast<idx_t>(hash & bitmask);
 
 		while (true) {
@@ -971,17 +1005,19 @@ static void ExecuteFlatAllValidSingleKeyNoChainProbeInt64ToInt32(const SljitNati
 			const bool has_next = next_row_idx < input.count;
 			int32_t next_key = 0;
 			hash_t next_hash = 0;
-			hash_t next_salt = 0;
 			idx_t next_ht_offset = 0;
 			if (has_next) {
 				next_key = SljitCastHashJoinKeyInt64ToInt32(input, key_data[next_row_idx]);
 				next_hash = Hash<int32_t>(next_key);
-				next_salt = ht_entry_t::ExtractSalt(next_hash);
 				next_ht_offset = UnsafeNumericCast<idx_t>(next_hash & bitmask);
 				SljitPrefetchHashJoinEntry(entries, next_ht_offset);
 			}
 
 			if (SljitBloomFilterMayContain(input, hash)) {
+				hash_t salt = 0;
+				if (input.use_salt) {
+					salt = ht_entry_t::ExtractSalt(hash);
+				}
 				while (true) {
 					const auto entry_value = entries[ht_offset].GetValue();
 					if (!entry_value) {
@@ -991,8 +1027,8 @@ static void ExecuteFlatAllValidSingleKeyNoChainProbeInt64ToInt32(const SljitNati
 						auto row_location = SljitHashJoinEntryPointer(entry_value);
 						SljitPrefetchHashJoinRow(row_location, key_offset);
 						if (SljitHashJoinKeysEqual<int32_t>(row_location, key_offset, key)) {
-							input.row_pointers[selected_count] = row_location;
-							input.match_sel[selected_count] = UnsafeNumericCast<sel_t>(row_idx);
+							row_pointers[selected_count] = row_location;
+							match_sel[selected_count] = UnsafeNumericCast<sel_t>(row_idx);
 							selected_count++;
 							break;
 						}
@@ -1006,7 +1042,6 @@ static void ExecuteFlatAllValidSingleKeyNoChainProbeInt64ToInt32(const SljitNati
 			row_idx = next_row_idx;
 			key = next_key;
 			hash = next_hash;
-			salt = next_salt;
 			ht_offset = next_ht_offset;
 		}
 	}
@@ -1770,6 +1805,31 @@ static void RecordSljitRegionStageRuntime(ExecutionRegionRuntime &runtime, idx_t
 	runtime.RecordGeneratedStageRuntime(SljitRegionStageName(op_idx, kind, phase), SljitRegionElapsedMicros(start));
 }
 
+static void RecordSljitRegionRuntimePath(ExecutionRegionRuntime &runtime, SljitNativeRegionOpKind kind,
+                                         const char *path, idx_t count = 1) {
+	if (!runtime.TraceRuntime()) {
+		return;
+	}
+	auto runtime_path = string(SljitRegionOpKindName(kind)) + "." + path;
+	runtime.RecordJitRuntimePath(runtime_path.c_str(), count);
+}
+
+static void RecordSljitRegionMaterializationBoundary(ExecutionRegionRuntime &runtime, SljitNativeRegionOpKind kind,
+                                                     const char *boundary, idx_t row_count) {
+	if (!runtime.TraceRuntime() || row_count == 0) {
+		return;
+	}
+	auto materialization_boundary = string(SljitRegionOpKindName(kind)) + "." + boundary;
+	runtime.RecordJitMaterializationBoundary(materialization_boundary.c_str(), row_count);
+}
+
+static void RecordSljitRegionStageRuntimePath(ExecutionRegionRuntime &runtime, idx_t op_idx,
+                                              SljitNativeRegionOpKind kind, const char *phase,
+                                              std::chrono::steady_clock::time_point start) {
+	RecordSljitRegionStageRuntime(runtime, op_idx, kind, phase, start);
+	RecordSljitRegionRuntimePath(runtime, kind, phase);
+}
+
 static void RecordSljitRegionStageRuntimeWithSuffix(ExecutionRegionRuntime &runtime, idx_t op_idx,
                                                     SljitNativeRegionOpKind kind, const char *suffix,
                                                     std::chrono::steady_clock::time_point start) {
@@ -1891,6 +1951,29 @@ private:
 
 class SljitNativeRegionKernel : public ExecutionRegionKernel {
 private:
+	enum class SljitRegularHashJoinProbeInputKind : uint8_t { GENERIC, FLAT_ALL_VALID, SELECTED_ALL_VALID };
+
+	struct SljitRegularHashJoinProbeRuntimeTraits {
+		SljitRegularHashJoinProbeInputKind input_kind = SljitRegularHashJoinProbeInputKind::GENERIC;
+
+		bool UsesFlatAllValidProbe() const {
+			return input_kind == SljitRegularHashJoinProbeInputKind::FLAT_ALL_VALID;
+		}
+
+		bool UsesSelectedAllValidProbe() const {
+			return input_kind == SljitRegularHashJoinProbeInputKind::SELECTED_ALL_VALID;
+		}
+	};
+
+	struct SljitGroupedAggregateRuntimeTraits {
+		bool use_grouped_state_addresses = false;
+		bool fused_payload_update_owns_group_lookup = false;
+
+		bool NeedsGroupedStateAddressPlan() const {
+			return use_grouped_state_addresses && !fused_payload_update_owns_group_lookup;
+		}
+	};
+
 	struct SljitHashJoinProbeDrainState {
 		idx_t input_offset = 0;
 		data_ptr_t resume_row_pointer = nullptr;
@@ -2773,6 +2856,19 @@ public:
 		       ProjectionOutputsAreFixedWidth(ops[2]);
 	}
 
+	bool CanBatchHashJoinHashJoinProjectionGroupedAggregateFullPipeline() const {
+		return ops.size() == 4 && ops[0].kind == SljitNativeRegionOpKind::HASH_JOIN_PROBE &&
+		       ops[1].kind == SljitNativeRegionOpKind::HASH_JOIN_PROBE &&
+		       ops[2].kind == SljitNativeRegionOpKind::PROJECTION &&
+		       ops[3].kind == SljitNativeRegionOpKind::AGGREGATE_UPDATE &&
+		       ops[3].aggregate_update.plan.sink_info.kind == ExecutionRegionSinkKind::HASH_AGGREGATE_UPDATE &&
+		       ops[0].hash_join_probe.plan.output_mode ==
+		           ExecutionHashJoinProbeOutputMode::MATCHED_PROBE_AND_BUILD &&
+		       ops[1].hash_join_probe.plan.output_mode ==
+		           ExecutionHashJoinProbeOutputMode::MATCHED_PROBE_AND_BUILD &&
+		       ProjectionOutputsAreFixedWidth(ops[2]);
+	}
+
 	bool CanBatchProjectionHashJoinProjectionProjectionGroupedAggregateFullPipeline() const {
 		return ops.size() == 5 && ops[0].kind == SljitNativeRegionOpKind::PROJECTION &&
 		       ops[1].kind == SljitNativeRegionOpKind::HASH_JOIN_PROBE &&
@@ -2781,6 +2877,24 @@ public:
 		       ops[4].kind == SljitNativeRegionOpKind::AGGREGATE_UPDATE &&
 		       ops[4].aggregate_update.plan.sink_info.kind == ExecutionRegionSinkKind::HASH_AGGREGATE_UPDATE &&
 		       ProjectionOutputsAreFixedWidth(ops[3]);
+	}
+
+	bool CanBatchHashJoinProjectionHashJoinProjectionsGroupedAggregateFullPipeline() const {
+		if (ops.size() < 6 || ops[0].kind != SljitNativeRegionOpKind::HASH_JOIN_PROBE ||
+		    ops[1].kind != SljitNativeRegionOpKind::PROJECTION ||
+		    ops[2].kind != SljitNativeRegionOpKind::HASH_JOIN_PROBE ||
+		    ops.back().kind != SljitNativeRegionOpKind::AGGREGATE_UPDATE ||
+		    ops.back().aggregate_update.plan.sink_info.kind != ExecutionRegionSinkKind::HASH_AGGREGATE_UPDATE ||
+		    ops[0].hash_join_probe.plan.output_mode != ExecutionHashJoinProbeOutputMode::MATCHED_PROBE_AND_BUILD ||
+		    ops[2].hash_join_probe.plan.output_mode != ExecutionHashJoinProbeOutputMode::MATCHED_PROBE_AND_BUILD) {
+			return false;
+		}
+		for (idx_t op_idx = 3; op_idx + 1 < ops.size(); op_idx++) {
+			if (ops[op_idx].kind != SljitNativeRegionOpKind::PROJECTION) {
+				return false;
+			}
+		}
+		return ProjectionOutputsAreFixedWidth(ops[ops.size() - 2]);
 	}
 
 	bool OutputTypesAreFixedWidth(const vector<LogicalType> &types) const {
@@ -2952,8 +3066,7 @@ public:
 		if (priority_ref.kind != SljitNativeRegionExpressionKind::REFERENCE || priority_ref.source_index != 0 ||
 		    priority_ref.return_type.id() != LogicalTypeId::VARCHAR ||
 		    shipmode_decompress.kind != SljitNativeRegionExpressionKind::STRING_DECOMPRESS ||
-		    shipmode_decompress.source_index != 1 ||
-		    shipmode_decompress.return_type.id() != LogicalTypeId::VARCHAR) {
+		    shipmode_decompress.source_index != 1 || shipmode_decompress.return_type.id() != LogicalTypeId::VARCHAR) {
 			return false;
 		}
 
@@ -2966,8 +3079,7 @@ public:
 		}
 		auto &shipmode_compress = final_projection.projections[0].plan;
 		if (shipmode_compress.kind != SljitNativeRegionExpressionKind::STRING_COMPRESS ||
-		    shipmode_compress.source_index != 1 ||
-		    shipmode_compress.return_type.id() != LogicalTypeId::UBIGINT) {
+		    shipmode_compress.source_index != 1 || shipmode_compress.return_type.id() != LogicalTypeId::UBIGINT) {
 			return false;
 		}
 		return IsQ12PriorityCaseExpression(final_projection.projections[1], true) &&
@@ -3067,7 +3179,8 @@ public:
 		for (idx_t projection_idx = 0; projection_idx < op.projections.size(); projection_idx++) {
 			auto &plan = op.projections[projection_idx].plan;
 			if (plan.kind == SljitNativeRegionExpressionKind::REFERENCE) {
-				if (plan.source_index >= input.ColumnCount() || plan.return_type != input.data[plan.source_index].GetType() ||
+				if (plan.source_index >= input.ColumnCount() ||
+				    plan.return_type != input.data[plan.source_index].GetType() ||
 				    output.data[projection_idx].GetType() != input.data[plan.source_index].GetType()) {
 					return false;
 				}
@@ -3092,7 +3205,8 @@ public:
 				output.data[projection_idx].Reference(input.data[plan.source_index]);
 				continue;
 			}
-			if (!TryFastDecodeInlineCompressedString16(input.data[plan.source_index], count, output.data[projection_idx])) {
+			if (!TryFastDecodeInlineCompressedString16(input.data[plan.source_index], count,
+			                                           output.data[projection_idx])) {
 				return false;
 			}
 		}
@@ -3130,8 +3244,9 @@ public:
 	bool TryDirectBuildQ7SecondJoinInput(SljitRegionExecutionScratch &scratch, DataChunk &source_chunk,
 	                                     SelectionVector &first_match_selection, Vector &first_row_pointers,
 	                                     idx_t count, DataChunk &second_join_input, idx_t target_offset = 0) const {
-		if (!CanDirectBuildQ7SecondJoinInput() || source_chunk.ColumnCount() < 2 || second_join_input.ColumnCount() != 5 ||
-		    !scratch.HasOperatorBinding(1) || target_offset + count > STANDARD_VECTOR_SIZE) {
+		if (!CanDirectBuildQ7SecondJoinInput() || source_chunk.ColumnCount() < 2 ||
+		    second_join_input.ColumnCount() != 5 || !scratch.HasOperatorBinding(1) ||
+		    target_offset + count > STANDARD_VECTOR_SIZE) {
 			return false;
 		}
 		auto &layout = scratch.OperatorBinding(1).hash_join_probe.table_layout;
@@ -3291,6 +3406,2094 @@ public:
 		return true;
 	}
 
+	bool SelectedProjectionHasGeneratedExpression(const SljitExecutableRegionOp &projection_op,
+	                                              const vector<uint8_t> &skip_projection) const {
+		for (idx_t projection_idx = 0; projection_idx < projection_op.projections.size(); projection_idx++) {
+			if (projection_idx < skip_projection.size() && skip_projection[projection_idx]) {
+				continue;
+			}
+			if (projection_op.projections[projection_idx].plan.kind != SljitNativeRegionExpressionKind::REFERENCE) {
+				return true;
+			}
+		}
+		return false;
+	}
+
+	bool
+	PrepareDirectProjectionBatchTargets(DataChunk &batch, SljitExecutableRegionOp &projection_op,
+	                                    optional_ptr<const vector<idx_t>> output_to_projection,
+	                                    DirectAppendSlice &slice, vector<uint8_t> &skip_projection,
+	                                    vector<idx_t> &projection_to_output,
+	                                    optional_ptr<const vector<uint8_t>> initial_skip_projection = nullptr) const {
+		if (projection_op.kind != SljitNativeRegionOpKind::PROJECTION || projection_op.projections.empty()) {
+			return false;
+		}
+		const auto current_size = batch.size();
+		const auto target_size = current_size + slice.count;
+		if (target_size > STANDARD_VECTOR_SIZE) {
+			return false;
+		}
+
+		const auto output_count =
+		    output_to_projection ? output_to_projection->size() : projection_op.projections.size();
+		if (batch.ColumnCount() != output_count) {
+			return false;
+		}
+		slice.targets.assign(projection_op.projections.size(), nullptr);
+		slice.sources.assign(projection_op.projections.size(), DirectAppendColumnSource());
+		skip_projection.assign(projection_op.projections.size(), output_to_projection ? 1 : 0);
+		projection_to_output.assign(projection_op.projections.size(), DConstants::INVALID_INDEX);
+		if (initial_skip_projection) {
+			if (initial_skip_projection->size() > skip_projection.size()) {
+				return false;
+			}
+			for (idx_t projection_idx = 0; projection_idx < initial_skip_projection->size(); projection_idx++) {
+				if ((*initial_skip_projection)[projection_idx]) {
+					skip_projection[projection_idx] = 1;
+				}
+			}
+		}
+
+		for (idx_t output_idx = 0; output_idx < output_count; output_idx++) {
+			const auto projection_idx = output_to_projection ? (*output_to_projection)[output_idx] : output_idx;
+			if (projection_idx >= projection_op.projections.size() || slice.targets[projection_idx]) {
+				return false;
+			}
+			if (projection_idx < skip_projection.size() && skip_projection[projection_idx]) {
+				continue;
+			}
+			auto &target = batch.data[output_idx];
+			auto &projection = projection_op.projections[projection_idx].plan;
+			if (target.GetVectorType() != VectorType::FLAT_VECTOR || target.GetType() != projection.return_type ||
+			    !DirectAppendSupportsFixedSizeType(target.GetType()) || FlatVector::GetCapacity(target) < target_size) {
+				return false;
+			}
+			auto target_data = FlatVector::GetDataMutable(target);
+			if (!target_data) {
+				return false;
+			}
+			slice.targets[projection_idx] = target_data + current_size * GetTypeIdSize(target.GetType().InternalType());
+			skip_projection[projection_idx] = 0;
+			projection_to_output[projection_idx] = output_idx;
+		}
+		return SelectedProjectionHasGeneratedExpression(projection_op, skip_projection);
+	}
+
+	void FinishDirectProjectionBatchTargets(DataChunk &batch, idx_t target_size, bool new_rows_all_valid = true) const {
+		for (auto &target : batch.data) {
+			if (new_rows_all_valid) {
+				auto &validity = FlatVector::ValidityMutable(target);
+				if (validity.CanHaveNull()) {
+					for (idx_t row_idx = target.size(); row_idx < target_size; row_idx++) {
+						validity.SetValid(row_idx);
+					}
+				}
+			}
+			FlatVector::SetSize(target, target_size);
+		}
+		batch.CheckCardinality(target_size);
+	}
+
+	bool FlatFusedFixedProjectionTargetsAreBound(SljitExecutableRegionOp &projection_op,
+	                                             DirectAppendSlice &slice) const {
+		if (slice.targets.size() != projection_op.projections.size()) {
+			return false;
+		}
+		for (auto &direct_plan : projection_op.flat_fused_fixed_projection_plans) {
+			for (auto projection_idx : direct_plan.projection_indices) {
+				if (projection_idx >= slice.targets.size() || !slice.targets[projection_idx]) {
+					return false;
+				}
+			}
+		}
+		return true;
+	}
+
+	void BuildPostFusedProjectionSkip(const vector<uint8_t> &skip_projection, const vector<uint8_t> &fused_projection,
+	                                  vector<uint8_t> &post_fused_skip) const {
+		post_fused_skip = skip_projection;
+		if (post_fused_skip.size() < fused_projection.size()) {
+			post_fused_skip.resize(fused_projection.size(), 0);
+		}
+		for (idx_t projection_idx = 0; projection_idx < fused_projection.size(); projection_idx++) {
+			if (fused_projection[projection_idx]) {
+				post_fused_skip[projection_idx] = 1;
+			}
+		}
+	}
+
+	void CopyDirectProjectionResultToBatch(Vector &result, Vector &target, data_ptr_t target_data, idx_t current_size,
+	                                       idx_t count) const {
+		const bool wrote_target =
+		    result.GetVectorType() == VectorType::FLAT_VECTOR && FlatVector::GetData(result) == target_data;
+		if (wrote_target) {
+			auto &target_validity = FlatVector::ValidityMutable(target);
+			target_validity.CopySel(FlatVector::Validity(result), *FlatVector::IncrementalSelectionVector(), 0,
+			                        current_size, count);
+		} else {
+			target.Copy(result, *FlatVector::IncrementalSelectionVector(), count, 0, current_size, count);
+		}
+	}
+
+	bool DirectProjectionBatchSupportsType(const LogicalType &type) const {
+		return DirectAppendSupportsFixedSizeType(type) || type.id() == LogicalTypeId::VARCHAR;
+	}
+
+	bool ProjectionTargetCanReceiveExpression(Vector &target, const LogicalType &return_type, idx_t target_size) const {
+		return target.GetVectorType() == VectorType::FLAT_VECTOR && target.GetType() == return_type &&
+		       DirectProjectionBatchSupportsType(target.GetType()) && FlatVector::GetCapacity(target) >= target_size;
+	}
+
+	bool TryExecuteProjectionExpressionToBatch(SljitExecutableRegionExpression &expr, DataChunk &input, Vector &target,
+	                                           idx_t current_size, idx_t count, const SelectionVector *execute_sel,
+	                                           SljitExpressionAdapterScratch &adapter_scratch) {
+		if (!ProjectionTargetCanReceiveExpression(target, expr.plan.return_type, current_size + count)) {
+			return false;
+		}
+		if (DirectAppendSupportsFixedSizeType(target.GetType())) {
+			auto target_data =
+			    FlatVector::GetDataMutable(target) + current_size * GetTypeIdSize(target.GetType().InternalType());
+			Vector result(expr.plan.return_type, target_data, count);
+			ExecuteProjectionExpression(expr, input, result, execute_sel, count, adapter_scratch);
+			CopyDirectProjectionResultToBatch(result, target, target_data, current_size, count);
+			return true;
+		}
+		Vector result(expr.plan.return_type);
+		ExecuteProjectionExpression(expr, input, result, execute_sel, count, adapter_scratch);
+		target.Copy(result, *FlatVector::IncrementalSelectionVector(), count, 0, current_size, count);
+		return true;
+	}
+
+	void ExecuteProjectionExpressionsToBatch(SljitRegionExecutionScratch &scratch, idx_t projection_idx,
+	                                         SljitExecutableRegionOp &projection_op, DataChunk &input, DataChunk &batch,
+	                                         const vector<uint8_t> &skip_projection,
+	                                         const vector<idx_t> &projection_to_output) {
+		const auto current_size = batch.size();
+		const auto count = input.size();
+		for (idx_t projected_idx = 0; projected_idx < projection_op.projections.size(); projected_idx++) {
+			if (projected_idx < skip_projection.size() && skip_projection[projected_idx]) {
+				continue;
+			}
+			if (projected_idx >= projection_to_output.size() ||
+			    projection_to_output[projected_idx] == DConstants::INVALID_INDEX) {
+				throw InternalException("SLJIT direct batch projection target mapping is missing");
+			}
+			const auto output_idx = projection_to_output[projected_idx];
+			auto &target = batch.data[output_idx];
+			auto &projection = projection_op.projections[projected_idx];
+			auto target_data =
+			    FlatVector::GetDataMutable(target) + current_size * GetTypeIdSize(target.GetType().InternalType());
+			Vector result(projection.plan.return_type, target_data, count);
+			ExecuteProjectionExpression(projection, input, result, nullptr, count,
+			                            scratch.ExpressionAdapterScratch(projection_idx, projected_idx));
+			CopyDirectProjectionResultToBatch(result, target, target_data, current_size, count);
+		}
+		FinishDirectProjectionBatchTargets(batch, current_size + count, false);
+	}
+
+	void RecordDirectProjectionBatchMaterialization(ExecutionRegionRuntime &runtime, idx_t projection_idx,
+	                                                SljitExecutableRegionOp &projection_op, bool remapped_projection,
+	                                                idx_t count, std::chrono::steady_clock::time_point stage_start) {
+		RecordSljitRegionStageRuntime(runtime, projection_idx, projection_op.kind,
+		                              remapped_projection ? "post_join_direct_remap_batch_projection"
+		                                                  : "post_join_direct_batch_projection",
+		                              stage_start);
+		RecordSljitRegionMaterializationBoundary(runtime, projection_op.kind,
+		                                         remapped_projection ? "direct_remap_post_join_batch_projection"
+		                                                             : "direct_post_join_batch_projection",
+		                                         count);
+	}
+
+	void HashDirectProjectionBatch(ExecutionRegionRuntime &runtime, idx_t projection_idx,
+	                               SljitExecutableRegionOp &projection_op, bool remapped_projection, DataChunk &batch,
+	                               Vector &hashes) {
+		auto hash_start = SljitRegionStageStart(runtime);
+		batch.Hash(hashes);
+		RecordSljitRegionStageRuntime(runtime, projection_idx, projection_op.kind,
+		                              remapped_projection ? "post_join_direct_remap_batch_projection_hash"
+		                                                  : "post_join_direct_batch_projection_hash",
+		                              hash_start);
+	}
+
+	bool TryDirectMaterializeFixedProjectionToBatch(ExecutionRegionRuntime &runtime,
+	                                                SljitRegionExecutionScratch &scratch, idx_t projection_idx,
+	                                                SljitExecutableRegionOp &projection_op, DataChunk &input,
+	                                                DataChunk &batch,
+	                                                optional_ptr<const vector<idx_t>> output_to_projection = nullptr,
+	                                                optional_ptr<const vector<uint8_t>> extra_skip_projection = nullptr,
+	                                                optional_ptr<Vector> projected_hashes = nullptr) {
+		if (input.size() == 0) {
+			return false;
+		}
+
+		const auto current_size = batch.size();
+		DirectAppendSlice slice;
+		slice.source_offset = 0;
+		slice.count = input.size();
+		vector<uint8_t> skip_projection;
+		vector<idx_t> projection_to_output;
+		if (!PrepareDirectProjectionBatchTargets(batch, projection_op, output_to_projection, slice, skip_projection,
+		                                         projection_to_output, extra_skip_projection)) {
+			return false;
+		}
+
+		FixedDirectAppendSourceCache source_cache;
+		source_cache.Reset(input.ColumnCount());
+		auto source_cache_ptr = optional_ptr<FixedDirectAppendSourceCache>(&source_cache);
+		const auto stage_start = SljitRegionStageStart(runtime);
+		auto &projection_scratch = scratch.ProjectionScratch(projection_idx);
+		const bool remapped_projection = output_to_projection;
+		if (TryPrepareFlatFusedFixedProjectionSources(projection_op, input, slice.source_offset, slice.count,
+		                                              source_cache_ptr, projection_scratch) &&
+		    FlatFusedFixedProjectionTargetsAreBound(projection_op, slice)) {
+			vector<uint8_t> post_fused_skip;
+			BuildPostFusedProjectionSkip(skip_projection, projection_scratch.fused, post_fused_skip);
+			auto post_fused_skip_ptr = optional_ptr<vector<uint8_t>>(&post_fused_skip);
+			if (!TryDirectMaterializeFixedProjection(projection_op, input, nullptr, source_cache_ptr,
+			                                         post_fused_skip_ptr)) {
+				ExecuteProjectionExpressionsToBatch(scratch, projection_idx, projection_op, input, batch,
+				                                    skip_projection, projection_to_output);
+				if (projected_hashes) {
+					HashDirectProjectionBatch(runtime, projection_idx, projection_op, remapped_projection, batch,
+					                          *projected_hashes);
+				}
+				RecordDirectProjectionBatchMaterialization(runtime, projection_idx, projection_op, remapped_projection,
+				                                           input.size(), stage_start);
+				return true;
+			}
+			BindFlatFusedFixedProjectionTargets(projection_op, slice, projection_scratch);
+			RunFlatFusedFixedProjection(projection_op, slice.count, projection_scratch);
+			if (!TryDirectMaterializeFixedProjection(projection_op, input, &slice, source_cache_ptr,
+			                                         post_fused_skip_ptr,
+			                                         optional_ptr<ExecutionRegionRuntime>(&runtime), projection_idx)) {
+				throw InternalException(
+				    "SLJIT fixed fused direct batch projection source shape changed after preflight");
+			}
+		} else {
+			auto skip_projection_ptr = optional_ptr<vector<uint8_t>>(&skip_projection);
+			if (!TryDirectMaterializeFixedProjection(projection_op, input, nullptr, source_cache_ptr,
+			                                         skip_projection_ptr)) {
+				ExecuteProjectionExpressionsToBatch(scratch, projection_idx, projection_op, input, batch,
+				                                    skip_projection, projection_to_output);
+				if (projected_hashes) {
+					HashDirectProjectionBatch(runtime, projection_idx, projection_op, remapped_projection, batch,
+					                          *projected_hashes);
+				}
+				RecordDirectProjectionBatchMaterialization(runtime, projection_idx, projection_op, remapped_projection,
+				                                           input.size(), stage_start);
+				return true;
+			}
+			if (!TryDirectMaterializeFixedProjection(projection_op, input, &slice, source_cache_ptr,
+			                                         skip_projection_ptr,
+			                                         optional_ptr<ExecutionRegionRuntime>(&runtime), projection_idx)) {
+				throw InternalException("SLJIT fixed direct batch projection source shape changed after preflight");
+			}
+		}
+
+		FinishDirectProjectionBatchTargets(batch, current_size + input.size());
+		if (projected_hashes) {
+			HashDirectProjectionBatch(runtime, projection_idx, projection_op, remapped_projection, batch,
+			                          *projected_hashes);
+		}
+		RecordDirectProjectionBatchMaterialization(runtime, projection_idx, projection_op, remapped_projection,
+		                                           input.size(), stage_start);
+		return true;
+	}
+
+	struct DirectProjectionBatchPassthrough {
+		idx_t output_idx = DConstants::INVALID_INDEX;
+		Vector *source = nullptr;
+		const SelectionVector *selection = nullptr;
+		const char *trace_phase = "direct_batch_expression.passthrough";
+	};
+
+	static optional_ptr<const DirectProjectionBatchPassthrough>
+	FindDirectProjectionBatchPassthrough(optional_ptr<const vector<DirectProjectionBatchPassthrough>> passthroughs,
+	                                     idx_t output_idx) {
+		if (!passthroughs) {
+			return nullptr;
+		}
+		for (auto &passthrough : *passthroughs) {
+			if (passthrough.output_idx == output_idx) {
+				return optional_ptr<const DirectProjectionBatchPassthrough>(&passthrough);
+			}
+		}
+		return nullptr;
+	}
+
+	bool TryCopyDirectProjectionPassthroughToBatch(const DirectProjectionBatchPassthrough &passthrough, Vector &target,
+	                                               idx_t current_size, idx_t count) const {
+		if (!passthrough.source || passthrough.source->GetType() != target.GetType() ||
+		    target.GetVectorType() != VectorType::FLAT_VECTOR ||
+		    FlatVector::GetCapacity(target) < current_size + count) {
+			return false;
+		}
+		const auto &selection =
+		    passthrough.selection ? *passthrough.selection : *FlatVector::IncrementalSelectionVector();
+		target.Copy(*passthrough.source, selection, count, 0, current_size, count);
+		return true;
+	}
+
+	bool TryMaterializeSelectedProjectionToBatch(
+	    ExecutionRegionRuntime &runtime, SljitRegionExecutionScratch &scratch, idx_t projection_idx,
+	    SljitExecutableRegionOp &projection_op, DataChunk &input, DataChunk &batch,
+	    const vector<idx_t> &output_to_projection, optional_ptr<Vector> projected_hashes = nullptr,
+	    optional_ptr<const vector<DirectProjectionBatchPassthrough>> passthroughs = nullptr) {
+		if (input.size() == 0 || projection_op.kind != SljitNativeRegionOpKind::PROJECTION ||
+		    batch.ColumnCount() != output_to_projection.size() || batch.size() + input.size() > STANDARD_VECTOR_SIZE) {
+			return false;
+		}
+		const auto current_size = batch.size();
+		const auto count = input.size();
+		FixedDirectAppendSourceCache source_cache;
+		source_cache.Reset(input.ColumnCount());
+		auto source_cache_ptr = optional_ptr<FixedDirectAppendSourceCache>(&source_cache);
+		auto stage_start = SljitRegionStageStart(runtime);
+		bool all_direct_fixed = true;
+		bool used_passthrough = false;
+		for (idx_t output_idx = 0; output_idx < output_to_projection.size(); output_idx++) {
+			const auto projected_idx = output_to_projection[output_idx];
+			if (projected_idx >= projection_op.projections.size()) {
+				return false;
+			}
+			auto &projection = projection_op.projections[projected_idx];
+			auto &target = batch.data[output_idx];
+			if (target.GetVectorType() != VectorType::FLAT_VECTOR || target.GetType() != projection.plan.return_type ||
+			    FlatVector::GetCapacity(target) < current_size + count) {
+				return false;
+			}
+			auto target_data =
+			    FlatVector::GetDataMutable(target) + current_size * GetTypeIdSize(target.GetType().InternalType());
+			auto expression_stage_start =
+			    runtime.TraceRuntime() ? SljitRegionStageStart(runtime) : std::chrono::steady_clock::time_point();
+			auto passthrough = FindDirectProjectionBatchPassthrough(passthroughs, output_idx);
+			if (passthrough && TryCopyDirectProjectionPassthroughToBatch(*passthrough, target, current_size, count)) {
+				all_direct_fixed = false;
+				used_passthrough = true;
+				if (runtime.TraceRuntime()) {
+					RecordSljitRegionStageRuntime(runtime, projection_idx, projection_op.kind, passthrough->trace_phase,
+					                              expression_stage_start);
+				}
+				continue;
+			}
+			if (DirectAppendSupportsFixedSizeType(target.GetType()) &&
+			    TryDirectMaterializeFixedExpression(projection, input, target_data, 0, count, true, source_cache_ptr)) {
+				if (runtime.TraceRuntime()) {
+					RecordSljitRegionStageRuntime(runtime, projection_idx, projection_op.kind,
+					                              SljitFixedProjectionExpressionTracePhase(projection.plan),
+					                              expression_stage_start);
+				}
+				continue;
+			}
+			all_direct_fixed = false;
+			Vector result(projection.plan.return_type, target_data, count);
+			ExecuteProjectionExpression(projection, input, result, nullptr, count,
+			                            scratch.ExpressionAdapterScratch(projection_idx, projected_idx));
+			CopyDirectProjectionResultToBatch(result, target, target_data, current_size, count);
+			if (runtime.TraceRuntime()) {
+				RecordSljitRegionStageRuntime(runtime, projection_idx, projection_op.kind,
+				                              SljitFixedProjectionExpressionTracePhase(projection.plan),
+				                              expression_stage_start);
+			}
+		}
+		FinishDirectProjectionBatchTargets(batch, current_size + count, all_direct_fixed);
+		if (projected_hashes) {
+			HashDirectProjectionBatch(runtime, projection_idx, projection_op, true, batch, *projected_hashes);
+		}
+		if (used_passthrough) {
+			RecordSljitRegionRuntimePath(runtime, projection_op.kind, "direct_batch_passthrough_projection", count);
+		}
+		RecordDirectProjectionBatchMaterialization(runtime, projection_idx, projection_op, true, count, stage_start);
+		return true;
+	}
+
+	bool BuildReferenceProjectionOutputMap(const SljitExecutableRegionOp &projection_op,
+	                                       const SljitExecutableRegionOp &reference_projection_op,
+	                                       vector<idx_t> &output_to_projection) const {
+		if (projection_op.kind != SljitNativeRegionOpKind::PROJECTION ||
+		    reference_projection_op.kind != SljitNativeRegionOpKind::PROJECTION ||
+		    !ProjectionOutputsAreFixedWidth(reference_projection_op)) {
+			return false;
+		}
+		output_to_projection.clear();
+		output_to_projection.reserve(reference_projection_op.projections.size());
+		for (auto &reference_expr : reference_projection_op.projections) {
+			auto &reference = reference_expr.plan;
+			if (reference.kind != SljitNativeRegionExpressionKind::REFERENCE ||
+			    reference.source_index >= projection_op.projections.size() ||
+			    reference.return_type != projection_op.projections[reference.source_index].plan.return_type) {
+				output_to_projection.clear();
+				return false;
+			}
+			output_to_projection.push_back(reference.source_index);
+		}
+		return true;
+	}
+
+	bool AddProjectionSourceColumn(idx_t source_index, idx_t input_column_count, vector<uint8_t> &referenced) const {
+		if (source_index >= input_column_count) {
+			return false;
+		}
+		referenced[source_index] = 1;
+		return true;
+	}
+
+	bool AddProjectionSourceColumns(const vector<idx_t> &source_indices, idx_t input_column_count,
+	                                vector<uint8_t> &referenced) const {
+		for (auto source_index : source_indices) {
+			if (!AddProjectionSourceColumn(source_index, input_column_count, referenced)) {
+				return false;
+			}
+		}
+		return true;
+	}
+
+	bool AddProjectionPredicateSourceColumns(const SljitNativePredicate &predicate, idx_t input_column_count,
+	                                         vector<uint8_t> &referenced) const {
+		if (!AddProjectionSourceColumns(predicate.source_indices, input_column_count, referenced)) {
+			return false;
+		}
+		switch (predicate.kind) {
+		case SljitNativePredicateKind::REFERENCE:
+		case SljitNativePredicateKind::INTEGER_COMPARE_CONSTANT:
+		case SljitNativePredicateKind::DOUBLE_COMPARE_CONSTANT:
+		case SljitNativePredicateKind::INT128_COMPARE_CONSTANT:
+		case SljitNativePredicateKind::INTEGER_IN_LIST:
+		case SljitNativePredicateKind::INTEGER_BETWEEN:
+		case SljitNativePredicateKind::STRING_EQUAL_CONSTANT:
+		case SljitNativePredicateKind::STRING_IN_LIST_CONSTANT:
+		case SljitNativePredicateKind::STRING_PREFIX_CONSTANT:
+		case SljitNativePredicateKind::STRING_SUFFIX_CONSTANT:
+		case SljitNativePredicateKind::STRING_CONTAINS_CONSTANT:
+		case SljitNativePredicateKind::STRING_LIKE_CONSTANT:
+		case SljitNativePredicateKind::STRING_SUBSTRING_IN_LIST_CONSTANT:
+		case SljitNativePredicateKind::NULL_CHECK:
+			if (!AddProjectionSourceColumn(predicate.source_index, input_column_count, referenced)) {
+				return false;
+			}
+			break;
+		case SljitNativePredicateKind::INTEGER_COMPARE_REFERENCES:
+		case SljitNativePredicateKind::DOUBLE_COMPARE_REFERENCES:
+		case SljitNativePredicateKind::INT128_COMPARE_REFERENCES:
+			if (!AddProjectionSourceColumn(predicate.source_index, input_column_count, referenced) ||
+			    !AddProjectionSourceColumn(predicate.right_source_index, input_column_count, referenced)) {
+				return false;
+			}
+			break;
+		default:
+			break;
+		}
+		if (predicate.child && !AddProjectionPredicateSourceColumns(*predicate.child, input_column_count, referenced)) {
+			return false;
+		}
+		for (auto &child : predicate.children) {
+			if (!AddProjectionPredicateSourceColumns(*child, input_column_count, referenced)) {
+				return false;
+			}
+		}
+		return true;
+	}
+
+	bool AddProjectionExpressionSourceColumns(const SljitNativeRegionExpressionPlan &plan, idx_t input_column_count,
+	                                          vector<uint8_t> &referenced) const {
+		switch (plan.kind) {
+		case SljitNativeRegionExpressionKind::REFERENCE:
+		case SljitNativeRegionExpressionKind::INTEGER_BINARY_CONSTANT:
+		case SljitNativeRegionExpressionKind::DOUBLE_BINARY_CONSTANT:
+		case SljitNativeRegionExpressionKind::INTEGER_COMPARE_CONSTANT:
+		case SljitNativeRegionExpressionKind::INTEGER_CAST:
+		case SljitNativeRegionExpressionKind::SIGNED_TO_UNSIGNED_INTEGER_CAST:
+		case SljitNativeRegionExpressionKind::INTEGER_IN_LIST:
+		case SljitNativeRegionExpressionKind::INTEGER_BETWEEN:
+		case SljitNativeRegionExpressionKind::DECIMAL64_TO_DOUBLE:
+		case SljitNativeRegionExpressionKind::DECIMAL128_SCALE_UP:
+		case SljitNativeRegionExpressionKind::INTEGRAL_COMPRESS:
+		case SljitNativeRegionExpressionKind::INTEGRAL_DECOMPRESS:
+		case SljitNativeRegionExpressionKind::STRING_COMPRESS:
+		case SljitNativeRegionExpressionKind::STRING_DECOMPRESS:
+		case SljitNativeRegionExpressionKind::DATE_YEAR:
+		case SljitNativeRegionExpressionKind::NULL_CHECK:
+			return AddProjectionSourceColumn(plan.source_index, input_column_count, referenced);
+		case SljitNativeRegionExpressionKind::INTEGER_BINARY_REFERENCES:
+		case SljitNativeRegionExpressionKind::DOUBLE_BINARY_REFERENCES:
+		case SljitNativeRegionExpressionKind::INTEGER_COMPARE_REFERENCES:
+			return AddProjectionSourceColumn(plan.source_index, input_column_count, referenced) &&
+			       AddProjectionSourceColumn(plan.right_source_index, input_column_count, referenced);
+		case SljitNativeRegionExpressionKind::INTEGER_COALESCE:
+			if (!AddProjectionSourceColumn(plan.source_index, input_column_count, referenced)) {
+				return false;
+			}
+			if (plan.coalesce_rhs_kind == SljitNativeCoalesceRhsKind::REFERENCE &&
+			    !AddProjectionSourceColumn(plan.right_source_index, input_column_count, referenced)) {
+				return false;
+			}
+			return true;
+		case SljitNativeRegionExpressionKind::CONSTANT_OR_NULL:
+			return AddProjectionSourceColumns(plan.constant_or_null.guard_source_indices, input_column_count,
+			                                  referenced);
+		case SljitNativeRegionExpressionKind::ERROR_GUARDED_REFERENCE:
+			return AddProjectionSourceColumn(plan.source_index, input_column_count, referenced) &&
+			       AddProjectionSourceColumn(plan.guard_source_index, input_column_count, referenced);
+		case SljitNativeRegionExpressionKind::PREDICATE:
+			if (plan.predicate) {
+				return AddProjectionPredicateSourceColumns(*plan.predicate, input_column_count, referenced);
+			}
+			return AddProjectionSourceColumns(plan.expression_tree_source_indices, input_column_count, referenced);
+		case SljitNativeRegionExpressionKind::EXPRESSION_TREE:
+		case SljitNativeRegionExpressionKind::TYPED_EXPRESSION_TREE:
+			return AddProjectionSourceColumns(plan.expression_tree_source_indices, input_column_count, referenced);
+		case SljitNativeRegionExpressionKind::CONSTANT:
+			return true;
+		default:
+			return false;
+		}
+	}
+
+	bool BuildProjectionSourceColumnSet(const SljitExecutableRegionOp &projection_op, idx_t input_column_count,
+	                                    optional_ptr<const vector<idx_t>> output_to_projection,
+	                                    optional_ptr<const vector<uint8_t>> skip_projection,
+	                                    vector<uint8_t> &referenced) const {
+		if (projection_op.kind != SljitNativeRegionOpKind::PROJECTION || input_column_count == 0) {
+			return false;
+		}
+		referenced.assign(input_column_count, 0);
+		if (output_to_projection) {
+			for (auto projection_idx : *output_to_projection) {
+				if (skip_projection && projection_idx < skip_projection->size() && (*skip_projection)[projection_idx]) {
+					continue;
+				}
+				if (projection_idx >= projection_op.projections.size() ||
+				    !AddProjectionExpressionSourceColumns(projection_op.projections[projection_idx].plan,
+				                                          input_column_count, referenced)) {
+					return false;
+				}
+			}
+			return true;
+		}
+		for (idx_t projection_idx = 0; projection_idx < projection_op.projections.size(); projection_idx++) {
+			if (skip_projection && projection_idx < skip_projection->size() && (*skip_projection)[projection_idx]) {
+				continue;
+			}
+			auto &projection = projection_op.projections[projection_idx];
+			if (!AddProjectionExpressionSourceColumns(projection.plan, input_column_count, referenced)) {
+				return false;
+			}
+		}
+		return true;
+	}
+
+	static bool ProjectionSkipHasAny(const vector<uint8_t> &skip_projection) {
+		for (auto skip : skip_projection) {
+			if (skip) {
+				return true;
+			}
+		}
+		return false;
+	}
+
+	static bool OrProjectionSkips(idx_t projection_count, optional_ptr<const vector<uint8_t>> left,
+	                              optional_ptr<const vector<uint8_t>> right, vector<uint8_t> &merged,
+	                              optional_ptr<const vector<uint8_t>> &merged_ptr) {
+		merged_ptr = nullptr;
+		if (!left && !right) {
+			return true;
+		}
+		merged.assign(projection_count, 0);
+		auto merge_one = [&](const vector<uint8_t> &skip) {
+			if (skip.size() != projection_count) {
+				return false;
+			}
+			for (idx_t projection_idx = 0; projection_idx < projection_count; projection_idx++) {
+				if (skip[projection_idx]) {
+					merged[projection_idx] = 1;
+				}
+			}
+			return true;
+		};
+		if (left && !merge_one(*left)) {
+			return false;
+		}
+		if (right && !merge_one(*right)) {
+			return false;
+		}
+		merged_ptr = optional_ptr<const vector<uint8_t>>(&merged);
+		return true;
+	}
+
+	static bool SourceVectorSelectedRowsAllValid(Vector &source, const SelectionVector &sel, idx_t count) {
+		UnifiedVectorFormat source_format;
+		source.ToUnifiedFormat(source_format);
+		return SljitNormalizedSourceAllValid(source_format, SljitNormalizedSourceSelectionData(source_format), &sel,
+		                                     count);
+	}
+
+	static bool SourceVectorAllRowsAllValid(Vector &source, idx_t count) {
+		UnifiedVectorFormat source_format;
+		source.ToUnifiedFormat(source_format);
+		return SljitNormalizedSourceAllValid(source_format, SljitNormalizedSourceSelectionData(source_format), count);
+	}
+
+	bool TryMaterializeHashJoinReferenceProjectionsToBatch(
+	    ExecutionRegionRuntime &runtime, SljitRegionExecutionScratch &scratch, idx_t hash_join_idx,
+	    idx_t projection_idx, SljitExecutableRegionOp &projection_op, DataChunk &join_input,
+	    const SelectionVector &match_selection, Vector &row_pointers, DataChunk &batch,
+	    optional_ptr<const vector<idx_t>> output_to_projection, idx_t count, vector<uint8_t> &skip_projection) {
+		if (count == 0 || !scratch.HasOperatorBinding(hash_join_idx)) {
+			return false;
+		}
+		auto &binding = scratch.OperatorBinding(hash_join_idx).hash_join_probe;
+		if (!binding.ready || !binding.hash_table ||
+		    binding.layout_kind != ExecutionHashJoinProbeLayoutKind::REGULAR_HASH_TABLE ||
+		    (binding.output_mode != ExecutionHashJoinProbeOutputMode::MATCHED_PROBE_AND_BUILD &&
+		     binding.output_mode != ExecutionHashJoinProbeOutputMode::MATCHED_PROBE_ONLY)) {
+			return false;
+		}
+
+		const auto current_size = batch.size();
+		const auto target_size = current_size + count;
+		const auto output_count =
+		    output_to_projection ? output_to_projection->size() : projection_op.projections.size();
+		if (batch.ColumnCount() != output_count || target_size > STANDARD_VECTOR_SIZE) {
+			return false;
+		}
+
+		if (skip_projection.empty()) {
+			skip_projection.assign(projection_op.projections.size(), 0);
+		} else if (skip_projection.size() != projection_op.projections.size()) {
+			return false;
+		}
+		bool materialized_any = false;
+		const auto lhs_column_count = binding.lhs_output_column_indices.size();
+		const auto rhs_column_count = binding.output_mode == ExecutionHashJoinProbeOutputMode::MATCHED_PROBE_AND_BUILD
+		                                  ? binding.rhs_output_column_count
+		                                  : 0;
+		const auto join_output_column_count = lhs_column_count + rhs_column_count;
+		const auto stage_start = SljitRegionStageStart(runtime);
+
+		for (idx_t output_idx = 0; output_idx < output_count; output_idx++) {
+			const auto projected_idx = output_to_projection ? (*output_to_projection)[output_idx] : output_idx;
+			if (projected_idx >= projection_op.projections.size()) {
+				return false;
+			}
+			if (skip_projection[projected_idx]) {
+				continue;
+			}
+			auto &expr = projection_op.projections[projected_idx];
+			SljitExecutableRegionExpression remapped_expr;
+			idx_t join_output_source_index;
+			if (!TryBuildSingleSourceProjectionExpression(expr, remapped_expr, join_output_source_index) ||
+			    !ProjectionIsSingleSourceReferenceLike(remapped_expr.plan) ||
+			    join_output_source_index >= join_output_column_count) {
+				continue;
+			}
+			auto &plan = expr.plan;
+			auto &target = batch.data[output_idx];
+			if (target.GetVectorType() != VectorType::FLAT_VECTOR || target.GetType() != plan.return_type ||
+			    FlatVector::GetCapacity(target) < target_size) {
+				continue;
+			}
+
+			Vector reference(plan.return_type);
+			if (join_output_source_index < lhs_column_count) {
+				const auto input_col = binding.lhs_output_column_indices[join_output_source_index];
+				if (input_col >= join_input.ColumnCount() || join_input.data[input_col].GetType() != plan.return_type ||
+				    !SourceVectorSelectedRowsAllValid(join_input.data[input_col], match_selection, count)) {
+					continue;
+				}
+				reference.Slice(join_input.data[input_col], match_selection, count);
+			} else {
+				const auto rhs_col_idx = join_output_source_index - lhs_column_count;
+				Vector gathered_reference(plan.return_type);
+				binding.hash_table->GatherRHSColumn(row_pointers, *FlatVector::IncrementalSelectionVector(), count,
+				                                    rhs_col_idx, gathered_reference);
+				if (!SourceVectorAllRowsAllValid(gathered_reference, count)) {
+					continue;
+				}
+				reference.Reference(gathered_reference);
+			}
+			target.Copy(reference, *FlatVector::IncrementalSelectionVector(), count, 0, current_size, count);
+			skip_projection[projected_idx] = 1;
+			materialized_any = true;
+		}
+
+		if (materialized_any) {
+			RecordSljitRegionStageRuntime(runtime, projection_idx, projection_op.kind,
+			                              "post_join_direct_reference_projection", stage_start);
+			RecordSljitRegionMaterializationBoundary(runtime, projection_op.kind,
+			                                         "direct_post_join_reference_projection", count);
+		}
+		return materialized_any;
+	}
+
+	bool TryMaterializeHashJoinOutputReferenceToBatch(const ExecutionHashJoinProbeBinding &binding,
+	                                                  DataChunk &join_input, const SelectionVector &match_selection,
+	                                                  Vector &row_pointers, idx_t join_output_source_index,
+	                                                  Vector &target, idx_t current_size, idx_t count) const {
+		if (!binding.ready || !binding.hash_table ||
+		    binding.layout_kind != ExecutionHashJoinProbeLayoutKind::REGULAR_HASH_TABLE ||
+		    binding.output_mode != ExecutionHashJoinProbeOutputMode::MATCHED_PROBE_AND_BUILD ||
+		    target.GetVectorType() != VectorType::FLAT_VECTOR || !DirectProjectionBatchSupportsType(target.GetType()) ||
+		    FlatVector::GetCapacity(target) < current_size + count) {
+			return false;
+		}
+		const auto lhs_column_count = binding.lhs_output_column_indices.size();
+		if (join_output_source_index >= binding.output_types.size()) {
+			return false;
+		}
+		if (binding.output_types[join_output_source_index] != target.GetType()) {
+			return false;
+		}
+
+		Vector reference(target.GetType());
+		if (join_output_source_index < lhs_column_count) {
+			const auto input_col = binding.lhs_output_column_indices[join_output_source_index];
+			if (input_col >= join_input.ColumnCount() || join_input.data[input_col].GetType() != target.GetType() ||
+			    !SourceVectorSelectedRowsAllValid(join_input.data[input_col], match_selection, count)) {
+				return false;
+			}
+			reference.Slice(join_input.data[input_col], match_selection, count);
+		} else {
+			const auto rhs_col_idx = join_output_source_index - lhs_column_count;
+			if (rhs_col_idx >= binding.rhs_output_column_count) {
+				return false;
+			}
+			if (!ExecutionTryDirectGatherHashJoinRHSFixedColumn(binding, row_pointers, count, rhs_col_idx, reference)) {
+				binding.hash_table->GatherRHSColumn(row_pointers, *FlatVector::IncrementalSelectionVector(), count,
+				                                    rhs_col_idx, reference);
+			}
+			if (!SourceVectorAllRowsAllValid(reference, count)) {
+				return false;
+			}
+		}
+		target.Copy(reference, *FlatVector::IncrementalSelectionVector(), count, 0, current_size, count);
+		return true;
+	}
+
+	bool SelectedProjectionOutputsAreSkipped(const SljitExecutableRegionOp &projection_op,
+	                                         optional_ptr<const vector<idx_t>> output_to_projection,
+	                                         const vector<uint8_t> &skip_projection) const {
+		if (output_to_projection) {
+			for (auto projected_idx : *output_to_projection) {
+				if (projected_idx >= projection_op.projections.size() || projected_idx >= skip_projection.size() ||
+				    !skip_projection[projected_idx]) {
+					return false;
+				}
+			}
+			return true;
+		}
+		if (skip_projection.size() < projection_op.projections.size()) {
+			return false;
+		}
+		for (idx_t projected_idx = 0; projected_idx < projection_op.projections.size(); projected_idx++) {
+			if (!skip_projection[projected_idx]) {
+				return false;
+			}
+		}
+		return true;
+	}
+
+	bool TryMapHashJoinProbeLHSOutputColumn(const ExecutionHashJoinProbeBinding &binding, DataChunk &join_input,
+	                                        idx_t &source_index) const {
+		if (source_index >= binding.lhs_output_column_indices.size()) {
+			return false;
+		}
+		auto input_col = binding.lhs_output_column_indices[source_index];
+		if (input_col >= join_input.ColumnCount()) {
+			return false;
+		}
+		source_index = input_col;
+		return true;
+	}
+
+	bool TryMapHashJoinProbeLHSOutputColumns(const ExecutionHashJoinProbeBinding &binding, DataChunk &join_input,
+	                                         vector<idx_t> &source_indices) const {
+		for (auto &source_index : source_indices) {
+			if (!TryMapHashJoinProbeLHSOutputColumn(binding, join_input, source_index)) {
+				return false;
+			}
+		}
+		return true;
+	}
+
+	bool TryMapHashJoinProbeLHSConstantOrNullSources(const ExecutionHashJoinProbeBinding &binding,
+	                                                 DataChunk &join_input,
+	                                                 SljitNativeConstantOrNull &constant_or_null) const {
+		return TryMapHashJoinProbeLHSOutputColumns(binding, join_input, constant_or_null.guard_source_indices);
+	}
+
+	bool TryMapHashJoinProbeLHSProjectionPlanSources(const ExecutionHashJoinProbeBinding &binding,
+	                                                 DataChunk &join_input,
+	                                                 SljitNativeRegionExpressionPlan &plan) const {
+		switch (plan.kind) {
+		case SljitNativeRegionExpressionKind::CONSTANT:
+			return true;
+		case SljitNativeRegionExpressionKind::REFERENCE:
+		case SljitNativeRegionExpressionKind::INTEGER_BINARY_CONSTANT:
+		case SljitNativeRegionExpressionKind::DOUBLE_BINARY_CONSTANT:
+		case SljitNativeRegionExpressionKind::INTEGER_COMPARE_CONSTANT:
+		case SljitNativeRegionExpressionKind::INTEGER_CAST:
+		case SljitNativeRegionExpressionKind::SIGNED_TO_UNSIGNED_INTEGER_CAST:
+		case SljitNativeRegionExpressionKind::INTEGER_IN_LIST:
+		case SljitNativeRegionExpressionKind::INTEGER_BETWEEN:
+		case SljitNativeRegionExpressionKind::DECIMAL64_TO_DOUBLE:
+		case SljitNativeRegionExpressionKind::DECIMAL128_SCALE_UP:
+		case SljitNativeRegionExpressionKind::INTEGRAL_COMPRESS:
+		case SljitNativeRegionExpressionKind::INTEGRAL_DECOMPRESS:
+		case SljitNativeRegionExpressionKind::STRING_COMPRESS:
+		case SljitNativeRegionExpressionKind::STRING_DECOMPRESS:
+		case SljitNativeRegionExpressionKind::DATE_YEAR:
+		case SljitNativeRegionExpressionKind::NULL_CHECK:
+			return TryMapHashJoinProbeLHSOutputColumn(binding, join_input, plan.source_index) &&
+			       TryMapHashJoinProbeLHSOutputColumns(binding, join_input, plan.expression_tree_source_indices);
+		case SljitNativeRegionExpressionKind::INTEGER_BINARY_REFERENCES:
+		case SljitNativeRegionExpressionKind::DOUBLE_BINARY_REFERENCES:
+		case SljitNativeRegionExpressionKind::INTEGER_COMPARE_REFERENCES:
+			return TryMapHashJoinProbeLHSOutputColumn(binding, join_input, plan.source_index) &&
+			       TryMapHashJoinProbeLHSOutputColumn(binding, join_input, plan.right_source_index) &&
+			       TryMapHashJoinProbeLHSOutputColumns(binding, join_input, plan.expression_tree_source_indices);
+		case SljitNativeRegionExpressionKind::INTEGER_COALESCE:
+			if (!TryMapHashJoinProbeLHSOutputColumn(binding, join_input, plan.source_index)) {
+				return false;
+			}
+			if (plan.coalesce_rhs_kind == SljitNativeCoalesceRhsKind::REFERENCE &&
+			    !TryMapHashJoinProbeLHSOutputColumn(binding, join_input, plan.right_source_index)) {
+				return false;
+			}
+			return TryMapHashJoinProbeLHSOutputColumns(binding, join_input, plan.expression_tree_source_indices);
+		case SljitNativeRegionExpressionKind::CONSTANT_OR_NULL:
+			return TryMapHashJoinProbeLHSConstantOrNullSources(binding, join_input, plan.constant_or_null) &&
+			       TryMapHashJoinProbeLHSOutputColumns(binding, join_input, plan.expression_tree_source_indices);
+		case SljitNativeRegionExpressionKind::ERROR_GUARDED_REFERENCE:
+			return TryMapHashJoinProbeLHSOutputColumn(binding, join_input, plan.source_index) &&
+			       TryMapHashJoinProbeLHSOutputColumn(binding, join_input, plan.guard_source_index) &&
+			       TryMapHashJoinProbeLHSOutputColumns(binding, join_input, plan.expression_tree_source_indices);
+		case SljitNativeRegionExpressionKind::EXPRESSION_TREE:
+		case SljitNativeRegionExpressionKind::TYPED_EXPRESSION_TREE:
+			return TryMapHashJoinProbeLHSOutputColumns(binding, join_input, plan.expression_tree_source_indices);
+		case SljitNativeRegionExpressionKind::PREDICATE:
+			return false;
+		default:
+			return false;
+		}
+	}
+
+	void BuildBorrowedProjectionExpression(const SljitExecutableRegionExpression &source,
+	                                       SljitExecutableRegionExpression &target) const {
+		target.plan = source.plan.Copy(true, false);
+		target.input_source_indices = source.input_source_indices;
+		target.function = source.function;
+		target.flat_function = source.flat_function;
+		target.select_function = source.select_function;
+		target.predicate_function = source.predicate_function;
+		target.predicate_select_function = source.predicate_select_function;
+		target.overflow_message = source.overflow_message;
+	}
+
+	bool TryBuildHashJoinProbeLHSProjectionExpression(const ExecutionHashJoinProbeBinding &binding,
+	                                                  DataChunk &join_input,
+	                                                  const SljitExecutableRegionExpression &source,
+	                                                  SljitExecutableRegionExpression &target) const {
+		BuildBorrowedProjectionExpression(source, target);
+		if (!target.input_source_indices.empty()) {
+			return TryMapHashJoinProbeLHSOutputColumns(binding, join_input, target.input_source_indices);
+		}
+		return TryMapHashJoinProbeLHSProjectionPlanSources(binding, join_input, target.plan);
+	}
+
+	bool TryBuildSingleSourceProjectionExpression(const SljitExecutableRegionExpression &source,
+	                                              SljitExecutableRegionExpression &target,
+	                                              idx_t &join_output_source_index) const {
+		BuildBorrowedProjectionExpression(source, target);
+		join_output_source_index = DConstants::INVALID_INDEX;
+		if (!target.input_source_indices.empty()) {
+			if (target.input_source_indices.size() != 1) {
+				return false;
+			}
+			join_output_source_index = target.input_source_indices[0];
+			target.input_source_indices[0] = 0;
+			auto &plan = target.plan;
+			if (plan.kind == SljitNativeRegionExpressionKind::EXPRESSION_TREE ||
+			    plan.kind == SljitNativeRegionExpressionKind::TYPED_EXPRESSION_TREE) {
+				if (plan.expression_tree_source_indices.size() != 1 ||
+				    plan.expression_tree_source_indices[0] != join_output_source_index) {
+					return false;
+				}
+				plan.expression_tree_source_indices[0] = 0;
+			}
+			return true;
+		}
+
+		auto &plan = target.plan;
+		switch (plan.kind) {
+		case SljitNativeRegionExpressionKind::REFERENCE:
+		case SljitNativeRegionExpressionKind::INTEGER_BINARY_CONSTANT:
+		case SljitNativeRegionExpressionKind::DOUBLE_BINARY_CONSTANT:
+		case SljitNativeRegionExpressionKind::INTEGER_COMPARE_CONSTANT:
+		case SljitNativeRegionExpressionKind::INTEGER_CAST:
+		case SljitNativeRegionExpressionKind::SIGNED_TO_UNSIGNED_INTEGER_CAST:
+		case SljitNativeRegionExpressionKind::INTEGER_IN_LIST:
+		case SljitNativeRegionExpressionKind::INTEGER_BETWEEN:
+		case SljitNativeRegionExpressionKind::DECIMAL64_TO_DOUBLE:
+		case SljitNativeRegionExpressionKind::DECIMAL128_SCALE_UP:
+		case SljitNativeRegionExpressionKind::INTEGRAL_COMPRESS:
+		case SljitNativeRegionExpressionKind::INTEGRAL_DECOMPRESS:
+		case SljitNativeRegionExpressionKind::STRING_COMPRESS:
+		case SljitNativeRegionExpressionKind::STRING_DECOMPRESS:
+		case SljitNativeRegionExpressionKind::DATE_YEAR:
+		case SljitNativeRegionExpressionKind::NULL_CHECK:
+			join_output_source_index = plan.source_index;
+			plan.source_index = 0;
+			if (plan.expression_tree_source_indices.empty()) {
+				return true;
+			}
+			if (plan.expression_tree_source_indices.size() != 1 ||
+			    plan.expression_tree_source_indices[0] != join_output_source_index) {
+				return false;
+			}
+			plan.expression_tree_source_indices[0] = 0;
+			return true;
+		case SljitNativeRegionExpressionKind::CONSTANT_OR_NULL:
+			if (plan.constant_or_null.guard_source_indices.size() != 1) {
+				return false;
+			}
+			join_output_source_index = plan.constant_or_null.guard_source_indices[0];
+			plan.constant_or_null.guard_source_indices[0] = 0;
+			return true;
+		case SljitNativeRegionExpressionKind::EXPRESSION_TREE:
+		case SljitNativeRegionExpressionKind::TYPED_EXPRESSION_TREE:
+			if (plan.expression_tree_source_indices.size() != 1) {
+				return false;
+			}
+			join_output_source_index = plan.expression_tree_source_indices[0];
+			plan.expression_tree_source_indices[0] = 0;
+			return true;
+		default:
+			return false;
+		}
+	}
+
+	bool SignedIntegerWidthMatchesPhysicalType(SljitNativeSignedIntegerWidth width, PhysicalType physical_type) const {
+		switch (width) {
+		case SljitNativeSignedIntegerWidth::INT8:
+			return physical_type == PhysicalType::INT8;
+		case SljitNativeSignedIntegerWidth::INT16:
+			return physical_type == PhysicalType::INT16;
+		case SljitNativeSignedIntegerWidth::INT32:
+			return physical_type == PhysicalType::INT32;
+		case SljitNativeSignedIntegerWidth::INT64:
+			return physical_type == PhysicalType::INT64;
+		default:
+			return false;
+		}
+	}
+
+	bool ProjectionIsSingleSourceReferenceLike(const SljitNativeRegionExpressionPlan &plan) const {
+		if (plan.kind == SljitNativeRegionExpressionKind::REFERENCE) {
+			return plan.source_index == 0;
+		}
+		if (plan.kind != SljitNativeRegionExpressionKind::EXPRESSION_TREE &&
+		    plan.kind != SljitNativeRegionExpressionKind::TYPED_EXPRESSION_TREE) {
+			return false;
+		}
+		if (!plan.expression_tree || plan.expression_tree->kind != ExecutionExpressionIRKind::REFERENCE ||
+		    plan.expression_tree->ref_index != 0) {
+			return false;
+		}
+		return plan.expression_tree_source_indices.size() == 1 && plan.expression_tree_source_indices[0] == 0 &&
+		       plan.return_type == plan.expression_tree->return_type;
+	}
+
+	bool TryGatherHashJoinRHSReferenceProjectionToBatch(const ExecutionHashJoinProbeBinding &binding,
+	                                                    const SljitNativeRegionExpressionPlan &plan, idx_t rhs_col_idx,
+	                                                    Vector &row_pointers, Vector &target, idx_t current_size,
+	                                                    idx_t count) const {
+		if (!ProjectionIsSingleSourceReferenceLike(plan) || plan.return_type != target.GetType()) {
+			return false;
+		}
+		data_ptr_t target_data = nullptr;
+		unique_ptr<Vector> owned_result;
+		if (DirectAppendSupportsFixedSizeType(target.GetType())) {
+			target_data =
+			    FlatVector::GetDataMutable(target) + current_size * GetTypeIdSize(target.GetType().InternalType());
+			owned_result = make_uniq<Vector>(target.GetType(), target_data, count);
+		} else if (target.GetType().id() == LogicalTypeId::VARCHAR) {
+			owned_result = make_uniq<Vector>(target.GetType());
+		} else {
+			return false;
+		}
+		auto &result = *owned_result;
+		if (!ExecutionTryDirectGatherHashJoinRHSFixedColumn(binding, row_pointers, count, rhs_col_idx, result)) {
+			binding.hash_table->GatherRHSColumn(row_pointers, *FlatVector::IncrementalSelectionVector(), count,
+			                                    rhs_col_idx, result);
+		}
+		CopyDirectProjectionResultToBatch(result, target, target_data, current_size, count);
+		return true;
+	}
+
+	static bool HashJoinRHSFixedColumnSourceIsValid(data_ptr_t row_pointer,
+	                                                const ExecutionHashJoinRHSFixedColumnSource &source) {
+		if (!row_pointer) {
+			return false;
+		}
+		if (source.all_valid) {
+			return true;
+		}
+		if (source.layout_column_idx == DConstants::INVALID_INDEX || source.layout_column_count == 0) {
+			return false;
+		}
+		idx_t entry_idx;
+		idx_t idx_in_entry;
+		JoinHashTable::ValidityBytes::GetEntryIndex(source.layout_column_idx, entry_idx, idx_in_entry);
+		return JoinHashTable::ValidityBytes::RowIsValid(
+		    JoinHashTable::ValidityBytes(row_pointer, source.layout_column_count).GetValidityEntryUnsafe(entry_idx),
+		    idx_in_entry);
+	}
+
+	static bool SljitDateDaysAreFinite(int32_t days) {
+		return days != date_t::infinity().days && days != date_t::ninfinity().days;
+	}
+
+	static int64_t SljitExtractFiniteDateYear(int32_t days) {
+		int32_t year = Date::EPOCH_YEAR;
+		while (days < 0) {
+			days += Date::DAYS_PER_YEAR_INTERVAL;
+			year -= Date::YEAR_INTERVAL;
+		}
+		while (days >= Date::DAYS_PER_YEAR_INTERVAL) {
+			days -= Date::DAYS_PER_YEAR_INTERVAL;
+			year += Date::YEAR_INTERVAL;
+		}
+		auto year_offset = days / 365;
+		while (days < Date::CUMULATIVE_YEAR_DAYS[year_offset]) {
+			year_offset--;
+			D_ASSERT(year_offset >= 0);
+		}
+		return year + year_offset;
+	}
+
+	bool TryMaterializeHashJoinRHSDateYearProjectionToBatch(const ExecutionHashJoinProbeBinding &binding,
+	                                                        const SljitNativeRegionExpressionPlan &plan,
+	                                                        idx_t rhs_col_idx, Vector &row_pointers, Vector &target,
+	                                                        data_ptr_t target_data, idx_t current_size,
+	                                                        idx_t count) const {
+		if (plan.kind != SljitNativeRegionExpressionKind::DATE_YEAR || plan.source_index != 0 ||
+		    plan.return_type != target.GetType() || target.GetType().InternalType() != PhysicalType::INT64 ||
+		    row_pointers.GetVectorType() != VectorType::FLAT_VECTOR) {
+			return false;
+		}
+		if (!plan.expression_tree_source_indices.empty() &&
+		    (plan.expression_tree_source_indices.size() != 1 || plan.expression_tree_source_indices[0] != 0)) {
+			return false;
+		}
+
+		ExecutionHashJoinRHSFixedColumnSource rhs_source;
+		if (!ExecutionGetHashJoinRHSFixedColumnSource(binding, rhs_col_idx, rhs_source) ||
+		    rhs_source.type.id() != LogicalTypeId::DATE || rhs_source.physical_type != PhysicalType::INT32 ||
+		    rhs_source.layout_offset == DConstants::INVALID_INDEX) {
+			return false;
+		}
+
+		Vector result(target.GetType(), target_data, count);
+		result.SetVectorType(VectorType::FLAT_VECTOR);
+		auto result_data = FlatVector::GetDataMutable<int64_t>(result);
+		auto &result_validity = FlatVector::ValidityMutable(result);
+		result_validity.Reset(count);
+		result_validity.EnsureWritable();
+		result_validity.SetAllValid(count);
+
+		auto row_pointer_data = FlatVector::GetData<data_ptr_t>(row_pointers);
+		if (rhs_source.all_valid) {
+			for (idx_t row_idx = 0; row_idx < count; row_idx++) {
+				auto row_location = row_pointer_data[row_idx];
+				if (!row_location) {
+					result_validity.SetInvalid(row_idx);
+					continue;
+				}
+				auto days = Load<int32_t>(row_location + rhs_source.layout_offset);
+				if (!SljitDateDaysAreFinite(days)) {
+					result_validity.SetInvalid(row_idx);
+					continue;
+				}
+				result_data[row_idx] = SljitExtractFiniteDateYear(days);
+			}
+		} else {
+			for (idx_t row_idx = 0; row_idx < count; row_idx++) {
+				auto row_location = row_pointer_data[row_idx];
+				if (!HashJoinRHSFixedColumnSourceIsValid(row_location, rhs_source)) {
+					result_validity.SetInvalid(row_idx);
+					continue;
+				}
+				auto days = Load<int32_t>(row_location + rhs_source.layout_offset);
+				if (!SljitDateDaysAreFinite(days)) {
+					result_validity.SetInvalid(row_idx);
+					continue;
+				}
+				result_data[row_idx] = SljitExtractFiniteDateYear(days);
+			}
+		}
+		FlatVector::SetSize(result, count_t(count));
+		CopyDirectProjectionResultToBatch(result, target, target_data, current_size, count);
+		return true;
+	}
+
+	bool TryMaterializeHashJoinRHSFixedGeneratedProjectionToBatch(const ExecutionHashJoinProbeBinding &binding,
+	                                                              const SljitNativeRegionExpressionPlan &plan,
+	                                                              idx_t rhs_col_idx, Vector &row_pointers,
+	                                                              Vector &target, data_ptr_t target_data,
+	                                                              idx_t current_size, idx_t count) const {
+		switch (plan.kind) {
+		case SljitNativeRegionExpressionKind::DATE_YEAR:
+			return TryMaterializeHashJoinRHSDateYearProjectionToBatch(binding, plan, rhs_col_idx, row_pointers, target,
+			                                                          target_data, current_size, count);
+		default:
+			return false;
+		}
+	}
+
+	bool TryMaterializeHashJoinComputedRHSProjectionToBatch(const ExecutionHashJoinProbeBinding &binding,
+	                                                        SljitExecutableRegionExpression &source_expr,
+	                                                        Vector &row_pointers, DataChunk &batch, idx_t output_idx,
+	                                                        idx_t current_size, idx_t count,
+	                                                        SljitExpressionAdapterScratch &adapter_scratch,
+	                                                        bool &used_row_pointer_generated_source) {
+		used_row_pointer_generated_source = false;
+		SljitExecutableRegionExpression remapped_expr;
+		idx_t join_output_source_index;
+		if (!TryBuildSingleSourceProjectionExpression(source_expr, remapped_expr, join_output_source_index)) {
+			return false;
+		}
+		const auto lhs_column_count = binding.lhs_output_column_indices.size();
+		if (join_output_source_index < lhs_column_count ||
+		    binding.output_mode != ExecutionHashJoinProbeOutputMode::MATCHED_PROBE_AND_BUILD) {
+			return false;
+		}
+		const auto rhs_col_idx = join_output_source_index - lhs_column_count;
+		if (rhs_col_idx >= binding.rhs_output_column_count || join_output_source_index >= binding.output_types.size()) {
+			return false;
+		}
+
+		auto &target = batch.data[output_idx];
+		if (TryGatherHashJoinRHSReferenceProjectionToBatch(binding, remapped_expr.plan, rhs_col_idx, row_pointers,
+		                                                   target, current_size, count)) {
+			return true;
+		}
+		if (DirectAppendSupportsFixedSizeType(target.GetType())) {
+			auto target_data =
+			    FlatVector::GetDataMutable(target) + current_size * GetTypeIdSize(target.GetType().InternalType());
+			if (TryMaterializeHashJoinRHSFixedGeneratedProjectionToBatch(
+			        binding, remapped_expr.plan, rhs_col_idx, row_pointers, target, target_data, current_size, count)) {
+				used_row_pointer_generated_source = true;
+				return true;
+			}
+		}
+		if (!remapped_expr.function && !remapped_expr.flat_function) {
+			return false;
+		}
+
+		auto &source_type = binding.output_types[join_output_source_index];
+		Vector gathered_source(source_type);
+		if (!ExecutionTryDirectGatherHashJoinRHSFixedColumn(binding, row_pointers, count, rhs_col_idx,
+		                                                    gathered_source)) {
+			binding.hash_table->GatherRHSColumn(row_pointers, *FlatVector::IncrementalSelectionVector(), count,
+			                                    rhs_col_idx, gathered_source);
+		}
+
+		DataChunk gathered_input;
+		gathered_input.InitializeEmpty(vector<LogicalType> {source_type});
+		gathered_input.data[0].Reference(gathered_source);
+		gathered_input.SetChildCardinality(count);
+		return TryExecuteProjectionExpressionToBatch(remapped_expr, gathered_input, target, current_size, count,
+		                                             nullptr, adapter_scratch);
+	}
+
+	static bool TryRemapHashJoinProjectionSourceIndex(const vector<idx_t> &source_map, idx_t &source_index) {
+		if (source_index >= source_map.size() || source_map[source_index] == DConstants::INVALID_INDEX) {
+			return false;
+		}
+		source_index = source_map[source_index];
+		return true;
+	}
+
+	static bool TryRemapHashJoinProjectionSourceIndices(const vector<idx_t> &source_map,
+	                                                    vector<idx_t> &source_indices) {
+		for (auto &source_index : source_indices) {
+			if (!TryRemapHashJoinProjectionSourceIndex(source_map, source_index)) {
+				return false;
+			}
+		}
+		return true;
+	}
+
+	static bool TryRemapHashJoinProjectionPredicateSources(const vector<idx_t> &source_map,
+	                                                       SljitNativePredicate &predicate) {
+		switch (predicate.kind) {
+		case SljitNativePredicateKind::REFERENCE:
+		case SljitNativePredicateKind::INTEGER_COMPARE_CONSTANT:
+		case SljitNativePredicateKind::DOUBLE_COMPARE_CONSTANT:
+		case SljitNativePredicateKind::INT128_COMPARE_CONSTANT:
+		case SljitNativePredicateKind::INTEGER_IN_LIST:
+		case SljitNativePredicateKind::INTEGER_BETWEEN:
+		case SljitNativePredicateKind::STRING_EQUAL_CONSTANT:
+		case SljitNativePredicateKind::STRING_IN_LIST_CONSTANT:
+		case SljitNativePredicateKind::STRING_PREFIX_CONSTANT:
+		case SljitNativePredicateKind::STRING_SUFFIX_CONSTANT:
+		case SljitNativePredicateKind::STRING_CONTAINS_CONSTANT:
+		case SljitNativePredicateKind::STRING_LIKE_CONSTANT:
+		case SljitNativePredicateKind::STRING_SUBSTRING_IN_LIST_CONSTANT:
+		case SljitNativePredicateKind::NULL_CHECK:
+			if (!TryRemapHashJoinProjectionSourceIndex(source_map, predicate.source_index)) {
+				return false;
+			}
+			break;
+		case SljitNativePredicateKind::INTEGER_COMPARE_REFERENCES:
+		case SljitNativePredicateKind::DOUBLE_COMPARE_REFERENCES:
+		case SljitNativePredicateKind::INT128_COMPARE_REFERENCES:
+			if (!TryRemapHashJoinProjectionSourceIndex(source_map, predicate.source_index) ||
+			    !TryRemapHashJoinProjectionSourceIndex(source_map, predicate.right_source_index)) {
+				return false;
+			}
+			break;
+		default:
+			break;
+		}
+		if (!TryRemapHashJoinProjectionSourceIndices(source_map, predicate.source_indices) ||
+		    !TryRemapHashJoinProjectionSourceIndices(source_map, predicate.guard_source_indices)) {
+			return false;
+		}
+		if (predicate.child && !TryRemapHashJoinProjectionPredicateSources(source_map, *predicate.child)) {
+			return false;
+		}
+		for (auto &child : predicate.children) {
+			if (!TryRemapHashJoinProjectionPredicateSources(source_map, *child)) {
+				return false;
+			}
+		}
+		return true;
+	}
+
+	static bool TryRemapHashJoinProjectionPlanSources(const vector<idx_t> &source_map,
+	                                                  SljitNativeRegionExpressionPlan &plan) {
+		switch (plan.kind) {
+		case SljitNativeRegionExpressionKind::CONSTANT:
+			return TryRemapHashJoinProjectionSourceIndices(source_map, plan.expression_tree_source_indices);
+		case SljitNativeRegionExpressionKind::REFERENCE:
+		case SljitNativeRegionExpressionKind::INTEGER_BINARY_CONSTANT:
+		case SljitNativeRegionExpressionKind::DOUBLE_BINARY_CONSTANT:
+		case SljitNativeRegionExpressionKind::INTEGER_COMPARE_CONSTANT:
+		case SljitNativeRegionExpressionKind::INTEGER_CAST:
+		case SljitNativeRegionExpressionKind::SIGNED_TO_UNSIGNED_INTEGER_CAST:
+		case SljitNativeRegionExpressionKind::DECIMAL64_TO_DOUBLE:
+		case SljitNativeRegionExpressionKind::DECIMAL128_SCALE_UP:
+		case SljitNativeRegionExpressionKind::INTEGER_IN_LIST:
+		case SljitNativeRegionExpressionKind::INTEGER_BETWEEN:
+		case SljitNativeRegionExpressionKind::INTEGRAL_COMPRESS:
+		case SljitNativeRegionExpressionKind::INTEGRAL_DECOMPRESS:
+		case SljitNativeRegionExpressionKind::STRING_COMPRESS:
+		case SljitNativeRegionExpressionKind::STRING_DECOMPRESS:
+		case SljitNativeRegionExpressionKind::DATE_YEAR:
+		case SljitNativeRegionExpressionKind::NULL_CHECK:
+			return TryRemapHashJoinProjectionSourceIndex(source_map, plan.source_index) &&
+			       TryRemapHashJoinProjectionSourceIndices(source_map, plan.expression_tree_source_indices);
+		case SljitNativeRegionExpressionKind::ERROR_GUARDED_REFERENCE:
+			return TryRemapHashJoinProjectionSourceIndex(source_map, plan.source_index) &&
+			       TryRemapHashJoinProjectionSourceIndex(source_map, plan.guard_source_index) &&
+			       TryRemapHashJoinProjectionSourceIndices(source_map, plan.expression_tree_source_indices);
+		case SljitNativeRegionExpressionKind::CONSTANT_OR_NULL:
+			return TryRemapHashJoinProjectionSourceIndices(source_map, plan.constant_or_null.guard_source_indices) &&
+			       TryRemapHashJoinProjectionSourceIndices(source_map, plan.expression_tree_source_indices);
+		case SljitNativeRegionExpressionKind::INTEGER_BINARY_REFERENCES:
+		case SljitNativeRegionExpressionKind::DOUBLE_BINARY_REFERENCES:
+		case SljitNativeRegionExpressionKind::INTEGER_COMPARE_REFERENCES:
+			return TryRemapHashJoinProjectionSourceIndex(source_map, plan.source_index) &&
+			       TryRemapHashJoinProjectionSourceIndex(source_map, plan.right_source_index) &&
+			       TryRemapHashJoinProjectionSourceIndices(source_map, plan.expression_tree_source_indices);
+		case SljitNativeRegionExpressionKind::INTEGER_COALESCE:
+			if (!TryRemapHashJoinProjectionSourceIndex(source_map, plan.source_index)) {
+				return false;
+			}
+			if (plan.coalesce_rhs_kind == SljitNativeCoalesceRhsKind::REFERENCE &&
+			    !TryRemapHashJoinProjectionSourceIndex(source_map, plan.right_source_index)) {
+				return false;
+			}
+			return TryRemapHashJoinProjectionSourceIndices(source_map, plan.expression_tree_source_indices);
+		case SljitNativeRegionExpressionKind::PREDICATE:
+			return plan.predicate && TryRemapHashJoinProjectionPredicateSources(source_map, *plan.predicate) &&
+			       TryRemapHashJoinProjectionSourceIndices(source_map, plan.expression_tree_source_indices);
+		case SljitNativeRegionExpressionKind::EXPRESSION_TREE:
+		case SljitNativeRegionExpressionKind::TYPED_EXPRESSION_TREE:
+			return TryRemapHashJoinProjectionSourceIndices(source_map, plan.expression_tree_source_indices);
+		default:
+			return false;
+		}
+	}
+
+	bool TryCollectHashJoinProjectionExpressionSources(const SljitExecutableRegionExpression &expr,
+	                                                   idx_t input_column_count, vector<uint8_t> &referenced) const {
+		referenced.assign(input_column_count, 0);
+		if (!expr.input_source_indices.empty()) {
+			return AddProjectionSourceColumns(expr.input_source_indices, input_column_count, referenced);
+		}
+		auto &plan = expr.plan;
+		switch (plan.kind) {
+		case SljitNativeRegionExpressionKind::CONSTANT:
+			return AddProjectionSourceColumns(plan.expression_tree_source_indices, input_column_count, referenced);
+		case SljitNativeRegionExpressionKind::REFERENCE:
+		case SljitNativeRegionExpressionKind::INTEGER_BINARY_CONSTANT:
+		case SljitNativeRegionExpressionKind::DOUBLE_BINARY_CONSTANT:
+		case SljitNativeRegionExpressionKind::INTEGER_COMPARE_CONSTANT:
+		case SljitNativeRegionExpressionKind::INTEGER_CAST:
+		case SljitNativeRegionExpressionKind::SIGNED_TO_UNSIGNED_INTEGER_CAST:
+		case SljitNativeRegionExpressionKind::DECIMAL64_TO_DOUBLE:
+		case SljitNativeRegionExpressionKind::DECIMAL128_SCALE_UP:
+		case SljitNativeRegionExpressionKind::INTEGER_IN_LIST:
+		case SljitNativeRegionExpressionKind::INTEGER_BETWEEN:
+		case SljitNativeRegionExpressionKind::INTEGRAL_COMPRESS:
+		case SljitNativeRegionExpressionKind::INTEGRAL_DECOMPRESS:
+		case SljitNativeRegionExpressionKind::STRING_COMPRESS:
+		case SljitNativeRegionExpressionKind::STRING_DECOMPRESS:
+		case SljitNativeRegionExpressionKind::DATE_YEAR:
+		case SljitNativeRegionExpressionKind::NULL_CHECK:
+			return AddProjectionSourceColumn(plan.source_index, input_column_count, referenced) &&
+			       AddProjectionSourceColumns(plan.expression_tree_source_indices, input_column_count, referenced);
+		case SljitNativeRegionExpressionKind::ERROR_GUARDED_REFERENCE:
+			return AddProjectionSourceColumn(plan.source_index, input_column_count, referenced) &&
+			       AddProjectionSourceColumn(plan.guard_source_index, input_column_count, referenced) &&
+			       AddProjectionSourceColumns(plan.expression_tree_source_indices, input_column_count, referenced);
+		case SljitNativeRegionExpressionKind::CONSTANT_OR_NULL:
+			return AddProjectionSourceColumns(plan.constant_or_null.guard_source_indices, input_column_count,
+			                                  referenced) &&
+			       AddProjectionSourceColumns(plan.expression_tree_source_indices, input_column_count, referenced);
+		case SljitNativeRegionExpressionKind::INTEGER_BINARY_REFERENCES:
+		case SljitNativeRegionExpressionKind::DOUBLE_BINARY_REFERENCES:
+		case SljitNativeRegionExpressionKind::INTEGER_COMPARE_REFERENCES:
+			return AddProjectionSourceColumn(plan.source_index, input_column_count, referenced) &&
+			       AddProjectionSourceColumn(plan.right_source_index, input_column_count, referenced) &&
+			       AddProjectionSourceColumns(plan.expression_tree_source_indices, input_column_count, referenced);
+		case SljitNativeRegionExpressionKind::INTEGER_COALESCE:
+			if (!AddProjectionSourceColumn(plan.source_index, input_column_count, referenced)) {
+				return false;
+			}
+			if (plan.coalesce_rhs_kind == SljitNativeCoalesceRhsKind::REFERENCE &&
+			    !AddProjectionSourceColumn(plan.right_source_index, input_column_count, referenced)) {
+				return false;
+			}
+			return AddProjectionSourceColumns(plan.expression_tree_source_indices, input_column_count, referenced);
+		case SljitNativeRegionExpressionKind::PREDICATE:
+			if (!plan.expression_tree_source_indices.empty()) {
+				return AddProjectionSourceColumns(plan.expression_tree_source_indices, input_column_count, referenced);
+			}
+			if (!plan.predicate) {
+				return false;
+			}
+			return AddProjectionSourceColumns(plan.predicate->source_indices, input_column_count, referenced);
+		case SljitNativeRegionExpressionKind::EXPRESSION_TREE:
+		case SljitNativeRegionExpressionKind::TYPED_EXPRESSION_TREE:
+			return AddProjectionSourceColumns(plan.expression_tree_source_indices, input_column_count, referenced);
+		default:
+			return false;
+		}
+	}
+
+	bool TryBuildHashJoinProjectionExpressionInput(const ExecutionHashJoinProbeBinding &binding,
+	                                               SljitExecutableRegionExpression &source_expr, DataChunk &join_input,
+	                                               const SelectionVector &match_selection, Vector &row_pointers,
+	                                               idx_t count, SljitExecutableRegionExpression &remapped_expr,
+	                                               DataChunk &expression_input,
+	                                               vector<Vector> &expression_sources) const {
+		if (!binding.ready || !binding.hash_table ||
+		    binding.output_mode != ExecutionHashJoinProbeOutputMode::MATCHED_PROBE_AND_BUILD) {
+			return false;
+		}
+		const auto lhs_column_count = binding.lhs_output_column_indices.size();
+		const auto join_output_column_count = lhs_column_count + binding.rhs_output_column_count;
+		if (join_output_column_count == 0) {
+			return false;
+		}
+
+		vector<uint8_t> referenced_columns;
+		if (!TryCollectHashJoinProjectionExpressionSources(source_expr, join_output_column_count, referenced_columns)) {
+			return false;
+		}
+		vector<idx_t> source_map(join_output_column_count, DConstants::INVALID_INDEX);
+		vector<LogicalType> expression_types;
+		expression_sources.clear();
+		expression_sources.reserve(join_output_column_count);
+		expression_types.reserve(join_output_column_count);
+
+		for (idx_t source_idx = 0; source_idx < join_output_column_count; source_idx++) {
+			if (!referenced_columns[source_idx]) {
+				continue;
+			}
+			auto &source_type = binding.output_types[source_idx];
+			expression_types.push_back(source_type);
+			source_map[source_idx] = expression_sources.size();
+			expression_sources.emplace_back(source_type);
+			auto &source = expression_sources.back();
+			if (source_idx < lhs_column_count) {
+				const auto input_col = binding.lhs_output_column_indices[source_idx];
+				if (input_col >= join_input.ColumnCount() || join_input.data[input_col].GetType() != source_type) {
+					return false;
+				}
+				source.Slice(join_input.data[input_col], match_selection, count);
+				continue;
+			}
+			const auto rhs_col_idx = source_idx - lhs_column_count;
+			if (rhs_col_idx >= binding.rhs_output_column_count) {
+				return false;
+			}
+			if (!ExecutionTryDirectGatherHashJoinRHSFixedColumn(binding, row_pointers, count, rhs_col_idx, source)) {
+				binding.hash_table->GatherRHSColumn(row_pointers, *FlatVector::IncrementalSelectionVector(), count,
+				                                    rhs_col_idx, source);
+			}
+		}
+		if (expression_sources.empty()) {
+			return false;
+		}
+
+		BuildBorrowedProjectionExpression(source_expr, remapped_expr);
+		if (!TryRemapHashJoinProjectionPlanSources(source_map, remapped_expr.plan)) {
+			return false;
+		}
+		for (auto &input_source_idx : remapped_expr.input_source_indices) {
+			if (input_source_idx >= source_map.size() || source_map[input_source_idx] == DConstants::INVALID_INDEX) {
+				return false;
+			}
+			input_source_idx = source_map[input_source_idx];
+		}
+
+		expression_input.InitializeEmpty(expression_types);
+		for (idx_t source_idx = 0; source_idx < expression_sources.size(); source_idx++) {
+			expression_input.data[source_idx].Reference(expression_sources[source_idx]);
+		}
+		expression_input.SetChildCardinality(count);
+		return true;
+	}
+
+	bool TryMaterializeHashJoinMixedProjectionToBatch(const ExecutionHashJoinProbeBinding &binding,
+	                                                  SljitExecutableRegionExpression &source_expr,
+	                                                  DataChunk &join_input, const SelectionVector &match_selection,
+	                                                  Vector &row_pointers, DataChunk &batch, idx_t output_idx,
+	                                                  idx_t current_size, idx_t count,
+	                                                  SljitExpressionAdapterScratch &adapter_scratch) {
+		auto &target = batch.data[output_idx];
+		if (target.GetVectorType() != VectorType::FLAT_VECTOR || target.GetType() != source_expr.plan.return_type ||
+		    !DirectProjectionBatchSupportsType(target.GetType()) ||
+		    FlatVector::GetCapacity(target) < current_size + count) {
+			return false;
+		}
+
+		SljitExecutableRegionExpression remapped_expr;
+		DataChunk expression_input;
+		vector<Vector> expression_sources;
+		if (!TryBuildHashJoinProjectionExpressionInput(binding, source_expr, join_input, match_selection, row_pointers,
+		                                               count, remapped_expr, expression_input, expression_sources)) {
+			return false;
+		}
+
+		return TryExecuteProjectionExpressionToBatch(remapped_expr, expression_input, target, current_size, count,
+		                                             nullptr, adapter_scratch);
+	}
+
+	static bool SljitRuntimeExpressionIsDecimal64(const ExecutionExpressionIR &node) {
+		return node.return_type.id() == LogicalTypeId::DECIMAL && node.physical_type == PhysicalType::INT64;
+	}
+
+	static bool SljitRuntimeDecimal64BinaryHasRawSemantics(const ExecutionExpressionIR &node) {
+		if (!node.left || !node.right || !SljitRuntimeExpressionIsDecimal64(node) ||
+		    !SljitRuntimeExpressionIsDecimal64(*node.left) || !SljitRuntimeExpressionIsDecimal64(*node.right)) {
+			return false;
+		}
+		switch (node.binary_op) {
+		case ExecutionExpressionBinaryOp::ADD:
+		case ExecutionExpressionBinaryOp::SUBTRACT:
+			return DecimalType::GetScale(node.return_type) == DecimalType::GetScale(node.left->return_type) &&
+			       DecimalType::GetScale(node.return_type) == DecimalType::GetScale(node.right->return_type);
+		case ExecutionExpressionBinaryOp::MULTIPLY:
+			return DecimalType::GetScale(node.return_type) ==
+			       DecimalType::GetScale(node.left->return_type) + DecimalType::GetScale(node.right->return_type);
+		default:
+			return false;
+		}
+	}
+
+	struct SljitRuntimeDecimal64Source {
+		const int64_t *data = nullptr;
+		const sel_t *source_sel = nullptr;
+		const SelectionVector *match_selection = nullptr;
+		const data_ptr_t *row_pointers = nullptr;
+		idx_t layout_offset = DConstants::INVALID_INDEX;
+		bool row_pointer_source = false;
+	};
+
+	struct SljitRuntimeDecimal64DiscountedAmountProgram {
+		bool ready = false;
+		idx_t gross_source_idx = DConstants::INVALID_INDEX;
+		idx_t discount_source_idx = DConstants::INVALID_INDEX;
+		idx_t cost_source_idx = DConstants::INVALID_INDEX;
+		idx_t quantity_source_idx = DConstants::INVALID_INDEX;
+		int64_t discount_base = 0;
+	};
+
+	static bool TryReadSljitRuntimeDecimal64Reference(const ExecutionExpressionIR &node, idx_t source_count,
+	                                                  idx_t &source_idx) {
+		if (node.kind != ExecutionExpressionIRKind::REFERENCE || !SljitRuntimeExpressionIsDecimal64(node) ||
+		    node.ref_index >= source_count) {
+			return false;
+		}
+		source_idx = node.ref_index;
+		return true;
+	}
+
+	static bool TryReadSljitRuntimeDecimal64Constant(const ExecutionExpressionIR &node, int64_t &constant) {
+		if (node.kind != ExecutionExpressionIRKind::CONSTANT || node.constant.IsNull() ||
+		    node.constant.type().id() != LogicalTypeId::DECIMAL ||
+		    node.constant.type().InternalType() != PhysicalType::INT64 || !SljitRuntimeExpressionIsDecimal64(node)) {
+			return false;
+		}
+		constant = node.constant.GetValueUnsafe<int64_t>();
+		return true;
+	}
+
+	static bool SljitRuntimeDecimal64BinaryCanRunUnchecked(const ExecutionExpressionIR &node,
+	                                                       ExecutionExpressionBinaryOp op) {
+		return node.kind == ExecutionExpressionIRKind::BINARY && node.binary_op == op &&
+		       !node.arithmetic_overflow_check && SljitRuntimeDecimal64BinaryHasRawSemantics(node);
+	}
+
+	static bool
+	TryBuildSljitRuntimeDecimal64DiscountedAmountProgram(const ExecutionExpressionIR &node, idx_t source_count,
+	                                                     SljitRuntimeDecimal64DiscountedAmountProgram &program) {
+		program = SljitRuntimeDecimal64DiscountedAmountProgram();
+		if (!SljitRuntimeDecimal64BinaryCanRunUnchecked(node, ExecutionExpressionBinaryOp::SUBTRACT) || !node.left ||
+		    !node.right ||
+		    !SljitRuntimeDecimal64BinaryCanRunUnchecked(*node.left, ExecutionExpressionBinaryOp::MULTIPLY) ||
+		    !SljitRuntimeDecimal64BinaryCanRunUnchecked(*node.right, ExecutionExpressionBinaryOp::MULTIPLY) ||
+		    !node.left->left || !node.left->right || !node.right->left || !node.right->right) {
+			return false;
+		}
+		if (!TryReadSljitRuntimeDecimal64Reference(*node.left->left, source_count, program.gross_source_idx) ||
+		    !TryReadSljitRuntimeDecimal64Reference(*node.right->left, source_count, program.cost_source_idx) ||
+		    !TryReadSljitRuntimeDecimal64Reference(*node.right->right, source_count, program.quantity_source_idx)) {
+			return false;
+		}
+		auto &discount_expr = *node.left->right;
+		if (!SljitRuntimeDecimal64BinaryCanRunUnchecked(discount_expr, ExecutionExpressionBinaryOp::SUBTRACT) ||
+		    !discount_expr.left || !discount_expr.right ||
+		    !TryReadSljitRuntimeDecimal64Constant(*discount_expr.left, program.discount_base) ||
+		    !TryReadSljitRuntimeDecimal64Reference(*discount_expr.right, source_count, program.discount_source_idx)) {
+			return false;
+		}
+		program.ready = true;
+		return true;
+	}
+
+	static int64_t SljitRuntimeLoadDecimal64Source(const SljitRuntimeDecimal64Source &source, idx_t row_idx) {
+		if (source.row_pointer_source) {
+			auto row_location = source.row_pointers[row_idx];
+			return Load<int64_t>(row_location + source.layout_offset);
+		}
+		const auto match_idx = source.match_selection->get_index(row_idx);
+		const auto source_idx = source.source_sel ? source.source_sel[match_idx] : match_idx;
+		return source.data[source_idx];
+	}
+
+	bool TryPrepareAllValidDecimal64HashJoinPayloadSource(const ExecutionHashJoinProbeBinding &binding,
+	                                                      DataChunk &join_input, const SelectionVector &match_selection,
+	                                                      Vector &row_pointers, idx_t count, idx_t source_idx,
+	                                                      vector<UnifiedVectorFormat> &formats,
+	                                                      SljitRuntimeDecimal64Source &source) const {
+		if (source_idx >= binding.output_types.size() ||
+		    binding.output_types[source_idx].InternalType() != PhysicalType::INT64 ||
+		    binding.output_types[source_idx].id() != LogicalTypeId::DECIMAL) {
+			return false;
+		}
+		const auto lhs_column_count = binding.lhs_output_column_indices.size();
+		if (source_idx < lhs_column_count) {
+			const auto input_col = binding.lhs_output_column_indices[source_idx];
+			if (input_col >= join_input.ColumnCount() ||
+			    join_input.data[input_col].GetType() != binding.output_types[source_idx]) {
+				return false;
+			}
+			formats.emplace_back();
+			auto &format = formats.back();
+			join_input.data[input_col].ToUnifiedFormat(format);
+			auto source_sel = SljitNormalizedSourceSelectionData(format);
+			if (!format.validity.CannotHaveNull()) {
+				for (idx_t row_idx = 0; row_idx < count; row_idx++) {
+					const auto match_idx = match_selection.get_index(row_idx);
+					const auto selected_idx = source_sel ? source_sel[match_idx] : match_idx;
+					if (!format.validity.RowIsValid(selected_idx)) {
+						return false;
+					}
+				}
+			}
+			source.data = UnifiedVectorFormat::GetData<int64_t>(format);
+			source.source_sel = source_sel;
+			source.match_selection = &match_selection;
+			source.row_pointer_source = false;
+			return true;
+		}
+
+		if (row_pointers.GetVectorType() != VectorType::FLAT_VECTOR) {
+			return false;
+		}
+		const auto rhs_col_idx = source_idx - lhs_column_count;
+		ExecutionHashJoinRHSFixedColumnSource rhs_source;
+		if (!ExecutionGetHashJoinRHSFixedColumnSource(binding, rhs_col_idx, rhs_source) ||
+		    rhs_source.type != binding.output_types[source_idx] || rhs_source.physical_type != PhysicalType::INT64 ||
+		    rhs_source.type.id() != LogicalTypeId::DECIMAL || rhs_source.layout_offset == DConstants::INVALID_INDEX) {
+			return false;
+		}
+		source.row_pointers = FlatVector::GetData<data_ptr_t>(row_pointers);
+		for (idx_t row_idx = 0; row_idx < count; row_idx++) {
+			auto row_location = source.row_pointers[row_idx];
+			if (!row_location ||
+			    (!rhs_source.all_valid && !HashJoinRHSFixedColumnSourceIsValid(row_location, rhs_source))) {
+				return false;
+			}
+		}
+		source.layout_offset = rhs_source.layout_offset;
+		source.row_pointer_source = true;
+		return true;
+	}
+
+	bool TryMaterializeHashJoinAllValidDecimal64ExpressionToBatch(
+	    const ExecutionHashJoinProbeBinding &binding, SljitExecutableRegionExpression &source_expr,
+	    DataChunk &join_input, const SelectionVector &match_selection, Vector &row_pointers, DataChunk &batch,
+	    idx_t output_idx, idx_t current_size, idx_t count, const SljitRuntimeDecimal64DiscountedAmountProgram &program,
+	    string *reason = nullptr) const {
+		auto set_reason = [&](const char *value) {
+			if (reason && reason->empty()) {
+				*reason = value;
+			}
+			return false;
+		};
+		auto &target = batch.data[output_idx];
+		if (source_expr.input_source_indices.empty() || !program.ready) {
+			return set_reason("program");
+		}
+		if (target.GetVectorType() != VectorType::FLAT_VECTOR || target.GetType() != source_expr.plan.return_type ||
+		    target.GetType().id() != LogicalTypeId::DECIMAL || target.GetType().InternalType() != PhysicalType::INT64 ||
+		    FlatVector::GetCapacity(target) < current_size + count) {
+			return set_reason("target");
+		}
+
+		vector<UnifiedVectorFormat> formats;
+		formats.reserve(source_expr.input_source_indices.size());
+		vector<SljitRuntimeDecimal64Source> sources(source_expr.input_source_indices.size());
+		for (idx_t source_idx = 0; source_idx < source_expr.input_source_indices.size(); source_idx++) {
+			if (!TryPrepareAllValidDecimal64HashJoinPayloadSource(binding, join_input, match_selection, row_pointers,
+			                                                      count, source_expr.input_source_indices[source_idx],
+			                                                      formats, sources[source_idx])) {
+				return set_reason("source");
+			}
+		}
+		if (program.gross_source_idx >= sources.size() || program.discount_source_idx >= sources.size() ||
+		    program.cost_source_idx >= sources.size() || program.quantity_source_idx >= sources.size()) {
+			return set_reason("program_source");
+		}
+
+		auto result_data = FlatVector::GetDataMutable<int64_t>(target);
+		auto &result_validity = FlatVector::ValidityMutable(target);
+		result_validity.Reset(current_size + count);
+		result_validity.SetAllValid(current_size + count);
+		for (idx_t row_idx = 0; row_idx < count; row_idx++) {
+			const auto gross = SljitRuntimeLoadDecimal64Source(sources[program.gross_source_idx], row_idx);
+			const auto discount = SljitRuntimeLoadDecimal64Source(sources[program.discount_source_idx], row_idx);
+			const auto cost = SljitRuntimeLoadDecimal64Source(sources[program.cost_source_idx], row_idx);
+			const auto quantity = SljitRuntimeLoadDecimal64Source(sources[program.quantity_source_idx], row_idx);
+			result_data[current_size + row_idx] = gross * (program.discount_base - discount) - cost * quantity;
+		}
+		return true;
+	}
+
+	static bool TryMapGroupKeyCast(const SljitNativeRegionExpressionPlan &plan, const LogicalType &target_type,
+	                               ExecutionRowPointerGroupKeySource &group_source) {
+		group_source.ready = false;
+		group_source.target_type = target_type;
+		group_source.target_physical_type = target_type.InternalType();
+		if (plan.return_type.InternalType() != target_type.InternalType()) {
+			return false;
+		}
+			if (plan.kind == SljitNativeRegionExpressionKind::INTEGER_CAST && !plan.try_cast && plan.source_index == 0) {
+				if (group_source.source_physical_type == PhysicalType::INT64 &&
+				    target_type.InternalType() == PhysicalType::INT32 &&
+			    plan.cast_source_width == SljitNativeSignedIntegerWidth::INT64 &&
+			    plan.cast_target_width == SljitNativeSignedIntegerWidth::INT32) {
+				group_source.cast_kind = ExecutionRowPointerGroupKeyCastKind::INT64_TO_INT32;
+				group_source.ready = true;
+				return true;
+			}
+			if (group_source.source_physical_type == PhysicalType::INT64 &&
+			    target_type.InternalType() == PhysicalType::INT16 &&
+			    plan.cast_source_width == SljitNativeSignedIntegerWidth::INT64 &&
+			    plan.cast_target_width == SljitNativeSignedIntegerWidth::INT16) {
+				group_source.cast_kind = ExecutionRowPointerGroupKeyCastKind::INT64_TO_INT16;
+				group_source.ready = true;
+				return true;
+			}
+			if (group_source.source_physical_type == PhysicalType::INT32 &&
+			    target_type.InternalType() == PhysicalType::INT8 &&
+			    plan.cast_source_width == SljitNativeSignedIntegerWidth::INT32 &&
+			    plan.cast_target_width == SljitNativeSignedIntegerWidth::INT8) {
+				group_source.cast_kind = ExecutionRowPointerGroupKeyCastKind::INT32_TO_INT8;
+				group_source.ready = true;
+				return true;
+				}
+				return false;
+			}
+			if (plan.kind == SljitNativeRegionExpressionKind::STRING_COMPRESS && plan.source_index == 0 &&
+			    group_source.source_physical_type == PhysicalType::VARCHAR) {
+				switch (target_type.InternalType()) {
+				case PhysicalType::UINT8:
+				case PhysicalType::UINT16:
+				case PhysicalType::UINT32:
+				case PhysicalType::UINT64:
+				case PhysicalType::UINT128:
+					group_source.cast_kind = ExecutionRowPointerGroupKeyCastKind::STRING_COMPRESS;
+					group_source.ready = true;
+					return true;
+				default:
+					break;
+				}
+			}
+			return false;
+		}
+
+	static void InitializeRowPointerGroupKeySource(const ExecutionHashJoinRHSFixedColumnSource &rhs_source,
+	                                               const LogicalType &target_type,
+	                                               ExecutionRowPointerGroupKeySource &group_source) {
+		group_source.source_kind = ExecutionRowPointerGroupKeySourceKind::ROW_POINTER_FIELD;
+		group_source.target_type = target_type;
+		group_source.source_physical_type = rhs_source.physical_type;
+		group_source.target_physical_type = target_type.InternalType();
+		group_source.input_vector_index = DConstants::INVALID_INDEX;
+		group_source.row_layout_offset = rhs_source.layout_offset;
+		group_source.row_layout_column_idx = rhs_source.layout_column_idx;
+		group_source.row_layout_column_count = rhs_source.layout_column_count;
+		group_source.all_valid = rhs_source.all_valid;
+	}
+
+	static void InitializeInputVectorGroupKeySource(idx_t input_vector_index, PhysicalType source_physical_type,
+	                                                const LogicalType &target_type,
+	                                                ExecutionRowPointerGroupKeySource &group_source) {
+		group_source.source_kind = ExecutionRowPointerGroupKeySourceKind::INPUT_VECTOR;
+		group_source.target_type = target_type;
+		group_source.source_physical_type = source_physical_type;
+		group_source.target_physical_type = target_type.InternalType();
+		group_source.input_vector_index = input_vector_index;
+		group_source.row_layout_offset = DConstants::INVALID_INDEX;
+		group_source.row_layout_column_idx = DConstants::INVALID_INDEX;
+		group_source.row_layout_column_count = 0;
+		group_source.all_valid = false;
+	}
+
+	bool TryBuildRowPointerGroupKeySource(const ExecutionHashJoinProbeBinding &binding,
+	                                      SljitExecutableRegionExpression &projection,
+	                                      const ExecutionRegionGroupInput &group,
+	                                      ExecutionRowPointerGroupKeySource &group_source) const {
+		SljitExecutableRegionExpression remapped_expr;
+		idx_t join_output_source_index;
+		if (!TryBuildSingleSourceProjectionExpression(projection, remapped_expr, join_output_source_index)) {
+			return false;
+		}
+		if (binding.output_mode != ExecutionHashJoinProbeOutputMode::MATCHED_PROBE_AND_BUILD ||
+		    join_output_source_index >= binding.output_types.size()) {
+			return false;
+		}
+		const auto lhs_column_count = binding.lhs_output_column_indices.size();
+		if (join_output_source_index < lhs_column_count) {
+			const auto input_col = binding.lhs_output_column_indices[join_output_source_index];
+			InitializeInputVectorGroupKeySource(
+			    input_col, binding.output_types[join_output_source_index].InternalType(), group.type, group_source);
+			if (ProjectionIsSingleSourceReferenceLike(remapped_expr.plan) &&
+			    group_source.source_physical_type == group.type.InternalType() &&
+			    remapped_expr.plan.return_type.InternalType() == group.type.InternalType()) {
+				group_source.ready = true;
+				group_source.cast_kind = ExecutionRowPointerGroupKeyCastKind::NONE;
+				return true;
+			}
+			return TryMapGroupKeyCast(remapped_expr.plan, group.type, group_source);
+		}
+		const auto rhs_col_idx = join_output_source_index - lhs_column_count;
+		ExecutionHashJoinRHSFixedColumnSource rhs_source;
+		if (!ExecutionGetHashJoinRHSFixedColumnSource(binding, rhs_col_idx, rhs_source)) {
+			return false;
+		}
+		InitializeRowPointerGroupKeySource(rhs_source, group.type, group_source);
+		if (ProjectionIsSingleSourceReferenceLike(remapped_expr.plan) &&
+		    rhs_source.physical_type == group.type.InternalType() &&
+		    remapped_expr.plan.return_type.InternalType() == group.type.InternalType()) {
+			group_source.ready = true;
+			group_source.cast_kind = ExecutionRowPointerGroupKeyCastKind::NONE;
+			return true;
+		}
+		return TryMapGroupKeyCast(remapped_expr.plan, group.type, group_source);
+	}
+
+	bool TryBuildRowPointerGroupKeySources(const ExecutionHashJoinProbeBinding &binding,
+	                                       SljitExecutableRegionOp &projection_op,
+	                                       SljitExecutableRegionOp &aggregate_op,
+	                                       vector<ExecutionRowPointerGroupKeySource> &group_sources) const {
+		auto &sink_info = aggregate_op.aggregate_update.plan.sink_info;
+		if (sink_info.kind != ExecutionRegionSinkKind::HASH_AGGREGATE_UPDATE || sink_info.groups.empty()) {
+			return false;
+		}
+		group_sources.clear();
+		group_sources.reserve(sink_info.groups.size());
+		for (auto &group : sink_info.groups) {
+			if (group.input_index >= projection_op.projections.size() ||
+			    group.input_index >= projection_op.output_types.size() ||
+			    projection_op.output_types[group.input_index].InternalType() != group.type.InternalType()) {
+				group_sources.clear();
+				return false;
+			}
+			ExecutionRowPointerGroupKeySource group_source;
+			if (!TryBuildRowPointerGroupKeySource(binding, projection_op.projections[group.input_index], group,
+			                                      group_source)) {
+				group_sources.clear();
+				return false;
+			}
+			group_sources.push_back(std::move(group_source));
+		}
+		return true;
+	}
+
+	static bool TryGetFusedTypedPayloadCombinedSources(vector<SljitExecutableRegionExpression> &payloads,
+	                                                   const vector<ExecutionRegionAggregateInput> &aggregates,
+	                                                   vector<idx_t> &combined_sources) {
+		if (!FusedAggregatePayloadsUseTypedExpressionTrees(payloads, aggregates)) {
+			return false;
+		}
+		combined_sources.clear();
+		for (idx_t payload_idx = 0; payload_idx < payloads.size(); payload_idx++) {
+			if (aggregates[payload_idx].primitive_update_kind == AggregatePrimitiveUpdateKind::COUNT_STAR) {
+				continue;
+			}
+			if (payloads[payload_idx].input_source_indices.empty()) {
+				combined_sources.clear();
+				return false;
+			}
+			if (combined_sources.empty()) {
+				combined_sources = payloads[payload_idx].input_source_indices;
+			} else if (combined_sources != payloads[payload_idx].input_source_indices) {
+				combined_sources.clear();
+				return false;
+			}
+		}
+		return !combined_sources.empty();
+	}
+
+	bool TryBuildRowPointerGroupedPayloadSourceOverride(const ExecutionHashJoinProbeBinding &binding,
+	                                                    SljitExecutableRegionOp &projection_op,
+	                                                    SljitExecutableRegionOp &aggregate_op, DataChunk &payload_input,
+	                                                    vector<idx_t> &source_override) const {
+		auto &aggregates = aggregate_op.aggregate_update.plan.sink_info.aggregates;
+		vector<idx_t> combined_sources;
+		if (!TryGetFusedTypedPayloadCombinedSources(aggregate_op.aggregate_update.payloads, aggregates,
+		                                            combined_sources)) {
+			return false;
+		}
+		if (!binding.ready || binding.output_mode != ExecutionHashJoinProbeOutputMode::MATCHED_PROBE_AND_BUILD) {
+			return false;
+		}
+		source_override.clear();
+		source_override.reserve(combined_sources.size());
+		for (auto projection_source_idx : combined_sources) {
+			if (projection_source_idx >= projection_op.projections.size() ||
+			    projection_source_idx >= projection_op.output_types.size()) {
+				source_override.clear();
+				return false;
+			}
+			SljitExecutableRegionExpression remapped_expr;
+			idx_t join_output_source_idx;
+			if (!TryBuildSingleSourceProjectionExpression(projection_op.projections[projection_source_idx],
+			                                              remapped_expr, join_output_source_idx) ||
+			    !ProjectionIsSingleSourceReferenceLike(remapped_expr.plan)) {
+				source_override.clear();
+				return false;
+			}
+			if (join_output_source_idx >= binding.lhs_output_column_indices.size()) {
+				source_override.clear();
+				return false;
+			}
+			const auto input_source_idx = binding.lhs_output_column_indices[join_output_source_idx];
+			if (input_source_idx >= payload_input.ColumnCount() ||
+			    projection_op.output_types[projection_source_idx] != payload_input.data[input_source_idx].GetType()) {
+				source_override.clear();
+				return false;
+			}
+			source_override.push_back(input_source_idx);
+		}
+		return true;
+	}
+
+	bool TryMaterializeHashJoinComputedProjectionsToBatch(ExecutionRegionRuntime &runtime,
+	                                                      SljitRegionExecutionScratch &scratch, idx_t hash_join_idx,
+	                                                      idx_t projection_idx, SljitExecutableRegionOp &projection_op,
+	                                                      DataChunk &join_input, const SelectionVector &match_selection,
+	                                                      Vector &row_pointers, DataChunk &batch,
+	                                                      optional_ptr<const vector<idx_t>> output_to_projection,
+	                                                      idx_t count, vector<uint8_t> &skip_projection) {
+		if (count == 0 || !scratch.HasOperatorBinding(hash_join_idx)) {
+			return false;
+		}
+		auto &binding = scratch.OperatorBinding(hash_join_idx).hash_join_probe;
+		if (!binding.ready || binding.layout_kind != ExecutionHashJoinProbeLayoutKind::REGULAR_HASH_TABLE ||
+		    !binding.hash_table ||
+		    (binding.output_mode != ExecutionHashJoinProbeOutputMode::MATCHED_PROBE_AND_BUILD &&
+		     binding.output_mode != ExecutionHashJoinProbeOutputMode::MATCHED_PROBE_ONLY)) {
+			return false;
+		}
+
+		const auto current_size = batch.size();
+		const auto target_size = current_size + count;
+		const auto output_count =
+		    output_to_projection ? output_to_projection->size() : projection_op.projections.size();
+		if (batch.ColumnCount() != output_count || target_size > STANDARD_VECTOR_SIZE) {
+			return false;
+		}
+		if (skip_projection.empty()) {
+			skip_projection.assign(projection_op.projections.size(), 0);
+		} else if (skip_projection.size() != projection_op.projections.size()) {
+			return false;
+		}
+
+		bool materialized_any = false;
+		const auto stage_start = SljitRegionStageStart(runtime);
+		for (idx_t output_idx = 0; output_idx < output_count; output_idx++) {
+			const auto projected_idx = output_to_projection ? (*output_to_projection)[output_idx] : output_idx;
+			if (projected_idx >= projection_op.projections.size()) {
+				return false;
+			}
+			if (skip_projection[projected_idx]) {
+				continue;
+			}
+			auto &source_expr = projection_op.projections[projected_idx];
+			if (source_expr.plan.kind == SljitNativeRegionExpressionKind::REFERENCE) {
+				continue;
+			}
+			auto &target = batch.data[output_idx];
+			if (target.GetVectorType() != VectorType::FLAT_VECTOR || target.GetType() != source_expr.plan.return_type ||
+			    !DirectProjectionBatchSupportsType(target.GetType()) || FlatVector::GetCapacity(target) < target_size) {
+				continue;
+			}
+
+			SljitExecutableRegionExpression remapped_expr;
+			if (!TryBuildHashJoinProbeLHSProjectionExpression(binding, join_input, source_expr, remapped_expr)) {
+				auto &adapter_scratch = scratch.ExpressionAdapterScratch(projection_idx, projected_idx);
+				bool used_row_pointer_generated_source = false;
+				if (!TryMaterializeHashJoinComputedRHSProjectionToBatch(
+				        binding, source_expr, row_pointers, batch, output_idx, current_size, count, adapter_scratch,
+				        used_row_pointer_generated_source)) {
+					if (!TryMaterializeHashJoinMixedProjectionToBatch(binding, source_expr, join_input, match_selection,
+					                                                  row_pointers, batch, output_idx, current_size,
+					                                                  count, adapter_scratch)) {
+						continue;
+					}
+				}
+				if (used_row_pointer_generated_source) {
+					RecordSljitRegionRuntimePath(runtime, projection_op.kind,
+					                             "direct_rhs_row_pointer_generated_projection", count);
+				}
+				skip_projection[projected_idx] = 1;
+				materialized_any = true;
+				continue;
+			}
+			auto &adapter_scratch = scratch.ExpressionAdapterScratch(projection_idx, projected_idx);
+			if (!TryExecuteProjectionExpressionToBatch(remapped_expr, join_input, target, current_size, count,
+			                                           &match_selection, adapter_scratch)) {
+				continue;
+			}
+			skip_projection[projected_idx] = 1;
+			materialized_any = true;
+		}
+
+		if (materialized_any) {
+			RecordSljitRegionStageRuntime(runtime, projection_idx, projection_op.kind,
+			                              "post_join_direct_computed_projection", stage_start);
+			RecordSljitRegionMaterializationBoundary(runtime, projection_op.kind,
+			                                         "direct_post_join_computed_projection", count);
+		}
+		return materialized_any;
+	}
+
+	bool TryDirectMaterializeHashJoinProjectionSourcesToBatch(
+	    ExecutionRegionRuntime &runtime, SljitRegionExecutionScratch &scratch, idx_t hash_join_idx,
+	    idx_t projection_idx, SljitExecutableRegionOp &projection_op, DataChunk &join_input,
+	    const SelectionVector &match_selection, Vector &row_pointers, DataChunk &join_source, DataChunk &batch,
+	    optional_ptr<const vector<idx_t>> output_to_projection = nullptr,
+	    optional_ptr<Vector> projected_hashes = nullptr,
+	    optional_ptr<const vector<uint8_t>> extra_skip_projection = nullptr) {
+		if (join_source.size() == 0 || !scratch.HasOperatorBinding(hash_join_idx)) {
+			return false;
+		}
+		vector<uint8_t> direct_reference_skip;
+		if (extra_skip_projection) {
+			if (extra_skip_projection->size() != projection_op.projections.size()) {
+				return false;
+			}
+			direct_reference_skip = *extra_skip_projection;
+		}
+		const bool direct_references_materialized = TryMaterializeHashJoinReferenceProjectionsToBatch(
+		    runtime, scratch, hash_join_idx, projection_idx, projection_op, join_input, match_selection, row_pointers,
+		    batch, output_to_projection, join_source.size(), direct_reference_skip);
+		const bool direct_computed_materialized = TryMaterializeHashJoinComputedProjectionsToBatch(
+		    runtime, scratch, hash_join_idx, projection_idx, projection_op, join_input, match_selection, row_pointers,
+		    batch, output_to_projection, join_source.size(), direct_reference_skip);
+		const bool direct_projection_materialized = direct_references_materialized || direct_computed_materialized;
+		auto direct_projection_skip_ptr = ProjectionSkipHasAny(direct_reference_skip)
+		                                      ? optional_ptr<const vector<uint8_t>>(&direct_reference_skip)
+		                                      : nullptr;
+		if (direct_projection_materialized &&
+		    SelectedProjectionOutputsAreSkipped(projection_op, output_to_projection, direct_reference_skip)) {
+			FinishDirectProjectionBatchTargets(batch, batch.size() + join_source.size(), !direct_computed_materialized);
+			if (projected_hashes) {
+				HashDirectProjectionBatch(runtime, projection_idx, projection_op, output_to_projection != nullptr,
+				                          batch, *projected_hashes);
+			}
+			RecordDirectProjectionBatchMaterialization(runtime, projection_idx, projection_op,
+			                                           output_to_projection != nullptr, join_source.size(),
+			                                           SljitRegionStageStart(runtime));
+			return true;
+		}
+		vector<uint8_t> referenced_columns;
+		if (!BuildProjectionSourceColumnSet(projection_op, join_source.ColumnCount(), output_to_projection,
+		                                    direct_projection_skip_ptr, referenced_columns)) {
+			return false;
+		}
+		auto &binding = scratch.OperatorBinding(hash_join_idx).hash_join_probe;
+		auto stage_start = SljitRegionStageStart(runtime);
+		bool materialized = false;
+		if (runtime.TraceRuntime()) {
+			auto stage_name =
+			    SljitRegionStageName(hash_join_idx, ops[hash_join_idx].kind, "materialize_projection_sources");
+			SljitRegionStageRecorder recorder(runtime, stage_name);
+			materialized = ExecutionMaterializeHashJoinProbeProjectionSources(
+			    binding, join_input, row_pointers, match_selection, join_source.size(), referenced_columns, join_source,
+			    &recorder);
+			auto runtime_us = SljitRegionElapsedMicros(stage_start);
+			auto unattributed_runtime_us = runtime_us - recorder.RecordedRuntimeTimeUs();
+			if (unattributed_runtime_us > 0) {
+				runtime.RecordGeneratedStageRuntime(stage_name + ".unattributed", unattributed_runtime_us);
+			}
+		} else {
+			materialized = ExecutionMaterializeHashJoinProbeProjectionSources(binding, join_input, row_pointers,
+			                                                                  match_selection, join_source.size(),
+			                                                                  referenced_columns, join_source, nullptr);
+		}
+		if (!materialized) {
+			return false;
+		}
+		RecordSljitRegionStageRuntime(runtime, hash_join_idx, ops[hash_join_idx].kind, "materialize_projection_sources",
+		                              stage_start);
+		RecordSljitRegionMaterializationBoundary(runtime, ops[hash_join_idx].kind, "projection_source",
+		                                         join_source.size());
+		return TryDirectMaterializeFixedProjectionToBatch(runtime, scratch, projection_idx, projection_op, join_source,
+		                                                  batch, output_to_projection, direct_projection_skip_ptr,
+		                                                  projected_hashes);
+	}
+
 	bool TryExecuteFullPipeline(ExecutionRegionRuntime &runtime, ExecutionRegionResult &result) override {
 		if (!ExecutionRegionABIIsFullPipeline(abi)) {
 			throw InternalException("SLJIT full pipeline kernel entered without full-pipeline ABI");
@@ -3310,9 +5513,15 @@ public:
 		if (CanBatchProjectionHashJoinProjectionProjectionGroupedAggregateFullPipeline()) {
 			return TryExecuteFullPipelineProjectionHashJoinProjectionProjectionGroupedAggregateBatched(runtime, result);
 		}
+		if (CanBatchHashJoinProjectionHashJoinProjectionsGroupedAggregateFullPipeline()) {
+			return TryExecuteFullPipelineHashJoinProjectionHashJoinProjectionsGroupedAggregateBatched(runtime, result);
+		}
 		if (CanBatchProjectionHashJoinProjectionHashJoinProjectionProjectionGroupedAggregateFullPipeline()) {
 			return TryExecuteFullPipelineProjectionHashJoinProjectionHashJoinProjectionProjectionGroupedAggregateBatched(
 			    runtime, result);
+		}
+		if (CanBatchHashJoinHashJoinProjectionGroupedAggregateFullPipeline()) {
+			return TryExecuteFullPipelineHashJoinHashJoinProjectionGroupedAggregateBatched(runtime, result);
 		}
 		if (CanBatchHashJoinHashJoinProjectionProjectionGroupedAggregateFullPipeline()) {
 			return TryExecuteFullPipelineHashJoinHashJoinProjectionProjectionGroupedAggregateBatched(runtime, result);
@@ -3595,31 +5804,56 @@ public:
 			intermediate.Reset();
 			auto first_projection_stage_start = SljitRegionStageStart(runtime);
 			if (TryReferenceProjection(intermediate, join_output, first_projection_op)) {
-				RecordSljitRegionStageRuntime(runtime, 1, first_projection_op.kind,
-				                              "post_join_reference_projection", first_projection_stage_start);
+				RecordSljitRegionStageRuntime(runtime, 1, first_projection_op.kind, "post_join_reference_projection",
+				                              first_projection_stage_start);
+				RecordSljitRegionMaterializationBoundary(runtime, first_projection_op.kind,
+				                                         "reference_post_join_projection", intermediate.size());
 			} else {
 				ExecuteProjection(scratch, 1, first_projection_op, join_output, intermediate);
 				RecordSljitRegionStageRuntime(runtime, 1, first_projection_op.kind, "post_join_batch_projection",
 				                              first_projection_stage_start);
+				RecordSljitRegionMaterializationBoundary(runtime, first_projection_op.kind,
+				                                         "copied_post_join_projection", intermediate.size());
 			}
 
 			projected.Reset();
 			auto second_projection_stage_start = SljitRegionStageStart(runtime);
 			if (TryReferenceProjection(projected, intermediate, second_projection_op)) {
-				RecordSljitRegionStageRuntime(runtime, 2, second_projection_op.kind,
-				                              "post_join_reference_projection", second_projection_stage_start);
+				RecordSljitRegionStageRuntime(runtime, 2, second_projection_op.kind, "post_join_reference_projection",
+				                              second_projection_stage_start);
+				RecordSljitRegionMaterializationBoundary(runtime, second_projection_op.kind,
+				                                         "reference_post_join_projection", projected.size());
 			} else {
 				ExecuteProjection(scratch, 2, second_projection_op, intermediate, projected);
 				RecordSljitRegionStageRuntime(runtime, 2, second_projection_op.kind, "post_join_batch_projection",
 				                              second_projection_stage_start);
+				RecordSljitRegionMaterializationBoundary(runtime, second_projection_op.kind,
+				                                         "copied_post_join_projection", projected.size());
 			}
 		};
-		return TryExecuteFullPipelineHashJoinProjectedGroupedAggregateBatched(runtime, result, 0, 2, 3,
-		                                                                      prepare_join_input, project_join_output);
+		auto direct_project_join_output_to_batch = [&](SljitRegionExecutionScratch &scratch, DataChunk *join_input,
+		                                               const SelectionVector *match_selection, Vector *row_pointers,
+		                                               DataChunk &join_output, DataChunk &batch) {
+			vector<idx_t> output_to_projection;
+			if (!BuildReferenceProjectionOutputMap(ops[1], ops[2], output_to_projection)) {
+				return false;
+			}
+			auto output_map = optional_ptr<const vector<idx_t>>(&output_to_projection);
+			if (join_input && match_selection && row_pointers) {
+				return TryDirectMaterializeHashJoinProjectionSourcesToBatch(runtime, scratch, 0, 1, ops[1], *join_input,
+				                                                            *match_selection, *row_pointers,
+				                                                            join_output, batch, output_map);
+			}
+			return TryDirectMaterializeFixedProjectionToBatch(runtime, scratch, 1, ops[1], join_output, batch,
+			                                                  output_map);
+		};
+		return TryExecuteFullPipelineHashJoinProjectedGroupedAggregateBatched(
+		    runtime, result, 0, 2, 3, prepare_join_input, project_join_output, direct_project_join_output_to_batch);
 	}
 
-	bool TryExecuteFullPipelineProjectionHashJoinProjectionProjectionGroupedAggregateBatched(
-	    ExecutionRegionRuntime &runtime, ExecutionRegionResult &result) {
+	bool
+	TryExecuteFullPipelineProjectionHashJoinProjectionProjectionGroupedAggregateBatched(ExecutionRegionRuntime &runtime,
+	                                                                                    ExecutionRegionResult &result) {
 		const bool bypass_pre_join_projection = CanBypassInt64ToInt32PreJoinProjection();
 		const bool first_join_unchecked_key_cast =
 		    bypass_pre_join_projection && CanUseUncheckedInt64ToInt32PreJoinProjection(0, 1);
@@ -3659,6 +5893,8 @@ public:
 				if (TryFastProjectQ12PriorityGroupedPayload(join_output, projected)) {
 					RecordSljitRegionStageRuntime(runtime, 3, ops[3].kind, "post_join_q12_priority_projection",
 					                              q12_projection_stage_start);
+					RecordSljitRegionMaterializationBoundary(runtime, ops[3].kind, "copied_post_join_projection",
+					                                         projected.size());
 					return;
 				}
 			}
@@ -3669,28 +5905,1554 @@ public:
 			intermediate.Reset();
 			auto first_projection_stage_start = SljitRegionStageStart(runtime);
 			if (TryReferenceProjection(intermediate, join_output, first_projection_op)) {
-				RecordSljitRegionStageRuntime(runtime, 2, first_projection_op.kind,
-				                              "post_join_reference_projection", first_projection_stage_start);
+				RecordSljitRegionStageRuntime(runtime, 2, first_projection_op.kind, "post_join_reference_projection",
+				                              first_projection_stage_start);
+				RecordSljitRegionMaterializationBoundary(runtime, first_projection_op.kind,
+				                                         "reference_post_join_projection", intermediate.size());
 			} else {
 				ExecuteProjection(scratch, 2, first_projection_op, join_output, intermediate);
 				RecordSljitRegionStageRuntime(runtime, 2, first_projection_op.kind, "post_join_batch_projection",
 				                              first_projection_stage_start);
+				RecordSljitRegionMaterializationBoundary(runtime, first_projection_op.kind,
+				                                         "copied_post_join_projection", intermediate.size());
 			}
 
 			projected.Reset();
 			auto second_projection_stage_start = SljitRegionStageStart(runtime);
 			if (TryReferenceProjection(projected, intermediate, second_projection_op)) {
-				RecordSljitRegionStageRuntime(runtime, 3, second_projection_op.kind,
-				                              "post_join_reference_projection", second_projection_stage_start);
+				RecordSljitRegionStageRuntime(runtime, 3, second_projection_op.kind, "post_join_reference_projection",
+				                              second_projection_stage_start);
+				RecordSljitRegionMaterializationBoundary(runtime, second_projection_op.kind,
+				                                         "reference_post_join_projection", projected.size());
 			} else {
 				ExecuteProjection(scratch, 3, second_projection_op, intermediate, projected);
 				RecordSljitRegionStageRuntime(runtime, 3, second_projection_op.kind, "post_join_batch_projection",
 				                              second_projection_stage_start);
+				RecordSljitRegionMaterializationBoundary(runtime, second_projection_op.kind,
+				                                         "copied_post_join_projection", projected.size());
 			}
 		};
-		return TryExecuteFullPipelineHashJoinProjectedGroupedAggregateBatched(runtime, result, 1, 3, 4,
-		                                                                      prepare_join_input, project_join_output,
-		                                                                      first_join_unchecked_key_cast);
+		auto direct_project_join_output_to_batch = [&](SljitRegionExecutionScratch &scratch, DataChunk *join_input,
+		                                               const SelectionVector *match_selection, Vector *row_pointers,
+		                                               DataChunk &join_output, DataChunk &batch) {
+			vector<idx_t> output_to_projection;
+			if (fast_q12_priority_projection ||
+			    !BuildReferenceProjectionOutputMap(ops[2], ops[3], output_to_projection)) {
+				return false;
+			}
+			auto output_map = optional_ptr<const vector<idx_t>>(&output_to_projection);
+			if (join_input && match_selection && row_pointers) {
+				return TryDirectMaterializeHashJoinProjectionSourcesToBatch(runtime, scratch, 1, 2, ops[2], *join_input,
+				                                                            *match_selection, *row_pointers,
+				                                                            join_output, batch, output_map);
+			}
+			return TryDirectMaterializeFixedProjectionToBatch(runtime, scratch, 2, ops[2], join_output, batch,
+			                                                  output_map);
+		};
+		return TryExecuteFullPipelineHashJoinProjectedGroupedAggregateBatched(
+		    runtime, result, 1, 3, 4, prepare_join_input, project_join_output, direct_project_join_output_to_batch,
+		    first_join_unchecked_key_cast);
+	}
+
+	bool
+	TryExecuteFullPipelineHashJoinProjectionHashJoinProjectionsGroupedAggregateBatched(ExecutionRegionRuntime &runtime,
+	                                                                                   ExecutionRegionResult &result) {
+		SljitRegionExecutionScratch scratch(runtime.GetAllocator(), ops);
+		idx_t fetched_chunks = 0;
+		idx_t processed_batches = 0;
+		bool deferred_grouped_finish = false;
+		const auto max_source_fetches = SljitBatchedSourceContractFetchBudget(runtime.MaxChunks());
+		const auto aggregate_idx = ops.size() - 1;
+		const auto final_projection_idx = aggregate_idx - 1;
+		auto &first_hash_join_op = ops[0];
+		auto &between_join_projection_op = ops[1];
+		auto &second_hash_join_op = ops[2];
+		auto &final_projection_op = ops[final_projection_idx];
+		auto &aggregate_op = ops[aggregate_idx];
+		auto &native_runtime = runtime.ExecutionOperators();
+		DataChunk second_join_batch;
+		second_join_batch.Initialize(runtime.GetAllocator(), between_join_projection_op.output_types);
+		struct BetweenJoinCompressedPassthrough {
+			idx_t between_projection_idx = DConstants::INVALID_INDEX;
+			idx_t first_join_output_source_idx = DConstants::INVALID_INDEX;
+			idx_t sidecar_idx = DConstants::INVALID_INDEX;
+		};
+		DataChunk second_join_compressed_passthrough_batch;
+		bool second_join_compressed_passthrough_initialized = false;
+		bool second_join_compressed_passthrough_usable = true;
+		vector<BetweenJoinCompressedPassthrough> between_join_compressed_passthroughs;
+		vector<idx_t> compressed_passthrough_by_between_projection;
+		struct BetweenJoinPrecomputedPayload {
+			idx_t second_projection_idx = DConstants::INVALID_INDEX;
+			idx_t sidecar_idx = DConstants::INVALID_INDEX;
+			SljitExecutableRegionExpression first_join_expr;
+			vector<idx_t> between_projection_indices;
+			SljitRuntimeDecimal64DiscountedAmountProgram decimal64_discounted_amount_program;
+		};
+		DataChunk second_join_precomputed_payload_batch;
+		bool second_join_precomputed_payload_initialized = false;
+		bool second_join_precomputed_payload_usable = true;
+		vector<BetweenJoinPrecomputedPayload> between_join_precomputed_payloads;
+		struct FinalGroupCompressedPassthroughSource {
+			idx_t final_group_output_idx = DConstants::INVALID_INDEX;
+			idx_t final_projection_idx = DConstants::INVALID_INDEX;
+			idx_t second_join_projection_idx = DConstants::INVALID_INDEX;
+			idx_t second_join_input_col = DConstants::INVALID_INDEX;
+			idx_t sidecar_idx = DConstants::INVALID_INDEX;
+		};
+		DataChunk final_group_key_batch;
+		Vector final_group_key_hashes(LogicalType::HASH);
+		bool final_group_key_batch_initialized = false;
+		bool final_split_payload_descriptor_initialized = false;
+		bool final_split_payload_descriptor_ready = false;
+		bool final_split_payload_uses_fused_update = false;
+		string final_split_payload_descriptor_blocker;
+		vector<LogicalType> final_group_key_types;
+		vector<idx_t> final_group_projection_indices;
+		vector<idx_t> final_payload_source_indices;
+		vector<uint8_t> between_join_compressed_key_skip_projection;
+		vector<uint8_t> second_join_compressed_key_skip_projection;
+		vector<uint8_t> between_join_precomputed_payload_skip_projection;
+		vector<uint8_t> second_join_precomputed_payload_skip_projection;
+		bool compressed_group_key_skip_initialized = false;
+		bool compressed_group_key_skip_ready = false;
+		bool second_join_batch_omits_compressed_group_keys = false;
+		bool precomputed_payload_skip_initialized = false;
+		bool precomputed_payload_skip_ready = false;
+		bool second_join_batch_omits_precomputed_payloads = false;
+
+		auto initialize_between_join_compressed_passthroughs = [&]() {
+			if (second_join_compressed_passthrough_initialized) {
+				return;
+			}
+			second_join_compressed_passthrough_initialized = true;
+			compressed_passthrough_by_between_projection.assign(between_join_projection_op.projections.size(),
+			                                                    DConstants::INVALID_INDEX);
+			vector<LogicalType> passthrough_types;
+			for (idx_t projection_idx = 0; projection_idx < between_join_projection_op.projections.size();
+			     projection_idx++) {
+				auto &plan = between_join_projection_op.projections[projection_idx].plan;
+				if (plan.kind != SljitNativeRegionExpressionKind::STRING_DECOMPRESS ||
+				    plan.return_type.id() != LogicalTypeId::VARCHAR ||
+				    plan.source_index >= first_hash_join_op.output_types.size()) {
+					continue;
+				}
+				auto &compressed_type = first_hash_join_op.output_types[plan.source_index];
+				if (!DirectAppendSupportsFixedSizeType(compressed_type)) {
+					continue;
+				}
+				BetweenJoinCompressedPassthrough passthrough;
+				passthrough.between_projection_idx = projection_idx;
+				passthrough.first_join_output_source_idx = plan.source_index;
+				passthrough.sidecar_idx = passthrough_types.size();
+				compressed_passthrough_by_between_projection[projection_idx] = passthrough.sidecar_idx;
+				passthrough_types.push_back(compressed_type);
+				between_join_compressed_passthroughs.push_back(passthrough);
+			}
+			if (!passthrough_types.empty()) {
+				second_join_compressed_passthrough_batch.Initialize(runtime.GetAllocator(), passthrough_types);
+			}
+		};
+
+		auto reset_between_join_compressed_passthroughs = [&]() {
+			if (second_join_compressed_passthrough_initialized &&
+			    second_join_compressed_passthrough_batch.ColumnCount() > 0) {
+				second_join_compressed_passthrough_batch.Reset();
+			}
+			second_join_compressed_passthrough_usable = true;
+			second_join_batch_omits_compressed_group_keys = false;
+		};
+
+		auto reset_between_join_precomputed_payloads = [&]() {
+			if (second_join_precomputed_payload_initialized &&
+			    second_join_precomputed_payload_batch.ColumnCount() > 0) {
+				second_join_precomputed_payload_batch.Reset();
+			}
+			second_join_precomputed_payload_usable = true;
+			second_join_batch_omits_precomputed_payloads = false;
+		};
+
+		auto append_between_join_compressed_passthroughs =
+		    [&](DataChunk &first_join_input, const SelectionVector &match_selection, Vector &row_pointers,
+		        idx_t target_offset, idx_t count) -> bool {
+			initialize_between_join_compressed_passthroughs();
+			if (between_join_compressed_passthroughs.empty()) {
+				return true;
+			}
+			auto record_passthrough_blocker = [&](const char *reason) {
+				auto path = string("direct_between_join_compressed_passthrough_unsupported.") + reason;
+				RecordSljitRegionRuntimePath(runtime, between_join_projection_op.kind, path.c_str(), count);
+			};
+			if (!scratch.HasOperatorBinding(0)) {
+				record_passthrough_blocker("first_join_binding");
+				return false;
+			}
+			if (second_join_compressed_passthrough_batch.size() != target_offset) {
+				record_passthrough_blocker("target_offset");
+				return false;
+			}
+			if (target_offset + count > STANDARD_VECTOR_SIZE) {
+				record_passthrough_blocker("capacity");
+				return false;
+			}
+			auto &binding = scratch.OperatorBinding(0).hash_join_probe;
+			auto stage_start = SljitRegionStageStart(runtime);
+			for (auto &passthrough : between_join_compressed_passthroughs) {
+				if (passthrough.sidecar_idx >= second_join_compressed_passthrough_batch.ColumnCount()) {
+					record_passthrough_blocker("sidecar_index");
+					return false;
+				}
+				auto &target = second_join_compressed_passthrough_batch.data[passthrough.sidecar_idx];
+				if (!TryMaterializeHashJoinOutputReferenceToBatch(
+				        binding, first_join_input, match_selection, row_pointers,
+				        passthrough.first_join_output_source_idx, target, target_offset, count)) {
+					record_passthrough_blocker("source");
+					return false;
+				}
+			}
+			FinishDirectProjectionBatchTargets(second_join_compressed_passthrough_batch, target_offset + count, false);
+			RecordSljitRegionStageRuntime(runtime, 1, between_join_projection_op.kind,
+			                              "between_join_compressed_passthrough_projection", stage_start);
+			RecordSljitRegionRuntimePath(runtime, between_join_projection_op.kind,
+			                             "direct_between_join_compressed_passthrough_projection", count);
+			return true;
+		};
+
+		auto append_between_join_precomputed_payloads =
+		    [&](DataChunk &first_join_input, const SelectionVector &match_selection, Vector &row_pointers,
+		        idx_t target_offset, idx_t count) -> bool {
+			if (!second_join_precomputed_payload_usable || between_join_precomputed_payloads.empty()) {
+				return true;
+			}
+			auto record_payload_blocker = [&](const char *reason) {
+				auto path = string("direct_between_join_precomputed_payload_unsupported.") + reason;
+				RecordSljitRegionRuntimePath(runtime, between_join_projection_op.kind, path.c_str(), count);
+			};
+			if (!scratch.HasOperatorBinding(0)) {
+				record_payload_blocker("first_join_binding");
+				return false;
+			}
+			if (!second_join_precomputed_payload_initialized ||
+			    second_join_precomputed_payload_batch.size() != target_offset) {
+				record_payload_blocker("target_offset");
+				return false;
+			}
+			if (target_offset + count > STANDARD_VECTOR_SIZE) {
+				record_payload_blocker("capacity");
+				return false;
+			}
+			auto &binding = scratch.OperatorBinding(0).hash_join_probe;
+			auto stage_start = SljitRegionStageStart(runtime);
+			bool used_direct_decimal64_payload = false;
+			for (auto &payload : between_join_precomputed_payloads) {
+				if (payload.sidecar_idx >= second_join_precomputed_payload_batch.ColumnCount()) {
+					record_payload_blocker("sidecar_index");
+					return false;
+				}
+				string decimal64_payload_miss;
+				if (TryMaterializeHashJoinAllValidDecimal64ExpressionToBatch(
+				        binding, payload.first_join_expr, first_join_input, match_selection, row_pointers,
+				        second_join_precomputed_payload_batch, payload.sidecar_idx, target_offset, count,
+				        payload.decimal64_discounted_amount_program, &decimal64_payload_miss)) {
+					used_direct_decimal64_payload = true;
+					continue;
+				}
+				if (!decimal64_payload_miss.empty()) {
+					auto path = string("direct_between_join_precomputed_payload_decimal64_unsupported.") +
+					            decimal64_payload_miss;
+					RecordSljitRegionRuntimePath(runtime, between_join_projection_op.kind, path.c_str(), count);
+				}
+				auto &adapter_scratch = scratch.ExpressionAdapterScratch(3, payload.second_projection_idx);
+				if (!TryMaterializeHashJoinMixedProjectionToBatch(
+				        binding, payload.first_join_expr, first_join_input, match_selection, row_pointers,
+				        second_join_precomputed_payload_batch, payload.sidecar_idx, target_offset, count,
+				        adapter_scratch)) {
+					record_payload_blocker("payload_projection");
+					return false;
+				}
+			}
+			FinishDirectProjectionBatchTargets(second_join_precomputed_payload_batch, target_offset + count, false);
+			RecordSljitRegionStageRuntime(runtime, 1, between_join_projection_op.kind,
+			                              "between_join_precomputed_payload_projection", stage_start);
+			RecordSljitRegionRuntimePath(runtime, between_join_projection_op.kind,
+			                             "direct_between_join_precomputed_payload_projection", count);
+			if (used_direct_decimal64_payload) {
+				RecordSljitRegionRuntimePath(runtime, between_join_projection_op.kind,
+				                             "direct_between_join_precomputed_payload_decimal64_projection", count);
+			}
+			return true;
+		};
+
+		auto copy_second_join_precomputed_payloads_to_projection = [&](DataChunk &direct_projection,
+		                                                               idx_t count) -> bool {
+			if (!second_join_batch_omits_precomputed_payloads) {
+				return true;
+			}
+			auto record_payload_blocker = [&](const char *reason) {
+				auto path = string("direct_second_join_precomputed_payload_unsupported.") + reason;
+				RecordSljitRegionRuntimePath(runtime, ops[3].kind, path.c_str(), count);
+			};
+			if (!second_join_precomputed_payload_usable || !second_join_precomputed_payload_initialized ||
+			    second_join_precomputed_payload_batch.size() != second_join_batch.size()) {
+				record_payload_blocker("sidecar_batch");
+				return false;
+			}
+			auto stage_start = SljitRegionStageStart(runtime);
+			for (auto &payload : between_join_precomputed_payloads) {
+				if (payload.sidecar_idx >= second_join_precomputed_payload_batch.ColumnCount() ||
+				    payload.second_projection_idx >= direct_projection.ColumnCount()) {
+					record_payload_blocker("sidecar_index");
+					return false;
+				}
+				DirectProjectionBatchPassthrough passthrough;
+				passthrough.output_idx = payload.second_projection_idx;
+				passthrough.source = &second_join_precomputed_payload_batch.data[payload.sidecar_idx];
+				passthrough.selection = &scratch.FilterSelection(2);
+				passthrough.trace_phase = "direct_batch_expression.precomputed_payload";
+				if (!TryCopyDirectProjectionPassthroughToBatch(
+				        passthrough, direct_projection.data[payload.second_projection_idx], 0, count)) {
+					record_payload_blocker("copy");
+					return false;
+				}
+			}
+			RecordSljitRegionStageRuntime(runtime, 3, ops[3].kind, "second_join_precomputed_payload_passthrough",
+			                              stage_start);
+			RecordSljitRegionRuntimePath(runtime, ops[3].kind, "direct_second_join_precomputed_payload_passthrough",
+			                             count);
+			return true;
+		};
+
+		auto collect_final_group_compressed_passthrough_sources =
+		    [&](const ExecutionHashJoinProbeBinding &second_binding,
+		        vector<FinalGroupCompressedPassthroughSource> &sources) -> bool {
+			sources.clear();
+			if (!second_join_compressed_passthrough_usable || !second_join_compressed_passthrough_initialized ||
+			    second_join_compressed_passthrough_batch.ColumnCount() == 0 || final_group_projection_indices.empty() ||
+			    !second_binding.ready ||
+			    second_binding.output_mode != ExecutionHashJoinProbeOutputMode::MATCHED_PROBE_AND_BUILD ||
+			    second_binding.lhs_output_column_indices.empty() || ops.size() <= 3) {
+				return false;
+			}
+			auto &second_join_projection_op = ops[3];
+			if (second_join_projection_op.kind != SljitNativeRegionOpKind::PROJECTION) {
+				return false;
+			}
+			for (idx_t output_idx = 0; output_idx < final_group_projection_indices.size(); output_idx++) {
+				const auto projection_idx = final_group_projection_indices[output_idx];
+				if (projection_idx >= final_projection_op.projections.size()) {
+					return false;
+				}
+				auto &final_plan = final_projection_op.projections[projection_idx].plan;
+				if (final_plan.kind != SljitNativeRegionExpressionKind::STRING_COMPRESS ||
+				    final_plan.source_index >= second_join_projection_op.projections.size()) {
+					continue;
+				}
+				SljitExecutableRegionExpression remapped_expr;
+				idx_t second_join_output_source_idx;
+				if (!TryBuildSingleSourceProjectionExpression(
+				        second_join_projection_op.projections[final_plan.source_index], remapped_expr,
+				        second_join_output_source_idx) ||
+				    !ProjectionIsSingleSourceReferenceLike(remapped_expr.plan) ||
+				    second_join_output_source_idx >= second_binding.lhs_output_column_indices.size()) {
+					continue;
+				}
+				const auto second_join_input_col =
+				    second_binding.lhs_output_column_indices[second_join_output_source_idx];
+				if (second_join_input_col >= compressed_passthrough_by_between_projection.size()) {
+					continue;
+				}
+				const auto sidecar_idx = compressed_passthrough_by_between_projection[second_join_input_col];
+				if (sidecar_idx == DConstants::INVALID_INDEX ||
+				    sidecar_idx >= second_join_compressed_passthrough_batch.ColumnCount()) {
+					continue;
+				}
+				auto &source = second_join_compressed_passthrough_batch.data[sidecar_idx];
+				if (source.GetType() != final_projection_op.output_types[projection_idx] ||
+				    source.GetType() != final_plan.return_type) {
+					continue;
+				}
+				FinalGroupCompressedPassthroughSource passthrough;
+				passthrough.final_group_output_idx = output_idx;
+				passthrough.final_projection_idx = projection_idx;
+				passthrough.second_join_projection_idx = final_plan.source_index;
+				passthrough.second_join_input_col = second_join_input_col;
+				passthrough.sidecar_idx = sidecar_idx;
+				sources.push_back(passthrough);
+			}
+			return !sources.empty();
+		};
+
+		auto finish_deferred_grouped_update = [&]() {
+			if (!deferred_grouped_finish) {
+				return;
+			}
+			auto &binding = scratch.SinkBinding(aggregate_idx);
+			if (!binding.ready || !binding.aggregate_update.ready || !binding.aggregate_update.grouped_state.ready ||
+			    !binding.aggregate_update.grouped_state.state) {
+				throw InternalException("SLJIT deferred grouped aggregate finish is missing aggregate state");
+			}
+			auto finish_stage_start = SljitRegionStageStart(runtime);
+			binding.aggregate_update.grouped_state.state->FinishStateUpdates();
+			RecordSljitRegionStageRuntime(runtime, aggregate_idx, aggregate_op.kind,
+			                              "finish_deferred_grouped_state_updates", finish_stage_start);
+			deferred_grouped_finish = false;
+		};
+
+		auto execute_projected_batch = [&](DataChunk &projected) -> bool {
+			if (projected.size() == 0) {
+				return false;
+			}
+			auto sink_result =
+			    ExecuteNativeAggregateUpdate(runtime, native_runtime, scratch, aggregate_idx, aggregate_op, projected,
+			                                 nullptr, DConstants::INVALID_INDEX, true, &deferred_grouped_finish);
+			if (sink_result == SinkResultType::BLOCKED) {
+				finish_deferred_grouped_update();
+				result = runtime.DeferredReason().empty() ? ExecutionRegionResult::INTERRUPTED
+				                                          : ExecutionRegionResult::DEFERRED;
+				return true;
+			}
+			native_runtime.RecordSinkResult(projected.size(), sink_result);
+			if (sink_result == SinkResultType::FINISHED) {
+				finish_deferred_grouped_update();
+				result = ExecutionRegionResult::FINISHED;
+				return true;
+			}
+			processed_batches++;
+			return false;
+		};
+
+		auto flush_projected_batch = [&]() -> bool {
+			auto batch = runtime.PendingSourceContractBatch();
+			if (!batch) {
+				return false;
+			}
+			if (execute_projected_batch(*batch)) {
+				return true;
+			}
+			runtime.ResetSourceContractBatch();
+			return false;
+		};
+
+		auto record_final_split_payload_unsupported = [&](const string &reason, idx_t count) {
+			auto path = string("direct_projected_group_payload_update_unsupported.") + reason;
+			RecordSljitRegionRuntimePath(runtime, aggregate_op.kind, path.c_str(), count);
+		};
+
+		auto build_final_split_payload_descriptor = [&](DataChunk &payload_input) -> bool {
+			if (final_split_payload_descriptor_initialized) {
+				return final_split_payload_descriptor_ready;
+			}
+			final_split_payload_descriptor_initialized = true;
+			auto set_blocker = [&](const char *blocker) {
+				final_split_payload_descriptor_blocker = blocker;
+				final_split_payload_descriptor_ready = false;
+				final_split_payload_uses_fused_update = false;
+				return false;
+			};
+			if (final_projection_op.kind != SljitNativeRegionOpKind::PROJECTION ||
+			    aggregate_op.kind != SljitNativeRegionOpKind::AGGREGATE_UPDATE) {
+				return set_blocker("operator_kind");
+			}
+			auto &aggregate_update = aggregate_op.aggregate_update;
+			auto &aggregate_plan = aggregate_update.plan;
+			auto &sink_info = aggregate_plan.sink_info;
+			if (sink_info.kind != ExecutionRegionSinkKind::HASH_AGGREGATE_UPDATE || sink_info.groups.empty() ||
+			    sink_info.aggregates.empty() || !aggregate_plan.use_primitive_payloads ||
+			    !aggregate_plan.use_grouped_state_addresses || aggregate_plan.use_perfect_hash_group_lookup ||
+			    aggregate_update.fused_payload_update_owns_group_lookup) {
+				return set_blocker("aggregate_shape");
+			}
+			if (aggregate_update.payloads.size() != sink_info.aggregates.size()) {
+				return set_blocker("payload_count");
+			}
+			final_group_key_types.clear();
+			final_group_projection_indices.clear();
+			final_group_key_types.reserve(sink_info.groups.size());
+			final_group_projection_indices.reserve(sink_info.groups.size());
+			for (idx_t group_idx = 0; group_idx < sink_info.groups.size(); group_idx++) {
+				auto &group = sink_info.groups[group_idx];
+				if (!group.supported_reference || group.input_index != group_idx ||
+				    group.input_index >= final_projection_op.projections.size() ||
+				    group.input_index >= final_projection_op.output_types.size()) {
+					return set_blocker("group_key_not_dense");
+				}
+				auto &group_projection = final_projection_op.projections[group.input_index].plan;
+				if (group_projection.return_type.InternalType() != group.type.InternalType() ||
+				    final_projection_op.output_types[group.input_index].InternalType() != group.type.InternalType()) {
+					return set_blocker("group_key_type");
+				}
+				final_group_projection_indices.push_back(group.input_index);
+				final_group_key_types.push_back(final_projection_op.output_types[group.input_index]);
+			}
+			final_payload_source_indices.clear();
+			vector<idx_t> fused_payload_sources;
+			if (aggregate_update.fused_payload_update_function &&
+			    TryGetFusedTypedPayloadCombinedSources(aggregate_update.payloads, sink_info.aggregates,
+			                                           fused_payload_sources)) {
+				final_payload_source_indices.reserve(fused_payload_sources.size());
+				for (auto projection_source_idx : fused_payload_sources) {
+					if (projection_source_idx >= final_projection_op.projections.size() ||
+					    projection_source_idx >= final_projection_op.output_types.size()) {
+						return set_blocker("fused_payload_source");
+					}
+					SljitExecutableRegionExpression remapped_expr;
+					idx_t input_source_idx;
+					if (!TryBuildSingleSourceProjectionExpression(
+					        final_projection_op.projections[projection_source_idx], remapped_expr, input_source_idx) ||
+					    !ProjectionIsSingleSourceReferenceLike(remapped_expr.plan)) {
+						return set_blocker("fused_payload_projection");
+					}
+					if (input_source_idx >= payload_input.ColumnCount() ||
+					    final_projection_op.output_types[projection_source_idx] !=
+					        payload_input.data[input_source_idx].GetType()) {
+						return set_blocker("fused_payload_type");
+					}
+					final_payload_source_indices.push_back(input_source_idx);
+				}
+				final_split_payload_uses_fused_update = true;
+				final_split_payload_descriptor_ready = true;
+				return true;
+			}
+			final_payload_source_indices.reserve(sink_info.aggregates.size());
+			final_split_payload_uses_fused_update = false;
+			for (idx_t payload_idx = 0; payload_idx < sink_info.aggregates.size(); payload_idx++) {
+				auto &aggregate = sink_info.aggregates[payload_idx];
+				auto &payload = aggregate_update.payloads[payload_idx].plan;
+				if (aggregate.primitive_update_kind == AggregatePrimitiveUpdateKind::COUNT_STAR) {
+					if (aggregate.child_count != 0) {
+						return set_blocker("count_star_payload");
+					}
+					final_payload_source_indices.push_back(DConstants::INVALID_INDEX);
+					continue;
+				}
+				if (aggregate.child_count != 1 || aggregate.child_types.size() != 1 ||
+				    aggregate.payload_index >= final_projection_op.projections.size()) {
+					return set_blocker("payload_contract");
+				}
+				if (payload.kind != SljitNativeRegionExpressionKind::REFERENCE ||
+				    payload.source_index != aggregate.payload_index) {
+					return set_blocker("payload_not_final_reference");
+				}
+				auto &payload_projection = final_projection_op.projections[aggregate.payload_index].plan;
+				if (payload_projection.kind != SljitNativeRegionExpressionKind::REFERENCE ||
+				    payload_projection.source_index >= payload_input.ColumnCount()) {
+					return set_blocker("payload_source");
+				}
+				if (payload_projection.return_type.InternalType() != aggregate.child_types[0].InternalType() ||
+				    payload_input.data[payload_projection.source_index].GetType().InternalType() !=
+				        aggregate.child_types[0].InternalType()) {
+					return set_blocker("payload_type");
+				}
+				final_payload_source_indices.push_back(payload_projection.source_index);
+			}
+			final_split_payload_descriptor_ready = true;
+			return true;
+		};
+
+		auto build_final_group_key_passthroughs = [&](vector<DirectProjectionBatchPassthrough> &passthroughs) -> bool {
+			passthroughs.clear();
+			if (second_join_compressed_passthrough_batch.size() != second_join_batch.size() ||
+			    !scratch.HasOperatorBinding(2)) {
+				return false;
+			}
+			auto &second_binding = scratch.OperatorBinding(2).hash_join_probe;
+			vector<FinalGroupCompressedPassthroughSource> sources;
+			if (!collect_final_group_compressed_passthrough_sources(second_binding, sources)) {
+				return false;
+			}
+			for (auto &source_info : sources) {
+				auto &source = second_join_compressed_passthrough_batch.data[source_info.sidecar_idx];
+				DirectProjectionBatchPassthrough passthrough;
+				passthrough.output_idx = source_info.final_group_output_idx;
+				passthrough.source = &source;
+				passthrough.selection = &scratch.FilterSelection(2);
+				passthrough.trace_phase = "direct_batch_expression.compressed_passthrough";
+				passthroughs.push_back(passthrough);
+			}
+			return !passthroughs.empty();
+		};
+
+		auto second_join_input_col_is_probe_key = [&](const ExecutionHashJoinProbeBinding &second_binding,
+		                                              idx_t input_col) -> bool {
+			for (auto key_input_idx : second_binding.probe_key_input_indices) {
+				if (key_input_idx == input_col) {
+					return true;
+				}
+			}
+			for (auto &key : second_hash_join_op.hash_join_probe.plan.keys) {
+				if (key.key_input_index == input_col) {
+					return true;
+				}
+			}
+			return false;
+		};
+
+		auto final_payload_uses_second_join_input_col = [&](const ExecutionHashJoinProbeBinding &second_binding,
+		                                                    idx_t input_col) -> bool {
+			if (ops.size() <= 3) {
+				return true;
+			}
+			auto &second_join_projection_op = ops[3];
+			if (second_join_projection_op.kind != SljitNativeRegionOpKind::PROJECTION) {
+				return true;
+			}
+			for (auto payload_source_idx : final_payload_source_indices) {
+				if (payload_source_idx == DConstants::INVALID_INDEX) {
+					continue;
+				}
+				if (payload_source_idx >= second_join_projection_op.projections.size()) {
+					return true;
+				}
+				vector<uint8_t> referenced_sources;
+				if (!TryCollectHashJoinProjectionExpressionSources(
+				        second_join_projection_op.projections[payload_source_idx], second_binding.output_types.size(),
+				        referenced_sources)) {
+					return true;
+				}
+				for (idx_t source_idx = 0; source_idx < referenced_sources.size(); source_idx++) {
+					if (!referenced_sources[source_idx] ||
+					    source_idx >= second_binding.lhs_output_column_indices.size()) {
+						continue;
+					}
+					if (second_binding.lhs_output_column_indices[source_idx] == input_col) {
+						return true;
+					}
+				}
+			}
+			return false;
+		};
+
+		auto second_join_input_col_used_by_live_projection =
+		    [&](const ExecutionHashJoinProbeBinding &second_binding, idx_t input_col,
+		        const vector<uint8_t> &second_projection_skip) -> bool {
+			if (ops.size() <= 3) {
+				return true;
+			}
+			auto &second_join_projection_op = ops[3];
+			if (second_join_projection_op.kind != SljitNativeRegionOpKind::PROJECTION ||
+			    second_projection_skip.size() != second_join_projection_op.projections.size()) {
+				return true;
+			}
+			for (idx_t projection_idx = 0; projection_idx < second_join_projection_op.projections.size();
+			     projection_idx++) {
+				if (second_projection_skip[projection_idx]) {
+					continue;
+				}
+				vector<uint8_t> referenced_sources;
+				if (!TryCollectHashJoinProjectionExpressionSources(
+				        second_join_projection_op.projections[projection_idx], second_binding.output_types.size(),
+				        referenced_sources)) {
+					return true;
+				}
+				for (idx_t source_idx = 0; source_idx < referenced_sources.size(); source_idx++) {
+					if (!referenced_sources[source_idx] ||
+					    source_idx >= second_binding.lhs_output_column_indices.size()) {
+						continue;
+					}
+					if (second_binding.lhs_output_column_indices[source_idx] == input_col) {
+						return true;
+					}
+				}
+			}
+			return false;
+		};
+
+		auto build_precomputed_payload_projection_skips = [&]() -> bool {
+			if (precomputed_payload_skip_initialized) {
+				return precomputed_payload_skip_ready;
+			}
+			auto record_skip_blocker = [&](const char *reason) {
+				auto path = string("direct_between_join_precomputed_payload_skip_unsupported.") + reason;
+				RecordSljitRegionRuntimePath(runtime, between_join_projection_op.kind, path.c_str(), 1);
+			};
+			auto add_unique = [&](vector<idx_t> &values, idx_t value) {
+				for (auto existing : values) {
+					if (existing == value) {
+						return;
+					}
+				}
+				values.push_back(value);
+			};
+			precomputed_payload_skip_initialized = true;
+			precomputed_payload_skip_ready = false;
+			between_join_precomputed_payloads.clear();
+			between_join_precomputed_payload_skip_projection.assign(between_join_projection_op.projections.size(), 0);
+			if (ops.size() <= 3) {
+				record_skip_blocker("operator_count");
+				return false;
+			}
+			auto &second_join_projection_op = ops[3];
+			second_join_precomputed_payload_skip_projection.assign(second_join_projection_op.projections.size(), 0);
+			if (second_hash_join_op.hash_join_probe.plan.residual_predicate) {
+				record_skip_blocker("second_join_residual");
+				return false;
+			}
+
+			DataChunk descriptor_input;
+			descriptor_input.InitializeEmpty(second_join_projection_op.output_types);
+			if (!build_final_split_payload_descriptor(descriptor_input)) {
+				record_skip_blocker("final_payload_descriptor");
+				return false;
+			}
+			if (final_payload_source_indices.empty()) {
+				record_skip_blocker("no_payload_sources");
+				return false;
+			}
+
+			if (!scratch.HasOperatorBinding(2)) {
+				ExecutionOperatorBinding *binding_ptr = nullptr;
+				string deferred_reason;
+				auto bind_result = BindNativeOperator(
+				    native_runtime, scratch, 2, second_hash_join_op, second_join_batch,
+				    second_hash_join_op.hash_join_probe.plan.operator_info, "native-operator-runtime-deferred",
+				    "SLJIT native hash join probe", binding_ptr, deferred_reason);
+				if (bind_result != ExecutionOperatorBindResult::READY) {
+					record_skip_blocker("second_join_bind");
+					return false;
+				}
+			}
+			auto &second_binding = scratch.OperatorBinding(2).hash_join_probe;
+			if (!second_binding.ready ||
+			    second_binding.output_mode != ExecutionHashJoinProbeOutputMode::MATCHED_PROBE_AND_BUILD ||
+			    second_binding.lhs_output_column_indices.empty()) {
+				record_skip_blocker("second_join_binding");
+				return false;
+			}
+
+			vector<BetweenJoinPrecomputedPayload> candidates;
+			vector<uint8_t> candidate_seen(second_join_projection_op.projections.size(), 0);
+			for (auto payload_source_idx : final_payload_source_indices) {
+				if (payload_source_idx == DConstants::INVALID_INDEX) {
+					continue;
+				}
+				if (payload_source_idx >= second_join_projection_op.projections.size() ||
+				    payload_source_idx >= second_join_projection_op.output_types.size()) {
+					record_skip_blocker("payload_source_index");
+					continue;
+				}
+				if (candidate_seen[payload_source_idx]) {
+					continue;
+				}
+				candidate_seen[payload_source_idx] = 1;
+				auto &payload_projection = second_join_projection_op.projections[payload_source_idx];
+				auto &payload_type = second_join_projection_op.output_types[payload_source_idx];
+				if (payload_projection.plan.return_type != payload_type ||
+				    !DirectProjectionBatchSupportsType(payload_type)) {
+					record_skip_blocker("payload_type");
+					continue;
+				}
+				vector<uint8_t> referenced_sources;
+				if (!TryCollectHashJoinProjectionExpressionSources(
+				        payload_projection, second_binding.output_types.size(), referenced_sources)) {
+					record_skip_blocker("payload_sources");
+					continue;
+				}
+				vector<idx_t> source_map(second_binding.output_types.size(), DConstants::INVALID_INDEX);
+				vector<idx_t> between_projection_indices;
+				bool supported = false;
+				for (idx_t source_idx = 0; source_idx < referenced_sources.size(); source_idx++) {
+					if (!referenced_sources[source_idx]) {
+						continue;
+					}
+					supported = true;
+					if (source_idx >= second_binding.lhs_output_column_indices.size()) {
+						supported = false;
+						record_skip_blocker("rhs_dependency");
+						break;
+					}
+					const auto between_projection_idx = second_binding.lhs_output_column_indices[source_idx];
+					if (between_projection_idx >= between_join_projection_op.projections.size() ||
+					    between_projection_idx >= between_join_projection_op.output_types.size() ||
+					    between_projection_idx >= second_join_batch.ColumnCount() ||
+					    second_binding.output_types[source_idx] !=
+					        between_join_projection_op.output_types[between_projection_idx]) {
+						supported = false;
+						record_skip_blocker("between_projection_index");
+						break;
+					}
+					SljitExecutableRegionExpression remapped_between_expr;
+					idx_t first_join_output_source_idx;
+					if (!TryBuildSingleSourceProjectionExpression(
+					        between_join_projection_op.projections[between_projection_idx], remapped_between_expr,
+					        first_join_output_source_idx) ||
+					    !ProjectionIsSingleSourceReferenceLike(remapped_between_expr.plan) ||
+					    first_join_output_source_idx >= first_hash_join_op.output_types.size() ||
+					    first_hash_join_op.output_types[first_join_output_source_idx] !=
+					        between_join_projection_op.output_types[between_projection_idx]) {
+						supported = false;
+						record_skip_blocker("between_projection_source");
+						break;
+					}
+					source_map[source_idx] = first_join_output_source_idx;
+					add_unique(between_projection_indices, between_projection_idx);
+				}
+				if (!supported || between_projection_indices.empty()) {
+					continue;
+				}
+				BetweenJoinPrecomputedPayload candidate;
+				candidate.second_projection_idx = payload_source_idx;
+				candidate.between_projection_indices = std::move(between_projection_indices);
+				BuildBorrowedProjectionExpression(payload_projection, candidate.first_join_expr);
+				if (!TryRemapHashJoinProjectionPlanSources(source_map, candidate.first_join_expr.plan)) {
+					record_skip_blocker("payload_remap_plan");
+					continue;
+				}
+				bool remapped_sources = true;
+				for (auto &input_source_idx : candidate.first_join_expr.input_source_indices) {
+					if (input_source_idx >= source_map.size() ||
+					    source_map[input_source_idx] == DConstants::INVALID_INDEX) {
+						remapped_sources = false;
+						break;
+					}
+					input_source_idx = source_map[input_source_idx];
+				}
+				if (!remapped_sources || candidate.first_join_expr.plan.return_type != payload_type) {
+					record_skip_blocker("payload_remap_sources");
+					continue;
+				}
+				if (candidate.first_join_expr.plan.expression_tree) {
+					TryBuildSljitRuntimeDecimal64DiscountedAmountProgram(
+					    *candidate.first_join_expr.plan.expression_tree,
+					    candidate.first_join_expr.input_source_indices.size(),
+					    candidate.decimal64_discounted_amount_program);
+				}
+				if (!candidate.decimal64_discounted_amount_program.ready) {
+					record_skip_blocker("payload_program");
+					continue;
+				}
+				candidates.push_back(std::move(candidate));
+			}
+			if (candidates.empty()) {
+				record_skip_blocker("no_candidate");
+				return false;
+			}
+
+			vector<uint8_t> selected_candidate(candidates.size(), 1);
+			bool changed = true;
+			while (changed) {
+				changed = false;
+				vector<uint8_t> live_second_projection_skip(second_join_projection_op.projections.size(), 0);
+				if (compressed_group_key_skip_ready &&
+				    second_join_compressed_key_skip_projection.size() == live_second_projection_skip.size()) {
+					for (idx_t projection_idx = 0; projection_idx < live_second_projection_skip.size();
+					     projection_idx++) {
+						if (second_join_compressed_key_skip_projection[projection_idx]) {
+							live_second_projection_skip[projection_idx] = 1;
+						}
+					}
+				}
+				for (idx_t candidate_idx = 0; candidate_idx < candidates.size(); candidate_idx++) {
+					if (selected_candidate[candidate_idx]) {
+						live_second_projection_skip[candidates[candidate_idx].second_projection_idx] = 1;
+					}
+				}
+				for (idx_t candidate_idx = 0; candidate_idx < candidates.size(); candidate_idx++) {
+					if (!selected_candidate[candidate_idx]) {
+						continue;
+					}
+					bool skips_input = false;
+					for (auto between_projection_idx : candidates[candidate_idx].between_projection_indices) {
+						if (between_projection_idx >= between_join_precomputed_payload_skip_projection.size() ||
+						    second_join_input_col_is_probe_key(second_binding, between_projection_idx) ||
+						    second_join_input_col_used_by_live_projection(second_binding, between_projection_idx,
+						                                                  live_second_projection_skip)) {
+							continue;
+						}
+						skips_input = true;
+						break;
+					}
+					if (!skips_input) {
+						selected_candidate[candidate_idx] = 0;
+						changed = true;
+					}
+				}
+			}
+
+			vector<LogicalType> payload_types;
+			for (idx_t candidate_idx = 0; candidate_idx < candidates.size(); candidate_idx++) {
+				if (!selected_candidate[candidate_idx]) {
+					continue;
+				}
+				auto &candidate = candidates[candidate_idx];
+				vector<uint8_t> live_second_projection_skip(second_join_projection_op.projections.size(), 0);
+				if (compressed_group_key_skip_ready &&
+				    second_join_compressed_key_skip_projection.size() == live_second_projection_skip.size()) {
+					for (idx_t projection_idx = 0; projection_idx < live_second_projection_skip.size();
+					     projection_idx++) {
+						if (second_join_compressed_key_skip_projection[projection_idx]) {
+							live_second_projection_skip[projection_idx] = 1;
+						}
+					}
+				}
+				for (idx_t other_idx = 0; other_idx < candidates.size(); other_idx++) {
+					if (selected_candidate[other_idx]) {
+						live_second_projection_skip[candidates[other_idx].second_projection_idx] = 1;
+					}
+				}
+				bool skipped_between_input = false;
+				for (auto between_projection_idx : candidate.between_projection_indices) {
+					if (between_projection_idx >= between_join_precomputed_payload_skip_projection.size() ||
+					    second_join_input_col_is_probe_key(second_binding, between_projection_idx) ||
+					    second_join_input_col_used_by_live_projection(second_binding, between_projection_idx,
+					                                                  live_second_projection_skip)) {
+						continue;
+					}
+					between_join_precomputed_payload_skip_projection[between_projection_idx] = 1;
+					skipped_between_input = true;
+				}
+				if (!skipped_between_input) {
+					continue;
+				}
+				candidate.sidecar_idx = payload_types.size();
+				second_join_precomputed_payload_skip_projection[candidate.second_projection_idx] = 1;
+				payload_types.push_back(second_join_projection_op.output_types[candidate.second_projection_idx]);
+				between_join_precomputed_payloads.push_back(std::move(candidate));
+			}
+			if (between_join_precomputed_payloads.empty() ||
+			    !ProjectionSkipHasAny(between_join_precomputed_payload_skip_projection)) {
+				record_skip_blocker("no_dead_between_projection");
+				between_join_precomputed_payloads.clear();
+				return false;
+			}
+			second_join_precomputed_payload_batch.Initialize(runtime.GetAllocator(), payload_types);
+			second_join_precomputed_payload_initialized = true;
+			precomputed_payload_skip_ready = true;
+			return true;
+		};
+
+		auto build_compressed_group_key_projection_skips = [&]() -> bool {
+			if (compressed_group_key_skip_initialized) {
+				return compressed_group_key_skip_ready;
+			}
+			auto record_skip_blocker = [&](const char *reason) {
+				auto path = string("direct_between_join_compressed_group_key_skip_unsupported.") + reason;
+				RecordSljitRegionRuntimePath(runtime, between_join_projection_op.kind, path.c_str(), 1);
+			};
+			compressed_group_key_skip_initialized = true;
+			compressed_group_key_skip_ready = false;
+			between_join_compressed_key_skip_projection.assign(between_join_projection_op.projections.size(), 0);
+			if (ops.size() <= 3) {
+				record_skip_blocker("operator_count");
+				return false;
+			}
+			second_join_compressed_key_skip_projection.assign(ops[3].projections.size(), 0);
+			if (second_hash_join_op.hash_join_probe.plan.residual_predicate) {
+				record_skip_blocker("second_join_residual");
+				return false;
+			}
+			initialize_between_join_compressed_passthroughs();
+			if (between_join_compressed_passthroughs.empty()) {
+				record_skip_blocker("no_compressed_passthrough_source");
+				return false;
+			}
+
+			DataChunk descriptor_input;
+			descriptor_input.InitializeEmpty(ops[3].output_types);
+			if (!build_final_split_payload_descriptor(descriptor_input)) {
+				record_skip_blocker("final_payload_descriptor");
+				return false;
+			}
+
+			if (!scratch.HasOperatorBinding(2)) {
+				ExecutionOperatorBinding *binding_ptr = nullptr;
+				string deferred_reason;
+				auto bind_result = BindNativeOperator(
+				    native_runtime, scratch, 2, second_hash_join_op, second_join_batch,
+				    second_hash_join_op.hash_join_probe.plan.operator_info, "native-operator-runtime-deferred",
+				    "SLJIT native hash join probe", binding_ptr, deferred_reason);
+				if (bind_result != ExecutionOperatorBindResult::READY) {
+					record_skip_blocker("second_join_bind");
+					return false;
+				}
+			}
+			auto &second_binding = scratch.OperatorBinding(2).hash_join_probe;
+			vector<FinalGroupCompressedPassthroughSource> sources;
+			if (!collect_final_group_compressed_passthrough_sources(second_binding, sources)) {
+				record_skip_blocker("final_group_passthrough");
+				return false;
+			}
+			bool skipped_any = false;
+			for (auto &source_info : sources) {
+				if (source_info.second_join_input_col >= between_join_compressed_key_skip_projection.size() ||
+				    source_info.second_join_projection_idx >= second_join_compressed_key_skip_projection.size()) {
+					record_skip_blocker("source_index");
+					return false;
+				}
+				if (second_join_input_col_is_probe_key(second_binding, source_info.second_join_input_col)) {
+					record_skip_blocker("probe_key");
+					return false;
+				}
+				if (final_payload_uses_second_join_input_col(second_binding, source_info.second_join_input_col)) {
+					record_skip_blocker("payload_dependency");
+					return false;
+				}
+				between_join_compressed_key_skip_projection[source_info.second_join_input_col] = 1;
+				second_join_compressed_key_skip_projection[source_info.second_join_projection_idx] = 1;
+				skipped_any = true;
+			}
+			compressed_group_key_skip_ready = skipped_any;
+			return compressed_group_key_skip_ready;
+		};
+
+		auto direct_update_final_projection_group_keys = [&](DataChunk &input, bool &handled) -> bool {
+			handled = false;
+			if (input.size() == 0) {
+				return false;
+			}
+			if (!build_final_split_payload_descriptor(input)) {
+				record_final_split_payload_unsupported(final_split_payload_descriptor_blocker, input.size());
+				return false;
+			}
+			if (runtime.PendingSourceContractBatch() && flush_projected_batch()) {
+				return true;
+			}
+			if (!final_group_key_batch_initialized) {
+				final_group_key_batch.Initialize(runtime.GetAllocator(), final_group_key_types);
+				final_group_key_batch_initialized = true;
+			}
+			final_group_key_batch.Reset();
+			vector<DirectProjectionBatchPassthrough> final_group_key_passthroughs;
+			optional_ptr<const vector<DirectProjectionBatchPassthrough>> final_group_key_passthroughs_ptr;
+			if (build_final_group_key_passthroughs(final_group_key_passthroughs)) {
+				final_group_key_passthroughs_ptr = &final_group_key_passthroughs;
+			}
+			if (!TryMaterializeSelectedProjectionToBatch(runtime, scratch, final_projection_idx, final_projection_op,
+			                                             input, final_group_key_batch, final_group_projection_indices,
+			                                             optional_ptr<Vector>(&final_group_key_hashes),
+			                                             final_group_key_passthroughs_ptr)) {
+				record_final_split_payload_unsupported("group_key_projection", input.size());
+				return false;
+			}
+
+			auto bind_stage_start = SljitRegionStageStart(runtime);
+			bool bound = false;
+			auto &binding =
+			    BindNativeSink(native_runtime, scratch, aggregate_idx, final_group_key_batch,
+			                   aggregate_op.aggregate_update.plan.sink_info, "aggregate-update-runtime-binding-failed",
+			                   "SLJIT aggregate update sink", bound);
+			if (bound) {
+				RecordSljitRegionStageRuntime(runtime, aggregate_idx, aggregate_op.kind, "bind_sink_contract",
+				                              bind_stage_start);
+			}
+			if (!binding.ready || !binding.aggregate_update.ready || !binding.aggregate_update.grouped_state.ready ||
+			    !binding.aggregate_update.grouped_state.state || !binding.aggregate_update.primitive.ready) {
+				record_final_split_payload_unsupported("sink_binding", input.size());
+				return false;
+			}
+			auto &aggregates = aggregate_op.aggregate_update.plan.sink_info.aggregates;
+			auto &payload_lanes =
+			    scratch.AggregatePayloadLanes(aggregate_idx, aggregates, binding.aggregate_update.primitive);
+			const bool finish = false;
+			bool updated = false;
+			if (final_split_payload_uses_fused_update) {
+				if (!CanExecuteDirectGroupedFusedPayloadUpdate(scratch, aggregate_idx, aggregate_op, input,
+				                                               payload_lanes, nullptr, input.size(), false)) {
+					record_final_split_payload_unsupported("fused_payload_update_shape", input.size());
+					return false;
+				}
+				auto &payload_scratch = scratch.AggregatePayloadScratch(aggregate_idx);
+				updated = TryExecuteDirectProjectedGroupedFusedPayloadUpdate(
+				    runtime, scratch, aggregate_idx, aggregate_op, final_group_key_batch, input,
+				    final_payload_source_indices, payload_lanes, binding.aggregate_update.grouped_state,
+				    payload_scratch, finish, optional_ptr<Vector>(&final_group_key_hashes));
+			} else {
+				auto stage_start = SljitRegionStageStart(runtime);
+				if (runtime.TraceRuntime()) {
+					auto stage_name =
+					    SljitRegionStageName(aggregate_idx, aggregate_op.kind, "direct_projected_group_payload_update");
+					SljitRegionStageRecorder recorder(runtime, stage_name);
+					updated = binding.aggregate_update.grouped_state.state->TryUpdateNewGroupsWithPayloadInput(
+					    final_group_key_batch, input, final_payload_source_indices,
+					    aggregate_op.aggregate_update.plan.sink_info, payload_lanes, &recorder, finish,
+					    optional_ptr<Vector>(&final_group_key_hashes));
+					auto runtime_us = SljitRegionElapsedMicros(stage_start);
+					auto unattributed_runtime_us = runtime_us - recorder.RecordedRuntimeTimeUs();
+					if (unattributed_runtime_us > 0) {
+						runtime.RecordGeneratedStageRuntime(stage_name + ".unattributed", unattributed_runtime_us);
+					}
+				} else {
+					updated = binding.aggregate_update.grouped_state.state->TryUpdateNewGroupsWithPayloadInput(
+					    final_group_key_batch, input, final_payload_source_indices,
+					    aggregate_op.aggregate_update.plan.sink_info, payload_lanes, nullptr, finish,
+					    optional_ptr<Vector>(&final_group_key_hashes));
+				}
+				if (updated) {
+					RecordSljitRegionStageRuntime(runtime, aggregate_idx, aggregate_op.kind,
+					                              "direct_projected_group_payload_update", stage_start);
+					RecordSljitRegionMaterializationBoundary(runtime, aggregate_op.kind,
+					                                         "projected_group_payload_update", input.size());
+				} else {
+					RecordSljitRegionStageRuntimePath(runtime, aggregate_idx, aggregate_op.kind,
+					                                  "direct_projected_group_payload_update_miss", stage_start);
+				}
+			}
+			if (!updated) {
+				return false;
+			}
+			MarkDeferredGroupedFinish(true, optional_ptr<bool>(&deferred_grouped_finish));
+			RecordSljitRegionRuntimePath(runtime, aggregate_op.kind, "direct_projected_group_payload_update",
+			                             input.size());
+			processed_batches++;
+			handled = true;
+			return false;
+		};
+
+		auto append_projected_batch = [&](DataChunk &projected) -> bool {
+			if (projected.size() == 0) {
+				return false;
+			}
+			auto &batch = runtime.PrepareSourceContractBatch(final_projection_op.output_types);
+			if (batch.size() + projected.size() > STANDARD_VECTOR_SIZE) {
+				if (flush_projected_batch()) {
+					return true;
+				}
+			}
+			if (projected.size() == STANDARD_VECTOR_SIZE && batch.size() == 0) {
+				return execute_projected_batch(projected);
+			}
+			auto append_stage_start = SljitRegionStageStart(runtime);
+			if (!SljitTryFastAppendFixedFlatAllValid(batch, projected)) {
+				batch.Append(projected);
+			}
+			RecordSljitRegionStageRuntime(runtime, final_projection_idx, final_projection_op.kind,
+			                              "post_join_batch_append", append_stage_start);
+			RecordSljitRegionMaterializationBoundary(runtime, final_projection_op.kind, "copied_post_join_batch",
+			                                         projected.size());
+			if (batch.size() == STANDARD_VECTOR_SIZE) {
+				if (flush_projected_batch()) {
+					return true;
+				}
+			}
+			return false;
+		};
+
+		auto project_second_join_output_from = [&](idx_t start_projection_idx, DataChunk &input,
+		                                           DataChunk *&projected) {
+			DataChunk *current = &input;
+			for (idx_t projection_idx = start_projection_idx; projection_idx < aggregate_idx; projection_idx++) {
+				auto &projection_op = ops[projection_idx];
+				auto &projection_output = scratch.TemporaryChunk(projection_idx);
+				projection_output.Reset();
+				auto projection_stage_start = SljitRegionStageStart(runtime);
+				if (TryReferenceProjection(projection_output, *current, projection_op)) {
+					RecordSljitRegionStageRuntime(runtime, projection_idx, projection_op.kind,
+					                              "post_second_join_reference_projection", projection_stage_start);
+					RecordSljitRegionMaterializationBoundary(
+					    runtime, projection_op.kind, "reference_post_join_projection", projection_output.size());
+				} else {
+					ExecuteProjection(scratch, projection_idx, projection_op, *current, projection_output);
+					RecordSljitRegionStageRuntime(runtime, projection_idx, projection_op.kind,
+					                              "post_second_join_batch_projection", projection_stage_start);
+					RecordSljitRegionMaterializationBoundary(runtime, projection_op.kind, "copied_post_join_projection",
+					                                         projection_output.size());
+				}
+				current = &projection_output;
+				if (current->size() == 0) {
+					projected = nullptr;
+					return;
+				}
+			}
+			projected = current;
+		};
+
+		auto materialize_selection_only_hash_join_output =
+		    [&](idx_t hash_join_idx, SljitExecutableRegionOp &hash_join_op, DataChunk &join_input,
+		        const SelectionVector &match_selection, const SelectionVector &build_selection, Vector &row_pointers,
+		        DataChunk &join_output) -> bool {
+			if (!scratch.HasOperatorBinding(hash_join_idx)) {
+				return false;
+			}
+			auto &binding = scratch.OperatorBinding(hash_join_idx).hash_join_probe;
+			if (!binding.ready) {
+				return false;
+			}
+			auto materialize_stage_start = SljitRegionStageStart(runtime);
+			SljitRegionStageRecorder recorder(
+			    runtime, SljitRegionStageName(hash_join_idx, hash_join_op.kind, "materialize_output_fallback"));
+			switch (binding.layout_kind) {
+			case ExecutionHashJoinProbeLayoutKind::REGULAR_HASH_TABLE:
+				RecordSljitRegionMaterializationBoundary(runtime, hash_join_op.kind, "final_output",
+				                                         join_output.size());
+				RecordSljitRegionMaterializationBoundary(runtime, hash_join_op.kind, "row_pointer_reference",
+				                                         join_output.size());
+				ExecutionMaterializeHashJoinProbe(binding, join_input, row_pointers, match_selection,
+				                                  join_output.size(), join_output,
+				                                  runtime.TraceRuntime() ? &recorder : nullptr);
+				break;
+			case ExecutionHashJoinProbeLayoutKind::PERFECT_HASH_TABLE:
+				RecordSljitRegionMaterializationBoundary(runtime, hash_join_op.kind, "final_output",
+				                                         join_output.size());
+				ExecutionMaterializePerfectHashJoinProbe(binding, join_input, match_selection, build_selection,
+				                                         join_output.size(), join_output,
+				                                         runtime.TraceRuntime() ? &recorder : nullptr);
+				break;
+			default:
+				return false;
+			}
+			RecordSljitRegionStageRuntime(runtime, hash_join_idx, hash_join_op.kind, "materialize_output_fallback",
+			                              materialize_stage_start);
+			return true;
+		};
+
+		auto direct_project_final_projection_to_batch = [&](DataChunk &input, bool &handled) -> bool {
+			handled = false;
+			if (input.size() == 0) {
+				return false;
+			}
+			auto &batch = runtime.PrepareSourceContractBatch(final_projection_op.output_types);
+			if (batch.size() + input.size() > STANDARD_VECTOR_SIZE) {
+				if (flush_projected_batch()) {
+					return true;
+				}
+			}
+			if (!TryDirectMaterializeFixedProjectionToBatch(runtime, scratch, final_projection_idx, final_projection_op,
+			                                                input, batch)) {
+				return false;
+			}
+			handled = true;
+			if (batch.size() == STANDARD_VECTOR_SIZE) {
+				if (flush_projected_batch()) {
+					return true;
+				}
+			}
+			return false;
+		};
+
+		auto direct_project_second_join_output = [&](DataChunk &second_join_input, DataChunk &second_join_output,
+		                                             DataChunk *&projected, bool &handled) -> bool {
+			handled = false;
+			projected = nullptr;
+			if (second_join_output.size() == 0 || aggregate_idx <= 3) {
+				return false;
+			}
+			auto &direct_projection = scratch.TemporaryChunk(3);
+			direct_projection.Reset();
+			optional_ptr<const vector<uint8_t>> compressed_skip_ptr;
+			if (second_join_batch_omits_compressed_group_keys) {
+				compressed_skip_ptr = &second_join_compressed_key_skip_projection;
+			}
+			optional_ptr<const vector<uint8_t>> precomputed_payload_skip_ptr;
+			if (second_join_batch_omits_precomputed_payloads) {
+				precomputed_payload_skip_ptr = &second_join_precomputed_payload_skip_projection;
+			}
+			vector<uint8_t> second_join_projection_skip;
+			optional_ptr<const vector<uint8_t>> second_join_projection_skip_ptr;
+			if (!OrProjectionSkips(ops[3].projections.size(), compressed_skip_ptr, precomputed_payload_skip_ptr,
+			                       second_join_projection_skip, second_join_projection_skip_ptr)) {
+				return false;
+			}
+			if (!TryDirectMaterializeHashJoinProjectionSourcesToBatch(
+			        runtime, scratch, 2, 3, ops[3], second_join_input, scratch.FilterSelection(2),
+			        scratch.HashJoinRowPointers(2), second_join_output, direct_projection, nullptr, nullptr,
+			        second_join_projection_skip_ptr)) {
+				if (second_join_batch_omits_compressed_group_keys || second_join_batch_omits_precomputed_payloads) {
+					throw InternalException(
+					    "SLJIT second-join projection skip became unsupported after descriptor preflight");
+				}
+				return false;
+			}
+			if (!copy_second_join_precomputed_payloads_to_projection(direct_projection, second_join_output.size())) {
+				throw InternalException("SLJIT precomputed payload passthrough became unsupported");
+			}
+			handled = true;
+			RecordSljitRegionRuntimePath(runtime, ops[3].kind, "direct_second_join_projection",
+			                             second_join_output.size());
+			bool final_projection_handled = false;
+			if (direct_update_final_projection_group_keys(direct_projection, final_projection_handled)) {
+				return true;
+			}
+			if (final_projection_handled) {
+				return false;
+			}
+			if (second_join_batch_omits_compressed_group_keys) {
+				throw InternalException("SLJIT compressed group-key aggregate update skip became unsupported");
+			}
+			if (second_join_batch_omits_precomputed_payloads) {
+				throw InternalException("SLJIT precomputed payload aggregate update skip became unsupported");
+			}
+			if (direct_project_final_projection_to_batch(direct_projection, final_projection_handled)) {
+				return true;
+			}
+			if (final_projection_handled) {
+				return false;
+			}
+			project_second_join_output_from(4, direct_projection, projected);
+			return false;
+		};
+
+		auto drain_second_hash_join = [&](DataChunk &second_join_input) -> bool {
+			if (second_join_input.size() == 0) {
+				return false;
+			}
+			SljitHashJoinProbeDrainState second_state;
+			auto &second_join_output = scratch.TemporaryChunk(2);
+			do {
+				second_join_output.Reset();
+				string deferred_reason;
+				auto stage_start = SljitRegionStageStart(runtime);
+				auto bind_result = ExecuteNativeHashJoinProbe(
+				    runtime, native_runtime, scratch, 2, second_hash_join_op, second_join_input, second_join_output,
+				    scratch.FilterSelection(2), scratch.HashJoinBuildSelection(2), scratch.HashJoinRowPointers(2),
+				    scratch.HashJoinSourceFormats(2), scratch.HashJoinSourceData(2),
+				    scratch.HashJoinSourceSelections(2), scratch.HashJoinSourceValidity(2),
+				    second_hash_join_op.hash_join_probe.plan.residual_predicate ? &scratch.HashJoinResidualChunk(2)
+				                                                                : nullptr,
+				    second_hash_join_op.hash_join_probe.plan.residual_predicate ? &scratch.HashJoinResidualSelection(2)
+				                                                                : nullptr,
+				    second_hash_join_op.hash_join_probe.plan.residual_predicate
+				        ? &scratch.HashJoinResidualMatchSelection(2)
+				        : nullptr,
+				    second_hash_join_op.hash_join_probe.plan.residual_predicate
+				        ? &scratch.HashJoinResidualRowPointers(2)
+				        : nullptr,
+				    second_state, deferred_reason, false, true);
+				RecordSljitRegionStageRuntime(runtime, 2, second_hash_join_op.kind, stage_start);
+				if (bind_result == ExecutionOperatorBindResult::DEFERRED) {
+					finish_deferred_grouped_update();
+					runtime.Defer(std::move(deferred_reason));
+					result = ExecutionRegionResult::DEFERRED;
+					return true;
+				}
+				if (second_join_output.size() == 0) {
+					continue;
+				}
+				DataChunk *projected = nullptr;
+				bool direct_projected = false;
+				if (direct_project_second_join_output(second_join_input, second_join_output, projected,
+				                                      direct_projected)) {
+					return true;
+				}
+				if (!direct_projected) {
+					if (!materialize_selection_only_hash_join_output(
+					        2, second_hash_join_op, second_join_input, scratch.FilterSelection(2),
+					        scratch.HashJoinBuildSelection(2), scratch.HashJoinRowPointers(2), second_join_output)) {
+						throw InternalException("SLJIT direct second-join fallback materialization failed");
+					}
+					project_second_join_output_from(3, second_join_output, projected);
+				}
+				if (projected && append_projected_batch(*projected)) {
+					return true;
+				}
+			} while (!HashJoinProbeDrainFinished(second_hash_join_op.hash_join_probe.plan.output_mode, second_state));
+			return false;
+		};
+
+		auto flush_second_join_batch = [&]() -> bool {
+			if (second_join_batch.size() == 0) {
+				return false;
+			}
+			if (drain_second_hash_join(second_join_batch)) {
+				return true;
+			}
+			second_join_batch.Reset();
+			reset_between_join_compressed_passthroughs();
+			reset_between_join_precomputed_payloads();
+			return false;
+		};
+
+		auto process_first_join_output = [&](DataChunk &first_join_output) -> bool {
+			if (first_join_output.size() == 0) {
+				return false;
+			}
+			auto &second_join_input = scratch.TemporaryChunk(1);
+			second_join_input.Reset();
+			auto projection_stage_start = SljitRegionStageStart(runtime);
+			if (TryReferenceProjection(second_join_input, first_join_output, between_join_projection_op)) {
+				RecordSljitRegionStageRuntime(runtime, 1, between_join_projection_op.kind,
+				                              "between_join_reference_projection", projection_stage_start);
+				RecordSljitRegionMaterializationBoundary(runtime, between_join_projection_op.kind,
+				                                         "reference_post_join_projection", second_join_input.size());
+			} else {
+				ExecuteProjection(scratch, 1, between_join_projection_op, first_join_output, second_join_input);
+				RecordSljitRegionStageRuntime(runtime, 1, between_join_projection_op.kind,
+				                              "between_join_batch_projection", projection_stage_start);
+				RecordSljitRegionMaterializationBoundary(runtime, between_join_projection_op.kind,
+				                                         "copied_post_join_projection", second_join_input.size());
+			}
+			return drain_second_hash_join(second_join_input);
+		};
+
+		auto append_direct_first_join_projection = [&](DataChunk &first_join_input, DataChunk &first_join_output,
+		                                               idx_t selected_count, bool &handled) -> bool {
+			handled = false;
+			if (selected_count == 0) {
+				return false;
+			}
+			bool use_compressed_group_key_skip = build_compressed_group_key_projection_skips();
+			bool use_precomputed_payload_skip = build_precomputed_payload_projection_skips();
+			if (second_join_batch.size() > 0 &&
+			    (second_join_batch_omits_compressed_group_keys != use_compressed_group_key_skip ||
+			     second_join_batch_omits_precomputed_payloads != use_precomputed_payload_skip)) {
+				if (flush_second_join_batch()) {
+					return true;
+				}
+			}
+			if (second_join_batch.size() + selected_count > STANDARD_VECTOR_SIZE) {
+				if (flush_second_join_batch()) {
+					return true;
+				}
+			}
+			const auto target_offset = second_join_batch.size();
+			optional_ptr<const vector<uint8_t>> compressed_skip_ptr;
+			if (use_compressed_group_key_skip) {
+				compressed_skip_ptr = &between_join_compressed_key_skip_projection;
+			}
+			optional_ptr<const vector<uint8_t>> precomputed_payload_skip_ptr;
+			if (use_precomputed_payload_skip) {
+				precomputed_payload_skip_ptr = &between_join_precomputed_payload_skip_projection;
+			}
+			vector<uint8_t> between_projection_skip;
+			optional_ptr<const vector<uint8_t>> between_projection_skip_ptr;
+			if (!OrProjectionSkips(between_join_projection_op.projections.size(), compressed_skip_ptr,
+			                       precomputed_payload_skip_ptr, between_projection_skip,
+			                       between_projection_skip_ptr)) {
+				return false;
+			}
+			if (!TryDirectMaterializeHashJoinProjectionSourcesToBatch(
+			        runtime, scratch, 0, 1, between_join_projection_op, first_join_input, scratch.FilterSelection(0),
+			        scratch.HashJoinRowPointers(0), first_join_output, second_join_batch, nullptr, nullptr,
+			        between_projection_skip_ptr)) {
+				if (!(use_compressed_group_key_skip || use_precomputed_payload_skip) ||
+				    !TryDirectMaterializeHashJoinProjectionSourcesToBatch(
+				        runtime, scratch, 0, 1, between_join_projection_op, first_join_input,
+				        scratch.FilterSelection(0), scratch.HashJoinRowPointers(0), first_join_output,
+				        second_join_batch)) {
+					return false;
+				}
+				use_compressed_group_key_skip = false;
+				use_precomputed_payload_skip = false;
+			}
+			second_join_batch_omits_compressed_group_keys = use_compressed_group_key_skip;
+			second_join_batch_omits_precomputed_payloads = use_precomputed_payload_skip;
+			if (second_join_compressed_passthrough_usable &&
+			    !append_between_join_compressed_passthroughs(first_join_input, scratch.FilterSelection(0),
+			                                                 scratch.HashJoinRowPointers(0), target_offset,
+			                                                 selected_count)) {
+				if (use_compressed_group_key_skip) {
+					throw InternalException("SLJIT compressed group-key sidecar became unsupported after skip");
+				}
+				second_join_compressed_passthrough_usable = false;
+				if (second_join_compressed_passthrough_initialized &&
+				    second_join_compressed_passthrough_batch.ColumnCount() > 0) {
+					second_join_compressed_passthrough_batch.Reset();
+				}
+			}
+			if (use_precomputed_payload_skip && !append_between_join_precomputed_payloads(
+			                                        first_join_input, scratch.FilterSelection(0),
+			                                        scratch.HashJoinRowPointers(0), target_offset, selected_count)) {
+				throw InternalException("SLJIT precomputed payload sidecar became unsupported after skip");
+			}
+			handled = true;
+			RecordSljitRegionRuntimePath(runtime, between_join_projection_op.kind, "direct_between_join_projection",
+			                             selected_count);
+			if (use_compressed_group_key_skip) {
+				RecordSljitRegionRuntimePath(runtime, between_join_projection_op.kind,
+				                             "direct_between_join_compressed_group_key_skip_projection",
+				                             selected_count);
+			}
+			if (use_precomputed_payload_skip) {
+				RecordSljitRegionRuntimePath(runtime, between_join_projection_op.kind,
+				                             "direct_between_join_precomputed_payload_skip_projection", selected_count);
+			}
+			if (second_join_batch.size() == STANDARD_VECTOR_SIZE) {
+				if (flush_second_join_batch()) {
+					return true;
+				}
+			}
+			return false;
+		};
+
+		auto execute_source_chunk = [&](DataChunk &source_chunk, bool have_more_output) -> bool {
+			auto next_batch_result = runtime.AdvanceSinkBatch(source_chunk, have_more_output);
+			if (next_batch_result == SinkNextBatchType::BLOCKED) {
+				finish_deferred_grouped_update();
+				result = ExecutionRegionResult::INTERRUPTED;
+				return true;
+			}
+
+			SljitHashJoinProbeDrainState first_state;
+			auto &first_join_output = scratch.TemporaryChunk(0);
+			do {
+				first_join_output.Reset();
+				string deferred_reason;
+				auto stage_start = SljitRegionStageStart(runtime);
+				auto bind_result = ExecuteNativeHashJoinProbe(
+				    runtime, native_runtime, scratch, 0, first_hash_join_op, source_chunk, first_join_output,
+				    scratch.FilterSelection(0), scratch.HashJoinBuildSelection(0), scratch.HashJoinRowPointers(0),
+				    scratch.HashJoinSourceFormats(0), scratch.HashJoinSourceData(0),
+				    scratch.HashJoinSourceSelections(0), scratch.HashJoinSourceValidity(0),
+				    first_hash_join_op.hash_join_probe.plan.residual_predicate ? &scratch.HashJoinResidualChunk(0)
+				                                                               : nullptr,
+				    first_hash_join_op.hash_join_probe.plan.residual_predicate ? &scratch.HashJoinResidualSelection(0)
+				                                                               : nullptr,
+				    first_hash_join_op.hash_join_probe.plan.residual_predicate
+				        ? &scratch.HashJoinResidualMatchSelection(0)
+				        : nullptr,
+				    first_hash_join_op.hash_join_probe.plan.residual_predicate ? &scratch.HashJoinResidualRowPointers(0)
+				                                                               : nullptr,
+				    first_state, deferred_reason, false, true);
+				RecordSljitRegionStageRuntime(runtime, 0, first_hash_join_op.kind, stage_start);
+				if (bind_result == ExecutionOperatorBindResult::DEFERRED) {
+					finish_deferred_grouped_update();
+					runtime.Defer(std::move(deferred_reason));
+					result = ExecutionRegionResult::DEFERRED;
+					return true;
+				}
+				if (first_join_output.size() == 0) {
+					continue;
+				}
+				bool direct_projected = false;
+				if (append_direct_first_join_projection(source_chunk, first_join_output, first_join_output.size(),
+				                                        direct_projected)) {
+					return true;
+				}
+				if (direct_projected) {
+					continue;
+				}
+				if (!materialize_selection_only_hash_join_output(
+				        0, first_hash_join_op, source_chunk, scratch.FilterSelection(0),
+				        scratch.HashJoinBuildSelection(0), scratch.HashJoinRowPointers(0), first_join_output)) {
+					throw InternalException("SLJIT direct between-join fallback materialization failed");
+				}
+				if (process_first_join_output(first_join_output)) {
+					return true;
+				}
+			} while (!HashJoinProbeDrainFinished(first_hash_join_op.hash_join_probe.plan.output_mode, first_state));
+			return false;
+		};
+
+		while (true) {
+			if (processed_batches >= runtime.MaxChunks() || fetched_chunks >= max_source_fetches) {
+				if (flush_second_join_batch() || flush_projected_batch()) {
+					return true;
+				}
+				finish_deferred_grouped_update();
+				result = ExecutionRegionResult::NOT_FINISHED;
+				return true;
+			}
+
+			DataChunk *source_chunk = nullptr;
+			auto source_result = runtime.FetchSourceContract(source_chunk);
+			if (source_result == SourceResultType::BLOCKED) {
+				finish_deferred_grouped_update();
+				result = ExecutionRegionResult::INTERRUPTED;
+				return true;
+			}
+			fetched_chunks++;
+
+			if (source_chunk && source_chunk->size() > 0 &&
+			    execute_source_chunk(*source_chunk, source_result == SourceResultType::HAVE_MORE_OUTPUT)) {
+				return true;
+			}
+			if (source_result == SourceResultType::FINISHED) {
+				if (flush_second_join_batch() || flush_projected_batch()) {
+					return true;
+				}
+				finish_deferred_grouped_update();
+				result = ExecutionRegionResult::FINISHED;
+				return true;
+			}
+		}
 	}
 
 	bool TryExecuteFullPipelineProjectionHashJoinProjectionHashJoinProjectionProjectionGroupedAggregateBatched(
@@ -3788,6 +7550,8 @@ public:
 			}
 			RecordSljitRegionStageRuntime(runtime, 5, final_projection_op.kind, "post_join_batch_append",
 			                              append_stage_start);
+			RecordSljitRegionMaterializationBoundary(runtime, final_projection_op.kind, "copied_post_join_batch",
+			                                         projected.size());
 			if (batch.size() == STANDARD_VECTOR_SIZE) {
 				if (flush_projected_batch()) {
 					return true;
@@ -3804,10 +7568,14 @@ public:
 			if (TryReferenceProjection(intermediate, second_join_output, first_final_projection_op)) {
 				RecordSljitRegionStageRuntime(runtime, 4, first_final_projection_op.kind,
 				                              "post_second_join_reference_projection", first_projection_stage_start);
+				RecordSljitRegionMaterializationBoundary(runtime, first_final_projection_op.kind,
+				                                         "reference_post_join_projection", intermediate.size());
 			} else {
 				ExecuteProjection(scratch, 4, first_final_projection_op, second_join_output, intermediate);
 				RecordSljitRegionStageRuntime(runtime, 4, first_final_projection_op.kind,
 				                              "post_second_join_batch_projection", first_projection_stage_start);
+				RecordSljitRegionMaterializationBoundary(runtime, first_final_projection_op.kind,
+				                                         "copied_post_join_projection", intermediate.size());
 			}
 
 			projected.Reset();
@@ -3815,16 +7583,20 @@ public:
 			if (TryReferenceProjection(projected, intermediate, final_projection_op)) {
 				RecordSljitRegionStageRuntime(runtime, 5, final_projection_op.kind,
 				                              "post_second_join_reference_projection", final_projection_stage_start);
+				RecordSljitRegionMaterializationBoundary(runtime, final_projection_op.kind,
+				                                         "reference_post_join_projection", projected.size());
 			} else {
 				ExecuteProjection(scratch, 5, final_projection_op, intermediate, projected);
-				RecordSljitRegionStageRuntime(runtime, 5, final_projection_op.kind,
-				                              "post_second_join_batch_projection", final_projection_stage_start);
+				RecordSljitRegionStageRuntime(runtime, 5, final_projection_op.kind, "post_second_join_batch_projection",
+				                              final_projection_stage_start);
+				RecordSljitRegionMaterializationBoundary(runtime, final_projection_op.kind,
+				                                         "copied_post_join_projection", projected.size());
 			}
 		};
 
-			auto drain_second_hash_join = [&](DataChunk &second_join_input) -> bool {
-				if (second_join_input.size() == 0) {
-					return false;
+		auto drain_second_hash_join = [&](DataChunk &second_join_input) -> bool {
+			if (second_join_input.size() == 0) {
+				return false;
 			}
 			SljitHashJoinProbeDrainState second_state;
 			auto &second_join_output = scratch.TemporaryChunk(3);
@@ -3836,8 +7608,8 @@ public:
 				auto bind_result = ExecuteNativeHashJoinProbe(
 				    runtime, native_runtime, scratch, 3, second_hash_join_op, second_join_input, second_join_output,
 				    scratch.FilterSelection(3), scratch.HashJoinBuildSelection(3), scratch.HashJoinRowPointers(3),
-				    scratch.HashJoinSourceFormats(3), scratch.HashJoinSourceData(3), scratch.HashJoinSourceSelections(3),
-				    scratch.HashJoinSourceValidity(3),
+				    scratch.HashJoinSourceFormats(3), scratch.HashJoinSourceData(3),
+				    scratch.HashJoinSourceSelections(3), scratch.HashJoinSourceValidity(3),
 				    second_hash_join_op.hash_join_probe.plan.residual_predicate ? &scratch.HashJoinResidualChunk(3)
 				                                                                : nullptr,
 				    second_hash_join_op.hash_join_probe.plan.residual_predicate ? &scratch.HashJoinResidualSelection(3)
@@ -3845,8 +7617,9 @@ public:
 				    second_hash_join_op.hash_join_probe.plan.residual_predicate
 				        ? &scratch.HashJoinResidualMatchSelection(3)
 				        : nullptr,
-				    second_hash_join_op.hash_join_probe.plan.residual_predicate ? &scratch.HashJoinResidualRowPointers(3)
-				                                                                : nullptr,
+				    second_hash_join_op.hash_join_probe.plan.residual_predicate
+				        ? &scratch.HashJoinResidualRowPointers(3)
+				        : nullptr,
 				    second_state, deferred_reason);
 				RecordSljitRegionStageRuntime(runtime, 3, second_hash_join_op.kind, stage_start);
 				if (bind_result == ExecutionOperatorBindResult::DEFERRED) {
@@ -3862,46 +7635,48 @@ public:
 				if (append_projected_batch(projected)) {
 					return true;
 				}
-				} while (!HashJoinProbeDrainFinished(second_hash_join_op.hash_join_probe.plan.output_mode, second_state));
-				return false;
-			};
+			} while (!HashJoinProbeDrainFinished(second_hash_join_op.hash_join_probe.plan.output_mode, second_state));
+			return false;
+		};
 
-			auto flush_direct_second_join_batch = [&]() -> bool {
-				if (!direct_first_join_to_second_join || direct_second_join_batch.size() == 0) {
-					return false;
-				}
-				if (drain_second_hash_join(direct_second_join_batch)) {
+		auto flush_direct_second_join_batch = [&]() -> bool {
+			if (!direct_first_join_to_second_join || direct_second_join_batch.size() == 0) {
+				return false;
+			}
+			if (drain_second_hash_join(direct_second_join_batch)) {
+				return true;
+			}
+			direct_second_join_batch.Reset();
+			return false;
+		};
+
+		auto append_direct_first_join_selection = [&](DataChunk &first_join_input, idx_t selected_count) -> bool {
+			if (selected_count == 0) {
+				return false;
+			}
+			if (direct_second_join_batch.size() + selected_count > STANDARD_VECTOR_SIZE) {
+				if (flush_direct_second_join_batch()) {
 					return true;
 				}
-				direct_second_join_batch.Reset();
-				return false;
-			};
-
-			auto append_direct_first_join_selection = [&](DataChunk &first_join_input, idx_t selected_count) -> bool {
-				if (selected_count == 0) {
-					return false;
+			}
+			const auto target_offset = direct_second_join_batch.size();
+			auto projection_stage_start = SljitRegionStageStart(runtime);
+			if (!TryDirectBuildQ7SecondJoinInput(scratch, first_join_input, scratch.FilterSelection(1),
+			                                     scratch.HashJoinRowPointers(1), selected_count,
+			                                     direct_second_join_batch, target_offset)) {
+				throw InternalException("SLJIT Q7 direct first-join selection projection failed");
+			}
+			RecordSljitRegionStageRuntime(runtime, 2, between_join_projection_op.kind,
+			                              "between_join_direct_selection_projection", projection_stage_start);
+			RecordSljitRegionMaterializationBoundary(runtime, between_join_projection_op.kind,
+			                                         "direct_row_pointer_projection", selected_count);
+			if (direct_second_join_batch.size() == STANDARD_VECTOR_SIZE) {
+				if (flush_direct_second_join_batch()) {
+					return true;
 				}
-				if (direct_second_join_batch.size() + selected_count > STANDARD_VECTOR_SIZE) {
-					if (flush_direct_second_join_batch()) {
-						return true;
-					}
-				}
-				const auto target_offset = direct_second_join_batch.size();
-				auto projection_stage_start = SljitRegionStageStart(runtime);
-				if (!TryDirectBuildQ7SecondJoinInput(scratch, first_join_input, scratch.FilterSelection(1),
-				                                     scratch.HashJoinRowPointers(1), selected_count,
-				                                     direct_second_join_batch, target_offset)) {
-					throw InternalException("SLJIT Q7 direct first-join selection projection failed");
-				}
-				RecordSljitRegionStageRuntime(runtime, 2, between_join_projection_op.kind,
-				                              "between_join_direct_selection_projection", projection_stage_start);
-				if (direct_second_join_batch.size() == STANDARD_VECTOR_SIZE) {
-					if (flush_direct_second_join_batch()) {
-						return true;
-					}
-				}
-				return false;
-			};
+			}
+			return false;
+		};
 
 		auto process_first_join_batch = [&](DataChunk &batch) -> bool {
 			if (batch.size() == 0) {
@@ -3913,10 +7688,14 @@ public:
 			if (TryReferenceProjection(second_join_input, batch, between_join_projection_op)) {
 				RecordSljitRegionStageRuntime(runtime, 2, between_join_projection_op.kind,
 				                              "between_join_reference_projection", projection_stage_start);
+				RecordSljitRegionMaterializationBoundary(runtime, between_join_projection_op.kind,
+				                                         "reference_post_join_projection", second_join_input.size());
 			} else {
 				ExecuteProjection(scratch, 2, between_join_projection_op, batch, second_join_input);
 				RecordSljitRegionStageRuntime(runtime, 2, between_join_projection_op.kind,
 				                              "between_join_batch_projection", projection_stage_start);
+				RecordSljitRegionMaterializationBoundary(runtime, between_join_projection_op.kind,
+				                                         "copied_post_join_projection", second_join_input.size());
 			}
 			return drain_second_hash_join(second_join_input);
 		};
@@ -3950,6 +7729,8 @@ public:
 			}
 			RecordSljitRegionStageRuntime(runtime, 1, first_hash_join_op.kind, "first_join_batch_append",
 			                              append_stage_start);
+			RecordSljitRegionMaterializationBoundary(runtime, first_hash_join_op.kind, "copied_post_join_batch",
+			                                         first_join_output.size());
 			if (first_join_batch.size() == STANDARD_VECTOR_SIZE) {
 				if (flush_first_join_batch()) {
 					return true;
@@ -4000,8 +7781,8 @@ public:
 				auto bind_result = ExecuteNativeHashJoinProbe(
 				    runtime, native_runtime, scratch, 1, first_hash_join_op, *first_join_input, first_join_output,
 				    scratch.FilterSelection(1), scratch.HashJoinBuildSelection(1), scratch.HashJoinRowPointers(1),
-				    scratch.HashJoinSourceFormats(1), scratch.HashJoinSourceData(1), scratch.HashJoinSourceSelections(1),
-				    scratch.HashJoinSourceValidity(1),
+				    scratch.HashJoinSourceFormats(1), scratch.HashJoinSourceData(1),
+				    scratch.HashJoinSourceSelections(1), scratch.HashJoinSourceValidity(1),
 				    first_hash_join_op.hash_join_probe.plan.residual_predicate ? &scratch.HashJoinResidualChunk(1)
 				                                                               : nullptr,
 				    first_hash_join_op.hash_join_probe.plan.residual_predicate ? &scratch.HashJoinResidualSelection(1)
@@ -4009,10 +7790,9 @@ public:
 				    first_hash_join_op.hash_join_probe.plan.residual_predicate
 				        ? &scratch.HashJoinResidualMatchSelection(1)
 				        : nullptr,
-					    first_hash_join_op.hash_join_probe.plan.residual_predicate ? &scratch.HashJoinResidualRowPointers(1)
-					                                                               : nullptr,
-						    first_state, deferred_reason, first_join_unchecked_key_cast,
-						    direct_first_join_to_second_join);
+				    first_hash_join_op.hash_join_probe.plan.residual_predicate ? &scratch.HashJoinResidualRowPointers(1)
+				                                                               : nullptr,
+				    first_state, deferred_reason, first_join_unchecked_key_cast, direct_first_join_to_second_join);
 				RecordSljitRegionStageRuntime(runtime, 1, first_hash_join_op.kind, stage_start);
 				if (bind_result == ExecutionOperatorBindResult::DEFERRED) {
 					finish_deferred_grouped_update();
@@ -4020,26 +7800,26 @@ public:
 					result = ExecutionRegionResult::DEFERRED;
 					return true;
 				}
-					if (direct_first_join_to_second_join) {
-						if (first_join_output.size() != 0) {
-							if (append_direct_first_join_selection(*first_join_input, first_join_output.size())) {
-								return true;
-							}
-						}
-					} else {
-						if (append_first_join_batch(first_join_output)) {
+				if (direct_first_join_to_second_join) {
+					if (first_join_output.size() != 0) {
+						if (append_direct_first_join_selection(*first_join_input, first_join_output.size())) {
 							return true;
 						}
 					}
-				} while (!HashJoinProbeDrainFinished(first_hash_join_op.hash_join_probe.plan.output_mode, first_state));
+				} else {
+					if (append_first_join_batch(first_join_output)) {
+						return true;
+					}
+				}
+			} while (!HashJoinProbeDrainFinished(first_hash_join_op.hash_join_probe.plan.output_mode, first_state));
 			return false;
 		};
 
-			while (true) {
-				if (processed_batches >= runtime.MaxChunks() || fetched_chunks >= max_source_fetches) {
-					if (flush_first_join_batch() || flush_direct_second_join_batch() || flush_projected_batch()) {
-						return true;
-					}
+		while (true) {
+			if (processed_batches >= runtime.MaxChunks() || fetched_chunks >= max_source_fetches) {
+				if (flush_first_join_batch() || flush_direct_second_join_batch() || flush_projected_batch()) {
+					return true;
+				}
 				finish_deferred_grouped_update();
 				result = ExecutionRegionResult::NOT_FINISHED;
 				return true;
@@ -4058,10 +7838,10 @@ public:
 			    execute_source_chunk(*source_chunk, source_result == SourceResultType::HAVE_MORE_OUTPUT)) {
 				return true;
 			}
-				if (source_result == SourceResultType::FINISHED) {
-					if (flush_first_join_batch() || flush_direct_second_join_batch() || flush_projected_batch()) {
-						return true;
-					}
+			if (source_result == SourceResultType::FINISHED) {
+				if (flush_first_join_batch() || flush_direct_second_join_batch() || flush_projected_batch()) {
+					return true;
+				}
 				finish_deferred_grouped_update();
 				result = ExecutionRegionResult::FINISHED;
 				return true;
@@ -4069,8 +7849,488 @@ public:
 		}
 	}
 
-	bool TryExecuteFullPipelineHashJoinHashJoinProjectionProjectionGroupedAggregateBatched(
-	    ExecutionRegionRuntime &runtime, ExecutionRegionResult &result) {
+	bool TryExecuteFullPipelineHashJoinHashJoinProjectionGroupedAggregateBatched(ExecutionRegionRuntime &runtime,
+	                                                                             ExecutionRegionResult &result) {
+		SljitRegionExecutionScratch scratch(runtime.GetAllocator(), ops);
+		idx_t fetched_chunks = 0;
+		idx_t processed_output_rows = 0;
+		bool deferred_grouped_finish = false;
+		bool pending_second_probe_input_initialized = false;
+		const auto max_source_fetches = SljitBatchedSourceContractFetchBudget(runtime.MaxChunks());
+		auto &first_hash_join_op = ops[0];
+		auto &second_hash_join_op = ops[1];
+		auto &final_projection_op = ops[2];
+		auto &aggregate_op = ops[3];
+		auto &native_runtime = runtime.ExecutionOperators();
+		DataChunk pending_second_probe_input;
+		Vector pending_second_probe_row_pointers(LogicalType::POINTER);
+		vector<ExecutionRowPointerGroupKeySource> pending_second_probe_group_sources;
+		vector<idx_t> pending_second_probe_payload_sources;
+
+		auto finish_deferred_grouped_update = [&]() {
+			if (!deferred_grouped_finish) {
+				return;
+			}
+			auto &binding = scratch.SinkBinding(3);
+			if (!binding.ready || !binding.aggregate_update.ready || !binding.aggregate_update.grouped_state.ready ||
+			    !binding.aggregate_update.grouped_state.state) {
+				throw InternalException("SLJIT deferred grouped aggregate finish is missing aggregate state");
+			}
+			auto finish_stage_start = SljitRegionStageStart(runtime);
+			binding.aggregate_update.grouped_state.state->FinishStateUpdates();
+			RecordSljitRegionStageRuntime(runtime, 3, aggregate_op.kind, "finish_deferred_grouped_state_updates",
+			                              finish_stage_start);
+			deferred_grouped_finish = false;
+		};
+
+		auto execute_projected_batch = [&](DataChunk &projected) -> bool {
+			if (projected.size() == 0) {
+				return false;
+			}
+			auto sink_result =
+			    ExecuteNativeAggregateUpdate(runtime, native_runtime, scratch, 3, aggregate_op, projected, nullptr,
+			                                 DConstants::INVALID_INDEX, true, &deferred_grouped_finish);
+			if (sink_result == SinkResultType::BLOCKED) {
+				finish_deferred_grouped_update();
+				result = runtime.DeferredReason().empty() ? ExecutionRegionResult::INTERRUPTED
+				                                          : ExecutionRegionResult::DEFERRED;
+				return true;
+			}
+			if (sink_result == SinkResultType::FINISHED) {
+				finish_deferred_grouped_update();
+				result = ExecutionRegionResult::FINISHED;
+				return true;
+			}
+			SljitChargeDownstreamRows(processed_output_rows, projected.size());
+			return false;
+		};
+
+		auto flush_projected_batch = [&]() -> bool {
+			auto batch = runtime.PendingSourceContractBatch();
+			if (!batch) {
+				return false;
+			}
+			if (execute_projected_batch(*batch)) {
+				return true;
+			}
+			runtime.ResetSourceContractBatch();
+			return false;
+		};
+
+		auto append_projected_batch = [&](DataChunk &projected) -> bool {
+			if (projected.size() == 0) {
+				return false;
+			}
+			auto &batch = runtime.PrepareSourceContractBatch(final_projection_op.output_types);
+			if (batch.size() + projected.size() > STANDARD_VECTOR_SIZE) {
+				if (flush_projected_batch()) {
+					return true;
+				}
+			}
+			if (projected.size() == STANDARD_VECTOR_SIZE && batch.size() == 0) {
+				return execute_projected_batch(projected);
+			}
+			auto append_stage_start = SljitRegionStageStart(runtime);
+			if (!SljitTryFastAppendFixedFlatAllValid(batch, projected)) {
+				batch.Append(projected);
+			}
+			RecordSljitRegionStageRuntime(runtime, 2, final_projection_op.kind, "post_join_batch_append",
+			                              append_stage_start);
+			RecordSljitRegionMaterializationBoundary(runtime, final_projection_op.kind, "copied_post_join_batch",
+			                                         projected.size());
+			if (batch.size() == STANDARD_VECTOR_SIZE) {
+				if (flush_projected_batch()) {
+					return true;
+				}
+			}
+			return false;
+		};
+
+		auto project_second_join_output = [&](DataChunk &second_join_output, DataChunk &projected) {
+			projected.Reset();
+			auto projection_stage_start = SljitRegionStageStart(runtime);
+			if (TryReferenceProjection(projected, second_join_output, final_projection_op)) {
+				RecordSljitRegionStageRuntime(runtime, 2, final_projection_op.kind,
+				                              "post_second_join_reference_projection", projection_stage_start);
+				RecordSljitRegionMaterializationBoundary(runtime, final_projection_op.kind,
+				                                         "reference_post_join_projection", projected.size());
+			} else {
+				ExecuteProjection(scratch, 2, final_projection_op, second_join_output, projected);
+				RecordSljitRegionStageRuntime(runtime, 2, final_projection_op.kind,
+				                              "post_second_join_batch_projection", projection_stage_start);
+				RecordSljitRegionMaterializationBoundary(runtime, final_projection_op.kind,
+				                                         "copied_post_join_projection", projected.size());
+			}
+		};
+
+		auto reset_pending_second_probe_batch = [&]() {
+			if (pending_second_probe_input_initialized) {
+				pending_second_probe_input.Reset();
+			}
+			pending_second_probe_row_pointers.SetVectorType(VectorType::FLAT_VECTOR);
+			FlatVector::SetSize(pending_second_probe_row_pointers, 0);
+		};
+
+		auto materialize_selection_only_second_join_output =
+		    [&](DataChunk &join_input, const SelectionVector &match_selection, const SelectionVector &build_selection,
+		        Vector &row_pointers, DataChunk &join_output) -> bool {
+			if (!scratch.HasOperatorBinding(1)) {
+				return false;
+			}
+			auto &binding = scratch.OperatorBinding(1).hash_join_probe;
+			if (!binding.ready) {
+				return false;
+			}
+			auto materialize_stage_start = SljitRegionStageStart(runtime);
+			SljitRegionStageRecorder recorder(
+			    runtime, SljitRegionStageName(1, second_hash_join_op.kind, "materialize_output_fallback"));
+			switch (binding.layout_kind) {
+			case ExecutionHashJoinProbeLayoutKind::REGULAR_HASH_TABLE:
+				RecordSljitRegionMaterializationBoundary(runtime, second_hash_join_op.kind, "row_pointer_reference",
+				                                         join_output.size());
+				RecordSljitRegionMaterializationBoundary(runtime, second_hash_join_op.kind, "final_output",
+				                                         join_output.size());
+				ExecutionMaterializeHashJoinProbe(binding, join_input, row_pointers, match_selection,
+				                                  join_output.size(), join_output,
+				                                  runtime.TraceRuntime() ? &recorder : nullptr);
+				break;
+			case ExecutionHashJoinProbeLayoutKind::PERFECT_HASH_TABLE:
+				RecordSljitRegionMaterializationBoundary(runtime, second_hash_join_op.kind, "final_output",
+				                                         join_output.size());
+				ExecutionMaterializePerfectHashJoinProbe(binding, join_input, match_selection, build_selection,
+				                                         join_output.size(), join_output,
+				                                         runtime.TraceRuntime() ? &recorder : nullptr);
+				break;
+			default:
+				return false;
+			}
+			RecordSljitRegionStageRuntime(runtime, 1, second_hash_join_op.kind, "materialize_output_fallback",
+			                              materialize_stage_start);
+			return true;
+		};
+
+		auto append_direct_projected_batch_from_second_probe =
+		    [&](DataChunk &join_input, const SelectionVector &match_selection, Vector &row_pointers,
+		        DataChunk &join_output, bool &handled) -> bool {
+			handled = false;
+			if (join_output.size() == 0) {
+				return false;
+			}
+			auto &batch = runtime.PrepareSourceContractBatch(final_projection_op.output_types);
+			if (batch.size() + join_output.size() > STANDARD_VECTOR_SIZE) {
+				if (flush_projected_batch()) {
+					return true;
+				}
+			}
+			if (!TryDirectMaterializeHashJoinProjectionSourcesToBatch(
+			        runtime, scratch, 1, 2, final_projection_op, join_input, match_selection, row_pointers,
+			        join_output, batch)) {
+				return false;
+			}
+			handled = true;
+			RecordSljitRegionRuntimePath(runtime, final_projection_op.kind, "direct_second_join_projection",
+			                             join_output.size());
+			if (batch.size() == STANDARD_VECTOR_SIZE) {
+				if (flush_projected_batch()) {
+					return true;
+				}
+			}
+			return false;
+		};
+
+		auto try_execute_pending_second_probe_grouped_update = [&](bool &handled) -> bool {
+			handled = false;
+			if (!pending_second_probe_input_initialized || pending_second_probe_input.size() == 0) {
+				return false;
+			}
+			if (runtime.PendingSourceContractBatch() && flush_projected_batch()) {
+				return true;
+			}
+			if (!scratch.HasOperatorBinding(1)) {
+				RecordSljitRegionRuntimePath(
+				    runtime, aggregate_op.kind,
+				    "direct_row_pointer_grouped_lookup_update_unsupported.no_join_binding");
+				return false;
+			}
+			auto &binding = scratch.OperatorBinding(1).hash_join_probe;
+			if (!binding.ready || !TryBuildRowPointerGroupKeySources(binding, final_projection_op, aggregate_op,
+			                                                         pending_second_probe_group_sources)) {
+				RecordSljitRegionRuntimePath(
+				    runtime, aggregate_op.kind,
+				    "direct_row_pointer_grouped_lookup_update_unsupported.group_key_sources",
+				    pending_second_probe_input.size());
+				return false;
+			}
+			if (!TryBuildRowPointerGroupedPayloadSourceOverride(binding, final_projection_op, aggregate_op,
+			                                                    pending_second_probe_input,
+			                                                    pending_second_probe_payload_sources)) {
+				RecordSljitRegionRuntimePath(
+				    runtime, aggregate_op.kind,
+				    "direct_row_pointer_grouped_lookup_update_unsupported.payload_sources",
+				    pending_second_probe_input.size());
+				return false;
+			}
+			if (!TryExecuteNativeRowPointerGroupedAggregateUpdate(
+			        runtime, native_runtime, scratch, 3, aggregate_op, pending_second_probe_input,
+			        pending_second_probe_row_pointers, pending_second_probe_group_sources,
+			        pending_second_probe_payload_sources, true, &deferred_grouped_finish)) {
+				return false;
+			}
+			native_runtime.RecordSinkResult(pending_second_probe_input.size(), SinkResultType::NEED_MORE_INPUT);
+			handled = true;
+			SljitChargeDownstreamRows(processed_output_rows, pending_second_probe_input.size());
+			reset_pending_second_probe_batch();
+			return false;
+		};
+
+		auto flush_pending_second_probe_batch = [&]() -> bool {
+			if (!pending_second_probe_input_initialized || pending_second_probe_input.size() == 0) {
+				return false;
+			}
+			bool row_pointer_grouped_update = false;
+			if (try_execute_pending_second_probe_grouped_update(row_pointer_grouped_update)) {
+				return true;
+			}
+			if (row_pointer_grouped_update) {
+				return false;
+			}
+
+			auto &second_join_output = scratch.TemporaryChunk(1);
+			auto &projected = scratch.TemporaryChunk(2);
+			second_join_output.Reset();
+			second_join_output.SetChildCardinality(pending_second_probe_input.size());
+			if (!materialize_selection_only_second_join_output(pending_second_probe_input,
+			                                                   *FlatVector::IncrementalSelectionVector(),
+			                                                   *FlatVector::IncrementalSelectionVector(),
+			                                                   pending_second_probe_row_pointers,
+			                                                   second_join_output)) {
+				return false;
+			}
+			project_second_join_output(second_join_output, projected);
+			if (append_projected_batch(projected)) {
+				return true;
+			}
+			reset_pending_second_probe_batch();
+			return false;
+		};
+
+		auto append_pending_second_probe_batch = [&](DataChunk &join_input, SelectionVector &match_selection,
+		                                             Vector &row_pointers, idx_t count, bool &handled) -> bool {
+			handled = false;
+			if (count == 0) {
+				return false;
+			}
+			if (count == STANDARD_VECTOR_SIZE &&
+			    (!pending_second_probe_input_initialized || pending_second_probe_input.size() == 0)) {
+				return false;
+			}
+			if (!pending_second_probe_input_initialized) {
+				pending_second_probe_input.Initialize(runtime.GetAllocator(), join_input.GetTypes());
+				pending_second_probe_input_initialized = true;
+				reset_pending_second_probe_batch();
+			}
+			if (pending_second_probe_input.ColumnCount() != join_input.ColumnCount()) {
+				return false;
+			}
+			if (pending_second_probe_input.size() + count > STANDARD_VECTOR_SIZE) {
+				if (flush_pending_second_probe_batch()) {
+					return true;
+				}
+			}
+			if (count == STANDARD_VECTOR_SIZE && pending_second_probe_input.size() == 0) {
+				return false;
+			}
+			const auto append_offset = pending_second_probe_input.size();
+			const auto new_count = append_offset + count;
+			auto append_stage_start = SljitRegionStageStart(runtime);
+			for (idx_t col_idx = 0; col_idx < join_input.ColumnCount(); col_idx++) {
+				if (pending_second_probe_input.data[col_idx].GetType() != join_input.data[col_idx].GetType()) {
+					return false;
+				}
+				VectorOperations::Copy(join_input.data[col_idx], pending_second_probe_input.data[col_idx],
+				                       match_selection, join_input.size(), 0, append_offset, count);
+				FlatVector::SetSize(pending_second_probe_input.data[col_idx], count_t(new_count));
+			}
+			VectorOperations::Copy(row_pointers, pending_second_probe_row_pointers, count, 0, append_offset);
+			FlatVector::SetSize(pending_second_probe_row_pointers, count_t(new_count));
+			pending_second_probe_input.CheckCardinality(new_count);
+			RecordSljitRegionStageRuntime(runtime, 1, second_hash_join_op.kind, "pending_probe_batch_append",
+			                              append_stage_start);
+			RecordSljitRegionMaterializationBoundary(runtime, second_hash_join_op.kind, "pending_probe_batch",
+			                                         count);
+			handled = true;
+			if (pending_second_probe_input.size() == STANDARD_VECTOR_SIZE) {
+				if (flush_pending_second_probe_batch()) {
+					return true;
+				}
+			}
+			return false;
+		};
+
+		auto drain_second_hash_join = [&](DataChunk &second_join_input) -> bool {
+			if (second_join_input.size() == 0) {
+				return false;
+			}
+			SljitHashJoinProbeDrainState second_state;
+			auto &second_join_output = scratch.TemporaryChunk(1);
+			auto &projected = scratch.TemporaryChunk(2);
+			do {
+				second_join_output.Reset();
+				string deferred_reason;
+				auto stage_start = SljitRegionStageStart(runtime);
+				auto bind_result = ExecuteNativeHashJoinProbe(
+				    runtime, native_runtime, scratch, 1, second_hash_join_op, second_join_input, second_join_output,
+				    scratch.FilterSelection(1), scratch.HashJoinBuildSelection(1), scratch.HashJoinRowPointers(1),
+				    scratch.HashJoinSourceFormats(1), scratch.HashJoinSourceData(1),
+				    scratch.HashJoinSourceSelections(1), scratch.HashJoinSourceValidity(1),
+				    second_hash_join_op.hash_join_probe.plan.residual_predicate ? &scratch.HashJoinResidualChunk(1)
+				                                                                : nullptr,
+				    second_hash_join_op.hash_join_probe.plan.residual_predicate ? &scratch.HashJoinResidualSelection(1)
+				                                                                : nullptr,
+				    second_hash_join_op.hash_join_probe.plan.residual_predicate
+				        ? &scratch.HashJoinResidualMatchSelection(1)
+				        : nullptr,
+				    second_hash_join_op.hash_join_probe.plan.residual_predicate
+				        ? &scratch.HashJoinResidualRowPointers(1)
+				        : nullptr,
+				    second_state, deferred_reason, false, true);
+				RecordSljitRegionStageRuntime(runtime, 1, second_hash_join_op.kind, stage_start);
+				if (bind_result == ExecutionOperatorBindResult::DEFERRED) {
+					if (flush_pending_second_probe_batch() || flush_projected_batch()) {
+						return true;
+					}
+					finish_deferred_grouped_update();
+					runtime.Defer(std::move(deferred_reason));
+					result = ExecutionRegionResult::DEFERRED;
+					return true;
+				}
+					if (second_join_output.size() == 0) {
+						continue;
+					}
+					bool pending_buffered = false;
+					if (append_pending_second_probe_batch(second_join_input, scratch.FilterSelection(1),
+					                                      scratch.HashJoinRowPointers(1), second_join_output.size(),
+					                                      pending_buffered)) {
+						return true;
+					}
+					if (pending_buffered) {
+						continue;
+					}
+					bool direct_projected = false;
+					if (append_direct_projected_batch_from_second_probe(
+					        second_join_input, scratch.FilterSelection(1), scratch.HashJoinRowPointers(1),
+					        second_join_output, direct_projected)) {
+						return true;
+					}
+					if (direct_projected) {
+						continue;
+					}
+					if (!materialize_selection_only_second_join_output(
+					        second_join_input, scratch.FilterSelection(1), scratch.HashJoinBuildSelection(1),
+					        scratch.HashJoinRowPointers(1), second_join_output)) {
+					throw InternalException("SLJIT direct second-join fallback materialization failed");
+				}
+				project_second_join_output(second_join_output, projected);
+				if (append_projected_batch(projected)) {
+					return true;
+				}
+			} while (!HashJoinProbeDrainFinished(second_hash_join_op.hash_join_probe.plan.output_mode, second_state));
+			return false;
+		};
+
+		auto execute_source_chunk = [&](DataChunk &source_chunk, bool have_more_output) -> bool {
+			auto next_batch_result = runtime.AdvanceSinkBatch(source_chunk, have_more_output);
+			if (next_batch_result == SinkNextBatchType::BLOCKED) {
+				if (flush_pending_second_probe_batch() || flush_projected_batch()) {
+					return true;
+				}
+				finish_deferred_grouped_update();
+				result = ExecutionRegionResult::INTERRUPTED;
+				return true;
+			}
+
+			SljitHashJoinProbeDrainState first_state;
+			auto &first_join_output = scratch.TemporaryChunk(0);
+			do {
+				first_join_output.Reset();
+				string deferred_reason;
+				auto stage_start = SljitRegionStageStart(runtime);
+				auto bind_result = ExecuteNativeHashJoinProbe(
+				    runtime, native_runtime, scratch, 0, first_hash_join_op, source_chunk, first_join_output,
+				    scratch.FilterSelection(0), scratch.HashJoinBuildSelection(0), scratch.HashJoinRowPointers(0),
+				    scratch.HashJoinSourceFormats(0), scratch.HashJoinSourceData(0),
+				    scratch.HashJoinSourceSelections(0), scratch.HashJoinSourceValidity(0),
+				    first_hash_join_op.hash_join_probe.plan.residual_predicate ? &scratch.HashJoinResidualChunk(0)
+				                                                               : nullptr,
+				    first_hash_join_op.hash_join_probe.plan.residual_predicate ? &scratch.HashJoinResidualSelection(0)
+				                                                               : nullptr,
+				    first_hash_join_op.hash_join_probe.plan.residual_predicate
+				        ? &scratch.HashJoinResidualMatchSelection(0)
+				        : nullptr,
+				    first_hash_join_op.hash_join_probe.plan.residual_predicate ? &scratch.HashJoinResidualRowPointers(0)
+				                                                               : nullptr,
+				    first_state, deferred_reason);
+				RecordSljitRegionStageRuntime(runtime, 0, first_hash_join_op.kind, stage_start);
+				if (bind_result == ExecutionOperatorBindResult::DEFERRED) {
+					if (flush_pending_second_probe_batch() || flush_projected_batch()) {
+						return true;
+					}
+					finish_deferred_grouped_update();
+					runtime.Defer(std::move(deferred_reason));
+					result = ExecutionRegionResult::DEFERRED;
+					return true;
+				}
+				if (first_join_output.size() == 0) {
+					continue;
+				}
+				if (drain_second_hash_join(first_join_output)) {
+					return true;
+				}
+			} while (!HashJoinProbeDrainFinished(first_hash_join_op.hash_join_probe.plan.output_mode, first_state));
+			return false;
+		};
+
+		while (true) {
+			if (SljitDownstreamRowBudgetReached(processed_output_rows, runtime.MaxChunks()) ||
+			    fetched_chunks >= max_source_fetches) {
+				if (flush_pending_second_probe_batch() || flush_projected_batch()) {
+					return true;
+				}
+				finish_deferred_grouped_update();
+				result = ExecutionRegionResult::NOT_FINISHED;
+				return true;
+			}
+
+			DataChunk *source_chunk = nullptr;
+			auto source_result = runtime.FetchSourceContract(source_chunk);
+			if (source_result == SourceResultType::BLOCKED) {
+				if (flush_pending_second_probe_batch() || flush_projected_batch()) {
+					return true;
+				}
+				finish_deferred_grouped_update();
+				result = ExecutionRegionResult::INTERRUPTED;
+				return true;
+			}
+			fetched_chunks++;
+
+			if (source_chunk && source_chunk->size() > 0 &&
+			    execute_source_chunk(*source_chunk, source_result == SourceResultType::HAVE_MORE_OUTPUT)) {
+				return true;
+			}
+			if (source_result == SourceResultType::FINISHED) {
+				if (flush_pending_second_probe_batch() || flush_projected_batch()) {
+					return true;
+				}
+				finish_deferred_grouped_update();
+				result = ExecutionRegionResult::FINISHED;
+				return true;
+			}
+		}
+	}
+
+	bool
+	TryExecuteFullPipelineHashJoinHashJoinProjectionProjectionGroupedAggregateBatched(ExecutionRegionRuntime &runtime,
+	                                                                                  ExecutionRegionResult &result) {
 		SljitRegionExecutionScratch scratch(runtime.GetAllocator(), ops);
 		idx_t fetched_chunks = 0;
 		idx_t processed_batches = 0;
@@ -4152,6 +8412,8 @@ public:
 			}
 			RecordSljitRegionStageRuntime(runtime, 3, final_projection_op.kind, "post_join_batch_append",
 			                              append_stage_start);
+			RecordSljitRegionMaterializationBoundary(runtime, final_projection_op.kind, "copied_post_join_batch",
+			                                         projected.size());
 			if (batch.size() == STANDARD_VECTOR_SIZE) {
 				if (flush_projected_batch()) {
 					return true;
@@ -4166,23 +8428,31 @@ public:
 			intermediate.Reset();
 			auto first_projection_stage_start = SljitRegionStageStart(runtime);
 			if (TryReferenceProjection(intermediate, join_output, first_projection_op)) {
-				RecordSljitRegionStageRuntime(runtime, 2, first_projection_op.kind,
-				                              "post_join_reference_projection", first_projection_stage_start);
+				RecordSljitRegionStageRuntime(runtime, 2, first_projection_op.kind, "post_join_reference_projection",
+				                              first_projection_stage_start);
+				RecordSljitRegionMaterializationBoundary(runtime, first_projection_op.kind,
+				                                         "reference_post_join_projection", intermediate.size());
 			} else {
 				ExecuteProjection(scratch, 2, first_projection_op, join_output, intermediate);
 				RecordSljitRegionStageRuntime(runtime, 2, first_projection_op.kind, "post_join_batch_projection",
 				                              first_projection_stage_start);
+				RecordSljitRegionMaterializationBoundary(runtime, first_projection_op.kind,
+				                                         "copied_post_join_projection", intermediate.size());
 			}
 
 			projected.Reset();
 			auto second_projection_stage_start = SljitRegionStageStart(runtime);
 			if (TryReferenceProjection(projected, intermediate, final_projection_op)) {
-				RecordSljitRegionStageRuntime(runtime, 3, final_projection_op.kind,
-				                              "post_join_reference_projection", second_projection_stage_start);
+				RecordSljitRegionStageRuntime(runtime, 3, final_projection_op.kind, "post_join_reference_projection",
+				                              second_projection_stage_start);
+				RecordSljitRegionMaterializationBoundary(runtime, final_projection_op.kind,
+				                                         "reference_post_join_projection", projected.size());
 			} else {
 				ExecuteProjection(scratch, 3, final_projection_op, intermediate, projected);
 				RecordSljitRegionStageRuntime(runtime, 3, final_projection_op.kind, "post_join_batch_projection",
 				                              second_projection_stage_start);
+				RecordSljitRegionMaterializationBoundary(runtime, final_projection_op.kind,
+				                                         "copied_post_join_projection", projected.size());
 			}
 		};
 
@@ -4197,8 +8467,8 @@ public:
 				auto bind_result = ExecuteNativeHashJoinProbe(
 				    runtime, native_runtime, scratch, 1, second_hash_join_op, first_join_output, second_join_output,
 				    scratch.FilterSelection(1), scratch.HashJoinBuildSelection(1), scratch.HashJoinRowPointers(1),
-				    scratch.HashJoinSourceFormats(1), scratch.HashJoinSourceData(1), scratch.HashJoinSourceSelections(1),
-				    scratch.HashJoinSourceValidity(1),
+				    scratch.HashJoinSourceFormats(1), scratch.HashJoinSourceData(1),
+				    scratch.HashJoinSourceSelections(1), scratch.HashJoinSourceValidity(1),
 				    second_hash_join_op.hash_join_probe.plan.residual_predicate ? &scratch.HashJoinResidualChunk(1)
 				                                                                : nullptr,
 				    second_hash_join_op.hash_join_probe.plan.residual_predicate ? &scratch.HashJoinResidualSelection(1)
@@ -4206,8 +8476,9 @@ public:
 				    second_hash_join_op.hash_join_probe.plan.residual_predicate
 				        ? &scratch.HashJoinResidualMatchSelection(1)
 				        : nullptr,
-				    second_hash_join_op.hash_join_probe.plan.residual_predicate ? &scratch.HashJoinResidualRowPointers(1)
-				                                                                : nullptr,
+				    second_hash_join_op.hash_join_probe.plan.residual_predicate
+				        ? &scratch.HashJoinResidualRowPointers(1)
+				        : nullptr,
 				    second_state, deferred_reason);
 				RecordSljitRegionStageRuntime(runtime, 1, second_hash_join_op.kind, stage_start);
 				if (bind_result == ExecutionOperatorBindResult::DEFERRED) {
@@ -4244,8 +8515,8 @@ public:
 				auto bind_result = ExecuteNativeHashJoinProbe(
 				    runtime, native_runtime, scratch, 0, first_hash_join_op, source_chunk, first_join_output,
 				    scratch.FilterSelection(0), scratch.HashJoinBuildSelection(0), scratch.HashJoinRowPointers(0),
-				    scratch.HashJoinSourceFormats(0), scratch.HashJoinSourceData(0), scratch.HashJoinSourceSelections(0),
-				    scratch.HashJoinSourceValidity(0),
+				    scratch.HashJoinSourceFormats(0), scratch.HashJoinSourceData(0),
+				    scratch.HashJoinSourceSelections(0), scratch.HashJoinSourceValidity(0),
 				    first_hash_join_op.hash_join_probe.plan.residual_predicate ? &scratch.HashJoinResidualChunk(0)
 				                                                               : nullptr,
 				    first_hash_join_op.hash_join_probe.plan.residual_predicate ? &scratch.HashJoinResidualSelection(0)
@@ -4341,36 +8612,61 @@ public:
 			if (TryReferenceProjection(projected, join_output, projection_op)) {
 				RecordSljitRegionStageRuntime(runtime, projection_idx, projection_op.kind,
 				                              "post_join_reference_projection", projection_stage_start);
+				RecordSljitRegionMaterializationBoundary(runtime, projection_op.kind, "reference_post_join_projection",
+				                                         projected.size());
 			} else {
 				ExecuteProjection(scratch, projection_idx, projection_op, join_output, projected);
 				RecordSljitRegionStageRuntime(runtime, projection_idx, projection_op.kind, "post_join_batch_projection",
 				                              projection_stage_start);
+				RecordSljitRegionMaterializationBoundary(runtime, projection_op.kind, "copied_post_join_projection",
+				                                         projected.size());
 			}
 		};
-		return TryExecuteFullPipelineHashJoinProjectedGroupedAggregateBatched(runtime, result, hash_join_idx,
-		                                                                      projection_idx, aggregate_idx,
-		                                                                      prepare_join_input, project_join_output);
+		auto direct_project_join_output_to_batch = [&](SljitRegionExecutionScratch &scratch, DataChunk *join_input,
+		                                               const SelectionVector *match_selection, Vector *row_pointers,
+		                                               DataChunk &join_output, DataChunk &batch) {
+			if (join_input && match_selection && row_pointers) {
+				return TryDirectMaterializeHashJoinProjectionSourcesToBatch(
+				    runtime, scratch, hash_join_idx, projection_idx, ops[projection_idx], *join_input, *match_selection,
+				    *row_pointers, join_output, batch);
+			}
+			return TryDirectMaterializeFixedProjectionToBatch(runtime, scratch, projection_idx, ops[projection_idx],
+			                                                  join_output, batch);
+		};
+		return TryExecuteFullPipelineHashJoinProjectedGroupedAggregateBatched(
+		    runtime, result, hash_join_idx, projection_idx, aggregate_idx, prepare_join_input, project_join_output,
+		    direct_project_join_output_to_batch);
 	}
 
-	template <class PREPARE_JOIN_INPUT, class PROJECT_JOIN_OUTPUT>
-		bool TryExecuteFullPipelineHashJoinProjectedGroupedAggregateBatched(ExecutionRegionRuntime &runtime,
-		                                                                    ExecutionRegionResult &result,
-		                                                                    idx_t hash_join_idx,
-		                                                                    idx_t final_projection_idx,
-		                                                                    idx_t aggregate_idx,
-		                                                                    PREPARE_JOIN_INPUT prepare_join_input,
-		                                                                    PROJECT_JOIN_OUTPUT project_join_output,
-		                                                                    bool source_key0_int64_to_int32_unchecked =
-		                                                                        false) {
+	template <class PREPARE_JOIN_INPUT, class PROJECT_JOIN_OUTPUT, class TRY_DIRECT_PROJECT_JOIN_OUTPUT_TO_BATCH>
+	bool TryExecuteFullPipelineHashJoinProjectedGroupedAggregateBatched(
+	    ExecutionRegionRuntime &runtime, ExecutionRegionResult &result, idx_t hash_join_idx, idx_t final_projection_idx,
+	    idx_t aggregate_idx, PREPARE_JOIN_INPUT prepare_join_input, PROJECT_JOIN_OUTPUT project_join_output,
+	    TRY_DIRECT_PROJECT_JOIN_OUTPUT_TO_BATCH try_direct_project_join_output_to_batch,
+	    bool source_key0_int64_to_int32_unchecked = false) {
 		SljitRegionExecutionScratch scratch(runtime.GetAllocator(), ops);
 		idx_t fetched_chunks = 0;
-		idx_t processed_batches = 0;
+		idx_t processed_output_rows = 0;
 		bool deferred_grouped_finish = false;
+		bool pending_probe_input_initialized = false;
 		const auto max_source_fetches = SljitBatchedSourceContractFetchBudget(runtime.MaxChunks());
 		auto &hash_join_op = ops[hash_join_idx];
 		auto &final_projection_op = ops[final_projection_idx];
 		auto &aggregate_op = ops[aggregate_idx];
 		auto &native_runtime = runtime.ExecutionOperators();
+		DataChunk pending_probe_input;
+		Vector pending_probe_row_pointers(LogicalType::POINTER);
+		DataChunk pending_probe_group_key_batch;
+		Vector pending_probe_group_key_hashes(LogicalType::HASH);
+		bool pending_probe_group_key_batch_initialized = false;
+		bool pending_probe_split_payload_descriptor_initialized = false;
+		bool pending_probe_split_payload_descriptor_ready = false;
+		string pending_probe_split_payload_descriptor_blocker;
+		vector<ExecutionRowPointerGroupKeySource> pending_probe_group_sources;
+		vector<idx_t> pending_probe_payload_sources;
+		vector<LogicalType> pending_probe_group_key_types;
+		vector<idx_t> pending_probe_group_projection_indices;
+		vector<idx_t> pending_probe_split_payload_sources;
 
 		auto finish_deferred_grouped_update = [&]() {
 			if (!deferred_grouped_finish) {
@@ -4406,7 +8702,7 @@ public:
 				result = ExecutionRegionResult::FINISHED;
 				return true;
 			}
-			processed_batches++;
+			SljitChargeDownstreamRows(processed_output_rows, projected.size());
 			return false;
 		};
 
@@ -4439,10 +8735,408 @@ public:
 			if (!SljitTryFastAppendFixedFlatAllValid(batch, projected)) {
 				batch.Append(projected);
 			}
-			RecordSljitRegionStageRuntime(runtime, final_projection_idx, final_projection_op.kind, "post_join_batch_append",
-			                              append_stage_start);
+			RecordSljitRegionStageRuntime(runtime, final_projection_idx, final_projection_op.kind,
+			                              "post_join_batch_append", append_stage_start);
+			RecordSljitRegionMaterializationBoundary(runtime, final_projection_op.kind, "copied_post_join_batch",
+			                                         projected.size());
 			if (batch.size() == STANDARD_VECTOR_SIZE) {
 				if (flush_projected_batch()) {
+					return true;
+				}
+			}
+			return false;
+		};
+
+		auto reset_pending_probe_batch = [&]() {
+			if (pending_probe_input_initialized) {
+				pending_probe_input.Reset();
+			}
+			pending_probe_row_pointers.SetVectorType(VectorType::FLAT_VECTOR);
+			FlatVector::SetSize(pending_probe_row_pointers, 0);
+		};
+
+		auto append_direct_projected_batch = [&](DataChunk &join_output, bool &handled) -> bool {
+			handled = false;
+			if (join_output.size() == 0) {
+				return false;
+			}
+			auto &batch = runtime.PrepareSourceContractBatch(final_projection_op.output_types);
+			if (batch.size() + join_output.size() > STANDARD_VECTOR_SIZE) {
+				if (flush_projected_batch()) {
+					return true;
+				}
+			}
+			if (!try_direct_project_join_output_to_batch(scratch, nullptr, nullptr, nullptr, join_output, batch)) {
+				return false;
+			}
+			handled = true;
+			if (batch.size() == STANDARD_VECTOR_SIZE) {
+				if (flush_projected_batch()) {
+					return true;
+				}
+			}
+			return false;
+		};
+
+		auto materialize_selection_only_join_output = [&](DataChunk &join_input, const SelectionVector &match_selection,
+		                                                  Vector &row_pointers, DataChunk &join_output) -> bool {
+			if (!scratch.HasOperatorBinding(hash_join_idx)) {
+				return false;
+			}
+			auto &binding = scratch.OperatorBinding(hash_join_idx).hash_join_probe;
+			if (binding.layout_kind != ExecutionHashJoinProbeLayoutKind::REGULAR_HASH_TABLE) {
+				return false;
+			}
+			auto materialize_stage_start = SljitRegionStageStart(runtime);
+			SljitRegionStageRecorder recorder(
+			    runtime, SljitRegionStageName(hash_join_idx, hash_join_op.kind, "materialize_output_fallback"));
+			RecordSljitRegionMaterializationBoundary(runtime, hash_join_op.kind, "row_pointer_reference",
+			                                         join_output.size());
+			RecordSljitRegionMaterializationBoundary(runtime, hash_join_op.kind, "final_output", join_output.size());
+			ExecutionMaterializeHashJoinProbe(binding, join_input, row_pointers, match_selection, join_output.size(),
+			                                  join_output, runtime.TraceRuntime() ? &recorder : nullptr);
+			RecordSljitRegionStageRuntime(runtime, hash_join_idx, hash_join_op.kind, "materialize_output_fallback",
+			                              materialize_stage_start);
+			return true;
+		};
+
+		auto append_direct_projected_batch_from_probe =
+		    [&](DataChunk &join_input, const SelectionVector &match_selection, Vector &row_pointers,
+		        DataChunk &join_output, bool &handled) -> bool {
+			handled = false;
+			if (join_output.size() == 0) {
+				return false;
+			}
+			auto &batch = runtime.PrepareSourceContractBatch(final_projection_op.output_types);
+			if (batch.size() + join_output.size() > STANDARD_VECTOR_SIZE) {
+				if (flush_projected_batch()) {
+					return true;
+				}
+			}
+			if (!try_direct_project_join_output_to_batch(scratch, &join_input, &match_selection, &row_pointers,
+			                                             join_output, batch)) {
+				return false;
+			}
+			handled = true;
+			if (batch.size() == STANDARD_VECTOR_SIZE) {
+				if (flush_projected_batch()) {
+					return true;
+				}
+			}
+			return false;
+		};
+
+		auto try_execute_pending_row_pointer_grouped_update = [&](bool &handled) -> bool {
+			handled = false;
+			if (!pending_probe_input_initialized || pending_probe_input.size() == 0) {
+				return false;
+			}
+			if (!scratch.HasOperatorBinding(hash_join_idx)) {
+				RecordSljitRegionRuntimePath(runtime, aggregate_op.kind,
+				                             "direct_row_pointer_grouped_lookup_update_unsupported.no_join_binding");
+				return false;
+			}
+			auto &binding = scratch.OperatorBinding(hash_join_idx).hash_join_probe;
+			if (!binding.ready || !TryBuildRowPointerGroupKeySources(binding, final_projection_op, aggregate_op,
+			                                                         pending_probe_group_sources)) {
+				RecordSljitRegionRuntimePath(runtime, aggregate_op.kind,
+				                             "direct_row_pointer_grouped_lookup_update_unsupported.group_key_sources");
+				return false;
+			}
+			if (!TryBuildRowPointerGroupedPayloadSourceOverride(binding, final_projection_op, aggregate_op,
+			                                                    pending_probe_input, pending_probe_payload_sources)) {
+				return false;
+			}
+			if (!TryExecuteNativeRowPointerGroupedAggregateUpdate(
+			        runtime, native_runtime, scratch, aggregate_idx, aggregate_op, pending_probe_input,
+			        pending_probe_row_pointers, pending_probe_group_sources, pending_probe_payload_sources, true,
+			        &deferred_grouped_finish)) {
+				return false;
+			}
+			handled = true;
+			SljitChargeDownstreamRows(processed_output_rows, pending_probe_input.size());
+			reset_pending_probe_batch();
+			return false;
+		};
+
+		auto record_pending_probe_split_payload_unsupported = [&](const string &reason, idx_t count) {
+			auto path = string("direct_projected_group_payload_update_unsupported.") + reason;
+			RecordSljitRegionRuntimePath(runtime, aggregate_op.kind, path.c_str(), count);
+		};
+
+		auto build_pending_probe_split_payload_descriptor = [&](DataChunk &payload_input) -> bool {
+			if (pending_probe_split_payload_descriptor_initialized) {
+				return pending_probe_split_payload_descriptor_ready;
+			}
+			pending_probe_split_payload_descriptor_initialized = true;
+			auto set_blocker = [&](const char *blocker) {
+				pending_probe_split_payload_descriptor_blocker = blocker;
+				pending_probe_split_payload_descriptor_ready = false;
+				return false;
+			};
+			if (final_projection_op.kind != SljitNativeRegionOpKind::PROJECTION ||
+			    aggregate_op.kind != SljitNativeRegionOpKind::AGGREGATE_UPDATE) {
+				return set_blocker("operator_kind");
+			}
+			auto &aggregate_update = aggregate_op.aggregate_update;
+			auto &aggregate_plan = aggregate_update.plan;
+			auto &sink_info = aggregate_plan.sink_info;
+			if (sink_info.kind != ExecutionRegionSinkKind::HASH_AGGREGATE_UPDATE || sink_info.groups.empty() ||
+			    sink_info.aggregates.empty() || !aggregate_plan.use_primitive_payloads ||
+			    !aggregate_plan.use_grouped_state_addresses || aggregate_plan.use_perfect_hash_group_lookup ||
+			    aggregate_update.fused_payload_update_owns_group_lookup ||
+			    aggregate_update.fused_payload_update_function) {
+				return set_blocker("aggregate_shape");
+			}
+			if (aggregate_update.payloads.size() != sink_info.aggregates.size()) {
+				return set_blocker("payload_count");
+			}
+			if (!scratch.HasOperatorBinding(hash_join_idx)) {
+				return set_blocker("no_join_binding");
+			}
+			auto &binding = scratch.OperatorBinding(hash_join_idx).hash_join_probe;
+			if (!binding.ready) {
+				return set_blocker("join_binding");
+			}
+			pending_probe_group_key_types.clear();
+			pending_probe_group_projection_indices.clear();
+			pending_probe_group_key_types.reserve(sink_info.groups.size());
+			pending_probe_group_projection_indices.reserve(sink_info.groups.size());
+			for (idx_t group_idx = 0; group_idx < sink_info.groups.size(); group_idx++) {
+				auto &group = sink_info.groups[group_idx];
+				if (!group.supported_reference || group.input_index != group_idx ||
+				    group.input_index >= final_projection_op.projections.size() ||
+				    group.input_index >= final_projection_op.output_types.size()) {
+					return set_blocker("group_key_not_dense");
+				}
+				auto &group_projection = final_projection_op.projections[group.input_index].plan;
+				if (group_projection.return_type.InternalType() != group.type.InternalType() ||
+				    final_projection_op.output_types[group.input_index].InternalType() != group.type.InternalType()) {
+					return set_blocker("group_key_type");
+				}
+				pending_probe_group_projection_indices.push_back(group.input_index);
+				pending_probe_group_key_types.push_back(final_projection_op.output_types[group.input_index]);
+			}
+			pending_probe_split_payload_sources.clear();
+			pending_probe_split_payload_sources.reserve(sink_info.aggregates.size());
+			for (idx_t payload_idx = 0; payload_idx < sink_info.aggregates.size(); payload_idx++) {
+				auto &aggregate = sink_info.aggregates[payload_idx];
+				auto &payload = aggregate_update.payloads[payload_idx].plan;
+				if (aggregate.primitive_update_kind == AggregatePrimitiveUpdateKind::COUNT_STAR) {
+					if (aggregate.child_count != 0) {
+						return set_blocker("count_star_payload");
+					}
+					pending_probe_split_payload_sources.push_back(DConstants::INVALID_INDEX);
+					continue;
+				}
+				if (aggregate.child_count != 1 || aggregate.child_types.size() != 1 ||
+				    aggregate.payload_index >= final_projection_op.projections.size()) {
+					return set_blocker("payload_contract");
+				}
+				if (payload.kind != SljitNativeRegionExpressionKind::REFERENCE ||
+				    payload.source_index != aggregate.payload_index) {
+					return set_blocker("payload_not_final_reference");
+				}
+				SljitExecutableRegionExpression remapped_expr;
+				idx_t payload_source_idx;
+				if (!TryBuildSingleSourceProjectionExpression(final_projection_op.projections[aggregate.payload_index],
+				                                              remapped_expr, payload_source_idx) ||
+				    !ProjectionIsSingleSourceReferenceLike(remapped_expr.plan) ||
+				    payload_source_idx >= binding.lhs_output_column_indices.size()) {
+					return set_blocker("payload_source");
+				}
+				const auto input_source_idx = binding.lhs_output_column_indices[payload_source_idx];
+				if (input_source_idx >= payload_input.ColumnCount() ||
+				    remapped_expr.plan.return_type.InternalType() != aggregate.child_types[0].InternalType() ||
+				    payload_input.data[input_source_idx].GetType().InternalType() !=
+				        aggregate.child_types[0].InternalType()) {
+					return set_blocker("payload_type");
+				}
+				pending_probe_split_payload_sources.push_back(input_source_idx);
+			}
+			pending_probe_split_payload_descriptor_ready = true;
+			return true;
+		};
+
+		auto try_execute_pending_probe_split_payload_update = [&](bool &handled) -> bool {
+			handled = false;
+			if (!pending_probe_input_initialized || pending_probe_input.size() == 0) {
+				return false;
+			}
+			if (!build_pending_probe_split_payload_descriptor(pending_probe_input)) {
+				record_pending_probe_split_payload_unsupported(pending_probe_split_payload_descriptor_blocker,
+				                                               pending_probe_input.size());
+				return false;
+			}
+			if (runtime.PendingSourceContractBatch() && flush_projected_batch()) {
+				return true;
+			}
+			if (!pending_probe_group_key_batch_initialized) {
+				pending_probe_group_key_batch.Initialize(runtime.GetAllocator(), pending_probe_group_key_types);
+				pending_probe_group_key_batch_initialized = true;
+			}
+			pending_probe_group_key_batch.Reset();
+			auto &join_output = scratch.TemporaryChunk(hash_join_idx);
+			join_output.Reset();
+			join_output.SetChildCardinality(pending_probe_input.size());
+			auto group_projection_map = optional_ptr<const vector<idx_t>>(&pending_probe_group_projection_indices);
+			if (!TryDirectMaterializeHashJoinProjectionSourcesToBatch(
+			        runtime, scratch, hash_join_idx, final_projection_idx, final_projection_op, pending_probe_input,
+			        *FlatVector::IncrementalSelectionVector(), pending_probe_row_pointers, join_output,
+			        pending_probe_group_key_batch, group_projection_map,
+			        optional_ptr<Vector>(&pending_probe_group_key_hashes))) {
+				record_pending_probe_split_payload_unsupported("group_key_projection", pending_probe_input.size());
+				return false;
+			}
+
+			auto bind_stage_start = SljitRegionStageStart(runtime);
+			bool bound = false;
+			auto &binding =
+			    BindNativeSink(native_runtime, scratch, aggregate_idx, pending_probe_group_key_batch,
+			                   aggregate_op.aggregate_update.plan.sink_info, "aggregate-update-runtime-binding-failed",
+			                   "SLJIT aggregate update sink", bound);
+			if (bound) {
+				RecordSljitRegionStageRuntime(runtime, aggregate_idx, aggregate_op.kind, "bind_sink_contract",
+				                              bind_stage_start);
+			}
+			if (!binding.ready || !binding.aggregate_update.ready || !binding.aggregate_update.grouped_state.ready ||
+			    !binding.aggregate_update.grouped_state.state || !binding.aggregate_update.primitive.ready) {
+				record_pending_probe_split_payload_unsupported("sink_binding", pending_probe_input.size());
+				return false;
+			}
+			auto &aggregates = aggregate_op.aggregate_update.plan.sink_info.aggregates;
+			auto &payload_lanes =
+			    scratch.AggregatePayloadLanes(aggregate_idx, aggregates, binding.aggregate_update.primitive);
+			const bool finish = false;
+			auto stage_start = SljitRegionStageStart(runtime);
+			bool updated = false;
+			if (runtime.TraceRuntime()) {
+				auto stage_name =
+				    SljitRegionStageName(aggregate_idx, aggregate_op.kind, "direct_projected_group_payload_update");
+				SljitRegionStageRecorder recorder(runtime, stage_name);
+				updated = binding.aggregate_update.grouped_state.state->TryUpdateNewGroupsWithPayloadInput(
+				    pending_probe_group_key_batch, pending_probe_input, pending_probe_split_payload_sources,
+				    aggregate_op.aggregate_update.plan.sink_info, payload_lanes, &recorder, finish,
+				    optional_ptr<Vector>(&pending_probe_group_key_hashes));
+				auto runtime_us = SljitRegionElapsedMicros(stage_start);
+				auto unattributed_runtime_us = runtime_us - recorder.RecordedRuntimeTimeUs();
+				if (unattributed_runtime_us > 0) {
+					runtime.RecordGeneratedStageRuntime(stage_name + ".unattributed", unattributed_runtime_us);
+				}
+			} else {
+				updated = binding.aggregate_update.grouped_state.state->TryUpdateNewGroupsWithPayloadInput(
+				    pending_probe_group_key_batch, pending_probe_input, pending_probe_split_payload_sources,
+				    aggregate_op.aggregate_update.plan.sink_info, payload_lanes, nullptr, finish,
+				    optional_ptr<Vector>(&pending_probe_group_key_hashes));
+			}
+			if (!updated) {
+				RecordSljitRegionStageRuntimePath(runtime, aggregate_idx, aggregate_op.kind,
+				                                  "direct_projected_group_payload_update_miss", stage_start);
+				return false;
+			}
+			RecordSljitRegionStageRuntime(runtime, aggregate_idx, aggregate_op.kind,
+			                              "direct_projected_group_payload_update", stage_start);
+			RecordSljitRegionMaterializationBoundary(runtime, aggregate_op.kind, "projected_group_payload_update",
+			                                         pending_probe_input.size());
+			RecordSljitRegionRuntimePath(runtime, aggregate_op.kind, "direct_projected_group_payload_update",
+			                             pending_probe_input.size());
+			MarkDeferredGroupedFinish(true, optional_ptr<bool>(&deferred_grouped_finish));
+			handled = true;
+			SljitChargeDownstreamRows(processed_output_rows, pending_probe_input.size());
+			reset_pending_probe_batch();
+			return false;
+		};
+
+		auto flush_pending_probe_batch = [&]() -> bool {
+			if (!pending_probe_input_initialized || pending_probe_input.size() == 0) {
+				return false;
+			}
+			bool row_pointer_grouped_update = false;
+			if (try_execute_pending_row_pointer_grouped_update(row_pointer_grouped_update)) {
+				return true;
+			}
+			if (row_pointer_grouped_update) {
+				return false;
+			}
+			bool split_payload_update = false;
+			if (try_execute_pending_probe_split_payload_update(split_payload_update)) {
+				return true;
+			}
+			if (split_payload_update) {
+				return false;
+			}
+			auto &join_output = scratch.TemporaryChunk(hash_join_idx);
+			auto &projected = scratch.TemporaryChunk(final_projection_idx);
+			join_output.Reset();
+			join_output.SetChildCardinality(pending_probe_input.size());
+			bool direct_projected = false;
+			if (append_direct_projected_batch_from_probe(pending_probe_input, *FlatVector::IncrementalSelectionVector(),
+			                                             pending_probe_row_pointers, join_output, direct_projected)) {
+				return true;
+			}
+			if (!direct_projected) {
+				materialize_selection_only_join_output(pending_probe_input, *FlatVector::IncrementalSelectionVector(),
+				                                       pending_probe_row_pointers, join_output);
+				if (append_direct_projected_batch(join_output, direct_projected)) {
+					return true;
+				}
+				if (!direct_projected) {
+					project_join_output(scratch, join_output, projected);
+					if (append_projected_batch(projected)) {
+						return true;
+					}
+				}
+			}
+			reset_pending_probe_batch();
+			return false;
+		};
+
+		auto append_pending_probe_batch = [&](DataChunk &join_input, SelectionVector &match_selection,
+		                                      Vector &row_pointers, idx_t count, bool &handled) -> bool {
+			handled = false;
+			if (count == 0) {
+				return false;
+			}
+			if (count == STANDARD_VECTOR_SIZE &&
+			    (!pending_probe_input_initialized || pending_probe_input.size() == 0)) {
+				return false;
+			}
+			if (!pending_probe_input_initialized) {
+				pending_probe_input.Initialize(runtime.GetAllocator(), join_input.GetTypes());
+				pending_probe_input_initialized = true;
+				reset_pending_probe_batch();
+			}
+			if (pending_probe_input.ColumnCount() != join_input.ColumnCount()) {
+				return false;
+			}
+			if (pending_probe_input.size() + count > STANDARD_VECTOR_SIZE) {
+				if (flush_pending_probe_batch()) {
+					return true;
+				}
+			}
+			if (count == STANDARD_VECTOR_SIZE && pending_probe_input.size() == 0) {
+				return false;
+			}
+			const auto append_offset = pending_probe_input.size();
+			const auto new_count = append_offset + count;
+			auto append_stage_start = SljitRegionStageStart(runtime);
+			for (idx_t col_idx = 0; col_idx < join_input.ColumnCount(); col_idx++) {
+				if (pending_probe_input.data[col_idx].GetType() != join_input.data[col_idx].GetType()) {
+					return false;
+				}
+				VectorOperations::Copy(join_input.data[col_idx], pending_probe_input.data[col_idx], match_selection,
+				                       join_input.size(), 0, append_offset, count);
+				FlatVector::SetSize(pending_probe_input.data[col_idx], count_t(new_count));
+			}
+			VectorOperations::Copy(row_pointers, pending_probe_row_pointers, count, 0, append_offset);
+			FlatVector::SetSize(pending_probe_row_pointers, count_t(new_count));
+			pending_probe_input.CheckCardinality(new_count);
+			RecordSljitRegionStageRuntime(runtime, hash_join_idx, hash_join_op.kind, "pending_probe_batch_append",
+			                              append_stage_start);
+			RecordSljitRegionMaterializationBoundary(runtime, hash_join_op.kind, "pending_probe_batch", count);
+			handled = true;
+			if (pending_probe_input.size() == STANDARD_VECTOR_SIZE) {
+				if (flush_pending_probe_batch()) {
 					return true;
 				}
 			}
@@ -4453,6 +9147,9 @@ public:
 			DataChunk *join_input = nullptr;
 			auto source_result = have_more_output ? SourceResultType::HAVE_MORE_OUTPUT : SourceResultType::FINISHED;
 			if (prepare_join_input(scratch, source_chunk, source_result, join_input)) {
+				if (flush_pending_probe_batch()) {
+					return true;
+				}
 				return true;
 			}
 			if (!join_input || join_input->size() == 0) {
@@ -4479,18 +9176,47 @@ public:
 				    hash_join_op.hash_join_probe.plan.residual_predicate
 				        ? &scratch.HashJoinResidualMatchSelection(hash_join_idx)
 				        : nullptr,
-					    hash_join_op.hash_join_probe.plan.residual_predicate
-					        ? &scratch.HashJoinResidualRowPointers(hash_join_idx)
-					        : nullptr,
-					    state, deferred_reason, source_key0_int64_to_int32_unchecked);
+				    hash_join_op.hash_join_probe.plan.residual_predicate
+				        ? &scratch.HashJoinResidualRowPointers(hash_join_idx)
+				        : nullptr,
+				    state, deferred_reason, source_key0_int64_to_int32_unchecked, true);
 				RecordSljitRegionStageRuntime(runtime, hash_join_idx, hash_join_op.kind, stage_start);
 				if (bind_result == ExecutionOperatorBindResult::DEFERRED) {
+					if (flush_pending_probe_batch()) {
+						return true;
+					}
 					finish_deferred_grouped_update();
 					runtime.Defer(std::move(deferred_reason));
 					result = ExecutionRegionResult::DEFERRED;
 					return true;
 				}
 				if (join_output.size() == 0) {
+					continue;
+				}
+				bool pending_buffered = false;
+				if (append_pending_probe_batch(*join_input, scratch.FilterSelection(hash_join_idx),
+				                               scratch.HashJoinRowPointers(hash_join_idx), join_output.size(),
+				                               pending_buffered)) {
+					return true;
+				}
+				if (pending_buffered) {
+					continue;
+				}
+				bool direct_projected = false;
+				if (append_direct_projected_batch_from_probe(*join_input, scratch.FilterSelection(hash_join_idx),
+				                                             scratch.HashJoinRowPointers(hash_join_idx), join_output,
+				                                             direct_projected)) {
+					return true;
+				}
+				if (direct_projected) {
+					continue;
+				}
+				materialize_selection_only_join_output(*join_input, scratch.FilterSelection(hash_join_idx),
+				                                       scratch.HashJoinRowPointers(hash_join_idx), join_output);
+				if (append_direct_projected_batch(join_output, direct_projected)) {
+					return true;
+				}
+				if (direct_projected) {
 					continue;
 				}
 				project_join_output(scratch, join_output, projected);
@@ -4502,7 +9228,11 @@ public:
 		};
 
 		while (true) {
-			if (processed_batches >= runtime.MaxChunks() || fetched_chunks >= max_source_fetches) {
+			if (SljitDownstreamRowBudgetReached(processed_output_rows, runtime.MaxChunks()) ||
+			    fetched_chunks >= max_source_fetches) {
+				if (flush_pending_probe_batch() || flush_projected_batch()) {
+					return true;
+				}
 				finish_deferred_grouped_update();
 				result = ExecutionRegionResult::NOT_FINISHED;
 				return true;
@@ -4511,6 +9241,9 @@ public:
 			DataChunk *source_chunk = nullptr;
 			auto source_result = runtime.FetchSourceContract(source_chunk);
 			if (source_result == SourceResultType::BLOCKED) {
+				if (flush_pending_probe_batch() || flush_projected_batch()) {
+					return true;
+				}
 				finish_deferred_grouped_update();
 				result = ExecutionRegionResult::INTERRUPTED;
 				return true;
@@ -4522,7 +9255,7 @@ public:
 				return true;
 			}
 			if (source_result == SourceResultType::FINISHED) {
-				if (flush_projected_batch()) {
+				if (flush_pending_probe_batch() || flush_projected_batch()) {
 					return true;
 				}
 				finish_deferred_grouped_update();
@@ -5267,8 +10000,10 @@ public:
 		switch (plan.kind) {
 		case SljitNativeRegionExpressionKind::INTEGER_BINARY_CONSTANT:
 		case SljitNativeRegionExpressionKind::INTEGER_BINARY_REFERENCES:
+		case SljitNativeRegionExpressionKind::STRING_COMPRESS:
 		case SljitNativeRegionExpressionKind::INTEGRAL_COMPRESS:
 		case SljitNativeRegionExpressionKind::INTEGRAL_DECOMPRESS:
+		case SljitNativeRegionExpressionKind::DATE_YEAR:
 			return true;
 		case SljitNativeRegionExpressionKind::INTEGER_CAST:
 		case SljitNativeRegionExpressionKind::SIGNED_TO_UNSIGNED_INTEGER_CAST:
@@ -5347,8 +10082,10 @@ public:
 			return target;
 		case SljitNativeRegionExpressionKind::INTEGER_CAST:
 		case SljitNativeRegionExpressionKind::SIGNED_TO_UNSIGNED_INTEGER_CAST:
+		case SljitNativeRegionExpressionKind::STRING_COMPRESS:
 		case SljitNativeRegionExpressionKind::INTEGRAL_COMPRESS:
 		case SljitNativeRegionExpressionKind::INTEGRAL_DECOMPRESS:
+		case SljitNativeRegionExpressionKind::DATE_YEAR:
 			return target;
 		default:
 			throw InternalException("SLJIT fixed direct append generated expression has no direct result pointer");
@@ -5382,12 +10119,16 @@ public:
 		}
 
 		SljitNativeVectorInput native_input;
-		if (plan.kind == SljitNativeRegionExpressionKind::INTEGRAL_DECOMPRESS) {
+		if (plan.kind == SljitNativeRegionExpressionKind::STRING_COMPRESS) {
+			native_input.source_data = source_format->data;
+		} else if (plan.kind == SljitNativeRegionExpressionKind::INTEGRAL_DECOMPRESS) {
 			native_input.source_data = NativeUnsignedIntegerSourceData(*source_format, plan.unsigned_source_width);
 		} else if (plan.kind == SljitNativeRegionExpressionKind::INTEGRAL_COMPRESS ||
 		           plan.kind == SljitNativeRegionExpressionKind::SIGNED_TO_UNSIGNED_INTEGER_CAST ||
 		           plan.kind == SljitNativeRegionExpressionKind::INTEGER_CAST) {
 			native_input.source_data = NativeSignedIntegerSourceData(*source_format, plan.cast_source_width);
+		} else if (plan.kind == SljitNativeRegionExpressionKind::DATE_YEAR) {
+			native_input.source_data = NativeIntegerSourceData(*source_format, SljitNativeIntegerKind::INT32);
 		} else {
 			native_input.source_data = NativeIntegerSourceData(*source_format, plan.integer_kind);
 		}
@@ -5428,22 +10169,57 @@ public:
 		return TryDirectMaterializeFixedGenerated(expr, input, target, source_offset, count, execute, source_cache);
 	}
 
+	static const char *SljitFixedProjectionExpressionTracePhase(const SljitNativeRegionExpressionPlan &plan) {
+		switch (plan.kind) {
+		case SljitNativeRegionExpressionKind::REFERENCE:
+			return "direct_batch_expression.reference";
+		case SljitNativeRegionExpressionKind::STRING_COMPRESS:
+			return "direct_batch_expression.string_compress";
+		case SljitNativeRegionExpressionKind::INTEGRAL_COMPRESS:
+			return "direct_batch_expression.integral_compress";
+		case SljitNativeRegionExpressionKind::INTEGRAL_DECOMPRESS:
+			return "direct_batch_expression.integral_decompress";
+		case SljitNativeRegionExpressionKind::DATE_YEAR:
+			return "direct_batch_expression.date_year";
+		case SljitNativeRegionExpressionKind::INTEGER_CAST:
+		case SljitNativeRegionExpressionKind::SIGNED_TO_UNSIGNED_INTEGER_CAST:
+			return "direct_batch_expression.integer_cast";
+		case SljitNativeRegionExpressionKind::INTEGER_BINARY_CONSTANT:
+		case SljitNativeRegionExpressionKind::INTEGER_BINARY_REFERENCES:
+			return "direct_batch_expression.integer_binary";
+		default:
+			return "direct_batch_expression.generated";
+		}
+	}
+
 	bool TryDirectMaterializeFixedProjection(SljitExecutableRegionOp &op, DataChunk &input,
 	                                         optional_ptr<DirectAppendSlice> slice,
 	                                         optional_ptr<FixedDirectAppendSourceCache> source_cache = nullptr,
-	                                         optional_ptr<vector<uint8_t>> skip_projection = nullptr) {
+	                                         optional_ptr<vector<uint8_t>> skip_projection = nullptr,
+	                                         optional_ptr<ExecutionRegionRuntime> trace_runtime = nullptr,
+	                                         idx_t trace_op_idx = DConstants::INVALID_INDEX) {
 		if (op.kind != SljitNativeRegionOpKind::PROJECTION || op.projections.empty()) {
 			return false;
 		}
 		const bool execute = slice != nullptr;
 		const auto source_offset = execute ? slice->source_offset : 0;
 		const auto count = execute ? slice->count : input.size();
+		const bool trace_expressions =
+		    execute && trace_runtime && trace_runtime->TraceRuntime() && trace_op_idx != DConstants::INVALID_INDEX;
 		for (idx_t projection_idx = 0; projection_idx < op.projections.size(); projection_idx++) {
 			if (skip_projection && projection_idx < skip_projection->size() && (*skip_projection)[projection_idx]) {
 				continue;
 			}
+			auto &projection = op.projections[projection_idx];
+			auto expression_stage_start =
+			    trace_expressions ? SljitRegionStageStart(*trace_runtime) : std::chrono::steady_clock::time_point();
 			if (TryBindDirectAppendSourceProjection(op.projections[projection_idx], input, slice, projection_idx,
 			                                        source_offset, count, execute)) {
+				if (trace_expressions) {
+					RecordSljitRegionStageRuntime(*trace_runtime, trace_op_idx, op.kind,
+					                              SljitFixedProjectionExpressionTracePhase(projection.plan),
+					                              expression_stage_start);
+				}
 				continue;
 			}
 			data_ptr_t target = nullptr;
@@ -5453,9 +10229,14 @@ public:
 				}
 				target = slice->targets[projection_idx];
 			}
-			if (!TryDirectMaterializeFixedExpression(op.projections[projection_idx], input, target, source_offset,
-			                                         count, execute, source_cache)) {
+			if (!TryDirectMaterializeFixedExpression(projection, input, target, source_offset, count, execute,
+			                                         source_cache)) {
 				return false;
+			}
+			if (trace_expressions) {
+				RecordSljitRegionStageRuntime(*trace_runtime, trace_op_idx, op.kind,
+				                              SljitFixedProjectionExpressionTracePhase(projection.plan),
+				                              expression_stage_start);
 			}
 		}
 		return true;
@@ -5764,13 +10545,13 @@ public:
 	void ExecuteProjection(SljitRegionExecutionScratch &scratch, idx_t op_idx, SljitExecutableRegionOp &op,
 	                       DataChunk &input, DataChunk &output, const SelectionVector *execute_sel = nullptr,
 	                       idx_t count = DConstants::INVALID_INDEX) {
-			if (count == DConstants::INVALID_INDEX) {
-				count = input.size();
-			}
-			if (!execute_sel && TryFastInlineStringDecompressProjection(op, input, output, count)) {
-				return;
-			}
-			auto &projection_scratch = scratch.ProjectionScratch(op_idx);
+		if (count == DConstants::INVALID_INDEX) {
+			count = input.size();
+		}
+		if (!execute_sel && TryFastInlineStringDecompressProjection(op, input, output, count)) {
+			return;
+		}
+		auto &projection_scratch = scratch.ProjectionScratch(op_idx);
 		auto fused_projection_executed =
 		    ExecuteFlatFusedFloatingProjection(op, input, output, execute_sel, count, projection_scratch);
 		if (fused_projection_executed && op.flat_fused_floating_projection_plan.covers_all_projections) {
@@ -6783,9 +11564,16 @@ public:
 	    vector<SljitExecutableRegionExpression> &payloads, SljitNativeAggregateUpdateFunction function,
 	    const vector<ExecutionRegionAggregateInput> &aggregates, const ExecutionRegionAggregateContract &contract,
 	    const vector<const ExecutionPrimitiveAggregateUpdateLane *> &lanes, DataChunk &input,
-	    Vector &grouped_state_addresses, idx_t count, SljitAggregatePayloadAdapterScratch &adapter_scratch) {
+	    const uintptr_t *grouped_state_addresses, const sel_t *grouped_state_address_sel,
+	    const SelectionVector *execute_sel, bool state_addresses_by_loop_index, idx_t count,
+	    SljitAggregatePayloadAdapterScratch &adapter_scratch,
+	    optional_ptr<const vector<idx_t>> input_source_indices_override = nullptr) {
 		if (!function) {
 			throw InternalException("SLJIT fused grouped aggregate primitive payload update is missing generated code");
+		}
+		if (!grouped_state_addresses) {
+			throw InternalException(
+			    "SLJIT fused grouped aggregate primitive payload update is missing state addresses");
 		}
 		if (aggregates.size() != payloads.size()) {
 			throw InternalException("SLJIT fused grouped aggregate primitive payload count mismatch");
@@ -6811,6 +11599,13 @@ public:
 			}
 			if (!combined_sources) {
 				throw InternalException("SLJIT fused grouped typed aggregate payload has no typed payloads");
+			}
+			if (input_source_indices_override) {
+				if (input_source_indices_override->size() != combined_sources->size()) {
+					throw InternalException(
+					    "SLJIT fused grouped typed aggregate payload source override size mismatch");
+				}
+				combined_sources = input_source_indices_override;
 			}
 
 			adapter_scratch.PrepareGrouped(combined_sources->size());
@@ -6878,23 +11673,25 @@ public:
 				source_data[source_idx] =
 				    SljitTypedExpressionTreeSourceData(source_formats[source_idx], input.data[input_index].GetType());
 				source_sel[source_idx] = SljitNormalizedSourceSelectionData(source_formats[source_idx]);
-				source_validity[source_idx] =
-				    SljitNormalizedSourceValidityData(source_formats[source_idx], source_sel[source_idx], count);
-				flat_no_selection = flat_no_selection && source_sel[source_idx] == nullptr;
-				flat_all_valid =
-				    flat_all_valid && source_sel[source_idx] == nullptr && source_validity[source_idx] == nullptr;
+				source_validity[source_idx] = SljitNormalizedSourceValidityData(
+				    source_formats[source_idx], source_sel[source_idx], execute_sel, count);
+				flat_no_selection = flat_no_selection && execute_sel == nullptr && source_sel[source_idx] == nullptr;
+				flat_all_valid = flat_all_valid && execute_sel == nullptr && source_sel[source_idx] == nullptr &&
+				                 source_validity[source_idx] == nullptr;
 				all_valid = all_valid && source_validity[source_idx] == nullptr;
 			}
 
-			grouped_state_addresses.Flatten();
 			SljitNativeVectorInput native_input;
+			native_input.execute_sel = execute_sel ? execute_sel->data() : nullptr;
 			native_input.source_data_array = source_data.data();
 			native_input.source_sel_array = source_sel.data();
 			native_input.source_validity_array = source_validity.data();
 			native_input.expression_tree_flat_no_selection = flat_no_selection;
 			native_input.expression_tree_flat_all_valid = flat_all_valid;
 			native_input.expression_tree_all_valid = all_valid;
-			native_input.aggregate_state_addresses = FlatVector::GetData<uintptr_t>(grouped_state_addresses);
+			native_input.aggregate_state_addresses = grouped_state_addresses;
+			native_input.aggregate_state_address_sel = grouped_state_address_sel;
+			native_input.aggregate_state_addresses_by_loop_index = state_addresses_by_loop_index;
 			native_input.count = count;
 			native_input.has_error = false;
 			function(&native_input);
@@ -6952,16 +11749,18 @@ public:
 			input.data[plan.source_index].ToUnifiedFormat(source_formats[payload_idx]);
 			source_data[payload_idx] = NativeIntegerSourceData(source_formats[payload_idx], plan.integer_kind);
 			source_sel[payload_idx] = SljitNormalizedSourceSelectionData(source_formats[payload_idx]);
-			source_validity[payload_idx] =
-			    SljitNormalizedSourceValidityData(source_formats[payload_idx], source_sel[payload_idx], input.size());
+			source_validity[payload_idx] = SljitNormalizedSourceValidityData(
+			    source_formats[payload_idx], source_sel[payload_idx], execute_sel, count);
 		}
 
-		grouped_state_addresses.Flatten();
 		SljitNativeVectorInput native_input;
+		native_input.execute_sel = execute_sel ? execute_sel->data() : nullptr;
 		native_input.source_data_array = source_data.data();
 		native_input.source_sel_array = SljitPointerArrayOrNull(source_sel);
 		native_input.source_validity_array = SljitPointerArrayOrNull(source_validity);
-		native_input.aggregate_state_addresses = FlatVector::GetData<uintptr_t>(grouped_state_addresses);
+		native_input.aggregate_state_addresses = grouped_state_addresses;
+		native_input.aggregate_state_address_sel = grouped_state_address_sel;
+		native_input.aggregate_state_addresses_by_loop_index = state_addresses_by_loop_index;
 		native_input.count = count;
 		native_input.has_error = false;
 		function(&native_input);
@@ -6978,11 +11777,12 @@ public:
 		const ExecutionRegionAggregateContract *contract = nullptr;
 		const vector<const ExecutionPrimitiveAggregateUpdateLane *> *lanes = nullptr;
 		DataChunk *input = nullptr;
-		idx_t count = 0;
 		SljitAggregatePayloadAdapterScratch *adapter_scratch = nullptr;
+		optional_ptr<const vector<idx_t>> input_source_indices_override;
 	};
 
-	static void ExecuteSljitGroupedStateAddressUpdate(Vector &addresses, void *state_p) {
+	static void ExecuteSljitGroupedStateAddressUpdate(const uintptr_t *addresses, const sel_t *address_sel, idx_t count,
+	                                                  void *state_p) {
 		auto &state = *reinterpret_cast<SljitGroupedStateAddressUpdateState *>(state_p);
 		if (!state.kernel || !state.payloads || !state.function || !state.aggregates || !state.contract ||
 		    !state.lanes || !state.input || !state.adapter_scratch) {
@@ -6990,7 +11790,22 @@ public:
 		}
 		state.kernel->ExecuteFusedGroupedPrimitiveAggregatePayloadUpdate(
 		    *state.payloads, state.function, *state.aggregates, *state.contract, *state.lanes, *state.input, addresses,
-		    state.count, *state.adapter_scratch);
+		    address_sel, nullptr, false, count, *state.adapter_scratch, state.input_source_indices_override);
+	}
+
+	static void ExecuteSljitGroupedSelectedStateAddressUpdate(const uintptr_t *addresses, const sel_t *address_sel,
+	                                                          const sel_t *execute_sel, idx_t count, void *state_p) {
+		auto &state = *reinterpret_cast<SljitGroupedStateAddressUpdateState *>(state_p);
+		if (!state.kernel || !state.payloads || !state.function || !state.aggregates || !state.contract ||
+		    !state.lanes || !state.input || !state.adapter_scratch) {
+			throw InternalException("SLJIT grouped selected state-address callback is incomplete");
+		}
+		SelectionVector execute_selection(const_cast<sel_t *>(execute_sel), execute_sel ? count : 0);
+		const bool state_addresses_by_loop_index = execute_sel && !address_sel;
+		state.kernel->ExecuteFusedGroupedPrimitiveAggregatePayloadUpdate(
+		    *state.payloads, state.function, *state.aggregates, *state.contract, *state.lanes, *state.input, addresses,
+		    address_sel, execute_sel ? &execute_selection : nullptr, state_addresses_by_loop_index, count,
+		    *state.adapter_scratch, state.input_source_indices_override);
 	}
 
 	void ExecuteFusedPerfectHashGroupedPrimitiveAggregatePayloadUpdate(
@@ -7214,10 +12029,10 @@ public:
 		}
 	}
 
-	idx_t ApplyNativeHashJoinResidualPredicate(SljitExecutableRegionOp &op, const ExecutionHashJoinProbeBinding &probe,
-	                                           DataChunk &input, Vector &row_pointers, SelectionVector &match_selection,
-	                                           idx_t count, DataChunk *residual_chunk,
-	                                           SelectionVector *residual_selection,
+	idx_t ApplyNativeHashJoinResidualPredicate(ExecutionRegionRuntime &runtime, SljitExecutableRegionOp &op,
+	                                           const ExecutionHashJoinProbeBinding &probe, DataChunk &input,
+	                                           Vector &row_pointers, SelectionVector &match_selection, idx_t count,
+	                                           DataChunk *residual_chunk, SelectionVector *residual_selection,
 	                                           SelectionVector *compact_match_selection, Vector *compact_row_pointers,
 	                                           SljitExpressionAdapterScratch *adapter_scratch,
 	                                           optional_ptr<ExecutionOperatorStageRecorder> recorder) {
@@ -7234,6 +12049,7 @@ public:
 		}
 
 		residual_chunk->Reset();
+		RecordSljitRegionMaterializationBoundary(runtime, op.kind, "residual_source_chunk", count);
 		ExecutionMaterializeHashJoinResidualSources(probe, input, row_pointers, match_selection, count, *residual_chunk,
 		                                            recorder);
 
@@ -7273,6 +12089,87 @@ public:
 		}
 	}
 
+	static SljitRegularHashJoinProbeRuntimeTraits
+	BuildRegularHashJoinProbeRuntimeTraits(bool source_selection_present, bool source_common_selection_present,
+	                                       bool source_validity_present, bool rhs_keys_all_valid) {
+		SljitRegularHashJoinProbeRuntimeTraits traits;
+		if (!rhs_keys_all_valid || source_validity_present) {
+			return traits;
+		}
+		if (!source_selection_present) {
+			traits.input_kind = SljitRegularHashJoinProbeInputKind::FLAT_ALL_VALID;
+		} else if (source_common_selection_present) {
+			traits.input_kind = SljitRegularHashJoinProbeInputKind::SELECTED_ALL_VALID;
+		}
+		return traits;
+	}
+
+	const char *ExecuteFlatAllValidRegularHashJoinProbeVariant(ExecutionRegionRuntime &runtime,
+	                                                           SljitExecutableHashJoinProbe &hash_join_probe,
+	                                                           const ExecutionHashJoinTableLayout &layout,
+	                                                           SljitNativeHashJoinProbeInput &native_input) {
+		if (TryExecuteFlatAllValidInt64PairNoChainProbe(hash_join_probe.plan, layout, native_input)) {
+			return SLJIT_FAST_FLAT_ALL_VALID_INT64_PAIR_HASH_JOIN_PROBE_STAGE;
+		}
+		if (TryExecuteFlatAllValidInt64PairChainProbe(hash_join_probe.plan, layout, native_input)) {
+			return SLJIT_FAST_FLAT_ALL_VALID_INT64_PAIR_CHAIN_HASH_JOIN_PROBE_STAGE;
+		}
+		if (TryExecuteAllValidSingleKeyNotEqualPredicateChainProbe<false>(hash_join_probe.plan, layout, native_input)) {
+			return SLJIT_FAST_FLAT_ALL_VALID_SINGLE_KEY_NOTEQUAL_CHAIN_HASH_JOIN_PROBE_STAGE;
+		}
+		if (TryExecuteFlatAllValidSingleKeyNoChainProbe(hash_join_probe.plan, layout, native_input)) {
+			return SLJIT_FAST_FLAT_ALL_VALID_SINGLE_KEY_HASH_JOIN_PROBE_STAGE;
+		}
+		if (TryExecuteAllValidSingleKeyChainProbe<false>(hash_join_probe.plan, layout, native_input)) {
+			return SLJIT_FAST_FLAT_ALL_VALID_SINGLE_KEY_CHAIN_HASH_JOIN_PROBE_STAGE;
+		}
+		auto function = EnsureFlatAllValidRegularHashJoinProbeCode(
+		    runtime, hash_join_probe, layout.use_salt, layout.chains_longer_than_one, layout.dictionary_emission);
+		function(&native_input);
+		return SLJIT_GENERATED_FLAT_ALL_VALID_HASH_JOIN_PROBE_STAGE;
+	}
+
+	const char *ExecuteSelectedAllValidRegularHashJoinProbeVariant(ExecutionRegionRuntime &runtime,
+	                                                               SljitExecutableHashJoinProbe &hash_join_probe,
+	                                                               const ExecutionHashJoinTableLayout &layout,
+	                                                               SljitNativeHashJoinProbeInput &native_input) {
+		if (TryExecuteSelectedAllValidInt64PairNoChainProbe(hash_join_probe.plan, layout, native_input)) {
+			return SLJIT_FAST_SELECTED_ALL_VALID_INT64_PAIR_HASH_JOIN_PROBE_STAGE;
+		}
+		if (TryExecuteSelectedAllValidInt64PairChainProbe(hash_join_probe.plan, layout, native_input)) {
+			return SLJIT_FAST_SELECTED_ALL_VALID_INT64_PAIR_CHAIN_HASH_JOIN_PROBE_STAGE;
+		}
+		if (TryExecuteSelectedAllValidSingleKeyNoChainProbe(hash_join_probe.plan, layout, native_input)) {
+			return SLJIT_FAST_SELECTED_ALL_VALID_SINGLE_KEY_HASH_JOIN_PROBE_STAGE;
+		}
+		if (TryExecuteAllValidSingleKeyChainProbe<true>(hash_join_probe.plan, layout, native_input)) {
+			return SLJIT_FAST_SELECTED_ALL_VALID_SINGLE_KEY_CHAIN_HASH_JOIN_PROBE_STAGE;
+		}
+		if (TryExecuteAllValidSingleKeyNotEqualPredicateChainProbe<true>(hash_join_probe.plan, layout, native_input)) {
+			return SLJIT_FAST_SELECTED_ALL_VALID_SINGLE_KEY_NOTEQUAL_CHAIN_HASH_JOIN_PROBE_STAGE;
+		}
+		auto function = EnsureSelectedAllValidRegularHashJoinProbeCode(
+		    runtime, hash_join_probe, layout.use_salt, layout.chains_longer_than_one, layout.dictionary_emission);
+		function(&native_input);
+		return SLJIT_GENERATED_SELECTED_ALL_VALID_HASH_JOIN_PROBE_STAGE;
+	}
+
+	const char *ExecuteRegularHashJoinProbeVariant(ExecutionRegionRuntime &runtime,
+	                                               const SljitRegularHashJoinProbeRuntimeTraits &traits,
+	                                               SljitExecutableHashJoinProbe &hash_join_probe,
+	                                               const ExecutionHashJoinTableLayout &layout,
+	                                               SljitNativeHashJoinProbeInput &native_input) {
+		if (traits.UsesFlatAllValidProbe()) {
+			return ExecuteFlatAllValidRegularHashJoinProbeVariant(runtime, hash_join_probe, layout, native_input);
+		}
+		if (traits.UsesSelectedAllValidProbe()) {
+			return ExecuteSelectedAllValidRegularHashJoinProbeVariant(runtime, hash_join_probe, layout, native_input);
+		}
+		EnsureRegularHashJoinProbeCode(runtime, hash_join_probe);
+		hash_join_probe.function(&native_input);
+		return SLJIT_GENERATED_REGULAR_HASH_JOIN_PROBE_STAGE;
+	}
+
 	ExecutionOperatorBindResult BindNativeOperator(ExecutionOperatorRuntime &native_runtime,
 	                                               SljitRegionExecutionScratch &scratch, idx_t op_idx,
 	                                               SljitExecutableRegionOp &op, DataChunk &input,
@@ -7304,7 +12201,7 @@ public:
 	ExecutePerfectHashJoinProbe(ExecutionRegionRuntime &runtime, idx_t op_idx, SljitExecutableRegionOp &op,
 	                            const ExecutionHashJoinProbeBinding &probe, DataChunk &input, DataChunk &output,
 	                            SelectionVector &match_selection, SelectionVector &build_selection,
-	                            SljitHashJoinProbeDrainState &state) {
+	                            SljitHashJoinProbeDrainState &state, bool selection_only = false) {
 		if (!op.hash_join_probe.plan.perfect_hash_probe) {
 			throw InternalException("SLJIT native hash join probe received a perfect layout without perfect code");
 		}
@@ -7352,8 +12249,8 @@ public:
 
 		auto generated_stage_start = SljitRegionStageStart(runtime);
 		op.hash_join_probe.perfect_function(&native_input);
-		RecordSljitRegionStageRuntime(runtime, op_idx, op.kind, SLJIT_GENERATED_PERFECT_HASH_JOIN_PROBE_STAGE,
-		                              generated_stage_start);
+		RecordSljitRegionStageRuntimePath(runtime, op_idx, op.kind, SLJIT_GENERATED_PERFECT_HASH_JOIN_PROBE_STAGE,
+		                                  generated_stage_start);
 		state.input_offset = native_input.input_offset;
 		state.resume_row_pointer = nullptr;
 		state.finished = native_input.finished;
@@ -7361,8 +12258,15 @@ public:
 			output.Reset();
 			return ExecutionOperatorBindResult::READY;
 		}
+		if (selection_only) {
+			RecordSljitRegionMaterializationBoundary(runtime, op.kind, "direct_selection_reference",
+			                                         native_input.selected_count);
+			output.SetChildCardinality(native_input.selected_count);
+			return ExecutionOperatorBindResult::READY;
+		}
 		auto materialize_stage_start = SljitRegionStageStart(runtime);
 		SljitRegionStageRecorder recorder(runtime, op_idx, op.kind, "materialize_output");
+		RecordSljitRegionMaterializationBoundary(runtime, op.kind, "final_output", native_input.selected_count);
 		ExecutionMaterializePerfectHashJoinProbe(probe, input, match_selection, build_selection,
 		                                         native_input.selected_count, output, &recorder);
 		RecordSljitRegionStageRuntime(runtime, op_idx, op.kind, "materialize_output", materialize_stage_start);
@@ -7438,11 +12342,14 @@ public:
 		RecordSljitRegionStageRuntime(runtime, op_idx, op.kind, "vector_setup", vector_setup_stage_start);
 		auto source_sel_array = SljitPointerArrayOrNull(source_sel);
 		auto source_validity_array = SljitPointerArrayOrNull(source_validity);
+		const bool source_selection_present = source_sel_array != nullptr;
+		const bool source_validity_present = source_validity_array != nullptr;
+		const bool source_common_selection_present =
+		    source_selection_present && SljitCommonSelectionOrNull(source_sel) != nullptr;
 		const bool rhs_keys_all_valid =
 		    !layout.can_have_null || (layout.null_keys_are_filtered && !layout.found_match_column_present);
-		const bool use_flat_all_valid_probe = !source_sel_array && !source_validity_array && rhs_keys_all_valid;
-		const bool use_selected_all_valid_probe =
-		    source_sel_array && SljitCommonSelectionOrNull(source_sel) && !source_validity_array && rhs_keys_all_valid;
+		const auto probe_traits = BuildRegularHashJoinProbeRuntimeTraits(
+		    source_selection_present, source_common_selection_present, source_validity_present, rhs_keys_all_valid);
 
 		SljitNativeHashJoinProbeInput native_input;
 		native_input.source_data = source_data.data();
@@ -7474,75 +12381,9 @@ public:
 		native_input.finished = false;
 
 		auto generated_stage_start = SljitRegionStageStart(runtime);
-		if (use_flat_all_valid_probe) {
-			if (TryExecuteFlatAllValidInt64PairNoChainProbe(op.hash_join_probe.plan, layout, native_input)) {
-				RecordSljitRegionStageRuntime(runtime, op_idx, op.kind,
-				                              SLJIT_FAST_FLAT_ALL_VALID_INT64_PAIR_HASH_JOIN_PROBE_STAGE,
-				                              generated_stage_start);
-			} else if (TryExecuteFlatAllValidInt64PairChainProbe(op.hash_join_probe.plan, layout, native_input)) {
-				RecordSljitRegionStageRuntime(runtime, op_idx, op.kind,
-				                              SLJIT_FAST_FLAT_ALL_VALID_INT64_PAIR_CHAIN_HASH_JOIN_PROBE_STAGE,
-				                              generated_stage_start);
-			} else if (TryExecuteAllValidSingleKeyNotEqualPredicateChainProbe<false>(op.hash_join_probe.plan, layout,
-			                                                                         native_input)) {
-				RecordSljitRegionStageRuntime(runtime, op_idx, op.kind,
-				                              SLJIT_FAST_FLAT_ALL_VALID_SINGLE_KEY_NOTEQUAL_CHAIN_HASH_JOIN_PROBE_STAGE,
-				                              generated_stage_start);
-			} else if (TryExecuteFlatAllValidSingleKeyNoChainProbe(op.hash_join_probe.plan, layout, native_input)) {
-				RecordSljitRegionStageRuntime(runtime, op_idx, op.kind,
-				                              SLJIT_FAST_FLAT_ALL_VALID_SINGLE_KEY_HASH_JOIN_PROBE_STAGE,
-				                              generated_stage_start);
-			} else if (TryExecuteAllValidSingleKeyChainProbe<false>(op.hash_join_probe.plan, layout, native_input)) {
-				RecordSljitRegionStageRuntime(runtime, op_idx, op.kind,
-				                              SLJIT_FAST_FLAT_ALL_VALID_SINGLE_KEY_CHAIN_HASH_JOIN_PROBE_STAGE,
-				                              generated_stage_start);
-			} else {
-				auto function = EnsureFlatAllValidRegularHashJoinProbeCode(runtime, op.hash_join_probe, layout.use_salt,
-				                                                           layout.chains_longer_than_one,
-				                                                           layout.dictionary_emission);
-				function(&native_input);
-				RecordSljitRegionStageRuntime(runtime, op_idx, op.kind,
-				                              SLJIT_GENERATED_FLAT_ALL_VALID_HASH_JOIN_PROBE_STAGE,
-				                              generated_stage_start);
-			}
-		} else if (use_selected_all_valid_probe) {
-			if (TryExecuteSelectedAllValidInt64PairNoChainProbe(op.hash_join_probe.plan, layout, native_input)) {
-				RecordSljitRegionStageRuntime(runtime, op_idx, op.kind,
-				                              SLJIT_FAST_SELECTED_ALL_VALID_INT64_PAIR_HASH_JOIN_PROBE_STAGE,
-				                              generated_stage_start);
-			} else if (TryExecuteSelectedAllValidInt64PairChainProbe(op.hash_join_probe.plan, layout, native_input)) {
-				RecordSljitRegionStageRuntime(runtime, op_idx, op.kind,
-				                              SLJIT_FAST_SELECTED_ALL_VALID_INT64_PAIR_CHAIN_HASH_JOIN_PROBE_STAGE,
-				                              generated_stage_start);
-			} else if (TryExecuteSelectedAllValidSingleKeyNoChainProbe(op.hash_join_probe.plan, layout, native_input)) {
-				RecordSljitRegionStageRuntime(runtime, op_idx, op.kind,
-				                              SLJIT_FAST_SELECTED_ALL_VALID_SINGLE_KEY_HASH_JOIN_PROBE_STAGE,
-				                              generated_stage_start);
-			} else if (TryExecuteAllValidSingleKeyChainProbe<true>(op.hash_join_probe.plan, layout, native_input)) {
-				RecordSljitRegionStageRuntime(runtime, op_idx, op.kind,
-				                              SLJIT_FAST_SELECTED_ALL_VALID_SINGLE_KEY_CHAIN_HASH_JOIN_PROBE_STAGE,
-				                              generated_stage_start);
-			} else if (TryExecuteAllValidSingleKeyNotEqualPredicateChainProbe<true>(op.hash_join_probe.plan, layout,
-			                                                                        native_input)) {
-				RecordSljitRegionStageRuntime(
-				    runtime, op_idx, op.kind,
-				    SLJIT_FAST_SELECTED_ALL_VALID_SINGLE_KEY_NOTEQUAL_CHAIN_HASH_JOIN_PROBE_STAGE,
-				    generated_stage_start);
-			} else {
-				auto function = EnsureSelectedAllValidRegularHashJoinProbeCode(
-				    runtime, op.hash_join_probe, layout.use_salt, layout.chains_longer_than_one,
-				    layout.dictionary_emission);
-				function(&native_input);
-				RecordSljitRegionStageRuntime(runtime, op_idx, op.kind,
-				                              SLJIT_GENERATED_SELECTED_ALL_VALID_HASH_JOIN_PROBE_STAGE,
-				                              generated_stage_start);
-			}
-		} else {
-			EnsureRegularHashJoinProbeCode(runtime, op.hash_join_probe);
-			op.hash_join_probe.function(&native_input);
-			RecordSljitRegionStageRuntime(runtime, op_idx, op.kind, SLJIT_GENERATED_REGULAR_HASH_JOIN_PROBE_STAGE,
-			                              generated_stage_start);
-		}
+		const auto executed_probe_stage =
+		    ExecuteRegularHashJoinProbeVariant(runtime, probe_traits, op.hash_join_probe, layout, native_input);
+		RecordSljitRegionStageRuntimePath(runtime, op_idx, op.kind, executed_probe_stage, generated_stage_start);
 		state.input_offset = native_input.input_offset;
 		state.resume_row_pointer = native_input.resume_row_pointer;
 		state.finished = native_input.finished;
@@ -7551,7 +12392,7 @@ public:
 		auto residual_scratch =
 		    op.hash_join_probe.plan.residual_predicate ? &scratch.ExpressionAdapterScratch(op_idx, 0) : nullptr;
 		auto selected_count = ApplyNativeHashJoinResidualPredicate(
-		    op, probe, input, row_pointers, match_selection, native_input.selected_count, residual_chunk,
+		    runtime, op, probe, input, row_pointers, match_selection, native_input.selected_count, residual_chunk,
 		    residual_selection, compact_match_selection, compact_row_pointers, residual_scratch, &residual_recorder);
 		RecordSljitRegionStageRuntime(runtime, op_idx, op.kind, "residual_predicate", residual_stage_start);
 		if (left_probe_output && selected_count != 0) {
@@ -7571,6 +12412,8 @@ public:
 				auto materialize_stage_start = SljitRegionStageStart(runtime);
 				SljitRegionStageRecorder recorder(runtime, op_idx, op.kind, "materialize_left_unmatched");
 				MaterializeLeftHashJoinProbeUnmatched(probe, input, output, match_selection, state, &recorder);
+				RecordSljitRegionMaterializationBoundary(runtime, op.kind, "final_output_left_unmatched",
+				                                         output.size());
 				RecordSljitRegionStageRuntime(runtime, op_idx, op.kind, "materialize_left_unmatched",
 				                              materialize_stage_start);
 				return ExecutionOperatorBindResult::READY;
@@ -7580,11 +12423,14 @@ public:
 		}
 		FlatVector::SetSize(row_pointers, count_t(selected_count));
 		if (selection_only) {
+			RecordSljitRegionMaterializationBoundary(runtime, op.kind, "direct_row_pointer_reference", selected_count);
 			output.SetChildCardinality(selected_count);
 			return ExecutionOperatorBindResult::READY;
 		}
 		auto materialize_stage_start = SljitRegionStageStart(runtime);
 		SljitRegionStageRecorder recorder(runtime, op_idx, op.kind, "materialize_output");
+		RecordSljitRegionMaterializationBoundary(runtime, op.kind, "row_pointer_reference", selected_count);
+		RecordSljitRegionMaterializationBoundary(runtime, op.kind, "final_output", selected_count);
 		ExecutionMaterializeHashJoinProbe(probe, input, row_pointers, match_selection, selected_count, output,
 		                                  &recorder);
 		RecordSljitRegionStageRuntime(runtime, op_idx, op.kind, "materialize_output", materialize_stage_start);
@@ -7597,17 +12443,20 @@ public:
 	                                                      DataChunk &output, SelectionVector &match_selection,
 	                                                      Vector &row_pointers, SljitHashJoinProbeDrainState &state) {
 		state.finished = true;
+		RecordSljitRegionRuntimePath(runtime, op.kind, "empty_build_side");
 		switch (op.hash_join_probe.plan.output_mode) {
 		case ExecutionHashJoinProbeOutputMode::LEFT_PROBE_AND_BUILD: {
 			auto materialize_stage_start = SljitRegionStageStart(runtime);
 			SljitRegionStageRecorder recorder(runtime, op_idx, op.kind, "materialize_left_unmatched");
 			MaterializeLeftHashJoinProbeUnmatched(probe, input, output, match_selection, state, &recorder);
+			RecordSljitRegionMaterializationBoundary(runtime, op.kind, "final_output_left_unmatched", output.size());
 			RecordSljitRegionStageRuntime(runtime, op_idx, op.kind, "materialize_left_unmatched",
 			                              materialize_stage_start);
 		} break;
 		case ExecutionHashJoinProbeOutputMode::MARK_PROBE: {
 			auto materialize_stage_start = SljitRegionStageStart(runtime);
 			SljitRegionStageRecorder recorder(runtime, op_idx, op.kind, "materialize_output");
+			RecordSljitRegionMaterializationBoundary(runtime, op.kind, "final_output", input.size());
 			ExecutionMaterializeHashJoinProbe(probe, input, row_pointers, match_selection, input.size(), output,
 			                                  &recorder);
 			RecordSljitRegionStageRuntime(runtime, op_idx, op.kind, "materialize_output", materialize_stage_start);
@@ -7630,8 +12479,8 @@ public:
 	    vector<UnifiedVectorFormat> &source_formats, vector<const_data_ptr_t> &source_data,
 	    vector<const sel_t *> &source_sel, vector<const validity_t *> &source_validity, DataChunk *residual_chunk,
 	    SelectionVector *residual_selection, SelectionVector *compact_match_selection, Vector *compact_row_pointers,
-	    SljitHashJoinProbeDrainState &state, string &deferred_reason,
-	    bool source_key0_int64_to_int32_unchecked = false, bool selection_only = false) {
+	    SljitHashJoinProbeDrainState &state, string &deferred_reason, bool source_key0_int64_to_int32_unchecked = false,
+	    bool selection_only = false) {
 		ExecutionOperatorBinding *binding_ptr = nullptr;
 		auto bind_stage_start = SljitRegionStageStart(runtime);
 		auto bind_result = BindNativeOperator(native_runtime, scratch, op_idx, op, input,
@@ -7657,6 +12506,8 @@ public:
 				auto materialize_stage_start = SljitRegionStageStart(runtime);
 				SljitRegionStageRecorder recorder(runtime, op_idx, op.kind, "materialize_left_unmatched");
 				MaterializeLeftHashJoinProbeUnmatched(probe, input, output, match_selection, state, &recorder);
+				RecordSljitRegionMaterializationBoundary(runtime, op.kind, "final_output_left_unmatched",
+				                                         output.size());
 				RecordSljitRegionStageRuntime(runtime, op_idx, op.kind, "materialize_left_unmatched",
 				                              materialize_stage_start);
 				return ExecutionOperatorBindResult::READY;
@@ -7673,13 +12524,12 @@ public:
 		switch (probe.layout_kind) {
 		case ExecutionHashJoinProbeLayoutKind::PERFECT_HASH_TABLE:
 			return ExecutePerfectHashJoinProbe(runtime, op_idx, op, probe, input, output, match_selection,
-			                                   build_selection, state);
+			                                   build_selection, state, selection_only);
 		case ExecutionHashJoinProbeLayoutKind::REGULAR_HASH_TABLE:
-			return ExecuteRegularHashJoinProbe(runtime, scratch, op_idx, op, probe, input, output, match_selection,
-			                                   row_pointers, source_formats, source_data, source_sel, source_validity,
-			                                   residual_chunk, residual_selection, compact_match_selection,
-			                                   compact_row_pointers, state, left_probe_output,
-			                                   source_key0_int64_to_int32_unchecked, selection_only);
+			return ExecuteRegularHashJoinProbe(
+			    runtime, scratch, op_idx, op, probe, input, output, match_selection, row_pointers, source_formats,
+			    source_data, source_sel, source_validity, residual_chunk, residual_selection, compact_match_selection,
+			    compact_row_pointers, state, left_probe_output, source_key0_int64_to_int32_unchecked, selection_only);
 		default:
 			throw InternalException("SLJIT native hash join probe received an unknown layout kind");
 		}
@@ -8065,25 +12915,29 @@ public:
 			    op.aggregate_update.plan.sink_info.groups, op.aggregate_update.plan.group_expressions,
 			    op.aggregate_update.plan.sink_info.aggregate_contract, payload_lanes, grouped_state.perfect_hash_layout,
 			    input, nullptr, input.size(), payload_scratch);
-			RecordSljitRegionStageRuntime(runtime, op_idx, op.kind, "filtered_perfect_hash_update",
-			                              aggregate_stage_start);
+			RecordSljitRegionStageRuntimePath(runtime, op_idx, op.kind, "filtered_perfect_hash_update",
+			                                  aggregate_stage_start);
+			RecordSljitRegionMaterializationBoundary(runtime, op.kind, "direct_perfect_hash_state_update",
+			                                         input.size());
 		} else {
 			ExecuteFilteredPrimitiveAggregateUpdate(op.aggregate_update.filtered_update, aggregates, payload_lanes,
 			                                        input, input.size(), payload_scratch);
-			RecordSljitRegionStageRuntime(runtime, op_idx, op.kind, "filtered_primitive_update", aggregate_stage_start);
+			RecordSljitRegionStageRuntimePath(runtime, op_idx, op.kind, "filtered_primitive_update",
+			                                  aggregate_stage_start);
+			RecordSljitRegionMaterializationBoundary(runtime, op.kind, "direct_state_update", input.size());
 		}
 		return SinkResultType::NEED_MORE_INPUT;
 	}
 
-	bool CanExecuteDirectExistingGroupedPrimitiveAggregateUpdate(
-	    SljitRegionExecutionScratch &scratch, idx_t op_idx, SljitExecutableRegionOp &op, DataChunk &input,
+	bool CanExecuteGroupedPrimitiveAggregateUpdateShape(
+	    SljitExecutableRegionOp &op, DataChunk &input,
 	    const vector<const ExecutionPrimitiveAggregateUpdateLane *> &payload_lanes, const SelectionVector *execute_sel,
 	    idx_t count) const {
 		auto &aggregate_update = op.aggregate_update;
 		auto &plan = aggregate_update.plan;
 		auto &sink_info = plan.sink_info;
-		if (scratch.DirectExistingAggregateUpdateDisabled(op_idx) || execute_sel != nullptr || count != input.size() ||
-		    !plan.use_primitive_payloads || !plan.use_grouped_state_addresses || plan.use_perfect_hash_group_lookup ||
+		if (execute_sel != nullptr || count != input.size() || !plan.use_primitive_payloads ||
+		    !plan.use_grouped_state_addresses || plan.use_perfect_hash_group_lookup ||
 		    aggregate_update.fused_payload_update_owns_group_lookup ||
 		    sink_info.kind != ExecutionRegionSinkKind::HASH_AGGREGATE_UPDATE ||
 		    sink_info.aggregates.size() != aggregate_update.payloads.size() ||
@@ -8119,40 +12973,16 @@ public:
 	    SljitRegionExecutionScratch &scratch, idx_t op_idx, SljitExecutableRegionOp &op, DataChunk &input,
 	    const vector<const ExecutionPrimitiveAggregateUpdateLane *> &payload_lanes, const SelectionVector *execute_sel,
 	    idx_t count) const {
-		auto &aggregate_update = op.aggregate_update;
-		auto &plan = aggregate_update.plan;
-		auto &sink_info = plan.sink_info;
-		if (scratch.DirectNewAggregateUpdateDisabled(op_idx) || execute_sel != nullptr || count != input.size() ||
-		    !plan.use_primitive_payloads || !plan.use_grouped_state_addresses || plan.use_perfect_hash_group_lookup ||
-		    aggregate_update.fused_payload_update_owns_group_lookup ||
-		    sink_info.kind != ExecutionRegionSinkKind::HASH_AGGREGATE_UPDATE ||
-		    sink_info.aggregates.size() != aggregate_update.payloads.size() ||
-		    sink_info.aggregates.size() != payload_lanes.size()) {
-			return false;
-		}
-		for (idx_t aggregate_idx = 0; aggregate_idx < sink_info.aggregates.size(); aggregate_idx++) {
-			auto &aggregate = sink_info.aggregates[aggregate_idx];
-			auto lane = payload_lanes[aggregate_idx];
-			if (!lane || !lane->ready || lane->aggregate_index != aggregate.aggregate_index) {
-				return false;
-			}
-			if (aggregate.primitive_update_kind == AggregatePrimitiveUpdateKind::COUNT_STAR) {
-				if (aggregate.child_count != 0) {
-					return false;
-				}
-				continue;
-			}
-			if (aggregate.child_count != 1 || aggregate.child_indices.size() != 1) {
-				return false;
-			}
-			auto &payload = aggregate_update.payloads[aggregate_idx].plan;
-			if (payload.kind != SljitNativeRegionExpressionKind::REFERENCE ||
-			    payload.source_index != aggregate.child_indices[0] || payload.source_index >= input.ColumnCount() ||
-			    input.data[payload.source_index].GetType().InternalType() != lane->payload_type) {
-				return false;
-			}
-		}
-		return true;
+		return !scratch.DirectNewAggregateUpdateDisabled(op_idx) &&
+		       CanExecuteGroupedPrimitiveAggregateUpdateShape(op, input, payload_lanes, execute_sel, count);
+	}
+
+	bool CanExecuteDirectAppendNewGroupedPrimitiveAggregateUpdate(
+	    SljitRegionExecutionScratch &scratch, idx_t op_idx, SljitExecutableRegionOp &op, DataChunk &input,
+	    const vector<const ExecutionPrimitiveAggregateUpdateLane *> &payload_lanes, const SelectionVector *execute_sel,
+	    idx_t count) const {
+		return !scratch.DirectAppendNewAggregateUpdateDisabled(op_idx) &&
+		       CanExecuteGroupedPrimitiveAggregateUpdateShape(op, input, payload_lanes, execute_sel, count);
 	}
 
 	bool CanExecuteDirectGroupedFusedPayloadUpdate(
@@ -8218,39 +13048,13 @@ public:
 			                                                    nullptr, finish);
 		}
 		scratch.RecordDirectNewAggregateUpdateResult(op_idx, resolved);
-		RecordSljitRegionStageRuntime(
+		RecordSljitRegionStageRuntimePath(
 		    runtime, op_idx, op.kind,
 		    resolved ? "direct_new_grouped_state_addresses" : "direct_new_grouped_state_addresses_miss", stage_start);
-		return resolved;
-	}
-
-	bool TryExecuteDirectExistingGroupedPrimitiveAggregateUpdate(
-	    ExecutionRegionRuntime &runtime, SljitRegionExecutionScratch &scratch, idx_t op_idx,
-	    SljitExecutableRegionOp &op, DataChunk &input,
-	    const vector<const ExecutionPrimitiveAggregateUpdateLane *> &payload_lanes,
-	    ExecutionGroupedAggregateStateAddressBinding &grouped_state, bool finish = true) {
-		auto stage_start = SljitRegionStageStart(runtime);
-		bool updated = false;
-		if (runtime.TraceRuntime()) {
-			auto stage_name = SljitRegionStageName(op_idx, op.kind, "direct_existing_grouped_primitive_update");
-			SljitRegionStageRecorder recorder(runtime, stage_name);
-			updated = grouped_state.state->TryUpdateExistingGroups(input, op.aggregate_update.plan.sink_info,
-			                                                       payload_lanes, &recorder, finish);
-			auto runtime_us = SljitRegionElapsedMicros(stage_start);
-			auto unattributed_runtime_us = runtime_us - recorder.RecordedRuntimeTimeUs();
-			if (unattributed_runtime_us > 0) {
-				runtime.RecordGeneratedStageRuntime(stage_name + ".unattributed", unattributed_runtime_us);
-			}
-		} else {
-			updated = grouped_state.state->TryUpdateExistingGroups(input, op.aggregate_update.plan.sink_info,
-			                                                       payload_lanes, nullptr, finish);
+		if (resolved) {
+			RecordSljitRegionMaterializationBoundary(runtime, op.kind, "address_vector_direct_new", input.size());
 		}
-		scratch.RecordDirectExistingAggregateUpdateResult(op_idx, updated);
-		RecordSljitRegionStageRuntime(runtime, op_idx, op.kind,
-		                              updated ? "direct_existing_grouped_primitive_update"
-		                                      : "direct_existing_grouped_primitive_update_miss",
-		                              stage_start);
-		return updated;
+		return resolved;
 	}
 
 	bool TryExecuteDirectGroupedFusedPayloadUpdate(
@@ -8270,44 +13074,151 @@ public:
 		update_state.contract = &op.aggregate_update.plan.sink_info.aggregate_contract;
 		update_state.lanes = &payload_lanes;
 		update_state.input = &input;
-		update_state.count = input.size();
 		update_state.adapter_scratch = &payload_scratch;
 		const char *stage_name = existing_groups ? "direct_existing_grouped_fused_payload_update"
 		                                         : "direct_new_grouped_fused_payload_update";
 		const char *miss_stage_name = existing_groups ? "direct_existing_grouped_fused_payload_update_miss"
 		                                              : "direct_new_grouped_fused_payload_update_miss";
+		const char *boundary_name =
+		    existing_groups ? "state_address_selection_existing_update" : "state_address_selection_new_update";
 		if (runtime.TraceRuntime()) {
 			auto trace_stage_name = SljitRegionStageName(op_idx, op.kind, stage_name);
 			SljitRegionStageRecorder recorder(runtime, trace_stage_name);
 			if (existing_groups) {
-				updated = grouped_state.state->TryUpdateExistingGroupsWithStateAddresses(
-				    input, op.aggregate_update.plan.sink_info, ExecuteSljitGroupedStateAddressUpdate, &update_state,
-				    &recorder, finish);
+				updated = grouped_state.state->TryUpdateExistingGroupsWithSelectedStateAddresses(
+				    input, op.aggregate_update.plan.sink_info, ExecuteSljitGroupedSelectedStateAddressUpdate,
+				    &update_state, &recorder, finish);
 			} else {
-				updated = grouped_state.state->TryUpdateNewGroupsWithStateAddresses(
-				    input, op.aggregate_update.plan.sink_info, ExecuteSljitGroupedStateAddressUpdate, &update_state,
-				    &recorder, finish);
+				updated = grouped_state.state->TryUpdateNewGroupsWithSelectedStateAddresses(
+				    input, op.aggregate_update.plan.sink_info, ExecuteSljitGroupedSelectedStateAddressUpdate,
+				    &update_state, &recorder, finish);
 			}
 			auto runtime_us = SljitRegionElapsedMicros(stage_start);
 			auto unattributed_runtime_us = runtime_us - recorder.RecordedRuntimeTimeUs();
 			if (unattributed_runtime_us > 0) {
 				runtime.RecordGeneratedStageRuntime(trace_stage_name + ".unattributed", unattributed_runtime_us);
 			}
-		} else if (existing_groups) {
-			updated = grouped_state.state->TryUpdateExistingGroupsWithStateAddresses(
-			    input, op.aggregate_update.plan.sink_info, ExecuteSljitGroupedStateAddressUpdate, &update_state,
-			    nullptr, finish);
 		} else {
-			updated = grouped_state.state->TryUpdateNewGroupsWithStateAddresses(
-			    input, op.aggregate_update.plan.sink_info, ExecuteSljitGroupedStateAddressUpdate, &update_state,
-			    nullptr, finish);
+			if (existing_groups) {
+				updated = grouped_state.state->TryUpdateExistingGroupsWithSelectedStateAddresses(
+				    input, op.aggregate_update.plan.sink_info, ExecuteSljitGroupedSelectedStateAddressUpdate,
+				    &update_state, nullptr, finish);
+			} else {
+				updated = grouped_state.state->TryUpdateNewGroupsWithSelectedStateAddresses(
+				    input, op.aggregate_update.plan.sink_info, ExecuteSljitGroupedSelectedStateAddressUpdate,
+				    &update_state, nullptr, finish);
+			}
 		}
 		if (existing_groups) {
 			scratch.RecordDirectExistingAggregateUpdateResult(op_idx, updated);
 		} else {
 			scratch.RecordDirectNewAggregateUpdateResult(op_idx, updated);
 		}
-		RecordSljitRegionStageRuntime(runtime, op_idx, op.kind, updated ? stage_name : miss_stage_name, stage_start);
+		RecordSljitRegionStageRuntimePath(runtime, op_idx, op.kind, updated ? stage_name : miss_stage_name,
+		                                  stage_start);
+		if (updated) {
+			RecordSljitRegionMaterializationBoundary(runtime, op.kind, boundary_name, input.size());
+		}
+		return updated;
+	}
+
+	bool TryExecuteDirectRowPointerGroupedFusedPayloadUpdate(
+	    ExecutionRegionRuntime &runtime, SljitRegionExecutionScratch &scratch, idx_t op_idx,
+	    SljitExecutableRegionOp &op, DataChunk &payload_input, Vector &row_pointers, idx_t count,
+	    const vector<ExecutionRowPointerGroupKeySource> &group_sources, const vector<idx_t> &payload_source_indices,
+	    const vector<const ExecutionPrimitiveAggregateUpdateLane *> &payload_lanes,
+	    ExecutionGroupedAggregateStateAddressBinding &grouped_state,
+	    SljitAggregatePayloadAdapterScratch &payload_scratch, bool finish = true) {
+		auto stage_start = SljitRegionStageStart(runtime);
+		bool updated = false;
+		auto &aggregates = op.aggregate_update.plan.sink_info.aggregates;
+		SljitGroupedStateAddressUpdateState update_state;
+		update_state.kernel = this;
+		update_state.payloads = &op.aggregate_update.payloads;
+		update_state.function = op.aggregate_update.fused_payload_update_function;
+		update_state.aggregates = &aggregates;
+		update_state.contract = &op.aggregate_update.plan.sink_info.aggregate_contract;
+		update_state.lanes = &payload_lanes;
+		update_state.input = &payload_input;
+		update_state.adapter_scratch = &payload_scratch;
+		update_state.input_source_indices_override = &payload_source_indices;
+		const char *stage_name = "direct_row_pointer_grouped_lookup_update";
+		const char *miss_stage_name = "direct_row_pointer_grouped_lookup_update_miss";
+		if (runtime.TraceRuntime()) {
+			auto trace_stage_name = SljitRegionStageName(op_idx, op.kind, stage_name);
+			SljitRegionStageRecorder recorder(runtime, trace_stage_name);
+			updated = grouped_state.state->TryUpdateNewGroupsWithRowPointerKeys(
+			    payload_input, row_pointers, count, group_sources, op.aggregate_update.plan.sink_info,
+			    ExecuteSljitGroupedSelectedStateAddressUpdate, &update_state, &recorder, finish);
+			auto runtime_us = SljitRegionElapsedMicros(stage_start);
+			auto unattributed_runtime_us = runtime_us - recorder.RecordedRuntimeTimeUs();
+			if (unattributed_runtime_us > 0) {
+				runtime.RecordGeneratedStageRuntime(trace_stage_name + ".unattributed", unattributed_runtime_us);
+			}
+		} else {
+			updated = grouped_state.state->TryUpdateNewGroupsWithRowPointerKeys(
+			    payload_input, row_pointers, count, group_sources, op.aggregate_update.plan.sink_info,
+			    ExecuteSljitGroupedSelectedStateAddressUpdate, &update_state, nullptr, finish);
+		}
+		scratch.RecordDirectNewAggregateUpdateResult(op_idx, updated);
+		RecordSljitRegionStageRuntimePath(runtime, op_idx, op.kind, updated ? stage_name : miss_stage_name,
+		                                  stage_start);
+		if (updated) {
+			RecordSljitRegionMaterializationBoundary(runtime, op.kind, "row_pointer_grouped_lookup_update", count);
+		}
+		return updated;
+	}
+
+	bool TryExecuteDirectProjectedGroupedFusedPayloadUpdate(
+	    ExecutionRegionRuntime &runtime, SljitRegionExecutionScratch &scratch, idx_t op_idx,
+	    SljitExecutableRegionOp &op, DataChunk &groups, DataChunk &payload_input,
+	    const vector<idx_t> &payload_source_indices,
+	    const vector<const ExecutionPrimitiveAggregateUpdateLane *> &payload_lanes,
+	    ExecutionGroupedAggregateStateAddressBinding &grouped_state,
+	    SljitAggregatePayloadAdapterScratch &payload_scratch, bool finish = true,
+	    optional_ptr<Vector> precomputed_hashes = nullptr) {
+		if (groups.size() != payload_input.size()) {
+			return false;
+		}
+		auto stage_start = SljitRegionStageStart(runtime);
+		bool updated = false;
+		auto &aggregates = op.aggregate_update.plan.sink_info.aggregates;
+		SljitGroupedStateAddressUpdateState update_state;
+		update_state.kernel = this;
+		update_state.payloads = &op.aggregate_update.payloads;
+		update_state.function = op.aggregate_update.fused_payload_update_function;
+		update_state.aggregates = &aggregates;
+		update_state.contract = &op.aggregate_update.plan.sink_info.aggregate_contract;
+		update_state.lanes = &payload_lanes;
+		update_state.input = &payload_input;
+		update_state.adapter_scratch = &payload_scratch;
+		update_state.input_source_indices_override = &payload_source_indices;
+		const char *stage_name = "direct_projected_group_payload_update";
+		const char *miss_stage_name = "direct_projected_group_payload_update_miss";
+		if (runtime.TraceRuntime()) {
+			auto trace_stage_name = SljitRegionStageName(op_idx, op.kind, stage_name);
+			SljitRegionStageRecorder recorder(runtime, trace_stage_name);
+			updated = grouped_state.state->TryUpdateNewGroupsWithSelectedStateAddresses(
+			    groups, op.aggregate_update.plan.sink_info, ExecuteSljitGroupedSelectedStateAddressUpdate,
+			    &update_state, &recorder, finish, precomputed_hashes);
+			auto runtime_us = SljitRegionElapsedMicros(stage_start);
+			auto unattributed_runtime_us = runtime_us - recorder.RecordedRuntimeTimeUs();
+			if (unattributed_runtime_us > 0) {
+				runtime.RecordGeneratedStageRuntime(trace_stage_name + ".unattributed", unattributed_runtime_us);
+			}
+		} else {
+			updated = grouped_state.state->TryUpdateNewGroupsWithSelectedStateAddresses(
+			    groups, op.aggregate_update.plan.sink_info, ExecuteSljitGroupedSelectedStateAddressUpdate,
+			    &update_state, nullptr, finish, precomputed_hashes);
+		}
+		scratch.RecordDirectNewAggregateUpdateResult(op_idx, updated);
+		if (updated) {
+			RecordSljitRegionStageRuntime(runtime, op_idx, op.kind, stage_name, stage_start);
+			RecordSljitRegionMaterializationBoundary(runtime, op.kind, "projected_group_payload_update",
+			                                         payload_input.size());
+		} else {
+			RecordSljitRegionStageRuntimePath(runtime, op_idx, op.kind, miss_stage_name, stage_start);
+		}
 		return updated;
 	}
 
@@ -8328,7 +13239,6 @@ public:
 		update_state.contract = &op.aggregate_update.plan.sink_info.aggregate_contract;
 		update_state.lanes = &payload_lanes;
 		update_state.input = &input;
-		update_state.count = input.size();
 		update_state.adapter_scratch = &payload_scratch;
 		const char *stage_name = "direct_append_new_grouped_fused_payload_update";
 		const char *miss_stage_name = "direct_append_new_grouped_fused_payload_update_miss";
@@ -8349,7 +13259,44 @@ public:
 			    nullptr, finish);
 		}
 		scratch.RecordDirectAppendNewAggregateUpdateResult(op_idx, updated);
-		RecordSljitRegionStageRuntime(runtime, op_idx, op.kind, updated ? stage_name : miss_stage_name, stage_start);
+		RecordSljitRegionStageRuntimePath(runtime, op_idx, op.kind, updated ? stage_name : miss_stage_name,
+		                                  stage_start);
+		if (updated) {
+			RecordSljitRegionMaterializationBoundary(runtime, op.kind, "state_address_selection_append_new_update",
+			                                         input.size());
+		}
+		return updated;
+	}
+
+	bool TryExecuteDirectAppendNewGroupedPrimitiveAggregateUpdate(
+	    ExecutionRegionRuntime &runtime, SljitRegionExecutionScratch &scratch, idx_t op_idx,
+	    SljitExecutableRegionOp &op, DataChunk &input,
+	    const vector<const ExecutionPrimitiveAggregateUpdateLane *> &payload_lanes,
+	    ExecutionGroupedAggregateStateAddressBinding &grouped_state, bool finish = true) {
+		auto stage_start = SljitRegionStageStart(runtime);
+		bool updated = false;
+		if (runtime.TraceRuntime()) {
+			auto stage_name = SljitRegionStageName(op_idx, op.kind, "direct_append_new_grouped_primitive_update");
+			SljitRegionStageRecorder recorder(runtime, stage_name);
+			updated = grouped_state.state->TryAppendNewGroups(input, op.aggregate_update.plan.sink_info, payload_lanes,
+			                                                  &recorder, finish);
+			auto runtime_us = SljitRegionElapsedMicros(stage_start);
+			auto unattributed_runtime_us = runtime_us - recorder.RecordedRuntimeTimeUs();
+			if (unattributed_runtime_us > 0) {
+				runtime.RecordGeneratedStageRuntime(stage_name + ".unattributed", unattributed_runtime_us);
+			}
+		} else {
+			updated = grouped_state.state->TryAppendNewGroups(input, op.aggregate_update.plan.sink_info, payload_lanes,
+			                                                  nullptr, finish);
+		}
+		scratch.RecordDirectAppendNewAggregateUpdateResult(op_idx, updated);
+		RecordSljitRegionStageRuntimePath(runtime, op_idx, op.kind,
+		                                  updated ? "direct_append_new_grouped_primitive_update"
+		                                          : "direct_append_new_grouped_primitive_update_miss",
+		                                  stage_start);
+		if (updated) {
+			RecordSljitRegionMaterializationBoundary(runtime, op.kind, "direct_state_update", input.size());
+		}
 		return updated;
 	}
 
@@ -8375,10 +13322,144 @@ public:
 			                                                  nullptr, finish);
 		}
 		scratch.RecordDirectNewAggregateUpdateResult(op_idx, updated);
-		RecordSljitRegionStageRuntime(
+		RecordSljitRegionStageRuntimePath(
 		    runtime, op_idx, op.kind,
 		    updated ? "direct_new_grouped_primitive_update" : "direct_new_grouped_primitive_update_miss", stage_start);
+		if (updated) {
+			RecordSljitRegionMaterializationBoundary(runtime, op.kind, "direct_state_update", input.size());
+		}
 		return updated;
+	}
+
+	static SljitGroupedAggregateRuntimeTraits
+	BuildGroupedAggregateRuntimeTraits(const SljitExecutableAggregateUpdate &aggregate_update) {
+		SljitGroupedAggregateRuntimeTraits traits;
+		traits.use_grouped_state_addresses = aggregate_update.plan.use_grouped_state_addresses;
+		traits.fused_payload_update_owns_group_lookup = aggregate_update.fused_payload_update_owns_group_lookup;
+		return traits;
+	}
+
+	static void MarkDeferredGroupedFinish(bool defer_grouped_finish, optional_ptr<bool> deferred_grouped_finish) {
+		if (defer_grouped_finish && deferred_grouped_finish) {
+			*deferred_grouped_finish = true;
+		}
+	}
+
+	bool TryExecuteDirectGroupedAggregateUpdateRoute(
+	    ExecutionRegionRuntime &runtime, SljitRegionExecutionScratch &scratch, idx_t op_idx,
+	    SljitExecutableRegionOp &op, DataChunk &input,
+	    const vector<const ExecutionPrimitiveAggregateUpdateLane *> &payload_lanes, const SelectionVector *execute_sel,
+	    idx_t count, ExecutionGroupedAggregateStateAddressBinding &grouped_state,
+	    SljitAggregatePayloadAdapterScratch &payload_scratch, bool defer_grouped_finish,
+	    optional_ptr<bool> deferred_grouped_finish) {
+		const bool finish = !defer_grouped_finish;
+		if (CanExecuteDirectAppendNewGroupedPrimitiveAggregateUpdate(scratch, op_idx, op, input, payload_lanes,
+		                                                             execute_sel, count) &&
+		    TryExecuteDirectAppendNewGroupedPrimitiveAggregateUpdate(runtime, scratch, op_idx, op, input, payload_lanes,
+		                                                             grouped_state, finish)) {
+			MarkDeferredGroupedFinish(defer_grouped_finish, deferred_grouped_finish);
+			return true;
+		}
+		if (CanExecuteDirectNewGroupedPrimitiveAggregateUpdate(scratch, op_idx, op, input, payload_lanes, execute_sel,
+		                                                       count) &&
+		    TryExecuteDirectNewGroupedPrimitiveAggregateUpdate(runtime, scratch, op_idx, op, input, payload_lanes,
+		                                                       grouped_state, finish)) {
+			MarkDeferredGroupedFinish(defer_grouped_finish, deferred_grouped_finish);
+			return true;
+		}
+		if (CanExecuteDirectGroupedFusedPayloadUpdate(scratch, op_idx, op, input, payload_lanes, execute_sel, count,
+		                                              true) &&
+		    TryExecuteDirectGroupedFusedPayloadUpdate(runtime, scratch, op_idx, op, input, payload_lanes, grouped_state,
+		                                              payload_scratch, true, finish)) {
+			MarkDeferredGroupedFinish(defer_grouped_finish, deferred_grouped_finish);
+			return true;
+		}
+		if (CanExecuteDirectAppendNewGroupedFusedPayloadUpdate(scratch, op_idx, op, input, payload_lanes, execute_sel,
+		                                                       count) &&
+		    TryExecuteDirectAppendNewGroupedFusedPayloadUpdate(runtime, scratch, op_idx, op, input, payload_lanes,
+		                                                       grouped_state, payload_scratch, finish)) {
+			MarkDeferredGroupedFinish(defer_grouped_finish, deferred_grouped_finish);
+			return true;
+		}
+		if (CanExecuteDirectGroupedFusedPayloadUpdate(scratch, op_idx, op, input, payload_lanes, execute_sel, count,
+		                                              false) &&
+		    TryExecuteDirectGroupedFusedPayloadUpdate(runtime, scratch, op_idx, op, input, payload_lanes, grouped_state,
+		                                              payload_scratch, false, finish)) {
+			MarkDeferredGroupedFinish(defer_grouped_finish, deferred_grouped_finish);
+			return true;
+		}
+		return false;
+	}
+
+	bool TryExecuteNativeRowPointerGroupedAggregateUpdate(
+	    ExecutionRegionRuntime &runtime, ExecutionOperatorRuntime &native_runtime, SljitRegionExecutionScratch &scratch,
+	    idx_t op_idx, SljitExecutableRegionOp &op, DataChunk &payload_input, Vector &row_pointers,
+	    const vector<ExecutionRowPointerGroupKeySource> &group_sources, const vector<idx_t> &payload_source_indices,
+	    bool defer_grouped_finish, optional_ptr<bool> deferred_grouped_finish) {
+		auto record_unsupported = [&](const char *reason) {
+			auto path = string("direct_row_pointer_grouped_lookup_update_unsupported.") + reason;
+			RecordSljitRegionRuntimePath(runtime, op.kind, path.c_str());
+		};
+		const auto count = payload_input.size();
+		if (count == 0) {
+			return false;
+		}
+		if (row_pointers.GetVectorType() != VectorType::FLAT_VECTOR) {
+			record_unsupported("non_flat_row_pointers");
+			return false;
+		}
+		if (payload_source_indices.empty()) {
+			record_unsupported("payload_sources");
+			return false;
+		}
+		auto bind_stage_start = SljitRegionStageStart(runtime);
+		bool bound = false;
+		auto &binding =
+		    BindNativeSink(native_runtime, scratch, op_idx, payload_input, op.aggregate_update.plan.sink_info,
+		                   "aggregate-update-runtime-binding-failed", "SLJIT aggregate update sink", bound);
+		if (bound) {
+			RecordSljitRegionStageRuntime(runtime, op_idx, op.kind, "bind_sink_contract", bind_stage_start);
+		}
+		if (!binding.ready || !binding.aggregate_update.ready || !op.aggregate_update.plan.use_primitive_payloads) {
+			record_unsupported("sink_binding");
+			return false;
+		}
+		auto &primitive = binding.aggregate_update.primitive;
+		if (!primitive.ready) {
+			record_unsupported("primitive_binding");
+			return false;
+		}
+		const auto aggregate_traits = BuildGroupedAggregateRuntimeTraits(op.aggregate_update);
+		if (!aggregate_traits.NeedsGroupedStateAddressPlan()) {
+			record_unsupported("grouped_state_plan");
+			return false;
+		}
+		auto &grouped_state = binding.aggregate_update.grouped_state;
+		if (!grouped_state.ready || !grouped_state.state) {
+			record_unsupported("grouped_state_binding");
+			return false;
+		}
+		auto &aggregates = op.aggregate_update.plan.sink_info.aggregates;
+		if (aggregates.size() != op.aggregate_update.payloads.size()) {
+			record_unsupported("aggregate_payload_count");
+			return false;
+		}
+		auto &payload_lanes = scratch.AggregatePayloadLanes(op_idx, aggregates, primitive);
+		auto &payload_scratch = scratch.AggregatePayloadScratch(op_idx);
+		const bool finish = !defer_grouped_finish;
+		if (!CanExecuteDirectGroupedFusedPayloadUpdate(scratch, op_idx, op, payload_input, payload_lanes, nullptr,
+		                                               count, false)) {
+			record_unsupported("fused_payload_update_shape");
+			return false;
+		}
+		if (!TryExecuteDirectRowPointerGroupedFusedPayloadUpdate(
+		        runtime, scratch, op_idx, op, payload_input, row_pointers, count, group_sources, payload_source_indices,
+		        payload_lanes, grouped_state, payload_scratch, finish)) {
+			record_unsupported("grouped_lookup_update");
+			return false;
+		}
+		MarkDeferredGroupedFinish(defer_grouped_finish, deferred_grouped_finish);
+		return true;
 	}
 
 	SinkResultType
@@ -8416,75 +13497,31 @@ public:
 			}
 			auto &payload_lanes = scratch.AggregatePayloadLanes(op_idx, aggregates, primitive);
 			auto &payload_scratch = scratch.AggregatePayloadScratch(op_idx);
+			const auto aggregate_traits = BuildGroupedAggregateRuntimeTraits(op.aggregate_update);
 			optional_ptr<Vector> grouped_state_addresses;
-			if (op.aggregate_update.plan.use_grouped_state_addresses &&
-			    !op.aggregate_update.fused_payload_update_owns_group_lookup) {
+			if (aggregate_traits.NeedsGroupedStateAddressPlan()) {
 				auto &grouped_state = binding.aggregate_update.grouped_state;
 				if (!grouped_state.ready || !grouped_state.state) {
 					auto blocker = grouped_state.blocker.empty() ? "aggregate-grouped-state-binding-missing"
 					                                             : grouped_state.blocker;
 					throw InternalException("SLJIT aggregate grouped-state binding failed: %s", blocker.c_str());
 				}
-				if (CanExecuteDirectExistingGroupedPrimitiveAggregateUpdate(scratch, op_idx, op, input, payload_lanes,
-				                                                            execute_sel, count) &&
-				    TryExecuteDirectExistingGroupedPrimitiveAggregateUpdate(
-				        runtime, scratch, op_idx, op, input, payload_lanes, grouped_state, !defer_grouped_finish)) {
-					if (defer_grouped_finish && deferred_grouped_finish) {
-						*deferred_grouped_finish = true;
-					}
-					return SinkResultType::NEED_MORE_INPUT;
-				}
-				if (CanExecuteDirectNewGroupedPrimitiveAggregateUpdate(scratch, op_idx, op, input, payload_lanes,
-				                                                       execute_sel, count) &&
-				    TryExecuteDirectNewGroupedPrimitiveAggregateUpdate(
-				        runtime, scratch, op_idx, op, input, payload_lanes, grouped_state, !defer_grouped_finish)) {
-					if (defer_grouped_finish && deferred_grouped_finish) {
-						*deferred_grouped_finish = true;
-					}
-					return SinkResultType::NEED_MORE_INPUT;
-				}
-				if (CanExecuteDirectGroupedFusedPayloadUpdate(scratch, op_idx, op, input, payload_lanes, execute_sel,
-				                                              count, true) &&
-				    TryExecuteDirectGroupedFusedPayloadUpdate(runtime, scratch, op_idx, op, input, payload_lanes,
-				                                              grouped_state, payload_scratch, true,
-				                                              !defer_grouped_finish)) {
-					if (defer_grouped_finish && deferred_grouped_finish) {
-						*deferred_grouped_finish = true;
-					}
-					return SinkResultType::NEED_MORE_INPUT;
-				}
-				if (CanExecuteDirectAppendNewGroupedFusedPayloadUpdate(scratch, op_idx, op, input, payload_lanes,
-				                                                       execute_sel, count) &&
-				    TryExecuteDirectAppendNewGroupedFusedPayloadUpdate(runtime, scratch, op_idx, op, input,
-				                                                       payload_lanes, grouped_state, payload_scratch,
-				                                                       !defer_grouped_finish)) {
-					if (defer_grouped_finish && deferred_grouped_finish) {
-						*deferred_grouped_finish = true;
-					}
-					return SinkResultType::NEED_MORE_INPUT;
-				}
-				if (CanExecuteDirectGroupedFusedPayloadUpdate(scratch, op_idx, op, input, payload_lanes, execute_sel,
-				                                              count, false) &&
-				    TryExecuteDirectGroupedFusedPayloadUpdate(runtime, scratch, op_idx, op, input, payload_lanes,
-				                                              grouped_state, payload_scratch, false,
-				                                              !defer_grouped_finish)) {
-					if (defer_grouped_finish && deferred_grouped_finish) {
-						*deferred_grouped_finish = true;
-					}
+				if (TryExecuteDirectGroupedAggregateUpdateRoute(runtime, scratch, op_idx, op, input, payload_lanes,
+				                                                execute_sel, count, grouped_state, payload_scratch,
+				                                                defer_grouped_finish, deferred_grouped_finish)) {
 					return SinkResultType::NEED_MORE_INPUT;
 				}
 				grouped_state_addresses = &scratch.AggregateStateAddresses(op_idx);
 				if (CanResolveDirectNewGroupedStateAddresses(scratch, op_idx, op, input, execute_sel, count) &&
 				    TryResolveDirectNewGroupedStateAddresses(runtime, scratch, op_idx, op, input, grouped_state,
 				                                             *grouped_state_addresses, !defer_grouped_finish)) {
-					if (defer_grouped_finish && deferred_grouped_finish) {
-						*deferred_grouped_finish = true;
-					}
+					MarkDeferredGroupedFinish(defer_grouped_finish, deferred_grouped_finish);
 				} else if (runtime.TraceRuntime()) {
 					auto resolve_stage_name = SljitRegionStageName(op_idx, op.kind, "resolve_grouped_state_addresses");
 					auto resolve_stage_start = SljitRegionStageStart(runtime);
 					SljitRegionStageRecorder resolve_recorder(runtime, resolve_stage_name);
 					grouped_state.state->ResolveStateAddresses(input, *grouped_state_addresses, &resolve_recorder);
+					RecordSljitRegionMaterializationBoundary(runtime, op.kind, "address_vector_resolve", input.size());
 					auto resolve_runtime_us = SljitRegionElapsedMicros(resolve_stage_start);
 					auto unattributed_runtime_us = resolve_runtime_us - resolve_recorder.RecordedRuntimeTimeUs();
 					if (unattributed_runtime_us > 0) {
@@ -8493,7 +13530,9 @@ public:
 					}
 				} else {
 					grouped_state.state->ResolveStateAddresses(input, *grouped_state_addresses);
+					RecordSljitRegionMaterializationBoundary(runtime, op.kind, "address_vector_resolve", input.size());
 				}
+				RecordSljitRegionRuntimePath(runtime, op.kind, "resolve_grouped_state_addresses");
 			}
 			if (op.aggregate_update.fused_payload_update_function) {
 				auto payload_stage_start = SljitRegionStageStart(runtime);
@@ -8504,18 +13543,28 @@ public:
 					    op.aggregate_update.plan.sink_info.groups, op.aggregate_update.plan.group_expressions,
 					    op.aggregate_update.plan.sink_info.aggregate_contract, payload_lanes,
 					    grouped_state.perfect_hash_layout, input, execute_sel, count, payload_scratch);
+					RecordSljitRegionRuntimePath(runtime, op.kind,
+					                             "fused_payload_update_owns_perfect_hash_group_lookup");
+					RecordSljitRegionMaterializationBoundary(runtime, op.kind, "direct_perfect_hash_state_update",
+					                                         count);
 				} else if (op.aggregate_update.plan.use_grouped_state_addresses) {
 					if (!grouped_state_addresses) {
 						throw InternalException("SLJIT fused grouped aggregate update is missing state addresses");
 					}
+					grouped_state_addresses->Flatten();
+					const auto grouped_state_address_data = FlatVector::GetData<uintptr_t>(*grouped_state_addresses);
 					ExecuteFusedGroupedPrimitiveAggregatePayloadUpdate(
 					    op.aggregate_update.payloads, op.aggregate_update.fused_payload_update_function, aggregates,
 					    op.aggregate_update.plan.sink_info.aggregate_contract, payload_lanes, input,
-					    *grouped_state_addresses, input.size(), payload_scratch);
+					    grouped_state_address_data, nullptr, execute_sel, false, count, payload_scratch);
+					RecordSljitRegionRuntimePath(runtime, op.kind, "fused_payload_update_with_grouped_state_addresses");
+					RecordSljitRegionMaterializationBoundary(runtime, op.kind, "address_vector_payload_update", count);
 				} else {
 					ExecuteFusedPrimitiveAggregatePayloadUpdate(
 					    op.aggregate_update.payloads, op.aggregate_update.fused_payload_update_function, aggregates,
 					    payload_lanes, input, execute_sel, count, payload_scratch);
+					RecordSljitRegionRuntimePath(runtime, op.kind, "fused_payload_update");
+					RecordSljitRegionMaterializationBoundary(runtime, op.kind, "direct_state_update", count);
 				}
 				RecordSljitRegionStageRuntime(runtime, op_idx, op.kind, "primitive_payload_update_fused",
 				                              payload_stage_start);
@@ -8535,13 +13584,14 @@ public:
 					RecordSljitRegionStageRuntime(runtime, op_idx, op.kind, "primitive_payload_update",
 					                              payload_stage_start);
 				}
+				RecordSljitRegionRuntimePath(runtime, op.kind, "primitive_payload_update", aggregates.size());
+				RecordSljitRegionMaterializationBoundary(
+				    runtime, op.kind, grouped_state_addresses ? "address_vector_payload_update" : "direct_state_update",
+				    count);
 			}
-			if (op.aggregate_update.plan.use_grouped_state_addresses &&
-			    !op.aggregate_update.fused_payload_update_owns_group_lookup) {
+			if (aggregate_traits.NeedsGroupedStateAddressPlan()) {
 				if (defer_grouped_finish) {
-					if (deferred_grouped_finish) {
-						*deferred_grouped_finish = true;
-					}
+					MarkDeferredGroupedFinish(defer_grouped_finish, deferred_grouped_finish);
 				} else {
 					auto finish_stage_start = SljitRegionStageStart(runtime);
 					binding.aggregate_update.grouped_state.state->FinishStateUpdates();
@@ -8597,10 +13647,9 @@ unique_ptr<ExecutionRegionKernel> CreateSljitNativeRegionKernel(ClientContext &c
                                                                 SljitExecutableRegion &&region,
                                                                 ExecutionRegionABI abi) {
 	(void)context;
-	return make_uniq<SljitNativeRegionKernel>(std::move(backend_name), std::move(region.ops),
-	                                          std::move(region.source_distinct_counts),
-	                                          std::move(region.source_min_values), std::move(region.source_max_values),
-	                                          abi);
+	return make_uniq<SljitNativeRegionKernel>(
+	    std::move(backend_name), std::move(region.ops), std::move(region.source_distinct_counts),
+	    std::move(region.source_min_values), std::move(region.source_max_values), abi);
 }
 
 } // namespace duckdb

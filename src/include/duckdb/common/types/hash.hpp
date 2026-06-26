@@ -24,6 +24,13 @@ inline hash_t CombineHash(hash_t left, hash_t right) {
 	return left ^ right;
 }
 
+//! Combine a running vector hash with the next scalar hash value.
+inline hash_t CombineHashScalar(hash_t left, hash_t right) {
+	left ^= left >> 32;
+	left *= 0xd6e8feb86659fd93U;
+	return left ^ right;
+}
+
 #ifdef DUCKDB_HASH_ZERO
 template <class T>
 hash_t Hash(T value) {

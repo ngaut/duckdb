@@ -745,14 +745,17 @@ unique_ptr<ExecutionRegionPlan> ExecutionRegionPlanner::Build(ClientContext &con
 			continue;
 		}
 		ExecutionRegionPhysicalRunnerSelection physical_runner;
-		const bool cost_only_shape_matches_lowering =
-		    has_cost_only_physical_runner && lowering_plan.IsFullyFused() &&
-		    candidate.uses_scan_filters == lowering_plan.UsesScanFilters();
+		const bool cost_only_shape_matches_lowering = has_cost_only_physical_runner && lowering_plan.IsFullyFused() &&
+		                                              candidate.uses_scan_filters == lowering_plan.UsesScanFilters();
 		if (cost_only_shape_matches_lowering) {
 			physical_runner = std::move(cost_only_physical_runner);
 			physical_runner.reason = "duckdb_cbo selects ";
 			physical_runner.reason += ExecutionRegionDecisionRunnerName(physical_runner.SelectedRunner());
 			physical_runner.reason += " physical runner";
+			auto cost_reason = ExecutionRegionCboCostReasonToken(physical_runner.runner_cost);
+			if (!cost_reason.empty()) {
+				physical_runner.reason += ";" + cost_reason;
+			}
 		} else {
 			auto candidate_cbo_start = std::chrono::steady_clock::now();
 			physical_runner = SelectExecutionRegionPhysicalRunner(cost_parameters, candidate, lowering_plan,

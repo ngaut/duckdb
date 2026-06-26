@@ -8,6 +8,7 @@
 
 #pragma once
 
+#include "duckdb/common/bswap.hpp"
 #include "duckdb/common/common.hpp"
 #include "duckdb/common/optional_ptr.hpp"
 #include "duckdb/common/enums/expression_type.hpp"
@@ -111,6 +112,16 @@ public:
 	void Merge(const BloomFilter &other);
 	void Reset();
 
+	static inline uint64_t GetMask(hash_t hash) {
+#if DUCKDB_IS_BIG_ENDIAN
+		return (1ULL << ((hash >> 24) & 0x3F)) | (1ULL << ((hash >> 16) & 0x3F)) | (1ULL << ((hash >> 8) & 0x3F)) |
+		       (1ULL << (hash & 0x3F));
+#else
+		return (1ULL << ((hash >> 32) & 0x3F)) | (1ULL << ((hash >> 40) & 0x3F)) | (1ULL << ((hash >> 48) & 0x3F)) |
+		       (1ULL << ((hash >> 56) & 0x3F));
+#endif
+	}
+
 	bool IsInitialized() const {
 		return initialized;
 	}
@@ -194,7 +205,8 @@ public:
 	virtual void InsertKeys(Vector &keys, BuildState &state) const = 0;
 	virtual void MergeBuildState(BuildState &state) = 0;
 	virtual idx_t LookupKeys(Vector &keys, SelectionVector &result_sel, idx_t count) const = 0;
-	virtual idx_t LookupKeys(Vector &keys, const SelectionVector &sel, SelectionVector &result_sel, idx_t count) const = 0;
+	virtual idx_t LookupKeys(Vector &keys, const SelectionVector &sel, SelectionVector &result_sel,
+	                         idx_t count) const = 0;
 	virtual bool GetSignedLookupData(PrefixRangeLookupData &result) const = 0;
 	virtual FilterPropagateResult LookupRange(const Value &lower_bound, const Value &upper_bound) const = 0;
 	virtual bool IsInitialized() const = 0;

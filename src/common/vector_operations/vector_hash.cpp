@@ -41,12 +41,6 @@ hash_t CachedHashOp::Operation(hash_t input) {
 	return input;
 }
 
-hash_t CombineHashScalar(hash_t a, hash_t b) {
-	a ^= a >> 32;
-	a *= 0xd6e8feb86659fd93U;
-	return a ^ b;
-}
-
 template <bool HAS_RSEL, bool HAS_SEL_VECTOR, class T, bool INPUT_IS_ALREADY_HASH>
 void TightLoopHash(const T *__restrict ldata, hash_t *__restrict result_data, const SelectionVector *rsel, idx_t count,
                    const SelectionVector *__restrict sel_vector, const ValidityMask &mask) {

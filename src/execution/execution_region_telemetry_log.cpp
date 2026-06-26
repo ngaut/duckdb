@@ -38,6 +38,12 @@ static hash_t ExecutionRegionCounterHash(const ExecutionRegionEvent &event) {
 	result = ExecutionRegionTelemetryCombine(result, ExecutionRegionTelemetryHashEnum(event.selected_runner));
 	result = ExecutionRegionTelemetryCombine(result, ExecutionRegionTelemetryHashString(event.blocker));
 	result = ExecutionRegionTelemetryCombine(
+	    result, ExecutionRegionTelemetryHashString(event.runner_cost.funded_protocol_rule));
+	result =
+	    ExecutionRegionTelemetryCombine(result, ExecutionRegionTelemetryHashString(event.runner_cost.startup_rules));
+	result =
+	    ExecutionRegionTelemetryCombine(result, ExecutionRegionTelemetryHashString(event.runner_cost.selection_reason));
+	result = ExecutionRegionTelemetryCombine(
 	    result, ExecutionRegionTelemetryHashString(event.jit_runtime.hash_join_probe_layout));
 	return result;
 }
@@ -46,7 +52,23 @@ static bool ExecutionRegionCounterMatches(const ExecutionRegionCounter &counter,
 	return counter.backend_name == event.backend_name && counter.status_kind == event.status_kind &&
 	       counter.execution_mode_kind == event.execution_mode_kind &&
 	       counter.selected_runner_kind == event.selected_runner && counter.blocker == event.blocker &&
+	       counter.runner_cost.funded_protocol_rule == event.runner_cost.funded_protocol_rule &&
+	       counter.runner_cost.startup_rules == event.runner_cost.startup_rules &&
+	       counter.runner_cost.selection_reason == event.runner_cost.selection_reason &&
 	       counter.jit_runtime.hash_join_probe_layout == event.jit_runtime.hash_join_probe_layout;
+}
+
+static void AccumulateExecutionRegionRuleName(string &target, const string &source) {
+	if (source.empty()) {
+		return;
+	}
+	if (target.empty()) {
+		target = source;
+		return;
+	}
+	if (target != source) {
+		target = "multiple";
+	}
 }
 
 static void AccumulateExecutionRegionRunnerCostTotals(ExecutionRegionRunnerCostTotals &target,
@@ -66,6 +88,9 @@ static void AccumulateExecutionRegionRunnerCostTotals(ExecutionRegionRunnerCostT
 	target.native_grouped_aggregate_stage_count += source.native_grouped_aggregate_stage_count;
 	target.native_sort_stage_count += source.native_sort_stage_count;
 	target.full_pipeline = target.full_pipeline || source.full_pipeline;
+	AccumulateExecutionRegionRuleName(target.funded_protocol_rule, source.funded_protocol_rule);
+	AccumulateExecutionRegionRuleName(target.startup_rules, source.startup_rules);
+	AccumulateExecutionRegionRuleName(target.selection_reason, source.selection_reason);
 	target.generated_expression_work += source.generated_expression_work;
 	target.generated_stage_work += source.generated_stage_work;
 	target.native_operator_work += source.native_operator_work;
@@ -124,6 +149,10 @@ static void AccumulateExecutionRegionCounter(ExecutionRegionCounter &counter, co
 	counter.generated_body_runtime_time_us += event.generated_body_runtime_time_us;
 	MergeExecutionRegionStageRuntime(counter.generated_stage_runtime, event.generated_stage_runtime);
 	AccumulateExecutionRegionStageTimings(counter.stage_timings, event.stage_timings);
+	MergeExecutionRegionRecordedCounters(counter.jit_runtime.runtime_path_counts,
+	                                     event.jit_runtime.runtime_path_counts);
+	MergeExecutionRegionRecordedCounters(counter.jit_runtime.materialization_boundary_counts,
+	                                     event.jit_runtime.materialization_boundary_counts);
 	AddExecutionRegionLazyCodegenMetrics(counter.jit_runtime.lazy_codegen, event.jit_runtime.lazy_codegen);
 }
 

@@ -102,6 +102,30 @@ void MergeExecutionRegionStageRuntime(vector<ExecutionRegionRecordedStageRuntime
 	}
 }
 
+void AddExecutionRegionRecordedCounter(vector<ExecutionRegionRecordedCounter> &counters, ExecutionRegionStageId counter,
+                                       idx_t count) {
+	if (!counter.IsValid() || count == 0) {
+		return;
+	}
+	for (auto &entry : counters) {
+		if (entry.counter.key == counter.key) {
+			entry.count += count;
+			return;
+		}
+	}
+	ExecutionRegionRecordedCounter entry;
+	entry.counter = std::move(counter);
+	entry.count = count;
+	counters.push_back(std::move(entry));
+}
+
+void MergeExecutionRegionRecordedCounters(vector<ExecutionRegionRecordedCounter> &target,
+                                          const vector<ExecutionRegionRecordedCounter> &source) {
+	for (auto &entry : source) {
+		AddExecutionRegionRecordedCounter(target, entry.counter, entry.count);
+	}
+}
+
 void AddExecutionRegionLazyCodegenMetrics(ExecutionRegionLazyCodegenMetrics &target,
                                           const ExecutionRegionLazyCodegenMetrics &source) {
 	target.codegen_time_us += source.codegen_time_us;
@@ -131,6 +155,17 @@ string RenderExecutionRegionStageCountBreakdown(const vector<ExecutionRegionReco
 	return result;
 }
 
+string RenderExecutionRegionCounterBreakdown(const vector<ExecutionRegionRecordedCounter> &counters) {
+	string result;
+	for (auto &entry : counters) {
+		if (!result.empty()) {
+			result += ";";
+		}
+		result += entry.counter.name + "=" + std::to_string(entry.count);
+	}
+	return result;
+}
+
 void ExecutionRegionSourceContractMetrics::RecordStageRuntime(ExecutionRegionStageId stage, int64_t runtime_time_us) {
 	AddExecutionRegionStageRuntime(get_data_stages, stage, runtime_time_us);
 }
@@ -153,9 +188,9 @@ ExecutionPrimitiveAggregateUpdateBinding::FindLane(idx_t aggregate_index) const 
 	return nullptr;
 }
 
-ExecutionOperatorBindResult
-ExecutionAppendSinkState::PrepareDirectAppend(const vector<LogicalType> &, idx_t, DirectAppendReservation &,
-                                              string &blocker, optional_ptr<DirectAppendProfile>) {
+ExecutionOperatorBindResult ExecutionAppendSinkState::PrepareDirectAppend(const vector<LogicalType> &, idx_t,
+                                                                          DirectAppendReservation &, string &blocker,
+                                                                          optional_ptr<DirectAppendProfile>) {
 	blocker = "direct-append-not-supported";
 	return ExecutionOperatorBindResult::INVALID;
 }
@@ -205,6 +240,12 @@ ExecutionRegionRuntime::~ExecutionRegionRuntime() {
 }
 
 void ExecutionRegionRuntime::RecordHashJoinProbeLayout(const char *) {
+}
+
+void ExecutionRegionRuntime::RecordJitRuntimePath(const char *, idx_t) {
+}
+
+void ExecutionRegionRuntime::RecordJitMaterializationBoundary(const char *, idx_t) {
 }
 
 void ExecutionRegionRuntime::RecordLazyCodegen(const ExecutionRegionLazyCodegenMetrics &) {

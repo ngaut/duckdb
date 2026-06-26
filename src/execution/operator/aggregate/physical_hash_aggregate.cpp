@@ -404,25 +404,6 @@ public:
 		op.groupings[0].table_data.ResolveStateAddresses(context, input, sink_input, addresses, recorder);
 	}
 
-	bool TryUpdateExistingGroups(DataChunk &input, const ExecutionRegionSinkInfo &sink_info,
-	                             const vector<const ExecutionPrimitiveAggregateUpdateLane *> &lanes,
-	                             optional_ptr<ExecutionOperatorStageRecorder> recorder = nullptr,
-	                             bool finish = true) override {
-		if (op.distinct_collection_info) {
-			return false;
-		}
-		if (op.groupings.size() != 1 || global_state.grouping_states.size() != 1 ||
-		    local_state.grouping_states.size() != 1) {
-			return false;
-		}
-		auto &grouping_global_state = global_state.grouping_states[0];
-		auto &grouping_local_state = local_state.grouping_states[0];
-		OperatorSinkInput sink_input {*grouping_global_state.table_state, *grouping_local_state.table_state,
-		                              interrupt_state};
-		return op.groupings[0].table_data.TryUpdateExistingPrimitiveGroups(context, input, sink_input, sink_info, lanes,
-		                                                                   recorder, finish);
-	}
-
 	bool TryUpdateNewGroups(DataChunk &input, const ExecutionRegionSinkInfo &sink_info,
 	                        const vector<const ExecutionPrimitiveAggregateUpdateLane *> &lanes,
 	                        optional_ptr<ExecutionOperatorStageRecorder> recorder = nullptr,
@@ -439,6 +420,46 @@ public:
 		OperatorSinkInput sink_input {*grouping_global_state.table_state, *grouping_local_state.table_state,
 		                              interrupt_state};
 		return op.groupings[0].table_data.TryUpdateNewPrimitiveGroups(context, input, sink_input, sink_info, lanes,
+		                                                              recorder, finish);
+	}
+
+	bool TryUpdateNewGroupsWithPayloadInput(
+	    DataChunk &groups, DataChunk &payload_input, const vector<idx_t> &payload_source_indices,
+	    const ExecutionRegionSinkInfo &sink_info, const vector<const ExecutionPrimitiveAggregateUpdateLane *> &lanes,
+	    optional_ptr<ExecutionOperatorStageRecorder> recorder = nullptr, bool finish = true,
+	    optional_ptr<Vector> precomputed_hashes = nullptr) override {
+		if (op.distinct_collection_info) {
+			return false;
+		}
+		if (op.groupings.size() != 1 || global_state.grouping_states.size() != 1 ||
+		    local_state.grouping_states.size() != 1) {
+			return false;
+		}
+		auto &grouping_global_state = global_state.grouping_states[0];
+		auto &grouping_local_state = local_state.grouping_states[0];
+		OperatorSinkInput sink_input {*grouping_global_state.table_state, *grouping_local_state.table_state,
+		                              interrupt_state};
+		return op.groupings[0].table_data.TryUpdateNewPrimitiveGroupsWithPayloadInput(
+		    context, groups, payload_input, payload_source_indices, sink_input, sink_info, lanes, recorder, finish,
+		    precomputed_hashes);
+	}
+
+	bool TryAppendNewGroups(DataChunk &input, const ExecutionRegionSinkInfo &sink_info,
+	                        const vector<const ExecutionPrimitiveAggregateUpdateLane *> &lanes,
+	                        optional_ptr<ExecutionOperatorStageRecorder> recorder = nullptr,
+	                        bool finish = true) override {
+		if (op.distinct_collection_info) {
+			return false;
+		}
+		if (op.groupings.size() != 1 || global_state.grouping_states.size() != 1 ||
+		    local_state.grouping_states.size() != 1) {
+			return false;
+		}
+		auto &grouping_global_state = global_state.grouping_states[0];
+		auto &grouping_local_state = local_state.grouping_states[0];
+		OperatorSinkInput sink_input {*grouping_global_state.table_state, *grouping_local_state.table_state,
+		                              interrupt_state};
+		return op.groupings[0].table_data.TryAppendNewPrimitiveGroups(context, input, sink_input, sink_info, lanes,
 		                                                              recorder, finish);
 	}
 
@@ -462,6 +483,25 @@ public:
 		    context, input, sink_input, sink_info, update_function, update_state, recorder, finish);
 	}
 
+	bool TryUpdateExistingGroupsWithSelectedStateAddresses(
+	    DataChunk &input, const ExecutionRegionSinkInfo &sink_info,
+	    ExecutionGroupedAggregateStateSelectedAddressUpdateFunction update_function, void *update_state,
+	    optional_ptr<ExecutionOperatorStageRecorder> recorder = nullptr, bool finish = true) override {
+		if (op.distinct_collection_info) {
+			return false;
+		}
+		if (op.groupings.size() != 1 || global_state.grouping_states.size() != 1 ||
+		    local_state.grouping_states.size() != 1) {
+			return false;
+		}
+		auto &grouping_global_state = global_state.grouping_states[0];
+		auto &grouping_local_state = local_state.grouping_states[0];
+		OperatorSinkInput sink_input {*grouping_global_state.table_state, *grouping_local_state.table_state,
+		                              interrupt_state};
+		return op.groupings[0].table_data.TryUpdateExistingGroupsWithSelectedStateAddresses(
+		    context, input, sink_input, sink_info, update_function, update_state, recorder, finish);
+	}
+
 	bool TryUpdateNewGroupsWithStateAddresses(DataChunk &input, const ExecutionRegionSinkInfo &sink_info,
 	                                          ExecutionGroupedAggregateStateAddressUpdateFunction update_function,
 	                                          void *update_state,
@@ -480,6 +520,48 @@ public:
 		                              interrupt_state};
 		return op.groupings[0].table_data.TryUpdateNewGroupsWithStateAddresses(
 		    context, input, sink_input, sink_info, update_function, update_state, recorder, finish);
+	}
+
+	bool TryUpdateNewGroupsWithSelectedStateAddresses(
+	    DataChunk &input, const ExecutionRegionSinkInfo &sink_info,
+	    ExecutionGroupedAggregateStateSelectedAddressUpdateFunction update_function, void *update_state,
+	    optional_ptr<ExecutionOperatorStageRecorder> recorder = nullptr, bool finish = true,
+	    optional_ptr<Vector> precomputed_hashes = nullptr) override {
+		if (op.distinct_collection_info) {
+			return false;
+		}
+		if (op.groupings.size() != 1 || global_state.grouping_states.size() != 1 ||
+		    local_state.grouping_states.size() != 1) {
+			return false;
+		}
+		auto &grouping_global_state = global_state.grouping_states[0];
+		auto &grouping_local_state = local_state.grouping_states[0];
+		OperatorSinkInput sink_input {*grouping_global_state.table_state, *grouping_local_state.table_state,
+		                              interrupt_state};
+		return op.groupings[0].table_data.TryUpdateNewGroupsWithSelectedStateAddresses(
+		    context, input, sink_input, sink_info, update_function, update_state, recorder, finish,
+		    precomputed_hashes);
+	}
+
+	bool TryUpdateNewGroupsWithRowPointerKeys(
+	    DataChunk &payload_input, Vector &row_pointers, idx_t count,
+	    const vector<ExecutionRowPointerGroupKeySource> &group_sources, const ExecutionRegionSinkInfo &sink_info,
+	    ExecutionGroupedAggregateStateSelectedAddressUpdateFunction update_function, void *update_state,
+	    optional_ptr<ExecutionOperatorStageRecorder> recorder = nullptr, bool finish = true) override {
+		if (op.distinct_collection_info) {
+			return false;
+		}
+		if (op.groupings.size() != 1 || global_state.grouping_states.size() != 1 ||
+		    local_state.grouping_states.size() != 1) {
+			return false;
+		}
+		auto &grouping_global_state = global_state.grouping_states[0];
+		auto &grouping_local_state = local_state.grouping_states[0];
+		OperatorSinkInput sink_input {*grouping_global_state.table_state, *grouping_local_state.table_state,
+		                              interrupt_state};
+		return op.groupings[0].table_data.TryUpdateNewGroupsWithRowPointerKeys(
+		    context, payload_input, row_pointers, count, sink_input, group_sources, sink_info, update_function,
+		    update_state, recorder, finish);
 	}
 
 	bool TryAppendNewGroupsWithStateAddresses(DataChunk &input, const ExecutionRegionSinkInfo &sink_info,

@@ -281,11 +281,67 @@ static bool SljitRejectsSinkRegionContext(const ExecutionRegionNode &node, const
 
 static void AddSljitLoweredNode(ExecutionRegionLoweringPlan &lowering_plan, const ExecutionRegionNode &node,
                                 const SljitRegionNodePlan &node_plan) {
+	if (node_plan.kind == ExecutionRegionLoweringKind::NATIVE) {
+		lowering_plan.AddBackendDataShapeCapability(node.input_format, node.output_format, node.vector_source,
+		                                            node.selection_source);
+	}
 	if (lowering_plan.RecordDetailedNodes()) {
 		lowering_plan.AddNode(node.label, node.operator_name, node.operator_kind, node_plan.kind, node_plan.reason);
 		return;
 	}
-	lowering_plan.AddCompactNode(node_plan.kind, node_plan.reason);
+	lowering_plan.AddCompactNode(node.operator_kind, node_plan.kind, node_plan.reason);
+}
+
+static void AddSljitNativeRegionCapabilityFacts(ExecutionRegionLoweringPlan &lowering_plan,
+                                                const SljitNativeRegionPlan &native_region) {
+	for (auto not_null : native_region.source_not_null) {
+		lowering_plan.AddBackendSourceValidityCapability(not_null);
+	}
+	for (auto &op : native_region.ops) {
+		switch (op.kind) {
+		case SljitNativeRegionOpKind::HASH_JOIN_PROBE:
+			lowering_plan.AddBackendHashJoinProbeCapability(
+			    op.hash_join_probe.perfect_hash_probe, op.hash_join_probe.residual_predicate,
+			    op.hash_join_probe.equality_key_count, op.hash_join_probe.keys.size());
+			for (auto &key : op.hash_join_probe.keys) {
+				lowering_plan.AddBackendJoinKeyTypeCapability(key.key_type);
+			}
+			break;
+		case SljitNativeRegionOpKind::HASH_JOIN_BUILD:
+			for (auto &key : op.hash_join_build.sink_info.hash_join_keys) {
+				lowering_plan.AddBackendJoinKeyTypeCapability(key.type);
+			}
+			lowering_plan.AddBackendHashJoinBuildCapability();
+			break;
+		case SljitNativeRegionOpKind::NESTED_LOOP_JOIN_PROBE:
+			for (auto &condition : op.nested_loop_join_probe.conditions) {
+				lowering_plan.AddBackendJoinKeyTypeCapability(condition.type);
+			}
+			lowering_plan.AddBackendNestedLoopJoinProbeCapability();
+			break;
+		case SljitNativeRegionOpKind::NESTED_LOOP_JOIN_BUILD:
+			for (auto &condition_type : op.nested_loop_join_build.condition_types) {
+				lowering_plan.AddBackendJoinKeyTypeCapability(condition_type);
+			}
+			lowering_plan.AddBackendNestedLoopJoinBuildCapability();
+			break;
+		case SljitNativeRegionOpKind::AGGREGATE_UPDATE: {
+			auto &aggregate_update = op.aggregate_update;
+			for (auto &group : aggregate_update.sink_info.groups) {
+				lowering_plan.AddBackendGroupKeyTypeCapability(group.type);
+			}
+			for (auto &payload : aggregate_update.payloads) {
+				lowering_plan.AddBackendPayloadTypeCapability(payload.return_type);
+			}
+			lowering_plan.AddBackendAggregateUpdateCapability(
+			    aggregate_update.sink_info.aggregate_contract.kind, aggregate_update.use_primitive_payloads,
+			    aggregate_update.use_grouped_state_addresses, aggregate_update.use_perfect_hash_group_lookup);
+			break;
+		}
+		default:
+			break;
+		}
+	}
 }
 
 static bool SljitNodePlanIsBoundary(const SljitRegionNodePlan &node_plan) {
@@ -556,6 +612,7 @@ ExecutionRegionLoweringPlan BuildSljitRegionPlan(const ExecutionRegionIR &region
 		FusePrimitiveAggregateUpdates(native_region, candidate.input_types, render_diagnostics);
 		SetSljitRegionFlatNullableFastPath(native_region, SljitShouldEmitFlatNullableFastPath(candidate));
 		FinalizeSljitNativeRegionPlan(native_region);
+		AddSljitNativeRegionCapabilityFacts(lowering_plan, native_region);
 		lowering_plan.SetUsesScanFilters(cursor.UsesScanFilters());
 		string codegen_blocker;
 		if (SljitNativeRegionHasExecutableBodyGap(native_region, codegen_blocker)) {

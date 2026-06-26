@@ -55,6 +55,9 @@ static constexpr ExecutionRegionTraceColumn EXECUTION_REGION_RUNNER_COST_PROFILE
     {"runner_cost_native_grouped_aggregate_stage_count", LogicalTypeId::BIGINT},
     {"runner_cost_native_sort_stage_count", LogicalTypeId::BIGINT},
     {"runner_cost_full_pipeline", LogicalTypeId::BOOLEAN},
+    {"runner_cost_funded_protocol_rule", LogicalTypeId::VARCHAR},
+    {"runner_cost_startup_rules", LogicalTypeId::VARCHAR},
+    {"runner_cost_selection_reason", LogicalTypeId::VARCHAR},
 };
 
 static constexpr idx_t EXECUTION_REGION_RUNNER_COST_PROFILE_COLUMN_COUNT =
@@ -258,6 +261,15 @@ static inline void AppendExecutionRegionRunnerCostProfileColumn(Vector &output, 
 		return;
 	case 11:
 		output.Append(Value::BOOLEAN(cost.full_pipeline));
+		return;
+	case 12:
+		AppendExecutionRegionNullableString(output, cost.funded_protocol_rule);
+		return;
+	case 13:
+		AppendExecutionRegionNullableString(output, cost.startup_rules);
+		return;
+	case 14:
+		AppendExecutionRegionNullableString(output, cost.selection_reason);
 		return;
 	default:
 		throw InternalException("Unsupported execution region runner cost profile column index");

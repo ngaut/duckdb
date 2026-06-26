@@ -189,6 +189,12 @@ static string ExecutionRegionProfileStageCosts(const PhysicalRunnerCostProfile &
 	result += PhysicalRunnerGeneratedWorkClassToString(cost.generated_work_class);
 	result += ",native_protocol:";
 	result += PhysicalRunnerNativeProtocolClassToString(cost.native_protocol_class);
+	result += ",rule:";
+	result += cost.funded_protocol_rule.empty() ? "none" : cost.funded_protocol_rule;
+	result += ",startup_rules:";
+	result += cost.startup_rules.empty() ? "none" : cost.startup_rules;
+	result += ",selection_reason:";
+	result += cost.selection_reason.empty() ? "none" : cost.selection_reason;
 	result += ",selected_runner:";
 	result += ExecutionRunnerKindToString(cost.selected_runner);
 	return result;
@@ -340,6 +346,9 @@ static void AddExecutionRegionEvent(QueryProfileResult &row, const ExecutionRegi
 	      Text(PhysicalRunnerGeneratedWorkClassToString(event.runner_cost.generated_work_class))},
 	     {"runner_cost_native_protocol_class",
 	      Text(PhysicalRunnerNativeProtocolClassToString(event.runner_cost.native_protocol_class))},
+	     {"runner_cost_funded_protocol_rule", NullableText(event.runner_cost.funded_protocol_rule)},
+	     {"runner_cost_startup_rules", NullableText(event.runner_cost.startup_rules)},
+	     {"runner_cost_selection_reason", NullableText(event.runner_cost.selection_reason)},
 	     {"runner_cost_generated_expression_work", Time(event.runner_cost.generated_expression_work)},
 	     {"runner_cost_generated_stage_work", Time(event.runner_cost.generated_stage_work)},
 	     {"runner_cost_native_operator_work", Time(event.runner_cost.native_operator_work)},
@@ -392,6 +401,10 @@ static void AddExecutionRegionEvent(QueryProfileResult &row, const ExecutionRegi
 	     {"lazy_machine_codegen_time_us", Time(event.jit_runtime.lazy_codegen.machine_codegen_time_us)},
 	     {"lazy_code_size", Count(event.jit_runtime.lazy_codegen.code_size)},
 	     {"hash_join_probe_layout", NullableText(event.jit_runtime.hash_join_probe_layout)},
+	     {"jit_runtime_path_counts",
+	      NullableText(RenderExecutionRegionCounterBreakdown(event.jit_runtime.runtime_path_counts))},
+	     {"jit_materialization_boundary_counts",
+	      NullableText(RenderExecutionRegionCounterBreakdown(event.jit_runtime.materialization_boundary_counts))},
 	     {"runtime_time_us", Time(event.runtime_time_us)},
 	     {"source_runtime_time_us", Time(event.source_contract_runtime_time_us)},
 	     {"sink_next_batch_runtime_time_us", Time(event.sink_next_batch_runtime_time_us)},
@@ -521,6 +534,12 @@ static void RenderExecutionRegionRuntimePipelineToStream(std::ostream &ss,
 		   << " generated_us=" << event.generated_body_runtime_time_us
 		   << " sink_us=" << event.sink_next_batch_runtime_time_us
 		   << " hash_join_probe_layout=" << ExecutionRegionProfileToken(event.jit_runtime.hash_join_probe_layout)
+		   << " jit_runtime_path_counts="
+		   << ExecutionRegionProfileToken(RenderExecutionRegionCounterBreakdown(event.jit_runtime.runtime_path_counts),
+		                                  128)
+		   << " jit_materialization_boundary_counts="
+		   << ExecutionRegionProfileToken(
+		          RenderExecutionRegionCounterBreakdown(event.jit_runtime.materialization_boundary_counts), 128)
 		   << " lazy_codegen_us=" << event.jit_runtime.lazy_codegen.codegen_time_us
 		   << " lazy_machine_codegen_us=" << event.jit_runtime.lazy_codegen.machine_codegen_time_us
 		   << " lazy_code_size=" << event.jit_runtime.lazy_codegen.code_size

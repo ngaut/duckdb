@@ -39,6 +39,7 @@ from tpch_common import (
     prepare_tpch_database,
     read_query,
 )
+from shape_inventory import write_shape_inventory
 
 COUNTER_VALUE_FIELDS = COUNTER_FIELDS[3:]
 
@@ -304,6 +305,7 @@ def main() -> int:
         write_csv(
             out_dir / "performance_gaps.csv", PERFORMANCE_GAP_FIELDS, performance_gap_rows(summary_rows, counter_rows)
         )
+        write_shape_inventory(out_dir, workload="tpch")
         print(f"benchmark output: {out_dir}")
         print(f"summary: {out_dir / 'summary.csv'}")
     finally:

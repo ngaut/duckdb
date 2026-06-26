@@ -39,7 +39,7 @@ RUN_FIELDS = (
     "profile_json",
 )
 
-COUNTER_FIELDS = (
+COUNTER_BASE_FIELDS = (
     "query",
     "policy",
     "repeat",
@@ -47,8 +47,53 @@ COUNTER_FIELDS = (
     "status",
     "execution_mode",
     "selected_runner",
-    "runner_cost_profile",
     "blocker",
+    "count",
+    "decision_time_us",
+    "compile_time_us",
+    "code_size",
+)
+
+COUNTER_RUNTIME_FIELDS = (
+    "input_rows",
+    "output_rows",
+    "invocation_count",
+    "runtime_time_us",
+    "source_contract_output_rows",
+    "source_contract_invocation_count",
+    "source_contract_runtime_time_us",
+    "source_stage_runtime_breakdown",
+    "source_stage_count_breakdown",
+    "sink_next_batch_invocation_count",
+    "sink_next_batch_runtime_time_us",
+    "generated_body_runtime_time_us",
+    "generated_stage_runtime_breakdown",
+    "generated_stage_count_breakdown",
+)
+
+COUNTER_STAGE_TIMING_FIELDS = (
+    "ir_lowering_time_us",
+    "backend_analysis_time_us",
+    "codegen_time_us",
+    "pipeline_cbo_time_us",
+    "graph_build_time_us",
+    "candidate_cbo_time_us",
+    "executable_build_time_us",
+    "machine_codegen_time_us",
+    "kernel_build_time_us",
+)
+
+COUNTER_JIT_RUNTIME_FIELDS = (
+    "lazy_codegen_time_us",
+    "lazy_machine_codegen_time_us",
+    "lazy_code_size",
+    "hash_join_probe_layout",
+    "jit_runtime_path_counts",
+    "jit_materialization_boundary_counts",
+)
+
+COUNTER_RUNNER_COST_PROFILE_FIELDS = (
+    "runner_cost_profile",
     "runner_cost_rows",
     "runner_cost_batches",
     "runner_cost_expression_cost",
@@ -60,6 +105,12 @@ COUNTER_FIELDS = (
     "runner_cost_native_grouped_aggregate_stage_count",
     "runner_cost_native_sort_stage_count",
     "runner_cost_full_pipeline",
+    "runner_cost_funded_protocol_rule",
+    "runner_cost_startup_rules",
+    "runner_cost_selection_reason",
+)
+
+COUNTER_RUNNER_COST_WORK_FIELDS = (
     "runner_cost_generated_expression_work",
     "runner_cost_generated_stage_work",
     "runner_cost_native_operator_work",
@@ -72,24 +123,31 @@ COUNTER_FIELDS = (
     "runner_cost_startup_cost",
     "runner_cost_required_benefit",
     "runner_cost_net_benefit",
+    "runner_cost_compiled_vectorized_runner_benefit",
+    "runner_cost_compiled_vectorized_startup_cost",
+    "runner_cost_compiled_vectorized_required_benefit",
+    "runner_cost_compiled_vectorized_net_benefit",
+    "runner_cost_gpu_runner_benefit",
+    "runner_cost_gpu_transfer_cost",
+    "runner_cost_gpu_startup_cost",
+    "runner_cost_gpu_required_benefit",
+    "runner_cost_gpu_net_benefit",
+)
+
+COUNTER_RUNNER_SELECTION_FIELDS = (
     "runner_cost_selected_accelerated_runner_count",
-    "count",
-    "decision_time_us",
-    "compile_time_us",
-    "pipeline_cbo_time_us",
-    "graph_build_time_us",
-    "candidate_cbo_time_us",
-    "ir_lowering_time_us",
-    "backend_analysis_time_us",
-    "codegen_time_us",
-    "executable_build_time_us",
-    "machine_codegen_time_us",
-    "kernel_build_time_us",
-    "lazy_codegen_time_us",
-    "lazy_machine_codegen_time_us",
-    "lazy_code_size",
-    "code_size",
-    "hash_join_probe_layout",
+    "runner_cost_selected_compiled_vectorized_runner_count",
+    "runner_cost_selected_gpu_runner_count",
+)
+
+COUNTER_FIELDS = (
+    *COUNTER_BASE_FIELDS,
+    *COUNTER_RUNTIME_FIELDS,
+    *COUNTER_STAGE_TIMING_FIELDS,
+    *COUNTER_JIT_RUNTIME_FIELDS,
+    *COUNTER_RUNNER_COST_PROFILE_FIELDS,
+    *COUNTER_RUNNER_COST_WORK_FIELDS,
+    *COUNTER_RUNNER_SELECTION_FIELDS,
 )
 
 RUNNER_COST_COMPONENT_FIELDS = (

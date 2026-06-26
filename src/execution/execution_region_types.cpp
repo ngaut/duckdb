@@ -1,5 +1,7 @@
 #include "duckdb/execution/execution_region_telemetry.hpp"
 
+#include "duckdb/common/types.hpp"
+
 namespace duckdb {
 
 const char *ExecutionRegionCompileStatusToString(ExecutionRegionCompileStatus status) {
@@ -408,6 +410,70 @@ const char *ExecutionRegionSelectionSourceKindToString(ExecutionRegionSelectionS
 	}
 }
 
+const char *ExecutionRegionCapabilityTypeKindToString(ExecutionRegionCapabilityTypeKind kind) {
+	switch (kind) {
+	case ExecutionRegionCapabilityTypeKind::UNKNOWN:
+		return "unknown";
+	case ExecutionRegionCapabilityTypeKind::BOOL:
+		return "bool";
+	case ExecutionRegionCapabilityTypeKind::INT8:
+		return "int8";
+	case ExecutionRegionCapabilityTypeKind::INT16:
+		return "int16";
+	case ExecutionRegionCapabilityTypeKind::INT32:
+		return "int32";
+	case ExecutionRegionCapabilityTypeKind::INT64:
+		return "int64";
+	case ExecutionRegionCapabilityTypeKind::INT128:
+		return "int128";
+	case ExecutionRegionCapabilityTypeKind::UINT8:
+		return "uint8";
+	case ExecutionRegionCapabilityTypeKind::UINT16:
+		return "uint16";
+	case ExecutionRegionCapabilityTypeKind::UINT32:
+		return "uint32";
+	case ExecutionRegionCapabilityTypeKind::UINT64:
+		return "uint64";
+	case ExecutionRegionCapabilityTypeKind::UINT128:
+		return "uint128";
+	case ExecutionRegionCapabilityTypeKind::FLOAT:
+		return "float";
+	case ExecutionRegionCapabilityTypeKind::DOUBLE:
+		return "double";
+	case ExecutionRegionCapabilityTypeKind::DECIMAL16:
+		return "decimal16";
+	case ExecutionRegionCapabilityTypeKind::DECIMAL32:
+		return "decimal32";
+	case ExecutionRegionCapabilityTypeKind::DECIMAL64:
+		return "decimal64";
+	case ExecutionRegionCapabilityTypeKind::DECIMAL128:
+		return "decimal128";
+	case ExecutionRegionCapabilityTypeKind::DATE:
+		return "date";
+	case ExecutionRegionCapabilityTypeKind::VARCHAR:
+		return "varchar";
+	case ExecutionRegionCapabilityTypeKind::POINTER:
+		return "pointer";
+	case ExecutionRegionCapabilityTypeKind::OTHER:
+		return "other";
+	default:
+		return "unknown";
+	}
+}
+
+const char *ExecutionRegionCapabilityValidityKindToString(ExecutionRegionCapabilityValidityKind kind) {
+	switch (kind) {
+	case ExecutionRegionCapabilityValidityKind::UNKNOWN:
+		return "unknown";
+	case ExecutionRegionCapabilityValidityKind::NOT_NULL:
+		return "not-null";
+	case ExecutionRegionCapabilityValidityKind::MAY_HAVE_NULL:
+		return "may-have-null";
+	default:
+		return "unknown";
+	}
+}
+
 const char *ExecutionRegionBoundaryKindToString(ExecutionRegionBoundaryKind kind) {
 	switch (kind) {
 	case ExecutionRegionBoundaryKind::NONE:
@@ -698,36 +764,213 @@ void ExecutionRegionLoweringPlan::AddNode(string label, string operator_name, Ex
 	AddNode(std::move(label), std::move(operator_name), ExecutionRegionOperatorKind::GENERIC, kind, std::move(reason));
 }
 
+static void AccumulateExecutionRegionLoweringFact(ExecutionRegionLoweringPlan &plan,
+                                                  ExecutionRegionOperatorKind operator_kind,
+                                                  ExecutionRegionLoweringKind kind, const string &reason) {
+	plan.node_count++;
+	auto operator_kind_index = static_cast<idx_t>(operator_kind);
+	if (kind == ExecutionRegionLoweringKind::NATIVE) {
+		plan.native_count++;
+		if (operator_kind_index < EXECUTION_REGION_OPERATOR_KIND_COUNT) {
+			plan.capability_facts.native_operator_kind_counts[operator_kind_index]++;
+		}
+	} else if (kind == ExecutionRegionLoweringKind::BOUNDARY) {
+		plan.boundary_count++;
+		if (operator_kind_index < EXECUTION_REGION_OPERATOR_KIND_COUNT) {
+			plan.capability_facts.boundary_operator_kind_counts[operator_kind_index]++;
+		}
+		if (plan.first_boundary_reason.empty() && !reason.empty()) {
+			plan.first_boundary_reason = reason;
+		}
+	}
+}
+
 void ExecutionRegionLoweringPlan::AddNode(string label, string operator_name, ExecutionRegionOperatorKind operator_kind,
                                           ExecutionRegionLoweringKind kind, string reason) {
-	node_count++;
+	AccumulateExecutionRegionLoweringFact(*this, operator_kind, kind, reason);
 	ExecutionRegionNodeLowering node;
 	node.label = std::move(label);
 	node.operator_name = std::move(operator_name);
 	node.operator_kind = operator_kind;
 	node.kind = kind;
 	node.reason = std::move(reason);
-	if (node.kind == ExecutionRegionLoweringKind::NATIVE) {
-		native_count++;
-	} else if (node.kind == ExecutionRegionLoweringKind::BOUNDARY) {
-		boundary_count++;
-		if (first_boundary_reason.empty() && !node.reason.empty()) {
-			first_boundary_reason = node.reason;
-		}
-	}
 	if (record_detailed_nodes) {
 		nodes.push_back(std::move(node));
 	}
 }
 
-void ExecutionRegionLoweringPlan::AddCompactNode(ExecutionRegionLoweringKind kind, const string &reason) {
-	node_count++;
-	if (kind == ExecutionRegionLoweringKind::NATIVE) {
-		native_count++;
-	} else if (kind == ExecutionRegionLoweringKind::BOUNDARY) {
-		boundary_count++;
-		if (first_boundary_reason.empty() && !reason.empty()) {
-			first_boundary_reason = reason;
+void ExecutionRegionLoweringPlan::AddCompactNode(ExecutionRegionOperatorKind operator_kind,
+                                                 ExecutionRegionLoweringKind kind, const string &reason) {
+	AccumulateExecutionRegionLoweringFact(*this, operator_kind, kind, reason);
+}
+
+void ExecutionRegionLoweringPlan::AddBackendDataShapeCapability(ExecutionRegionVectorFormatKind input_format,
+                                                                ExecutionRegionVectorFormatKind output_format,
+                                                                ExecutionRegionVectorSourceKind vector_source,
+                                                                ExecutionRegionSelectionSourceKind selection_source) {
+	auto input_format_index = static_cast<idx_t>(input_format);
+	if (input_format_index < EXECUTION_REGION_VECTOR_FORMAT_KIND_COUNT) {
+		capability_facts.native_input_format_counts[input_format_index]++;
+	}
+	auto output_format_index = static_cast<idx_t>(output_format);
+	if (output_format_index < EXECUTION_REGION_VECTOR_FORMAT_KIND_COUNT) {
+		capability_facts.native_output_format_counts[output_format_index]++;
+	}
+	auto vector_source_index = static_cast<idx_t>(vector_source);
+	if (vector_source_index < EXECUTION_REGION_VECTOR_SOURCE_KIND_COUNT) {
+		capability_facts.native_vector_source_counts[vector_source_index]++;
+	}
+	auto selection_source_index = static_cast<idx_t>(selection_source);
+	if (selection_source_index < EXECUTION_REGION_SELECTION_SOURCE_KIND_COUNT) {
+		capability_facts.native_selection_source_counts[selection_source_index]++;
+	}
+}
+
+static ExecutionRegionCapabilityTypeKind ExecutionRegionCapabilityTypeKindFromLogicalType(const LogicalType &type) {
+	switch (type.id()) {
+	case LogicalTypeId::BOOLEAN:
+		return ExecutionRegionCapabilityTypeKind::BOOL;
+	case LogicalTypeId::TINYINT:
+		return ExecutionRegionCapabilityTypeKind::INT8;
+	case LogicalTypeId::SMALLINT:
+		return ExecutionRegionCapabilityTypeKind::INT16;
+	case LogicalTypeId::INTEGER:
+		return ExecutionRegionCapabilityTypeKind::INT32;
+	case LogicalTypeId::BIGINT:
+		return ExecutionRegionCapabilityTypeKind::INT64;
+	case LogicalTypeId::HUGEINT:
+	case LogicalTypeId::UUID:
+		return ExecutionRegionCapabilityTypeKind::INT128;
+	case LogicalTypeId::UTINYINT:
+		return ExecutionRegionCapabilityTypeKind::UINT8;
+	case LogicalTypeId::USMALLINT:
+		return ExecutionRegionCapabilityTypeKind::UINT16;
+	case LogicalTypeId::UINTEGER:
+		return ExecutionRegionCapabilityTypeKind::UINT32;
+	case LogicalTypeId::UBIGINT:
+		return ExecutionRegionCapabilityTypeKind::UINT64;
+	case LogicalTypeId::UHUGEINT:
+		return ExecutionRegionCapabilityTypeKind::UINT128;
+	case LogicalTypeId::FLOAT:
+		return ExecutionRegionCapabilityTypeKind::FLOAT;
+	case LogicalTypeId::DOUBLE:
+		return ExecutionRegionCapabilityTypeKind::DOUBLE;
+	case LogicalTypeId::DECIMAL:
+		switch (type.InternalType()) {
+		case PhysicalType::INT16:
+			return ExecutionRegionCapabilityTypeKind::DECIMAL16;
+		case PhysicalType::INT32:
+			return ExecutionRegionCapabilityTypeKind::DECIMAL32;
+		case PhysicalType::INT64:
+			return ExecutionRegionCapabilityTypeKind::DECIMAL64;
+		case PhysicalType::INT128:
+			return ExecutionRegionCapabilityTypeKind::DECIMAL128;
+		default:
+			return ExecutionRegionCapabilityTypeKind::OTHER;
+		}
+	case LogicalTypeId::DATE:
+		return ExecutionRegionCapabilityTypeKind::DATE;
+	case LogicalTypeId::CHAR:
+	case LogicalTypeId::VARCHAR:
+		return ExecutionRegionCapabilityTypeKind::VARCHAR;
+	case LogicalTypeId::POINTER:
+		return ExecutionRegionCapabilityTypeKind::POINTER;
+	case LogicalTypeId::INVALID:
+	case LogicalTypeId::SQLNULL:
+	case LogicalTypeId::UNKNOWN:
+	case LogicalTypeId::ANY:
+	case LogicalTypeId::UNBOUND:
+	case LogicalTypeId::TEMPLATE:
+		return ExecutionRegionCapabilityTypeKind::UNKNOWN;
+	default:
+		return ExecutionRegionCapabilityTypeKind::OTHER;
+	}
+}
+
+static void AddExecutionRegionCapabilityTypeFact(ExecutionRegionCapabilityTypeKindCounts &counts,
+                                                 const LogicalType &type) {
+	auto type_index = static_cast<idx_t>(ExecutionRegionCapabilityTypeKindFromLogicalType(type));
+	if (type_index < EXECUTION_REGION_CAPABILITY_TYPE_KIND_COUNT) {
+		counts[type_index]++;
+	}
+}
+
+void ExecutionRegionLoweringPlan::AddBackendSourceValidityCapability(bool not_null) {
+	auto validity = not_null ? ExecutionRegionCapabilityValidityKind::NOT_NULL
+	                         : ExecutionRegionCapabilityValidityKind::MAY_HAVE_NULL;
+	auto validity_index = static_cast<idx_t>(validity);
+	if (validity_index < EXECUTION_REGION_CAPABILITY_VALIDITY_KIND_COUNT) {
+		capability_facts.backend_source_validity_counts[validity_index]++;
+	}
+}
+
+void ExecutionRegionLoweringPlan::AddBackendJoinKeyTypeCapability(const LogicalType &type) {
+	AddExecutionRegionCapabilityTypeFact(capability_facts.backend_join_key_type_counts, type);
+}
+
+void ExecutionRegionLoweringPlan::AddBackendGroupKeyTypeCapability(const LogicalType &type) {
+	AddExecutionRegionCapabilityTypeFact(capability_facts.backend_group_key_type_counts, type);
+}
+
+void ExecutionRegionLoweringPlan::AddBackendPayloadTypeCapability(const LogicalType &type) {
+	AddExecutionRegionCapabilityTypeFact(capability_facts.backend_payload_type_counts, type);
+}
+
+void ExecutionRegionLoweringPlan::AddBackendHashJoinProbeCapability(bool perfect_hash_probe, bool residual_predicate,
+                                                                    idx_t equality_key_count, idx_t key_count) {
+	capability_facts.backend_hash_join_probe_count++;
+	if (perfect_hash_probe) {
+		capability_facts.backend_perfect_hash_join_probe_count++;
+	} else {
+		capability_facts.backend_regular_hash_join_probe_count++;
+	}
+	if (residual_predicate) {
+		capability_facts.backend_residual_hash_join_probe_count++;
+	}
+	capability_facts.backend_hash_join_equality_key_count += equality_key_count;
+	if (key_count > equality_key_count) {
+		capability_facts.backend_hash_join_non_equality_key_count += key_count - equality_key_count;
+	}
+}
+
+void ExecutionRegionLoweringPlan::AddBackendHashJoinBuildCapability() {
+	capability_facts.backend_hash_join_build_count++;
+}
+
+void ExecutionRegionLoweringPlan::AddBackendNestedLoopJoinProbeCapability() {
+	capability_facts.backend_nested_loop_join_probe_count++;
+}
+
+void ExecutionRegionLoweringPlan::AddBackendNestedLoopJoinBuildCapability() {
+	capability_facts.backend_nested_loop_join_build_count++;
+}
+
+void ExecutionRegionLoweringPlan::AddBackendAggregateUpdateCapability(ExecutionRegionAggregateOperatorKind kind,
+                                                                      bool primitive_payloads,
+                                                                      bool grouped_state_addresses,
+                                                                      bool perfect_hash_group_lookup) {
+	switch (kind) {
+	case ExecutionRegionAggregateOperatorKind::HASH:
+		capability_facts.backend_hash_aggregate_update_count++;
+		break;
+	case ExecutionRegionAggregateOperatorKind::PERFECT_HASH:
+		capability_facts.backend_perfect_hash_aggregate_update_count++;
+		break;
+	case ExecutionRegionAggregateOperatorKind::UNGROUPED:
+		capability_facts.backend_ungrouped_aggregate_update_count++;
+		break;
+	default:
+		break;
+	}
+	if (primitive_payloads) {
+		capability_facts.backend_primitive_aggregate_payload_update_count++;
+	}
+	if (grouped_state_addresses) {
+		capability_facts.backend_grouped_state_address_lookup_count++;
+		if (perfect_hash_group_lookup) {
+			capability_facts.backend_generated_perfect_hash_lookup_count++;
+		} else {
+			capability_facts.backend_native_state_address_lookup_count++;
 		}
 	}
 }
@@ -806,6 +1049,197 @@ static void AppendFirstExecutionRegionLoweringReasonToken(string &result, const 
 	result.append(reason, 0, separator);
 }
 
+static void AppendExecutionRegionOperatorKindCounts(string &result, const char *label,
+                                                    const ExecutionRegionOperatorKindCounts &counts) {
+	bool first = true;
+	for (idx_t index = 0; index < EXECUTION_REGION_OPERATOR_KIND_COUNT; index++) {
+		auto count = counts[index];
+		if (count == 0) {
+			continue;
+		}
+		if (first) {
+			result += ";";
+			result += label;
+			result += "=";
+			first = false;
+		} else {
+			result += "|";
+		}
+		result += ExecutionRegionOperatorKindToString(static_cast<ExecutionRegionOperatorKind>(index));
+		result += ":";
+		result += std::to_string(count);
+	}
+}
+
+static void AppendExecutionRegionVectorFormatKindCounts(string &result, const char *label,
+                                                        const ExecutionRegionVectorFormatKindCounts &counts) {
+	bool first = true;
+	for (idx_t index = 0; index < EXECUTION_REGION_VECTOR_FORMAT_KIND_COUNT; index++) {
+		auto count = counts[index];
+		if (count == 0) {
+			continue;
+		}
+		if (first) {
+			result += ";";
+			result += label;
+			result += "=";
+			first = false;
+		} else {
+			result += "|";
+		}
+		result += ExecutionRegionVectorFormatKindToString(static_cast<ExecutionRegionVectorFormatKind>(index));
+		result += ":";
+		result += std::to_string(count);
+	}
+}
+
+static void AppendExecutionRegionVectorSourceKindCounts(string &result, const char *label,
+                                                        const ExecutionRegionVectorSourceKindCounts &counts) {
+	bool first = true;
+	for (idx_t index = 0; index < EXECUTION_REGION_VECTOR_SOURCE_KIND_COUNT; index++) {
+		auto count = counts[index];
+		if (count == 0) {
+			continue;
+		}
+		if (first) {
+			result += ";";
+			result += label;
+			result += "=";
+			first = false;
+		} else {
+			result += "|";
+		}
+		result += ExecutionRegionVectorSourceKindToString(static_cast<ExecutionRegionVectorSourceKind>(index));
+		result += ":";
+		result += std::to_string(count);
+	}
+}
+
+static void AppendExecutionRegionSelectionSourceKindCounts(string &result, const char *label,
+                                                           const ExecutionRegionSelectionSourceKindCounts &counts) {
+	bool first = true;
+	for (idx_t index = 0; index < EXECUTION_REGION_SELECTION_SOURCE_KIND_COUNT; index++) {
+		auto count = counts[index];
+		if (count == 0) {
+			continue;
+		}
+		if (first) {
+			result += ";";
+			result += label;
+			result += "=";
+			first = false;
+		} else {
+			result += "|";
+		}
+		result += ExecutionRegionSelectionSourceKindToString(static_cast<ExecutionRegionSelectionSourceKind>(index));
+		result += ":";
+		result += std::to_string(count);
+	}
+}
+
+static void AppendExecutionRegionCapabilityTypeKindCounts(string &result, const char *label,
+                                                          const ExecutionRegionCapabilityTypeKindCounts &counts) {
+	bool first = true;
+	for (idx_t index = 0; index < EXECUTION_REGION_CAPABILITY_TYPE_KIND_COUNT; index++) {
+		auto count = counts[index];
+		if (count == 0) {
+			continue;
+		}
+		if (first) {
+			result += ";";
+			result += label;
+			result += "=";
+			first = false;
+		} else {
+			result += "|";
+		}
+		result += ExecutionRegionCapabilityTypeKindToString(static_cast<ExecutionRegionCapabilityTypeKind>(index));
+		result += ":";
+		result += std::to_string(count);
+	}
+}
+
+static void
+AppendExecutionRegionCapabilityValidityKindCounts(string &result, const char *label,
+                                                  const ExecutionRegionCapabilityValidityKindCounts &counts) {
+	bool first = true;
+	for (idx_t index = 0; index < EXECUTION_REGION_CAPABILITY_VALIDITY_KIND_COUNT; index++) {
+		auto count = counts[index];
+		if (count == 0) {
+			continue;
+		}
+		if (first) {
+			result += ";";
+			result += label;
+			result += "=";
+			first = false;
+		} else {
+			result += "|";
+		}
+		result +=
+		    ExecutionRegionCapabilityValidityKindToString(static_cast<ExecutionRegionCapabilityValidityKind>(index));
+		result += ":";
+		result += std::to_string(count);
+	}
+}
+
+static void AppendExecutionRegionCapabilityCount(string &result, const char *label, const char *capability, idx_t count,
+                                                 bool &first) {
+	if (count == 0) {
+		return;
+	}
+	if (first) {
+		result += ";";
+		result += label;
+		result += "=";
+		first = false;
+	} else {
+		result += "|";
+	}
+	result += capability;
+	result += ":";
+	result += std::to_string(count);
+}
+
+static void AppendExecutionRegionBackendCapabilityFacts(string &result, const ExecutionRegionLoweringPlan &plan) {
+	auto &facts = plan.capability_facts;
+	bool first_join = true;
+	AppendExecutionRegionCapabilityCount(result, "backend_join", "hash_probe", facts.backend_hash_join_probe_count,
+	                                     first_join);
+	AppendExecutionRegionCapabilityCount(result, "backend_join", "regular_hash_probe",
+	                                     facts.backend_regular_hash_join_probe_count, first_join);
+	AppendExecutionRegionCapabilityCount(result, "backend_join", "perfect_hash_probe",
+	                                     facts.backend_perfect_hash_join_probe_count, first_join);
+	AppendExecutionRegionCapabilityCount(result, "backend_join", "residual_hash_probe",
+	                                     facts.backend_residual_hash_join_probe_count, first_join);
+	AppendExecutionRegionCapabilityCount(result, "backend_join", "equality_key",
+	                                     facts.backend_hash_join_equality_key_count, first_join);
+	AppendExecutionRegionCapabilityCount(result, "backend_join", "non_equality_key",
+	                                     facts.backend_hash_join_non_equality_key_count, first_join);
+	AppendExecutionRegionCapabilityCount(result, "backend_join", "hash_build", facts.backend_hash_join_build_count,
+	                                     first_join);
+	AppendExecutionRegionCapabilityCount(result, "backend_join", "nested_loop_probe",
+	                                     facts.backend_nested_loop_join_probe_count, first_join);
+	AppendExecutionRegionCapabilityCount(result, "backend_join", "nested_loop_build",
+	                                     facts.backend_nested_loop_join_build_count, first_join);
+
+	bool first_aggregate = true;
+	AppendExecutionRegionCapabilityCount(result, "backend_aggregate", "hash_update",
+	                                     facts.backend_hash_aggregate_update_count, first_aggregate);
+	AppendExecutionRegionCapabilityCount(result, "backend_aggregate", "perfect_hash_update",
+	                                     facts.backend_perfect_hash_aggregate_update_count, first_aggregate);
+	AppendExecutionRegionCapabilityCount(result, "backend_aggregate", "ungrouped_update",
+	                                     facts.backend_ungrouped_aggregate_update_count, first_aggregate);
+	AppendExecutionRegionCapabilityCount(result, "backend_aggregate", "primitive_payload_update",
+	                                     facts.backend_primitive_aggregate_payload_update_count, first_aggregate);
+	AppendExecutionRegionCapabilityCount(result, "backend_aggregate", "grouped_state_address_lookup",
+	                                     facts.backend_grouped_state_address_lookup_count, first_aggregate);
+	AppendExecutionRegionCapabilityCount(result, "backend_aggregate", "generated_perfect_hash_lookup",
+	                                     facts.backend_generated_perfect_hash_lookup_count, first_aggregate);
+	AppendExecutionRegionCapabilityCount(result, "backend_aggregate", "native_state_address_lookup",
+	                                     facts.backend_native_state_address_lookup_count, first_aggregate);
+}
+
 string ExecutionRegionLoweringPlan::CompactEventReason() const {
 	string result;
 	if (!first_fusion_blocker.empty()) {
@@ -819,6 +1253,25 @@ string ExecutionRegionLoweringPlan::CompactEventReason() const {
 	}
 	result += "region-lowering:native=" + std::to_string(native_count) + ",boundary=" + std::to_string(boundary_count) +
 	          ",fully-fused=" + (fully_fused ? string("true") : "false");
+	AppendExecutionRegionOperatorKindCounts(result, "backend_native", capability_facts.native_operator_kind_counts);
+	AppendExecutionRegionOperatorKindCounts(result, "backend_boundary", capability_facts.boundary_operator_kind_counts);
+	AppendExecutionRegionVectorFormatKindCounts(result, "backend_input_format",
+	                                            capability_facts.native_input_format_counts);
+	AppendExecutionRegionVectorFormatKindCounts(result, "backend_output_format",
+	                                            capability_facts.native_output_format_counts);
+	AppendExecutionRegionVectorSourceKindCounts(result, "backend_vector_source",
+	                                            capability_facts.native_vector_source_counts);
+	AppendExecutionRegionSelectionSourceKindCounts(result, "backend_selection_source",
+	                                               capability_facts.native_selection_source_counts);
+	AppendExecutionRegionCapabilityValidityKindCounts(result, "backend_source_validity",
+	                                                  capability_facts.backend_source_validity_counts);
+	AppendExecutionRegionCapabilityTypeKindCounts(result, "backend_join_key_type",
+	                                              capability_facts.backend_join_key_type_counts);
+	AppendExecutionRegionCapabilityTypeKindCounts(result, "backend_group_key_type",
+	                                              capability_facts.backend_group_key_type_counts);
+	AppendExecutionRegionCapabilityTypeKindCounts(result, "backend_payload_type",
+	                                              capability_facts.backend_payload_type_counts);
+	AppendExecutionRegionBackendCapabilityFacts(result, *this);
 	if (selected_source_execution != ExecutionRegionSourceExecutionKind::NONE) {
 		result += ";selected-source-execution=";
 		result += ExecutionRegionSourceExecutionKindToString(selected_source_execution);

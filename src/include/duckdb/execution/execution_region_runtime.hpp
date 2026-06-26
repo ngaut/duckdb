@@ -37,6 +37,8 @@ struct ExecutionRegionLazyCodegenMetrics {
 
 struct ExecutionRegionJitRuntimeMetrics {
 	string hash_join_probe_layout;
+	vector<ExecutionRegionRecordedCounter> runtime_path_counts;
+	vector<ExecutionRegionRecordedCounter> materialization_boundary_counts;
 	ExecutionRegionLazyCodegenMetrics lazy_codegen;
 };
 
@@ -56,10 +58,15 @@ DUCKDB_API void AddExecutionRegionStageRuntime(vector<ExecutionRegionRecordedSta
                                                ExecutionRegionStageId stage, int64_t runtime_time_us, idx_t count = 1);
 DUCKDB_API void MergeExecutionRegionStageRuntime(vector<ExecutionRegionRecordedStageRuntime> &target,
                                                  const vector<ExecutionRegionRecordedStageRuntime> &source);
+DUCKDB_API void AddExecutionRegionRecordedCounter(vector<ExecutionRegionRecordedCounter> &counters,
+                                                  ExecutionRegionStageId counter, idx_t count = 1);
+DUCKDB_API void MergeExecutionRegionRecordedCounters(vector<ExecutionRegionRecordedCounter> &target,
+                                                     const vector<ExecutionRegionRecordedCounter> &source);
 DUCKDB_API void AddExecutionRegionLazyCodegenMetrics(ExecutionRegionLazyCodegenMetrics &target,
                                                      const ExecutionRegionLazyCodegenMetrics &source);
 DUCKDB_API string RenderExecutionRegionStageRuntimeBreakdown(const vector<ExecutionRegionRecordedStageRuntime> &stages);
 DUCKDB_API string RenderExecutionRegionStageCountBreakdown(const vector<ExecutionRegionRecordedStageRuntime> &stages);
+DUCKDB_API string RenderExecutionRegionCounterBreakdown(const vector<ExecutionRegionRecordedCounter> &counters);
 
 struct ExecutionRegionSourceContractMetrics : public ExecutionOperatorStageRecorder {
 	int64_t setup_runtime_time_us = 0;
@@ -89,6 +96,8 @@ public:
 	virtual void RecordGeneratedStageRuntime(ExecutionRegionStageId stage, int64_t runtime_time_us,
 	                                         idx_t count = 1) = 0;
 	virtual void RecordHashJoinProbeLayout(const char *layout);
+	virtual void RecordJitRuntimePath(const char *path, idx_t count = 1);
+	virtual void RecordJitMaterializationBoundary(const char *boundary, idx_t count = 1);
 	virtual void RecordLazyCodegen(const ExecutionRegionLazyCodegenMetrics &metrics);
 	virtual void Defer(string reason) = 0;
 	virtual const string &DeferredReason() const = 0;

@@ -46,6 +46,7 @@
 #include "duckdb/planner/expression_iterator.hpp"
 
 #include <chrono>
+#include <cstring>
 
 namespace duckdb {
 
@@ -2761,6 +2762,97 @@ void ExecutionMaterializeHashJoinProbe(const ExecutionHashJoinProbeBinding &bind
 		                              binding.lhs_output_column_indices.size());
 	}
 	result.SetChildCardinality(count);
+}
+
+bool ExecutionTryDirectGatherHashJoinRHSFixedColumn(const ExecutionHashJoinProbeBinding &binding, Vector &row_pointers,
+                                                    idx_t count, idx_t rhs_output_idx, Vector &result) {
+	if (!binding.ready || !binding.hash_table ||
+	    binding.layout_kind != ExecutionHashJoinProbeLayoutKind::REGULAR_HASH_TABLE ||
+	    binding.output_mode != ExecutionHashJoinProbeOutputMode::MATCHED_PROBE_AND_BUILD ||
+	    row_pointers.GetVectorType() != VectorType::FLAT_VECTOR) {
+		return false;
+	}
+	if (rhs_output_idx >= binding.rhs_output_column_count) {
+		return false;
+	}
+	const auto join_output_idx = binding.lhs_output_column_indices.size() + rhs_output_idx;
+	if (join_output_idx >= binding.output_types.size() || result.GetType() != binding.output_types[join_output_idx]) {
+		return false;
+	}
+	return binding.hash_table->TryGatherRHSColumnFlat(row_pointers, *FlatVector::IncrementalSelectionVector(), count,
+	                                                  rhs_output_idx, result);
+}
+
+bool ExecutionGetHashJoinRHSFixedColumnSource(const ExecutionHashJoinProbeBinding &binding, idx_t rhs_output_idx,
+                                              ExecutionHashJoinRHSFixedColumnSource &source) {
+	source = ExecutionHashJoinRHSFixedColumnSource();
+	if (!binding.ready || !binding.hash_table ||
+	    binding.layout_kind != ExecutionHashJoinProbeLayoutKind::REGULAR_HASH_TABLE ||
+	    binding.output_mode != ExecutionHashJoinProbeOutputMode::MATCHED_PROBE_AND_BUILD ||
+	    rhs_output_idx >= binding.rhs_output_column_count) {
+		source.blocker = "hash-join-rhs-source-binding-shape";
+		return false;
+	}
+	return binding.hash_table->TryGetRHSFixedColumnSource(rhs_output_idx, source);
+}
+
+bool ExecutionMaterializeHashJoinProbeProjectionSources(const ExecutionHashJoinProbeBinding &binding, DataChunk &input,
+                                                        Vector &row_pointers, const SelectionVector &match_sel,
+                                                        idx_t count, const vector<uint8_t> &referenced_columns,
+                                                        DataChunk &result,
+                                                        optional_ptr<ExecutionOperatorStageRecorder> recorder) {
+	if (!binding.ready || !binding.hash_table) {
+		throw InternalException(
+		    "execution native hash join projection-source materialization requires a bound hash join table");
+	}
+	if (binding.layout_kind != ExecutionHashJoinProbeLayoutKind::REGULAR_HASH_TABLE) {
+		return false;
+	}
+	if (binding.output_mode != ExecutionHashJoinProbeOutputMode::MATCHED_PROBE_AND_BUILD &&
+	    binding.output_mode != ExecutionHashJoinProbeOutputMode::MATCHED_PROBE_ONLY) {
+		return false;
+	}
+	auto expected_column_count = binding.lhs_output_column_indices.size();
+	if (binding.output_mode == ExecutionHashJoinProbeOutputMode::MATCHED_PROBE_AND_BUILD) {
+		expected_column_count += binding.rhs_output_column_count;
+	}
+	if (expected_column_count != result.ColumnCount() || expected_column_count != referenced_columns.size()) {
+		throw InternalException("execution native hash join projection-source column count mismatch");
+	}
+	const bool all_probe_rows_selected =
+	    count == input.size() && ExecutionHashJoinProbeSelectionIsIdentity(match_sel, count);
+	{
+		ExecutionOperatorStageTimer timer(recorder, all_probe_rows_selected ? "reference_probe_sources"
+		                                                                    : "slice_probe_sources");
+		for (idx_t col_idx = 0; col_idx < binding.lhs_output_column_indices.size(); col_idx++) {
+			if (!referenced_columns[col_idx]) {
+				continue;
+			}
+			auto input_col = binding.lhs_output_column_indices[col_idx];
+			if (input_col >= input.ColumnCount()) {
+				throw InternalException("execution native hash join projection-source column index out of range");
+			}
+			if (all_probe_rows_selected) {
+				result.data[col_idx].Reference(input.data[input_col]);
+			} else {
+				result.data[col_idx].Slice(input.data[input_col], match_sel, count);
+			}
+		}
+	}
+	if (binding.output_mode == ExecutionHashJoinProbeOutputMode::MATCHED_PROBE_AND_BUILD) {
+		ExecutionOperatorStageTimer timer(recorder, "gather_build_sources");
+		const auto rhs_offset = binding.lhs_output_column_indices.size();
+		for (idx_t rhs_col_idx = 0; rhs_col_idx < binding.rhs_output_column_count; rhs_col_idx++) {
+			const auto output_col_idx = rhs_offset + rhs_col_idx;
+			if (!referenced_columns[output_col_idx]) {
+				continue;
+			}
+			binding.hash_table->GatherRHSColumn(row_pointers, *FlatVector::IncrementalSelectionVector(), count,
+			                                    rhs_col_idx, result.data[output_col_idx]);
+		}
+	}
+	result.SetChildCardinality(count);
+	return true;
 }
 
 void ExecutionMaterializePerfectHashJoinProbe(const ExecutionHashJoinProbeBinding &binding, DataChunk &input,

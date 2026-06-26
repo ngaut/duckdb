@@ -204,6 +204,21 @@ public:
 		}
 	}
 
+	void RecordJitRuntimePath(const char *path, idx_t count) override {
+		if (!trace_runtime || !path || !path[0]) {
+			return;
+		}
+		AddExecutionRegionRecordedCounter(jit_runtime.runtime_path_counts, ExecutionRegionStageId(path), count);
+	}
+
+	void RecordJitMaterializationBoundary(const char *boundary, idx_t count) override {
+		if (!trace_runtime || !boundary || !boundary[0]) {
+			return;
+		}
+		AddExecutionRegionRecordedCounter(jit_runtime.materialization_boundary_counts, ExecutionRegionStageId(boundary),
+		                                  count);
+	}
+
 	void RecordLazyCodegen(const ExecutionRegionLazyCodegenMetrics &metrics) override {
 		if (!trace_runtime) {
 			return;

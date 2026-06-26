@@ -59,6 +59,8 @@ enum JitEventColumn : idx_t {
 	JIT_EVENT_LAZY_MACHINE_CODEGEN_TIME_US,
 	JIT_EVENT_LAZY_CODE_SIZE,
 	JIT_EVENT_HASH_JOIN_PROBE_LAYOUT,
+	JIT_EVENT_JIT_RUNTIME_PATH_COUNTS,
+	JIT_EVENT_JIT_MATERIALIZATION_BOUNDARY_COUNTS,
 	JIT_EVENT_CANDIDATE_PIPELINE_SHAPE,
 	JIT_EVENT_RUNNER_COST_PROFILE,
 	JIT_EVENT_RUNNER_COST_ROWS,
@@ -72,6 +74,9 @@ enum JitEventColumn : idx_t {
 	JIT_EVENT_RUNNER_COST_NATIVE_GROUPED_AGGREGATE_STAGE_COUNT,
 	JIT_EVENT_RUNNER_COST_NATIVE_SORT_STAGE_COUNT,
 	JIT_EVENT_RUNNER_COST_FULL_PIPELINE,
+	JIT_EVENT_RUNNER_COST_FUNDED_PROTOCOL_RULE,
+	JIT_EVENT_RUNNER_COST_STARTUP_RULES,
+	JIT_EVENT_RUNNER_COST_SELECTION_REASON,
 	JIT_EVENT_RUNNER_COST_GENERATED_WORK_CLASS,
 	JIT_EVENT_RUNNER_COST_NATIVE_PROTOCOL_CLASS,
 	JIT_EVENT_RUNNER_COST_GENERATED_EXPRESSION_WORK,
@@ -105,7 +110,7 @@ static constexpr idx_t JIT_EVENT_STAGE_TIMING_COLUMN_OFFSET = JIT_EVENT_IR_LOWER
 static_assert(JIT_EVENT_KERNEL_BUILD_TIME_US - JIT_EVENT_STAGE_TIMING_COLUMN_OFFSET + 1 ==
               EXECUTION_REGION_STAGE_TIMING_COLUMN_COUNT);
 static constexpr idx_t JIT_EVENT_RUNNER_COST_PROFILE_COLUMN_OFFSET = JIT_EVENT_RUNNER_COST_PROFILE;
-static_assert(JIT_EVENT_RUNNER_COST_FULL_PIPELINE - JIT_EVENT_RUNNER_COST_PROFILE_COLUMN_OFFSET + 1 ==
+static_assert(JIT_EVENT_RUNNER_COST_SELECTION_REASON - JIT_EVENT_RUNNER_COST_PROFILE_COLUMN_OFFSET + 1 ==
               EXECUTION_REGION_RUNNER_COST_PROFILE_COLUMN_COUNT);
 static constexpr idx_t JIT_EVENT_RUNNER_COST_WORK_COLUMN_OFFSET = JIT_EVENT_RUNNER_COST_GENERATED_EXPRESSION_WORK;
 static_assert(JIT_EVENT_RUNNER_COST_GPU_NET_BENEFIT - JIT_EVENT_RUNNER_COST_WORK_COLUMN_OFFSET + 1 ==
@@ -301,6 +306,14 @@ static void AppendJitEventColumn(Vector &output, idx_t column_id, const Executio
 	case JIT_EVENT_HASH_JOIN_PROBE_LAYOUT:
 		AppendExecutionRegionNullableString(output, entry.jit_runtime.hash_join_probe_layout);
 		return;
+	case JIT_EVENT_JIT_RUNTIME_PATH_COUNTS:
+		AppendExecutionRegionNullableString(
+		    output, RenderExecutionRegionCounterBreakdown(entry.jit_runtime.runtime_path_counts));
+		return;
+	case JIT_EVENT_JIT_MATERIALIZATION_BOUNDARY_COUNTS:
+		AppendExecutionRegionNullableString(
+		    output, RenderExecutionRegionCounterBreakdown(entry.jit_runtime.materialization_boundary_counts));
+		return;
 	case JIT_EVENT_CANDIDATE_PIPELINE_SHAPE:
 		if (entry.has_candidate) {
 			AppendExecutionRegionNullableString(output, entry.candidate_pipeline_shape);
@@ -386,6 +399,9 @@ static unique_ptr<FunctionData> DuckDBJitEventsBind(ClientContext &context, Tabl
 	AddExecutionRegionTableFunctionColumn(return_types, names, "lazy_machine_codegen_time_us", LogicalType::BIGINT);
 	AddExecutionRegionTableFunctionColumn(return_types, names, "lazy_code_size", LogicalType::UBIGINT);
 	AddExecutionRegionTableFunctionColumn(return_types, names, "hash_join_probe_layout", LogicalType::VARCHAR);
+	AddExecutionRegionTableFunctionColumn(return_types, names, "jit_runtime_path_counts", LogicalType::VARCHAR);
+	AddExecutionRegionTableFunctionColumn(return_types, names, "jit_materialization_boundary_counts",
+	                                      LogicalType::VARCHAR);
 	AddExecutionRegionTableFunctionColumn(return_types, names, "candidate_pipeline_shape", LogicalType::VARCHAR);
 	AddJitEventRunnerCostColumns(return_types, names);
 	AddExecutionRegionCandidateTraceColumns(return_types, names);

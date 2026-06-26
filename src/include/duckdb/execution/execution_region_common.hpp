@@ -7,6 +7,7 @@
 
 #pragma once
 
+#include "duckdb/common/array.hpp"
 #include "duckdb/common/common.hpp"
 
 namespace duckdb {
@@ -41,8 +42,12 @@ enum class ExecutionRegionOperatorKind : uint8_t {
 	CTE,
 	RESULT_COLLECTOR,
 	EXPLAIN_ANALYZE,
-	CREATE_TABLE_AS
+	CREATE_TABLE_AS,
+	COUNT
 };
+
+static constexpr idx_t EXECUTION_REGION_OPERATOR_KIND_COUNT = static_cast<idx_t>(ExecutionRegionOperatorKind::COUNT);
+using ExecutionRegionOperatorKindCounts = array<idx_t, EXECUTION_REGION_OPERATOR_KIND_COUNT>;
 enum class ExecutionRegionNodeKind : uint8_t { SOURCE, FILTER, PROJECTION, OPERATOR, SINK };
 enum class ExecutionRegionABI : uint8_t { NONE, FULL_PIPELINE };
 enum class ExecutionRegionSourceKind : uint8_t {
@@ -99,10 +104,52 @@ enum class ExecutionRegionVectorFormatKind : uint8_t {
 	UNIFIED_VECTOR,
 	FLAT_VECTOR,
 	SELECTION_VECTOR,
-	BOUNDARY
+	BOUNDARY,
+	COUNT
 };
-enum class ExecutionRegionVectorSourceKind : uint8_t { NONE, REGION_INPUT, OPERATOR_OUTPUT, BOUNDARY };
-enum class ExecutionRegionSelectionSourceKind : uint8_t { NONE, INPUT_SELECTION, FILTER_SELECTION, BOUNDARY };
+static constexpr idx_t EXECUTION_REGION_VECTOR_FORMAT_KIND_COUNT =
+    static_cast<idx_t>(ExecutionRegionVectorFormatKind::COUNT);
+using ExecutionRegionVectorFormatKindCounts = array<idx_t, EXECUTION_REGION_VECTOR_FORMAT_KIND_COUNT>;
+enum class ExecutionRegionVectorSourceKind : uint8_t { NONE, REGION_INPUT, OPERATOR_OUTPUT, BOUNDARY, COUNT };
+static constexpr idx_t EXECUTION_REGION_VECTOR_SOURCE_KIND_COUNT =
+    static_cast<idx_t>(ExecutionRegionVectorSourceKind::COUNT);
+using ExecutionRegionVectorSourceKindCounts = array<idx_t, EXECUTION_REGION_VECTOR_SOURCE_KIND_COUNT>;
+enum class ExecutionRegionSelectionSourceKind : uint8_t { NONE, INPUT_SELECTION, FILTER_SELECTION, BOUNDARY, COUNT };
+static constexpr idx_t EXECUTION_REGION_SELECTION_SOURCE_KIND_COUNT =
+    static_cast<idx_t>(ExecutionRegionSelectionSourceKind::COUNT);
+using ExecutionRegionSelectionSourceKindCounts = array<idx_t, EXECUTION_REGION_SELECTION_SOURCE_KIND_COUNT>;
+enum class ExecutionRegionCapabilityTypeKind : uint8_t {
+	UNKNOWN,
+	BOOL,
+	INT8,
+	INT16,
+	INT32,
+	INT64,
+	INT128,
+	UINT8,
+	UINT16,
+	UINT32,
+	UINT64,
+	UINT128,
+	FLOAT,
+	DOUBLE,
+	DECIMAL16,
+	DECIMAL32,
+	DECIMAL64,
+	DECIMAL128,
+	DATE,
+	VARCHAR,
+	POINTER,
+	OTHER,
+	COUNT
+};
+static constexpr idx_t EXECUTION_REGION_CAPABILITY_TYPE_KIND_COUNT =
+    static_cast<idx_t>(ExecutionRegionCapabilityTypeKind::COUNT);
+using ExecutionRegionCapabilityTypeKindCounts = array<idx_t, EXECUTION_REGION_CAPABILITY_TYPE_KIND_COUNT>;
+enum class ExecutionRegionCapabilityValidityKind : uint8_t { UNKNOWN, NOT_NULL, MAY_HAVE_NULL, COUNT };
+static constexpr idx_t EXECUTION_REGION_CAPABILITY_VALIDITY_KIND_COUNT =
+    static_cast<idx_t>(ExecutionRegionCapabilityValidityKind::COUNT);
+using ExecutionRegionCapabilityValidityKindCounts = array<idx_t, EXECUTION_REGION_CAPABILITY_VALIDITY_KIND_COUNT>;
 enum class ExecutionRegionBoundaryKind : uint8_t {
 	NONE,
 	SCAN,
@@ -232,6 +279,11 @@ struct ExecutionRegionRecordedStageRuntime {
 	idx_t count = 0;
 };
 
+struct ExecutionRegionRecordedCounter {
+	ExecutionRegionStageId counter;
+	idx_t count = 0;
+};
+
 struct ExecutionRegionOpenRequest {
 	bool present = false;
 	ExecutionRegionSourceExecutionKind source_execution = ExecutionRegionSourceExecutionKind::NONE;
@@ -275,6 +327,8 @@ DUCKDB_API const char *ExecutionRegionAggregateOperatorKindToString(ExecutionReg
 DUCKDB_API const char *ExecutionRegionVectorFormatKindToString(ExecutionRegionVectorFormatKind kind);
 DUCKDB_API const char *ExecutionRegionVectorSourceKindToString(ExecutionRegionVectorSourceKind kind);
 DUCKDB_API const char *ExecutionRegionSelectionSourceKindToString(ExecutionRegionSelectionSourceKind kind);
+DUCKDB_API const char *ExecutionRegionCapabilityTypeKindToString(ExecutionRegionCapabilityTypeKind kind);
+DUCKDB_API const char *ExecutionRegionCapabilityValidityKindToString(ExecutionRegionCapabilityValidityKind kind);
 DUCKDB_API const char *ExecutionRegionBoundaryKindToString(ExecutionRegionBoundaryKind kind);
 DUCKDB_API const char *ExecutionRegionOwnershipKindToString(ExecutionRegionOwnershipKind kind);
 DUCKDB_API const char *ExecutionRegionStageKindToString(ExecutionRegionStageKind kind);

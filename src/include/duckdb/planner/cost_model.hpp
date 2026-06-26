@@ -85,6 +85,9 @@ struct PhysicalRunnerCostProfile {
 	bool full_pipeline = false;
 	PhysicalRunnerGeneratedWorkClass generated_work_class = PhysicalRunnerGeneratedWorkClass::NONE;
 	PhysicalRunnerNativeProtocolClass native_protocol_class = PhysicalRunnerNativeProtocolClass::NONE;
+	string funded_protocol_rule;
+	string startup_rules;
+	string selection_reason;
 	int64_t generated_expression_work = 0;
 	int64_t generated_stage_work = 0;
 	int64_t native_operator_work = 0;

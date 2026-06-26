@@ -70,6 +70,18 @@ struct ExecutionPerfectHashJoinTableLayout {
 	string blocker;
 };
 
+struct ExecutionHashJoinRHSFixedColumnSource {
+	bool ready = false;
+	LogicalType type;
+	PhysicalType physical_type = PhysicalType::INVALID;
+	idx_t rhs_output_idx = DConstants::INVALID_INDEX;
+	idx_t layout_column_idx = DConstants::INVALID_INDEX;
+	idx_t layout_column_count = 0;
+	idx_t layout_offset = DConstants::INVALID_INDEX;
+	bool all_valid = false;
+	string blocker;
+};
+
 DUCKDB_API bool ExecutionGetHashJoinTableLayout(const JoinHashTable &hash_table, ExecutionHashJoinTableLayout &layout);
 
 DUCKDB_API string DescribeExecutionHashJoinTableLayout(const ExecutionHashJoinTableLayout &layout);

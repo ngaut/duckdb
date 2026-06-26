@@ -50,6 +50,14 @@ static string EventGeneratedStageCountBreakdown(const ExecutionRegionEvent &even
 	return RenderExecutionRegionStageCountBreakdown(event.generated_stage_runtime);
 }
 
+static string EventJitRuntimePathCounts(const ExecutionRegionEvent &event) {
+	return RenderExecutionRegionCounterBreakdown(event.jit_runtime.runtime_path_counts);
+}
+
+static string EventJitMaterializationBoundaryCounts(const ExecutionRegionEvent &event) {
+	return RenderExecutionRegionCounterBreakdown(event.jit_runtime.materialization_boundary_counts);
+}
+
 struct JitTestDatabase {
 	JitTestDatabase() : con(db), context(*con.context), manager(ExecutionRegionManager::Get(context)) {
 	}

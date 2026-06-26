@@ -34,8 +34,6 @@ struct PartitionedTupleDataAppendState;
 struct JoinFilterLocalState;
 struct JoinFilterPushdownInfo;
 
-typedef void (*ExecutionGroupedAggregateStateAddressUpdateFunction)(Vector &addresses, void *state);
-
 enum class ExecutionOperatorBindResult : uint8_t { READY, DEFERRED, INVALID };
 enum class ExecutionOperatorReadinessStatus : uint8_t { READY, NOT_READY, INVALID };
 
@@ -105,10 +103,10 @@ struct ExecutionGroupedAggregateStateAddressState {
 	}
 	virtual void ResolveStateAddresses(DataChunk &input, Vector &addresses,
 	                                   optional_ptr<ExecutionOperatorStageRecorder> recorder = nullptr) = 0;
-	virtual bool TryUpdateExistingGroups(DataChunk &input, const ExecutionRegionSinkInfo &sink_info,
-	                                     const vector<const ExecutionPrimitiveAggregateUpdateLane *> &lanes,
-	                                     optional_ptr<ExecutionOperatorStageRecorder> recorder = nullptr,
-	                                     bool finish = true) {
+	virtual bool TryUpdateNewGroups(DataChunk &input, const ExecutionRegionSinkInfo &sink_info,
+	                                const vector<const ExecutionPrimitiveAggregateUpdateLane *> &lanes,
+	                                optional_ptr<ExecutionOperatorStageRecorder> recorder = nullptr,
+	                                bool finish = true) {
 		(void)input;
 		(void)sink_info;
 		(void)lanes;
@@ -116,7 +114,22 @@ struct ExecutionGroupedAggregateStateAddressState {
 		(void)finish;
 		return false;
 	}
-	virtual bool TryUpdateNewGroups(DataChunk &input, const ExecutionRegionSinkInfo &sink_info,
+	virtual bool TryUpdateNewGroupsWithPayloadInput(
+	    DataChunk &groups, DataChunk &payload_input, const vector<idx_t> &payload_source_indices,
+	    const ExecutionRegionSinkInfo &sink_info, const vector<const ExecutionPrimitiveAggregateUpdateLane *> &lanes,
+	    optional_ptr<ExecutionOperatorStageRecorder> recorder = nullptr, bool finish = true,
+	    optional_ptr<Vector> precomputed_hashes = nullptr) {
+		(void)groups;
+		(void)payload_input;
+		(void)payload_source_indices;
+		(void)sink_info;
+		(void)lanes;
+		(void)recorder;
+		(void)finish;
+		(void)precomputed_hashes;
+		return false;
+	}
+	virtual bool TryAppendNewGroups(DataChunk &input, const ExecutionRegionSinkInfo &sink_info,
 	                                const vector<const ExecutionPrimitiveAggregateUpdateLane *> &lanes,
 	                                optional_ptr<ExecutionOperatorStageRecorder> recorder = nullptr,
 	                                bool finish = true) {
@@ -139,11 +152,53 @@ struct ExecutionGroupedAggregateStateAddressState {
 		(void)finish;
 		return false;
 	}
+	virtual bool TryUpdateExistingGroupsWithSelectedStateAddresses(
+	    DataChunk &input, const ExecutionRegionSinkInfo &sink_info,
+	    ExecutionGroupedAggregateStateSelectedAddressUpdateFunction update_function, void *update_state,
+	    optional_ptr<ExecutionOperatorStageRecorder> recorder = nullptr, bool finish = true) {
+		(void)input;
+		(void)sink_info;
+		(void)update_function;
+		(void)update_state;
+		(void)recorder;
+		(void)finish;
+		return false;
+	}
 	virtual bool TryUpdateNewGroupsWithStateAddresses(
 	    DataChunk &input, const ExecutionRegionSinkInfo &sink_info,
 	    ExecutionGroupedAggregateStateAddressUpdateFunction update_function, void *update_state,
 	    optional_ptr<ExecutionOperatorStageRecorder> recorder = nullptr, bool finish = true) {
 		(void)input;
+		(void)sink_info;
+		(void)update_function;
+		(void)update_state;
+		(void)recorder;
+		(void)finish;
+		return false;
+	}
+	virtual bool TryUpdateNewGroupsWithSelectedStateAddresses(
+	    DataChunk &input, const ExecutionRegionSinkInfo &sink_info,
+	    ExecutionGroupedAggregateStateSelectedAddressUpdateFunction update_function, void *update_state,
+	    optional_ptr<ExecutionOperatorStageRecorder> recorder = nullptr, bool finish = true,
+	    optional_ptr<Vector> precomputed_hashes = nullptr) {
+		(void)input;
+		(void)sink_info;
+		(void)update_function;
+		(void)update_state;
+		(void)recorder;
+		(void)finish;
+		(void)precomputed_hashes;
+		return false;
+	}
+	virtual bool TryUpdateNewGroupsWithRowPointerKeys(
+	    DataChunk &payload_input, Vector &row_pointers, idx_t count,
+	    const vector<ExecutionRowPointerGroupKeySource> &group_sources, const ExecutionRegionSinkInfo &sink_info,
+	    ExecutionGroupedAggregateStateSelectedAddressUpdateFunction update_function, void *update_state,
+	    optional_ptr<ExecutionOperatorStageRecorder> recorder = nullptr, bool finish = true) {
+		(void)payload_input;
+		(void)row_pointers;
+		(void)count;
+		(void)group_sources;
 		(void)sink_info;
 		(void)update_function;
 		(void)update_state;
@@ -339,6 +394,19 @@ DUCKDB_API void ExecutionMaterializeHashJoinProbe(const ExecutionHashJoinProbeBi
                                                   Vector &row_pointers, const SelectionVector &match_sel, idx_t count,
                                                   DataChunk &result,
                                                   optional_ptr<ExecutionOperatorStageRecorder> recorder = nullptr);
+
+DUCKDB_API bool ExecutionTryDirectGatherHashJoinRHSFixedColumn(const ExecutionHashJoinProbeBinding &binding,
+                                                               Vector &row_pointers, idx_t count,
+                                                               idx_t rhs_output_idx, Vector &result);
+
+DUCKDB_API bool ExecutionGetHashJoinRHSFixedColumnSource(const ExecutionHashJoinProbeBinding &binding,
+                                                         idx_t rhs_output_idx,
+                                                         ExecutionHashJoinRHSFixedColumnSource &source);
+
+DUCKDB_API bool ExecutionMaterializeHashJoinProbeProjectionSources(
+    const ExecutionHashJoinProbeBinding &binding, DataChunk &input, Vector &row_pointers,
+    const SelectionVector &match_sel, idx_t count, const vector<uint8_t> &referenced_columns, DataChunk &result,
+    optional_ptr<ExecutionOperatorStageRecorder> recorder = nullptr);
 
 DUCKDB_API void
 ExecutionMaterializePerfectHashJoinProbe(const ExecutionHashJoinProbeBinding &binding, DataChunk &input,

@@ -100,6 +100,8 @@ COUNTER_FIELDS = (
     "lazy_code_size",
     "code_size",
     "hash_join_probe_layout",
+    "jit_runtime_path_counts",
+    "jit_materialization_boundary_counts",
     "runner_cost_rows",
     "runner_cost_batches",
     "runner_cost_expression_cost",

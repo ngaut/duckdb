@@ -10,6 +10,7 @@
 #include "duckdb/planner/filter/table_filter_function_helpers.hpp"
 
 #include "duckdb/common/operator/cast_operators.hpp"
+#include "duckdb/common/vector/flat_vector.hpp"
 #include "duckdb/common/operator/subtract.hpp"
 #include "duckdb/common/vector_operations/vector_operations.hpp"
 #include "duckdb/common/vector_size.hpp"
@@ -23,9 +24,7 @@ namespace duckdb {
 static constexpr idx_t MAX_NUM_SECTORS = (1ULL << 26);
 static constexpr idx_t MIN_NUM_BITS_PER_KEY = 12;
 static constexpr idx_t MIN_NUM_BITS = 512;
-static constexpr idx_t LOG_SECTOR_SIZE = 6;             // a sector is 64 bits, log2(64) = 6
-static constexpr idx_t SHIFT_MASK = 0x3F3F3F3F3F3F3F3F; // 6 bits for 64 positions
-static constexpr idx_t N_BITS = 4;                      // the number of bits to set per hash
+static constexpr idx_t LOG_SECTOR_SIZE = 6; // a sector is 64 bits, log2(64) = 6
 
 void BloomFilter::Initialize(ClientContext &context_p, idx_t number_of_rows) {
 	BufferManager &buffer_manager = BufferManager::GetBufferManager(context_p);
@@ -60,21 +59,14 @@ void BloomFilter::Reset() {
 	bf = nullptr;
 }
 
-inline uint64_t GetMask(const hash_t hash) {
-	const uint64_t shifts = hash & SHIFT_MASK;
-	const auto shifts_8 = reinterpret_cast<const uint8_t *>(&shifts);
-
-	uint64_t mask = 0;
-
-	for (idx_t bit_idx = 8 - N_BITS; bit_idx < 8; bit_idx++) {
-		const uint8_t bit_pos = shifts_8[bit_idx];
-		mask |= (1ULL << bit_pos);
-	}
-
-	return mask;
-}
-
 void BloomFilter::InsertHashes(const Vector &hashes_v) const {
+	if (hashes_v.GetVectorType() == VectorType::FLAT_VECTOR && FlatVector::Validity(hashes_v).CannotHaveNull()) {
+		const auto hashes = FlatVector::GetData<hash_t>(hashes_v);
+		for (idx_t i = 0; i < hashes_v.size(); i++) {
+			InsertOne(hashes[i]);
+		}
+		return;
+	}
 	for (auto hash : hashes_v.Values<uint64_t>()) {
 		InsertOne(hash.GetValue());
 	}
@@ -96,7 +88,7 @@ idx_t BloomFilter::LookupHashes(const Vector &hashes_v, SelectionVector &result_
 inline void BloomFilter::InsertOne(const hash_t hash) const {
 	D_ASSERT(initialized);
 	const uint64_t bf_offset = hash & bitmask;
-	const uint64_t mask = GetMask(hash);
+	const uint64_t mask = BloomFilter::GetMask(hash);
 	atomic<uint64_t> &slot = *reinterpret_cast<atomic<uint64_t> *>(&bf[bf_offset]);
 
 	slot.fetch_or(mask, std::memory_order_relaxed);
@@ -105,7 +97,7 @@ inline void BloomFilter::InsertOne(const hash_t hash) const {
 bool BloomFilter::LookupOne(const hash_t hash) const {
 	D_ASSERT(initialized);
 	const uint64_t bf_offset = hash & bitmask;
-	const uint64_t mask = GetMask(hash);
+	const uint64_t mask = BloomFilter::GetMask(hash);
 	atomic<uint64_t> &slot = *reinterpret_cast<atomic<uint64_t> *>(&bf[bf_offset]);
 	auto bf_entry = slot.load(std::memory_order_relaxed);
 

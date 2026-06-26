@@ -823,6 +823,29 @@ static void EmitLoadFusedAggregateSourceIndex(struct sljit_compiler *compiler, s
 	sljit_set_label(have_source_index, sljit_emit_label(compiler));
 }
 
+static void EmitLoadGroupedAggregateStateAddress(struct sljit_compiler *compiler, sljit_s32 target_reg,
+                                                 sljit_s32 logical_index_reg) {
+	sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_R0, 0, SLJIT_MEM1(SLJIT_S0),
+	               offsetof(SljitNativeVectorInput, aggregate_state_addresses));
+	sljit_emit_op1(compiler, SLJIT_MOV_U8, SLJIT_R1, 0, SLJIT_MEM1(SLJIT_S0),
+	               offsetof(SljitNativeVectorInput, aggregate_state_addresses_by_loop_index));
+	auto use_logical_index = sljit_emit_cmp(compiler, SLJIT_EQUAL, SLJIT_R1, 0, SLJIT_IMM, 0);
+	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R1, 0, SLJIT_S1, 0);
+	auto have_address_index_input = sljit_emit_jump(compiler, SLJIT_JUMP);
+	sljit_set_label(use_logical_index, sljit_emit_label(compiler));
+	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R1, 0, logical_index_reg, 0);
+	sljit_set_label(have_address_index_input, sljit_emit_label(compiler));
+
+	sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_R2, 0, SLJIT_MEM1(SLJIT_S0),
+	               offsetof(SljitNativeVectorInput, aggregate_state_address_sel));
+	auto no_address_sel = sljit_emit_cmp(compiler, SLJIT_EQUAL, SLJIT_R2, 0, SLJIT_IMM, 0);
+	sljit_emit_op1(compiler, SLJIT_MOV_U32, SLJIT_R1, 0, SLJIT_MEM2(SLJIT_R2, SLJIT_R1), 2);
+	auto have_address_index = sljit_emit_jump(compiler, SLJIT_JUMP);
+	sljit_set_label(no_address_sel, sljit_emit_label(compiler));
+	sljit_set_label(have_address_index, sljit_emit_label(compiler));
+	sljit_emit_op1(compiler, SLJIT_MOV_P, target_reg, 0, SLJIT_MEM2(SLJIT_R0, SLJIT_R1), 3);
+}
+
 static struct sljit_jump *EmitFusedAggregateJumpIfValidityNull(struct sljit_compiler *compiler,
                                                                sljit_sw validity_array_offset, idx_t lane_idx,
                                                                sljit_s32 index_reg) {
@@ -2448,9 +2471,7 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeGroupedFusedPrimitiveAggre
 	auto loop = sljit_emit_label(compiler);
 	auto done = sljit_emit_cmp(compiler, SLJIT_GREATER_EQUAL, SLJIT_S1, 0, SLJIT_S2, 0);
 	EmitLoadFusedAggregateExecuteIndex(compiler);
-	sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_R0, 0, SLJIT_MEM1(SLJIT_S0),
-	               offsetof(SljitNativeVectorInput, aggregate_state_addresses));
-	sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_S4, 0, SLJIT_MEM2(SLJIT_R0, SLJIT_S3), 3);
+	EmitLoadGroupedAggregateStateAddress(compiler, SLJIT_S4, SLJIT_S3);
 
 	for (idx_t payload_idx = 0; payload_idx < payloads.size(); payload_idx++) {
 		auto &aggregate = aggregates[payload_idx];
@@ -2524,15 +2545,13 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeGroupedFusedTypedExpressio
 
 		auto fast_loop = sljit_emit_label(compiler);
 		fast_done = sljit_emit_cmp(compiler, SLJIT_GREATER_EQUAL, SLJIT_S1, 0, SLJIT_S2, 0);
-		sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_R0, 0, SLJIT_MEM1(SLJIT_S0),
-		               offsetof(SljitNativeVectorInput, aggregate_state_addresses));
-		sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_S3, 0, SLJIT_MEM2(SLJIT_R0, SLJIT_S1), 3);
+		EmitLoadGroupedAggregateStateAddress(compiler, SLJIT_S4, SLJIT_S1);
 
 		for (idx_t payload_idx = 0; payload_idx < payloads.size(); payload_idx++) {
 			auto &aggregate = aggregates[payload_idx];
 			const auto state_offset = contract.grouped_state_offsets[aggregate.aggregate_index];
 			if (aggregate.primitive_update_kind == AggregatePrimitiveUpdateKind::COUNT_STAR) {
-				EmitSljitGroupedAggregateIncrementInt64Immediate(compiler, SLJIT_S3, state_offset,
+				EmitSljitGroupedAggregateIncrementInt64Immediate(compiler, SLJIT_S4, state_offset,
 				                                                 aggregate.primitive_update_state_value_offset);
 				continue;
 			}
@@ -2547,11 +2566,11 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeGroupedFusedTypedExpressio
 			}
 			if (aggregate.primitive_update_kind == AggregatePrimitiveUpdateKind::SUM_INT64) {
 				EmitSljitGroupedAggregateAccumulateInt64Immediate(
-				    compiler, SLJIT_S3, state_offset, aggregate.primitive_update_state_value_offset,
+				    compiler, SLJIT_S4, state_offset, aggregate.primitive_update_state_value_offset,
 				    aggregate.primitive_update_state_is_set_offset, SLJIT_R2);
 			} else {
 				EmitSljitGroupedAggregateAccumulateHugeintImmediate(
-				    compiler, SLJIT_S3, state_offset, aggregate.primitive_update_state_value_offset,
+				    compiler, SLJIT_S4, state_offset, aggregate.primitive_update_state_value_offset,
 				    aggregate.primitive_update_state_is_set_offset, SLJIT_R2);
 			}
 		}
@@ -2565,9 +2584,7 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeGroupedFusedTypedExpressio
 	auto done = sljit_emit_cmp(compiler, SLJIT_GREATER_EQUAL, SLJIT_S1, 0, SLJIT_S2, 0);
 	EmitLoadSljitExpressionTreeLogicalIndex(compiler);
 	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_MEM1(SLJIT_SP), logical_index_offset, SLJIT_S3, 0);
-	sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_R0, 0, SLJIT_MEM1(SLJIT_S0),
-	               offsetof(SljitNativeVectorInput, aggregate_state_addresses));
-	sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_R0, 0, SLJIT_MEM2(SLJIT_R0, SLJIT_S3), 3);
+	EmitLoadGroupedAggregateStateAddress(compiler, SLJIT_R0, SLJIT_S3);
 	sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_MEM1(SLJIT_SP), state_ptr_offset, SLJIT_R0, 0);
 
 	for (idx_t payload_idx = 0; payload_idx < payloads.size(); payload_idx++) {

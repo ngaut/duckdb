@@ -30,6 +30,7 @@ class ColumnDataCollection;
 struct ColumnDataAppendState;
 struct ClientConfig;
 struct ExecutionHashJoinTableLayout;
+struct ExecutionHashJoinRHSFixedColumnSource;
 struct ResidualPredicateInfo;
 class PhysicalHashJoin;
 
@@ -270,6 +271,14 @@ public:
 	//! result column rhs_col_offset; routes through EmitDictVectors when use_dict_emission is active.
 	void GatherRHS(Vector &row_ptrs, const SelectionVector &ptr_sel, const idx_t count, DataChunk &result,
 	               idx_t rhs_col_offset) const;
+	//! Emit one RHS output column for matched rows row_ptrs[ptr_sel[0..count)].
+	void GatherRHSColumn(Vector &row_ptrs, const SelectionVector &ptr_sel, const idx_t count, idx_t rhs_output_idx,
+	                     Vector &result) const;
+	//! Emit one fixed-width RHS output column into a flat result vector when the caller immediately consumes flat data.
+	bool TryGatherRHSColumnFlat(Vector &row_ptrs, const SelectionVector &ptr_sel, const idx_t count,
+	                            idx_t rhs_output_idx, Vector &result) const;
+	//! Return a fixed-width RHS output column's row-layout source when row pointers can safely load it directly.
+	bool TryGetRHSFixedColumnSource(idx_t rhs_output_idx, ExecutionHashJoinRHSFixedColumnSource &source) const;
 	//! Follow the chain pointer; when USE_DICT_EMISSION, resolves via aux_next_ptrs
 	template <bool USE_DICT_EMISSION>
 	inline data_ptr_t GetNextPointer(data_ptr_t row_ptr) const {

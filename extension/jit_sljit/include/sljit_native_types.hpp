@@ -181,6 +181,8 @@ struct SljitNativeVectorInput {
 	idx_t *aggregate_row_count = nullptr;
 	idx_t **aggregate_row_counts = nullptr;
 	const uintptr_t *aggregate_state_addresses = nullptr;
+	const sel_t *aggregate_state_address_sel = nullptr;
+	bool aggregate_state_addresses_by_loop_index = false;
 	idx_t aggregate_state_offset = 0;
 	idx_t aggregate_state_value_offset = 0;
 	idx_t aggregate_state_is_set_offset = 0;
