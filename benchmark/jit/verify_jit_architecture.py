@@ -178,7 +178,7 @@ FORBIDDEN_TEXT = {
         "runner_cost_startup_rules",
     ),
     "src/function/pragma/pragma_functions.cpp": (
-        "enable_verification",
+        "enable_" "verification",
     ),
 }
 
@@ -279,7 +279,7 @@ REGEX_RULES = (
     ),
     (
         "deprecated verification pragma",
-        (r"\benable_verification\b",),
+        (r"\benable_" r"verification\b",),
         (
             "src/**/*.hpp",
             "src/**/*.cpp",

@@ -150,19 +150,16 @@ bool ExecutionRegionGraphMayHaveCostedAcceleration(const ExecutionRegionGraph &g
 	             parameters.gpu_runner_available ? parameters.gpu_full_pipeline_benefit : 0);
 	const bool has_generated_expression = graph.HasGeneratedExpression();
 	const bool has_native_operator_work = graph.HasNativeOperatorWork();
-	const bool has_native_aggregate_sink = graph.HasNativeAggregateSink();
 	if (generated_stage_benefit > 0 && has_generated_expression) {
 		return true;
 	}
-	if (native_operator_stage_benefit > 0 &&
-	    ((has_generated_expression && has_native_operator_work) || has_native_aggregate_sink)) {
+	if (native_operator_stage_benefit > 0 && has_native_operator_work) {
 		return true;
 	}
 	if (materialization_elision_benefit > 0 && has_generated_expression && graph.HasSink()) {
 		return true;
 	}
-	if (full_pipeline_benefit > 0 && graph.HasSource() && graph.HasSink() &&
-	    (has_generated_expression || !has_native_operator_work)) {
+	if (full_pipeline_benefit > 0 && graph.HasSource() && graph.HasSink()) {
 		return true;
 	}
 	return false;

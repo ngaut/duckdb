@@ -620,6 +620,61 @@ TEST_CASE("JIT regular hash aggregate updates existing groups through find-or-cr
 	    });
 }
 
+TEST_CASE("JIT preaggregated grouped primitive updates existing compact groups", "[api][jit]") {
+	DuckDB db;
+	Connection con(db);
+	auto &manager = ExecutionRegionManager::Get(*con.context);
+
+	ConfigureSljitForCoverage(con, false, true, true, 10000);
+	REQUIRE_NO_FAIL(con.Query("PRAGMA threads=1"));
+	REQUIRE_NO_FAIL(con.Query("SET perfect_ht_threshold=0"));
+	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_preaggregated_existing_grouped_update AS "
+	                          "SELECT ((i // 2) % 2)::INTEGER AS k, "
+	                          "       (i % 2 = 0)::INTEGER AS high_payload, "
+	                          "       (i % 2 <> 0)::INTEGER AS low_payload "
+	                          "FROM range(200000) tbl(i)"));
+
+	const string query = "SELECT k, "
+	                     "       sum(high_payload), "
+	                     "       sum(low_payload) "
+	                     "FROM jit_preaggregated_existing_grouped_update GROUP BY k ORDER BY k";
+	REQUIRE_NO_FAIL(con.Query("SET jit_policy='off'"));
+	auto reference = con.Query(query);
+	REQUIRE_NO_FAIL(*reference);
+	REQUIRE(reference->RowCount() == 2);
+
+	ConfigureSljitForCoverageSettings(con, false, true, true, 10000);
+	ClearJitTrace(manager, true);
+	auto result = con.Query(query);
+	REQUIRE_NO_FAIL(*result);
+	REQUIRE(result->RowCount() == reference->RowCount());
+	for (idx_t row_idx = 0; row_idx < result->RowCount(); row_idx++) {
+		for (idx_t col_idx = 0; col_idx < result->ColumnCount(); col_idx++) {
+			REQUIRE(result->GetValue(col_idx, row_idx).ToString() == reference->GetValue(col_idx, row_idx).ToString());
+		}
+	}
+
+	RequireJitEvent(
+	    manager,
+	    [](const ExecutionRegionEvent &event) {
+		    if (EventPhase(event) != "runtime" || event.backend_name != "sljit") {
+			    return false;
+		    }
+		    auto stage_counts = EventGeneratedStageCountBreakdown(event);
+		    return StringUtil::Contains(stage_counts, "aggregate_update.local_preaggregate_primitive_groups=") &&
+		           StringUtil::Contains(stage_counts,
+		                                "aggregate_update.direct_preaggregated_grouped_primitive_update=") &&
+		           StringUtil::Contains(stage_counts, "find_or_create_fast.selected_state_update=");
+	    },
+	    [](const ExecutionRegionEvent &event) {
+		    REQUIRE(StringUtil::Contains(EventGeneratedStageCountBreakdown(event), "find_or_create_fast.probe="));
+		    REQUIRE(StringUtil::Contains(EventJitRuntimePathCounts(event),
+		                                 "aggregate_update.direct_preaggregated_grouped_primitive_update="));
+		    REQUIRE(StringUtil::Contains(EventJitMaterializationBoundaryCounts(event),
+		                                 "aggregate_update.preaggregated_primitive_groups="));
+	    });
+}
+
 TEST_CASE("JIT regular hash aggregate appends new groups directly", "[api][jit]") {
 	DuckDB db;
 	Connection con(db);

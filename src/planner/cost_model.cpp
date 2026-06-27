@@ -361,12 +361,6 @@ static bool PhysicalRunnerNativeStageBenefitCanPay(const PhysicalRunnerCostInput
 	return input.native_join_stage_count > 0 || input.native_aggregate_stage_count > 0;
 }
 
-static bool PhysicalRunnerNativeAggregateBenefitPays(const PhysicalRunnerCostInput &input,
-                                                     const PhysicalRunnerCostParameters &parameters) {
-	return PhysicalRunnerNativeStageBenefitCanPay(input, parameters) && input.native_aggregate_stage_count > 0 &&
-	       input.generated_stage_count == 0 && input.materialization_elision_count == 0;
-}
-
 struct PhysicalRunnerAdmission {
 	string admission_class;
 	bool full_pipeline_benefit_pays = false;
@@ -387,9 +381,6 @@ static string PhysicalRunnerAdmissionClass(const PhysicalRunnerCostInput &input,
 		return input.input_scope == PhysicalRunnerCostInputScope::PHYSICAL_PIPELINE ? "physical_pipeline_graph"
 		                                                                            : "full_pipeline";
 	}
-	if (PhysicalRunnerNativeAggregateBenefitPays(input, parameters)) {
-		return "native_aggregate";
-	}
 	if (facts.native_operator_stage_count == 0) {
 		return facts.has_generated_compute_work && input.generated_stage_count > 0 &&
 		               parameters.generated_stage_benefit > 0
@@ -398,6 +389,9 @@ static string PhysicalRunnerAdmissionClass(const PhysicalRunnerCostInput &input,
 	}
 	if (facts.has_generated_compute_work && input.generated_stage_count > 0 && facts.no_native_sort) {
 		return "generated_native_fusion";
+	}
+	if (PhysicalRunnerNativeStageBenefitCanPay(input, parameters)) {
+		return "native_operator";
 	}
 	return "none";
 }

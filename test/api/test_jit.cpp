@@ -426,7 +426,7 @@ TEST_CASE("JIT Metal projection reports DECIMAL overflow", "[api][jit][metal]") 
 }
 #endif
 
-TEST_CASE("JIT CBO admits native aggregate stages without generated stage credit", "[api][jit]") {
+TEST_CASE("JIT CBO admits native operator stages without generated stage credit", "[api][jit]") {
 	PhysicalRunnerCostInput input;
 	input.estimated_cardinality = 2048;
 	input.native_aggregate_stage_count = 1;
@@ -440,10 +440,19 @@ TEST_CASE("JIT CBO admits native aggregate stages without generated stage credit
 	auto profile = DuckDBCostModel::SelectPhysicalRunner(input, parameters);
 	REQUIRE(profile.generated_stage_count == 0);
 	REQUIRE(profile.native_aggregate_stage_count == 1);
-	REQUIRE(profile.admission_class == "native_aggregate");
+	REQUIRE(profile.admission_class == "native_operator");
 	REQUIRE(profile.native_operator_work == 100);
 	REQUIRE(profile.saved_work_per_batch == 100);
 	REQUIRE(profile.selected_accelerated_runner);
+
+	input.native_aggregate_stage_count = 0;
+	input.native_join_stage_count = 1;
+	profile = DuckDBCostModel::SelectPhysicalRunner(input, parameters);
+	REQUIRE(profile.native_join_stage_count == 1);
+	REQUIRE(profile.admission_class == "native_operator");
+	REQUIRE(profile.native_operator_work == 100);
+	REQUIRE(profile.stateful_protocol_penalty == 640);
+	REQUIRE_FALSE(profile.selected_accelerated_runner);
 }
 
 TEST_CASE("JIT CBO admits generated native fusion from quantified benefit", "[api][jit]") {
@@ -492,7 +501,7 @@ TEST_CASE("JIT CBO admits generated native fusion from quantified benefit", "[ap
 	REQUIRE_FALSE(profile.selected_accelerated_runner);
 }
 
-TEST_CASE("JIT CBO scores native protocol work only after real generated admission", "[api][jit]") {
+TEST_CASE("JIT CBO admits costed native protocol work directly", "[api][jit]") {
 	PhysicalRunnerCostInput input;
 	input.estimated_cardinality = 300000;
 	input.native_join_stage_count = 1;
@@ -506,12 +515,12 @@ TEST_CASE("JIT CBO scores native protocol work only after real generated admissi
 
 	parameters.native_operator_stage_benefit = 1000;
 	profile = DuckDBCostModel::SelectPhysicalRunner(input, parameters);
-	REQUIRE(profile.admission_class == "none");
-	REQUIRE(profile.native_operator_work == 0);
+	REQUIRE(profile.admission_class == "native_operator");
+	REQUIRE(profile.native_operator_work == 1000);
 	REQUIRE(profile.stateful_protocol_penalty == 640);
-	REQUIRE(profile.saved_work_per_batch == -640);
-	REQUIRE(profile.selection_reason == "rejected_native_operator_work_uncosted");
-	REQUIRE_FALSE(profile.selected_accelerated_runner);
+	REQUIRE(profile.saved_work_per_batch == 360);
+	REQUIRE(profile.selection_reason == "admitted_admission_class:native_operator|native_operator_stage_benefit");
+	REQUIRE(profile.selected_accelerated_runner);
 
 	input.expression_cost = 1000;
 	input.generated_stage_count = 1;
@@ -1942,12 +1951,16 @@ TEST_CASE("JIT auto planner skips region graph when CBO already selects vectoriz
 	}
 }
 
-TEST_CASE("JIT auto planner skips region graph when pipeline has no costed acceleration", "[api][jit]") {
+TEST_CASE("JIT auto planner does not enter region graph when pipeline has no costed acceleration", "[api][jit]") {
 	JitTestDatabase test;
 	auto &con = test.con;
 	auto &manager = test.manager;
 
 	ConfigureSljit(con, "auto");
+	REQUIRE_NO_FAIL(con.Query("SET jit_cbo_generated_stage_benefit=0"));
+	REQUIRE_NO_FAIL(con.Query("SET jit_cbo_materialization_elision_benefit=0"));
+	REQUIRE_NO_FAIL(con.Query("SET jit_cbo_native_operator_stage_benefit=0"));
+	REQUIRE_NO_FAIL(con.Query("SET jit_cbo_full_pipeline_benefit=0"));
 	REQUIRE_NO_FAIL(con.Query("CREATE TEMP TABLE jit_auto_no_cost_left AS "
 	                          "SELECT i::BIGINT AS i FROM range(64) tbl(i)"));
 	REQUIRE_NO_FAIL(con.Query("CREATE TEMP TABLE jit_auto_no_cost_right AS "
@@ -1958,19 +1971,7 @@ TEST_CASE("JIT auto planner skips region graph when pipeline has no costed accel
 	REQUIRE_NO_FAIL(*result);
 	REQUIRE(result->GetValue(0, 0).ToString() == "64");
 
-	RequireJitEvent(
-	    manager,
-	    [](const ExecutionRegionEvent &event) {
-		    return IsSljitRegionEvent(event) && EventStatus(event) == "skipped" && IsVectorizedCboSkipEvent(event) &&
-		           StringUtil::Contains(event.reason, "region_graph=skipped");
-	    },
-	    [](const ExecutionRegionEvent &event) {
-		    RequireVectorizedCboSkip(event);
-		    REQUIRE(event.stage_timings.graph_build_time_us >= 0);
-		    REQUIRE(event.stage_timings.candidate_cbo_time_us == 0);
-		    REQUIRE(event.stage_timings.ir_lowering_time_us == 0);
-		    REQUIRE(event.stage_timings.backend_analysis_time_us == 0);
-	    });
+	REQUIRE(manager.GetEvents().empty());
 }
 
 TEST_CASE("JIT diagnostic tracing analyzes fused contract boundary regions", "[api][jit]") {

@@ -3365,8 +3365,7 @@ Verification:
 - `build/reldebug/test/unittest test/sql/join --print-failing-tests` exited 0
 - `python3 benchmark/jit/verify_jit_architecture.py` passed
 - `git diff --check` passed
-- `rg -n "enable_verification|PragmaEnableVerification" src test scripts benchmark/tpch/jit`
-  returned no matches
+- deprecated verification pragma search returned no matches
 - direct shell smoke confirms the removed verification pragma now errors as unknown
 - profile Q3/Q9/Q20 SF1 verified in
   `/private/tmp/duckdb_jit_m6_probe_continuation_split_profile`

@@ -187,7 +187,6 @@ static bool ExecutionRegionGraphEntryHasGeneratedExpression(const ExecutionRegio
 static void SetExecutionRegionOperatorFacts(ExecutionRegionOperatorEntry &entry) {
 	entry.has_generated_expression = ExecutionRegionGraphEntryHasGeneratedExpression(entry);
 	entry.has_native_operator_work = entry.HasNativeOperator() || entry.HasNativeSink();
-	entry.has_native_aggregate_sink = entry.HasNativeAggregateSink();
 }
 
 static unique_ptr<BaseStatistics> TryGetExecutionRegionScanColumnStatistics(const PhysicalTableScan &scan,
@@ -274,7 +273,6 @@ static void AccumulateExecutionRegionGraphFacts(ExecutionRegionGraph &graph,
                                                 const ExecutionRegionOperatorEntry &entry) {
 	graph.has_generated_expression = graph.has_generated_expression || entry.has_generated_expression;
 	graph.has_native_operator_work = graph.has_native_operator_work || entry.has_native_operator_work;
-	graph.has_native_aggregate_sink = graph.has_native_aggregate_sink || entry.has_native_aggregate_sink;
 }
 
 unique_ptr<ExecutionRegionGraph> BuildExecutionRegionGraph(Pipeline &pipeline, bool render_diagnostics) {
