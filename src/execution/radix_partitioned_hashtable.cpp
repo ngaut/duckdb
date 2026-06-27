@@ -306,8 +306,20 @@ static void RadixUpdatePrimitiveGroupSelected(const uintptr_t *state_addresses, 
 		throw InternalException("Primitive aggregate selected grouped update is missing state addresses");
 	}
 	for (idx_t idx = 0; idx < count; idx++) {
-		const auto address_idx = address_sel ? address_sel[idx] : idx;
 		const auto row_idx = row_sel ? row_sel[idx] : idx;
+		const auto address_idx = address_sel ? address_sel[row_idx] : idx;
+		auto state_address = reinterpret_cast<data_ptr_t>(state_addresses[address_idx]);
+		RadixUpdatePrimitiveGroup(state_address, row_idx, state_p);
+	}
+}
+
+static void RadixUpdatePrimitiveGroupAddresses(const uintptr_t *state_addresses, const sel_t *address_sel, idx_t count,
+                                               void *state_p) {
+	if (!state_addresses) {
+		throw InternalException("Primitive aggregate grouped update is missing state addresses");
+	}
+	for (idx_t row_idx = 0; row_idx < count; row_idx++) {
+		const auto address_idx = address_sel ? address_sel[row_idx] : row_idx;
 		auto state_address = reinterpret_cast<data_ptr_t>(state_addresses[address_idx]);
 		RadixUpdatePrimitiveGroup(state_address, row_idx, state_p);
 	}
@@ -1010,7 +1022,8 @@ bool RadixPartitionedHashTable::TryUpdateNewPrimitiveGroups(
 	update_state.lanes = &lanes;
 	update_state.payloads = &payloads;
 	auto append_start = RadixTraceStart(recorder);
-	if (!ht.TryFindOrCreateGroupsUpdateFast(group_chunk, RadixUpdatePrimitiveGroup, &update_state, recorder)) {
+	if (!ht.TryFindOrCreateGroupsSelectedStateUpdateFast(group_chunk, RadixUpdatePrimitiveGroupSelected, &update_state,
+	                                                     recorder)) {
 		RecordRadixTraceStage(recorder, "direct_new.append_miss", append_start);
 		return false;
 	}
@@ -1066,8 +1079,8 @@ bool RadixPartitionedHashTable::TryUpdateNewPrimitiveGroupsWithPayloadInput(
 	RecordRadixTraceStage(recorder, "direct_existing_split_payload.miss", existing_start);
 
 	auto append_start = RadixTraceStart(recorder);
-	if (!ht.TryFindOrCreateGroupsUpdateFast(groups, RadixUpdatePrimitiveGroup, &update_state, recorder,
-	                                        precomputed_hashes)) {
+	if (!ht.TryFindOrCreateGroupsSelectedStateUpdateFast(groups, RadixUpdatePrimitiveGroupSelected, &update_state,
+	                                                     recorder, precomputed_hashes)) {
 		RecordRadixTraceStage(recorder, "direct_new_split_payload.append_miss", append_start);
 		return false;
 	}
@@ -1107,7 +1120,8 @@ bool RadixPartitionedHashTable::TryAppendNewPrimitiveGroups(
 	update_state.lanes = &lanes;
 	update_state.payloads = &payloads;
 	auto append_start = RadixTraceStart(recorder);
-	if (!ht.TryAppendNewGroupsUpdateFast(group_chunk, RadixUpdatePrimitiveGroup, &update_state, recorder)) {
+	if (!ht.TryAppendNewGroupsWithStateAddressesFast(group_chunk, RadixUpdatePrimitiveGroupAddresses, &update_state,
+	                                                 recorder)) {
 		RecordRadixTraceStage(recorder, "direct_append_new.append_miss", append_start);
 		return false;
 	}
@@ -1298,6 +1312,50 @@ bool RadixPartitionedHashTable::TryUpdateNewGroupsWithRowPointerKeys(
 		auto finish_start = RadixTraceStart(recorder);
 		FinishRadixHTSinkState(context.client, gstate, lstate);
 		RecordRadixTraceStage(recorder, "direct_row_pointer_grouped_lookup.finish_sink_state", finish_start);
+	}
+	return true;
+}
+
+bool RadixPartitionedHashTable::TryUpdateNewPrimitiveGroupsWithRowPointerKeysPayloadInput(
+    ExecutionContext &context, DataChunk &payload_input, Vector &row_pointers, idx_t count,
+    const vector<ExecutionRowPointerGroupKeySource> &group_sources, const vector<idx_t> &payload_source_indices,
+    OperatorSinkInput &input, const ExecutionRegionSinkInfo &sink_info,
+    const vector<const ExecutionPrimitiveAggregateUpdateLane *> &lanes,
+    optional_ptr<ExecutionOperatorStageRecorder> recorder, bool finish) const {
+	if (payload_input.size() != count) {
+		return false;
+	}
+	auto &lstate = input.local_state.Cast<RadixHTLocalSinkState>();
+	auto &payloads = lstate.primitive_payloads;
+	if (!RadixValidatePrimitiveAggregateUpdateWithPayloadInput(sink_info, lanes, payload_input, payload_source_indices,
+	                                                           payloads)) {
+		return false;
+	}
+
+	auto &gstate = input.global_state.Cast<RadixHTGlobalSinkState>();
+	auto prepare_start = RadixTraceStart(recorder);
+	auto &ht = PrepareRadixHTSinkState(context, *this, input);
+	RecordRadixTraceStage(recorder, "direct_row_pointer_split_payload.prepare_sink_state", prepare_start);
+
+	RadixPrimitiveGroupUpdateState update_state;
+	update_state.lanes = &lanes;
+	update_state.payloads = &payloads;
+
+	auto update_start = RadixTraceStart(recorder);
+	if (!ht.TryFindOrCreateGroupsRowPointerSelectedStateUpdateFast(payload_input, row_pointers, count, group_sources,
+	                                                               RadixUpdatePrimitiveGroupSelected, &update_state,
+	                                                               recorder)) {
+		RecordRadixTraceStage(recorder, "direct_row_pointer_split_payload.update_miss", update_start);
+		return false;
+	}
+	RecordRadixTraceStage(recorder, "direct_row_pointer_split_payload.update", update_start);
+	auto update_marker_start = RadixTraceStart(recorder);
+	RecordRadixTraceStage(recorder, "direct_row_pointer_split_payload.primitive_update", update_marker_start);
+
+	if (finish) {
+		auto finish_start = RadixTraceStart(recorder);
+		FinishRadixHTSinkState(context.client, gstate, lstate);
+		RecordRadixTraceStage(recorder, "direct_row_pointer_split_payload.finish_sink_state", finish_start);
 	}
 	return true;
 }

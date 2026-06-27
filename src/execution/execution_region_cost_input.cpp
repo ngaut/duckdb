@@ -30,6 +30,10 @@ public:
 		input.estimated_cardinality = estimated_cardinality;
 	}
 
+	void SetInputScope(PhysicalRunnerCostInputScope input_scope) {
+		input.input_scope = input_scope;
+	}
+
 	void MaxEstimatedCardinality(idx_t estimated_cardinality) {
 		input.estimated_cardinality = MaxValue(input.estimated_cardinality, estimated_cardinality);
 	}
@@ -62,14 +66,6 @@ public:
 		input.native_join_stage_count = native_join_stage_count;
 	}
 
-	void SetPerfectHashJoinProbeCount(idx_t perfect_hash_join_probe_count) {
-		input.perfect_hash_join_probe_count = perfect_hash_join_probe_count;
-	}
-
-	void SetHashJoinBuildPayloadColumnCount(idx_t hash_join_build_payload_column_count) {
-		input.hash_join_build_payload_column_count = hash_join_build_payload_column_count;
-	}
-
 	void AddNativeJoinStage() {
 		input.native_join_stage_count++;
 	}
@@ -80,14 +76,6 @@ public:
 
 	void SetNativeGroupedAggregateStageCount(idx_t native_grouped_aggregate_stage_count) {
 		input.native_grouped_aggregate_stage_count = native_grouped_aggregate_stage_count;
-	}
-
-	void SetGroupedAggregateGroupCount(idx_t grouped_aggregate_group_count) {
-		input.grouped_aggregate_group_count = grouped_aggregate_group_count;
-	}
-
-	void SetGroupedAggregateVarcharGroupCount(idx_t grouped_aggregate_varchar_group_count) {
-		input.grouped_aggregate_varchar_group_count = grouped_aggregate_varchar_group_count;
 	}
 
 	void SetBlockedHashAggregateLookupCount(idx_t blocked_hash_aggregate_lookup_count) {
@@ -125,20 +113,8 @@ public:
 		input.uses_scan_filters = uses_scan_filters;
 	}
 
-	void SetSortSink(bool sort_sink) {
-		input.sort_sink = sort_sink;
-	}
-
 	void SetSourceFilterCount(idx_t source_filter_count) {
 		input.source_filter_count = source_filter_count;
-	}
-
-	void SetSourceProjectedColumnCount(idx_t source_projected_column_count) {
-		input.source_projected_column_count = source_projected_column_count;
-	}
-
-	void SetReferenceVarcharProjectionCount(idx_t reference_varchar_projection_count) {
-		input.reference_varchar_projection_count = reference_varchar_projection_count;
 	}
 
 	void SetNodeCount(idx_t node_count) {
@@ -278,6 +254,7 @@ static bool ExecutionRegionCandidateHasGeneratedFilterOrOperatorWork(const Execu
 
 static bool ExecutionRegionCandidateHasGeneratedProjectionWork(const ExecutionRegionCandidateTraits &traits) {
 	return traits.arithmetic_projection_count > 0 || traits.high_cost_projection_count > 0 ||
+	       traits.projection_count > traits.reference_projection_count ||
 	       (traits.projection_count > 0 &&
 	        (traits.predicate_expression_count > 0 || traits.control_expression_count > 0));
 }
@@ -366,6 +343,7 @@ static bool ExecutionRegionHashAggregateLookupIsBlocked(const ExecutionRegionAgg
 PhysicalRunnerCostInput BuildExecutionRegionCandidateCostInput(const ExecutionRegionCandidate &candidate) {
 	auto cost_facts = BuildExecutionRegionCostFacts(candidate);
 	ExecutionRegionRunnerCostInputBuilder builder;
+	builder.SetInputScope(PhysicalRunnerCostInputScope::EXECUTION_REGION_CANDIDATE);
 	builder.SetEstimatedCardinality(candidate.estimated_cardinality);
 	builder.SetExpressionCost(candidate.traits.expression_cost);
 	builder.SetGeneratedStageCount(cost_facts.generated_stage_count);
@@ -374,20 +352,13 @@ PhysicalRunnerCostInput BuildExecutionRegionCandidateCostInput(const ExecutionRe
 	                                                ? candidate.traits.reference_varchar_projection_count
 	                                                : 0);
 	builder.SetNativeJoinStageCount(cost_facts.native_join_stage_count);
-	builder.SetPerfectHashJoinProbeCount(candidate.traits.perfect_hash_join_probe_count);
-	builder.SetHashJoinBuildPayloadColumnCount(candidate.traits.hash_join_build_payload_column_count);
 	builder.SetNativeAggregateStageCount(cost_facts.native_aggregate_stage_count);
 	builder.SetNativeGroupedAggregateStageCount(cost_facts.native_grouped_aggregate_stage_count);
-	builder.SetGroupedAggregateGroupCount(candidate.traits.grouped_aggregate_group_count);
-	builder.SetGroupedAggregateVarcharGroupCount(candidate.traits.grouped_aggregate_varchar_group_count);
 	if (candidate.contract.hash_aggregate_lookup_present && candidate.contract.hash_aggregate_lookup_mode == "blocked") {
 		builder.SetBlockedHashAggregateLookupCount(cost_facts.native_grouped_aggregate_stage_count);
 	}
 	builder.SetNativeSortStageCount(cost_facts.native_sort_stage_count);
-	builder.SetSortSink(candidate.traits.sink_kind == ExecutionRegionSinkKind::SORT);
 	builder.SetSourceFilterCount(candidate.traits.source_filter_count);
-	builder.SetSourceProjectedColumnCount(candidate.traits.source_projected_column_count);
-	builder.SetReferenceVarcharProjectionCount(candidate.traits.reference_varchar_projection_count);
 	builder.SetFullPipeline(ExecutionRegionABIIsFullPipeline(candidate.contract.abi) &&
 	                        cost_facts.may_anchor_compiled_body);
 	builder.SetUsesScanFilters(candidate.uses_scan_filters);
@@ -764,7 +735,6 @@ static void FinalizeExecutionRegionPhysicalPipelineCostInput(Pipeline &pipeline,
 		builder.SetMaterializationElisionCount(1);
 	}
 	builder.SetSourceFilterCount(facts.traits.source_filter_count);
-	builder.SetSortSink(facts.traits.sink_kind == ExecutionRegionSinkKind::SORT);
 	builder.SetMaterializationSourceAppendCount(facts.traits.sink_kind == ExecutionRegionSinkKind::MATERIALIZATION
 	                                                ? facts.traits.reference_varchar_projection_count
 	                                                : 0);
@@ -778,6 +748,7 @@ bool TryBuildExecutionRegionPipelineCostInput(Pipeline &pipeline, PhysicalRunner
 		return false;
 	}
 	ExecutionRegionPhysicalPipelineCostFacts facts;
+	facts.builder.SetInputScope(PhysicalRunnerCostInputScope::PHYSICAL_PIPELINE);
 	if (!TryAccumulateExecutionRegionPhysicalOperatorCost(*pipeline.GetSource(), facts,
 	                                                      ExecutionRegionPhysicalPipelineSlot::SOURCE)) {
 		return false;

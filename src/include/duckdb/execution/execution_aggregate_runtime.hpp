@@ -53,6 +53,7 @@ enum class ExecutionRowPointerGroupKeyCastKind : uint8_t {
 	INT64_TO_INT32,
 	INT64_TO_INT16,
 	INT32_TO_INT8,
+	INTEGRAL_COMPRESS,
 	STRING_COMPRESS
 };
 
@@ -69,12 +70,11 @@ struct ExecutionRowPointerGroupKeySource {
 	idx_t row_layout_column_idx = DConstants::INVALID_INDEX;
 	idx_t row_layout_column_count = 0;
 	ExecutionRowPointerGroupKeyCastKind cast_kind = ExecutionRowPointerGroupKeyCastKind::NONE;
+	int64_t cast_constant = 0;
 	bool all_valid = false;
 	string blocker;
 };
 
-typedef void (*ExecutionGroupedAggregateStateRowUpdateFunction)(data_ptr_t state_address, idx_t row_idx,
-                                                                void *state);
 typedef void (*ExecutionGroupedAggregateStateAddressUpdateFunction)(const uintptr_t *addresses,
                                                                     const sel_t *address_sel, idx_t count,
                                                                     void *state);

@@ -206,6 +206,22 @@ struct ExecutionGroupedAggregateStateAddressState {
 		(void)finish;
 		return false;
 	}
+	virtual bool TryUpdateNewGroupsWithRowPointerKeysPayloadInput(
+	    DataChunk &payload_input, Vector &row_pointers, idx_t count,
+	    const vector<ExecutionRowPointerGroupKeySource> &group_sources, const vector<idx_t> &payload_source_indices,
+	    const ExecutionRegionSinkInfo &sink_info, const vector<const ExecutionPrimitiveAggregateUpdateLane *> &lanes,
+	    optional_ptr<ExecutionOperatorStageRecorder> recorder = nullptr, bool finish = true) {
+		(void)payload_input;
+		(void)row_pointers;
+		(void)count;
+		(void)group_sources;
+		(void)payload_source_indices;
+		(void)sink_info;
+		(void)lanes;
+		(void)recorder;
+		(void)finish;
+		return false;
+	}
 	virtual bool TryAppendNewGroupsWithStateAddresses(
 	    DataChunk &input, const ExecutionRegionSinkInfo &sink_info,
 	    ExecutionGroupedAggregateStateAddressUpdateFunction update_function, void *update_state,
@@ -406,7 +422,8 @@ DUCKDB_API bool ExecutionGetHashJoinRHSFixedColumnSource(const ExecutionHashJoin
 DUCKDB_API bool ExecutionMaterializeHashJoinProbeProjectionSources(
     const ExecutionHashJoinProbeBinding &binding, DataChunk &input, Vector &row_pointers,
     const SelectionVector &match_sel, idx_t count, const vector<uint8_t> &referenced_columns, DataChunk &result,
-    optional_ptr<ExecutionOperatorStageRecorder> recorder = nullptr);
+    optional_ptr<ExecutionOperatorStageRecorder> recorder = nullptr,
+    optional_ptr<const SelectionVector> perfect_build_sel = nullptr);
 
 DUCKDB_API void
 ExecutionMaterializePerfectHashJoinProbe(const ExecutionHashJoinProbeBinding &binding, DataChunk &input,

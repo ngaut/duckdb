@@ -73,7 +73,7 @@ statement ok
 SET disabled_optimizers=''
 
 # operations on the columns - we can't do the optimization here,
-# but with enable_verification we check the results are the same with/without optimizer
+# but verification checks the results are the same with/without optimizer
 query I
 select count(*) from lineitem l1 where exists (
      select * from lineitem l2

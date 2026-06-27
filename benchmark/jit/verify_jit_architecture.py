@@ -61,9 +61,10 @@ REQUIRED_TEXT = {
         "DuckDBCostModel::InitialFilterOrder",
         "DuckDBCostModel::SelectPhysicalRunner",
         "PhysicalRunnerBuildShapeFacts",
+        "PhysicalRunnerAdmission",
+        "PhysicalRunnerEvaluateAdmission",
         "PhysicalRunnerAnalyzeSelection",
         "PhysicalRunnerSelectionAnalysis",
-        "PhysicalRunnerAccelerationBasis",
         "rejected_insufficient_benefit",
         "rejected_saved_work_non_positive",
         "parameters.generated_stage_benefit > 0",
@@ -80,6 +81,8 @@ REQUIRED_TEXT = {
         "AppendExecutionRegionStageTimingColumn",
         "AppendExecutionRegionRunnerCostProfileColumn",
         "AppendExecutionRegionRunnerCostWorkColumn",
+        "runner_cost_input_scope",
+        "runner_cost_admission_class",
     ),
     "src/function/table/system/duckdb_jit_events.cpp": (
         "JIT_EVENT_STAGE_TIMING_COLUMN_OFFSET",
@@ -143,6 +146,39 @@ REQUIRED_TEXT = {
         "DuckDB Native Vectorized Compiled Regions",
         "DuckDB CBO physical-runner decision",
         "protocol-only regions stay vectorized",
+    ),
+}
+
+FORBIDDEN_TEXT = {
+    "src/planner/cost_model.cpp": (
+        "PHYSICAL_RUNNER_FUNDED_PROTOCOL_RULES",
+        "PHYSICAL_RUNNER_STARTUP_RULES",
+        "STATEFUL_STANDALONE_PROJECTION_MIN_BATCHES",
+        "PhysicalRunnerIsNativeContractProjectionGlue",
+        "PhysicalRunnerIsSmallStatefulStandaloneProjection",
+        "funded_protocol_rule",
+        "native_contract_projection_glue",
+        "small_stateful_standalone_projection",
+        "startup_rules",
+    ),
+    "src/include/duckdb/planner/cost_model.hpp": (
+        "funded_protocol_rule",
+        "sort_sink",
+        "startup_rules",
+    ),
+    "src/execution/execution_region_cost_input.cpp": (
+        "SetSortSink",
+    ),
+    "src/include/duckdb/execution/execution_region_telemetry.hpp": (
+        "funded_protocol_rule",
+        "startup_rules",
+    ),
+    "src/function/table/system/execution_region_table_function_utils.hpp": (
+        "runner_cost_funded_protocol_rule",
+        "runner_cost_startup_rules",
+    ),
+    "src/function/pragma/pragma_functions.cpp": (
+        "enable_verification",
     ),
 }
 
@@ -241,6 +277,20 @@ REGEX_RULES = (
         ("src/execution/**/*.cpp", "src/include/duckdb/execution/**/*.hpp"),
         (),
     ),
+    (
+        "deprecated verification pragma",
+        (r"\benable_verification\b",),
+        (
+            "src/**/*.hpp",
+            "src/**/*.cpp",
+            "benchmark/**/*.py",
+            "test/**/*.test",
+            "test/**/*.cpp",
+            "test/**/*.hpp",
+            "scripts/**/*.py",
+        ),
+        ("benchmark/jit/verify_jit_architecture.py",),
+    ),
 )
 
 
@@ -275,6 +325,14 @@ def verify_required_text() -> None:
             raise AssertionError(f"{path}: missing required text {missing}")
 
 
+def verify_forbidden_text() -> None:
+    for path, snippets in FORBIDDEN_TEXT.items():
+        data = read_text(path)
+        present = [snippet for snippet in snippets if snippet in data]
+        if present:
+            raise AssertionError(f"{path}: stale CBO text remains {present}")
+
+
 def verify_regex_rules() -> None:
     for name, patterns, globs, allowed in REGEX_RULES:
         allowed_paths = {ROOT / path for path in allowed}
@@ -282,7 +340,7 @@ def verify_regex_rules() -> None:
         for path in files(globs):
             if path in allowed_paths:
                 continue
-            data = path.read_text(encoding="utf-8")
+            data = path.read_text(encoding="utf-8", errors="replace")
             for pattern, regex in compiled:
                 if regex.search(data):
                     raise AssertionError(f"{rel(path)}: {name}: {pattern}")
@@ -362,6 +420,7 @@ def verify_candidate_stage_timing_attribution() -> None:
 def main() -> None:
     verify_files()
     verify_required_text()
+    verify_forbidden_text()
     verify_regex_rules()
     verify_typed_observability_state()
     verify_candidate_stage_timing_attribution()

@@ -20,27 +20,23 @@ enum class PhysicalRunnerGeneratedWorkClass : uint8_t { NONE, PROJECTION_GLUE, H
 
 enum class PhysicalRunnerNativeProtocolClass : uint8_t { NONE, STATEFUL_SOURCE_SINK_PROTOCOL };
 
+enum class PhysicalRunnerCostInputScope : uint8_t { EXECUTION_REGION_CANDIDATE, PHYSICAL_PIPELINE };
+
 struct PhysicalRunnerCostInput {
+	PhysicalRunnerCostInputScope input_scope = PhysicalRunnerCostInputScope::EXECUTION_REGION_CANDIDATE;
 	idx_t estimated_cardinality = 0;
 	idx_t expression_cost = 0;
 	idx_t generated_stage_count = 0;
 	idx_t materialization_elision_count = 0;
 	idx_t materialization_source_append_count = 0;
 	idx_t native_join_stage_count = 0;
-	idx_t perfect_hash_join_probe_count = 0;
-	idx_t hash_join_build_payload_column_count = 0;
 	idx_t native_aggregate_stage_count = 0;
 	idx_t native_grouped_aggregate_stage_count = 0;
-	idx_t grouped_aggregate_group_count = 0;
-	idx_t grouped_aggregate_varchar_group_count = 0;
 	idx_t blocked_hash_aggregate_lookup_count = 0;
 	idx_t native_sort_stage_count = 0;
 	idx_t source_filter_count = 0;
-	idx_t source_projected_column_count = 0;
-	idx_t reference_varchar_projection_count = 0;
 	bool full_pipeline = false;
 	bool uses_scan_filters = false;
-	bool sort_sink = false;
 	idx_t node_count = 0;
 	idx_t stage_count = 0;
 	idx_t expression_node_count = 0;
@@ -71,6 +67,7 @@ struct PhysicalRunnerCostParameters {
 struct PhysicalRunnerCostProfile {
 	bool present = false;
 	ExecutionRunnerKind selected_runner = ExecutionRunnerKind::VECTORIZED;
+	PhysicalRunnerCostInputScope input_scope = PhysicalRunnerCostInputScope::EXECUTION_REGION_CANDIDATE;
 	int64_t rows = 0;
 	int64_t batches = 0;
 	int64_t expression_cost = 0;
@@ -85,8 +82,7 @@ struct PhysicalRunnerCostProfile {
 	bool full_pipeline = false;
 	PhysicalRunnerGeneratedWorkClass generated_work_class = PhysicalRunnerGeneratedWorkClass::NONE;
 	PhysicalRunnerNativeProtocolClass native_protocol_class = PhysicalRunnerNativeProtocolClass::NONE;
-	string funded_protocol_rule;
-	string startup_rules;
+	string admission_class;
 	string selection_reason;
 	int64_t generated_expression_work = 0;
 	int64_t generated_stage_work = 0;
@@ -126,5 +122,6 @@ public:
 
 DUCKDB_API const char *PhysicalRunnerGeneratedWorkClassToString(PhysicalRunnerGeneratedWorkClass work_class);
 DUCKDB_API const char *PhysicalRunnerNativeProtocolClassToString(PhysicalRunnerNativeProtocolClass protocol_class);
+DUCKDB_API const char *PhysicalRunnerCostInputScopeToString(PhysicalRunnerCostInputScope input_scope);
 
 } // namespace duckdb

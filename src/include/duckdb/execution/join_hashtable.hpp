@@ -169,15 +169,6 @@ public:
 	};
 
 public:
-	struct SharedState {
-		SharedState();
-
-		Vector salt_v;
-
-		SelectionVector keys_to_compare_sel;
-		SelectionVector keys_no_match_sel;
-	};
-
 	//! Mirrors GroupedAggregateHashTable::AggregateDictionaryState for the join probe path
 	struct ProbeDictionaryState {
 		ProbeDictionaryState();
@@ -198,21 +189,24 @@ public:
 		idx_t resolved_count = 0;
 	};
 
-	struct ProbeState : SharedState {
+	struct ProbeState {
 		ProbeState();
 
-		Vector ht_offsets_and_salts_v;
+		SelectionVector keys_to_compare_sel;
+		SelectionVector keys_no_match_sel;
 		Vector hashes_dense_v;
-		SelectionVector non_empty_sel;
 		//! Allocated only when the operator gates the compressed-probe paths on; null otherwise
 		unique_ptr<ProbeDictionaryState> dict_state;
 	};
 
-	struct InsertState : SharedState {
+	struct InsertState {
 		explicit InsertState(const JoinHashTable &ht);
+		Vector salt_v;
 		/// Because of the index hick up
 		SelectionVector remaining_sel;
+		SelectionVector keys_to_compare_sel;
 		SelectionVector key_match_sel;
+		SelectionVector keys_no_match_sel;
 
 		// The ptrs to the row to which a key should be inserted into during building
 		// or matched against during probing
@@ -429,6 +423,8 @@ private:
 	//! Constant-vector variant of Probe. Returns false if the LHS keys are not a constant vector.
 	bool TryProbeConstant(ScanStructure &scan_structure, DataChunk &keys, TupleDataChunkState &key_state,
 	                      ProbeState &probe_state);
+	//! Direct all-valid inner probe for the common no-chain two-key 64-bit equality shape.
+	bool TryProbeInt64PairNoChain(ScanStructure &scan_structure, DataChunk &keys, TupleDataChunkState &key_state);
 
 	bool UseSalt() const;
 
@@ -437,6 +433,8 @@ private:
 	void GetRowPointers(DataChunk &keys, TupleDataChunkState &key_state, ProbeState &state, Vector &hashes_v,
 	                    optional_ptr<const SelectionVector> sel, idx_t &count, Vector &pointers_result_v,
 	                    SelectionVector &match_sel, bool has_sel);
+	void GetRowPointersWithDenseHashes(DataChunk &keys, TupleDataChunkState &key_state, ProbeState &state, idx_t &count,
+	                                   Vector &pointers_result_v, SelectionVector &match_sel);
 
 private:
 	//! Insert the given set of locations into the HT with the given set of hashes_v

@@ -8,8 +8,10 @@ FROM duckdb_settings()
 WHERE name IN (
     'enable_jit',
 	    'jit_backend',
+	    'jit_cbo_full_pipeline_benefit',
 	    'jit_cbo_generated_stage_benefit',
 	    'jit_cbo_native_operator_stage_benefit',
+	    'jit_cbo_startup_margin_basis_points',
 	    'jit_trace_decisions',
     'jit_event_log_size',
     'jit_policy',
@@ -21,8 +23,10 @@ ORDER BY name
 ----
 enable_jit	true
 jit_backend	auto
-jit_cbo_generated_stage_benefit	1
-jit_cbo_native_operator_stage_benefit	0
+jit_cbo_full_pipeline_benefit	4096
+jit_cbo_generated_stage_benefit	4096
+jit_cbo_native_operator_stage_benefit	1024
+jit_cbo_startup_margin_basis_points	0
 jit_dump_ir	false
 jit_event_log_size	0
 jit_policy	auto

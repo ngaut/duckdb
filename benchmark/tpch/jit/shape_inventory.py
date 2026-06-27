@@ -62,8 +62,8 @@ INVENTORY_FIELDS = (
     "runner_cost_native_grouped_aggregate_stage_count",
     "runner_cost_native_sort_stage_count",
     "runner_cost_full_pipeline",
-    "runner_cost_funded_protocol_rule",
-    "runner_cost_startup_rules",
+    "runner_cost_input_scope",
+    "runner_cost_admission_class",
     "runner_cost_selection_reason",
     "runner_cost_saved_work_per_batch",
     "runner_cost_accelerated_runner_benefit",
@@ -79,8 +79,7 @@ INVENTORY_FIELDS = (
     "profile_candidate_shapes",
     "profile_generated_work_classes",
     "profile_native_protocol_classes",
-    "profile_funded_protocol_rules",
-    "profile_startup_rules",
+    "profile_admission_classes",
     "profile_selection_reasons",
     "profile_jit_runtime_paths",
     "profile_jit_materialization_boundaries",
@@ -175,8 +174,8 @@ def runner_cost_shape(row: dict) -> str:
         f"grouped={row_int(row, 'runner_cost_native_grouped_aggregate_stage_count')}",
         f"sort={row_int(row, 'runner_cost_native_sort_stage_count')}",
         f"full={bool_token(row.get('runner_cost_full_pipeline'))}",
-        f"rule={row.get('runner_cost_funded_protocol_rule', '') or 'none'}",
-        f"startup={row.get('runner_cost_startup_rules', '') or 'none'}",
+        f"scope={row.get('runner_cost_input_scope', '') or 'none'}",
+        f"admission={row.get('runner_cost_admission_class', '') or 'none'}",
         f"reason={row.get('runner_cost_selection_reason', '') or 'none'}",
     ]
     return ",".join(parts)
@@ -238,12 +237,9 @@ def profile_sets(trace_dir: Path, run_rows: list[dict]) -> dict[tuple[str, str],
             protocol_class = normalized(event.get("runner_cost_native_protocol_class"))
             if protocol_class:
                 result[key]["native_protocol_classes"][protocol_class] += 1
-            funded_rule = normalized(event.get("runner_cost_funded_protocol_rule"))
-            if funded_rule:
-                result[key]["funded_protocol_rules"][funded_rule] += 1
-            startup_rules = normalized(event.get("runner_cost_startup_rules"))
-            if startup_rules:
-                result[key]["startup_rules"][startup_rules] += 1
+            admission_class = normalized(event.get("runner_cost_admission_class"))
+            if admission_class:
+                result[key]["admission_classes"][admission_class] += 1
             selection_reason = normalized(event.get("runner_cost_selection_reason"))
             if selection_reason:
                 result[key]["selection_reasons"][selection_reason] += 1
@@ -287,8 +283,8 @@ def aggregate_group(rows: list[dict]) -> dict:
     hash_layouts = collections.Counter()
     runtime_paths = collections.Counter()
     materialization_boundaries = collections.Counter()
-    funded_rules = collections.Counter()
-    startup_rules = collections.Counter()
+    input_scopes = collections.Counter()
+    admission_classes = collections.Counter()
     selection_reasons = collections.Counter()
     source_stages = collections.Counter()
     generated_stages = collections.Counter()
@@ -307,8 +303,8 @@ def aggregate_group(rows: list[dict]) -> dict:
         hash_layouts[normalized(row.get("hash_join_probe_layout"))] += weight
         runtime_paths[normalized(row.get("jit_runtime_path_counts"))] += weight
         materialization_boundaries[normalized(row.get("jit_materialization_boundary_counts"))] += weight
-        funded_rules[normalized(row.get("runner_cost_funded_protocol_rule"))] += weight
-        startup_rules[normalized(row.get("runner_cost_startup_rules"))] += weight
+        input_scopes[normalized(row.get("runner_cost_input_scope"))] += weight
+        admission_classes[normalized(row.get("runner_cost_admission_class"))] += weight
         selection_reasons[normalized(row.get("runner_cost_selection_reason"))] += weight
         source_stages[normalized(row.get("source_stage_runtime_breakdown"))] += weight
         generated_stages[normalized(row.get("generated_stage_runtime_breakdown"))] += weight
@@ -319,8 +315,8 @@ def aggregate_group(rows: list[dict]) -> dict:
     result["hash_join_probe_layout"] = top_counter(hash_layouts)
     result["jit_runtime_path_counts"] = top_counter(runtime_paths)
     result["jit_materialization_boundary_counts"] = top_counter(materialization_boundaries)
-    result["runner_cost_funded_protocol_rule"] = top_counter(funded_rules)
-    result["runner_cost_startup_rules"] = top_counter(startup_rules)
+    result["runner_cost_input_scope"] = top_counter(input_scopes)
+    result["runner_cost_admission_class"] = top_counter(admission_classes)
     result["runner_cost_selection_reason"] = top_counter(selection_reasons)
     result["source_stage_runtime_breakdown"] = top_counter(source_stages)
     result["generated_stage_runtime_breakdown"] = top_counter(generated_stages)
@@ -399,10 +395,9 @@ def build_inventory_rows(
             "profile_native_protocol_classes": join_counter_keys(
                 profile_key.get("native_protocol_classes", collections.Counter())
             ),
-            "profile_funded_protocol_rules": join_counter_keys(
-                profile_key.get("funded_protocol_rules", collections.Counter())
+            "profile_admission_classes": join_counter_keys(
+                profile_key.get("admission_classes", collections.Counter())
             ),
-            "profile_startup_rules": join_counter_keys(profile_key.get("startup_rules", collections.Counter())),
             "profile_selection_reasons": join_counter_keys(
                 profile_key.get("selection_reasons", collections.Counter())
             ),
@@ -447,6 +442,7 @@ def build_inventory_rows(
             "compile_errors": summary.get("compile_errors", ""),
             "runner_cost_profile": "false",
             "runner_cost_full_pipeline": "false",
+            "runner_cost_input_scope": "",
         }
         classification, next_action = classify(row, material_speedup)
         row["classification"] = classification

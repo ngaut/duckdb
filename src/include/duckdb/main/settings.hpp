@@ -1410,7 +1410,7 @@ struct JitCboFullPipelineBenefitSetting {
 	static constexpr const char *Description =
 	    "Per-vector benefit for full-pipeline ownership used by the JIT CBO physical-runner decision";
 	static constexpr const char *InputType = "UBIGINT";
-	static constexpr const char *DefaultValue = "0";
+	static constexpr const char *DefaultValue = "4096";
 	static constexpr SettingScopeTarget Scope = SettingScopeTarget::LOCAL_DEFAULT;
 	static constexpr idx_t SettingIndex = NEXT_SETTING_INDEX();
 };
@@ -1421,7 +1421,7 @@ struct JitCboGeneratedStageBenefitSetting {
 	static constexpr const char *Description =
 	    "Per-vector benefit per generated stage used by the JIT CBO physical-runner decision";
 	static constexpr const char *InputType = "UBIGINT";
-	static constexpr const char *DefaultValue = "1";
+	static constexpr const char *DefaultValue = "4096";
 	static constexpr SettingScopeTarget Scope = SettingScopeTarget::LOCAL_DEFAULT;
 	static constexpr idx_t SettingIndex = NEXT_SETTING_INDEX();
 };
@@ -1432,7 +1432,7 @@ struct JitCboMaterializationElisionBenefitSetting {
 	static constexpr const char *Description = "Per-vector benefit per eliminated vector materialization boundary used "
 	                                           "by the JIT CBO physical-runner decision";
 	static constexpr const char *InputType = "UBIGINT";
-	static constexpr const char *DefaultValue = "0";
+	static constexpr const char *DefaultValue = "4096";
 	static constexpr SettingScopeTarget Scope = SettingScopeTarget::LOCAL_DEFAULT;
 	static constexpr idx_t SettingIndex = NEXT_SETTING_INDEX();
 };
@@ -1443,7 +1443,7 @@ struct JitCboNativeOperatorStageBenefitSetting {
 	static constexpr const char *Description =
 	    "Per-vector benefit per native operator protocol stage used by the JIT CBO physical-runner decision";
 	static constexpr const char *InputType = "UBIGINT";
-	static constexpr const char *DefaultValue = "0";
+	static constexpr const char *DefaultValue = "1024";
 	static constexpr SettingScopeTarget Scope = SettingScopeTarget::LOCAL_DEFAULT;
 	static constexpr idx_t SettingIndex = NEXT_SETTING_INDEX();
 };
@@ -1464,7 +1464,7 @@ struct JitCboStartupMarginBasisPointsSetting {
 	static constexpr const char *Description =
 	    "Required-benefit margin over startup cost in basis points used by the JIT CBO physical-runner decision";
 	static constexpr const char *InputType = "UBIGINT";
-	static constexpr const char *DefaultValue = "5000";
+	static constexpr const char *DefaultValue = "0";
 	static constexpr SettingScopeTarget Scope = SettingScopeTarget::LOCAL_DEFAULT;
 	static constexpr idx_t SettingIndex = NEXT_SETTING_INDEX();
 };

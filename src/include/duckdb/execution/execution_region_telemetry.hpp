@@ -62,8 +62,8 @@ struct ExecutionRegionRunnerCostTotals {
 	int64_t native_grouped_aggregate_stage_count = 0;
 	int64_t native_sort_stage_count = 0;
 	bool full_pipeline = false;
-	string funded_protocol_rule;
-	string startup_rules;
+	string input_scope;
+	string admission_class;
 	string selection_reason;
 	int64_t generated_expression_work = 0;
 	int64_t generated_stage_work = 0;

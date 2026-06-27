@@ -96,6 +96,12 @@ public:
 	    const ExecutionRegionSinkInfo &sink_info,
 	    ExecutionGroupedAggregateStateSelectedAddressUpdateFunction update_function, void *update_state,
 	    optional_ptr<ExecutionOperatorStageRecorder> recorder = nullptr, bool finish = true) const;
+	bool TryUpdateNewPrimitiveGroupsWithRowPointerKeysPayloadInput(
+	    ExecutionContext &context, DataChunk &payload_input, Vector &row_pointers, idx_t count,
+	    const vector<ExecutionRowPointerGroupKeySource> &group_sources, const vector<idx_t> &payload_source_indices,
+	    OperatorSinkInput &input, const ExecutionRegionSinkInfo &sink_info,
+	    const vector<const ExecutionPrimitiveAggregateUpdateLane *> &lanes,
+	    optional_ptr<ExecutionOperatorStageRecorder> recorder = nullptr, bool finish = true) const;
 	bool TryAppendNewGroupsWithStateAddresses(ExecutionContext &context, DataChunk &chunk, OperatorSinkInput &input,
 	                                          const ExecutionRegionSinkInfo &sink_info,
 	                                          ExecutionGroupedAggregateStateAddressUpdateFunction update_function,

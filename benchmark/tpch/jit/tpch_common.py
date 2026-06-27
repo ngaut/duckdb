@@ -105,8 +105,8 @@ COUNTER_RUNNER_COST_PROFILE_FIELDS = (
     "runner_cost_native_grouped_aggregate_stage_count",
     "runner_cost_native_sort_stage_count",
     "runner_cost_full_pipeline",
-    "runner_cost_funded_protocol_rule",
-    "runner_cost_startup_rules",
+    "runner_cost_input_scope",
+    "runner_cost_admission_class",
     "runner_cost_selection_reason",
 )
 

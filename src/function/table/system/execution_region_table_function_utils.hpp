@@ -55,8 +55,8 @@ static constexpr ExecutionRegionTraceColumn EXECUTION_REGION_RUNNER_COST_PROFILE
     {"runner_cost_native_grouped_aggregate_stage_count", LogicalTypeId::BIGINT},
     {"runner_cost_native_sort_stage_count", LogicalTypeId::BIGINT},
     {"runner_cost_full_pipeline", LogicalTypeId::BOOLEAN},
-    {"runner_cost_funded_protocol_rule", LogicalTypeId::VARCHAR},
-    {"runner_cost_startup_rules", LogicalTypeId::VARCHAR},
+    {"runner_cost_input_scope", LogicalTypeId::VARCHAR},
+    {"runner_cost_admission_class", LogicalTypeId::VARCHAR},
     {"runner_cost_selection_reason", LogicalTypeId::VARCHAR},
 };
 
@@ -182,6 +182,14 @@ static inline void AppendExecutionRegionNullableString(Vector &output, const str
 	}
 }
 
+static inline void AppendExecutionRegionRunnerCostInputScope(Vector &output, PhysicalRunnerCostInputScope input_scope) {
+	output.Append(Value(PhysicalRunnerCostInputScopeToString(input_scope)));
+}
+
+static inline void AppendExecutionRegionRunnerCostInputScope(Vector &output, const string &input_scope) {
+	AppendExecutionRegionNullableString(output, input_scope);
+}
+
 static inline void AddExecutionRegionStageTimingColumns(vector<LogicalType> &return_types, vector<string> &names) {
 	AddExecutionRegionTableFunctionColumns(return_types, names, EXECUTION_REGION_STAGE_TIMING_COLUMNS,
 	                                       EXECUTION_REGION_STAGE_TIMING_COLUMN_COUNT);
@@ -263,10 +271,10 @@ static inline void AppendExecutionRegionRunnerCostProfileColumn(Vector &output, 
 		output.Append(Value::BOOLEAN(cost.full_pipeline));
 		return;
 	case 12:
-		AppendExecutionRegionNullableString(output, cost.funded_protocol_rule);
+		AppendExecutionRegionRunnerCostInputScope(output, cost.input_scope);
 		return;
 	case 13:
-		AppendExecutionRegionNullableString(output, cost.startup_rules);
+		AppendExecutionRegionNullableString(output, cost.admission_class);
 		return;
 	case 14:
 		AppendExecutionRegionNullableString(output, cost.selection_reason);

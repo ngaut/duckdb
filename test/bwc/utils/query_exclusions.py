@@ -66,7 +66,6 @@ SKIP_PATTERNS = [
     r'\b(begin|commit|rollback)\b',
     r'\bstart\s+transaction\b',
     # Pragmas that cause verification issues
-    r'\bpragma\s+enable_verification\b',
     r'\bpragma\s+verify_external\b',
     r'\bpragma\s+threads\b',
     # Thread settings can cause system errors
@@ -141,7 +140,7 @@ def _should_skip_query(normalized_sql: str) -> bool:
 
     Returns True for:
     - Transaction statements (BEGIN, COMMIT, ROLLBACK)
-    - PRAGMA enable_verification / verify_external
+    - PRAGMA verify_external
     - SET threads / RESET threads
     """
     for pattern in _SKIP_REGEX:

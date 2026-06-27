@@ -69,7 +69,7 @@ with recursive t as (select 1 as x union all select sum(x+1) AS x from t where x
 3
 
 # some of the following recursive queries are terminated by the LIMIT clause
-# this requires CTE inlining, which enable_verification disables
+# this requires CTE inlining, which verification disables
 require no_alternative_verify
 
 statement ok

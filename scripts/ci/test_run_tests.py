@@ -1095,10 +1095,7 @@ require windows: 2
             "/tmp/b.test",
             "test/sql/logging/http_logging.test",
         ]
-        stdout = (
-            "[2/5] (40%): /tmp/b.test took 0.007s"
-            "PRAGMA enable_verification has been deprecated - there is no need to set this anymore\n"
-        )
+        stdout = "[2/5] (40%): /tmp/b.test took 0.007s\n"
         stderr = """
 1. test/sql/logging/http_logging.test:25
 ================================================================================
@@ -1141,10 +1138,7 @@ unittest is a Catch v2.13.7 host application.
         self.assertIn("bytes=0-1275\tbytes 0-1275/1276", lines)
         self.assertIn("Actual result:", lines)
         self.assertIn("bytes=0-1275\tNULL", lines)
-        self.assertNotIn(
-            "PRAGMA enable_verification has been deprecated - there is no need to set this anymore",
-            "\n".join(lines),
-        )
+        self.assertNotIn("/tmp/b.test took 0.007s", "\n".join(lines))
 
     def test_generic_failure_uses_failing_stderr_block_instead_of_stdout(self):
         batch = ["/tmp/a.test", "/tmp/fail.test"]

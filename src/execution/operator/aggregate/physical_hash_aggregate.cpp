@@ -564,6 +564,27 @@ public:
 		    update_state, recorder, finish);
 	}
 
+	bool TryUpdateNewGroupsWithRowPointerKeysPayloadInput(
+	    DataChunk &payload_input, Vector &row_pointers, idx_t count,
+	    const vector<ExecutionRowPointerGroupKeySource> &group_sources, const vector<idx_t> &payload_source_indices,
+	    const ExecutionRegionSinkInfo &sink_info, const vector<const ExecutionPrimitiveAggregateUpdateLane *> &lanes,
+	    optional_ptr<ExecutionOperatorStageRecorder> recorder = nullptr, bool finish = true) override {
+		if (op.distinct_collection_info) {
+			return false;
+		}
+		if (op.groupings.size() != 1 || global_state.grouping_states.size() != 1 ||
+		    local_state.grouping_states.size() != 1) {
+			return false;
+		}
+		auto &grouping_global_state = global_state.grouping_states[0];
+		auto &grouping_local_state = local_state.grouping_states[0];
+		OperatorSinkInput sink_input {*grouping_global_state.table_state, *grouping_local_state.table_state,
+		                              interrupt_state};
+		return op.groupings[0].table_data.TryUpdateNewPrimitiveGroupsWithRowPointerKeysPayloadInput(
+		    context, payload_input, row_pointers, count, group_sources, payload_source_indices, sink_input, sink_info,
+		    lanes, recorder, finish);
+	}
+
 	bool TryAppendNewGroupsWithStateAddresses(DataChunk &input, const ExecutionRegionSinkInfo &sink_info,
 	                                          ExecutionGroupedAggregateStateAddressUpdateFunction update_function,
 	                                          void *update_state,

@@ -26,6 +26,17 @@ static hash_t ExecutionRegionTelemetryCombine(hash_t result, hash_t value) {
 	return CombineHash(result, value);
 }
 
+static string ExecutionRegionRunnerCostInputScope(const PhysicalRunnerCostProfile &cost) {
+	if (!cost.present) {
+		return string();
+	}
+	return PhysicalRunnerCostInputScopeToString(cost.input_scope);
+}
+
+static const string &ExecutionRegionRunnerCostInputScope(const ExecutionRegionRunnerCostTotals &cost) {
+	return cost.input_scope;
+}
+
 static idx_t ExecutionRegionRingIndex(idx_t start, idx_t capacity, idx_t offset) {
 	D_ASSERT(capacity > 0);
 	return (start + offset) % capacity;
@@ -38,9 +49,8 @@ static hash_t ExecutionRegionCounterHash(const ExecutionRegionEvent &event) {
 	result = ExecutionRegionTelemetryCombine(result, ExecutionRegionTelemetryHashEnum(event.selected_runner));
 	result = ExecutionRegionTelemetryCombine(result, ExecutionRegionTelemetryHashString(event.blocker));
 	result = ExecutionRegionTelemetryCombine(
-	    result, ExecutionRegionTelemetryHashString(event.runner_cost.funded_protocol_rule));
-	result =
-	    ExecutionRegionTelemetryCombine(result, ExecutionRegionTelemetryHashString(event.runner_cost.startup_rules));
+	    result, ExecutionRegionTelemetryHashString(ExecutionRegionRunnerCostInputScope(event.runner_cost)));
+	result = ExecutionRegionTelemetryCombine(result, ExecutionRegionTelemetryHashString(event.runner_cost.admission_class));
 	result =
 	    ExecutionRegionTelemetryCombine(result, ExecutionRegionTelemetryHashString(event.runner_cost.selection_reason));
 	result = ExecutionRegionTelemetryCombine(
@@ -52,8 +62,8 @@ static bool ExecutionRegionCounterMatches(const ExecutionRegionCounter &counter,
 	return counter.backend_name == event.backend_name && counter.status_kind == event.status_kind &&
 	       counter.execution_mode_kind == event.execution_mode_kind &&
 	       counter.selected_runner_kind == event.selected_runner && counter.blocker == event.blocker &&
-	       counter.runner_cost.funded_protocol_rule == event.runner_cost.funded_protocol_rule &&
-	       counter.runner_cost.startup_rules == event.runner_cost.startup_rules &&
+	       counter.runner_cost.input_scope == ExecutionRegionRunnerCostInputScope(event.runner_cost) &&
+	       counter.runner_cost.admission_class == event.runner_cost.admission_class &&
 	       counter.runner_cost.selection_reason == event.runner_cost.selection_reason &&
 	       counter.jit_runtime.hash_join_probe_layout == event.jit_runtime.hash_join_probe_layout;
 }
@@ -88,8 +98,8 @@ static void AccumulateExecutionRegionRunnerCostTotals(ExecutionRegionRunnerCostT
 	target.native_grouped_aggregate_stage_count += source.native_grouped_aggregate_stage_count;
 	target.native_sort_stage_count += source.native_sort_stage_count;
 	target.full_pipeline = target.full_pipeline || source.full_pipeline;
-	AccumulateExecutionRegionRuleName(target.funded_protocol_rule, source.funded_protocol_rule);
-	AccumulateExecutionRegionRuleName(target.startup_rules, source.startup_rules);
+	AccumulateExecutionRegionRuleName(target.input_scope, ExecutionRegionRunnerCostInputScope(source));
+	AccumulateExecutionRegionRuleName(target.admission_class, source.admission_class);
 	AccumulateExecutionRegionRuleName(target.selection_reason, source.selection_reason);
 	target.generated_expression_work += source.generated_expression_work;
 	target.generated_stage_work += source.generated_stage_work;

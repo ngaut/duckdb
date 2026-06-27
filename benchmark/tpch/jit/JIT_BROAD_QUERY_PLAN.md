@@ -1,7 +1,7 @@
 # JIT Broad Query Root Plan
 
-Last updated: 2026-06-26
-Last verified commit: `48868a4a1d`
+Last updated: 2026-06-27
+Last verified commit: `2d1c4ce9d4`
 Branch: `codex/jit-native-duckdb-core`
 
 Status: active root plan. This file is the execution plan for making more query
@@ -127,6 +127,10 @@ These are the facts the plan is built on:
   covered route without a Q20-only branch; the remaining root work is carrying
   hash/state-target facts deeper instead of stopping at compact group-key vector
   construction.
+- The last Q3-shaped grouped find-or-create branch, hard-coded for
+  `[INT32, INT32, INT8]`, is removed. Q3 now uses the same descriptor-driven
+  grouped lookup loop as the broader fixed-key path, and xtrace did not show the
+  generic comparer becoming a new dominant cost.
 - Runtime path counts and materialization boundary counts now exist and must stay
   row-counted. They are the source of truth for what work remains.
 
@@ -364,6 +368,389 @@ Production checkpoint after the split-payload final aggregate fix:
   value-lifetime cleanup, but not the Q9 root win by itself: SF10 Q9 stayed near
   the noise threshold at about `1.05x`, while Q20 SF10 stayed strong at about
   `1.44x`.
+- The selected state-address ABI is now consistent across generated and
+  primitive grouped updates: when an execute selection is present,
+  `address_sel` is a logical-row map. The mixed split-payload fallback now uses
+  `TryFindOrCreateGroupsSelectedStateUpdateFast` instead of the row-update
+  callback, and the stale unused duplicate-position scratch selection is gone.
+  SF1 forced/profile records `find_or_create_fast.selected_state_update` under
+  the mixed `direct_new_split_payload.append` path for Q9/Q20 while preserving
+  precomputed group hashes and correctness. Production Q3/Q9/Q20 over three
+  repeats stayed positive: Q3 `0.062s -> 0.052s`, Q9 `0.144s -> 0.118s`, Q20
+  `0.063s -> 0.044s`, all with correctness diff 0.
+- The remaining direct primitive grouped find-or-create route now uses the same
+  selected state-address ABI, so `TryFindOrCreateGroupsUpdateFast` and the
+  row-update arm inside `TryFindOrCreateGroupsFastInternal` are deleted. The
+  helper now has two outcomes only: fill an address vector or emit selected
+  state-address spans for existing, new, and duplicate-new groups.
+- The append-only primitive grouped route now uses the existing state-address
+  append callback as well. `TryAppendNewGroupsUpdateFast`, the
+  `ExecutionGroupedAggregateStateRowUpdateFunction` typedef, and the row-update
+  arm inside `TryAppendNewGroupsFastInternal` are deleted. The append helper now
+  either fills an address vector or appends new groups and emits a state-address
+  span through DuckDB-owned tuple layout.
+- Verification for this ABI deletion:
+  `make reldebug -j12`, `[api][jit]` with the append test now requiring
+  `find_new.state_address_update`, `python3 benchmark/jit/verify_jit_architecture.py`,
+  `build/reldebug/test/unittest --print-failing-tests`, forced/profile Q3/Q9/Q20 in
+  `/private/tmp/duckdb_jit_append_state_address_profile`, and production
+  Q3/Q9/Q20 in `/private/tmp/duckdb_jit_append_state_address_prod` all passed
+  with correctness diff 0. Production medians stayed positive: Q3
+  `0.063s -> 0.051s`, Q9 `0.142s -> 0.118s`, Q20 `0.064s -> 0.044s`.
+- Direct Time Profiler xtrace over repeated Q9 auto is saved at
+  `/tmp/trace_duckdb_20260626_163015.trace` with 5,356 samples. It sampled the
+  `duckdb` process directly; top frames still include `ht_entry_t::GetValue`,
+  `BloomFilter::GetMask`, `ht_entry_t::ExtractSalt`,
+  `ExecuteAllValidInt64PairNoChainProbe`, `JoinHashTable::Finalize`, and scan
+  decompression/filtering. This confirms the append ABI cleanup is not the next
+  limiting frame; Milestone 6 regular probe/build ownership remains the larger
+  root target.
+- Milestone 6 probe cleanup has started by deleting duplicated flat/selected
+  regular hash probe ladders rather than adding another fast path. The flat and
+  selected all-valid no-chain predicates now share
+  `SljitHashJoinCanUseAllValidNoChainProbe`; the flat and selected pair-chain
+  predicates share `SljitHashJoinCanUseAllValidPairChainProbe`; and the
+  flat/selected two-key no-chain and chain wrappers are trait-selected template
+  instantiations. Telemetry stage names are unchanged, so old evidence still
+  maps to the same runtime path counters.
+- Verification for that probe-shape cleanup:
+  `make reldebug -j12`, `[api][jit]`,
+  `python3 benchmark/jit/verify_jit_architecture.py`, direct verification-setting
+  smoke, forced/profile Q3/Q9/Q20 in
+  `/private/tmp/duckdb_jit_probe_template_profile`, and production Q3/Q9/Q20 in
+  `/private/tmp/duckdb_jit_probe_template_prod` passed with correctness diff 0.
+  Production medians stayed positive: Q3 `0.062s -> 0.051s`, Q9
+  `0.142s -> 0.118s`, Q20 `0.065s -> 0.045s`.
+- A direct DuckDB Time Profiler run for the current Milestone 6 checkpoint is
+  saved at `/tmp/trace_duckdb_jit_probe_template_q9_file_20260626_164548.trace`
+  with 2,647 samples. It shows the remaining root cost is still regular
+  DuckDB hash join work: `JoinHashTable::Probe` is about 33.7% total,
+  `ProbeForPointers` is about 20.2% self, `JoinHashTable::Hash` about 5.9%,
+  scan/filtering about 28%, sink/build about 9.6%, and hash-join finalize about
+  8.1%. This cleanup reduces branch sprawl and salt/bloom duplication; it does
+  not complete Milestone 6.
+- The first core DuckDB probe cleanup now removes the `AddPointerToCompare`
+  helper from `ProbeForPointersInternal`, hoists the entry pointer and result
+  vector bases, compares stored salt bits directly in the collision walk, and
+  folds salted/unsalted candidate writes back into one append block. The follow-up
+  direct selection-buffer write removes hot-loop `SelectionVector::set_index`
+  calls for the compare and match selections while preserving the same
+  `RowMatcher` row-index contract.
+  Verification passed for `make reldebug -j12`, `[api][jit]`, `test/sql/join`,
+  the architecture verifier, forced/profile Q3/Q9/Q20 in
+  `/private/tmp/duckdb_jit_probe_folded_profile`, and production Q3/Q9/Q20 in
+  `/private/tmp/duckdb_jit_probe_folded_prod`; production medians stayed positive
+  at Q3 `0.062s -> 0.052s`, Q9 `0.144s -> 0.119s`, and Q20
+  `0.064s -> 0.045s`, all correctness diff 0.
+- Direct Time Profiler after the core probe cleanup is saved at
+  `/tmp/trace_duckdb_jit_probe_core_q9_20260626_165548.trace` with 2,640
+  samples. A trace diff against the prior direct Q9 profile shows the intended
+  local movement, not a root win: `IncrementAndWrap` self samples dropped about
+  1.0 percentage point and `ht_entry_t::ExtractSalt` dropped about 0.8 points,
+  while `ProbeForPointers` remains dominant and sampled at about 22.7% self.
+  The next root target is still reducing regular hash probe/match lifetime, not
+  adding another local helper.
+- Direct Time Profiler after direct selection writes is saved at
+  `/tmp/trace_duckdb_jit_probe_selwrite_q9_20260626_170505.trace` with 2,618
+  samples. Diffing it against the core-probe trace shows
+  `SelectionVector::set_index` disappeared from the top sampled functions, but
+  `ProbeForPointers` remained about 22.7% self. This confirms the edit removed
+  local setter overhead without changing the Milestone 6 root blocker.
+- Direct Time Profiler after folding the candidate append and direct salt-bit
+  compare is saved at
+  `/tmp/trace_duckdb_jit_probe_folded_q9_20260626_172141.trace` with 2,663
+  samples. Diffing it against the direct-selection trace shows the sampled lambda
+  frame is gone and `ProbeForPointers` is effectively unchanged at about 22.5%
+  self. This is retained as source and instruction-shape cleanup, not a root
+  probe/dataflow win.
+- The next Milestone 6 cleanup now gives the one-join and two-join pending probe
+  paths one implementation for selected probe batch append:
+  `SljitAppendSelectedProbeBatch`. The edit deletes the duplicated local copy,
+  row-pointer copy, cardinality update, and telemetry blocks while leaving each
+  path's capacity and flush decisions local. Final-build verification passed for
+  `make reldebug -j12`, `[api][jit]`, `test/sql/join`, the architecture
+  verifier, forced/profile Q3/Q9/Q20 in
+  `/private/tmp/duckdb_jit_pending_probe_helper_final_profile`, and production
+  Q3/Q9/Q20 in `/private/tmp/duckdb_jit_pending_probe_helper_final_prod`.
+  Production medians stayed positive and correct at Q3 `0.062s -> 0.052s`, Q9
+  `0.141s -> 0.119s`, and Q20 `0.063s -> 0.044s`, all correctness diff 0.
+  The Q9 runtime path and boundary counters stayed in the same shape:
+  `hash_join_probe.fast_regular_probe_selected_all_valid_int64_pair_no_chain=2931`,
+  `hash_join_probe.fast_regular_probe_flat_all_valid_single_key_no_chain=164`,
+  and the same direct row-pointer/reference/projection/group-payload boundaries.
+  Direct Time Profiler for this final build is saved at
+  `/tmp/trace_duckdb_jit_pending_probe_helper_final_q9_20260626_173631.trace`
+  with 2,638 samples. Diffing against the folded-probe trace keeps
+  `ProbeForPointers` in the same dominant band (`22.5% -> 23.4%` self, sampling
+  noise), so this is retained as duplicated-boundary implementation cleanup, not
+  a root Milestone 6 performance win.
+- The current Milestone 6 row-pointer descriptor slice removes the covered Q9
+  final compact group-key remap and projected group-payload aggregate update.
+  Final projection group-key facts are now described as row-pointer/input-vector
+  descriptors, including `STRING_COMPRESS` for `nation` and `INTEGRAL_COMPRESS`
+  for `o_year`, and DuckDB-owned grouped aggregate helpers consume those
+  descriptors while the primitive DECIMAL payload remains in the live input.
+  The replacement path is generic descriptor plumbing, not a Q9 branch.
+  Q9 forced/profile now reports
+  `aggregate_update.direct_row_pointer_grouped_lookup_update=164` and
+  `aggregate_update.row_pointer_grouped_lookup_update=319404`; the old
+  `projection.direct_remap_post_join_batch_projection` and
+  `aggregate_update.projected_group_payload_update` boundaries are gone for this
+  route. The descriptor fill loop is specialized by source/cast kind so the
+  large Q9 events keep `find_or_create_descriptor_keys.fill` near
+  `0.29-0.33 ms` instead of making the deleted projection boundary reappear as a
+  slower generic row loop.
+  Verification passed for `make reldebug -j12`, `[api][jit]`, `test/sql/join`,
+  the architecture verifier, direct smoke that the removed verification pragma is
+  gone, forced/profile Q3/Q9/Q20 in
+  `/private/tmp/duckdb_jit_m6_row_pointer_descriptor_profile`, and comparable
+  no-trace production Q3/Q9/Q20 in
+  `/private/tmp/duckdb_jit_m6_row_pointer_descriptor_prod_notrace`. Production
+  medians stayed positive and correct at Q3 `0.063s -> 0.051s`, Q9
+  `0.139s -> 0.117s`, and Q20 `0.063s -> 0.044s`, all correctness diff 0.
+  Direct Time Profiler over a repeated Q9 file is saved at
+  `/tmp/trace_duckdb_20260626_181554.trace` with 29,929 samples. It shows the
+  remaining root is still regular hash probe work: `ProbeForPointers` is about
+  `27.7%` self, `TemplatedSignHashFunction` about `5.1%`,
+  `ht_entry_t::ExtractSalt` about `4.5%`, with scan/filtering and grouped-update
+  support frames below that. Therefore this slice is a real boundary deletion,
+  but it does not complete Milestone 6.
+- The follow-up probe-state cleanup removes stale state from the same regular
+  hash join object: `ProbeState` no longer inherits the build-only salt vector,
+  `InsertState` owns that vector directly, and the unused `non_empty_sel` probe
+  selection is gone. This is retained as state ownership cleanup, not as a root
+  probe-loop win. Verification passed for `make reldebug -j12`, `[api][jit]`,
+  `test/sql/join`, the architecture verifier, and no-trace production Q3/Q9/Q20
+  in `/private/tmp/duckdb_jit_m6_probe_state_cleanup_prod_notrace`; medians
+  stayed positive and correct at Q3 `0.059s -> 0.051s`, Q9 `0.134s -> 0.114s`,
+  and Q20 `0.061s -> 0.045s`, all correctness diff 0.
+	- The next probe continuation cleanup deletes `ProbeState::ht_offsets_and_salts_v`.
+	  Continuation tokens now live in `hashes_dense_v`: the first unselected probe
+	  pass stores them at the original row slot, and selected continuation passes use
+	  a compact compare-row map only where RowMatcher's original-row
+	  contract requires it. This removes the extra per-row continuation vector and
+  the stale helper wrapper, while keeping RowMatcher indexed by original probe
+  rows. Verification passed for `make reldebug -j12`, `[api][jit]`,
+  `test/sql/join`, the architecture verifier, `git diff --check`, and direct
+  proof that the removed verification pragma is gone. Forced/profile Q3/Q9/Q20
+  in `/private/tmp/duckdb_jit_m6_probe_continuation_split_profile` stayed
+  correct; profile medians were Q3 `0.061068s -> 0.060205s`, Q9
+  `0.135810s -> 0.135843s`, and Q20 `0.064099s -> 0.061425s`. No-trace
+  production Q3/Q9/Q20 in
+  `/private/tmp/duckdb_jit_m6_probe_continuation_split_prod_notrace` also
+  verified with correctness diff 0; medians were neutral at Q3
+  `0.060s -> 0.060s`, Q9 `0.133s -> 0.134s`, and Q20 `0.061s -> 0.061s`.
+  A short repeated-Q9 Time Profiler trace
+  `/tmp/trace_zsh_20260626_184042.trace` has 5,057 samples and keeps
+  `ProbeForPointersInternal<true,false>` as the largest C++ self frame at
+  `23.9%` (`ht_entry_t::ExtractSalt` `3.4%`). The longer 29s trace
+  `/tmp/trace_zsh_20260626_184210.trace` is mostly unsymbolicated generated code,
+  so it is not used for C++ frame attribution. This cleanup is worth keeping as
+  state deletion, but the neutral production result means it is not a Milestone 6
+  root win.
+- A follow-up packed-entry-value micro-edit was rejected. Carrying the raw hash-table
+  entry value through the salted probe loop lowered the short repeated-Q9 trace frame
+  from `23.9%` to `22.4%`, but production Q9 failed the verifier at
+  `0.978571x` in
+  `/private/tmp/duckdb_jit_m6_probe_entry_value_final_prod_notrace`. The edit was
+  reverted. The reverted-state production smoke in
+  `/private/tmp/duckdb_jit_m6_probe_entry_value_reverted_prod_notrace` verified with
+  correctness diff 0 and medians Q3 `0.063s -> 0.062s`, Q9
+  `0.138s -> 0.140s`, and Q20 `0.063s -> 0.064s`. Trace-only source shaping is
+  not sufficient Milestone 6 evidence.
+- The retained dense-probe-hash cleanup removes one more regular probe ownership
+  boundary. The common no-null-filter `JoinHashTable::Probe` path now hashes
+  directly into `ProbeState::hashes_dense_v` and probes via
+  `GetRowPointersWithDenseHashes`, so it no longer allocates a temporary hash vector
+  and then copies it back into probe-owned dense state. Precomputed and
+  null-filtered hashes keep the existing densifier because their hash vectors are
+  externally owned or sparse by original row id. Verification passed for
+  `make reldebug -j12`, `[api][jit]`, `test/sql/join`, the architecture verifier,
+  and `git diff --check`. Final-source profile Q3/Q9/Q20 in
+  `/private/tmp/duckdb_jit_m6_dense_probe_hash_flat_profile` verified with
+  correctness diff 0; medians were Q3 `0.062534s -> 0.062283s`, Q9
+  `0.139142s -> 0.141199s`, and Q20 `0.065517s -> 0.064241s`. Final-source
+  no-trace production Q3/Q9/Q20 in
+  `/private/tmp/duckdb_jit_m6_dense_probe_hash_flat_prod_notrace` verified with
+  medians Q3 `0.061s -> 0.062s`, Q9 `0.137s -> 0.139s`, and Q20
+  `0.063s -> 0.063s`. The final-source repeated-Q9 trace
+  `/tmp/trace_zsh_20260626_191125.trace` has 3,826 samples but is mostly
+  unsymbolicated generated code, so it is not used for C++ frame attribution.
+  Collapsed stack checks still showed the old
+  `VectorBuffer::Copy`/`GetRowPointersInternal<true>` probe-copy path in 19 stacks
+  before this cleanup and no matches after it. This is retained as boundary deletion,
+  not as a Milestone 6 root win.
+- The SLJIT fast regular probe helpers now compare salt bits directly instead of
+  materializing packed pointer-mask salts with `ht_entry_t::ExtractSalt`.
+  `SljitHashJoinFindFirstChainPointer` uses `GetSaltWithNulls`, and the pair-key
+  and single-key no-chain helpers compare `entry_value & ht_entry_t::SALT_MASK`
+  against `hash & ht_entry_t::SALT_MASK`. Verification passed for
+  `make reldebug -j12`, `[api][jit]`, `test/sql/join`, the architecture verifier,
+  `git diff --check`, and the removed-pragma smoke. No-trace production Q3/Q9/Q20
+  in `/private/tmp/duckdb_jit_m6_sljit_probe_salt_bits_prod_notrace` verified
+  with medians Q3 `0.062s -> 0.061s`, Q9 `0.138s -> 0.138s`, and Q20
+  `0.063s -> 0.064s`. Profile Q3/Q9/Q20 in
+  `/private/tmp/duckdb_jit_m6_sljit_probe_salt_bits_profile` also verified; Q9
+  measured `0.139591s -> 0.140836s`. The direct repeated-Q9 trace
+  `/tmp/trace_zsh_20260626_192419.trace` has 2,535 samples but is mostly
+  unsymbolicated generated code, so it is only used as a negative helper check:
+  the collapsed stacks contain no `ExtractSalt` or `GetSaltWithNulls` frames, and
+  only two named bloom-filter stacks. Keep this as instruction-shape cleanup, not
+  as a Milestone 6 root win.
+- The post-join RHS row-pointer gather paths now share one `GatherHashJoinRHSColumn`
+  helper. Every supported projection/materialization path tries
+  `ExecutionTryDirectGatherHashJoinRHSFixedColumn` first and falls back to
+  `JoinHashTable::GatherRHSColumn` in one place, with the fallback hash-table
+  dependency asserted there. Verification passed for `make reldebug -j12`,
+  `[api][jit]`, `test/sql/join`, the architecture verifier, `git diff --check`,
+  and the removed-pragma smoke. No-trace production Q3/Q9/Q20 in
+  `/private/tmp/duckdb_jit_m6_rhs_gather_helper_prod_notrace` verified with
+  medians Q3 `0.061s -> 0.062s`, Q9 `0.136s -> 0.138s`, and Q20
+  `0.062s -> 0.063s`. Profile Q3/Q9/Q20 in
+  `/private/tmp/duckdb_jit_m6_rhs_gather_helper_profile` also verified; Q9
+  measured `0.139239s -> 0.141463s`. The useful repeated-Q9 xtrace is
+  `/tmp/trace_zsh_jit_m6_rhs_gather_helper_q9_20260626_193620.trace` with 2,561
+  samples over 3.30s; it names `ProbeForPointersInternal<true,false>` as the top
+  frame at `23.16%` self and `ht_entry_t::ExtractSalt` at `3.79%`. Keep the helper
+  as source deletion and direct-gather consistency only. It does not move the
+  Milestone 6 root.
+- `JoinHashTable` build/finalize now uses raw salt bits instead of packed
+  pointer-mask salts. `ApplyBitmaskAndGetSaltBuild` writes
+  `hash & ht_entry_t::SALT_MASK`, the build loop compares
+  `entry.GetValue() & ht_entry_t::SALT_MASK`, and
+  `src/execution/join_hashtable.cpp` no longer calls `ExtractSalt`, `GetSalt`, or
+  `GetSaltWithNulls`. Verification passed for `make reldebug -j12`,
+  `[api][jit]`, `test/sql/join`, the architecture verifier, `git diff --check`,
+  and the removed-pragma smoke. Final 9-repeat no-trace production Q3/Q9/Q20 in
+  `/private/tmp/duckdb_jit_m6_join_build_raw_salt_bits_prod9_notrace` verified
+  with medians Q3 `0.061s -> 0.062s`, Q9 `0.138s -> 0.139s`, and Q20
+  `0.063s -> 0.063s`. Profile Q3/Q9/Q20 in
+  `/private/tmp/duckdb_jit_m6_join_build_raw_salt_bits_profile` also verified; Q9
+  measured `0.141995s -> 0.143777s`. The final repeated-Q9 trace
+  `/tmp/trace_zsh_jit_m6_join_build_raw_salt_bits_q9_20260626_194757.trace` has
+  2,575 samples and is mostly unsymbolicated, but collapsed stacks contain zero
+  named `ExtractSalt`, `GetSaltWithNulls`, `ProbeForPointers`, or
+  `JoinHashTable::Finalize` frames. Keep this as source/instruction-shape cleanup,
+  not as a Milestone 6 root win.
+- The next probe scratch cleanup deletes `ProbeState::keys_to_compare_row_sel`.
+  Selected regular probe continuation still needs original probe row identity for
+  `RowMatcher`, but that map is now scratch in the unused tail of `match_sel`
+  during each dense probe iteration instead of persistent probe state. This
+  keeps previous matches intact, remaps no-match continuation tokens before
+  writing new matches, and leaves flat probing indexed directly by row id.
+  The cleanup exposed a real SF10 Q9 correctness bug: the row-pointer grouped
+  descriptor path could read a second-join projection input column that had been
+  intentionally omitted by the compressed/precomputed skip projection. The fix is
+  a descriptor fact guard, `group_key_omitted_input`, so the invalid
+  input-vector read is rejected and the existing sidecar/batch path consumes the
+  live compressed key instead.
+  Verification passed for `make reldebug -j12`, `[api][jit]`, `test/sql/join`,
+  `python3 benchmark/jit/verify_jit_architecture.py`, `git diff --check`, direct
+  smoke that the removed verification pragma is gone, and the isolated SF10 Q9
+  repro that previously crashed in `AggregateReverseMemCpy`. SF1 forced/profile
+  Q3/Q9/Q20 in
+  `/private/tmp/duckdb_jit_m6_probe_compare_scratch_fixed_profile` verified with
+  medians Q3 `0.060700s -> 0.056383s`, Q9 `0.138486s -> 0.127730s`, and Q20
+  `0.063615s -> 0.050615s`. SF1 no-trace production in
+  `/private/tmp/duckdb_jit_m6_probe_compare_scratch_fixed_prod_notrace` verified
+  with medians Q3 `0.060s -> 0.051s`, Q9 `0.142s -> 0.121s`, and Q20
+  `0.063s -> 0.045s`. SF10 Q9 verified in both profile and production:
+  `/private/tmp/duckdb_jit_m6_probe_compare_scratch_q9_sf10_fixed_profile`
+  measured `1.524604s -> 1.289852s`, and
+  `/private/tmp/duckdb_jit_m6_probe_compare_scratch_q9_sf10_fixed_prod_notrace`
+  measured `1.486s -> 1.140s`, all with correctness diff 0. The final repeated
+  Q9 xtrace is
+  `/tmp/trace_duckdb_jit_m6_probe_compare_scratch_fixed_q9_sqlarg_20260626_202233.trace`
+  with 3,824 samples over 4.54s; `ProbeForPointersInternal<true,false>` is still
+  the largest self frame at `22.3%`. Keep this as state deletion plus correctness
+  cleanup. It does not complete Milestone 6.
+- The follow-up join-state split deletes the misleading `JoinHashTable::SharedState`
+  base. Probe state now owns only probe comparison/no-match selections plus dense
+  hashes, and insert state now owns only build salt, remaining, compare, match,
+  no-match, and RHS row-location scratch. The edit preserves RowMatcher's contract:
+  the build path still mutates an owned `key_match_sel`, and the selected probe
+  path still keeps original probe row identity where RowMatcher requires it.
+  Verification passed for `make reldebug -j12`, `[api][jit]`, `test/sql/join`,
+  the architecture verifier, `git diff --check`, and the removed-pragma smoke.
+  SF1 forced/profile Q3/Q9/Q20 in
+  `/private/tmp/duckdb_jit_m6_join_state_split_profile` verified with medians
+  Q3 `0.061857s -> 0.057291s`, Q9 `0.139290s -> 0.130279s`, and Q20
+  `0.062637s -> 0.050856s`. SF1 no-trace production in
+  `/private/tmp/duckdb_jit_m6_join_state_split_prod_notrace` verified with
+  medians Q3 `0.061s -> 0.051s`, Q9 `0.140s -> 0.118s`, and Q20
+  `0.065s -> 0.046s`. SF10 Q9 production in
+  `/private/tmp/duckdb_jit_m6_join_state_split_q9_sf10_prod_notrace` verified at
+  `1.483s -> 1.139s`, correctness diff 0. The direct repeated-Q9 trace
+  `/tmp/trace_duckdb_20260626_204054.trace` has 3,894 samples over 4.68s and
+  still names `ProbeForPointersInternal<true,false>` as the largest self frame at
+  `23.1%`, with `InsertHashesLoop<false>` at `5.6%`. Keep this as ownership
+  cleanup only; the Milestone 6 root target is unchanged.
+- The build-side selection cleanup now uses direct owned selection buffers inside
+  `InsertHashesLoop`, `PerformKeyComparison`, and
+  `InsertMatchesAndIncrementMisses` instead of `SelectionVector` accessor calls.
+  This covers the build salt-match list, build key-match reset, no-match
+  continuation, and build-side null filtering while keeping RowMatcher's mutable
+  selection contract unchanged. Verification passed for `make reldebug -j12`,
+  `[api][jit]`, `test/sql/join`, the architecture verifier, `git diff --check`,
+  and the removed-pragma smoke. SF1 forced/profile Q3/Q9/Q20 in
+  `/private/tmp/duckdb_jit_m6_join_build_sel_direct_profile` verified with
+  medians Q3 `0.061960s -> 0.057760s`, Q9 `0.138828s -> 0.128560s`, and Q20
+  `0.063311s -> 0.050823s`. SF1 no-trace production in
+  `/private/tmp/duckdb_jit_m6_join_build_sel_direct_prod_notrace` verified with
+  medians Q3 `0.061s -> 0.049s`, Q9 `0.136s -> 0.117s`, and Q20
+  `0.062s -> 0.044s`. SF10 Q9 production in
+  `/private/tmp/duckdb_jit_m6_join_build_sel_direct_q9_sf10_prod_notrace`
+  verified at `1.495s -> 1.140s`, correctness diff 0. The direct repeated-Q9
+  xtrace `/tmp/trace_duckdb_20260626_204916.trace` has 3,787 samples over 4.52s:
+  `InsertHashesLoop<false>` moved from `5.6%` to `5.0%` against the previous
+  trace, but `ProbeForPointersInternal<true,false>` remains the top self frame at
+  `23.0%`. Keep this as local instruction cleanup, not a Milestone 6 exit.
+- The current regular-probe implementation adds a DuckDB-owned direct path for
+  the common all-valid inner two-key 64-bit no-chain equality probe. It is gated
+  by join type, equality predicates, no residual, no chain matcher, no build/probe
+  NULL handling, no duplicate chains, and matching `INT64`/`UINT64` key physical
+  types. The path hashes the two probe keys, linearly probes the existing regular
+  hash table, compares both row-layout keys directly, writes row pointers, and
+  emits the match selection. It bypasses the separate vector hash, row-pointer
+  probe, and RowMatcher compare passes for that shape. Failed follow-up
+  micro-specializations for selector/salt dispatch and first-bucket branching
+  were removed; the retained loop is intentionally compact. Verification passed
+  for `make reldebug -j12`, `[api][jit]`, `test/sql/join`, the architecture
+  verifier, `git diff --check`, and the removed-pragma smoke. SF1 profile
+  Q3/Q9/Q20 in `/private/tmp/duckdb_jit_m6_pair_probe_compact_profile` verified
+  with medians Q3 `0.061931s -> 0.057349s`, Q9 `0.147971s -> 0.129587s`, and
+  Q20 `0.064916s -> 0.050722s`. SF1 production in
+  `/private/tmp/duckdb_jit_m6_pair_probe_compact_prod_notrace` verified with
+  medians Q3 `0.062s -> 0.051s`, Q9 `0.144s -> 0.115s`, and Q20
+  `0.064s -> 0.045s`. SF10 Q9 production in
+  `/private/tmp/duckdb_jit_m6_pair_probe_compact_q9_sf10_prod_notrace` verified
+  at `1.618s -> 1.116s`, speedup `1.449821`, correctness diff 0. The final Q9
+  xtrace `/tmp/trace_duckdb_20260626_213759.trace` has 4,055 samples over 4.88s:
+  `ProbeForPointersFlatInternal<true>` is down to 7 samples, while the new
+  `ProbeInt64PairNoChainLoop<long long, long long>` is the top frame at `32.0%`
+  self. This is real probe/match ownership for the no-chain pair shape, but the
+  direct loop is now the sampled root and needs deeper hash/probe ownership next.
+- The follow-up probe cleanup kept the direct-pair loop compact but made its
+  emission contract explicit through a local matched-row consumer. The same
+  producer/consumer shape now exists in the SLJIT all-valid pair and single-key
+  no-chain fast paths, which preserves `row_pointers` and `match_sel` behavior
+  while preparing a real fused descriptor consumer. Build/finalize now writes
+  hash/salt vectors directly, carries loaded entry values through occupied,
+  salt, and pointer checks, inserts known-empty serial build slots without
+  re-reading them, and increments build probe offsets with the true pointer-table
+  bitmask now that salt is carried separately. Header-level force-inline hints
+  were measured and removed as hint-only churn. Verification passed for
+  `make reldebug -j12`, `[api][jit]`, `test/sql/join`, the architecture
+  verifier, `git diff --check`, and the removed-pragma smoke. Final SF1
+  coverage-CBO production in
+  `/private/tmp/duckdb_jit_m6_consumer_build_cleanup_final_coverage_prod_notrace`
+  verified Q3 `0.062s -> 0.051s`, Q9 `0.147s -> 0.117s`, and Q20
+  `0.063s -> 0.045s`, all correctness diff 0. The current Q9 xtrace is
+  `/tmp/trace_duckdb_20260626_223044.trace`; it still names
+  `ht_entry_t::GetValue`, `InsertHashesLoopProbe`,
+  `TemplatedSignHashFunction`, and `BloomFilter::GetMask` as the next
+  instruction-level roots, so the next profitable work is deeper probe/build
+  ownership rather than more helper hints or local setter cleanup.
 
 Next root fixes, in order:
 
@@ -620,6 +1007,16 @@ Current evidence:
 - Regular-hash chains need backend ownership of downstream boundaries.
 - Selected all-valid one-key/two-key probe helpers are useful groundwork but not
   sufficient by themselves.
+- The first active Milestone 6 slice removes duplicated flat/selected pair-probe
+  code. `sljit_region_runtime.cpp` now shares all-valid no-chain/pair-chain
+  capability predicates and uses templated flat/selected two-key probe wrappers,
+  a net source deletion in the hot probe runtime while preserving runtime stage
+  names.
+- Direct Time Profiler evidence after this cleanup still points below that
+  branch ladder: Q9 spends about one third of samples in DuckDB
+  `JoinHashTable::Probe`, with `ProbeForPointers` the largest self frame.
+  Therefore the next deletion must own more probe/match/dataflow lifetime, not
+  clone another selected or flat helper.
 - Q7/Q8/Q21 should stay skipped unless production medians prove a real win.
 
 Implementation direction:
@@ -746,6 +1143,219 @@ Before claiming a milestone complete:
 8. Treat trace timings as stage evidence, not final performance claims.
 9. Treat zero-compiled timing movement as planning overhead or noise unless it
    repeats and has a specific root cause.
+
+## Current Milestone 6 CBO Refactor Decision
+
+The broad-query CBO no longer uses per-shape funded-protocol rules or startup
+waivers. Admission now has one visible class per cost input, exposed as
+`runner_cost_admission_class`, and the cost input scope is visible as
+`runner_cost_input_scope`.
+
+The current production model is intentionally small:
+
+- generated/native fusion is admitted by `generated_native_fusion`, then must
+  clear the ordinary saved-work and startup threshold
+- native operator work is admitted only by explicit native benefit
+  (`configured_native_operator`)
+- materialization elision and full-pipeline proof remain explicit admission
+  classes
+- native joins pay a fixed protocol penalty; blocked aggregate lookup pays its
+  own fixed penalty
+- projection glue is reference-only work and contributes zero generated benefit;
+  non-reference projections are generated compute, capped by expression cost
+- startup is uniform; there are no shape-specific discounts or waivers
+- pre-graph physical-pipeline admission remains separate from execution-region
+  candidate admission through `runner_cost_input_scope`
+
+The architecture verifier now rejects the obsolete CBO rule-table vocabulary in
+code, the removed projection-glue/small-stateful hard rejects, and the removed
+verification pragma. New TPC-H work should tune this quantitative model or delete
+work in the runtime path; it should not add another shape predicate.
+
+The broad default run
+`/private/tmp/duckdb_jit_m6_scope_default_broad_prod` verified correctness but
+did not justify enabling `jit_cbo_full_pipeline_benefit` by default. The default
+therefore stays conservative while broad-query work moves to measured runtime
+deletions and explicit cost terms.
+
+Follow-up simplification removed the remaining stale CBO input inventory fields
+that were no longer read by the quantitative model (`perfect_hash_join`/payload
+shape, grouped-string shape, source projected columns, and reference-varchar
+projection count) from `PhysicalRunnerCostInput`; those facts stay in IR
+inventory/telemetry where they are observational. It also removed the `sort_sink`
+CBO bit and the old small-stateful-projection hard reject. Q7 stays governed by
+the same quantitative startup threshold, so the deletion did not need a
+replacement shape gate.
+
+Focused SF1 production smoke after this deletion, before default recalibration:
+`/private/tmp/duckdb_jit_cbo_simplified_no_shape_reject_prod` verified
+correctness for Q1/Q3/Q7/Q9/Q14/Q17/Q19/Q20. Medians were Q1
+`0.070s -> 0.060s` (`1.166667x`, compiled), Q9 `0.155s -> 0.153s`
+(`1.013072x`, compiled/runtime-limited), Q7 neutral with no JIT decision, and
+all other zero-compiled changes were noise-level. This supports the simpler CBO
+as a safe base, but not as the remaining performance win by itself.
+
+The default CBO is now deliberately more aggressive without adding shape gates:
+`jit_cbo_generated_stage_benefit=4096` and
+`jit_cbo_startup_base_cost=64000`. The high generated-stage benefit admits real
+generated/native fusion wins; the higher uniform startup threshold rejects weak
+marginal regions like Q7 through the same math instead of naming the query shape.
+With those defaults, SF1 all-22 production TPC-H in
+`/private/tmp/duckdb_jit_cbo_aggressive_defaults_all22_prod` verified
+correctness. Compiled wins were Q1 `0.069s -> 0.060s` (`1.150000x`), Q9
+`0.152s -> 0.120s` (`1.266667x`, two compiled shapes), and Q14
+`0.076s -> 0.037s` (`2.054054x`). There were no compiled regressions; remaining
+slow-looking rows had zero JIT decisions and are benchmark noise, not CBO
+admissions.
+
+Current aggressive CBO checkpoint:
+
+- The stale generic `configured_native_operator` admission path is deleted.
+  Native operator work no longer opens a region by itself; native work is scored
+  only after a real generated/materialization/full-pipeline/native-aggregate
+  admission. This keeps native-only join plumbing out of auto while still
+  allowing native aggregate-only regions through the explicit `native_aggregate`
+  admission class.
+- Graph prefiltering now distinguishes native aggregate sinks from generic
+  native operator work. Native stage benefit can make planning worthwhile for a
+  generated-native graph or a native aggregate sink, but it does not open
+  native-only join/delim protocol graphs.
+- Default settings are now the measured aggressive profile:
+  `jit_cbo_generated_stage_benefit=4096`,
+  `jit_cbo_materialization_elision_benefit=4096`,
+  `jit_cbo_native_operator_stage_benefit=1024`,
+  `jit_cbo_full_pipeline_benefit=4096`,
+  `jit_cbo_startup_base_cost=32000`, and
+  `jit_cbo_startup_margin_basis_points=0`.
+- Native benefit guards are smaller and evidence-based: weak native-only join
+  plumbing no longer opens regions by itself, while the wide-join guard uses
+  costed post-filter rows instead of a blanket stage-count veto. A join-only
+  threshold relaxation was tested and discarded because it admitted Q18/Q21
+  regressions and still did not admit Q20.
+- The mixed find-or-create grouped fused-payload route no longer calls the
+  selected state-address payload callback from inside hash-table lookup.
+  Append-new and existing-group fast paths remain direct, while mixed new/existing
+  batches fall through to direct state-address resolution plus one fused payload
+  update over the address vector. This removes the slower
+  `state_address_selection_new_update` route from that mixed path and keeps Q9
+  positive.
+- Verification for this checkpoint passed:
+  `make reldebug -j12`, `[api][jit]`, `test/sql/jit`,
+  `python3 benchmark/jit/verify_jit_architecture.py`, and all-22 SF1 production
+  TPC-H in `/private/tmp/duckdb_jit_aggressive_defaults_route_final_all22_r3`.
+  Correctness diff was 0. Default-auto wins with compiled regions were Q1
+  `1.116667x`, Q7 `1.055556x`, Q9 `1.260870x`, Q13 `1.006803x`, Q14
+  `2.312500x`, and Q15 `1.125000x`; Q6 and Q18 were small zero-compiled/noise
+  wins. A higher-repeat compiled-regression check in
+  `/private/tmp/duckdb_jit_final_compiled_regressions_r9` verified correctness
+  and narrowed stable remaining runtime targets to Q4 `0.976190x`, Q10
+  `0.984375x`, and Q17 `0.972222x`. Q12 improved to `1.050000x`, while Q13 and
+  Q21 were neutral.
+- Q10 xtrace/profile evidence shows the current blocker is runtime work, not CBO:
+  the selected state-address callback cost was removed, but the region still
+  spends time in source-contract hash join output materialization and grouped
+  state-address resolution. Detailed Q10 events show
+  `native_hash_aggregate_lookup_blocker=hash-aggregate-row-compare-direct-equality-contract-missing`
+  because the grouped keys include VARCHAR. The next clean runtime target is a
+  broader row-pointer/group-key descriptor lookup for that variable-width shape,
+  not another CBO shape predicate.
+- The Q10 variable-width grouped lookup slice now keeps the one-join
+  hash-join/projection/grouped-aggregate route batched even when projection
+  outputs include variable-width keys. The row-pointer descriptor path no longer
+  materializes descriptor keys and then hashes them in a second pass; casted or
+  compressed descriptor keys use one `find_or_create_descriptor_keys.fill_hash`
+  pass, and no-cast row-pointer descriptors can probe directly. Covered API tests
+  now reject the old `find_or_create_descriptor_keys.fill` plus
+  `find_or_create_descriptor_keys.hash` stages. SF1 Q10 production in
+  `/private/tmp/duckdb_jit_q10_descriptor_fill_hash_prod_r9` verified correctness
+  and held neutral at `0.063s -> 0.063s`.
+- The Q4 string preaggregation slice keeps preaggregation batched and removes the
+  expensive `memcmp`-style equality helper for `string_t`; generated string
+  equality now uses `string_t::operator==`. The
+  `direct_mark_preaggregate_count_star_groups` stage moved from roughly
+  `0.46-0.49 ms` to `0.36-0.37 ms` in trace, while SF1 production
+  `/private/tmp/duckdb_jit_q4_string_equals_prod_r9` stayed neutral at
+  `0.042s -> 0.042s`.
+- Q17 now has a direct hash-join/filter/ungrouped-aggregate route. The runtime
+  runs the regular hash join probe in selection-only mode, keeps match selections
+  and build row pointers live, evaluates the post-join filter from those live
+  sources, then remaps aggregate payload references directly to selected
+  probe/build vectors. The same route handles residual predicates lowered into
+  the hash join and mark-build right/delim joins; it does not materialize a full
+  joined chunk before the filter. Focused API coverage asserts
+  `hash_join_probe.direct_row_pointer_reference`,
+  `aggregate_update.direct_hash_join_filtered_payload_update`, and absence of
+  `hash_join_probe.final_output`.
+- Q17 SF1 profile in
+  `/private/tmp/duckdb_jit_q17_mark_build_direct_profile` confirms the boundary
+  deletion: the old hot region changed from
+  `hash_join_probe.final_output=6088; aggregate_update.direct_state_update=587`
+  to
+  `hash_join_probe.direct_row_pointer_reference=6088; hash_join_probe.filtered_expression_input=6088; aggregate_update.direct_hash_join_filtered_state_update=587`.
+  It did not produce a Q17 production win: `/private/tmp/duckdb_jit_q17_mark_build_direct_prod_r9`
+  measured `0.034s -> 0.035s` (`0.971429x`). Direct xtrace over repeated Q17
+  at `/tmp/trace_duckdb_20260627_025444.trace` shows process-level CPU dominated
+  outside this route, especially existing perfect-hash join and scan/decompression
+  work. The next Q17 root target is broader pipeline coverage or compile-cost
+  amortization, not reverting this direct route.
+- Current broad SF1 production evidence is
+  `/private/tmp/duckdb_jit_tpch_all_direct_prod_r5`, verified with correctness
+  diff 0 for all 22 queries. Compiled wins above noise were Q1 `1.116667x`, Q9
+  `1.232759x`, Q14 `2.242424x`, and Q15 `1.125000x`; Q7 was a smaller compiled
+  win at `1.037037x`, and Q20 was a slight zero-compiled/noise win. Stable
+  remaining compiled regressions are still small-region/compile-overhead cases
+  such as Q10 and Q17, plus Q4 at noise scale.
+- The active milestone remains Milestone 6 with Milestone 7 CBO cleanup running
+  in parallel. The CBO is now intentionally more aggressive in the simple
+  direction: once a region has real generated work and no native sort, native
+  join/aggregate fusion is admitted as `generated_native_fusion` without the
+  old hidden high-cardinality and low-expression native-benefit guards. Native
+  only join plumbing still does not open a region by itself because admission
+  still needs generated, materialization, full-pipeline, or native-aggregate
+  basis.
+- The Q17 aggressive-admission failure exposed a runtime bug, not a CBO reason
+  to retreat. Selection-only perfect-hash probes populated probe/build
+  selections without materializing `join_output`; the generic fallback then read
+  an unmaterialized chunk as if it held projected columns. The shared fallback
+  now materializes perfect-hash selection-only output through
+  `ExecutionMaterializePerfectHashJoinProbe`, records
+  `hash_join_probe.perfect_selection_reference`, and regular row-pointer pending
+  buffering no longer accepts perfect-hash probe batches.
+- Perfect-hash post-join projection now uses the same direct probe-side path as
+  regular joins for probe/LHS references and computed expressions. Q17 trace no
+  longer needs `hash_join_probe.final_output` in the main perfect-hash grouped
+  route; it records `hash_join_probe.direct_selection_reference`,
+  `projection.direct_post_join_reference_projection`,
+  `projection.direct_post_join_computed_projection`, and
+  `aggregate_update.direct_state_update`. SF1 production improved from the
+  earlier fixed-but-regressed Q17 run (`0.034s -> 0.037s`) to
+  `/private/tmp/duckdb_jit_q17_perfect_direct_prod_r5`
+  (`0.034s -> 0.036s`), but Q17 is still not a production win.
+- Q21 xtrace confirmed the remaining loss is runtime work inside native
+  join/probe/build execution, not a debuggability problem in the simplified CBO.
+  A sparse selected-source path was tested for hash-probe-to-hash-build sinks.
+  The first version was slower because the old full-output path was mostly
+  zero-copy slice/dictionary materialization while the sparse projection path
+  copied reference projections into flat vectors. The retained design is the
+  cleaner view path: direct no-projection build input is used only when it
+  removes dead columns, and projection-to-build input uses required-column
+  reference/dictionary views through `projection.required_projection_view`.
+- Generic full-pipeline native hash-build and delim sinks now use the same
+  extended source-fetch budget as the batched specialized routes. Q21 traced
+  invocation counts for the large compiled regions dropped from roughly `59/61`
+  runtime invocations to `1/3` for the same row volume. Production did not move
+  materially, so Q21 remains a Milestone 6 runtime target: the next root work is
+  generated/native hash probe and build hot-loop ownership, not another CBO shape
+  predicate.
+- Fresh broad SF1 production after these changes is
+  `/private/tmp/duckdb_jit_broad_after_budget_prod_r7`, correctness diff 0.
+  Clear compiled wins are Q3 `0.061s -> 0.050s` (`1.220000x`), Q10
+  `0.061s -> 0.058s` (`1.051724x`), and Q20 `0.062s -> 0.043s`
+  (`1.441860x`). Q5 was neutral, and remaining compiled regressions are Q4
+  (`0.041s -> 0.044s`), Q12 in this noisy run (`0.059s -> 0.063s`), Q17
+  (`0.034s -> 0.037s`), and Q21 (`0.111s -> 0.121s`). These are runtime
+  optimization targets; weakening admission would hide the problem instead of
+  deleting work.
 
 ## Definition Of Done
 

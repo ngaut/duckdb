@@ -184,15 +184,15 @@ static string ExecutionRegionProfileStageCosts(const PhysicalRunnerCostProfile &
 	result += ",source_append:" + std::to_string(cost.materialization_source_append_count);
 	result += ",full:";
 	result += cost.full_pipeline ? "true" : "false";
+	result += ",scope:";
+	result += PhysicalRunnerCostInputScopeToString(cost.input_scope);
 	result += ",expr:" + std::to_string(cost.expression_cost);
 	result += ",gen_class:";
 	result += PhysicalRunnerGeneratedWorkClassToString(cost.generated_work_class);
 	result += ",native_protocol:";
 	result += PhysicalRunnerNativeProtocolClassToString(cost.native_protocol_class);
-	result += ",rule:";
-	result += cost.funded_protocol_rule.empty() ? "none" : cost.funded_protocol_rule;
-	result += ",startup_rules:";
-	result += cost.startup_rules.empty() ? "none" : cost.startup_rules;
+	result += ",admission:";
+	result += cost.admission_class.empty() ? "none" : cost.admission_class;
 	result += ",selection_reason:";
 	result += cost.selection_reason.empty() ? "none" : cost.selection_reason;
 	result += ",selected_runner:";
@@ -342,12 +342,12 @@ static void AddExecutionRegionEvent(QueryProfileResult &row, const ExecutionRegi
 	      Time(event.runner_cost.native_grouped_aggregate_stage_count)},
 	     {"runner_cost_native_sort_stage_count", Time(event.runner_cost.native_sort_stage_count)},
 	     {"runner_cost_full_pipeline", Value::BOOLEAN(event.runner_cost.full_pipeline)},
+	     {"runner_cost_input_scope", Text(PhysicalRunnerCostInputScopeToString(event.runner_cost.input_scope))},
 	     {"runner_cost_generated_work_class",
 	      Text(PhysicalRunnerGeneratedWorkClassToString(event.runner_cost.generated_work_class))},
 	     {"runner_cost_native_protocol_class",
 	      Text(PhysicalRunnerNativeProtocolClassToString(event.runner_cost.native_protocol_class))},
-	     {"runner_cost_funded_protocol_rule", NullableText(event.runner_cost.funded_protocol_rule)},
-	     {"runner_cost_startup_rules", NullableText(event.runner_cost.startup_rules)},
+	     {"runner_cost_admission_class", NullableText(event.runner_cost.admission_class)},
 	     {"runner_cost_selection_reason", NullableText(event.runner_cost.selection_reason)},
 	     {"runner_cost_generated_expression_work", Time(event.runner_cost.generated_expression_work)},
 	     {"runner_cost_generated_stage_work", Time(event.runner_cost.generated_stage_work)},

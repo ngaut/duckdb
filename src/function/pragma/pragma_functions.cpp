@@ -54,10 +54,6 @@ static void PragmaDisablePrintProgressBar(ClientContext &context, const Function
 	ClientConfig::GetConfig(context).print_progress_bar = false;
 }
 
-static void PragmaEnableVerification(ClientContext &context, const FunctionParameters &parameters) {
-	Printer::PrintF("PRAGMA enable_verification has been deprecated - there is no need to set this anymore");
-}
-
 static void PragmaDisableVerification(ClientContext &context, const FunctionParameters &parameters) {
 }
 
@@ -105,7 +101,6 @@ void PragmaFunctions::RegisterFunction(BuiltinFunctions &set) {
 	set.AddFunction(PragmaFunction::PragmaStatement("disable_profile", PragmaDisableProfiling));
 	set.AddFunction(PragmaFunction::PragmaStatement("disable_profiling", PragmaDisableProfiling));
 
-	set.AddFunction(PragmaFunction::PragmaStatement("enable_verification", PragmaEnableVerification));
 	set.AddFunction(PragmaFunction::PragmaStatement("disable_verification", PragmaDisableVerification));
 
 	set.AddFunction(PragmaFunction::PragmaStatement("verify_parallelism", PragmaEnableForceParallelism));

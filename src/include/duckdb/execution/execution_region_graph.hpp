@@ -36,6 +36,7 @@ struct ExecutionRegionOperatorEntry {
 	ExecutionCompiledOperatorContract sink_contract;
 	bool has_generated_expression = false;
 	bool has_native_operator_work = false;
+	bool has_native_aggregate_sink = false;
 
 	bool HasSourceContract() const {
 		return source_contract.Present();
@@ -61,6 +62,9 @@ struct ExecutionRegionOperatorEntry {
 		       sink_contract.HasNativeContract(ExecutionCompiledContractKind::AGGREGATE_UPDATE) ||
 		       sink_contract.HasNativeContract(ExecutionCompiledContractKind::AGGREGATE_DISTINCT_SINK) ||
 		       sink_contract.HasNativeContract(ExecutionCompiledContractKind::SINK_CURSOR);
+	}
+	bool HasNativeAggregateSink() const {
+		return sink_contract.HasNativeContract(ExecutionCompiledContractKind::AGGREGATE_UPDATE);
 	}
 	bool IsScanSource() const {
 		return operator_kind == ExecutionRegionOperatorKind::TABLE_SCAN ||
@@ -103,6 +107,7 @@ struct ExecutionRegionGraph {
 	ExecutionRegionOperatorEntry sink;
 	bool has_generated_expression = false;
 	bool has_native_operator_work = false;
+	bool has_native_aggregate_sink = false;
 
 	bool HasSource() const {
 		return source.present;
@@ -122,10 +127,13 @@ struct ExecutionRegionGraph {
 	bool HasNativeOperatorWork() const {
 		return has_native_operator_work;
 	}
+	bool HasNativeAggregateSink() const {
+		return has_native_aggregate_sink;
+	}
 };
 
 DUCKDB_API unique_ptr<ExecutionRegionGraph> BuildExecutionRegionGraph(Pipeline &pipeline,
-                                                                       bool render_diagnostics = false);
+                                                                      bool render_diagnostics = false);
 DUCKDB_API string DescribeExecutionRegionGraphShape(const ExecutionRegionGraph &graph);
 
 } // namespace duckdb

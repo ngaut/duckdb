@@ -7,7 +7,7 @@ CREATE TABLE t0 ( c1 INT DEFAULT ? );
 ----
 <REGEX>:.*Binder Error.*cannot contain parameters.*
 
-# error messages for `enable_verification`=(false|true)
+# error messages with and without verification
 statement error
 CREATE TABLE t0 ( c1 INT CHECK (?) );
 ----

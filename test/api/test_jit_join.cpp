@@ -2,6 +2,17 @@
 
 using namespace duckdb;
 
+static void RequireRowPointerDescriptorLookupStages(const string &stage_counts) {
+	const bool direct_descriptor_probe =
+	    StringUtil::Contains(stage_counts, "find_or_create_row_pointer_descriptor.hash=") &&
+	    StringUtil::Contains(stage_counts, "find_or_create_row_pointer_descriptor.probe=");
+	const bool one_pass_descriptor_materialization =
+	    StringUtil::Contains(stage_counts, "find_or_create_descriptor_keys.fill_hash=");
+	REQUIRE((direct_descriptor_probe || one_pass_descriptor_materialization));
+	REQUIRE_FALSE(StringUtil::Contains(stage_counts, "find_or_create_descriptor_keys.fill="));
+	REQUIRE_FALSE(StringUtil::Contains(stage_counts, "find_or_create_descriptor_keys.hash="));
+}
+
 TEST_CASE("JIT hash join build protocol compiles only inside generated fused regions", "[api][jit]") {
 	DuckDB db;
 	Connection con(db);
@@ -355,6 +366,129 @@ TEST_CASE("JIT hash join probe uses selected all-valid single-key fast path", "[
 	    });
 }
 
+TEST_CASE("JIT hash join filter ungrouped aggregate avoids final join materialization", "[api][jit]") {
+	DuckDB db;
+	Connection con(db);
+	auto &manager = ExecutionRegionManager::Get(*con.context);
+
+	ConfigureSljitForCoverage(con, false, true, true, 10000);
+	REQUIRE_NO_FAIL(con.Query("PRAGMA threads=1"));
+	REQUIRE_NO_FAIL(con.Query("SET perfect_ht_threshold=0"));
+	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_direct_filtered_agg_l AS "
+	                          "SELECT ((i % 8192) * 1000003)::BIGINT AS k, "
+	                          "       (i % 37)::DOUBLE AS quantity, "
+	                          "       CAST(100 + (i % 1000) AS DECIMAL(15,2)) AS price "
+	                          "FROM range(65536) tbl(i)"));
+	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_direct_filtered_agg_r AS "
+	                          "SELECT (i * 1000003)::BIGINT AS k, "
+	                          "       ((i % 23) + 5)::DOUBLE AS threshold "
+	                          "FROM range(8192) tbl(i)"));
+
+	const string query = "SELECT sum(l.price)::HUGEINT AS revenue "
+	                     "FROM jit_direct_filtered_agg_l l "
+	                     "JOIN jit_direct_filtered_agg_r r ON l.k = r.k "
+	                     "WHERE l.quantity < r.threshold OR l.k = -1";
+	REQUIRE_NO_FAIL(con.Query("SET jit_policy='off'"));
+	auto reference = con.Query(query);
+	REQUIRE_NO_FAIL(*reference);
+	REQUIRE(reference->RowCount() == 1);
+
+	REQUIRE_NO_FAIL(con.Query("SET jit_policy='auto'"));
+	ClearJitTrace(manager, true);
+	auto result = con.Query(query);
+	REQUIRE_NO_FAIL(*result);
+	REQUIRE(result->RowCount() == reference->RowCount());
+	REQUIRE(result->ColumnCount() == reference->ColumnCount());
+	REQUIRE(result->GetValue(0, 0).ToString() == reference->GetValue(0, 0).ToString());
+
+	RequireJitEvent(
+	    manager,
+	    [](const ExecutionRegionEvent &event) {
+		    return EventPhase(event) == "runtime" && EventStatus(event) == "executed" &&
+		           EventExecutionMode(event) == "native" &&
+		           StringUtil::Contains(EventJitRuntimePathCounts(event),
+		                                "aggregate_update.direct_hash_join_filtered_payload_update=");
+	    },
+	    [](const ExecutionRegionEvent &event) {
+		    const auto stage_counts = EventGeneratedStageCountBreakdown(event);
+		    const auto runtime_paths = EventJitRuntimePathCounts(event);
+		    const auto boundaries = EventJitMaterializationBoundaryCounts(event);
+		    REQUIRE(event.jit_runtime.hash_join_probe_layout == "regular_hash_table");
+		    REQUIRE(StringUtil::Contains(runtime_paths,
+		                                 "aggregate_update.direct_hash_join_filtered_payload_update="));
+		    REQUIRE(StringUtil::Contains(stage_counts, "hash_join_probe.residual_predicate="));
+		    REQUIRE(StringUtil::Contains(stage_counts, "aggregate_update.direct_hash_join_filtered_payload_input="));
+		    REQUIRE(StringUtil::Contains(boundaries, "hash_join_probe.direct_row_pointer_reference="));
+		    REQUIRE(StringUtil::Contains(boundaries, "hash_join_probe.residual_source_chunk="));
+		    REQUIRE(StringUtil::Contains(boundaries, "aggregate_update.direct_hash_join_filtered_state_update="));
+		    REQUIRE_FALSE(StringUtil::Contains(boundaries, "hash_join_probe.final_output="));
+	    });
+}
+
+TEST_CASE("JIT perfect hash join materializes selection-only output before post-join projection", "[api][jit]") {
+	DuckDB db;
+	Connection con(db);
+	auto &manager = ExecutionRegionManager::Get(*con.context);
+
+	ConfigureSljitForCoverage(con, false, true, true, 10000);
+	REQUIRE_NO_FAIL(con.Query("SET threads=1"));
+	REQUIRE_NO_FAIL(con.Query("SET perfect_ht_threshold=10"));
+	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_perfect_post_join_fact AS "
+	                          "SELECT (i % 1024)::BIGINT AS k, "
+	                          "       CAST(100 + (i % 1000) AS DECIMAL(15,2)) AS price "
+	                          "FROM range(32768) tbl(i)"));
+	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_perfect_post_join_dim AS "
+	                          "SELECT i::BIGINT AS k FROM range(1024) tbl(i)"));
+	REQUIRE_NO_FAIL(con.Query("ANALYZE jit_perfect_post_join_fact"));
+	REQUIRE_NO_FAIL(con.Query("ANALYZE jit_perfect_post_join_dim"));
+
+	const string query = "SELECT k_i, sum(price)::HUGEINT AS total, count(*) AS cnt "
+	                     "FROM ("
+	                     "    SELECT CAST(k * 1000003 AS INTEGER) AS k_i, price "
+	                     "    FROM ("
+	                     "        SELECT f.k, f.price "
+	                     "        FROM jit_perfect_post_join_fact f "
+	                     "        JOIN jit_perfect_post_join_dim d ON f.k=d.k"
+	                     "    ) joined"
+	                     ") projected "
+	                     "GROUP BY k_i";
+	REQUIRE_NO_FAIL(con.Query("SET jit_policy='off'"));
+	REQUIRE_NO_FAIL(con.Query("CREATE TEMP TABLE jit_perfect_post_join_reference AS " + query));
+	REQUIRE_NO_FAIL(con.Query("SET jit_policy='auto'"));
+	ClearJitTrace(manager, true);
+	REQUIRE_NO_FAIL(con.Query("CREATE TEMP TABLE jit_perfect_post_join_output AS " + query));
+
+	auto diff = con.Query("SELECT count(*) FROM ("
+	                      "  (SELECT * FROM jit_perfect_post_join_output "
+	                      "   EXCEPT SELECT * FROM jit_perfect_post_join_reference) "
+	                      "  UNION ALL "
+	                      "  (SELECT * FROM jit_perfect_post_join_reference "
+	                      "   EXCEPT SELECT * FROM jit_perfect_post_join_output)"
+	                      ") diff");
+	REQUIRE_NO_FAIL(*diff);
+	REQUIRE(diff->GetValue(0, 0).GetValue<int64_t>() == 0);
+
+	RequireJitEvent(
+	    manager,
+	    [](const ExecutionRegionEvent &event) {
+		    return EventPhase(event) == "runtime" && EventStatus(event) == "executed" &&
+		           EventExecutionMode(event) == "native" &&
+		           event.jit_runtime.hash_join_probe_layout == "perfect_hash_table" &&
+		           StringUtil::Contains(EventGeneratedStageCountBreakdown(event),
+		                                "hash_join_probe.materialize_output_fallback=");
+	    },
+	    [](const ExecutionRegionEvent &event) {
+		    const auto stage_counts = EventGeneratedStageCountBreakdown(event);
+		    const auto boundaries = EventJitMaterializationBoundaryCounts(event);
+		    REQUIRE(StringUtil::Contains(stage_counts, "hash_join_probe.generated_perfect_probe_function="));
+		    REQUIRE(StringUtil::Contains(stage_counts,
+		                                 "hash_join_probe.materialize_output_fallback.dictionary_build_payload="));
+		    REQUIRE(StringUtil::Contains(boundaries, "hash_join_probe.direct_selection_reference="));
+		    REQUIRE(StringUtil::Contains(boundaries, "hash_join_probe.perfect_selection_reference="));
+		    REQUIRE(StringUtil::Contains(boundaries, "hash_join_probe.final_output="));
+	    });
+}
+
 TEST_CASE("JIT join grouped aggregate updates through probe-side grouped keys", "[api][jit]") {
 	DuckDB db;
 	Connection con(db);
@@ -409,8 +543,7 @@ TEST_CASE("JIT join grouped aggregate updates through probe-side grouped keys", 
 		    const auto boundaries = EventJitMaterializationBoundaryCounts(event);
 		    REQUIRE(StringUtil::Contains(runtime_paths,
 		                                 "aggregate_update.direct_row_pointer_grouped_lookup_update="));
-		    REQUIRE(StringUtil::Contains(stage_counts, "find_or_create_descriptor_keys.fill="));
-		    REQUIRE(StringUtil::Contains(stage_counts, "find_or_create_descriptor_keys.hash="));
+		    RequireRowPointerDescriptorLookupStages(stage_counts);
 		    REQUIRE(StringUtil::Contains(boundaries, "hash_join_probe.direct_row_pointer_reference="));
 		    REQUIRE(StringUtil::Contains(boundaries, "aggregate_update.row_pointer_grouped_lookup_update="));
 		    REQUIRE_FALSE(StringUtil::Contains(boundaries, "hash_join_probe.final_output="));
@@ -564,6 +697,78 @@ TEST_CASE("JIT join grouped aggregate updates through RHS row-pointer keys", "[a
 	    });
 }
 
+TEST_CASE("JIT join grouped aggregate batches variable-width RHS row-pointer keys", "[api][jit]") {
+	DuckDB db;
+	Connection con(db);
+	auto &manager = ExecutionRegionManager::Get(*con.context);
+
+	ConfigureSljitForCoverage(con, false, true, true, 10000);
+	REQUIRE_NO_FAIL(con.Query("PRAGMA threads=1"));
+	REQUIRE_NO_FAIL(con.Query("SET perfect_ht_threshold=0"));
+	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_varwidth_row_pointer_group_l AS "
+	                          "SELECT ((i % 8192) * 100019)::BIGINT AS k, "
+	                          "       CAST(100 + (i % 1000) AS DECIMAL(15,2)) AS p, "
+	                          "       CAST((i % 9)::DOUBLE / 100 AS DECIMAL(15,2)) AS d, "
+	                          "       DATE '1992-01-01' + (i % 2000)::INTEGER AS shipdate "
+	                          "FROM range(65536) tbl(i)"));
+	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_varwidth_row_pointer_group_r AS "
+	                          "SELECT (i * 100019)::BIGINT AS join_k, "
+	                          "       'customer-' || (i % 97)::VARCHAR AS customer_name "
+	                          "FROM range(8192) tbl(i)"));
+
+	const string query = "SELECT r.customer_name, sum(l.p * (1.00::DECIMAL(15,2) - l.d))::HUGEINT AS revenue "
+	                     "FROM jit_varwidth_row_pointer_group_l l "
+	                     "JOIN jit_varwidth_row_pointer_group_r r ON l.k = r.join_k "
+	                     "WHERE l.shipdate > DATE '1994-01-01' "
+	                     "GROUP BY r.customer_name "
+	                     "ORDER BY r.customer_name";
+	REQUIRE_NO_FAIL(con.Query("SET jit_policy='off'"));
+	auto reference = con.Query(query);
+	REQUIRE_NO_FAIL(*reference);
+	REQUIRE(reference->RowCount() > 0);
+
+	REQUIRE_NO_FAIL(con.Query("SET jit_policy='auto'"));
+	ClearJitTrace(manager, true);
+	auto result = con.Query(query);
+	REQUIRE_NO_FAIL(*result);
+	REQUIRE(result->RowCount() == reference->RowCount());
+	REQUIRE(result->ColumnCount() == reference->ColumnCount());
+	for (idx_t row_idx = 0; row_idx < result->RowCount(); row_idx++) {
+		for (idx_t col_idx = 0; col_idx < result->ColumnCount(); col_idx++) {
+			REQUIRE(result->GetValue(col_idx, row_idx).ToString() == reference->GetValue(col_idx, row_idx).ToString());
+		}
+	}
+
+	RequireJitEvent(
+	    manager,
+	    [](const ExecutionRegionEvent &event) {
+		    return EventPhase(event) == "runtime" && EventStatus(event) == "executed" &&
+		           EventExecutionMode(event) == "native" &&
+		           StringUtil::Contains(EventJitRuntimePathCounts(event),
+		                                "aggregate_update.direct_row_pointer_grouped_lookup_update=");
+	    },
+	    [](const ExecutionRegionEvent &event) {
+		    const auto runtime_paths = EventJitRuntimePathCounts(event);
+		    const auto stage_counts = EventGeneratedStageCountBreakdown(event);
+		    const auto boundaries = EventJitMaterializationBoundaryCounts(event);
+		    REQUIRE(event.jit_runtime.hash_join_probe_layout == "regular_hash_table");
+		    REQUIRE(StringUtil::Contains(runtime_paths,
+		                                 "aggregate_update.direct_row_pointer_grouped_lookup_update="));
+		    RequireRowPointerDescriptorLookupStages(stage_counts);
+		    REQUIRE(StringUtil::Contains(boundaries, "hash_join_probe.direct_row_pointer_reference="));
+		    REQUIRE(StringUtil::Contains(boundaries, "hash_join_probe.pending_probe_batch="));
+		    REQUIRE(StringUtil::Contains(boundaries, "aggregate_update.row_pointer_grouped_lookup_update="));
+		    REQUIRE_FALSE(StringUtil::Contains(boundaries, "hash_join_probe.final_output="));
+		    REQUIRE_FALSE(StringUtil::Contains(boundaries, "hash_join_probe.projection_source="));
+		    REQUIRE_FALSE(StringUtil::Contains(boundaries, "projection.direct_post_join_reference_projection="));
+		    REQUIRE_FALSE(StringUtil::Contains(boundaries, "projection.direct_post_join_computed_projection="));
+		    REQUIRE_FALSE(StringUtil::Contains(boundaries, "projection.direct_post_join_batch_projection="));
+		    REQUIRE_FALSE(StringUtil::Contains(boundaries, "projection.copied_post_join_projection="));
+		    REQUIRE_FALSE(StringUtil::Contains(boundaries, "projection.copied_post_join_batch="));
+		    REQUIRE_FALSE(StringUtil::Contains(boundaries, "aggregate_update.address_vector_payload_update="));
+	    });
+}
+
 TEST_CASE("JIT two-join grouped aggregate direct-projects mixed VARCHAR before perfect fallback", "[api][jit]") {
 	DuckDB db;
 	Connection con(db);
@@ -639,9 +844,9 @@ TEST_CASE("JIT two-join grouped aggregate direct-projects mixed VARCHAR before p
 		    REQUIRE(StringUtil::Contains(boundaries, "projection.direct_post_join_reference_projection="));
 		    REQUIRE(StringUtil::Contains(boundaries, "projection.direct_post_join_computed_projection="));
 		    REQUIRE(StringUtil::Contains(boundaries, "hash_join_probe.direct_selection_reference="));
-		    REQUIRE(StringUtil::Contains(boundaries, "hash_join_probe.final_output="));
+		    REQUIRE_FALSE(StringUtil::Contains(boundaries, "hash_join_probe.final_output="));
 		    REQUIRE_FALSE(StringUtil::Contains(stages, "op0:hash_join_probe.materialize_output"));
-		    REQUIRE(StringUtil::Contains(stages, "op2:hash_join_probe.materialize_output_fallback"));
+		    REQUIRE_FALSE(StringUtil::Contains(stages, "op2:hash_join_probe.materialize_output_fallback"));
 		    });
 	}
 
@@ -702,8 +907,7 @@ TEST_CASE("JIT Q5-like two-join aggregate groups compressed input-vector VARCHAR
 		    REQUIRE(StringUtil::Contains(runtime_paths,
 		                                 "aggregate_update.direct_row_pointer_grouped_lookup_update="));
 		    REQUIRE_FALSE(StringUtil::Contains(runtime_paths, "projection.direct_second_join_projection="));
-		    REQUIRE(StringUtil::Contains(stage_counts, "find_or_create_descriptor_keys.fill="));
-		    REQUIRE(StringUtil::Contains(stage_counts, "find_or_create_descriptor_keys.hash="));
+		    RequireRowPointerDescriptorLookupStages(stage_counts);
 		    REQUIRE(StringUtil::Contains(boundaries, "hash_join_probe.direct_row_pointer_reference="));
 		    REQUIRE(StringUtil::Contains(boundaries, "hash_join_probe.pending_probe_batch="));
 		    REQUIRE(StringUtil::Contains(boundaries, "aggregate_update.row_pointer_grouped_lookup_update="));
@@ -785,45 +989,48 @@ TEST_CASE("JIT Q9-like two-join aggregate removes second-join projection source 
 		           StringUtil::Contains(EventJitRuntimePathCounts(event),
 		                                "projection.direct_second_join_projection=");
 	    },
-	    [](const ExecutionRegionEvent &event) {
-		    const auto runtime_paths = EventJitRuntimePathCounts(event);
-		    const auto boundaries = EventJitMaterializationBoundaryCounts(event);
-		    const auto stages = EventGeneratedStageCountBreakdown(event);
-		    const bool has_compressed_passthrough =
-		        StringUtil::Contains(runtime_paths, "projection.direct_between_join_compressed_passthrough_projection=");
-		    REQUIRE(event.jit_runtime.hash_join_probe_layout == "regular_hash_table");
-		    REQUIRE(StringUtil::Contains(runtime_paths, "projection.direct_between_join_projection="));
-		    REQUIRE(StringUtil::Contains(runtime_paths, "projection.direct_second_join_projection="));
-		    REQUIRE(StringUtil::Contains(runtime_paths, "projection.direct_rhs_row_pointer_generated_projection="));
-		    REQUIRE(StringUtil::Contains(runtime_paths, "aggregate_update.direct_projected_group_payload_update="));
-		    REQUIRE(StringUtil::Contains(boundaries, "hash_join_probe.direct_row_pointer_reference="));
-		    REQUIRE(StringUtil::Contains(boundaries, "projection.direct_post_join_reference_projection="));
-		    REQUIRE(StringUtil::Contains(boundaries, "projection.direct_post_join_computed_projection="));
-		    REQUIRE(StringUtil::Contains(boundaries, "projection.direct_remap_post_join_batch_projection="));
-		    REQUIRE(StringUtil::Contains(boundaries, "aggregate_update.projected_group_payload_update="));
-		    REQUIRE(StringUtil::Contains(stages, "op4:projection.post_join_direct_remap_batch_projection="));
-		    REQUIRE(StringUtil::Contains(stages, "op4:projection.post_join_direct_remap_batch_projection_hash="));
-		    REQUIRE(StringUtil::Contains(stages, "op4:projection.direct_batch_expression.integral_compress="));
-		    REQUIRE(StringUtil::Contains(stages, "op5:aggregate_update.direct_projected_group_payload_update="));
-		    if (has_compressed_passthrough) {
-			    REQUIRE(StringUtil::Contains(runtime_paths, "projection.direct_batch_passthrough_projection="));
-			    REQUIRE(StringUtil::Contains(stages, "op4:projection.direct_batch_expression.compressed_passthrough="));
-			    REQUIRE_FALSE(StringUtil::Contains(stages, "op4:projection.direct_batch_expression.string_compress="));
-		    }
-		    REQUIRE_FALSE(StringUtil::Contains(
-		        stages,
-		        "direct_projected_group_payload_update.direct_new_selected_state.append_update.find_or_create_fast.hash="));
-		    REQUIRE_FALSE(StringUtil::Contains(boundaries, "hash_join_probe.final_output="));
-		    REQUIRE_FALSE(StringUtil::Contains(boundaries, "hash_join_probe.projection_source="));
-		    REQUIRE_FALSE(StringUtil::Contains(boundaries, "projection.copied_post_join_projection="));
-		    REQUIRE_FALSE(StringUtil::Contains(boundaries, "projection.copied_post_join_batch="));
-		    REQUIRE_FALSE(StringUtil::Contains(boundaries, "aggregate_update.address_vector_payload_update="));
-		    REQUIRE_FALSE(StringUtil::Contains(boundaries, "aggregate_update.state_address_selection_new_update="));
-		    REQUIRE_FALSE(StringUtil::Contains(boundaries, "aggregate_update.state_address_selection_existing_update="));
-		    REQUIRE_FALSE(StringUtil::Contains(stages, "materialize_projection_sources"));
-		    REQUIRE_FALSE(StringUtil::Contains(stages, "post_join_batch_append"));
-		    REQUIRE_FALSE(StringUtil::Contains(runtime_paths,
-		                                       "direct_projected_group_payload_update_unsupported."));
+		    [](const ExecutionRegionEvent &event) {
+			    const auto runtime_paths = EventJitRuntimePathCounts(event);
+			    const auto boundaries = EventJitMaterializationBoundaryCounts(event);
+			    const auto stages = EventGeneratedStageCountBreakdown(event);
+			    const bool has_compressed_passthrough =
+			        StringUtil::Contains(runtime_paths, "projection.direct_between_join_compressed_passthrough_projection=");
+			    REQUIRE(event.jit_runtime.hash_join_probe_layout == "regular_hash_table");
+			    REQUIRE(StringUtil::Contains(runtime_paths, "projection.direct_between_join_projection="));
+			    REQUIRE(StringUtil::Contains(runtime_paths, "projection.direct_second_join_projection="));
+			    REQUIRE(StringUtil::Contains(runtime_paths, "projection.direct_rhs_row_pointer_generated_projection="));
+			    REQUIRE(StringUtil::Contains(runtime_paths,
+			                                 "aggregate_update.direct_row_pointer_grouped_lookup_update="));
+				    REQUIRE(StringUtil::Contains(boundaries, "hash_join_probe.direct_row_pointer_reference="));
+				    REQUIRE(StringUtil::Contains(boundaries, "projection.direct_post_join_reference_projection="));
+				    REQUIRE(StringUtil::Contains(boundaries, "projection.direct_post_join_computed_projection="));
+				    REQUIRE(StringUtil::Contains(boundaries, "aggregate_update.row_pointer_grouped_lookup_update="));
+				    RequireRowPointerDescriptorLookupStages(stages);
+				    REQUIRE(StringUtil::Contains(stages, "op5:aggregate_update.direct_row_pointer_grouped_lookup_update="));
+				    if (has_compressed_passthrough) {
+					    REQUIRE(StringUtil::Contains(runtime_paths, "projection.direct_batch_passthrough_projection="));
+				    REQUIRE(StringUtil::Contains(stages, "direct_batch_expression.compressed_passthrough="));
+				    REQUIRE_FALSE(StringUtil::Contains(stages, "op4:projection.direct_batch_expression.string_compress="));
+			    }
+			    REQUIRE_FALSE(StringUtil::Contains(
+			        stages,
+			        "direct_projected_group_payload_update.direct_new_selected_state.append_update.find_or_create_fast.hash="));
+			    REQUIRE_FALSE(StringUtil::Contains(boundaries, "hash_join_probe.final_output="));
+			    REQUIRE_FALSE(StringUtil::Contains(boundaries, "hash_join_probe.projection_source="));
+			    REQUIRE_FALSE(StringUtil::Contains(boundaries, "projection.direct_remap_post_join_batch_projection="));
+			    REQUIRE_FALSE(StringUtil::Contains(boundaries, "projection.copied_post_join_projection="));
+			    REQUIRE_FALSE(StringUtil::Contains(boundaries, "projection.copied_post_join_batch="));
+			    REQUIRE_FALSE(StringUtil::Contains(boundaries, "aggregate_update.projected_group_payload_update="));
+			    REQUIRE_FALSE(StringUtil::Contains(boundaries, "aggregate_update.address_vector_payload_update="));
+			    REQUIRE_FALSE(StringUtil::Contains(boundaries, "aggregate_update.state_address_selection_new_update="));
+			    REQUIRE_FALSE(StringUtil::Contains(boundaries, "aggregate_update.state_address_selection_existing_update="));
+			    REQUIRE_FALSE(StringUtil::Contains(stages, "op4:projection.post_join_direct_remap_batch_projection="));
+			    REQUIRE_FALSE(StringUtil::Contains(stages, "op4:projection.post_join_direct_remap_batch_projection_hash="));
+			    REQUIRE_FALSE(StringUtil::Contains(stages, "op4:projection.direct_batch_expression.integral_compress="));
+			    REQUIRE_FALSE(StringUtil::Contains(stages, "materialize_projection_sources"));
+			    REQUIRE_FALSE(StringUtil::Contains(stages, "post_join_batch_append"));
+			    REQUIRE_FALSE(StringUtil::Contains(runtime_paths,
+			                                       "direct_projected_group_payload_update_unsupported."));
 	    });
 }
 
@@ -901,22 +1108,27 @@ TEST_CASE("JIT Q9-like two-projection between-join chain keeps first join live",
 		           StringUtil::Contains(EventJitRuntimePathCounts(event),
 		                                "projection.direct_between_join_projection=");
 	    },
-	    [](const ExecutionRegionEvent &event) {
-		    const auto runtime_paths = EventJitRuntimePathCounts(event);
-		    const auto boundaries = EventJitMaterializationBoundaryCounts(event);
-		    const auto stages = EventGeneratedStageCountBreakdown(event);
-		    REQUIRE(StringUtil::Contains(runtime_paths, "projection.direct_between_join_projection="));
-		    REQUIRE(StringUtil::Contains(runtime_paths, "projection.direct_second_join_projection="));
-		    REQUIRE(StringUtil::Contains(runtime_paths, "aggregate_update.direct_projected_group_payload_update="));
-		    REQUIRE(StringUtil::Contains(boundaries, "hash_join_probe.direct_row_pointer_reference="));
-		    REQUIRE(StringUtil::Contains(boundaries, "projection.direct_post_join_reference_projection="));
-		    REQUIRE(StringUtil::Contains(boundaries, "projection.direct_post_join_computed_projection="));
-		    REQUIRE_FALSE(StringUtil::Contains(boundaries, "hash_join_probe.final_output="));
-		    REQUIRE_FALSE(StringUtil::Contains(boundaries, "hash_join_probe.projection_source="));
-		    REQUIRE_FALSE(StringUtil::Contains(boundaries, "projection.copied_post_join_projection="));
-		    REQUIRE_FALSE(StringUtil::Contains(stages, "op0:hash_join_probe.materialize_projection_sources"));
-		    REQUIRE_FALSE(StringUtil::Contains(stages, "op0:hash_join_probe.materialize_output_fallback"));
-	    });
+		    [](const ExecutionRegionEvent &event) {
+			    const auto runtime_paths = EventJitRuntimePathCounts(event);
+			    const auto boundaries = EventJitMaterializationBoundaryCounts(event);
+			    const auto stages = EventGeneratedStageCountBreakdown(event);
+			    REQUIRE(StringUtil::Contains(runtime_paths, "projection.direct_between_join_projection="));
+			    REQUIRE(StringUtil::Contains(runtime_paths, "projection.direct_second_join_projection="));
+				    REQUIRE(StringUtil::Contains(runtime_paths,
+				                                 "aggregate_update.direct_row_pointer_grouped_lookup_update="));
+				    REQUIRE(StringUtil::Contains(boundaries, "hash_join_probe.direct_row_pointer_reference="));
+				    REQUIRE(StringUtil::Contains(boundaries, "projection.direct_post_join_reference_projection="));
+				    REQUIRE(StringUtil::Contains(boundaries, "projection.direct_post_join_computed_projection="));
+				    REQUIRE(StringUtil::Contains(boundaries, "aggregate_update.row_pointer_grouped_lookup_update="));
+				    RequireRowPointerDescriptorLookupStages(stages);
+				    REQUIRE_FALSE(StringUtil::Contains(boundaries, "hash_join_probe.final_output="));
+				    REQUIRE_FALSE(StringUtil::Contains(boundaries, "hash_join_probe.projection_source="));
+				    REQUIRE_FALSE(StringUtil::Contains(boundaries, "projection.direct_remap_post_join_batch_projection="));
+			    REQUIRE_FALSE(StringUtil::Contains(boundaries, "aggregate_update.projected_group_payload_update="));
+			    REQUIRE_FALSE(StringUtil::Contains(boundaries, "projection.copied_post_join_projection="));
+			    REQUIRE_FALSE(StringUtil::Contains(stages, "op0:hash_join_probe.materialize_projection_sources"));
+			    REQUIRE_FALSE(StringUtil::Contains(stages, "op0:hash_join_probe.materialize_output_fallback"));
+		    });
 }
 
 TEST_CASE("JIT hash join pair probe preserves bloom-filtered sparse misses", "[api][jit]") {

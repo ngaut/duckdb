@@ -113,6 +113,7 @@ COUNTER_FIELDS = (
     "runner_cost_native_grouped_aggregate_stage_count",
     "runner_cost_native_sort_stage_count",
     "runner_cost_full_pipeline",
+    "runner_cost_input_scope",
     "runner_cost_generated_expression_work",
     "runner_cost_generated_stage_work",
     "runner_cost_native_operator_work",

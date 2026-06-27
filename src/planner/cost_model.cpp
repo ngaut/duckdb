@@ -25,22 +25,8 @@ namespace duckdb {
 static idx_t DuckDBExpressionCost(const Expression &expr);
 static constexpr int64_t BASIS_POINT_SCALE = 10000;
 static constexpr int64_t MATERIALIZATION_SOURCE_APPEND_PENALTY = 80;
+static constexpr int64_t NATIVE_JOIN_PROTOCOL_PENALTY = 640;
 static constexpr int64_t BLOCKED_HASH_AGGREGATE_LOOKUP_PENALTY = 64;
-static constexpr int64_t DISCOUNTED_JOIN_BLOCKED_HASH_AGGREGATE_LOOKUP_PENALTY = 64;
-static constexpr idx_t JOIN_UNGROUPED_AGGREGATE_MIN_EXPRESSION_COST = 512;
-static constexpr idx_t SCAN_FILTERED_JOIN_GROUPED_AGGREGATE_MIN_EXPRESSION_COST = 384;
-static constexpr idx_t JOIN_BUILD_CHAIN_MIN_EXPRESSION_COST = 64;
-static constexpr int64_t LONG_BLOCKED_JOIN_GROUPED_AGGREGATE_MIN_BATCHES = 512;
-static constexpr int64_t STATEFUL_STANDALONE_PROJECTION_MIN_BATCHES = 128;
-static constexpr int64_t JOIN_BUILD_CHAIN_MIN_BATCHES = 128;
-static constexpr int64_t LONG_NATIVE_JOIN_CHAIN_MIN_BATCHES = 512;
-static constexpr idx_t LONG_NATIVE_JOIN_CHAIN_MIN_EXPRESSION_COST = 64;
-static constexpr idx_t HIGH_EXPRESSION_BLOCKED_JOIN_GROUPED_AGGREGATE_MIN_COST = 256;
-static constexpr idx_t NARROW_TWO_JOIN_GROUPED_AGGREGATE_MIN_EXPRESSION_COST = 96;
-static constexpr idx_t WIDE_TWO_JOIN_GROUPED_AGGREGATE_MIN_EXPRESSION_COST = 1024;
-static constexpr int64_t SCAN_FILTERED_NARROW_TWO_JOIN_GROUPED_AGGREGATE_MIN_BATCHES = 512;
-static constexpr idx_t JOIN_BUILD_CHAIN_MAX_PAYLOAD_COLUMNS = 2;
-static constexpr idx_t JOIN_BUILD_CHAIN_MIN_SOURCE_PROJECTED_COLUMNS = 4;
 
 static int64_t SaturatingCostCast(idx_t value) {
 	auto max_value = static_cast<idx_t>(std::numeric_limits<int64_t>::max());
@@ -328,30 +314,12 @@ static int64_t PhysicalRunnerBatches(int64_t rows) {
 	return AddCost(rows, STANDARD_VECTOR_SIZE - 1) / STANDARD_VECTOR_SIZE;
 }
 
-static bool PhysicalRunnerHasWideStringGroupedAggregate(const PhysicalRunnerCostInput &input) {
-	if (input.native_grouped_aggregate_stage_count == 0) {
-		return false;
-	}
-	if (input.grouped_aggregate_varchar_group_count >= 2) {
-		return true;
-	}
-	if (input.grouped_aggregate_group_count >= 5 && input.reference_varchar_projection_count > 0) {
-		return true;
-	}
-	return input.native_join_stage_count >= 2 && input.grouped_aggregate_group_count >= 3 &&
-	       input.reference_varchar_projection_count >= 2;
-}
-
 struct PhysicalRunnerShapeFacts {
 	int64_t rows = 1;
 	int64_t batches = 1;
 	idx_t native_operator_stage_count = 0;
 	bool has_generated_compute_work = false;
-	bool no_native_join = false;
 	bool no_native_sort = false;
-	bool has_native_grouped_aggregate = false;
-	bool grouped_aggregate_only = false;
-	bool has_wide_string_grouped_aggregate = false;
 };
 
 static PhysicalRunnerShapeFacts PhysicalRunnerBuildShapeFacts(const PhysicalRunnerCostInput &input) {
@@ -362,319 +330,76 @@ static PhysicalRunnerShapeFacts PhysicalRunnerBuildShapeFacts(const PhysicalRunn
 	    input.native_join_stage_count + input.native_aggregate_stage_count + input.native_sort_stage_count;
 	facts.has_generated_compute_work = input.generated_work_class != PhysicalRunnerGeneratedWorkClass::NONE &&
 	                                   input.generated_work_class != PhysicalRunnerGeneratedWorkClass::PROJECTION_GLUE;
-	facts.no_native_join = input.native_join_stage_count == 0;
 	facts.no_native_sort = input.native_sort_stage_count == 0;
-	facts.has_native_grouped_aggregate = input.native_grouped_aggregate_stage_count > 0;
-	facts.grouped_aggregate_only = facts.has_native_grouped_aggregate &&
-	                               input.native_aggregate_stage_count == input.native_grouped_aggregate_stage_count;
-	facts.has_wide_string_grouped_aggregate = PhysicalRunnerHasWideStringGroupedAggregate(input);
 	return facts;
 }
 
-static bool PhysicalRunnerIsNativeContractProjectionGlue(const PhysicalRunnerCostInput &input,
-                                                         const PhysicalRunnerShapeFacts &facts) {
-	return input.full_pipeline &&
-	       input.native_protocol_class == PhysicalRunnerNativeProtocolClass::STATEFUL_SOURCE_SINK_PROTOCOL &&
-	       input.generated_work_class == PhysicalRunnerGeneratedWorkClass::PROJECTION_GLUE &&
-	       facts.native_operator_stage_count == 0 && input.materialization_elision_count == 0;
+static bool PhysicalRunnerFullPipelineBenefitCanOpenGraph(const PhysicalRunnerCostInput &input) {
+	return input.input_scope == PhysicalRunnerCostInputScope::PHYSICAL_PIPELINE && input.full_pipeline;
 }
 
-static bool PhysicalRunnerIsSmallStatefulStandaloneProjection(const PhysicalRunnerCostInput &input,
-                                                              const PhysicalRunnerShapeFacts &facts) {
-	return input.full_pipeline &&
-	       input.native_protocol_class == PhysicalRunnerNativeProtocolClass::STATEFUL_SOURCE_SINK_PROTOCOL &&
-	       input.sort_sink && input.generated_stage_count > 0 && facts.has_generated_compute_work &&
-	       facts.native_operator_stage_count == 0 && input.materialization_elision_count == 0 &&
-	       facts.batches < STATEFUL_STANDALONE_PROJECTION_MIN_BATCHES;
-}
-
-static bool PhysicalRunnerGeneratedWorkPaysStandaloneUngroupedAggregateProtocol(const PhysicalRunnerCostInput &input,
-                                                                                const PhysicalRunnerShapeFacts &facts) {
-	return input.generated_stage_count > 0 && facts.has_generated_compute_work && facts.no_native_join &&
-	       input.native_aggregate_stage_count > 0 && input.native_grouped_aggregate_stage_count == 0 &&
-	       facts.no_native_sort;
-}
-
-static bool PhysicalRunnerGeneratedWorkPaysStandaloneGroupedAggregateProtocol(const PhysicalRunnerCostInput &input,
-                                                                              const PhysicalRunnerShapeFacts &facts) {
-	return input.generated_stage_count >= 2 && facts.has_generated_compute_work && facts.no_native_join &&
-	       facts.grouped_aggregate_only && facts.no_native_sort;
-}
-
-static bool PhysicalRunnerGeneratedWorkPaysJoinGroupedAggregateProtocol(const PhysicalRunnerCostInput &input,
+static bool PhysicalRunnerFullPipelineBenefitPaysEmptyFullPipelineProof(const PhysicalRunnerCostInput &input,
                                                                         const PhysicalRunnerShapeFacts &facts) {
-	if (!input.full_pipeline || input.uses_scan_filters || input.generated_stage_count < 2 ||
-	    !facts.has_generated_compute_work || !facts.grouped_aggregate_only || !facts.no_native_sort) {
+	return input.full_pipeline && facts.native_operator_stage_count == 0 && input.generated_stage_count == 0 &&
+	       input.materialization_elision_count == 0;
+}
+
+static bool PhysicalRunnerFullPipelineBenefitPays(const PhysicalRunnerCostInput &input,
+                                                  const PhysicalRunnerShapeFacts &facts) {
+	return PhysicalRunnerFullPipelineBenefitCanOpenGraph(input) ||
+	       PhysicalRunnerFullPipelineBenefitPaysEmptyFullPipelineProof(input, facts);
+}
+
+static bool PhysicalRunnerNativeStageBenefitCanPay(const PhysicalRunnerCostInput &input,
+                                                   const PhysicalRunnerCostParameters &parameters) {
+	if (parameters.native_operator_stage_benefit == 0) {
 		return false;
 	}
-	if (facts.has_wide_string_grouped_aggregate) {
+	if (input.native_sort_stage_count > 0) {
 		return false;
 	}
-	if (input.native_join_stage_count == 1) {
-		if (input.generated_stage_count < 3 && input.blocked_hash_aggregate_lookup_count > 0) {
-			return false;
-		}
-		return true;
-	}
-	if (input.generated_stage_count < 3) {
-		return false;
-	}
-	return input.native_join_stage_count == 2 && input.source_filter_count == 0;
+	return input.native_join_stage_count > 0 || input.native_aggregate_stage_count > 0;
 }
 
-static bool
-PhysicalRunnerGeneratedWorkPaysLongBlockedJoinGroupedAggregateProtocol(const PhysicalRunnerCostInput &input,
-                                                                       const PhysicalRunnerShapeFacts &facts) {
-	return input.full_pipeline && !input.uses_scan_filters && input.generated_stage_count == 2 &&
-	       input.materialization_elision_count > 0 && facts.has_generated_compute_work &&
-	       input.native_join_stage_count == 1 && facts.grouped_aggregate_only &&
-	       input.blocked_hash_aggregate_lookup_count > 0 && facts.no_native_sort &&
-	       !facts.has_wide_string_grouped_aggregate;
+static bool PhysicalRunnerNativeAggregateBenefitPays(const PhysicalRunnerCostInput &input,
+                                                     const PhysicalRunnerCostParameters &parameters) {
+	return PhysicalRunnerNativeStageBenefitCanPay(input, parameters) && input.native_aggregate_stage_count > 0 &&
+	       input.generated_stage_count == 0 && input.materialization_elision_count == 0;
 }
 
-static bool PhysicalRunnerGeneratedWorkPaysHighExpressionBlockedJoinGroupedAggregateProtocol(
-    const PhysicalRunnerCostInput &input, const PhysicalRunnerShapeFacts &facts) {
-	return input.full_pipeline && !input.uses_scan_filters && input.generated_stage_count >= 2 &&
-	       input.materialization_elision_count == 0 &&
-	       input.expression_cost >= HIGH_EXPRESSION_BLOCKED_JOIN_GROUPED_AGGREGATE_MIN_COST &&
-	       facts.has_generated_compute_work && input.native_join_stage_count == 1 && facts.grouped_aggregate_only &&
-	       input.blocked_hash_aggregate_lookup_count > 0 && facts.no_native_sort &&
-	       !facts.has_wide_string_grouped_aggregate;
-}
-
-static bool
-PhysicalRunnerGeneratedWorkPaysNarrowTwoJoinGroupedAggregateProtocol(const PhysicalRunnerCostInput &input,
-                                                                     const PhysicalRunnerShapeFacts &facts) {
-	return input.full_pipeline && !input.uses_scan_filters && input.generated_stage_count == 2 &&
-	       input.materialization_elision_count == 0 &&
-	       input.expression_cost >= NARROW_TWO_JOIN_GROUPED_AGGREGATE_MIN_EXPRESSION_COST &&
-	       facts.has_generated_compute_work && input.native_join_stage_count == 2 &&
-	       input.native_grouped_aggregate_stage_count == 1 && facts.grouped_aggregate_only &&
-	       input.grouped_aggregate_group_count <= 2 && input.grouped_aggregate_varchar_group_count <= 1 &&
-	       input.reference_varchar_projection_count == 0 && input.blocked_hash_aggregate_lookup_count > 0 &&
-	       facts.no_native_sort && !facts.has_wide_string_grouped_aggregate;
-}
-
-static bool PhysicalRunnerGeneratedWorkPaysScanFilteredNarrowTwoJoinGroupedAggregateProtocol(
-    const PhysicalRunnerCostInput &input, const PhysicalRunnerShapeFacts &facts) {
-	const bool supported_reference_varchar_projection =
-	    input.reference_varchar_projection_count == 0 ||
-	    (input.generated_stage_count >= 4 &&
-	     input.expression_cost >= WIDE_TWO_JOIN_GROUPED_AGGREGATE_MIN_EXPRESSION_COST);
-	return input.full_pipeline && input.uses_scan_filters && input.source_filter_count == 0 &&
-	       input.generated_stage_count >= 2 && input.materialization_elision_count == 0 &&
-	       input.expression_cost >= NARROW_TWO_JOIN_GROUPED_AGGREGATE_MIN_EXPRESSION_COST &&
-	       facts.has_generated_compute_work && input.native_join_stage_count == 2 &&
-	       input.native_grouped_aggregate_stage_count == 1 && facts.grouped_aggregate_only &&
-	       input.grouped_aggregate_group_count <= 2 && input.grouped_aggregate_varchar_group_count <= 1 &&
-	       supported_reference_varchar_projection && input.blocked_hash_aggregate_lookup_count > 0 &&
-	       facts.no_native_sort && !facts.has_wide_string_grouped_aggregate &&
-	       facts.batches >= SCAN_FILTERED_NARROW_TWO_JOIN_GROUPED_AGGREGATE_MIN_BATCHES;
-}
-
-static bool PhysicalRunnerGeneratedWorkPaysWideTwoJoinGroupedAggregateProtocol(const PhysicalRunnerCostInput &input,
-                                                                               const PhysicalRunnerShapeFacts &facts) {
-	return input.full_pipeline && !input.uses_scan_filters && input.generated_stage_count >= 4 &&
-	       input.materialization_elision_count == 0 &&
-	       input.expression_cost >= WIDE_TWO_JOIN_GROUPED_AGGREGATE_MIN_EXPRESSION_COST &&
-	       facts.has_generated_compute_work && input.native_join_stage_count == 2 &&
-	       input.native_grouped_aggregate_stage_count == 1 && facts.grouped_aggregate_only &&
-	       input.grouped_aggregate_group_count >= 3 && input.reference_varchar_projection_count >= 2 &&
-	       input.blocked_hash_aggregate_lookup_count > 0 && facts.no_native_sort &&
-	       facts.has_wide_string_grouped_aggregate;
-}
-
-static bool
-PhysicalRunnerGeneratedWorkPaysScanFilteredWideTwoJoinGroupedAggregateProtocol(const PhysicalRunnerCostInput &input,
-                                                                               const PhysicalRunnerShapeFacts &facts) {
-	return input.full_pipeline && input.uses_scan_filters && input.source_filter_count == 0 &&
-	       input.generated_stage_count >= 4 && input.materialization_elision_count == 0 &&
-	       input.expression_cost >= WIDE_TWO_JOIN_GROUPED_AGGREGATE_MIN_EXPRESSION_COST &&
-	       facts.has_generated_compute_work && input.native_join_stage_count == 2 &&
-	       input.native_grouped_aggregate_stage_count == 1 && facts.grouped_aggregate_only &&
-	       input.grouped_aggregate_group_count >= 3 && input.reference_varchar_projection_count >= 2 &&
-	       input.blocked_hash_aggregate_lookup_count > 0 && facts.no_native_sort &&
-	       facts.has_wide_string_grouped_aggregate;
-}
-
-static bool
-PhysicalRunnerGeneratedWorkPaysScanFilteredJoinGroupedAggregateProtocol(const PhysicalRunnerCostInput &input,
-                                                                        const PhysicalRunnerShapeFacts &facts) {
-	return input.full_pipeline && input.uses_scan_filters && input.source_filter_count == 0 &&
-	       input.generated_stage_count >= 4 && input.materialization_elision_count == 0 &&
-	       input.expression_cost >= SCAN_FILTERED_JOIN_GROUPED_AGGREGATE_MIN_EXPRESSION_COST &&
-	       facts.has_generated_compute_work && input.native_join_stage_count == 1 &&
-	       input.native_grouped_aggregate_stage_count == 1 && facts.grouped_aggregate_only && facts.no_native_sort &&
-	       !facts.has_wide_string_grouped_aggregate;
-}
-
-static bool PhysicalRunnerGeneratedWorkPaysJoinBuildChainProtocol(const PhysicalRunnerCostInput &input,
-                                                                  const PhysicalRunnerShapeFacts &facts) {
-	return input.full_pipeline && input.generated_stage_count == 1 && input.materialization_elision_count == 0 &&
-	       input.expression_cost >= JOIN_BUILD_CHAIN_MIN_EXPRESSION_COST && input.source_filter_count > 0 &&
-	       input.perfect_hash_join_probe_count > 0 &&
-	       input.source_projected_column_count >= JOIN_BUILD_CHAIN_MIN_SOURCE_PROJECTED_COLUMNS &&
-	       input.hash_join_build_payload_column_count > 0 &&
-	       input.hash_join_build_payload_column_count <= JOIN_BUILD_CHAIN_MAX_PAYLOAD_COLUMNS &&
-	       facts.has_generated_compute_work && input.native_join_stage_count == 2 &&
-	       input.native_aggregate_stage_count == 0 && facts.no_native_sort;
-}
-
-static bool
-PhysicalRunnerGeneratedWorkPaysScanFilteredJoinUngroupedAggregateProtocol(const PhysicalRunnerCostInput &input,
-                                                                          const PhysicalRunnerShapeFacts &facts) {
-	return input.full_pipeline && input.uses_scan_filters && input.generated_stage_count > 0 &&
-	       input.source_filter_count > 0 && facts.has_generated_compute_work && input.native_join_stage_count > 0 &&
-	       input.native_join_stage_count <= 2 && input.native_aggregate_stage_count > 0 &&
-	       input.native_grouped_aggregate_stage_count == 0 && facts.no_native_sort;
-}
-
-static bool PhysicalRunnerGeneratedWorkPaysJoinUngroupedAggregateProtocol(const PhysicalRunnerCostInput &input,
-                                                                          const PhysicalRunnerShapeFacts &facts) {
-	return input.full_pipeline && input.generated_stage_count >= 2 && input.materialization_elision_count > 0 &&
-	       input.expression_cost >= JOIN_UNGROUPED_AGGREGATE_MIN_EXPRESSION_COST && facts.has_generated_compute_work &&
-	       input.native_join_stage_count == 1 && input.native_aggregate_stage_count == 1 &&
-	       input.native_grouped_aggregate_stage_count == 0 && facts.no_native_sort;
-}
-
-static bool PhysicalRunnerGeneratedWorkPaysGeneratedSourceFilterJoinUngroupedAggregateProtocol(
-    const PhysicalRunnerCostInput &input, const PhysicalRunnerShapeFacts &facts) {
-	return input.full_pipeline && !input.uses_scan_filters && input.source_filter_count > 0 &&
-	       input.generated_stage_count >= 2 && input.materialization_elision_count == 0 &&
-	       input.expression_cost >= JOIN_UNGROUPED_AGGREGATE_MIN_EXPRESSION_COST && facts.has_generated_compute_work &&
-	       input.native_join_stage_count == 1 && input.native_aggregate_stage_count == 1 &&
-	       input.native_grouped_aggregate_stage_count == 0 && facts.no_native_sort;
-}
-
-static bool PhysicalRunnerLongNativeJoinChainProtocol(const PhysicalRunnerCostInput &input,
-                                                      const PhysicalRunnerShapeFacts &facts) {
-	return input.full_pipeline && !input.uses_scan_filters && input.generated_stage_count == 0 &&
-	       input.materialization_elision_count == 0 && input.source_filter_count == 0 &&
-	       input.expression_cost >= LONG_NATIVE_JOIN_CHAIN_MIN_EXPRESSION_COST && input.native_join_stage_count == 2 &&
-	       input.perfect_hash_join_probe_count > 0 && input.native_aggregate_stage_count == 0 &&
-	       input.native_grouped_aggregate_stage_count == 0 && facts.no_native_sort;
-}
-
-static bool PhysicalRunnerUsesDiscountedJoinGroupedAggregateStartup(const PhysicalRunnerCostInput &input,
-                                                                    const PhysicalRunnerShapeFacts &facts) {
-	return input.generated_stage_count >= 3 && input.materialization_elision_count > 0 &&
-	       input.native_join_stage_count == 1 &&
-	       PhysicalRunnerGeneratedWorkPaysJoinGroupedAggregateProtocol(input, facts);
-}
-
-static bool PhysicalRunnerUsesScanFilteredJoinUngroupedAggregateStartupWaiver(const PhysicalRunnerCostInput &input,
-                                                                              const PhysicalRunnerShapeFacts &facts) {
-	return input.full_pipeline && input.uses_scan_filters && input.source_filter_count >= 3 &&
-	       facts.rows <= SaturatingCostCast(STANDARD_VECTOR_SIZE * 32ULL) &&
-	       PhysicalRunnerGeneratedWorkPaysScanFilteredJoinUngroupedAggregateProtocol(input, facts) &&
-	       input.native_join_stage_count <= 2 && input.native_aggregate_stage_count == 1 &&
-	       input.native_grouped_aggregate_stage_count == 0 && facts.no_native_sort;
-}
-
-static bool PhysicalRunnerUsesLongBlockedJoinGroupedAggregateStartupWaiver(const PhysicalRunnerCostInput &input,
-                                                                           const PhysicalRunnerShapeFacts &facts) {
-	if (!PhysicalRunnerGeneratedWorkPaysLongBlockedJoinGroupedAggregateProtocol(input, facts)) {
-		return false;
-	}
-	return facts.batches >= LONG_BLOCKED_JOIN_GROUPED_AGGREGATE_MIN_BATCHES;
-}
-
-static bool PhysicalRunnerUsesJoinBuildChainStartupWaiver(const PhysicalRunnerCostInput &input,
-                                                          const PhysicalRunnerShapeFacts &facts) {
-	if (!PhysicalRunnerGeneratedWorkPaysJoinBuildChainProtocol(input, facts)) {
-		return false;
-	}
-	return facts.batches >= JOIN_BUILD_CHAIN_MIN_BATCHES;
-}
-
-static bool PhysicalRunnerUsesLongNativeJoinChainStartupWaiver(const PhysicalRunnerCostInput &input,
-                                                               const PhysicalRunnerShapeFacts &facts) {
-	if (!PhysicalRunnerLongNativeJoinChainProtocol(input, facts)) {
-		return false;
-	}
-	return facts.batches >= LONG_NATIVE_JOIN_CHAIN_MIN_BATCHES;
-}
-
-struct PhysicalRunnerRule {
-	const char *name;
-	bool (*matches)(const PhysicalRunnerCostInput &input, const PhysicalRunnerShapeFacts &facts);
+struct PhysicalRunnerAdmission {
+	string admission_class;
+	bool full_pipeline_benefit_pays = false;
+	bool native_operator_work_is_costed = false;
+	string acceleration_basis;
 };
 
-static const PhysicalRunnerRule PHYSICAL_RUNNER_FUNDED_PROTOCOL_RULES[] = {
-    {"standalone_ungrouped_aggregate", PhysicalRunnerGeneratedWorkPaysStandaloneUngroupedAggregateProtocol},
-    {"standalone_grouped_aggregate", PhysicalRunnerGeneratedWorkPaysStandaloneGroupedAggregateProtocol},
-    {"join_grouped_aggregate", PhysicalRunnerGeneratedWorkPaysJoinGroupedAggregateProtocol},
-    {"long_blocked_join_grouped_aggregate", PhysicalRunnerGeneratedWorkPaysLongBlockedJoinGroupedAggregateProtocol},
-    {"high_expression_blocked_join_grouped_aggregate",
-     PhysicalRunnerGeneratedWorkPaysHighExpressionBlockedJoinGroupedAggregateProtocol},
-    {"narrow_two_join_grouped_aggregate", PhysicalRunnerGeneratedWorkPaysNarrowTwoJoinGroupedAggregateProtocol},
-    {"scan_filtered_narrow_two_join_grouped_aggregate",
-     PhysicalRunnerGeneratedWorkPaysScanFilteredNarrowTwoJoinGroupedAggregateProtocol},
-    {"wide_two_join_grouped_aggregate", PhysicalRunnerGeneratedWorkPaysWideTwoJoinGroupedAggregateProtocol},
-    {"scan_filtered_wide_two_join_grouped_aggregate",
-     PhysicalRunnerGeneratedWorkPaysScanFilteredWideTwoJoinGroupedAggregateProtocol},
-    {"scan_filtered_join_grouped_aggregate", PhysicalRunnerGeneratedWorkPaysScanFilteredJoinGroupedAggregateProtocol},
-    {"join_build_chain", PhysicalRunnerGeneratedWorkPaysJoinBuildChainProtocol},
-    {"scan_filtered_join_ungrouped_aggregate",
-     PhysicalRunnerGeneratedWorkPaysScanFilteredJoinUngroupedAggregateProtocol},
-    {"join_ungrouped_aggregate", PhysicalRunnerGeneratedWorkPaysJoinUngroupedAggregateProtocol},
-    {"generated_source_filter_join_ungrouped_aggregate",
-     PhysicalRunnerGeneratedWorkPaysGeneratedSourceFilterJoinUngroupedAggregateProtocol},
-    {"long_native_join_chain", PhysicalRunnerUsesLongNativeJoinChainStartupWaiver},
-};
-
-enum class PhysicalRunnerStartupRuleAction : uint8_t { DISCOUNT_HALF, WAIVE };
-
-struct PhysicalRunnerStartupRule {
-	const char *name;
-	PhysicalRunnerStartupRuleAction action;
-	bool (*matches)(const PhysicalRunnerCostInput &input, const PhysicalRunnerShapeFacts &facts);
-};
-
-static const PhysicalRunnerStartupRule PHYSICAL_RUNNER_STARTUP_RULES[] = {
-    {"discount_join_grouped_aggregate_startup", PhysicalRunnerStartupRuleAction::DISCOUNT_HALF,
-     PhysicalRunnerUsesDiscountedJoinGroupedAggregateStartup},
-    {"scan_filtered_join_ungrouped_aggregate_startup_waiver", PhysicalRunnerStartupRuleAction::WAIVE,
-     PhysicalRunnerUsesScanFilteredJoinUngroupedAggregateStartupWaiver},
-    {"long_blocked_join_grouped_aggregate_startup_waiver", PhysicalRunnerStartupRuleAction::WAIVE,
-     PhysicalRunnerUsesLongBlockedJoinGroupedAggregateStartupWaiver},
-    {"join_build_chain_startup_waiver", PhysicalRunnerStartupRuleAction::WAIVE,
-     PhysicalRunnerUsesJoinBuildChainStartupWaiver},
-    {"long_native_join_chain_startup_waiver", PhysicalRunnerStartupRuleAction::WAIVE,
-     PhysicalRunnerUsesLongNativeJoinChainStartupWaiver},
-};
-
-static const PhysicalRunnerRule *PhysicalRunnerFindMatchingRule(const PhysicalRunnerCostInput &input,
-                                                                const PhysicalRunnerShapeFacts &facts,
-                                                                const PhysicalRunnerRule *rules, idx_t rule_count) {
-	for (idx_t rule_idx = 0; rule_idx < rule_count; rule_idx++) {
-		if (rules[rule_idx].matches(input, facts)) {
-			return &rules[rule_idx];
-		}
+static string PhysicalRunnerAdmissionClass(const PhysicalRunnerCostInput &input, const PhysicalRunnerShapeFacts &facts,
+                                           const PhysicalRunnerCostParameters &parameters,
+                                           bool full_pipeline_benefit_pays) {
+	if (!input.has_accelerated_work) {
+		return "none";
 	}
-	return nullptr;
-}
-
-static const PhysicalRunnerRule *PhysicalRunnerFindFundedProtocolRule(const PhysicalRunnerCostInput &input,
-                                                                      const PhysicalRunnerShapeFacts &facts) {
-	return PhysicalRunnerFindMatchingRule(input, facts, PHYSICAL_RUNNER_FUNDED_PROTOCOL_RULES,
-	                                      sizeof(PHYSICAL_RUNNER_FUNDED_PROTOCOL_RULES) /
-	                                          sizeof(PHYSICAL_RUNNER_FUNDED_PROTOCOL_RULES[0]));
-}
-
-static string PhysicalRunnerMatchedStartupRules(const PhysicalRunnerCostInput &input,
-                                                const PhysicalRunnerShapeFacts &facts) {
-	string result;
-	for (const auto &rule : PHYSICAL_RUNNER_STARTUP_RULES) {
-		if (!rule.matches(input, facts)) {
-			continue;
-		}
-		if (!result.empty()) {
-			result += "|";
-		}
-		result += rule.name;
+	if (input.materialization_elision_count > 0 && parameters.materialization_elision_benefit > 0) {
+		return "materialization_elision";
 	}
-	return result;
+	if (full_pipeline_benefit_pays) {
+		return input.input_scope == PhysicalRunnerCostInputScope::PHYSICAL_PIPELINE ? "physical_pipeline_graph"
+		                                                                            : "full_pipeline";
+	}
+	if (PhysicalRunnerNativeAggregateBenefitPays(input, parameters)) {
+		return "native_aggregate";
+	}
+	if (facts.native_operator_stage_count == 0) {
+		return facts.has_generated_compute_work && input.generated_stage_count > 0 &&
+		               parameters.generated_stage_benefit > 0
+		           ? "generated"
+		           : "none";
+	}
+	if (facts.has_generated_compute_work && input.generated_stage_count > 0 && facts.no_native_sort) {
+		return "generated_native_fusion";
+	}
+	return "none";
 }
 
 static void PhysicalRunnerAppendReasonToken(string &result, const string &token) {
@@ -687,53 +412,62 @@ static void PhysicalRunnerAppendReasonToken(string &result, const string &token)
 	result += token;
 }
 
-static string PhysicalRunnerAccelerationBasis(const PhysicalRunnerCostInput &input,
-                                              const PhysicalRunnerShapeFacts &facts,
-                                              const PhysicalRunnerCostParameters &parameters) {
-	string result;
-	auto funded_protocol_rule = PhysicalRunnerFindFundedProtocolRule(input, facts);
-	if (funded_protocol_rule) {
-		PhysicalRunnerAppendReasonToken(result, string("funded_protocol_rule:") + funded_protocol_rule->name);
+static bool PhysicalRunnerNativeOperatorBenefitPays(const PhysicalRunnerCostInput &input,
+                                                    const PhysicalRunnerCostParameters &parameters,
+                                                    const PhysicalRunnerAdmission &admission) {
+	return admission.admission_class != "none" && PhysicalRunnerNativeStageBenefitCanPay(input, parameters);
+}
+
+static void PhysicalRunnerBuildAccelerationBasis(const PhysicalRunnerCostInput &input,
+                                                 const PhysicalRunnerShapeFacts &facts,
+                                                 const PhysicalRunnerCostParameters &parameters,
+                                                 PhysicalRunnerAdmission &admission) {
+	if (admission.admission_class != "none") {
+		PhysicalRunnerAppendReasonToken(admission.acceleration_basis,
+		                                string("admission_class:") + admission.admission_class);
 	}
-	if (input.generated_stage_count > 0 && parameters.generated_stage_benefit > 0) {
-		PhysicalRunnerAppendReasonToken(result, "generated_stage_benefit");
+	if (facts.has_generated_compute_work && input.generated_stage_count > 0 && parameters.generated_stage_benefit > 0) {
+		PhysicalRunnerAppendReasonToken(admission.acceleration_basis, "generated_stage_benefit");
 	}
-	if (facts.native_operator_stage_count > 0 && parameters.native_operator_stage_benefit > 0) {
-		PhysicalRunnerAppendReasonToken(result, "native_operator_stage_benefit");
+	if (facts.native_operator_stage_count > 0 &&
+	    PhysicalRunnerNativeOperatorBenefitPays(input, parameters, admission)) {
+		PhysicalRunnerAppendReasonToken(admission.acceleration_basis, "native_operator_stage_benefit");
 	}
 	if (input.materialization_elision_count > 0 && parameters.materialization_elision_benefit > 0) {
-		PhysicalRunnerAppendReasonToken(result, "materialization_elision_benefit");
+		PhysicalRunnerAppendReasonToken(admission.acceleration_basis, "materialization_elision_benefit");
 	}
-	if (input.full_pipeline && parameters.full_pipeline_benefit > 0) {
-		PhysicalRunnerAppendReasonToken(result, "full_pipeline_benefit");
+	if (admission.full_pipeline_benefit_pays) {
+		PhysicalRunnerAppendReasonToken(admission.acceleration_basis, "full_pipeline_benefit");
 	}
-	if (PhysicalRunnerUsesLongNativeJoinChainStartupWaiver(input, facts)) {
-		PhysicalRunnerAppendReasonToken(result, "long_native_join_chain_startup_waiver");
+	if (admission.acceleration_basis.empty()) {
+		admission.acceleration_basis = "none";
 	}
-	return result.empty() ? "none" : result;
+}
+
+static PhysicalRunnerAdmission PhysicalRunnerEvaluateAdmission(const PhysicalRunnerCostInput &input,
+                                                               const PhysicalRunnerShapeFacts &facts,
+                                                               const PhysicalRunnerCostParameters &parameters) {
+	PhysicalRunnerAdmission admission;
+	admission.full_pipeline_benefit_pays =
+	    parameters.full_pipeline_benefit > 0 && PhysicalRunnerFullPipelineBenefitPays(input, facts);
+	admission.admission_class =
+	    PhysicalRunnerAdmissionClass(input, facts, parameters, admission.full_pipeline_benefit_pays);
+	admission.native_operator_work_is_costed =
+	    facts.native_operator_stage_count == 0 || admission.admission_class != "none";
+	PhysicalRunnerBuildAccelerationBasis(input, facts, parameters, admission);
+	return admission;
 }
 
 static string PhysicalRunnerRejectedAcceleratedWorkReason(const PhysicalRunnerCostInput &input,
-                                                          const PhysicalRunnerShapeFacts &facts,
-                                                          const PhysicalRunnerCostParameters &parameters,
+                                                          const PhysicalRunnerAdmission &admission,
                                                           const PhysicalRunnerCostProfile &profile) {
-	if (PhysicalRunnerIsNativeContractProjectionGlue(input, facts)) {
-		return "rejected_native_contract_projection_glue";
-	}
-	if (PhysicalRunnerIsSmallStatefulStandaloneProjection(input, facts)) {
-		return "rejected_small_stateful_standalone_projection";
-	}
 	if (!input.has_accelerated_work) {
 		return "rejected_no_accelerated_work";
 	}
-	const bool funded_protocol_rule_matches = PhysicalRunnerFindFundedProtocolRule(input, facts) != nullptr;
-	const bool native_operator_work_is_costed =
-	    facts.native_operator_stage_count == 0 || parameters.native_operator_stage_benefit > 0 ||
-	    (input.full_pipeline && parameters.full_pipeline_benefit > 0) || funded_protocol_rule_matches;
-	if (!native_operator_work_is_costed) {
+	if (!admission.native_operator_work_is_costed) {
 		return "rejected_native_operator_work_uncosted";
 	}
-	if (PhysicalRunnerAccelerationBasis(input, facts, parameters) == "none") {
+	if (admission.acceleration_basis == "none") {
 		return "rejected_no_costed_acceleration";
 	}
 	if (profile.saved_work_per_batch <= 0) {
@@ -745,18 +479,21 @@ static string PhysicalRunnerRejectedAcceleratedWorkReason(const PhysicalRunnerCo
 static void PhysicalRunnerComputeWorkComponents(const PhysicalRunnerCostInput &input,
                                                 const PhysicalRunnerShapeFacts &facts,
                                                 const PhysicalRunnerCostParameters &parameters,
+                                                const PhysicalRunnerAdmission &admission,
                                                 PhysicalRunnerCostProfile &profile) {
-	if (PhysicalRunnerIsNativeContractProjectionGlue(input, facts)) {
-		return;
-	}
 	const auto expression_cost = SaturatingCostCast(input.expression_cost);
-	profile.generated_expression_work = expression_cost;
-	auto generated_stage_work = MultiplyCost(SaturatingCostCast(input.generated_stage_count),
-	                                         SaturatingCostCast(parameters.generated_stage_benefit));
-	if (expression_cost > 0 && generated_stage_work > expression_cost) {
-		generated_stage_work = expression_cost;
+	if (facts.has_generated_compute_work) {
+		profile.generated_expression_work = expression_cost;
+		int64_t generated_stage_work = 0;
+		if (expression_cost > 0) {
+			generated_stage_work = MultiplyCost(SaturatingCostCast(input.generated_stage_count),
+			                                    SaturatingCostCast(parameters.generated_stage_benefit));
+			if (generated_stage_work > expression_cost) {
+				generated_stage_work = expression_cost;
+			}
+		}
+		profile.generated_stage_work = generated_stage_work;
 	}
-	profile.generated_stage_work = generated_stage_work;
 	const auto native_join_stage_count = SaturatingCostCast(input.native_join_stage_count);
 	const auto native_aggregate_stage_count = SaturatingCostCast(input.native_aggregate_stage_count);
 	const auto native_grouped_aggregate_stage_count = SaturatingCostCast(input.native_grouped_aggregate_stage_count);
@@ -764,8 +501,10 @@ static void PhysicalRunnerComputeWorkComponents(const PhysicalRunnerCostInput &i
 	D_ASSERT(native_aggregate_stage_count >= native_grouped_aggregate_stage_count);
 	const auto native_operator_stage_count =
 	    AddCost(AddCost(native_join_stage_count, native_aggregate_stage_count), native_sort_stage_count);
-	const auto native_operator_stage_benefit = SaturatingCostCast(parameters.native_operator_stage_benefit);
-	profile.native_operator_work = MultiplyCost(native_operator_stage_count, native_operator_stage_benefit);
+	if (PhysicalRunnerNativeOperatorBenefitPays(input, parameters, admission)) {
+		const auto native_operator_stage_benefit = SaturatingCostCast(parameters.native_operator_stage_benefit);
+		profile.native_operator_work = MultiplyCost(native_operator_stage_count, native_operator_stage_benefit);
+	}
 	if (input.materialization_elision_count > 0) {
 		profile.materialization_elision_work =
 		    MultiplyCost(SaturatingCostCast(input.materialization_elision_count),
@@ -777,27 +516,19 @@ static void PhysicalRunnerComputeWorkComponents(const PhysicalRunnerCostInput &i
 	}
 	if (input.full_pipeline) {
 		const auto full_pipeline_benefit = SaturatingCostCast(parameters.full_pipeline_benefit);
-		const auto stateful_protocol_stage_count =
-		    AddCost(native_join_stage_count, native_grouped_aggregate_stage_count);
-		if (stateful_protocol_stage_count > 0) {
-			profile.stateful_protocol_penalty = MultiplyCost(
-			    AddCost(stateful_protocol_stage_count, stateful_protocol_stage_count), native_operator_stage_benefit);
-			profile.stateful_protocol_penalty = AddCost(profile.stateful_protocol_penalty, full_pipeline_benefit);
-		} else {
+		if (admission.full_pipeline_benefit_pays) {
 			profile.full_pipeline_work = full_pipeline_benefit;
 		}
+	}
+	if (input.native_join_stage_count > 0) {
+		profile.stateful_protocol_penalty = AddCost(
+		    profile.stateful_protocol_penalty, MultiplyCost(native_join_stage_count, NATIVE_JOIN_PROTOCOL_PENALTY));
 	}
 	if (input.blocked_hash_aggregate_lookup_count > 0) {
 		profile.stateful_protocol_penalty =
 		    AddCost(profile.stateful_protocol_penalty,
 		            MultiplyCost(SaturatingCostCast(input.blocked_hash_aggregate_lookup_count),
 		                         BLOCKED_HASH_AGGREGATE_LOOKUP_PENALTY));
-		if (PhysicalRunnerUsesDiscountedJoinGroupedAggregateStartup(input, facts)) {
-			profile.stateful_protocol_penalty =
-			    AddCost(profile.stateful_protocol_penalty,
-			            MultiplyCost(SaturatingCostCast(input.blocked_hash_aggregate_lookup_count),
-			                         DISCOUNTED_JOIN_BLOCKED_HASH_AGGREGATE_LOOKUP_PENALTY));
-		}
 	}
 	auto work = profile.generated_expression_work;
 	work = AddCost(work, profile.generated_stage_work);
@@ -809,25 +540,8 @@ static void PhysicalRunnerComputeWorkComponents(const PhysicalRunnerCostInput &i
 	profile.saved_work_per_batch = work;
 }
 
-static int64_t PhysicalRunnerStartupCost(const PhysicalRunnerCostInput &input, const PhysicalRunnerShapeFacts &facts,
-                                         const PhysicalRunnerCostParameters &parameters) {
-	auto startup_cost = SaturatingCostCast(parameters.startup_base_cost);
-	for (const auto &rule : PHYSICAL_RUNNER_STARTUP_RULES) {
-		if (!rule.matches(input, facts)) {
-			continue;
-		}
-		switch (rule.action) {
-		case PhysicalRunnerStartupRuleAction::DISCOUNT_HALF:
-			startup_cost /= 2;
-			break;
-		case PhysicalRunnerStartupRuleAction::WAIVE:
-			startup_cost = 0;
-			break;
-		default:
-			throw InternalException("Unknown physical runner startup rule action");
-		}
-	}
-	return startup_cost;
+static int64_t PhysicalRunnerStartupCost(const PhysicalRunnerCostParameters &parameters) {
+	return SaturatingCostCast(parameters.startup_base_cost);
 }
 
 static PhysicalRunnerCostParameters PhysicalRunnerGpuCostParameters(const PhysicalRunnerCostParameters &parameters) {
@@ -850,8 +564,10 @@ static int64_t PhysicalRunnerRequiredBenefit(const PhysicalRunnerCostProfile &pr
 }
 
 static void PhysicalRunnerInitializeProfile(const PhysicalRunnerCostInput &input, const PhysicalRunnerShapeFacts &facts,
+                                            const PhysicalRunnerAdmission &admission,
                                             PhysicalRunnerCostProfile &profile) {
 	profile.present = true;
+	profile.input_scope = input.input_scope;
 	profile.rows = facts.rows;
 	profile.batches = facts.batches;
 	profile.expression_cost = SaturatingCostCast(input.expression_cost);
@@ -866,9 +582,7 @@ static void PhysicalRunnerInitializeProfile(const PhysicalRunnerCostInput &input
 	profile.full_pipeline = input.full_pipeline;
 	profile.generated_work_class = input.generated_work_class;
 	profile.native_protocol_class = input.native_protocol_class;
-	auto funded_protocol_rule = PhysicalRunnerFindFundedProtocolRule(input, facts);
-	profile.funded_protocol_rule = funded_protocol_rule ? funded_protocol_rule->name : string();
-	profile.startup_rules = PhysicalRunnerMatchedStartupRules(input, facts);
+	profile.admission_class = admission.admission_class;
 }
 
 struct PhysicalRunnerSelectionAnalysis {
@@ -878,7 +592,7 @@ struct PhysicalRunnerSelectionAnalysis {
 
 static PhysicalRunnerSelectionAnalysis PhysicalRunnerAnalyzeSelection(const PhysicalRunnerCostInput &input,
                                                                       const PhysicalRunnerShapeFacts &facts,
-                                                                      const PhysicalRunnerCostParameters &parameters,
+                                                                      const PhysicalRunnerAdmission &admission,
                                                                       const PhysicalRunnerCostProfile &profile,
                                                                       bool runner_available) {
 	PhysicalRunnerSelectionAnalysis result;
@@ -886,7 +600,7 @@ static PhysicalRunnerSelectionAnalysis PhysicalRunnerAnalyzeSelection(const Phys
 		result.selection_reason = "rejected_runner_unavailable";
 		return result;
 	}
-	result.selection_reason = PhysicalRunnerRejectedAcceleratedWorkReason(input, facts, parameters, profile);
+	result.selection_reason = PhysicalRunnerRejectedAcceleratedWorkReason(input, admission, profile);
 	if (!result.selection_reason.empty()) {
 		return result;
 	}
@@ -895,40 +609,42 @@ static PhysicalRunnerSelectionAnalysis PhysicalRunnerAnalyzeSelection(const Phys
 		return result;
 	}
 	result.selected = true;
-	result.selection_reason = "admitted_" + PhysicalRunnerAccelerationBasis(input, facts, parameters);
+	result.selection_reason = "admitted_" + admission.acceleration_basis;
 	return result;
 }
 
 PhysicalRunnerCostProfile DuckDBCostModel::SelectPhysicalRunner(const PhysicalRunnerCostInput &input,
                                                                 const PhysicalRunnerCostParameters &parameters) {
 	auto facts = PhysicalRunnerBuildShapeFacts(input);
+	auto compiled_admission = PhysicalRunnerEvaluateAdmission(input, facts, parameters);
 	PhysicalRunnerCostProfile compiled_profile;
-	PhysicalRunnerInitializeProfile(input, facts, compiled_profile);
-	PhysicalRunnerComputeWorkComponents(input, facts, parameters, compiled_profile);
+	PhysicalRunnerInitializeProfile(input, facts, compiled_admission, compiled_profile);
+	PhysicalRunnerComputeWorkComponents(input, facts, parameters, compiled_admission, compiled_profile);
 	compiled_profile.accelerated_runner_benefit =
 	    MultiplyCost(compiled_profile.batches, compiled_profile.saved_work_per_batch);
-	compiled_profile.startup_cost = PhysicalRunnerStartupCost(input, facts, parameters);
+	compiled_profile.startup_cost = PhysicalRunnerStartupCost(parameters);
 	compiled_profile.required_benefit = PhysicalRunnerRequiredBenefit(compiled_profile, parameters);
 	compiled_profile.net_benefit =
 	    SubtractCost(compiled_profile.accelerated_runner_benefit, compiled_profile.startup_cost);
 
 	auto gpu_parameters = PhysicalRunnerGpuCostParameters(parameters);
+	auto gpu_admission = PhysicalRunnerEvaluateAdmission(input, facts, gpu_parameters);
 	PhysicalRunnerCostProfile gpu_profile;
-	PhysicalRunnerInitializeProfile(input, facts, gpu_profile);
-	PhysicalRunnerComputeWorkComponents(input, facts, gpu_parameters, gpu_profile);
+	PhysicalRunnerInitializeProfile(input, facts, gpu_admission, gpu_profile);
+	PhysicalRunnerComputeWorkComponents(input, facts, gpu_parameters, gpu_admission, gpu_profile);
 	gpu_profile.accelerated_runner_benefit = MultiplyCost(gpu_profile.batches, gpu_profile.saved_work_per_batch);
 	gpu_profile.gpu_transfer_cost =
 	    MultiplyCost(gpu_profile.batches, SaturatingCostCast(parameters.gpu_transfer_cost_per_batch));
-	gpu_profile.startup_cost = PhysicalRunnerStartupCost(input, facts, gpu_parameters);
+	gpu_profile.startup_cost = PhysicalRunnerStartupCost(gpu_parameters);
 	gpu_profile.required_benefit =
 	    AddCost(PhysicalRunnerRequiredBenefit(gpu_profile, gpu_parameters), gpu_profile.gpu_transfer_cost);
 	gpu_profile.net_benefit = SubtractCost(
 	    SubtractCost(gpu_profile.accelerated_runner_benefit, gpu_profile.startup_cost), gpu_profile.gpu_transfer_cost);
 
-	auto compiled_selection = PhysicalRunnerAnalyzeSelection(input, facts, parameters, compiled_profile,
+	auto compiled_selection = PhysicalRunnerAnalyzeSelection(input, facts, compiled_admission, compiled_profile,
 	                                                         parameters.compiled_vectorized_runner_available);
 	auto gpu_selection =
-	    PhysicalRunnerAnalyzeSelection(input, facts, gpu_parameters, gpu_profile, parameters.gpu_runner_available);
+	    PhysicalRunnerAnalyzeSelection(input, facts, gpu_admission, gpu_profile, parameters.gpu_runner_available);
 	const bool compiled_selected = compiled_selection.selected;
 	const bool gpu_selected = gpu_selection.selected;
 
@@ -987,6 +703,17 @@ const char *PhysicalRunnerNativeProtocolClassToString(PhysicalRunnerNativeProtoc
 		return "none";
 	case PhysicalRunnerNativeProtocolClass::STATEFUL_SOURCE_SINK_PROTOCOL:
 		return "stateful_source_sink_protocol";
+	default:
+		return "unknown";
+	}
+}
+
+const char *PhysicalRunnerCostInputScopeToString(PhysicalRunnerCostInputScope input_scope) {
+	switch (input_scope) {
+	case PhysicalRunnerCostInputScope::EXECUTION_REGION_CANDIDATE:
+		return "execution_region_candidate";
+	case PhysicalRunnerCostInputScope::PHYSICAL_PIPELINE:
+		return "physical_pipeline";
 	default:
 		return "unknown";
 	}
