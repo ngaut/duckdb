@@ -1215,6 +1215,30 @@ struct SljitUngroupedFusedTypedAggregateCodegenPlan {
 	const ExecutionExpressionIR *binary_other_value = nullptr;
 };
 
+static bool TryGetSljitAggregatePayloadIntegerKind(const LogicalType &payload_type, SljitNativeIntegerKind &kind) {
+	switch (payload_type.InternalType()) {
+	case PhysicalType::INT32:
+		kind = SljitNativeIntegerKind::INT32;
+		return true;
+	case PhysicalType::INT64:
+		kind = payload_type.id() == LogicalTypeId::DECIMAL ? SljitNativeIntegerKind::DECIMAL64
+		                                                   : SljitNativeIntegerKind::INT64;
+		return true;
+	default:
+		return false;
+	}
+}
+
+static bool SljitAggregateTypedPayloadPlanSupported(const SljitTypedExpressionTreePlan &payload_plan,
+                                                    const ExecutionRegionAggregateInput &aggregate) {
+	if (!payload_plan.supported || aggregate.child_types.size() != 1) {
+		return false;
+	}
+	SljitNativeIntegerKind aggregate_payload_kind;
+	return TryGetSljitAggregatePayloadIntegerKind(aggregate.child_types[0], aggregate_payload_kind) &&
+	       payload_plan.result_kind == aggregate_payload_kind;
+}
+
 static bool BuildSljitUngroupedFusedTypedAggregatePayloadPlan(const SljitNativeRegionExpressionPlan &payload,
                                                               const ExecutionRegionAggregateInput &aggregate,
                                                               SljitTypedExpressionTreePlan &payload_plan) {
@@ -1244,7 +1268,7 @@ static bool BuildSljitUngroupedFusedTypedAggregatePayloadPlan(const SljitNativeR
 		return false;
 	}
 	payload_plan = BuildSljitTypedExpressionTreePlan(*payload.expression_tree, false);
-	return payload_plan.supported && payload_plan.result_is_int64;
+	return SljitAggregateTypedPayloadPlanSupported(payload_plan, aggregate);
 }
 
 static bool SljitExpressionIRStructurallyEqual(const ExecutionExpressionIR &left, const ExecutionExpressionIR &right) {
@@ -1997,20 +2021,7 @@ static bool BuildSljitFilteredFusedPrimitiveAggregatePayloadPlan(const SljitNati
 		return false;
 	}
 	payload_plan = BuildSljitTypedExpressionTreePlan(*payload.expression_tree, false);
-	if (payload_plan.supported && payload_plan.result_is_int64) {
-		return true;
-	}
-	if ((aggregate.primitive_update_kind == AggregatePrimitiveUpdateKind::SUM_INT64 ||
-	     aggregate.primitive_update_kind == AggregatePrimitiveUpdateKind::SUM_HUGEINT) &&
-	    payload.expression_tree->kind == ExecutionExpressionIRKind::REFERENCE &&
-	    payload.expression_tree->physical_type == PhysicalType::INT64) {
-		payload_plan.supported = true;
-		payload_plan.result_kind = SljitNativeIntegerKind::INT64;
-		payload_plan.result_is_int64 = true;
-		payload_plan.node_count = CountSljitTypedExpressionTreeNodes(*payload.expression_tree);
-		return true;
-	}
-	return false;
+	return SljitAggregateTypedPayloadPlanSupported(payload_plan, aggregate);
 }
 
 static bool
@@ -2334,7 +2345,7 @@ static bool BuildSljitGroupedFusedTypedAggregateCodegenPlan(const vector<SljitNa
 			continue;
 		}
 		payload_plan = BuildSljitTypedExpressionTreePlan(*payload.expression_tree, false);
-		if (!payload_plan.supported || !payload_plan.result_is_int64) {
+		if (!SljitAggregateTypedPayloadPlanSupported(payload_plan, aggregate)) {
 			return false;
 		}
 		codegen_plan.has_typed_payload = true;

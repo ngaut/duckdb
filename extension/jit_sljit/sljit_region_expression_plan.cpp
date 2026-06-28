@@ -131,6 +131,85 @@ static bool IsComposableNativeAddConstant(const SljitNativeRegionExpressionPlan 
 	       expr.binary_op == SljitNativeIntegerBinaryOp::ADD && !expr.constant_on_left;
 }
 
+static bool SljitSignedIntegerWidthMatchesType(SljitNativeSignedIntegerWidth width, const LogicalType &type) {
+	switch (width) {
+	case SljitNativeSignedIntegerWidth::INT8:
+		return type.InternalType() == PhysicalType::INT8;
+	case SljitNativeSignedIntegerWidth::INT16:
+		return type.InternalType() == PhysicalType::INT16;
+	case SljitNativeSignedIntegerWidth::INT32:
+		return type.InternalType() == PhysicalType::INT32;
+	case SljitNativeSignedIntegerWidth::INT64:
+		return type.InternalType() == PhysicalType::INT64;
+	default:
+		return false;
+	}
+}
+
+static bool SljitUnsignedIntegerWidthMatchesType(SljitNativeUnsignedIntegerWidth width, const LogicalType &type) {
+	switch (width) {
+	case SljitNativeUnsignedIntegerWidth::UINT8:
+		return type.InternalType() == PhysicalType::UINT8;
+	case SljitNativeUnsignedIntegerWidth::UINT16:
+		return type.InternalType() == PhysicalType::UINT16;
+	case SljitNativeUnsignedIntegerWidth::UINT32:
+		return type.InternalType() == PhysicalType::UINT32;
+	default:
+		return false;
+	}
+}
+
+static SljitNativeRegionExpressionPlan
+SljitProjectionReferenceThroughSource(const SljitNativeRegionExpressionPlan &expr,
+                                      const SljitNativeRegionExpressionPlan &source, bool render_diagnostics,
+                                      const char *reason) {
+	SljitNativeRegionExpressionPlan result;
+	result.kind = SljitNativeRegionExpressionKind::REFERENCE;
+	result.return_type = expr.return_type;
+	result.source_index = source.source_index;
+	result.reference_origin = source.reference_origin;
+	if (render_diagnostics) {
+		result.ir = string(reason) + "(" + source.ir + "," + expr.ir + ")";
+	}
+	return result;
+}
+
+static bool TryComposeNativeRoundTripProjection(const vector<SljitNativeRegionExpressionPlan> &input_projection,
+                                                const SljitNativeRegionExpressionPlan &expr,
+                                                SljitNativeRegionExpressionPlan &result, bool render_diagnostics) {
+	if (expr.source_index >= input_projection.size()) {
+		return false;
+	}
+	auto &source = input_projection[expr.source_index];
+	if (expr.kind == SljitNativeRegionExpressionKind::STRING_COMPRESS &&
+	    source.kind == SljitNativeRegionExpressionKind::STRING_DECOMPRESS &&
+	    expr.string_compress_target_size == source.string_decompress_source_size &&
+	    expr.return_type.InternalType() != PhysicalType::INVALID &&
+	    GetTypeIdSize(expr.return_type.InternalType()) == expr.string_compress_target_size) {
+		result = SljitProjectionReferenceThroughSource(expr, source, render_diagnostics,
+		                                               "compose-string-compress-decompress");
+		return true;
+	}
+	if (expr.kind == SljitNativeRegionExpressionKind::INTEGRAL_COMPRESS &&
+	    source.kind == SljitNativeRegionExpressionKind::INTEGRAL_DECOMPRESS &&
+	    expr.cast_source_width == source.cast_target_width &&
+	    expr.unsigned_cast_target_width == source.unsigned_source_width && expr.constant == source.constant &&
+	    SljitUnsignedIntegerWidthMatchesType(expr.unsigned_cast_target_width, expr.return_type)) {
+		result = SljitProjectionReferenceThroughSource(expr, source, render_diagnostics,
+		                                               "compose-integral-compress-decompress");
+		return true;
+	}
+	if (expr.kind == SljitNativeRegionExpressionKind::INTEGER_CAST &&
+	    source.kind == SljitNativeRegionExpressionKind::INTEGER_CAST && !expr.try_cast && !source.try_cast &&
+	    expr.cast_source_width == source.cast_target_width && expr.cast_target_width == source.cast_source_width &&
+	    SljitSignedIntegerWidthMatchesType(expr.cast_target_width, expr.return_type)) {
+		result =
+		    SljitProjectionReferenceThroughSource(expr, source, render_diagnostics, "compose-integer-cast-roundtrip");
+		return true;
+	}
+	return false;
+}
+
 static bool TryMapNativeProjectionSourceIndex(const vector<SljitNativeRegionExpressionPlan> &input_projection,
                                               idx_t &source_index) {
 	if (source_index >= input_projection.size()) {
@@ -408,6 +487,9 @@ static bool TryComposeNativeProjectionExpression(const vector<SljitNativeRegionE
 		}
 		return true;
 	}
+	if (TryComposeNativeRoundTripProjection(input_projection, expr, result, render_diagnostics)) {
+		return true;
+	}
 	if (!IsComposableNativeAddConstant(expr)) {
 		return false;
 	}
@@ -549,9 +631,7 @@ static bool SljitPrimitiveAggregatePayloadSupported(SljitNativeRegionExpressionP
 			return false;
 		}
 		SljitNativeIntegerKind typed_tree_kind;
-		if ((aggregate_payload_kind == SljitNativeIntegerKind::INT64 ||
-		     aggregate_payload_kind == SljitNativeIntegerKind::DECIMAL64) &&
-		    SljitTypedExpressionTreeIsSupported(*payload.expression_tree) &&
+		if (SljitTypedExpressionTreeIsSupported(*payload.expression_tree) &&
 		    TryGetSljitTypedExpressionTreeResultKind(*payload.expression_tree, typed_tree_kind) &&
 		    typed_tree_kind == aggregate_payload_kind) {
 			payload.kind = SljitNativeRegionExpressionKind::TYPED_EXPRESSION_TREE;
@@ -575,10 +655,14 @@ static bool SljitPrimitiveAggregatePayloadSupported(SljitNativeRegionExpressionP
 	case SljitNativeRegionExpressionKind::INTEGER_BINARY_CONSTANT:
 	case SljitNativeRegionExpressionKind::INTEGER_BINARY_REFERENCES:
 		return payload.integer_kind == aggregate_payload_kind;
-	case SljitNativeRegionExpressionKind::TYPED_EXPRESSION_TREE:
-		return (aggregate_payload_kind == SljitNativeIntegerKind::INT64 ||
-		        aggregate_payload_kind == SljitNativeIntegerKind::DECIMAL64) &&
-		       payload.expression_tree != nullptr;
+	case SljitNativeRegionExpressionKind::TYPED_EXPRESSION_TREE: {
+		if (!payload.expression_tree || !SljitTypedExpressionTreeIsSupported(*payload.expression_tree)) {
+			return false;
+		}
+		SljitNativeIntegerKind typed_tree_kind;
+		return TryGetSljitTypedExpressionTreeResultKind(*payload.expression_tree, typed_tree_kind) &&
+		       typed_tree_kind == aggregate_payload_kind;
+	}
 	case SljitNativeRegionExpressionKind::EXPRESSION_TREE:
 		return aggregate_payload_kind == SljitNativeIntegerKind::DECIMAL64 && payload.expression_tree != nullptr;
 	default:

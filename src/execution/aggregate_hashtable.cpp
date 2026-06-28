@@ -144,8 +144,8 @@ static bool AggregatePrepareFastGroupSourceInfo(DataChunk &groups, const vector<
 static bool AggregateFastGroupSourceRowsMatch(const AggregateFastGroupSourceInfo &sources, idx_t row_idx,
                                               idx_t other_row_idx) {
 	for (idx_t group_idx = 0; group_idx < sources.group_count; group_idx++) {
-		if (!AggregateFastSourceValuesMatch(sources.source_data[group_idx], sources.physical_types[group_idx],
-		                                    row_idx, other_row_idx, sources.value_sizes[group_idx])) {
+		if (!AggregateFastSourceValuesMatch(sources.source_data[group_idx], sources.physical_types[group_idx], row_idx,
+		                                    other_row_idx, sources.value_sizes[group_idx])) {
 			return false;
 		}
 	}
@@ -157,8 +157,8 @@ static bool AggregateFastExistingRowMatches(const AggregateFastGroupSourceInfo &
                                             idx_t row_idx) {
 	for (idx_t group_idx = 0; group_idx < sources.group_count; group_idx++) {
 		if (!AggregateFastExistingValueMatches(sources.source_data[group_idx], row_location,
-		                                       sources.physical_types[group_idx], row_idx,
-		                                       layout_offsets[group_idx], sources.value_sizes[group_idx])) {
+		                                       sources.physical_types[group_idx], row_idx, layout_offsets[group_idx],
+		                                       sources.value_sizes[group_idx])) {
 			return false;
 		}
 	}
@@ -183,10 +183,10 @@ GroupedAggregateHashTable::GroupedAggregateHashTable(ClientContext &context, All
 }
 
 GroupedAggregateHashTable::AggregateHTAppendState::AggregateHTAppendState(ArenaAllocator &allocator)
-	: hashes(LogicalType::HASH), ht_offsets(LogicalType::UBIGINT), hash_salts(LogicalType::HASH),
-	  new_groups(STANDARD_VECTOR_SIZE), group_compare_vector(STANDARD_VECTOR_SIZE),
-	  no_match_vector(STANDARD_VECTOR_SIZE), existing_groups(STANDARD_VECTOR_SIZE), addresses(LogicalType::POINTER),
-	  row_state(allocator) {
+    : hashes(LogicalType::HASH), ht_offsets(LogicalType::UBIGINT), hash_salts(LogicalType::HASH),
+      new_groups(STANDARD_VECTOR_SIZE), group_compare_vector(STANDARD_VECTOR_SIZE),
+      no_match_vector(STANDARD_VECTOR_SIZE), existing_groups(STANDARD_VECTOR_SIZE), addresses(LogicalType::POINTER),
+      row_state(allocator) {
 }
 
 GroupedAggregateHashTable::GroupedAggregateHashTable(ClientContext &context_p, Allocator &allocator,
@@ -1256,22 +1256,6 @@ idx_t GroupedAggregateHashTable::FindOrCreateGroupAddresses(DataChunk &groups, V
 	return FindOrCreateGroups(groups, state.hashes, addresses_out, state.new_groups, recorder);
 }
 
-bool GroupedAggregateHashTable::TryFindExistingGroupAddresses(DataChunk &groups, Vector &addresses_out,
-                                                              optional_ptr<ExecutionOperatorStageRecorder> recorder) {
-	auto hash_start = AggregateTraceStart(recorder);
-	groups.Hash(state.hashes);
-	RecordAggregateTraceStage(recorder, "find_existing.hash", hash_start);
-
-	auto fast_existing_start = AggregateTraceStart(recorder);
-	if (!TryResolveExistingGroupsFast(groups, state.hashes, addresses_out)) {
-		RecordAggregateTraceStage(recorder, "find_existing.fast_existing_miss", fast_existing_start);
-		return false;
-	}
-	sink_count += groups.size();
-	RecordAggregateTraceStage(recorder, "find_existing.fast_existing", fast_existing_start);
-	return true;
-}
-
 bool GroupedAggregateHashTable::TryFindExistingGroupsSelectedStateUpdateFast(
     DataChunk &groups, ExecutionGroupedAggregateStateSelectedAddressUpdateFunction update_function, void *update_state,
     optional_ptr<ExecutionOperatorStageRecorder> recorder, optional_ptr<Vector> precomputed_hashes) {
@@ -1315,7 +1299,7 @@ bool GroupedAggregateHashTable::TryFindOrCreateGroupsFastInternal(
 		}
 		return true;
 	}
-	if (skip_lookups || enable_hll || !entries || !layout_ptr->CannotHaveNull() || group_count == 0 ||
+	if (skip_lookups || !entries || !layout_ptr->CannotHaveNull() || group_count == 0 ||
 	    group_count > AGGREGATE_MAX_FAST_GROUPS) {
 		return false;
 	}
@@ -1345,6 +1329,11 @@ bool GroupedAggregateHashTable::TryFindOrCreateGroupsFastInternal(
 		groups.Hash(state.hashes);
 		RecordAggregateTraceStage(recorder, "find_or_create_fast.hash", hash_start);
 		group_hashes = &state.hashes;
+	}
+	if (enable_hll) {
+		auto hll_start = AggregateTraceStart(recorder);
+		hll.Update(*group_hashes);
+		RecordAggregateTraceStage(recorder, "find_or_create_fast.hll", hll_start);
 	}
 
 	data_ptr_t *addresses = nullptr;
@@ -1574,8 +1563,8 @@ bool GroupedAggregateHashTable::TryFindOrCreateGroupsFastInternal(
 				selected_existing_addresses[duplicate_idx] =
 				    reinterpret_cast<uintptr_t>(entries[ht_offsets[marked_idx]].GetPointer());
 			}
-			selected_update_function(selected_existing_addresses, nullptr, state.no_match_vector.data(), duplicate_count,
-			                         selected_update_state);
+			selected_update_function(selected_existing_addresses, nullptr, state.no_match_vector.data(),
+			                         duplicate_count, selected_update_state);
 		}
 		RecordAggregateTraceStage(recorder, "find_or_create_fast.selected_state_update", update_start);
 	}
@@ -2065,20 +2054,17 @@ struct AggregateRowPointerDescriptorSourceInfo {
 	std::array<UnifiedVectorFormat, AGGREGATE_MAX_FAST_GROUPS> input_formats;
 };
 
-static bool AggregateRowPointerDescriptorSourcesCanProbeDirect(
-    const vector<ExecutionRowPointerGroupKeySource> &group_sources) {
-	for (auto &source : group_sources) {
-		if (source.cast_kind != ExecutionRowPointerGroupKeyCastKind::NONE) {
-			return false;
-		}
-	}
-	return true;
+static bool
+AggregateRowPointerDescriptorSourcesCanProbeDirect(const vector<ExecutionRowPointerGroupKeySource> &group_sources) {
+	static constexpr idx_t DIRECT_DESCRIPTOR_GROUP_LIMIT = 3;
+	return group_sources.size() <= DIRECT_DESCRIPTOR_GROUP_LIMIT;
 }
 
-static bool AggregatePrepareRowPointerDescriptorSourceInfo(
-    DataChunk &payload_input, Vector &row_pointers, idx_t count,
-    const vector<ExecutionRowPointerGroupKeySource> &group_sources, const vector<LogicalType> &layout_types,
-    AggregateRowPointerDescriptorSourceInfo &info) {
+static bool
+AggregatePrepareRowPointerDescriptorSourceInfo(DataChunk &payload_input, Vector &row_pointers, idx_t count,
+                                               const vector<ExecutionRowPointerGroupKeySource> &group_sources,
+                                               const vector<LogicalType> &layout_types,
+                                               AggregateRowPointerDescriptorSourceInfo &info) {
 	if (!AggregateDescriptorGroupKeySourcesSupported(group_sources, layout_types) ||
 	    !AggregateRowPointerDescriptorSourcesCanProbeDirect(group_sources)) {
 		return false;
@@ -2173,14 +2159,22 @@ static bool AggregateHashDescriptorRows(const AggregateRowPointerDescriptorSourc
 			auto &source = group_sources[group_idx];
 			const_data_ptr_t source_data;
 			idx_t source_idx;
-			AggregateDescriptorValue value;
 			if (!AggregateDescriptorSourceValueData(info, source, group_idx, row_idx, source_data, source_idx)) {
 				return false;
 			}
-			if (!AggregateLoadDescriptorGroupKeyValue(source_data, source_idx, value, source)) {
-				return false;
+			hash_t value_hash;
+			if (source.cast_kind == ExecutionRowPointerGroupKeyCastKind::NONE &&
+			    source.source_physical_type == source.target_physical_type) {
+				const auto value_size = AggregateDescriptorValueSize(source.target_physical_type);
+				value_hash =
+				    AggregateHashDescriptorValue(source_data + source_idx * value_size, 0, source.target_physical_type);
+			} else {
+				AggregateDescriptorValue value;
+				if (!AggregateLoadDescriptorGroupKeyValue(source_data, source_idx, value, source)) {
+					return false;
+				}
+				value_hash = AggregateHashDescriptorValue(value.Ptr(), 0, source.target_physical_type);
 			}
-			const auto value_hash = AggregateHashDescriptorValue(value.Ptr(), 0, source.target_physical_type);
 			result = group_idx == 0 ? value_hash : CombineHashScalar(result, value_hash);
 		}
 		hash_data[row_idx] = result;
@@ -2188,10 +2182,11 @@ static bool AggregateHashDescriptorRows(const AggregateRowPointerDescriptorSourc
 	return true;
 }
 
-static bool AggregateFillDescriptorGroupChunkAndHashes(
-    Allocator &allocator, DataChunk &payload_input, Vector &row_pointers, idx_t count,
-    const vector<ExecutionRowPointerGroupKeySource> &group_sources, const vector<LogicalType> &layout_types,
-    DataChunk &groups, Vector &hashes) {
+static bool AggregateFillDescriptorGroupChunkAndHashes(Allocator &allocator, DataChunk &payload_input,
+                                                       Vector &row_pointers, idx_t count,
+                                                       const vector<ExecutionRowPointerGroupKeySource> &group_sources,
+                                                       const vector<LogicalType> &layout_types, DataChunk &groups,
+                                                       Vector &hashes) {
 	if (!AggregateDescriptorGroupKeySourcesSupported(group_sources, layout_types)) {
 		return false;
 	}
@@ -2222,6 +2217,52 @@ static bool AggregateFillDescriptorGroupChunkAndHashes(
 	}
 	AggregateEnsureDescriptorGroupChunk(allocator, groups, group_types);
 
+	bool row_pointer_no_cast_sources = row_pointers.GetVectorType() == VectorType::FLAT_VECTOR;
+	for (auto &source : group_sources) {
+		if (source.source_kind != ExecutionRowPointerGroupKeySourceKind::ROW_POINTER_FIELD ||
+		    source.cast_kind != ExecutionRowPointerGroupKeyCastKind::NONE ||
+		    source.source_physical_type != source.target_physical_type || !source.all_valid ||
+		    source.row_layout_offset == DConstants::INVALID_INDEX) {
+			row_pointer_no_cast_sources = false;
+			break;
+		}
+	}
+	if (row_pointer_no_cast_sources) {
+		std::array<data_ptr_t, AGGREGATE_MAX_FAST_GROUPS> target_data;
+		std::array<idx_t, AGGREGATE_MAX_FAST_GROUPS> value_sizes;
+		for (idx_t group_idx = 0; group_idx < group_sources.size(); group_idx++) {
+			auto &target = groups.data[group_idx];
+			target.SetVectorType(VectorType::FLAT_VECTOR);
+			FlatVector::ValidityMutable(target).SetAllValid(count);
+			FlatVector::SetSize(target, count_t(count));
+			target_data[group_idx] = FlatVector::GetDataMutable(target);
+			value_sizes[group_idx] = AggregateDescriptorValueSize(group_sources[group_idx].target_physical_type);
+		}
+
+		hashes.SetVectorType(VectorType::FLAT_VECTOR);
+		FlatVector::SetSize(hashes, count_t(count));
+		auto hash_data = FlatVector::GetDataMutable<hash_t>(hashes);
+		const auto row_pointer_data = FlatVector::GetData<data_ptr_t>(row_pointers);
+		for (idx_t row_idx = 0; row_idx < count; row_idx++) {
+			const auto row_pointer = row_pointer_data[row_idx];
+			if (!row_pointer) {
+				return false;
+			}
+			hash_t result = 0;
+			for (idx_t group_idx = 0; group_idx < group_sources.size(); group_idx++) {
+				auto &source = group_sources[group_idx];
+				const auto value_size = value_sizes[group_idx];
+				auto source_value = row_pointer + source.row_layout_offset;
+				std::memcpy(target_data[group_idx] + row_idx * value_size, source_value, value_size);
+				const auto value_hash = AggregateHashDescriptorValue(source_value, 0, source.target_physical_type);
+				result = group_idx == 0 ? value_hash : CombineHashScalar(result, value_hash);
+			}
+			hash_data[row_idx] = result;
+		}
+		groups.SetChildCardinality(count);
+		return true;
+	}
+
 	hashes.SetVectorType(VectorType::FLAT_VECTOR);
 	FlatVector::SetSize(hashes, count_t(count));
 	auto hash_data = FlatVector::GetDataMutable<hash_t>(hashes);
@@ -2236,13 +2277,23 @@ static bool AggregateFillDescriptorGroupChunkAndHashes(
 		for (idx_t row_idx = 0; row_idx < count; row_idx++) {
 			const_data_ptr_t source_data;
 			idx_t source_idx;
-			AggregateDescriptorValue value;
-			if (!AggregateDescriptorSourceValueData(info, source, group_idx, row_idx, source_data, source_idx) ||
-			    !AggregateLoadDescriptorGroupKeyValue(source_data, source_idx, value, source)) {
+			if (!AggregateDescriptorSourceValueData(info, source, group_idx, row_idx, source_data, source_idx)) {
 				return false;
 			}
-			std::memcpy(target_data + row_idx * value_size, value.Ptr(), value_size);
-			const auto value_hash = AggregateHashDescriptorValue(value.Ptr(), 0, source.target_physical_type);
+			hash_t value_hash;
+			if (source.cast_kind == ExecutionRowPointerGroupKeyCastKind::NONE &&
+			    source.source_physical_type == source.target_physical_type) {
+				auto source_value = source_data + source_idx * value_size;
+				std::memcpy(target_data + row_idx * value_size, source_value, value_size);
+				value_hash = AggregateHashDescriptorValue(source_value, 0, source.target_physical_type);
+			} else {
+				AggregateDescriptorValue value;
+				if (!AggregateLoadDescriptorGroupKeyValue(source_data, source_idx, value, source)) {
+					return false;
+				}
+				std::memcpy(target_data + row_idx * value_size, value.Ptr(), value_size);
+				value_hash = AggregateHashDescriptorValue(value.Ptr(), 0, source.target_physical_type);
+			}
 			hash_data[row_idx] = group_idx == 0 ? value_hash : CombineHashScalar(hash_data[row_idx], value_hash);
 		}
 	}
@@ -2282,10 +2333,10 @@ static bool AggregateDescriptorSourceValuesMatch(const AggregateRowPointerDescri
 	return true;
 }
 
-static bool AggregateDescriptorSourceRowMatchesStored(
-    const AggregateRowPointerDescriptorSourceInfo &info,
-    const vector<ExecutionRowPointerGroupKeySource> &group_sources, const vector<idx_t> &layout_offsets,
-    data_ptr_t row_location, idx_t row_idx) {
+static bool AggregateDescriptorSourceRowMatchesStored(const AggregateRowPointerDescriptorSourceInfo &info,
+                                                      const vector<ExecutionRowPointerGroupKeySource> &group_sources,
+                                                      const vector<idx_t> &layout_offsets, data_ptr_t row_location,
+                                                      idx_t row_idx) {
 	for (idx_t group_idx = 0; group_idx < group_sources.size(); group_idx++) {
 		auto &source = group_sources[group_idx];
 		const_data_ptr_t source_data;
@@ -2306,10 +2357,12 @@ static bool AggregateDescriptorSourceRowMatchesStored(
 	return true;
 }
 
-static bool AggregateFillSelectedDescriptorGroupChunk(
-    Allocator &allocator, const AggregateRowPointerDescriptorSourceInfo &info,
-    const vector<ExecutionRowPointerGroupKeySource> &group_sources, const SelectionVector &selected_rows,
-    idx_t selected_count, idx_t count, const vector<LogicalType> &layout_types, DataChunk &groups) {
+static bool AggregateFillSelectedDescriptorGroupChunk(Allocator &allocator,
+                                                      const AggregateRowPointerDescriptorSourceInfo &info,
+                                                      const vector<ExecutionRowPointerGroupKeySource> &group_sources,
+                                                      const SelectionVector &selected_rows, idx_t selected_count,
+                                                      idx_t count, const vector<LogicalType> &layout_types,
+                                                      DataChunk &groups) {
 	vector<LogicalType> group_types;
 	group_types.reserve(group_sources.size());
 	for (idx_t group_idx = 0; group_idx < group_sources.size(); group_idx++) {
@@ -2347,7 +2400,7 @@ bool GroupedAggregateHashTable::TryFindOrCreateGroupsRowPointerSelectedStateUpda
 	if (count == 0) {
 		return true;
 	}
-	if (payload_input.size() != count || skip_lookups || enable_hll || !entries || !layout_ptr->CannotHaveNull()) {
+	if (payload_input.size() != count || skip_lookups || !entries || !layout_ptr->CannotHaveNull()) {
 		return false;
 	}
 
@@ -2363,6 +2416,11 @@ bool GroupedAggregateHashTable::TryFindOrCreateGroupsRowPointerSelectedStateUpda
 		return false;
 	}
 	RecordAggregateTraceStage(recorder, "find_or_create_row_pointer_descriptor.hash", hash_start);
+	if (enable_hll) {
+		auto hll_start = AggregateTraceStart(recorder);
+		hll.Update(state.hashes);
+		RecordAggregateTraceStage(recorder, "find_or_create_row_pointer_descriptor.hll", hll_start);
+	}
 
 	if (Count() + count > capacity || Count() + count > ResizeThreshold()) {
 		auto resize_start = AggregateTraceStart(recorder);
@@ -2577,14 +2635,14 @@ bool GroupedAggregateHashTable::TryFindOrCreateGroupsRowPointerSelectedStateUpda
 		}
 		selected_update_function(selected_addresses, nullptr, state.new_groups.data(), new_group_count,
 		                         selected_update_state);
-		RecordAggregateTraceStage(recorder, "find_or_create_row_pointer_descriptor.selected_new_update",
-		                          update_start);
+		RecordAggregateTraceStage(recorder, "find_or_create_row_pointer_descriptor.selected_new_update", update_start);
 	}
 	if (duplicate_count > 0) {
 		auto update_start = AggregateTraceStart(recorder);
 		for (idx_t duplicate_idx = 0; duplicate_idx < duplicate_count; duplicate_idx++) {
 			const auto marked_idx = UnsafeNumericCast<idx_t>(duplicate_targets[duplicate_idx]);
-			selected_addresses[duplicate_idx] = reinterpret_cast<uintptr_t>(entries[ht_offsets[marked_idx]].GetPointer());
+			selected_addresses[duplicate_idx] =
+			    reinterpret_cast<uintptr_t>(entries[ht_offsets[marked_idx]].GetPointer());
 		}
 		selected_update_function(selected_addresses, nullptr, state.no_match_vector.data(), duplicate_count,
 		                         selected_update_state);
@@ -2608,7 +2666,7 @@ bool GroupedAggregateHashTable::TryFindOrCreateGroupsRowPointerSelectedStateUpda
 	if (count == 0) {
 		return true;
 	}
-	if (payload_input.size() != count || skip_lookups || enable_hll || !entries || !layout_ptr->CannotHaveNull() ||
+	if (payload_input.size() != count || skip_lookups || !entries || !layout_ptr->CannotHaveNull() ||
 	    !AggregateDescriptorGroupKeySourcesSupported(group_sources, layout_ptr->GetTypes())) {
 		return false;
 	}

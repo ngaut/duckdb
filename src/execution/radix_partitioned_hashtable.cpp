@@ -202,7 +202,7 @@ static bool RadixValidatePrimitiveAggregateUpdateWithPayloadInput(
 		if (aggregate.child_count != 1 || !aggregate.primitive_update_ready ||
 		    !AggregatePrimitiveUpdateRequiresPayload(lane->kind) ||
 		    !RadixPrimitiveAggregatePayloadSourceIsFlatAllValid(payload_input, payload_source_indices[aggregate_idx],
-		                                                       *lane, payloads[aggregate_idx])) {
+		                                                        *lane, payloads[aggregate_idx])) {
 			return false;
 		}
 		if (payload_input.size() == 0) {
@@ -233,9 +233,9 @@ RadixValidateStateAddressCallbackUpdate(const ExecutionRegionSinkInfo &sink_info
 	       sink_info.aggregate_contract.grouped_state_layout_ready;
 }
 
-static bool RadixValidateStateAddressCallbackUpdate(
-    const ExecutionRegionSinkInfo &sink_info,
-    ExecutionGroupedAggregateStateSelectedAddressUpdateFunction update_function) {
+static bool
+RadixValidateStateAddressCallbackUpdate(const ExecutionRegionSinkInfo &sink_info,
+                                        ExecutionGroupedAggregateStateSelectedAddressUpdateFunction update_function) {
 	return update_function && sink_info.kind == ExecutionRegionSinkKind::HASH_AGGREGATE_UPDATE &&
 	       sink_info.aggregate_contract.grouped_state_layout_ready;
 }
@@ -966,7 +966,6 @@ static void FinishRadixHTSinkState(ClientContext &context, RadixHTGlobalSinkStat
 			ht.Resize(lstate.local_sink_capacity);
 		}
 	}
-
 }
 
 void RadixPartitionedHashTable::Sink(ExecutionContext &context, DataChunk &chunk, OperatorSinkInput &input,
@@ -1040,8 +1039,8 @@ bool RadixPartitionedHashTable::TryUpdateNewPrimitiveGroups(
 }
 
 bool RadixPartitionedHashTable::TryUpdateNewPrimitiveGroupsWithPayloadInput(
-    ExecutionContext &context, DataChunk &groups, DataChunk &payload_input,
-    const vector<idx_t> &payload_source_indices, OperatorSinkInput &input, const ExecutionRegionSinkInfo &sink_info,
+    ExecutionContext &context, DataChunk &groups, DataChunk &payload_input, const vector<idx_t> &payload_source_indices,
+    OperatorSinkInput &input, const ExecutionRegionSinkInfo &sink_info,
     const vector<const ExecutionPrimitiveAggregateUpdateLane *> &lanes,
     optional_ptr<ExecutionOperatorStageRecorder> recorder, bool finish, optional_ptr<Vector> precomputed_hashes) const {
 	if (groups.size() != payload_input.size()) {
@@ -1049,8 +1048,8 @@ bool RadixPartitionedHashTable::TryUpdateNewPrimitiveGroupsWithPayloadInput(
 	}
 	auto &lstate = input.local_state.Cast<RadixHTLocalSinkState>();
 	auto &payloads = lstate.primitive_payloads;
-	if (!RadixValidatePrimitiveAggregateUpdateWithPayloadInput(sink_info, lanes, payload_input,
-	                                                           payload_source_indices, payloads)) {
+	if (!RadixValidatePrimitiveAggregateUpdateWithPayloadInput(sink_info, lanes, payload_input, payload_source_indices,
+	                                                           payloads)) {
 		return false;
 	}
 
@@ -1133,78 +1132,6 @@ bool RadixPartitionedHashTable::TryAppendNewPrimitiveGroups(
 		auto finish_start = RadixTraceStart(recorder);
 		FinishRadixHTSinkState(context.client, gstate, lstate);
 		RecordRadixTraceStage(recorder, "direct_append_new.finish_sink_state", finish_start);
-	}
-	return true;
-}
-
-bool RadixPartitionedHashTable::TryUpdateExistingGroupsWithStateAddresses(
-    ExecutionContext &context, DataChunk &chunk, OperatorSinkInput &input, const ExecutionRegionSinkInfo &sink_info,
-    ExecutionGroupedAggregateStateAddressUpdateFunction update_function, void *update_state,
-    optional_ptr<ExecutionOperatorStageRecorder> recorder, bool finish) const {
-	if (!RadixValidateStateAddressCallbackUpdate(sink_info, update_function)) {
-		return false;
-	}
-
-	auto &gstate = input.global_state.Cast<RadixHTGlobalSinkState>();
-	auto &lstate = input.local_state.Cast<RadixHTLocalSinkState>();
-	auto prepare_start = RadixTraceStart(recorder);
-	auto &ht = PrepareRadixHTSinkState(context, *this, input);
-	RecordRadixTraceStage(recorder, "direct_existing_state_address.prepare_sink_state", prepare_start);
-
-	auto &group_chunk = lstate.group_chunk;
-	auto populate_start = RadixTraceStart(recorder);
-	PopulateGroupChunk(group_chunk, chunk);
-	RecordRadixTraceStage(recorder, "direct_existing_state_address.populate_group_chunk", populate_start);
-
-	auto lookup_start = RadixTraceStart(recorder);
-	if (!ht.TryFindExistingGroupAddresses(group_chunk, lstate.existing_group_addresses, recorder)) {
-		RecordRadixTraceStage(recorder, "direct_existing_state_address.lookup_miss", lookup_start);
-		return false;
-	}
-	RecordRadixTraceStage(recorder, "direct_existing_state_address.lookup", lookup_start);
-
-	auto update_start = RadixTraceStart(recorder);
-	update_function(RadixStateAddressSpan(lstate.existing_group_addresses), nullptr, chunk.size(), update_state);
-	RecordRadixTraceStage(recorder, "direct_existing_state_address.update", update_start);
-
-	if (finish) {
-		auto finish_start = RadixTraceStart(recorder);
-		FinishRadixHTSinkState(context.client, gstate, lstate);
-		RecordRadixTraceStage(recorder, "direct_existing_state_address.finish_sink_state", finish_start);
-	}
-	return true;
-}
-
-bool RadixPartitionedHashTable::TryUpdateExistingGroupsWithSelectedStateAddresses(
-    ExecutionContext &context, DataChunk &chunk, OperatorSinkInput &input, const ExecutionRegionSinkInfo &sink_info,
-    ExecutionGroupedAggregateStateSelectedAddressUpdateFunction update_function, void *update_state,
-    optional_ptr<ExecutionOperatorStageRecorder> recorder, bool finish) const {
-	if (!RadixValidateStateAddressCallbackUpdate(sink_info, update_function)) {
-		return false;
-	}
-
-	auto &gstate = input.global_state.Cast<RadixHTGlobalSinkState>();
-	auto &lstate = input.local_state.Cast<RadixHTLocalSinkState>();
-	auto prepare_start = RadixTraceStart(recorder);
-	auto &ht = PrepareRadixHTSinkState(context, *this, input);
-	RecordRadixTraceStage(recorder, "direct_existing_selected_state.prepare_sink_state", prepare_start);
-
-	auto &group_chunk = lstate.group_chunk;
-	auto populate_start = RadixTraceStart(recorder);
-	PopulateGroupChunk(group_chunk, chunk);
-	RecordRadixTraceStage(recorder, "direct_existing_selected_state.populate_group_chunk", populate_start);
-
-	auto lookup_start = RadixTraceStart(recorder);
-	if (!ht.TryFindExistingGroupsSelectedStateUpdateFast(group_chunk, update_function, update_state, recorder)) {
-		RecordRadixTraceStage(recorder, "direct_existing_selected_state.lookup_miss", lookup_start);
-		return false;
-	}
-	RecordRadixTraceStage(recorder, "direct_existing_selected_state.lookup_update", lookup_start);
-
-	if (finish) {
-		auto finish_start = RadixTraceStart(recorder);
-		FinishRadixHTSinkState(context.client, gstate, lstate);
-		RecordRadixTraceStage(recorder, "direct_existing_selected_state.finish_sink_state", finish_start);
 	}
 	return true;
 }

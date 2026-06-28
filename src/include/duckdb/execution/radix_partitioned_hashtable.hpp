@@ -58,27 +58,19 @@ public:
 	                                 const vector<const ExecutionPrimitiveAggregateUpdateLane *> &lanes,
 	                                 optional_ptr<ExecutionOperatorStageRecorder> recorder = nullptr,
 	                                 bool finish = true) const;
-	bool TryUpdateNewPrimitiveGroupsWithPayloadInput(
-	    ExecutionContext &context, DataChunk &groups, DataChunk &payload_input,
-	    const vector<idx_t> &payload_source_indices, OperatorSinkInput &input,
-	    const ExecutionRegionSinkInfo &sink_info, const vector<const ExecutionPrimitiveAggregateUpdateLane *> &lanes,
-	    optional_ptr<ExecutionOperatorStageRecorder> recorder = nullptr, bool finish = true,
-	    optional_ptr<Vector> precomputed_hashes = nullptr) const;
+	bool TryUpdateNewPrimitiveGroupsWithPayloadInput(ExecutionContext &context, DataChunk &groups,
+	                                                 DataChunk &payload_input,
+	                                                 const vector<idx_t> &payload_source_indices,
+	                                                 OperatorSinkInput &input, const ExecutionRegionSinkInfo &sink_info,
+	                                                 const vector<const ExecutionPrimitiveAggregateUpdateLane *> &lanes,
+	                                                 optional_ptr<ExecutionOperatorStageRecorder> recorder = nullptr,
+	                                                 bool finish = true,
+	                                                 optional_ptr<Vector> precomputed_hashes = nullptr) const;
 	bool TryAppendNewPrimitiveGroups(ExecutionContext &context, DataChunk &chunk, OperatorSinkInput &input,
 	                                 const ExecutionRegionSinkInfo &sink_info,
 	                                 const vector<const ExecutionPrimitiveAggregateUpdateLane *> &lanes,
 	                                 optional_ptr<ExecutionOperatorStageRecorder> recorder = nullptr,
 	                                 bool finish = true) const;
-	bool TryUpdateExistingGroupsWithStateAddresses(ExecutionContext &context, DataChunk &chunk,
-	                                               OperatorSinkInput &input, const ExecutionRegionSinkInfo &sink_info,
-	                                               ExecutionGroupedAggregateStateAddressUpdateFunction update_function,
-	                                               void *update_state,
-	                                               optional_ptr<ExecutionOperatorStageRecorder> recorder = nullptr,
-	                                               bool finish = true) const;
-	bool TryUpdateExistingGroupsWithSelectedStateAddresses(
-	    ExecutionContext &context, DataChunk &chunk, OperatorSinkInput &input, const ExecutionRegionSinkInfo &sink_info,
-	    ExecutionGroupedAggregateStateSelectedAddressUpdateFunction update_function, void *update_state,
-	    optional_ptr<ExecutionOperatorStageRecorder> recorder = nullptr, bool finish = true) const;
 	bool TryUpdateNewGroupsWithStateAddresses(ExecutionContext &context, DataChunk &chunk, OperatorSinkInput &input,
 	                                          const ExecutionRegionSinkInfo &sink_info,
 	                                          ExecutionGroupedAggregateStateAddressUpdateFunction update_function,
