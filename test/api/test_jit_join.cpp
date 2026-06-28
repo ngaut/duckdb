@@ -41,7 +41,7 @@ TEST_CASE("JIT hash join build protocol compiles only inside generated fused reg
 				REQUIRE(ExecutionRegionEventProfileCodeSize(event) > 0);
 				REQUIRE(event.runner_cost.present);
 				REQUIRE(event.runner_cost.generated_stage_count > 0);
-				REQUIRE(event.runner_cost.native_join_stage_count > 0);
+				REQUIRE(event.runner_cost.native_join_stage_count == 0);
 				REQUIRE(event.code_size > 0);
 				REQUIRE(StringUtil::Contains(event.reason, JIT_HASH_JOIN_BUILD_READY_CONTRACT));
 				REQUIRE(StringUtil::Contains(event.reason, "requires=hash_join_build_prepare"));
@@ -69,7 +69,7 @@ TEST_CASE("JIT hash join build protocol compiles only inside generated fused reg
 	REQUIRE(found_build_runtime);
 }
 
-TEST_CASE("JIT CBO admits generated hash-build regions after generated work pays native join protocol", "[api][jit]") {
+TEST_CASE("JIT CBO admits generated hash-build regions through generated work", "[api][jit]") {
 	DuckDB db;
 	Connection con(db);
 	auto &manager = ExecutionRegionManager::Get(*con.context);
@@ -100,7 +100,7 @@ TEST_CASE("JIT CBO admits generated hash-build regions after generated work pays
 	    [](const ExecutionRegionEvent &event) {
 		    REQUIRE(event.runner_cost.present);
 		    REQUIRE(event.runner_cost.generated_stage_count > 0);
-		    REQUIRE(event.runner_cost.native_join_stage_count > 0);
+		    REQUIRE(event.runner_cost.native_join_stage_count == 0);
 		    REQUIRE(event.runner_cost.saved_work_per_batch > 0);
 		    REQUIRE(event.runner_cost.selected_accelerated_runner);
 	    });
@@ -135,7 +135,7 @@ TEST_CASE("JIT CBO skips bodyless native hash-build candidates before backend an
 		    RequireVectorizedCboSkip(event);
 		    REQUIRE(event.has_candidate);
 		    REQUIRE(event.stage_timings.backend_analysis_time_us == 0);
-		    REQUIRE(event.runner_cost.native_join_stage_count > 0);
+		    REQUIRE(event.runner_cost.native_join_stage_count == 0);
 		    REQUIRE_FALSE(event.runner_cost.full_pipeline);
 		    REQUIRE(StringUtil::Contains(event.reason, "backend_analysis=skipped"));
 	    });

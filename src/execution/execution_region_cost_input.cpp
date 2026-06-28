@@ -220,7 +220,6 @@ static ExecutionRegionStageCostFact GetExecutionRegionStageCostFact(const Execut
 	}
 	switch (stage.kind) {
 	case ExecutionRegionStageKind::HASH_JOIN_BUILD:
-		result.work_kind = ExecutionRegionStageCostWorkKind::NATIVE_JOIN;
 		break;
 	case ExecutionRegionStageKind::HASH_JOIN_PROBE:
 	case ExecutionRegionStageKind::NESTED_LOOP_JOIN_PROBE:
@@ -766,10 +765,17 @@ static bool TryAccumulateExecutionRegionPhysicalOperatorCost(const PhysicalOpera
 		if (slot == ExecutionRegionPhysicalPipelineSlot::OPERATOR) {
 			traits.operator_count++;
 			traits.hash_join_operator_count++;
+			builder.AddNativeJoinStage();
 		}
-		builder.AddNativeJoinStage();
 		return true;
 	case PhysicalOperatorType::NESTED_LOOP_JOIN:
+		if (slot == ExecutionRegionPhysicalPipelineSlot::OPERATOR) {
+			traits.operator_count++;
+			builder.AddNativeJoinStage();
+		} else if (slot == ExecutionRegionPhysicalPipelineSlot::SINK) {
+			builder.AddNativeJoinStage();
+		}
+		return true;
 	case PhysicalOperatorType::LEFT_DELIM_JOIN:
 	case PhysicalOperatorType::RIGHT_DELIM_JOIN:
 	case PhysicalOperatorType::BLOCKWISE_NL_JOIN:
@@ -778,10 +784,6 @@ static bool TryAccumulateExecutionRegionPhysicalOperatorCost(const PhysicalOpera
 	case PhysicalOperatorType::ASOF_JOIN:
 	case PhysicalOperatorType::CROSS_PRODUCT:
 	case PhysicalOperatorType::POSITIONAL_JOIN:
-		if (slot == ExecutionRegionPhysicalPipelineSlot::OPERATOR) {
-			traits.operator_count++;
-		}
-		builder.AddNativeJoinStage();
 		return true;
 	case PhysicalOperatorType::ORDER_BY:
 	case PhysicalOperatorType::TOP_N:

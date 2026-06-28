@@ -1091,13 +1091,14 @@ FROM duckdb_jit_events(), jit_auto_filter_projection_baseline
 WHERE event_id > base_event_id
   AND backend_name='sljit'
   AND status='skipped'
-  AND candidate_id IS NOT NULL
-  AND candidate_sink_kind='ungrouped-aggregate-update'
+  AND candidate_id IS NULL
   AND selected_runner='vectorized'
   AND runner_cost_profile
+  AND runner_cost_input_scope='physical_pipeline'
   AND runner_cost_accelerated_runner_benefit <= runner_cost_required_benefit
   AND NOT runner_cost_selected_accelerated_runner
   AND blocker='duckdb_selected_vectorized'
+  AND reason LIKE '%region_graph=skipped%'
 ----
 1
 
@@ -1771,9 +1772,9 @@ SELECT sum(f.i + d.payload) AS total
 FROM jit_perfect_join_fact f
 JOIN jit_perfect_join_dim d ON f.k = d.k
 
-# Coverage-mode CBO economics for exercising perfect-hash join lazy codegen; reset below.
+# Coverage-mode CBO economics for exercising perfect-hash join lazy codegen through real probe work.
 statement ok
-SET jit_cbo_native_operator_stage_benefit=1
+SET jit_cbo_native_operator_stage_benefit=4096
 
 statement ok
 SET jit_cbo_full_pipeline_benefit=0
