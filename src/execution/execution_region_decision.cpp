@@ -131,7 +131,7 @@ bool ExecutionRegionPlanningNeedsBackendDiagnostics(ClientContext &context) {
 }
 
 bool ExecutionRegionPlanningNeedsCandidateDiagnostics(ClientContext &context) {
-	return ExecutionRegionSettings::TraceDecisions(context) || ExecutionRegionSettings::DumpIR(context);
+	return ExecutionRegionSettings::DumpIR(context);
 }
 
 bool ExecutionRegionGraphMayHaveCostedAcceleration(const ExecutionRegionGraph &graph,

@@ -561,7 +561,7 @@ TEST_CASE("JIT generic grouped primitive aggregate payload lanes use native stat
 	REQUIRE(found_fused_runtime);
 }
 
-TEST_CASE("JIT regular hash aggregate updates existing groups through find-or-create", "[api][jit]") {
+TEST_CASE("JIT regular hash aggregate updates existing preaggregated groups through split prefix", "[api][jit]") {
 	DuckDB db;
 	Connection con(db);
 	auto &manager = ExecutionRegionManager::Get(*con.context);
@@ -608,13 +608,19 @@ TEST_CASE("JIT regular hash aggregate updates existing groups through find-or-cr
 			    return false;
 		    }
 		    auto stage_counts = EventGeneratedStageCountBreakdown(event);
-		    return StringUtil::Contains(stage_counts, "direct_new_grouped_primitive_update=") &&
-		           StringUtil::Contains(stage_counts, "find_or_create_fast.probe=");
+		    return StringUtil::Contains(stage_counts, "aggregate_update.local_preaggregate_primitive_groups=") &&
+		           StringUtil::Contains(stage_counts,
+		                                "aggregate_update.direct_split_preaggregated_grouped_primitive_update=") &&
+		           StringUtil::Contains(stage_counts,
+		                                "split_preaggregated_update_existing_prefix.find_existing.fast_existing=");
 	    },
 	    [](const ExecutionRegionEvent &event) {
-		    REQUIRE(StringUtil::Contains(EventGeneratedStageCountBreakdown(event), "direct_new.primitive_update="));
+		    REQUIRE(StringUtil::Contains(EventGeneratedStageCountBreakdown(event),
+		                                 "split_preaggregated_update_existing_prefix="));
 		    REQUIRE(StringUtil::Contains(EventJitRuntimePathCounts(event),
-		                                 "aggregate_update.direct_new_grouped_primitive_update="));
+		                                 "aggregate_update.direct_split_preaggregated_grouped_primitive_update="));
+		    REQUIRE(StringUtil::Contains(EventJitMaterializationBoundaryCounts(event),
+		                                 "aggregate_update.preaggregated_primitive_groups="));
 		    REQUIRE(StringUtil::Contains(EventJitMaterializationBoundaryCounts(event),
 		                                 "aggregate_update.direct_state_update="));
 	    });
@@ -663,13 +669,15 @@ TEST_CASE("JIT preaggregated grouped primitive updates existing compact groups",
 		    auto stage_counts = EventGeneratedStageCountBreakdown(event);
 		    return StringUtil::Contains(stage_counts, "aggregate_update.local_preaggregate_primitive_groups=") &&
 		           StringUtil::Contains(stage_counts,
-		                                "aggregate_update.direct_preaggregated_grouped_primitive_update=") &&
-		           StringUtil::Contains(stage_counts, "find_or_create_fast.selected_state_update=");
+		                                "aggregate_update.direct_split_preaggregated_grouped_primitive_update=") &&
+		           StringUtil::Contains(stage_counts,
+		                                "split_preaggregated_update_existing_prefix.find_existing.fast_existing=");
 	    },
 	    [](const ExecutionRegionEvent &event) {
-		    REQUIRE(StringUtil::Contains(EventGeneratedStageCountBreakdown(event), "find_or_create_fast.probe="));
+		    REQUIRE(StringUtil::Contains(EventGeneratedStageCountBreakdown(event),
+		                                 "split_preaggregated_update_existing_prefix="));
 		    REQUIRE(StringUtil::Contains(EventJitRuntimePathCounts(event),
-		                                 "aggregate_update.direct_preaggregated_grouped_primitive_update="));
+		                                 "aggregate_update.direct_split_preaggregated_grouped_primitive_update="));
 		    REQUIRE(StringUtil::Contains(EventJitMaterializationBoundaryCounts(event),
 		                                 "aggregate_update.preaggregated_primitive_groups="));
 	    });

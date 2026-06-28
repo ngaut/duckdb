@@ -2070,6 +2070,47 @@ private:
 		}
 	};
 
+	static bool SlicePreaggregatedPrimitiveScratch(const SljitPreaggregatedPrimitiveAggregateScratch &source,
+	                                               const vector<const ExecutionPrimitiveAggregateUpdateLane *> &lanes,
+	                                               idx_t offset, idx_t count,
+	                                               SljitPreaggregatedPrimitiveAggregateScratch &target) {
+		if (source.payloads.size() != lanes.size()) {
+			return false;
+		}
+		target.Prepare(lanes, count);
+		for (idx_t payload_idx = 0; payload_idx < source.payloads.size(); payload_idx++) {
+			auto &source_payload = source.payloads[payload_idx];
+			auto &target_payload = target.payloads[payload_idx];
+			if (source_payload.kind != target_payload.kind) {
+				return false;
+			}
+			switch (source_payload.kind) {
+			case AggregatePrimitiveUpdateKind::COUNT_STAR:
+			case AggregatePrimitiveUpdateKind::SUM_INT64:
+				if (source_payload.int64_values.size() < offset + count) {
+					return false;
+				}
+				target_payload.int64_values.insert(
+				    target_payload.int64_values.end(),
+				    source_payload.int64_values.begin() + UnsafeNumericCast<int64_t>(offset),
+				    source_payload.int64_values.begin() + UnsafeNumericCast<int64_t>(offset + count));
+				break;
+			case AggregatePrimitiveUpdateKind::SUM_HUGEINT:
+				if (source_payload.hugeint_values.size() < offset + count) {
+					return false;
+				}
+				target_payload.hugeint_values.insert(
+				    target_payload.hugeint_values.end(),
+				    source_payload.hugeint_values.begin() + UnsafeNumericCast<int64_t>(offset),
+				    source_payload.hugeint_values.begin() + UnsafeNumericCast<int64_t>(offset + count));
+				break;
+			default:
+				return false;
+			}
+		}
+		return true;
+	}
+
 	struct SljitRegionExecutionScratch {
 		SljitRegionExecutionScratch(Allocator &allocator, const vector<SljitExecutableRegionOp> &ops) {
 			temporary_chunks.resize(ops.size());
@@ -2756,6 +2797,26 @@ public:
 		       ops[3].aggregate_update.plan.sink_info.kind == ExecutionRegionSinkKind::UNGROUPED_AGGREGATE_UPDATE;
 	}
 
+	bool CanBatchProjectionCountStarGroupedAggregateFullPipeline() const {
+		if (ops.size() != 2 || ops[0].kind != SljitNativeRegionOpKind::PROJECTION ||
+		    ops[1].kind != SljitNativeRegionOpKind::AGGREGATE_UPDATE || ops[0].output_types.size() != 1 ||
+		    !ProjectionOutputsAreFixedWidth(ops[0])) {
+			return false;
+		}
+		auto &aggregate_update = ops[1].aggregate_update.plan;
+		auto &sink_info = aggregate_update.sink_info;
+		if (sink_info.kind != ExecutionRegionSinkKind::HASH_AGGREGATE_UPDATE ||
+		    !aggregate_update.use_primitive_payloads || !aggregate_update.use_grouped_state_addresses ||
+		    aggregate_update.use_perfect_hash_group_lookup || sink_info.groups.size() != 1 ||
+		    sink_info.groups[0].input_index != 0 || sink_info.groups[0].type != ops[0].output_types[0] ||
+		    sink_info.aggregates.size() != 1 || ops[1].aggregate_update.payloads.size() != 1) {
+			return false;
+		}
+		auto &aggregate = sink_info.aggregates[0];
+		return aggregate.child_count == 0 &&
+		       aggregate.primitive_update_kind == AggregatePrimitiveUpdateKind::COUNT_STAR;
+	}
+
 	bool CanBatchHashJoinProjectionGroupedAggregateFullPipeline() const {
 		return ops.size() == 3 && ops[0].kind == SljitNativeRegionOpKind::HASH_JOIN_PROBE &&
 		       ops[1].kind == SljitNativeRegionOpKind::PROJECTION &&
@@ -3334,10 +3395,9 @@ public:
 	static constexpr idx_t SLJIT_LOCAL_PREAGGREGATED_GROUP_LIMIT = 64;
 
 	template <class T>
-	static bool AccumulatePreaggregatedCountStarKey(const T &key,
-	                                                std::array<T, SLJIT_LOCAL_PREAGGREGATED_GROUP_LIMIT> &keys,
-	                                                std::array<int64_t, SLJIT_LOCAL_PREAGGREGATED_GROUP_LIMIT> &counts,
-	                                                idx_t &group_count) {
+	static bool AccumulatePreaggregatedCountStarDeltaKey(
+	    const T &key, int64_t delta, std::array<T, SLJIT_LOCAL_PREAGGREGATED_GROUP_LIMIT> &keys,
+	    std::array<int64_t, SLJIT_LOCAL_PREAGGREGATED_GROUP_LIMIT> &counts, idx_t &group_count) {
 		idx_t group_idx = 0;
 		for (; group_idx < group_count; group_idx++) {
 			if (keys[group_idx] == key) {
@@ -3352,8 +3412,16 @@ public:
 			counts[group_count] = 0;
 			group_count++;
 		}
-		counts[group_idx]++;
+		counts[group_idx] += delta;
 		return true;
+	}
+
+	template <class T>
+	static bool AccumulatePreaggregatedCountStarKey(const T &key,
+	                                                std::array<T, SLJIT_LOCAL_PREAGGREGATED_GROUP_LIMIT> &keys,
+	                                                std::array<int64_t, SLJIT_LOCAL_PREAGGREGATED_GROUP_LIMIT> &counts,
+	                                                idx_t &group_count) {
+		return AccumulatePreaggregatedCountStarDeltaKey(key, 1, keys, counts, group_count);
 	}
 
 	template <class T>
@@ -3450,6 +3518,33 @@ public:
 		default:
 			return false;
 		}
+	}
+
+	template <class T>
+	static bool MergePreaggregatedFixedWidthCountStarGroupsTemplated(
+	    DataChunk &compact_groups, const vector<int64_t> &count_deltas,
+	    std::array<T, SLJIT_LOCAL_PREAGGREGATED_GROUP_LIMIT> &keys,
+	    std::array<int64_t, SLJIT_LOCAL_PREAGGREGATED_GROUP_LIMIT> &counts, idx_t &group_count) {
+		if (compact_groups.ColumnCount() != 1 || count_deltas.size() < compact_groups.size()) {
+			return false;
+		}
+		UnifiedVectorFormat format;
+		compact_groups.data[0].ToUnifiedFormat(format);
+		auto source_data = UnifiedVectorFormat::GetData<T>(format);
+		auto source_sel = format.sel;
+		auto &source_validity = format.validity;
+		const bool can_have_null = source_validity.CanHaveNull();
+		for (idx_t row_idx = 0; row_idx < compact_groups.size(); row_idx++) {
+			const auto source_idx = source_sel->get_index(row_idx);
+			if (can_have_null && !source_validity.RowIsValid(source_idx)) {
+				return false;
+			}
+			if (!AccumulatePreaggregatedCountStarDeltaKey(source_data[source_idx], count_deltas[row_idx], keys, counts,
+			                                              group_count)) {
+				return false;
+			}
+		}
+		return true;
 	}
 
 	static void SljitReverseMemCpy(data_ptr_t dest, const_data_ptr_t src, idx_t length) {
@@ -4270,6 +4365,122 @@ public:
 		return false;
 	}
 
+	template <class GROUP_TYPE>
+	static bool TryPreaggregateBoundedPrimitiveGroupsTemplated(
+	    SljitExecutableRegionOp &op, DataChunk &input,
+	    const vector<const ExecutionPrimitiveAggregateUpdateLane *> &payload_lanes, DataChunk &compact_groups,
+	    SljitPreaggregatedPrimitiveAggregateScratch &scratch) {
+		const auto count = input.size();
+		auto &sink_info = op.aggregate_update.plan.sink_info;
+		if (count < 2 || sink_info.groups.size() != 1 || compact_groups.ColumnCount() != 1) {
+			return false;
+		}
+		const auto group_source_index = sink_info.groups[0].input_index;
+		if (group_source_index >= input.ColumnCount()) {
+			return false;
+		}
+
+		UnifiedVectorFormat group_format;
+		input.data[group_source_index].ToUnifiedFormat(group_format);
+		auto group_data = UnifiedVectorFormat::GetData<GROUP_TYPE>(group_format);
+		auto group_sel = group_format.sel;
+		auto &group_validity = group_format.validity;
+		const bool can_have_null = group_validity.CanHaveNull();
+
+		vector<SljitPreaggregatedPrimitivePayloadSource> payload_sources;
+		if (!PrepareSljitPreaggregatedPrimitivePayloadSources(op, input, payload_lanes, payload_sources)) {
+			return false;
+		}
+		scratch.Prepare(payload_lanes, SLJIT_LOCAL_PREAGGREGATED_GROUP_LIMIT);
+
+		std::array<GROUP_TYPE, SLJIT_LOCAL_PREAGGREGATED_GROUP_LIMIT> keys;
+		compact_groups.Reset();
+		auto &target = compact_groups.data[0];
+		target.SetVectorType(VectorType::FLAT_VECTOR);
+		auto target_data = FlatVector::GetDataMutable<GROUP_TYPE>(target);
+		idx_t group_count = 0;
+
+		auto append_group = [&](GROUP_TYPE key) {
+			if (group_count == SLJIT_LOCAL_PREAGGREGATED_GROUP_LIMIT) {
+				return DConstants::INVALID_INDEX;
+			}
+			const auto group_idx = group_count++;
+			keys[group_idx] = key;
+			target_data[group_idx] = key;
+			for (idx_t payload_idx = 0; payload_idx < payload_lanes.size(); payload_idx++) {
+				auto &payload = scratch.payloads[payload_idx];
+				switch (payload.kind) {
+				case AggregatePrimitiveUpdateKind::COUNT_STAR:
+				case AggregatePrimitiveUpdateKind::SUM_INT64:
+					payload.int64_values.push_back(0);
+					break;
+				case AggregatePrimitiveUpdateKind::SUM_HUGEINT:
+					payload.hugeint_values.emplace_back(0);
+					break;
+				default:
+					break;
+				}
+			}
+			return group_idx;
+		};
+
+		for (idx_t row_idx = 0; row_idx < count; row_idx++) {
+			const auto source_idx = group_sel->get_index(row_idx);
+			if (can_have_null && !group_validity.RowIsValid(source_idx)) {
+				return false;
+			}
+			auto key = group_data[source_idx];
+			idx_t group_idx = 0;
+			for (; group_idx < group_count; group_idx++) {
+				if (keys[group_idx] == key) {
+					break;
+				}
+			}
+			if (group_idx == group_count) {
+				group_idx = append_group(key);
+				if (group_idx == DConstants::INVALID_INDEX) {
+					return false;
+				}
+			}
+			for (idx_t payload_idx = 0; payload_idx < payload_lanes.size(); payload_idx++) {
+				auto lane = payload_lanes[payload_idx];
+				auto &payload = scratch.payloads[payload_idx];
+				switch (lane->kind) {
+				case AggregatePrimitiveUpdateKind::COUNT_STAR:
+					payload.int64_values[group_idx]++;
+					break;
+				case AggregatePrimitiveUpdateKind::SUM_INT64: {
+					int64_t value;
+					if (!SljitLoadPreaggregatedInt64Payload(payload_sources[payload_idx], row_idx, value)) {
+						return false;
+					}
+					payload.int64_values[group_idx] += value;
+					break;
+				}
+				case AggregatePrimitiveUpdateKind::SUM_HUGEINT: {
+					hugeint_t value;
+					if (!SljitLoadPreaggregatedHugeintPayload(payload_sources[payload_idx], row_idx, value)) {
+						return false;
+					}
+					payload.hugeint_values[group_idx] += value;
+					break;
+				}
+				default:
+					return false;
+				}
+			}
+		}
+		if (group_count == count) {
+			return false;
+		}
+		auto &target_validity = FlatVector::ValidityMutable(target);
+		target_validity.Reset(group_count);
+		target_validity.SetAllValid(group_count);
+		FlatVector::SetSize(target, count_t(group_count));
+		compact_groups.SetChildCardinality(group_count);
+		return true;
+	}
+
 	template <class T>
 	static bool TryPreaggregateConsecutivePrimitiveGroupsTemplated(
 	    SljitExecutableRegionOp &op, DataChunk &input,
@@ -4284,9 +4495,6 @@ public:
 		if (group_source_index >= input.ColumnCount()) {
 			return false;
 		}
-		if (TryPreaggregateFlatAllValidSinglePrimitiveGroup<T>(op, input, payload_lanes, compact_groups, scratch)) {
-			return true;
-		}
 
 		UnifiedVectorFormat group_format;
 		input.data[group_source_index].ToUnifiedFormat(group_format);
@@ -4295,6 +4503,7 @@ public:
 		auto &group_validity = group_format.validity;
 		const auto sample_count = MinValue<idx_t>(count, 64);
 		bool has_consecutive_repeat = false;
+		bool monotonic_nondecreasing = true;
 		auto previous_key = group_data[group_sel->get_index(0)];
 		if (!group_validity.RowIsValid(group_sel->get_index(0))) {
 			return false;
@@ -4307,9 +4516,19 @@ public:
 			auto key = group_data[source_idx];
 			if (key == previous_key) {
 				has_consecutive_repeat = true;
-				break;
+			}
+			if (key < previous_key) {
+				monotonic_nondecreasing = false;
 			}
 			previous_key = key;
+		}
+		const bool prefer_consecutive_runs = monotonic_nondecreasing && has_consecutive_repeat;
+		if (!prefer_consecutive_runs &&
+		    TryPreaggregateBoundedPrimitiveGroupsTemplated<T>(op, input, payload_lanes, compact_groups, scratch)) {
+			return true;
+		}
+		if (TryPreaggregateFlatAllValidSinglePrimitiveGroup<T>(op, input, payload_lanes, compact_groups, scratch)) {
+			return true;
 		}
 		if (!has_consecutive_repeat) {
 			return false;
@@ -7119,6 +7338,9 @@ public:
 		if (CanBatchGeneratedFilterProjectionFullPipeline()) {
 			return TryExecuteFullPipelineGeneratedFilterBatched(runtime, result);
 		}
+		if (CanBatchProjectionCountStarGroupedAggregateFullPipeline()) {
+			return TryExecuteFullPipelineProjectionCountStarGroupedAggregateBatched(runtime, result);
+		}
 		if (CanBatchHashJoinProjectionGroupedAggregateFullPipeline()) {
 			return TryExecuteFullPipelineHashJoinProjectionGroupedAggregateBatched(runtime, result);
 		}
@@ -7157,6 +7379,191 @@ public:
 			return TryExecuteFullPipelineGeneratedFilterHashJoinProjectionGroupedAggregateBatched(runtime, result);
 		}
 		return TryExecuteFullPipelineUnbatched(runtime, result);
+	}
+
+	template <class T>
+	bool TryExecuteFullPipelineProjectionCountStarGroupedAggregateBatchedTemplated(ExecutionRegionRuntime &runtime,
+	                                                                               ExecutionRegionResult &result) {
+		static constexpr idx_t PROJECTION_IDX = 0;
+		static constexpr idx_t AGGREGATE_IDX = 1;
+		auto &projection_op = ops[PROJECTION_IDX];
+		auto &aggregate_op = ops[AGGREGATE_IDX];
+		auto &native_runtime = runtime.ExecutionOperators();
+		auto &sink_info = aggregate_op.aggregate_update.plan.sink_info;
+		SljitRegionExecutionScratch scratch(runtime.GetAllocator(), ops);
+
+		vector<LogicalType> group_types;
+		group_types.reserve(sink_info.groups.size());
+		for (auto &group : sink_info.groups) {
+			group_types.push_back(group.type);
+		}
+		DataChunk accumulated_groups;
+		accumulated_groups.Initialize(runtime.GetAllocator(), group_types);
+		bool bound = false;
+		auto bind_stage_start = SljitRegionStageStart(runtime);
+		auto &binding = BindNativeSink(native_runtime, scratch, AGGREGATE_IDX, accumulated_groups, sink_info,
+		                               "aggregate-update-runtime-binding-failed", "SLJIT aggregate update sink", bound);
+		if (bound) {
+			RecordSljitRegionStageRuntime(runtime, AGGREGATE_IDX, aggregate_op.kind, "bind_sink_contract",
+			                              bind_stage_start);
+		}
+		if (!binding.ready || !binding.aggregate_update.ready || !binding.aggregate_update.primitive.ready ||
+		    !binding.aggregate_update.grouped_state.ready || !binding.aggregate_update.grouped_state.state) {
+			return TryExecuteFullPipelineUnbatched(runtime, result);
+		}
+		auto &payload_lanes =
+		    scratch.AggregatePayloadLanes(AGGREGATE_IDX, sink_info.aggregates, binding.aggregate_update.primitive);
+		if (payload_lanes.size() != 1 || !payload_lanes[0] ||
+		    payload_lanes[0]->kind != AggregatePrimitiveUpdateKind::COUNT_STAR) {
+			return TryExecuteFullPipelineUnbatched(runtime, result);
+		}
+
+		std::array<T, SLJIT_LOCAL_PREAGGREGATED_GROUP_LIMIT> accumulated_keys;
+		std::array<int64_t, SLJIT_LOCAL_PREAGGREGATED_GROUP_LIMIT> accumulated_counts;
+		idx_t accumulated_group_count = 0;
+		idx_t accumulated_input_count = 0;
+		vector<int64_t> accumulated_deltas;
+		DataChunk chunk_groups;
+		chunk_groups.Initialize(runtime.GetAllocator(), group_types);
+		vector<int64_t> chunk_deltas;
+
+		auto flush_accumulated_groups = [&]() {
+			if (accumulated_group_count == 0) {
+				return;
+			}
+			MaterializePreaggregatedCountStarGroups(accumulated_keys, accumulated_counts, accumulated_group_count,
+			                                        accumulated_groups, accumulated_deltas);
+			auto &preaggregate_scratch = scratch.AggregatePreaggregateScratch(AGGREGATE_IDX);
+			preaggregate_scratch.Prepare(payload_lanes, accumulated_group_count);
+			preaggregate_scratch.payloads[0].int64_values = accumulated_deltas;
+			if (!TryExecutePreaggregatedGroupedPrimitiveAggregateUpdate(
+			        runtime, scratch, AGGREGATE_IDX, aggregate_op, accumulated_groups, preaggregate_scratch,
+			        payload_lanes, binding.aggregate_update.grouped_state, accumulated_input_count, false, nullptr)) {
+				throw InternalException("SLJIT projection count-star grouped accumulator failed to flush");
+			}
+			RecordSljitRegionRuntimePath(runtime, aggregate_op.kind, "cross_chunk_preaggregated_count_star_update",
+			                             accumulated_input_count);
+			accumulated_group_count = 0;
+			accumulated_input_count = 0;
+		};
+
+		auto execute_projected_fallback = [&](DataChunk &projected) -> bool {
+			flush_accumulated_groups();
+			auto sink_result =
+			    ExecuteNativeAggregateUpdate(runtime, native_runtime, scratch, AGGREGATE_IDX, aggregate_op, projected);
+			if (sink_result == SinkResultType::BLOCKED) {
+				result = runtime.DeferredReason().empty() ? ExecutionRegionResult::INTERRUPTED
+				                                          : ExecutionRegionResult::DEFERRED;
+				return true;
+			}
+			if (sink_result == SinkResultType::FINISHED) {
+				result = ExecutionRegionResult::FINISHED;
+				return true;
+			}
+			return false;
+		};
+
+		const auto max_source_fetches = SljitBatchedSourceContractFetchBudget(runtime.MaxChunks());
+		idx_t fetched_chunks = 0;
+		while (true) {
+			if (fetched_chunks >= max_source_fetches) {
+				flush_accumulated_groups();
+				result = ExecutionRegionResult::NOT_FINISHED;
+				return true;
+			}
+
+			DataChunk *source_chunk = nullptr;
+			auto source_result = runtime.FetchSourceContract(source_chunk);
+			if (source_result == SourceResultType::BLOCKED) {
+				flush_accumulated_groups();
+				result = ExecutionRegionResult::INTERRUPTED;
+				return true;
+			}
+			fetched_chunks++;
+
+			if (source_chunk) {
+				auto next_batch_result =
+				    runtime.AdvanceSinkBatch(*source_chunk, source_result == SourceResultType::HAVE_MORE_OUTPUT);
+				if (next_batch_result == SinkNextBatchType::BLOCKED) {
+					flush_accumulated_groups();
+					result = ExecutionRegionResult::INTERRUPTED;
+					return true;
+				}
+			}
+			if (source_chunk && source_chunk->size() > 0) {
+				auto &projected = scratch.TemporaryChunk(PROJECTION_IDX);
+				projected.Reset();
+				auto projection_stage_start = SljitRegionStageStart(runtime);
+				ExecuteProjection(scratch, PROJECTION_IDX, projection_op, *source_chunk, projected);
+				RecordSljitRegionStageRuntime(runtime, PROJECTION_IDX, projection_op.kind, projection_stage_start);
+				if (projected.size() > 0) {
+					auto preaggregate_stage_start = SljitRegionStageStart(runtime);
+					bool merged_projected = false;
+					if (!TryPreaggregateFixedWidthCountStarGroups(projected, chunk_groups, chunk_deltas)) {
+						if (execute_projected_fallback(projected)) {
+							return true;
+						}
+					} else if (!MergePreaggregatedFixedWidthCountStarGroupsTemplated<T>(
+					               chunk_groups, chunk_deltas, accumulated_keys, accumulated_counts,
+					               accumulated_group_count)) {
+						flush_accumulated_groups();
+						if (!MergePreaggregatedFixedWidthCountStarGroupsTemplated<T>(
+						        chunk_groups, chunk_deltas, accumulated_keys, accumulated_counts,
+						        accumulated_group_count)) {
+							if (execute_projected_fallback(projected)) {
+								return true;
+							}
+						} else {
+							merged_projected = true;
+						}
+					} else {
+						merged_projected = true;
+					}
+					if (merged_projected) {
+						accumulated_input_count += projected.size();
+						RecordSljitRegionStageRuntime(runtime, AGGREGATE_IDX, aggregate_op.kind,
+						                              "cross_chunk_preaggregate_count_star_groups",
+						                              preaggregate_stage_start);
+					}
+				}
+			}
+			if (source_result == SourceResultType::FINISHED) {
+				flush_accumulated_groups();
+				result = ExecutionRegionResult::FINISHED;
+				return true;
+			}
+		}
+	}
+
+	bool TryExecuteFullPipelineProjectionCountStarGroupedAggregateBatched(ExecutionRegionRuntime &runtime,
+	                                                                      ExecutionRegionResult &result) {
+		auto &group_type = ops[1].aggregate_update.plan.sink_info.groups[0].type;
+		switch (group_type.InternalType()) {
+		case PhysicalType::INT8:
+			return TryExecuteFullPipelineProjectionCountStarGroupedAggregateBatchedTemplated<int8_t>(runtime, result);
+		case PhysicalType::INT16:
+			return TryExecuteFullPipelineProjectionCountStarGroupedAggregateBatchedTemplated<int16_t>(runtime, result);
+		case PhysicalType::INT32:
+			return TryExecuteFullPipelineProjectionCountStarGroupedAggregateBatchedTemplated<int32_t>(runtime, result);
+		case PhysicalType::INT64:
+			return TryExecuteFullPipelineProjectionCountStarGroupedAggregateBatchedTemplated<int64_t>(runtime, result);
+		case PhysicalType::INT128:
+			return TryExecuteFullPipelineProjectionCountStarGroupedAggregateBatchedTemplated<hugeint_t>(runtime,
+			                                                                                            result);
+		case PhysicalType::UINT8:
+			return TryExecuteFullPipelineProjectionCountStarGroupedAggregateBatchedTemplated<uint8_t>(runtime, result);
+		case PhysicalType::UINT16:
+			return TryExecuteFullPipelineProjectionCountStarGroupedAggregateBatchedTemplated<uint16_t>(runtime, result);
+		case PhysicalType::UINT32:
+			return TryExecuteFullPipelineProjectionCountStarGroupedAggregateBatchedTemplated<uint32_t>(runtime, result);
+		case PhysicalType::UINT64:
+			return TryExecuteFullPipelineProjectionCountStarGroupedAggregateBatchedTemplated<uint64_t>(runtime, result);
+		case PhysicalType::UINT128:
+			return TryExecuteFullPipelineProjectionCountStarGroupedAggregateBatchedTemplated<uhugeint_t>(runtime,
+			                                                                                             result);
+		default:
+			return TryExecuteFullPipelineUnbatched(runtime, result);
+		}
 	}
 
 	bool TryExecuteFullPipelineSourceInputBatched(ExecutionRegionRuntime &runtime, ExecutionRegionResult &result) {
@@ -12442,6 +12849,310 @@ public:
 		}
 	}
 
+	template <class T, SljitNativeIntegerCompareOp COMPARE_OP>
+	struct CompareNativeIntegerValues;
+
+	template <class T>
+	struct CompareNativeIntegerValues<T, SljitNativeIntegerCompareOp::EQUAL> {
+		static inline bool Operation(T left, T right) {
+			return left == right;
+		}
+	};
+
+	template <class T>
+	struct CompareNativeIntegerValues<T, SljitNativeIntegerCompareOp::NOT_EQUAL> {
+		static inline bool Operation(T left, T right) {
+			return left != right;
+		}
+	};
+
+	template <class T>
+	struct CompareNativeIntegerValues<T, SljitNativeIntegerCompareOp::LESS_THAN> {
+		static inline bool Operation(T left, T right) {
+			return left < right;
+		}
+	};
+
+	template <class T>
+	struct CompareNativeIntegerValues<T, SljitNativeIntegerCompareOp::GREATER_THAN> {
+		static inline bool Operation(T left, T right) {
+			return left > right;
+		}
+	};
+
+	template <class T>
+	struct CompareNativeIntegerValues<T, SljitNativeIntegerCompareOp::LESS_THAN_OR_EQUAL> {
+		static inline bool Operation(T left, T right) {
+			return left <= right;
+		}
+	};
+
+	template <class T>
+	struct CompareNativeIntegerValues<T, SljitNativeIntegerCompareOp::GREATER_THAN_OR_EQUAL> {
+		static inline bool Operation(T left, T right) {
+			return left >= right;
+		}
+	};
+
+	template <bool HAS_SELECTION>
+	static inline idx_t SljitSourceIndex(const sel_t *sel, idx_t logical_idx) {
+		return HAS_SELECTION ? sel[logical_idx] : logical_idx;
+	}
+
+	template <class T, class PROJECT_T, SljitNativeIntegerCompareOp COMPARE_OP, bool HAS_LEFT_SEL, bool HAS_RIGHT_SEL,
+	          bool HAS_PROJECT_SEL>
+	static idx_t CompactComparedReferenceValues(const_data_ptr_t left_data_p, const sel_t *left_sel,
+	                                            const_data_ptr_t right_data_p, const sel_t *right_sel,
+	                                            const_data_ptr_t project_data_p, const sel_t *project_sel, idx_t count,
+	                                            idx_t source_offset, data_ptr_t target_data_p, idx_t target_offset) {
+		auto left_data = reinterpret_cast<const T *>(left_data_p);
+		auto right_data = reinterpret_cast<const T *>(right_data_p);
+		auto project_data = reinterpret_cast<const PROJECT_T *>(project_data_p);
+		auto target_data = reinterpret_cast<PROJECT_T *>(target_data_p);
+		idx_t selected_count = 0;
+		for (idx_t row_idx = 0; row_idx < count; row_idx++) {
+			auto logical_idx = source_offset + row_idx;
+			auto left_idx = SljitSourceIndex<HAS_LEFT_SEL>(left_sel, logical_idx);
+			auto right_idx = SljitSourceIndex<HAS_RIGHT_SEL>(right_sel, logical_idx);
+			if (!CompareNativeIntegerValues<T, COMPARE_OP>::Operation(left_data[left_idx], right_data[right_idx])) {
+				continue;
+			}
+			auto project_idx = SljitSourceIndex<HAS_PROJECT_SEL>(project_sel, logical_idx);
+			target_data[target_offset + selected_count] = project_data[project_idx];
+			selected_count++;
+		}
+		return selected_count;
+	}
+
+	template <class T, class PROJECT_T, bool HAS_LEFT_SEL, bool HAS_RIGHT_SEL, bool HAS_PROJECT_SEL>
+	static idx_t CompactComparedReferenceValuesForSelections(const_data_ptr_t left_data, const sel_t *left_sel,
+	                                                         const_data_ptr_t right_data, const sel_t *right_sel,
+	                                                         const_data_ptr_t project_data, const sel_t *project_sel,
+	                                                         idx_t count, idx_t source_offset,
+	                                                         SljitNativeIntegerCompareOp compare_op,
+	                                                         data_ptr_t target_data, idx_t target_offset) {
+		switch (compare_op) {
+		case SljitNativeIntegerCompareOp::EQUAL:
+			return CompactComparedReferenceValues<T, PROJECT_T, SljitNativeIntegerCompareOp::EQUAL, HAS_LEFT_SEL,
+			                                      HAS_RIGHT_SEL, HAS_PROJECT_SEL>(
+			    left_data, left_sel, right_data, right_sel, project_data, project_sel, count, source_offset,
+			    target_data, target_offset);
+		case SljitNativeIntegerCompareOp::NOT_EQUAL:
+			return CompactComparedReferenceValues<T, PROJECT_T, SljitNativeIntegerCompareOp::NOT_EQUAL, HAS_LEFT_SEL,
+			                                      HAS_RIGHT_SEL, HAS_PROJECT_SEL>(
+			    left_data, left_sel, right_data, right_sel, project_data, project_sel, count, source_offset,
+			    target_data, target_offset);
+		case SljitNativeIntegerCompareOp::LESS_THAN:
+			return CompactComparedReferenceValues<T, PROJECT_T, SljitNativeIntegerCompareOp::LESS_THAN, HAS_LEFT_SEL,
+			                                      HAS_RIGHT_SEL, HAS_PROJECT_SEL>(
+			    left_data, left_sel, right_data, right_sel, project_data, project_sel, count, source_offset,
+			    target_data, target_offset);
+		case SljitNativeIntegerCompareOp::GREATER_THAN:
+			return CompactComparedReferenceValues<T, PROJECT_T, SljitNativeIntegerCompareOp::GREATER_THAN, HAS_LEFT_SEL,
+			                                      HAS_RIGHT_SEL, HAS_PROJECT_SEL>(
+			    left_data, left_sel, right_data, right_sel, project_data, project_sel, count, source_offset,
+			    target_data, target_offset);
+		case SljitNativeIntegerCompareOp::LESS_THAN_OR_EQUAL:
+			return CompactComparedReferenceValues<T, PROJECT_T, SljitNativeIntegerCompareOp::LESS_THAN_OR_EQUAL,
+			                                      HAS_LEFT_SEL, HAS_RIGHT_SEL, HAS_PROJECT_SEL>(
+			    left_data, left_sel, right_data, right_sel, project_data, project_sel, count, source_offset,
+			    target_data, target_offset);
+		case SljitNativeIntegerCompareOp::GREATER_THAN_OR_EQUAL:
+			return CompactComparedReferenceValues<T, PROJECT_T, SljitNativeIntegerCompareOp::GREATER_THAN_OR_EQUAL,
+			                                      HAS_LEFT_SEL, HAS_RIGHT_SEL, HAS_PROJECT_SEL>(
+			    left_data, left_sel, right_data, right_sel, project_data, project_sel, count, source_offset,
+			    target_data, target_offset);
+		default:
+			throw InternalException("Unsupported SLJIT integer comparison op");
+		}
+	}
+
+	template <class T, class PROJECT_T>
+	static idx_t CompactComparedReferenceValuesForSelectionShape(
+	    const_data_ptr_t left_data, const sel_t *left_sel, const_data_ptr_t right_data, const sel_t *right_sel,
+	    const_data_ptr_t project_data, const sel_t *project_sel, idx_t count, idx_t source_offset,
+	    SljitNativeIntegerCompareOp compare_op, data_ptr_t target_data, idx_t target_offset) {
+		if (left_sel) {
+			if (right_sel) {
+				if (project_sel) {
+					return CompactComparedReferenceValuesForSelections<T, PROJECT_T, true, true, true>(
+					    left_data, left_sel, right_data, right_sel, project_data, project_sel, count, source_offset,
+					    compare_op, target_data, target_offset);
+				}
+				return CompactComparedReferenceValuesForSelections<T, PROJECT_T, true, true, false>(
+				    left_data, left_sel, right_data, right_sel, project_data, project_sel, count, source_offset,
+				    compare_op, target_data, target_offset);
+			}
+			if (project_sel) {
+				return CompactComparedReferenceValuesForSelections<T, PROJECT_T, true, false, true>(
+				    left_data, left_sel, right_data, right_sel, project_data, project_sel, count, source_offset,
+				    compare_op, target_data, target_offset);
+			}
+			return CompactComparedReferenceValuesForSelections<T, PROJECT_T, true, false, false>(
+			    left_data, left_sel, right_data, right_sel, project_data, project_sel, count, source_offset, compare_op,
+			    target_data, target_offset);
+		}
+		if (right_sel) {
+			if (project_sel) {
+				return CompactComparedReferenceValuesForSelections<T, PROJECT_T, false, true, true>(
+				    left_data, left_sel, right_data, right_sel, project_data, project_sel, count, source_offset,
+				    compare_op, target_data, target_offset);
+			}
+			return CompactComparedReferenceValuesForSelections<T, PROJECT_T, false, true, false>(
+			    left_data, left_sel, right_data, right_sel, project_data, project_sel, count, source_offset, compare_op,
+			    target_data, target_offset);
+		}
+		if (project_sel) {
+			return CompactComparedReferenceValuesForSelections<T, PROJECT_T, false, false, true>(
+			    left_data, left_sel, right_data, right_sel, project_data, project_sel, count, source_offset, compare_op,
+			    target_data, target_offset);
+		}
+		return CompactComparedReferenceValuesForSelections<T, PROJECT_T, false, false, false>(
+		    left_data, left_sel, right_data, right_sel, project_data, project_sel, count, source_offset, compare_op,
+		    target_data, target_offset);
+	}
+
+	template <class T>
+	static bool TryCompactComparedReferenceValuesForProjectType(
+	    const LogicalType &project_type, const_data_ptr_t left_data, const sel_t *left_sel, const_data_ptr_t right_data,
+	    const sel_t *right_sel, const_data_ptr_t project_data, const sel_t *project_sel, idx_t count,
+	    idx_t source_offset, SljitNativeIntegerCompareOp compare_op, data_ptr_t target_data, idx_t target_offset,
+	    idx_t &selected_count) {
+		switch (GetTypeIdSize(project_type.InternalType())) {
+		case 1:
+			selected_count = CompactComparedReferenceValuesForSelectionShape<T, uint8_t>(
+			    left_data, left_sel, right_data, right_sel, project_data, project_sel, count, source_offset, compare_op,
+			    target_data, target_offset);
+			return true;
+		case 2:
+			selected_count = CompactComparedReferenceValuesForSelectionShape<T, uint16_t>(
+			    left_data, left_sel, right_data, right_sel, project_data, project_sel, count, source_offset, compare_op,
+			    target_data, target_offset);
+			return true;
+		case 4:
+			selected_count = CompactComparedReferenceValuesForSelectionShape<T, uint32_t>(
+			    left_data, left_sel, right_data, right_sel, project_data, project_sel, count, source_offset, compare_op,
+			    target_data, target_offset);
+			return true;
+		case 8:
+			selected_count = CompactComparedReferenceValuesForSelectionShape<T, uint64_t>(
+			    left_data, left_sel, right_data, right_sel, project_data, project_sel, count, source_offset, compare_op,
+			    target_data, target_offset);
+			return true;
+		default:
+			return false;
+		}
+	}
+
+	static bool TryCompactComparedReferenceValues(SljitNativeIntegerKind compare_kind, const LogicalType &project_type,
+	                                              const_data_ptr_t left_data, const sel_t *left_sel,
+	                                              const_data_ptr_t right_data, const sel_t *right_sel,
+	                                              const_data_ptr_t project_data, const sel_t *project_sel, idx_t count,
+	                                              idx_t source_offset, SljitNativeIntegerCompareOp compare_op,
+	                                              data_ptr_t target_data, idx_t target_offset, idx_t &selected_count) {
+		switch (compare_kind) {
+		case SljitNativeIntegerKind::INT8:
+			return TryCompactComparedReferenceValuesForProjectType<int8_t>(
+			    project_type, left_data, left_sel, right_data, right_sel, project_data, project_sel, count,
+			    source_offset, compare_op, target_data, target_offset, selected_count);
+		case SljitNativeIntegerKind::UINT8:
+			return TryCompactComparedReferenceValuesForProjectType<uint8_t>(
+			    project_type, left_data, left_sel, right_data, right_sel, project_data, project_sel, count,
+			    source_offset, compare_op, target_data, target_offset, selected_count);
+		case SljitNativeIntegerKind::INT32:
+		case SljitNativeIntegerKind::DATE:
+			return TryCompactComparedReferenceValuesForProjectType<int32_t>(
+			    project_type, left_data, left_sel, right_data, right_sel, project_data, project_sel, count,
+			    source_offset, compare_op, target_data, target_offset, selected_count);
+		case SljitNativeIntegerKind::INT64:
+		case SljitNativeIntegerKind::DECIMAL64:
+			return TryCompactComparedReferenceValuesForProjectType<int64_t>(
+			    project_type, left_data, left_sel, right_data, right_sel, project_data, project_sel, count,
+			    source_offset, compare_op, target_data, target_offset, selected_count);
+		default:
+			return false;
+		}
+	}
+
+	template <class FLUSH>
+	bool TryAppendComparedReferenceProjectionBatch(ExecutionRegionRuntime &runtime, idx_t filter_idx,
+	                                               SljitExecutableRegionOp &filter_op,
+	                                               SljitExecutableRegionOp &projection_op,
+	                                               SljitExecutableRegionOp &append_trace_op, DataChunk &source_chunk,
+	                                               DataChunk &filtered_batch, bool &filtered_batch_initialized,
+	                                               idx_t projection_source_index, FLUSH &&flush_filtered_batch,
+	                                               bool &stopped) {
+		stopped = false;
+		auto &filter = filter_op.filter.plan;
+		if (filter.kind != SljitNativeRegionExpressionKind::INTEGER_COMPARE_REFERENCES ||
+		    filter.source_index >= source_chunk.ColumnCount() ||
+		    filter.right_source_index >= source_chunk.ColumnCount()) {
+			return false;
+		}
+		if (!filtered_batch_initialized) {
+			filtered_batch.Initialize(runtime.GetAllocator(), projection_op.output_types);
+			filtered_batch_initialized = true;
+		}
+		if (filtered_batch.ColumnCount() != 1 || filtered_batch.data[0].GetType() != projection_op.output_types[0]) {
+			return false;
+		}
+
+		UnifiedVectorFormat left_format;
+		UnifiedVectorFormat right_format;
+		UnifiedVectorFormat project_format;
+		auto &left = source_chunk.data[filter.source_index];
+		auto &right = source_chunk.data[filter.right_source_index];
+		auto &project = source_chunk.data[projection_source_index];
+		if (!AllValidSource(left_format, left, source_chunk.size()) ||
+		    !AllValidSource(right_format, right, source_chunk.size()) ||
+		    !AllValidSource(project_format, project, source_chunk.size())) {
+			return false;
+		}
+		auto left_data = NativeIntegerSourceData(left_format, filter.integer_kind);
+		auto right_data = NativeIntegerSourceData(right_format, filter.integer_kind);
+		auto project_data = project_format.data;
+		auto left_sel = SljitNormalizedSourceSelectionData(left_format);
+		auto right_sel = SljitNormalizedSourceSelectionData(right_format);
+		auto project_sel = SljitNormalizedSourceSelectionData(project_format);
+
+		auto stage_start = SljitRegionStageStart(runtime);
+		idx_t appended_count = 0;
+		idx_t source_offset = 0;
+		while (source_offset < source_chunk.size()) {
+			const auto current_size = filtered_batch.size();
+			if (current_size == STANDARD_VECTOR_SIZE) {
+				if (flush_filtered_batch()) {
+					stopped = true;
+					return true;
+				}
+				continue;
+			}
+			const auto append_capacity = STANDARD_VECTOR_SIZE - current_size;
+			const auto input_count = MinValue<idx_t>(append_capacity, source_chunk.size() - source_offset);
+			idx_t selected_count = 0;
+			if (!TryCompactComparedReferenceValues(
+			        filter.integer_kind, projection_op.output_types[0], left_data, left_sel, right_data, right_sel,
+			        project_data, project_sel, input_count, source_offset, filter.compare_op,
+			        FlatVector::GetDataMutable(filtered_batch.data[0]), current_size, selected_count)) {
+				return false;
+			}
+			if (selected_count > 0) {
+				FinishDirectProjectionBatchTargets(filtered_batch, current_size + selected_count);
+				appended_count += selected_count;
+			}
+			source_offset += input_count;
+			if (filtered_batch.size() == STANDARD_VECTOR_SIZE && flush_filtered_batch()) {
+				stopped = true;
+				return true;
+			}
+		}
+		RecordSljitRegionStageRuntimeWithSuffix(runtime, filter_idx, filter_op.kind,
+		                                        "+direct_compact_reference_projection", stage_start);
+		RecordSljitRegionRuntimePath(runtime, filter_op.kind, "direct_compact_reference_projection", appended_count);
+		RecordSljitRegionMaterializationBoundary(runtime, append_trace_op.kind, "filtered_input_batch", appended_count);
+		return true;
+	}
+
 	template <class FLUSH>
 	bool TryAppendSelectedReferenceProjectionBatch(ExecutionRegionRuntime &runtime,
 	                                               SljitRegionExecutionScratch &scratch, idx_t filter_idx,
@@ -12475,6 +13186,11 @@ public:
 		}
 		if (filtered_batch.ColumnCount() != 1 || filtered_batch.data[0].GetType() != projection.return_type) {
 			return false;
+		}
+		if (TryAppendComparedReferenceProjectionBatch(runtime, filter_idx, filter_op, projection_op, append_trace_op,
+		                                              source_chunk, filtered_batch, filtered_batch_initialized,
+		                                              projection_source_index, flush_filtered_batch, stopped)) {
+			return true;
 		}
 
 		auto &filter_selection = scratch.FilterSelection(filter_idx);
@@ -16405,6 +17121,119 @@ public:
 		return true;
 	}
 
+	bool TryExecuteSplitPreaggregatedGroupedPrimitiveAggregateUpdate(
+	    ExecutionRegionRuntime &runtime, idx_t op_idx, SljitExecutableRegionOp &op, DataChunk &compact_groups,
+	    SljitPreaggregatedPrimitiveAggregateScratch &preaggregate_scratch,
+	    const vector<const ExecutionPrimitiveAggregateUpdateLane *> &payload_lanes,
+	    ExecutionGroupedAggregateStateAddressBinding &grouped_state, idx_t preaggregated_row_count,
+	    bool defer_grouped_finish, optional_ptr<bool> deferred_grouped_finish) {
+		static constexpr idx_t MAX_EXISTING_PREFIX_GROUPS = 8;
+		static constexpr idx_t MAX_SPLIT_PREAGGREGATED_GROUPS = 64;
+		if (compact_groups.size() <= 1 || compact_groups.size() > MAX_SPLIT_PREAGGREGATED_GROUPS ||
+		    !grouped_state.ready || !grouped_state.state) {
+			return false;
+		}
+		auto split_stage_start = SljitRegionStageStart(runtime);
+		auto &sink_info = op.aggregate_update.plan.sink_info;
+		const auto max_prefix_count = MinValue<idx_t>(MAX_EXISTING_PREFIX_GROUPS, compact_groups.size());
+		const auto group_types = compact_groups.GetTypes();
+
+		DataChunk prefix_groups;
+		DataChunk suffix_groups;
+		prefix_groups.Initialize(runtime.GetAllocator(), group_types);
+		suffix_groups.Initialize(runtime.GetAllocator(), group_types);
+		SljitPreaggregatedPrimitiveAggregateScratch prefix_scratch;
+		SljitPreaggregatedPrimitiveAggregateScratch suffix_scratch;
+
+		for (idx_t prefix_count = 1; prefix_count <= max_prefix_count; prefix_count++) {
+			prefix_groups.Reset();
+			prefix_groups.Slice(compact_groups, 0, prefix_count);
+			if (!SlicePreaggregatedPrimitiveScratch(preaggregate_scratch, payload_lanes, 0, prefix_count,
+			                                        prefix_scratch)) {
+				return false;
+			}
+
+			const auto suffix_count = compact_groups.size() - prefix_count;
+			if (suffix_count > 0) {
+				suffix_groups.Reset();
+				suffix_groups.Slice(compact_groups, prefix_count, compact_groups.size());
+				if (!SlicePreaggregatedPrimitiveScratch(preaggregate_scratch, payload_lanes, prefix_count, suffix_count,
+				                                        suffix_scratch)) {
+					return false;
+				}
+				SljitPreaggregatedPrimitiveUpdateState suffix_update_state;
+				suffix_update_state.lanes = &payload_lanes;
+				suffix_update_state.payloads = &suffix_scratch.payloads;
+
+				auto suffix_stage_start = SljitRegionStageStart(runtime);
+				bool suffix_appended = false;
+				if (runtime.TraceRuntime()) {
+					auto stage_name = SljitRegionStageName(op_idx, op.kind, "split_preaggregated_append_new_suffix");
+					SljitRegionStageRecorder recorder(runtime, stage_name);
+					suffix_appended = grouped_state.state->TryAppendNewGroupsWithStateAddresses(
+					    suffix_groups, sink_info, ExecuteSljitPreaggregatedPrimitiveAddressUpdate, &suffix_update_state,
+					    &recorder, false);
+					auto runtime_us = SljitRegionElapsedMicros(suffix_stage_start);
+					auto unattributed_runtime_us = runtime_us - recorder.RecordedRuntimeTimeUs();
+					if (unattributed_runtime_us > 0) {
+						runtime.RecordGeneratedStageRuntime(stage_name + ".unattributed", unattributed_runtime_us);
+					}
+				} else {
+					suffix_appended = grouped_state.state->TryAppendNewGroupsWithStateAddresses(
+					    suffix_groups, sink_info, ExecuteSljitPreaggregatedPrimitiveAddressUpdate, &suffix_update_state,
+					    nullptr, false);
+				}
+				RecordSljitRegionStageRuntimePath(runtime, op_idx, op.kind,
+				                                  suffix_appended ? "split_preaggregated_append_new_suffix"
+				                                                  : "split_preaggregated_append_new_suffix_miss",
+				                                  suffix_stage_start);
+				if (!suffix_appended) {
+					continue;
+				}
+			}
+
+			SljitPreaggregatedPrimitiveUpdateState prefix_update_state;
+			prefix_update_state.lanes = &payload_lanes;
+			prefix_update_state.payloads = &prefix_scratch.payloads;
+			const bool finish = !defer_grouped_finish;
+			auto prefix_stage_start = SljitRegionStageStart(runtime);
+			bool prefix_updated = false;
+			if (runtime.TraceRuntime()) {
+				auto stage_name = SljitRegionStageName(op_idx, op.kind, "split_preaggregated_update_existing_prefix");
+				SljitRegionStageRecorder recorder(runtime, stage_name);
+				prefix_updated = grouped_state.state->TryUpdateExistingGroupsWithStateAddresses(
+				    prefix_groups, sink_info, ExecuteSljitPreaggregatedPrimitiveAddressUpdate, &prefix_update_state,
+				    &recorder, finish);
+				auto runtime_us = SljitRegionElapsedMicros(prefix_stage_start);
+				auto unattributed_runtime_us = runtime_us - recorder.RecordedRuntimeTimeUs();
+				if (unattributed_runtime_us > 0) {
+					runtime.RecordGeneratedStageRuntime(stage_name + ".unattributed", unattributed_runtime_us);
+				}
+			} else {
+				prefix_updated = grouped_state.state->TryUpdateExistingGroupsWithStateAddresses(
+				    prefix_groups, sink_info, ExecuteSljitPreaggregatedPrimitiveAddressUpdate, &prefix_update_state,
+				    nullptr, finish);
+			}
+			RecordSljitRegionStageRuntimePath(runtime, op_idx, op.kind,
+			                                  prefix_updated ? "split_preaggregated_update_existing_prefix"
+			                                                 : "split_preaggregated_update_existing_prefix_miss",
+			                                  prefix_stage_start);
+			if (!prefix_updated) {
+				throw InternalException("SLJIT split preaggregated grouped primitive prefix update failed after "
+				                        "successful suffix append");
+			}
+
+			RecordSljitRegionStageRuntime(runtime, op_idx, op.kind, "split_preaggregated_grouped_primitive_update",
+			                              split_stage_start);
+			RecordSljitRegionMaterializationBoundary(runtime, op.kind, "preaggregated_primitive_groups",
+			                                         compact_groups.size());
+			RecordSljitRegionMaterializationBoundary(runtime, op.kind, "direct_state_update", preaggregated_row_count);
+			MarkDeferredGroupedFinish(defer_grouped_finish, deferred_grouped_finish);
+			return true;
+		}
+		return false;
+	}
+
 	bool TryExecutePreaggregatedGroupedPrimitiveAggregateUpdate(
 	    ExecutionRegionRuntime &runtime, SljitRegionExecutionScratch &scratch, idx_t op_idx,
 	    SljitExecutableRegionOp &op, DataChunk &compact_groups,
@@ -16463,12 +17292,11 @@ public:
 				    compact_groups, sink_info, ExecuteSljitPreaggregatedPrimitiveAddressUpdate, &update_state, nullptr,
 				    finish);
 			}
-			scratch.RecordDirectAppendNewAggregateUpdateResult(op_idx, appended);
-			RecordSljitRegionStageRuntimePath(runtime, op_idx, op.kind,
-			                                  appended ? "direct_append_preaggregated_grouped_primitive_update"
-			                                           : "direct_append_preaggregated_grouped_primitive_update_miss",
-			                                  append_stage_start);
 			if (appended) {
+				scratch.RecordDirectAppendNewAggregateUpdateResult(op_idx, true);
+				RecordSljitRegionStageRuntimePath(runtime, op_idx, op.kind,
+				                                  "direct_append_preaggregated_grouped_primitive_update",
+				                                  append_stage_start);
 				RecordSljitRegionMaterializationBoundary(runtime, op.kind, "preaggregated_primitive_groups",
 				                                         compact_groups.size());
 				RecordSljitRegionMaterializationBoundary(runtime, op.kind, "direct_state_update",
@@ -16476,6 +17304,19 @@ public:
 				MarkDeferredGroupedFinish(defer_grouped_finish, deferred_grouped_finish);
 				return true;
 			}
+			if (TryExecuteSplitPreaggregatedGroupedPrimitiveAggregateUpdate(
+			        runtime, op_idx, op, compact_groups, preaggregate_scratch, payload_lanes, grouped_state,
+			        preaggregated_row_count, defer_grouped_finish, deferred_grouped_finish)) {
+				scratch.RecordDirectAppendNewAggregateUpdateResult(op_idx, true);
+				RecordSljitRegionStageRuntimePath(runtime, op_idx, op.kind,
+				                                  "direct_split_preaggregated_grouped_primitive_update",
+				                                  append_stage_start);
+				return true;
+			}
+			scratch.RecordDirectAppendNewAggregateUpdateResult(op_idx, false);
+			RecordSljitRegionStageRuntimePath(runtime, op_idx, op.kind,
+			                                  "direct_append_preaggregated_grouped_primitive_update_miss",
+			                                  append_stage_start);
 		}
 
 		auto stage_start = SljitRegionStageStart(runtime);
@@ -16499,10 +17340,42 @@ public:
 		                                  updated ? "direct_preaggregated_grouped_primitive_update"
 		                                          : "direct_preaggregated_grouped_primitive_update_miss",
 		                                  stage_start);
-		if (!updated) {
-			return false;
+		if (updated) {
+			RecordSljitRegionMaterializationBoundary(runtime, op.kind, "preaggregated_primitive_groups",
+			                                         compact_groups.size());
+			RecordSljitRegionMaterializationBoundary(runtime, op.kind, "direct_state_update", preaggregated_row_count);
+			MarkDeferredGroupedFinish(defer_grouped_finish, deferred_grouped_finish);
+			return true;
 		}
+
+		auto &addresses = scratch.AggregateStateAddresses(op_idx);
+		auto fallback_stage_start = SljitRegionStageStart(runtime);
+		if (runtime.TraceRuntime()) {
+			auto stage_name = SljitRegionStageName(op_idx, op.kind, "preaggregated_grouped_primitive_address_update");
+			SljitRegionStageRecorder recorder(runtime, stage_name);
+			grouped_state.state->ResolveStateAddresses(compact_groups, addresses, &recorder);
+			auto runtime_us = SljitRegionElapsedMicros(fallback_stage_start);
+			auto unattributed_runtime_us = runtime_us - recorder.RecordedRuntimeTimeUs();
+			if (unattributed_runtime_us > 0) {
+				runtime.RecordGeneratedStageRuntime(stage_name + ".unattributed", unattributed_runtime_us);
+			}
+		} else {
+			grouped_state.state->ResolveStateAddresses(compact_groups, addresses);
+		}
+		addresses.Flatten();
+		ExecuteSljitPreaggregatedPrimitiveAddressUpdate(FlatVector::GetData<uintptr_t>(addresses), nullptr,
+		                                                compact_groups.size(), &update_state);
+		if (finish) {
+			auto finish_stage_start = SljitRegionStageStart(runtime);
+			grouped_state.state->FinishStateUpdates();
+			RecordSljitRegionStageRuntime(runtime, op_idx, op.kind, "finish_grouped_state_updates", finish_stage_start);
+		}
+		scratch.RecordDirectNewAggregateUpdateResult(op_idx, true);
+		RecordSljitRegionStageRuntimePath(runtime, op_idx, op.kind, "preaggregated_grouped_primitive_address_update",
+		                                  fallback_stage_start);
 		RecordSljitRegionMaterializationBoundary(runtime, op.kind, "preaggregated_primitive_groups",
+		                                         compact_groups.size());
+		RecordSljitRegionMaterializationBoundary(runtime, op.kind, "preaggregated_address_vector_resolve",
 		                                         compact_groups.size());
 		RecordSljitRegionMaterializationBoundary(runtime, op.kind, "direct_state_update", preaggregated_row_count);
 		MarkDeferredGroupedFinish(defer_grouped_finish, deferred_grouped_finish);

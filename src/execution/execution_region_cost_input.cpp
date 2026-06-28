@@ -17,6 +17,7 @@
 #include "duckdb/execution/operator/projection/physical_projection.hpp"
 #include "duckdb/execution/operator/scan/physical_table_scan.hpp"
 #include "duckdb/parallel/pipeline.hpp"
+#include "duckdb/planner/expression/bound_aggregate_expression.hpp"
 #include "duckdb/planner/expression/bound_function_expression.hpp"
 #include "duckdb/planner/expression_iterator.hpp"
 
@@ -354,7 +355,8 @@ PhysicalRunnerCostInput BuildExecutionRegionCandidateCostInput(const ExecutionRe
 	builder.SetNativeJoinStageCount(cost_facts.native_join_stage_count);
 	builder.SetNativeAggregateStageCount(cost_facts.native_aggregate_stage_count);
 	builder.SetNativeGroupedAggregateStageCount(cost_facts.native_grouped_aggregate_stage_count);
-	if (candidate.contract.hash_aggregate_lookup_present && candidate.contract.hash_aggregate_lookup_mode == "blocked") {
+	if (candidate.contract.hash_aggregate_lookup_present &&
+	    candidate.contract.hash_aggregate_lookup_mode == "blocked") {
 		builder.SetBlockedHashAggregateLookupCount(cost_facts.native_grouped_aggregate_stage_count);
 	}
 	builder.SetNativeSortStageCount(cost_facts.native_sort_stage_count);
@@ -382,11 +384,61 @@ static idx_t ExecutionRegionPhysicalExpressionListCost(const vector<unique_ptr<E
 	return result;
 }
 
+static idx_t ExecutionRegionPhysicalAggregateExpressionCost(const Expression &expression) {
+	if (expression.GetExpressionClass() != ExpressionClass::BOUND_AGGREGATE) {
+		return DuckDBCostModel::ExpressionCost(expression);
+	}
+	auto &aggregate = expression.Cast<BoundAggregateExpression>();
+	idx_t result = ExecutionRegionPhysicalExpressionListCost(aggregate.GetChildren());
+	if (aggregate.GetFilter()) {
+		result += DuckDBCostModel::ExpressionCost(*aggregate.GetFilter());
+	}
+	if (aggregate.GetOrderBys()) {
+		for (auto &order : aggregate.GetOrderBys()->orders) {
+			if (order.expression) {
+				result += DuckDBCostModel::ExpressionCost(*order.expression);
+			}
+		}
+	}
+	return result;
+}
+
+static idx_t ExecutionRegionPhysicalAggregateListCost(const vector<unique_ptr<Expression>> &expressions) {
+	idx_t result = 0;
+	for (auto &expression : expressions) {
+		if (expression) {
+			result += ExecutionRegionPhysicalAggregateExpressionCost(*expression);
+		}
+	}
+	return result;
+}
+
+static bool ExecutionRegionPhysicalAggregateSinkUsesPrimitivePayloads(const ExecutionRegionSinkInfo &sink) {
+	if (sink.aggregate_contract.native_state_update_contract.status != ExecutionRegionStateContractStatus::READY) {
+		return false;
+	}
+	if (!ExecutionRegionAggregateNativeStateUpdateBlocker(sink.aggregate_contract, sink.aggregates, sink.groups)
+	         .empty()) {
+		return false;
+	}
+	for (auto &aggregate : sink.aggregates) {
+		if (!aggregate.primitive_update_ready) {
+			return false;
+		}
+	}
+	return true;
+}
+
+static bool ExecutionRegionPhysicalAggregateSinkCanAnchorNativePipeline(const PhysicalOperator &op) {
+	return ExecutionRegionPhysicalAggregateSinkUsesPrimitivePayloads(op.GetExecutionContract().sink);
+}
+
 enum class ExecutionRegionPhysicalPipelineSlot : uint8_t { SOURCE, OPERATOR, SINK };
 
 struct ExecutionRegionPhysicalPipelineCostFacts {
 	ExecutionRegionRunnerCostInputBuilder builder;
 	ExecutionRegionCandidateTraits traits;
+	bool native_sink_boundary = false;
 };
 
 static bool ExecutionRegionPhysicalExpressionIsReference(const Expression &expression) {
@@ -503,8 +555,10 @@ static bool TryAccumulateExecutionRegionPhysicalScanCost(const PhysicalOperator 
 		return true;
 	}
 	auto &scan = op.Cast<PhysicalTableScan>();
-	if (scan.dynamic_filters && scan.dynamic_filters->HasFilters()) {
-		return false;
+	const bool has_pushed_dynamic_filters =
+	    scan.function.filter_pushdown && scan.dynamic_filters && scan.dynamic_filters->HasFilters();
+	if (has_pushed_dynamic_filters) {
+		facts.builder.SetUsesScanFilters(true);
 	}
 	if (!scan.table_filters || !scan.table_filters->HasFilters()) {
 		return true;
@@ -517,6 +571,9 @@ static bool TryAccumulateExecutionRegionPhysicalScanCost(const PhysicalOperator 
 	}
 	facts.traits.source_filter_count += filter_count;
 	facts.traits.source_filter_expression_count += filter_count;
+	if (scan.function.filter_pushdown) {
+		facts.builder.SetUsesScanFilters(true);
+	}
 	facts.builder.AddGeneratedExpressionWork(filter_cost);
 	return true;
 }
@@ -531,11 +588,21 @@ static void AccumulateExecutionRegionPhysicalSourceTraits(const PhysicalOperator
 	case PhysicalOperatorType::COLUMN_DATA_SCAN:
 	case PhysicalOperatorType::CHUNK_SCAN:
 	case PhysicalOperatorType::CTE_SCAN:
+	case PhysicalOperatorType::DELIM_SCAN:
+	case PhysicalOperatorType::EXPRESSION_SCAN:
 	case PhysicalOperatorType::POSITIONAL_SCAN:
 		traits.source_kind = ExecutionRegionSourceKind::GENERIC_SCAN;
 		return;
 	case PhysicalOperatorType::HASH_JOIN:
 	case PhysicalOperatorType::NESTED_LOOP_JOIN:
+	case PhysicalOperatorType::LEFT_DELIM_JOIN:
+	case PhysicalOperatorType::RIGHT_DELIM_JOIN:
+	case PhysicalOperatorType::BLOCKWISE_NL_JOIN:
+	case PhysicalOperatorType::PIECEWISE_MERGE_JOIN:
+	case PhysicalOperatorType::IE_JOIN:
+	case PhysicalOperatorType::ASOF_JOIN:
+	case PhysicalOperatorType::CROSS_PRODUCT:
+	case PhysicalOperatorType::POSITIONAL_JOIN:
 	case PhysicalOperatorType::UNGROUPED_AGGREGATE:
 	case PhysicalOperatorType::HASH_GROUP_BY:
 	case PhysicalOperatorType::PERFECT_HASH_GROUP_BY:
@@ -553,6 +620,14 @@ static bool ExecutionRegionPhysicalOperatorIsStatefulSource(const PhysicalOperat
 	switch (op.type) {
 	case PhysicalOperatorType::HASH_JOIN:
 	case PhysicalOperatorType::NESTED_LOOP_JOIN:
+	case PhysicalOperatorType::LEFT_DELIM_JOIN:
+	case PhysicalOperatorType::RIGHT_DELIM_JOIN:
+	case PhysicalOperatorType::BLOCKWISE_NL_JOIN:
+	case PhysicalOperatorType::PIECEWISE_MERGE_JOIN:
+	case PhysicalOperatorType::IE_JOIN:
+	case PhysicalOperatorType::ASOF_JOIN:
+	case PhysicalOperatorType::CROSS_PRODUCT:
+	case PhysicalOperatorType::POSITIONAL_JOIN:
 	case PhysicalOperatorType::UNGROUPED_AGGREGATE:
 	case PhysicalOperatorType::HASH_GROUP_BY:
 	case PhysicalOperatorType::PERFECT_HASH_GROUP_BY:
@@ -588,6 +663,10 @@ static void AccumulateExecutionRegionPhysicalSinkTraits(const PhysicalOperator &
 		return;
 	case PhysicalOperatorType::NESTED_LOOP_JOIN:
 		traits.sink_kind = ExecutionRegionSinkKind::NESTED_LOOP_JOIN_BUILD;
+		return;
+	case PhysicalOperatorType::LEFT_DELIM_JOIN:
+	case PhysicalOperatorType::RIGHT_DELIM_JOIN:
+		traits.sink_kind = ExecutionRegionSinkKind::DELIM_JOIN_SINK;
 		return;
 	case PhysicalOperatorType::ORDER_BY:
 	case PhysicalOperatorType::TOP_N:
@@ -636,9 +715,14 @@ static bool TryAccumulateExecutionRegionPhysicalOperatorCost(const PhysicalOpera
 	}
 	case PhysicalOperatorType::UNGROUPED_AGGREGATE: {
 		auto &aggregate = op.Cast<PhysicalUngroupedAggregate>();
-		builder.AddGeneratedExpressionWork(ExecutionRegionPhysicalExpressionListCost(aggregate.aggregates));
+		builder.AddGeneratedExpressionWork(ExecutionRegionPhysicalAggregateListCost(aggregate.aggregates));
 		if (slot != ExecutionRegionPhysicalPipelineSlot::SOURCE) {
 			traits.aggregate_count++;
+		}
+		if (slot == ExecutionRegionPhysicalPipelineSlot::SINK &&
+		    !ExecutionRegionPhysicalAggregateSinkCanAnchorNativePipeline(op)) {
+			facts.native_sink_boundary = true;
+			return true;
 		}
 		builder.AddNativeAggregateStage(false);
 		return true;
@@ -646,10 +730,15 @@ static bool TryAccumulateExecutionRegionPhysicalOperatorCost(const PhysicalOpera
 	case PhysicalOperatorType::HASH_GROUP_BY: {
 		auto &aggregate = op.Cast<PhysicalHashAggregate>();
 		auto expression_cost = ExecutionRegionPhysicalExpressionListCost(aggregate.grouped_aggregate_data.groups);
-		expression_cost += ExecutionRegionPhysicalExpressionListCost(aggregate.grouped_aggregate_data.aggregates);
+		expression_cost += ExecutionRegionPhysicalAggregateListCost(aggregate.grouped_aggregate_data.aggregates);
 		builder.AddGeneratedExpressionWork(expression_cost);
 		if (slot != ExecutionRegionPhysicalPipelineSlot::SOURCE) {
 			traits.aggregate_count++;
+		}
+		if (slot == ExecutionRegionPhysicalPipelineSlot::SINK &&
+		    !ExecutionRegionPhysicalAggregateSinkCanAnchorNativePipeline(op)) {
+			facts.native_sink_boundary = true;
+			return true;
 		}
 		builder.AddNativeAggregateStage(true);
 		if (ExecutionRegionHashAggregateLookupIsBlocked(aggregate.GetExecutionContract().sink.aggregate_contract)) {
@@ -660,10 +749,15 @@ static bool TryAccumulateExecutionRegionPhysicalOperatorCost(const PhysicalOpera
 	case PhysicalOperatorType::PERFECT_HASH_GROUP_BY: {
 		auto &aggregate = op.Cast<PhysicalPerfectHashAggregate>();
 		auto expression_cost = ExecutionRegionPhysicalExpressionListCost(aggregate.groups);
-		expression_cost += ExecutionRegionPhysicalExpressionListCost(aggregate.aggregates);
+		expression_cost += ExecutionRegionPhysicalAggregateListCost(aggregate.aggregates);
 		builder.AddGeneratedExpressionWork(expression_cost);
 		if (slot != ExecutionRegionPhysicalPipelineSlot::SOURCE) {
 			traits.aggregate_count++;
+		}
+		if (slot == ExecutionRegionPhysicalPipelineSlot::SINK &&
+		    !ExecutionRegionPhysicalAggregateSinkCanAnchorNativePipeline(op)) {
+			facts.native_sink_boundary = true;
+			return true;
 		}
 		builder.AddNativeAggregateStage(true);
 		return true;
@@ -676,6 +770,14 @@ static bool TryAccumulateExecutionRegionPhysicalOperatorCost(const PhysicalOpera
 		builder.AddNativeJoinStage();
 		return true;
 	case PhysicalOperatorType::NESTED_LOOP_JOIN:
+	case PhysicalOperatorType::LEFT_DELIM_JOIN:
+	case PhysicalOperatorType::RIGHT_DELIM_JOIN:
+	case PhysicalOperatorType::BLOCKWISE_NL_JOIN:
+	case PhysicalOperatorType::PIECEWISE_MERGE_JOIN:
+	case PhysicalOperatorType::IE_JOIN:
+	case PhysicalOperatorType::ASOF_JOIN:
+	case PhysicalOperatorType::CROSS_PRODUCT:
+	case PhysicalOperatorType::POSITIONAL_JOIN:
 		if (slot == ExecutionRegionPhysicalPipelineSlot::OPERATOR) {
 			traits.operator_count++;
 		}
@@ -689,8 +791,14 @@ static bool TryAccumulateExecutionRegionPhysicalOperatorCost(const PhysicalOpera
 	case PhysicalOperatorType::COLUMN_DATA_SCAN:
 	case PhysicalOperatorType::CHUNK_SCAN:
 	case PhysicalOperatorType::CTE_SCAN:
+	case PhysicalOperatorType::DELIM_SCAN:
+	case PhysicalOperatorType::EXPRESSION_SCAN:
 	case PhysicalOperatorType::POSITIONAL_SCAN:
 	case PhysicalOperatorType::CTE:
+	case PhysicalOperatorType::LIMIT:
+	case PhysicalOperatorType::LIMIT_PERCENT:
+	case PhysicalOperatorType::STREAMING_LIMIT:
+	case PhysicalOperatorType::EMPTY_RESULT:
 	case PhysicalOperatorType::RESULT_COLLECTOR:
 	case PhysicalOperatorType::EXPLAIN_ANALYZE:
 	case PhysicalOperatorType::CREATE_TABLE_AS:
@@ -731,16 +839,18 @@ static void FinalizeExecutionRegionPhysicalPipelineCostInput(Pipeline &pipeline,
 	    facts.traits.sink_kind == ExecutionRegionSinkKind::SORT) {
 		builder.ClearNativeSortStages();
 	}
-	if (cost_input.generated_stage_count > 0 && cost_input.native_aggregate_stage_count > 0) {
+	if (cost_input.native_aggregate_stage_count > 0 &&
+	    (facts.traits.filter_count > 0 || facts.traits.source_filter_expression_count > 0)) {
 		builder.SetMaterializationElisionCount(1);
 	}
 	builder.SetSourceFilterCount(facts.traits.source_filter_count);
 	builder.SetMaterializationSourceAppendCount(facts.traits.sink_kind == ExecutionRegionSinkKind::MATERIALIZATION
 	                                                ? facts.traits.reference_varchar_projection_count
 	                                                : 0);
-	builder.SetHasAcceleratedWork(cost_input.generated_stage_count > 0 || cost_input.native_join_stage_count > 0 ||
-	                              cost_input.native_aggregate_stage_count > 0 ||
-	                              cost_input.native_sort_stage_count > 0 || cost_input.full_pipeline);
+	builder.SetHasAcceleratedWork(!facts.native_sink_boundary &&
+	                              (cost_input.generated_stage_count > 0 || cost_input.native_join_stage_count > 0 ||
+	                               cost_input.native_aggregate_stage_count > 0 ||
+	                               cost_input.native_sort_stage_count > 0 || cost_input.full_pipeline));
 }
 
 bool TryBuildExecutionRegionPipelineCostInput(Pipeline &pipeline, PhysicalRunnerCostInput &cost_input) {

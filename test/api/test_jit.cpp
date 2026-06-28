@@ -633,7 +633,7 @@ TEST_CASE("JIT CBO keeps startup uniform instead of shape waivers", "[api][jit]"
 	REQUIRE_FALSE(profile.selected_accelerated_runner);
 }
 
-TEST_CASE("JIT CBO exposes physical pipeline scope separately from candidate admission", "[api][jit]") {
+TEST_CASE("JIT CBO does not use physical pipeline scope as full-pipeline proof", "[api][jit]") {
 	PhysicalRunnerCostInput input;
 	input.estimated_cardinality = 2048;
 	input.full_pipeline = true;
@@ -652,10 +652,10 @@ TEST_CASE("JIT CBO exposes physical pipeline scope separately from candidate adm
 	input.input_scope = PhysicalRunnerCostInputScope::PHYSICAL_PIPELINE;
 	profile = DuckDBCostModel::SelectPhysicalRunner(input, parameters);
 	REQUIRE(profile.input_scope == PhysicalRunnerCostInputScope::PHYSICAL_PIPELINE);
-	REQUIRE(profile.admission_class == "physical_pipeline_graph");
-	REQUIRE(profile.full_pipeline_work == 100);
-	REQUIRE(profile.saved_work_per_batch == 100);
-	REQUIRE(profile.selected_accelerated_runner);
+	REQUIRE(profile.admission_class == "none");
+	REQUIRE(profile.full_pipeline_work == 0);
+	REQUIRE(profile.saved_work_per_batch == 0);
+	REQUIRE_FALSE(profile.selected_accelerated_runner);
 }
 
 TEST_CASE("JIT CBO discounts DuckDB-owned scan-filter rows before admitting native work", "[api][jit]") {
@@ -865,13 +865,14 @@ TEST_CASE("JIT auto planner cost skips cheap projections", "[api][jit]") {
 	RequireJitEvent(
 	    manager,
 	    [](const ExecutionRegionEvent &event) {
-		    return EventStatus(event) == "skipped" && event.has_candidate &&
-		           event.candidate_estimated_cardinality == 16;
+		    return IsSljitRegionEvent(event) && EventStatus(event) == "skipped" && IsVectorizedCboSkipEvent(event) &&
+		           event.runner_cost.rows == 16;
 	    },
 	    [](const ExecutionRegionEvent &event) {
-		    REQUIRE(event.has_candidate);
-		    REQUIRE(event.candidate_estimated_cardinality == 16);
-		    REQUIRE(event.selected_runner == ExecutionRunnerKind::VECTORIZED);
+		    REQUIRE_FALSE(event.has_candidate);
+		    RequireVectorizedCboSkip(event);
+		    RequirePipelineCboOnlyTiming(event);
+		    REQUIRE(StringUtil::Contains(event.reason, "region_graph=skipped"));
 	    });
 
 	for (auto &event : manager.GetEvents()) {
@@ -1790,32 +1791,6 @@ TEST_CASE("SLJIT direct append resized transient segments survive reopen and dro
 	TestDeleteFile(db_path + ".wal");
 }
 
-TEST_CASE("JIT auto planner skips native-contract projection glue before sort", "[api][jit]") {
-	JitTestDatabase test;
-	auto &con = test.con;
-	auto &manager = test.manager;
-
-	ConfigureSljitForCoverage(con, false, false, false, 10000);
-	ConfigureJitDecisionTrace(con);
-	CreateJitStatefulSortInput(con);
-
-	ClearJitTrace(manager, true);
-	auto result = RunJitStatefulSortQuery(con);
-	REQUIRE_NO_FAIL(*result);
-
-	RequireJitEvent(
-	    manager,
-	    [](const ExecutionRegionEvent &event) {
-		    return IsSljitRegionEvent(event) && EventStatus(event) == "skipped" &&
-		           IsStatefulSortProjectionGlueCandidate(event);
-	    },
-	    [](const ExecutionRegionEvent &event) { RequireNativeContractProjectionGlueSkipped(event); });
-
-	for (auto &event : manager.GetEvents()) {
-		REQUIRE_FALSE((IsCompiledSljitRegionEvent(event) && IsStatefulSortProjectionGlueCandidate(event)));
-	}
-}
-
 TEST_CASE("JIT auto planner skips native-contract projection glue before region graph", "[api][jit]") {
 	JitTestDatabase test;
 	auto &con = test.con;
@@ -1871,16 +1846,16 @@ TEST_CASE("JIT auto planner keeps division projection as compute before region g
 	RequireJitEvent(
 	    manager,
 	    [](const ExecutionRegionEvent &event) {
-		    return IsSljitRegionEvent(event) && event.has_candidate && event.runner_cost.present &&
-		           event.candidate_traits.source_kind == ExecutionRegionSourceKind::STATEFUL_OPERATOR &&
-		           event.candidate_traits.sink_kind == ExecutionRegionSinkKind::SORT &&
-		           event.candidate_traits.projection_count > 0 &&
-		           event.candidate_traits.arithmetic_projection_count > 0;
+		    return IsSljitRegionEvent(event) && EventStatus(event) == "skipped" && IsVectorizedCboSkipEvent(event) &&
+		           event.runner_cost.generated_work_class == PhysicalRunnerGeneratedWorkClass::COMPUTE &&
+		           event.runner_cost.native_sort_stage_count > 0;
 	    },
 	    [](const ExecutionRegionEvent &event) {
+		    REQUIRE_FALSE(event.has_candidate);
 		    REQUIRE(event.runner_cost.generated_work_class == PhysicalRunnerGeneratedWorkClass::COMPUTE);
 		    REQUIRE(event.stage_timings.graph_build_time_us >= 0);
 		    REQUIRE(event.stage_timings.ir_lowering_time_us >= 0);
+		    REQUIRE(StringUtil::Contains(event.reason, "region_graph=skipped"));
 	    });
 }
 
@@ -2031,15 +2006,17 @@ TEST_CASE("JIT auto planner cost skips aggregate codegen when native and pipelin
 	RequireJitEvent(
 	    manager,
 	    [](const ExecutionRegionEvent &event) {
-		    return IsSljitRegionEvent(event) && EventStatus(event) == "skipped" &&
-		           event.candidate_traits.sink_kind == ExecutionRegionSinkKind::UNGROUPED_AGGREGATE_UPDATE;
+		    return IsSljitRegionEvent(event) && EventStatus(event) == "skipped" && !event.has_candidate &&
+		           event.runner_cost.present &&
+		           event.runner_cost.input_scope == PhysicalRunnerCostInputScope::PHYSICAL_PIPELINE &&
+		           event.runner_cost.native_aggregate_stage_count > 0;
 	    },
 	    [](const ExecutionRegionEvent &event) {
 		    REQUIRE(event.selected_runner == ExecutionRunnerKind::VECTORIZED);
-		    REQUIRE(event.runner_cost.present);
 		    REQUIRE_FALSE(event.runner_cost.selected_accelerated_runner);
 		    REQUIRE(event.runner_cost.saved_work_per_batch >= event.runner_cost.expression_cost);
 		    REQUIRE(StringUtil::Contains(event.reason, "duckdb_cbo selects vectorized physical runner"));
+		    REQUIRE(StringUtil::Contains(event.reason, "region_graph=skipped"));
 	    });
 
 	for (auto &event : manager.GetEvents()) {
@@ -2074,16 +2051,16 @@ TEST_CASE("JIT auto planner cost uses configurable CBO settings", "[api][jit]") 
 	RequireJitEvent(
 	    manager,
 	    [](const ExecutionRegionEvent &event) {
-		    return IsSljitRegionEvent(event) && EventStatus(event) == "skipped" &&
-		           CandidateHasStructure(event, 0, 1, ExecutionRegionSinkKind::MATERIALIZATION);
+		    return IsSljitRegionEvent(event) && EventStatus(event) == "skipped" && IsVectorizedCboSkipEvent(event) &&
+		           event.runner_cost.rows == 500000 && event.runner_cost.generated_stage_count > 0;
 	    },
 	    [](const ExecutionRegionEvent &event) {
-		    REQUIRE(event.selected_runner == ExecutionRunnerKind::VECTORIZED);
-		    REQUIRE(event.runner_cost.present);
+		    REQUIRE_FALSE(event.has_candidate);
+		    RequireVectorizedCboSkip(event);
 		    REQUIRE_FALSE(event.runner_cost.selected_accelerated_runner);
 		    REQUIRE(event.runner_cost.startup_cost >= 1000000000);
 		    REQUIRE(event.runner_cost.accelerated_runner_benefit < event.runner_cost.required_benefit);
-		    REQUIRE(StringUtil::Contains(event.reason, "duckdb_cbo selects vectorized physical runner"));
+		    REQUIRE(StringUtil::Contains(event.reason, "region_graph=skipped"));
 	    });
 }
 
@@ -2192,9 +2169,13 @@ TEST_CASE("JIT auto planner cost skips tiny filtered sums", "[api][jit]") {
 
 	RequireJitEvent(
 	    manager,
-	    [](const ExecutionRegionEvent &event) { return EventStatus(event) == "skipped" && event.has_candidate; },
 	    [](const ExecutionRegionEvent &event) {
-		    REQUIRE(event.has_candidate);
-		    REQUIRE(event.selected_runner == ExecutionRunnerKind::VECTORIZED);
+		    return IsSljitRegionEvent(event) && EventStatus(event) == "skipped" && IsVectorizedCboSkipEvent(event) &&
+		           event.runner_cost.native_aggregate_stage_count > 0;
+	    },
+	    [](const ExecutionRegionEvent &event) {
+		    REQUIRE_FALSE(event.has_candidate);
+		    RequireVectorizedCboSkip(event);
+		    REQUIRE(StringUtil::Contains(event.reason, "region_graph=skipped"));
 	    });
 }

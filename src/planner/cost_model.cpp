@@ -334,20 +334,16 @@ static PhysicalRunnerShapeFacts PhysicalRunnerBuildShapeFacts(const PhysicalRunn
 	return facts;
 }
 
-static bool PhysicalRunnerFullPipelineBenefitCanOpenGraph(const PhysicalRunnerCostInput &input) {
-	return input.input_scope == PhysicalRunnerCostInputScope::PHYSICAL_PIPELINE && input.full_pipeline;
-}
-
 static bool PhysicalRunnerFullPipelineBenefitPaysEmptyFullPipelineProof(const PhysicalRunnerCostInput &input,
                                                                         const PhysicalRunnerShapeFacts &facts) {
-	return input.full_pipeline && facts.native_operator_stage_count == 0 && input.generated_stage_count == 0 &&
+	return input.input_scope == PhysicalRunnerCostInputScope::EXECUTION_REGION_CANDIDATE && input.full_pipeline &&
+	       facts.native_operator_stage_count == 0 && input.generated_stage_count == 0 &&
 	       input.materialization_elision_count == 0;
 }
 
 static bool PhysicalRunnerFullPipelineBenefitPays(const PhysicalRunnerCostInput &input,
                                                   const PhysicalRunnerShapeFacts &facts) {
-	return PhysicalRunnerFullPipelineBenefitCanOpenGraph(input) ||
-	       PhysicalRunnerFullPipelineBenefitPaysEmptyFullPipelineProof(input, facts);
+	return PhysicalRunnerFullPipelineBenefitPaysEmptyFullPipelineProof(input, facts);
 }
 
 static bool PhysicalRunnerNativeStageBenefitCanPay(const PhysicalRunnerCostInput &input,
@@ -378,8 +374,7 @@ static string PhysicalRunnerAdmissionClass(const PhysicalRunnerCostInput &input,
 		return "materialization_elision";
 	}
 	if (full_pipeline_benefit_pays) {
-		return input.input_scope == PhysicalRunnerCostInputScope::PHYSICAL_PIPELINE ? "physical_pipeline_graph"
-		                                                                            : "full_pipeline";
+		return "full_pipeline";
 	}
 	if (facts.native_operator_stage_count == 0) {
 		return facts.has_generated_compute_work && input.generated_stage_count > 0 &&

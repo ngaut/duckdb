@@ -133,6 +133,7 @@ TEST_CASE("JIT CBO skips bodyless native hash-build candidates before backend an
 	    },
 	    [](const ExecutionRegionEvent &event) {
 		    RequireVectorizedCboSkip(event);
+		    REQUIRE(event.has_candidate);
 		    REQUIRE(event.stage_timings.backend_analysis_time_us == 0);
 		    REQUIRE(event.runner_cost.native_join_stage_count > 0);
 		    REQUIRE_FALSE(event.runner_cost.full_pipeline);

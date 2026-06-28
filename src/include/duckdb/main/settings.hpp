@@ -1508,7 +1508,7 @@ struct JitPolicySetting {
 struct JitTraceDecisionsSetting {
 	using RETURN_TYPE = bool;
 	static constexpr const char *Name = "jit_trace_decisions";
-	static constexpr const char *Description = "Record detailed per-candidate physical-runner decision events";
+	static constexpr const char *Description = "Record physical-runner decision events";
 	static constexpr const char *InputType = "BOOLEAN";
 	static constexpr const char *DefaultValue = "false";
 	static constexpr SettingScopeTarget Scope = SettingScopeTarget::LOCAL_DEFAULT;
