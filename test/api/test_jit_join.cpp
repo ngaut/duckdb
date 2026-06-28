@@ -141,6 +141,39 @@ TEST_CASE("JIT CBO skips bodyless native hash-build candidates before backend an
 	    });
 }
 
+TEST_CASE("JIT CBO does not cost nested-loop join protocol as native join work", "[api][jit]") {
+	DuckDB db;
+	Connection con(db);
+	auto &manager = ExecutionRegionManager::Get(*con.context);
+
+	ConfigureSljit(con, "auto", false, false, false, 10000);
+	ConfigureJitDecisionTrace(con);
+	REQUIRE_NO_FAIL(con.Query("SET nested_loop_join_threshold=1000000"));
+	REQUIRE_NO_FAIL(con.Query("SET merge_join_threshold=1000000"));
+	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_nested_cost_l AS "
+	                          "SELECT i::BIGINT AS i FROM range(4096) tbl(i)"));
+	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_nested_cost_r AS "
+	                          "SELECT i::BIGINT AS j FROM range(64) tbl(i)"));
+	REQUIRE_NO_FAIL(con.Query("ANALYZE jit_nested_cost_l"));
+	REQUIRE_NO_FAIL(con.Query("ANALYZE jit_nested_cost_r"));
+
+	ClearJitTrace(manager, true);
+	auto result = con.Query("SELECT count(*) FROM jit_nested_cost_l l JOIN jit_nested_cost_r r ON l.i < r.j");
+	REQUIRE_NO_FAIL(*result);
+	REQUIRE(result->GetValue(0, 0).ToString() == "2016");
+
+	bool found_nested_loop_physical_cbo = false;
+	for (auto &event : manager.GetEvents()) {
+		if (!IsSljitRegionEvent(event) || EventPhase(event) != "decision" || !event.runner_cost.present ||
+		    event.runner_cost.input_scope != PhysicalRunnerCostInputScope::PHYSICAL_PIPELINE) {
+			continue;
+		}
+		found_nested_loop_physical_cbo = true;
+		REQUIRE(event.runner_cost.native_join_stage_count == 0);
+	}
+	REQUIRE(found_nested_loop_physical_cbo);
+}
+
 TEST_CASE("JIT auto costs hash join regions through planner cost selection", "[api][jit]") {
 	DuckDB db;
 	Connection con(db);

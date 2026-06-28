@@ -222,23 +222,16 @@ static ExecutionRegionStageCostFact GetExecutionRegionStageCostFact(const Execut
 	case ExecutionRegionStageKind::HASH_JOIN_BUILD:
 		break;
 	case ExecutionRegionStageKind::HASH_JOIN_PROBE:
-	case ExecutionRegionStageKind::NESTED_LOOP_JOIN_PROBE:
-	case ExecutionRegionStageKind::NESTED_LOOP_JOIN_BUILD:
 		result.work_kind = ExecutionRegionStageCostWorkKind::NATIVE_JOIN;
 		result.may_anchor_compiled_body = true;
 		break;
 	case ExecutionRegionStageKind::HASH_AGGREGATE_UPDATE:
-	case ExecutionRegionStageKind::HASH_AGGREGATE_DISTINCT_SINK:
 	case ExecutionRegionStageKind::PERFECT_HASH_AGGREGATE_UPDATE:
 		result.work_kind = ExecutionRegionStageCostWorkKind::NATIVE_GROUPED_AGGREGATE;
 		result.may_anchor_compiled_body = true;
 		break;
 	case ExecutionRegionStageKind::UNGROUPED_AGGREGATE_UPDATE:
 		result.work_kind = ExecutionRegionStageCostWorkKind::NATIVE_UNGROUPED_AGGREGATE;
-		result.may_anchor_compiled_body = true;
-		break;
-	case ExecutionRegionStageKind::SORT_SINK:
-		result.work_kind = ExecutionRegionStageCostWorkKind::NATIVE_SORT;
 		result.may_anchor_compiled_body = true;
 		break;
 	default:
@@ -771,9 +764,6 @@ static bool TryAccumulateExecutionRegionPhysicalOperatorCost(const PhysicalOpera
 	case PhysicalOperatorType::NESTED_LOOP_JOIN:
 		if (slot == ExecutionRegionPhysicalPipelineSlot::OPERATOR) {
 			traits.operator_count++;
-			builder.AddNativeJoinStage();
-		} else if (slot == ExecutionRegionPhysicalPipelineSlot::SINK) {
-			builder.AddNativeJoinStage();
 		}
 		return true;
 	case PhysicalOperatorType::LEFT_DELIM_JOIN:
