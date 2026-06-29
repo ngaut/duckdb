@@ -310,8 +310,6 @@ DUCKDB_API const char *ExecutionRegionOperatorKindToTraceLabel(ExecutionRegionOp
 DUCKDB_API const char *ExecutionRegionNodeKindToString(ExecutionRegionNodeKind kind);
 DUCKDB_API const char *ExecutionRegionABIToString(ExecutionRegionABI abi);
 DUCKDB_API bool ExecutionRegionABIIsFullPipeline(ExecutionRegionABI abi);
-DUCKDB_API bool ExecutionRegionABIOwnsSource(ExecutionRegionABI abi);
-DUCKDB_API bool ExecutionRegionABIOwnsSink(ExecutionRegionABI abi);
 DUCKDB_API const char *ExecutionRegionSourceKindToString(ExecutionRegionSourceKind kind);
 DUCKDB_API const char *ExecutionRegionSourceExecutionKindToString(ExecutionRegionSourceExecutionKind kind);
 DUCKDB_API const char *ExecutionRegionSourceContractStatusToString(ExecutionRegionSourceContractStatus status);

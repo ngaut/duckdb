@@ -174,14 +174,6 @@ const char *ExecutionRegionABIToString(ExecutionRegionABI abi) {
 	}
 }
 
-bool ExecutionRegionABIOwnsSource(ExecutionRegionABI abi) {
-	return abi == ExecutionRegionABI::FULL_PIPELINE;
-}
-
-bool ExecutionRegionABIOwnsSink(ExecutionRegionABI abi) {
-	return abi == ExecutionRegionABI::FULL_PIPELINE;
-}
-
 bool ExecutionRegionABIIsFullPipeline(ExecutionRegionABI abi) {
 	return abi == ExecutionRegionABI::FULL_PIPELINE;
 }

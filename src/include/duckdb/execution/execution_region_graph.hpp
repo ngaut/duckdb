@@ -65,20 +65,11 @@ struct ExecutionRegionOperatorEntry {
 		return operator_kind == ExecutionRegionOperatorKind::TABLE_SCAN ||
 		       operator_kind == ExecutionRegionOperatorKind::SCAN_SOURCE;
 	}
-	bool IsTableScanSource() const {
-		return operator_kind == ExecutionRegionOperatorKind::TABLE_SCAN;
-	}
 	bool IsFilter() const {
 		return operator_kind == ExecutionRegionOperatorKind::FILTER;
 	}
 	bool IsProjection() const {
 		return operator_kind == ExecutionRegionOperatorKind::PROJECTION;
-	}
-	bool IsHashJoin() const {
-		return operator_kind == ExecutionRegionOperatorKind::HASH_JOIN;
-	}
-	bool IsNestedLoopJoin() const {
-		return operator_kind == ExecutionRegionOperatorKind::NESTED_LOOP_JOIN;
 	}
 	bool IsSortSink() const {
 		return operator_kind == ExecutionRegionOperatorKind::ORDER_BY ||
@@ -86,11 +77,6 @@ struct ExecutionRegionOperatorEntry {
 	}
 	bool IsMaterializationSink() const {
 		return operator_kind == ExecutionRegionOperatorKind::CTE ||
-		       operator_kind == ExecutionRegionOperatorKind::RESULT_COLLECTOR ||
-		       operator_kind == ExecutionRegionOperatorKind::EXPLAIN_ANALYZE;
-	}
-	bool IsWrapperOnlySource() const {
-		return operator_kind == ExecutionRegionOperatorKind::CREATE_TABLE_AS ||
 		       operator_kind == ExecutionRegionOperatorKind::RESULT_COLLECTOR ||
 		       operator_kind == ExecutionRegionOperatorKind::EXPLAIN_ANALYZE;
 	}

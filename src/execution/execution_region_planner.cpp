@@ -285,7 +285,7 @@ static bool ExecutionRegionRuntimeCanEnter(Pipeline &pipeline, string &reason) {
 static void AccumulateExecutionRegionOpenRequest(ExecutionRegionPlan &plan, const ExecutionRegionIR &region_ir,
                                                  const ExecutionRegionCandidate &candidate,
                                                  const ExecutionRegionLoweringPlan &lowering_plan) {
-	if (!ExecutionRegionABIOwnsSource(candidate.contract.abi)) {
+	if (!ExecutionRegionABIIsFullPipeline(candidate.contract.abi)) {
 		return;
 	}
 	for (idx_t node_idx = candidate.first_node; node_idx < candidate.EndNode(); node_idx++) {

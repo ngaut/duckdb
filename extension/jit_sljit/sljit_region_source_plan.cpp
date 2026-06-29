@@ -381,8 +381,8 @@ static SljitRegionNodePlan PlanSljitSourceContractNode(const ExecutionRegionNode
 	if (!table_scan_contract.present) {
 		return SljitRegionBoundaryNode("source contract requires typed table scan contract IR");
 	}
-	if (!ExecutionRegionABIOwnsSource(contract.abi)) {
-		return SljitRegionBoundaryNode("source contract requires source ownership in the region contract");
+	if (!ExecutionRegionABIIsFullPipeline(contract.abi)) {
+		return SljitRegionBoundaryNode("source contract requires full-pipeline region ABI");
 	}
 
 	if (node.source->filters.empty()) {
@@ -435,8 +435,8 @@ static SljitRegionNodePlan PlanSljitNativeStateScanSourceNode(const ExecutionReg
 	if (node.source->native_state_scan_contract.status != ExecutionRegionStateContractStatus::READY) {
 		return SljitRegionBoundaryNode("native state scan source requires a ready state-scan contract");
 	}
-	if (!ExecutionRegionABIOwnsSource(contract.abi)) {
-		return SljitRegionBoundaryNode("native state scan source requires source ownership in the region contract");
+	if (!ExecutionRegionABIIsFullPipeline(contract.abi)) {
+		return SljitRegionBoundaryNode("native state scan source requires full-pipeline region ABI");
 	}
 	if (!node.source->filters.empty()) {
 		return SljitRegionBoundaryNode("native state scan source does not own source-pushed filters");
@@ -460,8 +460,8 @@ static SljitRegionNodePlan PlanSljitNativeStatefulSourceNode(const ExecutionRegi
 	if (node.source->source_contract.status != ExecutionRegionSourceContractStatus::READY) {
 		return SljitRegionBoundaryNode("stateful source requires a ready source contract");
 	}
-	if (!ExecutionRegionABIOwnsSource(contract.abi)) {
-		return SljitRegionBoundaryNode("native stateful source requires source ownership in the region contract");
+	if (!ExecutionRegionABIIsFullPipeline(contract.abi)) {
+		return SljitRegionBoundaryNode("native stateful source requires full-pipeline region ABI");
 	}
 	if (!node.source->filters.empty()) {
 		return SljitRegionBoundaryNode("native stateful source does not own source-pushed filters");
@@ -519,8 +519,8 @@ SljitRegionNodePlan PlanSljitSourceNode(const ExecutionRegionNode &node, const E
 		auto reason = "source-pushed filters require DuckDB scan source contract ownership;source_execution=" +
 		              string(ExecutionRegionSourceExecutionKindToString(node.source->execution));
 		AppendSljitSourceFilterFacts(reason, node, table_scan_contract, true);
-		if (!ExecutionRegionABIOwnsSource(contract.abi)) {
-			reason += ";source_contract_ownership_contract=source_required";
+		if (!ExecutionRegionABIIsFullPipeline(contract.abi)) {
+			reason += ";source_contract_abi=full_pipeline_required";
 			AppendSljitSourceIR(reason, node, render_diagnostics, source_execution);
 			return SljitRegionBoundaryNode(std::move(reason));
 		}
@@ -535,7 +535,7 @@ SljitRegionNodePlan PlanSljitSourceNode(const ExecutionRegionNode &node, const E
 }
 
 bool SljitCanExecuteSourceNode(const ExecutionRegionNode &node, const ExecutionRegionContract &contract) {
-	if (!ExecutionRegionABIOwnsSource(contract.abi) || !node.source) {
+	if (!ExecutionRegionABIIsFullPipeline(contract.abi) || !node.source) {
 		return false;
 	}
 	if (node.source->source_contract.status == ExecutionRegionSourceContractStatus::READY ||
