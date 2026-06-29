@@ -8328,22 +8328,9 @@ public:
 		}
 		DataChunk accumulated_groups;
 		accumulated_groups.Initialize(runtime.GetAllocator(), group_types);
-		bool bound = false;
-		auto bind_stage_start = SljitRegionStageStart(runtime);
-		auto &binding = BindNativeSink(native_runtime, scratch, AGGREGATE_IDX, accumulated_groups, sink_info,
-		                               "aggregate-update-runtime-binding-failed", "SLJIT aggregate update sink", bound);
-		if (bound) {
-			RecordSljitRegionStageRuntime(runtime, AGGREGATE_IDX, aggregate_op.kind, "bind_sink_contract",
-			                              bind_stage_start);
-		}
-		if (!binding.ready || !binding.aggregate_update.ready || !binding.aggregate_update.primitive.ready ||
-		    !binding.aggregate_update.grouped_state.ready || !binding.aggregate_update.grouped_state.state) {
-			return TryExecuteFullPipelineUnbatched(runtime, result);
-		}
-		auto &payload_lanes =
-		    scratch.AggregatePayloadLanes(AGGREGATE_IDX, sink_info.aggregates, binding.aggregate_update.primitive);
-		if (payload_lanes.size() != 1 || !payload_lanes[0] ||
-		    payload_lanes[0]->kind != AggregatePrimitiveUpdateKind::COUNT_STAR) {
+		SljitCountStarGroupedAggregateUpdateDescriptor count_star_update;
+		if (!TryPrepareCountStarGroupedAggregateUpdate(runtime, native_runtime, scratch, AGGREGATE_IDX, aggregate_op,
+		                                               accumulated_groups, count_star_update)) {
 			return TryExecuteFullPipelineUnbatched(runtime, result);
 		}
 
@@ -8362,9 +8349,9 @@ public:
 			}
 			MaterializePreaggregatedCountStarGroups(accumulated_keys, accumulated_counts, accumulated_group_count,
 			                                        accumulated_groups, accumulated_deltas);
-			if (!TryExecutePreaggregatedCountStarGroupedAggregateUpdate(
-			        runtime, native_runtime, scratch, AGGREGATE_IDX, aggregate_op, accumulated_groups,
-			        accumulated_deltas, accumulated_input_count, false, nullptr)) {
+			if (!TryExecutePreparedPreaggregatedCountStarGroupedAggregateUpdate(
+			        runtime, scratch, AGGREGATE_IDX, aggregate_op, accumulated_groups, accumulated_deltas,
+			        count_star_update, accumulated_input_count, false, nullptr)) {
 				throw InternalException("SLJIT projection count-star grouped accumulator failed to flush");
 			}
 			RecordSljitRegionRuntimePath(runtime, aggregate_op.kind, "cross_chunk_preaggregated_count_star_update",
@@ -9100,6 +9087,9 @@ public:
 		DataChunk compact_groups;
 		compact_groups.Initialize(runtime.GetAllocator(), projection_op.output_types);
 		vector<int64_t> preaggregated_count_deltas;
+		SljitCountStarGroupedAggregateUpdateDescriptor count_star_update;
+		TryPrepareCountStarGroupedAggregateUpdate(runtime, native_runtime, scratch, AGGREGATE_IDX, aggregate_op,
+		                                          compact_groups, count_star_update);
 
 		auto finish_deferred_grouped_update = [&]() {
 			if (!deferred_grouped_finish) {
@@ -9181,7 +9171,7 @@ public:
 		};
 
 		auto try_preaggregated_count_star_batch = [&](DataChunk &projected) -> bool {
-			if (projected.size() == 0) {
+			if (projected.size() == 0 || !count_star_update.Ready()) {
 				return false;
 			}
 			auto preaggregate_stage_start = SljitRegionStageStart(runtime);
@@ -9190,9 +9180,9 @@ public:
 			}
 			RecordSljitRegionStageRuntime(runtime, AGGREGATE_IDX, aggregate_op.kind,
 			                              "local_preaggregate_count_star_groups", preaggregate_stage_start);
-			if (!TryExecutePreaggregatedCountStarGroupedAggregateUpdate(
-			        runtime, native_runtime, scratch, AGGREGATE_IDX, aggregate_op, compact_groups,
-			        preaggregated_count_deltas, projected.size(), true, &deferred_grouped_finish)) {
+			if (!TryExecutePreparedPreaggregatedCountStarGroupedAggregateUpdate(
+			        runtime, scratch, AGGREGATE_IDX, aggregate_op, compact_groups, preaggregated_count_deltas,
+			        count_star_update, projected.size(), true, &deferred_grouped_finish)) {
 				return false;
 			}
 			SljitChargeDownstreamRows(processed_output_rows, projected.size());
@@ -9270,7 +9260,7 @@ public:
 				    scratch.HasOperatorBinding(HASH_JOIN_IDX) &&
 				    TryReferenceMarkProbeFilterInput(scratch.OperatorBinding(HASH_JOIN_IDX).hash_join_probe,
 				                                     source_chunk, mark_count, join_output);
-				if (referenced_mark_input) {
+				if (referenced_mark_input && count_star_update.Ready()) {
 					idx_t preaggregated_selected_count = 0;
 					auto direct_preaggregate_stage_start = SljitRegionStageStart(runtime);
 					if (TryPreaggregateProjectedMarkedCountStarGroups(
@@ -9283,9 +9273,9 @@ public:
 						if (preaggregated_selected_count == 0) {
 							continue;
 						}
-						if (TryExecutePreaggregatedCountStarGroupedAggregateUpdate(
-						        runtime, native_runtime, scratch, AGGREGATE_IDX, aggregate_op, compact_groups,
-						        preaggregated_count_deltas, preaggregated_selected_count, true,
+						if (TryExecutePreparedPreaggregatedCountStarGroupedAggregateUpdate(
+						        runtime, scratch, AGGREGATE_IDX, aggregate_op, compact_groups,
+						        preaggregated_count_deltas, count_star_update, preaggregated_selected_count, true,
 						        &deferred_grouped_finish)) {
 							SljitChargeDownstreamRows(processed_output_rows, preaggregated_selected_count);
 							continue;
@@ -9319,14 +9309,15 @@ public:
 
 				const auto *execute_sel = selected_count == mark_count ? nullptr : &mark_selection;
 				auto direct_preaggregate_stage_start = SljitRegionStageStart(runtime);
-				if (TryPreaggregateProjectedCountStarGroups(projection_op, join_output, execute_sel, selected_count,
+				if (count_star_update.Ready() &&
+				    TryPreaggregateProjectedCountStarGroups(projection_op, join_output, execute_sel, selected_count,
 				                                            compact_groups, preaggregated_count_deltas)) {
 					RecordSljitRegionStageRuntime(runtime, AGGREGATE_IDX, aggregate_op.kind,
 					                              "direct_preaggregate_count_star_groups",
 					                              direct_preaggregate_stage_start);
-					if (TryExecutePreaggregatedCountStarGroupedAggregateUpdate(
-					        runtime, native_runtime, scratch, AGGREGATE_IDX, aggregate_op, compact_groups,
-					        preaggregated_count_deltas, selected_count, true, &deferred_grouped_finish)) {
+					if (TryExecutePreparedPreaggregatedCountStarGroupedAggregateUpdate(
+					        runtime, scratch, AGGREGATE_IDX, aggregate_op, compact_groups, preaggregated_count_deltas,
+					        count_star_update, selected_count, true, &deferred_grouped_finish)) {
 						SljitChargeDownstreamRows(processed_output_rows, selected_count);
 						continue;
 					}
@@ -17869,6 +17860,66 @@ public:
 		return updated;
 	}
 
+	struct SljitCountStarGroupedAggregateUpdateDescriptor {
+		optional_ptr<ExecutionGroupedAggregateStateAddressBinding> grouped_state;
+		optional_ptr<const ExecutionPrimitiveAggregateUpdateLane> lane;
+
+		bool Ready() const {
+			return grouped_state && lane;
+		}
+	};
+
+	bool TryPrepareCountStarGroupedAggregateUpdate(ExecutionRegionRuntime &runtime,
+	                                               ExecutionOperatorRuntime &native_runtime,
+	                                               SljitRegionExecutionScratch &scratch, idx_t op_idx,
+	                                               SljitExecutableRegionOp &op, DataChunk &bind_groups,
+	                                               SljitCountStarGroupedAggregateUpdateDescriptor &descriptor) {
+		descriptor = SljitCountStarGroupedAggregateUpdateDescriptor();
+		if (op.aggregate_update.plan.sink_info.kind != ExecutionRegionSinkKind::HASH_AGGREGATE_UPDATE ||
+		    !op.aggregate_update.plan.use_primitive_payloads || !op.aggregate_update.plan.use_grouped_state_addresses) {
+			return false;
+		}
+		auto &sink_info = op.aggregate_update.plan.sink_info;
+		if (sink_info.groups.size() != bind_groups.ColumnCount() || sink_info.aggregates.size() != 1 ||
+		    op.aggregate_update.payloads.size() != 1) {
+			return false;
+		}
+		auto &aggregate = sink_info.aggregates[0];
+		if (aggregate.child_count != 0 || aggregate.primitive_update_kind != AggregatePrimitiveUpdateKind::COUNT_STAR) {
+			return false;
+		}
+
+		auto bind_stage_start = SljitRegionStageStart(runtime);
+		bool bound = false;
+		auto &binding = BindNativeSink(native_runtime, scratch, op_idx, bind_groups, sink_info,
+		                               "aggregate-update-runtime-binding-failed", "SLJIT aggregate update sink", bound);
+		if (bound) {
+			RecordSljitRegionStageRuntime(runtime, op_idx, op.kind, "bind_sink_contract", bind_stage_start);
+		}
+		if (!binding.ready || !binding.aggregate_update.ready || !binding.aggregate_update.primitive.ready ||
+		    !binding.aggregate_update.grouped_state.ready || !binding.aggregate_update.grouped_state.state) {
+			return false;
+		}
+		auto &payload_lanes =
+		    scratch.AggregatePayloadLanes(op_idx, sink_info.aggregates, binding.aggregate_update.primitive);
+		if (payload_lanes.size() != 1 || !payload_lanes[0]) {
+			return false;
+		}
+		auto lane = payload_lanes[0];
+		if (!lane->ready || lane->kind != AggregatePrimitiveUpdateKind::COUNT_STAR ||
+		    lane->aggregate_index != aggregate.aggregate_index ||
+		    aggregate.aggregate_index >= sink_info.aggregate_contract.grouped_state_offsets.size() ||
+		    lane->state_offset != sink_info.aggregate_contract.grouped_state_offsets[aggregate.aggregate_index] ||
+		    lane->state_value_offset != aggregate.primitive_update_state_value_offset ||
+		    lane->state_is_set_offset != aggregate.primitive_update_state_is_set_offset) {
+			return false;
+		}
+
+		descriptor.grouped_state = &binding.aggregate_update.grouped_state;
+		descriptor.lane = lane;
+		return true;
+	}
+
 	bool TryExecutePreaggregatedCountStarAddressAggregateUpdate(
 	    ExecutionRegionRuntime &runtime, SljitRegionExecutionScratch &scratch, idx_t op_idx,
 	    SljitExecutableRegionOp &op, DataChunk &compact_groups, const ExecutionPrimitiveAggregateUpdateLane &lane,
@@ -17917,51 +17968,16 @@ public:
 		return true;
 	}
 
-	bool TryExecutePreaggregatedCountStarGroupedAggregateUpdate(
-	    ExecutionRegionRuntime &runtime, ExecutionOperatorRuntime &native_runtime, SljitRegionExecutionScratch &scratch,
-	    idx_t op_idx, SljitExecutableRegionOp &op, DataChunk &compact_groups, const vector<int64_t> &count_deltas,
-	    idx_t preaggregated_row_count, bool defer_grouped_finish, optional_ptr<bool> deferred_grouped_finish) {
-		if (compact_groups.size() == 0 || count_deltas.size() < compact_groups.size() ||
-		    op.aggregate_update.plan.sink_info.kind != ExecutionRegionSinkKind::HASH_AGGREGATE_UPDATE ||
-		    !op.aggregate_update.plan.use_primitive_payloads || !op.aggregate_update.plan.use_grouped_state_addresses) {
+	bool TryExecutePreparedPreaggregatedCountStarGroupedAggregateUpdate(
+	    ExecutionRegionRuntime &runtime, SljitRegionExecutionScratch &scratch, idx_t op_idx,
+	    SljitExecutableRegionOp &op, DataChunk &compact_groups, const vector<int64_t> &count_deltas,
+	    SljitCountStarGroupedAggregateUpdateDescriptor &descriptor, idx_t preaggregated_row_count,
+	    bool defer_grouped_finish, optional_ptr<bool> deferred_grouped_finish) {
+		if (compact_groups.size() == 0 || count_deltas.size() < compact_groups.size() || !descriptor.Ready()) {
 			return false;
 		}
-		auto &sink_info = op.aggregate_update.plan.sink_info;
-		if (sink_info.groups.size() != compact_groups.ColumnCount() || sink_info.aggregates.size() != 1 ||
-		    op.aggregate_update.payloads.size() != 1) {
-			return false;
-		}
-		auto &aggregate = sink_info.aggregates[0];
-		if (aggregate.child_count != 0 || aggregate.primitive_update_kind != AggregatePrimitiveUpdateKind::COUNT_STAR) {
-			return false;
-		}
-
-		auto bind_stage_start = SljitRegionStageStart(runtime);
-		bool bound = false;
-		auto &binding = BindNativeSink(native_runtime, scratch, op_idx, compact_groups, sink_info,
-		                               "aggregate-update-runtime-binding-failed", "SLJIT aggregate update sink", bound);
-		if (bound) {
-			RecordSljitRegionStageRuntime(runtime, op_idx, op.kind, "bind_sink_contract", bind_stage_start);
-		}
-		if (!binding.ready || !binding.aggregate_update.ready || !binding.aggregate_update.primitive.ready ||
-		    !binding.aggregate_update.grouped_state.ready || !binding.aggregate_update.grouped_state.state) {
-			return false;
-		}
-		auto &grouped_state = binding.aggregate_update.grouped_state;
-		auto &payload_lanes =
-		    scratch.AggregatePayloadLanes(op_idx, sink_info.aggregates, binding.aggregate_update.primitive);
-		if (payload_lanes.size() != 1 || !payload_lanes[0]) {
-			return false;
-		}
-		auto lane = payload_lanes[0];
-		if (!lane->ready || lane->kind != AggregatePrimitiveUpdateKind::COUNT_STAR ||
-		    lane->aggregate_index != aggregate.aggregate_index ||
-		    aggregate.aggregate_index >= sink_info.aggregate_contract.grouped_state_offsets.size() ||
-		    lane->state_offset != sink_info.aggregate_contract.grouped_state_offsets[aggregate.aggregate_index] ||
-		    lane->state_value_offset != aggregate.primitive_update_state_value_offset ||
-		    lane->state_is_set_offset != aggregate.primitive_update_state_is_set_offset) {
-			return false;
-		}
+		auto &grouped_state = *descriptor.grouped_state;
+		auto lane = descriptor.lane.get();
 
 		SljitPreaggregatedCountStarUpdateState update_state;
 		update_state.lane = lane;
@@ -17973,7 +17989,8 @@ public:
 			auto stage_name = SljitRegionStageName(op_idx, op.kind, "direct_preaggregated_count_star_update");
 			SljitRegionStageRecorder recorder(runtime, stage_name);
 			updated = grouped_state.state->TryUpdateNewGroupsWithSelectedStateAddresses(
-			    compact_groups, sink_info, ExecuteSljitPreaggregatedCountStarUpdate, &update_state, &recorder, finish);
+			    compact_groups, op.aggregate_update.plan.sink_info, ExecuteSljitPreaggregatedCountStarUpdate,
+			    &update_state, &recorder, finish);
 			auto runtime_us = SljitRegionElapsedMicros(stage_start);
 			auto unattributed_runtime_us = runtime_us - recorder.RecordedRuntimeTimeUs();
 			if (unattributed_runtime_us > 0) {
@@ -17981,7 +17998,8 @@ public:
 			}
 		} else {
 			updated = grouped_state.state->TryUpdateNewGroupsWithSelectedStateAddresses(
-			    compact_groups, sink_info, ExecuteSljitPreaggregatedCountStarUpdate, &update_state, nullptr, finish);
+			    compact_groups, op.aggregate_update.plan.sink_info, ExecuteSljitPreaggregatedCountStarUpdate,
+			    &update_state, nullptr, finish);
 		}
 		RecordSljitRegionStageRuntimePath(runtime, op_idx, op.kind,
 		                                  updated ? "direct_preaggregated_count_star_update"
@@ -17997,6 +18015,23 @@ public:
 		RecordSljitRegionMaterializationBoundary(runtime, op.kind, "direct_state_update", preaggregated_row_count);
 		MarkDeferredGroupedFinish(defer_grouped_finish, deferred_grouped_finish);
 		return true;
+	}
+
+	bool TryExecutePreaggregatedCountStarGroupedAggregateUpdate(
+	    ExecutionRegionRuntime &runtime, ExecutionOperatorRuntime &native_runtime, SljitRegionExecutionScratch &scratch,
+	    idx_t op_idx, SljitExecutableRegionOp &op, DataChunk &compact_groups, const vector<int64_t> &count_deltas,
+	    idx_t preaggregated_row_count, bool defer_grouped_finish, optional_ptr<bool> deferred_grouped_finish) {
+		if (compact_groups.size() == 0 || count_deltas.size() < compact_groups.size()) {
+			return false;
+		}
+		SljitCountStarGroupedAggregateUpdateDescriptor descriptor;
+		if (!TryPrepareCountStarGroupedAggregateUpdate(runtime, native_runtime, scratch, op_idx, op, compact_groups,
+		                                               descriptor)) {
+			return false;
+		}
+		return TryExecutePreparedPreaggregatedCountStarGroupedAggregateUpdate(
+		    runtime, scratch, op_idx, op, compact_groups, count_deltas, descriptor, preaggregated_row_count,
+		    defer_grouped_finish, deferred_grouped_finish);
 	}
 
 	bool TryExecutePreaggregatedGroupedPrimitiveAggregateUpdate(
