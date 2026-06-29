@@ -114,10 +114,10 @@ public:
 	    DataChunk &groups, ExecutionGroupedAggregateStateSelectedAddressUpdateFunction update_function,
 	    void *update_state, optional_ptr<ExecutionOperatorStageRecorder> recorder = nullptr,
 	    optional_ptr<Vector> precomputed_hashes = nullptr);
-	bool TryFindOrCreateGroupsRowPointerSelectedStateUpdateFast(
+	bool TryFindOrCreateRowPointerGroupStateTargetsFast(
 	    DataChunk &payload_input, Vector &row_pointers, idx_t count,
 	    const vector<ExecutionRowPointerGroupKeySource> &group_sources,
-	    ExecutionGroupedAggregateStateSelectedAddressUpdateFunction update_function, void *update_state,
+	    ExecutionGroupedAggregateStateTargetBatch &targets,
 	    optional_ptr<ExecutionOperatorStageRecorder> recorder = nullptr);
 	bool TryAppendNewGroupAddressesFast(DataChunk &groups, Vector &addresses_out,
 	                                    optional_ptr<ExecutionOperatorStageRecorder> recorder = nullptr);
@@ -285,11 +285,16 @@ private:
 	    ExecutionGroupedAggregateStateSelectedAddressUpdateFunction selected_update_function,
 	    void *selected_update_state, optional_ptr<ExecutionOperatorStageRecorder> recorder,
 	    optional_ptr<Vector> precomputed_hashes = nullptr);
-	bool TryFindOrCreateGroupsRowPointerSelectedStateUpdateDirect(
+	bool TryFindOrCreateRowPointerGroupStateTargetsDirect(
 	    DataChunk &payload_input, Vector &row_pointers, idx_t count,
 	    const vector<ExecutionRowPointerGroupKeySource> &group_sources,
-	    ExecutionGroupedAggregateStateSelectedAddressUpdateFunction selected_update_function,
-	    void *selected_update_state, optional_ptr<ExecutionOperatorStageRecorder> recorder);
+	    ExecutionGroupedAggregateStateTargetBatch &targets,
+	    optional_ptr<ExecutionOperatorStageRecorder> recorder);
+	bool TryFindOrCreateRowPointerGroupStateTargetsMaterialized(
+	    DataChunk &payload_input, Vector &row_pointers, idx_t count,
+	    const vector<ExecutionRowPointerGroupKeySource> &group_sources,
+	    ExecutionGroupedAggregateStateTargetBatch &targets,
+	    optional_ptr<ExecutionOperatorStageRecorder> recorder);
 	bool TryAppendNewGroupsFastInternal(DataChunk &groups, optional_ptr<Vector> addresses_out,
 	                                    ExecutionGroupedAggregateStateAddressUpdateFunction address_update_function,
 	                                    void *address_update_state,

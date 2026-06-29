@@ -1261,14 +1261,19 @@ Current aggressive CBO checkpoint:
   not another CBO shape predicate.
 - The Q10 variable-width grouped lookup slice now keeps the one-join
   hash-join/projection/grouped-aggregate route batched even when projection
-  outputs include variable-width keys. The row-pointer descriptor path no longer
-  materializes descriptor keys and then hashes them in a second pass; casted or
-  compressed descriptor keys use one `find_or_create_descriptor_keys.fill_hash`
-  pass, and no-cast row-pointer descriptors can probe directly. Covered API tests
-  now reject the old `find_or_create_descriptor_keys.fill` plus
-  `find_or_create_descriptor_keys.hash` stages. SF1 Q10 production in
-  `/private/tmp/duckdb_jit_q10_descriptor_fill_hash_prod_r9` verified correctness
-  and held neutral at `0.063s -> 0.063s`.
+  outputs include variable-width keys. The row-pointer descriptor path hashes
+  and compares casted/compressed group keys directly instead of rebuilding a
+  scratch descriptor value for every hash/probe comparison. When every group key
+  is a row-pointer field, adjacent identical row pointers reuse the previous
+  descriptor hash and skip full descriptor equality. The hot lookup slice moved
+  from roughly `246 ms` to `152 ms` in traced SF10 Q10 runs. The final SF10
+  all-query production sweep in
+  `/private/tmp/duckdb_jit_tpch_sf10_all_after_q10_direct_descriptor` verified
+  correctness for all 22 queries, compiled 19/22, made 17/22 faster, and moved
+  Q10 from `0.969s` vectorized to `0.964s` JIT (`1.005187x`). A 15-repeat
+  Q10-only production check in
+  `/private/tmp/duckdb_jit_q10_sf10_production_after_inline_hash_r15` was
+  neutral-positive at `0.968s` to `0.967s`.
 - The Q4 string preaggregation slice keeps preaggregation batched and removes the
   expensive `memcmp`-style equality helper for `string_t`; generated string
   equality now uses `string_t::operator==`. The
@@ -1356,6 +1361,120 @@ Current aggressive CBO checkpoint:
   (`0.034s -> 0.037s`), and Q21 (`0.111s -> 0.121s`). These are runtime
   optimization targets; weakening admission would hide the problem instead of
   deleting work.
+- Q10 SF10 direct row-pointer aggregate now uses an explicit leading-key hash
+  strategy for wide descriptors whose first group key is a fixed-width integer.
+  This is correct because equal full descriptors must share the leading-key
+  hash, while full descriptor equality still resolves collisions. The immediate
+  same-row prefetch in the no-chain single-key probe was also removed because it
+  could not hide a dependent load; pair no-chain already used the cleaner shape.
+  Verification passed for `make release -j12`, the focused JIT join/descriptor
+  tests, Q10 production/profile, and all SF10 TPC-H production.
+  `/private/tmp/duckdb_jit_q10_sf10_profile_leading_key_hash_t1_r3` shows
+  `find_or_create_row_pointer_descriptor.hash` dropping from about `48.8 ms` to
+  about `0.45 ms`, with probe flat around `43 ms`; total
+  `direct_row_pointer_grouped_lookup_update` dropped from about `160.8 ms` to
+  about `120.0 ms`. Production Q10 improved from the old direct descriptor
+  checkpoint `/tmp/duckdb_jit_q10_sf10_production_after_inline_hash_r15`
+  (`0.968s -> 0.967s`, `1.001x`) to
+  `/private/tmp/duckdb_jit_q10_sf10_production_leading_key_hash_t1_r15`
+  (`0.947s -> 0.904s`, `1.048x`).
+- The leading-key hash strategy is now covered by a focused API test that forces
+  four direct row-pointer `BIGINT` group keys with a shared leading key and
+  different later descriptor fields. That exposed a root bug in the
+  selected-view row-pointer aggregate route: reference-only grouped payloads do
+  not have a fused payload function, so the view path fell through to the
+  split-primitive updater, which only accepts flat/all-valid payload inputs. The
+  route now keeps selected payload views only when the grouped fused updater can
+  consume them; otherwise it materializes the compact flat payload batch and uses
+  the supported primitive update path. This fixes the crash without weakening
+  the direct descriptor lookup or the leading-key hash admission.
+- Focused Q10 SF10 production after the selected-view route fix is
+  `/private/tmp/duckdb_jit_q10_sf10_production_after_view_gate_t1_r15`,
+  verified with correctness diff 0 at `0.960s -> 0.922s` (`1.041x`). The broad
+  SF10 production sweep after the same fix is
+  `/private/tmp/duckdb_jit_tpch_sf10_all_after_view_gate_r3`, verified with
+  correctness diff 0 for all 22 queries. Eighteen queries are faster than
+  non-JIT and nineteen are jitted; Q10 is `0.967s -> 0.928s` (`1.042x`) in that
+  sweep.
+- Broad SF10 production after the Q10 hash fix was
+  `/private/tmp/duckdb_jit_tpch_sf10_all_after_leading_key_hash_r3`, verified
+  with correctness diff 0 for all 22 queries. It exposed Q7 as the next runtime
+  target rather than a CBO problem: Q7 was `0.961x` in that broad run, and
+  `/private/tmp/duckdb_jit_q07_sf10_profile_after_leading_key_hash_t1_r3`
+  pointed to generated `filter+projection` in the large first region.
+- Q10 SF10 row-pointer grouped aggregate now preaggregates consecutive
+  descriptor runs before grouped lookup when all group keys come from row
+  pointers. The fused-payload case reuses the existing grouped fused updater
+  against temporary run-local aggregate states instead of trying to materialize
+  aggregate payload expressions as standalone projections. Row-pointer equality
+  also has a pointer-identity fast path that still checks nullable descriptor
+  validity. Focused production
+  `/private/tmp/duckdb_jit_q10_sf10_production_rowptr_preagg_ptrfast_r15`
+  verified correctness diff 0 at `0.955s -> 0.910s` (`1.049x`). The useful
+  xtrace sample `/tmp/trace_run_duckdb_q10_xtrace.sh_20260629_133805.trace`
+  shows the hot CPU after this change dominated by storage decompression and
+  bitpacking; `ExecutionRowPointerGroupKeysEqual` is down to roughly `1.1%`
+  self time.
+- Q7 SF10 generated filter/projection now uses the shared direct selected
+  reference projection path for multi-column fixed-width reference projections.
+  This deletes the separate filtered-input append and copies selected scan
+  columns directly into the pending hash-join input batch. Runtime trace
+  `/private/tmp/duckdb_jit_q07_sf10_profile_direct_multiref_r1` records
+  `filter.direct_selected_reference_projection=18230325`; the large 60M-row
+  generated region dropped from about `380 ms` generated time to about `343 ms`.
+  Focused production
+  `/private/tmp/duckdb_jit_q07_sf10_production_direct_multiref_r15` verified
+  correctness diff 0 at `0.595s -> 0.579s` (`1.028x`).
+- Broad SF10 production after the Q10 preaggregation and Q7 direct
+  multi-reference path is
+  `/private/tmp/duckdb_jit_tpch_sf10_all_after_q7_direct_multiref_r7`, verified
+  with correctness diff 0 for all 22 queries. Nineteen queries are faster than
+  non-JIT and nineteen are jitted; eighteen of the nineteen jitted queries are
+  faster. Q10 is `0.961s -> 0.916s` (`1.049x`) and Q7 is `0.589s -> 0.582s`
+  (`1.012x`). Remaining not-faster rows are Q11 (`0.986x`, jitted and tiny),
+  Q16 (`0.994x`, no compiled regions), and Q19 (`1.000x`, no compiled
+  regions).
+- Q11 was not a CBO miss. The selected SF10 shape was a native
+  `hash_join_probe -> append_sink` full pipeline fed by sparse table-scan source
+  chunks; before this cleanup the runtime executed the probe/append path 3907
+  times for 323920 rows. The shared full-pipeline variant registry now routes
+  hash-join-only append sinks through the existing source-input batching executor
+  used by hash-join build and delim sinks. The traced checkpoint
+  `/private/tmp/duckdb_jit_q11_sf10_profile_append_batched_r1` shows runtime
+  events collapsed to 4, probe stage count collapsed to 164, and
+  `hash_join_probe.source_input_batch=323920`. Focused Q11 production
+  `/private/tmp/duckdb_jit_q11_sf10_production_append_batched_r15` verified
+  correctness diff 0 at `0.073s -> 0.070s` (`1.043x`).
+- Broad SF10 production after the Q11 append-sink source batching route is
+  `/private/tmp/duckdb_jit_tpch_sf10_all_after_q11_append_batched_r7`, verified
+  with correctness diff 0 for all 22 queries. Nineteen queries are faster than
+  non-JIT and nineteen are jitted; all nineteen jitted queries are faster. Q11
+  is `0.073s -> 0.070s` (`1.043x`), Q10 is `0.957s -> 0.910s` (`1.052x`), and
+  Q7 is `0.586s -> 0.566s` (`1.035x`). Remaining not-faster rows are Q6
+  (`0.995x`, no compiled regions), Q16 (`1.000x`, no compiled regions), and Q19
+  (`1.000x`, no compiled regions).
+- The remaining no-JIT rows were probed with forced startup. Q6 was a
+  near-threshold materialization-elision/native-aggregate candidate: default
+  `32000` startup rejected benefit `31032`, while focused production with zero
+  startup verified correctness diff 0 and measured `0.375s -> 0.372s`
+  (`1.008x`). Q19 had one useful generated/native fusion candidate with benefit
+  `11776`; startup `10000` admits that region while keeping Q16's bad
+  `592`-benefit candidate rejected. Focused Q16/Q19 production with default
+  startup `10000` is
+  `/private/tmp/duckdb_jit_q16_q19_sf10_production_startup10000_default_r15`,
+  verified with correctness diff 0: Q16 stayed uncompiled and neutral
+  (`0.166s -> 0.165s`), while Q19 improved `0.256s -> 0.246s` (`1.041x`).
+- Broad SF10 production after the startup default was corrected to `10000` is
+  `/private/tmp/duckdb_jit_tpch_sf10_all_after_startup10000_default_r7`,
+  verified with correctness diff 0 for all 22 queries. Twenty queries are faster
+  than non-JIT and twenty-one are jitted; twenty of the twenty-one jitted queries
+  are faster. New admissions include Q6 (`0.386s -> 0.385s`, `1.003x`) and Q19
+  (`0.256s -> 0.245s`, `1.045x`). Q13 is the only jitted not-faster row in that
+  sweep (`0.999x`). Focused Q13 production
+  `/private/tmp/duckdb_jit_q13_sf10_production_startup10000_default_r15`
+  confirmed the small loss (`0.999x`); disabling generated-stage benefit did
+  not fix it, so the next root fix is the Q13 hash-aggregate state-scan to
+  count-star grouped-aggregate path, not CBO threshold tuning.
 
 ## Definition Of Done
 

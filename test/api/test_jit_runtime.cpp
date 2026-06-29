@@ -454,11 +454,19 @@ TEST_CASE("JIT source contracts preserve Q7 table scan filter contracts", "[api]
 		    REQUIRE(event.selected_uses_scan_filters);
 		    RequireGeneratedMachineCodeRegion(event);
 	    });
-	RequireJitEvent(manager, [](const ExecutionRegionEvent &event) {
-		return IsSljitRegionEvent(event) && EventPhase(event) == "runtime" && EventStatus(event) == "executed" &&
-		       event.selected_uses_scan_filters && event.source_contract_output_rows > 0 &&
-		       event.input_rows == event.source_contract_output_rows;
-	});
+	RequireJitEvent(
+	    manager,
+	    [](const ExecutionRegionEvent &event) {
+		    return IsSljitRegionEvent(event) && EventPhase(event) == "runtime" && EventStatus(event) == "executed" &&
+		           StringUtil::Contains(EventJitRuntimePathCounts(event),
+		                                "filter.direct_selected_reference_projection");
+	    },
+	    [](const ExecutionRegionEvent &event) {
+		    REQUIRE(event.source_contract_output_rows > 0);
+		    REQUIRE(event.input_rows == event.source_contract_output_rows);
+		    REQUIRE(
+		        StringUtil::Contains(EventGeneratedStageRuntimeBreakdown(event), "filter+direct_reference_projection"));
+	    });
 }
 
 TEST_CASE("EXPLAIN ANALYZE exposes compact execution region profile", "[api][jit]") {

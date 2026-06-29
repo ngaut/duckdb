@@ -1453,7 +1453,7 @@ struct JitCboStartupBaseCostSetting {
 	static constexpr const char *Name = "jit_cbo_startup_base_cost";
 	static constexpr const char *Description = "Base startup cost used by the JIT CBO physical-runner decision";
 	static constexpr const char *InputType = "UBIGINT";
-	static constexpr const char *DefaultValue = "32000";
+	static constexpr const char *DefaultValue = "10000";
 	static constexpr SettingScopeTarget Scope = SettingScopeTarget::LOCAL_DEFAULT;
 	static constexpr idx_t SettingIndex = NEXT_SETTING_INDEX();
 };

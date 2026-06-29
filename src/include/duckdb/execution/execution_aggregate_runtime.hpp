@@ -11,6 +11,8 @@
 #include "duckdb/common/types.hpp"
 #include "duckdb/execution/ht_entry.hpp"
 
+#include <array>
+
 namespace duckdb {
 
 class GroupedAggregateHashTable;
@@ -75,13 +77,80 @@ struct ExecutionRowPointerGroupKeySource {
 	string blocker;
 };
 
+struct ExecutionGroupedAggregateStateTargetSpan {
+	const uintptr_t *addresses = nullptr;
+	const sel_t *address_sel = nullptr;
+	const sel_t *row_sel = nullptr;
+	idx_t count = 0;
+
+	bool HasTargets() const {
+		return count > 0;
+	}
+
+	void Set(const uintptr_t *addresses_p, const sel_t *row_sel_p, idx_t count_p,
+	         const sel_t *address_sel_p = nullptr) {
+		D_ASSERT(addresses_p || count_p == 0);
+		addresses = addresses_p;
+		address_sel = address_sel_p;
+		row_sel = row_sel_p;
+		count = count_p;
+	}
+};
+
+enum class ExecutionGroupedAggregateStateTargetKind : uint8_t {
+	INPUT_ORDER = 0,
+	EXISTING = 1,
+	NEW_GROUPS = 2,
+	DUPLICATE_GROUPS = 3
+};
+
+static constexpr idx_t EXECUTION_GROUPED_AGGREGATE_STATE_TARGET_COUNT = 4;
+
+struct ExecutionGroupedAggregateStateTargetBatch {
+	std::array<ExecutionGroupedAggregateStateTargetSpan, EXECUTION_GROUPED_AGGREGATE_STATE_TARGET_COUNT> spans;
+
+	ExecutionGroupedAggregateStateTargetSpan &Span(ExecutionGroupedAggregateStateTargetKind kind) {
+		return spans[static_cast<idx_t>(kind)];
+	}
+
+	const ExecutionGroupedAggregateStateTargetSpan &Span(ExecutionGroupedAggregateStateTargetKind kind) const {
+		return spans[static_cast<idx_t>(kind)];
+	}
+
+	ExecutionGroupedAggregateStateTargetSpan &InputOrder() {
+		return Span(ExecutionGroupedAggregateStateTargetKind::INPUT_ORDER);
+	}
+
+	ExecutionGroupedAggregateStateTargetSpan &Existing() {
+		return Span(ExecutionGroupedAggregateStateTargetKind::EXISTING);
+	}
+
+	ExecutionGroupedAggregateStateTargetSpan &NewGroups() {
+		return Span(ExecutionGroupedAggregateStateTargetKind::NEW_GROUPS);
+	}
+
+	ExecutionGroupedAggregateStateTargetSpan &DuplicateGroups() {
+		return Span(ExecutionGroupedAggregateStateTargetKind::DUPLICATE_GROUPS);
+	}
+
+	const std::array<ExecutionGroupedAggregateStateTargetSpan, EXECUTION_GROUPED_AGGREGATE_STATE_TARGET_COUNT> &
+	Spans() const {
+		return spans;
+	}
+
+	void Reset() {
+		for (auto &span : spans) {
+			span = ExecutionGroupedAggregateStateTargetSpan();
+		}
+	}
+};
+
 typedef void (*ExecutionGroupedAggregateStateAddressUpdateFunction)(const uintptr_t *addresses,
-                                                                    const sel_t *address_sel, idx_t count,
-                                                                    void *state);
+                                                                    const sel_t *address_sel, idx_t count, void *state);
 typedef void (*ExecutionGroupedAggregateStateSelectedAddressUpdateFunction)(const uintptr_t *addresses,
-                                                                           const sel_t *address_sel,
-                                                                           const sel_t *execute_sel, idx_t count,
-                                                                           void *state);
+                                                                            const sel_t *address_sel,
+                                                                            const sel_t *execute_sel, idx_t count,
+                                                                            void *state);
 
 DUCKDB_API bool ExecutionBuildHashAggregateLookupLayout(const TupleDataLayout &tuple_layout,
                                                         ExecutionHashAggregateLookupLayout &layout);
@@ -90,5 +159,11 @@ DUCKDB_API bool ExecutionGetHashAggregateLookupLayout(const GroupedAggregateHash
                                                       ExecutionHashAggregateLookupLayout &layout);
 
 DUCKDB_API string DescribeExecutionHashAggregateLookupLayout(const ExecutionHashAggregateLookupLayout &layout);
+
+DUCKDB_API bool
+ExecutionRowPointerGroupKeySourcesAreRowPointerFields(const vector<ExecutionRowPointerGroupKeySource> &group_sources);
+
+DUCKDB_API bool ExecutionRowPointerGroupKeysEqual(data_ptr_t left_row_pointer, data_ptr_t right_row_pointer,
+                                                  const vector<ExecutionRowPointerGroupKeySource> &group_sources);
 
 } // namespace duckdb

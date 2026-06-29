@@ -240,6 +240,11 @@ RadixValidateStateAddressCallbackUpdate(const ExecutionRegionSinkInfo &sink_info
 	       sink_info.aggregate_contract.grouped_state_layout_ready;
 }
 
+static bool RadixValidateStateTargetLookup(const ExecutionRegionSinkInfo &sink_info) {
+	return sink_info.kind == ExecutionRegionSinkKind::HASH_AGGREGATE_UPDATE &&
+	       sink_info.aggregate_contract.grouped_state_layout_ready;
+}
+
 static const uintptr_t *RadixStateAddressSpan(Vector &addresses) {
 	D_ASSERT(addresses.GetVectorType() == VectorType::FLAT_VECTOR);
 	return FlatVector::GetData<uintptr_t>(addresses);
@@ -310,6 +315,30 @@ static void RadixUpdatePrimitiveGroupSelected(const uintptr_t *state_addresses, 
 		const auto address_idx = address_sel ? address_sel[row_idx] : idx;
 		auto state_address = reinterpret_cast<data_ptr_t>(state_addresses[address_idx]);
 		RadixUpdatePrimitiveGroup(state_address, row_idx, state_p);
+	}
+}
+
+static void RadixUpdatePrimitiveGroupTargetSpan(const ExecutionGroupedAggregateStateTargetSpan &span, void *update_state,
+                                                optional_ptr<ExecutionOperatorStageRecorder> recorder,
+                                                const char *stage_name) {
+	if (!span.HasTargets()) {
+		return;
+	}
+	auto update_start = RadixTraceStart(recorder);
+	RadixUpdatePrimitiveGroupSelected(span.addresses, span.address_sel, span.row_sel, span.count, update_state);
+	RecordRadixTraceStage(recorder, stage_name, update_start);
+}
+
+static void RadixUpdatePrimitiveGroupTargetBatch(const ExecutionGroupedAggregateStateTargetBatch &targets,
+                                                 void *update_state,
+                                                 optional_ptr<ExecutionOperatorStageRecorder> recorder,
+                                                 const char *input_order_stage_name, const char *existing_stage_name,
+                                                 const char *new_stage_name, const char *duplicate_stage_name) {
+	const char *stage_names[EXECUTION_GROUPED_AGGREGATE_STATE_TARGET_COUNT] = {
+	    input_order_stage_name, existing_stage_name, new_stage_name, duplicate_stage_name};
+	const auto &spans = targets.Spans();
+	for (idx_t target_idx = 0; target_idx < spans.size(); target_idx++) {
+		RadixUpdatePrimitiveGroupTargetSpan(spans[target_idx], update_state, recorder, stage_names[target_idx]);
 	}
 }
 
@@ -1209,41 +1238,30 @@ bool RadixPartitionedHashTable::TryUpdateNewGroupsWithSelectedStateAddresses(
 	return true;
 }
 
-bool RadixPartitionedHashTable::TryUpdateNewGroupsWithRowPointerKeys(
+bool RadixPartitionedHashTable::TryFindOrCreateRowPointerGroupStateTargets(
     ExecutionContext &context, DataChunk &payload_input, Vector &row_pointers, idx_t count, OperatorSinkInput &input,
     const vector<ExecutionRowPointerGroupKeySource> &group_sources, const ExecutionRegionSinkInfo &sink_info,
-    ExecutionGroupedAggregateStateSelectedAddressUpdateFunction update_function, void *update_state,
-    optional_ptr<ExecutionOperatorStageRecorder> recorder, bool finish) const {
-	if (!RadixValidateStateAddressCallbackUpdate(sink_info, update_function)) {
-		return false;
-	}
-	if (payload_input.size() != count) {
+    ExecutionGroupedAggregateStateTargetBatch &targets, optional_ptr<ExecutionOperatorStageRecorder> recorder) const {
+	targets.Reset();
+	if (!RadixValidateStateTargetLookup(sink_info) || payload_input.size() != count) {
 		return false;
 	}
 
-	auto &gstate = input.global_state.Cast<RadixHTGlobalSinkState>();
-	auto &lstate = input.local_state.Cast<RadixHTLocalSinkState>();
 	auto prepare_start = RadixTraceStart(recorder);
 	auto &ht = PrepareRadixHTSinkState(context, *this, input);
-	RecordRadixTraceStage(recorder, "direct_row_pointer_grouped_lookup.prepare_sink_state", prepare_start);
+	RecordRadixTraceStage(recorder, "direct_row_pointer_grouped_targets.prepare_sink_state", prepare_start);
 
 	auto lookup_start = RadixTraceStart(recorder);
-	if (!ht.TryFindOrCreateGroupsRowPointerSelectedStateUpdateFast(payload_input, row_pointers, count, group_sources,
-	                                                               update_function, update_state, recorder)) {
-		RecordRadixTraceStage(recorder, "direct_row_pointer_grouped_lookup.lookup_miss", lookup_start);
+	if (!ht.TryFindOrCreateRowPointerGroupStateTargetsFast(payload_input, row_pointers, count, group_sources, targets,
+	                                                       recorder)) {
+		RecordRadixTraceStage(recorder, "direct_row_pointer_grouped_targets.lookup_miss", lookup_start);
 		return false;
 	}
-	RecordRadixTraceStage(recorder, "direct_row_pointer_grouped_lookup.lookup_update", lookup_start);
-
-	if (finish) {
-		auto finish_start = RadixTraceStart(recorder);
-		FinishRadixHTSinkState(context.client, gstate, lstate);
-		RecordRadixTraceStage(recorder, "direct_row_pointer_grouped_lookup.finish_sink_state", finish_start);
-	}
+	RecordRadixTraceStage(recorder, "direct_row_pointer_grouped_targets.lookup", lookup_start);
 	return true;
 }
 
-bool RadixPartitionedHashTable::TryUpdateNewPrimitiveGroupsWithRowPointerKeysPayloadInput(
+bool RadixPartitionedHashTable::TryUpdateRowPointerGroupPrimitivePayloads(
     ExecutionContext &context, DataChunk &payload_input, Vector &row_pointers, idx_t count,
     const vector<ExecutionRowPointerGroupKeySource> &group_sources, const vector<idx_t> &payload_source_indices,
     OperatorSinkInput &input, const ExecutionRegionSinkInfo &sink_info,
@@ -1260,21 +1278,25 @@ bool RadixPartitionedHashTable::TryUpdateNewPrimitiveGroupsWithRowPointerKeysPay
 	}
 
 	auto &gstate = input.global_state.Cast<RadixHTGlobalSinkState>();
-	auto prepare_start = RadixTraceStart(recorder);
-	auto &ht = PrepareRadixHTSinkState(context, *this, input);
-	RecordRadixTraceStage(recorder, "direct_row_pointer_split_payload.prepare_sink_state", prepare_start);
-
 	RadixPrimitiveGroupUpdateState update_state;
 	update_state.lanes = &lanes;
 	update_state.payloads = &payloads;
 
-	auto update_start = RadixTraceStart(recorder);
-	if (!ht.TryFindOrCreateGroupsRowPointerSelectedStateUpdateFast(payload_input, row_pointers, count, group_sources,
-	                                                               RadixUpdatePrimitiveGroupSelected, &update_state,
-	                                                               recorder)) {
-		RecordRadixTraceStage(recorder, "direct_row_pointer_split_payload.update_miss", update_start);
+	ExecutionGroupedAggregateStateTargetBatch targets;
+	auto lookup_start = RadixTraceStart(recorder);
+	if (!TryFindOrCreateRowPointerGroupStateTargets(context, payload_input, row_pointers, count, input, group_sources,
+	                                                sink_info, targets, recorder)) {
+		RecordRadixTraceStage(recorder, "direct_row_pointer_split_payload.update_miss", lookup_start);
 		return false;
 	}
+	RecordRadixTraceStage(recorder, "direct_row_pointer_split_payload.lookup", lookup_start);
+
+	auto update_start = RadixTraceStart(recorder);
+	RadixUpdatePrimitiveGroupTargetBatch(
+	    targets, &update_state, recorder, "direct_row_pointer_split_payload.target_input_order_update",
+	    "direct_row_pointer_split_payload.target_existing_update",
+	    "direct_row_pointer_split_payload.target_new_update",
+	    "direct_row_pointer_split_payload.target_duplicate_update");
 	RecordRadixTraceStage(recorder, "direct_row_pointer_split_payload.update", update_start);
 	auto update_marker_start = RadixTraceStart(recorder);
 	RecordRadixTraceStage(recorder, "direct_row_pointer_split_payload.primitive_update", update_marker_start);

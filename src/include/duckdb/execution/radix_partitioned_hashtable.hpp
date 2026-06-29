@@ -82,13 +82,12 @@ public:
 	    ExecutionGroupedAggregateStateSelectedAddressUpdateFunction update_function, void *update_state,
 	    optional_ptr<ExecutionOperatorStageRecorder> recorder = nullptr, bool finish = true,
 	    optional_ptr<Vector> precomputed_hashes = nullptr) const;
-	bool TryUpdateNewGroupsWithRowPointerKeys(
-	    ExecutionContext &context, DataChunk &payload_input, Vector &row_pointers, idx_t count,
-	    OperatorSinkInput &input, const vector<ExecutionRowPointerGroupKeySource> &group_sources,
-	    const ExecutionRegionSinkInfo &sink_info,
-	    ExecutionGroupedAggregateStateSelectedAddressUpdateFunction update_function, void *update_state,
-	    optional_ptr<ExecutionOperatorStageRecorder> recorder = nullptr, bool finish = true) const;
-	bool TryUpdateNewPrimitiveGroupsWithRowPointerKeysPayloadInput(
+	bool TryFindOrCreateRowPointerGroupStateTargets(
+	    ExecutionContext &context, DataChunk &payload_input, Vector &row_pointers, idx_t count, OperatorSinkInput &input,
+	    const vector<ExecutionRowPointerGroupKeySource> &group_sources, const ExecutionRegionSinkInfo &sink_info,
+	    ExecutionGroupedAggregateStateTargetBatch &targets,
+	    optional_ptr<ExecutionOperatorStageRecorder> recorder = nullptr) const;
+	bool TryUpdateRowPointerGroupPrimitivePayloads(
 	    ExecutionContext &context, DataChunk &payload_input, Vector &row_pointers, idx_t count,
 	    const vector<ExecutionRowPointerGroupKeySource> &group_sources, const vector<idx_t> &payload_source_indices,
 	    OperatorSinkInput &input, const ExecutionRegionSinkInfo &sink_info,

@@ -168,23 +168,21 @@ struct ExecutionGroupedAggregateStateAddressState {
 		(void)precomputed_hashes;
 		return false;
 	}
-	virtual bool TryUpdateNewGroupsWithRowPointerKeys(
+	virtual bool TryFindOrCreateRowPointerGroupStateTargets(
 	    DataChunk &payload_input, Vector &row_pointers, idx_t count,
 	    const vector<ExecutionRowPointerGroupKeySource> &group_sources, const ExecutionRegionSinkInfo &sink_info,
-	    ExecutionGroupedAggregateStateSelectedAddressUpdateFunction update_function, void *update_state,
-	    optional_ptr<ExecutionOperatorStageRecorder> recorder = nullptr, bool finish = true) {
+	    ExecutionGroupedAggregateStateTargetBatch &targets,
+	    optional_ptr<ExecutionOperatorStageRecorder> recorder = nullptr) {
 		(void)payload_input;
 		(void)row_pointers;
 		(void)count;
 		(void)group_sources;
 		(void)sink_info;
-		(void)update_function;
-		(void)update_state;
+		(void)targets;
 		(void)recorder;
-		(void)finish;
 		return false;
 	}
-	virtual bool TryUpdateNewGroupsWithRowPointerKeysPayloadInput(
+	virtual bool TryUpdateRowPointerGroupPayloads(
 	    DataChunk &payload_input, Vector &row_pointers, idx_t count,
 	    const vector<ExecutionRowPointerGroupKeySource> &group_sources, const vector<idx_t> &payload_source_indices,
 	    const ExecutionRegionSinkInfo &sink_info, const vector<const ExecutionPrimitiveAggregateUpdateLane *> &lanes,
