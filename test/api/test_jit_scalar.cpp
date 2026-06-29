@@ -522,7 +522,7 @@ TEST_CASE("JIT auto planner cost skips source-only string filters", "[api][jit]"
 	    });
 }
 
-TEST_CASE("JIT auto preserves DuckDB scan ownership for cheap source string equality filters", "[api][jit]") {
+TEST_CASE("JIT auto generates cheap source string equality filters under aggressive CBO", "[api][jit]") {
 	DuckDB db;
 	Connection con(db);
 	auto &manager = ExecutionRegionManager::Get(*con.context);
@@ -546,11 +546,11 @@ TEST_CASE("JIT auto preserves DuckDB scan ownership for cheap source string equa
 	    manager,
 	    [](const ExecutionRegionEvent &event) {
 		    return IsCompiledSljitRegionEvent(event) &&
-		           StringUtil::Contains(event.reason, "vectorized table scan filters") &&
-		           StringUtil::Contains(event.ir, "uses_scan_filters=true");
+		           StringUtil::Contains(event.reason, "generated table scan source filters") &&
+		           StringUtil::Contains(event.ir, "generated_source_stage_candidate=true");
 	    },
 	    [](const ExecutionRegionEvent &event) {
-		    REQUIRE(event.selected_uses_scan_filters);
+		    REQUIRE_FALSE(event.selected_uses_scan_filters);
 		    RequireGeneratedMachineCodeRegion(event);
 	    });
 	RequireNoUnsupportedReason(manager, "source filter references must be local to one scan column");

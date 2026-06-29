@@ -175,7 +175,7 @@ static bool ExecutionRegionExpressionCanUseGeneratedSourceStage(const ExecutionE
 	if (!expression.root) {
 		return false;
 	}
-	return !expression.traits.has_arithmetic_binary && expression.traits.high_cost_string_predicate_count == 0;
+	return !expression.traits.has_arithmetic_binary;
 }
 
 static bool ExecutionRegionTypeCanUseGeneratedSourceStage(const LogicalType &type) {
@@ -192,6 +192,7 @@ static bool ExecutionRegionTypeCanUseGeneratedSourceStage(const LogicalType &typ
 	case PhysicalType::UINT64:
 	case PhysicalType::FLOAT:
 	case PhysicalType::DOUBLE:
+	case PhysicalType::VARCHAR:
 		return true;
 	default:
 		return false;
@@ -502,7 +503,6 @@ static string DescribeExecutionRegionAggregateContract(const ExecutionRegionAggr
 		AppendExecutionRegionContractIR(result, contract.native_grouped_state_contract.ir);
 		AppendExecutionRegionContractIR(result, contract.native_hash_lookup_contract.ir);
 		AppendExecutionRegionContractIR(result, contract.native_state_update_contract.ir);
-		AppendExecutionRegionContractIR(result, contract.native_distinct_state_update_contract.ir);
 	}
 	result += ">";
 	return result;
@@ -575,6 +575,8 @@ static string DescribeExecutionRegionPrimitiveUpdateKind(AggregatePrimitiveUpdat
 		return "sum_hugeint";
 	case AggregatePrimitiveUpdateKind::SUM_DOUBLE:
 		return "sum_double";
+	case AggregatePrimitiveUpdateKind::COUNT:
+		return "count";
 	case AggregatePrimitiveUpdateKind::COUNT_STAR:
 		return "count_star";
 	default:
@@ -1006,9 +1008,6 @@ BuildExecutionRegionSourceInfo(const ExecutionSourceContract &descriptor, Execut
 	    result->aggregate_contract.native_hash_lookup_contract, "native_hash_aggregate_lookup");
 	result->aggregate_contract.native_state_update_contract.ir = DescribeExecutionRegionNativeOperatorContract(
 	    result->aggregate_contract.native_state_update_contract, "native_aggregate_state_update");
-	result->aggregate_contract.native_distinct_state_update_contract.ir =
-	    DescribeExecutionRegionNativeOperatorContract(result->aggregate_contract.native_distinct_state_update_contract,
-	                                                  "native_hash_aggregate_distinct_state_update");
 	result->aggregate_contract.ir = DescribeExecutionRegionAggregateContract(result->aggregate_contract, false);
 	for (auto &order_key : result->order_contract.order_keys) {
 		order_key.ir = DescribeExecutionRegionOrderKeyInput(order_key);
@@ -1137,8 +1136,6 @@ static void FinalizeExecutionRegionSinkInfo(ExecutionRegionSinkInfo &sink, Execu
 	    sink.aggregate_contract.native_hash_lookup_contract, "native_hash_aggregate_lookup");
 	sink.aggregate_contract.native_state_update_contract.ir = DescribeExecutionRegionNativeOperatorContract(
 	    sink.aggregate_contract.native_state_update_contract, "native_aggregate_state_update");
-	sink.aggregate_contract.native_distinct_state_update_contract.ir = DescribeExecutionRegionNativeOperatorContract(
-	    sink.aggregate_contract.native_distinct_state_update_contract, "native_hash_aggregate_distinct_state_update");
 	sink.aggregate_contract.ir = DescribeExecutionRegionAggregateContract(sink.aggregate_contract, true);
 	for (auto &order_key : sink.order_contract.order_keys) {
 		order_key.ir = DescribeExecutionRegionOrderKeyInput(order_key);
@@ -2451,8 +2448,6 @@ static string GetExecutionRegionSinkSignatureFeature(const ExecutionRegionNode &
 		return "nested-loop-join-build";
 	case ExecutionRegionSinkKind::HASH_AGGREGATE_UPDATE:
 		return "hash-aggregate-update";
-	case ExecutionRegionSinkKind::HASH_AGGREGATE_DISTINCT_SINK:
-		return "hash-aggregate-distinct-sink";
 	case ExecutionRegionSinkKind::PERFECT_HASH_AGGREGATE_UPDATE:
 		return "perfect-hash-aggregate-update";
 	case ExecutionRegionSinkKind::UNGROUPED_AGGREGATE_UPDATE:

@@ -14,13 +14,14 @@
 
 namespace duckdb {
 
-enum class AggregatePrimitiveUpdateKind : uint8_t { NONE, SUM_INT64, SUM_HUGEINT, SUM_DOUBLE, COUNT_STAR };
+enum class AggregatePrimitiveUpdateKind : uint8_t { NONE, SUM_INT64, SUM_HUGEINT, SUM_DOUBLE, COUNT, COUNT_STAR };
 
 static inline bool AggregatePrimitiveUpdateKindIsSupported(AggregatePrimitiveUpdateKind kind) {
 	switch (kind) {
 	case AggregatePrimitiveUpdateKind::SUM_INT64:
 	case AggregatePrimitiveUpdateKind::SUM_HUGEINT:
 	case AggregatePrimitiveUpdateKind::SUM_DOUBLE:
+	case AggregatePrimitiveUpdateKind::COUNT:
 	case AggregatePrimitiveUpdateKind::COUNT_STAR:
 		return true;
 	default:
@@ -29,6 +30,18 @@ static inline bool AggregatePrimitiveUpdateKindIsSupported(AggregatePrimitiveUpd
 }
 
 static inline bool AggregatePrimitiveUpdateRequiresPayload(AggregatePrimitiveUpdateKind kind) {
+	switch (kind) {
+	case AggregatePrimitiveUpdateKind::SUM_INT64:
+	case AggregatePrimitiveUpdateKind::SUM_HUGEINT:
+	case AggregatePrimitiveUpdateKind::SUM_DOUBLE:
+	case AggregatePrimitiveUpdateKind::COUNT:
+		return true;
+	default:
+		return false;
+	}
+}
+
+static inline bool AggregatePrimitiveUpdateRequiresTypedPayload(AggregatePrimitiveUpdateKind kind) {
 	switch (kind) {
 	case AggregatePrimitiveUpdateKind::SUM_INT64:
 	case AggregatePrimitiveUpdateKind::SUM_HUGEINT:
@@ -53,6 +66,7 @@ static inline bool AggregatePrimitiveUpdateHasStateIsSet(AggregatePrimitiveUpdat
 static inline bool AggregatePrimitiveUpdateUsesInt64State(AggregatePrimitiveUpdateKind kind) {
 	switch (kind) {
 	case AggregatePrimitiveUpdateKind::SUM_INT64:
+	case AggregatePrimitiveUpdateKind::COUNT:
 	case AggregatePrimitiveUpdateKind::COUNT_STAR:
 		return true;
 	default:
@@ -71,6 +85,7 @@ static inline bool AggregatePrimitiveUpdateUsesDoubleState(AggregatePrimitiveUpd
 static inline idx_t AggregatePrimitiveUpdateStateValueSize(AggregatePrimitiveUpdateKind kind) {
 	switch (kind) {
 	case AggregatePrimitiveUpdateKind::SUM_INT64:
+	case AggregatePrimitiveUpdateKind::COUNT:
 	case AggregatePrimitiveUpdateKind::COUNT_STAR:
 		return sizeof(int64_t);
 	case AggregatePrimitiveUpdateKind::SUM_HUGEINT:
@@ -93,7 +108,7 @@ struct AggregatePrimitiveUpdateABI {
 		if (kind == AggregatePrimitiveUpdateKind::NONE || state_size == 0) {
 			return false;
 		}
-		if (AggregatePrimitiveUpdateRequiresPayload(kind) && input_type == PhysicalType::INVALID) {
+		if (AggregatePrimitiveUpdateRequiresTypedPayload(kind) && input_type == PhysicalType::INVALID) {
 			return false;
 		}
 		return AggregatePrimitiveUpdateStateValueSize(kind) > 0;

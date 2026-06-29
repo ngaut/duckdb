@@ -237,7 +237,6 @@ struct ExecutionRegionAggregateContract {
 	ExecutionRegionNativeGroupedStateContract native_grouped_state_contract;
 	ExecutionRegionNativeOperatorContract native_hash_lookup_contract;
 	ExecutionRegionNativeOperatorContract native_state_update_contract;
-	ExecutionRegionNativeOperatorContract native_distinct_state_update_contract;
 	string ir;
 };
 

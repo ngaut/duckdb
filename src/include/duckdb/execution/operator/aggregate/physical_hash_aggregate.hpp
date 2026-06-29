@@ -20,12 +20,14 @@ namespace duckdb {
 class ClientContext;
 class BufferManager;
 class PhysicalHashAggregate;
+class DistinctCountPointerSet;
 
 struct HashAggregateGroupingData {
 public:
 	HashAggregateGroupingData(GroupingSet &grouping_set_p, const GroupedAggregateData &grouped_aggregate_data,
 	                          unique_ptr<DistinctAggregateCollectionInfo> &info, TupleDataValidityType group_validity,
-	                          TupleDataValidityType distinct_validity);
+	                          TupleDataValidityType distinct_validity,
+	                          DistinctAggregateKeyStrategy distinct_key_strategy);
 
 public:
 	RadixPartitionedHashTable table_data;
@@ -44,6 +46,14 @@ public:
 	unique_ptr<DistinctAggregateState> distinct_state;
 };
 
+struct DistinctCountPointerScratch {
+	DistinctCountPointerScratch();
+	~DistinctCountPointerScratch();
+
+	Vector state_addresses;
+	unique_ptr<DistinctCountPointerSet> distinct_set;
+};
+
 struct HashAggregateGroupingLocalState {
 public:
 	HashAggregateGroupingLocalState(const PhysicalHashAggregate &op, const HashAggregateGroupingData &data,
@@ -54,6 +64,7 @@ public:
 	unique_ptr<LocalSinkState> table_state;
 	// Local states of the DISTINCT aggregates hashtables
 	vector<unique_ptr<LocalSinkState>> distinct_states;
+	unique_ptr<DistinctCountPointerScratch> distinct_count_scratch;
 };
 
 //! PhysicalHashAggregate is a group-by and aggregate implementation that uses a hash table to perform the grouping
@@ -143,7 +154,6 @@ public:
 public:
 	InsertionOrderPreservingMap<string> ParamsToString() const override;
 	ExecutionContract GetExecutionContract() const override;
-	bool CanUseDistinctSinkContract() const;
 	//! Toggle multi-scan capability on a hash table, which prevents the scan of the aggregate from being destructive
 	//! If this is not toggled the GetData method will destroy the hash table as it is scanning it
 	static void SetMultiScan(GlobalSinkState &state);

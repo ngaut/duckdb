@@ -2082,6 +2082,7 @@ private:
 				payload.value_is_set.clear();
 				switch (payload.kind) {
 				case AggregatePrimitiveUpdateKind::COUNT_STAR:
+				case AggregatePrimitiveUpdateKind::COUNT:
 				case AggregatePrimitiveUpdateKind::SUM_INT64:
 					payload.int64_values.reserve(capacity);
 					break;
@@ -2115,6 +2116,7 @@ private:
 			}
 			switch (source_payload.kind) {
 			case AggregatePrimitiveUpdateKind::COUNT_STAR:
+			case AggregatePrimitiveUpdateKind::COUNT:
 			case AggregatePrimitiveUpdateKind::SUM_INT64:
 				if (source_payload.int64_values.size() < offset + count) {
 					return false;
@@ -3604,16 +3606,16 @@ public:
 	}
 
 	template <class T>
-	static bool TryPreaggregateFixedWidthCountStarGroupsTemplated(DataChunk &input_groups, DataChunk &compact_groups,
+	static bool TryPreaggregateFixedWidthCountStarVectorTemplated(Vector &input_group, idx_t count,
+	                                                              DataChunk &compact_groups,
 	                                                              vector<int64_t> &count_deltas) {
-		const auto count = input_groups.size();
-		if (count == 0 || input_groups.ColumnCount() != 1 || compact_groups.ColumnCount() != 1 ||
-		    input_groups.data[0].GetType() != compact_groups.data[0].GetType()) {
+		if (count == 0 || compact_groups.ColumnCount() != 1 ||
+		    input_group.GetType() != compact_groups.data[0].GetType()) {
 			return false;
 		}
 
 		UnifiedVectorFormat format;
-		input_groups.data[0].ToUnifiedFormat(format);
+		input_group.ToUnifiedFormat(format);
 		if (TryPreaggregateDenseFixedWidthCountStarGroupsTemplated<T>(format, count, compact_groups, count_deltas)) {
 			return true;
 		}
@@ -3639,45 +3641,98 @@ public:
 		return true;
 	}
 
+	template <class T>
+	static bool TryPreaggregateFixedWidthCountStarGroupsTemplated(DataChunk &input_groups, DataChunk &compact_groups,
+	                                                              vector<int64_t> &count_deltas) {
+		if (input_groups.ColumnCount() != 1) {
+			return false;
+		}
+		return TryPreaggregateFixedWidthCountStarVectorTemplated<T>(input_groups.data[0], input_groups.size(),
+		                                                            compact_groups, count_deltas);
+	}
+
+	static bool TryPreaggregateFixedWidthCountStarVector(Vector &input_group, idx_t count, DataChunk &compact_groups,
+	                                                     vector<int64_t> &count_deltas) {
+		switch (input_group.GetType().InternalType()) {
+		case PhysicalType::INT8:
+			return TryPreaggregateFixedWidthCountStarVectorTemplated<int8_t>(input_group, count, compact_groups,
+			                                                                 count_deltas);
+		case PhysicalType::INT16:
+			return TryPreaggregateFixedWidthCountStarVectorTemplated<int16_t>(input_group, count, compact_groups,
+			                                                                  count_deltas);
+		case PhysicalType::INT32:
+			return TryPreaggregateFixedWidthCountStarVectorTemplated<int32_t>(input_group, count, compact_groups,
+			                                                                  count_deltas);
+		case PhysicalType::INT64:
+			return TryPreaggregateFixedWidthCountStarVectorTemplated<int64_t>(input_group, count, compact_groups,
+			                                                                  count_deltas);
+		case PhysicalType::INT128:
+			return TryPreaggregateFixedWidthCountStarVectorTemplated<hugeint_t>(input_group, count, compact_groups,
+			                                                                    count_deltas);
+		case PhysicalType::UINT8:
+			return TryPreaggregateFixedWidthCountStarVectorTemplated<uint8_t>(input_group, count, compact_groups,
+			                                                                  count_deltas);
+		case PhysicalType::UINT16:
+			return TryPreaggregateFixedWidthCountStarVectorTemplated<uint16_t>(input_group, count, compact_groups,
+			                                                                   count_deltas);
+		case PhysicalType::UINT32:
+			return TryPreaggregateFixedWidthCountStarVectorTemplated<uint32_t>(input_group, count, compact_groups,
+			                                                                   count_deltas);
+		case PhysicalType::UINT64:
+			return TryPreaggregateFixedWidthCountStarVectorTemplated<uint64_t>(input_group, count, compact_groups,
+			                                                                   count_deltas);
+		case PhysicalType::UINT128:
+			return TryPreaggregateFixedWidthCountStarVectorTemplated<uhugeint_t>(input_group, count, compact_groups,
+			                                                                     count_deltas);
+		default:
+			return false;
+		}
+	}
+
 	static bool TryPreaggregateFixedWidthCountStarGroups(DataChunk &input_groups, DataChunk &compact_groups,
 	                                                     vector<int64_t> &count_deltas) {
 		if (input_groups.ColumnCount() != 1) {
 			return false;
 		}
-		switch (input_groups.data[0].GetType().InternalType()) {
-		case PhysicalType::INT8:
-			return TryPreaggregateFixedWidthCountStarGroupsTemplated<int8_t>(input_groups, compact_groups,
-			                                                                 count_deltas);
-		case PhysicalType::INT16:
-			return TryPreaggregateFixedWidthCountStarGroupsTemplated<int16_t>(input_groups, compact_groups,
-			                                                                  count_deltas);
-		case PhysicalType::INT32:
-			return TryPreaggregateFixedWidthCountStarGroupsTemplated<int32_t>(input_groups, compact_groups,
-			                                                                  count_deltas);
-		case PhysicalType::INT64:
-			return TryPreaggregateFixedWidthCountStarGroupsTemplated<int64_t>(input_groups, compact_groups,
-			                                                                  count_deltas);
-		case PhysicalType::INT128:
-			return TryPreaggregateFixedWidthCountStarGroupsTemplated<hugeint_t>(input_groups, compact_groups,
-			                                                                    count_deltas);
-		case PhysicalType::UINT8:
-			return TryPreaggregateFixedWidthCountStarGroupsTemplated<uint8_t>(input_groups, compact_groups,
-			                                                                  count_deltas);
-		case PhysicalType::UINT16:
-			return TryPreaggregateFixedWidthCountStarGroupsTemplated<uint16_t>(input_groups, compact_groups,
-			                                                                   count_deltas);
-		case PhysicalType::UINT32:
-			return TryPreaggregateFixedWidthCountStarGroupsTemplated<uint32_t>(input_groups, compact_groups,
-			                                                                   count_deltas);
-		case PhysicalType::UINT64:
-			return TryPreaggregateFixedWidthCountStarGroupsTemplated<uint64_t>(input_groups, compact_groups,
-			                                                                   count_deltas);
-		case PhysicalType::UINT128:
-			return TryPreaggregateFixedWidthCountStarGroupsTemplated<uhugeint_t>(input_groups, compact_groups,
-			                                                                     count_deltas);
-		default:
+		return TryPreaggregateFixedWidthCountStarVector(input_groups.data[0], input_groups.size(), compact_groups,
+		                                                count_deltas);
+	}
+
+	static bool TryReadProjectionSourceReferenceIndex(const SljitNativeRegionExpressionPlan &projection,
+	                                                  idx_t &source_index) {
+		if (projection.kind == SljitNativeRegionExpressionKind::REFERENCE) {
+			source_index = projection.source_index;
+			return true;
+		}
+		if (projection.kind != SljitNativeRegionExpressionKind::EXPRESSION_TREE &&
+		    projection.kind != SljitNativeRegionExpressionKind::TYPED_EXPRESSION_TREE) {
 			return false;
 		}
+		if (!projection.expression_tree || projection.expression_tree->kind != ExecutionExpressionIRKind::REFERENCE ||
+		    projection.expression_tree->ref_index >= projection.expression_tree_source_indices.size()) {
+			return false;
+		}
+		source_index = projection.expression_tree_source_indices[projection.expression_tree->ref_index];
+		return true;
+	}
+
+	static bool TryPreaggregateProjectedFixedWidthCountStarGroups(const SljitExecutableRegionOp &projection_op,
+	                                                              DataChunk &input, DataChunk &compact_groups,
+	                                                              vector<int64_t> &count_deltas) {
+		if (input.size() == 0 || projection_op.kind != SljitNativeRegionOpKind::PROJECTION ||
+		    projection_op.projections.size() != 1 || projection_op.output_types.size() != 1 ||
+		    compact_groups.ColumnCount() != 1 || compact_groups.data[0].GetType() != projection_op.output_types[0]) {
+			return false;
+		}
+		auto &projection = projection_op.projections[0].plan;
+		idx_t source_index;
+		if (!TryReadProjectionSourceReferenceIndex(projection, source_index) || source_index >= input.ColumnCount() ||
+		    projection.return_type != projection_op.output_types[0] ||
+		    input.data[source_index].GetType() != projection_op.output_types[0]) {
+			return false;
+		}
+		return TryPreaggregateFixedWidthCountStarVector(input.data[source_index], input.size(), compact_groups,
+		                                                count_deltas);
 	}
 
 	template <class T>
@@ -4163,6 +4218,7 @@ public:
 	static bool SljitPreaggregatedPrimitivePayloadSupported(AggregatePrimitiveUpdateKind kind, PhysicalType type) {
 		switch (kind) {
 		case AggregatePrimitiveUpdateKind::COUNT_STAR:
+		case AggregatePrimitiveUpdateKind::COUNT:
 			return true;
 		case AggregatePrimitiveUpdateKind::SUM_INT64:
 			return SljitPreaggregatedPrimitiveIntegerTypeSupported(type);
@@ -4303,6 +4359,7 @@ public:
 			auto &payload = scratch.payloads[payload_idx];
 			switch (payload.kind) {
 			case AggregatePrimitiveUpdateKind::COUNT_STAR:
+			case AggregatePrimitiveUpdateKind::COUNT:
 			case AggregatePrimitiveUpdateKind::SUM_INT64:
 				payload.int64_values.push_back(0);
 				break;
@@ -4331,6 +4388,14 @@ public:
 			case AggregatePrimitiveUpdateKind::COUNT_STAR:
 				payload.int64_values[group_idx]++;
 				break;
+			case AggregatePrimitiveUpdateKind::COUNT: {
+				auto &source = payload_sources[payload_idx];
+				auto source_idx = source.format.sel->get_index(row_idx);
+				if (source.format.validity.RowIsValid(source_idx)) {
+					payload.int64_values[group_idx]++;
+				}
+				break;
+			}
 			case AggregatePrimitiveUpdateKind::SUM_INT64: {
 				int64_t value;
 				if (!SljitLoadPreaggregatedInt64Payload(payload_sources[payload_idx], row_idx, value)) {
@@ -7500,6 +7565,25 @@ public:
 		group_source.all_valid = false;
 	}
 
+	static bool HashJoinRHSFixedColumnIsNullFilteredConditionKey(const ExecutionHashJoinProbeBinding &binding,
+	                                                             const ExecutionHashJoinRHSFixedColumnSource &source) {
+		if (!binding.table_layout.null_keys_are_filtered) {
+			return false;
+		}
+		const auto condition_count =
+		    MinValue<idx_t>(binding.table_layout.condition_count, binding.table_layout.layout_offsets.size());
+		for (idx_t key_idx = 0; key_idx < condition_count; key_idx++) {
+			if (key_idx >= binding.table_layout.condition_types.size()) {
+				return false;
+			}
+			if (source.layout_offset == binding.table_layout.layout_offsets[key_idx] &&
+			    source.type == binding.table_layout.condition_types[key_idx]) {
+				return true;
+			}
+		}
+		return false;
+	}
+
 	bool TryBuildRowPointerGroupKeySource(const ExecutionHashJoinProbeBinding &binding,
 	                                      SljitExecutableRegionExpression &projection,
 	                                      const ExecutionRegionGroupInput &group,
@@ -7533,6 +7617,9 @@ public:
 			return false;
 		}
 		InitializeRowPointerGroupKeySource(rhs_source, group.type, group_source);
+		if (HashJoinRHSFixedColumnIsNullFilteredConditionKey(binding, rhs_source)) {
+			group_source.all_valid = true;
+		}
 		if (ProjectionIsSingleSourceReferenceLike(remapped_expr.plan) &&
 		    rhs_source.physical_type == group.type.InternalType() &&
 		    remapped_expr.plan.return_type.InternalType() == group.type.InternalType()) {
@@ -8360,6 +8447,22 @@ public:
 			accumulated_input_count = 0;
 		};
 
+		auto merge_preaggregated_groups = [&](DataChunk &preaggregated_groups,
+		                                      const vector<int64_t> &preaggregated_deltas, idx_t input_count) -> bool {
+			if (!MergePreaggregatedFixedWidthCountStarGroupsTemplated<T>(preaggregated_groups, preaggregated_deltas,
+			                                                             accumulated_keys, accumulated_counts,
+			                                                             accumulated_group_count)) {
+				flush_accumulated_groups();
+				if (!MergePreaggregatedFixedWidthCountStarGroupsTemplated<T>(preaggregated_groups, preaggregated_deltas,
+				                                                             accumulated_keys, accumulated_counts,
+				                                                             accumulated_group_count)) {
+					return false;
+				}
+			}
+			accumulated_input_count += input_count;
+			return true;
+		};
+
 		auto execute_projected_fallback = [&](DataChunk &projected) -> bool {
 			flush_accumulated_groups();
 			auto sink_result =
@@ -8404,39 +8507,35 @@ public:
 				}
 			}
 			if (source_chunk && source_chunk->size() > 0) {
-				auto &projected = scratch.TemporaryChunk(PROJECTION_IDX);
-				projected.Reset();
-				auto projection_stage_start = SljitRegionStageStart(runtime);
-				ExecuteProjection(scratch, PROJECTION_IDX, projection_op, *source_chunk, projected);
-				RecordSljitRegionStageRuntime(runtime, PROJECTION_IDX, projection_op.kind, projection_stage_start);
-				if (projected.size() > 0) {
-					auto preaggregate_stage_start = SljitRegionStageStart(runtime);
-					bool merged_projected = false;
-					if (!TryPreaggregateFixedWidthCountStarGroups(projected, chunk_groups, chunk_deltas)) {
-						if (execute_projected_fallback(projected)) {
-							return true;
-						}
-					} else if (!MergePreaggregatedFixedWidthCountStarGroupsTemplated<T>(
-					               chunk_groups, chunk_deltas, accumulated_keys, accumulated_counts,
-					               accumulated_group_count)) {
-						flush_accumulated_groups();
-						if (!MergePreaggregatedFixedWidthCountStarGroupsTemplated<T>(
-						        chunk_groups, chunk_deltas, accumulated_keys, accumulated_counts,
-						        accumulated_group_count)) {
+				auto direct_preaggregate_stage_start = SljitRegionStageStart(runtime);
+				if (TryPreaggregateProjectedFixedWidthCountStarGroups(projection_op, *source_chunk, chunk_groups,
+				                                                      chunk_deltas) &&
+				    merge_preaggregated_groups(chunk_groups, chunk_deltas, source_chunk->size())) {
+					RecordSljitRegionStageRuntime(runtime, AGGREGATE_IDX, aggregate_op.kind,
+					                              "direct_source_preaggregate_count_star_groups",
+					                              direct_preaggregate_stage_start);
+					RecordSljitRegionRuntimePath(runtime, projection_op.kind, "direct_count_star_projection_elided",
+					                             source_chunk->size());
+					RecordSljitRegionMaterializationBoundary(
+					    runtime, projection_op.kind, "direct_count_star_projection_elided", source_chunk->size());
+				} else {
+					auto &projected = scratch.TemporaryChunk(PROJECTION_IDX);
+					projected.Reset();
+					auto projection_stage_start = SljitRegionStageStart(runtime);
+					ExecuteProjection(scratch, PROJECTION_IDX, projection_op, *source_chunk, projected);
+					RecordSljitRegionStageRuntime(runtime, PROJECTION_IDX, projection_op.kind, projection_stage_start);
+					if (projected.size() > 0) {
+						auto preaggregate_stage_start = SljitRegionStageStart(runtime);
+						if (!TryPreaggregateFixedWidthCountStarGroups(projected, chunk_groups, chunk_deltas) ||
+						    !merge_preaggregated_groups(chunk_groups, chunk_deltas, projected.size())) {
 							if (execute_projected_fallback(projected)) {
 								return true;
 							}
 						} else {
-							merged_projected = true;
+							RecordSljitRegionStageRuntime(runtime, AGGREGATE_IDX, aggregate_op.kind,
+							                              "cross_chunk_preaggregate_count_star_groups",
+							                              preaggregate_stage_start);
 						}
-					} else {
-						merged_projected = true;
-					}
-					if (merged_projected) {
-						accumulated_input_count += projected.size();
-						RecordSljitRegionStageRuntime(runtime, AGGREGATE_IDX, aggregate_op.kind,
-						                              "cross_chunk_preaggregate_count_star_groups",
-						                              preaggregate_stage_start);
 					}
 				}
 			}
@@ -15423,7 +15522,8 @@ public:
 			auto has_sum_state = (AggregatePrimitiveUpdateUsesInt64State(lane.kind) && lane.sum_int64_value) ||
 			                     (AggregatePrimitiveUpdateUsesHugeintState(lane.kind) && lane.sum_hugeint_value) ||
 			                     (AggregatePrimitiveUpdateUsesDoubleState(lane.kind) && lane.sum_double_value);
-			if (!lane.ready || !has_sum_state || !lane.state_is_set || !lane.row_count) {
+			const auto needs_state_is_set = AggregatePrimitiveUpdateHasStateIsSet(lane.kind);
+			if (!lane.ready || !has_sum_state || (needs_state_is_set && !lane.state_is_set) || !lane.row_count) {
 				auto blocker = lane.blocker.empty() ? "aggregate-primitive-lane-incomplete" : lane.blocker;
 				throw InternalException("SLJIT aggregate primitive lane is incomplete: %s", blocker.c_str());
 			}
@@ -15459,9 +15559,13 @@ public:
 				throw InternalException("SLJIT aggregate primitive reference source is out of range");
 			}
 			input.data[plan.source_index].ToUnifiedFormat(source_format);
-			native_input.source_data = plan.return_type.InternalType() == PhysicalType::DOUBLE
-			                               ? source_format.data
-			                               : NativeIntegerSourceData(source_format, plan.integer_kind);
+			if (lane.kind == AggregatePrimitiveUpdateKind::COUNT) {
+				native_input.source_data = nullptr;
+			} else {
+				native_input.source_data = plan.return_type.InternalType() == PhysicalType::DOUBLE
+				                               ? source_format.data
+				                               : NativeIntegerSourceData(source_format, plan.integer_kind);
+			}
 			native_input.source_sel = SljitNormalizedSourceSelectionData(source_format);
 			native_input.source_validity = source_format.validity.GetData();
 			break;
@@ -15976,6 +16080,9 @@ public:
 		auto &source_data = adapter_scratch.source_data;
 		auto &source_sel = adapter_scratch.source_sel;
 		auto &source_validity = adapter_scratch.source_validity;
+		if (input_source_indices_override && input_source_indices_override->size() != payloads.size()) {
+			throw InternalException("SLJIT fused grouped aggregate payload source override size mismatch");
+		}
 
 		for (idx_t payload_idx = 0; payload_idx < payloads.size(); payload_idx++) {
 			auto &aggregate = aggregates[payload_idx];
@@ -16013,11 +16120,17 @@ public:
 			if (plan.return_type.InternalType() != lane->payload_type) {
 				throw InternalException("SLJIT fused grouped aggregate primitive payload type mismatch");
 			}
-			if (plan.source_index >= input.ColumnCount()) {
+			const auto source_index =
+			    input_source_indices_override ? (*input_source_indices_override)[payload_idx] : plan.source_index;
+			if (source_index >= input.ColumnCount()) {
 				throw InternalException("SLJIT fused grouped aggregate reference source is out of range");
 			}
-			input.data[plan.source_index].ToUnifiedFormat(source_formats[payload_idx]);
-			source_data[payload_idx] = NativeIntegerSourceData(source_formats[payload_idx], plan.integer_kind);
+			input.data[source_index].ToUnifiedFormat(source_formats[payload_idx]);
+			if (lane->kind == AggregatePrimitiveUpdateKind::COUNT) {
+				source_data[payload_idx] = nullptr;
+			} else {
+				source_data[payload_idx] = NativeIntegerSourceData(source_formats[payload_idx], plan.integer_kind);
+			}
 			source_sel[payload_idx] = SljitNormalizedSourceSelectionData(source_formats[payload_idx]);
 			source_validity[payload_idx] = SljitNormalizedSourceValidityData(
 			    source_formats[payload_idx], source_sel[payload_idx], execute_sel, count);
@@ -16153,6 +16266,14 @@ public:
 				case AggregatePrimitiveUpdateKind::COUNT_STAR: {
 					if (row_idx >= payload.int64_values.size()) {
 						throw InternalException("SLJIT preaggregated count-star delta is out of range");
+					}
+					auto count_ptr = reinterpret_cast<int64_t *>(value_ptr);
+					*count_ptr += payload.int64_values[row_idx];
+					break;
+				}
+				case AggregatePrimitiveUpdateKind::COUNT: {
+					if (row_idx >= payload.int64_values.size()) {
+						throw InternalException("SLJIT preaggregated count delta is out of range");
 					}
 					auto count_ptr = reinterpret_cast<int64_t *>(value_ptr);
 					*count_ptr += payload.int64_values[row_idx];

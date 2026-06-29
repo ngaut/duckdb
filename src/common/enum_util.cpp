@@ -410,6 +410,7 @@ const StringUtil::EnumStringLiteral *GetAggregatePrimitiveUpdateKindValues() {
 		{ static_cast<uint32_t>(AggregatePrimitiveUpdateKind::SUM_INT64), "SUM_INT64" },
 		{ static_cast<uint32_t>(AggregatePrimitiveUpdateKind::SUM_HUGEINT), "SUM_HUGEINT" },
 		{ static_cast<uint32_t>(AggregatePrimitiveUpdateKind::SUM_DOUBLE), "SUM_DOUBLE" },
+		{ static_cast<uint32_t>(AggregatePrimitiveUpdateKind::COUNT), "COUNT" },
 		{ static_cast<uint32_t>(AggregatePrimitiveUpdateKind::COUNT_STAR), "COUNT_STAR" }
 	};
 	return values;
@@ -417,12 +418,12 @@ const StringUtil::EnumStringLiteral *GetAggregatePrimitiveUpdateKindValues() {
 
 template<>
 const char* EnumUtil::ToChars<AggregatePrimitiveUpdateKind>(AggregatePrimitiveUpdateKind value) {
-	return StringUtil::EnumToString(GetAggregatePrimitiveUpdateKindValues(), 5, "AggregatePrimitiveUpdateKind", static_cast<uint32_t>(value));
+	return StringUtil::EnumToString(GetAggregatePrimitiveUpdateKindValues(), 6, "AggregatePrimitiveUpdateKind", static_cast<uint32_t>(value));
 }
 
 template<>
 AggregatePrimitiveUpdateKind EnumUtil::FromString<AggregatePrimitiveUpdateKind>(const char *value) {
-	return static_cast<AggregatePrimitiveUpdateKind>(StringUtil::StringToEnum(GetAggregatePrimitiveUpdateKindValues(), 5, "AggregatePrimitiveUpdateKind", value));
+	return static_cast<AggregatePrimitiveUpdateKind>(StringUtil::StringToEnum(GetAggregatePrimitiveUpdateKindValues(), 6, "AggregatePrimitiveUpdateKind", value));
 }
 
 const StringUtil::EnumStringLiteral *GetAggregateStateExportModeValues() {

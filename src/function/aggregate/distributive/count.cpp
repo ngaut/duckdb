@@ -271,6 +271,16 @@ AggregatePrimitiveUpdateABI CountStarPrimitiveUpdateABI() {
 	return abi;
 }
 
+AggregatePrimitiveUpdateABI CountPrimitiveUpdateABI() {
+	AggregatePrimitiveUpdateABI abi;
+	abi.kind = AggregatePrimitiveUpdateKind::COUNT;
+	abi.input_type = PhysicalType::INVALID;
+	abi.state_size = sizeof(int64_t);
+	abi.state_value_offset = 0;
+	abi.state_is_set_offset = 0;
+	return abi;
+}
+
 unique_ptr<BaseStatistics> CountPropagateStats(ClientContext &context, BoundAggregateExpression &expr,
                                                AggregateStatisticsInput &input) {
 	if (!expr.IsDistinct() && !input.child_stats[0].CanHaveNull()) {
@@ -294,6 +304,7 @@ AggregateFunction CountFunctionBase::GetFunction() {
 	fun.SetOrderDependent(AggregateOrderDependent::NOT_ORDER_DEPENDENT);
 	fun.SetStructStateExport(GetCountStateType);
 	fun.SetStatisticsCallback(CountPropagateStats);
+	fun.SetPrimitiveUpdateABI(CountPrimitiveUpdateABI());
 	return fun;
 }
 

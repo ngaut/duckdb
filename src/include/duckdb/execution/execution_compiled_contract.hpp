@@ -22,7 +22,6 @@ enum class ExecutionCompiledContractKind : uint8_t {
 	NESTED_LOOP_JOIN_PROBE_CURSOR,
 	AGGREGATE_LOOKUP,
 	AGGREGATE_UPDATE,
-	AGGREGATE_DISTINCT_SINK,
 	SINK_CURSOR,
 	STATE_SCAN_CURSOR
 };
@@ -83,7 +82,6 @@ struct ExecutionCompiledOperatorContract {
 			case ExecutionRegionStageKind::HASH_JOIN_BUILD:
 			case ExecutionRegionStageKind::NESTED_LOOP_JOIN_BUILD:
 			case ExecutionRegionStageKind::HASH_AGGREGATE_UPDATE:
-			case ExecutionRegionStageKind::HASH_AGGREGATE_DISTINCT_SINK:
 			case ExecutionRegionStageKind::PERFECT_HASH_AGGREGATE_UPDATE:
 			case ExecutionRegionStageKind::UNGROUPED_AGGREGATE_UPDATE:
 			case ExecutionRegionStageKind::APPEND_SINK:

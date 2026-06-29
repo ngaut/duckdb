@@ -737,7 +737,7 @@ TEST_CASE("JIT count-star distribution aggregate uses dense preaggregated groups
 	    },
 	    [](const ExecutionRegionEvent &event) {
 		    REQUIRE(StringUtil::Contains(EventGeneratedStageCountBreakdown(event),
-		                                 "aggregate_update.cross_chunk_preaggregate_count_star_groups="));
+		                                 "aggregate_update.direct_source_preaggregate_count_star_groups="));
 		    REQUIRE(StringUtil::Contains(EventJitRuntimePathCounts(event),
 		                                 "aggregate_update.preaggregated_count_star_address_update="));
 		    REQUIRE(StringUtil::Contains(EventJitMaterializationBoundaryCounts(event),

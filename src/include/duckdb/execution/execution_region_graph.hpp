@@ -59,7 +59,6 @@ struct ExecutionRegionOperatorEntry {
 		return sink_contract.HasNativeContract(ExecutionCompiledContractKind::HASH_JOIN_BUILD) ||
 		       sink_contract.HasNativeContract(ExecutionCompiledContractKind::NESTED_LOOP_JOIN_BUILD) ||
 		       sink_contract.HasNativeContract(ExecutionCompiledContractKind::AGGREGATE_UPDATE) ||
-		       sink_contract.HasNativeContract(ExecutionCompiledContractKind::AGGREGATE_DISTINCT_SINK) ||
 		       sink_contract.HasNativeContract(ExecutionCompiledContractKind::SINK_CURSOR);
 	}
 	bool IsScanSource() const {

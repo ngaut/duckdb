@@ -29,6 +29,50 @@ SELECT COUNT(*), COUNT(1), COUNT(i), COUNT(COALESCE(i, 1)), COUNT(DISTINCT i), C
 2
 1
 
+statement ok
+CREATE TABLE grouped_count_distinct(g INTEGER, v INTEGER);
+
+statement ok
+INSERT INTO grouped_count_distinct VALUES
+	(1, NULL),
+	(1, NULL),
+	(2, 10),
+	(2, 10),
+	(2, NULL),
+	(2, 11),
+	(3, NULL),
+	(3, 20);
+
+query II
+SELECT g, COUNT(DISTINCT v) FROM grouped_count_distinct GROUP BY g ORDER BY g
+----
+1	0
+2	2
+3	1
+
+statement ok
+SET threads=4;
+
+statement ok
+CREATE TABLE threaded_grouped_count_distinct(g BIGINT NOT NULL, v BIGINT NOT NULL);
+
+statement ok
+INSERT INTO threaded_grouped_count_distinct
+SELECT i % 10, i % 100 FROM range(200000) t(i);
+
+query II
+SELECT min(c), max(c)
+FROM (
+	SELECT g, COUNT(DISTINCT v) AS c
+	FROM threaded_grouped_count_distinct
+	GROUP BY g
+);
+----
+10	10
+
+statement ok
+SET threads=1;
+
 # ordered aggregates are not supported
 query I
 SELECT COUNT(1 ORDER BY 1)

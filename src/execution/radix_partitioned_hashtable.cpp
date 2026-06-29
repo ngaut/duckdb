@@ -154,6 +154,9 @@ static bool RadixValidatePrimitiveAggregateUpdate(const ExecutionRegionSinkInfo 
 		if (chunk.size() == 0) {
 			continue;
 		}
+		if (lane->kind == AggregatePrimitiveUpdateKind::COUNT) {
+			continue;
+		}
 		if (lane->kind == AggregatePrimitiveUpdateKind::SUM_INT64 ||
 		    lane->kind == AggregatePrimitiveUpdateKind::SUM_HUGEINT) {
 			int64_t ignored;
@@ -206,6 +209,9 @@ static bool RadixValidatePrimitiveAggregateUpdateWithPayloadInput(
 			return false;
 		}
 		if (payload_input.size() == 0) {
+			continue;
+		}
+		if (lane->kind == AggregatePrimitiveUpdateKind::COUNT) {
 			continue;
 		}
 		if (lane->kind == AggregatePrimitiveUpdateKind::SUM_INT64 ||
@@ -272,6 +278,11 @@ static void RadixUpdatePrimitiveGroup(data_ptr_t state_address, idx_t row_idx, v
 			(*count)++;
 			break;
 		}
+		case AggregatePrimitiveUpdateKind::COUNT: {
+			auto count = reinterpret_cast<int64_t *>(value_ptr);
+			(*count)++;
+			break;
+		}
 		case AggregatePrimitiveUpdateKind::SUM_INT64: {
 			int64_t value;
 			RadixLoadPrimitiveInteger(payloads[aggregate_idx].data, payloads[aggregate_idx].type, row_idx, value);
@@ -318,7 +329,8 @@ static void RadixUpdatePrimitiveGroupSelected(const uintptr_t *state_addresses, 
 	}
 }
 
-static void RadixUpdatePrimitiveGroupTargetSpan(const ExecutionGroupedAggregateStateTargetSpan &span, void *update_state,
+static void RadixUpdatePrimitiveGroupTargetSpan(const ExecutionGroupedAggregateStateTargetSpan &span,
+                                                void *update_state,
                                                 optional_ptr<ExecutionOperatorStageRecorder> recorder,
                                                 const char *stage_name) {
 	if (!span.HasTargets()) {
@@ -428,10 +440,12 @@ enum class AggregatePartitionState : uint8_t {
 
 struct AggregatePartition : StateWithBlockableTasks {
 	explicit AggregatePartition(unique_ptr<TupleDataCollection> data_p)
-	    : state(AggregatePartitionState::READY_TO_FINALIZE), data(std::move(data_p)), progress(0) {
+	    : state(AggregatePartitionState::READY_TO_FINALIZE), data_contains_duplicate_rows(false),
+	      data(std::move(data_p)), progress(0) {
 	}
 
 	AggregatePartitionState state;
+	bool data_contains_duplicate_rows;
 
 	unique_ptr<TupleDataCollection> data;
 	atomic<double> progress;
@@ -1294,8 +1308,7 @@ bool RadixPartitionedHashTable::TryUpdateRowPointerGroupPrimitivePayloads(
 	auto update_start = RadixTraceStart(recorder);
 	RadixUpdatePrimitiveGroupTargetBatch(
 	    targets, &update_state, recorder, "direct_row_pointer_split_payload.target_input_order_update",
-	    "direct_row_pointer_split_payload.target_existing_update",
-	    "direct_row_pointer_split_payload.target_new_update",
+	    "direct_row_pointer_split_payload.target_existing_update", "direct_row_pointer_split_payload.target_new_update",
 	    "direct_row_pointer_split_payload.target_duplicate_update");
 	RecordRadixTraceStage(recorder, "direct_row_pointer_split_payload.update", update_start);
 	auto update_marker_start = RadixTraceStart(recorder);
@@ -1691,11 +1704,13 @@ void RadixHTLocalSourceState::Finalize(RadixHTGlobalSinkState &sink, RadixHTGlob
 	// Now combine the uncombined data using this thread's HT
 	ht->Combine(*partition.data, &partition.progress);
 	partition.progress = 1;
+	auto combined_data = ht->AcquirePartitionedData();
 
 	// Move the combined data back to the partition
 	partition.data = make_uniq<TupleDataCollection>(BufferManager::GetBufferManager(gstate.context),
 	                                                sink.radix_ht.GetLayoutPtr(), MemoryTag::HASH_TABLE);
-	partition.data->Combine(*ht->AcquirePartitionedData()->GetPartitions()[0]);
+	partition.data->Combine(*combined_data->GetPartitions()[0]);
+	partition.data_contains_duplicate_rows = false;
 
 	// Update thread-global state
 	const annotated_lock_guard<annotated_mutex> guard {sink.lock};

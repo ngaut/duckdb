@@ -233,7 +233,8 @@ BuildPerfectHashAggregatePrimitiveUpdateBinding(const PhysicalPerfectHashAggrega
 				result.blocker = "perfect-hash-aggregate-primitive-update-requires-one-payload";
 				return result;
 			}
-			if (aggregate_info.child_types[0].InternalType() != abi.input_type) {
+			if (AggregatePrimitiveUpdateRequiresTypedPayload(abi.kind) &&
+			    aggregate_info.child_types[0].InternalType() != abi.input_type) {
 				result.blocker = "perfect-hash-aggregate-primitive-update-payload-type-mismatch";
 				return result;
 			}

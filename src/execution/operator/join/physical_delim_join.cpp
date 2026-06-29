@@ -40,10 +40,10 @@ static string DelimJoinNativeContractBlocker(const ExecutionContract &distinct_c
 	if (!distinct_contract.sink.aggregates.empty()) {
 		return "delim-join-distinct-sink-has-aggregate-payloads";
 	}
-	auto &distinct_state_update = distinct_contract.sink.aggregate_contract.native_state_update_contract;
-	if (distinct_state_update.status != ExecutionRegionStateContractStatus::READY) {
-		return distinct_state_update.blocker.empty() ? "delim-join-distinct-state-update-contract-not-ready"
-		                                             : distinct_state_update.blocker;
+	auto &distinct_update = distinct_contract.sink.aggregate_contract.native_state_update_contract;
+	if (distinct_update.status != ExecutionRegionStateContractStatus::READY) {
+		return distinct_update.blocker.empty() ? "delim-join-distinct-aggregate-update-contract-not-ready"
+		                                      : distinct_update.blocker;
 	}
 	if (type != PhysicalOperatorType::RIGHT_DELIM_JOIN) {
 		return string();
@@ -84,7 +84,7 @@ ExecutionContract PhysicalDelimJoin::GetExecutionContract() const {
 	result.sink.reason += ";delim_scans=" + std::to_string(delim_scans.size());
 	result.sink.reason += ";delim_index=" + (delim_idx.IsValid() ? std::to_string(delim_idx.GetIndex()) : "invalid");
 	result.sink.reason += ";distinct_sink_kind=" + string(ExecutionRegionSinkKindToString(distinct_contract.sink.kind));
-	result.sink.reason += ";distinct_state_update_status=" +
+	result.sink.reason += ";distinct_aggregate_update_status=" +
 	                      string(ExecutionRegionStateContractStatusToString(
 	                          distinct_contract.sink.aggregate_contract.native_state_update_contract.status));
 	if (join_contract) {

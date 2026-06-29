@@ -118,45 +118,6 @@ static SljitRegionNodePlan PlanSljitHashAggregateSinkNode(const ExecutionRegionN
 	return PlanSljitAggregateUpdateSinkNode(node, render_diagnostics);
 }
 
-static SljitRegionNodePlan PlanSljitHashAggregateDistinctSinkNode(const ExecutionRegionNode &node,
-                                                                  bool render_diagnostics) {
-	if (!node.sink) {
-		return SljitRegionBoundaryNode("hash aggregate distinct sink is missing native sink IR");
-	}
-	auto &distinct_contract = node.sink->aggregate_contract.native_distinct_state_update_contract;
-	if (distinct_contract.status != ExecutionRegionStateContractStatus::READY) {
-		return SljitRegionBoundaryNode("hash aggregate distinct state-update contract missing;blocker=" +
-		                               distinct_contract.blocker);
-	}
-	if (node.sink->groups.empty()) {
-		return SljitRegionBoundaryNode("hash aggregate distinct sink has no group bindings");
-	}
-	for (auto &group : node.sink->groups) {
-		if (!group.supported_reference) {
-			auto reason = group.reason.empty() ? "hash aggregate distinct group binding unsupported" : group.reason;
-			return SljitRegionBoundaryNode("hash aggregate distinct sink group unsupported;group_index=" +
-			                               std::to_string(group.group_index) + ";" + reason);
-		}
-	}
-	if (node.sink->aggregates.empty()) {
-		return SljitRegionBoundaryNode("hash aggregate distinct sink has no aggregate payload bindings");
-	}
-	for (auto &aggregate : node.sink->aggregates) {
-		if (!aggregate.distinct) {
-			return SljitRegionBoundaryNode("hash aggregate distinct sink received non-distinct aggregate");
-		}
-	}
-
-	string reason = "hash aggregate distinct state-update native lowering requires distinct aggregate contract";
-	if (render_diagnostics) {
-		reason += ";aggregate-state-update=distinct-contract-boundary";
-		reason += ";aggregate_count=" + std::to_string(node.sink->aggregate_contract.aggregate_count);
-		reason += ";group_count=" + std::to_string(node.sink->aggregate_contract.group_count);
-	}
-	AppendSljitReasonPart(reason, node.sink->reason, render_diagnostics);
-	return SljitRegionBoundaryNode(std::move(reason));
-}
-
 static SljitRegionNodePlan PlanSljitHashJoinSinkNode(const ExecutionRegionNode &node, bool render_diagnostics) {
 	if (!node.sink) {
 		return SljitRegionBoundaryNode("hash join sink is missing native sink IR");
@@ -447,9 +408,6 @@ SljitRegionNodePlan PlanSljitSinkNode(const ExecutionRegionNode &node, const vec
 		break;
 	case ExecutionRegionSinkKind::HASH_AGGREGATE_UPDATE:
 		sink = PlanSljitHashAggregateSinkNode(node, render_diagnostics);
-		break;
-	case ExecutionRegionSinkKind::HASH_AGGREGATE_DISTINCT_SINK:
-		sink = PlanSljitHashAggregateDistinctSinkNode(node, render_diagnostics);
 		break;
 	case ExecutionRegionSinkKind::PERFECT_HASH_AGGREGATE_UPDATE:
 	case ExecutionRegionSinkKind::UNGROUPED_AGGREGATE_UPDATE:

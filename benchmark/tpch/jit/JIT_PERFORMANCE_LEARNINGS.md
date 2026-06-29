@@ -6,23 +6,22 @@ that were verified are separated from principles and next directions.
 
 ## Verified State
 
-- The repo is back on DuckDB's default vector size of 2048.
-- `make reldebug -j12` passed after the latest cleanup.
-- `build/reldebug/test/unittest "[api][jit]"` passed.
-- Full `build/reldebug/test/unittest` passed:
-  - 977381 assertions
-  - 4537 test cases
-  - 356 skipped tests
-
-Latest cleaned TPC-H Q1 SF1, single-thread checkpoint:
-
-| Mode | Median |
-| --- | ---: |
-| Vectorized/off | 0.072s |
-| JIT/auto | 0.069s |
-
-The measured end-to-end speedup was about 1.04x. That is real, but too small to
-treat as a root solution. Generated-region runtime was 465681 us over 15 runs.
+- Current broad SF10 production sweep:
+  `/private/tmp/duckdb_jit_cleanup_all_sf10_r3`.
+- Correctness diff is 0 for all 22 TPC-H queries.
+- Twenty-one queries are jitted, and all twenty-one jitted queries are faster
+  than non-JIT in that sweep.
+- Q16 is the only non-jitted query in the latest broad sweep, but it now has a
+  focused core distinct-count backend instead of a CBO exception. The backend
+  resolves grouped state row pointers, owns the integer distinct set, and
+  increments the count state only when a payload is first seen.
+- Latest cleanup verification:
+  - `make release -j12` passed
+  - `build/release/test/unittest "*jit*"` passed
+  - Python syntax checks passed for `tpch_common.py`, `tpch_benchmark.py`, and
+    `verify_tpch_benchmark.py`
+  - `git diff --check` passed
+  - whole-repo search found no deprecated verification pragma references
 
 ## What Actually Worked
 
@@ -348,38 +347,11 @@ conditionals:
 
 When those facts are explicit, special cases become normal cases.
 
-## Next Aggressive Directions
+## Historical Optimization Log
 
-### 1. TPC-H Type Coverage With Fusion
-
-Add native BIGINT, INTEGER, DECIMAL(15,2), DATE, and selected VARCHAR paths where
-they remove real work. Do not add isolated type support that still materializes
-through the same generic vectorized boundaries.
-
-Exit criteria:
-
-- correctness tests for each type family
-- CTAS/direct materialization benchmark per type
-- TPC-H query evidence, not only synthetic microbenchmarks
-
-### 2. Grouped Aggregate State Locality
-
-The current Q1 bottleneck is per-row grouped aggregate state lookup/update around
-sparse perfect-hash state. The next root-level optimization should reduce that
-traffic.
-
-Promising directions:
-
-- packed group-state layout when runtime stats prove a small active domain
-- remapping without a per-row slot-map load on the hot path
-- multi-group local accumulation only when flush frequency is controlled
-- better dictionary/statistics knowledge for compressed string grouping keys
-
-Exit criteria:
-
-- prove fewer loads/stores in the generated loop
-- show TPC-H Q1 generated-region improvement beyond noise
-- preserve full unit-test correctness
+The sections below preserve the measured sequence of fixes. They are not the
+current work order; use `JIT_BROAD_QUERY_PLAN.md` and
+`JIT_BROAD_QUERY_REFACTOR_PLAN.md` for active milestones.
 
 ### 2a. Predicate-Gated Perfect-Hash Aggregate Loop
 
@@ -4015,6 +3987,41 @@ boundary: either carry matched row descriptors directly into grouped state looku
 and payload update, or reduce the surviving regular hash-table probe/build
 traffic itself. Local helper reshaping is exhausted unless it deletes measured
 loads, branches, or materialized descriptor state.
+
+### 73. Q16 Count-Distinct Backend Owns Duplicate Detection
+
+The retained Q16 fix is a DuckDB-owned distinct aggregate backend, not a JIT CBO
+threshold change. The old tuple-backed duplicate table and count-all-then-
+decrement correction path were removed. The active path now:
+
+- resolves grouped aggregate row pointers through the address-only grouped hash
+  table API
+- keeps a compact per-group integer payload table keyed by the row pointer
+- promotes only high-cardinality groups into one shared `(row_pointer, payload)`
+  overflow table
+- increments the count state directly on first insert, so duplicate rows do not
+  need a correction selection or a second state update
+- consumes the payload vector directly inside the pointer-key set, so the
+  temporary distinct `DataChunk` and valid-row selection scratch are gone
+- stays single-thread-only for pointer keys because local aggregate row pointers
+  are not stable across local states
+
+Focused SF10 Q16 verification:
+
+- `/private/tmp/duckdb_jit_q16_inline_hash_direct_update_r2`
+- 30 repeats, threads 1, correctness diff 0
+- policy off median `0.162s`
+- policy auto median `0.163s`
+- compiled regions `0`
+- cleanup smoke `/private/tmp/duckdb_jit_q16_no_distinct_chunk_r1` verified
+  correctness diff 0 over 10 repeats with off median `0.1555s`, auto median
+  `0.1550s`, and `compiled_regions=0`
+
+The current win is a core execution-path cleanup: Q16 remains non-jitted because
+there is no generated region with owned hot work yet. Future Q16 JIT work should
+start from this distinct backend and remove more grouped lookup/projection work;
+it should not reintroduce tuple-backed duplicate scans, correction selections,
+or CBO leniency for the old fragments.
 
 ## Bottom Line
 

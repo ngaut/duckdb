@@ -36,6 +36,7 @@ from tpch_common import (
     SUMMARY_FIELDS,
     TPCHConfigurationError,
     cleanup_tpch_database,
+    normalize_tpch_query_ids,
     prepare_tpch_database,
     read_query,
 )
@@ -274,6 +275,7 @@ def parse_args() -> argparse.Namespace:
 
 def validate_args(args: argparse.Namespace) -> None:
     args.duckdb = args.duckdb.resolve()
+    args.queries = normalize_tpch_query_ids(args.queries)
     if args.repeats <= 0:
         raise TPCHConfigurationError("--repeats must be positive")
     if not args.duckdb.exists():
@@ -289,8 +291,7 @@ def main() -> int:
     rows = []
     counter_rows = []
     try:
-        for raw_query_id in args.queries:
-            query_id = f"{int(raw_query_id):02d}"
+        for query_id in args.queries:
             query_sql = read_query(root, query_id)
             create_baseline(args, db_path, query_id, query_sql)
             for repeat in range(1, args.repeats + 1):

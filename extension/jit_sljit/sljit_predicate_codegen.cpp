@@ -21,11 +21,87 @@
 
 namespace duckdb {
 
+struct SljitNativeStringLikeFragment {
+	idx_t start = 0;
+	idx_t length = 0;
+	idx_t anchor = 0;
+};
+
+static uint8_t SljitLikeFragmentAnchorScore(unsigned char c) {
+	static constexpr char RARE_TO_COMMON[] = "qzxjkvbpygfwmucldrhsnioate";
+	if (c >= 'A' && c <= 'Z') {
+		c = static_cast<unsigned char>(c - 'A' + 'a');
+	}
+	for (idx_t idx = 0; idx + 1 < sizeof(RARE_TO_COMMON); idx++) {
+		if (c == static_cast<unsigned char>(RARE_TO_COMMON[idx])) {
+			return UnsafeNumericCast<uint8_t>(idx + 1);
+		}
+	}
+	return 0;
+}
+
+static idx_t SljitLikeFragmentAnchor(const char *data, idx_t length) {
+	D_ASSERT(length > 0);
+	idx_t anchor = 0;
+	auto best_score = SljitLikeFragmentAnchorScore(static_cast<unsigned char>(data[0]));
+	for (idx_t idx = 1; idx < length; idx++) {
+		auto score = SljitLikeFragmentAnchorScore(static_cast<unsigned char>(data[idx]));
+		if (score < best_score) {
+			anchor = idx;
+			best_score = score;
+		}
+	}
+	return anchor;
+}
+
+static idx_t SljitFindLikeFragment(const char *sdata, idx_t slen, const char *fragment, idx_t fragment_length,
+                                   idx_t anchor) {
+	if (fragment_length > slen) {
+		return DConstants::INVALID_INDEX;
+	}
+	const auto anchor_byte = static_cast<unsigned char>(fragment[anchor]);
+	idx_t position = anchor;
+	const auto last_anchor = slen - fragment_length + anchor;
+	while (position <= last_anchor) {
+		auto location = static_cast<const char *>(memchr(sdata + position, anchor_byte, last_anchor - position + 1));
+		if (!location) {
+			return DConstants::INVALID_INDEX;
+		}
+		const auto anchor_position = UnsafeNumericCast<idx_t>(location - sdata);
+		const auto fragment_position = anchor_position - anchor;
+		if (memcmp(sdata + fragment_position, fragment, fragment_length) == 0) {
+			return fragment_position;
+		}
+		position = anchor_position + 1;
+	}
+	return DConstants::INVALID_INDEX;
+}
+
 struct SljitNativeStringConstant {
 	explicit SljitNativeStringConstant(string value_p) : value(std::move(value_p)) {
+		like_anchor_start = value.empty() || value[0] != '%';
+		like_anchor_end = value.empty() || value[value.size() - 1] != '%';
+		idx_t pattern_idx = 0;
+		while (pattern_idx < value.size()) {
+			while (pattern_idx < value.size() && value[pattern_idx] == '%') {
+				pattern_idx++;
+			}
+			const auto fragment_start = pattern_idx;
+			while (pattern_idx < value.size() && value[pattern_idx] != '%') {
+				pattern_idx++;
+			}
+			const auto fragment_length = pattern_idx - fragment_start;
+			if (fragment_length > 0) {
+				const auto anchor = SljitLikeFragmentAnchor(value.data() + fragment_start, fragment_length);
+				like_fragments.push_back({fragment_start, fragment_length, anchor});
+			}
+		}
 	}
 
 	string value;
+	vector<SljitNativeStringLikeFragment> like_fragments;
+	bool like_anchor_start = true;
+	bool like_anchor_end = true;
 };
 
 struct SljitNativeStringConstantList {
@@ -39,40 +115,26 @@ static sljit_sw SLJIT_FUNC SljitNativeStringLikePercentOnly(const char *sdata, i
                                                             const SljitNativeStringConstant *pattern) {
 	const auto &pattern_value = pattern->value;
 	const auto pdata = pattern_value.data();
-	const auto plen = pattern_value.size();
-	const bool anchor_start = plen == 0 || pdata[0] != '%';
-	const bool anchor_end = plen == 0 || pdata[plen - 1] != '%';
 	idx_t position = 0;
-	idx_t pattern_idx = 0;
-	bool saw_fragment = false;
 
-	while (pattern_idx < plen) {
-		while (pattern_idx < plen && pdata[pattern_idx] == '%') {
-			pattern_idx++;
-		}
-		auto fragment_start = pattern_idx;
-		while (pattern_idx < plen && pdata[pattern_idx] != '%') {
-			pattern_idx++;
-		}
-		auto fragment_length = pattern_idx - fragment_start;
-		if (fragment_length == 0) {
-			continue;
-		}
-		const bool first_fragment = !saw_fragment;
-		const bool last_fragment = pattern_idx == plen;
-		saw_fragment = true;
+	for (idx_t fragment_idx = 0; fragment_idx < pattern->like_fragments.size(); fragment_idx++) {
+		auto &fragment = pattern->like_fragments[fragment_idx];
+		const auto fragment_start = fragment.start;
+		const auto fragment_length = fragment.length;
+		const bool first_fragment = fragment_idx == 0;
+		const bool last_fragment = fragment_idx + 1 == pattern->like_fragments.size();
 
-		if (first_fragment && anchor_start) {
+		if (first_fragment && pattern->like_anchor_start) {
 			if (slen < fragment_length || memcmp(sdata, pdata + fragment_start, fragment_length) != 0) {
 				return false;
 			}
 			position = fragment_length;
-			if (last_fragment && anchor_end) {
+			if (last_fragment && pattern->like_anchor_end) {
 				return position == slen;
 			}
 			continue;
 		}
-		if (last_fragment && anchor_end) {
+		if (last_fragment && pattern->like_anchor_end) {
 			if (slen < fragment_length) {
 				return false;
 			}
@@ -81,20 +143,14 @@ static sljit_sw SLJIT_FUNC SljitNativeStringLikePercentOnly(const char *sdata, i
 			       memcmp(sdata + suffix_position, pdata + fragment_start, fragment_length) == 0;
 		}
 
-		bool found = false;
-		while (position + fragment_length <= slen) {
-			if (memcmp(sdata + position, pdata + fragment_start, fragment_length) == 0) {
-				position += fragment_length;
-				found = true;
-				break;
-			}
-			position++;
-		}
-		if (!found) {
+		auto match_offset = SljitFindLikeFragment(sdata + position, slen - position, pdata + fragment_start,
+		                                          fragment_length, fragment.anchor);
+		if (match_offset == DConstants::INVALID_INDEX) {
 			return false;
 		}
+		position += match_offset + fragment_length;
 	}
-	return saw_fragment || !anchor_start || !anchor_end || slen == 0;
+	return !pattern->like_fragments.empty() || !pattern->like_anchor_start || !pattern->like_anchor_end || slen == 0;
 }
 
 static sljit_sw SLJIT_FUNC SljitNativeStringInListConstant(const char *sdata, idx_t slen,
@@ -562,7 +618,8 @@ static const SljitNativeStringConstantList *AddStringConstantListCodeData(vector
 }
 
 static bool StringInListShouldUseHelper(const SljitNativePredicate &predicate) {
-	return predicate.string_constants.size() > 2;
+	static constexpr idx_t INLINE_STRING_IN_LIST_LIMIT = 2;
+	return predicate.string_constants.size() > INLINE_STRING_IN_LIST_LIMIT;
 }
 
 static void EmitStringInListInlineBranches(struct sljit_compiler *compiler, const SljitNativePredicate &predicate,

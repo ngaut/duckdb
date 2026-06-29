@@ -8,7 +8,6 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "jit"))
 from benchmark_common import (
-    normalize_query_ids,
     read_csv,
     require,
     require_columns,
@@ -20,11 +19,12 @@ from benchmark_common import (
 from tpch_common import (
     COUNTER_FIELDS,
     DEFAULT_POLICIES,
-    DEFAULT_QUERIES,
     PERFORMANCE_GAP_FIELDS,
     RUN_FIELDS,
     RUNNER_COST_COMPONENT_FIELDS,
     SUMMARY_FIELDS,
+    TPCHConfigurationError,
+    normalize_tpch_query_ids,
 )
 from shape_inventory import verify_shape_inventory
 
@@ -35,9 +35,7 @@ DEFAULT_AUTO_NO_DECISION_NOISE_S = 0.005
 
 def expected_queries(rows: list[dict], requested: list[str] | None) -> list[str]:
     if requested is not None:
-        if requested == ["all"]:
-            return list(DEFAULT_QUERIES)
-        return normalize_query_ids(requested)
+        return normalize_tpch_query_ids(requested)
     return sorted({row["query"] for row in rows})
 
 
@@ -248,4 +246,8 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    try:
+        raise SystemExit(main())
+    except TPCHConfigurationError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        raise SystemExit(2) from None

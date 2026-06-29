@@ -29,6 +29,7 @@ DistinctAggregateCollectionInfo::DistinctAggregateCollectionInfo(const vector<un
 
 DistinctAggregateState::DistinctAggregateState(const DistinctAggregateData &data, ClientContext &client)
     : child_executor(client) {
+	D_ASSERT(!data.UsesGroupStatePointerKeys());
 	radix_states.resize(data.info.table_count);
 	distinct_output_chunks.resize(data.info.table_count);
 
@@ -74,8 +75,13 @@ DistinctAggregateData::DistinctAggregateData(const DistinctAggregateCollectionIn
 
 DistinctAggregateData::DistinctAggregateData(const DistinctAggregateCollectionInfo &info, const GroupingSet &groups,
                                              const vector<unique_ptr<Expression>> *group_expressions,
-                                             TupleDataValidityType distinct_validity)
-    : info(info) {
+                                             TupleDataValidityType distinct_validity,
+                                             DistinctAggregateKeyStrategy key_strategy_p)
+    : info(info), key_strategy(key_strategy_p) {
+	if (UsesGroupStatePointerKeys()) {
+		return;
+	}
+
 	grouped_aggregate_data.resize(info.table_count);
 	radix_tables.resize(info.table_count);
 	grouping_sets.resize(info.table_count);
@@ -89,9 +95,11 @@ DistinctAggregateData::DistinctAggregateData(const DistinctAggregateCollectionIn
 			//! This aggregate shares a table with another aggregate, and the table is already initialized
 			continue;
 		}
+		auto &grouping_set = grouping_sets[table_idx];
+		grouped_aggregate_data[table_idx] = make_uniq<GroupedAggregateData>();
+		auto &distinct_group_data = *grouped_aggregate_data[table_idx];
 		// The grouping set contains the indices of the chunk that correspond to the data vector
 		// that will be used to figure out in which bucket the payload should be put
-		auto &grouping_set = grouping_sets[table_idx];
 		//! Populate the group with the children of the aggregate
 		for (auto &group : groups) {
 			grouping_set.insert(group);
@@ -100,11 +108,9 @@ DistinctAggregateData::DistinctAggregateData(const DistinctAggregateCollectionIn
 		for (idx_t set_idx = 0; set_idx < aggregate.GetChildren().size(); set_idx++) {
 			grouping_set.insert(ProjectionIndex(set_idx + group_by_size));
 		}
-		// Create the hashtable for the aggregate
-		grouped_aggregate_data[table_idx] = make_uniq<GroupedAggregateData>();
-		grouped_aggregate_data[table_idx]->InitializeDistinct(info.aggregates[i], group_expressions);
+		distinct_group_data.InitializeDistinct(info.aggregates[i], group_expressions);
 		radix_tables[table_idx] =
-		    make_uniq<RadixPartitionedHashTable>(grouping_set, *grouped_aggregate_data[table_idx], distinct_validity);
+		    make_uniq<RadixPartitionedHashTable>(grouping_set, distinct_group_data, distinct_validity);
 
 		// Fill the chunk_types (only contains the payload of the distinct aggregates)
 		vector<LogicalType> chunk_types;
@@ -198,7 +204,7 @@ DistinctAggregateCollectionInfo::Create(vector<unique_ptr<Expression>> &aggregat
 }
 
 bool DistinctAggregateData::IsDistinct(idx_t index) const {
-	bool is_distinct = !radix_tables.empty() && info.table_map.count(index);
+	bool is_distinct = info.table_map.count(index);
 #ifdef DEBUG
 	//! Make sure that if it is distinct, it's also in the indices
 	//! And if it's not distinct, that it's also not in the indices
@@ -212,6 +218,10 @@ bool DistinctAggregateData::IsDistinct(idx_t index) const {
 	D_ASSERT(found == is_distinct);
 #endif
 	return is_distinct;
+}
+
+bool DistinctAggregateData::UsesGroupStatePointerKeys() const {
+	return key_strategy == DistinctAggregateKeyStrategy::GROUP_STATE_POINTER;
 }
 
 } // namespace duckdb

@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Optional
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "jit"))
-from benchmark_common import REGION_SUMMARY_FIELDS, run_duckdb
+from benchmark_common import REGION_SUMMARY_FIELDS, normalize_query_ids, run_duckdb
 
 DEFAULT_QUERIES = tuple(f"{query_id:02d}" for query_id in range(1, 23))
 DEFAULT_POLICIES = ("off", "auto")
@@ -194,6 +194,21 @@ PERFORMANCE_GAP_FIELDS = (
 
 class TPCHConfigurationError(RuntimeError):
     pass
+
+
+def normalize_tpch_query_ids(query_ids: list[str]) -> list[str]:
+    if any(query_id.lower() == "all" for query_id in query_ids):
+        if len(query_ids) != 1 or query_ids[0].lower() != "all":
+            raise TPCHConfigurationError("--queries all cannot be combined with explicit query ids")
+        return list(DEFAULT_QUERIES)
+    try:
+        normalized = normalize_query_ids(query_ids)
+    except ValueError as exc:
+        raise TPCHConfigurationError("--queries must be integers or all") from exc
+    unknown = sorted(set(normalized) - set(DEFAULT_QUERIES))
+    if unknown:
+        raise TPCHConfigurationError(f"unknown TPC-H query id(s): {', '.join(unknown)}")
+    return normalized
 
 
 def read_query(root: Path, query_id: str) -> str:

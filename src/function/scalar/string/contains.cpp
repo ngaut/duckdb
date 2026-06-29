@@ -75,34 +75,31 @@ struct ContainsOperator {
 
 idx_t FindStrInStr(const unsigned char *haystack, idx_t haystack_size, const unsigned char *needle, idx_t needle_size) {
 	D_ASSERT(needle_size > 0);
-	// start off by performing a memchr to find the first character of the
-	auto location = memchr(haystack, needle[0], haystack_size);
-	if (location == nullptr) {
-		return DConstants::INVALID_INDEX;
-	}
-	idx_t base_offset = UnsafeNumericCast<idx_t>(const_uchar_ptr_cast(location) - haystack);
-	haystack_size -= base_offset;
-	haystack = const_uchar_ptr_cast(location);
 	// switch algorithm depending on needle size
 	switch (needle_size) {
-	case 1:
-		return base_offset;
+	case 1: {
+		auto location = memchr(haystack, needle[0], haystack_size);
+		if (!location) {
+			return DConstants::INVALID_INDEX;
+		}
+		return UnsafeNumericCast<idx_t>(const_uchar_ptr_cast(location) - haystack);
+	}
 	case 2:
-		return Contains<uint16_t, ContainsAligned>(haystack, haystack_size, needle, 2, base_offset);
+		return Contains<uint16_t, ContainsAligned>(haystack, haystack_size, needle, 2, 0);
 	case 3:
-		return Contains<uint16_t, ContainsUnaligned>(haystack, haystack_size, needle, 3, base_offset);
+		return Contains<uint16_t, ContainsUnaligned>(haystack, haystack_size, needle, 3, 0);
 	case 4:
-		return Contains<uint32_t, ContainsAligned>(haystack, haystack_size, needle, 4, base_offset);
+		return Contains<uint32_t, ContainsAligned>(haystack, haystack_size, needle, 4, 0);
 	case 5:
-		return Contains<uint32_t, ContainsUnaligned>(haystack, haystack_size, needle, 5, base_offset);
+		return Contains<uint32_t, ContainsUnaligned>(haystack, haystack_size, needle, 5, 0);
 	case 6:
-		return Contains<uint32_t, ContainsUnaligned>(haystack, haystack_size, needle, 6, base_offset);
+		return Contains<uint32_t, ContainsUnaligned>(haystack, haystack_size, needle, 6, 0);
 	case 7:
-		return Contains<uint32_t, ContainsUnaligned>(haystack, haystack_size, needle, 7, base_offset);
+		return Contains<uint32_t, ContainsUnaligned>(haystack, haystack_size, needle, 7, 0);
 	case 8:
-		return Contains<uint64_t, ContainsAligned>(haystack, haystack_size, needle, 8, base_offset);
+		return Contains<uint64_t, ContainsAligned>(haystack, haystack_size, needle, 8, 0);
 	default:
-		return Contains<uint64_t, ContainsGeneric>(haystack, haystack_size, needle, needle_size, base_offset);
+		return Contains<uint64_t, ContainsGeneric>(haystack, haystack_size, needle, needle_size, 0);
 	}
 }
 

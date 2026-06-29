@@ -362,17 +362,14 @@ static bool SljitSourceFiltersPreferDuckDBScanFilter(const ExecutionRegionCandid
 	constexpr idx_t LARGE_COMPLEX_SCAN_FILTER_CARDINALITY = STANDARD_VECTOR_SIZE * 512ULL;
 	const bool complex_scan_filter = traits.source_filter_count > 1 || traits.source_conjunction_filter_count > 0;
 	const bool native_ungrouped_aggregate = traits.sink_kind == ExecutionRegionSinkKind::UNGROUPED_AGGREGATE_UPDATE;
-	const bool large_scan_ungrouped_aggregate =
-	    native_ungrouped_aggregate && traits.hash_join_operator_count == 0 &&
-	    traits.estimated_source_cardinality >= LARGE_COMPLEX_SCAN_FILTER_CARDINALITY;
+	const bool large_ungrouped_aggregate =
+	    native_ungrouped_aggregate && traits.estimated_source_cardinality >= LARGE_COMPLEX_SCAN_FILTER_CARDINALITY;
 	const bool native_grouped_multi_join_aggregate =
 	    traits.sink_kind == ExecutionRegionSinkKind::HASH_AGGREGATE_UPDATE && traits.hash_join_operator_count >= 2;
 	const bool large_multi_join_grouped_aggregate =
 	    native_grouped_multi_join_aggregate &&
 	    traits.estimated_source_cardinality >= LARGE_COMPLEX_SCAN_FILTER_CARDINALITY;
-	const bool high_cost_string_filter = traits.high_cost_string_predicate_expression_count > 0;
-	return high_cost_string_filter ||
-	       (complex_scan_filter && (large_scan_ungrouped_aggregate || large_multi_join_grouped_aggregate));
+	return complex_scan_filter && (large_ungrouped_aggregate || large_multi_join_grouped_aggregate);
 }
 
 static SljitRegionNodePlan PlanSljitSourceContractNode(const ExecutionRegionNode &node,
@@ -390,7 +387,8 @@ static SljitRegionNodePlan PlanSljitSourceContractNode(const ExecutionRegionNode
 
 	if (node.source->filters.empty()) {
 		if (table_scan_contract.dynamic_filters && table_scan_contract.filter_pushdown) {
-			string reason = "vectorized dynamic table scan filters;source-strategy=duckdb-scan-filtered-source-contract";
+			string reason =
+			    "vectorized dynamic table scan filters;source-strategy=duckdb-scan-filtered-source-contract";
 			reason += ";source_contract_filter_pushdown=true";
 			reason += ";source_contract_dynamic_filters=true";
 			return SljitNativeSourceNode(std::move(reason), node, ExecutionRegionSourceExecutionKind::SOURCE_CONTRACT,

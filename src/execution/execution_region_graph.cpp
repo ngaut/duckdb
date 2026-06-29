@@ -31,7 +31,6 @@ static bool ExecutionRegionCompiledStageIsSinkSlot(const ExecutionCompiledStageC
 	return stage.stage == ExecutionRegionStageKind::HASH_JOIN_BUILD ||
 	       stage.stage == ExecutionRegionStageKind::NESTED_LOOP_JOIN_BUILD ||
 	       stage.stage == ExecutionRegionStageKind::HASH_AGGREGATE_UPDATE ||
-	       stage.stage == ExecutionRegionStageKind::HASH_AGGREGATE_DISTINCT_SINK ||
 	       stage.stage == ExecutionRegionStageKind::PERFECT_HASH_AGGREGATE_UPDATE ||
 	       stage.stage == ExecutionRegionStageKind::UNGROUPED_AGGREGATE_UPDATE ||
 	       stage.stage == ExecutionRegionStageKind::APPEND_SINK || stage.stage == ExecutionRegionStageKind::SORT_SINK ||

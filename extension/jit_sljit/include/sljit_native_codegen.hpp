@@ -143,6 +143,8 @@ BuildSljitNativeUngroupedSumDoubleReference(SljitNativeDoubleSourceKind kind,
 unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeUngroupedCountStar(SljitNativeAggregateUpdateFunction &function,
                                                                          string &error);
 unique_ptr<ExecutionRegionCodeHandle>
+BuildSljitNativeUngroupedCountReference(SljitNativeAggregateUpdateFunction &function, string &error);
+unique_ptr<ExecutionRegionCodeHandle>
 BuildSljitNativeGroupedSumInt64Reference(SljitNativeIntegerKind kind, SljitNativeAggregateUpdateFunction &function,
                                          string &error);
 unique_ptr<ExecutionRegionCodeHandle>
@@ -150,6 +152,8 @@ BuildSljitNativeGroupedSumHugeintReference(SljitNativeIntegerKind kind, SljitNat
                                            string &error);
 unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeGroupedCountStar(SljitNativeAggregateUpdateFunction &function,
                                                                        string &error);
+unique_ptr<ExecutionRegionCodeHandle>
+BuildSljitNativeGroupedCountReference(SljitNativeAggregateUpdateFunction &function, string &error);
 unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeUngroupedSumInt64IntegerBinaryConstant(
     SljitNativeIntegerKind kind, SljitNativeIntegerBinaryOp op, bool constant_on_left,
     SljitNativeAggregateUpdateFunction &function, string &error, bool check_arithmetic_overflow = true,

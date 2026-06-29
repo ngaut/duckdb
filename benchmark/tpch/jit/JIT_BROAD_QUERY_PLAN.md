@@ -1,7 +1,7 @@
 # JIT Broad Query Root Plan
 
-Last updated: 2026-06-27
-Last verified commit: `2d1c4ce9d4`
+Last updated: 2026-06-30
+Last verified commit: `f8f471533e`
 Branch: `codex/jit-native-duckdb-core`
 
 Status: active root plan. This file is the execution plan for making more query
@@ -1425,15 +1425,6 @@ Current aggressive CBO checkpoint:
   Focused production
   `/private/tmp/duckdb_jit_q07_sf10_production_direct_multiref_r15` verified
   correctness diff 0 at `0.595s -> 0.579s` (`1.028x`).
-- Broad SF10 production after the Q10 preaggregation and Q7 direct
-  multi-reference path is
-  `/private/tmp/duckdb_jit_tpch_sf10_all_after_q7_direct_multiref_r7`, verified
-  with correctness diff 0 for all 22 queries. Nineteen queries are faster than
-  non-JIT and nineteen are jitted; eighteen of the nineteen jitted queries are
-  faster. Q10 is `0.961s -> 0.916s` (`1.049x`) and Q7 is `0.589s -> 0.582s`
-  (`1.012x`). Remaining not-faster rows are Q11 (`0.986x`, jitted and tiny),
-  Q16 (`0.994x`, no compiled regions), and Q19 (`1.000x`, no compiled
-  regions).
 - Q11 was not a CBO miss. The selected SF10 shape was a native
   `hash_join_probe -> append_sink` full pipeline fed by sparse table-scan source
   chunks; before this cleanup the runtime executed the probe/append path 3907
@@ -1445,36 +1436,30 @@ Current aggressive CBO checkpoint:
   `hash_join_probe.source_input_batch=323920`. Focused Q11 production
   `/private/tmp/duckdb_jit_q11_sf10_production_append_batched_r15` verified
   correctness diff 0 at `0.073s -> 0.070s` (`1.043x`).
-- Broad SF10 production after the Q11 append-sink source batching route is
-  `/private/tmp/duckdb_jit_tpch_sf10_all_after_q11_append_batched_r7`, verified
-  with correctness diff 0 for all 22 queries. Nineteen queries are faster than
-  non-JIT and nineteen are jitted; all nineteen jitted queries are faster. Q11
-  is `0.073s -> 0.070s` (`1.043x`), Q10 is `0.957s -> 0.910s` (`1.052x`), and
-  Q7 is `0.586s -> 0.566s` (`1.035x`). Remaining not-faster rows are Q6
-  (`0.995x`, no compiled regions), Q16 (`1.000x`, no compiled regions), and Q19
-  (`1.000x`, no compiled regions).
-- The remaining no-JIT rows were probed with forced startup. Q6 was a
-  near-threshold materialization-elision/native-aggregate candidate: default
-  `32000` startup rejected benefit `31032`, while focused production with zero
-  startup verified correctness diff 0 and measured `0.375s -> 0.372s`
-  (`1.008x`). Q19 had one useful generated/native fusion candidate with benefit
-  `11776`; startup `10000` admits that region while keeping Q16's bad
-  `592`-benefit candidate rejected. Focused Q16/Q19 production with default
-  startup `10000` is
-  `/private/tmp/duckdb_jit_q16_q19_sf10_production_startup10000_default_r15`,
-  verified with correctness diff 0: Q16 stayed uncompiled and neutral
-  (`0.166s -> 0.165s`), while Q19 improved `0.256s -> 0.246s` (`1.041x`).
-- Broad SF10 production after the startup default was corrected to `10000` is
-  `/private/tmp/duckdb_jit_tpch_sf10_all_after_startup10000_default_r7`,
-  verified with correctness diff 0 for all 22 queries. Twenty queries are faster
-  than non-JIT and twenty-one are jitted; twenty of the twenty-one jitted queries
-  are faster. New admissions include Q6 (`0.386s -> 0.385s`, `1.003x`) and Q19
-  (`0.256s -> 0.245s`, `1.045x`). Q13 is the only jitted not-faster row in that
-  sweep (`0.999x`). Focused Q13 production
-  `/private/tmp/duckdb_jit_q13_sf10_production_startup10000_default_r15`
-  confirmed the small loss (`0.999x`); disabling generated-stage benefit did
-  not fix it, so the next root fix is the Q13 hash-aggregate state-scan to
-  count-star grouped-aggregate path, not CBO threshold tuning.
+- Current broad SF10 production status is
+  `/private/tmp/duckdb_jit_cleanup_all_sf10_r3`, verified with correctness diff
+  0 for all 22 queries. Twenty-one queries are jitted and all twenty-one jitted
+  queries are faster than non-JIT. There are no measured regressions in that
+  sweep. Top production wins include Q20 `1.480x`, Q9 `1.455x`, Q13 `1.199x`,
+  Q17 `1.184x`, Q5 `1.176x`, Q1 `1.155x`, Q15 `1.145x`, and Q3 `1.142x`.
+  Q16 is the only non-jitted TPC-H query and remains neutral.
+- Q16 is not a CBO-conservatism miss. Forced zero-startup admission in
+  `/private/tmp/duckdb_jit_q16_force_startup0` regressed production from
+  `0.158s` to `0.166s` median while compiling seven regions. The root fix is now
+  in DuckDB's distinct aggregate path, not in CBO: grouped row pointers feed a
+  compact integer distinct-count backend, and the backend increments the count
+  state only on first insert. The old tuple-backed duplicate table and
+  count-all-then-decrement correction path are gone, and the follow-up cleanup
+  deleted the temporary distinct `DataChunk` plus valid-row selection scratch.
+  Focused SF10 Q16 production
+  `/private/tmp/duckdb_jit_q16_inline_hash_direct_update_r2` verified
+  correctness diff 0 with 30 repeats at `0.162s` off median and `0.163s` auto
+  median, with `compiled_regions=0`. Cleanup smoke
+  `/private/tmp/duckdb_jit_q16_no_distinct_chunk_r1` verified correctness diff 0
+  with 10 repeats at `0.1555s` off median and `0.1550s` auto median, again with
+  `compiled_regions=0`. Future Q16 work should remove more grouped
+  lookup/projection traffic from this backend; do not admit the old generated
+  fragments or reintroduce CBO leniency.
 
 ## Definition Of Done
 

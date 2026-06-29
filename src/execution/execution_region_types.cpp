@@ -327,8 +327,6 @@ const char *ExecutionRegionSinkKindToString(ExecutionRegionSinkKind kind) {
 		return "nested-loop-join-build";
 	case ExecutionRegionSinkKind::HASH_AGGREGATE_UPDATE:
 		return "hash-aggregate-update";
-	case ExecutionRegionSinkKind::HASH_AGGREGATE_DISTINCT_SINK:
-		return "hash-aggregate-distinct-sink";
 	case ExecutionRegionSinkKind::PERFECT_HASH_AGGREGATE_UPDATE:
 		return "perfect-hash-aggregate-update";
 	case ExecutionRegionSinkKind::UNGROUPED_AGGREGATE_UPDATE:
@@ -536,8 +534,6 @@ const char *ExecutionRegionStageKindToString(ExecutionRegionStageKind kind) {
 		return "nested-loop-join-build";
 	case ExecutionRegionStageKind::HASH_AGGREGATE_UPDATE:
 		return "hash-aggregate-update";
-	case ExecutionRegionStageKind::HASH_AGGREGATE_DISTINCT_SINK:
-		return "hash-aggregate-distinct-sink";
 	case ExecutionRegionStageKind::PERFECT_HASH_AGGREGATE_UPDATE:
 		return "perfect-hash-aggregate-update";
 	case ExecutionRegionStageKind::UNGROUPED_AGGREGATE_UPDATE:
@@ -594,8 +590,6 @@ const char *ExecutionCompiledContractKindToString(ExecutionCompiledContractKind 
 		return "aggregate_lookup";
 	case ExecutionCompiledContractKind::AGGREGATE_UPDATE:
 		return "aggregate_update";
-	case ExecutionCompiledContractKind::AGGREGATE_DISTINCT_SINK:
-		return "aggregate_distinct_sink";
 	case ExecutionCompiledContractKind::SINK_CURSOR:
 		return "sink_cursor";
 	case ExecutionCompiledContractKind::STATE_SCAN_CURSOR:

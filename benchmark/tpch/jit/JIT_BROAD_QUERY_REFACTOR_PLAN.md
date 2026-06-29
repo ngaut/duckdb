@@ -1,7 +1,7 @@
 # JIT Broad Query Refactor Plan
 
-Last updated: 2026-06-26
-Status: active refactor plan before broadening query coverage
+Last updated: 2026-06-30
+Status: active refactor plan after broad SF10 verification
 Companion docs:
 
 - `benchmark/tpch/jit/JIT_BROAD_QUERY_PLAN.md`
@@ -37,6 +37,10 @@ shape.
 
 Current baseline:
 
+- The current broad SF10 production sweep
+  `/private/tmp/duckdb_jit_cleanup_all_sf10_r3` is verified with correctness
+  diff 0 for all 22 TPC-H queries. Twenty-one queries are jitted, all twenty-one
+  jitted queries are faster than non-JIT, and Q16 is the only non-jitted query.
 - The current full SF10 Q9 shape is backend-fusable and admitted through facts,
   not through a query-number rule.
 - The stale first-join materialization boundary is removed for the current full
@@ -47,15 +51,9 @@ Current baseline:
   root Q9 win. The follow-up early compressed-key skip now proves payload and
   probe-key independence, carries the compressed key before the second join, and
   skips materializing the dead decompressed `nation` column.
-- Q9 SF10 production over 5 repeats after the early skip measured
-  vectorized/off `1.722s` median versus auto `1.300s` median, speedup
-  `1.324615`, correctness diff 0.
-- A later no-chain probe aliasing cleanup reduced Q9 traced probe counters
-  slightly and kept production medians correct:
-  `/private/tmp/duckdb_jit_q9_restrict_prod2` measured off `1.599s` median
-  versus auto `1.159s`, speedup `1.379638`, correctness diff 0. The lesson is
-  limited: compiler-friendly probe loops help, but they do not delete a
-  boundary.
+- Current Q9 SF10 production in the all-query sweep measured vectorized/off
+  `1.696s` median versus auto `1.166s` median, speedup `1.454545`,
+  correctness diff 0.
 - The follow-up chain-probe cleanup centralizes first chain-head lookup in one
   helper and moves salt derivation behind the bloom gate for those variants. It
   is retained as code-shape cleanup, not as a new Q9 root win.
@@ -68,8 +66,8 @@ Current baseline:
   Q3 uses the same descriptor-driven grouped lookup loop as the broader fixed
   key path, and direct xtrace shows the generic comparer is not a new dominant
   cost.
-- Q3 and Q20 focused production smokes remain correct and skipped by default
-  where CBO facts do not justify compilation.
+- Q3 and Q20 are no longer default-skipped examples: current SF10 auto compiles
+  both, with Q3 at `1.142x` and Q20 at `1.480x` in the all-query sweep.
 
 Root problem still open:
 
@@ -90,6 +88,13 @@ Root problem still open:
   it. The profiler still names selected/flat regular hash probe variants,
   `JoinHashTable::InsertHashes`, scan decompression/filtering, and grouped
   lookup/update as the remaining cost centers.
+- Q16 is the distinct-aggregate exception. Forced admission of its old
+  generated/native fragment regressed production, and xtrace showed the root was
+  `count(DISTINCT)` grouped aggregation. The current backend fixes the first
+  ownership boundary in DuckDB core: address-only grouped lookup feeds a compact
+  pointer-key integer distinct set, the count state is incremented only on first
+  insert, and the temporary distinct chunk/valid-selection scratch is gone. Treat
+  any further Q16 work as backend dataflow ownership, not CBO threshold tuning.
 - The latest direct DuckDB Time Profiler checkpoint
   (`/tmp/trace_duckdb_jit_probe_template_q9_file_20260626_164548.trace`) confirms
   the same direction after the probe-template cleanup: Q9 still spends about
@@ -759,6 +764,10 @@ Exit criteria:
 
 Completed current slice:
 
+- benchmark harness query parsing is centralized; `--queries all` now works in
+  both the benchmark runner and verifier, and out-of-range query ids fail during
+  argument validation
+- deprecated verification pragma references are gone from the repo
 - final-projection-to-grouped-aggregate split-payload fusion for Q9-like
   fixed-width final projections through shared descriptors
 - Q9 verification that the terminal final shape is now compact group-key remap
@@ -783,15 +792,18 @@ Completed current slice:
 
 Next work:
 
-1. Optimize the measured regular hash join probe variants and hash-table lookup
+1. Extend the new Q16 distinct-count backend only from measured ownership facts:
+   keep grouped row pointers live, preserve the direct first-insert count update,
+   and do not reintroduce tuple-backed duplicate scans or correction selections.
+2. Optimize the measured regular hash join probe variants and hash-table lookup
    traffic before adding another projection-only cleanup.
-2. Carry or reuse grouped hash/state-target facts across the final projection and
+3. Carry or reuse grouped hash/state-target facts across the final projection and
    grouped aggregate lookup after the first-join boundary is gone.
-3. Refactor fixed-width and variable-width projection descriptors before adding
+4. Refactor fixed-width and variable-width projection descriptors before adding
    another query-family path.
-4. Run SF10 smokes before any default CBO broadening.
-5. Only then move to SIMD experiments.
-6. Keep GPU work behind residency and real cost accounting.
+5. Run SF10 smokes before any default CBO broadening.
+6. Only then move to SIMD experiments.
+7. Keep GPU work behind residency and real cost accounting.
 
 ## Verification Gate
 

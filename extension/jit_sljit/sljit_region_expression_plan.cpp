@@ -599,6 +599,9 @@ static bool SljitPrimitiveAggregatePayloadSupported(SljitNativeRegionExpressionP
 	    payload.return_type.InternalType() != aggregate.child_types[0].InternalType()) {
 		return false;
 	}
+	if (aggregate.primitive_update_kind == AggregatePrimitiveUpdateKind::COUNT) {
+		return aggregate.primitive_update_ready && payload.kind == SljitNativeRegionExpressionKind::REFERENCE;
+	}
 	if (!aggregate.primitive_update_ready ||
 	    aggregate.primitive_update_input_type != aggregate.child_types[0].InternalType()) {
 		return false;

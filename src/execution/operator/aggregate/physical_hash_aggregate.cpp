@@ -18,21 +18,24 @@
 #include "duckdb/planner/expression/bound_constant_expression.hpp"
 #include "duckdb/planner/expression/bound_reference_expression.hpp"
 
+#include <cstring>
+
 namespace duckdb {
 
 HashAggregateGroupingData::HashAggregateGroupingData(GroupingSet &grouping_set_p,
                                                      const GroupedAggregateData &grouped_aggregate_data,
                                                      unique_ptr<DistinctAggregateCollectionInfo> &info,
                                                      TupleDataValidityType group_validity,
-                                                     TupleDataValidityType distinct_validity)
+                                                     TupleDataValidityType distinct_validity,
+                                                     DistinctAggregateKeyStrategy distinct_key_strategy)
     : table_data(grouping_set_p, grouped_aggregate_data, group_validity) {
 	if (info) {
 		auto nested_validity = group_validity == TupleDataValidityType::CANNOT_HAVE_NULL_VALUES &&
 		                               distinct_validity == TupleDataValidityType::CANNOT_HAVE_NULL_VALUES
 		                           ? TupleDataValidityType::CANNOT_HAVE_NULL_VALUES
 		                           : TupleDataValidityType::CAN_HAVE_NULL_VALUES;
-		distinct_data =
-		    make_uniq<DistinctAggregateData>(*info, grouping_set_p, &grouped_aggregate_data.groups, nested_validity);
+		distinct_data = make_uniq<DistinctAggregateData>(*info, grouping_set_p, &grouped_aggregate_data.groups,
+		                                                 nested_validity, distinct_key_strategy);
 	}
 }
 
@@ -43,9 +46,364 @@ bool HashAggregateGroupingData::HasDistinct() const {
 HashAggregateGroupingGlobalState::HashAggregateGroupingGlobalState(const HashAggregateGroupingData &data,
                                                                    ClientContext &context) {
 	table_state = data.table_data.GetGlobalSinkState(context);
-	if (data.HasDistinct()) {
+	if (data.HasDistinct() && !data.distinct_data->UsesGroupStatePointerKeys()) {
 		distinct_state = make_uniq<DistinctAggregateState>(*data.distinct_data, context);
 	}
+}
+
+static constexpr idx_t DISTINCT_COUNT_INLINE_PAYLOAD_CAPACITY = 64;
+static constexpr idx_t DISTINCT_COUNT_INLINE_TABLE_CAPACITY = DISTINCT_COUNT_INLINE_PAYLOAD_CAPACITY * 2;
+
+struct DistinctCountPointerGroup {
+	DistinctCountPointerGroup() {
+		std::memset(payload_tags, 0, sizeof(payload_tags));
+	}
+
+	uintptr_t state_pointer = 0;
+	idx_t payload_count = 0;
+	bool uses_overflow = false;
+	uint64_t payloads[DISTINCT_COUNT_INLINE_TABLE_CAPACITY];
+	uint8_t payload_tags[DISTINCT_COUNT_INLINE_TABLE_CAPACITY];
+};
+
+class DistinctCountPairOverflowSet {
+public:
+	bool Add(uintptr_t state_pointer, uint64_t payload);
+
+private:
+	void Resize(idx_t capacity);
+	void InsertKnownNew(uintptr_t state_pointer, uint64_t payload, hash_t hash);
+
+private:
+	vector<uintptr_t> state_entries;
+	vector<uint64_t> payload_entries;
+	vector<hash_t> hash_entries;
+	idx_t entry_count = 0;
+	hash_t bitmask = 0;
+};
+
+class DistinctCountPointerSet {
+public:
+	bool Add(Vector &state_pointers, Vector &payload, idx_t count, idx_t state_value_offset);
+
+private:
+	template <class T>
+	bool AddTemplated(Vector &state_pointers, Vector &payload, idx_t count, idx_t state_value_offset);
+	DistinctCountPointerGroup &FindOrCreateGroup(uintptr_t state_pointer);
+	bool AddPayload(DistinctCountPointerGroup &group, uint64_t payload);
+	bool PromoteToOverflow(DistinctCountPointerGroup &group);
+	void ResizeGroups(idx_t capacity);
+	void InsertKnownGroup(uintptr_t state_pointer, idx_t group_index, hash_t hash);
+
+private:
+	vector<uintptr_t> group_state_entries;
+	vector<idx_t> group_index_entries;
+	vector<hash_t> group_hash_entries;
+	vector<DistinctCountPointerGroup> groups;
+	DistinctCountPairOverflowSet overflow;
+	idx_t group_count = 0;
+	hash_t group_bitmask = 0;
+	uintptr_t last_state_pointer = 0;
+	idx_t last_group_index = DConstants::INVALID_INDEX;
+};
+
+static bool DistinctCountPointerPayloadTypeSupported(PhysicalType type) {
+	switch (type) {
+	case PhysicalType::BOOL:
+	case PhysicalType::UINT8:
+	case PhysicalType::INT8:
+	case PhysicalType::UINT16:
+	case PhysicalType::INT16:
+	case PhysicalType::UINT32:
+	case PhysicalType::INT32:
+	case PhysicalType::UINT64:
+	case PhysicalType::INT64:
+		return true;
+	default:
+		return false;
+	}
+}
+
+static hash_t DistinctCountIntegerHash(uint64_t value) {
+	auto key = value * 0x9e3779b97f4a7c15ULL;
+	key ^= key >> 32;
+	key *= 0xd6e8feb86659fd93ULL;
+	key ^= key >> 32;
+	return key ? key : 1;
+}
+
+static hash_t DistinctCountPointerHash(uintptr_t state_pointer) {
+	return DistinctCountIntegerHash(static_cast<uint64_t>(state_pointer >> 4));
+}
+
+static hash_t DistinctCountPairHash(uintptr_t state_pointer, uint64_t payload) {
+	auto hash = DistinctCountPointerHash(state_pointer);
+	hash ^= DistinctCountIntegerHash(payload) + 0x9e3779b97f4a7c15ULL + (hash << 6) + (hash >> 2);
+	return hash ? hash : 1;
+}
+
+static uint8_t DistinctCountPayloadTag(hash_t hash) {
+	auto tag = static_cast<uint8_t>(hash >> 56);
+	return tag ? tag : 1;
+}
+
+void DistinctCountPairOverflowSet::Resize(idx_t capacity) {
+	auto old_state_entries = std::move(state_entries);
+	auto old_payload_entries = std::move(payload_entries);
+	auto old_hash_entries = std::move(hash_entries);
+	state_entries.assign(capacity, 0);
+	payload_entries.assign(capacity, 0);
+	hash_entries.assign(capacity, 0);
+	bitmask = capacity - 1;
+	entry_count = 0;
+	for (idx_t entry_idx = 0; entry_idx < old_hash_entries.size(); entry_idx++) {
+		const auto hash = old_hash_entries[entry_idx];
+		if (hash == 0) {
+			continue;
+		}
+		InsertKnownNew(old_state_entries[entry_idx], old_payload_entries[entry_idx], hash);
+	}
+}
+
+void DistinctCountPairOverflowSet::InsertKnownNew(uintptr_t state_pointer, uint64_t payload, hash_t hash) {
+	D_ASSERT(!hash_entries.empty());
+	auto ht_offset = hash & bitmask;
+	for (idx_t iteration_count = 0; iteration_count < hash_entries.size(); iteration_count++) {
+		if (hash_entries[ht_offset] == 0) {
+			state_entries[ht_offset] = state_pointer;
+			payload_entries[ht_offset] = payload;
+			hash_entries[ht_offset] = hash;
+			entry_count++;
+			return;
+		}
+		ht_offset = (ht_offset + 1) & bitmask;
+	}
+	throw InternalException("Maximum count-distinct pointer-set rehash iteration count reached");
+}
+
+bool DistinctCountPairOverflowSet::Add(uintptr_t state_pointer, uint64_t payload) {
+	const auto target_count = entry_count + 1;
+	const auto required_capacity = NextPowerOfTwo(MaxValue<idx_t>(idx_t(1024), target_count * 2));
+	if (hash_entries.size() < required_capacity) {
+		Resize(required_capacity);
+	}
+	const auto hash = DistinctCountPairHash(state_pointer, payload);
+	auto ht_offset = hash & bitmask;
+	auto state_slots = state_entries.data();
+	auto payload_slots = payload_entries.data();
+	auto hash_slots = hash_entries.data();
+	for (idx_t iteration_count = 0; iteration_count < hash_entries.size(); iteration_count++) {
+		const auto entry_hash = hash_slots[ht_offset];
+		if (entry_hash == 0) {
+			state_slots[ht_offset] = state_pointer;
+			payload_slots[ht_offset] = payload;
+			hash_slots[ht_offset] = hash;
+			entry_count++;
+			return true;
+		}
+		if (entry_hash == hash && state_slots[ht_offset] == state_pointer && payload_slots[ht_offset] == payload) {
+			return false;
+		}
+		ht_offset = (ht_offset + 1) & bitmask;
+	}
+	throw InternalException("Maximum count-distinct payload-set iteration count reached");
+}
+
+void DistinctCountPointerSet::ResizeGroups(idx_t capacity) {
+	auto old_group_state_entries = std::move(group_state_entries);
+	auto old_group_index_entries = std::move(group_index_entries);
+	auto old_group_hash_entries = std::move(group_hash_entries);
+	group_state_entries.assign(capacity, 0);
+	group_index_entries.assign(capacity, 0);
+	group_hash_entries.assign(capacity, 0);
+	group_bitmask = capacity - 1;
+	group_count = 0;
+	for (idx_t entry_idx = 0; entry_idx < old_group_hash_entries.size(); entry_idx++) {
+		const auto hash = old_group_hash_entries[entry_idx];
+		if (hash == 0) {
+			continue;
+		}
+		InsertKnownGroup(old_group_state_entries[entry_idx], old_group_index_entries[entry_idx], hash);
+	}
+}
+
+void DistinctCountPointerSet::InsertKnownGroup(uintptr_t state_pointer, idx_t group_index, hash_t hash) {
+	D_ASSERT(!group_hash_entries.empty());
+	auto ht_offset = hash & group_bitmask;
+	for (idx_t iteration_count = 0; iteration_count < group_hash_entries.size(); iteration_count++) {
+		if (group_hash_entries[ht_offset] == 0) {
+			group_state_entries[ht_offset] = state_pointer;
+			group_index_entries[ht_offset] = group_index;
+			group_hash_entries[ht_offset] = hash;
+			group_count++;
+			return;
+		}
+		ht_offset = (ht_offset + 1) & group_bitmask;
+	}
+	throw InternalException("Maximum count-distinct group-set rehash iteration count reached");
+}
+
+DistinctCountPointerGroup &DistinctCountPointerSet::FindOrCreateGroup(uintptr_t state_pointer) {
+	if (last_group_index != DConstants::INVALID_INDEX && last_state_pointer == state_pointer) {
+		return groups[last_group_index];
+	}
+	const auto hash = DistinctCountPointerHash(state_pointer);
+	const auto target_count = group_count + 1;
+	const auto required_capacity = NextPowerOfTwo(MaxValue<idx_t>(idx_t(64), target_count * 2));
+	if (group_hash_entries.size() < required_capacity) {
+		ResizeGroups(required_capacity);
+		groups.reserve(required_capacity);
+	}
+	auto ht_offset = hash & group_bitmask;
+	for (idx_t iteration_count = 0; iteration_count < group_hash_entries.size(); iteration_count++) {
+		const auto entry_hash = group_hash_entries[ht_offset];
+		if (entry_hash == 0) {
+			const auto group_index = groups.size();
+			groups.emplace_back();
+			groups.back().state_pointer = state_pointer;
+			group_state_entries[ht_offset] = state_pointer;
+			group_index_entries[ht_offset] = group_index;
+			group_hash_entries[ht_offset] = hash;
+			group_count++;
+			last_state_pointer = state_pointer;
+			last_group_index = group_index;
+			return groups[group_index];
+		}
+		if (entry_hash == hash && group_state_entries[ht_offset] == state_pointer) {
+			const auto group_index = group_index_entries[ht_offset];
+			last_state_pointer = state_pointer;
+			last_group_index = group_index;
+			return groups[group_index];
+		}
+		ht_offset = (ht_offset + 1) & group_bitmask;
+	}
+	throw InternalException("Maximum count-distinct group-set iteration count reached");
+}
+
+bool DistinctCountPointerSet::PromoteToOverflow(DistinctCountPointerGroup &group) {
+	for (idx_t entry_idx = 0; entry_idx < DISTINCT_COUNT_INLINE_TABLE_CAPACITY; entry_idx++) {
+		if (group.payload_tags[entry_idx] == 0) {
+			continue;
+		}
+		const auto is_new = overflow.Add(group.state_pointer, group.payloads[entry_idx]);
+		D_ASSERT(is_new);
+		(void)is_new;
+	}
+	group.uses_overflow = true;
+	return true;
+}
+
+bool DistinctCountPointerSet::AddPayload(DistinctCountPointerGroup &group, uint64_t payload) {
+	if (group.uses_overflow) {
+		return overflow.Add(group.state_pointer, payload);
+	}
+	const auto hash = DistinctCountIntegerHash(payload);
+	const auto tag = DistinctCountPayloadTag(hash);
+	auto ht_offset = hash & (DISTINCT_COUNT_INLINE_TABLE_CAPACITY - 1);
+	for (idx_t iteration_count = 0; iteration_count < DISTINCT_COUNT_INLINE_TABLE_CAPACITY; iteration_count++) {
+		const auto entry_tag = group.payload_tags[ht_offset];
+		if (entry_tag == 0) {
+			if (group.payload_count >= DISTINCT_COUNT_INLINE_PAYLOAD_CAPACITY) {
+				PromoteToOverflow(group);
+				return overflow.Add(group.state_pointer, payload);
+			}
+			group.payloads[ht_offset] = payload;
+			group.payload_tags[ht_offset] = tag;
+			group.payload_count++;
+			return true;
+		}
+		if (entry_tag == tag && group.payloads[ht_offset] == payload) {
+			return false;
+		}
+		ht_offset = (ht_offset + 1) & (DISTINCT_COUNT_INLINE_TABLE_CAPACITY - 1);
+	}
+	PromoteToOverflow(group);
+	return overflow.Add(group.state_pointer, payload);
+}
+
+template <class T>
+bool DistinctCountPointerSet::AddTemplated(Vector &state_pointers, Vector &payload, idx_t count,
+                                           idx_t state_value_offset) {
+	if (count == 0) {
+		return true;
+	}
+	if (state_pointers.GetVectorType() != VectorType::FLAT_VECTOR ||
+	    !FlatVector::Validity(state_pointers).CheckAllValid(count)) {
+		return false;
+	}
+
+	const auto state_data = FlatVector::GetData<uintptr_t>(state_pointers);
+	if (payload.GetVectorType() == VectorType::FLAT_VECTOR && FlatVector::Validity(payload).CheckAllValid(count)) {
+		const auto payload_data = FlatVector::GetData<T>(payload);
+		for (idx_t row_idx = 0; row_idx < count; row_idx++) {
+			const auto state_pointer = state_data[row_idx];
+			const auto payload_bits = static_cast<uint64_t>(payload_data[row_idx]);
+			auto &group = FindOrCreateGroup(state_pointer);
+			if (AddPayload(group, payload_bits)) {
+				auto count_state =
+				    reinterpret_cast<int64_t *>(reinterpret_cast<data_ptr_t>(state_pointer) + state_value_offset);
+				(*count_state)++;
+			}
+		}
+		return true;
+	}
+
+	UnifiedVectorFormat payload_data;
+	payload.ToUnifiedFormat(payload_data);
+	const auto payload_entries = UnifiedVectorFormat::GetData<T>(payload_data);
+	for (idx_t row_idx = 0; row_idx < count; row_idx++) {
+		const auto payload_idx = payload_data.sel->get_index(row_idx);
+		if (!payload_data.validity.RowIsValid(payload_idx)) {
+			continue;
+		}
+		const auto state_pointer = state_data[row_idx];
+		const auto payload_bits = static_cast<uint64_t>(payload_entries[payload_idx]);
+		auto &group = FindOrCreateGroup(state_pointer);
+		if (AddPayload(group, payload_bits)) {
+			auto count_state =
+			    reinterpret_cast<int64_t *>(reinterpret_cast<data_ptr_t>(state_pointer) + state_value_offset);
+			(*count_state)++;
+		}
+	}
+	return true;
+}
+
+bool DistinctCountPointerSet::Add(Vector &state_pointers, Vector &payload, idx_t count, idx_t state_value_offset) {
+	if (!DistinctCountPointerPayloadTypeSupported(payload.GetType().InternalType())) {
+		return false;
+	}
+	if (state_value_offset == DConstants::INVALID_INDEX) {
+		return false;
+	}
+	switch (payload.GetType().InternalType()) {
+	case PhysicalType::BOOL:
+		return AddTemplated<bool>(state_pointers, payload, count, state_value_offset);
+	case PhysicalType::UINT8:
+		return AddTemplated<uint8_t>(state_pointers, payload, count, state_value_offset);
+	case PhysicalType::INT8:
+		return AddTemplated<int8_t>(state_pointers, payload, count, state_value_offset);
+	case PhysicalType::UINT16:
+		return AddTemplated<uint16_t>(state_pointers, payload, count, state_value_offset);
+	case PhysicalType::INT16:
+		return AddTemplated<int16_t>(state_pointers, payload, count, state_value_offset);
+	case PhysicalType::UINT32:
+		return AddTemplated<uint32_t>(state_pointers, payload, count, state_value_offset);
+	case PhysicalType::INT32:
+		return AddTemplated<int32_t>(state_pointers, payload, count, state_value_offset);
+	case PhysicalType::UINT64:
+		return AddTemplated<uint64_t>(state_pointers, payload, count, state_value_offset);
+	case PhysicalType::INT64:
+		return AddTemplated<int64_t>(state_pointers, payload, count, state_value_offset);
+	default:
+		return false;
+	}
+}
+
+DistinctCountPointerScratch::DistinctCountPointerScratch()
+    : state_addresses(LogicalType::POINTER), distinct_set(make_uniq<DistinctCountPointerSet>()) {
+}
+
+DistinctCountPointerScratch::~DistinctCountPointerScratch() {
 }
 
 HashAggregateGroupingLocalState::HashAggregateGroupingLocalState(const PhysicalHashAggregate &op,
@@ -56,6 +414,10 @@ HashAggregateGroupingLocalState::HashAggregateGroupingLocalState(const PhysicalH
 		return;
 	}
 	auto &distinct_data = *data.distinct_data;
+	if (distinct_data.UsesGroupStatePointerKeys()) {
+		distinct_count_scratch = make_uniq<DistinctCountPointerScratch>();
+		return;
+	}
 
 	auto &distinct_indices = op.distinct_collection_info->Indices();
 	D_ASSERT(!distinct_indices.empty());
@@ -96,7 +458,40 @@ static vector<LogicalType> CreateGroupChunkTypes(vector<unique_ptr<Expression>> 
 	return types;
 }
 
+static bool HashAggregateCanUseDistinctCountPointerKeys(
+    const GroupedAggregateData &grouped_aggregate_data, const unique_ptr<DistinctAggregateCollectionInfo> &info,
+    idx_t grouping_count, TupleDataValidityType group_validity, const unsafe_vector<idx_t> &non_distinct_filter,
+    const unsafe_vector<idx_t> &distinct_filter, const reference_map_t<const Expression, size_t> &filter_indexes) {
+	if (!info || grouping_count != 1 || group_validity != TupleDataValidityType::CANNOT_HAVE_NULL_VALUES ||
+	    grouped_aggregate_data.groups.empty() || grouped_aggregate_data.aggregates.size() != 1 ||
+	    distinct_filter.size() != 1 || !non_distinct_filter.empty() || !filter_indexes.empty()) {
+		return false;
+	}
+	if (grouped_aggregate_data.filter_count != 0 || grouped_aggregate_data.payload_types.size() != 1) {
+		return false;
+	}
+	auto &aggregate = grouped_aggregate_data.aggregates[0]->Cast<BoundAggregateExpression>();
+	if (!aggregate.IsDistinct() || aggregate.GetFilter() || aggregate.GetOrderBys() ||
+	    aggregate.GetChildren().size() != 1) {
+		return false;
+	}
+	auto &function = aggregate.Function();
+	auto &child = aggregate.GetChildren()[0];
+	return function.HasPrimitiveUpdateABI() &&
+	       function.GetPrimitiveUpdateABI().kind == AggregatePrimitiveUpdateKind::COUNT &&
+	       child->GetExpressionClass() == ExpressionClass::BOUND_REF &&
+	       DistinctCountPointerPayloadTypeSupported(child->GetReturnType().InternalType());
+}
+
+static bool HashAggregateUsesDistinctCountPointerKeys(const PhysicalHashAggregate &op) {
+	return op.groupings.size() == 1 && op.groupings[0].distinct_data &&
+	       op.groupings[0].distinct_data->UsesGroupStatePointerKeys();
+}
+
 bool PhysicalHashAggregate::CanSkipRegularSink() const {
+	if (HashAggregateUsesDistinctCountPointerKeys(*this)) {
+		return false;
+	}
 	if (!filter_indexes.empty()) {
 		// If we have filters, we can't skip the regular sink, because we might lose groups otherwise.
 		return false;
@@ -107,22 +502,6 @@ bool PhysicalHashAggregate::CanSkipRegularSink() const {
 	}
 	if (!non_distinct_filter.empty()) {
 		return false;
-	}
-	return true;
-}
-
-bool PhysicalHashAggregate::CanUseDistinctSinkContract() const {
-	if (!distinct_collection_info || groupings.size() != 1 || !CanSkipRegularSink()) {
-		return false;
-	}
-	if (grouped_aggregate_data.filter_count != 0 || grouped_aggregate_data.aggregates.empty()) {
-		return false;
-	}
-	for (auto &aggregate : grouped_aggregate_data.aggregates) {
-		auto &bound_aggregate = aggregate->Cast<BoundAggregateExpression>();
-		if (!bound_aggregate.IsDistinct() || bound_aggregate.GetFilter() || bound_aggregate.GetOrderBys()) {
-			return false;
-		}
 	}
 	return true;
 }
@@ -198,10 +577,18 @@ PhysicalHashAggregate::PhysicalHashAggregate(PhysicalPlan &physical_plan, Client
 	}
 
 	distinct_collection_info = DistinctAggregateCollectionInfo::Create(grouped_aggregate_data.aggregates);
+	const auto single_aggregate_local_state = TaskScheduler::GetScheduler(context).NumberOfThreads() == 1;
+	const auto use_distinct_count_pointer_keys =
+	    single_aggregate_local_state && HashAggregateCanUseDistinctCountPointerKeys(
+	                                        grouped_aggregate_data, distinct_collection_info, grouping_sets.size(),
+	                                        group_validity, non_distinct_filter, distinct_filter, filter_indexes);
+	const auto distinct_key_strategy = use_distinct_count_pointer_keys
+	                                       ? DistinctAggregateKeyStrategy::GROUP_STATE_POINTER
+	                                       : DistinctAggregateKeyStrategy::GROUP_KEYS;
 
 	for (idx_t i = 0; i < grouping_sets.size(); i++) {
 		groupings.emplace_back(grouping_sets[i], grouped_aggregate_data, distinct_collection_info, group_validity,
-		                       distinct_validity);
+		                       distinct_validity, distinct_key_strategy);
 	}
 }
 
@@ -440,8 +827,8 @@ public:
 			return false;
 		}
 		auto single_grouping = GetSingleGroupingSinkState();
-		return single_grouping.grouping.table_data.TryUpdateNewPrimitiveGroups(
-		    context, input, single_grouping.input, sink_info, lanes, recorder, finish);
+		return single_grouping.grouping.table_data.TryUpdateNewPrimitiveGroups(context, input, single_grouping.input,
+		                                                                       sink_info, lanes, recorder, finish);
 	}
 
 	bool TryUpdateNewGroupsWithPayloadInput(DataChunk &groups, DataChunk &payload_input,
@@ -468,8 +855,8 @@ public:
 			return false;
 		}
 		auto single_grouping = GetSingleGroupingSinkState();
-		return single_grouping.grouping.table_data.TryAppendNewPrimitiveGroups(
-		    context, input, single_grouping.input, sink_info, lanes, recorder, finish);
+		return single_grouping.grouping.table_data.TryAppendNewPrimitiveGroups(context, input, single_grouping.input,
+		                                                                       sink_info, lanes, recorder, finish);
 	}
 
 	bool TryUpdateNewGroupsWithStateAddresses(DataChunk &input, const ExecutionRegionSinkInfo &sink_info,
@@ -513,11 +900,13 @@ public:
 		    recorder);
 	}
 
-	bool TryUpdateRowPointerGroupPayloads(
-	    DataChunk &payload_input, Vector &row_pointers, idx_t count,
-	    const vector<ExecutionRowPointerGroupKeySource> &group_sources, const vector<idx_t> &payload_source_indices,
-	    const ExecutionRegionSinkInfo &sink_info, const vector<const ExecutionPrimitiveAggregateUpdateLane *> &lanes,
-	    optional_ptr<ExecutionOperatorStageRecorder> recorder = nullptr, bool finish = true) override {
+	bool TryUpdateRowPointerGroupPayloads(DataChunk &payload_input, Vector &row_pointers, idx_t count,
+	                                      const vector<ExecutionRowPointerGroupKeySource> &group_sources,
+	                                      const vector<idx_t> &payload_source_indices,
+	                                      const ExecutionRegionSinkInfo &sink_info,
+	                                      const vector<const ExecutionPrimitiveAggregateUpdateLane *> &lanes,
+	                                      optional_ptr<ExecutionOperatorStageRecorder> recorder = nullptr,
+	                                      bool finish = true) override {
 		if (!CanUseSingleGroupingState()) {
 			return false;
 		}
@@ -547,8 +936,8 @@ public:
 			return false;
 		}
 		auto single_grouping = GetSingleGroupingSinkState();
-		return single_grouping.grouping.table_data.TryResolveNewGroupAddresses(
-		    context, input, single_grouping.input, sink_info, addresses, recorder, finish);
+		return single_grouping.grouping.table_data.TryResolveNewGroupAddresses(context, input, single_grouping.input,
+		                                                                       sink_info, addresses, recorder, finish);
 	}
 
 	void FinishStateUpdates() override {
@@ -598,7 +987,8 @@ BuildHashAggregatePrimitiveUpdateBinding(const PhysicalHashAggregate &op, const 
 				result.blocker = "hash-aggregate-primitive-update-requires-one-payload";
 				return result;
 			}
-			if (aggregate_info.child_types[0].InternalType() != abi.input_type) {
+			if (AggregatePrimitiveUpdateRequiresTypedPayload(abi.kind) &&
+			    aggregate_info.child_types[0].InternalType() != abi.input_type) {
 				result.blocker = "hash-aggregate-primitive-update-payload-type-mismatch";
 				return result;
 			}
@@ -661,6 +1051,23 @@ void PhysicalHashAggregate::SetMultiScan(GlobalSinkState &state) {
 		RadixPartitionedHashTable::SetMultiScan(*grouping_state.table_state);
 	}
 }
+
+struct DistinctCountFinalizeFastPath {
+	idx_t payload_index = DConstants::INVALID_INDEX;
+	LogicalType payload_logical_type;
+	PhysicalType payload_type = PhysicalType::INVALID;
+	idx_t state_offset = DConstants::INVALID_INDEX;
+	idx_t state_value_offset = DConstants::INVALID_INDEX;
+};
+
+static bool TryGetDistinctCountFinalizeFastPath(const PhysicalHashAggregate &op,
+                                                const HashAggregateGroupingData &grouping_data, idx_t aggregate_index,
+                                                idx_t payload_index, DistinctCountFinalizeFastPath &result);
+
+static bool TrySinkDistinctCountPointerKeys(ExecutionContext &context, const PhysicalHashAggregate &op,
+                                            const HashAggregateGroupingData &grouping_data,
+                                            HashAggregateGroupingLocalState &grouping_lstate,
+                                            OperatorSinkInput &sink_input, DataChunk &input);
 
 //===--------------------------------------------------------------------===//
 // Sink
@@ -766,7 +1173,8 @@ SinkResultType PhysicalHashAggregate::Sink(ExecutionContext &context, DataChunk 
 	auto &local_state = input.local_state.Cast<HashAggregateLocalSinkState>();
 	auto &global_state = input.global_state.Cast<HashAggregateGlobalSinkState>();
 
-	if (distinct_collection_info) {
+	const auto use_distinct_count_pointer_keys = HashAggregateUsesDistinctCountPointerKeys(*this);
+	if (distinct_collection_info && !use_distinct_count_pointer_keys) {
 		SinkDistinct(context, chunk, input);
 	}
 
@@ -812,6 +1220,12 @@ SinkResultType PhysicalHashAggregate::Sink(ExecutionContext &context, DataChunk 
 
 		auto &grouping = groupings[i];
 		auto &table = grouping.table_data;
+		if (use_distinct_count_pointer_keys) {
+			if (!TrySinkDistinctCountPointerKeys(context, *this, grouping, grouping_local_state, sink_input, chunk)) {
+				throw InternalException("count distinct pointer-key sink failed");
+			}
+			continue;
+		}
 		table.Sink(context, chunk, sink_input, aggregate_input_chunk, non_distinct_filter);
 	}
 
@@ -860,7 +1274,7 @@ void PhysicalHashAggregate::CombineDistinct(ExecutionContext &context, OperatorS
 	auto &global_sink = input.global_state.Cast<HashAggregateGlobalSinkState>();
 	auto &sink = input.local_state.Cast<HashAggregateLocalSinkState>();
 
-	if (!distinct_collection_info) {
+	if (!distinct_collection_info || HashAggregateUsesDistinctCountPointerKeys(*this)) {
 		return;
 	}
 	for (idx_t i = 0; i < groupings.size(); i++) {
@@ -1023,6 +1437,200 @@ private:
 	idx_t next_payload_idx = 0;
 };
 
+static bool TryGetDistinctCountFinalizeFastPath(const PhysicalHashAggregate &op,
+                                                const HashAggregateGroupingData &grouping_data, idx_t aggregate_index,
+                                                idx_t payload_index, DistinctCountFinalizeFastPath &result) {
+	if (op.grouped_aggregate_data.aggregates.size() != 1 || aggregate_index != 0) {
+		return false;
+	}
+	if (op.groupings.size() != 1 || op.grouped_aggregate_data.groups.empty()) {
+		return false;
+	}
+	auto &aggregate = op.grouped_aggregate_data.aggregates[aggregate_index]->Cast<BoundAggregateExpression>();
+	if (!aggregate.IsDistinct() || aggregate.GetFilter() || aggregate.GetOrderBys() ||
+	    aggregate.GetChildren().size() != 1) {
+		return false;
+	}
+	auto &function = aggregate.Function();
+	if (!function.HasPrimitiveUpdateABI()) {
+		return false;
+	}
+	auto &abi = function.GetPrimitiveUpdateABI();
+	if (abi.kind != AggregatePrimitiveUpdateKind::COUNT || abi.state_size != sizeof(int64_t) ||
+	    abi.state_value_offset + sizeof(int64_t) > abi.state_size) {
+		return false;
+	}
+	if (function.HasStateSizeCallback() && function.GetStateSizeCallback()(function) != abi.state_size) {
+		return false;
+	}
+	auto &layout = grouping_data.table_data.GetLayout();
+	if (layout.AggregateCount() <= aggregate_index ||
+	    layout.GetOffsets().size() <= layout.ColumnCount() + aggregate_index) {
+		return false;
+	}
+	result.payload_index = payload_index;
+	result.payload_logical_type = aggregate.GetChildren()[0]->GetReturnType();
+	result.payload_type = result.payload_logical_type.InternalType();
+	result.state_offset = layout.GetOffsets()[layout.ColumnCount() + aggregate_index];
+	result.state_value_offset = result.state_offset + abi.state_value_offset;
+	return true;
+}
+
+static ExecutionRegionSinkInfo BuildDistinctCountFinalizeSinkInfo(idx_t aggregate_index,
+                                                                  const DistinctCountFinalizeFastPath &fast_path) {
+	ExecutionRegionSinkInfo result;
+	result.kind = ExecutionRegionSinkKind::HASH_AGGREGATE_UPDATE;
+	result.aggregate_contract.grouped_state_layout_ready = true;
+	result.aggregate_contract.native_grouped_state_contract.status = ExecutionRegionStateContractStatus::READY;
+	result.aggregate_contract.grouped_state_offsets.resize(aggregate_index + 1, DConstants::INVALID_INDEX);
+	result.aggregate_contract.grouped_state_offsets[aggregate_index] = fast_path.state_offset;
+
+	ExecutionRegionAggregateInput aggregate;
+	aggregate.aggregate_index = aggregate_index;
+	aggregate.payload_index = fast_path.payload_index;
+	aggregate.child_count = 1;
+	aggregate.child_indices.push_back(fast_path.payload_index);
+	aggregate.child_types.push_back(fast_path.payload_logical_type);
+	aggregate.primitive_update_ready = true;
+	aggregate.primitive_update_kind = AggregatePrimitiveUpdateKind::COUNT;
+	aggregate.primitive_update_input_type = fast_path.payload_type;
+	aggregate.primitive_update_state_size = sizeof(int64_t);
+	aggregate.primitive_update_state_value_offset = 0;
+	result.aggregates.push_back(std::move(aggregate));
+	return result;
+}
+
+static ExecutionPrimitiveAggregateUpdateLane
+BuildDistinctCountFinalizeLane(idx_t aggregate_index, const DistinctCountFinalizeFastPath &fast_path) {
+	ExecutionPrimitiveAggregateUpdateLane result;
+	result.ready = true;
+	result.kind = AggregatePrimitiveUpdateKind::COUNT;
+	result.aggregate_index = aggregate_index;
+	result.payload_index = fast_path.payload_index;
+	result.payload_type = fast_path.payload_type;
+	result.state_size = sizeof(int64_t);
+	result.state_offset = fast_path.state_offset;
+	result.state_value_offset = 0;
+	return result;
+}
+
+static bool FillDistinctCountPointerAddressesFast(ExecutionContext &context,
+                                                  const HashAggregateGroupingData &grouping_data,
+                                                  OperatorSinkInput &sink_input, DataChunk &input,
+                                                  const DistinctCountFinalizeFastPath &fast_path,
+                                                  Vector &state_pointer_vector,
+                                                  optional_ptr<ExecutionOperatorStageRecorder> recorder = nullptr) {
+	auto sink_info = BuildDistinctCountFinalizeSinkInfo(0, fast_path);
+	return grouping_data.table_data.TryResolveNewGroupAddresses(context, input, sink_input, sink_info,
+	                                                            state_pointer_vector, recorder, true);
+}
+
+static bool FillDistinctCountPointerAddressesGeneric(ExecutionContext &context,
+                                                     const HashAggregateGroupingData &grouping_data,
+                                                     OperatorSinkInput &sink_input, DataChunk &input,
+                                                     Vector &state_pointer_vector) {
+	grouping_data.table_data.ResolveStateAddresses(context, input, sink_input, state_pointer_vector);
+	state_pointer_vector.Flatten();
+	grouping_data.table_data.FinishStateUpdates(context, sink_input);
+	return true;
+}
+
+static bool TrySinkDistinctCountPointerKeys(ExecutionContext &context, const PhysicalHashAggregate &op,
+                                            const HashAggregateGroupingData &grouping_data,
+                                            HashAggregateGroupingLocalState &grouping_lstate,
+                                            OperatorSinkInput &sink_input, DataChunk &input) {
+	auto &aggregate = op.grouped_aggregate_data.aggregates[0]->Cast<BoundAggregateExpression>();
+	auto &child_ref = aggregate.GetChildren()[0]->Cast<BoundReferenceExpression>();
+	DistinctCountFinalizeFastPath fast_path;
+	if (!TryGetDistinctCountFinalizeFastPath(op, grouping_data, 0, child_ref.Index(), fast_path)) {
+		return false;
+	}
+	if (!grouping_data.distinct_data || !grouping_data.distinct_data->UsesGroupStatePointerKeys() ||
+	    child_ref.Index() >= input.ColumnCount() || !grouping_lstate.distinct_count_scratch) {
+		return false;
+	}
+	auto &scratch = *grouping_lstate.distinct_count_scratch;
+
+	auto &payload = input.data[child_ref.Index()];
+	auto &state_pointer_vector = scratch.state_addresses;
+	state_pointer_vector.SetVectorType(VectorType::FLAT_VECTOR);
+	FlatVector::ValidityMutable(state_pointer_vector).SetAllValid(input.size());
+	FlatVector::SetSize(state_pointer_vector, input.size());
+
+	if (!FillDistinctCountPointerAddressesFast(context, grouping_data, sink_input, input, fast_path,
+	                                           state_pointer_vector)) {
+		FillDistinctCountPointerAddressesGeneric(context, grouping_data, sink_input, input, state_pointer_vector);
+	}
+
+	if (!scratch.distinct_set->Add(state_pointer_vector, payload, input.size(), fast_path.state_value_offset)) {
+		return false;
+	}
+	return true;
+}
+
+static void ReferenceCompactDistinctGroups(ClientContext &context, const RadixPartitionedHashTable &table,
+                                           DataChunk &distinct_rows, idx_t group_by_size, DataChunk &groups) {
+	if (groups.ColumnCount() == 0) {
+		groups.Initialize(context, table.group_types);
+	}
+	for (idx_t group_idx = 0; group_idx < group_by_size; group_idx++) {
+		groups.data[group_idx].Reference(distinct_rows.data[group_idx]);
+	}
+	groups.SetChildCardinality(distinct_rows.size());
+}
+
+static bool TryFinalizeDistinctCountFastPath(ExecutionContext &context, const HashAggregateGroupingData &grouping_data,
+                                             OperatorSinkInput &sink_input, DataChunk &group_chunk,
+                                             DataChunk &distinct_rows, const DistinctCountFinalizeFastPath &fast_path) {
+	const auto count = distinct_rows.size();
+	if (count == 0) {
+		return true;
+	}
+	if (group_chunk.size() != count || fast_path.payload_index >= distinct_rows.ColumnCount() ||
+	    fast_path.state_value_offset == DConstants::INVALID_INDEX) {
+		return false;
+	}
+
+	const auto aggregate_index = idx_t(0);
+	DataChunk compact_groups;
+	ReferenceCompactDistinctGroups(context.client, grouping_data.table_data, distinct_rows, group_chunk.ColumnCount(),
+	                               compact_groups);
+	auto sink_info = BuildDistinctCountFinalizeSinkInfo(aggregate_index, fast_path);
+	auto lane = BuildDistinctCountFinalizeLane(aggregate_index, fast_path);
+	vector<const ExecutionPrimitiveAggregateUpdateLane *> lanes;
+	lanes.push_back(&lane);
+	vector<idx_t> payload_source_indices;
+	payload_source_indices.push_back(fast_path.payload_index);
+	Vector group_hashes(LogicalType::HASH);
+	compact_groups.Hash(group_hashes);
+	if (grouping_data.table_data.TryUpdateNewPrimitiveGroupsWithPayloadInput(
+	        context, compact_groups, distinct_rows, payload_source_indices, sink_input, sink_info, lanes, nullptr, true,
+	        group_hashes)) {
+		return true;
+	}
+
+	Vector addresses(LogicalType::POINTER);
+	grouping_data.table_data.ResolveStateAddresses(context, group_chunk, sink_input, addresses);
+	addresses.Flatten();
+	auto state_addresses = FlatVector::GetData<uintptr_t>(addresses);
+
+	auto &payload = distinct_rows.data[fast_path.payload_index];
+	UnifiedVectorFormat payload_data;
+	payload.ToUnifiedFormat(payload_data);
+	for (idx_t row_idx = 0; row_idx < count; row_idx++) {
+		const auto payload_idx = payload_data.sel->get_index(row_idx);
+		if (!payload_data.validity.RowIsValid(payload_idx)) {
+			continue;
+		}
+		auto state = reinterpret_cast<int64_t *>(reinterpret_cast<data_ptr_t>(state_addresses[row_idx]) +
+		                                         fast_path.state_value_offset);
+		(*state)++;
+	}
+
+	grouping_data.table_data.FinishStateUpdates(context, sink_input);
+	return true;
+}
+
 void HashAggregateDistinctFinalizeEvent::Schedule() {
 	auto n_tasks = CreateGlobalSources();
 	n_tasks = MinValue<idx_t>(n_tasks, NumericCast<idx_t>(TaskScheduler::GetScheduler(context).NumberOfThreads()));
@@ -1162,7 +1770,6 @@ TaskExecutionResult HashAggregateDistinctFinalizeTask::AggregateDistinctGrouping
 		while (true) {
 			output_chunk.Reset();
 			group_chunk.Reset();
-			aggregate_input_chunk.Reset();
 
 			auto res = radix_table->GetData(execution_context, output_chunk, sink, source_input);
 			if (res == SourceResultType::FINISHED) {
@@ -1180,6 +1787,15 @@ TaskExecutionResult HashAggregateDistinctFinalizeTask::AggregateDistinctGrouping
 				group_chunk.data[bound_ref_expr.Index()].Reference(output_chunk.data[group_idx]);
 			}
 
+			DistinctCountFinalizeFastPath count_fast_path;
+			if (TryGetDistinctCountFinalizeFastPath(op, grouping_data, agg_idx, group_by_size, count_fast_path)) {
+				if (TryFinalizeDistinctCountFastPath(execution_context, grouping_data, sink_input, group_chunk,
+				                                     output_chunk, count_fast_path)) {
+					continue;
+				}
+			}
+
+			aggregate_input_chunk.Reset();
 			for (idx_t child_idx = 0; child_idx < grouped_aggregate_data.groups.size() - group_by_size; child_idx++) {
 				aggregate_input_chunk.data[payload_idx + child_idx].Reference(
 				    output_chunk.data[group_by_size + child_idx]);
@@ -1223,7 +1839,7 @@ SinkFinalizeType PhysicalHashAggregate::FinalizeInternal(Pipeline &pipeline, Eve
                                                          GlobalSinkState &gstate_p, bool check_distinct) const {
 	auto &gstate = gstate_p.Cast<HashAggregateGlobalSinkState>();
 
-	if (check_distinct && distinct_collection_info) {
+	if (check_distinct && distinct_collection_info && !HashAggregateUsesDistinctCountPointerKeys(*this)) {
 		// There are distinct aggregates
 		// If these are partitioned those need to be combined first
 		// Then we Finalize again, skipping this step

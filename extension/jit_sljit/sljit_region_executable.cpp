@@ -1240,7 +1240,7 @@ static bool BuildExecutableAggregateUpdatePayloadCode(const SljitNativeAggregate
 			return false;
 		}
 	}
-	if (op.use_primitive_payloads && op.use_grouped_state_addresses && op.payloads.size() > 1) {
+	if (op.use_primitive_payloads && op.use_grouped_state_addresses && !op.payloads.empty()) {
 		SljitNativeAggregateUpdateFunction fused_function = nullptr;
 		string fused_error;
 		auto fused_code = BuildSljitNativeGroupedFusedPrimitiveAggregateUpdate(
@@ -1289,6 +1289,8 @@ static bool BuildExecutableAggregateUpdatePayloadCode(const SljitNativeAggregate
 					code = BuildSljitNativeGroupedSumInt64Reference(payload.integer_kind, function, error);
 				} else if (primitive_kind == AggregatePrimitiveUpdateKind::SUM_HUGEINT) {
 					code = BuildSljitNativeGroupedSumHugeintReference(payload.integer_kind, function, error);
+				} else if (primitive_kind == AggregatePrimitiveUpdateKind::COUNT) {
+					code = BuildSljitNativeGroupedCountReference(function, error);
 				} else {
 					error = "SLJIT grouped aggregate reference reducer has no primitive state kind";
 					return false;
@@ -1298,6 +1300,8 @@ static bool BuildExecutableAggregateUpdatePayloadCode(const SljitNativeAggregate
 					code = BuildSljitNativeUngroupedSumInt64Reference(payload.integer_kind, function, error);
 				} else if (primitive_kind == AggregatePrimitiveUpdateKind::SUM_DOUBLE) {
 					code = BuildSljitNativeUngroupedSumDoubleReference(payload.double_source_kind, function, error);
+				} else if (primitive_kind == AggregatePrimitiveUpdateKind::COUNT) {
+					code = BuildSljitNativeUngroupedCountReference(function, error);
 				} else {
 					error = "SLJIT aggregate reference reducer has no primitive state kind";
 					return false;

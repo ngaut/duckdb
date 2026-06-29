@@ -2006,9 +2006,9 @@ TEST_CASE("JIT auto planner cost skips aggregate codegen when native and pipelin
 	RequireJitEvent(
 	    manager,
 	    [](const ExecutionRegionEvent &event) {
-		    return IsSljitRegionEvent(event) && EventStatus(event) == "skipped" && !event.has_candidate &&
+		    return IsSljitRegionEvent(event) && EventStatus(event) == "skipped" && event.has_candidate &&
 		           event.runner_cost.present &&
-		           event.runner_cost.input_scope == PhysicalRunnerCostInputScope::PHYSICAL_PIPELINE &&
+		           event.runner_cost.input_scope == PhysicalRunnerCostInputScope::EXECUTION_REGION_CANDIDATE &&
 		           event.runner_cost.native_aggregate_stage_count > 0;
 	    },
 	    [](const ExecutionRegionEvent &event) {
@@ -2016,7 +2016,7 @@ TEST_CASE("JIT auto planner cost skips aggregate codegen when native and pipelin
 		    REQUIRE_FALSE(event.runner_cost.selected_accelerated_runner);
 		    REQUIRE(event.runner_cost.saved_work_per_batch >= event.runner_cost.expression_cost);
 		    REQUIRE(StringUtil::Contains(event.reason, "duckdb_cbo selects vectorized physical runner"));
-		    REQUIRE(StringUtil::Contains(event.reason, "region_graph=skipped"));
+		    REQUIRE(StringUtil::Contains(event.reason, "backend_analysis=skipped"));
 	    });
 
 	for (auto &event : manager.GetEvents()) {

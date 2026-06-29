@@ -558,8 +558,6 @@ static ExecutionRegionStateContractStatus ExecutionCompiledSinkStatus(const Exec
 	case ExecutionRegionSinkKind::HASH_AGGREGATE_UPDATE:
 	case ExecutionRegionSinkKind::PERFECT_HASH_AGGREGATE_UPDATE:
 		return sink.aggregate_contract.native_state_update_contract.status;
-	case ExecutionRegionSinkKind::HASH_AGGREGATE_DISTINCT_SINK:
-		return sink.aggregate_contract.native_distinct_state_update_contract.status;
 	case ExecutionRegionSinkKind::UNGROUPED_AGGREGATE_UPDATE:
 		return sink.aggregate_contract.native_state_update_contract.status;
 	case ExecutionRegionSinkKind::RESULT_COLLECTOR_SINK:
@@ -582,8 +580,6 @@ static ExecutionCompiledContractKind ExecutionCompiledSinkOperation(const Execut
 	case ExecutionRegionSinkKind::PERFECT_HASH_AGGREGATE_UPDATE:
 	case ExecutionRegionSinkKind::UNGROUPED_AGGREGATE_UPDATE:
 		return ExecutionCompiledContractKind::AGGREGATE_UPDATE;
-	case ExecutionRegionSinkKind::HASH_AGGREGATE_DISTINCT_SINK:
-		return ExecutionCompiledContractKind::AGGREGATE_DISTINCT_SINK;
 	case ExecutionRegionSinkKind::RESULT_COLLECTOR_SINK:
 	case ExecutionRegionSinkKind::MATERIALIZATION:
 		return ExecutionCompiledContractKind::SINK_CURSOR;
@@ -603,8 +599,6 @@ static ExecutionRegionStageKind ExecutionCompiledSinkStage(const ExecutionRegion
 		return ExecutionRegionStageKind::NESTED_LOOP_JOIN_BUILD;
 	case ExecutionRegionSinkKind::HASH_AGGREGATE_UPDATE:
 		return ExecutionRegionStageKind::HASH_AGGREGATE_UPDATE;
-	case ExecutionRegionSinkKind::HASH_AGGREGATE_DISTINCT_SINK:
-		return ExecutionRegionStageKind::HASH_AGGREGATE_DISTINCT_SINK;
 	case ExecutionRegionSinkKind::PERFECT_HASH_AGGREGATE_UPDATE:
 		return ExecutionRegionStageKind::PERFECT_HASH_AGGREGATE_UPDATE;
 	case ExecutionRegionSinkKind::UNGROUPED_AGGREGATE_UPDATE:
@@ -636,9 +630,6 @@ static ExecutionCompiledStageContract BuildExecutionCompiledSinkStage(const Exec
 	} else if (sink.kind == ExecutionRegionSinkKind::NESTED_LOOP_JOIN_BUILD) {
 		stage.required_capability = sink.nested_loop_join_contract.native_build_contract.required_capability;
 		stage.blocker = sink.nested_loop_join_contract.native_build_contract.blocker;
-	} else if (sink.kind == ExecutionRegionSinkKind::HASH_AGGREGATE_DISTINCT_SINK) {
-		stage.required_capability = sink.aggregate_contract.native_distinct_state_update_contract.required_capability;
-		stage.blocker = sink.aggregate_contract.native_distinct_state_update_contract.blocker;
 	} else if (sink.kind == ExecutionRegionSinkKind::HASH_AGGREGATE_UPDATE ||
 	           sink.kind == ExecutionRegionSinkKind::PERFECT_HASH_AGGREGATE_UPDATE) {
 		stage.required_capability = sink.aggregate_contract.native_state_update_contract.required_capability;
@@ -1625,15 +1616,6 @@ static void MarkExecutionContractHashAggregateDistinctStateBoundary(ExecutionReg
 	}
 }
 
-static void MarkExecutionContractHashAggregateDistinctStateUpdateContract(ExecutionRegionAggregateContract &result,
-                                                                          const PhysicalHashAggregate &aggregate) {
-	result.native_distinct_state_update_contract = BuildExecutionContractNativeOperatorContract(
-	    "hash-aggregate-native-distinct-state-update", "hash-aggregate-distinct-native-state-update-boundary");
-	if (!aggregate.CanUseDistinctSinkContract() || result.distinct_aggregate_count == 0) {
-		return;
-	}
-}
-
 static void MarkExecutionContractPerfectHashAggregateGroupedStateContract(ExecutionRegionAggregateContract &result) {
 	if (!result.grouped_state_layout_ready || result.distinct_aggregate_count != 0 ||
 	    result.aggregate_filter_count != 0 || result.aggregate_order_count != 0) {
@@ -1756,7 +1738,6 @@ BuildExecutionContractHashAggregateContract(const PhysicalHashAggregate &aggrega
 	AddExecutionContractHashAggregateLookupLayout(result, aggregate);
 	MarkExecutionContractHashAggregateGroupedStateContract(result);
 	MarkExecutionContractHashAggregateDistinctStateBoundary(result);
-	MarkExecutionContractHashAggregateDistinctStateUpdateContract(result, aggregate);
 	MarkExecutionContractHashAggregateLookupContractBoundary(result);
 	return result;
 }
@@ -2037,7 +2018,7 @@ BuildExecutionContractAggregateInput(idx_t aggregate_idx, const unique_ptr<Expre
 	}
 
 	if (result.distinct) {
-		result.reason = "distinct aggregate update requires native distinct state-update contract";
+		result.reason = "distinct aggregate update is handled by DuckDB distinct aggregate finalization";
 	} else if (result.has_filter) {
 		result.reason = "aggregate filter requires per-aggregate filtered payload contract";
 	} else if (result.has_order_bys) {
@@ -2385,17 +2366,11 @@ ExecutionContract PhysicalHashAggregate::GetExecutionContract() const {
 	result.source.aggregate_contract = contract;
 	result.source.aggregates = sink_aggregates;
 	result.source.groups = sink_groups;
-	result.sink.kind =
-	    contract.native_distinct_state_update_contract.status == ExecutionRegionStateContractStatus::READY
-	        ? ExecutionRegionSinkKind::HASH_AGGREGATE_DISTINCT_SINK
-	        : ExecutionRegionSinkKind::HASH_AGGREGATE_UPDATE;
+	result.sink.kind = ExecutionRegionSinkKind::HASH_AGGREGATE_UPDATE;
 	result.sink.reason =
 	    BuildExecutionContractHashAggregateBoundaryReason(*this, "DuckDB hash aggregate sink update contract");
 	AppendExecutionContractNativeOperatorReason(result.sink.reason,
-	                                            result.sink.kind ==
-	                                                    ExecutionRegionSinkKind::HASH_AGGREGATE_DISTINCT_SINK
-	                                                ? contract.native_distinct_state_update_contract
-	                                                : contract.native_state_update_contract,
+	                                            contract.native_state_update_contract,
 	                                            "aggregate_state_update");
 	result.sink.aggregate_contract = std::move(contract);
 	result.sink.aggregates = std::move(sink_aggregates);
