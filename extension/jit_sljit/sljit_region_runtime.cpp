@@ -316,6 +316,15 @@ static inline int32_t SljitCastHashJoinKeyInt64ToInt32(const SljitNativeHashJoin
 	return input.source_key0_int64_to_int32_unchecked ? UnsafeNumericCast<int32_t>(value) : NumericCast<int32_t>(value);
 }
 
+template <bool UNCHECKED>
+static inline int32_t SljitCastHashJoinKeyInt64ToInt32(int64_t value) {
+	if constexpr (UNCHECKED) {
+		return UnsafeNumericCast<int32_t>(value);
+	} else {
+		return NumericCast<int32_t>(value);
+	}
+}
+
 static inline uint64_t SljitBloomFilterMask(hash_t hash) {
 	return BloomFilter::GetMask(hash);
 }
@@ -346,14 +355,20 @@ static bool SljitHashJoinMatchedProbeOutputMode(ExecutionHashJoinProbeOutputMode
 }
 
 struct SljitHashJoinMatchedRowConsumer {
-	explicit SljitHashJoinMatchedRowConsumer(SljitNativeHashJoinProbeInput &input)
-	    : row_pointers(input.row_pointers), match_sel(input.match_sel), selected_count(input.selected_count) {
+	SljitHashJoinMatchedRowConsumer(SljitNativeHashJoinProbeInput &input, const SljitNativeHashJoinProbePlan &plan)
+	    : row_pointers(input.row_pointers), match_sel(input.match_sel), selected_count(input.selected_count),
+	      output_capacity(input.output_capacity), mark_build_match(plan.mark_build_match),
+	      found_match_offset(plan.found_match_offset) {
 	}
 
-	inline void EmitMatch(const idx_t row_idx, const data_ptr_t row_location) {
+	inline bool EmitMatch(const idx_t row_idx, const data_ptr_t row_location) {
+		if (mark_build_match) {
+			row_location[found_match_offset] = 1;
+		}
 		row_pointers[selected_count] = row_location;
 		match_sel[selected_count] = UnsafeNumericCast<sel_t>(row_idx);
 		selected_count++;
+		return selected_count >= output_capacity;
 	}
 
 	idx_t Count() const {
@@ -364,14 +379,25 @@ private:
 	data_ptr_t *__restrict row_pointers;
 	sel_t *__restrict match_sel;
 	idx_t selected_count;
+	idx_t output_capacity;
+	bool mark_build_match;
+	idx_t found_match_offset;
 };
+
+static void FinishHashJoinNoChainProbeChunk(SljitNativeHashJoinProbeInput &input, idx_t selected_count,
+                                            idx_t next_row_idx) {
+	input.selected_count = selected_count;
+	input.input_offset = next_row_idx;
+	input.resume_row_pointer = nullptr;
+	input.finished = input.input_offset >= input.count;
+}
 
 static bool SljitHashJoinCanUseAllValidNoChainProbe(const SljitNativeHashJoinProbePlan &plan,
                                                     const ExecutionHashJoinTableLayout &layout,
                                                     const SljitNativeHashJoinProbeInput &input, bool selected) {
-	if (plan.residual_predicate || plan.mark_build_match || !SljitHashJoinMatchedProbeOutputMode(plan.output_mode) ||
+	if (plan.residual_predicate || !SljitHashJoinMatchedProbeOutputMode(plan.output_mode) ||
 	    layout.chains_longer_than_one || input.source_validity || input.resume_row_pointer ||
-	    input.count > input.output_capacity) {
+	    input.output_capacity == 0) {
 		return false;
 	}
 	if (selected) {
@@ -524,7 +550,10 @@ static void ExecuteAllValidInt64PairNoChainProbe(const SljitNativeHashJoinProbeP
 						auto row_location = SljitHashJoinEntryPointer(entry_value);
 						if (SljitHashJoinKeysEqual<uint64_t>(row_location, key0_offset, key0) &&
 						    SljitHashJoinKeysEqual<uint64_t>(row_location, key1_offset, key1)) {
-							consumer.EmitMatch(row_idx, row_location);
+							if (consumer.EmitMatch(row_idx, row_location)) {
+								FinishHashJoinNoChainProbeChunk(input, consumer.Count(), row_idx + 1);
+								return;
+							}
 							break;
 						}
 					}
@@ -551,7 +580,7 @@ static void ExecuteAllValidInt64PairNoChainProbe(const SljitNativeHashJoinProbeP
 template <bool SELECTED>
 static void ExecuteAllValidInt64PairNoChainProbe(const SljitNativeHashJoinProbePlan &plan,
                                                  SljitNativeHashJoinProbeInput &input) {
-	SljitHashJoinMatchedRowConsumer consumer(input);
+	SljitHashJoinMatchedRowConsumer consumer(input, plan);
 	if (input.use_salt) {
 		if (input.bloom_filter_bits) {
 			ExecuteAllValidInt64PairNoChainProbe<SELECTED, true, true>(plan, input, consumer);
@@ -819,7 +848,10 @@ static void ExecuteAllValidSingleKeyNoChainProbe(const SljitNativeHashJoinProbeP
 					if (!USE_SALT || (entry_value & ht_entry_t::SALT_MASK) == salt) {
 						auto row_location = SljitHashJoinEntryPointer(entry_value);
 						if (SljitHashJoinKeysEqual<T>(row_location, key_offset, key)) {
-							consumer.EmitMatch(row_idx, row_location);
+							if (consumer.EmitMatch(row_idx, row_location)) {
+								FinishHashJoinNoChainProbeChunk(input, consumer.Count(), row_idx + 1);
+								return;
+							}
 							break;
 						}
 					}
@@ -842,17 +874,23 @@ static void ExecuteAllValidSingleKeyNoChainProbe(const SljitNativeHashJoinProbeP
 	input.finished = true;
 }
 
-static void ExecuteFlatAllValidSingleKeyNoChainProbeInt64ToInt32(const SljitNativeHashJoinProbePlan &plan,
-                                                                 SljitNativeHashJoinProbeInput &input) {
+template <bool SELECTED, bool UNCHECKED>
+static void ExecuteAllValidSingleKeyNoChainProbeInt64ToInt32(const SljitNativeHashJoinProbePlan &plan,
+                                                             SljitNativeHashJoinProbeInput &input) {
 	const auto key_data = reinterpret_cast<const int64_t *__restrict>(input.source_data[0]);
 	const auto entries = reinterpret_cast<const ht_entry_t *__restrict>(input.entries);
-	SljitHashJoinMatchedRowConsumer consumer(input);
+	const sel_t *__restrict key_sel = nullptr;
+	if (SELECTED) {
+		key_sel = input.source_sel[0];
+	}
+	SljitHashJoinMatchedRowConsumer consumer(input, plan);
 	const auto key_offset = plan.keys[0].key_layout_offset;
 	const auto bitmask = input.bitmask;
 
 	auto row_idx = input.input_offset;
 	if (row_idx < input.count) {
-		auto key = SljitCastHashJoinKeyInt64ToInt32(input, key_data[row_idx]);
+		auto source_idx = SELECTED ? key_sel[row_idx] : UnsafeNumericCast<sel_t>(row_idx);
+		auto key = SljitCastHashJoinKeyInt64ToInt32<UNCHECKED>(key_data[source_idx]);
 		auto hash = Hash<int32_t>(key);
 		auto ht_offset = UnsafeNumericCast<idx_t>(hash & bitmask);
 
@@ -863,7 +901,8 @@ static void ExecuteFlatAllValidSingleKeyNoChainProbeInt64ToInt32(const SljitNati
 			hash_t next_hash = 0;
 			idx_t next_ht_offset = 0;
 			if (has_next) {
-				next_key = SljitCastHashJoinKeyInt64ToInt32(input, key_data[next_row_idx]);
+				const auto next_source_idx = SELECTED ? key_sel[next_row_idx] : UnsafeNumericCast<sel_t>(next_row_idx);
+				next_key = SljitCastHashJoinKeyInt64ToInt32<UNCHECKED>(key_data[next_source_idx]);
 				next_hash = Hash<int32_t>(next_key);
 				next_ht_offset = UnsafeNumericCast<idx_t>(next_hash & bitmask);
 				SljitPrefetchHashJoinEntry(entries, next_ht_offset);
@@ -882,7 +921,10 @@ static void ExecuteFlatAllValidSingleKeyNoChainProbeInt64ToInt32(const SljitNati
 					if (!input.use_salt || (entry_value & ht_entry_t::SALT_MASK) == salt) {
 						auto row_location = SljitHashJoinEntryPointer(entry_value);
 						if (SljitHashJoinKeysEqual<int32_t>(row_location, key_offset, key)) {
-							consumer.EmitMatch(row_idx, row_location);
+							if (consumer.EmitMatch(row_idx, row_location)) {
+								FinishHashJoinNoChainProbeChunk(input, consumer.Count(), row_idx + 1);
+								return;
+							}
 							break;
 						}
 					}
@@ -908,7 +950,7 @@ static void ExecuteFlatAllValidSingleKeyNoChainProbeInt64ToInt32(const SljitNati
 template <class T, bool SELECTED>
 static void ExecuteAllValidSingleKeyNoChainProbe(const SljitNativeHashJoinProbePlan &plan,
                                                  SljitNativeHashJoinProbeInput &input) {
-	SljitHashJoinMatchedRowConsumer consumer(input);
+	SljitHashJoinMatchedRowConsumer consumer(input, plan);
 	if (input.use_salt) {
 		if (input.bloom_filter_bits) {
 			ExecuteAllValidSingleKeyNoChainProbe<T, SELECTED, true, true>(plan, input, consumer);
@@ -940,6 +982,17 @@ static bool TryExecuteSelectedAllValidSingleKeyNoChainProbe(const SljitNativeHas
 		return false;
 	}
 	auto &key = plan.keys[0];
+	if (input.source_key0_int64_to_int32) {
+		if (key.key_kind != SljitNativeHashJoinKeyKind::INT32) {
+			return false;
+		}
+		if (input.source_key0_int64_to_int32_unchecked) {
+			ExecuteAllValidSingleKeyNoChainProbeInt64ToInt32<true, true>(plan, input);
+		} else {
+			ExecuteAllValidSingleKeyNoChainProbeInt64ToInt32<true, false>(plan, input);
+		}
+		return true;
+	}
 
 	switch (key.key_kind) {
 	case SljitNativeHashJoinKeyKind::INT8:
@@ -983,7 +1036,11 @@ static bool TryExecuteFlatAllValidSingleKeyNoChainProbe(const SljitNativeHashJoi
 		if (key.key_kind != SljitNativeHashJoinKeyKind::INT32) {
 			return false;
 		}
-		ExecuteFlatAllValidSingleKeyNoChainProbeInt64ToInt32(plan, input);
+		if (input.source_key0_int64_to_int32_unchecked) {
+			ExecuteAllValidSingleKeyNoChainProbeInt64ToInt32<false, true>(plan, input);
+		} else {
+			ExecuteAllValidSingleKeyNoChainProbeInt64ToInt32<false, false>(plan, input);
+		}
 		return true;
 	}
 
@@ -16749,8 +16806,7 @@ public:
 		const bool source_validity_present = source_validity_array != nullptr;
 		const bool source_common_selection_present =
 		    source_selection_present && SljitCommonSelectionOrNull(source_sel) != nullptr;
-		const bool rhs_keys_all_valid =
-		    !layout.can_have_null || (layout.null_keys_are_filtered && !layout.found_match_column_present);
+		const bool rhs_keys_all_valid = !layout.can_have_null || layout.null_keys_are_filtered;
 		const auto probe_traits = BuildRegularHashJoinProbeRuntimeTraits(
 		    source_selection_present, source_common_selection_present, source_validity_present, rhs_keys_all_valid);
 
