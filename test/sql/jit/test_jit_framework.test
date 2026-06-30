@@ -1626,8 +1626,8 @@ WHERE event_id > base_event_id
   AND candidate_filter_count=0
   AND candidate_projection_count=1
   AND candidate_has_sink
+  AND candidate_signature_feature_shape='perfect-hash-aggregate-update+table-scan-source'
   AND ir LIKE '%aggregate_update(kind=perfect-hash%'
-  AND ir LIKE '%features=perfect-hash-aggregate-update+table-scan-source%'
   AND ir LIKE '%payload_update=generated-primitive%'
   AND ir LIKE '%grouped_state_lookup=generated-perfect-hash%'
   AND ir LIKE '%primitive_payloads=native:reference%'

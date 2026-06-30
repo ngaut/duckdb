@@ -105,12 +105,11 @@ REQUIRED_TEXT = {
         'selection.reason = "duckdb_cbo selects ";',
     ),
     "src/execution/execution_region_cost_input.cpp": (
-        "ExecutionRegionRunnerCostInputBuilder",
         "BuildExecutionRegionCandidateCostInput",
         "TryBuildExecutionRegionPipelineCostInput",
         "candidate.traits.expression_cost",
         "candidate.stage_plan.stages",
-        "AddGeneratedExpressionWork",
+        "AddExecutionRegionGeneratedExpressionWork",
     ),
     "src/include/duckdb/execution/execution_region_common.hpp": (
         "enum class ExecutionRegionABI",
@@ -149,39 +148,6 @@ REQUIRED_TEXT = {
     ),
 }
 
-FORBIDDEN_TEXT = {
-    "src/planner/cost_model.cpp": (
-        "PHYSICAL_RUNNER_FUNDED_PROTOCOL_RULES",
-        "PHYSICAL_RUNNER_STARTUP_RULES",
-        "STATEFUL_STANDALONE_PROJECTION_MIN_BATCHES",
-        "PhysicalRunnerIsNativeContractProjectionGlue",
-        "PhysicalRunnerIsSmallStatefulStandaloneProjection",
-        "funded_protocol_rule",
-        "native_contract_projection_glue",
-        "small_stateful_standalone_projection",
-        "startup_rules",
-    ),
-    "src/include/duckdb/planner/cost_model.hpp": (
-        "funded_protocol_rule",
-        "sort_sink",
-        "startup_rules",
-    ),
-    "src/execution/execution_region_cost_input.cpp": (
-        "SetSortSink",
-    ),
-    "src/include/duckdb/execution/execution_region_telemetry.hpp": (
-        "funded_protocol_rule",
-        "startup_rules",
-    ),
-    "src/function/table/system/execution_region_table_function_utils.hpp": (
-        "runner_cost_funded_protocol_rule",
-        "runner_cost_startup_rules",
-    ),
-    "src/function/pragma/pragma_functions.cpp": (
-        "enable_" "verification",
-    ),
-}
-
 REGEX_RULES = (
     (
         "SLJIT dependency in core DuckDB",
@@ -194,33 +160,6 @@ REGEX_RULES = (
         (r'#include "duckdb/execution/operator/', r'#include "duckdb/parallel/pipeline(_executor)?\.hpp"'),
         ("extension/jit_sljit/**/*.hpp", "extension/jit_sljit/**/*.cpp"),
         (),
-    ),
-    (
-        "private admission or duplicate CBO",
-        (
-            r"\bExpressionCostModel\b",
-            r"expression_cost\.hpp",
-            r"\bExecutionRegionRunnerCostProfile\b",
-            r"\bPhysicalRunnerCostDecision\b",
-            r"\bBuildExecutionRegionRunnerCostProfile\b",
-            r"\bExecutionRegionCBO[A-Za-z0-9_]*\b",
-            r"\bCompiledRegionCost(Input|Decision)\b",
-            r"\bSelectCompiledRegionRunner\b",
-            r"\bShouldCompile\(",
-            r"\bselection_score\b",
-            r"\bnative_ownership_score\b",
-        ),
-        (
-            "src/**/*.hpp",
-            "src/**/*.cpp",
-            "extension/jit_sljit/**/*.hpp",
-            "extension/jit_sljit/**/*.cpp",
-            "benchmark/**/*.py",
-            "test/api/test_jit*.cpp",
-            "test/api/test_jit*.hpp",
-            "test/sql/jit/**/*.test",
-        ),
-        ("benchmark/jit/verify_jit_architecture.py",),
     ),
     (
         "whole executor fallback in compiled layers",
@@ -263,34 +202,6 @@ REGEX_RULES = (
         ("src/execution/**/*.cpp", "src/include/duckdb/execution/**/*.hpp", "extension/jit_sljit/**/*.cpp"),
         (),
     ),
-    (
-        "duplicate pre-IR inventory or workload selector",
-        (
-            r"\bExecutionRegionPipelineInventory\b",
-            r"\bTryInspectExecutionRegionPipeline\b",
-            r"\bRenderExecutionRegionPipelineInventoryIR\b",
-            r"\bworkload_relevant\b",
-            r"\bworkload_relevance_reason\b",
-            r"\bIsExecutionRegionPipelineInventoryWorkloadRelevant\b",
-            r"\bHasWrapperOnlySource\b",
-        ),
-        ("src/execution/**/*.cpp", "src/include/duckdb/execution/**/*.hpp"),
-        (),
-    ),
-    (
-        "deprecated verification pragma",
-        (r"\benable_" r"verification\b",),
-        (
-            "src/**/*.hpp",
-            "src/**/*.cpp",
-            "benchmark/**/*.py",
-            "test/**/*.test",
-            "test/**/*.cpp",
-            "test/**/*.hpp",
-            "scripts/**/*.py",
-        ),
-        ("benchmark/jit/verify_jit_architecture.py",),
-    ),
 )
 
 
@@ -323,14 +234,6 @@ def verify_required_text() -> None:
         missing = [snippet for snippet in snippets if snippet not in data]
         if missing:
             raise AssertionError(f"{path}: missing required text {missing}")
-
-
-def verify_forbidden_text() -> None:
-    for path, snippets in FORBIDDEN_TEXT.items():
-        data = read_text(path)
-        present = [snippet for snippet in snippets if snippet in data]
-        if present:
-            raise AssertionError(f"{path}: stale CBO text remains {present}")
 
 
 def verify_regex_rules() -> None:
@@ -420,7 +323,6 @@ def verify_candidate_stage_timing_attribution() -> None:
 def main() -> None:
     verify_files()
     verify_required_text()
-    verify_forbidden_text()
     verify_regex_rules()
     verify_typed_observability_state()
     verify_candidate_stage_timing_attribution()

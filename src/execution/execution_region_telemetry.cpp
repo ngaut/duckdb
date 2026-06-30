@@ -89,16 +89,12 @@ static ExecutionRunnerKind ExecutionRegionRunnerFromExecutionMode(ExecutionRegio
 	}
 }
 
-static void SetDetailedExecutionRegionCandidate(ExecutionRegionEvent &event, const ExecutionRegionCandidate &candidate,
-                                                bool include_ir) {
+static void SetDetailedExecutionRegionCandidate(ExecutionRegionEvent &event, const ExecutionRegionCandidate &candidate) {
 	event.has_candidate = true;
 	event.candidate_id = candidate.candidate_id;
 	event.candidate_shape = candidate.shape;
 	event.candidate_pipeline_shape = candidate.pipeline_shape;
 	event.candidate_signature = candidate.signature;
-	if (!include_ir) {
-		event.candidate_signature.ir.clear();
-	}
 	event.candidate_node_count = candidate.node_count;
 	event.candidate_start_operator_index = candidate.start_operator_index;
 	event.candidate_end_operator_index = candidate.end_operator_index;
@@ -244,7 +240,7 @@ idx_t ExecutionRegionManager::RecordEvent(
 	}
 	ExecutionRegionEvent event;
 	if (candidate && ExecutionRegionSettings::ShouldRecordDetailedTelemetry(context)) {
-		SetDetailedExecutionRegionCandidate(event, *candidate, ExecutionRegionSettings::DumpIR(context));
+		SetDetailedExecutionRegionCandidate(event, *candidate);
 	}
 	if (candidate && !event.has_pipeline) {
 		event.has_pipeline = true;

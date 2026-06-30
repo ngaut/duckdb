@@ -166,29 +166,6 @@ static sljit_sw SLJIT_FUNC SljitNativeStringInListConstant(const char *sdata, id
 	return false;
 }
 
-static unique_ptr<ExecutionRegionCodeHandle> FinishSljitNativePredicateCode(struct sljit_compiler *compiler,
-                                                                            SljitNativePredicateFunction &function,
-                                                                            string &error,
-                                                                            vector<shared_ptr<void>> owned_data = {}) {
-	auto compiler_error = sljit_get_compiler_error(compiler);
-	if (compiler_error != SLJIT_SUCCESS) {
-		error = "SLJIT compiler failed with error code " + std::to_string(compiler_error);
-		sljit_free_compiler(compiler);
-		return nullptr;
-	}
-
-	auto code = GenerateSljitCode(compiler);
-	auto code_size = LossyNumericCast<idx_t>(sljit_get_generated_code_size(compiler));
-	sljit_free_compiler(compiler);
-	if (!code) {
-		error = "SLJIT executable code generation failed";
-		return nullptr;
-	}
-
-	function = reinterpret_cast<SljitNativePredicateFunction>(code);
-	return MakeSljitCodeHandle(code, code_size, std::move(owned_data));
-}
-
 struct SljitPredicateBranches {
 	vector<sljit_jump *> true_jumps;
 	vector<sljit_jump *> false_jumps;
@@ -226,21 +203,6 @@ static void EmitLoadPredicateLogicalIndex(struct sljit_compiler *compiler, sljit
 	sljit_set_label(no_execute_sel, sljit_emit_label(compiler));
 	sljit_emit_op1(compiler, SLJIT_MOV, target, 0, SLJIT_S1, 0);
 	sljit_set_label(have_logical_index, sljit_emit_label(compiler));
-}
-
-static void EmitLoadPredicateResultAndLogicalIndexForSelect(struct sljit_compiler *compiler) {
-	EmitLoadPredicateLogicalIndex(compiler, SLJIT_S3);
-}
-
-static void EmitLoadPredicateResultIndex(struct sljit_compiler *compiler, sljit_s32 target) {
-	sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_R0, 0, SLJIT_MEM1(SLJIT_S0),
-	               offsetof(SljitNativePredicateInput, execute_sel));
-	auto no_execute_sel = sljit_emit_cmp(compiler, SLJIT_EQUAL, SLJIT_R0, 0, SLJIT_IMM, 0);
-	sljit_emit_op1(compiler, SLJIT_MOV_U32, target, 0, SLJIT_MEM2(SLJIT_R0, SLJIT_S1), 2);
-	auto have_result_index = sljit_emit_jump(compiler, SLJIT_JUMP);
-	sljit_set_label(no_execute_sel, sljit_emit_label(compiler));
-	sljit_emit_op1(compiler, SLJIT_MOV, target, 0, SLJIT_S1, 0);
-	sljit_set_label(have_result_index, sljit_emit_label(compiler));
 }
 
 static void EmitLoadPredicateSourceIndex(struct sljit_compiler *compiler, idx_t source_index, sljit_s32 logical_index,
@@ -484,9 +446,7 @@ static void EmitLoadPredicateStringForMatch(struct sljit_compiler *compiler, idx
 	static_assert(sizeof(string_t) == 16, "SLJIT string match expects DuckDB string_t ABI size");
 	static constexpr sljit_sw STRING_LENGTH_OFFSET = 0;
 	EmitLoadPredicateSourceIndex(compiler, source_index, SLJIT_S3, SLJIT_R1);
-	if (!sources_all_valid && PredicateSourceCanHaveNull(source_index, source_not_null)) {
-		result.null_jumps.push_back(EmitJumpIfPredicateSourceNull(compiler, source_index, SLJIT_R1));
-	}
+	AppendPredicateSourceNullJump(compiler, result, source_index, SLJIT_R1, source_not_null, sources_all_valid);
 	EmitLoadPredicateStringPointer(compiler, source_index, SLJIT_R0, SLJIT_R1);
 	sljit_emit_op1(compiler, SLJIT_MOV_U32, SLJIT_R2, 0, SLJIT_MEM1(SLJIT_R0), STRING_LENGTH_OFFSET);
 	EmitLoadPredicateStringDataPointer(compiler, SLJIT_R0, SLJIT_R2, SLJIT_R4);
@@ -734,7 +694,7 @@ static void EmitStringContainsBranches(struct sljit_compiler *compiler, const st
 
 static void EmitPredicateStoreTrueSelection(struct sljit_compiler *compiler) {
 	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R2, 0, SLJIT_MEM1(SLJIT_SP), SLJIT_SELECT_TRUE_COUNT_OFFSET);
-	EmitLoadPredicateResultIndex(compiler, SLJIT_R3);
+	EmitLoadPredicateLogicalIndex(compiler, SLJIT_R3);
 	sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_R0, 0, SLJIT_MEM1(SLJIT_S0),
 	               offsetof(SljitNativePredicateInput, true_sel));
 	auto no_true_sel = sljit_emit_cmp(compiler, SLJIT_EQUAL, SLJIT_R0, 0, SLJIT_IMM, 0);
@@ -747,7 +707,7 @@ static void EmitPredicateStoreTrueSelection(struct sljit_compiler *compiler) {
 static void EmitPredicateStoreFalseSelection(struct sljit_compiler *compiler) {
 	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R2, 0, SLJIT_MEM1(SLJIT_SP), SLJIT_SELECT_TRUE_COUNT_OFFSET);
 	sljit_emit_op2(compiler, SLJIT_SUB, SLJIT_R2, 0, SLJIT_S1, 0, SLJIT_R2, 0);
-	EmitLoadPredicateResultIndex(compiler, SLJIT_R3);
+	EmitLoadPredicateLogicalIndex(compiler, SLJIT_R3);
 	sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_R0, 0, SLJIT_MEM1(SLJIT_S0),
 	               offsetof(SljitNativePredicateInput, false_sel));
 	auto no_false_sel = sljit_emit_cmp(compiler, SLJIT_EQUAL, SLJIT_R0, 0, SLJIT_IMM, 0);
@@ -804,7 +764,7 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeConstantOrNull(const vecto
 	sljit_set_label(done, sljit_emit_label(compiler));
 	sljit_emit_return_void(compiler);
 
-	return FinishSljitNativePredicateCode(compiler, function, error);
+	return FinishSljitCode(compiler, function, error);
 }
 
 static SljitPredicateBranches EmitSljitPredicateBranches(struct sljit_compiler *compiler,
@@ -1247,11 +1207,7 @@ static sljit_jump *EmitSljitNativePredicateLoop(struct sljit_compiler *compiler,
                                                 bool sources_all_valid) {
 	auto loop = sljit_emit_label(compiler);
 	auto done = sljit_emit_cmp(compiler, SLJIT_GREATER_EQUAL, SLJIT_S1, 0, SLJIT_S2, 0);
-	if (materialize_result) {
-		EmitLoadPredicateLogicalIndex(compiler, SLJIT_S3);
-	} else {
-		EmitLoadPredicateResultAndLogicalIndexForSelect(compiler);
-	}
+	EmitLoadPredicateLogicalIndex(compiler, SLJIT_S3);
 
 	auto branches =
 	    EmitSljitPredicateBranches(compiler, predicate, owned_data, predicate.source_not_null, sources_all_valid);
@@ -1338,7 +1294,7 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativePredicate(const SljitNativ
 	}
 	sljit_emit_return_void(compiler);
 
-	return FinishSljitNativePredicateCode(compiler, function, error, std::move(owned_data));
+	return FinishSljitCode(compiler, function, error, std::move(owned_data));
 }
 
 } // namespace duckdb

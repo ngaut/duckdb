@@ -205,7 +205,8 @@ SelectExecutionRegionPipelinePhysicalRunner(const PhysicalRunnerCostParameters &
 	if (ExecutionRegionPipelineHasNonProducingSource(pipeline)) {
 		auto source = pipeline.GetSource();
 		D_ASSERT(source);
-		auto cost_input = BuildExecutionRegionNonProducingSourceCostInput(*source);
+		PhysicalRunnerCostInput cost_input;
+		cost_input.estimated_cardinality = source->estimated_cardinality;
 		selection.runner_cost = DuckDBCostModel::SelectPhysicalRunner(cost_input, cost_parameters);
 		selection.reason = "duckdb_cbo selects vectorized physical runner before region graph";
 		selection.reason += ";region_graph=skipped;source_produces_rows=false";

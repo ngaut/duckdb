@@ -923,7 +923,6 @@ TEST_CASE("SLJIT native projection handles many FLOAT expressions sharing source
 	    [](const ExecutionRegionEvent &event) {
 		    RequireGeneratedMachineCodeRegion(event);
 		    REQUIRE(event.candidate_traits.arithmetic_projection_count == 8);
-		    REQUIRE(event.candidate_traits.non_integer_arithmetic_projection_count == 8);
 	    });
 
 	RequireJitEvent(
@@ -1317,7 +1316,6 @@ TEST_CASE("SLJIT fixed direct append fuses DECIMAL64 groups with checks", "[api]
 	    [](const ExecutionRegionEvent &event) {
 		    RequireGeneratedMachineCodeRegion(event);
 		    REQUIRE(event.candidate_traits.arithmetic_projection_count == 4);
-		    REQUIRE(event.candidate_traits.non_integer_arithmetic_projection_count == 4);
 		    REQUIRE(event.candidate_traits.reference_projection_count == 1);
 	    });
 

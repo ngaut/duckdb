@@ -10,31 +10,13 @@
 
 namespace duckdb {
 
-static constexpr const char *SLJIT_NATIVE_CONTRACT_UNSUPPORTED =
-    "region IR node is unsupported by SLJIT native contract lowering";
-
 bool SljitRegionNodeHasNativeOps(const SljitRegionNodePlan &node_plan) {
 	return !node_plan.native_ops.empty();
-}
-
-const SljitNativeRegionOpPlan &SljitRegionNodeFirstNativeOp(const SljitRegionNodePlan &node_plan) {
-	D_ASSERT(!node_plan.native_ops.empty());
-	return node_plan.native_ops[0];
 }
 
 SljitNativeRegionOpPlan &SljitRegionNodeLastNativeOp(SljitRegionNodePlan &node_plan) {
 	D_ASSERT(!node_plan.native_ops.empty());
 	return node_plan.native_ops.back();
-}
-
-bool SljitRegionNodeHasSingleNativeOp(const SljitRegionNodePlan &node_plan) {
-	return node_plan.native_ops.size() == 1;
-}
-
-void AppendSljitRegionNodeNativeOps(SljitNativeRegionPlan &region, SljitRegionNodePlan &node_plan) {
-	for (auto &op : node_plan.native_ops) {
-		region.ops.push_back(std::move(op));
-	}
 }
 
 SljitRegionNodePlan SljitNativeNode(SljitNativeRegionOpPlan &&native_op, string reason) {
@@ -75,17 +57,19 @@ void AppendSljitReasonPart(string &reason, const string &part, bool render_diagn
 	}
 }
 
-SljitRegionNodePlan SljitBlockedContractBoundary(const string &blocker, const char *reason) {
-	return SljitRegionBoundaryNode(SljitBlockerOrReason(blocker, reason));
+SljitNativeRegionExpressionPlan SljitNativeReferenceExpression(idx_t source_index, const LogicalType &type, string ir,
+                                                               bool references_region_input) {
+	SljitNativeRegionExpressionPlan result;
+	result.kind = SljitNativeRegionExpressionKind::REFERENCE;
+	result.references_region_input = references_region_input;
+	result.return_type = type;
+	result.source_index = source_index;
+	result.ir = std::move(ir);
+	return result;
 }
 
-SljitRegionNodePlan SljitUnsupportedExpressionBoundaryNode(const string &error) {
-	string reason = SLJIT_NATIVE_CONTRACT_UNSUPPORTED;
-	if (!error.empty()) {
-		reason += ";";
-		reason += error;
-	}
-	return SljitRegionBoundaryNode(std::move(reason));
+SljitRegionNodePlan SljitBlockedContractBoundary(const string &blocker, const char *reason) {
+	return SljitRegionBoundaryNode(SljitBlockerOrReason(blocker, reason));
 }
 
 } // namespace duckdb

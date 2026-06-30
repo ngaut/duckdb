@@ -169,23 +169,7 @@ static string DescribeNativeRegionExpression(const SljitNativeRegionExpressionPl
 	switch (expr.kind) {
 	case SljitNativeRegionExpressionKind::REFERENCE:
 		result = "native:reference";
-		switch (expr.reference_origin) {
-		case SljitNativeReferenceOrigin::REGION_INPUT:
-			result += ":region-input";
-			break;
-		case SljitNativeReferenceOrigin::PROJECTION_PASS_THROUGH:
-			result += ":projection-pass";
-			break;
-		case SljitNativeReferenceOrigin::PROJECTION_TEMP:
-			result += ":projection-temp";
-			break;
-		case SljitNativeReferenceOrigin::SOURCE_OUTPUT:
-			result += ":source-output";
-			break;
-		default:
-			result += ":unknown";
-			break;
-		}
+		result += expr.references_region_input ? ":region-input" : ":projection-local";
 		break;
 	case SljitNativeRegionExpressionKind::CONSTANT:
 		result = "native:constant<" + expr.return_type.ToString() + ">(" + expr.constant_value.ToString() + ")";

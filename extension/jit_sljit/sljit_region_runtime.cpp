@@ -32,7 +32,6 @@
 #include <array>
 #include <chrono>
 #include <cstring>
-#include <exception>
 #include <limits>
 #include <type_traits>
 
@@ -185,74 +184,49 @@ static bool SljitDownstreamRowBudgetReached(idx_t processed_rows, idx_t max_chun
 	return processed_rows >= max_chunks * STANDARD_VECTOR_SIZE;
 }
 
-static const sel_t *SljitCanonicalizeCommonSelection(vector<const sel_t *> &source_sel,
-                                                     vector<const sel_t *> &group_sel) {
-	const sel_t *common_sel = nullptr;
-	for (auto sel : group_sel) {
+static bool SljitFindCommonSelection(const vector<const sel_t *> &selections, const sel_t *&common_sel) {
+	for (auto sel : selections) {
 		if (!sel) {
-			return nullptr;
+			return false;
 		}
 		if (!common_sel) {
 			common_sel = sel;
 		} else if (common_sel != sel) {
-			return nullptr;
+			return false;
 		}
 	}
-	for (auto sel : source_sel) {
-		if (!sel) {
-			return nullptr;
-		}
-		if (!common_sel) {
-			common_sel = sel;
-		} else if (common_sel != sel) {
-			return nullptr;
-		}
-	}
-	if (!common_sel) {
-		return nullptr;
-	}
-	for (auto &sel : group_sel) {
-		sel = nullptr;
-	}
-	for (auto &sel : source_sel) {
-		sel = nullptr;
-	}
-	return common_sel;
+	return true;
 }
 
-static const sel_t *SljitCanonicalizeCommonSourceSelection(vector<const sel_t *> &source_sel) {
-	const sel_t *common_sel = nullptr;
-	for (auto sel : source_sel) {
-		if (!sel) {
-			return nullptr;
-		}
-		if (!common_sel) {
-			common_sel = sel;
-		} else if (common_sel != sel) {
-			return nullptr;
-		}
-	}
-	if (!common_sel) {
-		return nullptr;
-	}
-	for (auto &sel : source_sel) {
+static void SljitClearSelections(vector<const sel_t *> &selections) {
+	for (auto &sel : selections) {
 		sel = nullptr;
 	}
-	return common_sel;
 }
 
 static const sel_t *SljitCommonSelectionOrNull(const vector<const sel_t *> &source_sel) {
 	const sel_t *common_sel = nullptr;
-	for (auto sel : source_sel) {
-		if (!sel) {
-			return nullptr;
-		}
-		if (!common_sel) {
-			common_sel = sel;
-		} else if (common_sel != sel) {
-			return nullptr;
-		}
+	return SljitFindCommonSelection(source_sel, common_sel) ? common_sel : nullptr;
+}
+
+static const sel_t *SljitCanonicalizeCommonSelection(vector<const sel_t *> &source_sel,
+                                                     vector<const sel_t *> &group_sel) {
+	const sel_t *common_sel = nullptr;
+	if (!SljitFindCommonSelection(group_sel, common_sel) || !SljitFindCommonSelection(source_sel, common_sel) ||
+	    !common_sel) {
+		return nullptr;
 	}
+	SljitClearSelections(group_sel);
+	SljitClearSelections(source_sel);
+	return common_sel;
+}
+
+static const sel_t *SljitCanonicalizeCommonSourceSelection(vector<const sel_t *> &source_sel) {
+	auto common_sel = SljitCommonSelectionOrNull(source_sel);
+	if (!common_sel) {
+		return nullptr;
+	}
+	SljitClearSelections(source_sel);
 	return common_sel;
 }
 
@@ -2324,44 +2298,43 @@ private:
 			return lanes;
 		}
 
+		static bool DirectAggregateUpdateDisabled(const vector<bool> &disabled, idx_t op_idx) {
+			return op_idx >= disabled.size() || disabled[op_idx];
+		}
+
+		static void RecordDirectAggregateUpdateResult(vector<bool> &disabled, vector<idx_t> &misses, idx_t op_idx,
+		                                              bool updated, idx_t miss_limit, const char *scratch_name) {
+			if (op_idx >= disabled.size() || op_idx >= misses.size()) {
+				throw InternalException("SLJIT aggregate update has no %s scratch", scratch_name);
+			}
+			if (updated) {
+				misses[op_idx] = 0;
+				return;
+			}
+			if (++misses[op_idx] >= miss_limit) {
+				disabled[op_idx] = true;
+			}
+		}
+
 		bool DirectNewAggregateUpdateDisabled(idx_t op_idx) const {
-			return op_idx >= aggregate_direct_new_disabled.size() || aggregate_direct_new_disabled[op_idx];
+			return DirectAggregateUpdateDisabled(aggregate_direct_new_disabled, op_idx);
 		}
 
 		void RecordDirectNewAggregateUpdateResult(idx_t op_idx, bool updated) {
 			static constexpr idx_t DIRECT_NEW_AGGREGATE_UPDATE_MISS_LIMIT = 8;
-			if (op_idx >= aggregate_direct_new_disabled.size() || op_idx >= aggregate_direct_new_misses.size()) {
-				throw InternalException("SLJIT aggregate update has no direct-new scratch");
-			}
-			if (updated) {
-				aggregate_direct_new_misses[op_idx] = 0;
-				return;
-			}
-			auto misses = ++aggregate_direct_new_misses[op_idx];
-			if (misses >= DIRECT_NEW_AGGREGATE_UPDATE_MISS_LIMIT) {
-				aggregate_direct_new_disabled[op_idx] = true;
-			}
+			RecordDirectAggregateUpdateResult(aggregate_direct_new_disabled, aggregate_direct_new_misses, op_idx,
+			                                  updated, DIRECT_NEW_AGGREGATE_UPDATE_MISS_LIMIT, "direct-new");
 		}
 
 		bool DirectAppendNewAggregateUpdateDisabled(idx_t op_idx) const {
-			return op_idx >= aggregate_direct_append_new_disabled.size() ||
-			       aggregate_direct_append_new_disabled[op_idx];
+			return DirectAggregateUpdateDisabled(aggregate_direct_append_new_disabled, op_idx);
 		}
 
 		void RecordDirectAppendNewAggregateUpdateResult(idx_t op_idx, bool updated) {
 			static constexpr idx_t DIRECT_APPEND_NEW_AGGREGATE_UPDATE_MISS_LIMIT = 2;
-			if (op_idx >= aggregate_direct_append_new_disabled.size() ||
-			    op_idx >= aggregate_direct_append_new_misses.size()) {
-				throw InternalException("SLJIT aggregate update has no direct-append-new scratch");
-			}
-			if (updated) {
-				aggregate_direct_append_new_misses[op_idx] = 0;
-				return;
-			}
-			auto misses = ++aggregate_direct_append_new_misses[op_idx];
-			if (misses >= DIRECT_APPEND_NEW_AGGREGATE_UPDATE_MISS_LIMIT) {
-				aggregate_direct_append_new_disabled[op_idx] = true;
-			}
+			RecordDirectAggregateUpdateResult(aggregate_direct_append_new_disabled, aggregate_direct_append_new_misses,
+			                                  op_idx, updated, DIRECT_APPEND_NEW_AGGREGATE_UPDATE_MISS_LIMIT,
+			                                  "direct-append-new");
 		}
 
 		SljitExpressionAdapterScratch &ExpressionAdapterScratch(idx_t op_idx, idx_t expression_idx) {
@@ -3641,16 +3614,6 @@ public:
 		return true;
 	}
 
-	template <class T>
-	static bool TryPreaggregateFixedWidthCountStarGroupsTemplated(DataChunk &input_groups, DataChunk &compact_groups,
-	                                                              vector<int64_t> &count_deltas) {
-		if (input_groups.ColumnCount() != 1) {
-			return false;
-		}
-		return TryPreaggregateFixedWidthCountStarVectorTemplated<T>(input_groups.data[0], input_groups.size(),
-		                                                            compact_groups, count_deltas);
-	}
-
 	static bool TryPreaggregateFixedWidthCountStarVector(Vector &input_group, idx_t count, DataChunk &compact_groups,
 	                                                     vector<int64_t> &count_deltas) {
 		switch (input_group.GetType().InternalType()) {
@@ -3828,6 +3791,41 @@ public:
 	}
 
 	template <class T>
+	static bool TrySljitStringCompressCountStarKey(const string_t &input, T &result) {
+		return TrySljitStringCompressWide(input, result);
+	}
+
+	static bool TrySljitStringCompressCountStarKey(const string_t &input, uint8_t &result) {
+		return TrySljitStringCompressUInt8(input, result);
+	}
+
+	template <class T>
+	static bool MaterializePreaggregatedStringCountStarGroups(
+	    const std::array<string_t, SLJIT_LOCAL_PREAGGREGATED_GROUP_LIMIT> &keys,
+	    const std::array<int64_t, SLJIT_LOCAL_PREAGGREGATED_GROUP_LIMIT> &counts, idx_t group_count,
+	    DataChunk &compact_groups, vector<int64_t> &count_deltas) {
+		compact_groups.Reset();
+		auto &target = compact_groups.data[0];
+		target.SetVectorType(VectorType::FLAT_VECTOR);
+		auto target_data = FlatVector::GetDataMutable<T>(target);
+		auto &target_validity = FlatVector::ValidityMutable(target);
+		target_validity.Reset(group_count);
+		target_validity.SetAllValid(group_count);
+		count_deltas.resize(group_count);
+		for (idx_t group_idx = 0; group_idx < group_count; group_idx++) {
+			T compressed_key;
+			if (!TrySljitStringCompressCountStarKey(keys[group_idx], compressed_key)) {
+				return false;
+			}
+			target_data[group_idx] = compressed_key;
+			count_deltas[group_idx] = counts[group_idx];
+		}
+		FlatVector::SetSize(target, count_t(group_count));
+		compact_groups.SetChildCardinality(group_count);
+		return true;
+	}
+
+	template <class T>
 	static bool TryPreaggregateStringCompressedCountStarGroupsTemplated(Vector &source,
 	                                                                    const SelectionVector *execute_sel, idx_t count,
 	                                                                    DataChunk &compact_groups,
@@ -3853,25 +3851,8 @@ public:
 			}
 		}
 
-		compact_groups.Reset();
-		auto &target = compact_groups.data[0];
-		target.SetVectorType(VectorType::FLAT_VECTOR);
-		auto target_data = FlatVector::GetDataMutable<T>(target);
-		auto &target_validity = FlatVector::ValidityMutable(target);
-		target_validity.Reset(group_count);
-		target_validity.SetAllValid(group_count);
-		count_deltas.resize(group_count);
-		for (idx_t group_idx = 0; group_idx < group_count; group_idx++) {
-			T compressed_key;
-			if (!TrySljitStringCompressWide(keys[group_idx], compressed_key)) {
-				return false;
-			}
-			target_data[group_idx] = compressed_key;
-			count_deltas[group_idx] = counts[group_idx];
-		}
-		FlatVector::SetSize(target, count_t(group_count));
-		compact_groups.SetChildCardinality(group_count);
-		return true;
+		return MaterializePreaggregatedStringCountStarGroups<T>(keys, counts, group_count, compact_groups,
+		                                                        count_deltas);
 	}
 
 	template <class T>
@@ -3901,25 +3882,8 @@ public:
 					compact_groups.Reset();
 					return true;
 				}
-				compact_groups.Reset();
-				auto &target = compact_groups.data[0];
-				target.SetVectorType(VectorType::FLAT_VECTOR);
-				auto target_data = FlatVector::GetDataMutable<T>(target);
-				auto &target_validity = FlatVector::ValidityMutable(target);
-				target_validity.Reset(group_count);
-				target_validity.SetAllValid(group_count);
-				count_deltas.resize(group_count);
-				for (idx_t group_idx = 0; group_idx < group_count; group_idx++) {
-					T compressed_key;
-					if (!TrySljitStringCompressWide(keys[group_idx], compressed_key)) {
-						return false;
-					}
-					target_data[group_idx] = compressed_key;
-					count_deltas[group_idx] = counts[group_idx];
-				}
-				FlatVector::SetSize(target, count_t(group_count));
-				compact_groups.SetChildCardinality(group_count);
-				return true;
+				return MaterializePreaggregatedStringCountStarGroups<T>(keys, counts, group_count, compact_groups,
+				                                                        count_deltas);
 			}
 		}
 
@@ -3952,25 +3916,8 @@ public:
 			return true;
 		}
 
-		compact_groups.Reset();
-		auto &target = compact_groups.data[0];
-		target.SetVectorType(VectorType::FLAT_VECTOR);
-		auto target_data = FlatVector::GetDataMutable<T>(target);
-		auto &target_validity = FlatVector::ValidityMutable(target);
-		target_validity.Reset(group_count);
-		target_validity.SetAllValid(group_count);
-		count_deltas.resize(group_count);
-		for (idx_t group_idx = 0; group_idx < group_count; group_idx++) {
-			T compressed_key;
-			if (!TrySljitStringCompressWide(keys[group_idx], compressed_key)) {
-				return false;
-			}
-			target_data[group_idx] = compressed_key;
-			count_deltas[group_idx] = counts[group_idx];
-		}
-		FlatVector::SetSize(target, count_t(group_count));
-		compact_groups.SetChildCardinality(group_count);
-		return true;
+		return MaterializePreaggregatedStringCountStarGroups<T>(keys, counts, group_count, compact_groups,
+		                                                        count_deltas);
 	}
 
 	static bool TryPreaggregateStringCompressedUInt8CountStarGroups(Vector &source, const SelectionVector *execute_sel,
@@ -3997,25 +3944,8 @@ public:
 			}
 		}
 
-		compact_groups.Reset();
-		auto &target = compact_groups.data[0];
-		target.SetVectorType(VectorType::FLAT_VECTOR);
-		auto target_data = FlatVector::GetDataMutable<uint8_t>(target);
-		auto &target_validity = FlatVector::ValidityMutable(target);
-		target_validity.Reset(group_count);
-		target_validity.SetAllValid(group_count);
-		count_deltas.resize(group_count);
-		for (idx_t group_idx = 0; group_idx < group_count; group_idx++) {
-			uint8_t compressed_key;
-			if (!TrySljitStringCompressUInt8(keys[group_idx], compressed_key)) {
-				return false;
-			}
-			target_data[group_idx] = compressed_key;
-			count_deltas[group_idx] = counts[group_idx];
-		}
-		FlatVector::SetSize(target, count_t(group_count));
-		compact_groups.SetChildCardinality(group_count);
-		return true;
+		return MaterializePreaggregatedStringCountStarGroups<uint8_t>(keys, counts, group_count, compact_groups,
+		                                                              count_deltas);
 	}
 
 	static bool TryPreaggregateStringCompressedUInt8MarkedCountStarGroups(Vector &source,
@@ -4044,25 +3974,8 @@ public:
 					compact_groups.Reset();
 					return true;
 				}
-				compact_groups.Reset();
-				auto &target = compact_groups.data[0];
-				target.SetVectorType(VectorType::FLAT_VECTOR);
-				auto target_data = FlatVector::GetDataMutable<uint8_t>(target);
-				auto &target_validity = FlatVector::ValidityMutable(target);
-				target_validity.Reset(group_count);
-				target_validity.SetAllValid(group_count);
-				count_deltas.resize(group_count);
-				for (idx_t group_idx = 0; group_idx < group_count; group_idx++) {
-					uint8_t compressed_key;
-					if (!TrySljitStringCompressUInt8(keys[group_idx], compressed_key)) {
-						return false;
-					}
-					target_data[group_idx] = compressed_key;
-					count_deltas[group_idx] = counts[group_idx];
-				}
-				FlatVector::SetSize(target, count_t(group_count));
-				compact_groups.SetChildCardinality(group_count);
-				return true;
+				return MaterializePreaggregatedStringCountStarGroups<uint8_t>(keys, counts, group_count,
+				                                                              compact_groups, count_deltas);
 			}
 		}
 
@@ -4095,25 +4008,8 @@ public:
 			return true;
 		}
 
-		compact_groups.Reset();
-		auto &target = compact_groups.data[0];
-		target.SetVectorType(VectorType::FLAT_VECTOR);
-		auto target_data = FlatVector::GetDataMutable<uint8_t>(target);
-		auto &target_validity = FlatVector::ValidityMutable(target);
-		target_validity.Reset(group_count);
-		target_validity.SetAllValid(group_count);
-		count_deltas.resize(group_count);
-		for (idx_t group_idx = 0; group_idx < group_count; group_idx++) {
-			uint8_t compressed_key;
-			if (!TrySljitStringCompressUInt8(keys[group_idx], compressed_key)) {
-				return false;
-			}
-			target_data[group_idx] = compressed_key;
-			count_deltas[group_idx] = counts[group_idx];
-		}
-		FlatVector::SetSize(target, count_t(group_count));
-		compact_groups.SetChildCardinality(group_count);
-		return true;
+		return MaterializePreaggregatedStringCountStarGroups<uint8_t>(keys, counts, group_count, compact_groups,
+		                                                              count_deltas);
 	}
 
 	static bool TryPreaggregateProjectedCountStarGroups(const SljitExecutableRegionOp &projection_op, DataChunk &input,
@@ -6394,21 +6290,6 @@ public:
 		}
 	}
 
-	bool SignedIntegerWidthMatchesPhysicalType(SljitNativeSignedIntegerWidth width, PhysicalType physical_type) const {
-		switch (width) {
-		case SljitNativeSignedIntegerWidth::INT8:
-			return physical_type == PhysicalType::INT8;
-		case SljitNativeSignedIntegerWidth::INT16:
-			return physical_type == PhysicalType::INT16;
-		case SljitNativeSignedIntegerWidth::INT32:
-			return physical_type == PhysicalType::INT32;
-		case SljitNativeSignedIntegerWidth::INT64:
-			return physical_type == PhysicalType::INT64;
-		default:
-			return false;
-		}
-	}
-
 	bool ProjectionIsSingleSourceReferenceLike(const SljitNativeRegionExpressionPlan &plan) const {
 		if (plan.kind == SljitNativeRegionExpressionKind::REFERENCE) {
 			return plan.source_index == 0;
@@ -7090,11 +6971,6 @@ public:
 			}
 		}
 		return true;
-	}
-
-	bool CanExecuteHashJoinFilteredUngroupedAggregateUpdate(idx_t hash_join_idx) const {
-		return hash_join_idx + 2 < ops.size() && ops[hash_join_idx + 1].kind == SljitNativeRegionOpKind::FILTER &&
-		       CanExecuteHashJoinUngroupedAggregateUpdate(hash_join_idx, hash_join_idx + 2);
 	}
 
 	bool TryPrepareHashJoinFilteredUngroupedPayloadInput(
@@ -16773,6 +16649,9 @@ public:
 
 		auto generated_stage_start = SljitRegionStageStart(runtime);
 		op.hash_join_probe.perfect_function(&native_input);
+		if (native_input.error) {
+			std::rethrow_exception(native_input.error);
+		}
 		RecordSljitRegionStageRuntimePath(runtime, op_idx, op.kind, SLJIT_GENERATED_PERFECT_HASH_JOIN_PROBE_STAGE,
 		                                  generated_stage_start);
 		state.input_offset = native_input.input_offset;
@@ -16907,6 +16786,9 @@ public:
 		auto generated_stage_start = SljitRegionStageStart(runtime);
 		const auto executed_probe_stage =
 		    ExecuteRegularHashJoinProbeVariant(runtime, probe_traits, op.hash_join_probe, layout, native_input);
+		if (native_input.error) {
+			std::rethrow_exception(native_input.error);
+		}
 		RecordSljitRegionStageRuntimePath(runtime, op_idx, op.kind, executed_probe_stage, generated_stage_start);
 		state.input_offset = native_input.input_offset;
 		state.resume_row_pointer = native_input.resume_row_pointer;

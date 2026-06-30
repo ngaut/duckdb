@@ -127,49 +127,6 @@ static void SLJIT_FUNC SljitNativeStringDecompress(SljitNativeVectorInput *input
 	}
 }
 
-unique_ptr<ExecutionRegionCodeHandle> FinishSljitNativeVectorCode(struct sljit_compiler *compiler,
-                                                                  SljitNativeVectorFunction &function, string &error) {
-	auto compiler_error = sljit_get_compiler_error(compiler);
-	if (compiler_error != SLJIT_SUCCESS) {
-		error = "SLJIT compiler failed with error code " + std::to_string(compiler_error);
-		sljit_free_compiler(compiler);
-		return nullptr;
-	}
-
-	auto code = GenerateSljitCode(compiler);
-	auto code_size = LossyNumericCast<idx_t>(sljit_get_generated_code_size(compiler));
-	sljit_free_compiler(compiler);
-	if (!code) {
-		error = "SLJIT executable code generation failed";
-		return nullptr;
-	}
-
-	function = reinterpret_cast<SljitNativeVectorFunction>(code);
-	return MakeSljitCodeHandle(code, code_size);
-}
-
-unique_ptr<ExecutionRegionCodeHandle> FinishSljitNativeAggregateUpdateCode(struct sljit_compiler *compiler,
-                                                                           SljitNativeAggregateUpdateFunction &function,
-                                                                           string &error) {
-	auto compiler_error = sljit_get_compiler_error(compiler);
-	if (compiler_error != SLJIT_SUCCESS) {
-		error = "SLJIT compiler failed with error code " + std::to_string(compiler_error);
-		sljit_free_compiler(compiler);
-		return nullptr;
-	}
-
-	auto code = GenerateSljitCode(compiler);
-	auto code_size = LossyNumericCast<idx_t>(sljit_get_generated_code_size(compiler));
-	sljit_free_compiler(compiler);
-	if (!code) {
-		error = "SLJIT executable code generation failed";
-		return nullptr;
-	}
-
-	function = reinterpret_cast<SljitNativeAggregateUpdateFunction>(code);
-	return MakeSljitCodeHandle(code, code_size);
-}
-
 void EmitLoadLogicalIndex(struct sljit_compiler *compiler, sljit_s32 target) {
 	sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_R0, 0, SLJIT_MEM1(SLJIT_S0),
 	               offsetof(SljitNativeVectorInput, execute_sel));
@@ -245,15 +202,7 @@ sljit_jump *EmitJumpIfValidityNull(struct sljit_compiler *compiler, sljit_sw val
 }
 
 void EmitLoadSelectedIndex(struct sljit_compiler *compiler) {
-	sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_R0, 0, SLJIT_MEM1(SLJIT_S0),
-	               offsetof(SljitNativeVectorInput, execute_sel));
-	auto no_execute_sel = sljit_emit_cmp(compiler, SLJIT_EQUAL, SLJIT_R0, 0, SLJIT_IMM, 0);
-	sljit_emit_op1(compiler, SLJIT_MOV_U32, SLJIT_R1, 0, SLJIT_MEM2(SLJIT_R0, SLJIT_S1), 2);
-	auto have_logical_index = sljit_emit_jump(compiler, SLJIT_JUMP);
-	sljit_set_label(no_execute_sel, sljit_emit_label(compiler));
-	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R1, 0, SLJIT_S1, 0);
-	sljit_set_label(have_logical_index, sljit_emit_label(compiler));
-
+	EmitLoadLogicalIndex(compiler, SLJIT_R1);
 	sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_R0, 0, SLJIT_MEM1(SLJIT_S0),
 	               offsetof(SljitNativeVectorInput, source_sel));
 	auto no_source_sel = sljit_emit_cmp(compiler, SLJIT_EQUAL, SLJIT_R0, 0, SLJIT_IMM, 0);
@@ -262,17 +211,7 @@ void EmitLoadSelectedIndex(struct sljit_compiler *compiler) {
 }
 
 sljit_jump *EmitSkipInvalidSourceRow(struct sljit_compiler *compiler) {
-	sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_R0, 0, SLJIT_MEM1(SLJIT_S0),
-	               offsetof(SljitNativeVectorInput, source_validity));
-	auto source_all_valid = sljit_emit_cmp(compiler, SLJIT_EQUAL, SLJIT_R0, 0, SLJIT_IMM, 0);
-	sljit_emit_op2(compiler, SLJIT_LSHR, SLJIT_R2, 0, SLJIT_R1, 0, SLJIT_IMM, 6);
-	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R3, 0, SLJIT_MEM2(SLJIT_R0, SLJIT_R2), 3);
-	sljit_emit_op2(compiler, SLJIT_AND, SLJIT_R2, 0, SLJIT_R1, 0, SLJIT_IMM, 63);
-	sljit_emit_op2(compiler, SLJIT_SHL, SLJIT_R4, 0, SLJIT_IMM, 1, SLJIT_R2, 0);
-	sljit_emit_op2(compiler, SLJIT_AND | SLJIT_SET_Z, SLJIT_R4, 0, SLJIT_R4, 0, SLJIT_R3, 0);
-	auto source_is_null = sljit_emit_jump(compiler, SLJIT_EQUAL);
-	sljit_set_label(source_all_valid, sljit_emit_label(compiler));
-	return source_is_null;
+	return EmitJumpIfValidityNull(compiler, offsetof(SljitNativeVectorInput, source_validity), SLJIT_R1);
 }
 
 void EmitSetResultRowInvalid(struct sljit_compiler *compiler) {
@@ -287,18 +226,16 @@ void EmitSetResultRowInvalid(struct sljit_compiler *compiler) {
 	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_MEM2(SLJIT_R0, SLJIT_R2), 3, SLJIT_R3, 0);
 }
 
-static struct sljit_jump *EmitJumpIfSourceNull(struct sljit_compiler *compiler) {
+static void EmitStoreBoolResult(struct sljit_compiler *compiler, bool value) {
 	sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_R0, 0, SLJIT_MEM1(SLJIT_S0),
-	               offsetof(SljitNativeVectorInput, source_validity));
-	auto source_all_valid = sljit_emit_cmp(compiler, SLJIT_EQUAL, SLJIT_R0, 0, SLJIT_IMM, 0);
-	sljit_emit_op2(compiler, SLJIT_LSHR, SLJIT_R2, 0, SLJIT_R1, 0, SLJIT_IMM, 6);
-	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R3, 0, SLJIT_MEM2(SLJIT_R0, SLJIT_R2), 3);
-	sljit_emit_op2(compiler, SLJIT_AND, SLJIT_R2, 0, SLJIT_R1, 0, SLJIT_IMM, 63);
-	sljit_emit_op2(compiler, SLJIT_SHL, SLJIT_R4, 0, SLJIT_IMM, 1, SLJIT_R2, 0);
-	sljit_emit_op2(compiler, SLJIT_AND | SLJIT_SET_Z, SLJIT_R4, 0, SLJIT_R4, 0, SLJIT_R3, 0);
-	auto source_is_null = sljit_emit_jump(compiler, SLJIT_EQUAL);
-	sljit_set_label(source_all_valid, sljit_emit_label(compiler));
-	return source_is_null;
+	               offsetof(SljitNativeVectorInput, result_data));
+	sljit_emit_op1(compiler, SLJIT_MOV_U8, SLJIT_MEM2(SLJIT_R0, SLJIT_S1), 0, SLJIT_IMM, value ? 1 : 0);
+}
+
+void EmitNextSljitNativeVectorLoop(struct sljit_compiler *compiler, sljit_label *loop) {
+	sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_S1, 0, SLJIT_S1, 0, SLJIT_IMM, 1);
+	auto repeat = sljit_emit_jump(compiler, SLJIT_JUMP);
+	sljit_set_label(repeat, loop);
 }
 
 unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeNullCheck(SljitNativeNullCheckOp op,
@@ -310,40 +247,31 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeNullCheck(SljitNativeNullC
 	}
 
 	sljit_emit_enter(compiler, 0, SLJIT_ARGS1V(P), 5 | SLJIT_ENTER_FLOAT(2), 3, 0);
-	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_S1, 0, SLJIT_IMM, 0);
-	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_S2, 0, SLJIT_MEM1(SLJIT_S0), offsetof(SljitNativeVectorInput, count));
+	EmitInitSljitNativeVectorLoop(compiler);
 
 	auto loop = sljit_emit_label(compiler);
 	auto done = sljit_emit_cmp(compiler, SLJIT_GREATER_EQUAL, SLJIT_S1, 0, SLJIT_S2, 0);
 
 	EmitLoadSelectedIndex(compiler);
-	auto source_is_null = EmitJumpIfSourceNull(compiler);
+	auto source_is_null = EmitSkipInvalidSourceRow(compiler);
 
-	sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_R0, 0, SLJIT_MEM1(SLJIT_S0),
-	               offsetof(SljitNativeVectorInput, result_data));
-	sljit_emit_op1(compiler, SLJIT_MOV_U8, SLJIT_MEM2(SLJIT_R0, SLJIT_S1), 0, SLJIT_IMM,
-	               op == SljitNativeNullCheckOp::IS_NULL ? 0 : 1);
+	EmitStoreBoolResult(compiler, op != SljitNativeNullCheckOp::IS_NULL);
 	auto next = sljit_emit_jump(compiler, SLJIT_JUMP);
 
 	sljit_set_label(source_is_null, sljit_emit_label(compiler));
-	sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_R0, 0, SLJIT_MEM1(SLJIT_S0),
-	               offsetof(SljitNativeVectorInput, result_data));
-	sljit_emit_op1(compiler, SLJIT_MOV_U8, SLJIT_MEM2(SLJIT_R0, SLJIT_S1), 0, SLJIT_IMM,
-	               op == SljitNativeNullCheckOp::IS_NULL ? 1 : 0);
+	EmitStoreBoolResult(compiler, op == SljitNativeNullCheckOp::IS_NULL);
 
 	auto next_label = sljit_emit_label(compiler);
 	sljit_set_label(next, next_label);
-	sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_S1, 0, SLJIT_S1, 0, SLJIT_IMM, 1);
-	auto repeat = sljit_emit_jump(compiler, SLJIT_JUMP);
-	sljit_set_label(repeat, loop);
+	EmitNextSljitNativeVectorLoop(compiler, loop);
 
 	sljit_set_label(done, sljit_emit_label(compiler));
 	sljit_emit_return_void(compiler);
 
-	return FinishSljitNativeVectorCode(compiler, function, error);
+	return FinishSljitCode(compiler, function, error);
 }
 
-static bool IsSljitNativeStringCompressionStorageSize(idx_t storage_size) {
+static bool IsSljitNativeFixedByteStorageSize(idx_t storage_size) {
 	switch (storage_size) {
 	case 1:
 	case 2:
@@ -354,10 +282,6 @@ static bool IsSljitNativeStringCompressionStorageSize(idx_t storage_size) {
 	default:
 		return false;
 	}
-}
-
-static bool IsSljitNativeStringCompressTargetSize(idx_t target_size) {
-	return IsSljitNativeStringCompressionStorageSize(target_size);
 }
 
 static idx_t SljitNativeStringCompressTargetShift(idx_t target_size) {
@@ -488,7 +412,7 @@ BuildSljitNativeStringCompress(idx_t target_size, SljitNativeVectorFunction &fun
 	static constexpr sljit_sw STRING_LENGTH_OFFSET = 0;
 	static constexpr sljit_sw STRING_T_SHIFT = 4;
 
-	if (!IsSljitNativeStringCompressTargetSize(target_size)) {
+	if (!IsSljitNativeFixedByteStorageSize(target_size)) {
 		error = "SLJIT native string compression has unsupported target size " + std::to_string(target_size);
 		return nullptr;
 	}
@@ -500,8 +424,7 @@ BuildSljitNativeStringCompress(idx_t target_size, SljitNativeVectorFunction &fun
 	}
 
 	sljit_emit_enter(compiler, 0, SLJIT_ARGS1V(P), 5, 6, 0);
-	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_S1, 0, SLJIT_IMM, 0);
-	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_S2, 0, SLJIT_MEM1(SLJIT_S0), offsetof(SljitNativeVectorInput, count));
+	EmitInitSljitNativeVectorLoop(compiler);
 
 	auto loop = sljit_emit_label(compiler);
 	auto done = sljit_emit_cmp(compiler, SLJIT_GREATER_EQUAL, SLJIT_S1, 0, SLJIT_S2, 0);
@@ -531,21 +454,19 @@ BuildSljitNativeStringCompress(idx_t target_size, SljitNativeVectorFunction &fun
 
 	auto next_label = sljit_emit_label(compiler);
 	sljit_set_label(next, next_label);
-	sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_S1, 0, SLJIT_S1, 0, SLJIT_IMM, 1);
-	auto repeat = sljit_emit_jump(compiler, SLJIT_JUMP);
-	sljit_set_label(repeat, loop);
+	EmitNextSljitNativeVectorLoop(compiler, loop);
 
 	sljit_set_label(done, sljit_emit_label(compiler));
 	sljit_emit_return_void(compiler);
 
-	return FinishSljitNativeVectorCode(compiler, function, error);
+	return FinishSljitCode(compiler, function, error);
 }
 
 unique_ptr<ExecutionRegionCodeHandle>
 BuildSljitNativeStringDecompress(idx_t source_size, SljitNativeVectorFunction &function, string &error) {
 	static_assert(sizeof(string_t) == 16, "SLJIT string decompression expects DuckDB string_t ABI size");
 
-	if (!IsSljitNativeStringCompressionStorageSize(source_size)) {
+	if (!IsSljitNativeFixedByteStorageSize(source_size)) {
 		error = "SLJIT native string decompression has unsupported source size " + std::to_string(source_size);
 		return nullptr;
 	}
@@ -557,8 +478,7 @@ BuildSljitNativeStringDecompress(idx_t source_size, SljitNativeVectorFunction &f
 	}
 
 	sljit_emit_enter(compiler, 0, SLJIT_ARGS1V(P), 5 | SLJIT_ENTER_FLOAT(2), 3, 0);
-	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_S1, 0, SLJIT_IMM, 0);
-	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_S2, 0, SLJIT_MEM1(SLJIT_S0), offsetof(SljitNativeVectorInput, count));
+	EmitInitSljitNativeVectorLoop(compiler);
 
 	auto loop = sljit_emit_label(compiler);
 	auto done = sljit_emit_cmp(compiler, SLJIT_GREATER_EQUAL, SLJIT_S1, 0, SLJIT_S2, 0);
@@ -583,16 +503,14 @@ BuildSljitNativeStringDecompress(idx_t source_size, SljitNativeVectorFunction &f
 
 	auto next_label = sljit_emit_label(compiler);
 	sljit_set_label(next, next_label);
-	sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_S1, 0, SLJIT_S1, 0, SLJIT_IMM, 1);
-	auto repeat = sljit_emit_jump(compiler, SLJIT_JUMP);
-	sljit_set_label(repeat, loop);
+	EmitNextSljitNativeVectorLoop(compiler, loop);
 
 	auto done_label = sljit_emit_label(compiler);
 	sljit_set_label(done, done_label);
 	sljit_set_label(helper_error, done_label);
 	sljit_emit_return_void(compiler);
 
-	return FinishSljitNativeVectorCode(compiler, function, error);
+	return FinishSljitCode(compiler, function, error);
 }
 
 unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeIntegralCompress(SljitNativeSignedIntegerWidth source_width,
@@ -610,8 +528,7 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeIntegralCompress(SljitNati
 	auto target_store_op = NativeUnsignedIntegerStoreOp(target_width);
 
 	sljit_emit_enter(compiler, 0, SLJIT_ARGS1V(P), 5 | SLJIT_ENTER_FLOAT(2), 3, 0);
-	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_S1, 0, SLJIT_IMM, 0);
-	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_S2, 0, SLJIT_MEM1(SLJIT_S0), offsetof(SljitNativeVectorInput, count));
+	EmitInitSljitNativeVectorLoop(compiler);
 
 	auto loop = sljit_emit_label(compiler);
 	auto done = sljit_emit_cmp(compiler, SLJIT_GREATER_EQUAL, SLJIT_S1, 0, SLJIT_S2, 0);
@@ -636,14 +553,12 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeIntegralCompress(SljitNati
 
 	auto next_label = sljit_emit_label(compiler);
 	sljit_set_label(next, next_label);
-	sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_S1, 0, SLJIT_S1, 0, SLJIT_IMM, 1);
-	auto repeat = sljit_emit_jump(compiler, SLJIT_JUMP);
-	sljit_set_label(repeat, loop);
+	EmitNextSljitNativeVectorLoop(compiler, loop);
 
 	sljit_set_label(done, sljit_emit_label(compiler));
 	sljit_emit_return_void(compiler);
 
-	return FinishSljitNativeVectorCode(compiler, function, error);
+	return FinishSljitCode(compiler, function, error);
 }
 
 unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeIntegralDecompress(SljitNativeUnsignedIntegerWidth source_width,
@@ -661,8 +576,7 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeIntegralDecompress(SljitNa
 	auto target_store_op = NativeSignedIntegerStoreOp(target_width);
 
 	sljit_emit_enter(compiler, 0, SLJIT_ARGS1V(P), 5, 3, 0);
-	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_S1, 0, SLJIT_IMM, 0);
-	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_S2, 0, SLJIT_MEM1(SLJIT_S0), offsetof(SljitNativeVectorInput, count));
+	EmitInitSljitNativeVectorLoop(compiler);
 
 	auto loop = sljit_emit_label(compiler);
 	auto done = sljit_emit_cmp(compiler, SLJIT_GREATER_EQUAL, SLJIT_S1, 0, SLJIT_S2, 0);
@@ -687,14 +601,12 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeIntegralDecompress(SljitNa
 
 	auto next_label = sljit_emit_label(compiler);
 	sljit_set_label(next, next_label);
-	sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_S1, 0, SLJIT_S1, 0, SLJIT_IMM, 1);
-	auto repeat = sljit_emit_jump(compiler, SLJIT_JUMP);
-	sljit_set_label(repeat, loop);
+	EmitNextSljitNativeVectorLoop(compiler, loop);
 
 	sljit_set_label(done, sljit_emit_label(compiler));
 	sljit_emit_return_void(compiler);
 
-	return FinishSljitNativeVectorCode(compiler, function, error);
+	return FinishSljitCode(compiler, function, error);
 }
 
 unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeDateYear(SljitNativeVectorFunction &function, string &error) {
@@ -707,8 +619,7 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeDateYear(SljitNativeVector
 	}
 
 	sljit_emit_enter(compiler, 0, SLJIT_ARGS1V(P), 5 | SLJIT_ENTER_FLOAT(2), 5, 0);
-	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_S1, 0, SLJIT_IMM, 0);
-	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_S2, 0, SLJIT_MEM1(SLJIT_S0), offsetof(SljitNativeVectorInput, count));
+	EmitInitSljitNativeVectorLoop(compiler);
 
 	auto loop = sljit_emit_label(compiler);
 	auto done = sljit_emit_cmp(compiler, SLJIT_GREATER_EQUAL, SLJIT_S1, 0, SLJIT_S2, 0);
@@ -773,33 +684,18 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeDateYear(SljitNativeVector
 
 	auto next_label = sljit_emit_label(compiler);
 	sljit_set_label(next, next_label);
-	sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_S1, 0, SLJIT_S1, 0, SLJIT_IMM, 1);
-	auto repeat = sljit_emit_jump(compiler, SLJIT_JUMP);
-	sljit_set_label(repeat, loop);
+	EmitNextSljitNativeVectorLoop(compiler, loop);
 
 	sljit_set_label(done, sljit_emit_label(compiler));
 	sljit_emit_return_void(compiler);
 
-	return FinishSljitNativeVectorCode(compiler, function, error);
-}
-
-static bool IsSljitNativeGuardedReferenceValueSize(idx_t value_size) {
-	switch (value_size) {
-	case 1:
-	case 2:
-	case 4:
-	case 8:
-	case 16:
-		return true;
-	default:
-		return false;
-	}
+	return FinishSljitCode(compiler, function, error);
 }
 
 unique_ptr<ExecutionRegionCodeHandle>
 BuildSljitNativeErrorGuardedReference(idx_t value_size, SljitNativeIntegerCompareOp guard_compare_op,
                                       bool guard_constant_on_left, SljitNativeVectorFunction &function, string &error) {
-	if (!IsSljitNativeGuardedReferenceValueSize(value_size)) {
+	if (!IsSljitNativeFixedByteStorageSize(value_size)) {
 		error = "SLJIT error-guarded reference has unsupported value size " + std::to_string(value_size);
 		return nullptr;
 	}
@@ -812,8 +708,7 @@ BuildSljitNativeErrorGuardedReference(idx_t value_size, SljitNativeIntegerCompar
 	auto compare_type = NativeIntegerCompareJumpType(SljitNativeIntegerKind::INT64, guard_compare_op);
 
 	sljit_emit_enter(compiler, 0, SLJIT_ARGS1V(P), 5, 5, 0);
-	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_S1, 0, SLJIT_IMM, 0);
-	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_S2, 0, SLJIT_MEM1(SLJIT_S0), offsetof(SljitNativeVectorInput, count));
+	EmitInitSljitNativeVectorLoop(compiler);
 
 	auto loop = sljit_emit_label(compiler);
 	auto done = sljit_emit_cmp(compiler, SLJIT_GREATER_EQUAL, SLJIT_S1, 0, SLJIT_S2, 0);
@@ -859,9 +754,7 @@ BuildSljitNativeErrorGuardedReference(idx_t value_size, SljitNativeIntegerCompar
 
 	auto next_label = sljit_emit_label(compiler);
 	sljit_set_label(next, next_label);
-	sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_S1, 0, SLJIT_S1, 0, SLJIT_IMM, 1);
-	auto repeat = sljit_emit_jump(compiler, SLJIT_JUMP);
-	sljit_set_label(repeat, loop);
+	EmitNextSljitNativeVectorLoop(compiler, loop);
 
 	auto error_label = sljit_emit_label(compiler);
 	sljit_set_label(guard_is_true, error_label);
@@ -874,7 +767,7 @@ BuildSljitNativeErrorGuardedReference(idx_t value_size, SljitNativeIntegerCompar
 	sljit_set_label(helper_error, done_label);
 	sljit_emit_return_void(compiler);
 
-	return FinishSljitNativeVectorCode(compiler, function, error);
+	return FinishSljitCode(compiler, function, error);
 }
 
 unique_ptr<ExecutionRegionCodeHandle>
@@ -893,8 +786,7 @@ BuildSljitNativeIntegerBinaryConstant(SljitNativeIntegerKind kind, SljitNativeIn
 	auto binary_op = NativeIntegerBinaryOp(kind, op);
 
 	sljit_emit_enter(compiler, 0, SLJIT_ARGS1V(P), 5, 3, 0);
-	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_S1, 0, SLJIT_IMM, 0);
-	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_S2, 0, SLJIT_MEM1(SLJIT_S0), offsetof(SljitNativeVectorInput, count));
+	EmitInitSljitNativeVectorLoop(compiler);
 
 	auto loop = sljit_emit_label(compiler);
 	auto done = sljit_emit_cmp(compiler, SLJIT_GREATER_EQUAL, SLJIT_S1, 0, SLJIT_S2, 0);
@@ -962,9 +854,7 @@ BuildSljitNativeIntegerBinaryConstant(SljitNativeIntegerKind kind, SljitNativeIn
 
 	auto next_label = sljit_emit_label(compiler);
 	sljit_set_label(next, next_label);
-	sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_S1, 0, SLJIT_S1, 0, SLJIT_IMM, 1);
-	auto repeat = sljit_emit_jump(compiler, SLJIT_JUMP);
-	sljit_set_label(repeat, loop);
+	EmitNextSljitNativeVectorLoop(compiler, loop);
 
 	if (check_arithmetic_overflow || check_result_range) {
 		auto overflow_label = sljit_emit_label(compiler);
@@ -981,7 +871,7 @@ BuildSljitNativeIntegerBinaryConstant(SljitNativeIntegerKind kind, SljitNativeIn
 	sljit_set_label(done, sljit_emit_label(compiler));
 	sljit_emit_return_void(compiler);
 
-	return FinishSljitNativeVectorCode(compiler, function, error);
+	return FinishSljitCode(compiler, function, error);
 }
 
 static bool SljitArm64NeonIntegerBinarySupported(SljitNativeIntegerKind kind, SljitNativeIntegerBinaryOp op) {
@@ -1244,7 +1134,7 @@ BuildSljitNativeFlatIntegerBinaryConstant(SljitNativeIntegerKind kind, SljitNati
 	}
 	sljit_emit_return_void(compiler);
 
-	return FinishSljitNativeVectorCode(compiler, function, error);
+	return FinishSljitCode(compiler, function, error);
 }
 
 unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeIntegerBinaryReferences(
@@ -1261,8 +1151,7 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeIntegerBinaryReferences(
 	auto binary_op = NativeIntegerBinaryOp(kind, op);
 
 	sljit_emit_enter(compiler, 0, SLJIT_ARGS1V(P), 5, 5, 0);
-	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_S1, 0, SLJIT_IMM, 0);
-	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_S2, 0, SLJIT_MEM1(SLJIT_S0), offsetof(SljitNativeVectorInput, count));
+	EmitInitSljitNativeVectorLoop(compiler);
 
 	auto loop = sljit_emit_label(compiler);
 	auto done = sljit_emit_cmp(compiler, SLJIT_GREATER_EQUAL, SLJIT_S1, 0, SLJIT_S2, 0);
@@ -1322,9 +1211,7 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeIntegerBinaryReferences(
 
 	auto next_label = sljit_emit_label(compiler);
 	sljit_set_label(next, next_label);
-	sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_S1, 0, SLJIT_S1, 0, SLJIT_IMM, 1);
-	auto repeat = sljit_emit_jump(compiler, SLJIT_JUMP);
-	sljit_set_label(repeat, loop);
+	EmitNextSljitNativeVectorLoop(compiler, loop);
 
 	if (check_arithmetic_overflow || check_result_range) {
 		auto overflow_label = sljit_emit_label(compiler);
@@ -1342,7 +1229,7 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeIntegerBinaryReferences(
 	sljit_set_label(done, sljit_emit_label(compiler));
 	sljit_emit_return_void(compiler);
 
-	return FinishSljitNativeVectorCode(compiler, function, error);
+	return FinishSljitCode(compiler, function, error);
 }
 
 unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeFlatIntegerBinaryReferences(SljitNativeIntegerKind kind,
@@ -1432,7 +1319,7 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeFlatIntegerBinaryReference
 	}
 	sljit_emit_return_void(compiler);
 
-	return FinishSljitNativeVectorCode(compiler, function, error);
+	return FinishSljitCode(compiler, function, error);
 }
 
 static bool ValidateNativeFlatIntegerProjectionExpression(const SljitNativeRegionExpressionPlan &plan,
@@ -1820,7 +1707,7 @@ static unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeFlatIntegerProjecti
 	}
 	sljit_emit_return_void(compiler);
 
-	return FinishSljitNativeVectorCode(compiler, function, error);
+	return FinishSljitCode(compiler, function, error);
 }
 
 unique_ptr<ExecutionRegionCodeHandle>
@@ -1948,6 +1835,20 @@ static sljit_sw NativeDirectFloatingDataWidth(bool single_precision) {
 	return single_precision ? NumericCast<sljit_sw>(sizeof(float)) : NumericCast<sljit_sw>(sizeof(double));
 }
 
+template <class EMIT_ROW, class EMIT_INCREMENT>
+static sljit_label *EmitSljitFlatCountedScalarLoop(struct sljit_compiler *compiler, EMIT_ROW &&emit_row,
+                                                   EMIT_INCREMENT &&emit_increment) {
+	auto loop = sljit_emit_label(compiler);
+	auto done = sljit_emit_cmp(compiler, SLJIT_GREATER_EQUAL, SLJIT_S1, 0, SLJIT_S2, 0);
+	emit_row();
+	emit_increment();
+	auto repeat = sljit_emit_jump(compiler, SLJIT_JUMP);
+	sljit_set_label(repeat, loop);
+	auto done_label = sljit_emit_label(compiler);
+	sljit_set_label(done, done_label);
+	return done_label;
+}
+
 static bool ValidateNativeFlatDoubleBinarySource(SljitNativeDoubleSourceKind kind, bool single_precision,
                                                  string &error) {
 	if (!IsDirectNativeFloatingSource(kind)) {
@@ -1977,8 +1878,7 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeDoubleBinaryConstant(Sljit
 	auto result_data_scale = single_precision ? 2 : 3;
 
 	sljit_emit_enter(compiler, 0, SLJIT_ARGS1V(P), 5 | SLJIT_ENTER_FLOAT(2), 3, 0);
-	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_S1, 0, SLJIT_IMM, 0);
-	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_S2, 0, SLJIT_MEM1(SLJIT_S0), offsetof(SljitNativeVectorInput, count));
+	EmitInitSljitNativeVectorLoop(compiler);
 
 	auto loop = sljit_emit_label(compiler);
 	auto done = sljit_emit_cmp(compiler, SLJIT_GREATER_EQUAL, SLJIT_S1, 0, SLJIT_S2, 0);
@@ -2011,14 +1911,12 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeDoubleBinaryConstant(Sljit
 
 	auto next_label = sljit_emit_label(compiler);
 	sljit_set_label(next, next_label);
-	sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_S1, 0, SLJIT_S1, 0, SLJIT_IMM, 1);
-	auto repeat = sljit_emit_jump(compiler, SLJIT_JUMP);
-	sljit_set_label(repeat, loop);
+	EmitNextSljitNativeVectorLoop(compiler, loop);
 
 	sljit_set_label(done, sljit_emit_label(compiler));
 	sljit_emit_return_void(compiler);
 
-	return FinishSljitNativeVectorCode(compiler, function, error);
+	return FinishSljitCode(compiler, function, error);
 }
 
 unique_ptr<ExecutionRegionCodeHandle>
@@ -2042,8 +1940,7 @@ BuildSljitNativeFlatDoubleBinaryConstant(SljitNativeDoubleBinaryOp op, SljitNati
 
 	sljit_emit_enter(compiler, 0, SLJIT_ARGS1V(P), 5 | SLJIT_ENTER_FLOAT(2) | (use_simd ? SLJIT_ENTER_VECTOR(3) : 0), 5,
 	                 0);
-	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_S1, 0, SLJIT_IMM, 0);
-	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_S2, 0, SLJIT_MEM1(SLJIT_S0), offsetof(SljitNativeVectorInput, count));
+	EmitInitSljitNativeVectorLoop(compiler);
 	sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_S3, 0, SLJIT_MEM1(SLJIT_S0),
 	               offsetof(SljitNativeVectorInput, source_data));
 	sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_S4, 0, SLJIT_MEM1(SLJIT_S0),
@@ -2095,20 +1992,16 @@ BuildSljitNativeFlatDoubleBinaryConstant(SljitNativeDoubleBinaryOp op, SljitNati
 		sljit_set_label(repeat, tail_loop);
 		sljit_set_label(done, sljit_emit_label(compiler));
 	} else {
-		auto loop = sljit_emit_label(compiler);
-		auto done = sljit_emit_cmp(compiler, SLJIT_GREATER_EQUAL, SLJIT_S1, 0, SLJIT_S2, 0);
-		emit_row();
-		sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_S1, 0, SLJIT_S1, 0, SLJIT_IMM, 1);
-		sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_S3, 0, SLJIT_S3, 0, SLJIT_IMM, data_width);
-		sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_S4, 0, SLJIT_S4, 0, SLJIT_IMM, data_width);
-		auto repeat = sljit_emit_jump(compiler, SLJIT_JUMP);
-		sljit_set_label(repeat, loop);
-		sljit_set_label(done, sljit_emit_label(compiler));
+		EmitSljitFlatCountedScalarLoop(compiler, emit_row, [&]() {
+			sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_S1, 0, SLJIT_S1, 0, SLJIT_IMM, 1);
+			sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_S3, 0, SLJIT_S3, 0, SLJIT_IMM, data_width);
+			sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_S4, 0, SLJIT_S4, 0, SLJIT_IMM, data_width);
+		});
 	}
 
 	sljit_emit_return_void(compiler);
 
-	return FinishSljitNativeVectorCode(compiler, function, error);
+	return FinishSljitCode(compiler, function, error);
 }
 
 unique_ptr<ExecutionRegionCodeHandle>
@@ -2131,8 +2024,7 @@ BuildSljitNativeDoubleBinaryReferences(SljitNativeDoubleBinaryOp op, SljitNative
 
 	sljit_emit_enter(compiler, 0, SLJIT_ARGS1V(P), 5 | SLJIT_ENTER_FLOAT(2), 5,
 	                 needs_helper_spill ? NumericCast<sljit_sw>(spill_width * 2) : 0);
-	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_S1, 0, SLJIT_IMM, 0);
-	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_S2, 0, SLJIT_MEM1(SLJIT_S0), offsetof(SljitNativeVectorInput, count));
+	EmitInitSljitNativeVectorLoop(compiler);
 
 	auto loop = sljit_emit_label(compiler);
 	auto done = sljit_emit_cmp(compiler, SLJIT_GREATER_EQUAL, SLJIT_S1, 0, SLJIT_S2, 0);
@@ -2180,14 +2072,12 @@ BuildSljitNativeDoubleBinaryReferences(SljitNativeDoubleBinaryOp op, SljitNative
 
 	auto next_label = sljit_emit_label(compiler);
 	sljit_set_label(next, next_label);
-	sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_S1, 0, SLJIT_S1, 0, SLJIT_IMM, 1);
-	auto repeat = sljit_emit_jump(compiler, SLJIT_JUMP);
-	sljit_set_label(repeat, loop);
+	EmitNextSljitNativeVectorLoop(compiler, loop);
 
 	sljit_set_label(done, sljit_emit_label(compiler));
 	sljit_emit_return_void(compiler);
 
-	return FinishSljitNativeVectorCode(compiler, function, error);
+	return FinishSljitCode(compiler, function, error);
 }
 
 unique_ptr<ExecutionRegionCodeHandle>
@@ -2212,8 +2102,7 @@ BuildSljitNativeFlatDoubleBinaryReferences(SljitNativeDoubleBinaryOp op, SljitNa
 
 	sljit_emit_enter(compiler, 0, SLJIT_ARGS1V(P), 5 | SLJIT_ENTER_FLOAT(2) | (use_simd ? SLJIT_ENTER_VECTOR(3) : 0), 6,
 	                 0);
-	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_S1, 0, SLJIT_IMM, 0);
-	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_S2, 0, SLJIT_MEM1(SLJIT_S0), offsetof(SljitNativeVectorInput, count));
+	EmitInitSljitNativeVectorLoop(compiler);
 	sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_S3, 0, SLJIT_MEM1(SLJIT_S0),
 	               offsetof(SljitNativeVectorInput, source_data));
 	sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_S4, 0, SLJIT_MEM1(SLJIT_S0),
@@ -2257,21 +2146,17 @@ BuildSljitNativeFlatDoubleBinaryReferences(SljitNativeDoubleBinaryOp op, SljitNa
 		sljit_set_label(repeat, tail_loop);
 		sljit_set_label(done, sljit_emit_label(compiler));
 	} else {
-		auto loop = sljit_emit_label(compiler);
-		auto done = sljit_emit_cmp(compiler, SLJIT_GREATER_EQUAL, SLJIT_S1, 0, SLJIT_S2, 0);
-		emit_row();
-		sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_S1, 0, SLJIT_S1, 0, SLJIT_IMM, 1);
-		sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_S3, 0, SLJIT_S3, 0, SLJIT_IMM, data_width);
-		sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_S4, 0, SLJIT_S4, 0, SLJIT_IMM, data_width);
-		sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_S5, 0, SLJIT_S5, 0, SLJIT_IMM, data_width);
-		auto repeat = sljit_emit_jump(compiler, SLJIT_JUMP);
-		sljit_set_label(repeat, loop);
-		sljit_set_label(done, sljit_emit_label(compiler));
+		EmitSljitFlatCountedScalarLoop(compiler, emit_row, [&]() {
+			sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_S1, 0, SLJIT_S1, 0, SLJIT_IMM, 1);
+			sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_S3, 0, SLJIT_S3, 0, SLJIT_IMM, data_width);
+			sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_S4, 0, SLJIT_S4, 0, SLJIT_IMM, data_width);
+			sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_S5, 0, SLJIT_S5, 0, SLJIT_IMM, data_width);
+		});
 	}
 
 	sljit_emit_return_void(compiler);
 
-	return FinishSljitNativeVectorCode(compiler, function, error);
+	return FinishSljitCode(compiler, function, error);
 }
 
 static bool GetNativeFlatDoubleProjectionPrecision(const SljitNativeRegionExpressionPlan &plan, bool &single_precision,
@@ -2399,8 +2284,7 @@ static unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeFlatDoubleProjectio
 
 	auto stats_float_register_count = NumericCast<sljit_s32>(4 + projection_indices.size() * 2);
 	sljit_emit_enter(compiler, 0, SLJIT_ARGS1V(P), 5 | SLJIT_ENTER_FLOAT(stats_float_register_count), 7, 0);
-	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_S1, 0, SLJIT_IMM, 0);
-	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_S2, 0, SLJIT_MEM1(SLJIT_S0), offsetof(SljitNativeVectorInput, count));
+	EmitInitSljitNativeVectorLoop(compiler);
 
 	for (idx_t source_idx = 0; source_idx < shared_plan.sources.size(); source_idx++) {
 		auto &source = shared_plan.sources[source_idx];
@@ -2496,25 +2380,23 @@ static unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeFlatDoubleProjectio
 	}
 	auto stats_finished = sljit_emit_jump(compiler, SLJIT_JUMP);
 
-	auto old_loop_label = sljit_emit_label(compiler);
-	sljit_set_label(no_stats, old_loop_label);
+	auto no_stats_loop_label = sljit_emit_label(compiler);
+	sljit_set_label(no_stats, no_stats_loop_label);
 	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_S1, 0, SLJIT_IMM, 0);
-	auto loop = sljit_emit_label(compiler);
-	auto done = sljit_emit_cmp(compiler, SLJIT_GREATER_EQUAL, SLJIT_S1, 0, SLJIT_S2, 0);
-	emit_sources();
-	for (idx_t fused_idx = 0; fused_idx < projection_indices.size(); fused_idx++) {
-		emit_projection(fused_idx, false, false);
-	}
-	sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_S1, 0, SLJIT_S1, 0, SLJIT_IMM, 1);
-	auto repeat = sljit_emit_jump(compiler, SLJIT_JUMP);
-	sljit_set_label(repeat, loop);
-	auto done_label = sljit_emit_label(compiler);
-	sljit_set_label(done, done_label);
+	auto done_label = EmitSljitFlatCountedScalarLoop(
+	    compiler,
+	    [&]() {
+		    emit_sources();
+		    for (idx_t fused_idx = 0; fused_idx < projection_indices.size(); fused_idx++) {
+			    emit_projection(fused_idx, false, false);
+		    }
+	    },
+	    [&]() { sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_S1, 0, SLJIT_S1, 0, SLJIT_IMM, 1); });
 	sljit_set_label(stats_empty, done_label);
 	sljit_set_label(stats_finished, done_label);
 	sljit_emit_return_void(compiler);
 
-	return FinishSljitNativeVectorCode(compiler, function, error);
+	return FinishSljitCode(compiler, function, error);
 }
 
 unique_ptr<ExecutionRegionCodeHandle>
@@ -2563,8 +2445,7 @@ BuildSljitNativeFlatDoubleProjection(const vector<SljitNativeRegionExpressionPla
 	auto constant_width = NativeDirectFloatingDataWidth(single_precision);
 
 	sljit_emit_enter(compiler, 0, SLJIT_ARGS1V(P), 5 | SLJIT_ENTER_FLOAT(4), 7, 0);
-	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_S1, 0, SLJIT_IMM, 0);
-	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_S2, 0, SLJIT_MEM1(SLJIT_S0), offsetof(SljitNativeVectorInput, count));
+	EmitInitSljitNativeVectorLoop(compiler);
 	sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_S3, 0, SLJIT_MEM1(SLJIT_S0),
 	               offsetof(SljitNativeVectorInput, source_data_array));
 	sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_S4, 0, SLJIT_MEM1(SLJIT_S0),
@@ -2629,23 +2510,18 @@ BuildSljitNativeFlatDoubleProjection(const vector<SljitNativeRegionExpressionPla
 		                            SLJIT_R4);
 		auto stats_finished = sljit_emit_jump(compiler, SLJIT_JUMP);
 
-		auto old_loop_label = sljit_emit_label(compiler);
-		sljit_set_label(no_stats, old_loop_label);
+		auto no_stats_loop_label = sljit_emit_label(compiler);
+		sljit_set_label(no_stats, no_stats_loop_label);
 		sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_S1, 0, SLJIT_IMM, 0);
-		auto loop = sljit_emit_label(compiler);
-		auto done = sljit_emit_cmp(compiler, SLJIT_GREATER_EQUAL, SLJIT_S1, 0, SLJIT_S2, 0);
-		emit_projection_row();
-		sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_S1, 0, SLJIT_S1, 0, SLJIT_IMM, 1);
-		auto repeat = sljit_emit_jump(compiler, SLJIT_JUMP);
-		sljit_set_label(repeat, loop);
-		auto done_label = sljit_emit_label(compiler);
-		sljit_set_label(done, done_label);
+		auto done_label = EmitSljitFlatCountedScalarLoop(
+		    compiler, emit_projection_row,
+		    [&]() { sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_S1, 0, SLJIT_S1, 0, SLJIT_IMM, 1); });
 		sljit_set_label(stats_empty, done_label);
 		sljit_set_label(stats_finished, done_label);
 	}
 	sljit_emit_return_void(compiler);
 
-	return FinishSljitNativeVectorCode(compiler, function, error);
+	return FinishSljitCode(compiler, function, error);
 }
 
 unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeIntegerCast(SljitNativeSignedIntegerWidth source_width,
@@ -2664,8 +2540,7 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeIntegerCast(SljitNativeSig
 	auto needs_range_check = NativeSignedIntegerCastNeedsRangeCheck(source_width, target_width);
 
 	sljit_emit_enter(compiler, 0, SLJIT_ARGS1V(P), 5, 3, 0);
-	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_S1, 0, SLJIT_IMM, 0);
-	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_S2, 0, SLJIT_MEM1(SLJIT_S0), offsetof(SljitNativeVectorInput, count));
+	EmitInitSljitNativeVectorLoop(compiler);
 
 	auto loop = sljit_emit_label(compiler);
 	auto done = sljit_emit_cmp(compiler, SLJIT_GREATER_EQUAL, SLJIT_S1, 0, SLJIT_S2, 0);
@@ -2717,14 +2592,12 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeIntegerCast(SljitNativeSig
 	auto next_label = sljit_emit_label(compiler);
 	sljit_set_label(next, next_label);
 	sljit_set_label(next_after_invalid, next_label);
-	sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_S1, 0, SLJIT_S1, 0, SLJIT_IMM, 1);
-	auto repeat = sljit_emit_jump(compiler, SLJIT_JUMP);
-	sljit_set_label(repeat, loop);
+	EmitNextSljitNativeVectorLoop(compiler, loop);
 
 	sljit_set_label(done, sljit_emit_label(compiler));
 	sljit_emit_return_void(compiler);
 
-	return FinishSljitNativeVectorCode(compiler, function, error);
+	return FinishSljitCode(compiler, function, error);
 }
 
 unique_ptr<ExecutionRegionCodeHandle>
@@ -2742,8 +2615,7 @@ BuildSljitNativeSignedToUnsignedIntegerCast(SljitNativeSignedIntegerWidth source
 	auto target_store_op = NativeUnsignedIntegerStoreOp(target_width);
 
 	sljit_emit_enter(compiler, 0, SLJIT_ARGS1V(P), 5, 3, 0);
-	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_S1, 0, SLJIT_IMM, 0);
-	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_S2, 0, SLJIT_MEM1(SLJIT_S0), offsetof(SljitNativeVectorInput, count));
+	EmitInitSljitNativeVectorLoop(compiler);
 
 	auto loop = sljit_emit_label(compiler);
 	auto done = sljit_emit_cmp(compiler, SLJIT_GREATER_EQUAL, SLJIT_S1, 0, SLJIT_S2, 0);
@@ -2790,14 +2662,12 @@ BuildSljitNativeSignedToUnsignedIntegerCast(SljitNativeSignedIntegerWidth source
 	auto next_label = sljit_emit_label(compiler);
 	sljit_set_label(next, next_label);
 	sljit_set_label(next_after_invalid, next_label);
-	sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_S1, 0, SLJIT_S1, 0, SLJIT_IMM, 1);
-	auto repeat = sljit_emit_jump(compiler, SLJIT_JUMP);
-	sljit_set_label(repeat, loop);
+	EmitNextSljitNativeVectorLoop(compiler, loop);
 
 	sljit_set_label(done, sljit_emit_label(compiler));
 	sljit_emit_return_void(compiler);
 
-	return FinishSljitNativeVectorCode(compiler, function, error);
+	return FinishSljitCode(compiler, function, error);
 }
 
 unique_ptr<ExecutionRegionCodeHandle>
@@ -2813,8 +2683,7 @@ BuildSljitNativeIntegerCoalesce(SljitNativeSignedIntegerWidth width, SljitNative
 	auto store_op = NativeSignedIntegerStoreOp(width);
 
 	sljit_emit_enter(compiler, 0, SLJIT_ARGS1V(P), 5, 5, 0);
-	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_S1, 0, SLJIT_IMM, 0);
-	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_S2, 0, SLJIT_MEM1(SLJIT_S0), offsetof(SljitNativeVectorInput, count));
+	EmitInitSljitNativeVectorLoop(compiler);
 
 	auto loop = sljit_emit_label(compiler);
 	auto done = sljit_emit_cmp(compiler, SLJIT_GREATER_EQUAL, SLJIT_S1, 0, SLJIT_S2, 0);
@@ -2865,17 +2734,15 @@ BuildSljitNativeIntegerCoalesce(SljitNativeSignedIntegerWidth width, SljitNative
 		sljit_set_label(next_after_rhs, next_label);
 	}
 	sljit_set_label(next_after_invalid, next_label);
-	sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_S1, 0, SLJIT_S1, 0, SLJIT_IMM, 1);
-	auto repeat = sljit_emit_jump(compiler, SLJIT_JUMP);
-	sljit_set_label(repeat, loop);
+	EmitNextSljitNativeVectorLoop(compiler, loop);
 
 	sljit_set_label(done, sljit_emit_label(compiler));
 	sljit_emit_return_void(compiler);
 
-	return FinishSljitNativeVectorCode(compiler, function, error);
+	return FinishSljitCode(compiler, function, error);
 }
 
-static void EmitLoadResultAndSourceIndexForSelect(struct sljit_compiler *compiler) {
+static void EmitLoadResultIndexForSelect(struct sljit_compiler *compiler) {
 	sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_R0, 0, SLJIT_MEM1(SLJIT_S0),
 	               offsetof(SljitNativeVectorInput, execute_sel));
 	auto no_execute_sel = sljit_emit_cmp(compiler, SLJIT_EQUAL, SLJIT_R0, 0, SLJIT_IMM, 0);
@@ -2885,7 +2752,10 @@ static void EmitLoadResultAndSourceIndexForSelect(struct sljit_compiler *compile
 	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R1, 0, SLJIT_S1, 0);
 	sljit_set_label(have_result_index, sljit_emit_label(compiler));
 	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_MEM1(SLJIT_SP), SLJIT_SELECT_RESULT_INDEX_OFFSET, SLJIT_R1, 0);
+}
 
+static void EmitLoadResultAndSourceIndexForSelect(struct sljit_compiler *compiler) {
+	EmitLoadResultIndexForSelect(compiler);
 	sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_R0, 0, SLJIT_MEM1(SLJIT_S0),
 	               offsetof(SljitNativeVectorInput, source_sel));
 	auto no_source_sel = sljit_emit_cmp(compiler, SLJIT_EQUAL, SLJIT_R0, 0, SLJIT_IMM, 0);
@@ -2916,6 +2786,26 @@ static void EmitStoreFalseSelection(struct sljit_compiler *compiler) {
 	sljit_set_label(no_false_sel, sljit_emit_label(compiler));
 }
 
+static void EmitStoreSelectionResult(struct sljit_compiler *compiler, bool selected) {
+	if (selected) {
+		EmitStoreTrueSelection(compiler);
+	} else {
+		EmitStoreFalseSelection(compiler);
+	}
+}
+
+static void EmitInitSelectLoop(struct sljit_compiler *compiler) {
+	EmitInitSljitNativeVectorLoop(compiler);
+	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_MEM1(SLJIT_SP), SLJIT_SELECT_TRUE_COUNT_OFFSET, SLJIT_IMM, 0);
+}
+
+static void EmitFinishSelectLoop(struct sljit_compiler *compiler) {
+	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R0, 0, SLJIT_MEM1(SLJIT_SP), SLJIT_SELECT_TRUE_COUNT_OFFSET);
+	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_MEM1(SLJIT_S0), offsetof(SljitNativeVectorInput, selected_count),
+	               SLJIT_R0, 0);
+	sljit_emit_return_void(compiler);
+}
+
 unique_ptr<ExecutionRegionCodeHandle>
 BuildSljitNativeIntegerCompareConstant(SljitNativeIntegerKind kind, SljitNativeIntegerCompareOp op,
                                        bool constant_on_left, SljitNativeVectorFunction &function, string &error) {
@@ -2929,8 +2819,7 @@ BuildSljitNativeIntegerCompareConstant(SljitNativeIntegerKind kind, SljitNativeI
 	auto compare_type = NativeIntegerCompareJumpType(kind, op);
 
 	sljit_emit_enter(compiler, 0, SLJIT_ARGS1V(P), 5, 3, 0);
-	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_S1, 0, SLJIT_IMM, 0);
-	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_S2, 0, SLJIT_MEM1(SLJIT_S0), offsetof(SljitNativeVectorInput, count));
+	EmitInitSljitNativeVectorLoop(compiler);
 
 	auto loop = sljit_emit_label(compiler);
 	auto done = sljit_emit_cmp(compiler, SLJIT_GREATER_EQUAL, SLJIT_S1, 0, SLJIT_S2, 0);
@@ -2949,14 +2838,10 @@ BuildSljitNativeIntegerCompareConstant(SljitNativeIntegerKind kind, SljitNativeI
 		comparison_true = sljit_emit_cmp(compiler, compare_type, SLJIT_R2, 0, SLJIT_R3, 0);
 	}
 
-	sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_R0, 0, SLJIT_MEM1(SLJIT_S0),
-	               offsetof(SljitNativeVectorInput, result_data));
-	sljit_emit_op1(compiler, SLJIT_MOV_U8, SLJIT_MEM2(SLJIT_R0, SLJIT_S1), 0, SLJIT_IMM, 0);
+	EmitStoreBoolResult(compiler, false);
 	auto next = sljit_emit_jump(compiler, SLJIT_JUMP);
 	sljit_set_label(comparison_true, sljit_emit_label(compiler));
-	sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_R0, 0, SLJIT_MEM1(SLJIT_S0),
-	               offsetof(SljitNativeVectorInput, result_data));
-	sljit_emit_op1(compiler, SLJIT_MOV_U8, SLJIT_MEM2(SLJIT_R0, SLJIT_S1), 0, SLJIT_IMM, 1);
+	EmitStoreBoolResult(compiler, true);
 	auto after_true = sljit_emit_jump(compiler, SLJIT_JUMP);
 
 	auto invalid_label = sljit_emit_label(compiler);
@@ -2966,17 +2851,13 @@ BuildSljitNativeIntegerCompareConstant(SljitNativeIntegerKind kind, SljitNativeI
 	auto next_label = sljit_emit_label(compiler);
 	sljit_set_label(next, next_label);
 	sljit_set_label(after_true, next_label);
-	sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_S1, 0, SLJIT_S1, 0, SLJIT_IMM, 1);
-	auto repeat = sljit_emit_jump(compiler, SLJIT_JUMP);
-	sljit_set_label(repeat, loop);
+	EmitNextSljitNativeVectorLoop(compiler, loop);
 
 	sljit_set_label(done, sljit_emit_label(compiler));
 	sljit_emit_return_void(compiler);
 
-	return FinishSljitNativeVectorCode(compiler, function, error);
+	return FinishSljitCode(compiler, function, error);
 }
-
-static void EmitStoreBoolResult(struct sljit_compiler *compiler, bool value);
 
 unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeIntegerCompareReferences(SljitNativeIntegerKind kind,
                                                                                SljitNativeIntegerCompareOp op,
@@ -2992,8 +2873,7 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeIntegerCompareReferences(S
 	auto compare_type = NativeIntegerCompareJumpType(kind, op);
 
 	sljit_emit_enter(compiler, 0, SLJIT_ARGS1V(P), 5, 5, 0);
-	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_S1, 0, SLJIT_IMM, 0);
-	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_S2, 0, SLJIT_MEM1(SLJIT_S0), offsetof(SljitNativeVectorInput, count));
+	EmitInitSljitNativeVectorLoop(compiler);
 
 	auto loop = sljit_emit_label(compiler);
 	auto done = sljit_emit_cmp(compiler, SLJIT_GREATER_EQUAL, SLJIT_S1, 0, SLJIT_S2, 0);
@@ -3028,14 +2908,12 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeIntegerCompareReferences(S
 	auto next_label = sljit_emit_label(compiler);
 	sljit_set_label(next, next_label);
 	sljit_set_label(after_true, next_label);
-	sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_S1, 0, SLJIT_S1, 0, SLJIT_IMM, 1);
-	auto repeat = sljit_emit_jump(compiler, SLJIT_JUMP);
-	sljit_set_label(repeat, loop);
+	EmitNextSljitNativeVectorLoop(compiler, loop);
 
 	sljit_set_label(done, sljit_emit_label(compiler));
 	sljit_emit_return_void(compiler);
 
-	return FinishSljitNativeVectorCode(compiler, function, error);
+	return FinishSljitCode(compiler, function, error);
 }
 
 unique_ptr<ExecutionRegionCodeHandle>
@@ -3051,9 +2929,7 @@ BuildSljitNativeIntegerSelectConstant(SljitNativeIntegerKind kind, SljitNativeIn
 	auto compare_type = NativeIntegerCompareJumpType(kind, op);
 
 	sljit_emit_enter(compiler, 0, SLJIT_ARGS1V(P), 5, 3, SLJIT_SELECT_LOCAL_SIZE);
-	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_S1, 0, SLJIT_IMM, 0);
-	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_S2, 0, SLJIT_MEM1(SLJIT_S0), offsetof(SljitNativeVectorInput, count));
-	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_MEM1(SLJIT_SP), SLJIT_SELECT_TRUE_COUNT_OFFSET, SLJIT_IMM, 0);
+	EmitInitSelectLoop(compiler);
 
 	vector<sljit_jump *> generic_path;
 	sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_R0, 0, SLJIT_MEM1(SLJIT_S0),
@@ -3099,10 +2975,7 @@ BuildSljitNativeIntegerSelectConstant(SljitNativeIntegerKind kind, SljitNativeIn
 	sljit_set_label(fast_repeat, fast_loop);
 
 	sljit_set_label(fast_done, sljit_emit_label(compiler));
-	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R0, 0, SLJIT_MEM1(SLJIT_SP), SLJIT_SELECT_TRUE_COUNT_OFFSET);
-	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_MEM1(SLJIT_S0), offsetof(SljitNativeVectorInput, selected_count),
-	               SLJIT_R0, 0);
-	sljit_emit_return_void(compiler);
+	EmitFinishSelectLoop(compiler);
 
 	auto loop = sljit_emit_label(compiler);
 	for (auto &jump : generic_path) {
@@ -3134,17 +3007,12 @@ BuildSljitNativeIntegerSelectConstant(SljitNativeIntegerKind kind, SljitNativeIn
 
 	auto next_label = sljit_emit_label(compiler);
 	sljit_set_label(next, next_label);
-	sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_S1, 0, SLJIT_S1, 0, SLJIT_IMM, 1);
-	auto repeat = sljit_emit_jump(compiler, SLJIT_JUMP);
-	sljit_set_label(repeat, loop);
+	EmitNextSljitNativeVectorLoop(compiler, loop);
 
 	sljit_set_label(done, sljit_emit_label(compiler));
-	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R0, 0, SLJIT_MEM1(SLJIT_SP), SLJIT_SELECT_TRUE_COUNT_OFFSET);
-	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_MEM1(SLJIT_S0), offsetof(SljitNativeVectorInput, selected_count),
-	               SLJIT_R0, 0);
-	sljit_emit_return_void(compiler);
+	EmitFinishSelectLoop(compiler);
 
-	return FinishSljitNativeVectorCode(compiler, function, error);
+	return FinishSljitCode(compiler, function, error);
 }
 
 unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeIntegerSelectReferences(SljitNativeIntegerKind kind,
@@ -3161,23 +3029,12 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeIntegerSelectReferences(Sl
 	auto compare_type = NativeIntegerCompareJumpType(kind, op);
 
 	sljit_emit_enter(compiler, 0, SLJIT_ARGS1V(P), 5, 5, SLJIT_SELECT_LOCAL_SIZE);
-	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_S1, 0, SLJIT_IMM, 0);
-	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_S2, 0, SLJIT_MEM1(SLJIT_S0), offsetof(SljitNativeVectorInput, count));
-	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_MEM1(SLJIT_SP), SLJIT_SELECT_TRUE_COUNT_OFFSET, SLJIT_IMM, 0);
+	EmitInitSelectLoop(compiler);
 
 	auto loop = sljit_emit_label(compiler);
 	auto done = sljit_emit_cmp(compiler, SLJIT_GREATER_EQUAL, SLJIT_S1, 0, SLJIT_S2, 0);
 
-	sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_R0, 0, SLJIT_MEM1(SLJIT_S0),
-	               offsetof(SljitNativeVectorInput, execute_sel));
-	auto no_execute_sel = sljit_emit_cmp(compiler, SLJIT_EQUAL, SLJIT_R0, 0, SLJIT_IMM, 0);
-	sljit_emit_op1(compiler, SLJIT_MOV_U32, SLJIT_R1, 0, SLJIT_MEM2(SLJIT_R0, SLJIT_S1), 2);
-	auto have_result_index = sljit_emit_jump(compiler, SLJIT_JUMP);
-	sljit_set_label(no_execute_sel, sljit_emit_label(compiler));
-	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R1, 0, SLJIT_S1, 0);
-	sljit_set_label(have_result_index, sljit_emit_label(compiler));
-	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_MEM1(SLJIT_SP), SLJIT_SELECT_RESULT_INDEX_OFFSET, SLJIT_R1, 0);
-
+	EmitLoadResultIndexForSelect(compiler);
 	EmitLoadSourceIndex(compiler, offsetof(SljitNativeVectorInput, source_sel), SLJIT_R1, SLJIT_S3);
 	EmitLoadSourceIndex(compiler, offsetof(SljitNativeVectorInput, right_source_sel), SLJIT_R1, SLJIT_S4);
 	auto left_is_null = EmitJumpIfValidityNull(compiler, offsetof(SljitNativeVectorInput, source_validity), SLJIT_S3);
@@ -3203,17 +3060,12 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeIntegerSelectReferences(Sl
 
 	auto next_label = sljit_emit_label(compiler);
 	sljit_set_label(next, next_label);
-	sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_S1, 0, SLJIT_S1, 0, SLJIT_IMM, 1);
-	auto repeat = sljit_emit_jump(compiler, SLJIT_JUMP);
-	sljit_set_label(repeat, loop);
+	EmitNextSljitNativeVectorLoop(compiler, loop);
 
 	sljit_set_label(done, sljit_emit_label(compiler));
-	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R0, 0, SLJIT_MEM1(SLJIT_SP), SLJIT_SELECT_TRUE_COUNT_OFFSET);
-	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_MEM1(SLJIT_S0), offsetof(SljitNativeVectorInput, selected_count),
-	               SLJIT_R0, 0);
-	sljit_emit_return_void(compiler);
+	EmitFinishSelectLoop(compiler);
 
-	return FinishSljitNativeVectorCode(compiler, function, error);
+	return FinishSljitCode(compiler, function, error);
 }
 
 unique_ptr<ExecutionRegionCodeHandle>
@@ -3225,49 +3077,28 @@ BuildSljitNativeNullCheckSelect(SljitNativeNullCheckOp op, SljitNativeVectorFunc
 	}
 
 	sljit_emit_enter(compiler, 0, SLJIT_ARGS1V(P), 5, 3, SLJIT_SELECT_LOCAL_SIZE);
-	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_S1, 0, SLJIT_IMM, 0);
-	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_S2, 0, SLJIT_MEM1(SLJIT_S0), offsetof(SljitNativeVectorInput, count));
-	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_MEM1(SLJIT_SP), SLJIT_SELECT_TRUE_COUNT_OFFSET, SLJIT_IMM, 0);
+	EmitInitSelectLoop(compiler);
 
 	auto loop = sljit_emit_label(compiler);
 	auto done = sljit_emit_cmp(compiler, SLJIT_GREATER_EQUAL, SLJIT_S1, 0, SLJIT_S2, 0);
 
 	EmitLoadResultAndSourceIndexForSelect(compiler);
-	auto source_is_null = EmitJumpIfSourceNull(compiler);
+	auto source_is_null = EmitSkipInvalidSourceRow(compiler);
 
-	if (op == SljitNativeNullCheckOp::IS_NULL) {
-		EmitStoreFalseSelection(compiler);
-	} else {
-		EmitStoreTrueSelection(compiler);
-	}
+	EmitStoreSelectionResult(compiler, op != SljitNativeNullCheckOp::IS_NULL);
 	auto next = sljit_emit_jump(compiler, SLJIT_JUMP);
 
 	sljit_set_label(source_is_null, sljit_emit_label(compiler));
-	if (op == SljitNativeNullCheckOp::IS_NULL) {
-		EmitStoreTrueSelection(compiler);
-	} else {
-		EmitStoreFalseSelection(compiler);
-	}
+	EmitStoreSelectionResult(compiler, op == SljitNativeNullCheckOp::IS_NULL);
 
 	auto next_label = sljit_emit_label(compiler);
 	sljit_set_label(next, next_label);
-	sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_S1, 0, SLJIT_S1, 0, SLJIT_IMM, 1);
-	auto repeat = sljit_emit_jump(compiler, SLJIT_JUMP);
-	sljit_set_label(repeat, loop);
+	EmitNextSljitNativeVectorLoop(compiler, loop);
 
 	sljit_set_label(done, sljit_emit_label(compiler));
-	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R0, 0, SLJIT_MEM1(SLJIT_SP), SLJIT_SELECT_TRUE_COUNT_OFFSET);
-	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_MEM1(SLJIT_S0), offsetof(SljitNativeVectorInput, selected_count),
-	               SLJIT_R0, 0);
-	sljit_emit_return_void(compiler);
+	EmitFinishSelectLoop(compiler);
 
-	return FinishSljitNativeVectorCode(compiler, function, error);
-}
-
-static void EmitStoreBoolResult(struct sljit_compiler *compiler, bool value) {
-	sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_R0, 0, SLJIT_MEM1(SLJIT_S0),
-	               offsetof(SljitNativeVectorInput, result_data));
-	sljit_emit_op1(compiler, SLJIT_MOV_U8, SLJIT_MEM2(SLJIT_R0, SLJIT_S1), 0, SLJIT_IMM, value ? 1 : 0);
+	return FinishSljitCode(compiler, function, error);
 }
 
 unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeIntegerInList(SljitNativeIntegerKind kind, idx_t constant_count,
@@ -3283,8 +3114,7 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeIntegerInList(SljitNativeI
 	auto source_load_op = NativeIntegerLoadOp(kind);
 
 	sljit_emit_enter(compiler, 0, SLJIT_ARGS1V(P), 5, 4, 0);
-	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_S1, 0, SLJIT_IMM, 0);
-	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_S2, 0, SLJIT_MEM1(SLJIT_S0), offsetof(SljitNativeVectorInput, count));
+	EmitInitSljitNativeVectorLoop(compiler);
 
 	auto loop = sljit_emit_label(compiler);
 	auto done = sljit_emit_cmp(compiler, SLJIT_GREATER_EQUAL, SLJIT_S1, 0, SLJIT_S2, 0);
@@ -3327,22 +3157,12 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeIntegerInList(SljitNativeI
 	auto next_label = sljit_emit_label(compiler);
 	sljit_set_label(next_after_no_match, next_label);
 	sljit_set_label(next_after_match, next_label);
-	sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_S1, 0, SLJIT_S1, 0, SLJIT_IMM, 1);
-	auto repeat = sljit_emit_jump(compiler, SLJIT_JUMP);
-	sljit_set_label(repeat, loop);
+	EmitNextSljitNativeVectorLoop(compiler, loop);
 
 	sljit_set_label(done, sljit_emit_label(compiler));
 	sljit_emit_return_void(compiler);
 
-	return FinishSljitNativeVectorCode(compiler, function, error);
-}
-
-static void EmitStoreInListSelectionResult(struct sljit_compiler *compiler, bool selected) {
-	if (selected) {
-		EmitStoreTrueSelection(compiler);
-	} else {
-		EmitStoreFalseSelection(compiler);
-	}
+	return FinishSljitCode(compiler, function, error);
 }
 
 unique_ptr<ExecutionRegionCodeHandle>
@@ -3357,15 +3177,13 @@ BuildSljitNativeIntegerInListSelect(SljitNativeIntegerKind kind, idx_t constant_
 	auto source_load_op = NativeIntegerLoadOp(kind);
 
 	sljit_emit_enter(compiler, 0, SLJIT_ARGS1V(P), 5, 4, SLJIT_SELECT_LOCAL_SIZE);
-	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_S1, 0, SLJIT_IMM, 0);
-	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_S2, 0, SLJIT_MEM1(SLJIT_S0), offsetof(SljitNativeVectorInput, count));
-	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_MEM1(SLJIT_SP), SLJIT_SELECT_TRUE_COUNT_OFFSET, SLJIT_IMM, 0);
+	EmitInitSelectLoop(compiler);
 
 	auto loop = sljit_emit_label(compiler);
 	auto done = sljit_emit_cmp(compiler, SLJIT_GREATER_EQUAL, SLJIT_S1, 0, SLJIT_S2, 0);
 
 	EmitLoadResultAndSourceIndexForSelect(compiler);
-	auto source_is_null = EmitJumpIfSourceNull(compiler);
+	auto source_is_null = EmitSkipInvalidSourceRow(compiler);
 
 	sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_R0, 0, SLJIT_MEM1(SLJIT_S0),
 	               offsetof(SljitNativeVectorInput, source_data));
@@ -3384,11 +3202,11 @@ BuildSljitNativeIntegerInListSelect(SljitNativeIntegerKind kind, idx_t constant_
 	sljit_set_label(repeat_constants, constants_loop);
 
 	sljit_set_label(no_match, sljit_emit_label(compiler));
-	EmitStoreInListSelectionResult(compiler, !list_has_null && not_in);
+	EmitStoreSelectionResult(compiler, !list_has_null && not_in);
 	auto next_after_no_match = sljit_emit_jump(compiler, SLJIT_JUMP);
 
 	sljit_set_label(match, sljit_emit_label(compiler));
-	EmitStoreInListSelectionResult(compiler, !not_in);
+	EmitStoreSelectionResult(compiler, !not_in);
 	auto next_after_match = sljit_emit_jump(compiler, SLJIT_JUMP);
 
 	sljit_set_label(source_is_null, sljit_emit_label(compiler));
@@ -3397,17 +3215,12 @@ BuildSljitNativeIntegerInListSelect(SljitNativeIntegerKind kind, idx_t constant_
 	auto next_label = sljit_emit_label(compiler);
 	sljit_set_label(next_after_no_match, next_label);
 	sljit_set_label(next_after_match, next_label);
-	sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_S1, 0, SLJIT_S1, 0, SLJIT_IMM, 1);
-	auto repeat = sljit_emit_jump(compiler, SLJIT_JUMP);
-	sljit_set_label(repeat, loop);
+	EmitNextSljitNativeVectorLoop(compiler, loop);
 
 	sljit_set_label(done, sljit_emit_label(compiler));
-	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R0, 0, SLJIT_MEM1(SLJIT_SP), SLJIT_SELECT_TRUE_COUNT_OFFSET);
-	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_MEM1(SLJIT_S0), offsetof(SljitNativeVectorInput, selected_count),
-	               SLJIT_R0, 0);
-	sljit_emit_return_void(compiler);
+	EmitFinishSelectLoop(compiler);
 
-	return FinishSljitNativeVectorCode(compiler, function, error);
+	return FinishSljitCode(compiler, function, error);
 }
 
 sljit_s32 NativeIntegerLowerBoundFailureJump(SljitNativeIntegerKind kind, bool inclusive) {
@@ -3442,8 +3255,7 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeIntegerBetween(SljitNative
 	auto upper_failure = NativeIntegerUpperBoundFailureJump(kind, upper_inclusive);
 
 	sljit_emit_enter(compiler, 0, SLJIT_ARGS1V(P), 5, 3, 0);
-	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_S1, 0, SLJIT_IMM, 0);
-	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_S2, 0, SLJIT_MEM1(SLJIT_S0), offsetof(SljitNativeVectorInput, count));
+	EmitInitSljitNativeVectorLoop(compiler);
 
 	auto loop = sljit_emit_label(compiler);
 	auto done = sljit_emit_cmp(compiler, SLJIT_GREATER_EQUAL, SLJIT_S1, 0, SLJIT_S2, 0);
@@ -3473,14 +3285,12 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeIntegerBetween(SljitNative
 	auto next_label = sljit_emit_label(compiler);
 	sljit_set_label(next_after_success, next_label);
 	sljit_set_label(next_after_failure, next_label);
-	sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_S1, 0, SLJIT_S1, 0, SLJIT_IMM, 1);
-	auto repeat = sljit_emit_jump(compiler, SLJIT_JUMP);
-	sljit_set_label(repeat, loop);
+	EmitNextSljitNativeVectorLoop(compiler, loop);
 
 	sljit_set_label(done, sljit_emit_label(compiler));
 	sljit_emit_return_void(compiler);
 
-	return FinishSljitNativeVectorCode(compiler, function, error);
+	return FinishSljitCode(compiler, function, error);
 }
 
 unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeIntegerBetweenSelect(SljitNativeIntegerKind kind, int64_t lower,
@@ -3499,15 +3309,13 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeIntegerBetweenSelect(Sljit
 	auto upper_failure = NativeIntegerUpperBoundFailureJump(kind, upper_inclusive);
 
 	sljit_emit_enter(compiler, 0, SLJIT_ARGS1V(P), 5, 3, SLJIT_SELECT_LOCAL_SIZE);
-	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_S1, 0, SLJIT_IMM, 0);
-	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_S2, 0, SLJIT_MEM1(SLJIT_S0), offsetof(SljitNativeVectorInput, count));
-	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_MEM1(SLJIT_SP), SLJIT_SELECT_TRUE_COUNT_OFFSET, SLJIT_IMM, 0);
+	EmitInitSelectLoop(compiler);
 
 	auto loop = sljit_emit_label(compiler);
 	auto done = sljit_emit_cmp(compiler, SLJIT_GREATER_EQUAL, SLJIT_S1, 0, SLJIT_S2, 0);
 
 	EmitLoadResultAndSourceIndexForSelect(compiler);
-	auto source_is_null = EmitJumpIfSourceNull(compiler);
+	auto source_is_null = EmitSkipInvalidSourceRow(compiler);
 
 	sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_R0, 0, SLJIT_MEM1(SLJIT_S0),
 	               offsetof(SljitNativeVectorInput, source_data));
@@ -3515,13 +3323,13 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeIntegerBetweenSelect(Sljit
 	auto lower_failed = sljit_emit_cmp(compiler, lower_failure, SLJIT_R2, 0, SLJIT_IMM, NumericCast<sljit_sw>(lower));
 	auto upper_failed = sljit_emit_cmp(compiler, upper_failure, SLJIT_R2, 0, SLJIT_IMM, NumericCast<sljit_sw>(upper));
 
-	EmitStoreInListSelectionResult(compiler, !not_between);
+	EmitStoreSelectionResult(compiler, !not_between);
 	auto next_after_success = sljit_emit_jump(compiler, SLJIT_JUMP);
 
 	auto failed_label = sljit_emit_label(compiler);
 	sljit_set_label(lower_failed, failed_label);
 	sljit_set_label(upper_failed, failed_label);
-	EmitStoreInListSelectionResult(compiler, not_between);
+	EmitStoreSelectionResult(compiler, not_between);
 	auto next_after_failure = sljit_emit_jump(compiler, SLJIT_JUMP);
 
 	sljit_set_label(source_is_null, sljit_emit_label(compiler));
@@ -3530,17 +3338,12 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeIntegerBetweenSelect(Sljit
 	auto next_label = sljit_emit_label(compiler);
 	sljit_set_label(next_after_success, next_label);
 	sljit_set_label(next_after_failure, next_label);
-	sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_S1, 0, SLJIT_S1, 0, SLJIT_IMM, 1);
-	auto repeat = sljit_emit_jump(compiler, SLJIT_JUMP);
-	sljit_set_label(repeat, loop);
+	EmitNextSljitNativeVectorLoop(compiler, loop);
 
 	sljit_set_label(done, sljit_emit_label(compiler));
-	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R0, 0, SLJIT_MEM1(SLJIT_SP), SLJIT_SELECT_TRUE_COUNT_OFFSET);
-	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_MEM1(SLJIT_S0), offsetof(SljitNativeVectorInput, selected_count),
-	               SLJIT_R0, 0);
-	sljit_emit_return_void(compiler);
+	EmitFinishSelectLoop(compiler);
 
-	return FinishSljitNativeVectorCode(compiler, function, error);
+	return FinishSljitCode(compiler, function, error);
 }
 
 } // namespace duckdb

@@ -330,18 +330,31 @@ bool SljitTypedExpressionTreeCanPrecheckNulls(const ExecutionExpressionIR &node)
 	}
 }
 
-SljitNativeIntegerKind SljitTypedExpressionTreeIntegerKind(const ExecutionExpressionIR &node) {
+static bool TryGetSljitTypedExpressionTreeIntegerKind(const ExecutionExpressionIR &node,
+                                                      SljitNativeIntegerKind &kind) {
 	if (SljitTypedExpressionTreeIsBoolNode(node)) {
-		return SljitNativeIntegerKind::UINT8;
+		kind = SljitNativeIntegerKind::UINT8;
+		return true;
 	}
 	if (SljitTypedExpressionTreeIsInt32Node(node)) {
-		return SljitNativeIntegerKind::INT32;
+		kind = SljitNativeIntegerKind::INT32;
+		return true;
 	}
 	if (SljitTypedExpressionTreeIsDecimal64Node(node)) {
-		return SljitNativeIntegerKind::DECIMAL64;
+		kind = SljitNativeIntegerKind::DECIMAL64;
+		return true;
 	}
 	if (SljitTypedExpressionTreeIsInt64Node(node)) {
-		return SljitNativeIntegerKind::INT64;
+		kind = SljitNativeIntegerKind::INT64;
+		return true;
+	}
+	return false;
+}
+
+SljitNativeIntegerKind SljitTypedExpressionTreeIntegerKind(const ExecutionExpressionIR &node) {
+	SljitNativeIntegerKind kind;
+	if (TryGetSljitTypedExpressionTreeIntegerKind(node, kind)) {
+		return kind;
 	}
 	throw InternalException("Unsupported SLJIT typed expression-tree node type");
 }
@@ -473,23 +486,7 @@ void CollectSljitTypedExpressionTreeNotTrueFacts(const ExecutionExpressionIR &no
 }
 
 bool TryGetSljitTypedExpressionTreeResultKind(const ExecutionExpressionIR &root, SljitNativeIntegerKind &kind) {
-	if (SljitTypedExpressionTreeIsInt64Node(root)) {
-		kind = SljitNativeIntegerKind::INT64;
-		return true;
-	}
-	if (SljitTypedExpressionTreeIsDecimal64Node(root)) {
-		kind = SljitNativeIntegerKind::DECIMAL64;
-		return true;
-	}
-	if (SljitTypedExpressionTreeIsBoolNode(root)) {
-		kind = SljitNativeIntegerKind::UINT8;
-		return true;
-	}
-	if (SljitTypedExpressionTreeIsInt32Node(root)) {
-		kind = SljitNativeIntegerKind::INT32;
-		return true;
-	}
-	return false;
+	return TryGetSljitTypedExpressionTreeIntegerKind(root, kind);
 }
 
 SljitTypedExpressionTreePlan BuildSljitTypedExpressionTreePlan(const ExecutionExpressionIR &root,

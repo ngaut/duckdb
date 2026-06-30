@@ -55,13 +55,6 @@ enum class SljitNativeRegionExpressionKind : uint8_t {
 	TYPED_EXPRESSION_TREE
 };
 
-enum class SljitNativeReferenceOrigin : uint8_t {
-	REGION_INPUT,
-	PROJECTION_PASS_THROUGH,
-	PROJECTION_TEMP,
-	SOURCE_OUTPUT
-};
-
 struct SljitNativeRegionExpressionPlan;
 
 struct SljitNativeHashJoinProbeKeyPlan {
@@ -76,7 +69,6 @@ struct SljitNativeHashJoinProbeKeyPlan {
 
 struct SljitNativeRegionExpressionPlan {
 	SljitNativeRegionExpressionKind kind = SljitNativeRegionExpressionKind::REFERENCE;
-	SljitNativeReferenceOrigin reference_origin = SljitNativeReferenceOrigin::REGION_INPUT;
 	SljitNativeIntegerKind integer_kind = SljitNativeIntegerKind::INT64;
 	LogicalType return_type;
 	Value constant_value;
@@ -126,6 +118,7 @@ struct SljitNativeRegionExpressionPlan {
 	unique_ptr<ExecutionExpressionIR> expression_tree;
 	vector<idx_t> expression_tree_source_indices;
 	SljitNativeConstantOrNull constant_or_null;
+	bool references_region_input = true;
 	bool emit_flat_nullable_fast_path = true;
 	string ir;
 
@@ -232,12 +225,6 @@ struct SljitNativeRegionOpPlan {
 	vector<SljitNativeRegionExpressionPlan> projections;
 };
 
-struct SljitNativeRegionSummary {
-	bool generates_machine_code = false;
-	bool has_whole_operator_boundary_stage = false;
-	string whole_operator_boundary_blocker;
-};
-
 struct SljitNativeRegionPlan {
 	vector<SljitNativeRegionOpPlan> ops;
 	ExecutionRegionSourceExecutionKind source_execution = ExecutionRegionSourceExecutionKind::NONE;
@@ -245,7 +232,6 @@ struct SljitNativeRegionPlan {
 	vector<Value> source_min_values;
 	vector<Value> source_max_values;
 	vector<bool> source_not_null;
-	SljitNativeRegionSummary summary;
 
 	const vector<LogicalType> &OutputTypes() const {
 		D_ASSERT(!ops.empty());

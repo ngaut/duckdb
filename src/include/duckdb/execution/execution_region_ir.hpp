@@ -421,64 +421,25 @@ struct ExecutionRegionContract {
 };
 
 struct ExecutionRegionCandidateTraits {
-	bool expression_traits_known = false;
 	ExecutionRegionSourceKind source_kind = ExecutionRegionSourceKind::NONE;
 	ExecutionRegionSourceExecutionKind source_execution = ExecutionRegionSourceExecutionKind::NONE;
 	ExecutionRegionSinkKind sink_kind = ExecutionRegionSinkKind::NONE;
 	bool sink_present = false;
-	idx_t estimated_source_cardinality = 0;
 	idx_t source_filter_count = 0;
 	idx_t source_filter_expression_count = 0;
-	idx_t source_filter_missing_count = 0;
-	idx_t source_contract_input_column_count = 0;
-	bool source_contract_filter_prune_required = false;
-	bool source_projection_pushdown = false;
-	bool source_filter_pushdown = false;
-	bool source_filter_prune = false;
-	idx_t source_comparison_filter_count = 0;
-	idx_t source_integer_comparison_filter_count = 0;
-	idx_t source_non_integer_comparison_filter_count = 0;
 	idx_t source_conjunction_filter_count = 0;
-	idx_t source_projected_column_count = 0;
-	idx_t source_returned_column_count = 0;
 	idx_t filter_count = 0;
 	idx_t projection_count = 0;
 	idx_t operator_count = 0;
 	idx_t hash_join_operator_count = 0;
-	idx_t perfect_hash_join_probe_count = 0;
-	idx_t hash_join_build_payload_column_count = 0;
-	idx_t right_hash_join_operator_count = 0;
-	idx_t inner_hash_join_operator_count = 0;
 	idx_t aggregate_count = 0;
-	idx_t aggregate_count_function_count = 0;
-	idx_t aggregate_sum_function_count = 0;
-	idx_t aggregate_other_function_count = 0;
-	idx_t grouped_aggregate_group_count = 0;
-	idx_t grouped_aggregate_varchar_group_count = 0;
-	idx_t core_expression_operator_count = 0;
 	idx_t arithmetic_projection_count = 0;
-	idx_t integer_arithmetic_projection_count = 0;
-	idx_t non_integer_arithmetic_projection_count = 0;
 	idx_t high_cost_projection_count = 0;
 	idx_t reference_projection_count = 0;
 	idx_t reference_varchar_projection_count = 0;
-	idx_t comparison_filter_count = 0;
-	idx_t integer_comparison_filter_count = 0;
-	idx_t non_integer_comparison_filter_count = 0;
-	idx_t conjunction_filter_count = 0;
-	idx_t expression_node_count = 0;
 	idx_t predicate_expression_count = 0;
 	idx_t control_expression_count = 0;
-	idx_t reference_expression_count = 0;
-	idx_t string_predicate_expression_count = 0;
-	idx_t high_cost_string_predicate_expression_count = 0;
-	idx_t string_like_expression_count = 0;
-	idx_t string_contains_expression_count = 0;
-	idx_t string_prefix_expression_count = 0;
-	idx_t string_suffix_expression_count = 0;
 	idx_t expression_cost = 0;
-	idx_t expression_missing_count = 0;
-	idx_t operator_missing_count = 0;
 	string ir;
 
 	bool HasSource() const {
@@ -512,19 +473,12 @@ struct ExecutionRegionNode {
 	string blocker_reason;
 };
 
-struct ExecutionRegionContractShapePart {
-	ExecutionRegionNodeKind node_kind = ExecutionRegionNodeKind::OPERATOR;
-	string shape;
-};
-
 struct ExecutionRegionSignature {
 	string context;
 	string shape;
 	string feature_shape;
 	string context_feature_shape;
-	vector<ExecutionRegionContractShapePart> contract_shape_parts;
 	string contract_shape;
-	string ir;
 };
 
 struct ExecutionRegionStage {
@@ -564,16 +518,13 @@ struct ExecutionRegionCandidate {
 	idx_t start_operator_index = 0;
 	idx_t end_operator_index = 0;
 	idx_t estimated_cardinality = 0;
-	idx_t estimated_source_cardinality = 0;
 	vector<LogicalType> input_types;
 	vector<LogicalType> output_types;
 	string shape;
 	string pipeline_shape;
 	ExecutionRegionCandidateTraits traits;
 	ExecutionRegionContract contract;
-	ExecutionRegionCandidateTraits upstream_traits;
-	ExecutionRegionCandidateTraits context_traits;
-	ExecutionRegionCandidateTraits continuation_traits;
+	bool context_has_missing_operator_contract = false;
 	ExecutionRegionSourceExecutionKind source_execution = ExecutionRegionSourceExecutionKind::NONE;
 	bool uses_scan_filters = false;
 	ExecutionRegionSignature signature;
@@ -585,13 +536,6 @@ struct ExecutionRegionCandidate {
 	}
 };
 
-DUCKDB_API bool ExecutionRegionAggregateFunctionIsCount(const string &function_name);
-DUCKDB_API bool ExecutionRegionAggregateFunctionIsSum(const string &function_name);
-DUCKDB_API void AccumulateExecutionRegionHashJoinKind(ExecutionRegionJoinType join_type, idx_t &hash_join_count,
-                                                      idx_t &right_hash_join_count, idx_t &inner_hash_join_count);
-DUCKDB_API void AccumulateExecutionRegionAggregateFunctionKinds(const ExecutionRegionAggregateContract &contract,
-                                                                idx_t &aggregate_count, idx_t &count_function_count,
-                                                                idx_t &sum_function_count, idx_t &other_function_count);
 DUCKDB_API string ExecutionRegionAggregateNativeStateUpdateBlocker(
     const ExecutionRegionAggregateContract &contract, const vector<ExecutionRegionAggregateInput> &aggregates,
     const vector<ExecutionRegionGroupInput> &groups);

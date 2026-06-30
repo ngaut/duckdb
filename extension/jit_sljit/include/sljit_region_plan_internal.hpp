@@ -38,35 +38,29 @@ bool TryLowerNativeRegionExpression(const ExecutionExpressionFragment &fragment,
 bool TryLowerNativeRegionExpressionTreeThroughProjection(
     const ExecutionExpressionFragment &fragment, const vector<SljitNativeRegionExpressionPlan> &input_projection,
     unique_ptr<ExecutionExpressionIR> &tree, string &error, bool render_diagnostics);
-bool TryMapNativeProjectionExpressionSources(const vector<SljitNativeRegionExpressionPlan> &input_projection,
-                                             SljitNativeRegionExpressionPlan &expr);
 bool TryBuildSljitProjectionGraphExpression(const ExecutionExpressionIR &root, SljitProjectionGraphLowering &graph,
                                             SljitNativeRegionExpressionPlan &expression);
 void FuseAdjacentNativeProjections(SljitNativeRegionPlan &region, bool render_diagnostics);
 void FusePrimitiveAggregateUpdates(SljitNativeRegionPlan &region, const vector<LogicalType> &region_input_types,
                                    bool render_diagnostics);
-bool SljitNativeRegionOpGeneratesCode(const SljitNativeRegionOpPlan &op);
 
 bool SljitRegionNodeHasNativeOps(const SljitRegionNodePlan &node_plan);
-const SljitNativeRegionOpPlan &SljitRegionNodeFirstNativeOp(const SljitRegionNodePlan &node_plan);
 SljitNativeRegionOpPlan &SljitRegionNodeLastNativeOp(SljitRegionNodePlan &node_plan);
-bool SljitRegionNodeHasSingleNativeOp(const SljitRegionNodePlan &node_plan);
-void AppendSljitRegionNodeNativeOps(SljitNativeRegionPlan &region, SljitRegionNodePlan &node_plan);
 SljitRegionNodePlan SljitNativeNode(SljitNativeRegionOpPlan &&native_op, string reason);
 SljitRegionNodePlan SljitNativeNode(vector<SljitNativeRegionOpPlan> native_ops, string reason);
 SljitRegionNodePlan SljitRegionBoundaryNode(string reason);
 SljitRegionNodePlan SljitNodeBlockerBoundary(const ExecutionRegionNode &node, const char *fallback);
 string SljitBlockerOrReason(const string &blocker, const char *reason);
 void AppendSljitReasonPart(string &reason, const string &part, bool render_diagnostics);
+SljitNativeRegionExpressionPlan SljitNativeReferenceExpression(idx_t source_index, const LogicalType &type, string ir,
+                                                               bool references_region_input);
 SljitRegionNodePlan SljitBlockedContractBoundary(const string &blocker, const char *reason);
-SljitRegionNodePlan SljitUnsupportedExpressionBoundaryNode(const string &error);
 
 SljitRegionNodePlan PlanSljitFilterNode(const ExecutionRegionNode &node, string &error, bool render_diagnostics);
 SljitRegionNodePlan PlanSljitProjectionNode(const ExecutionRegionNode &node, const vector<LogicalType> &input_types,
                                             string &error, bool render_diagnostics);
 string SljitSourceBoundaryReason(const ExecutionRegionNode &node, bool render_diagnostics);
 SljitRegionNodePlan PlanSljitSourceNode(const ExecutionRegionNode &node, const ExecutionRegionContract &contract,
-                                        const ExecutionRegionCandidateTraits &candidate_traits,
                                         ExecutionRegionSourceExecutionKind source_execution, bool render_diagnostics);
 bool SljitCanExecuteSourceNode(const ExecutionRegionNode &node, const ExecutionRegionContract &contract);
 SljitRegionNodePlan PlanSljitHashJoinProbeOperatorNode(const ExecutionRegionNode &node,

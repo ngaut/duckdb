@@ -3,11 +3,9 @@
 #include "sljit_codegen_util.hpp"
 
 #include "duckdb/common/exception.hpp"
-#include "duckdb/common/hugeint.hpp"
 #include "duckdb/common/numeric_utils.hpp"
 #include "duckdb/common/types/validity_mask.hpp"
 #include "duckdb/common/types/hugeint.hpp"
-#include "duckdb/common/types/string_type.hpp"
 
 #include "sljitLir.h"
 
@@ -15,50 +13,6 @@
 #include <exception>
 
 namespace duckdb {
-
-static unique_ptr<ExecutionRegionCodeHandle> FinishSljitHashJoinProbeCode(struct sljit_compiler *compiler,
-                                                                          SljitNativeHashJoinProbeFunction &function,
-                                                                          string &error) {
-	auto compiler_error = sljit_get_compiler_error(compiler);
-	if (compiler_error != SLJIT_SUCCESS) {
-		error = "SLJIT compiler failed with error code " + std::to_string(compiler_error);
-		sljit_free_compiler(compiler);
-		return nullptr;
-	}
-
-	auto code = GenerateSljitCode(compiler);
-	auto code_size = LossyNumericCast<idx_t>(sljit_get_generated_code_size(compiler));
-	sljit_free_compiler(compiler);
-	if (!code) {
-		error = "SLJIT executable code generation failed";
-		return nullptr;
-	}
-
-	function = reinterpret_cast<SljitNativeHashJoinProbeFunction>(code);
-	return MakeSljitCodeHandle(code, code_size);
-}
-
-static unique_ptr<ExecutionRegionCodeHandle>
-FinishSljitNestedLoopJoinProbeCode(struct sljit_compiler *compiler, SljitNativeNestedLoopJoinProbeFunction &function,
-                                   string &error) {
-	auto compiler_error = sljit_get_compiler_error(compiler);
-	if (compiler_error != SLJIT_SUCCESS) {
-		error = "SLJIT compiler failed with error code " + std::to_string(compiler_error);
-		sljit_free_compiler(compiler);
-		return nullptr;
-	}
-
-	auto code = GenerateSljitCode(compiler);
-	auto code_size = LossyNumericCast<idx_t>(sljit_get_generated_code_size(compiler));
-	sljit_free_compiler(compiler);
-	if (!code) {
-		error = "SLJIT executable code generation failed";
-		return nullptr;
-	}
-
-	function = reinterpret_cast<SljitNativeNestedLoopJoinProbeFunction>(code);
-	return MakeSljitCodeHandle(code, code_size);
-}
 
 static inline bool SljitNestedLoopJoinValueIsValid(const validity_t *validity, idx_t row_idx) {
 	if (!validity) {
@@ -410,6 +364,41 @@ static void EmitLoadHashJoinKey(struct sljit_compiler *compiler, SljitNativeHash
 	sljit_emit_op1(compiler, load_op, target, 0, SLJIT_MEM2(base, SLJIT_R4), 0);
 }
 
+static void EmitCheckedHashJoinInt64ToInt32Range(struct sljit_compiler *compiler, sljit_s32 value_reg,
+                                                 sljit_s32 scratch);
+
+static void EmitLoadHashJoinSourceKey(struct sljit_compiler *compiler, idx_t key_idx,
+                                      SljitNativeHashJoinKeyKind kind, sljit_s32 target, sljit_s32 base,
+                                      sljit_s32 index, sljit_sw offset, sljit_s32 scratch,
+                                      bool check_int64_to_int32_range = true) {
+	if (key_idx != 0 || kind != SljitNativeHashJoinKeyKind::INT32) {
+		EmitLoadHashJoinKey(compiler, kind, target, base, index, offset);
+		return;
+	}
+
+	D_ASSERT(target != base);
+	sljit_emit_op1(compiler, SLJIT_MOV_U8, target, 0, SLJIT_MEM1(SLJIT_S0),
+	               offsetof(SljitNativeHashJoinProbeInput, source_key0_int64_to_int32));
+	auto use_int32_source = sljit_emit_cmp(compiler, SLJIT_EQUAL, target, 0, SLJIT_IMM, 0);
+	if (index == SLJIT_IMM) {
+		sljit_emit_op1(compiler, SLJIT_MOV, target, 0, SLJIT_MEM1(base), offset);
+	} else if (offset == 0) {
+		sljit_emit_op1(compiler, SLJIT_MOV, target, 0, SLJIT_MEM2(base, index), 3);
+	} else {
+		sljit_emit_op2(compiler, SLJIT_SHL, scratch, 0, index, 0, SLJIT_IMM, 3);
+		sljit_emit_op2(compiler, SLJIT_ADD, scratch, 0, scratch, 0, SLJIT_IMM, offset);
+		sljit_emit_op1(compiler, SLJIT_MOV, target, 0, SLJIT_MEM2(base, scratch), 0);
+	}
+	if (check_int64_to_int32_range) {
+		EmitCheckedHashJoinInt64ToInt32Range(compiler, target, scratch);
+	}
+	auto done = sljit_emit_jump(compiler, SLJIT_JUMP);
+
+	sljit_set_label(use_int32_source, sljit_emit_label(compiler));
+	EmitLoadHashJoinKey(compiler, kind, target, base, index, offset);
+	sljit_set_label(done, sljit_emit_label(compiler));
+}
+
 static void EmitLoadHashJoinKeyWord(struct sljit_compiler *compiler, sljit_s32 target, sljit_s32 base, sljit_s32 index,
                                     sljit_sw offset, sljit_s32 scratch) {
 	if (index == SLJIT_IMM) {
@@ -431,11 +420,12 @@ static void EmitHashJoinKeyHash(struct sljit_compiler *compiler, SljitNativeHash
 	EmitDuckDBMurmurHash64(compiler, hash_reg, scratch, multiplier_reg);
 }
 
-static void EmitHashJoinKeyHashFromSourceData(struct sljit_compiler *compiler, SljitNativeHashJoinKeyKind key_kind,
-                                              sljit_s32 hash_reg, sljit_s32 source_data, sljit_s32 source_index,
-                                              sljit_s32 scratch, sljit_s32 multiplier_reg = 0) {
+static void EmitHashJoinKeyHashFromSourceData(struct sljit_compiler *compiler, idx_t key_idx,
+                                              SljitNativeHashJoinKeyKind key_kind, sljit_s32 hash_reg,
+                                              sljit_s32 source_data, sljit_s32 source_index, sljit_s32 scratch,
+                                              sljit_s32 multiplier_reg = 0) {
 	if (!SljitHashJoinKeyKindIs128(key_kind)) {
-		EmitLoadHashJoinKey(compiler, key_kind, hash_reg, source_data, source_index, 0);
+		EmitLoadHashJoinSourceKey(compiler, key_idx, key_kind, hash_reg, source_data, source_index, 0, scratch);
 		EmitHashJoinKeyHash(compiler, key_kind, hash_reg, scratch, multiplier_reg);
 		return;
 	}
@@ -453,7 +443,8 @@ static void EmitHashJoinEqualityKeyMismatch(struct sljit_compiler *compiler, idx
                                             const vector<sljit_s32> &source_data_regs, sljit_s32 source_index_reg) {
 	auto source_data_reg = EmitPrepareHashJoinSourceData(compiler, key_idx, SLJIT_R4, source_data_regs);
 	if (!SljitHashJoinKeyKindIs128(key_kind)) {
-		EmitLoadHashJoinKey(compiler, key_kind, SLJIT_R2, source_data_reg, source_index_reg, 0);
+		EmitLoadHashJoinSourceKey(compiler, key_idx, key_kind, SLJIT_R2, source_data_reg, source_index_reg, 0,
+		                          SLJIT_R3, false);
 		sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_R4, 0, SLJIT_R0, 0, SLJIT_IMM, key_layout_offset);
 		EmitLoadHashJoinKey(compiler, key_kind, SLJIT_R4, SLJIT_R4, SLJIT_IMM, 0);
 		equality_key_mismatches.push_back(sljit_emit_cmp(compiler, SLJIT_NOT_EQUAL, SLJIT_R4, 0, SLJIT_R2, 0));
@@ -511,6 +502,17 @@ static void EmitStoreHashJoinMarkProbeFlag(struct sljit_compiler *compiler, slji
 	sljit_emit_op1(compiler, SLJIT_MOV_U32, SLJIT_MEM2(SLJIT_R4, SLJIT_S1), 2, SLJIT_IMM, value);
 }
 
+static void SLJIT_FUNC SljitNativeHashJoinInt64ToInt32CastError(SljitNativeHashJoinProbeInput *input, int64_t value) {
+	try {
+		throw OutOfRangeException("Type INT64 with value %lld can't be cast because the value is out of range for "
+		                          "the destination type INT32",
+		                          static_cast<long long>(value));
+	} catch (...) {
+		input->has_error = true;
+		input->error = std::current_exception();
+	}
+}
+
 static void EmitFinishHashJoinProbe(struct sljit_compiler *compiler) {
 	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_MEM1(SLJIT_S0), offsetof(SljitNativeHashJoinProbeInput, input_offset),
 	               SLJIT_S1, 0);
@@ -527,6 +529,40 @@ static void EmitPauseHashJoinProbe(struct sljit_compiler *compiler, sljit_s32 re
 	               offsetof(SljitNativeHashJoinProbeInput, resume_row_pointer), resume_row_pointer, 0);
 	sljit_emit_op1(compiler, SLJIT_MOV_U8, SLJIT_MEM1(SLJIT_S0), offsetof(SljitNativeHashJoinProbeInput, finished),
 	               SLJIT_IMM, 0);
+}
+
+static void EmitAbortHashJoinProbeWithCastError(struct sljit_compiler *compiler, sljit_s32 value_reg) {
+	sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_R0, 0, SLJIT_S0, 0);
+	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R1, 0, value_reg, 0);
+	sljit_emit_icall(compiler, SLJIT_CALL, SLJIT_ARGS2V(P, W), SLJIT_IMM,
+	                 SLJIT_FUNC_ADDR(SljitNativeHashJoinInt64ToInt32CastError));
+	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_MEM1(SLJIT_S0),
+	               offsetof(SljitNativeHashJoinProbeInput, selected_count), SLJIT_S3, 0);
+	EmitPauseHashJoinProbe(compiler, SLJIT_IMM);
+	sljit_emit_return_void(compiler);
+}
+
+static void EmitCheckedHashJoinInt64ToInt32Range(struct sljit_compiler *compiler, sljit_s32 value_reg,
+                                                 sljit_s32 scratch) {
+	sljit_emit_op1(compiler, SLJIT_MOV_U8, scratch, 0, SLJIT_MEM1(SLJIT_S0),
+	               offsetof(SljitNativeHashJoinProbeInput, source_key0_int64_to_int32_unchecked));
+	auto unchecked = sljit_emit_cmp(compiler, SLJIT_NOT_EQUAL, scratch, 0, SLJIT_IMM, 0);
+	auto below_range =
+	    sljit_emit_cmp(compiler, SLJIT_SIG_LESS, value_reg, 0, SLJIT_IMM,
+	                   NumericCast<sljit_sw>(NumericLimits<int32_t>::Minimum()));
+	auto above_range =
+	    sljit_emit_cmp(compiler, SLJIT_SIG_GREATER, value_reg, 0, SLJIT_IMM,
+	                   NumericCast<sljit_sw>(NumericLimits<int32_t>::Maximum()));
+	auto in_range = sljit_emit_jump(compiler, SLJIT_JUMP);
+
+	auto range_error = sljit_emit_label(compiler);
+	sljit_set_label(below_range, range_error);
+	sljit_set_label(above_range, range_error);
+	EmitAbortHashJoinProbeWithCastError(compiler, value_reg);
+
+	auto done = sljit_emit_label(compiler);
+	sljit_set_label(unchecked, done);
+	sljit_set_label(in_range, done);
 }
 
 static void EmitLoadHashJoinNextPointer(struct sljit_compiler *compiler, sljit_s32 row_pointer, sljit_s32 scratch,
@@ -707,7 +743,7 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitPerfectHashJoinProbe(const Sljit
 	               SLJIT_S3, 0);
 	EmitFinishHashJoinProbe(compiler);
 	sljit_emit_return_void(compiler);
-	return FinishSljitHashJoinProbeCode(compiler, function, error);
+	return FinishSljitCode(compiler, function, error);
 }
 
 bool ValidateSljitHashJoinProbe(const vector<SljitNativeHashJoinProbeKeyPlan> &keys, idx_t equality_key_count,
@@ -858,12 +894,12 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitHashJoinProbe(const vector<Sljit
 				source_is_null.push_back(source_null);
 			}
 			auto source_data_reg = EmitPrepareHashJoinSourceData(compiler, key_idx, SLJIT_R0, source_data_regs);
-			EmitHashJoinKeyHashFromSourceData(compiler, key.key_kind, SLJIT_R2, source_data_reg, source_index_reg,
-			                                  SLJIT_R4, hash_multiplier_reg);
+			EmitHashJoinKeyHashFromSourceData(compiler, key_idx, key.key_kind, SLJIT_R2, source_data_reg,
+			                                  source_index_reg, SLJIT_R4, hash_multiplier_reg);
 		} else {
 			auto source_data_reg = EmitPrepareHashJoinSourceData(compiler, key_idx, SLJIT_R0, source_data_regs);
-			EmitHashJoinKeyHashFromSourceData(compiler, key.key_kind, SLJIT_R2, source_data_reg, source_index_reg,
-			                                  SLJIT_R4, hash_multiplier_reg);
+			EmitHashJoinKeyHashFromSourceData(compiler, key_idx, key.key_kind, SLJIT_R2, source_data_reg,
+			                                  source_index_reg, SLJIT_R4, hash_multiplier_reg);
 			auto source_hash_ready = sljit_emit_jump(compiler, SLJIT_JUMP);
 			sljit_set_label(source_null, sljit_emit_label(compiler));
 			sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R2, 0, SLJIT_IMM, DuckDBNullHashImmediate());
@@ -930,7 +966,8 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitHashJoinProbe(const vector<Sljit
 				predicate_key_mismatches.push_back(rhs_null);
 			}
 			auto source_data_reg = EmitPrepareHashJoinSourceData(compiler, key_idx, SLJIT_R4, source_data_regs);
-			EmitLoadHashJoinKey(compiler, key.key_kind, SLJIT_R2, source_data_reg, source_index_reg, 0);
+			EmitLoadHashJoinSourceKey(compiler, key_idx, key.key_kind, SLJIT_R2, source_data_reg, source_index_reg, 0,
+			                          SLJIT_R3, false);
 			sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_R4, 0, SLJIT_R0, 0, SLJIT_IMM,
 			               NumericCast<sljit_sw>(key.key_layout_offset));
 			EmitLoadHashJoinKey(compiler, key.key_kind, SLJIT_R4, SLJIT_R4, SLJIT_IMM, 0);
@@ -1007,7 +1044,7 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitHashJoinProbe(const vector<Sljit
 		               offsetof(SljitNativeHashJoinProbeInput, selected_count), SLJIT_IMM, 0);
 		EmitFinishHashJoinProbe(compiler);
 		sljit_emit_return_void(compiler);
-		return FinishSljitHashJoinProbeCode(compiler, function, error);
+		return FinishSljitCode(compiler, function, error);
 	}
 
 	if (mark_probe) {
@@ -1048,7 +1085,7 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitHashJoinProbe(const vector<Sljit
 		               offsetof(SljitNativeHashJoinProbeInput, selected_count), SLJIT_S2, 0);
 		EmitFinishHashJoinProbe(compiler);
 		sljit_emit_return_void(compiler);
-		return FinishSljitHashJoinProbeCode(compiler, function, error);
+		return FinishSljitCode(compiler, function, error);
 	}
 
 	sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_R4, 0, SLJIT_MEM1(SLJIT_S0),
@@ -1103,7 +1140,7 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitHashJoinProbe(const vector<Sljit
 		               offsetof(SljitNativeHashJoinProbeInput, selected_count), SLJIT_S3, 0);
 		EmitFinishHashJoinProbe(compiler);
 		sljit_emit_return_void(compiler);
-		return FinishSljitHashJoinProbeCode(compiler, function, error);
+		return FinishSljitCode(compiler, function, error);
 	}
 
 	const bool no_chain_specialized = chain_layout_is_constant && !constant_chains_longer_than_one;
@@ -1149,7 +1186,7 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitHashJoinProbe(const vector<Sljit
 		               offsetof(SljitNativeHashJoinProbeInput, selected_count), SLJIT_S3, 0);
 		EmitFinishHashJoinProbe(compiler);
 		sljit_emit_return_void(compiler);
-		return FinishSljitHashJoinProbeCode(compiler, function, error);
+		return FinishSljitCode(compiler, function, error);
 	}
 	if (!no_chain_specialized) {
 		EmitLoadHashJoinNextPointer(compiler, SLJIT_R0, SLJIT_R2, SLJIT_R4, pointer_offset,
@@ -1233,7 +1270,7 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitHashJoinProbe(const vector<Sljit
 	               SLJIT_S3, 0);
 	EmitFinishHashJoinProbe(compiler);
 	sljit_emit_return_void(compiler);
-	return FinishSljitHashJoinProbeCode(compiler, function, error);
+	return FinishSljitCode(compiler, function, error);
 }
 
 unique_ptr<ExecutionRegionCodeHandle> BuildSljitNestedLoopJoinProbe(const SljitNativeNestedLoopJoinProbePlan &plan,
@@ -1257,7 +1294,7 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNestedLoopJoinProbe(const SljitN
 	sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_R0, 0, SLJIT_S0, 0);
 	sljit_emit_icall(compiler, SLJIT_CALL, SLJIT_ARGS1V(P), SLJIT_IMM, SLJIT_FUNC_ADDR(helper));
 	sljit_emit_return_void(compiler);
-	return FinishSljitNestedLoopJoinProbeCode(compiler, function, error);
+	return FinishSljitCode(compiler, function, error);
 }
 
 } // namespace duckdb

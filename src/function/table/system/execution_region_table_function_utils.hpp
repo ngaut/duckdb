@@ -107,7 +107,6 @@ static constexpr ExecutionRegionTraceColumn EXECUTION_REGION_CANDIDATE_TRACE_COL
     {"candidate_signature_feature_shape", LogicalTypeId::VARCHAR},
     {"candidate_signature_context_feature_shape", LogicalTypeId::VARCHAR},
     {"candidate_contract_shape", LogicalTypeId::VARCHAR},
-    {"candidate_signature_ir", LogicalTypeId::VARCHAR},
     {"candidate_contract_abi", LogicalTypeId::VARCHAR},
     {"candidate_owns_source", LogicalTypeId::BOOLEAN},
     {"candidate_owns_transform", LogicalTypeId::BOOLEAN},
@@ -118,35 +117,14 @@ static constexpr ExecutionRegionTraceColumn EXECUTION_REGION_CANDIDATE_TRACE_COL
     {"candidate_source_kind", LogicalTypeId::VARCHAR},
     {"candidate_source_execution", LogicalTypeId::VARCHAR},
     {"candidate_sink_kind", LogicalTypeId::VARCHAR},
-    {"candidate_expression_traits_known", LogicalTypeId::BOOLEAN},
     {"candidate_source_filter_count", LogicalTypeId::UBIGINT},
     {"candidate_source_filter_expression_count", LogicalTypeId::UBIGINT},
-    {"candidate_source_filter_missing_count", LogicalTypeId::UBIGINT},
-    {"candidate_source_contract_input_column_count", LogicalTypeId::UBIGINT},
-    {"candidate_source_contract_filter_prune_required", LogicalTypeId::BOOLEAN},
-    {"candidate_source_projection_pushdown", LogicalTypeId::BOOLEAN},
-    {"candidate_source_filter_pushdown", LogicalTypeId::BOOLEAN},
-    {"candidate_source_filter_prune", LogicalTypeId::BOOLEAN},
-    {"candidate_source_comparison_filter_count", LogicalTypeId::UBIGINT},
-    {"candidate_source_integer_comparison_filter_count", LogicalTypeId::UBIGINT},
-    {"candidate_source_non_integer_comparison_filter_count", LogicalTypeId::UBIGINT},
     {"candidate_source_conjunction_filter_count", LogicalTypeId::UBIGINT},
-    {"candidate_source_projected_column_count", LogicalTypeId::UBIGINT},
-    {"candidate_source_returned_column_count", LogicalTypeId::UBIGINT},
     {"candidate_filter_count", LogicalTypeId::UBIGINT},
     {"candidate_projection_count", LogicalTypeId::UBIGINT},
     {"candidate_operator_count", LogicalTypeId::UBIGINT},
-    {"candidate_core_expression_operator_count", LogicalTypeId::UBIGINT},
     {"candidate_arithmetic_projection_count", LogicalTypeId::UBIGINT},
-    {"candidate_integer_arithmetic_projection_count", LogicalTypeId::UBIGINT},
-    {"candidate_non_integer_arithmetic_projection_count", LogicalTypeId::UBIGINT},
     {"candidate_reference_projection_count", LogicalTypeId::UBIGINT},
-    {"candidate_comparison_filter_count", LogicalTypeId::UBIGINT},
-    {"candidate_integer_comparison_filter_count", LogicalTypeId::UBIGINT},
-    {"candidate_non_integer_comparison_filter_count", LogicalTypeId::UBIGINT},
-    {"candidate_conjunction_filter_count", LogicalTypeId::UBIGINT},
-    {"candidate_expression_missing_count", LogicalTypeId::UBIGINT},
-    {"candidate_operator_missing_count", LogicalTypeId::UBIGINT},
     {"candidate_source_ownership", LogicalTypeId::VARCHAR},
     {"candidate_state_scan_ownership", LogicalTypeId::VARCHAR},
     {"candidate_transform_ownership", LogicalTypeId::VARCHAR},
@@ -401,157 +379,87 @@ static inline void AppendExecutionRegionCandidateTraceColumn(Vector &output, idx
 		output.Append(Value(signature.contract_shape));
 		return;
 	case 5:
-		if (signature.ir.empty()) {
-			output.Append(Value(LogicalType::VARCHAR));
-		} else {
-			output.Append(Value(signature.ir));
-		}
-		return;
-	case 6:
 		output.Append(Value(ExecutionRegionABIToString(contract.abi)));
 		return;
-	case 7:
+	case 6:
 		output.Append(Value::BOOLEAN(contract.OwnsSource()));
 		return;
-	case 8:
+	case 7:
 		output.Append(Value::BOOLEAN(contract.OwnsTransform()));
 		return;
-	case 9:
+	case 8:
 		output.Append(Value::BOOLEAN(contract.OwnsSink()));
 		return;
-	case 10:
+	case 9:
 		output.Append(Value::BOOLEAN(contract.OwnsStateScan()));
 		return;
-	case 11:
+	case 10:
 		output.Append(Value::BOOLEAN(traits.HasSource()));
 		return;
-	case 12:
+	case 11:
 		output.Append(Value::BOOLEAN(traits.HasSink()));
 		return;
-	case 13:
+	case 12:
 		output.Append(Value(ExecutionRegionSourceKindToString(traits.source_kind)));
 		return;
-	case 14:
+	case 13:
 		output.Append(Value(ExecutionRegionSourceExecutionKindToString(traits.source_execution)));
 		return;
-	case 15:
+	case 14:
 		output.Append(Value(ExecutionRegionSinkKindToString(traits.sink_kind)));
 		return;
-	case 16:
-		output.Append(Value::BOOLEAN(traits.expression_traits_known));
-		return;
-	case 17:
+	case 15:
 		output.Append(Value::UBIGINT(traits.source_filter_count));
 		return;
-	case 18:
+	case 16:
 		output.Append(Value::UBIGINT(traits.source_filter_expression_count));
 		return;
-	case 19:
-		output.Append(Value::UBIGINT(traits.source_filter_missing_count));
-		return;
-	case 20:
-		output.Append(Value::UBIGINT(traits.source_contract_input_column_count));
-		return;
-	case 21:
-		output.Append(Value::BOOLEAN(traits.source_contract_filter_prune_required));
-		return;
-	case 22:
-		output.Append(Value::BOOLEAN(traits.source_projection_pushdown));
-		return;
-	case 23:
-		output.Append(Value::BOOLEAN(traits.source_filter_pushdown));
-		return;
-	case 24:
-		output.Append(Value::BOOLEAN(traits.source_filter_prune));
-		return;
-	case 25:
-		output.Append(Value::UBIGINT(traits.source_comparison_filter_count));
-		return;
-	case 26:
-		output.Append(Value::UBIGINT(traits.source_integer_comparison_filter_count));
-		return;
-	case 27:
-		output.Append(Value::UBIGINT(traits.source_non_integer_comparison_filter_count));
-		return;
-	case 28:
+	case 17:
 		output.Append(Value::UBIGINT(traits.source_conjunction_filter_count));
 		return;
-	case 29:
-		output.Append(Value::UBIGINT(traits.source_projected_column_count));
-		return;
-	case 30:
-		output.Append(Value::UBIGINT(traits.source_returned_column_count));
-		return;
-	case 31:
+	case 18:
 		output.Append(Value::UBIGINT(traits.filter_count));
 		return;
-	case 32:
+	case 19:
 		output.Append(Value::UBIGINT(traits.projection_count));
 		return;
-	case 33:
+	case 20:
 		output.Append(Value::UBIGINT(traits.operator_count));
 		return;
-	case 34:
-		output.Append(Value::UBIGINT(traits.core_expression_operator_count));
-		return;
-	case 35:
+	case 21:
 		output.Append(Value::UBIGINT(traits.arithmetic_projection_count));
 		return;
-	case 36:
-		output.Append(Value::UBIGINT(traits.integer_arithmetic_projection_count));
-		return;
-	case 37:
-		output.Append(Value::UBIGINT(traits.non_integer_arithmetic_projection_count));
-		return;
-	case 38:
+	case 22:
 		output.Append(Value::UBIGINT(traits.reference_projection_count));
 		return;
-	case 39:
-		output.Append(Value::UBIGINT(traits.comparison_filter_count));
-		return;
-	case 40:
-		output.Append(Value::UBIGINT(traits.integer_comparison_filter_count));
-		return;
-	case 41:
-		output.Append(Value::UBIGINT(traits.non_integer_comparison_filter_count));
-		return;
-	case 42:
-		output.Append(Value::UBIGINT(traits.conjunction_filter_count));
-		return;
-	case 43:
-		output.Append(Value::UBIGINT(traits.expression_missing_count));
-		return;
-	case 44:
-		output.Append(Value::UBIGINT(traits.operator_missing_count));
-		return;
-	case 45:
+	case 23:
 		output.Append(Value(ExecutionRegionOwnershipKindToString(contract.source_ownership)));
 		return;
-	case 46:
+	case 24:
 		output.Append(Value(ExecutionRegionOwnershipKindToString(contract.state_scan_ownership)));
 		return;
-	case 47:
+	case 25:
 		output.Append(Value(ExecutionRegionOwnershipKindToString(contract.transform_ownership)));
 		return;
-	case 48:
+	case 26:
 		output.Append(Value(ExecutionRegionOwnershipKindToString(contract.sink_ownership)));
 		return;
-	case 49:
+	case 27:
 		output.Append(Value::UBIGINT(contract.generated_operator_count));
 		return;
-	case 50:
+	case 28:
 		output.Append(Value::UBIGINT(contract.source_boundary_count));
 		return;
-	case 51:
+	case 29:
 		output.Append(Value::UBIGINT(contract.missing_contract_count));
 		return;
-	case 52:
+	case 30:
 		output.Append(Value(FormatExecutionRegionStringList(contract.required_capabilities)));
 		return;
-	case 53:
+	case 31:
 		output.Append(Value(FormatExecutionRegionStringList(contract.blockers)));
 		return;
-	case 54:
+	case 32:
 		output.Append(Value::UBIGINT(traits.reference_varchar_projection_count));
 		return;
 	default:

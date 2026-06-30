@@ -54,23 +54,10 @@ unique_ptr<SljitNativePredicate> SljitNativePredicate::Copy() const {
 	return result;
 }
 
-static bool ShouldCopySljitNativeExpressionTree(const SljitNativeRegionExpressionPlan &input,
-                                                bool copy_auxiliary_expression_tree) {
-	if (!input.expression_tree) {
-		return false;
-	}
-	if (input.kind == SljitNativeRegionExpressionKind::EXPRESSION_TREE ||
-	    input.kind == SljitNativeRegionExpressionKind::TYPED_EXPRESSION_TREE) {
-		return true;
-	}
-	return copy_auxiliary_expression_tree;
-}
-
 SljitNativeRegionExpressionPlan SljitNativeRegionExpressionPlan::Copy(bool copy_auxiliary_expression_tree,
                                                                       bool copy_ir) const {
 	SljitNativeRegionExpressionPlan result;
 	result.kind = kind;
-	result.reference_origin = reference_origin;
 	result.integer_kind = integer_kind;
 	result.return_type = return_type;
 	result.constant_value = constant_value;
@@ -117,11 +104,16 @@ SljitNativeRegionExpressionPlan SljitNativeRegionExpressionPlan::Copy(bool copy_
 	result.lower_inclusive = lower_inclusive;
 	result.upper_inclusive = upper_inclusive;
 	result.predicate = predicate ? predicate->Copy() : nullptr;
-	if (ShouldCopySljitNativeExpressionTree(*this, copy_auxiliary_expression_tree)) {
+	const bool copy_expression_tree =
+	    expression_tree && (copy_auxiliary_expression_tree ||
+	                        kind == SljitNativeRegionExpressionKind::EXPRESSION_TREE ||
+	                        kind == SljitNativeRegionExpressionKind::TYPED_EXPRESSION_TREE);
+	if (copy_expression_tree) {
 		result.expression_tree = expression_tree->Copy();
 		result.expression_tree_source_indices = expression_tree_source_indices;
 	}
 	result.constant_or_null = constant_or_null;
+	result.references_region_input = references_region_input;
 	result.emit_flat_nullable_fast_path = emit_flat_nullable_fast_path;
 	if (copy_ir) {
 		result.ir = ir;
@@ -230,7 +222,6 @@ unique_ptr<SljitNativeRegionPlan> SljitNativeRegionPlan::Copy() const {
 	result->source_min_values = source_min_values;
 	result->source_max_values = source_max_values;
 	result->source_not_null = source_not_null;
-	result->summary = summary;
 	result->ops.reserve(ops.size());
 	for (auto &op : ops) {
 		result->ops.push_back(CopySljitNativeRegionOp(op));

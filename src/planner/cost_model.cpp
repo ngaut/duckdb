@@ -334,16 +334,11 @@ static PhysicalRunnerShapeFacts PhysicalRunnerBuildShapeFacts(const PhysicalRunn
 	return facts;
 }
 
-static bool PhysicalRunnerFullPipelineBenefitPaysEmptyFullPipelineProof(const PhysicalRunnerCostInput &input,
-                                                                        const PhysicalRunnerShapeFacts &facts) {
+static bool PhysicalRunnerFullPipelineBenefitPays(const PhysicalRunnerCostInput &input,
+                                                  const PhysicalRunnerShapeFacts &facts) {
 	return input.input_scope == PhysicalRunnerCostInputScope::EXECUTION_REGION_CANDIDATE && input.full_pipeline &&
 	       facts.native_operator_stage_count == 0 && input.generated_stage_count == 0 &&
 	       input.materialization_elision_count == 0;
-}
-
-static bool PhysicalRunnerFullPipelineBenefitPays(const PhysicalRunnerCostInput &input,
-                                                  const PhysicalRunnerShapeFacts &facts) {
-	return PhysicalRunnerFullPipelineBenefitPaysEmptyFullPipelineProof(input, facts);
 }
 
 static bool PhysicalRunnerNativeStageBenefitCanPay(const PhysicalRunnerCostInput &input,
@@ -483,16 +478,11 @@ static void PhysicalRunnerComputeWorkComponents(const PhysicalRunnerCostInput &i
 		}
 		profile.generated_stage_work = generated_stage_work;
 	}
-	const auto native_join_stage_count = SaturatingCostCast(input.native_join_stage_count);
-	const auto native_aggregate_stage_count = SaturatingCostCast(input.native_aggregate_stage_count);
-	const auto native_grouped_aggregate_stage_count = SaturatingCostCast(input.native_grouped_aggregate_stage_count);
-	const auto native_sort_stage_count = SaturatingCostCast(input.native_sort_stage_count);
-	D_ASSERT(native_aggregate_stage_count >= native_grouped_aggregate_stage_count);
-	const auto native_operator_stage_count =
-	    AddCost(AddCost(native_join_stage_count, native_aggregate_stage_count), native_sort_stage_count);
+	D_ASSERT(input.native_aggregate_stage_count >= input.native_grouped_aggregate_stage_count);
 	if (PhysicalRunnerNativeOperatorBenefitPays(input, parameters, admission)) {
 		const auto native_operator_stage_benefit = SaturatingCostCast(parameters.native_operator_stage_benefit);
-		profile.native_operator_work = MultiplyCost(native_operator_stage_count, native_operator_stage_benefit);
+		profile.native_operator_work =
+		    MultiplyCost(SaturatingCostCast(facts.native_operator_stage_count), native_operator_stage_benefit);
 	}
 	if (input.materialization_elision_count > 0) {
 		profile.materialization_elision_work =
@@ -510,6 +500,7 @@ static void PhysicalRunnerComputeWorkComponents(const PhysicalRunnerCostInput &i
 		}
 	}
 	if (input.native_join_stage_count > 0) {
+		const auto native_join_stage_count = SaturatingCostCast(input.native_join_stage_count);
 		profile.stateful_protocol_penalty = AddCost(
 		    profile.stateful_protocol_penalty, MultiplyCost(native_join_stage_count, NATIVE_JOIN_PROTOCOL_PENALTY));
 	}
@@ -580,7 +571,6 @@ struct PhysicalRunnerSelectionAnalysis {
 };
 
 static PhysicalRunnerSelectionAnalysis PhysicalRunnerAnalyzeSelection(const PhysicalRunnerCostInput &input,
-                                                                      const PhysicalRunnerShapeFacts &facts,
                                                                       const PhysicalRunnerAdmission &admission,
                                                                       const PhysicalRunnerCostProfile &profile,
                                                                       bool runner_available) {
@@ -630,10 +620,9 @@ PhysicalRunnerCostProfile DuckDBCostModel::SelectPhysicalRunner(const PhysicalRu
 	gpu_profile.net_benefit = SubtractCost(
 	    SubtractCost(gpu_profile.accelerated_runner_benefit, gpu_profile.startup_cost), gpu_profile.gpu_transfer_cost);
 
-	auto compiled_selection = PhysicalRunnerAnalyzeSelection(input, facts, compiled_admission, compiled_profile,
+	auto compiled_selection = PhysicalRunnerAnalyzeSelection(input, compiled_admission, compiled_profile,
 	                                                         parameters.compiled_vectorized_runner_available);
-	auto gpu_selection =
-	    PhysicalRunnerAnalyzeSelection(input, facts, gpu_admission, gpu_profile, parameters.gpu_runner_available);
+	auto gpu_selection = PhysicalRunnerAnalyzeSelection(input, gpu_admission, gpu_profile, parameters.gpu_runner_available);
 	const bool compiled_selected = compiled_selection.selected;
 	const bool gpu_selected = gpu_selection.selected;
 

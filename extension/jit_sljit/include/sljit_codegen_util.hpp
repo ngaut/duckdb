@@ -30,6 +30,20 @@ private:
 void *GenerateSljitCode(struct sljit_compiler *compiler);
 unique_ptr<ExecutionRegionCodeHandle> MakeSljitCodeHandle(void *code, idx_t code_size,
                                                           vector<shared_ptr<void>> owned_data = {});
+unique_ptr<ExecutionRegionCodeHandle> FinishSljitCode(struct sljit_compiler *compiler, void *&code, string &error,
+                                                      vector<shared_ptr<void>> owned_data = {});
+
+template <class FUNCTION>
+unique_ptr<ExecutionRegionCodeHandle> FinishSljitCode(struct sljit_compiler *compiler, FUNCTION &function,
+                                                      string &error, vector<shared_ptr<void>> owned_data = {}) {
+	void *code = nullptr;
+	auto handle = FinishSljitCode(compiler, code, error, std::move(owned_data));
+	if (!handle) {
+		return nullptr;
+	}
+	function = reinterpret_cast<FUNCTION>(code);
+	return handle;
+}
 
 sljit_sw NativeIntegerDataScale(SljitNativeIntegerKind kind);
 sljit_s32 NativeIntegerLoadOp(SljitNativeIntegerKind kind);

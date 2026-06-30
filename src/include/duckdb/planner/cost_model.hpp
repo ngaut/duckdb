@@ -37,10 +37,6 @@ struct PhysicalRunnerCostInput {
 	idx_t source_filter_count = 0;
 	bool full_pipeline = false;
 	bool uses_scan_filters = false;
-	idx_t node_count = 0;
-	idx_t stage_count = 0;
-	idx_t expression_node_count = 0;
-	idx_t operator_count = 0;
 	PhysicalRunnerGeneratedWorkClass generated_work_class = PhysicalRunnerGeneratedWorkClass::NONE;
 	PhysicalRunnerNativeProtocolClass native_protocol_class = PhysicalRunnerNativeProtocolClass::NONE;
 	bool has_accelerated_work = false;

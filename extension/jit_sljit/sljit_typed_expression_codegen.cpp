@@ -31,6 +31,13 @@ static void EmitStoreSljitTypedExpressionTreeSlot(struct sljit_compiler *compile
 	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_MEM1(SLJIT_SP), slot.valid_offset, valid_reg, 0);
 }
 
+static void EmitStoreSljitTypedExpressionTreeBool(struct sljit_compiler *compiler,
+                                                  const SljitTypedExpressionTreeSlot &slot, bool value) {
+	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R2, 0, SLJIT_IMM, value ? 1 : 0);
+	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R3, 0, SLJIT_IMM, 1);
+	EmitStoreSljitTypedExpressionTreeSlot(compiler, slot, SLJIT_R2, SLJIT_R3);
+}
+
 static int64_t SljitTypedExpressionTreeConstantValue(const ExecutionExpressionIR &node) {
 	if (node.constant.IsNull()) {
 		return 0;
@@ -221,58 +228,24 @@ static void EmitLoadSljitTypedExpressionTreeFastStringForPrefix(
 	sljit_emit_op1(compiler, SLJIT_MOV_U32, SLJIT_R2, 0, SLJIT_MEM1(SLJIT_R0), STRING_LENGTH_OFFSET);
 }
 
+static void EmitSljitTypedExpressionTreeFastStringBytesFalseBranches(struct sljit_compiler *compiler,
+                                                                     const string &constant,
+                                                                     vector<sljit_jump *> &false_jumps);
+
 static void EmitSljitTypedExpressionTreeFastStringPrefixFalseBranches(struct sljit_compiler *compiler,
                                                                       const string &prefix,
                                                                       vector<sljit_jump *> &false_jumps) {
-	static constexpr sljit_sw STRING_INLINE_PREFIX_OFFSET = sizeof(uint32_t);
-	static constexpr sljit_sw STRING_POINTER_OFFSET = sizeof(uint32_t) + string_t::PREFIX_BYTES;
-
 	false_jumps.push_back(
 	    sljit_emit_cmp(compiler, SLJIT_LESS, SLJIT_R2, 0, SLJIT_IMM, NumericCast<sljit_sw>(prefix.size())));
-	if (prefix.empty()) {
-		return;
-	}
-
-	const auto embedded_prefix_bytes =
-	    prefix.size() < string_t::PREFIX_BYTES ? prefix.size() : idx_t(string_t::PREFIX_BYTES);
-	for (idx_t byte_idx = 0; byte_idx < embedded_prefix_bytes;) {
-		const auto chunk_size = SljitTypedStringCompareChunkSize(embedded_prefix_bytes - byte_idx);
-		sljit_emit_mem(compiler, SljitTypedStringChunkLoadOp(chunk_size) | SLJIT_MEM_UNALIGNED, SLJIT_R3,
-		               SLJIT_MEM1(SLJIT_R0), NumericCast<sljit_sw>(STRING_INLINE_PREFIX_OFFSET + byte_idx));
-		false_jumps.push_back(sljit_emit_cmp(compiler, SLJIT_NOT_EQUAL, SLJIT_R3, 0, SLJIT_IMM,
-		                                     SljitTypedStringChunkImmediate(prefix, byte_idx, chunk_size)));
-		byte_idx += chunk_size;
-	}
-	if (prefix.size() <= string_t::PREFIX_BYTES) {
-		return;
-	}
-
-	auto non_inlined =
-	    sljit_emit_cmp(compiler, SLJIT_GREATER, SLJIT_R2, 0, SLJIT_IMM, NumericCast<sljit_sw>(string_t::INLINE_LENGTH));
-	sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_R4, 0, SLJIT_R0, 0, SLJIT_IMM, STRING_INLINE_PREFIX_OFFSET);
-	auto have_data = sljit_emit_jump(compiler, SLJIT_JUMP);
-	sljit_set_label(non_inlined, sljit_emit_label(compiler));
-	sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_R4, 0, SLJIT_MEM1(SLJIT_R0), STRING_POINTER_OFFSET);
-	sljit_set_label(have_data, sljit_emit_label(compiler));
-
-	for (idx_t byte_idx = string_t::PREFIX_BYTES; byte_idx < prefix.size();) {
-		const auto chunk_size = SljitTypedStringCompareChunkSize(prefix.size() - byte_idx);
-		sljit_emit_mem(compiler, SljitTypedStringChunkLoadOp(chunk_size) | SLJIT_MEM_UNALIGNED, SLJIT_R3,
-		               SLJIT_MEM1(SLJIT_R4), NumericCast<sljit_sw>(byte_idx));
-		false_jumps.push_back(sljit_emit_cmp(compiler, SLJIT_NOT_EQUAL, SLJIT_R3, 0, SLJIT_IMM,
-		                                     SljitTypedStringChunkImmediate(prefix, byte_idx, chunk_size)));
-		byte_idx += chunk_size;
-	}
+	EmitSljitTypedExpressionTreeFastStringBytesFalseBranches(compiler, prefix, false_jumps);
 }
 
-static void EmitSljitTypedExpressionTreeFastStringEqualFalseBranches(struct sljit_compiler *compiler,
+static void EmitSljitTypedExpressionTreeFastStringBytesFalseBranches(struct sljit_compiler *compiler,
                                                                      const string &constant,
                                                                      vector<sljit_jump *> &false_jumps) {
 	static constexpr sljit_sw STRING_INLINE_PREFIX_OFFSET = sizeof(uint32_t);
 	static constexpr sljit_sw STRING_POINTER_OFFSET = sizeof(uint32_t) + string_t::PREFIX_BYTES;
 
-	false_jumps.push_back(
-	    sljit_emit_cmp(compiler, SLJIT_NOT_EQUAL, SLJIT_R2, 0, SLJIT_IMM, NumericCast<sljit_sw>(constant.size())));
 	if (constant.empty()) {
 		return;
 	}
@@ -309,28 +282,17 @@ static void EmitSljitTypedExpressionTreeFastStringEqualFalseBranches(struct slji
 	}
 }
 
-static void EmitSljitTypedExpressionTreeStringPrefixFalseBranches(struct sljit_compiler *compiler, const string &prefix,
-                                                                  vector<sljit_jump *> &false_jumps) {
-	false_jumps.push_back(
-	    sljit_emit_cmp(compiler, SLJIT_LESS, SLJIT_R2, 0, SLJIT_IMM, NumericCast<sljit_sw>(prefix.size())));
-	if (prefix.empty()) {
-		return;
-	}
-	for (idx_t byte_idx = 0; byte_idx < prefix.size();) {
-		const auto chunk_size = SljitTypedStringCompareChunkSize(prefix.size() - byte_idx);
-		sljit_emit_mem(compiler, SljitTypedStringChunkLoadOp(chunk_size) | SLJIT_MEM_UNALIGNED, SLJIT_R3,
-		               SLJIT_MEM1(SLJIT_R4), NumericCast<sljit_sw>(byte_idx));
-		false_jumps.push_back(sljit_emit_cmp(compiler, SLJIT_NOT_EQUAL, SLJIT_R3, 0, SLJIT_IMM,
-		                                     SljitTypedStringChunkImmediate(prefix, byte_idx, chunk_size)));
-		byte_idx += chunk_size;
-	}
-}
-
-static void EmitSljitTypedExpressionTreeStringEqualFalseBranches(struct sljit_compiler *compiler,
-                                                                 const string &constant,
-                                                                 vector<sljit_jump *> &false_jumps) {
+static void EmitSljitTypedExpressionTreeFastStringEqualFalseBranches(struct sljit_compiler *compiler,
+                                                                     const string &constant,
+                                                                     vector<sljit_jump *> &false_jumps) {
 	false_jumps.push_back(
 	    sljit_emit_cmp(compiler, SLJIT_NOT_EQUAL, SLJIT_R2, 0, SLJIT_IMM, NumericCast<sljit_sw>(constant.size())));
+	EmitSljitTypedExpressionTreeFastStringBytesFalseBranches(compiler, constant, false_jumps);
+}
+
+static void EmitSljitTypedExpressionTreeStringBytesFalseBranches(struct sljit_compiler *compiler,
+                                                                 const string &constant,
+                                                                 vector<sljit_jump *> &false_jumps) {
 	for (idx_t byte_idx = 0; byte_idx < constant.size();) {
 		const auto chunk_size = SljitTypedStringCompareChunkSize(constant.size() - byte_idx);
 		sljit_emit_mem(compiler, SljitTypedStringChunkLoadOp(chunk_size) | SLJIT_MEM_UNALIGNED, SLJIT_R3,
@@ -339,6 +301,21 @@ static void EmitSljitTypedExpressionTreeStringEqualFalseBranches(struct sljit_co
 		                                     SljitTypedStringChunkImmediate(constant, byte_idx, chunk_size)));
 		byte_idx += chunk_size;
 	}
+}
+
+static void EmitSljitTypedExpressionTreeStringPrefixFalseBranches(struct sljit_compiler *compiler, const string &prefix,
+                                                                  vector<sljit_jump *> &false_jumps) {
+	false_jumps.push_back(
+	    sljit_emit_cmp(compiler, SLJIT_LESS, SLJIT_R2, 0, SLJIT_IMM, NumericCast<sljit_sw>(prefix.size())));
+	EmitSljitTypedExpressionTreeStringBytesFalseBranches(compiler, prefix, false_jumps);
+}
+
+static void EmitSljitTypedExpressionTreeStringEqualFalseBranches(struct sljit_compiler *compiler,
+                                                                 const string &constant,
+                                                                 vector<sljit_jump *> &false_jumps) {
+	false_jumps.push_back(
+	    sljit_emit_cmp(compiler, SLJIT_NOT_EQUAL, SLJIT_R2, 0, SLJIT_IMM, NumericCast<sljit_sw>(constant.size())));
+	EmitSljitTypedExpressionTreeStringBytesFalseBranches(compiler, constant, false_jumps);
 }
 
 static SljitTypedExpressionTreeSlot EmitSljitTypedExpressionTreeStringPrefix(struct sljit_compiler *compiler,
@@ -356,16 +333,12 @@ static SljitTypedExpressionTreeSlot EmitSljitTypedExpressionTreeStringPrefix(str
 	EmitLoadSljitTypedExpressionTreeStringForPrefix(compiler, source_index, null_jumps);
 	EmitSljitTypedExpressionTreeStringPrefixFalseBranches(compiler, prefix, false_jumps);
 
-	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R2, 0, SLJIT_IMM, 1);
-	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R3, 0, SLJIT_IMM, 1);
-	EmitStoreSljitTypedExpressionTreeSlot(compiler, result_slot, SLJIT_R2, SLJIT_R3);
+	EmitStoreSljitTypedExpressionTreeBool(compiler, result_slot, true);
 	auto done_from_true = sljit_emit_jump(compiler, SLJIT_JUMP);
 
 	auto false_label = sljit_emit_label(compiler);
 	SetSljitJumpLabels(false_jumps, false_label);
-	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R2, 0, SLJIT_IMM, 0);
-	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R3, 0, SLJIT_IMM, 1);
-	EmitStoreSljitTypedExpressionTreeSlot(compiler, result_slot, SLJIT_R2, SLJIT_R3);
+	EmitStoreSljitTypedExpressionTreeBool(compiler, result_slot, false);
 	auto done_from_false = sljit_emit_jump(compiler, SLJIT_JUMP);
 
 	auto null_label = sljit_emit_label(compiler);
@@ -525,26 +498,18 @@ static SljitTypedExpressionTreeSlot EmitSljitTypedExpressionTreeStringCompare(st
 	EmitLoadSljitTypedExpressionTreeStringForPrefix(compiler, source_index, null_jumps);
 	EmitSljitTypedExpressionTreeStringEqualFalseBranches(compiler, constant, equal_false_jumps);
 	if (compare_equal) {
-		sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R2, 0, SLJIT_IMM, 1);
-		sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R3, 0, SLJIT_IMM, 1);
-		EmitStoreSljitTypedExpressionTreeSlot(compiler, result_slot, SLJIT_R2, SLJIT_R3);
+		EmitStoreSljitTypedExpressionTreeBool(compiler, result_slot, true);
 		done_jumps.push_back(sljit_emit_jump(compiler, SLJIT_JUMP));
 		auto false_label = sljit_emit_label(compiler);
 		SetSljitJumpLabels(equal_false_jumps, false_label);
-		sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R2, 0, SLJIT_IMM, 0);
-		sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R3, 0, SLJIT_IMM, 1);
-		EmitStoreSljitTypedExpressionTreeSlot(compiler, result_slot, SLJIT_R2, SLJIT_R3);
+		EmitStoreSljitTypedExpressionTreeBool(compiler, result_slot, false);
 		done_jumps.push_back(sljit_emit_jump(compiler, SLJIT_JUMP));
 	} else {
-		sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R2, 0, SLJIT_IMM, 0);
-		sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R3, 0, SLJIT_IMM, 1);
-		EmitStoreSljitTypedExpressionTreeSlot(compiler, result_slot, SLJIT_R2, SLJIT_R3);
+		EmitStoreSljitTypedExpressionTreeBool(compiler, result_slot, false);
 		done_jumps.push_back(sljit_emit_jump(compiler, SLJIT_JUMP));
 		auto true_label = sljit_emit_label(compiler);
 		SetSljitJumpLabels(equal_false_jumps, true_label);
-		sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R2, 0, SLJIT_IMM, 1);
-		sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R3, 0, SLJIT_IMM, 1);
-		EmitStoreSljitTypedExpressionTreeSlot(compiler, result_slot, SLJIT_R2, SLJIT_R3);
+		EmitStoreSljitTypedExpressionTreeBool(compiler, result_slot, true);
 		done_jumps.push_back(sljit_emit_jump(compiler, SLJIT_JUMP));
 	}
 
@@ -1256,17 +1221,6 @@ EmitSljitTypedExpressionTreeFastBinaryReg(struct sljit_compiler *compiler, const
 	EmitSljitTypedExpressionTreeFastValueRegInternal(compiler, *node.right, spill_index, overflows, index_mode,
 	                                                 data_hoists);
 	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R4, 0, SLJIT_MEM1(SLJIT_SP), left_offset);
-	if (SljitTypedExpressionTreeComparisonSupported(node.binary_op)) {
-		auto compare_type = NativeIntegerCompareJumpType(SljitTypedExpressionTreeIntegerKind(*node.left),
-		                                                 SljitTypedExpressionTreeCompareOp(node.binary_op));
-		auto compare_true = sljit_emit_cmp(compiler, compare_type, SLJIT_R4, 0, SLJIT_R2, 0);
-		sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R2, 0, SLJIT_IMM, 0);
-		auto compare_done = sljit_emit_jump(compiler, SLJIT_JUMP);
-		sljit_set_label(compare_true, sljit_emit_label(compiler));
-		sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R2, 0, SLJIT_IMM, 1);
-		sljit_set_label(compare_done, sljit_emit_label(compiler));
-		return;
-	}
 	EmitSljitTypedExpressionTreeFastBinaryOpReg(compiler, node, SLJIT_R4, SLJIT_R2, SLJIT_R2, overflows);
 }
 
@@ -1559,7 +1513,7 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeTypedExpressionTree(const 
 	}
 	sljit_emit_return_void(compiler);
 
-	return FinishSljitNativeVectorCode(compiler, function, error);
+	return FinishSljitCode(compiler, function, error);
 }
 
 static void EmitStoreTypedExpressionTreeTrueSelection(struct sljit_compiler *compiler, sljit_s32 index_reg) {
@@ -1688,7 +1642,7 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeTypedExpressionTreeSelect(
 	}
 	sljit_emit_return_void(compiler);
 
-	return FinishSljitNativeVectorCode(compiler, function, error);
+	return FinishSljitCode(compiler, function, error);
 }
 
 static unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeUngroupedSumTypedExpressionTree(
@@ -1715,19 +1669,12 @@ static unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeUngroupedSumTypedEx
 	const auto local_size = saw_value_offset + NumericCast<sljit_sw>(sizeof(sljit_sw));
 
 	sljit_emit_enter(compiler, 0, SLJIT_ARGS1V(P), 5, 7, local_size);
-	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_S1, 0, SLJIT_IMM, 0);
-	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_S2, 0, SLJIT_MEM1(SLJIT_S0), offsetof(SljitNativeVectorInput, count));
+	EmitInitSljitNativeExpressionVectorLoop(compiler);
 	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_MEM1(SLJIT_SP), local_sum_offset, SLJIT_IMM, 0);
 	if (hugeint_state) {
 		sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_MEM1(SLJIT_SP), local_sum_upper_offset, SLJIT_IMM, 0);
 	}
 	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_MEM1(SLJIT_SP), saw_value_offset, SLJIT_IMM, 0);
-	sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_S4, 0, SLJIT_MEM1(SLJIT_S0),
-	               offsetof(SljitNativeVectorInput, source_sel_array));
-	sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_S5, 0, SLJIT_MEM1(SLJIT_S0),
-	               offsetof(SljitNativeVectorInput, source_data_array));
-	sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_S6, 0, SLJIT_MEM1(SLJIT_S0),
-	               offsetof(SljitNativeVectorInput, source_validity_array));
 
 	vector<SljitExpressionTreeOverflowJumps> overflows;
 	const auto &fast_path = tree_plan.fast_path;
@@ -1746,7 +1693,7 @@ static unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeUngroupedSumTypedEx
 		} else {
 			EmitSljitAggregateAccumulateInt64(compiler, local_sum_offset, saw_value_offset, SLJIT_R2);
 		}
-		EmitSljitAggregateLoopStep(compiler, fast_loop);
+		EmitNextSljitNativeVectorLoop(compiler, fast_loop);
 		sljit_set_label(use_slow_loop, sljit_emit_label(compiler));
 	}
 	struct sljit_jump *flat_nullable_done = nullptr;
@@ -1776,7 +1723,7 @@ static unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeUngroupedSumTypedEx
 			sljit_set_label(source_null_jump, flat_nullable_invalid);
 		}
 		sljit_set_label(flat_nullable_next, sljit_emit_label(compiler));
-		EmitSljitAggregateLoopStep(compiler, flat_nullable_loop);
+		EmitNextSljitNativeVectorLoop(compiler, flat_nullable_loop);
 		sljit_set_label(use_generic_loop, sljit_emit_label(compiler));
 	}
 
@@ -1798,7 +1745,7 @@ static unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeUngroupedSumTypedEx
 	auto row_done = sljit_emit_jump(compiler, SLJIT_JUMP);
 	sljit_set_label(root_invalid, sljit_emit_label(compiler));
 	sljit_set_label(row_done, sljit_emit_label(compiler));
-	EmitSljitAggregateLoopStep(compiler, loop);
+	EmitNextSljitNativeVectorLoop(compiler, loop);
 
 	vector<sljit_jump *> helper_done;
 	for (auto &overflow : overflows) {
@@ -1828,7 +1775,7 @@ static unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeUngroupedSumTypedEx
 	}
 	sljit_emit_return_void(compiler);
 
-	return FinishSljitNativeAggregateUpdateCode(compiler, function, error);
+	return FinishSljitCode(compiler, function, error);
 }
 
 unique_ptr<ExecutionRegionCodeHandle>

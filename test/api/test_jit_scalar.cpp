@@ -411,7 +411,7 @@ TEST_CASE("JIT lowers pruned table scan filters as generated source stages", "[a
 	    manager,
 	    [](const ExecutionRegionEvent &event) {
 		    return IsCompiledSljitRegionEvent(event) && event.candidate_traits.source_filter_count > 0 &&
-		           event.candidate_traits.source_contract_filter_prune_required &&
+		           StringUtil::Contains(event.reason, "source_contract_filter_prune_required=true") &&
 		           StringUtil::Contains(event.reason, "generated table scan source filters");
 	    },
 	    [](const ExecutionRegionEvent &event) {
@@ -448,7 +448,7 @@ TEST_CASE("JIT canonicalizes generated date range source filters as native betwe
 	});
 }
 
-TEST_CASE("JIT keeps large complex scan filters in DuckDB for ungrouped aggregates", "[api][jit]") {
+TEST_CASE("JIT lowers large complex scan filters as generated source stages", "[api][jit]") {
 	DuckDB db;
 	Connection con(db);
 	auto &manager = ExecutionRegionManager::Get(*con.context);
@@ -470,11 +470,12 @@ TEST_CASE("JIT keeps large complex scan filters in DuckDB for ungrouped aggregat
 	    [](const ExecutionRegionEvent &event) {
 		    return IsCompiledSljitRegionEvent(event) && event.candidate_traits.source_filter_count > 1 &&
 		           event.candidate_traits.sink_kind == ExecutionRegionSinkKind::UNGROUPED_AGGREGATE_UPDATE &&
-		           StringUtil::Contains(event.reason, "vectorized table scan filters");
+		           StringUtil::Contains(event.reason, "generated table scan source filters");
 	    },
 	    [](const ExecutionRegionEvent &event) {
-		    REQUIRE(event.selected_uses_scan_filters);
-		    REQUIRE_FALSE(StringUtil::Contains(event.reason, "generated table scan source filters"));
+		    REQUIRE_FALSE(event.selected_uses_scan_filters);
+		    REQUIRE_FALSE(event.candidate_uses_scan_filters);
+		    REQUIRE(event.runner_cost.generated_stage_count > 0);
 		    RequireGeneratedMachineCodeRegion(event);
 	    });
 }

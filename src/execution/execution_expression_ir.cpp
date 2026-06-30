@@ -142,11 +142,6 @@ static bool ExecutionExpressionIsArithmeticOp(ExecutionExpressionBinaryOp op) {
 	}
 }
 
-static bool ExecutionExpressionBinaryOperandsAreIntegral(const ExecutionExpressionIR &node) {
-	return node.left && node.right && ExecutionExpressionIsIntegralType(node.left->return_type) &&
-	       ExecutionExpressionIsIntegralType(node.right->return_type);
-}
-
 static bool TryInvertExecutionComparisonOp(ExecutionExpressionBinaryOp input, ExecutionExpressionBinaryOp &result) {
 	switch (input) {
 	case ExecutionExpressionBinaryOp::COMPARE_EQUAL:
@@ -607,61 +602,20 @@ static ExecutionExpressionExceptionKind GetExecutionExpressionExceptionBehavior(
 static void MergeChildExecutionExpressionTraits(ExecutionExpressionTraits &target,
                                                 const ExecutionExpressionTraits &source) {
 	target.has_arithmetic_binary = target.has_arithmetic_binary || source.has_arithmetic_binary;
-	target.has_integer_arithmetic_result = target.has_integer_arithmetic_result || source.has_integer_arithmetic_result;
-	target.has_non_integer_arithmetic_result =
-	    target.has_non_integer_arithmetic_result || source.has_non_integer_arithmetic_result;
-	target.has_comparison_binary = target.has_comparison_binary || source.has_comparison_binary;
-	target.has_integer_comparison_operands =
-	    target.has_integer_comparison_operands || source.has_integer_comparison_operands;
-	target.has_non_integer_comparison_operands =
-	    target.has_non_integer_comparison_operands || source.has_non_integer_comparison_operands;
 	target.has_conjunction = target.has_conjunction || source.has_conjunction;
-	target.expression_node_count += source.expression_node_count;
-	target.reference_expression_count += source.reference_expression_count;
 	target.predicate_expression_count += source.predicate_expression_count;
 	target.control_expression_count += source.control_expression_count;
-	target.arithmetic_binary_count += source.arithmetic_binary_count;
-	target.integer_arithmetic_result_count += source.integer_arithmetic_result_count;
-	target.non_integer_arithmetic_result_count += source.non_integer_arithmetic_result_count;
-	target.comparison_binary_count += source.comparison_binary_count;
-	target.integer_comparison_operand_count += source.integer_comparison_operand_count;
-	target.non_integer_comparison_operand_count += source.non_integer_comparison_operand_count;
-	target.conjunction_count += source.conjunction_count;
-	target.string_predicate_count += source.string_predicate_count;
-	target.high_cost_string_predicate_count += source.high_cost_string_predicate_count;
-	target.string_like_count += source.string_like_count;
-	target.string_contains_count += source.string_contains_count;
-	target.string_prefix_count += source.string_prefix_count;
-	target.string_suffix_count += source.string_suffix_count;
 }
 
-static void AnnotateExecutionExpressionStringPredicate(ExecutionExpressionTraits &traits,
-                                                       ExecutionExpressionIntrinsicKind intrinsic) {
+static bool ExecutionExpressionIntrinsicIsStringPredicate(ExecutionExpressionIntrinsicKind intrinsic) {
 	switch (intrinsic) {
 	case ExecutionExpressionIntrinsicKind::STRING_LIKE:
-		traits.predicate_expression_count++;
-		traits.string_predicate_count++;
-		traits.high_cost_string_predicate_count++;
-		traits.string_like_count++;
-		break;
 	case ExecutionExpressionIntrinsicKind::STRING_CONTAINS:
-		traits.predicate_expression_count++;
-		traits.string_predicate_count++;
-		traits.high_cost_string_predicate_count++;
-		traits.string_contains_count++;
-		break;
 	case ExecutionExpressionIntrinsicKind::STRING_PREFIX:
-		traits.predicate_expression_count++;
-		traits.string_predicate_count++;
-		traits.string_prefix_count++;
-		break;
 	case ExecutionExpressionIntrinsicKind::STRING_SUFFIX:
-		traits.predicate_expression_count++;
-		traits.string_predicate_count++;
-		traits.string_suffix_count++;
-		break;
+		return true;
 	default:
-		break;
+		return false;
 	}
 }
 
@@ -684,44 +638,23 @@ static ExecutionExpressionTraits AnnotateExecutionExpressionIR(ExecutionExpressi
 	node.source = GetExecutionExpressionSource(node);
 	node.exception_behavior = GetExecutionExpressionExceptionBehavior(node);
 
-	traits.expression_node_count++;
 	traits.root_is_reference = node.kind == ExecutionExpressionIRKind::REFERENCE;
-	if (node.kind == ExecutionExpressionIRKind::REFERENCE) {
-		traits.reference_expression_count++;
-	}
 	if (node.kind == ExecutionExpressionIRKind::BINARY) {
 		if (ExecutionExpressionIsArithmeticOp(node.binary_op)) {
 			traits.has_arithmetic_binary = true;
-			traits.arithmetic_binary_count++;
-			if (ExecutionExpressionIsIntegralType(node.return_type)) {
-				traits.has_integer_arithmetic_result = true;
-				traits.integer_arithmetic_result_count++;
-			} else {
-				traits.has_non_integer_arithmetic_result = true;
-				traits.non_integer_arithmetic_result_count++;
-			}
 		}
 		if (ExecutionExpressionIsComparisonOp(node.binary_op)) {
-			traits.has_comparison_binary = true;
 			traits.predicate_expression_count++;
-			traits.comparison_binary_count++;
-			if (ExecutionExpressionBinaryOperandsAreIntegral(node)) {
-				traits.has_integer_comparison_operands = true;
-				traits.integer_comparison_operand_count++;
-			} else {
-				traits.has_non_integer_comparison_operands = true;
-				traits.non_integer_comparison_operand_count++;
-			}
 		}
 	}
 	if (node.kind == ExecutionExpressionIRKind::CONJUNCTION) {
 		traits.has_conjunction = true;
 		traits.predicate_expression_count++;
 		traits.control_expression_count++;
-		traits.conjunction_count++;
 	}
-	if (node.kind == ExecutionExpressionIRKind::INTRINSIC) {
-		AnnotateExecutionExpressionStringPredicate(traits, node.intrinsic);
+	if (node.kind == ExecutionExpressionIRKind::INTRINSIC &&
+	    ExecutionExpressionIntrinsicIsStringPredicate(node.intrinsic)) {
+		traits.predicate_expression_count++;
 	}
 	if (node.kind == ExecutionExpressionIRKind::UNARY &&
 	    (node.unary_op == ExecutionExpressionUnaryOp::NOT || node.unary_op == ExecutionExpressionUnaryOp::IS_NULL ||

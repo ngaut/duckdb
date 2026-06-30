@@ -10,14 +10,13 @@
 
 namespace duckdb {
 
-static bool SljitSourceContractIsBlocked(const ExecutionRegionNode &node) {
-	if (!node.source) {
-		return false;
+static SljitRegionNodePlan SljitUnsupportedExpressionBoundaryNode(const string &error) {
+	string reason = "region IR node is unsupported by SLJIT native contract lowering";
+	if (!error.empty()) {
+		reason += ";";
+		reason += error;
 	}
-	auto &source_contract = node.source->source_contract;
-	return source_contract.status == ExecutionRegionSourceContractStatus::BLOCKED &&
-	       !source_contract.required_capability.empty() && !source_contract.contract_version.empty() &&
-	       !source_contract.blocker.empty();
+	return SljitRegionBoundaryNode(std::move(reason));
 }
 
 SljitRegionNodePlan PlanSljitFilterNode(const ExecutionRegionNode &node, string &error, bool render_diagnostics) {
@@ -93,9 +92,7 @@ SljitRegionNodePlan PlanSljitProjectionNode(const ExecutionRegionNode &node, con
 
 	SljitNativeRegionOpPlan native_op;
 	if (TryPlanDirectSljitProjection(node, native_op, error, render_diagnostics)) {
-		const auto reason =
-		    SljitNativeRegionOpGeneratesCode(native_op) ? "generated typed projection" : "reference projection remap";
-		return SljitNativeNode(std::move(native_op), reason);
+		return SljitNativeNode(std::move(native_op), "native projection");
 	}
 
 	vector<SljitNativeRegionOpPlan> native_ops;
@@ -105,36 +102,24 @@ SljitRegionNodePlan PlanSljitProjectionNode(const ExecutionRegionNode &node, con
 	return SljitNativeNode(std::move(native_ops), "generated typed projection expression graph");
 }
 
-static string SljitSourceIR(const ExecutionRegionNode &node, bool render_diagnostics,
-                            ExecutionRegionSourceExecutionKind execution = ExecutionRegionSourceExecutionKind::NONE) {
-	if (!render_diagnostics) {
-		return string();
-	}
-	if (!node.source) {
-		return string();
-	}
-	return DescribeExecutionRegionSourceInfo(*node.source, execution);
-}
-
 static void
 AppendSljitSourceIR(string &reason, const ExecutionRegionNode &node, bool render_diagnostics,
                     ExecutionRegionSourceExecutionKind execution = ExecutionRegionSourceExecutionKind::NONE) {
-	auto source_ir = SljitSourceIR(node, render_diagnostics, execution);
-	if (!source_ir.empty()) {
-		reason += ";";
-		reason += source_ir;
+	if (!render_diagnostics || !node.source) {
+		return;
 	}
+	reason += ";";
+	reason += DescribeExecutionRegionSourceInfo(*node.source, execution);
 }
 
-static SljitRegionNodePlan SljitNativeSourceNode(string reason, const ExecutionRegionNode &node,
-                                                 ExecutionRegionSourceExecutionKind execution, bool render_diagnostics,
+static SljitRegionNodePlan SljitNativeSourceNode(string reason, const ExecutionRegionNode &node, bool render_diagnostics,
                                                  bool uses_scan_filters = false) {
 	SljitRegionNodePlan result;
 	result.kind = ExecutionRegionLoweringKind::NATIVE;
-	result.source_execution = execution;
+	result.source_execution = ExecutionRegionSourceExecutionKind::SOURCE_CONTRACT;
 	result.uses_scan_filters = uses_scan_filters;
 	result.reason = std::move(reason);
-	AppendSljitSourceIR(result.reason, node, render_diagnostics, execution);
+	AppendSljitSourceIR(result.reason, node, render_diagnostics, ExecutionRegionSourceExecutionKind::SOURCE_CONTRACT);
 	return result;
 }
 
@@ -197,47 +182,28 @@ static bool TryBuildSljitSourceContractOutputProjection(const ExecutionRegionNod
 			error = "source contract projection type does not match source output type";
 			return false;
 		}
-		SljitNativeRegionExpressionPlan reference;
-		reference.kind = SljitNativeRegionExpressionKind::REFERENCE;
-		reference.return_type = input_types[input_idx];
-		reference.source_index = input_idx;
-		if (render_diagnostics) {
-			reference.ir = "source-contract-output-reference";
-		}
-		projection.projections.push_back(std::move(reference));
+		auto ir = render_diagnostics ? "source-contract-output-reference" : string();
+		projection.projections.push_back(
+		    SljitNativeReferenceExpression(input_idx, input_types[input_idx], std::move(ir), true));
 		projection.output_types.push_back(input_types[input_idx]);
 	}
 	return true;
 }
 
-static SljitNativeRegionExpressionPlan MakeSljitSourceReference(const vector<LogicalType> &source_types,
-                                                                idx_t source_index) {
-	D_ASSERT(source_index < source_types.size());
-	SljitNativeRegionExpressionPlan source_reference;
-	source_reference.kind = SljitNativeRegionExpressionKind::REFERENCE;
-	source_reference.return_type = source_types[source_index];
-	source_reference.source_index = source_index;
-	return source_reference;
-}
+static bool TryPlanSljitSourceFilters(const ExecutionRegionNode &node, vector<SljitNativeRegionOpPlan> &native_ops,
+                                      string &error, bool render_diagnostics) {
+	D_ASSERT(node.source);
+	auto &contract = node.source->table_scan_contract;
+	if (!contract.present || contract.source_contract_input_types.empty()) {
+		error = "generated source filters require source contract input types";
+		return false;
+	}
+	if (node.source->filters.empty()) {
+		error = "generated source filters require source filter expressions";
+		return false;
+	}
 
-static unique_ptr<ExecutionExpressionIR>
-MakeSljitSourceFilterConjunctionTree(vector<unique_ptr<ExecutionExpressionIR>> children) {
-	auto conjunction = make_uniq<ExecutionExpressionIR>();
-	conjunction->kind = ExecutionExpressionIRKind::CONJUNCTION;
-	conjunction->return_type = LogicalType::BOOLEAN;
-	conjunction->physical_type = PhysicalType::BOOL;
-	conjunction->validity = ExecutionExpressionValidityKind::THREE_VALUED_BOOLEAN;
-	conjunction->source = ExecutionExpressionSourceKind::DERIVED;
-	conjunction->exception_behavior = ExecutionExpressionExceptionKind::NONE;
-	conjunction->conjunction_op = ExecutionExpressionConjunctionOp::AND;
-	conjunction->children = std::move(children);
-	return conjunction;
-}
-
-static bool TryBuildSljitFusedSourceFilterExpression(const ExecutionRegionNode &node,
-                                                     const vector<LogicalType> &source_types,
-                                                     SljitNativeRegionExpressionPlan &filter, string &error,
-                                                     bool render_diagnostics) {
+	auto &source_types = contract.source_contract_input_types;
 	vector<unique_ptr<ExecutionExpressionIR>> filter_trees;
 	filter_trees.reserve(node.source->filters.size());
 	for (auto &source_filter : node.source->filters) {
@@ -255,7 +221,8 @@ static bool TryBuildSljitFusedSourceFilterExpression(const ExecutionRegionNode &
 		}
 
 		vector<SljitNativeRegionExpressionPlan> source_filter_projection;
-		source_filter_projection.push_back(MakeSljitSourceReference(source_types, source_filter.scan_column_index));
+		source_filter_projection.push_back(SljitNativeReferenceExpression(
+		    source_filter.scan_column_index, source_types[source_filter.scan_column_index], string(), true));
 		unique_ptr<ExecutionExpressionIR> tree;
 		if (!TryLowerNativeRegionExpressionTreeThroughProjection(*source_filter.expression, source_filter_projection,
 		                                                         tree, error, render_diagnostics)) {
@@ -269,33 +236,24 @@ static bool TryBuildSljitFusedSourceFilterExpression(const ExecutionRegionNode &
 	if (filter_trees.size() == 1) {
 		fused_filter.root = std::move(filter_trees[0]);
 	} else {
-		fused_filter.root = MakeSljitSourceFilterConjunctionTree(std::move(filter_trees));
+		auto conjunction = make_uniq<ExecutionExpressionIR>();
+		conjunction->kind = ExecutionExpressionIRKind::CONJUNCTION;
+		conjunction->return_type = LogicalType::BOOLEAN;
+		conjunction->physical_type = PhysicalType::BOOL;
+		conjunction->validity = ExecutionExpressionValidityKind::THREE_VALUED_BOOLEAN;
+		conjunction->source = ExecutionExpressionSourceKind::DERIVED;
+		conjunction->exception_behavior = ExecutionExpressionExceptionKind::NONE;
+		conjunction->conjunction_op = ExecutionExpressionConjunctionOp::AND;
+		conjunction->children = std::move(filter_trees);
+		fused_filter.root = std::move(conjunction);
 	}
 	if (render_diagnostics) {
 		fused_filter.ir = "fused-generated-source-filters";
 	}
-	return TryLowerNativeRegionExpression(fused_filter, true, filter, error, render_diagnostics);
-}
-
-static bool TryPlanSljitFusedGeneratedSourceFilters(const ExecutionRegionNode &node,
-                                                    vector<SljitNativeRegionOpPlan> &native_ops, string &error,
-                                                    bool render_diagnostics) {
-	D_ASSERT(node.source);
-	auto &contract = node.source->table_scan_contract;
-	if (!contract.present || contract.source_contract_input_types.empty()) {
-		error = "generated source filters require source contract input types";
-		return false;
-	}
-	if (node.source->filters.empty()) {
-		error = "generated source filters require source filter expressions";
-		return false;
-	}
-
-	auto &current_types = contract.source_contract_input_types;
 	SljitNativeRegionOpPlan filter_op;
 	filter_op.kind = SljitNativeRegionOpKind::FILTER;
-	filter_op.output_types = current_types;
-	if (!TryBuildSljitFusedSourceFilterExpression(node, current_types, filter_op.filter, error, render_diagnostics)) {
+	filter_op.output_types = source_types;
+	if (!TryLowerNativeRegionExpression(fused_filter, true, filter_op.filter, error, render_diagnostics)) {
 		return false;
 	}
 
@@ -308,73 +266,8 @@ static bool TryPlanSljitFusedGeneratedSourceFilters(const ExecutionRegionNode &n
 	return true;
 }
 
-static bool TryPlanSljitGeneratedSourceFilters(const ExecutionRegionNode &node,
-                                               vector<SljitNativeRegionOpPlan> &native_ops, string &error,
-                                               bool render_diagnostics) {
-	D_ASSERT(node.source);
-	auto &contract = node.source->table_scan_contract;
-	if (!contract.present || contract.source_contract_input_types.empty()) {
-		error = "generated source filters require source contract input types";
-		return false;
-	}
-	if (node.source->filters.empty()) {
-		error = "generated source filters require source filter expressions";
-		return false;
-	}
-	auto current_types = contract.source_contract_input_types;
-	for (auto &filter : node.source->filters) {
-		if (!filter.generated_source_stage_candidate) {
-			error = "source filter is not a generated source stage candidate";
-			return false;
-		}
-		if (!filter.expression || !filter.expression->root) {
-			error = filter.reason.empty() ? "source filter has no lowered expression IR" : filter.reason;
-			return false;
-		}
-		SljitNativeRegionOpPlan filter_op;
-		filter_op.kind = SljitNativeRegionOpKind::FILTER;
-		filter_op.output_types = current_types;
-		if (!TryLowerNativeRegionExpression(*filter.expression, true, filter_op.filter, error, render_diagnostics)) {
-			return false;
-		}
-		if (filter.scan_column_index >= current_types.size()) {
-			error = "source filter references column outside source input";
-			return false;
-		}
-		vector<SljitNativeRegionExpressionPlan> source_filter_projection;
-		source_filter_projection.push_back(MakeSljitSourceReference(current_types, filter.scan_column_index));
-		if (!TryMapNativeProjectionExpressionSources(source_filter_projection, filter_op.filter)) {
-			error = "source filter expression could not be mapped to source input column";
-			return false;
-		}
-		native_ops.push_back(std::move(filter_op));
-	}
-
-	SljitNativeRegionOpPlan projection;
-	if (!TryBuildSljitSourceContractOutputProjection(node, contract, projection, error, render_diagnostics)) {
-		return false;
-	}
-	native_ops.push_back(std::move(projection));
-	return true;
-}
-
-static bool SljitSourceFiltersPreferDuckDBScanFilter(const ExecutionRegionCandidateTraits &traits) {
-	constexpr idx_t LARGE_COMPLEX_SCAN_FILTER_CARDINALITY = STANDARD_VECTOR_SIZE * 512ULL;
-	const bool complex_scan_filter = traits.source_filter_count > 1 || traits.source_conjunction_filter_count > 0;
-	const bool native_ungrouped_aggregate = traits.sink_kind == ExecutionRegionSinkKind::UNGROUPED_AGGREGATE_UPDATE;
-	const bool large_ungrouped_aggregate =
-	    native_ungrouped_aggregate && traits.estimated_source_cardinality >= LARGE_COMPLEX_SCAN_FILTER_CARDINALITY;
-	const bool native_grouped_multi_join_aggregate =
-	    traits.sink_kind == ExecutionRegionSinkKind::HASH_AGGREGATE_UPDATE && traits.hash_join_operator_count >= 2;
-	const bool large_multi_join_grouped_aggregate =
-	    native_grouped_multi_join_aggregate &&
-	    traits.estimated_source_cardinality >= LARGE_COMPLEX_SCAN_FILTER_CARDINALITY;
-	return complex_scan_filter && (large_ungrouped_aggregate || large_multi_join_grouped_aggregate);
-}
-
 static SljitRegionNodePlan PlanSljitSourceContractNode(const ExecutionRegionNode &node,
                                                        const ExecutionRegionContract &contract,
-                                                       const ExecutionRegionCandidateTraits &candidate_traits,
                                                        bool render_diagnostics) {
 	D_ASSERT(node.source);
 	auto &table_scan_contract = node.source->table_scan_contract;
@@ -391,38 +284,23 @@ static SljitRegionNodePlan PlanSljitSourceContractNode(const ExecutionRegionNode
 			    "vectorized dynamic table scan filters;source-strategy=duckdb-scan-filtered-source-contract";
 			reason += ";source_contract_filter_pushdown=true";
 			reason += ";source_contract_dynamic_filters=true";
-			return SljitNativeSourceNode(std::move(reason), node, ExecutionRegionSourceExecutionKind::SOURCE_CONTRACT,
-			                             render_diagnostics, true);
+			return SljitNativeSourceNode(std::move(reason), node, render_diagnostics, true);
 		}
-		return SljitNativeSourceNode("table scan source contract", node,
-		                             ExecutionRegionSourceExecutionKind::SOURCE_CONTRACT, render_diagnostics);
+		return SljitNativeSourceNode("table scan source contract", node, render_diagnostics);
 	}
 
 	if (table_scan_contract.filter_pushdown) {
-		if (SljitSourceFiltersPreferDuckDBScanFilter(candidate_traits)) {
-			string reason = "vectorized table scan filters;source-strategy=duckdb-scan-filtered-source-contract";
-			AppendSljitSourceFilterFacts(reason, node, table_scan_contract, false);
-			reason += ";source_contract_filter_pushdown=true";
-			reason += ";source_contract_complex_filter=true";
-			reason += ";source_contract_native_join_aggregate=true";
-			return SljitNativeSourceNode(std::move(reason), node, ExecutionRegionSourceExecutionKind::SOURCE_CONTRACT,
-			                             render_diagnostics, true);
-		}
 		vector<SljitNativeRegionOpPlan> native_ops;
 		string error;
-		if (TryPlanSljitFusedGeneratedSourceFilters(node, native_ops, error, render_diagnostics) ||
-		    TryPlanSljitGeneratedSourceFilters(node, native_ops, error, render_diagnostics)) {
-			auto result =
-			    SljitNativeSourceNode("generated table scan source filters", node,
-			                          ExecutionRegionSourceExecutionKind::SOURCE_CONTRACT, render_diagnostics);
+		if (TryPlanSljitSourceFilters(node, native_ops, error, render_diagnostics)) {
+			auto result = SljitNativeSourceNode("generated table scan source filters", node, render_diagnostics);
 			result.native_ops = std::move(native_ops);
 			return result;
 		}
 		string reason = "vectorized table scan filters;source-strategy=duckdb-scan-filtered-source-contract";
 		AppendSljitSourceFilterFacts(reason, node, table_scan_contract, false);
 		reason += ";source_contract_filter_pushdown=true";
-		return SljitNativeSourceNode(std::move(reason), node, ExecutionRegionSourceExecutionKind::SOURCE_CONTRACT,
-		                             render_diagnostics, true);
+		return SljitNativeSourceNode(std::move(reason), node, render_diagnostics, true);
 	}
 
 	return SljitRegionBoundaryNode("table scan source filters require DuckDB scan filter pushdown");
@@ -449,8 +327,7 @@ static SljitRegionNodePlan PlanSljitNativeStateScanSourceNode(const ExecutionReg
 		reason += ";native-state-scan-capability=" + node.source->native_state_scan_contract.required_capability;
 		reason += ";native-state-scan-contract-version=" + node.source->native_state_scan_contract.contract_version;
 	}
-	return SljitNativeSourceNode(std::move(reason), node, ExecutionRegionSourceExecutionKind::SOURCE_CONTRACT,
-	                             render_diagnostics);
+	return SljitNativeSourceNode(std::move(reason), node, render_diagnostics);
 }
 
 static SljitRegionNodePlan PlanSljitNativeStatefulSourceNode(const ExecutionRegionNode &node,
@@ -474,12 +351,10 @@ static SljitRegionNodePlan PlanSljitNativeStatefulSourceNode(const ExecutionRegi
 		reason += ";source-contract-capability=" + node.source->source_contract.required_capability;
 		reason += ";source-contract-version=" + node.source->source_contract.contract_version;
 	}
-	return SljitNativeSourceNode(std::move(reason), node, ExecutionRegionSourceExecutionKind::SOURCE_CONTRACT,
-	                             render_diagnostics);
+	return SljitNativeSourceNode(std::move(reason), node, render_diagnostics);
 }
 
 SljitRegionNodePlan PlanSljitSourceNode(const ExecutionRegionNode &node, const ExecutionRegionContract &contract,
-                                        const ExecutionRegionCandidateTraits &candidate_traits,
                                         ExecutionRegionSourceExecutionKind source_execution, bool render_diagnostics) {
 	if (!node.source) {
 		return SljitRegionBoundaryNode("source boundary requires typed source IR");
@@ -506,7 +381,7 @@ SljitRegionNodePlan PlanSljitSourceNode(const ExecutionRegionNode &node, const E
 			}
 			return PlanSljitNativeStatefulSourceNode(node, contract, render_diagnostics);
 		}
-		return PlanSljitSourceContractNode(node, contract, candidate_traits, render_diagnostics);
+		return PlanSljitSourceContractNode(node, contract, render_diagnostics);
 	}
 	if (node.operator_kind == ExecutionRegionOperatorKind::TABLE_SCAN && !node.source->table_scan_contract.present) {
 		return SljitRegionBoundaryNode("table scan source boundary requires typed table scan contract IR");
@@ -530,7 +405,9 @@ SljitRegionNodePlan PlanSljitSourceNode(const ExecutionRegionNode &node, const E
 	AppendSljitSourceIR(boundary_reason, node, render_diagnostics,
 	                    ExecutionRegionSourceExecutionKind::DUCKDB_SOURCE_BOUNDARY);
 	auto result = SljitRegionBoundaryNode(std::move(boundary_reason));
-	result.requires_source_contract = SljitSourceContractIsBlocked(node);
+	result.requires_source_contract = source_contract.status == ExecutionRegionSourceContractStatus::BLOCKED &&
+	                                  !source_contract.required_capability.empty() &&
+	                                  !source_contract.contract_version.empty() && !source_contract.blocker.empty();
 	return result;
 }
 

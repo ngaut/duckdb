@@ -41,15 +41,10 @@ inline sljit_sw SljitPointerArrayOffset(idx_t index) {
 	return NumericCast<sljit_sw>(index * sizeof(data_ptr_t));
 }
 
-unique_ptr<ExecutionRegionCodeHandle> FinishSljitNativeVectorCode(struct sljit_compiler *compiler,
-                                                                  SljitNativeVectorFunction &function, string &error);
-unique_ptr<ExecutionRegionCodeHandle> FinishSljitNativeAggregateUpdateCode(struct sljit_compiler *compiler,
-                                                                           SljitNativeAggregateUpdateFunction &function,
-                                                                           string &error);
-
 void EmitInitSljitNativeVectorLoop(struct sljit_compiler *compiler);
 void EmitInitSljitNativeVectorSourceArrays(struct sljit_compiler *compiler);
 void EmitInitSljitNativeExpressionVectorLoop(struct sljit_compiler *compiler);
+void EmitNextSljitNativeVectorLoop(struct sljit_compiler *compiler, struct sljit_label *loop);
 void EmitLoadLogicalIndex(struct sljit_compiler *compiler, sljit_s32 target);
 void EmitLoadSourceIndex(struct sljit_compiler *compiler, sljit_sw sel_offset, sljit_s32 logical_index,
                          sljit_s32 target);
@@ -77,7 +72,6 @@ void EmitSljitAggregateAccumulateHugeintInt64(struct sljit_compiler *compiler, s
                                               sljit_s32 value_reg);
 void EmitSljitAggregateCommitHugeint(struct sljit_compiler *compiler, sljit_sw local_lower_offset,
                                      sljit_sw local_upper_offset, sljit_sw saw_value_offset);
-void EmitSljitAggregateLoopStep(struct sljit_compiler *compiler, struct sljit_label *loop);
 
 double SLJIT_FUNC SljitNativeHugeintToDouble(uint64_t lower, int64_t upper);
 void SLJIT_FUNC SljitNativeAggregateHugeintCommit(SljitNativeVectorInput *input);

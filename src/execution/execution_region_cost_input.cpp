@@ -25,148 +25,20 @@
 
 namespace duckdb {
 
-class ExecutionRegionRunnerCostInputBuilder {
-public:
-	void SetEstimatedCardinality(idx_t estimated_cardinality) {
-		input.estimated_cardinality = estimated_cardinality;
+static void AddExecutionRegionGeneratedExpressionWork(PhysicalRunnerCostInput &input, idx_t expression_cost) {
+	if (expression_cost == 0) {
+		return;
 	}
+	input.expression_cost += expression_cost;
+	input.generated_stage_count++;
+}
 
-	void SetInputScope(PhysicalRunnerCostInputScope input_scope) {
-		input.input_scope = input_scope;
+static void AddExecutionRegionNativeAggregateStage(PhysicalRunnerCostInput &input, bool grouped) {
+	input.native_aggregate_stage_count++;
+	if (grouped) {
+		input.native_grouped_aggregate_stage_count++;
 	}
-
-	void MaxEstimatedCardinality(idx_t estimated_cardinality) {
-		input.estimated_cardinality = MaxValue(input.estimated_cardinality, estimated_cardinality);
-	}
-
-	void SetExpressionCost(idx_t expression_cost) {
-		input.expression_cost = expression_cost;
-	}
-
-	void AddGeneratedExpressionWork(idx_t expression_cost) {
-		if (expression_cost == 0) {
-			return;
-		}
-		input.expression_cost += expression_cost;
-		input.generated_stage_count++;
-	}
-
-	void SetGeneratedStageCount(idx_t generated_stage_count) {
-		input.generated_stage_count = generated_stage_count;
-	}
-
-	void SetMaterializationElisionCount(idx_t materialization_elision_count) {
-		input.materialization_elision_count = materialization_elision_count;
-	}
-
-	void SetMaterializationSourceAppendCount(idx_t materialization_source_append_count) {
-		input.materialization_source_append_count = materialization_source_append_count;
-	}
-
-	void SetNativeJoinStageCount(idx_t native_join_stage_count) {
-		input.native_join_stage_count = native_join_stage_count;
-	}
-
-	void AddNativeJoinStage() {
-		input.native_join_stage_count++;
-	}
-
-	void SetNativeAggregateStageCount(idx_t native_aggregate_stage_count) {
-		input.native_aggregate_stage_count = native_aggregate_stage_count;
-	}
-
-	void SetNativeGroupedAggregateStageCount(idx_t native_grouped_aggregate_stage_count) {
-		input.native_grouped_aggregate_stage_count = native_grouped_aggregate_stage_count;
-	}
-
-	void SetBlockedHashAggregateLookupCount(idx_t blocked_hash_aggregate_lookup_count) {
-		input.blocked_hash_aggregate_lookup_count = blocked_hash_aggregate_lookup_count;
-	}
-
-	void AddBlockedHashAggregateLookup() {
-		input.blocked_hash_aggregate_lookup_count++;
-	}
-
-	void AddNativeAggregateStage(bool grouped) {
-		input.native_aggregate_stage_count++;
-		if (grouped) {
-			input.native_grouped_aggregate_stage_count++;
-		}
-	}
-
-	void SetNativeSortStageCount(idx_t native_sort_stage_count) {
-		input.native_sort_stage_count = native_sort_stage_count;
-	}
-
-	void AddNativeSortStage() {
-		input.native_sort_stage_count++;
-	}
-
-	void ClearNativeSortStages() {
-		input.native_sort_stage_count = 0;
-	}
-
-	void SetFullPipeline(bool full_pipeline) {
-		input.full_pipeline = full_pipeline;
-	}
-
-	void SetUsesScanFilters(bool uses_scan_filters) {
-		input.uses_scan_filters = uses_scan_filters;
-	}
-
-	void SetSourceFilterCount(idx_t source_filter_count) {
-		input.source_filter_count = source_filter_count;
-	}
-
-	void SetNodeCount(idx_t node_count) {
-		input.node_count = node_count;
-	}
-
-	void AddOperatorNode() {
-		input.node_count++;
-		input.stage_count++;
-		input.operator_count++;
-	}
-
-	void SetStageCount(idx_t stage_count) {
-		input.stage_count = stage_count;
-	}
-
-	void SetExpressionNodeCount(idx_t expression_node_count) {
-		input.expression_node_count = expression_node_count;
-	}
-
-	void SetOperatorCount(idx_t operator_count) {
-		input.operator_count = operator_count;
-	}
-
-	void SetGeneratedWorkClass(PhysicalRunnerGeneratedWorkClass generated_work_class) {
-		input.generated_work_class = generated_work_class;
-	}
-
-	void SetNativeProtocolClass(PhysicalRunnerNativeProtocolClass native_protocol_class) {
-		input.native_protocol_class = native_protocol_class;
-	}
-
-	void SetHasAcceleratedWork(bool has_accelerated_work) {
-		input.has_accelerated_work = has_accelerated_work;
-	}
-
-	PhysicalRunnerCostInput &MutableInput() {
-		return input;
-	}
-
-	const PhysicalRunnerCostInput &Input() const {
-		return input;
-	}
-
-	PhysicalRunnerCostInput Build() const {
-		return input;
-	}
-
-private:
-	PhysicalRunnerCostInput input;
-};
+}
 
 static bool ExecutionRegionStageIsExecutable(const ExecutionRegionStage &stage) {
 	return stage.executable_work && stage.execution != ExecutionRegionStageExecutionKind::MISSING_CONTRACT &&
@@ -178,15 +50,12 @@ enum class ExecutionRegionStageCostWorkKind : uint8_t {
 	GENERATED,
 	NATIVE_JOIN,
 	NATIVE_GROUPED_AGGREGATE,
-	NATIVE_UNGROUPED_AGGREGATE,
-	NATIVE_SORT
+	NATIVE_UNGROUPED_AGGREGATE
 };
-
-enum class ExecutionRegionStageCostRole : uint8_t { NONE, FILTER };
 
 struct ExecutionRegionStageCostFact {
 	ExecutionRegionStageCostWorkKind work_kind = ExecutionRegionStageCostWorkKind::NONE;
-	ExecutionRegionStageCostRole role = ExecutionRegionStageCostRole::NONE;
+	bool is_filter = false;
 	bool may_anchor_compiled_body = false;
 };
 
@@ -196,7 +65,6 @@ struct ExecutionRegionCostFacts {
 	idx_t native_join_stage_count = 0;
 	idx_t native_aggregate_stage_count = 0;
 	idx_t native_grouped_aggregate_stage_count = 0;
-	idx_t native_sort_stage_count = 0;
 	bool may_anchor_compiled_body = false;
 	PhysicalRunnerGeneratedWorkClass generated_work_class = PhysicalRunnerGeneratedWorkClass::NONE;
 	PhysicalRunnerNativeProtocolClass native_protocol_class = PhysicalRunnerNativeProtocolClass::NONE;
@@ -208,7 +76,7 @@ static ExecutionRegionStageCostFact GetExecutionRegionStageCostFact(const Execut
 		return result;
 	}
 	if (stage.kind == ExecutionRegionStageKind::FILTER || stage.kind == ExecutionRegionStageKind::SOURCE_FILTER) {
-		result.role = ExecutionRegionStageCostRole::FILTER;
+		result.is_filter = true;
 	}
 	if (stage.execution == ExecutionRegionStageExecutionKind::GENERATED_IR) {
 		result.work_kind = ExecutionRegionStageCostWorkKind::GENERATED;
@@ -241,8 +109,8 @@ static ExecutionRegionStageCostFact GetExecutionRegionStageCostFact(const Execut
 }
 
 static bool ExecutionRegionCandidateHasGeneratedFilterOrOperatorWork(const ExecutionRegionCandidateTraits &traits) {
-	return traits.source_filter_expression_count > 0 || traits.filter_count > 0 || traits.comparison_filter_count > 0 ||
-	       traits.conjunction_filter_count > 0 || traits.hash_join_operator_count > 0 || traits.aggregate_count > 0;
+	return traits.source_filter_expression_count > 0 || traits.filter_count > 0 ||
+	       traits.hash_join_operator_count > 0 || traits.aggregate_count > 0;
 }
 
 static bool ExecutionRegionCandidateHasGeneratedProjectionWork(const ExecutionRegionCandidateTraits &traits) {
@@ -282,17 +150,13 @@ ClassifyExecutionRegionNativeProtocol(const ExecutionRegionCandidateTraits &trai
 	return PhysicalRunnerNativeProtocolClass::NONE;
 }
 
-static bool ExecutionRegionStageCostWorkIsNativeAggregate(ExecutionRegionStageCostWorkKind work_kind) {
-	return work_kind == ExecutionRegionStageCostWorkKind::NATIVE_GROUPED_AGGREGATE ||
-	       work_kind == ExecutionRegionStageCostWorkKind::NATIVE_UNGROUPED_AGGREGATE;
-}
-
 static void AccumulateExecutionRegionCostFact(const ExecutionRegionStageCostFact &fact,
                                               ExecutionRegionCostFacts &result, bool &has_filter) {
 	result.may_anchor_compiled_body = result.may_anchor_compiled_body || fact.may_anchor_compiled_body;
-	has_filter = has_filter || fact.role == ExecutionRegionStageCostRole::FILTER;
-	if (has_filter && result.materialization_elision_count == 0 &&
-	    ExecutionRegionStageCostWorkIsNativeAggregate(fact.work_kind)) {
+	has_filter = has_filter || fact.is_filter;
+	const bool native_aggregate = fact.work_kind == ExecutionRegionStageCostWorkKind::NATIVE_GROUPED_AGGREGATE ||
+	                              fact.work_kind == ExecutionRegionStageCostWorkKind::NATIVE_UNGROUPED_AGGREGATE;
+	if (has_filter && result.materialization_elision_count == 0 && native_aggregate) {
 		result.materialization_elision_count = 1;
 	}
 	switch (fact.work_kind) {
@@ -308,9 +172,6 @@ static void AccumulateExecutionRegionCostFact(const ExecutionRegionStageCostFact
 		return;
 	case ExecutionRegionStageCostWorkKind::NATIVE_UNGROUPED_AGGREGATE:
 		result.native_aggregate_stage_count++;
-		return;
-	case ExecutionRegionStageCostWorkKind::NATIVE_SORT:
-		result.native_sort_stage_count++;
 		return;
 	case ExecutionRegionStageCostWorkKind::NONE:
 		return;
@@ -335,35 +196,29 @@ static bool ExecutionRegionHashAggregateLookupIsBlocked(const ExecutionRegionAgg
 
 PhysicalRunnerCostInput BuildExecutionRegionCandidateCostInput(const ExecutionRegionCandidate &candidate) {
 	auto cost_facts = BuildExecutionRegionCostFacts(candidate);
-	ExecutionRegionRunnerCostInputBuilder builder;
-	builder.SetInputScope(PhysicalRunnerCostInputScope::EXECUTION_REGION_CANDIDATE);
-	builder.SetEstimatedCardinality(candidate.estimated_cardinality);
-	builder.SetExpressionCost(candidate.traits.expression_cost);
-	builder.SetGeneratedStageCount(cost_facts.generated_stage_count);
-	builder.SetMaterializationElisionCount(cost_facts.materialization_elision_count);
-	builder.SetMaterializationSourceAppendCount(candidate.traits.sink_kind == ExecutionRegionSinkKind::MATERIALIZATION
+	PhysicalRunnerCostInput input;
+	input.input_scope = PhysicalRunnerCostInputScope::EXECUTION_REGION_CANDIDATE;
+	input.estimated_cardinality = candidate.estimated_cardinality;
+	input.expression_cost = candidate.traits.expression_cost;
+	input.generated_stage_count = cost_facts.generated_stage_count;
+	input.materialization_elision_count = cost_facts.materialization_elision_count;
+	input.materialization_source_append_count = candidate.traits.sink_kind == ExecutionRegionSinkKind::MATERIALIZATION
 	                                                ? candidate.traits.reference_varchar_projection_count
-	                                                : 0);
-	builder.SetNativeJoinStageCount(cost_facts.native_join_stage_count);
-	builder.SetNativeAggregateStageCount(cost_facts.native_aggregate_stage_count);
-	builder.SetNativeGroupedAggregateStageCount(cost_facts.native_grouped_aggregate_stage_count);
+	                                                : 0;
+	input.native_join_stage_count = cost_facts.native_join_stage_count;
+	input.native_aggregate_stage_count = cost_facts.native_aggregate_stage_count;
+	input.native_grouped_aggregate_stage_count = cost_facts.native_grouped_aggregate_stage_count;
 	if (candidate.contract.hash_aggregate_lookup_present &&
 	    candidate.contract.hash_aggregate_lookup_mode == "blocked") {
-		builder.SetBlockedHashAggregateLookupCount(cost_facts.native_grouped_aggregate_stage_count);
+		input.blocked_hash_aggregate_lookup_count = cost_facts.native_grouped_aggregate_stage_count;
 	}
-	builder.SetNativeSortStageCount(cost_facts.native_sort_stage_count);
-	builder.SetSourceFilterCount(candidate.traits.source_filter_count);
-	builder.SetFullPipeline(ExecutionRegionABIIsFullPipeline(candidate.contract.abi) &&
-	                        cost_facts.may_anchor_compiled_body);
-	builder.SetUsesScanFilters(candidate.uses_scan_filters);
-	builder.SetNodeCount(candidate.node_count);
-	builder.SetStageCount(candidate.stage_plan.stages.size());
-	builder.SetExpressionNodeCount(candidate.traits.expression_node_count);
-	builder.SetOperatorCount(candidate.traits.operator_count);
-	builder.SetGeneratedWorkClass(cost_facts.generated_work_class);
-	builder.SetNativeProtocolClass(cost_facts.native_protocol_class);
-	builder.SetHasAcceleratedWork(cost_facts.may_anchor_compiled_body);
-	return builder.Build();
+	input.source_filter_count = candidate.traits.source_filter_count;
+	input.full_pipeline = ExecutionRegionABIIsFullPipeline(candidate.contract.abi) && cost_facts.may_anchor_compiled_body;
+	input.uses_scan_filters = candidate.uses_scan_filters;
+	input.generated_work_class = cost_facts.generated_work_class;
+	input.native_protocol_class = cost_facts.native_protocol_class;
+	input.has_accelerated_work = cost_facts.may_anchor_compiled_body;
+	return input;
 }
 
 static idx_t ExecutionRegionPhysicalExpressionListCost(const vector<unique_ptr<Expression>> &expressions) {
@@ -421,14 +276,10 @@ static bool ExecutionRegionPhysicalAggregateSinkUsesPrimitivePayloads(const Exec
 	return true;
 }
 
-static bool ExecutionRegionPhysicalAggregateSinkCanAnchorNativePipeline(const PhysicalOperator &op) {
-	return ExecutionRegionPhysicalAggregateSinkUsesPrimitivePayloads(op.GetExecutionContract().sink);
-}
-
 enum class ExecutionRegionPhysicalPipelineSlot : uint8_t { SOURCE, OPERATOR, SINK };
 
 struct ExecutionRegionPhysicalPipelineCostFacts {
-	ExecutionRegionRunnerCostInputBuilder builder;
+	PhysicalRunnerCostInput cost_input;
 	ExecutionRegionCandidateTraits traits;
 	bool native_sink_boundary = false;
 };
@@ -436,11 +287,6 @@ struct ExecutionRegionPhysicalPipelineCostFacts {
 static bool ExecutionRegionPhysicalExpressionIsReference(const Expression &expression) {
 	auto expression_class = expression.GetExpressionClass();
 	return expression_class == ExpressionClass::BOUND_REF || expression_class == ExpressionClass::BOUND_COLUMN_REF;
-}
-
-static bool ExecutionRegionPhysicalExpressionIsReferenceVarchar(const Expression &expression) {
-	return ExecutionRegionPhysicalExpressionIsReference(expression) &&
-	       expression.GetReturnType().id() == LogicalTypeId::VARCHAR;
 }
 
 static bool ExecutionRegionPhysicalExpressionTypeIsComparison(ExpressionType expression_type) {
@@ -517,7 +363,7 @@ static void AccumulateExecutionRegionPhysicalProjectionTraits(const Expression &
 	traits.expression_cost += expression_cost;
 	if (ExecutionRegionPhysicalExpressionIsReference(expression)) {
 		traits.reference_projection_count++;
-		if (ExecutionRegionPhysicalExpressionIsReferenceVarchar(expression)) {
+		if (expression.GetReturnType().id() == LogicalTypeId::VARCHAR) {
 			traits.reference_varchar_projection_count++;
 		}
 		return;
@@ -550,7 +396,7 @@ static bool TryAccumulateExecutionRegionPhysicalScanCost(const PhysicalOperator 
 	const bool has_pushed_dynamic_filters =
 	    scan.function.filter_pushdown && scan.dynamic_filters && scan.dynamic_filters->HasFilters();
 	if (has_pushed_dynamic_filters) {
-		facts.builder.SetUsesScanFilters(true);
+		facts.cost_input.uses_scan_filters = true;
 	}
 	if (!scan.table_filters || !scan.table_filters->HasFilters()) {
 		return true;
@@ -564,18 +410,16 @@ static bool TryAccumulateExecutionRegionPhysicalScanCost(const PhysicalOperator 
 	facts.traits.source_filter_count += filter_count;
 	facts.traits.source_filter_expression_count += filter_count;
 	if (scan.function.filter_pushdown) {
-		facts.builder.SetUsesScanFilters(true);
+		facts.cost_input.uses_scan_filters = true;
 	}
-	facts.builder.AddGeneratedExpressionWork(filter_cost);
+	AddExecutionRegionGeneratedExpressionWork(facts.cost_input, filter_cost);
 	return true;
 }
 
-static void AccumulateExecutionRegionPhysicalSourceTraits(const PhysicalOperator &source,
-                                                          ExecutionRegionCandidateTraits &traits) {
-	switch (source.type) {
+static ExecutionRegionSourceKind ExecutionRegionPhysicalSourceKind(PhysicalOperatorType type) {
+	switch (type) {
 	case PhysicalOperatorType::TABLE_SCAN:
-		traits.source_kind = ExecutionRegionSourceKind::DUCKDB_TABLE_SCAN;
-		return;
+		return ExecutionRegionSourceKind::DUCKDB_TABLE_SCAN;
 	case PhysicalOperatorType::DUMMY_SCAN:
 	case PhysicalOperatorType::COLUMN_DATA_SCAN:
 	case PhysicalOperatorType::CHUNK_SCAN:
@@ -583,8 +427,7 @@ static void AccumulateExecutionRegionPhysicalSourceTraits(const PhysicalOperator
 	case PhysicalOperatorType::DELIM_SCAN:
 	case PhysicalOperatorType::EXPRESSION_SCAN:
 	case PhysicalOperatorType::POSITIONAL_SCAN:
-		traits.source_kind = ExecutionRegionSourceKind::GENERIC_SCAN;
-		return;
+		return ExecutionRegionSourceKind::GENERIC_SCAN;
 	case PhysicalOperatorType::HASH_JOIN:
 	case PhysicalOperatorType::NESTED_LOOP_JOIN:
 	case PhysicalOperatorType::LEFT_DELIM_JOIN:
@@ -600,35 +443,19 @@ static void AccumulateExecutionRegionPhysicalSourceTraits(const PhysicalOperator
 	case PhysicalOperatorType::PERFECT_HASH_GROUP_BY:
 	case PhysicalOperatorType::ORDER_BY:
 	case PhysicalOperatorType::TOP_N:
-		traits.source_kind = ExecutionRegionSourceKind::STATEFUL_OPERATOR;
-		return;
+		return ExecutionRegionSourceKind::STATEFUL_OPERATOR;
 	default:
-		traits.source_kind = ExecutionRegionSourceKind::NONE;
-		return;
+		return ExecutionRegionSourceKind::NONE;
 	}
 }
 
+static void AccumulateExecutionRegionPhysicalSourceTraits(const PhysicalOperator &source,
+                                                          ExecutionRegionCandidateTraits &traits) {
+	traits.source_kind = ExecutionRegionPhysicalSourceKind(source.type);
+}
+
 static bool ExecutionRegionPhysicalOperatorIsStatefulSource(const PhysicalOperator &op) {
-	switch (op.type) {
-	case PhysicalOperatorType::HASH_JOIN:
-	case PhysicalOperatorType::NESTED_LOOP_JOIN:
-	case PhysicalOperatorType::LEFT_DELIM_JOIN:
-	case PhysicalOperatorType::RIGHT_DELIM_JOIN:
-	case PhysicalOperatorType::BLOCKWISE_NL_JOIN:
-	case PhysicalOperatorType::PIECEWISE_MERGE_JOIN:
-	case PhysicalOperatorType::IE_JOIN:
-	case PhysicalOperatorType::ASOF_JOIN:
-	case PhysicalOperatorType::CROSS_PRODUCT:
-	case PhysicalOperatorType::POSITIONAL_JOIN:
-	case PhysicalOperatorType::UNGROUPED_AGGREGATE:
-	case PhysicalOperatorType::HASH_GROUP_BY:
-	case PhysicalOperatorType::PERFECT_HASH_GROUP_BY:
-	case PhysicalOperatorType::ORDER_BY:
-	case PhysicalOperatorType::TOP_N:
-		return true;
-	default:
-		return false;
-	}
+	return ExecutionRegionPhysicalSourceKind(op.type) == ExecutionRegionSourceKind::STATEFUL_OPERATOR;
 }
 
 static void AccumulateExecutionRegionPhysicalSinkTraits(const PhysicalOperator &sink,
@@ -673,10 +500,9 @@ static void AccumulateExecutionRegionPhysicalSinkTraits(const PhysicalOperator &
 static bool TryAccumulateExecutionRegionPhysicalOperatorCost(const PhysicalOperator &op,
                                                              ExecutionRegionPhysicalPipelineCostFacts &facts,
                                                              ExecutionRegionPhysicalPipelineSlot slot) {
-	auto &builder = facts.builder;
+	auto &input = facts.cost_input;
 	auto &traits = facts.traits;
-	builder.MaxEstimatedCardinality(op.estimated_cardinality);
-	builder.AddOperatorNode();
+	input.estimated_cardinality = MaxValue(input.estimated_cardinality, op.estimated_cardinality);
 	if (slot == ExecutionRegionPhysicalPipelineSlot::SOURCE) {
 		AccumulateExecutionRegionPhysicalSourceTraits(op, traits);
 	}
@@ -695,46 +521,46 @@ static bool TryAccumulateExecutionRegionPhysicalOperatorCost(const PhysicalOpera
 			return false;
 		}
 		traits.filter_count++;
-		builder.AddGeneratedExpressionWork(DuckDBCostModel::ExpressionCost(*filter.expression));
+		AddExecutionRegionGeneratedExpressionWork(input, DuckDBCostModel::ExpressionCost(*filter.expression));
 		return true;
 	}
 	case PhysicalOperatorType::PROJECTION: {
 		auto &projection = op.Cast<PhysicalProjection>();
 		traits.projection_count++;
 		AccumulateExecutionRegionPhysicalProjectionListTraits(projection.select_list, traits);
-		builder.AddGeneratedExpressionWork(ExecutionRegionPhysicalExpressionListCost(projection.select_list));
+		AddExecutionRegionGeneratedExpressionWork(input, ExecutionRegionPhysicalExpressionListCost(projection.select_list));
 		return true;
 	}
 	case PhysicalOperatorType::UNGROUPED_AGGREGATE: {
 		auto &aggregate = op.Cast<PhysicalUngroupedAggregate>();
-		builder.AddGeneratedExpressionWork(ExecutionRegionPhysicalAggregateListCost(aggregate.aggregates));
+		AddExecutionRegionGeneratedExpressionWork(input, ExecutionRegionPhysicalAggregateListCost(aggregate.aggregates));
 		if (slot != ExecutionRegionPhysicalPipelineSlot::SOURCE) {
 			traits.aggregate_count++;
 		}
 		if (slot == ExecutionRegionPhysicalPipelineSlot::SINK &&
-		    !ExecutionRegionPhysicalAggregateSinkCanAnchorNativePipeline(op)) {
+		    !ExecutionRegionPhysicalAggregateSinkUsesPrimitivePayloads(op.GetExecutionContract().sink)) {
 			facts.native_sink_boundary = true;
 			return true;
 		}
-		builder.AddNativeAggregateStage(false);
+		AddExecutionRegionNativeAggregateStage(input, false);
 		return true;
 	}
 	case PhysicalOperatorType::HASH_GROUP_BY: {
 		auto &aggregate = op.Cast<PhysicalHashAggregate>();
 		auto expression_cost = ExecutionRegionPhysicalExpressionListCost(aggregate.grouped_aggregate_data.groups);
 		expression_cost += ExecutionRegionPhysicalAggregateListCost(aggregate.grouped_aggregate_data.aggregates);
-		builder.AddGeneratedExpressionWork(expression_cost);
+		AddExecutionRegionGeneratedExpressionWork(input, expression_cost);
 		if (slot != ExecutionRegionPhysicalPipelineSlot::SOURCE) {
 			traits.aggregate_count++;
 		}
 		if (slot == ExecutionRegionPhysicalPipelineSlot::SINK &&
-		    !ExecutionRegionPhysicalAggregateSinkCanAnchorNativePipeline(op)) {
+		    !ExecutionRegionPhysicalAggregateSinkUsesPrimitivePayloads(op.GetExecutionContract().sink)) {
 			facts.native_sink_boundary = true;
 			return true;
 		}
-		builder.AddNativeAggregateStage(true);
+		AddExecutionRegionNativeAggregateStage(input, true);
 		if (ExecutionRegionHashAggregateLookupIsBlocked(aggregate.GetExecutionContract().sink.aggregate_contract)) {
-			builder.AddBlockedHashAggregateLookup();
+			input.blocked_hash_aggregate_lookup_count++;
 		}
 		return true;
 	}
@@ -742,23 +568,23 @@ static bool TryAccumulateExecutionRegionPhysicalOperatorCost(const PhysicalOpera
 		auto &aggregate = op.Cast<PhysicalPerfectHashAggregate>();
 		auto expression_cost = ExecutionRegionPhysicalExpressionListCost(aggregate.groups);
 		expression_cost += ExecutionRegionPhysicalAggregateListCost(aggregate.aggregates);
-		builder.AddGeneratedExpressionWork(expression_cost);
+		AddExecutionRegionGeneratedExpressionWork(input, expression_cost);
 		if (slot != ExecutionRegionPhysicalPipelineSlot::SOURCE) {
 			traits.aggregate_count++;
 		}
 		if (slot == ExecutionRegionPhysicalPipelineSlot::SINK &&
-		    !ExecutionRegionPhysicalAggregateSinkCanAnchorNativePipeline(op)) {
+		    !ExecutionRegionPhysicalAggregateSinkUsesPrimitivePayloads(op.GetExecutionContract().sink)) {
 			facts.native_sink_boundary = true;
 			return true;
 		}
-		builder.AddNativeAggregateStage(true);
+		AddExecutionRegionNativeAggregateStage(input, true);
 		return true;
 	}
 	case PhysicalOperatorType::HASH_JOIN:
 		if (slot == ExecutionRegionPhysicalPipelineSlot::OPERATOR) {
 			traits.operator_count++;
 			traits.hash_join_operator_count++;
-			builder.AddNativeJoinStage();
+			input.native_join_stage_count++;
 		}
 		return true;
 	case PhysicalOperatorType::NESTED_LOOP_JOIN:
@@ -777,7 +603,7 @@ static bool TryAccumulateExecutionRegionPhysicalOperatorCost(const PhysicalOpera
 		return true;
 	case PhysicalOperatorType::ORDER_BY:
 	case PhysicalOperatorType::TOP_N:
-		builder.AddNativeSortStage();
+		input.native_sort_stage_count++;
 		return true;
 	case PhysicalOperatorType::DUMMY_SCAN:
 	case PhysicalOperatorType::COLUMN_DATA_SCAN:
@@ -811,11 +637,10 @@ static bool ExecutionRegionPhysicalSourceUsesReadySourceContract(const PhysicalO
 
 static void FinalizeExecutionRegionPhysicalPipelineCostInput(Pipeline &pipeline,
                                                              ExecutionRegionPhysicalPipelineCostFacts &facts) {
-	auto &builder = facts.builder;
-	auto &cost_input = builder.MutableInput();
-	builder.SetFullPipeline(pipeline.GetSource() && pipeline.GetSink());
+	auto &cost_input = facts.cost_input;
+	cost_input.full_pipeline = pipeline.GetSource() && pipeline.GetSink();
 	facts.traits.source_execution = ExecutionRegionSourceExecutionKind::NONE;
-	builder.SetGeneratedWorkClass(ClassifyExecutionRegionGeneratedWork(facts.traits));
+	cost_input.generated_work_class = ClassifyExecutionRegionGeneratedWork(facts.traits);
 	if (cost_input.full_pipeline &&
 	    cost_input.generated_work_class == PhysicalRunnerGeneratedWorkClass::PROJECTION_GLUE &&
 	    facts.traits.source_kind == ExecutionRegionSourceKind::STATEFUL_OPERATOR) {
@@ -823,26 +648,28 @@ static void FinalizeExecutionRegionPhysicalPipelineCostInput(Pipeline &pipeline,
 		D_ASSERT(source);
 		if (ExecutionRegionPhysicalSourceUsesReadySourceContract(*source)) {
 			facts.traits.source_execution = ExecutionRegionSourceExecutionKind::SOURCE_CONTRACT;
-			builder.SetNativeProtocolClass(ClassifyExecutionRegionNativeProtocol(facts.traits));
+			cost_input.native_protocol_class = ClassifyExecutionRegionNativeProtocol(facts.traits);
 		}
 	}
 	if (cost_input.native_protocol_class == PhysicalRunnerNativeProtocolClass::STATEFUL_SOURCE_SINK_PROTOCOL &&
 	    cost_input.generated_work_class == PhysicalRunnerGeneratedWorkClass::PROJECTION_GLUE &&
 	    facts.traits.sink_kind == ExecutionRegionSinkKind::SORT) {
-		builder.ClearNativeSortStages();
+		cost_input.native_sort_stage_count = 0;
 	}
 	if (cost_input.native_aggregate_stage_count > 0 &&
 	    (facts.traits.filter_count > 0 || facts.traits.source_filter_expression_count > 0)) {
-		builder.SetMaterializationElisionCount(1);
+		cost_input.materialization_elision_count = 1;
 	}
-	builder.SetSourceFilterCount(facts.traits.source_filter_count);
-	builder.SetMaterializationSourceAppendCount(facts.traits.sink_kind == ExecutionRegionSinkKind::MATERIALIZATION
-	                                                ? facts.traits.reference_varchar_projection_count
-	                                                : 0);
-	builder.SetHasAcceleratedWork(!facts.native_sink_boundary &&
-	                              (cost_input.generated_stage_count > 0 || cost_input.native_join_stage_count > 0 ||
-	                               cost_input.native_aggregate_stage_count > 0 ||
-	                               cost_input.native_sort_stage_count > 0 || cost_input.full_pipeline));
+	cost_input.source_filter_count = facts.traits.source_filter_count;
+	cost_input.materialization_source_append_count =
+	    facts.traits.sink_kind == ExecutionRegionSinkKind::MATERIALIZATION
+	        ? facts.traits.reference_varchar_projection_count
+	        : 0;
+	cost_input.has_accelerated_work =
+	    !facts.native_sink_boundary &&
+	    (cost_input.generated_stage_count > 0 || cost_input.native_join_stage_count > 0 ||
+	     cost_input.native_aggregate_stage_count > 0 || cost_input.native_sort_stage_count > 0 ||
+	     cost_input.full_pipeline);
 }
 
 bool TryBuildExecutionRegionPipelineCostInput(Pipeline &pipeline, PhysicalRunnerCostInput &cost_input) {
@@ -850,7 +677,7 @@ bool TryBuildExecutionRegionPipelineCostInput(Pipeline &pipeline, PhysicalRunner
 		return false;
 	}
 	ExecutionRegionPhysicalPipelineCostFacts facts;
-	facts.builder.SetInputScope(PhysicalRunnerCostInputScope::PHYSICAL_PIPELINE);
+	facts.cost_input.input_scope = PhysicalRunnerCostInputScope::PHYSICAL_PIPELINE;
 	if (!TryAccumulateExecutionRegionPhysicalOperatorCost(*pipeline.GetSource(), facts,
 	                                                      ExecutionRegionPhysicalPipelineSlot::SOURCE)) {
 		return false;
@@ -866,7 +693,7 @@ bool TryBuildExecutionRegionPipelineCostInput(Pipeline &pipeline, PhysicalRunner
 		return false;
 	}
 	FinalizeExecutionRegionPhysicalPipelineCostInput(pipeline, facts);
-	cost_input = facts.builder.Build();
+	cost_input = facts.cost_input;
 	return true;
 }
 
@@ -888,15 +715,6 @@ static bool ExecutionRegionStatefulSourceProducesRows(const PhysicalOperator &so
 bool ExecutionRegionPipelineHasNonProducingSource(Pipeline &pipeline) {
 	auto source = pipeline.GetSource();
 	return source && !ExecutionRegionStatefulSourceProducesRows(*source);
-}
-
-PhysicalRunnerCostInput BuildExecutionRegionNonProducingSourceCostInput(const PhysicalOperator &source) {
-	ExecutionRegionRunnerCostInputBuilder builder;
-	builder.SetEstimatedCardinality(source.estimated_cardinality);
-	builder.SetNodeCount(1);
-	builder.SetStageCount(1);
-	builder.SetOperatorCount(1);
-	return builder.Build();
 }
 
 } // namespace duckdb

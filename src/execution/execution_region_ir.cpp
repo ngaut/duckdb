@@ -1428,25 +1428,6 @@ static void AppendExecutionRegionContractShapeEntry(string &result, const string
 	result += entry;
 }
 
-static void AppendExecutionRegionContractShapePart(vector<ExecutionRegionContractShapePart> &parts,
-                                                   ExecutionRegionNodeKind node_kind, string entry) {
-	if (entry.empty()) {
-		return;
-	}
-	ExecutionRegionContractShapePart part;
-	part.node_kind = node_kind;
-	part.shape = std::move(entry);
-	parts.push_back(std::move(part));
-}
-
-static string DescribeExecutionRegionContractShapeParts(const vector<ExecutionRegionContractShapePart> &parts) {
-	string result;
-	for (auto &part : parts) {
-		AppendExecutionRegionContractShapeEntry(result, part.shape);
-	}
-	return result;
-}
-
 static string DescribeExecutionSourceProtocolContractShape(const ExecutionSourceContract &source) {
 	return DescribeExecutionSourceProtocolContractShape(source.kind, source.execution, source.filters.size(),
 	                                                    source.projection_ids.size(), source.returned_column_count,
@@ -1483,47 +1464,6 @@ static string DescribeExecutionRegionSinkContractShape(const ExecutionRegionSink
 		return "sink(" + DescribeExecutionRegionOrderContractShape(sink.order_contract) + ")";
 	}
 	return "sink(kind=" + string(ExecutionRegionSinkKindToString(sink.kind)) + ")";
-}
-
-bool ExecutionRegionAggregateFunctionIsCount(const string &function_name) {
-	return function_name == "count" || function_name == "count_star";
-}
-
-bool ExecutionRegionAggregateFunctionIsSum(const string &function_name) {
-	return function_name == "sum" || function_name == "sum_no_overflow";
-}
-
-void AccumulateExecutionRegionHashJoinKind(ExecutionRegionJoinType join_type, idx_t &hash_join_count,
-                                           idx_t &right_hash_join_count, idx_t &inner_hash_join_count) {
-	hash_join_count++;
-	switch (join_type) {
-	case ExecutionRegionJoinType::RIGHT:
-		right_hash_join_count++;
-		break;
-	case ExecutionRegionJoinType::INNER:
-		inner_hash_join_count++;
-		break;
-	default:
-		break;
-	}
-}
-
-void AccumulateExecutionRegionAggregateFunctionKinds(const ExecutionRegionAggregateContract &contract,
-                                                     idx_t &aggregate_count, idx_t &count_function_count,
-                                                     idx_t &sum_function_count, idx_t &other_function_count) {
-	if (!contract.present) {
-		return;
-	}
-	aggregate_count += contract.aggregate_count;
-	for (auto &function_name : contract.aggregate_functions) {
-		if (ExecutionRegionAggregateFunctionIsCount(function_name)) {
-			count_function_count++;
-		} else if (ExecutionRegionAggregateFunctionIsSum(function_name)) {
-			sum_function_count++;
-		} else {
-			other_function_count++;
-		}
-	}
 }
 
 static bool ExecutionRegionOrderDependencyCoveredByPrimitiveUpdate(const ExecutionRegionAggregateInput &aggregate) {
@@ -1723,60 +1663,21 @@ static string DescribeExecutionRegionCandidateTraits(const ExecutionRegionCandid
 	result += ",source_kind=" + string(ExecutionRegionSourceKindToString(traits.source_kind));
 	result += ",source_execution=" + string(ExecutionRegionSourceExecutionKindToString(traits.source_execution));
 	result += ",sink_kind=" + string(ExecutionRegionSinkKindToString(traits.sink_kind));
-	result += ",expression_traits_known=" + ExecutionRegionBool(traits.expression_traits_known);
-	result += ",estimated_source_cardinality=" + std::to_string(traits.estimated_source_cardinality);
 	result += ",source_filters=" + std::to_string(traits.source_filter_count);
 	result += ",source_filter_expressions=" + std::to_string(traits.source_filter_expression_count);
-	result += ",source_filter_missing=" + std::to_string(traits.source_filter_missing_count);
-	result += ",source_contract_input_columns=" + std::to_string(traits.source_contract_input_column_count);
-	result +=
-	    ",source_contract_filter_prune_required=" + ExecutionRegionBool(traits.source_contract_filter_prune_required);
-	result += ",source_projection_pushdown=" + ExecutionRegionBool(traits.source_projection_pushdown);
-	result += ",source_filter_pushdown=" + ExecutionRegionBool(traits.source_filter_pushdown);
-	result += ",source_filter_prune=" + ExecutionRegionBool(traits.source_filter_prune);
-	result += ",source_comparison_filters=" + std::to_string(traits.source_comparison_filter_count);
-	result += ",source_integer_comparison_filters=" + std::to_string(traits.source_integer_comparison_filter_count);
-	result +=
-	    ",source_non_integer_comparison_filters=" + std::to_string(traits.source_non_integer_comparison_filter_count);
 	result += ",source_conjunction_filters=" + std::to_string(traits.source_conjunction_filter_count);
-	result += ",source_projected_columns=" + std::to_string(traits.source_projected_column_count);
-	result += ",source_returned_columns=" + std::to_string(traits.source_returned_column_count);
 	result += ",filters=" + std::to_string(traits.filter_count);
 	result += ",projections=" + std::to_string(traits.projection_count);
 	result += ",operators=" + std::to_string(traits.operator_count);
 	result += ",hash_join_operators=" + std::to_string(traits.hash_join_operator_count);
-	result += ",perfect_hash_join_probes=" + std::to_string(traits.perfect_hash_join_probe_count);
-	result += ",hash_join_build_payload_columns=" + std::to_string(traits.hash_join_build_payload_column_count);
-	result += ",right_hash_join_operators=" + std::to_string(traits.right_hash_join_operator_count);
-	result += ",inner_hash_join_operators=" + std::to_string(traits.inner_hash_join_operator_count);
 	result += ",aggregates=" + std::to_string(traits.aggregate_count);
-	result += ",aggregate_count_functions=" + std::to_string(traits.aggregate_count_function_count);
-	result += ",aggregate_sum_functions=" + std::to_string(traits.aggregate_sum_function_count);
-	result += ",aggregate_other_functions=" + std::to_string(traits.aggregate_other_function_count);
-	result += ",core_expression_operators=" + std::to_string(traits.core_expression_operator_count);
 	result += ",arithmetic_projections=" + std::to_string(traits.arithmetic_projection_count);
-	result += ",integer_arithmetic_projections=" + std::to_string(traits.integer_arithmetic_projection_count);
-	result += ",non_integer_arithmetic_projections=" + std::to_string(traits.non_integer_arithmetic_projection_count);
 	result += ",high_cost_projections=" + std::to_string(traits.high_cost_projection_count);
 	result += ",reference_projections=" + std::to_string(traits.reference_projection_count);
 	result += ",reference_varchar_projections=" + std::to_string(traits.reference_varchar_projection_count);
-	result += ",comparison_filters=" + std::to_string(traits.comparison_filter_count);
-	result += ",integer_comparison_filters=" + std::to_string(traits.integer_comparison_filter_count);
-	result += ",non_integer_comparison_filters=" + std::to_string(traits.non_integer_comparison_filter_count);
-	result += ",conjunction_filters=" + std::to_string(traits.conjunction_filter_count);
-	result += ",expression_nodes=" + std::to_string(traits.expression_node_count);
 	result += ",predicate_expressions=" + std::to_string(traits.predicate_expression_count);
 	result += ",control_expressions=" + std::to_string(traits.control_expression_count);
-	result += ",reference_expressions=" + std::to_string(traits.reference_expression_count);
 	result += ",expression_cost=" + std::to_string(traits.expression_cost);
-	result += ",string_predicates=" + std::to_string(traits.string_predicate_expression_count);
-	result += ",high_cost_string_predicates=" + std::to_string(traits.high_cost_string_predicate_expression_count);
-	result += ",string_like_expressions=" + std::to_string(traits.string_like_expression_count);
-	result += ",string_contains_expressions=" + std::to_string(traits.string_contains_expression_count);
-	result += ",string_prefix_expressions=" + std::to_string(traits.string_prefix_expression_count);
-	result += ",string_suffix_expressions=" + std::to_string(traits.string_suffix_expression_count);
-	result += ",expression_missing=" + std::to_string(traits.expression_missing_count);
-	result += ",operator_missing=" + std::to_string(traits.operator_missing_count);
 	result += ">";
 	return result;
 }
@@ -2136,38 +2037,11 @@ static ExecutionRegionStagePlan BuildExecutionRegionStagePlan(const ExecutionReg
                                                               const ExecutionRegionCandidate &candidate,
                                                               ExecutionRegionIRMode mode);
 
-static void AccumulateExecutionRegionFilterTraits(const ExecutionExpressionTraits &expression_traits,
-                                                  idx_t &comparison_filter_count,
-                                                  idx_t &integer_comparison_filter_count,
-                                                  idx_t &non_integer_comparison_filter_count,
-                                                  idx_t &conjunction_filter_count) {
-	if (expression_traits.has_comparison_binary) {
-		comparison_filter_count++;
-	}
-	if (expression_traits.has_integer_comparison_operands) {
-		integer_comparison_filter_count++;
-	}
-	if (expression_traits.has_non_integer_comparison_operands) {
-		non_integer_comparison_filter_count++;
-	}
-	if (expression_traits.has_conjunction) {
-		conjunction_filter_count++;
-	}
-}
-
 static void AccumulateExecutionRegionExpressionTraits(const ExecutionExpressionTraits &expression_traits,
                                                       ExecutionRegionCandidateTraits &traits) {
-	traits.expression_node_count += expression_traits.expression_node_count;
-	traits.reference_expression_count += expression_traits.reference_expression_count;
 	traits.predicate_expression_count += expression_traits.predicate_expression_count;
 	traits.control_expression_count += expression_traits.control_expression_count;
 	traits.expression_cost += expression_traits.expression_cost;
-	traits.string_predicate_expression_count += expression_traits.string_predicate_count;
-	traits.high_cost_string_predicate_expression_count += expression_traits.high_cost_string_predicate_count;
-	traits.string_like_expression_count += expression_traits.string_like_count;
-	traits.string_contains_expression_count += expression_traits.string_contains_count;
-	traits.string_prefix_expression_count += expression_traits.string_prefix_count;
-	traits.string_suffix_expression_count += expression_traits.string_suffix_count;
 }
 
 static bool ExecutionRegionStageIsOperatorSlot(const ExecutionRegionStage &stage) {
@@ -2180,59 +2054,43 @@ static bool ExecutionRegionStageRequiresMissingContract(ExecutionRegionStageExec
 	return execution == ExecutionRegionStageExecutionKind::MISSING_CONTRACT;
 }
 
-static void AccumulateExecutionRegionStageTraits(const ExecutionRegionStage &stage,
-                                                 ExecutionRegionCandidateTraits &traits) {
-	if ((stage.kind == ExecutionRegionStageKind::FILTER || stage.kind == ExecutionRegionStageKind::PROJECTION) &&
-	    ExecutionRegionStageRequiresMissingContract(stage.execution)) {
-		traits.expression_missing_count++;
-	}
+static bool ExecutionRegionStageHasMissingOperatorContract(const ExecutionRegionStage &stage) {
 	if (ExecutionRegionStageIsOperatorSlot(stage)) {
 		if (ExecutionRegionStageRequiresMissingContract(stage.execution)) {
-			traits.operator_missing_count++;
+			return true;
 		}
 	}
+	return false;
 }
 
-static void AccumulateExecutionRegionStagePlanTraits(const ExecutionRegionStagePlan &stage_plan,
-                                                     ExecutionRegionCandidateTraits &traits) {
+static idx_t CountExecutionRegionMissingOperatorContracts(const ExecutionRegionStagePlan &stage_plan) {
+	idx_t result = 0;
 	for (auto &stage : stage_plan.stages) {
-		AccumulateExecutionRegionStageTraits(stage, traits);
+		if (ExecutionRegionStageHasMissingOperatorContract(stage)) {
+			result++;
+		}
 	}
+	return result;
 }
 
 static void AccumulateExecutionRegionSourceTraits(const ExecutionRegionNode &node,
                                                   ExecutionRegionSourceExecutionKind execution,
-                                                  ExecutionRegionCandidateTraits &traits,
-                                                  bool &unknown_expression_traits) {
+                                                  ExecutionRegionCandidateTraits &traits) {
 	traits.source_kind = InferExecutionRegionSourceKind(node);
 	traits.source_execution = execution;
 	if (!node.source) {
 		return;
 	}
 
-	traits.estimated_source_cardinality = node.source->estimated_source_cardinality;
-	traits.source_projected_column_count = node.source->projection_ids.size();
-	traits.source_returned_column_count = node.source->returned_column_count;
 	traits.source_filter_count = node.source->filters.size();
-	if (node.source->table_scan_contract.present) {
-		auto &table_scan_contract = node.source->table_scan_contract;
-		traits.source_contract_input_column_count = table_scan_contract.source_contract_input_column_count;
-		traits.source_contract_filter_prune_required = table_scan_contract.source_contract_filter_prune_required;
-		traits.source_projection_pushdown = table_scan_contract.projection_pushdown;
-		traits.source_filter_pushdown = table_scan_contract.filter_pushdown;
-		traits.source_filter_prune = table_scan_contract.filter_prune;
-	}
 	for (auto &filter : node.source->filters) {
 		if (!filter.expression || !filter.expression->root) {
-			traits.source_filter_missing_count++;
-			unknown_expression_traits = true;
 			continue;
 		}
 		traits.source_filter_expression_count++;
-		AccumulateExecutionRegionFilterTraits(filter.expression->traits, traits.source_comparison_filter_count,
-		                                      traits.source_integer_comparison_filter_count,
-		                                      traits.source_non_integer_comparison_filter_count,
-		                                      traits.source_conjunction_filter_count);
+		if (filter.expression->traits.has_conjunction) {
+			traits.source_conjunction_filter_count++;
+		}
 	}
 }
 
@@ -2241,58 +2099,36 @@ static ExecutionRegionCandidateTraits BuildExecutionRegionCandidateTraits(const 
                                                                           const ExecutionRegionStagePlan &stage_plan,
                                                                           ExecutionRegionIRMode mode) {
 	ExecutionRegionCandidateTraits traits;
-	bool unknown_expression_traits = false;
 	for (idx_t node_idx = candidate.first_node; node_idx < candidate.EndNode() && node_idx < region_ir.nodes.size();
 	     node_idx++) {
 		auto &node = region_ir.nodes[node_idx];
 		switch (node.kind) {
 		case ExecutionRegionNodeKind::SOURCE:
 			AccumulateExecutionRegionSourceTraits(node, GetExecutionRegionCandidateSourceExecution(candidate, node),
-			                                      traits, unknown_expression_traits);
+			                                      traits);
 			break;
 		case ExecutionRegionNodeKind::SINK:
 			traits.sink_present = true;
 			traits.sink_kind = node.sink ? node.sink->kind : ExecutionRegionSinkKind::NONE;
 			if (node.sink) {
-				if (node.sink->hash_join_contract.present) {
-					traits.hash_join_build_payload_column_count += node.sink->hash_join_contract.payload_column_count;
-				}
-				AccumulateExecutionRegionAggregateFunctionKinds(
-				    node.sink->aggregate_contract, traits.aggregate_count, traits.aggregate_count_function_count,
-				    traits.aggregate_sum_function_count, traits.aggregate_other_function_count);
-				if (node.sink->aggregate_contract.kind == ExecutionRegionAggregateOperatorKind::HASH &&
-				    node.sink->aggregate_contract.group_count > 0) {
-					traits.grouped_aggregate_group_count += node.sink->aggregate_contract.group_count;
-					for (auto &group_type : node.sink->aggregate_contract.group_types) {
-						if (group_type.id() == LogicalTypeId::VARCHAR) {
-							traits.grouped_aggregate_varchar_group_count++;
-						}
-					}
+				if (node.sink->aggregate_contract.present) {
+					traits.aggregate_count += node.sink->aggregate_contract.aggregate_count;
 				}
 			}
 			break;
 		case ExecutionRegionNodeKind::FILTER:
 			traits.filter_count++;
 			if (node.filter && node.filter->root) {
-				traits.core_expression_operator_count++;
 				AccumulateExecutionRegionExpressionTraits(node.filter->traits, traits);
-				AccumulateExecutionRegionFilterTraits(
-				    node.filter->traits, traits.comparison_filter_count, traits.integer_comparison_filter_count,
-				    traits.non_integer_comparison_filter_count, traits.conjunction_filter_count);
-			} else {
-				unknown_expression_traits = true;
 			}
 			break;
 		case ExecutionRegionNodeKind::PROJECTION:
 			traits.projection_count++;
 			if (node.projections.empty()) {
-				unknown_expression_traits = true;
 				break;
 			}
-			traits.core_expression_operator_count++;
 			for (auto &projection : node.projections) {
 				if (!projection || !projection->root) {
-					unknown_expression_traits = true;
 					continue;
 				}
 				AccumulateExecutionRegionExpressionTraits(projection->traits, traits);
@@ -2302,14 +2138,8 @@ static ExecutionRegionCandidateTraits BuildExecutionRegionCandidateTraits(const 
 						traits.reference_varchar_projection_count++;
 					}
 				}
-				if (projection->traits.arithmetic_binary_count > 0) {
+				if (projection->traits.has_arithmetic_binary) {
 					traits.arithmetic_projection_count++;
-				}
-				if (projection->traits.integer_arithmetic_result_count > 0) {
-					traits.integer_arithmetic_projection_count++;
-				}
-				if (projection->traits.non_integer_arithmetic_result_count > 0) {
-					traits.non_integer_arithmetic_projection_count++;
 				}
 				if (projection->traits.expression_cost >= HIGH_COST_GENERATED_PROJECTION_EXPRESSION_COST) {
 					traits.high_cost_projection_count++;
@@ -2319,12 +2149,7 @@ static ExecutionRegionCandidateTraits BuildExecutionRegionCandidateTraits(const 
 		case ExecutionRegionNodeKind::OPERATOR:
 			traits.operator_count++;
 			if (node.operator_info && node.operator_info->hash_join_contract.present) {
-				AccumulateExecutionRegionHashJoinKind(
-				    node.operator_info->hash_join_contract.join_type, traits.hash_join_operator_count,
-				    traits.right_hash_join_operator_count, traits.inner_hash_join_operator_count);
-				if (node.operator_info->hash_join_contract.perfect_hash_probe_shape_ready) {
-					traits.perfect_hash_join_probe_count++;
-				}
+				traits.hash_join_operator_count++;
 			}
 			break;
 		default:
@@ -2332,52 +2157,10 @@ static ExecutionRegionCandidateTraits BuildExecutionRegionCandidateTraits(const 
 			break;
 		}
 	}
-	AccumulateExecutionRegionStagePlanTraits(stage_plan, traits);
-	traits.expression_traits_known = !unknown_expression_traits;
 	if (ExecutionRegionShouldRenderDiagnostics(mode)) {
 		traits.ir = DescribeExecutionRegionCandidateTraits(traits);
 	}
 	return traits;
-}
-
-static ExecutionRegionCandidateTraits BuildExecutionRegionSpanTraits(const ExecutionRegionIR &region_ir,
-                                                                     ExecutionRegionCandidate span_candidate,
-                                                                     ExecutionRegionIRMode mode) {
-	span_candidate.contract = BuildExecutionRegionContract(region_ir, span_candidate, mode);
-	span_candidate.stage_plan = BuildExecutionRegionStagePlan(region_ir, span_candidate, mode);
-	return BuildExecutionRegionCandidateTraits(region_ir, span_candidate, span_candidate.stage_plan, mode);
-}
-
-static ExecutionRegionCandidateTraits BuildExecutionRegionContextTraits(const ExecutionRegionIR &region_ir,
-                                                                        ExecutionRegionIRMode mode) {
-	ExecutionRegionCandidate context_candidate;
-	context_candidate.first_node = 0;
-	context_candidate.node_count = region_ir.nodes.size();
-	return BuildExecutionRegionSpanTraits(region_ir, std::move(context_candidate), mode);
-}
-
-static ExecutionRegionCandidateTraits BuildExecutionRegionUpstreamTraits(const ExecutionRegionIR &region_ir,
-                                                                         const ExecutionRegionCandidate &candidate,
-                                                                         ExecutionRegionIRMode mode) {
-	if (candidate.first_node == 0 || region_ir.nodes.empty()) {
-		return ExecutionRegionCandidateTraits();
-	}
-	ExecutionRegionCandidate upstream_candidate;
-	upstream_candidate.first_node = 0;
-	upstream_candidate.node_count = MinValue(candidate.first_node, NumericCast<idx_t>(region_ir.nodes.size()));
-	return BuildExecutionRegionSpanTraits(region_ir, std::move(upstream_candidate), mode);
-}
-
-static ExecutionRegionCandidateTraits BuildExecutionRegionContinuationTraits(const ExecutionRegionIR &region_ir,
-                                                                             const ExecutionRegionCandidate &candidate,
-                                                                             ExecutionRegionIRMode mode) {
-	ExecutionRegionCandidate continuation_candidate;
-	continuation_candidate.first_node = MinValue(candidate.EndNode(), NumericCast<idx_t>(region_ir.nodes.size()));
-	if (continuation_candidate.first_node >= region_ir.nodes.size()) {
-		return ExecutionRegionCandidateTraits();
-	}
-	continuation_candidate.node_count = region_ir.nodes.size() - continuation_candidate.first_node;
-	return BuildExecutionRegionSpanTraits(region_ir, std::move(continuation_candidate), mode);
 }
 
 static void AppendExecutionRegionCandidateShapeSegment(string &result, const string &segment) {
@@ -2498,29 +2281,28 @@ static string BuildExecutionRegionFeatureShape(const ExecutionRegionIR &region_i
 	return BuildExecutionRegionFeatureSetShape(std::move(features));
 }
 
-static vector<ExecutionRegionContractShapePart>
-BuildExecutionRegionContractShapeParts(const ExecutionRegionIR &region_ir, idx_t first_node, idx_t node_count) {
-	vector<ExecutionRegionContractShapePart> result;
+static string BuildExecutionRegionContractShape(const ExecutionRegionIR &region_ir, idx_t first_node,
+                                                idx_t node_count) {
+	string result;
 	const auto end_node = MinValue(first_node + node_count, NumericCast<idx_t>(region_ir.nodes.size()));
 	for (idx_t node_idx = first_node; node_idx < end_node; node_idx++) {
 		auto &node = region_ir.nodes[node_idx];
 		switch (node.kind) {
 		case ExecutionRegionNodeKind::SOURCE:
 			if (node.source) {
-				AppendExecutionRegionContractShapePart(result, node.kind,
-				                                       DescribeExecutionSourceProtocolContractShape(*node.source));
+				AppendExecutionRegionContractShapeEntry(result,
+				                                        DescribeExecutionSourceProtocolContractShape(*node.source));
 			}
 			break;
 		case ExecutionRegionNodeKind::OPERATOR:
 			if (node.operator_info) {
-				AppendExecutionRegionContractShapePart(
-				    result, node.kind, DescribeExecutionRegionOperatorContractShape(*node.operator_info));
+				AppendExecutionRegionContractShapeEntry(
+				    result, DescribeExecutionRegionOperatorContractShape(*node.operator_info));
 			}
 			break;
 		case ExecutionRegionNodeKind::SINK:
 			if (node.sink) {
-				AppendExecutionRegionContractShapePart(result, node.kind,
-				                                       DescribeExecutionRegionSinkContractShape(*node.sink));
+				AppendExecutionRegionContractShapeEntry(result, DescribeExecutionRegionSinkContractShape(*node.sink));
 			}
 			break;
 		default:
@@ -2531,21 +2313,13 @@ BuildExecutionRegionContractShapeParts(const ExecutionRegionIR &region_ir, idx_t
 }
 
 static ExecutionRegionSignature BuildExecutionRegionSignature(const ExecutionRegionIR &region_ir,
-                                                              const ExecutionRegionCandidate &candidate,
-                                                              ExecutionRegionIRMode mode) {
+                                                              const ExecutionRegionCandidate &candidate) {
 	ExecutionRegionSignature signature;
 	signature.context = GetExecutionRegionSignatureContext(candidate.contract);
 	signature.shape = candidate.shape;
 	signature.feature_shape = BuildExecutionRegionFeatureShape(region_ir, candidate.first_node, candidate.node_count);
 	signature.context_feature_shape = BuildExecutionRegionFeatureShape(region_ir, 0, region_ir.nodes.size());
-	signature.contract_shape_parts =
-	    BuildExecutionRegionContractShapeParts(region_ir, candidate.first_node, candidate.node_count);
-	signature.contract_shape = DescribeExecutionRegionContractShapeParts(signature.contract_shape_parts);
-	if (ExecutionRegionShouldRenderDiagnostics(mode)) {
-		signature.ir = "signature<context=" + signature.context + ",shape=" + signature.shape +
-		               ",features=" + signature.feature_shape + ",context_features=" + signature.context_feature_shape +
-		               ",contract_shape=" + signature.contract_shape + ">";
-	}
+	signature.contract_shape = BuildExecutionRegionContractShape(region_ir, candidate.first_node, candidate.node_count);
 	return signature;
 }
 
@@ -2840,18 +2614,6 @@ static idx_t EstimateExecutionRegionCandidateCardinality(const ExecutionRegionIR
 	return result;
 }
 
-static idx_t EstimateExecutionRegionCandidateSourceCardinality(const ExecutionRegionIR &region_ir,
-                                                               const ExecutionRegionCandidate &candidate) {
-	if (candidate.first_node >= region_ir.nodes.size()) {
-		return 0;
-	}
-	auto &source = region_ir.nodes[candidate.first_node];
-	if (!source.source) {
-		return source.estimated_cardinality;
-	}
-	return MaxValue(source.source->estimated_source_cardinality, source.estimated_cardinality);
-}
-
 static string DescribeExecutionRegionCandidate(const ExecutionRegionCandidate &candidate) {
 	string result = "candidate" + std::to_string(candidate.candidate_id);
 	result += "<first_node=" + std::to_string(candidate.first_node);
@@ -2859,7 +2621,6 @@ static string DescribeExecutionRegionCandidate(const ExecutionRegionCandidate &c
 	result += ",start_operator_index=" + std::to_string(candidate.start_operator_index);
 	result += ",end_operator_index=" + std::to_string(candidate.end_operator_index);
 	result += ",estimated_cardinality=" + std::to_string(candidate.estimated_cardinality);
-	result += ",estimated_source_cardinality=" + std::to_string(candidate.estimated_source_cardinality);
 	if (candidate.source_execution != ExecutionRegionSourceExecutionKind::NONE) {
 		result += ",source_execution=";
 		result += ExecutionRegionSourceExecutionKindToString(candidate.source_execution);
@@ -2870,23 +2631,16 @@ static string DescribeExecutionRegionCandidate(const ExecutionRegionCandidate &c
 	result += ",inputs=" + DescribeExecutionRegionTypeList(candidate.input_types);
 	result += ",outputs=" + DescribeExecutionRegionTypeList(candidate.output_types);
 	result += ",shape=" + candidate.shape;
-	result += "," + candidate.signature.ir;
 	if (!candidate.stage_plan.ir.empty()) {
 		result += ",";
 		result += candidate.stage_plan.ir;
 	}
+	if (candidate.context_has_missing_operator_contract) {
+		result += ",context_has_missing_operator_contract=true";
+	}
 	result += ",pipeline_shape=" + candidate.pipeline_shape;
 	result += "," + candidate.traits.ir;
 	result += "," + candidate.contract.ir;
-	if (!candidate.upstream_traits.ir.empty()) {
-		result += ",upstream_" + candidate.upstream_traits.ir;
-	}
-	if (!candidate.context_traits.ir.empty()) {
-		result += ",context_" + candidate.context_traits.ir;
-	}
-	if (!candidate.continuation_traits.ir.empty()) {
-		result += ",continuation_" + candidate.continuation_traits.ir;
-	}
 	result += ">";
 	return result;
 }
@@ -2974,13 +2728,19 @@ static bool ExecutionRegionCandidateCoversFullPipeline(const ExecutionRegionIR &
 	return candidate.first_node == 0 && candidate.node_count == region_ir.nodes.size();
 }
 
-static ExecutionRegionCandidateTraits
-BuildExecutionRegionCandidateContextTraits(const ExecutionRegionIR &region_ir,
-                                           const ExecutionRegionCandidate &candidate, ExecutionRegionIRMode mode) {
+static bool ExecutionRegionCandidateContextHasMissingOperatorContract(const ExecutionRegionIR &region_ir,
+                                                                      const ExecutionRegionCandidate &candidate) {
 	if (ExecutionRegionCandidateCoversFullPipeline(region_ir, candidate)) {
-		return candidate.traits;
+		return CountExecutionRegionMissingOperatorContracts(candidate.stage_plan) > 0;
 	}
-	return BuildExecutionRegionContextTraits(region_ir, mode);
+	ExecutionRegionCandidate context_candidate;
+	context_candidate.first_node = 0;
+	context_candidate.node_count = region_ir.nodes.size();
+	context_candidate.contract =
+	    BuildExecutionRegionContract(region_ir, context_candidate, ExecutionRegionIRMode::COMPACT);
+	context_candidate.stage_plan =
+	    BuildExecutionRegionStagePlan(region_ir, context_candidate, ExecutionRegionIRMode::COMPACT);
+	return CountExecutionRegionMissingOperatorContracts(context_candidate.stage_plan) > 0;
 }
 
 static ExecutionRegionCandidateSummary
@@ -2996,7 +2756,6 @@ BuildExecutionRegionCandidateSummary(const ExecutionRegionIR &region_ir, idx_t c
 	candidate.end_operator_index = end_operator_index;
 	candidate.source_execution = source_execution;
 	candidate.estimated_cardinality = EstimateExecutionRegionCandidateCardinality(region_ir, candidate);
-	candidate.estimated_source_cardinality = EstimateExecutionRegionCandidateSourceCardinality(region_ir, candidate);
 	candidate.input_types = GetExecutionRegionCandidateInputTypes(region_ir, candidate);
 	candidate.output_types = GetExecutionRegionCandidateOutputTypes(region_ir, candidate);
 	candidate.shape = DescribeExecutionRegionCandidateShape(region_ir, candidate);
@@ -3033,10 +2792,9 @@ BuildExecutionRegionCandidateSummary(const ExecutionRegionIR &region_ir, idx_t c
 		return summary;
 	}
 	candidate.traits = BuildExecutionRegionCandidateTraits(region_ir, candidate, candidate.stage_plan, mode);
-	candidate.signature = BuildExecutionRegionSignature(region_ir, candidate, mode);
-	candidate.upstream_traits = BuildExecutionRegionUpstreamTraits(region_ir, candidate, mode);
-	candidate.context_traits = BuildExecutionRegionCandidateContextTraits(region_ir, candidate, mode);
-	candidate.continuation_traits = BuildExecutionRegionContinuationTraits(region_ir, candidate, mode);
+	candidate.signature = BuildExecutionRegionSignature(region_ir, candidate);
+	candidate.context_has_missing_operator_contract =
+	    ExecutionRegionCandidateContextHasMissingOperatorContract(region_ir, candidate);
 	if (mode == ExecutionRegionIRMode::TRACE) {
 		candidate.ir = DescribeExecutionRegionCandidate(candidate);
 	}

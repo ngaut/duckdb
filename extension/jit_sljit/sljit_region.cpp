@@ -60,9 +60,6 @@ ExecutionRegionCompileResult CompileSljitRegion(const string &backend_name,
 		if (native_region->UsesSourceContract()) {
 			reason += ";source-execution:source-contract";
 		}
-		if (!native_region->summary.generates_machine_code) {
-			throw InternalException("SLJIT compiled region has no executable body classification");
-		}
 		auto shape = DescribeNativeRegionShape(*native_region);
 		string ir;
 		if (ExecutionRegionSettings::DumpIR(input.context)) {

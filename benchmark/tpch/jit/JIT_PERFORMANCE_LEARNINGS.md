@@ -21,7 +21,6 @@ that were verified are separated from principles and next directions.
   - Python syntax checks passed for `tpch_common.py`, `tpch_benchmark.py`, and
     `verify_tpch_benchmark.py`
   - `git diff --check` passed
-  - whole-repo search found no deprecated verification pragma references
 
 ## What Actually Worked
 
@@ -350,8 +349,7 @@ When those facts are explicit, special cases become normal cases.
 ## Historical Optimization Log
 
 The sections below preserve the measured sequence of fixes. They are not the
-current work order; use `JIT_BROAD_QUERY_PLAN.md` and
-`JIT_BROAD_QUERY_REFACTOR_PLAN.md` for active milestones.
+current work order; use `JIT_BROAD_QUERY_PLAN.md` for active milestones.
 
 ### 2a. Predicate-Gated Perfect-Hash Aggregate Loop
 
@@ -518,9 +516,9 @@ more time in protocol and state lookup than the vectorized plan.
 The root cause was not the native state-address direction. The root cause was
 CBO shape blindness:
 
-- `source_filter_pushdown` was a capability flag, not proof that the candidate
-  actually used scan filters; treating it as actual filter use blocked Q9
-  incorrectly.
+- The old source-filter capability flag was not proof that the candidate
+  actually used scan filters; treating capability as actual filter use blocked
+  Q9 incorrectly.
 - a grouped aggregate with one generated stage is mostly state-address setup,
   not enough generated work to fund compilation
 - one join plus grouped aggregate can win with generated source filters (Q3)
@@ -890,12 +888,15 @@ The latest cleaned-state verification changed two important facts.
 First, Q6's source-filter correctness fix was necessary but not sufficient for
 performance. Fusing multiple generated table-scan filters into one predicate
 removed repeated filter operators and improved forced Q6 from the earlier
-~46 ms range to ~37-38 ms. Keeping large complex scan filters in DuckDB's scan
-filter path improved the forced shape again to ~35 ms, but vectorized/off
-remained about 30 ms. The root cause is now clear: after source-filter work is
-made correct and less fragmented, Q6 is still source-scan/filter dominated. It
-should stay vectorized by default until the source path itself is natively owned
-or the aggregate work becomes large enough to pay for the extra boundary.
+~46 ms range to ~37-38 ms. The old cleaned-state note kept large complex scan
+filters in DuckDB's scan filter path and reached ~35 ms, but that was a
+conservative ownership heuristic. The current source planner now attempts
+generated source filters uniformly and falls back to DuckDB scan-filter
+ownership only when native lowering cannot build a correct source-filter plan.
+The root cause is still source ownership: after source-filter work is correct
+and less fragmented, Q6 remains source-scan/filter dominated until the source
+path itself is natively owned or the aggregate work is large enough to pay for
+the extra boundary.
 
 Second, regular hash aggregate lookup must be treated as an unfunded native
 protocol until generated/native lookup ownership exists. In the current cleaned
@@ -3240,8 +3241,6 @@ Verification:
 - `[api][jit]` passed
 - `build/reldebug/test/unittest test/sql/join --print-failing-tests` exited 0
 - `python3 benchmark/jit/verify_jit_architecture.py` passed
-- direct smoke confirms the removed verification pragma now errors as unknown,
-  confirming the deprecated no-op registration is gone
 - forced/profile Q3/Q9/Q20 SF1 verified in
   `/private/tmp/duckdb_jit_m6_row_pointer_descriptor_profile`
 - no-trace production Q3/Q9/Q20 SF1 verified in
@@ -3337,8 +3336,6 @@ Verification:
 - `build/reldebug/test/unittest test/sql/join --print-failing-tests` exited 0
 - `python3 benchmark/jit/verify_jit_architecture.py` passed
 - `git diff --check` passed
-- deprecated verification pragma search returned no matches
-- direct shell smoke confirms the removed verification pragma now errors as unknown
 - profile Q3/Q9/Q20 SF1 verified in
   `/private/tmp/duckdb_jit_m6_probe_continuation_split_profile`
 - no-trace production Q3/Q9/Q20 SF1 verified in
@@ -3483,7 +3480,6 @@ Verification:
 - `build/reldebug/test/unittest test/sql/join --print-failing-tests` exited 0
 - `python3 benchmark/jit/verify_jit_architecture.py` passed
 - `git diff --check` passed
-- direct smoke proves the removed verification pragma remains unknown
 - no-trace production Q3/Q9/Q20 verified in
   `/private/tmp/duckdb_jit_m6_sljit_probe_salt_bits_prod_notrace`
 - profile Q3/Q9/Q20 verified in
@@ -3542,7 +3538,6 @@ Verification:
 - `build/reldebug/test/unittest test/sql/join --print-failing-tests` exited 0
 - `python3 benchmark/jit/verify_jit_architecture.py` passed
 - `git diff --check` passed
-- direct shell smoke proves the removed verification pragma remains unknown
 - no-trace production Q3/Q9/Q20 verified in
   `/private/tmp/duckdb_jit_m6_rhs_gather_helper_prod_notrace`
 - profile Q3/Q9/Q20 verified in
@@ -3611,7 +3606,6 @@ Verification:
 - `build/reldebug/test/unittest test/sql/join --print-failing-tests` exited 0
 - `python3 benchmark/jit/verify_jit_architecture.py` passed
 - `git diff --check` passed
-- direct shell smoke proves the removed verification pragma remains unknown
 - 9-repeat no-trace production Q3/Q9/Q20 verified in
   `/private/tmp/duckdb_jit_m6_join_build_raw_salt_bits_prod9_notrace`
 - profile Q3/Q9/Q20 verified in
@@ -3678,7 +3672,6 @@ Verification:
 - `build/reldebug/test/unittest test/sql/join --print-failing-tests` exited 0
 - `python3 benchmark/jit/verify_jit_architecture.py` passed
 - `git diff --check` passed
-- direct shell smoke proves the removed verification pragma remains unknown
 - the isolated SF10 Q9 repro that previously crashed now completes
 - SF1 profile Q3/Q9/Q20 verified in
   `/private/tmp/duckdb_jit_m6_probe_compare_scratch_fixed_profile`
@@ -3738,7 +3731,6 @@ Verification:
 - `build/reldebug/test/unittest test/sql/join --print-failing-tests` exited 0
 - `python3 benchmark/jit/verify_jit_architecture.py` passed
 - `git diff --check` passed
-- direct shell smoke proves the removed verification pragma remains unknown
 - SF1 profile Q3/Q9/Q20 verified in
   `/private/tmp/duckdb_jit_m6_join_state_split_profile`
 - SF1 no-trace production Q3/Q9/Q20 verified in
@@ -3790,7 +3782,6 @@ Verification:
 - `build/reldebug/test/unittest test/sql/join --print-failing-tests` exited 0
 - `python3 benchmark/jit/verify_jit_architecture.py` passed
 - `git diff --check` passed
-- direct shell smoke proves the removed verification pragma remains unknown
 - SF1 profile Q3/Q9/Q20 verified in
   `/private/tmp/duckdb_jit_m6_join_build_sel_direct_profile`
 - SF1 no-trace production Q3/Q9/Q20 verified in
@@ -3856,7 +3847,6 @@ Verification:
 - `build/reldebug/test/unittest test/sql/join --print-failing-tests` exited 0
 - `python3 benchmark/jit/verify_jit_architecture.py` passed
 - `git diff --check` passed
-- direct shell smoke proves the removed verification pragma remains unknown
 - SF1 profile Q3/Q9/Q20 verified in
   `/private/tmp/duckdb_jit_m6_pair_probe_compact_profile`
 - SF1 no-trace production Q3/Q9/Q20 verified in
@@ -3908,7 +3898,6 @@ Final retained verification:
 - `build/reldebug/test/unittest test/sql/join --print-failing-tests` exited 0
 - `python3 benchmark/jit/verify_jit_architecture.py` passed
 - `git diff --check` passed
-- The removed verification pragma remains unknown
 - SF1 coverage-CBO production verified in
   `/private/tmp/duckdb_jit_m6_retained_probe_cleanup_coverage_prod_notrace`
 

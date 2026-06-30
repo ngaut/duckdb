@@ -6,7 +6,6 @@
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/helper.hpp"
 #include "duckdb/common/types/cast_helpers.hpp"
-#include "duckdb/common/types/hugeint.hpp"
 
 #include "sljitLir.h"
 
@@ -145,14 +144,7 @@ void AddSljitExpressionOverflowJump(vector<SljitExpressionTreeOverflowJumps> &ov
 }
 
 void EmitLoadSljitExpressionTreeLogicalIndex(struct sljit_compiler *compiler) {
-	sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_R0, 0, SLJIT_MEM1(SLJIT_S0),
-	               offsetof(SljitNativeVectorInput, execute_sel));
-	auto no_execute_sel = sljit_emit_cmp(compiler, SLJIT_EQUAL, SLJIT_R0, 0, SLJIT_IMM, 0);
-	sljit_emit_op1(compiler, SLJIT_MOV_U32, SLJIT_S3, 0, SLJIT_MEM2(SLJIT_R0, SLJIT_S1), 2);
-	auto have_logical_index = sljit_emit_jump(compiler, SLJIT_JUMP);
-	sljit_set_label(no_execute_sel, sljit_emit_label(compiler));
-	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_S3, 0, SLJIT_S1, 0);
-	sljit_set_label(have_logical_index, sljit_emit_label(compiler));
+	EmitLoadLogicalIndex(compiler, SLJIT_S3);
 }
 
 void EmitLoadSljitExpressionTreeSourceIndex(struct sljit_compiler *compiler, idx_t source_index, sljit_s32 target) {
@@ -212,23 +204,20 @@ sljit_jump *EmitJumpIfSljitExpressionTreeFlatSourceNull(struct sljit_compiler *c
 	return source_is_null;
 }
 
-static void EmitLoadSljitExpressionTreeReference(struct sljit_compiler *compiler, idx_t source_index,
-                                                 sljit_s32 target) {
-	EmitLoadSljitExpressionTreeSourceIndex(compiler, source_index, SLJIT_R1);
+static void EmitLoadSljitExpressionTreeReference(struct sljit_compiler *compiler, idx_t source_index, sljit_s32 target,
+                                                 bool flat_index) {
+	auto index_reg = SLJIT_R1;
+	if (flat_index) {
+		index_reg = SLJIT_S1;
+	} else {
+		EmitLoadSljitExpressionTreeSourceIndex(compiler, source_index, index_reg);
+	}
 	// SLJIT_S5 holds the loop-invariant source_data_array base (hoisted out of the row loop by the
 	// caller), so the per-reference base load is gone; index directly to this column's data pointer.
 	sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_R0, 0, SLJIT_MEM1(SLJIT_S5),
 	               NumericCast<sljit_sw>(source_index * sizeof(const_data_ptr_t)));
 	sljit_emit_op1(compiler, NativeIntegerLoadOp(SljitNativeIntegerKind::DECIMAL64), target, 0,
-	               SLJIT_MEM2(SLJIT_R0, SLJIT_R1), NativeIntegerDataScale(SljitNativeIntegerKind::DECIMAL64));
-}
-
-static void EmitLoadSljitExpressionTreeReferenceFast(struct sljit_compiler *compiler, idx_t source_index,
-                                                     sljit_s32 target) {
-	sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_R0, 0, SLJIT_MEM1(SLJIT_S5),
-	               NumericCast<sljit_sw>(source_index * sizeof(const_data_ptr_t)));
-	sljit_emit_op1(compiler, NativeIntegerLoadOp(SljitNativeIntegerKind::DECIMAL64), target, 0,
-	               SLJIT_MEM2(SLJIT_R0, SLJIT_S1), NativeIntegerDataScale(SljitNativeIntegerKind::DECIMAL64));
+	               SLJIT_MEM2(SLJIT_R0, index_reg), NativeIntegerDataScale(SljitNativeIntegerKind::DECIMAL64));
 }
 
 void EmitSljitExpressionTreeOverflowCall(struct sljit_compiler *compiler, SljitNativeIntegerBinaryOp op) {
@@ -281,14 +270,14 @@ static void EmitSljitExpressionTreeCheckedBinaryOp(struct sljit_compiler *compil
 
 static void EmitSljitExpressionTreeValue(struct sljit_compiler *compiler, const ExecutionExpressionIR &node,
                                          sljit_s32 target, idx_t &spill_index,
-                                         vector<SljitExpressionTreeOverflowJumps> &overflows) {
+                                         vector<SljitExpressionTreeOverflowJumps> &overflows, bool flat_index = false) {
 	if (node.kind == ExecutionExpressionIRKind::CONSTANT) {
 		sljit_emit_op1(compiler, SLJIT_MOV, target, 0, SLJIT_IMM,
 		               NumericCast<sljit_sw>(node.constant.GetValueUnsafe<int64_t>()));
 		return;
 	}
 	if (node.kind == ExecutionExpressionIRKind::REFERENCE) {
-		EmitLoadSljitExpressionTreeReference(compiler, node.ref_index, target);
+		EmitLoadSljitExpressionTreeReference(compiler, node.ref_index, target, flat_index);
 		return;
 	}
 	D_ASSERT(node.kind == ExecutionExpressionIRKind::BINARY);
@@ -300,49 +289,15 @@ static void EmitSljitExpressionTreeValue(struct sljit_compiler *compiler, const 
 	}
 	if (SljitExpressionTreeIsLeaf(*node.right)) {
 		D_ASSERT(target != SLJIT_R4);
-		EmitSljitExpressionTreeValue(compiler, *node.left, target, spill_index, overflows);
-		EmitSljitExpressionTreeValue(compiler, *node.right, SLJIT_R4, spill_index, overflows);
+		EmitSljitExpressionTreeValue(compiler, *node.left, target, spill_index, overflows, flat_index);
+		EmitSljitExpressionTreeValue(compiler, *node.right, SLJIT_R4, spill_index, overflows, flat_index);
 		EmitSljitExpressionTreeCheckedBinaryOp(compiler, node, native_op, target, target, SLJIT_R4, overflows);
 		return;
 	}
 	auto local_offset = NumericCast<sljit_sw>(spill_index++ * sizeof(sljit_sw));
-	EmitSljitExpressionTreeValue(compiler, *node.left, target, spill_index, overflows);
+	EmitSljitExpressionTreeValue(compiler, *node.left, target, spill_index, overflows, flat_index);
 	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_MEM1(SLJIT_SP), local_offset, target, 0);
-	EmitSljitExpressionTreeValue(compiler, *node.right, target, spill_index, overflows);
-	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R4, 0, SLJIT_MEM1(SLJIT_SP), local_offset);
-	EmitSljitExpressionTreeCheckedBinaryOp(compiler, node, native_op, target, SLJIT_R4, target, overflows);
-}
-
-static void EmitSljitExpressionTreeValueFast(struct sljit_compiler *compiler, const ExecutionExpressionIR &node,
-                                             sljit_s32 target, idx_t &spill_index,
-                                             vector<SljitExpressionTreeOverflowJumps> &overflows) {
-	if (node.kind == ExecutionExpressionIRKind::CONSTANT) {
-		sljit_emit_op1(compiler, SLJIT_MOV, target, 0, SLJIT_IMM,
-		               NumericCast<sljit_sw>(node.constant.GetValueUnsafe<int64_t>()));
-		return;
-	}
-	if (node.kind == ExecutionExpressionIRKind::REFERENCE) {
-		EmitLoadSljitExpressionTreeReferenceFast(compiler, node.ref_index, target);
-		return;
-	}
-	D_ASSERT(node.kind == ExecutionExpressionIRKind::BINARY);
-	D_ASSERT(node.left);
-	D_ASSERT(node.right);
-	SljitNativeIntegerBinaryOp native_op;
-	if (!TryGetSljitExpressionTreeBinaryOp(node.binary_op, native_op)) {
-		throw InternalException("Unsupported SLJIT expression-tree binary operator");
-	}
-	if (SljitExpressionTreeIsLeaf(*node.right)) {
-		D_ASSERT(target != SLJIT_R4);
-		EmitSljitExpressionTreeValueFast(compiler, *node.left, target, spill_index, overflows);
-		EmitSljitExpressionTreeValueFast(compiler, *node.right, SLJIT_R4, spill_index, overflows);
-		EmitSljitExpressionTreeCheckedBinaryOp(compiler, node, native_op, target, target, SLJIT_R4, overflows);
-		return;
-	}
-	auto local_offset = NumericCast<sljit_sw>(spill_index++ * sizeof(sljit_sw));
-	EmitSljitExpressionTreeValueFast(compiler, *node.left, target, spill_index, overflows);
-	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_MEM1(SLJIT_SP), local_offset, target, 0);
-	EmitSljitExpressionTreeValueFast(compiler, *node.right, target, spill_index, overflows);
+	EmitSljitExpressionTreeValue(compiler, *node.right, target, spill_index, overflows, flat_index);
 	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R4, 0, SLJIT_MEM1(SLJIT_SP), local_offset);
 	EmitSljitExpressionTreeCheckedBinaryOp(compiler, node, native_op, target, SLJIT_R4, target, overflows);
 }
@@ -362,16 +317,9 @@ BuildSljitNativeExpressionTree(const ExecutionExpressionIR &root, SljitNativeVec
 
 	auto local_size = NumericCast<sljit_sw>(CountSljitExpressionTreeSpills(root) * sizeof(sljit_sw));
 	sljit_emit_enter(compiler, 0, SLJIT_ARGS1V(P), 5, 7, local_size);
-	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_S1, 0, SLJIT_IMM, 0);
-	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_S2, 0, SLJIT_MEM1(SLJIT_S0), offsetof(SljitNativeVectorInput, count));
 	// Hoist loop-invariant vector-format arrays so source indexing and references do not reload them
 	// for every expression node in the fused tree.
-	sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_S4, 0, SLJIT_MEM1(SLJIT_S0),
-	               offsetof(SljitNativeVectorInput, source_sel_array));
-	sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_S5, 0, SLJIT_MEM1(SLJIT_S0),
-	               offsetof(SljitNativeVectorInput, source_data_array));
-	sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_S6, 0, SLJIT_MEM1(SLJIT_S0),
-	               offsetof(SljitNativeVectorInput, source_validity_array));
+	EmitInitSljitNativeExpressionVectorLoop(compiler);
 
 	sljit_emit_op1(compiler, SLJIT_MOV_U8, SLJIT_R0, 0, SLJIT_MEM1(SLJIT_S0),
 	               offsetof(SljitNativeVectorInput, expression_tree_flat_all_valid));
@@ -381,7 +329,7 @@ BuildSljitNativeExpressionTree(const ExecutionExpressionIR &root, SljitNativeVec
 	idx_t fast_spill_index = 0;
 	auto fast_loop = sljit_emit_label(compiler);
 	auto fast_done = sljit_emit_cmp(compiler, SLJIT_GREATER_EQUAL, SLJIT_S1, 0, SLJIT_S2, 0);
-	EmitSljitExpressionTreeValueFast(compiler, root, SLJIT_R2, fast_spill_index, overflows);
+	EmitSljitExpressionTreeValue(compiler, root, SLJIT_R2, fast_spill_index, overflows, true);
 	sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_R0, 0, SLJIT_MEM1(SLJIT_S0),
 	               offsetof(SljitNativeVectorInput, result_data));
 	sljit_emit_op1(compiler, NativeIntegerStoreOp(SljitNativeIntegerKind::DECIMAL64), SLJIT_MEM2(SLJIT_R0, SLJIT_S1),
@@ -441,7 +389,7 @@ BuildSljitNativeExpressionTree(const ExecutionExpressionIR &root, SljitNativeVec
 	}
 	sljit_emit_return_void(compiler);
 
-	return FinishSljitNativeVectorCode(compiler, function, error);
+	return FinishSljitCode(compiler, function, error);
 }
 
 static unique_ptr<ExecutionRegionCodeHandle>
@@ -485,14 +433,14 @@ BuildSljitNativeUngroupedSumExpressionTree(const ExecutionExpressionIR &root,
 	idx_t fast_spill_index = 0;
 	auto fast_loop = sljit_emit_label(compiler);
 	auto fast_done = sljit_emit_cmp(compiler, SLJIT_GREATER_EQUAL, SLJIT_S1, 0, SLJIT_S2, 0);
-	EmitSljitExpressionTreeValueFast(compiler, root, SLJIT_R2, fast_spill_index, overflows);
+	EmitSljitExpressionTreeValue(compiler, root, SLJIT_R2, fast_spill_index, overflows, true);
 	if (hugeint_state) {
 		EmitSljitAggregateAccumulateHugeintInt64(compiler, local_sum_offset, local_sum_upper_offset, saw_value_offset,
 		                                         SLJIT_R2);
 	} else {
 		EmitSljitAggregateAccumulateInt64(compiler, local_sum_offset, saw_value_offset, SLJIT_R2);
 	}
-	EmitSljitAggregateLoopStep(compiler, fast_loop);
+	EmitNextSljitNativeVectorLoop(compiler, fast_loop);
 
 	sljit_set_label(use_generic_loop, sljit_emit_label(compiler));
 	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_S1, 0, SLJIT_IMM, 0);
@@ -541,47 +489,18 @@ BuildSljitNativeUngroupedSumExpressionTree(const ExecutionExpressionIR &root,
 	auto done_label = sljit_emit_label(compiler);
 	sljit_set_label(fast_done, done_label);
 	sljit_set_label(done, done_label);
-	sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_R0, 0, SLJIT_MEM1(SLJIT_S0),
-	               offsetof(SljitNativeVectorInput, aggregate_row_count));
-	auto no_count = sljit_emit_cmp(compiler, SLJIT_EQUAL, SLJIT_R0, 0, SLJIT_IMM, 0);
-	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R1, 0, SLJIT_MEM1(SLJIT_R0), 0);
-	sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_R1, 0, SLJIT_R1, 0, SLJIT_S2, 0);
-	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_MEM1(SLJIT_R0), 0, SLJIT_R1, 0);
-	sljit_set_label(no_count, sljit_emit_label(compiler));
-
-	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R2, 0, SLJIT_MEM1(SLJIT_SP), saw_value_offset);
-	auto no_value = sljit_emit_cmp(compiler, SLJIT_EQUAL, SLJIT_R2, 0, SLJIT_IMM, 0);
-	if (!hugeint_state) {
-		sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_R0, 0, SLJIT_MEM1(SLJIT_S0),
-		               offsetof(SljitNativeVectorInput, aggregate_int64_value));
-		sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R1, 0, SLJIT_MEM1(SLJIT_R0), 0);
-		sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R2, 0, SLJIT_MEM1(SLJIT_SP), local_sum_offset);
-		sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_R1, 0, SLJIT_R1, 0, SLJIT_R2, 0);
-		sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_MEM1(SLJIT_R0), 0, SLJIT_R1, 0);
-		sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_R0, 0, SLJIT_MEM1(SLJIT_S0),
-		               offsetof(SljitNativeVectorInput, aggregate_state_is_set));
-		sljit_emit_op1(compiler, SLJIT_MOV_U8, SLJIT_MEM1(SLJIT_R0), 0, SLJIT_IMM, 1);
+	if (hugeint_state) {
+		EmitSljitAggregateCommitHugeint(compiler, local_sum_offset, local_sum_upper_offset, saw_value_offset);
 	} else {
-		sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R2, 0, SLJIT_MEM1(SLJIT_SP), local_sum_offset);
-		sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_MEM1(SLJIT_S0),
-		               offsetof(SljitNativeVectorInput, aggregate_local_hugeint) + offsetof(hugeint_t, lower), SLJIT_R2,
-		               0);
-		sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R2, 0, SLJIT_MEM1(SLJIT_SP), local_sum_upper_offset);
-		sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_MEM1(SLJIT_S0),
-		               offsetof(SljitNativeVectorInput, aggregate_local_hugeint) + offsetof(hugeint_t, upper), SLJIT_R2,
-		               0);
-		sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_R0, 0, SLJIT_S0, 0);
-		sljit_emit_icall(compiler, SLJIT_CALL, SLJIT_ARGS1V(P), SLJIT_IMM,
-		                 SLJIT_FUNC_ADDR(SljitNativeAggregateHugeintCommit));
+		EmitSljitAggregateCommitInt64(compiler, local_sum_offset, saw_value_offset);
 	}
-	sljit_set_label(no_value, sljit_emit_label(compiler));
 
 	for (auto jump : helper_done) {
 		sljit_set_label(jump, sljit_emit_label(compiler));
 	}
 	sljit_emit_return_void(compiler);
 
-	return FinishSljitNativeAggregateUpdateCode(compiler, function, error);
+	return FinishSljitCode(compiler, function, error);
 }
 
 unique_ptr<ExecutionRegionCodeHandle>

@@ -9,17 +9,7 @@
 #include "sljit_region_plan.hpp"
 #include "sljit_region_plan_internal.hpp"
 
-#include "duckdb/common/exception.hpp"
 #include "duckdb/common/constants.hpp"
-#include "duckdb/common/operator/add.hpp"
-#include "duckdb/common/string_util.hpp"
-#include "duckdb/common/types/value.hpp"
-
-#include "sljit_native_plan.hpp"
-#include "sljit_typed_expression_plan.hpp"
-#include "sljit_native_util.hpp"
-
-#include <limits>
 
 namespace duckdb {
 
@@ -61,7 +51,7 @@ static bool SljitNativeRegionExpressionsGenerateCode(const vector<SljitNativeReg
 	return false;
 }
 
-bool SljitNativeRegionOpGeneratesCode(const SljitNativeRegionOpPlan &op) {
+static bool SljitNativeRegionOpGeneratesMachineCode(const SljitNativeRegionOpPlan &op) {
 	switch (op.kind) {
 	case SljitNativeRegionOpKind::FILTER:
 		return SljitNativeRegionExpressionGeneratesCode(op.filter);
@@ -74,7 +64,8 @@ bool SljitNativeRegionOpGeneratesCode(const SljitNativeRegionOpPlan &op) {
 	case SljitNativeRegionOpKind::HASH_JOIN_BUILD:
 		return false;
 	case SljitNativeRegionOpKind::NESTED_LOOP_JOIN_PROBE:
-		return false;
+		return op.nested_loop_join_probe.join_type == ExecutionRegionJoinType::INNER &&
+		       op.nested_loop_join_probe.conditions.size() == 1;
 	case SljitNativeRegionOpKind::NESTED_LOOP_JOIN_BUILD:
 		return SljitNativeRegionExpressionsGenerateCode(op.nested_loop_join_build.rhs_conditions);
 	case SljitNativeRegionOpKind::ORDER_SINK:
@@ -86,18 +77,6 @@ bool SljitNativeRegionOpGeneratesCode(const SljitNativeRegionOpPlan &op) {
 	default:
 		return false;
 	}
-}
-
-static bool SljitNativeRegionOpGeneratesMachineCode(const SljitNativeRegionOpPlan &op) {
-	if (op.kind == SljitNativeRegionOpKind::NESTED_LOOP_JOIN_PROBE) {
-		return op.nested_loop_join_probe.join_type == ExecutionRegionJoinType::INNER &&
-		       op.nested_loop_join_probe.conditions.size() == 1;
-	}
-	return SljitNativeRegionOpGeneratesCode(op);
-}
-
-static string SljitNativeRegionCodegenFusionBlocker() {
-	return "operator-contract-blocker:native-operator-executable-body-missing";
 }
 
 static bool SljitNativeRegionOpIsNativeSink(const SljitNativeRegionOpPlan &op) {
@@ -152,79 +131,44 @@ static string SljitNativeRegionOpBoundaryBlocker(const SljitNativeRegionOpPlan &
 	       string(SljitNativeRegionOpKindName(op.kind));
 }
 
-static SljitNativeRegionSummary BuildSljitNativeRegionSummary(const SljitNativeRegionPlan &region) {
-	SljitNativeRegionSummary summary;
-	for (idx_t op_idx = 0; op_idx < region.ops.size(); op_idx++) {
-		auto &op = region.ops[op_idx];
-		const auto generates_machine_code = SljitNativeRegionOpGeneratesMachineCode(op);
-		summary.generates_machine_code = summary.generates_machine_code || generates_machine_code;
-		if (!summary.has_whole_operator_boundary_stage) {
-			auto op_blocker = SljitNativeRegionOpBoundaryBlocker(op);
-			if (!op_blocker.empty()) {
-				summary.has_whole_operator_boundary_stage = true;
-				summary.whole_operator_boundary_blocker = std::move(op_blocker);
-			}
+static void DisableSljitRegionFlatNullableFastPath(SljitNativeRegionPlan &region) {
+	auto set_expression = [&](SljitNativeRegionExpressionPlan &expr) {
+		expr.emit_flat_nullable_fast_path = false;
+	};
+	auto set_expressions = [&](vector<SljitNativeRegionExpressionPlan> &expressions) {
+		for (auto &expr : expressions) {
+			set_expression(expr);
 		}
-	}
-	return summary;
-}
-
-static bool SljitShouldEmitFlatNullableFastPath(const ExecutionRegionCandidate &candidate) {
-	return candidate.estimated_cardinality >= SLJIT_FLAT_NULLABLE_FAST_PATH_MIN_CARDINALITY;
-}
-
-static void SetSljitExpressionFlatNullableFastPath(SljitNativeRegionExpressionPlan &expr,
-                                                   bool emit_flat_nullable_fast_path) {
-	expr.emit_flat_nullable_fast_path = emit_flat_nullable_fast_path;
-}
-
-static void SetSljitExpressionsFlatNullableFastPath(vector<SljitNativeRegionExpressionPlan> &expressions,
-                                                    bool emit_flat_nullable_fast_path) {
-	for (auto &expr : expressions) {
-		SetSljitExpressionFlatNullableFastPath(expr, emit_flat_nullable_fast_path);
-	}
-}
-
-static void SetSljitRegionFlatNullableFastPath(SljitNativeRegionPlan &region, bool emit_flat_nullable_fast_path) {
+	};
 	for (auto &op : region.ops) {
-		SetSljitExpressionFlatNullableFastPath(op.filter, emit_flat_nullable_fast_path);
-		SetSljitExpressionFlatNullableFastPath(op.hash_join_probe.residual_filter, emit_flat_nullable_fast_path);
+		set_expression(op.filter);
+		set_expression(op.hash_join_probe.residual_filter);
 		for (auto &condition : op.nested_loop_join_probe.conditions) {
-			SetSljitExpressionFlatNullableFastPath(condition.lhs_condition, emit_flat_nullable_fast_path);
+			set_expression(condition.lhs_condition);
 		}
-		SetSljitExpressionsFlatNullableFastPath(op.nested_loop_join_build.rhs_conditions, emit_flat_nullable_fast_path);
-		SetSljitExpressionsFlatNullableFastPath(op.order_sink.order_keys, emit_flat_nullable_fast_path);
-		SetSljitExpressionsFlatNullableFastPath(op.aggregate_update.payloads, emit_flat_nullable_fast_path);
-		SetSljitExpressionsFlatNullableFastPath(op.aggregate_update.group_expressions, emit_flat_nullable_fast_path);
-		SetSljitExpressionsFlatNullableFastPath(op.projections, emit_flat_nullable_fast_path);
+		set_expressions(op.nested_loop_join_build.rhs_conditions);
+		set_expressions(op.order_sink.order_keys);
+		set_expressions(op.aggregate_update.payloads);
+		set_expressions(op.aggregate_update.group_expressions);
+		set_expressions(op.projections);
 	}
-}
-
-static void FinalizeSljitNativeRegionPlan(SljitNativeRegionPlan &region) {
-	region.summary = BuildSljitNativeRegionSummary(region);
-}
-
-static bool SljitNativeRegionHasExecutableBody(const SljitNativeRegionPlan &region) {
-	return !region.summary.has_whole_operator_boundary_stage && region.summary.generates_machine_code;
 }
 
 static bool SljitNativeRegionHasExecutableBodyGap(const SljitNativeRegionPlan &region, string &blocker) {
-	if (region.summary.has_whole_operator_boundary_stage) {
-		blocker = region.summary.whole_operator_boundary_blocker;
-		return true;
+	bool generates_machine_code = false;
+	for (auto &op : region.ops) {
+		auto op_blocker = SljitNativeRegionOpBoundaryBlocker(op);
+		if (!op_blocker.empty()) {
+			blocker = std::move(op_blocker);
+			return true;
+		}
+		generates_machine_code = generates_machine_code || SljitNativeRegionOpGeneratesMachineCode(op);
 	}
-	if (!SljitNativeRegionHasExecutableBody(region)) {
+	if (!generates_machine_code) {
 		blocker = "SLJIT native region emits no generated machine code";
 		return true;
 	}
 	return false;
-}
-
-static bool SljitRegionIsFullyFused(const SljitNativeRegionPlan &region, const ExecutionRegionContract &contract) {
-	if (contract.source_boundary_count > 0 || contract.missing_contract_count > 0) {
-		return false;
-	}
-	return SljitNativeRegionHasExecutableBody(region);
 }
 
 static vector<bool> BuildSljitSourceOutputNotNull(const ExecutionRegionSourceInfo &source) {
@@ -240,13 +184,6 @@ static vector<bool> BuildSljitSourceOutputNotNull(const ExecutionRegionSourceInf
 		                     : false);
 	}
 	return result;
-}
-
-static string SljitRegionCandidateContext(const ExecutionRegionContract &contract) {
-	if (ExecutionRegionABIIsFullPipeline(contract.abi)) {
-		return "full-pipeline";
-	}
-	return "unknown";
 }
 
 static SljitRegionNodePlan PlanSljitRegionNode(const ExecutionRegionNode &node, const vector<LogicalType> &input_types,
@@ -273,10 +210,6 @@ static SljitRegionNodePlan PlanSljitRegionNode(const ExecutionRegionNode &node, 
 	default:
 		return SljitNodeBlockerBoundary(node, "region IR node is outside SLJIT native region lowering");
 	}
-}
-
-static bool SljitRejectsSinkRegionContext(const ExecutionRegionNode &node, const ExecutionRegionCandidate &candidate) {
-	return node.kind == ExecutionRegionNodeKind::SINK && candidate.context_traits.operator_missing_count > 0;
 }
 
 static void AddSljitLoweredNode(ExecutionRegionLoweringPlan &lowering_plan, const ExecutionRegionNode &node,
@@ -344,10 +277,6 @@ static void AddSljitNativeRegionCapabilityFacts(ExecutionRegionLoweringPlan &low
 	}
 }
 
-static bool SljitNodePlanIsBoundary(const SljitRegionNodePlan &node_plan) {
-	return node_plan.kind == ExecutionRegionLoweringKind::BOUNDARY;
-}
-
 static bool SljitNativeContractReady(bool present, const ExecutionRegionNativeOperatorContract &native_contract) {
 	return present && native_contract.status == ExecutionRegionStateContractStatus::READY;
 }
@@ -372,7 +301,8 @@ static void AddSljitContractBlocker(ExecutionRegionLoweringPlan &lowering_plan, 
 static void AddSljitFullPipelineSinkBlockers(ExecutionRegionLoweringPlan &lowering_plan, string &backend_error,
                                              const ExecutionRegionNode &node, const SljitRegionNodePlan &node_plan,
                                              const ExecutionRegionContract &contract) {
-	if (!SljitNodePlanIsBoundary(node_plan) || !ExecutionRegionABIIsFullPipeline(contract.abi) || !node.sink) {
+	if (node_plan.kind != ExecutionRegionLoweringKind::BOUNDARY || !ExecutionRegionABIIsFullPipeline(contract.abi) ||
+	    !node.sink) {
 		return;
 	}
 	switch (node.sink->kind) {
@@ -403,7 +333,7 @@ static void AddSljitFullPipelineSinkBlockers(ExecutionRegionLoweringPlan &loweri
 
 static void AddSljitOperatorContractBlockers(ExecutionRegionLoweringPlan &lowering_plan, string &backend_error,
                                              const ExecutionRegionNode &node, const SljitRegionNodePlan &node_plan) {
-	if (!SljitNodePlanIsBoundary(node_plan) || !node.operator_info) {
+	if (node_plan.kind != ExecutionRegionLoweringKind::BOUNDARY || !node.operator_info) {
 		return;
 	}
 	switch (node.operator_info->kind) {
@@ -447,14 +377,6 @@ struct SljitRegionLoweringCursor {
 		return can_fuse;
 	}
 
-	ExecutionRegionSourceExecutionKind SelectedSourceExecution() const {
-		return selected_source_execution;
-	}
-
-	bool UsesScanFilters() const {
-		return uses_scan_filters;
-	}
-
 	void BreakAtBoundary(const vector<LogicalType> &boundary_output_types) {
 		can_fuse = false;
 		current_types = boundary_output_types;
@@ -465,10 +387,6 @@ struct SljitRegionLoweringCursor {
 		auto source_output_types = SljitRegionNodeHasNativeOps(node_plan)
 		                               ? SljitRegionNodeLastNativeOp(node_plan).output_types
 		                               : node.output_types;
-		if (node_plan.source_execution != ExecutionRegionSourceExecutionKind::NONE) {
-			selected_source_execution = node_plan.source_execution;
-		}
-		uses_scan_filters = uses_scan_filters || node_plan.uses_scan_filters;
 		AppendIfFusing(node_plan);
 		current_types = std::move(source_output_types);
 	}
@@ -485,8 +403,8 @@ struct SljitRegionLoweringCursor {
 		if (current_types.empty()) {
 			current_types = node.output_types;
 		}
-		if (can_fuse && SljitRegionNodeHasSingleNativeOp(node_plan) &&
-		    IsIdentityProjection(SljitRegionNodeFirstNativeOp(node_plan), current_types)) {
+		if (can_fuse && node_plan.native_ops.size() == 1 &&
+		    IsIdentityProjection(node_plan.native_ops[0], current_types)) {
 			return;
 		}
 		auto output_types = SljitRegionNodeLastNativeOp(node_plan).output_types;
@@ -497,15 +415,15 @@ struct SljitRegionLoweringCursor {
 private:
 	void AppendIfFusing(SljitRegionNodePlan &node_plan) {
 		if (can_fuse) {
-			AppendSljitRegionNodeNativeOps(native_region, node_plan);
+			for (auto &op : node_plan.native_ops) {
+				native_region.ops.push_back(std::move(op));
+			}
 		}
 	}
 
 	vector<LogicalType> current_types;
 	SljitNativeRegionPlan &native_region;
 	bool can_fuse = true;
-	ExecutionRegionSourceExecutionKind selected_source_execution = ExecutionRegionSourceExecutionKind::NONE;
-	bool uses_scan_filters = false;
 };
 
 ExecutionRegionLoweringPlan BuildSljitRegionPlan(const ExecutionRegionIR &region_ir,
@@ -524,6 +442,7 @@ ExecutionRegionLoweringPlan BuildSljitRegionPlan(const ExecutionRegionIR &region
 		return lowering_plan;
 	}
 	auto &contract = candidate.contract;
+	bool selected_uses_scan_filters = false;
 	for (idx_t node_idx = candidate.first_node; node_idx < candidate.EndNode(); node_idx++) {
 		auto &node = region_ir.nodes[node_idx];
 		if (node.kind == ExecutionRegionNodeKind::SOURCE) {
@@ -532,10 +451,10 @@ ExecutionRegionLoweringPlan BuildSljitRegionPlan(const ExecutionRegionIR &region
 			    candidate.source_execution != ExecutionRegionSourceExecutionKind::NONE
 			        ? candidate.source_execution
 			        : (node.source ? node.source->execution : ExecutionRegionSourceExecutionKind::NONE);
-			auto node_plan = executable_source
-			                     ? PlanSljitSourceNode(node, contract, candidate.traits, source_execution,
-			                                           render_diagnostics)
-			                     : PlanSljitRegionNode(node, cursor.InputTypes(), backend_error, render_diagnostics);
+			auto node_plan =
+			    executable_source
+			        ? PlanSljitSourceNode(node, contract, source_execution, render_diagnostics)
+			        : PlanSljitRegionNode(node, cursor.InputTypes(), backend_error, render_diagnostics);
 			const bool source_requires_native = executable_source &&
 			                                    node_plan.kind == ExecutionRegionLoweringKind::BOUNDARY &&
 			                                    node_plan.requires_source_contract;
@@ -549,11 +468,13 @@ ExecutionRegionLoweringPlan BuildSljitRegionPlan(const ExecutionRegionIR &region
 				                                     ? node_plan.source_execution
 				                                     : node.source->execution;
 				lowering_plan.SetSelectedSourceExecution(selected_source_execution);
+				native_region.source_execution = selected_source_execution;
 			}
 			if (executable_source && node_plan.kind == ExecutionRegionLoweringKind::NATIVE) {
 				const bool generated_source_filters = node.source && !node.source->filters.empty() &&
 				                                      !node_plan.uses_scan_filters &&
 				                                      SljitRegionNodeHasNativeOps(node_plan);
+				selected_uses_scan_filters = selected_uses_scan_filters || node_plan.uses_scan_filters;
 				cursor.AcceptSource(node, node_plan);
 				if (node.source && node.source->table_scan_contract.present) {
 					native_region.source_distinct_counts =
@@ -573,7 +494,7 @@ ExecutionRegionLoweringPlan BuildSljitRegionPlan(const ExecutionRegionIR &region
 			auto node_plan =
 			    ExecutionRegionABIIsFullPipeline(contract.abi)
 			        ? PlanSljitFullPipelineSinkNode(node, cursor.InputTypes(), render_diagnostics)
-			    : SljitRejectsSinkRegionContext(node, candidate)
+			    : candidate.context_has_missing_operator_contract
 			        ? SljitRegionBoundaryNode("sink region requires upstream operators with native contracts")
 			        : PlanSljitRegionNode(node, cursor.InputTypes(), backend_error, render_diagnostics);
 			AddSljitLoweredNode(lowering_plan, node, node_plan);
@@ -607,24 +528,25 @@ ExecutionRegionLoweringPlan BuildSljitRegionPlan(const ExecutionRegionIR &region
 		cursor.AcceptOperator(node, node_plan);
 	}
 	if (cursor.CanFuse() && !native_region.ops.empty()) {
-		native_region.source_execution = cursor.SelectedSourceExecution();
 		FuseAdjacentNativeProjections(native_region, render_diagnostics);
 		FusePrimitiveAggregateUpdates(native_region, candidate.input_types, render_diagnostics);
-		SetSljitRegionFlatNullableFastPath(native_region, SljitShouldEmitFlatNullableFastPath(candidate));
-		FinalizeSljitNativeRegionPlan(native_region);
+		if (candidate.estimated_cardinality < SLJIT_FLAT_NULLABLE_FAST_PATH_MIN_CARDINALITY) {
+			DisableSljitRegionFlatNullableFastPath(native_region);
+		}
 		AddSljitNativeRegionCapabilityFacts(lowering_plan, native_region);
-		lowering_plan.SetUsesScanFilters(cursor.UsesScanFilters());
+		lowering_plan.SetUsesScanFilters(selected_uses_scan_filters);
 		string codegen_blocker;
 		if (SljitNativeRegionHasExecutableBodyGap(native_region, codegen_blocker)) {
 			backend_error = codegen_blocker;
-			auto fusion_blocker = SljitNativeRegionCodegenFusionBlocker() + ";" + codegen_blocker;
+			auto fusion_blocker =
+			    "operator-contract-blocker:native-operator-executable-body-missing;" + codegen_blocker;
 			if (!candidate.contract.ir.empty()) {
 				fusion_blocker += ";" + candidate.contract.ir;
 			}
 			lowering_plan.AddFusionBlocker(std::move(fusion_blocker));
 			return lowering_plan;
 		}
-		if (SljitRegionIsFullyFused(native_region, contract)) {
+		if (contract.source_boundary_count == 0 && contract.missing_contract_count == 0) {
 			lowering_plan.SetFullyFused(true);
 			auto backend_plan = make_shared_ptr<SljitRegionBackendPlan>();
 			backend_plan->error = std::move(backend_error);

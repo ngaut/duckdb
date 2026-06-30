@@ -10,9 +10,6 @@ compile": a milestone is not complete until it deletes named work, preserves
 correctness, passes the verification gate, and improves production medians beyond
 noise.
 
-Companion refactor plan:
-`benchmark/tpch/jit/JIT_BROAD_QUERY_REFACTOR_PLAN.md`.
-
 ## Root Solution
 
 The root solution is data-centric value-lifetime fusion:
@@ -251,7 +248,7 @@ Latest full-shape checkpoint after variable-width direct projection:
 
 - The full SF10 Q9 candidate is backend-fusable and fully fused by lowering:
   `operator-projection-projection-operator-projection-projection-projection-projection-sink`.
-- Backend native summary is
+- Backend native shape is
   `table-scan:1|projection:6|hash-join:2|hash-group-by:1`.
 - The CBO rule `scan_filtered_narrow_two_join_grouped_aggregate` was stale: it
   required exactly two generated stages and no reference-`VARCHAR` projection.
@@ -501,8 +498,7 @@ Production checkpoint after the split-payload final aggregate fix:
   `0.29-0.33 ms` instead of making the deleted projection boundary reappear as a
   slower generic row loop.
   Verification passed for `make reldebug -j12`, `[api][jit]`, `test/sql/join`,
-  the architecture verifier, direct smoke that the removed verification pragma is
-  gone, forced/profile Q3/Q9/Q20 in
+  the architecture verifier, forced/profile Q3/Q9/Q20 in
   `/private/tmp/duckdb_jit_m6_row_pointer_descriptor_profile`, and comparable
   no-trace production Q3/Q9/Q20 in
   `/private/tmp/duckdb_jit_m6_row_pointer_descriptor_prod_notrace`. Production
@@ -531,8 +527,8 @@ Production checkpoint after the split-payload final aggregate fix:
 	  contract requires it. This removes the extra per-row continuation vector and
   the stale helper wrapper, while keeping RowMatcher indexed by original probe
   rows. Verification passed for `make reldebug -j12`, `[api][jit]`,
-  `test/sql/join`, the architecture verifier, `git diff --check`, and direct
-  proof that the removed verification pragma is gone. Forced/profile Q3/Q9/Q20
+  `test/sql/join`, the architecture verifier, and `git diff --check`.
+  Forced/profile Q3/Q9/Q20
   in `/private/tmp/duckdb_jit_m6_probe_continuation_split_profile` stayed
   correct; profile medians were Q3 `0.061068s -> 0.060205s`, Q9
   `0.135810s -> 0.135843s`, and Q20 `0.064099s -> 0.061425s`. No-trace
@@ -645,10 +641,9 @@ Production checkpoint after the split-payload final aggregate fix:
   input-vector read is rejected and the existing sidecar/batch path consumes the
   live compressed key instead.
   Verification passed for `make reldebug -j12`, `[api][jit]`, `test/sql/join`,
-  `python3 benchmark/jit/verify_jit_architecture.py`, `git diff --check`, direct
-  smoke that the removed verification pragma is gone, and the isolated SF10 Q9
-  repro that previously crashed in `AggregateReverseMemCpy`. SF1 forced/profile
-  Q3/Q9/Q20 in
+  `python3 benchmark/jit/verify_jit_architecture.py`, `git diff --check`, and
+  the isolated SF10 Q9 repro that previously crashed in `AggregateReverseMemCpy`.
+  SF1 forced/profile Q3/Q9/Q20 in
   `/private/tmp/duckdb_jit_m6_probe_compare_scratch_fixed_profile` verified with
   medians Q3 `0.060700s -> 0.056383s`, Q9 `0.138486s -> 0.127730s`, and Q20
   `0.063615s -> 0.050615s`. SF1 no-trace production in
@@ -1144,82 +1139,16 @@ Before claiming a milestone complete:
 9. Treat zero-compiled timing movement as planning overhead or noise unless it
    repeats and has a specific root cause.
 
-## Current Milestone 6 CBO Refactor Decision
+## Current Aggressive CBO Checkpoint
 
-The broad-query CBO no longer uses per-shape funded-protocol rules or startup
-waivers. Admission now has one visible class per cost input, exposed as
-`runner_cost_admission_class`, and the cost input scope is visible as
-`runner_cost_input_scope`.
-
-The current production model is intentionally small:
-
-- generated/native fusion is admitted by `generated_native_fusion`, then must
-  clear the ordinary saved-work and startup threshold
-- native operator work is admitted only by explicit native benefit
-  (`configured_native_operator`)
-- materialization elision and full-pipeline proof remain explicit admission
-  classes
-- native joins pay a fixed protocol penalty; blocked aggregate lookup pays its
-  own fixed penalty
-- projection glue is reference-only work and contributes zero generated benefit;
-  non-reference projections are generated compute, capped by expression cost
-- startup is uniform; there are no shape-specific discounts or waivers
-- pre-graph physical-pipeline admission remains separate from execution-region
-  candidate admission through `runner_cost_input_scope`
-
-The architecture verifier now rejects the obsolete CBO rule-table vocabulary in
-code, the removed projection-glue/small-stateful hard rejects, and the removed
-verification pragma. New TPC-H work should tune this quantitative model or delete
-work in the runtime path; it should not add another shape predicate.
-
-The broad default run
-`/private/tmp/duckdb_jit_m6_scope_default_broad_prod` verified correctness but
-did not justify enabling `jit_cbo_full_pipeline_benefit` by default. The default
-therefore stays conservative while broad-query work moves to measured runtime
-deletions and explicit cost terms.
-
-Follow-up simplification removed the remaining stale CBO input inventory fields
-that were no longer read by the quantitative model (`perfect_hash_join`/payload
-shape, grouped-string shape, source projected columns, and reference-varchar
-projection count) from `PhysicalRunnerCostInput`; those facts stay in IR
-inventory/telemetry where they are observational. It also removed the `sort_sink`
-CBO bit and the old small-stateful-projection hard reject. Q7 stays governed by
-the same quantitative startup threshold, so the deletion did not need a
-replacement shape gate.
-
-Focused SF1 production smoke after this deletion, before default recalibration:
-`/private/tmp/duckdb_jit_cbo_simplified_no_shape_reject_prod` verified
-correctness for Q1/Q3/Q7/Q9/Q14/Q17/Q19/Q20. Medians were Q1
-`0.070s -> 0.060s` (`1.166667x`, compiled), Q9 `0.155s -> 0.153s`
-(`1.013072x`, compiled/runtime-limited), Q7 neutral with no JIT decision, and
-all other zero-compiled changes were noise-level. This supports the simpler CBO
-as a safe base, but not as the remaining performance win by itself.
-
-The default CBO is now deliberately more aggressive without adding shape gates:
-`jit_cbo_generated_stage_benefit=4096` and
-`jit_cbo_startup_base_cost=64000`. The high generated-stage benefit admits real
-generated/native fusion wins; the higher uniform startup threshold rejects weak
-marginal regions like Q7 through the same math instead of naming the query shape.
-With those defaults, SF1 all-22 production TPC-H in
-`/private/tmp/duckdb_jit_cbo_aggressive_defaults_all22_prod` verified
-correctness. Compiled wins were Q1 `0.069s -> 0.060s` (`1.150000x`), Q9
-`0.152s -> 0.120s` (`1.266667x`, two compiled shapes), and Q14
-`0.076s -> 0.037s` (`2.054054x`). There were no compiled regressions; remaining
-slow-looking rows had zero JIT decisions and are benchmark noise, not CBO
-admissions.
-
-Current aggressive CBO checkpoint:
-
-- The stale generic `configured_native_operator` admission path is deleted.
-  Native operator work no longer opens a region by itself; native work is scored
-  only after a real generated/materialization/full-pipeline/native-aggregate
-  admission. This keeps native-only join plumbing out of auto while still
-  allowing native aggregate-only regions through the explicit `native_aggregate`
-  admission class.
+- The stale generic `configured_native_operator` admission token is deleted.
+  Native operator work is admitted by the quantitative `native_operator` class
+  when measured native-stage benefit pays after protocol penalties. It is not a
+  hidden shape waiver and it does not require generated-stage credit.
 - Graph prefiltering now distinguishes native aggregate sinks from generic
-  native operator work. Native stage benefit can make planning worthwhile for a
-  generated-native graph or a native aggregate sink, but it does not open
-  native-only join/delim protocol graphs.
+  native operator work. Native stage benefit can make planning worthwhile for
+  generated-native graphs, native aggregate sinks, and native-only join graphs
+  when the same cost equation clears startup and protocol costs.
 - Default settings are now the measured aggressive profile:
   `jit_cbo_generated_stage_benefit=4096`,
   `jit_cbo_materialization_elision_benefit=4096`,
@@ -1228,10 +1157,9 @@ Current aggressive CBO checkpoint:
   `jit_cbo_startup_base_cost=32000`, and
   `jit_cbo_startup_margin_basis_points=0`.
 - Native benefit guards are smaller and evidence-based: weak native-only join
-  plumbing no longer opens regions by itself, while the wide-join guard uses
-  costed post-filter rows instead of a blanket stage-count veto. A join-only
-  threshold relaxation was tested and discarded because it admitted Q18/Q21
-  regressions and still did not admit Q20.
+  plumbing is rejected by net benefit instead of hidden shape gates, while the
+  wide-join guard uses costed post-filter rows instead of a blanket stage-count
+  veto.
 - The mixed find-or-create grouped fused-payload route no longer calls the
   selected state-address payload callback from inside hash-table lookup.
   Append-new and existing-group fast paths remain direct, while mixed new/existing

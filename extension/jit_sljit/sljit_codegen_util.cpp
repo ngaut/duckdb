@@ -60,6 +60,26 @@ unique_ptr<ExecutionRegionCodeHandle> MakeSljitCodeHandle(void *code, idx_t code
 	return make_uniq<SljitCodeHandle>(code, code_size, std::move(owned_data));
 }
 
+unique_ptr<ExecutionRegionCodeHandle> FinishSljitCode(struct sljit_compiler *compiler, void *&code, string &error,
+                                                      vector<shared_ptr<void>> owned_data) {
+	auto compiler_error = sljit_get_compiler_error(compiler);
+	if (compiler_error != SLJIT_SUCCESS) {
+		error = "SLJIT compiler failed with error code " + std::to_string(compiler_error);
+		sljit_free_compiler(compiler);
+		return nullptr;
+	}
+
+	code = GenerateSljitCode(compiler);
+	auto code_size = LossyNumericCast<idx_t>(sljit_get_generated_code_size(compiler));
+	sljit_free_compiler(compiler);
+	if (!code) {
+		error = "SLJIT executable code generation failed";
+		return nullptr;
+	}
+
+	return MakeSljitCodeHandle(code, code_size, std::move(owned_data));
+}
+
 sljit_sw NativeIntegerDataScale(SljitNativeIntegerKind kind) {
 	switch (kind) {
 	case SljitNativeIntegerKind::INT8:
