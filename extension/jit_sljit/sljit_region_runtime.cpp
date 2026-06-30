@@ -354,9 +354,10 @@ static bool SljitHashJoinMatchedProbeOutputMode(ExecutionHashJoinProbeOutputMode
 	       mode == ExecutionHashJoinProbeOutputMode::MATCHED_PROBE_ONLY;
 }
 
-struct SljitHashJoinMatchedRowConsumer {
-	SljitHashJoinMatchedRowConsumer(SljitNativeHashJoinProbeInput &input, const SljitNativeHashJoinProbePlan &plan)
-	    : row_pointers(input.row_pointers), match_sel(input.match_sel), selected_count(input.selected_count),
+struct SljitHashJoinNoChainMatchedRowConsumer {
+	SljitHashJoinNoChainMatchedRowConsumer(SljitNativeHashJoinProbeInput &input,
+	                                       const SljitNativeHashJoinProbePlan &plan)
+	    : input(input), row_pointers(input.row_pointers), match_sel(input.match_sel), selected_count(input.selected_count),
 	      output_capacity(input.output_capacity), mark_build_match(plan.mark_build_match),
 	      found_match_offset(plan.found_match_offset) {
 	}
@@ -368,14 +369,26 @@ struct SljitHashJoinMatchedRowConsumer {
 		row_pointers[selected_count] = row_location;
 		match_sel[selected_count] = UnsafeNumericCast<sel_t>(row_idx);
 		selected_count++;
-		return selected_count >= output_capacity;
+		if (selected_count < output_capacity) {
+			return false;
+		}
+		Finish(row_idx + 1);
+		return true;
 	}
 
-	idx_t Count() const {
-		return selected_count;
+	void Finish() {
+		Finish(input.count);
 	}
 
 private:
+	void Finish(const idx_t next_row_idx) {
+		input.selected_count = selected_count;
+		input.input_offset = next_row_idx;
+		input.resume_row_pointer = nullptr;
+		input.finished = input.input_offset >= input.count;
+	}
+
+	SljitNativeHashJoinProbeInput &input;
 	data_ptr_t *__restrict row_pointers;
 	sel_t *__restrict match_sel;
 	idx_t selected_count;
@@ -383,14 +396,6 @@ private:
 	bool mark_build_match;
 	idx_t found_match_offset;
 };
-
-static void FinishHashJoinNoChainProbeChunk(SljitNativeHashJoinProbeInput &input, idx_t selected_count,
-                                            idx_t next_row_idx) {
-	input.selected_count = selected_count;
-	input.input_offset = next_row_idx;
-	input.resume_row_pointer = nullptr;
-	input.finished = input.input_offset >= input.count;
-}
 
 static bool SljitHashJoinCanUseAllValidNoChainProbe(const SljitNativeHashJoinProbePlan &plan,
                                                     const ExecutionHashJoinTableLayout &layout,
@@ -551,7 +556,6 @@ static void ExecuteAllValidInt64PairNoChainProbe(const SljitNativeHashJoinProbeP
 						if (SljitHashJoinKeysEqual<uint64_t>(row_location, key0_offset, key0) &&
 						    SljitHashJoinKeysEqual<uint64_t>(row_location, key1_offset, key1)) {
 							if (consumer.EmitMatch(row_idx, row_location)) {
-								FinishHashJoinNoChainProbeChunk(input, consumer.Count(), row_idx + 1);
 								return;
 							}
 							break;
@@ -571,16 +575,13 @@ static void ExecuteAllValidInt64PairNoChainProbe(const SljitNativeHashJoinProbeP
 		}
 	}
 
-	input.selected_count = consumer.Count();
-	input.input_offset = input.count;
-	input.resume_row_pointer = nullptr;
-	input.finished = true;
+	consumer.Finish();
 }
 
 template <bool SELECTED>
 static void ExecuteAllValidInt64PairNoChainProbe(const SljitNativeHashJoinProbePlan &plan,
                                                  SljitNativeHashJoinProbeInput &input) {
-	SljitHashJoinMatchedRowConsumer consumer(input, plan);
+	SljitHashJoinNoChainMatchedRowConsumer consumer(input, plan);
 	if (input.use_salt) {
 		if (input.bloom_filter_bits) {
 			ExecuteAllValidInt64PairNoChainProbe<SELECTED, true, true>(plan, input, consumer);
@@ -849,7 +850,6 @@ static void ExecuteAllValidSingleKeyNoChainProbe(const SljitNativeHashJoinProbeP
 						auto row_location = SljitHashJoinEntryPointer(entry_value);
 						if (SljitHashJoinKeysEqual<T>(row_location, key_offset, key)) {
 							if (consumer.EmitMatch(row_idx, row_location)) {
-								FinishHashJoinNoChainProbeChunk(input, consumer.Count(), row_idx + 1);
 								return;
 							}
 							break;
@@ -868,10 +868,7 @@ static void ExecuteAllValidSingleKeyNoChainProbe(const SljitNativeHashJoinProbeP
 		}
 	}
 
-	input.selected_count = consumer.Count();
-	input.input_offset = input.count;
-	input.resume_row_pointer = nullptr;
-	input.finished = true;
+	consumer.Finish();
 }
 
 template <bool SELECTED, bool UNCHECKED>
@@ -883,7 +880,7 @@ static void ExecuteAllValidSingleKeyNoChainProbeInt64ToInt32(const SljitNativeHa
 	if (SELECTED) {
 		key_sel = input.source_sel[0];
 	}
-	SljitHashJoinMatchedRowConsumer consumer(input, plan);
+	SljitHashJoinNoChainMatchedRowConsumer consumer(input, plan);
 	const auto key_offset = plan.keys[0].key_layout_offset;
 	const auto bitmask = input.bitmask;
 
@@ -922,7 +919,6 @@ static void ExecuteAllValidSingleKeyNoChainProbeInt64ToInt32(const SljitNativeHa
 						auto row_location = SljitHashJoinEntryPointer(entry_value);
 						if (SljitHashJoinKeysEqual<int32_t>(row_location, key_offset, key)) {
 							if (consumer.EmitMatch(row_idx, row_location)) {
-								FinishHashJoinNoChainProbeChunk(input, consumer.Count(), row_idx + 1);
 								return;
 							}
 							break;
@@ -941,16 +937,13 @@ static void ExecuteAllValidSingleKeyNoChainProbeInt64ToInt32(const SljitNativeHa
 		}
 	}
 
-	input.selected_count = consumer.Count();
-	input.input_offset = input.count;
-	input.resume_row_pointer = nullptr;
-	input.finished = true;
+	consumer.Finish();
 }
 
 template <class T, bool SELECTED>
 static void ExecuteAllValidSingleKeyNoChainProbe(const SljitNativeHashJoinProbePlan &plan,
                                                  SljitNativeHashJoinProbeInput &input) {
-	SljitHashJoinMatchedRowConsumer consumer(input, plan);
+	SljitHashJoinNoChainMatchedRowConsumer consumer(input, plan);
 	if (input.use_salt) {
 		if (input.bloom_filter_bits) {
 			ExecuteAllValidSingleKeyNoChainProbe<T, SELECTED, true, true>(plan, input, consumer);

@@ -508,7 +508,6 @@ static void SLJIT_FUNC SljitNativeHashJoinInt64ToInt32CastError(SljitNativeHashJ
 		                          "the destination type INT32",
 		                          static_cast<long long>(value));
 	} catch (...) {
-		input->has_error = true;
 		input->error = std::current_exception();
 	}
 }

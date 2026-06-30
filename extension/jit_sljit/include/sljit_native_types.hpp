@@ -240,7 +240,6 @@ struct SljitNativeHashJoinProbeInput {
 	idx_t input_offset = 0;
 	data_ptr_t resume_row_pointer = nullptr;
 	bool finished = false;
-	bool has_error = false;
 	std::exception_ptr error;
 };
 
