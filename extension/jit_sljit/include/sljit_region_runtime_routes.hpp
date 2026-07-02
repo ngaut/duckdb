@@ -276,6 +276,13 @@ public:
 			return SljitFullPipelineRouteKind::GENERATED_FILTER_PROJECTION_HASH_JOIN_PROJECTION_GROUPED_AGGREGATE;
 		}
 
+		if (OpsPrefixIs(SljitNativeRegionOpKind::HASH_JOIN_PROBE, SljitNativeRegionOpKind::HASH_JOIN_PROBE,
+		                SljitNativeRegionOpKind::FILTER) &&
+		    TryBuildProjectionAggregateShape(3, shape) &&
+		    ops[1].hash_join_probe.plan.output_mode == ExecutionHashJoinProbeOutputMode::MARK_PROBE) {
+			return SljitFullPipelineRouteKind::HASH_JOIN_HASH_JOIN_FILTER_PROJECTION_CHAIN_GROUPED_AGGREGATE;
+		}
+
 		return SljitFullPipelineRouteKind::NONE;
 	}
 

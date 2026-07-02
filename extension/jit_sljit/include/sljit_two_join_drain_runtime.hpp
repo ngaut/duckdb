@@ -390,4 +390,137 @@ static bool SljitTryExecuteHashJoinHashJoinProjectionProjectionGroupedAggregateB
 	    fetched_chunks, max_source_fetches, append_source_batch, flush_source_and_projected_batches);
 }
 
+template <class EXECUTE_HASH_JOIN_PROBE, class EXECUTE_NATIVE_FULL_PIPELINE_FROM>
+static bool SljitTryExecuteHashJoinHashJoinFilterProjectionChainGroupedAggregateBatched(
+    ExecutionRegionRuntime &runtime, ExecutionRegionResult &result, vector<SljitExecutableRegionOp> &ops,
+    EXECUTE_HASH_JOIN_PROBE &&execute_recorded_hash_join_probe,
+    EXECUTE_NATIVE_FULL_PIPELINE_FROM &&execute_native_full_pipeline_from) {
+	SljitRegionExecutionScratch scratch(runtime.GetAllocator(), ops);
+	idx_t fetched_chunks = 0;
+	idx_t processed_batches = 0;
+	bool deferred_grouped_finish = false;
+	const auto max_source_fetches = SljitBatchedSourceContractFetchBudget(runtime.MaxChunks());
+	const idx_t first_hash_join_idx = 0;
+	const idx_t second_hash_join_idx = 1;
+	const idx_t filter_idx = 2;
+	const idx_t final_projection_idx = ops.size() - 2;
+	const idx_t aggregate_idx = ops.size() - 1;
+	auto &first_hash_join_op = ops[first_hash_join_idx];
+	auto &second_hash_join_op = ops[second_hash_join_idx];
+	auto &final_projection_op = ops[final_projection_idx];
+	auto &aggregate_op = ops[aggregate_idx];
+	auto &native_runtime = runtime.ExecutionOperators();
+	SljitRouteChunkBatch source_batch(runtime);
+	SljitProjectedGroupedAggregateSink aggregate_sink(
+	    ops, runtime, native_runtime, scratch, result, final_projection_idx, final_projection_op, aggregate_idx,
+	    aggregate_op, deferred_grouped_finish, processed_batches,
+	    SljitProjectedGroupedAggregateProgressMode::SOURCE_FETCHES, "post_mark_projection_batch_append",
+	    "copied_post_mark_projection_batch", nullptr, true);
+
+	auto execute_hash_join_probe = [&](idx_t hash_join_idx, SljitExecutableRegionOp &hash_join_op, DataChunk &input,
+	                                   DataChunk &output, SljitHashJoinProbeDrainState &state, string &deferred_reason,
+	                                   bool source_key0_int64_to_int32_unchecked, bool selection_only) {
+		return execute_recorded_hash_join_probe(scratch, hash_join_idx, hash_join_op, input, output, state,
+		                                        deferred_reason, source_key0_int64_to_int32_unchecked, selection_only);
+	};
+
+	auto materialize_mark_output_fallback = [&](DataChunk &join_input, idx_t mark_count, DataChunk &join_output) {
+		if (!scratch.HasOperatorBinding(second_hash_join_idx)) {
+			throw InternalException("SLJIT two-join MARK fallback has no hash join binding");
+		}
+		auto &binding = scratch.OperatorBinding(second_hash_join_idx).hash_join_probe;
+		auto materialize_stage_start = SljitRegionStageStart(runtime);
+		SljitRegionStageRecorder recorder(runtime, second_hash_join_idx, second_hash_join_op.kind,
+		                                  "materialize_mark_output_fallback");
+		RecordSljitRegionMaterializationBoundary(runtime, second_hash_join_op.kind, "final_output", mark_count);
+		ExecutionMaterializeHashJoinProbe(binding, join_input, scratch.HashJoinRowPointers(second_hash_join_idx),
+		                                  scratch.FilterSelection(second_hash_join_idx), mark_count, join_output,
+		                                  runtime.TraceRuntime() ? &recorder : nullptr);
+		RecordSljitRegionStageRuntime(runtime, second_hash_join_idx, second_hash_join_op.kind,
+		                              "materialize_mark_output_fallback", materialize_stage_start);
+	};
+
+	auto drain_second_mark_join = [&](DataChunk &second_join_input) -> bool {
+		if (second_join_input.size() == 0) {
+			return false;
+		}
+		SljitHashJoinProbeDrainState second_state;
+		auto &second_join_output = scratch.TemporaryChunk(second_hash_join_idx);
+		do {
+			second_join_output.Reset();
+			string deferred_reason;
+			auto bind_result = execute_hash_join_probe(second_hash_join_idx, second_hash_join_op, second_join_input,
+			                                           second_join_output, second_state, deferred_reason, false, true);
+			if (bind_result == ExecutionOperatorBindResult::DEFERRED) {
+				return aggregate_sink.DeferAfterFlushAndFinish(deferred_reason);
+			}
+			const auto mark_count = second_join_output.size();
+			if (mark_count == 0) {
+				continue;
+			}
+
+			const bool built_mark_filter_input =
+			    scratch.HasOperatorBinding(second_hash_join_idx) &&
+			    SljitTryBuildMarkProbeFilterInput(scratch.OperatorBinding(second_hash_join_idx).hash_join_probe,
+			                                      second_join_input, scratch.FilterSelection(second_hash_join_idx),
+			                                      mark_count, second_join_output);
+			if (!built_mark_filter_input) {
+				materialize_mark_output_fallback(second_join_input, mark_count, second_join_output);
+				auto sink_result = execute_native_full_pipeline_from(scratch, filter_idx, second_join_output);
+				if (aggregate_sink.StopAfterSinkResult(sink_result)) {
+					return true;
+				}
+				continue;
+			}
+			RecordSljitRegionMaterializationBoundary(runtime, second_hash_join_op.kind, "mark_filter_vector",
+			                                         mark_count);
+			auto sink_result = execute_native_full_pipeline_from(scratch, filter_idx, second_join_output);
+			if (aggregate_sink.StopAfterSinkResult(sink_result)) {
+				return true;
+			}
+		} while (!SljitHashJoinProbeDrainFinished(second_hash_join_op.hash_join_probe.plan.output_mode, second_state));
+		return false;
+	};
+
+	auto execute_source_batch = [&](DataChunk &source_chunk) -> bool {
+		SljitHashJoinProbeDrainState first_state;
+		auto &first_join_output = scratch.TemporaryChunk(first_hash_join_idx);
+		do {
+			first_join_output.Reset();
+			string deferred_reason;
+			auto bind_result = execute_hash_join_probe(first_hash_join_idx, first_hash_join_op, source_chunk,
+			                                           first_join_output, first_state, deferred_reason, false, false);
+			if (bind_result == ExecutionOperatorBindResult::DEFERRED) {
+				return aggregate_sink.DeferAfterFlushAndFinish(deferred_reason);
+			}
+			if (first_join_output.size() == 0) {
+				continue;
+			}
+			if (drain_second_mark_join(first_join_output)) {
+				return true;
+			}
+		} while (!SljitHashJoinProbeDrainFinished(first_hash_join_op.hash_join_probe.plan.output_mode, first_state));
+		return false;
+	};
+
+	auto flush_source_batch = [&]() -> bool {
+		return source_batch.Flush(execute_source_batch);
+	};
+
+	auto flush_source_and_projected_batches = [&]() -> bool {
+		return flush_source_batch() || aggregate_sink.FlushProjectedBatch();
+	};
+
+	auto append_source_batch = [&](DataChunk &source_chunk, bool have_more_output) -> bool {
+		if (SljitAdvanceSinkBatchBlocked(runtime, source_chunk, have_more_output)) {
+			return aggregate_sink.StopAfterFlushAndFinish(ExecutionRegionResult::INTERRUPTED,
+			                                              flush_source_and_projected_batches);
+		}
+		return source_batch.Append(source_chunk, source_chunk.GetTypes(), execute_source_batch);
+	};
+
+	return aggregate_sink.RunSourceLoopAfterBudgetOrFinishedFlushAndFinish(
+	    fetched_chunks, max_source_fetches, append_source_batch, flush_source_and_projected_batches);
+}
+
 } // namespace duckdb

@@ -47,8 +47,22 @@ enum class SljitFullPipelineRouteKind : uint8_t {
 	PROJECTION_HASH_JOIN_PROJECTION_HASH_JOIN_PROJECTION_PROJECTION_GROUPED_AGGREGATE,
 	HASH_JOIN_HASH_JOIN_PROJECTION_GROUPED_AGGREGATE,
 	HASH_JOIN_HASH_JOIN_PROJECTION_PROJECTION_GROUPED_AGGREGATE,
-	GENERATED_FILTER_PROJECTION_HASH_JOIN_PROJECTION_GROUPED_AGGREGATE
+	GENERATED_FILTER_PROJECTION_HASH_JOIN_PROJECTION_GROUPED_AGGREGATE,
+	HASH_JOIN_HASH_JOIN_FILTER_PROJECTION_CHAIN_GROUPED_AGGREGATE
 };
+
+enum class SljitMarkProbeFilterMode : uint8_t { NONE, MATCHES, NON_MATCHES };
+
+static SljitMarkProbeFilterMode SljitInvertMarkProbeFilterMode(SljitMarkProbeFilterMode mode) {
+	switch (mode) {
+	case SljitMarkProbeFilterMode::MATCHES:
+		return SljitMarkProbeFilterMode::NON_MATCHES;
+	case SljitMarkProbeFilterMode::NON_MATCHES:
+		return SljitMarkProbeFilterMode::MATCHES;
+	default:
+		return SljitMarkProbeFilterMode::NONE;
+	}
+}
 
 static bool SljitIsBooleanType(const LogicalType &type) {
 	return type.id() == LogicalTypeId::BOOLEAN && type.InternalType() == PhysicalType::BOOL;
@@ -62,36 +76,82 @@ static bool SljitLocalSourceReferencesColumn(const vector<idx_t> &input_source_i
 	return local_source_index < input_source_indices.size() && input_source_indices[local_source_index] == column_index;
 }
 
-static bool SljitIsBooleanMarkerReference(const SljitExecutableRegionExpression &expression, idx_t marker_index) {
+static SljitMarkProbeFilterMode SljitReadBooleanMarkerPredicateMode(const SljitNativePredicate &predicate,
+                                                                    const vector<idx_t> &input_source_indices,
+                                                                    idx_t marker_index) {
+	if (!SljitIsBooleanType(predicate.return_type)) {
+		return SljitMarkProbeFilterMode::NONE;
+	}
+	switch (predicate.kind) {
+	case SljitNativePredicateKind::REFERENCE:
+		return SljitLocalSourceReferencesColumn(input_source_indices, predicate.source_index, marker_index)
+		           ? SljitMarkProbeFilterMode::MATCHES
+		           : SljitMarkProbeFilterMode::NONE;
+	case SljitNativePredicateKind::NOT:
+		return predicate.child ? SljitInvertMarkProbeFilterMode(SljitReadBooleanMarkerPredicateMode(
+		                             *predicate.child, input_source_indices, marker_index))
+		                       : SljitMarkProbeFilterMode::NONE;
+	default:
+		return SljitMarkProbeFilterMode::NONE;
+	}
+}
+
+static SljitMarkProbeFilterMode SljitReadBooleanMarkerExpressionTreeMode(const ExecutionExpressionIR &node,
+                                                                         const vector<idx_t> &input_source_indices,
+                                                                         idx_t marker_index) {
+	if (!SljitIsBooleanType(node.return_type)) {
+		return SljitMarkProbeFilterMode::NONE;
+	}
+	if (node.kind == ExecutionExpressionIRKind::REFERENCE) {
+		return SljitLocalSourceReferencesColumn(input_source_indices, node.ref_index, marker_index)
+		           ? SljitMarkProbeFilterMode::MATCHES
+		           : SljitMarkProbeFilterMode::NONE;
+	}
+	if (node.kind == ExecutionExpressionIRKind::UNARY && node.unary_op == ExecutionExpressionUnaryOp::NOT &&
+	    node.left) {
+		return SljitInvertMarkProbeFilterMode(
+		    SljitReadBooleanMarkerExpressionTreeMode(*node.left, input_source_indices, marker_index));
+	}
+	return SljitMarkProbeFilterMode::NONE;
+}
+
+static SljitMarkProbeFilterMode SljitReadBooleanMarkerFilterMode(const SljitExecutableRegionExpression &expression,
+                                                                 idx_t marker_index) {
 	auto &plan = expression.plan;
 	if (!SljitIsBooleanType(plan.return_type)) {
-		return false;
+		return SljitMarkProbeFilterMode::NONE;
 	}
-	if (plan.kind == SljitNativeRegionExpressionKind::REFERENCE) {
-		return SljitLocalSourceReferencesColumn(expression.input_source_indices, plan.source_index, marker_index);
+	switch (plan.kind) {
+	case SljitNativeRegionExpressionKind::REFERENCE:
+		return SljitLocalSourceReferencesColumn(expression.input_source_indices, plan.source_index, marker_index)
+		           ? SljitMarkProbeFilterMode::MATCHES
+		           : SljitMarkProbeFilterMode::NONE;
+	case SljitNativeRegionExpressionKind::PREDICATE:
+		return plan.predicate
+		           ? SljitReadBooleanMarkerPredicateMode(*plan.predicate, expression.input_source_indices, marker_index)
+		           : SljitMarkProbeFilterMode::NONE;
+	case SljitNativeRegionExpressionKind::EXPRESSION_TREE:
+	case SljitNativeRegionExpressionKind::TYPED_EXPRESSION_TREE:
+		return plan.expression_tree ? SljitReadBooleanMarkerExpressionTreeMode(
+		                                  *plan.expression_tree, plan.expression_tree_source_indices, marker_index)
+		                            : SljitMarkProbeFilterMode::NONE;
+	default:
+		return SljitMarkProbeFilterMode::NONE;
 	}
-	if (plan.kind == SljitNativeRegionExpressionKind::PREDICATE) {
-		return plan.predicate && plan.predicate->kind == SljitNativePredicateKind::REFERENCE &&
-		       SljitIsBooleanType(plan.predicate->return_type) &&
-		       SljitLocalSourceReferencesColumn(expression.input_source_indices, plan.predicate->source_index,
-		                                        marker_index);
+}
+
+static SljitMarkProbeFilterMode SljitMarkProbeMarkerFilterMode(const SljitExecutableRegionOp &hash_join_op,
+                                                               const SljitExecutableRegionOp &filter_op) {
+	if (hash_join_op.output_types.empty() || hash_join_op.output_types.back().id() != LogicalTypeId::BOOLEAN ||
+	    filter_op.kind != SljitNativeRegionOpKind::FILTER) {
+		return SljitMarkProbeFilterMode::NONE;
 	}
-	if (plan.kind != SljitNativeRegionExpressionKind::TYPED_EXPRESSION_TREE || !plan.expression_tree ||
-	    plan.expression_tree->kind != ExecutionExpressionIRKind::REFERENCE ||
-	    !SljitIsBooleanType(plan.expression_tree->return_type)) {
-		return false;
-	}
-	return SljitLocalSourceReferencesColumn(plan.expression_tree_source_indices, plan.expression_tree->ref_index,
-	                                        marker_index);
+	return SljitReadBooleanMarkerFilterMode(filter_op.filter, hash_join_op.output_types.size() - 1);
 }
 
 static bool SljitIsMarkProbeMarkerFilter(const SljitExecutableRegionOp &hash_join_op,
                                          const SljitExecutableRegionOp &filter_op) {
-	if (hash_join_op.output_types.empty() || hash_join_op.output_types.back().id() != LogicalTypeId::BOOLEAN ||
-	    filter_op.kind != SljitNativeRegionOpKind::FILTER) {
-		return false;
-	}
-	return SljitIsBooleanMarkerReference(filter_op.filter, hash_join_op.output_types.size() - 1);
+	return SljitMarkProbeMarkerFilterMode(hash_join_op, filter_op) != SljitMarkProbeFilterMode::NONE;
 }
 
 static bool SljitTryReadSignedIntegerValue(const Value &value, int64_t &result) {

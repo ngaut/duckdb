@@ -18,7 +18,7 @@
 
 namespace duckdb {
 
-enum class SljitProjectedGroupedAggregateProgressMode : uint8_t { ROWS, BATCHES };
+enum class SljitProjectedGroupedAggregateProgressMode : uint8_t { ROWS, BATCHES, SOURCE_FETCHES };
 
 static bool SljitExecuteDeferredGroupedAggregateBatch(ExecutionRegionRuntime &runtime,
                                                       ExecutionOperatorRuntime &native_runtime,
@@ -64,6 +64,9 @@ struct SljitProjectedGroupedAggregateSink {
 		if (progress_mode == SljitProjectedGroupedAggregateProgressMode::ROWS) {
 			return SljitDownstreamRowBudgetReached(processed, runtime.MaxChunks());
 		}
+		if (progress_mode == SljitProjectedGroupedAggregateProgressMode::SOURCE_FETCHES) {
+			return false;
+		}
 		return processed >= runtime.MaxChunks();
 	}
 
@@ -77,6 +80,9 @@ struct SljitProjectedGroupedAggregateSink {
 	void Charge(idx_t rows) {
 		if (progress_mode == SljitProjectedGroupedAggregateProgressMode::ROWS) {
 			SljitChargeDownstreamRows(processed, rows);
+			return;
+		}
+		if (progress_mode == SljitProjectedGroupedAggregateProgressMode::SOURCE_FETCHES) {
 			return;
 		}
 		processed++;

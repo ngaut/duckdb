@@ -37,6 +37,7 @@ static bool SljitTryExecuteFullPipelineMarkHashJoinFilterProjectionGroupedAggreg
 	auto &projection_op = ops[PROJECTION_IDX];
 	auto &aggregate_op = ops[AGGREGATE_IDX];
 	auto &native_runtime = runtime.ExecutionOperators();
+	const auto mark_filter_mode = SljitMarkProbeMarkerFilterMode(hash_join_op, filter_op);
 	DataChunk compact_groups;
 	compact_groups.Initialize(runtime.GetAllocator(), projection_op.output_types);
 	vector<int64_t> preaggregated_count_deltas;
@@ -108,7 +109,8 @@ static bool SljitTryExecuteFullPipelineMarkHashJoinFilterProjectionGroupedAggreg
 			    scratch.HasOperatorBinding(HASH_JOIN_IDX) &&
 			    SljitTryReferenceMarkProbeFilterInput(scratch.OperatorBinding(HASH_JOIN_IDX).hash_join_probe,
 			                                          source_chunk, mark_count, join_output);
-			if (referenced_mark_input && count_star_update.Ready()) {
+			if (referenced_mark_input && mark_filter_mode == SljitMarkProbeFilterMode::MATCHES &&
+			    count_star_update.Ready()) {
 				idx_t preaggregated_selected_count = 0;
 				auto direct_preaggregate_stage_start = SljitRegionStageStart(runtime);
 				if (TryPreaggregateProjectedMarkedCountStarGroups(
@@ -133,20 +135,21 @@ static bool SljitTryExecuteFullPipelineMarkHashJoinFilterProjectionGroupedAggreg
 
 			auto selection_stage_start = SljitRegionStageStart(runtime);
 			auto &mark_selection = scratch.FilterSelection(FILTER_IDX);
-			auto selected_count =
-			    SljitSelectMarkProbeMatches(scratch.FilterSelection(HASH_JOIN_IDX), mark_count, mark_selection);
-			RecordSljitRegionStageRuntimePath(runtime, FILTER_IDX, filter_op.kind, "direct_mark_selection",
-			                                  selection_stage_start);
-			if (selected_count == 0) {
-				continue;
-			}
-
 			if (!referenced_mark_input) {
 				materialize_mark_output_fallback(source_chunk, mark_count, join_output);
 				auto sink_result = execute_native_full_pipeline_from(scratch, FILTER_IDX, join_output);
 				if (aggregate_sink.StopAfterSinkResult(sink_result)) {
 					return true;
 				}
+				continue;
+			}
+			auto selected_count = SljitSelectMarkProbeFilterRows(scratch.OperatorBinding(HASH_JOIN_IDX).hash_join_probe,
+			                                                     source_chunk, scratch.FilterSelection(HASH_JOIN_IDX),
+			                                                     mark_count, mark_filter_mode, mark_selection);
+			RecordSljitRegionStageRuntimePath(runtime, FILTER_IDX, filter_op.kind,
+			                                  SljitMarkProbeFilterSelectionPath(mark_filter_mode),
+			                                  selection_stage_start);
+			if (selected_count == 0) {
 				continue;
 			}
 

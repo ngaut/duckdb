@@ -1437,6 +1437,76 @@ TEST_CASE("JIT Q9-like two-join aggregate removes second-join projection source 
 	    });
 }
 
+TEST_CASE("JIT two-join mark filter aggregate builds direct mark filter input", "[api][jit]") {
+	DuckDB db;
+	Connection con(db);
+	auto &manager = ExecutionRegionManager::Get(*con.context);
+
+	ConfigureSljitForCoverage(con, false, true, true, 10000);
+	REQUIRE_NO_FAIL(con.Query("PRAGMA threads=1"));
+	REQUIRE_NO_FAIL(con.Query("SET perfect_ht_threshold=0"));
+	REQUIRE_NO_FAIL(con.Query("SET disabled_optimizers='join_order,build_side_probe_side'"));
+	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_mark_filter_fact AS "
+	                          "SELECT (i % 2048)::BIGINT AS partkey, "
+	                          "       (i % 4096)::BIGINT AS suppkey "
+	                          "FROM range(65536) tbl(i)"));
+	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_mark_filter_part AS "
+	                          "SELECT i::BIGINT AS partkey, "
+	                          "       'Brand#' || CAST(i % 17 AS VARCHAR) AS brand, "
+	                          "       'TYPE_' || CAST(i % 31 AS VARCHAR) AS type, "
+	                          "       (1 + (i % 11))::INTEGER AS size "
+	                          "FROM range(2048) tbl(i)"));
+	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_mark_filter_bad_supplier AS "
+	                          "SELECT (i * 13)::BIGINT AS suppkey "
+	                          "FROM range(256) tbl(i)"));
+
+	const string query = "SELECT p.brand, p.type, p.size, count(DISTINCT f.suppkey) AS supplier_count "
+	                     "FROM jit_mark_filter_fact f "
+	                     "JOIN jit_mark_filter_part p ON f.partkey = p.partkey "
+	                     "WHERE f.suppkey NOT IN ("
+	                     "  SELECT b.suppkey FROM jit_mark_filter_bad_supplier b"
+	                     ") "
+	                     "GROUP BY p.brand, p.type, p.size "
+	                     "ORDER BY p.brand, p.type, p.size";
+	REQUIRE_NO_FAIL(con.Query("SET jit_policy='off'"));
+	auto reference = con.Query(query);
+	REQUIRE_NO_FAIL(*reference);
+	REQUIRE(reference->RowCount() > 0);
+
+	REQUIRE_NO_FAIL(con.Query("SET jit_policy='auto'"));
+	ClearJitTrace(manager, true);
+	auto result = con.Query(query);
+	REQUIRE_NO_FAIL(*result);
+	REQUIRE(result->RowCount() == reference->RowCount());
+	REQUIRE(result->ColumnCount() == reference->ColumnCount());
+	for (idx_t row_idx = 0; row_idx < result->RowCount(); row_idx++) {
+		for (idx_t col_idx = 0; col_idx < result->ColumnCount(); col_idx++) {
+			REQUIRE(result->GetValue(col_idx, row_idx).ToString() == reference->GetValue(col_idx, row_idx).ToString());
+		}
+	}
+
+	RequireJitEvent(
+	    manager,
+	    [](const ExecutionRegionEvent &event) {
+		    return EventPhase(event) == "runtime" && EventStatus(event) == "executed" &&
+		           EventExecutionMode(event) == "native" &&
+		           StringUtil::Contains(EventJitMaterializationBoundaryCounts(event),
+		                                "hash_join_probe.mark_filter_vector=");
+	    },
+	    [](const ExecutionRegionEvent &event) {
+		    const auto runtime_paths = EventJitRuntimePathCounts(event);
+		    const auto boundaries = EventJitMaterializationBoundaryCounts(event);
+		    const auto stages = EventGeneratedStageRuntimeBreakdown(event);
+		    REQUIRE(StringUtil::Contains(runtime_paths, "hash_join_probe.generated_regular_probe_flat_all_valid_"
+		                                                "function="));
+		    REQUIRE(StringUtil::Contains(boundaries, "hash_join_probe.direct_mark_flags="));
+		    REQUIRE(StringUtil::Contains(boundaries, "hash_join_probe.mark_filter_vector="));
+		    REQUIRE(StringUtil::Contains(stages, "op2:filter+projection="));
+		    REQUIRE_FALSE(StringUtil::Contains(stages, "op1:hash_join_probe.materialize_output.mark_probe_vector="));
+		    REQUIRE_FALSE(StringUtil::Contains(stages, "op1:hash_join_probe.materialize_mark_output_fallback="));
+	    });
+}
+
 TEST_CASE("JIT Q9-like two-projection between-join chain keeps first join live", "[api][jit]") {
 	DuckDB db;
 	Connection con(db);

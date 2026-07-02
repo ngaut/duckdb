@@ -58,8 +58,8 @@ private:
 		RuntimeRouteExecutor execute;
 	};
 
-	static const std::array<RuntimeRoute, 17> &RuntimeRoutes() {
-		static const std::array<RuntimeRoute, 17> routes = {
+	static const std::array<RuntimeRoute, 18> &RuntimeRoutes() {
+		static const std::array<RuntimeRoute, 18> routes = {
 		    {{SljitFullPipelineRouteKind::FILTERED_SOURCE_AGGREGATE,
 		      &SljitFullPipelineRuntimeDispatcher::TryExecuteBatched},
 		     {SljitFullPipelineRouteKind::GENERATED_FILTER_PROJECTION,
@@ -98,8 +98,10 @@ private:
 		      &SljitFullPipelineRuntimeDispatcher::
 		          TryExecuteHashJoinHashJoinProjectionProjectionGroupedAggregateBatched},
 		     {SljitFullPipelineRouteKind::GENERATED_FILTER_PROJECTION_HASH_JOIN_PROJECTION_GROUPED_AGGREGATE,
+		      &SljitFullPipelineRuntimeDispatcher::TryExecuteGeneratedFilterHashJoinProjectionGroupedAggregateBatched},
+		     {SljitFullPipelineRouteKind::HASH_JOIN_HASH_JOIN_FILTER_PROJECTION_CHAIN_GROUPED_AGGREGATE,
 		      &SljitFullPipelineRuntimeDispatcher::
-		          TryExecuteGeneratedFilterHashJoinProjectionGroupedAggregateBatched}}};
+		          TryExecuteHashJoinHashJoinFilterProjectionChainGroupedAggregateBatched}}};
 		return routes;
 	}
 
@@ -144,8 +146,7 @@ private:
 		    runtime, result, ops, execute_native_full_pipeline_from);
 	}
 
-	bool TryExecuteGeneratedProjectionFilterProjectionHashJoinBuildSinkBatched(
-	    const SljitFullPipelineRouteSelector &) {
+	bool TryExecuteGeneratedProjectionFilterProjectionHashJoinBuildSinkBatched(const SljitFullPipelineRouteSelector &) {
 		auto execute_native_full_pipeline_from = NativePipelineExecutor();
 		return SljitTryExecuteFullPipelineGeneratedProjectionFilterProjectionHashJoinBuildSinkBatched(
 		    runtime, result, ops, execute_native_full_pipeline_from);
@@ -267,6 +268,15 @@ private:
 		auto execute_recorded_hash_join_probe = SljitMakeRecordedHashJoinProbeCallback(kernel, runtime, native_runtime);
 		return SljitTryExecuteHashJoinHashJoinProjectionProjectionGroupedAggregateBatched(
 		    runtime, result, ops, execute_recorded_hash_join_probe);
+	}
+
+	bool
+	TryExecuteHashJoinHashJoinFilterProjectionChainGroupedAggregateBatched(const SljitFullPipelineRouteSelector &) {
+		auto &native_runtime = runtime.ExecutionOperators();
+		auto execute_recorded_hash_join_probe = SljitMakeRecordedHashJoinProbeCallback(kernel, runtime, native_runtime);
+		auto execute_native_full_pipeline_from = NativePipelineExecutor();
+		return SljitTryExecuteHashJoinHashJoinFilterProjectionChainGroupedAggregateBatched(
+		    runtime, result, ops, execute_recorded_hash_join_probe, execute_native_full_pipeline_from);
 	}
 
 	bool TryExecuteGeneratedFilterHashJoinProjectionGroupedAggregateBatched(const SljitFullPipelineRouteSelector &) {
