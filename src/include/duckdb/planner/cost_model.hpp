@@ -50,6 +50,7 @@ struct PhysicalRunnerCostParameters {
 	idx_t full_pipeline_benefit = 0;
 	idx_t startup_base_cost = 0;
 	idx_t startup_margin_basis_points = 0;
+	idx_t vectorized_parallelism = 1;
 	bool gpu_runner_available = false;
 	idx_t gpu_generated_stage_benefit = 0;
 	idx_t gpu_native_operator_stage_benefit = 0;

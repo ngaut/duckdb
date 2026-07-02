@@ -1098,6 +1098,46 @@ void JoinHashTable::PrepareBloomFilterForFinalize() {
 	bloom_filter.Initialize(context, bloom_filter_init_count);
 }
 
+void JoinHashTable::EnsureBloomFilterForProbe() {
+	lock_guard<mutex> guard(bloom_filter_lock);
+	if (bloom_filter.IsInitialized()) {
+		return;
+	}
+	if (!finalized || !hash_map.get() || Count() == 0) {
+		return;
+	}
+
+	bloom_filter_init_count = Count();
+	bloom_filter.Initialize(context, bloom_filter_init_count);
+
+	DataChunk keys;
+	TupleDataChunkState key_state;
+	data_collection->InitializeChunk(keys, equality_predicate_columns);
+	data_collection->InitializeChunkState(key_state, equality_predicate_columns);
+	Vector row_location_vector(LogicalType::POINTER);
+	Vector hashes(LogicalType::HASH);
+	TupleDataChunkIterator iterator(*data_collection, TupleDataPinProperties::KEEP_EVERYTHING_PINNED, 0,
+	                                data_collection->ChunkCount(), false);
+	const auto row_locations = iterator.GetRowLocations();
+	const auto &sel = *FlatVector::IncrementalSelectionVector();
+	do {
+		const auto count = iterator.GetCurrentChunkCount();
+		row_location_vector.SetVectorType(VectorType::FLAT_VECTOR);
+		FlatVector::SetSize(row_location_vector, count_t(count));
+		auto row_location_data = FlatVector::GetDataMutable<data_ptr_t>(row_location_vector);
+		for (idx_t row_idx = 0; row_idx < count; row_idx++) {
+			row_location_data[row_idx] = row_locations[row_idx];
+		}
+		keys.Reset();
+		keys.SetChildCardinality(count);
+		data_collection->ResetCachedCastVectors(key_state, equality_predicate_columns);
+		data_collection->Gather(row_location_vector, sel, count, equality_predicate_columns, keys, sel,
+		                        key_state.cached_cast_vectors);
+		Hash(keys, sel, count, hashes);
+		bloom_filter.InsertHashes(hashes);
+	} while (iterator.Next());
+}
+
 void JoinHashTable::InitializePointerTable(idx_t entry_idx_from, idx_t entry_idx_to) {
 	// initialize HT with all-zero entries
 	auto entries = GetEntries();

@@ -451,7 +451,8 @@ TEST_CASE("JIT CBO admits native operator stages without generated stage credit"
 	REQUIRE(profile.native_join_stage_count == 1);
 	REQUIRE(profile.admission_class == "native_operator");
 	REQUIRE(profile.native_operator_work == 100);
-	REQUIRE(profile.stateful_protocol_penalty == 640);
+	REQUIRE(profile.stateful_protocol_penalty == 720);
+	REQUIRE(profile.selection_reason == "rejected_saved_work_non_positive");
 	REQUIRE_FALSE(profile.selected_accelerated_runner);
 }
 
@@ -479,10 +480,16 @@ TEST_CASE("JIT CBO admits generated native fusion from quantified benefit", "[ap
 	REQUIRE(profile.generated_expression_work == 1398);
 	REQUIRE(profile.generated_stage_work == 4);
 	REQUIRE(profile.native_operator_work == 0);
-	REQUIRE(profile.stateful_protocol_penalty == 1344);
-	REQUIRE(profile.saved_work_per_batch == 58);
+	REQUIRE(profile.stateful_protocol_penalty == 1504);
+	REQUIRE(profile.saved_work_per_batch <= 0);
 	REQUIRE(profile.startup_cost == 32000);
 	REQUIRE(profile.required_benefit == 48000);
+	REQUIRE(profile.selection_reason == "rejected_saved_work_non_positive");
+	REQUIRE_FALSE(profile.selected_accelerated_runner);
+
+	input.expression_cost = 1600;
+	profile = DuckDBCostModel::SelectPhysicalRunner(input, parameters);
+	REQUIRE(profile.saved_work_per_batch == 100);
 	REQUIRE(profile.accelerated_runner_benefit > profile.required_benefit);
 	REQUIRE(profile.selection_reason == "admitted_admission_class:generated_native_fusion|generated_stage_benefit");
 	REQUIRE(profile.selected_accelerated_runner);
@@ -517,11 +524,23 @@ TEST_CASE("JIT CBO admits costed native protocol work directly", "[api][jit]") {
 	profile = DuckDBCostModel::SelectPhysicalRunner(input, parameters);
 	REQUIRE(profile.admission_class == "native_operator");
 	REQUIRE(profile.native_operator_work == 1000);
-	REQUIRE(profile.stateful_protocol_penalty == 640);
-	REQUIRE(profile.saved_work_per_batch == 360);
+	REQUIRE(profile.stateful_protocol_penalty == 720);
+	REQUIRE(profile.saved_work_per_batch == 280);
 	REQUIRE(profile.selection_reason == "admitted_admission_class:native_operator|native_operator_stage_benefit");
 	REQUIRE(profile.selected_accelerated_runner);
 
+	input.native_join_stage_count = 0;
+	input.native_aggregate_stage_count = 1;
+	profile = DuckDBCostModel::SelectPhysicalRunner(input, parameters);
+	REQUIRE(profile.admission_class == "native_operator");
+	REQUIRE(profile.native_operator_work == 1000);
+	REQUIRE(profile.stateful_protocol_penalty == 0);
+	REQUIRE(profile.saved_work_per_batch == 1000);
+	REQUIRE(profile.selection_reason == "admitted_admission_class:native_operator|native_operator_stage_benefit");
+	REQUIRE(profile.selected_accelerated_runner);
+
+	input.native_join_stage_count = 1;
+	input.native_aggregate_stage_count = 0;
 	input.expression_cost = 1000;
 	input.generated_stage_count = 1;
 	input.generated_work_class = PhysicalRunnerGeneratedWorkClass::COMPUTE;
@@ -529,8 +548,30 @@ TEST_CASE("JIT CBO admits costed native protocol work directly", "[api][jit]") {
 	profile = DuckDBCostModel::SelectPhysicalRunner(input, parameters);
 	REQUIRE(profile.admission_class == "generated_native_fusion");
 	REQUIRE(profile.native_operator_work == 1000);
-	REQUIRE(profile.stateful_protocol_penalty == 640);
-	REQUIRE(profile.saved_work_per_batch == 1361);
+	REQUIRE(profile.stateful_protocol_penalty == 720);
+	REQUIRE(profile.saved_work_per_batch == 1281);
+	REQUIRE(profile.selected_accelerated_runner);
+
+	input.estimated_cardinality = 800000;
+	input.expression_cost = 0;
+	input.generated_stage_count = 0;
+	input.generated_work_class = PhysicalRunnerGeneratedWorkClass::NONE;
+	parameters.generated_stage_benefit = 0;
+	parameters.native_operator_stage_benefit = 1024;
+	parameters.startup_base_cost = 30000;
+	parameters.vectorized_parallelism = 4;
+	profile = DuckDBCostModel::SelectPhysicalRunner(input, parameters);
+	REQUIRE(profile.admission_class == "native_operator");
+	REQUIRE(profile.saved_work_per_batch == 304);
+	REQUIRE(profile.accelerated_runner_benefit < profile.required_benefit);
+	REQUIRE(profile.selection_reason == "rejected_insufficient_benefit");
+	REQUIRE_FALSE(profile.selected_accelerated_runner);
+
+	input.estimated_cardinality = 2000000;
+	profile = DuckDBCostModel::SelectPhysicalRunner(input, parameters);
+	REQUIRE(profile.admission_class == "native_operator");
+	REQUIRE(profile.saved_work_per_batch == 304);
+	REQUIRE(profile.accelerated_runner_benefit > profile.required_benefit);
 	REQUIRE(profile.selected_accelerated_runner);
 }
 
@@ -560,8 +601,8 @@ TEST_CASE("JIT CBO scores native-stage fusion uniformly after generated admissio
 	REQUIRE(profile.rows < 1000000);
 	REQUIRE(profile.admission_class == "generated_native_fusion");
 	REQUIRE(profile.native_operator_work == 5120);
-	REQUIRE(profile.stateful_protocol_penalty == 2624);
-	REQUIRE(profile.saved_work_per_batch == 2712);
+	REQUIRE(profile.stateful_protocol_penalty == 2944);
+	REQUIRE(profile.saved_work_per_batch == 2392);
 	REQUIRE(profile.selected_accelerated_runner);
 
 	input.estimated_cardinality = 1346398;
@@ -577,8 +618,8 @@ TEST_CASE("JIT CBO scores native-stage fusion uniformly after generated admissio
 	REQUIRE(profile.rows > 1000000);
 	REQUIRE(profile.admission_class == "generated_native_fusion");
 	REQUIRE(profile.native_operator_work == 5120);
-	REQUIRE(profile.stateful_protocol_penalty == 3200);
-	REQUIRE(profile.saved_work_per_batch == 2077);
+	REQUIRE(profile.stateful_protocol_penalty == 3600);
+	REQUIRE(profile.saved_work_per_batch == 1677);
 	REQUIRE(profile.selected_accelerated_runner);
 
 	input.estimated_cardinality = 6001215;
@@ -594,20 +635,108 @@ TEST_CASE("JIT CBO scores native-stage fusion uniformly after generated admissio
 	REQUIRE(profile.rows < 1000000);
 	REQUIRE(profile.admission_class == "generated_native_fusion");
 	REQUIRE(profile.native_operator_work == 2048);
-	REQUIRE(profile.stateful_protocol_penalty == 704);
-	REQUIRE(profile.saved_work_per_batch == 1390);
+	REQUIRE(profile.stateful_protocol_penalty == 784);
+	REQUIRE(profile.saved_work_per_batch == 1310);
 	REQUIRE(profile.selected_accelerated_runner);
 }
 
-TEST_CASE("JIT CBO keeps startup uniform instead of shape waivers", "[api][jit]") {
+TEST_CASE("JIT CBO charges grouped aggregate fusion against parallel vectorized baseline", "[api][jit]") {
+	PhysicalRunnerCostParameters parameters;
+	parameters.compiled_vectorized_runner_available = true;
+	parameters.generated_stage_benefit = 1024;
+	parameters.native_operator_stage_benefit = 1024;
+	parameters.startup_base_cost = 30000;
+	parameters.startup_margin_basis_points = 0;
+
+	PhysicalRunnerCostInput q13_shape;
+	q13_shape.estimated_cardinality = 4619408;
+	q13_shape.expression_cost = 174;
+	q13_shape.generated_stage_count = 6;
+	q13_shape.native_join_stage_count = 1;
+	q13_shape.native_aggregate_stage_count = 3;
+	q13_shape.native_grouped_aggregate_stage_count = 3;
+	q13_shape.blocked_hash_aggregate_lookup_count = 3;
+	q13_shape.full_pipeline = true;
+	q13_shape.generated_work_class = PhysicalRunnerGeneratedWorkClass::COMPUTE;
+	q13_shape.has_accelerated_work = true;
+
+	auto profile = DuckDBCostModel::SelectPhysicalRunner(q13_shape, parameters);
+	REQUIRE(profile.saved_work_per_batch == 3532);
+	REQUIRE(profile.selected_accelerated_runner);
+
+	parameters.vectorized_parallelism = 12;
+	profile = DuckDBCostModel::SelectPhysicalRunner(q13_shape, parameters);
+	REQUIRE(profile.saved_work_per_batch <= 0);
+	REQUIRE(profile.selection_reason == "rejected_saved_work_non_positive");
+	REQUIRE_FALSE(profile.selected_accelerated_runner);
+
+	PhysicalRunnerCostInput q13_small_grouped_shape;
+	q13_small_grouped_shape.estimated_cardinality = 302394;
+	q13_small_grouped_shape.expression_cost = 79;
+	q13_small_grouped_shape.generated_stage_count = 3;
+	q13_small_grouped_shape.native_join_stage_count = 1;
+	q13_small_grouped_shape.native_aggregate_stage_count = 1;
+	q13_small_grouped_shape.native_grouped_aggregate_stage_count = 1;
+	q13_small_grouped_shape.blocked_hash_aggregate_lookup_count = 1;
+	q13_small_grouped_shape.full_pipeline = true;
+	q13_small_grouped_shape.generated_work_class = PhysicalRunnerGeneratedWorkClass::COMPUTE;
+	q13_small_grouped_shape.has_accelerated_work = true;
+
+	profile = DuckDBCostModel::SelectPhysicalRunner(q13_small_grouped_shape, parameters);
+	REQUIRE(profile.saved_work_per_batch <= 0);
+	REQUIRE(profile.selection_reason == "rejected_saved_work_non_positive");
+	REQUIRE_FALSE(profile.selected_accelerated_runner);
+
+	PhysicalRunnerCostInput q10_shape;
+	q10_shape.estimated_cardinality = 20386135;
+	q10_shape.expression_cost = 1312;
+	q10_shape.generated_stage_count = 7;
+	q10_shape.native_join_stage_count = 3;
+	q10_shape.native_aggregate_stage_count = 1;
+	q10_shape.native_grouped_aggregate_stage_count = 1;
+	q10_shape.blocked_hash_aggregate_lookup_count = 1;
+	q10_shape.full_pipeline = true;
+	q10_shape.generated_work_class = PhysicalRunnerGeneratedWorkClass::COMPUTE;
+	q10_shape.has_accelerated_work = true;
+
+	profile = DuckDBCostModel::SelectPhysicalRunner(q10_shape, parameters);
+	REQUIRE(profile.saved_work_per_batch > 0);
+	REQUIRE(profile.selected_accelerated_runner);
+
+	PhysicalRunnerCostInput q13_generated_shape;
+	q13_generated_shape.estimated_cardinality = 3023933;
+	q13_generated_shape.expression_cost = 39;
+	q13_generated_shape.generated_stage_count = 3;
+	q13_generated_shape.full_pipeline = true;
+	q13_generated_shape.generated_work_class = PhysicalRunnerGeneratedWorkClass::COMPUTE;
+	q13_generated_shape.has_accelerated_work = true;
+
+	profile = DuckDBCostModel::SelectPhysicalRunner(q13_generated_shape, parameters);
+	REQUIRE(profile.saved_work_per_batch == 78);
+	REQUIRE(profile.accelerated_runner_benefit < profile.required_benefit);
+	REQUIRE(profile.selection_reason == "rejected_insufficient_benefit");
+	REQUIRE_FALSE(profile.selected_accelerated_runner);
+
+	PhysicalRunnerCostInput q10_generated_shape;
+	q10_generated_shape.estimated_cardinality = 3000000;
+	q10_generated_shape.expression_cost = 78;
+	q10_generated_shape.generated_stage_count = 6;
+	q10_generated_shape.full_pipeline = true;
+	q10_generated_shape.generated_work_class = PhysicalRunnerGeneratedWorkClass::COMPUTE;
+	q10_generated_shape.has_accelerated_work = true;
+
+	profile = DuckDBCostModel::SelectPhysicalRunner(q10_generated_shape, parameters);
+	REQUIRE(profile.saved_work_per_batch == 156);
+	REQUIRE(profile.accelerated_runner_benefit < profile.required_benefit);
+	REQUIRE(profile.selection_reason == "rejected_insufficient_benefit");
+	REQUIRE_FALSE(profile.selected_accelerated_runner);
+}
+
+TEST_CASE("JIT CBO scales startup against parallel vectorized baseline", "[api][jit]") {
 	PhysicalRunnerCostInput input;
-	input.estimated_cardinality = 1200243;
-	input.expression_cost = 1000;
-	input.generated_stage_count = 2;
-	input.native_join_stage_count = 1;
-	input.native_aggregate_stage_count = 1;
-	input.native_grouped_aggregate_stage_count = 1;
-	input.blocked_hash_aggregate_lookup_count = 1;
+	input.estimated_cardinality = STANDARD_VECTOR_SIZE * 2000;
+	input.expression_cost = 199;
+	input.generated_stage_count = 1;
 	input.full_pipeline = true;
 	input.generated_work_class = PhysicalRunnerGeneratedWorkClass::COMPUTE;
 	input.has_accelerated_work = true;
@@ -619,16 +748,17 @@ TEST_CASE("JIT CBO keeps startup uniform instead of shape waivers", "[api][jit]"
 	parameters.startup_margin_basis_points = 5000;
 
 	auto profile = DuckDBCostModel::SelectPhysicalRunner(input, parameters);
-	REQUIRE(profile.admission_class == "generated_native_fusion");
-	REQUIRE(profile.stateful_protocol_penalty == 704);
-	REQUIRE(profile.saved_work_per_batch == 298);
+	REQUIRE(profile.admission_class == "generated");
+	REQUIRE(profile.stateful_protocol_penalty == 0);
+	REQUIRE(profile.saved_work_per_batch == 200);
 	REQUIRE(profile.startup_cost == 32000);
 	REQUIRE(profile.required_benefit == 48000);
 	REQUIRE(profile.selected_accelerated_runner);
 
-	input.estimated_cardinality = STANDARD_VECTOR_SIZE * 100;
+	parameters.vectorized_parallelism = 12;
 	profile = DuckDBCostModel::SelectPhysicalRunner(input, parameters);
-	REQUIRE(profile.startup_cost == 32000);
+	REQUIRE(profile.startup_cost == 384000);
+	REQUIRE(profile.required_benefit == 576000);
 	REQUIRE(profile.accelerated_runner_benefit < profile.required_benefit);
 	REQUIRE_FALSE(profile.selected_accelerated_runner);
 }
@@ -1991,6 +2121,7 @@ TEST_CASE("JIT auto planner cost skips aggregate codegen when native and pipelin
 
 	ConfigureSljit(con, "auto", false, false);
 	ConfigureJitDecisionTrace(con);
+	REQUIRE_NO_FAIL(con.Query("SET threads=1"));
 	REQUIRE_NO_FAIL(con.Query("SET jit_cbo_native_operator_stage_benefit=0"));
 	REQUIRE_NO_FAIL(con.Query("SET jit_cbo_full_pipeline_benefit=0"));
 	REQUIRE_NO_FAIL(con.Query("CREATE TEMP TABLE jit_auto_default_aggregate_input AS "

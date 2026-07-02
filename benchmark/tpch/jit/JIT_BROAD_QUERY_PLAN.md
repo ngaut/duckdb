@@ -1,7 +1,7 @@
 # JIT Broad Query Root Plan
 
-Last updated: 2026-06-30
-Last verified commit: `f8f471533e`
+Last updated: 2026-07-02
+Last verified base: `7b59f15ed6` plus current working-tree JIT changes
 Branch: `codex/jit-native-duckdb-core`
 
 Status: active root plan. This file is the execution plan for making more query
@@ -844,7 +844,7 @@ Implementation direction:
 
 - Introduce one shared value-lifetime contract for join probe, projection, and
   grouped aggregate update.
-- Keep runtime variant choice trait-selected:
+- Keep runtime probe-path choice trait-selected:
   - regular hash probe
   - post-join projection
   - grouped aggregate lookup
@@ -1356,7 +1356,7 @@ Before claiming a milestone complete:
 - Q11 was not a CBO miss. The selected SF10 shape was a native
   `hash_join_probe -> append_sink` full pipeline fed by sparse table-scan source
   chunks; before this cleanup the runtime executed the probe/append path 3907
-  times for 323920 rows. The shared full-pipeline variant registry now routes
+  times for 323920 rows. The shared full-pipeline route registry now routes
   hash-join-only append sinks through the existing source-input batching executor
   used by hash-join build and delim sinks. The traced checkpoint
   `/private/tmp/duckdb_jit_q11_sf10_profile_append_batched_r1` shows runtime
@@ -1364,13 +1364,85 @@ Before claiming a milestone complete:
   `hash_join_probe.source_input_batch=323920`. Focused Q11 production
   `/private/tmp/duckdb_jit_q11_sf10_production_append_batched_r15` verified
   correctness diff 0 at `0.073s -> 0.070s` (`1.043x`).
-- Current broad SF10 production status is
-  `/private/tmp/duckdb_jit_cleanup_all_sf10_r3`, verified with correctness diff
-  0 for all 22 queries. Twenty-one queries are jitted and all twenty-one jitted
-  queries are faster than non-JIT. There are no measured regressions in that
-  sweep. Top production wins include Q20 `1.480x`, Q9 `1.455x`, Q13 `1.199x`,
-  Q17 `1.184x`, Q5 `1.176x`, Q1 `1.155x`, Q15 `1.145x`, and Q3 `1.142x`.
-  Q16 is the only non-jitted TPC-H query and remains neutral.
+- Current broad SF10 production status after the fixed-width/native codegen
+  cleanup and perfect-hash COUNT(reference) lookup cleanup is
+  `/private/tmp/duckdb_jit_tpch_sf10_broad_after_count_lookup_cleanup_r5_20260702`,
+  verified with correctness diff 0 for all 22 queries. Twenty-one queries are
+  jitted and all twenty-one jitted queries are faster than non-JIT. There are no
+  measured regressions in that sweep. Top production wins include Q20 `1.524x`,
+  Q9 `1.480x`, Q14 `1.209x`, Q15 `1.182x`, Q17 `1.175x`, Q5 `1.174x`, Q1
+  `1.154x`, Q3 `1.135x`, Q6 `1.133x`, and Q22 `1.101x`. Q16 is the only
+  non-jitted TPC-H query and remains neutral. Focused fixed-width production
+  `/private/tmp/duckdb_jit_tpch_sf10_fixed_width_codegen_cleanup_20260702`
+  verified Q1/Q6/Q14 at `1.147x`, `1.156x`, and `1.177x` respectively over five
+  repeats. The follow-up scalar fixed-width cleanup centralized source-to-result
+  copies in the fixed-width helper and moved integer coalesce onto the shared
+  invalid-result loop; final focused SF10 production
+  `/private/tmp/duckdb_jit_tpch_sf10_scalar_fixed_width_cleanup_final_20260702`
+  verified Q1/Q6/Q8/Q14 correctness diff 0 at `1.140x`, `1.161x`, `1.010x`,
+  and `1.169x` respectively over five repeats.
+- Aggregate reducer loop cleanup moved selected-source and two-source
+  null-skipping iteration into the aggregate primitive helper layer while
+  leaving arithmetic, overflow, and accumulation bodies local to each reducer.
+  The same helpers now drive simple reference reducers and binary reducers.
+  Focused SF10 production
+  `/private/tmp/duckdb_jit_tpch_sf10_aggregate_reference_loop_cleanup_20260702`
+  verified Q1/Q6/Q14/Q15/Q17 correctness diff 0 at `1.146x`, `1.141x`,
+  `1.170x`, `1.142x`, and `1.163x` respectively over five repeats.
+- Grouped reference aggregate reducers now use grouped-loop helpers for
+  count-star, count-reference, and sum-reference codegen while preserving the
+  all-valid count fast path. Focused SF10 production
+  `/private/tmp/duckdb_jit_tpch_sf10_grouped_reference_loop_cleanup_20260702`
+  verified Q1/Q10/Q13/Q18 correctness diff 0 at `1.146x`, `1.012x`, `1.054x`,
+  and `1.019x` respectively over five repeats.
+- Perfect-hash local aggregate initialization now uses one shared group-index
+  loop helper for sparse payload zeroing, sparse sentinel zeroing, dense
+  payload zeroing, and deferred flag zeroing. Focused SF10 production
+  `/private/tmp/duckdb_jit_tpch_sf10_perfect_hash_zero_loop_cleanup_20260702`
+  verified Q1/Q8/Q14 correctness diff 0 at `1.165x`, `1.018x`, and `1.165x`
+  respectively over five repeats.
+- Perfect-hash local aggregate commit now uses one dense seen-group commit loop
+  helper for dense payload commits and deferred flag commits. The helper owns
+  the group scan, seen check, output group marker, and state-pointer
+  materialization while each caller keeps only payload-specific work. The
+  follow-up shared perfect-hash helper cleanup also centralizes output group
+  marking and state-pointer materialization for commit, fused update lookup,
+  and the primitive update path. The payload updater now also uses shared local
+  helpers for state-pointer reloads, nullable-payload continuations, and shared
+  expression-tree value loading across predicate guards and payload updates.
+  Focused SF10 production
+  `/private/tmp/duckdb_jit_tpch_sf10_perfect_hash_expression_value_cleanup_20260702`
+  verified Q1/Q8/Q14 correctness diff 0 at `1.173x`, `1.018x`, and `1.188x`
+  respectively over five repeats.
+- Perfect-hash primitive aggregate updates now admit COUNT(reference) payloads
+  to the generated perfect-hash lookup route. The primitive update emitter
+  treats nullable COUNT as its own validity-gated increment path instead of
+  sharing SUM payload loading. Focused SF10 production
+  `/private/tmp/duckdb_jit_tpch_sf10_perfect_hash_count_lookup_cleanup_20260702`
+  verified Q1/Q8/Q14 correctness diff 0 at `1.150x`, `1.005x`, and `1.186x`
+  respectively over five repeats.
+- Follow-up flat codegen refactoring keeps the same hot-path evidence while
+  deleting duplicated loop scaffolding. `sljit_native_flat_loop_codegen.hpp`
+  now owns counted scalar, decrement-to-zero scalar, unrolled scalar, and
+  SIMD-then-scalar-tail loop shapes. Flat integer, flat floating, and flat
+  integer projection codegen keep only their operation-specific row bodies. The
+  floating stats loop now lives with the floating stats emitters, and shared
+  flat projection source-pointer loading is owned by the flat projection helper.
+  Native predicate select codegen now uses the same fixed-width source loader as
+  non-select predicates, with select row-loop scaffolding owned by the select
+  helper layer. String compression/decompression now uses the same selected-source
+  invalid-result loop as fixed-width native paths instead of carrying a local
+  transform loop.
+  Verification passed for `make release -j12`,
+  `build/release/test/unittest "*jit*"`,
+  `python3 benchmark/jit/verify_jit_architecture.py`, stale-code scan,
+  and `git diff --check`. Focused SF10 production
+  `/private/tmp/duckdb_jit_tpch_sf10_predicate_select_cleanup_20260702`
+  verified correctness diff 0 for Q1/Q6/Q14 at `1.149x`, `1.169x`, and
+  `1.219x` respectively over five repeats. Focused string-route production
+  `/private/tmp/duckdb_jit_tpch_sf10_string_loop_cleanup_20260702` verified
+  Q5/Q9/Q20 correctness diff 0 at `1.240x`, `1.446x`, and `1.536x`. The broad
+  all-query artifact above is the current post-refactor validation.
 - Q16 is not a CBO-conservatism miss. Forced zero-startup admission in
   `/private/tmp/duckdb_jit_q16_force_startup0` regressed production from
   `0.158s` to `0.166s` median while compiling seven regions. The root fix is now
@@ -1385,9 +1457,29 @@ Before claiming a milestone complete:
   median, with `compiled_regions=0`. Cleanup smoke
   `/private/tmp/duckdb_jit_q16_no_distinct_chunk_r1` verified correctness diff 0
   with 10 repeats at `0.1555s` off median and `0.1550s` auto median, again with
-  `compiled_regions=0`. Future Q16 work should remove more grouped
-  lookup/projection traffic from this backend; do not admit the old generated
-  fragments or reintroduce CBO leniency.
+  `compiled_regions=0`. The pointer-key distinct backend now lives in
+  `distinct_count_pointer_set.cpp`, and its adjacent-row current-group cache is
+  local to the row loop instead of persistent hash-table state. Focused SF10 Q16
+  production `/private/tmp/duckdb_jit_q16_pointer_set_split_r5_20260702`
+  verified correctness diff 0 over five repeats at `0.043s` off median and
+  `0.044s` auto median, with `compiled_regions=0`. Current traced profile
+  `/private/tmp/duckdb_jit_q16_sf10_current_profile_20260702` again verifies
+  correctness diff 0 with `compiled_regions=0`: the rejected candidates are
+  small generated/projection-glue fragments with negative net benefit, plus two
+  `no_executable_region_work` decisions. Future Q16 work should remove more
+  grouped lookup/projection traffic from this backend; do not admit the old
+  generated fragments or reintroduce CBO leniency.
+- Q8 source-filter ownership is now explicit instead of inferred from source
+  traits. Generated source-filter plans request source-contract input layout;
+  only the single-filter identity-layout shape may also keep DuckDB scan filters
+  enabled. This preserves storage pruning for the Q8-style orders scan without
+  reintroducing the multi-filter source-layout crash. Focused SF10 Q8 production
+  `/private/tmp/duckdb_jit_tpch_sf10_q8_hybrid_input_layout_r15_20260702`
+  verified correctness diff 0 at `0.401s -> 0.360s`, speedup `1.114x`. Full
+  SF10 production
+  `/private/tmp/duckdb_jit_tpch_sf10_all_hybrid_input_layout_r5_20260702`
+  verified correctness diff 0 for all 22 queries: 21 queries jitted, all 21
+  jitted queries faster than non-JIT, and Q16 remains non-jitted.
 
 ## Definition Of Done
 

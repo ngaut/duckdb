@@ -383,8 +383,6 @@ TEST_CASE("JIT lowers retained table scan filters as generated source stages", "
 		           StringUtil::Contains(event.reason, "generated table scan source filters");
 	    },
 	    [](const ExecutionRegionEvent &event) {
-		    REQUIRE_FALSE(event.selected_uses_scan_filters);
-		    REQUIRE_FALSE(event.candidate_uses_scan_filters);
 		    REQUIRE(event.runner_cost.generated_stage_count > 0);
 		    REQUIRE(event.runner_cost.native_aggregate_stage_count > 0);
 		    RequireGeneratedMachineCodeRegion(event);
@@ -415,8 +413,6 @@ TEST_CASE("JIT lowers pruned table scan filters as generated source stages", "[a
 		           StringUtil::Contains(event.reason, "generated table scan source filters");
 	    },
 	    [](const ExecutionRegionEvent &event) {
-		    REQUIRE_FALSE(event.selected_uses_scan_filters);
-		    REQUIRE_FALSE(event.candidate_uses_scan_filters);
 		    REQUIRE(event.runner_cost.generated_stage_count > 0);
 		    REQUIRE(event.runner_cost.native_aggregate_stage_count > 0);
 		    RequireGeneratedMachineCodeRegion(event);
@@ -443,8 +439,6 @@ TEST_CASE("JIT canonicalizes generated date range source filters as native betwe
 	RequireNativeSljitIr(manager, "native:date-between", [](const ExecutionRegionEvent &event) {
 		REQUIRE(event.candidate_traits.source_filter_count > 0);
 		REQUIRE(StringUtil::Contains(event.reason, "generated table scan source filters"));
-		REQUIRE_FALSE(event.selected_uses_scan_filters);
-		REQUIRE_FALSE(event.candidate_uses_scan_filters);
 	});
 }
 
@@ -473,8 +467,6 @@ TEST_CASE("JIT lowers large complex scan filters as generated source stages", "[
 		           StringUtil::Contains(event.reason, "generated table scan source filters");
 	    },
 	    [](const ExecutionRegionEvent &event) {
-		    REQUIRE_FALSE(event.selected_uses_scan_filters);
-		    REQUIRE_FALSE(event.candidate_uses_scan_filters);
 		    REQUIRE(event.runner_cost.generated_stage_count > 0);
 		    RequireGeneratedMachineCodeRegion(event);
 	    });
@@ -550,10 +542,7 @@ TEST_CASE("JIT auto generates cheap source string equality filters under aggress
 		           StringUtil::Contains(event.reason, "generated table scan source filters") &&
 		           StringUtil::Contains(event.ir, "generated_source_stage_candidate=true");
 	    },
-	    [](const ExecutionRegionEvent &event) {
-		    REQUIRE_FALSE(event.selected_uses_scan_filters);
-		    RequireGeneratedMachineCodeRegion(event);
-	    });
+	    [](const ExecutionRegionEvent &event) { RequireGeneratedMachineCodeRegion(event); });
 	RequireNoUnsupportedReason(manager, "source filter references must be local to one scan column");
 }
 

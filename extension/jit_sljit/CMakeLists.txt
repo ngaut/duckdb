@@ -8,29 +8,133 @@ add_third_party(sljit)
 
 set(JIT_SLJIT_EXTENSION_FILES
     jit_sljit_extension.cpp
-    sljit_aggregate_codegen.cpp
+    sljit_aggregate_fused_codegen.cpp
+    sljit_aggregate_grouped_codegen.cpp
+    sljit_aggregate_grouped_primitive_codegen.cpp
+    sljit_aggregate_grouped_reference_codegen.cpp
+    sljit_aggregate_grouped_typed_codegen.cpp
+    sljit_aggregate_perfect_hash_commit_codegen.cpp
+    sljit_aggregate_perfect_hash_codegen.cpp
+    sljit_aggregate_perfect_hash_group_codegen.cpp
+    sljit_aggregate_perfect_hash_group_plan.cpp
+    sljit_aggregate_perfect_hash_plan.cpp
+    sljit_aggregate_perfect_hash_range_plan.cpp
+    sljit_aggregate_perfect_hash_run_cache_codegen.cpp
+    sljit_aggregate_perfect_hash_primitive_update_codegen.cpp
+    sljit_aggregate_perfect_hash_update_plan.cpp
+    sljit_aggregate_perfect_hash_update_codegen.cpp
+    sljit_aggregate_perfect_hash_update_emitters.cpp
+    sljit_aggregate_perfect_hash_update_loops.cpp
+    sljit_aggregate_primitive_codegen.cpp
+    sljit_aggregate_reference_binary_codegen.cpp
+    sljit_aggregate_reference_codegen.cpp
+    sljit_aggregate_source_hoist_codegen.cpp
+    sljit_aggregate_typed_payload_codegen.cpp
+    sljit_aggregate_ungrouped_codegen.cpp
+    sljit_aggregate_ungrouped_filtered_codegen.cpp
+    sljit_aggregate_ungrouped_shared_codegen.cpp
+    sljit_aggregate_ungrouped_typed_plan.cpp
+    sljit_aggregate_ungrouped_typed_codegen.cpp
+    sljit_aggregate_ungrouped_typed_payload_codegen.cpp
     sljit_backend.cpp
     sljit_codegen_util.cpp
+    sljit_executable_aggregate_codegen.cpp
+    sljit_executable_aggregate_filtered_codegen.cpp
+    sljit_executable_aggregate_payload_codegen.cpp
+    sljit_executable_expression_codegen.cpp
+    sljit_executable_expression_inputs.cpp
+    sljit_executable_projection_codegen.cpp
+    sljit_executable_range_analysis.cpp
+    sljit_executable_range_stats.cpp
+    sljit_executable_stats.cpp
     sljit_expression_tree_codegen.cpp
+    sljit_expression_tree_overflow_codegen.cpp
+    sljit_expression_tree_source_codegen.cpp
+    sljit_expression_tree_value_codegen.cpp
+    sljit_hash_join_runtime.cpp
+    sljit_hash_join_probe_codegen_validation.cpp
+    sljit_hash_join_probe_perfect_codegen.cpp
+    sljit_hash_join_probe_regular_codegen.cpp
     sljit_native_codegen.cpp
+    sljit_native_date_plan.cpp
+    sljit_native_double_plan.cpp
+    sljit_native_double_codegen.cpp
+    sljit_native_decimal_plan.cpp
+    sljit_native_flat_double_codegen.cpp
+    sljit_native_flat_double_projection_codegen.cpp
+    sljit_native_flat_floating_stats_codegen.cpp
+    sljit_native_flat_integer_codegen.cpp
+    sljit_native_flat_integer_projection_codegen.cpp
+    sljit_native_flat_integer_projection_helpers.cpp
+    sljit_native_flat_projection_codegen.cpp
+    sljit_native_predicate_codegen.cpp
+    sljit_native_predicate_select_codegen.cpp
+    sljit_native_int128_plan.cpp
+    sljit_native_integer_binary_codegen.cpp
+    sljit_native_integer_plan.cpp
+    sljit_native_integer_set_plan.cpp
+    sljit_native_integer_scalar_codegen.cpp
+    sljit_native_scalar_utility_codegen.cpp
     sljit_native_plan.cpp
+    sljit_native_predicate_plan.cpp
+    sljit_native_predicate_structural_plan.cpp
+    sljit_native_predicate_sources.cpp
+    sljit_native_predicate_select_helpers.cpp
     sljit_native_runtime.cpp
+    sljit_native_string_compression_codegen.cpp
+    sljit_native_string_plan.cpp
     sljit_native_util.cpp
+    sljit_nested_loop_join_codegen.cpp
     sljit_platform.cpp
+    sljit_predicate_branch_codegen.cpp
+    sljit_predicate_constant_or_null_codegen.cpp
     sljit_predicate_codegen.cpp
+    sljit_predicate_facts.cpp
+    sljit_predicate_numeric_branch_codegen.cpp
+    sljit_predicate_string_branch_codegen.cpp
+    sljit_predicate_string_runtime.cpp
+    sljit_predicate_structural_branch_codegen.cpp
     sljit_region_description.cpp
-    sljit_region_codegen.cpp
+    sljit_region_aggregate_sink_plan.cpp
+    sljit_region_aggregate_fusion.cpp
+    sljit_region_aggregate_partial_fusion.cpp
+    sljit_region_aggregate_projection_fusion.cpp
+    sljit_region_contract_blockers.cpp
     sljit_region_executable.cpp
+    sljit_region_expression_description.cpp
+    sljit_region_filter_projection_plan.cpp
     sljit_region_expression_plan.cpp
+    sljit_region_expression_projection_graph.cpp
+    sljit_region_expression_tree_plan.cpp
     sljit_region_join_plan.cpp
+    sljit_region_join_sink_plan.cpp
+    sljit_region_nested_loop_join_plan.cpp
     sljit_region_node_plan.cpp
+    sljit_region_plan_facts.cpp
     sljit_region_plan_copy.cpp
     sljit_region_plan.cpp
+    sljit_region_predicate_expression_plan.cpp
+    sljit_region_projection_fusion.cpp
+    sljit_region_projection_sources.cpp
     sljit_region_runtime.cpp
+    sljit_region_runtime_source.cpp
+    sljit_region_runtime_trace.cpp
+    sljit_region_scalar_expression_plan.cpp
     sljit_region_sink_plan.cpp
+    sljit_region_source_filter_plan.cpp
     sljit_region_source_plan.cpp
     sljit_typed_expression_codegen.cpp
+    sljit_typed_expression_control_codegen.cpp
+    sljit_typed_expression_facts_plan.cpp
+    sljit_typed_expression_fast_codegen.cpp
+    sljit_typed_expression_jump_codegen.cpp
+    sljit_typed_expression_string_codegen.cpp
+    sljit_typed_expression_aggregate_codegen.cpp
+    sljit_typed_expression_select_codegen.cpp
+    sljit_typed_expression_type_plan.cpp
     sljit_typed_expression_plan.cpp
+    sljit_typed_expression_utility_codegen.cpp
+    sljit_typed_expression_vector_codegen.cpp
     sljit_region.cpp)
 
 build_static_extension(jit_sljit ${JIT_SLJIT_EXTENSION_FILES})

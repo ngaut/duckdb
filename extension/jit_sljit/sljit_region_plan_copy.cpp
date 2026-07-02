@@ -203,6 +203,7 @@ static SljitNativeRegionOpPlan CopySljitNativeRegionOp(const SljitNativeRegionOp
 	result.aggregate_update.use_primitive_payloads = input.aggregate_update.use_primitive_payloads;
 	result.aggregate_update.use_grouped_state_addresses = input.aggregate_update.use_grouped_state_addresses;
 	result.aggregate_update.use_perfect_hash_group_lookup = input.aggregate_update.use_perfect_hash_group_lookup;
+	result.aggregate_update.use_distinct_count_pointer_update = input.aggregate_update.use_distinct_count_pointer_update;
 	result.aggregate_update.ir = input.aggregate_update.ir;
 	result.aggregate_update.payloads = CopySljitNativeRegionExpressions(input.aggregate_update.payloads);
 	result.aggregate_update.group_expressions = CopySljitNativeRegionExpressions(input.aggregate_update.group_expressions);

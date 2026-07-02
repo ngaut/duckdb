@@ -329,7 +329,7 @@ static void AccumulateExecutionRegionOpenRequest(ExecutionRegionPlan &plan, cons
 		plan_contract.uses_scan_filters = native_fused_source_owner && lowering_plan.UsesScanFilters() &&
 		                                  (!source.filters.empty() || table_scan_contract.dynamic_filters);
 		plan_contract.source_contract_input_types.clear();
-		if (plan_contract.UsesSourceContract() && !plan_contract.uses_scan_filters && !source.filters.empty()) {
+		if (plan_contract.UsesSourceContract() && lowering_plan.RequiresSourceContractInputLayout()) {
 			plan_contract.source_contract_input_types = table_scan_contract.source_contract_input_types;
 		}
 		return;

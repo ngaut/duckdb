@@ -9,7 +9,7 @@
 #pragma once
 
 #include "sljit_function_types.hpp"
-#include "sljit_region_codegen.hpp"
+#include "sljit_hash_join_probe_specialization.hpp"
 #include "sljit_region_plan.hpp"
 
 #include "duckdb/execution/execution_region_kernel.hpp"
@@ -52,54 +52,57 @@ struct SljitExecutableRegionExpression {
 	}
 };
 
-struct SljitExecutableHashJoinProbe {
-	SljitNativeHashJoinProbePlan plan;
+struct SljitExecutableRegularHashJoinProbeCode {
 	unique_ptr<ExecutionRegionCodeHandle> code;
-	SljitNativeHashJoinProbeFunction function = nullptr;
-	struct AllValidVariant {
+	SljitNativeRegularHashJoinProbeFunction function = nullptr;
+
+	struct AllValidSpecialization {
 		unique_ptr<ExecutionRegionCodeHandle> code;
-		SljitNativeHashJoinProbeFunction function = nullptr;
+		SljitNativeRegularHashJoinProbeFunction function = nullptr;
 
 		idx_t CodeSize() const {
 			return code ? code->CodeSize() : 0;
 		}
 	};
-	static constexpr idx_t ALL_VALID_VARIANT_COUNT = 8;
-	AllValidVariant flat_all_valid_variants[ALL_VALID_VARIANT_COUNT];
-	AllValidVariant selected_all_valid_variants[ALL_VALID_VARIANT_COUNT];
-	unique_ptr<ExecutionRegionCodeHandle> perfect_code;
-	SljitNativeHashJoinProbeFunction perfect_function = nullptr;
-	SljitExecutableRegionExpression residual_filter;
+	static constexpr idx_t ALL_VALID_SPECIALIZATION_COUNT =
+	    SljitHashJoinProbeAllValidSpecializationKey::SPECIALIZATION_COUNT;
+	AllValidSpecialization all_valid_specializations[ALL_VALID_SPECIALIZATION_COUNT];
 
-	static idx_t FlatAllValidVariantIndex(bool use_salt, bool chains_longer_than_one, bool dictionary_emission) {
-		return (use_salt ? 4 : 0) + (chains_longer_than_one ? 2 : 0) + (dictionary_emission ? 1 : 0);
-	}
-
-	AllValidVariant &FlatAllValidVariantFor(bool use_salt, bool chains_longer_than_one, bool dictionary_emission) {
-		return flat_all_valid_variants[FlatAllValidVariantIndex(use_salt, chains_longer_than_one,
-		                                                        dictionary_emission)];
-	}
-
-	AllValidVariant &SelectedAllValidVariantFor(bool use_salt, bool chains_longer_than_one,
-	                                            bool dictionary_emission) {
-		return selected_all_valid_variants[FlatAllValidVariantIndex(use_salt, chains_longer_than_one,
-		                                                            dictionary_emission)];
-	}
-
-	bool HasDeferredProbeCodegen() const {
-		string error;
-		return ValidateSljitHashJoinProbe(plan.keys, plan.equality_key_count, plan.output_mode, error);
+	AllValidSpecialization &AllValidSpecializationFor(const SljitHashJoinProbeAllValidSpecializationKey &key) {
+		return all_valid_specializations[key.CacheIndex()];
 	}
 
 	idx_t CodeSize() const {
 		idx_t result = code ? code->CodeSize() : 0;
-		for (auto &variant : flat_all_valid_variants) {
-			result += variant.CodeSize();
+		for (auto &specialization : all_valid_specializations) {
+			result += specialization.CodeSize();
 		}
-		for (auto &variant : selected_all_valid_variants) {
-			result += variant.CodeSize();
-		}
-		result += perfect_code ? perfect_code->CodeSize() : 0;
+		return result;
+	}
+};
+
+struct SljitExecutablePerfectHashJoinProbeCode {
+	unique_ptr<ExecutionRegionCodeHandle> code;
+	SljitNativePerfectHashJoinProbeFunction function = nullptr;
+
+	idx_t CodeSize() const {
+		return code ? code->CodeSize() : 0;
+	}
+};
+
+struct SljitExecutableHashJoinProbe {
+	SljitNativeHashJoinProbePlan plan;
+	SljitExecutableRegularHashJoinProbeCode regular;
+	SljitExecutablePerfectHashJoinProbeCode perfect;
+	SljitExecutableRegionExpression residual_filter;
+
+	bool ValidateDeferredCodegen(string &error) const;
+
+	bool HasDeferredCodegen() const;
+
+	idx_t CodeSize() const {
+		idx_t result = regular.CodeSize();
+		result += perfect.CodeSize();
 		result += residual_filter.CodeSize();
 		return result;
 	}
@@ -278,7 +281,7 @@ struct SljitExecutableRegionOp {
 		if (CodeSize() > 0) {
 			return true;
 		}
-		return kind == SljitNativeRegionOpKind::HASH_JOIN_PROBE && hash_join_probe.HasDeferredProbeCodegen();
+		return kind == SljitNativeRegionOpKind::HASH_JOIN_PROBE && hash_join_probe.HasDeferredCodegen();
 	}
 };
 

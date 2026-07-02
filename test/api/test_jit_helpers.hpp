@@ -215,8 +215,6 @@ static void RequireDuckDBScanFilteredSourceContract(const ExecutionRegionEvent &
 
 static void RequireGeneratedSourceFilteredSourceContract(const ExecutionRegionEvent &event) {
 	REQUIRE(event.selected_source_execution == ExecutionRegionSourceExecutionKind::SOURCE_CONTRACT);
-	REQUIRE_FALSE(event.selected_uses_scan_filters);
-	REQUIRE_FALSE(event.candidate_uses_scan_filters);
 	REQUIRE(event.candidate_traits.source_filter_count > 0);
 	REQUIRE(event.runner_cost.generated_stage_count > 0);
 	REQUIRE(StringUtil::Contains(event.reason, "generated table scan source filters"));

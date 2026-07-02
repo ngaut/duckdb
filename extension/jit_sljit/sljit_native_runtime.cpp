@@ -160,4 +160,24 @@ void SljitNativePredicateSourceAdapter::Prepare(DataChunk *input, const vector<i
 	}
 }
 
+const_data_ptr_t *SljitNativePredicateSourceAdapter::DataArray() {
+	return source_data.data();
+}
+
+const sel_t **SljitNativePredicateSourceAdapter::SelectionArray() {
+	return source_sel.data();
+}
+
+const validity_t **SljitNativePredicateSourceAdapter::ValidityArray() {
+	return source_validity.data();
+}
+
+idx_t SljitNativePredicateSourceAdapter::SourceCount() const {
+	return source_data.size();
+}
+
+bool SljitNativePredicateSourceAdapter::SourcesAllValid() const {
+	return sources_all_valid;
+}
+
 } // namespace duckdb

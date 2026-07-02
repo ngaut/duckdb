@@ -24,7 +24,13 @@ data_ptr_t NativeUnsignedIntegerResultData(Vector &result, SljitNativeUnsignedIn
 struct SljitNativePredicateSourceAdapter {
 	void Reset();
 	void Prepare(DataChunk *input, const vector<idx_t> &input_source_indices);
+	const_data_ptr_t *DataArray();
+	const sel_t **SelectionArray();
+	const validity_t **ValidityArray();
+	idx_t SourceCount() const;
+	bool SourcesAllValid() const;
 
+private:
 	vector<UnifiedVectorFormat> formats;
 	vector<const_data_ptr_t> source_data;
 	vector<const sel_t *> source_sel;

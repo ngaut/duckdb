@@ -8,6 +8,7 @@
 
 #pragma once
 
+#include "duckdb/common/optional_idx.hpp"
 #include "duckdb/execution/physical_operator_states.hpp"
 #include "duckdb/execution/progress_data.hpp"
 #include "duckdb/common/sorting/sort_projection_column.hpp"
@@ -104,6 +105,7 @@ public:
 	//===--------------------------------------------------------------------===//
 	SourceResultType MaterializeColumnData(ExecutionContext &context, OperatorSourceInput &input) const;
 	unique_ptr<ColumnDataCollection> GetColumnData(OperatorSourceInput &input) const;
+	optional_idx FinalizedCount(GlobalSinkState &sink) const;
 
 	SourceResultType MaterializeSortedRun(ExecutionContext &context, OperatorSourceInput &input) const;
 	unique_ptr<SortedRun> GetSortedRun(GlobalSourceState &global_state);

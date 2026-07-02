@@ -1598,6 +1598,57 @@ WHERE backend_name='sljit'
 1
 
 statement ok
+CREATE TEMP TABLE jit_grouped_count_input AS
+SELECT (i % 16)::TINYINT AS k,
+       CASE WHEN i % 3 = 0 THEN NULL ELSE i::BIGINT END AS v
+FROM range(99840) tbl(i)
+
+statement ok
+CREATE TEMP TABLE jit_grouped_count_output AS
+SELECT k, count(v) AS c
+FROM jit_grouped_count_input
+GROUP BY k
+
+query I
+SELECT count(*) FROM jit_grouped_count_output
+WHERE c = 4160
+----
+16
+
+statement ok
+SET jit_cbo_native_operator_stage_benefit=4096
+
+statement ok
+CREATE TEMP TABLE jit_grouped_count_baseline AS
+SELECT coalesce(max(event_id), 0) AS base_event_id FROM duckdb_jit_events()
+
+statement ok
+CREATE TEMP TABLE jit_grouped_count_event_output AS
+SELECT k, count(v) AS c
+FROM jit_grouped_count_input
+GROUP BY k
+
+query I
+SELECT count(*) > 0
+FROM duckdb_jit_events(), jit_grouped_count_baseline
+WHERE event_id > base_event_id
+  AND backend_name='sljit'
+  AND status='compiled'
+  AND execution_mode='native'
+  AND code_size > 0
+  AND candidate_sink_kind='perfect-hash-aggregate-update'
+  AND ir LIKE '%aggregate_update(kind=perfect-hash%'
+  AND ir LIKE '%payload_update=generated-primitive%'
+  AND ir LIKE '%grouped_state_lookup=generated-perfect-hash%'
+  AND ir LIKE '%primitive_payloads=native:reference%'
+  AND ir NOT LIKE '%execution=vectorized-operator-boundary%'
+----
+1
+
+statement ok
+SET jit_cbo_native_operator_stage_benefit=1
+
+statement ok
 SET jit_dump_ir=true
 
 statement ok
@@ -1641,6 +1692,48 @@ SET jit_cbo_native_operator_stage_benefit=4096
 
 statement ok
 SET jit_cbo_full_pipeline_benefit=4096
+
+statement ok
+CREATE TEMP TABLE jit_identity_source_filter_input AS
+SELECT i::BIGINT AS k,
+       (DATE '1995-01-01' + ((i % 60)::INTEGER)) AS d
+FROM range(20000) tbl(i)
+
+statement ok
+CREATE TEMP TABLE jit_identity_source_filter_baseline AS
+SELECT coalesce(max(event_id), 0) AS base_event_id FROM duckdb_jit_events()
+
+statement ok
+CREATE TEMP TABLE jit_identity_source_filter_output AS
+SELECT k, d
+FROM jit_identity_source_filter_input
+WHERE d >= DATE '1995-01-10' AND d < DATE '1995-01-20'
+
+query I
+SELECT count(*) FROM jit_identity_source_filter_output
+----
+3340
+
+query I
+SELECT count(*) > 0
+FROM duckdb_jit_events(), jit_identity_source_filter_baseline
+WHERE event_id > base_event_id
+  AND backend_name='sljit'
+  AND status='compiled'
+  AND execution_mode='native'
+  AND code_size > 0
+  AND selected_uses_scan_filters
+  AND candidate_has_source
+  AND candidate_source_filter_count=1
+  AND candidate_filter_count=0
+  AND candidate_projection_count=1
+  AND candidate_has_sink
+  AND reason LIKE '%generated-source-filtered-source-contract%'
+  AND reason LIKE '%source_contract_filter_pushdown=true%'
+  AND reason LIKE '%generated table scan source filters%'
+  AND ir LIKE '%native:date-between%'
+----
+1
 
 statement ok
 SET threads=1
@@ -1727,8 +1820,6 @@ WHERE event_id > base_event_id
   AND status='compiled'
   AND execution_mode='native'
   AND code_size > 0
-  AND selected_uses_scan_filters
-  AND candidate_uses_scan_filters
   AND candidate_has_source
   AND candidate_source_filter_count > 0
   AND candidate_filter_count=1

@@ -125,6 +125,14 @@ static void SetExecutionRegionOperatorExpressions(ExecutionRegionOperatorEntry &
 	entry.projection_expressions = transform.projection_expressions;
 }
 
+static void ApplyExecutionRegionExactSourceCardinality(ExecutionRegionOperatorEntry &entry,
+                                                       const ExecutionContract &descriptor) {
+	if (entry.slot != ExecutionRegionOperatorSlot::SOURCE || !descriptor.source.estimated_source_cardinality_exact) {
+		return;
+	}
+	entry.estimated_cardinality = descriptor.source.estimated_source_cardinality;
+}
+
 static bool ExecutionRegionAggregateInputsHaveGeneratedExpression(const vector<ExecutionRegionAggregateInput> &inputs) {
 	for (auto &input : inputs) {
 		if (input.has_filter || !input.child_expressions.empty()) {
@@ -253,6 +261,7 @@ static ExecutionRegionOperatorEntry BuildExecutionRegionOperatorEntry(const Phys
 	if (context) {
 		AddExecutionRegionTableScanColumnStats(op, descriptor, *context);
 	}
+	ApplyExecutionRegionExactSourceCardinality(entry, descriptor);
 	SetExecutionRegionOperatorExpressions(entry, descriptor.transform);
 	entry.source_contract =
 	    SliceExecutionRegionCompiledContract(descriptor, ExecutionRegionOperatorSlot::SOURCE, render_diagnostics);

@@ -15,6 +15,7 @@
 #include "duckdb/main/client_context.hpp"
 #include "duckdb/main/settings.hpp"
 #include "duckdb/parallel/pipeline.hpp"
+#include "duckdb/parallel/task_scheduler.hpp"
 
 #include "execution_region_cost_input.hpp"
 
@@ -95,6 +96,8 @@ PhysicalRunnerCostParameters BuildPhysicalRunnerCostParameters(ClientContext &co
 	result.full_pipeline_benefit = Settings::Get<JitCboFullPipelineBenefitSetting>(context);
 	result.startup_base_cost = Settings::Get<JitCboStartupBaseCostSetting>(context);
 	result.startup_margin_basis_points = Settings::Get<JitCboStartupMarginBasisPointsSetting>(context);
+	result.vectorized_parallelism =
+	    MaxValue<idx_t>(NumericCast<idx_t>(TaskScheduler::GetScheduler(context).NumberOfThreads()), 1);
 	result.gpu_runner_available = manager.HasAvailableBackendForRunner(context, ExecutionRunnerKind::COMPILED_GPU);
 	result.gpu_generated_stage_benefit = Settings::Get<GpuCboGeneratedStageBenefitSetting>(context);
 	result.gpu_native_operator_stage_benefit = Settings::Get<GpuCboNativeOperatorStageBenefitSetting>(context);

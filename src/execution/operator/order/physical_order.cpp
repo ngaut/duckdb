@@ -164,6 +164,14 @@ ProgressData PhysicalOrder::GetSinkProgress(ClientContext &context, GlobalSinkSt
 	return gstate.sort.GetSinkProgress(context, *gstate.state, source_progress);
 }
 
+optional_idx PhysicalOrder::FinalizedSourceCardinality() const {
+	if (!sink_state) {
+		return optional_idx::Invalid();
+	}
+	auto &gstate = sink_state->Cast<OrderGlobalSinkState>();
+	return gstate.sort.FinalizedCount(*gstate.state);
+}
+
 //===--------------------------------------------------------------------===//
 // Source
 //===--------------------------------------------------------------------===//

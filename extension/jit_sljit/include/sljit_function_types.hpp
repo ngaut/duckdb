@@ -17,7 +17,8 @@ namespace duckdb {
 using SljitNativeVectorFunction = void(SLJIT_FUNC *)(SljitNativeVectorInput *);
 using SljitNativeAggregateUpdateFunction = void(SLJIT_FUNC *)(SljitNativeVectorInput *);
 using SljitNativePredicateFunction = void(SLJIT_FUNC *)(SljitNativePredicateInput *);
-using SljitNativeHashJoinProbeFunction = void(SLJIT_FUNC *)(SljitNativeHashJoinProbeInput *);
+using SljitNativeRegularHashJoinProbeFunction = void(SLJIT_FUNC *)(SljitNativeRegularHashJoinProbeInput *);
+using SljitNativePerfectHashJoinProbeFunction = void(SLJIT_FUNC *)(SljitNativePerfectHashJoinProbeInput *);
 using SljitNativeNestedLoopJoinProbeFunction = void(SLJIT_FUNC *)(SljitNativeNestedLoopJoinProbeInput *);
 
 } // namespace duckdb

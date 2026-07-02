@@ -9,7 +9,6 @@
 #include "duckdb/common/types/uhugeint.hpp"
 #include "duckdb/catalog/catalog_entry/table_catalog_entry.hpp"
 #include "duckdb/execution/execution_operator_runtime.hpp"
-#include "duckdb/execution/execution_region_settings.hpp"
 #include "duckdb/execution/expression_executor.hpp"
 #include "duckdb/execution/join_hashtable.hpp"
 #include "duckdb/execution/operator/aggregate/ungrouped_aggregate_state.hpp"
@@ -744,11 +743,11 @@ static bool ShouldPrepareBloomFilterBuild(const PhysicalHashJoin &op) {
 	return true;
 }
 
-static bool ShouldPrepareJitProbeBloomFilterBuild(ClientContext &context, const PhysicalHashJoin &op) {
-	if (!ExecutionRegionSettings::Enabled(context) || op.join_type != JoinType::INNER || op.residual_info) {
+static bool ShouldUseJitProbeBloomFilter(const PhysicalHashJoin &op) {
+	if (op.join_type != JoinType::INNER || op.residual_info) {
 		return false;
 	}
-	if (op.conditions.size() != 2) {
+	if (op.conditions.empty() || op.conditions.size() > 2) {
 		return false;
 	}
 	for (auto &cond : op.conditions) {
@@ -756,7 +755,17 @@ static bool ShouldPrepareJitProbeBloomFilterBuild(ClientContext &context, const 
 			return false;
 		}
 		auto key_type = cond.GetLHS().GetReturnType().InternalType();
-		if (key_type != PhysicalType::INT64 && key_type != PhysicalType::UINT64) {
+		switch (key_type) {
+		case PhysicalType::INT8:
+		case PhysicalType::INT16:
+		case PhysicalType::INT32:
+		case PhysicalType::INT64:
+		case PhysicalType::UINT8:
+		case PhysicalType::UINT16:
+		case PhysicalType::UINT32:
+		case PhysicalType::UINT64:
+			break;
+		default:
 			return false;
 		}
 	}
@@ -783,7 +792,7 @@ unique_ptr<JoinHashTable> PhysicalHashJoin::InitializeHashTable(ClientContext &c
 	    make_uniq<JoinHashTable>(context, *this, conditions, payload_columns.col_types, join_type, initial_radix_bits,
 	                             rhs_output_columns.col_idxs, residual_info ? residual_info->Copy() : nullptr,
 	                             predicate ? predicate.get() : nullptr, lhs_output_in_probe);
-	if (ShouldPrepareBloomFilterBuild(*this) || ShouldPrepareJitProbeBloomFilterBuild(context, *this)) {
+	if (ShouldPrepareBloomFilterBuild(*this)) {
 		result->PrepareBuildBloomFilter(children[1].get().estimated_cardinality);
 	}
 
@@ -2489,6 +2498,17 @@ ExecutionOperatorBindResult PhysicalHashJoin::BindExecutionOperator(ExecutionCon
 		}
 		if (mark_info.correlated_types.size() != contract.delim_type_count) {
 			binding.blocker = "hash-join-native-runtime-correlated-mark-count-shape-mismatch";
+			return ExecutionOperatorBindResult::INVALID;
+		}
+	}
+	if (!perfect_hash_layout && table_layout.ready && !empty_build_side && ShouldUseJitProbeBloomFilter(*this)) {
+		sink.hash_table->EnsureBloomFilterForProbe();
+		if (!ExecutionGetHashJoinTableLayout(*sink.hash_table, table_layout)) {
+			binding.blocker =
+			    table_layout.blocker.empty() ? "hash-join-native-runtime-table-layout-not-ready" : table_layout.blocker;
+			if (ExecutionHashJoinProbeLayoutCanDefer(binding.blocker)) {
+				return ExecutionOperatorBindResult::DEFERRED;
+			}
 			return ExecutionOperatorBindResult::INVALID;
 		}
 	}

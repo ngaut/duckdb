@@ -1,0 +1,145 @@
+//===----------------------------------------------------------------------===//
+//                         DuckDB
+//
+// sljit_aggregate_perfect_hash_update_plan.cpp
+//
+//
+//===----------------------------------------------------------------------===//
+
+#include "sljit_aggregate_perfect_hash_update_codegen.hpp"
+
+#include "sljit_aggregate_fused_codegen.hpp"
+
+#include "duckdb/common/types/cast_helpers.hpp"
+
+namespace duckdb {
+
+bool TryBuildSljitPerfectHashFusedUpdatePlan(
+    const ExecutionExpressionIR *predicate, const vector<SljitNativeRegionExpressionPlan> &payloads,
+    const vector<ExecutionRegionAggregateInput> &aggregates, const vector<ExecutionRegionGroupInput> &groups,
+    const vector<SljitNativeRegionExpressionPlan> &group_expressions, const ExecutionRegionAggregateContract &contract,
+    const vector<bool> &source_not_null, const vector<Value> &source_min_values, const vector<Value> &source_max_values,
+    SljitPerfectHashFusedUpdatePlan &result, string &error) {
+	result = SljitPerfectHashFusedUpdatePlan();
+	if (!TryBuildSljitPerfectHashGroupPlans(groups, group_expressions, contract, result.group_plans) ||
+	    result.group_plans.empty() || !contract.grouped_state_layout_ready ||
+	    !BuildSljitFusedTypedAggregateCodegenPlan(payloads, aggregates, result.codegen_plan)) {
+		error = "unsupported fused perfect-hash typed aggregate payload shape";
+		return false;
+	}
+	SljitTypedExpressionTreePlan predicate_plan;
+	if (predicate) {
+		predicate_plan = BuildSljitTypedExpressionTreePlan(*predicate, false);
+		if (!predicate_plan.supported || !predicate_plan.result_is_bool) {
+			error = "unsupported filtered fused perfect-hash aggregate predicate shape";
+			return false;
+		}
+		result.codegen_plan.tree_node_count += predicate_plan.node_count;
+		result.codegen_plan.fast_path_supported =
+		    result.codegen_plan.fast_path_supported && predicate_plan.fast_path.fast_path_supported;
+	}
+	if (contract.perfect_required_bits_total >= 8 * sizeof(idx_t)) {
+		error = "unsupported fused perfect-hash typed aggregate domain size";
+		return false;
+	}
+	result.perfect_hash_group_count = idx_t(1) << contract.perfect_required_bits_total;
+	for (idx_t payload_idx = 0; payload_idx < payloads.size(); payload_idx++) {
+		if (!SljitFusedGroupedTypedAggregatePayloadSupported(payloads[payload_idx], aggregates[payload_idx],
+		                                                     contract)) {
+			error = "unsupported fused perfect-hash typed aggregate payload shape";
+			return false;
+		}
+	}
+
+	const auto tree_local_size = NumericCast<sljit_sw>(result.codegen_plan.tree_node_count * sizeof(sljit_sw) * 3);
+	result.state_pointer_offset = tree_local_size;
+	result.group_index_offset = result.state_pointer_offset + NumericCast<sljit_sw>(sizeof(uintptr_t));
+	result.binary_shared_value_offset = result.group_index_offset + NumericCast<sljit_sw>(sizeof(sljit_sw));
+	result.local_size = result.binary_shared_value_offset;
+	if (result.codegen_plan.binary_shared_payload) {
+		result.local_size += NumericCast<sljit_sw>(sizeof(sljit_sw));
+	}
+	auto payloads_not_null = BuildSljitAggregatePayloadNotNull(payloads, aggregates, source_not_null);
+	TryBuildSljitLocalPerfectHashAggregatePlan(aggregates, contract, payloads_not_null, result.local_size,
+	                                           result.local_aggregate_plan);
+	AnnotateSljitLocalPerfectHashAggregatePlan(result.local_aggregate_plan, payloads, aggregates, source_min_values,
+	                                           source_max_values);
+
+	result.sparse_run_cache_enabled =
+	    result.codegen_plan.fast_path_supported && SLJIT_HAS_SPARSE_LOCAL_RUN_CACHE_REGS &&
+	    result.local_aggregate_plan.enabled && result.local_aggregate_plan.sparse &&
+	    !result.local_aggregate_plan.sparse_eager_zero && SljitSparseLocalUsesCountSeen(result.local_aggregate_plan);
+	result.sparse_run_cache_count_accepted_rows = result.sparse_run_cache_enabled && predicate;
+	const auto sparse_run_cacheable_lane_count =
+	    result.sparse_run_cache_enabled
+	        ? CountSljitSparseLocalRunCacheableLanes(result.local_aggregate_plan, aggregates)
+	        : idx_t(0);
+	result.source_data_hoists = BuildSljitPerfectHashSourceDataPointerHoists(payloads);
+	result.hoist_source_data_pointers = SLJIT_HAS_PERFECT_HASH_GROUP_DATA_REGS &&
+	                                    result.source_data_hoists.size() >= result.group_plans.size() &&
+	                                    !result.source_data_hoists.empty();
+	const bool group_data_pointer_hoist_candidate =
+	    !result.hoist_source_data_pointers && SLJIT_HAS_PERFECT_HASH_GROUP_DATA_REGS && result.group_plans.size() <= 2;
+	const bool sparse_run_cache_payload_register_mode =
+	    result.sparse_run_cache_enabled && sparse_run_cacheable_lane_count >= 3 && result.group_plans.size() <= 2 &&
+	    !result.hoist_source_data_pointers && !group_data_pointer_hoist_candidate;
+	if (result.sparse_run_cache_enabled) {
+		vector<sljit_s32> sparse_run_cache_lower_regs;
+		sparse_run_cache_lower_regs.push_back(SLJIT_SPARSE_LOCAL_RUN_LOWER0_REG);
+		if (sparse_run_cache_payload_register_mode) {
+			sparse_run_cache_lower_regs.push_back(SLJIT_SPARSE_LOCAL_RUN_LOWER1_REG);
+			sparse_run_cache_lower_regs.push_back(SLJIT_SPARSE_LOCAL_RUN_LOWER2_REG);
+		}
+		result.sparse_run_cached_lanes =
+		    BuildSljitSparseLocalRunCachedLanes(result.local_aggregate_plan, aggregates, sparse_run_cache_lower_regs);
+		result.sparse_run_cached_group_offset = result.local_size;
+		result.local_size += NumericCast<sljit_sw>(sizeof(sljit_sw));
+		result.sparse_run_cached_pointer_offset = result.local_size;
+		result.local_size += NumericCast<sljit_sw>(sizeof(uintptr_t));
+		result.sparse_run_cached_start_offset = result.local_size;
+		result.local_size += NumericCast<sljit_sw>(sizeof(sljit_sw));
+		if (result.sparse_run_cache_count_accepted_rows) {
+			result.sparse_run_cached_count_offset = result.local_size;
+			result.local_size += NumericCast<sljit_sw>(sizeof(sljit_sw));
+		}
+	}
+	if (!result.local_aggregate_plan.enabled) {
+		TryBuildSljitDeferredPerfectHashFlagPlan(aggregates, contract, result.local_size, result.deferred_flag_plan);
+	}
+	result.fast_source_data_hoists =
+	    result.sparse_run_cache_enabled
+	        ? (result.hoist_source_data_pointers ? result.source_data_hoists
+	                                             : vector<SljitTypedExpressionTreeDataPointerHoist>())
+	        : (result.codegen_plan.fast_path_supported
+	               ? (result.hoist_source_data_pointers
+	                      ? BuildSljitPerfectHashSourceDataPointerHoists(payloads, 3, true)
+	                      : BuildSljitPerfectHashSpareFastSourceDataPointerHoists(payloads))
+	               : result.source_data_hoists);
+	if (!result.hoist_source_data_pointers) {
+		result.source_data_hoists.clear();
+	} else if (result.fast_source_data_hoists.size() < result.source_data_hoists.size()) {
+		result.fast_source_data_hoists = result.source_data_hoists;
+	}
+	result.hoist_group_data_pointers = !sparse_run_cache_payload_register_mode && group_data_pointer_hoist_candidate;
+	result.hoist_fast_source_data_pointers = !result.fast_source_data_hoists.empty() &&
+	                                         (!result.hoist_source_data_pointers ||
+	                                          result.fast_source_data_hoists.size() > result.source_data_hoists.size());
+	result.hoist_fast_group_data_array_base =
+	    result.hoist_source_data_pointers && result.codegen_plan.fast_path_supported &&
+	    result.local_aggregate_plan.sparse && SljitCanPrecomputePerfectHashStringGroupOffset(result.group_plans);
+	result.dedicated_state_register =
+	    SLJIT_HAS_DEDICATED_PERFECT_HASH_STATE_REG && !result.local_aggregate_plan.enabled;
+	result.state_pointer_reg = result.dedicated_state_register ? SLJIT_PERFECT_HASH_STATE_REG : SLJIT_S4;
+	result.saved_register_count = (result.dedicated_state_register || result.local_aggregate_plan.sparse)
+	                                  ? SLJIT_PERFECT_HASH_SAVED_REG_COUNT
+	                                  : NumericCast<sljit_s32>(7);
+	if (result.hoist_group_data_pointers || result.hoist_source_data_pointers) {
+		result.saved_register_count = SLJIT_PERFECT_HASH_GROUP_DATA_SAVED_REG_COUNT;
+	}
+	if (result.sparse_run_cache_enabled && result.saved_register_count < SLJIT_SPARSE_LOCAL_RUN_SAVED_REG_COUNT) {
+		result.saved_register_count = SLJIT_SPARSE_LOCAL_RUN_SAVED_REG_COUNT;
+	}
+	return true;
+}
+
+} // namespace duckdb

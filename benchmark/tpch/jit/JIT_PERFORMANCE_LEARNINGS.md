@@ -7,10 +7,10 @@ that were verified are separated from principles and next directions.
 ## Verified State
 
 - Current broad SF10 production sweep:
-  `/private/tmp/duckdb_jit_cleanup_all_sf10_r3`.
+  `/private/tmp/duckdb_jit_tpch_sf10_all_hybrid_input_layout_r5_20260702`.
 - Correctness diff is 0 for all 22 TPC-H queries.
 - Twenty-one queries are jitted, and all twenty-one jitted queries are faster
-  than non-JIT in that sweep.
+  than non-JIT in that sweep. Q16 remains non-jitted and effectively neutral.
 - Q16 is the only non-jitted query in the latest broad sweep, but it now has a
   focused core distinct-count backend instead of a CBO exception. The backend
   resolves grouped state row pointers, owns the integer distinct set, and
@@ -18,9 +18,54 @@ that were verified are separated from principles and next directions.
 - Latest cleanup verification:
   - `make release -j12` passed
   - `build/release/test/unittest "*jit*"` passed
-  - Python syntax checks passed for `tpch_common.py`, `tpch_benchmark.py`, and
-    `verify_tpch_benchmark.py`
+  - `python3 benchmark/jit/verify_jit_architecture.py` passed
+  - stale-code scan over JIT code, TPC-H JIT docs, and
+    `test/api/test_jit_runtime.cpp` was clean
   - `git diff --check` passed
+  - full SF10 production
+    `/private/tmp/duckdb_jit_tpch_sf10_all_hybrid_input_layout_r5_20260702`
+    verified correctness diff 0 for all 22 queries; 21 queries jitted, all 21
+    jitted queries faster than non-JIT, Q16 non-jitted and effectively neutral
+  - focused SF10 Q8 production
+    `/private/tmp/duckdb_jit_tpch_sf10_q8_hybrid_input_layout_r15_20260702`
+    verified correctness diff 0 with off median `0.401s`, auto median `0.360s`,
+    and auto speedup `1.114x`
+  - focused SF10 production
+    `/private/tmp/duckdb_jit_tpch_sf10_predicate_select_cleanup_20260702`
+    verified Q1/Q6/Q14 correctness diff 0 with auto speedups `1.149x`,
+    `1.169x`, and `1.219x`
+  - focused string-route SF10 production
+    `/private/tmp/duckdb_jit_tpch_sf10_string_loop_cleanup_20260702` verified
+    Q5/Q9/Q20 correctness diff 0 with auto speedups `1.240x`, `1.446x`, and
+    `1.536x`
+  - focused scalar fixed-width SF10 production
+    `/private/tmp/duckdb_jit_tpch_sf10_scalar_fixed_width_cleanup_final_20260702`
+    verified Q1/Q6/Q8/Q14 correctness diff 0 with auto speedups `1.140x`,
+    `1.161x`, `1.010x`, and `1.169x`
+  - focused aggregate reducer SF10 production
+    `/private/tmp/duckdb_jit_tpch_sf10_aggregate_reference_loop_cleanup_20260702`
+    verified Q1/Q6/Q14/Q15/Q17 correctness diff 0 with auto speedups `1.146x`,
+    `1.141x`, `1.170x`, `1.142x`, and `1.163x`
+  - focused grouped aggregate reducer SF10 production
+    `/private/tmp/duckdb_jit_tpch_sf10_grouped_reference_loop_cleanup_20260702`
+    verified Q1/Q10/Q13/Q18 correctness diff 0 with auto speedups `1.146x`,
+    `1.012x`, `1.054x`, and `1.019x`
+  - focused perfect-hash aggregate SF10 production
+    `/private/tmp/duckdb_jit_tpch_sf10_perfect_hash_zero_loop_cleanup_20260702`
+    verified Q1/Q8/Q14 correctness diff 0 with auto speedups `1.165x`,
+    `1.018x`, and `1.165x`
+  - focused perfect-hash shared-helper SF10 production
+    `/private/tmp/duckdb_jit_tpch_sf10_perfect_hash_shared_state_helper_20260702`
+    verified Q1/Q8/Q14 correctness diff 0 with auto speedups `1.158x`,
+    `1.015x`, and `1.174x`
+  - focused perfect-hash payload-updater SF10 production
+    `/private/tmp/duckdb_jit_tpch_sf10_perfect_hash_expression_value_cleanup_20260702`
+    verified Q1/Q8/Q14 correctness diff 0 with auto speedups `1.173x`,
+    `1.018x`, and `1.188x`
+  - focused perfect-hash COUNT(reference) lookup SF10 production
+    `/private/tmp/duckdb_jit_tpch_sf10_perfect_hash_count_lookup_cleanup_20260702`
+    verified Q1/Q8/Q14 correctness diff 0 with auto speedups `1.150x`,
+    `1.005x`, and `1.186x`
 
 ## What Actually Worked
 
@@ -1725,22 +1770,22 @@ Verification for this pass:
 - `python3 benchmark/jit/verify_jit_architecture.py`
 - SQL smoke against `duckdb_jit_events()` for boundary counts
 
-### 31. Runtime Variants Should Be Trait-Selected, Not Branch-Ladder Cloned
+### 31. Runtime Probe Paths Should Be Trait-Selected, Not Branch-Ladder Cloned
 
 The first Milestone 4 refactor moved regular hash-join probe input selection
 behind `SljitRegularHashJoinProbeRuntimeTraits`. The executed code path is still
 the same: flat all-valid probes, selected all-valid probes, and generic probes
 keep their previous fast-path order and stage tokens. The difference is that the
-choice is now named once and executed by shared variant helpers.
+choice is now named once and executed by shared fast-path helpers.
 
 This matters because broader query support will otherwise copy the same branch
 ladder for every new key type, validity shape, selection shape, and chain shape.
 The root design is:
 
 - derive the input/table traits once from vector format and hash-table layout
-- choose one runtime variant from those traits
+- choose one runtime probe path from those traits
 - preserve counted runtime-path and materialization-boundary telemetry
-- add future fixed-width type support inside common variant helpers, not as a
+- add future fixed-width type support inside common fast-path helpers, not as a
   parallel probe loop tree
 
 This slice is structural, not a standalone performance claim. Its value is that
@@ -2633,7 +2678,7 @@ was owned by `JoinHashTable::Finalize`, not by the generated probe path. The
 generated probe hotspot was the bloom check and entry probing:
 
 - `BloomFilter::GetMask` under
-  `SljitNativeRegionKernel::ExecuteRegularHashJoinProbeVariant`
+  `SljitNativeRegionKernel::ExecuteRegularHashJoinProbePath`
 - `ht_entry_t::GetValue`
 - selected and flat `ExecuteAllValidInt64PairNoChainProbe`
 
@@ -3662,8 +3707,8 @@ projection. At SF10 the stale skipped `VARCHAR` vector crashed in
 `AggregateReverseMemCpy` during string compression. The fix is to reject that
 descriptor with the explicit fact `group_key_omitted_input`; the existing
 sidecar/batch path then consumes the live compressed key. This is not a fallback
-workaround. It is the correct ownership rule: an omitted projection column is not
-a valid input-vector descriptor source.
+escape hatch. It is the correct ownership rule: an omitted projection column is
+not a valid input-vector descriptor source.
 
 Verification:
 
@@ -4005,12 +4050,43 @@ Focused SF10 Q16 verification:
 - cleanup smoke `/private/tmp/duckdb_jit_q16_no_distinct_chunk_r1` verified
   correctness diff 0 over 10 repeats with off median `0.1555s`, auto median
   `0.1550s`, and `compiled_regions=0`
+- backend split smoke `/private/tmp/duckdb_jit_q16_pointer_set_split_r5_20260702`
+  verified correctness diff 0 over 5 repeats with off median `0.043s`, auto
+  median `0.044s`, and `compiled_regions=0`
 
 The current win is a core execution-path cleanup: Q16 remains non-jitted because
 there is no generated region with owned hot work yet. Future Q16 JIT work should
 start from this distinct backend and remove more grouped lookup/projection work;
 it should not reintroduce tuple-backed duplicate scans, correction selections,
 or CBO leniency for the old fragments.
+
+### 74. Q8 Source Filters Need Explicit Input-Layout Ownership
+
+The Q8 SF10 regression after ORDER BY cardinality cleanup was not a CBO issue.
+The selected source region still generated a native date-range source filter,
+but that forced the table scan source contract to fetch unfiltered source input
+and prevented DuckDB's storage filter pruning from doing the heavy work first.
+
+The retained design makes source-contract input layout an explicit lowering-plan
+property. Generated source-filter plans always request source-contract input
+columns, but only the one-filter identity-layout shape may also keep DuckDB scan
+filters enabled. Non-identity and multi-filter shapes still use generated source
+filters over source input without pretending that storage-filter projection has
+the same layout.
+
+Verification:
+
+- the former multi-filter framework crash now passes and keeps the generated
+  source-filter event without requiring scan-filter selection
+- the new identity-layout framework case asserts the hybrid route explicitly:
+  selected scan filters, generated source filters, and native date-between IR
+- focused SF10 Q8 production
+  `/private/tmp/duckdb_jit_tpch_sf10_q8_hybrid_input_layout_r15_20260702`
+  verified correctness diff 0 with `0.401s -> 0.360s`, speedup `1.114x`
+- full SF10 production
+  `/private/tmp/duckdb_jit_tpch_sf10_all_hybrid_input_layout_r5_20260702`
+  verified correctness diff 0 for all 22 queries; all 21 jitted queries are
+  faster than non-JIT, and Q16 remains non-jitted
 
 ## Bottom Line
 

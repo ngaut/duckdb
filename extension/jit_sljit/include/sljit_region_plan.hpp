@@ -206,6 +206,7 @@ struct SljitNativeAggregateUpdatePlan {
 	bool use_primitive_payloads = false;
 	bool use_grouped_state_addresses = false;
 	bool use_perfect_hash_group_lookup = false;
+	bool use_distinct_count_pointer_update = false;
 	string ir;
 };
 

@@ -25,8 +25,10 @@ namespace duckdb {
 static idx_t DuckDBExpressionCost(const Expression &expr);
 static constexpr int64_t BASIS_POINT_SCALE = 10000;
 static constexpr int64_t MATERIALIZATION_SOURCE_APPEND_PENALTY = 80;
-static constexpr int64_t NATIVE_JOIN_PROTOCOL_PENALTY = 640;
+static constexpr int64_t NATIVE_JOIN_PROTOCOL_PENALTY = 720;
+static constexpr int64_t NATIVE_GROUPED_AGGREGATE_PARALLELISM_PENALTY = 160;
 static constexpr int64_t BLOCKED_HASH_AGGREGATE_LOOKUP_PENALTY = 64;
+static constexpr int64_t PURE_NATIVE_JOIN_REQUIRED_BENEFIT_MULTIPLIER = 2;
 
 static int64_t SaturatingCostCast(idx_t value) {
 	auto max_value = static_cast<idx_t>(std::numeric_limits<int64_t>::max());
@@ -510,6 +512,14 @@ static void PhysicalRunnerComputeWorkComponents(const PhysicalRunnerCostInput &i
 		            MultiplyCost(SaturatingCostCast(input.blocked_hash_aggregate_lookup_count),
 		                         BLOCKED_HASH_AGGREGATE_LOOKUP_PENALTY));
 	}
+	if (parameters.vectorized_parallelism > 1 && input.native_grouped_aggregate_stage_count > 0) {
+		const auto grouped_aggregate_parallel_penalty =
+		    MultiplyCost(SaturatingCostCast(input.native_grouped_aggregate_stage_count),
+		                 SaturatingCostCast(parameters.vectorized_parallelism - 1));
+		profile.stateful_protocol_penalty =
+		    AddCost(profile.stateful_protocol_penalty,
+		            MultiplyCost(grouped_aggregate_parallel_penalty, NATIVE_GROUPED_AGGREGATE_PARALLELISM_PENALTY));
+	}
 	auto work = profile.generated_expression_work;
 	work = AddCost(work, profile.generated_stage_work);
 	work = AddCost(work, profile.native_operator_work);
@@ -521,7 +531,8 @@ static void PhysicalRunnerComputeWorkComponents(const PhysicalRunnerCostInput &i
 }
 
 static int64_t PhysicalRunnerStartupCost(const PhysicalRunnerCostParameters &parameters) {
-	return SaturatingCostCast(parameters.startup_base_cost);
+	return MultiplyCost(SaturatingCostCast(parameters.startup_base_cost),
+	                    SaturatingCostCast(MaxValue<idx_t>(parameters.vectorized_parallelism, 1)));
 }
 
 static PhysicalRunnerCostParameters PhysicalRunnerGpuCostParameters(const PhysicalRunnerCostParameters &parameters) {
@@ -533,6 +544,7 @@ static PhysicalRunnerCostParameters PhysicalRunnerGpuCostParameters(const Physic
 	result.full_pipeline_benefit = parameters.gpu_full_pipeline_benefit;
 	result.startup_base_cost = parameters.gpu_startup_base_cost;
 	result.startup_margin_basis_points = parameters.gpu_startup_margin_basis_points;
+	result.vectorized_parallelism = parameters.vectorized_parallelism;
 	return result;
 }
 
@@ -540,7 +552,13 @@ static int64_t PhysicalRunnerRequiredBenefit(const PhysicalRunnerCostProfile &pr
                                              const PhysicalRunnerCostParameters &parameters) {
 	auto margin = FractionalCost(profile.startup_cost, SaturatingCostCast(parameters.startup_margin_basis_points),
 	                             BASIS_POINT_SCALE);
-	return AddCost(profile.startup_cost, margin);
+	auto required_benefit = AddCost(profile.startup_cost, margin);
+	if (profile.admission_class == "native_operator" && profile.native_join_stage_count > 0 &&
+	    profile.native_aggregate_stage_count == 0 && profile.generated_stage_count == 0 &&
+	    profile.materialization_elision_count == 0) {
+		required_benefit = MultiplyCost(required_benefit, PURE_NATIVE_JOIN_REQUIRED_BENEFIT_MULTIPLIER);
+	}
+	return required_benefit;
 }
 
 static void PhysicalRunnerInitializeProfile(const PhysicalRunnerCostInput &input, const PhysicalRunnerShapeFacts &facts,
@@ -622,7 +640,8 @@ PhysicalRunnerCostProfile DuckDBCostModel::SelectPhysicalRunner(const PhysicalRu
 
 	auto compiled_selection = PhysicalRunnerAnalyzeSelection(input, compiled_admission, compiled_profile,
 	                                                         parameters.compiled_vectorized_runner_available);
-	auto gpu_selection = PhysicalRunnerAnalyzeSelection(input, gpu_admission, gpu_profile, parameters.gpu_runner_available);
+	auto gpu_selection =
+	    PhysicalRunnerAnalyzeSelection(input, gpu_admission, gpu_profile, parameters.gpu_runner_available);
 	const bool compiled_selected = compiled_selection.selected;
 	const bool gpu_selected = gpu_selection.selected;
 

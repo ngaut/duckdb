@@ -217,6 +217,7 @@ struct ExecutionRegionAggregateContract {
 	idx_t distinct_aggregate_count = 0;
 	idx_t distinct_table_count = 0;
 	idx_t distinct_child_count = 0;
+	bool distinct_count_pointer_keys = false;
 	idx_t input_group_type_count = 0;
 	vector<LogicalType> input_group_types;
 	idx_t non_distinct_filter_count = 0;
@@ -335,6 +336,7 @@ struct ExecutionRegionSourceInfo {
 	string function_name;
 	vector<ExecutionRegionContractField> fields;
 	idx_t estimated_source_cardinality = 0;
+	bool estimated_source_cardinality_exact = false;
 	idx_t output_column_count = 0;
 	idx_t returned_column_count = 0;
 	vector<idx_t> column_ids;
@@ -460,6 +462,7 @@ struct ExecutionRegionNode {
 	ExecutionRegionNodeKind kind = ExecutionRegionNodeKind::OPERATOR;
 	vector<LogicalType> output_types;
 	idx_t estimated_cardinality = 0;
+	bool estimated_cardinality_exact = false;
 	ExecutionRegionVectorFormatKind input_format = ExecutionRegionVectorFormatKind::NONE;
 	ExecutionRegionVectorFormatKind output_format = ExecutionRegionVectorFormatKind::NONE;
 	ExecutionRegionVectorSourceKind vector_source = ExecutionRegionVectorSourceKind::NONE;

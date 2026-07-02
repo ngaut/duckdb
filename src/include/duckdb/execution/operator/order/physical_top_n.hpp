@@ -83,6 +83,9 @@ public:
 
 	ExecutionContract GetExecutionContract() const override;
 	InsertionOrderPreservingMap<string> ParamsToString() const override;
+
+private:
+	optional_idx FinalizedSourceCardinality() const;
 };
 
 } // namespace duckdb

@@ -125,6 +125,7 @@ public:
 
 	void InitializeScan(TopNScanState &state, bool exclude_offset);
 	void Scan(TopNScanState &state, DataChunk &chunk, idx_t &pos);
+	idx_t OutputCount() const;
 
 	bool CheckBoundaryValues(DataChunk &sort_chunk, DataChunk &payload, TopNBoundaryValue &boundary_val);
 	void AddSmallHeap(DataChunk &input, const Vector &sort_keys_vec);
@@ -504,15 +505,23 @@ void TopNHeap::Scan(TopNScanState &state, DataChunk &chunk, idx_t &pos) {
 	chunk.Slice(heap_data, sel, count);
 }
 
+idx_t TopNHeap::OutputCount() const {
+	if (offset >= heap.size()) {
+		return 0;
+	}
+	return heap.size() - offset;
+}
+
 class TopNGlobalSinkState : public GlobalSinkState {
 public:
 	TopNGlobalSinkState(ClientContext &context, const PhysicalTopN &op)
-	    : heap(context, op.types, op.orders, op.limit, op.offset), boundary_value(op) {
+	    : heap(context, op.types, op.orders, op.limit, op.offset), boundary_value(op), finalized(false) {
 	}
 
 	mutex lock;
 	TopNHeap heap;
 	TopNBoundaryValue boundary_value;
+	bool finalized;
 };
 
 class TopNLocalSinkState : public LocalSinkState {
@@ -637,7 +646,19 @@ SinkFinalizeType PhysicalTopN::Finalize(Pipeline &pipeline, Event &event, Client
 	auto &gstate = input.global_state.Cast<TopNGlobalSinkState>();
 	// global finalize: compute the final top N
 	gstate.heap.Finalize();
+	gstate.finalized = true;
 	return SinkFinalizeType::READY;
+}
+
+optional_idx PhysicalTopN::FinalizedSourceCardinality() const {
+	if (!sink_state) {
+		return optional_idx::Invalid();
+	}
+	auto &gstate = sink_state->Cast<TopNGlobalSinkState>();
+	if (!gstate.finalized) {
+		return optional_idx::Invalid();
+	}
+	return gstate.heap.OutputCount();
 }
 
 //===--------------------------------------------------------------------===//

@@ -13,7 +13,6 @@
 
 namespace duckdb {
 
-class BloomFilter;
 class Vector;
 
 enum class SljitNativeIntegerBinaryOp : uint8_t { ADD, SUBTRACT, MULTIPLY };
@@ -49,6 +48,48 @@ enum class SljitNativeHashJoinKeyKind : uint8_t {
 	UINT64,
 	UINT128
 };
+
+enum class SljitHashJoinProbeLayoutKind : int8_t {
+	RUNTIME = -1,
+	NO_CHAIN = 0,
+	NO_CHAIN_SALT = 1,
+	CHAIN_DIRECT = 2,
+	CHAIN_DICTIONARY = 3,
+	CHAIN_SALT_DIRECT = 4,
+	CHAIN_SALT_DICTIONARY = 5
+};
+
+static inline SljitHashJoinProbeLayoutKind
+SljitHashJoinProbeLayoutKindFromFlags(bool use_salt, bool chains_longer_than_one, bool dictionary_emission) {
+	if (!chains_longer_than_one) {
+		return use_salt ? SljitHashJoinProbeLayoutKind::NO_CHAIN_SALT : SljitHashJoinProbeLayoutKind::NO_CHAIN;
+	}
+	if (use_salt) {
+		return dictionary_emission ? SljitHashJoinProbeLayoutKind::CHAIN_SALT_DICTIONARY
+		                           : SljitHashJoinProbeLayoutKind::CHAIN_SALT_DIRECT;
+	}
+	return dictionary_emission ? SljitHashJoinProbeLayoutKind::CHAIN_DICTIONARY
+	                           : SljitHashJoinProbeLayoutKind::CHAIN_DIRECT;
+}
+
+static inline bool SljitHashJoinProbeLayoutUsesSalt(SljitHashJoinProbeLayoutKind kind) {
+	return kind == SljitHashJoinProbeLayoutKind::NO_CHAIN_SALT ||
+	       kind == SljitHashJoinProbeLayoutKind::CHAIN_SALT_DIRECT ||
+	       kind == SljitHashJoinProbeLayoutKind::CHAIN_SALT_DICTIONARY;
+}
+
+static inline bool SljitHashJoinProbeLayoutChainsLongerThanOne(SljitHashJoinProbeLayoutKind kind) {
+	return kind == SljitHashJoinProbeLayoutKind::CHAIN_DIRECT ||
+	       kind == SljitHashJoinProbeLayoutKind::CHAIN_DICTIONARY ||
+	       kind == SljitHashJoinProbeLayoutKind::CHAIN_SALT_DIRECT ||
+	       kind == SljitHashJoinProbeLayoutKind::CHAIN_SALT_DICTIONARY;
+}
+
+static inline bool SljitHashJoinProbeLayoutUsesDictionaryEmission(SljitHashJoinProbeLayoutKind kind) {
+	return kind == SljitHashJoinProbeLayoutKind::CHAIN_DICTIONARY ||
+	       kind == SljitHashJoinProbeLayoutKind::CHAIN_SALT_DICTIONARY;
+}
+
 enum class SljitNativeNestedLoopJoinValueKind : uint8_t { INT32, INT64, INT128, DOUBLE };
 enum class SljitNativeCoalesceRhsKind : uint8_t { CONSTANT, REFERENCE };
 enum class SljitNativeNullCheckOp : uint8_t { IS_NULL, IS_NOT_NULL };
@@ -209,7 +250,7 @@ struct SljitNativePredicateInput {
 	std::exception_ptr error;
 };
 
-struct SljitNativeHashJoinProbeInput {
+struct SljitNativeRegularHashJoinProbeInput {
 	const_data_ptr_t *source_data = nullptr;
 	const sel_t **source_sel = nullptr;
 	const validity_t **source_validity = nullptr;
@@ -219,26 +260,34 @@ struct SljitNativeHashJoinProbeInput {
 	const_data_ptr_t entries = nullptr;
 	uint64_t bitmask = 0;
 	uint64_t pointer_mask = 0;
-	bool use_salt = false;
+	SljitHashJoinProbeLayoutKind layout_kind = SljitHashJoinProbeLayoutKind::NO_CHAIN;
 	bool rhs_keys_have_validity = false;
-	bool chains_longer_than_one = false;
-	bool dictionary_emission = false;
-	idx_t key_offset = 0;
 	idx_t pointer_offset = 0;
 	const data_ptr_t *aux_next_ptrs = nullptr;
-	const BloomFilter *bloom_filter = nullptr;
 	const uint64_t *bloom_filter_bits = nullptr;
 	uint64_t bloom_filter_bitmask = 0;
 	sel_t *match_sel = nullptr;
-	sel_t *build_sel = nullptr;
 	data_ptr_t *row_pointers = nullptr;
 	idx_t output_capacity = 0;
+	idx_t selected_count = 0;
+	idx_t input_offset = 0;
+	data_ptr_t resume_row_pointer = nullptr;
+	bool finished = false;
+	std::exception_ptr error;
+};
+
+struct SljitNativePerfectHashJoinProbeInput {
+	const_data_ptr_t source_data = nullptr;
+	const sel_t *source_sel = nullptr;
+	const validity_t *source_validity = nullptr;
+	idx_t count = 0;
+	sel_t *match_sel = nullptr;
+	sel_t *build_sel = nullptr;
 	uint64_t perfect_min = 0;
 	uint64_t perfect_max = 0;
 	const validity_t *perfect_validity = nullptr;
 	idx_t selected_count = 0;
 	idx_t input_offset = 0;
-	data_ptr_t resume_row_pointer = nullptr;
 	bool finished = false;
 	std::exception_ptr error;
 };

@@ -65,6 +65,7 @@ BuildTableScanExecutionSourceConfig(const PhysicalTableScan &op, optional_ptr<Ta
 	if (result.use_source_contract && open_request.UsesSourceContractInputLayout()) {
 		result.source_contract_input_types = open_request.source_contract_input_types;
 		result.return_source_contract_input = true;
+		result.projection_ids.clear();
 	}
 	if (result.use_source_contract && !open_request.UsesScanFilters()) {
 		result.filters = nullptr;
@@ -142,8 +143,7 @@ InitializeExecutionSourceContractTableScanGlobalState(ClientContext &context, co
 		contract_state.projection_ids = execution_source_config.projection_ids;
 	}
 	contract_state.can_remove_filter_columns = !contract_state.return_source_contract_input &&
-	                                           !can_scan_projected_layout &&
-	                                           !contract_state.projection_ids.empty() &&
+	                                           !can_scan_projected_layout && !contract_state.projection_ids.empty() &&
 	                                           contract_state.projection_ids.size() != op.column_ids.size();
 
 	if (bind_data.order_options) {

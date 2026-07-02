@@ -1480,14 +1480,31 @@ static ExecutionContract BuildExecutionContractSortStateContracts(
 	return result;
 }
 
+static void ApplyExecutionContractFinalizedSourceCardinality(ExecutionContract &contract, optional_idx cardinality) {
+	if (!cardinality.IsValid()) {
+		return;
+	}
+	const auto count = cardinality.GetIndex();
+	contract.source.estimated_source_cardinality = count;
+	contract.source.estimated_source_cardinality_exact = true;
+	contract.source_boundary_reason += ";finalized_source_cardinality=" + std::to_string(count);
+	contract.source.reason = contract.source_boundary_reason;
+}
+
 static ExecutionRegionAggregateContract
 BuildExecutionContractHashAggregateContract(const PhysicalHashAggregate &aggregate);
 static ExecutionRegionAggregateContract
 BuildExecutionContractPerfectHashAggregateContract(const PhysicalPerfectHashAggregate &aggregate);
 
+static bool ExecutionContractHashAggregateUsesDistinctCountPointerKeys(const PhysicalHashAggregate &aggregate) {
+	return aggregate.groupings.size() == 1 && aggregate.groupings[0].distinct_data &&
+	       aggregate.groupings[0].distinct_data->UsesGroupStatePointerKeys();
+}
+
 static string BuildExecutionContractHashAggregateBoundaryReason(const PhysicalHashAggregate &aggregate,
                                                                 const string &marker) {
 	auto &aggregate_data = aggregate.grouped_aggregate_data;
+	const auto distinct_count_pointer_keys = ExecutionContractHashAggregateUsesDistinctCountPointerKeys(aggregate);
 	idx_t distinct_aggregate_count = 0;
 	idx_t distinct_table_count = 0;
 	idx_t distinct_child_count = 0;
@@ -1519,6 +1536,7 @@ static string BuildExecutionContractHashAggregateBoundaryReason(const PhysicalHa
 	result += ";distinct_aggregate_count=" + std::to_string(distinct_aggregate_count);
 	result += ";distinct_table_count=" + std::to_string(distinct_table_count);
 	result += ";distinct_child_count=" + std::to_string(distinct_child_count);
+	result += ";distinct_count_pointer_keys=" + ExecutionContractBool(distinct_count_pointer_keys);
 	result += ";input_group_type_count=" + std::to_string(aggregate.input_group_types.size());
 	result += ";input_group_types=" + BuildExecutionContractLogicalTypeList(aggregate.input_group_types);
 	result += ";non_distinct_filter_count=" + std::to_string(aggregate.non_distinct_filter.size());
@@ -1730,6 +1748,7 @@ BuildExecutionContractHashAggregateContract(const PhysicalHashAggregate &aggrega
 		result.distinct_table_count = aggregate.distinct_collection_info->table_count;
 		result.distinct_child_count = aggregate.distinct_collection_info->total_child_count;
 	}
+	result.distinct_count_pointer_keys = ExecutionContractHashAggregateUsesDistinctCountPointerKeys(aggregate);
 	result.input_group_type_count = aggregate.input_group_types.size();
 	result.input_group_types = aggregate.input_group_types;
 	result.non_distinct_filter_count = aggregate.non_distinct_filter.size();
@@ -1983,7 +2002,8 @@ static void AppendExecutionContractAggregateReason(ExecutionRegionAggregateInput
 }
 
 static ExecutionRegionAggregateInput
-BuildExecutionContractAggregateInput(idx_t aggregate_idx, const unique_ptr<Expression> &aggregate_expression) {
+BuildExecutionContractAggregateInput(idx_t aggregate_idx, const unique_ptr<Expression> &aggregate_expression,
+                                     bool allow_distinct_count_pointer_update = false) {
 	ExecutionRegionAggregateInput result;
 	result.aggregate_index = aggregate_idx;
 	result.return_type = aggregate_expression->GetReturnType();
@@ -2017,7 +2037,7 @@ BuildExecutionContractAggregateInput(idx_t aggregate_idx, const unique_ptr<Expre
 		result.primitive_update_blocker = "aggregate function has no primitive update ABI";
 	}
 
-	if (result.distinct) {
+	if (result.distinct && !allow_distinct_count_pointer_update) {
 		result.reason = "distinct aggregate update is handled by DuckDB distinct aggregate finalization";
 	} else if (result.has_filter) {
 		result.reason = "aggregate filter requires per-aggregate filtered payload contract";
@@ -2045,9 +2065,11 @@ static vector<ExecutionRegionAggregateInput>
 BuildExecutionContractHashAggregateInputs(const PhysicalHashAggregate &op) {
 	vector<ExecutionRegionAggregateInput> result;
 	auto &aggregates = op.grouped_aggregate_data.aggregates;
+	const bool allow_distinct_count_pointer_update = ExecutionContractHashAggregateUsesDistinctCountPointerKeys(op);
 	result.reserve(aggregates.size());
 	for (idx_t aggregate_idx = 0; aggregate_idx < aggregates.size(); aggregate_idx++) {
-		result.push_back(BuildExecutionContractAggregateInput(aggregate_idx, aggregates[aggregate_idx]));
+		result.push_back(BuildExecutionContractAggregateInput(aggregate_idx, aggregates[aggregate_idx],
+		                                                      allow_distinct_count_pointer_update));
 	}
 	return result;
 }
@@ -2321,6 +2343,7 @@ ExecutionContract PhysicalOrder::GetExecutionContract() const {
 	    type, orders, children[0].get().types, projections, GetTypes().size(), "order_by_scan",
 	    "order-by-native-state-scan", "DuckDB order by native state scan contract", is_index_sort, false, 0, 0, false);
 	result.source_boundary_reason += ";is_index_sort=" + ExecutionContractBool(is_index_sort);
+	ApplyExecutionContractFinalizedSourceCardinality(result, FinalizedSourceCardinality());
 	result.source.reason = result.source_boundary_reason;
 	result.sink.reason += ";is_index_sort=" + ExecutionContractBool(is_index_sort);
 	return FinalizeExecutionContract(std::move(result));
@@ -2334,6 +2357,7 @@ ExecutionContract PhysicalTopN::GetExecutionContract() const {
 	result.source_boundary_reason += ";limit=" + std::to_string(limit);
 	result.source_boundary_reason += ";offset=" + std::to_string(offset);
 	result.source_boundary_reason += ";dynamic_filter=" + ExecutionContractBool(static_cast<bool>(dynamic_filter));
+	ApplyExecutionContractFinalizedSourceCardinality(result, FinalizedSourceCardinality());
 	result.source.reason = result.source_boundary_reason;
 	result.sink.reason += ";limit=" + std::to_string(limit);
 	result.sink.reason += ";offset=" + std::to_string(offset);

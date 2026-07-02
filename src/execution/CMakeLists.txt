@@ -28,8 +28,13 @@ add_library_unity(
   execution_region_telemetry.cpp
   execution_expression_ir.cpp
   execution_contract.cpp
+  execution_region_contract.cpp
+  execution_region_description.cpp
   execution_region_graph.cpp
   execution_region_runner.cpp
+  execution_region_signature.cpp
+  execution_region_source_contract.cpp
+  execution_region_stage_plan.cpp
   execution_region_ir.cpp
   execution_region_telemetry_log.cpp
   execution_region_types.cpp

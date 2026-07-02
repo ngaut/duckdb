@@ -164,7 +164,7 @@ public:
 	    : num_threads(NumericCast<idx_t>(TaskScheduler::GetScheduler(context).NumberOfThreads())),
 	      temporary_memory_state(TemporaryMemoryManager::Get(context).Register(context)), sorted_tuples(0),
 	      external(Settings::Get<DebugForceExternalSetting>(context)), any_combined(false), total_count(0),
-	      partition_size(0) {
+	      partition_size(0), finalized(false) {
 	}
 
 public:
@@ -231,6 +231,8 @@ public:
 	idx_t total_count;
 	//! Partition size (for the source phase)
 	idx_t partition_size;
+	//! Whether Finalize has established the source-phase cardinality
+	bool finalized;
 };
 
 unique_ptr<LocalSinkState> Sort::GetLocalSinkState(ExecutionContext &context) const {
@@ -365,6 +367,7 @@ SinkCombineResultType Sort::Combine(ExecutionContext &context, OperatorSinkCombi
 SinkFinalizeType Sort::Finalize(ClientContext &context, OperatorSinkFinalizeInput &input) const {
 	auto &gstate = input.global_state.Cast<SortGlobalSinkState>();
 	if (gstate.sorted_runs.empty()) {
+		gstate.finalized = true;
 		return SinkFinalizeType::NO_OUTPUT_POSSIBLE;
 	}
 
@@ -379,7 +382,16 @@ SinkFinalizeType Sort::Finalize(ClientContext &context, OperatorSinkFinalizeInpu
 		gstate.partition_size = MinValue<idx_t>(gstate.total_count, DEFAULT_ROW_GROUP_SIZE);
 	}
 
+	gstate.finalized = true;
 	return SinkFinalizeType::READY;
+}
+
+optional_idx Sort::FinalizedCount(GlobalSinkState &sink) const {
+	auto &gstate = sink.Cast<SortGlobalSinkState>();
+	if (!gstate.finalized) {
+		return optional_idx::Invalid();
+	}
+	return gstate.total_count;
 }
 
 ProgressData Sort::GetSinkProgress(ClientContext &context, GlobalSinkState &gstate_p,

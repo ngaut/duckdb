@@ -986,6 +986,10 @@ void ExecutionRegionLoweringPlan::SetUsesScanFilters(bool uses_scan_filters_p) {
 	uses_scan_filters = uses_scan_filters_p;
 }
 
+void ExecutionRegionLoweringPlan::SetRequiresSourceContractInputLayout(bool requires_input_layout) {
+	requires_source_contract_input_layout = requires_input_layout;
+}
+
 void ExecutionRegionLoweringPlan::SetSelectedSourceExecution(ExecutionRegionSourceExecutionKind source_execution) {
 	selected_source_execution = source_execution;
 }
@@ -1020,6 +1024,10 @@ bool ExecutionRegionLoweringPlan::IsFullyFused() const {
 
 bool ExecutionRegionLoweringPlan::UsesScanFilters() const {
 	return uses_scan_filters;
+}
+
+bool ExecutionRegionLoweringPlan::RequiresSourceContractInputLayout() const {
+	return requires_source_contract_input_layout;
 }
 
 ExecutionRegionSourceExecutionKind ExecutionRegionLoweringPlan::SelectedSourceExecution() const {

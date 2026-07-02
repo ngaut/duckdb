@@ -1,0 +1,28 @@
+//===----------------------------------------------------------------------===//
+//                         DuckDB
+//
+// sljit_executable_aggregate_codegen.hpp
+//
+//
+//===----------------------------------------------------------------------===//
+
+#pragma once
+
+#include "sljit_region_executable.hpp"
+
+namespace duckdb {
+
+bool SljitTryBuildFilteredAggregateUpdate(SljitExecutableRegionOp &filter_op, SljitExecutableRegionOp &aggregate_op,
+                                          string &error, const vector<bool> &input_not_null,
+                                          const vector<Value> &input_min_values, const vector<Value> &input_max_values);
+void SljitBuildExecutableAggregateUpdateMetadata(const SljitNativeAggregateUpdatePlan &op,
+                                                 SljitExecutableAggregateUpdate &executable);
+bool SljitBuildExecutableAggregateUpdatePayloadCode(const SljitNativeAggregateUpdatePlan &op,
+                                                    SljitExecutableAggregateUpdate &executable, string &error,
+                                                    const vector<bool> &input_not_null,
+                                                    const vector<Value> &input_min_values,
+                                                    const vector<Value> &input_max_values);
+bool SljitBuildExecutableAggregateUpdateFallbackPayloadCode(const SljitNativeAggregateUpdatePlan &op,
+                                                            SljitExecutableAggregateUpdate &executable, string &error);
+
+} // namespace duckdb

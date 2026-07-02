@@ -26,6 +26,7 @@ string NativeIntegerInListReason(SljitNativeIntegerKind kind, bool not_in);
 string NativeIntegerBetweenReason(SljitNativeIntegerKind kind, bool not_between);
 string NativeNullCheckReason(SljitNativeNullCheckOp op);
 
+bool TryGetNativeIntegerCompareOp(ExecutionExpressionBinaryOp op, SljitNativeIntegerCompareOp &compare_op);
 bool TryReadNativeIntegerBinaryConstant(const ExecutionExpressionIR &root, SljitNativeIntegerBinaryOp &native_op,
                                         SljitNativeIntegerKind &kind, idx_t &source_index, int64_t &constant_value,
                                         bool &constant_on_left);
@@ -81,6 +82,11 @@ bool TryReadNativeStringSubstringInListConstant(const ExecutionExpressionIR &roo
 bool TryReadNativeNullCheck(const ExecutionExpressionIR &root, SljitNativeNullCheckOp &op, idx_t &source_index);
 bool TryReadNativeConstantOrNull(const ExecutionExpressionIR &root, SljitNativeConstantOrNull &expr);
 bool ShouldTryNativePredicateRoot(const ExecutionExpressionIR &root);
+bool TryBuildNativeBasePredicate(const ExecutionExpressionIR &root, unique_ptr<SljitNativePredicate> &predicate);
+bool TryBuildNativeConstantOrNullPredicate(const ExecutionExpressionIR &root,
+                                           unique_ptr<SljitNativePredicate> &predicate);
+bool TryBuildNativeConjunctionPredicate(const ExecutionExpressionIR &root, unique_ptr<SljitNativePredicate> &predicate);
+bool TryBuildNativeNullCheckPredicate(const ExecutionExpressionIR &root, unique_ptr<SljitNativePredicate> &predicate);
 void FinalizeSljitNativePredicateSourceIndices(SljitNativePredicate &predicate);
 bool TryBuildNativePredicate(const ExecutionExpressionIR &root, unique_ptr<SljitNativePredicate> &predicate);
 

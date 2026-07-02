@@ -1,0 +1,298 @@
+#include "sljit_aggregate_perfect_hash_update_codegen.hpp"
+
+#include "sljit_aggregate_fused_codegen.hpp"
+#include "sljit_aggregate_perfect_hash_codegen.hpp"
+#include "sljit_codegen_internal.hpp"
+#include "sljit_codegen_util.hpp"
+
+#include "sljitLir.h"
+
+namespace duckdb {
+
+struct SljitPerfectHashUpdateLoopOptions {
+	bool reset_index = false;
+	bool direct_logical_index = false;
+	bool predicate_fast_path = false;
+	bool all_valid = false;
+	bool no_source_selection = false;
+	const vector<SljitTypedExpressionTreeDataPointerHoist> *predicate_data_hoists = nullptr;
+	bool load_fast_group_data_array_base = false;
+	SljitPerfectHashGroupLookupOptions group_lookup;
+	bool load_common_selected_source_index = false;
+	SljitPerfectHashPayloadUpdateOptions payload_update;
+};
+
+static void EmitSljitPerfectHashFastGroupDataArrayBase(struct sljit_compiler *compiler) {
+	sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_PERFECT_HASH_STATE_REG, 0, SLJIT_MEM1(SLJIT_S0),
+	               offsetof(SljitNativeVectorInput, group_data_array));
+}
+
+static sljit_jump *EmitSljitPerfectHashUpdateLoop(const SljitPerfectHashFusedUpdateEmitContext &context,
+                                                  const SljitPerfectHashUpdateLoopOptions &options) {
+	auto compiler = context.compiler;
+	if (options.reset_index) {
+		sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_S1, 0, SLJIT_IMM, 0);
+	}
+	auto loop = sljit_emit_label(compiler);
+	auto done = sljit_emit_cmp(compiler, SLJIT_GREATER_EQUAL, SLJIT_S1, 0, SLJIT_S2, 0);
+	EmitLoadFusedAggregateExecuteIndex(compiler, options.direct_logical_index);
+	auto predicate_skip_jumps =
+	    EmitSljitPerfectHashPredicateSkipJumps(context, options.predicate_fast_path, options.all_valid,
+	                                           options.no_source_selection, options.predicate_data_hoists);
+	if (options.load_fast_group_data_array_base) {
+		EmitSljitPerfectHashFastGroupDataArrayBase(compiler);
+	}
+	EmitSljitPerfectHashGroupLookup(context, options.group_lookup);
+	if (options.load_common_selected_source_index) {
+		EmitLoadSljitCommonSelectedSourceIndex(compiler);
+	}
+	EmitSljitPerfectHashPayloadUpdates(context, options.payload_update);
+	EmitSljitPerfectHashPredicateSkipLabel(compiler, predicate_skip_jumps);
+	EmitNextSljitNativeVectorLoop(compiler, loop);
+	return done;
+}
+
+static void EmitSljitPerfectHashFastSourceDataHoists(struct sljit_compiler *compiler,
+                                                     const SljitPerfectHashFusedUpdatePlan &update_plan) {
+	if (!update_plan.hoist_fast_source_data_pointers) {
+		return;
+	}
+	for (idx_t hoist_idx = update_plan.source_data_hoists.size();
+	     hoist_idx < update_plan.fast_source_data_hoists.size(); hoist_idx++) {
+		auto &hoist = update_plan.fast_source_data_hoists[hoist_idx];
+		sljit_emit_op1(compiler, SLJIT_MOV_P, hoist.data_reg, 0, SLJIT_MEM1(SLJIT_S5),
+		               SljitPointerArrayOffset(hoist.source_index));
+	}
+}
+
+static SljitPerfectHashGroupLookupOptions
+SljitPerfectHashDirectGroupLookupOptions(const SljitPerfectHashFusedUpdateEmitContext &context,
+                                         bool mark_local_payloads_seen, bool use_fast_group_data_array_base) {
+	SljitPerfectHashGroupLookupOptions result;
+	result.materialize_state_pointer = !context.local_aggregate_plan.enabled;
+	result.defer_flags = context.deferred_flag_plan.enabled;
+	result.direct_group_index = true;
+	result.mark_local_payloads_seen = mark_local_payloads_seen;
+	result.use_fast_group_data_array_base = use_fast_group_data_array_base;
+	return result;
+}
+
+static SljitPerfectHashGroupLookupOptions
+SljitPerfectHashSelectedGroupLookupOptions(const SljitPerfectHashFusedUpdateEmitContext &context) {
+	SljitPerfectHashGroupLookupOptions result;
+	result.materialize_state_pointer = !context.local_aggregate_plan.enabled;
+	result.defer_flags = context.deferred_flag_plan.enabled;
+	result.mark_local_payloads_seen = context.local_aggregate_plan.sparse;
+	return result;
+}
+
+static SljitPerfectHashPayloadUpdateOptions
+SljitPerfectHashPayloadUpdateOptionsForLoop(bool fast_path, bool all_valid, bool no_source_selection,
+                                            const vector<SljitTypedExpressionTreeDataPointerHoist> *payload_data_hoists,
+                                            const vector<SljitSparseLocalRunCachedLane> *run_cached_lanes = nullptr) {
+	SljitPerfectHashPayloadUpdateOptions result;
+	result.fast_path = fast_path;
+	result.all_valid = all_valid;
+	result.no_source_selection = no_source_selection;
+	result.payload_data_hoists = payload_data_hoists;
+	result.run_cached_lanes = run_cached_lanes;
+	return result;
+}
+
+static sljit_jump *
+EmitSljitPerfectHashFlatFastLoop(const SljitPerfectHashFusedUpdateEmitContext &context,
+                                 const SljitPerfectHashFusedUpdatePlan &update_plan,
+                                 const vector<SljitTypedExpressionTreeDataPointerHoist> *fast_data_hoists) {
+	auto compiler = context.compiler;
+	auto &local_plan = update_plan.local_aggregate_plan;
+	auto fast_loop = sljit_emit_label(compiler);
+	auto fast_done = sljit_emit_cmp(compiler, SLJIT_GREATER_EQUAL, SLJIT_S1, 0, SLJIT_S2, 0);
+	EmitLoadFusedAggregateExecuteIndex(compiler, true);
+	auto predicate_skip_jumps = EmitSljitPerfectHashPredicateSkipJumps(context, true, true, false, fast_data_hoists);
+	if (update_plan.sparse_run_cache_enabled) {
+		if (update_plan.hoist_fast_group_data_array_base) {
+			EmitSljitPerfectHashFastGroupDataArrayBase(compiler);
+		}
+		auto lookup =
+		    SljitPerfectHashDirectGroupLookupOptions(context, false, update_plan.hoist_fast_group_data_array_base);
+		lookup.materialize_state_pointer = false;
+		lookup.mark_local_group = false;
+		EmitSljitPerfectHashGroupLookup(context, lookup);
+		sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R0, 0, SLJIT_MEM1(SLJIT_SP),
+		               update_plan.sparse_run_cached_group_offset);
+		auto group_changed = sljit_emit_cmp(compiler, SLJIT_NOT_EQUAL, SLJIT_R0, 0, SLJIT_S4, 0);
+		sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_PERFECT_HASH_STATE_REG, 0, SLJIT_MEM1(SLJIT_SP),
+		               update_plan.sparse_run_cached_pointer_offset);
+		EmitSljitSparseLocalRunCacheIncrementCount(compiler, update_plan.sparse_run_cached_count_offset);
+		EmitSljitPerfectHashPayloadUpdates(
+		    context, SljitPerfectHashPayloadUpdateOptionsForLoop(true, true, false, fast_data_hoists,
+		                                                         &update_plan.sparse_run_cached_lanes));
+		EmitSljitPerfectHashPredicateSkipLabel(compiler, predicate_skip_jumps);
+		EmitNextSljitNativeVectorLoop(compiler, fast_loop);
+
+		sljit_set_label(group_changed, sljit_emit_label(compiler));
+		sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_PERFECT_HASH_STATE_REG, 0, SLJIT_MEM1(SLJIT_SP),
+		               update_plan.sparse_run_cached_pointer_offset);
+		EmitSljitSparseLocalRunCacheFlush(compiler, local_plan, update_plan.sparse_run_cached_lanes,
+		                                  SLJIT_PERFECT_HASH_STATE_REG, update_plan.sparse_run_cached_group_offset,
+		                                  update_plan.sparse_run_cached_start_offset, SLJIT_S1,
+		                                  update_plan.sparse_run_cached_count_offset);
+		EmitMarkSljitLocalPerfectHashGroupSeen(compiler, local_plan, SLJIT_S4, SLJIT_PERFECT_HASH_STATE_REG, true,
+		                                       false);
+		EmitSljitSparseLocalRunCacheLoadCurrent(
+		    compiler, local_plan, update_plan.sparse_run_cached_lanes, SLJIT_PERFECT_HASH_STATE_REG,
+		    update_plan.sparse_run_cached_start_offset, SLJIT_S1, update_plan.sparse_run_cached_count_offset);
+		sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_MEM1(SLJIT_SP), update_plan.sparse_run_cached_group_offset, SLJIT_S4,
+		               0);
+		sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_MEM1(SLJIT_SP), update_plan.sparse_run_cached_pointer_offset,
+		               SLJIT_PERFECT_HASH_STATE_REG, 0);
+		EmitSljitPerfectHashPayloadUpdates(
+		    context, SljitPerfectHashPayloadUpdateOptionsForLoop(true, true, false, fast_data_hoists,
+		                                                         &update_plan.sparse_run_cached_lanes));
+		EmitNextSljitNativeVectorLoop(compiler, fast_loop);
+		return fast_done;
+	}
+
+	if (update_plan.hoist_fast_group_data_array_base) {
+		EmitSljitPerfectHashFastGroupDataArrayBase(compiler);
+	}
+	auto lookup = SljitPerfectHashDirectGroupLookupOptions(context, local_plan.sparse,
+	                                                       update_plan.hoist_fast_group_data_array_base);
+	EmitSljitPerfectHashGroupLookup(context, lookup);
+	EmitSljitPerfectHashPayloadUpdates(
+	    context, SljitPerfectHashPayloadUpdateOptionsForLoop(true, true, false, fast_data_hoists));
+	EmitSljitPerfectHashPredicateSkipLabel(compiler, predicate_skip_jumps);
+	EmitNextSljitNativeVectorLoop(compiler, fast_loop);
+	return fast_done;
+}
+
+void EmitSljitPerfectHashFusedUpdateLoops(const SljitPerfectHashFusedUpdateEmitContext &context,
+                                          const SljitPerfectHashFusedUpdatePlan &update_plan) {
+	auto compiler = context.compiler;
+	auto &local_plan = update_plan.local_aggregate_plan;
+	const auto data_hoists = update_plan.hoist_source_data_pointers ? &update_plan.source_data_hoists : nullptr;
+	const auto fast_data_hoists =
+	    update_plan.hoist_fast_source_data_pointers ? &update_plan.fast_source_data_hoists : data_hoists;
+	const bool can_use_common_selected_group_data_base_reg =
+	    update_plan.dedicated_state_register || update_plan.local_aggregate_plan.sparse;
+
+	struct sljit_jump *fast_done = nullptr;
+	struct sljit_jump *logical_fast_done = nullptr;
+	struct sljit_jump *common_selected_group_present_fast_done = nullptr;
+	struct sljit_jump *common_selected_fast_done = nullptr;
+	struct sljit_jump *selected_fast_done = nullptr;
+
+	if (update_plan.codegen_plan.fast_path_supported) {
+		sljit_emit_op1(compiler, SLJIT_MOV_U8, SLJIT_R0, 0, SLJIT_MEM1(SLJIT_S0),
+		               offsetof(SljitNativeVectorInput, expression_tree_flat_all_valid));
+		auto use_generic_loop = sljit_emit_cmp(compiler, SLJIT_EQUAL, SLJIT_R0, 0, SLJIT_IMM, 0);
+		EmitSljitPerfectHashFastSourceDataHoists(compiler, update_plan);
+		fast_done = EmitSljitPerfectHashFlatFastLoop(context, update_plan, fast_data_hoists);
+
+		sljit_set_label(use_generic_loop, sljit_emit_label(compiler));
+		sljit_emit_op1(compiler, SLJIT_MOV_U8, SLJIT_R0, 0, SLJIT_MEM1(SLJIT_S0),
+		               offsetof(SljitNativeVectorInput, expression_tree_all_valid));
+		auto use_generic_selected_loop = sljit_emit_cmp(compiler, SLJIT_EQUAL, SLJIT_R0, 0, SLJIT_IMM, 0);
+		EmitSljitPerfectHashFastSourceDataHoists(compiler, update_plan);
+		sljit_emit_op1(compiler, SLJIT_MOV_U8, SLJIT_R0, 0, SLJIT_MEM1(SLJIT_S0),
+		               offsetof(SljitNativeVectorInput, expression_tree_flat_no_selection));
+		auto use_source_selected_loop = sljit_emit_cmp(compiler, SLJIT_EQUAL, SLJIT_R0, 0, SLJIT_IMM, 0);
+
+		SljitPerfectHashUpdateLoopOptions loop_options;
+		loop_options.reset_index = true;
+		loop_options.all_valid = true;
+		loop_options.no_source_selection = true;
+		loop_options.predicate_data_hoists = fast_data_hoists;
+		loop_options.group_lookup = SljitPerfectHashDirectGroupLookupOptions(context, local_plan.sparse, false);
+		loop_options.payload_update = SljitPerfectHashPayloadUpdateOptionsForLoop(false, true, true, fast_data_hoists);
+		logical_fast_done = EmitSljitPerfectHashUpdateLoop(context, loop_options);
+
+		sljit_set_label(use_source_selected_loop, sljit_emit_label(compiler));
+		sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_R0, 0, SLJIT_MEM1(SLJIT_S0),
+		               offsetof(SljitNativeVectorInput, source_common_sel));
+		auto use_per_source_selected_loop = sljit_emit_cmp(compiler, SLJIT_EQUAL, SLJIT_R0, 0, SLJIT_IMM, 0);
+		sljit_emit_op1(compiler, SLJIT_MOV_U8, SLJIT_R0, 0, SLJIT_MEM1(SLJIT_S0),
+		               offsetof(SljitNativeVectorInput, group_selection_all_present));
+		auto use_nullable_common_selected_loop = sljit_emit_cmp(compiler, SLJIT_EQUAL, SLJIT_R0, 0, SLJIT_IMM, 0);
+		sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_S6, 0, SLJIT_MEM1(SLJIT_S0),
+		               offsetof(SljitNativeVectorInput, group_sel_array));
+
+		loop_options = SljitPerfectHashUpdateLoopOptions();
+		loop_options.reset_index = true;
+		loop_options.direct_logical_index = true;
+		loop_options.all_valid = true;
+		loop_options.predicate_data_hoists = data_hoists;
+		loop_options.load_fast_group_data_array_base = can_use_common_selected_group_data_base_reg;
+		loop_options.group_lookup = SljitPerfectHashSelectedGroupLookupOptions(context);
+		loop_options.group_lookup.group_selection_all_present = true;
+		loop_options.group_lookup.group_sel_array_base_reg = SLJIT_S6;
+		loop_options.group_lookup.group_data_array_base_reg_override =
+		    can_use_common_selected_group_data_base_reg ? SLJIT_PERFECT_HASH_STATE_REG : 0;
+		loop_options.load_common_selected_source_index = true;
+		loop_options.payload_update = SljitPerfectHashPayloadUpdateOptionsForLoop(false, true, true, data_hoists);
+		common_selected_group_present_fast_done = EmitSljitPerfectHashUpdateLoop(context, loop_options);
+
+		sljit_set_label(use_nullable_common_selected_loop, sljit_emit_label(compiler));
+		loop_options = SljitPerfectHashUpdateLoopOptions();
+		loop_options.reset_index = true;
+		loop_options.direct_logical_index = true;
+		loop_options.all_valid = true;
+		loop_options.predicate_data_hoists = fast_data_hoists;
+		loop_options.group_lookup = SljitPerfectHashSelectedGroupLookupOptions(context);
+		loop_options.load_common_selected_source_index = true;
+		loop_options.payload_update = SljitPerfectHashPayloadUpdateOptionsForLoop(false, true, true, fast_data_hoists);
+		common_selected_fast_done = EmitSljitPerfectHashUpdateLoop(context, loop_options);
+
+		sljit_set_label(use_per_source_selected_loop, sljit_emit_label(compiler));
+		loop_options = SljitPerfectHashUpdateLoopOptions();
+		loop_options.reset_index = true;
+		loop_options.all_valid = true;
+		loop_options.predicate_data_hoists = fast_data_hoists;
+		loop_options.group_lookup = SljitPerfectHashSelectedGroupLookupOptions(context);
+		loop_options.payload_update = SljitPerfectHashPayloadUpdateOptionsForLoop(false, true, false, fast_data_hoists);
+		selected_fast_done = EmitSljitPerfectHashUpdateLoop(context, loop_options);
+
+		sljit_set_label(use_generic_selected_loop, sljit_emit_label(compiler));
+		sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_S1, 0, SLJIT_IMM, 0);
+	}
+
+	SljitPerfectHashUpdateLoopOptions loop_options;
+	loop_options.group_lookup.check_group_validity = true;
+	loop_options.group_lookup.materialize_state_pointer = !local_plan.enabled;
+	loop_options.payload_update = SljitPerfectHashPayloadUpdateOptionsForLoop(false, false, false, data_hoists);
+	auto done = EmitSljitPerfectHashUpdateLoop(context, loop_options);
+
+	sljit_jump *fast_run_cache_flushed = nullptr;
+	if (update_plan.sparse_run_cache_enabled && fast_done) {
+		sljit_set_label(fast_done, sljit_emit_label(compiler));
+		sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_PERFECT_HASH_STATE_REG, 0, SLJIT_MEM1(SLJIT_SP),
+		               update_plan.sparse_run_cached_pointer_offset);
+		EmitSljitSparseLocalRunCacheFlush(compiler, local_plan, update_plan.sparse_run_cached_lanes,
+		                                  SLJIT_PERFECT_HASH_STATE_REG, update_plan.sparse_run_cached_group_offset,
+		                                  update_plan.sparse_run_cached_start_offset, SLJIT_S1,
+		                                  update_plan.sparse_run_cached_count_offset);
+		fast_run_cache_flushed = sljit_emit_jump(compiler, SLJIT_JUMP);
+	}
+	auto done_label = sljit_emit_label(compiler);
+	if (fast_done && !update_plan.sparse_run_cache_enabled) {
+		sljit_set_label(fast_done, done_label);
+	}
+	if (fast_run_cache_flushed) {
+		sljit_set_label(fast_run_cache_flushed, done_label);
+	}
+	if (logical_fast_done) {
+		sljit_set_label(logical_fast_done, done_label);
+	}
+	if (common_selected_group_present_fast_done) {
+		sljit_set_label(common_selected_group_present_fast_done, done_label);
+	}
+	if (common_selected_fast_done) {
+		sljit_set_label(common_selected_fast_done, done_label);
+	}
+	if (selected_fast_done) {
+		sljit_set_label(selected_fast_done, done_label);
+	}
+	sljit_set_label(done, done_label);
+}
+
+} // namespace duckdb

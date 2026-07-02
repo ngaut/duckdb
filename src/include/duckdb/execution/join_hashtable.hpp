@@ -468,6 +468,7 @@ private:
 
 	//! Whether or not to use a bloom filter will be determined by the operator
 	BloomFilter bloom_filter;
+	mutex bloom_filter_lock;
 	bool should_build_bloom_filter = false;
 	idx_t bloom_filter_init_count = 0;
 
@@ -556,6 +557,7 @@ public:
 	}
 	void PrepareBuildBloomFilter(idx_t estimated_row_count);
 	void PrepareBloomFilterForFinalize();
+	void EnsureBloomFilterForProbe();
 
 	BloomFilter &GetBloomFilter() {
 		return bloom_filter;
