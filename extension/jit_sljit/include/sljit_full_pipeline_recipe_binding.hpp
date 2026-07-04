@@ -68,18 +68,10 @@ public:
 		return MakeProjectionGroupedAggregateRecipe(std::move(sequence), shape);
 	}
 
-	SljitFullPipelineRecipe MakeSourceBatchNativeTailRecipe() const {
+	SljitFullPipelineRecipe MakeSourceBatchNativeTailRecipe(const SljitSourceBatchNativeTailFacts &facts) const {
 		auto sequence = MakeSourceSequence();
-		sequence.Add(SljitFullPipelinePrimitiveStep::SourceBatchBoundary(0));
-		return MakeNativeTailRecipe(std::move(sequence), 0);
-	}
-
-	bool ShouldUseSourceBatchNativeTailRecipe() const {
-		if (!SljitCanBindNativeTailHandoffPrimitive(ops, 0)) {
-			return false;
-		}
-		return UsesScanFilteredAggregateTerminal() ||
-		       (!ops.empty() && ops[0].kind == SljitNativeRegionOpKind::HASH_JOIN_PROBE);
+		sequence.Add(SljitFullPipelinePrimitiveStep::SourceBatchBoundary(facts.boundary_op_idx));
+		return MakeNativeTailRecipe(std::move(sequence), facts.tail_start_idx);
 	}
 
 	SljitFullPipelineRecipe

@@ -70,7 +70,13 @@ private:
 		if (!SljitTryAnalyzeFilteredSourceAggregate(ops, uses_scan_filters, facts)) {
 			return false;
 		}
-		recipe = binding.MakeSourceBatchNativeTailRecipe();
+		SljitSourceBatchNativeTailFacts source_batch_facts;
+		source_batch_facts.boundary_op_idx = facts.hash_join_idx;
+		source_batch_facts.tail_start_idx = facts.hash_join_idx;
+		if (!SljitCanBindNativeTailHandoffPrimitive(ops, source_batch_facts.tail_start_idx)) {
+			return false;
+		}
+		recipe = binding.MakeSourceBatchNativeTailRecipe(source_batch_facts);
 		return true;
 	}
 
@@ -151,10 +157,12 @@ private:
 	}
 
 	bool TryBuildSourceBatchNativeTailRecipe(SljitFullPipelineRecipe &recipe) const {
-		if (!binding.ShouldUseSourceBatchNativeTailRecipe()) {
+		SljitSourceBatchNativeTailFacts facts;
+		if (!SljitTryAnalyzeSourceBatchNativeTail(ops, uses_scan_filters, facts) ||
+		    !SljitCanBindNativeTailHandoffPrimitive(ops, facts.tail_start_idx)) {
 			return false;
 		}
-		recipe = binding.MakeSourceBatchNativeTailRecipe();
+		recipe = binding.MakeSourceBatchNativeTailRecipe(facts);
 		return true;
 	}
 

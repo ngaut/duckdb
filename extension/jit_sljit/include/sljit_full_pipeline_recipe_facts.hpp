@@ -62,6 +62,11 @@ struct SljitHashJoinDelimJoinSinkFacts {
 	idx_t sink_idx = DConstants::INVALID_INDEX;
 };
 
+struct SljitSourceBatchNativeTailFacts {
+	idx_t boundary_op_idx = DConstants::INVALID_INDEX;
+	idx_t tail_start_idx = DConstants::INVALID_INDEX;
+};
+
 struct SljitProjectionAggregatePrefixFacts {
 	idx_t source_filter_idx = DConstants::INVALID_INDEX;
 	idx_t source_projection_idx = DConstants::INVALID_INDEX;
@@ -181,6 +186,25 @@ static bool SljitTryAnalyzeHashJoinDelimJoinSink(const vector<SljitExecutableReg
 	facts.first_hash_join_idx = 0;
 	facts.final_hash_join_idx = sink_idx - 1;
 	facts.sink_idx = sink_idx;
+	return true;
+}
+
+static bool SljitTryAnalyzeSourceBatchNativeTail(const vector<SljitExecutableRegionOp> &ops, bool uses_scan_filters,
+                                                 SljitSourceBatchNativeTailFacts &facts) {
+	facts = SljitSourceBatchNativeTailFacts();
+	if (ops.empty()) {
+		return false;
+	}
+	const bool scan_filtered_aggregate_terminal =
+	    uses_scan_filters && ops.back().kind == SljitNativeRegionOpKind::AGGREGATE_UPDATE &&
+	    (ops.back().aggregate_update.plan.sink_info.kind == ExecutionRegionSinkKind::UNGROUPED_AGGREGATE_UPDATE ||
+	     ops.back().aggregate_update.plan.sink_info.kind == ExecutionRegionSinkKind::HASH_AGGREGATE_UPDATE);
+	const bool first_hash_join_native_tail = ops[0].kind == SljitNativeRegionOpKind::HASH_JOIN_PROBE;
+	if (!scan_filtered_aggregate_terminal && !first_hash_join_native_tail) {
+		return false;
+	}
+	facts.boundary_op_idx = 0;
+	facts.tail_start_idx = 0;
 	return true;
 }
 
