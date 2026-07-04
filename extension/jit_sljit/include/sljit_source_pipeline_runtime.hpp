@@ -17,7 +17,6 @@
 #include "sljit_hash_join_probe_materialize_primitive_runtime.hpp"
 #include "sljit_hash_join_probe_selection_primitive_runtime.hpp"
 #include "sljit_mark_probe_filter_boundary_runtime.hpp"
-#include "sljit_native_tail_handoff_runtime.hpp"
 #include "sljit_projection_chain_primitive_runtime.hpp"
 #include "sljit_region_runtime_state.hpp"
 #include "sljit_selected_hash_join_input_runtime.hpp"
@@ -73,10 +72,9 @@ public:
 	    EXECUTE_HASH_JOIN_PROBE &execute_hash_join_probe_p, const vector<idx_t> &source_distinct_counts_p,
 	    const vector<Value> &source_min_values_p, const vector<Value> &source_max_values_p)
 	    : runtime(runtime_p), result(result_p), ops(ops_p), recipe(recipe_p),
-	      execute_native_full_pipeline_from(execute_native_full_pipeline_from_p),
 	      execute_hash_join_probe(execute_hash_join_probe_p),
-	      terminal_runtime(execute_hash_join_probe_p, source_distinct_counts_p, source_min_values_p,
-	                       source_max_values_p),
+	      terminal_runtime(execute_native_full_pipeline_from_p, execute_hash_join_probe_p, source_distinct_counts_p,
+	                       source_min_values_p, source_max_values_p),
 	      scratch(runtime.GetAllocator(), ops), selected_hash_join_inputs(runtime, ops, scratch),
 	      generated_filter(runtime, ops, scratch), hash_join_materialize(runtime, result, ops, scratch),
 	      hash_join_selection(runtime, result, ops, scratch, selected_hash_join_inputs),
@@ -175,14 +173,6 @@ private:
 
 	bool ExecuteTerminalStep(const SljitFullPipelinePrimitiveStep &step, const SljitRuntimeBatchView &input,
 	                         bool have_more_output) {
-		if (step.kind == SljitFullPipelinePrimitiveKind::NATIVE_TAIL_HANDOFF) {
-			auto stopped = SljitExecuteNativeTailHandoffBatch(runtime, result, scratch, step.Op(0), input,
-			                                                  processed_batches, execute_native_full_pipeline_from);
-			if (stopped) {
-				execute_native_full_pipeline_from.Finalize(scratch);
-			}
-			return stopped;
-		}
 		return terminal_runtime.Execute(runtime, result, ops, scratch, step, input, have_more_output,
 		                                processed_batches);
 	}
@@ -271,10 +261,6 @@ private:
 			}
 		}
 		auto &terminal_step = TerminalStep();
-		if (terminal_step.kind == SljitFullPipelinePrimitiveKind::NATIVE_TAIL_HANDOFF) {
-			execute_native_full_pipeline_from.Finalize(scratch);
-			return false;
-		}
 		return terminal_runtime.Flush(runtime, result, ops, scratch, terminal_step, processed_batches);
 	}
 
@@ -307,9 +293,8 @@ private:
 	ExecutionRegionResult &result;
 	vector<SljitExecutableRegionOp> &ops;
 	const SljitFullPipelineRecipe &recipe;
-	EXECUTE_NATIVE_FULL_PIPELINE_FROM &execute_native_full_pipeline_from;
 	EXECUTE_HASH_JOIN_PROBE &execute_hash_join_probe;
-	SljitFullPipelineTerminalRuntime<EXECUTE_HASH_JOIN_PROBE> terminal_runtime;
+	SljitFullPipelineTerminalRuntime<EXECUTE_NATIVE_FULL_PIPELINE_FROM, EXECUTE_HASH_JOIN_PROBE> terminal_runtime;
 	SljitRegionExecutionScratch scratch;
 	SljitSelectedHashJoinInputRuntime selected_hash_join_inputs;
 	SljitGeneratedFilterPrimitiveRuntime generated_filter;

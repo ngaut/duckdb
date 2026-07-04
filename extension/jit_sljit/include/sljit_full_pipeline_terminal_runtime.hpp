@@ -12,16 +12,19 @@
 #include "sljit_full_pipeline_primitive_contract.hpp"
 #include "sljit_grouped_aggregate_update_primitive.hpp"
 #include "sljit_join_projection_aggregate_update_runtime.hpp"
+#include "sljit_native_tail_handoff_runtime.hpp"
 
 namespace duckdb {
 
-template <class EXECUTE_HASH_JOIN_PROBE>
+template <class EXECUTE_NATIVE_FULL_PIPELINE_FROM, class EXECUTE_HASH_JOIN_PROBE>
 class SljitFullPipelineTerminalRuntime {
 public:
-	SljitFullPipelineTerminalRuntime(EXECUTE_HASH_JOIN_PROBE &execute_hash_join_probe_p,
+	SljitFullPipelineTerminalRuntime(EXECUTE_NATIVE_FULL_PIPELINE_FROM &execute_native_full_pipeline_from_p,
+	                                 EXECUTE_HASH_JOIN_PROBE &execute_hash_join_probe_p,
 	                                 const vector<idx_t> &source_distinct_counts_p,
 	                                 const vector<Value> &source_min_values_p, const vector<Value> &source_max_values_p)
-	    : execute_hash_join_probe(execute_hash_join_probe_p), source_distinct_counts(source_distinct_counts_p),
+	    : execute_native_full_pipeline_from(execute_native_full_pipeline_from_p),
+	      execute_hash_join_probe(execute_hash_join_probe_p), source_distinct_counts(source_distinct_counts_p),
 	      source_min_values(source_min_values_p), source_max_values(source_max_values_p) {
 	}
 
@@ -57,6 +60,8 @@ public:
 		case SljitFullPipelinePrimitiveKind::DELIM_JOIN_SINK:
 			return delim_join_sink.Execute(runtime, result, ops, scratch, terminal_step.delim_join_sink, input,
 			                               processed_batches);
+		case SljitFullPipelinePrimitiveKind::NATIVE_TAIL_HANDOFF:
+			return ExecuteNativeTailHandoff(runtime, result, scratch, terminal_step, input, processed_batches);
 		default:
 			throw InternalException("SLJIT primitive sequence contains an unsupported terminal primitive");
 		}
@@ -72,6 +77,9 @@ public:
 			return join_projection_aggregate_update.Flush(
 			    runtime, result, ops, scratch, terminal_step.join_projection_aggregate_update, execute_hash_join_probe);
 		case SljitFullPipelinePrimitiveKind::DELIM_JOIN_SINK:
+			return false;
+		case SljitFullPipelinePrimitiveKind::NATIVE_TAIL_HANDOFF:
+			execute_native_full_pipeline_from.Finalize(scratch);
 			return false;
 		default:
 			throw InternalException("SLJIT primitive sequence has an unsupported terminal flush primitive");
@@ -98,6 +106,19 @@ private:
 		                                        input, processed_batches);
 	}
 
+	bool ExecuteNativeTailHandoff(ExecutionRegionRuntime &runtime, ExecutionRegionResult &result,
+	                              SljitRegionExecutionScratch &scratch,
+	                              const SljitFullPipelinePrimitiveStep &terminal_step,
+	                              const SljitRuntimeBatchView &input, idx_t &processed_batches) {
+		auto stopped = SljitExecuteNativeTailHandoffBatch(runtime, result, scratch, terminal_step.Op(0), input,
+		                                                  processed_batches, execute_native_full_pipeline_from);
+		if (stopped) {
+			execute_native_full_pipeline_from.Finalize(scratch);
+		}
+		return stopped;
+	}
+
+	EXECUTE_NATIVE_FULL_PIPELINE_FROM &execute_native_full_pipeline_from;
 	EXECUTE_HASH_JOIN_PROBE &execute_hash_join_probe;
 	const vector<idx_t> &source_distinct_counts;
 	const vector<Value> &source_min_values;

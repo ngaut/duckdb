@@ -1537,11 +1537,10 @@ def verify_primitive_sequence() -> None:
             "source_batch_boundary.Execute(step_idx, step, input, have_more_output, execute_output_batch)",
             "source_batch_boundary.Flush(step_idx, execute_output_batch)",
             "ExecuteSourceBatchBoundary",
-            "SljitFullPipelineTerminalRuntime<EXECUTE_HASH_JOIN_PROBE> terminal_runtime",
+            "SljitFullPipelineTerminalRuntime<EXECUTE_NATIVE_FULL_PIPELINE_FROM, EXECUTE_HASH_JOIN_PROBE> terminal_runtime",
             "terminal_runtime.Prepare",
             "terminal_runtime.Execute",
             "terminal_runtime.Flush",
-            "execute_native_full_pipeline_from.Finalize(scratch)",
             "ExecuteHashJoinProbeSelection",
         ),
     )
@@ -1550,6 +1549,10 @@ def verify_primitive_sequence() -> None:
         (
             "SljitExecuteGeneratedFilterPrimitive(runtime, scratch, ops, step.generated_filter, input",
             "step.generated_filter",
+            "SljitExecuteNativeTailHandoffBatch(runtime, result, scratch, step.Op(0), input",
+            "terminal_step.kind == SljitFullPipelinePrimitiveKind::NATIVE_TAIL_HANDOFF",
+            "execute_native_full_pipeline_from.Finalize(scratch);\n\t\t\treturn false;",
+            "EXECUTE_NATIVE_FULL_PIPELINE_FROM &execute_native_full_pipeline_from;",
             "hash_join_materialize_batches",
             "AppendHashJoinMaterializeBatch",
             "SljitAppendChunkToInitializedBatch(",
@@ -1655,10 +1658,13 @@ def verify_primitive_sequence() -> None:
         (
             "class SljitFullPipelineTerminalRuntime",
             "ExecuteGroupedAggregateUpdate",
+            "ExecuteNativeTailHandoff",
             "grouped_aggregate_update.Execute",
             "grouped_aggregate_update.Flush",
             "join_projection_aggregate_update.Execute",
             "join_projection_aggregate_update.Flush",
+            "SljitExecuteNativeTailHandoffBatch(runtime, result, scratch, terminal_step.Op(0), input",
+            "execute_native_full_pipeline_from.Finalize(scratch)",
         ),
     )
     require_text(
