@@ -85,6 +85,7 @@ def verify_required_design_files() -> None:
         "extension/jit_sljit/include/sljit_projection_aggregate_descriptor.hpp",
         "extension/jit_sljit/include/sljit_projection_chain_runtime.hpp",
         "extension/jit_sljit/include/sljit_selected_hash_join_input_runtime.hpp",
+        "extension/jit_sljit/include/sljit_source_batch_boundary_runtime.hpp",
         "extension/jit_sljit/include/sljit_grouped_aggregate_update_primitive.hpp",
         "src/include/duckdb/execution/aggregate_hashtable.hpp",
         "src/include/duckdb/execution/execution_operator_runtime.hpp",
@@ -1437,6 +1438,19 @@ def verify_primitive_sequence() -> None:
         ),
     )
     require_text(
+        "extension/jit_sljit/include/sljit_source_batch_boundary_runtime.hpp",
+        (
+            "class SljitSourceBatchBoundaryRuntime",
+            "boundary_batches",
+            "ShouldBatch",
+            "SljitAdvanceSinkBatchBlocked(runtime, batch, batch_has_more_output)",
+            "RecordSljitRegionRuntimePath(runtime, trace_op.kind, \"source_batch_boundary\", chunk.size())",
+            "RecordSljitRegionStageRuntime(runtime, op_idx, trace_op.kind, \"source_batch_boundary_append\", stage_start)",
+            "RecordSljitRegionMaterializationBoundary(runtime, trace_op.kind, \"source_batch\", chunk.size())",
+            "SljitFlushDataChunkBatch(boundary_batch.chunk, execute_batch)",
+        ),
+    )
+    require_text(
         "extension/jit_sljit/include/sljit_source_pipeline_runtime.hpp",
         (
             "SljitFullPipelinePrimitiveSequenceBatchExecutor",
@@ -1446,6 +1460,7 @@ def verify_primitive_sequence() -> None:
             "step.projection_chain",
             "hash_join_materialize_batches",
             "projection_chain_batches",
+            "SljitSourceBatchBoundaryRuntime source_batch_boundary",
             "const auto max_recipe_batches = recipe.uses_extended_source_fetch_budget",
             "SljitBatchedSourceContractFetchBudget(runtime.MaxChunks())",
             "processed_batches >= max_recipe_batches",
@@ -1455,11 +1470,11 @@ def verify_primitive_sequence() -> None:
             "FlushHashJoinMaterializeBatch(step_idx)",
             "FlushProjectionChainBatch(step_idx)",
             "FlushSourceBoundaryBatch(step_idx)",
+            "source_batch_boundary.Execute(step_idx, step, input, have_more_output, execute_output_batch)",
+            "source_batch_boundary.Flush(step_idx, execute_output_batch)",
             "AppendHashJoinMaterializeBatch(step_idx, step, output, next_step_idx)",
             "hash_join_materialize_batch_append",
             "ExecuteSourceBatchBoundary",
-            "source_batch_boundary",
-            "source_batch_boundary_append",
             "SljitFullPipelineTerminalRuntime<EXECUTE_HASH_JOIN_PROBE> terminal_runtime",
             "terminal_runtime.Prepare",
             "terminal_runtime.Execute",
@@ -1467,6 +1482,17 @@ def verify_primitive_sequence() -> None:
             "execute_native_full_pipeline_from.Finalize(scratch)",
             "ExecuteHashJoinProbeSelection",
             "SljitRuntimeBatchViewFromHashJoinSelection",
+        ),
+    )
+    reject_text(
+        "extension/jit_sljit/include/sljit_source_pipeline_runtime.hpp",
+        (
+            "SljitSourceBatchBoundaryShouldBatch",
+            "ExecuteBatchBoundary",
+            "source_boundary_batches",
+            "\"source_batch_boundary\"",
+            "\"source_batch_boundary_append\"",
+            "\"source_batch\"",
         ),
     )
     reject_text(

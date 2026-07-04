@@ -22,15 +22,9 @@
 #include "sljit_region_runtime_state.hpp"
 #include "sljit_region_runtime_trace.hpp"
 #include "sljit_selected_hash_join_input_runtime.hpp"
+#include "sljit_source_batch_boundary_runtime.hpp"
 
 namespace duckdb {
-
-static bool SljitSourceBatchBoundaryShouldBatch(idx_t pending_count, idx_t chunk_count) {
-	if (pending_count != 0) {
-		return true;
-	}
-	return chunk_count < STANDARD_VECTOR_SIZE / 2;
-}
 
 template <class EXECUTE_NATIVE_FULL_PIPELINE>
 static bool SljitTryExecuteFullPipelineNativeOnly(ExecutionRegionRuntime &runtime, ExecutionRegionResult &result,
@@ -85,7 +79,8 @@ public:
 	      terminal_runtime(execute_hash_join_probe_p, source_distinct_counts_p, source_min_values_p,
 	                       source_max_values_p),
 	      scratch(runtime.GetAllocator(), ops), selected_hash_join_inputs(runtime, ops, scratch),
-	      mark_probe_filter_boundary(runtime, result, ops, scratch, selected_hash_join_inputs) {
+	      mark_probe_filter_boundary(runtime, result, ops, scratch, selected_hash_join_inputs),
+	      source_batch_boundary(runtime, result, ops) {
 	}
 
 	bool Execute() {
@@ -300,60 +295,11 @@ private:
 
 	bool ExecuteSourceBatchBoundary(idx_t step_idx, const SljitFullPipelinePrimitiveStep &step,
 	                                const SljitRuntimeBatchView &input, bool have_more_output) {
-		return ExecuteBatchBoundary(step_idx, step, input, have_more_output, "source_batch_boundary",
-		                            "source_batch_boundary_append", "source_batch", true);
-	}
-
-	bool ExecuteBatchBoundary(idx_t step_idx, const SljitFullPipelinePrimitiveStep &step,
-	                          const SljitRuntimeBatchView &input, bool have_more_output, const char *runtime_path,
-	                          const char *append_stage, const char *boundary_counter, bool adaptive_source_batch) {
-		auto &chunk = SljitBindNativeTailHandoffInput(input);
-		if (chunk.size() == 0) {
-			return false;
-		}
 		const auto next_step_idx = step_idx + 1;
-
 		auto execute_output_batch = [&](DataChunk &batch, bool batch_has_more_output) -> bool {
-			if (SljitAdvanceSinkBatchBlocked(runtime, batch, batch_has_more_output)) {
-				return SljitStopFullPipeline(result, ExecutionRegionResult::INTERRUPTED);
-			}
 			return ExecuteMaterializedBatch(next_step_idx, batch, batch_has_more_output);
 		};
-		auto flush_batch = [&](bool batch_has_more_output) -> bool {
-			auto &boundary_batch = source_boundary_batches[step_idx];
-			if (boundary_batch.Empty()) {
-				return false;
-			}
-			return SljitFlushDataChunkBatch(boundary_batch.chunk, [&](DataChunk &batch) {
-				return execute_output_batch(batch, batch_has_more_output);
-			});
-		};
-
-		auto &boundary_batch = source_boundary_batches[step_idx];
-		boundary_batch.Ensure(runtime.GetAllocator(), chunk.GetTypes());
-		auto &batch = boundary_batch.chunk;
-		const auto op_idx = step.Op(0);
-		auto &trace_op = ops[op_idx];
-		RecordSljitRegionRuntimePath(runtime, trace_op.kind, runtime_path, chunk.size());
-		if (batch.size() + chunk.size() > STANDARD_VECTOR_SIZE && flush_batch(true)) {
-			return true;
-		}
-		if (adaptive_source_batch && !SljitSourceBatchBoundaryShouldBatch(batch.size(), chunk.size())) {
-			return execute_output_batch(chunk, have_more_output);
-		}
-		if (chunk.size() == STANDARD_VECTOR_SIZE && batch.size() == 0) {
-			return execute_output_batch(chunk, have_more_output);
-		}
-		auto stage_start = SljitRegionStageStart(runtime);
-		if (!SljitTryFastAppendFixedFlatAllValid(batch, chunk)) {
-			batch.Append(chunk);
-		}
-		RecordSljitRegionStageRuntime(runtime, op_idx, trace_op.kind, append_stage, stage_start);
-		RecordSljitRegionMaterializationBoundary(runtime, trace_op.kind, boundary_counter, chunk.size());
-		if (batch.size() == STANDARD_VECTOR_SIZE && flush_batch(have_more_output)) {
-			return true;
-		}
-		return false;
+		return source_batch_boundary.Execute(step_idx, step, input, have_more_output, execute_output_batch);
 	}
 
 	bool FlushPendingBatch() {
@@ -400,18 +346,11 @@ private:
 	}
 
 	bool FlushSourceBoundaryBatch(idx_t step_idx) {
-		auto &boundary_batch = source_boundary_batches[step_idx];
-		if (boundary_batch.Empty()) {
-			return false;
-		}
 		auto next_step_idx = step_idx + 1;
 		auto execute_output_batch = [&](DataChunk &batch) -> bool {
-			if (SljitAdvanceSinkBatchBlocked(runtime, batch, false)) {
-				return SljitStopFullPipeline(result, ExecutionRegionResult::INTERRUPTED);
-			}
 			return ExecuteMaterializedBatch(next_step_idx, batch, false);
 		};
-		return SljitFlushDataChunkBatch(boundary_batch.chunk, execute_output_batch);
+		return source_batch_boundary.Flush(step_idx, execute_output_batch);
 	}
 
 	bool AppendHashJoinMaterializeBatch(idx_t step_idx, const SljitFullPipelinePrimitiveStep &step, DataChunk &output,
@@ -454,10 +393,10 @@ private:
 	SljitRegionExecutionScratch scratch;
 	SljitSelectedHashJoinInputRuntime selected_hash_join_inputs;
 	SljitMarkProbeFilterBoundaryRuntime mark_probe_filter_boundary;
+	SljitSourceBatchBoundaryRuntime source_batch_boundary;
 	std::array<SljitDataChunkBatch, SLJIT_FULL_PIPELINE_MAX_PRIMITIVES> hash_join_materialize_batches;
 	std::array<SljitDataChunkBatch, SLJIT_FULL_PIPELINE_MAX_PRIMITIVES> selected_hash_join_projection_inputs;
 	std::array<SljitDataChunkBatch, SLJIT_FULL_PIPELINE_MAX_PRIMITIVES> projection_chain_batches;
-	std::array<SljitDataChunkBatch, SLJIT_FULL_PIPELINE_MAX_PRIMITIVES> source_boundary_batches;
 	idx_t processed_batches = 0;
 };
 
