@@ -1589,9 +1589,7 @@ def verify_recipe_builder() -> None:
             "MakePrimitiveRecipePlan",
             "SljitFullPipelinePrimitiveSequenceIsExecutable(ops, recipe.primitive_sequence)",
             "invalid full-pipeline primitive sequence",
-            "UsesScanFilteredAggregateTerminal",
-            "uses_scan_filters",
-            "ExecutionRegionSinkKind::UNGROUPED_AGGREGATE_UPDATE",
+            "uses_extended_source_fetch_budget",
             "MakePrimitiveSequence",
             "MakeSourceSequence",
             "MakeNativeTailRecipe",
@@ -1642,6 +1640,9 @@ def verify_recipe_builder() -> None:
             "SljitFullPipelinePrimitiveStep::MaterializeBoundary",
             "sequence.Add(SljitFullPipelinePrimitiveStep::MaterializeBoundary(hash_join_idx));",
             "MakeSourceMaterializeNativeTailRecipe",
+            "UsesExtendedSourceFetchBudget",
+            "UsesScanFilteredAggregateTerminal",
+            "uses_scan_filters",
         ),
     )
     reject_text(
@@ -1671,7 +1672,8 @@ def verify_recipe_builder() -> None:
             "SljitFullPipelineRecipeBinding binding",
             "CanBindHashJoinProbeProjectionInput",
             "!CanBindHashJoinProbeProjectionInput(facts.first_hash_join_idx)",
-            "SljitTryAnalyzeFilteredSourceAggregate(ops, uses_scan_filters, facts)",
+            "SljitAnalyzeFullPipelineScheduleFacts(ops_p, uses_scan_filters_p)",
+            "schedule_facts.uses_extended_source_fetch_budget",
             "SljitTryAnalyzeSelectedJoinAggregate(ops, facts)",
             "SljitTryAnalyzeHashJoinDelimJoinSink(ops, facts)",
             "SljitTryAnalyzeSourceBatchNativeTail(ops, uses_scan_filters, facts)",
@@ -1700,11 +1702,12 @@ def verify_recipe_builder() -> None:
         (
             "struct SljitProjectionAggregatePlanFacts",
             "struct SljitProjectionAggregatePrefixFacts",
-            "struct SljitFilteredSourceAggregateFacts",
+            "struct SljitFullPipelineScheduleFacts",
             "struct SljitSelectedJoinAggregateFacts",
             "struct SljitHashJoinDelimJoinSinkFacts",
             "struct SljitSourceBatchNativeTailFacts",
-            "SljitTryAnalyzeFilteredSourceAggregate",
+            "SljitAnalyzeFullPipelineScheduleFacts",
+            "SljitFullPipelineUsesScanFilteredAggregateTerminal",
             "SljitTryAnalyzeSelectedJoinAggregate",
             "SljitTryAnalyzeHashJoinDelimJoinSink",
             "SljitTryAnalyzeSourceBatchNativeTail",
@@ -1745,6 +1748,9 @@ def verify_recipe_builder() -> None:
             "MakeUnbatched",
             "HasPrimitiveSequence",
             "FilteredSourceAggregate() const",
+            "filtered_source_aggregate",
+            "TryBuildFilteredSourceAggregateRecipe",
+            "SljitTryAnalyzeFilteredSourceAggregate",
             "SljitFullPipelineOpsAre",
             "SljitFullPipelineIsAggregateUpdateAt",
             "ShouldUseSourceBatchNativeTailRecipe",
@@ -1758,6 +1764,13 @@ def verify_recipe_builder() -> None:
             "DistinctAggregateUpdate",
             "row_pointer_distinct",
             "projected_distinct",
+        ),
+    )
+    reject_text(
+        "extension/jit_sljit/include/sljit_full_pipeline_recipe_facts.hpp",
+        (
+            "SljitFilteredSourceAggregateFacts",
+            "SljitTryAnalyzeFilteredSourceAggregate",
         ),
     )
     reject_regex(

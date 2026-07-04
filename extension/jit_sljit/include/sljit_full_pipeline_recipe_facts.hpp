@@ -41,9 +41,15 @@ static bool SljitFullPipelineProjectionAggregateShapeHasFixedFinalProjection(
 	       SljitProjectionOutputsAreFixedWidth(ops[shape.final_projection_idx]);
 }
 
-struct SljitFilteredSourceAggregateFacts {
-	idx_t hash_join_idx = DConstants::INVALID_INDEX;
-	idx_t aggregate_idx = DConstants::INVALID_INDEX;
+static bool SljitFullPipelineUsesScanFilteredAggregateTerminal(const vector<SljitExecutableRegionOp> &ops,
+                                                               bool uses_scan_filters) {
+	return uses_scan_filters && !ops.empty() && ops.back().kind == SljitNativeRegionOpKind::AGGREGATE_UPDATE &&
+	       (ops.back().aggregate_update.plan.sink_info.kind == ExecutionRegionSinkKind::UNGROUPED_AGGREGATE_UPDATE ||
+	        ops.back().aggregate_update.plan.sink_info.kind == ExecutionRegionSinkKind::HASH_AGGREGATE_UPDATE);
+}
+
+struct SljitFullPipelineScheduleFacts {
+	bool uses_extended_source_fetch_budget = false;
 };
 
 struct SljitSelectedJoinAggregateFacts {
@@ -136,19 +142,38 @@ struct SljitProjectionFilterProjectionNativeTailFacts {
 	idx_t tail_start_idx = DConstants::INVALID_INDEX;
 };
 
-static bool SljitTryAnalyzeFilteredSourceAggregate(const vector<SljitExecutableRegionOp> &ops,
-                                                   bool uses_scan_filters,
-                                                   SljitFilteredSourceAggregateFacts &facts) {
-	facts = SljitFilteredSourceAggregateFacts();
-	if (!uses_scan_filters || ops.size() != 2 ||
-	    !SljitFullPipelineOpIsAt(ops, 0, SljitNativeRegionOpKind::HASH_JOIN_PROBE) ||
-	    !SljitFullPipelineOpIsAt(ops, 1, SljitNativeRegionOpKind::AGGREGATE_UPDATE) ||
-	    ops[1].aggregate_update.plan.sink_info.kind != ExecutionRegionSinkKind::UNGROUPED_AGGREGATE_UPDATE) {
-		return false;
+static SljitFullPipelineScheduleFacts SljitAnalyzeFullPipelineScheduleFacts(const vector<SljitExecutableRegionOp> &ops,
+                                                                            bool uses_scan_filters) {
+	SljitFullPipelineScheduleFacts facts;
+	if (SljitFullPipelineUsesScanFilteredAggregateTerminal(ops, uses_scan_filters)) {
+		facts.uses_extended_source_fetch_budget = true;
+		return facts;
 	}
-	facts.hash_join_idx = 0;
-	facts.aggregate_idx = 1;
-	return true;
+	bool has_hash_join_probe = false;
+	for (auto &op : ops) {
+		if (op.kind == SljitNativeRegionOpKind::HASH_JOIN_PROBE) {
+			has_hash_join_probe = true;
+			continue;
+		}
+		if (op.kind == SljitNativeRegionOpKind::AGGREGATE_UPDATE) {
+			facts.uses_extended_source_fetch_budget =
+			    has_hash_join_probe &&
+			    op.aggregate_update.plan.sink_info.kind == ExecutionRegionSinkKind::HASH_AGGREGATE_UPDATE;
+			return facts;
+		}
+	}
+	if (ops.empty()) {
+		return facts;
+	}
+	switch (ops.back().kind) {
+	case SljitNativeRegionOpKind::HASH_JOIN_BUILD:
+	case SljitNativeRegionOpKind::DELIM_JOIN_SINK:
+		facts.uses_extended_source_fetch_budget = true;
+		break;
+	default:
+		break;
+	}
+	return facts;
 }
 
 static bool SljitTryAnalyzeSelectedJoinAggregate(const vector<SljitExecutableRegionOp> &ops,
@@ -196,9 +221,7 @@ static bool SljitTryAnalyzeSourceBatchNativeTail(const vector<SljitExecutableReg
 		return false;
 	}
 	const bool scan_filtered_aggregate_terminal =
-	    uses_scan_filters && ops.back().kind == SljitNativeRegionOpKind::AGGREGATE_UPDATE &&
-	    (ops.back().aggregate_update.plan.sink_info.kind == ExecutionRegionSinkKind::UNGROUPED_AGGREGATE_UPDATE ||
-	     ops.back().aggregate_update.plan.sink_info.kind == ExecutionRegionSinkKind::HASH_AGGREGATE_UPDATE);
+	    SljitFullPipelineUsesScanFilteredAggregateTerminal(ops, uses_scan_filters);
 	const bool first_hash_join_native_tail = ops[0].kind == SljitNativeRegionOpKind::HASH_JOIN_PROBE;
 	if (!scan_filtered_aggregate_terminal && !first_hash_join_native_tail) {
 		return false;

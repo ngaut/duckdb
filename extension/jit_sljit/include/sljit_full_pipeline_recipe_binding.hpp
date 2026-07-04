@@ -27,13 +27,13 @@ class SljitFullPipelineRecipeBinding {
 public:
 	SljitFullPipelineRecipeBinding(const vector<SljitExecutableRegionOp> &ops_p,
 	                               const vector<Value> &source_min_values_p, const vector<Value> &source_max_values_p,
-	                               bool uses_scan_filters_p)
+	                               bool uses_extended_source_fetch_budget_p)
 	    : ops(ops_p), source_min_values(source_min_values_p), source_max_values(source_max_values_p),
-	      uses_scan_filters(uses_scan_filters_p) {
+	      uses_extended_source_fetch_budget(uses_extended_source_fetch_budget_p) {
 	}
 
 	SljitFullPipelineRecipePlan MakeNativeOnlyPlan() const {
-		return SljitMakeFullPipelineNativeOnlyPlan(UsesExtendedSourceFetchBudget());
+		return SljitMakeFullPipelineNativeOnlyPlan(uses_extended_source_fetch_budget);
 	}
 
 	SljitFullPipelineRecipePlan MakePrimitiveRecipePlan(SljitFullPipelineRecipe recipe) const {
@@ -295,46 +295,12 @@ public:
 	}
 
 private:
-	bool UsesExtendedSourceFetchBudget() const {
-		if (UsesScanFilteredAggregateTerminal()) {
-			return true;
-		}
-		bool has_hash_join_probe = false;
-		for (auto &op : ops) {
-			if (op.kind == SljitNativeRegionOpKind::HASH_JOIN_PROBE) {
-				has_hash_join_probe = true;
-				continue;
-			}
-			if (op.kind == SljitNativeRegionOpKind::AGGREGATE_UPDATE) {
-				return has_hash_join_probe &&
-				       op.aggregate_update.plan.sink_info.kind == ExecutionRegionSinkKind::HASH_AGGREGATE_UPDATE;
-			}
-		}
-		if (ops.empty()) {
-			return false;
-		}
-		switch (ops.back().kind) {
-		case SljitNativeRegionOpKind::HASH_JOIN_BUILD:
-		case SljitNativeRegionOpKind::DELIM_JOIN_SINK:
-			return true;
-		default:
-			return false;
-		}
-	}
-
-	bool UsesScanFilteredAggregateTerminal() const {
-		return uses_scan_filters && !ops.empty() && ops.back().kind == SljitNativeRegionOpKind::AGGREGATE_UPDATE &&
-		       (ops.back().aggregate_update.plan.sink_info.kind ==
-		            ExecutionRegionSinkKind::UNGROUPED_AGGREGATE_UPDATE ||
-		        ops.back().aggregate_update.plan.sink_info.kind == ExecutionRegionSinkKind::HASH_AGGREGATE_UPDATE);
-	}
-
 	SljitFullPipelineRecipe MakePrimitiveSequence(std::initializer_list<SljitFullPipelinePrimitiveStep> steps) const {
-		return SljitMakeFullPipelinePrimitiveRecipe(UsesExtendedSourceFetchBudget(), steps);
+		return SljitMakeFullPipelinePrimitiveRecipe(uses_extended_source_fetch_budget, steps);
 	}
 
 	SljitFullPipelineRecipe MakePrimitiveSequence(SljitFullPipelinePrimitiveSequence sequence) const {
-		return SljitMakeFullPipelinePrimitiveRecipe(UsesExtendedSourceFetchBudget(), std::move(sequence));
+		return SljitMakeFullPipelinePrimitiveRecipe(uses_extended_source_fetch_budget, std::move(sequence));
 	}
 
 	SljitFullPipelinePrimitiveSequence MakeSourceSequence() const {
@@ -573,7 +539,7 @@ private:
 	const vector<SljitExecutableRegionOp> &ops;
 	const vector<Value> &source_min_values;
 	const vector<Value> &source_max_values;
-	bool uses_scan_filters;
+	bool uses_extended_source_fetch_budget;
 };
 
 } // namespace duckdb

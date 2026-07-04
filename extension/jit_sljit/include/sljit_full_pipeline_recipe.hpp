@@ -25,7 +25,9 @@ public:
 	                               const vector<Value> &source_min_values_p, const vector<Value> &source_max_values_p,
 	                               bool uses_scan_filters_p)
 	    : ops(ops_p), uses_scan_filters(uses_scan_filters_p),
-	      binding(ops_p, source_min_values_p, source_max_values_p, uses_scan_filters_p) {
+	      schedule_facts(SljitAnalyzeFullPipelineScheduleFacts(ops_p, uses_scan_filters_p)),
+	      binding(ops_p, source_min_values_p, source_max_values_p,
+	              schedule_facts.uses_extended_source_fetch_budget) {
 	}
 
 	SljitFullPipelineRecipePlan Build() const {
@@ -50,7 +52,6 @@ private:
 
 	static const SljitFullPipelineRecipeRegistryEntry *RecipeRegistry(idx_t &count) {
 		static const SljitFullPipelineRecipeRegistryEntry registry[] = {
-		    {"filtered_source_aggregate", &SljitFullPipelineRecipeBuilder::TryBuildFilteredSourceAggregateRecipe},
 		    {"selected_join_aggregate", &SljitFullPipelineRecipeBuilder::TryBuildSelectedJoinAggregateRecipe},
 		    {"hash_join_delim_join_sink", &SljitFullPipelineRecipeBuilder::TryBuildHashJoinDelimJoinSinkRecipe},
 		    {"projection_aggregate", &SljitFullPipelineRecipeBuilder::TryBuildProjectionAggregateRecipe},
@@ -63,21 +64,6 @@ private:
 		    {"source_batch_native_tail", &SljitFullPipelineRecipeBuilder::TryBuildSourceBatchNativeTailRecipe}};
 		count = sizeof(registry) / sizeof(registry[0]);
 		return registry;
-	}
-
-	bool TryBuildFilteredSourceAggregateRecipe(SljitFullPipelineRecipe &recipe) const {
-		SljitFilteredSourceAggregateFacts facts;
-		if (!SljitTryAnalyzeFilteredSourceAggregate(ops, uses_scan_filters, facts)) {
-			return false;
-		}
-		SljitSourceBatchNativeTailFacts source_batch_facts;
-		source_batch_facts.boundary_op_idx = facts.hash_join_idx;
-		source_batch_facts.tail_start_idx = facts.hash_join_idx;
-		if (!SljitCanBindNativeTailHandoffPrimitive(ops, source_batch_facts.tail_start_idx)) {
-			return false;
-		}
-		recipe = binding.MakeSourceBatchNativeTailRecipe(source_batch_facts);
-		return true;
 	}
 
 	bool TryBuildSelectedJoinAggregateRecipe(SljitFullPipelineRecipe &recipe) const {
@@ -402,6 +388,7 @@ private:
 private:
 	const vector<SljitExecutableRegionOp> &ops;
 	bool uses_scan_filters;
+	SljitFullPipelineScheduleFacts schedule_facts;
 	SljitFullPipelineRecipeBinding binding;
 };
 
