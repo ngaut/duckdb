@@ -82,6 +82,7 @@ def verify_required_design_files() -> None:
         "extension/jit_sljit/include/sljit_native_tail_handoff_runtime.hpp",
         "extension/jit_sljit/include/sljit_hash_join_probe_executor_runtime.hpp",
         "extension/jit_sljit/include/sljit_hash_join_probe_materialize_primitive_runtime.hpp",
+        "extension/jit_sljit/include/sljit_hash_join_probe_selection_primitive_runtime.hpp",
         "extension/jit_sljit/include/sljit_hash_join_projection_source_runtime.hpp",
         "extension/jit_sljit/include/sljit_projection_aggregate_descriptor.hpp",
         "extension/jit_sljit/include/sljit_projection_chain_runtime.hpp",
@@ -1300,7 +1301,6 @@ def verify_primitive_sequence() -> None:
         "extension/jit_sljit/include/sljit_source_pipeline_runtime.hpp",
         (
             "SljitSelectedHashJoinInputRuntime selected_hash_join_inputs",
-            "selected_hash_join_inputs.TryPrepareHashProbeInput",
         ),
     )
     require_text(
@@ -1440,6 +1440,18 @@ def verify_primitive_sequence() -> None:
         ),
     )
     require_text(
+        "extension/jit_sljit/include/sljit_hash_join_probe_selection_primitive_runtime.hpp",
+        (
+            "class SljitHashJoinProbeSelectionPrimitiveRuntime",
+            "selected_hash_join_inputs.TryPrepareHashProbeInput",
+            "step.hash_join_probe_selection",
+            "SljitRuntimeBatchViewFromHashJoinSelection(",
+            "SljitDrainHashJoinProbeOutputsWithState(",
+            "SljitHashJoinProbeOutputContract::SELECTED_VIEW",
+            "optional_ptr<const SljitHashJoinProbeInputRemap>(&primitive.input_remap)",
+        ),
+    )
+    require_text(
         "extension/jit_sljit/include/sljit_hash_join_probe_materialize_primitive_runtime.hpp",
         (
             "class SljitHashJoinProbeMaterializePrimitiveRuntime",
@@ -1481,6 +1493,7 @@ def verify_primitive_sequence() -> None:
             "SljitFullPipelinePrimitiveSequenceTerminalStep",
             "step.generated_filter",
             "SljitHashJoinProbeMaterializePrimitiveRuntime hash_join_materialize",
+            "SljitHashJoinProbeSelectionPrimitiveRuntime hash_join_selection",
             "SljitProjectionChainPrimitiveRuntime projection_chain",
             "SljitSourceBatchBoundaryRuntime source_batch_boundary",
             "const auto max_recipe_batches = recipe.uses_extended_source_fetch_budget",
@@ -1494,6 +1507,7 @@ def verify_primitive_sequence() -> None:
             "FlushSourceBoundaryBatch(step_idx)",
             "hash_join_materialize.Execute(step_idx, step, input, execute_hash_join_probe, execute_output_batch)",
             "hash_join_materialize.Flush(step_idx, execute_output_batch)",
+            "hash_join_selection.Execute(step, input, execute_hash_join_probe, execute_next_step)",
             "projection_chain.Execute(step_idx, step, input, execute_output_batch)",
             "projection_chain.Flush(step_idx, execute_output_batch)",
             "source_batch_boundary.Execute(step_idx, step, input, have_more_output, execute_output_batch)",
@@ -1505,7 +1519,6 @@ def verify_primitive_sequence() -> None:
             "terminal_runtime.Flush",
             "execute_native_full_pipeline_from.Finalize(scratch)",
             "ExecuteHashJoinProbeSelection",
-            "SljitRuntimeBatchViewFromHashJoinSelection",
         ),
     )
     reject_text(
@@ -1515,6 +1528,11 @@ def verify_primitive_sequence() -> None:
             "AppendHashJoinMaterializeBatch",
             "SljitAppendChunkToInitializedBatch(",
             "\"hash_join_materialize_batch_append\"",
+            "selected_hash_join_inputs.TryPrepareHashProbeInput",
+            "SljitRuntimeBatchViewFromHashJoinSelection(",
+            "SljitDrainHashJoinProbeOutputsWithState(",
+            "SljitHashJoinProbeOutputContract::SELECTED_VIEW",
+            "optional_ptr<const SljitHashJoinProbeInputRemap>(&primitive.input_remap)",
             "projection_chain_batches",
             "selected_hash_join_projection_inputs",
             "SljitExecuteProjectionChainPrimitive(runtime, scratch, ops, step.projection_chain, input",
@@ -1704,7 +1722,7 @@ def verify_primitive_sequence() -> None:
         ),
     )
     require_text(
-        "extension/jit_sljit/include/sljit_source_pipeline_runtime.hpp",
+        "extension/jit_sljit/include/sljit_hash_join_probe_selection_primitive_runtime.hpp",
         (
             "primitive.HasOutputColumnMap()",
             "primitive.output_column_map",

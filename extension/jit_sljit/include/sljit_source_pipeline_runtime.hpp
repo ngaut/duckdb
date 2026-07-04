@@ -15,7 +15,7 @@
 #include "sljit_full_pipeline_terminal_runtime.hpp"
 #include "sljit_generated_filter_projection_runtime.hpp"
 #include "sljit_hash_join_probe_materialize_primitive_runtime.hpp"
-#include "sljit_hash_join_probe_executor_runtime.hpp"
+#include "sljit_hash_join_probe_selection_primitive_runtime.hpp"
 #include "sljit_mark_probe_filter_boundary_runtime.hpp"
 #include "sljit_native_tail_handoff_runtime.hpp"
 #include "sljit_projection_chain_primitive_runtime.hpp"
@@ -79,6 +79,7 @@ public:
 	                       source_max_values_p),
 	      scratch(runtime.GetAllocator(), ops), selected_hash_join_inputs(runtime, ops, scratch),
 	      hash_join_materialize(runtime, result, ops, scratch),
+	      hash_join_selection(runtime, result, ops, scratch, selected_hash_join_inputs),
 	      mark_probe_filter_boundary(runtime, result, ops, scratch, selected_hash_join_inputs),
 	      source_batch_boundary(runtime, result, ops), projection_chain(runtime, ops, scratch) {
 	}
@@ -215,45 +216,11 @@ private:
 
 	bool ExecuteHashJoinProbeSelection(idx_t step_idx, const SljitFullPipelinePrimitiveStep &step,
 	                                   const SljitRuntimeBatchView &input) {
-		string deferred_reason;
-		DataChunk *join_input_ptr = nullptr;
-		if (input.HasHashJoinSelection()) {
-			if (!selected_hash_join_inputs.TryPrepareHashProbeInput(step.Op(0), input, join_input_ptr,
-			                                                        deferred_reason)) {
-				if (!deferred_reason.empty()) {
-					return SljitDeferFullPipelineResult(runtime, deferred_reason, result);
-				}
-				throw InternalException("SLJIT hash probe could not prepare selected upstream hash-join input");
-			}
-		} else {
-			join_input_ptr = &SljitBindNativeTailHandoffInput(input);
-		}
-		auto &join_input = *join_input_ptr;
-		if (join_input.size() == 0) {
-			return false;
-		}
-		auto &primitive = step.hash_join_probe_selection;
-		const auto hash_join_idx = primitive.hash_join_idx;
-		auto &hash_join_op = ops[hash_join_idx];
-		auto &join_output = scratch.TemporaryChunk(hash_join_idx);
 		const auto next_step_idx = step_idx + 1;
-		const auto output_column_map = primitive.HasOutputColumnMap() ? &primitive.output_column_map : nullptr;
-		auto handle_output = [&](DataChunk &output, SljitHashJoinProbeDrainState &state) {
-			auto output_view = SljitRuntimeBatchViewFromHashJoinSelection(
-			    join_input, scratch.FilterSelection(hash_join_idx), scratch.HashJoinBuildSelection(hash_join_idx),
-			    scratch.HashJoinRowPointers(hash_join_idx), output.size(), hash_join_idx,
-			    state.source_key0_int64_to_int32_matches_are_proven, output_column_map,
-			    primitive.output_projection_idx);
-			return ExecuteStep(next_step_idx, output_view, true);
+		auto execute_next_step = [&](const SljitRuntimeBatchView &output) {
+			return ExecuteStep(next_step_idx, output, true);
 		};
-		auto handle_defer = [&](string &deferred_reason) {
-			return SljitDeferFullPipelineResult(runtime, deferred_reason, result);
-		};
-		return SljitDrainHashJoinProbeOutputsWithState(
-		    scratch, hash_join_idx, hash_join_op, join_input, join_output, execute_hash_join_probe, handle_output,
-		    handle_defer, primitive.source_key0_int64_to_int32_unchecked,
-		    SljitHashJoinProbeOutputContract::SELECTED_VIEW,
-		    optional_ptr<const SljitHashJoinProbeInputRemap>(&primitive.input_remap));
+		return hash_join_selection.Execute(step, input, execute_hash_join_probe, execute_next_step);
 	}
 
 	bool ExecuteMarkProbeFilterBoundary(idx_t step_idx, const SljitFullPipelinePrimitiveStep &step,
@@ -348,6 +315,7 @@ private:
 	SljitRegionExecutionScratch scratch;
 	SljitSelectedHashJoinInputRuntime selected_hash_join_inputs;
 	SljitHashJoinProbeMaterializePrimitiveRuntime hash_join_materialize;
+	SljitHashJoinProbeSelectionPrimitiveRuntime hash_join_selection;
 	SljitMarkProbeFilterBoundaryRuntime mark_probe_filter_boundary;
 	SljitSourceBatchBoundaryRuntime source_batch_boundary;
 	SljitProjectionChainPrimitiveRuntime projection_chain;
