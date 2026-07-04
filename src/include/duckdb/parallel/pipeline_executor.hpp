@@ -97,9 +97,6 @@ private:
 	DataChunk final_chunk;
 	//! Scratch chunk used when compiled source-contract execution fetches a source chunk before generated prefix code.
 	DataChunk execution_source_input_chunk;
-	//! Buffered source-contract output used by compiled execution to feed full vectors into native pipeline stages.
-	DataChunk execution_source_output_batch;
-	bool execution_source_output_batch_initialized = false;
 	std::array<vector<bool>, EXECUTION_REGION_RUNTIME_ONCE_FLAG_COUNT> execution_region_runtime_once_flags;
 
 	//! The operators that are not yet finished executing and have data remaining
@@ -150,9 +147,6 @@ private:
 	SourceResultType FetchFromSource(DataChunk *&result);
 	SourceResultType FetchFromSourceContract(DataChunk *&result,
 	                                         ExecutionRegionSourceContractMetrics *metrics = nullptr);
-	optional_ptr<DataChunk> PendingSourceContractBatch();
-	DataChunk &PrepareSourceContractBatch(const vector<LogicalType> &types);
-	void ResetSourceContractBatch();
 	bool TryMarkExecutionRegionRuntimeOnceFlag(ExecutionRegionRuntimeOnceFlag flag, idx_t index);
 
 	void FinishProcessing(int32_t operator_idx = -1);

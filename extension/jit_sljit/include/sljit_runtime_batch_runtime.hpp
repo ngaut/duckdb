@@ -68,19 +68,6 @@ static bool SljitTryFastAppendFixedFlatAllValid(DataChunk &target, DataChunk &so
 	return true;
 }
 
-template <class EXECUTE_BATCH>
-static bool SljitFlushRuntimePendingBatch(ExecutionRegionRuntime &runtime, EXECUTE_BATCH execute_batch) {
-	auto batch = runtime.PendingSourceContractBatch();
-	if (!batch) {
-		return false;
-	}
-	if (execute_batch(*batch)) {
-		return true;
-	}
-	runtime.ResetSourceContractBatch();
-	return false;
-}
-
 template <class FLUSH_BATCH, class EXECUTE_BATCH>
 static bool SljitAppendChunkToInitializedBatch(ExecutionRegionRuntime &runtime, DataChunk &batch, DataChunk &chunk,
                                                idx_t trace_op_idx, optional_ptr<const SljitExecutableRegionOp> trace_op,
@@ -117,44 +104,6 @@ static bool SljitAppendChunkToInitializedBatch(ExecutionRegionRuntime &runtime, 
 	if (trace_op && boundary_phase) {
 		RecordSljitRegionMaterializationBoundary(runtime, trace_op->kind, boundary_phase, chunk.size());
 	}
-	if (batch.size() == STANDARD_VECTOR_SIZE) {
-		if (flush_batch()) {
-			return true;
-		}
-	}
-	return false;
-}
-
-template <class FLUSH_BATCH, class EXECUTE_BATCH>
-static bool SljitAppendChunkToRuntimeBatch(ExecutionRegionRuntime &runtime, DataChunk &chunk,
-                                           const vector<LogicalType> &batch_types, idx_t trace_op_idx,
-                                           const SljitExecutableRegionOp &trace_op, const char *append_phase,
-                                           const char *boundary_phase, FLUSH_BATCH flush_batch,
-                                           EXECUTE_BATCH execute_batch) {
-	auto &batch = runtime.PrepareSourceContractBatch(batch_types);
-	return SljitAppendChunkToInitializedBatch(runtime, batch, chunk, trace_op_idx,
-	                                          optional_ptr<const SljitExecutableRegionOp>(&trace_op), append_phase,
-	                                          boundary_phase, flush_batch, execute_batch);
-}
-
-template <class FLUSH_BATCH, class MATERIALIZE_BATCH>
-static bool SljitTryAppendDirectChunkToRuntimeBatch(ExecutionRegionRuntime &runtime, DataChunk &chunk,
-                                                    const vector<LogicalType> &batch_types, bool &handled,
-                                                    FLUSH_BATCH flush_batch, MATERIALIZE_BATCH materialize_batch) {
-	handled = false;
-	if (chunk.size() == 0) {
-		return false;
-	}
-	auto &batch = runtime.PrepareSourceContractBatch(batch_types);
-	if (batch.size() + chunk.size() > STANDARD_VECTOR_SIZE) {
-		if (flush_batch()) {
-			return true;
-		}
-	}
-	if (!materialize_batch(batch)) {
-		return false;
-	}
-	handled = true;
 	if (batch.size() == STANDARD_VECTOR_SIZE) {
 		if (flush_batch()) {
 			return true;

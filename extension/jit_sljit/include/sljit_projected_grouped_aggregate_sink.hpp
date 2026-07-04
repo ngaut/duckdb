@@ -46,14 +46,15 @@ struct SljitProjectedGroupedAggregateSink {
 	                                   idx_t projection_idx_p, SljitExecutableRegionOp &projection_op_p,
 	                                   idx_t aggregate_idx_p, SljitExecutableRegionOp &aggregate_op_p,
 	                                   bool &deferred_grouped_finish_p, idx_t &processed_p,
-	                                   const char *append_phase_p, const char *boundary_phase_p,
+	                                   SljitDataChunkBatch &projected_batch_p, const char *append_phase_p,
+	                                   const char *boundary_phase_p,
 	                                   optional_ptr<SljitDirectJoinOutputAggregatePolicy> direct_aggregate_p = nullptr,
 	                                   bool record_sink_result_p = false)
 	    : ops(ops_p), runtime(runtime_p), native_runtime(native_runtime_p), scratch(scratch_p), result(result_p),
 	      projection_idx(projection_idx_p), projection_op(projection_op_p), aggregate_idx(aggregate_idx_p),
 	      aggregate_op(aggregate_op_p), deferred_grouped_finish(deferred_grouped_finish_p), processed(processed_p),
-	      append_phase(append_phase_p), boundary_phase(boundary_phase_p), direct_aggregate(direct_aggregate_p),
-	      record_sink_result(record_sink_result_p) {
+	      projected_batch(projected_batch_p), append_phase(append_phase_p), boundary_phase(boundary_phase_p),
+	      direct_aggregate(direct_aggregate_p), record_sink_result(record_sink_result_p) {
 	}
 
 	bool FlushDirectAggregate() {
@@ -94,13 +95,18 @@ struct SljitProjectedGroupedAggregateSink {
 		if (FlushDirectAggregate()) {
 			return true;
 		}
-		return SljitFlushRuntimePendingBatch(runtime,
-		                                     [&](DataChunk &projected) { return ExecuteProjectedBatch(projected); });
+		if (projected_batch.Empty()) {
+			return false;
+		}
+		return SljitFlushDataChunkBatch(projected_batch.chunk,
+		                                [&](DataChunk &projected) { return ExecuteProjectedBatch(projected); });
 	}
 
 	bool AppendProjectedBatch(DataChunk &projected) {
-		return SljitAppendChunkToRuntimeBatch(
-		    runtime, projected, projection_op.output_types, projection_idx, projection_op, append_phase, boundary_phase,
+		projected_batch.Ensure(runtime.GetAllocator(), projection_op.output_types);
+		return SljitAppendChunkToInitializedBatch(
+		    runtime, projected_batch.chunk, projected, projection_idx,
+		    optional_ptr<const SljitExecutableRegionOp>(&projection_op), append_phase, boundary_phase,
 		    [&]() { return FlushProjectedBatch(); }, [&](DataChunk &batch) { return ExecuteProjectedBatch(batch); });
 	}
 
@@ -113,9 +119,22 @@ struct SljitProjectedGroupedAggregateSink {
 		if (FlushDirectAggregate()) {
 			return true;
 		}
-		return SljitTryAppendDirectChunkToRuntimeBatch(
-		    runtime, projected, projection_op.output_types, handled, [&]() { return FlushProjectedBatch(); },
-		    std::forward<MATERIALIZE_BATCH>(materialize_batch));
+		projected_batch.Ensure(runtime.GetAllocator(), projection_op.output_types);
+		if (projected_batch.chunk.size() + projected.size() > STANDARD_VECTOR_SIZE) {
+			if (FlushProjectedBatch()) {
+				return true;
+			}
+		}
+		if (!materialize_batch(projected_batch.chunk)) {
+			return false;
+		}
+		handled = true;
+		if (projected_batch.chunk.size() == STANDARD_VECTOR_SIZE) {
+			if (FlushProjectedBatch()) {
+				return true;
+			}
+		}
+		return false;
 	}
 
 	void FinishDeferredGroupedUpdate() {
@@ -179,6 +198,7 @@ struct SljitProjectedGroupedAggregateSink {
 	SljitExecutableRegionOp &aggregate_op;
 	bool &deferred_grouped_finish;
 	idx_t &processed;
+	SljitDataChunkBatch &projected_batch;
 	const char *append_phase;
 	const char *boundary_phase;
 	optional_ptr<SljitDirectJoinOutputAggregatePolicy> direct_aggregate;

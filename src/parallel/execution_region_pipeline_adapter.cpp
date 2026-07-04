@@ -70,18 +70,6 @@ SinkNextBatchType ExecutionRegionPipelineAdapter::AdvanceSinkBatch(DataChunk &so
 	return result;
 }
 
-optional_ptr<DataChunk> ExecutionRegionPipelineAdapter::PendingSourceContractBatch() {
-	return executor.PendingSourceContractBatch();
-}
-
-DataChunk &ExecutionRegionPipelineAdapter::PrepareSourceContractBatch(const vector<LogicalType> &types) {
-	return executor.PrepareSourceContractBatch(types);
-}
-
-void ExecutionRegionPipelineAdapter::ResetSourceContractBatch() {
-	executor.ResetSourceContractBatch();
-}
-
 ExecutionOperatorBindResult
 ExecutionRegionPipelineAdapter::BindOperator(idx_t operator_index, DataChunk &input,
                                              const ExecutionRegionOperatorInfo &operator_info,

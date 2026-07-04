@@ -181,7 +181,7 @@ private:
 		return SljitProjectedGroupedAggregateSink(
 		    ops, runtime, runtime.ExecutionOperators(), scratch, result, final_projection_idx,
 		    ops[final_projection_idx], aggregate_idx, ops[aggregate_idx], deferred_grouped_finish,
-		    processed_output_rows, "post_join_batch_append", "copied_post_join_batch",
+		    processed_output_rows, projected_batch, "post_join_batch_append", "copied_post_join_batch",
 		    optional_ptr<SljitDirectJoinOutputAggregatePolicy>(&direct_join_output_aggregate));
 	}
 
@@ -189,6 +189,7 @@ private:
 	bool prepared = false;
 	bool deferred_grouped_finish = false;
 	idx_t processed_output_rows = 0;
+	SljitDataChunkBatch projected_batch;
 	SljitPostJoinProjectionStrategy post_join_projection;
 	unique_ptr<SljitDirectJoinOutputAggregateStrategy> direct_join_output_aggregate_strategy;
 	SljitDirectJoinOutputAggregatePolicy direct_join_output_aggregate;

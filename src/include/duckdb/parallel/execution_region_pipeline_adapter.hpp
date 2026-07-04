@@ -36,9 +36,6 @@ public:
 
 	SourceResultType FetchSourceContract(DataChunk *&result, ExecutionRegionSourceContractMetrics *metrics = nullptr);
 	SinkNextBatchType AdvanceSinkBatch(DataChunk &source_chunk, bool have_more_output);
-	optional_ptr<DataChunk> PendingSourceContractBatch();
-	DataChunk &PrepareSourceContractBatch(const vector<LogicalType> &types);
-	void ResetSourceContractBatch();
 	ExecutionOperatorBindResult BindOperator(idx_t operator_index, DataChunk &input,
 	                                         const ExecutionRegionOperatorInfo &operator_info,
 	                                         ExecutionOperatorBinding &binding);

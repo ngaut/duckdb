@@ -650,7 +650,20 @@ def verify_runtime_batch_view() -> None:
     )
     require_text(
         "extension/jit_sljit/include/sljit_hash_join_projected_aggregate_runtime.hpp",
-        ("SljitDownstreamRowBudgetReached(processed_output_rows, max_recipe_batches)",),
+        (
+            "SljitDownstreamRowBudgetReached(processed_output_rows, max_recipe_batches)",
+            "SljitDataChunkBatch projected_batch",
+            "processed_output_rows, projected_batch",
+        ),
+    )
+    require_text(
+        "extension/jit_sljit/include/sljit_projected_grouped_aggregate_sink.hpp",
+        (
+            "SljitDataChunkBatch &projected_batch",
+            "projected_batch.Ensure(runtime.GetAllocator(), projection_op.output_types)",
+            "SljitAppendChunkToInitializedBatch",
+            "SljitFlushDataChunkBatch(projected_batch.chunk",
+        ),
     )
     reject_text(
         "extension/jit_sljit/include/sljit_projected_grouped_aggregate_sink.hpp",
@@ -659,6 +672,24 @@ def verify_runtime_batch_view() -> None:
             "SOURCE_FETCHES",
             "RunSourceLoop",
             "BudgetReached() const",
+        ),
+    )
+    reject_regex(
+        "global source-contract output batch",
+        (
+            r"\bPendingSourceContractBatch\b",
+            r"\bPrepareSourceContractBatch\b",
+            r"\bResetSourceContractBatch\b",
+            r"\bexecution_source_output_batch\b",
+            r"\bSljitFlushRuntimePendingBatch\b",
+            r"\bSljitAppendChunkToRuntimeBatch\b",
+            r"\bSljitTryAppendDirectChunkToRuntimeBatch\b",
+        ),
+        (
+            "src/**/*.cpp",
+            "src/**/*.hpp",
+            "extension/jit_sljit/**/*.cpp",
+            "extension/jit_sljit/**/*.hpp",
         ),
     )
     require_text(

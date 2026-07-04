@@ -276,18 +276,6 @@ public:
 		return result;
 	}
 
-	optional_ptr<DataChunk> PendingSourceContractBatch() override {
-		return pipeline.PendingSourceContractBatch();
-	}
-
-	DataChunk &PrepareSourceContractBatch(const vector<LogicalType> &types) override {
-		return pipeline.PrepareSourceContractBatch(types);
-	}
-
-	void ResetSourceContractBatch() override {
-		pipeline.ResetSourceContractBatch();
-	}
-
 	ExecutionOperatorBindResult BindOperator(idx_t operator_index, DataChunk &input,
 	                                         const ExecutionRegionOperatorInfo &operator_info,
 	                                         ExecutionOperatorBinding &binding) override {
