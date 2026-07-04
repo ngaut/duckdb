@@ -35,18 +35,14 @@ private:
 	using TryBuildRecipeFunction = bool (SljitNativeTailRecipeBuilder::*)(SljitFullPipelineRecipe &) const;
 
 	struct RegistryEntry {
-		const char *name;
 		TryBuildRecipeFunction try_build;
 	};
 
 	static const RegistryEntry *RecipeRegistry(idx_t &count) {
-		static const RegistryEntry registry[] = {
-		    {"mark_filter_projection_native_tail", &SljitNativeTailRecipeBuilder::TryBuildMarkFilterProjection},
-		    {"generated_filter_projection_native_tail",
-		     &SljitNativeTailRecipeBuilder::TryBuildGeneratedFilterProjection},
-		    {"projection_filter_projection_native_tail",
-		     &SljitNativeTailRecipeBuilder::TryBuildProjectionFilterProjection},
-		    {"source_batch_native_tail", &SljitNativeTailRecipeBuilder::TryBuildSourceBatch}};
+		static const RegistryEntry registry[] = {{&SljitNativeTailRecipeBuilder::TryBuildMarkFilterProjection},
+		                                         {&SljitNativeTailRecipeBuilder::TryBuildGeneratedFilterProjection},
+		                                         {&SljitNativeTailRecipeBuilder::TryBuildProjectionFilterProjection},
+		                                         {&SljitNativeTailRecipeBuilder::TryBuildSourceBatch}};
 		count = sizeof(registry) / sizeof(registry[0]);
 		return registry;
 	}

@@ -27,8 +27,7 @@ public:
 	                               bool uses_scan_filters_p)
 	    : ops(ops_p), uses_scan_filters(uses_scan_filters_p),
 	      schedule_facts(SljitAnalyzeFullPipelineScheduleFacts(ops_p, uses_scan_filters_p)),
-	      binding(ops_p, source_min_values_p, source_max_values_p,
-	              schedule_facts.uses_extended_source_fetch_budget) {
+	      binding(ops_p, source_min_values_p, source_max_values_p, schedule_facts.uses_extended_source_fetch_budget) {
 	}
 
 	SljitFullPipelineRecipePlan Build() const {
@@ -47,16 +46,15 @@ private:
 	using TryBuildRecipeFunction = bool (SljitFullPipelineRecipeBuilder::*)(SljitFullPipelineRecipe &) const;
 
 	struct SljitFullPipelineRecipeRegistryEntry {
-		const char *name;
 		TryBuildRecipeFunction try_build;
 	};
 
 	static const SljitFullPipelineRecipeRegistryEntry *RecipeRegistry(idx_t &count) {
 		static const SljitFullPipelineRecipeRegistryEntry registry[] = {
-		    {"selected_join_aggregate", &SljitFullPipelineRecipeBuilder::TryBuildSelectedJoinAggregateRecipe},
-		    {"hash_join_delim_join_sink", &SljitFullPipelineRecipeBuilder::TryBuildHashJoinDelimJoinSinkRecipe},
-		    {"projection_aggregate", &SljitFullPipelineRecipeBuilder::TryBuildProjectionAggregateRecipe},
-		    {"native_tail", &SljitFullPipelineRecipeBuilder::TryBuildNativeTailRecipe}};
+		    {&SljitFullPipelineRecipeBuilder::TryBuildSelectedJoinAggregateRecipe},
+		    {&SljitFullPipelineRecipeBuilder::TryBuildHashJoinDelimJoinSinkRecipe},
+		    {&SljitFullPipelineRecipeBuilder::TryBuildProjectionAggregateRecipe},
+		    {&SljitFullPipelineRecipeBuilder::TryBuildNativeTailRecipe}};
 		count = sizeof(registry) / sizeof(registry[0]);
 		return registry;
 	}
@@ -105,8 +103,8 @@ private:
 				return false;
 			}
 		}
-		recipe =
-		    binding.MakeHashJoinDelimJoinSinkRecipe(facts.first_hash_join_idx, facts.final_hash_join_idx, facts.sink_idx);
+		recipe = binding.MakeHashJoinDelimJoinSinkRecipe(facts.first_hash_join_idx, facts.final_hash_join_idx,
+		                                                 facts.sink_idx);
 		return true;
 	}
 
