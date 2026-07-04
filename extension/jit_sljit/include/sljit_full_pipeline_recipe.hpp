@@ -66,7 +66,8 @@ private:
 	}
 
 	bool TryBuildFilteredSourceAggregateRecipe(SljitFullPipelineRecipe &recipe) const {
-		if (!FilteredSourceAggregate()) {
+		SljitFilteredSourceAggregateFacts facts;
+		if (!SljitTryAnalyzeFilteredSourceAggregate(ops, uses_scan_filters, facts)) {
 			return false;
 		}
 		recipe = binding.MakeSourceBatchNativeTailRecipe();
@@ -74,26 +75,25 @@ private:
 	}
 
 	bool TryBuildSelectedJoinAggregateRecipe(SljitFullPipelineRecipe &recipe) const {
-		if (!SljitFullPipelineOpsAre(ops, SljitNativeRegionOpKind::HASH_JOIN_PROBE,
-		                             SljitNativeRegionOpKind::AGGREGATE_UPDATE)) {
-			if (!SljitFullPipelineOpsAre(ops, SljitNativeRegionOpKind::HASH_JOIN_PROBE,
-			                             SljitNativeRegionOpKind::HASH_JOIN_PROBE,
-			                             SljitNativeRegionOpKind::AGGREGATE_UPDATE)) {
-				return false;
-			}
-			if (!SljitCanBindHashJoinProbeSelectionPrimitive(ops, 0) ||
-			    !SljitCanBindHashJoinProbeSelectionPrimitive(ops, 1) ||
-			    !SljitAggregateUpdateCanUseSelectedJoinPerfectHashBackend(ops[2])) {
-				return false;
-			}
-			recipe = binding.MakeTwoJoinSelectedAggregateRecipe(0, 1, 2);
-			return true;
-		}
-		if (!SljitCanBindHashJoinProbeSelectionPrimitive(ops, 0) ||
-		    !SljitAggregateUpdateCanUseSelectedJoinPerfectHashBackend(ops[1])) {
+		SljitSelectedJoinAggregateFacts facts;
+		if (!SljitTryAnalyzeSelectedJoinAggregate(ops, facts)) {
 			return false;
 		}
-		recipe = binding.MakeSelectedJoinAggregateRecipe(0, 1);
+		if (facts.HasSecondHashJoin()) {
+			if (!SljitCanBindHashJoinProbeSelectionPrimitive(ops, facts.first_hash_join_idx) ||
+			    !SljitCanBindHashJoinProbeSelectionPrimitive(ops, facts.second_hash_join_idx) ||
+			    !SljitAggregateUpdateCanUseSelectedJoinPerfectHashBackend(ops[facts.aggregate_idx])) {
+				return false;
+			}
+			recipe = binding.MakeTwoJoinSelectedAggregateRecipe(facts.first_hash_join_idx, facts.second_hash_join_idx,
+			                                                    facts.aggregate_idx);
+			return true;
+		}
+		if (!SljitCanBindHashJoinProbeSelectionPrimitive(ops, facts.first_hash_join_idx) ||
+		    !SljitAggregateUpdateCanUseSelectedJoinPerfectHashBackend(ops[facts.aggregate_idx])) {
+			return false;
+		}
+		recipe = binding.MakeSelectedJoinAggregateRecipe(facts.first_hash_join_idx, facts.aggregate_idx);
 		return true;
 	}
 
@@ -107,20 +107,17 @@ private:
 	}
 
 	bool TryBuildHashJoinDelimJoinSinkRecipe(SljitFullPipelineRecipe &recipe) const {
-		if (ops.size() < 2 || ops.back().kind != SljitNativeRegionOpKind::DELIM_JOIN_SINK) {
+		SljitHashJoinDelimJoinSinkFacts facts;
+		if (!SljitTryAnalyzeHashJoinDelimJoinSink(ops, facts)) {
 			return false;
 		}
-		const idx_t sink_idx = ops.size() - 1;
-		const idx_t final_hash_join_idx = sink_idx - 1;
-		if (sink_idx + 3 > SLJIT_FULL_PIPELINE_MAX_PRIMITIVES ||
-		    !SljitCanBindSelectedHashJoinDelimJoinSinkPrimitive(ops, final_hash_join_idx, sink_idx)) {
+		if (facts.sink_idx + 3 > SLJIT_FULL_PIPELINE_MAX_PRIMITIVES ||
+		    !SljitCanBindSelectedHashJoinDelimJoinSinkPrimitive(ops, facts.final_hash_join_idx, facts.sink_idx)) {
 			return false;
 		}
-		for (idx_t hash_join_idx = 0; hash_join_idx < sink_idx; hash_join_idx++) {
-			if (ops[hash_join_idx].kind != SljitNativeRegionOpKind::HASH_JOIN_PROBE) {
-				return false;
-			}
-			if (hash_join_idx == final_hash_join_idx) {
+		for (idx_t hash_join_idx = facts.first_hash_join_idx; hash_join_idx <= facts.final_hash_join_idx;
+		     hash_join_idx++) {
+			if (hash_join_idx == facts.final_hash_join_idx) {
 				if (!SljitCanBindHashJoinProbeSelectionPrimitive(ops, hash_join_idx)) {
 					return false;
 				}
@@ -130,7 +127,8 @@ private:
 				return false;
 			}
 		}
-		recipe = binding.MakeHashJoinDelimJoinSinkRecipe(0, final_hash_join_idx, sink_idx);
+		recipe =
+		    binding.MakeHashJoinDelimJoinSinkRecipe(facts.first_hash_join_idx, facts.final_hash_join_idx, facts.sink_idx);
 		return true;
 	}
 
@@ -381,13 +379,6 @@ private:
 			return true;
 		}
 		throw InternalException("SLJIT projection aggregate recipe has an unknown variant");
-	}
-
-	bool FilteredSourceAggregate() const {
-		return uses_scan_filters &&
-		       SljitFullPipelineOpsAre(ops, SljitNativeRegionOpKind::HASH_JOIN_PROBE,
-		                               SljitNativeRegionOpKind::AGGREGATE_UPDATE) &&
-		       SljitFullPipelineIsAggregateUpdateAt(ops, 1, ExecutionRegionSinkKind::UNGROUPED_AGGREGATE_UPDATE);
 	}
 
 	bool
