@@ -8,11 +8,6 @@
 
 #pragma once
 
-#include "sljit_runtime_batch_state.hpp"
-#include "sljit_region_runtime_state.hpp"
-#include "sljit_region_runtime_trace.hpp"
-#include "sljit_runtime_batch_runtime.hpp"
-
 #include "duckdb/common/types.hpp"
 #include "duckdb/execution/execution_region_runtime.hpp"
 
@@ -79,13 +74,6 @@ static bool SljitStopFullPipelineAfterFlush(ExecutionRegionResult &result, Execu
 	return SljitStopFullPipeline(result, stop_result);
 }
 
-template <class FINALIZE>
-static bool SljitStopFullPipelineAfterFinalize(ExecutionRegionResult &result, ExecutionRegionResult stop_result,
-                                               FINALIZE finalize) {
-	finalize();
-	return SljitStopFullPipeline(result, stop_result);
-}
-
 template <class BUDGET_REACHED, class EXECUTE_SOURCE_CHUNK, class STOP_NOT_FINISHED, class STOP_BLOCKED,
           class STOP_FINISHED>
 static bool SljitRunFullPipelineSourceContractLoop(ExecutionRegionRuntime &runtime, idx_t &fetched_chunks,
@@ -114,45 +102,6 @@ static bool SljitRunFullPipelineSourceContractLoop(ExecutionRegionRuntime &runti
 	}
 }
 
-template <class BUDGET_REACHED, class EXECUTE_SOURCE_CHUNK>
-static bool SljitRunFullPipelineSourceContractLoop(ExecutionRegionRuntime &runtime, ExecutionRegionResult &result,
-                                                   idx_t &fetched_chunks, BUDGET_REACHED &&budget_reached,
-                                                   EXECUTE_SOURCE_CHUNK &&execute_source_chunk) {
-	return SljitRunFullPipelineSourceContractLoop(
-	    runtime, fetched_chunks, std::forward<BUDGET_REACHED>(budget_reached),
-	    std::forward<EXECUTE_SOURCE_CHUNK>(execute_source_chunk),
-	    [&]() { return SljitStopFullPipeline(result, ExecutionRegionResult::NOT_FINISHED); },
-	    [&]() { return SljitStopFullPipeline(result, ExecutionRegionResult::INTERRUPTED); },
-	    [&]() { return SljitStopFullPipeline(result, ExecutionRegionResult::FINISHED); });
-}
-
-template <class BUDGET_REACHED, class EXECUTE_SOURCE_CHUNK, class FLUSH_BATCH>
-static bool SljitRunFullPipelineSourceContractLoopAfterFlush(ExecutionRegionRuntime &runtime,
-                                                             ExecutionRegionResult &result, idx_t &fetched_chunks,
-                                                             BUDGET_REACHED &&budget_reached,
-                                                             EXECUTE_SOURCE_CHUNK &&execute_source_chunk,
-                                                             FLUSH_BATCH &&flush_batch) {
-	return SljitRunFullPipelineSourceContractLoop(
-	    runtime, fetched_chunks, std::forward<BUDGET_REACHED>(budget_reached),
-	    std::forward<EXECUTE_SOURCE_CHUNK>(execute_source_chunk),
-	    [&]() { return SljitStopFullPipelineAfterFlush(result, ExecutionRegionResult::NOT_FINISHED, flush_batch); },
-	    [&]() { return SljitStopFullPipelineAfterFlush(result, ExecutionRegionResult::INTERRUPTED, flush_batch); },
-	    [&]() { return SljitStopFullPipelineAfterFlush(result, ExecutionRegionResult::FINISHED, flush_batch); });
-}
-
-template <class BUDGET_REACHED, class EXECUTE_SOURCE_CHUNK, class FINALIZE>
-static bool
-SljitRunFullPipelineSourceContractLoopAfterFinalize(ExecutionRegionRuntime &runtime, ExecutionRegionResult &result,
-                                                    idx_t &fetched_chunks, BUDGET_REACHED &&budget_reached,
-                                                    EXECUTE_SOURCE_CHUNK &&execute_source_chunk, FINALIZE &&finalize) {
-	return SljitRunFullPipelineSourceContractLoop(
-	    runtime, fetched_chunks, std::forward<BUDGET_REACHED>(budget_reached),
-	    std::forward<EXECUTE_SOURCE_CHUNK>(execute_source_chunk),
-	    [&]() { return SljitStopFullPipelineAfterFinalize(result, ExecutionRegionResult::NOT_FINISHED, finalize); },
-	    [&]() { return SljitStopFullPipelineAfterFinalize(result, ExecutionRegionResult::INTERRUPTED, finalize); },
-	    [&]() { return SljitStopFullPipelineAfterFinalize(result, ExecutionRegionResult::FINISHED, finalize); });
-}
-
 static bool SljitDeferFullPipelineResult(ExecutionRegionRuntime &runtime, string &deferred_reason,
                                          ExecutionRegionResult &result) {
 	runtime.Defer(std::move(deferred_reason));
@@ -176,37 +125,5 @@ static bool SljitAdvanceSinkBatchBlocked(ExecutionRegionRuntime &runtime, DataCh
                                          bool have_more_output) {
 	return runtime.AdvanceSinkBatch(source_chunk, have_more_output) == SinkNextBatchType::BLOCKED;
 }
-
-static bool SljitPrepareSourceChunkAsJoinInput(ExecutionRegionRuntime &runtime, ExecutionRegionResult &result,
-                                               DataChunk &source_chunk, SourceResultType source_result,
-                                               DataChunk *&join_input) {
-	if (SljitAdvanceSinkBatchBlocked(runtime, source_chunk, source_result == SourceResultType::HAVE_MORE_OUTPUT)) {
-		return SljitStopFullPipeline(result, ExecutionRegionResult::INTERRUPTED);
-	}
-	join_input = &source_chunk;
-	return false;
-}
-
-struct SljitSourceChunkJoinInput {
-	SljitSourceChunkJoinInput(ExecutionRegionRuntime &runtime_p, ExecutionRegionResult &result_p)
-	    : runtime(runtime_p), result(result_p) {
-	}
-
-	bool operator()(SljitRegionExecutionScratch &, DataChunk &source_chunk, SourceResultType source_result,
-	                DataChunk *&join_input) {
-		return SljitPrepareSourceChunkAsJoinInput(runtime, result, source_chunk, source_result, join_input);
-	}
-
-	ExecutionRegionRuntime &runtime;
-	ExecutionRegionResult &result;
-};
-
-struct SljitMaterializedChunkJoinInput {
-	bool operator()(SljitRegionExecutionScratch &, DataChunk &source_chunk, SourceResultType,
-	                DataChunk *&join_input) {
-		join_input = &source_chunk;
-		return false;
-	}
-};
 
 } // namespace duckdb

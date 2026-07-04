@@ -14,7 +14,6 @@
 #include "sljit_filter_runtime.hpp"
 #include "sljit_inline_string_decompress_projection_runtime.hpp"
 #include "sljit_projection_expression_runtime.hpp"
-#include "sljit_projection_reference_runtime.hpp"
 #include "sljit_region_runtime_state.hpp"
 
 namespace duckdb {
@@ -107,33 +106,6 @@ static bool SljitTryExecuteFullPipelineSingleOperatorTransform(ExecutionRegionRu
 	current = &output;
 	needs_more_input = current->size() == 0;
 	return true;
-}
-
-template <class SCRATCH>
-static void SljitPrepareOptionalPreJoinProjectionInput(ExecutionRegionRuntime &runtime, SCRATCH &scratch,
-                                                       idx_t pre_join_projection_idx,
-                                                       SljitExecutableRegionOp &pre_join_projection_op,
-                                                       DataChunk &source_chunk,
-                                                       bool use_source_chunk_without_projection, DataChunk *&join_input,
-                                                       const char *reference_phase = "pre_join_reference_projection",
-                                                       const char *batch_phase = "pre_join_batch_projection") {
-	if (use_source_chunk_without_projection) {
-		join_input = &source_chunk;
-		return;
-	}
-
-	auto &pre_join = scratch.TemporaryChunk(pre_join_projection_idx);
-	pre_join.Reset();
-	auto projection_stage_start = SljitRegionStageStart(runtime);
-	if (SljitTryReferenceProjection(pre_join, source_chunk, pre_join_projection_op)) {
-		RecordSljitRegionStageRuntime(runtime, pre_join_projection_idx, pre_join_projection_op.kind, reference_phase,
-		                              projection_stage_start);
-	} else {
-		SljitExecuteProjection(scratch, pre_join_projection_idx, pre_join_projection_op, source_chunk, pre_join);
-		RecordSljitRegionStageRuntime(runtime, pre_join_projection_idx, pre_join_projection_op.kind, batch_phase,
-		                              projection_stage_start);
-	}
-	join_input = pre_join.size() == 0 ? nullptr : &pre_join;
 }
 
 static bool SljitTryBindProjectionExpressionBatchTarget(Vector &target, const LogicalType &return_type,

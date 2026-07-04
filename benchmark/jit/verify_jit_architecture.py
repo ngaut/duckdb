@@ -115,6 +115,14 @@ def verify_required_design_files() -> None:
     require_absent("extension/jit_sljit/include/sljit_between_join_sidecar_plan_common_runtime.hpp")
     require_absent("extension/jit_sljit/include/sljit_between_join_compressed_group_key_plan_runtime.hpp")
     require_absent("extension/jit_sljit/include/sljit_between_join_precomputed_payload_plan_runtime.hpp")
+    require_absent("extension/jit_sljit/include/sljit_pre_join_projection_runtime.hpp")
+    require_absent("extension/jit_sljit/include/sljit_decimal64_payload_runtime.hpp")
+    require_absent("extension/jit_sljit/include/sljit_decimal64_payload_state.hpp")
+    require_absent("extension/jit_sljit/include/sljit_direct_reference_projection_runtime.hpp")
+    require_absent("extension/jit_sljit/include/sljit_direct_reference_projection_compaction_runtime.hpp")
+    require_absent("extension/jit_sljit/include/sljit_final_projection_aggregate_descriptor.hpp")
+    require_absent("extension/jit_sljit/include/sljit_final_projection_aggregate_state.hpp")
+    require_absent("extension/jit_sljit/include/sljit_hash_join_projected_aggregate_runtime.hpp")
     require_text(
         "benchmark/tpch/jit/JIT_PRODUCTION_RECIPE_DESIGN.md",
         (
@@ -203,6 +211,21 @@ def verify_required_design_files() -> None:
     reject_text(
         "benchmark/tpch/jit/JIT_PRODUCTION_RECIPE_DESIGN.md",
         ("regular hash-table probe",),
+    )
+    reject_text(
+        "extension/jit_sljit/include/sljit_full_pipeline_runtime.hpp",
+        (
+            "SljitStopFullPipelineAfterFinalize",
+            "SljitRunFullPipelineSourceContractLoopAfterFlush",
+            "SljitRunFullPipelineSourceContractLoopAfterFinalize",
+            "SljitPrepareSourceChunkAsJoinInput",
+            "SljitSourceChunkJoinInput",
+            "SljitMaterializedChunkJoinInput",
+        ),
+    )
+    reject_text(
+        "extension/jit_sljit/include/sljit_projection_executor_runtime.hpp",
+        ("SljitPrepareOptionalPreJoinProjectionInput",),
     )
 
 
@@ -682,7 +705,7 @@ def verify_runtime_batch_view() -> None:
         ("selected_join_output.BudgetReached(runtime, max_recipe_batches)",),
     )
     require_text(
-        "extension/jit_sljit/include/sljit_hash_join_projected_aggregate_runtime.hpp",
+        "extension/jit_sljit/include/sljit_join_projection_aggregate_update_runtime.hpp",
         (
             "SljitDownstreamRowBudgetReached(processed_output_rows, max_recipe_batches)",
             "SljitDataChunkBatch projected_batch",
@@ -780,7 +803,7 @@ def verify_runtime_proof_ownership() -> None:
         ("extension/jit_sljit/include/sljit_direct_join_output_aggregate_state.hpp",),
     )
     reject_text(
-        "extension/jit_sljit/include/sljit_hash_join_projected_aggregate_runtime.hpp",
+        "extension/jit_sljit/include/sljit_join_projection_aggregate_update_runtime.hpp",
         ("source_key0_int64_to_int32_unchecked || source_key0_int64_to_int32_matches_are_proven",),
     )
 
@@ -1686,7 +1709,7 @@ def verify_primitive_sequence() -> None:
         ),
     )
     require_text(
-        "extension/jit_sljit/include/sljit_hash_join_projected_aggregate_runtime.hpp",
+        "extension/jit_sljit/include/sljit_join_projection_aggregate_update_runtime.hpp",
         (
             "input.hash_join_output_column_map",
             "input.hash_join_output_projection_idx",
@@ -1695,7 +1718,7 @@ def verify_primitive_sequence() -> None:
         ),
     )
     reject_text(
-        "extension/jit_sljit/include/sljit_hash_join_projected_aggregate_runtime.hpp",
+        "extension/jit_sljit/include/sljit_join_projection_aggregate_update_runtime.hpp",
         (
             "auto &producer_input = scratch.TemporaryChunk(output_projection_idx)",
             "SljitExecuteProjection(scratch, output_projection_idx",
