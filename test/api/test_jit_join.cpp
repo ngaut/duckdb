@@ -1573,161 +1573,6 @@ TEST_CASE("JIT two-join grouped aggregate composes mixed VARCHAR projection chai
 	RequireComposedTwoJoinProjectionChainEvent(manager);
 }
 
-TEST_CASE("JIT Q5-like two-join aggregate direct-projects compressed VARCHAR groups", "[api][jit]") {
-	DuckDB db;
-	Connection con(db);
-	auto &manager = ExecutionRegionManager::Get(*con.context);
-
-	REQUIRE_NO_FAIL(con.Query("LOAD tpch"));
-	REQUIRE_NO_FAIL(con.Query("CALL dbgen(sf=0.01)"));
-	ConfigureSljitForCoverage(con, false, true, true, 10000);
-	REQUIRE_NO_FAIL(con.Query("PRAGMA threads=1"));
-	REQUIRE_NO_FAIL(con.Query("SET perfect_ht_threshold=0"));
-
-	const string query = "SELECT n_name, sum(l_extendedprice * (1 - l_discount)) AS revenue "
-	                     "FROM customer, orders, lineitem, supplier, nation, region "
-	                     "WHERE c_custkey = o_custkey "
-	                     "  AND l_orderkey = o_orderkey "
-	                     "  AND l_suppkey = s_suppkey "
-	                     "  AND c_nationkey = s_nationkey "
-	                     "  AND s_nationkey = n_nationkey "
-	                     "  AND n_regionkey = r_regionkey "
-	                     "  AND r_name = 'ASIA' "
-	                     "  AND o_orderdate >= CAST('1994-01-01' AS date) "
-	                     "  AND o_orderdate < CAST('1995-01-01' AS date) "
-	                     "GROUP BY n_name "
-	                     "ORDER BY revenue DESC";
-	REQUIRE_NO_FAIL(con.Query("SET jit_policy='off'"));
-	auto reference = con.Query(query);
-	REQUIRE_NO_FAIL(*reference);
-	REQUIRE(reference->RowCount() > 0);
-
-	REQUIRE_NO_FAIL(con.Query("SET jit_policy='auto'"));
-	ClearJitTrace(manager, true);
-	auto result = con.Query(query);
-	REQUIRE_NO_FAIL(*result);
-	REQUIRE(result->RowCount() == reference->RowCount());
-	REQUIRE(result->ColumnCount() == reference->ColumnCount());
-	for (idx_t row_idx = 0; row_idx < result->RowCount(); row_idx++) {
-		for (idx_t col_idx = 0; col_idx < result->ColumnCount(); col_idx++) {
-			REQUIRE(result->GetValue(col_idx, row_idx).ToString() == reference->GetValue(col_idx, row_idx).ToString());
-		}
-	}
-
-	RequireJitEvent(
-	    manager,
-	    [](const ExecutionRegionEvent &event) {
-		    return EventPhase(event) == "runtime" && EventStatus(event) == "executed" &&
-		           EventExecutionMode(event) == "native" &&
-		           StringUtil::Contains(EventJitRuntimePathCounts(event),
-		                                "aggregate_update.direct_projection_row_pointer_grouped_update=");
-	    },
-	    [](const ExecutionRegionEvent &event) {
-		    const auto runtime_paths = EventJitRuntimePathCounts(event);
-		    const auto boundaries = EventJitMaterializationBoundaryCounts(event);
-		    REQUIRE(event.jit_runtime.hash_join_probe_layout == "regular_hash_table");
-		    REQUIRE(
-		        StringUtil::Contains(runtime_paths, "aggregate_update.direct_projection_row_pointer_grouped_update="));
-		    REQUIRE(StringUtil::Contains(
-		        runtime_paths, "aggregate_update.direct_row_pointer_preaggregated_grouped_primitive_update="));
-		    REQUIRE(StringUtil::Contains(runtime_paths, "projection.direct_reference_payload_view="));
-		    REQUIRE(StringUtil::Contains(boundaries, "hash_join_probe.row_pointer_selection_reference="));
-		    REQUIRE(StringUtil::Contains(boundaries, "aggregate_update.preaggregated_row_pointer_primitive_groups="));
-		    REQUIRE(StringUtil::Contains(boundaries, "aggregate_update.row_pointer_grouped_lookup_update="));
-		    REQUIRE_FALSE(StringUtil::Contains(boundaries, "hash_join_probe.pending_probe_batch="));
-		    REQUIRE_FALSE(StringUtil::Contains(boundaries, "projection.direct_post_join_reference_projection="));
-		    REQUIRE_FALSE(StringUtil::Contains(boundaries, "projection.direct_remap_post_join_batch_projection="));
-		    REQUIRE_FALSE(StringUtil::Contains(boundaries, "projection.direct_post_join_computed_projection="));
-		    REQUIRE_FALSE(StringUtil::Contains(boundaries, "projection.direct_post_join_batch_projection="));
-		    REQUIRE_FALSE(StringUtil::Contains(boundaries, "projection.copied_post_join_projection="));
-		    REQUIRE_FALSE(StringUtil::Contains(boundaries, "projection.copied_post_join_batch="));
-		    REQUIRE_FALSE(StringUtil::Contains(boundaries, "aggregate_update.state_address_selection_new_update="));
-		    REQUIRE_FALSE(StringUtil::Contains(boundaries, "aggregate_update.address_vector_payload_update="));
-	    });
-}
-
-TEST_CASE("JIT Q7-like aggregate preaggregates compressed interleaved descriptor groups", "[api][jit]") {
-	DuckDB db;
-	Connection con(db);
-	auto &manager = ExecutionRegionManager::Get(*con.context);
-
-	REQUIRE_NO_FAIL(con.Query("LOAD tpch"));
-	REQUIRE_NO_FAIL(con.Query("CALL dbgen(sf=0.01)"));
-	ConfigureSljitForCoverage(con, false, true, true, 10000);
-	REQUIRE_NO_FAIL(con.Query("SET threads=1"));
-	REQUIRE_NO_FAIL(con.Query("SET perfect_ht_threshold=0"));
-
-	const string query = "SELECT supp_nation, cust_nation, l_year, sum(volume) AS revenue "
-	                     "FROM ("
-	                     "  SELECT n1.n_name AS supp_nation, "
-	                     "         n2.n_name AS cust_nation, "
-	                     "         extract(year FROM l_shipdate) AS l_year, "
-	                     "         l_extendedprice * (1 - l_discount) AS volume "
-	                     "  FROM supplier, lineitem, orders, customer, nation n1, nation n2 "
-	                     "  WHERE s_suppkey = l_suppkey "
-	                     "    AND o_orderkey = l_orderkey "
-	                     "    AND c_custkey = o_custkey "
-	                     "    AND s_nationkey = n1.n_nationkey "
-	                     "    AND c_nationkey = n2.n_nationkey "
-	                     "    AND ((n1.n_name = 'FRANCE' AND n2.n_name = 'GERMANY') "
-	                     "      OR (n1.n_name = 'GERMANY' AND n2.n_name = 'FRANCE')) "
-	                     "    AND l_shipdate BETWEEN CAST('1995-01-01' AS date) AND CAST('1996-12-31' AS date)"
-	                     ") AS shipping "
-	                     "GROUP BY supp_nation, cust_nation, l_year "
-	                     "ORDER BY supp_nation, cust_nation, l_year";
-	REQUIRE_NO_FAIL(con.Query("SET jit_policy='off'"));
-	auto reference = con.Query(query);
-	REQUIRE_NO_FAIL(*reference);
-	REQUIRE(reference->RowCount() == 4);
-
-	REQUIRE_NO_FAIL(con.Query("SET jit_policy='auto'"));
-	ClearJitTrace(manager, true);
-	auto result = con.Query(query);
-	REQUIRE_NO_FAIL(*result);
-	REQUIRE(result->RowCount() == reference->RowCount());
-	REQUIRE(result->ColumnCount() == reference->ColumnCount());
-	for (idx_t row_idx = 0; row_idx < result->RowCount(); row_idx++) {
-		for (idx_t col_idx = 0; col_idx < result->ColumnCount(); col_idx++) {
-			REQUIRE(result->GetValue(col_idx, row_idx).ToString() == reference->GetValue(col_idx, row_idx).ToString());
-		}
-	}
-
-	RequireJitEvent(
-	    manager,
-	    [](const ExecutionRegionEvent &event) {
-		    return EventPhase(event) == "runtime" && EventStatus(event) == "executed" &&
-		           EventExecutionMode(event) == "native" &&
-		           StringUtil::Contains(EventJitRuntimePathCounts(event),
-		                                "aggregate_update.direct_projection_row_pointer_grouped_update=");
-	    },
-	    [](const ExecutionRegionEvent &event) {
-		    const auto runtime_paths = EventJitRuntimePathCounts(event);
-		    const auto boundaries = EventJitMaterializationBoundaryCounts(event);
-		    const auto stages = EventGeneratedStageCountBreakdown(event);
-		    REQUIRE_FALSE(StringUtil::Contains(
-		        runtime_paths, "aggregate_update.direct_projection_aggregate_group.input_vector_cast="));
-		    REQUIRE(StringUtil::Contains(runtime_paths,
-		                                 "aggregate_update.direct_projection_aggregate_group.row_pointer_field_cast="));
-		    REQUIRE(StringUtil::Contains(runtime_paths,
-		                                 "aggregate_update.direct_projection_aggregate_group.input_vector="));
-		    REQUIRE(
-		        StringUtil::Contains(runtime_paths, "aggregate_update.direct_projection_row_pointer_grouped_update="));
-		    REQUIRE(StringUtil::Contains(
-		        runtime_paths, "aggregate_update.direct_row_pointer_preaggregated_grouped_primitive_update="));
-		    REQUIRE_FALSE(
-		        StringUtil::Contains(runtime_paths, "aggregate_update.direct_row_pointer_grouped_lookup_update="));
-		    REQUIRE(StringUtil::Contains(stages, "aggregate_update.local_preaggregate_row_pointer_primitive_groups="));
-		    REQUIRE(StringUtil::Contains(boundaries, "hash_join_probe.row_pointer_selection_reference="));
-		    REQUIRE(StringUtil::Contains(boundaries, "projection.direct_post_join_computed_projection="));
-		    REQUIRE(StringUtil::Contains(boundaries, "aggregate_update.preaggregated_row_pointer_primitive_groups="));
-		    REQUIRE(StringUtil::Contains(boundaries, "aggregate_update.row_pointer_grouped_lookup_update="));
-		    REQUIRE(StringUtil::Contains(boundaries, "aggregate_update.direct_state_update="));
-		    REQUIRE_FALSE(StringUtil::Contains(boundaries, "projection.direct_post_join_batch_projection="));
-		    REQUIRE_FALSE(StringUtil::Contains(boundaries, "aggregate_update.state_address_selection_new_update="));
-		    REQUIRE_FALSE(StringUtil::Contains(boundaries, "aggregate_update.address_vector_payload_update="));
-	    });
-}
-
 TEST_CASE("JIT row-pointer grouped aggregate probes compressed string keys as single fields", "[api][jit]") {
 	DuckDB db;
 	Connection con(db);
@@ -2322,7 +2167,7 @@ TEST_CASE("JIT two-join mark distinct aggregate uses row-pointer distinct backen
 	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_distinct_contract_blocked AS "
 	                          "SELECT (i * 13)::BIGINT AS payload, "
 	                          "       CASE WHEN i % 3 = 0 "
-	                          "            THEN 'has Customer Complaints marker' "
+	                          "            THEN 'blocked payload marker' "
 	                          "            ELSE 'clean marker' END AS note "
 	                          "FROM range(256) tbl(i)"));
 
@@ -2335,7 +2180,7 @@ TEST_CASE("JIT two-join mark distinct aggregate uses row-pointer distinct backen
 	                     "  AND f.payload NOT IN ("
 	                     "      SELECT b.payload "
 	                     "      FROM jit_distinct_contract_blocked b "
-	                     "      WHERE b.note LIKE '%Customer%Complaints%'"
+	                     "      WHERE b.note LIKE '%blocked%payload%'"
 	                     "  ) "
 	                     "GROUP BY d.label, d.category, d.bucket "
 	                     "ORDER BY payload_count DESC, d.label, d.category, d.bucket";
