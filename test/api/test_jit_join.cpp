@@ -500,6 +500,65 @@ TEST_CASE("JIT hash join probe batches selected reference source explicitly", "[
 	    });
 }
 
+TEST_CASE("JIT first hash join native tail uses source batch boundary recipe", "[api][jit]") {
+	DuckDB db;
+	Connection con(db);
+	auto &manager = ExecutionRegionManager::Get(*con.context);
+
+	ConfigureSljitForCoverage(con, false, true, true, 10000);
+	REQUIRE_NO_FAIL(con.Query("SET threads=1"));
+	REQUIRE_NO_FAIL(con.Query("SET perfect_ht_threshold=0"));
+	REQUIRE_NO_FAIL(con.Query("SET disabled_optimizers='join_order,build_side_probe_side'"));
+	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_hash_native_tail_l AS "
+	                          "SELECT ((i % 4096) * 1000003)::BIGINT AS k, i::BIGINT AS v, "
+	                          "DATE '1992-01-01' + (i % 2000)::INTEGER AS d "
+	                          "FROM range(32768) tbl(i)"));
+	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_hash_native_tail_r AS "
+	                          "SELECT (i * 1000003)::BIGINT AS k, (i * 5)::BIGINT AS w "
+	                          "FROM range(4096) tbl(i)"));
+
+	const string query = "SELECT l.k, l.v + r.w AS projected_value, r.w "
+	                     "FROM jit_hash_native_tail_l l "
+	                     "JOIN jit_hash_native_tail_r r ON l.k = r.k "
+	                     "WHERE l.d > DATE '1996-01-01'";
+	REQUIRE_NO_FAIL(con.Query("SET jit_policy='off'"));
+	REQUIRE_NO_FAIL(con.Query("CREATE TEMP TABLE jit_hash_native_tail_expected AS " + query));
+
+	REQUIRE_NO_FAIL(con.Query("SET jit_policy='auto'"));
+	ClearJitTrace(manager, true);
+	REQUIRE_NO_FAIL(con.Query("CREATE TEMP TABLE jit_hash_native_tail_actual AS " + query));
+
+	RequireJitEvent(
+	    manager,
+	    [](const ExecutionRegionEvent &event) {
+		    return EventPhase(event) == "runtime" && EventStatus(event) == "executed" &&
+		           EventExecutionMode(event) == "native" &&
+		           StringUtil::Contains(EventJitRuntimePathCounts(event), "hash_join_probe.source_batch_boundary=");
+	    },
+	    [](const ExecutionRegionEvent &event) {
+		    const auto runtime_paths = EventJitRuntimePathCounts(event);
+		    const auto boundaries = EventJitMaterializationBoundaryCounts(event);
+		    const auto stages = EventGeneratedStageRuntimeBreakdown(event);
+		    REQUIRE(StringUtil::Contains(runtime_paths, "hash_join_probe.source_batch_boundary="));
+		    REQUIRE(StringUtil::Contains(runtime_paths, "hash_join_probe.fast_regular_probe_"));
+		    REQUIRE(StringUtil::Contains(stages, "op0:hash_join_probe.source_batch_boundary_append="));
+		    REQUIRE_FALSE(StringUtil::Contains(stages, "op0:hash_join_probe.source_batch_append="));
+		    REQUIRE_FALSE(StringUtil::Contains(boundaries, "hash_join_probe.source_contract_batch="));
+		    REQUIRE_FALSE(StringUtil::Contains(boundaries, "hash_join_probe.filtered_input_batch="));
+	    });
+
+	REQUIRE_NO_FAIL(con.Query("SET jit_policy='off'"));
+	auto diff = con.Query("SELECT count(*) FROM ("
+	                      "    (SELECT * FROM jit_hash_native_tail_expected "
+	                      "     EXCEPT ALL SELECT * FROM jit_hash_native_tail_actual) "
+	                      "    UNION ALL "
+	                      "    (SELECT * FROM jit_hash_native_tail_actual "
+	                      "     EXCEPT ALL SELECT * FROM jit_hash_native_tail_expected)"
+	                      ") diff");
+	REQUIRE_NO_FAIL(*diff);
+	REQUIRE(diff->GetValue(0, 0).GetValue<int64_t>() == 0);
+}
+
 TEST_CASE("JIT hash join filter ungrouped aggregate avoids final join materialization", "[api][jit]") {
 	DuckDB db;
 	Connection con(db);

@@ -42,8 +42,6 @@ static bool SljitTryExecuteFullPipelineNativeOnly(ExecutionRegionRuntime &runtim
 	const auto max_chunks = uses_extended_source_fetch_budget
 	                            ? SljitBatchedSourceContractFetchBudget(runtime.MaxChunks())
 	                            : runtime.MaxChunks();
-	const bool batch_source_hash_join = !ops.empty() && ops[0].kind == SljitNativeRegionOpKind::HASH_JOIN_PROBE;
-	SljitDataChunkBatch source_hash_join_batch;
 	auto execute_native_batch = [&](DataChunk &batch, bool have_more_output) {
 		if (SljitAdvanceSinkBatchBlocked(runtime, batch, have_more_output)) {
 			return SljitStopFullPipeline(result, ExecutionRegionResult::INTERRUPTED);
@@ -58,34 +56,10 @@ static bool SljitTryExecuteFullPipelineNativeOnly(ExecutionRegionRuntime &runtim
 		}
 		return false;
 	};
-	auto flush_source_hash_join_batch = [&]() {
-		if (source_hash_join_batch.Empty()) {
-			return false;
-		}
-		return SljitFlushDataChunkBatch(source_hash_join_batch.chunk,
-		                                [&](DataChunk &batch) { return execute_native_batch(batch, true); });
-	};
 	auto execute_source_chunk = [&](DataChunk &source_chunk, bool have_more_output) {
-		if (batch_source_hash_join &&
-		    SljitSourceBatchBoundaryShouldBatch(source_hash_join_batch.Count(), source_chunk.size())) {
-			source_hash_join_batch.Ensure(runtime.GetAllocator(), source_chunk.GetTypes());
-			auto flush_batch = [&]() {
-				return flush_source_hash_join_batch();
-			};
-			auto execute_batch = [&](DataChunk &batch) {
-				return execute_native_batch(batch, true);
-			};
-			return SljitAppendChunkToInitializedBatch(runtime, source_hash_join_batch.chunk, source_chunk, 0,
-			                                          optional_ptr<const SljitExecutableRegionOp>(&ops[0]),
-			                                          "source_batch_boundary_append", "source_batch", flush_batch,
-			                                          execute_batch);
-		}
 		return execute_native_batch(source_chunk, have_more_output);
 	};
 	auto stop_after_flush = [&](ExecutionRegionResult stop_result) {
-		if (flush_source_hash_join_batch()) {
-			return true;
-		}
 		execute_native_full_pipeline.Finalize(scratch);
 		return SljitStopFullPipeline(result, stop_result);
 	};

@@ -75,7 +75,11 @@ public:
 	}
 
 	bool ShouldUseSourceBatchNativeTailRecipe() const {
-		return UsesScanFilteredAggregateTerminal() && SljitCanBindNativeTailHandoffPrimitive(ops, 0);
+		if (!SljitCanBindNativeTailHandoffPrimitive(ops, 0)) {
+			return false;
+		}
+		return UsesScanFilteredAggregateTerminal() ||
+		       (!ops.empty() && ops[0].kind == SljitNativeRegionOpKind::HASH_JOIN_PROBE);
 	}
 
 	SljitFullPipelineRecipe
