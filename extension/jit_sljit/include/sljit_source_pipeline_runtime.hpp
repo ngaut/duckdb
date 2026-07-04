@@ -17,8 +17,7 @@
 #include "sljit_hash_join_probe_executor_runtime.hpp"
 #include "sljit_mark_probe_filter_boundary_runtime.hpp"
 #include "sljit_native_tail_handoff_runtime.hpp"
-#include "sljit_projection_executor_runtime.hpp"
-#include "sljit_projection_reference_runtime.hpp"
+#include "sljit_projection_chain_primitive_runtime.hpp"
 #include "sljit_region_runtime_state.hpp"
 #include "sljit_region_runtime_trace.hpp"
 #include "sljit_selected_hash_join_input_runtime.hpp"
@@ -80,7 +79,7 @@ public:
 	                       source_max_values_p),
 	      scratch(runtime.GetAllocator(), ops), selected_hash_join_inputs(runtime, ops, scratch),
 	      mark_probe_filter_boundary(runtime, result, ops, scratch, selected_hash_join_inputs),
-	      source_batch_boundary(runtime, result, ops) {
+	      source_batch_boundary(runtime, result, ops), projection_chain(runtime, ops, scratch) {
 	}
 
 	bool Execute() {
@@ -286,11 +285,7 @@ private:
 		auto execute_output_batch = [&](DataChunk &batch) -> bool {
 			return ExecuteMaterializedBatch(next_step_idx, batch);
 		};
-		auto &projection_chain_batch = projection_chain_batches[step_idx];
-		auto &selected_hash_join_input = selected_hash_join_projection_inputs[step_idx];
-		return SljitExecuteProjectionChainPrimitive(runtime, scratch, ops, step.projection_chain, input,
-		                                            projection_chain_batch, selected_hash_join_input,
-		                                            execute_output_batch);
+		return projection_chain.Execute(step_idx, step, input, execute_output_batch);
 	}
 
 	bool ExecuteSourceBatchBoundary(idx_t step_idx, const SljitFullPipelinePrimitiveStep &step,
@@ -334,15 +329,11 @@ private:
 	}
 
 	bool FlushProjectionChainBatch(idx_t step_idx) {
-		auto &projection_chain_batch = projection_chain_batches[step_idx];
-		if (projection_chain_batch.Empty()) {
-			return false;
-		}
 		auto next_step_idx = step_idx + 1;
 		auto execute_output_batch = [&](DataChunk &batch) -> bool {
 			return ExecuteMaterializedBatch(next_step_idx, batch, false);
 		};
-		return SljitFlushDataChunkBatch(projection_chain_batch.chunk, execute_output_batch);
+		return projection_chain.Flush(step_idx, execute_output_batch);
 	}
 
 	bool FlushSourceBoundaryBatch(idx_t step_idx) {
@@ -394,9 +385,8 @@ private:
 	SljitSelectedHashJoinInputRuntime selected_hash_join_inputs;
 	SljitMarkProbeFilterBoundaryRuntime mark_probe_filter_boundary;
 	SljitSourceBatchBoundaryRuntime source_batch_boundary;
+	SljitProjectionChainPrimitiveRuntime projection_chain;
 	std::array<SljitDataChunkBatch, SLJIT_FULL_PIPELINE_MAX_PRIMITIVES> hash_join_materialize_batches;
-	std::array<SljitDataChunkBatch, SLJIT_FULL_PIPELINE_MAX_PRIMITIVES> selected_hash_join_projection_inputs;
-	std::array<SljitDataChunkBatch, SLJIT_FULL_PIPELINE_MAX_PRIMITIVES> projection_chain_batches;
 	idx_t processed_batches = 0;
 };
 
