@@ -75,6 +75,7 @@ def verify_required_design_files() -> None:
         "extension/jit_sljit/include/sljit_full_pipeline_primitive_sequence.hpp",
         "extension/jit_sljit/include/sljit_full_pipeline_primitive_contract.hpp",
         "extension/jit_sljit/include/sljit_full_pipeline_terminal_runtime.hpp",
+        "extension/jit_sljit/include/sljit_generated_filter_primitive_runtime.hpp",
         "extension/jit_sljit/include/sljit_join_projection_aggregate_update_primitive.hpp",
         "extension/jit_sljit/include/sljit_join_projection_aggregate_update_runtime.hpp",
         "extension/jit_sljit/include/sljit_mark_probe_filter_boundary.hpp",
@@ -1454,6 +1455,14 @@ def verify_primitive_sequence() -> None:
         ),
     )
     require_text(
+        "extension/jit_sljit/include/sljit_generated_filter_primitive_runtime.hpp",
+        (
+            "class SljitGeneratedFilterPrimitiveRuntime",
+            "SljitExecuteGeneratedFilterPrimitive(runtime, scratch, ops, step.generated_filter, input",
+            "execute_output_view(filtered_input)",
+        ),
+    )
+    require_text(
         "extension/jit_sljit/include/sljit_hash_join_probe_selection_primitive_runtime.hpp",
         (
             "class SljitHashJoinProbeSelectionPrimitiveRuntime",
@@ -1505,7 +1514,7 @@ def verify_primitive_sequence() -> None:
             "SljitFullPipelinePrimitiveSequenceBatchExecutor",
             "SljitFullPipelinePrimitiveSequenceIsExecutable",
             "SljitFullPipelinePrimitiveSequenceTerminalStep",
-            "step.generated_filter",
+            "SljitGeneratedFilterPrimitiveRuntime generated_filter",
             "SljitHashJoinProbeMaterializePrimitiveRuntime hash_join_materialize",
             "SljitHashJoinProbeSelectionPrimitiveRuntime hash_join_selection",
             "SljitProjectionChainPrimitiveRuntime projection_chain",
@@ -1519,6 +1528,7 @@ def verify_primitive_sequence() -> None:
             "FlushHashJoinMaterializeBatch(step_idx)",
             "FlushProjectionChainBatch(step_idx)",
             "FlushSourceBoundaryBatch(step_idx)",
+            "generated_filter.Execute(step, input, execute_output_view)",
             "hash_join_materialize.Execute(step_idx, step, input, execute_hash_join_probe, execute_output_batch)",
             "hash_join_materialize.Flush(step_idx, execute_output_batch)",
             "hash_join_selection.Execute(step, input, execute_hash_join_probe, execute_next_step)",
@@ -1538,6 +1548,8 @@ def verify_primitive_sequence() -> None:
     reject_text(
         "extension/jit_sljit/include/sljit_source_pipeline_runtime.hpp",
         (
+            "SljitExecuteGeneratedFilterPrimitive(runtime, scratch, ops, step.generated_filter, input",
+            "step.generated_filter",
             "hash_join_materialize_batches",
             "AppendHashJoinMaterializeBatch",
             "SljitAppendChunkToInitializedBatch(",

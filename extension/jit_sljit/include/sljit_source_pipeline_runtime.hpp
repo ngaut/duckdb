@@ -13,7 +13,7 @@
 #include "sljit_full_pipeline_recipe.hpp"
 #include "sljit_full_pipeline_runtime.hpp"
 #include "sljit_full_pipeline_terminal_runtime.hpp"
-#include "sljit_generated_filter_projection_runtime.hpp"
+#include "sljit_generated_filter_primitive_runtime.hpp"
 #include "sljit_hash_join_probe_materialize_primitive_runtime.hpp"
 #include "sljit_hash_join_probe_selection_primitive_runtime.hpp"
 #include "sljit_mark_probe_filter_boundary_runtime.hpp"
@@ -78,7 +78,7 @@ public:
 	      terminal_runtime(execute_hash_join_probe_p, source_distinct_counts_p, source_min_values_p,
 	                       source_max_values_p),
 	      scratch(runtime.GetAllocator(), ops), selected_hash_join_inputs(runtime, ops, scratch),
-	      hash_join_materialize(runtime, result, ops, scratch),
+	      generated_filter(runtime, ops, scratch), hash_join_materialize(runtime, result, ops, scratch),
 	      hash_join_selection(runtime, result, ops, scratch, selected_hash_join_inputs),
 	      mark_probe_filter_boundary(runtime, result, ops, scratch, selected_hash_join_inputs),
 	      source_batch_boundary(runtime, result, ops), projection_chain(runtime, ops, scratch) {
@@ -197,12 +197,10 @@ private:
 
 	bool ExecuteGeneratedFilter(idx_t step_idx, const SljitFullPipelinePrimitiveStep &step,
 	                            const SljitRuntimeBatchView &input, bool have_more_output) {
-		SljitRuntimeBatchView filtered_input;
-		if (!SljitExecuteGeneratedFilterPrimitive(runtime, scratch, ops, step.generated_filter, input,
-		                                          filtered_input)) {
-			return false;
-		}
-		return ExecuteStep(step_idx + 1, filtered_input, have_more_output);
+		auto execute_output_view = [&](const SljitRuntimeBatchView &output) {
+			return ExecuteStep(step_idx + 1, output, have_more_output);
+		};
+		return generated_filter.Execute(step, input, execute_output_view);
 	}
 
 	bool ExecuteHashJoinProbeMaterialize(idx_t step_idx, const SljitFullPipelinePrimitiveStep &step,
@@ -314,6 +312,7 @@ private:
 	SljitFullPipelineTerminalRuntime<EXECUTE_HASH_JOIN_PROBE> terminal_runtime;
 	SljitRegionExecutionScratch scratch;
 	SljitSelectedHashJoinInputRuntime selected_hash_join_inputs;
+	SljitGeneratedFilterPrimitiveRuntime generated_filter;
 	SljitHashJoinProbeMaterializePrimitiveRuntime hash_join_materialize;
 	SljitHashJoinProbeSelectionPrimitiveRuntime hash_join_selection;
 	SljitMarkProbeFilterBoundaryRuntime mark_probe_filter_boundary;
