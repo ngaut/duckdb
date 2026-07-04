@@ -414,29 +414,29 @@ TEST_CASE("JIT fuses multiple primitive ungrouped aggregate payload lanes into o
 	REQUIRE(found_fused_runtime);
 }
 
-TEST_CASE("JIT fuses Q14 shaped decimal CASE aggregate payload lanes", "[api][jit]") {
+TEST_CASE("JIT fuses decimal CASE aggregate payload lanes", "[api][jit]") {
 	DuckDB db;
 	Connection con(db);
 	auto &manager = ExecutionRegionManager::Get(*con.context);
 
 	ConfigureSljitForCoverage(con, true, true, true, 10000);
-	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_q14_aggregate_probe AS "
-	                          "SELECT i::BIGINT AS partkey, "
-	                          "       100.00::DECIMAL(15,2) + (i % 13)::DECIMAL(15,2) AS l_extendedprice, "
-	                          "       0.10::DECIMAL(15,2) AS l_discount "
+	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_decimal_case_payload_probe AS "
+	                          "SELECT i::BIGINT AS item_key, "
+	                          "       100.00::DECIMAL(15,2) + (i % 13)::DECIMAL(15,2) AS base_amount, "
+	                          "       0.10::DECIMAL(15,2) AS rebate_rate "
 	                          "FROM range(0, 20000) tbl(i)"));
-	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_q14_aggregate_part AS "
-	                          "SELECT i::BIGINT AS partkey, "
-	                          "       CASE WHEN i % 7 IN (0, 3) THEN 'PROMO BRUSHED STEEL' "
-	                          "            ELSE 'STANDARD ANODIZED COPPER' END AS p_type "
+	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_decimal_case_payload_dim AS "
+	                          "SELECT i::BIGINT AS item_key, "
+	                          "       CASE WHEN i % 7 IN (0, 3) THEN 'PRIORITY BRUSHED STEEL' "
+	                          "            ELSE 'STANDARD ANODIZED COPPER' END AS category_name "
 	                          "FROM range(0, 20000) tbl(i)"));
 
-	const string query = "SELECT sum(CASE WHEN p_type LIKE 'PROMO%' "
-	                     "                THEN l_extendedprice * (1.00 - l_discount) "
-	                     "                ELSE 0.0000 END) AS promo_sum, "
-	                     "       sum(l_extendedprice * (1.00 - l_discount)) AS total_sum "
-	                     "FROM jit_q14_aggregate_probe, jit_q14_aggregate_part "
-	                     "WHERE jit_q14_aggregate_probe.partkey = jit_q14_aggregate_part.partkey";
+	const string query = "SELECT sum(CASE WHEN category_name LIKE 'PRIORITY%' "
+	                     "                THEN base_amount * (1.00 - rebate_rate) "
+	                     "                ELSE 0.0000 END) AS matched_sum, "
+	                     "       sum(base_amount * (1.00 - rebate_rate)) AS total_sum "
+	                     "FROM jit_decimal_case_payload_probe, jit_decimal_case_payload_dim "
+	                     "WHERE jit_decimal_case_payload_probe.item_key = jit_decimal_case_payload_dim.item_key";
 	REQUIRE_NO_FAIL(con.Query("SET jit_policy='off'"));
 	auto reference = con.Query(query);
 	REQUIRE_NO_FAIL(*reference);
@@ -506,8 +506,7 @@ TEST_CASE("JIT perfect hash aggregate composes date-year group projection into f
 	REQUIRE(result->RowCount() == reference->RowCount());
 	for (idx_t row_idx = 0; row_idx < reference->RowCount(); row_idx++) {
 		for (idx_t col_idx = 0; col_idx < reference->ColumnCount(); col_idx++) {
-			REQUIRE(result->GetValue(col_idx, row_idx).ToString() ==
-			        reference->GetValue(col_idx, row_idx).ToString());
+			REQUIRE(result->GetValue(col_idx, row_idx).ToString() == reference->GetValue(col_idx, row_idx).ToString());
 		}
 	}
 
@@ -1632,34 +1631,33 @@ TEST_CASE("JIT preserves stats-proven non-overflowing decimal arithmetic in expr
 	REQUIRE(found_compile);
 }
 
-TEST_CASE("JIT fuses TPC-H Q1 shaped perfect-hash aggregate payloads", "[api][jit]") {
+TEST_CASE("JIT fuses multi-key perfect-hash aggregate payloads", "[api][jit]") {
 	DuckDB db;
 	Connection con(db);
 	auto &manager = ExecutionRegionManager::Get(*con.context);
 
 	ConfigureSljitForCoverage(con, false, true, true, 10000);
 	REQUIRE_NO_FAIL(con.Query("PRAGMA threads=1"));
-	REQUIRE_NO_FAIL(
-	    con.Query("CREATE TABLE jit_q1_perfect_hash_payload AS "
-	              "SELECT CASE WHEN i % 3 = 0 THEN 'A' WHEN i % 3 = 1 THEN 'N' ELSE 'R' END AS l_returnflag, "
-	              "       CASE WHEN i % 2 = 0 THEN 'F' ELSE 'O' END AS l_linestatus, "
-	              "       CAST(1 + (i % 50) AS DECIMAL(15,2)) AS l_quantity, "
-	              "       CAST(100 + (i % 1000) AS DECIMAL(15,2)) AS l_extendedprice, "
-	              "       CAST(i % 10 AS DECIMAL(15,2)) AS l_discount, "
-	              "       CAST(i % 8 AS DECIMAL(15,2)) AS l_tax "
-	              "FROM range(120000) tbl(i)"));
+	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_multi_key_perfect_hash_payload AS "
+	                          "SELECT CASE WHEN i % 3 = 0 THEN 'A' WHEN i % 3 = 1 THEN 'N' ELSE 'R' END AS group_flag, "
+	                          "       CASE WHEN i % 2 = 0 THEN 'F' ELSE 'O' END AS group_status, "
+	                          "       CAST(1 + (i % 50) AS DECIMAL(15,2)) AS qty_value, "
+	                          "       CAST(100 + (i % 1000) AS DECIMAL(15,2)) AS gross_value, "
+	                          "       CAST(i % 10 AS DECIMAL(15,2)) AS discount_rate, "
+	                          "       CAST(i % 8 AS DECIMAL(15,2)) AS tax_rate "
+	                          "FROM range(120000) tbl(i)"));
 
-	const string query = "SELECT l_returnflag, l_linestatus, "
-	                     "       sum(l_quantity), "
-	                     "       sum(l_extendedprice), "
-	                     "       sum(l_extendedprice * (1.00::DECIMAL(15,2) - l_discount)), "
-	                     "       sum(l_extendedprice * (1.00::DECIMAL(15,2) - l_discount) * "
-	                     "           (1.00::DECIMAL(15,2) + l_tax)), "
-	                     "       sum(l_discount), "
+	const string query = "SELECT group_flag, group_status, "
+	                     "       sum(qty_value), "
+	                     "       sum(gross_value), "
+	                     "       sum(gross_value * (1.00::DECIMAL(15,2) - discount_rate)), "
+	                     "       sum(gross_value * (1.00::DECIMAL(15,2) - discount_rate) * "
+	                     "           (1.00::DECIMAL(15,2) + tax_rate)), "
+	                     "       sum(discount_rate), "
 	                     "       count(*) "
-	                     "FROM jit_q1_perfect_hash_payload "
-	                     "GROUP BY l_returnflag, l_linestatus "
-	                     "ORDER BY l_returnflag, l_linestatus";
+	                     "FROM jit_multi_key_perfect_hash_payload "
+	                     "GROUP BY group_flag, group_status "
+	                     "ORDER BY group_flag, group_status";
 	REQUIRE_NO_FAIL(con.Query("SET jit_policy='off'"));
 	auto reference = con.Query(query);
 	REQUIRE_NO_FAIL(*reference);
@@ -1713,31 +1711,31 @@ TEST_CASE("JIT fuses TPC-H Q1 shaped perfect-hash aggregate payloads", "[api][ji
 	    });
 }
 
-TEST_CASE("JIT Q8 shaped perfect-hash aggregate payloads survive join selections", "[api][jit]") {
+TEST_CASE("JIT join-selected perfect-hash aggregate payloads survive selection views", "[api][jit]") {
 	DuckDB db;
 	Connection con(db);
 	auto &manager = ExecutionRegionManager::Get(*con.context);
 
 	ConfigureSljitForCoverage(con, false, true, true, 10000);
 	REQUIRE_NO_FAIL(con.Query("PRAGMA threads=1"));
-	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_q8_join_perfect_hash_payload AS "
-	                          "SELECT (1995 + (i % 2))::INTEGER AS o_year, "
-	                          "       (i % 5)::INTEGER AS nation_id, "
+	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_join_selected_perfect_hash_payload AS "
+	                          "SELECT (1995 + (i % 2))::INTEGER AS bucket_year, "
+	                          "       (i % 5)::INTEGER AS segment_id, "
 	                          "       CAST(100 + (i % 1000) AS DECIMAL(15,2)) AS volume "
 	                          "FROM range(10000) tbl(i)"));
-	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_q8_join_nation AS "
-	                          "SELECT i::INTEGER AS nation_id, "
-	                          "       CASE WHEN i = 0 THEN 'BRAZIL' ELSE 'ARGENTINA' END AS nation "
+	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_join_selected_dimension AS "
+	                          "SELECT i::INTEGER AS segment_id, "
+	                          "       CASE WHEN i = 0 THEN 'target' ELSE 'other' END AS segment_name "
 	                          "FROM range(5) tbl(i)"));
 
-	const string query = "SELECT o_year, "
-	                     "       sum(CASE WHEN nation = 'BRAZIL' "
-	                     "                THEN volume ELSE 0.00::DECIMAL(15,2) END) AS brazil_sum, "
+	const string query = "SELECT bucket_year, "
+	                     "       sum(CASE WHEN segment_name = 'target' "
+	                     "                THEN volume ELSE 0.00::DECIMAL(15,2) END) AS target_sum, "
 	                     "       sum(volume) AS total_sum "
-	                     "FROM jit_q8_join_perfect_hash_payload "
-	                     "JOIN jit_q8_join_nation USING (nation_id) "
-	                     "GROUP BY o_year "
-	                     "ORDER BY o_year";
+	                     "FROM jit_join_selected_perfect_hash_payload "
+	                     "JOIN jit_join_selected_dimension USING (segment_id) "
+	                     "GROUP BY bucket_year "
+	                     "ORDER BY bucket_year";
 	REQUIRE_NO_FAIL(con.Query("SET jit_policy='off'"));
 	auto reference = con.Query(query);
 	REQUIRE_NO_FAIL(*reference);
@@ -1782,8 +1780,8 @@ TEST_CASE("JIT Q8 shaped perfect-hash aggregate payloads survive join selections
 		                                 "aggregate_update.direct_join_output_perfect_hash_payload_update="));
 		    REQUIRE(StringUtil::Contains(EventJitMaterializationBoundaryCounts(event),
 		                                 "aggregate_update.direct_perfect_hash_state_update="));
-		    REQUIRE_FALSE(StringUtil::Contains(EventJitMaterializationBoundaryCounts(event),
-		                                       "hash_join_probe.final_output="));
+		    REQUIRE_FALSE(
+		        StringUtil::Contains(EventJitMaterializationBoundaryCounts(event), "hash_join_probe.final_output="));
 		    REQUIRE_FALSE(StringUtil::Contains(EventGeneratedStageCountBreakdown(event),
 		                                       "aggregate_update.resolve_grouped_state_addresses="));
 	    });
@@ -1857,36 +1855,35 @@ TEST_CASE("JIT gates single typed perfect-hash aggregate payloads to grouped-sta
 	    });
 }
 
-TEST_CASE("JIT gates Q1 shaped perfect-hash aggregate updates with generated source filters", "[api][jit]") {
+TEST_CASE("JIT gates perfect-hash aggregate updates with generated source filters", "[api][jit]") {
 	DuckDB db;
 	Connection con(db);
 	auto &manager = ExecutionRegionManager::Get(*con.context);
 
 	ConfigureSljitForCoverage(con, false, true, true, 10000);
 	REQUIRE_NO_FAIL(con.Query("PRAGMA threads=1"));
-	REQUIRE_NO_FAIL(
-	    con.Query("CREATE TABLE jit_q1_filtered_perfect_hash_payload AS "
-	              "SELECT CASE WHEN i % 3 = 0 THEN 'A' WHEN i % 3 = 1 THEN 'N' ELSE 'R' END AS l_returnflag, "
-	              "       CASE WHEN i % 2 = 0 THEN 'F' ELSE 'O' END AS l_linestatus, "
-	              "       DATE '1998-08-30' + CAST(i % 8 AS INTEGER) AS l_shipdate, "
-	              "       CAST(1 + (i % 50) AS DECIMAL(15,2)) AS l_quantity, "
-	              "       CAST(100 + (i % 1000) AS DECIMAL(15,2)) AS l_extendedprice, "
-	              "       CAST(i % 10 AS DECIMAL(15,2)) AS l_discount, "
-	              "       CAST(i % 8 AS DECIMAL(15,2)) AS l_tax "
-	              "FROM range(120000) tbl(i)"));
+	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_filtered_perfect_hash_payload AS "
+	                          "SELECT CASE WHEN i % 3 = 0 THEN 'A' WHEN i % 3 = 1 THEN 'N' ELSE 'R' END AS group_flag, "
+	                          "       CASE WHEN i % 2 = 0 THEN 'F' ELSE 'O' END AS group_status, "
+	                          "       DATE '1998-08-30' + CAST(i % 8 AS INTEGER) AS event_date, "
+	                          "       CAST(1 + (i % 50) AS DECIMAL(15,2)) AS qty_value, "
+	                          "       CAST(100 + (i % 1000) AS DECIMAL(15,2)) AS gross_value, "
+	                          "       CAST(i % 10 AS DECIMAL(15,2)) AS discount_rate, "
+	                          "       CAST(i % 8 AS DECIMAL(15,2)) AS tax_rate "
+	                          "FROM range(120000) tbl(i)"));
 
-	const string query = "SELECT l_returnflag, l_linestatus, "
-	                     "       sum(l_quantity), "
-	                     "       sum(l_extendedprice), "
-	                     "       sum(l_extendedprice * (1.00::DECIMAL(15,2) - l_discount)), "
-	                     "       sum(l_extendedprice * (1.00::DECIMAL(15,2) - l_discount) * "
-	                     "           (1.00::DECIMAL(15,2) + l_tax)), "
-	                     "       sum(l_discount), "
+	const string query = "SELECT group_flag, group_status, "
+	                     "       sum(qty_value), "
+	                     "       sum(gross_value), "
+	                     "       sum(gross_value * (1.00::DECIMAL(15,2) - discount_rate)), "
+	                     "       sum(gross_value * (1.00::DECIMAL(15,2) - discount_rate) * "
+	                     "           (1.00::DECIMAL(15,2) + tax_rate)), "
+	                     "       sum(discount_rate), "
 	                     "       count(*) "
-	                     "FROM jit_q1_filtered_perfect_hash_payload "
-	                     "WHERE l_shipdate <= DATE '1998-09-02' "
-	                     "GROUP BY l_returnflag, l_linestatus "
-	                     "ORDER BY l_returnflag, l_linestatus";
+	                     "FROM jit_filtered_perfect_hash_payload "
+	                     "WHERE event_date <= DATE '1998-09-02' "
+	                     "GROUP BY group_flag, group_status "
+	                     "ORDER BY group_flag, group_status";
 	REQUIRE_NO_FAIL(con.Query("SET jit_policy='off'"));
 	auto reference = con.Query(query);
 	REQUIRE_NO_FAIL(*reference);

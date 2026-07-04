@@ -241,25 +241,25 @@ TEST_CASE("JIT lowers decimal CASE payloads with string prefix conditions", "[ap
 	auto &manager = ExecutionRegionManager::Get(*con.context);
 
 	ConfigureSljitForCoverage(con, true, true, true, 10000);
-	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_q14_case_shape("
-	                          "id INTEGER, p_type VARCHAR, "
-	                          "l_extendedprice DECIMAL(15,2), l_discount DECIMAL(15,2))"));
-	REQUIRE_NO_FAIL(con.Query("INSERT INTO jit_q14_case_shape VALUES "
-	                          "(1, 'PROMO BRUSHED STEEL', 100.00, 0.10), "
+	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_decimal_case_shape("
+	                          "id INTEGER, category_name VARCHAR, "
+	                          "base_amount DECIMAL(15,2), rebate_rate DECIMAL(15,2))"));
+	REQUIRE_NO_FAIL(con.Query("INSERT INTO jit_decimal_case_shape VALUES "
+	                          "(1, 'PRIORITY BRUSHED STEEL', 100.00, 0.10), "
 	                          "(2, 'STANDARD BRUSHED STEEL', 50.00, 0.05), "
-	                          "(3, 'PROMO ANODIZED COPPER', 200.00, 0.25), "
+	                          "(3, 'PRIORITY ANODIZED COPPER', 200.00, 0.25), "
 	                          "(4, NULL, 30.00, 0.10)"));
 
 	ClearJitTrace(manager, true);
-	auto result = con.Query("CREATE TEMP TABLE jit_q14_case_shape_out AS "
+	auto result = con.Query("CREATE TEMP TABLE jit_decimal_case_shape_out AS "
 	                        "SELECT id, "
-	                        "       CASE WHEN prefix(p_type, 'PROMO') "
-	                        "            THEN l_extendedprice * (1.00 - l_discount) "
-	                        "            ELSE 0.0000 END AS promo_revenue, "
-	                        "       l_extendedprice * (1.00 - l_discount) AS total_revenue "
-	                        "FROM jit_q14_case_shape");
+	                        "       CASE WHEN prefix(category_name, 'PRIORITY') "
+	                        "            THEN base_amount * (1.00 - rebate_rate) "
+	                        "            ELSE 0.0000 END AS matched_revenue, "
+	                        "       base_amount * (1.00 - rebate_rate) AS total_revenue "
+	                        "FROM jit_decimal_case_shape");
 	REQUIRE_NO_FAIL(*result);
-	result = con.Query("SELECT promo_revenue, total_revenue FROM jit_q14_case_shape_out ORDER BY id");
+	result = con.Query("SELECT matched_revenue, total_revenue FROM jit_decimal_case_shape_out ORDER BY id");
 	REQUIRE_NO_FAIL(*result);
 	REQUIRE(CHECK_COLUMN(result, 0, {"90.0000", "0.0000", "150.0000", "0.0000"}));
 	REQUIRE(CHECK_COLUMN(result, 1, {"90.0000", "47.5000", "150.0000", "27.0000"}));
@@ -285,22 +285,22 @@ TEST_CASE("JIT CASE branch fast path respects selected hash join sources", "[api
 	auto &manager = ExecutionRegionManager::Get(*con.context);
 
 	ConfigureSljitForCoverage(con, true, true, true, 10000);
-	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_q14_join_probe AS "
-	                          "SELECT i::BIGINT AS partkey, "
-	                          "       100.00::DECIMAL(15,2) + (i % 13)::DECIMAL(15,2) AS l_extendedprice, "
-	                          "       0.10::DECIMAL(15,2) AS l_discount "
+	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_decimal_case_join_probe AS "
+	                          "SELECT i::BIGINT AS item_key, "
+	                          "       100.00::DECIMAL(15,2) + (i % 13)::DECIMAL(15,2) AS base_amount, "
+	                          "       0.10::DECIMAL(15,2) AS rebate_rate "
 	                          "FROM range(0, 20000) tbl(i)"));
-	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_q14_join_part AS "
-	                          "SELECT i::BIGINT AS partkey, "
-	                          "       CASE WHEN i % 7 IN (0, 3) THEN 'PROMO BRUSHED STEEL' "
-	                          "            ELSE 'STANDARD ANODIZED COPPER' END AS p_type "
+	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_decimal_case_join_dim AS "
+	                          "SELECT i::BIGINT AS item_key, "
+	                          "       CASE WHEN i % 7 IN (0, 3) THEN 'PRIORITY BRUSHED STEEL' "
+	                          "            ELSE 'STANDARD ANODIZED COPPER' END AS category_name "
 	                          "FROM range(0, 20000) tbl(i)"));
 
-	const string aggregate_sql = "SELECT sum(CASE WHEN p_type LIKE 'PROMO%' "
-	                             "                THEN l_extendedprice * (1.00 - l_discount) "
-	                             "                ELSE 0.0000 END) AS promo_sum "
-	                             "FROM jit_q14_join_probe, jit_q14_join_part "
-	                             "WHERE jit_q14_join_probe.partkey = jit_q14_join_part.partkey";
+	const string aggregate_sql = "SELECT sum(CASE WHEN category_name LIKE 'PRIORITY%' "
+	                             "                THEN base_amount * (1.00 - rebate_rate) "
+	                             "                ELSE 0.0000 END) AS matched_sum "
+	                             "FROM jit_decimal_case_join_probe, jit_decimal_case_join_dim "
+	                             "WHERE jit_decimal_case_join_probe.item_key = jit_decimal_case_join_dim.item_key";
 
 	REQUIRE_NO_FAIL(con.Query("SET enable_jit=false"));
 	auto expected = con.Query(aggregate_sql);

@@ -1534,16 +1534,16 @@ TEST_CASE("JIT two-join grouped aggregate composes mixed VARCHAR projection chai
 	                          "SELECT i::BIGINT AS ps_suppkey, "
 	                          "       (i % 2048)::BIGINT AS ps_partkey, "
 	                          "       CAST(3 + (i % 31) AS DECIMAL(15,2)) AS supplycost, "
-	                          "       'nation_' || CAST(i % 7 AS VARCHAR) AS nation_name "
+	                          "       'segment_' || CAST(i % 7 AS VARCHAR) AS segment_name "
 	                          "FROM range(4096) tbl(i)"));
 	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_two_join_orders AS "
 	                          "SELECT i::INTEGER AS orderkey, "
 	                          "       DATE '1992-01-01' + (i % 2000)::INTEGER AS orderdate "
 	                          "FROM range(8192) tbl(i)"));
 
-	const string query = "SELECT x.nation, year(o.orderdate) AS o_year, sum(x.amount)::HUGEINT AS sum_profit "
+	const string query = "SELECT x.segment, year(o.orderdate) AS o_year, sum(x.amount)::HUGEINT AS sum_profit "
 	                     "FROM ("
-	                     "  SELECT b.nation_name AS nation, "
+	                     "  SELECT b.segment_name AS segment, "
 	                     "         CAST(l.orderkey AS INTEGER) AS orderkey_i, "
 	                     "         l.extendedprice * (1.00::DECIMAL(15,2) - l.discount) - "
 	                     "         b.supplycost * l.quantity AS amount "
@@ -1551,8 +1551,8 @@ TEST_CASE("JIT two-join grouped aggregate composes mixed VARCHAR projection chai
 	                     "  JOIN jit_two_join_psn b ON l.suppkey = b.ps_suppkey AND l.partkey = b.ps_partkey "
 	                     ") x "
 	                     "JOIN jit_two_join_orders o ON x.orderkey_i = o.orderkey "
-	                     "GROUP BY x.nation, o_year "
-	                     "ORDER BY x.nation, o_year";
+	                     "GROUP BY x.segment, o_year "
+	                     "ORDER BY x.segment, o_year";
 	REQUIRE_NO_FAIL(con.Query("SET jit_policy='off'"));
 	auto reference = con.Query(query);
 	REQUIRE_NO_FAIL(*reference);
@@ -1662,19 +1662,19 @@ TEST_CASE("JIT two-join grouped aggregate materializes wide projection tail", "[
 	                          "SELECT i::BIGINT AS ps_suppkey, "
 	                          "       (i % 2048)::BIGINT AS ps_partkey, "
 	                          "       CAST(3 + (i % 31) AS DECIMAL(15,2)) AS supplycost, "
-	                          "       'nation_' || CAST(i % 7 AS VARCHAR) AS nation_name "
+	                          "       'segment_' || CAST(i % 7 AS VARCHAR) AS segment_name "
 	                          "FROM range(4096) tbl(i)"));
 	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_wide_group_orders AS "
 	                          "SELECT (i * 100003)::INTEGER AS orderkey, "
 	                          "       DATE '1992-01-01' + (i % 2000)::INTEGER AS orderdate "
 	                          "FROM range(8192) tbl(i)"));
 
-	const string query = "SELECT x.nation, year(o.orderdate) AS o_year, "
+	const string query = "SELECT x.segment, year(o.orderdate) AS o_year, "
 	                     "       x.g0, x.g1, x.g2, x.g3, x.g4, x.g5, x.g6, "
 	                     "       sum(x.extendedprice * (1.00::DECIMAL(15,2) - x.discount) - "
 	                     "           x.supplycost * x.quantity)::HUGEINT AS total_payload "
 	                     "FROM ("
-	                     "  SELECT b.nation_name AS nation, "
+	                     "  SELECT b.segment_name AS segment, "
 	                     "         CAST(l.orderkey AS INTEGER) AS orderkey_i, "
 	                     "         l.g0, l.g1, l.g2, l.g3, l.g4, l.g5, l.g6, "
 	                     "         l.extendedprice AS extendedprice, "
@@ -1685,8 +1685,8 @@ TEST_CASE("JIT two-join grouped aggregate materializes wide projection tail", "[
 	                     "  JOIN jit_wide_group_psn b ON l.suppkey = b.ps_suppkey AND l.partkey = b.ps_partkey "
 	                     ") x "
 	                     "JOIN jit_wide_group_orders o ON x.orderkey_i = o.orderkey "
-	                     "GROUP BY x.nation, o_year, x.g0, x.g1, x.g2, x.g3, x.g4, x.g5, x.g6 "
-	                     "ORDER BY x.nation, o_year, x.g0, x.g1, x.g2, x.g3, x.g4, x.g5, x.g6";
+	                     "GROUP BY x.segment, o_year, x.g0, x.g1, x.g2, x.g3, x.g4, x.g5, x.g6 "
+	                     "ORDER BY x.segment, o_year, x.g0, x.g1, x.g2, x.g3, x.g4, x.g5, x.g6";
 	REQUIRE_NO_FAIL(con.Query("SET jit_policy='off'"));
 	auto reference = con.Query(query);
 	REQUIRE_NO_FAIL(*reference);
@@ -1707,7 +1707,7 @@ TEST_CASE("JIT two-join grouped aggregate materializes wide projection tail", "[
 	RequireComposedTwoJoinProjectionChainEvent(manager);
 }
 
-TEST_CASE("JIT Q9-like two-join aggregate composes second-join projection chain", "[api][jit]") {
+TEST_CASE("JIT two-join aggregate composes second-join projection chain", "[api][jit]") {
 	DuckDB db;
 	Connection con(db);
 	auto &manager = ExecutionRegionManager::Get(*con.context);
@@ -1716,41 +1716,42 @@ TEST_CASE("JIT Q9-like two-join aggregate composes second-join projection chain"
 	REQUIRE_NO_FAIL(con.Query("PRAGMA threads=1"));
 	REQUIRE_NO_FAIL(con.Query("SET perfect_ht_threshold=0"));
 	REQUIRE_NO_FAIL(con.Query("SET disabled_optimizers='join_order,build_side_probe_side'"));
-	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_q9_like_l AS "
-	                          "SELECT (i % 4096)::BIGINT AS suppkey, "
-	                          "       (i % 2048)::BIGINT AS partkey, "
-	                          "       ((i % 8192) * 100003)::BIGINT AS orderkey, "
-	                          "       CAST(100 + (i % 1000) AS DECIMAL(15,2)) AS extendedprice, "
-	                          "       CAST(i % 17 AS DECIMAL(15,2)) AS discount, "
-	                          "       CAST(1 + (i % 23) AS DECIMAL(15,2)) AS quantity "
+	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_two_join_fact AS "
+	                          "SELECT (i % 4096)::BIGINT AS left_key, "
+	                          "       (i % 2048)::BIGINT AS right_key, "
+	                          "       ((i % 8192) * 100003)::BIGINT AS event_key, "
+	                          "       CAST(100 + (i % 1000) AS DECIMAL(15,2)) AS gross_value, "
+	                          "       CAST(i % 17 AS DECIMAL(15,2)) AS discount_rate, "
+	                          "       CAST(1 + (i % 23) AS DECIMAL(15,2)) AS qty_value "
 	                          "FROM range(65536) tbl(i)"));
-	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_q9_like_psn AS "
-	                          "SELECT i::BIGINT AS ps_suppkey, "
-	                          "       (i % 2048)::BIGINT AS ps_partkey, "
-	                          "       CAST(3 + (i % 31) AS DECIMAL(15,2)) AS supplycost, "
-	                          "       'nation_' || CAST(i % 7 AS VARCHAR) AS nation_name "
+	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_two_join_build AS "
+	                          "SELECT i::BIGINT AS build_left_key, "
+	                          "       (i % 2048)::BIGINT AS build_right_key, "
+	                          "       CAST(3 + (i % 31) AS DECIMAL(15,2)) AS unit_cost, "
+	                          "       'segment_' || CAST(i % 7 AS VARCHAR) AS segment_name "
 	                          "FROM range(4096) tbl(i)"));
-	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_q9_like_orders AS "
-	                          "SELECT (i * 100003)::INTEGER AS orderkey, "
-	                          "       DATE '1992-01-01' + (i % 2000)::INTEGER AS orderdate "
+	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_two_join_lookup AS "
+	                          "SELECT (i * 100003)::INTEGER AS event_key, "
+	                          "       DATE '1992-01-01' + (i % 2000)::INTEGER AS event_date "
 	                          "FROM range(8192) tbl(i)"));
 
-	const string query = "SELECT x.nation, year(o.orderdate) AS o_year, "
-	                     "       sum(x.extendedprice * (1.00::DECIMAL(15,2) - x.discount) - "
-	                     "           x.supplycost * x.quantity)::HUGEINT AS sum_profit "
+	const string query = "SELECT x.segment, year(o.event_date) AS event_year, "
+	                     "       sum(x.gross_value * (1.00::DECIMAL(15,2) - x.discount_rate) - "
+	                     "           x.unit_cost * x.qty_value)::HUGEINT AS sum_profit "
 	                     "FROM ("
-	                     "  SELECT b.nation_name AS nation, "
-	                     "         CAST(l.orderkey AS INTEGER) AS orderkey_i, "
-	                     "         l.extendedprice AS extendedprice, "
-	                     "         l.discount AS discount, "
-	                     "         b.supplycost AS supplycost, "
-	                     "         l.quantity AS quantity "
-	                     "  FROM jit_q9_like_l l "
-	                     "  JOIN jit_q9_like_psn b ON l.suppkey = b.ps_suppkey AND l.partkey = b.ps_partkey "
+	                     "  SELECT b.segment_name AS segment, "
+	                     "         CAST(l.event_key AS INTEGER) AS event_key_i, "
+	                     "         l.gross_value AS gross_value, "
+	                     "         l.discount_rate AS discount_rate, "
+	                     "         b.unit_cost AS unit_cost, "
+	                     "         l.qty_value AS qty_value "
+	                     "  FROM jit_two_join_fact l "
+	                     "  JOIN jit_two_join_build b ON l.left_key = b.build_left_key AND "
+	                     "l.right_key = b.build_right_key "
 	                     ") x "
-	                     "JOIN jit_q9_like_orders o ON x.orderkey_i = o.orderkey "
-	                     "GROUP BY x.nation, o_year "
-	                     "ORDER BY x.nation, o_year";
+	                     "JOIN jit_two_join_lookup o ON x.event_key_i = o.event_key "
+	                     "GROUP BY x.segment, event_year "
+	                     "ORDER BY x.segment, event_year";
 	REQUIRE_NO_FAIL(con.Query("SET jit_policy='off'"));
 	auto reference = con.Query(query);
 	REQUIRE_NO_FAIL(*reference);
@@ -2331,7 +2332,7 @@ TEST_CASE("JIT distinct aggregate uses global pair set for high-payload probe gr
 	    });
 }
 
-TEST_CASE("JIT Q9-like two-projection between-join chain composes primitive boundaries", "[api][jit]") {
+TEST_CASE("JIT two-projection between-join chain composes primitive boundaries", "[api][jit]") {
 	DuckDB db;
 	Connection con(db);
 	auto &manager = ExecutionRegionManager::Get(*con.context);
@@ -2340,45 +2341,47 @@ TEST_CASE("JIT Q9-like two-projection between-join chain composes primitive boun
 	REQUIRE_NO_FAIL(con.Query("PRAGMA threads=1"));
 	REQUIRE_NO_FAIL(con.Query("SET perfect_ht_threshold=0"));
 	REQUIRE_NO_FAIL(con.Query("SET disabled_optimizers='join_order,build_side_probe_side'"));
-	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_q9_chain_l AS "
-	                          "SELECT (i % 4096)::BIGINT AS suppkey, "
-	                          "       (i % 2048)::BIGINT AS partkey, "
-	                          "       ((i % 8192) * 100003)::BIGINT AS orderkey, "
-	                          "       CAST(100 + (i % 1000) AS DECIMAL(15,2)) AS extendedprice, "
-	                          "       CAST(i % 17 AS DECIMAL(15,2)) AS discount, "
-	                          "       CAST(1 + (i % 23) AS DECIMAL(15,2)) AS quantity "
+	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_two_projection_chain_fact AS "
+	                          "SELECT (i % 4096)::BIGINT AS left_key, "
+	                          "       (i % 2048)::BIGINT AS right_key, "
+	                          "       ((i % 8192) * 100003)::BIGINT AS event_key, "
+	                          "       CAST(100 + (i % 1000) AS DECIMAL(15,2)) AS gross_value, "
+	                          "       CAST(i % 17 AS DECIMAL(15,2)) AS discount_rate, "
+	                          "       CAST(1 + (i % 23) AS DECIMAL(15,2)) AS qty_value "
 	                          "FROM range(65536) tbl(i)"));
-	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_q9_chain_psn AS "
-	                          "SELECT i::BIGINT AS ps_suppkey, "
-	                          "       (i % 2048)::BIGINT AS ps_partkey, "
-	                          "       CAST(3 + (i % 31) AS DECIMAL(15,2)) AS supplycost, "
-	                          "       'nation_' || CAST(i % 7 AS VARCHAR) AS nation_name "
+	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_two_projection_chain_build AS "
+	                          "SELECT i::BIGINT AS build_left_key, "
+	                          "       (i % 2048)::BIGINT AS build_right_key, "
+	                          "       CAST(3 + (i % 31) AS DECIMAL(15,2)) AS unit_cost, "
+	                          "       'segment_' || CAST(i % 7 AS VARCHAR) AS segment_name "
 	                          "FROM range(4096) tbl(i)"));
-	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_q9_chain_orders AS "
-	                          "SELECT (i * 100003)::INTEGER AS orderkey, "
-	                          "       DATE '1992-01-01' + (i % 2000)::INTEGER AS orderdate "
+	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_two_projection_chain_lookup AS "
+	                          "SELECT (i * 100003)::INTEGER AS event_key, "
+	                          "       DATE '1992-01-01' + (i % 2000)::INTEGER AS event_date "
 	                          "FROM range(8192) tbl(i)"));
 
-	const string query = "SELECT x.nation_alias, year(o.orderdate) AS o_year, sum(x.amount)::HUGEINT AS sum_profit "
-	                     "FROM ("
-	                     "  SELECT y.nation AS nation_alias, "
-	                     "         CAST(y.orderkey_raw AS INTEGER) AS orderkey_i, "
-	                     "         y.extendedprice * (1.00::DECIMAL(15,2) - y.discount) - "
-	                     "         y.supplycost * y.quantity AS amount "
-	                     "  FROM ("
-	                     "    SELECT b.nation_name AS nation, "
-	                     "           l.orderkey AS orderkey_raw, "
-	                     "           l.extendedprice AS extendedprice, "
-	                     "           l.discount AS discount, "
-	                     "           b.supplycost AS supplycost, "
-	                     "           l.quantity AS quantity "
-	                     "    FROM jit_q9_chain_l l "
-	                     "    JOIN jit_q9_chain_psn b ON l.suppkey = b.ps_suppkey AND l.partkey = b.ps_partkey "
-	                     "  ) y "
-	                     ") x "
-	                     "JOIN jit_q9_chain_orders o ON x.orderkey_i = o.orderkey "
-	                     "GROUP BY x.nation_alias, o_year "
-	                     "ORDER BY x.nation_alias, o_year";
+	const string query =
+	    "SELECT x.segment_alias, year(o.event_date) AS event_year, sum(x.amount)::HUGEINT AS sum_profit "
+	    "FROM ("
+	    "  SELECT y.segment AS segment_alias, "
+	    "         CAST(y.event_key_raw AS INTEGER) AS event_key_i, "
+	    "         y.gross_value * (1.00::DECIMAL(15,2) - y.discount_rate) - "
+	    "         y.unit_cost * y.qty_value AS amount "
+	    "  FROM ("
+	    "    SELECT b.segment_name AS segment, "
+	    "           l.event_key AS event_key_raw, "
+	    "           l.gross_value AS gross_value, "
+	    "           l.discount_rate AS discount_rate, "
+	    "           b.unit_cost AS unit_cost, "
+	    "           l.qty_value AS qty_value "
+	    "    FROM jit_two_projection_chain_fact l "
+	    "    JOIN jit_two_projection_chain_build b ON l.left_key = b.build_left_key AND "
+	    "l.right_key = b.build_right_key "
+	    "  ) y "
+	    ") x "
+	    "JOIN jit_two_projection_chain_lookup o ON x.event_key_i = o.event_key "
+	    "GROUP BY x.segment_alias, event_year "
+	    "ORDER BY x.segment_alias, event_year";
 	REQUIRE_NO_FAIL(con.Query("SET jit_policy='off'"));
 	auto reference = con.Query(query);
 	REQUIRE_NO_FAIL(*reference);

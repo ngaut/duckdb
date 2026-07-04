@@ -224,6 +224,32 @@ def verify_no_benchmark_shaped_production_logic() -> None:
     )
 
 
+def verify_no_benchmark_shaped_jit_api_tests() -> None:
+    reject_regex(
+        "benchmark-shaped JIT API coverage",
+        (
+            r"\bQ[0-9]+(?:-like)?\b",
+            r"\bTPC-H\b",
+            r"\btpch\b",
+            r"\bjit_q[0-9]",
+            r"\bl_returnflag\b",
+            r"\bl_linestatus\b",
+            r"\bl_shipdate\b",
+            r"\bl_extendedprice\b",
+            r"\bl_discount\b",
+            r"\bl_quantity\b",
+            r"\bl_tax\b",
+            r"\bp_type\b",
+            r"\bnation_id\b",
+            r"\bnation_name\b",
+        ),
+        (
+            "test/api/test_jit*.cpp",
+            "test/api/test_jit_helpers.hpp",
+        ),
+    )
+
+
 def verify_layer_boundaries() -> None:
     reject_regex(
         "SLJIT dependency in core DuckDB",
@@ -2209,6 +2235,7 @@ def verify_no_whole_executor_fallbacks() -> None:
 def main() -> None:
     verify_required_design_files()
     verify_no_benchmark_shaped_production_logic()
+    verify_no_benchmark_shaped_jit_api_tests()
     verify_layer_boundaries()
     verify_no_deprecated_verification_pragmas()
     verify_stale_route_code_removed()
