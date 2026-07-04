@@ -116,11 +116,10 @@ static bool SljitTryAddJoinLHSInputAggregateInput(SljitJoinProjectionAggregateDe
 	return true;
 }
 
-static bool SljitTryAddJoinLHSInputAggregateInputFromProjection(const ExecutionHashJoinProbeBinding &binding,
-	SljitJoinProjectionAggregateDescriptor &descriptor,
-	SljitExecutableRegionOp &projection_op,
-	idx_t projection_idx, idx_t &input_idx,
-	optional_ptr<SljitExecutableRegionOp> producer_projection_op = nullptr) {
+static bool SljitTryAddJoinLHSInputAggregateInputFromProjection(
+    const ExecutionHashJoinProbeBinding &binding, SljitJoinProjectionAggregateDescriptor &descriptor,
+    SljitExecutableRegionOp &projection_op, idx_t projection_idx, idx_t &input_idx,
+    optional_ptr<SljitExecutableRegionOp> producer_projection_op = nullptr) {
 	if (projection_idx >= projection_op.projections.size() || projection_idx >= projection_op.output_types.size()) {
 		return false;
 	}
@@ -376,13 +375,13 @@ static bool SljitTryBuildProjectionRowPointerAggregateDescriptor(
 			continue;
 		}
 		idx_t input_idx;
-			const bool uses_projection_output = group_idx < group_source_uses_projection_output.size() &&
-			                                    group_source_uses_projection_output[group_idx] != 0;
-			if (!uses_projection_output && !SljitInputVectorGroupSourceUsesProjection(group_source) &&
-			    SljitInputVectorGroupKeyHasOriginalInput(group_source)) {
-				if (!SljitTryAddJoinLHSInputAggregateInput(descriptor, group_source.input_vector_index,
-				                                           group_source.source_type, input_idx)) {
-					return descriptor.Block("input_group_source");
+		const bool uses_projection_output = group_idx < group_source_uses_projection_output.size() &&
+		                                    group_source_uses_projection_output[group_idx] != 0;
+		if (!uses_projection_output && !SljitInputVectorGroupSourceUsesProjection(group_source) &&
+		    SljitInputVectorGroupKeyHasOriginalInput(group_source)) {
+			if (!SljitTryAddJoinLHSInputAggregateInput(descriptor, group_source.input_vector_index,
+			                                           group_source.source_type, input_idx)) {
+				return descriptor.Block("input_group_source");
 			}
 			group_source.input_vector_index = input_idx;
 		} else {
@@ -393,9 +392,7 @@ static bool SljitTryBuildProjectionRowPointerAggregateDescriptor(
 			    !SljitTryAddJoinProjectionAggregateInput(descriptor, projection_to_input, projection_idx, input_idx)) {
 				return descriptor.Block("input_group_projection");
 			}
-			const bool repeats_with_row_pointer = group_source.input_vector_repeats_with_row_pointer;
 			SljitInitializeInputVectorGroupKeySource(input_idx, group.type, group.type, group_source);
-			group_source.input_vector_repeats_with_row_pointer = repeats_with_row_pointer;
 			group_source.ready = true;
 			group_source.cast_kind = ExecutionRowPointerGroupKeyCastKind::NONE;
 		}
@@ -426,8 +423,8 @@ static bool SljitTryBuildProjectionRowPointerAggregateDescriptor(
 			return descriptor.Block("distinct_payload_type");
 		}
 		idx_t input_idx;
-		if ((!SljitTryAddJoinLHSInputAggregateInputFromProjection(
-		         binding, descriptor, projection_op, projection_idx, input_idx, producer_projection_op) &&
+		if ((!SljitTryAddJoinLHSInputAggregateInputFromProjection(binding, descriptor, projection_op, projection_idx,
+		                                                          input_idx, producer_projection_op) &&
 		     !SljitTryAddJoinProjectionAggregateInput(descriptor, projection_to_input, projection_idx, input_idx)) ||
 		    descriptor.input_types[input_idx].InternalType() != aggregate.child_types[0].InternalType()) {
 			return descriptor.Block("distinct_payload_projection");
@@ -448,8 +445,8 @@ static bool SljitTryBuildProjectionRowPointerAggregateDescriptor(
 			return descriptor.Block("fused_payload_projection");
 		}
 		idx_t input_idx;
-		if (!SljitTryAddJoinLHSInputAggregateInputFromProjection(
-		        binding, descriptor, projection_op, projection_idx, input_idx, producer_projection_op) &&
+		if (!SljitTryAddJoinLHSInputAggregateInputFromProjection(binding, descriptor, projection_op, projection_idx,
+		                                                         input_idx, producer_projection_op) &&
 		    !SljitTryAddJoinProjectionAggregateInput(descriptor, projection_to_input, projection_idx, input_idx)) {
 			return descriptor.Block("fused_payload_projection");
 		}
@@ -469,8 +466,8 @@ static bool SljitTryBuildProjectionRowPointerAggregateDescriptor(
 			return true;
 		}
 		idx_t input_idx;
-		if ((!SljitTryAddJoinLHSInputAggregateInputFromProjection(
-		         binding, descriptor, projection_op, projection_idx, input_idx, producer_projection_op) &&
+		if ((!SljitTryAddJoinLHSInputAggregateInputFromProjection(binding, descriptor, projection_op, projection_idx,
+		                                                          input_idx, producer_projection_op) &&
 		     !SljitTryAddJoinProjectionAggregateInput(descriptor, projection_to_input, projection_idx, input_idx)) ||
 		    descriptor.input_types[input_idx].InternalType() != aggregate.child_types[0].InternalType()) {
 			return descriptor.Block("payload_projection");

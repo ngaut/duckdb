@@ -83,8 +83,8 @@ struct SljitPostJoinProjectionAggregateRuntimeState {
 		if (!post_join_projection.HasProjectionChain()) {
 			if (SljitTryExecuteDirectJoinOutputAggregate(
 			        runtime, ops, scratch, direct_join_output_aggregate, post_join_projection, join_input,
-			        match_selection, row_pointers, join_output, nullptr, source_key0_int64_to_int32_safe_for_output,
-			        output_column_map, output_projection_idx)) {
+			        match_selection, build_selection, row_pointers, join_output, nullptr,
+			        source_key0_int64_to_int32_safe_for_output, output_column_map, output_projection_idx)) {
 				processed_output_rows += join_output.size();
 				return false;
 			}
@@ -93,8 +93,8 @@ struct SljitPostJoinProjectionAggregateRuntimeState {
 			                                                 join_output.size(), join_output);
 			auto aggregate_idx = AggregateIndex();
 			auto &aggregate_op = ops[aggregate_idx];
-			auto sink_result = SljitExecuteNativeAggregateUpdate(
-			    runtime, runtime.ExecutionOperators(), scratch, aggregate_idx, aggregate_op, join_output);
+			auto sink_result = SljitExecuteNativeAggregateUpdate(runtime, runtime.ExecutionOperators(), scratch,
+			                                                     aggregate_idx, aggregate_op, join_output);
 			if (SljitSinkResultStopsPipeline(sink_result)) {
 				return SljitNativeSinkResultStopsExecution(runtime, sink_result, result);
 			}
@@ -107,7 +107,7 @@ struct SljitPostJoinProjectionAggregateRuntimeState {
 		bool direct_projected = false;
 		if (SljitTryExecuteDirectJoinOutputAggregate(
 		        runtime, ops, scratch, direct_join_output_aggregate, post_join_projection, join_input, match_selection,
-		        row_pointers, join_output, aggregate_sink.DeferredGroupedFinishPtr(),
+		        build_selection, row_pointers, join_output, aggregate_sink.DeferredGroupedFinishPtr(),
 		        source_key0_int64_to_int32_safe_for_output, output_column_map, output_projection_idx)) {
 			aggregate_sink.Charge(join_output.size());
 			return false;

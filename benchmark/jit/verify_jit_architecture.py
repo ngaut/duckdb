@@ -389,7 +389,8 @@ def verify_runtime_batch_view() -> None:
         (
             "SljitTryMaterializeHashJoinProjectionAggregateInputsToChunk",
             "binding.perfect_layout.rhs_dictionary_buffers",
-            "scratch.HashJoinBuildSelection(hash_join_idx)",
+            "const SelectionVector &build_selection",
+            "target.Dictionary(binding.perfect_layout.rhs_dictionary_buffers[rhs_col_idx], build_selection",
             "SljitTryMaterializePerfectHashJoinComputedRHSProjectionToBatch",
             "SljitTryBuildSingleSourceProjectionExpression(source_expr, remapped_reference, join_output_source_index)",
             "SljitProjectionIsSingleSourceReferenceLike(remapped_reference.plan)",
@@ -640,7 +641,7 @@ def verify_runtime_batch_view() -> None:
             "JIT mark filter projection native tail uses boundary primitive",
             "JIT first hash join native tail uses source batch boundary recipe",
             "JIT mark match filter emits selected boundary without marker flags",
-            "JIT Q16 selected hash-join distinct aggregate uses mixed row-pointer backend",
+            "JIT two-join mark distinct aggregate uses row-pointer distinct backend",
             "JIT distinct aggregate uses global pair set for high-payload probe groups",
             "aggregate_update.distinct_count_pointer_row_pointer_group_key_update=",
             "aggregate_update.direct_projection_distinct_count_pointer_row_pointer_update=",

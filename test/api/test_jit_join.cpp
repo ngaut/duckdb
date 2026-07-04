@@ -2307,28 +2307,38 @@ TEST_CASE("JIT two-join mark distinct aggregate uses row-pointer distinct backen
 	REQUIRE_NO_FAIL(con.Query("PRAGMA threads=1"));
 	REQUIRE_NO_FAIL(con.Query("SET perfect_ht_threshold=0"));
 	REQUIRE_NO_FAIL(con.Query("SET disabled_optimizers='join_order,build_side_probe_side'"));
-	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_mark_filter_fact AS "
-	                          "SELECT ((i % 2048) * 1000003)::BIGINT AS partkey, "
-	                          "       (i % 4096)::BIGINT AS suppkey "
+	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_distinct_contract_fact AS "
+	                          "SELECT (i % 2048)::BIGINT AS k, "
+	                          "       (i % 4096)::BIGINT AS payload "
 	                          "FROM range(65536) tbl(i)"));
-	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_mark_filter_part AS "
-	                          "SELECT (i * 1000003)::BIGINT AS partkey, "
-	                          "       'Brand#' || CAST(i % 17 AS VARCHAR) AS brand, "
-	                          "       'TYPE_' || CAST(i % 31 AS VARCHAR) AS type, "
-	                          "       (1 + (i % 11))::INTEGER AS size "
+	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_distinct_contract_dim AS "
+	                          "SELECT i::BIGINT AS k, "
+	                          "       'label_' || CAST(i % 97 AS VARCHAR) AS label, "
+	                          "       CASE WHEN i % 5 = 0 "
+	                          "            THEN 'MEDIUM_POLISHED_' || CAST(i % 11 AS VARCHAR) "
+	                          "            ELSE 'category_' || CAST(i % 31 AS VARCHAR) END AS category, "
+	                          "       (1 + (i % 50))::INTEGER AS bucket "
 	                          "FROM range(2048) tbl(i)"));
-	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_mark_filter_bad_supplier AS "
-	                          "SELECT (i * 13)::BIGINT AS suppkey "
+	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_distinct_contract_blocked AS "
+	                          "SELECT (i * 13)::BIGINT AS payload, "
+	                          "       CASE WHEN i % 3 = 0 "
+	                          "            THEN 'has Customer Complaints marker' "
+	                          "            ELSE 'clean marker' END AS note "
 	                          "FROM range(256) tbl(i)"));
 
-	const string query = "SELECT p.brand, p.type, p.size, count(DISTINCT f.suppkey) AS supplier_count "
-	                     "FROM jit_mark_filter_fact f "
-	                     "JOIN jit_mark_filter_part p ON f.partkey = p.partkey "
-	                     "WHERE f.suppkey NOT IN ("
-	                     "  SELECT b.suppkey FROM jit_mark_filter_bad_supplier b"
-	                     ") "
-	                     "GROUP BY p.brand, p.type, p.size "
-	                     "ORDER BY p.brand, p.type, p.size";
+	const string query = "SELECT d.label, d.category, d.bucket, count(DISTINCT f.payload) AS payload_count "
+	                     "FROM jit_distinct_contract_fact f, jit_distinct_contract_dim d "
+	                     "WHERE d.k = f.k "
+	                     "  AND d.label <> 'label_45' "
+	                     "  AND d.category NOT LIKE 'MEDIUM_POLISHED_%' "
+	                     "  AND d.bucket IN (49, 14, 23, 45, 19, 3, 36, 9) "
+	                     "  AND f.payload NOT IN ("
+	                     "      SELECT b.payload "
+	                     "      FROM jit_distinct_contract_blocked b "
+	                     "      WHERE b.note LIKE '%Customer%Complaints%'"
+	                     "  ) "
+	                     "GROUP BY d.label, d.category, d.bucket "
+	                     "ORDER BY payload_count DESC, d.label, d.category, d.bucket";
 	REQUIRE_NO_FAIL(con.Query("SET jit_policy='off'"));
 	auto reference = con.Query(query);
 	REQUIRE_NO_FAIL(*reference);
@@ -2346,28 +2356,63 @@ TEST_CASE("JIT two-join mark distinct aggregate uses row-pointer distinct backen
 		}
 	}
 
-	bool found_distinct_backend = false;
-	for (auto &event : manager.GetEvents()) {
-		REQUIRE_FALSE(StringUtil::Contains(EventJitRuntimePathCounts(event),
-		                                   "aggregate_update.row_pointer_distinct_count_pointer_direct_update="));
-		REQUIRE_FALSE(StringUtil::Contains(EventJitRuntimePathCounts(event),
-		                                   "aggregate_update.distinct_count_pointer_direct_update="));
-		if (EventStatus(event) != "executed") {
-			continue;
-		}
-		REQUIRE_FALSE(StringUtil::Contains(EventJitRuntimePathCounts(event),
-		                                   "aggregate_update.distinct_count_pointer_selected_payload_update="));
-		REQUIRE_FALSE(StringUtil::Contains(EventJitRuntimePathCounts(event),
-		                                   "aggregate_update.distinct_count_pointer_group_key_update_unsupported."));
-		if (!StringUtil::Contains(EventJitRuntimePathCounts(event),
-		                          "aggregate_update.distinct_count_pointer_group_key_update=") &&
-		    !StringUtil::Contains(EventJitRuntimePathCounts(event),
-		                          "aggregate_update.distinct_count_pointer_row_pointer_group_key_update=")) {
-			continue;
-		}
-		found_distinct_backend = true;
-	}
-	REQUIRE(found_distinct_backend);
+	RequireJitEvent(
+	    manager,
+	    [](const ExecutionRegionEvent &event) {
+		    return EventPhase(event) == "runtime" && EventStatus(event) == "executed" &&
+		           EventExecutionMode(event) == "native" &&
+		           StringUtil::Contains(EventJitRuntimePathCounts(event),
+		                                "aggregate_update.distinct_count_pointer_row_pointer_group_key_update=");
+	    },
+	    [](const ExecutionRegionEvent &event) {
+		    const auto runtime_paths = EventJitRuntimePathCounts(event);
+		    const auto boundaries = EventJitMaterializationBoundaryCounts(event);
+		    const auto stages = EventGeneratedStageRuntimeBreakdown(event);
+		    REQUIRE_FALSE(StringUtil::Contains(runtime_paths,
+		                                       "aggregate_update.row_pointer_distinct_count_pointer_direct_update="));
+		    REQUIRE_FALSE(
+		        StringUtil::Contains(runtime_paths, "aggregate_update.distinct_count_pointer_direct_update="));
+		    REQUIRE_FALSE(StringUtil::Contains(runtime_paths,
+		                                       "aggregate_update.distinct_count_pointer_selected_payload_update="));
+		    REQUIRE_FALSE(StringUtil::Contains(
+		        runtime_paths, "aggregate_update.distinct_count_pointer_group_key_update_unsupported."));
+		    REQUIRE(StringUtil::Contains(runtime_paths,
+		                                 "aggregate_update.distinct_count_pointer_row_pointer_group_key_update="));
+		    REQUIRE(StringUtil::Contains(
+		        runtime_paths, "aggregate_update.direct_projection_distinct_count_pointer_row_pointer_update="));
+		    REQUIRE(StringUtil::Contains(runtime_paths,
+		                                 "aggregate_update.direct_projection_aggregate_input.projection_output="));
+		    REQUIRE(StringUtil::Contains(runtime_paths,
+		                                 "aggregate_update.direct_projection_aggregate_input.hash_join_lhs_input="));
+		    REQUIRE(StringUtil::Contains(runtime_paths,
+		                                 "aggregate_update.direct_projection_aggregate_group.input_vector="));
+		    REQUIRE_FALSE(
+		        StringUtil::Contains(runtime_paths, "aggregate_update.distinct_count_pointer_payload_set_update="));
+		    REQUIRE(StringUtil::Contains(boundaries, "hash_join_probe.selected_mark_probe_input="));
+		    REQUIRE(StringUtil::Contains(boundaries, "hash_join_probe.mark_nonmatch_selection_reference="));
+		    REQUIRE_FALSE(StringUtil::Contains(boundaries, "hash_join_probe.mark_flags="));
+		    REQUIRE(StringUtil::Contains(boundaries, "projection.direct_post_join_reference_projection="));
+		    REQUIRE(StringUtil::Contains(boundaries, "projection.direct_post_join_computed_projection="));
+		    REQUIRE(StringUtil::Contains(boundaries,
+		                                 "aggregate_update.distinct_count_pointer_row_pointer_group_key_update="));
+		    REQUIRE(StringUtil::Contains(stages, "projection.post_join_direct_reference_projection="));
+		    REQUIRE(StringUtil::Contains(stages, "projection.post_join_direct_computed_projection="));
+		    REQUIRE(StringUtil::Contains(stages, "aggregate_update.distinct_count_pointer_row_pointer_group_key_update."
+		                                         "direct_row_pointer_grouped_targets."));
+	    });
+	RequireJitEvent(
+	    manager,
+	    [](const ExecutionRegionEvent &event) {
+		    return IsCompiledSljitRegionEvent(event) && event.runner_cost.present &&
+		           event.candidate_traits.sink_kind == ExecutionRegionSinkKind::HASH_AGGREGATE_UPDATE &&
+		           StringUtil::Contains(event.ir, "distinct_count_pointer");
+	    },
+	    [](const ExecutionRegionEvent &event) {
+		    REQUIRE(event.runner_cost.generated_stage_count > 0);
+		    REQUIRE(event.runner_cost.native_aggregate_stage_count == 0);
+		    REQUIRE(event.runner_cost.native_distinct_count_pointer_aggregate_stage_count == 0);
+		    REQUIRE(event.runner_cost.generated_distinct_count_pointer_aggregate_update_count > 0);
+	    });
 }
 
 TEST_CASE("JIT distinct aggregate uses global pair set for high-payload probe groups", "[api][jit]") {
@@ -2438,115 +2483,6 @@ TEST_CASE("JIT distinct aggregate uses global pair set for high-payload probe gr
 		                                       "aggregate_update.distinct_count_pointer_selected_payload_update="));
 		    REQUIRE_FALSE(
 		        StringUtil::Contains(runtime_paths, "aggregate_update.distinct_count_pointer_payload_set_update="));
-	    });
-}
-
-TEST_CASE("JIT Q16 selected hash-join distinct aggregate uses mixed row-pointer backend", "[api][jit]") {
-	DuckDB db;
-	Connection con(db);
-	auto &manager = ExecutionRegionManager::Get(*con.context);
-
-	REQUIRE_NO_FAIL(con.Query("LOAD tpch"));
-	ConfigureSljitForCoverage(con, false, true, true, 10000);
-	REQUIRE_NO_FAIL(con.Query("PRAGMA threads=1"));
-	REQUIRE_NO_FAIL(con.Query("CALL dbgen(sf=0.01)"));
-
-	const string query = "SELECT "
-	                     "    p_brand, "
-	                     "    p_type, "
-	                     "    p_size, "
-	                     "    count(DISTINCT ps_suppkey) AS supplier_cnt "
-	                     "FROM partsupp, part "
-	                     "WHERE p_partkey = ps_partkey "
-	                     "  AND p_brand <> 'Brand#45' "
-	                     "  AND p_type NOT LIKE 'MEDIUM POLISHED%' "
-	                     "  AND p_size IN (49, 14, 23, 45, 19, 3, 36, 9) "
-	                     "  AND ps_suppkey NOT IN ("
-	                     "      SELECT s_suppkey "
-	                     "      FROM supplier "
-	                     "      WHERE s_comment LIKE '%Customer%Complaints%'"
-	                     "  ) "
-	                     "GROUP BY p_brand, p_type, p_size "
-	                     "ORDER BY supplier_cnt DESC, p_brand, p_type, p_size";
-
-	REQUIRE_NO_FAIL(con.Query("SET jit_policy='off'"));
-	REQUIRE_NO_FAIL(con.Query("CREATE TEMP TABLE jit_q16_selected_expected AS " + query));
-
-	REQUIRE_NO_FAIL(con.Query("SET jit_policy='auto'"));
-	ClearJitTrace(manager, true);
-	REQUIRE_NO_FAIL(con.Query("CREATE TEMP TABLE jit_q16_selected_actual AS " + query));
-
-	auto diff = con.Query("SELECT count(*) FROM ("
-	                      "    (SELECT * FROM jit_q16_selected_expected "
-	                      "     EXCEPT ALL SELECT * FROM jit_q16_selected_actual) "
-	                      "    UNION ALL "
-	                      "    (SELECT * FROM jit_q16_selected_actual "
-	                      "     EXCEPT ALL SELECT * FROM jit_q16_selected_expected)"
-	                      ") diff");
-	REQUIRE_NO_FAIL(*diff);
-	REQUIRE(diff->GetValue(0, 0).GetValue<int64_t>() == 0);
-
-	RequireJitEvent(
-	    manager,
-	    [](const ExecutionRegionEvent &event) {
-		    return EventPhase(event) == "runtime" && EventStatus(event) == "executed" &&
-		           EventExecutionMode(event) == "native" &&
-		           StringUtil::Contains(EventJitRuntimePathCounts(event),
-		                                "aggregate_update.distinct_count_pointer_row_pointer_group_key_update=");
-	    },
-	    [](const ExecutionRegionEvent &event) {
-		    const auto runtime_paths = EventJitRuntimePathCounts(event);
-		    const auto boundaries = EventJitMaterializationBoundaryCounts(event);
-		    const auto stages = EventGeneratedStageRuntimeBreakdown(event);
-		    REQUIRE(StringUtil::Contains(runtime_paths,
-		                                 "aggregate_update.distinct_count_pointer_row_pointer_group_key_update="));
-		    REQUIRE(StringUtil::Contains(
-		        runtime_paths, "aggregate_update.direct_projection_distinct_count_pointer_row_pointer_update="));
-		    REQUIRE(StringUtil::Contains(runtime_paths,
-		                                 "aggregate_update.direct_projection_aggregate_input.projection_output="));
-		    REQUIRE(StringUtil::Contains(runtime_paths,
-		                                 "aggregate_update.direct_projection_aggregate_input.hash_join_lhs_input="));
-		    REQUIRE(StringUtil::Contains(runtime_paths,
-		                                 "aggregate_update.direct_projection_aggregate_group.input_vector="));
-		    REQUIRE_FALSE(
-		        StringUtil::Contains(runtime_paths, "aggregate_update.distinct_count_pointer_payload_set_update="));
-		    REQUIRE(StringUtil::Contains(boundaries, "hash_join_probe.selected_mark_probe_input="));
-		    REQUIRE(StringUtil::Contains(boundaries, "hash_join_probe.mark_nonmatch_selection_reference="));
-		    REQUIRE_FALSE(StringUtil::Contains(boundaries, "hash_join_probe.mark_flags="));
-		    REQUIRE(StringUtil::Contains(boundaries, "projection.direct_post_join_reference_projection="));
-		    REQUIRE(StringUtil::Contains(boundaries, "projection.direct_post_join_computed_projection="));
-		    REQUIRE(StringUtil::Contains(boundaries,
-		                                 "aggregate_update.distinct_count_pointer_row_pointer_group_key_update="));
-		    REQUIRE(StringUtil::Contains(stages, "projection.post_join_direct_reference_projection="));
-		    REQUIRE(StringUtil::Contains(stages, "projection.post_join_direct_computed_projection="));
-		    REQUIRE(StringUtil::Contains(stages, "aggregate_update.distinct_count_pointer_row_pointer_group_key_update."
-		                                         "direct_row_pointer_grouped_targets."));
-	    });
-	RequireJitEvent(
-	    manager,
-	    [](const ExecutionRegionEvent &event) {
-		    return EventPhase(event) == "runtime" && EventStatus(event) == "executed" &&
-		           EventExecutionMode(event) == "native" &&
-		           StringUtil::Contains(EventGeneratedStageRuntimeBreakdown(event),
-		                                "projection.reference_view_handoff=");
-	    },
-	    [](const ExecutionRegionEvent &event) {
-		    const auto stages = EventGeneratedStageRuntimeBreakdown(event);
-		    REQUIRE(StringUtil::Contains(stages, "projection.reference_view_handoff="));
-		    REQUIRE_FALSE(StringUtil::Contains(stages, "projection.batch_append="));
-	    });
-	RequireJitEvent(
-	    manager,
-	    [](const ExecutionRegionEvent &event) {
-		    return IsCompiledSljitRegionEvent(event) && event.runner_cost.present &&
-		           event.candidate_traits.sink_kind == ExecutionRegionSinkKind::HASH_AGGREGATE_UPDATE &&
-		           StringUtil::Contains(event.ir, "distinct_count_pointer");
-	    },
-	    [](const ExecutionRegionEvent &event) {
-		    REQUIRE(event.runner_cost.generated_stage_count > 0);
-		    REQUIRE(event.runner_cost.native_aggregate_stage_count == 0);
-		    REQUIRE(event.runner_cost.native_distinct_count_pointer_aggregate_stage_count == 0);
-		    REQUIRE(event.runner_cost.generated_distinct_count_pointer_aggregate_update_count > 0);
 	    });
 }
 

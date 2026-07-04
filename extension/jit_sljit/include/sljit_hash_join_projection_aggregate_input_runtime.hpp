@@ -90,8 +90,9 @@ static bool SljitTryReferenceHashJoinProjectionAggregateInputsToChunk(
 static bool SljitTryMaterializeHashJoinProjectionAggregateInputsToChunk(
     ExecutionRegionRuntime &runtime, SljitRegionExecutionScratch &scratch, idx_t hash_join_idx, idx_t projection_idx,
     SljitExecutableRegionOp &projection_op, DataChunk &join_input, const SelectionVector &match_selection,
-    Vector &row_pointers, const vector<SljitJoinProjectionAggregateInputSource> &input_sources, idx_t count,
-    DataChunk &result, optional_ptr<string> blocker = nullptr) {
+    const SelectionVector &build_selection, Vector &row_pointers,
+    const vector<SljitJoinProjectionAggregateInputSource> &input_sources, idx_t count, DataChunk &result,
+    optional_ptr<string> blocker = nullptr) {
 	auto block = [&](const char *reason) {
 		if (blocker) {
 			*blocker = reason;
@@ -191,8 +192,8 @@ static bool SljitTryMaterializeHashJoinProjectionAggregateInputsToChunk(
 					}
 					if (!SljitTryGatherHashJoinRHSReferenceProjectionToBatch(
 					        binding, remapped_reference.plan, rhs_col_idx, row_pointers, target, current_size, count)) {
-						return block_message("rhs_reference_gather_projection_" + to_string(projected_idx) +
-						                     "_rhs_" + to_string(rhs_col_idx) + "_kind_" +
+						return block_message("rhs_reference_gather_projection_" + to_string(projected_idx) + "_rhs_" +
+						                     to_string(rhs_col_idx) + "_kind_" +
 						                     to_string(static_cast<int>(remapped_reference.plan.kind)) + "_source_" +
 						                     to_string(remapped_reference.plan.source_index) + "_return_" +
 						                     remapped_reference.plan.return_type.ToString() + "_target_" +
@@ -206,8 +207,8 @@ static bool SljitTryMaterializeHashJoinProjectionAggregateInputsToChunk(
 					    target.GetType() != binding.perfect_layout.rhs_output_types[rhs_col_idx]) {
 						return block("rhs_perfect_reference");
 					}
-					target.Dictionary(binding.perfect_layout.rhs_dictionary_buffers[rhs_col_idx],
-					                  scratch.HashJoinBuildSelection(hash_join_idx), count);
+					target.Dictionary(binding.perfect_layout.rhs_dictionary_buffers[rhs_col_idx], build_selection,
+					                  count);
 				}
 			}
 			materialized_reference = true;
@@ -235,8 +236,8 @@ static bool SljitTryMaterializeHashJoinProjectionAggregateInputsToChunk(
 				}
 			} else if (perfect_hash_join) {
 				if (!SljitTryMaterializePerfectHashJoinComputedRHSProjectionToBatch(
-				        binding, source_expr, scratch.HashJoinBuildSelection(hash_join_idx), result, output_idx,
-				        current_size, count, adapter_scratch)) {
+				        binding, source_expr, build_selection, result, output_idx, current_size, count,
+				        adapter_scratch)) {
 					return block("computed_projection");
 				}
 			} else {

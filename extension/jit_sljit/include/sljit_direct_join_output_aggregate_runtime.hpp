@@ -51,15 +51,15 @@ SljitRecordJoinProjectionAggregateDescriptorShape(ExecutionRegionRuntime &runtim
 				RecordSljitRegionRuntimePath(runtime, kind, (group_prefix + "input_vector").c_str(), count);
 			} else if (source.cast_kind == ExecutionRowPointerGroupKeyCastKind::INT64_TO_INT32 &&
 			           source.hash_join_condition_idx == 0 && source.unchecked_integral_cast) {
-				RecordSljitRegionRuntimePath(
-				    runtime, kind, (group_prefix + "input_vector_cast_key0_unchecked").c_str(), count);
+				RecordSljitRegionRuntimePath(runtime, kind, (group_prefix + "input_vector_cast_key0_unchecked").c_str(),
+				                             count);
 			} else if (source.cast_kind == ExecutionRowPointerGroupKeyCastKind::INT64_TO_INT32 &&
 			           source.hash_join_condition_idx == 0) {
-				RecordSljitRegionRuntimePath(runtime, kind,
-				                             (group_prefix + "input_vector_cast_key0_checked").c_str(), count);
+				RecordSljitRegionRuntimePath(runtime, kind, (group_prefix + "input_vector_cast_key0_checked").c_str(),
+				                             count);
 			} else if (source.unchecked_integral_cast) {
-				RecordSljitRegionRuntimePath(runtime, kind,
-				                             (group_prefix + "input_vector_cast_unchecked").c_str(), count);
+				RecordSljitRegionRuntimePath(runtime, kind, (group_prefix + "input_vector_cast_unchecked").c_str(),
+				                             count);
 			} else {
 				RecordSljitRegionRuntimePath(runtime, kind, (group_prefix + "input_vector_cast").c_str(), count);
 			}
@@ -67,8 +67,8 @@ SljitRecordJoinProjectionAggregateDescriptorShape(ExecutionRegionRuntime &runtim
 			if (source.cast_kind == ExecutionRowPointerGroupKeyCastKind::NONE) {
 				RecordSljitRegionRuntimePath(runtime, kind, (group_prefix + "row_pointer_field").c_str(), count);
 			} else if (source.unchecked_integral_cast) {
-				RecordSljitRegionRuntimePath(
-				    runtime, kind, (group_prefix + "row_pointer_field_cast_unchecked").c_str(), count);
+				RecordSljitRegionRuntimePath(runtime, kind, (group_prefix + "row_pointer_field_cast_unchecked").c_str(),
+				                             count);
 			} else {
 				RecordSljitRegionRuntimePath(runtime, kind, (group_prefix + "row_pointer_field_cast").c_str(), count);
 			}
@@ -247,9 +247,9 @@ static bool SljitTryExecuteDirectJoinOutputPerfectHashAggregateUpdate(
 		}
 		return false;
 	}
-	auto &binding = SljitBindRecordedNativeSink(
-	    runtime, native_runtime, scratch, op_idx, op.kind, aggregate_input, sink_info,
-	    "aggregate-update-runtime-binding-failed", "SLJIT direct join-output perfect-hash aggregate update");
+	auto &binding = SljitBindRecordedNativeSink(runtime, native_runtime, scratch, op_idx, op.kind, aggregate_input,
+	                                            sink_info, "aggregate-update-runtime-binding-failed",
+	                                            "SLJIT direct join-output perfect-hash aggregate update");
 	if (!binding.ready || !binding.aggregate_update.ready || !binding.aggregate_update.primitive.ready) {
 		if (failure_reason) {
 			*failure_reason = "binding";
@@ -265,7 +265,8 @@ static bool SljitTryExecuteDirectJoinOutputPerfectHashAggregateUpdate(
 		}
 		return false;
 	}
-	auto &payload_lanes = scratch.AggregatePayloadLanes(op_idx, sink_info.aggregates, binding.aggregate_update.primitive);
+	auto &payload_lanes =
+	    scratch.AggregatePayloadLanes(op_idx, sink_info.aggregates, binding.aggregate_update.primitive);
 	if (payload_lanes.size() != sink_info.aggregates.size()) {
 		if (failure_reason) {
 			*failure_reason = "payload_lanes";
@@ -291,9 +292,9 @@ static bool SljitTryExecuteDirectJoinOutputPerfectHashAggregateUpdate(
 static bool SljitTryExecuteDirectJoinOutputAggregate(
     ExecutionRegionRuntime &runtime, vector<SljitExecutableRegionOp> &ops, SljitRegionExecutionScratch &scratch,
     SljitDirectJoinOutputAggregatePolicy &policy, SljitPostJoinProjectionStrategy &post_join_projection,
-    DataChunk &join_input, const SelectionVector &match_selection, Vector &row_pointers, DataChunk &join_output,
-    optional_ptr<bool> deferred_grouped_finish, bool source_key0_int64_to_int32_unchecked = false,
-    optional_ptr<const vector<idx_t>> output_column_map = nullptr,
+    DataChunk &join_input, const SelectionVector &match_selection, const SelectionVector &build_selection,
+    Vector &row_pointers, DataChunk &join_output, optional_ptr<bool> deferred_grouped_finish,
+    bool source_key0_int64_to_int32_unchecked = false, optional_ptr<const vector<idx_t>> output_column_map = nullptr,
     idx_t output_projection_idx = DConstants::INVALID_INDEX) {
 	if (!policy.Enabled()) {
 		return false;
@@ -308,8 +309,8 @@ static bool SljitTryExecuteDirectJoinOutputAggregate(
 	const bool descriptor_ready =
 	    has_projection_chain
 	        ? SljitTryBuildPostJoinProjectionAggregateDescriptor(ops, scratch, post_join_projection,
-	                                                             strategy.aggregate_idx, descriptor,
-	                                                             output_column_map, output_projection_idx)
+	                                                             strategy.aggregate_idx, descriptor, output_column_map,
+	                                                             output_projection_idx)
 	        : SljitTryBuildSelectedJoinAggregateInputDescriptor(ops, scratch, post_join_projection.hash_join_idx,
 	                                                            strategy.aggregate_idx, descriptor);
 	if (!descriptor_ready) {
@@ -327,9 +328,9 @@ static bool SljitTryExecuteDirectJoinOutputAggregate(
 		throw InternalException("SLJIT direct row-pointer aggregate descriptor has no projection index");
 	}
 	SljitApplyJoinProjectionGroupCastProofs(descriptor.group_sources, source_key0_int64_to_int32_unchecked);
-	const auto aggregate_projection_idx =
-	    descriptor.projection_idx == DConstants::INVALID_INDEX ? post_join_projection.trace_projection_idx
-	                                                          : descriptor.projection_idx;
+	const auto aggregate_projection_idx = descriptor.projection_idx == DConstants::INVALID_INDEX
+	                                          ? post_join_projection.trace_projection_idx
+	                                          : descriptor.projection_idx;
 	if (descriptor.output_to_projection.empty()) {
 		aggregate_input.SetChildCardinality(join_output.size());
 	} else if (SljitTryReferenceHashJoinProjectionAggregateInputsToChunk(
@@ -340,8 +341,8 @@ static bool SljitTryExecuteDirectJoinOutputAggregate(
 		string materialize_failure;
 		if (SljitTryMaterializeHashJoinProjectionAggregateInputsToChunk(
 		        runtime, scratch, post_join_projection.hash_join_idx, aggregate_projection_idx, descriptor.Projection(),
-		        join_input, match_selection, row_pointers, descriptor.input_sources, join_output.size(),
-		        aggregate_input, optional_ptr<string>(&materialize_failure))) {
+		        join_input, match_selection, build_selection, row_pointers, descriptor.input_sources,
+		        join_output.size(), aggregate_input, optional_ptr<string>(&materialize_failure))) {
 		} else if (!SljitJoinProjectionAggregateInputsUseOnlyProjectionOutputs(descriptor) ||
 		           !SljitTryDirectMaterializeHashJoinProjectionSourcesToBatch(
 		               runtime, ops, scratch, post_join_projection.hash_join_idx, aggregate_projection_idx,
@@ -368,15 +369,15 @@ static bool SljitTryExecuteDirectJoinOutputAggregate(
 	SljitRecordJoinProjectionAggregateDescriptorShape(runtime, aggregate_op.kind, descriptor, batch_group_sources,
 	                                                  join_output.size());
 	string perfect_hash_failure;
-	if (SljitTryExecuteDirectJoinOutputPerfectHashAggregateUpdate(
-	        runtime, runtime.ExecutionOperators(), scratch, strategy.aggregate_idx, aggregate_op, aggregate_input,
-	        optional_ptr<string>(&perfect_hash_failure))) {
+	if (SljitTryExecuteDirectJoinOutputPerfectHashAggregateUpdate(runtime, runtime.ExecutionOperators(), scratch,
+	                                                              strategy.aggregate_idx, aggregate_op, aggregate_input,
+	                                                              optional_ptr<string>(&perfect_hash_failure))) {
 		return true;
 	}
 	if (!perfect_hash_failure.empty()) {
-		SljitRecordDirectJoinOutputAggregateProjectionUnsupported(
-		    runtime, ops, post_join_projection, string("perfect_hash_update_") + perfect_hash_failure,
-		    join_output.size());
+		SljitRecordDirectJoinOutputAggregateProjectionUnsupported(runtime, ops, post_join_projection,
+		                                                          string("perfect_hash_update_") + perfect_hash_failure,
+		                                                          join_output.size());
 	}
 
 	if (aggregate_op.aggregate_update.plan.sink_info.aggregate_contract.distinct_count_pointer_keys) {
