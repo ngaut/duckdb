@@ -78,6 +78,7 @@ def verify_required_design_files() -> None:
         "extension/jit_sljit/include/sljit_join_projection_aggregate_update_primitive.hpp",
         "extension/jit_sljit/include/sljit_join_projection_aggregate_update_runtime.hpp",
         "extension/jit_sljit/include/sljit_mark_probe_filter_boundary.hpp",
+        "extension/jit_sljit/include/sljit_mark_probe_filter_boundary_runtime.hpp",
         "extension/jit_sljit/include/sljit_native_tail_handoff_runtime.hpp",
         "extension/jit_sljit/include/sljit_hash_join_probe_executor_runtime.hpp",
         "extension/jit_sljit/include/sljit_hash_join_projection_source_runtime.hpp",
@@ -617,11 +618,36 @@ def verify_runtime_batch_view() -> None:
         ),
     )
     require_text(
+        "extension/jit_sljit/include/sljit_mark_probe_filter_boundary_runtime.hpp",
+        (
+            "class SljitMarkProbeFilterBoundaryRuntime",
+            "BoundaryOutputChunk",
+            "lhs_boundary_outputs",
+            "lhs_boundary_output_types",
+            "selected_hash_join_inputs.TryPrepareMarkProbeInput",
+            "selected_hash_join_inputs.BuildMarkOutputView",
+            "SljitHashJoinProbeOutputContract::FILTERED_MARK_MATCHES",
+            "SljitHashJoinProbeOutputContract::FILTERED_MARK_NON_MATCHES",
+            "\"direct_mark_probe_match_selection\"",
+            "\"direct_mark_probe_nonmatch_selection\"",
+            "\"mark_filter_lhs_selected_view\"",
+            "\"mark_filter_lhs_view\"",
+            "\"mark_filter_vector\"",
+        ),
+    )
+    require_text(
         "extension/jit_sljit/include/sljit_source_pipeline_runtime.hpp",
         (
             "const auto max_recipe_batches = recipe.uses_extended_source_fetch_budget",
             "terminal_runtime.BudgetReached(runtime, TerminalStep(), max_recipe_batches)",
             "fetched_chunks >= max_recipe_batches",
+            "SljitMarkProbeFilterBoundaryRuntime mark_probe_filter_boundary",
+            "mark_probe_filter_boundary.Execute(step_idx, step, input, execute_hash_join_probe, execute_next_step)",
+        ),
+    )
+    reject_text(
+        "extension/jit_sljit/include/sljit_source_pipeline_runtime.hpp",
+        (
             "MarkProbeFilterBoundaryOutputChunk",
             "mark_probe_lhs_boundary_outputs",
             "mark_probe_lhs_boundary_output_types",
@@ -1272,6 +1298,11 @@ def verify_primitive_sequence() -> None:
         (
             "SljitSelectedHashJoinInputRuntime selected_hash_join_inputs",
             "selected_hash_join_inputs.TryPrepareHashProbeInput",
+        ),
+    )
+    require_text(
+        "extension/jit_sljit/include/sljit_mark_probe_filter_boundary_runtime.hpp",
+        (
             "selected_hash_join_inputs.TryPrepareMarkProbeInput",
             "selected_hash_join_inputs.BuildMarkOutputView",
         ),

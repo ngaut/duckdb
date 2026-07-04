@@ -15,7 +15,7 @@
 #include "sljit_full_pipeline_terminal_runtime.hpp"
 #include "sljit_generated_filter_projection_runtime.hpp"
 #include "sljit_hash_join_probe_executor_runtime.hpp"
-#include "sljit_mark_probe_filter_boundary.hpp"
+#include "sljit_mark_probe_filter_boundary_runtime.hpp"
 #include "sljit_native_tail_handoff_runtime.hpp"
 #include "sljit_projection_executor_runtime.hpp"
 #include "sljit_projection_reference_runtime.hpp"
@@ -84,7 +84,8 @@ public:
 	      execute_hash_join_probe(execute_hash_join_probe_p),
 	      terminal_runtime(execute_hash_join_probe_p, source_distinct_counts_p, source_min_values_p,
 	                       source_max_values_p),
-	      scratch(runtime.GetAllocator(), ops), selected_hash_join_inputs(runtime, ops, scratch) {
+	      scratch(runtime.GetAllocator(), ops), selected_hash_join_inputs(runtime, ops, scratch),
+	      mark_probe_filter_boundary(runtime, result, ops, scratch, selected_hash_join_inputs) {
 	}
 
 	bool Execute() {
@@ -278,163 +279,10 @@ private:
 
 	bool ExecuteMarkProbeFilterBoundary(idx_t step_idx, const SljitFullPipelinePrimitiveStep &step,
 	                                    const SljitRuntimeBatchView &input) {
-		string deferred_reason;
-		DataChunk *join_input_ptr = nullptr;
-		const auto &primitive = step.mark_probe_filter_boundary;
-		const bool preserve_selected_hash_join = input.HasHashJoinSelection() && primitive.preserve_selected_hash_join;
-		if (input.HasHashJoinSelection()) {
-			if (!selected_hash_join_inputs.TryPrepareMarkProbeInput(
-			        primitive.hash_join_idx, input, !preserve_selected_hash_join, join_input_ptr, deferred_reason)) {
-				if (!deferred_reason.empty()) {
-					return SljitDeferFullPipelineResult(runtime, deferred_reason, result);
-				}
-				throw InternalException("SLJIT MARK probe boundary could not prepare selected hash-join input");
-			}
-		} else {
-			join_input_ptr = &SljitBindNativeTailHandoffInput(input);
-		}
-		auto &join_input = *join_input_ptr;
-		if (join_input.size() == 0) {
-			return false;
-		}
-		const auto hash_join_idx = primitive.hash_join_idx;
-		const auto filter_idx = primitive.filter_idx;
-		auto &hash_join_op = ops[hash_join_idx];
-		auto &filter_op = ops[filter_idx];
-		const auto next_step_idx = step_idx + 1;
-		const auto mark_filter_mode = SljitMarkProbeMarkerFilterMode(hash_join_op, filter_op);
-		auto marker_mode = SljitMarkProbeFilterBoundaryMarkerMode::MATERIALIZE_FLAGS;
-		if (primitive.downstream_projection_idx != DConstants::INVALID_INDEX) {
-			marker_mode =
-			    SljitChooseMarkProbeFilterBoundaryMarkerMode(hash_join_op, ops[primitive.downstream_projection_idx],
-			                                                 mark_filter_mode, primitive.allow_marker_omission);
-		}
-		const bool use_filtered_mark_selection_probe = SljitMarkProbeFilterBoundaryOmitsMarker(marker_mode) &&
-		                                               (mark_filter_mode == SljitMarkProbeFilterMode::MATCHES ||
-		                                                mark_filter_mode == SljitMarkProbeFilterMode::NON_MATCHES) &&
-		                                               !hash_join_op.hash_join_probe.plan.perfect_hash_probe &&
-		                                               !hash_join_op.hash_join_probe.plan.residual_predicate;
-		auto probe_output_contract = SljitHashJoinProbeOutputContract::SELECTED_VIEW;
-		if (use_filtered_mark_selection_probe) {
-			probe_output_contract = mark_filter_mode == SljitMarkProbeFilterMode::MATCHES
-			                            ? SljitHashJoinProbeOutputContract::FILTERED_MARK_MATCHES
-			                            : SljitHashJoinProbeOutputContract::FILTERED_MARK_NON_MATCHES;
-		}
-		auto &join_output = scratch.TemporaryChunk(hash_join_idx);
-
-		auto handle_output = [&](DataChunk &output) {
-			const auto mark_count = output.size();
-			if (preserve_selected_hash_join) {
-				if (use_filtered_mark_selection_probe) {
-					RecordSljitRegionRuntimePath(runtime, filter_op.kind,
-					                             mark_filter_mode == SljitMarkProbeFilterMode::MATCHES
-					                                 ? "direct_mark_probe_match_selection"
-					                                 : "direct_mark_probe_nonmatch_selection",
-					                             mark_count);
-					if (mark_count == 0) {
-						return false;
-					}
-					auto selected_view = selected_hash_join_inputs.BuildMarkOutputView(
-					    input, &scratch.FilterSelection(hash_join_idx), mark_count);
-					return ExecuteStep(next_step_idx, selected_view, true);
-				}
-				SljitMarkProbeFilterBoundary mark_boundary;
-				mark_boundary.input = SljitRuntimeBatchViewFromChunk(join_input, nullptr, mark_count);
-				mark_boundary.mark_flags = &scratch.FilterSelection(hash_join_idx);
-				mark_boundary.count = mark_count;
-				SljitMarkProbeFilterBoundaryResult mark_result;
-				auto selection_stage_start = SljitRegionStageStart(runtime);
-				SljitSelectMarkProbeFilterBoundaryRows(scratch.OperatorBinding(hash_join_idx).hash_join_probe,
-				                                       mark_boundary, mark_filter_mode,
-				                                       scratch.FilterSelection(filter_idx), mark_result);
-				RecordSljitRegionStageRuntimePath(runtime, filter_idx, filter_op.kind,
-				                                  SljitMarkProbeFilterSelectionPath(mark_filter_mode),
-				                                  selection_stage_start);
-				if (mark_result.selected_count == 0) {
-					return false;
-				}
-				auto selected_view = selected_hash_join_inputs.BuildMarkOutputView(input, mark_result.selection,
-				                                                                   mark_result.selected_count);
-				return ExecuteStep(next_step_idx, selected_view, true);
-			}
-			if (use_filtered_mark_selection_probe) {
-				RecordSljitRegionRuntimePath(runtime, filter_op.kind,
-				                             mark_filter_mode == SljitMarkProbeFilterMode::MATCHES
-				                                 ? "direct_mark_probe_match_selection"
-				                                 : "direct_mark_probe_nonmatch_selection",
-				                             mark_count);
-				if (mark_count == 0) {
-					return false;
-				}
-				auto &boundary_output =
-				    MarkProbeFilterBoundaryOutputChunk(step_idx, hash_join_idx, hash_join_op, marker_mode);
-				SljitBuiltMarkProbeFilterBoundary mark_boundary;
-				const bool built_mark_boundary = SljitTryBuildMarkProbeFilterBoundaryFromInput(
-				    scratch, hash_join_idx, join_input, boundary_output, join_input.size(), marker_mode, mark_boundary);
-				if (!built_mark_boundary) {
-					throw InternalException(
-					    "SLJIT filtered MARK probe boundary could not build its marker-omitted output");
-				}
-				RecordSljitRegionMaterializationBoundary(runtime, hash_join_op.kind, "mark_filter_lhs_selected_view",
-				                                         mark_count);
-				auto selected_output = SljitRuntimeBatchViewFromChunk(
-				    mark_boundary.OutputChunk(), &scratch.FilterSelection(hash_join_idx), mark_count);
-				return ExecuteStep(next_step_idx, selected_output, true);
-			}
-			auto &boundary_output =
-			    MarkProbeFilterBoundaryOutputChunk(step_idx, hash_join_idx, hash_join_op, marker_mode);
-			SljitBuiltMarkProbeFilterBoundary mark_boundary;
-			const bool built_mark_boundary = SljitTryBuildMarkProbeFilterBoundaryFromInput(
-			    scratch, hash_join_idx, join_input, boundary_output, mark_count, marker_mode, mark_boundary);
-			if (built_mark_boundary) {
-				RecordSljitRegionMaterializationBoundary(runtime, hash_join_op.kind,
-				                                         SljitMarkProbeFilterBoundaryOmitsMarker(marker_mode)
-				                                             ? "mark_filter_lhs_view"
-				                                             : "mark_filter_vector",
-				                                         mark_count);
-				if (!primitive.apply_filter_selection) {
-					return ExecuteStep(next_step_idx, mark_boundary.result.output, true);
-				}
-				SljitSelectMarkProbeFilterProjectionBoundaryRows(runtime, scratch, hash_join_idx, filter_idx, filter_op,
-				                                                 mark_filter_mode, mark_boundary);
-				if (mark_boundary.SelectedCount() == 0) {
-					return false;
-				}
-				auto selected_output = SljitRuntimeBatchViewFromChunk(
-				    mark_boundary.OutputChunk(), mark_boundary.ExecuteSelection(), mark_boundary.SelectedCount());
-				return ExecuteStep(next_step_idx, selected_output, true);
-			}
-			throw InternalException("SLJIT MARK probe filter boundary primitive could not build its bound output");
+		auto execute_next_step = [&](const SljitRuntimeBatchView &output) {
+			return ExecuteStep(step_idx + 1, output, true);
 		};
-		auto handle_defer = [&](string &deferred_reason) {
-			return SljitDeferFullPipelineResult(runtime, deferred_reason, result);
-		};
-		return SljitDrainHashJoinProbeOutputs(scratch, hash_join_idx, hash_join_op, join_input, join_output,
-		                                      execute_hash_join_probe, handle_output, handle_defer, false,
-		                                      probe_output_contract);
-	}
-
-	DataChunk &MarkProbeFilterBoundaryOutputChunk(idx_t step_idx, idx_t hash_join_idx,
-	                                              const SljitExecutableRegionOp &hash_join_op,
-	                                              SljitMarkProbeFilterBoundaryMarkerMode marker_mode) {
-		if (!SljitMarkProbeFilterBoundaryOmitsMarker(marker_mode)) {
-			return scratch.TemporaryChunk(hash_join_idx);
-		}
-		if (hash_join_op.output_types.empty()) {
-			throw InternalException("SLJIT MARK probe filtered LHS boundary has no output columns");
-		}
-		auto &lhs_output_types = mark_probe_lhs_boundary_output_types[step_idx];
-		if (!mark_probe_lhs_boundary_output_types_initialized[step_idx]) {
-			lhs_output_types.reserve(hash_join_op.output_types.size() - 1);
-			for (idx_t col_idx = 0; col_idx + 1 < hash_join_op.output_types.size(); col_idx++) {
-				lhs_output_types.push_back(hash_join_op.output_types[col_idx]);
-			}
-			mark_probe_lhs_boundary_output_types_initialized[step_idx] = true;
-		}
-		auto &lhs_output = mark_probe_lhs_boundary_outputs[step_idx];
-		lhs_output.Ensure(runtime.GetAllocator(), lhs_output_types);
-		lhs_output.Reset();
-		return lhs_output.chunk;
+		return mark_probe_filter_boundary.Execute(step_idx, step, input, execute_hash_join_probe, execute_next_step);
 	}
 
 	bool ExecuteProjectionChain(idx_t step_idx, const SljitFullPipelinePrimitiveStep &step,
@@ -605,10 +453,8 @@ private:
 	SljitFullPipelineTerminalRuntime<EXECUTE_HASH_JOIN_PROBE> terminal_runtime;
 	SljitRegionExecutionScratch scratch;
 	SljitSelectedHashJoinInputRuntime selected_hash_join_inputs;
+	SljitMarkProbeFilterBoundaryRuntime mark_probe_filter_boundary;
 	std::array<SljitDataChunkBatch, SLJIT_FULL_PIPELINE_MAX_PRIMITIVES> hash_join_materialize_batches;
-	std::array<SljitDataChunkBatch, SLJIT_FULL_PIPELINE_MAX_PRIMITIVES> mark_probe_lhs_boundary_outputs;
-	std::array<vector<LogicalType>, SLJIT_FULL_PIPELINE_MAX_PRIMITIVES> mark_probe_lhs_boundary_output_types;
-	std::array<bool, SLJIT_FULL_PIPELINE_MAX_PRIMITIVES> mark_probe_lhs_boundary_output_types_initialized {};
 	std::array<SljitDataChunkBatch, SLJIT_FULL_PIPELINE_MAX_PRIMITIVES> selected_hash_join_projection_inputs;
 	std::array<SljitDataChunkBatch, SLJIT_FULL_PIPELINE_MAX_PRIMITIVES> projection_chain_batches;
 	std::array<SljitDataChunkBatch, SLJIT_FULL_PIPELINE_MAX_PRIMITIVES> source_boundary_batches;
