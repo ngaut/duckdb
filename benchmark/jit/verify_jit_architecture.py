@@ -1220,13 +1220,16 @@ def verify_primitive_sequence() -> None:
         ),
     )
     require_text(
-        "extension/jit_sljit/include/sljit_full_pipeline_recipe.hpp",
+        "extension/jit_sljit/include/sljit_native_tail_recipe.hpp",
         (
-            "TryBuildMarkFilterProjectionNativeTailRecipe",
             "SljitTryAnalyzeMarkFilterProjectionNativeTail(ops, facts)",
             "SljitTryAnalyzeGeneratedFilterProjectionNativeTail(ops, facts)",
             "SljitTryAnalyzeProjectionFilterProjectionNativeTail(ops, facts)",
-            "TryBuildProjectionFilterProjectionNativeTailRecipe",
+            "SljitTryAnalyzeSourceBatchNativeTail(ops, uses_scan_filters, facts)",
+            "class SljitNativeTailRecipeBuilder",
+            "mark_filter_projection_native_tail",
+            "source_batch_native_tail",
+            "TryBuildSourceBatch",
         ),
     )
     reject_text(
@@ -1679,13 +1682,13 @@ def verify_recipe_builder() -> None:
             "schedule_facts.uses_extended_source_fetch_budget",
             "SljitTryAnalyzeSelectedJoinAggregate(ops, facts)",
             "SljitTryAnalyzeHashJoinDelimJoinSink(ops, facts)",
-            "SljitTryAnalyzeSourceBatchNativeTail(ops, uses_scan_filters, facts)",
             "SljitTryAnalyzeProjectionAggregatePlan",
             "SljitProjectionAggregateRecipeBuilder(ops, binding).Build(recipe, plan)",
+            "SljitNativeTailRecipeBuilder(ops, uses_scan_filters, binding).Build(recipe)",
             "struct SljitFullPipelineRecipeRegistryEntry",
             "RecipeRegistry",
-            "source_batch_native_tail",
-            "TryBuildSourceBatchNativeTailRecipe",
+            "native_tail",
+            "TryBuildNativeTailRecipe",
         ),
     )
     require_text(
@@ -1734,6 +1737,10 @@ def verify_recipe_builder() -> None:
             "struct RegistryEntry",
             "TryBuildProjectionAggregateSingleMarkFilter",
             "TryBuildProjectionAggregateTwoJoinMarkFilter",
+            "TryBuildMarkFilterProjectionNativeTailRecipe",
+            "TryBuildGeneratedFilterProjectionNativeTailRecipe",
+            "TryBuildProjectionFilterProjectionNativeTailRecipe",
+            "TryBuildSourceBatchNativeTailRecipe",
             "enum class SljitProjectionAggregateRecipeKind",
             "ProjectionAggregateRecipeKind(plan)",
             "registry[entry_idx].kind != kind",

@@ -13,6 +13,7 @@
 
 #include "sljit_full_pipeline_recipe_binding.hpp"
 #include "sljit_full_pipeline_recipe_facts.hpp"
+#include "sljit_native_tail_recipe.hpp"
 #include "sljit_projection_aggregate_recipe.hpp"
 
 #include <utility>
@@ -55,13 +56,7 @@ private:
 		    {"selected_join_aggregate", &SljitFullPipelineRecipeBuilder::TryBuildSelectedJoinAggregateRecipe},
 		    {"hash_join_delim_join_sink", &SljitFullPipelineRecipeBuilder::TryBuildHashJoinDelimJoinSinkRecipe},
 		    {"projection_aggregate", &SljitFullPipelineRecipeBuilder::TryBuildProjectionAggregateRecipe},
-		    {"mark_filter_projection_native_tail",
-		     &SljitFullPipelineRecipeBuilder::TryBuildMarkFilterProjectionNativeTailRecipe},
-		    {"generated_filter_projection_native_tail",
-		     &SljitFullPipelineRecipeBuilder::TryBuildGeneratedFilterProjectionNativeTailRecipe},
-		    {"projection_filter_projection_native_tail",
-		     &SljitFullPipelineRecipeBuilder::TryBuildProjectionFilterProjectionNativeTailRecipe},
-		    {"source_batch_native_tail", &SljitFullPipelineRecipeBuilder::TryBuildSourceBatchNativeTailRecipe}};
+		    {"native_tail", &SljitFullPipelineRecipeBuilder::TryBuildNativeTailRecipe}};
 		count = sizeof(registry) / sizeof(registry[0]);
 		return registry;
 	}
@@ -86,15 +81,6 @@ private:
 			return false;
 		}
 		recipe = binding.MakeSelectedJoinAggregateRecipe(facts.first_hash_join_idx, facts.aggregate_idx);
-		return true;
-	}
-
-	bool TryBuildGeneratedFilterProjectionNativeTailRecipe(SljitFullPipelineRecipe &recipe) const {
-		SljitGeneratedFilterProjectionNativeTailFacts facts;
-		if (!SljitTryAnalyzeGeneratedFilterProjectionNativeTail(ops, facts)) {
-			return false;
-		}
-		recipe = binding.MakeGeneratedFilterProjectionNativeTailRecipe(facts);
 		return true;
 	}
 
@@ -124,40 +110,16 @@ private:
 		return true;
 	}
 
-	bool TryBuildProjectionFilterProjectionNativeTailRecipe(SljitFullPipelineRecipe &recipe) const {
-		SljitProjectionFilterProjectionNativeTailFacts facts;
-		if (!SljitTryAnalyzeProjectionFilterProjectionNativeTail(ops, facts)) {
-			return false;
-		}
-		recipe = binding.MakeProjectionFilterProjectionNativeTailRecipe(facts);
-		return true;
-	}
-
-	bool TryBuildMarkFilterProjectionNativeTailRecipe(SljitFullPipelineRecipe &recipe) const {
-		SljitMarkFilterProjectionNativeTailFacts facts;
-		if (!SljitTryAnalyzeMarkFilterProjectionNativeTail(ops, facts)) {
-			return false;
-		}
-		recipe = binding.MakeMarkFilterProjectionNativeTailRecipe(facts);
-		return true;
-	}
-
-	bool TryBuildSourceBatchNativeTailRecipe(SljitFullPipelineRecipe &recipe) const {
-		SljitSourceBatchNativeTailFacts facts;
-		if (!SljitTryAnalyzeSourceBatchNativeTail(ops, uses_scan_filters, facts) ||
-		    !SljitCanBindNativeTailHandoffPrimitive(ops, facts.tail_start_idx)) {
-			return false;
-		}
-		recipe = binding.MakeSourceBatchNativeTailRecipe(facts);
-		return true;
-	}
-
 	bool TryBuildProjectionAggregateRecipe(SljitFullPipelineRecipe &recipe) const {
 		SljitProjectionAggregatePlanFacts plan;
 		if (!SljitTryAnalyzeProjectionAggregatePlan(ops, plan)) {
 			return false;
 		}
 		return SljitProjectionAggregateRecipeBuilder(ops, binding).Build(recipe, plan);
+	}
+
+	bool TryBuildNativeTailRecipe(SljitFullPipelineRecipe &recipe) const {
+		return SljitNativeTailRecipeBuilder(ops, uses_scan_filters, binding).Build(recipe);
 	}
 
 private:
