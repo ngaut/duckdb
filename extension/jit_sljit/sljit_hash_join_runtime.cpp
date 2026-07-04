@@ -92,7 +92,11 @@ SljitValidatePerfectHashJoinProbeExecutionLayout(const SljitNativeHashJoinProbeP
 	if (probe.probe_key_input_indices[0] != key.key_input_index) {
 		throw InternalException("SLJIT native perfect hash join probe key binding mismatch");
 	}
-	if (input.data[key.key_input_index].GetType().InternalType() != perfect_layout.key_physical_type) {
+	const auto source_physical_type = input.data[key.key_input_index].GetType().InternalType();
+	const bool source_key0_int64_to_int32 = key.key_kind == SljitNativeHashJoinKeyKind::INT32 &&
+	                                        source_physical_type == PhysicalType::INT64 &&
+	                                        perfect_layout.key_physical_type == PhysicalType::INT32;
+	if (!source_key0_int64_to_int32 && source_physical_type != perfect_layout.key_physical_type) {
 		throw InternalException("SLJIT native perfect hash join probe key type mismatch");
 	}
 	return key;
@@ -101,15 +105,24 @@ SljitValidatePerfectHashJoinProbeExecutionLayout(const SljitNativeHashJoinProbeP
 void SljitPreparePerfectHashJoinProbeInput(const SljitNativeHashJoinProbeKeyPlan &key,
                                            const ExecutionPerfectHashJoinTableLayout &layout, DataChunk &input,
                                            SelectionVector &match_selection, SelectionVector &build_selection,
-                                           SljitHashJoinProbeDrainState &state,
+                                           SljitHashJoinProbeDrainState &state, bool allow_unchecked_int64_to_int32,
                                            SljitPreparedPerfectHashJoinProbeInput &result) {
 	input.data[key.key_input_index].ToUnifiedFormat(result.source_format);
+	const bool source_key0_int64_to_int32 =
+	    key.key_kind == SljitNativeHashJoinKeyKind::INT32 &&
+	    input.data[key.key_input_index].GetType().InternalType() == PhysicalType::INT64;
 
 	auto &native_input = result.native_input;
-	native_input.source_data = NativeHashJoinKeySourceData(result.source_format, key.key_kind);
+	native_input.source_data =
+	    source_key0_int64_to_int32
+	        ? reinterpret_cast<const_data_ptr_t>(UnifiedVectorFormat::GetData<int64_t>(result.source_format))
+	        : NativeHashJoinKeySourceData(result.source_format, key.key_kind);
 	native_input.source_sel = SljitNormalizedSourceSelectionData(result.source_format);
-	native_input.source_validity =
-	    result.source_format.validity.CannotHaveNull() ? nullptr : result.source_format.validity.GetData();
+	native_input.source_validity = key.source_known_not_null || result.source_format.validity.CannotHaveNull()
+	                                   ? nullptr
+	                                   : result.source_format.validity.GetData();
+	native_input.source_key0_int64_to_int32 = source_key0_int64_to_int32;
+	native_input.source_key0_int64_to_int32_unchecked = source_key0_int64_to_int32 && allow_unchecked_int64_to_int32;
 	native_input.count = input.size();
 	native_input.match_sel = match_selection.data();
 	native_input.build_sel = build_selection.data();
@@ -161,8 +174,22 @@ SljitValidateRegularHashJoinProbeExecutionLayout(const SljitNativeHashJoinProbeP
 }
 
 static constexpr const char *SLJIT_GENERATED_REGULAR_HASH_JOIN_PROBE_STAGE = "generated_regular_probe_function";
+static constexpr const char *SLJIT_GENERATED_REGULAR_HASH_JOIN_PROBE_BLOOM_STAGE =
+    "generated_regular_probe_bloom_function";
+static constexpr const char *SLJIT_GENERATED_REGULAR_HASH_JOIN_MARK_MATCH_SELECTION_PROBE_STAGE =
+    "generated_regular_probe_mark_match_selection_function";
+static constexpr const char *SLJIT_GENERATED_REGULAR_HASH_JOIN_MARK_MATCH_SELECTION_BLOOM_PROBE_STAGE =
+    "generated_regular_probe_mark_match_selection_bloom_function";
+static constexpr const char *SLJIT_GENERATED_REGULAR_HASH_JOIN_MARK_NONMATCH_SELECTION_PROBE_STAGE =
+    "generated_regular_probe_mark_nonmatch_selection_function";
+static constexpr const char *SLJIT_GENERATED_REGULAR_HASH_JOIN_MARK_NONMATCH_SELECTION_BLOOM_PROBE_STAGE =
+    "generated_regular_probe_mark_nonmatch_selection_bloom_function";
 static constexpr const char *SLJIT_GENERATED_FLAT_ALL_VALID_HASH_JOIN_PROBE_STAGE =
     "generated_regular_probe_flat_all_valid_function";
+static constexpr const char *SLJIT_GENERATED_MARK_MATCH_FLAT_ALL_VALID_HASH_JOIN_PROBE_STAGE =
+    "generated_regular_probe_mark_match_flat_all_valid_function";
+static constexpr const char *SLJIT_GENERATED_MARK_NONMATCH_FLAT_ALL_VALID_HASH_JOIN_PROBE_STAGE =
+    "generated_regular_probe_mark_nonmatch_flat_all_valid_function";
 static constexpr const char *SLJIT_FAST_FLAT_ALL_VALID_UINT64_PAIR_HASH_JOIN_PROBE_STAGE =
     "fast_regular_probe_flat_all_valid_int64_pair_no_chain";
 static constexpr const char *SLJIT_FAST_FLAT_ALL_VALID_UINT64_PAIR_CHAIN_HASH_JOIN_PROBE_STAGE =
@@ -185,6 +212,10 @@ static constexpr const char *SLJIT_FAST_SELECTED_ALL_VALID_SINGLE_KEY_NOTEQUAL_C
     "fast_regular_probe_selected_all_valid_single_key_notequal_chain";
 static constexpr const char *SLJIT_GENERATED_SELECTED_ALL_VALID_HASH_JOIN_PROBE_STAGE =
     "generated_regular_probe_selected_all_valid_function";
+static constexpr const char *SLJIT_GENERATED_MARK_MATCH_SELECTED_ALL_VALID_HASH_JOIN_PROBE_STAGE =
+    "generated_regular_probe_mark_match_selected_all_valid_function";
+static constexpr const char *SLJIT_GENERATED_MARK_NONMATCH_SELECTED_ALL_VALID_HASH_JOIN_PROBE_STAGE =
+    "generated_regular_probe_mark_nonmatch_selected_all_valid_function";
 static constexpr const char *SLJIT_GENERATED_PERFECT_HASH_JOIN_PROBE_STAGE = "generated_perfect_probe_function";
 
 template <bool SELECTED, bool CHAIN>
@@ -249,9 +280,40 @@ const char *SljitGeneratedRegularHashJoinProbeStage() {
 	return SLJIT_GENERATED_REGULAR_HASH_JOIN_PROBE_STAGE;
 }
 
+const char *SljitGeneratedRegularHashJoinProbeStage(bool uses_bloom_filter) {
+	return uses_bloom_filter ? SLJIT_GENERATED_REGULAR_HASH_JOIN_PROBE_BLOOM_STAGE
+	                         : SLJIT_GENERATED_REGULAR_HASH_JOIN_PROBE_STAGE;
+}
+
+const char *SljitGeneratedRegularHashJoinProbeStage(bool uses_bloom_filter,
+                                                    SljitHashJoinMarkSelectionMode mark_selection_mode) {
+	if (mark_selection_mode == SljitHashJoinMarkSelectionMode::NONE) {
+		return SljitGeneratedRegularHashJoinProbeStage(uses_bloom_filter);
+	}
+	if (mark_selection_mode == SljitHashJoinMarkSelectionMode::MATCHES) {
+		return uses_bloom_filter ? SLJIT_GENERATED_REGULAR_HASH_JOIN_MARK_MATCH_SELECTION_BLOOM_PROBE_STAGE
+		                         : SLJIT_GENERATED_REGULAR_HASH_JOIN_MARK_MATCH_SELECTION_PROBE_STAGE;
+	}
+	return uses_bloom_filter ? SLJIT_GENERATED_REGULAR_HASH_JOIN_MARK_NONMATCH_SELECTION_BLOOM_PROBE_STAGE
+	                         : SLJIT_GENERATED_REGULAR_HASH_JOIN_MARK_NONMATCH_SELECTION_PROBE_STAGE;
+}
+
 const char *SljitGeneratedAllValidRegularHashJoinProbeStage(bool selected) {
 	return selected ? SLJIT_GENERATED_SELECTED_ALL_VALID_HASH_JOIN_PROBE_STAGE
 	                : SLJIT_GENERATED_FLAT_ALL_VALID_HASH_JOIN_PROBE_STAGE;
+}
+
+const char *SljitGeneratedAllValidRegularHashJoinProbeStage(bool selected,
+                                                            SljitHashJoinMarkSelectionMode mark_selection_mode) {
+	if (mark_selection_mode == SljitHashJoinMarkSelectionMode::NONE) {
+		return SljitGeneratedAllValidRegularHashJoinProbeStage(selected);
+	}
+	if (mark_selection_mode == SljitHashJoinMarkSelectionMode::MATCHES) {
+		return selected ? SLJIT_GENERATED_MARK_MATCH_SELECTED_ALL_VALID_HASH_JOIN_PROBE_STAGE
+		                : SLJIT_GENERATED_MARK_MATCH_FLAT_ALL_VALID_HASH_JOIN_PROBE_STAGE;
+	}
+	return selected ? SLJIT_GENERATED_MARK_NONMATCH_SELECTED_ALL_VALID_HASH_JOIN_PROBE_STAGE
+	                : SLJIT_GENERATED_MARK_NONMATCH_FLAT_ALL_VALID_HASH_JOIN_PROBE_STAGE;
 }
 
 const char *SljitGeneratedPerfectHashJoinProbeStage() {

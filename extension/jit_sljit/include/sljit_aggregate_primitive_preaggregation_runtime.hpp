@@ -50,6 +50,81 @@ static bool SljitPreaggregatedPrimitivePayloadSupported(AggregatePrimitiveUpdate
 	}
 }
 
+static bool SljitPreaggregationComparableInputVectorType(PhysicalType type) {
+	switch (type) {
+	case PhysicalType::BOOL:
+	case PhysicalType::INT8:
+	case PhysicalType::INT16:
+	case PhysicalType::INT32:
+	case PhysicalType::INT64:
+	case PhysicalType::INT128:
+	case PhysicalType::UINT8:
+	case PhysicalType::UINT16:
+	case PhysicalType::UINT32:
+	case PhysicalType::UINT64:
+	case PhysicalType::UINT128:
+	case PhysicalType::VARCHAR:
+		return true;
+	default:
+		return false;
+	}
+}
+
+static bool SljitPreaggregationCompressedUnsignedTargetType(PhysicalType type) {
+	switch (type) {
+	case PhysicalType::UINT8:
+	case PhysicalType::UINT16:
+	case PhysicalType::UINT32:
+	case PhysicalType::UINT64:
+	case PhysicalType::UINT128:
+		return true;
+	default:
+		return false;
+	}
+}
+
+static bool SljitPreaggregationIntegralCompressionSourceType(PhysicalType type) {
+	switch (type) {
+	case PhysicalType::INT8:
+	case PhysicalType::INT16:
+	case PhysicalType::INT32:
+	case PhysicalType::INT64:
+		return true;
+	default:
+		return false;
+	}
+}
+
+static bool SljitPreaggregationInputVectorGroupCastSupported(const ExecutionRowPointerGroupKeySource &source) {
+	switch (source.cast_kind) {
+	case ExecutionRowPointerGroupKeyCastKind::NONE:
+		return source.source_physical_type == source.target_physical_type &&
+		       SljitPreaggregationComparableInputVectorType(source.source_physical_type);
+	case ExecutionRowPointerGroupKeyCastKind::INT64_TO_INT32:
+		return source.source_physical_type == PhysicalType::INT64 && source.target_physical_type == PhysicalType::INT32;
+	case ExecutionRowPointerGroupKeyCastKind::INT64_TO_INT16:
+		return source.source_physical_type == PhysicalType::INT64 && source.target_physical_type == PhysicalType::INT16;
+	case ExecutionRowPointerGroupKeyCastKind::INT32_TO_INT8:
+		return source.source_physical_type == PhysicalType::INT32 && source.target_physical_type == PhysicalType::INT8;
+	case ExecutionRowPointerGroupKeyCastKind::INTEGRAL_COMPRESS:
+		return SljitPreaggregationIntegralCompressionSourceType(source.source_physical_type) &&
+		       SljitPreaggregationCompressedUnsignedTargetType(source.target_physical_type);
+	case ExecutionRowPointerGroupKeyCastKind::STRING_COMPRESS:
+		return source.source_physical_type == PhysicalType::VARCHAR &&
+		       SljitPreaggregationCompressedUnsignedTargetType(source.target_physical_type);
+	default:
+		return false;
+	}
+}
+
+static bool SljitPreaggregationInputVectorGroupSourceSupported(DataChunk &payload_input,
+                                                               const ExecutionRowPointerGroupKeySource &source) {
+	return source.ready && source.source_kind == ExecutionRowPointerGroupKeySourceKind::INPUT_VECTOR &&
+	       source.input_vector_index < payload_input.ColumnCount() &&
+	       payload_input.data[source.input_vector_index].GetType().InternalType() == source.source_physical_type &&
+	       SljitPreaggregationInputVectorGroupCastSupported(source);
+}
+
 static bool SljitLoadPreaggregatedInt64Payload(SljitPreaggregatedPrimitivePayloadSource &source, idx_t row_idx,
                                                int64_t &result) {
 	auto source_idx = source.format.sel->get_index(row_idx);
@@ -115,6 +190,10 @@ static bool PrepareSljitPreaggregatedPrimitivePayloadSource(DataChunk &input,
 		source.type = PhysicalType::INVALID;
 		return true;
 	}
+	if (lane->kind == AggregatePrimitiveUpdateKind::COUNT && source_idx == DConstants::INVALID_INDEX) {
+		source.type = PhysicalType::INVALID;
+		return true;
+	}
 	if (source_idx >= input.ColumnCount()) {
 		return false;
 	}
@@ -175,6 +254,9 @@ struct SljitPreaggregatedPrimitivePayloadSources {
 			return false;
 		}
 		auto &source = sources[payload_idx];
+		if (source.type == PhysicalType::INVALID) {
+			return true;
+		}
 		auto source_idx = source.format.sel->get_index(row_idx);
 		return source.format.validity.RowIsValid(source_idx);
 	}
@@ -196,6 +278,7 @@ private:
 static bool SljitStartPreaggregatedPrimitivePayloadGroup(
     SljitPreaggregatedPrimitiveAggregateScratch &scratch,
     const vector<const ExecutionPrimitiveAggregateUpdateLane *> &payload_lanes) {
+	scratch.group_row_counts.push_back(0);
 	for (idx_t payload_idx = 0; payload_idx < payload_lanes.size(); payload_idx++) {
 		auto &payload = scratch.payloads[payload_idx];
 		switch (payload.kind) {
@@ -221,6 +304,9 @@ static bool SljitStartPreaggregatedPrimitivePayloadGroup(
 static bool SljitAccumulatePreaggregatedPrimitivePayloadGroup(
     SljitPreaggregatedPrimitivePayloadSources &payload_sources, SljitPreaggregatedPrimitiveAggregateScratch &scratch,
     const vector<const ExecutionPrimitiveAggregateUpdateLane *> &payload_lanes, idx_t row_idx, idx_t group_idx) {
+	if (group_idx >= scratch.group_row_counts.size()) {
+		return false;
+	}
 	for (idx_t payload_idx = 0; payload_idx < payload_lanes.size(); payload_idx++) {
 		auto lane = payload_lanes[payload_idx];
 		auto &payload = scratch.payloads[payload_idx];
@@ -256,6 +342,7 @@ static bool SljitAccumulatePreaggregatedPrimitivePayloadGroup(
 			return false;
 		}
 	}
+	scratch.group_row_counts[group_idx]++;
 	return true;
 }
 

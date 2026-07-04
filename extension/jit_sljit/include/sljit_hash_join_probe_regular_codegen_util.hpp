@@ -20,7 +20,6 @@
 #include "sljitLir.h"
 
 #include <cstddef>
-#include <exception>
 
 namespace duckdb {
 
@@ -53,22 +52,8 @@ FinishSljitRegularHashJoinProbeCode(struct sljit_compiler *compiler, SljitNative
 	return FinishSljitCode(compiler, function, error);
 }
 
-static inline void SLJIT_FUNC
-SljitNativeHashJoinInt64ToInt32CastError(SljitNativeRegularHashJoinProbeInput *input, int64_t value) {
-	try {
-		throw OutOfRangeException("Type INT64 with value %lld can't be cast because the value is out of range for "
-		                          "the destination type INT32",
-		                          static_cast<long long>(value));
-	} catch (...) {
-		input->error = std::current_exception();
-	}
-}
-
 static inline void EmitAbortHashJoinProbeWithCastError(struct sljit_compiler *compiler, sljit_s32 value_reg) {
-	sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_R0, 0, SLJIT_S0, 0);
-	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R1, 0, value_reg, 0);
-	sljit_emit_icall(compiler, SLJIT_CALL, SLJIT_ARGS2V(P, W), SLJIT_IMM,
-	                 SLJIT_FUNC_ADDR(SljitNativeHashJoinInt64ToInt32CastError));
+	EmitCallHashJoinInt64ToInt32CastError(compiler, offsetof(SljitNativeRegularHashJoinProbeInput, error), value_reg);
 	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_MEM1(SLJIT_S0),
 	               offsetof(SljitNativeRegularHashJoinProbeInput, selected_count), SLJIT_S3, 0);
 	EmitPauseRegularHashJoinProbe(compiler, SLJIT_IMM);
@@ -130,8 +115,8 @@ static inline void EmitLoadHashJoinSourceKey(struct sljit_compiler *compiler, id
 
 static inline void EmitHashJoinKeyHashFromSourceData(struct sljit_compiler *compiler, idx_t key_idx,
                                                      SljitNativeHashJoinKeyKind key_kind, sljit_s32 hash_reg,
-                                                     sljit_s32 source_data, sljit_s32 source_index,
-                                                     sljit_s32 scratch, sljit_s32 multiplier_reg = 0) {
+                                                     sljit_s32 source_data, sljit_s32 source_index, sljit_s32 scratch,
+                                                     sljit_s32 multiplier_reg = 0) {
 	if (!SljitHashJoinKeyKindIs128(key_kind)) {
 		EmitLoadHashJoinSourceKey(compiler, key_idx, key_kind, hash_reg, source_data, source_index, 0, scratch);
 		EmitHashJoinKeyHash(compiler, key_kind, hash_reg, scratch, multiplier_reg);

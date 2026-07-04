@@ -14,6 +14,15 @@
 
 namespace duckdb {
 
+static bool SljitPerfectHashGroupExpressionsUseTypedTree(const vector<SljitNativeRegionExpressionPlan> &group_expressions) {
+	for (auto &group_expression : group_expressions) {
+		if (group_expression.kind == SljitNativeRegionExpressionKind::TYPED_EXPRESSION_TREE) {
+			return true;
+		}
+	}
+	return false;
+}
+
 bool TryBuildSljitPerfectHashFusedUpdatePlan(
     const ExecutionExpressionIR *predicate, const vector<SljitNativeRegionExpressionPlan> &payloads,
     const vector<ExecutionRegionAggregateInput> &aggregates, const vector<ExecutionRegionGroupInput> &groups,
@@ -21,11 +30,31 @@ bool TryBuildSljitPerfectHashFusedUpdatePlan(
     const vector<bool> &source_not_null, const vector<Value> &source_min_values, const vector<Value> &source_max_values,
     SljitPerfectHashFusedUpdatePlan &result, string &error) {
 	result = SljitPerfectHashFusedUpdatePlan();
-	if (!TryBuildSljitPerfectHashGroupPlans(groups, group_expressions, contract, result.group_plans) ||
+	const bool typed_group_expressions = SljitPerfectHashGroupExpressionsUseTypedTree(group_expressions);
+	if (!TryBuildSljitPerfectHashGroupPlans(groups, group_expressions, contract, result.group_plans,
+	                                        typed_group_expressions) ||
 	    result.group_plans.empty() || !contract.grouped_state_layout_ready ||
-	    !BuildSljitFusedTypedAggregateCodegenPlan(payloads, aggregates, result.codegen_plan)) {
+	    !BuildSljitFusedTypedAggregateCodegenPlan(payloads, aggregates, result.codegen_plan,
+	                                              typed_group_expressions)) {
 		error = "unsupported fused perfect-hash typed aggregate payload shape";
 		return false;
+	}
+	for (auto &group_plan : result.group_plans) {
+		if (group_plan.expression_kind != SljitNativeRegionExpressionKind::TYPED_EXPRESSION_TREE) {
+			continue;
+		}
+		if (!group_plan.expression_tree) {
+			error = "unsupported fused perfect-hash typed aggregate group shape";
+			return false;
+		}
+		auto tree_plan = BuildSljitTypedExpressionTreePlan(*group_plan.expression_tree, false);
+		if (!tree_plan.supported) {
+			error = "unsupported fused perfect-hash typed aggregate group shape";
+			return false;
+		}
+		result.codegen_plan.tree_node_count += tree_plan.node_count;
+		result.codegen_plan.fast_path_supported =
+		    result.codegen_plan.fast_path_supported && tree_plan.fast_path.fast_path_supported;
 	}
 	SljitTypedExpressionTreePlan predicate_plan;
 	if (predicate) {

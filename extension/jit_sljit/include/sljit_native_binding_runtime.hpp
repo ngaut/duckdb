@@ -20,9 +20,12 @@ static ExecutionOperatorBindResult
 SljitBindNativeOperator(ExecutionOperatorRuntime &native_runtime, SljitRegionExecutionScratch &scratch, idx_t op_idx,
                         SljitExecutableRegionOp &op, DataChunk &input, const ExecutionRegionOperatorInfo &operator_info,
                         const char *blocker_prefix, const char *error_prefix, ExecutionOperatorBinding *&binding_out,
-                        string &deferred_reason) {
+                        string &deferred_reason, optional_ptr<bool> bound = nullptr) {
 	auto &binding = scratch.OperatorBinding(op_idx);
 	binding_out = &binding;
+	if (bound) {
+		*bound = false;
+	}
 	if (scratch.HasOperatorBinding(op_idx)) {
 		return ExecutionOperatorBindResult::READY;
 	}
@@ -30,6 +33,9 @@ SljitBindNativeOperator(ExecutionOperatorRuntime &native_runtime, SljitRegionExe
 		throw InternalException("%s is missing an operator index", error_prefix);
 	}
 	auto bind_result = native_runtime.BindOperator(op.operator_index, input, operator_info, binding);
+	if (bound) {
+		*bound = true;
+	}
 	if (bind_result == ExecutionOperatorBindResult::DEFERRED) {
 		deferred_reason = binding.blocker.empty() ? string(blocker_prefix) : binding.blocker;
 		return bind_result;
@@ -85,11 +91,14 @@ SljitBindRecordedNativeOperator(ExecutionRegionRuntime &runtime, ExecutionOperat
                                 SljitRegionExecutionScratch &scratch, idx_t op_idx, SljitExecutableRegionOp &op,
                                 DataChunk &input, const ExecutionRegionOperatorInfo &operator_info,
                                 const char *blocker_prefix, const char *error_prefix,
-                                ExecutionOperatorBinding *&binding_out, string &deferred_reason) {
+	ExecutionOperatorBinding *&binding_out, string &deferred_reason) {
 	auto bind_stage_start = SljitRegionStageStart(runtime);
+	bool bound = false;
 	auto bind_result = SljitBindNativeOperator(native_runtime, scratch, op_idx, op, input, operator_info,
-	                                           blocker_prefix, error_prefix, binding_out, deferred_reason);
-	RecordSljitRegionStageRuntime(runtime, op_idx, op.kind, "bind_operator_contract", bind_stage_start);
+	                                           blocker_prefix, error_prefix, binding_out, deferred_reason, bound);
+	if (bound) {
+		RecordSljitRegionStageRuntime(runtime, op_idx, op.kind, "bind_operator_contract", bind_stage_start);
+	}
 	return bind_result;
 }
 

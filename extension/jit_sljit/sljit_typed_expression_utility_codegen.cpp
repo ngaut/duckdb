@@ -46,6 +46,9 @@ int64_t SljitTypedExpressionTreeConstantValue(const ExecutionExpressionIR &node)
 	if (SljitTypedExpressionTreeIsBoolNode(node)) {
 		return node.constant.GetValueUnsafe<bool>() ? 1 : 0;
 	}
+	if (node.return_type.id() == LogicalTypeId::UTINYINT && node.physical_type == PhysicalType::UINT8) {
+		return node.constant.GetValueUnsafe<uint8_t>();
+	}
 	if (SljitTypedExpressionTreeIsInt32Node(node)) {
 		return node.constant.GetValueUnsafe<int32_t>();
 	}

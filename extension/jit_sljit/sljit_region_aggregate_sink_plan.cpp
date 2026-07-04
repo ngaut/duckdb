@@ -65,8 +65,6 @@ SljitRegionNodePlan PlanSljitAggregateUpdateSinkNode(const ExecutionRegionNode &
 	SljitNativeRegionOpPlan native_op;
 	native_op.kind = SljitNativeRegionOpKind::AGGREGATE_UPDATE;
 	native_op.aggregate_update.sink_info = *node.sink;
-	native_op.aggregate_update.use_distinct_count_pointer_update =
-	    node.sink->aggregate_contract.distinct_count_pointer_keys;
 	if (render_diagnostics) {
 		native_op.aggregate_update.ir = node.sink->ir;
 	}
@@ -78,15 +76,15 @@ SljitRegionNodePlan PlanSljitAggregateUpdateSinkNode(const ExecutionRegionNode &
 		if (!contract.native_state_update_contract.required_capability.empty()) {
 			reason += ";requires=" + contract.native_state_update_contract.required_capability;
 		}
-		reason += ";sink_kind=" + string(ExecutionRegionSinkKindToString(node.sink->kind));
-		reason += ";aggregate_operator_kind=" + string(ExecutionRegionAggregateOperatorKindToString(contract.kind));
-		reason += ";aggregate_count=" + std::to_string(contract.aggregate_count);
-		reason += ";group_count=" + std::to_string(contract.group_count);
+			reason += ";sink_kind=" + string(ExecutionRegionSinkKindToString(node.sink->kind));
+			reason += ";aggregate_operator_kind=" + string(ExecutionRegionAggregateOperatorKindToString(contract.kind));
+			reason += ";aggregate_count=" + std::to_string(contract.aggregate_count);
+			reason += ";group_count=" + std::to_string(contract.group_count);
 			reason += ";payload_type_count=" + std::to_string(contract.payload_type_count);
-			if (native_op.aggregate_update.use_distinct_count_pointer_update) {
+			if (contract.distinct_count_pointer_keys) {
 				reason += ";payload_update=duckdb-distinct-count-pointer";
-			}
-			for (auto &aggregate : node.sink->aggregates) {
+		}
+		for (auto &aggregate : node.sink->aggregates) {
 			reason += ";aggregate" + std::to_string(aggregate.aggregate_index) + "_function=" + aggregate.function_name;
 			reason += ";";
 			reason += DescribeSljitAggregateSinkInput(aggregate);

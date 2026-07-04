@@ -105,6 +105,31 @@ bool TryReadSljitTypedExpressionTreeStringCompareConstant(const ExecutionExpress
 	return try_read(*node.left, *node.right) || try_read(*node.right, *node.left);
 }
 
+static bool SljitTypedExpressionTreeDateYearSupported(const ExecutionExpressionIR &node) {
+	return node.kind == ExecutionExpressionIRKind::INTRINSIC &&
+	       node.intrinsic == ExecutionExpressionIntrinsicKind::DATE_YEAR &&
+	       node.return_type.id() == LogicalTypeId::BIGINT && node.physical_type == PhysicalType::INT64 &&
+	       node.children.size() == 1 && node.children[0] &&
+	       node.children[0]->return_type.id() == LogicalTypeId::DATE &&
+	       node.children[0]->physical_type == PhysicalType::INT32 &&
+	       SljitTypedExpressionTreeIsSupported(*node.children[0]);
+}
+
+static bool SljitTypedExpressionTreeIntegralCompressSupported(const ExecutionExpressionIR &node) {
+	if (node.kind != ExecutionExpressionIRKind::INTRINSIC ||
+	    node.intrinsic != ExecutionExpressionIntrinsicKind::INTEGRAL_COMPRESS ||
+	    node.return_type.id() != LogicalTypeId::UTINYINT || node.physical_type != PhysicalType::UINT8 ||
+	    node.children.size() != 2 || !node.children[0] || !node.children[1]) {
+		return false;
+	}
+	auto &source = *node.children[0];
+	auto &minimum = *node.children[1];
+	return source.return_type.IsIntegral() && SljitTypedExpressionTreeIsIntegerNode(source) &&
+	       SljitTypedExpressionTreeIsSupported(source) &&
+	       minimum.kind == ExecutionExpressionIRKind::CONSTANT && !minimum.constant.IsNull() &&
+	       SljitTypedExpressionTreeSameIntegerKind(source, minimum);
+}
+
 bool SljitTypedExpressionTreeIsSupported(const ExecutionExpressionIR &node) {
 	switch (node.kind) {
 	case ExecutionExpressionIRKind::REFERENCE:
@@ -195,7 +220,9 @@ bool SljitTypedExpressionTreeIsSupported(const ExecutionExpressionIR &node) {
 	case ExecutionExpressionIRKind::INTRINSIC: {
 		idx_t source_index;
 		string prefix;
-		return TryReadSljitTypedExpressionTreeStringPrefixConstant(node, source_index, prefix);
+		return TryReadSljitTypedExpressionTreeStringPrefixConstant(node, source_index, prefix) ||
+		       SljitTypedExpressionTreeDateYearSupported(node) ||
+		       SljitTypedExpressionTreeIntegralCompressSupported(node);
 	}
 	default:
 		return false;
@@ -213,7 +240,16 @@ bool SljitTypedExpressionTreeFastPathSupported(const ExecutionExpressionIR &node
 	if (node.kind == ExecutionExpressionIRKind::INTRINSIC) {
 		idx_t source_index;
 		string prefix;
-		return TryReadSljitTypedExpressionTreeStringPrefixConstant(node, source_index, prefix);
+		if (TryReadSljitTypedExpressionTreeStringPrefixConstant(node, source_index, prefix)) {
+			return true;
+		}
+		if (node.intrinsic == ExecutionExpressionIntrinsicKind::INTEGRAL_COMPRESS) {
+			return node.children.size() == 2 && node.children[0] && node.children[1] &&
+			       node.children[1]->kind == ExecutionExpressionIRKind::CONSTANT &&
+			       !node.children[1]->constant.IsNull() &&
+			       SljitTypedExpressionTreeFastPathSupported(*node.children[0]);
+		}
+		return false;
 	}
 	if (node.kind == ExecutionExpressionIRKind::CONSTANT && node.constant.IsNull()) {
 		return false;

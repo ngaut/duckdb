@@ -9,6 +9,7 @@
 #pragma once
 
 #include "duckdb/common/types/row/tuple_data_layout.hpp"
+#include "duckdb/common/types/row/tuple_data_row_location_remap.hpp"
 #include "duckdb/common/types/row/tuple_data_segment.hpp"
 #include "duckdb/common/types/row/tuple_data_states.hpp"
 
@@ -165,7 +166,7 @@ public:
 	             const SelectionVector &append_sel, const idx_t append_count) const;
 	//! Copy rows from input to the built Chunk state
 	void CopyRows(TupleDataChunkState &chunk_state, TupleDataChunkState &input, const SelectionVector &append_sel,
-	              const idx_t append_count) const;
+	              const idx_t append_count, optional_ptr<TupleDataRowLocationRemap> row_location_remap = nullptr) const;
 	//! Finds the heap pointers of the rows in the given Chunk state
 	void FindHeapPointers(TupleDataChunkState &chunk_state, const idx_t chunk_count) const;
 

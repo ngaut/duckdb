@@ -68,6 +68,7 @@ static bool SljitHashJoinMatchPredicateSupported(ExecutionRegionComparisonType c
 
 SljitRegionNodePlan PlanSljitHashJoinProbeOperatorNode(const ExecutionRegionNode &node,
                                                        const vector<LogicalType> &input_types,
+                                                       const vector<bool> &input_not_null,
                                                        bool render_diagnostics) {
 	if (!node.operator_info) {
 		return SljitRegionBoundaryNode("hash join probe operator is missing typed operator IR");
@@ -130,11 +131,13 @@ SljitRegionNodePlan PlanSljitHashJoinProbeOperatorNode(const ExecutionRegionNode
 		key_plan.key_layout_offset = contract.layout_offsets[key_idx];
 		key_plan.key_type = key.type;
 		key_plan.key_kind = key_kind;
-		key_plan.comparison_type = comparison_type;
-		key_plan.equality_key = equality_key;
-		key_plan.null_equal = equality_key && comparison_type == ExecutionRegionComparisonType::NOT_DISTINCT_FROM;
-		keys.push_back(std::move(key_plan));
-	}
+			key_plan.comparison_type = comparison_type;
+			key_plan.equality_key = equality_key;
+			key_plan.null_equal = equality_key && comparison_type == ExecutionRegionComparisonType::NOT_DISTINCT_FROM;
+			key_plan.source_known_not_null =
+			    key.input_index < input_not_null.size() && input_not_null[key.input_index];
+			keys.push_back(std::move(key_plan));
+		}
 
 	SljitNativeRegionOpPlan native_op;
 	native_op.kind = SljitNativeRegionOpKind::HASH_JOIN_PROBE;

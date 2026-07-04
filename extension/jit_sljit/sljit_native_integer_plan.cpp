@@ -204,17 +204,84 @@ bool IsNativeCompareRoot(const ExecutionExpressionIR &root) {
 	       TryGetNativeIntegerCompareOp(root.binary_op, compare_op);
 }
 
-bool TryReadNativeIntegerCast(const ExecutionExpressionIR &root, SljitNativeSignedIntegerWidth &source_width,
-                              SljitNativeSignedIntegerWidth &target_width, idx_t &source_index, bool &try_cast) {
-	if (root.kind != ExecutionExpressionIRKind::CAST || !root.left ||
-	    root.left->kind != ExecutionExpressionIRKind::REFERENCE ||
-	    !TryGetNativeSignedIntegerWidth(*root.left, source_width) ||
-	    !TryGetNativeSignedIntegerWidth(root, target_width)) {
+static idx_t NativeSignedIntegerWidthRank(SljitNativeSignedIntegerWidth width) {
+	switch (width) {
+	case SljitNativeSignedIntegerWidth::INT8:
+		return 0;
+	case SljitNativeSignedIntegerWidth::INT16:
+		return 1;
+	case SljitNativeSignedIntegerWidth::INT32:
+		return 2;
+	case SljitNativeSignedIntegerWidth::INT64:
+		return 3;
+	default:
+		throw InternalException("Unknown SLJIT native signed integer width");
+	}
+}
+
+static bool NativeSignedIntegerDomainContains(SljitNativeSignedIntegerWidth container,
+                                              SljitNativeSignedIntegerWidth contained) {
+	return NativeSignedIntegerWidthRank(container) >= NativeSignedIntegerWidthRank(contained);
+}
+
+struct SljitNativeIntegerCastChainStep {
+	SljitNativeSignedIntegerWidth target_width;
+	bool try_cast;
+};
+
+static bool TryReadNativeIntegerCastChain(const ExecutionExpressionIR &node,
+                                          SljitNativeSignedIntegerWidth &source_width, idx_t &source_index,
+                                          vector<SljitNativeIntegerCastChainStep> &steps) {
+	if (node.kind == ExecutionExpressionIRKind::REFERENCE) {
+		if (!TryGetNativeSignedIntegerWidth(node, source_width)) {
+			return false;
+		}
+		source_index = node.ref_index;
+		return true;
+	}
+	if (node.kind != ExecutionExpressionIRKind::CAST || !node.left) {
 		return false;
 	}
-	source_index = root.left->ref_index;
-	try_cast = root.try_cast;
+	SljitNativeSignedIntegerWidth target_width;
+	if (!TryGetNativeSignedIntegerWidth(node, target_width) ||
+	    !TryReadNativeIntegerCastChain(*node.left, source_width, source_index, steps)) {
+		return false;
+	}
+	steps.push_back({target_width, node.try_cast});
 	return true;
+}
+
+static bool TryCollapseNativeIntegerCastChain(SljitNativeSignedIntegerWidth source_width,
+                                              const vector<SljitNativeIntegerCastChainStep> &steps,
+                                              SljitNativeSignedIntegerWidth &target_width, bool &try_cast) {
+	if (steps.empty()) {
+		return false;
+	}
+	target_width = steps.back().target_width;
+	try_cast = steps[0].try_cast;
+	for (auto &step : steps) {
+		if (step.try_cast != try_cast) {
+			return false;
+		}
+	}
+	for (idx_t step_idx = 0; step_idx + 1 < steps.size(); step_idx++) {
+		auto intermediate_width = steps[step_idx].target_width;
+		if (!NativeSignedIntegerDomainContains(intermediate_width, target_width) &&
+		    !NativeSignedIntegerDomainContains(intermediate_width, source_width)) {
+			return false;
+		}
+	}
+	return true;
+}
+
+bool TryReadNativeIntegerCast(const ExecutionExpressionIR &root, SljitNativeSignedIntegerWidth &source_width,
+                              SljitNativeSignedIntegerWidth &target_width, idx_t &source_index, bool &try_cast) {
+	if (root.kind != ExecutionExpressionIRKind::CAST) {
+		return false;
+	}
+	vector<SljitNativeIntegerCastChainStep> steps;
+	return TryReadNativeIntegerCastChain(root, source_width, source_index, steps) &&
+	       TryCollapseNativeIntegerCastChain(source_width, steps, target_width, try_cast);
 }
 
 bool TryReadNativeSignedToUnsignedIntegerCast(const ExecutionExpressionIR &root,

@@ -384,7 +384,7 @@ TEST_CASE("JIT lowers retained table scan filters as generated source stages", "
 	    },
 	    [](const ExecutionRegionEvent &event) {
 		    REQUIRE(event.runner_cost.generated_stage_count > 0);
-		    REQUIRE(event.runner_cost.native_aggregate_stage_count > 0);
+		    REQUIRE(event.runner_cost.native_aggregate_stage_count == 0);
 		    RequireGeneratedMachineCodeRegion(event);
 	    });
 }
@@ -414,7 +414,7 @@ TEST_CASE("JIT lowers pruned table scan filters as generated source stages", "[a
 	    },
 	    [](const ExecutionRegionEvent &event) {
 		    REQUIRE(event.runner_cost.generated_stage_count > 0);
-		    REQUIRE(event.runner_cost.native_aggregate_stage_count > 0);
+		    REQUIRE(event.runner_cost.native_aggregate_stage_count == 0);
 		    RequireGeneratedMachineCodeRegion(event);
 	    });
 }

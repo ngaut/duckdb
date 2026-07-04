@@ -8,8 +8,8 @@
 
 #pragma once
 
+#include "sljit_direct_projection_batch_runtime.hpp"
 #include "sljit_hash_join_projection_source_runtime.hpp"
-#include "sljit_projection_runtime.hpp"
 #include "sljit_region_runtime_source.hpp"
 
 namespace duckdb {

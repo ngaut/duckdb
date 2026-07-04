@@ -33,6 +33,7 @@ static bool TryBuildSljitSourceContractOutputProjection(const ExecutionRegionNod
 	}
 	projection = SljitNativeRegionOpPlan();
 	projection.kind = SljitNativeRegionOpKind::PROJECTION;
+	projection.input_types = input_types;
 	projection.output_types.reserve(projection_map.size());
 	projection.projections.reserve(projection_map.size());
 	for (idx_t output_idx = 0; output_idx < projection_map.size(); output_idx++) {
@@ -53,40 +54,54 @@ static bool TryBuildSljitSourceContractOutputProjection(const ExecutionRegionNod
 	return true;
 }
 
-static bool SourceContractOutputUsesIdentityInputLayout(const ExecutionRegionTableScanContract &contract) {
-	auto &projection_map = contract.source_contract_output_projection_map;
-	if (projection_map.size() != contract.source_contract_input_types.size()) {
+static SljitSourceContractPlan
+BuildGeneratedSourceFilterContractPlan(const ExecutionRegionNode &node,
+                                       const ExecutionRegionTableScanContract &contract) {
+	D_ASSERT(node.source);
+	SljitSourceContractPlan contract_plan;
+	contract_plan.requires_source_contract_input_layout = true;
+	return contract_plan;
+}
+
+static bool RemapSljitSourceFilterTreeReferences(ExecutionExpressionIR &node, idx_t scan_column_index,
+                                                 const vector<LogicalType> &source_types, string &error) {
+	if (node.kind == ExecutionExpressionIRKind::REFERENCE) {
+		if (node.ref_index != 0) {
+			error = "source filter references must be local to one scan column";
+			return false;
+		}
+		if (scan_column_index >= source_types.size()) {
+			error = "source filter references column outside source input";
+			return false;
+		}
+		if (node.return_type != source_types[scan_column_index]) {
+			error = "source filter reference type does not match source input type";
+			return false;
+		}
+		node.ref_index = scan_column_index;
+		return true;
+	}
+	if (node.left && !RemapSljitSourceFilterTreeReferences(*node.left, scan_column_index, source_types, error)) {
 		return false;
 	}
-	for (idx_t output_idx = 0; output_idx < projection_map.size(); output_idx++) {
-		if (projection_map[output_idx] != output_idx) {
+	if (node.right && !RemapSljitSourceFilterTreeReferences(*node.right, scan_column_index, source_types, error)) {
+		return false;
+	}
+	if (node.else_node &&
+	    !RemapSljitSourceFilterTreeReferences(*node.else_node, scan_column_index, source_types, error)) {
+		return false;
+	}
+	for (auto &child : node.children) {
+		if (!child || !RemapSljitSourceFilterTreeReferences(*child, scan_column_index, source_types, error)) {
 			return false;
 		}
 	}
 	return true;
 }
 
-static bool CanPreserveScanFiltersWithGeneratedSourceFilter(const ExecutionRegionNode &node,
-                                                            const ExecutionRegionTableScanContract &contract) {
-	D_ASSERT(node.source);
-	if (node.source->filters.size() != 1) {
-		return false;
-	}
-	return SourceContractOutputUsesIdentityInputLayout(contract);
-}
-
-static SljitSourceRoutePlan BuildGeneratedSourceFilterRoute(const ExecutionRegionNode &node,
-                                                            const ExecutionRegionTableScanContract &contract) {
-	SljitSourceRoutePlan route;
-	route.uses_scan_filters = CanPreserveScanFiltersWithGeneratedSourceFilter(node, contract);
-	route.requires_source_contract_input_layout = true;
-	return route;
-}
-
 static bool TryBuildSljitSourceFilterTrees(const ExecutionRegionSourceInfo &source,
                                            const vector<LogicalType> &source_types,
-                                           vector<unique_ptr<ExecutionExpressionIR>> &filter_trees, string &error,
-                                           bool render_diagnostics) {
+                                           vector<unique_ptr<ExecutionExpressionIR>> &filter_trees, string &error) {
 	filter_trees.clear();
 	filter_trees.reserve(source.filters.size());
 	for (auto &source_filter : source.filters) {
@@ -103,12 +118,8 @@ static bool TryBuildSljitSourceFilterTrees(const ExecutionRegionSourceInfo &sour
 			return false;
 		}
 
-		vector<SljitNativeRegionExpressionPlan> source_filter_projection;
-		source_filter_projection.push_back(SljitNativeReferenceExpression(
-		    source_filter.scan_column_index, source_types[source_filter.scan_column_index], string(), true));
-		unique_ptr<ExecutionExpressionIR> tree;
-		if (!TryLowerNativeRegionExpressionTreeThroughProjection(*source_filter.expression, source_filter_projection,
-		                                                         tree, error, render_diagnostics)) {
+		auto tree = source_filter.expression->root->Copy();
+		if (!RemapSljitSourceFilterTreeReferences(*tree, source_filter.scan_column_index, source_types, error)) {
 			return false;
 		}
 		filter_trees.push_back(std::move(tree));
@@ -167,7 +178,7 @@ bool TryPlanSljitSourceFilters(const ExecutionRegionNode &node, SljitSourceFilte
 
 	auto &source_types = contract.source_contract_input_types;
 	vector<unique_ptr<ExecutionExpressionIR>> filter_trees;
-	if (!TryBuildSljitSourceFilterTrees(*node.source, source_types, filter_trees, error, render_diagnostics)) {
+	if (!TryBuildSljitSourceFilterTrees(*node.source, source_types, filter_trees, error)) {
 		return false;
 	}
 
@@ -182,7 +193,7 @@ bool TryPlanSljitSourceFilters(const ExecutionRegionNode &node, SljitSourceFilte
 	}
 	plan.native_ops.push_back(std::move(filter_op));
 	plan.native_ops.push_back(std::move(projection));
-	plan.source_route = BuildGeneratedSourceFilterRoute(node, contract);
+	plan.source_contract = BuildGeneratedSourceFilterContractPlan(node, contract);
 	return true;
 }
 

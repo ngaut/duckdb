@@ -9,6 +9,7 @@
 
 #include "duckdb/execution/execution_operator_runtime.hpp"
 #include "duckdb/execution/execution_region_kernel.hpp"
+#include "duckdb/execution/execution_region_runtime.hpp"
 #include "duckdb/parallel/pipeline_execution.hpp"
 
 namespace duckdb {
@@ -44,6 +45,7 @@ public:
 	bool BindSink(DataChunk &input, const ExecutionRegionSinkInfo &sink_info, ExecutionSinkBinding &binding);
 	void RecordBlockedSinkChunk(DataChunk &chunk);
 	void FinishProcessing();
+	bool TryMarkRuntimeOnce(ExecutionRegionRuntimeOnceFlag flag, idx_t index);
 	PipelineExecuteResult FlushAndFinalizeAfterCompiledFinish(idx_t max_chunks, string &runtime_reason);
 
 private:

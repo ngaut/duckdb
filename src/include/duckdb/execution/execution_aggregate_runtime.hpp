@@ -50,6 +50,14 @@ struct ExecutionHashAggregateLookupLayout {
 	string blocker;
 };
 
+struct ExecutionDenseGroupDomain {
+	bool ready = false;
+	PhysicalType physical_type = PhysicalType::INVALID;
+	idx_t min_key = 0;
+	idx_t max_key = 0;
+	idx_t distinct_count = 0;
+};
+
 enum class ExecutionRowPointerGroupKeyCastKind : uint8_t {
 	NONE,
 	INT64_TO_INT32,
@@ -61,18 +69,25 @@ enum class ExecutionRowPointerGroupKeyCastKind : uint8_t {
 
 enum class ExecutionRowPointerGroupKeySourceKind : uint8_t { ROW_POINTER_FIELD, INPUT_VECTOR };
 
+static constexpr idx_t EXECUTION_DISTINCT_COUNT_POINTER_INLINE_PAYLOAD_CAPACITY = 64;
+
 struct ExecutionRowPointerGroupKeySource {
 	bool ready = false;
 	ExecutionRowPointerGroupKeySourceKind source_kind = ExecutionRowPointerGroupKeySourceKind::ROW_POINTER_FIELD;
+	LogicalType source_type;
 	LogicalType target_type;
 	PhysicalType source_physical_type = PhysicalType::INVALID;
 	PhysicalType target_physical_type = PhysicalType::INVALID;
 	idx_t input_vector_index = DConstants::INVALID_INDEX;
+	bool input_vector_repeats_with_row_pointer = false;
+	idx_t hash_join_condition_idx = DConstants::INVALID_INDEX;
+	PhysicalType hash_join_build_key_physical_type = PhysicalType::INVALID;
 	idx_t row_layout_offset = DConstants::INVALID_INDEX;
 	idx_t row_layout_column_idx = DConstants::INVALID_INDEX;
 	idx_t row_layout_column_count = 0;
 	ExecutionRowPointerGroupKeyCastKind cast_kind = ExecutionRowPointerGroupKeyCastKind::NONE;
 	int64_t cast_constant = 0;
+	bool unchecked_integral_cast = false;
 	bool all_valid = false;
 	string blocker;
 };

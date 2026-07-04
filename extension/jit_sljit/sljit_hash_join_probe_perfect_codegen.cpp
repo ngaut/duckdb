@@ -7,9 +7,18 @@
 
 #include "sljitLir.h"
 
+#include "duckdb/common/numeric_utils.hpp"
+
 #include <cstddef>
 
 namespace duckdb {
+
+static void EmitPausePerfectHashJoinProbe(struct sljit_compiler *compiler) {
+	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_MEM1(SLJIT_S0),
+	               offsetof(SljitNativePerfectHashJoinProbeInput, input_offset), SLJIT_S1, 0);
+	sljit_emit_op1(compiler, SLJIT_MOV_U8, SLJIT_MEM1(SLJIT_S0),
+	               offsetof(SljitNativePerfectHashJoinProbeInput, finished), SLJIT_IMM, 0);
+}
 
 static void EmitFinishPerfectHashJoinProbe(struct sljit_compiler *compiler) {
 	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_MEM1(SLJIT_S0),
@@ -26,6 +35,35 @@ FinishSljitPerfectHashJoinProbeCode(struct sljit_compiler *compiler, SljitNative
 	EmitFinishPerfectHashJoinProbe(compiler);
 	sljit_emit_return_void(compiler);
 	return FinishSljitCode(compiler, function, error);
+}
+
+static void EmitAbortPerfectHashJoinProbeWithCastError(struct sljit_compiler *compiler, sljit_s32 value_reg) {
+	EmitCallHashJoinInt64ToInt32CastError(compiler, offsetof(SljitNativePerfectHashJoinProbeInput, error), value_reg);
+	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_MEM1(SLJIT_S0),
+	               offsetof(SljitNativePerfectHashJoinProbeInput, selected_count), SLJIT_S3, 0);
+	EmitPausePerfectHashJoinProbe(compiler);
+	sljit_emit_return_void(compiler);
+}
+
+static void EmitCheckedPerfectHashJoinInt64ToInt32Range(struct sljit_compiler *compiler, sljit_s32 value_reg,
+                                                        sljit_s32 scratch) {
+	sljit_emit_op1(compiler, SLJIT_MOV_U8, scratch, 0, SLJIT_MEM1(SLJIT_S0),
+	               offsetof(SljitNativePerfectHashJoinProbeInput, source_key0_int64_to_int32_unchecked));
+	auto unchecked = sljit_emit_cmp(compiler, SLJIT_NOT_EQUAL, scratch, 0, SLJIT_IMM, 0);
+	auto below_range = sljit_emit_cmp(compiler, SLJIT_SIG_LESS, value_reg, 0, SLJIT_IMM,
+	                                  NumericCast<sljit_sw>(NumericLimits<int32_t>::Minimum()));
+	auto above_range = sljit_emit_cmp(compiler, SLJIT_SIG_GREATER, value_reg, 0, SLJIT_IMM,
+	                                  NumericCast<sljit_sw>(NumericLimits<int32_t>::Maximum()));
+	auto in_range = sljit_emit_jump(compiler, SLJIT_JUMP);
+
+	auto range_error = sljit_emit_label(compiler);
+	sljit_set_label(below_range, range_error);
+	sljit_set_label(above_range, range_error);
+	EmitAbortPerfectHashJoinProbeWithCastError(compiler, value_reg);
+
+	auto done = sljit_emit_label(compiler);
+	sljit_set_label(unchecked, done);
+	sljit_set_label(in_range, done);
 }
 
 unique_ptr<ExecutionRegionCodeHandle> BuildSljitPerfectHashJoinProbe(const SljitNativeHashJoinProbePlan &plan,
@@ -60,7 +98,19 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitPerfectHashJoinProbe(const Sljit
 
 	EmitLoadPerfectHashJoinSourceIndex(compiler, SLJIT_R1, SLJIT_R0);
 	auto source_is_null = EmitJumpIfPerfectHashJoinSourceNull(compiler, SLJIT_R1, SLJIT_R2, SLJIT_R4);
-	EmitLoadHashJoinKey(compiler, key.key_kind, SLJIT_R0, SLJIT_S4, SLJIT_R1, 0);
+	if (key.key_kind == SljitNativeHashJoinKeyKind::INT32) {
+		sljit_emit_op1(compiler, SLJIT_MOV_U8, SLJIT_R2, 0, SLJIT_MEM1(SLJIT_S0),
+		               offsetof(SljitNativePerfectHashJoinProbeInput, source_key0_int64_to_int32));
+		auto load_int32 = sljit_emit_cmp(compiler, SLJIT_EQUAL, SLJIT_R2, 0, SLJIT_IMM, 0);
+		sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R0, 0, SLJIT_MEM2(SLJIT_S4, SLJIT_R1), 3);
+		EmitCheckedPerfectHashJoinInt64ToInt32Range(compiler, SLJIT_R0, SLJIT_R2);
+		auto loaded_key = sljit_emit_jump(compiler, SLJIT_JUMP);
+		sljit_set_label(load_int32, sljit_emit_label(compiler));
+		EmitLoadHashJoinKey(compiler, key.key_kind, SLJIT_R0, SLJIT_S4, SLJIT_R1, 0);
+		sljit_set_label(loaded_key, sljit_emit_label(compiler));
+	} else {
+		EmitLoadHashJoinKey(compiler, key.key_kind, SLJIT_R0, SLJIT_S4, SLJIT_R1, 0);
+	}
 
 	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R2, 0, SLJIT_MEM1(SLJIT_S0),
 	               offsetof(SljitNativePerfectHashJoinProbeInput, perfect_min));

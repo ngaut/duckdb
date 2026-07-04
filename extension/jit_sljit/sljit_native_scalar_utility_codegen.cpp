@@ -11,6 +11,49 @@
 
 namespace duckdb {
 
+void EmitSljitDateYearFromDays(struct sljit_compiler *compiler, sljit_s32 days_reg, sljit_s32 target_reg) {
+	static_assert(sizeof(date_t) == sizeof(int32_t), "SLJIT date-year expects DuckDB date_t ABI size");
+
+	if (days_reg != SLJIT_R3) {
+		sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R3, 0, days_reg, 0);
+	}
+	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R4, 0, SLJIT_IMM, Date::EPOCH_YEAR);
+
+	auto normalize_negative_loop = sljit_emit_label(compiler);
+	auto not_negative = sljit_emit_cmp(compiler, SLJIT_SIG_GREATER_EQUAL, SLJIT_R3, 0, SLJIT_IMM, 0);
+	sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_R3, 0, SLJIT_R3, 0, SLJIT_IMM, Date::DAYS_PER_YEAR_INTERVAL);
+	sljit_emit_op2(compiler, SLJIT_SUB, SLJIT_R4, 0, SLJIT_R4, 0, SLJIT_IMM, Date::YEAR_INTERVAL);
+	auto repeat_negative = sljit_emit_jump(compiler, SLJIT_JUMP);
+	sljit_set_label(repeat_negative, normalize_negative_loop);
+	sljit_set_label(not_negative, sljit_emit_label(compiler));
+
+	auto normalize_positive_loop = sljit_emit_label(compiler);
+	auto in_current_interval =
+	    sljit_emit_cmp(compiler, SLJIT_SIG_LESS, SLJIT_R3, 0, SLJIT_IMM, Date::DAYS_PER_YEAR_INTERVAL);
+	sljit_emit_op2(compiler, SLJIT_SUB, SLJIT_R3, 0, SLJIT_R3, 0, SLJIT_IMM, Date::DAYS_PER_YEAR_INTERVAL);
+	sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_R4, 0, SLJIT_R4, 0, SLJIT_IMM, Date::YEAR_INTERVAL);
+	auto repeat_positive = sljit_emit_jump(compiler, SLJIT_JUMP);
+	sljit_set_label(repeat_positive, normalize_positive_loop);
+	sljit_set_label(in_current_interval, sljit_emit_label(compiler));
+
+	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R0, 0, SLJIT_R3, 0);
+	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R1, 0, SLJIT_IMM, 365);
+	sljit_emit_op0(compiler, SLJIT_DIV_SW);
+	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R2, 0, SLJIT_R0, 0);
+	sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_R1, 0, SLJIT_IMM,
+	               reinterpret_cast<sljit_sw>(&Date::CUMULATIVE_YEAR_DAYS[0]));
+
+	auto year_offset_loop = sljit_emit_label(compiler);
+	sljit_emit_op1(compiler, SLJIT_MOV_S32, SLJIT_R0, 0, SLJIT_MEM2(SLJIT_R1, SLJIT_R2), 2);
+	auto have_year_offset = sljit_emit_cmp(compiler, SLJIT_SIG_GREATER_EQUAL, SLJIT_R3, 0, SLJIT_R0, 0);
+	sljit_emit_op2(compiler, SLJIT_SUB, SLJIT_R2, 0, SLJIT_R2, 0, SLJIT_IMM, 1);
+	auto repeat_year_offset = sljit_emit_jump(compiler, SLJIT_JUMP);
+	sljit_set_label(repeat_year_offset, year_offset_loop);
+	sljit_set_label(have_year_offset, sljit_emit_label(compiler));
+
+	sljit_emit_op2(compiler, SLJIT_ADD, target_reg, 0, SLJIT_R4, 0, SLJIT_R2, 0);
+}
+
 unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeIntegralCompress(SljitNativeSignedIntegerWidth source_width,
                                                                        SljitNativeUnsignedIntegerWidth target_width,
                                                                        SljitNativeVectorFunction &function,
@@ -76,8 +119,6 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeIntegralDecompress(SljitNa
 }
 
 unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeDateYear(SljitNativeVectorFunction &function, string &error) {
-	static_assert(sizeof(date_t) == sizeof(int32_t), "SLJIT date-year expects DuckDB date_t ABI size");
-
 	auto compiler = sljit_create_compiler(nullptr);
 	if (!compiler) {
 		error = "failed to create SLJIT compiler";
@@ -96,41 +137,7 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeDateYear(SljitNativeVector
 		invalid_jumps.push_back(sljit_emit_cmp(compiler, SLJIT_EQUAL, SLJIT_S3, 0, SLJIT_IMM,
 		                                       NumericCast<sljit_sw>(date_t::ninfinity().days)));
 
-		sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_S4, 0, SLJIT_IMM, Date::EPOCH_YEAR);
-
-		auto normalize_negative_loop = sljit_emit_label(compiler);
-		auto not_negative = sljit_emit_cmp(compiler, SLJIT_SIG_GREATER_EQUAL, SLJIT_S3, 0, SLJIT_IMM, 0);
-		sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_S3, 0, SLJIT_S3, 0, SLJIT_IMM, Date::DAYS_PER_YEAR_INTERVAL);
-		sljit_emit_op2(compiler, SLJIT_SUB, SLJIT_S4, 0, SLJIT_S4, 0, SLJIT_IMM, Date::YEAR_INTERVAL);
-		auto repeat_negative = sljit_emit_jump(compiler, SLJIT_JUMP);
-		sljit_set_label(repeat_negative, normalize_negative_loop);
-		sljit_set_label(not_negative, sljit_emit_label(compiler));
-
-		auto normalize_positive_loop = sljit_emit_label(compiler);
-		auto in_current_interval =
-		    sljit_emit_cmp(compiler, SLJIT_SIG_LESS, SLJIT_S3, 0, SLJIT_IMM, Date::DAYS_PER_YEAR_INTERVAL);
-		sljit_emit_op2(compiler, SLJIT_SUB, SLJIT_S3, 0, SLJIT_S3, 0, SLJIT_IMM, Date::DAYS_PER_YEAR_INTERVAL);
-		sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_S4, 0, SLJIT_S4, 0, SLJIT_IMM, Date::YEAR_INTERVAL);
-		auto repeat_positive = sljit_emit_jump(compiler, SLJIT_JUMP);
-		sljit_set_label(repeat_positive, normalize_positive_loop);
-		sljit_set_label(in_current_interval, sljit_emit_label(compiler));
-
-		sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R0, 0, SLJIT_S3, 0);
-		sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R1, 0, SLJIT_IMM, 365);
-		sljit_emit_op0(compiler, SLJIT_DIV_SW);
-		sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R2, 0, SLJIT_R0, 0);
-		sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_R3, 0, SLJIT_IMM,
-		               reinterpret_cast<sljit_sw>(&Date::CUMULATIVE_YEAR_DAYS[0]));
-
-		auto year_offset_loop = sljit_emit_label(compiler);
-		sljit_emit_op1(compiler, SLJIT_MOV_S32, SLJIT_R4, 0, SLJIT_MEM2(SLJIT_R3, SLJIT_R2), 2);
-		auto have_year_offset = sljit_emit_cmp(compiler, SLJIT_SIG_GREATER_EQUAL, SLJIT_S3, 0, SLJIT_R4, 0);
-		sljit_emit_op2(compiler, SLJIT_SUB, SLJIT_R2, 0, SLJIT_R2, 0, SLJIT_IMM, 1);
-		auto repeat_year_offset = sljit_emit_jump(compiler, SLJIT_JUMP);
-		sljit_set_label(repeat_year_offset, year_offset_loop);
-		sljit_set_label(have_year_offset, sljit_emit_label(compiler));
-
-		sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_S4, 0, SLJIT_S4, 0, SLJIT_R2, 0);
+		EmitSljitDateYearFromDays(compiler, SLJIT_S3, SLJIT_S4);
 		EmitStoreSljitNativeFixedWidthResult(compiler, SLJIT_MOV, 3, SLJIT_S4);
 	});
 	sljit_set_label(done, sljit_emit_label(compiler));

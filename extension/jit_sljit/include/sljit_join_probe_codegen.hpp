@@ -20,6 +20,8 @@ namespace duckdb {
 struct SljitHashJoinProbeCodegenConfig {
 	SljitHashJoinProbeInputKind input_kind = SljitHashJoinProbeInputKind::GENERIC;
 	SljitHashJoinProbeLayoutKind layout_kind = SljitHashJoinProbeLayoutKind::RUNTIME;
+	bool uses_bloom_filter = false;
+	SljitHashJoinMarkSelectionMode mark_selection_mode = SljitHashJoinMarkSelectionMode::NONE;
 
 	static SljitHashJoinProbeCodegenConfig
 	ForAllValidSpecialization(const SljitHashJoinProbeAllValidSpecializationKey &key) {
@@ -60,6 +62,22 @@ struct SljitHashJoinProbeCodegenConfig {
 
 	bool PreloadsAuxNextPointers() const {
 		return ChainsLongerThanOne() && UsesDictionaryEmission();
+	}
+
+	bool UsesBloomFilter() const {
+		return uses_bloom_filter;
+	}
+
+	bool EmitsMarkSelection() const {
+		return SljitHashJoinEmitsMarkSelection(mark_selection_mode);
+	}
+
+	bool EmitsMarkMatchesAsSelection() const {
+		return mark_selection_mode == SljitHashJoinMarkSelectionMode::MATCHES;
+	}
+
+	bool EmitsMarkNonMatchesAsSelection() const {
+		return mark_selection_mode == SljitHashJoinMarkSelectionMode::NON_MATCHES;
 	}
 
 	bool SpecializesNoChainLayout() const {

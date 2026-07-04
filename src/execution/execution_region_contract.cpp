@@ -257,6 +257,14 @@ static void RecordExecutionRegionGroupedStateContract(ExecutionRegionContract &r
 	RecordExecutionRegionMissingContract(region_contract, state_contract.required_capability, state_contract.blocker);
 }
 
+static bool ExecutionRegionHashAggregateSinkUsesRegularDistinctNativeUpdate(const ExecutionRegionSinkInfo &sink) {
+	auto &contract = sink.aggregate_contract;
+	return sink.kind == ExecutionRegionSinkKind::HASH_AGGREGATE_UPDATE &&
+	       (contract.distinct_aggregate_count != 0 || contract.distinct_table_count != 0 ||
+	        contract.distinct_child_count != 0 || contract.distinct_filter_count != 0) &&
+	       !contract.distinct_count_pointer_keys;
+}
+
 static ExecutionRegionOwnershipKind ClassifyExecutionRegionSinkOwnership(const ExecutionRegionNode &node,
                                                                          ExecutionRegionContract &region_contract) {
 	if (!node.sink) {
@@ -264,8 +272,9 @@ static ExecutionRegionOwnershipKind ClassifyExecutionRegionSinkOwnership(const E
 		return ExecutionRegionOwnershipKind::MISSING_CONTRACT;
 	}
 	auto &sink = *node.sink;
-	if (sink.kind == ExecutionRegionSinkKind::HASH_AGGREGATE_UPDATE ||
-	    sink.kind == ExecutionRegionSinkKind::PERFECT_HASH_AGGREGATE_UPDATE) {
+	if ((sink.kind == ExecutionRegionSinkKind::HASH_AGGREGATE_UPDATE ||
+	     sink.kind == ExecutionRegionSinkKind::PERFECT_HASH_AGGREGATE_UPDATE) &&
+	    !ExecutionRegionHashAggregateSinkUsesRegularDistinctNativeUpdate(sink)) {
 		RecordExecutionRegionGroupedStateContract(region_contract, sink.aggregate_contract);
 	}
 	return ClassifyExecutionCompiledContractOwnership(node.compiled_contract, region_contract, node.blocker_reason);

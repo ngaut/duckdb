@@ -8,7 +8,7 @@
 
 #pragma once
 
-#include "sljit_join_aggregate_route_state.hpp"
+#include "sljit_decimal64_payload_state.hpp"
 #include "sljit_hash_join_rhs_projection_runtime.hpp"
 #include "sljit_region_runtime_state.hpp"
 

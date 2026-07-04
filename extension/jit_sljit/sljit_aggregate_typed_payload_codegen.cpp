@@ -148,7 +148,8 @@ static bool TryBuildSljitBinarySharedAggregatePlan(const vector<SljitNativeRegio
 
 bool BuildSljitFusedTypedAggregateCodegenPlan(const vector<SljitNativeRegionExpressionPlan> &payloads,
                                               const vector<ExecutionRegionAggregateInput> &aggregates,
-                                              SljitFusedTypedAggregateCodegenPlan &codegen_plan) {
+                                              SljitFusedTypedAggregateCodegenPlan &codegen_plan,
+                                              bool force_typed_path) {
 	if (payloads.size() != aggregates.size() || payloads.size() < 2) {
 		return false;
 	}
@@ -176,7 +177,7 @@ bool BuildSljitFusedTypedAggregateCodegenPlan(const vector<SljitNativeRegionExpr
 			TryBuildSljitBinarySharedAggregatePlan(payloads, aggregates, codegen_plan);
 		}
 	}
-	return has_typed_payload;
+	return has_typed_payload || force_typed_path;
 }
 
 void EmitSljitBinarySharedPayloadValueReg(struct sljit_compiler *compiler,

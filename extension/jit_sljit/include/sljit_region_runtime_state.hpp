@@ -8,12 +8,17 @@
 
 #pragma once
 
+#include "sljit_binding_execution_scratch.hpp"
+#include "sljit_hash_join_execution_scratch.hpp"
 #include "sljit_hash_join_runtime.hpp"
 #include "sljit_join_drain_state.hpp"
+#include "sljit_nested_loop_execution_scratch.hpp"
 #include "sljit_native_runtime.hpp"
+#include "sljit_order_execution_scratch.hpp"
 #include "sljit_region_adapter_scratch.hpp"
 #include "sljit_region_execution_scratch_helpers.hpp"
 #include "sljit_region_executable.hpp"
+#include "sljit_scratch_access.hpp"
 
 #include "duckdb/common/allocator.hpp"
 #include "duckdb/common/exception.hpp"
@@ -29,25 +34,10 @@ struct SljitRegionExecutionScratch {
 		const auto op_count = ops.size();
 		temporary_chunks.resize(op_count);
 		filter_selections.resize(op_count);
-		operator_bindings.resize(op_count);
-		operator_binding_ready.resize(op_count);
-		sink_bindings.resize(op_count);
-		sink_binding_ready.resize(op_count);
-		hash_join_build_selections.resize(op_count);
-		hash_join_row_pointers.resize(op_count);
-		hash_join_residual_chunks.resize(op_count);
-		hash_join_residual_selections.resize(op_count);
-		hash_join_residual_match_selections.resize(op_count);
-		hash_join_residual_row_pointers.resize(op_count);
-		hash_join_sources.resize(op_count);
-		hash_join_build_source_chunks.resize(op_count);
-		hash_join_build_hash_values.resize(op_count);
-		nested_loop_left_condition_chunks.resize(op_count);
-		nested_loop_left_selections.resize(op_count);
-		nested_loop_right_selections.resize(op_count);
-		nested_loop_condition_chunks.resize(op_count);
-		order_key_chunks.resize(op_count);
-		order_payload_chunks.resize(op_count);
+		binding_scratch.Resize(op_count);
+		hash_join_scratch.Resize(op_count);
+		nested_loop_scratch.Resize(op_count);
+		order_scratch.Resize(op_count);
 		aggregate_scratch.Resize(op_count);
 		projection_adapter_scratch.resize(op_count);
 		expression_adapter_scratch.resize(op_count);
@@ -67,7 +57,8 @@ struct SljitRegionExecutionScratch {
 	}
 
 	DataChunk &TemporaryChunk(idx_t op_idx) {
-		return CheckedScratchPtr(temporary_chunks, op_idx, "SLJIT full pipeline transform has no stage scratch chunk");
+		return SljitCheckedScratchPtr(temporary_chunks, op_idx,
+		                              "SLJIT full pipeline transform has no stage scratch chunk");
 	}
 
 	Vector &AggregateStateAddresses(idx_t op_idx) {
@@ -82,12 +73,20 @@ struct SljitRegionExecutionScratch {
 		return aggregate_scratch.PreaggregatedGroups(op_idx);
 	}
 
+	DataChunk &AggregatePreaggregatedGroupSlice(idx_t op_idx) {
+		return aggregate_scratch.PreaggregatedGroupSlice(op_idx);
+	}
+
 	Vector &AggregatePreaggregatedRowPointers(idx_t op_idx) {
 		return aggregate_scratch.PreaggregatedRowPointers(op_idx);
 	}
 
 	SljitPreaggregatedPrimitiveAggregateScratch &AggregatePreaggregateScratch(idx_t op_idx) {
 		return aggregate_scratch.PreaggregateScratch(op_idx);
+	}
+
+	SljitPreaggregatedPrimitiveAggregateScratch &AggregatePreaggregateScratchSlice(idx_t op_idx) {
+		return aggregate_scratch.PreaggregateScratchSlice(op_idx);
 	}
 
 	const vector<const ExecutionPrimitiveAggregateUpdateLane *> &
@@ -112,6 +111,14 @@ struct SljitRegionExecutionScratch {
 		aggregate_scratch.RecordDirectAppendNewResult(op_idx, updated);
 	}
 
+	bool RowPointerPreaggregateDisabled(idx_t op_idx) const {
+		return aggregate_scratch.RowPointerPreaggregateDisabled(op_idx);
+	}
+
+	void RecordRowPointerPreaggregateResult(idx_t op_idx, bool updated) {
+		aggregate_scratch.RecordRowPointerPreaggregateResult(op_idx, updated);
+	}
+
 	SljitExpressionAdapterScratch &ExpressionAdapterScratch(idx_t op_idx, idx_t expression_idx) {
 		if (op_idx >= expression_adapter_scratch.size() ||
 		    expression_idx >= expression_adapter_scratch[op_idx].size()) {
@@ -121,157 +128,108 @@ struct SljitRegionExecutionScratch {
 	}
 
 	SljitProjectionAdapterScratch &ProjectionScratch(idx_t op_idx) {
-		return CheckedScratchSlot(projection_adapter_scratch, op_idx, "SLJIT projection has no adapter scratch");
+		return SljitCheckedScratchSlot(projection_adapter_scratch, op_idx, "SLJIT projection has no adapter scratch");
 	}
 
 	SelectionVector &FilterSelection(idx_t op_idx) {
-		return CheckedScratchPtr(filter_selections, op_idx, "SLJIT full pipeline transform has no selection scratch");
+		return SljitCheckedScratchPtr(filter_selections, op_idx,
+		                              "SLJIT full pipeline transform has no selection scratch");
 	}
 
 	bool HasSinkBinding(idx_t op_idx) const {
-		return op_idx < sink_binding_ready.size() && sink_binding_ready[op_idx];
+		return binding_scratch.HasSink(op_idx);
 	}
 
 	ExecutionSinkBinding &SinkBinding(idx_t op_idx) {
-		return CheckedScratchSlot(sink_bindings, op_idx, "SLJIT full pipeline sink has no binding scratch");
+		return binding_scratch.Sink(op_idx);
 	}
 
 	void MarkSinkBindingReady(idx_t op_idx) {
-		if (op_idx >= sink_binding_ready.size()) {
-			throw InternalException("SLJIT full pipeline sink has no binding-ready scratch");
-		}
-		sink_binding_ready[op_idx] = true;
+		binding_scratch.MarkSinkReady(op_idx);
 	}
 
 	bool HasOperatorBinding(idx_t op_idx) const {
-		return op_idx < operator_binding_ready.size() && operator_binding_ready[op_idx];
+		return binding_scratch.HasOperator(op_idx);
 	}
 
 	ExecutionOperatorBinding &OperatorBinding(idx_t op_idx) {
-		return CheckedScratchSlot(operator_bindings, op_idx, "SLJIT full pipeline operator has no binding scratch");
+		return binding_scratch.Operator(op_idx);
 	}
 
 	void MarkOperatorBindingReady(idx_t op_idx) {
-		if (op_idx >= operator_binding_ready.size()) {
-			throw InternalException("SLJIT full pipeline operator has no binding-ready scratch");
-		}
-		operator_binding_ready[op_idx] = true;
+		binding_scratch.MarkOperatorReady(op_idx);
 	}
 
 	Vector &HashJoinRowPointers(idx_t op_idx) {
-		return CheckedScratchPtr(hash_join_row_pointers, op_idx,
-		                         "SLJIT full pipeline hash join probe has no row-pointer scratch");
+		return hash_join_scratch.RowPointers(op_idx);
 	}
 
 	SelectionVector &HashJoinBuildSelection(idx_t op_idx) {
-		return CheckedScratchPtr(hash_join_build_selections, op_idx,
-		                         "SLJIT full pipeline hash join probe has no build-selection scratch");
+		return hash_join_scratch.BuildSelection(op_idx);
 	}
 
 	DataChunk &HashJoinBuildSourceChunk(idx_t op_idx) {
-		return CheckedScratchPtr(hash_join_build_source_chunks, op_idx,
-		                         "SLJIT full pipeline hash join build has no source-chunk scratch");
+		return hash_join_scratch.BuildSourceChunk(op_idx);
 	}
 
 	Vector &HashJoinBuildHashValues(idx_t op_idx) {
-		return CheckedScratchPtr(hash_join_build_hash_values, op_idx,
-		                         "SLJIT full pipeline hash join build has no hash-value scratch");
+		return hash_join_scratch.BuildHashValues(op_idx);
 	}
 
 	DataChunk &HashJoinResidualChunk(idx_t op_idx) {
-		return CheckedScratchPtr(hash_join_residual_chunks, op_idx,
-		                         "SLJIT full pipeline hash join probe has no residual chunk scratch");
+		return hash_join_scratch.ResidualChunk(op_idx);
 	}
 
 	SelectionVector &HashJoinResidualSelection(idx_t op_idx) {
-		return CheckedScratchPtr(hash_join_residual_selections, op_idx,
-		                         "SLJIT full pipeline hash join probe has no residual selection scratch");
+		return hash_join_scratch.ResidualSelection(op_idx);
 	}
 
 	SelectionVector &HashJoinResidualMatchSelection(idx_t op_idx) {
-		return CheckedScratchPtr(hash_join_residual_match_selections, op_idx,
-		                         "SLJIT full pipeline hash join probe has no residual match selection scratch");
+		return hash_join_scratch.ResidualMatchSelection(op_idx);
 	}
 
 	Vector &HashJoinResidualRowPointers(idx_t op_idx) {
-		return CheckedScratchPtr(hash_join_residual_row_pointers, op_idx,
-		                         "SLJIT full pipeline hash join probe has no residual row-pointer scratch");
+		return hash_join_scratch.ResidualRowPointers(op_idx);
 	}
 
 	SljitHashJoinProbeSourceScratch &HashJoinSources(idx_t op_idx) {
-		return CheckedScratchSlot(hash_join_sources, op_idx, "SLJIT hash join probe has no source scratch slot");
+		return hash_join_scratch.Sources(op_idx);
 	}
 
 	DataChunk &NestedLoopLeftConditionChunk(idx_t op_idx) {
-		return CheckedScratchPtr(nested_loop_left_condition_chunks, op_idx,
-		                         "SLJIT nested loop join probe has no left condition scratch chunk");
+		return nested_loop_scratch.LeftConditionChunk(op_idx);
 	}
 
 	SelectionVector &NestedLoopLeftSelection(idx_t op_idx) {
-		return CheckedScratchPtr(nested_loop_left_selections, op_idx,
-		                         "SLJIT nested loop join probe has no left selection scratch");
+		return nested_loop_scratch.LeftSelection(op_idx);
 	}
 
 	SelectionVector &NestedLoopRightSelection(idx_t op_idx) {
-		return CheckedScratchPtr(nested_loop_right_selections, op_idx,
-		                         "SLJIT nested loop join probe has no right selection scratch");
+		return nested_loop_scratch.RightSelection(op_idx);
 	}
 
 	DataChunk &NestedLoopConditionChunk(idx_t op_idx) {
-		return CheckedScratchPtr(nested_loop_condition_chunks, op_idx,
-		                         "SLJIT nested loop join build has no condition scratch chunk");
+		return nested_loop_scratch.ConditionChunk(op_idx);
 	}
 
 	DataChunk &OrderKeyChunk(idx_t op_idx) {
-		return CheckedScratchPtr(order_key_chunks, op_idx, "SLJIT ordered sink has no order-key scratch chunk");
+		return order_scratch.KeyChunk(op_idx);
 	}
 
 	DataChunk &OrderPayloadChunk(idx_t op_idx) {
-		return CheckedScratchPtr(order_payload_chunks, op_idx, "SLJIT ordered sink has no payload scratch chunk");
+		return order_scratch.PayloadChunk(op_idx);
 	}
 
 	vector<unique_ptr<DataChunk>> temporary_chunks;
 	vector<unique_ptr<SelectionVector>> filter_selections;
-	vector<ExecutionOperatorBinding> operator_bindings;
-	vector<bool> operator_binding_ready;
-	vector<ExecutionSinkBinding> sink_bindings;
-	vector<bool> sink_binding_ready;
-	vector<unique_ptr<SelectionVector>> hash_join_build_selections;
-	vector<unique_ptr<Vector>> hash_join_row_pointers;
-	vector<unique_ptr<DataChunk>> hash_join_build_source_chunks;
-	vector<unique_ptr<Vector>> hash_join_build_hash_values;
-	vector<unique_ptr<DataChunk>> hash_join_residual_chunks;
-	vector<unique_ptr<SelectionVector>> hash_join_residual_selections;
-	vector<unique_ptr<SelectionVector>> hash_join_residual_match_selections;
-	vector<unique_ptr<Vector>> hash_join_residual_row_pointers;
-	vector<SljitHashJoinProbeSourceScratch> hash_join_sources;
-	vector<unique_ptr<DataChunk>> nested_loop_left_condition_chunks;
-	vector<unique_ptr<SelectionVector>> nested_loop_left_selections;
-	vector<unique_ptr<SelectionVector>> nested_loop_right_selections;
-	vector<unique_ptr<DataChunk>> nested_loop_condition_chunks;
-	vector<unique_ptr<DataChunk>> order_key_chunks;
-	vector<unique_ptr<DataChunk>> order_payload_chunks;
+	SljitBindingExecutionScratch binding_scratch;
+	SljitHashJoinExecutionScratch hash_join_scratch;
+	SljitNestedLoopJoinExecutionScratch nested_loop_scratch;
+	SljitOrderExecutionScratch order_scratch;
 	SljitAggregateUpdateScratchState aggregate_scratch;
 	vector<SljitProjectionAdapterScratch> projection_adapter_scratch;
 	vector<vector<SljitExpressionAdapterScratch>> expression_adapter_scratch;
 	DirectAppendReservation direct_append_reservation;
-
-private:
-	template <class T>
-	static T &CheckedScratchPtr(vector<unique_ptr<T>> &scratch, idx_t op_idx, const char *message) {
-		if (op_idx >= scratch.size() || !scratch[op_idx]) {
-			throw InternalException(message);
-		}
-		return *scratch[op_idx];
-	}
-
-	template <class T>
-	static T &CheckedScratchSlot(vector<T> &scratch, idx_t op_idx, const char *message) {
-		if (op_idx >= scratch.size()) {
-			throw InternalException(message);
-		}
-		return scratch[op_idx];
-	}
 
 	void InitializeOperatorScratch(Allocator &allocator, idx_t op_idx, const SljitExecutableRegionOp &op) {
 		switch (op.kind) {
@@ -279,26 +237,20 @@ private:
 			filter_selections[op_idx] = make_uniq<SelectionVector>(STANDARD_VECTOR_SIZE);
 			break;
 		case SljitNativeRegionOpKind::HASH_JOIN_PROBE:
-			InitializeHashJoinProbeScratch(allocator, op_idx, op);
+			filter_selections[op_idx] = make_uniq<SelectionVector>(STANDARD_VECTOR_SIZE);
+			hash_join_scratch.InitializeProbe(allocator, op_idx, op);
 			break;
 		case SljitNativeRegionOpKind::HASH_JOIN_BUILD:
-			hash_join_build_selections[op_idx] = make_uniq<SelectionVector>(STANDARD_VECTOR_SIZE);
-			hash_join_build_source_chunks[op_idx] = make_uniq<DataChunk>();
-			hash_join_build_hash_values[op_idx] = make_uniq<Vector>(LogicalType::HASH);
+			hash_join_scratch.InitializeBuild(op_idx);
 			break;
 		case SljitNativeRegionOpKind::NESTED_LOOP_JOIN_PROBE:
-			nested_loop_left_selections[op_idx] = make_uniq<SelectionVector>(STANDARD_VECTOR_SIZE);
-			nested_loop_right_selections[op_idx] = make_uniq<SelectionVector>(STANDARD_VECTOR_SIZE);
-			InitializeChunk(allocator, op.nested_loop_join_probe.plan.condition_types,
-			                nested_loop_left_condition_chunks[op_idx]);
+			nested_loop_scratch.InitializeProbe(allocator, op_idx, op);
 			break;
 		case SljitNativeRegionOpKind::NESTED_LOOP_JOIN_BUILD:
-			InitializeChunk(allocator, op.nested_loop_join_build.plan.condition_types,
-			                nested_loop_condition_chunks[op_idx]);
+			nested_loop_scratch.InitializeBuild(allocator, op_idx, op);
 			break;
 		case SljitNativeRegionOpKind::ORDER_SINK:
-			InitializeChunk(allocator, op.order_sink.plan.key_types, order_key_chunks[op_idx]);
-			InitializeChunk(allocator, op.order_sink.plan.input_types, order_payload_chunks[op_idx]);
+			order_scratch.InitializeSink(allocator, op_idx, op);
 			break;
 		case SljitNativeRegionOpKind::AGGREGATE_UPDATE:
 			aggregate_scratch.Initialize(allocator, op_idx, op);
@@ -306,27 +258,6 @@ private:
 		default:
 			break;
 		}
-	}
-
-	static void InitializeChunk(Allocator &allocator, const vector<LogicalType> &types, unique_ptr<DataChunk> &target) {
-		auto chunk = make_uniq<DataChunk>();
-		chunk->Initialize(allocator, types);
-		target = std::move(chunk);
-	}
-
-	void InitializeHashJoinProbeScratch(Allocator &allocator, idx_t op_idx, const SljitExecutableRegionOp &op) {
-		filter_selections[op_idx] = make_uniq<SelectionVector>(STANDARD_VECTOR_SIZE);
-		hash_join_build_selections[op_idx] = make_uniq<SelectionVector>(STANDARD_VECTOR_SIZE);
-		hash_join_row_pointers[op_idx] = make_uniq<Vector>(LogicalType::POINTER);
-		auto key_count = op.hash_join_probe.plan.keys.size();
-		hash_join_sources[op_idx].Resize(key_count);
-		if (!op.hash_join_probe.plan.residual_predicate) {
-			return;
-		}
-		hash_join_residual_selections[op_idx] = make_uniq<SelectionVector>(STANDARD_VECTOR_SIZE);
-		hash_join_residual_match_selections[op_idx] = make_uniq<SelectionVector>(STANDARD_VECTOR_SIZE);
-		hash_join_residual_row_pointers[op_idx] = make_uniq<Vector>(LogicalType::POINTER);
-		InitializeChunk(allocator, op.hash_join_probe.plan.residual_source_types, hash_join_residual_chunks[op_idx]);
 	}
 
 	void InitializeExpressionAdapterScratch(idx_t op_idx, const SljitExecutableRegionOp &op) {
@@ -382,9 +313,7 @@ private:
 		if (op_idx >= ops.size() || temporary_chunks[op_idx]) {
 			return;
 		}
-		auto chunk = make_uniq<DataChunk>();
-		chunk->Initialize(allocator, ops[op_idx].output_types);
-		temporary_chunks[op_idx] = std::move(chunk);
+		SljitInitializeScratchChunk(allocator, ops[op_idx].output_types, temporary_chunks[op_idx]);
 	}
 };
 

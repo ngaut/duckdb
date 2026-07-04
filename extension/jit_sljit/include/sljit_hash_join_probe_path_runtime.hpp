@@ -12,6 +12,7 @@
 #include "sljit_hash_join_probe_runtime.hpp"
 #include "sljit_hash_join_probe_specialization.hpp"
 #include "sljit_hash_join_runtime.hpp"
+#include "sljit_native_function_runtime.hpp"
 #include "sljit_region_adapter_scratch.hpp"
 #include "sljit_region_runtime_trace.hpp"
 
@@ -63,38 +64,70 @@ static idx_t SljitApplyNativeHashJoinResidualPredicate(
 template <bool SELECTED, class OWNER>
 static const char *SljitExecuteAllValidRegularHashJoinProbePath(OWNER &owner, ExecutionRegionRuntime &runtime,
                                                                 SljitExecutableHashJoinProbe &hash_join_probe,
+                                                                const SljitNativeHashJoinProbePlan &plan,
                                                                 bool needs_chain_matcher,
                                                                 SljitNativeRegularHashJoinProbeInput &native_input) {
 	const bool can_use_chain_input = SljitHashJoinCanUseAllValidChainInput(native_input);
 	const SljitAllValidHashJoinProbeFacts facts {can_use_chain_input && !needs_chain_matcher};
 	for (auto &fast_path : SljitAllValidHashJoinProbeFastPaths(SELECTED)) {
-		if (fast_path.execute(hash_join_probe.plan, native_input, facts)) {
+		if (fast_path.execute(plan, native_input, facts)) {
 			return SljitAllValidHashJoinProbeFastPathStage(fast_path, SELECTED);
 		}
 	}
 	auto key = SljitHashJoinProbeAllValidSpecializationKey::FromLayoutKind(SELECTED, native_input.layout_kind);
 	auto function = owner.EnsureAllValidRegularHashJoinProbeCode(runtime, hash_join_probe, key);
-	function(&native_input);
+	SljitExecuteNativeFunction(function, native_input);
 	return SljitGeneratedAllValidRegularHashJoinProbeStage(SELECTED);
 }
 
 template <class OWNER>
-static const char *SljitExecuteRegularHashJoinProbePath(OWNER &owner, ExecutionRegionRuntime &runtime,
-                                                        SljitHashJoinProbeInputKind input_kind,
-                                                        SljitExecutableHashJoinProbe &hash_join_probe,
-                                                        bool needs_chain_matcher,
-                                                        SljitNativeRegularHashJoinProbeInput &native_input) {
+static const char *SljitExecuteRegularHashJoinProbePath(
+    OWNER &owner, ExecutionRegionRuntime &runtime, SljitHashJoinProbeInputKind input_kind,
+    SljitExecutableHashJoinProbe &hash_join_probe, const SljitNativeHashJoinProbePlan &plan, bool needs_chain_matcher,
+    SljitNativeRegularHashJoinProbeInput &native_input,
+    SljitHashJoinMarkSelectionMode mark_selection_mode = SljitHashJoinMarkSelectionMode::NONE) {
 	if (input_kind == SljitHashJoinProbeInputKind::FLAT_ALL_VALID) {
-		return SljitExecuteAllValidRegularHashJoinProbePath<false>(owner, runtime, hash_join_probe, needs_chain_matcher,
-		                                                           native_input);
+		if (!SljitHashJoinEmitsMarkSelection(mark_selection_mode)) {
+			return SljitExecuteAllValidRegularHashJoinProbePath<false>(owner, runtime, hash_join_probe, plan,
+			                                                           needs_chain_matcher, native_input);
+		}
+		auto key = SljitHashJoinProbeAllValidSpecializationKey::FromLayoutKind(false, native_input.layout_kind);
+		auto function =
+		    owner.EnsureAllValidRegularHashJoinProbeCode(runtime, hash_join_probe, key, mark_selection_mode);
+		SljitExecuteNativeFunction(function, native_input);
+		return SljitGeneratedAllValidRegularHashJoinProbeStage(false, mark_selection_mode);
 	}
 	if (input_kind == SljitHashJoinProbeInputKind::SELECTED_ALL_VALID) {
-		return SljitExecuteAllValidRegularHashJoinProbePath<true>(owner, runtime, hash_join_probe, needs_chain_matcher,
-		                                                          native_input);
+		if (!SljitHashJoinEmitsMarkSelection(mark_selection_mode)) {
+			return SljitExecuteAllValidRegularHashJoinProbePath<true>(owner, runtime, hash_join_probe, plan,
+			                                                          needs_chain_matcher, native_input);
+		}
+		auto key = SljitHashJoinProbeAllValidSpecializationKey::FromLayoutKind(true, native_input.layout_kind);
+		auto function =
+		    owner.EnsureAllValidRegularHashJoinProbeCode(runtime, hash_join_probe, key, mark_selection_mode);
+		SljitExecuteNativeFunction(function, native_input);
+		return SljitGeneratedAllValidRegularHashJoinProbeStage(true, mark_selection_mode);
 	}
-	owner.EnsureRegularHashJoinProbeCode(runtime, hash_join_probe);
-	hash_join_probe.regular.function(&native_input);
-	return SljitGeneratedRegularHashJoinProbeStage();
+	const bool uses_bloom_filter = native_input.bloom_filter_bits != nullptr;
+	owner.EnsureRegularHashJoinProbeCode(runtime, hash_join_probe, uses_bloom_filter, mark_selection_mode);
+	SljitNativeRegularHashJoinProbeFunction function = nullptr;
+	switch (mark_selection_mode) {
+	case SljitHashJoinMarkSelectionMode::NONE:
+		function = uses_bloom_filter ? hash_join_probe.regular.bloom_function : hash_join_probe.regular.function;
+		break;
+	case SljitHashJoinMarkSelectionMode::MATCHES:
+		function = uses_bloom_filter ? hash_join_probe.regular.mark_match_selection_bloom_function
+		                             : hash_join_probe.regular.mark_match_selection_function;
+		break;
+	case SljitHashJoinMarkSelectionMode::NON_MATCHES:
+		function = uses_bloom_filter ? hash_join_probe.regular.mark_nonmatch_selection_bloom_function
+		                             : hash_join_probe.regular.mark_nonmatch_selection_function;
+		break;
+	default:
+		throw InternalException("Unsupported SLJIT MARK selection mode");
+	}
+	SljitExecuteNativeFunction(function, native_input);
+	return SljitGeneratedRegularHashJoinProbeStage(uses_bloom_filter, mark_selection_mode);
 }
 
 static SljitPreparedRegularHashJoinProbeInput SljitPrepareRegularHashJoinProbeInput(
@@ -102,7 +135,7 @@ static SljitPreparedRegularHashJoinProbeInput SljitPrepareRegularHashJoinProbeIn
     const SljitNativeHashJoinProbePlan &plan, const ExecutionHashJoinTableLayout &layout, DataChunk &input,
     SelectionVector &match_selection, Vector &row_pointers, SljitHashJoinProbeSourceScratch &source_scratch,
     SljitHashJoinProbeDrainState &state, SljitHashJoinProbeLayoutKind table_layout_kind,
-    bool allow_unchecked_int64_to_int32) {
+    bool allow_unchecked_int64_to_int32, bool rhs_keys_all_valid) {
 	auto vector_setup_stage_start = SljitRegionStageStart(runtime);
 	auto source_key0_int64_to_int32 = source_scratch.Prepare(input, plan);
 	row_pointers.SetVectorType(VectorType::FLAT_VECTOR);
@@ -114,7 +147,7 @@ static SljitPreparedRegularHashJoinProbeInput SljitPrepareRegularHashJoinProbeIn
 	const bool source_selection_present = source_sel_array != nullptr;
 	const SljitRegularHashJoinProbeInputShape input_shape {
 	    source_selection_present, source_selection_present && source_scratch.HasCommonSelection(),
-	    source_validity_array != nullptr, !layout.can_have_null || layout.null_keys_are_filtered};
+	    source_validity_array != nullptr, rhs_keys_all_valid};
 
 	SljitPreparedRegularHashJoinProbeInput result;
 	result.input_kind = input_shape.PathKind();
@@ -129,7 +162,7 @@ static SljitPreparedRegularHashJoinProbeInput SljitPrepareRegularHashJoinProbeIn
 	native_input.bitmask = layout.bitmask;
 	native_input.pointer_mask = layout.pointer_mask;
 	native_input.layout_kind = table_layout_kind;
-	native_input.rhs_keys_have_validity = layout.can_have_null;
+	native_input.rhs_keys_have_validity = layout.can_have_null && !rhs_keys_all_valid;
 	native_input.pointer_offset = layout.pointer_offset;
 	native_input.aux_next_ptrs = layout.aux_next_ptrs;
 	native_input.bloom_filter_bits = layout.bloom_filter ? layout.bloom_filter->Data() : nullptr;

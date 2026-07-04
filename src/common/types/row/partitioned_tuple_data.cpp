@@ -94,7 +94,8 @@ void PartitionedTupleData::AppendUnified(PartitionedTupleDataAppendState &state,
 }
 
 void PartitionedTupleData::Append(PartitionedTupleDataAppendState &state, TupleDataChunkState &input,
-                                  const idx_t append_count) {
+                                  const idx_t append_count,
+                                  optional_ptr<TupleDataRowLocationRemap> row_location_remap) {
 	const auto max_partition_idx = MaxPartitionIndex();
 	const auto use_fixed_size_map = max_partition_idx < PartitionedTupleDataAppendState::MAP_THRESHOLD;
 
@@ -116,7 +117,8 @@ void PartitionedTupleData::Append(PartitionedTupleDataAppendState &state, TupleD
 		partition.Build(partition_pin_state, state.chunk_state, 0, append_count);
 		data_size += partition.data_size - size_before;
 
-		partition.CopyRows(state.chunk_state, input, *FlatVector::IncrementalSelectionVector(), append_count);
+		partition.CopyRows(state.chunk_state, input, *FlatVector::IncrementalSelectionVector(), append_count,
+		                   row_location_remap);
 	} else {
 		// Build the buffer space
 		state.chunk_state.heap_sizes.Slice(input.heap_sizes, state.partition_sel, append_count);
@@ -124,7 +126,7 @@ void PartitionedTupleData::Append(PartitionedTupleDataAppendState &state, TupleD
 		BuildBufferSpace(state);
 
 		// Copy the rows
-		partitions[0]->CopyRows(state.chunk_state, input, state.partition_sel, append_count);
+		partitions[0]->CopyRows(state.chunk_state, input, state.partition_sel, append_count, row_location_remap);
 	}
 
 	count += append_count;
@@ -322,11 +324,16 @@ void PartitionedTupleData::Reset() {
 	Verify();
 }
 
-void PartitionedTupleData::Repartition(ClientContext &context, PartitionedTupleData &new_partitioned_data) {
+void PartitionedTupleData::Repartition(ClientContext &context, PartitionedTupleData &new_partitioned_data,
+                                       optional_ptr<TupleDataRowLocationRemap> row_location_remap) {
 	D_ASSERT(layout.GetTypes() == new_partitioned_data.layout.GetTypes());
 
 	if (partitions.size() == new_partitioned_data.partitions.size()) {
+		// Combine transfers row ownership without copying rows; existing row locations remain valid.
 		new_partitioned_data.Combine(*this);
+		if (row_location_remap) {
+			row_location_remap->Flush();
+		}
 		return;
 	}
 
@@ -342,7 +349,8 @@ void PartitionedTupleData::Repartition(ClientContext &context, PartitionedTupleD
 			do {
 				// Check for interrupts with each chunk
 				context.InterruptCheck();
-				new_partitioned_data.Append(append_state, chunk_state, iterator.GetCurrentChunkCount());
+				new_partitioned_data.Append(append_state, chunk_state, iterator.GetCurrentChunkCount(),
+				                            row_location_remap);
 			} while (iterator.Next());
 
 			RepartitionFinalizeStates(*this, new_partitioned_data, append_state, partition_idx);
@@ -350,6 +358,9 @@ void PartitionedTupleData::Repartition(ClientContext &context, PartitionedTupleD
 		partitions[partition_idx]->Reset();
 	}
 	new_partitioned_data.FlushAppendState(append_state);
+	if (row_location_remap) {
+		row_location_remap->Flush();
+	}
 
 	count = 0;
 	data_size = 0;

@@ -50,7 +50,8 @@ static hash_t ExecutionRegionCounterHash(const ExecutionRegionEvent &event) {
 	result = ExecutionRegionTelemetryCombine(result, ExecutionRegionTelemetryHashString(event.blocker));
 	result = ExecutionRegionTelemetryCombine(
 	    result, ExecutionRegionTelemetryHashString(ExecutionRegionRunnerCostInputScope(event.runner_cost)));
-	result = ExecutionRegionTelemetryCombine(result, ExecutionRegionTelemetryHashString(event.runner_cost.admission_class));
+	result =
+	    ExecutionRegionTelemetryCombine(result, ExecutionRegionTelemetryHashString(event.runner_cost.admission_class));
 	result =
 	    ExecutionRegionTelemetryCombine(result, ExecutionRegionTelemetryHashString(event.runner_cost.selection_reason));
 	result = ExecutionRegionTelemetryCombine(
@@ -91,11 +92,17 @@ static void AccumulateExecutionRegionRunnerCostTotals(ExecutionRegionRunnerCostT
 	target.batches += source.batches;
 	target.expression_cost += source.expression_cost;
 	target.generated_stage_count += source.generated_stage_count;
+	target.generated_backend_stage_count += source.generated_backend_stage_count;
 	target.materialization_elision_count += source.materialization_elision_count;
 	target.materialization_source_append_count += source.materialization_source_append_count;
 	target.native_join_stage_count += source.native_join_stage_count;
+	target.native_hash_join_build_sink_count += source.native_hash_join_build_sink_count;
 	target.native_aggregate_stage_count += source.native_aggregate_stage_count;
 	target.native_grouped_aggregate_stage_count += source.native_grouped_aggregate_stage_count;
+	target.native_distinct_count_pointer_aggregate_stage_count +=
+	    source.native_distinct_count_pointer_aggregate_stage_count;
+	target.generated_distinct_count_pointer_aggregate_update_count +=
+	    source.generated_distinct_count_pointer_aggregate_update_count;
 	target.native_sort_stage_count += source.native_sort_stage_count;
 	target.full_pipeline = target.full_pipeline || source.full_pipeline;
 	AccumulateExecutionRegionRuleName(target.input_scope, ExecutionRegionRunnerCostInputScope(source));
@@ -103,6 +110,7 @@ static void AccumulateExecutionRegionRunnerCostTotals(ExecutionRegionRunnerCostT
 	AccumulateExecutionRegionRuleName(target.selection_reason, source.selection_reason);
 	target.generated_expression_work += source.generated_expression_work;
 	target.generated_stage_work += source.generated_stage_work;
+	target.generated_backend_stage_work += source.generated_backend_stage_work;
 	target.native_operator_work += source.native_operator_work;
 	target.materialization_elision_work += source.materialization_elision_work;
 	target.materialization_source_append_penalty += source.materialization_source_append_penalty;

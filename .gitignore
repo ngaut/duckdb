@@ -315,6 +315,7 @@ benchmark/taxi/data/
 # Benchmarks
 .last_benchmarked_commit
 benchmark_results/
+benchmark/tpch/jit/results_*/
 duckdb_unittest_tempdir/
 grammar.y.tmp
 # single file compile

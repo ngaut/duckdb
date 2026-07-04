@@ -1,7 +1,7 @@
 //===----------------------------------------------------------------------===//
 //                         DuckDB
 //
-// sljit_full_pipeline_route_kind.hpp
+// sljit_mark_probe_filter_mode.hpp
 //
 //
 //===----------------------------------------------------------------------===//
@@ -10,46 +10,7 @@
 
 #include "sljit_region_executable.hpp"
 
-#include "duckdb/common/operator/numeric_cast.hpp"
-#include "duckdb/common/types/value.hpp"
-
 namespace duckdb {
-
-struct SljitFullPipelineProjectionAggregateShape {
-	idx_t first_projection_idx = DConstants::INVALID_INDEX;
-	idx_t final_projection_idx = DConstants::INVALID_INDEX;
-	idx_t aggregate_idx = DConstants::INVALID_INDEX;
-
-	idx_t ProjectionCount() const {
-		if (first_projection_idx == DConstants::INVALID_INDEX || final_projection_idx == DConstants::INVALID_INDEX ||
-		    final_projection_idx < first_projection_idx) {
-			return 0;
-		}
-		return final_projection_idx - first_projection_idx + 1;
-	}
-};
-
-enum class SljitFullPipelineRouteKind : uint8_t {
-	NONE,
-	FILTERED_SOURCE_AGGREGATE,
-	GENERATED_FILTER_PROJECTION,
-	PROJECTION_COUNT_STAR_GROUPED_AGGREGATE,
-	HASH_JOIN_PROJECTION_GROUPED_AGGREGATE,
-	HASH_JOIN_DELIM_JOIN_SINK,
-	GENERATED_FILTER_PROJECTION_HASH_JOIN_BUILD_SINK,
-	GENERATED_PROJECTION_FILTER_PROJECTION_HASH_JOIN_BUILD_SINK,
-	HASH_JOIN_BUILD_SINK,
-	HASH_JOIN_APPEND_SINK,
-	HASH_JOIN_PROJECTION_PROJECTION_GROUPED_AGGREGATE,
-	MARK_HASH_JOIN_FILTER_PROJECTION_GROUPED_AGGREGATE,
-	PROJECTION_HASH_JOIN_PROJECTION_CHAIN_GROUPED_AGGREGATE,
-	HASH_JOIN_PROJECTION_HASH_JOIN_PROJECTIONS_GROUPED_AGGREGATE,
-	PROJECTION_HASH_JOIN_PROJECTION_HASH_JOIN_PROJECTION_PROJECTION_GROUPED_AGGREGATE,
-	HASH_JOIN_HASH_JOIN_PROJECTION_GROUPED_AGGREGATE,
-	HASH_JOIN_HASH_JOIN_PROJECTION_PROJECTION_GROUPED_AGGREGATE,
-	GENERATED_FILTER_PROJECTION_HASH_JOIN_PROJECTION_GROUPED_AGGREGATE,
-	HASH_JOIN_HASH_JOIN_FILTER_PROJECTION_CHAIN_GROUPED_AGGREGATE
-};
 
 enum class SljitMarkProbeFilterMode : uint8_t { NONE, MATCHES, NON_MATCHES };
 
@@ -152,28 +113,6 @@ static SljitMarkProbeFilterMode SljitMarkProbeMarkerFilterMode(const SljitExecut
 static bool SljitIsMarkProbeMarkerFilter(const SljitExecutableRegionOp &hash_join_op,
                                          const SljitExecutableRegionOp &filter_op) {
 	return SljitMarkProbeMarkerFilterMode(hash_join_op, filter_op) != SljitMarkProbeFilterMode::NONE;
-}
-
-static bool SljitTryReadSignedIntegerValue(const Value &value, int64_t &result) {
-	if (value.IsNull()) {
-		return false;
-	}
-	switch (value.type().InternalType()) {
-	case PhysicalType::INT8:
-		result = NumericCast<int64_t>(value.GetValueUnsafe<int8_t>());
-		return true;
-	case PhysicalType::INT16:
-		result = NumericCast<int64_t>(value.GetValueUnsafe<int16_t>());
-		return true;
-	case PhysicalType::INT32:
-		result = NumericCast<int64_t>(value.GetValueUnsafe<int32_t>());
-		return true;
-	case PhysicalType::INT64:
-		result = value.GetValueUnsafe<int64_t>();
-		return true;
-	default:
-		return false;
-	}
 }
 
 } // namespace duckdb

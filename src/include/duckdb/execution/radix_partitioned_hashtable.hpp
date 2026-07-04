@@ -9,6 +9,7 @@
 #pragma once
 
 #include "duckdb/common/types/row/tuple_data_layout.hpp"
+#include "duckdb/common/optional_idx.hpp"
 #include "duckdb/execution/execution_operator_runtime.hpp"
 #include "duckdb/execution/operator/aggregate/grouped_aggregate_data.hpp"
 #include "duckdb/execution/progress_data.hpp"
@@ -17,6 +18,7 @@
 namespace duckdb {
 
 class GroupedAggregateHashTable;
+class TupleDataRowLocationRemap;
 struct ExecutionHashAggregateLookupLayout;
 struct ExecutionPrimitiveAggregateUpdateLane;
 struct ExecutionRegionSinkInfo;
@@ -53,46 +55,58 @@ public:
 	void ResolveStateAddresses(ExecutionContext &context, DataChunk &chunk, OperatorSinkInput &input,
 	                           Vector &addresses_out,
 	                           optional_ptr<ExecutionOperatorStageRecorder> recorder = nullptr) const;
+	bool ReserveGroups(ExecutionContext &context, OperatorSinkInput &input, idx_t group_count,
+	                   optional_ptr<ExecutionOperatorStageRecorder> recorder = nullptr) const;
 	bool TryUpdateNewPrimitiveGroups(ExecutionContext &context, DataChunk &chunk, OperatorSinkInput &input,
 	                                 const ExecutionRegionSinkInfo &sink_info,
 	                                 const vector<const ExecutionPrimitiveAggregateUpdateLane *> &lanes,
 	                                 optional_ptr<ExecutionOperatorStageRecorder> recorder = nullptr,
-	                                 bool finish = true) const;
-	bool TryUpdateNewPrimitiveGroupsWithPayloadInput(ExecutionContext &context, DataChunk &groups,
-	                                                 DataChunk &payload_input,
-	                                                 const vector<idx_t> &payload_source_indices,
-	                                                 OperatorSinkInput &input, const ExecutionRegionSinkInfo &sink_info,
-	                                                 const vector<const ExecutionPrimitiveAggregateUpdateLane *> &lanes,
-	                                                 optional_ptr<ExecutionOperatorStageRecorder> recorder = nullptr,
-	                                                 bool finish = true,
-	                                                 optional_ptr<Vector> precomputed_hashes = nullptr) const;
+	                                 bool finish = true,
+	                                 optional_ptr<const ExecutionDenseGroupDomain> dense_domain = nullptr) const;
+	bool TryUpdateNewPrimitiveGroupsWithPayloadInput(
+	    ExecutionContext &context, DataChunk &groups, DataChunk &payload_input,
+	    const vector<idx_t> &payload_source_indices, OperatorSinkInput &input, const ExecutionRegionSinkInfo &sink_info,
+	    const vector<const ExecutionPrimitiveAggregateUpdateLane *> &lanes,
+	    optional_ptr<ExecutionOperatorStageRecorder> recorder = nullptr, bool finish = true,
+	    optional_ptr<Vector> precomputed_hashes = nullptr,
+	    optional_ptr<const ExecutionDenseGroupDomain> dense_domain = nullptr) const;
 	bool TryAppendNewPrimitiveGroups(ExecutionContext &context, DataChunk &chunk, OperatorSinkInput &input,
 	                                 const ExecutionRegionSinkInfo &sink_info,
 	                                 const vector<const ExecutionPrimitiveAggregateUpdateLane *> &lanes,
 	                                 optional_ptr<ExecutionOperatorStageRecorder> recorder = nullptr,
 	                                 bool finish = true) const;
-	bool TryUpdateNewGroupsWithStateAddresses(ExecutionContext &context, DataChunk &chunk, OperatorSinkInput &input,
-	                                          const ExecutionRegionSinkInfo &sink_info,
-	                                          ExecutionGroupedAggregateStateAddressUpdateFunction update_function,
-	                                          void *update_state,
-	                                          optional_ptr<ExecutionOperatorStageRecorder> recorder = nullptr,
-	                                          bool finish = true) const;
 	bool TryUpdateNewGroupsWithSelectedStateAddresses(
 	    ExecutionContext &context, DataChunk &chunk, OperatorSinkInput &input, const ExecutionRegionSinkInfo &sink_info,
 	    ExecutionGroupedAggregateStateSelectedAddressUpdateFunction update_function, void *update_state,
 	    optional_ptr<ExecutionOperatorStageRecorder> recorder = nullptr, bool finish = true,
-	    optional_ptr<Vector> precomputed_hashes = nullptr) const;
+	    optional_ptr<Vector> precomputed_hashes = nullptr,
+	    optional_ptr<const ExecutionDenseGroupDomain> dense_domain = nullptr) const;
+	bool TryUpdateGroupKeysWithSelectedStateAddresses(
+	    ExecutionContext &context, DataChunk &groups, OperatorSinkInput &input,
+	    const ExecutionRegionSinkInfo &sink_info,
+	    ExecutionGroupedAggregateStateSelectedAddressUpdateFunction update_function, void *update_state,
+	    optional_ptr<ExecutionOperatorStageRecorder> recorder = nullptr, bool finish = true,
+	    optional_ptr<Vector> precomputed_hashes = nullptr,
+	    optional_ptr<const ExecutionDenseGroupDomain> dense_domain = nullptr) const;
 	bool TryFindOrCreateRowPointerGroupStateTargets(
-	    ExecutionContext &context, DataChunk &payload_input, Vector &row_pointers, idx_t count, OperatorSinkInput &input,
+	    ExecutionContext &context, DataChunk &payload_input, Vector &row_pointers, idx_t count,
+	    OperatorSinkInput &input, const vector<ExecutionRowPointerGroupKeySource> &group_sources,
+	    const ExecutionRegionSinkInfo &sink_info, ExecutionGroupedAggregateStateTargetBatch &targets,
+	    optional_ptr<ExecutionOperatorStageRecorder> recorder = nullptr) const;
+	bool TryFindOrCreateInputVectorGroupStateTargets(
+	    ExecutionContext &context, DataChunk &payload_input, idx_t count, OperatorSinkInput &input,
 	    const vector<ExecutionRowPointerGroupKeySource> &group_sources, const ExecutionRegionSinkInfo &sink_info,
 	    ExecutionGroupedAggregateStateTargetBatch &targets,
-	    optional_ptr<ExecutionOperatorStageRecorder> recorder = nullptr) const;
-	bool TryUpdateRowPointerGroupPrimitivePayloads(
-	    ExecutionContext &context, DataChunk &payload_input, Vector &row_pointers, idx_t count,
-	    const vector<ExecutionRowPointerGroupKeySource> &group_sources, const vector<idx_t> &payload_source_indices,
-	    OperatorSinkInput &input, const ExecutionRegionSinkInfo &sink_info,
-	    const vector<const ExecutionPrimitiveAggregateUpdateLane *> &lanes,
-	    optional_ptr<ExecutionOperatorStageRecorder> recorder = nullptr, bool finish = true) const;
+	    optional_ptr<ExecutionOperatorStageRecorder> recorder = nullptr,
+	    optional_ptr<const ExecutionDenseGroupDomain> dense_domain = nullptr) const;
+	bool TryUpdateRowPointerGroupPrimitivePayloads(ExecutionContext &context, DataChunk &payload_input,
+	                                               Vector &row_pointers, idx_t count,
+	                                               const vector<ExecutionRowPointerGroupKeySource> &group_sources,
+	                                               const vector<idx_t> &payload_source_indices,
+	                                               OperatorSinkInput &input, const ExecutionRegionSinkInfo &sink_info,
+	                                               const vector<const ExecutionPrimitiveAggregateUpdateLane *> &lanes,
+	                                               optional_ptr<ExecutionOperatorStageRecorder> recorder = nullptr,
+	                                               bool finish = true) const;
 	bool TryAppendNewGroupsWithStateAddresses(ExecutionContext &context, DataChunk &chunk, OperatorSinkInput &input,
 	                                          const ExecutionRegionSinkInfo &sink_info,
 	                                          ExecutionGroupedAggregateStateAddressUpdateFunction update_function,
@@ -104,9 +118,12 @@ public:
 	                                 optional_ptr<ExecutionOperatorStageRecorder> recorder = nullptr,
 	                                 bool finish = true) const;
 	bool GetExecutionHashAggregateLookupLayout(ExecutionHashAggregateLookupLayout &layout) const;
-	void FinishStateUpdates(ExecutionContext &context, OperatorSinkInput &input) const;
-	void Combine(ExecutionContext &context, GlobalSinkState &gstate, LocalSinkState &lstate) const;
-	void Finalize(ClientContext &context, GlobalSinkState &gstate) const;
+	void FinishStateUpdates(ExecutionContext &context, OperatorSinkInput &input,
+	                        optional_ptr<TupleDataRowLocationRemap> row_location_remap = nullptr) const;
+	void Combine(ExecutionContext &context, GlobalSinkState &gstate, LocalSinkState &lstate,
+	             optional_ptr<TupleDataRowLocationRemap> row_location_remap = nullptr) const;
+	void Finalize(ClientContext &context, GlobalSinkState &gstate,
+	              optional_ptr<TupleDataRowLocationRemap> state_remap = nullptr) const;
 
 public:
 	//! Source interface
@@ -119,6 +136,7 @@ public:
 	                         OperatorSourceInput &input) const;
 
 	ProgressData GetProgress(ClientContext &context, GlobalSinkState &sink_p, GlobalSourceState &gstate) const;
+	optional_idx FinalizedCount(GlobalSinkState &sink) const;
 
 	shared_ptr<TupleDataLayout> GetLayoutPtr() const;
 	const TupleDataLayout &GetLayout() const;

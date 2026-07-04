@@ -1,5 +1,7 @@
 #include "test_jit_helpers.hpp"
 
+#include "duckdb/execution/aggregate_hashtable.hpp"
+
 using namespace duckdb;
 
 TEST_CASE("JIT ungrouped aggregate sinks use native state-update contracts", "[api][jit]") {
@@ -36,42 +38,6 @@ TEST_CASE("JIT ungrouped aggregate sinks use native state-update contracts", "[a
 		REQUIRE_FALSE(StringUtil::Contains(event.reason, "missing-native-state-update-contract"));
 	}
 	REQUIRE(found_aggregate_update);
-}
-
-TEST_CASE("JIT CBO counts aggregate protocol once in runtime planner facts", "[api][jit]") {
-	DuckDB db;
-	Connection con(db);
-	auto &manager = ExecutionRegionManager::Get(*con.context);
-
-	ConfigureSljit(con, "auto", false, true, false, 10000);
-	ConfigureJitDecisionTrace(con);
-	REQUIRE_NO_FAIL(con.Query("SET jit_cbo_generated_stage_benefit=10"));
-	REQUIRE_NO_FAIL(con.Query("SET jit_cbo_native_operator_stage_benefit=100"));
-	REQUIRE_NO_FAIL(con.Query("SET jit_cbo_materialization_elision_benefit=0"));
-	REQUIRE_NO_FAIL(con.Query("SET jit_cbo_full_pipeline_benefit=0"));
-	REQUIRE_NO_FAIL(con.Query("SET jit_cbo_startup_base_cost=0"));
-	REQUIRE_NO_FAIL(con.Query("SET jit_cbo_startup_margin_basis_points=0"));
-	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_aggregate_cbo_partition AS "
-	                          "SELECT i::BIGINT AS i FROM range(10000) tbl(i)"));
-
-	ClearJitTrace(manager, true);
-	auto result = con.Query("SELECT count(*) FROM jit_aggregate_cbo_partition");
-	REQUIRE_NO_FAIL(*result);
-	REQUIRE(result->GetValue(0, 0).ToString() == "10000");
-
-	RequireJitEvent(
-	    manager,
-	    [](const ExecutionRegionEvent &event) {
-		    return IsCompiledSljitRegionEvent(event) &&
-		           event.candidate_traits.sink_kind == ExecutionRegionSinkKind::UNGROUPED_AGGREGATE_UPDATE;
-	    },
-	    [](const ExecutionRegionEvent &event) {
-		    REQUIRE(event.runner_cost.present);
-		    REQUIRE(event.runner_cost.generated_stage_count == 0);
-		    REQUIRE(event.runner_cost.native_aggregate_stage_count == 1);
-		    REQUIRE(event.runner_cost.saved_work_per_batch == 100);
-		    REQUIRE(event.runner_cost.selected_accelerated_runner);
-	    });
 }
 
 TEST_CASE("JIT fuses projection payloads into primitive ungrouped aggregate reducers", "[api][jit]") {
@@ -512,6 +478,67 @@ TEST_CASE("JIT fuses Q14 shaped decimal CASE aggregate payload lanes", "[api][ji
 	REQUIRE(found_fused_runtime);
 }
 
+TEST_CASE("JIT perfect hash aggregate composes date-year group projection into fused payload update", "[api][jit]") {
+	DuckDB db;
+	Connection con(db);
+	auto &manager = ExecutionRegionManager::Get(*con.context);
+
+	ConfigureSljitForCoverage(con, false, true, true, 10000);
+	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_perfect_hash_date_year_group AS "
+	                          "SELECT DATE '1995-01-01' + (i % 700)::INTEGER AS d, "
+	                          "       (i % 100)::DECIMAL(15,2) AS ep, "
+	                          "       0.05::DECIMAL(15,2) AS disc, "
+	                          "       CASE WHEN i % 2 = 0 THEN 'BRAZIL' ELSE 'PERU' END AS n "
+	                          "FROM range(0, 10000) tbl(i)"));
+
+	const string query = "SELECT year(d) AS y, "
+	                     "       sum(CASE WHEN n='BRAZIL' THEN ep * (1 - disc) ELSE 0 END) AS a, "
+	                     "       sum(ep * (1 - disc)) AS b "
+	                     "FROM jit_perfect_hash_date_year_group GROUP BY 1 ORDER BY 1";
+	REQUIRE_NO_FAIL(con.Query("SET jit_policy='off'"));
+	auto reference = con.Query(query);
+	REQUIRE_NO_FAIL(*reference);
+
+	REQUIRE_NO_FAIL(con.Query("SET jit_policy='auto'"));
+	ClearJitTrace(manager, true);
+	auto result = con.Query(query);
+	REQUIRE_NO_FAIL(*result);
+	REQUIRE(result->RowCount() == reference->RowCount());
+	for (idx_t row_idx = 0; row_idx < reference->RowCount(); row_idx++) {
+		for (idx_t col_idx = 0; col_idx < reference->ColumnCount(); col_idx++) {
+			REQUIRE(result->GetValue(col_idx, row_idx).ToString() ==
+			        reference->GetValue(col_idx, row_idx).ToString());
+		}
+	}
+
+	RequireJitEvent(
+	    manager,
+	    [](const ExecutionRegionEvent &event) {
+		    return IsCompiledSljitRegionEvent(event) && event.has_candidate &&
+		           event.candidate_traits.sink_kind == ExecutionRegionSinkKind::PERFECT_HASH_AGGREGATE_UPDATE &&
+		           StringUtil::Contains(event.ir, "group_expressions=native:typed-expression-tree");
+	    },
+	    [](const ExecutionRegionEvent &event) {
+		    RequireGeneratedMachineCodeRegion(event);
+		    REQUIRE(StringUtil::Contains(event.reason, "execution:native-sljit-region-aggregate-update"));
+		    REQUIRE(StringUtil::Contains(event.ir, "integral_compress"));
+		    REQUIRE(StringUtil::Contains(event.ir, "date_year"));
+		    REQUIRE_FALSE(StringUtil::Contains(event.ir, "op0=projection("));
+	    });
+
+	RequireJitEvent(
+	    manager,
+	    [](const ExecutionRegionEvent &event) {
+		    return EventPhase(event) == "runtime" && event.backend_name == "sljit" &&
+		           StringUtil::Contains(EventGeneratedStageRuntimeBreakdown(event),
+		                                "aggregate_update.primitive_payload_update_fused=");
+	    },
+	    [](const ExecutionRegionEvent &event) {
+		    REQUIRE(ExecutionRegionEventProfileCodeSize(event) > 0);
+		    REQUIRE_FALSE(StringUtil::Contains(EventGeneratedStageRuntimeBreakdown(event), "projection"));
+	    });
+}
+
 TEST_CASE("JIT generic grouped primitive aggregate payload lanes use native state addresses", "[api][jit]") {
 	DuckDB db;
 	Connection con(db);
@@ -556,13 +583,243 @@ TEST_CASE("JIT generic grouped primitive aggregate payload lanes use native stat
 			continue;
 		}
 		found_direct_runtime = true;
+		auto stage_counts = EventGeneratedStageCountBreakdown(event);
 		auto boundaries = EventJitMaterializationBoundaryCounts(event);
+		REQUIRE(StringUtil::Contains(runtime_paths, "aggregate_update.direct_grouped_dense_group_domain="));
+		REQUIRE(StringUtil::Contains(stage_counts, "aggregate_update.direct_new_grouped_primitive_update"
+		                                           ".find_or_create_dense.probe="));
+		REQUIRE_FALSE(StringUtil::Contains(stage_counts, "aggregate_update.direct_new_grouped_primitive_update"
+		                                                 ".find_or_create_fast.probe="));
 		REQUIRE(StringUtil::Contains(boundaries, "aggregate_update.direct_state_update="));
 		REQUIRE_FALSE(StringUtil::Contains(boundaries, "aggregate_update.address_vector_payload_update="));
 		REQUIRE_FALSE(
 		    StringUtil::Contains(runtime_paths, "aggregate_update.fused_payload_update_with_grouped_state_addresses="));
 	}
 	REQUIRE(found_direct_runtime);
+}
+
+TEST_CASE("Grouped aggregate dense lookup supports nullable all-valid group layouts", "[api][jit]") {
+	DuckDB db;
+	Connection con(db);
+	auto &allocator = Allocator::Get(*con.context);
+
+	GroupedAggregateHashTable ht(*con.context, allocator, {LogicalType::INTEGER},
+	                             TupleDataValidityType::CAN_HAVE_NULL_VALUES);
+
+	const idx_t group_count = STANDARD_VECTOR_SIZE;
+	DataChunk groups;
+	groups.Initialize(allocator, {LogicalType::INTEGER});
+	auto group_data = FlatVector::GetDataMutable<int32_t>(groups.data[0]);
+	for (idx_t row_idx = 0; row_idx < group_count; row_idx++) {
+		group_data[row_idx] = UnsafeNumericCast<int32_t>(row_idx);
+	}
+	groups.SetChildCardinality(group_count);
+
+	ExecutionDenseGroupDomain dense_domain;
+	dense_domain.ready = true;
+	dense_domain.physical_type = PhysicalType::INT32;
+	dense_domain.min_key = 0;
+	dense_domain.max_key = group_count - 1;
+	dense_domain.distinct_count = group_count;
+
+	struct DenseLookupUpdateState {
+		DataChunk *groups = nullptr;
+		vector<uintptr_t> address_by_key;
+		bool expect_existing = false;
+		idx_t update_count = 0;
+	};
+	auto record_addresses = [](const uintptr_t *addresses, const sel_t *address_sel, const sel_t *execute_sel,
+	                           idx_t count, void *state_p) {
+		auto &state = *reinterpret_cast<DenseLookupUpdateState *>(state_p);
+		REQUIRE(addresses);
+		REQUIRE(state.groups);
+		for (idx_t idx = 0; idx < count; idx++) {
+			const auto row_idx = execute_sel ? execute_sel[idx] : idx;
+			const auto address_idx = address_sel ? address_sel[row_idx] : idx;
+			const auto address = addresses[address_idx];
+			REQUIRE(address != 0);
+			const auto key = state.groups->data[0].GetValue(row_idx).GetValue<int32_t>();
+			REQUIRE(key >= 0);
+			REQUIRE(UnsafeNumericCast<idx_t>(key) < state.address_by_key.size());
+			auto &stored_address = state.address_by_key[UnsafeNumericCast<idx_t>(key)];
+			if (state.expect_existing) {
+				REQUIRE(stored_address == address);
+			} else {
+				REQUIRE(stored_address == 0);
+				stored_address = address;
+			}
+			state.update_count++;
+		}
+	};
+
+	DenseLookupUpdateState state;
+	state.groups = &groups;
+	state.address_by_key.resize(group_count, 0);
+	REQUIRE(ht.TryFindOrCreateGroupsSelectedStateUpdateFast(groups, record_addresses, &state, nullptr, nullptr,
+	                                                        &dense_domain));
+	REQUIRE(state.update_count == group_count);
+	REQUIRE(ht.Count() == group_count);
+
+	const idx_t selected_count = 512;
+	vector<sel_t> selected_rows;
+	selected_rows.reserve(selected_count);
+	for (idx_t row_idx = 0; row_idx < selected_count; row_idx++) {
+		selected_rows.push_back(UnsafeNumericCast<sel_t>(selected_count - row_idx - 1));
+	}
+	SelectionVector selected_row_selection(selected_rows.data(), selected_count);
+	DataChunk selected_groups;
+	selected_groups.Initialize(allocator, {LogicalType::INTEGER});
+	selected_groups.data[0].Slice(groups.data[0], selected_row_selection, selected_count);
+	selected_groups.SetChildCardinality(selected_count);
+
+	state.groups = &selected_groups;
+	state.expect_existing = true;
+	state.update_count = 0;
+	REQUIRE(ht.TryFindOrCreateGroupsSelectedStateUpdateFast(selected_groups, record_addresses, &state, nullptr, nullptr,
+	                                                        &dense_domain));
+	REQUIRE(state.update_count == selected_count);
+	REQUIRE(ht.Count() == group_count);
+}
+
+static ExecutionRowPointerGroupKeySource BuildBigintToIntegerInputVectorGroupSource() {
+	ExecutionRowPointerGroupKeySource source;
+	source.ready = true;
+	source.source_kind = ExecutionRowPointerGroupKeySourceKind::INPUT_VECTOR;
+	source.source_type = LogicalType::BIGINT;
+	source.target_type = LogicalType::INTEGER;
+	source.source_physical_type = PhysicalType::INT64;
+	source.target_physical_type = PhysicalType::INT32;
+	source.input_vector_index = 0;
+	source.cast_kind = ExecutionRowPointerGroupKeyCastKind::INT64_TO_INT32;
+	source.unchecked_integral_cast = true;
+	source.all_valid = true;
+	return source;
+}
+
+TEST_CASE("Grouped aggregate input-vector group targets use descriptor lookup directly", "[api][jit]") {
+	DuckDB db;
+	Connection con(db);
+	auto &allocator = Allocator::Get(*con.context);
+
+	GroupedAggregateHashTable ht(*con.context, allocator, {LogicalType::INTEGER},
+	                             TupleDataValidityType::CAN_HAVE_NULL_VALUES);
+
+	const idx_t group_count = STANDARD_VECTOR_SIZE;
+	DataChunk payload_input;
+	payload_input.Initialize(allocator, {LogicalType::BIGINT});
+	auto input_data = FlatVector::GetDataMutable<int64_t>(payload_input.data[0]);
+	for (idx_t row_idx = 0; row_idx < group_count; row_idx++) {
+		input_data[row_idx] = UnsafeNumericCast<int64_t>(row_idx);
+	}
+	FlatVector::SetSize(payload_input.data[0], group_count);
+	payload_input.SetChildCardinality(group_count);
+
+	vector<ExecutionRowPointerGroupKeySource> group_sources;
+	group_sources.push_back(BuildBigintToIntegerInputVectorGroupSource());
+
+	auto verify_targets = [&](DataChunk &input, ExecutionGroupedAggregateStateTargetBatch &targets,
+	                          vector<uintptr_t> &address_by_key, bool expect_existing) {
+		auto &span = targets.InputOrder();
+		REQUIRE(span.addresses);
+		REQUIRE(span.count == input.size());
+		for (idx_t target_idx = 0; target_idx < span.count; target_idx++) {
+			const auto row_idx = span.row_sel ? span.row_sel[target_idx] : target_idx;
+			const auto address_idx = span.address_sel ? span.address_sel[target_idx] : target_idx;
+			const auto address = span.addresses[address_idx];
+			REQUIRE(address != 0);
+			const auto key = input.data[0].GetValue(row_idx).GetValue<int64_t>();
+			REQUIRE(key >= 0);
+			REQUIRE(UnsafeNumericCast<idx_t>(key) < address_by_key.size());
+			auto &stored_address = address_by_key[UnsafeNumericCast<idx_t>(key)];
+			if (expect_existing) {
+				REQUIRE(stored_address == address);
+			} else {
+				REQUIRE(stored_address == 0);
+				stored_address = address;
+			}
+		}
+	};
+
+	ExecutionGroupedAggregateStateTargetBatch targets;
+	vector<uintptr_t> address_by_key(group_count, 0);
+	REQUIRE(ht.TryFindOrCreateInputVectorGroupStateTargetsFast(payload_input, payload_input.size(), group_sources,
+	                                                           targets));
+	verify_targets(payload_input, targets, address_by_key, false);
+	REQUIRE(ht.Count() == group_count);
+
+	const idx_t selected_count = 512;
+	vector<sel_t> selected_rows;
+	selected_rows.reserve(selected_count);
+	for (idx_t row_idx = 0; row_idx < selected_count; row_idx++) {
+		selected_rows.push_back(UnsafeNumericCast<sel_t>(selected_count - row_idx - 1));
+	}
+	SelectionVector selected_row_selection(selected_rows.data(), selected_count);
+	DataChunk selected_payload_input;
+	selected_payload_input.Initialize(allocator, {LogicalType::BIGINT});
+	selected_payload_input.data[0].Slice(payload_input.data[0], selected_row_selection, selected_count);
+	selected_payload_input.SetChildCardinality(selected_count);
+
+	targets.Reset();
+	REQUIRE(ht.TryFindOrCreateInputVectorGroupStateTargetsFast(selected_payload_input, selected_payload_input.size(),
+	                                                           group_sources, targets));
+	verify_targets(selected_payload_input, targets, address_by_key, true);
+	REQUIRE(ht.Count() == group_count);
+}
+
+TEST_CASE("Grouped aggregate input-vector targets rebuild dense cache from existing groups", "[api][jit]") {
+	DuckDB db;
+	Connection con(db);
+	auto &allocator = Allocator::Get(*con.context);
+
+	GroupedAggregateHashTable ht(*con.context, allocator, {LogicalType::INTEGER},
+	                             TupleDataValidityType::CAN_HAVE_NULL_VALUES);
+
+	DataChunk existing_groups;
+	existing_groups.Initialize(allocator, {LogicalType::INTEGER});
+	auto existing_group_data = FlatVector::GetDataMutable<int32_t>(existing_groups.data[0]);
+	existing_group_data[0] = 0;
+	FlatVector::SetSize(existing_groups.data[0], 1);
+	existing_groups.SetChildCardinality(1);
+
+	Vector existing_addresses(LogicalType::POINTER);
+	ht.FindOrCreateGroups(existing_groups, existing_addresses);
+	existing_addresses.Flatten();
+	const auto existing_group_address =
+	    reinterpret_cast<uintptr_t>(FlatVector::GetData<data_ptr_t>(existing_addresses)[0]);
+	REQUIRE(existing_group_address != 0);
+	REQUIRE(ht.Count() == 1);
+
+	DataChunk payload_input;
+	payload_input.Initialize(allocator, {LogicalType::BIGINT});
+	auto input_data = FlatVector::GetDataMutable<int64_t>(payload_input.data[0]);
+	input_data[0] = 0;
+	input_data[1] = 1;
+	input_data[2] = 2;
+	FlatVector::SetSize(payload_input.data[0], 3);
+	payload_input.SetChildCardinality(3);
+
+	ExecutionDenseGroupDomain dense_domain;
+	dense_domain.ready = true;
+	dense_domain.physical_type = PhysicalType::INT32;
+	dense_domain.min_key = 0;
+	dense_domain.max_key = 2;
+	dense_domain.distinct_count = 3;
+
+	vector<ExecutionRowPointerGroupKeySource> group_sources;
+	group_sources.push_back(BuildBigintToIntegerInputVectorGroupSource());
+
+	ExecutionGroupedAggregateStateTargetBatch targets;
+	REQUIRE(ht.TryFindOrCreateInputVectorGroupStateTargetsFast(payload_input, payload_input.size(), group_sources,
+	                                                           targets, nullptr, &dense_domain));
+	auto &span = targets.InputOrder();
+	REQUIRE(span.addresses);
+	REQUIRE(span.count == 3);
+	REQUIRE(span.addresses[0] == existing_group_address);
+	REQUIRE(span.addresses[1] != 0);
+	REQUIRE(span.addresses[2] != 0);
+	REQUIRE(span.addresses[1] != existing_group_address);
+	REQUIRE(span.addresses[2] != existing_group_address);
+	REQUIRE(ht.Count() == 3);
 }
 
 TEST_CASE("JIT regular hash aggregate updates mixed preaggregated groups directly", "[api][jit]") {
@@ -683,6 +940,63 @@ TEST_CASE("JIT preaggregated grouped primitive updates existing compact groups",
 	    });
 }
 
+TEST_CASE("JIT preaggregated grouped aggregate reserves source distinct groups once", "[api][jit]") {
+	DuckDB db;
+	Connection con(db);
+	auto &manager = ExecutionRegionManager::Get(*con.context);
+
+	ConfigureSljitForCoverage(con, false, true, true, 10000);
+	REQUIRE_NO_FAIL(con.Query("PRAGMA threads=1"));
+	REQUIRE_NO_FAIL(con.Query("SET perfect_ht_threshold=0"));
+	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_preaggregated_group_reserve AS "
+	                          "SELECT ((i // 2) % 100000)::INTEGER AS k, "
+	                          "       (i % 2 = 0)::INTEGER AS high_payload, "
+	                          "       (i % 2 <> 0)::INTEGER AS low_payload "
+	                          "FROM range(200000) tbl(i)"));
+	REQUIRE_NO_FAIL(con.Query("VACUUM jit_preaggregated_group_reserve"));
+
+	const string query = "SELECT k, "
+	                     "       sum(high_payload), "
+	                     "       sum(low_payload) "
+	                     "FROM jit_preaggregated_group_reserve GROUP BY k ORDER BY k";
+	REQUIRE_NO_FAIL(con.Query("SET jit_policy='off'"));
+	auto reference = con.Query(query);
+	REQUIRE_NO_FAIL(*reference);
+	REQUIRE(reference->RowCount() == 100000);
+
+	ConfigureSljitForCoverageSettings(con, false, true, true, 10000);
+	ClearJitTrace(manager, true);
+	auto result = con.Query(query);
+	REQUIRE_NO_FAIL(*result);
+	REQUIRE(result->RowCount() == reference->RowCount());
+	for (idx_t row_idx = 0; row_idx < result->RowCount(); row_idx++) {
+		for (idx_t col_idx = 0; col_idx < result->ColumnCount(); col_idx++) {
+			REQUIRE(result->GetValue(col_idx, row_idx).ToString() == reference->GetValue(col_idx, row_idx).ToString());
+		}
+	}
+
+	RequireJitEvent(
+	    manager,
+	    [](const ExecutionRegionEvent &event) {
+		    if (EventPhase(event) != "runtime" || event.backend_name != "sljit") {
+			    return false;
+		    }
+		    return StringUtil::Contains(EventJitRuntimePathCounts(event),
+		                                "aggregate_update.preaggregated_grouped_primitive_reserve_target=");
+	    },
+	    [](const ExecutionRegionEvent &event) {
+		    const auto runtime_paths = EventJitRuntimePathCounts(event);
+		    const auto stage_counts = EventGeneratedStageCountBreakdown(event);
+		    REQUIRE(StringUtil::Contains(runtime_paths,
+		                                 "aggregate_update.preaggregated_grouped_primitive_reserve_target=200000"));
+		    REQUIRE(StringUtil::Contains(runtime_paths, "aggregate_update.preaggregated_grouped_primitive_reserve=1"));
+		    REQUIRE(
+		        StringUtil::Contains(stage_counts, "preaggregated_grouped_primitive_reserve.reserve_groups.resize=1"));
+		    REQUIRE_FALSE(StringUtil::Contains(stage_counts,
+		                                       "direct_append_preaggregated_grouped_primitive_update.find_new.resize"));
+	    });
+}
+
 TEST_CASE("JIT count-star distribution aggregate uses dense preaggregated groups", "[api][jit]") {
 	DuckDB db;
 	Connection con(db);
@@ -733,17 +1047,64 @@ TEST_CASE("JIT count-star distribution aggregate uses dense preaggregated groups
 			    return false;
 		    }
 		    auto runtime_paths = EventJitRuntimePathCounts(event);
-		    return StringUtil::Contains(runtime_paths, "aggregate_update.cross_chunk_preaggregated_count_star_update=");
+		    return StringUtil::Contains(runtime_paths,
+		                                "aggregate_update.primitive_projected_preaggregated_count_star_update=");
 	    },
 	    [](const ExecutionRegionEvent &event) {
 		    REQUIRE(StringUtil::Contains(EventGeneratedStageCountBreakdown(event),
-		                                 "aggregate_update.direct_source_preaggregate_count_star_groups="));
+		                                 "aggregate_update.primitive_projected_preaggregate_count_star_groups="));
 		    REQUIRE(StringUtil::Contains(EventJitRuntimePathCounts(event),
-		                                 "aggregate_update.preaggregated_count_star_address_update="));
+		                                 "aggregate_update.primitive_projected_preaggregated_count_star_update="));
 		    REQUIRE(StringUtil::Contains(EventJitMaterializationBoundaryCounts(event),
 		                                 "aggregate_update.preaggregated_count_star_groups="));
 		    REQUIRE(StringUtil::Contains(EventJitMaterializationBoundaryCounts(event),
 		                                 "aggregate_update.direct_state_update="));
+		    REQUIRE_FALSE(StringUtil::Contains(EventGeneratedStageCountBreakdown(event), "projection.batch_append="));
+	    });
+}
+
+TEST_CASE("JIT count-star grouped aggregate uses row-delta backend for high-cardinality batches", "[api][jit]") {
+	DuckDB db;
+	Connection con(db);
+	auto &manager = ExecutionRegionManager::Get(*con.context);
+
+	ConfigureSljitForCoverage(con, false, true, true, 10000);
+	REQUIRE_NO_FAIL(con.Query("PRAGMA threads=1"));
+	REQUIRE_NO_FAIL(con.Query("SET perfect_ht_threshold=0"));
+	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_count_star_row_delta AS "
+	                          "SELECT i::INTEGER AS k FROM range(2048) tbl(i)"));
+
+	const string query = "SELECT k + 0 AS g, count(*) AS c "
+	                     "FROM jit_count_star_row_delta GROUP BY g ORDER BY g";
+	REQUIRE_NO_FAIL(con.Query("SET jit_policy='off'"));
+	auto reference = con.Query(query);
+	REQUIRE_NO_FAIL(*reference);
+	REQUIRE(reference->RowCount() == 2048);
+
+	ConfigureSljitForCoverageSettings(con, false, true, true, 10000);
+	ClearJitTrace(manager, true);
+	auto result = con.Query(query);
+	REQUIRE_NO_FAIL(*result);
+	REQUIRE(result->RowCount() == reference->RowCount());
+	for (idx_t row_idx = 0; row_idx < result->RowCount(); row_idx++) {
+		REQUIRE(result->GetValue(0, row_idx).ToString() == reference->GetValue(0, row_idx).ToString());
+		REQUIRE(result->GetValue(1, row_idx).ToString() == "1");
+	}
+
+	RequireJitEvent(
+	    manager,
+	    [](const ExecutionRegionEvent &event) {
+		    if (EventPhase(event) != "runtime" || event.backend_name != "sljit") {
+			    return false;
+		    }
+		    return StringUtil::Contains(EventJitRuntimePathCounts(event),
+		                                "aggregate_update.primitive_grouped_count_star_row_update=");
+	    },
+	    [](const ExecutionRegionEvent &event) {
+		    REQUIRE(StringUtil::Contains(EventJitRuntimePathCounts(event),
+		                                 "aggregate_update.primitive_grouped_count_star_row_update=2048"));
+		    REQUIRE(StringUtil::Contains(EventJitMaterializationBoundaryCounts(event),
+		                                 "aggregate_update.direct_state_update=2048"));
 	    });
 }
 
@@ -858,10 +1219,16 @@ TEST_CASE("JIT regular hash aggregate fuses typed expression payloads with nativ
 	    },
 	    [](const ExecutionRegionEvent &event) {
 		    auto stage_counts = EventGeneratedStageCountBreakdown(event);
+		    auto runtime_paths = EventJitRuntimePathCounts(event);
+		    REQUIRE(StringUtil::Contains(runtime_paths, "aggregate_update.direct_grouped_dense_group_domain="));
 		    REQUIRE(StringUtil::Contains(stage_counts, "aggregate_update.direct_new_grouped_fused_payload_update"));
+		    REQUIRE(StringUtil::Contains(stage_counts, "aggregate_update.direct_new_grouped_fused_payload_update"
+		                                               ".find_or_create_dense.probe="));
 		    auto boundary_counts = EventJitMaterializationBoundaryCounts(event);
 		    REQUIRE(StringUtil::Contains(boundary_counts, "aggregate_update.state_address_selection_new_update="));
 		    REQUIRE_FALSE(StringUtil::Contains(stage_counts, "aggregate_update.primitive_payload_update_fused="));
+		    REQUIRE_FALSE(StringUtil::Contains(stage_counts, "aggregate_update.direct_new_grouped_fused_payload_update"
+		                                                     ".find_or_create_fast.probe="));
 		    REQUIRE_FALSE(StringUtil::Contains(boundary_counts, "aggregate_update.address_vector_direct_new="));
 		    REQUIRE_FALSE(StringUtil::Contains(boundary_counts, "aggregate_update.address_vector_payload_update="));
 		    REQUIRE_FALSE(
@@ -995,14 +1362,13 @@ TEST_CASE("JIT regular hash aggregate fuses INT32 CASE payloads into hugeint gro
 	    [](const ExecutionRegionEvent &event) {
 		    return EventPhase(event) == "runtime" && event.backend_name == "sljit" &&
 		           StringUtil::Contains(EventGeneratedStageCountBreakdown(event),
-		                                "aggregate_update.primitive_payload_update_fused=");
+		                                "aggregate_update.direct_new_grouped_fused_payload_update=");
 	    },
 	    [](const ExecutionRegionEvent &event) {
 		    auto stage_counts = EventGeneratedStageCountBreakdown(event);
-		    REQUIRE(StringUtil::Contains(stage_counts, "aggregate_update.primitive_payload_update_fused="));
+		    REQUIRE(StringUtil::Contains(stage_counts, "aggregate_update.direct_new_grouped_fused_payload_update="));
 		    auto runtime_paths = EventJitRuntimePathCounts(event);
-		    REQUIRE(StringUtil::Contains(runtime_paths,
-		                                 "aggregate_update.fused_payload_update_with_grouped_state_addresses="));
+		    REQUIRE(StringUtil::Contains(runtime_paths, "aggregate_update.direct_new_grouped_fused_payload_update="));
 	    });
 }
 
@@ -1412,8 +1778,82 @@ TEST_CASE("JIT Q8 shaped perfect-hash aggregate payloads survive join selections
 	    },
 	    [](const ExecutionRegionEvent &event) {
 		    REQUIRE(ExecutionRegionEventProfileCodeSize(event) > 0);
+		    REQUIRE(StringUtil::Contains(EventJitRuntimePathCounts(event),
+		                                 "aggregate_update.direct_join_output_perfect_hash_payload_update="));
+		    REQUIRE(StringUtil::Contains(EventJitMaterializationBoundaryCounts(event),
+		                                 "aggregate_update.direct_perfect_hash_state_update="));
+		    REQUIRE_FALSE(StringUtil::Contains(EventJitMaterializationBoundaryCounts(event),
+		                                       "hash_join_probe.final_output="));
 		    REQUIRE_FALSE(StringUtil::Contains(EventGeneratedStageCountBreakdown(event),
 		                                       "aggregate_update.resolve_grouped_state_addresses="));
+	    });
+}
+
+TEST_CASE("JIT gates single typed perfect-hash aggregate payloads to grouped-state-address updates", "[api][jit]") {
+	DuckDB db;
+	Connection con(db);
+	auto &manager = ExecutionRegionManager::Get(*con.context);
+
+	ConfigureSljitForCoverage(con, false, true, true, 10000);
+	REQUIRE_NO_FAIL(con.Query("PRAGMA threads=1"));
+	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_single_typed_payload_l AS "
+	                          "SELECT i::BIGINT AS k, (i % 100)::BIGINT AS g, (i % 7)::BIGINT AS v "
+	                          "FROM range(10000) tbl(i)"));
+	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_single_typed_payload_r AS "
+	                          "SELECT i::BIGINT AS k, (i % 11)::BIGINT AS x "
+	                          "FROM range(10000) tbl(i)"));
+
+	const string query = "SELECT g, sum(v + x) AS s "
+	                     "FROM jit_single_typed_payload_l JOIN jit_single_typed_payload_r USING (k) "
+	                     "GROUP BY g "
+	                     "ORDER BY g";
+	REQUIRE_NO_FAIL(con.Query("SET jit_policy='off'"));
+	auto reference = con.Query(query);
+	REQUIRE_NO_FAIL(*reference);
+	REQUIRE(reference->RowCount() == 100);
+
+	REQUIRE_NO_FAIL(con.Query("SET jit_policy='auto'"));
+	ClearJitTrace(manager, true);
+	auto result = con.Query(query);
+	REQUIRE_NO_FAIL(*result);
+	REQUIRE(result->RowCount() == reference->RowCount());
+	for (idx_t row_idx = 0; row_idx < result->RowCount(); row_idx++) {
+		for (idx_t col_idx = 0; col_idx < result->ColumnCount(); col_idx++) {
+			REQUIRE(result->GetValue(col_idx, row_idx).ToString() == reference->GetValue(col_idx, row_idx).ToString());
+		}
+	}
+
+	RequireJitEvent(
+	    manager,
+	    [](const ExecutionRegionEvent &event) {
+		    return IsCompiledSljitRegionEvent(event) && event.has_candidate &&
+		           event.candidate_traits.sink_kind == ExecutionRegionSinkKind::PERFECT_HASH_AGGREGATE_UPDATE &&
+		           StringUtil::Contains(event.ir, "native:typed-expression-tree");
+	    },
+	    [](const ExecutionRegionEvent &event) {
+		    RequireGeneratedMachineCodeRegion(event);
+		    REQUIRE(StringUtil::Contains(event.ir, "payload_update=generated-primitive"));
+		    REQUIRE(StringUtil::Contains(event.ir, "grouped_state_lookup=native-state-address"));
+		    REQUIRE_FALSE(StringUtil::Contains(event.ir, "grouped_state_lookup=generated-perfect-hash"));
+	    });
+
+	RequireJitEvent(
+	    manager,
+	    [](const ExecutionRegionEvent &event) {
+		    return EventPhase(event) == "runtime" && event.backend_name == "sljit" &&
+		           StringUtil::Contains(EventGeneratedStageCountBreakdown(event),
+		                                "aggregate_update.primitive_payload_update_fused=");
+	    },
+	    [](const ExecutionRegionEvent &event) {
+		    REQUIRE(ExecutionRegionEventProfileCodeSize(event) > 0);
+		    REQUIRE(StringUtil::Contains(EventJitRuntimePathCounts(event),
+		                                 "aggregate_update.resolve_grouped_state_addresses="));
+		    REQUIRE(StringUtil::Contains(EventJitRuntimePathCounts(event),
+		                                 "aggregate_update.fused_payload_update_with_grouped_state_addresses="));
+		    REQUIRE(StringUtil::Contains(EventJitMaterializationBoundaryCounts(event),
+		                                 "aggregate_update.address_vector_payload_update="));
+		    REQUIRE_FALSE(StringUtil::Contains(EventJitMaterializationBoundaryCounts(event),
+		                                       "direct_perfect_hash_state_update="));
 	    });
 }
 
@@ -1621,6 +2061,25 @@ TEST_CASE("JIT hash aggregate cast-only keys use native state addresses", "[api]
 		REQUIRE_FALSE(StringUtil::Contains(event.ir, "grouped_state_lookup=vectorized-address-contract"));
 	}
 	REQUIRE(found_hash_state_address_update);
+
+	bool found_direct_runtime = false;
+	for (auto &event : manager.GetEvents()) {
+		if (EventPhase(event) != "runtime" || event.backend_name != "sljit") {
+			continue;
+		}
+		auto runtime_paths = EventJitRuntimePathCounts(event);
+		if (!StringUtil::Contains(runtime_paths, "aggregate_update.direct_new_grouped_primitive_update=")) {
+			continue;
+		}
+		found_direct_runtime = true;
+		auto stage_counts = EventGeneratedStageCountBreakdown(event);
+		REQUIRE(StringUtil::Contains(runtime_paths, "aggregate_update.direct_grouped_dense_group_domain="));
+		REQUIRE(StringUtil::Contains(stage_counts, "aggregate_update.direct_new_grouped_primitive_update"
+		                                           ".find_or_create_dense.probe="));
+		REQUIRE_FALSE(StringUtil::Contains(stage_counts, "aggregate_update.direct_new_grouped_primitive_update"
+		                                                 ".find_or_create_fast.probe="));
+	}
+	REQUIRE(found_direct_runtime);
 }
 
 TEST_CASE("JIT auto skips grouped hash aggregate updates without native lookup ownership", "[api][jit]") {

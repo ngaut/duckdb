@@ -8,13 +8,13 @@
 
 #pragma once
 
+#include "sljit_direct_projection_batch_runtime.hpp"
 #include "sljit_full_pipeline_runtime.hpp"
 #include "sljit_hash_join_output_reference_runtime.hpp"
 #include "sljit_hash_join_probe_runtime.hpp"
 #include "sljit_hash_join_projection_source_runtime.hpp"
 #include "sljit_hash_join_rhs_projection_runtime.hpp"
 #include "sljit_projection_executor_runtime.hpp"
-#include "sljit_projection_runtime.hpp"
 #include "sljit_region_runtime_state.hpp"
 #include "sljit_region_runtime_trace.hpp"
 
@@ -122,10 +122,8 @@ static bool SljitTryMaterializeHashJoinReferenceProjectionsToBatch(
 	bool materialized_any;
 	auto materialize_output = [&](idx_t output_idx, idx_t projected_idx) -> bool {
 		auto &expr = projection_op.projections[projected_idx];
-		SljitExecutableRegionExpression remapped_expr;
 		idx_t join_output_source_index;
-		if (!SljitTryBuildSingleSourceProjectionExpression(expr, remapped_expr, join_output_source_index) ||
-		    !SljitProjectionIsSingleSourceReferenceLike(remapped_expr.plan) ||
+		if (!SljitTryGetSingleSourceReferenceProjectionIndex(expr, join_output_source_index) ||
 		    join_output_source_index >= context.join_output_column_count) {
 			return false;
 		}
@@ -155,61 +153,6 @@ static bool SljitTryMaterializeHashJoinReferenceProjectionsToBatch(
 		                                         count);
 	}
 	return materialized_any;
-}
-
-static bool SljitTryReferenceHashJoinLHSProjectionSourcesToChunk(
-    ExecutionRegionRuntime &runtime, SljitRegionExecutionScratch &scratch, idx_t hash_join_idx, idx_t projection_idx,
-    SljitExecutableRegionOp &projection_op, DataChunk &join_input, const SelectionVector &match_selection,
-    optional_ptr<const vector<idx_t>> output_to_projection, idx_t count, DataChunk &result) {
-	if (count == 0 || !scratch.HasOperatorBinding(hash_join_idx) || !output_to_projection ||
-	    result.ColumnCount() != output_to_projection->size()) {
-		return false;
-	}
-	auto &binding = scratch.OperatorBinding(hash_join_idx).hash_join_probe;
-	if (!binding.ready || binding.layout_kind != ExecutionHashJoinProbeLayoutKind::REGULAR_HASH_TABLE ||
-	    binding.output_mode != ExecutionHashJoinProbeOutputMode::MATCHED_PROBE_AND_BUILD || !binding.hash_table) {
-		return false;
-	}
-
-	const auto lhs_column_count = binding.lhs_output_column_indices.size();
-	vector<idx_t> input_columns;
-	input_columns.reserve(output_to_projection->size());
-	for (idx_t output_idx = 0; output_idx < output_to_projection->size(); output_idx++) {
-		const auto projected_idx = (*output_to_projection)[output_idx];
-		if (projected_idx >= projection_op.projections.size() || projected_idx >= projection_op.output_types.size()) {
-			return false;
-		}
-		auto &expr = projection_op.projections[projected_idx];
-		SljitExecutableRegionExpression remapped_expr;
-		idx_t join_output_source_index;
-		if (!SljitTryBuildSingleSourceProjectionExpression(expr, remapped_expr, join_output_source_index) ||
-		    !SljitProjectionIsSingleSourceReferenceLike(remapped_expr.plan) ||
-		    join_output_source_index >= lhs_column_count) {
-			return false;
-		}
-
-		const auto input_col = binding.lhs_output_column_indices[join_output_source_index];
-		if (input_col >= join_input.ColumnCount() ||
-		    expr.plan.return_type != projection_op.output_types[projected_idx] ||
-		    join_input.data[input_col].GetType() != expr.plan.return_type ||
-		    result.data[output_idx].GetType() != expr.plan.return_type) {
-			return false;
-		}
-		input_columns.push_back(input_col);
-	}
-	if (input_columns.size() != output_to_projection->size()) {
-		return false;
-	}
-
-	const auto stage_start = SljitRegionStageStart(runtime);
-	for (idx_t output_idx = 0; output_idx < input_columns.size(); output_idx++) {
-		result.data[output_idx].Slice(join_input.data[input_columns[output_idx]], match_selection, count);
-	}
-	result.SetChildCardinality(count);
-	RecordSljitRegionStageRuntime(runtime, projection_idx, projection_op.kind,
-	                              "post_join_direct_reference_payload_view", stage_start);
-	RecordSljitRegionRuntimePath(runtime, projection_op.kind, "direct_reference_payload_view", count);
-	return true;
 }
 
 static bool SljitTryMaterializeHashJoinComputedProjectionsToBatch(

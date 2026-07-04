@@ -15,27 +15,43 @@
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/vector/unified_vector_format.hpp"
 
-#include <exception>
 #include <limits>
 #include <type_traits>
 
 namespace duckdb {
 
 template <class T>
-static bool SljitTryFastSelectFlatAllValidInclusiveExclusiveBetween(const SljitNativeRegionExpressionPlan &filter,
-                                                                    DataChunk &input, SelectionVector &filter_selection,
-                                                                    idx_t &selected_count) {
-	if (filter.lower < static_cast<int64_t>(std::numeric_limits<T>::min()) ||
-	    filter.upper > static_cast<int64_t>(std::numeric_limits<T>::max())) {
+static bool SljitTryFastSelectFlatAllValidBetween(idx_t source_index, int64_t lower_value, int64_t upper_value,
+                                                  bool lower_inclusive, bool upper_inclusive, bool not_between,
+                                                  DataChunk &input, SelectionVector &filter_selection,
+                                                  idx_t &selected_count) {
+	if (not_between || source_index >= input.ColumnCount() ||
+	    lower_value < static_cast<int64_t>(std::numeric_limits<T>::min()) ||
+	    lower_value > static_cast<int64_t>(std::numeric_limits<T>::max()) ||
+	    upper_value < static_cast<int64_t>(std::numeric_limits<T>::min()) ||
+	    upper_value > static_cast<int64_t>(std::numeric_limits<T>::max())) {
 		return false;
 	}
-	if (filter.upper <= filter.lower) {
+	if (!lower_inclusive) {
+		if (lower_value == static_cast<int64_t>(std::numeric_limits<T>::max())) {
+			selected_count = 0;
+			return true;
+		}
+		lower_value++;
+	}
+	if (upper_inclusive) {
+		if (upper_value == static_cast<int64_t>(std::numeric_limits<T>::max())) {
+			return false;
+		}
+		upper_value++;
+	}
+	if (upper_value <= lower_value) {
 		selected_count = 0;
 		return true;
 	}
 
 	UnifiedVectorFormat source_format;
-	input.data[filter.source_index].ToUnifiedFormat(source_format);
+	input.data[source_index].ToUnifiedFormat(source_format);
 	if (!SljitUnifiedFormatHasIdentitySelection(source_format)) {
 		return false;
 	}
@@ -44,8 +60,8 @@ static bool SljitTryFastSelectFlatAllValidInclusiveExclusiveBetween(const SljitN
 	}
 
 	using UNSIGNED_T = typename std::make_unsigned<T>::type;
-	const auto lower = static_cast<UNSIGNED_T>(static_cast<T>(filter.lower));
-	const auto upper = static_cast<UNSIGNED_T>(static_cast<T>(filter.upper));
+	const auto lower = static_cast<UNSIGNED_T>(static_cast<T>(lower_value));
+	const auto upper = static_cast<UNSIGNED_T>(static_cast<T>(upper_value));
 	const auto width = static_cast<UNSIGNED_T>(upper - lower);
 	const auto source_data = UnifiedVectorFormat::GetData<T>(source_format);
 	auto result_data = filter_selection.data();
@@ -63,15 +79,31 @@ static bool SljitTryFastSelectFlatAllValidInclusiveExclusiveBetween(const SljitN
 static bool SljitTryFastSelectFlatAllValidIntegerBetween(const SljitNativeRegionExpressionPlan &filter,
                                                          DataChunk &input, SelectionVector &filter_selection,
                                                          idx_t &selected_count) {
-	if (filter.kind != SljitNativeRegionExpressionKind::INTEGER_BETWEEN || filter.not_between ||
-	    !filter.lower_inclusive || filter.upper_inclusive || filter.source_index >= input.ColumnCount()) {
+	if (filter.kind != SljitNativeRegionExpressionKind::INTEGER_BETWEEN) {
 		return false;
 	}
 	switch (filter.integer_kind) {
 	case SljitNativeIntegerKind::INT32:
 	case SljitNativeIntegerKind::DATE:
-		return SljitTryFastSelectFlatAllValidInclusiveExclusiveBetween<int32_t>(filter, input, filter_selection,
-		                                                                        selected_count);
+		return SljitTryFastSelectFlatAllValidBetween<int32_t>(
+		    filter.source_index, filter.lower, filter.upper, filter.lower_inclusive, filter.upper_inclusive,
+		    filter.not_between, input, filter_selection, selected_count);
+	default:
+		return false;
+	}
+}
+
+static bool SljitTryFastSelectFlatAllValidIntegerBetween(const SljitNativePredicate &predicate, DataChunk &input,
+                                                         SelectionVector &filter_selection, idx_t &selected_count) {
+	if (predicate.kind != SljitNativePredicateKind::INTEGER_BETWEEN) {
+		return false;
+	}
+	switch (predicate.integer_kind) {
+	case SljitNativeIntegerKind::INT32:
+	case SljitNativeIntegerKind::DATE:
+		return SljitTryFastSelectFlatAllValidBetween<int32_t>(
+		    predicate.source_index, predicate.lower, predicate.upper, predicate.lower_inclusive,
+		    predicate.upper_inclusive, predicate.not_between, input, filter_selection, selected_count);
 	default:
 		return false;
 	}
@@ -82,25 +114,16 @@ static idx_t SljitSelectExpression(SljitExecutableRegionExpression &expression, 
                                    SelectionVector &filter_selection, ADAPTER_SCRATCH &adapter_scratch) {
 	auto &filter = expression.plan;
 	if (filter.kind == SljitNativeRegionExpressionKind::PREDICATE) {
-		auto &predicate_sources = adapter_scratch.predicate_sources;
-		predicate_sources.Prepare(&input, expression.input_source_indices);
-
-		SljitNativePredicateInput native_input;
-		native_input.source_data = predicate_sources.DataArray();
-		native_input.source_sel = predicate_sources.SelectionArray();
-		native_input.source_validity = predicate_sources.ValidityArray();
-		native_input.sources_all_valid = predicate_sources.SourcesAllValid();
-		native_input.execute_sel = nullptr;
-		native_input.result_data = nullptr;
-		native_input.result_validity = nullptr;
-		native_input.true_sel = filter_selection.data();
-		native_input.false_sel = nullptr;
-		native_input.selected_count = 0;
-		native_input.count = input.size();
-		expression.predicate_select_function(&native_input);
-		if (native_input.error) {
-			std::rethrow_exception(native_input.error);
+		idx_t fast_selected_count;
+		if (filter.predicate &&
+		    SljitTryFastSelectFlatAllValidIntegerBetween(*filter.predicate, input, filter_selection,
+		                                                 fast_selected_count)) {
+			return fast_selected_count;
 		}
+		auto native_input = SljitPrepareNativePredicateInput(adapter_scratch, input, expression.input_source_indices,
+		                                                     nullptr, input.size(), nullptr, nullptr,
+		                                                     filter_selection.data(), nullptr);
+		SljitExecuteNativeFunction(expression.predicate_select_function, native_input);
 		return native_input.selected_count;
 	}
 	if (filter.kind == SljitNativeRegionExpressionKind::TYPED_EXPRESSION_TREE) {
@@ -116,10 +139,7 @@ static idx_t SljitSelectExpression(SljitExecutableRegionExpression &expression, 
 		native_input.overflow_message = expression.overflow_message.c_str();
 		native_input.query_location = filter.query_location;
 		native_input.count = input.size();
-		expression.select_function(&native_input);
-		if (native_input.error) {
-			std::rethrow_exception(native_input.error);
-		}
+		SljitExecuteNativeFunction(expression.select_function, native_input);
 		return native_input.selected_count;
 	}
 	D_ASSERT(filter.kind == SljitNativeRegionExpressionKind::INTEGER_COMPARE_CONSTANT ||
@@ -165,10 +185,7 @@ static idx_t SljitSelectExpression(SljitExecutableRegionExpression &expression, 
 	native_input.selected_count = 0;
 	native_input.overflow_message = nullptr;
 	native_input.count = input.size();
-	expression.select_function(&native_input);
-	if (native_input.error) {
-		std::rethrow_exception(native_input.error);
-	}
+	SljitExecuteNativeFunction(expression.select_function, native_input);
 
 	return native_input.selected_count;
 }

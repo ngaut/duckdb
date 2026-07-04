@@ -61,31 +61,6 @@ static bool TrySljitStringCompressUInt8(const string_t &input, uint8_t &result) 
 	return true;
 }
 
-static bool SljitStringEquals(const string_t &left, const string_t &right) {
-	return left == right;
-}
-
-static bool AccumulatePreaggregatedStringCountStarKey(
-    const string_t &key, std::array<string_t, SLJIT_LOCAL_PREAGGREGATED_GROUP_LIMIT> &keys,
-    std::array<int64_t, SLJIT_LOCAL_PREAGGREGATED_GROUP_LIMIT> &counts, idx_t &group_count) {
-	idx_t group_idx = 0;
-	for (; group_idx < group_count; group_idx++) {
-		if (SljitStringEquals(keys[group_idx], key)) {
-			break;
-		}
-	}
-	if (group_idx == group_count) {
-		if (group_count == SLJIT_LOCAL_PREAGGREGATED_GROUP_LIMIT) {
-			return false;
-		}
-		keys[group_count] = key;
-		counts[group_count] = 0;
-		group_count++;
-	}
-	counts[group_idx]++;
-	return true;
-}
-
 template <class T>
 static bool TrySljitStringCompressCountStarKey(const string_t &input, T &result) {
 	return TrySljitStringCompressWide(input, result);
@@ -96,22 +71,30 @@ static bool TrySljitStringCompressCountStarKey(const string_t &input, uint8_t &r
 }
 
 template <class T>
-static bool
-MaterializePreaggregatedStringCountStarGroups(const std::array<string_t, SLJIT_LOCAL_PREAGGREGATED_GROUP_LIMIT> &keys,
-                                              const std::array<int64_t, SLJIT_LOCAL_PREAGGREGATED_GROUP_LIMIT> &counts,
-                                              idx_t group_count, DataChunk &compact_groups,
-                                              vector<int64_t> &count_deltas) {
-	auto target_data = PrepareFlatPreaggregatedGroupTarget<T>(compact_groups);
-	count_deltas.resize(group_count);
-	for (idx_t group_idx = 0; group_idx < group_count; group_idx++) {
-		T compressed_key;
-		if (!TrySljitStringCompressCountStarKey(keys[group_idx], compressed_key)) {
+static bool AccumulatePreaggregatedStringCompressedCountStarKey(
+    const string_t &key, std::array<string_t, SLJIT_LOCAL_PREAGGREGATED_GROUP_LIMIT> &lookup_keys,
+    std::array<T, SLJIT_LOCAL_PREAGGREGATED_GROUP_LIMIT> &compressed_keys,
+    std::array<int64_t, SLJIT_LOCAL_PREAGGREGATED_GROUP_LIMIT> &counts, idx_t &group_count) {
+	idx_t group_idx = 0;
+	for (; group_idx < group_count; group_idx++) {
+		if (lookup_keys[group_idx] == key) {
+			break;
+		}
+	}
+	if (group_idx == group_count) {
+		if (group_count == SLJIT_LOCAL_PREAGGREGATED_GROUP_LIMIT) {
 			return false;
 		}
-		target_data[group_idx] = compressed_key;
-		count_deltas[group_idx] = counts[group_idx];
+		T compressed_key;
+		if (!TrySljitStringCompressCountStarKey(key, compressed_key)) {
+			return false;
+		}
+		lookup_keys[group_count] = key;
+		compressed_keys[group_count] = compressed_key;
+		counts[group_count] = 0;
+		group_count++;
 	}
-	FinishFlatPreaggregatedGroupTarget(compact_groups, group_count);
+	counts[group_idx]++;
 	return true;
 }
 
@@ -119,13 +102,35 @@ template <class T>
 static bool TryPreaggregateStringCompressedCountStarGroupsTemplated(Vector &source, const SelectionVector *execute_sel,
                                                                     idx_t count, DataChunk &compact_groups,
                                                                     vector<int64_t> &count_deltas) {
+	if (source.GetVectorType() == VectorType::FLAT_VECTOR) {
+		auto &validity = FlatVector::Validity(source);
+		if (validity.CannotHaveNull() || (!execute_sel && validity.CheckAllValid(count))) {
+			auto source_data = FlatVector::GetData<string_t>(source);
+			std::array<string_t, SLJIT_LOCAL_PREAGGREGATED_GROUP_LIMIT> lookup_keys;
+			std::array<T, SLJIT_LOCAL_PREAGGREGATED_GROUP_LIMIT> compressed_keys;
+			std::array<int64_t, SLJIT_LOCAL_PREAGGREGATED_GROUP_LIMIT> counts;
+			idx_t group_count = 0;
+			for (idx_t row_idx = 0; row_idx < count; row_idx++) {
+				const auto source_idx = execute_sel ? execute_sel->get_index(row_idx) : row_idx;
+				if (!AccumulatePreaggregatedStringCompressedCountStarKey(
+				        source_data[source_idx], lookup_keys, compressed_keys, counts, group_count)) {
+					return false;
+				}
+			}
+			MaterializePreaggregatedCountStarGroups(compressed_keys, counts, group_count, compact_groups,
+			                                        count_deltas);
+			return true;
+		}
+	}
+
 	UnifiedVectorFormat format;
 	source.ToUnifiedFormat(format);
 	auto source_data = UnifiedVectorFormat::GetData<string_t>(format);
 	auto source_sel = format.sel;
 	auto &source_validity = format.validity;
 	const bool can_have_null = source_validity.CanHaveNull();
-	std::array<string_t, SLJIT_LOCAL_PREAGGREGATED_GROUP_LIMIT> keys;
+	std::array<string_t, SLJIT_LOCAL_PREAGGREGATED_GROUP_LIMIT> lookup_keys;
+	std::array<T, SLJIT_LOCAL_PREAGGREGATED_GROUP_LIMIT> compressed_keys;
 	std::array<int64_t, SLJIT_LOCAL_PREAGGREGATED_GROUP_LIMIT> counts;
 	idx_t group_count = 0;
 
@@ -135,12 +140,14 @@ static bool TryPreaggregateStringCompressedCountStarGroupsTemplated(Vector &sour
 		if (can_have_null && !source_validity.RowIsValid(source_idx)) {
 			return false;
 		}
-		if (!AccumulatePreaggregatedStringCountStarKey(source_data[source_idx], keys, counts, group_count)) {
+		if (!AccumulatePreaggregatedStringCompressedCountStarKey(source_data[source_idx], lookup_keys, compressed_keys,
+		                                                         counts, group_count)) {
 			return false;
 		}
 	}
 
-	return MaterializePreaggregatedStringCountStarGroups<T>(keys, counts, group_count, compact_groups, count_deltas);
+	MaterializePreaggregatedCountStarGroups(compressed_keys, counts, group_count, compact_groups, count_deltas);
+	return true;
 }
 
 template <class T>
@@ -152,7 +159,8 @@ TryPreaggregateStringCompressedMarkedCountStarGroupsTemplated(Vector &source, co
 		auto &validity = FlatVector::Validity(source);
 		if (validity.CannotHaveNull() || validity.CheckAllValid(count)) {
 			auto source_data = FlatVector::GetData<string_t>(source);
-			std::array<string_t, SLJIT_LOCAL_PREAGGREGATED_GROUP_LIMIT> keys;
+			std::array<string_t, SLJIT_LOCAL_PREAGGREGATED_GROUP_LIMIT> lookup_keys;
+			std::array<T, SLJIT_LOCAL_PREAGGREGATED_GROUP_LIMIT> compressed_keys;
 			std::array<int64_t, SLJIT_LOCAL_PREAGGREGATED_GROUP_LIMIT> counts;
 			idx_t group_count = 0;
 			selected_count = 0;
@@ -161,7 +169,8 @@ TryPreaggregateStringCompressedMarkedCountStarGroupsTemplated(Vector &source, co
 					continue;
 				}
 				selected_count++;
-				if (!AccumulatePreaggregatedStringCountStarKey(source_data[row_idx], keys, counts, group_count)) {
+				if (!AccumulatePreaggregatedStringCompressedCountStarKey(source_data[row_idx], lookup_keys,
+				                                                         compressed_keys, counts, group_count)) {
 					return false;
 				}
 			}
@@ -169,8 +178,9 @@ TryPreaggregateStringCompressedMarkedCountStarGroupsTemplated(Vector &source, co
 				compact_groups.Reset();
 				return true;
 			}
-			return MaterializePreaggregatedStringCountStarGroups<T>(keys, counts, group_count, compact_groups,
-			                                                        count_deltas);
+			MaterializePreaggregatedCountStarGroups(compressed_keys, counts, group_count, compact_groups,
+			                                        count_deltas);
+			return true;
 		}
 	}
 
@@ -180,7 +190,8 @@ TryPreaggregateStringCompressedMarkedCountStarGroupsTemplated(Vector &source, co
 	auto source_sel = format.sel;
 	auto &source_validity = format.validity;
 	const bool can_have_null = source_validity.CanHaveNull();
-	std::array<string_t, SLJIT_LOCAL_PREAGGREGATED_GROUP_LIMIT> keys;
+	std::array<string_t, SLJIT_LOCAL_PREAGGREGATED_GROUP_LIMIT> lookup_keys;
+	std::array<T, SLJIT_LOCAL_PREAGGREGATED_GROUP_LIMIT> compressed_keys;
 	std::array<int64_t, SLJIT_LOCAL_PREAGGREGATED_GROUP_LIMIT> counts;
 	idx_t group_count = 0;
 	selected_count = 0;
@@ -194,7 +205,8 @@ TryPreaggregateStringCompressedMarkedCountStarGroupsTemplated(Vector &source, co
 		if (can_have_null && !source_validity.RowIsValid(source_idx)) {
 			return false;
 		}
-		if (!AccumulatePreaggregatedStringCountStarKey(source_data[source_idx], keys, counts, group_count)) {
+		if (!AccumulatePreaggregatedStringCompressedCountStarKey(source_data[source_idx], lookup_keys, compressed_keys,
+		                                                         counts, group_count)) {
 			return false;
 		}
 	}
@@ -203,7 +215,8 @@ TryPreaggregateStringCompressedMarkedCountStarGroupsTemplated(Vector &source, co
 		return true;
 	}
 
-	return MaterializePreaggregatedStringCountStarGroups<T>(keys, counts, group_count, compact_groups, count_deltas);
+	MaterializePreaggregatedCountStarGroups(compressed_keys, counts, group_count, compact_groups, count_deltas);
+	return true;
 }
 
 static bool TryGetStringCompressedCountStarProjectionSource(const SljitExecutableRegionOp &projection_op,

@@ -91,8 +91,8 @@ ExecutionRegionCompileResult CompileSljitRegion(const string &backend_name,
 			reason += ";verify:region";
 		}
 		auto kernel_build_start = std::chrono::steady_clock::now();
-		auto kernel =
-		    CreateSljitNativeRegionKernel(input.context, backend_name, std::move(executable_region), contract.abi);
+		auto kernel = CreateSljitNativeRegionKernel(input.context, backend_name, std::move(executable_region),
+		                                            contract.abi, lowering_plan.UsesScanFilters());
 		timings.kernel_build_time_us = SljitRegionElapsedMicros(kernel_build_start);
 		auto result = ExecutionRegionCompileResult::Compiled(std::move(kernel), execution_mode, std::move(reason),
 		                                                     MaybeDumpIr(input.context, std::move(ir)));

@@ -93,8 +93,12 @@ struct SljitDeferredPerfectHashFlagPlan {
 struct SljitPerfectHashGroupPlan {
 	SljitNativeRegionExpressionKind expression_kind = SljitNativeRegionExpressionKind::REFERENCE;
 	SljitNativeIntegerKind integer_kind = SljitNativeIntegerKind::INT64;
+	SljitNativeSignedIntegerWidth integral_compress_source_width = SljitNativeSignedIntegerWidth::INT32;
+	unique_ptr<ExecutionExpressionIR> expression_tree;
+	vector<idx_t> expression_tree_source_indices;
 	idx_t source_index = DConstants::INVALID_INDEX;
 	idx_t string_compress_target_size = 0;
+	int64_t integral_compress_minimum = 0;
 	int64_t minimum = 0;
 	idx_t shift = 0;
 };
@@ -104,7 +108,8 @@ enum class SljitFusedAggregateGroupIndexMode : uint8_t { LOGICAL, SELECTED_NULLA
 bool TryBuildSljitPerfectHashGroupPlans(const vector<ExecutionRegionGroupInput> &groups,
                                         const vector<SljitNativeRegionExpressionPlan> &group_expressions,
                                         const ExecutionRegionAggregateContract &contract,
-                                        vector<SljitPerfectHashGroupPlan> &result);
+                                        vector<SljitPerfectHashGroupPlan> &result,
+                                        bool allow_typed_expression_tree = false);
 bool SljitCanPrecomputePerfectHashStringGroupOffset(const vector<SljitPerfectHashGroupPlan> &groups);
 vector<SljitTypedExpressionTreeDataPointerHoist>
 BuildSljitPerfectHashSourceDataPointerHoists(const vector<SljitNativeRegionExpressionPlan> &payloads,

@@ -135,7 +135,7 @@ static bool TryExecutePreparedPreaggregatedCountStarGroupedAggregateUpdate(
 	auto updated = ExecuteSljitRegionRecordedOperation(
 	    runtime, op_idx, op.kind, "direct_preaggregated_count_star_update", stage_start,
 	    [&](optional_ptr<ExecutionOperatorStageRecorder> recorder) {
-		    return grouped_state.state->TryUpdateNewGroupsWithSelectedStateAddresses(
+		    return grouped_state.state->TryUpdateGroupKeysWithSelectedStateAddresses(
 		        compact_groups, op.aggregate_update.plan.sink_info, ExecuteSljitPreaggregatedCountStarUpdate,
 		        &update_state, recorder, finish);
 	    });

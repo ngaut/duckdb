@@ -2523,6 +2523,7 @@ ExecutionOperatorBindResult PhysicalHashJoin::BindExecutionOperator(ExecutionCon
 	binding.hash_join_probe.perfect_layout = std::move(perfect_layout);
 	binding.hash_join_probe.empty_build_side = empty_build_side;
 	binding.hash_join_probe.probe_key_input_indices = std::move(probe_key_input_indices);
+	binding.hash_join_probe.rhs_condition_types = contract.rhs_condition_types;
 	binding.hash_join_probe.lhs_output_column_indices = contract.lhs_output_column_indices;
 	binding.hash_join_probe.rhs_output_column_count = contract.rhs_output_column_count;
 	binding.hash_join_probe.lhs_probe_column_indices = contract.lhs_probe_column_indices;

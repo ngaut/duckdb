@@ -26,9 +26,10 @@ static idx_t DuckDBExpressionCost(const Expression &expr);
 static constexpr int64_t BASIS_POINT_SCALE = 10000;
 static constexpr int64_t MATERIALIZATION_SOURCE_APPEND_PENALTY = 80;
 static constexpr int64_t NATIVE_JOIN_PROTOCOL_PENALTY = 720;
+static constexpr int64_t NATIVE_HASH_JOIN_BUILD_SINK_PROTOCOL_PENALTY = 720;
 static constexpr int64_t NATIVE_GROUPED_AGGREGATE_PARALLELISM_PENALTY = 160;
+static constexpr int64_t NATIVE_DISTINCT_COUNT_POINTER_AGGREGATE_PENALTY = 8192;
 static constexpr int64_t BLOCKED_HASH_AGGREGATE_LOOKUP_PENALTY = 64;
-static constexpr int64_t PURE_NATIVE_JOIN_REQUIRED_BENEFIT_MULTIPLIER = 2;
 
 static int64_t SaturatingCostCast(idx_t value) {
 	auto max_value = static_cast<idx_t>(std::numeric_limits<int64_t>::max());
@@ -340,7 +341,11 @@ static bool PhysicalRunnerFullPipelineBenefitPays(const PhysicalRunnerCostInput 
                                                   const PhysicalRunnerShapeFacts &facts) {
 	return input.input_scope == PhysicalRunnerCostInputScope::EXECUTION_REGION_CANDIDATE && input.full_pipeline &&
 	       facts.native_operator_stage_count == 0 && input.generated_stage_count == 0 &&
-	       input.materialization_elision_count == 0;
+	       input.materialization_elision_count == 0 && input.native_hash_join_build_sink_count == 0;
+}
+
+static bool PhysicalRunnerUsesGeneratedDistinctCountPointerBackend(const PhysicalRunnerCostInput &input) {
+	return input.generated_distinct_count_pointer_aggregate_update_count > 0;
 }
 
 static bool PhysicalRunnerNativeStageBenefitCanPay(const PhysicalRunnerCostInput &input,
@@ -351,7 +356,41 @@ static bool PhysicalRunnerNativeStageBenefitCanPay(const PhysicalRunnerCostInput
 	if (input.native_sort_stage_count > 0) {
 		return false;
 	}
+	if (PhysicalRunnerUsesGeneratedDistinctCountPointerBackend(input)) {
+		return false;
+	}
+	if (input.native_protocol_class == PhysicalRunnerNativeProtocolClass::STATEFUL_SOURCE_SINK_PROTOCOL &&
+	    input.generated_backend_stage_count == 0) {
+		return false;
+	}
 	return input.native_join_stage_count > 0 || input.native_aggregate_stage_count > 0;
+}
+
+static bool PhysicalRunnerMaterializationElisionBenefitCanPay(const PhysicalRunnerCostInput &input,
+                                                              const PhysicalRunnerCostParameters &parameters) {
+	if (parameters.materialization_elision_benefit == 0 || input.materialization_elision_count == 0) {
+		return false;
+	}
+	return !PhysicalRunnerUsesGeneratedDistinctCountPointerBackend(input);
+}
+
+static bool PhysicalRunnerGeneratedBackendStageBenefitCanPay(const PhysicalRunnerCostInput &input) {
+	if (input.generated_backend_stage_count == 0 || input.generated_stage_count == 0) {
+		return false;
+	}
+	if (input.native_hash_join_build_sink_count > 0 && input.native_join_stage_count == 0 &&
+	    input.native_aggregate_stage_count == 0 && input.native_sort_stage_count == 0 &&
+	    input.generated_distinct_count_pointer_aggregate_update_count == 0) {
+		return false;
+	}
+	return true;
+}
+
+static idx_t PhysicalRunnerCostedGeneratedBackendStageCount(const PhysicalRunnerCostInput &input) {
+	if (!PhysicalRunnerGeneratedBackendStageBenefitCanPay(input)) {
+		return 0;
+	}
+	return MinValue(input.generated_backend_stage_count, input.generated_stage_count);
 }
 
 struct PhysicalRunnerAdmission {
@@ -367,7 +406,7 @@ static string PhysicalRunnerAdmissionClass(const PhysicalRunnerCostInput &input,
 	if (!input.has_accelerated_work) {
 		return "none";
 	}
-	if (input.materialization_elision_count > 0 && parameters.materialization_elision_benefit > 0) {
+	if (PhysicalRunnerMaterializationElisionBenefitCanPay(input, parameters)) {
 		return "materialization_elision";
 	}
 	if (full_pipeline_benefit_pays) {
@@ -381,9 +420,6 @@ static string PhysicalRunnerAdmissionClass(const PhysicalRunnerCostInput &input,
 	}
 	if (facts.has_generated_compute_work && input.generated_stage_count > 0 && facts.no_native_sort) {
 		return "generated_native_fusion";
-	}
-	if (PhysicalRunnerNativeStageBenefitCanPay(input, parameters)) {
-		return "native_operator";
 	}
 	return "none";
 }
@@ -419,7 +455,7 @@ static void PhysicalRunnerBuildAccelerationBasis(const PhysicalRunnerCostInput &
 	    PhysicalRunnerNativeOperatorBenefitPays(input, parameters, admission)) {
 		PhysicalRunnerAppendReasonToken(admission.acceleration_basis, "native_operator_stage_benefit");
 	}
-	if (input.materialization_elision_count > 0 && parameters.materialization_elision_benefit > 0) {
+	if (PhysicalRunnerMaterializationElisionBenefitCanPay(input, parameters)) {
 		PhysicalRunnerAppendReasonToken(admission.acceleration_basis, "materialization_elision_benefit");
 	}
 	if (admission.full_pipeline_benefit_pays) {
@@ -470,15 +506,20 @@ static void PhysicalRunnerComputeWorkComponents(const PhysicalRunnerCostInput &i
 	const auto expression_cost = SaturatingCostCast(input.expression_cost);
 	if (facts.has_generated_compute_work) {
 		profile.generated_expression_work = expression_cost;
-		int64_t generated_stage_work = 0;
+		const auto generated_stage_benefit = SaturatingCostCast(parameters.generated_stage_benefit);
+		const auto generated_backend_stage_count = PhysicalRunnerCostedGeneratedBackendStageCount(input);
+		const auto generated_expression_stage_count = input.generated_stage_count - generated_backend_stage_count;
+		int64_t generated_expression_stage_work = 0;
 		if (expression_cost > 0) {
-			generated_stage_work = MultiplyCost(SaturatingCostCast(input.generated_stage_count),
-			                                    SaturatingCostCast(parameters.generated_stage_benefit));
-			if (generated_stage_work > expression_cost) {
-				generated_stage_work = expression_cost;
+			generated_expression_stage_work =
+			    MultiplyCost(SaturatingCostCast(generated_expression_stage_count), generated_stage_benefit);
+			if (generated_expression_stage_work > expression_cost) {
+				generated_expression_stage_work = expression_cost;
 			}
 		}
-		profile.generated_stage_work = generated_stage_work;
+		profile.generated_backend_stage_work =
+		    MultiplyCost(SaturatingCostCast(generated_backend_stage_count), generated_stage_benefit);
+		profile.generated_stage_work = AddCost(generated_expression_stage_work, profile.generated_backend_stage_work);
 	}
 	D_ASSERT(input.native_aggregate_stage_count >= input.native_grouped_aggregate_stage_count);
 	if (PhysicalRunnerNativeOperatorBenefitPays(input, parameters, admission)) {
@@ -486,7 +527,7 @@ static void PhysicalRunnerComputeWorkComponents(const PhysicalRunnerCostInput &i
 		profile.native_operator_work =
 		    MultiplyCost(SaturatingCostCast(facts.native_operator_stage_count), native_operator_stage_benefit);
 	}
-	if (input.materialization_elision_count > 0) {
+	if (PhysicalRunnerMaterializationElisionBenefitCanPay(input, parameters)) {
 		profile.materialization_elision_work =
 		    MultiplyCost(SaturatingCostCast(input.materialization_elision_count),
 		                 SaturatingCostCast(parameters.materialization_elision_benefit));
@@ -506,6 +547,12 @@ static void PhysicalRunnerComputeWorkComponents(const PhysicalRunnerCostInput &i
 		profile.stateful_protocol_penalty = AddCost(
 		    profile.stateful_protocol_penalty, MultiplyCost(native_join_stage_count, NATIVE_JOIN_PROTOCOL_PENALTY));
 	}
+	if (input.native_hash_join_build_sink_count > 0) {
+		const auto native_hash_join_build_sink_count = SaturatingCostCast(input.native_hash_join_build_sink_count);
+		profile.stateful_protocol_penalty =
+		    AddCost(profile.stateful_protocol_penalty,
+		            MultiplyCost(native_hash_join_build_sink_count, NATIVE_HASH_JOIN_BUILD_SINK_PROTOCOL_PENALTY));
+	}
 	if (input.blocked_hash_aggregate_lookup_count > 0) {
 		profile.stateful_protocol_penalty =
 		    AddCost(profile.stateful_protocol_penalty,
@@ -519,6 +566,12 @@ static void PhysicalRunnerComputeWorkComponents(const PhysicalRunnerCostInput &i
 		profile.stateful_protocol_penalty =
 		    AddCost(profile.stateful_protocol_penalty,
 		            MultiplyCost(grouped_aggregate_parallel_penalty, NATIVE_GROUPED_AGGREGATE_PARALLELISM_PENALTY));
+	}
+	if (input.native_distinct_count_pointer_aggregate_stage_count > 0) {
+		profile.stateful_protocol_penalty =
+		    AddCost(profile.stateful_protocol_penalty,
+		            MultiplyCost(SaturatingCostCast(input.native_distinct_count_pointer_aggregate_stage_count),
+		                         NATIVE_DISTINCT_COUNT_POINTER_AGGREGATE_PENALTY));
 	}
 	auto work = profile.generated_expression_work;
 	work = AddCost(work, profile.generated_stage_work);
@@ -553,11 +606,6 @@ static int64_t PhysicalRunnerRequiredBenefit(const PhysicalRunnerCostProfile &pr
 	auto margin = FractionalCost(profile.startup_cost, SaturatingCostCast(parameters.startup_margin_basis_points),
 	                             BASIS_POINT_SCALE);
 	auto required_benefit = AddCost(profile.startup_cost, margin);
-	if (profile.admission_class == "native_operator" && profile.native_join_stage_count > 0 &&
-	    profile.native_aggregate_stage_count == 0 && profile.generated_stage_count == 0 &&
-	    profile.materialization_elision_count == 0) {
-		required_benefit = MultiplyCost(required_benefit, PURE_NATIVE_JOIN_REQUIRED_BENEFIT_MULTIPLIER);
-	}
 	return required_benefit;
 }
 
@@ -570,11 +618,17 @@ static void PhysicalRunnerInitializeProfile(const PhysicalRunnerCostInput &input
 	profile.batches = facts.batches;
 	profile.expression_cost = SaturatingCostCast(input.expression_cost);
 	profile.generated_stage_count = SaturatingCostCast(input.generated_stage_count);
+	profile.generated_backend_stage_count = SaturatingCostCast(input.generated_backend_stage_count);
 	profile.materialization_elision_count = SaturatingCostCast(input.materialization_elision_count);
 	profile.materialization_source_append_count = SaturatingCostCast(input.materialization_source_append_count);
 	profile.native_join_stage_count = SaturatingCostCast(input.native_join_stage_count);
+	profile.native_hash_join_build_sink_count = SaturatingCostCast(input.native_hash_join_build_sink_count);
 	profile.native_aggregate_stage_count = SaturatingCostCast(input.native_aggregate_stage_count);
 	profile.native_grouped_aggregate_stage_count = SaturatingCostCast(input.native_grouped_aggregate_stage_count);
+	profile.native_distinct_count_pointer_aggregate_stage_count =
+	    SaturatingCostCast(input.native_distinct_count_pointer_aggregate_stage_count);
+	profile.generated_distinct_count_pointer_aggregate_update_count =
+	    SaturatingCostCast(input.generated_distinct_count_pointer_aggregate_update_count);
 	profile.native_sort_stage_count = SaturatingCostCast(input.native_sort_stage_count);
 	profile.source_filter_count = SaturatingCostCast(input.source_filter_count);
 	profile.full_pipeline = input.full_pipeline;

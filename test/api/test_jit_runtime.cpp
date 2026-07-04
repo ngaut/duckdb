@@ -32,6 +32,15 @@ static bool HasSourceContractStageBreakdown(const ExecutionRegionManager &manage
 	return false;
 }
 
+static idx_t StageCount(const vector<ExecutionRegionRecordedStageRuntime> &stages, const string &name) {
+	for (auto &stage : stages) {
+		if (StringUtil::Contains(stage.stage.name, name)) {
+			return stage.count;
+		}
+	}
+	return 0;
+}
+
 TEST_CASE("SLJIT predicate source preparation uses referenced slots only", "[api][jit]") {
 	vector<LogicalType> types;
 	for (idx_t column_idx = 0; column_idx < 8; column_idx++) {
@@ -407,7 +416,50 @@ TEST_CASE("Execution region runtime trace records kernel execution facts", "[api
 	REQUIRE(found_runtime_counter);
 }
 
-TEST_CASE("JIT hash aggregate count distinct uses pointer-key update with nullable groups", "[api][jit]") {
+TEST_CASE("JIT distinct count-pointer planning is independent of decision tracing", "[api][jit]") {
+	DuckDB db;
+	Connection con(db);
+	auto &manager = ExecutionRegionManager::Get(*con.context);
+
+	ConfigureSljit(con, "auto");
+	REQUIRE_NO_FAIL(con.Query("SET threads=1"));
+	REQUIRE_NO_FAIL(con.Query("CREATE TEMP TABLE jit_distinct_pointer_plan_input AS "
+	                          "SELECT i::BIGINT AS i, "
+	                          "       (i % 37)::INTEGER AS g, "
+	                          "       CASE WHEN i % 13 = 0 THEN NULL ELSE (i % 97)::BIGINT END AS x "
+	                          "FROM range(20000) tbl(i)"));
+
+	auto run_and_require_distinct_pointer_cost = [&](bool trace_decisions) {
+		ClearJitTrace(manager, true);
+		REQUIRE_NO_FAIL(con.Query(string("SET jit_trace_decisions=") + (trace_decisions ? "true" : "false")));
+		REQUIRE_NO_FAIL(con.Query("CREATE OR REPLACE TEMP TABLE jit_distinct_pointer_plan_actual AS "
+		                          "SELECT g, count(DISTINCT x1) AS c "
+		                          "FROM ("
+		                          "    SELECT g, x + 0 AS x1 "
+		                          "    FROM jit_distinct_pointer_plan_input "
+		                          "    WHERE i >= 0"
+		                          ") projected "
+		                          "GROUP BY g"));
+
+			idx_t distinct_pointer_cost_events = 0;
+			for (auto &event : manager.GetEvents()) {
+				if (!event.runner_cost.present ||
+				    event.runner_cost.generated_distinct_count_pointer_aggregate_update_count == 0) {
+					continue;
+				}
+				distinct_pointer_cost_events++;
+				REQUIRE(event.runner_cost.native_aggregate_stage_count == 0);
+				REQUIRE(event.runner_cost.native_distinct_count_pointer_aggregate_stage_count == 0);
+				REQUIRE(event.runner_cost.generated_distinct_count_pointer_aggregate_update_count == 1);
+			}
+		REQUIRE(distinct_pointer_cost_events > 0);
+	};
+
+	run_and_require_distinct_pointer_cost(false);
+	run_and_require_distinct_pointer_cost(true);
+}
+
+TEST_CASE("JIT hash aggregate count distinct uses pointer-key backend", "[api][jit]") {
 	DuckDB db;
 	Connection con(db);
 	auto &manager = ExecutionRegionManager::Get(*con.context);
@@ -429,6 +481,8 @@ TEST_CASE("JIT hash aggregate count distinct uses pointer-key update with nullab
 	                          "GROUP BY g1, g2"));
 
 	ConfigureSljitForCoverageSettings(con, false, true, true);
+	REQUIRE_NO_FAIL(con.Query("SET jit_cbo_materialization_elision_benefit=16384"));
+	REQUIRE_NO_FAIL(con.Query("SET jit_cbo_native_operator_stage_benefit=16384"));
 	ClearJitTrace(manager, true);
 	REQUIRE_NO_FAIL(con.Query("CREATE TEMP TABLE jit_distinct_pointer_actual AS "
 	                          "SELECT g1, g2, count(DISTINCT x1) AS c "
@@ -452,28 +506,114 @@ TEST_CASE("JIT hash aggregate count distinct uses pointer-key update with nullab
 	RequireJitEvent(
 	    manager,
 	    [](const ExecutionRegionEvent &event) {
-		    return IsCompiledSljitRegionEvent(event) && event.has_candidate &&
-		           event.candidate_traits.sink_kind == ExecutionRegionSinkKind::HASH_AGGREGATE_UPDATE &&
-		           event.candidate_contract.hash_aggregate_lookup_mode == "duckdb-distinct-count-pointer";
+		    return IsSljitRegionEvent(event) && EventStatus(event) == "executed" &&
+		           StringUtil::Contains(EventJitRuntimePathCounts(event),
+		                                "aggregate_update.distinct_count_pointer_selected_payload_update=");
 	    },
 	    [](const ExecutionRegionEvent &event) {
-		    RequireGeneratedMachineCodeRegion(event);
-		    REQUIRE(event.candidate_contract.missing_contract_count == 0);
-		    REQUIRE(event.candidate_contract.blockers.empty());
-		    REQUIRE(event.candidate_contract.required_capabilities.size() == 2);
+		    REQUIRE(StringUtil::Contains(EventGeneratedStageRuntimeBreakdown(event),
+		                                 "aggregate_update.distinct_count_pointer_selected_payload_update"));
 	    });
 	RequireJitEvent(
 	    manager,
 	    [](const ExecutionRegionEvent &event) {
-		    return IsSljitRegionEvent(event) && EventPhase(event) == "runtime" && EventStatus(event) == "executed" &&
-		           StringUtil::Contains(EventJitRuntimePathCounts(event),
-		                                "aggregate_update.distinct_count_pointer_update");
+		    return IsCompiledSljitRegionEvent(event) && event.runner_cost.present &&
+		           event.candidate_traits.sink_kind == ExecutionRegionSinkKind::HASH_AGGREGATE_UPDATE &&
+		           StringUtil::Contains(event.ir, "distinct_count_pointer");
 	    },
+		    [](const ExecutionRegionEvent &event) {
+			    REQUIRE(event.runner_cost.generated_stage_count > 0);
+			    REQUIRE(event.runner_cost.native_aggregate_stage_count == 0);
+			    REQUIRE(event.runner_cost.native_distinct_count_pointer_aggregate_stage_count == 0);
+			    REQUIRE(event.runner_cost.generated_distinct_count_pointer_aggregate_update_count > 0);
+		    });
+	for (auto &event : manager.GetEvents()) {
+		REQUIRE_FALSE(StringUtil::Contains(EventJitRuntimePathCounts(event),
+		                                   "aggregate_update.distinct_count_pointer_direct_update"));
+		REQUIRE_FALSE(StringUtil::Contains(EventJitRuntimePathCounts(event),
+		                                   "aggregate_update.row_pointer_distinct_count_pointer_direct_update"));
+		REQUIRE_FALSE(StringUtil::Contains(EventGeneratedStageRuntimeBreakdown(event),
+		                                   "aggregate_update.distinct_count_pointer_direct_update"));
+	}
+}
+
+TEST_CASE("JIT hash aggregate count distinct pointer-key backend merges parallel local states", "[api][jit]") {
+	DuckDB db;
+	Connection con(db);
+	auto &manager = ExecutionRegionManager::Get(*con.context);
+
+	LoadSljit(con);
+	REQUIRE_NO_FAIL(con.Query("SET threads=12"));
+	REQUIRE_NO_FAIL(con.Query("CREATE TEMP TABLE jit_parallel_distinct_pointer_input AS "
+	                          "SELECT i::BIGINT AS i, "
+	                          "       (i % 100)::INTEGER AS g, "
+	                          "       (i % 200)::BIGINT AS x "
+	                          "FROM range(1000000) tbl(i)"));
+
+	REQUIRE_NO_FAIL(con.Query("SET enable_jit=false"));
+	REQUIRE_NO_FAIL(con.Query("CREATE TEMP TABLE jit_parallel_distinct_pointer_expected AS "
+	                          "SELECT g, count(DISTINCT x + 0) AS c "
+	                          "FROM jit_parallel_distinct_pointer_input "
+	                          "WHERE i >= 0 "
+	                          "GROUP BY g"));
+
+	ConfigureSljitForCoverageSettings(con, false, true, true);
+	REQUIRE_NO_FAIL(con.Query("SET jit_cbo_materialization_elision_benefit=16384"));
+	REQUIRE_NO_FAIL(con.Query("SET jit_cbo_native_operator_stage_benefit=16384"));
+	ClearJitTrace(manager, true);
+	REQUIRE_NO_FAIL(con.Query("CREATE TEMP TABLE jit_parallel_distinct_pointer_actual AS "
+	                          "SELECT g, count(DISTINCT x1) AS c "
+	                          "FROM ("
+	                          "    SELECT g, x + 0 AS x1 "
+	                          "    FROM jit_parallel_distinct_pointer_input "
+	                          "    WHERE i >= 0"
+	                          ") projected "
+	                          "GROUP BY g"));
+
+	auto diff = con.Query("SELECT count(*) FROM ("
+	                      "    (SELECT * FROM jit_parallel_distinct_pointer_expected "
+	                      "     EXCEPT ALL SELECT * FROM jit_parallel_distinct_pointer_actual) "
+	                      "    UNION ALL "
+	                      "    (SELECT * FROM jit_parallel_distinct_pointer_actual "
+	                      "     EXCEPT ALL SELECT * FROM jit_parallel_distinct_pointer_expected)"
+	                      ") diff");
+	REQUIRE_NO_FAIL(*diff);
+	REQUIRE(diff->GetValue(0, 0).GetValue<int64_t>() == 0);
+
+	auto summary = con.Query("SELECT sum(c)::BIGINT, min(c), max(c), count(*) "
+	                         "FROM jit_parallel_distinct_pointer_actual");
+	REQUIRE_NO_FAIL(*summary);
+	REQUIRE(summary->GetValue(0, 0).GetValue<int64_t>() == 200);
+	REQUIRE(summary->GetValue(1, 0).GetValue<int64_t>() == 2);
+	REQUIRE(summary->GetValue(2, 0).GetValue<int64_t>() == 2);
+	REQUIRE(summary->GetValue(3, 0).GetValue<int64_t>() == 100);
+
+	RequireJitEvent(manager, [](const ExecutionRegionEvent &event) {
+		if (!IsSljitRegionEvent(event) || EventStatus(event) != "executed") {
+			return false;
+		}
+		auto runtime_paths = EventJitRuntimePathCounts(event);
+		const bool uses_distinct_pointer =
+		    StringUtil::Contains(runtime_paths, "aggregate_update.distinct_count_pointer_payload_set_update=") ||
+		    StringUtil::Contains(runtime_paths, "aggregate_update.distinct_count_pointer_selected_payload_update=");
+		if (!uses_distinct_pointer) {
+			return false;
+		}
+		return true;
+	});
+	RequireJitEvent(
+	    manager,
 	    [](const ExecutionRegionEvent &event) {
-		    REQUIRE(event.output_rows > 0);
-		    REQUIRE(StringUtil::Contains(EventGeneratedStageRuntimeBreakdown(event),
-		                                 "aggregate_update.distinct_count_pointer_update"));
-	    });
+		    return IsCompiledSljitRegionEvent(event) && event.runner_cost.present &&
+		           event.candidate_traits.sink_kind == ExecutionRegionSinkKind::HASH_AGGREGATE_UPDATE &&
+		           StringUtil::Contains(event.ir, "distinct_count_pointer");
+	    },
+		    [](const ExecutionRegionEvent &event) {
+			    REQUIRE(event.runner_cost.generated_stage_count > 0);
+			    REQUIRE(event.runner_cost.native_aggregate_stage_count == 0);
+			    REQUIRE(event.runner_cost.native_distinct_count_pointer_aggregate_stage_count == 0);
+			    REQUIRE(event.runner_cost.generated_distinct_count_pointer_aggregate_update_count > 0);
+		    });
 }
 
 TEST_CASE("JIT source contracts preserve Q7 table scan filter contracts", "[api][jit]") {
@@ -525,15 +665,73 @@ TEST_CASE("JIT source contracts preserve Q7 table scan filter contracts", "[api]
 	    manager,
 	    [](const ExecutionRegionEvent &event) {
 		    return IsSljitRegionEvent(event) && EventPhase(event) == "runtime" && EventStatus(event) == "executed" &&
-		           StringUtil::Contains(EventJitRuntimePathCounts(event),
-		                                "filter.direct_selected_reference_projection");
+		           event.selected_uses_scan_filters && event.source_contract_output_rows > 0 &&
+		           event.input_rows == event.source_contract_output_rows;
 	    },
 	    [](const ExecutionRegionEvent &event) {
+		    auto runtime_paths = EventJitRuntimePathCounts(event);
+		    auto has_generated_probe =
+		        StringUtil::Contains(runtime_paths,
+		                             "hash_join_probe.generated_regular_probe_flat_all_valid_function") ||
+		        StringUtil::Contains(runtime_paths, "hash_join_probe.generated_perfect_probe_function");
 		    REQUIRE(event.source_contract_output_rows > 0);
 		    REQUIRE(event.input_rows == event.source_contract_output_rows);
-		    REQUIRE(
-		        StringUtil::Contains(EventGeneratedStageRuntimeBreakdown(event), "filter+direct_reference_projection"));
+		    REQUIRE(has_generated_probe);
 	    });
+}
+
+TEST_CASE("JIT generated source-filter aggregate terminals use extended source budget", "[api][jit]") {
+	DuckDB db;
+	Connection con(db);
+	auto &manager = ExecutionRegionManager::Get(*con.context);
+
+	ConfigureSljitForCoverage(con, false, true, true, 10000);
+	REQUIRE_NO_FAIL(con.Query("SET threads=1"));
+	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_scan_filtered_aggregate_budget AS "
+	                          "SELECT "
+	                          "    CAST(1000 + (i % 100) AS DECIMAL(15,2)) AS price, "
+	                          "    CAST((5 + (i % 3))::DOUBLE / 100.0 AS DECIMAL(15,2)) AS discount, "
+	                          "    DATE '1994-01-01' + CAST(i % 730 AS INTEGER) AS shipdate, "
+	                          "    CAST(i % 50 AS INTEGER) AS quantity "
+	                          "FROM range(300000) tbl(i)"));
+
+	ClearJitTrace(manager, true);
+	auto result = con.Query("SELECT sum(price * discount) "
+	                        "FROM jit_scan_filtered_aggregate_budget "
+	                        "WHERE shipdate >= DATE '1994-01-01' "
+	                        "  AND shipdate < DATE '1995-01-01' "
+	                        "  AND discount BETWEEN 0.05 AND 0.07 "
+	                        "  AND quantity < 24");
+	REQUIRE_NO_FAIL(*result);
+
+	RequireJitEvent(
+	    manager,
+	    [](const ExecutionRegionEvent &event) {
+		    return IsCompiledSljitRegionEvent(event) && event.has_candidate &&
+		           event.candidate_traits.sink_kind == ExecutionRegionSinkKind::UNGROUPED_AGGREGATE_UPDATE &&
+		           !event.selected_uses_scan_filters &&
+		           StringUtil::Contains(event.reason, "generated table scan source filters");
+	    },
+	    [](const ExecutionRegionEvent &event) {
+		    RequireGeneratedMachineCodeRegion(event);
+		    REQUIRE(StringUtil::Contains(event.reason, "source-execution:source-contract"));
+	    });
+
+	idx_t bind_count = 0;
+	idx_t source_fetch_count = 0;
+	idx_t update_count = 0;
+	for (auto &counter : manager.GetCounters()) {
+		if (counter.backend_name != "sljit" || counter.status_kind != ExecutionRegionEventStatus::EXECUTED ||
+		    counter.execution_mode_kind != ExecutionRegionExecutionMode::NATIVE) {
+			continue;
+		}
+		source_fetch_count += counter.source_contract_invocation_count;
+		bind_count += StageCount(counter.generated_stage_runtime, "aggregate_update.bind_sink_contract");
+		update_count += StageCount(counter.generated_stage_runtime, "aggregate_update.filtered_primitive_update");
+	}
+	REQUIRE(bind_count > 0);
+	REQUIRE(source_fetch_count > bind_count * 10);
+	REQUIRE(update_count > bind_count * 10);
 }
 
 TEST_CASE("EXPLAIN ANALYZE exposes compact execution region profile", "[api][jit]") {

@@ -80,12 +80,16 @@ static SljitFusedTypedPayloadSourceResult
 SljitGetFusedTypedPayloadCombinedSourceIndices(vector<SljitExecutableRegionExpression> &payloads,
                                                const vector<ExecutionRegionAggregateInput> &aggregates) {
 	SljitFusedTypedPayloadSourceResult result;
-	if (!SljitFusedAggregatePayloadsUseTypedExpressionTrees(payloads, aggregates)) {
-		return result;
-	}
+	bool supported_payloads = payloads.size() == aggregates.size();
 	for (idx_t payload_idx = 0; payload_idx < payloads.size(); payload_idx++) {
 		if (aggregates[payload_idx].primitive_update_kind == AggregatePrimitiveUpdateKind::COUNT_STAR) {
 			continue;
+		}
+		auto &plan = payloads[payload_idx].plan;
+		if (plan.kind != SljitNativeRegionExpressionKind::REFERENCE &&
+		    plan.kind != SljitNativeRegionExpressionKind::TYPED_EXPRESSION_TREE) {
+			supported_payloads = false;
+			break;
 		}
 		auto &source_indices = payloads[payload_idx].input_source_indices;
 		if (source_indices.empty()) {
@@ -99,6 +103,9 @@ SljitGetFusedTypedPayloadCombinedSourceIndices(vector<SljitExecutableRegionExpre
 			result.sources = nullptr;
 			return result;
 		}
+	}
+	if (!supported_payloads) {
+		return result;
 	}
 	if (!result.sources) {
 		result.status = SljitFusedTypedPayloadSourceStatus::NO_PAYLOADS;
@@ -125,6 +132,28 @@ static const vector<idx_t> &SljitRequireFusedTypedPayloadCombinedSourceIndices(
 	default:
 		throw InternalException("Unknown SLJIT fused typed aggregate payload source status");
 	}
+}
+
+static optional_ptr<const vector<bool>>
+SljitGetFusedTypedPayloadCombinedSourceNotNull(vector<SljitExecutableRegionExpression> &payloads,
+                                               const vector<ExecutionRegionAggregateInput> &aggregates,
+                                               idx_t source_count) {
+	optional_ptr<const vector<bool>> result;
+	for (idx_t payload_idx = 0; payload_idx < payloads.size(); payload_idx++) {
+		if (aggregates[payload_idx].primitive_update_kind == AggregatePrimitiveUpdateKind::COUNT_STAR) {
+			continue;
+		}
+		auto &source_not_null = payloads[payload_idx].input_source_not_null;
+		if (source_not_null.size() != source_count) {
+			return nullptr;
+		}
+		if (!result) {
+			result = source_not_null;
+		} else if (*result != source_not_null) {
+			throw InternalException("SLJIT fused typed aggregate payload source facts are not normalized");
+		}
+	}
+	return result;
 }
 
 static bool SljitTryGetFusedTypedPayloadCombinedSources(vector<SljitExecutableRegionExpression> &payloads,

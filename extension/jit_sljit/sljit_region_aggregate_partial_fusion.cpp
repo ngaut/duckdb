@@ -71,8 +71,11 @@ bool TryPartiallyFuseNativeProjectionIntoPerfectHashAggregateUpdate(const vector
 	                                                              rewritten_types, render_diagnostics)) {
 		return false;
 	}
-	if (!TryNormalizePerfectHashAggregatePayloads(payloads, sink, render_diagnostics) ||
-	    !SljitPerfectHashGroupLookupSupported(sink, payloads)) {
+	if (!TryNormalizePerfectHashAggregatePayloads(payloads, sink, render_diagnostics)) {
+		return false;
+	}
+	const bool use_perfect_hash_group_lookup = SljitPerfectHashGroupLookupSupported(sink, payloads);
+	if (!use_perfect_hash_group_lookup && !SljitGroupedStateAddressPayloadsSupported(sink, payloads)) {
 		return false;
 	}
 	const bool primitive_payload_transition = !aggregate_update.aggregate_update.use_primitive_payloads;
@@ -88,12 +91,17 @@ bool TryPartiallyFuseNativeProjectionIntoPerfectHashAggregateUpdate(const vector
 	aggregate_update.aggregate_update.payloads = std::move(payloads);
 	aggregate_update.aggregate_update.use_primitive_payloads = true;
 	aggregate_update.aggregate_update.use_grouped_state_addresses = true;
-	aggregate_update.aggregate_update.use_perfect_hash_group_lookup = true;
+	aggregate_update.aggregate_update.use_perfect_hash_group_lookup = use_perfect_hash_group_lookup;
 	if (render_diagnostics) {
 		AppendSljitAggregateUpdateDiagnostic(aggregate_update.aggregate_update,
 		                                     "primitive_payload_projection_partially_composed=true");
-		AppendSljitAggregateUpdateDiagnostic(aggregate_update.aggregate_update,
-		                                     "grouped_state_lookup=generated-perfect-hash");
+		if (aggregate_update.aggregate_update.use_perfect_hash_group_lookup) {
+			AppendSljitAggregateUpdateDiagnostic(aggregate_update.aggregate_update,
+			                                     "grouped_state_lookup=generated-perfect-hash");
+		} else {
+			AppendSljitAggregateUpdateDiagnostic(aggregate_update.aggregate_update,
+			                                     "grouped_state_lookup=native-state-address");
+		}
 	}
 	return true;
 }

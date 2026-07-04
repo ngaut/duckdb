@@ -8,6 +8,8 @@
 
 #include "sljit_region_plan_internal.hpp"
 
+#include "sljit_hash_join_probe_codegen_validation.hpp"
+
 namespace duckdb {
 
 static bool SljitNativeRegionExpressionGeneratesCode(const SljitNativeRegionExpressionPlan &expr) {
@@ -31,6 +33,11 @@ static bool SljitNativeRegionExpressionsGenerateCode(const vector<SljitNativeReg
 	return false;
 }
 
+static bool SljitNativeHashJoinProbeGeneratesDeferredCode(const SljitNativeHashJoinProbePlan &plan) {
+	string unused_error;
+	return SljitValidateHashJoinProbePlan(plan, unused_error);
+}
+
 static bool SljitNativeRegionOpGeneratesMachineCode(const SljitNativeRegionOpPlan &op) {
 	switch (op.kind) {
 	case SljitNativeRegionOpKind::FILTER:
@@ -38,22 +45,21 @@ static bool SljitNativeRegionOpGeneratesMachineCode(const SljitNativeRegionOpPla
 	case SljitNativeRegionOpKind::PROJECTION:
 		return SljitNativeRegionExpressionsGenerateCode(op.projections);
 	case SljitNativeRegionOpKind::HASH_JOIN_PROBE:
-		return !op.hash_join_probe.keys.empty() && op.hash_join_probe.equality_key_count > 0 &&
-		       op.hash_join_probe.equality_key_count <= op.hash_join_probe.keys.size() &&
-		       op.hash_join_probe.output_mode != ExecutionHashJoinProbeOutputMode::NONE;
+		return SljitNativeHashJoinProbeGeneratesDeferredCode(op.hash_join_probe) ||
+		       (op.hash_join_probe.residual_predicate &&
+		        SljitNativeRegionExpressionGeneratesCode(op.hash_join_probe.residual_filter));
 	case SljitNativeRegionOpKind::HASH_JOIN_BUILD:
 		return false;
 	case SljitNativeRegionOpKind::NESTED_LOOP_JOIN_PROBE:
-		return op.nested_loop_join_probe.join_type == ExecutionRegionJoinType::INNER &&
-		       op.nested_loop_join_probe.conditions.size() == 1;
+		return false;
 	case SljitNativeRegionOpKind::NESTED_LOOP_JOIN_BUILD:
 		return SljitNativeRegionExpressionsGenerateCode(op.nested_loop_join_build.rhs_conditions);
 	case SljitNativeRegionOpKind::ORDER_SINK:
 		return SljitNativeRegionExpressionsGenerateCode(op.order_sink.order_keys);
 	case SljitNativeRegionOpKind::DELIM_JOIN_SINK:
 		return false;
-		case SljitNativeRegionOpKind::AGGREGATE_UPDATE:
-			return op.aggregate_update.use_primitive_payloads || op.aggregate_update.use_distinct_count_pointer_update;
+	case SljitNativeRegionOpKind::AGGREGATE_UPDATE:
+		return op.aggregate_update.use_primitive_payloads;
 	default:
 		return false;
 	}
@@ -99,7 +105,10 @@ static string SljitNativeRegionOpBoundaryBlocker(const SljitNativeRegionOpPlan &
 		return string();
 	}
 	if (op.kind == SljitNativeRegionOpKind::AGGREGATE_UPDATE) {
-		if (op.aggregate_update.use_primitive_payloads || op.aggregate_update.use_distinct_count_pointer_update) {
+		if (op.aggregate_update.use_primitive_payloads) {
+			return string();
+		}
+		if (SljitNativeRegionOpIsNativeSink(op)) {
 			return string();
 		}
 		return "operator-contract-blocker:aggregate-update-generated-payload-missing";

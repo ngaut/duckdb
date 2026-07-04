@@ -251,4 +251,8 @@ void ExecutionRegionRuntime::RecordJitMaterializationBoundary(const char *, idx_
 void ExecutionRegionRuntime::RecordLazyCodegen(const ExecutionRegionLazyCodegenMetrics &) {
 }
 
+bool ExecutionRegionRuntime::TryMarkOnce(ExecutionRegionRuntimeOnceFlag, idx_t) {
+	return true;
+}
+
 } // namespace duckdb

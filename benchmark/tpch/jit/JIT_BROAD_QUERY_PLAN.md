@@ -1,6 +1,6 @@
 # JIT Broad Query Root Plan
 
-Last updated: 2026-07-02
+Last updated: 2026-07-04
 Last verified base: `7b59f15ed6` plus current working-tree JIT changes
 Branch: `codex/jit-native-duckdb-core`
 
@@ -1142,13 +1142,16 @@ Before claiming a milestone complete:
 ## Current Aggressive CBO Checkpoint
 
 - The stale generic `configured_native_operator` admission token is deleted.
-  Native operator work is admitted by the quantitative `native_operator` class
-  when measured native-stage benefit pays after protocol penalties. It is not a
-  hidden shape waiver and it does not require generated-stage credit.
+  The stale quantitative `native_operator` admission class is also deleted.
+  Native operator work is now a score component only after generated code or
+  materialization elision has anchored the compiled region. Protocol-only native
+  wrappers stay vectorized because they do not prove value-lifetime ownership.
 - Graph prefiltering now distinguishes native aggregate sinks from generic
-  native operator work. Native stage benefit can make planning worthwhile for
-  generated-native graphs, native aggregate sinks, and native-only join graphs
-  when the same cost equation clears startup and protocol costs.
+  native operator work. Native stage benefit can make planning worthwhile only
+  when primitive aggregate update, generated perfect-hash lookup, generated IR,
+  or materialization elision anchors the region. Native aggregate state
+  contracts without those generated body facts are protocol-only, the same as
+  native-only join graphs.
 - Default settings are now the measured aggressive profile:
   `jit_cbo_generated_stage_benefit=4096`,
   `jit_cbo_materialization_elision_benefit=4096`,
@@ -1156,10 +1159,9 @@ Before claiming a milestone complete:
   `jit_cbo_full_pipeline_benefit=4096`,
   `jit_cbo_startup_base_cost=32000`, and
   `jit_cbo_startup_margin_basis_points=0`.
-- Native benefit guards are smaller and evidence-based: weak native-only join
-  plumbing is rejected by net benefit instead of hidden shape gates, while the
-  wide-join guard uses costed post-filter rows instead of a blanket stage-count
-  veto.
+- Native benefit guards are explicit capability gates: weak native-only join
+  plumbing is rejected as protocol-only, while generated/native fusion still
+  scores native-stage benefit with costed post-filter rows.
 - The mixed find-or-create grouped fused-payload route no longer calls the
   selected state-address payload callback from inside hash-table lookup.
   Append-new and existing-group fast paths remain direct, while mixed new/existing
@@ -1353,17 +1355,11 @@ Before claiming a milestone complete:
   Focused production
   `/private/tmp/duckdb_jit_q07_sf10_production_direct_multiref_r15` verified
   correctness diff 0 at `0.595s -> 0.579s` (`1.028x`).
-- Q11 was not a CBO miss. The selected SF10 shape was a native
-  `hash_join_probe -> append_sink` full pipeline fed by sparse table-scan source
-  chunks; before this cleanup the runtime executed the probe/append path 3907
-  times for 323920 rows. The shared full-pipeline route registry now routes
-  hash-join-only append sinks through the existing source-input batching executor
-  used by hash-join build and delim sinks. The traced checkpoint
-  `/private/tmp/duckdb_jit_q11_sf10_profile_append_batched_r1` shows runtime
-  events collapsed to 4, probe stage count collapsed to 164, and
-  `hash_join_probe.source_input_batch=323920`. Focused Q11 production
-  `/private/tmp/duckdb_jit_q11_sf10_production_append_batched_r15` verified
-  correctness diff 0 at `0.073s -> 0.070s` (`1.043x`).
+- The old Q11 native `hash_join_probe -> append_sink` batching route is removed.
+  It was useful as profiling evidence that sparse source batches matter, but it
+  was still a protocol-only native wrapper and therefore contradicted the
+  production compiled-body rule. Future Q11 work must add a generated body or a
+  real materialization-elision anchor before native-stage benefit can be scored.
 - Current broad SF10 production status after the fixed-width/native codegen
   cleanup and perfect-hash COUNT(reference) lookup cleanup is
   `/private/tmp/duckdb_jit_tpch_sf10_broad_after_count_lookup_cleanup_r5_20260702`,
@@ -1445,30 +1441,22 @@ Before claiming a milestone complete:
   all-query artifact above is the current post-refactor validation.
 - Q16 is not a CBO-conservatism miss. Forced zero-startup admission in
   `/private/tmp/duckdb_jit_q16_force_startup0` regressed production from
-  `0.158s` to `0.166s` median while compiling seven regions. The root fix is now
-  in DuckDB's distinct aggregate path, not in CBO: grouped row pointers feed a
-  compact integer distinct-count backend, and the backend increments the count
-  state only on first insert. The old tuple-backed duplicate table and
-  count-all-then-decrement correction path are gone, and the follow-up cleanup
-  deleted the temporary distinct `DataChunk` plus valid-row selection scratch.
-  Focused SF10 Q16 production
-  `/private/tmp/duckdb_jit_q16_inline_hash_direct_update_r2` verified
-  correctness diff 0 with 30 repeats at `0.162s` off median and `0.163s` auto
-  median, with `compiled_regions=0`. Cleanup smoke
-  `/private/tmp/duckdb_jit_q16_no_distinct_chunk_r1` verified correctness diff 0
-  with 10 repeats at `0.1555s` off median and `0.1550s` auto median, again with
-  `compiled_regions=0`. The pointer-key distinct backend now lives in
-  `distinct_count_pointer_set.cpp`, and its adjacent-row current-group cache is
-  local to the row loop instead of persistent hash-table state. Focused SF10 Q16
-  production `/private/tmp/duckdb_jit_q16_pointer_set_split_r5_20260702`
-  verified correctness diff 0 over five repeats at `0.043s` off median and
-  `0.044s` auto median, with `compiled_regions=0`. Current traced profile
-  `/private/tmp/duckdb_jit_q16_sf10_current_profile_20260702` again verifies
-  correctness diff 0 with `compiled_regions=0`: the rejected candidates are
-  small generated/projection-glue fragments with negative net benefit, plus two
-  `no_executable_region_work` decisions. Future Q16 work should remove more
-  grouped lookup/projection traffic from this backend; do not admit the old
-  generated fragments or reintroduce CBO leniency.
+  `0.158s` to `0.166s` median while compiling seven regions. The root fix is in
+  DuckDB's distinct aggregate path and in cost-fact ownership, not in CBO
+  leniency: grouped row pointers feed a compact integer distinct-count backend,
+  and the backend increments the count state only on first insert. The physical
+  distinct count-pointer strategy is now telemetry-independent; production and
+  traced planning expose the same `distinct_ptr=1` candidate instead of making
+  the backend trace-only. Focused SF10 Q16 production
+  `/private/tmp/duckdb_jit_tpch_sf10_q16_trace_invariant_r5_20260704` verified
+  correctness diff 0 over five repeats at `0.167s` off median and `0.144s`
+  auto median, speedup `1.160x`, with `compiled_regions=0`. The rejected
+  combined candidate is the real architecture shape:
+  `gen=7,gen_backend=3,mat=1,join=3,join_build_sink=1,distinct_ptr=1`, rejected
+  by negative saved work after charging distinct count-pointer stateful backend
+  cost and blocking generated backend-stage credit through a native hash-join
+  build sink. Future Q16 work should optimize the distinct backend itself; do
+  not admit the old generated fragments or reintroduce CBO leniency.
 - Q8 source-filter ownership is now explicit instead of inferred from source
   traits. Generated source-filter plans request source-contract input layout;
   only the single-filter identity-layout shape may also keep DuckDB scan filters
@@ -1477,9 +1465,10 @@ Before claiming a milestone complete:
   `/private/tmp/duckdb_jit_tpch_sf10_q8_hybrid_input_layout_r15_20260702`
   verified correctness diff 0 at `0.401s -> 0.360s`, speedup `1.114x`. Full
   SF10 production
-  `/private/tmp/duckdb_jit_tpch_sf10_all_hybrid_input_layout_r5_20260702`
-  verified correctness diff 0 for all 22 queries: 21 queries jitted, all 21
-  jitted queries faster than non-JIT, and Q16 remains non-jitted.
+  `/private/tmp/duckdb_jit_tpch_sf10_arch_budget_20260704`
+  verified correctness diff 0 for all 22 queries: 20 queries jitted, 17 queries
+  faster overall, 16 jitted queries faster, and Q16 remains non-jitted but is
+  faster from the core distinct count-pointer backend.
 
 ## Definition Of Done
 

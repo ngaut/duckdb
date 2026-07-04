@@ -11,6 +11,7 @@
 
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/helper.hpp"
+#include "duckdb/common/types/date.hpp"
 
 namespace duckdb {
 
@@ -66,6 +67,58 @@ static void EmitSljitTypedExpressionTreeCast(struct sljit_compiler *compiler, co
 	}
 	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R3, 0, SLJIT_MEM1(SLJIT_SP), source_slot.valid_offset);
 	EmitStoreSljitTypedExpressionTreeSlot(compiler, slot, SLJIT_R2, SLJIT_R3);
+}
+
+static SljitTypedExpressionTreeSlot
+EmitSljitTypedExpressionTreeDateYear(struct sljit_compiler *compiler, const ExecutionExpressionIR &node,
+                                     idx_t &slot_index, vector<SljitExpressionTreeOverflowJumps> &overflows,
+                                     const vector<idx_t> *known_valid_sources) {
+	D_ASSERT(node.children.size() == 1);
+	auto source_slot =
+	    EmitSljitTypedExpressionTreeValue(compiler, *node.children[0], slot_index, overflows, known_valid_sources);
+	auto result_slot = AllocateSljitTypedExpressionTreeSlot(slot_index);
+
+	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R3, 0, SLJIT_MEM1(SLJIT_SP), source_slot.valid_offset);
+	auto source_invalid = sljit_emit_cmp(compiler, SLJIT_EQUAL, SLJIT_R3, 0, SLJIT_IMM, 0);
+	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R2, 0, SLJIT_MEM1(SLJIT_SP), source_slot.value_offset);
+	auto positive_infinity = sljit_emit_cmp(compiler, SLJIT_EQUAL, SLJIT_R2, 0, SLJIT_IMM,
+	                                        NumericCast<sljit_sw>(date_t::infinity().days));
+	auto negative_infinity = sljit_emit_cmp(compiler, SLJIT_EQUAL, SLJIT_R2, 0, SLJIT_IMM,
+	                                        NumericCast<sljit_sw>(date_t::ninfinity().days));
+	EmitSljitDateYearFromDays(compiler, SLJIT_R2, SLJIT_R2);
+	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R3, 0, SLJIT_IMM, 1);
+	EmitStoreSljitTypedExpressionTreeSlot(compiler, result_slot, SLJIT_R2, SLJIT_R3);
+	auto done = sljit_emit_jump(compiler, SLJIT_JUMP);
+	auto invalid_label = sljit_emit_label(compiler);
+	sljit_set_label(source_invalid, invalid_label);
+	sljit_set_label(positive_infinity, invalid_label);
+	sljit_set_label(negative_infinity, invalid_label);
+	EmitSljitTypedExpressionTreeInvalidResult(compiler, result_slot);
+	sljit_set_label(done, sljit_emit_label(compiler));
+	return result_slot;
+}
+
+static SljitTypedExpressionTreeSlot
+EmitSljitTypedExpressionTreeIntegralCompress(struct sljit_compiler *compiler, const ExecutionExpressionIR &node,
+                                             idx_t &slot_index, vector<SljitExpressionTreeOverflowJumps> &overflows,
+                                             const vector<idx_t> *known_valid_sources) {
+	D_ASSERT(node.children.size() == 2);
+	auto source_slot =
+	    EmitSljitTypedExpressionTreeValue(compiler, *node.children[0], slot_index, overflows, known_valid_sources);
+	auto result_slot = AllocateSljitTypedExpressionTreeSlot(slot_index);
+
+	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R3, 0, SLJIT_MEM1(SLJIT_SP), source_slot.valid_offset);
+	auto source_invalid = sljit_emit_cmp(compiler, SLJIT_EQUAL, SLJIT_R3, 0, SLJIT_IMM, 0);
+	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R2, 0, SLJIT_MEM1(SLJIT_SP), source_slot.value_offset);
+	sljit_emit_op2(compiler, SLJIT_SUB, SLJIT_R2, 0, SLJIT_R2, 0, SLJIT_IMM,
+	               NumericCast<sljit_sw>(SljitTypedExpressionTreeConstantValue(*node.children[1])));
+	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R3, 0, SLJIT_IMM, 1);
+	EmitStoreSljitTypedExpressionTreeSlot(compiler, result_slot, SLJIT_R2, SLJIT_R3);
+	auto done = sljit_emit_jump(compiler, SLJIT_JUMP);
+	sljit_set_label(source_invalid, sljit_emit_label(compiler));
+	EmitSljitTypedExpressionTreeInvalidResult(compiler, result_slot);
+	sljit_set_label(done, sljit_emit_label(compiler));
+	return result_slot;
 }
 
 static SljitTypedExpressionTreeSlot
@@ -221,6 +274,13 @@ SljitTypedExpressionTreeSlot EmitSljitTypedExpressionTreeValue(struct sljit_comp
 	case ExecutionExpressionIRKind::CASE:
 		return EmitSljitTypedExpressionTreeCase(compiler, node, slot_index, overflows, known_valid_sources);
 	case ExecutionExpressionIRKind::INTRINSIC:
+		if (node.intrinsic == ExecutionExpressionIntrinsicKind::DATE_YEAR) {
+			return EmitSljitTypedExpressionTreeDateYear(compiler, node, slot_index, overflows, known_valid_sources);
+		}
+		if (node.intrinsic == ExecutionExpressionIntrinsicKind::INTEGRAL_COMPRESS) {
+			return EmitSljitTypedExpressionTreeIntegralCompress(compiler, node, slot_index, overflows,
+			                                                   known_valid_sources);
+		}
 		return EmitSljitTypedExpressionTreeStringPrefix(compiler, node, slot_index);
 	default:
 		throw InternalException("Unsupported SLJIT typed expression-tree node kind");

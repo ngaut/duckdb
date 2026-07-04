@@ -10,6 +10,7 @@
 
 #include "sljit_region_aggregate_payload_fusion.hpp"
 #include "sljit_region_aggregate_projection_rewrite.hpp"
+#include "sljit_typed_expression_plan.hpp"
 
 namespace duckdb {
 
@@ -20,18 +21,107 @@ static bool SljitPrimitiveAggregatePayloadCanEraseProjection(const SljitNativeRe
 	return payload.references_region_input;
 }
 
+static bool SljitPerfectHashIntegralCompressSourceMatchesInput(SljitNativeSignedIntegerWidth width,
+                                                               const LogicalType &type) {
+	switch (width) {
+	case SljitNativeSignedIntegerWidth::INT8:
+		return type.InternalType() == PhysicalType::INT8;
+	case SljitNativeSignedIntegerWidth::INT16:
+		return type.InternalType() == PhysicalType::INT16;
+	case SljitNativeSignedIntegerWidth::INT32:
+		return type.InternalType() == PhysicalType::INT32;
+	case SljitNativeSignedIntegerWidth::INT64:
+		return type.InternalType() == PhysicalType::INT64;
+	default:
+		return false;
+	}
+}
+
+static bool TryGetSljitPerfectHashGroupKind(const LogicalType &type, SljitNativeIntegerKind &kind) {
+	switch (type.InternalType()) {
+	case PhysicalType::INT8:
+		kind = SljitNativeIntegerKind::INT8;
+		return true;
+	case PhysicalType::UINT8:
+		kind = SljitNativeIntegerKind::UINT8;
+		return true;
+	case PhysicalType::INT32:
+		kind = SljitNativeIntegerKind::INT32;
+		return true;
+	case PhysicalType::INT64:
+		kind = SljitNativeIntegerKind::INT64;
+		return true;
+	default:
+		return false;
+	}
+}
+
+static bool SljitExpressionTreeReferencesMatchInputTypes(const ExecutionExpressionIR &node,
+                                                         const vector<idx_t> &source_indices,
+                                                         const vector<LogicalType> &input_types) {
+	if (node.kind == ExecutionExpressionIRKind::REFERENCE) {
+		if (node.ref_index >= source_indices.size()) {
+			return false;
+		}
+		auto source_index = source_indices[node.ref_index];
+		if (source_index >= input_types.size()) {
+			return false;
+		}
+		return node.return_type == input_types[source_index];
+	}
+	if (node.left && !SljitExpressionTreeReferencesMatchInputTypes(*node.left, source_indices, input_types)) {
+		return false;
+	}
+	if (node.right && !SljitExpressionTreeReferencesMatchInputTypes(*node.right, source_indices, input_types)) {
+		return false;
+	}
+	if (node.else_node && !SljitExpressionTreeReferencesMatchInputTypes(*node.else_node, source_indices, input_types)) {
+		return false;
+	}
+	for (auto &child : node.children) {
+		if (!child || !SljitExpressionTreeReferencesMatchInputTypes(*child, source_indices, input_types)) {
+			return false;
+		}
+	}
+	return true;
+}
+
 static bool SljitPerfectHashGroupExpressionCanEraseProjection(const vector<LogicalType> &input_types,
                                                               const SljitNativeRegionExpressionPlan &expr,
                                                               const ExecutionRegionGroupInput &group) {
-	if (expr.return_type.InternalType() != group.type.InternalType() || expr.source_index >= input_types.size()) {
+	if (expr.return_type.InternalType() != group.type.InternalType()) {
 		return false;
 	}
 	switch (expr.kind) {
 	case SljitNativeRegionExpressionKind::REFERENCE:
+		if (expr.source_index >= input_types.size()) {
+			return false;
+		}
 		return expr.references_region_input;
+	case SljitNativeRegionExpressionKind::INTEGRAL_COMPRESS:
+		if (expr.source_index >= input_types.size()) {
+			return false;
+		}
+		return SljitPerfectHashIntegralCompressSourceMatchesInput(expr.cast_source_width, input_types[expr.source_index]);
 	case SljitNativeRegionExpressionKind::STRING_COMPRESS:
+		if (expr.source_index >= input_types.size()) {
+			return false;
+		}
 		return input_types[expr.source_index].id() == LogicalTypeId::VARCHAR &&
 		       group.type.InternalType() == PhysicalType::UINT8 && expr.string_compress_target_size == sizeof(uint8_t);
+	case SljitNativeRegionExpressionKind::TYPED_EXPRESSION_TREE: {
+		if (!expr.expression_tree) {
+			return false;
+		}
+		if (!SljitExpressionTreeReferencesMatchInputTypes(*expr.expression_tree, expr.expression_tree_source_indices,
+		                                                  input_types)) {
+			return false;
+		}
+		SljitNativeIntegerKind group_kind;
+		auto tree_plan = BuildSljitTypedExpressionTreePlan(*expr.expression_tree, false);
+		return tree_plan.supported && TryGetSljitPerfectHashGroupKind(group.type, group_kind) &&
+		       tree_plan.result_kind == group_kind;
+	}
 	default:
 		return false;
 	}

@@ -8,6 +8,9 @@
 
 #pragma once
 
+#include "sljit_aggregate_fused_codegen.hpp"
+#include "sljit_aggregate_perfect_hash_codegen.hpp"
+#include "sljit_aggregate_typed_payload_codegen.hpp"
 #include "sljit_native_plan.hpp"
 #include "sljit_region_plan_internal.hpp"
 #include "sljit_typed_expression_plan.hpp"
@@ -118,6 +121,63 @@ static bool SljitPrimitiveAggregatePayloadSupported(SljitNativeRegionExpressionP
 static bool SljitAggregateUpdateUsesGeneratedPerfectHashLookup(const ExecutionRegionSinkInfo &sink) {
 	return sink.kind == ExecutionRegionSinkKind::PERFECT_HASH_AGGREGATE_UPDATE &&
 	       sink.aggregate_contract.native_grouped_state_contract.status == ExecutionRegionStateContractStatus::READY;
+}
+
+static bool SljitGroupedStateAddressPrimitivePayloadsSupported(
+    const ExecutionRegionSinkInfo &sink, const vector<SljitNativeRegionExpressionPlan> &payloads) {
+	if (payloads.empty() || payloads.size() != sink.aggregates.size()) {
+		return false;
+	}
+	for (idx_t payload_idx = 0; payload_idx < payloads.size(); payload_idx++) {
+		if (!SljitFusedGroupedPrimitiveAggregatePayloadSupported(payloads[payload_idx], sink.aggregates[payload_idx],
+		                                                         sink.aggregate_contract)) {
+			return false;
+		}
+	}
+	return true;
+}
+
+static bool SljitGroupedStateAddressTypedPayloadsSupported(
+    const ExecutionRegionSinkInfo &sink, const vector<SljitNativeRegionExpressionPlan> &payloads) {
+	auto &contract = sink.aggregate_contract;
+	if (!contract.grouped_state_layout_ready || payloads.empty() || payloads.size() != sink.aggregates.size()) {
+		return false;
+	}
+	bool has_typed_payload = false;
+	for (idx_t payload_idx = 0; payload_idx < payloads.size(); payload_idx++) {
+		auto &aggregate = sink.aggregates[payload_idx];
+		auto &payload = payloads[payload_idx];
+		if (!SljitFusedGroupedTypedAggregatePayloadSupported(payload, aggregate, contract)) {
+			return false;
+		}
+		if (aggregate.primitive_update_kind == AggregatePrimitiveUpdateKind::COUNT_STAR ||
+		    payload.kind == SljitNativeRegionExpressionKind::REFERENCE) {
+			continue;
+		}
+		if (payload.kind != SljitNativeRegionExpressionKind::TYPED_EXPRESSION_TREE || !payload.expression_tree) {
+			return false;
+		}
+		auto payload_plan = BuildSljitTypedExpressionTreePlan(*payload.expression_tree, false);
+		if (!SljitAggregateTypedPayloadPlanSupported(payload_plan, aggregate)) {
+			return false;
+		}
+		has_typed_payload = true;
+	}
+	return has_typed_payload;
+}
+
+static bool
+SljitGroupedStateAddressPayloadsSupported(const ExecutionRegionSinkInfo &sink,
+                                          const vector<SljitNativeRegionExpressionPlan> &payloads) {
+	auto &contract = sink.aggregate_contract;
+	if ((sink.kind != ExecutionRegionSinkKind::HASH_AGGREGATE_UPDATE &&
+	     sink.kind != ExecutionRegionSinkKind::PERFECT_HASH_AGGREGATE_UPDATE) ||
+	    contract.native_grouped_state_contract.status != ExecutionRegionStateContractStatus::READY ||
+	    !contract.grouped_state_layout_ready) {
+		return false;
+	}
+	return SljitGroupedStateAddressPrimitivePayloadsSupported(sink, payloads) ||
+	       SljitGroupedStateAddressTypedPayloadsSupported(sink, payloads);
 }
 
 static bool SljitPrimitiveAggregatePayloadsContainNonReference(const vector<SljitNativeRegionExpressionPlan> &payloads,
@@ -275,61 +335,44 @@ static bool SljitPerfectHashGroupLookupSupported(
 	auto &contract = sink.aggregate_contract;
 	if (sink.kind != ExecutionRegionSinkKind::PERFECT_HASH_AGGREGATE_UPDATE ||
 	    contract.kind != ExecutionRegionAggregateOperatorKind::PERFECT_HASH || !contract.grouped_state_layout_ready ||
-	    payloads.empty() || contract.perfect_required_bits.size() != sink.groups.size() ||
-	    contract.perfect_group_minima.size() != sink.groups.size() ||
-	    (group_expressions && group_expressions->size() != sink.groups.size())) {
+	    payloads.empty() || payloads.size() != sink.aggregates.size() ||
+	    contract.perfect_required_bits_total >= 8 * sizeof(idx_t)) {
 		return false;
 	}
-	for (idx_t group_idx = 0; group_idx < sink.groups.size(); group_idx++) {
-		auto &group = sink.groups[group_idx];
-		if (!group.supported_reference) {
-			return false;
-		}
-		switch (group.type.InternalType()) {
-		case PhysicalType::INT8:
-		case PhysicalType::UINT8:
-		case PhysicalType::INT32:
-		case PhysicalType::INT64:
+	static const vector<SljitNativeRegionExpressionPlan> empty_group_expressions;
+	auto &resolved_group_expressions = group_expressions ? *group_expressions : empty_group_expressions;
+	vector<SljitPerfectHashGroupPlan> primitive_group_plans;
+	const bool primitive_group_lookup_supported =
+	    TryBuildSljitPerfectHashGroupPlans(sink.groups, resolved_group_expressions, contract,
+	                                       primitive_group_plans) &&
+	    !primitive_group_plans.empty();
+	vector<SljitPerfectHashGroupPlan> typed_group_plans;
+	if (!TryBuildSljitPerfectHashGroupPlans(sink.groups, resolved_group_expressions, contract, typed_group_plans,
+	                                        true) ||
+	    typed_group_plans.empty()) {
+		return false;
+	}
+
+	bool primitive_payloads_supported = true;
+	for (idx_t payload_idx = 0; payload_idx < payloads.size(); payload_idx++) {
+		if (!SljitFusedGroupedPrimitiveAggregatePayloadSupported(payloads[payload_idx], sink.aggregates[payload_idx],
+		                                                         contract)) {
+			primitive_payloads_supported = false;
 			break;
-		default:
-			return false;
-		}
-		if (group_expressions) {
-			auto &group_expression = (*group_expressions)[group_idx];
-			if (group_expression.return_type.InternalType() != group.type.InternalType()) {
-				return false;
-			}
-			switch (group_expression.kind) {
-			case SljitNativeRegionExpressionKind::REFERENCE:
-				break;
-			case SljitNativeRegionExpressionKind::STRING_COMPRESS:
-				if (group.type.InternalType() != PhysicalType::UINT8 ||
-				    group_expression.string_compress_target_size != sizeof(uint8_t)) {
-					return false;
-				}
-				break;
-			default:
-				return false;
-			}
 		}
 	}
+	if (primitive_payloads_supported && primitive_group_lookup_supported) {
+		return true;
+	}
+
+	SljitFusedTypedAggregateCodegenPlan typed_plan;
+	if (!BuildSljitFusedTypedAggregateCodegenPlan(payloads, sink.aggregates, typed_plan,
+	                                              !primitive_group_lookup_supported)) {
+		return false;
+	}
 	for (idx_t payload_idx = 0; payload_idx < payloads.size(); payload_idx++) {
-		auto &aggregate = sink.aggregates[payload_idx];
-		auto &payload = payloads[payload_idx];
-		if (aggregate.primitive_update_kind == AggregatePrimitiveUpdateKind::COUNT_STAR) {
-			if (aggregate.child_count != 0) {
-				return false;
-			}
-			continue;
-		}
-		if (!AggregatePrimitiveUpdateRequiresPayload(aggregate.primitive_update_kind) ||
-		    (payload.kind != SljitNativeRegionExpressionKind::REFERENCE &&
-		     payload.kind != SljitNativeRegionExpressionKind::TYPED_EXPRESSION_TREE)) {
-			return false;
-		}
-		if (aggregate.primitive_update_kind != AggregatePrimitiveUpdateKind::COUNT &&
-		    aggregate.primitive_update_kind != AggregatePrimitiveUpdateKind::SUM_INT64 &&
-		    aggregate.primitive_update_kind != AggregatePrimitiveUpdateKind::SUM_HUGEINT) {
+		if (!SljitFusedGroupedTypedAggregatePayloadSupported(payloads[payload_idx], sink.aggregates[payload_idx],
+		                                                     contract)) {
 			return false;
 		}
 	}

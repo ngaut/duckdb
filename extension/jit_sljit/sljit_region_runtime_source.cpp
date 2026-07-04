@@ -11,6 +11,8 @@
 #include "sljit_native_runtime.hpp"
 
 #include "duckdb/common/exception.hpp"
+#include "duckdb/common/vector/constant_vector.hpp"
+#include "duckdb/common/vector/dictionary_vector.hpp"
 #include "duckdb/common/vector/flat_vector.hpp"
 
 namespace duckdb {
@@ -72,6 +74,25 @@ const validity_t *SljitNormalizedSourceValidityData(const UnifiedVectorFormat &f
 const validity_t *SljitNormalizedSourceValidityData(const UnifiedVectorFormat &format, const sel_t *source_sel,
                                                     const SelectionVector *execute_sel, idx_t count) {
 	return SljitNormalizedSourceAllValid(format, source_sel, execute_sel, count) ? nullptr : format.validity.GetData();
+}
+
+static const validity_t *SljitDirectSourceValidityData(const ValidityMask &validity, const sel_t *source_sel,
+                                                       const SelectionVector *execute_sel, idx_t count,
+                                                       bool source_known_not_null) {
+	if (source_known_not_null || validity.CannotHaveNull()) {
+		return nullptr;
+	}
+	if (!execute_sel && !source_sel) {
+		return validity.CheckAllValid(count) ? nullptr : validity.GetData();
+	}
+	for (idx_t row_idx = 0; row_idx < count; row_idx++) {
+		const auto logical_idx = execute_sel ? execute_sel->get_index(row_idx) : row_idx;
+		const auto source_idx = source_sel ? source_sel[logical_idx] : logical_idx;
+		if (!validity.RowIsValid(source_idx)) {
+			return validity.GetData();
+		}
+	}
+	return nullptr;
 }
 
 bool SljitUnifiedFormatHasIdentitySelection(const UnifiedVectorFormat &format) {
@@ -207,7 +228,8 @@ UnifiedVectorFormat &SljitSourceVectorScratch::PrepareFormat(DataChunk &input, i
 
 bool SljitSourceVectorScratch::PrepareFlatSource(DataChunk &input, idx_t input_index, idx_t source_idx,
                                                  const_data_ptr_t source_data, idx_t count,
-                                                 const char *out_of_range_error) {
+                                                 const char *out_of_range_error, bool source_known_not_null,
+                                                 const SelectionVector *execute_sel) {
 	if (input_index >= input.ColumnCount()) {
 		throw InternalException(out_of_range_error);
 	}
@@ -219,9 +241,54 @@ bool SljitSourceVectorScratch::PrepareFlatSource(DataChunk &input, idx_t input_i
 	data[source_idx] = source_data;
 	selections[source_idx] = nullptr;
 	auto &source_validity = FlatVector::Validity(source);
-	validity[source_idx] = source_validity.CannotHaveNull() || source_validity.CheckAllValid(count)
-	                           ? nullptr
-	                           : source_validity.GetData();
+	validity[source_idx] = SljitDirectSourceValidityData(source_validity, nullptr, execute_sel, count,
+	                                                    source_known_not_null);
+	return true;
+}
+
+bool SljitSourceVectorScratch::PrepareDictionarySource(DataChunk &input, idx_t input_index, idx_t source_idx,
+                                                       const_data_ptr_t source_data, idx_t count,
+                                                       const char *out_of_range_error,
+                                                       bool source_known_not_null,
+                                                       const SelectionVector *execute_sel) {
+	if (input_index >= input.ColumnCount()) {
+		throw InternalException(out_of_range_error);
+	}
+	CheckSourceIndex(source_idx);
+	auto &source = input.data[input_index];
+	if (source.GetVectorType() != VectorType::DICTIONARY_VECTOR) {
+		return false;
+	}
+	auto &child = DictionaryVector::Child(source);
+	if (child.GetVectorType() != VectorType::FLAT_VECTOR) {
+		return false;
+	}
+	data[source_idx] = source_data ? source_data : FlatVector::GetData(child);
+	selections[source_idx] = DictionaryVector::SelVector(source).data();
+	auto &source_validity = FlatVector::Validity(child);
+	validity[source_idx] = SljitDirectSourceValidityData(source_validity, selections[source_idx], execute_sel, count,
+	                                                    source_known_not_null);
+	return true;
+}
+
+bool SljitSourceVectorScratch::PrepareConstantSource(DataChunk &input, idx_t input_index, idx_t source_idx,
+                                                     const_data_ptr_t source_data, idx_t count,
+                                                     const char *out_of_range_error, bool source_known_not_null) {
+	if (input_index >= input.ColumnCount()) {
+		throw InternalException(out_of_range_error);
+	}
+	CheckSourceIndex(source_idx);
+	auto &source = input.data[input_index];
+	if (source.GetVectorType() != VectorType::CONSTANT_VECTOR) {
+		return false;
+	}
+	if (count > STANDARD_VECTOR_SIZE) {
+		return false;
+	}
+	data[source_idx] = source_data ? source_data : ConstantVector::GetData(source);
+	selections[source_idx] = ConstantVector::ZeroSelectionVector()->data();
+	auto &source_validity = ConstantVector::Validity(source);
+	validity[source_idx] = source_known_not_null || source_validity.RowIsValid(0) ? nullptr : source_validity.GetData();
 	return true;
 }
 
@@ -230,36 +297,86 @@ void SljitSourceVectorScratch::SetData(idx_t source_idx, const_data_ptr_t source
 	data[source_idx] = source_data;
 }
 
-void SljitSourceVectorScratch::FinishSource(idx_t source_idx, const SelectionVector *execute_sel, idx_t count) {
+void SljitSourceVectorScratch::FinishSource(idx_t source_idx, const SelectionVector *execute_sel, idx_t count,
+                                            bool source_known_not_null) {
 	CheckSourceIndex(source_idx);
 	selections[source_idx] = SljitNormalizedSourceSelectionData(formats[source_idx]);
-	validity[source_idx] =
-	    SljitNormalizedSourceValidityData(formats[source_idx], selections[source_idx], execute_sel, count);
+	validity[source_idx] = source_known_not_null
+	                           ? nullptr
+	                           : SljitNormalizedSourceValidityData(formats[source_idx], selections[source_idx],
+	                                                               execute_sel, count);
 }
 
 void SljitSourceVectorScratch::PrepareTypedExpressionSource(DataChunk &input, idx_t input_index, idx_t source_idx,
                                                             const SelectionVector *execute_sel, idx_t count,
-                                                            const char *out_of_range_error) {
+                                                            const char *out_of_range_error,
+                                                            bool source_known_not_null) {
+	if (input_index < input.ColumnCount() && input.data[input_index].GetVectorType() == VectorType::FLAT_VECTOR &&
+	    PrepareFlatSource(input, input_index, source_idx, FlatVector::GetData(input.data[input_index]), count,
+	                      out_of_range_error, source_known_not_null, execute_sel)) {
+		return;
+	}
+	if (input_index < input.ColumnCount() && input.data[input_index].GetVectorType() == VectorType::DICTIONARY_VECTOR &&
+	    PrepareDictionarySource(input, input_index, source_idx, nullptr, count, out_of_range_error,
+	                            source_known_not_null, execute_sel)) {
+		return;
+	}
+	if (input_index < input.ColumnCount() && input.data[input_index].GetVectorType() == VectorType::CONSTANT_VECTOR &&
+	    PrepareConstantSource(input, input_index, source_idx, nullptr, count, out_of_range_error,
+	                          source_known_not_null)) {
+		return;
+	}
 	auto &format = PrepareFormat(input, input_index, source_idx, out_of_range_error);
 	SetData(source_idx, SljitTypedExpressionTreeSourceData(format, input.data[input_index].GetType()));
-	FinishSource(source_idx, execute_sel, count);
+	FinishSource(source_idx, execute_sel, count, source_known_not_null);
 }
 
 void SljitSourceVectorScratch::PrepareIntegerSource(DataChunk &input, idx_t input_index, idx_t source_idx,
                                                     SljitNativeIntegerKind integer_kind,
                                                     const SelectionVector *execute_sel, idx_t count,
-                                                    const char *out_of_range_error) {
+                                                    const char *out_of_range_error,
+                                                    bool source_known_not_null) {
+	if (input_index < input.ColumnCount() && input.data[input_index].GetVectorType() == VectorType::FLAT_VECTOR &&
+	    PrepareFlatSource(input, input_index, source_idx, FlatVector::GetData(input.data[input_index]), count,
+	                      out_of_range_error, source_known_not_null, execute_sel)) {
+		return;
+	}
+	if (input_index < input.ColumnCount() && input.data[input_index].GetVectorType() == VectorType::DICTIONARY_VECTOR &&
+	    PrepareDictionarySource(input, input_index, source_idx, nullptr, count, out_of_range_error,
+	                            source_known_not_null, execute_sel)) {
+		return;
+	}
+	if (input_index < input.ColumnCount() && input.data[input_index].GetVectorType() == VectorType::CONSTANT_VECTOR &&
+	    PrepareConstantSource(input, input_index, source_idx, nullptr, count, out_of_range_error,
+	                          source_known_not_null)) {
+		return;
+	}
 	auto &format = PrepareFormat(input, input_index, source_idx, out_of_range_error);
 	SetData(source_idx, NativeIntegerSourceData(format, integer_kind));
-	FinishSource(source_idx, execute_sel, count);
+	FinishSource(source_idx, execute_sel, count, source_known_not_null);
 }
 
 void SljitSourceVectorScratch::PrepareValiditySource(DataChunk &input, idx_t input_index, idx_t source_idx,
                                                      const SelectionVector *execute_sel, idx_t count,
-                                                     const char *out_of_range_error) {
+                                                     const char *out_of_range_error, bool source_known_not_null) {
+	if (input_index < input.ColumnCount() && input.data[input_index].GetVectorType() == VectorType::FLAT_VECTOR &&
+	    PrepareFlatSource(input, input_index, source_idx, nullptr, count, out_of_range_error, source_known_not_null,
+	                      execute_sel)) {
+		return;
+	}
+	if (input_index < input.ColumnCount() && input.data[input_index].GetVectorType() == VectorType::DICTIONARY_VECTOR &&
+	    PrepareDictionarySource(input, input_index, source_idx, nullptr, count, out_of_range_error,
+	                            source_known_not_null, execute_sel)) {
+		return;
+	}
+	if (input_index < input.ColumnCount() && input.data[input_index].GetVectorType() == VectorType::CONSTANT_VECTOR &&
+	    PrepareConstantSource(input, input_index, source_idx, nullptr, count, out_of_range_error,
+	                          source_known_not_null)) {
+		return;
+	}
 	PrepareFormat(input, input_index, source_idx, out_of_range_error);
 	SetData(source_idx, nullptr);
-	FinishSource(source_idx, execute_sel, count);
+	FinishSource(source_idx, execute_sel, count, source_known_not_null);
 }
 
 const_data_ptr_t *SljitSourceVectorScratch::DataArray() {

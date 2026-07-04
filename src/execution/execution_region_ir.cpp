@@ -353,7 +353,9 @@ string ExecutionRegionAggregateNativeStateUpdateBlocker(const ExecutionRegionAgg
 	}
 	const bool has_distinct_state = contract.distinct_aggregate_count != 0 || contract.distinct_table_count != 0 ||
 	                                contract.distinct_child_count != 0 || contract.distinct_filter_count != 0;
-	if (has_distinct_state && !contract.distinct_count_pointer_keys) {
+	const bool has_regular_hash_distinct_state = has_distinct_state && !contract.distinct_count_pointer_keys &&
+	                                             contract.kind == ExecutionRegionAggregateOperatorKind::HASH;
+	if (has_distinct_state && !contract.distinct_count_pointer_keys && !has_regular_hash_distinct_state) {
 		return "aggregate-state-update-distinct-state";
 	}
 	if (contract.distinct_count_pointer_keys) {
@@ -379,7 +381,7 @@ string ExecutionRegionAggregateNativeStateUpdateBlocker(const ExecutionRegionAgg
 		if (groups.size() != contract.group_count) {
 			return "aggregate-state-update-group-binding-count";
 		}
-		if (!contract.distinct_count_pointer_keys &&
+		if (!contract.distinct_count_pointer_keys && !has_regular_hash_distinct_state &&
 		    contract.native_grouped_state_contract.status != ExecutionRegionStateContractStatus::READY) {
 			return contract.native_grouped_state_contract.blocker.empty()
 			           ? "aggregate-state-update-grouped-state-contract"
@@ -404,7 +406,7 @@ string ExecutionRegionAggregateNativeStateUpdateBlocker(const ExecutionRegionAgg
 		if (!aggregate.reason.empty()) {
 			return aggregate.reason;
 		}
-		if (aggregate.distinct && !contract.distinct_count_pointer_keys) {
+		if (aggregate.distinct && !contract.distinct_count_pointer_keys && !has_regular_hash_distinct_state) {
 			return "aggregate-state-update-distinct-aggregate";
 		}
 		if (contract.distinct_count_pointer_keys &&
@@ -431,6 +433,42 @@ string ExecutionRegionAggregateNativeStateUpdateBlocker(const ExecutionRegionAgg
 		}
 	}
 	return string();
+}
+
+static bool ExecutionRegionSinkIsAggregateUpdate(const ExecutionRegionSinkInfo &sink) {
+	return sink.kind == ExecutionRegionSinkKind::HASH_AGGREGATE_UPDATE ||
+	       sink.kind == ExecutionRegionSinkKind::PERFECT_HASH_AGGREGATE_UPDATE ||
+	       sink.kind == ExecutionRegionSinkKind::UNGROUPED_AGGREGATE_UPDATE;
+}
+
+bool ExecutionRegionAggregateUpdateGeneratesBody(const ExecutionRegionSinkInfo &sink) {
+	if (!ExecutionRegionSinkIsAggregateUpdate(sink)) {
+		return false;
+	}
+	auto &contract = sink.aggregate_contract;
+	if (contract.native_state_update_contract.status != ExecutionRegionStateContractStatus::READY) {
+		return false;
+	}
+	if (!ExecutionRegionAggregateNativeStateUpdateBlocker(contract, sink.aggregates, sink.groups).empty()) {
+		return false;
+	}
+	if (contract.distinct_count_pointer_keys) {
+		return true;
+	}
+	if (sink.aggregates.empty()) {
+		return false;
+	}
+	for (auto &aggregate : sink.aggregates) {
+		if (!aggregate.primitive_update_ready) {
+			return false;
+		}
+	}
+	return true;
+}
+
+bool ExecutionRegionAggregateLookupGeneratesBody(const ExecutionRegionSinkInfo &sink) {
+	return sink.kind == ExecutionRegionSinkKind::PERFECT_HASH_AGGREGATE_UPDATE &&
+	       sink.aggregate_contract.native_grouped_state_contract.status == ExecutionRegionStateContractStatus::READY;
 }
 
 static ExecutionRegionSourceKind InferExecutionRegionSourceKind(const ExecutionRegionNode &node) {
@@ -478,6 +516,38 @@ static void AccumulateExecutionRegionSourceTraits(const ExecutionRegionNode &nod
 	}
 }
 
+static bool ExecutionRegionNodeIsMarkHashJoinProbe(const ExecutionRegionNode &node) {
+	return node.kind == ExecutionRegionNodeKind::OPERATOR && node.operator_info &&
+	       node.operator_info->hash_join_contract.present &&
+	       node.operator_info->hash_join_contract.native_probe_output_mode ==
+	           ExecutionHashJoinProbeOutputMode::MARK_PROBE;
+}
+
+static bool ExecutionRegionExpressionReadsColumn(const ExecutionExpressionIR &node, idx_t column_index) {
+	if (node.kind == ExecutionExpressionIRKind::REFERENCE) {
+		return node.ref_index == column_index;
+	}
+	if (node.kind == ExecutionExpressionIRKind::UNARY && node.unary_op == ExecutionExpressionUnaryOp::NOT &&
+	    node.left) {
+		return ExecutionRegionExpressionReadsColumn(*node.left, column_index);
+	}
+	return false;
+}
+
+static bool ExecutionRegionFilterReadsMarkProbeMarker(const ExecutionRegionNode &previous_node,
+                                                      const ExecutionRegionNode &filter_node) {
+	if (!ExecutionRegionNodeIsMarkHashJoinProbe(previous_node) || previous_node.output_types.empty() ||
+	    !filter_node.filter || !filter_node.filter->root) {
+		return false;
+	}
+	const auto marker_index = previous_node.output_types.size() - 1;
+	if (previous_node.output_types[marker_index].id() != LogicalTypeId::BOOLEAN ||
+	    filter_node.filter->return_type.id() != LogicalTypeId::BOOLEAN) {
+		return false;
+	}
+	return ExecutionRegionExpressionReadsColumn(*filter_node.filter->root, marker_index);
+}
+
 static ExecutionRegionCandidateTraits BuildExecutionRegionCandidateTraits(const ExecutionRegionIR &region_ir,
                                                                           const ExecutionRegionCandidate &candidate,
                                                                           const ExecutionRegionStagePlan &stage_plan,
@@ -498,10 +568,23 @@ static ExecutionRegionCandidateTraits BuildExecutionRegionCandidateTraits(const 
 				if (node.sink->aggregate_contract.present) {
 					traits.aggregate_count += node.sink->aggregate_contract.aggregate_count;
 				}
+				if (ExecutionRegionAggregateUpdateGeneratesBody(*node.sink)) {
+					traits.generated_aggregate_update_count++;
+					if (node.sink->aggregate_contract.distinct_count_pointer_keys) {
+						traits.generated_distinct_count_pointer_aggregate_update_count++;
+					}
+				}
+				if (ExecutionRegionAggregateLookupGeneratesBody(*node.sink)) {
+					traits.generated_aggregate_lookup_count++;
+				}
 			}
 			break;
 		case ExecutionRegionNodeKind::FILTER:
 			traits.filter_count++;
+			if (node_idx > candidate.first_node &&
+			    ExecutionRegionFilterReadsMarkProbeMarker(region_ir.nodes[node_idx - 1], node)) {
+				traits.mark_probe_filter_count++;
+			}
 			if (node.filter && node.filter->root) {
 				AccumulateExecutionRegionExpressionTraits(node.filter->traits, traits);
 			}

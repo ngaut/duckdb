@@ -12,11 +12,13 @@
 #include "duckdb/parallel/interrupt.hpp"
 #include "duckdb/parallel/pipeline.hpp"
 #include "duckdb/parallel/pipeline_execution.hpp"
+#include "duckdb/execution/execution_region_runtime.hpp"
 #include "duckdb/execution/physical_operator.hpp"
 #include "duckdb/parallel/thread_context.hpp"
 #include "duckdb/execution/execution_context.hpp"
 #include "duckdb/common/stack.hpp"
 
+#include <array>
 #include <functional>
 
 namespace duckdb {
@@ -98,6 +100,7 @@ private:
 	//! Buffered source-contract output used by compiled execution to feed full vectors into native pipeline stages.
 	DataChunk execution_source_output_batch;
 	bool execution_source_output_batch_initialized = false;
+	std::array<vector<bool>, EXECUTION_REGION_RUNTIME_ONCE_FLAG_COUNT> execution_region_runtime_once_flags;
 
 	//! The operators that are not yet finished executing and have data remaining
 	//! If the stack of in_process_operators is empty, we fetch from the source instead
@@ -150,6 +153,7 @@ private:
 	optional_ptr<DataChunk> PendingSourceContractBatch();
 	DataChunk &PrepareSourceContractBatch(const vector<LogicalType> &types);
 	void ResetSourceContractBatch();
+	bool TryMarkExecutionRegionRuntimeOnceFlag(ExecutionRegionRuntimeOnceFlag flag, idx_t index);
 
 	void FinishProcessing(int32_t operator_idx = -1);
 	bool IsFinished();

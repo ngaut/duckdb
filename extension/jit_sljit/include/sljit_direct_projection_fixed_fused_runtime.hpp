@@ -12,8 +12,6 @@
 
 #include "duckdb/common/exception.hpp"
 
-#include <exception>
-
 namespace duckdb {
 
 static bool HasDirectProjectionSourceRef(const SljitDirectProjectionPlan &direct_plan, idx_t source_index) {
@@ -110,10 +108,7 @@ static void RunFlatFusedFixedProjection(SljitExecutableRegionOp &op, idx_t count
 	native_input.has_error = false;
 	for (auto function : op.flat_fused_fixed_projection_functions) {
 		native_input.error = nullptr;
-		function(&native_input);
-		if (native_input.error) {
-			std::rethrow_exception(native_input.error);
-		}
+		SljitExecuteNativeFunction(function, native_input);
 	}
 }
 

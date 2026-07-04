@@ -135,7 +135,7 @@ TryComposeNativeExpressionTreeThroughProjection(const vector<SljitNativeRegionEx
 	if (!tree || !RewriteSljitExpressionTreeReferencesThroughProjection(tree, input_projection)) {
 		return false;
 	}
-	if (!TryBuildSljitNativeAnyExpressionTreePlan(*tree, result)) {
+	if (!TryReadNativeRegionExpression(*tree, false, result)) {
 		return false;
 	}
 	if (render_diagnostics) {
@@ -147,10 +147,6 @@ TryComposeNativeExpressionTreeThroughProjection(const vector<SljitNativeRegionEx
 static bool TryComposeNativeProjectionExpression(const vector<SljitNativeRegionExpressionPlan> &input_projection,
                                                  const SljitNativeRegionExpressionPlan &expr,
                                                  SljitNativeRegionExpressionPlan &result, bool render_diagnostics) {
-	if (expr.expression_tree &&
-	    TryComposeNativeExpressionTreeThroughProjection(input_projection, expr, result, render_diagnostics)) {
-		return true;
-	}
 	if (expr.kind == SljitNativeRegionExpressionKind::CONSTANT) {
 		result = expr.Copy();
 		if (render_diagnostics) {
@@ -158,11 +154,11 @@ static bool TryComposeNativeProjectionExpression(const vector<SljitNativeRegionE
 		}
 		return true;
 	}
-	if (expr.source_index >= input_projection.size()) {
-		return false;
-	}
-	auto &source = input_projection[expr.source_index];
 	if (expr.kind == SljitNativeRegionExpressionKind::REFERENCE) {
+		if (expr.source_index >= input_projection.size()) {
+			return false;
+		}
+		auto &source = input_projection[expr.source_index];
 		if (source.return_type != expr.return_type) {
 			return false;
 		}
@@ -172,6 +168,17 @@ static bool TryComposeNativeProjectionExpression(const vector<SljitNativeRegionE
 		}
 		return true;
 	}
+	if ((expr.expression_tree || expr.kind == SljitNativeRegionExpressionKind::INTEGER_CAST ||
+	     expr.kind == SljitNativeRegionExpressionKind::SIGNED_TO_UNSIGNED_INTEGER_CAST ||
+	     expr.kind == SljitNativeRegionExpressionKind::INTEGRAL_COMPRESS ||
+	     expr.kind == SljitNativeRegionExpressionKind::DATE_YEAR) &&
+	    TryComposeNativeExpressionTreeThroughProjection(input_projection, expr, result, render_diagnostics)) {
+		return true;
+	}
+	if (expr.source_index >= input_projection.size()) {
+		return false;
+	}
+	auto &source = input_projection[expr.source_index];
 	if (TryComposeNativeRoundTripProjection(input_projection, expr, result, render_diagnostics)) {
 		return true;
 	}
@@ -229,6 +236,9 @@ bool TryComposeNativeProjection(const vector<SljitNativeRegionExpressionPlan> &i
 static bool TryFuseAdjacentNativeProjection(SljitNativeRegionOpPlan &left, const SljitNativeRegionOpPlan &right,
                                             bool render_diagnostics) {
 	if (left.kind != SljitNativeRegionOpKind::PROJECTION || right.kind != SljitNativeRegionOpKind::PROJECTION) {
+		return false;
+	}
+	if (!right.input_types.empty() && right.input_types != left.output_types) {
 		return false;
 	}
 	vector<SljitNativeRegionExpressionPlan> projections;

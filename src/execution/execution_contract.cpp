@@ -19,6 +19,7 @@
 #include "duckdb/function/table/table_scan.hpp"
 #include "duckdb/parser/constraints/not_null_constraint.hpp"
 #include "duckdb/planner/expression/bound_aggregate_expression.hpp"
+#include "duckdb/planner/expression/bound_cast_expression.hpp"
 #include "duckdb/planner/expression/bound_reference_expression.hpp"
 #include "duckdb/planner/filter/expression_filter.hpp"
 
@@ -43,6 +44,42 @@ static string BuildExecutionContractLogicalTypeList(const vector<LogicalType> &t
 	}
 	result += "]";
 	return result;
+}
+
+static idx_t ExecutionContractSignedIntegerWidth(PhysicalType type) {
+	switch (type) {
+	case PhysicalType::INT8:
+		return 8;
+	case PhysicalType::INT16:
+		return 16;
+	case PhysicalType::INT32:
+		return 32;
+	case PhysicalType::INT64:
+		return 64;
+	default:
+		return 0;
+	}
+}
+
+static bool ExecutionContractIsWideningSignedIntegerCast(const LogicalType &source_type,
+                                                         const LogicalType &target_type) {
+	const auto source_width = ExecutionContractSignedIntegerWidth(source_type.InternalType());
+	const auto target_width = ExecutionContractSignedIntegerWidth(target_type.InternalType());
+	return source_width != 0 && target_width != 0 && source_width < target_width;
+}
+
+static LogicalType ExecutionContractHashJoinConditionDomainType(const Expression &expression) {
+	if (expression.GetExpressionClass() != ExpressionClass::BOUND_CAST) {
+		return expression.GetReturnType();
+	}
+	auto &cast = expression.Cast<BoundCastExpression>();
+	if (cast.IsTryCast() || cast.Child().GetExpressionClass() != ExpressionClass::BOUND_REF) {
+		return expression.GetReturnType();
+	}
+	if (!ExecutionContractIsWideningSignedIntegerCast(cast.Child().GetReturnType(), expression.GetReturnType())) {
+		return expression.GetReturnType();
+	}
+	return cast.Child().GetReturnType();
 }
 
 static string BuildExecutionContractIdxList(const vector<idx_t> &values) {
@@ -932,6 +969,9 @@ static string BuildExecutionContractHashJoinCommonNativeBlocker(const ExecutionR
 	if (contract.condition_count == 0) {
 		return "hash-join-native-no-conditions";
 	}
+	if (contract.rhs_condition_types.size() != contract.condition_count) {
+		return "hash-join-native-rhs-condition-type-shape";
+	}
 	if (!contract.regular_hash_table_layout_ready) {
 		return "hash-join-native-layout";
 	}
@@ -1080,6 +1120,10 @@ static ExecutionRegionHashJoinContract BuildExecutionContractHashJoinContract(co
 	result.join_type = ExecutionRegionJoinTypeFromDuckDB(join.join_type);
 	result.condition_count = join.conditions.size();
 	result.condition_types = join.condition_types;
+	result.rhs_condition_types.reserve(join.conditions.size());
+	for (auto &condition : join.conditions) {
+		result.rhs_condition_types.push_back(ExecutionContractHashJoinConditionDomainType(condition.GetRHS()));
+	}
 	result.payload_column_count = join.payload_columns.col_idxs.size();
 	result.payload_column_indices = join.payload_columns.col_idxs;
 	result.payload_types = join.payload_columns.col_types;
@@ -1138,6 +1182,7 @@ static string BuildExecutionContractHashJoinBoundaryReason(const PhysicalHashJoi
 	result += ";non_equality_condition_count=" + std::to_string(contract.non_equality_condition_count);
 	result += ";null_equal_condition_count=" + std::to_string(contract.null_equal_condition_count);
 	result += ";condition_types=" + BuildExecutionContractLogicalTypeList(contract.condition_types);
+	result += ";rhs_condition_types=" + BuildExecutionContractLogicalTypeList(contract.rhs_condition_types);
 	result += ";comparison_ops=" + BuildExecutionContractJoinComparisonList(contract.comparison_types);
 	result += ";payload_columns=" + std::to_string(contract.payload_column_count);
 	result += ";payload_column_indices=" + BuildExecutionContractIdxList(contract.payload_column_indices);
@@ -2003,7 +2048,7 @@ static void AppendExecutionContractAggregateReason(ExecutionRegionAggregateInput
 
 static ExecutionRegionAggregateInput
 BuildExecutionContractAggregateInput(idx_t aggregate_idx, const unique_ptr<Expression> &aggregate_expression,
-                                     bool allow_distinct_count_pointer_update = false) {
+                                     bool allow_distinct_update = false) {
 	ExecutionRegionAggregateInput result;
 	result.aggregate_index = aggregate_idx;
 	result.return_type = aggregate_expression->GetReturnType();
@@ -2037,7 +2082,7 @@ BuildExecutionContractAggregateInput(idx_t aggregate_idx, const unique_ptr<Expre
 		result.primitive_update_blocker = "aggregate function has no primitive update ABI";
 	}
 
-	if (result.distinct && !allow_distinct_count_pointer_update) {
+	if (result.distinct && !allow_distinct_update) {
 		result.reason = "distinct aggregate update is handled by DuckDB distinct aggregate finalization";
 	} else if (result.has_filter) {
 		result.reason = "aggregate filter requires per-aggregate filtered payload contract";
@@ -2065,11 +2110,9 @@ static vector<ExecutionRegionAggregateInput>
 BuildExecutionContractHashAggregateInputs(const PhysicalHashAggregate &op) {
 	vector<ExecutionRegionAggregateInput> result;
 	auto &aggregates = op.grouped_aggregate_data.aggregates;
-	const bool allow_distinct_count_pointer_update = ExecutionContractHashAggregateUsesDistinctCountPointerKeys(op);
 	result.reserve(aggregates.size());
 	for (idx_t aggregate_idx = 0; aggregate_idx < aggregates.size(); aggregate_idx++) {
-		result.push_back(BuildExecutionContractAggregateInput(aggregate_idx, aggregates[aggregate_idx],
-		                                                      allow_distinct_count_pointer_update));
+		result.push_back(BuildExecutionContractAggregateInput(aggregate_idx, aggregates[aggregate_idx], true));
 	}
 	return result;
 }
@@ -2390,11 +2433,11 @@ ExecutionContract PhysicalHashAggregate::GetExecutionContract() const {
 	result.source.aggregate_contract = contract;
 	result.source.aggregates = sink_aggregates;
 	result.source.groups = sink_groups;
+	ApplyExecutionContractFinalizedSourceCardinality(result, FinalizedSourceCardinality());
 	result.sink.kind = ExecutionRegionSinkKind::HASH_AGGREGATE_UPDATE;
 	result.sink.reason =
 	    BuildExecutionContractHashAggregateBoundaryReason(*this, "DuckDB hash aggregate sink update contract");
-	AppendExecutionContractNativeOperatorReason(result.sink.reason,
-	                                            contract.native_state_update_contract,
+	AppendExecutionContractNativeOperatorReason(result.sink.reason, contract.native_state_update_contract,
 	                                            "aggregate_state_update");
 	result.sink.aggregate_contract = std::move(contract);
 	result.sink.aggregates = std::move(sink_aggregates);
@@ -2431,6 +2474,7 @@ ExecutionContract PhysicalPerfectHashAggregate::GetExecutionContract() const {
 	result.source.aggregate_contract = contract;
 	result.source.aggregates = sink_aggregates;
 	result.source.groups = sink_groups;
+	ApplyExecutionContractFinalizedSourceCardinality(result, FinalizedSourceCardinality());
 	result.sink.kind = ExecutionRegionSinkKind::PERFECT_HASH_AGGREGATE_UPDATE;
 	result.sink.reason = BuildExecutionContractPerfectHashAggregateBoundaryReason(
 	    *this, "DuckDB perfect hash aggregate sink update contract");

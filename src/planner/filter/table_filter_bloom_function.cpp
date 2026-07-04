@@ -72,19 +72,6 @@ void BloomFilter::InsertHashes(const Vector &hashes_v) const {
 	}
 }
 
-idx_t BloomFilter::LookupHashes(const Vector &hashes_v, SelectionVector &result_sel, const idx_t count) const {
-	D_ASSERT(hashes_v.GetVectorType() == VectorType::FLAT_VECTOR);
-	D_ASSERT(hashes_v.GetType() == LogicalType::HASH);
-
-	const auto hashes = FlatVector::GetData<uint64_t>(hashes_v);
-	idx_t found_count = 0;
-	for (idx_t i = 0; i < count; i++) {
-		result_sel.set_index(found_count, i);
-		found_count += LookupOne(hashes[i]);
-	}
-	return found_count;
-}
-
 inline void BloomFilter::InsertOne(const hash_t hash) const {
 	D_ASSERT(initialized);
 	const uint64_t bf_offset = hash & bitmask;
@@ -128,28 +115,30 @@ static idx_t SelectBloomFilter(Vector &input, const BloomFilterFunctionData &fun
 	Vector hashes(LogicalType::HASH, count);
 	VectorOperations::Hash(input, hashes, count);
 	hashes.Flatten();
+	const auto hash_data = FlatVector::GetData<hash_t>(hashes);
 
 	UnifiedVectorFormat input_data;
 	input.ToUnifiedFormat(input_data);
 
-	SelectionVector bloom_sel(count);
-	const auto bloom_count = func_data.filter->LookupHashes(hashes, bloom_sel, count);
-
 	idx_t result_count = 0;
-	idx_t bloom_idx = 0;
+	if (input_data.validity.CannotHaveNull()) {
+		for (idx_t i = 0; i < count; i++) {
+			if (func_data.filter->LookupOne(hash_data[i])) {
+				result_sel.set_index(result_count++, i);
+			}
+		}
+		return result_count;
+	}
+
 	for (idx_t i = 0; i < count; i++) {
-		const auto matched = bloom_idx < bloom_count && bloom_sel.get_index_unsafe(bloom_idx) == i;
-		if (matched) {
-			bloom_idx++;
-		}
 		const auto input_idx = input_data.sel->get_index(i);
-		bool passed;
-		if (!input_data.validity.RowIsValid(input_idx)) {
-			passed = !func_data.filters_null_values;
-		} else {
-			passed = matched;
+		if (!input_data.validity.RowIsValidUnsafe(input_idx)) {
+			if (!func_data.filters_null_values) {
+				result_sel.set_index(result_count++, i);
+			}
+			continue;
 		}
-		if (passed) {
+		if (func_data.filter->LookupOne(hash_data[i])) {
 			result_sel.set_index(result_count++, i);
 		}
 	}

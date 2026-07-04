@@ -13,6 +13,7 @@
 #include "sljit_projection_chain_runtime.hpp"
 #include "sljit_projection_executor_runtime.hpp"
 #include "sljit_region_runtime_trace.hpp"
+#include "sljit_string_set_case_projection_runtime.hpp"
 
 namespace duckdb {
 
@@ -37,10 +38,9 @@ static bool SljitTryFastProjectJoinOutput(ExecutionRegionRuntime &runtime, const
 	throw InternalException("Unsupported SLJIT post-join projection fast path");
 }
 
-static void SljitProjectPostJoinProjectionStep(ExecutionRegionRuntime &runtime, SljitRegionExecutionScratch &scratch,
-                                               vector<SljitExecutableRegionOp> &ops, idx_t projection_idx,
-                                               DataChunk &input, DataChunk &output, const char *reference_phase,
-                                               const char *batch_phase) {
+static void SljitProjectProjectionStep(ExecutionRegionRuntime &runtime, SljitRegionExecutionScratch &scratch,
+                                       vector<SljitExecutableRegionOp> &ops, idx_t projection_idx, DataChunk &input,
+                                       DataChunk &output, const char *reference_phase, const char *batch_phase) {
 	auto &projection_op = ops[projection_idx];
 	output.Reset();
 	auto projection_stage_start = SljitRegionStageStart(runtime);
@@ -65,8 +65,8 @@ static void SljitProjectPostJoinProjectionChain(ExecutionRegionRuntime &runtime,
 	for (idx_t projection_idx = first_projection_idx; projection_idx <= final_projection_idx; projection_idx++) {
 		auto &projection_output =
 		    projection_idx == final_projection_idx ? projected : scratch.TemporaryChunk(projection_idx);
-		SljitProjectPostJoinProjectionStep(runtime, scratch, ops, projection_idx, *current, projection_output,
-		                                   reference_phase, batch_phase);
+		SljitProjectProjectionStep(runtime, scratch, ops, projection_idx, *current, projection_output, reference_phase,
+		                           batch_phase);
 		current = &projection_output;
 		if (current->size() == 0) {
 			projected.Reset();
@@ -134,9 +134,15 @@ static bool SljitTryBuildPostJoinProjectionDescriptor(vector<SljitExecutableRegi
 	}
 
 	SljitExecutableRegionOp composed_projection;
+	string compose_blocker;
 	if (!SljitBuildProjectionChainComposedProjection(ops, first_projection_idx, final_projection_idx,
-	                                                 composed_projection)) {
-		return descriptor.Block("compose");
+	                                                 composed_projection, optional_ptr<string>(&compose_blocker))) {
+		if (compose_blocker.empty()) {
+			compose_blocker = "compose";
+		} else {
+			compose_blocker = "compose_" + compose_blocker;
+		}
+		return descriptor.Block(compose_blocker.c_str());
 	}
 	descriptor.OwnProjection(final_projection_idx, std::move(composed_projection));
 	descriptor.MarkReady();

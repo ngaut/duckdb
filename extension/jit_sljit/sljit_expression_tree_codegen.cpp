@@ -141,12 +141,8 @@ BuildSljitNativeUngroupedSumExpressionTree(const ExecutionExpressionIR &root,
 	auto fast_loop = sljit_emit_label(compiler);
 	auto fast_done = sljit_emit_cmp(compiler, SLJIT_GREATER_EQUAL, SLJIT_S1, 0, SLJIT_S2, 0);
 	EmitSljitExpressionTreeValue(compiler, root, SLJIT_R2, fast_spill_index, overflows, true);
-	if (hugeint_state) {
-		EmitSljitAggregateAccumulateHugeintInt64(compiler, local_sum_offset, local_sum_upper_offset, saw_value_offset,
-		                                         SLJIT_R2);
-	} else {
-		EmitSljitAggregateAccumulateInt64(compiler, local_sum_offset, saw_value_offset, SLJIT_R2);
-	}
+	EmitSljitAggregateAccumulateSumState(compiler, state_kind, local_sum_offset, local_sum_upper_offset,
+	                                     saw_value_offset, SLJIT_R2);
 	EmitNextSljitNativeVectorLoop(compiler, fast_loop);
 
 	sljit_set_label(use_generic_loop, sljit_emit_label(compiler));
@@ -164,12 +160,8 @@ BuildSljitNativeUngroupedSumExpressionTree(const ExecutionExpressionIR &root,
 
 	idx_t spill_index = 0;
 	EmitSljitExpressionTreeValue(compiler, root, SLJIT_R2, spill_index, overflows);
-	if (hugeint_state) {
-		EmitSljitAggregateAccumulateHugeintInt64(compiler, local_sum_offset, local_sum_upper_offset, saw_value_offset,
-		                                         SLJIT_R2);
-	} else {
-		EmitSljitAggregateAccumulateInt64(compiler, local_sum_offset, saw_value_offset, SLJIT_R2);
-	}
+	EmitSljitAggregateAccumulateSumState(compiler, state_kind, local_sum_offset, local_sum_upper_offset,
+	                                     saw_value_offset, SLJIT_R2);
 	auto next = sljit_emit_jump(compiler, SLJIT_JUMP);
 
 	auto invalid_label = sljit_emit_label(compiler);
@@ -196,11 +188,8 @@ BuildSljitNativeUngroupedSumExpressionTree(const ExecutionExpressionIR &root,
 	auto done_label = sljit_emit_label(compiler);
 	sljit_set_label(fast_done, done_label);
 	sljit_set_label(done, done_label);
-	if (hugeint_state) {
-		EmitSljitAggregateCommitHugeint(compiler, local_sum_offset, local_sum_upper_offset, saw_value_offset);
-	} else {
-		EmitSljitAggregateCommitInt64(compiler, local_sum_offset, saw_value_offset);
-	}
+	EmitSljitAggregateCommitSumState(compiler, state_kind, local_sum_offset, local_sum_upper_offset,
+	                                 saw_value_offset);
 
 	for (auto jump : helper_done) {
 		sljit_set_label(jump, sljit_emit_label(compiler));

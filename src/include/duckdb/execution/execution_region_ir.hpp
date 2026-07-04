@@ -87,7 +87,7 @@ struct ExecutionRegionTableScanContract {
 	idx_t source_contract_input_column_count = 0;
 	vector<LogicalType> source_contract_input_types;
 	vector<bool> source_contract_input_not_null;
-	vector<idx_t> source_contract_input_distinct_counts;
+	vector<idx_t> source_contract_input_distinct_reserve_counts;
 	vector<Value> source_contract_input_min_values;
 	vector<Value> source_contract_input_max_values;
 	vector<idx_t> source_contract_output_projection_map;
@@ -109,6 +109,7 @@ struct ExecutionRegionHashJoinContract {
 	idx_t non_equality_condition_count = 0;
 	idx_t null_equal_condition_count = 0;
 	vector<LogicalType> condition_types;
+	vector<LogicalType> rhs_condition_types;
 	vector<ExecutionRegionComparisonType> comparison_types;
 	idx_t payload_column_count = 0;
 	vector<idx_t> payload_column_indices;
@@ -435,6 +436,10 @@ struct ExecutionRegionCandidateTraits {
 	idx_t operator_count = 0;
 	idx_t hash_join_operator_count = 0;
 	idx_t aggregate_count = 0;
+	idx_t mark_probe_filter_count = 0;
+	idx_t generated_aggregate_update_count = 0;
+	idx_t generated_distinct_count_pointer_aggregate_update_count = 0;
+	idx_t generated_aggregate_lookup_count = 0;
 	idx_t arithmetic_projection_count = 0;
 	idx_t high_cost_projection_count = 0;
 	idx_t reference_projection_count = 0;
@@ -542,6 +547,8 @@ struct ExecutionRegionCandidate {
 DUCKDB_API string ExecutionRegionAggregateNativeStateUpdateBlocker(
     const ExecutionRegionAggregateContract &contract, const vector<ExecutionRegionAggregateInput> &aggregates,
     const vector<ExecutionRegionGroupInput> &groups);
+DUCKDB_API bool ExecutionRegionAggregateUpdateGeneratesBody(const ExecutionRegionSinkInfo &sink);
+DUCKDB_API bool ExecutionRegionAggregateLookupGeneratesBody(const ExecutionRegionSinkInfo &sink);
 
 struct ExecutionRegionIR {
 	vector<ExecutionRegionNode> nodes;

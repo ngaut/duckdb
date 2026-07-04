@@ -14,7 +14,6 @@
 #include "duckdb/common/exception.hpp"
 
 #include <cstring>
-#include <exception>
 
 namespace duckdb {
 
@@ -184,10 +183,7 @@ static bool TryDirectMaterializeFixedGenerated(const SljitExecutableRegionExpres
 	native_input.count = count;
 	native_input.has_error = false;
 	auto function = expr.flat_function ? expr.flat_function : expr.function;
-	function(&native_input);
-	if (native_input.error) {
-		std::rethrow_exception(native_input.error);
-	}
+	SljitExecuteNativeFunction(function, native_input);
 	return true;
 }
 

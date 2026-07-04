@@ -120,6 +120,9 @@ SljitGetFusedTypedPayloadSourceOverrideStatus(SljitExecutableAggregateUpdate &ag
 	if (!aggregate_update.fused_payload_update_function) {
 		return SljitFusedTypedPayloadSourceOverrideStatus::NONE;
 	}
+	if (!SljitFusedAggregatePayloadsUseTypedExpressionTrees(aggregate_update.payloads, aggregates)) {
+		return SljitFusedTypedPayloadSourceOverrideStatus::NONE;
+	}
 	vector<idx_t> fused_payload_sources;
 	if (!SljitTryGetFusedTypedPayloadCombinedSources(aggregate_update.payloads, aggregates, fused_payload_sources)) {
 		return SljitFusedTypedPayloadSourceOverrideStatus::NONE;
@@ -133,6 +136,31 @@ SljitGetFusedTypedPayloadSourceOverrideStatus(SljitExecutableAggregateUpdate &ag
 		}
 	}
 	return SljitFusedTypedPayloadSourceOverrideStatus::READY;
+}
+
+static bool
+SljitCanPreaggregateRowPointerGroupSources(DataChunk &payload_input,
+                                           const vector<ExecutionRowPointerGroupKeySource> &group_sources) {
+	if (group_sources.empty()) {
+		return false;
+	}
+	for (auto &source : group_sources) {
+		switch (source.source_kind) {
+		case ExecutionRowPointerGroupKeySourceKind::ROW_POINTER_FIELD:
+			if (!source.ready) {
+				return false;
+			}
+			break;
+		case ExecutionRowPointerGroupKeySourceKind::INPUT_VECTOR:
+			if (!SljitPreaggregationInputVectorGroupSourceSupported(payload_input, source)) {
+				return false;
+			}
+			break;
+		default:
+			return false;
+		}
+	}
+	return true;
 }
 
 static bool SljitCanExecuteDirectRowPointerPreaggregatedPrimitiveUpdate(
@@ -153,7 +181,7 @@ static bool SljitCanExecuteDirectRowPointerPreaggregatedPrimitiveUpdate(
 	    sink_info.groups.size() != group_sources.size() ||
 	    sink_info.aggregates.size() != aggregate_update.payloads.size() ||
 	    sink_info.aggregates.size() != payload_lanes.size() ||
-	    !ExecutionRowPointerGroupKeySourcesAreRowPointerFields(group_sources)) {
+	    !SljitCanPreaggregateRowPointerGroupSources(payload_input, group_sources)) {
 		return false;
 	}
 	auto fused_override_status = SljitGetFusedTypedPayloadSourceOverrideStatus(aggregate_update, sink_info.aggregates,
@@ -188,6 +216,10 @@ static bool SljitCanExecuteDirectRowPointerPreaggregatedPrimitiveUpdate(
 		}
 		if (payload_sources_match_aggregates) {
 			const auto source_idx = payload_source_indices[payload_idx];
+			if (lane->kind == AggregatePrimitiveUpdateKind::COUNT &&
+			    source_idx == DConstants::INVALID_INDEX) {
+				continue;
+			}
 			if (source_idx >= payload_input.ColumnCount() ||
 			    payload_input.data[source_idx].GetType().InternalType() != lane->payload_type) {
 				return false;

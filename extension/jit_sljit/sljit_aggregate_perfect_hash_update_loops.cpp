@@ -39,10 +39,15 @@ static sljit_jump *EmitSljitPerfectHashUpdateLoop(const SljitPerfectHashFusedUpd
 	auto predicate_skip_jumps =
 	    EmitSljitPerfectHashPredicateSkipJumps(context, options.predicate_fast_path, options.all_valid,
 	                                           options.no_source_selection, options.predicate_data_hoists);
+	auto group_lookup = options.group_lookup;
+	group_lookup.expression_fast_path = options.payload_update.fast_path;
+	group_lookup.expression_all_valid = options.payload_update.all_valid;
+	group_lookup.expression_no_source_selection = options.payload_update.no_source_selection;
+	group_lookup.expression_data_hoists = options.payload_update.payload_data_hoists;
 	if (options.load_fast_group_data_array_base) {
 		EmitSljitPerfectHashFastGroupDataArrayBase(compiler);
 	}
-	EmitSljitPerfectHashGroupLookup(context, options.group_lookup);
+	EmitSljitPerfectHashGroupLookup(context, group_lookup);
 	if (options.load_common_selected_source_index) {
 		EmitLoadSljitCommonSelectedSourceIndex(compiler);
 	}
@@ -117,6 +122,9 @@ EmitSljitPerfectHashFlatFastLoop(const SljitPerfectHashFusedUpdateEmitContext &c
 		    SljitPerfectHashDirectGroupLookupOptions(context, false, update_plan.hoist_fast_group_data_array_base);
 		lookup.materialize_state_pointer = false;
 		lookup.mark_local_group = false;
+		lookup.expression_fast_path = true;
+		lookup.expression_all_valid = true;
+		lookup.expression_data_hoists = fast_data_hoists;
 		EmitSljitPerfectHashGroupLookup(context, lookup);
 		sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R0, 0, SLJIT_MEM1(SLJIT_SP),
 		               update_plan.sparse_run_cached_group_offset);
@@ -158,6 +166,9 @@ EmitSljitPerfectHashFlatFastLoop(const SljitPerfectHashFusedUpdateEmitContext &c
 	}
 	auto lookup = SljitPerfectHashDirectGroupLookupOptions(context, local_plan.sparse,
 	                                                       update_plan.hoist_fast_group_data_array_base);
+	lookup.expression_fast_path = true;
+	lookup.expression_all_valid = true;
+	lookup.expression_data_hoists = fast_data_hoists;
 	EmitSljitPerfectHashGroupLookup(context, lookup);
 	EmitSljitPerfectHashPayloadUpdates(
 	    context, SljitPerfectHashPayloadUpdateOptionsForLoop(true, true, false, fast_data_hoists));

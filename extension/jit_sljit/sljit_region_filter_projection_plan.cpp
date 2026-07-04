@@ -35,9 +35,11 @@ SljitRegionNodePlan PlanSljitFilterNode(const ExecutionRegionNode &node, string 
 }
 
 static bool TryPlanDirectSljitProjection(const ExecutionRegionNode &node, SljitNativeRegionOpPlan &native_op,
+                                         const vector<LogicalType> &input_types,
                                          string &error, bool render_diagnostics) {
 	native_op = SljitNativeRegionOpPlan();
 	native_op.kind = SljitNativeRegionOpKind::PROJECTION;
+	native_op.input_types = input_types;
 	native_op.output_types = node.output_types;
 	for (auto &expression : node.projections) {
 		SljitNativeRegionExpressionPlan native_expression;
@@ -77,6 +79,7 @@ static bool TryPlanExpandedSljitProjection(const ExecutionRegionNode &node, cons
 
 	SljitNativeRegionOpPlan final_op;
 	final_op.kind = SljitNativeRegionOpKind::PROJECTION;
+	final_op.input_types = graph.current_types;
 	final_op.output_types = node.output_types;
 	final_op.projections = std::move(final_projections);
 	graph.native_ops.push_back(std::move(final_op));
@@ -91,7 +94,7 @@ SljitRegionNodePlan PlanSljitProjectionNode(const ExecutionRegionNode &node, con
 	}
 
 	SljitNativeRegionOpPlan native_op;
-	if (TryPlanDirectSljitProjection(node, native_op, error, render_diagnostics)) {
+	if (TryPlanDirectSljitProjection(node, native_op, input_types, error, render_diagnostics)) {
 		return SljitNativeNode(std::move(native_op), "native projection");
 	}
 

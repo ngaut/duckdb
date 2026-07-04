@@ -16,7 +16,8 @@ bool SljitTryBuildFilteredAggregateUpdate(SljitExecutableRegionOp &filter_op, Sl
                                           string &error, const vector<bool> &input_not_null,
                                           const vector<Value> &input_min_values, const vector<Value> &input_max_values);
 void SljitBuildExecutableAggregateUpdateMetadata(const SljitNativeAggregateUpdatePlan &op,
-                                                 SljitExecutableAggregateUpdate &executable);
+                                                 SljitExecutableAggregateUpdate &executable,
+                                                 const vector<bool> &input_not_null);
 bool SljitBuildExecutableAggregateUpdatePayloadCode(const SljitNativeAggregateUpdatePlan &op,
                                                     SljitExecutableAggregateUpdate &executable, string &error,
                                                     const vector<bool> &input_not_null,

@@ -103,24 +103,29 @@ struct ExecutionGroupedAggregateStateAddressState {
 	}
 	virtual void ResolveStateAddresses(DataChunk &input, Vector &addresses,
 	                                   optional_ptr<ExecutionOperatorStageRecorder> recorder = nullptr) = 0;
+	virtual bool ReserveGroups(idx_t group_count, optional_ptr<ExecutionOperatorStageRecorder> recorder = nullptr) {
+		(void)group_count;
+		(void)recorder;
+		return false;
+	}
 	virtual bool TryUpdateNewGroups(DataChunk &input, const ExecutionRegionSinkInfo &sink_info,
 	                                const vector<const ExecutionPrimitiveAggregateUpdateLane *> &lanes,
-	                                optional_ptr<ExecutionOperatorStageRecorder> recorder = nullptr,
-	                                bool finish = true) {
+	                                optional_ptr<ExecutionOperatorStageRecorder> recorder = nullptr, bool finish = true,
+	                                optional_ptr<const ExecutionDenseGroupDomain> dense_domain = nullptr) {
 		(void)input;
 		(void)sink_info;
 		(void)lanes;
 		(void)recorder;
 		(void)finish;
+		(void)dense_domain;
 		return false;
 	}
-	virtual bool TryUpdateNewGroupsWithPayloadInput(DataChunk &groups, DataChunk &payload_input,
-	                                                const vector<idx_t> &payload_source_indices,
-	                                                const ExecutionRegionSinkInfo &sink_info,
-	                                                const vector<const ExecutionPrimitiveAggregateUpdateLane *> &lanes,
-	                                                optional_ptr<ExecutionOperatorStageRecorder> recorder = nullptr,
-	                                                bool finish = true,
-	                                                optional_ptr<Vector> precomputed_hashes = nullptr) {
+	virtual bool TryUpdateNewGroupsWithPayloadInput(
+	    DataChunk &groups, DataChunk &payload_input, const vector<idx_t> &payload_source_indices,
+	    const ExecutionRegionSinkInfo &sink_info, const vector<const ExecutionPrimitiveAggregateUpdateLane *> &lanes,
+	    optional_ptr<ExecutionOperatorStageRecorder> recorder = nullptr, bool finish = true,
+	    optional_ptr<Vector> precomputed_hashes = nullptr,
+	    optional_ptr<const ExecutionDenseGroupDomain> dense_domain = nullptr) {
 		(void)groups;
 		(void)payload_input;
 		(void)payload_source_indices;
@@ -129,6 +134,7 @@ struct ExecutionGroupedAggregateStateAddressState {
 		(void)recorder;
 		(void)finish;
 		(void)precomputed_hashes;
+		(void)dense_domain;
 		return false;
 	}
 	virtual bool TryAppendNewGroups(DataChunk &input, const ExecutionRegionSinkInfo &sink_info,
@@ -142,23 +148,12 @@ struct ExecutionGroupedAggregateStateAddressState {
 		(void)finish;
 		return false;
 	}
-	virtual bool TryUpdateNewGroupsWithStateAddresses(
-	    DataChunk &input, const ExecutionRegionSinkInfo &sink_info,
-	    ExecutionGroupedAggregateStateAddressUpdateFunction update_function, void *update_state,
-	    optional_ptr<ExecutionOperatorStageRecorder> recorder = nullptr, bool finish = true) {
-		(void)input;
-		(void)sink_info;
-		(void)update_function;
-		(void)update_state;
-		(void)recorder;
-		(void)finish;
-		return false;
-	}
 	virtual bool TryUpdateNewGroupsWithSelectedStateAddresses(
 	    DataChunk &input, const ExecutionRegionSinkInfo &sink_info,
 	    ExecutionGroupedAggregateStateSelectedAddressUpdateFunction update_function, void *update_state,
 	    optional_ptr<ExecutionOperatorStageRecorder> recorder = nullptr, bool finish = true,
-	    optional_ptr<Vector> precomputed_hashes = nullptr) {
+	    optional_ptr<Vector> precomputed_hashes = nullptr,
+	    optional_ptr<const ExecutionDenseGroupDomain> dense_domain = nullptr) {
 		(void)input;
 		(void)sink_info;
 		(void)update_function;
@@ -166,13 +161,31 @@ struct ExecutionGroupedAggregateStateAddressState {
 		(void)recorder;
 		(void)finish;
 		(void)precomputed_hashes;
+		(void)dense_domain;
 		return false;
 	}
-	virtual bool TryFindOrCreateRowPointerGroupStateTargets(
-	    DataChunk &payload_input, Vector &row_pointers, idx_t count,
-	    const vector<ExecutionRowPointerGroupKeySource> &group_sources, const ExecutionRegionSinkInfo &sink_info,
-	    ExecutionGroupedAggregateStateTargetBatch &targets,
-	    optional_ptr<ExecutionOperatorStageRecorder> recorder = nullptr) {
+	virtual bool TryUpdateGroupKeysWithSelectedStateAddresses(
+	    DataChunk &groups, const ExecutionRegionSinkInfo &sink_info,
+	    ExecutionGroupedAggregateStateSelectedAddressUpdateFunction update_function, void *update_state,
+	    optional_ptr<ExecutionOperatorStageRecorder> recorder = nullptr, bool finish = true,
+	    optional_ptr<Vector> precomputed_hashes = nullptr,
+	    optional_ptr<const ExecutionDenseGroupDomain> dense_domain = nullptr) {
+		(void)groups;
+		(void)sink_info;
+		(void)update_function;
+		(void)update_state;
+		(void)recorder;
+		(void)finish;
+		(void)precomputed_hashes;
+		(void)dense_domain;
+		return false;
+	}
+	virtual bool
+	TryFindOrCreateRowPointerGroupStateTargets(DataChunk &payload_input, Vector &row_pointers, idx_t count,
+	                                           const vector<ExecutionRowPointerGroupKeySource> &group_sources,
+	                                           const ExecutionRegionSinkInfo &sink_info,
+	                                           ExecutionGroupedAggregateStateTargetBatch &targets,
+	                                           optional_ptr<ExecutionOperatorStageRecorder> recorder = nullptr) {
 		(void)payload_input;
 		(void)row_pointers;
 		(void)count;
@@ -182,11 +195,29 @@ struct ExecutionGroupedAggregateStateAddressState {
 		(void)recorder;
 		return false;
 	}
-	virtual bool TryUpdateRowPointerGroupPayloads(
-	    DataChunk &payload_input, Vector &row_pointers, idx_t count,
-	    const vector<ExecutionRowPointerGroupKeySource> &group_sources, const vector<idx_t> &payload_source_indices,
-	    const ExecutionRegionSinkInfo &sink_info, const vector<const ExecutionPrimitiveAggregateUpdateLane *> &lanes,
-	    optional_ptr<ExecutionOperatorStageRecorder> recorder = nullptr, bool finish = true) {
+	virtual bool
+	TryFindOrCreateInputVectorGroupStateTargets(DataChunk &payload_input, idx_t count,
+	                                            const vector<ExecutionRowPointerGroupKeySource> &group_sources,
+	                                            const ExecutionRegionSinkInfo &sink_info,
+	                                            ExecutionGroupedAggregateStateTargetBatch &targets,
+	                                            optional_ptr<ExecutionOperatorStageRecorder> recorder = nullptr,
+	                                            optional_ptr<const ExecutionDenseGroupDomain> dense_domain = nullptr) {
+		(void)payload_input;
+		(void)count;
+		(void)group_sources;
+		(void)sink_info;
+		(void)targets;
+		(void)recorder;
+		(void)dense_domain;
+		return false;
+	}
+	virtual bool TryUpdateRowPointerGroupPayloads(DataChunk &payload_input, Vector &row_pointers, idx_t count,
+	                                              const vector<ExecutionRowPointerGroupKeySource> &group_sources,
+	                                              const vector<idx_t> &payload_source_indices,
+	                                              const ExecutionRegionSinkInfo &sink_info,
+	                                              const vector<const ExecutionPrimitiveAggregateUpdateLane *> &lanes,
+	                                              optional_ptr<ExecutionOperatorStageRecorder> recorder = nullptr,
+	                                              bool finish = true) {
 		(void)payload_input;
 		(void)row_pointers;
 		(void)count;
@@ -215,6 +246,16 @@ struct ExecutionGroupedAggregateStateAddressState {
 	                                 bool finish = true) {
 		(void)input;
 		(void)sink_info;
+		(void)addresses;
+		(void)recorder;
+		(void)finish;
+		return false;
+	}
+	virtual bool TryResolveDistinctCountPointerAddresses(
+	    DataChunk &input, const ExecutionRegionSinkInfo &state_address_sink_info, Vector &addresses,
+	    optional_ptr<ExecutionOperatorStageRecorder> recorder = nullptr, bool finish = true) {
+		(void)input;
+		(void)state_address_sink_info;
 		(void)addresses;
 		(void)recorder;
 		(void)finish;
@@ -260,12 +301,42 @@ struct ExecutionPrimitiveAggregateUpdateBinding {
 	const ExecutionPrimitiveAggregateUpdateLane *FindLane(idx_t aggregate_index) const;
 };
 
+struct ExecutionDistinctCountPointerUpdateState {
+	virtual ~ExecutionDistinctCountPointerUpdateState() {
+	}
+	virtual bool UseGlobalPayloadSet(idx_t expected_payload_count) {
+		(void)expected_payload_count;
+		return false;
+	}
+	virtual bool AddPayloads(Vector &state_pointers, Vector &payload, idx_t count, idx_t state_value_offset) = 0;
+	virtual bool AddSelectedPayloads(const uintptr_t *state_pointers, const sel_t *state_sel, const sel_t *payload_sel,
+	                                 Vector &payload, idx_t count, idx_t state_value_offset) {
+		(void)state_pointers;
+		(void)state_sel;
+		(void)payload_sel;
+		(void)payload;
+		(void)count;
+		(void)state_value_offset;
+		return false;
+	}
+};
+
 struct ExecutionGroupedAggregateStateAddressBinding {
 	bool ready = false;
 	shared_ptr<ExecutionGroupedAggregateStateAddressState> state;
 	vector<idx_t> aggregate_state_offsets;
 	ExecutionHashAggregateLookupLayout hash_lookup_layout;
 	ExecutionPerfectAggregateStateAddressLayout perfect_hash_layout;
+	string blocker;
+};
+
+struct ExecutionDistinctCountPointerUpdateBinding {
+	bool ready = false;
+	idx_t payload_index = DConstants::INVALID_INDEX;
+	idx_t state_value_offset = DConstants::INVALID_INDEX;
+	Vector *state_addresses = nullptr;
+	shared_ptr<ExecutionDistinctCountPointerUpdateState> state;
+	ExecutionRegionSinkInfo state_address_sink_info;
 	string blocker;
 };
 
@@ -277,6 +348,7 @@ struct ExecutionHashJoinProbeBinding {
 	ExecutionPerfectHashJoinTableLayout perfect_layout;
 	bool empty_build_side = false;
 	vector<idx_t> probe_key_input_indices;
+	vector<LogicalType> rhs_condition_types;
 	vector<idx_t> lhs_output_column_indices;
 	idx_t rhs_output_column_count = 0;
 	vector<idx_t> lhs_probe_column_indices;
@@ -359,6 +431,7 @@ struct ExecutionAggregateUpdateBinding {
 	shared_ptr<ExecutionAggregateUpdateState> state;
 	ExecutionPrimitiveAggregateUpdateBinding primitive;
 	ExecutionGroupedAggregateStateAddressBinding grouped_state;
+	ExecutionDistinctCountPointerUpdateBinding distinct_count_pointer;
 	string blocker;
 };
 

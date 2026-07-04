@@ -54,6 +54,9 @@ struct ExecutionRegionRuntimeMetrics {
 	ExecutionRegionJitRuntimeMetrics jit_runtime;
 };
 
+enum class ExecutionRegionRuntimeOnceFlag : uint8_t { AGGREGATE_GROUP_RESERVE };
+static constexpr idx_t EXECUTION_REGION_RUNTIME_ONCE_FLAG_COUNT = 1;
+
 DUCKDB_API void AddExecutionRegionStageRuntime(vector<ExecutionRegionRecordedStageRuntime> &stages,
                                                ExecutionRegionStageId stage, int64_t runtime_time_us, idx_t count = 1);
 DUCKDB_API void MergeExecutionRegionStageRuntime(vector<ExecutionRegionRecordedStageRuntime> &target,
@@ -99,6 +102,7 @@ public:
 	virtual void RecordJitRuntimePath(const char *path, idx_t count = 1);
 	virtual void RecordJitMaterializationBoundary(const char *boundary, idx_t count = 1);
 	virtual void RecordLazyCodegen(const ExecutionRegionLazyCodegenMetrics &metrics);
+	virtual bool TryMarkOnce(ExecutionRegionRuntimeOnceFlag flag, idx_t index);
 	virtual void Defer(string reason) = 0;
 	virtual const string &DeferredReason() const = 0;
 };

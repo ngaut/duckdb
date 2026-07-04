@@ -202,6 +202,15 @@ string ExecutionRegionDecisionRunnerName(ExecutionRunnerKind runner) {
 	}
 }
 
+static bool PhysicalPipelineDecisionNeedsRegionGraph(const PhysicalRunnerCostInput &cost_input) {
+	if (!cost_input.full_pipeline) {
+		return false;
+	}
+	return cost_input.native_join_stage_count > 0 || cost_input.native_aggregate_stage_count > 0 ||
+	       cost_input.native_grouped_aggregate_stage_count > 0 || cost_input.native_sort_stage_count > 0 ||
+	       cost_input.materialization_source_append_count > 0;
+}
+
 ExecutionRegionPhysicalRunnerSelection
 SelectExecutionRegionPipelinePhysicalRunner(const PhysicalRunnerCostParameters &cost_parameters, Pipeline &pipeline) {
 	ExecutionRegionPhysicalRunnerSelection selection;
@@ -228,6 +237,14 @@ SelectExecutionRegionPipelinePhysicalRunner(const PhysicalRunnerCostParameters &
 	if (selection.runner_cost.selected_accelerated_runner) {
 		SelectExecutionRegionAcceleratedRunner(selection);
 		selection.reason = "duckdb_cbo physical pipeline cost admits region graph analysis";
+		AppendExecutionRegionCboCostReason(selection.reason, selection.runner_cost);
+		return selection;
+	}
+	if (PhysicalPipelineDecisionNeedsRegionGraph(cost_input)) {
+		selection.use_compiled_runner = true;
+		selection.selected_runner = ExecutionRunnerKind::COMPILED_VECTORIZED;
+		selection.reason = "duckdb_cbo requires execution-region graph for physical runner decision";
+		selection.reason += ";region_graph=required";
 		AppendExecutionRegionCboCostReason(selection.reason, selection.runner_cost);
 		return selection;
 	}

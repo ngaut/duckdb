@@ -40,6 +40,7 @@ public:
 	idx_t GetCount() const;
 
 	static bool TypeIsSupported(const LogicalType &type);
+	static double SampleRate(const LogicalType &type);
 
 	void Serialize(Serializer &serializer) const;
 	static unique_ptr<DistinctStatistics> Deserialize(Deserializer &deserializer);

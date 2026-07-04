@@ -8,9 +8,10 @@
 
 #pragma once
 
+#include "sljit_direct_projection_batch_runtime.hpp"
 #include "sljit_hash_join_projection_source_runtime.hpp"
+#include "sljit_inline_string_decompress_projection_runtime.hpp"
 #include "sljit_projection_executor_runtime.hpp"
-#include "sljit_projection_runtime.hpp"
 #include "sljit_region_runtime_state.hpp"
 
 #include "duckdb/common/types/date.hpp"
@@ -18,11 +19,19 @@
 
 namespace duckdb {
 
+static bool SljitReferenceProjectionTypesMatch(const LogicalType &source_type, const LogicalType &target_type) {
+	if (source_type == target_type) {
+		return true;
+	}
+	return source_type.InternalType() == PhysicalType::VARCHAR && target_type.InternalType() == PhysicalType::VARCHAR;
+}
+
 static bool SljitTryGatherHashJoinRHSReferenceProjectionToBatch(const ExecutionHashJoinProbeBinding &binding,
                                                                 const SljitNativeRegionExpressionPlan &plan,
                                                                 idx_t rhs_col_idx, Vector &row_pointers, Vector &target,
                                                                 idx_t current_size, idx_t count) {
-	if (!SljitProjectionIsSingleSourceReferenceLike(plan) || plan.return_type != target.GetType()) {
+	if (!SljitProjectionIsSingleSourceReferenceLike(plan) ||
+	    !SljitReferenceProjectionTypesMatch(plan.return_type, target.GetType())) {
 		return false;
 	}
 	data_ptr_t target_data = nullptr;
@@ -148,6 +157,46 @@ static bool SljitTryMaterializeHashJoinRHSDateYearProjectionToBatch(const Execut
 	return true;
 }
 
+static bool
+SljitTryMaterializeHashJoinRHSInlineStringDecompressProjectionToBatch(const ExecutionHashJoinProbeBinding &binding,
+                                                                      const SljitNativeRegionExpressionPlan &plan,
+                                                                      idx_t rhs_col_idx, Vector &row_pointers,
+                                                                      Vector &target, idx_t current_size,
+                                                                      idx_t count) {
+	if (plan.kind != SljitNativeRegionExpressionKind::STRING_DECOMPRESS || plan.source_index != 0 ||
+	    plan.string_decompress_source_size != sizeof(uhugeint_t) || plan.return_type != target.GetType() ||
+	    target.GetType().id() != LogicalTypeId::VARCHAR || target.GetVectorType() != VectorType::FLAT_VECTOR ||
+	    row_pointers.GetVectorType() != VectorType::FLAT_VECTOR ||
+	    FlatVector::GetCapacity(target) < current_size + count) {
+		return false;
+	}
+
+	ExecutionHashJoinRHSFixedColumnSource rhs_source;
+	if (!ExecutionGetHashJoinRHSFixedColumnSource(binding, rhs_col_idx, rhs_source) ||
+	    rhs_source.physical_type != PhysicalType::UINT128 || rhs_source.layout_offset == DConstants::INVALID_INDEX) {
+		return false;
+	}
+
+	auto row_pointer_data = FlatVector::GetData<data_ptr_t>(row_pointers);
+	auto target_data = FlatVector::GetDataMutable<string_t>(target);
+	auto &target_validity = FlatVector::ValidityMutable(target);
+	target_validity.EnsureWritable();
+	for (idx_t row_idx = 0; row_idx < count; row_idx++) {
+		const auto target_idx = current_size + row_idx;
+		auto row_location = row_pointer_data[row_idx];
+		if (!SljitHashJoinRHSFixedColumnSourceIsValid(row_location, rhs_source)) {
+			target_validity.SetInvalid(target_idx);
+			continue;
+		}
+		target_validity.SetValid(target_idx);
+		if (!SljitTryDecodeInlineCompressedString16Value(Load<uhugeint_t>(row_location + rhs_source.layout_offset),
+		                                                 target_data[target_idx])) {
+			return false;
+		}
+	}
+	return true;
+}
+
 static bool SljitTryBuildHashJoinProjectionExpressionInput(
     const ExecutionHashJoinProbeBinding &binding, const SljitExecutableRegionExpression &source_expr,
     DataChunk &join_input, const SelectionVector &match_selection, Vector &row_pointers, idx_t count,
@@ -249,6 +298,11 @@ static bool SljitTryMaterializeHashJoinComputedRHSProjectionToBatch(const Execut
 			return true;
 		}
 	}
+	if (SljitTryMaterializeHashJoinRHSInlineStringDecompressProjectionToBatch(
+	        binding, remapped_expr.plan, rhs_col_idx, row_pointers, target, current_size, count)) {
+		used_row_pointer_generated_source = true;
+		return true;
+	}
 	if (!remapped_expr.function && !remapped_expr.flat_function) {
 		return false;
 	}
@@ -262,6 +316,47 @@ static bool SljitTryMaterializeHashJoinComputedRHSProjectionToBatch(const Execut
 	gathered_input.data[0].Reference(gathered_source);
 	gathered_input.SetChildCardinality(count);
 	return SljitTryExecuteProjectionExpressionToBatch(remapped_expr, gathered_input, target, current_size, count,
+	                                                  nullptr, adapter_scratch);
+}
+
+static bool SljitTryMaterializePerfectHashJoinComputedRHSProjectionToBatch(
+    const ExecutionHashJoinProbeBinding &binding, const SljitExecutableRegionExpression &source_expr,
+    const SelectionVector &build_selection, DataChunk &batch, idx_t output_idx, idx_t current_size, idx_t count,
+    SljitExpressionAdapterScratch &adapter_scratch) {
+	if (!binding.ready || binding.layout_kind != ExecutionHashJoinProbeLayoutKind::PERFECT_HASH_TABLE ||
+	    !binding.perfect_layout.ready ||
+	    binding.output_mode != ExecutionHashJoinProbeOutputMode::MATCHED_PROBE_AND_BUILD) {
+		return false;
+	}
+
+	SljitExecutableRegionExpression remapped_expr;
+	idx_t join_output_source_index;
+	if (!SljitTryBuildSingleSourceProjectionExpression(source_expr, remapped_expr, join_output_source_index)) {
+		return false;
+	}
+	const auto lhs_column_count = binding.lhs_output_column_indices.size();
+	if (join_output_source_index < lhs_column_count || join_output_source_index >= binding.output_types.size()) {
+		return false;
+	}
+	const auto rhs_col_idx = join_output_source_index - lhs_column_count;
+	if (rhs_col_idx >= binding.perfect_layout.rhs_output_column_count ||
+	    rhs_col_idx >= binding.perfect_layout.rhs_dictionary_buffers.size() ||
+	    rhs_col_idx >= binding.perfect_layout.rhs_output_types.size()) {
+		return false;
+	}
+
+	auto &source_type = binding.perfect_layout.rhs_output_types[rhs_col_idx];
+	if (binding.output_types[join_output_source_index] != source_type) {
+		return false;
+	}
+	Vector source(source_type);
+	source.Dictionary(binding.perfect_layout.rhs_dictionary_buffers[rhs_col_idx], build_selection, count);
+
+	DataChunk input;
+	input.InitializeEmpty(vector<LogicalType> {source_type});
+	input.data[0].Reference(source);
+	input.SetChildCardinality(count);
+	return SljitTryExecuteProjectionExpressionToBatch(remapped_expr, input, batch.data[output_idx], current_size, count,
 	                                                  nullptr, adapter_scratch);
 }
 

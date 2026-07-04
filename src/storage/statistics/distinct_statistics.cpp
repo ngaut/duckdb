@@ -81,4 +81,8 @@ bool DistinctStatistics::TypeIsSupported(const LogicalType &type) {
 	}
 }
 
+double DistinctStatistics::SampleRate(const LogicalType &type) {
+	return type.IsIntegral() ? INTEGRAL_SAMPLE_RATE : BASE_SAMPLE_RATE;
+}
+
 } // namespace duckdb

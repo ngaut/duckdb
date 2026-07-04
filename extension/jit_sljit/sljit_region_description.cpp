@@ -49,6 +49,17 @@ static string BuildSljitNativeRegionShape(const SljitNativeRegionPlan &region) {
 	return result.empty() ? "empty" : result;
 }
 
+static string DescribeSljitLogicalTypes(const vector<LogicalType> &types) {
+	string result;
+	for (idx_t type_idx = 0; type_idx < types.size(); type_idx++) {
+		if (type_idx > 0) {
+			result += "|";
+		}
+		result += types[type_idx].ToString();
+	}
+	return result;
+}
+
 static const char *SljitHashJoinKeyKindToString(SljitNativeHashJoinKeyKind kind) {
 	switch (kind) {
 	case SljitNativeHashJoinKeyKind::INT8:
@@ -123,7 +134,8 @@ static string DescribeSljitHashJoinProbeKey(idx_t key_idx, const SljitNativeHash
 	result += ",kind=" + string(SljitHashJoinKeyKindToString(key.key_kind));
 	result += ",layout_offset=" + std::to_string(key.key_layout_offset);
 	result += ",comparison=" + string(SljitHashJoinComparisonToString(key.comparison_type));
-	result += key.null_equal ? ",null_equal=true>" : ",null_equal=false>";
+	result += key.null_equal ? ",null_equal=true" : ",null_equal=false";
+	result += key.source_known_not_null ? ",source_not_null=true>" : ",source_not_null=false>";
 	return result;
 }
 
@@ -242,8 +254,12 @@ string DescribeNativeRegion(const SljitNativeRegionPlan &region, const string &m
 			result += string(
 			    ExecutionRegionAggregateOperatorKindToString(op.aggregate_update.sink_info.aggregate_contract.kind));
 			result += ";columns=" + std::to_string(op.aggregate_update.input_types.size());
+			result += ";input_types=[" + DescribeSljitLogicalTypes(op.aggregate_update.input_types) + "]";
 			result += ";groups=" + std::to_string(op.aggregate_update.sink_info.groups.size());
 			result += ";aggregates=" + std::to_string(op.aggregate_update.sink_info.aggregates.size());
+			if (!op.aggregate_update.ir.empty()) {
+				result += ";diagnostics=" + op.aggregate_update.ir;
+			}
 			if (op.aggregate_update.use_primitive_payloads) {
 				result += ";payload_update=generated-primitive";
 				result += ";primitive_payloads=" + DescribeNativeRegionExpressionList(op.aggregate_update.payloads);
@@ -256,8 +272,6 @@ string DescribeNativeRegion(const SljitNativeRegionPlan &region, const string &m
 				} else if (op.aggregate_update.use_grouped_state_addresses) {
 					result += ";grouped_state_lookup=native-state-address";
 				}
-			} else if (op.aggregate_update.use_distinct_count_pointer_update) {
-				result += ";payload_update=duckdb-distinct-count-pointer";
 			} else {
 				result += ";execution=vectorized-operator-boundary";
 			}

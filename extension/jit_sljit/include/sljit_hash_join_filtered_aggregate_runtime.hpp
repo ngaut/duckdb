@@ -192,7 +192,7 @@ static bool SljitTryExecuteHashJoinFilteredUngroupedAggregateUpdate(
 		RecordSljitRegionRuntimePath(runtime, hash_join_op.kind, path.c_str());
 		if (updated_aggregate || hash_join_op.hash_join_probe.plan.mark_build_match) {
 			throw InternalException(
-			    "SLJIT direct filtered aggregate route failed after entering stateful join/aggregate path: %s", reason);
+			    "SLJIT direct filtered aggregate path failed after entering stateful join/aggregate path: %s", reason);
 		}
 		return false;
 	};
@@ -201,7 +201,8 @@ static bool SljitTryExecuteHashJoinFilteredUngroupedAggregateUpdate(
 		join_selection_output.Reset();
 		string deferred_reason;
 		auto bind_result = execute_hash_join_probe(hash_join_idx, hash_join_op, join_input, join_selection_output,
-		                                           state, deferred_reason, false, true);
+		                                           state, deferred_reason, false,
+		                                           SljitHashJoinProbeOutputContract::SELECTED_VIEW);
 		if (bind_result == ExecutionOperatorBindResult::DEFERRED) {
 			return SljitDeferBlockedSinkResult(runtime, deferred_reason, sink_result);
 		}

@@ -130,6 +130,27 @@ void EmitSljitAggregateCommitHugeint(struct sljit_compiler *compiler, sljit_sw l
 	sljit_set_label(no_value, sljit_emit_label(compiler));
 }
 
+void EmitSljitAggregateAccumulateSumState(struct sljit_compiler *compiler, SljitNativeAggregateSumStateKind state_kind,
+                                          sljit_sw local_lower_offset, sljit_sw local_upper_offset,
+                                          sljit_sw saw_value_offset, sljit_s32 value_reg) {
+	if (state_kind == SljitNativeAggregateSumStateKind::HUGEINT) {
+		EmitSljitAggregateAccumulateHugeintInt64(compiler, local_lower_offset, local_upper_offset, saw_value_offset,
+		                                         value_reg);
+	} else {
+		EmitSljitAggregateAccumulateInt64(compiler, local_lower_offset, saw_value_offset, value_reg);
+	}
+}
+
+void EmitSljitAggregateCommitSumState(struct sljit_compiler *compiler, SljitNativeAggregateSumStateKind state_kind,
+                                      sljit_sw local_lower_offset, sljit_sw local_upper_offset,
+                                      sljit_sw saw_value_offset) {
+	if (state_kind == SljitNativeAggregateSumStateKind::HUGEINT) {
+		EmitSljitAggregateCommitHugeint(compiler, local_lower_offset, local_upper_offset, saw_value_offset);
+	} else {
+		EmitSljitAggregateCommitInt64(compiler, local_lower_offset, saw_value_offset);
+	}
+}
+
 void EmitSljitAggregateIncrementLocalCount(struct sljit_compiler *compiler, sljit_sw local_count_offset) {
 	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R0, 0, SLJIT_MEM1(SLJIT_SP), local_count_offset);
 	sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_R0, 0, SLJIT_R0, 0, SLJIT_IMM, 1);

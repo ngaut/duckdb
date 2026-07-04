@@ -59,6 +59,7 @@ public:
 
 	InsertionOrderPreservingMap<string> ParamsToString() const override;
 	ExecutionContract GetExecutionContract() const override;
+	optional_idx FinalizedSourceCardinality() const;
 
 	//! Create a perfect aggregate hash table for this node
 	unique_ptr<PerfectAggregateHashTable> CreateHT(Allocator &allocator, ClientContext &context) const;

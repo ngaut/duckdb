@@ -26,6 +26,8 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitRegularHashJoinProbe(const Sljit
 	auto &keys = plan.keys;
 	const bool mark_build_only = plan.output_mode == ExecutionHashJoinProbeOutputMode::MARK_BUILD_ONLY;
 	const bool mark_probe = plan.output_mode == ExecutionHashJoinProbeOutputMode::MARK_PROBE;
+	const bool mark_match_selection = mark_probe && config.EmitsMarkMatchesAsSelection();
+	const bool mark_nonmatch_selection = mark_probe && config.EmitsMarkNonMatchesAsSelection();
 	const bool matched_probe_only = plan.output_mode == ExecutionHashJoinProbeOutputMode::MATCHED_PROBE_ONLY;
 	auto compiler = sljit_create_compiler(nullptr);
 	if (!compiler) {
@@ -53,10 +55,10 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitRegularHashJoinProbe(const Sljit
 
 	auto loop = sljit_emit_label(compiler);
 	auto done = sljit_emit_cmp(compiler, SLJIT_GREATER_EQUAL, SLJIT_S1, 0, SLJIT_S2, 0);
-	if (mark_probe) {
+	if (mark_probe && !config.EmitsMarkSelection()) {
 		EmitStoreHashJoinMarkProbeFlag(compiler, 0);
 	}
-	auto source_is_null = EmitRegularHashJoinProbeHash(compiler, plan, config, registers);
+	auto hash_jumps = EmitRegularHashJoinProbeHash(compiler, plan, config, registers);
 
 	auto probe_loop = sljit_emit_label(compiler);
 	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R0, 0, SLJIT_MEM2(SLJIT_S4, SLJIT_R1), 3);
@@ -92,27 +94,34 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitRegularHashJoinProbe(const Sljit
 	control.empty_slot = empty_slot;
 	control.salt_mismatch = salt_mismatch;
 	if (mark_build_only) {
-		return FinishRegularHashJoinMarkBuildOnlyOutput(compiler, function, error, control, source_is_null, key_jumps,
+		return FinishRegularHashJoinMarkBuildOnlyOutput(compiler, function, error, control, hash_jumps, key_jumps,
 		                                                !assume_all_keys_valid);
 	}
 
 	if (mark_probe) {
-		return FinishRegularHashJoinMarkProbeOutput(compiler, function, error, control, source_is_null, key_jumps,
+		if (mark_match_selection) {
+			return FinishRegularHashJoinMarkMatchSelectionOutput(compiler, function, error, control, hash_jumps,
+			                                                     key_jumps, !assume_all_keys_valid);
+		}
+		if (mark_nonmatch_selection) {
+			return FinishRegularHashJoinMarkNonMatchSelectionOutput(compiler, function, error, control, hash_jumps,
+			                                                        key_jumps, !assume_all_keys_valid);
+		}
+		return FinishRegularHashJoinMarkProbeOutput(compiler, function, error, control, hash_jumps, key_jumps,
 		                                            !assume_all_keys_valid);
 	}
 
 	EmitRegularHashJoinOutputMatch(compiler);
 	if (config.SpecializesNoChainLayout()) {
-		return FinishRegularHashJoinNoChainOutput(compiler, function, error, control, source_is_null, key_jumps,
+		return FinishRegularHashJoinNoChainOutput(compiler, function, error, control, hash_jumps, key_jumps,
 		                                          !assume_all_keys_valid);
 	}
 	if (matched_probe_only) {
-		return FinishRegularHashJoinMatchedProbeOnlyOutput(compiler, function, error, plan, config, control,
-		                                                   source_is_null, key_jumps, aux_next_ptrs_reg,
-		                                                   !assume_all_keys_valid);
+		return FinishRegularHashJoinMatchedProbeOnlyOutput(compiler, function, error, plan, config, control, hash_jumps,
+		                                                   key_jumps, aux_next_ptrs_reg, !assume_all_keys_valid);
 	}
-	return FinishRegularHashJoinChainedOutput(compiler, function, error, plan, config, control, source_is_null,
-	                                          key_jumps, aux_next_ptrs_reg, !assume_all_keys_valid);
+	return FinishRegularHashJoinChainedOutput(compiler, function, error, plan, config, control, hash_jumps, key_jumps,
+	                                          aux_next_ptrs_reg, !assume_all_keys_valid);
 }
 
 } // namespace duckdb

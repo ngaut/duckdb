@@ -10,25 +10,6 @@
 
 namespace duckdb {
 
-bool TryLowerNativeRegionExpressionTreeThroughProjection(
-    const ExecutionExpressionFragment &fragment, const vector<SljitNativeRegionExpressionPlan> &input_projection,
-    unique_ptr<ExecutionExpressionIR> &tree, string &error, bool render_diagnostics) {
-	SljitNativeRegionExpressionPlan expr;
-	if (!TryLowerNativeRegionExpression(fragment, true, expr, error, render_diagnostics)) {
-		return false;
-	}
-	if (!TryMapNativeProjectionExpressionSources(input_projection, expr)) {
-		error = "sljit-expression-tree-projection-map-failed";
-		return false;
-	}
-	tree = CopySljitExpressionPlanAsInputTree(expr);
-	if (!tree) {
-		error = "sljit-expression-tree-projection-copy-failed";
-		return false;
-	}
-	return true;
-}
-
 static unique_ptr<ExecutionExpressionIR> MakeSljitReferenceExpression(idx_t source_index, const LogicalType &type) {
 	auto result = make_uniq<ExecutionExpressionIR>();
 	result->kind = ExecutionExpressionIRKind::REFERENCE;
@@ -52,6 +33,7 @@ static void AppendSljitNativeTempProjection(SljitProjectionGraphLowering &graph,
 
 	SljitNativeRegionOpPlan temp_op;
 	temp_op.kind = SljitNativeRegionOpKind::PROJECTION;
+	temp_op.input_types = graph.current_types;
 	temp_op.output_types.reserve(graph.current_types.size() + 1);
 	temp_op.projections.reserve(graph.current_types.size() + 1);
 	for (idx_t col_idx = 0; col_idx < graph.current_types.size(); col_idx++) {

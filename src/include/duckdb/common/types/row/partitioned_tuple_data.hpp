@@ -106,7 +106,8 @@ public:
 	                   const SelectionVector &append_sel = *FlatVector::IncrementalSelectionVector(),
 	                   const idx_t append_count = DConstants::INVALID_INDEX);
 	//! Appends rows to this PartitionedTupleData
-	void Append(PartitionedTupleDataAppendState &state, TupleDataChunkState &input, const idx_t count);
+	void Append(PartitionedTupleDataAppendState &state, TupleDataChunkState &input, const idx_t count,
+	            optional_ptr<TupleDataRowLocationRemap> row_location_remap = nullptr);
 	//! Flushes any remaining data in the append state into this PartitionedTupleData
 	void FlushAppendState(PartitionedTupleDataAppendState &state);
 	//! Combine another PartitionedTupleData into this PartitionedTupleData
@@ -114,7 +115,8 @@ public:
 	//! Resets this PartitionedTupleData
 	void Reset();
 	//! Repartition this PartitionedTupleData into the new PartitionedTupleData
-	void Repartition(ClientContext &context, PartitionedTupleData &new_partitioned_data);
+	void Repartition(ClientContext &context, PartitionedTupleData &new_partitioned_data,
+	                 optional_ptr<TupleDataRowLocationRemap> row_location_remap = nullptr);
 	//! Unpins the data
 	void Unpin();
 	//! Get the partitions in this PartitionedTupleData

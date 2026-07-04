@@ -40,6 +40,51 @@ static inline void EmitApplyHashJoinBitmask(struct sljit_compiler *compiler, slj
 	sljit_emit_op2(compiler, SLJIT_AND, target, 0, target, 0, scratch, 0);
 }
 
+static inline void EmitBloomFilterMaskPart(struct sljit_compiler *compiler, sljit_s32 hash_reg, sljit_s32 mask_reg,
+                                           sljit_s32 scratch, sljit_s32 shift, bool first_part) {
+	sljit_emit_op2(compiler, SLJIT_LSHR, scratch, 0, hash_reg, 0, SLJIT_IMM, shift);
+	sljit_emit_op2(compiler, SLJIT_AND, scratch, 0, scratch, 0, SLJIT_IMM, 0x3F);
+	sljit_emit_op2(compiler, SLJIT_SHL, scratch, 0, SLJIT_IMM, 1, scratch, 0);
+	if (first_part) {
+		sljit_emit_op1(compiler, SLJIT_MOV, mask_reg, 0, scratch, 0);
+	} else {
+		sljit_emit_op2(compiler, SLJIT_OR, mask_reg, 0, mask_reg, 0, scratch, 0);
+	}
+}
+
+static inline void EmitBloomFilterMask(struct sljit_compiler *compiler, sljit_s32 hash_reg, sljit_s32 mask_reg,
+                                       sljit_s32 scratch) {
+#if DUCKDB_IS_BIG_ENDIAN
+	EmitBloomFilterMaskPart(compiler, hash_reg, mask_reg, scratch, 24, true);
+	EmitBloomFilterMaskPart(compiler, hash_reg, mask_reg, scratch, 16, false);
+	EmitBloomFilterMaskPart(compiler, hash_reg, mask_reg, scratch, 8, false);
+	EmitBloomFilterMaskPart(compiler, hash_reg, mask_reg, scratch, 0, false);
+#else
+	EmitBloomFilterMaskPart(compiler, hash_reg, mask_reg, scratch, 32, true);
+	EmitBloomFilterMaskPart(compiler, hash_reg, mask_reg, scratch, 40, false);
+	EmitBloomFilterMaskPart(compiler, hash_reg, mask_reg, scratch, 48, false);
+	EmitBloomFilterMaskPart(compiler, hash_reg, mask_reg, scratch, 56, false);
+#endif
+}
+
+static inline struct sljit_jump *EmitJumpIfRegularHashJoinBloomMiss(struct sljit_compiler *compiler,
+                                                                    sljit_s32 hash_reg, sljit_s32 bits_reg,
+                                                                    sljit_s32 slot_reg, sljit_s32 mask_reg,
+                                                                    sljit_s32 scratch) {
+	sljit_emit_op1(compiler, SLJIT_MOV_P, bits_reg, 0, SLJIT_MEM1(SLJIT_S0),
+	               offsetof(SljitNativeRegularHashJoinProbeInput, bloom_filter_bits));
+	auto no_bloom = sljit_emit_cmp(compiler, SLJIT_EQUAL, bits_reg, 0, SLJIT_IMM, 0);
+	sljit_emit_op1(compiler, SLJIT_MOV, slot_reg, 0, SLJIT_MEM1(SLJIT_S0),
+	               offsetof(SljitNativeRegularHashJoinProbeInput, bloom_filter_bitmask));
+	sljit_emit_op2(compiler, SLJIT_AND, slot_reg, 0, slot_reg, 0, hash_reg, 0);
+	sljit_emit_op1(compiler, SLJIT_MOV, slot_reg, 0, SLJIT_MEM2(bits_reg, slot_reg), 3);
+	EmitBloomFilterMask(compiler, hash_reg, mask_reg, scratch);
+	sljit_emit_op2(compiler, SLJIT_AND, scratch, 0, slot_reg, 0, mask_reg, 0);
+	auto bloom_miss = sljit_emit_cmp(compiler, SLJIT_NOT_EQUAL, scratch, 0, mask_reg, 0);
+	sljit_set_label(no_bloom, sljit_emit_label(compiler));
+	return bloom_miss;
+}
+
 static inline void EmitStoreHashJoinMarkProbeFlag(struct sljit_compiler *compiler, sljit_sw value) {
 	sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_R4, 0, SLJIT_MEM1(SLJIT_S0),
 	               offsetof(SljitNativeRegularHashJoinProbeInput, match_sel));

@@ -115,6 +115,7 @@ sljit_jump *EmitJumpIfValidityNull(struct sljit_compiler *compiler, sljit_sw val
 void EmitLoadSelectedIndex(struct sljit_compiler *compiler);
 sljit_jump *EmitSkipInvalidSourceRow(struct sljit_compiler *compiler);
 void EmitSetResultRowInvalid(struct sljit_compiler *compiler);
+void EmitSljitDateYearFromDays(struct sljit_compiler *compiler, sljit_s32 days_reg, sljit_s32 target_reg);
 
 bool TryGetSljitExpressionTreeBinaryOp(ExecutionExpressionBinaryOp op, SljitNativeIntegerBinaryOp &native_op);
 void AddSljitExpressionOverflowJump(vector<SljitExpressionTreeOverflowJumps> &overflows, SljitNativeIntegerBinaryOp op,
@@ -141,6 +142,12 @@ void EmitSljitAggregateAccumulateHugeintInt64(struct sljit_compiler *compiler, s
                                               sljit_s32 value_reg);
 void EmitSljitAggregateCommitHugeint(struct sljit_compiler *compiler, sljit_sw local_lower_offset,
                                      sljit_sw local_upper_offset, sljit_sw saw_value_offset);
+void EmitSljitAggregateAccumulateSumState(struct sljit_compiler *compiler, SljitNativeAggregateSumStateKind state_kind,
+                                          sljit_sw local_lower_offset, sljit_sw local_upper_offset,
+                                          sljit_sw saw_value_offset, sljit_s32 value_reg);
+void EmitSljitAggregateCommitSumState(struct sljit_compiler *compiler, SljitNativeAggregateSumStateKind state_kind,
+                                      sljit_sw local_lower_offset, sljit_sw local_upper_offset,
+                                      sljit_sw saw_value_offset);
 
 double SLJIT_FUNC SljitNativeHugeintToDouble(uint64_t lower, int64_t upper);
 void SLJIT_FUNC SljitNativeAggregateHugeintCommit(SljitNativeVectorInput *input);

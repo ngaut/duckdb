@@ -9,6 +9,7 @@
 #pragma once
 
 #include "duckdb/execution/operator/aggregate/distinct_aggregate_data.hpp"
+#include "duckdb/execution/operator/aggregate/distinct_count_pointer_set.hpp"
 #include "duckdb/execution/operator/aggregate/grouped_aggregate_data.hpp"
 #include "duckdb/execution/physical_operator.hpp"
 #include "duckdb/execution/radix_partitioned_hashtable.hpp"
@@ -20,8 +21,6 @@ namespace duckdb {
 class ClientContext;
 class BufferManager;
 class PhysicalHashAggregate;
-class DistinctCountPointerSet;
-
 struct HashAggregateGroupingData {
 public:
 	HashAggregateGroupingData(GroupingSet &grouping_set_p, const GroupedAggregateData &grouped_aggregate_data,
@@ -49,6 +48,8 @@ public:
 struct DistinctCountPointerScratch {
 	DistinctCountPointerScratch();
 	~DistinctCountPointerScratch();
+
+	void Reset();
 
 	Vector state_addresses;
 	unique_ptr<DistinctCountPointerSet> distinct_set;
@@ -154,6 +155,7 @@ public:
 public:
 	InsertionOrderPreservingMap<string> ParamsToString() const override;
 	ExecutionContract GetExecutionContract() const override;
+	optional_idx FinalizedSourceCardinality() const;
 	//! Toggle multi-scan capability on a hash table, which prevents the scan of the aggregate from being destructive
 	//! If this is not toggled the GetData method will destroy the hash table as it is scanning it
 	static void SetMultiScan(GlobalSinkState &state);

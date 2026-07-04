@@ -98,102 +98,6 @@ static bool SljitAddProjectionPredicateSourceColumns(const SljitNativePredicate 
 	return SljitTryApplyProjectionPredicateSources(predicate, add_source, add_source_indices, ignore_guard_sources);
 }
 
-static bool SljitAddProjectionExpressionSourceColumns(const SljitNativeRegionExpressionPlan &plan,
-                                                      idx_t input_column_count, vector<uint8_t> &referenced) {
-	switch (plan.kind) {
-	case SljitNativeRegionExpressionKind::REFERENCE:
-	case SljitNativeRegionExpressionKind::INTEGER_BINARY_CONSTANT:
-	case SljitNativeRegionExpressionKind::DOUBLE_BINARY_CONSTANT:
-	case SljitNativeRegionExpressionKind::INTEGER_COMPARE_CONSTANT:
-	case SljitNativeRegionExpressionKind::INTEGER_CAST:
-	case SljitNativeRegionExpressionKind::SIGNED_TO_UNSIGNED_INTEGER_CAST:
-	case SljitNativeRegionExpressionKind::INTEGER_IN_LIST:
-	case SljitNativeRegionExpressionKind::INTEGER_BETWEEN:
-	case SljitNativeRegionExpressionKind::DECIMAL64_TO_DOUBLE:
-	case SljitNativeRegionExpressionKind::DECIMAL128_SCALE_UP:
-	case SljitNativeRegionExpressionKind::INTEGRAL_COMPRESS:
-	case SljitNativeRegionExpressionKind::INTEGRAL_DECOMPRESS:
-	case SljitNativeRegionExpressionKind::STRING_COMPRESS:
-	case SljitNativeRegionExpressionKind::STRING_DECOMPRESS:
-	case SljitNativeRegionExpressionKind::DATE_YEAR:
-	case SljitNativeRegionExpressionKind::NULL_CHECK:
-		return SljitAddProjectionSourceColumn(plan.source_index, input_column_count, referenced);
-	case SljitNativeRegionExpressionKind::INTEGER_BINARY_REFERENCES:
-	case SljitNativeRegionExpressionKind::DOUBLE_BINARY_REFERENCES:
-	case SljitNativeRegionExpressionKind::INTEGER_COMPARE_REFERENCES:
-		return SljitAddProjectionSourceColumn(plan.source_index, input_column_count, referenced) &&
-		       SljitAddProjectionSourceColumn(plan.right_source_index, input_column_count, referenced);
-	case SljitNativeRegionExpressionKind::INTEGER_COALESCE:
-		if (!SljitAddProjectionSourceColumn(plan.source_index, input_column_count, referenced)) {
-			return false;
-		}
-		if (plan.coalesce_rhs_kind == SljitNativeCoalesceRhsKind::REFERENCE &&
-		    !SljitAddProjectionSourceColumn(plan.right_source_index, input_column_count, referenced)) {
-			return false;
-		}
-		return true;
-	case SljitNativeRegionExpressionKind::CONSTANT_OR_NULL:
-		return SljitAddProjectionSourceColumns(plan.constant_or_null.guard_source_indices, input_column_count,
-		                                       referenced);
-	case SljitNativeRegionExpressionKind::ERROR_GUARDED_REFERENCE:
-		return SljitAddProjectionSourceColumn(plan.source_index, input_column_count, referenced) &&
-		       SljitAddProjectionSourceColumn(plan.guard_source_index, input_column_count, referenced);
-	case SljitNativeRegionExpressionKind::PREDICATE:
-		if (plan.predicate) {
-			return SljitAddProjectionPredicateSourceColumns(*plan.predicate, input_column_count, referenced);
-		}
-		return SljitAddProjectionSourceColumns(plan.expression_tree_source_indices, input_column_count, referenced);
-	case SljitNativeRegionExpressionKind::EXPRESSION_TREE:
-	case SljitNativeRegionExpressionKind::TYPED_EXPRESSION_TREE:
-		return SljitAddProjectionSourceColumns(plan.expression_tree_source_indices, input_column_count, referenced);
-	case SljitNativeRegionExpressionKind::CONSTANT:
-		return true;
-	default:
-		return false;
-	}
-}
-
-static bool SljitAddProjectionOutputSourceColumns(const SljitExecutableRegionOp &projection_op,
-                                                  idx_t input_column_count, idx_t projection_idx,
-                                                  optional_ptr<const vector<uint8_t>> skip_projection,
-                                                  vector<uint8_t> &referenced) {
-	if (skip_projection && projection_idx < skip_projection->size() && (*skip_projection)[projection_idx]) {
-		return true;
-	}
-	if (projection_idx >= projection_op.projections.size()) {
-		return false;
-	}
-	return SljitAddProjectionExpressionSourceColumns(projection_op.projections[projection_idx].plan, input_column_count,
-	                                                 referenced);
-}
-
-static bool SljitBuildProjectionSourceColumnSet(const SljitExecutableRegionOp &projection_op, idx_t input_column_count,
-                                                optional_ptr<const vector<idx_t>> output_to_projection,
-                                                optional_ptr<const vector<uint8_t>> skip_projection,
-                                                vector<uint8_t> &referenced) {
-	if (projection_op.kind != SljitNativeRegionOpKind::PROJECTION || input_column_count == 0) {
-		return false;
-	}
-	referenced.assign(input_column_count, 0);
-	if (output_to_projection) {
-		for (auto projection_idx : *output_to_projection) {
-			if (!SljitAddProjectionOutputSourceColumns(projection_op, input_column_count, projection_idx,
-			                                           skip_projection, referenced)) {
-				return false;
-			}
-		}
-		return true;
-	}
-
-	for (idx_t projection_idx = 0; projection_idx < projection_op.projections.size(); projection_idx++) {
-		if (!SljitAddProjectionOutputSourceColumns(projection_op, input_column_count, projection_idx, skip_projection,
-		                                           referenced)) {
-			return false;
-		}
-	}
-	return true;
-}
-
 template <class PLAN, class HANDLE_SOURCE, class HANDLE_SOURCES, class HANDLE_CONSTANT, class HANDLE_PREDICATE>
 static bool SljitTryApplyProjectionPlanSources(PLAN &plan, HANDLE_SOURCE &&handle_source,
                                                HANDLE_SOURCES &&handle_sources, HANDLE_CONSTANT &&handle_constant,
@@ -248,6 +152,96 @@ static bool SljitTryApplyProjectionPlanSources(PLAN &plan, HANDLE_SOURCE &&handl
 	}
 }
 
+static bool SljitAddProjectionExpressionSourceColumns(const SljitNativeRegionExpressionPlan &plan,
+                                                      idx_t input_column_count, vector<uint8_t> &referenced) {
+	auto add_source = [&](idx_t source_index) {
+		return SljitAddProjectionSourceColumn(source_index, input_column_count, referenced);
+	};
+	auto add_sources = [&](const vector<idx_t> &source_indices) {
+		return SljitAddProjectionSourceColumns(source_indices, input_column_count, referenced);
+	};
+	auto add_constant = [&](const SljitNativeRegionExpressionPlan &) {
+		return true;
+	};
+	auto add_predicate = [&](const SljitNativeRegionExpressionPlan &plan) {
+		if (plan.predicate) {
+			return SljitAddProjectionPredicateSourceColumns(*plan.predicate, input_column_count, referenced);
+		}
+		return add_sources(plan.expression_tree_source_indices);
+	};
+	return SljitTryApplyProjectionPlanSources(plan, add_source, add_sources, add_constant, add_predicate);
+}
+
+static bool SljitTryFindSingleProjectionPlanSource(const SljitNativeRegionExpressionPlan &plan, idx_t &source_index) {
+	source_index = DConstants::INVALID_INDEX;
+	auto capture_source = [&](idx_t candidate) {
+		if (source_index == DConstants::INVALID_INDEX) {
+			source_index = candidate;
+			return true;
+		}
+		return source_index == candidate;
+	};
+	auto capture_sources = [&](const vector<idx_t> &candidates) {
+		for (auto candidate : candidates) {
+			if (!capture_source(candidate)) {
+				return false;
+			}
+		}
+		return true;
+	};
+	auto reject_constant = [&](const SljitNativeRegionExpressionPlan &) {
+		return false;
+	};
+	auto reject_predicate = [&](const SljitNativeRegionExpressionPlan &) {
+		return false;
+	};
+	if (!SljitTryApplyProjectionPlanSources(plan, capture_source, capture_sources, reject_constant, reject_predicate)) {
+		return false;
+	}
+	return source_index != DConstants::INVALID_INDEX;
+}
+
+static bool SljitAddProjectionOutputSourceColumns(const SljitExecutableRegionOp &projection_op,
+                                                  idx_t input_column_count, idx_t projection_idx,
+                                                  optional_ptr<const vector<uint8_t>> skip_projection,
+                                                  vector<uint8_t> &referenced) {
+	if (skip_projection && projection_idx < skip_projection->size() && (*skip_projection)[projection_idx]) {
+		return true;
+	}
+	if (projection_idx >= projection_op.projections.size()) {
+		return false;
+	}
+	return SljitAddProjectionExpressionSourceColumns(projection_op.projections[projection_idx].plan, input_column_count,
+	                                                 referenced);
+}
+
+static bool SljitBuildProjectionSourceColumnSet(const SljitExecutableRegionOp &projection_op, idx_t input_column_count,
+                                                optional_ptr<const vector<idx_t>> output_to_projection,
+                                                optional_ptr<const vector<uint8_t>> skip_projection,
+                                                vector<uint8_t> &referenced) {
+	if (projection_op.kind != SljitNativeRegionOpKind::PROJECTION || input_column_count == 0) {
+		return false;
+	}
+	referenced.assign(input_column_count, 0);
+	if (output_to_projection) {
+		for (auto projection_idx : *output_to_projection) {
+			if (!SljitAddProjectionOutputSourceColumns(projection_op, input_column_count, projection_idx,
+			                                           skip_projection, referenced)) {
+				return false;
+			}
+		}
+		return true;
+	}
+
+	for (idx_t projection_idx = 0; projection_idx < projection_op.projections.size(); projection_idx++) {
+		if (!SljitAddProjectionOutputSourceColumns(projection_op, input_column_count, projection_idx, skip_projection,
+		                                           referenced)) {
+			return false;
+		}
+	}
+	return true;
+}
+
 static bool SljitTryNormalizeSingleSourceProjectionPlan(SljitNativeRegionExpressionPlan &plan, idx_t source_index) {
 	auto normalize_source = [&](idx_t &candidate) {
 		if (candidate != source_index) {
@@ -279,6 +273,7 @@ static void SljitBuildBorrowedProjectionExpression(const SljitExecutableRegionEx
                                                    SljitExecutableRegionExpression &target) {
 	target.plan = source.plan.Copy(true, false);
 	target.input_source_indices = source.input_source_indices;
+	target.input_source_not_null = source.input_source_not_null;
 	target.function = source.function;
 	target.flat_function = source.flat_function;
 	target.select_function = source.select_function;
@@ -301,53 +296,10 @@ static bool SljitTryBuildSingleSourceProjectionExpression(const SljitExecutableR
 		return SljitTryNormalizeSingleSourceProjectionPlan(target.plan, join_output_source_index);
 	}
 
-	auto &plan = target.plan;
-	switch (plan.kind) {
-	case SljitNativeRegionExpressionKind::REFERENCE:
-	case SljitNativeRegionExpressionKind::INTEGER_BINARY_CONSTANT:
-	case SljitNativeRegionExpressionKind::DOUBLE_BINARY_CONSTANT:
-	case SljitNativeRegionExpressionKind::INTEGER_COMPARE_CONSTANT:
-	case SljitNativeRegionExpressionKind::INTEGER_CAST:
-	case SljitNativeRegionExpressionKind::SIGNED_TO_UNSIGNED_INTEGER_CAST:
-	case SljitNativeRegionExpressionKind::INTEGER_IN_LIST:
-	case SljitNativeRegionExpressionKind::INTEGER_BETWEEN:
-	case SljitNativeRegionExpressionKind::DECIMAL64_TO_DOUBLE:
-	case SljitNativeRegionExpressionKind::DECIMAL128_SCALE_UP:
-	case SljitNativeRegionExpressionKind::INTEGRAL_COMPRESS:
-	case SljitNativeRegionExpressionKind::INTEGRAL_DECOMPRESS:
-	case SljitNativeRegionExpressionKind::STRING_COMPRESS:
-	case SljitNativeRegionExpressionKind::STRING_DECOMPRESS:
-	case SljitNativeRegionExpressionKind::DATE_YEAR:
-	case SljitNativeRegionExpressionKind::NULL_CHECK:
-		join_output_source_index = plan.source_index;
-		plan.source_index = 0;
-		if (plan.expression_tree_source_indices.empty()) {
-			return true;
-		}
-		if (plan.expression_tree_source_indices.size() != 1 ||
-		    plan.expression_tree_source_indices[0] != join_output_source_index) {
-			return false;
-		}
-		plan.expression_tree_source_indices[0] = 0;
-		return true;
-	case SljitNativeRegionExpressionKind::CONSTANT_OR_NULL:
-		if (plan.constant_or_null.guard_source_indices.size() != 1) {
-			return false;
-		}
-		join_output_source_index = plan.constant_or_null.guard_source_indices[0];
-		plan.constant_or_null.guard_source_indices[0] = 0;
-		return true;
-	case SljitNativeRegionExpressionKind::EXPRESSION_TREE:
-	case SljitNativeRegionExpressionKind::TYPED_EXPRESSION_TREE:
-		if (plan.expression_tree_source_indices.size() != 1) {
-			return false;
-		}
-		join_output_source_index = plan.expression_tree_source_indices[0];
-		plan.expression_tree_source_indices[0] = 0;
-		return true;
-	default:
+	if (!SljitTryFindSingleProjectionPlanSource(target.plan, join_output_source_index)) {
 		return false;
 	}
+	return SljitTryNormalizeSingleSourceProjectionPlan(target.plan, join_output_source_index);
 }
 
 static bool SljitProjectionIsSingleSourceReferenceLike(const SljitNativeRegionExpressionPlan &plan) {
@@ -364,6 +316,13 @@ static bool SljitProjectionIsSingleSourceReferenceLike(const SljitNativeRegionEx
 	}
 	return plan.expression_tree_source_indices.size() == 1 && plan.expression_tree_source_indices[0] == 0 &&
 	       plan.return_type == plan.expression_tree->return_type;
+}
+
+static bool SljitTryGetSingleSourceReferenceProjectionIndex(const SljitExecutableRegionExpression &source,
+                                                            idx_t &source_index) {
+	SljitExecutableRegionExpression remapped_expr;
+	return SljitTryBuildSingleSourceProjectionExpression(source, remapped_expr, source_index) &&
+	       SljitProjectionIsSingleSourceReferenceLike(remapped_expr.plan);
 }
 
 } // namespace duckdb

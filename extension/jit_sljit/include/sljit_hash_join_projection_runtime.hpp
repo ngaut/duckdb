@@ -49,7 +49,7 @@ static bool SljitRequiredColumnsAreStrictSubset(const vector<uint8_t> &required_
 }
 
 struct SljitHashJoinSelectionOnlyMaterializationBoundaries {
-	SljitHashJoinSelectionOnlyMaterializationBoundaries(const char *regular_first_p = "row_pointer_reference",
+	SljitHashJoinSelectionOnlyMaterializationBoundaries(const char *regular_first_p = "row_pointer_selection_reference",
 	                                                    const char *regular_second_p = "final_output",
 	                                                    const char *perfect_first_p = "perfect_selection_reference",
 	                                                    const char *perfect_second_p = "final_output")
@@ -169,10 +169,8 @@ static bool SljitTryMaterializeHashJoinRequiredProjectionViews(
 			continue;
 		}
 		auto &expr = projection_op.projections[projected_idx];
-		SljitExecutableRegionExpression remapped_expr;
 		idx_t join_output_source_index;
-		if (!SljitTryBuildSingleSourceProjectionExpression(expr, remapped_expr, join_output_source_index) ||
-		    !SljitProjectionIsSingleSourceReferenceLike(remapped_expr.plan) ||
+		if (!SljitTryGetSingleSourceReferenceProjectionIndex(expr, join_output_source_index) ||
 		    join_output_source_index >= join_output_column_count) {
 			return false;
 		}
@@ -259,7 +257,8 @@ static bool SljitTryExecuteHashJoinProbeDirectHashJoinBuild(
 		join_output.Reset();
 		string deferred_reason;
 		auto bind_result = execute_hash_join_probe(hash_join_idx, hash_join_op, join_input, join_output, state,
-		                                           deferred_reason, false, true);
+		                                           deferred_reason, false,
+		                                           SljitHashJoinProbeOutputContract::SELECTED_VIEW);
 		if (bind_result == ExecutionOperatorBindResult::DEFERRED) {
 			return SljitDeferBlockedSinkResult(runtime, deferred_reason, sink_result);
 		}

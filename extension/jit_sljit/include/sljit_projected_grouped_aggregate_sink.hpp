@@ -8,7 +8,6 @@
 
 #pragma once
 
-#include "sljit_join_aggregate_route_state.hpp"
 #include "sljit_direct_join_output_aggregate_runtime.hpp"
 #include "sljit_full_pipeline_runtime.hpp"
 #include "sljit_grouped_aggregate_update_runtime.hpp"
@@ -17,8 +16,6 @@
 #include <utility>
 
 namespace duckdb {
-
-enum class SljitProjectedGroupedAggregateProgressMode : uint8_t { ROWS, BATCHES, SOURCE_FETCHES };
 
 static bool SljitExecuteDeferredGroupedAggregateBatch(ExecutionRegionRuntime &runtime,
                                                       ExecutionOperatorRuntime &native_runtime,
@@ -49,25 +46,14 @@ struct SljitProjectedGroupedAggregateSink {
 	                                   idx_t projection_idx_p, SljitExecutableRegionOp &projection_op_p,
 	                                   idx_t aggregate_idx_p, SljitExecutableRegionOp &aggregate_op_p,
 	                                   bool &deferred_grouped_finish_p, idx_t &processed_p,
-	                                   SljitProjectedGroupedAggregateProgressMode progress_mode_p,
 	                                   const char *append_phase_p, const char *boundary_phase_p,
 	                                   optional_ptr<SljitDirectJoinOutputAggregatePolicy> direct_aggregate_p = nullptr,
 	                                   bool record_sink_result_p = false)
 	    : ops(ops_p), runtime(runtime_p), native_runtime(native_runtime_p), scratch(scratch_p), result(result_p),
 	      projection_idx(projection_idx_p), projection_op(projection_op_p), aggregate_idx(aggregate_idx_p),
 	      aggregate_op(aggregate_op_p), deferred_grouped_finish(deferred_grouped_finish_p), processed(processed_p),
-	      progress_mode(progress_mode_p), append_phase(append_phase_p), boundary_phase(boundary_phase_p),
-	      direct_aggregate(direct_aggregate_p), record_sink_result(record_sink_result_p) {
-	}
-
-	bool BudgetReached() const {
-		if (progress_mode == SljitProjectedGroupedAggregateProgressMode::ROWS) {
-			return SljitDownstreamRowBudgetReached(processed, runtime.MaxChunks());
-		}
-		if (progress_mode == SljitProjectedGroupedAggregateProgressMode::SOURCE_FETCHES) {
-			return false;
-		}
-		return processed >= runtime.MaxChunks();
+	      append_phase(append_phase_p), boundary_phase(boundary_phase_p), direct_aggregate(direct_aggregate_p),
+	      record_sink_result(record_sink_result_p) {
 	}
 
 	bool FlushDirectAggregate() {
@@ -78,14 +64,7 @@ struct SljitProjectedGroupedAggregateSink {
 	}
 
 	void Charge(idx_t rows) {
-		if (progress_mode == SljitProjectedGroupedAggregateProgressMode::ROWS) {
-			SljitChargeDownstreamRows(processed, rows);
-			return;
-		}
-		if (progress_mode == SljitProjectedGroupedAggregateProgressMode::SOURCE_FETCHES) {
-			return;
-		}
-		processed++;
+		SljitChargeDownstreamRows(processed, rows);
 	}
 
 	bool ExecuteProjectedBatch(DataChunk &projected) {
@@ -185,50 +164,6 @@ struct SljitProjectedGroupedAggregateSink {
 		return SljitNativeSinkResultStopsExecution(runtime, sink_result, result);
 	}
 
-	template <class EXECUTE_SOURCE_CHUNK, class STOP_NOT_FINISHED, class STOP_BLOCKED, class STOP_FINISHED>
-	bool RunSourceLoop(idx_t &fetched_chunks, idx_t max_source_fetches, EXECUTE_SOURCE_CHUNK &&execute_source_chunk,
-	                   STOP_NOT_FINISHED &&stop_not_finished, STOP_BLOCKED &&stop_blocked,
-	                   STOP_FINISHED &&stop_finished) {
-		return SljitRunFullPipelineSourceContractLoop(
-		    runtime, fetched_chunks, [&]() { return BudgetReached() || fetched_chunks >= max_source_fetches; },
-		    [&](DataChunk &source_chunk, bool have_more_output) {
-			    return source_chunk.size() > 0 && execute_source_chunk(source_chunk, have_more_output);
-		    },
-		    std::forward<STOP_NOT_FINISHED>(stop_not_finished), std::forward<STOP_BLOCKED>(stop_blocked),
-		    std::forward<STOP_FINISHED>(stop_finished));
-	}
-
-	template <class EXECUTE_SOURCE_CHUNK>
-	bool RunSourceLoopAfterFlushAndFinish(idx_t &fetched_chunks, idx_t max_source_fetches,
-	                                      EXECUTE_SOURCE_CHUNK &&execute_source_chunk) {
-		return RunSourceLoop(
-		    fetched_chunks, max_source_fetches, std::forward<EXECUTE_SOURCE_CHUNK>(execute_source_chunk),
-		    [&]() { return StopAfterFlushAndFinish(ExecutionRegionResult::NOT_FINISHED); },
-		    [&]() { return StopAfterFlushAndFinish(ExecutionRegionResult::INTERRUPTED); },
-		    [&]() { return StopAfterFlushAndFinish(ExecutionRegionResult::FINISHED); });
-	}
-
-	template <class EXECUTE_SOURCE_CHUNK, class FLUSH_BATCH>
-	bool RunSourceLoopAfterFlushAndFinish(idx_t &fetched_chunks, idx_t max_source_fetches,
-	                                      EXECUTE_SOURCE_CHUNK &&execute_source_chunk, FLUSH_BATCH &&flush_batch) {
-		return RunSourceLoop(
-		    fetched_chunks, max_source_fetches, std::forward<EXECUTE_SOURCE_CHUNK>(execute_source_chunk),
-		    [&]() { return StopAfterFlushAndFinish(ExecutionRegionResult::NOT_FINISHED, flush_batch); },
-		    [&]() { return StopAfterFlushAndFinish(ExecutionRegionResult::INTERRUPTED, flush_batch); },
-		    [&]() { return StopAfterFlushAndFinish(ExecutionRegionResult::FINISHED, flush_batch); });
-	}
-
-	template <class EXECUTE_SOURCE_CHUNK, class FLUSH_BATCH>
-	bool RunSourceLoopAfterBudgetOrFinishedFlushAndFinish(idx_t &fetched_chunks, idx_t max_source_fetches,
-	                                                      EXECUTE_SOURCE_CHUNK &&execute_source_chunk,
-	                                                      FLUSH_BATCH &&flush_batch) {
-		return RunSourceLoop(
-		    fetched_chunks, max_source_fetches, std::forward<EXECUTE_SOURCE_CHUNK>(execute_source_chunk),
-		    [&]() { return StopAfterFlushAndFinish(ExecutionRegionResult::NOT_FINISHED, flush_batch); },
-		    [&]() { return StopAfterFinish(ExecutionRegionResult::INTERRUPTED); },
-		    [&]() { return StopAfterFlushAndFinish(ExecutionRegionResult::FINISHED, flush_batch); });
-	}
-
 	optional_ptr<bool> DeferredGroupedFinishPtr() {
 		return optional_ptr<bool>(&deferred_grouped_finish);
 	}
@@ -244,7 +179,6 @@ struct SljitProjectedGroupedAggregateSink {
 	SljitExecutableRegionOp &aggregate_op;
 	bool &deferred_grouped_finish;
 	idx_t &processed;
-	SljitProjectedGroupedAggregateProgressMode progress_mode;
 	const char *append_phase;
 	const char *boundary_phase;
 	optional_ptr<SljitDirectJoinOutputAggregatePolicy> direct_aggregate;

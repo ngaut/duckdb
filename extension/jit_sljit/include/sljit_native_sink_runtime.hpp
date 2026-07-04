@@ -111,7 +111,8 @@ static SinkResultType SljitExecuteNativeOrderSink(ExecutionRegionRuntime &runtim
 static bool SljitTryExecuteNativeTerminalSink(ExecutionRegionRuntime &runtime, ExecutionOperatorRuntime &native_runtime,
                                               SljitRegionExecutionScratch &scratch, idx_t op_idx,
                                               SljitExecutableRegionOp &op, DataChunk &input, bool is_final_operator,
-                                              SinkResultType &sink_result) {
+                                              SinkResultType &sink_result,
+                                              optional_ptr<bool> deferred_grouped_finish = nullptr) {
 	switch (op.kind) {
 	case SljitNativeRegionOpKind::HASH_JOIN_BUILD:
 		if (!is_final_operator) {
@@ -160,7 +161,13 @@ static bool SljitTryExecuteNativeTerminalSink(ExecutionRegionRuntime &runtime, E
 		if (!is_final_operator) {
 			throw InternalException("SLJIT aggregate update sink must be the final full pipeline operator");
 		}
-		sink_result = SljitExecuteNativeAggregateUpdate(runtime, native_runtime, scratch, op_idx, op, input);
+		if (deferred_grouped_finish) {
+			sink_result =
+			    SljitExecuteNativeAggregateUpdate(runtime, native_runtime, scratch, op_idx, op, input, nullptr,
+			                                      DConstants::INVALID_INDEX, true, deferred_grouped_finish);
+		} else {
+			sink_result = SljitExecuteNativeAggregateUpdate(runtime, native_runtime, scratch, op_idx, op, input);
+		}
 		return true;
 	default:
 		return false;
@@ -181,12 +188,10 @@ static bool SljitCanExecuteGeneratedFilterAggregateUpdate(const vector<SljitExec
 	       ops[op_idx + 1].aggregate_update.filtered_update.IsExecutable();
 }
 
-static bool SljitTryExecuteNativeFilterAggregateUpdate(ExecutionRegionRuntime &runtime,
-                                                       ExecutionOperatorRuntime &native_runtime,
-                                                       SljitRegionExecutionScratch &scratch,
-                                                       vector<SljitExecutableRegionOp> &ops, idx_t op_idx,
-                                                       DataChunk &input, SinkResultType &sink_result,
-                                                       bool &record_sink_result) {
+static bool SljitTryExecuteNativeFilterAggregateUpdate(
+    ExecutionRegionRuntime &runtime, ExecutionOperatorRuntime &native_runtime, SljitRegionExecutionScratch &scratch,
+    vector<SljitExecutableRegionOp> &ops, idx_t op_idx, DataChunk &input, SinkResultType &sink_result,
+    bool &record_sink_result, optional_ptr<bool> deferred_grouped_finish = nullptr) {
 	if (SljitCanExecuteGeneratedFilterAggregateUpdate(ops, op_idx)) {
 		auto &aggregate_op = ops[op_idx + 1];
 		sink_result = SljitExecuteNativeFilteredAggregateUpdate(runtime, native_runtime, scratch, op_idx + 1,
@@ -210,8 +215,14 @@ static bool SljitTryExecuteNativeFilterAggregateUpdate(ExecutionRegionRuntime &r
 		record_sink_result = false;
 		return true;
 	}
-	sink_result = SljitExecuteNativeAggregateUpdate(runtime, native_runtime, scratch, op_idx + 1, aggregate_op, input,
-	                                                &filter_selection, selected_count);
+	if (deferred_grouped_finish) {
+		sink_result =
+		    SljitExecuteNativeAggregateUpdate(runtime, native_runtime, scratch, op_idx + 1, aggregate_op, input,
+		                                      &filter_selection, selected_count, true, deferred_grouped_finish);
+	} else {
+		sink_result = SljitExecuteNativeAggregateUpdate(runtime, native_runtime, scratch, op_idx + 1, aggregate_op,
+		                                                input, &filter_selection, selected_count);
+	}
 	record_sink_result = true;
 	return true;
 }

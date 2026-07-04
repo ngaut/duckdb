@@ -12,6 +12,7 @@
 #include "sljit_region_adapter_scratch.hpp"
 #include "sljit_region_executable.hpp"
 #include "sljit_region_runtime_source.hpp"
+#include "sljit_scratch_access.hpp"
 
 #include "duckdb/common/allocator.hpp"
 #include "duckdb/common/exception.hpp"
@@ -69,7 +70,7 @@ struct SljitHashJoinProbeSourceScratch {
 				    sources.PrepareFlatSource(
 				        input, key.key_input_index, key_idx,
 				        reinterpret_cast<const_data_ptr_t>(FlatVector::GetData<int64_t>(source_vector)), input.size(),
-				        "SLJIT native hash join probe key source is out of range")) {
+				        "SLJIT native hash join probe key source is out of range", key.source_known_not_null)) {
 					source_key0_int64_to_int32 = true;
 					continue;
 				}
@@ -81,16 +82,16 @@ struct SljitHashJoinProbeSourceScratch {
 			} else {
 				if (source_vector.GetVectorType() == VectorType::FLAT_VECTOR &&
 				    sources.PrepareFlatSource(input, key.key_input_index, key_idx,
-				                              SljitFlatHashJoinKeySourceData(source_vector, key.key_kind),
-				                              input.size(),
-				                              "SLJIT native hash join probe key source is out of range")) {
+				                              SljitFlatHashJoinKeySourceData(source_vector, key.key_kind), input.size(),
+				                              "SLJIT native hash join probe key source is out of range",
+				                              key.source_known_not_null)) {
 					continue;
 				}
 				auto &format = sources.PrepareFormat(input, key.key_input_index, key_idx,
 				                                     "SLJIT native hash join probe key source is out of range");
 				sources.SetData(key_idx, NativeHashJoinKeySourceData(format, key.key_kind));
 			}
-			sources.FinishSource(key_idx, nullptr, input.size());
+			sources.FinishSource(key_idx, nullptr, input.size(), key.source_known_not_null);
 		}
 		return source_key0_int64_to_int32;
 	}
@@ -152,36 +153,51 @@ struct SljitAggregateUpdateScratchState {
 	void Resize(idx_t count) {
 		state_addresses.resize(count);
 		preaggregated_groups.resize(count);
+		preaggregated_group_slices.resize(count);
 		preaggregated_row_pointers.resize(count);
 		preaggregate_scratch.resize(count);
+		preaggregate_scratch_slices.resize(count);
 		payload_scratch.resize(count);
 		payload_lanes.resize(count);
 		payload_lanes_ready.resize(count);
 		direct_new.Resize(count);
 		direct_append_new.Resize(count);
+		row_pointer_preaggregate.Resize(count);
 	}
 
 	Vector &StateAddresses(idx_t op_idx) {
-		return CheckedScratchPtr(state_addresses, op_idx,
-		                         "SLJIT aggregate update has no grouped state-address scratch");
+		return SljitCheckedScratchPtr(state_addresses, op_idx,
+		                              "SLJIT aggregate update has no grouped state-address scratch");
 	}
 
 	SljitAggregatePayloadAdapterScratch &PayloadScratch(idx_t op_idx) {
-		return CheckedScratchSlot(payload_scratch, op_idx, "SLJIT aggregate update has no payload-adapter scratch");
+		return SljitCheckedScratchSlot(payload_scratch, op_idx,
+		                               "SLJIT aggregate update has no payload-adapter scratch");
 	}
 
 	DataChunk &PreaggregatedGroups(idx_t op_idx) {
-		return CheckedScratchPtr(preaggregated_groups, op_idx,
-		                         "SLJIT aggregate update has no preaggregated group scratch");
+		return SljitCheckedScratchPtr(preaggregated_groups, op_idx,
+		                              "SLJIT aggregate update has no preaggregated group scratch");
+	}
+
+	DataChunk &PreaggregatedGroupSlice(idx_t op_idx) {
+		return SljitCheckedScratchPtr(preaggregated_group_slices, op_idx,
+		                              "SLJIT aggregate update has no preaggregated group slice scratch");
 	}
 
 	Vector &PreaggregatedRowPointers(idx_t op_idx) {
-		return CheckedScratchPtr(preaggregated_row_pointers, op_idx,
-		                         "SLJIT aggregate update has no preaggregated row-pointer scratch");
+		return SljitCheckedScratchPtr(preaggregated_row_pointers, op_idx,
+		                              "SLJIT aggregate update has no preaggregated row-pointer scratch");
 	}
 
 	SljitPreaggregatedPrimitiveAggregateScratch &PreaggregateScratch(idx_t op_idx) {
-		return CheckedScratchSlot(preaggregate_scratch, op_idx, "SLJIT aggregate update has no preaggregate scratch");
+		return SljitCheckedScratchSlot(preaggregate_scratch, op_idx,
+		                               "SLJIT aggregate update has no preaggregate scratch");
+	}
+
+	SljitPreaggregatedPrimitiveAggregateScratch &PreaggregateScratchSlice(idx_t op_idx) {
+		return SljitCheckedScratchSlot(preaggregate_scratch_slices, op_idx,
+		                               "SLJIT aggregate update has no preaggregate slice scratch");
 	}
 
 	const vector<const ExecutionPrimitiveAggregateUpdateLane *> &
@@ -225,6 +241,14 @@ struct SljitAggregateUpdateScratchState {
 		direct_append_new.Record(op_idx, updated);
 	}
 
+	bool RowPointerPreaggregateDisabled(idx_t op_idx) const {
+		return row_pointer_preaggregate.Disabled(op_idx);
+	}
+
+	void RecordRowPointerPreaggregateResult(idx_t op_idx, bool updated) {
+		row_pointer_preaggregate.Record(op_idx, updated);
+	}
+
 	void Initialize(Allocator &allocator, idx_t op_idx, const SljitExecutableRegionOp &op) {
 		if (!op.aggregate_update.plan.use_grouped_state_addresses) {
 			return;
@@ -240,42 +264,23 @@ struct SljitAggregateUpdateScratchState {
 		for (auto &group : groups) {
 			group_types.push_back(group.type);
 		}
-		InitializeChunk(allocator, group_types, preaggregated_groups[op_idx]);
-	}
-
-private:
-	template <class T>
-	static T &CheckedScratchPtr(vector<unique_ptr<T>> &scratch, idx_t op_idx, const char *message) {
-		if (op_idx >= scratch.size() || !scratch[op_idx]) {
-			throw InternalException(message);
-		}
-		return *scratch[op_idx];
-	}
-
-	template <class T>
-	static T &CheckedScratchSlot(vector<T> &scratch, idx_t op_idx, const char *message) {
-		if (op_idx >= scratch.size()) {
-			throw InternalException(message);
-		}
-		return scratch[op_idx];
-	}
-
-	static void InitializeChunk(Allocator &allocator, const vector<LogicalType> &types, unique_ptr<DataChunk> &target) {
-		auto chunk = make_uniq<DataChunk>();
-		chunk->Initialize(allocator, types);
-		target = std::move(chunk);
+		SljitInitializeScratchChunk(allocator, group_types, preaggregated_groups[op_idx]);
+		SljitInitializeScratchChunk(allocator, group_types, preaggregated_group_slices[op_idx]);
 	}
 
 private:
 	vector<unique_ptr<Vector>> state_addresses;
 	vector<unique_ptr<DataChunk>> preaggregated_groups;
+	vector<unique_ptr<DataChunk>> preaggregated_group_slices;
 	vector<unique_ptr<Vector>> preaggregated_row_pointers;
 	vector<SljitPreaggregatedPrimitiveAggregateScratch> preaggregate_scratch;
+	vector<SljitPreaggregatedPrimitiveAggregateScratch> preaggregate_scratch_slices;
 	vector<SljitAggregatePayloadAdapterScratch> payload_scratch;
 	vector<vector<const ExecutionPrimitiveAggregateUpdateLane *>> payload_lanes;
 	vector<bool> payload_lanes_ready;
 	SljitDirectAggregateUpdateTracker direct_new {8, "direct-new"};
 	SljitDirectAggregateUpdateTracker direct_append_new {2, "direct-append-new"};
+	SljitDirectAggregateUpdateTracker row_pointer_preaggregate {8, "row-pointer-preaggregate"};
 };
 
 } // namespace duckdb

@@ -90,6 +90,9 @@ void PipelineExecutor::Reset() {
 	finished_processing_idx = -1;
 	should_flush_current_idx = true;
 	source_chunk_initial_idx = 0;
+	for (auto &flags : execution_region_runtime_once_flags) {
+		flags.clear();
+	}
 	while (!in_process_operators.empty()) {
 		in_process_operators.pop();
 	}
@@ -777,6 +780,22 @@ void PipelineExecutor::ResetSourceContractBatch() {
 	if (execution_source_output_batch_initialized) {
 		execution_source_output_batch.Reset();
 	}
+}
+
+bool PipelineExecutor::TryMarkExecutionRegionRuntimeOnceFlag(ExecutionRegionRuntimeOnceFlag flag, idx_t index) {
+	const auto flag_idx = static_cast<idx_t>(flag);
+	if (flag_idx >= execution_region_runtime_once_flags.size()) {
+		throw InternalException("execution region runtime-once flag index is out of range");
+	}
+	auto &flags = execution_region_runtime_once_flags[flag_idx];
+	if (index >= flags.size()) {
+		flags.resize(index + 1);
+	}
+	if (flags[index]) {
+		return false;
+	}
+	flags[index] = true;
+	return true;
 }
 
 void PipelineExecutor::InitializeChunk(DataChunk &chunk) {

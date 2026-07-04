@@ -10,6 +10,7 @@
 
 #include "sljit_aggregate_filtered_payload_runtime.hpp"
 #include "sljit_aggregate_fused_payload_sources.hpp"
+#include "sljit_aggregate_payload_lane_runtime.hpp"
 #include "sljit_aggregate_perfect_hash_payload_runtime.hpp"
 #include "sljit_aggregate_primitive_payload_runtime.hpp"
 #include "sljit_region_runtime_state.hpp"
@@ -34,80 +35,46 @@ static void SljitExecuteFusedTypedExpressionAggregatePayloadUpdate(
 	auto &aggregate_row_counts = adapter_scratch.aggregate_row_counts;
 
 	for (idx_t payload_idx = 0; payload_idx < aggregates.size(); payload_idx++) {
-		auto lane = lanes[payload_idx];
-		if (!lane) {
-			throw InternalException("SLJIT fused typed aggregate primitive lane missing for aggregate %llu",
-			                        static_cast<unsigned long long>(aggregates[payload_idx].aggregate_index));
-		}
+		auto &lane = SljitRequireAggregatePrimitiveLane(
+		    lanes, aggregates, payload_idx, "SLJIT fused typed aggregate primitive lane missing for aggregate %llu");
 		auto &aggregate = aggregates[payload_idx];
-		if (lane->kind != aggregate.primitive_update_kind) {
+		if (lane.kind != aggregate.primitive_update_kind) {
 			throw InternalException("SLJIT fused typed aggregate primitive lane kind mismatch");
 		}
-		if (lane->kind == AggregatePrimitiveUpdateKind::COUNT_STAR) {
-			if (!lane->ready || !lane->sum_int64_value || !lane->row_count) {
-				auto blocker = lane->blocker.empty() ? "aggregate-count-star-lane-incomplete" : lane->blocker;
-				throw InternalException("SLJIT fused typed aggregate count-star lane is incomplete: %s",
-				                        blocker.c_str());
-			}
-			aggregate_int64_values[payload_idx] = lane->sum_int64_value;
-			aggregate_row_counts[payload_idx] = lane->row_count;
+		if (lane.kind == AggregatePrimitiveUpdateKind::COUNT_STAR) {
+			SljitBindUngroupedCountStarPrimitiveLane(lane, aggregate_int64_values, aggregate_row_counts, payload_idx,
+			                                         "SLJIT fused typed aggregate count-star lane is incomplete: %s");
 			continue;
 		}
-		if (lane->kind != AggregatePrimitiveUpdateKind::SUM_INT64 &&
-		    lane->kind != AggregatePrimitiveUpdateKind::SUM_HUGEINT) {
+		if (lane.kind != AggregatePrimitiveUpdateKind::SUM_INT64 &&
+		    lane.kind != AggregatePrimitiveUpdateKind::SUM_HUGEINT) {
 			throw InternalException("SLJIT fused typed aggregate primitive lane has unsupported state kind");
 		}
-		if (payloads[payload_idx].plan.return_type.InternalType() != lane->payload_type) {
-			throw InternalException("SLJIT fused typed aggregate primitive payload type mismatch");
-		}
-		if (payloads[payload_idx].plan.kind == SljitNativeRegionExpressionKind::REFERENCE) {
-			if (payloads[payload_idx].plan.source_index >= combined_sources.size()) {
-				throw InternalException("SLJIT fused typed aggregate reference source is out of range");
-			}
-		} else if (payloads[payload_idx].plan.kind != SljitNativeRegionExpressionKind::TYPED_EXPRESSION_TREE ||
-		           !payloads[payload_idx].plan.expression_tree) {
-			throw InternalException("SLJIT fused typed aggregate payload is unsupported");
-		}
-		const auto has_sum_state = (lane->kind == AggregatePrimitiveUpdateKind::SUM_INT64 && lane->sum_int64_value) ||
-		                           (lane->kind == AggregatePrimitiveUpdateKind::SUM_HUGEINT && lane->sum_hugeint_value);
-		if (!lane->ready || !has_sum_state || !lane->state_is_set || !lane->row_count) {
-			auto blocker = lane->blocker.empty() ? "aggregate-primitive-lane-incomplete" : lane->blocker;
-			throw InternalException("SLJIT fused typed aggregate primitive lane is incomplete: %s", blocker.c_str());
-		}
-		if (lane->kind == AggregatePrimitiveUpdateKind::SUM_INT64) {
-			aggregate_int64_values[payload_idx] = lane->sum_int64_value;
-		} else {
-			aggregate_hugeint_values[payload_idx] = lane->sum_hugeint_value;
-		}
-		aggregate_state_is_sets[payload_idx] = lane->state_is_set;
-		aggregate_row_counts[payload_idx] = lane->row_count;
+		SljitValidateTypedAggregatePayloadPlan(payloads[payload_idx].plan, combined_sources, lane.payload_type,
+		                                       "SLJIT fused typed aggregate reference source is out of range",
+		                                       "SLJIT fused typed aggregate payload is unsupported",
+		                                       "SLJIT fused typed aggregate primitive payload type mismatch");
+		SljitBindUngroupedSumPrimitiveLane(lane, aggregate_int64_values, aggregate_hugeint_values,
+		                                   aggregate_state_is_sets, aggregate_row_counts, payload_idx,
+		                                   "SLJIT fused typed aggregate primitive lane is incomplete: %s");
 	}
 
-	for (idx_t source_idx = 0; source_idx < combined_sources.size(); source_idx++) {
-		auto input_index = combined_sources[source_idx];
-		payload_sources.PrepareTypedExpressionSource(
-		    input, input_index, source_idx, execute_sel, count,
-		    "SLJIT fused typed aggregate expression-tree source is out of range");
-	}
+	SljitPrepareTypedAggregatePayloadSources(input, combined_sources, execute_sel, count, payload_sources,
+	                                         "SLJIT fused typed aggregate expression-tree source is out of range",
+	                                         SljitGetFusedTypedPayloadCombinedSourceNotNull(payloads, aggregates,
+	                                                                                        combined_sources.size())
+	                                             .get());
 
 	SljitNativeVectorInput native_input;
 	native_input.execute_sel = execute_sel ? execute_sel->data() : nullptr;
-	native_input.source_data_array = payload_sources.DataArray();
-	native_input.source_sel_array = payload_sources.SelectionArray();
-	native_input.source_validity_array = payload_sources.ValidityArray();
-	native_input.expression_tree_flat_no_selection = payload_sources.FlatNoSelection(execute_sel);
-	native_input.expression_tree_flat_all_valid = payload_sources.FlatAllValid(execute_sel);
-	native_input.expression_tree_all_valid = payload_sources.AllValid();
+	SljitBindTypedAggregatePayloadSources(native_input, payload_sources, execute_sel);
 	native_input.aggregate_int64_values = aggregate_int64_values.data();
 	native_input.aggregate_hugeint_values = aggregate_hugeint_values.data();
 	native_input.aggregate_state_is_sets = aggregate_state_is_sets.data();
 	native_input.aggregate_row_counts = aggregate_row_counts.data();
 	native_input.count = count;
 	native_input.has_error = false;
-	function(&native_input);
-	if (native_input.error) {
-		std::rethrow_exception(native_input.error);
-	}
+	SljitExecuteNativeAggregatePayloadFunction(function, native_input);
 }
 
 static void SljitExecuteFusedPrimitiveAggregatePayloadUpdate(
@@ -136,51 +103,46 @@ static void SljitExecuteFusedPrimitiveAggregatePayloadUpdate(
 	auto &constants = adapter_scratch.constants;
 
 	for (idx_t payload_idx = 0; payload_idx < payloads.size(); payload_idx++) {
-		auto lane = lanes[payload_idx];
-		if (!lane) {
-			throw InternalException("SLJIT fused aggregate primitive lane missing for aggregate %llu",
-			                        static_cast<unsigned long long>(aggregates[payload_idx].aggregate_index));
-		}
+		auto &lane = SljitRequireAggregatePrimitiveLane(
+		    lanes, aggregates, payload_idx, "SLJIT fused aggregate primitive lane missing for aggregate %llu");
 		auto &plan = payloads[payload_idx].plan;
-		if (lane->kind == AggregatePrimitiveUpdateKind::COUNT_STAR) {
-			if (!lane->ready || !lane->sum_int64_value || !lane->row_count) {
-				auto blocker = lane->blocker.empty() ? "aggregate-count-star-lane-incomplete" : lane->blocker;
-				throw InternalException("SLJIT fused aggregate count-star lane is incomplete: %s", blocker.c_str());
-			}
-			aggregate_int64_values[payload_idx] = lane->sum_int64_value;
-			aggregate_row_counts[payload_idx] = lane->row_count;
+		if (lane.kind == AggregatePrimitiveUpdateKind::COUNT_STAR) {
+			SljitBindUngroupedCountStarPrimitiveLane(lane, aggregate_int64_values, aggregate_row_counts, payload_idx,
+			                                         "SLJIT fused aggregate count-star lane is incomplete: %s");
 			continue;
 		}
-		if (lane->kind != AggregatePrimitiveUpdateKind::SUM_INT64) {
-			throw InternalException("SLJIT fused aggregate primitive lane has unsupported state kind");
-		}
-		if (plan.return_type.InternalType() != lane->payload_type) {
+		if (plan.return_type.InternalType() != lane.payload_type) {
 			throw InternalException("SLJIT fused aggregate primitive payload type mismatch");
 		}
-		if (!lane->ready || !lane->sum_int64_value || !lane->state_is_set || !lane->row_count) {
-			auto blocker = lane->blocker.empty() ? "aggregate-primitive-lane-incomplete" : lane->blocker;
-			throw InternalException("SLJIT fused aggregate primitive lane is incomplete: %s", blocker.c_str());
-		}
-		aggregate_int64_values[payload_idx] = lane->sum_int64_value;
-		aggregate_state_is_sets[payload_idx] = lane->state_is_set;
-		aggregate_row_counts[payload_idx] = lane->row_count;
+		SljitBindUngroupedInt64SumPrimitiveLane(
+		    lane, aggregate_int64_values, aggregate_state_is_sets, aggregate_row_counts, payload_idx,
+		    "SLJIT fused aggregate primitive lane has unsupported state kind",
+		    "SLJIT fused aggregate primitive lane is incomplete: %s");
 
 		switch (plan.kind) {
 		case SljitNativeRegionExpressionKind::REFERENCE:
 			payload_sources.PrepareIntegerSource(input, plan.source_index, payload_idx, plan.integer_kind, execute_sel,
-			                                     count, "SLJIT fused aggregate reference source is out of range");
+			                                     count, "SLJIT fused aggregate reference source is out of range",
+			                                     SljitInputSourceKnownNotNull(payloads[payload_idx].input_source_not_null,
+			                                                                  0));
 			break;
 		case SljitNativeRegionExpressionKind::INTEGER_BINARY_CONSTANT:
 			payload_sources.PrepareIntegerSource(input, plan.source_index, payload_idx, plan.integer_kind, execute_sel,
-			                                     count, "SLJIT fused aggregate binary source is out of range");
+			                                     count, "SLJIT fused aggregate binary source is out of range",
+			                                     SljitInputSourceKnownNotNull(payloads[payload_idx].input_source_not_null,
+			                                                                  0));
 			constants[payload_idx] = plan.constant;
 			break;
 		case SljitNativeRegionExpressionKind::INTEGER_BINARY_REFERENCES:
 			payload_sources.PrepareIntegerSource(input, plan.source_index, payload_idx, plan.integer_kind, execute_sel,
-			                                     count, "SLJIT fused aggregate binary source is out of range");
+			                                     count, "SLJIT fused aggregate binary source is out of range",
+			                                     SljitInputSourceKnownNotNull(payloads[payload_idx].input_source_not_null,
+			                                                                  0));
 			right_payload_sources.PrepareIntegerSource(input, plan.right_source_index, payload_idx, plan.integer_kind,
 			                                           execute_sel, count,
-			                                           "SLJIT fused aggregate binary source is out of range");
+			                                           "SLJIT fused aggregate binary source is out of range",
+			                                           SljitInputSourceKnownNotNull(
+			                                               payloads[payload_idx].input_source_not_null, 1));
 			break;
 		default:
 			throw InternalException("SLJIT fused aggregate primitive payload has no runtime input adapter");
@@ -201,10 +163,7 @@ static void SljitExecuteFusedPrimitiveAggregatePayloadUpdate(
 	native_input.aggregate_row_counts = aggregate_row_counts.data();
 	native_input.count = count;
 	native_input.has_error = false;
-	function(&native_input);
-	if (native_input.error) {
-		std::rethrow_exception(native_input.error);
-	}
+	SljitExecuteNativeAggregatePayloadFunction(function, native_input);
 }
 
 static void SljitExecuteFusedGroupedPrimitiveAggregatePayloadUpdate(
@@ -246,70 +205,44 @@ static void SljitExecuteFusedGroupedPrimitiveAggregatePayloadUpdate(
 
 		for (idx_t payload_idx = 0; payload_idx < payloads.size(); payload_idx++) {
 			auto &aggregate = aggregates[payload_idx];
-			auto lane = lanes[payload_idx];
-			if (!lane) {
-				throw InternalException("SLJIT fused grouped typed aggregate primitive lane missing for aggregate %llu",
-				                        static_cast<unsigned long long>(aggregate.aggregate_index));
-			}
-			if (aggregate.aggregate_index >= contract.grouped_state_offsets.size()) {
-				throw InternalException("SLJIT fused grouped typed aggregate state offset is out of range");
-			}
-			if (!lane->ready || lane->state_size == 0) {
-				auto blocker = lane->blocker.empty() ? "aggregate-primitive-grouped-lane-incomplete" : lane->blocker;
-				throw InternalException("SLJIT fused grouped typed aggregate primitive lane is incomplete: %s",
-				                        blocker.c_str());
-			}
-			if (lane->state_offset != contract.grouped_state_offsets[aggregate.aggregate_index] ||
-			    lane->state_value_offset != aggregate.primitive_update_state_value_offset ||
-			    lane->state_is_set_offset != aggregate.primitive_update_state_is_set_offset) {
-				throw InternalException("SLJIT fused grouped typed aggregate primitive lane layout mismatch");
-			}
+			auto &lane = SljitRequireAggregatePrimitiveLane(
+			    lanes, aggregates, payload_idx,
+			    "SLJIT fused grouped typed aggregate primitive lane missing for aggregate %llu");
+			SljitValidateGroupedPrimitiveLaneLayout(
+			    aggregate, contract, lane, "SLJIT fused grouped typed aggregate state offset is out of range",
+			    "SLJIT fused grouped typed aggregate primitive lane is incomplete: %s",
+			    "SLJIT fused grouped typed aggregate primitive lane layout mismatch");
 			auto &plan = payloads[payload_idx].plan;
-			if (lane->kind == AggregatePrimitiveUpdateKind::COUNT_STAR) {
-				if (aggregate.child_count != 0) {
-					throw InternalException("SLJIT fused grouped typed count-star aggregate has unexpected payload");
-				}
+			if (SljitSkipCountStarPrimitivePayload(
+			        aggregate, lane, "SLJIT fused grouped typed count-star aggregate has unexpected payload")) {
 				continue;
 			}
-			if (!AggregatePrimitiveUpdateRequiresPayload(lane->kind)) {
-				throw InternalException(
-				    "SLJIT fused grouped typed aggregate primitive lane has unsupported state kind");
-			}
-			if (plan.kind == SljitNativeRegionExpressionKind::REFERENCE) {
-				if (plan.source_index >= combined_sources->size()) {
-					throw InternalException("SLJIT fused grouped typed aggregate reference source is out of range");
-				}
-			} else if (plan.kind != SljitNativeRegionExpressionKind::TYPED_EXPRESSION_TREE || !plan.expression_tree) {
-				throw InternalException("SLJIT fused grouped typed aggregate payload is unsupported");
-			}
-			if (plan.return_type.InternalType() != lane->payload_type) {
-				throw InternalException("SLJIT fused grouped typed aggregate primitive payload type mismatch");
-			}
+			SljitRequireAggregatePayloadPrimitiveLane(
+			    lane, "SLJIT fused grouped typed aggregate primitive lane has unsupported state kind");
+			SljitValidateTypedAggregatePayloadPlan(
+			    plan, *combined_sources, lane.payload_type,
+			    "SLJIT fused grouped typed aggregate reference source is out of range",
+			    "SLJIT fused grouped typed aggregate payload is unsupported",
+			    "SLJIT fused grouped typed aggregate primitive payload type mismatch");
 		}
 
-		for (idx_t source_idx = 0; source_idx < combined_sources->size(); source_idx++) {
-			auto input_index = (*combined_sources)[source_idx];
-			payload_sources.PrepareTypedExpressionSource(input, input_index, source_idx, execute_sel, count,
-			                                             "SLJIT fused grouped typed aggregate source is out of range");
-		}
+		SljitPrepareTypedAggregatePayloadSources(input, *combined_sources, execute_sel, count, payload_sources,
+		                                         "SLJIT fused grouped typed aggregate source is out of range",
+		                                         input_source_indices_override
+		                                             ? nullptr
+		                                             : SljitGetFusedTypedPayloadCombinedSourceNotNull(
+		                                                   payloads, aggregates, combined_sources->size())
+		                                                   .get());
 
 		SljitNativeVectorInput native_input;
 		native_input.execute_sel = execute_sel ? execute_sel->data() : nullptr;
-		native_input.source_data_array = payload_sources.DataArray();
-		native_input.source_sel_array = payload_sources.SelectionArray();
-		native_input.source_validity_array = payload_sources.ValidityArray();
-		native_input.expression_tree_flat_no_selection = payload_sources.FlatNoSelection(execute_sel);
-		native_input.expression_tree_flat_all_valid = payload_sources.FlatAllValid(execute_sel);
-		native_input.expression_tree_all_valid = payload_sources.AllValid();
+		SljitBindTypedAggregatePayloadSources(native_input, payload_sources, execute_sel);
 		native_input.aggregate_state_addresses = grouped_state_addresses;
 		native_input.aggregate_state_address_sel = grouped_state_address_sel;
 		native_input.aggregate_state_addresses_by_loop_index = state_addresses_by_loop_index;
 		native_input.count = count;
 		native_input.has_error = false;
-		function(&native_input);
-		if (native_input.error) {
-			std::rethrow_exception(native_input.error);
-		}
+		SljitExecuteNativeAggregatePayloadFunction(function, native_input);
 		return;
 	}
 
@@ -321,48 +254,37 @@ static void SljitExecuteFusedGroupedPrimitiveAggregatePayloadUpdate(
 
 	for (idx_t payload_idx = 0; payload_idx < payloads.size(); payload_idx++) {
 		auto &aggregate = aggregates[payload_idx];
-		auto lane = lanes[payload_idx];
-		if (!lane) {
-			throw InternalException("SLJIT fused grouped aggregate primitive lane missing for aggregate %llu",
-			                        static_cast<unsigned long long>(aggregate.aggregate_index));
-		}
-		if (aggregate.aggregate_index >= contract.grouped_state_offsets.size()) {
-			throw InternalException("SLJIT fused grouped aggregate state offset is out of range");
-		}
-		if (!lane->ready || lane->state_size == 0) {
-			auto blocker = lane->blocker.empty() ? "aggregate-primitive-grouped-lane-incomplete" : lane->blocker;
-			throw InternalException("SLJIT fused grouped aggregate primitive lane is incomplete: %s", blocker.c_str());
-		}
-		if (lane->state_offset != contract.grouped_state_offsets[aggregate.aggregate_index] ||
-		    lane->state_value_offset != aggregate.primitive_update_state_value_offset ||
-		    lane->state_is_set_offset != aggregate.primitive_update_state_is_set_offset) {
-			throw InternalException("SLJIT fused grouped aggregate primitive lane layout mismatch");
-		}
+		auto &lane = SljitRequireAggregatePrimitiveLane(
+		    lanes, aggregates, payload_idx, "SLJIT fused grouped aggregate primitive lane missing for aggregate %llu");
+		SljitValidateGroupedPrimitiveLaneLayout(
+		    aggregate, contract, lane, "SLJIT fused grouped aggregate state offset is out of range",
+		    "SLJIT fused grouped aggregate primitive lane is incomplete: %s",
+		    "SLJIT fused grouped aggregate primitive lane layout mismatch");
 		auto &plan = payloads[payload_idx].plan;
-		if (lane->kind == AggregatePrimitiveUpdateKind::COUNT_STAR) {
-			if (aggregate.child_count != 0) {
-				throw InternalException("SLJIT fused grouped count-star aggregate has unexpected payload");
-			}
+		if (SljitSkipCountStarPrimitivePayload(aggregate, lane,
+		                                       "SLJIT fused grouped count-star aggregate has unexpected payload")) {
 			continue;
 		}
-		if (!AggregatePrimitiveUpdateRequiresPayload(lane->kind)) {
-			throw InternalException("SLJIT fused grouped aggregate primitive lane has unsupported state kind");
-		}
-		if (plan.kind != SljitNativeRegionExpressionKind::REFERENCE) {
-			throw InternalException("SLJIT fused grouped aggregate payload has unsupported expression kind");
-		}
-		if (plan.return_type.InternalType() != lane->payload_type) {
-			throw InternalException("SLJIT fused grouped aggregate primitive payload type mismatch");
-		}
+		SljitRequireAggregatePayloadPrimitiveLane(
+		    lane, "SLJIT fused grouped aggregate primitive lane has unsupported state kind");
+		SljitValidateReferenceAggregatePayloadPlan(plan, lane.payload_type,
+		                                           "SLJIT fused grouped aggregate payload has unsupported expression kind",
+		                                           "SLJIT fused grouped aggregate primitive payload type mismatch");
 		const auto source_index =
 		    input_source_indices_override ? (*input_source_indices_override)[payload_idx] : plan.source_index;
-		if (lane->kind == AggregatePrimitiveUpdateKind::COUNT) {
+		if (lane.kind == AggregatePrimitiveUpdateKind::COUNT) {
 			payload_sources.PrepareValiditySource(input, source_index, payload_idx, execute_sel, count,
-			                                      "SLJIT fused grouped aggregate reference source is out of range");
+			                                      "SLJIT fused grouped aggregate reference source is out of range",
+			                                      !input_source_indices_override &&
+			                                          SljitInputSourceKnownNotNull(
+			                                              payloads[payload_idx].input_source_not_null, 0));
 		} else {
 			payload_sources.PrepareIntegerSource(input, source_index, payload_idx, plan.integer_kind, execute_sel,
 			                                     count,
-			                                     "SLJIT fused grouped aggregate reference source is out of range");
+			                                     "SLJIT fused grouped aggregate reference source is out of range",
+			                                     !input_source_indices_override &&
+			                                         SljitInputSourceKnownNotNull(
+			                                             payloads[payload_idx].input_source_not_null, 0));
 		}
 	}
 
@@ -376,10 +298,7 @@ static void SljitExecuteFusedGroupedPrimitiveAggregatePayloadUpdate(
 	native_input.aggregate_state_addresses_by_loop_index = state_addresses_by_loop_index;
 	native_input.count = count;
 	native_input.has_error = false;
-	function(&native_input);
-	if (native_input.error) {
-		std::rethrow_exception(native_input.error);
-	}
+	SljitExecuteNativeAggregatePayloadFunction(function, native_input);
 }
 
 } // namespace duckdb

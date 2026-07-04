@@ -131,6 +131,10 @@ void ExecutionRegionPipelineAdapter::FinishProcessing() {
 	executor.FinishProcessing();
 }
 
+bool ExecutionRegionPipelineAdapter::TryMarkRuntimeOnce(ExecutionRegionRuntimeOnceFlag flag, idx_t index) {
+	return executor.TryMarkExecutionRegionRuntimeOnceFlag(flag, index);
+}
+
 PipelineExecuteResult ExecutionRegionPipelineAdapter::FlushAndFinalizeAfterCompiledFinish(idx_t max_chunks,
                                                                                           string &runtime_reason) {
 	PipelineExecuteResult pipeline_result;

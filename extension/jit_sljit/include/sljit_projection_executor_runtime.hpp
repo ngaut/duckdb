@@ -8,10 +8,13 @@
 
 #pragma once
 
+#include "sljit_direct_projection_batch_runtime.hpp"
 #include "sljit_direct_projection_fixed_runtime.hpp"
 #include "sljit_direct_projection_floating_runtime.hpp"
 #include "sljit_filter_runtime.hpp"
-#include "sljit_projection_runtime.hpp"
+#include "sljit_inline_string_decompress_projection_runtime.hpp"
+#include "sljit_projection_expression_runtime.hpp"
+#include "sljit_projection_reference_runtime.hpp"
 #include "sljit_region_runtime_state.hpp"
 
 namespace duckdb {
@@ -110,11 +113,11 @@ template <class SCRATCH>
 static void SljitPrepareOptionalPreJoinProjectionInput(ExecutionRegionRuntime &runtime, SCRATCH &scratch,
                                                        idx_t pre_join_projection_idx,
                                                        SljitExecutableRegionOp &pre_join_projection_op,
-                                                       DataChunk &source_chunk, bool bypass_pre_join_projection,
-                                                       DataChunk *&join_input,
+                                                       DataChunk &source_chunk,
+                                                       bool use_source_chunk_without_projection, DataChunk *&join_input,
                                                        const char *reference_phase = "pre_join_reference_projection",
                                                        const char *batch_phase = "pre_join_batch_projection") {
-	if (bypass_pre_join_projection) {
+	if (use_source_chunk_without_projection) {
 		join_input = &source_chunk;
 		return;
 	}
@@ -133,19 +136,51 @@ static void SljitPrepareOptionalPreJoinProjectionInput(ExecutionRegionRuntime &r
 	join_input = pre_join.size() == 0 ? nullptr : &pre_join;
 }
 
+static bool SljitTryBindProjectionExpressionBatchTarget(Vector &target, const LogicalType &return_type,
+                                                        idx_t current_size, idx_t count, data_ptr_t &target_data,
+                                                        bool require_direct_projection_type = true) {
+	if (target.GetVectorType() != VectorType::FLAT_VECTOR || target.GetType() != return_type ||
+	    FlatVector::GetCapacity(target) < current_size + count ||
+	    (require_direct_projection_type && !SljitDirectProjectionBatchSupportsType(target.GetType()))) {
+		return false;
+	}
+	target_data = FlatVector::GetDataMutable(target) + current_size * GetTypeIdSize(target.GetType().InternalType());
+	return true;
+}
+
+static void SljitExecuteProjectionExpressionToFlatBatchTarget(SljitExecutableRegionExpression &expr, DataChunk &input,
+                                                              Vector &target, data_ptr_t target_data,
+                                                              idx_t current_size, idx_t count,
+                                                              const SelectionVector *execute_sel,
+                                                              SljitExpressionAdapterScratch &adapter_scratch) {
+	Vector result(expr.plan.return_type, target_data, count);
+	SljitExecuteProjectionExpression(expr, input, result, execute_sel, count, adapter_scratch);
+	SljitCopyDirectProjectionResultToBatch(result, target, target_data, current_size, count);
+}
+
+static void SljitExecuteProjectionExpressionToFlatBatchTarget(SljitExecutableRegionExpression &expr, DataChunk &input,
+                                                              Vector &target, idx_t current_size, idx_t count,
+                                                              const SelectionVector *execute_sel,
+                                                              SljitExpressionAdapterScratch &adapter_scratch) {
+	data_ptr_t target_data;
+	if (!SljitTryBindProjectionExpressionBatchTarget(target, expr.plan.return_type, current_size, count, target_data)) {
+		throw InternalException("SLJIT projection expression batch target is incompatible");
+	}
+	SljitExecuteProjectionExpressionToFlatBatchTarget(expr, input, target, target_data, current_size, count,
+	                                                  execute_sel, adapter_scratch);
+}
+
 static bool SljitTryExecuteProjectionExpressionToBatch(SljitExecutableRegionExpression &expr, DataChunk &input,
                                                        Vector &target, idx_t current_size, idx_t count,
                                                        const SelectionVector *execute_sel,
                                                        SljitExpressionAdapterScratch &adapter_scratch) {
-	if (!SljitProjectionTargetCanReceiveExpression(target, expr.plan.return_type, current_size + count)) {
+	data_ptr_t target_data;
+	if (!SljitTryBindProjectionExpressionBatchTarget(target, expr.plan.return_type, current_size, count, target_data)) {
 		return false;
 	}
 	if (DirectAppendSupportsFixedSizeType(target.GetType())) {
-		auto target_data =
-		    FlatVector::GetDataMutable(target) + current_size * GetTypeIdSize(target.GetType().InternalType());
-		Vector result(expr.plan.return_type, target_data, count);
-		SljitExecuteProjectionExpression(expr, input, result, execute_sel, count, adapter_scratch);
-		SljitCopyDirectProjectionResultToBatch(result, target, target_data, current_size, count);
+		SljitExecuteProjectionExpressionToFlatBatchTarget(expr, input, target, target_data, current_size, count,
+		                                                  execute_sel, adapter_scratch);
 		return true;
 	}
 	Vector result(expr.plan.return_type);
@@ -172,12 +207,9 @@ static void SljitExecuteProjectionExpressionsToBatch(SCRATCH &scratch, idx_t pro
 		const auto output_idx = projection_to_output[projected_idx];
 		auto &target = batch.data[output_idx];
 		auto &projection = projection_op.projections[projected_idx];
-		auto target_data =
-		    FlatVector::GetDataMutable(target) + current_size * GetTypeIdSize(target.GetType().InternalType());
-		Vector result(projection.plan.return_type, target_data, count);
-		SljitExecuteProjectionExpression(projection, input, result, nullptr, count,
-		                                 scratch.ExpressionAdapterScratch(projection_idx, projected_idx));
-		SljitCopyDirectProjectionResultToBatch(result, target, target_data, current_size, count);
+		SljitExecuteProjectionExpressionToFlatBatchTarget(
+		    projection, input, target, current_size, count, nullptr,
+		    scratch.ExpressionAdapterScratch(projection_idx, projected_idx));
 	}
 	SljitFinishDirectProjectionBatchTargets(batch, current_size + count, false);
 }
@@ -264,18 +296,22 @@ static bool SljitTryMaterializeSelectedProjectionToBatch(
     ExecutionRegionRuntime &runtime, SCRATCH &scratch, idx_t projection_idx, SljitExecutableRegionOp &projection_op,
     DataChunk &input, DataChunk &batch, const vector<idx_t> &output_to_projection,
     optional_ptr<Vector> projected_hashes = nullptr,
-    optional_ptr<const vector<SljitDirectProjectionBatchPassthrough>> passthroughs = nullptr) {
+    optional_ptr<const vector<SljitDirectProjectionBatchPassthrough>> passthroughs = nullptr,
+    const SelectionVector *execute_sel = nullptr, idx_t selected_count = DConstants::INVALID_INDEX) {
 	if (input.size() == 0 || projection_op.kind != SljitNativeRegionOpKind::PROJECTION ||
-	    batch.ColumnCount() != output_to_projection.size() || batch.size() + input.size() > STANDARD_VECTOR_SIZE) {
+	    batch.ColumnCount() != output_to_projection.size()) {
 		return false;
 	}
 	const auto current_size = batch.size();
-	const auto count = input.size();
+	const auto count = selected_count == DConstants::INVALID_INDEX ? input.size() : selected_count;
+	if (count == 0 || count > input.size() || batch.size() + count > STANDARD_VECTOR_SIZE) {
+		return false;
+	}
 	SljitFixedDirectProjectionSourceCache source_cache;
 	source_cache.Reset(input.ColumnCount());
 	auto source_cache_ptr = optional_ptr<SljitFixedDirectProjectionSourceCache>(&source_cache);
 	auto stage_start = SljitRegionStageStart(runtime);
-	bool all_direct_fixed = true;
+	bool all_direct_fixed = execute_sel == nullptr;
 	bool used_passthrough = false;
 	for (idx_t output_idx = 0; output_idx < output_to_projection.size(); output_idx++) {
 		const auto projected_idx = output_to_projection[output_idx];
@@ -284,12 +320,11 @@ static bool SljitTryMaterializeSelectedProjectionToBatch(
 		}
 		auto &projection = projection_op.projections[projected_idx];
 		auto &target = batch.data[output_idx];
-		if (target.GetVectorType() != VectorType::FLAT_VECTOR || target.GetType() != projection.plan.return_type ||
-		    FlatVector::GetCapacity(target) < current_size + count) {
+		data_ptr_t target_data;
+		if (!SljitTryBindProjectionExpressionBatchTarget(target, projection.plan.return_type, current_size, count,
+		                                                 target_data, false)) {
 			return false;
 		}
-		auto target_data =
-		    FlatVector::GetDataMutable(target) + current_size * GetTypeIdSize(target.GetType().InternalType());
 		auto expression_stage_start =
 		    runtime.TraceRuntime() ? SljitRegionStageStart(runtime) : std::chrono::steady_clock::time_point();
 		auto passthrough = SljitFindDirectProjectionBatchPassthrough(passthroughs, output_idx);
@@ -302,7 +337,7 @@ static bool SljitTryMaterializeSelectedProjectionToBatch(
 			}
 			continue;
 		}
-		if (DirectAppendSupportsFixedSizeType(target.GetType()) &&
+		if (!execute_sel && DirectAppendSupportsFixedSizeType(target.GetType()) &&
 		    TryDirectMaterializeFixedExpression(projection, input, target_data, 0, count, true, source_cache_ptr)) {
 			if (runtime.TraceRuntime()) {
 				RecordSljitRegionStageRuntime(runtime, projection_idx, projection_op.kind,
@@ -312,10 +347,9 @@ static bool SljitTryMaterializeSelectedProjectionToBatch(
 			continue;
 		}
 		all_direct_fixed = false;
-		Vector result(projection.plan.return_type, target_data, count);
-		SljitExecuteProjectionExpression(projection, input, result, nullptr, count,
-		                                 scratch.ExpressionAdapterScratch(projection_idx, projected_idx));
-		SljitCopyDirectProjectionResultToBatch(result, target, target_data, current_size, count);
+		SljitExecuteProjectionExpressionToFlatBatchTarget(
+		    projection, input, target, target_data, current_size, count, execute_sel,
+		    scratch.ExpressionAdapterScratch(projection_idx, projected_idx));
 		if (runtime.TraceRuntime()) {
 			RecordSljitRegionStageRuntime(runtime, projection_idx, projection_op.kind,
 			                              SljitFixedProjectionExpressionTracePhase(projection.plan),

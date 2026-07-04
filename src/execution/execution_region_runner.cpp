@@ -226,6 +226,10 @@ public:
 		AddExecutionRegionLazyCodegenMetrics(jit_runtime.lazy_codegen, metrics);
 	}
 
+	bool TryMarkOnce(ExecutionRegionRuntimeOnceFlag flag, idx_t index) override {
+		return pipeline.TryMarkRuntimeOnce(flag, index);
+	}
+
 	void Defer(string reason) override {
 		deferred_reason = std::move(reason);
 	}

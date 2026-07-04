@@ -105,9 +105,22 @@ static void SetDenseSljitPredicateSourceIndices(SljitNativePredicate &predicate,
 }
 
 static void RemapSljitConstantOrNullToExecutableInputs(SljitNativeConstantOrNull &constant_or_null,
-                                                       vector<idx_t> &input_sources) {
+                                                       vector<idx_t> &input_sources,
+                                                       vector<bool> &local_source_not_null,
+                                                       const vector<bool> *input_not_null) {
 	for (auto &source_index : constant_or_null.guard_source_indices) {
-		source_index = AddSljitExecutableInputSource(input_sources, source_index);
+		source_index =
+		    AddSljitExecutableInputSource(input_sources, source_index, &local_source_not_null, input_not_null);
+	}
+}
+
+static void PopulateSljitExecutableInputSourceFacts(const vector<idx_t> &input_sources,
+                                                    vector<bool> &input_source_not_null,
+                                                    const vector<bool> *input_not_null) {
+	input_source_not_null.clear();
+	input_source_not_null.reserve(input_sources.size());
+	for (auto input_source : input_sources) {
+		input_source_not_null.push_back(SljitSourceKnownNotNull(input_not_null, input_source));
 	}
 }
 
@@ -115,6 +128,7 @@ static void PrepareExecutableRegionExpressionInputs(SljitExecutableRegionExpress
                                                     const vector<bool> *input_not_null) {
 	auto &semantic = expr.plan;
 	expr.input_source_indices.clear();
+	expr.input_source_not_null.clear();
 	switch (semantic.kind) {
 	case SljitNativeRegionExpressionKind::PREDICATE:
 		if (semantic.predicate) {
@@ -122,15 +136,18 @@ static void PrepareExecutableRegionExpressionInputs(SljitExecutableRegionExpress
 			RemapSljitPredicateToExecutableInputs(*semantic.predicate, expr.input_source_indices, local_source_not_null,
 			                                      input_not_null);
 			SetDenseSljitPredicateSourceIndices(*semantic.predicate, expr.input_source_indices.size());
+			expr.input_source_not_null = local_source_not_null;
 			semantic.predicate->source_not_null = std::move(local_source_not_null);
 		}
 		return;
 	case SljitNativeRegionExpressionKind::CONSTANT_OR_NULL:
-		RemapSljitConstantOrNullToExecutableInputs(semantic.constant_or_null, expr.input_source_indices);
+		RemapSljitConstantOrNullToExecutableInputs(semantic.constant_or_null, expr.input_source_indices,
+		                                           expr.input_source_not_null, input_not_null);
 		return;
 	case SljitNativeRegionExpressionKind::EXPRESSION_TREE:
 	case SljitNativeRegionExpressionKind::TYPED_EXPRESSION_TREE:
 		expr.input_source_indices = semantic.expression_tree_source_indices;
+		PopulateSljitExecutableInputSourceFacts(expr.input_source_indices, expr.input_source_not_null, input_not_null);
 		return;
 	default:
 		return;

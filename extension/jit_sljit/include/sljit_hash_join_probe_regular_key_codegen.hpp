@@ -28,7 +28,12 @@ struct SljitRegularHashJoinProbeKeyJumps {
 	vector<struct sljit_jump *> predicate_key_mismatches;
 };
 
-static inline vector<struct sljit_jump *>
+struct SljitRegularHashJoinProbeHashJumps {
+	vector<struct sljit_jump *> source_is_null;
+	vector<struct sljit_jump *> no_match;
+};
+
+static inline SljitRegularHashJoinProbeHashJumps
 EmitRegularHashJoinProbeHash(struct sljit_compiler *compiler, const SljitNativeHashJoinProbePlan &plan,
                              const SljitHashJoinProbeCodegenConfig &config,
                              const SljitRegularHashJoinProbeRegisters &registers) {
@@ -47,7 +52,7 @@ EmitRegularHashJoinProbeHash(struct sljit_compiler *compiler, const SljitNativeH
 		sljit_emit_op1(compiler, SLJIT_MOV_U32, common_source_index_reg, 0, SLJIT_MEM2(SLJIT_R0, SLJIT_S1), 2);
 	}
 
-	vector<struct sljit_jump *> source_is_null;
+	SljitRegularHashJoinProbeHashJumps jumps;
 	for (idx_t key_idx = 0; key_idx < equality_key_count; key_idx++) {
 		auto &key = keys[key_idx];
 		if (!assume_all_keys_valid) {
@@ -57,7 +62,7 @@ EmitRegularHashJoinProbeHash(struct sljit_compiler *compiler, const SljitNativeH
 		                                                       assume_all_keys_valid);
 		if (!key.null_equal || assume_all_keys_valid) {
 			if (source_null) {
-				source_is_null.push_back(source_null);
+				jumps.source_is_null.push_back(source_null);
 			}
 			auto source_data_reg = EmitPrepareRegularHashJoinSourceData(compiler, key_idx, SLJIT_R0, source_data_regs);
 			EmitHashJoinKeyHashFromSourceData(compiler, key_idx, key.key_kind, SLJIT_R2, source_data_reg,
@@ -77,14 +82,18 @@ EmitRegularHashJoinProbeHash(struct sljit_compiler *compiler, const SljitNativeH
 			EmitDuckDBCombineHashScalar(compiler, SLJIT_R3, SLJIT_R2, SLJIT_R4, hash_multiplier_reg);
 		}
 	}
+	if (config.UsesBloomFilter()) {
+		jumps.no_match.push_back(
+		    EmitJumpIfRegularHashJoinBloomMiss(compiler, SLJIT_R3, SLJIT_R0, SLJIT_R1, SLJIT_R2, SLJIT_R4));
+	}
 	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R1, 0, SLJIT_R3, 0);
 	sljit_emit_op2(compiler, SLJIT_OR, SLJIT_R3, 0, SLJIT_R3, 0, SLJIT_S5, 0);
 	EmitApplyHashJoinBitmask(compiler, SLJIT_R1, SLJIT_R4, SLJIT_REGULAR_HASH_JOIN_BITMASK_REG_AVAILABLE);
-	return source_is_null;
+	return jumps;
 }
 
-static inline struct sljit_jump *
-EmitRegularHashJoinSaltMismatch(struct sljit_compiler *compiler, const SljitHashJoinProbeCodegenConfig &config) {
+static inline struct sljit_jump *EmitRegularHashJoinSaltMismatch(struct sljit_compiler *compiler,
+                                                                 const SljitHashJoinProbeCodegenConfig &config) {
 	if (!config.HasRuntimeLayout() && !config.UsesSalt()) {
 		return nullptr;
 	}
@@ -152,8 +161,8 @@ EmitRegularHashJoinKeyChecks(struct sljit_compiler *compiler, const SljitNativeH
 			jumps.equality_key_mismatches.push_back(
 			    EmitJumpIfHashJoinRhsKeyNull(compiler, key_idx, SLJIT_R0, SLJIT_R2, SLJIT_R4));
 			EmitHashJoinEqualityKeyMismatch(compiler, key_idx, key.key_kind,
-			                                NumericCast<sljit_sw>(key.key_layout_offset),
-			                                jumps.equality_key_mismatches, source_data_regs, source_index_reg);
+			                                NumericCast<sljit_sw>(key.key_layout_offset), jumps.equality_key_mismatches,
+			                                source_data_regs, source_index_reg);
 			auto key_done = sljit_emit_jump(compiler, SLJIT_JUMP);
 
 			sljit_set_label(source_null, sljit_emit_label(compiler));
@@ -169,8 +178,8 @@ EmitRegularHashJoinKeyChecks(struct sljit_compiler *compiler, const SljitNativeH
 				jumps.equality_key_mismatches.push_back(rhs_null);
 			}
 			EmitHashJoinEqualityKeyMismatch(compiler, key_idx, key.key_kind,
-			                                NumericCast<sljit_sw>(key.key_layout_offset),
-			                                jumps.equality_key_mismatches, source_data_regs, source_index_reg);
+			                                NumericCast<sljit_sw>(key.key_layout_offset), jumps.equality_key_mismatches,
+			                                source_data_regs, source_index_reg);
 		}
 	}
 	return jumps;

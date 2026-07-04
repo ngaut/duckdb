@@ -14,7 +14,27 @@
 
 #include "sljitLir.h"
 
+#include <exception>
+
 namespace duckdb {
+
+static inline void SLJIT_FUNC SljitNativeHashJoinInt64ToInt32CastError(std::exception_ptr *error, int64_t value) {
+	try {
+		throw OutOfRangeException("Type INT64 with value %lld can't be cast because the value is out of range for "
+		                          "the destination type INT32",
+		                          static_cast<long long>(value));
+	} catch (...) {
+		*error = std::current_exception();
+	}
+}
+
+static inline void EmitCallHashJoinInt64ToInt32CastError(struct sljit_compiler *compiler, sljit_sw error_offset,
+                                                         sljit_s32 value_reg) {
+	sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_R0, 0, SLJIT_S0, 0, SLJIT_IMM, error_offset);
+	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R1, 0, value_reg, 0);
+	sljit_emit_icall(compiler, SLJIT_CALL, SLJIT_ARGS2V(P, W), SLJIT_IMM,
+	                 SLJIT_FUNC_ADDR(SljitNativeHashJoinInt64ToInt32CastError));
+}
 
 static inline sljit_s32 SljitHashJoinKeyLoadOp(SljitNativeHashJoinKeyKind kind) {
 	switch (kind) {
@@ -180,8 +200,7 @@ static inline void EmitHashJoinKeyHash(struct sljit_compiler *compiler, SljitNat
 }
 
 static inline void EmitDuckDBCombineHashScalar(struct sljit_compiler *compiler, sljit_s32 current_hash,
-                                               sljit_s32 other_hash, sljit_s32 scratch,
-                                               sljit_s32 multiplier_reg = 0) {
+                                               sljit_s32 other_hash, sljit_s32 scratch, sljit_s32 multiplier_reg = 0) {
 	sljit_emit_op1(compiler, SLJIT_MOV, scratch, 0, current_hash, 0);
 	sljit_emit_op2(compiler, SLJIT_LSHR, scratch, 0, scratch, 0, SLJIT_IMM, 32);
 	sljit_emit_op2(compiler, SLJIT_XOR, current_hash, 0, current_hash, 0, scratch, 0);

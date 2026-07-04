@@ -247,6 +247,19 @@ EmitSljitTypedExpressionTreeFastCaseReg(struct sljit_compiler *compiler, const E
 	}
 }
 
+static void
+EmitSljitTypedExpressionTreeFastIntegralCompressReg(struct sljit_compiler *compiler, const ExecutionExpressionIR &node,
+                                                    idx_t &spill_index,
+                                                    vector<SljitExpressionTreeOverflowJumps> &overflows,
+                                                    SljitTypedExpressionTreeFastIndexMode index_mode,
+                                                    const vector<SljitTypedExpressionTreeDataPointerHoist> *data_hoists) {
+	D_ASSERT(node.children.size() == 2);
+	EmitSljitTypedExpressionTreeFastValueRegInternal(compiler, *node.children[0], spill_index, overflows, index_mode,
+	                                                 data_hoists);
+	sljit_emit_op2(compiler, SLJIT_SUB, SLJIT_R2, 0, SLJIT_R2, 0, SLJIT_IMM,
+	               NumericCast<sljit_sw>(SljitTypedExpressionTreeConstantValue(*node.children[1])));
+}
+
 static void EmitSljitTypedExpressionTreeFastValueRegInternal(
     struct sljit_compiler *compiler, const ExecutionExpressionIR &node, idx_t &spill_index,
     vector<SljitExpressionTreeOverflowJumps> &overflows, SljitTypedExpressionTreeFastIndexMode index_mode,
@@ -275,6 +288,11 @@ static void EmitSljitTypedExpressionTreeFastValueRegInternal(
 		EmitSljitTypedExpressionTreeFastCaseReg(compiler, node, spill_index, overflows, index_mode, data_hoists);
 		return;
 	case ExecutionExpressionIRKind::INTRINSIC:
+		if (node.intrinsic == ExecutionExpressionIntrinsicKind::INTEGRAL_COMPRESS) {
+			EmitSljitTypedExpressionTreeFastIntegralCompressReg(compiler, node, spill_index, overflows, index_mode,
+			                                                    data_hoists);
+			return;
+		}
 		EmitSljitTypedExpressionTreeFastStringPrefixReg(compiler, node, index_mode, data_hoists);
 		return;
 	default:

@@ -8,6 +8,7 @@
 
 #pragma once
 
+#include "sljit_final_projection_aggregate_state.hpp"
 #include "sljit_grouped_aggregate_descriptor.hpp"
 
 namespace duckdb {
@@ -29,13 +30,29 @@ static bool SljitBuildFinalSplitPayloadDescriptor(SljitFinalProjectionAggregateB
 	auto &aggregate_update = aggregate_op.aggregate_update;
 	auto &aggregate_plan = aggregate_update.plan;
 	auto &sink_info = aggregate_plan.sink_info;
-	if (sink_info.kind != ExecutionRegionSinkKind::HASH_AGGREGATE_UPDATE || sink_info.groups.empty() ||
-	    sink_info.aggregates.empty() || !aggregate_plan.use_primitive_payloads ||
-	    !aggregate_plan.use_grouped_state_addresses || aggregate_plan.use_perfect_hash_group_lookup ||
-	    aggregate_update.fused_payload_update_owns_group_lookup) {
-		return set_blocker("aggregate_shape");
+	const bool uses_distinct_count_pointer = sink_info.aggregate_contract.distinct_count_pointer_keys;
+	if (sink_info.kind != ExecutionRegionSinkKind::HASH_AGGREGATE_UPDATE) {
+		return set_blocker("aggregate_kind");
 	}
-	if (aggregate_update.payloads.size() != sink_info.aggregates.size()) {
+	if (sink_info.groups.empty()) {
+		return set_blocker("group_keys");
+	}
+	if (sink_info.aggregates.empty()) {
+		return set_blocker("aggregates");
+	}
+	if (!aggregate_plan.use_primitive_payloads && !uses_distinct_count_pointer) {
+		return set_blocker("primitive_payloads");
+	}
+	if (!aggregate_plan.use_grouped_state_addresses && !uses_distinct_count_pointer) {
+		return set_blocker("grouped_state_addresses");
+	}
+	if (aggregate_plan.use_perfect_hash_group_lookup) {
+		return set_blocker("perfect_hash_group_lookup");
+	}
+	if (aggregate_update.fused_payload_update_owns_group_lookup) {
+		return set_blocker("fused_payload_owns_lookup");
+	}
+	if (!uses_distinct_count_pointer && aggregate_update.payloads.size() != sink_info.aggregates.size()) {
 		return set_blocker("payload_count");
 	}
 	bridge.group_key_types.clear();
@@ -57,6 +74,31 @@ static bool SljitBuildFinalSplitPayloadDescriptor(SljitFinalProjectionAggregateB
 		bridge.group_projection_indices.push_back(group.input_index);
 		bridge.group_key_types.push_back(final_projection_op.output_types[group.input_index]);
 	}
+	if (uses_distinct_count_pointer) {
+		if (sink_info.aggregates.size() != 1) {
+			return set_blocker("distinct_payload_count");
+		}
+		auto &aggregate = sink_info.aggregates[0];
+		if (aggregate.child_count != 1 || aggregate.child_types.size() != 1 ||
+		    aggregate.payload_index >= final_projection_op.projections.size() ||
+		    aggregate.payload_index >= final_projection_op.output_types.size()) {
+			return set_blocker("distinct_payload_contract");
+		}
+		idx_t input_source_idx;
+		if (!SljitTryGetSingleSourceReferenceProjectionIndex(final_projection_op.projections[aggregate.payload_index],
+		                                                     input_source_idx) ||
+		    input_source_idx >= payload_input.ColumnCount() ||
+		    final_projection_op.output_types[aggregate.payload_index].InternalType() !=
+		        aggregate.child_types[0].InternalType() ||
+		    payload_input.data[input_source_idx].GetType().InternalType() != aggregate.child_types[0].InternalType()) {
+			return set_blocker("distinct_payload_projection");
+		}
+		bridge.payload_source_indices.clear();
+		bridge.payload_source_indices.push_back(input_source_idx);
+		bridge.split_payload_uses_fused_update = false;
+		bridge.split_payload_descriptor.MarkReady();
+		return true;
+	}
 	bridge.payload_source_indices.clear();
 	bridge.payload_source_indices.reserve(sink_info.aggregates.size());
 	auto add_count_star_payload = [&]() {
@@ -68,11 +110,9 @@ static bool SljitBuildFinalSplitPayloadDescriptor(SljitFinalProjectionAggregateB
 		    projection_source_idx >= final_projection_op.output_types.size()) {
 			return set_blocker("fused_payload_source");
 		}
-		SljitExecutableRegionExpression remapped_expr;
 		idx_t input_source_idx;
-		if (!SljitTryBuildSingleSourceProjectionExpression(final_projection_op.projections[projection_source_idx],
-		                                                   remapped_expr, input_source_idx) ||
-		    !SljitProjectionIsSingleSourceReferenceLike(remapped_expr.plan)) {
+		if (!SljitTryGetSingleSourceReferenceProjectionIndex(final_projection_op.projections[projection_source_idx],
+		                                                     input_source_idx)) {
 			return set_blocker("fused_payload_projection");
 		}
 		if (input_source_idx >= payload_input.ColumnCount() ||

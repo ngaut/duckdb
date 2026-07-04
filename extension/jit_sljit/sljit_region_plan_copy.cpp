@@ -105,9 +105,9 @@ SljitNativeRegionExpressionPlan SljitNativeRegionExpressionPlan::Copy(bool copy_
 	result.upper_inclusive = upper_inclusive;
 	result.predicate = predicate ? predicate->Copy() : nullptr;
 	const bool copy_expression_tree =
-	    expression_tree && (copy_auxiliary_expression_tree ||
-	                        kind == SljitNativeRegionExpressionKind::EXPRESSION_TREE ||
-	                        kind == SljitNativeRegionExpressionKind::TYPED_EXPRESSION_TREE);
+	    expression_tree &&
+	    (copy_auxiliary_expression_tree || kind == SljitNativeRegionExpressionKind::EXPRESSION_TREE ||
+	     kind == SljitNativeRegionExpressionKind::TYPED_EXPRESSION_TREE);
 	if (copy_expression_tree) {
 		result.expression_tree = expression_tree->Copy();
 		result.expression_tree_source_indices = expression_tree_source_indices;
@@ -185,6 +185,7 @@ static SljitNativeRegionOpPlan CopySljitNativeRegionOp(const SljitNativeRegionOp
 	SljitNativeRegionOpPlan result;
 	result.kind = input.kind;
 	result.operator_index = input.operator_index;
+	result.input_types = input.input_types;
 	result.output_types = input.output_types;
 	result.filter = input.filter.Copy();
 	result.hash_join_probe = input.hash_join_probe.Copy();
@@ -200,13 +201,15 @@ static SljitNativeRegionOpPlan CopySljitNativeRegionOp(const SljitNativeRegionOp
 	result.delim_join_sink = input.delim_join_sink;
 	result.aggregate_update.sink_info = input.aggregate_update.sink_info;
 	result.aggregate_update.input_types = input.aggregate_update.input_types;
+	result.aggregate_update.estimated_input_count = input.aggregate_update.estimated_input_count;
+	result.aggregate_update.group_reserve = input.aggregate_update.group_reserve;
 	result.aggregate_update.use_primitive_payloads = input.aggregate_update.use_primitive_payloads;
 	result.aggregate_update.use_grouped_state_addresses = input.aggregate_update.use_grouped_state_addresses;
 	result.aggregate_update.use_perfect_hash_group_lookup = input.aggregate_update.use_perfect_hash_group_lookup;
-	result.aggregate_update.use_distinct_count_pointer_update = input.aggregate_update.use_distinct_count_pointer_update;
 	result.aggregate_update.ir = input.aggregate_update.ir;
 	result.aggregate_update.payloads = CopySljitNativeRegionExpressions(input.aggregate_update.payloads);
-	result.aggregate_update.group_expressions = CopySljitNativeRegionExpressions(input.aggregate_update.group_expressions);
+	result.aggregate_update.group_expressions =
+	    CopySljitNativeRegionExpressions(input.aggregate_update.group_expressions);
 	result.order_sink.sink_info = input.order_sink.sink_info;
 	result.order_sink.input_types = input.order_sink.input_types;
 	result.order_sink.key_types = input.order_sink.key_types;

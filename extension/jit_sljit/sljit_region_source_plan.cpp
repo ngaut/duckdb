@@ -10,10 +10,10 @@
 
 namespace duckdb {
 
-static SljitSourceRoutePlan SljitDuckDBScanFilteredRoute() {
-	SljitSourceRoutePlan route;
-	route.uses_scan_filters = true;
-	return route;
+static SljitSourceContractPlan SljitDuckDBScanFilteredSourceContractPlan() {
+	SljitSourceContractPlan contract_plan;
+	contract_plan.uses_scan_filters = true;
+	return contract_plan;
 }
 
 static void
@@ -27,11 +27,11 @@ AppendSljitSourceIR(string &reason, const ExecutionRegionNode &node, bool render
 }
 
 static SljitRegionNodePlan SljitNativeSourceNode(string reason, const ExecutionRegionNode &node,
-                                                 bool render_diagnostics, SljitSourceRoutePlan route = {}) {
+                                                 bool render_diagnostics, SljitSourceContractPlan contract_plan = {}) {
 	SljitRegionNodePlan result;
 	result.kind = ExecutionRegionLoweringKind::NATIVE;
 	result.source_execution = ExecutionRegionSourceExecutionKind::SOURCE_CONTRACT;
-	result.source_route = route;
+	result.source_contract = contract_plan;
 	result.reason = std::move(reason);
 	AppendSljitSourceIR(result.reason, node, render_diagnostics, ExecutionRegionSourceExecutionKind::SOURCE_CONTRACT);
 	return result;
@@ -61,12 +61,8 @@ static SljitRegionNodePlan SljitSourceBoundaryRequiresContract(const ExecutionRe
 	return result;
 }
 
-static string SljitGeneratedSourceFilterReason(const SljitSourceRoutePlan &route) {
-	if (!route.uses_scan_filters) {
-		return "generated table scan source filters";
-	}
-	return "generated table scan source filters;source-strategy="
-	       "generated-source-filtered-source-contract;source_contract_filter_pushdown=true";
+static string SljitGeneratedSourceFilterReason() {
+	return "generated table scan source filters";
 }
 
 static SljitRegionNodePlan PlanSljitSourceContractNode(const ExecutionRegionNode &node,
@@ -81,14 +77,16 @@ static SljitRegionNodePlan PlanSljitSourceContractNode(const ExecutionRegionNode
 		return SljitRegionBoundaryNode("source contract requires full-pipeline region ABI");
 	}
 
+	if (table_scan_contract.dynamic_filters && table_scan_contract.filter_pushdown) {
+		string reason = "vectorized dynamic table scan filters;source-strategy=duckdb-scan-filtered-source-contract";
+		AppendSljitSourceFilterFacts(reason, node, table_scan_contract, false);
+		reason += ";source_contract_filter_pushdown=true";
+		reason += ";source_contract_dynamic_filters=true";
+		return SljitNativeSourceNode(std::move(reason), node, render_diagnostics,
+		                             SljitDuckDBScanFilteredSourceContractPlan());
+	}
+
 	if (node.source->filters.empty()) {
-		if (table_scan_contract.dynamic_filters && table_scan_contract.filter_pushdown) {
-			string reason =
-			    "vectorized dynamic table scan filters;source-strategy=duckdb-scan-filtered-source-contract";
-			reason += ";source_contract_filter_pushdown=true";
-			reason += ";source_contract_dynamic_filters=true";
-			return SljitNativeSourceNode(std::move(reason), node, render_diagnostics, SljitDuckDBScanFilteredRoute());
-		}
 		return SljitNativeSourceNode("table scan source contract", node, render_diagnostics);
 	}
 
@@ -96,16 +94,20 @@ static SljitRegionNodePlan PlanSljitSourceContractNode(const ExecutionRegionNode
 		SljitSourceFilterPlan source_filter_plan;
 		string error;
 		if (TryPlanSljitSourceFilters(node, source_filter_plan, error, render_diagnostics)) {
-			auto reason = SljitGeneratedSourceFilterReason(source_filter_plan.source_route);
+			auto reason = SljitGeneratedSourceFilterReason();
 			auto result =
-			    SljitNativeSourceNode(std::move(reason), node, render_diagnostics, source_filter_plan.source_route);
+			    SljitNativeSourceNode(std::move(reason), node, render_diagnostics, source_filter_plan.source_contract);
 			result.native_ops = std::move(source_filter_plan.native_ops);
 			return result;
 		}
 		string reason = "vectorized table scan filters;source-strategy=duckdb-scan-filtered-source-contract";
 		AppendSljitSourceFilterFacts(reason, node, table_scan_contract, false);
 		reason += ";source_contract_filter_pushdown=true";
-		return SljitNativeSourceNode(std::move(reason), node, render_diagnostics, SljitDuckDBScanFilteredRoute());
+		if (render_diagnostics && !error.empty()) {
+			reason += ";generated_source_filter_blocker=" + error;
+		}
+		return SljitNativeSourceNode(std::move(reason), node, render_diagnostics,
+		                             SljitDuckDBScanFilteredSourceContractPlan());
 	}
 
 	return SljitRegionBoundaryNode("table scan source filters require DuckDB scan filter pushdown");

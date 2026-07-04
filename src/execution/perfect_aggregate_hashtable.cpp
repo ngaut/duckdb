@@ -15,6 +15,7 @@ PerfectAggregateHashTable::PerfectAggregateHashTable(ClientContext &context, All
                                                      vector<Value> group_minima_p, vector<idx_t> required_bits_p)
     : BaseAggregateHashTable(context, allocator, aggregate_objects_p, std::move(payload_types_p)),
       addresses(LogicalType::POINTER), required_bits(std::move(required_bits_p)), total_required_bits(0),
+      occupied_count(0),
       group_minima(std::move(group_minima_p)), sel(STANDARD_VECTOR_SIZE),
       aggregate_allocator(make_uniq<ArenaAllocator>(allocator)) {
 	for (auto &group_bits : required_bits) {
@@ -154,11 +155,16 @@ idx_t PerfectAggregateHashTable::ResolveGroupStateAddresses(uintptr_t *address_d
 		}
 		if (!group_is_set[group]) {
 			new_group_count++;
+			occupied_count++;
 		}
 		group_is_set[group] = true;
 		address_data[i] = uintptr_t(data) + group * tuple_size + state_offset;
 	}
 	return new_group_count;
+}
+
+idx_t PerfectAggregateHashTable::OccupiedCount() const {
+	return occupied_count;
 }
 
 PerfectAggregateHashTableStateLayout PerfectAggregateHashTable::GetStateLayout() {
@@ -262,6 +268,9 @@ void PerfectAggregateHashTable::Combine(PerfectAggregateHashTable &other) {
 		auto has_entry_source = other.group_is_set[i];
 		// we only have any work to do if the source has an entry for this group
 		if (has_entry_source) {
+			if (!group_is_set[i]) {
+				occupied_count++;
+			}
 			group_is_set[i] = true;
 			source_addresses_ptr[combine_count] = source_ptr;
 			target_addresses_ptr[combine_count] = target_ptr;

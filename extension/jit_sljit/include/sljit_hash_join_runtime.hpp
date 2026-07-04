@@ -31,6 +31,12 @@ struct SljitHashJoinProbeDrainState;
 
 enum class SljitHashJoinProbeInputKind { GENERIC, FLAT_ALL_VALID, SELECTED_ALL_VALID };
 
+enum class SljitHashJoinMarkSelectionMode : uint8_t { NONE, MATCHES, NON_MATCHES };
+
+static inline bool SljitHashJoinEmitsMarkSelection(SljitHashJoinMarkSelectionMode mode) {
+	return mode != SljitHashJoinMarkSelectionMode::NONE;
+}
+
 struct SljitRegularHashJoinProbeInputShape {
 	bool source_selection_present = false;
 	bool source_common_selection_present = false;
@@ -75,14 +81,19 @@ SljitValidatePerfectHashJoinProbeExecutionLayout(const SljitNativeHashJoinProbeP
 void SljitPreparePerfectHashJoinProbeInput(const SljitNativeHashJoinProbeKeyPlan &key,
                                            const ExecutionPerfectHashJoinTableLayout &layout, DataChunk &input,
                                            SelectionVector &match_selection, SelectionVector &build_selection,
-                                           SljitHashJoinProbeDrainState &state,
+                                           SljitHashJoinProbeDrainState &state, bool allow_unchecked_int64_to_int32,
                                            SljitPreparedPerfectHashJoinProbeInput &result);
 SljitHashJoinProbeLayoutKind
 SljitValidateRegularHashJoinProbeExecutionLayout(const SljitNativeHashJoinProbePlan &plan,
                                                  const ExecutionHashJoinProbeBinding &probe);
 
 const char *SljitGeneratedRegularHashJoinProbeStage();
+const char *SljitGeneratedRegularHashJoinProbeStage(bool uses_bloom_filter);
+const char *SljitGeneratedRegularHashJoinProbeStage(bool uses_bloom_filter,
+                                                    SljitHashJoinMarkSelectionMode mark_selection_mode);
 const char *SljitGeneratedAllValidRegularHashJoinProbeStage(bool selected);
+const char *SljitGeneratedAllValidRegularHashJoinProbeStage(bool selected,
+                                                            SljitHashJoinMarkSelectionMode mark_selection_mode);
 const char *SljitGeneratedPerfectHashJoinProbeStage();
 
 struct SljitAllValidHashJoinProbeFacts {

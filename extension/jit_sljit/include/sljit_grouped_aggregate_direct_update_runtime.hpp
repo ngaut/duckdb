@@ -10,212 +10,13 @@
 
 #include "sljit_aggregate_preaggregated_update_runtime.hpp"
 #include "sljit_aggregate_preaggregation.hpp"
-#include "sljit_aggregate_row_pointer_preaggregation.hpp"
 #include "sljit_grouped_aggregate_direct_update_capability_runtime.hpp"
 #include "sljit_grouped_aggregate_state_address_update_runtime.hpp"
 #include "sljit_grouped_aggregate_state_runtime.hpp"
-#include "sljit_native_binding_runtime.hpp"
 #include "sljit_region_runtime_trace.hpp"
+#include "sljit_row_pointer_grouped_aggregate_update_runtime.hpp"
 
 namespace duckdb {
-
-static bool TryExecuteDirectRowPointerGroupedFusedPayloadUpdate(
-    ExecutionRegionRuntime &runtime, SljitRegionExecutionScratch &scratch, idx_t op_idx, SljitExecutableRegionOp &op,
-    DataChunk &payload_input, Vector &row_pointers, idx_t count,
-    const vector<ExecutionRowPointerGroupKeySource> &group_sources, const vector<idx_t> &payload_source_indices,
-    const vector<const ExecutionPrimitiveAggregateUpdateLane *> &payload_lanes,
-    ExecutionGroupedAggregateStateAddressBinding &grouped_state, SljitAggregatePayloadAdapterScratch &payload_scratch,
-    bool finish = true) {
-	auto stage_start = SljitRegionStageStart(runtime);
-	const char *stage_name = "direct_row_pointer_grouped_lookup_update";
-	const char *miss_stage_name = "direct_row_pointer_grouped_lookup_update_miss";
-	ExecutionGroupedAggregateStateTargetBatch targets;
-	auto updated = ExecuteSljitRegionRecordedOperation(
-	    runtime, op_idx, op.kind, stage_name, stage_start, [&](optional_ptr<ExecutionOperatorStageRecorder> recorder) {
-		    return grouped_state.state->TryFindOrCreateRowPointerGroupStateTargets(
-		        payload_input, row_pointers, count, group_sources, op.aggregate_update.plan.sink_info, targets,
-		        recorder);
-	    });
-	if (updated) {
-		auto target_payload_start = SljitRegionStageStart(runtime);
-		auto update_state =
-		    SljitBuildGroupedStateAddressUpdateState(op, payload_input, payload_lanes, payload_scratch,
-		                                             optional_ptr<const vector<idx_t>>(&payload_source_indices));
-		SljitExecuteGroupedStateTargetBatch(targets, update_state);
-		RecordSljitRegionStageRuntime(runtime, op_idx, op.kind, "direct_row_pointer_grouped_target_payload_update",
-		                              target_payload_start);
-		if (finish) {
-			FinishGroupedAggregateStateUpdates(runtime, op_idx, grouped_state, "finish_grouped_state_updates");
-		}
-	}
-	scratch.RecordDirectNewAggregateUpdateResult(op_idx, updated);
-	RecordSljitRegionStageRuntimePath(runtime, op_idx, op.kind, updated ? stage_name : miss_stage_name, stage_start);
-	if (updated) {
-		RecordSljitRegionMaterializationBoundary(runtime, op.kind, "row_pointer_grouped_lookup_update", count);
-	}
-	return updated;
-}
-
-static bool TryExecuteDirectRowPointerPreaggregatedPrimitiveUpdate(
-    ExecutionRegionRuntime &runtime, SljitRegionExecutionScratch &scratch, idx_t op_idx, SljitExecutableRegionOp &op,
-    DataChunk &payload_input, Vector &row_pointers, idx_t count,
-    const vector<ExecutionRowPointerGroupKeySource> &group_sources, const vector<idx_t> &payload_source_indices,
-    const vector<const ExecutionPrimitiveAggregateUpdateLane *> &payload_lanes,
-    ExecutionGroupedAggregateStateAddressBinding &grouped_state, SljitAggregatePayloadAdapterScratch &payload_scratch,
-    bool payload_sources_are_fused_override, bool finish = true) {
-	auto &compact_row_pointers = scratch.AggregatePreaggregatedRowPointers(op_idx);
-	auto &preaggregate_scratch = scratch.AggregatePreaggregateScratch(op_idx);
-	idx_t compact_count = 0;
-	auto preaggregate_stage_start = SljitRegionStageStart(runtime);
-	const bool preaggregated =
-	    payload_sources_are_fused_override
-	        ? SljitTryPreaggregateConsecutiveRowPointerFusedPrimitiveGroups(
-	              op, payload_input, row_pointers, group_sources, payload_source_indices, payload_lanes,
-	              compact_row_pointers, preaggregate_scratch, payload_scratch, compact_count)
-	        : TryPreaggregateConsecutiveRowPointerPrimitiveGroups(
-	              payload_input, row_pointers, group_sources, payload_source_indices, payload_lanes,
-	              compact_row_pointers, preaggregate_scratch, compact_count);
-	if (!preaggregated) {
-		return false;
-	}
-	RecordSljitRegionStageRuntime(runtime, op_idx, op.kind, "local_preaggregate_row_pointer_primitive_groups",
-	                              preaggregate_stage_start);
-
-	DataChunk compact_lookup_input;
-	vector<LogicalType> empty_types;
-	compact_lookup_input.InitializeEmpty(empty_types);
-	compact_lookup_input.SetChildCardinality(compact_count);
-
-	ExecutionGroupedAggregateStateTargetBatch targets;
-	auto stage_start = SljitRegionStageStart(runtime);
-	const char *stage_name = "direct_row_pointer_preaggregated_grouped_primitive_update";
-	auto updated = ExecuteSljitRegionRecordedOperation(
-	    runtime, op_idx, op.kind, stage_name, stage_start, [&](optional_ptr<ExecutionOperatorStageRecorder> recorder) {
-		    return grouped_state.state->TryFindOrCreateRowPointerGroupStateTargets(
-		        compact_lookup_input, compact_row_pointers, compact_count, group_sources,
-		        op.aggregate_update.plan.sink_info, targets, recorder);
-	    });
-	if (!updated) {
-		scratch.RecordDirectNewAggregateUpdateResult(op_idx, false);
-		RecordSljitRegionStageRuntimePath(
-		    runtime, op_idx, op.kind, "direct_row_pointer_preaggregated_grouped_primitive_update_miss", stage_start);
-		return false;
-	}
-
-	auto update_start = SljitRegionStageStart(runtime);
-	SljitPreaggregatedPrimitiveUpdateState update_state;
-	update_state.lanes = &payload_lanes;
-	update_state.payloads = &preaggregate_scratch.payloads;
-	ExecuteSljitPreaggregatedPrimitiveTargetBatch(targets, update_state);
-	RecordSljitRegionStageRuntime(runtime, op_idx, op.kind, "direct_row_pointer_preaggregated_primitive_payload_update",
-	                              update_start);
-	if (finish) {
-		FinishGroupedAggregateStateUpdates(runtime, op_idx, grouped_state, "finish_grouped_state_updates");
-	}
-	scratch.RecordDirectNewAggregateUpdateResult(op_idx, true);
-	RecordSljitRegionStageRuntimePath(runtime, op_idx, op.kind,
-	                                  "direct_row_pointer_preaggregated_grouped_primitive_update", stage_start);
-	RecordSljitRegionMaterializationBoundary(runtime, op.kind, "preaggregated_row_pointer_primitive_groups",
-	                                         compact_count);
-	RecordSljitRegionMaterializationBoundary(runtime, op.kind, "row_pointer_grouped_lookup_update", compact_count);
-	RecordSljitRegionMaterializationBoundary(runtime, op.kind, "direct_state_update", count);
-	return true;
-}
-
-static bool SljitTryExecuteNativeRowPointerGroupedAggregateUpdate(
-    ExecutionRegionRuntime &runtime, ExecutionOperatorRuntime &native_runtime, SljitRegionExecutionScratch &scratch,
-    idx_t op_idx, SljitExecutableRegionOp &op, DataChunk &payload_input, Vector &row_pointers,
-    const vector<ExecutionRowPointerGroupKeySource> &group_sources, const vector<idx_t> &payload_source_indices,
-    bool defer_grouped_finish, optional_ptr<bool> deferred_grouped_finish) {
-	auto record_unsupported = [&](const char *reason) {
-		auto path = string("direct_row_pointer_grouped_lookup_update_unsupported.") + reason;
-		RecordSljitRegionRuntimePath(runtime, op.kind, path.c_str());
-	};
-	const auto count = payload_input.size();
-	if (count == 0) {
-		return false;
-	}
-	if (row_pointers.GetVectorType() != VectorType::FLAT_VECTOR) {
-		record_unsupported("non_flat_row_pointers");
-		return false;
-	}
-	if (payload_source_indices.empty()) {
-		record_unsupported("payload_sources");
-		return false;
-	}
-	auto &binding = SljitBindRecordedNativeSink(
-	    runtime, native_runtime, scratch, op_idx, op.kind, payload_input, op.aggregate_update.plan.sink_info,
-	    "aggregate-update-runtime-binding-failed", "SLJIT aggregate update sink");
-	if (!binding.ready || !binding.aggregate_update.ready || !op.aggregate_update.plan.use_primitive_payloads) {
-		record_unsupported("sink_binding");
-		return false;
-	}
-	auto &primitive = binding.aggregate_update.primitive;
-	if (!primitive.ready) {
-		record_unsupported("primitive_binding");
-		return false;
-	}
-	if (!NeedsGroupedAggregateStateAddressPlan(op.aggregate_update)) {
-		record_unsupported("grouped_state_plan");
-		return false;
-	}
-	auto &grouped_state = binding.aggregate_update.grouped_state;
-	if (!grouped_state.ready || !grouped_state.state) {
-		record_unsupported("grouped_state_binding");
-		return false;
-	}
-	auto &aggregates = op.aggregate_update.plan.sink_info.aggregates;
-	if (aggregates.size() != op.aggregate_update.payloads.size()) {
-		record_unsupported("aggregate_payload_count");
-		return false;
-	}
-
-	auto &payload_lanes = scratch.AggregatePayloadLanes(op_idx, aggregates, primitive);
-	auto &payload_scratch = scratch.AggregatePayloadScratch(op_idx);
-	const bool finish = !defer_grouped_finish;
-	bool payload_sources_are_fused_override = false;
-	if (SljitCanExecuteDirectRowPointerPreaggregatedPrimitiveUpdate(
-	        scratch, op_idx, op, payload_input, row_pointers, group_sources, payload_source_indices, payload_lanes,
-	        count, payload_sources_are_fused_override) &&
-	    TryExecuteDirectRowPointerPreaggregatedPrimitiveUpdate(
-	        runtime, scratch, op_idx, op, payload_input, row_pointers, count, group_sources, payload_source_indices,
-	        payload_lanes, grouped_state, payload_scratch, payload_sources_are_fused_override, finish)) {
-		MarkDeferredGroupedFinish(defer_grouped_finish, deferred_grouped_finish);
-		return true;
-	}
-	if (SljitCanExecuteDirectGroupedFusedPayloadUpdate(scratch, op_idx, op, payload_input, payload_lanes, nullptr,
-	                                                   count)) {
-		if (!TryExecuteDirectRowPointerGroupedFusedPayloadUpdate(
-		        runtime, scratch, op_idx, op, payload_input, row_pointers, count, group_sources, payload_source_indices,
-		        payload_lanes, grouped_state, payload_scratch, finish)) {
-			record_unsupported("grouped_lookup_update");
-			return false;
-		}
-		MarkDeferredGroupedFinish(defer_grouped_finish, deferred_grouped_finish);
-		return true;
-	}
-
-	auto stage_start = SljitRegionStageStart(runtime);
-	auto updated = ExecuteSljitRegionRecordedOperation(
-	    runtime, op_idx, op.kind, "direct_row_pointer_grouped_lookup_update", stage_start,
-	    [&](optional_ptr<ExecutionOperatorStageRecorder> recorder) {
-		    return grouped_state.state->TryUpdateRowPointerGroupPayloads(
-		        payload_input, row_pointers, count, group_sources, payload_source_indices,
-		        op.aggregate_update.plan.sink_info, payload_lanes, recorder, finish);
-	    });
-	scratch.RecordDirectNewAggregateUpdateResult(op_idx, updated);
-	RecordSljitRegionStageRuntimePath(runtime, op_idx, op.kind,
-	                                  updated ? "direct_row_pointer_grouped_lookup_update"
-	                                          : "direct_row_pointer_grouped_lookup_update_miss",
-	                                  stage_start);
-	if (!updated) {
-		record_unsupported("row_pointer_payload_update");
-		return false;
-	}
-	RecordSljitRegionMaterializationBoundary(runtime, op.kind, "row_pointer_grouped_lookup_update", count);
-	MarkDeferredGroupedFinish(defer_grouped_finish, deferred_grouped_finish);
-	return true;
-}
 
 static bool TryExecuteDirectAppendNewGroupedPrimitiveAggregateUpdate(
     ExecutionRegionRuntime &runtime, SljitRegionExecutionScratch &scratch, idx_t op_idx, SljitExecutableRegionOp &op,
@@ -242,13 +43,14 @@ static bool TryExecuteDirectAppendNewGroupedPrimitiveAggregateUpdate(
 static bool TryExecuteDirectNewGroupedPrimitiveAggregateUpdate(
     ExecutionRegionRuntime &runtime, SljitRegionExecutionScratch &scratch, idx_t op_idx, SljitExecutableRegionOp &op,
     DataChunk &input, const vector<const ExecutionPrimitiveAggregateUpdateLane *> &payload_lanes,
-    ExecutionGroupedAggregateStateAddressBinding &grouped_state, bool finish = true) {
+    ExecutionGroupedAggregateStateAddressBinding &grouped_state, bool finish = true,
+    optional_ptr<const ExecutionDenseGroupDomain> dense_domain = nullptr) {
 	auto stage_start = SljitRegionStageStart(runtime);
 	auto updated = ExecuteSljitRegionRecordedOperation(
 	    runtime, op_idx, op.kind, "direct_new_grouped_primitive_update", stage_start,
 	    [&](optional_ptr<ExecutionOperatorStageRecorder> recorder) {
 		    return grouped_state.state->TryUpdateNewGroups(input, op.aggregate_update.plan.sink_info, payload_lanes,
-		                                                   recorder, finish);
+		                                                   recorder, finish, dense_domain);
 	    });
 	scratch.RecordDirectNewAggregateUpdateResult(op_idx, updated);
 	RecordSljitRegionStageRuntimePath(
@@ -260,12 +62,11 @@ static bool TryExecuteDirectNewGroupedPrimitiveAggregateUpdate(
 	return updated;
 }
 
-static bool TryExecutePreaggregatedGroupedPrimitiveAggregateUpdate(
-    ExecutionRegionRuntime &runtime, SljitRegionExecutionScratch &scratch, idx_t op_idx, SljitExecutableRegionOp &op,
-    DataChunk &compact_groups, SljitPreaggregatedPrimitiveAggregateScratch &preaggregate_scratch,
+static bool SljitCanApplyPreaggregatedGroupedPrimitiveAggregateUpdate(
+    SljitExecutableRegionOp &op, DataChunk &compact_groups,
+    SljitPreaggregatedPrimitiveAggregateScratch &preaggregate_scratch,
     const vector<const ExecutionPrimitiveAggregateUpdateLane *> &payload_lanes,
-    ExecutionGroupedAggregateStateAddressBinding &grouped_state, idx_t preaggregated_row_count,
-    bool defer_grouped_finish, optional_ptr<bool> deferred_grouped_finish) {
+    ExecutionGroupedAggregateStateAddressBinding &grouped_state) {
 	if (compact_groups.size() == 0 ||
 	    op.aggregate_update.plan.sink_info.kind != ExecutionRegionSinkKind::HASH_AGGREGATE_UPDATE ||
 	    !op.aggregate_update.plan.use_primitive_payloads || !op.aggregate_update.plan.use_grouped_state_addresses ||
@@ -292,10 +93,35 @@ static bool TryExecutePreaggregatedGroupedPrimitiveAggregateUpdate(
 			return false;
 		}
 	}
+	return true;
+}
+
+static bool TryExecutePreaggregatedGroupedPrimitiveAppendSuffixWithPrefixUpdate(
+    ExecutionRegionRuntime &runtime, SljitRegionExecutionScratch &scratch, idx_t op_idx, SljitExecutableRegionOp &op,
+    DataChunk &compact_groups, SljitPreaggregatedPrimitiveAggregateScratch &preaggregate_scratch,
+    const vector<const ExecutionPrimitiveAggregateUpdateLane *> &payload_lanes,
+    ExecutionGroupedAggregateStateAddressBinding &grouped_state, bool defer_grouped_finish,
+    optional_ptr<bool> deferred_grouped_finish);
+
+static bool TryExecutePreaggregatedGroupedPrimitiveAggregateUpdate(
+    ExecutionRegionRuntime &runtime, SljitRegionExecutionScratch &scratch, idx_t op_idx, SljitExecutableRegionOp &op,
+    DataChunk &compact_groups, SljitPreaggregatedPrimitiveAggregateScratch &preaggregate_scratch,
+    const vector<const ExecutionPrimitiveAggregateUpdateLane *> &payload_lanes,
+    ExecutionGroupedAggregateStateAddressBinding &grouped_state, idx_t preaggregated_row_count,
+    bool defer_grouped_finish, optional_ptr<bool> deferred_grouped_finish) {
+	if (!SljitCanApplyPreaggregatedGroupedPrimitiveAggregateUpdate(op, compact_groups, preaggregate_scratch,
+	                                                               payload_lanes, grouped_state)) {
+		return false;
+	}
+	auto &sink_info = op.aggregate_update.plan.sink_info;
 
 	SljitPreaggregatedPrimitiveUpdateState update_state;
 	update_state.lanes = &payload_lanes;
 	update_state.payloads = &preaggregate_scratch.payloads;
+	optional_ptr<const ExecutionDenseGroupDomain> dense_domain;
+	if (op.aggregate_update.dense_group_domain.ready) {
+		dense_domain = &op.aggregate_update.dense_group_domain;
+	}
 	const bool finish = !defer_grouped_finish;
 	if (!scratch.DirectAppendNewAggregateUpdateDisabled(op_idx)) {
 		auto append_stage_start = SljitRegionStageStart(runtime);
@@ -316,6 +142,11 @@ static bool TryExecutePreaggregatedGroupedPrimitiveAggregateUpdate(
 			MarkDeferredGroupedFinish(defer_grouped_finish, deferred_grouped_finish);
 			return true;
 		}
+		if (TryExecutePreaggregatedGroupedPrimitiveAppendSuffixWithPrefixUpdate(
+		        runtime, scratch, op_idx, op, compact_groups, preaggregate_scratch, payload_lanes, grouped_state,
+		        defer_grouped_finish, deferred_grouped_finish)) {
+			return true;
+		}
 		scratch.RecordDirectAppendNewAggregateUpdateResult(op_idx, false);
 		RecordSljitRegionStageRuntimePath(
 		    runtime, op_idx, op.kind, "direct_append_preaggregated_grouped_primitive_update_miss", append_stage_start);
@@ -325,8 +156,9 @@ static bool TryExecutePreaggregatedGroupedPrimitiveAggregateUpdate(
 	auto updated = ExecuteSljitRegionRecordedOperation(
 	    runtime, op_idx, op.kind, "direct_preaggregated_grouped_primitive_update", stage_start,
 	    [&](optional_ptr<ExecutionOperatorStageRecorder> recorder) {
-		    return grouped_state.state->TryUpdateNewGroupsWithSelectedStateAddresses(
-		        compact_groups, sink_info, ExecuteSljitPreaggregatedPrimitiveUpdate, &update_state, recorder, finish);
+		    return grouped_state.state->TryUpdateGroupKeysWithSelectedStateAddresses(
+		        compact_groups, sink_info, ExecuteSljitPreaggregatedPrimitiveUpdate, &update_state, recorder, finish,
+		        nullptr, dense_domain);
 	    });
 	scratch.RecordDirectNewAggregateUpdateResult(op_idx, updated);
 	RecordSljitRegionStageRuntimePath(runtime, op_idx, op.kind,
@@ -365,47 +197,278 @@ static bool TryExecutePreaggregatedGroupedPrimitiveAggregateUpdate(
 	return true;
 }
 
-static bool TryExecuteDirectGroupedAggregateUpdateRoute(
+static bool TryExecutePreaggregatedGroupedPrimitiveAppendSuffixWithPrefixUpdate(
+    ExecutionRegionRuntime &runtime, SljitRegionExecutionScratch &scratch, idx_t op_idx, SljitExecutableRegionOp &op,
+    DataChunk &compact_groups, SljitPreaggregatedPrimitiveAggregateScratch &preaggregate_scratch,
+    const vector<const ExecutionPrimitiveAggregateUpdateLane *> &payload_lanes,
+    ExecutionGroupedAggregateStateAddressBinding &grouped_state, bool defer_grouped_finish,
+    optional_ptr<bool> deferred_grouped_finish) {
+	if (compact_groups.size() < 2 || !SljitCanApplyPreaggregatedGroupedPrimitiveAggregateUpdate(
+	                                     op, compact_groups, preaggregate_scratch, payload_lanes, grouped_state)) {
+		return false;
+	}
+	const idx_t prefix_count = 1;
+	const auto suffix_offset = prefix_count;
+	const auto suffix_count = compact_groups.size() - suffix_offset;
+	idx_t prefix_row_count;
+	idx_t suffix_row_count;
+	if (!CanSlicePreaggregatedPrimitiveScratch(preaggregate_scratch, payload_lanes, 0, prefix_count) ||
+	    !CanSlicePreaggregatedPrimitiveScratch(preaggregate_scratch, payload_lanes, suffix_offset, suffix_count) ||
+	    !PreaggregatedPrimitiveRepresentedRowCount(preaggregate_scratch, 0, prefix_count, prefix_row_count) ||
+	    !PreaggregatedPrimitiveRepresentedRowCount(preaggregate_scratch, suffix_offset, suffix_count,
+	                                               suffix_row_count)) {
+		return false;
+	}
+
+	auto &sink_info = op.aggregate_update.plan.sink_info;
+	auto &group_slice = scratch.AggregatePreaggregatedGroupSlice(op_idx);
+	auto &preaggregate_scratch_slice = scratch.AggregatePreaggregateScratchSlice(op_idx);
+
+	group_slice.Reset();
+	group_slice.Slice(compact_groups, suffix_offset, compact_groups.size());
+	if (!SlicePreaggregatedPrimitiveScratch(preaggregate_scratch, payload_lanes, suffix_offset, suffix_count,
+	                                        preaggregate_scratch_slice)) {
+		return false;
+	}
+	SljitPreaggregatedPrimitiveUpdateState suffix_update_state;
+	suffix_update_state.lanes = &payload_lanes;
+	suffix_update_state.payloads = &preaggregate_scratch_slice.payloads;
+	auto suffix_stage_start = SljitRegionStageStart(runtime);
+	auto suffix_appended = ExecuteSljitRegionRecordedOperation(
+	    runtime, op_idx, op.kind, "direct_append_preaggregated_grouped_primitive_update_suffix", suffix_stage_start,
+	    [&](optional_ptr<ExecutionOperatorStageRecorder> recorder) {
+		    return grouped_state.state->TryAppendNewGroupsWithStateAddresses(
+		        group_slice, sink_info, ExecuteSljitPreaggregatedPrimitiveAddressUpdate, &suffix_update_state, recorder,
+		        false);
+	    });
+	if (!suffix_appended) {
+		RecordSljitRegionStageRuntimePath(runtime, op_idx, op.kind,
+		                                  "direct_append_preaggregated_grouped_primitive_update_suffix_miss",
+		                                  suffix_stage_start);
+		return false;
+	}
+	RecordSljitRegionStageRuntimePath(
+	    runtime, op_idx, op.kind, "direct_append_preaggregated_grouped_primitive_update_suffix", suffix_stage_start);
+	RecordSljitRegionMaterializationBoundary(runtime, op.kind, "preaggregated_primitive_groups", suffix_count);
+	RecordSljitRegionMaterializationBoundary(runtime, op.kind, "direct_state_update", suffix_row_count);
+
+	group_slice.Reset();
+	group_slice.Slice(compact_groups, 0, prefix_count);
+	if (!SlicePreaggregatedPrimitiveScratch(preaggregate_scratch, payload_lanes, 0, prefix_count,
+	                                        preaggregate_scratch_slice)) {
+		throw InternalException("Validated SLJIT preaggregated prefix scratch slice failed");
+	}
+	SljitPreaggregatedPrimitiveUpdateState prefix_update_state;
+	prefix_update_state.lanes = &payload_lanes;
+	prefix_update_state.payloads = &preaggregate_scratch_slice.payloads;
+	auto &addresses = scratch.AggregateStateAddresses(op_idx);
+	auto prefix_stage_start = SljitRegionStageStart(runtime);
+	ExecuteSljitRegionRecordedOperation(
+	    runtime, op_idx, op.kind, "preaggregated_grouped_primitive_prefix_address_update", prefix_stage_start,
+	    [&](optional_ptr<ExecutionOperatorStageRecorder> recorder) {
+		    grouped_state.state->ResolveStateAddresses(group_slice, addresses, recorder);
+	    });
+	addresses.Flatten();
+	ExecuteSljitPreaggregatedPrimitiveAddressUpdate(FlatVector::GetData<uintptr_t>(addresses), nullptr, prefix_count,
+	                                                &prefix_update_state);
+	RecordSljitRegionStageRuntimePath(runtime, op_idx, op.kind, "preaggregated_grouped_primitive_prefix_address_update",
+	                                  prefix_stage_start);
+	RecordSljitRegionMaterializationBoundary(runtime, op.kind, "preaggregated_primitive_groups", prefix_count);
+	RecordSljitRegionMaterializationBoundary(runtime, op.kind, "preaggregated_address_vector_resolve", prefix_count);
+	RecordSljitRegionMaterializationBoundary(runtime, op.kind, "direct_state_update", prefix_row_count);
+	if (!defer_grouped_finish) {
+		FinishGroupedAggregateStateUpdates(runtime, op_idx, grouped_state, "finish_grouped_state_updates");
+	}
+	scratch.RecordDirectAppendNewAggregateUpdateResult(op_idx, true);
+	RecordSljitRegionRuntimePath(runtime, op.kind, "preaggregated_suffix_append_prefix_update");
+	MarkDeferredGroupedFinish(defer_grouped_finish, deferred_grouped_finish);
+	return true;
+}
+
+static bool TryReservePreaggregatedGroupedPrimitiveGroups(ExecutionRegionRuntime &runtime, idx_t op_idx,
+                                                          SljitExecutableRegionOp &op,
+                                                          ExecutionGroupedAggregateStateAddressBinding &grouped_state) {
+	auto &reserve = op.aggregate_update.plan.group_reserve;
+	if (!reserve.CanReserve() || !grouped_state.ready || !grouped_state.state) {
+		return false;
+	}
+	if (!runtime.TryMarkOnce(ExecutionRegionRuntimeOnceFlag::AGGREGATE_GROUP_RESERVE, op_idx)) {
+		return false;
+	}
+	RecordSljitRegionRuntimePath(runtime, op.kind, "preaggregated_grouped_primitive_reserve_target",
+	                             reserve.group_count);
+	auto reserve_stage_start = SljitRegionStageStart(runtime);
+	auto reserved = ExecuteSljitRegionRecordedOperation(
+	    runtime, op_idx, op.kind, "preaggregated_grouped_primitive_reserve", reserve_stage_start,
+	    [&](optional_ptr<ExecutionOperatorStageRecorder> recorder) {
+		    return grouped_state.state->ReserveGroups(reserve.group_count, recorder);
+	    });
+	RecordSljitRegionStageRuntimePath(runtime, op_idx, op.kind,
+	                                  reserved ? "preaggregated_grouped_primitive_reserve"
+	                                           : "preaggregated_grouped_primitive_reserve_miss",
+	                                  reserve_stage_start);
+	return reserved;
+}
+
+static bool TryExecutePreaggregatedGroupedPrimitiveAggregateUpdateBatches(
+    ExecutionRegionRuntime &runtime, SljitRegionExecutionScratch &scratch, idx_t op_idx, SljitExecutableRegionOp &op,
+    DataChunk &compact_groups, SljitPreaggregatedPrimitiveAggregateScratch &preaggregate_scratch,
+    const vector<const ExecutionPrimitiveAggregateUpdateLane *> &payload_lanes,
+    ExecutionGroupedAggregateStateAddressBinding &grouped_state, idx_t preaggregated_row_count,
+    bool defer_grouped_finish, optional_ptr<bool> deferred_grouped_finish) {
+	if (!SljitCanApplyPreaggregatedGroupedPrimitiveAggregateUpdate(op, compact_groups, preaggregate_scratch,
+	                                                               payload_lanes, grouped_state)) {
+		return false;
+	}
+	TryReservePreaggregatedGroupedPrimitiveGroups(runtime, op_idx, op, grouped_state);
+	if (compact_groups.size() <= STANDARD_VECTOR_SIZE) {
+		return TryExecutePreaggregatedGroupedPrimitiveAggregateUpdate(
+		    runtime, scratch, op_idx, op, compact_groups, preaggregate_scratch, payload_lanes, grouped_state,
+		    preaggregated_row_count, defer_grouped_finish, deferred_grouped_finish);
+	}
+
+	idx_t total_represented_row_count = 0;
+	for (idx_t offset = 0; offset < compact_groups.size(); offset += STANDARD_VECTOR_SIZE) {
+		const auto count = MinValue<idx_t>(STANDARD_VECTOR_SIZE, compact_groups.size() - offset);
+		idx_t represented_row_count;
+		if (!CanSlicePreaggregatedPrimitiveScratch(preaggregate_scratch, payload_lanes, offset, count) ||
+		    !PreaggregatedPrimitiveRepresentedRowCount(preaggregate_scratch, offset, count, represented_row_count)) {
+			return false;
+		}
+		total_represented_row_count += represented_row_count;
+	}
+	if (total_represented_row_count != preaggregated_row_count) {
+		return false;
+	}
+
+	auto &compact_group_slice = scratch.AggregatePreaggregatedGroupSlice(op_idx);
+	auto &preaggregate_scratch_slice = scratch.AggregatePreaggregateScratchSlice(op_idx);
+	bool local_deferred_grouped_finish = false;
+	const bool inner_defer_grouped_finish = true;
+	auto inner_deferred_grouped_finish =
+	    defer_grouped_finish ? deferred_grouped_finish : optional_ptr<bool>(&local_deferred_grouped_finish);
+	RecordSljitRegionRuntimePath(runtime, op.kind, "preaggregated_primitive_group_batches", compact_groups.size());
+	for (idx_t offset = 0; offset < compact_groups.size(); offset += STANDARD_VECTOR_SIZE) {
+		const auto count = MinValue<idx_t>(STANDARD_VECTOR_SIZE, compact_groups.size() - offset);
+		const auto end = offset + count;
+		idx_t represented_row_count;
+		const auto counted =
+		    PreaggregatedPrimitiveRepresentedRowCount(preaggregate_scratch, offset, count, represented_row_count);
+		D_ASSERT(counted);
+		compact_group_slice.Reset();
+		compact_group_slice.Slice(compact_groups, offset, end);
+		if (!SlicePreaggregatedPrimitiveScratch(preaggregate_scratch, payload_lanes, offset, count,
+		                                        preaggregate_scratch_slice)) {
+			throw InternalException("Validated SLJIT preaggregated primitive scratch slice failed");
+		}
+		if (!TryExecutePreaggregatedGroupedPrimitiveAggregateUpdate(
+		        runtime, scratch, op_idx, op, compact_group_slice, preaggregate_scratch_slice, payload_lanes,
+		        grouped_state, represented_row_count, inner_defer_grouped_finish, inner_deferred_grouped_finish)) {
+			throw InternalException("Validated SLJIT preaggregated primitive aggregate slice update failed");
+		}
+	}
+	if (!defer_grouped_finish && local_deferred_grouped_finish) {
+		FinishGroupedAggregateStateUpdates(runtime, op_idx, grouped_state, "finish_grouped_state_updates");
+	}
+	return true;
+}
+
+enum class SljitDirectGroupedAggregateUpdateStrategy : uint8_t {
+	PREAGGREGATED_PRIMITIVE_GROUPS,
+	DIRECT_APPEND_NEW_GROUPS,
+	DIRECT_NEW_GROUPS,
+	FUSED_PAYLOAD
+};
+
+static bool TryExecuteDirectGroupedAggregateUpdateStrategy(
     ExecutionRegionRuntime &runtime, SljitRegionExecutionScratch &scratch, idx_t op_idx, SljitExecutableRegionOp &op,
     DataChunk &input, const vector<const ExecutionPrimitiveAggregateUpdateLane *> &payload_lanes,
     const SelectionVector *execute_sel, idx_t count, ExecutionGroupedAggregateStateAddressBinding &grouped_state,
     SljitAggregatePayloadAdapterScratch &payload_scratch, bool defer_grouped_finish,
-    optional_ptr<bool> deferred_grouped_finish) {
+    optional_ptr<bool> deferred_grouped_finish, SljitDirectGroupedAggregateUpdateStrategy strategy) {
 	const bool finish = !defer_grouped_finish;
-	if (SljitCanExecutePreaggregatedGroupedPrimitiveAggregateUpdate(scratch, op_idx, op, input, payload_lanes,
-	                                                                execute_sel, count)) {
+	switch (strategy) {
+	case SljitDirectGroupedAggregateUpdateStrategy::PREAGGREGATED_PRIMITIVE_GROUPS: {
+		if (!SljitCanExecutePreaggregatedGroupedPrimitiveAggregateUpdate(scratch, op_idx, op, input, payload_lanes,
+		                                                                 execute_sel, count)) {
+			return false;
+		}
 		auto &compact_groups = scratch.AggregatePreaggregatedGroups(op_idx);
 		auto &preaggregate_scratch = scratch.AggregatePreaggregateScratch(op_idx);
 		auto preaggregate_stage_start = SljitRegionStageStart(runtime);
 		if (TryPreaggregateConsecutivePrimitiveGroups(op, input, payload_lanes, compact_groups, preaggregate_scratch)) {
 			RecordSljitRegionStageRuntime(runtime, op_idx, op.kind, "local_preaggregate_primitive_groups",
 			                              preaggregate_stage_start);
-			if (TryExecutePreaggregatedGroupedPrimitiveAggregateUpdate(
+			if (TryExecutePreaggregatedGroupedPrimitiveAggregateUpdateBatches(
 			        runtime, scratch, op_idx, op, compact_groups, preaggregate_scratch, payload_lanes, grouped_state,
 			        input.size(), defer_grouped_finish, deferred_grouped_finish)) {
 				return true;
 			}
 		}
+		return false;
 	}
-	if (SljitCanExecuteDirectAppendNewGroupedPrimitiveAggregateUpdate(scratch, op_idx, op, input, payload_lanes,
-	                                                                  execute_sel, count) &&
-	    TryExecuteDirectAppendNewGroupedPrimitiveAggregateUpdate(runtime, scratch, op_idx, op, input, payload_lanes,
-	                                                             grouped_state, finish)) {
-		MarkDeferredGroupedFinish(defer_grouped_finish, deferred_grouped_finish);
-		return true;
+	case SljitDirectGroupedAggregateUpdateStrategy::DIRECT_APPEND_NEW_GROUPS:
+		if (SljitCanExecuteDirectAppendNewGroupedPrimitiveAggregateUpdate(scratch, op_idx, op, input, payload_lanes,
+		                                                                  execute_sel, count) &&
+		    TryExecuteDirectAppendNewGroupedPrimitiveAggregateUpdate(runtime, scratch, op_idx, op, input, payload_lanes,
+		                                                             grouped_state, finish)) {
+			MarkDeferredGroupedFinish(defer_grouped_finish, deferred_grouped_finish);
+			return true;
+		}
+		return false;
+	case SljitDirectGroupedAggregateUpdateStrategy::DIRECT_NEW_GROUPS: {
+		optional_ptr<const ExecutionDenseGroupDomain> dense_domain;
+		if (op.aggregate_update.dense_group_domain.ready) {
+			dense_domain = &op.aggregate_update.dense_group_domain;
+			RecordSljitRegionRuntimePath(runtime, op.kind, "direct_grouped_dense_group_domain", count);
+		}
+		if (SljitCanExecuteDirectNewGroupedPrimitiveAggregateUpdate(scratch, op_idx, op, input, payload_lanes,
+		                                                            execute_sel, count) &&
+		    TryExecuteDirectNewGroupedPrimitiveAggregateUpdate(runtime, scratch, op_idx, op, input, payload_lanes,
+		                                                       grouped_state, finish, dense_domain)) {
+			MarkDeferredGroupedFinish(defer_grouped_finish, deferred_grouped_finish);
+			return true;
+		}
+		return false;
 	}
-	if (SljitCanExecuteDirectNewGroupedPrimitiveAggregateUpdate(scratch, op_idx, op, input, payload_lanes, execute_sel,
-	                                                            count) &&
-	    TryExecuteDirectNewGroupedPrimitiveAggregateUpdate(runtime, scratch, op_idx, op, input, payload_lanes,
-	                                                       grouped_state, finish)) {
-		MarkDeferredGroupedFinish(defer_grouped_finish, deferred_grouped_finish);
-		return true;
+	case SljitDirectGroupedAggregateUpdateStrategy::FUSED_PAYLOAD: {
+		optional_ptr<const ExecutionDenseGroupDomain> dense_domain;
+		if (op.aggregate_update.dense_group_domain.ready) {
+			dense_domain = &op.aggregate_update.dense_group_domain;
+			RecordSljitRegionRuntimePath(runtime, op.kind, "direct_grouped_dense_group_domain", count);
+		}
+		if (SljitCanExecuteDirectGroupedFusedPayloadUpdate(scratch, op_idx, op, input, payload_lanes, execute_sel,
+		                                                   count) &&
+		    TryExecuteDirectGroupedFusedPayloadUpdate(runtime, scratch, op_idx, op, input, payload_lanes, grouped_state,
+		                                              payload_scratch, finish, dense_domain)) {
+			MarkDeferredGroupedFinish(defer_grouped_finish, deferred_grouped_finish);
+			return true;
+		}
+		return false;
 	}
-	if (SljitCanExecuteDirectGroupedFusedPayloadUpdate(scratch, op_idx, op, input, payload_lanes, execute_sel, count) &&
-	    TryExecuteDirectGroupedFusedPayloadUpdate(runtime, scratch, op_idx, op, input, payload_lanes, grouped_state,
-	                                              payload_scratch, finish)) {
-		MarkDeferredGroupedFinish(defer_grouped_finish, deferred_grouped_finish);
-		return true;
+	default:
+		throw InternalException("Unknown SLJIT direct grouped aggregate update strategy");
+	}
+}
+
+static bool TryExecuteDirectGroupedAggregateUpdate(
+    ExecutionRegionRuntime &runtime, SljitRegionExecutionScratch &scratch, idx_t op_idx, SljitExecutableRegionOp &op,
+    DataChunk &input, const vector<const ExecutionPrimitiveAggregateUpdateLane *> &payload_lanes,
+    const SelectionVector *execute_sel, idx_t count, ExecutionGroupedAggregateStateAddressBinding &grouped_state,
+    SljitAggregatePayloadAdapterScratch &payload_scratch, bool defer_grouped_finish,
+    optional_ptr<bool> deferred_grouped_finish) {
+	static constexpr SljitDirectGroupedAggregateUpdateStrategy STRATEGIES[] = {
+	    SljitDirectGroupedAggregateUpdateStrategy::PREAGGREGATED_PRIMITIVE_GROUPS,
+	    SljitDirectGroupedAggregateUpdateStrategy::DIRECT_APPEND_NEW_GROUPS,
+	    SljitDirectGroupedAggregateUpdateStrategy::DIRECT_NEW_GROUPS,
+	    SljitDirectGroupedAggregateUpdateStrategy::FUSED_PAYLOAD};
+
+	for (auto strategy : STRATEGIES) {
+		if (TryExecuteDirectGroupedAggregateUpdateStrategy(runtime, scratch, op_idx, op, input, payload_lanes,
+		                                                   execute_sel, count, grouped_state, payload_scratch,
+		                                                   defer_grouped_finish, deferred_grouped_finish, strategy)) {
+			return true;
+		}
 	}
 	return false;
 }

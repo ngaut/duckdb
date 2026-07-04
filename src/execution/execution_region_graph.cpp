@@ -9,11 +9,15 @@
 
 #include "duckdb/execution/operator/scan/physical_table_scan.hpp"
 #include "duckdb/execution/physical_operator.hpp"
+#include "duckdb/common/operator/numeric_cast.hpp"
 #include "duckdb/function/table_function.hpp"
 #include "duckdb/main/client_context.hpp"
 #include "duckdb/parallel/pipeline.hpp"
 #include "duckdb/storage/statistics/base_statistics.hpp"
+#include "duckdb/storage/statistics/distinct_statistics.hpp"
 #include "duckdb/storage/statistics/numeric_stats.hpp"
+
+#include <cmath>
 
 namespace duckdb {
 
@@ -215,6 +219,22 @@ static unique_ptr<BaseStatistics> TryGetExecutionRegionScanColumnStatistics(cons
 	return scan.function.statistics(context, scan.bind_data.get(), column_id.GetPrimaryIndex());
 }
 
+static idx_t BuildExecutionRegionDistinctReserveCount(BaseStatistics &stats, idx_t source_cardinality) {
+	if (source_cardinality == 0) {
+		return 0;
+	}
+	const auto distinct_count = MinValue(stats.GetDistinctCount(), source_cardinality);
+	if (distinct_count == 0) {
+		return 0;
+	}
+	const auto sample_rate = DistinctStatistics::SampleRate(stats.GetType());
+	const auto sampled_reserve_count = std::ceil(static_cast<double>(distinct_count) / sample_rate);
+	if (sampled_reserve_count >= static_cast<double>(source_cardinality)) {
+		return source_cardinality;
+	}
+	return MaxValue(distinct_count, LossyNumericCast<idx_t>(sampled_reserve_count));
+}
+
 static void AddExecutionRegionTableScanColumnStats(const PhysicalOperator &op, ExecutionContract &descriptor,
                                                    ClientContext &context) {
 	if (op.type != PhysicalOperatorType::TABLE_SCAN || !descriptor.source.table_scan_contract.present) {
@@ -225,7 +245,7 @@ static void AddExecutionRegionTableScanColumnStats(const PhysicalOperator &op, E
 	if (contract.function_name != "seq_scan") {
 		return;
 	}
-	contract.source_contract_input_distinct_counts.assign(scan.column_ids.size(), 0);
+	contract.source_contract_input_distinct_reserve_counts.assign(scan.column_ids.size(), 0);
 	contract.source_contract_input_min_values.assign(scan.column_ids.size(), Value());
 	contract.source_contract_input_max_values.assign(scan.column_ids.size(), Value());
 	for (idx_t column_idx = 0; column_idx < scan.column_ids.size(); column_idx++) {
@@ -233,7 +253,8 @@ static void AddExecutionRegionTableScanColumnStats(const PhysicalOperator &op, E
 		if (!stats) {
 			continue;
 		}
-		contract.source_contract_input_distinct_counts[column_idx] = stats->GetDistinctCount();
+		contract.source_contract_input_distinct_reserve_counts[column_idx] =
+		    BuildExecutionRegionDistinctReserveCount(*stats, contract.estimated_source_cardinality);
 		if (stats->GetStatsType() == StatisticsType::NUMERIC_STATS && NumericStats::HasMinMax(*stats)) {
 			contract.source_contract_input_min_values[column_idx] = NumericStats::Min(*stats);
 			contract.source_contract_input_max_values[column_idx] = NumericStats::Max(*stats);

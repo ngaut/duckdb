@@ -8,7 +8,8 @@
 
 #pragma once
 
-#include "sljit_hash_join_all_valid_probe_core_runtime.hpp"
+#include "sljit_hash_join_all_valid_probe_base_runtime.hpp"
+#include "sljit_hash_join_all_valid_probe_consumer_runtime.hpp"
 
 #include "duckdb/common/exception.hpp"
 

@@ -422,6 +422,14 @@ unique_ptr<GlobalSourceState> PhysicalPerfectHashAggregate::GetGlobalSourceState
 	return make_uniq<PerfectHashAggregateState>();
 }
 
+optional_idx PhysicalPerfectHashAggregate::FinalizedSourceCardinality() const {
+	if (!sink_state) {
+		return optional_idx::Invalid();
+	}
+	auto &gstate = sink_state->Cast<PerfectHashAggregateGlobalState>();
+	return gstate.ht->OccupiedCount();
+}
+
 bool PhysicalPerfectHashAggregate::SupportsExecutionSourceContract(
     const ExecutionRegionOpenRequest &open_request) const {
 	return open_request.UsesSourceContract();

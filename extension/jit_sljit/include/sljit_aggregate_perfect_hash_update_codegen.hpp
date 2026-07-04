@@ -40,6 +40,9 @@ struct SljitPerfectHashGroupLookupOptions {
 	bool materialize_state_pointer = false;
 	bool defer_flags = false;
 	bool direct_group_index = false;
+	bool expression_fast_path = false;
+	bool expression_all_valid = false;
+	bool expression_no_source_selection = false;
 	bool mark_local_payloads_seen = false;
 	bool use_fast_group_data_array_base = false;
 	bool mark_local_group = true;
@@ -47,6 +50,7 @@ struct SljitPerfectHashGroupLookupOptions {
 	bool group_selection_all_present = false;
 	sljit_s32 group_sel_array_base_reg = 0;
 	sljit_s32 group_data_array_base_reg_override = 0;
+	const vector<SljitTypedExpressionTreeDataPointerHoist> *expression_data_hoists = nullptr;
 };
 
 struct SljitPerfectHashPayloadUpdateOptions {

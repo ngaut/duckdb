@@ -168,8 +168,8 @@ static string DescribeExecutionRegionTableScanContract(const ExecutionRegionTabl
 	result += ",source_contract_input_columns=" + std::to_string(contract.source_contract_input_column_count);
 	result +=
 	    ",source_contract_input_types=" + BuildExecutionRegionLogicalTypeList(contract.source_contract_input_types);
-	result += ",source_contract_input_distinct_counts=" +
-	          BuildExecutionRegionIdxList(contract.source_contract_input_distinct_counts);
+	result += ",source_contract_input_distinct_reserve_counts=" +
+	          BuildExecutionRegionIdxList(contract.source_contract_input_distinct_reserve_counts);
 	result +=
 	    ",source_contract_input_min_values=" + BuildExecutionRegionValueList(contract.source_contract_input_min_values);
 	result +=
@@ -212,6 +212,7 @@ static string DescribeExecutionRegionHashJoinContract(const ExecutionRegionHashJ
 	result += ",non_equality_condition_count=" + std::to_string(contract.non_equality_condition_count);
 	result += ",null_equal_condition_count=" + std::to_string(contract.null_equal_condition_count);
 	result += ",condition_types=" + BuildExecutionRegionLogicalTypeList(contract.condition_types);
+	result += ",rhs_condition_types=" + BuildExecutionRegionLogicalTypeList(contract.rhs_condition_types);
 	result += ",comparison_ops=" + BuildExecutionRegionComparisonTypeList(contract.comparison_types);
 	result += ",payload_columns=" + std::to_string(contract.payload_column_count);
 	result += ",payload_column_indices=" + BuildExecutionRegionIdxList(contract.payload_column_indices);
@@ -888,6 +889,11 @@ static string DescribeExecutionRegionCandidateTraits(const ExecutionRegionCandid
 	result += ",operators=" + std::to_string(traits.operator_count);
 	result += ",hash_join_operators=" + std::to_string(traits.hash_join_operator_count);
 	result += ",aggregates=" + std::to_string(traits.aggregate_count);
+	result += ",mark_probe_filters=" + std::to_string(traits.mark_probe_filter_count);
+	result += ",generated_aggregate_updates=" + std::to_string(traits.generated_aggregate_update_count);
+	result += ",generated_distinct_count_pointer_aggregate_updates=" +
+	          std::to_string(traits.generated_distinct_count_pointer_aggregate_update_count);
+	result += ",generated_aggregate_lookups=" + std::to_string(traits.generated_aggregate_lookup_count);
 	result += ",arithmetic_projections=" + std::to_string(traits.arithmetic_projection_count);
 	result += ",high_cost_projections=" + std::to_string(traits.high_cost_projection_count);
 	result += ",reference_projections=" + std::to_string(traits.reference_projection_count);

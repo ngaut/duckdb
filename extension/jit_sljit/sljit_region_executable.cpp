@@ -1,9 +1,12 @@
 #include "sljit_region_executable.hpp"
 
 #include "sljit_executable_aggregate_codegen.hpp"
+#include "sljit_dense_group_domain.hpp"
 #include "sljit_executable_expression_codegen.hpp"
 #include "sljit_executable_stats.hpp"
 #include "sljit_join_probe_codegen.hpp"
+
+#include "duckdb/common/limits.hpp"
 
 namespace duckdb {
 
@@ -13,7 +16,9 @@ static bool BuildExecutableRegionOp(const SljitNativeRegionOpPlan &op, SljitExec
                                     bool build_filter_code = true, bool build_aggregate_update_payload_code = true) {
 	executable.kind = op.kind;
 	executable.operator_index = op.operator_index;
+	executable.input_types = op.input_types;
 	executable.output_types = op.output_types;
+	executable.output_not_null = SljitBuildExecutableOutputNotNull(op, input_not_null);
 	switch (op.kind) {
 	case SljitNativeRegionOpKind::FILTER:
 		SljitPrepareExecutableRegionExpression(op.filter, executable.filter, &input_not_null, !build_filter_code);
@@ -102,7 +107,7 @@ static bool BuildExecutableRegionOp(const SljitNativeRegionOpPlan &op, SljitExec
 		executable.delim_join_sink.plan.input_types = op.delim_join_sink.input_types;
 		return true;
 	case SljitNativeRegionOpKind::AGGREGATE_UPDATE:
-		SljitBuildExecutableAggregateUpdateMetadata(op.aggregate_update, executable.aggregate_update);
+		SljitBuildExecutableAggregateUpdateMetadata(op.aggregate_update, executable.aggregate_update, input_not_null);
 		if (!build_aggregate_update_payload_code) {
 			return true;
 		}
@@ -124,6 +129,56 @@ static bool BuildExecutableRegionOp(const SljitNativeRegionOpPlan &op, SljitExec
 	}
 }
 
+static void SljitTryBuildExecutableAggregateDenseGroupDomain(const SljitNativeAggregateUpdatePlan &plan,
+                                                             const vector<idx_t> &current_distinct_counts,
+                                                             const vector<Value> &current_min_values,
+                                                             const vector<Value> &current_max_values,
+                                                             ExecutionDenseGroupDomain &domain) {
+	domain = ExecutionDenseGroupDomain();
+	auto &sink_info = plan.sink_info;
+	if (sink_info.kind != ExecutionRegionSinkKind::HASH_AGGREGATE_UPDATE || sink_info.groups.size() != 1) {
+		return;
+	}
+	auto &group = sink_info.groups[0];
+	if (!group.supported_reference || group.input_index >= current_distinct_counts.size() ||
+	    group.input_index >= current_min_values.size() || group.input_index >= current_max_values.size()) {
+		return;
+	}
+	SljitTryBuildDenseGroupDomainFromStats(group.type.InternalType(), current_distinct_counts[group.input_index],
+	                                       current_min_values[group.input_index], current_max_values[group.input_index],
+	                                       domain);
+}
+
+static bool SljitTryMultiplyGroupReserveCount(idx_t left, idx_t right, idx_t &result) {
+	if (left == 0 || right == 0 || left > NumericLimits<idx_t>::Maximum() / right) {
+		return false;
+	}
+	result = left * right;
+	return true;
+}
+
+static void SljitTryBuildExecutableAggregateGroupReservePlan(const SljitNativeAggregateUpdatePlan &plan,
+                                                             const vector<idx_t> &current_distinct_counts,
+                                                             SljitAggregateGroupReservePlan &reserve) {
+	reserve = SljitAggregateGroupReservePlan();
+	auto &sink_info = plan.sink_info;
+	if (sink_info.kind != ExecutionRegionSinkKind::HASH_AGGREGATE_UPDATE || sink_info.groups.empty()) {
+		return;
+	}
+	idx_t reserve_count = 1;
+	for (auto &group : sink_info.groups) {
+		if (!group.supported_reference || group.input_index >= current_distinct_counts.size()) {
+			return;
+		}
+		const auto group_distinct_count = current_distinct_counts[group.input_index];
+		if (!SljitTryMultiplyGroupReserveCount(reserve_count, group_distinct_count, reserve_count)) {
+			return;
+		}
+	}
+	reserve.has_group_count = true;
+	reserve.group_count = reserve_count;
+}
+
 static bool SljitCanDeferAggregateUpdatePayloadCode(const vector<SljitNativeRegionOpPlan> &ops, idx_t op_idx) {
 	if (op_idx == 0 || op_idx + 1 != ops.size() || ops[op_idx].kind != SljitNativeRegionOpKind::AGGREGATE_UPDATE) {
 		return false;
@@ -137,6 +192,7 @@ bool BuildSljitExecutableRegion(const SljitNativeRegionPlan &region, SljitExecut
 	executable.source_max_values = region.source_max_values;
 	executable.ops.reserve(region.ops.size());
 	auto current_not_null = region.source_not_null;
+	auto current_distinct_counts = region.source_distinct_counts;
 	auto current_min_values = region.source_min_values;
 	auto current_max_values = region.source_max_values;
 	for (idx_t op_idx = 0; op_idx < region.ops.size(); op_idx++) {
@@ -148,6 +204,13 @@ bool BuildSljitExecutableRegion(const SljitNativeRegionPlan &region, SljitExecut
 		if (!BuildExecutableRegionOp(op, executable_op, error, current_not_null, current_min_values, current_max_values,
 		                             !defer_filter_code, !defer_aggregate_payload_code)) {
 			return false;
+		}
+		if (op.kind == SljitNativeRegionOpKind::AGGREGATE_UPDATE) {
+			SljitTryBuildExecutableAggregateDenseGroupDomain(op.aggregate_update, current_distinct_counts,
+			                                                 current_min_values, current_max_values,
+			                                                 executable_op.aggregate_update.dense_group_domain);
+			SljitTryBuildExecutableAggregateGroupReservePlan(op.aggregate_update, current_distinct_counts,
+			                                                 executable_op.aggregate_update.plan.group_reserve);
 		}
 		executable.ops.push_back(std::move(executable_op));
 		if (defer_aggregate_payload_code) {
@@ -169,6 +232,7 @@ bool BuildSljitExecutableRegion(const SljitNativeRegionPlan &region, SljitExecut
 			}
 		}
 		SljitUpdateExecutableCurrentNotNull(op, current_not_null);
+		SljitUpdateExecutableCurrentDistinctCounts(op, current_distinct_counts, current_min_values, current_max_values);
 		SljitUpdateExecutableCurrentRanges(op, current_min_values, current_max_values);
 	}
 	return true;

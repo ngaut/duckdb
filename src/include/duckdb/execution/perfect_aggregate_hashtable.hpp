@@ -39,6 +39,7 @@ public:
 	//! Expose the stable state-address layout for generated perfect-hash aggregate updates.
 	PerfectAggregateHashTableStateLayout GetStateLayout();
 	void ResolveStateAddresses(DataChunk &groups, Vector &addresses_out, idx_t state_offset);
+	idx_t OccupiedCount() const;
 
 	//! Combines the target perfect aggregate HT into this one
 	void Combine(PerfectAggregateHashTable &other);
@@ -54,6 +55,8 @@ protected:
 	idx_t total_required_bits;
 	//! The total amount of groups
 	idx_t total_groups;
+	//! The number of occupied groups
+	idx_t occupied_count;
 	//! The tuple size
 	idx_t tuple_size;
 	//! The number of grouping columns

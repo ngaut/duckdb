@@ -8,6 +8,7 @@
 
 #pragma once
 
+#include "sljit_projection_composition.hpp"
 #include "sljit_region_plan.hpp"
 
 namespace duckdb {
@@ -24,11 +25,11 @@ struct SljitProjectionGraphLowering {
 	vector<SljitNativeRegionOpPlan> native_ops;
 };
 
-struct SljitSourceRoutePlan {
+struct SljitSourceContractPlan {
 	bool uses_scan_filters = false;
 	bool requires_source_contract_input_layout = false;
 
-	void Merge(const SljitSourceRoutePlan &other) {
+	void Merge(const SljitSourceContractPlan &other) {
 		uses_scan_filters = uses_scan_filters || other.uses_scan_filters;
 		requires_source_contract_input_layout =
 		    requires_source_contract_input_layout || other.requires_source_contract_input_layout;
@@ -39,14 +40,14 @@ struct SljitRegionNodePlan {
 	ExecutionRegionLoweringKind kind = ExecutionRegionLoweringKind::BOUNDARY;
 	string reason;
 	vector<SljitNativeRegionOpPlan> native_ops;
-	SljitSourceRoutePlan source_route;
+	SljitSourceContractPlan source_contract;
 	ExecutionRegionSourceExecutionKind source_execution = ExecutionRegionSourceExecutionKind::NONE;
 	bool requires_source_contract = false;
 };
 
 struct SljitSourceFilterPlan {
 	vector<SljitNativeRegionOpPlan> native_ops;
-	SljitSourceRoutePlan source_route;
+	SljitSourceContractPlan source_contract;
 };
 
 bool TryLowerNativeRegionExpression(const ExecutionExpressionFragment &fragment, bool require_boolean,
@@ -56,9 +57,6 @@ bool TryReadNativeRegionExpression(const ExecutionExpressionIR &root, bool requi
 bool TryReadNativeRegionPredicateExpression(const ExecutionExpressionIR &root, SljitNativeRegionExpressionPlan &expr);
 bool TryReadNativeScalarIntrinsicRegionExpression(const ExecutionExpressionIR &root,
                                                   SljitNativeRegionExpressionPlan &expr);
-bool TryLowerNativeRegionExpressionTreeThroughProjection(
-    const ExecutionExpressionFragment &fragment, const vector<SljitNativeRegionExpressionPlan> &input_projection,
-    unique_ptr<ExecutionExpressionIR> &tree, string &error, bool render_diagnostics);
 bool TryBuildSljitProjectionGraphExpression(const ExecutionExpressionIR &root, SljitProjectionGraphLowering &graph,
                                             SljitNativeRegionExpressionPlan &expression);
 bool TryBuildSljitNativeTypedExpressionTreePlan(const ExecutionExpressionIR &root,
@@ -68,9 +66,6 @@ void AttachSljitNativeExpressionTree(const ExecutionExpressionIR &root, SljitNat
 unique_ptr<ExecutionExpressionIR> CopySljitExpressionPlanAsInputTree(const SljitNativeRegionExpressionPlan &expr);
 bool TryMapNativeProjectionExpressionSources(const vector<SljitNativeRegionExpressionPlan> &input_projection,
                                              SljitNativeRegionExpressionPlan &expr);
-bool TryComposeNativeProjection(const vector<SljitNativeRegionExpressionPlan> &input_projection,
-                                const SljitNativeRegionExpressionPlan &expr, SljitNativeRegionExpressionPlan &result,
-                                bool render_diagnostics);
 void FuseAdjacentNativeProjections(SljitNativeRegionPlan &region, bool render_diagnostics);
 void FusePrimitiveAggregateUpdates(SljitNativeRegionPlan &region, const vector<LogicalType> &region_input_types,
                                    bool render_diagnostics);
@@ -102,8 +97,9 @@ bool TryPlanSljitSourceFilters(const ExecutionRegionNode &node, SljitSourceFilte
 SljitRegionNodePlan PlanSljitSourceNode(const ExecutionRegionNode &node, const ExecutionRegionContract &contract,
                                         ExecutionRegionSourceExecutionKind source_execution, bool render_diagnostics);
 bool SljitCanExecuteSourceNode(const ExecutionRegionNode &node, const ExecutionRegionContract &contract);
-SljitRegionNodePlan PlanSljitHashJoinProbeOperatorNode(const ExecutionRegionNode &node,
-                                                       const vector<LogicalType> &input_types, bool render_diagnostics);
+	SljitRegionNodePlan PlanSljitHashJoinProbeOperatorNode(const ExecutionRegionNode &node,
+	                                                       const vector<LogicalType> &input_types,
+	                                                       const vector<bool> &input_not_null, bool render_diagnostics);
 SljitRegionNodePlan PlanSljitNestedLoopJoinProbeOperatorNode(const ExecutionRegionNode &node,
                                                              const vector<LogicalType> &input_types,
                                                              bool render_diagnostics);

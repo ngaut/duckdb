@@ -105,9 +105,11 @@ static bool TryPreaggregateFlatAllValidSingleCountStarGroup(
 			active_key = key;
 			target_data[group_count] = key;
 			counts.push_back(0);
+			scratch.group_row_counts.push_back(0);
 			group_count++;
 		}
 		counts[group_count - 1]++;
+		scratch.group_row_counts[group_count - 1]++;
 	}
 	if (group_count == count) {
 		return false;
@@ -147,10 +149,12 @@ TryPreaggregateFlatAllValidSingleSumGroup(DataChunk &input, idx_t group_source_i
 			target_data[group_count] = key;
 			SljitPreaggregatedSingleSumAppendZero(sums);
 			value_is_set.push_back(0);
+			scratch.group_row_counts.push_back(0);
 			group_count++;
 		}
 		sums[group_count - 1] += SljitPreaggregatedSingleSumConvert(payload_data[row_idx], sum_type);
 		value_is_set[group_count - 1] = 1;
+		scratch.group_row_counts[group_count - 1]++;
 	}
 	if (group_count == count) {
 		return false;

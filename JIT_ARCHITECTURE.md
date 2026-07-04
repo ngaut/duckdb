@@ -224,7 +224,9 @@ algorithm. DuckDB owns the single CBO decision path:
 
 Native operator contracts are not compiled-runner proof by themselves. They are
 capability facts until backend lowering reports generated machine-code stages.
-protocol-only regions stay vectorized.
+Primitive aggregate state updates and generated perfect-hash aggregate lookup are
+generated machine-code body facts; native aggregate state contracts without those
+body facts are protocol only; protocol-only regions stay vectorized.
 
 Unsupported contracts are not CBO decisions. Core capability analysis may reject
 missing source, operator, or sink contracts before backend work, but it must not
@@ -233,7 +235,9 @@ estimate private runner costs or select a runner.
 Diagnostic modes (`jit_trace_decisions`, `jit_dump_ir`, `jit_trace_runtime`, and
 `EXPLAIN ANALYZE`) add retained detail, IR text, and runtime profile data to the
 same production CBO path. They must not admit a region that the core CBO rejected,
-and they must not act as a second CBO.
+they must not act as a second CBO, and they must not change physical backend
+strategy selection. Backend facts such as distinct count-pointer aggregate keys
+must be present or absent the same way with tracing on and off.
 
 ## Observability
 

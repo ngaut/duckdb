@@ -9,6 +9,7 @@
 #pragma once
 
 #include "sljit_hash_join_all_valid_probe_executor_runtime.hpp"
+#include "sljit_hash_join_all_valid_probe_matcher_runtime.hpp"
 
 namespace duckdb {
 

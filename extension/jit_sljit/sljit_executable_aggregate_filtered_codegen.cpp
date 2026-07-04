@@ -122,12 +122,15 @@ bool SljitTryBuildFilteredAggregateUpdate(SljitExecutableRegionOp &filter_op, Sl
 		}
 
 		filtered_update.input_source_indices = combined_sources;
+		filtered_update.input_source_not_null = combined_source_not_null;
 		filtered_update.filter.input_source_indices = combined_sources;
+		filtered_update.filter.input_source_not_null = combined_source_not_null;
 		filtered_update.filter.plan.expression_tree_source_indices = combined_sources;
 		vector<SljitNativeRegionExpressionPlan> codegen_payloads;
 		codegen_payloads.reserve(filtered_update.payloads.size());
 		for (auto &payload : filtered_update.payloads) {
 			payload.input_source_indices = combined_sources;
+			payload.input_source_not_null = combined_source_not_null;
 			payload.plan.expression_tree_source_indices = combined_sources;
 			codegen_payloads.push_back(payload.plan.Copy(true, false));
 		}
@@ -176,11 +179,12 @@ bool SljitTryBuildFilteredAggregateUpdate(SljitExecutableRegionOp &filter_op, Sl
 	}
 
 	vector<idx_t> combined_sources;
+	vector<bool> combined_source_not_null;
 	auto &filter_sources = filter_op.filter.input_source_indices.empty()
 	                           ? filter_op.filter.plan.expression_tree_source_indices
 	                           : filter_op.filter.input_source_indices;
 	RemapSljitExpressionTreeToCombinedInputs(*filtered_update.filter.plan.expression_tree, filter_sources,
-	                                         combined_sources);
+	                                         combined_sources, &combined_source_not_null, &input_not_null);
 	for (idx_t payload_idx = 0; payload_idx < aggregate_update.payloads.size(); payload_idx++) {
 		auto primitive_kind = aggregate_update.plan.sink_info.aggregates[payload_idx].primitive_update_kind;
 		if (!SljitFilteredAggregateUsesPayloadExpression(primitive_kind)) {
@@ -191,15 +195,19 @@ bool SljitTryBuildFilteredAggregateUpdate(SljitExecutableRegionOp &filter_op, Sl
 			return true;
 		}
 		RemapSljitExpressionTreeToCombinedInputs(*filtered_update.payloads[payload_idx].plan.expression_tree,
-		                                         payload_sources, combined_sources);
+		                                         payload_sources, combined_sources, &combined_source_not_null,
+		                                         &input_not_null);
 	}
 	filtered_update.input_source_indices = combined_sources;
+	filtered_update.input_source_not_null = combined_source_not_null;
 	filtered_update.filter.input_source_indices = combined_sources;
+	filtered_update.filter.input_source_not_null = combined_source_not_null;
 	filtered_update.filter.plan.expression_tree_source_indices = combined_sources;
 	vector<SljitNativeRegionExpressionPlan> codegen_payloads;
 	codegen_payloads.reserve(filtered_update.payloads.size());
 	for (auto &payload : filtered_update.payloads) {
 		payload.input_source_indices = combined_sources;
+		payload.input_source_not_null = combined_source_not_null;
 		payload.plan.expression_tree_source_indices = combined_sources;
 		codegen_payloads.push_back(payload.plan.Copy(true, false));
 	}

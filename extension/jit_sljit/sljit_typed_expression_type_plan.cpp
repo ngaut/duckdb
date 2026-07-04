@@ -47,6 +47,10 @@ bool SljitTypedExpressionTreeIsDecimal64Node(const ExecutionExpressionIR &node) 
 	return node.return_type.id() == LogicalTypeId::DECIMAL && node.physical_type == PhysicalType::INT64;
 }
 
+static bool SljitTypedExpressionTreeIsUInt8Node(const ExecutionExpressionIR &node) {
+	return node.return_type.id() == LogicalTypeId::UTINYINT && node.physical_type == PhysicalType::UINT8;
+}
+
 bool TryGetSljitTypedExpressionTreeDecimal64Range(const LogicalType &type, int64_t &result_min, int64_t &result_max) {
 	if (type.id() != LogicalTypeId::DECIMAL || type.InternalType() != PhysicalType::INT64) {
 		return false;
@@ -71,7 +75,8 @@ bool SljitTypedExpressionTreeIsBoolNode(const ExecutionExpressionIR &node) {
 
 bool SljitTypedExpressionTreeIsValueNode(const ExecutionExpressionIR &node) {
 	return SljitTypedExpressionTreeIsInt64Node(node) || SljitTypedExpressionTreeIsInt32Node(node) ||
-	       SljitTypedExpressionTreeIsBoolNode(node) || SljitTypedExpressionTreeIsDecimal64Node(node);
+	       SljitTypedExpressionTreeIsBoolNode(node) || SljitTypedExpressionTreeIsDecimal64Node(node) ||
+	       SljitTypedExpressionTreeIsUInt8Node(node);
 }
 
 bool SljitTypedExpressionTreeIsIntegerNode(const ExecutionExpressionIR &node) {
@@ -92,6 +97,10 @@ bool SljitTypedExpressionTreeSameValueKind(const ExecutionExpressionIR &left, co
 
 static bool TryGetSljitTypedExpressionTreeIntegerKind(const ExecutionExpressionIR &node, SljitNativeIntegerKind &kind) {
 	if (SljitTypedExpressionTreeIsBoolNode(node)) {
+		kind = SljitNativeIntegerKind::UINT8;
+		return true;
+	}
+	if (SljitTypedExpressionTreeIsUInt8Node(node)) {
 		kind = SljitNativeIntegerKind::UINT8;
 		return true;
 	}

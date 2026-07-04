@@ -10,6 +10,7 @@
 
 #include "sljit_native_plan.hpp"
 
+#include "duckdb/common/exception.hpp"
 #include "duckdb/common/types/value.hpp"
 
 namespace duckdb {
@@ -112,6 +113,80 @@ static unique_ptr<ExecutionExpressionIR> MakeSljitTreeConstant(const Value &cons
 	return result;
 }
 
+static Value SljitSignedIntegerValue(SljitNativeSignedIntegerWidth width, int64_t value) {
+	switch (width) {
+	case SljitNativeSignedIntegerWidth::INT8:
+		return Value::TINYINT(NumericCast<int8_t>(value));
+	case SljitNativeSignedIntegerWidth::INT16:
+		return Value::SMALLINT(NumericCast<int16_t>(value));
+	case SljitNativeSignedIntegerWidth::INT32:
+		return Value::INTEGER(NumericCast<int32_t>(value));
+	case SljitNativeSignedIntegerWidth::INT64:
+		return Value::BIGINT(value);
+	default:
+		throw InternalException("Unknown SLJIT native signed integer width");
+	}
+}
+
+static LogicalType SljitSignedIntegerWidthType(SljitNativeSignedIntegerWidth width) {
+	switch (width) {
+	case SljitNativeSignedIntegerWidth::INT8:
+		return LogicalType::TINYINT;
+	case SljitNativeSignedIntegerWidth::INT16:
+		return LogicalType::SMALLINT;
+	case SljitNativeSignedIntegerWidth::INT32:
+		return LogicalType::INTEGER;
+	case SljitNativeSignedIntegerWidth::INT64:
+		return LogicalType::BIGINT;
+	default:
+		throw InternalException("Unknown SLJIT native signed integer width");
+	}
+}
+
+static LogicalType SljitUnsignedIntegerWidthType(SljitNativeUnsignedIntegerWidth width) {
+	switch (width) {
+	case SljitNativeUnsignedIntegerWidth::UINT8:
+		return LogicalType::UTINYINT;
+	case SljitNativeUnsignedIntegerWidth::UINT16:
+		return LogicalType::USMALLINT;
+	case SljitNativeUnsignedIntegerWidth::UINT32:
+		return LogicalType::UINTEGER;
+	default:
+		throw InternalException("Unknown SLJIT native unsigned integer width");
+	}
+}
+
+static unique_ptr<ExecutionExpressionIR> MakeSljitTreeIntrinsic(ExecutionExpressionIntrinsicKind intrinsic,
+                                                                const LogicalType &return_type) {
+	auto result = make_uniq<ExecutionExpressionIR>();
+	result->kind = ExecutionExpressionIRKind::INTRINSIC;
+	result->return_type = return_type;
+	result->physical_type = return_type.InternalType();
+	result->validity = ExecutionExpressionValidityKind::CHILD;
+	result->source = ExecutionExpressionSourceKind::DERIVED;
+	result->exception_behavior = ExecutionExpressionExceptionKind::NONE;
+	result->intrinsic = intrinsic;
+	return result;
+}
+
+static unique_ptr<ExecutionExpressionIR> MakeSljitTreeCast(unique_ptr<ExecutionExpressionIR> child,
+                                                           const LogicalType &target_type, optional_idx query_location,
+                                                           bool try_cast) {
+	auto result = make_uniq<ExecutionExpressionIR>();
+	result->kind = ExecutionExpressionIRKind::CAST;
+	result->return_type = target_type;
+	result->physical_type = target_type.InternalType();
+	result->validity =
+	    try_cast ? ExecutionExpressionValidityKind::CHILD_OR_CAST_FAILURE : ExecutionExpressionValidityKind::CHILD;
+	result->source = ExecutionExpressionSourceKind::DERIVED;
+	result->exception_behavior =
+	    try_cast ? ExecutionExpressionExceptionKind::NULL_ON_CAST_ERROR : ExecutionExpressionExceptionKind::CAST;
+	result->query_location = query_location;
+	result->try_cast = try_cast;
+	result->left = std::move(child);
+	return result;
+}
+
 static void ExpandSljitExpressionTreeSources(ExecutionExpressionIR &node, const vector<idx_t> &source_indices) {
 	if (node.kind == ExecutionExpressionIRKind::REFERENCE) {
 		D_ASSERT(node.ref_index < source_indices.size());
@@ -133,17 +208,58 @@ static void ExpandSljitExpressionTreeSources(ExecutionExpressionIR &node, const 
 }
 
 unique_ptr<ExecutionExpressionIR> CopySljitExpressionPlanAsInputTree(const SljitNativeRegionExpressionPlan &expr) {
-	if (expr.expression_tree) {
-		auto result = expr.expression_tree->Copy();
-		ExpandSljitExpressionTreeSources(*result, expr.expression_tree_source_indices);
-		return result;
-	}
 	switch (expr.kind) {
 	case SljitNativeRegionExpressionKind::REFERENCE:
 		return MakeSljitTreeReference(expr.source_index, expr.return_type);
 	case SljitNativeRegionExpressionKind::CONSTANT:
 		return MakeSljitTreeConstant(expr.constant_value, expr.return_type);
+	case SljitNativeRegionExpressionKind::INTEGER_CAST: {
+		auto source_type = SljitSignedIntegerWidthType(expr.cast_source_width);
+		auto target_type = SljitSignedIntegerWidthType(expr.cast_target_width);
+		if (expr.return_type != target_type) {
+			return nullptr;
+		}
+		auto child = MakeSljitTreeReference(expr.source_index, source_type);
+		return MakeSljitTreeCast(std::move(child), expr.return_type, expr.query_location, expr.try_cast);
+	}
+	case SljitNativeRegionExpressionKind::SIGNED_TO_UNSIGNED_INTEGER_CAST: {
+		auto source_type = SljitSignedIntegerWidthType(expr.cast_source_width);
+		auto target_type = SljitUnsignedIntegerWidthType(expr.unsigned_cast_target_width);
+		if (expr.return_type != target_type) {
+			return nullptr;
+		}
+		auto child = MakeSljitTreeReference(expr.source_index, source_type);
+		return MakeSljitTreeCast(std::move(child), expr.return_type, expr.query_location, expr.try_cast);
+	}
+	case SljitNativeRegionExpressionKind::INTEGRAL_COMPRESS: {
+		auto source_type = SljitSignedIntegerWidthType(expr.cast_source_width);
+		auto target_type = SljitUnsignedIntegerWidthType(expr.unsigned_cast_target_width);
+		if (expr.return_type != target_type) {
+			return nullptr;
+		}
+		auto child = MakeSljitTreeReference(expr.source_index, source_type);
+		auto constant = MakeSljitTreeConstant(SljitSignedIntegerValue(expr.cast_source_width, expr.constant),
+		                                      source_type);
+		auto result = MakeSljitTreeIntrinsic(ExecutionExpressionIntrinsicKind::INTEGRAL_COMPRESS, expr.return_type);
+		result->children.push_back(std::move(child));
+		result->children.push_back(std::move(constant));
+		return result;
+	}
+	case SljitNativeRegionExpressionKind::DATE_YEAR: {
+		if (expr.return_type.id() != LogicalTypeId::BIGINT || expr.return_type.InternalType() != PhysicalType::INT64) {
+			return nullptr;
+		}
+		auto child = MakeSljitTreeReference(expr.source_index, LogicalType::DATE);
+		auto result = MakeSljitTreeIntrinsic(ExecutionExpressionIntrinsicKind::DATE_YEAR, expr.return_type);
+		result->children.push_back(std::move(child));
+		return result;
+	}
 	default:
+		if (expr.expression_tree) {
+			auto result = expr.expression_tree->Copy();
+			ExpandSljitExpressionTreeSources(*result, expr.expression_tree_source_indices);
+			return result;
+		}
 		return nullptr;
 	}
 }

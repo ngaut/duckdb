@@ -27,14 +27,16 @@ EmitSljitPerfectHashExpressionTreeValue(const SljitPerfectHashFusedUpdateEmitCon
 		                                                data_hoists);
 		return nullptr;
 	}
-	sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_S4, 0, SLJIT_MEM1(SLJIT_S0),
-	               offsetof(SljitNativeVectorInput, source_sel_array));
 	if (all_valid) {
+		sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_S4, 0, SLJIT_MEM1(SLJIT_S0),
+		               offsetof(SljitNativeVectorInput, source_sel_array));
 		idx_t spill_index = 0;
 		EmitSljitTypedExpressionTreeSelectedFastValueReg(compiler, expression, spill_index, context.overflows,
 		                                                 data_hoists);
 		return nullptr;
 	}
+	sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_S4, 0, SLJIT_MEM1(SLJIT_S0),
+	               offsetof(SljitNativeVectorInput, source_sel_array));
 	idx_t slot_index = 0;
 	auto slot = EmitSljitTypedExpressionTreeValue(compiler, expression, slot_index, context.overflows);
 	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R3, 0, SLJIT_MEM1(SLJIT_SP), slot.valid_offset);
@@ -113,20 +115,35 @@ void EmitSljitPerfectHashGroupLookup(const SljitPerfectHashFusedUpdateEmitContex
 	}
 	for (idx_t group_idx = 0; group_idx < group_plans.size(); group_idx++) {
 		auto &group = group_plans[group_idx];
-		EmitLoadFusedAggregateGroupSourceIndex(compiler, group_idx, SLJIT_R1, group_index_mode,
-		                                       options.group_sel_array_base_reg);
 		sljit_jump *group_is_null = nullptr;
-		if (options.check_group_validity) {
-			group_is_null = EmitFusedAggregateJumpIfGroupValidityNull(compiler, group_idx, SLJIT_R1);
+		if (group.expression_kind == SljitNativeRegionExpressionKind::TYPED_EXPRESSION_TREE) {
+			if (!group.expression_tree) {
+				throw InternalException("SLJIT perfect-hash typed group expression is missing IR");
+			}
+			if (group_index_initialized) {
+				sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_MEM1(SLJIT_SP), context.group_index_offset, SLJIT_S4, 0);
+			}
+			group_is_null = EmitSljitPerfectHashExpressionTreeValue(
+			    context, *group.expression_tree, options.expression_fast_path, options.expression_all_valid,
+			    options.expression_no_source_selection, options.expression_data_hoists);
+			if (group_index_initialized) {
+				sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_S4, 0, SLJIT_MEM1(SLJIT_SP), context.group_index_offset);
+			}
+		} else {
+			EmitLoadFusedAggregateGroupSourceIndex(compiler, group_idx, SLJIT_R1, group_index_mode,
+			                                       options.group_sel_array_base_reg);
+			if (options.check_group_validity) {
+				group_is_null = EmitFusedAggregateJumpIfGroupValidityNull(compiler, group_idx, SLJIT_R1);
+			}
+			const auto group_data_reg =
+			    context.hoist_group_data_pointers ? SljitPerfectHashGroupDataPointerReg(group_idx) : SLJIT_R0;
+			const auto group_data_array_base_reg = options.use_fast_group_data_array_base
+			                                           ? SLJIT_PERFECT_HASH_STATE_REG
+			                                           : options.group_data_array_base_reg_override;
+			EmitLoadFusedAggregateGroupData(compiler, group_idx, group, SLJIT_R1, SLJIT_R2,
+			                                context.hoist_group_data_pointers, group_data_reg,
+			                                use_precomputed_string_offset, group_data_array_base_reg);
 		}
-		const auto group_data_reg =
-		    context.hoist_group_data_pointers ? SljitPerfectHashGroupDataPointerReg(group_idx) : SLJIT_R0;
-		const auto group_data_array_base_reg = options.use_fast_group_data_array_base
-		                                           ? SLJIT_PERFECT_HASH_STATE_REG
-		                                           : options.group_data_array_base_reg_override;
-		EmitLoadFusedAggregateGroupData(compiler, group_idx, group, SLJIT_R1, SLJIT_R2,
-		                                context.hoist_group_data_pointers, group_data_reg,
-		                                use_precomputed_string_offset, group_data_array_base_reg);
 		const auto group_offset = 1 - group.minimum;
 		if (group_offset != 0) {
 			sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_R2, 0, SLJIT_R2, 0, SLJIT_IMM,

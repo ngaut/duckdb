@@ -18,6 +18,7 @@ struct SljitHashJoinProbeDrainState {
 	vector<uint8_t> found_match;
 	bool left_initialized = false;
 	bool left_unmatched_emitted = false;
+	bool source_key0_int64_to_int32_matches_are_proven = false;
 	bool finished = false;
 };
 

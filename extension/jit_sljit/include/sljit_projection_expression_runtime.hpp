@@ -18,8 +18,6 @@
 #include "duckdb/common/vector/flat_vector.hpp"
 #include "duckdb/common/vector/unified_vector_format.hpp"
 
-#include <exception>
-
 namespace duckdb {
 
 template <class ADAPTER_SCRATCH>
@@ -43,31 +41,17 @@ static void SljitExecuteProjectionExpression(SljitExecutableRegionExpression &ex
 		return;
 	}
 	if (plan.kind == SljitNativeRegionExpressionKind::PREDICATE) {
-		auto &predicate_sources = adapter_scratch.predicate_sources;
-		predicate_sources.Prepare(&input, expr.input_source_indices);
-
 		result.SetVectorType(VectorType::FLAT_VECTOR);
 		auto &result_validity = FlatVector::ValidityMutable(result);
 		result_validity.Reset(count);
 		result_validity.EnsureWritable();
 		result_validity.SetAllValid(count);
 
-		SljitNativePredicateInput native_input;
-		native_input.source_data = predicate_sources.DataArray();
-		native_input.source_sel = predicate_sources.SelectionArray();
-		native_input.source_validity = predicate_sources.ValidityArray();
-		native_input.sources_all_valid = predicate_sources.SourcesAllValid();
-		native_input.execute_sel = execute_sel ? execute_sel->data() : nullptr;
-		native_input.result_data = reinterpret_cast<data_ptr_t>(FlatVector::GetDataMutable<bool>(result));
-		native_input.result_validity = result_validity.GetData();
-		native_input.true_sel = nullptr;
-		native_input.false_sel = nullptr;
-		native_input.selected_count = 0;
-		native_input.count = count;
-		expr.predicate_function(&native_input);
-		if (native_input.error) {
-			std::rethrow_exception(native_input.error);
-		}
+		auto native_input =
+		    SljitPrepareNativePredicateInput(adapter_scratch, input, expr.input_source_indices, execute_sel, count,
+		                                     reinterpret_cast<data_ptr_t>(FlatVector::GetDataMutable<bool>(result)),
+		                                     result_validity.GetData(), nullptr, nullptr);
+		SljitExecuteNativeFunction(expr.predicate_function, native_input);
 		FlatVector::SetSize(result, count_t(count));
 		return;
 	}
@@ -81,25 +65,10 @@ static void SljitExecuteProjectionExpression(SljitExecutableRegionExpression &ex
 		result_validity.EnsureWritable();
 		if (!constant.IsNull()) {
 			result_validity.SetAllValid(count);
-			auto &predicate_sources = adapter_scratch.predicate_sources;
-			predicate_sources.Prepare(&input, expr.input_source_indices);
-
-			SljitNativePredicateInput native_input;
-			native_input.source_data = predicate_sources.DataArray();
-			native_input.source_sel = predicate_sources.SelectionArray();
-			native_input.source_validity = predicate_sources.ValidityArray();
-			native_input.sources_all_valid = predicate_sources.SourcesAllValid();
-			native_input.execute_sel = execute_sel ? execute_sel->data() : nullptr;
-			native_input.result_data = nullptr;
-			native_input.result_validity = result_validity.GetData();
-			native_input.true_sel = nullptr;
-			native_input.false_sel = nullptr;
-			native_input.selected_count = 0;
-			native_input.count = count;
-			expr.predicate_function(&native_input);
-			if (native_input.error) {
-				std::rethrow_exception(native_input.error);
-			}
+			auto native_input =
+			    SljitPrepareNativePredicateInput(adapter_scratch, input, expr.input_source_indices, execute_sel, count,
+			                                     nullptr, result_validity.GetData(), nullptr, nullptr);
+			SljitExecuteNativeFunction(expr.predicate_function, native_input);
 		}
 		FlatVector::SetSize(result, count_t(count));
 		return;
@@ -129,10 +98,7 @@ static void SljitExecuteProjectionExpression(SljitExecutableRegionExpression &ex
 		native_input.overflow_message = expr.overflow_message.c_str();
 		native_input.query_location = plan.query_location;
 		native_input.count = count;
-		expr.function(&native_input);
-		if (native_input.error) {
-			std::rethrow_exception(native_input.error);
-		}
+		SljitExecuteNativeFunction(expr.function, native_input);
 		FlatVector::SetSize(result, count_t(count));
 		return;
 	}
@@ -346,10 +312,7 @@ static void SljitExecuteProjectionExpression(SljitExecutableRegionExpression &ex
 	                         (!has_right_source || (SljitUnifiedFormatHasIdentitySelection(right_source_format) &&
 	                                                right_source_format.validity.CannotHaveNull()));
 	auto vector_function = use_flat_function ? expr.flat_function : expr.function;
-	vector_function(&native_input);
-	if (native_input.error) {
-		std::rethrow_exception(native_input.error);
-	}
+	SljitExecuteNativeFunction(vector_function, native_input);
 	FlatVector::SetSize(result, count_t(count));
 }
 

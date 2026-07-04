@@ -11,6 +11,8 @@
 #include "duckdb/common/helper.hpp"
 #include "duckdb/common/types/string_type.hpp"
 
+#include "sljit_typed_expression_plan.hpp"
+
 namespace duckdb {
 
 static bool TryGetSljitPerfectHashGroupIntegerKind(const LogicalType &type, SljitNativeIntegerKind &kind) {
@@ -51,16 +53,45 @@ static bool TryGetSljitPerfectHashGroupMinimum(const LogicalType &type, const Va
 	}
 }
 
+static bool SljitPerfectHashIntegralCompressTargetMatchesGroup(SljitNativeUnsignedIntegerWidth width,
+                                                               PhysicalType physical_type) {
+	switch (width) {
+	case SljitNativeUnsignedIntegerWidth::UINT8:
+		return physical_type == PhysicalType::UINT8;
+	case SljitNativeUnsignedIntegerWidth::UINT16:
+		return physical_type == PhysicalType::UINT16;
+	case SljitNativeUnsignedIntegerWidth::UINT32:
+		return physical_type == PhysicalType::UINT32;
+	default:
+		return false;
+	}
+}
+
 static bool SljitPerfectHashGroupExpressionSupported(const SljitNativeRegionExpressionPlan &expr,
-                                                     const ExecutionRegionGroupInput &group) {
+                                                     const ExecutionRegionGroupInput &group,
+                                                     bool allow_typed_expression_tree) {
 	if (expr.return_type.InternalType() != group.type.InternalType()) {
 		return false;
 	}
 	switch (expr.kind) {
 	case SljitNativeRegionExpressionKind::REFERENCE:
 		return true;
+	case SljitNativeRegionExpressionKind::INTEGRAL_COMPRESS:
+		return SljitPerfectHashIntegralCompressTargetMatchesGroup(expr.unsigned_cast_target_width,
+		                                                          group.type.InternalType());
 	case SljitNativeRegionExpressionKind::STRING_COMPRESS:
 		return group.type.InternalType() == PhysicalType::UINT8 && expr.string_compress_target_size == sizeof(uint8_t);
+	case SljitNativeRegionExpressionKind::TYPED_EXPRESSION_TREE: {
+		if (!allow_typed_expression_tree || !expr.expression_tree) {
+			return false;
+		}
+		SljitNativeIntegerKind group_kind;
+		if (!TryGetSljitPerfectHashGroupIntegerKind(group.type, group_kind)) {
+			return false;
+		}
+		auto tree_plan = BuildSljitTypedExpressionTreePlan(*expr.expression_tree, false);
+		return tree_plan.supported && tree_plan.result_kind == group_kind;
+	}
 	default:
 		return false;
 	}
@@ -69,7 +100,8 @@ static bool SljitPerfectHashGroupExpressionSupported(const SljitNativeRegionExpr
 bool TryBuildSljitPerfectHashGroupPlans(const vector<ExecutionRegionGroupInput> &groups,
                                         const vector<SljitNativeRegionExpressionPlan> &group_expressions,
                                         const ExecutionRegionAggregateContract &contract,
-                                        vector<SljitPerfectHashGroupPlan> &result) {
+                                        vector<SljitPerfectHashGroupPlan> &result,
+                                        bool allow_typed_expression_tree) {
 	if (contract.kind != ExecutionRegionAggregateOperatorKind::PERFECT_HASH ||
 	    contract.perfect_required_bits.size() != groups.size() ||
 	    contract.perfect_group_minima.size() != groups.size() ||
@@ -97,15 +129,21 @@ bool TryBuildSljitPerfectHashGroupPlans(const vector<ExecutionRegionGroupInput> 
 			plan.source_index = group.input_index;
 		} else {
 			auto &group_expression = group_expressions[group_idx];
-			if (!SljitPerfectHashGroupExpressionSupported(group_expression, group)) {
+			if (!SljitPerfectHashGroupExpressionSupported(group_expression, group, allow_typed_expression_tree)) {
 				return false;
 			}
 			plan.expression_kind = group_expression.kind;
 			plan.source_index = group_expression.source_index;
 			plan.string_compress_target_size = group_expression.string_compress_target_size;
+			plan.integral_compress_source_width = group_expression.cast_source_width;
+			plan.integral_compress_minimum = group_expression.constant;
+			if (group_expression.kind == SljitNativeRegionExpressionKind::TYPED_EXPRESSION_TREE) {
+				plan.expression_tree = group_expression.expression_tree->Copy();
+				plan.expression_tree_source_indices = group_expression.expression_tree_source_indices;
+			}
 		}
 		plan.shift = shift;
-		result.push_back(plan);
+		result.push_back(std::move(plan));
 	}
 	return true;
 }

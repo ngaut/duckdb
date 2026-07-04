@@ -13,12 +13,69 @@
 
 namespace duckdb {
 
+static string DescribeSljitExpressionSourceIndexList(const vector<idx_t> &source_indices) {
+	string result;
+	for (idx_t source_idx = 0; source_idx < source_indices.size(); source_idx++) {
+		if (source_idx > 0) {
+			result += "|";
+		}
+		result += std::to_string(source_indices[source_idx]);
+	}
+	return result;
+}
+
+static string DescribeSljitExpressionTreeNode(const ExecutionExpressionIR &node) {
+	string result;
+	switch (node.kind) {
+	case ExecutionExpressionIRKind::REFERENCE:
+		return "ref#" + std::to_string(node.ref_index) + ":" + node.return_type.ToString();
+	case ExecutionExpressionIRKind::CONSTANT:
+		return "const:" + node.return_type.ToString();
+	case ExecutionExpressionIRKind::INTRINSIC:
+		result = "intrinsic" + std::to_string(static_cast<uint8_t>(node.intrinsic)) + ":" + node.return_type.ToString();
+		break;
+	case ExecutionExpressionIRKind::BINARY:
+		result = "binary" + std::to_string(static_cast<uint8_t>(node.binary_op)) + ":" + node.return_type.ToString();
+		break;
+	case ExecutionExpressionIRKind::CAST:
+		result = "cast:" + node.return_type.ToString();
+		break;
+	case ExecutionExpressionIRKind::CASE:
+		result = "case:" + node.return_type.ToString();
+		break;
+	default:
+		result = "node" + std::to_string(static_cast<uint8_t>(node.kind)) + ":" + node.return_type.ToString();
+		break;
+	}
+	result += "(";
+	bool needs_separator = false;
+	auto append_child = [&](const unique_ptr<ExecutionExpressionIR> &child) {
+		if (!child) {
+			return;
+		}
+		if (needs_separator) {
+			result += ",";
+		}
+		result += DescribeSljitExpressionTreeNode(*child);
+		needs_separator = true;
+	};
+	append_child(node.left);
+	append_child(node.right);
+	for (auto &child : node.children) {
+		append_child(child);
+	}
+	append_child(node.else_node);
+	result += ")";
+	return result;
+}
+
 string DescribeNativeRegionExpression(const SljitNativeRegionExpressionPlan &expr) {
 	string result;
 	switch (expr.kind) {
 	case SljitNativeRegionExpressionKind::REFERENCE:
 		result = "native:reference";
 		result += expr.references_region_input ? ":region-input" : ":projection-local";
+		result += ":source=" + std::to_string(expr.source_index);
 		break;
 	case SljitNativeRegionExpressionKind::CONSTANT:
 		result = "native:constant<" + expr.return_type.ToString() + ">(" + expr.constant_value.ToString() + ")";
@@ -98,10 +155,17 @@ string DescribeNativeRegionExpression(const SljitNativeRegionExpressionPlan &exp
 		result = "native:boolean-predicate";
 		break;
 	case SljitNativeRegionExpressionKind::EXPRESSION_TREE:
-		result = "native:expression-tree:sources=" + std::to_string(expr.expression_tree_source_indices.size());
+		result = "native:expression-tree:sources=" + DescribeSljitExpressionSourceIndexList(expr.expression_tree_source_indices);
+		if (expr.expression_tree) {
+			result += ":tree=" + DescribeSljitExpressionTreeNode(*expr.expression_tree);
+		}
 		break;
 	case SljitNativeRegionExpressionKind::TYPED_EXPRESSION_TREE:
-		result = "native:typed-expression-tree:sources=" + std::to_string(expr.expression_tree_source_indices.size());
+		result = "native:typed-expression-tree:sources=" +
+		         DescribeSljitExpressionSourceIndexList(expr.expression_tree_source_indices);
+		if (expr.expression_tree) {
+			result += ":tree=" + DescribeSljitExpressionTreeNode(*expr.expression_tree);
+		}
 		break;
 	default:
 		result = "native:unknown";

@@ -426,7 +426,7 @@ TEST_CASE("JIT Metal projection reports DECIMAL overflow", "[api][jit][metal]") 
 }
 #endif
 
-TEST_CASE("JIT CBO admits native operator stages without generated stage credit", "[api][jit]") {
+TEST_CASE("JIT CBO rejects native operator stages without generated stage credit", "[api][jit]") {
 	PhysicalRunnerCostInput input;
 	input.estimated_cardinality = 2048;
 	input.native_aggregate_stage_count = 1;
@@ -440,19 +440,20 @@ TEST_CASE("JIT CBO admits native operator stages without generated stage credit"
 	auto profile = DuckDBCostModel::SelectPhysicalRunner(input, parameters);
 	REQUIRE(profile.generated_stage_count == 0);
 	REQUIRE(profile.native_aggregate_stage_count == 1);
-	REQUIRE(profile.admission_class == "native_operator");
-	REQUIRE(profile.native_operator_work == 100);
-	REQUIRE(profile.saved_work_per_batch == 100);
-	REQUIRE(profile.selected_accelerated_runner);
+	REQUIRE(profile.admission_class == "none");
+	REQUIRE(profile.native_operator_work == 0);
+	REQUIRE(profile.saved_work_per_batch == 0);
+	REQUIRE(profile.selection_reason == "rejected_native_operator_work_uncosted");
+	REQUIRE_FALSE(profile.selected_accelerated_runner);
 
 	input.native_aggregate_stage_count = 0;
 	input.native_join_stage_count = 1;
 	profile = DuckDBCostModel::SelectPhysicalRunner(input, parameters);
 	REQUIRE(profile.native_join_stage_count == 1);
-	REQUIRE(profile.admission_class == "native_operator");
-	REQUIRE(profile.native_operator_work == 100);
+	REQUIRE(profile.admission_class == "none");
+	REQUIRE(profile.native_operator_work == 0);
 	REQUIRE(profile.stateful_protocol_penalty == 720);
-	REQUIRE(profile.selection_reason == "rejected_saved_work_non_positive");
+	REQUIRE(profile.selection_reason == "rejected_native_operator_work_uncosted");
 	REQUIRE_FALSE(profile.selected_accelerated_runner);
 }
 
@@ -508,7 +509,7 @@ TEST_CASE("JIT CBO admits generated native fusion from quantified benefit", "[ap
 	REQUIRE_FALSE(profile.selected_accelerated_runner);
 }
 
-TEST_CASE("JIT CBO admits costed native protocol work directly", "[api][jit]") {
+TEST_CASE("JIT CBO only scores native protocol work after generated admission", "[api][jit]") {
 	PhysicalRunnerCostInput input;
 	input.estimated_cardinality = 300000;
 	input.native_join_stage_count = 1;
@@ -522,22 +523,22 @@ TEST_CASE("JIT CBO admits costed native protocol work directly", "[api][jit]") {
 
 	parameters.native_operator_stage_benefit = 1000;
 	profile = DuckDBCostModel::SelectPhysicalRunner(input, parameters);
-	REQUIRE(profile.admission_class == "native_operator");
-	REQUIRE(profile.native_operator_work == 1000);
+	REQUIRE(profile.admission_class == "none");
+	REQUIRE(profile.native_operator_work == 0);
 	REQUIRE(profile.stateful_protocol_penalty == 720);
-	REQUIRE(profile.saved_work_per_batch == 280);
-	REQUIRE(profile.selection_reason == "admitted_admission_class:native_operator|native_operator_stage_benefit");
-	REQUIRE(profile.selected_accelerated_runner);
+	REQUIRE(profile.saved_work_per_batch == -720);
+	REQUIRE(profile.selection_reason == "rejected_native_operator_work_uncosted");
+	REQUIRE_FALSE(profile.selected_accelerated_runner);
 
 	input.native_join_stage_count = 0;
 	input.native_aggregate_stage_count = 1;
 	profile = DuckDBCostModel::SelectPhysicalRunner(input, parameters);
-	REQUIRE(profile.admission_class == "native_operator");
-	REQUIRE(profile.native_operator_work == 1000);
+	REQUIRE(profile.admission_class == "none");
+	REQUIRE(profile.native_operator_work == 0);
 	REQUIRE(profile.stateful_protocol_penalty == 0);
-	REQUIRE(profile.saved_work_per_batch == 1000);
-	REQUIRE(profile.selection_reason == "admitted_admission_class:native_operator|native_operator_stage_benefit");
-	REQUIRE(profile.selected_accelerated_runner);
+	REQUIRE(profile.saved_work_per_batch == 0);
+	REQUIRE(profile.selection_reason == "rejected_native_operator_work_uncosted");
+	REQUIRE_FALSE(profile.selected_accelerated_runner);
 
 	input.native_join_stage_count = 1;
 	input.native_aggregate_stage_count = 0;
@@ -561,18 +562,18 @@ TEST_CASE("JIT CBO admits costed native protocol work directly", "[api][jit]") {
 	parameters.startup_base_cost = 30000;
 	parameters.vectorized_parallelism = 4;
 	profile = DuckDBCostModel::SelectPhysicalRunner(input, parameters);
-	REQUIRE(profile.admission_class == "native_operator");
-	REQUIRE(profile.saved_work_per_batch == 304);
-	REQUIRE(profile.accelerated_runner_benefit < profile.required_benefit);
-	REQUIRE(profile.selection_reason == "rejected_insufficient_benefit");
+	REQUIRE(profile.admission_class == "none");
+	REQUIRE(profile.native_operator_work == 0);
+	REQUIRE(profile.saved_work_per_batch == -720);
+	REQUIRE(profile.selection_reason == "rejected_native_operator_work_uncosted");
 	REQUIRE_FALSE(profile.selected_accelerated_runner);
 
 	input.estimated_cardinality = 2000000;
 	profile = DuckDBCostModel::SelectPhysicalRunner(input, parameters);
-	REQUIRE(profile.admission_class == "native_operator");
-	REQUIRE(profile.saved_work_per_batch == 304);
-	REQUIRE(profile.accelerated_runner_benefit > profile.required_benefit);
-	REQUIRE(profile.selected_accelerated_runner);
+	REQUIRE(profile.admission_class == "none");
+	REQUIRE(profile.native_operator_work == 0);
+	REQUIRE(profile.selection_reason == "rejected_native_operator_work_uncosted");
+	REQUIRE_FALSE(profile.selected_accelerated_runner);
 }
 
 TEST_CASE("JIT CBO scores native-stage fusion uniformly after generated admission", "[api][jit]") {
@@ -788,6 +789,66 @@ TEST_CASE("JIT CBO does not use physical pipeline scope as full-pipeline proof",
 	REQUIRE_FALSE(profile.selected_accelerated_runner);
 }
 
+TEST_CASE("JIT CBO charges hash join build sink protocol separately from native probe work", "[api][jit]") {
+	PhysicalRunnerCostInput input;
+	input.estimated_cardinality = 400000;
+	input.native_hash_join_build_sink_count = 1;
+	input.full_pipeline = true;
+	input.has_accelerated_work = true;
+
+	auto parameters = ZeroStartupRunnerCostParameters();
+	parameters.full_pipeline_benefit = 100;
+
+	auto profile = DuckDBCostModel::SelectPhysicalRunner(input, parameters);
+	REQUIRE(profile.native_hash_join_build_sink_count == 1);
+	REQUIRE(profile.admission_class == "none");
+	REQUIRE(profile.full_pipeline_work == 0);
+	REQUIRE(profile.stateful_protocol_penalty == 720);
+	REQUIRE(profile.saved_work_per_batch == -720);
+	REQUIRE(profile.selection_reason == "rejected_no_costed_acceleration");
+	REQUIRE_FALSE(profile.selected_accelerated_runner);
+
+	input.expression_cost = 104;
+	input.generated_stage_count = 4;
+	input.native_join_stage_count = 1;
+	input.generated_work_class = PhysicalRunnerGeneratedWorkClass::COMPUTE;
+	parameters.full_pipeline_benefit = 0;
+	parameters.generated_stage_benefit = 1024;
+	parameters.native_operator_stage_benefit = 1024;
+
+	profile = DuckDBCostModel::SelectPhysicalRunner(input, parameters);
+	REQUIRE(profile.admission_class == "generated_native_fusion");
+	REQUIRE(profile.generated_expression_work == 104);
+	REQUIRE(profile.generated_stage_work == 104);
+	REQUIRE(profile.native_operator_work == 1024);
+	REQUIRE(profile.stateful_protocol_penalty == 1440);
+	REQUIRE(profile.saved_work_per_batch == -208);
+	REQUIRE(profile.selection_reason == "rejected_saved_work_non_positive");
+	REQUIRE_FALSE(profile.selected_accelerated_runner);
+}
+
+TEST_CASE("JIT CBO does not fund generated backend stages through native hash join build sink", "[api][jit]") {
+	PhysicalRunnerCostInput input;
+	input.estimated_cardinality = 2048;
+	input.generated_stage_count = 1;
+	input.generated_backend_stage_count = 1;
+	input.native_hash_join_build_sink_count = 1;
+	input.full_pipeline = true;
+	input.generated_work_class = PhysicalRunnerGeneratedWorkClass::COMPUTE;
+	input.has_accelerated_work = true;
+
+	auto parameters = ZeroStartupRunnerCostParameters();
+	parameters.generated_stage_benefit = 4096;
+
+	auto profile = DuckDBCostModel::SelectPhysicalRunner(input, parameters);
+	REQUIRE(profile.generated_backend_stage_count == 1);
+	REQUIRE(profile.generated_backend_stage_work == 0);
+	REQUIRE(profile.stateful_protocol_penalty == 720);
+	REQUIRE(profile.saved_work_per_batch < 0);
+	REQUIRE(profile.selection_reason == "rejected_saved_work_non_positive");
+	REQUIRE_FALSE(profile.selected_accelerated_runner);
+}
+
 TEST_CASE("JIT CBO discounts DuckDB-owned scan-filter rows before admitting native work", "[api][jit]") {
 	PhysicalRunnerCostInput input;
 	input.estimated_cardinality = 1500304;
@@ -896,6 +957,86 @@ TEST_CASE("JIT CBO does not count native-contract projection glue as accelerated
 	REQUIRE(profile.batches < 128);
 	REQUIRE(profile.saved_work_per_batch == 2132);
 	REQUIRE(profile.selection_reason == "admitted_admission_class:generated|generated_stage_benefit");
+	REQUIRE(profile.selected_accelerated_runner);
+}
+
+TEST_CASE("JIT CBO requires backend ownership before funding stateful native source-sink glue", "[api][jit]") {
+	PhysicalRunnerCostInput input;
+	input.estimated_cardinality = 1380556;
+	input.expression_cost = 64;
+	input.generated_stage_count = 1;
+	input.native_join_stage_count = 1;
+	input.full_pipeline = true;
+	input.generated_work_class = PhysicalRunnerGeneratedWorkClass::COMPUTE;
+	input.native_protocol_class = PhysicalRunnerNativeProtocolClass::STATEFUL_SOURCE_SINK_PROTOCOL;
+	input.has_accelerated_work = true;
+
+	auto parameters = ZeroStartupRunnerCostParameters();
+	parameters.generated_stage_benefit = 4096;
+	parameters.native_operator_stage_benefit = 1024;
+
+	auto profile = DuckDBCostModel::SelectPhysicalRunner(input, parameters);
+	REQUIRE(profile.admission_class == "generated_native_fusion");
+	REQUIRE(profile.native_operator_work == 0);
+	REQUIRE(profile.stateful_protocol_penalty == 720);
+	REQUIRE(profile.saved_work_per_batch < 0);
+	REQUIRE(profile.selection_reason == "rejected_saved_work_non_positive");
+	REQUIRE_FALSE(profile.selected_accelerated_runner);
+
+	input.generated_backend_stage_count = 1;
+	profile = DuckDBCostModel::SelectPhysicalRunner(input, parameters);
+	REQUIRE(profile.native_operator_work == 1024);
+	REQUIRE(profile.generated_backend_stage_work == 4096);
+	REQUIRE(profile.saved_work_per_batch > 0);
+	REQUIRE(profile.selection_reason ==
+	        "admitted_admission_class:generated_native_fusion|generated_stage_benefit|native_operator_stage_benefit");
+	REQUIRE(profile.selected_accelerated_runner);
+}
+
+TEST_CASE("JIT CBO separates generated distinct count-pointer backend from native distinct penalty", "[api][jit]") {
+	PhysicalRunnerCostInput input;
+	input.estimated_cardinality = 2048;
+	input.generated_stage_count = 1;
+	input.generated_backend_stage_count = 1;
+	input.generated_distinct_count_pointer_aggregate_update_count = 1;
+	input.full_pipeline = true;
+	input.generated_work_class = PhysicalRunnerGeneratedWorkClass::COMPUTE;
+	input.has_accelerated_work = true;
+
+	auto parameters = ZeroStartupRunnerCostParameters();
+	parameters.generated_stage_benefit = 4096;
+
+	auto profile = DuckDBCostModel::SelectPhysicalRunner(input, parameters);
+	REQUIRE(profile.native_aggregate_stage_count == 0);
+	REQUIRE(profile.native_distinct_count_pointer_aggregate_stage_count == 0);
+	REQUIRE(profile.generated_distinct_count_pointer_aggregate_update_count == 1);
+	REQUIRE(profile.generated_backend_stage_work == 4096);
+	REQUIRE(profile.stateful_protocol_penalty == 0);
+	REQUIRE(profile.saved_work_per_batch == 4096);
+	REQUIRE(profile.selection_reason == "admitted_admission_class:generated|generated_stage_benefit");
+	REQUIRE(profile.selected_accelerated_runner);
+
+	input.generated_distinct_count_pointer_aggregate_update_count = 0;
+	input.native_distinct_count_pointer_aggregate_stage_count = 1;
+	profile = DuckDBCostModel::SelectPhysicalRunner(input, parameters);
+	REQUIRE(profile.native_distinct_count_pointer_aggregate_stage_count == 1);
+	REQUIRE(profile.generated_distinct_count_pointer_aggregate_update_count == 0);
+	REQUIRE(profile.stateful_protocol_penalty == 8192);
+	REQUIRE(profile.saved_work_per_batch < 0);
+	REQUIRE_FALSE(profile.selected_accelerated_runner);
+
+	input.native_distinct_count_pointer_aggregate_stage_count = 0;
+	input.generated_distinct_count_pointer_aggregate_update_count = 1;
+	input.native_join_stage_count = 2;
+	input.materialization_elision_count = 1;
+	parameters.native_operator_stage_benefit = 4096;
+	parameters.materialization_elision_benefit = 4096;
+	profile = DuckDBCostModel::SelectPhysicalRunner(input, parameters);
+	REQUIRE(profile.admission_class == "generated_native_fusion");
+	REQUIRE(profile.native_operator_work == 0);
+	REQUIRE(profile.materialization_elision_work == 0);
+	REQUIRE(profile.stateful_protocol_penalty == 1440);
+	REQUIRE(profile.saved_work_per_batch > 0);
 	REQUIRE(profile.selected_accelerated_runner);
 }
 
@@ -1952,7 +2093,7 @@ TEST_CASE("JIT auto planner skips native-contract projection glue before region 
 	    });
 }
 
-TEST_CASE("JIT auto planner keeps division projection as compute before region graph", "[api][jit]") {
+TEST_CASE("JIT auto planner compiles division projection aggregate and sort as compute candidates", "[api][jit]") {
 	JitTestDatabase test;
 	auto &con = test.con;
 	auto &manager = test.manager;
@@ -1974,16 +2115,38 @@ TEST_CASE("JIT auto planner keeps division projection as compute before region g
 	RequireJitEvent(
 	    manager,
 	    [](const ExecutionRegionEvent &event) {
-		    return IsSljitRegionEvent(event) && EventStatus(event) == "skipped" && IsVectorizedCboSkipEvent(event) &&
+		    return IsCompiledSljitRegionEvent(event) &&
 		           event.runner_cost.generated_work_class == PhysicalRunnerGeneratedWorkClass::COMPUTE &&
-		           event.runner_cost.native_sort_stage_count > 0;
+		           event.candidate_traits.sink_kind == ExecutionRegionSinkKind::HASH_AGGREGATE_UPDATE;
 	    },
 	    [](const ExecutionRegionEvent &event) {
-		    REQUIRE_FALSE(event.has_candidate);
+		    REQUIRE(event.has_candidate);
+		    REQUIRE(event.selected_runner == ExecutionRunnerKind::COMPILED_VECTORIZED);
+		    REQUIRE(event.runner_cost.input_scope == PhysicalRunnerCostInputScope::EXECUTION_REGION_CANDIDATE);
 		    REQUIRE(event.runner_cost.generated_work_class == PhysicalRunnerGeneratedWorkClass::COMPUTE);
-		    REQUIRE(event.stage_timings.graph_build_time_us >= 0);
-		    REQUIRE(event.stage_timings.ir_lowering_time_us >= 0);
-		    REQUIRE(StringUtil::Contains(event.reason, "region_graph=skipped"));
+		    REQUIRE(event.runner_cost.native_aggregate_stage_count == 0);
+		    REQUIRE(event.runner_cost.generated_stage_count > 0);
+		    REQUIRE(StringUtil::Contains(event.reason, "duckdb_cbo selects compiled-vectorized physical runner"));
+		    REQUIRE_FALSE(StringUtil::Contains(event.reason, "native_operator_stage_benefit"));
+		    RequireGeneratedMachineCodeRegion(event);
+		    RequireCandidateStructure(event, 0, 2, ExecutionRegionSinkKind::HASH_AGGREGATE_UPDATE);
+	    });
+
+	RequireJitEvent(
+	    manager,
+	    [](const ExecutionRegionEvent &event) {
+		    return IsCompiledSljitRegionEvent(event) &&
+		           event.runner_cost.generated_work_class == PhysicalRunnerGeneratedWorkClass::COMPUTE &&
+		           event.candidate_traits.sink_kind == ExecutionRegionSinkKind::SORT;
+	    },
+	    [](const ExecutionRegionEvent &event) {
+		    REQUIRE(event.has_candidate);
+		    REQUIRE(event.selected_runner == ExecutionRunnerKind::COMPILED_VECTORIZED);
+		    REQUIRE(event.runner_cost.input_scope == PhysicalRunnerCostInputScope::EXECUTION_REGION_CANDIDATE);
+		    REQUIRE(event.runner_cost.generated_stage_count > 0);
+		    REQUIRE(StringUtil::Contains(event.reason, "duckdb_cbo selects compiled-vectorized physical runner"));
+		    RequireGeneratedMachineCodeRegion(event);
+		    RequireCandidateStructure(event, 0, 2, ExecutionRegionSinkKind::SORT);
 	    });
 }
 
@@ -2023,12 +2186,13 @@ TEST_CASE("JIT generated work class does not label source-filter compute as proj
 	    });
 }
 
-TEST_CASE("JIT auto planner skips region graph when CBO already selects vectorized", "[api][jit]") {
+TEST_CASE("JIT auto planner rejects tiny aggregate pipeline before region graph", "[api][jit]") {
 	JitTestDatabase test;
 	auto &con = test.con;
 	auto &manager = test.manager;
 
 	ConfigureSljit(con, "auto");
+	ConfigureJitDecisionTrace(con);
 	REQUIRE_NO_FAIL(con.Query("CREATE TEMP TABLE jit_auto_fast_cost_input AS "
 	                          "SELECT i::BIGINT AS i FROM range(64) tbl(i)"));
 
@@ -2040,13 +2204,23 @@ TEST_CASE("JIT auto planner skips region graph when CBO already selects vectoriz
 	RequireJitEvent(
 	    manager,
 	    [](const ExecutionRegionEvent &event) {
-		    return IsSljitRegionEvent(event) && EventStatus(event) == "skipped" && IsVectorizedCboSkipEvent(event);
+		    return IsSljitRegionEvent(event) && EventStatus(event) == "skipped" && IsVectorizedCboSkipEvent(event) &&
+		           !event.has_candidate &&
+		           event.runner_cost.input_scope == PhysicalRunnerCostInputScope::PHYSICAL_PIPELINE &&
+		           event.runner_cost.materialization_elision_count > 0;
 	    },
 	    [](const ExecutionRegionEvent &event) {
 		    RequireVectorizedCboSkip(event);
-		    RequirePipelineCboOnlyTiming(event);
+		    REQUIRE(event.runner_cost.admission_class == "materialization_elision");
+		    REQUIRE(event.runner_cost.generated_work_class == PhysicalRunnerGeneratedWorkClass::COMPUTE);
+		    REQUIRE(event.runner_cost.native_aggregate_stage_count == 0);
+		    REQUIRE(event.runner_cost.generated_stage_count > 0);
+		    REQUIRE(event.stage_timings.graph_build_time_us == 0);
+		    REQUIRE(event.stage_timings.candidate_cbo_time_us == 0);
+		    REQUIRE(event.stage_timings.ir_lowering_time_us == 0);
 		    REQUIRE(StringUtil::Contains(event.reason, "before region graph"));
 		    REQUIRE(StringUtil::Contains(event.reason, "region_graph=skipped"));
+		    REQUIRE(StringUtil::Contains(event.reason, "rejected_insufficient_benefit"));
 	    });
 
 	for (auto &event : manager.GetEvents()) {
@@ -2113,17 +2287,14 @@ TEST_CASE("JIT diagnostic tracing analyzes fused contract boundary regions", "[a
 	}
 }
 
-TEST_CASE("JIT auto planner cost skips aggregate codegen when native and pipeline benefits are disabled",
-          "[api][jit]") {
+TEST_CASE("JIT auto planner costs generated aggregate updates as generated backend work", "[api][jit]") {
 	JitTestDatabase test;
 	auto &con = test.con;
 	auto &manager = test.manager;
 
-	ConfigureSljit(con, "auto", false, false);
+	ConfigureSljitForCoverage(con);
 	ConfigureJitDecisionTrace(con);
 	REQUIRE_NO_FAIL(con.Query("SET threads=1"));
-	REQUIRE_NO_FAIL(con.Query("SET jit_cbo_native_operator_stage_benefit=0"));
-	REQUIRE_NO_FAIL(con.Query("SET jit_cbo_full_pipeline_benefit=0"));
 	REQUIRE_NO_FAIL(con.Query("CREATE TEMP TABLE jit_auto_default_aggregate_input AS "
 	                          "SELECT (i % 5)::BIGINT AS i FROM range(1000000) tbl(i)"));
 
@@ -2135,23 +2306,19 @@ TEST_CASE("JIT auto planner cost skips aggregate codegen when native and pipelin
 	RequireJitEvent(
 	    manager,
 	    [](const ExecutionRegionEvent &event) {
-		    return IsSljitRegionEvent(event) && EventStatus(event) == "skipped" && event.has_candidate &&
-		           event.runner_cost.present &&
+		    return IsCompiledSljitRegionEvent(event) && event.has_candidate && event.runner_cost.present &&
 		           event.runner_cost.input_scope == PhysicalRunnerCostInputScope::EXECUTION_REGION_CANDIDATE &&
-		           event.runner_cost.native_aggregate_stage_count > 0;
+		           event.candidate_traits.sink_kind == ExecutionRegionSinkKind::UNGROUPED_AGGREGATE_UPDATE;
 	    },
 	    [](const ExecutionRegionEvent &event) {
-		    REQUIRE(event.selected_runner == ExecutionRunnerKind::VECTORIZED);
-		    REQUIRE_FALSE(event.runner_cost.selected_accelerated_runner);
-		    REQUIRE(event.runner_cost.saved_work_per_batch >= event.runner_cost.expression_cost);
-		    REQUIRE(StringUtil::Contains(event.reason, "duckdb_cbo selects vectorized physical runner"));
-		    REQUIRE(StringUtil::Contains(event.reason, "backend_analysis=skipped"));
+		    REQUIRE(event.selected_runner == ExecutionRunnerKind::COMPILED_VECTORIZED);
+		    REQUIRE(event.runner_cost.selected_accelerated_runner);
+		    REQUIRE(event.runner_cost.generated_stage_count > 0);
+		    REQUIRE(event.runner_cost.native_aggregate_stage_count == 0);
+		    REQUIRE(StringUtil::Contains(event.reason, "duckdb_cbo selects compiled-vectorized physical runner"));
+		    REQUIRE_FALSE(StringUtil::Contains(event.reason, "native_operator_stage_benefit"));
+		    RequireGeneratedMachineCodeRegion(event);
 	    });
-
-	for (auto &event : manager.GetEvents()) {
-		const bool compiled_auto_region = EventStatus(event) == "compiled";
-		REQUIRE_FALSE(compiled_auto_region);
-	}
 }
 
 TEST_CASE("JIT auto planner cost uses configurable CBO settings", "[api][jit]") {
@@ -2233,8 +2400,11 @@ TEST_CASE("JIT auto policy selects high-work ungrouped aggregate updates through
 
 	ConfigureSljit(con, "auto", false, true, true, 10000);
 	ConfigureJitDecisionTrace(con);
+	REQUIRE_NO_FAIL(con.Query("SET jit_cbo_generated_stage_benefit=4096"));
 	REQUIRE_NO_FAIL(con.Query("SET jit_cbo_native_operator_stage_benefit=4096"));
 	REQUIRE_NO_FAIL(con.Query("SET jit_cbo_full_pipeline_benefit=4096"));
+	REQUIRE_NO_FAIL(con.Query("SET jit_cbo_startup_base_cost=0"));
+	REQUIRE_NO_FAIL(con.Query("SET jit_cbo_startup_margin_basis_points=0"));
 	REQUIRE_NO_FAIL(con.Query("CREATE TEMP TABLE jit_auto_aggregate_cbo_input AS "
 	                          "SELECT i::BIGINT AS a, (i + 1)::BIGINT AS b, (i + 2)::BIGINT AS c, "
 	                          "(i + 3)::BIGINT AS d FROM range(500000) tbl(i)"));
@@ -2261,10 +2431,11 @@ TEST_CASE("JIT auto policy selects high-work ungrouped aggregate updates through
 		    REQUIRE(event.runner_cost.selected_accelerated_runner);
 		    REQUIRE(event.runner_cost.accelerated_runner_benefit > event.runner_cost.required_benefit);
 		    REQUIRE(event.runner_cost.generated_stage_count > 0);
-		    REQUIRE(event.runner_cost.native_aggregate_stage_count > 0);
+		    REQUIRE(event.runner_cost.native_aggregate_stage_count == 0);
 		    REQUIRE(event.runner_cost.expression_cost > 0);
 		    REQUIRE(event.runner_cost.saved_work_per_batch > 0);
 		    REQUIRE(StringUtil::Contains(event.reason, "duckdb_cbo selects compiled-vectorized physical runner"));
+		    REQUIRE_FALSE(StringUtil::Contains(event.reason, "native_operator_stage_benefit"));
 		    REQUIRE(StringUtil::Contains(event.ir, "primitive_payloads=native:"));
 		    RequireCandidateStructure(event, 0, 1, ExecutionRegionSinkKind::UNGROUPED_AGGREGATE_UPDATE);
 		    RequireGeneratedMachineCodeRegion(event);
@@ -2300,11 +2471,21 @@ TEST_CASE("JIT auto planner cost skips tiny filtered sums", "[api][jit]") {
 	    manager,
 	    [](const ExecutionRegionEvent &event) {
 		    return IsSljitRegionEvent(event) && EventStatus(event) == "skipped" && IsVectorizedCboSkipEvent(event) &&
-		           event.runner_cost.native_aggregate_stage_count > 0;
+		           !event.has_candidate &&
+		           event.runner_cost.input_scope == PhysicalRunnerCostInputScope::PHYSICAL_PIPELINE &&
+		           event.runner_cost.materialization_elision_count > 0;
 	    },
 	    [](const ExecutionRegionEvent &event) {
-		    REQUIRE_FALSE(event.has_candidate);
 		    RequireVectorizedCboSkip(event);
+		    REQUIRE(event.runner_cost.admission_class == "materialization_elision");
+		    REQUIRE(event.runner_cost.generated_work_class == PhysicalRunnerGeneratedWorkClass::COMPUTE);
+		    REQUIRE(event.runner_cost.generated_stage_count > 0);
+		    REQUIRE(event.runner_cost.native_aggregate_stage_count == 0);
+		    REQUIRE(event.stage_timings.graph_build_time_us == 0);
+		    REQUIRE(event.stage_timings.candidate_cbo_time_us == 0);
+		    REQUIRE(event.stage_timings.ir_lowering_time_us == 0);
+		    REQUIRE(StringUtil::Contains(event.reason, "before region graph"));
 		    REQUIRE(StringUtil::Contains(event.reason, "region_graph=skipped"));
+		    REQUIRE(StringUtil::Contains(event.reason, "rejected_insufficient_benefit"));
 	    });
 }

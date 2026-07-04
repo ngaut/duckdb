@@ -65,6 +65,7 @@ struct SljitNativeHashJoinProbeKeyPlan {
 	ExecutionRegionComparisonType comparison_type = ExecutionRegionComparisonType::EQUAL;
 	bool equality_key = true;
 	bool null_equal = false;
+	bool source_known_not_null = false;
 };
 
 struct SljitNativeRegionExpressionPlan {
@@ -198,21 +199,32 @@ struct SljitNativeOrderSinkPlan {
 	string ir;
 };
 
+struct SljitAggregateGroupReservePlan {
+	bool has_group_count = false;
+	idx_t group_count = 0;
+
+	bool CanReserve() const {
+		return has_group_count && group_count > 0;
+	}
+};
+
 struct SljitNativeAggregateUpdatePlan {
 	ExecutionRegionSinkInfo sink_info;
 	vector<LogicalType> input_types;
 	vector<SljitNativeRegionExpressionPlan> payloads;
 	vector<SljitNativeRegionExpressionPlan> group_expressions;
+	idx_t estimated_input_count = 0;
+	SljitAggregateGroupReservePlan group_reserve;
 	bool use_primitive_payloads = false;
 	bool use_grouped_state_addresses = false;
 	bool use_perfect_hash_group_lookup = false;
-	bool use_distinct_count_pointer_update = false;
 	string ir;
 };
 
 struct SljitNativeRegionOpPlan {
 	SljitNativeRegionOpKind kind;
 	idx_t operator_index = DConstants::INVALID_INDEX;
+	vector<LogicalType> input_types;
 	vector<LogicalType> output_types;
 	SljitNativeRegionExpressionPlan filter;
 	SljitNativeHashJoinProbePlan hash_join_probe;

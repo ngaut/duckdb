@@ -95,12 +95,11 @@ static bool TryResolveDirectNewGroupedStateAddresses(ExecutionRegionRuntime &run
 	return resolved;
 }
 
-static bool
-TryExecuteDirectGroupedFusedPayloadUpdate(ExecutionRegionRuntime &runtime, SljitRegionExecutionScratch &scratch,
-                                          idx_t op_idx, SljitExecutableRegionOp &op, DataChunk &input,
-                                          const vector<const ExecutionPrimitiveAggregateUpdateLane *> &payload_lanes,
-                                          ExecutionGroupedAggregateStateAddressBinding &grouped_state,
-                                          SljitAggregatePayloadAdapterScratch &payload_scratch, bool finish = true) {
+static bool TryExecuteDirectGroupedFusedPayloadUpdate(
+    ExecutionRegionRuntime &runtime, SljitRegionExecutionScratch &scratch, idx_t op_idx, SljitExecutableRegionOp &op,
+    DataChunk &input, const vector<const ExecutionPrimitiveAggregateUpdateLane *> &payload_lanes,
+    ExecutionGroupedAggregateStateAddressBinding &grouped_state, SljitAggregatePayloadAdapterScratch &payload_scratch,
+    bool finish = true, optional_ptr<const ExecutionDenseGroupDomain> dense_domain = nullptr) {
 	auto stage_start = SljitRegionStageStart(runtime);
 	auto update_state = SljitBuildGroupedStateAddressUpdateState(op, input, payload_lanes, payload_scratch);
 	const char *stage_name = "direct_new_grouped_fused_payload_update";
@@ -109,7 +108,7 @@ TryExecuteDirectGroupedFusedPayloadUpdate(ExecutionRegionRuntime &runtime, Sljit
 	    runtime, op_idx, op.kind, stage_name, stage_start, [&](optional_ptr<ExecutionOperatorStageRecorder> recorder) {
 		    return grouped_state.state->TryUpdateNewGroupsWithSelectedStateAddresses(
 		        input, op.aggregate_update.plan.sink_info, SljitExecuteGroupedSelectedStateAddressUpdate, &update_state,
-		        recorder, finish);
+		        recorder, finish, nullptr, dense_domain);
 	    });
 	scratch.RecordDirectNewAggregateUpdateResult(op_idx, updated);
 	RecordSljitRegionStageRuntimePath(runtime, op_idx, op.kind, updated ? stage_name : miss_stage_name, stage_start);
@@ -124,7 +123,8 @@ static bool TryExecuteDirectProjectedGroupedFusedPayloadUpdate(
     DataChunk &groups, DataChunk &payload_input, const vector<idx_t> &payload_source_indices,
     const vector<const ExecutionPrimitiveAggregateUpdateLane *> &payload_lanes,
     ExecutionGroupedAggregateStateAddressBinding &grouped_state, SljitAggregatePayloadAdapterScratch &payload_scratch,
-    bool finish = true, optional_ptr<Vector> precomputed_hashes = nullptr) {
+    bool finish = true, optional_ptr<Vector> precomputed_hashes = nullptr,
+    optional_ptr<const ExecutionDenseGroupDomain> dense_domain = nullptr) {
 	if (groups.size() != payload_input.size()) {
 		return false;
 	}
@@ -135,9 +135,9 @@ static bool TryExecuteDirectProjectedGroupedFusedPayloadUpdate(
 	const char *miss_stage_name = "direct_projected_group_payload_update_miss";
 	auto updated = ExecuteSljitRegionRecordedOperation(
 	    runtime, op_idx, op.kind, stage_name, stage_start, [&](optional_ptr<ExecutionOperatorStageRecorder> recorder) {
-		    return grouped_state.state->TryUpdateNewGroupsWithSelectedStateAddresses(
+		    return grouped_state.state->TryUpdateGroupKeysWithSelectedStateAddresses(
 		        groups, op.aggregate_update.plan.sink_info, SljitExecuteGroupedSelectedStateAddressUpdate,
-		        &update_state, recorder, finish, precomputed_hashes);
+		        &update_state, recorder, finish, precomputed_hashes, dense_domain);
 	    });
 	scratch.RecordDirectNewAggregateUpdateResult(op_idx, updated);
 	if (updated) {

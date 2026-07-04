@@ -12,6 +12,7 @@
 #include "sljit_hash_join_probe_specialization.hpp"
 #include "sljit_region_plan.hpp"
 
+#include "duckdb/execution/execution_aggregate_runtime.hpp"
 #include "duckdb/execution/execution_region_kernel.hpp"
 
 namespace duckdb {
@@ -19,6 +20,7 @@ namespace duckdb {
 struct SljitExecutableRegionExpression {
 	SljitNativeRegionExpressionPlan plan;
 	vector<idx_t> input_source_indices;
+	vector<bool> input_source_not_null;
 	unique_ptr<ExecutionRegionCodeHandle> code;
 	SljitNativeVectorFunction function = nullptr;
 	unique_ptr<ExecutionRegionCodeHandle> flat_code;
@@ -52,9 +54,27 @@ struct SljitExecutableRegionExpression {
 	}
 };
 
+static inline bool SljitInputSourceKnownNotNull(const vector<bool> &input_source_not_null, idx_t source_idx) {
+	return source_idx < input_source_not_null.size() && input_source_not_null[source_idx];
+}
+
+static inline bool SljitSourceKnownNotNull(const vector<bool> *source_not_null, idx_t input_index) {
+	return source_not_null && input_index < source_not_null->size() && (*source_not_null)[input_index];
+}
+
 struct SljitExecutableRegularHashJoinProbeCode {
 	unique_ptr<ExecutionRegionCodeHandle> code;
 	SljitNativeRegularHashJoinProbeFunction function = nullptr;
+	unique_ptr<ExecutionRegionCodeHandle> bloom_code;
+	SljitNativeRegularHashJoinProbeFunction bloom_function = nullptr;
+	unique_ptr<ExecutionRegionCodeHandle> mark_match_selection_code;
+	SljitNativeRegularHashJoinProbeFunction mark_match_selection_function = nullptr;
+	unique_ptr<ExecutionRegionCodeHandle> mark_match_selection_bloom_code;
+	SljitNativeRegularHashJoinProbeFunction mark_match_selection_bloom_function = nullptr;
+	unique_ptr<ExecutionRegionCodeHandle> mark_nonmatch_selection_code;
+	SljitNativeRegularHashJoinProbeFunction mark_nonmatch_selection_function = nullptr;
+	unique_ptr<ExecutionRegionCodeHandle> mark_nonmatch_selection_bloom_code;
+	SljitNativeRegularHashJoinProbeFunction mark_nonmatch_selection_bloom_function = nullptr;
 
 	struct AllValidSpecialization {
 		unique_ptr<ExecutionRegionCodeHandle> code;
@@ -72,9 +92,33 @@ struct SljitExecutableRegularHashJoinProbeCode {
 		return all_valid_specializations[key.CacheIndex()];
 	}
 
+	AllValidSpecialization mark_match_all_valid_specializations[ALL_VALID_SPECIALIZATION_COUNT];
+
+	AllValidSpecialization &MarkMatchAllValidSpecializationFor(const SljitHashJoinProbeAllValidSpecializationKey &key) {
+		return mark_match_all_valid_specializations[key.CacheIndex()];
+	}
+
+	AllValidSpecialization mark_nonmatch_all_valid_specializations[ALL_VALID_SPECIALIZATION_COUNT];
+
+	AllValidSpecialization &
+	MarkNonMatchAllValidSpecializationFor(const SljitHashJoinProbeAllValidSpecializationKey &key) {
+		return mark_nonmatch_all_valid_specializations[key.CacheIndex()];
+	}
+
 	idx_t CodeSize() const {
 		idx_t result = code ? code->CodeSize() : 0;
+		result += bloom_code ? bloom_code->CodeSize() : 0;
+		result += mark_match_selection_code ? mark_match_selection_code->CodeSize() : 0;
+		result += mark_match_selection_bloom_code ? mark_match_selection_bloom_code->CodeSize() : 0;
+		result += mark_nonmatch_selection_code ? mark_nonmatch_selection_code->CodeSize() : 0;
+		result += mark_nonmatch_selection_bloom_code ? mark_nonmatch_selection_bloom_code->CodeSize() : 0;
 		for (auto &specialization : all_valid_specializations) {
+			result += specialization.CodeSize();
+		}
+		for (auto &specialization : mark_match_all_valid_specializations) {
+			result += specialization.CodeSize();
+		}
+		for (auto &specialization : mark_nonmatch_all_valid_specializations) {
 			result += specialization.CodeSize();
 		}
 		return result;
@@ -165,6 +209,7 @@ struct SljitExecutableFilteredAggregateUpdate {
 	SljitExecutableRegionExpression filter;
 	vector<SljitExecutableRegionExpression> payloads;
 	vector<idx_t> input_source_indices;
+	vector<bool> input_source_not_null;
 	unique_ptr<ExecutionRegionCodeHandle> code;
 	SljitNativeAggregateUpdateFunction function = nullptr;
 	bool owns_perfect_hash_group_lookup = false;
@@ -182,6 +227,7 @@ struct SljitExecutableAggregateUpdate {
 	SljitNativeAggregateUpdatePlan plan;
 	vector<SljitExecutableRegionExpression> payloads;
 	SljitExecutableFilteredAggregateUpdate filtered_update;
+	ExecutionDenseGroupDomain dense_group_domain;
 	unique_ptr<ExecutionRegionCodeHandle> fused_payload_update_code;
 	SljitNativeAggregateUpdateFunction fused_payload_update_function = nullptr;
 	bool fused_payload_update_owns_group_lookup = false;
@@ -227,7 +273,9 @@ struct SljitDirectProjectionPlan {
 struct SljitExecutableRegionOp {
 	SljitNativeRegionOpKind kind;
 	idx_t operator_index = DConstants::INVALID_INDEX;
+	vector<LogicalType> input_types;
 	vector<LogicalType> output_types;
+	vector<bool> output_not_null;
 	SljitExecutableRegionExpression filter;
 	SljitExecutableHashJoinProbe hash_join_probe;
 	SljitExecutableHashJoinBuild hash_join_build;

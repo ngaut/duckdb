@@ -280,6 +280,8 @@ struct SljitNativePerfectHashJoinProbeInput {
 	const_data_ptr_t source_data = nullptr;
 	const sel_t *source_sel = nullptr;
 	const validity_t *source_validity = nullptr;
+	bool source_key0_int64_to_int32 = false;
+	bool source_key0_int64_to_int32_unchecked = false;
 	idx_t count = 0;
 	sel_t *match_sel = nullptr;
 	sel_t *build_sel = nullptr;

@@ -9,6 +9,7 @@
 
 #include "duckdb/common/common.hpp"
 #include "duckdb/common/types.hpp"
+#include "duckdb/common/types/vector.hpp"
 #include "duckdb/common/vector.hpp"
 #include "duckdb/execution/ht_entry.hpp"
 #include "duckdb/execution/execution_region_common.hpp"

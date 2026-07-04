@@ -14,8 +14,6 @@
 
 #include "duckdb/common/exception.hpp"
 
-#include <exception>
-
 namespace duckdb {
 
 template <class PROJECTION_SCRATCH>
@@ -91,10 +89,7 @@ static void RunFlatFusedFloatingProjection(SljitExecutableRegionOp &op, idx_t co
 	}
 	native_input.count = count;
 	native_input.has_error = false;
-	op.flat_fused_floating_projection_function(&native_input);
-	if (native_input.error) {
-		std::rethrow_exception(native_input.error);
-	}
+	SljitExecuteNativeFunction(op.flat_fused_floating_projection_function, native_input);
 }
 
 template <class PROJECTION_SCRATCH>

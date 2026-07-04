@@ -6,26 +6,73 @@ that were verified are separated from principles and next directions.
 
 ## Verified State
 
-- Current broad SF10 production sweep:
+- Latest architecture/performance SF10 verification:
+  `/private/tmp/duckdb_jit_tpch_sf10_arch_budget_20260704`.
+  Correctness diff is 0 for all 22 TPC-H queries. Twenty queries are jitted,
+  and 17 queries are faster in production mode:
+  Q1, Q2, Q3, Q5, Q6, Q9, Q10, Q12, Q13, Q14, Q15, Q16, Q17, Q18, Q19, Q20,
+  and Q22. Sixteen jitted queries are faster; Q16 is faster without compiling
+  because the core distinct count-pointer aggregate backend is now selected
+  independently of tracing. Q4 is neutral, and Q7, Q8, Q11, and Q21 are small
+  slowdowns within the verifier's default `0.98` auto-speedup guard.
+  Profile-mode runtime tracing remains useful for attribution but can make the
+  JIT path look worse because nested stage recording overhead is charged to
+  outer JIT stages.
+- Q4's architecture fix was to move selected projected count-star update into
+  `GroupedAggregateUpdate` as a projected-input contract. The recipe now emits
+  `MarkProbeFilterBoundary -> GroupedAggregateUpdate(projected input)` when the
+  count-star backend can prove the group projection, instead of materializing
+  `ProjectionChain` output first. The traced SF10 run
+  `/private/tmp/duckdb_jit_tpch_sf10_q04_projected_countstar_trace_20260704`
+  showed `aggregate_update.primitive_projected_preaggregated_count_star_update`
+  and no `projection.batch_append` stage for that path. A follow-up flat-string
+  selected fast path was correctness-verified but is only a small/noisy Q4
+  micro-optimization; the durable win is the terminal ownership boundary.
+- The source boundary fix is architectural: scan-filtered source output no
+  longer implies an opaque materialization primitive. The stale
+  `MaterializeBoundary` source path was removed. Stateful source-probe/aggregate
+  recipes that need coalescing use the explicit `SourceBatchBoundary` primitive.
+  The native-only side flag for compacting source-contract output was deleted;
+  source coalescing is now visible as `SourceBatchBoundary -> NativeTailHandoff`.
+- Q10's grouped aggregate path now keeps arbitrary row-pointer duplicate
+  compaction optional. Descriptor lookup must prove repeat evidence before
+  allocating a per-batch compacting hash map.
+- Q21's remaining relative slowdown is not a generated-code inner-loop issue.
+  xtrace showed both off and auto dominated by native dynamic bloom-filter scan
+  work. `BloomFilterSelect` now emits the final selection in one pass after
+  hashing and the unused intermediate `LookupHashes` helper was deleted. Focused
+  SF10 Q21 production improved absolute medians from `1.477s -> 1.405s` off and
+  `1.490s -> 1.422s` auto; the JIT ratio stays neutral because the optimized
+  bottleneck is shared by both policies.
+- The July 4 Q21 regression after broader admission was architectural, not a
+  license to make the CBO timid. Profile showed a MARK-to-delimiter-sink region
+  with `generated_backend_stage_count=0`: generated selection glue was claiming
+  native source/sink protocol benefit without owning a backend primitive. The
+  cost surface now requires backend ownership before funding stateful native
+  source-to-sink glue. Focused SF10 Q21 production moved from `0.984x`
+  (`1.379s -> 1.402s`) to neutral `0.999x` (`1.383s -> 1.384s`), while Q3's
+  row-pointer aggregate backend remains admitted and faster at `1.031x`.
+- Previous broad SF10 production sweep:
   `/private/tmp/duckdb_jit_tpch_sf10_all_hybrid_input_layout_r5_20260702`.
-- Correctness diff is 0 for all 22 TPC-H queries.
-- Twenty-one queries are jitted, and all twenty-one jitted queries are faster
-  than non-JIT in that sweep. Q16 remains non-jitted and effectively neutral.
-- Q16 is the only non-jitted query in the latest broad sweep, but it now has a
-  focused core distinct-count backend instead of a CBO exception. The backend
-  resolves grouped state row pointers, owns the integer distinct set, and
-  increments the count state only when a payload is first seen.
+- That earlier run had correctness diff 0 for all 22 TPC-H queries; 21 queries
+  were jitted and all 21 jitted queries were faster than non-JIT in that sweep.
+  The newer July 4 sweep above supersedes its current-status numbers.
+- Q16 now has a focused core distinct-count backend instead of a CBO exception.
+  The backend resolves grouped state row pointers, owns the integer distinct
+  set, and increments the count state only when a payload is first seen.
+  The physical backend strategy is no longer gated by
+  `jit_trace_decisions`/detailed telemetry, so production and traced planning
+  expose the same distinct count-pointer facts.
 - Latest cleanup verification:
   - `make release -j12` passed
-  - `build/release/test/unittest "*jit*"` passed
+  - focused JIT CBO/distinct-pointer guard tests passed
   - `python3 benchmark/jit/verify_jit_architecture.py` passed
-  - stale-code scan over JIT code, TPC-H JIT docs, and
-    `test/api/test_jit_runtime.cpp` was clean
   - `git diff --check` passed
   - full SF10 production
-    `/private/tmp/duckdb_jit_tpch_sf10_all_hybrid_input_layout_r5_20260702`
-    verified correctness diff 0 for all 22 queries; 21 queries jitted, all 21
-    jitted queries faster than non-JIT, Q16 non-jitted and effectively neutral
+    `/private/tmp/duckdb_jit_tpch_sf10_arch_budget_20260704`
+    verified correctness diff 0 for all 22 queries; 20 queries jitted, 17
+    queries faster overall, and Q16 non-jitted but faster from the core
+    distinct count-pointer backend
   - focused SF10 Q8 production
     `/private/tmp/duckdb_jit_tpch_sf10_q8_hybrid_input_layout_r15_20260702`
     verified correctness diff 0 with off median `0.401s`, auto median `0.360s`,
@@ -4058,7 +4105,10 @@ The current win is a core execution-path cleanup: Q16 remains non-jitted because
 there is no generated region with owned hot work yet. Future Q16 JIT work should
 start from this distinct backend and remove more grouped lookup/projection work;
 it should not reintroduce tuple-backed duplicate scans, correction selections,
-or CBO leniency for the old fragments.
+or CBO leniency for the old fragments. The cost model now exposes
+`runner_cost_native_distinct_count_pointer_aggregate_stage_count` and charges it
+through the stateful protocol penalty, keeping correctness eligibility separate
+from production profitability.
 
 ### 74. Q8 Source Filters Need Explicit Input-Layout Ownership
 
