@@ -441,17 +441,17 @@ TEST_CASE("JIT distinct count-pointer planning is independent of decision tracin
 		                          ") projected "
 		                          "GROUP BY g"));
 
-			idx_t distinct_pointer_cost_events = 0;
-			for (auto &event : manager.GetEvents()) {
-				if (!event.runner_cost.present ||
-				    event.runner_cost.generated_distinct_count_pointer_aggregate_update_count == 0) {
-					continue;
-				}
-				distinct_pointer_cost_events++;
-				REQUIRE(event.runner_cost.native_aggregate_stage_count == 0);
-				REQUIRE(event.runner_cost.native_distinct_count_pointer_aggregate_stage_count == 0);
-				REQUIRE(event.runner_cost.generated_distinct_count_pointer_aggregate_update_count == 1);
+		idx_t distinct_pointer_cost_events = 0;
+		for (auto &event : manager.GetEvents()) {
+			if (!event.runner_cost.present ||
+			    event.runner_cost.generated_distinct_count_pointer_aggregate_update_count == 0) {
+				continue;
 			}
+			distinct_pointer_cost_events++;
+			REQUIRE(event.runner_cost.native_aggregate_stage_count == 0);
+			REQUIRE(event.runner_cost.native_distinct_count_pointer_aggregate_stage_count == 0);
+			REQUIRE(event.runner_cost.generated_distinct_count_pointer_aggregate_update_count == 1);
+		}
 		REQUIRE(distinct_pointer_cost_events > 0);
 	};
 
@@ -521,12 +521,12 @@ TEST_CASE("JIT hash aggregate count distinct uses pointer-key backend", "[api][j
 		           event.candidate_traits.sink_kind == ExecutionRegionSinkKind::HASH_AGGREGATE_UPDATE &&
 		           StringUtil::Contains(event.ir, "distinct_count_pointer");
 	    },
-		    [](const ExecutionRegionEvent &event) {
-			    REQUIRE(event.runner_cost.generated_stage_count > 0);
-			    REQUIRE(event.runner_cost.native_aggregate_stage_count == 0);
-			    REQUIRE(event.runner_cost.native_distinct_count_pointer_aggregate_stage_count == 0);
-			    REQUIRE(event.runner_cost.generated_distinct_count_pointer_aggregate_update_count > 0);
-		    });
+	    [](const ExecutionRegionEvent &event) {
+		    REQUIRE(event.runner_cost.generated_stage_count > 0);
+		    REQUIRE(event.runner_cost.native_aggregate_stage_count == 0);
+		    REQUIRE(event.runner_cost.native_distinct_count_pointer_aggregate_stage_count == 0);
+		    REQUIRE(event.runner_cost.generated_distinct_count_pointer_aggregate_update_count > 0);
+	    });
 	for (auto &event : manager.GetEvents()) {
 		REQUIRE_FALSE(StringUtil::Contains(EventJitRuntimePathCounts(event),
 		                                   "aggregate_update.distinct_count_pointer_direct_update"));
@@ -608,42 +608,66 @@ TEST_CASE("JIT hash aggregate count distinct pointer-key backend merges parallel
 		           event.candidate_traits.sink_kind == ExecutionRegionSinkKind::HASH_AGGREGATE_UPDATE &&
 		           StringUtil::Contains(event.ir, "distinct_count_pointer");
 	    },
-		    [](const ExecutionRegionEvent &event) {
-			    REQUIRE(event.runner_cost.generated_stage_count > 0);
-			    REQUIRE(event.runner_cost.native_aggregate_stage_count == 0);
-			    REQUIRE(event.runner_cost.native_distinct_count_pointer_aggregate_stage_count == 0);
-			    REQUIRE(event.runner_cost.generated_distinct_count_pointer_aggregate_update_count > 0);
-		    });
+	    [](const ExecutionRegionEvent &event) {
+		    REQUIRE(event.runner_cost.generated_stage_count > 0);
+		    REQUIRE(event.runner_cost.native_aggregate_stage_count == 0);
+		    REQUIRE(event.runner_cost.native_distinct_count_pointer_aggregate_stage_count == 0);
+		    REQUIRE(event.runner_cost.generated_distinct_count_pointer_aggregate_update_count > 0);
+	    });
 }
 
-TEST_CASE("JIT source contracts preserve Q7 table scan filter contracts", "[api][jit]") {
+TEST_CASE("JIT source contracts preserve joined table scan filter contracts", "[api][jit]") {
 	DuckDB db;
 	Connection con(db);
 	auto &manager = ExecutionRegionManager::Get(*con.context);
 
-	REQUIRE_NO_FAIL(con.Query("LOAD tpch"));
 	ConfigureSljitForCoverage(con, false, true, true, 10000);
 	REQUIRE_NO_FAIL(con.Query("SET threads=1"));
-	REQUIRE_NO_FAIL(con.Query("CALL dbgen(sf=0.01)"));
+	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_source_contract_nation AS "
+	                          "SELECT i::BIGINT AS nationkey, "
+	                          "       CASE i WHEN 0 THEN 'alpha' WHEN 1 THEN 'beta' ELSE 'other' END AS name "
+	                          "FROM range(8) tbl(i)"));
+	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_source_contract_supplier AS "
+	                          "SELECT i::BIGINT AS suppkey, "
+	                          "       (i % 2)::BIGINT AS nationkey "
+	                          "FROM range(4096) tbl(i)"));
+	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_source_contract_customer AS "
+	                          "SELECT i::BIGINT AS custkey, "
+	                          "       ((i + 1) % 2)::BIGINT AS nationkey "
+	                          "FROM range(4096) tbl(i)"));
+	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_source_contract_orders AS "
+	                          "SELECT i::BIGINT AS orderkey, "
+	                          "       (i % 4096)::BIGINT AS custkey "
+	                          "FROM range(65536) tbl(i)"));
+	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_source_contract_lineitem AS "
+	                          "SELECT i::BIGINT AS linekey, "
+	                          "       (i % 65536)::BIGINT AS orderkey, "
+	                          "       (i % 4096)::BIGINT AS suppkey, "
+	                          "       DATE '2020-01-01' + (i % 730)::INTEGER AS shipdate, "
+	                          "       CAST(100 + (i % 1000) AS DECIMAL(15,2)) AS extendedprice, "
+	                          "       CAST((i % 7)::DOUBLE / 100 AS DECIMAL(15,2)) AS discount "
+	                          "FROM range(131072) tbl(i)"));
 
 	ClearJitTrace(manager, true);
-	auto result = con.Query("SELECT supp_nation, cust_nation, l_year, sum(volume) AS revenue "
+	auto result = con.Query("SELECT source_name, target_name, ship_year, sum(volume) AS revenue "
 	                        "FROM ("
-	                        "    SELECT n1.n_name AS supp_nation, n2.n_name AS cust_nation, "
-	                        "           extract(year FROM l_shipdate) AS l_year, "
-	                        "           l_extendedprice * (1 - l_discount) AS volume "
-	                        "    FROM supplier, lineitem, orders, customer, nation n1, nation n2 "
-	                        "    WHERE s_suppkey = l_suppkey "
-	                        "      AND o_orderkey = l_orderkey "
-	                        "      AND c_custkey = o_custkey "
-	                        "      AND s_nationkey = n1.n_nationkey "
-	                        "      AND c_nationkey = n2.n_nationkey "
-	                        "      AND ((n1.n_name = 'FRANCE' AND n2.n_name = 'GERMANY') "
-	                        "        OR (n1.n_name = 'GERMANY' AND n2.n_name = 'FRANCE')) "
-	                        "      AND l_shipdate BETWEEN CAST('1995-01-01' AS date) AND CAST('1996-12-31' AS date)"
+	                        "    SELECT n1.name AS source_name, n2.name AS target_name, "
+	                        "           extract(year FROM l.shipdate) AS ship_year, "
+	                        "           l.extendedprice * (1 - l.discount) AS volume "
+	                        "    FROM jit_source_contract_supplier s, jit_source_contract_lineitem l, "
+	                        "         jit_source_contract_orders o, jit_source_contract_customer c, "
+	                        "         jit_source_contract_nation n1, jit_source_contract_nation n2 "
+	                        "    WHERE s.suppkey = l.suppkey "
+	                        "      AND o.orderkey = l.orderkey "
+	                        "      AND c.custkey = o.custkey "
+	                        "      AND s.nationkey = n1.nationkey "
+	                        "      AND c.nationkey = n2.nationkey "
+	                        "      AND ((n1.name = 'alpha' AND n2.name = 'beta') "
+	                        "        OR (n1.name = 'beta' AND n2.name = 'alpha')) "
+	                        "      AND l.shipdate BETWEEN DATE '2020-01-01' AND DATE '2021-12-31'"
 	                        ") AS shipping "
-	                        "GROUP BY supp_nation, cust_nation, l_year "
-	                        "ORDER BY supp_nation, cust_nation, l_year");
+	                        "GROUP BY source_name, target_name, ship_year "
+	                        "ORDER BY source_name, target_name, ship_year");
 	REQUIRE_NO_FAIL(*result);
 	REQUIRE(result->RowCount() == 4);
 
@@ -664,9 +688,14 @@ TEST_CASE("JIT source contracts preserve Q7 table scan filter contracts", "[api]
 	RequireJitEvent(
 	    manager,
 	    [](const ExecutionRegionEvent &event) {
+		    auto runtime_paths = EventJitRuntimePathCounts(event);
+		    const bool has_generated_probe =
+		        StringUtil::Contains(runtime_paths,
+		                             "hash_join_probe.generated_regular_probe_flat_all_valid_function") ||
+		        StringUtil::Contains(runtime_paths, "hash_join_probe.generated_perfect_probe_function");
 		    return IsSljitRegionEvent(event) && EventPhase(event) == "runtime" && EventStatus(event) == "executed" &&
 		           event.selected_uses_scan_filters && event.source_contract_output_rows > 0 &&
-		           event.input_rows == event.source_contract_output_rows;
+		           event.input_rows == event.source_contract_output_rows && has_generated_probe;
 	    },
 	    [](const ExecutionRegionEvent &event) {
 		    auto runtime_paths = EventJitRuntimePathCounts(event);
