@@ -21,6 +21,7 @@
 #include "sljit_projection_reference_runtime.hpp"
 #include "sljit_region_runtime_state.hpp"
 #include "sljit_region_runtime_trace.hpp"
+#include "sljit_selected_hash_join_input_runtime.hpp"
 
 namespace duckdb {
 
@@ -83,7 +84,7 @@ public:
 	      execute_hash_join_probe(execute_hash_join_probe_p),
 	      terminal_runtime(execute_hash_join_probe_p, source_distinct_counts_p, source_min_values_p,
 	                       source_max_values_p),
-	      scratch(runtime.GetAllocator(), ops) {
+	      scratch(runtime.GetAllocator(), ops), selected_hash_join_inputs(runtime, ops, scratch) {
 	}
 
 	bool Execute() {
@@ -237,8 +238,8 @@ private:
 		string deferred_reason;
 		DataChunk *join_input_ptr = nullptr;
 		if (input.HasHashJoinSelection()) {
-			if (!TryPrepareSelectedHashJoinOutputForHashProbeInput(step.Op(0), input, join_input_ptr,
-			                                                       deferred_reason)) {
+			if (!selected_hash_join_inputs.TryPrepareHashProbeInput(step.Op(0), input, join_input_ptr,
+			                                                        deferred_reason)) {
 				if (!deferred_reason.empty()) {
 					return SljitDeferFullPipelineResult(runtime, deferred_reason, result);
 				}
@@ -282,7 +283,7 @@ private:
 		const auto &primitive = step.mark_probe_filter_boundary;
 		const bool preserve_selected_hash_join = input.HasHashJoinSelection() && primitive.preserve_selected_hash_join;
 		if (input.HasHashJoinSelection()) {
-			if (!TryPrepareSelectedHashJoinOutputForMarkProbeInput(
+			if (!selected_hash_join_inputs.TryPrepareMarkProbeInput(
 			        primitive.hash_join_idx, input, !preserve_selected_hash_join, join_input_ptr, deferred_reason)) {
 				if (!deferred_reason.empty()) {
 					return SljitDeferFullPipelineResult(runtime, deferred_reason, result);
@@ -333,8 +334,8 @@ private:
 					if (mark_count == 0) {
 						return false;
 					}
-					auto selected_view =
-					    BuildSelectedHashJoinMarkOutputView(input, &scratch.FilterSelection(hash_join_idx), mark_count);
+					auto selected_view = selected_hash_join_inputs.BuildMarkOutputView(
+					    input, &scratch.FilterSelection(hash_join_idx), mark_count);
 					return ExecuteStep(next_step_idx, selected_view, true);
 				}
 				SljitMarkProbeFilterBoundary mark_boundary;
@@ -352,8 +353,8 @@ private:
 				if (mark_result.selected_count == 0) {
 					return false;
 				}
-				auto selected_view =
-				    BuildSelectedHashJoinMarkOutputView(input, mark_result.selection, mark_result.selected_count);
+				auto selected_view = selected_hash_join_inputs.BuildMarkOutputView(input, mark_result.selection,
+				                                                                   mark_result.selected_count);
 				return ExecuteStep(next_step_idx, selected_view, true);
 			}
 			if (use_filtered_mark_selection_probe) {
@@ -434,205 +435,6 @@ private:
 		lhs_output.Ensure(runtime.GetAllocator(), lhs_output_types);
 		lhs_output.Reset();
 		return lhs_output.chunk;
-	}
-
-	bool TryPrepareSelectedHashJoinOutputForMarkProbeInput(idx_t mark_hash_join_idx,
-	                                                       const SljitRuntimeBatchView &selected_input,
-	                                                       bool include_lhs_output_columns, DataChunk *&join_input,
-	                                                       string &deferred_reason) {
-		join_input = nullptr;
-		if (!selected_input.HasHashJoinSelection()) {
-			return false;
-		}
-		const auto source_hash_join_idx = selected_input.hash_join_idx;
-		if (source_hash_join_idx >= ops.size() || mark_hash_join_idx >= ops.size()) {
-			return false;
-		}
-		if (!scratch.HasOperatorBinding(source_hash_join_idx)) {
-			throw InternalException("SLJIT selected MARK input has no source hash-join binding");
-		}
-		auto &source_binding = scratch.OperatorBinding(source_hash_join_idx).hash_join_probe;
-		if (!source_binding.ready || source_binding.output_types.empty()) {
-			throw InternalException("SLJIT selected MARK input has an incomplete source hash-join binding");
-		}
-
-		selected_hash_join_mark_input.Ensure(runtime.GetAllocator(), source_binding.output_types);
-		auto &compact_input = selected_hash_join_mark_input.chunk;
-		compact_input.Reset();
-
-		auto &mark_hash_join_op = ops[mark_hash_join_idx];
-		ExecutionOperatorBinding *mark_binding_ptr = nullptr;
-		auto bind_result = SljitBindRecordedNativeOperator(
-		    runtime, runtime.ExecutionOperators(), scratch, mark_hash_join_idx, mark_hash_join_op, compact_input,
-		    mark_hash_join_op.hash_join_probe.plan.operator_info, "native-operator-runtime-deferred",
-		    "SLJIT selected MARK probe input", mark_binding_ptr, deferred_reason);
-		if (bind_result == ExecutionOperatorBindResult::DEFERRED) {
-			return false;
-		}
-		auto &mark_binding = mark_binding_ptr->hash_join_probe;
-		if (!mark_binding.ready || mark_binding.output_mode != ExecutionHashJoinProbeOutputMode::MARK_PROBE) {
-			throw InternalException("SLJIT selected MARK probe input received an invalid MARK binding");
-		}
-
-		vector<uint8_t> referenced_columns(source_binding.output_types.size(), 0);
-		auto mark_referenced_column = [&](idx_t column_idx) {
-			if (column_idx >= referenced_columns.size()) {
-				throw InternalException("SLJIT selected MARK probe input column index out of range");
-			}
-			referenced_columns[column_idx] = 1;
-		};
-		for (auto column_idx : mark_binding.probe_key_input_indices) {
-			mark_referenced_column(column_idx);
-		}
-		if (include_lhs_output_columns) {
-			for (auto column_idx : mark_binding.lhs_output_column_indices) {
-				mark_referenced_column(column_idx);
-			}
-		}
-		for (auto &residual_source : mark_binding.residual_sources) {
-			if (residual_source.kind == ExecutionHashJoinResidualSourceKind::PROBE) {
-				mark_referenced_column(residual_source.input_index);
-			}
-		}
-
-		auto materialize_stage_start = SljitRegionStageStart(runtime);
-		auto materialized = ExecuteSljitRegionRecordedOperation(
-		    runtime, source_hash_join_idx, ops[source_hash_join_idx].kind, "materialize_selected_mark_input",
-		    materialize_stage_start, [&](optional_ptr<ExecutionOperatorStageRecorder> recorder) {
-			    (void)recorder;
-			    return SljitTryMaterializeSelectedHashJoinOutputColumns(source_binding, selected_input,
-			                                                            referenced_columns, compact_input);
-		    });
-		if (!materialized) {
-			RecordSljitRegionStageRuntimePath(runtime, source_hash_join_idx, ops[source_hash_join_idx].kind,
-			                                  "materialize_selected_mark_input_miss", materialize_stage_start);
-			return false;
-		}
-		RecordSljitRegionStageRuntime(runtime, source_hash_join_idx, ops[source_hash_join_idx].kind,
-		                              "materialize_selected_mark_input", materialize_stage_start);
-		RecordSljitRegionMaterializationBoundary(runtime, ops[source_hash_join_idx].kind, "selected_mark_probe_input",
-		                                         selected_input.count);
-		join_input = &compact_input;
-		return true;
-	}
-
-	bool TryPrepareSelectedHashJoinOutputForHashProbeInput(idx_t target_hash_join_idx,
-	                                                       const SljitRuntimeBatchView &selected_input,
-	                                                       DataChunk *&join_input, string &deferred_reason) {
-		join_input = nullptr;
-		if (!selected_input.HasHashJoinSelection()) {
-			return false;
-		}
-		const auto source_hash_join_idx = selected_input.hash_join_idx;
-		if (source_hash_join_idx >= ops.size() || target_hash_join_idx >= ops.size()) {
-			return false;
-		}
-		if (!scratch.HasOperatorBinding(source_hash_join_idx)) {
-			throw InternalException("SLJIT selected hash probe input has no source hash-join binding");
-		}
-		auto &source_binding = scratch.OperatorBinding(source_hash_join_idx).hash_join_probe;
-		if (!source_binding.ready || source_binding.output_types.empty()) {
-			throw InternalException("SLJIT selected hash probe input has an incomplete source hash-join binding");
-		}
-
-		selected_hash_join_probe_input.Ensure(runtime.GetAllocator(), source_binding.output_types);
-		auto &compact_input = selected_hash_join_probe_input.chunk;
-		compact_input.Reset();
-
-		auto &target_hash_join_op = ops[target_hash_join_idx];
-		ExecutionOperatorBinding *target_binding_ptr = nullptr;
-		auto bind_result = SljitBindRecordedNativeOperator(
-		    runtime, runtime.ExecutionOperators(), scratch, target_hash_join_idx, target_hash_join_op, compact_input,
-		    target_hash_join_op.hash_join_probe.plan.operator_info, "native-operator-runtime-deferred",
-		    "SLJIT selected hash probe input", target_binding_ptr, deferred_reason);
-		if (bind_result == ExecutionOperatorBindResult::DEFERRED) {
-			return false;
-		}
-		auto &target_binding = target_binding_ptr->hash_join_probe;
-		if (!target_binding.ready) {
-			throw InternalException("SLJIT selected hash probe input received an invalid target binding");
-		}
-
-		vector<uint8_t> referenced_columns(source_binding.output_types.size(), 0);
-		auto mark_referenced_column = [&](idx_t column_idx) {
-			if (column_idx >= referenced_columns.size()) {
-				throw InternalException("SLJIT selected hash probe input column index out of range");
-			}
-			referenced_columns[column_idx] = 1;
-		};
-		for (auto column_idx : target_binding.probe_key_input_indices) {
-			mark_referenced_column(column_idx);
-		}
-		for (auto column_idx : target_binding.lhs_output_column_indices) {
-			mark_referenced_column(column_idx);
-		}
-		for (auto &residual_source : target_binding.residual_sources) {
-			if (residual_source.kind == ExecutionHashJoinResidualSourceKind::PROBE) {
-				mark_referenced_column(residual_source.input_index);
-			}
-		}
-
-		auto materialize_stage_start = SljitRegionStageStart(runtime);
-		auto materialized = ExecuteSljitRegionRecordedOperation(
-		    runtime, source_hash_join_idx, ops[source_hash_join_idx].kind, "materialize_selected_hash_probe_input",
-		    materialize_stage_start, [&](optional_ptr<ExecutionOperatorStageRecorder> recorder) {
-			    (void)recorder;
-			    return SljitTryMaterializeSelectedHashJoinOutputColumns(source_binding, selected_input,
-			                                                            referenced_columns, compact_input);
-		    });
-		if (!materialized) {
-			RecordSljitRegionStageRuntimePath(runtime, source_hash_join_idx, ops[source_hash_join_idx].kind,
-			                                  "materialize_selected_hash_probe_input_miss", materialize_stage_start);
-			return false;
-		}
-		RecordSljitRegionStageRuntime(runtime, source_hash_join_idx, ops[source_hash_join_idx].kind,
-		                              "materialize_selected_hash_probe_input", materialize_stage_start);
-		RecordSljitRegionMaterializationBoundary(runtime, ops[source_hash_join_idx].kind, "selected_hash_probe_input",
-		                                         selected_input.count);
-		join_input = &compact_input;
-		return true;
-	}
-
-	SljitRuntimeBatchView BuildSelectedHashJoinMarkOutputView(const SljitRuntimeBatchView &input,
-	                                                          const SelectionVector *mark_selection,
-	                                                          idx_t selected_count) {
-		if (!mark_selection) {
-			return SljitRuntimeBatchViewFromHashJoinSelection(
-			    input.Chunk(), *input.selection, *input.hash_join_build_selection, *input.hash_join_row_pointers,
-			    selected_count, input.hash_join_idx, input.source_key0_int64_to_int32_matches_are_proven,
-			    input.hash_join_output_column_map, input.hash_join_output_projection_idx);
-		}
-
-		if (!selected_mark_source_selection) {
-			selected_mark_source_selection = make_uniq<SelectionVector>(STANDARD_VECTOR_SIZE);
-		}
-		if (!selected_mark_build_selection) {
-			selected_mark_build_selection = make_uniq<SelectionVector>(STANDARD_VECTOR_SIZE);
-		}
-		if (!selected_mark_row_pointers) {
-			selected_mark_row_pointers = make_uniq<Vector>(LogicalType::POINTER);
-		}
-		auto &row_pointers = *selected_mark_row_pointers;
-		row_pointers.SetVectorType(VectorType::FLAT_VECTOR);
-		FlatVector::ValidityMutable(row_pointers).SetAllValid(selected_count);
-		FlatVector::SetSize(row_pointers, selected_count);
-		auto target_row_pointers = FlatVector::GetDataMutable<data_ptr_t>(row_pointers);
-		auto source_row_pointers = FlatVector::GetData<data_ptr_t>(*input.hash_join_row_pointers);
-		auto mark_sel = mark_selection->data();
-		auto source_sel = input.selection->data();
-		auto build_sel = input.hash_join_build_selection->data();
-		auto target_source_sel = selected_mark_source_selection->data();
-		auto target_build_sel = selected_mark_build_selection->data();
-		for (idx_t row_idx = 0; row_idx < selected_count; row_idx++) {
-			const auto selected_idx = mark_sel[row_idx];
-			target_source_sel[row_idx] = source_sel[selected_idx];
-			target_build_sel[row_idx] = build_sel[selected_idx];
-			target_row_pointers[row_idx] = source_row_pointers[selected_idx];
-		}
-		return SljitRuntimeBatchViewFromHashJoinSelection(
-		    input.Chunk(), *selected_mark_source_selection, *selected_mark_build_selection, row_pointers,
-		    selected_count, input.hash_join_idx, input.source_key0_int64_to_int32_matches_are_proven,
-		    input.hash_join_output_column_map, input.hash_join_output_projection_idx);
 	}
 
 	bool ExecuteProjectionChain(idx_t step_idx, const SljitFullPipelinePrimitiveStep &step,
@@ -802,11 +604,7 @@ private:
 	EXECUTE_HASH_JOIN_PROBE &execute_hash_join_probe;
 	SljitFullPipelineTerminalRuntime<EXECUTE_HASH_JOIN_PROBE> terminal_runtime;
 	SljitRegionExecutionScratch scratch;
-	SljitDataChunkBatch selected_hash_join_mark_input;
-	SljitDataChunkBatch selected_hash_join_probe_input;
-	unique_ptr<SelectionVector> selected_mark_source_selection;
-	unique_ptr<SelectionVector> selected_mark_build_selection;
-	unique_ptr<Vector> selected_mark_row_pointers;
+	SljitSelectedHashJoinInputRuntime selected_hash_join_inputs;
 	std::array<SljitDataChunkBatch, SLJIT_FULL_PIPELINE_MAX_PRIMITIVES> hash_join_materialize_batches;
 	std::array<SljitDataChunkBatch, SLJIT_FULL_PIPELINE_MAX_PRIMITIVES> mark_probe_lhs_boundary_outputs;
 	std::array<vector<LogicalType>, SLJIT_FULL_PIPELINE_MAX_PRIMITIVES> mark_probe_lhs_boundary_output_types;

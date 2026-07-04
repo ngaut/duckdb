@@ -83,6 +83,7 @@ def verify_required_design_files() -> None:
         "extension/jit_sljit/include/sljit_hash_join_projection_source_runtime.hpp",
         "extension/jit_sljit/include/sljit_projection_aggregate_descriptor.hpp",
         "extension/jit_sljit/include/sljit_projection_chain_runtime.hpp",
+        "extension/jit_sljit/include/sljit_selected_hash_join_input_runtime.hpp",
         "extension/jit_sljit/include/sljit_grouped_aggregate_update_primitive.hpp",
         "src/include/duckdb/execution/aggregate_hashtable.hpp",
         "src/include/duckdb/execution/execution_operator_runtime.hpp",
@@ -204,6 +205,7 @@ def verify_no_benchmark_shaped_production_logic() -> None:
         "benchmark-shaped production JIT logic",
         (
             r"\bQ[0-9]+(?:-like)?\b",
+            r"\bq[0-9]+_",
             r"\bTPC-H\b",
             r"\btpch\b",
             r"\blineitem\b",
@@ -1246,6 +1248,45 @@ def verify_primitive_sequence() -> None:
             "SljitTryBuildHashJoinMappedProjection",
             "SljitBuildProjectionSourceColumnSet",
             "SljitTryMaterializeSelectedHashJoinOutputColumns",
+        ),
+    )
+    require_text(
+        "extension/jit_sljit/include/sljit_selected_hash_join_input_runtime.hpp",
+        (
+            "class SljitSelectedHashJoinInputRuntime",
+            "TryPrepareMarkProbeInput",
+            "TryPrepareHashProbeInput",
+            "BuildMarkOutputView",
+            "TryPrepareInput",
+            "MarkTargetProbeInputColumns",
+            "SljitTryMaterializeSelectedHashJoinOutputColumns",
+            "selected_hash_join_mark_input",
+            "selected_hash_join_probe_input",
+            "selected_mark_source_selection",
+            "selected_mark_build_selection",
+            "selected_mark_row_pointers",
+        ),
+    )
+    require_text(
+        "extension/jit_sljit/include/sljit_source_pipeline_runtime.hpp",
+        (
+            "SljitSelectedHashJoinInputRuntime selected_hash_join_inputs",
+            "selected_hash_join_inputs.TryPrepareHashProbeInput",
+            "selected_hash_join_inputs.TryPrepareMarkProbeInput",
+            "selected_hash_join_inputs.BuildMarkOutputView",
+        ),
+    )
+    reject_text(
+        "extension/jit_sljit/include/sljit_source_pipeline_runtime.hpp",
+        (
+            "TryPrepareSelectedHashJoinOutputForMarkProbeInput",
+            "TryPrepareSelectedHashJoinOutputForHashProbeInput",
+            "BuildSelectedHashJoinMarkOutputView",
+            "selected_hash_join_mark_input",
+            "selected_hash_join_probe_input",
+            "selected_mark_source_selection",
+            "selected_mark_build_selection",
+            "selected_mark_row_pointers",
         ),
     )
     require_text(
