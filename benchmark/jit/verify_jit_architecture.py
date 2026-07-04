@@ -772,7 +772,7 @@ def verify_projection_aggregate_descriptor_boundary() -> None:
         ),
     )
     require_text(
-        "extension/jit_sljit/include/sljit_full_pipeline_recipe.hpp",
+        "extension/jit_sljit/include/sljit_projection_aggregate_recipe.hpp",
         (
             "DirectJoinProjectionAggregateHasDedicatedBackend",
             "!DirectJoinProjectionAggregateHasDedicatedBackend(shape)",
@@ -1209,7 +1209,7 @@ def verify_primitive_sequence() -> None:
         ),
     )
     require_text(
-        "extension/jit_sljit/include/sljit_full_pipeline_recipe.hpp",
+        "extension/jit_sljit/include/sljit_projection_aggregate_recipe.hpp",
         (
             "SljitProjectionAggregateCanUseSourceCountStarGroupedAggregate(ops, plan)",
             "SljitProjectionAggregateCanUseSingleJoinMarkFilterBoundary(ops, plan)",
@@ -1217,6 +1217,11 @@ def verify_primitive_sequence() -> None:
             "SljitProjectionAggregateCanUseSingleJoinPreJoinProjection(plan)",
             "SljitProjectionAggregateCanUseSingleJoinSingleProjection(plan)",
             "SljitProjectionAggregateCanUseSingleJoinProjectionChain(plan)",
+        ),
+    )
+    require_text(
+        "extension/jit_sljit/include/sljit_full_pipeline_recipe.hpp",
+        (
             "TryBuildMarkFilterProjectionNativeTailRecipe",
             "SljitTryAnalyzeMarkFilterProjectionNativeTail(ops, facts)",
             "SljitTryAnalyzeGeneratedFilterProjectionNativeTail(ops, facts)",
@@ -1670,25 +1675,32 @@ def verify_recipe_builder() -> None:
             "BuildSljitFullPipelineRecipePlan",
             "SljitFullPipelineRecipeBuilder",
             "SljitFullPipelineRecipeBinding binding",
-            "CanBindHashJoinProbeProjectionInput",
-            "!CanBindHashJoinProbeProjectionInput(facts.first_hash_join_idx)",
             "SljitAnalyzeFullPipelineScheduleFacts(ops_p, uses_scan_filters_p)",
             "schedule_facts.uses_extended_source_fetch_budget",
             "SljitTryAnalyzeSelectedJoinAggregate(ops, facts)",
             "SljitTryAnalyzeHashJoinDelimJoinSink(ops, facts)",
             "SljitTryAnalyzeSourceBatchNativeTail(ops, uses_scan_filters, facts)",
             "SljitTryAnalyzeProjectionAggregatePlan",
+            "SljitProjectionAggregateRecipeBuilder(ops, binding).Build(recipe, plan)",
             "struct SljitFullPipelineRecipeRegistryEntry",
             "RecipeRegistry",
             "source_batch_native_tail",
             "TryBuildSourceBatchNativeTailRecipe",
+        ),
+    )
+    require_text(
+        "extension/jit_sljit/include/sljit_projection_aggregate_recipe.hpp",
+        (
+            "class SljitProjectionAggregateRecipeBuilder",
             "TryBuildProjectionAggregateRecipeFunction",
-            "struct SljitProjectionAggregateRecipeRegistryEntry",
-            "ProjectionAggregateRecipeRegistry",
+            "struct RegistryEntry",
+            "RecipeRegistry",
             "registry[entry_idx].try_build",
             "(this->*registry[entry_idx].try_build)(recipe, plan)",
-            "TryBuildProjectionAggregateSingleMarkFilter",
-            "TryBuildProjectionAggregateTwoJoinMarkFilter",
+            "TryBuildSingleMarkFilter",
+            "TryBuildTwoJoinMarkFilter",
+            "CanBindHashJoinProbeProjectionInput",
+            "!CanBindHashJoinProbeProjectionInput(facts.first_hash_join_idx)",
             "SelectedProjectionAggregateHasDedicatedBackend(shape)",
             "MakeMarkFilterNativeTailRecipe",
         ),
@@ -1718,6 +1730,10 @@ def verify_recipe_builder() -> None:
         (
             "SljitProjectionAggregateRecipeStrategy",
             "SljitSelectProjectionAggregateRecipeStrategy",
+            "TryBuildProjectionAggregateRecipeFunction",
+            "struct RegistryEntry",
+            "TryBuildProjectionAggregateSingleMarkFilter",
+            "TryBuildProjectionAggregateTwoJoinMarkFilter",
             "enum class SljitProjectionAggregateRecipeKind",
             "ProjectionAggregateRecipeKind(plan)",
             "registry[entry_idx].kind != kind",
