@@ -73,6 +73,8 @@ struct SljitSourceBatchNativeTailFacts {
 	idx_t tail_start_idx = DConstants::INVALID_INDEX;
 };
 
+enum class SljitProjectionAggregatePrefixKind { INVALID, SOURCE, SINGLE_JOIN, TWO_JOIN };
+
 struct SljitProjectionAggregatePrefixFacts {
 	idx_t source_filter_idx = DConstants::INVALID_INDEX;
 	idx_t source_projection_idx = DConstants::INVALID_INDEX;
@@ -104,6 +106,15 @@ struct SljitProjectionAggregatePrefixFacts {
 
 	bool HasMarkFilter() const {
 		return mark_filter_idx != DConstants::INVALID_INDEX;
+	}
+
+	SljitProjectionAggregatePrefixKind Kind() const {
+		if (!HasFirstHashJoin()) {
+			return HasSecondHashJoin() ? SljitProjectionAggregatePrefixKind::INVALID
+			                           : SljitProjectionAggregatePrefixKind::SOURCE;
+		}
+		return HasSecondHashJoin() ? SljitProjectionAggregatePrefixKind::TWO_JOIN
+		                           : SljitProjectionAggregatePrefixKind::SINGLE_JOIN;
 	}
 };
 
@@ -315,57 +326,8 @@ static bool SljitTryAnalyzeProjectionAggregatePlan(const vector<SljitExecutableR
 	return true;
 }
 
-static bool
-SljitProjectionAggregateCanUseSourceCountStarGroupedAggregate(const vector<SljitExecutableRegionOp> &ops,
-                                                              const SljitProjectionAggregatePlanFacts &plan) {
-	auto &shape = plan.shape;
-	return !plan.prefix.HasFirstHashJoin() && plan.ProjectionCount() == 1 && plan.HasFixedFinalProjection() &&
-	       SljitGroupedAggregateUpdateHasDedicatedBackend(ops, shape.aggregate_idx) &&
-	       SljitChooseGroupedAggregateUpdateStrategy(ops[shape.aggregate_idx]) ==
-	           SljitGroupedAggregateUpdateStrategyKind::COUNT_STAR_PREAGGREGATION;
-}
-
-static bool SljitProjectionAggregateCanUseSingleJoinMarkFilterBoundary(const vector<SljitExecutableRegionOp> &ops,
-                                                                       const SljitProjectionAggregatePlanFacts &plan) {
-	auto &shape = plan.shape;
-	auto &facts = plan.prefix;
-	return facts.HasFirstHashJoin() && !facts.HasSecondHashJoin() && facts.HasMarkFilter() &&
-	       !facts.HasSourceFilterProjection() && !facts.HasPreJoinProjection() &&
-	       facts.mark_filter_idx == facts.first_hash_join_idx + 1 && shape.ProjectionCount() == 1 &&
-	       plan.HasFixedFinalProjection() &&
-	       ops[facts.first_hash_join_idx].hash_join_probe.plan.output_mode ==
-	           ExecutionHashJoinProbeOutputMode::MARK_PROBE &&
-	       SljitIsMarkProbeMarkerFilter(ops[facts.first_hash_join_idx], ops[facts.mark_filter_idx]);
-}
-
-static bool
-SljitProjectionAggregateCanUseSingleJoinSourceFilterProjection(const SljitProjectionAggregatePlanFacts &plan) {
-	auto &facts = plan.prefix;
-	return facts.HasFirstHashJoin() && !facts.HasSecondHashJoin() && facts.HasSourceFilterProjection() &&
-	       !facts.HasPreJoinProjection() && !facts.HasMarkFilter() && plan.ProjectionCount() == 1;
-}
-
-static bool SljitProjectionAggregateCanUseSingleJoinPreJoinProjection(const SljitProjectionAggregatePlanFacts &plan) {
-	auto &facts = plan.prefix;
-	return facts.HasFirstHashJoin() && !facts.HasSecondHashJoin() && facts.HasPreJoinProjection() &&
-	       !facts.HasSourceFilterProjection() && !facts.HasMarkFilter();
-}
-
-static bool SljitProjectionAggregateCanUseSingleJoinSingleProjection(const SljitProjectionAggregatePlanFacts &plan) {
-	auto &facts = plan.prefix;
-	return facts.HasFirstHashJoin() && !facts.HasSecondHashJoin() && !facts.HasSourceFilterProjection() &&
-	       !facts.HasPreJoinProjection() && !facts.HasMarkFilter() && plan.ProjectionCount() == 1;
-}
-
-static bool SljitProjectionAggregateCanUseSingleJoinProjectionChain(const SljitProjectionAggregatePlanFacts &plan) {
-	auto &facts = plan.prefix;
-	return facts.HasFirstHashJoin() && !facts.HasSecondHashJoin() && !facts.HasSourceFilterProjection() &&
-	       !facts.HasPreJoinProjection() && !facts.HasMarkFilter() && plan.ProjectionCount() == 2 &&
-	       plan.HasFixedFinalProjection();
-}
-
-static bool SljitTryAnalyzeMarkFilterProjectionNativeTail(
-    const vector<SljitExecutableRegionOp> &ops, SljitMarkFilterProjectionNativeTailFacts &facts) {
+static bool SljitTryAnalyzeMarkFilterProjectionNativeTail(const vector<SljitExecutableRegionOp> &ops,
+                                                          SljitMarkFilterProjectionNativeTailFacts &facts) {
 	facts = SljitMarkFilterProjectionNativeTailFacts();
 	if (ops.size() < 4 || !SljitFullPipelineOpIsAt(ops, 0, SljitNativeRegionOpKind::HASH_JOIN_PROBE) ||
 	    !SljitFullPipelineOpIsAt(ops, 1, SljitNativeRegionOpKind::FILTER) ||
@@ -394,8 +356,8 @@ static bool SljitTryAnalyzeMarkFilterProjectionNativeTail(
 	return true;
 }
 
-static bool SljitTryAnalyzeGeneratedFilterProjectionNativeTail(
-    const vector<SljitExecutableRegionOp> &ops, SljitGeneratedFilterProjectionNativeTailFacts &facts) {
+static bool SljitTryAnalyzeGeneratedFilterProjectionNativeTail(const vector<SljitExecutableRegionOp> &ops,
+                                                               SljitGeneratedFilterProjectionNativeTailFacts &facts) {
 	facts = SljitGeneratedFilterProjectionNativeTailFacts();
 	if (ops.size() <= 2 || !SljitFullPipelineOpIsAt(ops, 0, SljitNativeRegionOpKind::FILTER) ||
 	    !SljitFullPipelineOpIsAt(ops, 1, SljitNativeRegionOpKind::PROJECTION)) {
@@ -407,8 +369,8 @@ static bool SljitTryAnalyzeGeneratedFilterProjectionNativeTail(
 	return true;
 }
 
-static bool SljitTryAnalyzeProjectionFilterProjectionNativeTail(
-    const vector<SljitExecutableRegionOp> &ops, SljitProjectionFilterProjectionNativeTailFacts &facts) {
+static bool SljitTryAnalyzeProjectionFilterProjectionNativeTail(const vector<SljitExecutableRegionOp> &ops,
+                                                                SljitProjectionFilterProjectionNativeTailFacts &facts) {
 	facts = SljitProjectionFilterProjectionNativeTailFacts();
 	if (ops.size() <= 3 || !SljitFullPipelineOpIsAt(ops, 0, SljitNativeRegionOpKind::PROJECTION) ||
 	    !SljitFullPipelineOpIsAt(ops, 1, SljitNativeRegionOpKind::FILTER) ||
