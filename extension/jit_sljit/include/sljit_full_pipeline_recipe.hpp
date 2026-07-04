@@ -172,22 +172,34 @@ private:
 			if (registry[entry_idx].kind != kind) {
 				continue;
 			}
-			if ((this->*registry[entry_idx].try_build)(recipe, plan)) {
+			if (TryBuildProjectionAggregateRecipeVariant(recipe, plan, registry[entry_idx].variant)) {
 				return true;
 			}
 		}
 		return false;
 	}
 
-	using TryBuildProjectionAggregateFunction = bool (SljitFullPipelineRecipeBuilder::*)(
-	    SljitFullPipelineRecipe &, const SljitProjectionAggregatePlanFacts &) const;
-
 	enum class SljitProjectionAggregateRecipeKind { SOURCE, SINGLE_JOIN, TWO_JOIN };
+
+	enum class SljitProjectionAggregateRecipeVariant {
+		SOURCE_GROUPED_AGGREGATE,
+		SINGLE_JOIN_MARK_FILTER,
+		SINGLE_JOIN_SOURCE_FILTER_PROJECTION,
+		SINGLE_JOIN_PRE_PROJECTION,
+		SINGLE_JOIN_DIRECT_PROJECTION,
+		SINGLE_JOIN_PROJECTION_CHAIN,
+		TWO_JOIN_MARK_FILTER,
+		TWO_JOIN_SOURCE_FILTER_PROJECTION,
+		TWO_JOIN_PRE_PROJECTION,
+		TWO_JOIN_BETWEEN_PROJECTION,
+		TWO_JOIN_DIRECT_PROJECTION,
+		TWO_JOIN_PROJECTION_CHAIN
+	};
 
 	struct SljitProjectionAggregateRecipeRegistryEntry {
 		SljitProjectionAggregateRecipeKind kind;
+		SljitProjectionAggregateRecipeVariant variant;
 		const char *name;
-		TryBuildProjectionAggregateFunction try_build;
 	};
 
 	static SljitProjectionAggregateRecipeKind
@@ -203,217 +215,172 @@ private:
 
 	static const SljitProjectionAggregateRecipeRegistryEntry *ProjectionAggregateRecipeRegistry(idx_t &count) {
 		static const SljitProjectionAggregateRecipeRegistryEntry registry[] = {
-		    {SljitProjectionAggregateRecipeKind::SOURCE, "source_grouped_aggregate",
-		     &SljitFullPipelineRecipeBuilder::TryBuildSourceProjectionAggregateRecipe},
-		    {SljitProjectionAggregateRecipeKind::SINGLE_JOIN, "single_join_mark_filter",
-		     &SljitFullPipelineRecipeBuilder::TryBuildSingleJoinMarkFilterRecipe},
-		    {SljitProjectionAggregateRecipeKind::SINGLE_JOIN, "single_join_source_filter_projection",
-		     &SljitFullPipelineRecipeBuilder::TryBuildSingleJoinSourceFilterProjectionRecipe},
-		    {SljitProjectionAggregateRecipeKind::SINGLE_JOIN, "single_join_pre_projection",
-		     &SljitFullPipelineRecipeBuilder::TryBuildSingleJoinPreProjectionRecipe},
-		    {SljitProjectionAggregateRecipeKind::SINGLE_JOIN, "single_join_direct_projection",
-		     &SljitFullPipelineRecipeBuilder::TryBuildSingleJoinDirectProjectionRecipe},
-		    {SljitProjectionAggregateRecipeKind::SINGLE_JOIN, "single_join_projection_chain",
-		     &SljitFullPipelineRecipeBuilder::TryBuildSingleJoinProjectionChainRecipe},
-		    {SljitProjectionAggregateRecipeKind::TWO_JOIN, "two_join_mark_filter",
-		     &SljitFullPipelineRecipeBuilder::TryBuildTwoJoinMarkFilterRecipe},
-		    {SljitProjectionAggregateRecipeKind::TWO_JOIN, "two_join_filtered_projection_prefix",
-		     &SljitFullPipelineRecipeBuilder::TryBuildTwoJoinSourceFilterProjectionRecipe},
-		    {SljitProjectionAggregateRecipeKind::TWO_JOIN, "two_join_pre_projection",
-		     &SljitFullPipelineRecipeBuilder::TryBuildTwoJoinPreProjectionRecipe},
-		    {SljitProjectionAggregateRecipeKind::TWO_JOIN, "two_join_between_projection",
-		     &SljitFullPipelineRecipeBuilder::TryBuildTwoJoinBetweenProjectionRecipe},
-		    {SljitProjectionAggregateRecipeKind::TWO_JOIN, "two_join_direct_projection",
-		     &SljitFullPipelineRecipeBuilder::TryBuildTwoJoinDirectProjectionRecipe},
-		    {SljitProjectionAggregateRecipeKind::TWO_JOIN, "two_join_projection_chain",
-		     &SljitFullPipelineRecipeBuilder::TryBuildTwoJoinProjectionChainRecipe}};
+		    {SljitProjectionAggregateRecipeKind::SOURCE,
+		     SljitProjectionAggregateRecipeVariant::SOURCE_GROUPED_AGGREGATE, "source_grouped_aggregate"},
+		    {SljitProjectionAggregateRecipeKind::SINGLE_JOIN,
+		     SljitProjectionAggregateRecipeVariant::SINGLE_JOIN_MARK_FILTER, "single_join_mark_filter"},
+		    {SljitProjectionAggregateRecipeKind::SINGLE_JOIN,
+		     SljitProjectionAggregateRecipeVariant::SINGLE_JOIN_SOURCE_FILTER_PROJECTION,
+		     "single_join_source_filter_projection"},
+		    {SljitProjectionAggregateRecipeKind::SINGLE_JOIN,
+		     SljitProjectionAggregateRecipeVariant::SINGLE_JOIN_PRE_PROJECTION, "single_join_pre_projection"},
+		    {SljitProjectionAggregateRecipeKind::SINGLE_JOIN,
+		     SljitProjectionAggregateRecipeVariant::SINGLE_JOIN_DIRECT_PROJECTION, "single_join_direct_projection"},
+		    {SljitProjectionAggregateRecipeKind::SINGLE_JOIN,
+		     SljitProjectionAggregateRecipeVariant::SINGLE_JOIN_PROJECTION_CHAIN, "single_join_projection_chain"},
+		    {SljitProjectionAggregateRecipeKind::TWO_JOIN,
+		     SljitProjectionAggregateRecipeVariant::TWO_JOIN_MARK_FILTER, "two_join_mark_filter"},
+		    {SljitProjectionAggregateRecipeKind::TWO_JOIN,
+		     SljitProjectionAggregateRecipeVariant::TWO_JOIN_SOURCE_FILTER_PROJECTION,
+		     "two_join_filtered_projection_prefix"},
+		    {SljitProjectionAggregateRecipeKind::TWO_JOIN,
+		     SljitProjectionAggregateRecipeVariant::TWO_JOIN_PRE_PROJECTION, "two_join_pre_projection"},
+		    {SljitProjectionAggregateRecipeKind::TWO_JOIN,
+		     SljitProjectionAggregateRecipeVariant::TWO_JOIN_BETWEEN_PROJECTION, "two_join_between_projection"},
+		    {SljitProjectionAggregateRecipeKind::TWO_JOIN,
+		     SljitProjectionAggregateRecipeVariant::TWO_JOIN_DIRECT_PROJECTION, "two_join_direct_projection"},
+		    {SljitProjectionAggregateRecipeKind::TWO_JOIN,
+		     SljitProjectionAggregateRecipeVariant::TWO_JOIN_PROJECTION_CHAIN, "two_join_projection_chain"}};
 		count = sizeof(registry) / sizeof(registry[0]);
 		return registry;
 	}
 
-	bool TryBuildSourceProjectionAggregateRecipe(SljitFullPipelineRecipe &recipe,
-	                                             const SljitProjectionAggregatePlanFacts &plan) const {
-		if (!SljitProjectionAggregateCanUseSourceCountStarGroupedAggregate(ops, plan)) {
-			return false;
-		}
-		recipe = binding.MakeSourceProjectionGroupedAggregateRecipe(plan.shape);
-		return true;
-	}
-
-	bool TryBuildSingleJoinMarkFilterRecipe(SljitFullPipelineRecipe &recipe,
-	                                        const SljitProjectionAggregatePlanFacts &plan) const {
+	bool TryBuildProjectionAggregateRecipeVariant(SljitFullPipelineRecipe &recipe,
+	                                              const SljitProjectionAggregatePlanFacts &plan,
+	                                              SljitProjectionAggregateRecipeVariant variant) const {
 		auto &shape = plan.shape;
 		auto &facts = plan.prefix;
-		if (!facts.HasMarkFilter() || !SljitProjectionAggregateCanUseSingleJoinMarkFilterBoundary(ops, plan)) {
-			return false;
-		}
-		if (!binding.SelectedProjectionAggregateHasDedicatedBackend(shape)) {
-			recipe = binding.MakeMarkFilterNativeTailRecipe(facts.first_hash_join_idx, facts.mark_filter_idx);
+		switch (variant) {
+		case SljitProjectionAggregateRecipeVariant::SOURCE_GROUPED_AGGREGATE:
+			if (!SljitProjectionAggregateCanUseSourceCountStarGroupedAggregate(ops, plan)) {
+				return false;
+			}
+			recipe = binding.MakeSourceProjectionGroupedAggregateRecipe(shape);
 			return true;
-		}
-		recipe =
-		    binding.MakeMarkFilterProjectionAggregateRecipe(shape, facts.first_hash_join_idx, facts.mark_filter_idx);
-		return true;
-	}
-
-	bool TryBuildSingleJoinSourceFilterProjectionRecipe(SljitFullPipelineRecipe &recipe,
-	                                                    const SljitProjectionAggregatePlanFacts &plan) const {
-		auto &shape = plan.shape;
-		auto &facts = plan.prefix;
-		if (!facts.HasSourceFilterProjection() ||
-		    !SljitProjectionAggregateCanUseSingleJoinSourceFilterProjection(plan) ||
-		    !SljitCanBindHashJoinProbeSelectionPrimitive(ops, facts.first_hash_join_idx) ||
-		    !DirectJoinProjectionAggregateHasDedicatedBackend(shape)) {
-			return false;
-		}
-		recipe = binding.MakeFilterProjectionJoinProjectionAggregateRecipe(
-		    shape, facts.source_filter_idx, facts.source_projection_idx, facts.first_hash_join_idx,
-		    SljitDirectJoinOutputAggregateUpdateSchedule::PENDING_ROW_POINTER_BATCH);
-		return true;
-	}
-
-	bool TryBuildSingleJoinPreProjectionRecipe(SljitFullPipelineRecipe &recipe,
-	                                           const SljitProjectionAggregatePlanFacts &plan) const {
-		auto &shape = plan.shape;
-		auto &facts = plan.prefix;
-		if (!facts.HasPreJoinProjection() || !SljitProjectionAggregateCanUseSingleJoinPreJoinProjection(plan) ||
-		    !SljitCanBindHashJoinProbeSelectionPrimitive(ops, facts.first_hash_join_idx) ||
-		    !DirectJoinProjectionAggregateHasDedicatedBackend(shape)) {
-			return false;
-		}
-		recipe = binding.MakePreProjectionJoinProjectionAggregateRecipe(
-		    shape, facts.first_hash_join_idx,
-		    SljitDirectJoinOutputAggregateUpdateSchedule::IMMEDIATE_ROW_POINTER_UPDATE);
-		return true;
-	}
-
-	bool TryBuildSingleJoinDirectProjectionRecipe(SljitFullPipelineRecipe &recipe,
-	                                              const SljitProjectionAggregatePlanFacts &plan) const {
-		auto &shape = plan.shape;
-		auto &facts = plan.prefix;
-		if (!SljitProjectionAggregateCanUseSingleJoinSingleProjection(plan) ||
-		    !SljitCanBindHashJoinProbeSelectionPrimitive(ops, facts.first_hash_join_idx) ||
-		    !DirectJoinProjectionAggregateHasDedicatedBackend(shape)) {
-			return false;
-		}
-		recipe = binding.MakeJoinProjectionAggregateRecipe(
-		    shape, facts.first_hash_join_idx, SljitDirectJoinOutputAggregateUpdateSchedule::PENDING_ROW_POINTER_BATCH);
-		return true;
-	}
-
-	bool TryBuildSingleJoinProjectionChainRecipe(SljitFullPipelineRecipe &recipe,
-	                                             const SljitProjectionAggregatePlanFacts &plan) const {
-		auto &shape = plan.shape;
-		auto &facts = plan.prefix;
-		if (!SljitProjectionAggregateCanUseSingleJoinProjectionChain(plan) ||
-		    !SljitCanBindHashJoinProbeSelectionPrimitive(ops, facts.first_hash_join_idx) ||
-		    !DirectJoinProjectionAggregateHasDedicatedBackend(shape)) {
-			return false;
-		}
-		recipe = binding.MakeJoinProjectionAggregateRecipe(
-		    shape, facts.first_hash_join_idx,
-		    SljitDirectJoinOutputAggregateUpdateSchedule::IMMEDIATE_ROW_POINTER_UPDATE);
-		return true;
-	}
-
-	bool TryBuildTwoJoinMarkFilterRecipe(SljitFullPipelineRecipe &recipe,
-	                                     const SljitProjectionAggregatePlanFacts &plan) const {
-		auto &shape = plan.shape;
-		auto &facts = plan.prefix;
-		if (!facts.HasMarkFilter() || facts.HasSourceFilterProjection() || facts.HasPreJoinProjection() ||
-		    facts.HasBetweenProjection() || facts.mark_filter_idx != facts.second_hash_join_idx + 1 ||
-		    ops[facts.second_hash_join_idx].hash_join_probe.plan.output_mode !=
-		        ExecutionHashJoinProbeOutputMode::MARK_PROBE) {
-			return false;
-		}
-		if (shape.ProjectionCount() != 0 && binding.SelectedProjectionAggregateHasDedicatedBackend(shape)) {
-			recipe = binding.MakeTwoJoinMarkFilterProjectionAggregateRecipe(
-			    shape, facts.first_hash_join_idx, facts.second_hash_join_idx, facts.mark_filter_idx);
+		case SljitProjectionAggregateRecipeVariant::SINGLE_JOIN_MARK_FILTER:
+			if (!SljitProjectionAggregateCanUseSingleJoinMarkFilterBoundary(ops, plan)) {
+				return false;
+			}
+			if (!binding.SelectedProjectionAggregateHasDedicatedBackend(shape)) {
+				recipe = binding.MakeMarkFilterNativeTailRecipe(facts.first_hash_join_idx, facts.mark_filter_idx);
+				return true;
+			}
+			recipe = binding.MakeMarkFilterProjectionAggregateRecipe(shape, facts.first_hash_join_idx,
+			                                                         facts.mark_filter_idx);
 			return true;
-		}
-		recipe = binding.MakeTwoJoinMarkFilterNativeTailRecipe(shape, facts.first_hash_join_idx,
-		                                                       facts.second_hash_join_idx, facts.mark_filter_idx);
-		return true;
-	}
-
-	bool TryBuildTwoJoinSourceFilterProjectionRecipe(SljitFullPipelineRecipe &recipe,
-	                                                 const SljitProjectionAggregatePlanFacts &plan) const {
-		auto &shape = plan.shape;
-		auto &facts = plan.prefix;
-		if (!facts.HasSourceFilterProjection() || facts.HasPreJoinProjection() || facts.HasBetweenProjection() ||
-		    shape.ProjectionCount() != 2 || !plan.HasFixedFinalProjection() ||
-		    !CanBindHashJoinProbeProjectionInput(facts.first_hash_join_idx) ||
-		    !SljitCanBindHashJoinProbeSelectionPrimitive(ops, facts.second_hash_join_idx)) {
-			return false;
-		}
-		recipe = binding.MakeFilterProjectionTwoJoinProjectionAggregateRecipe(
-		    shape, facts.source_filter_idx, facts.source_projection_idx, facts.first_hash_join_idx,
-		    facts.second_hash_join_idx);
-		return true;
-	}
-
-	bool TryBuildTwoJoinPreProjectionRecipe(SljitFullPipelineRecipe &recipe,
-	                                        const SljitProjectionAggregatePlanFacts &plan) const {
-		auto &shape = plan.shape;
-		auto &facts = plan.prefix;
-		if (!facts.HasPreJoinProjection() || !facts.HasBetweenProjection() || shape.ProjectionCount() != 2 ||
-		    !plan.HasFixedFinalProjection() || !CanBindHashJoinProbeProjectionInput(facts.first_hash_join_idx) ||
-		    !SljitCanBindHashJoinProbeSelectionPrimitive(ops, facts.second_hash_join_idx)) {
-			return false;
-		}
-		recipe = binding.MakePreProjectionTwoJoinProjectionAggregateRecipe(
-		    shape, facts.pre_join_projection_idx, facts.first_hash_join_idx, facts.between_projection_idx,
-		    facts.second_hash_join_idx);
-		return true;
-	}
-
-	bool TryBuildTwoJoinBetweenProjectionRecipe(SljitFullPipelineRecipe &recipe,
-	                                            const SljitProjectionAggregatePlanFacts &plan) const {
-		auto &shape = plan.shape;
-		auto &facts = plan.prefix;
-		if (!facts.HasBetweenProjection() || facts.HasMarkFilter() || shape.ProjectionCount() == 0 ||
-		    !CanBindHashJoinProbeProjectionInput(facts.first_hash_join_idx) ||
-		    !SljitCanBindHashJoinProbeSelectionPrimitive(ops, facts.second_hash_join_idx) ||
-		    !plan.HasFixedFinalProjection()) {
-			return false;
-		}
-		if (DirectJoinProjectionAggregateHasDedicatedBackend(shape)) {
-			recipe = binding.MakeBetweenProjectionTwoJoinDirectAggregateRecipe(
+		case SljitProjectionAggregateRecipeVariant::SINGLE_JOIN_SOURCE_FILTER_PROJECTION:
+			if (!SljitProjectionAggregateCanUseSingleJoinSourceFilterProjection(plan) ||
+			    !SljitCanBindHashJoinProbeSelectionPrimitive(ops, facts.first_hash_join_idx) ||
+			    !DirectJoinProjectionAggregateHasDedicatedBackend(shape)) {
+				return false;
+			}
+			recipe = binding.MakeFilterProjectionJoinProjectionAggregateRecipe(
+			    shape, facts.source_filter_idx, facts.source_projection_idx, facts.first_hash_join_idx,
+			    SljitDirectJoinOutputAggregateUpdateSchedule::PENDING_ROW_POINTER_BATCH);
+			return true;
+		case SljitProjectionAggregateRecipeVariant::SINGLE_JOIN_PRE_PROJECTION:
+			if (!SljitProjectionAggregateCanUseSingleJoinPreJoinProjection(plan) ||
+			    !SljitCanBindHashJoinProbeSelectionPrimitive(ops, facts.first_hash_join_idx) ||
+			    !DirectJoinProjectionAggregateHasDedicatedBackend(shape)) {
+				return false;
+			}
+			recipe = binding.MakePreProjectionJoinProjectionAggregateRecipe(
+			    shape, facts.first_hash_join_idx,
+			    SljitDirectJoinOutputAggregateUpdateSchedule::IMMEDIATE_ROW_POINTER_UPDATE);
+			return true;
+		case SljitProjectionAggregateRecipeVariant::SINGLE_JOIN_DIRECT_PROJECTION:
+			if (!SljitProjectionAggregateCanUseSingleJoinSingleProjection(plan) ||
+			    !SljitCanBindHashJoinProbeSelectionPrimitive(ops, facts.first_hash_join_idx) ||
+			    !DirectJoinProjectionAggregateHasDedicatedBackend(shape)) {
+				return false;
+			}
+			recipe = binding.MakeJoinProjectionAggregateRecipe(
+			    shape, facts.first_hash_join_idx,
+			    SljitDirectJoinOutputAggregateUpdateSchedule::PENDING_ROW_POINTER_BATCH);
+			return true;
+		case SljitProjectionAggregateRecipeVariant::SINGLE_JOIN_PROJECTION_CHAIN:
+			if (!SljitProjectionAggregateCanUseSingleJoinProjectionChain(plan) ||
+			    !SljitCanBindHashJoinProbeSelectionPrimitive(ops, facts.first_hash_join_idx) ||
+			    !DirectJoinProjectionAggregateHasDedicatedBackend(shape)) {
+				return false;
+			}
+			recipe = binding.MakeJoinProjectionAggregateRecipe(
+			    shape, facts.first_hash_join_idx,
+			    SljitDirectJoinOutputAggregateUpdateSchedule::IMMEDIATE_ROW_POINTER_UPDATE);
+			return true;
+		case SljitProjectionAggregateRecipeVariant::TWO_JOIN_MARK_FILTER:
+			if (!facts.HasMarkFilter() || facts.HasSourceFilterProjection() || facts.HasPreJoinProjection() ||
+			    facts.HasBetweenProjection() || facts.mark_filter_idx != facts.second_hash_join_idx + 1 ||
+			    ops[facts.second_hash_join_idx].hash_join_probe.plan.output_mode !=
+			        ExecutionHashJoinProbeOutputMode::MARK_PROBE) {
+				return false;
+			}
+			if (shape.ProjectionCount() != 0 && binding.SelectedProjectionAggregateHasDedicatedBackend(shape)) {
+				recipe = binding.MakeTwoJoinMarkFilterProjectionAggregateRecipe(
+				    shape, facts.first_hash_join_idx, facts.second_hash_join_idx, facts.mark_filter_idx);
+				return true;
+			}
+			recipe = binding.MakeTwoJoinMarkFilterNativeTailRecipe(shape, facts.first_hash_join_idx,
+			                                                       facts.second_hash_join_idx,
+			                                                       facts.mark_filter_idx);
+			return true;
+		case SljitProjectionAggregateRecipeVariant::TWO_JOIN_SOURCE_FILTER_PROJECTION:
+			if (!facts.HasSourceFilterProjection() || facts.HasPreJoinProjection() || facts.HasBetweenProjection() ||
+			    shape.ProjectionCount() != 2 || !plan.HasFixedFinalProjection() ||
+			    !CanBindHashJoinProbeProjectionInput(facts.first_hash_join_idx) ||
+			    !SljitCanBindHashJoinProbeSelectionPrimitive(ops, facts.second_hash_join_idx)) {
+				return false;
+			}
+			recipe = binding.MakeFilterProjectionTwoJoinProjectionAggregateRecipe(
+			    shape, facts.source_filter_idx, facts.source_projection_idx, facts.first_hash_join_idx,
+			    facts.second_hash_join_idx);
+			return true;
+		case SljitProjectionAggregateRecipeVariant::TWO_JOIN_PRE_PROJECTION:
+			if (!facts.HasPreJoinProjection() || !facts.HasBetweenProjection() || shape.ProjectionCount() != 2 ||
+			    !plan.HasFixedFinalProjection() || !CanBindHashJoinProbeProjectionInput(facts.first_hash_join_idx) ||
+			    !SljitCanBindHashJoinProbeSelectionPrimitive(ops, facts.second_hash_join_idx)) {
+				return false;
+			}
+			recipe = binding.MakePreProjectionTwoJoinProjectionAggregateRecipe(
+			    shape, facts.pre_join_projection_idx, facts.first_hash_join_idx, facts.between_projection_idx,
+			    facts.second_hash_join_idx);
+			return true;
+		case SljitProjectionAggregateRecipeVariant::TWO_JOIN_BETWEEN_PROJECTION:
+			if (!facts.HasBetweenProjection() || facts.HasMarkFilter() || shape.ProjectionCount() == 0 ||
+			    !CanBindHashJoinProbeProjectionInput(facts.first_hash_join_idx) ||
+			    !SljitCanBindHashJoinProbeSelectionPrimitive(ops, facts.second_hash_join_idx) ||
+			    !plan.HasFixedFinalProjection()) {
+				return false;
+			}
+			if (DirectJoinProjectionAggregateHasDedicatedBackend(shape)) {
+				recipe = binding.MakeBetweenProjectionTwoJoinDirectAggregateRecipe(
+				    shape, facts.first_hash_join_idx, facts.between_projection_idx, facts.second_hash_join_idx);
+				return true;
+			}
+			recipe = binding.MakeBetweenProjectionTwoJoinProjectionAggregateRecipe(
 			    shape, facts.first_hash_join_idx, facts.between_projection_idx, facts.second_hash_join_idx);
 			return true;
+		case SljitProjectionAggregateRecipeVariant::TWO_JOIN_DIRECT_PROJECTION:
+			if (facts.HasSourceFilterProjection() || facts.HasPreJoinProjection() || facts.HasBetweenProjection() ||
+			    facts.HasMarkFilter() || shape.ProjectionCount() != 1 || !plan.HasFixedFinalProjection() ||
+			    !SljitFullPipelineHashJoinProbeIsMatchedProbeAndBuild(ops, facts.first_hash_join_idx) ||
+			    !SljitFullPipelineHashJoinProbeIsMatchedProbeAndBuild(ops, facts.second_hash_join_idx) ||
+			    !DirectJoinProjectionAggregateHasDedicatedBackend(shape)) {
+				return false;
+			}
+			recipe = binding.MakeTwoJoinDirectProjectionAggregateRecipe(shape, facts.first_hash_join_idx);
+			return true;
+		case SljitProjectionAggregateRecipeVariant::TWO_JOIN_PROJECTION_CHAIN:
+			if (shape.ProjectionCount() != 2 || !plan.HasFixedFinalProjection() ||
+			    !SljitCanBindHashJoinProbeMaterializePrimitive(ops, facts.first_hash_join_idx) ||
+			    !SljitCanBindHashJoinProbeSelectionPrimitive(ops, facts.second_hash_join_idx)) {
+				return false;
+			}
+			recipe = binding.MakeTwoJoinProjectionChainAggregateRecipe(shape, facts.first_hash_join_idx,
+			                                                           facts.second_hash_join_idx);
+			return true;
 		}
-		recipe = binding.MakeBetweenProjectionTwoJoinProjectionAggregateRecipe(
-		    shape, facts.first_hash_join_idx, facts.between_projection_idx, facts.second_hash_join_idx);
-		return true;
-	}
-
-	bool TryBuildTwoJoinDirectProjectionRecipe(SljitFullPipelineRecipe &recipe,
-	                                           const SljitProjectionAggregatePlanFacts &plan) const {
-		auto &shape = plan.shape;
-		auto &facts = plan.prefix;
-		if (facts.HasSourceFilterProjection() || facts.HasPreJoinProjection() || facts.HasBetweenProjection() ||
-		    facts.HasMarkFilter() || shape.ProjectionCount() != 1 || !plan.HasFixedFinalProjection() ||
-		    !SljitFullPipelineHashJoinProbeIsMatchedProbeAndBuild(ops, facts.first_hash_join_idx) ||
-		    !SljitFullPipelineHashJoinProbeIsMatchedProbeAndBuild(ops, facts.second_hash_join_idx) ||
-		    !DirectJoinProjectionAggregateHasDedicatedBackend(shape)) {
-			return false;
-		}
-		recipe = binding.MakeTwoJoinDirectProjectionAggregateRecipe(shape, facts.first_hash_join_idx);
-		return true;
-	}
-
-	bool TryBuildTwoJoinProjectionChainRecipe(SljitFullPipelineRecipe &recipe,
-	                                          const SljitProjectionAggregatePlanFacts &plan) const {
-		auto &shape = plan.shape;
-		auto &facts = plan.prefix;
-		if (shape.ProjectionCount() != 2 || !plan.HasFixedFinalProjection() ||
-		    !SljitCanBindHashJoinProbeMaterializePrimitive(ops, facts.first_hash_join_idx) ||
-		    !SljitCanBindHashJoinProbeSelectionPrimitive(ops, facts.second_hash_join_idx)) {
-			return false;
-		}
-		recipe = binding.MakeTwoJoinProjectionChainAggregateRecipe(shape, facts.first_hash_join_idx,
-		                                                           facts.second_hash_join_idx);
-		return true;
+		throw InternalException("SLJIT projection aggregate recipe has an unknown variant");
 	}
 
 	bool FilteredSourceAggregate() const {
