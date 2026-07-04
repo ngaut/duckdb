@@ -81,6 +81,7 @@ def verify_required_design_files() -> None:
         "extension/jit_sljit/include/sljit_mark_probe_filter_boundary_runtime.hpp",
         "extension/jit_sljit/include/sljit_native_tail_handoff_runtime.hpp",
         "extension/jit_sljit/include/sljit_hash_join_probe_executor_runtime.hpp",
+        "extension/jit_sljit/include/sljit_hash_join_probe_materialize_primitive_runtime.hpp",
         "extension/jit_sljit/include/sljit_hash_join_projection_source_runtime.hpp",
         "extension/jit_sljit/include/sljit_projection_aggregate_descriptor.hpp",
         "extension/jit_sljit/include/sljit_projection_chain_runtime.hpp",
@@ -1439,6 +1440,17 @@ def verify_primitive_sequence() -> None:
         ),
     )
     require_text(
+        "extension/jit_sljit/include/sljit_hash_join_probe_materialize_primitive_runtime.hpp",
+        (
+            "class SljitHashJoinProbeMaterializePrimitiveRuntime",
+            "step.hash_join_probe_materialize",
+            "SljitDrainHashJoinProbeOutputs(scratch, hash_join_idx, hash_join_op, join_input, join_output",
+            "SljitAppendChunkToInitializedBatch(",
+            "\"hash_join_materialize_batch_append\"",
+            "SljitFlushDataChunkBatch(hash_join_materialize_batch.chunk, execute_output_batch)",
+        ),
+    )
+    require_text(
         "extension/jit_sljit/include/sljit_projection_chain_primitive_runtime.hpp",
         (
             "class SljitProjectionChainPrimitiveRuntime",
@@ -1468,7 +1480,7 @@ def verify_primitive_sequence() -> None:
             "SljitFullPipelinePrimitiveSequenceIsExecutable",
             "SljitFullPipelinePrimitiveSequenceTerminalStep",
             "step.generated_filter",
-            "hash_join_materialize_batches",
+            "SljitHashJoinProbeMaterializePrimitiveRuntime hash_join_materialize",
             "SljitProjectionChainPrimitiveRuntime projection_chain",
             "SljitSourceBatchBoundaryRuntime source_batch_boundary",
             "const auto max_recipe_batches = recipe.uses_extended_source_fetch_budget",
@@ -1480,12 +1492,12 @@ def verify_primitive_sequence() -> None:
             "FlushHashJoinMaterializeBatch(step_idx)",
             "FlushProjectionChainBatch(step_idx)",
             "FlushSourceBoundaryBatch(step_idx)",
+            "hash_join_materialize.Execute(step_idx, step, input, execute_hash_join_probe, execute_output_batch)",
+            "hash_join_materialize.Flush(step_idx, execute_output_batch)",
             "projection_chain.Execute(step_idx, step, input, execute_output_batch)",
             "projection_chain.Flush(step_idx, execute_output_batch)",
             "source_batch_boundary.Execute(step_idx, step, input, have_more_output, execute_output_batch)",
             "source_batch_boundary.Flush(step_idx, execute_output_batch)",
-            "AppendHashJoinMaterializeBatch(step_idx, step, output, next_step_idx)",
-            "hash_join_materialize_batch_append",
             "ExecuteSourceBatchBoundary",
             "SljitFullPipelineTerminalRuntime<EXECUTE_HASH_JOIN_PROBE> terminal_runtime",
             "terminal_runtime.Prepare",
@@ -1499,6 +1511,10 @@ def verify_primitive_sequence() -> None:
     reject_text(
         "extension/jit_sljit/include/sljit_source_pipeline_runtime.hpp",
         (
+            "hash_join_materialize_batches",
+            "AppendHashJoinMaterializeBatch",
+            "SljitAppendChunkToInitializedBatch(",
+            "\"hash_join_materialize_batch_append\"",
             "projection_chain_batches",
             "selected_hash_join_projection_inputs",
             "SljitExecuteProjectionChainPrimitive(runtime, scratch, ops, step.projection_chain, input",
