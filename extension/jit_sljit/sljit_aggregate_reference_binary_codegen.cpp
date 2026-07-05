@@ -7,6 +7,8 @@
 
 #include "sljitLir.h"
 
+#include <vector>
+
 namespace duckdb {
 
 struct SljitAggregateIntegerBinaryOverflowJumps {
@@ -124,6 +126,47 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeUngroupedSumInt64IntegerBi
 	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_MEM1(SLJIT_SP), saw_value_offset, SLJIT_IMM, 0);
 
 	SljitAggregateIntegerBinaryOverflowJumps overflow_jumps;
+	sljit_jump *fast_commit_done = nullptr;
+	if (!check_arithmetic_overflow && !check_result_range) {
+		vector<sljit_jump *> generic_loop_jumps;
+		auto jump_to_generic_if_present = [&](sljit_sw input_offset) {
+			sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_R0, 0, SLJIT_MEM1(SLJIT_S0), input_offset);
+			generic_loop_jumps.push_back(sljit_emit_cmp(compiler, SLJIT_NOT_EQUAL, SLJIT_R0, 0, SLJIT_IMM, 0));
+		};
+		jump_to_generic_if_present(offsetof(SljitNativeVectorInput, execute_sel));
+		jump_to_generic_if_present(offsetof(SljitNativeVectorInput, source_sel));
+		jump_to_generic_if_present(offsetof(SljitNativeVectorInput, right_source_sel));
+		jump_to_generic_if_present(offsetof(SljitNativeVectorInput, source_validity));
+		jump_to_generic_if_present(offsetof(SljitNativeVectorInput, right_source_validity));
+
+		sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_S3, 0, SLJIT_MEM1(SLJIT_S0),
+		               offsetof(SljitNativeVectorInput, source_data));
+		sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_S4, 0, SLJIT_MEM1(SLJIT_S0),
+		               offsetof(SljitNativeVectorInput, right_source_data));
+		sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R4, 0, SLJIT_IMM, 0);
+
+		auto fast_loop = sljit_emit_label(compiler);
+		auto fast_done = sljit_emit_cmp(compiler, SLJIT_GREATER_EQUAL, SLJIT_S1, 0, SLJIT_S2, 0);
+		sljit_emit_op1(compiler, load_op, SLJIT_R2, 0, SLJIT_MEM2(SLJIT_S3, SLJIT_S1), data_scale);
+		sljit_emit_op1(compiler, load_op, SLJIT_R3, 0, SLJIT_MEM2(SLJIT_S4, SLJIT_S1), data_scale);
+		sljit_emit_op2(compiler, binary_op, SLJIT_R2, 0, SLJIT_R2, 0, SLJIT_R3, 0);
+		sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_R4, 0, SLJIT_R4, 0, SLJIT_R2, 0);
+		EmitNextSljitNativeVectorLoop(compiler, fast_loop);
+
+		sljit_set_label(fast_done, sljit_emit_label(compiler));
+		sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_MEM1(SLJIT_SP), local_sum_offset, SLJIT_R4, 0);
+		sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R1, 0, SLJIT_IMM, 0);
+		auto no_rows = sljit_emit_cmp(compiler, SLJIT_EQUAL, SLJIT_S2, 0, SLJIT_IMM, 0);
+		sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R1, 0, SLJIT_IMM, 1);
+		sljit_set_label(no_rows, sljit_emit_label(compiler));
+		sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_MEM1(SLJIT_SP), saw_value_offset, SLJIT_R1, 0);
+		fast_commit_done = sljit_emit_jump(compiler, SLJIT_JUMP);
+
+		auto generic_loop_label = sljit_emit_label(compiler);
+		for (auto jump : generic_loop_jumps) {
+			sljit_set_label(jump, generic_loop_label);
+		}
+	}
 	auto done = EmitSljitAggregateTwoSourceLoop(compiler, [&]() {
 		EmitLoadSljitNativeFixedWidthValue(compiler, offsetof(SljitNativeVectorInput, source_data), SLJIT_S3, load_op,
 		                                   data_scale, SLJIT_R2);
@@ -140,6 +183,9 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeUngroupedSumInt64IntegerBi
 	    compiler, op, check_arithmetic_overflow, check_result_range, overflow_jumps);
 
 	auto done_label = sljit_emit_label(compiler);
+	if (fast_commit_done) {
+		sljit_set_label(fast_commit_done, done_label);
+	}
 	sljit_set_label(done, done_label);
 	EmitSljitAggregateCommitInt64(compiler, local_sum_offset, saw_value_offset);
 	if (helper_done) {
