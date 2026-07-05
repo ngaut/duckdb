@@ -108,12 +108,11 @@ static SinkResultType SljitExecuteNativeOrderSink(ExecutionRegionRuntime &runtim
 	return result;
 }
 
-static bool SljitTryExecuteNativeTerminalSink(ExecutionRegionRuntime &runtime, ExecutionOperatorRuntime &native_runtime,
-                                              SljitRegionExecutionScratch &scratch, idx_t op_idx,
-                                              SljitExecutableRegionOp &op, DataChunk &input, bool is_final_operator,
-                                              SinkResultType &sink_result,
-                                              optional_ptr<bool> deferred_grouped_finish = nullptr,
-                                              bool force_duckdb_aggregate_update = false) {
+static bool SljitTryExecuteNativeTerminalNonAggregateSink(ExecutionRegionRuntime &runtime,
+                                                          ExecutionOperatorRuntime &native_runtime,
+                                                          SljitRegionExecutionScratch &scratch, idx_t op_idx,
+                                                          SljitExecutableRegionOp &op, DataChunk &input,
+                                                          bool is_final_operator, SinkResultType &sink_result) {
 	switch (op.kind) {
 	case SljitNativeRegionOpKind::HASH_JOIN_BUILD:
 		if (!is_final_operator) {
@@ -159,23 +158,57 @@ static bool SljitTryExecuteNativeTerminalSink(ExecutionRegionRuntime &runtime, E
 		return true;
 	}
 	case SljitNativeRegionOpKind::AGGREGATE_UPDATE:
-		if (!is_final_operator) {
-			throw InternalException("SLJIT aggregate update sink must be the final full pipeline operator");
-		}
-		if (deferred_grouped_finish) {
-			sink_result =
-			    SljitExecuteNativeAggregateUpdate(runtime, native_runtime, scratch, op_idx, op, input, nullptr,
-			                                      DConstants::INVALID_INDEX, true, deferred_grouped_finish,
-			                                      force_duckdb_aggregate_update);
-		} else {
-			sink_result = SljitExecuteNativeAggregateUpdate(runtime, native_runtime, scratch, op_idx, op, input,
-			                                                nullptr, DConstants::INVALID_INDEX, false, nullptr,
-			                                                force_duckdb_aggregate_update);
-		}
-		return true;
+		return false;
 	default:
 		return false;
 	}
+}
+
+static bool SljitTryExecuteNativeTerminalSink(ExecutionRegionRuntime &runtime, ExecutionOperatorRuntime &native_runtime,
+                                              SljitRegionExecutionScratch &scratch, idx_t op_idx,
+                                              SljitExecutableRegionOp &op, DataChunk &input, bool is_final_operator,
+                                              SinkResultType &sink_result,
+                                              optional_ptr<bool> deferred_grouped_finish = nullptr) {
+	if (SljitTryExecuteNativeTerminalNonAggregateSink(runtime, native_runtime, scratch, op_idx, op, input,
+	                                                  is_final_operator, sink_result)) {
+		return true;
+	}
+	if (op.kind != SljitNativeRegionOpKind::AGGREGATE_UPDATE) {
+		return false;
+	}
+	if (!is_final_operator) {
+		throw InternalException("SLJIT aggregate update sink must be the final full pipeline operator");
+	}
+	if (deferred_grouped_finish) {
+		sink_result = SljitExecuteNativeAggregateUpdate(runtime, native_runtime, scratch, op_idx, op, input, nullptr,
+		                                                DConstants::INVALID_INDEX, true, deferred_grouped_finish);
+	} else {
+		sink_result = SljitExecuteNativeAggregateUpdate(runtime, native_runtime, scratch, op_idx, op, input);
+	}
+	return true;
+}
+
+static bool SljitTryExecuteNativeTailTerminalSink(ExecutionRegionRuntime &runtime,
+                                                  ExecutionOperatorRuntime &native_runtime,
+                                                  SljitRegionExecutionScratch &scratch, idx_t op_idx,
+                                                  SljitExecutableRegionOp &op, DataChunk &input,
+                                                  bool is_final_operator, SinkResultType &sink_result,
+                                                  optional_ptr<bool> deferred_grouped_finish = nullptr) {
+	if (SljitTryExecuteNativeTerminalNonAggregateSink(runtime, native_runtime, scratch, op_idx, op, input,
+	                                                  is_final_operator, sink_result)) {
+		return true;
+	}
+	if (op.kind != SljitNativeRegionOpKind::AGGREGATE_UPDATE) {
+		return false;
+	}
+	if (!is_final_operator) {
+		throw InternalException("SLJIT aggregate update sink must be the final full pipeline operator");
+	}
+	if (deferred_grouped_finish) {
+		throw InternalException("SLJIT native tail aggregate sink cannot defer generated grouped finish");
+	}
+	sink_result = SljitExecuteDuckDBAggregateUpdate(runtime, native_runtime, scratch, op_idx, op, input);
+	return true;
 }
 
 static bool SljitCanExecuteFilterAggregateUpdate(const vector<SljitExecutableRegionOp> &ops, idx_t op_idx) {

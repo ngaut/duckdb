@@ -187,18 +187,12 @@ SljitExecutePrimitiveAggregateUpdate(ExecutionRegionRuntime &runtime, ExecutionO
 }
 
 static SinkResultType
-SljitExecuteNativeAggregateUpdate(ExecutionRegionRuntime &runtime, ExecutionOperatorRuntime &native_runtime,
+SljitExecuteDuckDBAggregateUpdate(ExecutionRegionRuntime &runtime, ExecutionOperatorRuntime &native_runtime,
                                   SljitRegionExecutionScratch &scratch, idx_t op_idx, SljitExecutableRegionOp &op,
                                   DataChunk &input, const SelectionVector *execute_sel = nullptr,
-                                  idx_t count = DConstants::INVALID_INDEX, bool defer_grouped_finish = false,
-                                  optional_ptr<bool> deferred_grouped_finish = nullptr,
-                                  bool force_duckdb_update = false) {
+                                  idx_t count = DConstants::INVALID_INDEX) {
 	if (count == DConstants::INVALID_INDEX) {
 		count = input.size();
-	}
-	if (op.aggregate_update.plan.use_primitive_payloads && !force_duckdb_update) {
-		return SljitExecutePrimitiveAggregateUpdate(runtime, native_runtime, scratch, op_idx, op, input, execute_sel,
-		                                            count, defer_grouped_finish, deferred_grouped_finish);
 	}
 	auto &binding = SljitBindRecordedNativeSink(
 	    runtime, native_runtime, scratch, op_idx, op.kind, input, op.aggregate_update.plan.sink_info,
@@ -218,6 +212,22 @@ SljitExecuteNativeAggregateUpdate(ExecutionRegionRuntime &runtime, ExecutionOper
 	RecordSljitRegionRuntimePath(runtime, op.kind, "native_sink_update", input.size());
 	RecordSljitRegionMaterializationBoundary(runtime, op.kind, "native_sink_update", input.size());
 	return sink_result;
+}
+
+static SinkResultType
+SljitExecuteNativeAggregateUpdate(ExecutionRegionRuntime &runtime, ExecutionOperatorRuntime &native_runtime,
+                                  SljitRegionExecutionScratch &scratch, idx_t op_idx, SljitExecutableRegionOp &op,
+                                  DataChunk &input, const SelectionVector *execute_sel = nullptr,
+                                  idx_t count = DConstants::INVALID_INDEX, bool defer_grouped_finish = false,
+                                  optional_ptr<bool> deferred_grouped_finish = nullptr) {
+	if (count == DConstants::INVALID_INDEX) {
+		count = input.size();
+	}
+	if (op.aggregate_update.plan.use_primitive_payloads) {
+		return SljitExecutePrimitiveAggregateUpdate(runtime, native_runtime, scratch, op_idx, op, input, execute_sel,
+		                                            count, defer_grouped_finish, deferred_grouped_finish);
+	}
+	return SljitExecuteDuckDBAggregateUpdate(runtime, native_runtime, scratch, op_idx, op, input, execute_sel, count);
 }
 
 } // namespace duckdb
