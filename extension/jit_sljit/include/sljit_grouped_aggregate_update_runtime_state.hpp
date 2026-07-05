@@ -113,10 +113,11 @@ private:
 		auto &input_chunk = SljitBindMaterializedRuntimeBatchInput(input, "SLJIT grouped aggregate direct update");
 		auto &aggregate_op = ops[primitive.aggregate_idx];
 		auto &native_runtime = runtime.ExecutionOperators();
-		auto sink_result =
-		    SljitExecutePrimitiveAggregateUpdate(runtime, native_runtime, scratch, primitive.aggregate_idx,
-		                                         aggregate_op, input_chunk, nullptr, DConstants::INVALID_INDEX, true,
-		                                         optional_ptr<bool>(&deferred_grouped_finish));
+		SljitBindGroupedPrimitiveAggregateUpdate(native_runtime, scratch, primitive.aggregate_idx, aggregate_op,
+		                                         input_chunk, bound_direct_update);
+		auto sink_result = SljitExecuteBoundGroupedPrimitiveAggregateUpdate(
+		    runtime, scratch, bound_direct_update, input_chunk, nullptr, input_chunk.size(), true,
+		    optional_ptr<bool>(&deferred_grouped_finish));
 		sink_result = native_runtime.RecordSinkResult(input_chunk, sink_result);
 		if (SljitNativeSinkResultStopsExecution(runtime, sink_result, result)) {
 			SljitFinishDeferredGroupedAggregateUpdate(runtime, scratch, primitive.aggregate_idx,
@@ -454,6 +455,7 @@ private:
 	shared_ptr<SljitProjectedInputGroupedAggregateDescriptor> projected_direct_update;
 	SljitDataChunkBatch projected_direct_selected_input;
 	SljitDataChunkBatch projected_direct_aggregate_input;
+	SljitBoundGroupedPrimitiveAggregateUpdate bound_direct_update;
 };
 
 } // namespace duckdb

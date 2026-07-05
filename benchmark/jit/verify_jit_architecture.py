@@ -507,6 +507,9 @@ def verify_runtime_batch_view() -> None:
         "extension/jit_sljit/include/sljit_grouped_aggregate_update_runtime_state.hpp",
         (
             "SljitGroupedAggregateUpdateRuntimeState",
+            "SljitBindGroupedPrimitiveAggregateUpdate",
+            "SljitExecuteBoundGroupedPrimitiveAggregateUpdate",
+            "SljitBoundGroupedPrimitiveAggregateUpdate bound_direct_update",
             "SljitExecutePrimitiveAggregateUpdate",
             "ExecuteCountStarPreaggregation",
         ),
@@ -2701,6 +2704,9 @@ def verify_distinct_aggregate_backend() -> None:
         "extension/jit_sljit/include/sljit_grouped_aggregate_update_runtime_state.hpp",
         (
             "SljitGroupedAggregateUpdateRuntimeState",
+            "SljitBindGroupedPrimitiveAggregateUpdate",
+            "SljitExecuteBoundGroupedPrimitiveAggregateUpdate",
+            "SljitBoundGroupedPrimitiveAggregateUpdate bound_direct_update",
             "SljitExecutePrimitiveAggregateUpdate",
             "ExecuteCountStarPreaggregation",
             "primitive_grouped_count_star_row_update",
@@ -2739,6 +2745,17 @@ def verify_distinct_aggregate_backend() -> None:
             "ExecuteStandard",
             "ExecuteDistinctCountPointer",
             "SljitExecuteNativeAggregateUpdate",
+        ),
+    )
+    require_text(
+        "extension/jit_sljit/include/sljit_grouped_aggregate_update_runtime.hpp",
+        (
+            "struct SljitBoundGroupedPrimitiveAggregateUpdate",
+            "SljitBindGroupedPrimitiveAggregateUpdate",
+            "SljitExecuteBoundGroupedPrimitiveAggregateUpdate",
+            "SljitBindNativeSink",
+            "optional_ptr<ExecutionGroupedAggregateStateAddressBinding> grouped_state",
+            "needs_grouped_state_address_plan",
         ),
     )
     reject_regex(
