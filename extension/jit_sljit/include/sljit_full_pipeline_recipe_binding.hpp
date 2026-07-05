@@ -139,21 +139,9 @@ public:
 		    SljitBindDirectJoinOutputAggregatePrimitive(ops, aggregate_idx);
 		auto terminal = SljitFullPipelinePrimitiveStep::JoinProjectionAggregateUpdate(
 		    SljitMakeSelectedJoinOutputAggregateUpdatePrimitive(post_join_aggregate));
-		SljitPreJoinProjectionViewDescriptor pre_join_view;
-		if (TryBuildPreJoinProjectionView(pre_projection_idx, hash_join_idx, pre_join_view) &&
-		    pre_join_view.CanElideProjectionWithCurrentHashProbe()) {
-			auto remapped_hash_join_selection =
-			    BindElidedPreJoinHashJoinProbeSelection(pre_join_view, pre_projection_idx, hash_join_idx);
-			return MakePrimitiveSequence(MakeSourceHashJoinProbeSelectionSequence(remapped_hash_join_selection,
-			                                                                      terminal));
-		}
-		auto pre_join_projection = SljitBindProjectionChainPrimitive(ops, pre_projection_idx);
-		auto hash_join_selection =
-		    SljitBindHashJoinProbeSelectionPrimitive(ops, hash_join_idx, SourceKey0RangeFitsInt32(hash_join_idx));
-		return MakePrimitiveSequence({SljitFullPipelinePrimitiveStep::SourceFetch(),
-		                              SljitFullPipelinePrimitiveStep::ProjectionChain(pre_join_projection),
-		                              SljitFullPipelinePrimitiveStep::HashJoinProbeSelection(hash_join_selection),
-		                              terminal});
+		auto sequence = MakePreJoinProjectionHashJoinSelectionSequence(pre_projection_idx, hash_join_idx, true);
+		sequence.Add(terminal);
+		return MakePrimitiveSequence(std::move(sequence));
 	}
 
 	SljitFullPipelineRecipe MakeTwoJoinSelectedAggregateRecipe(idx_t first_hash_join_idx, idx_t second_hash_join_idx,
@@ -177,27 +165,24 @@ public:
 		auto pre_join_projection_idx = hash_join_idx - 1;
 		auto post_join_aggregate = BindPostJoinProjectionAggregatePrimitive(shape, hash_join_idx);
 		SljitPreJoinProjectionViewDescriptor pre_join_view;
+		const auto has_pre_join_view =
+		    TryBuildPreJoinProjectionView(pre_join_projection_idx, hash_join_idx, pre_join_view);
 		SljitStringSetCaseGroupedPayloadProjection string_set_case_projection;
-		if (TryBuildPreJoinProjectionView(pre_join_projection_idx, hash_join_idx, pre_join_view) &&
+		if (has_pre_join_view &&
 		    SljitTryBuildStringSetCaseGroupedPayloadProjection(
 		        ops, pre_join_view, post_join_aggregate.post_join_projection.first_projection_idx,
 		        post_join_aggregate.post_join_projection.final_projection_idx, string_set_case_projection)) {
 			post_join_aggregate.post_join_projection.EnableStringSetCaseGroupedPayload(string_set_case_projection);
 		}
 		auto terminal = MakeJoinProjectionAggregateTerminal(post_join_aggregate);
-		if (pre_join_view.CanElideProjectionWithCurrentHashProbe()) {
-			auto remapped_hash_join_selection =
-			    BindElidedPreJoinHashJoinProbeSelection(pre_join_view, pre_join_projection_idx, hash_join_idx);
-			return MakePrimitiveSequence(MakeSourceHashJoinProbeSelectionSequence(remapped_hash_join_selection,
-			                                                                      terminal));
+		optional_ptr<const SljitPreJoinProjectionViewDescriptor> pre_join_view_ptr;
+		if (has_pre_join_view) {
+			pre_join_view_ptr = pre_join_view;
 		}
-		auto pre_join_projection = SljitBindProjectionChainPrimitive(ops, pre_join_projection_idx);
-		auto hash_join_selection =
-		    SljitBindHashJoinProbeSelectionPrimitive(ops, hash_join_idx, SourceKey0RangeFitsInt32(hash_join_idx));
-		return MakePrimitiveSequence({SljitFullPipelinePrimitiveStep::SourceFetch(),
-		                              SljitFullPipelinePrimitiveStep::ProjectionChain(pre_join_projection),
-		                              SljitFullPipelinePrimitiveStep::HashJoinProbeSelection(hash_join_selection),
-		                              terminal});
+		auto sequence =
+		    MakePreJoinProjectionHashJoinSelectionSequence(pre_join_projection_idx, hash_join_idx, true, pre_join_view_ptr);
+		sequence.Add(terminal);
+		return MakePrimitiveSequence(std::move(sequence));
 	}
 
 	SljitFullPipelineRecipe MakeFilterProjectionJoinProjectionAggregateRecipe(
@@ -230,12 +215,8 @@ public:
 		}
 		if (pre_join_projection_idx != DConstants::INVALID_INDEX) {
 			if (!has_source_filter_projection) {
-				SljitPreJoinProjectionViewDescriptor pre_join_view;
-				if (TryBuildPreJoinProjectionView(pre_join_projection_idx, hash_join_idx, pre_join_view) &&
-				    pre_join_view.CanElideProjectionWithCurrentHashProbe()) {
-					auto remapped_hash_join_selection =
-					    BindElidedPreJoinHashJoinProbeSelection(pre_join_view, pre_join_projection_idx, hash_join_idx);
-					sequence.Add(SljitFullPipelinePrimitiveStep::HashJoinProbeSelection(remapped_hash_join_selection));
+				if (TryAppendElidedPreJoinHashJoinProbeSelection(sequence, pre_join_projection_idx, hash_join_idx,
+				                                                 false)) {
 					return MakeProjectionAggregateTailRecipe(std::move(sequence), shape);
 				}
 			}
@@ -479,6 +460,26 @@ private:
 		return sequence;
 	}
 
+	SljitFullPipelinePrimitiveSequence
+	MakePreJoinProjectionHashJoinSelectionSequence(idx_t pre_join_projection_idx, idx_t hash_join_idx,
+	                                               bool add_source_batch_boundary_for_elided,
+	                                               optional_ptr<const SljitPreJoinProjectionViewDescriptor>
+	                                                   pre_join_view = nullptr) const {
+		auto sequence = MakeSourceSequence();
+		if (pre_join_view &&
+		    TryAppendElidedPreJoinHashJoinProbeSelection(sequence, *pre_join_view, pre_join_projection_idx,
+		                                                 hash_join_idx, add_source_batch_boundary_for_elided)) {
+			return sequence;
+		}
+		if (!pre_join_view &&
+		    TryAppendElidedPreJoinHashJoinProbeSelection(sequence, pre_join_projection_idx, hash_join_idx,
+		                                                 add_source_batch_boundary_for_elided)) {
+			return sequence;
+		}
+		AddMaterializedPreJoinProjectionHashJoinSelection(sequence, pre_join_projection_idx, hash_join_idx);
+		return sequence;
+	}
+
 	SljitFullPipelinePrimitiveSequence MakeSourceHashJoinProjectionInputSequence(idx_t hash_join_idx) const {
 		auto sequence = MakeSourceSequence();
 		AddSourceBatchBoundaryIfUseful(sequence, hash_join_idx);
@@ -490,6 +491,39 @@ private:
 	                                   SljitPreJoinProjectionViewDescriptor &pre_join_view) const {
 		return SljitTryBuildPreJoinProjectionViewDescriptor(ops, pre_join_projection_idx, hash_join_idx,
 		                                                    source_min_values, source_max_values, pre_join_view);
+	}
+
+	bool TryAppendElidedPreJoinHashJoinProbeSelection(SljitFullPipelinePrimitiveSequence &sequence,
+	                                                  idx_t pre_join_projection_idx, idx_t hash_join_idx,
+	                                                  bool add_source_batch_boundary) const {
+		SljitPreJoinProjectionViewDescriptor pre_join_view;
+		if (!TryBuildPreJoinProjectionView(pre_join_projection_idx, hash_join_idx, pre_join_view)) {
+			return false;
+		}
+		return TryAppendElidedPreJoinHashJoinProbeSelection(sequence, pre_join_view, pre_join_projection_idx,
+		                                                    hash_join_idx, add_source_batch_boundary);
+	}
+
+	bool TryAppendElidedPreJoinHashJoinProbeSelection(
+	    SljitFullPipelinePrimitiveSequence &sequence, const SljitPreJoinProjectionViewDescriptor &pre_join_view,
+	    idx_t pre_join_projection_idx, idx_t hash_join_idx, bool add_source_batch_boundary) const {
+		if (!pre_join_view.CanElideProjectionWithCurrentHashProbe()) {
+			return false;
+		}
+		if (add_source_batch_boundary) {
+			AddSourceBatchBoundaryIfUseful(sequence, hash_join_idx);
+		}
+		auto remapped_hash_join_selection =
+		    BindElidedPreJoinHashJoinProbeSelection(pre_join_view, pre_join_projection_idx, hash_join_idx);
+		sequence.Add(SljitFullPipelinePrimitiveStep::HashJoinProbeSelection(remapped_hash_join_selection));
+		return true;
+	}
+
+	void AddMaterializedPreJoinProjectionHashJoinSelection(SljitFullPipelinePrimitiveSequence &sequence,
+	                                                       idx_t pre_join_projection_idx, idx_t hash_join_idx) const {
+		auto pre_join_projection = SljitBindProjectionChainPrimitive(ops, pre_join_projection_idx);
+		sequence.Add(SljitFullPipelinePrimitiveStep::ProjectionChain(pre_join_projection));
+		sequence.Add(MakeHashJoinProbeSelectionStep(hash_join_idx));
 	}
 
 	SljitHashJoinProbeSelectionPrimitive
