@@ -271,16 +271,6 @@ public:
 	}
 
 	SljitFullPipelineRecipe
-	MakeBetweenProjectionTwoJoinProjectionAggregateRecipe(const SljitFullPipelineProjectionAggregateShape &shape,
-	                                                      idx_t first_hash_join_idx, idx_t between_projection_idx,
-	                                                      idx_t second_hash_join_idx) const {
-		auto sequence = MakeSourceHashJoinProjectionInputSequence(first_hash_join_idx);
-		AddProjectionChainStep(sequence, between_projection_idx);
-		sequence.Add(MakeHashJoinProbeSelectionStep(second_hash_join_idx));
-		return MakeProjectionAggregateTailRecipe(std::move(sequence), shape);
-	}
-
-	SljitFullPipelineRecipe
 	MakeBetweenProjectionTwoJoinDirectAggregateRecipe(const SljitFullPipelineProjectionAggregateShape &shape,
 	                                                  idx_t first_hash_join_idx, idx_t between_projection_idx,
 	                                                  idx_t second_hash_join_idx) const {
@@ -294,14 +284,23 @@ public:
 	}
 
 	SljitFullPipelineRecipe
-	MakePreProjectionTwoJoinProjectionAggregateRecipe(const SljitFullPipelineProjectionAggregateShape &shape,
-	                                                  idx_t pre_join_projection_idx, idx_t first_hash_join_idx,
-	                                                  idx_t between_projection_idx, idx_t second_hash_join_idx) const {
+	MakeTwoJoinProjectionAggregateRecipe(const SljitFullPipelineProjectionAggregateShape &shape,
+	                                     const SljitProjectionAggregatePrefixFacts &facts) const {
 		auto sequence = MakeSourceSequence();
-		AddProjectionChainStep(sequence, pre_join_projection_idx);
-		sequence.Add(MakeHashJoinProbeProjectionInputStep(first_hash_join_idx));
-		AddProjectionChainStep(sequence, between_projection_idx);
-		sequence.Add(MakeHashJoinProbeSelectionStep(second_hash_join_idx));
+		if (facts.HasSourceFilterProjection()) {
+			auto generated_filter = SljitBindGeneratedFilterPrimitive(ops, facts.source_filter_idx);
+			sequence.Add(SljitFullPipelinePrimitiveStep::GeneratedFilter(generated_filter));
+			AddProjectionChainStep(sequence, facts.source_projection_idx);
+		} else if (facts.HasPreJoinProjection()) {
+			AddProjectionChainStep(sequence, facts.pre_join_projection_idx);
+		} else {
+			AddSourceBatchBoundaryIfUseful(sequence, facts.first_hash_join_idx);
+		}
+		sequence.Add(MakeHashJoinProbeProjectionInputStep(facts.first_hash_join_idx));
+		if (facts.HasBetweenProjection()) {
+			AddProjectionChainStep(sequence, facts.between_projection_idx);
+		}
+		sequence.Add(MakeHashJoinProbeSelectionStep(facts.second_hash_join_idx));
 		return MakeProjectionAggregateTailRecipe(std::move(sequence), shape);
 	}
 
@@ -315,27 +314,6 @@ public:
 		sequence.Add(SljitFullPipelinePrimitiveStep::JoinProjectionAggregateUpdate(
 		    SljitMakeSelectedJoinOutputAggregateUpdatePrimitive(post_join_aggregate)));
 		return MakePrimitiveSequence(std::move(sequence));
-	}
-
-	SljitFullPipelineRecipe
-	MakeTwoJoinProjectionChainAggregateRecipe(const SljitFullPipelineProjectionAggregateShape &shape,
-	                                          idx_t first_hash_join_idx, idx_t second_hash_join_idx) const {
-		auto sequence = MakeSourceHashJoinProjectionInputSequence(first_hash_join_idx);
-		sequence.Add(MakeHashJoinProbeSelectionStep(second_hash_join_idx));
-		return MakeProjectionAggregateTailRecipe(std::move(sequence), shape);
-	}
-
-	SljitFullPipelineRecipe
-	MakeFilterProjectionTwoJoinProjectionAggregateRecipe(const SljitFullPipelineProjectionAggregateShape &shape,
-	                                                     idx_t filter_idx, idx_t source_projection_idx,
-	                                                     idx_t first_hash_join_idx, idx_t second_hash_join_idx) const {
-		auto generated_filter = SljitBindGeneratedFilterPrimitive(ops, filter_idx);
-		auto sequence = MakeSourceSequence();
-		sequence.Add(SljitFullPipelinePrimitiveStep::GeneratedFilter(generated_filter));
-		AddProjectionChainStep(sequence, source_projection_idx);
-		sequence.Add(MakeHashJoinProbeProjectionInputStep(first_hash_join_idx));
-		sequence.Add(MakeHashJoinProbeSelectionStep(second_hash_join_idx));
-		return MakeProjectionAggregateTailRecipe(std::move(sequence), shape);
 	}
 
 	SljitFullPipelineRecipe
@@ -357,10 +335,6 @@ public:
 	}
 
 private:
-	SljitFullPipelineRecipe MakePrimitiveSequence(std::initializer_list<SljitFullPipelinePrimitiveStep> steps) const {
-		return SljitMakeFullPipelinePrimitiveRecipe(uses_extended_source_fetch_budget, steps);
-	}
-
 	SljitFullPipelineRecipe MakePrimitiveSequence(SljitFullPipelinePrimitiveSequence sequence) const {
 		return SljitMakeFullPipelinePrimitiveRecipe(uses_extended_source_fetch_budget, std::move(sequence));
 	}

@@ -183,9 +183,7 @@ private:
 		    !TwoJoinCanUseProjectionAggregateTail(plan)) {
 			return false;
 		}
-		recipe = binding.MakeFilterProjectionTwoJoinProjectionAggregateRecipe(
-		    plan.shape, facts.source_filter_idx, facts.source_projection_idx, facts.first_hash_join_idx,
-		    facts.second_hash_join_idx);
+		recipe = binding.MakeTwoJoinProjectionAggregateRecipe(plan.shape, facts);
 		return true;
 	}
 
@@ -201,9 +199,7 @@ private:
 			if (!TwoJoinCanUseProjectionAggregateTail(plan)) {
 				return false;
 			}
-			recipe = binding.MakePreProjectionTwoJoinProjectionAggregateRecipe(
-			    shape, facts.pre_join_projection_idx, facts.first_hash_join_idx, facts.between_projection_idx,
-			    facts.second_hash_join_idx);
+			recipe = binding.MakeTwoJoinProjectionAggregateRecipe(shape, facts);
 			return true;
 		}
 		if (shape.ProjectionCount() == 0 || !CanBindHashJoinProbeProjectionInput(facts.first_hash_join_idx) ||
@@ -216,8 +212,7 @@ private:
 			    shape, facts.first_hash_join_idx, facts.between_projection_idx, facts.second_hash_join_idx);
 			return true;
 		}
-		recipe = binding.MakeBetweenProjectionTwoJoinProjectionAggregateRecipe(
-		    shape, facts.first_hash_join_idx, facts.between_projection_idx, facts.second_hash_join_idx);
+		recipe = binding.MakeTwoJoinProjectionAggregateRecipe(shape, facts);
 		return true;
 	}
 
@@ -244,8 +239,7 @@ private:
 		    !binding.CanMakeProjectionAggregateTailRecipe(shape)) {
 			return false;
 		}
-		recipe =
-		    binding.MakeTwoJoinProjectionChainAggregateRecipe(shape, facts.first_hash_join_idx, facts.second_hash_join_idx);
+		recipe = binding.MakeTwoJoinProjectionAggregateRecipe(shape, facts);
 		return true;
 	}
 

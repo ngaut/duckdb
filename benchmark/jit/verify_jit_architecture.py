@@ -2218,22 +2218,34 @@ def verify_recipe_builder() -> None:
             "MakeSourceHashJoinProbeSelectionSequence",
             "MakeSourceHashJoinProjectionInputSequence",
             "MakeTwoJoinDirectProjectionAggregateRecipe",
+            "MakeTwoJoinProjectionAggregateRecipe",
+            "const SljitProjectionAggregatePrefixFacts &facts",
+            "facts.HasSourceFilterProjection()",
+            "facts.HasPreJoinProjection()",
+            "facts.HasBetweenProjection()",
+            "AddProjectionChainStep(sequence, facts.between_projection_idx)",
             "MakeHashJoinProbeProjectionInputStep",
             "SourceBatchBoundaryCanCoalesce",
             "AddSourceBatchBoundaryIfUseful",
             "TypeIsConstantSize(type.InternalType())",
             "source_output_types",
-            "sequence.Add(MakeHashJoinProbeProjectionInputStep(first_hash_join_idx))",
-            "MakeHashJoinProbeSelectionStep(second_hash_join_idx)",
+            "sequence.Add(MakeHashJoinProbeProjectionInputStep(facts.first_hash_join_idx))",
+            "MakeHashJoinProbeSelectionStep(facts.second_hash_join_idx)",
             "SljitMakeSelectedJoinOutputAggregateUpdatePrimitive",
-            "MakeFilterProjectionTwoJoinProjectionAggregateRecipe",
-            "MakeBetweenProjectionTwoJoinProjectionAggregateRecipe",
-            "MakePreProjectionTwoJoinProjectionAggregateRecipe",
             "return MakeProjectionAggregateTailRecipe(std::move(sequence), shape)",
             "return MakeProjectionAggregateRecipe(std::move(sequence), shape)",
             "return MakeProjectionGroupedAggregateRecipe(std::move(sequence), shape,",
             "return MakeProjectionNativeTailRecipe(std::move(sequence), shape)",
             "SljitFullPipelinePrimitiveStep::NativeTailHandoff",
+        ),
+    )
+    reject_text(
+        "extension/jit_sljit/include/sljit_full_pipeline_recipe_binding.hpp",
+        (
+            "MakeFilterProjectionTwoJoinProjectionAggregateRecipe",
+            "MakeBetweenProjectionTwoJoinProjectionAggregateRecipe",
+            "MakePreProjectionTwoJoinProjectionAggregateRecipe",
+            "MakeTwoJoinProjectionChainAggregateRecipe",
         ),
     )
     require_text(
@@ -2258,7 +2270,9 @@ def verify_recipe_builder() -> None:
             "struct SljitUngroupedAggregateUpdatePrimitive",
             "SljitCanBindUngroupedAggregateUpdatePrimitive",
             "ExecutionRegionSinkKind::UNGROUPED_AGGREGATE_UPDATE",
-            "SljitExecutePrimitiveAggregateUpdate",
+            "SljitExecuteUngroupedPrimitiveAggregateUpdate",
+            "SljitBindNativeSink",
+            "RecordSinkResult(input.count, sink_result)",
             "SljitUngroupedAggregateUpdateRuntimeState",
         ),
     )
@@ -2536,17 +2550,12 @@ def verify_recipe_builder() -> None:
     reject_regex(
         "projection-fed two-join recipes must not force full first-join materialization",
         (
-            r"(?s)MakeBetweenProjectionTwoJoinProjectionAggregateRecipe.*?"
-            r"sequence\.Add\(MakeHashJoinProbeMaterializeStep\(first_hash_join_idx\)\);\s*"
-            r"sequence\.Add\(SljitFullPipelinePrimitiveStep::ProjectionChain\(between_projection\)\)",
-            r"(?s)MakePreProjectionTwoJoinProjectionAggregateRecipe.*?"
-            r"sequence\.Add\(SljitFullPipelinePrimitiveStep::ProjectionChain\(pre_join_projection\)\);\s*"
-            r"sequence\.Add\(MakeHashJoinProbeMaterializeStep\(first_hash_join_idx\)\);\s*"
-            r"sequence\.Add\(SljitFullPipelinePrimitiveStep::ProjectionChain\(between_projection\)\)",
-            r"(?s)MakeFilterProjectionTwoJoinProjectionAggregateRecipe.*?"
-            r"sequence\.Add\(SljitFullPipelinePrimitiveStep::ProjectionChain\(source_projection\)\);\s*"
-            r"sequence\.Add\(MakeHashJoinProbeMaterializeStep\(first_hash_join_idx\)\);\s*"
-            r"sequence\.Add\(MakeHashJoinProbeSelectionStep\(second_hash_join_idx\)\)",
+            r"(?s)MakeTwoJoinProjectionAggregateRecipe.*?"
+            r"sequence\.Add\(MakeHashJoinProbeMaterializeStep\(facts\.first_hash_join_idx\)\);\s*"
+            r"if \(facts\.HasBetweenProjection\(\)\)",
+            r"(?s)MakeTwoJoinProjectionAggregateRecipe.*?"
+            r"sequence\.Add\(MakeHashJoinProbeMaterializeStep\(facts\.first_hash_join_idx\)\);\s*"
+            r"sequence\.Add\(MakeHashJoinProbeSelectionStep\(facts\.second_hash_join_idx\)\)",
         ),
         ("extension/jit_sljit/include/sljit_full_pipeline_recipe_binding.hpp",),
     )

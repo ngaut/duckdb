@@ -140,9 +140,9 @@ static bool SljitTryBuildCountStarGroupProjection(const SljitExecutableRegionOp 
 	if (group.input_index < projection_op.output_not_null.size()) {
 		group_projection.output_not_null.push_back(projection_op.output_not_null[group.input_index]);
 	}
-	SljitExecutableRegionExpression group_expression;
-	SljitBuildBorrowedProjectionExpression(projection_op.projections[group.input_index], group_expression);
-	group_projection.projections.push_back(std::move(group_expression));
+	auto group_expression = make_uniq<SljitExecutableRegionExpression>();
+	SljitBuildBorrowedProjectionExpression(projection_op.projections[group.input_index], *group_expression);
+	group_projection.projections.push_back(std::move(*group_expression));
 	return true;
 }
 
@@ -157,30 +157,28 @@ static void SljitInitializeProjectedInputGroupedAggregatePrimitive(SljitGroupedA
 static bool SljitTryBindProjectedCountStarGroupedAggregateStrategy(
     SljitGroupedAggregateUpdatePrimitive &primitive, const SljitExecutableRegionOp &semantic_projection,
     const SljitExecutableRegionOp &aggregate_op) {
-	SljitExecutableRegionOp group_projection;
-	if (!SljitTryBuildCountStarGroupProjection(semantic_projection, aggregate_op, group_projection) ||
-	    !SljitCountStarProjectionInputSupported(group_projection)) {
+	auto group_projection = make_shared_ptr<SljitExecutableRegionOp>();
+	if (!SljitTryBuildCountStarGroupProjection(semantic_projection, aggregate_op, *group_projection) ||
+	    !SljitCountStarProjectionInputSupported(*group_projection)) {
 		return false;
 	}
 	primitive.strategy = SljitGroupedAggregateUpdateStrategyKind::COUNT_STAR_PREAGGREGATION;
-	primitive.projected_count_star_group_projection =
-	    make_shared_ptr<SljitExecutableRegionOp>(std::move(group_projection));
+	primitive.projected_count_star_group_projection = std::move(group_projection);
 	return true;
 }
 
 static bool SljitTryBindProjectedDirectPrimitivePayloadUpdateStrategy(
     SljitGroupedAggregateUpdatePrimitive &primitive, const vector<SljitExecutableRegionOp> &ops,
     idx_t first_projection_idx, idx_t final_projection_idx) {
-	SljitProjectedInputGroupedAggregateDescriptor descriptor;
+	auto descriptor = make_shared_ptr<SljitProjectedInputGroupedAggregateDescriptor>();
 	if (!SljitTryBuildProjectedInputGroupedAggregateDescriptor(
 	        ops, first_projection_idx, final_projection_idx, primitive.aggregate_idx,
-	        optional_ptr<SljitProjectedInputGroupedAggregateDescriptor>(&descriptor)) ||
-	    !SljitProjectedInputGroupedAggregateCanUseCompactInput(descriptor)) {
+	        optional_ptr<SljitProjectedInputGroupedAggregateDescriptor>(descriptor.get())) ||
+	    !SljitProjectedInputGroupedAggregateCanUseCompactInput(*descriptor)) {
 		return false;
 	}
 	primitive.strategy = SljitGroupedAggregateUpdateStrategyKind::DIRECT_PRIMITIVE_PAYLOAD_UPDATE;
-	primitive.projected_direct_update =
-	    make_shared_ptr<SljitProjectedInputGroupedAggregateDescriptor>(std::move(descriptor));
+	primitive.projected_direct_update = std::move(descriptor);
 	return true;
 }
 
@@ -194,12 +192,12 @@ static bool SljitTryBindProjectedInputGroupedAggregateUpdateStrategy(
 		return false;
 	}
 	SljitInitializeProjectedInputGroupedAggregatePrimitive(primitive, first_projection_idx, final_projection_idx);
-	SljitExecutableRegionOp semantic_projection;
+	auto semantic_projection = make_uniq<SljitExecutableRegionOp>();
 	if (!SljitBuildProjectionChainComposedProjection(ops, first_projection_idx, final_projection_idx,
-	                                                 semantic_projection)) {
+	                                                 *semantic_projection)) {
 		return false;
 	}
-	if (SljitTryBindProjectedCountStarGroupedAggregateStrategy(primitive, semantic_projection,
+	if (SljitTryBindProjectedCountStarGroupedAggregateStrategy(primitive, *semantic_projection,
 	                                                          ops[primitive.aggregate_idx])) {
 		return true;
 	}

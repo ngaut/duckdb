@@ -116,10 +116,10 @@ static bool SljitTryBuildPostJoinProjectionDescriptor(vector<SljitExecutableRegi
 		return true;
 	}
 
-	SljitExecutableRegionOp composed_projection;
+	auto composed_projection = make_uniq<SljitExecutableRegionOp>();
 	string compose_blocker;
 	if (!SljitBuildProjectionChainComposedProjection(ops, first_projection_idx, final_projection_idx,
-	                                                 composed_projection, optional_ptr<string>(&compose_blocker))) {
+	                                                 *composed_projection, optional_ptr<string>(&compose_blocker))) {
 		if (compose_blocker.empty()) {
 			compose_blocker = "compose";
 		} else {
@@ -127,7 +127,7 @@ static bool SljitTryBuildPostJoinProjectionDescriptor(vector<SljitExecutableRegi
 		}
 		return descriptor.Block(compose_blocker.c_str());
 	}
-	descriptor.OwnProjection(final_projection_idx, std::move(composed_projection));
+	descriptor.OwnProjection(final_projection_idx, std::move(*composed_projection));
 	descriptor.MarkReady();
 	return true;
 }

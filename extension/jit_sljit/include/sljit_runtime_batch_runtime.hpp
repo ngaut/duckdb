@@ -56,11 +56,37 @@ static bool SljitVectorCanFastAppendFixedAllValid(Vector &target, Vector &source
 	return TypeIsConstantSize(physical_type);
 }
 
+template <class T>
+static void SljitCopyFixedWidthSelectedAllValid(const UnifiedVectorFormat &source_format, data_ptr_t target_data,
+                                                idx_t append_count) {
+	auto source_data = reinterpret_cast<const T *>(source_format.data);
+	auto target = reinterpret_cast<T *>(target_data);
+	for (idx_t row_idx = 0; row_idx < append_count; row_idx++) {
+		target[row_idx] = source_data[source_format.sel->get_index(row_idx)];
+	}
+}
+
 static void SljitCopyFixedWidthUnifiedAllValid(const UnifiedVectorFormat &source_format, data_ptr_t target_data,
                                                idx_t append_count, idx_t type_size) {
 	if (source_format.sel == FlatVector::IncrementalSelectionVector()) {
 		memcpy(target_data, source_format.data, append_count * type_size);
 		return;
+	}
+	switch (type_size) {
+	case sizeof(uint8_t):
+		SljitCopyFixedWidthSelectedAllValid<uint8_t>(source_format, target_data, append_count);
+		return;
+	case sizeof(uint16_t):
+		SljitCopyFixedWidthSelectedAllValid<uint16_t>(source_format, target_data, append_count);
+		return;
+	case sizeof(uint32_t):
+		SljitCopyFixedWidthSelectedAllValid<uint32_t>(source_format, target_data, append_count);
+		return;
+	case sizeof(uint64_t):
+		SljitCopyFixedWidthSelectedAllValid<uint64_t>(source_format, target_data, append_count);
+		return;
+	default:
+		break;
 	}
 	for (idx_t row_idx = 0; row_idx < append_count; row_idx++) {
 		const auto source_idx = source_format.sel->get_index(row_idx);

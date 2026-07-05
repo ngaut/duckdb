@@ -65,13 +65,13 @@ static bool SljitCanBindProjectedDelimJoinSinkPrimitive(const vector<SljitExecut
 	    final_projection_idx + 1 != sink_idx) {
 		return false;
 	}
-	SljitExecutableRegionOp projection_op;
-	if (!SljitTryBuildReferencePreservingProjectionChain(ops, first_projection_idx, final_projection_idx,
-	                                                     projection_op)) {
-		return false;
+		auto projection_op = make_uniq<SljitExecutableRegionOp>();
+		if (!SljitTryBuildReferencePreservingProjectionChain(ops, first_projection_idx, final_projection_idx,
+		                                                     *projection_op)) {
+			return false;
+		}
+		return projection_op->output_types == ops[sink_idx].delim_join_sink.plan.input_types;
 	}
-	return projection_op.output_types == ops[sink_idx].delim_join_sink.plan.input_types;
-}
 
 static bool SljitCanBindSelectedHashJoinDelimJoinSinkPrimitive(const vector<SljitExecutableRegionOp> &ops,
                                                                idx_t hash_join_idx, idx_t sink_idx) {

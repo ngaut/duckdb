@@ -163,9 +163,9 @@ static bool SljitTryBuildProjectedInputGroupedAggregateDescriptor(
 		return block("aggregate_shape");
 	}
 
-	SljitExecutableRegionOp semantic_projection;
+	auto semantic_projection = make_uniq<SljitExecutableRegionOp>();
 	if (!SljitBuildProjectionChainComposedProjection(ops, first_projection_idx, final_projection_idx,
-	                                                 semantic_projection)) {
+	                                                 *semantic_projection)) {
 		return block("projection_compose");
 	}
 	vector<ExecutionRowPointerGroupKeySource> group_sources;
@@ -173,7 +173,7 @@ static bool SljitTryBuildProjectedInputGroupedAggregateDescriptor(
 	for (auto &group : sink_info.groups) {
 		ExecutionRowPointerGroupKeySource group_source;
 		string group_blocker;
-		if (!SljitTryBuildProjectedInputGroupSource(semantic_projection, group, group_source,
+		if (!SljitTryBuildProjectedInputGroupSource(*semantic_projection, group, group_source,
 		                                            optional_ptr<string>(&group_blocker))) {
 			return block("group" + to_string(group_sources.size()) + "_source_" + group_blocker);
 		}
@@ -189,7 +189,7 @@ static bool SljitTryBuildProjectedInputGroupedAggregateDescriptor(
 	};
 	auto add_fused_payload_source = [&](idx_t projection_idx) {
 		idx_t source_idx;
-		if (!SljitTryResolveProjectedInputPayloadSource(semantic_projection, projection_idx, source_idx)) {
+		if (!SljitTryResolveProjectedInputPayloadSource(*semantic_projection, projection_idx, source_idx)) {
 			return block("fused_payload_source");
 		}
 		payload_projection_indices.push_back(projection_idx);
@@ -201,7 +201,7 @@ static bool SljitTryBuildProjectedInputGroupedAggregateDescriptor(
 	};
 	auto add_direct_payload_source = [&](const ExecutionRegionAggregateInput &aggregate, idx_t) {
 		idx_t source_idx;
-		if (!SljitTryResolveProjectedInputPayloadSource(semantic_projection, aggregate.payload_index, source_idx)) {
+		if (!SljitTryResolveProjectedInputPayloadSource(*semantic_projection, aggregate.payload_index, source_idx)) {
 			return block("direct_payload_source");
 		}
 		payload_projection_indices.push_back(aggregate.payload_index);
@@ -219,7 +219,7 @@ static bool SljitTryBuildProjectedInputGroupedAggregateDescriptor(
 		return block("payload_sources");
 	}
 	if (descriptor) {
-		descriptor->projection = std::move(semantic_projection);
+		descriptor->projection = std::move(*semantic_projection);
 		descriptor->group_sources = std::move(group_sources);
 		descriptor->payload_projection_indices = std::move(payload_projection_indices);
 		descriptor->payload_source_indices = std::move(payload_source_indices);
