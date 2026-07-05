@@ -8,13 +8,13 @@
 
 #pragma once
 
+#include "sljit_date_year_runtime.hpp"
 #include "sljit_direct_projection_batch_runtime.hpp"
 #include "sljit_hash_join_projection_source_runtime.hpp"
 #include "sljit_inline_string_decompress_projection_runtime.hpp"
 #include "sljit_projection_executor_runtime.hpp"
 #include "sljit_region_runtime_state.hpp"
 
-#include "duckdb/common/types/date.hpp"
 #include "duckdb/execution/join_hashtable.hpp"
 
 namespace duckdb {
@@ -70,28 +70,6 @@ static bool SljitHashJoinRHSFixedColumnSourceIsValid(data_ptr_t row_pointer,
 	    idx_in_entry);
 }
 
-static bool SljitDateDaysAreFinite(int32_t days) {
-	return days != date_t::infinity().days && days != date_t::ninfinity().days;
-}
-
-static int64_t SljitExtractFiniteDateYear(int32_t days) {
-	int32_t year = Date::EPOCH_YEAR;
-	while (days < 0) {
-		days += Date::DAYS_PER_YEAR_INTERVAL;
-		year -= Date::YEAR_INTERVAL;
-	}
-	while (days >= Date::DAYS_PER_YEAR_INTERVAL) {
-		days -= Date::DAYS_PER_YEAR_INTERVAL;
-		year += Date::YEAR_INTERVAL;
-	}
-	auto year_offset = days / 365;
-	while (days < Date::CUMULATIVE_YEAR_DAYS[year_offset]) {
-		year_offset--;
-		D_ASSERT(year_offset >= 0);
-	}
-	return year + year_offset;
-}
-
 static bool SljitTryMaterializeHashJoinRHSDateYearProjectionToBatch(const ExecutionHashJoinProbeBinding &binding,
                                                                     const SljitNativeRegionExpressionPlan &plan,
                                                                     idx_t rhs_col_idx, Vector &row_pointers,
@@ -135,7 +113,7 @@ static bool SljitTryMaterializeHashJoinRHSDateYearProjectionToBatch(const Execut
 				result_validity.SetInvalid(row_idx);
 				continue;
 			}
-			result_data[row_idx] = SljitExtractFiniteDateYear(days);
+			result_data[row_idx] = SljitExtractDateYearFromDays(days);
 		}
 	} else {
 		for (idx_t row_idx = 0; row_idx < count; row_idx++) {
@@ -149,7 +127,7 @@ static bool SljitTryMaterializeHashJoinRHSDateYearProjectionToBatch(const Execut
 				result_validity.SetInvalid(row_idx);
 				continue;
 			}
-			result_data[row_idx] = SljitExtractFiniteDateYear(days);
+			result_data[row_idx] = SljitExtractDateYearFromDays(days);
 		}
 	}
 	FlatVector::SetSize(result, count_t(count));

@@ -10,9 +10,7 @@
 
 #include "sljit_aggregate_payload_runtime.hpp"
 #include "sljit_aggregate_primitive_preaggregation_runtime.hpp"
-
-#include "duckdb/common/operator/subtract.hpp"
-#include "duckdb/common/types/date.hpp"
+#include "sljit_date_year_runtime.hpp"
 
 #include <array>
 
@@ -430,24 +428,6 @@ static bool SljitInputVectorGroupPhysicalRowsEqual(PhysicalType type, const Unif
 	}
 }
 
-static int64_t SljitRowPointerPreaggregationDateYear(int32_t days) {
-	int32_t year = Date::EPOCH_YEAR;
-	while (days < 0) {
-		days += Date::DAYS_PER_YEAR_INTERVAL;
-		year -= Date::YEAR_INTERVAL;
-	}
-	while (days >= Date::DAYS_PER_YEAR_INTERVAL) {
-		days -= Date::DAYS_PER_YEAR_INTERVAL;
-		year += Date::YEAR_INTERVAL;
-	}
-	auto year_offset = days / 365;
-	while (days < Date::CUMULATIVE_YEAR_DAYS[year_offset]) {
-		year_offset--;
-		D_ASSERT(year_offset >= 0);
-	}
-	return year + year_offset;
-}
-
 template <class DST>
 static bool SljitInputVectorGroupDateYearCompressRowsEqual(const UnifiedVectorFormat &format, idx_t left_row,
                                                            idx_t right_row,
@@ -461,12 +441,7 @@ static bool SljitInputVectorGroupDateYearCompressRowsEqual(const UnifiedVectorFo
 	}
 	auto data = UnifiedVectorFormat::GetData<int32_t>(format);
 	auto load_key = [&](idx_t source_idx, DST &result) {
-		int64_t compressed_value;
-		if (!TrySubtractOperator::Operation<int64_t, int64_t, int64_t>(
-		        SljitRowPointerPreaggregationDateYear(data[source_idx]), source.cast_constant, compressed_value)) {
-			return false;
-		}
-		return TryCast::Operation<int64_t, DST>(compressed_value, result, false);
+		return SljitTryDateYearCompressedGroupKey<DST>(data[source_idx], source.cast_constant, result);
 	};
 	DST left_value;
 	DST right_value;

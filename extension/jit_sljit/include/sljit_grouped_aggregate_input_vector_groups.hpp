@@ -8,12 +8,11 @@
 
 #pragma once
 
+#include "sljit_date_year_runtime.hpp"
 #include "sljit_grouped_aggregate_group_key_source.hpp"
 #include "sljit_region_adapter_scratch.hpp"
 
 #include "duckdb/common/operator/cast_operators.hpp"
-#include "duckdb/common/operator/subtract.hpp"
-#include "duckdb/common/types/date.hpp"
 #include "duckdb/common/types/row/tuple_data_layout.hpp"
 #include "duckdb/common/vector/flat_vector.hpp"
 #include "duckdb/common/vector/unified_vector_format.hpp"
@@ -258,38 +257,6 @@ static void SljitMaterializeInputVectorGroupCast(Vector &source, Vector &target,
 	FlatVector::SetSize(target, count);
 }
 
-static int64_t SljitExtractDateYearForGroupKey(int32_t days) {
-	int32_t year = Date::EPOCH_YEAR;
-	while (days < 0) {
-		days += Date::DAYS_PER_YEAR_INTERVAL;
-		year -= Date::YEAR_INTERVAL;
-	}
-	while (days >= Date::DAYS_PER_YEAR_INTERVAL) {
-		days -= Date::DAYS_PER_YEAR_INTERVAL;
-		year += Date::YEAR_INTERVAL;
-	}
-	auto year_offset = days / 365;
-	while (days < Date::CUMULATIVE_YEAR_DAYS[year_offset]) {
-		year_offset--;
-		D_ASSERT(year_offset >= 0);
-	}
-	return year + year_offset;
-}
-
-template <class DST>
-static DST SljitDateYearCompressedGroupKey(int32_t days, int64_t minimum) {
-	int64_t compressed_value;
-	if (!TrySubtractOperator::Operation<int64_t, int64_t, int64_t>(SljitExtractDateYearForGroupKey(days), minimum,
-	                                                               compressed_value)) {
-		throw InvalidInputException("Overflow in date year group compression");
-	}
-	DST result;
-	if (!TryCast::Operation<int64_t, DST>(compressed_value, result, false)) {
-		throw InvalidInputException(CastExceptionText<int64_t, DST>(compressed_value));
-	}
-	return result;
-}
-
 template <class DST>
 static void SljitMaterializeDateYearCompressedInputVectorGroup(Vector &source, Vector &target, idx_t count,
                                                               int64_t minimum) {
@@ -305,8 +272,8 @@ static void SljitMaterializeDateYearCompressedInputVectorGroup(Vector &source, V
 	auto source_data = UnifiedVectorFormat::GetData<int32_t>(source_format);
 	if (!source_format.validity.CanHaveNull()) {
 		for (idx_t row_idx = 0; row_idx < count; row_idx++) {
-			target_data[row_idx] =
-			    SljitDateYearCompressedGroupKey<DST>(source_data[source_format.sel->get_index(row_idx)], minimum);
+			target_data[row_idx] = SljitDateYearCompressedGroupKeyOrThrow<DST>(
+			    source_data[source_format.sel->get_index(row_idx)], minimum);
 		}
 	} else {
 		for (idx_t row_idx = 0; row_idx < count; row_idx++) {
@@ -315,7 +282,7 @@ static void SljitMaterializeDateYearCompressedInputVectorGroup(Vector &source, V
 				target_validity.SetInvalid(row_idx);
 				continue;
 			}
-			target_data[row_idx] = SljitDateYearCompressedGroupKey<DST>(source_data[source_idx], minimum);
+			target_data[row_idx] = SljitDateYearCompressedGroupKeyOrThrow<DST>(source_data[source_idx], minimum);
 		}
 	}
 	FlatVector::SetSize(target, count);

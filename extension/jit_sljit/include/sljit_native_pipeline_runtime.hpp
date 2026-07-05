@@ -24,6 +24,11 @@
 namespace duckdb {
 
 struct SljitNativePipelineGroupedFinishState {
+	SljitNativePipelineGroupedFinishState(ExecutionOperatorRuntime &native_runtime_p,
+	                                      vector<SljitExecutableRegionOp> &ops_p)
+	    : native_runtime(native_runtime_p), ops(ops_p) {
+	}
+
 	idx_t aggregate_idx = DConstants::INVALID_INDEX;
 	bool deferred = false;
 	SljitDataChunkBatch pending_aggregate_update;
@@ -69,9 +74,8 @@ struct SljitNativePipelineGroupedFinishState {
 		return true;
 	}
 
-	void Finish(ExecutionRegionRuntime &runtime, ExecutionOperatorRuntime &native_runtime,
-	            vector<SljitExecutableRegionOp> &ops, SljitRegionExecutionScratch &scratch) {
-		FlushPendingAggregateUpdate(runtime, native_runtime, ops, scratch);
+	void Finish(ExecutionRegionRuntime &runtime, SljitRegionExecutionScratch &scratch) {
+		FlushPendingAggregateUpdate(runtime, scratch);
 		if (!deferred) {
 			return;
 		}
@@ -83,6 +87,9 @@ struct SljitNativePipelineGroupedFinishState {
 	}
 
 private:
+	ExecutionOperatorRuntime &native_runtime;
+	vector<SljitExecutableRegionOp> &ops;
+
 	static bool CanBatchTerminalAggregateUpdate(SljitExecutableRegionOp &op, DataChunk &input) {
 		if (input.size() == 0 || op.kind != SljitNativeRegionOpKind::AGGREGATE_UPDATE ||
 		    op.aggregate_update.plan.sink_info.kind != ExecutionRegionSinkKind::HASH_AGGREGATE_UPDATE ||
@@ -106,8 +113,7 @@ private:
 		return native_runtime.RecordSinkResult(batch, result);
 	}
 
-	void FlushPendingAggregateUpdate(ExecutionRegionRuntime &runtime, ExecutionOperatorRuntime &native_runtime,
-	                                 vector<SljitExecutableRegionOp> &ops, SljitRegionExecutionScratch &scratch) {
+	void FlushPendingAggregateUpdate(ExecutionRegionRuntime &runtime, SljitRegionExecutionScratch &scratch) {
 		if (pending_aggregate_update.Empty()) {
 			return;
 		}
@@ -238,7 +244,8 @@ struct SljitNativePipelineExecutor {
 	SljitNativePipelineExecutor(KERNEL &kernel_p, ExecutionRegionRuntime &runtime_p,
 	                            vector<SljitExecutableRegionOp> &ops_p,
 	                            const vector<idx_t> &source_distinct_counts_p)
-	    : kernel(kernel_p), runtime(runtime_p), ops(ops_p), source_distinct_counts(source_distinct_counts_p) {
+	    : kernel(kernel_p), runtime(runtime_p), ops(ops_p), source_distinct_counts(source_distinct_counts_p),
+	      grouped_finish(runtime_p.ExecutionOperators(), ops_p) {
 	}
 
 	KERNEL &kernel;
@@ -258,7 +265,7 @@ struct SljitNativePipelineExecutor {
 	}
 
 	void Finalize(SljitRegionExecutionScratch &scratch) {
-		grouped_finish.Finish(runtime, runtime.ExecutionOperators(), ops, scratch);
+		grouped_finish.Finish(runtime, scratch);
 	}
 
 private:

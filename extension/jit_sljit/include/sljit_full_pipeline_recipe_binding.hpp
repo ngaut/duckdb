@@ -139,7 +139,17 @@ public:
 		    SljitBindDirectJoinOutputAggregatePrimitive(ops, aggregate_idx);
 		auto terminal = SljitFullPipelinePrimitiveStep::JoinProjectionAggregateUpdate(
 		    SljitMakeSelectedJoinOutputAggregateUpdatePrimitive(post_join_aggregate));
-		auto sequence = MakePreJoinProjectionHashJoinSelectionSequence(pre_projection_idx, hash_join_idx, true);
+		SljitPreJoinProjectionViewDescriptor pre_join_view;
+		if (TryBuildPreJoinProjectionView(pre_projection_idx, hash_join_idx, pre_join_view) &&
+		    pre_join_view.CanElideProjectionWithCurrentHashProbe()) {
+			auto remapped_hash_join_selection =
+			    BindElidedPreJoinHashJoinProbeSelection(pre_join_view, pre_projection_idx, hash_join_idx);
+			return MakePrimitiveSequence(MakeSourceHashJoinProbeSelectionSequence(remapped_hash_join_selection, terminal));
+		}
+		auto sequence = MakeSourceSequence();
+		auto pre_join_projection = SljitBindProjectionChainPrimitive(ops, pre_projection_idx);
+		sequence.Add(SljitFullPipelinePrimitiveStep::ProjectionChain(pre_join_projection));
+		sequence.Add(MakeHashJoinProbeSelectionStep(hash_join_idx));
 		sequence.Add(terminal);
 		return MakePrimitiveSequence(std::move(sequence));
 	}
