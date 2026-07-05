@@ -24,13 +24,34 @@ static bool SljitFusedUngroupedPrimitiveAggregatePayloadSupported(const SljitNat
 	    payload.return_type.InternalType() != aggregate.child_types[0].InternalType()) {
 		return false;
 	}
+	return aggregate.primitive_update_kind == AggregatePrimitiveUpdateKind::SUM_INT64 &&
+	       (payload.kind == SljitNativeRegionExpressionKind::REFERENCE ||
+	        payload.kind == SljitNativeRegionExpressionKind::INTEGER_BINARY_CONSTANT ||
+	        payload.kind == SljitNativeRegionExpressionKind::INTEGER_BINARY_REFERENCES);
+}
+
+static unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeUngroupedSingleFusedPrimitiveAggregateUpdate(
+    const SljitNativeRegionExpressionPlan &payload, const ExecutionRegionAggregateInput &aggregate,
+    SljitNativeAggregateUpdateFunction &function, string &error) {
+	if (!SljitFusedUngroupedPrimitiveAggregatePayloadSupported(payload, aggregate) ||
+	    aggregate.primitive_update_kind != AggregatePrimitiveUpdateKind::SUM_INT64) {
+		error = "unsupported fused aggregate payload shape";
+		return nullptr;
+	}
 	switch (payload.kind) {
 	case SljitNativeRegionExpressionKind::REFERENCE:
+		return BuildSljitNativeUngroupedSumInt64Reference(payload.integer_kind, function, error);
 	case SljitNativeRegionExpressionKind::INTEGER_BINARY_CONSTANT:
+		return BuildSljitNativeUngroupedSumInt64IntegerBinaryConstant(
+		    payload.integer_kind, payload.binary_op, payload.constant_on_left, function, error,
+		    payload.check_arithmetic_overflow, payload.check_result_range, payload.result_min, payload.result_max);
 	case SljitNativeRegionExpressionKind::INTEGER_BINARY_REFERENCES:
-		return true;
+		return BuildSljitNativeUngroupedSumInt64IntegerBinaryReferences(
+		    payload.integer_kind, payload.binary_op, function, error, payload.check_arithmetic_overflow,
+		    payload.check_result_range, payload.result_min, payload.result_max);
 	default:
-		return false;
+		error = "unsupported fused aggregate payload shape";
+		return nullptr;
 	}
 }
 
@@ -38,7 +59,7 @@ unique_ptr<ExecutionRegionCodeHandle>
 BuildSljitNativeUngroupedFusedPrimitiveAggregateUpdate(const vector<SljitNativeRegionExpressionPlan> &payloads,
                                                        const vector<ExecutionRegionAggregateInput> &aggregates,
                                                        SljitNativeAggregateUpdateFunction &function, string &error) {
-	if (payloads.size() != aggregates.size() || payloads.size() < 2) {
+	if (payloads.size() != aggregates.size() || payloads.empty()) {
 		error = "unsupported fused aggregate payload shape";
 		return nullptr;
 	}
@@ -47,6 +68,10 @@ BuildSljitNativeUngroupedFusedPrimitiveAggregateUpdate(const vector<SljitNativeR
 			error = "unsupported fused aggregate payload shape";
 			return nullptr;
 		}
+	}
+	if (payloads.size() == 1) {
+		return BuildSljitNativeUngroupedSingleFusedPrimitiveAggregateUpdate(payloads[0], aggregates[0], function,
+		                                                                    error);
 	}
 
 	auto compiler = sljit_create_compiler(nullptr);

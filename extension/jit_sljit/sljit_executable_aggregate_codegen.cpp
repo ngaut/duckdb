@@ -279,7 +279,7 @@ bool SljitBuildExecutableAggregateUpdatePayloadCode(const SljitNativeAggregateUp
                                                     const vector<bool> &input_not_null,
                                                     const vector<Value> &input_min_values,
                                                     const vector<Value> &input_max_values) {
-	if (op.use_primitive_payloads && !op.use_grouped_state_addresses && op.payloads.size() > 1) {
+	if (op.use_primitive_payloads && !op.use_grouped_state_addresses && !op.payloads.empty()) {
 		SljitNativeAggregateUpdateFunction fused_function = nullptr;
 		string fused_error;
 		auto fused_code = BuildSljitNativeUngroupedFusedPrimitiveAggregateUpdate(op.payloads, op.sink_info.aggregates,

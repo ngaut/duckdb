@@ -74,7 +74,7 @@ TEST_CASE("JIT fuses projection payloads into primitive ungrouped aggregate redu
 			continue;
 		}
 		if (!StringUtil::Contains(EventGeneratedStageCountBreakdown(event),
-		                          "aggregate_update.primitive_payload_update=")) {
+		                          "aggregate_update.primitive_payload_update_fused=")) {
 			continue;
 		}
 		found_runtime = true;
@@ -83,7 +83,7 @@ TEST_CASE("JIT fuses projection payloads into primitive ungrouped aggregate redu
 		REQUIRE(event.invocation_count > 0);
 		REQUIRE(StringUtil::Contains(EventGeneratedStageRuntimeBreakdown(event), "aggregate_update"));
 		REQUIRE_FALSE(StringUtil::Contains(EventGeneratedStageRuntimeBreakdown(event),
-		                                   "aggregate_update.primitive_payload_update_fused="));
+		                                   "aggregate_update.primitive_payload_update="));
 		REQUIRE_FALSE(StringUtil::Contains(EventGeneratedStageRuntimeBreakdown(event), "projection"));
 	}
 	REQUIRE(found_runtime);

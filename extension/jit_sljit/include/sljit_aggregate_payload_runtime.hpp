@@ -101,6 +101,16 @@ static void SljitExecuteFusedPrimitiveAggregatePayloadUpdate(
 	auto &aggregate_state_is_sets = adapter_scratch.aggregate_state_is_sets;
 	auto &aggregate_row_counts = adapter_scratch.aggregate_row_counts;
 	auto &constants = adapter_scratch.constants;
+	const_data_ptr_t single_source_data = nullptr;
+	const_data_ptr_t single_right_source_data = nullptr;
+	const sel_t *single_source_sel = nullptr;
+	const sel_t *single_right_source_sel = nullptr;
+	const validity_t *single_source_validity = nullptr;
+	const validity_t *single_right_source_validity = nullptr;
+	int64_t single_constant = 0;
+	int64_t *single_aggregate_int64_value = nullptr;
+	bool *single_aggregate_state_is_set = nullptr;
+	idx_t *single_aggregate_row_count = nullptr;
 
 	for (idx_t payload_idx = 0; payload_idx < payloads.size(); payload_idx++) {
 		auto &lane = SljitRequireAggregatePrimitiveLane(
@@ -118,6 +128,11 @@ static void SljitExecuteFusedPrimitiveAggregatePayloadUpdate(
 		    lane, aggregate_int64_values, aggregate_state_is_sets, aggregate_row_counts, payload_idx,
 		    "SLJIT fused aggregate primitive lane has unsupported state kind",
 		    "SLJIT fused aggregate primitive lane is incomplete: %s");
+		if (payloads.size() == 1) {
+			single_aggregate_int64_value = lane.sum_int64_value;
+			single_aggregate_state_is_set = lane.state_is_set;
+			single_aggregate_row_count = lane.row_count;
+		}
 
 		switch (plan.kind) {
 		case SljitNativeRegionExpressionKind::REFERENCE:
@@ -125,6 +140,11 @@ static void SljitExecuteFusedPrimitiveAggregatePayloadUpdate(
 			                                     count, "SLJIT fused aggregate reference source is out of range",
 			                                     SljitInputSourceKnownNotNull(payloads[payload_idx].input_source_not_null,
 			                                                                  0));
+			if (payloads.size() == 1) {
+				single_source_data = payload_sources.DataArray()[0];
+				single_source_sel = payload_sources.SelectionArray()[0];
+				single_source_validity = payload_sources.ValidityArray()[0];
+			}
 			break;
 		case SljitNativeRegionExpressionKind::INTEGER_BINARY_CONSTANT:
 			payload_sources.PrepareIntegerSource(input, plan.source_index, payload_idx, plan.integer_kind, execute_sel,
@@ -132,6 +152,12 @@ static void SljitExecuteFusedPrimitiveAggregatePayloadUpdate(
 			                                     SljitInputSourceKnownNotNull(payloads[payload_idx].input_source_not_null,
 			                                                                  0));
 			constants[payload_idx] = plan.constant;
+			if (payloads.size() == 1) {
+				single_source_data = payload_sources.DataArray()[0];
+				single_source_sel = payload_sources.SelectionArray()[0];
+				single_source_validity = payload_sources.ValidityArray()[0];
+				single_constant = plan.constant;
+			}
 			break;
 		case SljitNativeRegionExpressionKind::INTEGER_BINARY_REFERENCES:
 			payload_sources.PrepareIntegerSource(input, plan.source_index, payload_idx, plan.integer_kind, execute_sel,
@@ -143,6 +169,14 @@ static void SljitExecuteFusedPrimitiveAggregatePayloadUpdate(
 			                                           "SLJIT fused aggregate binary source is out of range",
 			                                           SljitInputSourceKnownNotNull(
 			                                               payloads[payload_idx].input_source_not_null, 1));
+			if (payloads.size() == 1) {
+				single_source_data = payload_sources.DataArray()[0];
+				single_source_sel = payload_sources.SelectionArray()[0];
+				single_source_validity = payload_sources.ValidityArray()[0];
+				single_right_source_data = right_payload_sources.DataArray()[0];
+				single_right_source_sel = right_payload_sources.SelectionArray()[0];
+				single_right_source_validity = right_payload_sources.ValidityArray()[0];
+			}
 			break;
 		default:
 			throw InternalException("SLJIT fused aggregate primitive payload has no runtime input adapter");
@@ -158,6 +192,18 @@ static void SljitExecuteFusedPrimitiveAggregatePayloadUpdate(
 	native_input.source_validity_array = payload_sources.ValidityArrayOrNull();
 	native_input.right_source_validity_array = right_payload_sources.ValidityArrayOrNull();
 	native_input.constants = constants.data();
+	if (payloads.size() == 1) {
+		native_input.source_data = single_source_data;
+		native_input.source_sel = single_source_sel;
+		native_input.source_validity = single_source_validity;
+		native_input.right_source_data = single_right_source_data;
+		native_input.right_source_sel = single_right_source_sel;
+		native_input.right_source_validity = single_right_source_validity;
+		native_input.constant = single_constant;
+		native_input.aggregate_int64_value = single_aggregate_int64_value;
+		native_input.aggregate_state_is_set = single_aggregate_state_is_set;
+		native_input.aggregate_row_count = single_aggregate_row_count;
+	}
 	native_input.aggregate_int64_values = aggregate_int64_values.data();
 	native_input.aggregate_state_is_sets = aggregate_state_is_sets.data();
 	native_input.aggregate_row_counts = aggregate_row_counts.data();
