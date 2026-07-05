@@ -52,21 +52,6 @@ struct SljitFullPipelineScheduleFacts {
 	idx_t source_batch_tail_start_idx = DConstants::INVALID_INDEX;
 };
 
-struct SljitSelectedJoinAggregateFacts {
-	idx_t pre_join_projection_idx = DConstants::INVALID_INDEX;
-	idx_t first_hash_join_idx = DConstants::INVALID_INDEX;
-	idx_t second_hash_join_idx = DConstants::INVALID_INDEX;
-	idx_t aggregate_idx = DConstants::INVALID_INDEX;
-
-	bool HasPreJoinProjection() const {
-		return pre_join_projection_idx != DConstants::INVALID_INDEX;
-	}
-
-	bool HasSecondHashJoin() const {
-		return second_hash_join_idx != DConstants::INVALID_INDEX;
-	}
-};
-
 struct SljitHashJoinDelimJoinSinkFacts {
 	idx_t first_hash_join_idx = DConstants::INVALID_INDEX;
 	idx_t final_hash_join_idx = DConstants::INVALID_INDEX;
@@ -194,34 +179,6 @@ static SljitFullPipelineScheduleFacts SljitAnalyzeFullPipelineScheduleFacts(cons
 	return facts;
 }
 
-static bool SljitTryAnalyzeSelectedJoinAggregate(const vector<SljitExecutableRegionOp> &ops,
-                                                 SljitSelectedJoinAggregateFacts &facts) {
-	facts = SljitSelectedJoinAggregateFacts();
-	if (ops.size() == 2 && SljitFullPipelineOpIsAt(ops, 0, SljitNativeRegionOpKind::HASH_JOIN_PROBE) &&
-	    SljitFullPipelineOpIsAt(ops, 1, SljitNativeRegionOpKind::AGGREGATE_UPDATE)) {
-		facts.first_hash_join_idx = 0;
-		facts.aggregate_idx = 1;
-		return true;
-	}
-	if (ops.size() == 3 && SljitFullPipelineOpIsAt(ops, 0, SljitNativeRegionOpKind::PROJECTION) &&
-	    SljitFullPipelineOpIsAt(ops, 1, SljitNativeRegionOpKind::HASH_JOIN_PROBE) &&
-	    SljitFullPipelineOpIsAt(ops, 2, SljitNativeRegionOpKind::AGGREGATE_UPDATE)) {
-		facts.pre_join_projection_idx = 0;
-		facts.first_hash_join_idx = 1;
-		facts.aggregate_idx = 2;
-		return true;
-	}
-	if (ops.size() == 3 && SljitFullPipelineOpIsAt(ops, 0, SljitNativeRegionOpKind::HASH_JOIN_PROBE) &&
-	    SljitFullPipelineOpIsAt(ops, 1, SljitNativeRegionOpKind::HASH_JOIN_PROBE) &&
-	    SljitFullPipelineOpIsAt(ops, 2, SljitNativeRegionOpKind::AGGREGATE_UPDATE)) {
-		facts.first_hash_join_idx = 0;
-		facts.second_hash_join_idx = 1;
-		facts.aggregate_idx = 2;
-		return true;
-	}
-	return false;
-}
-
 static bool SljitTryAnalyzeHashJoinDelimJoinSink(const vector<SljitExecutableRegionOp> &ops,
                                                  SljitHashJoinDelimJoinSinkFacts &facts) {
 	facts = SljitHashJoinDelimJoinSinkFacts();
@@ -271,7 +228,9 @@ static bool SljitTryAnalyzeProjectionAggregateSuffix(const vector<SljitExecutabl
 	shape.final_projection_idx = shape.aggregate_idx - 1;
 	if (shape.final_projection_idx >= ops.size() ||
 	    !SljitFullPipelineOpIsAt(ops, shape.final_projection_idx, SljitNativeRegionOpKind::PROJECTION)) {
-		return false;
+		shape.first_projection_idx = DConstants::INVALID_INDEX;
+		shape.final_projection_idx = DConstants::INVALID_INDEX;
+		return true;
 	}
 	shape.first_projection_idx = shape.final_projection_idx;
 	while (shape.first_projection_idx > 0 &&
@@ -286,7 +245,8 @@ static bool SljitTryAnalyzeProjectionAggregatePrefix(const vector<SljitExecutabl
                                                      SljitProjectionAggregatePrefixFacts &facts) {
 	facts = SljitProjectionAggregatePrefixFacts();
 	idx_t op_idx = 0;
-	const auto prefix_end = shape.first_projection_idx;
+	const auto prefix_end =
+	    shape.ProjectionCount() == 0 ? shape.aggregate_idx : shape.first_projection_idx;
 	if (prefix_end == 0) {
 		return true;
 	}

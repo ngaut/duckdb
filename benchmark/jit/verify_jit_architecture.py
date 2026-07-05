@@ -127,6 +127,7 @@ def verify_required_design_files() -> None:
         "src/execution/operator/aggregate/physical_hash_aggregate.cpp",
     ):
         require_file(path)
+    require_absent("extension/jit_sljit/include/sljit_selected_join_aggregate_recipe.hpp")
     require_absent("extension/jit_sljit/include/sljit_distinct_aggregate_update_runtime.hpp")
     require_absent("extension/jit_sljit/include/sljit_direct_join_output_aggregate_descriptor.hpp")
     require_absent("extension/jit_sljit/include/sljit_deferred_pre_projection_filter_build_runtime.hpp")
@@ -2029,14 +2030,14 @@ def verify_primitive_sequence() -> None:
     )
     require_scoped_text(
         "extension/jit_sljit/include/sljit_full_pipeline_recipe_binding.hpp",
-        "MakePreProjectionSelectedJoinAggregateRecipe",
-        "MakeTwoJoinSelectedAggregateRecipe",
+        "MakePreProjectionJoinProjectionAggregateRecipe",
+        "MakeFilterProjectionJoinProjectionAggregateRecipe",
         (
             "SljitPreJoinProjectionViewDescriptor pre_join_view",
             "TryBuildPreJoinProjectionView",
             "optional_ptr<const SljitPreJoinProjectionViewDescriptor> pre_join_view_ptr",
             "pre_join_view_ptr = pre_join_view",
-            "MakePreJoinProjectionHashJoinSelectionSequence(pre_projection_idx, hash_join_idx, true, pre_join_view_ptr)",
+            "MakePreJoinProjectionHashJoinSelectionSequence(pre_join_projection_idx, hash_join_idx, true, pre_join_view_ptr)",
         ),
     )
     require_scoped_text(
@@ -2347,9 +2348,6 @@ def verify_recipe_builder() -> None:
             "SljitAnalyzeFullPipelineScheduleFacts(ops_p)",
             "schedule_facts.uses_extended_source_fetch_budget",
             '#include "sljit_hash_join_delim_join_sink_recipe.hpp"',
-            '#include "sljit_selected_join_aggregate_recipe.hpp"',
-            "SljitTryAnalyzeSelectedJoinAggregate(ops, facts)",
-            "SljitSelectedJoinAggregateRecipeBuilder(ops, binding).Build(recipe, facts)",
             "SljitTryAnalyzeHashJoinDelimJoinSink(ops, facts)",
             "SljitHashJoinDelimJoinSinkRecipeBuilder(ops, binding).Build(recipe, facts)",
             "SljitTryAnalyzeProjectionAggregatePlan",
@@ -2365,6 +2363,9 @@ def verify_recipe_builder() -> None:
         (
             "uses_scan_filters_p",
             "uses_scan_filters",
+            "sljit_selected_join_aggregate_recipe.hpp",
+            "SljitTryAnalyzeSelectedJoinAggregate",
+            "SljitSelectedJoinAggregateRecipeBuilder",
             "facts.HasSecondHashJoin()",
             "facts.HasPreJoinProjection()",
             "MakeTwoJoinSelectedAggregateRecipe(",
@@ -2383,33 +2384,6 @@ def verify_recipe_builder() -> None:
             "\"hash_join_delim_join_sink\"",
             "\"projection_aggregate\"",
             "\"native_tail\"",
-        ),
-    )
-    require_text(
-        "extension/jit_sljit/include/sljit_selected_join_aggregate_recipe.hpp",
-        (
-            "class SljitSelectedJoinAggregateRecipeBuilder",
-            "TryBuildSelectedJoinAggregateRecipeFunction",
-            "struct RegistryEntry",
-            "RecipeRegistry",
-            "registry[entry_idx].try_build",
-            "(this->*registry[entry_idx].try_build)(recipe, facts)",
-            "TryBuildTwoJoinSelectedAggregate",
-            "TryBuildPreProjectionSelectedAggregate",
-            "TryBuildSingleJoinSelectedAggregate",
-            "CanBindAggregateTerminal",
-            "CanBindHashJoinSelection",
-            "MakeTwoJoinSelectedAggregateRecipe",
-            "MakePreProjectionSelectedJoinAggregateRecipe",
-            "MakeSelectedJoinAggregateRecipe",
-        ),
-    )
-    reject_text(
-        "extension/jit_sljit/include/sljit_selected_join_aggregate_recipe.hpp",
-        (
-            "const char *name",
-            "switch (",
-            "enum class SljitSelectedJoinAggregate",
         ),
     )
     require_text(
@@ -2454,6 +2428,8 @@ def verify_recipe_builder() -> None:
             "TryBuildPlainTwoJoinMaterializedTail",
             "HasMarkFilterBoundary",
             "SingleJoinCanUseProjectionAggregateTail",
+            "plan.ProjectionCount() == 0",
+            "projection_count != 0 && projection_count != 1",
             "CanBindSecondHashJoinSelection",
             "TwoJoinHasPreparedPrefix",
             "CanBindHashJoinProbeProjectionInput",
@@ -2472,14 +2448,13 @@ def verify_recipe_builder() -> None:
             "source_batch_boundary_op_idx",
             "source_batch_tail_start_idx",
             "SljitFullPipelineOpIsUngroupedPrimitiveAggregateUpdate",
-            "struct SljitSelectedJoinAggregateFacts",
             "struct SljitHashJoinDelimJoinSinkFacts",
             "struct SljitSourceBatchNativeTailFacts",
             "SljitAnalyzeFullPipelineScheduleFacts",
-            "SljitTryAnalyzeSelectedJoinAggregate",
             "SljitTryAnalyzeHashJoinDelimJoinSink",
             "SljitTryAnalyzeSourceBatchNativeTail",
             "SljitTryAnalyzeProjectionAggregatePlan",
+            "shape.ProjectionCount() == 0 ? shape.aggregate_idx : shape.first_projection_idx",
             "SljitTryAnalyzeMarkFilterProjectionNativeTail",
             "SljitTryAnalyzeGeneratedFilterProjectionNativeTail",
             "SljitTryAnalyzeProjectionFilterProjectionNativeTail",
@@ -2490,6 +2465,8 @@ def verify_recipe_builder() -> None:
         (
             "SljitFullPipelineUsesScanFilteredAggregateTerminal",
             "uses_scan_filters",
+            "struct SljitSelectedJoinAggregateFacts",
+            "SljitTryAnalyzeSelectedJoinAggregate",
         ),
     )
     reject_text(

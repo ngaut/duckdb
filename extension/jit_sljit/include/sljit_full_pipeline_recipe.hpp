@@ -16,7 +16,6 @@
 #include "sljit_hash_join_delim_join_sink_recipe.hpp"
 #include "sljit_native_tail_recipe.hpp"
 #include "sljit_projection_aggregate_recipe.hpp"
-#include "sljit_selected_join_aggregate_recipe.hpp"
 
 #include <utility>
 
@@ -54,20 +53,11 @@ private:
 	static const SljitFullPipelineRecipeRegistryEntry *RecipeRegistry(idx_t &count) {
 		static const SljitFullPipelineRecipeRegistryEntry registry[] = {
 		    {&SljitFullPipelineRecipeBuilder::TryBuildSourceUngroupedAggregateRecipe},
-		    {&SljitFullPipelineRecipeBuilder::TryBuildSelectedJoinAggregateRecipe},
 		    {&SljitFullPipelineRecipeBuilder::TryBuildHashJoinDelimJoinSinkRecipe},
 		    {&SljitFullPipelineRecipeBuilder::TryBuildProjectionAggregateRecipe},
 		    {&SljitFullPipelineRecipeBuilder::TryBuildNativeTailRecipe}};
 		count = sizeof(registry) / sizeof(registry[0]);
 		return registry;
-	}
-
-	bool TryBuildSelectedJoinAggregateRecipe(SljitFullPipelineRecipe &recipe) const {
-		SljitSelectedJoinAggregateFacts facts;
-		if (!SljitTryAnalyzeSelectedJoinAggregate(ops, facts)) {
-			return false;
-		}
-		return SljitSelectedJoinAggregateRecipeBuilder(ops, binding).Build(recipe, facts);
 	}
 
 	bool TryBuildSourceUngroupedAggregateRecipe(SljitFullPipelineRecipe &recipe) const {

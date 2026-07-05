@@ -119,55 +119,6 @@ public:
 		return MakePrimitiveSequence(MakeSourceHashJoinProbeSelectionSequence(hash_join_selection, terminal));
 	}
 
-	SljitFullPipelineRecipe MakeSelectedJoinAggregateRecipe(idx_t hash_join_idx, idx_t aggregate_idx) const {
-		SljitPostJoinProjectionAggregatePrimitive post_join_aggregate;
-		post_join_aggregate.post_join_projection = SljitBindPostJoinProjectionPrimitive(
-		    ops, hash_join_idx, DConstants::INVALID_INDEX, DConstants::INVALID_INDEX);
-		post_join_aggregate.direct_join_output_aggregate =
-		    SljitBindDirectJoinOutputAggregatePrimitive(ops, aggregate_idx);
-		auto terminal = SljitFullPipelinePrimitiveStep::JoinProjectionAggregateUpdate(
-		    SljitMakeSelectedJoinOutputAggregateUpdatePrimitive(post_join_aggregate));
-		auto hash_join_selection = SljitBindHashJoinProbeSelectionPrimitive(
-		    ops, hash_join_idx,
-		    hash_join_idx == 0 &&
-		        SljitHashJoinSourceKey0RangeFitsInt32(ops, hash_join_idx, source_min_values, source_max_values));
-		return MakePrimitiveSequence(MakeSourceHashJoinProbeSelectionSequence(hash_join_selection, terminal));
-	}
-
-	SljitFullPipelineRecipe MakePreProjectionSelectedJoinAggregateRecipe(idx_t pre_projection_idx, idx_t hash_join_idx,
-	                                                                     idx_t aggregate_idx) const {
-		SljitPostJoinProjectionAggregatePrimitive post_join_aggregate;
-		post_join_aggregate.post_join_projection = SljitBindPostJoinProjectionPrimitive(
-		    ops, hash_join_idx, DConstants::INVALID_INDEX, DConstants::INVALID_INDEX);
-		post_join_aggregate.direct_join_output_aggregate =
-		    SljitBindDirectJoinOutputAggregatePrimitive(ops, aggregate_idx);
-		auto terminal = SljitFullPipelinePrimitiveStep::JoinProjectionAggregateUpdate(
-		    SljitMakeSelectedJoinOutputAggregateUpdatePrimitive(post_join_aggregate));
-		SljitPreJoinProjectionViewDescriptor pre_join_view;
-		optional_ptr<const SljitPreJoinProjectionViewDescriptor> pre_join_view_ptr;
-		if (TryBuildPreJoinProjectionView(pre_projection_idx, hash_join_idx, pre_join_view)) {
-			pre_join_view_ptr = pre_join_view;
-		}
-		auto sequence =
-		    MakePreJoinProjectionHashJoinSelectionSequence(pre_projection_idx, hash_join_idx, true, pre_join_view_ptr);
-		sequence.Add(terminal);
-		return MakePrimitiveSequence(std::move(sequence));
-	}
-
-	SljitFullPipelineRecipe MakeTwoJoinSelectedAggregateRecipe(idx_t first_hash_join_idx, idx_t second_hash_join_idx,
-	                                                           idx_t aggregate_idx) const {
-		SljitPostJoinProjectionAggregatePrimitive post_join_aggregate;
-		post_join_aggregate.post_join_projection = SljitBindPostJoinProjectionPrimitive(
-		    ops, second_hash_join_idx, DConstants::INVALID_INDEX, DConstants::INVALID_INDEX);
-		post_join_aggregate.direct_join_output_aggregate =
-		    SljitBindDirectJoinOutputAggregatePrimitive(ops, aggregate_idx);
-		auto sequence = MakeSourceHashJoinProjectionInputSequence(first_hash_join_idx);
-		sequence.Add(MakeHashJoinProbeSelectionStep(second_hash_join_idx));
-		sequence.Add(SljitFullPipelinePrimitiveStep::JoinProjectionAggregateUpdate(
-		    SljitMakeSelectedJoinOutputAggregateUpdatePrimitive(post_join_aggregate)));
-		return MakePrimitiveSequence(std::move(sequence));
-	}
-
 	SljitFullPipelineRecipe
 	MakePreProjectionJoinProjectionAggregateRecipe(const SljitFullPipelineProjectionAggregateShape &shape,
 	                                               idx_t hash_join_idx) const {

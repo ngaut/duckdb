@@ -154,7 +154,8 @@ private:
 			recipe = binding.MakePreProjectionJoinProjectionAggregateRecipe(shape, facts.first_hash_join_idx);
 			return true;
 		}
-		if (!facts.HasPreJoinProjection() && (plan.ProjectionCount() == 1 || plan.ProjectionCount() == 2) &&
+		if (!facts.HasPreJoinProjection() &&
+		    (plan.ProjectionCount() == 0 || plan.ProjectionCount() == 1 || plan.ProjectionCount() == 2) &&
 		    SingleJoinCanUseDirectAggregate(plan)) {
 			recipe = binding.MakeJoinProjectionAggregateRecipe(plan.shape, facts.first_hash_join_idx);
 			return true;
@@ -220,10 +221,19 @@ private:
 	                                         const SljitProjectionAggregatePlanFacts &plan) const {
 		auto &shape = plan.shape;
 		auto &facts = plan.prefix;
-		if (TwoJoinHasPreparedPrefix(plan) || !CanBindSecondHashJoinSelection(plan) || shape.ProjectionCount() != 1 ||
-		    !SljitFullPipelineHashJoinProbeIsMatchedProbeAndBuild(ops, facts.first_hash_join_idx) ||
-		    !SljitFullPipelineHashJoinProbeIsMatchedProbeAndBuild(ops, facts.second_hash_join_idx) ||
+		const auto projection_count = shape.ProjectionCount();
+		if (TwoJoinHasPreparedPrefix(plan) || !CanBindSecondHashJoinSelection(plan) ||
+		    (projection_count != 0 && projection_count != 1) ||
 		    !DirectJoinProjectionAggregateHasDedicatedBackend(shape)) {
+			return false;
+		}
+		if (projection_count == 0) {
+			if (!SljitCanBindHashJoinProbeSelectionPrimitive(ops, facts.first_hash_join_idx) ||
+			    !SljitFullPipelineHashJoinProbeIsMatchedProbeAndBuild(ops, facts.second_hash_join_idx)) {
+				return false;
+			}
+		} else if (!SljitFullPipelineHashJoinProbeIsMatchedProbeAndBuild(ops, facts.first_hash_join_idx) ||
+		           !SljitFullPipelineHashJoinProbeIsMatchedProbeAndBuild(ops, facts.second_hash_join_idx)) {
 			return false;
 		}
 		recipe = binding.MakeTwoJoinDirectProjectionAggregateRecipe(shape, facts.first_hash_join_idx);
@@ -247,6 +257,8 @@ private:
 		auto &shape = plan.shape;
 		auto &facts = plan.prefix;
 		return SljitCanBindHashJoinProbeSelectionPrimitive(ops, facts.first_hash_join_idx) &&
+		       (shape.ProjectionCount() != 0 ||
+		        SljitFullPipelineHashJoinProbeIsMatchedProbeAndBuild(ops, facts.first_hash_join_idx)) &&
 		       DirectJoinProjectionAggregateHasDedicatedBackend(shape);
 	}
 
