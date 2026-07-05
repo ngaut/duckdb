@@ -2239,6 +2239,25 @@ def verify_recipe_builder() -> None:
             "SljitFullPipelinePrimitiveStep::NativeTailHandoff",
         ),
     )
+    require_scoped_text(
+        "extension/jit_sljit/include/sljit_full_pipeline_recipe_binding.hpp",
+        "MakeSourceUngroupedAggregateRecipe",
+        "MakeGeneratedFilterProjectionNativeTailRecipe",
+        (
+            "auto sequence = MakeSourceSequence();",
+            "SljitBindUngroupedAggregateUpdatePrimitive(ops, facts.aggregate_idx)",
+            "sequence.Add(SljitFullPipelinePrimitiveStep::UngroupedAggregateUpdate(aggregate_update));",
+        ),
+    )
+    reject_scoped_text(
+        "extension/jit_sljit/include/sljit_full_pipeline_recipe_binding.hpp",
+        "MakeSourceUngroupedAggregateRecipe",
+        "MakeGeneratedFilterProjectionNativeTailRecipe",
+        (
+            "AddSourceBatchBoundaryIfUseful",
+            "SljitFullPipelinePrimitiveStep::SourceBatchBoundary",
+        ),
+    )
     reject_text(
         "extension/jit_sljit/include/sljit_full_pipeline_recipe_binding.hpp",
         (
@@ -2268,12 +2287,15 @@ def verify_recipe_builder() -> None:
         "extension/jit_sljit/include/sljit_ungrouped_aggregate_update_primitive.hpp",
         (
             "struct SljitUngroupedAggregateUpdatePrimitive",
+            "struct SljitBoundUngroupedPrimitiveAggregateUpdate",
             "SljitCanBindUngroupedAggregateUpdatePrimitive",
             "ExecutionRegionSinkKind::UNGROUPED_AGGREGATE_UPDATE",
-            "SljitExecuteUngroupedPrimitiveAggregateUpdate",
+            "SljitBindUngroupedPrimitiveAggregateUpdate",
+            "SljitExecuteBoundUngroupedPrimitiveAggregateUpdate",
             "SljitBindNativeSink",
             "RecordSinkResult(input.count, sink_result)",
             "SljitUngroupedAggregateUpdateRuntimeState",
+            "SljitBoundUngroupedPrimitiveAggregateUpdate bound_update",
         ),
     )
     reject_text(

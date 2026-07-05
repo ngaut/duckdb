@@ -77,6 +77,76 @@ static void SljitExecuteFusedTypedExpressionAggregatePayloadUpdate(
 	SljitExecuteNativeAggregatePayloadFunction(function, native_input);
 }
 
+static bool SljitTryExecuteSingleFusedPrimitiveAggregatePayloadUpdate(
+    vector<SljitExecutableRegionExpression> &payloads, SljitNativeAggregateUpdateFunction function,
+    const vector<ExecutionRegionAggregateInput> &aggregates,
+    const vector<const ExecutionPrimitiveAggregateUpdateLane *> &lanes, DataChunk &input,
+    const SelectionVector *execute_sel, idx_t count, SljitAggregatePayloadAdapterScratch &adapter_scratch) {
+	if (payloads.size() != 1 || aggregates.size() != 1) {
+		return false;
+	}
+	auto &payload = payloads[0];
+	auto &plan = payload.plan;
+	auto &lane = SljitRequireAggregatePrimitiveLane(
+	    lanes, aggregates, 0, "SLJIT single fused aggregate primitive lane missing for aggregate %llu");
+	if (lane.kind != AggregatePrimitiveUpdateKind::SUM_INT64) {
+		return false;
+	}
+	if (plan.return_type.InternalType() != lane.payload_type) {
+		throw InternalException("SLJIT single fused aggregate primitive payload type mismatch");
+	}
+	SljitValidateUngroupedPrimitiveLaneState(lane, "SLJIT single fused aggregate primitive lane is incomplete: %s",
+	                                         "aggregate-primitive-lane-incomplete");
+
+	adapter_scratch.payload_sources.Resize(1);
+	adapter_scratch.right_payload_sources.Resize(1);
+	auto &payload_sources = adapter_scratch.payload_sources;
+	auto &right_payload_sources = adapter_scratch.right_payload_sources;
+	int64_t constant = 0;
+
+	switch (plan.kind) {
+	case SljitNativeRegionExpressionKind::REFERENCE:
+		payload_sources.PrepareIntegerSource(input, plan.source_index, 0, plan.integer_kind, execute_sel, count,
+		                                     "SLJIT single fused aggregate reference source is out of range",
+		                                     SljitInputSourceKnownNotNull(payload.input_source_not_null, 0));
+		break;
+	case SljitNativeRegionExpressionKind::INTEGER_BINARY_CONSTANT:
+		payload_sources.PrepareIntegerSource(input, plan.source_index, 0, plan.integer_kind, execute_sel, count,
+		                                     "SLJIT single fused aggregate binary source is out of range",
+		                                     SljitInputSourceKnownNotNull(payload.input_source_not_null, 0));
+		constant = plan.constant;
+		break;
+	case SljitNativeRegionExpressionKind::INTEGER_BINARY_REFERENCES:
+		payload_sources.PrepareIntegerSource(input, plan.source_index, 0, plan.integer_kind, execute_sel, count,
+		                                     "SLJIT single fused aggregate binary source is out of range",
+		                                     SljitInputSourceKnownNotNull(payload.input_source_not_null, 0));
+		right_payload_sources.PrepareIntegerSource(input, plan.right_source_index, 0, plan.integer_kind, execute_sel,
+		                                           count,
+		                                           "SLJIT single fused aggregate binary source is out of range",
+		                                           SljitInputSourceKnownNotNull(payload.input_source_not_null, 1));
+		break;
+	default:
+		return false;
+	}
+
+	SljitNativeVectorInput native_input;
+	native_input.execute_sel = execute_sel ? execute_sel->data() : nullptr;
+	native_input.source_data = payload_sources.DataArray()[0];
+	native_input.source_sel = payload_sources.SelectionArray()[0];
+	native_input.source_validity = payload_sources.ValidityArray()[0];
+	native_input.right_source_data = right_payload_sources.DataArray()[0];
+	native_input.right_source_sel = right_payload_sources.SelectionArray()[0];
+	native_input.right_source_validity = right_payload_sources.ValidityArray()[0];
+	native_input.constant = constant;
+	native_input.aggregate_int64_value = lane.sum_int64_value;
+	native_input.aggregate_state_is_set = lane.state_is_set;
+	native_input.aggregate_row_count = lane.row_count;
+	native_input.count = count;
+	native_input.has_error = false;
+	SljitExecuteNativeAggregatePayloadFunction(function, native_input);
+	return true;
+}
+
 static void SljitExecuteFusedPrimitiveAggregatePayloadUpdate(
     vector<SljitExecutableRegionExpression> &payloads, SljitNativeAggregateUpdateFunction function,
     const vector<ExecutionRegionAggregateInput> &aggregates,
@@ -91,6 +161,10 @@ static void SljitExecuteFusedPrimitiveAggregatePayloadUpdate(
 	if (SljitFusedAggregatePayloadsUseTypedExpressionTrees(payloads, aggregates)) {
 		SljitExecuteFusedTypedExpressionAggregatePayloadUpdate(payloads, function, aggregates, lanes, input,
 		                                                       execute_sel, count, adapter_scratch);
+		return;
+	}
+	if (SljitTryExecuteSingleFusedPrimitiveAggregatePayloadUpdate(payloads, function, aggregates, lanes, input,
+	                                                              execute_sel, count, adapter_scratch)) {
 		return;
 	}
 
