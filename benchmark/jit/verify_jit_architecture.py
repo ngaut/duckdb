@@ -51,6 +51,20 @@ def reject_text(path: str, snippets: tuple[str, ...]) -> None:
         raise AssertionError(f"{path}: stale or forbidden text remains {present}")
 
 
+def reject_scoped_text(path: str, start: str, end: str, snippets: tuple[str, ...]) -> None:
+    data = read(path)
+    start_idx = data.find(start)
+    if start_idx == -1:
+        raise AssertionError(f"{path}: missing scope start {start!r}")
+    end_idx = data.find(end, start_idx + len(start))
+    if end_idx == -1:
+        raise AssertionError(f"{path}: missing scope end {end!r}")
+    scope = data[start_idx:end_idx]
+    present = [snippet for snippet in snippets if snippet in scope]
+    if present:
+        raise AssertionError(f"{path}: stale or forbidden text remains in scoped block {present}")
+
+
 def require_scoped_text(path: str, start: str, end: str, snippets: tuple[str, ...]) -> None:
     data = read(path)
     start_idx = data.find(start)
@@ -2583,6 +2597,25 @@ def verify_distinct_aggregate_backend() -> None:
             "primitive.strategy",
             "ExecuteCountStarPreaggregation",
             "primitive_grouped_count_star_row_update",
+            "shared_ptr<SljitExecutableRegionOp> projected_count_star_group_projection",
+            "shared_ptr<SljitProjectedInputGroupedAggregateDescriptor> projected_direct_update",
+            "make_shared_ptr<SljitExecutableRegionOp>",
+            "make_shared_ptr<SljitProjectedInputGroupedAggregateDescriptor>",
+            "SljitTryBindProjectedCountStarGroupedAggregateStrategy",
+            "SljitTryBindProjectedDirectPrimitivePayloadUpdateStrategy",
+            "SljitTryBindProjectedInputGroupedAggregateUpdateStrategy",
+            "projected_direct_update = primitive.projected_direct_update",
+            "projected_count_star_group_projection = primitive.projected_count_star_group_projection",
+        ),
+    )
+    reject_scoped_text(
+        "extension/jit_sljit/include/sljit_grouped_aggregate_update_primitive.hpp",
+        "bool Prepare(ExecutionRegionRuntime &runtime",
+        "bool Execute(ExecutionRegionRuntime &runtime",
+        (
+            "SljitTryBuildProjectedInputGroupedAggregateDescriptor(",
+            "SljitBuildProjectionChainComposedProjection(",
+            "SljitTryBuildCountStarGroupProjection(",
         ),
     )
     reject_text(
@@ -2590,6 +2623,7 @@ def verify_distinct_aggregate_backend() -> None:
         (
             "SljitGroupedAggregateUpdateStrategyKind::STANDARD",
             "SljitGroupedAggregateUpdateStrategyKind::DISTINCT_COUNT_POINTER",
+            "SljitChooseProjectedInputGroupedAggregateUpdateStrategy",
             "ExecuteStandard",
             "ExecuteDistinctCountPointer",
             "SljitExecuteNativeAggregateUpdate",
