@@ -13,8 +13,10 @@
 
 #include "sljit_full_pipeline_recipe_binding.hpp"
 #include "sljit_full_pipeline_recipe_facts.hpp"
+#include "sljit_hash_join_delim_join_sink_recipe.hpp"
 #include "sljit_native_tail_recipe.hpp"
 #include "sljit_projection_aggregate_recipe.hpp"
+#include "sljit_selected_join_aggregate_recipe.hpp"
 
 #include <utility>
 
@@ -64,30 +66,7 @@ private:
 		if (!SljitTryAnalyzeSelectedJoinAggregate(ops, facts)) {
 			return false;
 		}
-		if (facts.HasSecondHashJoin()) {
-			if (!SljitCanBindHashJoinProbeSelectionPrimitive(ops, facts.first_hash_join_idx) ||
-			    !SljitCanBindHashJoinProbeSelectionPrimitive(ops, facts.second_hash_join_idx) ||
-			    !SljitCanBindDirectJoinOutputAggregatePrimitive(ops, facts.aggregate_idx)) {
-				return false;
-			}
-			recipe = binding.MakeTwoJoinSelectedAggregateRecipe(facts.first_hash_join_idx, facts.second_hash_join_idx,
-			                                                    facts.aggregate_idx);
-			return true;
-		}
-		if (!SljitCanBindHashJoinProbeSelectionPrimitive(ops, facts.first_hash_join_idx) ||
-		    !SljitCanBindDirectJoinOutputAggregatePrimitive(ops, facts.aggregate_idx)) {
-			return false;
-		}
-		if (facts.HasPreJoinProjection()) {
-			if (!SljitCanBindProjectionChainPrimitive(ops, facts.pre_join_projection_idx)) {
-				return false;
-			}
-			recipe = binding.MakePreProjectionSelectedJoinAggregateRecipe(
-			    facts.pre_join_projection_idx, facts.first_hash_join_idx, facts.aggregate_idx);
-			return true;
-		}
-		recipe = binding.MakeSelectedJoinAggregateRecipe(facts.first_hash_join_idx, facts.aggregate_idx);
-		return true;
+		return SljitSelectedJoinAggregateRecipeBuilder(ops, binding).Build(recipe, facts);
 	}
 
 	bool TryBuildHashJoinDelimJoinSinkRecipe(SljitFullPipelineRecipe &recipe) const {
@@ -95,25 +74,7 @@ private:
 		if (!SljitTryAnalyzeHashJoinDelimJoinSink(ops, facts)) {
 			return false;
 		}
-		if (facts.sink_idx + 3 > SLJIT_FULL_PIPELINE_MAX_PRIMITIVES ||
-		    !SljitCanBindSelectedHashJoinDelimJoinSinkPrimitive(ops, facts.final_hash_join_idx, facts.sink_idx)) {
-			return false;
-		}
-		for (idx_t hash_join_idx = facts.first_hash_join_idx; hash_join_idx <= facts.final_hash_join_idx;
-		     hash_join_idx++) {
-			if (hash_join_idx == facts.final_hash_join_idx) {
-				if (!SljitCanBindHashJoinProbeSelectionPrimitive(ops, hash_join_idx)) {
-					return false;
-				}
-				continue;
-			}
-			if (!SljitCanBindHashJoinProbeMaterializePrimitive(ops, hash_join_idx)) {
-				return false;
-			}
-		}
-		recipe = binding.MakeHashJoinDelimJoinSinkRecipe(facts.first_hash_join_idx, facts.final_hash_join_idx,
-		                                                 facts.sink_idx);
-		return true;
+		return SljitHashJoinDelimJoinSinkRecipeBuilder(ops, binding).Build(recipe, facts);
 	}
 
 	bool TryBuildProjectionAggregateRecipe(SljitFullPipelineRecipe &recipe) const {
