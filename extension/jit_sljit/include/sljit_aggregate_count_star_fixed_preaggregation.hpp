@@ -378,24 +378,6 @@ static bool TryAccumulatePreaggregatedCountStarGroups(DataChunk &source_groups,
 	}
 }
 
-static bool TryReadProjectionSourceReferenceIndex(const SljitNativeRegionExpressionPlan &projection,
-                                                  idx_t &source_index) {
-	if (projection.kind == SljitNativeRegionExpressionKind::REFERENCE) {
-		source_index = projection.source_index;
-		return true;
-	}
-	if (projection.kind != SljitNativeRegionExpressionKind::EXPRESSION_TREE &&
-	    projection.kind != SljitNativeRegionExpressionKind::TYPED_EXPRESSION_TREE) {
-		return false;
-	}
-	if (!projection.expression_tree || projection.expression_tree->kind != ExecutionExpressionIRKind::REFERENCE ||
-	    projection.expression_tree->ref_index >= projection.expression_tree_source_indices.size()) {
-		return false;
-	}
-	source_index = projection.expression_tree_source_indices[projection.expression_tree->ref_index];
-	return true;
-}
-
 static bool TryPreaggregateProjectedFixedWidthCountStarGroups(const SljitExecutableRegionOp &projection_op,
                                                               DataChunk &input, const SelectionVector *execute_sel,
                                                               idx_t count, DataChunk &compact_groups,

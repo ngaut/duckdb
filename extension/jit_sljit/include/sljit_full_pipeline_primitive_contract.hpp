@@ -88,6 +88,10 @@ static bool SljitFullPipelineTerminalPrimitiveIsExecutable(const vector<SljitExe
 	case SljitFullPipelinePrimitiveKind::JOIN_PROJECTION_AGGREGATE_UPDATE:
 		return SljitFullPipelinePrimitiveStepHasOpCount(step, 2) &&
 		       SljitCanBindJoinProjectionAggregateUpdatePrimitive(ops, step.join_projection_aggregate_update);
+	case SljitFullPipelinePrimitiveKind::UNGROUPED_AGGREGATE_UPDATE:
+		return SljitFullPipelinePrimitiveStepHasOpCount(step, 1) &&
+		       step.ungrouped_aggregate_update.aggregate_idx == step.Op(0) &&
+		       SljitCanBindUngroupedAggregateUpdatePrimitive(ops, step.ungrouped_aggregate_update);
 	case SljitFullPipelinePrimitiveKind::GROUPED_AGGREGATE_UPDATE:
 		if (!SljitCanBindGroupedAggregateUpdatePrimitive(ops, step.grouped_aggregate_update)) {
 			return false;

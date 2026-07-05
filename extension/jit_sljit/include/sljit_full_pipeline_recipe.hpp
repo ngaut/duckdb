@@ -53,6 +53,7 @@ private:
 
 	static const SljitFullPipelineRecipeRegistryEntry *RecipeRegistry(idx_t &count) {
 		static const SljitFullPipelineRecipeRegistryEntry registry[] = {
+		    {&SljitFullPipelineRecipeBuilder::TryBuildSourceUngroupedAggregateRecipe},
 		    {&SljitFullPipelineRecipeBuilder::TryBuildSelectedJoinAggregateRecipe},
 		    {&SljitFullPipelineRecipeBuilder::TryBuildHashJoinDelimJoinSinkRecipe},
 		    {&SljitFullPipelineRecipeBuilder::TryBuildProjectionAggregateRecipe},
@@ -67,6 +68,15 @@ private:
 			return false;
 		}
 		return SljitSelectedJoinAggregateRecipeBuilder(ops, binding).Build(recipe, facts);
+	}
+
+	bool TryBuildSourceUngroupedAggregateRecipe(SljitFullPipelineRecipe &recipe) const {
+		SljitSourceUngroupedAggregateFacts facts;
+		if (!SljitTryAnalyzeSourceUngroupedAggregate(ops, facts)) {
+			return false;
+		}
+		recipe = binding.MakeSourceUngroupedAggregateRecipe(facts);
+		return true;
 	}
 
 	bool TryBuildHashJoinDelimJoinSinkRecipe(SljitFullPipelineRecipe &recipe) const {

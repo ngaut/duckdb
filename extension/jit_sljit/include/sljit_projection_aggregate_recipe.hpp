@@ -71,10 +71,10 @@ private:
 	bool TryBuildSourceProjectionAggregate(SljitFullPipelineRecipe &recipe,
 	                                       const SljitProjectionAggregatePlanFacts &plan) const {
 		auto &shape = plan.shape;
-		if (plan.ProjectionCount() == 0 || !binding.SelectedProjectionAggregateHasDedicatedBackend(shape, true)) {
+		if (plan.ProjectionCount() == 0 || !binding.ProjectionAggregateHasDedicatedBackend(shape, true)) {
 			return false;
 		}
-		recipe = binding.MakeSourceProjectionGroupedAggregateRecipe(shape);
+		recipe = binding.MakeSourceProjectionAggregateRecipe(shape);
 		return true;
 	}
 
@@ -108,7 +108,7 @@ private:
 		}
 		switch (facts.Kind()) {
 		case SljitProjectionAggregatePrefixKind::SINGLE_JOIN:
-			if (!binding.SelectedProjectionAggregateHasDedicatedBackend(shape)) {
+			if (!binding.ProjectionAggregateHasDedicatedBackend(shape)) {
 				if (!binding.CanMakeNativeTailRecipe(facts.mark_filter_idx + 1)) {
 					return false;
 				}
@@ -119,7 +119,7 @@ private:
 			    binding.MakeMarkFilterProjectionAggregateRecipe(shape, facts.first_hash_join_idx, facts.mark_filter_idx);
 			return true;
 		case SljitProjectionAggregatePrefixKind::TWO_JOIN:
-			if (shape.ProjectionCount() != 0 && binding.SelectedProjectionAggregateHasDedicatedBackend(shape)) {
+			if (shape.ProjectionCount() != 0 && binding.ProjectionAggregateHasDedicatedBackend(shape)) {
 				recipe = binding.MakeTwoJoinMarkFilterProjectionAggregateRecipe(
 				    shape, facts.first_hash_join_idx, facts.second_hash_join_idx, facts.mark_filter_idx);
 				return true;

@@ -78,6 +78,10 @@ struct SljitSourceBatchNativeTailFacts {
 	idx_t tail_start_idx = DConstants::INVALID_INDEX;
 };
 
+struct SljitSourceUngroupedAggregateFacts {
+	idx_t aggregate_idx = DConstants::INVALID_INDEX;
+};
+
 enum class SljitProjectionAggregatePrefixKind { INVALID, SOURCE, SINGLE_JOIN, TWO_JOIN };
 
 struct SljitProjectionAggregatePrefixFacts {
@@ -244,6 +248,16 @@ static bool SljitTryAnalyzeSourceBatchNativeTail(const SljitFullPipelineSchedule
 	}
 	facts.boundary_op_idx = schedule_facts.source_batch_boundary_op_idx;
 	facts.tail_start_idx = schedule_facts.source_batch_tail_start_idx;
+	return true;
+}
+
+static bool SljitTryAnalyzeSourceUngroupedAggregate(const vector<SljitExecutableRegionOp> &ops,
+                                                    SljitSourceUngroupedAggregateFacts &facts) {
+	facts = SljitSourceUngroupedAggregateFacts();
+	if (ops.size() != 1 || !SljitFullPipelineOpIsUngroupedPrimitiveAggregateUpdate(ops[0])) {
+		return false;
+	}
+	facts.aggregate_idx = 0;
 	return true;
 }
 

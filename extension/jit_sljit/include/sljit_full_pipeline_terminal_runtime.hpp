@@ -11,9 +11,10 @@
 #include "sljit_delim_join_sink_runtime.hpp"
 #include "sljit_full_pipeline_primitive_contract.hpp"
 #include "sljit_full_pipeline_runtime.hpp"
-#include "sljit_grouped_aggregate_update_primitive.hpp"
+#include "sljit_grouped_aggregate_update_runtime_state.hpp"
 #include "sljit_join_projection_aggregate_update_runtime.hpp"
 #include "sljit_runtime_batch_view.hpp"
+#include "sljit_ungrouped_aggregate_update_primitive.hpp"
 
 namespace duckdb {
 
@@ -32,6 +33,9 @@ public:
 	bool Prepare(ExecutionRegionRuntime &runtime, vector<SljitExecutableRegionOp> &ops,
 	             SljitRegionExecutionScratch &scratch, const SljitFullPipelinePrimitiveStep &terminal_step) {
 		switch (terminal_step.kind) {
+		case SljitFullPipelinePrimitiveKind::UNGROUPED_AGGREGATE_UPDATE:
+			return ungrouped_aggregate_update.Prepare(runtime, ops, scratch,
+			                                          terminal_step.ungrouped_aggregate_update);
 		case SljitFullPipelinePrimitiveKind::GROUPED_AGGREGATE_UPDATE:
 			return grouped_aggregate_update.Prepare(runtime, ops, scratch, terminal_step.grouped_aggregate_update);
 		case SljitFullPipelinePrimitiveKind::JOIN_PROJECTION_AGGREGATE_UPDATE:
@@ -51,6 +55,10 @@ public:
 	             SljitRegionExecutionScratch &scratch, const SljitFullPipelinePrimitiveStep &terminal_step,
 	             const SljitRuntimeBatchView &input, bool have_more_output, idx_t &processed_batches) {
 		switch (terminal_step.kind) {
+		case SljitFullPipelinePrimitiveKind::UNGROUPED_AGGREGATE_UPDATE:
+			return ungrouped_aggregate_update.Execute(runtime, result, ops, scratch,
+			                                          terminal_step.ungrouped_aggregate_update, input,
+			                                          processed_batches);
 		case SljitFullPipelinePrimitiveKind::GROUPED_AGGREGATE_UPDATE:
 			return ExecuteGroupedAggregateUpdate(runtime, result, ops, scratch, terminal_step, input,
 			                                     processed_batches);
@@ -72,6 +80,9 @@ public:
 	           SljitRegionExecutionScratch &scratch, const SljitFullPipelinePrimitiveStep &terminal_step,
 	           idx_t &processed_batches) {
 		switch (terminal_step.kind) {
+		case SljitFullPipelinePrimitiveKind::UNGROUPED_AGGREGATE_UPDATE:
+			return ungrouped_aggregate_update.Flush(runtime, ops, scratch,
+			                                        terminal_step.ungrouped_aggregate_update);
 		case SljitFullPipelinePrimitiveKind::GROUPED_AGGREGATE_UPDATE:
 			return grouped_aggregate_update.Flush(runtime, ops, scratch, terminal_step.grouped_aggregate_update);
 		case SljitFullPipelinePrimitiveKind::JOIN_PROJECTION_AGGREGATE_UPDATE:
@@ -130,6 +141,7 @@ private:
 	const vector<idx_t> &source_distinct_counts;
 	const vector<Value> &source_min_values;
 	const vector<Value> &source_max_values;
+	SljitUngroupedAggregateUpdateRuntimeState ungrouped_aggregate_update;
 	SljitGroupedAggregateUpdateRuntimeState grouped_aggregate_update;
 	SljitJoinProjectionAggregateUpdateRuntimeState join_projection_aggregate_update;
 	SljitDelimJoinSinkRuntimeState delim_join_sink;

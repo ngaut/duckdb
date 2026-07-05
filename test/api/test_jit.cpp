@@ -784,7 +784,7 @@ TEST_CASE("JIT backend owns scan-filtered aggregate terminals through DuckDB sca
 	                          "FROM range(100000) tbl(i)"));
 
 	const string query = "SELECT sum(x), sum((x * 1.5) + (y / 4.0)) "
-	                     "FROM jit_scan_filtered_aggregate_terminal WHERE i % 7 <> 0";
+	                     "FROM jit_scan_filtered_aggregate_terminal WHERE i % 97 = 0";
 	REQUIRE_NO_FAIL(con.Query("SET jit_policy='off'"));
 	auto reference = con.Query(query);
 	REQUIRE_NO_FAIL(*reference);
@@ -808,6 +808,20 @@ TEST_CASE("JIT backend owns scan-filtered aggregate terminals through DuckDB sca
 		REQUIRE(event.runner_cost.selected_accelerated_runner);
 	}
 	REQUIRE(found_scan_filtered_aggregate);
+
+	RequireJitEvent(
+	    manager,
+	    [](const ExecutionRegionEvent &event) {
+		    return EventPhase(event) == "runtime" && EventStatus(event) == "executed" &&
+		           EventExecutionMode(event) == "native" &&
+		           StringUtil::Contains(EventJitRuntimePathCounts(event), "projection.source_batch_boundary=") &&
+		           StringUtil::Contains(EventJitRuntimePathCounts(event), "aggregate_update.primitive_payload_update=");
+	    },
+	    [](const ExecutionRegionEvent &event) {
+		    REQUIRE(StringUtil::Contains(EventJitMaterializationBoundaryCounts(event), "projection.source_batch="));
+		    REQUIRE(StringUtil::Contains(EventJitMaterializationBoundaryCounts(event),
+		                                 "aggregate_update.direct_state_update="));
+	    });
 }
 
 TEST_CASE("JIT scan-filtered grouped aggregate uses source batch grouped primitive recipe", "[api][jit]") {

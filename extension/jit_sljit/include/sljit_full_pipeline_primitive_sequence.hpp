@@ -20,6 +20,7 @@
 #include "sljit_hash_join_probe_primitive.hpp"
 #include "sljit_join_projection_aggregate_update_primitive.hpp"
 #include "sljit_projection_chain_runtime.hpp"
+#include "sljit_ungrouped_aggregate_update_primitive.hpp"
 
 namespace duckdb {
 
@@ -33,6 +34,7 @@ enum class SljitFullPipelinePrimitiveKind : uint8_t {
 	MARK_PROBE_FILTER_BOUNDARY,
 	PROJECTION_CHAIN,
 	JOIN_PROJECTION_AGGREGATE_UPDATE,
+	UNGROUPED_AGGREGATE_UPDATE,
 	GROUPED_AGGREGATE_UPDATE,
 	DELIM_JOIN_SINK,
 	NATIVE_TAIL_HANDOFF
@@ -51,6 +53,7 @@ struct SljitFullPipelinePrimitiveStep {
 	SljitMarkProbeFilterBoundaryPrimitive mark_probe_filter_boundary;
 	SljitProjectionChainPrimitive projection_chain;
 	SljitJoinProjectionAggregateUpdatePrimitive join_projection_aggregate_update;
+	SljitUngroupedAggregateUpdatePrimitive ungrouped_aggregate_update;
 	SljitGroupedAggregateUpdatePrimitive grouped_aggregate_update;
 	SljitDelimJoinSinkPrimitive delim_join_sink;
 
@@ -110,6 +113,14 @@ struct SljitFullPipelinePrimitiveStep {
 		                 {SljitJoinProjectionAggregateUpdateFirstOpIdx(primitive),
 		                  SljitJoinProjectionAggregateUpdateAggregateIdx(primitive)});
 		step.join_projection_aggregate_update = primitive;
+		return step;
+	}
+
+	static SljitFullPipelinePrimitiveStep
+	UngroupedAggregateUpdate(const SljitUngroupedAggregateUpdatePrimitive &primitive) {
+		auto step =
+		    Make(SljitFullPipelinePrimitiveKind::UNGROUPED_AGGREGATE_UPDATE, {primitive.aggregate_idx});
+		step.ungrouped_aggregate_update = primitive;
 		return step;
 	}
 
