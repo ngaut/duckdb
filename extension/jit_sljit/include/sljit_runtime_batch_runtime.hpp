@@ -14,6 +14,8 @@
 
 #include "duckdb/common/types.hpp"
 #include "duckdb/common/vector/flat_vector.hpp"
+#include "duckdb/common/vector/dictionary_vector.hpp"
+#include "duckdb/common/vector/unified_vector_format.hpp"
 #include "duckdb/execution/execution_region_runtime.hpp"
 
 #include <chrono>
@@ -21,35 +23,63 @@
 
 namespace duckdb {
 
-static bool SljitVectorCanFastAppendFixedFlatAllValid(Vector &target, Vector &source, idx_t append_count,
-                                                      idx_t new_count) {
+static bool SljitSourceVectorKnownAllValid(Vector &source) {
+	switch (source.GetVectorType()) {
+	case VectorType::FLAT_VECTOR:
+		return FlatVector::Validity(source).CannotHaveNull();
+	case VectorType::CONSTANT_VECTOR:
+		return !ConstantVector::IsNull(source);
+	case VectorType::DICTIONARY_VECTOR: {
+		auto &child = DictionaryVector::Child(source);
+		return child.GetVectorType() == VectorType::FLAT_VECTOR && FlatVector::Validity(child).CannotHaveNull();
+	}
+	default:
+		return false;
+	}
+}
+
+static bool SljitVectorCanFastAppendFixedAllValid(Vector &target, Vector &source, idx_t append_count,
+                                                  idx_t new_count) {
 	if (target.GetType() != source.GetType()) {
 		return false;
 	}
-	if (target.GetVectorType() != VectorType::FLAT_VECTOR || source.GetVectorType() != VectorType::FLAT_VECTOR) {
+	if (target.GetVectorType() != VectorType::FLAT_VECTOR) {
 		return false;
 	}
 	if (FlatVector::GetCapacity(target) < new_count) {
 		return false;
 	}
-	if (FlatVector::Validity(target).CanHaveNull() || !FlatVector::Validity(source).CheckAllValid(append_count)) {
+	if (FlatVector::Validity(target).CanHaveNull() || !SljitSourceVectorKnownAllValid(source)) {
 		return false;
 	}
 	const auto physical_type = target.GetType().InternalType();
 	return TypeIsConstantSize(physical_type);
 }
 
-static void SljitFastAppendFixedFlatAllValidVector(Vector &target, Vector &source, idx_t target_count,
-                                                   idx_t append_count, idx_t new_count) {
+static void SljitCopyFixedWidthUnifiedAllValid(const UnifiedVectorFormat &source_format, data_ptr_t target_data,
+                                               idx_t append_count, idx_t type_size) {
+	if (source_format.sel == FlatVector::IncrementalSelectionVector()) {
+		memcpy(target_data, source_format.data, append_count * type_size);
+		return;
+	}
+	for (idx_t row_idx = 0; row_idx < append_count; row_idx++) {
+		const auto source_idx = source_format.sel->get_index(row_idx);
+		memcpy(target_data + row_idx * type_size, source_format.data + source_idx * type_size, type_size);
+	}
+}
+
+static void SljitFastAppendFixedAllValidVector(Vector &target, Vector &source, idx_t target_count, idx_t append_count,
+                                               idx_t new_count) {
 	const auto physical_type = target.GetType().InternalType();
 	const auto type_size = GetTypeIdSize(physical_type);
 	auto target_data = FlatVector::GetDataMutable(target) + target_count * type_size;
-	auto source_data = FlatVector::GetData(source);
-	memcpy(target_data, source_data, append_count * type_size);
+	UnifiedVectorFormat source_format;
+	source.ToUnifiedFormat(source_format);
+	SljitCopyFixedWidthUnifiedAllValid(source_format, target_data, append_count, type_size);
 	FlatVector::SetSize(target, new_count);
 }
 
-static bool SljitTryFastAppendFixedFlatAllValid(DataChunk &target, DataChunk &source) {
+static bool SljitTryFastAppendFixedAllValid(DataChunk &target, DataChunk &source) {
 	const auto append_count = source.size();
 	if (append_count == 0) {
 		return true;
@@ -63,14 +93,14 @@ static bool SljitTryFastAppendFixedFlatAllValid(DataChunk &target, DataChunk &so
 		return false;
 	}
 	for (idx_t col_idx = 0; col_idx < target.ColumnCount(); col_idx++) {
-		if (!SljitVectorCanFastAppendFixedFlatAllValid(target.data[col_idx], source.data[col_idx], append_count,
-		                                               new_count)) {
+		if (!SljitVectorCanFastAppendFixedAllValid(target.data[col_idx], source.data[col_idx], append_count,
+		                                           new_count)) {
 			return false;
 		}
 	}
 	for (idx_t col_idx = 0; col_idx < target.ColumnCount(); col_idx++) {
-		SljitFastAppendFixedFlatAllValidVector(target.data[col_idx], source.data[col_idx], target_count, append_count,
-		                                        new_count);
+		SljitFastAppendFixedAllValidVector(target.data[col_idx], source.data[col_idx], target_count, append_count,
+		                                    new_count);
 	}
 	target.CheckCardinality(new_count);
 	return true;
@@ -103,7 +133,7 @@ static bool SljitAppendChunkToInitializedBatch(ExecutionRegionRuntime &runtime, 
 	if (trace_append) {
 		append_stage_start = SljitRegionStageStart(runtime);
 	}
-	if (!SljitTryFastAppendFixedFlatAllValid(batch, chunk)) {
+	if (!SljitTryFastAppendFixedAllValid(batch, chunk)) {
 		batch.Append(chunk);
 	}
 	if (trace_append) {

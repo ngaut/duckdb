@@ -38,6 +38,14 @@ struct SljitDataChunkBatch {
 		initialized = true;
 	}
 
+	void EnsureFromChunk(Allocator &allocator, DataChunk &source) {
+		if (initialized) {
+			return;
+		}
+		chunk.Initialize(allocator, source.GetTypes());
+		initialized = true;
+	}
+
 	void Reset() {
 		if (initialized) {
 			chunk.Reset();

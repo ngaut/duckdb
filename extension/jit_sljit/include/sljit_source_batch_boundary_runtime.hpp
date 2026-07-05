@@ -48,7 +48,7 @@ public:
 		};
 
 		auto &boundary_batch = boundary_batches[step_idx];
-		boundary_batch.Ensure(runtime.GetAllocator(), chunk.GetTypes());
+		boundary_batch.EnsureFromChunk(runtime.GetAllocator(), chunk);
 		auto &batch = boundary_batch.chunk;
 		if (batch.size() + chunk.size() > STANDARD_VECTOR_SIZE && flush_batch(true)) {
 			return true;
@@ -68,7 +68,7 @@ public:
 			return execute_boundary_batch(chunk, have_more_output);
 		}
 		auto stage_start = SljitRegionStageStart(runtime);
-		if (!SljitTryFastAppendFixedFlatAllValid(batch, chunk)) {
+		if (!SljitTryFastAppendFixedAllValid(batch, chunk)) {
 			batch.Append(chunk);
 		}
 		RecordSljitRegionStageRuntime(runtime, op_idx, trace_op.kind, "source_batch_boundary_append", stage_start);
@@ -109,8 +109,8 @@ private:
 	}
 
 	static bool CanCoalesce(DataChunk &chunk) {
-		for (auto &type : chunk.GetTypes()) {
-			if (!TypeIsConstantSize(type.InternalType())) {
+		for (auto &vector : chunk.data) {
+			if (!TypeIsConstantSize(vector.GetType().InternalType())) {
 				return false;
 			}
 		}

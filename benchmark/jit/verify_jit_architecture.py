@@ -1719,9 +1719,10 @@ def verify_primitive_sequence() -> None:
         (
             "class SljitSourceBatchBoundaryRuntime",
             "boundary_batches",
+            "EnsureFromChunk(runtime.GetAllocator(), chunk)",
             "ShouldBatch",
             "CanCoalesce",
-            "TypeIsConstantSize(type.InternalType())",
+            "TypeIsConstantSize(vector.GetType().InternalType())",
             "SljitAdvanceSinkBatchBlocked(runtime, batch, batch_has_more_output)",
             "RecordSljitRegionRuntimePath(runtime, trace_op.kind, \"source_batch_boundary\", chunk.size())",
             "\"source_batch_boundary_reference_handoff\"",

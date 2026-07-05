@@ -371,7 +371,7 @@ static bool SljitExecuteProjectionChainPrimitive(ExecutionRegionRuntime &runtime
 				SljitExecuteProjection(scratch, primitive.final_projection_idx, *projection_op, *source_chunk, filtered,
 				                       selection, count);
 			}
-			if (!SljitTryFastAppendFixedFlatAllValid(batch, filtered)) {
+			if (!SljitTryFastAppendFixedAllValid(batch, filtered)) {
 				batch.Append(filtered);
 			}
 		}
