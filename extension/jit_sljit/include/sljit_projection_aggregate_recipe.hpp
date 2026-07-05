@@ -59,7 +59,7 @@ private:
 	bool TryBuildSourceProjectionAggregate(SljitFullPipelineRecipe &recipe,
 	                                       const SljitProjectionAggregatePlanFacts &plan) const {
 		auto &shape = plan.shape;
-		if (plan.ProjectionCount() == 0 || !binding.SelectedProjectionAggregateHasDedicatedBackend(shape)) {
+		if (plan.ProjectionCount() == 0 || !binding.SelectedProjectionAggregateHasDedicatedBackend(shape, true)) {
 			return false;
 		}
 		recipe = binding.MakeSourceProjectionGroupedAggregateRecipe(shape);

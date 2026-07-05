@@ -11,6 +11,7 @@
 #include "sljit_aggregate_count_star_fixed_preaggregation.hpp"
 #include "sljit_aggregate_count_star_string_preaggregation.hpp"
 #include "sljit_full_pipeline_runtime.hpp"
+#include "sljit_grouped_aggregate_descriptor.hpp"
 #include "sljit_grouped_aggregate_update_runtime.hpp"
 #include "sljit_grouped_count_star_update_runtime.hpp"
 #include "sljit_projection_chain_runtime.hpp"
@@ -153,7 +154,8 @@ static bool SljitTryBuildCountStarGroupProjection(const SljitExecutableRegionOp 
 static SljitGroupedAggregateUpdateStrategyKind
 SljitChooseProjectedInputGroupedAggregateUpdateStrategy(const vector<SljitExecutableRegionOp> &ops,
                                                         idx_t first_projection_idx, idx_t final_projection_idx,
-                                                        idx_t aggregate_idx) {
+                                                        idx_t aggregate_idx,
+                                                        bool allow_direct_primitive_payload_update = false) {
 	if (!SljitCanBindProjectionChainPrimitive(ops, first_projection_idx, final_projection_idx) ||
 	    !SljitCanBindGroupedAggregateUpdatePrimitive(ops, aggregate_idx) ||
 	    SljitChooseGroupedAggregateUpdateStrategy(ops[aggregate_idx]) ==
@@ -166,20 +168,30 @@ SljitChooseProjectedInputGroupedAggregateUpdateStrategy(const vector<SljitExecut
 		return SljitGroupedAggregateUpdateStrategyKind::INVALID;
 	}
 	SljitExecutableRegionOp group_projection;
-	if (!SljitTryBuildCountStarGroupProjection(semantic_projection, ops[aggregate_idx], group_projection)) {
-		return SljitGroupedAggregateUpdateStrategyKind::INVALID;
-	}
-	if (SljitCountStarProjectionInputSupported(group_projection)) {
+	if (SljitTryBuildCountStarGroupProjection(semantic_projection, ops[aggregate_idx], group_projection) &&
+	    SljitCountStarProjectionInputSupported(group_projection)) {
 		return SljitGroupedAggregateUpdateStrategyKind::COUNT_STAR_PREAGGREGATION;
+	}
+	if (allow_direct_primitive_payload_update) {
+		SljitProjectedInputGroupedAggregateDescriptor descriptor;
+		if (SljitTryBuildProjectedInputGroupedAggregateDescriptor(
+		        ops, first_projection_idx, final_projection_idx, aggregate_idx,
+		        optional_ptr<SljitProjectedInputGroupedAggregateDescriptor>(&descriptor)) &&
+		    SljitProjectedInputGroupedAggregateCanUseCompactInput(descriptor)) {
+			return SljitGroupedAggregateUpdateStrategyKind::DIRECT_PRIMITIVE_PAYLOAD_UPDATE;
+		}
 	}
 	return SljitGroupedAggregateUpdateStrategyKind::INVALID;
 }
 
 static bool SljitCanBindProjectedInputGroupedAggregateUpdatePrimitive(const vector<SljitExecutableRegionOp> &ops,
                                                                       idx_t first_projection_idx,
-                                                                      idx_t final_projection_idx, idx_t aggregate_idx) {
+                                                                      idx_t final_projection_idx, idx_t aggregate_idx,
+                                                                      bool allow_direct_primitive_payload_update =
+                                                                          false) {
 	return SljitChooseProjectedInputGroupedAggregateUpdateStrategy(ops, first_projection_idx, final_projection_idx,
-	                                                               aggregate_idx) !=
+	                                                               aggregate_idx,
+	                                                               allow_direct_primitive_payload_update) !=
 	       SljitGroupedAggregateUpdateStrategyKind::INVALID;
 }
 
@@ -210,14 +222,17 @@ SljitBindGroupedAggregateUpdatePrimitive(const vector<SljitExecutableRegionOp> &
 static SljitGroupedAggregateUpdatePrimitive
 SljitBindProjectedInputGroupedAggregateUpdatePrimitive(const vector<SljitExecutableRegionOp> &ops,
                                                        idx_t first_projection_idx, idx_t final_projection_idx,
-                                                       idx_t aggregate_idx) {
+                                                       idx_t aggregate_idx,
+                                                       bool allow_direct_primitive_payload_update = false) {
 	if (!SljitCanBindProjectedInputGroupedAggregateUpdatePrimitive(ops, first_projection_idx, final_projection_idx,
-	                                                               aggregate_idx)) {
+	                                                               aggregate_idx,
+	                                                               allow_direct_primitive_payload_update)) {
 		throw InternalException("SLJIT projected grouped aggregate update primitive cannot bind requested operators");
 	}
 	auto primitive = SljitBindGroupedAggregateUpdatePrimitive(ops, aggregate_idx);
 	primitive.strategy = SljitChooseProjectedInputGroupedAggregateUpdateStrategy(ops, first_projection_idx,
-	                                                                             final_projection_idx, aggregate_idx);
+	                                                                             final_projection_idx, aggregate_idx,
+	                                                                             allow_direct_primitive_payload_update);
 	primitive.input_kind = SljitGroupedAggregateUpdateInputKind::PROJECTED_INPUT;
 	primitive.first_projection_idx = first_projection_idx;
 	primitive.final_projection_idx = final_projection_idx;
@@ -240,7 +255,8 @@ static bool SljitCanBindGroupedAggregateUpdatePrimitive(const vector<SljitExecut
 	case SljitGroupedAggregateUpdateInputKind::PROJECTED_INPUT:
 		return primitive.strategy ==
 		       SljitChooseProjectedInputGroupedAggregateUpdateStrategy(
-		           ops, primitive.first_projection_idx, primitive.final_projection_idx, primitive.aggregate_idx);
+		           ops, primitive.first_projection_idx, primitive.final_projection_idx, primitive.aggregate_idx,
+		           primitive.strategy == SljitGroupedAggregateUpdateStrategyKind::DIRECT_PRIMITIVE_PAYLOAD_UPDATE);
 	}
 	return false;
 }
@@ -250,6 +266,14 @@ struct SljitGroupedAggregateUpdateRuntimeState {
 	             SljitRegionExecutionScratch &scratch, const SljitGroupedAggregateUpdatePrimitive &primitive) {
 		if (primitive.strategy == SljitGroupedAggregateUpdateStrategyKind::DIRECT_PRIMITIVE_PAYLOAD_UPDATE) {
 			deferred_grouped_finish = false;
+			if (primitive.input_kind == SljitGroupedAggregateUpdateInputKind::PROJECTED_INPUT) {
+				if (!SljitTryBuildProjectedInputGroupedAggregateDescriptor(
+				    ops, primitive.first_projection_idx, primitive.final_projection_idx, primitive.aggregate_idx,
+				    optional_ptr<SljitProjectedInputGroupedAggregateDescriptor>(&projected_direct_update))) {
+					return false;
+				}
+				return SljitProjectedInputGroupedAggregateCanUseCompactInput(projected_direct_update);
+			}
 			return true;
 		}
 		if (primitive.strategy != SljitGroupedAggregateUpdateStrategyKind::COUNT_STAR_PREAGGREGATION) {
@@ -327,6 +351,10 @@ private:
 	                                         SljitRegionExecutionScratch &scratch,
 	                                         const SljitGroupedAggregateUpdatePrimitive &primitive,
 	                                         const SljitRuntimeBatchView &input, idx_t &processed_batches) {
+		if (primitive.input_kind == SljitGroupedAggregateUpdateInputKind::PROJECTED_INPUT) {
+			return ExecuteProjectedDirectPrimitivePayloadUpdate(runtime, result, ops, scratch, primitive, input,
+			                                                   processed_batches);
+		}
 		auto &input_chunk = SljitBindMaterializedRuntimeBatchInput(input, "SLJIT grouped aggregate direct update");
 		auto &aggregate_op = ops[primitive.aggregate_idx];
 		auto &native_runtime = runtime.ExecutionOperators();
@@ -342,6 +370,100 @@ private:
 		}
 		processed_batches++;
 		return false;
+	}
+
+	bool ExecuteProjectedDirectPrimitivePayloadUpdate(ExecutionRegionRuntime &runtime, ExecutionRegionResult &result,
+	                                                  vector<SljitExecutableRegionOp> &ops,
+	                                                  SljitRegionExecutionScratch &scratch,
+	                                                  const SljitGroupedAggregateUpdatePrimitive &primitive,
+	                                                  const SljitRuntimeBatchView &input, idx_t &processed_batches) {
+		(void)result;
+		if (!projected_direct_update.Ready()) {
+			throw InternalException("SLJIT projected grouped aggregate direct update descriptor is not prepared");
+		}
+		if (input.HasHashJoinSelection()) {
+			throw InternalException("SLJIT projected grouped aggregate direct update requires a source batch view");
+		}
+		auto &input_chunk = SljitBindRuntimeBatchInput(input, "SLJIT projected grouped aggregate direct update");
+		if (input_chunk.ColumnCount() != projected_direct_update.input_types.size()) {
+			throw InternalException("SLJIT projected grouped aggregate direct update input schema mismatch");
+		}
+		DataChunk *source_input = &input_chunk;
+		if (input.selection) {
+			projected_direct_selected_input.Ensure(runtime.GetAllocator(), projected_direct_update.input_types);
+			auto &selected_input = projected_direct_selected_input.chunk;
+			selected_input.Reset();
+			selected_input.Slice(input_chunk, *input.selection, input.count);
+			source_input = &selected_input;
+		}
+		auto &aggregate_input = BuildProjectedDirectAggregateInput(runtime, ops, primitive, *source_input);
+		auto &aggregate_op = ops[primitive.aggregate_idx];
+		if (aggregate_op.aggregate_update.dense_group_domain.ready) {
+			RecordSljitRegionRuntimePath(runtime, aggregate_op.kind, "direct_projected_dense_group_domain",
+			                             aggregate_input.size());
+		}
+		auto sink_result =
+		    SljitExecutePrimitiveAggregateUpdate(runtime, runtime.ExecutionOperators(), scratch, primitive.aggregate_idx,
+		                                         aggregate_op, aggregate_input, nullptr, DConstants::INVALID_INDEX, true,
+		                                         optional_ptr<bool>(&deferred_grouped_finish));
+		sink_result = runtime.ExecutionOperators().RecordSinkResult(aggregate_input, sink_result);
+		if (SljitNativeSinkResultStopsExecution(runtime, sink_result, result)) {
+			SljitFinishDeferredGroupedAggregateUpdate(runtime, scratch, primitive.aggregate_idx,
+			                                          deferred_grouped_finish);
+			return true;
+		}
+		RecordSljitRegionRuntimePath(runtime, aggregate_op.kind, "direct_projected_input_vector_grouped_update",
+		                             aggregate_input.size());
+		processed_batches++;
+		return false;
+	}
+
+	DataChunk &BuildProjectedDirectAggregateInput(ExecutionRegionRuntime &runtime,
+	                                             const vector<SljitExecutableRegionOp> &ops,
+	                                             const SljitGroupedAggregateUpdatePrimitive &primitive,
+	                                             DataChunk &source_input) {
+		auto &aggregate_op = ops[primitive.aggregate_idx];
+		auto &sink_info = aggregate_op.aggregate_update.plan.sink_info;
+		auto &projection = projected_direct_update.projection;
+		projected_direct_aggregate_input.Ensure(runtime.GetAllocator(), projection.output_types);
+		auto &aggregate_input = projected_direct_aggregate_input.chunk;
+		aggregate_input.Reset();
+		if (aggregate_input.ColumnCount() != projection.output_types.size()) {
+			throw InternalException("SLJIT projected compact aggregate input schema mismatch");
+		}
+		for (idx_t group_idx = 0; group_idx < sink_info.groups.size(); group_idx++) {
+			auto &group = sink_info.groups[group_idx];
+			if (group.input_index >= aggregate_input.ColumnCount() ||
+			    group_idx >= projected_direct_update.group_sources.size()) {
+				throw InternalException("SLJIT projected compact aggregate group source mismatch");
+			}
+			if (!SljitTryMaterializeInputVectorGroupSource(source_input, projected_direct_update.group_sources[group_idx],
+			                                               aggregate_input.data[group.input_index], source_input.size(),
+			                                               false)) {
+				throw InternalException("SLJIT projected compact aggregate group materialization failed");
+			}
+		}
+		if (projected_direct_update.payload_projection_indices.size() !=
+		    projected_direct_update.payload_source_indices.size()) {
+			throw InternalException("SLJIT projected compact aggregate payload mapping mismatch");
+		}
+		for (idx_t payload_idx = 0; payload_idx < projected_direct_update.payload_projection_indices.size();
+		     payload_idx++) {
+			const auto projection_idx = projected_direct_update.payload_projection_indices[payload_idx];
+			const auto source_idx = projected_direct_update.payload_source_indices[payload_idx];
+			if (projection_idx == DConstants::INVALID_INDEX || source_idx == DConstants::INVALID_INDEX) {
+				continue;
+			}
+			if (projection_idx >= aggregate_input.ColumnCount() || source_idx >= source_input.ColumnCount() ||
+			    aggregate_input.data[projection_idx].GetType() != source_input.data[source_idx].GetType()) {
+				throw InternalException("SLJIT projected compact aggregate payload source mismatch");
+			}
+			aggregate_input.data[projection_idx].Reference(source_input.data[source_idx]);
+		}
+		aggregate_input.SetChildCardinality(source_input.size());
+		RecordSljitRegionMaterializationBoundary(runtime, aggregate_op.kind, "projected_compact_aggregate_input",
+		                                         source_input.size());
+		return aggregate_input;
 	}
 
 	bool ExecuteCountStarPreaggregation(ExecutionRegionRuntime &runtime, ExecutionRegionResult &result,
@@ -571,6 +693,9 @@ private:
 	SljitExecutableRegionOp projected_count_star_group_projection;
 	SljitExpressionAdapterScratch projected_count_star_group_scratch;
 	SljitCountStarGroupedAggregateUpdateDescriptor count_star_update;
+	SljitProjectedInputGroupedAggregateDescriptor projected_direct_update;
+	SljitDataChunkBatch projected_direct_selected_input;
+	SljitDataChunkBatch projected_direct_aggregate_input;
 };
 
 } // namespace duckdb

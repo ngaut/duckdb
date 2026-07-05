@@ -15,7 +15,7 @@
 namespace duckdb {
 
 static bool
-SljitFusedAggregatePayloadsUseTypedExpressionTrees(vector<SljitExecutableRegionExpression> &payloads,
+SljitFusedAggregatePayloadsUseTypedExpressionTrees(const vector<SljitExecutableRegionExpression> &payloads,
                                                    const vector<ExecutionRegionAggregateInput> &aggregates) {
 	if (payloads.size() != aggregates.size()) {
 		return false;
@@ -38,7 +38,7 @@ SljitFusedAggregatePayloadsUseTypedExpressionTrees(vector<SljitExecutableRegionE
 }
 
 static bool
-SljitFusedGroupedAggregatePayloadsUseReferenceAdapter(vector<SljitExecutableRegionExpression> &payloads,
+SljitFusedGroupedAggregatePayloadsUseReferenceAdapter(const vector<SljitExecutableRegionExpression> &payloads,
                                                       const vector<ExecutionRegionAggregateInput> &aggregates) {
 	if (payloads.size() != aggregates.size()) {
 		return false;
@@ -57,7 +57,7 @@ SljitFusedGroupedAggregatePayloadsUseReferenceAdapter(vector<SljitExecutableRegi
 }
 
 static bool
-SljitFusedGroupedAggregatePayloadsUseRuntimeInputAdapter(vector<SljitExecutableRegionExpression> &payloads,
+SljitFusedGroupedAggregatePayloadsUseRuntimeInputAdapter(const vector<SljitExecutableRegionExpression> &payloads,
                                                          const vector<ExecutionRegionAggregateInput> &aggregates) {
 	return SljitFusedAggregatePayloadsUseTypedExpressionTrees(payloads, aggregates) ||
 	       SljitFusedGroupedAggregatePayloadsUseReferenceAdapter(payloads, aggregates);
@@ -77,7 +77,7 @@ struct SljitFusedTypedPayloadSourceResult {
 };
 
 static SljitFusedTypedPayloadSourceResult
-SljitGetFusedTypedPayloadCombinedSourceIndices(vector<SljitExecutableRegionExpression> &payloads,
+SljitGetFusedTypedPayloadCombinedSourceIndices(const vector<SljitExecutableRegionExpression> &payloads,
                                                const vector<ExecutionRegionAggregateInput> &aggregates) {
 	SljitFusedTypedPayloadSourceResult result;
 	bool supported_payloads = payloads.size() == aggregates.size();
@@ -116,7 +116,7 @@ SljitGetFusedTypedPayloadCombinedSourceIndices(vector<SljitExecutableRegionExpre
 }
 
 static const vector<idx_t> &SljitRequireFusedTypedPayloadCombinedSourceIndices(
-    vector<SljitExecutableRegionExpression> &payloads, const vector<ExecutionRegionAggregateInput> &aggregates,
+    const vector<SljitExecutableRegionExpression> &payloads, const vector<ExecutionRegionAggregateInput> &aggregates,
     const char *missing_sources_message, const char *source_mismatch_message, const char *no_payloads_message) {
 	auto result = SljitGetFusedTypedPayloadCombinedSourceIndices(payloads, aggregates);
 	switch (result.status) {
@@ -135,7 +135,7 @@ static const vector<idx_t> &SljitRequireFusedTypedPayloadCombinedSourceIndices(
 }
 
 static optional_ptr<const vector<bool>>
-SljitGetFusedTypedPayloadCombinedSourceNotNull(vector<SljitExecutableRegionExpression> &payloads,
+SljitGetFusedTypedPayloadCombinedSourceNotNull(const vector<SljitExecutableRegionExpression> &payloads,
                                                const vector<ExecutionRegionAggregateInput> &aggregates,
                                                idx_t source_count) {
 	optional_ptr<const vector<bool>> result;
@@ -156,7 +156,7 @@ SljitGetFusedTypedPayloadCombinedSourceNotNull(vector<SljitExecutableRegionExpre
 	return result;
 }
 
-static bool SljitTryGetFusedTypedPayloadCombinedSources(vector<SljitExecutableRegionExpression> &payloads,
+static bool SljitTryGetFusedTypedPayloadCombinedSources(const vector<SljitExecutableRegionExpression> &payloads,
                                                         const vector<ExecutionRegionAggregateInput> &aggregates,
                                                         vector<idx_t> &combined_sources) {
 	auto result = SljitGetFusedTypedPayloadCombinedSourceIndices(payloads, aggregates);
