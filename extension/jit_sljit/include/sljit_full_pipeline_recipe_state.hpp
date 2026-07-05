@@ -28,7 +28,7 @@ struct SljitFullPipelineRecipePlan {
 static SljitFullPipelineRecipe
 SljitMakeFullPipelinePrimitiveRecipe(bool uses_extended_source_fetch_budget,
                                      SljitFullPipelinePrimitiveSequence primitive_sequence) {
-	if (primitive_sequence.count == 0) {
+	if (primitive_sequence.Count() == 0) {
 		throw InternalException("SLJIT full-pipeline primitive recipe cannot be empty");
 	}
 	SljitFullPipelineRecipe recipe;
@@ -45,7 +45,7 @@ SljitMakeFullPipelinePrimitiveRecipe(bool uses_extended_source_fetch_budget,
 }
 
 static SljitFullPipelineRecipePlan SljitMakeFullPipelinePrimitiveRecipePlan(SljitFullPipelineRecipe recipe) {
-	if (recipe.primitive_sequence.count == 0) {
+	if (recipe.primitive_sequence.Count() == 0) {
 		throw InternalException("SLJIT full-pipeline primitive recipe cannot be empty");
 	}
 	SljitFullPipelineRecipePlan plan;

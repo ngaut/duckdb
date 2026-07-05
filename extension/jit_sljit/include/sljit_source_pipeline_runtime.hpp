@@ -130,7 +130,7 @@ private:
 	}
 
 	bool IsTerminalStep(idx_t step_idx) const {
-		return step_idx + 1 == recipe.primitive_sequence.count;
+		return step_idx + 1 == recipe.primitive_sequence.Count();
 	}
 
 	bool ExecuteSourceChunk(DataChunk &source_chunk, bool have_more_output) {
@@ -146,10 +146,10 @@ private:
 	}
 
 	bool ExecuteStep(idx_t step_idx, const SljitRuntimeBatchView &input, bool have_more_output) {
-		if (step_idx >= recipe.primitive_sequence.count) {
+		if (step_idx >= recipe.primitive_sequence.Count()) {
 			throw InternalException("SLJIT primitive sequence reached the end without a consumer");
 		}
-		auto &step = recipe.primitive_sequence.steps[step_idx];
+		auto &step = recipe.primitive_sequence.Step(step_idx);
 		if (IsTerminalStep(step_idx)) {
 			return ExecuteTerminalStep(step, input, have_more_output);
 		}
@@ -238,8 +238,8 @@ private:
 	}
 
 	bool FlushPendingBatch() {
-		for (idx_t step_idx = 1; step_idx + 1 < recipe.primitive_sequence.count; step_idx++) {
-			auto &step = recipe.primitive_sequence.steps[step_idx];
+		for (idx_t step_idx = 1; step_idx + 1 < recipe.primitive_sequence.Count(); step_idx++) {
+			auto &step = recipe.primitive_sequence.Step(step_idx);
 			if (FlushMaterializingStep(step_idx, step)) {
 				return true;
 			}

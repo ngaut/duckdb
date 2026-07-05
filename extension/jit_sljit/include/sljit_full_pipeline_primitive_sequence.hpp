@@ -10,9 +10,11 @@
 
 #include <array>
 #include <initializer_list>
+#include <utility>
 
 #include "duckdb/common/constants.hpp"
 #include "duckdb/common/exception.hpp"
+#include "duckdb/common/vector.hpp"
 
 #include "sljit_delim_join_sink_primitive.hpp"
 #include "sljit_generated_filter_primitive.hpp"
@@ -118,8 +120,7 @@ struct SljitFullPipelinePrimitiveStep {
 
 	static SljitFullPipelinePrimitiveStep
 	UngroupedAggregateUpdate(const SljitUngroupedAggregateUpdatePrimitive &primitive) {
-		auto step =
-		    Make(SljitFullPipelinePrimitiveKind::UNGROUPED_AGGREGATE_UPDATE, {primitive.aggregate_idx});
+		auto step = Make(SljitFullPipelinePrimitiveKind::UNGROUPED_AGGREGATE_UPDATE, {primitive.aggregate_idx});
 		step.ungrouped_aggregate_update = primitive;
 		return step;
 	}
@@ -164,24 +165,40 @@ private:
 	}
 };
 
-struct SljitFullPipelinePrimitiveSequence {
-	std::array<SljitFullPipelinePrimitiveStep, SLJIT_FULL_PIPELINE_MAX_PRIMITIVES> steps;
-	idx_t count = 0;
-
-	SljitFullPipelinePrimitiveSequence() = default;
+class SljitFullPipelinePrimitiveSequence {
+public:
+	SljitFullPipelinePrimitiveSequence() {
+		steps.reserve(SLJIT_FULL_PIPELINE_MAX_PRIMITIVES);
+	}
 
 	explicit SljitFullPipelinePrimitiveSequence(std::initializer_list<SljitFullPipelinePrimitiveStep> steps) {
+		this->steps.reserve(SLJIT_FULL_PIPELINE_MAX_PRIMITIVES);
 		for (auto step : steps) {
 			Add(step);
 		}
 	}
 
 	void Add(SljitFullPipelinePrimitiveStep step) {
-		if (count >= SLJIT_FULL_PIPELINE_MAX_PRIMITIVES) {
+		if (Count() >= SLJIT_FULL_PIPELINE_MAX_PRIMITIVES) {
 			throw InternalException("SLJIT full-pipeline primitive sequence exceeds the maximum step count");
 		}
-		steps[count++] = step;
+		steps.push_back(std::move(step));
 	}
+
+	idx_t Count() const {
+		return steps.size();
+	}
+
+	const SljitFullPipelinePrimitiveStep &Step(idx_t step_idx) const {
+		return steps[step_idx];
+	}
+
+	SljitFullPipelinePrimitiveStep &Step(idx_t step_idx) {
+		return steps[step_idx];
+	}
+
+private:
+	vector<SljitFullPipelinePrimitiveStep> steps;
 };
 
 } // namespace duckdb

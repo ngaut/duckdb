@@ -34,10 +34,10 @@ static bool SljitFullPipelinePrimitiveOwnsSourceBatchAdvance(const SljitFullPipe
 }
 
 static bool SljitFullPipelineSourceFetchOwnsSinkAdvance(const SljitFullPipelinePrimitiveSequence &primitive_sequence) {
-	if (primitive_sequence.count < 2 || !SljitFullPipelineSourcePrimitiveIsExecutable(primitive_sequence.steps[0])) {
+	if (primitive_sequence.Count() < 2 || !SljitFullPipelineSourcePrimitiveIsExecutable(primitive_sequence.Step(0))) {
 		throw InternalException("SLJIT source-fetch sink ownership requires an executable primitive sequence");
 	}
-	return !SljitFullPipelinePrimitiveOwnsSourceBatchAdvance(primitive_sequence.steps[1]);
+	return !SljitFullPipelinePrimitiveOwnsSourceBatchAdvance(primitive_sequence.Step(1));
 }
 
 static bool SljitNativeTailHandoffCanConsumeTail(const vector<SljitExecutableRegionOp> &ops, idx_t tail_start_idx) {
@@ -45,8 +45,7 @@ static bool SljitNativeTailHandoffCanConsumeTail(const vector<SljitExecutableReg
 		return false;
 	}
 	auto &tail = ops[tail_start_idx];
-	if (tail.kind == SljitNativeRegionOpKind::AGGREGATE_UPDATE &&
-	    tail.aggregate_update.plan.use_primitive_payloads) {
+	if (tail.kind == SljitNativeRegionOpKind::AGGREGATE_UPDATE && tail.aggregate_update.plan.use_primitive_payloads) {
 		return false;
 	}
 	return true;
@@ -117,8 +116,7 @@ static bool SljitFullPipelineTerminalPrimitiveIsExecutable(const vector<SljitExe
 			       step.delim_join_sink.final_projection_idx == step.Op(1) &&
 			       step.delim_join_sink.sink_idx == step.Op(2);
 		}
-		return SljitFullPipelinePrimitiveStepHasOpCount(step, 1) &&
-		       step.delim_join_sink.sink_idx == step.Op(0);
+		return SljitFullPipelinePrimitiveStepHasOpCount(step, 1) && step.delim_join_sink.sink_idx == step.Op(0);
 	case SljitFullPipelinePrimitiveKind::NATIVE_TAIL_HANDOFF:
 		return SljitFullPipelinePrimitiveStepHasOpCount(step, 1) &&
 		       SljitNativeTailHandoffCanConsumeTail(ops, step.Op(0));
@@ -129,12 +127,12 @@ static bool SljitFullPipelineTerminalPrimitiveIsExecutable(const vector<SljitExe
 
 static bool SljitFullPipelinePrimitiveSequenceIsExecutable(const vector<SljitExecutableRegionOp> &ops,
                                                            const SljitFullPipelinePrimitiveSequence &sequence) {
-	if (sequence.count < 2 || !SljitFullPipelineSourcePrimitiveIsExecutable(sequence.steps[0])) {
+	if (sequence.Count() < 2 || !SljitFullPipelineSourcePrimitiveIsExecutable(sequence.Step(0))) {
 		return false;
 	}
-	for (idx_t step_idx = 1; step_idx < sequence.count; step_idx++) {
-		auto &step = sequence.steps[step_idx];
-		const bool terminal_step = step_idx == sequence.count - 1;
+	for (idx_t step_idx = 1; step_idx < sequence.Count(); step_idx++) {
+		auto &step = sequence.Step(step_idx);
+		const bool terminal_step = step_idx == sequence.Count() - 1;
 		if (terminal_step) {
 			return SljitFullPipelineTerminalPrimitiveIsExecutable(ops, step);
 		}
@@ -147,8 +145,8 @@ static bool SljitFullPipelinePrimitiveSequenceIsExecutable(const vector<SljitExe
 
 static const SljitFullPipelinePrimitiveStep &
 SljitFullPipelinePrimitiveSequenceTerminalStep(const SljitFullPipelinePrimitiveSequence &sequence) {
-	D_ASSERT(sequence.count > 0);
-	return sequence.steps[sequence.count - 1];
+	D_ASSERT(sequence.Count() > 0);
+	return sequence.Step(sequence.Count() - 1);
 }
 
 } // namespace duckdb

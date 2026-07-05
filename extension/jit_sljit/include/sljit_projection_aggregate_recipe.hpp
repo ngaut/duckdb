@@ -63,7 +63,7 @@ private:
 		    {SljitProjectionAggregatePrefixKind::TWO_JOIN,
 		     &SljitProjectionAggregateRecipeBuilder::TryBuildPlainTwoJoinDirectAggregate},
 		    {SljitProjectionAggregatePrefixKind::TWO_JOIN,
-		     &SljitProjectionAggregateRecipeBuilder::TryBuildPlainTwoJoinMaterializedTail}};
+		     &SljitProjectionAggregateRecipeBuilder::TryBuildPlainTwoJoinProjectionAggregateTail}};
 		count = sizeof(registry) / sizeof(registry[0]);
 		return registry;
 	}
@@ -99,8 +99,7 @@ private:
 		}
 	}
 
-	bool TryBuildMarkBoundary(SljitFullPipelineRecipe &recipe,
-	                          const SljitProjectionAggregatePlanFacts &plan) const {
+	bool TryBuildMarkBoundary(SljitFullPipelineRecipe &recipe, const SljitProjectionAggregatePlanFacts &plan) const {
 		auto &shape = plan.shape;
 		auto &facts = plan.prefix;
 		if (!HasMarkFilterBoundary(plan)) {
@@ -115,8 +114,8 @@ private:
 				recipe = binding.MakeMarkFilterNativeTailRecipe(facts.first_hash_join_idx, facts.mark_filter_idx);
 				return true;
 			}
-			recipe =
-			    binding.MakeMarkFilterProjectionAggregateRecipe(shape, facts.first_hash_join_idx, facts.mark_filter_idx);
+			recipe = binding.MakeMarkFilterProjectionAggregateRecipe(shape, facts.first_hash_join_idx,
+			                                                         facts.mark_filter_idx);
 			return true;
 		case SljitProjectionAggregatePrefixKind::TWO_JOIN:
 			if (shape.ProjectionCount() != 0 && binding.ProjectionAggregateHasDedicatedBackend(shape)) {
@@ -240,13 +239,12 @@ private:
 		return true;
 	}
 
-	bool TryBuildPlainTwoJoinMaterializedTail(SljitFullPipelineRecipe &recipe,
-	                                          const SljitProjectionAggregatePlanFacts &plan) const {
+	bool TryBuildPlainTwoJoinProjectionAggregateTail(SljitFullPipelineRecipe &recipe,
+	                                                 const SljitProjectionAggregatePlanFacts &plan) const {
 		auto &shape = plan.shape;
 		auto &facts = plan.prefix;
-		if (TwoJoinHasPreparedPrefix(plan) || !CanBindSecondHashJoinSelection(plan) || shape.ProjectionCount() != 2 ||
-		    !SljitCanBindHashJoinProbeMaterializePrimitive(ops, facts.first_hash_join_idx) ||
-		    !binding.CanMakeProjectionAggregateTailRecipe(shape)) {
+		if (TwoJoinHasPreparedPrefix(plan) || !CanBindSecondHashJoinSelection(plan) ||
+		    !TwoJoinCanUseProjectionAggregateTail(plan)) {
 			return false;
 		}
 		recipe = binding.MakeTwoJoinProjectionAggregateRecipe(shape, facts);
@@ -274,7 +272,8 @@ private:
 		     !SljitCanBindProjectionChainPrimitive(ops, facts.source_projection_idx))) {
 			return false;
 		}
-		return !facts.HasPreJoinProjection() || SljitCanBindProjectionChainPrimitive(ops, facts.pre_join_projection_idx);
+		return !facts.HasPreJoinProjection() ||
+		       SljitCanBindProjectionChainPrimitive(ops, facts.pre_join_projection_idx);
 	}
 
 	bool CanBindSecondHashJoinSelection(const SljitProjectionAggregatePlanFacts &plan) const {
@@ -291,7 +290,7 @@ private:
 	bool TwoJoinCanUseProjectionAggregateTail(const SljitProjectionAggregatePlanFacts &plan) const {
 		auto &shape = plan.shape;
 		auto &facts = plan.prefix;
-		return shape.ProjectionCount() == 2 && CanBindHashJoinProbeProjectionInput(facts.first_hash_join_idx) &&
+		return shape.ProjectionCount() != 0 && CanBindHashJoinProbeProjectionInput(facts.first_hash_join_idx) &&
 		       binding.CanMakeProjectionAggregateTailRecipe(shape);
 	}
 

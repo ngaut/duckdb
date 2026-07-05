@@ -141,7 +141,12 @@ static bool SljitTryBuildCountStarGroupProjection(const SljitExecutableRegionOp 
 		group_projection.output_not_null.push_back(projection_op.output_not_null[group.input_index]);
 	}
 	auto group_expression = make_uniq<SljitExecutableRegionExpression>();
-	SljitBuildBorrowedProjectionExpression(projection_op.projections[group.input_index], *group_expression);
+	SljitPrepareExecutableRegionExpression(projection_op.projections[group.input_index].plan, *group_expression,
+	                                       nullptr, true);
+	string compile_error;
+	if (!SljitCompilePreparedExecutableRegionExpression(*group_expression, false, compile_error)) {
+		return false;
+	}
 	group_projection.projections.push_back(std::move(*group_expression));
 	return true;
 }
@@ -154,9 +159,9 @@ static void SljitInitializeProjectedInputGroupedAggregatePrimitive(SljitGroupedA
 	primitive.final_projection_idx = final_projection_idx;
 }
 
-static bool SljitTryBindProjectedCountStarGroupedAggregateStrategy(
-    SljitGroupedAggregateUpdatePrimitive &primitive, const SljitExecutableRegionOp &semantic_projection,
-    const SljitExecutableRegionOp &aggregate_op) {
+static bool SljitTryBindProjectedCountStarGroupedAggregateStrategy(SljitGroupedAggregateUpdatePrimitive &primitive,
+                                                                   const SljitExecutableRegionOp &semantic_projection,
+                                                                   const SljitExecutableRegionOp &aggregate_op) {
 	auto group_projection = make_shared_ptr<SljitExecutableRegionOp>();
 	if (!SljitTryBuildCountStarGroupProjection(semantic_projection, aggregate_op, *group_projection) ||
 	    !SljitCountStarProjectionInputSupported(*group_projection)) {
@@ -167,9 +172,10 @@ static bool SljitTryBindProjectedCountStarGroupedAggregateStrategy(
 	return true;
 }
 
-static bool SljitTryBindProjectedDirectPrimitivePayloadUpdateStrategy(
-    SljitGroupedAggregateUpdatePrimitive &primitive, const vector<SljitExecutableRegionOp> &ops,
-    idx_t first_projection_idx, idx_t final_projection_idx) {
+static bool SljitTryBindProjectedDirectPrimitivePayloadUpdateStrategy(SljitGroupedAggregateUpdatePrimitive &primitive,
+                                                                      const vector<SljitExecutableRegionOp> &ops,
+                                                                      idx_t first_projection_idx,
+                                                                      idx_t final_projection_idx) {
 	auto descriptor = make_shared_ptr<SljitProjectedInputGroupedAggregateDescriptor>();
 	if (!SljitTryBuildProjectedInputGroupedAggregateDescriptor(
 	        ops, first_projection_idx, final_projection_idx, primitive.aggregate_idx,
@@ -182,9 +188,11 @@ static bool SljitTryBindProjectedDirectPrimitivePayloadUpdateStrategy(
 	return true;
 }
 
-static bool SljitTryBindProjectedInputGroupedAggregateUpdateStrategy(
-    const vector<SljitExecutableRegionOp> &ops, idx_t first_projection_idx, idx_t final_projection_idx,
-    bool allow_direct_primitive_payload_update, SljitGroupedAggregateUpdatePrimitive &primitive) {
+static bool SljitTryBindProjectedInputGroupedAggregateUpdateStrategy(const vector<SljitExecutableRegionOp> &ops,
+                                                                     idx_t first_projection_idx,
+                                                                     idx_t final_projection_idx,
+                                                                     bool allow_direct_primitive_payload_update,
+                                                                     SljitGroupedAggregateUpdatePrimitive &primitive) {
 	if (!SljitCanBindProjectionChainPrimitive(ops, first_projection_idx, final_projection_idx) ||
 	    !SljitCanBindGroupedAggregateUpdatePrimitive(ops, primitive.aggregate_idx) ||
 	    SljitChooseGroupedAggregateUpdateStrategy(ops[primitive.aggregate_idx]) ==
@@ -198,21 +206,19 @@ static bool SljitTryBindProjectedInputGroupedAggregateUpdateStrategy(
 		return false;
 	}
 	if (SljitTryBindProjectedCountStarGroupedAggregateStrategy(primitive, *semantic_projection,
-	                                                          ops[primitive.aggregate_idx])) {
+	                                                           ops[primitive.aggregate_idx])) {
 		return true;
 	}
 	if (allow_direct_primitive_payload_update) {
 		return SljitTryBindProjectedDirectPrimitivePayloadUpdateStrategy(primitive, ops, first_projection_idx,
-		                                                                final_projection_idx);
+		                                                                 final_projection_idx);
 	}
 	return false;
 }
 
-static bool SljitCanBindProjectedInputGroupedAggregateUpdatePrimitive(const vector<SljitExecutableRegionOp> &ops,
-                                                                      idx_t first_projection_idx,
-                                                                      idx_t final_projection_idx, idx_t aggregate_idx,
-                                                                      bool allow_direct_primitive_payload_update =
-                                                                          false) {
+static bool SljitCanBindProjectedInputGroupedAggregateUpdatePrimitive(
+    const vector<SljitExecutableRegionOp> &ops, idx_t first_projection_idx, idx_t final_projection_idx,
+    idx_t aggregate_idx, bool allow_direct_primitive_payload_update = false) {
 	if (!SljitCanBindGroupedAggregateUpdatePrimitive(ops, aggregate_idx)) {
 		return false;
 	}
@@ -246,11 +252,9 @@ SljitBindGroupedAggregateUpdatePrimitive(const vector<SljitExecutableRegionOp> &
 	return primitive;
 }
 
-static SljitGroupedAggregateUpdatePrimitive
-SljitBindProjectedInputGroupedAggregateUpdatePrimitive(const vector<SljitExecutableRegionOp> &ops,
-                                                       idx_t first_projection_idx, idx_t final_projection_idx,
-                                                       idx_t aggregate_idx,
-                                                       bool allow_direct_primitive_payload_update = false) {
+static SljitGroupedAggregateUpdatePrimitive SljitBindProjectedInputGroupedAggregateUpdatePrimitive(
+    const vector<SljitExecutableRegionOp> &ops, idx_t first_projection_idx, idx_t final_projection_idx,
+    idx_t aggregate_idx, bool allow_direct_primitive_payload_update = false) {
 	auto primitive = SljitBindGroupedAggregateUpdatePrimitive(ops, aggregate_idx);
 	if (!SljitTryBindProjectedInputGroupedAggregateUpdateStrategy(ops, first_projection_idx, final_projection_idx,
 	                                                              allow_direct_primitive_payload_update, primitive)) {

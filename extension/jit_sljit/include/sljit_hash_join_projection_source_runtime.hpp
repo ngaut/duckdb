@@ -8,6 +8,7 @@
 
 #pragma once
 
+#include "sljit_executable_expression_codegen.hpp"
 #include "sljit_hash_join_probe_runtime.hpp"
 #include "sljit_projection_source_runtime.hpp"
 #include "sljit_runtime_batch_view.hpp"
@@ -120,8 +121,7 @@ static bool SljitTryBuildHashJoinMappedProjection(
 	mapped_projection.projections.reserve(projection_op.projections.size());
 	for (idx_t projection_idx = 0; projection_idx < projection_op.projections.size(); projection_idx++) {
 		auto &projection = projection_op.projections[projection_idx];
-		SljitExecutableRegionExpression mapped_expression;
-		SljitBuildBorrowedProjectionExpression(projection, mapped_expression);
+		auto mapped_plan = projection.plan.Copy(true, false);
 		if (required_projection_outputs) {
 			if (projection_idx >= required_projection_outputs->size()) {
 				if (blocker) {
@@ -131,13 +131,15 @@ static bool SljitTryBuildHashJoinMappedProjection(
 				return false;
 			}
 			if ((*required_projection_outputs)[projection_idx] == 0) {
+				SljitExecutableRegionExpression mapped_expression;
+				SljitBuildBorrowedProjectionExpression(projection, mapped_expression);
 				mapped_projection.projections.push_back(std::move(mapped_expression));
 				continue;
 			}
 		}
 		idx_t failed_source_index = DConstants::INVALID_INDEX;
-		if (!SljitTryRemapHashJoinProjectionExpressionSources(full_source_map, mapped_expression,
-		                                                      optional_ptr<idx_t>(&failed_source_index))) {
+		if (!SljitTryRemapHashJoinProjectionPlanSources(full_source_map, mapped_plan,
+		                                                optional_ptr<idx_t>(&failed_source_index))) {
 			if (blocker) {
 				const auto mapped_source_index = failed_source_index < full_source_map.size()
 				                                     ? full_source_map[failed_source_index]
@@ -145,6 +147,16 @@ static bool SljitTryBuildHashJoinMappedProjection(
 				*blocker = "remap_projection_sources_projection_" + std::to_string(projection_idx) + "_source_" +
 				           std::to_string(failed_source_index) + "_map_size_" + std::to_string(full_source_map.size()) +
 				           "_mapped_" + std::to_string(mapped_source_index);
+			}
+			mapped_projection.projections.clear();
+			return false;
+		}
+		SljitExecutableRegionExpression mapped_expression;
+		SljitPrepareExecutableRegionExpression(mapped_plan, mapped_expression);
+		string compile_error;
+		if (!SljitCompilePreparedExecutableRegionExpression(mapped_expression, false, compile_error)) {
+			if (blocker) {
+				*blocker = "compile_mapped_projection_" + std::to_string(projection_idx) + "_" + compile_error;
 			}
 			mapped_projection.projections.clear();
 			return false;

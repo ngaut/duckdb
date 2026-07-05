@@ -83,6 +83,17 @@ SljitGetFusedTypedPayloadCombinedSourceIndices(const vector<SljitExecutableRegio
 	bool supported_payloads = payloads.size() == aggregates.size();
 	for (idx_t payload_idx = 0; payload_idx < payloads.size(); payload_idx++) {
 		if (aggregates[payload_idx].primitive_update_kind == AggregatePrimitiveUpdateKind::COUNT_STAR) {
+			auto &source_indices = payloads[payload_idx].input_source_indices;
+			if (source_indices.empty()) {
+				continue;
+			}
+			if (!result.sources) {
+				result.sources = source_indices;
+			} else if (*result.sources != source_indices) {
+				result.status = SljitFusedTypedPayloadSourceStatus::SOURCE_MISMATCH;
+				result.sources = nullptr;
+				return result;
+			}
 			continue;
 		}
 		auto &plan = payloads[payload_idx].plan;

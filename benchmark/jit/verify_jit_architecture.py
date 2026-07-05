@@ -1385,7 +1385,10 @@ def verify_primitive_sequence() -> None:
             "GroupedAggregateUpdate(const SljitGroupedAggregateUpdatePrimitive &primitive)",
             "step.op_count >= SLJIT_FULL_PIPELINE_MAX_PRIMITIVE_STEP_OPS",
             "exceeds the maximum operator count",
-            "count >= SLJIT_FULL_PIPELINE_MAX_PRIMITIVES",
+            "vector<SljitFullPipelinePrimitiveStep> steps",
+            "Count() >= SLJIT_FULL_PIPELINE_MAX_PRIMITIVES",
+            "idx_t Count() const",
+            "const SljitFullPipelinePrimitiveStep &Step(idx_t step_idx) const",
             "exceeds the maximum step count",
         ),
     )
@@ -1549,7 +1552,7 @@ def verify_primitive_sequence() -> None:
             "&SljitProjectionAggregateRecipeBuilder::TryBuildTwoJoinSourcePrefixRecipe",
             "&SljitProjectionAggregateRecipeBuilder::TryBuildTwoJoinProjectedPrefixRecipe",
             "&SljitProjectionAggregateRecipeBuilder::TryBuildPlainTwoJoinDirectAggregate",
-            "&SljitProjectionAggregateRecipeBuilder::TryBuildPlainTwoJoinMaterializedTail",
+            "&SljitProjectionAggregateRecipeBuilder::TryBuildPlainTwoJoinProjectionAggregateTail",
             "HasMarkFilterBoundary",
             "SingleJoinCanUseDirectAggregate",
             "CanBindSecondHashJoinSelection",
@@ -1751,7 +1754,7 @@ def verify_primitive_sequence() -> None:
             "processed_batches >= max_recipe_batches",
             "terminal_runtime.BudgetReached(runtime, TerminalStep(), max_recipe_batches)",
             "fetched_chunks >= max_recipe_batches",
-            "for (idx_t step_idx = 1; step_idx + 1 < recipe.primitive_sequence.count; step_idx++)",
+            "for (idx_t step_idx = 1; step_idx + 1 < recipe.primitive_sequence.Count(); step_idx++)",
             "FlushMaterializingStep(step_idx, step)",
             "bool FlushMaterializingStep(idx_t step_idx, const SljitFullPipelinePrimitiveStep &step)",
             "generated_filter.Execute(step, input, execute_output_view)",
@@ -2037,7 +2040,8 @@ def verify_primitive_sequence() -> None:
             "TryBuildPreJoinProjectionView",
             "optional_ptr<const SljitPreJoinProjectionViewDescriptor> pre_join_view_ptr",
             "pre_join_view_ptr = pre_join_view",
-            "MakePreJoinProjectionHashJoinSelectionSequence(pre_join_projection_idx, hash_join_idx, true, pre_join_view_ptr)",
+            "MakePreJoinProjectionHashJoinSelectionSequence(pre_join_projection_idx, hash_join_idx, true,",
+            "pre_join_view_ptr);",
         ),
     )
     require_scoped_text(
@@ -2052,7 +2056,7 @@ def verify_primitive_sequence() -> None:
     )
     require_scoped_text(
         "extension/jit_sljit/include/sljit_full_pipeline_recipe_binding.hpp",
-        "SljitFullPipelinePrimitiveSequence &sequence, const SljitPreJoinProjectionViewDescriptor &pre_join_view",
+        "TryAppendElidedPreJoinHashJoinProbeSelection(SljitFullPipelinePrimitiveSequence &sequence,",
         "AddMaterializedPreJoinProjectionHashJoinSelection",
         (
             "pre_join_view.CanElideProjectionWithCurrentHashProbe()",
@@ -2171,7 +2175,7 @@ def verify_recipe_builder() -> None:
             "struct SljitFullPipelineRecipe",
             "struct SljitFullPipelineRecipePlan",
             "bool has_recipe = false",
-            "recipe.primitive_sequence.count == 0",
+            "recipe.primitive_sequence.Count() == 0",
             "primitive recipe cannot be empty",
             "SljitFullPipelinePrimitiveSequence primitive_sequence",
             "SljitMakeFullPipelinePrimitiveRecipe",
@@ -2425,7 +2429,7 @@ def verify_recipe_builder() -> None:
             "TryBuildTwoJoinSourcePrefixRecipe",
             "TryBuildTwoJoinProjectedPrefixRecipe",
             "TryBuildPlainTwoJoinDirectAggregate",
-            "TryBuildPlainTwoJoinMaterializedTail",
+            "TryBuildPlainTwoJoinProjectionAggregateTail",
             "HasMarkFilterBoundary",
             "SingleJoinCanUseProjectionAggregateTail",
             "plan.ProjectionCount() == 0",
@@ -2435,6 +2439,7 @@ def verify_recipe_builder() -> None:
             "CanBindHashJoinProbeProjectionInput",
             "CanBindHashJoinProbeProjectionInput(facts.first_hash_join_idx)",
             "ProjectionAggregateHasDedicatedBackend(shape)",
+            "shape.ProjectionCount() != 0",
             "MakeMarkFilterNativeTailRecipe",
         ),
     )
