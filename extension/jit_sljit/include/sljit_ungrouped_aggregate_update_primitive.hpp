@@ -8,8 +8,8 @@
 
 #pragma once
 
+#include "sljit_aggregate_payload_runtime.hpp"
 #include "sljit_full_pipeline_runtime.hpp"
-#include "sljit_grouped_aggregate_update_runtime.hpp"
 #include "sljit_native_binding_runtime.hpp"
 #include "sljit_runtime_batch_view.hpp"
 
@@ -51,6 +51,7 @@ struct SljitBoundUngroupedPrimitiveAggregateUpdate {
 	optional_ptr<const vector<ExecutionRegionAggregateInput>> aggregates;
 	optional_ptr<const vector<const ExecutionPrimitiveAggregateUpdateLane *>> payload_lanes;
 	optional_ptr<SljitAggregatePayloadAdapterScratch> payload_scratch;
+	SljitBoundSingleFusedPrimitiveAggregatePayloadUpdate single_fused_payload_update;
 };
 
 static void SljitBindUngroupedPrimitiveAggregateUpdate(ExecutionOperatorRuntime &native_runtime,
@@ -86,6 +87,12 @@ static void SljitBindUngroupedPrimitiveAggregateUpdate(ExecutionOperatorRuntime 
 	}
 	auto &payload_lanes = scratch.AggregatePayloadLanes(op_idx, aggregates, primitive);
 	auto &payload_scratch = scratch.AggregatePayloadScratch(op_idx);
+	if (op.aggregate_update.fused_payload_update_function) {
+		SljitBindSingleFusedPrimitiveAggregatePayloadUpdate(op.aggregate_update.payloads,
+		                                                    op.aggregate_update.fused_payload_update_function,
+		                                                    aggregates, payload_lanes,
+		                                                    bound.single_fused_payload_update);
+	}
 	bound.ready = true;
 	bound.op_idx = op_idx;
 	bound.op = &op;
@@ -109,9 +116,13 @@ static SinkResultType SljitExecuteBoundUngroupedPrimitiveAggregateUpdate(
 	if (op.aggregate_update.fused_payload_update_function) {
 		auto payload_stage_start =
 		    trace_runtime ? SljitRegionStageStart(runtime) : std::chrono::steady_clock::time_point();
-		SljitExecuteFusedPrimitiveAggregatePayloadUpdate(op.aggregate_update.payloads,
-		                                                 op.aggregate_update.fused_payload_update_function, aggregates,
-		                                                 payload_lanes, input, execute_sel, count, payload_scratch);
+		if (!SljitExecuteBoundSingleFusedPrimitiveAggregatePayloadUpdate(bound.single_fused_payload_update, input,
+		                                                                 execute_sel, count, payload_scratch)) {
+			SljitExecuteFusedPrimitiveAggregatePayloadUpdate(op.aggregate_update.payloads,
+			                                                 op.aggregate_update.fused_payload_update_function,
+			                                                 aggregates, payload_lanes, input, execute_sel, count,
+			                                                 payload_scratch);
+		}
 		if (trace_runtime) {
 			RecordSljitRegionRuntimePath(runtime, op.kind, "fused_payload_update");
 			RecordSljitRegionMaterializationBoundary(runtime, op.kind, "direct_state_update", count);
