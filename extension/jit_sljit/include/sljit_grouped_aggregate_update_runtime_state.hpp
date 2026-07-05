@@ -204,18 +204,42 @@ private:
 		    projected_direct_update->payload_source_indices.size()) {
 			throw InternalException("SLJIT projected compact aggregate payload mapping mismatch");
 		}
+		projected_direct_payload_scratch.resize(projection.projections.size());
+		vector<uint8_t> initialized_columns(aggregate_input.ColumnCount(), 0);
+		for (auto &group : sink_info.groups) {
+			if (group.input_index < initialized_columns.size()) {
+				initialized_columns[group.input_index] = 1;
+			}
+		}
 		for (idx_t payload_idx = 0; payload_idx < projected_direct_update->payload_projection_indices.size();
 		     payload_idx++) {
 			const auto projection_idx = projected_direct_update->payload_projection_indices[payload_idx];
 			const auto source_idx = projected_direct_update->payload_source_indices[payload_idx];
-			if (projection_idx == DConstants::INVALID_INDEX || source_idx == DConstants::INVALID_INDEX) {
+			if (projection_idx == DConstants::INVALID_INDEX) {
 				continue;
 			}
-			if (projection_idx >= aggregate_input.ColumnCount() || source_idx >= source_input.ColumnCount() ||
-			    aggregate_input.data[projection_idx].GetType() != source_input.data[source_idx].GetType()) {
+			if (projection_idx >= aggregate_input.ColumnCount() || projection_idx >= projection.projections.size()) {
+				throw InternalException("SLJIT projected compact aggregate payload projection mismatch");
+			}
+			if (initialized_columns[projection_idx]) {
+				continue;
+			}
+			if (source_idx != DConstants::INVALID_INDEX) {
+				if (source_idx >= source_input.ColumnCount() ||
+				    aggregate_input.data[projection_idx].GetType() != source_input.data[source_idx].GetType()) {
+					throw InternalException("SLJIT projected compact aggregate payload source mismatch");
+				}
+				aggregate_input.data[projection_idx].Reference(source_input.data[source_idx]);
+				initialized_columns[projection_idx] = 1;
+				continue;
+			}
+			if (projection.output_types[projection_idx] != aggregate_input.data[projection_idx].GetType()) {
 				throw InternalException("SLJIT projected compact aggregate payload source mismatch");
 			}
-			aggregate_input.data[projection_idx].Reference(source_input.data[source_idx]);
+			SljitExecuteProjectionExpression(projection.projections[projection_idx], source_input,
+			                                 aggregate_input.data[projection_idx], nullptr, source_input.size(),
+			                                 projected_direct_payload_scratch[projection_idx]);
+			initialized_columns[projection_idx] = 1;
 		}
 		aggregate_input.SetChildCardinality(source_input.size());
 		RecordSljitRegionMaterializationBoundary(runtime, aggregate_op.kind, "projected_compact_aggregate_input",
@@ -472,6 +496,7 @@ private:
 	shared_ptr<SljitProjectedInputGroupedAggregateDescriptor> projected_direct_update;
 	SljitDataChunkBatch projected_direct_selected_input;
 	SljitDataChunkBatch projected_direct_aggregate_input;
+	vector<SljitExpressionAdapterScratch> projected_direct_payload_scratch;
 	SljitBoundGroupedPrimitiveAggregateUpdate bound_direct_update;
 	SljitBoundGroupedPrimitiveAggregateUpdate bound_projected_direct_update;
 };

@@ -79,10 +79,26 @@ struct SljitProjectedInputGroupedAggregateDescriptor {
 	}
 };
 
-static bool SljitProjectedInputGroupedAggregateCanUseCompactInput(
-    const SljitProjectedInputGroupedAggregateDescriptor &descriptor) {
+static bool SljitProjectedInputGroupSourceCanUseCompactInput(const ExecutionRowPointerGroupKeySource &group_source) {
+	if (!group_source.ready || group_source.source_kind != ExecutionRowPointerGroupKeySourceKind::INPUT_VECTOR) {
+		return false;
+	}
+	switch (group_source.cast_kind) {
+	case ExecutionRowPointerGroupKeyCastKind::NONE:
+	case ExecutionRowPointerGroupKeyCastKind::INT64_TO_INT32:
+	case ExecutionRowPointerGroupKeyCastKind::INT64_TO_INT16:
+	case ExecutionRowPointerGroupKeyCastKind::INT32_TO_INT8:
+	case ExecutionRowPointerGroupKeyCastKind::DATE_YEAR_COMPRESS:
+		return true;
+	default:
+		return false;
+	}
+}
+
+static bool
+SljitProjectedInputGroupedAggregateCanUseCompactInput(const SljitProjectedInputGroupedAggregateDescriptor &descriptor) {
 	for (auto &group_source : descriptor.group_sources) {
-		if (group_source.cast_kind != ExecutionRowPointerGroupKeyCastKind::NONE) {
+		if (!SljitProjectedInputGroupSourceCanUseCompactInput(group_source)) {
 			return false;
 		}
 	}
@@ -99,7 +115,8 @@ static bool SljitTryBuildProjectedInputGroupSource(const SljitExecutableRegionOp
 		}
 		return false;
 	};
-	if (group.input_index >= projection_op.projections.size() || group.input_index >= projection_op.output_types.size() ||
+	if (group.input_index >= projection_op.projections.size() ||
+	    group.input_index >= projection_op.output_types.size() ||
 	    projection_op.output_types[group.input_index].InternalType() != group.type.InternalType()) {
 		return block("projection");
 	}
@@ -119,7 +136,8 @@ static bool SljitTryBuildProjectedInputGroupSource(const SljitExecutableRegionOp
 	if (!SljitTryFinalizeRowPointerGroupKeySource(remapped_expr.plan, group.type, group_source)) {
 		return block("finalize_kind_" + to_string(static_cast<int>(remapped_expr.plan.kind)) + "_source_" +
 		             to_string(source_idx) + "_source_type_" + projection_op.input_types[source_idx].ToString() +
-		             "_group_type_" + group.type.ToString() + "_return_type_" + remapped_expr.plan.return_type.ToString());
+		             "_group_type_" + group.type.ToString() + "_return_type_" +
+		             remapped_expr.plan.return_type.ToString());
 	}
 	return true;
 }
@@ -132,10 +150,24 @@ static bool SljitTryResolveProjectedInputPayloadSource(const SljitExecutableRegi
 	SljitExecutableRegionExpression remapped_expr;
 	if (!SljitTryBuildSingleSourceProjectionExpression(projection_op.projections[projection_idx], remapped_expr,
 	                                                   source_idx) ||
-	    source_idx >= projection_op.input_types.size() || !SljitProjectionIsSingleSourceReferenceLike(remapped_expr.plan)) {
+	    source_idx >= projection_op.input_types.size() ||
+	    !SljitProjectionIsSingleSourceReferenceLike(remapped_expr.plan)) {
 		return false;
 	}
 	return projection_op.output_types[projection_idx] == projection_op.input_types[source_idx];
+}
+
+static bool SljitTryBindProjectedInputPayloadOutput(const SljitExecutableRegionOp &projection_op, idx_t projection_idx,
+                                                    idx_t &source_idx) {
+	if (SljitTryResolveProjectedInputPayloadSource(projection_op, projection_idx, source_idx)) {
+		return true;
+	}
+	if (projection_idx >= projection_op.projections.size() || projection_idx >= projection_op.output_types.size() ||
+	    projection_op.projections[projection_idx].plan.return_type != projection_op.output_types[projection_idx]) {
+		return false;
+	}
+	source_idx = DConstants::INVALID_INDEX;
+	return true;
 }
 
 static bool SljitTryBuildProjectedInputGroupedAggregateDescriptor(
@@ -189,7 +221,7 @@ static bool SljitTryBuildProjectedInputGroupedAggregateDescriptor(
 	};
 	auto add_fused_payload_source = [&](idx_t projection_idx) {
 		idx_t source_idx;
-		if (!SljitTryResolveProjectedInputPayloadSource(*semantic_projection, projection_idx, source_idx)) {
+		if (!SljitTryBindProjectedInputPayloadOutput(*semantic_projection, projection_idx, source_idx)) {
 			return block("fused_payload_source");
 		}
 		payload_projection_indices.push_back(projection_idx);
@@ -201,7 +233,11 @@ static bool SljitTryBuildProjectedInputGroupedAggregateDescriptor(
 	};
 	auto add_direct_payload_source = [&](const ExecutionRegionAggregateInput &aggregate, idx_t) {
 		idx_t source_idx;
-		if (!SljitTryResolveProjectedInputPayloadSource(*semantic_projection, aggregate.payload_index, source_idx)) {
+		if (aggregate.payload_index >= semantic_projection->output_types.size() ||
+		    semantic_projection->output_types[aggregate.payload_index] != aggregate.child_types[0]) {
+			return block("direct_payload_type");
+		}
+		if (!SljitTryBindProjectedInputPayloadOutput(*semantic_projection, aggregate.payload_index, source_idx)) {
 			return block("direct_payload_source");
 		}
 		payload_projection_indices.push_back(aggregate.payload_index);
