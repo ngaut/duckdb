@@ -87,6 +87,7 @@ struct ExecutionRegionTableScanContract {
 	idx_t source_contract_input_column_count = 0;
 	vector<LogicalType> source_contract_input_types;
 	vector<bool> source_contract_input_not_null;
+	vector<idx_t> source_contract_input_distinct_counts;
 	vector<idx_t> source_contract_input_distinct_reserve_counts;
 	vector<Value> source_contract_input_min_values;
 	vector<Value> source_contract_input_max_values;

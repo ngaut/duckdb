@@ -197,11 +197,13 @@ static bool SljitCanDeferAggregateUpdatePayloadCode(const vector<SljitNativeRegi
 bool BuildSljitExecutableRegion(const SljitNativeRegionPlan &region, SljitExecutableRegion &executable, string &error) {
 	executable.source_output_types = region.source_output_types;
 	executable.source_distinct_counts = region.source_distinct_counts;
+	executable.source_distinct_reserve_counts = region.source_distinct_reserve_counts;
 	executable.source_min_values = region.source_min_values;
 	executable.source_max_values = region.source_max_values;
 	executable.ops.reserve(region.ops.size());
 	auto current_not_null = region.source_not_null;
 	auto current_distinct_counts = region.source_distinct_counts;
+	auto current_distinct_reserve_counts = region.source_distinct_reserve_counts;
 	auto current_min_values = region.source_min_values;
 	auto current_max_values = region.source_max_values;
 	for (idx_t op_idx = 0; op_idx < region.ops.size(); op_idx++) {
@@ -218,7 +220,7 @@ bool BuildSljitExecutableRegion(const SljitNativeRegionPlan &region, SljitExecut
 			SljitTryBuildExecutableAggregateDenseGroupDomain(op.aggregate_update, current_distinct_counts,
 			                                                 current_min_values, current_max_values,
 			                                                 executable_op.aggregate_update.dense_group_domain);
-			SljitTryBuildExecutableAggregateGroupReservePlan(op.aggregate_update, current_distinct_counts,
+			SljitTryBuildExecutableAggregateGroupReservePlan(op.aggregate_update, current_distinct_reserve_counts,
 			                                                 executable_op.aggregate_update.plan.group_reserve);
 		}
 		executable.ops.push_back(std::move(executable_op));
@@ -243,6 +245,8 @@ bool BuildSljitExecutableRegion(const SljitNativeRegionPlan &region, SljitExecut
 		}
 		SljitUpdateExecutableCurrentNotNull(op, current_not_null);
 		SljitUpdateExecutableCurrentDistinctCounts(op, current_distinct_counts, current_min_values, current_max_values);
+		SljitUpdateExecutableCurrentDistinctCounts(op, current_distinct_reserve_counts, current_min_values,
+		                                           current_max_values);
 		SljitUpdateExecutableCurrentRanges(op, current_min_values, current_max_values);
 	}
 	return true;

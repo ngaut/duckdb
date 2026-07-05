@@ -222,10 +222,17 @@ static idx_t BuildExecutionRegionDistinctReserveCount(BaseStatistics &stats, idx
 		return 0;
 	}
 	const auto distinct_count = MinValue(stats.GetDistinctCount(), source_cardinality);
-	if (distinct_count == 0) {
+	if (distinct_count == 0 || distinct_count >= source_cardinality) {
 		return 0;
 	}
 	return distinct_count;
+}
+
+static idx_t BuildExecutionRegionDistinctCount(BaseStatistics &stats, idx_t source_cardinality) {
+	if (source_cardinality == 0) {
+		return 0;
+	}
+	return MinValue(stats.GetDistinctCount(), source_cardinality);
 }
 
 static optional_ptr<const Expression> TryUnwrapExecutionRegionOptionalFilterExpression(const Expression &expr) {
@@ -332,6 +339,7 @@ static void AddExecutionRegionTableScanColumnStats(const PhysicalOperator &op, E
 		return;
 	}
 	contract.source_contract_input_distinct_reserve_counts.assign(scan.column_ids.size(), 0);
+	contract.source_contract_input_distinct_counts.assign(scan.column_ids.size(), 0);
 	contract.source_contract_input_min_values.assign(scan.column_ids.size(), Value());
 	contract.source_contract_input_max_values.assign(scan.column_ids.size(), Value());
 	for (idx_t column_idx = 0; column_idx < scan.column_ids.size(); column_idx++) {
@@ -339,6 +347,8 @@ static void AddExecutionRegionTableScanColumnStats(const PhysicalOperator &op, E
 		if (!stats) {
 			continue;
 		}
+		contract.source_contract_input_distinct_counts[column_idx] =
+		    BuildExecutionRegionDistinctCount(*stats, contract.estimated_source_cardinality);
 		contract.source_contract_input_distinct_reserve_counts[column_idx] =
 		    BuildExecutionRegionDistinctReserveCount(*stats, contract.estimated_source_cardinality);
 		if (stats->GetStatsType() == StatisticsType::NUMERIC_STATS && NumericStats::HasMinMax(*stats)) {

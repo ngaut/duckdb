@@ -158,10 +158,12 @@ private:
 			RecordSljitRegionRuntimePath(runtime, aggregate_op.kind, "direct_projected_dense_group_domain",
 			                             aggregate_input.size());
 		}
-		auto sink_result =
-		    SljitExecutePrimitiveAggregateUpdate(runtime, runtime.ExecutionOperators(), scratch, primitive.aggregate_idx,
-		                                         aggregate_op, aggregate_input, nullptr, DConstants::INVALID_INDEX, true,
-		                                         optional_ptr<bool>(&deferred_grouped_finish));
+		auto &native_runtime = runtime.ExecutionOperators();
+		SljitBindGroupedPrimitiveAggregateUpdate(native_runtime, scratch, primitive.aggregate_idx, aggregate_op,
+		                                         aggregate_input, bound_projected_direct_update);
+		auto sink_result = SljitExecuteBoundGroupedPrimitiveAggregateUpdate(
+		    runtime, scratch, bound_projected_direct_update, aggregate_input, nullptr, aggregate_input.size(), true,
+		    optional_ptr<bool>(&deferred_grouped_finish));
 		sink_result = runtime.ExecutionOperators().RecordSinkResult(aggregate_input, sink_result);
 		if (SljitNativeSinkResultStopsExecution(runtime, sink_result, result)) {
 			SljitFinishDeferredGroupedAggregateUpdate(runtime, scratch, primitive.aggregate_idx,
@@ -456,6 +458,7 @@ private:
 	SljitDataChunkBatch projected_direct_selected_input;
 	SljitDataChunkBatch projected_direct_aggregate_input;
 	SljitBoundGroupedPrimitiveAggregateUpdate bound_direct_update;
+	SljitBoundGroupedPrimitiveAggregateUpdate bound_projected_direct_update;
 };
 
 } // namespace duckdb

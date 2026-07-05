@@ -295,13 +295,17 @@ static bool TryReservePreaggregatedGroupedPrimitiveGroups(ExecutionRegionRuntime
 	if (!runtime.TryMarkOnce(ExecutionRegionRuntimeOnceFlag::AGGREGATE_GROUP_RESERVE, op_idx)) {
 		return false;
 	}
+	const auto max_threads = MaxValue<idx_t>(runtime.MaxThreads(), 1);
+	const auto per_local_group_count = (reserve.group_count + max_threads - 1) / max_threads;
+	const auto reserve_group_count =
+	    MinValue(reserve.group_count, MaxValue<idx_t>(per_local_group_count, STANDARD_VECTOR_SIZE));
 	RecordSljitRegionRuntimePath(runtime, op.kind, "preaggregated_grouped_primitive_reserve_target",
-	                             reserve.group_count);
+	                             reserve_group_count);
 	auto reserve_stage_start = SljitRegionStageStart(runtime);
 	auto reserved = ExecuteSljitRegionRecordedOperation(
 	    runtime, op_idx, op.kind, "preaggregated_grouped_primitive_reserve", reserve_stage_start,
 	    [&](optional_ptr<ExecutionOperatorStageRecorder> recorder) {
-		    return grouped_state.state->ReserveGroups(reserve.group_count, recorder);
+		    return grouped_state.state->ReserveGroups(reserve_group_count, recorder);
 	    });
 	RecordSljitRegionStageRuntimePath(runtime, op_idx, op.kind,
 	                                  reserved ? "preaggregated_grouped_primitive_reserve"

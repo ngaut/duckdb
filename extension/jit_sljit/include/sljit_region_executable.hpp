@@ -373,6 +373,7 @@ struct SljitExecutableRegion {
 	vector<SljitExecutableRegionOp> ops;
 	vector<LogicalType> source_output_types;
 	vector<idx_t> source_distinct_counts;
+	vector<idx_t> source_distinct_reserve_counts;
 	vector<Value> source_min_values;
 	vector<Value> source_max_values;
 

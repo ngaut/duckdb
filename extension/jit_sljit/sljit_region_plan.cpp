@@ -74,6 +74,11 @@ static vector<idx_t> BuildSljitSourceDistinctReserveCountsForContractPlan(const 
 	return BuildSljitSourceOutputStats(source, counts);
 }
 
+static vector<idx_t> BuildSljitSourceDistinctCountsForContractPlan(const ExecutionRegionSourceInfo &source) {
+	auto &counts = source.table_scan_contract.source_contract_input_distinct_counts;
+	return BuildSljitSourceOutputStats(source, counts);
+}
+
 static vector<Value> BuildSljitSourceMinValuesForContractPlan(const ExecutionRegionSourceInfo &source) {
 	auto &values = source.table_scan_contract.source_contract_input_min_values;
 	return BuildSljitSourceOutputStats(source, values);
@@ -289,6 +294,8 @@ ExecutionRegionLoweringPlan BuildSljitRegionPlan(const ExecutionRegionIR &region
 					vector<bool> source_not_null;
 					if (node.source && node.source->table_scan_contract.present) {
 						native_region.source_distinct_counts =
+						    BuildSljitSourceDistinctCountsForContractPlan(*node.source);
+						native_region.source_distinct_reserve_counts =
 						    BuildSljitSourceDistinctReserveCountsForContractPlan(*node.source);
 						native_region.source_min_values = BuildSljitSourceMinValuesForContractPlan(*node.source);
 						native_region.source_max_values = BuildSljitSourceMaxValuesForContractPlan(*node.source);

@@ -28,6 +28,10 @@ bool ExecutionRegionPipelineAdapter::IsCompiledExecutionSuppressed() const {
 	return GetClientContext().IsCompiledExecutionSuppressed();
 }
 
+idx_t ExecutionRegionPipelineAdapter::MaxThreads() const {
+	return executor.pipeline.GetMaxThreads();
+}
+
 PipelineExecuteResult ExecutionRegionPipelineAdapter::ExecuteVectorizedPipeline(idx_t max_chunks) {
 	return executor.ExecuteVectorizedPipeline(max_chunks);
 }

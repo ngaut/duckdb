@@ -225,6 +225,7 @@ unique_ptr<SljitNativeRegionPlan> SljitNativeRegionPlan::Copy() const {
 	result->uses_scan_filters = uses_scan_filters;
 	result->source_output_types = source_output_types;
 	result->source_distinct_counts = source_distinct_counts;
+	result->source_distinct_reserve_counts = source_distinct_reserve_counts;
 	result->source_min_values = source_min_values;
 	result->source_max_values = source_max_values;
 	result->source_not_null = source_not_null;

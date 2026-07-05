@@ -171,6 +171,10 @@ public:
 		return max_chunks;
 	}
 
+	idx_t MaxThreads() const override {
+		return pipeline.MaxThreads();
+	}
+
 	Allocator &GetAllocator() override {
 		return pipeline.GetAllocator();
 	}

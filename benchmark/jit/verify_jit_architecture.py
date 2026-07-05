@@ -510,7 +510,7 @@ def verify_runtime_batch_view() -> None:
             "SljitBindGroupedPrimitiveAggregateUpdate",
             "SljitExecuteBoundGroupedPrimitiveAggregateUpdate",
             "SljitBoundGroupedPrimitiveAggregateUpdate bound_direct_update",
-            "SljitExecutePrimitiveAggregateUpdate",
+            "SljitBoundGroupedPrimitiveAggregateUpdate bound_projected_direct_update",
             "ExecuteCountStarPreaggregation",
         ),
     )
@@ -2707,7 +2707,7 @@ def verify_distinct_aggregate_backend() -> None:
             "SljitBindGroupedPrimitiveAggregateUpdate",
             "SljitExecuteBoundGroupedPrimitiveAggregateUpdate",
             "SljitBoundGroupedPrimitiveAggregateUpdate bound_direct_update",
-            "SljitExecutePrimitiveAggregateUpdate",
+            "SljitBoundGroupedPrimitiveAggregateUpdate bound_projected_direct_update",
             "ExecuteCountStarPreaggregation",
             "primitive_grouped_count_star_row_update",
             "projected_direct_update = primitive.projected_direct_update",
@@ -2756,6 +2756,21 @@ def verify_distinct_aggregate_backend() -> None:
             "SljitBindNativeSink",
             "optional_ptr<ExecutionGroupedAggregateStateAddressBinding> grouped_state",
             "needs_grouped_state_address_plan",
+        ),
+    )
+    require_text(
+        "extension/jit_sljit/include/sljit_projected_grouped_aggregate_sink.hpp",
+        (
+            "SljitBindGroupedPrimitiveAggregateUpdate",
+            "SljitExecuteBoundGroupedPrimitiveAggregateUpdate",
+            "optional_ptr<SljitBoundGroupedPrimitiveAggregateUpdate> bound_grouped_update",
+        ),
+    )
+    require_text(
+        "extension/jit_sljit/include/sljit_join_projection_aggregate_update_runtime.hpp",
+        (
+            "SljitBoundGroupedPrimitiveAggregateUpdate bound_projected_grouped_update",
+            "bound_grouped_update = &bound_projected_grouped_update",
         ),
     )
     reject_regex(
@@ -2906,25 +2921,42 @@ def verify_group_estimate_contract() -> None:
     )
     require_text(
         "src/include/duckdb/execution/execution_region_ir.hpp",
-        ("source_contract_input_distinct_reserve_counts",),
+        (
+            "source_contract_input_distinct_counts",
+            "source_contract_input_distinct_reserve_counts",
+        ),
     )
     require_text(
         "src/execution/execution_region_graph.cpp",
         (
+            "BuildExecutionRegionDistinctCount",
             "BuildExecutionRegionDistinctReserveCount",
+            "source_contract_input_distinct_counts",
             "source_contract_input_distinct_reserve_counts",
             "source_cardinality == 0",
             "contract.estimated_source_cardinality",
             "MinValue(stats.GetDistinctCount(), source_cardinality)",
+            "distinct_count == 0 || distinct_count >= source_cardinality",
             "return distinct_count",
         ),
     )
     require_text(
         "extension/jit_sljit/sljit_region_plan.cpp",
         (
+            "BuildSljitSourceDistinctCountsForContractPlan",
             "BuildSljitSourceDistinctReserveCountsForContractPlan",
+            "source_contract_input_distinct_counts",
             "source_contract_input_distinct_reserve_counts",
             "native_region.source_distinct_counts =",
+            "native_region.source_distinct_reserve_counts =",
+        ),
+    )
+    require_text(
+        "extension/jit_sljit/sljit_region_executable.cpp",
+        (
+            "current_distinct_reserve_counts",
+            "SljitTryBuildExecutableAggregateDenseGroupDomain(op.aggregate_update, current_distinct_counts",
+            "SljitTryBuildExecutableAggregateGroupReservePlan(op.aggregate_update, current_distinct_reserve_counts",
         ),
     )
     require_text(
@@ -2932,8 +2964,11 @@ def verify_group_estimate_contract() -> None:
         (
             "auto &reserve = op.aggregate_update.plan.group_reserve",
             "runtime.TryMarkOnce(ExecutionRegionRuntimeOnceFlag::AGGREGATE_GROUP_RESERVE, op_idx)",
+            "const auto max_threads = MaxValue<idx_t>(runtime.MaxThreads(), 1)",
+            "const auto per_local_group_count = (reserve.group_count + max_threads - 1) / max_threads",
+            "const auto reserve_group_count =",
             "preaggregated_grouped_primitive_reserve_target",
-            "ReserveGroups(reserve.group_count, recorder)",
+            "ReserveGroups(reserve_group_count, recorder)",
         ),
     )
     require_text(
@@ -2955,7 +2990,26 @@ def verify_group_estimate_contract() -> None:
         (
             "enum class ExecutionRegionRuntimeOnceFlag",
             "AGGREGATE_GROUP_RESERVE",
+            "virtual idx_t MaxThreads() const = 0",
             "virtual bool TryMarkOnce(ExecutionRegionRuntimeOnceFlag flag, idx_t index)",
+        ),
+    )
+    require_text(
+        "src/include/duckdb/parallel/execution_region_pipeline_adapter.hpp",
+        ("idx_t MaxThreads() const",),
+    )
+    require_text(
+        "src/parallel/execution_region_pipeline_adapter.cpp",
+        (
+            "idx_t ExecutionRegionPipelineAdapter::MaxThreads() const",
+            "return executor.pipeline.GetMaxThreads()",
+        ),
+    )
+    require_text(
+        "src/execution/execution_region_runner.cpp",
+        (
+            "idx_t MaxThreads() const override",
+            "return pipeline.MaxThreads()",
         ),
     )
     require_text(
