@@ -9,6 +9,7 @@
 #pragma once
 
 #include "sljit_full_pipeline_runtime.hpp"
+#include "sljit_hash_join_projection_materialization_runtime.hpp"
 #include "sljit_hash_join_probe_runtime.hpp"
 #include "sljit_projection_source_runtime.hpp"
 #include "sljit_region_runtime_state.hpp"
@@ -209,6 +210,38 @@ static bool SljitTryMaterializeHashJoinRequiredProjectionViews(
 	return true;
 }
 
+static bool SljitBuildRequiredProjectionSkip(const vector<uint8_t> &required_columns, idx_t projection_count,
+                                             vector<uint8_t> &skip_projection) {
+	if (required_columns.size() != projection_count) {
+		return false;
+	}
+	skip_projection.assign(projection_count, 0);
+	bool has_required = false;
+	for (idx_t projection_idx = 0; projection_idx < projection_count; projection_idx++) {
+		const bool required = required_columns[projection_idx] != 0;
+		has_required = has_required || required;
+		skip_projection[projection_idx] = required ? 0 : 1;
+	}
+	return has_required;
+}
+
+static bool SljitTryMaterializeHashJoinRequiredProjectionOutputs(
+    ExecutionRegionRuntime &runtime, vector<SljitExecutableRegionOp> &ops, SljitRegionExecutionScratch &scratch,
+    idx_t hash_join_idx, idx_t projection_idx, SljitExecutableRegionOp &projection_op, DataChunk &join_input,
+    const SelectionVector &match_selection, Vector &row_pointers, DataChunk &join_source, DataChunk &projected,
+    const vector<uint8_t> &required_columns) {
+	if (join_source.size() == 0 || projected.ColumnCount() != projection_op.projections.size()) {
+		return false;
+	}
+	vector<uint8_t> skip_projection;
+	if (!SljitBuildRequiredProjectionSkip(required_columns, projection_op.projections.size(), skip_projection)) {
+		return false;
+	}
+	return SljitTryDirectMaterializeHashJoinProjectionSourcesToBatch(
+	    runtime, ops, scratch, hash_join_idx, projection_idx, projection_op, join_input, match_selection, row_pointers,
+	    join_source, projected, nullptr, nullptr, optional_ptr<const vector<uint8_t>>(&skip_projection));
+}
+
 template <class EXECUTE_HASH_JOIN_PROBE, class EXECUTE_NATIVE_FULL_PIPELINE_FROM, class EXECUTE_NATIVE_HASH_JOIN_BUILD>
 static bool SljitTryExecuteHashJoinProbeDirectHashJoinBuild(
     ExecutionRegionRuntime &runtime, ExecutionOperatorRuntime &native_runtime, vector<SljitExecutableRegionOp> &ops,
@@ -283,6 +316,12 @@ static bool SljitTryExecuteHashJoinProbeDirectHashJoinBuild(
 			        build_selection, row_pointers, join_output.size(), required_columns, projected)) {
 				sink_input = &projected;
 				RecordSljitRegionRuntimePath(runtime, hash_join_op.kind, "direct_projected_hash_build_views",
+				                             projected.size());
+			} else if (SljitTryMaterializeHashJoinRequiredProjectionOutputs(
+			               runtime, ops, scratch, hash_join_idx, projection_idx, ops[projection_idx], join_input,
+			               match_selection, row_pointers, join_output, projected, required_columns)) {
+				sink_input = &projected;
+				RecordSljitRegionRuntimePath(runtime, hash_join_op.kind, "direct_projected_hash_build_outputs",
 				                             projected.size());
 			}
 		}

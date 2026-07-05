@@ -19,19 +19,59 @@
 #include "sljit_projection_direct_append_runtime.hpp"
 #include "sljit_projection_executor_runtime.hpp"
 #include "sljit_row_pointer_grouped_aggregate_update_runtime.hpp"
+#include "sljit_runtime_batch_runtime.hpp"
 
 namespace duckdb {
 
 struct SljitNativePipelineGroupedFinishState {
 	idx_t aggregate_idx = DConstants::INVALID_INDEX;
 	bool deferred = false;
+	SljitDataChunkBatch pending_aggregate_update;
+	idx_t pending_aggregate_update_idx = DConstants::INVALID_INDEX;
 
 	optional_ptr<bool> Prepare(idx_t aggregate_idx_p) {
 		aggregate_idx = aggregate_idx_p;
 		return optional_ptr<bool>(&deferred);
 	}
 
-	void Finish(ExecutionRegionRuntime &runtime, SljitRegionExecutionScratch &scratch) {
+	bool TryExecuteBatchedTerminalAggregateUpdate(ExecutionRegionRuntime &runtime,
+	                                              ExecutionOperatorRuntime &native_runtime,
+	                                              SljitRegionExecutionScratch &scratch, idx_t op_idx,
+	                                              SljitExecutableRegionOp &op, DataChunk &input,
+	                                              SinkResultType &sink_result) {
+		if (!CanBatchTerminalAggregateUpdate(op, input)) {
+			return false;
+		}
+		if (pending_aggregate_update.Empty() && input.size() >= STANDARD_VECTOR_SIZE / 2) {
+			return false;
+		}
+		pending_aggregate_update.Ensure(runtime.GetAllocator(), input.GetTypes());
+		pending_aggregate_update_idx = op_idx;
+		auto execute_batch = [&](DataChunk &batch) {
+			sink_result = ExecuteAggregateUpdateBatch(runtime, native_runtime, scratch, op_idx, op, batch);
+			if (SljitSinkResultStopsPipeline(sink_result)) {
+				SljitFinishDeferredGroupedAggregateUpdate(runtime, scratch, op_idx, deferred);
+				return true;
+			}
+			RecordSljitRegionRuntimePath(runtime, op.kind, "pending_grouped_aggregate_update_flush", batch.size());
+			return false;
+		};
+		auto flush_batch = [&]() {
+			return SljitFlushDataChunkBatch(pending_aggregate_update.chunk, execute_batch);
+		};
+		auto trace_op = optional_ptr<const SljitExecutableRegionOp>(&op);
+		if (SljitAppendChunkToInitializedBatch(runtime, pending_aggregate_update.chunk, input, op_idx, trace_op,
+		                                       "pending_grouped_aggregate_input_append",
+		                                       "pending_grouped_aggregate_input", flush_batch, execute_batch)) {
+			return true;
+		}
+		sink_result = SinkResultType::NEED_MORE_INPUT;
+		return true;
+	}
+
+	void Finish(ExecutionRegionRuntime &runtime, ExecutionOperatorRuntime &native_runtime,
+	            vector<SljitExecutableRegionOp> &ops, SljitRegionExecutionScratch &scratch) {
+		FlushPendingAggregateUpdate(runtime, native_runtime, ops, scratch);
 		if (!deferred) {
 			return;
 		}
@@ -40,6 +80,53 @@ struct SljitNativePipelineGroupedFinishState {
 		}
 		SljitFinishDeferredGroupedAggregateUpdate(runtime, scratch, aggregate_idx, deferred);
 		aggregate_idx = DConstants::INVALID_INDEX;
+	}
+
+private:
+	static bool CanBatchTerminalAggregateUpdate(SljitExecutableRegionOp &op, DataChunk &input) {
+		if (input.size() == 0 || op.kind != SljitNativeRegionOpKind::AGGREGATE_UPDATE ||
+		    op.aggregate_update.plan.sink_info.kind != ExecutionRegionSinkKind::HASH_AGGREGATE_UPDATE ||
+		    !op.aggregate_update.plan.use_grouped_state_addresses) {
+			return false;
+		}
+		for (auto &type : input.GetTypes()) {
+			if (!TypeIsConstantSize(type.InternalType())) {
+				return false;
+			}
+		}
+		return true;
+	}
+
+	SinkResultType ExecuteAggregateUpdateBatch(ExecutionRegionRuntime &runtime, ExecutionOperatorRuntime &native_runtime,
+	                                           SljitRegionExecutionScratch &scratch, idx_t op_idx,
+	                                           SljitExecutableRegionOp &op, DataChunk &batch) {
+		auto deferred_grouped_finish = Prepare(op_idx);
+		auto result = SljitExecuteNativeAggregateUpdate(runtime, native_runtime, scratch, op_idx, op, batch, nullptr,
+		                                                DConstants::INVALID_INDEX, true, deferred_grouped_finish);
+		return native_runtime.RecordSinkResult(batch, result);
+	}
+
+	void FlushPendingAggregateUpdate(ExecutionRegionRuntime &runtime, ExecutionOperatorRuntime &native_runtime,
+	                                 vector<SljitExecutableRegionOp> &ops, SljitRegionExecutionScratch &scratch) {
+		if (pending_aggregate_update.Empty()) {
+			return;
+		}
+		if (pending_aggregate_update_idx >= ops.size()) {
+			throw InternalException("SLJIT pending grouped aggregate update has no operator");
+		}
+		auto &op = ops[pending_aggregate_update_idx];
+		auto execute_batch = [&](DataChunk &batch) {
+			auto result =
+			    ExecuteAggregateUpdateBatch(runtime, native_runtime, scratch, pending_aggregate_update_idx, op, batch);
+			if (SljitSinkResultStopsPipeline(result)) {
+				SljitFinishDeferredGroupedAggregateUpdate(runtime, scratch, pending_aggregate_update_idx, deferred);
+				return true;
+			}
+			RecordSljitRegionRuntimePath(runtime, op.kind, "pending_grouped_aggregate_update_flush", batch.size());
+			return false;
+		};
+		SljitFlushDataChunkBatch(pending_aggregate_update.chunk, execute_batch);
+		pending_aggregate_update_idx = DConstants::INVALID_INDEX;
 	}
 };
 
@@ -171,7 +258,7 @@ struct SljitNativePipelineExecutor {
 	}
 
 	void Finalize(SljitRegionExecutionScratch &scratch) {
-		grouped_finish.Finish(runtime, scratch);
+		grouped_finish.Finish(runtime, runtime.ExecutionOperators(), ops, scratch);
 	}
 
 private:
@@ -403,6 +490,12 @@ SljitExecuteNativeFullPipelineFrom(KERNEL &kernel, ExecutionRegionRuntime &runti
 		if (TERMINAL_POLICY::CanDeferGroupedFinish() && grouped_finish &&
 		    SljitNativePipelineAggregateCanDeferGroupedFinish(op)) {
 			deferred_grouped_finish = grouped_finish->Prepare(op_idx);
+		}
+		SinkResultType batched_terminal_sink_result;
+		if (TERMINAL_POLICY::CanDeferGroupedFinish() && grouped_finish && op_idx + 1 == ops.size() &&
+		    grouped_finish->TryExecuteBatchedTerminalAggregateUpdate(runtime, native_runtime, scratch, op_idx, op,
+		                                                            *current, batched_terminal_sink_result)) {
+			return batched_terminal_sink_result;
 		}
 		if (TERMINAL_POLICY::TryExecuteTerminalSink(runtime, native_runtime, scratch, op_idx, op, *current,
 		                                            op_idx + 1 == ops.size(), terminal_sink_result,

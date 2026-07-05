@@ -91,21 +91,37 @@ static bool SljitProjectedInputGroupedAggregateCanUseCompactInput(
 
 static bool SljitTryBuildProjectedInputGroupSource(const SljitExecutableRegionOp &projection_op,
                                                    const ExecutionRegionGroupInput &group,
-                                                   ExecutionRowPointerGroupKeySource &group_source) {
+                                                   ExecutionRowPointerGroupKeySource &group_source,
+                                                   optional_ptr<string> blocker = nullptr) {
+	auto block = [&](string reason) {
+		if (blocker) {
+			*blocker = std::move(reason);
+		}
+		return false;
+	};
 	if (group.input_index >= projection_op.projections.size() || group.input_index >= projection_op.output_types.size() ||
 	    projection_op.output_types[group.input_index].InternalType() != group.type.InternalType()) {
-		return false;
+		return block("projection");
 	}
 	SljitExecutableRegionExpression remapped_expr;
 	idx_t source_idx;
 	if (!SljitTryBuildSingleSourceProjectionExpression(projection_op.projections[group.input_index], remapped_expr,
-	                                                   source_idx) ||
-	    source_idx >= projection_op.input_types.size()) {
-		return false;
+	                                                   source_idx)) {
+		return block("single_source_kind_" +
+		             to_string(static_cast<int>(projection_op.projections[group.input_index].plan.kind)));
+	}
+	if (source_idx >= projection_op.input_types.size()) {
+		return block("source_bounds_" + to_string(source_idx) + "_inputs_" +
+		             to_string(projection_op.input_types.size()));
 	}
 	SljitInitializeInputVectorGroupKeySource(source_idx, projection_op.input_types[source_idx], group.type,
 	                                         group_source);
-	return SljitTryFinalizeRowPointerGroupKeySource(remapped_expr.plan, group.type, group_source);
+	if (!SljitTryFinalizeRowPointerGroupKeySource(remapped_expr.plan, group.type, group_source)) {
+		return block("finalize_kind_" + to_string(static_cast<int>(remapped_expr.plan.kind)) + "_source_" +
+		             to_string(source_idx) + "_source_type_" + projection_op.input_types[source_idx].ToString() +
+		             "_group_type_" + group.type.ToString() + "_return_type_" + remapped_expr.plan.return_type.ToString());
+	}
+	return true;
 }
 
 static bool SljitTryResolveProjectedInputPayloadSource(const SljitExecutableRegionOp &projection_op,
@@ -126,9 +142,9 @@ static bool SljitTryBuildProjectedInputGroupedAggregateDescriptor(
     const vector<SljitExecutableRegionOp> &ops, idx_t first_projection_idx, idx_t final_projection_idx,
     idx_t aggregate_idx, optional_ptr<SljitProjectedInputGroupedAggregateDescriptor> descriptor = nullptr,
     optional_ptr<string> blocker = nullptr) {
-	auto block = [&](const char *reason) {
+	auto block = [&](string reason) {
 		if (blocker) {
-			*blocker = reason;
+			*blocker = std::move(reason);
 		}
 		return false;
 	};
@@ -156,8 +172,10 @@ static bool SljitTryBuildProjectedInputGroupedAggregateDescriptor(
 	group_sources.reserve(sink_info.groups.size());
 	for (auto &group : sink_info.groups) {
 		ExecutionRowPointerGroupKeySource group_source;
-		if (!SljitTryBuildProjectedInputGroupSource(semantic_projection, group, group_source)) {
-			return block("group_source");
+		string group_blocker;
+		if (!SljitTryBuildProjectedInputGroupSource(semantic_projection, group, group_source,
+		                                            optional_ptr<string>(&group_blocker))) {
+			return block("group" + to_string(group_sources.size()) + "_source_" + group_blocker);
 		}
 		group_sources.push_back(std::move(group_source));
 	}
