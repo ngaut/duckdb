@@ -961,6 +961,10 @@ void ExecutionRegionLoweringPlan::AddBackendAggregateUpdateCapability(ExecutionR
 	}
 }
 
+void ExecutionRegionLoweringPlan::AddBackendWeakAcceleratedWorkCapability() {
+	capability_facts.backend_weak_accelerated_work_count++;
+}
+
 void ExecutionRegionLoweringPlan::AddFusionBlocker(string reason) {
 	if (first_fusion_blocker.empty()) {
 		first_fusion_blocker = reason;
@@ -984,10 +988,6 @@ void ExecutionRegionLoweringPlan::SetFullyFused(bool fully_fused_p) {
 
 void ExecutionRegionLoweringPlan::SetUsesScanFilters(bool uses_scan_filters_p) {
 	uses_scan_filters = uses_scan_filters_p;
-}
-
-void ExecutionRegionLoweringPlan::SetRequiresSourceContractInputLayout(bool requires_input_layout) {
-	requires_source_contract_input_layout = requires_input_layout;
 }
 
 void ExecutionRegionLoweringPlan::SetSelectedSourceExecution(ExecutionRegionSourceExecutionKind source_execution) {
@@ -1024,10 +1024,6 @@ bool ExecutionRegionLoweringPlan::IsFullyFused() const {
 
 bool ExecutionRegionLoweringPlan::UsesScanFilters() const {
 	return uses_scan_filters;
-}
-
-bool ExecutionRegionLoweringPlan::RequiresSourceContractInputLayout() const {
-	return requires_source_contract_input_layout;
 }
 
 ExecutionRegionSourceExecutionKind ExecutionRegionLoweringPlan::SelectedSourceExecution() const {
@@ -1232,6 +1228,10 @@ static void AppendExecutionRegionBackendCapabilityFacts(string &result, const Ex
 	                                     facts.backend_generated_perfect_hash_lookup_count, first_aggregate);
 	AppendExecutionRegionCapabilityCount(result, "backend_aggregate", "native_state_address_lookup",
 	                                     facts.backend_native_state_address_lookup_count, first_aggregate);
+
+	bool first_cost = true;
+	AppendExecutionRegionCapabilityCount(result, "backend_cost", "weak_accelerated_work",
+	                                     facts.backend_weak_accelerated_work_count, first_cost);
 }
 
 string ExecutionRegionLoweringPlan::CompactEventReason() const {

@@ -150,7 +150,7 @@ bool BuildSljitFusedTypedAggregateCodegenPlan(const vector<SljitNativeRegionExpr
                                               const vector<ExecutionRegionAggregateInput> &aggregates,
                                               SljitFusedTypedAggregateCodegenPlan &codegen_plan,
                                               bool force_typed_path) {
-	if (payloads.size() != aggregates.size() || payloads.size() < 2) {
+	if (payloads.size() != aggregates.size() || payloads.empty()) {
 		return false;
 	}
 	codegen_plan = SljitFusedTypedAggregateCodegenPlan();

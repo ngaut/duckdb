@@ -44,8 +44,7 @@ struct SljitNativePipelineGroupedFinishState {
 static bool SljitNativePipelineAggregateCanDeferGroupedFinish(const SljitExecutableRegionOp &op) {
 	return op.kind == SljitNativeRegionOpKind::AGGREGATE_UPDATE &&
 	       op.aggregate_update.plan.sink_info.kind == ExecutionRegionSinkKind::HASH_AGGREGATE_UPDATE &&
-	       (op.aggregate_update.plan.use_grouped_state_addresses ||
-	        op.aggregate_update.plan.sink_info.aggregate_contract.distinct_count_pointer_keys);
+	       op.aggregate_update.plan.use_grouped_state_addresses;
 }
 
 template <class KERNEL>
@@ -53,20 +52,24 @@ static SinkResultType
 SljitExecuteNativeFullPipelineFrom(KERNEL &kernel, ExecutionRegionRuntime &runtime,
                                    vector<SljitExecutableRegionOp> &ops, const vector<idx_t> &source_distinct_counts,
                                    SljitRegionExecutionScratch &scratch, idx_t start_op_idx, DataChunk &input,
-                                   optional_ptr<SljitNativePipelineGroupedFinishState> grouped_finish = nullptr);
+                                   optional_ptr<SljitNativePipelineGroupedFinishState> grouped_finish = nullptr,
+                                   bool force_duckdb_terminal_aggregate_update = false);
 
 template <class KERNEL>
 static SinkResultType
 SljitExecuteNativeFullPipeline(KERNEL &kernel, ExecutionRegionRuntime &runtime, vector<SljitExecutableRegionOp> &ops,
                                const vector<idx_t> &source_distinct_counts, SljitRegionExecutionScratch &scratch,
                                DataChunk &input,
-                               optional_ptr<SljitNativePipelineGroupedFinishState> grouped_finish = nullptr);
+                               optional_ptr<SljitNativePipelineGroupedFinishState> grouped_finish = nullptr,
+                               bool force_duckdb_terminal_aggregate_update = false);
 
 template <class KERNEL>
 struct SljitNativePipelineExecutor {
 	SljitNativePipelineExecutor(KERNEL &kernel_p, ExecutionRegionRuntime &runtime_p,
-	                            vector<SljitExecutableRegionOp> &ops_p, const vector<idx_t> &source_distinct_counts_p)
-	    : kernel(kernel_p), runtime(runtime_p), ops(ops_p), source_distinct_counts(source_distinct_counts_p) {
+	                            vector<SljitExecutableRegionOp> &ops_p, const vector<idx_t> &source_distinct_counts_p,
+	                            bool force_duckdb_terminal_aggregate_update_p = false)
+	    : kernel(kernel_p), runtime(runtime_p), ops(ops_p), source_distinct_counts(source_distinct_counts_p),
+	      force_duckdb_terminal_aggregate_update(force_duckdb_terminal_aggregate_update_p) {
 	}
 
 	KERNEL &kernel;
@@ -76,12 +79,12 @@ struct SljitNativePipelineExecutor {
 
 	SinkResultType operator()(SljitRegionExecutionScratch &scratch, DataChunk &input) {
 		return SljitExecuteNativeFullPipeline(kernel, runtime, ops, source_distinct_counts, scratch, input,
-		                                      &grouped_finish);
+		                                      &grouped_finish, force_duckdb_terminal_aggregate_update);
 	}
 
 	SinkResultType operator()(SljitRegionExecutionScratch &scratch, idx_t start_op_idx, DataChunk &input) {
 		return SljitExecuteNativeFullPipelineFrom(kernel, runtime, ops, source_distinct_counts, scratch, start_op_idx,
-		                                          input, &grouped_finish);
+		                                          input, &grouped_finish, force_duckdb_terminal_aggregate_update);
 	}
 
 	void Finalize(SljitRegionExecutionScratch &scratch) {
@@ -90,13 +93,16 @@ struct SljitNativePipelineExecutor {
 
 private:
 	SljitNativePipelineGroupedFinishState grouped_finish;
+	bool force_duckdb_terminal_aggregate_update;
 };
 
 template <class KERNEL>
 static SljitNativePipelineExecutor<KERNEL>
 SljitMakeNativePipelineExecutor(KERNEL &kernel, ExecutionRegionRuntime &runtime, vector<SljitExecutableRegionOp> &ops,
-                                const vector<idx_t> &source_distinct_counts) {
-	return SljitNativePipelineExecutor<KERNEL>(kernel, runtime, ops, source_distinct_counts);
+                                const vector<idx_t> &source_distinct_counts,
+                                bool force_duckdb_terminal_aggregate_update = false) {
+	return SljitNativePipelineExecutor<KERNEL>(kernel, runtime, ops, source_distinct_counts,
+	                                           force_duckdb_terminal_aggregate_update);
 }
 
 template <class KERNEL>
@@ -208,7 +214,8 @@ static SinkResultType
 SljitExecuteNativeFullPipelineFrom(KERNEL &kernel, ExecutionRegionRuntime &runtime,
                                    vector<SljitExecutableRegionOp> &ops, const vector<idx_t> &source_distinct_counts,
                                    SljitRegionExecutionScratch &scratch, idx_t start_op_idx, DataChunk &input,
-                                   optional_ptr<SljitNativePipelineGroupedFinishState> grouped_finish) {
+                                   optional_ptr<SljitNativePipelineGroupedFinishState> grouped_finish,
+                                   bool force_duckdb_terminal_aggregate_update) {
 	if (input.size() == 0) {
 		return SinkResultType::NEED_MORE_INPUT;
 	}
@@ -224,7 +231,7 @@ SljitExecuteNativeFullPipelineFrom(KERNEL &kernel, ExecutionRegionRuntime &runti
 		}
 		if (SljitTryExecuteNativeTerminalSink(runtime, native_runtime, scratch, op_idx, op, *current,
 		                                      op_idx + 1 == ops.size(), terminal_sink_result,
-		                                      deferred_grouped_finish)) {
+		                                      deferred_grouped_finish, force_duckdb_terminal_aggregate_update)) {
 			return native_runtime.RecordSinkResult(*current, terminal_sink_result);
 		}
 		SinkResultType filter_aggregate_result;
@@ -296,9 +303,11 @@ template <class KERNEL>
 static SinkResultType
 SljitExecuteNativeFullPipeline(KERNEL &kernel, ExecutionRegionRuntime &runtime, vector<SljitExecutableRegionOp> &ops,
                                const vector<idx_t> &source_distinct_counts, SljitRegionExecutionScratch &scratch,
-                               DataChunk &input, optional_ptr<SljitNativePipelineGroupedFinishState> grouped_finish) {
+                               DataChunk &input,
+                               optional_ptr<SljitNativePipelineGroupedFinishState> grouped_finish,
+                               bool force_duckdb_terminal_aggregate_update) {
 	return SljitExecuteNativeFullPipelineFrom(kernel, runtime, ops, source_distinct_counts, scratch, 0, input,
-	                                          grouped_finish);
+	                                          grouped_finish, force_duckdb_terminal_aggregate_update);
 }
 
 } // namespace duckdb

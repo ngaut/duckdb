@@ -51,12 +51,11 @@ static constexpr ExecutionRegionTraceColumn EXECUTION_REGION_RUNNER_COST_PROFILE
     {"runner_cost_generated_backend_stage_count", LogicalTypeId::BIGINT},
     {"runner_cost_materialization_elision_count", LogicalTypeId::BIGINT},
     {"runner_cost_materialization_source_append_count", LogicalTypeId::BIGINT},
+    {"runner_cost_unfused_mark_filter_aggregate_count", LogicalTypeId::BIGINT},
     {"runner_cost_native_join_stage_count", LogicalTypeId::BIGINT},
     {"runner_cost_native_hash_join_build_sink_count", LogicalTypeId::BIGINT},
 	    {"runner_cost_native_aggregate_stage_count", LogicalTypeId::BIGINT},
 	    {"runner_cost_native_grouped_aggregate_stage_count", LogicalTypeId::BIGINT},
-	    {"runner_cost_native_distinct_count_pointer_aggregate_stage_count", LogicalTypeId::BIGINT},
-	    {"runner_cost_generated_distinct_count_pointer_aggregate_update_count", LogicalTypeId::BIGINT},
 	    {"runner_cost_native_sort_stage_count", LogicalTypeId::BIGINT},
     {"runner_cost_full_pipeline", LogicalTypeId::BOOLEAN},
     {"runner_cost_input_scope", LogicalTypeId::VARCHAR},
@@ -74,6 +73,7 @@ static constexpr ExecutionRegionTraceColumn EXECUTION_REGION_RUNNER_COST_WORK_CO
     {"runner_cost_native_operator_work", LogicalTypeId::BIGINT},
     {"runner_cost_materialization_elision_work", LogicalTypeId::BIGINT},
     {"runner_cost_materialization_source_append_penalty", LogicalTypeId::BIGINT},
+    {"runner_cost_unfused_mark_filter_aggregate_penalty", LogicalTypeId::BIGINT},
     {"runner_cost_full_pipeline_work", LogicalTypeId::BIGINT},
     {"runner_cost_stateful_protocol_penalty", LogicalTypeId::BIGINT},
     {"runner_cost_saved_work_per_batch", LogicalTypeId::BIGINT},
@@ -242,36 +242,33 @@ static inline void AppendExecutionRegionRunnerCostProfileColumn(Vector &output, 
 		output.Append(Value::BIGINT(cost.materialization_source_append_count));
 		return;
 	case 8:
-		output.Append(Value::BIGINT(cost.native_join_stage_count));
+		output.Append(Value::BIGINT(cost.unfused_mark_filter_aggregate_count));
 		return;
 	case 9:
-		output.Append(Value::BIGINT(cost.native_hash_join_build_sink_count));
+		output.Append(Value::BIGINT(cost.native_join_stage_count));
 		return;
 	case 10:
-		output.Append(Value::BIGINT(cost.native_aggregate_stage_count));
+		output.Append(Value::BIGINT(cost.native_hash_join_build_sink_count));
 		return;
 	case 11:
-		output.Append(Value::BIGINT(cost.native_grouped_aggregate_stage_count));
+		output.Append(Value::BIGINT(cost.native_aggregate_stage_count));
 		return;
 	case 12:
-		output.Append(Value::BIGINT(cost.native_distinct_count_pointer_aggregate_stage_count));
+		output.Append(Value::BIGINT(cost.native_grouped_aggregate_stage_count));
 		return;
 	case 13:
-		output.Append(Value::BIGINT(cost.generated_distinct_count_pointer_aggregate_update_count));
-		return;
-	case 14:
 		output.Append(Value::BIGINT(cost.native_sort_stage_count));
 		return;
-	case 15:
+	case 14:
 		output.Append(Value::BOOLEAN(cost.full_pipeline));
 		return;
-	case 16:
+	case 15:
 		AppendExecutionRegionRunnerCostInputScope(output, cost.input_scope);
 		return;
-	case 17:
+	case 16:
 		AppendExecutionRegionNullableString(output, cost.admission_class);
 		return;
-	case 18:
+	case 17:
 		AppendExecutionRegionNullableString(output, cost.selection_reason);
 		return;
 	default:
@@ -301,51 +298,54 @@ static inline void AppendExecutionRegionRunnerCostWorkColumn(Vector &output, idx
 		output.Append(Value::BIGINT(cost.materialization_source_append_penalty));
 		return;
 	case 6:
-		output.Append(Value::BIGINT(cost.full_pipeline_work));
+		output.Append(Value::BIGINT(cost.unfused_mark_filter_aggregate_penalty));
 		return;
 	case 7:
-		output.Append(Value::BIGINT(cost.stateful_protocol_penalty));
+		output.Append(Value::BIGINT(cost.full_pipeline_work));
 		return;
 	case 8:
-		output.Append(Value::BIGINT(cost.saved_work_per_batch));
+		output.Append(Value::BIGINT(cost.stateful_protocol_penalty));
 		return;
 	case 9:
-		output.Append(Value::BIGINT(cost.accelerated_runner_benefit));
+		output.Append(Value::BIGINT(cost.saved_work_per_batch));
 		return;
 	case 10:
-		output.Append(Value::BIGINT(cost.startup_cost));
+		output.Append(Value::BIGINT(cost.accelerated_runner_benefit));
 		return;
 	case 11:
-		output.Append(Value::BIGINT(cost.required_benefit));
+		output.Append(Value::BIGINT(cost.startup_cost));
 		return;
 	case 12:
-		output.Append(Value::BIGINT(cost.net_benefit));
+		output.Append(Value::BIGINT(cost.required_benefit));
 		return;
 	case 13:
-		output.Append(Value::BIGINT(cost.compiled_vectorized_runner_benefit));
+		output.Append(Value::BIGINT(cost.net_benefit));
 		return;
 	case 14:
-		output.Append(Value::BIGINT(cost.compiled_vectorized_startup_cost));
+		output.Append(Value::BIGINT(cost.compiled_vectorized_runner_benefit));
 		return;
 	case 15:
-		output.Append(Value::BIGINT(cost.compiled_vectorized_required_benefit));
+		output.Append(Value::BIGINT(cost.compiled_vectorized_startup_cost));
 		return;
 	case 16:
-		output.Append(Value::BIGINT(cost.compiled_vectorized_net_benefit));
+		output.Append(Value::BIGINT(cost.compiled_vectorized_required_benefit));
 		return;
 	case 17:
-		output.Append(Value::BIGINT(cost.gpu_runner_benefit));
+		output.Append(Value::BIGINT(cost.compiled_vectorized_net_benefit));
 		return;
 	case 18:
-		output.Append(Value::BIGINT(cost.gpu_transfer_cost));
+		output.Append(Value::BIGINT(cost.gpu_runner_benefit));
 		return;
 	case 19:
-		output.Append(Value::BIGINT(cost.gpu_startup_cost));
+		output.Append(Value::BIGINT(cost.gpu_transfer_cost));
 		return;
 	case 20:
-		output.Append(Value::BIGINT(cost.gpu_required_benefit));
+		output.Append(Value::BIGINT(cost.gpu_startup_cost));
 		return;
 	case 21:
+		output.Append(Value::BIGINT(cost.gpu_required_benefit));
+		return;
+	case 22:
 		output.Append(Value::BIGINT(cost.gpu_net_benefit));
 		return;
 	default:

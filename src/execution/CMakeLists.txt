@@ -23,7 +23,6 @@ add_library_unity(
   execution_region_plan.cpp
   execution_region_runtime.cpp
   execution_region_settings.cpp
-  execution_aggregate_runtime.cpp
   execution_hash_join_runtime.cpp
   execution_region_telemetry.cpp
   execution_expression_ir.cpp

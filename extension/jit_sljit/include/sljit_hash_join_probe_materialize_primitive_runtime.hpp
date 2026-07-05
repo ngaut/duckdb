@@ -11,10 +11,10 @@
 #include "sljit_full_pipeline_primitive_sequence.hpp"
 #include "sljit_full_pipeline_runtime.hpp"
 #include "sljit_hash_join_probe_executor_runtime.hpp"
-#include "sljit_native_tail_handoff_runtime.hpp"
 #include "sljit_region_runtime_state.hpp"
 #include "sljit_runtime_batch_runtime.hpp"
 #include "sljit_runtime_batch_state.hpp"
+#include "sljit_runtime_batch_view.hpp"
 
 #include <array>
 
@@ -31,7 +31,7 @@ public:
 	template <class EXECUTE_HASH_JOIN_PROBE, class EXECUTE_OUTPUT_BATCH>
 	bool Execute(idx_t step_idx, const SljitFullPipelinePrimitiveStep &step, const SljitRuntimeBatchView &input,
 	             EXECUTE_HASH_JOIN_PROBE &execute_hash_join_probe, EXECUTE_OUTPUT_BATCH &&execute_output_batch) {
-		auto &join_input = SljitBindNativeTailHandoffInput(input);
+		auto &join_input = SljitBindMaterializedRuntimeBatchInput(input, "SLJIT hash join materialize primitive");
 		if (join_input.size() == 0) {
 			return false;
 		}

@@ -27,12 +27,9 @@ struct SljitProjectionGraphLowering {
 
 struct SljitSourceContractPlan {
 	bool uses_scan_filters = false;
-	bool requires_source_contract_input_layout = false;
 
 	void Merge(const SljitSourceContractPlan &other) {
 		uses_scan_filters = uses_scan_filters || other.uses_scan_filters;
-		requires_source_contract_input_layout =
-		    requires_source_contract_input_layout || other.requires_source_contract_input_layout;
 	}
 };
 
@@ -43,11 +40,6 @@ struct SljitRegionNodePlan {
 	SljitSourceContractPlan source_contract;
 	ExecutionRegionSourceExecutionKind source_execution = ExecutionRegionSourceExecutionKind::NONE;
 	bool requires_source_contract = false;
-};
-
-struct SljitSourceFilterPlan {
-	vector<SljitNativeRegionOpPlan> native_ops;
-	SljitSourceContractPlan source_contract;
 };
 
 bool TryLowerNativeRegionExpression(const ExecutionExpressionFragment &fragment, bool require_boolean,
@@ -92,8 +84,6 @@ SljitRegionNodePlan PlanSljitProjectionNode(const ExecutionRegionNode &node, con
 string SljitSourceBoundaryReason(const ExecutionRegionNode &node, bool render_diagnostics);
 void AppendSljitSourceFilterFacts(string &reason, const ExecutionRegionNode &node,
                                   const ExecutionRegionTableScanContract &contract, bool include_input_columns);
-bool TryPlanSljitSourceFilters(const ExecutionRegionNode &node, SljitSourceFilterPlan &plan, string &error,
-                               bool render_diagnostics);
 SljitRegionNodePlan PlanSljitSourceNode(const ExecutionRegionNode &node, const ExecutionRegionContract &contract,
                                         ExecutionRegionSourceExecutionKind source_execution, bool render_diagnostics);
 bool SljitCanExecuteSourceNode(const ExecutionRegionNode &node, const ExecutionRegionContract &contract);

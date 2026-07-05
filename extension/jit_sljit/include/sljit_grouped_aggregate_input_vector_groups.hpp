@@ -9,7 +9,6 @@
 #pragma once
 
 #include "sljit_grouped_aggregate_group_key_source.hpp"
-#include "sljit_projection_expression_runtime.hpp"
 #include "sljit_region_adapter_scratch.hpp"
 
 #include "duckdb/common/operator/cast_operators.hpp"
@@ -50,79 +49,6 @@ SljitGroupSourcesCanMaterializeFromInputVectors(DataChunk &payload_input,
 	}
 	for (auto &source : group_sources) {
 		if (!SljitGroupSourceCanMaterializeFromInputVector(payload_input, source)) {
-			return false;
-		}
-	}
-	return true;
-}
-
-static bool SljitProjectionCanMaterializeInputVectorGroupSource(
-    DataChunk &payload_input, const ExecutionRowPointerGroupKeySource &source,
-    const SljitExecutableRegionExpression &projection) {
-	if (!source.ready || source.source_kind != ExecutionRowPointerGroupKeySourceKind::INPUT_VECTOR ||
-	    source.input_vector_index >= payload_input.ColumnCount() ||
-	    payload_input.data[source.input_vector_index].GetType() != source.source_type) {
-		return false;
-	}
-	SljitExecutableRegionExpression remapped_expr;
-	idx_t input_source_idx;
-	if (!SljitTryBuildSingleSourceProjectionExpression(projection, remapped_expr, input_source_idx) ||
-	    input_source_idx != source.input_vector_index || remapped_expr.plan.return_type != source.target_type) {
-		return false;
-	}
-	auto &plan = remapped_expr.plan;
-	switch (source.cast_kind) {
-	case ExecutionRowPointerGroupKeyCastKind::NONE:
-		return source.source_physical_type == source.target_physical_type &&
-		       SljitProjectionIsSingleSourceReferenceLike(plan);
-	case ExecutionRowPointerGroupKeyCastKind::INT64_TO_INT32:
-		return plan.kind == SljitNativeRegionExpressionKind::INTEGER_CAST && !plan.try_cast &&
-		       plan.source_index == 0 && source.source_physical_type == PhysicalType::INT64 &&
-		       source.target_physical_type == PhysicalType::INT32 &&
-		       plan.cast_source_width == SljitNativeSignedIntegerWidth::INT64 &&
-		       plan.cast_target_width == SljitNativeSignedIntegerWidth::INT32;
-	case ExecutionRowPointerGroupKeyCastKind::INT64_TO_INT16:
-		return plan.kind == SljitNativeRegionExpressionKind::INTEGER_CAST && !plan.try_cast &&
-		       plan.source_index == 0 && source.source_physical_type == PhysicalType::INT64 &&
-		       source.target_physical_type == PhysicalType::INT16 &&
-		       plan.cast_source_width == SljitNativeSignedIntegerWidth::INT64 &&
-		       plan.cast_target_width == SljitNativeSignedIntegerWidth::INT16;
-	case ExecutionRowPointerGroupKeyCastKind::INT32_TO_INT8:
-		return plan.kind == SljitNativeRegionExpressionKind::INTEGER_CAST && !plan.try_cast &&
-		       plan.source_index == 0 && source.source_physical_type == PhysicalType::INT32 &&
-		       source.target_physical_type == PhysicalType::INT8 &&
-		       plan.cast_source_width == SljitNativeSignedIntegerWidth::INT32 &&
-		       plan.cast_target_width == SljitNativeSignedIntegerWidth::INT8;
-	case ExecutionRowPointerGroupKeyCastKind::INTEGRAL_COMPRESS:
-		return remapped_expr.function && plan.kind == SljitNativeRegionExpressionKind::INTEGRAL_COMPRESS &&
-		       plan.source_index == 0 && plan.constant == source.cast_constant;
-	case ExecutionRowPointerGroupKeyCastKind::STRING_COMPRESS:
-		return remapped_expr.function && plan.kind == SljitNativeRegionExpressionKind::STRING_COMPRESS &&
-		       plan.source_index == 0 && source.source_physical_type == PhysicalType::VARCHAR &&
-		       plan.string_compress_target_size == GetTypeIdSize(source.target_physical_type);
-	}
-	return false;
-}
-
-static bool SljitProjectionInputVectorGroupSourcesCanMaterialize(
-    DataChunk &payload_input, const SljitExecutableRegionOp &projection_op,
-    const vector<idx_t> &group_projection_indices,
-    const vector<ExecutionRowPointerGroupKeySource> &group_sources, bool require_projection = false) {
-	if (group_sources.empty() || group_projection_indices.size() != group_sources.size()) {
-		return false;
-	}
-	for (idx_t group_idx = 0; group_idx < group_sources.size(); group_idx++) {
-		auto &source = group_sources[group_idx];
-		if (!require_projection && !SljitInputVectorGroupSourceUsesProjection(source)) {
-			if (!SljitGroupSourceCanMaterializeFromInputVector(payload_input, source)) {
-				return false;
-			}
-			continue;
-		}
-		const auto projection_idx = group_projection_indices[group_idx];
-		if (projection_idx >= projection_op.projections.size() ||
-		    !SljitProjectionCanMaterializeInputVectorGroupSource(payload_input, source,
-		                                                        projection_op.projections[projection_idx])) {
 			return false;
 		}
 	}
@@ -373,25 +299,6 @@ static bool SljitTryMaterializeInputVectorGroupSource(DataChunk &payload_input,
 	}
 }
 
-static bool SljitTryMaterializeProjectionInputVectorGroupSource(
-    DataChunk &payload_input, const ExecutionRowPointerGroupKeySource &source,
-    optional_ptr<SljitExecutableRegionExpression> projection, optional_ptr<SljitExpressionAdapterScratch> adapter_scratch,
-    Vector &target, const SelectionVector *execute_sel, idx_t count, bool source_key0_int64_to_int32_unchecked,
-    bool require_projection) {
-	if (!require_projection && !SljitInputVectorGroupSourceUsesProjection(source)) {
-		return SljitTryMaterializeInputVectorGroupSource(payload_input, source, target, count,
-		                                                 source_key0_int64_to_int32_unchecked);
-	}
-	if (!projection || !adapter_scratch ||
-	    !SljitProjectionCanMaterializeInputVectorGroupSource(payload_input, source, *projection) ||
-	    target.GetType() != source.target_type) {
-		return false;
-	}
-	SljitExecuteProjectionExpression(*projection, payload_input, target, execute_sel, count, *adapter_scratch);
-	target.Flatten();
-	return target.GetVectorType() == VectorType::FLAT_VECTOR && FlatVector::Validity(target).CheckAllValid(count);
-}
-
 static bool SljitTryBuildInputVectorGroups(ExecutionRegionRuntime &runtime,
                                            SljitAggregatePayloadAdapterScratch &scratch, DataChunk &payload_input,
                                            const vector<ExecutionRowPointerGroupKeySource> &group_sources,
@@ -413,38 +320,6 @@ static bool SljitTryBuildInputVectorGroups(ExecutionRegionRuntime &runtime,
 		}
 	}
 	target_groups.SetChildCardinality(payload_input.size());
-	groups = &target_groups;
-	return true;
-}
-
-static bool SljitTryBuildProjectionInputVectorGroups(
-    ExecutionRegionRuntime &runtime, SljitAggregatePayloadAdapterScratch &scratch, DataChunk &payload_input,
-    SljitExecutableRegionOp &projection_op, const vector<idx_t> &group_projection_indices,
-    vector<SljitExpressionAdapterScratch> &group_projection_scratch,
-    const vector<ExecutionRowPointerGroupKeySource> &group_sources, DataChunk *&groups,
-    const SelectionVector *execute_sel, idx_t count, bool source_key0_int64_to_int32_unchecked) {
-	const bool require_projection = execute_sel != nullptr;
-	if (!SljitProjectionInputVectorGroupSourcesCanMaterialize(payload_input, projection_op, group_projection_indices,
-	                                                         group_sources, require_projection)) {
-		return false;
-	}
-	group_projection_scratch.resize(group_sources.size());
-	auto &target_groups = scratch.PrepareInputVectorGroups(runtime.GetAllocator(), group_sources);
-	for (idx_t group_idx = 0; group_idx < group_sources.size(); group_idx++) {
-		const auto projection_idx = group_projection_indices[group_idx];
-		optional_ptr<SljitExecutableRegionExpression> projection = nullptr;
-		optional_ptr<SljitExpressionAdapterScratch> adapter_scratch = nullptr;
-		if (require_projection || SljitInputVectorGroupSourceUsesProjection(group_sources[group_idx])) {
-			projection = &projection_op.projections[projection_idx];
-			adapter_scratch = &group_projection_scratch[group_idx];
-		}
-		if (!SljitTryMaterializeProjectionInputVectorGroupSource(
-		        payload_input, group_sources[group_idx], projection, adapter_scratch, target_groups.data[group_idx],
-		        execute_sel, count, source_key0_int64_to_int32_unchecked, require_projection)) {
-			return false;
-		}
-	}
-	target_groups.SetChildCardinality(count);
 	groups = &target_groups;
 	return true;
 }

@@ -1479,16 +1479,6 @@ bool RadixPartitionedHashTable::TryResolveNewGroupAddresses(
 	return true;
 }
 
-bool RadixPartitionedHashTable::GetExecutionHashAggregateLookupLayout(
-    ExecutionHashAggregateLookupLayout &layout) const {
-	if (!layout_ptr) {
-		layout = ExecutionHashAggregateLookupLayout();
-		layout.blocker = "hash-aggregate-layout-missing";
-		return false;
-	}
-	return ExecutionBuildHashAggregateLookupLayout(*layout_ptr, layout);
-}
-
 void RadixPartitionedHashTable::FinishStateUpdates(ExecutionContext &context, OperatorSinkInput &input,
                                                    optional_ptr<TupleDataRowLocationRemap> row_location_remap) const {
 	auto &gstate = input.global_state.Cast<RadixHTGlobalSinkState>();

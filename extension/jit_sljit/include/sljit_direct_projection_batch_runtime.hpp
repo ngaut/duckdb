@@ -19,26 +19,6 @@
 
 namespace duckdb {
 
-struct SljitDirectProjectionBatchPassthrough {
-	idx_t output_idx = DConstants::INVALID_INDEX;
-	Vector *source = nullptr;
-	const SelectionVector *selection = nullptr;
-	const char *trace_phase = "direct_batch_expression.passthrough";
-};
-
-static optional_ptr<const SljitDirectProjectionBatchPassthrough> SljitFindDirectProjectionBatchPassthrough(
-    optional_ptr<const vector<SljitDirectProjectionBatchPassthrough>> passthroughs, idx_t output_idx) {
-	if (!passthroughs) {
-		return nullptr;
-	}
-	for (auto &passthrough : *passthroughs) {
-		if (passthrough.output_idx == output_idx) {
-			return optional_ptr<const SljitDirectProjectionBatchPassthrough>(&passthrough);
-		}
-	}
-	return nullptr;
-}
-
 static void SljitBuildPostFusedProjectionSkip(const vector<uint8_t> &skip_projection,
                                               const vector<uint8_t> &fused_projection,
                                               vector<uint8_t> &post_fused_skip) {
@@ -55,12 +35,6 @@ static void SljitBuildPostFusedProjectionSkip(const vector<uint8_t> &skip_projec
 
 static bool SljitDirectProjectionBatchSupportsType(const LogicalType &type) {
 	return DirectAppendSupportsFixedSizeType(type) || type.id() == LogicalTypeId::VARCHAR;
-}
-
-static bool SljitProjectionTargetCanReceiveExpression(Vector &target, const LogicalType &return_type,
-                                                      idx_t target_size) {
-	return target.GetVectorType() == VectorType::FLAT_VECTOR && target.GetType() == return_type &&
-	       SljitDirectProjectionBatchSupportsType(target.GetType()) && FlatVector::GetCapacity(target) >= target_size;
 }
 
 static bool SljitSelectedProjectionHasGeneratedExpression(const SljitExecutableRegionOp &projection_op,
@@ -161,28 +135,13 @@ static void SljitFinishDirectProjectionBatchMaterialization(ExecutionRegionRunti
                                                             SljitExecutableRegionOp &projection_op,
                                                             bool remapped_projection, DataChunk &batch,
                                                             optional_ptr<Vector> projected_hashes, idx_t count,
-                                                            std::chrono::steady_clock::time_point stage_start,
-                                                            bool used_passthrough = false) {
+                                                            std::chrono::steady_clock::time_point stage_start) {
 	if (projected_hashes) {
 		SljitHashDirectProjectionBatch(runtime, projection_idx, projection_op, remapped_projection, batch,
 		                               *projected_hashes);
 	}
-	if (used_passthrough) {
-		RecordSljitRegionRuntimePath(runtime, projection_op.kind, "direct_batch_passthrough_projection", count);
-	}
 	SljitRecordDirectProjectionBatchMaterialization(runtime, projection_idx, projection_op, remapped_projection, count,
 	                                                stage_start);
-}
-
-static bool SljitTryCopyDirectProjectionPassthroughToBatch(const SljitDirectProjectionBatchPassthrough &passthrough,
-                                                           Vector &target, idx_t current_size, idx_t count) {
-	if (!passthrough.source || passthrough.source->GetType() != target.GetType() ||
-	    target.GetVectorType() != VectorType::FLAT_VECTOR || FlatVector::GetCapacity(target) < current_size + count) {
-		return false;
-	}
-	const auto &selection = passthrough.selection ? *passthrough.selection : *FlatVector::IncrementalSelectionVector();
-	target.Copy(*passthrough.source, selection, count, 0, current_size, count);
-	return true;
 }
 
 static void SljitFinishDirectProjectionBatchTargets(DataChunk &batch, idx_t target_size,
@@ -236,35 +195,6 @@ static bool SljitProjectionSkipHasAny(const vector<uint8_t> &skip_projection) {
 		}
 	}
 	return false;
-}
-
-static bool SljitOrProjectionSkips(idx_t projection_count, optional_ptr<const vector<uint8_t>> left,
-                                   optional_ptr<const vector<uint8_t>> right, vector<uint8_t> &merged,
-                                   optional_ptr<const vector<uint8_t>> &merged_ptr) {
-	merged_ptr = nullptr;
-	if (!left && !right) {
-		return true;
-	}
-	merged.assign(projection_count, 0);
-	auto merge_one = [&](const vector<uint8_t> &skip) {
-		if (skip.size() != projection_count) {
-			return false;
-		}
-		for (idx_t projection_idx = 0; projection_idx < projection_count; projection_idx++) {
-			if (skip[projection_idx]) {
-				merged[projection_idx] = 1;
-			}
-		}
-		return true;
-	};
-	if (left && !merge_one(*left)) {
-		return false;
-	}
-	if (right && !merge_one(*right)) {
-		return false;
-	}
-	merged_ptr = optional_ptr<const vector<uint8_t>>(&merged);
-	return true;
 }
 
 } // namespace duckdb

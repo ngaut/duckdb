@@ -58,12 +58,11 @@ struct ExecutionRegionRunnerCostTotals {
 	int64_t generated_backend_stage_count = 0;
 	int64_t materialization_elision_count = 0;
 	int64_t materialization_source_append_count = 0;
+	int64_t unfused_mark_filter_aggregate_count = 0;
 	int64_t native_join_stage_count = 0;
 	int64_t native_hash_join_build_sink_count = 0;
 	int64_t native_aggregate_stage_count = 0;
 	int64_t native_grouped_aggregate_stage_count = 0;
-	int64_t native_distinct_count_pointer_aggregate_stage_count = 0;
-	int64_t generated_distinct_count_pointer_aggregate_update_count = 0;
 	int64_t native_sort_stage_count = 0;
 	bool full_pipeline = false;
 	string input_scope;
@@ -75,6 +74,7 @@ struct ExecutionRegionRunnerCostTotals {
 	int64_t native_operator_work = 0;
 	int64_t materialization_elision_work = 0;
 	int64_t materialization_source_append_penalty = 0;
+	int64_t unfused_mark_filter_aggregate_penalty = 0;
 	int64_t full_pipeline_work = 0;
 	int64_t stateful_protocol_penalty = 0;
 	int64_t saved_work_per_batch = 0;

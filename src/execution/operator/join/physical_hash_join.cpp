@@ -743,7 +743,9 @@ static bool ShouldPrepareBloomFilterBuild(const PhysicalHashJoin &op) {
 	return true;
 }
 
-static bool ShouldUseJitProbeBloomFilter(const PhysicalHashJoin &op) {
+enum class JitHashJoinProbeFilterStrategy : uint8_t { DIRECT_HASH_TABLE, BLOOM_REJECT };
+
+static bool JitProbeBloomCandidate(const PhysicalHashJoin &op) {
 	if (op.join_type != JoinType::INNER || op.residual_info) {
 		return false;
 	}
@@ -784,6 +786,17 @@ static bool ShouldUseJitProbeBloomFilter(const PhysicalHashJoin &op) {
 	const double build_to_probe_ratio =
 	    static_cast<double>(build_estimated_cardinality) / static_cast<double>(probe_estimated_cardinality);
 	return build_to_probe_ratio <= BUILD_TO_PROBE_RATIO_THRESHOLD;
+}
+
+static JitHashJoinProbeFilterStrategy SelectJitHashJoinProbeFilterStrategy(const PhysicalHashJoin &op,
+                                                                           idx_t build_count) {
+	if (!JitProbeBloomCandidate(op)) {
+		return JitHashJoinProbeFilterStrategy::DIRECT_HASH_TABLE;
+	}
+	if (build_count <= JoinHashTable::USE_SALT_THRESHOLD) {
+		return JitHashJoinProbeFilterStrategy::DIRECT_HASH_TABLE;
+	}
+	return JitHashJoinProbeFilterStrategy::BLOOM_REJECT;
 }
 
 unique_ptr<JoinHashTable> PhysicalHashJoin::InitializeHashTable(ClientContext &context,
@@ -1667,7 +1680,8 @@ bool JoinFilterPushdownInfo::CanUseBloomFilter(const ClientContext &context, con
 
 bool JoinFilterPushdownInfo::CanUsePrefixRangeFilter(ClientContext &context, optional_ptr<JoinHashTable> ht,
                                                      const PhysicalComparisonJoin &op, const ExpressionType &cmp,
-                                                     const Value &min, const Value &max) const {
+                                                     const LogicalType &filter_key_type, const Value &min,
+                                                     const Value &max) const {
 	if (!CanUseBloomFilter(context, op, cmp, ht)) {
 		return false;
 	}
@@ -1700,8 +1714,7 @@ bool JoinFilterPushdownInfo::CanUsePrefixRangeFilter(ClientContext &context, opt
 		return false;
 	}
 
-	const auto &key_type = ht->conditions[0].GetLHS().GetReturnType();
-	return PrefixRangeFilter::SupportedType(key_type);
+	return PrefixRangeFilter::SupportedType(filter_key_type);
 }
 
 static unique_ptr<ExpressionFilter> CreateSelectivityOptionalExpressionFilter(unique_ptr<Expression> child_expr,
@@ -1772,15 +1785,17 @@ void JoinFilterPushdownInfo::PushPerfectHashJoinFilter(ClientContext &context, c
 
 void JoinFilterPushdownInfo::RegisterPrefixRangeFilter(const JoinFilterPushdownFilter &info, ClientContext &context,
                                                        JoinHashTable &ht, const PhysicalOperator &op, idx_t filter_idx,
-                                                       ProjectionIndex filter_col_idx, const Value &min_val,
+                                                       ProjectionIndex filter_col_idx,
+                                                       const LogicalType &filter_key_type, const Value &min_val,
                                                        const Value &max_val) const {
-	const auto key_type = ht.conditions[0].GetLHS().GetReturnType();
-	auto filter_input_type = GetRuntimeFilterInputType(info.columns[filter_idx], key_type);
+	auto filter_input_type = GetRuntimeFilterInputType(info.columns[filter_idx], filter_key_type);
 	if (!ht.GetPrefixRangeFilter()) {
-		auto prefix_filter = PrefixRangeFilter::CreatePrefixRangeFilter(key_type);
+		auto prefix_filter = PrefixRangeFilter::CreatePrefixRangeFilter(filter_key_type);
 		prefix_filter->Initialize(context, ht.Count(), min_val, max_val);
-		ht.SetPrefixRangeFilter(std::move(prefix_filter));
+		ht.SetPrefixRangeFilter(std::move(prefix_filter), filter_key_type);
 		ht.SetBuildPrefixRangeFilter();
+	} else if (ht.GetPrefixRangeFilterKeyType() != filter_key_type) {
+		return;
 	}
 
 	const auto key_name = ht.conditions[0].GetRHS().ToString();
@@ -1788,10 +1803,10 @@ void JoinFilterPushdownInfo::RegisterPrefixRangeFilter(const JoinFilterPushdownF
 	idx_t n_vectors_to_check;
 	GetThresholdAndVectorsToCheck(SelectivityOptionalFilterType::PRF, selectivity_threshold, n_vectors_to_check);
 	vector<unique_ptr<Expression>> children;
-	children.push_back(CreateRuntimeFilterInputExpression(context, info.columns[filter_idx], key_type));
+	children.push_back(CreateRuntimeFilterInputExpression(context, info.columns[filter_idx], filter_key_type));
 	auto filter_expr = make_uniq<BoundFunctionExpression>(
 	    BoundScalarFunction(PrefixRangeScalarFun::GetFunction(filter_input_type)), std::move(children),
-	    make_uniq<PrefixRangeFunctionData>(ht.GetPrefixRangeFilter(), key_name, key_type, selectivity_threshold,
+	    make_uniq<PrefixRangeFunctionData>(ht.GetPrefixRangeFilter(), key_name, filter_key_type, selectivity_threshold,
 	                                       n_vectors_to_check));
 	info.dynamic_filters->PushFilter(op, filter_col_idx,
 	                                 CreateSelectivityOptionalExpressionFilter(std::move(filter_expr),
@@ -1841,6 +1856,22 @@ static unique_ptr<Expression> CreateComparisonExpressionFilter(ExpressionType co
 	                                         make_uniq<BoundConstantExpression>(std::move(constant_value)));
 }
 
+static bool TryCastPrefixRangeBounds(const LogicalType &target_type, const Value &min_val, const Value &max_val,
+                                     Value &target_min, Value &target_max) {
+	target_min = min_val;
+	target_max = max_val;
+	if (!target_min.DefaultTryCastAs(target_type)) {
+		return false;
+	}
+	if (!target_max.DefaultTryCastAs(target_type)) {
+		return false;
+	}
+	if (target_min.IsNull() || target_max.IsNull()) {
+		return false;
+	}
+	return target_min <= target_max;
+}
+
 unique_ptr<DataChunk>
 JoinFilterPushdownInfo::FinalizeFilters(ClientContext &context, const PhysicalComparisonJoin &op,
                                         unique_ptr<DataChunk> final_min_max, optional_ptr<JoinHashTable> ht,
@@ -1883,11 +1914,13 @@ JoinFilterPushdownInfo::FinalizeFilters(ClientContext &context, const PhysicalCo
 
 			auto condition_type = min_val.type();
 			auto runtime_filter_input_type = GetRuntimeFilterInputType(pushdown_column, condition_type);
-			bool can_emit_runtime_filters = pushdown_column.mode == JoinFilterPushdownMode::RECONSTRUCT_EXPRESSION;
-			if (can_emit_runtime_filters && perfect_join_executor) {
-				can_emit_runtime_filters = runtime_filter_input_type == perfect_join_executor->GetKeyType();
-			} else if (can_emit_runtime_filters && ht) {
-				can_emit_runtime_filters = runtime_filter_input_type == ht->conditions[0].GetLHS().GetReturnType();
+			bool can_emit_expression_runtime_filters =
+			    pushdown_column.mode == JoinFilterPushdownMode::RECONSTRUCT_EXPRESSION;
+			if (can_emit_expression_runtime_filters && perfect_join_executor) {
+				can_emit_expression_runtime_filters = runtime_filter_input_type == perfect_join_executor->GetKeyType();
+			} else if (can_emit_expression_runtime_filters && ht) {
+				can_emit_expression_runtime_filters =
+				    runtime_filter_input_type == ht->conditions[0].GetLHS().GetReturnType();
 			}
 
 			// if the HT is small we can generate a complete "OR" filter
@@ -1934,18 +1967,33 @@ JoinFilterPushdownInfo::FinalizeFilters(ClientContext &context, const PhysicalCo
 					break;
 				}
 
-				if (can_emit_runtime_filters && perfect_join_executor) {
+				if (can_emit_expression_runtime_filters && perfect_join_executor) {
 					PushPerfectHashJoinFilter(context, op, *perfect_join_executor, info, filter_idx, filter_col_idx);
-				} else if (can_emit_runtime_filters &&
-				           CanUsePrefixRangeFilter(context, ht, op, cmp, min_val_before_cast, max_val_before_cast)) {
-					// It's important that these get the min/max val before casting
-					RegisterPrefixRangeFilter(info, context, *ht, op, filter_idx, filter_col_idx, min_val_before_cast,
-					                          max_val_before_cast);
-				} else if (can_emit_runtime_filters && ht && CanUseBloomFilter(context, op, cmp, ht)) {
-					PushBloomFilter(context, op, *ht, info, filter_idx, filter_col_idx);
+				} else if (can_emit_expression_runtime_filters && ht) {
+					Value runtime_min;
+					Value runtime_max;
+					if (TryCastPrefixRangeBounds(runtime_filter_input_type, min_val_before_cast, max_val_before_cast,
+					                             runtime_min, runtime_max) &&
+					    CanUsePrefixRangeFilter(context, ht, op, cmp, runtime_filter_input_type, runtime_min,
+					                            runtime_max)) {
+						RegisterPrefixRangeFilter(info, context, *ht, op, filter_idx, filter_col_idx,
+						                          runtime_filter_input_type, runtime_min, runtime_max);
+					} else if (CanUseBloomFilter(context, op, cmp, ht)) {
+						PushBloomFilter(context, op, *ht, info, filter_idx, filter_col_idx);
+					}
+				} else if (ht && !perfect_join_executor) {
+					Value storage_min;
+					Value storage_max;
+					if (TryCastPrefixRangeBounds(pushdown_column.storage_type, min_val_before_cast, max_val_before_cast,
+					                             storage_min, storage_max) &&
+					    CanUsePrefixRangeFilter(context, ht, op, cmp, pushdown_column.storage_type, storage_min,
+					                            storage_max)) {
+						RegisterPrefixRangeFilter(info, context, *ht, op, filter_idx, filter_col_idx,
+						                          pushdown_column.storage_type, storage_min, storage_max);
+					}
 				}
 			}
-		}
+	}
 	}
 	return final_min_max;
 }
@@ -2501,7 +2549,9 @@ ExecutionOperatorBindResult PhysicalHashJoin::BindExecutionOperator(ExecutionCon
 			return ExecutionOperatorBindResult::INVALID;
 		}
 	}
-	if (!perfect_hash_layout && table_layout.ready && !empty_build_side && ShouldUseJitProbeBloomFilter(*this)) {
+	if (!perfect_hash_layout && table_layout.ready && !empty_build_side &&
+	    SelectJitHashJoinProbeFilterStrategy(*this, sink.hash_table->Count()) ==
+	        JitHashJoinProbeFilterStrategy::BLOOM_REJECT) {
 		sink.hash_table->EnsureBloomFilterForProbe();
 		if (!ExecutionGetHashJoinTableLayout(*sink.hash_table, table_layout)) {
 			binding.blocker =
@@ -2519,6 +2569,9 @@ ExecutionOperatorBindResult PhysicalHashJoin::BindExecutionOperator(ExecutionCon
 	binding.hash_join_probe.hash_table = sink.hash_table.get();
 	binding.hash_join_probe.layout_kind = perfect_hash_layout ? ExecutionHashJoinProbeLayoutKind::PERFECT_HASH_TABLE
 	                                                          : ExecutionHashJoinProbeLayoutKind::REGULAR_HASH_TABLE;
+	binding.hash_join_probe.use_bloom_filter =
+	    !perfect_hash_layout && SelectJitHashJoinProbeFilterStrategy(*this, sink.hash_table->Count()) ==
+	                                JitHashJoinProbeFilterStrategy::BLOOM_REJECT;
 	binding.hash_join_probe.table_layout = std::move(table_layout);
 	binding.hash_join_probe.perfect_layout = std::move(perfect_layout);
 	binding.hash_join_probe.empty_build_side = empty_build_side;

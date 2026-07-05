@@ -7,7 +7,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "sljit_hash_join_runtime.hpp"
-#include "sljit_hash_join_all_valid_probe_runtime.hpp"
+#include "sljit_hash_join_all_valid_probe_dispatch_runtime.hpp"
 #include "sljit_region_runtime_source.hpp"
 #include "sljit_region_runtime_state.hpp"
 #include "sljit_region_runtime_trace.hpp"
@@ -210,6 +210,54 @@ static constexpr const char *SLJIT_FAST_SELECTED_ALL_VALID_SINGLE_KEY_CHAIN_HASH
     "fast_regular_probe_selected_all_valid_single_key_chain";
 static constexpr const char *SLJIT_FAST_SELECTED_ALL_VALID_SINGLE_KEY_NOTEQUAL_CHAIN_HASH_JOIN_PROBE_STAGE =
     "fast_regular_probe_selected_all_valid_single_key_notequal_chain";
+static constexpr const char *SLJIT_FAST_MARK_MATCH_FLAT_ALL_VALID_UINT64_PAIR_HASH_JOIN_PROBE_STAGE =
+    "fast_regular_probe_mark_match_flat_all_valid_int64_pair_no_chain";
+static constexpr const char *SLJIT_FAST_MARK_MATCH_FLAT_ALL_VALID_UINT64_PAIR_CHAIN_HASH_JOIN_PROBE_STAGE =
+    "fast_regular_probe_mark_match_flat_all_valid_int64_pair_chain";
+static constexpr const char *SLJIT_FAST_MARK_MATCH_SELECTED_ALL_VALID_UINT64_PAIR_HASH_JOIN_PROBE_STAGE =
+    "fast_regular_probe_mark_match_selected_all_valid_int64_pair_no_chain";
+static constexpr const char *SLJIT_FAST_MARK_MATCH_SELECTED_ALL_VALID_UINT64_PAIR_CHAIN_HASH_JOIN_PROBE_STAGE =
+    "fast_regular_probe_mark_match_selected_all_valid_int64_pair_chain";
+static constexpr const char *SLJIT_FAST_MARK_MATCH_FLAT_ALL_VALID_SINGLE_KEY_COMPARISON_CHAIN_HASH_JOIN_PROBE_STAGE =
+    "fast_regular_probe_mark_match_flat_all_valid_single_key_comparison_chain";
+static constexpr const char *SLJIT_FAST_MARK_MATCH_FLAT_ALL_VALID_SINGLE_KEY_COMPARISON_HASH_JOIN_PROBE_STAGE =
+    "fast_regular_probe_mark_match_flat_all_valid_single_key_comparison_no_chain";
+static constexpr const char *SLJIT_FAST_MARK_MATCH_SELECTED_ALL_VALID_SINGLE_KEY_COMPARISON_HASH_JOIN_PROBE_STAGE =
+    "fast_regular_probe_mark_match_selected_all_valid_single_key_comparison_no_chain";
+static constexpr const char *SLJIT_FAST_MARK_MATCH_SELECTED_ALL_VALID_SINGLE_KEY_COMPARISON_CHAIN_HASH_JOIN_PROBE_STAGE =
+    "fast_regular_probe_mark_match_selected_all_valid_single_key_comparison_chain";
+static constexpr const char *SLJIT_FAST_MARK_MATCH_FLAT_ALL_VALID_SINGLE_KEY_HASH_JOIN_PROBE_STAGE =
+    "fast_regular_probe_mark_match_flat_all_valid_single_key_no_chain";
+static constexpr const char *SLJIT_FAST_MARK_MATCH_SELECTED_ALL_VALID_SINGLE_KEY_HASH_JOIN_PROBE_STAGE =
+    "fast_regular_probe_mark_match_selected_all_valid_single_key_no_chain";
+static constexpr const char *SLJIT_FAST_MARK_MATCH_FLAT_ALL_VALID_SINGLE_KEY_CHAIN_HASH_JOIN_PROBE_STAGE =
+    "fast_regular_probe_mark_match_flat_all_valid_single_key_chain";
+static constexpr const char *SLJIT_FAST_MARK_MATCH_SELECTED_ALL_VALID_SINGLE_KEY_CHAIN_HASH_JOIN_PROBE_STAGE =
+    "fast_regular_probe_mark_match_selected_all_valid_single_key_chain";
+static constexpr const char *SLJIT_FAST_MARK_NONMATCH_FLAT_ALL_VALID_UINT64_PAIR_HASH_JOIN_PROBE_STAGE =
+    "fast_regular_probe_mark_nonmatch_flat_all_valid_int64_pair_no_chain";
+static constexpr const char *SLJIT_FAST_MARK_NONMATCH_FLAT_ALL_VALID_UINT64_PAIR_CHAIN_HASH_JOIN_PROBE_STAGE =
+    "fast_regular_probe_mark_nonmatch_flat_all_valid_int64_pair_chain";
+static constexpr const char *SLJIT_FAST_MARK_NONMATCH_SELECTED_ALL_VALID_UINT64_PAIR_HASH_JOIN_PROBE_STAGE =
+    "fast_regular_probe_mark_nonmatch_selected_all_valid_int64_pair_no_chain";
+static constexpr const char *SLJIT_FAST_MARK_NONMATCH_SELECTED_ALL_VALID_UINT64_PAIR_CHAIN_HASH_JOIN_PROBE_STAGE =
+    "fast_regular_probe_mark_nonmatch_selected_all_valid_int64_pair_chain";
+static constexpr const char *SLJIT_FAST_MARK_NONMATCH_FLAT_ALL_VALID_SINGLE_KEY_COMPARISON_CHAIN_HASH_JOIN_PROBE_STAGE =
+    "fast_regular_probe_mark_nonmatch_flat_all_valid_single_key_comparison_chain";
+static constexpr const char *SLJIT_FAST_MARK_NONMATCH_FLAT_ALL_VALID_SINGLE_KEY_COMPARISON_HASH_JOIN_PROBE_STAGE =
+    "fast_regular_probe_mark_nonmatch_flat_all_valid_single_key_comparison_no_chain";
+static constexpr const char *SLJIT_FAST_MARK_NONMATCH_SELECTED_ALL_VALID_SINGLE_KEY_COMPARISON_HASH_JOIN_PROBE_STAGE =
+    "fast_regular_probe_mark_nonmatch_selected_all_valid_single_key_comparison_no_chain";
+static constexpr const char *SLJIT_FAST_MARK_NONMATCH_SELECTED_ALL_VALID_SINGLE_KEY_COMPARISON_CHAIN_HASH_JOIN_PROBE_STAGE =
+    "fast_regular_probe_mark_nonmatch_selected_all_valid_single_key_comparison_chain";
+static constexpr const char *SLJIT_FAST_MARK_NONMATCH_FLAT_ALL_VALID_SINGLE_KEY_HASH_JOIN_PROBE_STAGE =
+    "fast_regular_probe_mark_nonmatch_flat_all_valid_single_key_no_chain";
+static constexpr const char *SLJIT_FAST_MARK_NONMATCH_SELECTED_ALL_VALID_SINGLE_KEY_HASH_JOIN_PROBE_STAGE =
+    "fast_regular_probe_mark_nonmatch_selected_all_valid_single_key_no_chain";
+static constexpr const char *SLJIT_FAST_MARK_NONMATCH_FLAT_ALL_VALID_SINGLE_KEY_CHAIN_HASH_JOIN_PROBE_STAGE =
+    "fast_regular_probe_mark_nonmatch_flat_all_valid_single_key_chain";
+static constexpr const char *SLJIT_FAST_MARK_NONMATCH_SELECTED_ALL_VALID_SINGLE_KEY_CHAIN_HASH_JOIN_PROBE_STAGE =
+    "fast_regular_probe_mark_nonmatch_selected_all_valid_single_key_chain";
 static constexpr const char *SLJIT_GENERATED_SELECTED_ALL_VALID_HASH_JOIN_PROBE_STAGE =
     "generated_regular_probe_selected_all_valid_function";
 static constexpr const char *SLJIT_GENERATED_MARK_MATCH_SELECTED_ALL_VALID_HASH_JOIN_PROBE_STAGE =
@@ -245,6 +293,28 @@ static bool ExecuteAllValidSingleKeyProbeFastPath(const SljitNativeHashJoinProbe
 	return TryExecuteAllValidSingleKeyProbe<SELECTED, false>(plan, input);
 }
 
+template <bool SELECTED, bool CHAIN>
+static bool ExecuteAllValidUint64PairMarkSelectionProbeFastPath(
+    const SljitNativeHashJoinProbePlan &plan, SljitNativeRegularHashJoinProbeInput &input,
+    const SljitAllValidHashJoinProbeFacts &facts, SljitHashJoinMarkSelectionMode mark_selection_mode) {
+	return TryExecuteAllValidUint64PairMarkSelectionProbe<SELECTED, CHAIN>(plan, input, facts, mark_selection_mode);
+}
+
+template <bool SELECTED, bool CHAIN>
+static bool ExecuteAllValidSingleKeyComparisonPredicateMarkSelectionProbeFastPath(
+    const SljitNativeHashJoinProbePlan &plan, SljitNativeRegularHashJoinProbeInput &input,
+    const SljitAllValidHashJoinProbeFacts &facts, SljitHashJoinMarkSelectionMode mark_selection_mode) {
+	return TryExecuteAllValidSingleKeyComparisonPredicateMarkSelectionProbe<SELECTED, CHAIN>(plan, input, facts,
+	                                                                                         mark_selection_mode);
+}
+
+template <bool SELECTED, bool CHAIN>
+static bool ExecuteAllValidSingleKeyMarkSelectionProbeFastPath(
+    const SljitNativeHashJoinProbePlan &plan, SljitNativeRegularHashJoinProbeInput &input,
+    const SljitAllValidHashJoinProbeFacts &facts, SljitHashJoinMarkSelectionMode mark_selection_mode) {
+	return TryExecuteAllValidSingleKeyMarkSelectionProbe<SELECTED, CHAIN>(plan, input, facts, mark_selection_mode);
+}
+
 template <bool SELECTED>
 static const array<SljitAllValidHashJoinProbeFastPath, 5> &SljitAllValidHashJoinProbeFastPaths() {
 	static const array<SljitAllValidHashJoinProbeFastPath, 5> fast_paths {{
@@ -267,13 +337,66 @@ static const array<SljitAllValidHashJoinProbeFastPath, 5> &SljitAllValidHashJoin
 	return fast_paths;
 }
 
+template <bool SELECTED>
+static const array<SljitAllValidHashJoinMarkSelectionProbeFastPath, 6> &
+SljitAllValidHashJoinMarkSelectionProbeFastPaths() {
+	static const array<SljitAllValidHashJoinMarkSelectionProbeFastPath, 6> fast_paths {{
+	    {SLJIT_FAST_MARK_MATCH_FLAT_ALL_VALID_UINT64_PAIR_HASH_JOIN_PROBE_STAGE,
+	     SLJIT_FAST_MARK_MATCH_SELECTED_ALL_VALID_UINT64_PAIR_HASH_JOIN_PROBE_STAGE,
+	     SLJIT_FAST_MARK_NONMATCH_FLAT_ALL_VALID_UINT64_PAIR_HASH_JOIN_PROBE_STAGE,
+	     SLJIT_FAST_MARK_NONMATCH_SELECTED_ALL_VALID_UINT64_PAIR_HASH_JOIN_PROBE_STAGE,
+	     ExecuteAllValidUint64PairMarkSelectionProbeFastPath<SELECTED, false>},
+	    {SLJIT_FAST_MARK_MATCH_FLAT_ALL_VALID_UINT64_PAIR_CHAIN_HASH_JOIN_PROBE_STAGE,
+	     SLJIT_FAST_MARK_MATCH_SELECTED_ALL_VALID_UINT64_PAIR_CHAIN_HASH_JOIN_PROBE_STAGE,
+	     SLJIT_FAST_MARK_NONMATCH_FLAT_ALL_VALID_UINT64_PAIR_CHAIN_HASH_JOIN_PROBE_STAGE,
+	     SLJIT_FAST_MARK_NONMATCH_SELECTED_ALL_VALID_UINT64_PAIR_CHAIN_HASH_JOIN_PROBE_STAGE,
+	     ExecuteAllValidUint64PairMarkSelectionProbeFastPath<SELECTED, true>},
+	    {SLJIT_FAST_MARK_MATCH_FLAT_ALL_VALID_SINGLE_KEY_COMPARISON_HASH_JOIN_PROBE_STAGE,
+	     SLJIT_FAST_MARK_MATCH_SELECTED_ALL_VALID_SINGLE_KEY_COMPARISON_HASH_JOIN_PROBE_STAGE,
+	     SLJIT_FAST_MARK_NONMATCH_FLAT_ALL_VALID_SINGLE_KEY_COMPARISON_HASH_JOIN_PROBE_STAGE,
+	     SLJIT_FAST_MARK_NONMATCH_SELECTED_ALL_VALID_SINGLE_KEY_COMPARISON_HASH_JOIN_PROBE_STAGE,
+	     ExecuteAllValidSingleKeyComparisonPredicateMarkSelectionProbeFastPath<SELECTED, false>},
+	    {SLJIT_FAST_MARK_MATCH_FLAT_ALL_VALID_SINGLE_KEY_COMPARISON_CHAIN_HASH_JOIN_PROBE_STAGE,
+	     SLJIT_FAST_MARK_MATCH_SELECTED_ALL_VALID_SINGLE_KEY_COMPARISON_CHAIN_HASH_JOIN_PROBE_STAGE,
+	     SLJIT_FAST_MARK_NONMATCH_FLAT_ALL_VALID_SINGLE_KEY_COMPARISON_CHAIN_HASH_JOIN_PROBE_STAGE,
+	     SLJIT_FAST_MARK_NONMATCH_SELECTED_ALL_VALID_SINGLE_KEY_COMPARISON_CHAIN_HASH_JOIN_PROBE_STAGE,
+	     ExecuteAllValidSingleKeyComparisonPredicateMarkSelectionProbeFastPath<SELECTED, true>},
+	    {SLJIT_FAST_MARK_MATCH_FLAT_ALL_VALID_SINGLE_KEY_HASH_JOIN_PROBE_STAGE,
+	     SLJIT_FAST_MARK_MATCH_SELECTED_ALL_VALID_SINGLE_KEY_HASH_JOIN_PROBE_STAGE,
+	     SLJIT_FAST_MARK_NONMATCH_FLAT_ALL_VALID_SINGLE_KEY_HASH_JOIN_PROBE_STAGE,
+	     SLJIT_FAST_MARK_NONMATCH_SELECTED_ALL_VALID_SINGLE_KEY_HASH_JOIN_PROBE_STAGE,
+	     ExecuteAllValidSingleKeyMarkSelectionProbeFastPath<SELECTED, false>},
+	    {SLJIT_FAST_MARK_MATCH_FLAT_ALL_VALID_SINGLE_KEY_CHAIN_HASH_JOIN_PROBE_STAGE,
+	     SLJIT_FAST_MARK_MATCH_SELECTED_ALL_VALID_SINGLE_KEY_CHAIN_HASH_JOIN_PROBE_STAGE,
+	     SLJIT_FAST_MARK_NONMATCH_FLAT_ALL_VALID_SINGLE_KEY_CHAIN_HASH_JOIN_PROBE_STAGE,
+	     SLJIT_FAST_MARK_NONMATCH_SELECTED_ALL_VALID_SINGLE_KEY_CHAIN_HASH_JOIN_PROBE_STAGE,
+	     ExecuteAllValidSingleKeyMarkSelectionProbeFastPath<SELECTED, true>},
+	}};
+	return fast_paths;
+}
+
 const std::array<SljitAllValidHashJoinProbeFastPath, 5> &SljitAllValidHashJoinProbeFastPaths(bool selected) {
 	return selected ? SljitAllValidHashJoinProbeFastPaths<true>() : SljitAllValidHashJoinProbeFastPaths<false>();
+}
+
+const std::array<SljitAllValidHashJoinMarkSelectionProbeFastPath, 6> &
+SljitAllValidHashJoinMarkSelectionProbeFastPaths(bool selected) {
+	return selected ? SljitAllValidHashJoinMarkSelectionProbeFastPaths<true>()
+	                : SljitAllValidHashJoinMarkSelectionProbeFastPaths<false>();
 }
 
 const char *SljitAllValidHashJoinProbeFastPathStage(const SljitAllValidHashJoinProbeFastPath &fast_path,
                                                     bool selected) {
 	return selected ? fast_path.selected_stage : fast_path.flat_stage;
+}
+
+const char *SljitAllValidHashJoinMarkSelectionProbeFastPathStage(
+    const SljitAllValidHashJoinMarkSelectionProbeFastPath &fast_path, bool selected,
+    SljitHashJoinMarkSelectionMode mark_selection_mode) {
+	if (mark_selection_mode == SljitHashJoinMarkSelectionMode::MATCHES) {
+		return selected ? fast_path.selected_match_stage : fast_path.flat_match_stage;
+	}
+	return selected ? fast_path.selected_nonmatch_stage : fast_path.flat_nonmatch_stage;
 }
 
 const char *SljitGeneratedRegularHashJoinProbeStage() {

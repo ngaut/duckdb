@@ -9,6 +9,7 @@
 #pragma once
 
 #include "duckdb/common/constants.hpp"
+#include "duckdb/common/exception.hpp"
 #include "duckdb/common/types/data_chunk.hpp"
 
 namespace duckdb {
@@ -83,6 +84,32 @@ static SljitRuntimeBatchView SljitRuntimeBatchViewFromHashJoinSelection(
 	view.ownership = SljitRuntimeBatchOwnership::SELECTED_REFERENCE;
 	view.source_key0_int64_to_int32_matches_are_proven = source_key0_int64_to_int32_matches_are_proven;
 	return view;
+}
+
+static DataChunk &SljitBindRuntimeBatchInput(const SljitRuntimeBatchView &input, const char *consumer_name) {
+	if (!input.HasChunk()) {
+		throw InternalException("%s requires an input chunk", consumer_name);
+	}
+	auto &chunk = input.Chunk();
+	if (input.count > chunk.size()) {
+		throw InternalException("%s count exceeds input chunk cardinality", consumer_name);
+	}
+	if (!input.selection && input.count != chunk.size()) {
+		throw InternalException("%s requires a selection for partial chunk input", consumer_name);
+	}
+	return chunk;
+}
+
+static DataChunk &SljitBindMaterializedRuntimeBatchInput(const SljitRuntimeBatchView &input,
+                                                         const char *consumer_name) {
+	auto &chunk = SljitBindRuntimeBatchInput(input, consumer_name);
+	if (!input.IsMaterializedChunk()) {
+		throw InternalException("%s requires a materialized batch view", consumer_name);
+	}
+	if (input.count != chunk.size()) {
+		throw InternalException("%s count does not match input chunk cardinality", consumer_name);
+	}
+	return chunk;
 }
 
 } // namespace duckdb

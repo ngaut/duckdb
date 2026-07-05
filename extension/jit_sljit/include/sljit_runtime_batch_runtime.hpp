@@ -21,6 +21,34 @@
 
 namespace duckdb {
 
+static bool SljitVectorCanFastAppendFixedFlatAllValid(Vector &target, Vector &source, idx_t append_count,
+                                                      idx_t new_count) {
+	if (target.GetType() != source.GetType()) {
+		return false;
+	}
+	if (target.GetVectorType() != VectorType::FLAT_VECTOR || source.GetVectorType() != VectorType::FLAT_VECTOR) {
+		return false;
+	}
+	if (FlatVector::GetCapacity(target) < new_count) {
+		return false;
+	}
+	if (FlatVector::Validity(target).CanHaveNull() || !FlatVector::Validity(source).CheckAllValid(append_count)) {
+		return false;
+	}
+	const auto physical_type = target.GetType().InternalType();
+	return TypeIsConstantSize(physical_type);
+}
+
+static void SljitFastAppendFixedFlatAllValidVector(Vector &target, Vector &source, idx_t target_count,
+                                                   idx_t append_count, idx_t new_count) {
+	const auto physical_type = target.GetType().InternalType();
+	const auto type_size = GetTypeIdSize(physical_type);
+	auto target_data = FlatVector::GetDataMutable(target) + target_count * type_size;
+	auto source_data = FlatVector::GetData(source);
+	memcpy(target_data, source_data, append_count * type_size);
+	FlatVector::SetSize(target, new_count);
+}
+
 static bool SljitTryFastAppendFixedFlatAllValid(DataChunk &target, DataChunk &source) {
 	const auto append_count = source.size();
 	if (append_count == 0) {
@@ -35,34 +63,14 @@ static bool SljitTryFastAppendFixedFlatAllValid(DataChunk &target, DataChunk &so
 		return false;
 	}
 	for (idx_t col_idx = 0; col_idx < target.ColumnCount(); col_idx++) {
-		auto &target_vector = target.data[col_idx];
-		auto &source_vector = source.data[col_idx];
-		if (target_vector.GetType() != source_vector.GetType()) {
-			return false;
-		}
-		if (!TypeIsConstantSize(target_vector.GetType().InternalType())) {
-			return false;
-		}
-		if (target_vector.GetVectorType() != VectorType::FLAT_VECTOR ||
-		    source_vector.GetVectorType() != VectorType::FLAT_VECTOR) {
-			return false;
-		}
-		if (FlatVector::GetCapacity(target_vector) < new_count) {
-			return false;
-		}
-		if (FlatVector::Validity(target_vector).CanHaveNull() ||
-		    !FlatVector::Validity(source_vector).CheckAllValid(append_count)) {
+		if (!SljitVectorCanFastAppendFixedFlatAllValid(target.data[col_idx], source.data[col_idx], append_count,
+		                                               new_count)) {
 			return false;
 		}
 	}
 	for (idx_t col_idx = 0; col_idx < target.ColumnCount(); col_idx++) {
-		auto &target_vector = target.data[col_idx];
-		auto &source_vector = source.data[col_idx];
-		const auto type_size = GetTypeIdSize(target_vector.GetType().InternalType());
-		auto target_data = FlatVector::GetDataMutable(target_vector) + target_count * type_size;
-		auto source_data = FlatVector::GetData(source_vector);
-		memcpy(target_data, source_data, append_count * type_size);
-		FlatVector::SetSize(target_vector, new_count);
+		SljitFastAppendFixedFlatAllValidVector(target.data[col_idx], source.data[col_idx], target_count, append_count,
+		                                        new_count);
 	}
 	target.CheckCardinality(new_count);
 	return true;

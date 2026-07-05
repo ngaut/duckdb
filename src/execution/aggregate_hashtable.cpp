@@ -5622,32 +5622,6 @@ bool GroupedAggregateHashTable::TryAppendNewGroupsWithStateAddressesFast(
 	return TryAppendNewGroupsFastInternal(groups, nullptr, update_function, update_state, recorder);
 }
 
-bool GroupedAggregateHashTable::GetExecutionHashAggregateLookupLayout(
-    ExecutionHashAggregateLookupLayout &layout) const {
-	if (!layout_ptr) {
-		layout = ExecutionHashAggregateLookupLayout();
-		layout.blocker = "hash-aggregate-layout-missing";
-		return false;
-	}
-	if (!ExecutionBuildHashAggregateLookupLayout(*layout_ptr, layout)) {
-		return false;
-	}
-
-	layout.pointer_table_ready = entries;
-	layout.in_memory = layout.pointer_table_ready;
-	layout.skip_lookups = skip_lookups;
-	layout.capacity = capacity;
-	layout.bitmask = bitmask;
-	layout.entries = entries;
-	if (!layout.pointer_table_ready) {
-		layout.blocker = "hash-aggregate-pointer-table-missing";
-		return false;
-	}
-	layout.ready = layout.table_layout_ready && layout.pointer_table_ready && layout.append_contract_ready &&
-	               layout.row_compare_contract_ready && layout.backend_lowering_ready;
-	return layout.pointer_table_ready;
-}
-
 idx_t GroupedAggregateHashTable::FindOrCreateGroups(DataChunk &groups, Vector &addresses_out,
                                                     SelectionVector &new_groups_out) {
 	groups.Hash(state.hashes);

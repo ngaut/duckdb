@@ -377,6 +377,9 @@ bool Pipeline::PrepareExecutionRegionPlanForExecution() {
 	}
 	BuildExecutionRegionPlanLocked();
 	InitializeSourceStateFromExecutionRegionPlanLocked(GetClientContext());
+	if (execution_region_plan) {
+		execution_region_plan->operator_readiness_refresh = false;
+	}
 	return true;
 }
 

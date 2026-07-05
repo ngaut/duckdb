@@ -9,15 +9,13 @@
 
 #include "duckdb/execution/operator/scan/physical_table_scan.hpp"
 #include "duckdb/execution/physical_operator.hpp"
-#include "duckdb/common/operator/numeric_cast.hpp"
 #include "duckdb/function/table_function.hpp"
 #include "duckdb/main/client_context.hpp"
 #include "duckdb/parallel/pipeline.hpp"
+#include "duckdb/planner/filter/expression_filter.hpp"
+#include "duckdb/planner/filter/table_filter_functions.hpp"
 #include "duckdb/storage/statistics/base_statistics.hpp"
-#include "duckdb/storage/statistics/distinct_statistics.hpp"
 #include "duckdb/storage/statistics/numeric_stats.hpp"
-
-#include <cmath>
 
 namespace duckdb {
 
@@ -227,12 +225,100 @@ static idx_t BuildExecutionRegionDistinctReserveCount(BaseStatistics &stats, idx
 	if (distinct_count == 0) {
 		return 0;
 	}
-	const auto sample_rate = DistinctStatistics::SampleRate(stats.GetType());
-	const auto sampled_reserve_count = std::ceil(static_cast<double>(distinct_count) / sample_rate);
-	if (sampled_reserve_count >= static_cast<double>(source_cardinality)) {
-		return source_cardinality;
+	return distinct_count;
+}
+
+static optional_ptr<const Expression> TryUnwrapExecutionRegionOptionalFilterExpression(const Expression &expr) {
+	if (expr.GetExpressionClass() != ExpressionClass::BOUND_FUNCTION) {
+		return optional_ptr<const Expression>(expr);
 	}
-	return MaxValue(distinct_count, LossyNumericCast<idx_t>(sampled_reserve_count));
+	auto &function = expr.Cast<BoundFunctionExpression>();
+	if (function.Function().GetName() == OptionalFilterScalarFun::NAME && function.BindInfo()) {
+		auto &data = function.BindInfo()->Cast<OptionalFilterFunctionData>();
+		return data.child_filter_expr ? optional_ptr<const Expression>(*data.child_filter_expr) : nullptr;
+	}
+	if (function.Function().GetName() == SelectivityOptionalFilterScalarFun::NAME && function.BindInfo()) {
+		auto &data = function.BindInfo()->Cast<SelectivityOptionalFilterFunctionData>();
+		return data.child_filter_expr ? optional_ptr<const Expression>(*data.child_filter_expr) : nullptr;
+	}
+	return optional_ptr<const Expression>(expr);
+}
+
+static bool TryGetExecutionRegionSignedNumericFilterRange(const ExpressionFilter &filter, const LogicalType &type,
+                                                          SignedNumericRangeFilterData &range) {
+	auto current = optional_ptr<const Expression>(*filter.expr);
+	while (current) {
+		auto unwrapped = TryUnwrapExecutionRegionOptionalFilterExpression(*current);
+		if (!unwrapped || unwrapped.get() == current.get()) {
+			return TryGetSignedNumericRange(*current, type, range);
+		}
+		current = unwrapped;
+	}
+	return false;
+}
+
+static idx_t EstimateExecutionRegionEqualityFilterRows(idx_t source_cardinality, idx_t distinct_count) {
+	if (source_cardinality == 0 || distinct_count == 0) {
+		return 0;
+	}
+	return MaxValue<idx_t>((source_cardinality + distinct_count - 1) / distinct_count, 1);
+}
+
+static void ApplyExecutionRegionFinalizedDynamicFilterEstimate(const PhysicalTableScan &scan,
+                                                               ExecutionContract &descriptor,
+                                                               ClientContext &context) {
+	auto &contract = descriptor.source.table_scan_contract;
+	if (!contract.dynamic_filters || !scan.dynamic_filters || !scan.dynamic_filters->HasFilters()) {
+		return;
+	}
+	auto filters = scan.dynamic_filters->GetFinalTableFilters(scan, scan.table_filters.get());
+	if (!filters || !filters->HasFilters()) {
+		return;
+	}
+
+	auto source_cardinality = contract.estimated_source_cardinality;
+	auto estimated_cardinality = source_cardinality;
+	for (auto &filter_entry : *filters) {
+		auto filter_idx = filter_entry.GetIndex().GetIndex();
+		if (filter_idx >= scan.column_ids.size() || filter_idx >= contract.source_contract_input_types.size()) {
+			continue;
+		}
+		auto &expr_filter =
+		    ExpressionFilter::GetExpressionFilter(filter_entry.Filter(), "execution-region dynamic filter estimate");
+		SignedNumericRangeFilterData range;
+		if (!TryGetExecutionRegionSignedNumericFilterRange(expr_filter,
+		                                                   contract.source_contract_input_types[filter_idx], range)) {
+			continue;
+		}
+		if (range.empty) {
+			estimated_cardinality = 0;
+			break;
+		}
+		if (!range.has_lower || !range.has_upper || range.lower != range.upper) {
+			continue;
+		}
+		auto stats = TryGetExecutionRegionScanColumnStatistics(scan, context, scan.column_ids[filter_idx]);
+		if (!stats) {
+			continue;
+		}
+		auto equality_estimate = EstimateExecutionRegionEqualityFilterRows(source_cardinality, stats->GetDistinctCount());
+		if (equality_estimate == 0) {
+			continue;
+		}
+		estimated_cardinality = MinValue(estimated_cardinality, equality_estimate);
+	}
+	if (estimated_cardinality < descriptor.source.estimated_source_cardinality) {
+		descriptor.source.estimated_source_cardinality = estimated_cardinality;
+		contract.estimated_source_cardinality = estimated_cardinality;
+	}
+}
+
+static void ApplyExecutionRegionSourceCardinalityEstimate(ExecutionRegionOperatorEntry &entry,
+                                                          const ExecutionContract &descriptor) {
+	if (entry.slot != ExecutionRegionOperatorSlot::SOURCE || descriptor.source.estimated_source_cardinality == 0) {
+		return;
+	}
+	entry.estimated_cardinality = MinValue(entry.estimated_cardinality, descriptor.source.estimated_source_cardinality);
 }
 
 static void AddExecutionRegionTableScanColumnStats(const PhysicalOperator &op, ExecutionContract &descriptor,
@@ -260,6 +346,7 @@ static void AddExecutionRegionTableScanColumnStats(const PhysicalOperator &op, E
 			contract.source_contract_input_max_values[column_idx] = NumericStats::Max(*stats);
 		}
 	}
+	ApplyExecutionRegionFinalizedDynamicFilterEstimate(scan, descriptor, context);
 }
 
 static ExecutionRegionOperatorEntry BuildExecutionRegionOperatorEntry(const PhysicalOperator &op,
@@ -282,6 +369,7 @@ static ExecutionRegionOperatorEntry BuildExecutionRegionOperatorEntry(const Phys
 	if (context) {
 		AddExecutionRegionTableScanColumnStats(op, descriptor, *context);
 	}
+	ApplyExecutionRegionSourceCardinalityEstimate(entry, descriptor);
 	ApplyExecutionRegionExactSourceCardinality(entry, descriptor);
 	SetExecutionRegionOperatorExpressions(entry, descriptor.transform);
 	entry.source_contract =

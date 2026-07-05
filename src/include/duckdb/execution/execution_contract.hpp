@@ -31,6 +31,7 @@ struct ExecutionSourceContract {
 	vector<ExecutionRegionContractField> fields;
 	idx_t estimated_source_cardinality = 0;
 	bool estimated_source_cardinality_exact = false;
+	bool finalized_source_cardinality_required = false;
 	idx_t output_column_count = 0;
 	idx_t returned_column_count = 0;
 	vector<idx_t> column_ids;

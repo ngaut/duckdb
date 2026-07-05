@@ -473,6 +473,7 @@ private:
 	idx_t bloom_filter_init_count = 0;
 
 	unique_ptr<PrefixRangeFilter> prefix_range_filter;
+	LogicalType prefix_range_filter_key_type;
 	bool should_build_prefix_range_filter = false;
 
 	//! Copying not allowed
@@ -563,8 +564,9 @@ public:
 		return bloom_filter;
 	}
 
-	void SetPrefixRangeFilter(unique_ptr<PrefixRangeFilter> filter) {
+	void SetPrefixRangeFilter(unique_ptr<PrefixRangeFilter> filter, LogicalType filter_key_type) {
 		prefix_range_filter = std::move(filter);
+		prefix_range_filter_key_type = std::move(filter_key_type);
 	}
 
 	void SetBuildPrefixRangeFilter() {
@@ -573,6 +575,10 @@ public:
 
 	optional_ptr<PrefixRangeFilter> GetPrefixRangeFilter() {
 		return prefix_range_filter;
+	}
+
+	const LogicalType &GetPrefixRangeFilterKeyType() const {
+		return prefix_range_filter_key_type;
 	}
 
 	bool ShouldBuildPrefixRangeFilter() const {

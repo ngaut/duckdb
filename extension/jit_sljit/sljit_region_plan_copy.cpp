@@ -222,6 +222,8 @@ static SljitNativeRegionOpPlan CopySljitNativeRegionOp(const SljitNativeRegionOp
 unique_ptr<SljitNativeRegionPlan> SljitNativeRegionPlan::Copy() const {
 	auto result = make_uniq<SljitNativeRegionPlan>();
 	result->source_execution = source_execution;
+	result->uses_scan_filters = uses_scan_filters;
+	result->source_output_types = source_output_types;
 	result->source_distinct_counts = source_distinct_counts;
 	result->source_min_values = source_min_values;
 	result->source_max_values = source_max_values;

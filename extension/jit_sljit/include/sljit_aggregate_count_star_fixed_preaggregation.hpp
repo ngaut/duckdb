@@ -296,6 +296,88 @@ static bool TryPreaggregateFixedWidthCountStarGroups(DataChunk &input_groups, Da
 	                                                count_deltas);
 }
 
+template <class T>
+static bool TryAccumulatePreaggregatedCountStarGroupsTemplated(DataChunk &source_groups,
+                                                               const vector<int64_t> &source_count_deltas,
+                                                               DataChunk &pending_groups,
+                                                               vector<int64_t> &pending_count_deltas) {
+	if (source_groups.ColumnCount() != 1 || pending_groups.ColumnCount() != 1 ||
+	    source_groups.data[0].GetType() != pending_groups.data[0].GetType() ||
+	    source_groups.size() > source_count_deltas.size()) {
+		return false;
+	}
+	if (source_groups.data[0].GetVectorType() != VectorType::FLAT_VECTOR ||
+	    pending_groups.data[0].GetVectorType() != VectorType::FLAT_VECTOR ||
+	    pending_groups.size() != pending_count_deltas.size()) {
+		return false;
+	}
+
+	auto source_data = FlatVector::GetData<T>(source_groups.data[0]);
+	auto pending_data = FlatVector::GetData<T>(pending_groups.data[0]);
+	std::array<T, SLJIT_LOCAL_PREAGGREGATED_GROUP_LIMIT> keys;
+	std::array<int64_t, SLJIT_LOCAL_PREAGGREGATED_GROUP_LIMIT> counts;
+	idx_t group_count = pending_groups.size();
+	if (group_count > SLJIT_LOCAL_PREAGGREGATED_GROUP_LIMIT) {
+		return false;
+	}
+	for (idx_t group_idx = 0; group_idx < group_count; group_idx++) {
+		keys[group_idx] = pending_data[group_idx];
+		counts[group_idx] = pending_count_deltas[group_idx];
+	}
+	for (idx_t group_idx = 0; group_idx < source_groups.size(); group_idx++) {
+		if (!AccumulatePreaggregatedCountStarDeltaKey(source_data[group_idx], source_count_deltas[group_idx], keys,
+		                                              counts, group_count)) {
+			return false;
+		}
+	}
+	MaterializePreaggregatedCountStarGroups(keys, counts, group_count, pending_groups, pending_count_deltas);
+	return true;
+}
+
+static bool TryAccumulatePreaggregatedCountStarGroups(DataChunk &source_groups,
+                                                      const vector<int64_t> &source_count_deltas,
+                                                      DataChunk &pending_groups,
+                                                      vector<int64_t> &pending_count_deltas) {
+	if (source_groups.ColumnCount() != 1 || pending_groups.ColumnCount() != 1 ||
+	    source_groups.data[0].GetType() != pending_groups.data[0].GetType()) {
+		return false;
+	}
+	switch (source_groups.data[0].GetType().InternalType()) {
+	case PhysicalType::INT8:
+		return TryAccumulatePreaggregatedCountStarGroupsTemplated<int8_t>(
+		    source_groups, source_count_deltas, pending_groups, pending_count_deltas);
+	case PhysicalType::INT16:
+		return TryAccumulatePreaggregatedCountStarGroupsTemplated<int16_t>(
+		    source_groups, source_count_deltas, pending_groups, pending_count_deltas);
+	case PhysicalType::INT32:
+		return TryAccumulatePreaggregatedCountStarGroupsTemplated<int32_t>(
+		    source_groups, source_count_deltas, pending_groups, pending_count_deltas);
+	case PhysicalType::INT64:
+		return TryAccumulatePreaggregatedCountStarGroupsTemplated<int64_t>(
+		    source_groups, source_count_deltas, pending_groups, pending_count_deltas);
+	case PhysicalType::INT128:
+		return TryAccumulatePreaggregatedCountStarGroupsTemplated<hugeint_t>(
+		    source_groups, source_count_deltas, pending_groups, pending_count_deltas);
+	case PhysicalType::UINT8:
+		return TryAccumulatePreaggregatedCountStarGroupsTemplated<uint8_t>(
+		    source_groups, source_count_deltas, pending_groups, pending_count_deltas);
+	case PhysicalType::UINT16:
+		return TryAccumulatePreaggregatedCountStarGroupsTemplated<uint16_t>(
+		    source_groups, source_count_deltas, pending_groups, pending_count_deltas);
+	case PhysicalType::UINT32:
+		return TryAccumulatePreaggregatedCountStarGroupsTemplated<uint32_t>(
+		    source_groups, source_count_deltas, pending_groups, pending_count_deltas);
+	case PhysicalType::UINT64:
+		return TryAccumulatePreaggregatedCountStarGroupsTemplated<uint64_t>(
+		    source_groups, source_count_deltas, pending_groups, pending_count_deltas);
+	case PhysicalType::UINT128:
+		return TryAccumulatePreaggregatedCountStarGroupsTemplated<uhugeint_t>(
+		    source_groups, source_count_deltas, pending_groups, pending_count_deltas);
+	default:
+		return false;
+	}
+}
+
 static bool TryReadProjectionSourceReferenceIndex(const SljitNativeRegionExpressionPlan &projection,
                                                   idx_t &source_index) {
 	if (projection.kind == SljitNativeRegionExpressionKind::REFERENCE) {

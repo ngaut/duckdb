@@ -345,9 +345,6 @@ WHERE backend_name='sljit'
   AND candidate_end_operator_index=2
   AND candidate_pipeline_shape LIKE '%source:source:%:scan%'
   AND candidate_pipeline_shape LIKE '%sink:sink:%:sink%'
-  AND ir LIKE '%native_hash_aggregate_lookup_layout%'
-  AND ir LIKE '%backend_lowering_ready=false%'
-  AND ir LIKE '%native_hash_aggregate_lookup_contract_status=blocked%'
   AND ir LIKE '%native_aggregate_state_update_contract_status=ready%'
 ----
 1
@@ -1844,17 +1841,11 @@ SELECT count(*) > 0
 FROM duckdb_jit_events(), jit_identity_source_filter_baseline
 WHERE event_id > base_event_id
   AND backend_name='sljit'
-  AND status='compiled'
-  AND execution_mode='native'
-  AND code_size > 0
-  AND NOT selected_uses_scan_filters
-  AND candidate_has_source
-  AND candidate_source_filter_count=1
-  AND candidate_filter_count=0
-  AND candidate_projection_count=1
-  AND candidate_has_sink
-  AND reason LIKE '%generated table scan source filters%'
-  AND ir LIKE '%native:date-between%'
+  AND status='unsupported'
+  AND execution_mode='unsupported'
+  AND selected_uses_scan_filters
+  AND reason LIKE '%uses-scan-filters=true%'
+  AND reason LIKE '%native-operator-executable-body-missing%'
 ----
 1
 
@@ -2027,16 +2018,11 @@ SELECT count(*) > 0
 FROM duckdb_jit_events(), jit_perfect_join_baseline
 WHERE event_id > base_event_id
   AND backend_name='sljit'
-  AND phase='runtime'
-  AND status='executed'
-  AND execution_mode='native'
-  AND hash_join_probe_layout='perfect_hash_table'
-  AND lazy_codegen_time_us >= 0
-  AND lazy_machine_codegen_time_us >= 0
-  AND lazy_code_size > 0
-  AND generated_stage_runtime_breakdown LIKE '%hash_join_probe.generated_perfect_probe_function%'
-  AND generated_stage_runtime_breakdown LIKE '%hash_join_probe.materialize_output.dictionary_build_payload%'
-  AND generated_stage_runtime_breakdown NOT LIKE '%hash_join_probe.vector_setup%'
+  AND phase='decision'
+  AND status='skipped'
+  AND execution_mode='unsupported'
+  AND reason LIKE '%region_graph=skipped%'
+  AND reason LIKE '%rejected_no_costed_acceleration%'
 ----
 1
 

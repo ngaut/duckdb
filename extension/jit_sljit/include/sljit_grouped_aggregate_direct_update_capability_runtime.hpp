@@ -93,7 +93,7 @@ static bool SljitCanExecutePreaggregatedGroupedPrimitiveAggregateUpdate(
 	return true;
 }
 
-static bool SljitCanExecuteDirectGroupedFusedPayloadUpdate(
+static bool SljitCanExecuteDirectGroupedStateAddressPayloadUpdate(
     SljitRegionExecutionScratch &scratch, idx_t op_idx, SljitExecutableRegionOp &op, DataChunk &input,
     const vector<const ExecutionPrimitiveAggregateUpdateLane *> &payload_lanes, const SelectionVector *execute_sel,
     idx_t count) {
@@ -168,8 +168,8 @@ static bool SljitCanExecuteDirectRowPointerPreaggregatedPrimitiveUpdate(
     Vector &row_pointers, const vector<ExecutionRowPointerGroupKeySource> &group_sources,
     const vector<idx_t> &payload_source_indices,
     const vector<const ExecutionPrimitiveAggregateUpdateLane *> &payload_lanes, idx_t count,
-    bool &payload_sources_are_fused_override) {
-	payload_sources_are_fused_override = false;
+    bool &uses_generated_payload_preaggregation) {
+	uses_generated_payload_preaggregation = false;
 	auto &aggregate_update = op.aggregate_update;
 	auto &plan = aggregate_update.plan;
 	auto &sink_info = plan.sink_info;
@@ -184,15 +184,15 @@ static bool SljitCanExecuteDirectRowPointerPreaggregatedPrimitiveUpdate(
 	    !SljitCanPreaggregateRowPointerGroupSources(payload_input, group_sources)) {
 		return false;
 	}
-	auto fused_override_status = SljitGetFusedTypedPayloadSourceOverrideStatus(aggregate_update, sink_info.aggregates,
-	                                                                           payload_input, payload_source_indices);
+	auto fused_override_status = SljitGetFusedTypedPayloadSourceOverrideStatus(
+	    aggregate_update, sink_info.aggregates, payload_input, payload_source_indices);
 	if (fused_override_status == SljitFusedTypedPayloadSourceOverrideStatus::INVALID) {
 		return false;
 	}
-	payload_sources_are_fused_override = fused_override_status == SljitFusedTypedPayloadSourceOverrideStatus::READY;
+	uses_generated_payload_preaggregation = fused_override_status == SljitFusedTypedPayloadSourceOverrideStatus::READY;
 	const bool payload_sources_match_aggregates =
-	    !payload_sources_are_fused_override && sink_info.aggregates.size() == payload_source_indices.size();
-	if (!payload_sources_match_aggregates && !payload_sources_are_fused_override) {
+	    !uses_generated_payload_preaggregation && sink_info.aggregates.size() == payload_source_indices.size();
+	if (!payload_sources_match_aggregates && !uses_generated_payload_preaggregation) {
 		return false;
 	}
 	for (idx_t payload_idx = 0; payload_idx < sink_info.aggregates.size(); payload_idx++) {

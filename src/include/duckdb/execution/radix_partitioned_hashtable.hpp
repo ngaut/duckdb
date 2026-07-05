@@ -19,7 +19,6 @@ namespace duckdb {
 
 class GroupedAggregateHashTable;
 class TupleDataRowLocationRemap;
-struct ExecutionHashAggregateLookupLayout;
 struct ExecutionPrimitiveAggregateUpdateLane;
 struct ExecutionRegionSinkInfo;
 struct ExecutionOperatorStageRecorder;
@@ -117,7 +116,6 @@ public:
 	                                 const ExecutionRegionSinkInfo &sink_info, Vector &addresses_out,
 	                                 optional_ptr<ExecutionOperatorStageRecorder> recorder = nullptr,
 	                                 bool finish = true) const;
-	bool GetExecutionHashAggregateLookupLayout(ExecutionHashAggregateLookupLayout &layout) const;
 	void FinishStateUpdates(ExecutionContext &context, OperatorSinkInput &input,
 	                        optional_ptr<TupleDataRowLocationRemap> row_location_remap = nullptr) const;
 	void Combine(ExecutionContext &context, GlobalSinkState &gstate, LocalSinkState &lstate,

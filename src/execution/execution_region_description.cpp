@@ -411,7 +411,6 @@ static string DescribeExecutionRegionAggregateContract(const ExecutionRegionAggr
 	result += ",distinct_aggregate_count=" + std::to_string(contract.distinct_aggregate_count);
 	result += ",distinct_table_count=" + std::to_string(contract.distinct_table_count);
 	result += ",distinct_child_count=" + std::to_string(contract.distinct_child_count);
-	result += ",distinct_count_pointer_keys=" + ExecutionRegionBool(contract.distinct_count_pointer_keys);
 	result += ",input_group_type_count=" + std::to_string(contract.input_group_type_count);
 	result += ",input_group_types=" + BuildExecutionRegionLogicalTypeList(contract.input_group_types);
 	result += ",non_distinct_filter_count=" + std::to_string(contract.non_distinct_filter_count);
@@ -424,14 +423,8 @@ static string DescribeExecutionRegionAggregateContract(const ExecutionRegionAggr
 	result += ",grouped_state_layout_ready=" + ExecutionRegionBool(contract.grouped_state_layout_ready);
 	result += ",grouped_state_offsets=" + BuildExecutionRegionIdxList(contract.grouped_state_offsets);
 	result += ",grouped_state_payload_sizes=" + BuildExecutionRegionIdxList(contract.grouped_state_payload_sizes);
-	result += ",hash_lookup_layout_present=" + ExecutionRegionBool(contract.hash_lookup_layout_present);
-	result += ",hash_lookup_layout_blocker=" + contract.hash_lookup_layout_blocker;
-	result += ",hash_lookup_layout_row_compare_blocker=" + contract.hash_lookup_layout_row_compare_blocker;
-	result += ",hash_lookup_layout_backend_lowering_blocker=" + contract.hash_lookup_layout_backend_lowering_blocker;
 	if (include_update_contracts) {
-		AppendExecutionRegionContractIR(result, contract.hash_lookup_layout_ir);
 		AppendExecutionRegionContractIR(result, contract.native_grouped_state_contract.ir);
-		AppendExecutionRegionContractIR(result, contract.native_hash_lookup_contract.ir);
 		AppendExecutionRegionContractIR(result, contract.native_state_update_contract.ir);
 	}
 	result += ">";
@@ -690,6 +683,8 @@ string DescribeExecutionRegionSourceInfo(const ExecutionRegionSourceInfo &source
 	result += ",function=" + source.function_name;
 	result += ",estimated_source_cardinality=" + std::to_string(source.estimated_source_cardinality);
 	result += ",estimated_source_cardinality_exact=" + ExecutionRegionBool(source.estimated_source_cardinality_exact);
+	result +=
+	    ",finalized_source_cardinality_required=" + ExecutionRegionBool(source.finalized_source_cardinality_required);
 	result += ",fields=" + DescribeExecutionRegionContractFields(fields);
 	result += ",output_columns=" + std::to_string(source.output_column_count);
 	result += ",returned_columns=" + std::to_string(source.returned_column_count);
@@ -890,9 +885,8 @@ static string DescribeExecutionRegionCandidateTraits(const ExecutionRegionCandid
 	result += ",hash_join_operators=" + std::to_string(traits.hash_join_operator_count);
 	result += ",aggregates=" + std::to_string(traits.aggregate_count);
 	result += ",mark_probe_filters=" + std::to_string(traits.mark_probe_filter_count);
+	result += ",mark_probe_materialized_tails=" + std::to_string(traits.mark_probe_materialized_tail_count);
 	result += ",generated_aggregate_updates=" + std::to_string(traits.generated_aggregate_update_count);
-	result += ",generated_distinct_count_pointer_aggregate_updates=" +
-	          std::to_string(traits.generated_distinct_count_pointer_aggregate_update_count);
 	result += ",generated_aggregate_lookups=" + std::to_string(traits.generated_aggregate_lookup_count);
 	result += ",arithmetic_projections=" + std::to_string(traits.arithmetic_projection_count);
 	result += ",high_cost_projections=" + std::to_string(traits.high_cost_projection_count);
@@ -1031,8 +1025,6 @@ void FinalizeExecutionRegionSourceInfo(ExecutionRegionSourceInfo &source, Execut
 	    DescribeExecutionRegionNestedLoopJoinContract(source.nested_loop_join_contract);
 	source.aggregate_contract.native_grouped_state_contract.ir =
 	    DescribeExecutionRegionNativeGroupedStateContract(source.aggregate_contract.native_grouped_state_contract);
-	source.aggregate_contract.native_hash_lookup_contract.ir = DescribeExecutionRegionNativeOperatorContract(
-	    source.aggregate_contract.native_hash_lookup_contract, "native_hash_aggregate_lookup");
 	source.aggregate_contract.native_state_update_contract.ir = DescribeExecutionRegionNativeOperatorContract(
 	    source.aggregate_contract.native_state_update_contract, "native_aggregate_state_update");
 	source.aggregate_contract.ir = DescribeExecutionRegionAggregateContract(source.aggregate_contract, false);
@@ -1101,8 +1093,6 @@ void FinalizeExecutionRegionSinkInfo(ExecutionRegionSinkInfo &sink, ExecutionReg
 	sink.nested_loop_join_contract.ir = DescribeExecutionRegionNestedLoopJoinContract(sink.nested_loop_join_contract);
 	sink.aggregate_contract.native_grouped_state_contract.ir =
 	    DescribeExecutionRegionNativeGroupedStateContract(sink.aggregate_contract.native_grouped_state_contract);
-	sink.aggregate_contract.native_hash_lookup_contract.ir = DescribeExecutionRegionNativeOperatorContract(
-	    sink.aggregate_contract.native_hash_lookup_contract, "native_hash_aggregate_lookup");
 	sink.aggregate_contract.native_state_update_contract.ir = DescribeExecutionRegionNativeOperatorContract(
 	    sink.aggregate_contract.native_state_update_contract, "native_aggregate_state_update");
 	sink.aggregate_contract.ir = DescribeExecutionRegionAggregateContract(sink.aggregate_contract, true);

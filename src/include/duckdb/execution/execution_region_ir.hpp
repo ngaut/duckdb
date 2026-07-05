@@ -218,7 +218,6 @@ struct ExecutionRegionAggregateContract {
 	idx_t distinct_aggregate_count = 0;
 	idx_t distinct_table_count = 0;
 	idx_t distinct_child_count = 0;
-	bool distinct_count_pointer_keys = false;
 	idx_t input_group_type_count = 0;
 	vector<LogicalType> input_group_types;
 	idx_t non_distinct_filter_count = 0;
@@ -231,13 +230,7 @@ struct ExecutionRegionAggregateContract {
 	bool grouped_state_layout_ready = false;
 	vector<idx_t> grouped_state_offsets;
 	vector<idx_t> grouped_state_payload_sizes;
-	bool hash_lookup_layout_present = false;
-	string hash_lookup_layout_blocker;
-	string hash_lookup_layout_row_compare_blocker;
-	string hash_lookup_layout_backend_lowering_blocker;
-	string hash_lookup_layout_ir;
 	ExecutionRegionNativeGroupedStateContract native_grouped_state_contract;
-	ExecutionRegionNativeOperatorContract native_hash_lookup_contract;
 	ExecutionRegionNativeOperatorContract native_state_update_contract;
 	string ir;
 };
@@ -338,6 +331,7 @@ struct ExecutionRegionSourceInfo {
 	vector<ExecutionRegionContractField> fields;
 	idx_t estimated_source_cardinality = 0;
 	bool estimated_source_cardinality_exact = false;
+	bool finalized_source_cardinality_required = false;
 	idx_t output_column_count = 0;
 	idx_t returned_column_count = 0;
 	vector<idx_t> column_ids;
@@ -398,12 +392,6 @@ struct ExecutionRegionContract {
 	idx_t missing_contract_count = 0;
 	vector<string> required_capabilities;
 	vector<string> blockers;
-	bool hash_aggregate_lookup_present = false;
-	string hash_aggregate_lookup_mode;
-	string hash_aggregate_lookup_native_blocker;
-	string hash_aggregate_lookup_layout_blocker;
-	string hash_aggregate_lookup_row_compare_blocker;
-	string hash_aggregate_lookup_backend_lowering_blocker;
 	string ir;
 
 	bool OwnsSource() const {
@@ -437,8 +425,8 @@ struct ExecutionRegionCandidateTraits {
 	idx_t hash_join_operator_count = 0;
 	idx_t aggregate_count = 0;
 	idx_t mark_probe_filter_count = 0;
+	idx_t mark_probe_materialized_tail_count = 0;
 	idx_t generated_aggregate_update_count = 0;
-	idx_t generated_distinct_count_pointer_aggregate_update_count = 0;
 	idx_t generated_aggregate_lookup_count = 0;
 	idx_t arithmetic_projection_count = 0;
 	idx_t high_cost_projection_count = 0;

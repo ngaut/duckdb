@@ -52,7 +52,7 @@ static bool SljitPrimitiveAggregatePayloadSupported(SljitNativeRegionExpressionP
 		return false;
 	}
 	if (aggregate.primitive_update_kind == AggregatePrimitiveUpdateKind::SUM_DOUBLE) {
-		if (grouped_state || aggregate.child_types[0].InternalType() != PhysicalType::DOUBLE) {
+		if (aggregate.child_types[0].InternalType() != PhysicalType::DOUBLE) {
 			return false;
 		}
 		switch (payload.kind) {
@@ -61,7 +61,7 @@ static bool SljitPrimitiveAggregatePayloadSupported(SljitNativeRegionExpressionP
 			return true;
 		case SljitNativeRegionExpressionKind::DOUBLE_BINARY_CONSTANT:
 		case SljitNativeRegionExpressionKind::DOUBLE_BINARY_REFERENCES:
-			return true;
+			return !grouped_state;
 		default:
 			return false;
 		}

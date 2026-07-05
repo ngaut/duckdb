@@ -115,14 +115,15 @@ private:
 	                               idx_t filter_idx, ProjectionIndex filter_col_idx) const;
 	void RegisterPrefixRangeFilter(const JoinFilterPushdownFilter &info, ClientContext &context, JoinHashTable &ht,
 	                               const PhysicalOperator &op, idx_t filter_idx, ProjectionIndex filter_col_idx,
-	                               const Value &min_val, const Value &max_val) const;
+	                               const LogicalType &filter_key_type, const Value &min_val,
+	                               const Value &max_val) const;
 
 	bool CanUseInFilter(const ClientContext &context, optional_ptr<JoinHashTable> ht, const ExpressionType &cmp) const;
 	bool CanUseBloomFilter(const ClientContext &context, const PhysicalComparisonJoin &op, const ExpressionType &cmp,
 	                       optional_ptr<JoinHashTable> ht = nullptr) const;
 	bool CanUsePrefixRangeFilter(ClientContext &context, optional_ptr<JoinHashTable> ht,
-	                             const PhysicalComparisonJoin &op, const ExpressionType &cmp, const Value &min,
-	                             const Value &max) const;
+	                             const PhysicalComparisonJoin &op, const ExpressionType &cmp,
+	                             const LogicalType &filter_key_type, const Value &min, const Value &max) const;
 };
 
 } // namespace duckdb

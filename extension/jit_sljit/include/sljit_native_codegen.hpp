@@ -150,6 +150,9 @@ BuildSljitNativeGroupedSumInt64Reference(SljitNativeIntegerKind kind, SljitNativ
 unique_ptr<ExecutionRegionCodeHandle>
 BuildSljitNativeGroupedSumHugeintReference(SljitNativeIntegerKind kind, SljitNativeAggregateUpdateFunction &function,
                                            string &error);
+unique_ptr<ExecutionRegionCodeHandle>
+BuildSljitNativeGroupedSumDoubleReference(SljitNativeDoubleSourceKind kind,
+                                          SljitNativeAggregateUpdateFunction &function, string &error);
 unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeGroupedCountStar(SljitNativeAggregateUpdateFunction &function,
                                                                        string &error);
 unique_ptr<ExecutionRegionCodeHandle>

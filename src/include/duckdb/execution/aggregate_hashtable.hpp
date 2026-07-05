@@ -22,7 +22,6 @@
 namespace duckdb {
 
 class BlockHandle;
-struct ExecutionHashAggregateLookupLayout;
 struct ExecutionOperatorStageRecorder;
 
 struct FlushMoveState;
@@ -132,7 +131,6 @@ public:
 	                                              ExecutionGroupedAggregateStateAddressUpdateFunction update_function,
 	                                              void *update_state,
 	                                              optional_ptr<ExecutionOperatorStageRecorder> recorder = nullptr);
-	bool GetExecutionHashAggregateLookupLayout(ExecutionHashAggregateLookupLayout &layout) const;
 
 	const PartitionedTupleData &GetPartitionedData() const;
 	unique_ptr<PartitionedTupleData>

@@ -69,7 +69,7 @@ private:
 		if (primitive.HasSelectedHashJoinInput()) {
 			return MaterializeSelectedHashJoinInput(runtime, ops, scratch, primitive, input);
 		}
-		return SljitBindNativeTailHandoffInput(input);
+		return SljitBindMaterializedRuntimeBatchInput(input, "SLJIT delimiter join sink");
 	}
 
 	DataChunk &MaterializeSelectedHashJoinInput(ExecutionRegionRuntime &runtime, vector<SljitExecutableRegionOp> &ops,
@@ -106,13 +106,10 @@ private:
 
 	DataChunk &ProjectInput(ExecutionRegionRuntime &runtime, const SljitDelimJoinSinkPrimitive &primitive,
 	                        const SljitRuntimeBatchView &input) {
-		if (!input.HasChunk()) {
-			throw InternalException("SLJIT delimiter join sink projection requires an input chunk");
-		}
 		if (!primitive.bound_projection || !SljitProjectionIsReferencePreserving(*primitive.bound_projection)) {
 			throw InternalException("SLJIT delimiter join sink projection contract is not reference-preserving");
 		}
-		auto &source = input.Chunk();
+		auto &source = SljitBindRuntimeBatchInput(input, "SLJIT delimiter join sink projection");
 		auto &output = projected_input.chunk;
 		output.Reset();
 		auto project_stage_start = SljitRegionStageStart(runtime);

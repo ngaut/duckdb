@@ -10,7 +10,6 @@
 
 #include "sljit_full_pipeline_primitive_sequence.hpp"
 #include "sljit_full_pipeline_runtime.hpp"
-#include "sljit_native_tail_handoff_runtime.hpp"
 #include "sljit_region_executable.hpp"
 #include "sljit_region_runtime_trace.hpp"
 #include "sljit_runtime_batch_runtime.hpp"
@@ -31,7 +30,7 @@ public:
 	template <class EXECUTE_OUTPUT_BATCH>
 	bool Execute(idx_t step_idx, const SljitFullPipelinePrimitiveStep &step, const SljitRuntimeBatchView &input,
 	             bool have_more_output, EXECUTE_OUTPUT_BATCH &&execute_output_batch) {
-		auto &chunk = SljitBindNativeTailHandoffInput(input);
+		auto &chunk = SljitBindMaterializedRuntimeBatchInput(input, "SLJIT source batch boundary");
 		if (chunk.size() == 0) {
 			return false;
 		}
@@ -41,6 +40,9 @@ public:
 			}
 			return execute_output_batch(batch, batch_has_more_output);
 		};
+		const auto op_idx = step.Op(0);
+		auto &trace_op = ops[op_idx];
+		RecordSljitRegionRuntimePath(runtime, trace_op.kind, "source_batch_boundary", chunk.size());
 		auto flush_batch = [&](bool batch_has_more_output) -> bool {
 			return FlushWithHaveMore(step_idx, execute_boundary_batch, batch_has_more_output);
 		};
@@ -48,11 +50,16 @@ public:
 		auto &boundary_batch = boundary_batches[step_idx];
 		boundary_batch.Ensure(runtime.GetAllocator(), chunk.GetTypes());
 		auto &batch = boundary_batch.chunk;
-		const auto op_idx = step.Op(0);
-		auto &trace_op = ops[op_idx];
-		RecordSljitRegionRuntimePath(runtime, trace_op.kind, "source_batch_boundary", chunk.size());
 		if (batch.size() + chunk.size() > STANDARD_VECTOR_SIZE && flush_batch(true)) {
 			return true;
+		}
+		if (!CanCoalesce(chunk)) {
+			if (batch.size() > 0 && flush_batch(true)) {
+				return true;
+			}
+			RecordSljitRegionRuntimePath(runtime, trace_op.kind, "source_batch_boundary_reference_handoff",
+			                             chunk.size());
+			return execute_boundary_batch(chunk, have_more_output);
 		}
 		if (!ShouldBatch(batch.size(), chunk.size())) {
 			return execute_boundary_batch(chunk, have_more_output);
@@ -101,7 +108,15 @@ private:
 		return chunk_count < STANDARD_VECTOR_SIZE / 2;
 	}
 
-private:
+	static bool CanCoalesce(DataChunk &chunk) {
+		for (auto &type : chunk.GetTypes()) {
+			if (!TypeIsConstantSize(type.InternalType())) {
+				return false;
+			}
+		}
+		return true;
+	}
+
 	ExecutionRegionRuntime &runtime;
 	ExecutionRegionResult &result;
 	vector<SljitExecutableRegionOp> &ops;

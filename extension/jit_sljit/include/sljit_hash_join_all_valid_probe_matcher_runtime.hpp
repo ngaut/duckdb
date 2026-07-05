@@ -10,6 +10,10 @@
 
 #include "sljit_hash_join_all_valid_probe_base_runtime.hpp"
 
+#include "duckdb/common/numeric_utils.hpp"
+
+#include <type_traits>
+
 namespace duckdb {
 
 template <class T>
@@ -86,6 +90,51 @@ struct SljitHashJoinUint64PairMatcher {
 	idx_t key1_offset;
 };
 
+template <class KEY0, class KEY1>
+struct SljitHashJoinPairEqualityMatcher {
+	struct Row {
+		KEY0 key0;
+		KEY1 key1;
+	};
+
+	SljitHashJoinPairEqualityMatcher(const SljitNativeHashJoinProbePlan &plan,
+	                                 const SljitNativeRegularHashJoinProbeInput &input)
+	    : key0_data(reinterpret_cast<const KEY0 *>(input.source_data[0])),
+	      key1_data(reinterpret_cast<const KEY1 *>(input.source_data[1])),
+	      key0_offset(plan.keys[0].key_layout_offset), key1_offset(plan.keys[1].key_layout_offset) {
+	}
+
+	inline Row Load(const sel_t source_idx) const {
+		return {key0_data[source_idx], key1_data[source_idx]};
+	}
+
+	inline hash_t BuildHash(const Row &row) const {
+		return SljitHashJoinCombineHashScalar(Hash<KEY0>(row.key0), Hash<KEY1>(row.key1));
+	}
+
+	inline idx_t PrefetchOffset() const {
+		return key0_offset;
+	}
+
+	inline bool MatchesFirst(const Row &row, data_ptr_t row_location) const {
+		return Matches(row, row_location);
+	}
+
+	inline bool MatchesKnownFirst(const Row &, data_ptr_t) const {
+		return true;
+	}
+
+	inline bool Matches(const Row &row, data_ptr_t row_location) const {
+		return SljitHashJoinKeysEqual<KEY0>(row_location, key0_offset, row.key0) &&
+		       SljitHashJoinKeysEqual<KEY1>(row_location, key1_offset, row.key1);
+	}
+
+	const KEY0 *__restrict key0_data;
+	const KEY1 *__restrict key1_data;
+	idx_t key0_offset;
+	idx_t key1_offset;
+};
+
 struct SljitHashJoinSingleUint64NotEqualPredicateMatcher {
 	struct Row {
 		uint64_t key_value;
@@ -128,6 +177,79 @@ struct SljitHashJoinSingleUint64NotEqualPredicateMatcher {
 	const uint64_t *__restrict predicate_data;
 	idx_t key_offset;
 	idx_t predicate_offset;
+};
+
+template <class T>
+static inline bool SljitHashJoinComparePredicate(T left, T right, ExecutionRegionComparisonType comparison_type) {
+	switch (comparison_type) {
+	case ExecutionRegionComparisonType::NOT_EQUAL:
+		return left != right;
+	case ExecutionRegionComparisonType::LESS_THAN:
+		return left < right;
+	case ExecutionRegionComparisonType::GREATER_THAN:
+		return left > right;
+	case ExecutionRegionComparisonType::LESS_THAN_OR_EQUAL:
+		return left <= right;
+	case ExecutionRegionComparisonType::GREATER_THAN_OR_EQUAL:
+		return left >= right;
+	default:
+		return false;
+	}
+}
+
+template <class KEY_SOURCE, class KEY_LAYOUT, class PREDICATE>
+struct SljitHashJoinSingleKeyComparisonPredicateMatcher {
+	struct Row {
+		KEY_LAYOUT key_value;
+		PREDICATE predicate_value;
+	};
+
+	SljitHashJoinSingleKeyComparisonPredicateMatcher(const SljitNativeHashJoinProbePlan &plan,
+	                                                 const SljitNativeRegularHashJoinProbeInput &input)
+	    : key_data(reinterpret_cast<const KEY_SOURCE *>(input.source_data[0])),
+	      predicate_data(reinterpret_cast<const PREDICATE *>(input.source_data[1])),
+	      key_offset(plan.keys[0].key_layout_offset), predicate_offset(plan.keys[1].key_layout_offset),
+	      comparison_type(plan.keys[1].comparison_type) {
+	}
+
+	inline Row Load(const sel_t source_idx) const {
+		return {CastKey(key_data[source_idx]), predicate_data[source_idx]};
+	}
+
+	inline hash_t BuildHash(const Row &row) const {
+		return Hash<KEY_LAYOUT>(row.key_value);
+	}
+
+	inline idx_t PrefetchOffset() const {
+		return key_offset;
+	}
+
+	inline bool MatchesFirst(const Row &row, data_ptr_t row_location) const {
+		return SljitHashJoinKeysEqual<KEY_LAYOUT>(row_location, key_offset, row.key_value);
+	}
+
+	inline bool MatchesKnownFirst(const Row &row, data_ptr_t row_location) const {
+		return SljitHashJoinComparePredicate<PREDICATE>(
+		    row.predicate_value, duckdb::Load<PREDICATE>(row_location + predicate_offset), comparison_type);
+	}
+
+	inline bool Matches(const Row &row, data_ptr_t row_location) const {
+		return MatchesFirst(row, row_location) && MatchesKnownFirst(row, row_location);
+	}
+
+private:
+	static inline KEY_LAYOUT CastKey(KEY_SOURCE value) {
+		if constexpr (std::is_same<KEY_SOURCE, KEY_LAYOUT>::value) {
+			return value;
+		}
+		return NumericCast<KEY_LAYOUT>(value);
+	}
+
+	const KEY_SOURCE *__restrict key_data;
+	const PREDICATE *__restrict predicate_data;
+	idx_t key_offset;
+	idx_t predicate_offset;
+	ExecutionRegionComparisonType comparison_type;
 };
 
 template <class KEY_READER>

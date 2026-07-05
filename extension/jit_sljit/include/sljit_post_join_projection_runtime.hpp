@@ -75,23 +75,6 @@ static void SljitProjectPostJoinProjectionChain(ExecutionRegionRuntime &runtime,
 	}
 }
 
-static void SljitProjectOptionalPostJoinProjectionChain(ExecutionRegionRuntime &runtime,
-                                                        SljitRegionExecutionScratch &scratch,
-                                                        vector<SljitExecutableRegionOp> &ops,
-                                                        idx_t first_projection_idx, idx_t final_projection_idx,
-                                                        DataChunk &input, DataChunk *&projected,
-                                                        const char *reference_phase = "post_join_reference_projection",
-                                                        const char *batch_phase = "post_join_batch_projection") {
-	if (first_projection_idx > final_projection_idx) {
-		projected = &input;
-		return;
-	}
-	auto &projection_output = scratch.TemporaryChunk(final_projection_idx);
-	SljitProjectPostJoinProjectionChain(runtime, scratch, ops, first_projection_idx, final_projection_idx, input,
-	                                    projection_output, reference_phase, batch_phase);
-	projected = projection_output.size() == 0 ? nullptr : &projection_output;
-}
-
 static void SljitRecordDirectProjectionChainUnsupported(ExecutionRegionRuntime &runtime,
                                                         const vector<SljitExecutableRegionOp> &ops,
                                                         idx_t trace_projection_idx, const char *reason, idx_t count) {

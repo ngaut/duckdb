@@ -53,123 +53,27 @@ static bool SljitHashJoinProbeProducesSelectedView(SljitHashJoinProbeOutputContr
 struct SljitHashJoinProbeExecutionContractView {
 	const SljitNativeHashJoinProbePlan *plan = nullptr;
 	const ExecutionRegionOperatorInfo *operator_info = nullptr;
-	SljitNativeHashJoinProbePlan remapped_plan;
-	ExecutionRegionOperatorInfo remapped_operator_info;
 };
 
-static bool SljitHashJoinProbeKeyKindMatchesPhysicalType(SljitNativeHashJoinKeyKind key_kind,
-                                                         PhysicalType physical_type) {
-	switch (key_kind) {
-	case SljitNativeHashJoinKeyKind::INT8:
-		return physical_type == PhysicalType::INT8;
-	case SljitNativeHashJoinKeyKind::INT16:
-		return physical_type == PhysicalType::INT16;
-	case SljitNativeHashJoinKeyKind::INT32:
-		return physical_type == PhysicalType::INT32;
-	case SljitNativeHashJoinKeyKind::INT64:
-		return physical_type == PhysicalType::INT64;
-	case SljitNativeHashJoinKeyKind::INT128:
-		return physical_type == PhysicalType::INT128;
-	case SljitNativeHashJoinKeyKind::UINT8:
-		return physical_type == PhysicalType::UINT8;
-	case SljitNativeHashJoinKeyKind::UINT16:
-		return physical_type == PhysicalType::UINT16;
-	case SljitNativeHashJoinKeyKind::UINT32:
-		return physical_type == PhysicalType::UINT32;
-	case SljitNativeHashJoinKeyKind::UINT64:
-		return physical_type == PhysicalType::UINT64;
-	case SljitNativeHashJoinKeyKind::UINT128:
-		return physical_type == PhysicalType::UINT128;
-	default:
-		return false;
-	}
-}
-
-static bool SljitRemappedHashJoinProbeKeySourceSupported(const SljitNativeHashJoinProbeKeyPlan &key, idx_t key_idx,
-                                                         PhysicalType source_type) {
-	if (SljitHashJoinProbeKeyKindMatchesPhysicalType(key.key_kind, source_type)) {
-		return true;
-	}
-	return key_idx == 0 && key.key_kind == SljitNativeHashJoinKeyKind::INT32 && source_type == PhysicalType::INT64;
-}
-
-static void SljitApplyHashJoinResidualProbeSourceRemap(ExecutionRegionOperatorInfo &operator_info, DataChunk &input,
-                                                       const vector<idx_t> &residual_probe_source_indices) {
-	if (residual_probe_source_indices.empty()) {
-		return;
-	}
-	auto &residual_sources = operator_info.hash_join_contract.residual_sources;
-	if (residual_probe_source_indices.size() != residual_sources.size()) {
-		throw InternalException("SLJIT remapped hash join residual source count mismatch");
-	}
-	for (auto &source : residual_sources) {
-		if (source.kind == ExecutionHashJoinResidualSourceKind::BUILD) {
-			continue;
-		}
-		if (source.kind != ExecutionHashJoinResidualSourceKind::PROBE ||
-		    source.source_index >= residual_probe_source_indices.size()) {
-			throw InternalException("SLJIT remapped hash join residual source shape mismatch");
-		}
-		const auto input_idx = residual_probe_source_indices[source.source_index];
-		if (input_idx == DConstants::INVALID_INDEX) {
-			continue;
-		}
-		if (input_idx >= input.ColumnCount()) {
-			throw InternalException("SLJIT remapped hash join residual probe source is out of range");
-		}
-		if (input.data[input_idx].GetType() != source.type) {
-			throw InternalException("SLJIT remapped hash join residual probe source type mismatch");
-		}
-		source.input_index = input_idx;
-	}
-}
-
 static SljitHashJoinProbeExecutionContractView
-SljitBuildHashJoinProbeExecutionContractView(SljitExecutableRegionOp &op, DataChunk &input,
+SljitBuildHashJoinProbeExecutionContractView(SljitExecutableRegionOp &op,
                                              optional_ptr<const SljitHashJoinProbeInputRemap> input_remap,
                                              SljitHashJoinProbeOutputContract output_contract) {
 	auto &plan = op.hash_join_probe.plan;
 	SljitHashJoinProbeExecutionContractView view;
 	view.plan = &plan;
 	view.operator_info = &plan.operator_info;
-	if (!input_remap || (!input_remap->HasKeyInputRemap() && !input_remap->HasResidualProbeSourceRemap())) {
+	if (!input_remap || !input_remap->HasRemap()) {
 		return view;
 	}
 	if (!SljitHashJoinProbeProducesSelectedView(output_contract)) {
-		throw InternalException("SLJIT remapped hash join probe input requires selected-view execution");
+		throw InternalException("SLJIT prepared hash join probe remap requires selected-view execution");
 	}
-
-	view.remapped_plan = plan.Copy(false);
-	view.remapped_operator_info = plan.operator_info;
-	view.remapped_plan.input_types.clear();
-	view.remapped_plan.input_types.reserve(input.ColumnCount());
-	for (idx_t col_idx = 0; col_idx < input.ColumnCount(); col_idx++) {
-		view.remapped_plan.input_types.push_back(input.data[col_idx].GetType());
+	if (!input_remap->has_prepared_plan) {
+		throw InternalException("SLJIT hash join probe remap was not prepared during primitive binding");
 	}
-	if (input_remap->HasKeyInputRemap()) {
-		if (input_remap->key_input_indices.size() != plan.keys.size() ||
-		    plan.operator_info.hash_join_keys.size() != plan.keys.size()) {
-			throw InternalException("SLJIT remapped hash join probe key count mismatch");
-		}
-		for (idx_t key_idx = 0; key_idx < view.remapped_plan.keys.size(); key_idx++) {
-			const auto input_idx = input_remap->key_input_indices[key_idx];
-			if (input_idx >= input.ColumnCount()) {
-				throw InternalException("SLJIT remapped hash join probe key input is out of range");
-			}
-			auto &key = view.remapped_plan.keys[key_idx];
-			if (!SljitRemappedHashJoinProbeKeySourceSupported(key, key_idx,
-			                                                  input.data[input_idx].GetType().InternalType())) {
-				throw InternalException("SLJIT remapped hash join probe key source type is unsupported");
-			}
-			key.key_input_index = input_idx;
-			view.remapped_operator_info.hash_join_keys[key_idx].input_index = input_idx;
-		}
-	}
-	SljitApplyHashJoinResidualProbeSourceRemap(view.remapped_operator_info, input,
-	                                           input_remap->residual_probe_source_indices);
-	view.remapped_plan.operator_info = view.remapped_operator_info;
-	view.plan = &view.remapped_plan;
-	view.operator_info = &view.remapped_operator_info;
+	view.plan = &input_remap->prepared_plan;
+	view.operator_info = &input_remap->prepared_plan.operator_info;
 	return view;
 }
 
@@ -429,7 +333,7 @@ static ExecutionOperatorBindResult SljitExecuteRegularHashJoinProbe(
 
 	auto prepared_input = SljitPrepareRegularHashJoinProbeInput(
 	    runtime, op_idx, op.kind, plan, layout, input, match_selection, row_pointers, source_scratch, state,
-	    table_layout_kind, source_key0_int64_to_int32_unchecked, rhs_keys_all_valid);
+	    table_layout_kind, source_key0_int64_to_int32_unchecked, rhs_keys_all_valid, probe.use_bloom_filter);
 	auto &native_input = prepared_input.native_input;
 	const auto mark_selection_mode = SljitHashJoinMarkSelectionModeForOutputContract(output_contract);
 
@@ -568,7 +472,7 @@ static ExecutionOperatorBindResult SljitExecuteNativeHashJoinProbe(
     string &deferred_reason, bool source_key0_int64_to_int32_unchecked = false,
     SljitHashJoinProbeOutputContract output_contract = SljitHashJoinProbeOutputContract::MATERIALIZED_OUTPUT,
     optional_ptr<const SljitHashJoinProbeInputRemap> input_remap = nullptr) {
-	auto contract_view = SljitBuildHashJoinProbeExecutionContractView(op, input, input_remap, output_contract);
+	auto contract_view = SljitBuildHashJoinProbeExecutionContractView(op, input_remap, output_contract);
 	auto &plan = *contract_view.plan;
 	ExecutionOperatorBinding *binding_ptr = nullptr;
 	auto bind_result = SljitBindRecordedNativeOperator(runtime, native_runtime, scratch, op_idx, op, input,

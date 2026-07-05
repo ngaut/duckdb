@@ -7,6 +7,7 @@
 #include "sljit_join_probe_codegen.hpp"
 
 #include "duckdb/common/limits.hpp"
+#include "duckdb/execution/execution_aggregate_runtime.hpp"
 
 namespace duckdb {
 
@@ -111,8 +112,12 @@ static bool BuildExecutableRegionOp(const SljitNativeRegionOpPlan &op, SljitExec
 		if (!build_aggregate_update_payload_code) {
 			return true;
 		}
-		return SljitBuildExecutableAggregateUpdatePayloadCode(op.aggregate_update, executable.aggregate_update, error,
-		                                                      input_not_null, input_min_values, input_max_values);
+		if (!SljitBuildExecutableAggregateUpdatePayloadCode(op.aggregate_update, executable.aggregate_update, error,
+		                                                    input_not_null, input_min_values, input_max_values)) {
+			return false;
+		}
+		SljitSelectExecutableAggregateUpdateStrategy(executable.aggregate_update);
+		return true;
 	case SljitNativeRegionOpKind::PROJECTION:
 		executable.projections.reserve(op.projections.size());
 		for (auto &projection : op.projections) {
@@ -175,6 +180,9 @@ static void SljitTryBuildExecutableAggregateGroupReservePlan(const SljitNativeAg
 			return;
 		}
 	}
+	if (plan.estimated_input_count > 0 && reserve_count >= plan.estimated_input_count) {
+		return;
+	}
 	reserve.has_group_count = true;
 	reserve.group_count = reserve_count;
 }
@@ -187,6 +195,7 @@ static bool SljitCanDeferAggregateUpdatePayloadCode(const vector<SljitNativeRegi
 }
 
 bool BuildSljitExecutableRegion(const SljitNativeRegionPlan &region, SljitExecutableRegion &executable, string &error) {
+	executable.source_output_types = region.source_output_types;
 	executable.source_distinct_counts = region.source_distinct_counts;
 	executable.source_min_values = region.source_min_values;
 	executable.source_max_values = region.source_max_values;
@@ -229,6 +238,7 @@ bool BuildSljitExecutableRegion(const SljitNativeRegionPlan &region, SljitExecut
 				        current_min_values, current_max_values)) {
 					return false;
 				}
+				SljitSelectExecutableAggregateUpdateStrategy(aggregate_update_op.aggregate_update);
 			}
 		}
 		SljitUpdateExecutableCurrentNotNull(op, current_not_null);

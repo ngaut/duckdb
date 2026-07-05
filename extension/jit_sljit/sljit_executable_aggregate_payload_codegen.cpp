@@ -48,6 +48,8 @@ bool SljitBuildExecutableAggregateUpdateFallbackPayloadCode(const SljitNativeAgg
 					code = BuildSljitNativeGroupedSumInt64Reference(payload.integer_kind, function, error);
 				} else if (primitive_kind == AggregatePrimitiveUpdateKind::SUM_HUGEINT) {
 					code = BuildSljitNativeGroupedSumHugeintReference(payload.integer_kind, function, error);
+				} else if (primitive_kind == AggregatePrimitiveUpdateKind::SUM_DOUBLE) {
+					code = BuildSljitNativeGroupedSumDoubleReference(payload.double_source_kind, function, error);
 				} else if (primitive_kind == AggregatePrimitiveUpdateKind::COUNT) {
 					code = BuildSljitNativeGroupedCountReference(function, error);
 				} else {

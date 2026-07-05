@@ -279,12 +279,18 @@ static void SljitExecuteFusedGroupedPrimitiveAggregatePayloadUpdate(
 			                                          SljitInputSourceKnownNotNull(
 			                                              payloads[payload_idx].input_source_not_null, 0));
 		} else {
-			payload_sources.PrepareIntegerSource(input, source_index, payload_idx, plan.integer_kind, execute_sel,
-			                                     count,
-			                                     "SLJIT fused grouped aggregate reference source is out of range",
-			                                     !input_source_indices_override &&
-			                                         SljitInputSourceKnownNotNull(
-			                                             payloads[payload_idx].input_source_not_null, 0));
+			const auto known_not_null =
+			    !input_source_indices_override &&
+			    SljitInputSourceKnownNotNull(payloads[payload_idx].input_source_not_null, 0);
+			if (lane.kind == AggregatePrimitiveUpdateKind::SUM_DOUBLE) {
+				payload_sources.PrepareTypedExpressionSource(
+				    input, source_index, payload_idx, execute_sel, count,
+				    "SLJIT fused grouped aggregate reference source is out of range", known_not_null);
+			} else {
+				payload_sources.PrepareIntegerSource(
+				    input, source_index, payload_idx, plan.integer_kind, execute_sel, count,
+				    "SLJIT fused grouped aggregate reference source is out of range", known_not_null);
+			}
 		}
 	}
 

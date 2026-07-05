@@ -1166,9 +1166,10 @@ Before claiming a milestone complete:
   selected state-address payload callback from inside hash-table lookup.
   Append-new and existing-group fast paths remain direct, while mixed new/existing
   batches fall through to direct state-address resolution plus one fused payload
-  update over the address vector. This removes the slower
-  `state_address_selection_new_update` route from that mixed path and keeps Q9
-  positive.
+  update over the address vector. The old selected state-address payload
+  boundary has been folded into the primitive state-update counter, and the
+  explicit `direct_new_grouped_primitive_payload_update` path remains the direct
+  typed-payload backend.
 - Verification for this checkpoint passed:
   `make reldebug -j12`, `[api][jit]`, `test/sql/jit`,
   `python3 benchmark/jit/verify_jit_architecture.py`, and all-22 SF1 production
@@ -1184,11 +1185,10 @@ Before claiming a milestone complete:
 - Q10 xtrace/profile evidence shows the current blocker is runtime work, not CBO:
   the selected state-address callback cost was removed, but the region still
   spends time in source-contract hash join output materialization and grouped
-  state-address resolution. Detailed Q10 events show
-  `native_hash_aggregate_lookup_blocker=hash-aggregate-row-compare-direct-equality-contract-missing`
-  because the grouped keys include VARCHAR. The next clean runtime target is a
-  broader row-pointer/group-key descriptor lookup for that variable-width shape,
-  not another CBO shape predicate.
+  state-address resolution. Regular hash aggregates now report that real
+  state-address path directly instead of a stale generated-lookup blocker. The
+  next clean runtime target is a broader row-pointer/group-key descriptor lookup
+  for variable-width grouped shapes, not another CBO shape predicate.
 - The Q10 variable-width grouped lookup slice now keeps the one-join
   hash-join/projection/grouped-aggregate route batched even when projection
   outputs include variable-width keys. The row-pointer descriptor path hashes

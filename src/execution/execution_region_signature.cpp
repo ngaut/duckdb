@@ -132,11 +132,9 @@ static string DescribeExecutionRegionAggregateContractShape(const ExecutionRegio
 	result += ",functions=" + BuildExecutionRegionSignatureStringList(contract.aggregate_functions);
 	result += ",payloads=" + std::to_string(contract.payload_type_count);
 	result += ",distinct=" + std::to_string(contract.distinct_aggregate_count);
-	result += ",distinct_pointer_keys=" + ExecutionRegionSignatureBool(contract.distinct_count_pointer_keys);
 	result += ",filters=" + std::to_string(contract.aggregate_filter_count);
 	result += ",orders=" + std::to_string(contract.aggregate_order_count);
 	result += ",state_layout=" + ExecutionRegionSignatureBool(contract.grouped_state_layout_ready);
-	result += ",hash_lookup_layout=" + ExecutionRegionSignatureBool(contract.hash_lookup_layout_present);
 	result += ")";
 	return result;
 }

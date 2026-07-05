@@ -53,6 +53,30 @@ BuildSljitNativeGroupedSumHugeintReference(SljitNativeIntegerKind kind, SljitNat
 	return BuildSljitNativeGroupedSumReference(kind, function, error, SljitNativeAggregateSumStateKind::HUGEINT);
 }
 
+unique_ptr<ExecutionRegionCodeHandle>
+BuildSljitNativeGroupedSumDoubleReference(SljitNativeDoubleSourceKind kind,
+                                          SljitNativeAggregateUpdateFunction &function, string &error) {
+	auto compiler = sljit_create_compiler(nullptr);
+	if (!compiler) {
+		error = "failed to create SLJIT compiler";
+		return nullptr;
+	}
+
+	sljit_emit_enter(compiler, 0, SLJIT_ARGS1V(P), 5 | SLJIT_ENTER_FLOAT(2), 5, 0);
+	EmitInitSljitNativeVectorLoop(compiler);
+
+	auto done = EmitSljitGroupedAggregateSelectedSourceLoop(compiler, [&]() {
+		EmitLoadNativeDoubleOperand(compiler, kind, offsetof(SljitNativeVectorInput, source_data), SLJIT_S3,
+		                            offsetof(SljitNativeVectorInput, source_double_scale), SLJIT_TMP_FR0);
+		EmitSljitGroupedAggregateAccumulateDouble(compiler, SLJIT_S4, SLJIT_TMP_FR0);
+	});
+
+	sljit_set_label(done, sljit_emit_label(compiler));
+	sljit_emit_return_void(compiler);
+
+	return FinishSljitCode(compiler, function, error);
+}
+
 unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeGroupedCountStar(SljitNativeAggregateUpdateFunction &function,
                                                                        string &error) {
 	auto compiler = sljit_create_compiler(nullptr);

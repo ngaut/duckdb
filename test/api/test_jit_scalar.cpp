@@ -41,7 +41,7 @@ TEST_CASE("JIT auto compiles decimal projection chains through fused regions", "
 			return false;
 		}
 		RequireGeneratedMachineCodeRegion(event);
-		RequireGeneratedSourceFilteredSourceContract(event);
+		RequireDuckDBScanFilteredSourceContract(event);
 		REQUIRE(StringUtil::Contains(event.ir, "projection(native:expression-tree"));
 		REQUIRE(!StringUtil::Contains(event.ir, "op3=projection(native"));
 		return true;
@@ -362,7 +362,7 @@ TEST_CASE("JIT lowers long string predicates through packed native comparisons",
 	RequireNoUnsupportedReason(manager, "function=substring");
 }
 
-TEST_CASE("JIT lowers retained table scan filters as generated source stages", "[api][jit]") {
+TEST_CASE("JIT preserves retained table scan filters in the DuckDB scan contract", "[api][jit]") {
 	DuckDB db;
 	Connection con(db);
 	auto &manager = ExecutionRegionManager::Get(*con.context);
@@ -380,16 +380,15 @@ TEST_CASE("JIT lowers retained table scan filters as generated source stages", "
 	    manager,
 	    [](const ExecutionRegionEvent &event) {
 		    return IsCompiledSljitRegionEvent(event) && event.candidate_traits.source_filter_count > 0 &&
-		           StringUtil::Contains(event.reason, "generated table scan source filters");
+		           event.candidate_traits.sink_kind == ExecutionRegionSinkKind::UNGROUPED_AGGREGATE_UPDATE;
 	    },
 	    [](const ExecutionRegionEvent &event) {
-		    REQUIRE(event.runner_cost.generated_stage_count > 0);
-		    REQUIRE(event.runner_cost.native_aggregate_stage_count == 0);
+		    RequireDuckDBScanFilteredSourceContract(event);
 		    RequireGeneratedMachineCodeRegion(event);
 	    });
 }
 
-TEST_CASE("JIT lowers pruned table scan filters as generated source stages", "[api][jit]") {
+TEST_CASE("JIT preserves pruned table scan filters in the DuckDB scan contract", "[api][jit]") {
 	DuckDB db;
 	Connection con(db);
 	auto &manager = ExecutionRegionManager::Get(*con.context);
@@ -409,17 +408,15 @@ TEST_CASE("JIT lowers pruned table scan filters as generated source stages", "[a
 	    manager,
 	    [](const ExecutionRegionEvent &event) {
 		    return IsCompiledSljitRegionEvent(event) && event.candidate_traits.source_filter_count > 0 &&
-		           StringUtil::Contains(event.reason, "source_contract_filter_prune_required=true") &&
-		           StringUtil::Contains(event.reason, "generated table scan source filters");
+		           StringUtil::Contains(event.reason, "source_contract_filter_prune_required=true");
 	    },
 	    [](const ExecutionRegionEvent &event) {
-		    REQUIRE(event.runner_cost.generated_stage_count > 0);
-		    REQUIRE(event.runner_cost.native_aggregate_stage_count == 0);
+		    RequireDuckDBScanFilteredSourceContract(event);
 		    RequireGeneratedMachineCodeRegion(event);
 	    });
 }
 
-TEST_CASE("JIT canonicalizes generated date range source filters as native between", "[api][jit]") {
+TEST_CASE("JIT keeps date range source filters in the DuckDB scan contract", "[api][jit]") {
 	DuckDB db;
 	Connection con(db);
 	auto &manager = ExecutionRegionManager::Get(*con.context);
@@ -436,13 +433,15 @@ TEST_CASE("JIT canonicalizes generated date range source filters as native betwe
 	REQUIRE_NO_FAIL(*result);
 	REQUIRE(result->GetValue(0, 0).ToString() == "33411690");
 
-	RequireNativeSljitIr(manager, "native:date-between", [](const ExecutionRegionEvent &event) {
-		REQUIRE(event.candidate_traits.source_filter_count > 0);
-		REQUIRE(StringUtil::Contains(event.reason, "generated table scan source filters"));
-	});
+	RequireJitEvent(
+	    manager,
+	    [](const ExecutionRegionEvent &event) {
+		    return IsCompiledSljitRegionEvent(event) && event.candidate_traits.source_filter_count > 0;
+	    },
+	    [](const ExecutionRegionEvent &event) { RequireDuckDBScanFilteredSourceContract(event); });
 }
 
-TEST_CASE("JIT lowers large complex scan filters as generated source stages", "[api][jit]") {
+TEST_CASE("JIT preserves large complex scan filters in the DuckDB scan contract", "[api][jit]") {
 	DuckDB db;
 	Connection con(db);
 	auto &manager = ExecutionRegionManager::Get(*con.context);
@@ -463,11 +462,10 @@ TEST_CASE("JIT lowers large complex scan filters as generated source stages", "[
 	    manager,
 	    [](const ExecutionRegionEvent &event) {
 		    return IsCompiledSljitRegionEvent(event) && event.candidate_traits.source_filter_count > 1 &&
-		           event.candidate_traits.sink_kind == ExecutionRegionSinkKind::UNGROUPED_AGGREGATE_UPDATE &&
-		           StringUtil::Contains(event.reason, "generated table scan source filters");
+		           event.candidate_traits.sink_kind == ExecutionRegionSinkKind::UNGROUPED_AGGREGATE_UPDATE;
 	    },
 	    [](const ExecutionRegionEvent &event) {
-		    REQUIRE(event.runner_cost.generated_stage_count > 0);
+		    RequireDuckDBScanFilteredSourceContract(event);
 		    RequireGeneratedMachineCodeRegion(event);
 	    });
 }
@@ -515,7 +513,7 @@ TEST_CASE("JIT auto planner cost skips source-only string filters", "[api][jit]"
 	    });
 }
 
-TEST_CASE("JIT auto generates cheap source string equality filters under aggressive CBO", "[api][jit]") {
+TEST_CASE("JIT auto preserves cheap source string equality filters under aggressive CBO", "[api][jit]") {
 	DuckDB db;
 	Connection con(db);
 	auto &manager = ExecutionRegionManager::Get(*con.context);
@@ -538,11 +536,13 @@ TEST_CASE("JIT auto generates cheap source string equality filters under aggress
 	RequireJitEvent(
 	    manager,
 	    [](const ExecutionRegionEvent &event) {
-		    return IsCompiledSljitRegionEvent(event) &&
-		           StringUtil::Contains(event.reason, "generated table scan source filters") &&
-		           StringUtil::Contains(event.ir, "generated_source_stage_candidate=true");
+		    return IsCompiledSljitRegionEvent(event) && event.candidate_traits.source_filter_count > 0 &&
+		           event.candidate_traits.projection_count > 0;
 	    },
-	    [](const ExecutionRegionEvent &event) { RequireGeneratedMachineCodeRegion(event); });
+	    [](const ExecutionRegionEvent &event) {
+		    RequireDuckDBScanFilteredSourceContract(event);
+		    RequireGeneratedMachineCodeRegion(event);
+	    });
 	RequireNoUnsupportedReason(manager, "source filter references must be local to one scan column");
 }
 

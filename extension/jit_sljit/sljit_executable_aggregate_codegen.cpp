@@ -8,6 +8,7 @@
 
 #include "sljit_executable_aggregate_codegen.hpp"
 
+#include "sljit_aggregate_fused_payload_sources.hpp"
 #include "sljit_executable_aggregate_payload_sources.hpp"
 #include "sljit_native_codegen.hpp"
 
@@ -108,7 +109,7 @@ static bool TryBuildFusedTypedAggregatePayloads(const SljitNativeAggregateUpdate
 static bool TryBuildUngroupedFusedTypedExpressionAggregateUpdate(const SljitNativeAggregateUpdatePlan &op,
                                                                  SljitExecutableAggregateUpdate &executable,
                                                                  string &error, const vector<bool> &input_not_null) {
-	if (!op.use_primitive_payloads || op.use_grouped_state_addresses || op.payloads.size() < 2 ||
+	if (!op.use_primitive_payloads || op.use_grouped_state_addresses ||
 	    op.sink_info.kind != ExecutionRegionSinkKind::UNGROUPED_AGGREGATE_UPDATE ||
 	    op.payloads.size() != op.sink_info.aggregates.size()) {
 		return true;
@@ -256,6 +257,23 @@ void SljitBuildExecutableAggregateUpdateMetadata(const SljitNativeAggregateUpdat
 	}
 }
 
+static bool SljitAggregateUpdateRequiresTypedGroupedBackend(const SljitNativeAggregateUpdatePlan &op) {
+	if (!op.use_primitive_payloads || !op.use_grouped_state_addresses) {
+		return false;
+	}
+	for (auto &payload : op.payloads) {
+		if (payload.kind == SljitNativeRegionExpressionKind::TYPED_EXPRESSION_TREE) {
+			return true;
+		}
+	}
+	for (auto &group_expression : op.group_expressions) {
+		if (group_expression.kind == SljitNativeRegionExpressionKind::TYPED_EXPRESSION_TREE) {
+			return true;
+		}
+	}
+	return false;
+}
+
 bool SljitBuildExecutableAggregateUpdatePayloadCode(const SljitNativeAggregateUpdatePlan &op,
                                                     SljitExecutableAggregateUpdate &executable, string &error,
                                                     const vector<bool> &input_not_null,
@@ -295,6 +313,10 @@ bool SljitBuildExecutableAggregateUpdatePayloadCode(const SljitNativeAggregateUp
 	if (executable.fused_payload_update_function) {
 		return true;
 	}
+	if (SljitAggregateUpdateRequiresTypedGroupedBackend(op)) {
+		error = "SLJIT grouped typed aggregate update has no generated typed payload backend";
+		return false;
+	}
 	if (op.use_primitive_payloads && op.use_perfect_hash_group_lookup && !op.payloads.empty()) {
 		SljitNativeAggregateUpdateFunction fused_function = nullptr;
 		string fused_error;
@@ -328,6 +350,28 @@ bool SljitBuildExecutableAggregateUpdatePayloadCode(const SljitNativeAggregateUp
 		}
 	}
 	return SljitBuildExecutableAggregateUpdateFallbackPayloadCode(op, executable, error);
+}
+
+void SljitSelectExecutableAggregateUpdateStrategy(SljitExecutableAggregateUpdate &executable) {
+	auto &strategy = executable.grouped_update_strategy;
+	strategy.Clear();
+	auto &plan = executable.plan;
+	if (plan.sink_info.kind != ExecutionRegionSinkKind::HASH_AGGREGATE_UPDATE || !plan.use_primitive_payloads ||
+	    !plan.use_grouped_state_addresses || plan.use_perfect_hash_group_lookup ||
+	    executable.fused_payload_update_owns_group_lookup) {
+		return;
+	}
+	if (executable.fused_payload_update_function &&
+	    SljitFusedAggregatePayloadsUseTypedExpressionTrees(executable.payloads, plan.sink_info.aggregates)) {
+		strategy.Add(SljitGroupedAggregateUpdateStrategy::DIRECT_STATE_ADDRESS_PAYLOAD_UPDATE);
+		return;
+	}
+	strategy.Add(SljitGroupedAggregateUpdateStrategy::PREAGGREGATED_PRIMITIVE_GROUPS);
+	strategy.Add(SljitGroupedAggregateUpdateStrategy::DIRECT_APPEND_NEW_GROUPS);
+	strategy.Add(SljitGroupedAggregateUpdateStrategy::DIRECT_NEW_GROUPS);
+	if (executable.fused_payload_update_function) {
+		strategy.Add(SljitGroupedAggregateUpdateStrategy::DIRECT_STATE_ADDRESS_PAYLOAD_UPDATE);
+	}
 }
 
 } // namespace duckdb

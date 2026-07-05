@@ -23,11 +23,11 @@ namespace duckdb {
 class SljitFullPipelineRecipeBuilder {
 public:
 	SljitFullPipelineRecipeBuilder(const vector<SljitExecutableRegionOp> &ops_p,
-	                               const vector<Value> &source_min_values_p, const vector<Value> &source_max_values_p,
-	                               bool uses_scan_filters_p)
-	    : ops(ops_p), uses_scan_filters(uses_scan_filters_p),
-	      schedule_facts(SljitAnalyzeFullPipelineScheduleFacts(ops_p, uses_scan_filters_p)),
-	      binding(ops_p, source_min_values_p, source_max_values_p, schedule_facts.uses_extended_source_fetch_budget) {
+	                               const vector<LogicalType> &source_output_types_p,
+	                               const vector<Value> &source_min_values_p, const vector<Value> &source_max_values_p)
+	    : ops(ops_p), schedule_facts(SljitAnalyzeFullPipelineScheduleFacts(ops_p)),
+	      binding(ops_p, source_output_types_p, source_min_values_p, source_max_values_p,
+	              schedule_facts.uses_extended_source_fetch_budget) {
 	}
 
 	SljitFullPipelineRecipePlan Build() const {
@@ -67,7 +67,7 @@ private:
 		if (facts.HasSecondHashJoin()) {
 			if (!SljitCanBindHashJoinProbeSelectionPrimitive(ops, facts.first_hash_join_idx) ||
 			    !SljitCanBindHashJoinProbeSelectionPrimitive(ops, facts.second_hash_join_idx) ||
-			    !SljitAggregateUpdateCanUseSelectedJoinPerfectHashBackend(ops[facts.aggregate_idx])) {
+			    !SljitCanBindDirectJoinOutputAggregatePrimitive(ops, facts.aggregate_idx)) {
 				return false;
 			}
 			recipe = binding.MakeTwoJoinSelectedAggregateRecipe(facts.first_hash_join_idx, facts.second_hash_join_idx,
@@ -75,8 +75,16 @@ private:
 			return true;
 		}
 		if (!SljitCanBindHashJoinProbeSelectionPrimitive(ops, facts.first_hash_join_idx) ||
-		    !SljitAggregateUpdateCanUseSelectedJoinPerfectHashBackend(ops[facts.aggregate_idx])) {
+		    !SljitCanBindDirectJoinOutputAggregatePrimitive(ops, facts.aggregate_idx)) {
 			return false;
+		}
+		if (facts.HasPreJoinProjection()) {
+			if (!SljitCanBindProjectionChainPrimitive(ops, facts.pre_join_projection_idx)) {
+				return false;
+			}
+			recipe = binding.MakePreProjectionSelectedJoinAggregateRecipe(
+			    facts.pre_join_projection_idx, facts.first_hash_join_idx, facts.aggregate_idx);
+			return true;
 		}
 		recipe = binding.MakeSelectedJoinAggregateRecipe(facts.first_hash_join_idx, facts.aggregate_idx);
 		return true;
@@ -117,21 +125,20 @@ private:
 	}
 
 	bool TryBuildNativeTailRecipe(SljitFullPipelineRecipe &recipe) const {
-		return SljitNativeTailRecipeBuilder(ops, uses_scan_filters, binding).Build(recipe);
+		return SljitNativeTailRecipeBuilder(ops, schedule_facts, binding).Build(recipe);
 	}
 
 private:
 	const vector<SljitExecutableRegionOp> &ops;
-	bool uses_scan_filters;
 	SljitFullPipelineScheduleFacts schedule_facts;
 	SljitFullPipelineRecipeBinding binding;
 };
 
 static SljitFullPipelineRecipePlan BuildSljitFullPipelineRecipePlan(const vector<SljitExecutableRegionOp> &ops,
+                                                                    const vector<LogicalType> &source_output_types,
                                                                     const vector<Value> &source_min_values,
-                                                                    const vector<Value> &source_max_values,
-                                                                    bool uses_scan_filters) {
-	return SljitFullPipelineRecipeBuilder(ops, source_min_values, source_max_values, uses_scan_filters).Build();
+                                                                    const vector<Value> &source_max_values) {
+	return SljitFullPipelineRecipeBuilder(ops, source_output_types, source_min_values, source_max_values).Build();
 }
 
 } // namespace duckdb

@@ -331,13 +331,11 @@ static bool SljitTryBuildProjectionRowPointerAggregateDescriptor(
 	auto &aggregate_update = aggregate_op.aggregate_update;
 	auto &sink_info = aggregate_update.plan.sink_info;
 	auto &projection_op = descriptor.Projection();
-	const bool uses_distinct_count_pointer = sink_info.aggregate_contract.distinct_count_pointer_keys;
 	if (sink_info.kind != ExecutionRegionSinkKind::HASH_AGGREGATE_UPDATE || sink_info.groups.empty() ||
-	    (!uses_distinct_count_pointer && !aggregate_update.plan.use_primitive_payloads) ||
-	    (!uses_distinct_count_pointer && !aggregate_update.plan.use_grouped_state_addresses) ||
+	    !aggregate_update.plan.use_primitive_payloads || !aggregate_update.plan.use_grouped_state_addresses ||
 	    aggregate_update.plan.use_perfect_hash_group_lookup ||
 	    aggregate_update.fused_payload_update_owns_group_lookup ||
-	    (!uses_distinct_count_pointer && aggregate_update.payloads.size() != sink_info.aggregates.size())) {
+	    aggregate_update.payloads.size() != sink_info.aggregates.size()) {
 		return descriptor.Block("aggregate_shape");
 	}
 	string group_source_blocker;
@@ -405,35 +403,6 @@ static bool SljitTryBuildProjectionRowPointerAggregateDescriptor(
 		}
 	}
 
-	if (uses_distinct_count_pointer) {
-		if (sink_info.aggregates.size() != 1) {
-			return descriptor.Block("distinct_payload_count");
-		}
-		auto &aggregate = sink_info.aggregates[0];
-		if (aggregate.child_count != 1 || aggregate.child_types.size() != 1) {
-			return descriptor.Block("distinct_payload_contract");
-		}
-		idx_t projection_idx;
-		if (!SljitTryResolveProjectionSemanticIndex(projection_op, semantic_to_projection, aggregate.payload_index,
-		                                            projection_idx)) {
-			return descriptor.Block("distinct_payload_projection");
-		}
-		if (projection_idx >= projection_op.output_types.size() ||
-		    projection_op.output_types[projection_idx].InternalType() != aggregate.child_types[0].InternalType()) {
-			return descriptor.Block("distinct_payload_type");
-		}
-		idx_t input_idx;
-		if ((!SljitTryAddJoinLHSInputAggregateInputFromProjection(binding, descriptor, projection_op, projection_idx,
-		                                                          input_idx, producer_projection_op) &&
-		     !SljitTryAddJoinProjectionAggregateInput(descriptor, projection_to_input, projection_idx, input_idx)) ||
-		    descriptor.input_types[input_idx].InternalType() != aggregate.child_types[0].InternalType()) {
-			return descriptor.Block("distinct_payload_projection");
-		}
-		descriptor.payload_source_indices.push_back(input_idx);
-		descriptor.MarkReady();
-		return true;
-	}
-
 	auto add_count_star_payload = [&]() {
 		descriptor.payload_source_indices.push_back(DConstants::INVALID_INDEX);
 		return true;
@@ -491,74 +460,6 @@ static bool SljitTryBuildProjectionRowPointerAggregateDescriptor(
 	}
 	descriptor.MarkReady();
 	return true;
-}
-
-template <class INPUT_COLUMN_IS_OMITTED>
-static bool SljitTryBuildProjectionInputRowPointerGroupDescriptor(SljitExecutableRegionOp &projection_op,
-                                                                  SljitExecutableRegionOp &aggregate_op,
-                                                                  DataChunk &payload_input,
-                                                                  const vector<idx_t> &group_projection_indices,
-                                                                  INPUT_COLUMN_IS_OMITTED input_column_is_omitted,
-                                                                  SljitJoinProjectionAggregateDescriptor &descriptor) {
-	auto &sink_info = aggregate_op.aggregate_update.plan.sink_info;
-	if (sink_info.groups.size() != group_projection_indices.size() || descriptor.payload_source_indices.empty()) {
-		return descriptor.Block("aggregate_shape");
-	}
-	descriptor.group_sources.clear();
-	descriptor.group_sources.reserve(sink_info.groups.size());
-	for (idx_t group_idx = 0; group_idx < sink_info.groups.size(); group_idx++) {
-		auto &group = sink_info.groups[group_idx];
-		const auto projection_idx = group_projection_indices[group_idx];
-		if (projection_idx >= projection_op.projections.size() || projection_idx >= projection_op.output_types.size()) {
-			return descriptor.Block("group_key_index");
-		}
-		SljitExecutableRegionExpression remapped_expr;
-		idx_t input_source_idx;
-		if (!SljitTryBuildSingleSourceProjectionExpression(projection_op.projections[projection_idx], remapped_expr,
-		                                                   input_source_idx)) {
-			return descriptor.Block("group_key_projection");
-		}
-		if (input_source_idx >= payload_input.ColumnCount()) {
-			return descriptor.Block("group_key_source");
-		}
-		if (input_column_is_omitted(input_source_idx)) {
-			return descriptor.Block("group_key_omitted_input");
-		}
-		auto &input_type = payload_input.data[input_source_idx].GetType();
-		ExecutionRowPointerGroupKeySource group_source;
-		SljitInitializeInputVectorGroupKeySource(input_source_idx, input_type, group.type, group_source);
-		if (!SljitTryFinalizeRowPointerGroupKeySource(remapped_expr.plan, group.type, group_source)) {
-			return descriptor.Block("group_key_cast");
-		}
-		descriptor.group_sources.push_back(std::move(group_source));
-	}
-	if (descriptor.group_sources.empty()) {
-		return descriptor.Block("group_sources");
-	}
-	descriptor.MarkReady();
-	return true;
-}
-
-template <class INPUT_COLUMN_IS_OMITTED>
-static bool SljitTryBuildProjectionInputRowPointerAggregateDescriptor(
-    SljitExecutableRegionOp &projection_op, SljitExecutableRegionOp &aggregate_op, DataChunk &payload_input,
-    const vector<idx_t> &group_projection_indices, const vector<idx_t> &payload_source_indices,
-    const char *disabled_reason, INPUT_COLUMN_IS_OMITTED input_column_is_omitted,
-    SljitJoinProjectionAggregateDescriptor &descriptor) {
-	if (descriptor.Built()) {
-		return descriptor.Ready();
-	}
-	descriptor.ClearBuiltState();
-	descriptor.BorrowProjection(projection_op);
-	if (disabled_reason) {
-		return descriptor.Block(disabled_reason);
-	}
-	if (payload_source_indices.empty()) {
-		return descriptor.Block("payload_sources");
-	}
-	descriptor.payload_source_indices = payload_source_indices;
-	return SljitTryBuildProjectionInputRowPointerGroupDescriptor(
-	    projection_op, aggregate_op, payload_input, group_projection_indices, input_column_is_omitted, descriptor);
 }
 
 static bool SljitDescriptorUsesRowPointerGroupSource(const SljitJoinProjectionAggregateDescriptor &descriptor) {

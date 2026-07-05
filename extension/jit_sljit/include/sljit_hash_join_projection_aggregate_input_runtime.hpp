@@ -9,7 +9,6 @@
 #pragma once
 
 #include "sljit_direct_projection_batch_runtime.hpp"
-#include "sljit_hash_join_output_reference_runtime.hpp"
 #include "sljit_hash_join_projection_source_runtime.hpp"
 #include "sljit_hash_join_rhs_projection_runtime.hpp"
 #include "sljit_join_projection_aggregate_state.hpp"

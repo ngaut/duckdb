@@ -225,26 +225,6 @@ ClassifyExecutionRegionSourceOwnership(const ExecutionRegionNode &node, Executio
 
 static void RecordExecutionRegionGroupedStateContract(ExecutionRegionContract &region_contract,
                                                       const ExecutionRegionAggregateContract &contract) {
-	if (contract.present) {
-		region_contract.hash_aggregate_lookup_present = true;
-		if (contract.distinct_count_pointer_keys) {
-			region_contract.hash_aggregate_lookup_mode = "duckdb-distinct-count-pointer";
-			return;
-		}
-		if (contract.kind == ExecutionRegionAggregateOperatorKind::PERFECT_HASH &&
-		    contract.native_hash_lookup_contract.status == ExecutionRegionStateContractStatus::READY) {
-			region_contract.hash_aggregate_lookup_mode = "generated-perfect-hash";
-		} else if (contract.native_hash_lookup_contract.status == ExecutionRegionStateContractStatus::READY) {
-			region_contract.hash_aggregate_lookup_mode = "native-contract";
-		} else {
-			region_contract.hash_aggregate_lookup_mode = "blocked";
-		}
-		region_contract.hash_aggregate_lookup_native_blocker = contract.native_hash_lookup_contract.blocker;
-		region_contract.hash_aggregate_lookup_layout_blocker = contract.hash_lookup_layout_blocker;
-		region_contract.hash_aggregate_lookup_row_compare_blocker = contract.hash_lookup_layout_row_compare_blocker;
-		region_contract.hash_aggregate_lookup_backend_lowering_blocker =
-		    contract.hash_lookup_layout_backend_lowering_blocker;
-	}
 	auto &state_contract = contract.native_grouped_state_contract;
 	if (state_contract.status == ExecutionRegionStateContractStatus::NONE ||
 	    state_contract.status == ExecutionRegionStateContractStatus::READY) {
@@ -261,8 +241,7 @@ static bool ExecutionRegionHashAggregateSinkUsesRegularDistinctNativeUpdate(cons
 	auto &contract = sink.aggregate_contract;
 	return sink.kind == ExecutionRegionSinkKind::HASH_AGGREGATE_UPDATE &&
 	       (contract.distinct_aggregate_count != 0 || contract.distinct_table_count != 0 ||
-	        contract.distinct_child_count != 0 || contract.distinct_filter_count != 0) &&
-	       !contract.distinct_count_pointer_keys;
+	        contract.distinct_child_count != 0 || contract.distinct_filter_count != 0);
 }
 
 static ExecutionRegionOwnershipKind ClassifyExecutionRegionSinkOwnership(const ExecutionRegionNode &node,
@@ -307,13 +286,6 @@ static string DescribeExecutionRegionContract(const ExecutionRegionContract &con
 	result += ",missing_contracts=" + std::to_string(contract.missing_contract_count);
 	result += ",required_capabilities=" + BuildExecutionRegionContractStringList(contract.required_capabilities);
 	result += ",blockers=" + BuildExecutionRegionContractStringList(contract.blockers);
-	result += ",hash_aggregate_lookup_present=" + ExecutionRegionContractBool(contract.hash_aggregate_lookup_present);
-	result += ",hash_aggregate_lookup_mode=" + contract.hash_aggregate_lookup_mode;
-	result += ",hash_aggregate_lookup_native_blocker=" + contract.hash_aggregate_lookup_native_blocker;
-	result += ",hash_aggregate_lookup_layout_blocker=" + contract.hash_aggregate_lookup_layout_blocker;
-	result += ",hash_aggregate_lookup_row_compare_blocker=" + contract.hash_aggregate_lookup_row_compare_blocker;
-	result +=
-	    ",hash_aggregate_lookup_backend_lowering_blocker=" + contract.hash_aggregate_lookup_backend_lowering_blocker;
 	result += ">";
 	return result;
 }

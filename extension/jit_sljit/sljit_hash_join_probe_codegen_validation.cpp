@@ -67,10 +67,6 @@ bool SljitValidateRegularHashJoinProbePlan(const SljitNativeHashJoinProbePlan &p
 	if (!SljitValidateHashJoinProbeBase(plan, error)) {
 		return false;
 	}
-	if (plan.perfect_hash_probe) {
-		error = "SLJIT regular hash join probe received a perfect hash plan";
-		return false;
-	}
 	return true;
 }
 

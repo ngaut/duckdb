@@ -9,7 +9,6 @@
 #pragma once
 
 #include "duckdb/execution/operator/aggregate/distinct_aggregate_data.hpp"
-#include "duckdb/execution/operator/aggregate/distinct_count_pointer_set.hpp"
 #include "duckdb/execution/operator/aggregate/grouped_aggregate_data.hpp"
 #include "duckdb/execution/physical_operator.hpp"
 #include "duckdb/execution/radix_partitioned_hashtable.hpp"
@@ -25,8 +24,7 @@ struct HashAggregateGroupingData {
 public:
 	HashAggregateGroupingData(GroupingSet &grouping_set_p, const GroupedAggregateData &grouped_aggregate_data,
 	                          unique_ptr<DistinctAggregateCollectionInfo> &info, TupleDataValidityType group_validity,
-	                          TupleDataValidityType distinct_validity,
-	                          DistinctAggregateKeyStrategy distinct_key_strategy);
+	                          TupleDataValidityType distinct_validity);
 
 public:
 	RadixPartitionedHashTable table_data;
@@ -45,16 +43,6 @@ public:
 	unique_ptr<DistinctAggregateState> distinct_state;
 };
 
-struct DistinctCountPointerScratch {
-	DistinctCountPointerScratch();
-	~DistinctCountPointerScratch();
-
-	void Reset();
-
-	Vector state_addresses;
-	unique_ptr<DistinctCountPointerSet> distinct_set;
-};
-
 struct HashAggregateGroupingLocalState {
 public:
 	HashAggregateGroupingLocalState(const PhysicalHashAggregate &op, const HashAggregateGroupingData &data,
@@ -65,7 +53,6 @@ public:
 	unique_ptr<LocalSinkState> table_state;
 	// Local states of the DISTINCT aggregates hashtables
 	vector<unique_ptr<LocalSinkState>> distinct_states;
-	unique_ptr<DistinctCountPointerScratch> distinct_count_scratch;
 };
 
 //! PhysicalHashAggregate is a group-by and aggregate implementation that uses a hash table to perform the grouping

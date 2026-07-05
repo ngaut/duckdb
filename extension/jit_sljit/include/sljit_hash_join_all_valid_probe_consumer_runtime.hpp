@@ -96,4 +96,42 @@ private:
 	SljitHashJoinBuildMatchMarker<MARK_BUILD_MATCH> build_match_marker;
 };
 
+template <SljitHashJoinMarkSelectionMode MODE, bool MARK_BUILD_MATCH>
+struct SljitHashJoinMarkSelectionConsumer {
+	SljitHashJoinMarkSelectionConsumer(SljitNativeRegularHashJoinProbeInput &input,
+	                                   const SljitNativeHashJoinProbePlan &plan)
+	    : input(input), match_sel(input.match_sel), selected_count(input.selected_count), build_match_marker(plan) {
+	}
+
+	inline void EmitMatch(const idx_t row_idx, const data_ptr_t row_location) {
+		build_match_marker.Mark(row_location);
+		if constexpr (MODE == SljitHashJoinMarkSelectionMode::MATCHES) {
+			Emit(row_idx);
+		}
+	}
+
+	inline void EmitNoMatch(const idx_t row_idx) {
+		if constexpr (MODE == SljitHashJoinMarkSelectionMode::NON_MATCHES) {
+			Emit(row_idx);
+		}
+	}
+
+	void Finish() {
+		input.selected_count = selected_count;
+		input.input_offset = input.count;
+		input.resume_row_pointer = nullptr;
+		input.finished = true;
+	}
+
+private:
+	inline void Emit(const idx_t row_idx) {
+		match_sel[selected_count++] = UnsafeNumericCast<sel_t>(row_idx);
+	}
+
+	SljitNativeRegularHashJoinProbeInput &input;
+	sel_t *__restrict match_sel;
+	idx_t selected_count;
+	SljitHashJoinBuildMatchMarker<MARK_BUILD_MATCH> build_match_marker;
+};
+
 } // namespace duckdb

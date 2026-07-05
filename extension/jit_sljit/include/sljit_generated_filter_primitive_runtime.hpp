@@ -9,7 +9,7 @@
 #pragma once
 
 #include "sljit_full_pipeline_primitive_sequence.hpp"
-#include "sljit_generated_filter_projection_runtime.hpp"
+#include "sljit_generated_filter_primitive.hpp"
 #include "sljit_region_runtime_state.hpp"
 #include "sljit_runtime_batch_view.hpp"
 

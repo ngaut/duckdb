@@ -63,41 +63,24 @@ static vector<T> BuildSljitSourceOutputStats(const ExecutionRegionSourceInfo &so
 static void ApplySljitSourceContractPlan(const SljitSourceContractPlan &contract_plan,
                                          ExecutionRegionLoweringPlan &lowering_plan) {
 	lowering_plan.SetUsesScanFilters(contract_plan.uses_scan_filters);
-	lowering_plan.SetRequiresSourceContractInputLayout(contract_plan.requires_source_contract_input_layout);
 }
 
-static vector<bool> BuildSljitSourceNotNullForContractPlan(const ExecutionRegionSourceInfo &source,
-                                                           const SljitRegionNodePlan &node_plan) {
-	if (node_plan.source_contract.requires_source_contract_input_layout) {
-		return source.table_scan_contract.source_contract_input_not_null;
-	}
+static vector<bool> BuildSljitSourceNotNullForContractPlan(const ExecutionRegionSourceInfo &source) {
 	return BuildSljitSourceOutputNotNull(source);
 }
 
-static vector<idx_t> BuildSljitSourceDistinctReserveCountsForContractPlan(const ExecutionRegionSourceInfo &source,
-                                                                          const SljitRegionNodePlan &node_plan) {
+static vector<idx_t> BuildSljitSourceDistinctReserveCountsForContractPlan(const ExecutionRegionSourceInfo &source) {
 	auto &counts = source.table_scan_contract.source_contract_input_distinct_reserve_counts;
-	if (node_plan.source_contract.requires_source_contract_input_layout) {
-		return counts;
-	}
 	return BuildSljitSourceOutputStats(source, counts);
 }
 
-static vector<Value> BuildSljitSourceMinValuesForContractPlan(const ExecutionRegionSourceInfo &source,
-                                                              const SljitRegionNodePlan &node_plan) {
+static vector<Value> BuildSljitSourceMinValuesForContractPlan(const ExecutionRegionSourceInfo &source) {
 	auto &values = source.table_scan_contract.source_contract_input_min_values;
-	if (node_plan.source_contract.requires_source_contract_input_layout) {
-		return values;
-	}
 	return BuildSljitSourceOutputStats(source, values);
 }
 
-static vector<Value> BuildSljitSourceMaxValuesForContractPlan(const ExecutionRegionSourceInfo &source,
-                                                              const SljitRegionNodePlan &node_plan) {
+static vector<Value> BuildSljitSourceMaxValuesForContractPlan(const ExecutionRegionSourceInfo &source) {
 	auto &values = source.table_scan_contract.source_contract_input_max_values;
-	if (node_plan.source_contract.requires_source_contract_input_layout) {
-		return values;
-	}
 	return BuildSljitSourceOutputStats(source, values);
 }
 
@@ -146,8 +129,20 @@ static void ApplySljitAggregateUpdateInputEstimate(SljitRegionNodePlan &node_pla
 	}
 	for (auto &op : node_plan.native_ops) {
 		if (op.kind == SljitNativeRegionOpKind::AGGREGATE_UPDATE &&
-		    op.aggregate_update.sink_info.kind == ExecutionRegionSinkKind::HASH_AGGREGATE_UPDATE &&
-		    op.aggregate_update.sink_info.aggregate_contract.group_count > 0) {
+		    op.aggregate_update.sink_info.kind == ExecutionRegionSinkKind::HASH_AGGREGATE_UPDATE) {
+			op.aggregate_update.estimated_input_count =
+			    MaxValue(op.aggregate_update.estimated_input_count, estimated_input_count);
+		}
+	}
+}
+
+static void ApplySljitAggregateUpdateInputEstimate(SljitNativeRegionPlan &region, idx_t estimated_input_count) {
+	if (estimated_input_count == 0) {
+		return;
+	}
+	for (auto &op : region.ops) {
+		if (op.kind == SljitNativeRegionOpKind::AGGREGATE_UPDATE &&
+		    op.aggregate_update.sink_info.kind == ExecutionRegionSinkKind::HASH_AGGREGATE_UPDATE) {
 			op.aggregate_update.estimated_input_count =
 			    MaxValue(op.aggregate_update.estimated_input_count, estimated_input_count);
 		}
@@ -195,6 +190,7 @@ struct SljitRegionLoweringCursor {
 		auto source_output_types = SljitRegionNodeHasNativeOps(node_plan)
 		                               ? SljitRegionNodeLastNativeOp(node_plan).output_types
 		                               : node.output_types;
+		native_region.source_output_types = source_output_types;
 		AppendIfFusing(node_plan);
 		current_types = std::move(source_output_types);
 		if (source_not_null.size() != current_types.size()) {
@@ -288,15 +284,17 @@ ExecutionRegionLoweringPlan BuildSljitRegionPlan(const ExecutionRegionIR &region
 			}
 			if (executable_source && node_plan.kind == ExecutionRegionLoweringKind::NATIVE) {
 				selected_source_contract.Merge(node_plan.source_contract);
-				vector<bool> source_not_null;
-				if (node.source && node.source->table_scan_contract.present) {
-					native_region.source_distinct_counts =
-					    BuildSljitSourceDistinctReserveCountsForContractPlan(*node.source, node_plan);
-					native_region.source_min_values = BuildSljitSourceMinValuesForContractPlan(*node.source, node_plan);
-					native_region.source_max_values = BuildSljitSourceMaxValuesForContractPlan(*node.source, node_plan);
-					source_not_null = BuildSljitSourceNotNullForContractPlan(*node.source, node_plan);
-					native_region.source_not_null = source_not_null;
-				}
+				native_region.uses_scan_filters =
+				    native_region.uses_scan_filters || node_plan.source_contract.uses_scan_filters;
+					vector<bool> source_not_null;
+					if (node.source && node.source->table_scan_contract.present) {
+						native_region.source_distinct_counts =
+						    BuildSljitSourceDistinctReserveCountsForContractPlan(*node.source);
+						native_region.source_min_values = BuildSljitSourceMinValuesForContractPlan(*node.source);
+						native_region.source_max_values = BuildSljitSourceMaxValuesForContractPlan(*node.source);
+						source_not_null = BuildSljitSourceNotNullForContractPlan(*node.source);
+						native_region.source_not_null = source_not_null;
+					}
 				cursor.AcceptSource(node, node_plan, std::move(source_not_null));
 			} else {
 				cursor.BreakAtBoundary(node.output_types);
@@ -347,6 +345,7 @@ ExecutionRegionLoweringPlan BuildSljitRegionPlan(const ExecutionRegionIR &region
 	if (cursor.CanFuse() && !native_region.ops.empty()) {
 		FuseAdjacentNativeProjections(native_region, render_diagnostics);
 		FusePrimitiveAggregateUpdates(native_region, candidate.input_types, render_diagnostics);
+		ApplySljitAggregateUpdateInputEstimate(native_region, candidate.estimated_cardinality);
 		if (candidate.estimated_cardinality < SLJIT_FLAT_NULLABLE_FAST_PATH_MIN_CARDINALITY) {
 			DisableSljitRegionFlatNullableFastPath(native_region);
 		}

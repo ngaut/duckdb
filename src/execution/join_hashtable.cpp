@@ -1019,11 +1019,18 @@ unique_ptr<PrefixRangeFilter::BuildState> JoinHashTable::InitializePrefixRangeBu
 void JoinHashTable::InsertPrefixRangeChunk(TupleDataChunkState &chunk_state, idx_t count,
                                            PrefixRangeFilter::BuildState &state) {
 	D_ASSERT(prefix_range_filter);
-	Vector build_keys(layout_ptr->GetTypes()[0], count);
+	const auto &build_key_type = layout_ptr->GetTypes()[0];
+	Vector build_keys(build_key_type, count);
 	auto &sel = *FlatVector::IncrementalSelectionVector();
 	data_collection->Gather(chunk_state.row_locations, sel, count, 0, build_keys, sel, nullptr);
 	FlatVector::SetSize(build_keys, count_t(count));
-	prefix_range_filter->InsertKeys(build_keys, state);
+	if (prefix_range_filter_key_type != build_key_type) {
+		Vector cast_keys(prefix_range_filter_key_type, count);
+		VectorOperations::DefaultCast(build_keys, cast_keys, count, true);
+		prefix_range_filter->InsertKeys(cast_keys, state);
+	} else {
+		prefix_range_filter->InsertKeys(build_keys, state);
+	}
 }
 
 void JoinHashTable::MergePrefixRangeBuildState(PrefixRangeFilter::BuildState &state) {

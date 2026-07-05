@@ -241,6 +241,8 @@ struct SljitNativeRegionOpPlan {
 struct SljitNativeRegionPlan {
 	vector<SljitNativeRegionOpPlan> ops;
 	ExecutionRegionSourceExecutionKind source_execution = ExecutionRegionSourceExecutionKind::NONE;
+	bool uses_scan_filters = false;
+	vector<LogicalType> source_output_types;
 	vector<idx_t> source_distinct_counts;
 	vector<Value> source_min_values;
 	vector<Value> source_max_values;

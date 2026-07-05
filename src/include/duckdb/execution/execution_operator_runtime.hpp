@@ -251,16 +251,6 @@ struct ExecutionGroupedAggregateStateAddressState {
 		(void)finish;
 		return false;
 	}
-	virtual bool TryResolveDistinctCountPointerAddresses(
-	    DataChunk &input, const ExecutionRegionSinkInfo &state_address_sink_info, Vector &addresses,
-	    optional_ptr<ExecutionOperatorStageRecorder> recorder = nullptr, bool finish = true) {
-		(void)input;
-		(void)state_address_sink_info;
-		(void)addresses;
-		(void)recorder;
-		(void)finish;
-		return false;
-	}
 	virtual void FinishStateUpdates() {
 	}
 };
@@ -301,42 +291,11 @@ struct ExecutionPrimitiveAggregateUpdateBinding {
 	const ExecutionPrimitiveAggregateUpdateLane *FindLane(idx_t aggregate_index) const;
 };
 
-struct ExecutionDistinctCountPointerUpdateState {
-	virtual ~ExecutionDistinctCountPointerUpdateState() {
-	}
-	virtual bool UseGlobalPayloadSet(idx_t expected_payload_count) {
-		(void)expected_payload_count;
-		return false;
-	}
-	virtual bool AddPayloads(Vector &state_pointers, Vector &payload, idx_t count, idx_t state_value_offset) = 0;
-	virtual bool AddSelectedPayloads(const uintptr_t *state_pointers, const sel_t *state_sel, const sel_t *payload_sel,
-	                                 Vector &payload, idx_t count, idx_t state_value_offset) {
-		(void)state_pointers;
-		(void)state_sel;
-		(void)payload_sel;
-		(void)payload;
-		(void)count;
-		(void)state_value_offset;
-		return false;
-	}
-};
-
 struct ExecutionGroupedAggregateStateAddressBinding {
 	bool ready = false;
 	shared_ptr<ExecutionGroupedAggregateStateAddressState> state;
 	vector<idx_t> aggregate_state_offsets;
-	ExecutionHashAggregateLookupLayout hash_lookup_layout;
 	ExecutionPerfectAggregateStateAddressLayout perfect_hash_layout;
-	string blocker;
-};
-
-struct ExecutionDistinctCountPointerUpdateBinding {
-	bool ready = false;
-	idx_t payload_index = DConstants::INVALID_INDEX;
-	idx_t state_value_offset = DConstants::INVALID_INDEX;
-	Vector *state_addresses = nullptr;
-	shared_ptr<ExecutionDistinctCountPointerUpdateState> state;
-	ExecutionRegionSinkInfo state_address_sink_info;
 	string blocker;
 };
 
@@ -347,6 +306,7 @@ struct ExecutionHashJoinProbeBinding {
 	ExecutionHashJoinTableLayout table_layout;
 	ExecutionPerfectHashJoinTableLayout perfect_layout;
 	bool empty_build_side = false;
+	bool use_bloom_filter = false;
 	vector<idx_t> probe_key_input_indices;
 	vector<LogicalType> rhs_condition_types;
 	vector<idx_t> lhs_output_column_indices;
@@ -431,7 +391,6 @@ struct ExecutionAggregateUpdateBinding {
 	shared_ptr<ExecutionAggregateUpdateState> state;
 	ExecutionPrimitiveAggregateUpdateBinding primitive;
 	ExecutionGroupedAggregateStateAddressBinding grouped_state;
-	ExecutionDistinctCountPointerUpdateBinding distinct_count_pointer;
 	string blocker;
 };
 

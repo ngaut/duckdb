@@ -97,12 +97,16 @@ const char *SljitGeneratedAllValidRegularHashJoinProbeStage(bool selected,
 const char *SljitGeneratedPerfectHashJoinProbeStage();
 
 struct SljitAllValidHashJoinProbeFacts {
+	bool can_use_chain_input;
 	bool can_use_equality_chain_input;
 };
 
 using SljitAllValidHashJoinProbeExecutor = bool (*)(const SljitNativeHashJoinProbePlan &plan,
                                                     SljitNativeRegularHashJoinProbeInput &input,
                                                     const SljitAllValidHashJoinProbeFacts &facts);
+using SljitAllValidHashJoinMarkSelectionProbeExecutor = bool (*)(
+    const SljitNativeHashJoinProbePlan &plan, SljitNativeRegularHashJoinProbeInput &input,
+    const SljitAllValidHashJoinProbeFacts &facts, SljitHashJoinMarkSelectionMode mark_selection_mode);
 
 struct SljitAllValidHashJoinProbeFastPath {
 	const char *flat_stage;
@@ -110,8 +114,21 @@ struct SljitAllValidHashJoinProbeFastPath {
 	SljitAllValidHashJoinProbeExecutor execute;
 };
 
+struct SljitAllValidHashJoinMarkSelectionProbeFastPath {
+	const char *flat_match_stage;
+	const char *selected_match_stage;
+	const char *flat_nonmatch_stage;
+	const char *selected_nonmatch_stage;
+	SljitAllValidHashJoinMarkSelectionProbeExecutor execute;
+};
+
 const std::array<SljitAllValidHashJoinProbeFastPath, 5> &SljitAllValidHashJoinProbeFastPaths(bool selected);
 const char *SljitAllValidHashJoinProbeFastPathStage(const SljitAllValidHashJoinProbeFastPath &fast_path, bool selected);
+const std::array<SljitAllValidHashJoinMarkSelectionProbeFastPath, 6> &
+SljitAllValidHashJoinMarkSelectionProbeFastPaths(bool selected);
+const char *SljitAllValidHashJoinMarkSelectionProbeFastPathStage(
+    const SljitAllValidHashJoinMarkSelectionProbeFastPath &fast_path, bool selected,
+    SljitHashJoinMarkSelectionMode mark_selection_mode);
 
 SinkResultType SljitExecuteNativeHashJoinBuildUpdate(ExecutionRegionRuntime &runtime, idx_t op_idx,
                                                      SljitNativeRegionOpKind op_kind,

@@ -213,16 +213,15 @@ Verified forced/profile Q3 evidence:
 
 | Removed | Replacement |
 | --- | --- |
-| `aggregate_update.address_buffer_callback_new_update=30519` | `aggregate_update.state_address_selection_new_update=30519` |
+| address-buffer callback update | `aggregate_update.direct_new_grouped_primitive_payload_update=30519` |
 | full regular hash join output | `hash_join_probe.direct_row_pointer_reference=30519` |
 | simple RHS reference projection through the source chunk | `projection.direct_post_join_reference_projection=30519` |
 
 The same selected state-address ABI now covers existing-group fused typed
-payload updates. The all-existing grouped aggregate telemetry test requires
-`aggregate_update.state_address_selection_existing_update` and forbids
-`aggregate_update.address_buffer_callback_existing_update`. That matters because
-the ABI is now symmetric for new and existing fixed-width typed payload routes:
-the generated updater receives state-address spans, while DuckDB owns lookup and
+payload updates. The grouped aggregate telemetry now requires the direct
+primitive payload update counter and forbids address-vector payload updates.
+That matters because the ABI is now symmetric for fixed-width typed payload
+routes: the generated updater receives state-address spans, while DuckDB owns lookup and
 tuple layout.
 
 The direct reference projection slice reduced traced
@@ -445,8 +444,8 @@ current work order; use `JIT_BROAD_QUERY_PLAN.md` for active milestones.
 
 ### 2a. Predicate-Gated Perfect-Hash Aggregate Loop
 
-After source filters became generated and the filter-selection handoff removed
-the sliced chunk boundary, Q1 still runs two generated passes per input batch:
+After source filters stayed in the DuckDB scan contract and the filter-selection
+handoff was removed, Q1 still runs two passes per input batch:
 
 1. evaluate `l_shipdate <= constant` into a selection
 2. loop over selected rows to do perfect-hash group lookup and payload updates
@@ -1002,8 +1001,8 @@ Current root solution for more TPC-H coverage:
 
 - implement regular hash aggregate lookup ownership: hash, probe, append, and
   produce aggregate state addresses inside the fused native/JIT path
-- keep source filters generated only when they feed a fused loop that deletes a
-  pass; otherwise let DuckDB's scan filter path own selective scans
+- keep selective scan filters in DuckDB's scan filter path unless a future
+  primitive explicitly owns a fused predicate/aggregate loop
 - use forced compilation as a profiler, not as a CBO policy; if forced is still
   slower after fusion, locate the dominant stage before funding the shape
 
@@ -1245,12 +1244,12 @@ and immediately proved too loose:
 | Q8 | regressed, `~0.89x` |
 | Q21 | regressed, `~0.75x` |
 
-The root cause was missing cost facts. The bad Q4/Q21 regions had no generated
-source filter. Q8 did have a generated source filter, but carried a wider
+The root cause was missing cost facts. The bad Q4/Q21 regions had little
+profitable generated work around their scan filters. Q8 carried a wider
 hash-build payload (`payload_columns=4`) and used a regular/chain probe at
 runtime. Q5/Q7 had narrow payloads but only projected two source columns and
-were noise-level at best. Q3 had all the profitable data-centric traits: a
-generated source filter, a perfect-hash probe shape, a narrow build payload
+were noise-level at best. Q3 had the profitable data-centric traits: selective
+scan-contract input, a perfect-hash probe shape, a narrow build payload
 (`<= 2` columns), and at least four projected source columns worth keeping in
 the fused pipeline.
 
@@ -1786,9 +1785,7 @@ Recorded boundary examples now include:
 - `aggregate_update.address_vector_direct_new=...`
 - `aggregate_update.address_vector_resolve=...`
 - `aggregate_update.address_vector_payload_update=...`
-- `aggregate_update.address_buffer_callback_existing_update=...`
-- `aggregate_update.address_buffer_callback_new_update=...`
-- `aggregate_update.state_address_selection_append_new_update=...`
+- `aggregate_update.direct_new_grouped_primitive_payload_update=...`
 - `projection.copied_post_join_projection=...`
 - `projection.copied_post_join_batch=...`
 - `projection.reference_post_join_projection=...`
@@ -1896,20 +1893,17 @@ Verification for this pass:
 
 ### 33. Address-Callback Routes Are Not The Root Endpoint
 
-The grouped fused payload callback route is better than falling back to full
-`ResolveStateAddresses` plus a separate payload pass, but it still produces an
-address buffer before SLJIT updates payloads. The callback API now passes a raw
-state-address span instead of a `Vector`, and the telemetry split makes the
-remaining buffer explicit:
+The grouped primitive payload update route is better than falling back to full
+`ResolveStateAddresses` plus a separate payload pass. The callback API passes a
+raw state-address span into the generated updater, and telemetry now separates
+that direct path from explicit address-vector fallback:
 
-- `aggregate_update.address_buffer_callback_existing_update=...`
-- `aggregate_update.address_buffer_callback_new_update=...`
-- `aggregate_update.state_address_selection_append_new_update=...`
+- `aggregate_update.direct_new_grouped_primitive_payload_update=...`
 - `aggregate_update.address_vector_resolve=...`
 - `aggregate_update.address_vector_payload_update=...`
 
-This distinction matters. Existing/new callback routes are direct routes through
-the aggregate hash table, but they are still address-buffer based. Append-new can
+This distinction matters. Direct primitive payload updates route through the
+aggregate hash table without publishing an address-vector boundary. Append-new can
 use row locations plus a reverse partition selection instead. The span callback
 removes the callback `Vector` boundary; it does not eliminate address buffering
 for existing and mixed new-group paths. The root solution is a lower
@@ -2000,14 +1994,13 @@ Verified forced/profile evidence:
 
 The aggregate update invocation count stayed batched:
 
-- Q3 kept `aggregate_update.direct_new_grouped_fused_payload_update=15`
+- Q3 kept `aggregate_update.direct_new_grouped_primitive_payload_update=15`
 - Q20 kept `aggregate_update.direct_new_grouped_primitive_update=5`
 
 This is structural progress, not a CBO admission change. Production SF1 with
 default policy still skipped the Q3/Q20 regions in the focused run, and the
 verifier passed with correctness diff 0. The next root blocker is still below
-this boundary: Q3 has `aggregate_update.address_buffer_callback_new_update`, and
-both Q3/Q20 still materialize `hash_join_probe.final_output`.
+this boundary: both Q3/Q20 still materialize `hash_join_probe.final_output`.
 
 Verification for this pass:
 
@@ -2037,14 +2030,13 @@ Verified forced/profile boundary movement:
 
 The aggregate update count stayed batched:
 
-- Q3 kept `aggregate_update.direct_new_grouped_fused_payload_update=15`
+- Q3 kept `aggregate_update.direct_new_grouped_primitive_payload_update=15`
 - Q20 kept `aggregate_update.direct_new_grouped_primitive_update=5`
 
 The performance interpretation is deliberately conservative. Forced/profile
 timing was Q3 `0.899x` and Q20 `1.116x`. Q20 remains useful because the primitive
 aggregate update path is direct-state. Q3 is still not a production win because
-the old full-output boundary has become a narrower projection-source gather, and
-Q3 still reports `aggregate_update.address_buffer_callback_new_update=30519`.
+the old full-output boundary has become a narrower projection-source gather.
 Production default Q3/Q20 compiled zero regions after this pass; focused SF1
 medians were Q3 `1.000x` and Q20 `0.985x`, so the Q20 movement is zero-compiled
 policy noise rather than a runtime JIT regression.
@@ -2085,7 +2077,7 @@ Verified Q3 SF1 forced/profile evidence:
 - no `projection.direct_post_join_reference_projection`
 - no `projection.direct_post_join_computed_projection`
 - no `projection.direct_post_join_batch_projection`
-- no `aggregate_update.state_address_selection_new_update`
+- no separate selected state-address materialization boundary
 - median `0.063062s` vectorized/off versus `0.061738s` forced JIT/auto,
   or `1.021x`, with correctness diff 0
 
@@ -2370,8 +2362,7 @@ Verified Q9-like API coverage now requires the new route:
 - `projection.direct_remap_post_join_batch_projection`
 - `aggregate_update.projected_group_payload_update`
 - no `aggregate_update.address_vector_payload_update`
-- no `aggregate_update.state_address_selection_new_update`
-- no `aggregate_update.state_address_selection_existing_update`
+- no separate selected state-address materialization boundary
 - no `direct_projected_group_payload_update_unsupported.*`
 
 Verified TPC-H Q9 SF1 forced/profile evidence over three traced repeats:
@@ -4101,14 +4092,13 @@ Focused SF10 Q16 verification:
   verified correctness diff 0 over 5 repeats with off median `0.043s`, auto
   median `0.044s`, and `compiled_regions=0`
 
-The current win is a core execution-path cleanup: Q16 remains non-jitted because
-there is no generated region with owned hot work yet. Future Q16 JIT work should
-start from this distinct backend and remove more grouped lookup/projection work;
-it should not reintroduce tuple-backed duplicate scans, correction selections,
-or CBO leniency for the old fragments. The cost model now exposes
-`runner_cost_native_distinct_count_pointer_aggregate_stage_count` and charges it
-through the stateful protocol penalty, keeping correctness eligibility separate
-from production profitability.
+The corrected architecture keeps Q16 on the regular DuckDB distinct aggregate-key
+path unless a real generated distinct backend owns lookup and update work. The
+old JIT-coupled physical distinct count-pointer backend changed execution when
+JIT was enabled even with no admitted region, which is the wrong ownership
+boundary. Future Q16 JIT work should build a generic distinct aggregate backend
+instead of reintroducing tuple-backed duplicate scans, correction selections, or
+CBO leniency for old fragments.
 
 ### 74. Q8 Source Filters Need Explicit Input-Layout Ownership
 

@@ -10,7 +10,6 @@
 
 #include "sljit_hash_join_projection_source_runtime.hpp"
 #include "sljit_mark_probe_filter_mode.hpp"
-#include "sljit_native_tail_handoff_runtime.hpp"
 #include "sljit_region_executable.hpp"
 #include "sljit_region_runtime_trace.hpp"
 #include "sljit_runtime_batch_view.hpp"
@@ -21,7 +20,12 @@
 
 namespace duckdb {
 
-enum class SljitMarkProbeFilterBoundaryMarkerMode : uint8_t { OMIT_MARKER, REFERENCE_TRUE, MATERIALIZE_FLAGS };
+enum class SljitMarkProbeFilterBoundaryMarkerMode : uint8_t {
+	OMIT_MARKER,
+	REFERENCE_TRUE,
+	REFERENCE_FALSE,
+	MATERIALIZE_FLAGS
+};
 
 struct SljitMarkProbeFilterBoundary {
 	SljitRuntimeBatchView input;
@@ -205,6 +209,11 @@ static void SljitBuildReferencedTrueMarkProbeBoundaryMarker(DataChunk &output, i
 	mark_vector.Reference(Value::BOOLEAN(true), count_t(count));
 }
 
+static void SljitBuildReferencedFalseMarkProbeBoundaryMarker(DataChunk &output, idx_t count) {
+	auto &mark_vector = output.data.back();
+	mark_vector.Reference(Value::BOOLEAN(false), count_t(count));
+}
+
 static bool SljitBuildMaterializedMarkProbeBoundaryMarker(const ExecutionHashJoinProbeBinding &binding,
                                                           SljitMarkProbeFilterBoundary &boundary, DataChunk &input,
                                                           DataChunk &output) {
@@ -273,6 +282,12 @@ static bool SljitTryBuildMarkProbeFilterBoundary(const ExecutionHashJoinProbeBin
 		}
 		SljitBuildReferencedTrueMarkProbeBoundaryMarker(output, boundary.count);
 		break;
+	case SljitMarkProbeFilterBoundaryMarkerMode::REFERENCE_FALSE:
+		if (!SljitMarkProbeBoundaryMarkerIsBoolean(output)) {
+			return false;
+		}
+		SljitBuildReferencedFalseMarkProbeBoundaryMarker(output, boundary.count);
+		break;
 	case SljitMarkProbeFilterBoundaryMarkerMode::MATERIALIZE_FLAGS:
 		if (!SljitMarkProbeBoundaryMarkerIsBoolean(output)) {
 			return false;
@@ -308,6 +323,59 @@ SljitChooseMarkProbeFilterBoundaryMarkerMode(const SljitExecutableRegionOp &hash
 	                                   : SljitMarkProbeFilterBoundaryMarkerMode::MATERIALIZE_FLAGS;
 }
 
+static SljitMarkProbeFilterBoundaryMarkerMode
+SljitChooseMaterializedMarkProbeFilterBoundaryMarkerMode(SljitMarkProbeFilterMode mark_filter_mode) {
+	switch (mark_filter_mode) {
+	case SljitMarkProbeFilterMode::MATCHES:
+		return SljitMarkProbeFilterBoundaryMarkerMode::REFERENCE_TRUE;
+	case SljitMarkProbeFilterMode::NON_MATCHES:
+		return SljitMarkProbeFilterBoundaryMarkerMode::REFERENCE_FALSE;
+	default:
+		return SljitMarkProbeFilterBoundaryMarkerMode::MATERIALIZE_FLAGS;
+	}
+}
+
+static bool SljitTryBuildSelectedMarkProbeFilterBoundary(const ExecutionHashJoinProbeBinding &binding,
+                                                         SljitMarkProbeFilterBoundary &boundary,
+                                                         const SelectionVector &selection, idx_t selected_count,
+                                                         SljitMarkProbeFilterBoundaryMarkerMode marker_mode,
+                                                         SljitMarkProbeFilterBoundaryResult &result) {
+	if (!SljitCanBindMarkProbeFilterBoundary(binding, boundary, marker_mode)) {
+		return false;
+	}
+
+	auto &input = boundary.input.Chunk();
+	auto &output = *boundary.output;
+	output.Reset();
+	for (idx_t col_idx = 0; col_idx < binding.lhs_output_column_indices.size(); col_idx++) {
+		auto input_col = binding.lhs_output_column_indices[col_idx];
+		if (input_col >= input.ColumnCount() || input.data[input_col].GetType() != output.data[col_idx].GetType()) {
+			return false;
+		}
+		output.data[col_idx].Slice(input.data[input_col], selection, selected_count);
+	}
+	switch (marker_mode) {
+	case SljitMarkProbeFilterBoundaryMarkerMode::OMIT_MARKER:
+		break;
+	case SljitMarkProbeFilterBoundaryMarkerMode::REFERENCE_TRUE:
+		if (!SljitMarkProbeBoundaryMarkerIsBoolean(output)) {
+			return false;
+		}
+		SljitBuildReferencedTrueMarkProbeBoundaryMarker(output, selected_count);
+		break;
+	case SljitMarkProbeFilterBoundaryMarkerMode::REFERENCE_FALSE:
+		if (!SljitMarkProbeBoundaryMarkerIsBoolean(output)) {
+			return false;
+		}
+		SljitBuildReferencedFalseMarkProbeBoundaryMarker(output, selected_count);
+		break;
+	default:
+		return false;
+	}
+	SljitFinishMarkProbeFilterBoundaryOutput(output, selected_count, result);
+	return true;
+}
+
 template <class SCRATCH>
 static bool SljitTryBuildMarkProbeFilterBoundaryFromInput(SCRATCH &scratch, idx_t hash_join_idx, DataChunk &input,
                                                           DataChunk &join_output, idx_t mark_count,
@@ -324,18 +392,6 @@ static bool SljitTryBuildMarkProbeFilterBoundaryFromInput(SCRATCH &scratch, idx_
 	    SljitTryBuildMarkProbeFilterBoundary(scratch.OperatorBinding(hash_join_idx).hash_join_probe,
 	                                         built_boundary.boundary, marker_mode, built_boundary.result);
 	return built_boundary.built;
-}
-
-template <class SCRATCH>
-static bool SljitTryBuildMarkProbeFilterProjectionBoundary(SCRATCH &scratch, idx_t hash_join_idx,
-                                                           SljitExecutableRegionOp &hash_join_op,
-                                                           const SljitExecutableRegionOp &projection_op,
-                                                           DataChunk &input, DataChunk &join_output, idx_t mark_count,
-                                                           SljitMarkProbeFilterMode mark_filter_mode,
-                                                           SljitBuiltMarkProbeFilterBoundary &built_boundary) {
-	auto marker_mode = SljitChooseMarkProbeFilterBoundaryMarkerMode(hash_join_op, projection_op, mark_filter_mode);
-	return SljitTryBuildMarkProbeFilterBoundaryFromInput(scratch, hash_join_idx, input, join_output, mark_count,
-	                                                     marker_mode, built_boundary);
 }
 
 template <class SCRATCH>

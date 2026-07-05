@@ -40,8 +40,9 @@ public:
 	}
 
 private:
-	auto NativePipelineExecutor() {
-		return SljitMakeNativePipelineExecutor(kernel, runtime, ops, source_distinct_counts);
+	auto NativePipelineExecutor(bool force_duckdb_terminal_aggregate_update = false) {
+		return SljitMakeNativePipelineExecutor(kernel, runtime, ops, source_distinct_counts,
+		                                       force_duckdb_terminal_aggregate_update);
 	}
 
 	auto RecordedHashJoinProbeExecutor() {
@@ -56,7 +57,7 @@ private:
 	}
 
 	bool TryExecutePrimitiveSequenceBatched() {
-		auto execute_native_full_pipeline_from = NativePipelineExecutor();
+		auto execute_native_full_pipeline_from = NativePipelineExecutor(true);
 		auto execute_hash_join_probe = RecordedHashJoinProbeExecutor();
 		return SljitTryExecuteFullPipelinePrimitiveSequenceBatched(
 		    runtime, result, ops, recipe_plan.recipe, execute_native_full_pipeline_from, execute_hash_join_probe,

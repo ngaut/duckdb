@@ -89,12 +89,25 @@ static bool SljitHashJoinCanUseAllValidMatchedProbe(const SljitNativeHashJoinPro
 	return selected ? input.source_sel && input.source_sel[0] : !input.source_sel;
 }
 
-static bool SljitHashJoinHasPlainEqualityKey(const SljitNativeHashJoinProbeKeyPlan &key) {
-	return key.equality_key && !key.null_equal && key.comparison_type == ExecutionRegionComparisonType::EQUAL;
+static bool SljitHashJoinHasAllValidEqualityKey(const SljitNativeHashJoinProbeKeyPlan &key) {
+	return key.equality_key && (key.comparison_type == ExecutionRegionComparisonType::EQUAL ||
+	                            key.comparison_type == ExecutionRegionComparisonType::NOT_DISTINCT_FROM);
 }
 
-static bool SljitHashJoinHasPlainNotEqualPredicateKey(const SljitNativeHashJoinProbeKeyPlan &key) {
-	return !key.equality_key && !key.null_equal && key.comparison_type == ExecutionRegionComparisonType::NOT_EQUAL;
+static bool SljitHashJoinHasPlainComparisonPredicateKey(const SljitNativeHashJoinProbeKeyPlan &key) {
+	if (key.equality_key || key.null_equal) {
+		return false;
+	}
+	switch (key.comparison_type) {
+	case ExecutionRegionComparisonType::NOT_EQUAL:
+	case ExecutionRegionComparisonType::LESS_THAN:
+	case ExecutionRegionComparisonType::GREATER_THAN:
+	case ExecutionRegionComparisonType::LESS_THAN_OR_EQUAL:
+	case ExecutionRegionComparisonType::GREATER_THAN_OR_EQUAL:
+		return true;
+	default:
+		return false;
+	}
 }
 
 static bool SljitHashJoinHasUint64CompatibleKey(const SljitNativeHashJoinProbeKeyPlan &key) {
@@ -105,7 +118,7 @@ static bool SljitHashJoinCanUseSingleKeyProbe(const SljitNativeHashJoinProbePlan
 	if (plan.keys.size() != 1 || plan.equality_key_count != 1) {
 		return false;
 	}
-	return SljitHashJoinHasPlainEqualityKey(plan.keys[0]);
+	return SljitHashJoinHasAllValidEqualityKey(plan.keys[0]);
 }
 
 static bool SljitHashJoinCanUseAllValidNoChainProbe(const SljitNativeHashJoinProbePlan &plan,

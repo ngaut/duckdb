@@ -58,28 +58,4 @@ static bool SljitTryCopyAllValidHashJoinOutputReferenceToBatch(const ExecutionHa
 	return true;
 }
 
-static bool SljitTryMaterializeHashJoinOutputReferenceToBatch(const ExecutionHashJoinProbeBinding &binding,
-                                                              DataChunk &join_input,
-                                                              const SelectionVector &match_selection,
-                                                              Vector &row_pointers, idx_t join_output_source_index,
-                                                              Vector &target, idx_t current_size, idx_t count) {
-	if (!binding.ready || !binding.hash_table ||
-	    binding.layout_kind != ExecutionHashJoinProbeLayoutKind::REGULAR_HASH_TABLE ||
-	    binding.output_mode != ExecutionHashJoinProbeOutputMode::MATCHED_PROBE_AND_BUILD ||
-	    target.GetVectorType() != VectorType::FLAT_VECTOR ||
-	    !SljitDirectProjectionBatchSupportsType(target.GetType()) ||
-	    FlatVector::GetCapacity(target) < current_size + count) {
-		return false;
-	}
-	if (join_output_source_index >= binding.output_types.size()) {
-		return false;
-	}
-	if (binding.output_types[join_output_source_index] != target.GetType()) {
-		return false;
-	}
-
-	return SljitTryCopyAllValidHashJoinOutputReferenceToBatch(binding, join_input, match_selection, row_pointers,
-	                                                          join_output_source_index, target, current_size, count);
-}
-
 } // namespace duckdb

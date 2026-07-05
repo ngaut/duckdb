@@ -23,11 +23,11 @@ public:
 	}
 
 	bool TryPrepareMarkProbeInput(idx_t mark_hash_join_idx, const SljitRuntimeBatchView &selected_input,
-	                              bool include_lhs_output_columns, DataChunk *&join_input, string &deferred_reason) {
+	                              DataChunk *&join_input, string &deferred_reason) {
 		DataChunk *compact_input = nullptr;
 		ExecutionHashJoinProbeBinding *target_binding = nullptr;
-		if (!TryPrepareInput(mark_hash_join_idx, selected_input, include_lhs_output_columns,
-		                     selected_hash_join_mark_input, "SLJIT selected MARK probe input",
+		if (!TryPrepareInput(mark_hash_join_idx, selected_input, true, selected_hash_join_mark_input,
+		                     "SLJIT selected MARK probe input",
 		                     "materialize_selected_mark_input", "materialize_selected_mark_input_miss",
 		                     "selected_mark_probe_input", compact_input, target_binding, deferred_reason)) {
 			return false;
@@ -51,47 +51,6 @@ public:
 		}
 		join_input = compact_input;
 		return true;
-	}
-
-	SljitRuntimeBatchView BuildMarkOutputView(const SljitRuntimeBatchView &input, const SelectionVector *mark_selection,
-	                                          idx_t selected_count) {
-		if (!mark_selection) {
-			return SljitRuntimeBatchViewFromHashJoinSelection(
-			    input.Chunk(), *input.selection, *input.hash_join_build_selection, *input.hash_join_row_pointers,
-			    selected_count, input.hash_join_idx, input.source_key0_int64_to_int32_matches_are_proven,
-			    input.hash_join_output_column_map, input.hash_join_output_projection_idx);
-		}
-
-		if (!selected_mark_source_selection) {
-			selected_mark_source_selection = make_uniq<SelectionVector>(STANDARD_VECTOR_SIZE);
-		}
-		if (!selected_mark_build_selection) {
-			selected_mark_build_selection = make_uniq<SelectionVector>(STANDARD_VECTOR_SIZE);
-		}
-		if (!selected_mark_row_pointers) {
-			selected_mark_row_pointers = make_uniq<Vector>(LogicalType::POINTER);
-		}
-		auto &row_pointers = *selected_mark_row_pointers;
-		row_pointers.SetVectorType(VectorType::FLAT_VECTOR);
-		FlatVector::ValidityMutable(row_pointers).SetAllValid(selected_count);
-		FlatVector::SetSize(row_pointers, selected_count);
-		auto target_row_pointers = FlatVector::GetDataMutable<data_ptr_t>(row_pointers);
-		auto source_row_pointers = FlatVector::GetData<data_ptr_t>(*input.hash_join_row_pointers);
-		auto mark_sel = mark_selection->data();
-		auto source_sel = input.selection->data();
-		auto build_sel = input.hash_join_build_selection->data();
-		auto target_source_sel = selected_mark_source_selection->data();
-		auto target_build_sel = selected_mark_build_selection->data();
-		for (idx_t row_idx = 0; row_idx < selected_count; row_idx++) {
-			const auto selected_idx = mark_sel[row_idx];
-			target_source_sel[row_idx] = source_sel[selected_idx];
-			target_build_sel[row_idx] = build_sel[selected_idx];
-			target_row_pointers[row_idx] = source_row_pointers[selected_idx];
-		}
-		return SljitRuntimeBatchViewFromHashJoinSelection(
-		    input.Chunk(), *selected_mark_source_selection, *selected_mark_build_selection, row_pointers,
-		    selected_count, input.hash_join_idx, input.source_key0_int64_to_int32_matches_are_proven,
-		    input.hash_join_output_column_map, input.hash_join_output_projection_idx);
 	}
 
 private:
@@ -207,9 +166,6 @@ private:
 	SljitRegionExecutionScratch &scratch;
 	SljitDataChunkBatch selected_hash_join_mark_input;
 	SljitDataChunkBatch selected_hash_join_probe_input;
-	unique_ptr<SelectionVector> selected_mark_source_selection;
-	unique_ptr<SelectionVector> selected_mark_build_selection;
-	unique_ptr<Vector> selected_mark_row_pointers;
 };
 
 } // namespace duckdb

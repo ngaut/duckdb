@@ -155,21 +155,4 @@ static bool TryExecutePreparedPreaggregatedCountStarGroupedAggregateUpdate(
 	return true;
 }
 
-static bool SljitTryExecutePreaggregatedCountStarGroupedAggregateUpdate(
-    ExecutionRegionRuntime &runtime, ExecutionOperatorRuntime &native_runtime, SljitRegionExecutionScratch &scratch,
-    idx_t op_idx, SljitExecutableRegionOp &op, DataChunk &compact_groups, const vector<int64_t> &count_deltas,
-    idx_t preaggregated_row_count, bool defer_grouped_finish, optional_ptr<bool> deferred_grouped_finish) {
-	if (compact_groups.size() == 0 || count_deltas.size() < compact_groups.size()) {
-		return false;
-	}
-	SljitCountStarGroupedAggregateUpdateDescriptor descriptor;
-	if (!SljitTryPrepareCountStarGroupedAggregateUpdate(runtime, native_runtime, scratch, op_idx, op, compact_groups,
-	                                                    descriptor)) {
-		return false;
-	}
-	return TryExecutePreparedPreaggregatedCountStarGroupedAggregateUpdate(
-	    runtime, scratch, op_idx, op, compact_groups, count_deltas, descriptor, preaggregated_row_count,
-	    defer_grouped_finish, deferred_grouped_finish);
-}
-
 } // namespace duckdb

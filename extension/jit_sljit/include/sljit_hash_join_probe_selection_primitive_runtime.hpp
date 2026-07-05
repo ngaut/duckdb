@@ -11,8 +11,8 @@
 #include "sljit_full_pipeline_primitive_sequence.hpp"
 #include "sljit_full_pipeline_runtime.hpp"
 #include "sljit_hash_join_probe_executor_runtime.hpp"
-#include "sljit_native_tail_handoff_runtime.hpp"
 #include "sljit_region_runtime_state.hpp"
+#include "sljit_runtime_batch_view.hpp"
 #include "sljit_selected_hash_join_input_runtime.hpp"
 
 namespace duckdb {
@@ -41,7 +41,7 @@ public:
 				throw InternalException("SLJIT hash probe could not prepare selected upstream hash-join input");
 			}
 		} else {
-			join_input_ptr = &SljitBindNativeTailHandoffInput(input);
+			join_input_ptr = &SljitBindMaterializedRuntimeBatchInput(input, "SLJIT hash join selection primitive");
 		}
 		auto &join_input = *join_input_ptr;
 		if (join_input.size() == 0) {

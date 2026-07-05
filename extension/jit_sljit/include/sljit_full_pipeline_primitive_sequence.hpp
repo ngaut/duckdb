@@ -15,7 +15,7 @@
 #include "duckdb/common/exception.hpp"
 
 #include "sljit_delim_join_sink_primitive.hpp"
-#include "sljit_generated_filter_projection_runtime.hpp"
+#include "sljit_generated_filter_primitive.hpp"
 #include "sljit_grouped_aggregate_update_primitive.hpp"
 #include "sljit_hash_join_probe_primitive.hpp"
 #include "sljit_join_projection_aggregate_update_primitive.hpp"

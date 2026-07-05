@@ -30,8 +30,14 @@ public:
 	             EXECUTE_OUTPUT_BATCH &&execute_output_batch) {
 		auto &projection_chain_batch = projection_chain_batches[step_idx];
 		auto &selected_hash_join_input = selected_hash_join_inputs[step_idx];
+		auto &synthetic_projection_output = synthetic_projection_outputs[step_idx];
+		optional_ptr<SljitProjectionChainSyntheticProjectionScratch> synthetic_projection_scratch;
+		if (step.projection_chain.HasBoundComposedProjection()) {
+			synthetic_projection_scratch = &synthetic_projection_scratch_states[step_idx];
+		}
 		return SljitExecuteProjectionChainPrimitive(runtime, scratch, ops, step.projection_chain, input,
 		                                            projection_chain_batch, selected_hash_join_input,
+		                                            synthetic_projection_output, synthetic_projection_scratch,
 		                                            execute_output_batch);
 	}
 
@@ -50,6 +56,9 @@ private:
 	SljitRegionExecutionScratch &scratch;
 	std::array<SljitDataChunkBatch, SLJIT_FULL_PIPELINE_MAX_PRIMITIVES> projection_chain_batches;
 	std::array<SljitDataChunkBatch, SLJIT_FULL_PIPELINE_MAX_PRIMITIVES> selected_hash_join_inputs;
+	std::array<SljitDataChunkBatch, SLJIT_FULL_PIPELINE_MAX_PRIMITIVES> synthetic_projection_outputs;
+	std::array<SljitProjectionChainSyntheticProjectionScratch, SLJIT_FULL_PIPELINE_MAX_PRIMITIVES>
+	    synthetic_projection_scratch_states;
 };
 
 } // namespace duckdb

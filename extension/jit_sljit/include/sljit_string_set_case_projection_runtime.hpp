@@ -123,11 +123,21 @@ static bool SljitTryFastProjectStringSetCaseGroupedPayload(const SljitStringSetC
 }
 
 static bool SljitTryBuildStringSetCaseGroupedPayloadProjection(
-    const vector<SljitExecutableRegionOp> &ops, const SljitInt64ToInt32PreJoinProjection &pre_join_projection,
+    const vector<SljitExecutableRegionOp> &ops, const SljitPreJoinProjectionViewDescriptor &pre_join_view,
     idx_t first_projection_idx, idx_t final_projection_idx, SljitStringSetCaseGroupedPayloadProjection &descriptor) {
 	descriptor = SljitStringSetCaseGroupedPayloadProjection();
-	if (!pre_join_projection.HasInt64ToInt32Projection() || first_projection_idx >= ops.size() ||
-	    final_projection_idx >= ops.size() || first_projection_idx > final_projection_idx) {
+	if (pre_join_view.columns.size() != 2 ||
+	    pre_join_view.columns[0].kind != SljitPreJoinProjectionViewColumnKind::INT64_TO_INT32_CAST ||
+	    pre_join_view.columns[0].source_idx != 0 ||
+	    pre_join_view.columns[1].kind != SljitPreJoinProjectionViewColumnKind::REFERENCE ||
+	    pre_join_view.columns[1].source_idx != 1 || pre_join_view.hash_join_idx >= ops.size() ||
+	    first_projection_idx >= ops.size() || final_projection_idx >= ops.size() ||
+	    first_projection_idx > final_projection_idx) {
+		return false;
+	}
+	auto &join = ops[pre_join_view.hash_join_idx].hash_join_probe.plan;
+	if (join.keys.size() != 1 || join.keys[0].key_input_index != 0 ||
+	    join.keys[0].key_kind != SljitNativeHashJoinKeyKind::INT32) {
 		return false;
 	}
 	auto &first_projection = ops[first_projection_idx];

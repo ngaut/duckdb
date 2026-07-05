@@ -8,6 +8,7 @@
 
 #pragma once
 
+#include "sljit_executable_expression_codegen.hpp"
 #include "sljit_hash_join_projection_source_runtime.hpp"
 #include "sljit_projection_composition.hpp"
 #include "sljit_projection_executor_runtime.hpp"
@@ -30,6 +31,28 @@ struct SljitProjectionChainPrimitive {
 	bool HasBoundComposedProjection() const {
 		return bound_composed_projection != nullptr;
 	}
+};
+
+struct SljitProjectionChainSyntheticProjectionScratch {
+	void Ensure(const SljitExecutableRegionOp &projection_op) {
+		expression_adapter_scratch.resize(projection_op.projections.size());
+	}
+
+	SljitProjectionAdapterScratch &ProjectionScratch(idx_t op_idx) {
+		(void)op_idx;
+		return projection_adapter_scratch;
+	}
+
+	SljitExpressionAdapterScratch &ExpressionAdapterScratch(idx_t op_idx, idx_t expression_idx) {
+		(void)op_idx;
+		if (expression_idx >= expression_adapter_scratch.size()) {
+			throw InternalException("SLJIT synthetic projection expression has no adapter scratch");
+		}
+		return expression_adapter_scratch[expression_idx];
+	}
+
+	SljitProjectionAdapterScratch projection_adapter_scratch;
+	vector<SljitExpressionAdapterScratch> expression_adapter_scratch;
 };
 
 static bool SljitBuildProjectionChainComposedProjection(const vector<SljitExecutableRegionOp> &ops,
@@ -74,23 +97,23 @@ static SljitProjectionChainPrimitive SljitBindProjectionChainPrimitive(const vec
 	return primitive;
 }
 
+static SljitProjectionChainPrimitive
+SljitBindProjectionChainPrimitive(const vector<SljitExecutableRegionOp> &ops, idx_t projection_idx,
+                                  shared_ptr<SljitExecutableRegionOp> bound_projection) {
+	if (!SljitCanBindProjectionChainPrimitive(ops, projection_idx) || !bound_projection ||
+	    bound_projection->kind != SljitNativeRegionOpKind::PROJECTION) {
+		throw InternalException("SLJIT projection-chain primitive cannot bind requested projection override");
+	}
+	SljitProjectionChainPrimitive primitive;
+	primitive.first_projection_idx = projection_idx;
+	primitive.final_projection_idx = projection_idx;
+	primitive.bound_composed_projection = std::move(bound_projection);
+	return primitive;
+}
+
 static SljitProjectionChainPrimitive SljitBindProjectionChainPrimitive(const vector<SljitExecutableRegionOp> &ops,
                                                                        idx_t projection_idx) {
 	return SljitBindProjectionChainPrimitive(ops, projection_idx, projection_idx);
-}
-
-static bool SljitBindProjectionChainInput(const SljitRuntimeBatchView &input, DataChunk *&input_chunk) {
-	if (!input.HasChunk()) {
-		throw InternalException("SLJIT projection-chain primitive requires an input chunk");
-	}
-	input_chunk = &input.Chunk();
-	if (input.count > input_chunk->size()) {
-		throw InternalException("SLJIT projection-chain primitive count exceeds input chunk cardinality");
-	}
-	if (!input.selection && input.count != input_chunk->size()) {
-		throw InternalException("SLJIT projection-chain primitive requires a selection for partial chunk input");
-	}
-	return input.count > 0;
 }
 
 static bool SljitTryPrepareSelectedHashJoinProjectionChainInput(
@@ -146,6 +169,10 @@ static bool SljitTryPrepareSelectedHashJoinProjectionChainInput(
 static bool SljitResolveBoundProjectionChain(vector<SljitExecutableRegionOp> &ops,
                                              const SljitProjectionChainPrimitive &primitive,
                                              optional_ptr<SljitExecutableRegionOp> &projection_op) {
+	if (primitive.HasBoundComposedProjection()) {
+		projection_op = primitive.bound_composed_projection.get();
+		return true;
+	}
 	if (primitive.first_projection_idx == primitive.final_projection_idx) {
 		projection_op = &ops[primitive.final_projection_idx];
 		return true;
@@ -205,7 +232,8 @@ static bool SljitMaterializeProjectionChainStep(ExecutionRegionRuntime &runtime,
 		selection = nullptr;
 		count = source_chunk->size();
 	} else {
-		if (!SljitBindProjectionChainInput(input, source_chunk)) {
+		source_chunk = &SljitBindRuntimeBatchInput(input, "SLJIT projection-chain primitive");
+		if (input.count == 0) {
 			return false;
 		}
 		projection_op = &ops[projection_idx];
@@ -249,6 +277,9 @@ static bool SljitExecuteProjectionChainPrimitive(ExecutionRegionRuntime &runtime
                                                  const SljitRuntimeBatchView &input,
                                                  SljitDataChunkBatch &projection_chain_batch,
                                                  SljitDataChunkBatch &selected_hash_join_input,
+                                                 SljitDataChunkBatch &synthetic_projection_output,
+                                                 optional_ptr<SljitProjectionChainSyntheticProjectionScratch>
+                                                     synthetic_projection_scratch,
                                                  EXECUTE_OUTPUT_BATCH &&execute_output_batch) {
 	DataChunk *source_chunk;
 	unique_ptr<SljitExecutableRegionOp> mapped_projection;
@@ -269,9 +300,13 @@ static bool SljitExecuteProjectionChainPrimitive(ExecutionRegionRuntime &runtime
 		selection = nullptr;
 		count = source_chunk->size();
 	} else {
-		if (!SljitBindProjectionChainInput(input, source_chunk)) {
+		source_chunk = &SljitBindRuntimeBatchInput(input, "SLJIT projection-chain primitive");
+		if (input.count == 0) {
 			return false;
 		}
+	}
+	if (synthetic_projection_scratch) {
+		synthetic_projection_scratch->Ensure(*projection_op);
 	}
 	projection_chain_batch.Ensure(runtime.GetAllocator(), projection_op->output_types);
 	auto &batch = projection_chain_batch.chunk;
@@ -280,7 +315,14 @@ static bool SljitExecuteProjectionChainPrimitive(ExecutionRegionRuntime &runtime
 	};
 
 	if (SljitProjectionHasVariableWidthOutput(*projection_op)) {
-		auto &reference_output = scratch.TemporaryChunk(primitive.final_projection_idx);
+		DataChunk *reference_output_ptr;
+		if (synthetic_projection_scratch) {
+			synthetic_projection_output.Ensure(runtime.GetAllocator(), projection_op->output_types);
+			reference_output_ptr = &synthetic_projection_output.chunk;
+		} else {
+			reference_output_ptr = &scratch.TemporaryChunk(primitive.final_projection_idx);
+		}
+		auto &reference_output = *reference_output_ptr;
 		reference_output.Reset();
 		if (SljitTrySliceReferenceProjection(reference_output, *source_chunk, *projection_op, selection, count)) {
 			if (batch.size() > 0 && flush_output_batch()) {
@@ -297,19 +339,38 @@ static bool SljitExecuteProjectionChainPrimitive(ExecutionRegionRuntime &runtime
 		return true;
 	}
 
-	const bool direct_materialized =
-	    !selection && count == source_chunk->size() &&
-	    SljitTryDirectMaterializeFixedProjectionToBatch(runtime, scratch, primitive.final_projection_idx,
-	                                                    *projection_op, *source_chunk, batch);
+	bool direct_materialized = false;
+	if (!selection && count == source_chunk->size()) {
+		if (synthetic_projection_scratch) {
+			direct_materialized = SljitTryDirectMaterializeFixedProjectionToBatch(
+			    runtime, *synthetic_projection_scratch, primitive.final_projection_idx, *projection_op, *source_chunk,
+			    batch);
+		} else {
+			direct_materialized = SljitTryDirectMaterializeFixedProjectionToBatch(
+			    runtime, scratch, primitive.final_projection_idx, *projection_op, *source_chunk, batch);
+		}
+	}
 	if (!direct_materialized) {
 		auto append_stage_start = SljitRegionStageStart(runtime);
 		auto execute_selection = selection ? selection : FlatVector::IncrementalSelectionVector();
 		if (!SljitTryAppendReferenceProjectionToBatch(batch, *source_chunk, *projection_op, *execute_selection,
 		                                              count)) {
-			auto &filtered = scratch.TemporaryChunk(primitive.final_projection_idx);
+			DataChunk *filtered_ptr;
+			if (synthetic_projection_scratch) {
+				synthetic_projection_output.Ensure(runtime.GetAllocator(), projection_op->output_types);
+				filtered_ptr = &synthetic_projection_output.chunk;
+			} else {
+				filtered_ptr = &scratch.TemporaryChunk(primitive.final_projection_idx);
+			}
+			auto &filtered = *filtered_ptr;
 			filtered.Reset();
-			SljitExecuteProjection(scratch, primitive.final_projection_idx, *projection_op, *source_chunk, filtered,
-			                       selection, count);
+			if (synthetic_projection_scratch) {
+				SljitExecuteProjection(*synthetic_projection_scratch, primitive.final_projection_idx, *projection_op,
+				                       *source_chunk, filtered, selection, count);
+			} else {
+				SljitExecuteProjection(scratch, primitive.final_projection_idx, *projection_op, *source_chunk, filtered,
+				                       selection, count);
+			}
 			if (!SljitTryFastAppendFixedFlatAllValid(batch, filtered)) {
 				batch.Append(filtered);
 			}
@@ -357,156 +418,10 @@ static bool SljitBuildReferenceProjectionOutputMap(const SljitExecutableRegionOp
 	return true;
 }
 
-static bool SljitTryResolveProjectionChainReferenceSource(const vector<SljitExecutableRegionOp> &ops,
-                                                          idx_t first_projection_idx, idx_t projection_idx,
-                                                          idx_t output_idx, idx_t &join_output_source_idx,
-                                                          LogicalType &source_type) {
-	if (first_projection_idx >= ops.size() || projection_idx >= ops.size() || first_projection_idx > projection_idx ||
-	    ops[projection_idx].kind != SljitNativeRegionOpKind::PROJECTION ||
-	    output_idx >= ops[projection_idx].projections.size()) {
-		return false;
-	}
-
-	SljitExecutableRegionExpression remapped_reference;
-	idx_t previous_source_idx;
-	auto &projection_expr = ops[projection_idx].projections[output_idx];
-	if (!SljitTryBuildSingleSourceProjectionExpression(projection_expr, remapped_reference, previous_source_idx) ||
-	    !SljitProjectionIsSingleSourceReferenceLike(remapped_reference.plan)) {
-		return false;
-	}
-	if (projection_idx == first_projection_idx) {
-		join_output_source_idx = previous_source_idx;
-		source_type = remapped_reference.plan.return_type;
-		return true;
-	}
-
-	LogicalType resolved_type;
-	if (!SljitTryResolveProjectionChainReferenceSource(ops, first_projection_idx, projection_idx - 1,
-	                                                   previous_source_idx, join_output_source_idx, resolved_type) ||
-	    resolved_type != remapped_reference.plan.return_type) {
-		return false;
-	}
-	source_type = std::move(resolved_type);
-	return true;
-}
-
-static bool SljitBuildProjectionChainReferenceSourceMap(const vector<SljitExecutableRegionOp> &ops,
-                                                        idx_t first_projection_idx, idx_t projection_idx,
-                                                        vector<idx_t> &source_map) {
-	if (first_projection_idx >= ops.size() || projection_idx >= ops.size() || first_projection_idx > projection_idx ||
-	    ops[projection_idx].kind != SljitNativeRegionOpKind::PROJECTION) {
-		return false;
-	}
-	auto &projection_op = ops[projection_idx];
-	source_map.assign(projection_op.projections.size(), DConstants::INVALID_INDEX);
-	for (idx_t output_idx = 0; output_idx < projection_op.projections.size(); output_idx++) {
-		idx_t join_output_source_idx;
-		LogicalType source_type;
-		if (!SljitTryResolveProjectionChainReferenceSource(ops, first_projection_idx, projection_idx, output_idx,
-		                                                   join_output_source_idx, source_type)) {
-			continue;
-		}
-		if (source_type != projection_op.projections[output_idx].plan.return_type) {
-			return false;
-		}
-		source_map[output_idx] = join_output_source_idx;
-	}
-	return true;
-}
-
-static bool SljitTryBuildProjectionChainExpression(const vector<SljitExecutableRegionOp> &ops,
-                                                   idx_t first_projection_idx, idx_t projection_idx, idx_t output_idx,
-                                                   SljitExecutableRegionExpression &target,
-                                                   optional_ptr<string> blocker = nullptr) {
-	if (first_projection_idx >= ops.size() || projection_idx >= ops.size() || first_projection_idx > projection_idx ||
-	    ops[projection_idx].kind != SljitNativeRegionOpKind::PROJECTION ||
-	    output_idx >= ops[projection_idx].projections.size()) {
-		if (blocker) {
-			*blocker = "expression_bounds";
-		}
-		return false;
-	}
-	auto &projection_expr = ops[projection_idx].projections[output_idx];
-	if (projection_idx == first_projection_idx) {
-		SljitBuildBorrowedProjectionExpression(projection_expr, target);
-		return true;
-	}
-
-	SljitExecutableRegionExpression remapped_reference;
-	idx_t previous_source_idx;
-	if (SljitTryBuildSingleSourceProjectionExpression(projection_expr, remapped_reference, previous_source_idx) &&
-	    SljitProjectionIsSingleSourceReferenceLike(remapped_reference.plan)) {
-		return SljitTryBuildProjectionChainExpression(ops, first_projection_idx, projection_idx - 1,
-		                                              previous_source_idx, target, blocker);
-	}
-
-	vector<idx_t> source_map;
-	if (!SljitBuildProjectionChainReferenceSourceMap(ops, first_projection_idx, projection_idx - 1, source_map)) {
-		if (blocker) {
-			*blocker = "reference_source_map";
-		}
-		return false;
-	}
-	SljitBuildBorrowedProjectionExpression(projection_expr, target);
-	if (!SljitTryRemapHashJoinProjectionPlanSources(source_map, target.plan)) {
-		if (blocker) {
-			*blocker = "remap_plan_sources";
-		}
-		return false;
-	}
-	if (!SljitTryRemapHashJoinProjectionExpressionInputSources(source_map, target)) {
-		if (blocker) {
-			*blocker = "remap_input_sources";
-		}
-		return false;
-	}
-	return true;
-}
-
 static bool SljitBuildProjectionChainComposedProjection(const vector<SljitExecutableRegionOp> &ops,
                                                         idx_t first_projection_idx, idx_t final_projection_idx,
                                                         SljitExecutableRegionOp &composed_projection,
                                                         optional_ptr<string> blocker) {
-	if (first_projection_idx >= ops.size() || final_projection_idx >= ops.size() ||
-	    first_projection_idx > final_projection_idx ||
-	    ops[first_projection_idx].kind != SljitNativeRegionOpKind::PROJECTION ||
-	    ops[final_projection_idx].kind != SljitNativeRegionOpKind::PROJECTION) {
-		if (blocker) {
-			*blocker = "shape";
-		}
-		return false;
-	}
-	auto &final_projection = ops[final_projection_idx];
-	composed_projection = SljitExecutableRegionOp();
-	composed_projection.kind = SljitNativeRegionOpKind::PROJECTION;
-	composed_projection.operator_index = final_projection.operator_index;
-	composed_projection.input_types = ops[first_projection_idx].input_types;
-	composed_projection.output_types = final_projection.output_types;
-	composed_projection.output_not_null = final_projection.output_not_null;
-	composed_projection.projections.reserve(final_projection.projections.size());
-	for (idx_t output_idx = 0; output_idx < final_projection.projections.size(); output_idx++) {
-		SljitExecutableRegionExpression expression;
-		if (!SljitTryBuildProjectionChainExpression(ops, first_projection_idx, final_projection_idx, output_idx,
-		                                            expression, blocker)) {
-			composed_projection.projections.clear();
-			return false;
-		}
-		if (expression.plan.return_type != final_projection.projections[output_idx].plan.return_type) {
-			if (blocker) {
-				*blocker = "return_type";
-			}
-			composed_projection.projections.clear();
-			return false;
-		}
-		composed_projection.projections.push_back(std::move(expression));
-	}
-	return composed_projection.projections.size() == final_projection.projections.size();
-}
-
-static bool SljitBuildProjectionChainSemanticProjection(const vector<SljitExecutableRegionOp> &ops,
-                                                        idx_t first_projection_idx, idx_t final_projection_idx,
-                                                        SljitExecutableRegionOp &composed_projection,
-                                                        optional_ptr<string> blocker = nullptr) {
 	if (first_projection_idx >= ops.size() || final_projection_idx >= ops.size() ||
 	    first_projection_idx > final_projection_idx ||
 	    ops[first_projection_idx].kind != SljitNativeRegionOpKind::PROJECTION ||
@@ -562,12 +477,20 @@ static bool SljitBuildProjectionChainSemanticProjection(const vector<SljitExecut
 	composed_projection.input_types = ops[first_projection_idx].input_types;
 	composed_projection.output_types = final_projection.output_types;
 	composed_projection.output_not_null = final_projection.output_not_null;
-	composed_projection.projections.reserve(current_projection.size());
-	for (auto &projection_plan : current_projection) {
-		SljitExecutableRegionExpression projection;
-		projection.plan = projection_plan.Copy(true, false);
-		composed_projection.projections.push_back(std::move(projection));
-	}
+		composed_projection.projections.reserve(current_projection.size());
+		for (idx_t output_idx = 0; output_idx < current_projection.size(); output_idx++) {
+			auto &projection_plan = current_projection[output_idx];
+			SljitExecutableRegionExpression projection;
+			SljitPrepareExecutableRegionExpression(projection_plan, projection, nullptr, true);
+			string compile_error;
+			if (!SljitCompilePreparedExecutableRegionExpression(projection, false, compile_error)) {
+				if (blocker) {
+					*blocker = "compile_output_" + to_string(output_idx);
+				}
+				return false;
+			}
+			composed_projection.projections.push_back(std::move(projection));
+		}
 	return composed_projection.projections.size() == final_projection.projections.size();
 }
 

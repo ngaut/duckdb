@@ -112,13 +112,12 @@ static bool TryPreaggregateStringCompressedCountStarGroupsTemplated(Vector &sour
 			idx_t group_count = 0;
 			for (idx_t row_idx = 0; row_idx < count; row_idx++) {
 				const auto source_idx = execute_sel ? execute_sel->get_index(row_idx) : row_idx;
-				if (!AccumulatePreaggregatedStringCompressedCountStarKey(
-				        source_data[source_idx], lookup_keys, compressed_keys, counts, group_count)) {
+				if (!AccumulatePreaggregatedStringCompressedCountStarKey(source_data[source_idx], lookup_keys,
+				                                                         compressed_keys, counts, group_count)) {
 					return false;
 				}
 			}
-			MaterializePreaggregatedCountStarGroups(compressed_keys, counts, group_count, compact_groups,
-			                                        count_deltas);
+			MaterializePreaggregatedCountStarGroups(compressed_keys, counts, group_count, compact_groups, count_deltas);
 			return true;
 		}
 	}
@@ -178,8 +177,7 @@ TryPreaggregateStringCompressedMarkedCountStarGroupsTemplated(Vector &source, co
 				compact_groups.Reset();
 				return true;
 			}
-			MaterializePreaggregatedCountStarGroups(compressed_keys, counts, group_count, compact_groups,
-			                                        count_deltas);
+			MaterializePreaggregatedCountStarGroups(compressed_keys, counts, group_count, compact_groups, count_deltas);
 			return true;
 		}
 	}

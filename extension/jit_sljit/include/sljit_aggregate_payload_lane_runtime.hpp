@@ -177,11 +177,16 @@ static void SljitPrepareTypedAggregatePayloadSources(DataChunk &input, const vec
 static void SljitBindTypedAggregatePayloadSources(SljitNativeVectorInput &native_input,
                                                   SljitSourceVectorScratch &payload_sources,
                                                   const SelectionVector *execute_sel) {
+	const auto native_execute_sel = execute_sel ? execute_sel->data() : nullptr;
+	const auto source_common_sel = native_execute_sel ? nullptr : payload_sources.CanonicalizeCommonSourceSelection();
 	native_input.source_data_array = payload_sources.DataArray();
 	native_input.source_sel_array = payload_sources.SelectionArray();
+	native_input.source_common_sel = source_common_sel;
 	native_input.source_validity_array = payload_sources.ValidityArray();
-	native_input.expression_tree_flat_no_selection = payload_sources.FlatNoSelection(execute_sel);
-	native_input.expression_tree_flat_all_valid = payload_sources.FlatAllValid(execute_sel);
+	native_input.expression_tree_flat_no_selection =
+	    payload_sources.FlatNoSelection(native_execute_sel, source_common_sel);
+	native_input.expression_tree_flat_all_valid =
+	    payload_sources.FlatAllValid(native_execute_sel, source_common_sel);
 	native_input.expression_tree_all_valid = payload_sources.AllValid();
 }
 

@@ -36,6 +36,7 @@ struct SljitJoinProjectionAggregateDescriptor {
 	vector<LogicalType> input_types;
 	vector<ExecutionRowPointerGroupKeySource> group_sources;
 	vector<idx_t> payload_source_indices;
+	vector<SljitExecutableRegionExpression> remapped_payloads;
 	vector<idx_t> producer_output_column_map;
 	bool has_producer_output_column_map = false;
 	SljitDataChunkBatch input;
@@ -78,6 +79,7 @@ struct SljitJoinProjectionAggregateDescriptor {
 		input_types.clear();
 		group_sources.clear();
 		payload_source_indices.clear();
+		remapped_payloads.clear();
 	}
 
 	void ClearBuiltState() {

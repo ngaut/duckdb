@@ -167,6 +167,14 @@ before a stateful hash-probe/aggregate consumer use an explicit
 `SourceBatchBoundary` primitive with its own counters. That primitive may
 coalesce materially short source chunks and pass near-full chunks through
 without copying. It must not be hidden behind `uses_scan_filters`.
+DuckDB-owned table-scan filter pushdown stays in the DuckDB scan contract. SLJIT
+must not replace it with generated source filters because that loses scan
+pruning, adaptive scan filtering, and dynamic-filter ownership. Generated
+filters may still run as explicit post-source `FILTER` primitives over the
+scan-filtered source output.
+A scan-filtered primitive aggregate update is real generated/backend work. The
+backend capability pass must not downgrade primitive aggregate updates to weak
+accelerated work just because the source batch came from DuckDB scan filters.
 Native-only execution must remain native-only: if source-contract coalescing is
 needed before a native tail, recipe binding must emit
 `SourceBatchBoundary -> NativeTailHandoff` instead of passing an executor side
@@ -181,6 +189,13 @@ For count-star grouped aggregate, high-cardinality batches that cannot fit the
 local compact preaggregation table use the same prepared grouped state-address
 backend with one count delta per input row. That row-delta path is part of the
 dedicated count-star backend; it is not a native aggregate fallback.
+Regular hash aggregate lookup must not be modeled as a generated backend stage
+until a real generated hash-lookup backend exists. The production path is native
+grouped state-address resolution plus generated primitive payload update. That
+path must not publish permanent `native_hash_aggregate_lookup` blockers, layout
+IR, or CBO penalties for a backend that cannot become ready. Perfect hash
+aggregate lookup remains the generated-lookup backend because its address
+calculation is owned by the compiled primitive.
 When a selected reference view is followed by projection(s) and count-star
 grouped update, recipe binding may bind those projection semantics directly into
 `GroupedAggregateUpdate` as a projected-input contract. That is not a separate
@@ -218,9 +233,11 @@ share an explicit map-aware LHS contract:
   replaces materializing projection output `i`;
 - hash-probe key binding must use a physical key-input remap, not an implicit
   assumption that projected key indexes equal source indexes. The primitive
-  carries `SljitHashJoinProbeInputRemap`, and execution builds a temporary
-  remapped plan/operator-info view so DuckDB's `ExecutionHashJoinProbeBinding`
-  and SLJIT's generated key slots agree;
+  carries `SljitHashJoinProbeInputRemap`, and primitive binding prepares the
+  remapped plan/operator-info view so DuckDB's
+  `ExecutionHashJoinProbeBinding` and SLJIT's generated key slots agree.
+  Execution consumes that prepared view directly; it must not copy or patch
+  hash-join semantic metadata on the hot path;
 - post-join projection/aggregate descriptor binding must compose projection
   semantics through that map, preserving casts and target types;
 - direct reference, direct computed, and fallback materialization paths must all
@@ -239,12 +256,27 @@ The selected post-join aggregate runtime may consume remapped hash-join output
 views only through the descriptor-backed direct aggregate path. If that descriptor
 cannot bind the mapped producer, execution stops instead of falling through to
 stale full-output materialization.
+Selected aggregate recipes with no explicit post-join projection and
+projection-aggregate recipes with a post-join projection must share the same
+pre-join projection descriptor and prepared hash-probe remap path. The
+descriptor is the contract; recipe shape must not decide whether pre-join
+materialization is required.
 
-Grouped aggregate update binds an explicit update strategy. Distinct
+Grouped aggregate update binds an explicit update strategy schedule. Distinct
 count-pointer update is a strategy of `GroupedAggregateUpdate`, not a resurrected
-route-era top-level primitive. The strategy is selected during recipe binding and
-validated by the primitive contract so execution does not rediscover the
-semantic shape per batch.
+route-era top-level primitive. The strategy schedule is selected during recipe
+binding and validated by the primitive contract so execution does not own a
+hard-coded route list or rediscover the semantic shape per batch. Individual
+strategies may still decline on batch-local facts, such as whether a reference
+payload batch can be compactly preaggregated or appended as new groups, but the
+candidate order is a bound executable fact.
+For regular grouped aggregates, typed-expression payload reducers bind the
+fused grouped payload strategy once in the executable aggregate update. That
+path goes directly to grouped state-address find/update plus fused payload
+reduction; it must not probe reference-payload preaggregation, append-only, or
+direct-reference update strategies first on every batch. Reference payloads keep
+the default strategy order because preaggregation and append-new are their real
+backend strategies, not fallbacks.
 
 Distinct count-pointer update also owns its payload storage strategy. The
 adaptive per-group inline payload table is the default exact backend when group
@@ -300,6 +332,10 @@ row-preserving or row-reducing, such as filters, projections, and sinks. It must
 not take the maximum of stale source/operator estimates in that shape. A
 row-expanding operator such as a join breaks the cap and requires normal
 cardinality estimation.
+Scan-filtered source estimates are already estimates of the source output. CBO
+must not apply another synthetic selectivity reduction for each DuckDB-owned scan
+filter, or large scan-filtered native-tail candidates collapse to tiny one-batch
+costs and skip backend analysis.
 
 Stateful native source-to-sink protocol is not, by itself, generated/backend
 ownership. A region that only wraps a stateful native source and a native sink
@@ -308,6 +344,17 @@ with generated selection or projection glue must not claim
 generated backend stage. Real backend ownership, such as a row-pointer grouped
 aggregate update, remains aggressively admissible; MARK-to-delimiter-sink glue
 does not.
+
+Hash-join build sinks are native-tail capability boundaries. A pipeline with
+generated compute before a hash-join build sink must not be rejected solely by
+pre-graph route cost because the pipeline model cannot prove whether the
+generated prefix and native sink can share a valid execution contract. The
+pre-graph decision should require region-graph/backend analysis; post-lowering
+CBO still owns profitability and can reject unsupported or unprofitable
+build-sink recipes. The native hash-build sink protocol penalty must not erase
+generated compute-prefix benefit by default: the vectorized baseline also calls
+the same native build sink, so the incremental compiled-runner cost is the
+handoff contract, not the entire sink protocol.
 
 ## Projection Aggregate Descriptor
 
@@ -537,7 +584,7 @@ DuckDB CBO should score facts, not route names:
 - materialization bytes avoided;
 - selection density;
 - grouped lookup cost;
-- distinct aggregate cost, including native distinct count-pointer state work;
+- distinct aggregate cost, through the regular aggregate/stateful protocol model;
 - string, NULL, and decimal cost;
 - native-tail handoff cost;
 - stateful native source/sink protocol cost, including whether a generated
@@ -547,15 +594,12 @@ DuckDB CBO should score facts, not route names:
 Route names, TPC-H query ids, and benchmark-specific constants must not appear in
 CBO logic.
 
-Distinct count-pointer support is a capability fact and a runtime strategy, not
-proof of profitability. Auto admission must charge
-`native_distinct_count_pointer_aggregate_stage_count` as stateful aggregate work
-and only select the compiled runner when generated work or eliminated boundaries
-pay for that backend. Coverage tests may overfund that shape to exercise backend
-mechanics, but production CBO must not admit it from correctness eligibility
-alone. The physical distinct count-pointer backend itself is telemetry
-independent; Q16 uses it in production even when no compiled execution region is
-selected.
+Distinct aggregates must stay on the regular DuckDB aggregate-key path unless a
+real generated distinct backend owns both lookup and update work. JIT eligibility
+must not change DuckDB's physical distinct aggregate implementation. Coverage
+tests may overfund future backend shapes to exercise mechanics, but production
+CBO must admit only generated work that pays for itself against the vectorized
+parallel baseline.
 
 Aggregate group-count estimates are group estimates only. They must not be
 promoted from input row counts to force local hash-table reservation. Runtime

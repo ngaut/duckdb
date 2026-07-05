@@ -1,7 +1,7 @@
 //===----------------------------------------------------------------------===//
 //                         DuckDB
 //
-// sljit_generated_filter_projection_runtime.hpp
+// sljit_generated_filter_primitive.hpp
 //
 //
 //===----------------------------------------------------------------------===//
@@ -33,25 +33,11 @@ static SljitGeneratedFilterPrimitive SljitBindGeneratedFilterPrimitive(const vec
 	return primitive;
 }
 
-static DataChunk &SljitBindGeneratedFilterInput(const SljitRuntimeBatchView &input) {
-	if (!input.HasChunk()) {
-		throw InternalException("SLJIT generated filter requires an input chunk");
-	}
-	if (!input.IsMaterializedChunk()) {
-		throw InternalException("SLJIT generated filter requires a materialized batch view");
-	}
-	auto &input_chunk = input.Chunk();
-	if (input.count != input_chunk.size()) {
-		throw InternalException("SLJIT generated filter count does not match input chunk cardinality");
-	}
-	return input_chunk;
-}
-
 static bool SljitExecuteGeneratedFilterPrimitive(ExecutionRegionRuntime &runtime, SljitRegionExecutionScratch &scratch,
                                                  vector<SljitExecutableRegionOp> &ops,
                                                  const SljitGeneratedFilterPrimitive &primitive,
                                                  const SljitRuntimeBatchView &input, SljitRuntimeBatchView &output) {
-	auto &source_chunk = SljitBindGeneratedFilterInput(input);
+	auto &source_chunk = SljitBindMaterializedRuntimeBatchInput(input, "SLJIT generated filter");
 	if (source_chunk.size() == 0) {
 		return false;
 	}

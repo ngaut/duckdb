@@ -16,6 +16,17 @@ static SljitSourceContractPlan SljitDuckDBScanFilteredSourceContractPlan() {
 	return contract_plan;
 }
 
+void AppendSljitSourceFilterFacts(string &reason, const ExecutionRegionNode &node,
+                                  const ExecutionRegionTableScanContract &contract, bool include_input_columns) {
+	D_ASSERT(node.source);
+	reason += ";source_filter_count=" + std::to_string(node.source->filters.size());
+	if (include_input_columns) {
+		reason += ";source_contract_input_columns=" + std::to_string(contract.source_contract_input_column_count);
+	}
+	reason += ";source_contract_filter_prune_required=" +
+	          string(contract.source_contract_filter_prune_required ? "true" : "false");
+}
+
 static void
 AppendSljitSourceIR(string &reason, const ExecutionRegionNode &node, bool render_diagnostics,
                     ExecutionRegionSourceExecutionKind execution = ExecutionRegionSourceExecutionKind::NONE) {
@@ -61,10 +72,6 @@ static SljitRegionNodePlan SljitSourceBoundaryRequiresContract(const ExecutionRe
 	return result;
 }
 
-static string SljitGeneratedSourceFilterReason() {
-	return "generated table scan source filters";
-}
-
 static SljitRegionNodePlan PlanSljitSourceContractNode(const ExecutionRegionNode &node,
                                                        const ExecutionRegionContract &contract,
                                                        bool render_diagnostics) {
@@ -91,21 +98,9 @@ static SljitRegionNodePlan PlanSljitSourceContractNode(const ExecutionRegionNode
 	}
 
 	if (table_scan_contract.filter_pushdown) {
-		SljitSourceFilterPlan source_filter_plan;
-		string error;
-		if (TryPlanSljitSourceFilters(node, source_filter_plan, error, render_diagnostics)) {
-			auto reason = SljitGeneratedSourceFilterReason();
-			auto result =
-			    SljitNativeSourceNode(std::move(reason), node, render_diagnostics, source_filter_plan.source_contract);
-			result.native_ops = std::move(source_filter_plan.native_ops);
-			return result;
-		}
 		string reason = "vectorized table scan filters;source-strategy=duckdb-scan-filtered-source-contract";
 		AppendSljitSourceFilterFacts(reason, node, table_scan_contract, false);
 		reason += ";source_contract_filter_pushdown=true";
-		if (render_diagnostics && !error.empty()) {
-			reason += ";generated_source_filter_blocker=" + error;
-		}
 		return SljitNativeSourceNode(std::move(reason), node, render_diagnostics,
 		                             SljitDuckDBScanFilteredSourceContractPlan());
 	}

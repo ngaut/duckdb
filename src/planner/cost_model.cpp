@@ -28,8 +28,6 @@ static constexpr int64_t MATERIALIZATION_SOURCE_APPEND_PENALTY = 80;
 static constexpr int64_t NATIVE_JOIN_PROTOCOL_PENALTY = 720;
 static constexpr int64_t NATIVE_HASH_JOIN_BUILD_SINK_PROTOCOL_PENALTY = 720;
 static constexpr int64_t NATIVE_GROUPED_AGGREGATE_PARALLELISM_PENALTY = 160;
-static constexpr int64_t NATIVE_DISTINCT_COUNT_POINTER_AGGREGATE_PENALTY = 8192;
-static constexpr int64_t BLOCKED_HASH_AGGREGATE_LOOKUP_PENALTY = 64;
 
 static int64_t SaturatingCostCast(idx_t value) {
 	auto max_value = static_cast<idx_t>(std::numeric_limits<int64_t>::max());
@@ -66,6 +64,10 @@ static int64_t FractionalCost(int64_t value, int64_t numerator, int64_t denomina
 	}
 	auto multiplied = MultiplyCost(value, numerator);
 	return multiplied / denominator;
+}
+
+static int64_t DoubleCost(int64_t value) {
+	return AddCost(value, value);
 }
 
 static idx_t DuckDBPhysicalTypeCost(PhysicalType return_type, idx_t multiplier) {
@@ -302,14 +304,6 @@ static int64_t PhysicalRunnerRows(const PhysicalRunnerCostInput &input) {
 	if (rows == 0) {
 		rows = 1;
 	}
-	if (input.uses_scan_filters) {
-		// DuckDB-owned scan filters run before the accelerated body, so cost the
-		// generated/native work on a conservative post-filter row estimate.
-		const auto filter_count = MaxValue<idx_t>(input.source_filter_count, 1);
-		for (idx_t filter_idx = 0; filter_idx < filter_count; filter_idx++) {
-			rows = MaxValue<idx_t>((rows + 9) / 10, 1);
-		}
-	}
 	return SaturatingCostCast(rows);
 }
 
@@ -344,19 +338,12 @@ static bool PhysicalRunnerFullPipelineBenefitPays(const PhysicalRunnerCostInput 
 	       input.materialization_elision_count == 0 && input.native_hash_join_build_sink_count == 0;
 }
 
-static bool PhysicalRunnerUsesGeneratedDistinctCountPointerBackend(const PhysicalRunnerCostInput &input) {
-	return input.generated_distinct_count_pointer_aggregate_update_count > 0;
-}
-
 static bool PhysicalRunnerNativeStageBenefitCanPay(const PhysicalRunnerCostInput &input,
                                                    const PhysicalRunnerCostParameters &parameters) {
 	if (parameters.native_operator_stage_benefit == 0) {
 		return false;
 	}
 	if (input.native_sort_stage_count > 0) {
-		return false;
-	}
-	if (PhysicalRunnerUsesGeneratedDistinctCountPointerBackend(input)) {
 		return false;
 	}
 	if (input.native_protocol_class == PhysicalRunnerNativeProtocolClass::STATEFUL_SOURCE_SINK_PROTOCOL &&
@@ -371,7 +358,7 @@ static bool PhysicalRunnerMaterializationElisionBenefitCanPay(const PhysicalRunn
 	if (parameters.materialization_elision_benefit == 0 || input.materialization_elision_count == 0) {
 		return false;
 	}
-	return !PhysicalRunnerUsesGeneratedDistinctCountPointerBackend(input);
+	return true;
 }
 
 static bool PhysicalRunnerGeneratedBackendStageBenefitCanPay(const PhysicalRunnerCostInput &input) {
@@ -379,11 +366,24 @@ static bool PhysicalRunnerGeneratedBackendStageBenefitCanPay(const PhysicalRunne
 		return false;
 	}
 	if (input.native_hash_join_build_sink_count > 0 && input.native_join_stage_count == 0 &&
-	    input.native_aggregate_stage_count == 0 && input.native_sort_stage_count == 0 &&
-	    input.generated_distinct_count_pointer_aggregate_update_count == 0) {
+	    input.native_aggregate_stage_count == 0 && input.native_sort_stage_count == 0) {
 		return false;
 	}
 	return true;
+}
+
+static bool PhysicalRunnerHasGeneratedComputePrefix(const PhysicalRunnerCostInput &input) {
+	return input.generated_work_class != PhysicalRunnerGeneratedWorkClass::NONE &&
+	       input.generated_work_class != PhysicalRunnerGeneratedWorkClass::PROJECTION_GLUE &&
+	       input.generated_stage_count > 0;
+}
+
+static bool PhysicalRunnerHashJoinBuildSinkProtocolPenaltyApplies(const PhysicalRunnerCostInput &input) {
+	if (input.native_hash_join_build_sink_count == 0) {
+		return false;
+	}
+	return !PhysicalRunnerHasGeneratedComputePrefix(input) || input.native_join_stage_count > 0 ||
+	       input.native_aggregate_stage_count > 0 || input.native_sort_stage_count > 0;
 }
 
 static idx_t PhysicalRunnerCostedGeneratedBackendStageCount(const PhysicalRunnerCostInput &input) {
@@ -547,17 +547,18 @@ static void PhysicalRunnerComputeWorkComponents(const PhysicalRunnerCostInput &i
 		profile.stateful_protocol_penalty = AddCost(
 		    profile.stateful_protocol_penalty, MultiplyCost(native_join_stage_count, NATIVE_JOIN_PROTOCOL_PENALTY));
 	}
-	if (input.native_hash_join_build_sink_count > 0) {
+	if (PhysicalRunnerHashJoinBuildSinkProtocolPenaltyApplies(input)) {
 		const auto native_hash_join_build_sink_count = SaturatingCostCast(input.native_hash_join_build_sink_count);
 		profile.stateful_protocol_penalty =
 		    AddCost(profile.stateful_protocol_penalty,
 		            MultiplyCost(native_hash_join_build_sink_count, NATIVE_HASH_JOIN_BUILD_SINK_PROTOCOL_PENALTY));
 	}
-	if (input.blocked_hash_aggregate_lookup_count > 0) {
+	if (input.unfused_mark_filter_aggregate_count > 0) {
+		profile.unfused_mark_filter_aggregate_penalty =
+		    DoubleCost(MultiplyCost(SaturatingCostCast(input.unfused_mark_filter_aggregate_count),
+		                            SaturatingCostCast(parameters.generated_stage_benefit)));
 		profile.stateful_protocol_penalty =
-		    AddCost(profile.stateful_protocol_penalty,
-		            MultiplyCost(SaturatingCostCast(input.blocked_hash_aggregate_lookup_count),
-		                         BLOCKED_HASH_AGGREGATE_LOOKUP_PENALTY));
+		    AddCost(profile.stateful_protocol_penalty, profile.unfused_mark_filter_aggregate_penalty);
 	}
 	if (parameters.vectorized_parallelism > 1 && input.native_grouped_aggregate_stage_count > 0) {
 		const auto grouped_aggregate_parallel_penalty =
@@ -566,12 +567,6 @@ static void PhysicalRunnerComputeWorkComponents(const PhysicalRunnerCostInput &i
 		profile.stateful_protocol_penalty =
 		    AddCost(profile.stateful_protocol_penalty,
 		            MultiplyCost(grouped_aggregate_parallel_penalty, NATIVE_GROUPED_AGGREGATE_PARALLELISM_PENALTY));
-	}
-	if (input.native_distinct_count_pointer_aggregate_stage_count > 0) {
-		profile.stateful_protocol_penalty =
-		    AddCost(profile.stateful_protocol_penalty,
-		            MultiplyCost(SaturatingCostCast(input.native_distinct_count_pointer_aggregate_stage_count),
-		                         NATIVE_DISTINCT_COUNT_POINTER_AGGREGATE_PENALTY));
 	}
 	auto work = profile.generated_expression_work;
 	work = AddCost(work, profile.generated_stage_work);
@@ -609,6 +604,19 @@ static int64_t PhysicalRunnerRequiredBenefit(const PhysicalRunnerCostProfile &pr
 	return required_benefit;
 }
 
+static int64_t PhysicalRunnerParallelPerBatchWorkFloor(const PhysicalRunnerCostParameters &parameters) {
+	if (parameters.vectorized_parallelism <= 1) {
+		return 0;
+	}
+	return MultiplyCost(SaturatingCostCast(parameters.vectorized_parallelism),
+	                    SaturatingCostCast(parameters.native_operator_stage_benefit));
+}
+
+static bool PhysicalRunnerParallelPerBatchWorkFloorApplies(const PhysicalRunnerCostInput &input) {
+	return input.native_join_stage_count > 0 || input.native_aggregate_stage_count > 0 ||
+	       input.native_sort_stage_count > 0;
+}
+
 static void PhysicalRunnerInitializeProfile(const PhysicalRunnerCostInput &input, const PhysicalRunnerShapeFacts &facts,
                                             const PhysicalRunnerAdmission &admission,
                                             PhysicalRunnerCostProfile &profile) {
@@ -621,14 +629,11 @@ static void PhysicalRunnerInitializeProfile(const PhysicalRunnerCostInput &input
 	profile.generated_backend_stage_count = SaturatingCostCast(input.generated_backend_stage_count);
 	profile.materialization_elision_count = SaturatingCostCast(input.materialization_elision_count);
 	profile.materialization_source_append_count = SaturatingCostCast(input.materialization_source_append_count);
+	profile.unfused_mark_filter_aggregate_count = SaturatingCostCast(input.unfused_mark_filter_aggregate_count);
 	profile.native_join_stage_count = SaturatingCostCast(input.native_join_stage_count);
 	profile.native_hash_join_build_sink_count = SaturatingCostCast(input.native_hash_join_build_sink_count);
 	profile.native_aggregate_stage_count = SaturatingCostCast(input.native_aggregate_stage_count);
 	profile.native_grouped_aggregate_stage_count = SaturatingCostCast(input.native_grouped_aggregate_stage_count);
-	profile.native_distinct_count_pointer_aggregate_stage_count =
-	    SaturatingCostCast(input.native_distinct_count_pointer_aggregate_stage_count);
-	profile.generated_distinct_count_pointer_aggregate_update_count =
-	    SaturatingCostCast(input.generated_distinct_count_pointer_aggregate_update_count);
 	profile.native_sort_stage_count = SaturatingCostCast(input.native_sort_stage_count);
 	profile.source_filter_count = SaturatingCostCast(input.source_filter_count);
 	profile.full_pipeline = input.full_pipeline;
@@ -645,7 +650,8 @@ struct PhysicalRunnerSelectionAnalysis {
 static PhysicalRunnerSelectionAnalysis PhysicalRunnerAnalyzeSelection(const PhysicalRunnerCostInput &input,
                                                                       const PhysicalRunnerAdmission &admission,
                                                                       const PhysicalRunnerCostProfile &profile,
-                                                                      bool runner_available) {
+                                                                      bool runner_available,
+                                                                      int64_t parallel_per_batch_work_floor) {
 	PhysicalRunnerSelectionAnalysis result;
 	if (!runner_available) {
 		result.selection_reason = "rejected_runner_unavailable";
@@ -653,6 +659,11 @@ static PhysicalRunnerSelectionAnalysis PhysicalRunnerAnalyzeSelection(const Phys
 	}
 	result.selection_reason = PhysicalRunnerRejectedAcceleratedWorkReason(input, admission, profile);
 	if (!result.selection_reason.empty()) {
+		return result;
+	}
+	if (PhysicalRunnerParallelPerBatchWorkFloorApplies(input) && parallel_per_batch_work_floor > 0 &&
+	    profile.saved_work_per_batch < parallel_per_batch_work_floor) {
+		result.selection_reason = "rejected_parallel_per_batch_work_floor";
 		return result;
 	}
 	if (profile.accelerated_runner_benefit <= profile.required_benefit) {
@@ -692,10 +703,12 @@ PhysicalRunnerCostProfile DuckDBCostModel::SelectPhysicalRunner(const PhysicalRu
 	gpu_profile.net_benefit = SubtractCost(
 	    SubtractCost(gpu_profile.accelerated_runner_benefit, gpu_profile.startup_cost), gpu_profile.gpu_transfer_cost);
 
+	const auto compiled_parallel_per_batch_work_floor = PhysicalRunnerParallelPerBatchWorkFloor(parameters);
 	auto compiled_selection = PhysicalRunnerAnalyzeSelection(input, compiled_admission, compiled_profile,
-	                                                         parameters.compiled_vectorized_runner_available);
+	                                                         parameters.compiled_vectorized_runner_available,
+	                                                         compiled_parallel_per_batch_work_floor);
 	auto gpu_selection =
-	    PhysicalRunnerAnalyzeSelection(input, gpu_admission, gpu_profile, parameters.gpu_runner_available);
+	    PhysicalRunnerAnalyzeSelection(input, gpu_admission, gpu_profile, parameters.gpu_runner_available, 0);
 	const bool compiled_selected = compiled_selection.selected;
 	const bool gpu_selected = gpu_selection.selected;
 

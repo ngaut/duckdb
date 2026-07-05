@@ -183,6 +183,7 @@ static string ExecutionRegionProfileStageCosts(const PhysicalRunnerCostProfile &
 	result += ",sort:" + std::to_string(cost.native_sort_stage_count);
 	result += ",mat:" + std::to_string(cost.materialization_elision_count);
 	result += ",source_append:" + std::to_string(cost.materialization_source_append_count);
+	result += ",unfused_mark_filter_agg:" + std::to_string(cost.unfused_mark_filter_aggregate_count);
 	result += ",full:";
 	result += cost.full_pipeline ? "true" : "false";
 	result += ",scope:";
@@ -207,6 +208,7 @@ static string ExecutionRegionProfileCostComponents(const PhysicalRunnerCostProfi
 	result += ",native:" + std::to_string(cost.native_operator_work);
 	result += ",mat:" + std::to_string(cost.materialization_elision_work);
 	result += ",source_append_penalty:" + std::to_string(cost.materialization_source_append_penalty);
+	result += ",unfused_mark_filter_agg_penalty:" + std::to_string(cost.unfused_mark_filter_aggregate_penalty);
 	result += ",full:" + std::to_string(cost.full_pipeline_work);
 	result += ",protocol_penalty:" + std::to_string(cost.stateful_protocol_penalty);
 	result += ",gpu_transfer:" + std::to_string(cost.gpu_transfer_cost);
@@ -242,8 +244,7 @@ static string FirstExecutionRegionProfileReasonToken(const string &reason) {
 }
 
 static string ExecutionRegionProfileReason(const string &reason) {
-	for (const auto marker : {":boundary:", "native_hash_aggregate_lookup_blocker=", "candidate-builder-blocked:",
-	                          "region-lowering-blocked:"}) {
+	for (const auto marker : {":boundary:", "candidate-builder-blocked:", "region-lowering-blocked:"}) {
 		auto token = FindExecutionRegionProfileReasonToken(reason, marker);
 		if (!token.empty()) {
 			return token;
@@ -338,16 +339,14 @@ static void AddExecutionRegionEvent(QueryProfileResult &row, const ExecutionRegi
 		     {"runner_cost_materialization_elision_count", Time(event.runner_cost.materialization_elision_count)},
 	     {"runner_cost_materialization_source_append_count",
 	      Time(event.runner_cost.materialization_source_append_count)},
+	     {"runner_cost_unfused_mark_filter_aggregate_count",
+	      Time(event.runner_cost.unfused_mark_filter_aggregate_count)},
 	     {"runner_cost_native_join_stage_count", Time(event.runner_cost.native_join_stage_count)},
 		     {"runner_cost_native_hash_join_build_sink_count",
 		      Time(event.runner_cost.native_hash_join_build_sink_count)},
 		     {"runner_cost_native_aggregate_stage_count", Time(event.runner_cost.native_aggregate_stage_count)},
 		     {"runner_cost_native_grouped_aggregate_stage_count",
 		      Time(event.runner_cost.native_grouped_aggregate_stage_count)},
-		     {"runner_cost_native_distinct_count_pointer_aggregate_stage_count",
-		      Time(event.runner_cost.native_distinct_count_pointer_aggregate_stage_count)},
-		     {"runner_cost_generated_distinct_count_pointer_aggregate_update_count",
-		      Time(event.runner_cost.generated_distinct_count_pointer_aggregate_update_count)},
 		     {"runner_cost_native_sort_stage_count", Time(event.runner_cost.native_sort_stage_count)},
 	     {"runner_cost_full_pipeline", Value::BOOLEAN(event.runner_cost.full_pipeline)},
 	     {"runner_cost_input_scope", Text(PhysicalRunnerCostInputScopeToString(event.runner_cost.input_scope))},
@@ -364,6 +363,8 @@ static void AddExecutionRegionEvent(QueryProfileResult &row, const ExecutionRegi
 	     {"runner_cost_materialization_elision_work", Time(event.runner_cost.materialization_elision_work)},
 	     {"runner_cost_materialization_source_append_penalty",
 	      Time(event.runner_cost.materialization_source_append_penalty)},
+	     {"runner_cost_unfused_mark_filter_aggregate_penalty",
+	      Time(event.runner_cost.unfused_mark_filter_aggregate_penalty)},
 	     {"runner_cost_full_pipeline_work", Time(event.runner_cost.full_pipeline_work)},
 	     {"runner_cost_stateful_protocol_penalty", Time(event.runner_cost.stateful_protocol_penalty)},
 	     {"runner_cost_saved_work_per_batch", Time(event.runner_cost.saved_work_per_batch)},

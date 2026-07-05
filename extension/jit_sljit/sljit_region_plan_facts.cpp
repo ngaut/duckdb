@@ -120,6 +120,94 @@ static string SljitNativeRegionOpBoundaryBlocker(const SljitNativeRegionOpPlan &
 	       string(SljitNativeRegionOpKindName(op.kind));
 }
 
+static bool SljitRegionPlanBooleanType(const LogicalType &type) {
+	return type.id() == LogicalTypeId::BOOLEAN && type.InternalType() == PhysicalType::BOOL;
+}
+
+static bool SljitRegionPlanLocalSourceReferencesColumn(const vector<idx_t> &input_source_indices,
+                                                       idx_t local_source_index, idx_t column_index) {
+	if (input_source_indices.empty()) {
+		return local_source_index == column_index;
+	}
+	return local_source_index < input_source_indices.size() && input_source_indices[local_source_index] == column_index;
+}
+
+static bool SljitRegionPlanPredicateReferencesMarker(const SljitNativePredicate &predicate, idx_t marker_index) {
+	if (!SljitRegionPlanBooleanType(predicate.return_type)) {
+		return false;
+	}
+	switch (predicate.kind) {
+	case SljitNativePredicateKind::REFERENCE:
+		return predicate.source_index == marker_index;
+	case SljitNativePredicateKind::NOT:
+		return predicate.child && SljitRegionPlanPredicateReferencesMarker(*predicate.child, marker_index);
+	case SljitNativePredicateKind::CONJUNCTION:
+		for (auto &child : predicate.children) {
+			if (child && SljitRegionPlanPredicateReferencesMarker(*child, marker_index)) {
+				return true;
+			}
+		}
+		return false;
+	default:
+		return false;
+	}
+}
+
+static bool SljitRegionPlanExpressionTreeReferencesMarker(const ExecutionExpressionIR &node,
+                                                          const vector<idx_t> &input_source_indices,
+                                                          idx_t marker_index) {
+	if (!SljitRegionPlanBooleanType(node.return_type)) {
+		return false;
+	}
+	if (node.kind == ExecutionExpressionIRKind::REFERENCE) {
+		return SljitRegionPlanLocalSourceReferencesColumn(input_source_indices, node.ref_index, marker_index);
+	}
+	if (node.left && SljitRegionPlanExpressionTreeReferencesMarker(*node.left, input_source_indices, marker_index)) {
+		return true;
+	}
+	return node.right &&
+	       SljitRegionPlanExpressionTreeReferencesMarker(*node.right, input_source_indices, marker_index);
+}
+
+static bool SljitRegionPlanFilterReferencesMarkProbeMarker(const SljitNativeRegionOpPlan &hash_join_op,
+                                                           const SljitNativeRegionOpPlan &filter_op) {
+	if (hash_join_op.output_types.empty() || filter_op.kind != SljitNativeRegionOpKind::FILTER) {
+		return false;
+	}
+	const auto marker_index = hash_join_op.output_types.size() - 1;
+	if (!SljitRegionPlanBooleanType(hash_join_op.output_types[marker_index]) ||
+	    !SljitRegionPlanBooleanType(filter_op.filter.return_type)) {
+		return false;
+	}
+	auto &filter = filter_op.filter;
+	switch (filter.kind) {
+	case SljitNativeRegionExpressionKind::REFERENCE:
+		return filter.source_index == marker_index;
+	case SljitNativeRegionExpressionKind::PREDICATE:
+		return filter.predicate && SljitRegionPlanPredicateReferencesMarker(*filter.predicate, marker_index);
+	case SljitNativeRegionExpressionKind::EXPRESSION_TREE:
+	case SljitNativeRegionExpressionKind::TYPED_EXPRESSION_TREE:
+		return filter.expression_tree &&
+		       SljitRegionPlanExpressionTreeReferencesMarker(*filter.expression_tree,
+		                                                     filter.expression_tree_source_indices, marker_index);
+	default:
+		return false;
+	}
+}
+
+static bool SljitRegionPlanHasWeakMarkFilterProbe(const vector<SljitNativeRegionOpPlan> &ops, idx_t op_idx) {
+	if (op_idx + 1 >= ops.size() || ops[op_idx].kind != SljitNativeRegionOpKind::HASH_JOIN_PROBE) {
+		return false;
+	}
+	auto &hash_join_op = ops[op_idx];
+	auto &plan = hash_join_op.hash_join_probe;
+	if (plan.output_mode != ExecutionHashJoinProbeOutputMode::MARK_PROBE || plan.perfect_hash_probe ||
+	    plan.residual_predicate || plan.equality_key_count <= 1) {
+		return false;
+	}
+	return SljitRegionPlanFilterReferencesMarkProbeMarker(hash_join_op, ops[op_idx + 1]);
+}
+
 void DisableSljitRegionFlatNullableFastPath(SljitNativeRegionPlan &region) {
 	auto set_expression = [&](SljitNativeRegionExpressionPlan &expr) {
 		expr.emit_flat_nullable_fast_path = false;
@@ -165,7 +253,11 @@ void AddSljitNativeRegionCapabilityFacts(ExecutionRegionLoweringPlan &lowering_p
 	for (auto not_null : native_region.source_not_null) {
 		lowering_plan.AddBackendSourceValidityCapability(not_null);
 	}
-	for (auto &op : native_region.ops) {
+	for (idx_t op_idx = 0; op_idx < native_region.ops.size(); op_idx++) {
+		auto &op = native_region.ops[op_idx];
+		if (SljitRegionPlanHasWeakMarkFilterProbe(native_region.ops, op_idx)) {
+			lowering_plan.AddBackendWeakAcceleratedWorkCapability();
+		}
 		switch (op.kind) {
 		case SljitNativeRegionOpKind::HASH_JOIN_PROBE:
 			lowering_plan.AddBackendHashJoinProbeCapability(

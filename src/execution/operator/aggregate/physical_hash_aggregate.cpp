@@ -8,10 +8,8 @@
 #include "duckdb/common/types/row/tuple_data_row_location_remap.hpp"
 #include "duckdb/common/vector_operations/vector_operations.hpp"
 #include "duckdb/execution/aggregate_hashtable.hpp"
-#include "duckdb/execution/execution_region_settings.hpp"
 #include "duckdb/execution/execution_operator_runtime.hpp"
 #include "duckdb/execution/operator/aggregate/distinct_aggregate_data.hpp"
-#include "duckdb/execution/operator/aggregate/distinct_count_pointer_set.hpp"
 #include "duckdb/main/client_context.hpp"
 #include "duckdb/parallel/base_pipeline_event.hpp"
 #include "duckdb/parallel/interrupt.hpp"
@@ -29,8 +27,7 @@ HashAggregateGroupingData::HashAggregateGroupingData(GroupingSet &grouping_set_p
                                                      const GroupedAggregateData &grouped_aggregate_data,
                                                      unique_ptr<DistinctAggregateCollectionInfo> &info,
                                                      TupleDataValidityType group_validity,
-                                                     TupleDataValidityType distinct_validity,
-                                                     DistinctAggregateKeyStrategy distinct_key_strategy)
+                                                     TupleDataValidityType distinct_validity)
     : table_data(grouping_set_p, grouped_aggregate_data, group_validity) {
 	if (info) {
 		auto nested_validity = group_validity == TupleDataValidityType::CANNOT_HAVE_NULL_VALUES &&
@@ -38,7 +35,7 @@ HashAggregateGroupingData::HashAggregateGroupingData(GroupingSet &grouping_set_p
 		                           ? TupleDataValidityType::CANNOT_HAVE_NULL_VALUES
 		                           : TupleDataValidityType::CAN_HAVE_NULL_VALUES;
 		distinct_data = make_uniq<DistinctAggregateData>(*info, grouping_set_p, &grouped_aggregate_data.groups,
-		                                                 nested_validity, distinct_key_strategy);
+		                                                 nested_validity);
 	}
 }
 
@@ -49,7 +46,7 @@ bool HashAggregateGroupingData::HasDistinct() const {
 HashAggregateGroupingGlobalState::HashAggregateGroupingGlobalState(const HashAggregateGroupingData &data,
                                                                    ClientContext &context) {
 	table_state = data.table_data.GetGlobalSinkState(context);
-	if (data.HasDistinct() && !data.distinct_data->UsesGroupStatePointerKeys()) {
+	if (data.HasDistinct()) {
 		distinct_state = make_uniq<DistinctAggregateState>(*data.distinct_data, context);
 	}
 }
@@ -62,11 +59,6 @@ HashAggregateGroupingLocalState::HashAggregateGroupingLocalState(const PhysicalH
 		return;
 	}
 	auto &distinct_data = *data.distinct_data;
-	if (distinct_data.UsesGroupStatePointerKeys()) {
-		distinct_count_scratch = make_uniq<DistinctCountPointerScratch>();
-		return;
-	}
-
 	auto &distinct_indices = op.distinct_collection_info->Indices();
 	D_ASSERT(!distinct_indices.empty());
 
@@ -106,54 +98,7 @@ static vector<LogicalType> CreateGroupChunkTypes(vector<unique_ptr<Expression>> 
 	return types;
 }
 
-static bool HashAggregateCanUseDistinctCountPointerKeys(
-    const GroupedAggregateData &grouped_aggregate_data, const unique_ptr<DistinctAggregateCollectionInfo> &info,
-    idx_t grouping_count, const unsafe_vector<idx_t> &non_distinct_filter, const unsafe_vector<idx_t> &distinct_filter,
-    const reference_map_t<const Expression, size_t> &filter_indexes) {
-	if (!info || grouping_count != 1 || grouped_aggregate_data.groups.empty() ||
-	    grouped_aggregate_data.aggregates.size() != 1 || distinct_filter.size() != 1 || !non_distinct_filter.empty() ||
-	    !filter_indexes.empty()) {
-		return false;
-	}
-	if (grouped_aggregate_data.filter_count != 0 || grouped_aggregate_data.payload_types.size() != 1) {
-		return false;
-	}
-	auto &aggregate = grouped_aggregate_data.aggregates[0]->Cast<BoundAggregateExpression>();
-	if (!aggregate.IsDistinct() || aggregate.GetFilter() || aggregate.GetOrderBys() ||
-	    aggregate.GetChildren().size() != 1) {
-		return false;
-	}
-	auto &function = aggregate.Function();
-	auto &child = aggregate.GetChildren()[0];
-	return function.HasPrimitiveUpdateABI() &&
-	       function.GetPrimitiveUpdateABI().kind == AggregatePrimitiveUpdateKind::COUNT &&
-	       child->GetExpressionClass() == ExpressionClass::BOUND_REF &&
-	       DistinctCountPointerPayloadTypeSupported(child->GetReturnType().InternalType());
-}
-
-static bool HashAggregateCanPlanDistinctCountPointerKeys(ClientContext &context) {
-	return ExecutionRegionSettings::Enabled(context) &&
-	       ExecutionRegionSettings::Policy(context) != ExecutionRegionPolicyMode::OFF;
-}
-
-static bool HashAggregateUsesDistinctCountPointerKeys(const PhysicalHashAggregate &op) {
-	return op.groupings.size() == 1 && op.groupings[0].distinct_data &&
-	       op.groupings[0].distinct_data->UsesGroupStatePointerKeys();
-}
-
-static bool TrySinkDistinctCountPointerKeys(ExecutionContext &context, const PhysicalHashAggregate &op,
-                                            const HashAggregateGroupingData &grouping_data,
-                                            HashAggregateGroupingLocalState &grouping_lstate,
-                                            OperatorSinkInput &sink_input, DataChunk &input);
-static void BindHashAggregateDistinctCountPointerUpdate(const PhysicalHashAggregate &op,
-                                                        const HashAggregateGroupingData &grouping_data,
-                                                        HashAggregateGroupingLocalState &grouping_lstate,
-                                                        ExecutionDistinctCountPointerUpdateBinding &binding);
-
 bool PhysicalHashAggregate::CanSkipRegularSink() const {
-	if (HashAggregateUsesDistinctCountPointerKeys(*this)) {
-		return false;
-	}
 	if (!filter_indexes.empty()) {
 		// If we have filters, we can't skip the regular sink, because we might lose groups otherwise.
 		return false;
@@ -239,112 +184,11 @@ PhysicalHashAggregate::PhysicalHashAggregate(PhysicalPlan &physical_plan, Client
 	}
 
 	distinct_collection_info = DistinctAggregateCollectionInfo::Create(grouped_aggregate_data.aggregates);
-	const auto use_distinct_count_pointer_keys =
-	    HashAggregateCanPlanDistinctCountPointerKeys(context) &&
-	    HashAggregateCanUseDistinctCountPointerKeys(grouped_aggregate_data, distinct_collection_info,
-	                                                grouping_sets.size(), non_distinct_filter, distinct_filter,
-	                                                filter_indexes);
-	const auto distinct_key_strategy = use_distinct_count_pointer_keys
-	                                       ? DistinctAggregateKeyStrategy::GROUP_STATE_POINTER
-	                                       : DistinctAggregateKeyStrategy::GROUP_KEYS;
-
 	for (idx_t i = 0; i < grouping_sets.size(); i++) {
 		groupings.emplace_back(grouping_sets[i], grouped_aggregate_data, distinct_collection_info, group_validity,
-		                       distinct_validity, distinct_key_strategy);
+		                       distinct_validity);
 	}
 }
-
-class DistinctCountPointerLocalRowMoveState : public TupleDataRowLocationRemap {
-public:
-	explicit DistinctCountPointerLocalRowMoveState(DistinctCountPointerSet &distinct_set_p)
-	    : distinct_set(distinct_set_p) {
-	}
-
-	void Remap(Vector &source_addresses, const SelectionVector &source_sel, Vector &target_addresses,
-	           idx_t count) override {
-		if (count == 0) {
-			return;
-		}
-		source_addresses.Flatten();
-		target_addresses.Flatten();
-		const auto source_data = FlatVector::GetData<uintptr_t>(source_addresses);
-		const auto target_data = FlatVector::GetData<uintptr_t>(target_addresses);
-		for (idx_t row_idx = 0; row_idx < count; row_idx++) {
-			state_pointer_mappings.emplace_back(source_data[source_sel.get_index(row_idx)], target_data[row_idx]);
-		}
-	}
-
-	void Flush() override {
-		distinct_set.RemapStatePointers(state_pointer_mappings);
-		state_pointer_mappings.clear();
-	}
-
-private:
-	DistinctCountPointerSet &distinct_set;
-	vector<pair<uintptr_t, uintptr_t>> state_pointer_mappings;
-};
-
-class DistinctCountPointerGlobalMergeState : public TupleDataRowLocationRemap {
-public:
-	void AddLocalSet(unique_ptr<DistinctCountPointerSet> local_set) {
-		if (!local_set || local_set->GroupCount() == 0) {
-			return;
-		}
-		const annotated_lock_guard<annotated_mutex> guard {lock};
-		const auto set_index = local_sets.size();
-		if (state_value_offset == DConstants::INVALID_INDEX) {
-			state_value_offset = local_set->StateValueOffset();
-		} else if (state_value_offset != local_set->StateValueOffset()) {
-			throw InternalException("Distinct count pointer state offset changed during hash aggregate merge");
-		}
-		local_set->VisitStatePointers(
-		    [&](uintptr_t source_state_pointer) { source_state_to_set_index[source_state_pointer] = set_index; });
-		local_sets.emplace_back(std::move(local_set));
-	}
-
-	void Remap(Vector &source_addresses, const SelectionVector &source_sel, Vector &target_addresses,
-	           idx_t count) override {
-		if (count == 0) {
-			return;
-		}
-		source_addresses.Flatten();
-		target_addresses.Flatten();
-		const auto source_data = FlatVector::GetData<uintptr_t>(source_addresses);
-		const auto target_data = FlatVector::GetData<uintptr_t>(target_addresses);
-		const annotated_lock_guard<annotated_mutex> guard {lock};
-		for (idx_t row_idx = 0; row_idx < count; row_idx++) {
-			const auto source_state_pointer = source_data[source_sel.get_index(row_idx)];
-			auto entry = source_state_to_set_index.find(source_state_pointer);
-			if (entry == source_state_to_set_index.end()) {
-				continue;
-			}
-			auto &local_set = *local_sets[entry->second];
-			if (!merged_set) {
-				merged_set = make_uniq<DistinctCountPointerSet>();
-			}
-			const auto target_state_pointer = target_data[row_idx];
-			if (!local_set.MergeStatePayloadsTo(*merged_set, source_state_pointer, target_state_pointer)) {
-				throw InternalException("Distinct count pointer state remap failed during hash aggregate merge");
-			}
-			source_state_to_set_index.erase(entry);
-		}
-	}
-
-	void Reset() {
-		const annotated_lock_guard<annotated_mutex> guard {lock};
-		local_sets.clear();
-		source_state_to_set_index.clear();
-		merged_set.reset();
-		state_value_offset = DConstants::INVALID_INDEX;
-	}
-
-private:
-	annotated_mutex lock;
-	vector<unique_ptr<DistinctCountPointerSet>> local_sets;
-	unordered_map<uintptr_t, idx_t> source_state_to_set_index;
-	unique_ptr<DistinctCountPointerSet> merged_set;
-	idx_t state_value_offset = DConstants::INVALID_INDEX;
-};
 
 //===--------------------------------------------------------------------===//
 // Sink
@@ -353,15 +197,9 @@ class HashAggregateGlobalSinkState : public GlobalSinkState {
 public:
 	HashAggregateGlobalSinkState(const PhysicalHashAggregate &op, ClientContext &context) : op(op) {
 		grouping_states.reserve(op.groupings.size());
-		distinct_count_pointer_merge_states.reserve(op.groupings.size());
 		for (idx_t i = 0; i < op.groupings.size(); i++) {
 			auto &grouping = op.groupings[i];
 			grouping_states.emplace_back(grouping, context);
-			if (grouping.HasDistinct() && grouping.distinct_data->UsesGroupStatePointerKeys()) {
-				distinct_count_pointer_merge_states.emplace_back(make_uniq<DistinctCountPointerGlobalMergeState>());
-			} else {
-				distinct_count_pointer_merge_states.emplace_back(nullptr);
-			}
 		}
 		vector<LogicalType> filter_types;
 		for (auto &aggr : op.grouped_aggregate_data.aggregates) {
@@ -379,7 +217,6 @@ public:
 
 	const PhysicalHashAggregate &op;
 	vector<HashAggregateGroupingGlobalState> grouping_states;
-	vector<unique_ptr<DistinctCountPointerGlobalMergeState>> distinct_count_pointer_merge_states;
 	vector<LogicalType> payload_types;
 	//! Whether or not the aggregate is finished
 	bool finished = false;
@@ -397,12 +234,6 @@ public:
 				continue;
 			}
 			auto &distinct_data = *grouping.distinct_data;
-			if (distinct_data.UsesGroupStatePointerKeys()) {
-				if (distinct_count_pointer_merge_states[grouping_idx]) {
-					distinct_count_pointer_merge_states[grouping_idx]->Reset();
-				}
-				continue;
-			}
 			auto &distinct_state = *grouping_state.distinct_state;
 			for (idx_t table_idx = 0; table_idx < distinct_data.radix_tables.size(); table_idx++) {
 				auto &radix_table = distinct_data.radix_tables[table_idx];
@@ -464,12 +295,6 @@ public:
 				continue;
 			}
 			auto &distinct_data = *grouping.distinct_data;
-			if (distinct_data.UsesGroupStatePointerKeys()) {
-				if (grouping_state.distinct_count_scratch) {
-					grouping_state.distinct_count_scratch->Reset();
-				}
-				continue;
-			}
 			auto &distinct_gstate = *grouping_gstate.distinct_state;
 			for (idx_t table_idx = 0; table_idx < distinct_data.radix_tables.size(); table_idx++) {
 				auto &radix_table = distinct_data.radix_tables[table_idx];
@@ -505,29 +330,6 @@ private:
 	InterruptState &interrupt_state;
 };
 
-class HashAggregateDistinctCountPointerUpdateState : public ExecutionDistinctCountPointerUpdateState {
-public:
-	explicit HashAggregateDistinctCountPointerUpdateState(DistinctCountPointerSet &distinct_set_p)
-	    : distinct_set(distinct_set_p) {
-	}
-
-	bool AddPayloads(Vector &state_pointers, Vector &payload, idx_t count, idx_t state_value_offset) override {
-		return distinct_set.Add(state_pointers, payload, count, state_value_offset);
-	}
-
-	bool UseGlobalPayloadSet(idx_t expected_payload_count) override {
-		return distinct_set.UseGlobalPayloadSet(expected_payload_count);
-	}
-
-	bool AddSelectedPayloads(const uintptr_t *state_pointers, const sel_t *state_sel, const sel_t *payload_sel,
-	                         Vector &payload, idx_t count, idx_t state_value_offset) override {
-		return distinct_set.AddSelected(state_pointers, state_sel, payload_sel, payload, count, state_value_offset);
-	}
-
-private:
-	DistinctCountPointerSet &distinct_set;
-};
-
 class HashAggregateStateAddressState : public ExecutionGroupedAggregateStateAddressState {
 public:
 	HashAggregateStateAddressState(ExecutionContext &context_p, const PhysicalHashAggregate &op_p,
@@ -552,13 +354,9 @@ private:
 		return !op.distinct_collection_info && HasSingleGroupingState();
 	}
 
-	bool CanResolveDistinctCountPointerAddresses(const ExecutionRegionSinkInfo &sink_info) const {
-		return HasSingleGroupingState() && op.distinct_collection_info &&
-		       sink_info.aggregate_contract.distinct_count_pointer_keys;
-	}
-
 	bool CanFindRowPointerGroupStateTargets(const ExecutionRegionSinkInfo &sink_info) const {
-		return CanUseSingleGroupingState() || CanResolveDistinctCountPointerAddresses(sink_info);
+		(void)sink_info;
+		return CanUseSingleGroupingState();
 	}
 
 	void RequireSingleGroupingState(const char *unsupported_message, const char *shape_message) const {
@@ -644,7 +442,7 @@ public:
 	    optional_ptr<ExecutionOperatorStageRecorder> recorder = nullptr, bool finish = true,
 	    optional_ptr<Vector> precomputed_hashes = nullptr,
 	    optional_ptr<const ExecutionDenseGroupDomain> dense_domain = nullptr) override {
-		if (!CanUseSingleGroupingState() && !CanResolveDistinctCountPointerAddresses(sink_info)) {
+		if (!CanUseSingleGroupingState()) {
 			return false;
 		}
 		auto single_grouping = GetSingleGroupingSinkState();
@@ -659,7 +457,7 @@ public:
 	    optional_ptr<ExecutionOperatorStageRecorder> recorder = nullptr, bool finish = true,
 	    optional_ptr<Vector> precomputed_hashes = nullptr,
 	    optional_ptr<const ExecutionDenseGroupDomain> dense_domain = nullptr) override {
-		if (!CanUseSingleGroupingState() && !CanResolveDistinctCountPointerAddresses(sink_info)) {
+		if (!CanUseSingleGroupingState()) {
 			return false;
 		}
 		auto single_grouping = GetSingleGroupingSinkState();
@@ -736,42 +534,10 @@ public:
 		                                                                       sink_info, addresses, recorder, finish);
 	}
 
-	bool TryResolveDistinctCountPointerAddresses(DataChunk &input,
-	                                             const ExecutionRegionSinkInfo &state_address_sink_info,
-	                                             Vector &addresses,
-	                                             optional_ptr<ExecutionOperatorStageRecorder> recorder = nullptr,
-	                                             bool finish = true) override {
-		(void)finish;
-		if (!CanResolveDistinctCountPointerAddresses(state_address_sink_info)) {
-			return false;
-		}
-		auto single_grouping = GetSingleGroupingSinkState();
-		if (single_grouping.grouping.table_data.TryResolveNewGroupAddresses(
-		        context, input, single_grouping.input, state_address_sink_info, addresses, recorder, false)) {
-			return true;
-		}
-		single_grouping.grouping.table_data.ResolveStateAddresses(context, input, single_grouping.input, addresses,
-		                                                          recorder);
-		addresses.Flatten();
-		return true;
-	}
-
 	void FinishStateUpdates() override {
 		RequireSingleGroupingStateShape("execution region hash aggregate state update requires one grouping state");
 		auto single_grouping = GetSingleGroupingSinkState();
-		unique_ptr<DistinctCountPointerLocalRowMoveState> local_row_move_state;
-		if (HashAggregateUsesDistinctCountPointerKeys(op) && local_state.grouping_states[0].distinct_count_scratch &&
-		    local_state.grouping_states[0].distinct_count_scratch->distinct_set) {
-			local_row_move_state = make_uniq<DistinctCountPointerLocalRowMoveState>(
-			    *local_state.grouping_states[0].distinct_count_scratch->distinct_set);
-		}
-		single_grouping.grouping.table_data.FinishStateUpdates(
-		    context, single_grouping.input,
-		    local_row_move_state ? optional_ptr<TupleDataRowLocationRemap>(*local_row_move_state)
-		                         : optional_ptr<TupleDataRowLocationRemap>());
-		if (local_row_move_state) {
-			local_row_move_state->Flush();
-		}
+		single_grouping.grouping.table_data.FinishStateUpdates(context, single_grouping.input);
 	}
 
 private:
@@ -996,8 +762,7 @@ SinkResultType PhysicalHashAggregate::Sink(ExecutionContext &context, DataChunk 
 	auto &local_state = input.local_state.Cast<HashAggregateLocalSinkState>();
 	auto &global_state = input.global_state.Cast<HashAggregateGlobalSinkState>();
 
-	const auto use_distinct_count_pointer_keys = HashAggregateUsesDistinctCountPointerKeys(*this);
-	if (distinct_collection_info && !use_distinct_count_pointer_keys) {
+	if (distinct_collection_info) {
 		SinkDistinct(context, chunk, input);
 	}
 
@@ -1043,12 +808,6 @@ SinkResultType PhysicalHashAggregate::Sink(ExecutionContext &context, DataChunk 
 
 		auto &grouping = groupings[i];
 		auto &table = grouping.table_data;
-		if (use_distinct_count_pointer_keys) {
-			if (!TrySinkDistinctCountPointerKeys(context, *this, grouping, grouping_local_state, sink_input, chunk)) {
-				throw InternalException("count distinct pointer-key sink failed");
-			}
-			continue;
-		}
 		table.Sink(context, chunk, sink_input, aggregate_input_chunk, non_distinct_filter);
 	}
 
@@ -1078,14 +837,8 @@ bool PhysicalHashAggregate::BindExecutionSink(ExecutionContext &context, DataChu
 	binding.aggregate_update.grouped_state.state = make_shared_ptr<HashAggregateStateAddressState>(
 	    context, *this, global_state, local_state, sink_input.interrupt_state);
 	binding.aggregate_update.grouped_state.aggregate_state_offsets = sink_info.aggregate_contract.grouped_state_offsets;
-	groupings[0].table_data.GetExecutionHashAggregateLookupLayout(
-	    binding.aggregate_update.grouped_state.hash_lookup_layout);
 	binding.aggregate_update.grouped_state.blocker.clear();
 	binding.aggregate_update.primitive = BuildHashAggregatePrimitiveUpdateBinding(*this, sink_info);
-	if (HashAggregateUsesDistinctCountPointerKeys(*this)) {
-		BindHashAggregateDistinctCountPointerUpdate(*this, groupings[0], local_state.grouping_states[0],
-		                                            binding.aggregate_update.distinct_count_pointer);
-	}
 	binding.aggregate_update.blocker.clear();
 	binding.blocker.clear();
 	return true;
@@ -1098,7 +851,7 @@ void PhysicalHashAggregate::CombineDistinct(ExecutionContext &context, OperatorS
 	auto &global_sink = input.global_state.Cast<HashAggregateGlobalSinkState>();
 	auto &sink = input.local_state.Cast<HashAggregateLocalSinkState>();
 
-	if (!distinct_collection_info || HashAggregateUsesDistinctCountPointerKeys(*this)) {
+	if (!distinct_collection_info) {
 		return;
 	}
 	for (idx_t i = 0; i < groupings.size(); i++) {
@@ -1138,28 +891,7 @@ SinkCombineResultType PhysicalHashAggregate::Combine(ExecutionContext &context, 
 
 		auto &grouping = groupings[i];
 		auto &table = grouping.table_data;
-		unique_ptr<DistinctCountPointerLocalRowMoveState> local_row_move_state;
-		if (grouping.HasDistinct() && grouping.distinct_data->UsesGroupStatePointerKeys() &&
-		    grouping_lstate.distinct_count_scratch && grouping_lstate.distinct_count_scratch->distinct_set) {
-			local_row_move_state =
-			    make_uniq<DistinctCountPointerLocalRowMoveState>(*grouping_lstate.distinct_count_scratch->distinct_set);
-		}
-		table.Combine(context, *grouping_gstate.table_state, *grouping_lstate.table_state,
-		              local_row_move_state ? optional_ptr<TupleDataRowLocationRemap>(*local_row_move_state)
-		                                   : optional_ptr<TupleDataRowLocationRemap>());
-		if (local_row_move_state) {
-			local_row_move_state->Flush();
-		}
-		if (grouping.HasDistinct() && grouping.distinct_data->UsesGroupStatePointerKeys()) {
-			auto &merge_state = gstate.distinct_count_pointer_merge_states[i];
-			if (!merge_state) {
-				throw InternalException("Distinct count pointer aggregate is missing global merge state");
-			}
-			if (grouping_lstate.distinct_count_scratch && grouping_lstate.distinct_count_scratch->distinct_set) {
-				merge_state->AddLocalSet(std::move(grouping_lstate.distinct_count_scratch->distinct_set));
-				grouping_lstate.distinct_count_scratch->Reset();
-			}
-		}
+		table.Combine(context, *grouping_gstate.table_state, *grouping_lstate.table_state);
 	}
 
 	return SinkCombineResultType::FINISHED;
@@ -1327,7 +1059,6 @@ static ExecutionRegionSinkInfo BuildDistinctCountFinalizeSinkInfo(idx_t aggregat
 	result.kind = ExecutionRegionSinkKind::HASH_AGGREGATE_UPDATE;
 	result.aggregate_contract.kind = ExecutionRegionAggregateOperatorKind::HASH;
 	result.aggregate_contract.aggregate_count = 1;
-	result.aggregate_contract.distinct_count_pointer_keys = true;
 	result.aggregate_contract.grouped_state_layout_ready = true;
 	result.aggregate_contract.native_grouped_state_contract.status = ExecutionRegionStateContractStatus::READY;
 	result.aggregate_contract.grouped_state_offsets.resize(aggregate_index + 1, DConstants::INVALID_INDEX);
@@ -1348,46 +1079,6 @@ static ExecutionRegionSinkInfo BuildDistinctCountFinalizeSinkInfo(idx_t aggregat
 	return result;
 }
 
-static void BindHashAggregateDistinctCountPointerUpdate(const PhysicalHashAggregate &op,
-                                                        const HashAggregateGroupingData &grouping_data,
-                                                        HashAggregateGroupingLocalState &grouping_lstate,
-                                                        ExecutionDistinctCountPointerUpdateBinding &binding) {
-	binding = ExecutionDistinctCountPointerUpdateBinding();
-	if (!HashAggregateUsesDistinctCountPointerKeys(op)) {
-		binding.blocker = "hash-aggregate-distinct-count-pointer-contract-missing";
-		return;
-	}
-	if (op.grouped_aggregate_data.aggregates.size() != 1 || !grouping_data.distinct_data ||
-	    !grouping_data.distinct_data->UsesGroupStatePointerKeys()) {
-		binding.blocker = "hash-aggregate-distinct-count-pointer-shape";
-		return;
-	}
-	auto &aggregate = op.grouped_aggregate_data.aggregates[0]->Cast<BoundAggregateExpression>();
-	if (aggregate.GetChildren().size() != 1 ||
-	    aggregate.GetChildren()[0]->GetExpressionClass() != ExpressionClass::BOUND_REF) {
-		binding.blocker = "hash-aggregate-distinct-count-pointer-payload-reference";
-		return;
-	}
-	auto &child_ref = aggregate.GetChildren()[0]->Cast<BoundReferenceExpression>();
-	DistinctCountFinalizeFastPath fast_path;
-	if (!TryGetDistinctCountFinalizeFastPath(op, grouping_data, 0, child_ref.Index(), fast_path)) {
-		binding.blocker = "hash-aggregate-distinct-count-pointer-fast-path";
-		return;
-	}
-	if (!grouping_lstate.distinct_count_scratch || !grouping_lstate.distinct_count_scratch->distinct_set) {
-		binding.blocker = "hash-aggregate-distinct-count-pointer-scratch";
-		return;
-	}
-	binding.ready = true;
-	binding.payload_index = fast_path.payload_index;
-	binding.state_value_offset = fast_path.state_value_offset;
-	binding.state_addresses = &grouping_lstate.distinct_count_scratch->state_addresses;
-	binding.state = make_shared_ptr<HashAggregateDistinctCountPointerUpdateState>(
-	    *grouping_lstate.distinct_count_scratch->distinct_set);
-	binding.state_address_sink_info = BuildDistinctCountFinalizeSinkInfo(0, fast_path);
-	binding.blocker.clear();
-}
-
 static ExecutionPrimitiveAggregateUpdateLane
 BuildDistinctCountFinalizeLane(idx_t aggregate_index, const DistinctCountFinalizeFastPath &fast_path) {
 	ExecutionPrimitiveAggregateUpdateLane result;
@@ -1400,62 +1091,6 @@ BuildDistinctCountFinalizeLane(idx_t aggregate_index, const DistinctCountFinaliz
 	result.state_offset = fast_path.state_offset;
 	result.state_value_offset = 0;
 	return result;
-}
-
-static bool FillDistinctCountPointerAddressesFast(ExecutionContext &context,
-                                                  const HashAggregateGroupingData &grouping_data,
-                                                  OperatorSinkInput &sink_input, DataChunk &input,
-                                                  const DistinctCountFinalizeFastPath &fast_path,
-                                                  Vector &state_pointer_vector,
-                                                  optional_ptr<ExecutionOperatorStageRecorder> recorder = nullptr) {
-	auto sink_info = BuildDistinctCountFinalizeSinkInfo(0, fast_path);
-	return grouping_data.table_data.TryResolveNewGroupAddresses(context, input, sink_input, sink_info,
-	                                                            state_pointer_vector, recorder, false);
-}
-
-static bool FillDistinctCountPointerAddressesGeneric(ExecutionContext &context,
-                                                     const HashAggregateGroupingData &grouping_data,
-                                                     OperatorSinkInput &sink_input, DataChunk &input,
-                                                     Vector &state_pointer_vector) {
-	grouping_data.table_data.ResolveStateAddresses(context, input, sink_input, state_pointer_vector);
-	state_pointer_vector.Flatten();
-	return true;
-}
-
-static bool TrySinkDistinctCountPointerKeys(ExecutionContext &context, const PhysicalHashAggregate &op,
-                                            const HashAggregateGroupingData &grouping_data,
-                                            HashAggregateGroupingLocalState &grouping_lstate,
-                                            OperatorSinkInput &sink_input, DataChunk &input) {
-	auto &aggregate = op.grouped_aggregate_data.aggregates[0]->Cast<BoundAggregateExpression>();
-	auto &child_ref = aggregate.GetChildren()[0]->Cast<BoundReferenceExpression>();
-	DistinctCountFinalizeFastPath fast_path;
-	if (!TryGetDistinctCountFinalizeFastPath(op, grouping_data, 0, child_ref.Index(), fast_path)) {
-		return false;
-	}
-	if (!grouping_data.distinct_data || !grouping_data.distinct_data->UsesGroupStatePointerKeys() ||
-	    child_ref.Index() >= input.ColumnCount() || !grouping_lstate.distinct_count_scratch) {
-		return false;
-	}
-	auto &scratch = *grouping_lstate.distinct_count_scratch;
-
-	auto &payload = input.data[child_ref.Index()];
-	auto &state_pointer_vector = scratch.state_addresses;
-	state_pointer_vector.SetVectorType(VectorType::FLAT_VECTOR);
-	FlatVector::ValidityMutable(state_pointer_vector).SetAllValid(input.size());
-	FlatVector::SetSize(state_pointer_vector, input.size());
-
-	if (!FillDistinctCountPointerAddressesFast(context, grouping_data, sink_input, input, fast_path,
-	                                           state_pointer_vector)) {
-		FillDistinctCountPointerAddressesGeneric(context, grouping_data, sink_input, input, state_pointer_vector);
-	}
-
-	if (!scratch.distinct_set->Add(state_pointer_vector, payload, input.size(), fast_path.state_value_offset)) {
-		return false;
-	}
-	DistinctCountPointerLocalRowMoveState local_row_move_state(*scratch.distinct_set);
-	grouping_data.table_data.FinishStateUpdates(context, sink_input, local_row_move_state);
-	local_row_move_state.Flush();
-	return true;
 }
 
 static void ReferenceCompactDistinctGroups(ClientContext &context, const RadixPartitionedHashTable &table,
@@ -1729,7 +1364,7 @@ SinkFinalizeType PhysicalHashAggregate::FinalizeInternal(Pipeline &pipeline, Eve
                                                          GlobalSinkState &gstate_p, bool check_distinct) const {
 	auto &gstate = gstate_p.Cast<HashAggregateGlobalSinkState>();
 
-	if (check_distinct && distinct_collection_info && !HashAggregateUsesDistinctCountPointerKeys(*this)) {
+	if (check_distinct && distinct_collection_info) {
 		// There are distinct aggregates
 		// If these are partitioned those need to be combined first
 		// Then we Finalize again, skipping this step
@@ -1739,15 +1374,7 @@ SinkFinalizeType PhysicalHashAggregate::FinalizeInternal(Pipeline &pipeline, Eve
 	for (idx_t i = 0; i < groupings.size(); i++) {
 		auto &grouping = groupings[i];
 		auto &grouping_gstate = gstate.grouping_states[i];
-		optional_ptr<TupleDataRowLocationRemap> state_remap;
-		if (grouping.HasDistinct() && grouping.distinct_data->UsesGroupStatePointerKeys()) {
-			auto &merge_state = gstate.distinct_count_pointer_merge_states[i];
-			if (!merge_state) {
-				throw InternalException("Distinct count pointer aggregate is missing global merge state");
-			}
-			state_remap = *merge_state;
-		}
-		grouping.table_data.Finalize(context, *grouping_gstate.table_state, state_remap);
+		grouping.table_data.Finalize(context, *grouping_gstate.table_state);
 	}
 	return SinkFinalizeType::READY;
 }

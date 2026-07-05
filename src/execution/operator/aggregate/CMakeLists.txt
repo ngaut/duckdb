@@ -3,7 +3,6 @@ add_library_unity(
   OBJECT
   aggregate_object.cpp
   distinct_aggregate_data.cpp
-  distinct_count_pointer_set.cpp
   physical_hash_aggregate.cpp
   physical_limited_distinct.cpp
   grouped_aggregate_data.cpp

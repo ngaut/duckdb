@@ -21,16 +21,30 @@ struct SljitPendingRowPointerAggregateBatch {
 	}
 
 	idx_t Count() const {
-		return initialized ? input.size() : 0;
+		if (!initialized) {
+			return 0;
+		}
+		return uses_preclassified_input ? preclassified_input.size() : input.size();
 	}
 
 	void Ensure(Allocator &allocator, const vector<LogicalType> &input_types) {
-		if (initialized) {
-			return;
+		EnsureRowPointers();
+		if (!input_initialized) {
+			input.Initialize(allocator, input_types);
+			input_initialized = true;
 		}
-		input.Initialize(allocator, input_types);
-		row_pointers.Initialize(VectorDataInitialization::UNINITIALIZED, STANDARD_VECTOR_SIZE);
-		FlatVector::SetSize(row_pointers, 0);
+		uses_preclassified_input = false;
+		initialized = true;
+	}
+
+	void EnsurePreclassified(Allocator &allocator) {
+		EnsureRowPointers();
+		if (!preclassified_input_initialized) {
+			vector<LogicalType> input_types {LogicalType::UTINYINT};
+			preclassified_input.Initialize(allocator, input_types);
+			preclassified_input_initialized = true;
+		}
+		uses_preclassified_input = true;
 		initialized = true;
 	}
 
@@ -38,46 +52,58 @@ struct SljitPendingRowPointerAggregateBatch {
 		if (!initialized) {
 			return;
 		}
-		input.Reset();
+		if (input_initialized) {
+			input.Reset();
+		}
+		if (preclassified_input_initialized) {
+			preclassified_input.Reset();
+		}
 		FlatVector::SetSize(row_pointers, 0);
+		uses_preclassified_input = false;
 		source_key0_int64_to_int32_unchecked = false;
 	}
 
+	DataChunk &PayloadInput() {
+		return uses_preclassified_input ? preclassified_input : input;
+	}
+
+private:
+	void EnsureRowPointers() {
+		if (row_pointers_initialized) {
+			return;
+		}
+		row_pointers.Initialize(VectorDataInitialization::UNINITIALIZED, STANDARD_VECTOR_SIZE);
+		FlatVector::SetSize(row_pointers, 0);
+		row_pointers_initialized = true;
+	}
+
+public:
 	DataChunk input;
+	DataChunk preclassified_input;
 	Vector row_pointers;
 	bool initialized = false;
+	bool input_initialized = false;
+	bool preclassified_input_initialized = false;
+	bool row_pointers_initialized = false;
+	bool uses_preclassified_input = false;
 	bool source_key0_int64_to_int32_unchecked = false;
 	optional_ptr<SljitRegionExecutionScratch> scratch;
 	optional_ptr<bool> deferred_grouped_finish;
-};
-
-enum class SljitDirectJoinOutputAggregateUpdateSchedule : uint8_t {
-	PENDING_ROW_POINTER_BATCH,
-	IMMEDIATE_ROW_POINTER_UPDATE
 };
 
 struct SljitDirectJoinOutputAggregateStrategy;
 
 struct SljitDirectJoinOutputAggregatePrimitive {
 	idx_t aggregate_idx = DConstants::INVALID_INDEX;
-	SljitDirectJoinOutputAggregateUpdateSchedule update_schedule =
-	    SljitDirectJoinOutputAggregateUpdateSchedule::PENDING_ROW_POINTER_BATCH;
 
 	SljitDirectJoinOutputAggregateStrategy MakeStrategy() const;
 };
 
 struct SljitDirectJoinOutputAggregateStrategy {
-	SljitDirectJoinOutputAggregateStrategy(idx_t aggregate_idx_p,
-	                                       SljitDirectJoinOutputAggregateUpdateSchedule update_schedule_p)
-	    : aggregate_idx(aggregate_idx_p), update_schedule(update_schedule_p) {
-	}
-
-	bool UsesPendingBatch() const {
-		return update_schedule == SljitDirectJoinOutputAggregateUpdateSchedule::PENDING_ROW_POINTER_BATCH;
+	explicit SljitDirectJoinOutputAggregateStrategy(idx_t aggregate_idx_p) : aggregate_idx(aggregate_idx_p) {
 	}
 
 	idx_t aggregate_idx;
-	SljitDirectJoinOutputAggregateUpdateSchedule update_schedule;
 	bool disabled = false;
 	optional_ptr<const vector<idx_t>> source_distinct_counts;
 	optional_ptr<const vector<Value>> source_min_values;
@@ -88,29 +114,14 @@ struct SljitDirectJoinOutputAggregateStrategy {
 };
 
 inline SljitDirectJoinOutputAggregateStrategy SljitDirectJoinOutputAggregatePrimitive::MakeStrategy() const {
-	return SljitDirectJoinOutputAggregateStrategy(aggregate_idx, update_schedule);
+	return SljitDirectJoinOutputAggregateStrategy(aggregate_idx);
 }
 
 static bool SljitAggregateUpdateHasDedicatedCompiledBackend(const SljitExecutableRegionOp &op) {
 	if (op.kind != SljitNativeRegionOpKind::AGGREGATE_UPDATE) {
 		return false;
 	}
-	if (op.aggregate_update.plan.sink_info.aggregate_contract.distinct_count_pointer_keys) {
-		return true;
-	}
 	return op.aggregate_update.plan.use_primitive_payloads;
-}
-
-static bool SljitAggregateUpdateCanUseSelectedJoinPerfectHashBackend(const SljitExecutableRegionOp &op) {
-	if (op.kind != SljitNativeRegionOpKind::AGGREGATE_UPDATE) {
-		return false;
-	}
-	auto &aggregate_update = op.aggregate_update;
-	auto &plan = aggregate_update.plan;
-	return plan.sink_info.kind == ExecutionRegionSinkKind::PERFECT_HASH_AGGREGATE_UPDATE &&
-	       plan.use_primitive_payloads && plan.use_perfect_hash_group_lookup &&
-	       aggregate_update.fused_payload_update_owns_group_lookup &&
-	       aggregate_update.fused_payload_update_function != nullptr;
 }
 
 static bool SljitCanBindDirectJoinOutputAggregatePrimitive(const vector<SljitExecutableRegionOp> &ops,
@@ -119,14 +130,12 @@ static bool SljitCanBindDirectJoinOutputAggregatePrimitive(const vector<SljitExe
 }
 
 static SljitDirectJoinOutputAggregatePrimitive
-SljitBindDirectJoinOutputAggregatePrimitive(const vector<SljitExecutableRegionOp> &ops, idx_t aggregate_idx,
-                                            SljitDirectJoinOutputAggregateUpdateSchedule update_schedule) {
+SljitBindDirectJoinOutputAggregatePrimitive(const vector<SljitExecutableRegionOp> &ops, idx_t aggregate_idx) {
 	if (!SljitCanBindDirectJoinOutputAggregatePrimitive(ops, aggregate_idx)) {
 		throw InternalException("SLJIT direct join output aggregate primitive cannot bind requested aggregate");
 	}
 	SljitDirectJoinOutputAggregatePrimitive primitive;
 	primitive.aggregate_idx = aggregate_idx;
-	primitive.update_schedule = update_schedule;
 	return primitive;
 }
 
@@ -142,8 +151,8 @@ struct SljitDirectJoinOutputAggregatePolicy {
 		return strategy != nullptr && !strategy->disabled;
 	}
 
-	bool UsesPendingBatch() const {
-		return strategy != nullptr && strategy->UsesPendingBatch();
+	bool HasStrategy() const {
+		return strategy != nullptr;
 	}
 
 	SljitDirectJoinOutputAggregateStrategy &Strategy() {

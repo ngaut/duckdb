@@ -211,6 +211,19 @@ static bool PhysicalPipelineDecisionNeedsRegionGraph(const PhysicalRunnerCostInp
 	       cost_input.materialization_source_append_count > 0;
 }
 
+static bool PhysicalPipelineHashJoinBuildNeedsRegionGraph(const PhysicalRunnerCostInput &cost_input) {
+	return cost_input.full_pipeline && cost_input.native_hash_join_build_sink_count > 0 &&
+	       cost_input.generated_work_class != PhysicalRunnerGeneratedWorkClass::NONE &&
+	       cost_input.generated_work_class != PhysicalRunnerGeneratedWorkClass::PROJECTION_GLUE;
+}
+
+static PhysicalRunnerCostProfile
+SelectExecutionRegionPipelineCandidateUpperBoundRunner(const PhysicalRunnerCostParameters &cost_parameters,
+                                                       const PhysicalRunnerCostInput &pipeline_cost_input) {
+	auto upper_bound_input = BuildExecutionRegionPipelineCandidateUpperBoundCostInput(pipeline_cost_input);
+	return DuckDBCostModel::SelectPhysicalRunner(upper_bound_input, cost_parameters);
+}
+
 ExecutionRegionPhysicalRunnerSelection
 SelectExecutionRegionPipelinePhysicalRunner(const PhysicalRunnerCostParameters &cost_parameters, Pipeline &pipeline) {
 	ExecutionRegionPhysicalRunnerSelection selection;
@@ -240,12 +253,29 @@ SelectExecutionRegionPipelinePhysicalRunner(const PhysicalRunnerCostParameters &
 		AppendExecutionRegionCboCostReason(selection.reason, selection.runner_cost);
 		return selection;
 	}
-	if (PhysicalPipelineDecisionNeedsRegionGraph(cost_input)) {
+	if (PhysicalPipelineHashJoinBuildNeedsRegionGraph(cost_input)) {
 		selection.use_compiled_runner = true;
 		selection.selected_runner = ExecutionRunnerKind::COMPILED_VECTORIZED;
-		selection.reason = "duckdb_cbo requires execution-region graph for physical runner decision";
+		selection.reason = "duckdb_cbo requires execution-region graph for hash-join build sink decision";
 		selection.reason += ";region_graph=required";
 		AppendExecutionRegionCboCostReason(selection.reason, selection.runner_cost);
+		return selection;
+	}
+	if (PhysicalPipelineDecisionNeedsRegionGraph(cost_input)) {
+		auto upper_bound_cost = SelectExecutionRegionPipelineCandidateUpperBoundRunner(cost_parameters, cost_input);
+		if (!upper_bound_cost.selected_accelerated_runner) {
+			selection.runner_cost = std::move(upper_bound_cost);
+			selection.reason = "duckdb_cbo selects vectorized physical runner before region graph";
+			selection.reason += ";region_graph=skipped;candidate_upper_bound=rejected";
+			AppendExecutionRegionCboCostReason(selection.reason, selection.runner_cost);
+			selection.blocker = EXECUTION_REGION_BLOCKER_DUCKDB_SELECTED_VECTORIZED;
+			return selection;
+		}
+		selection.use_compiled_runner = true;
+		selection.selected_runner = upper_bound_cost.selected_runner;
+		selection.reason = "duckdb_cbo requires execution-region graph for physical runner decision";
+		selection.reason += ";region_graph=required";
+		AppendExecutionRegionCboCostReason(selection.reason, upper_bound_cost);
 		return selection;
 	}
 	selection.reason = "duckdb_cbo selects vectorized physical runner before region graph";
@@ -287,8 +317,7 @@ SelectExecutionRegionPhysicalRunner(const PhysicalRunnerCostParameters &cost_par
 		selection.blocker = EXECUTION_REGION_BLOCKER_NOT_FULLY_FUSED;
 		return selection;
 	}
-	auto cost_input = BuildExecutionRegionCandidateCostInput(candidate);
-	cost_input.uses_scan_filters = lowering_plan.UsesScanFilters();
+	auto cost_input = BuildExecutionRegionCandidateCostInput(candidate, lowering_plan);
 	selection.runner_cost = DuckDBCostModel::SelectPhysicalRunner(cost_input, cost_parameters);
 	if (selection.runner_cost.selected_accelerated_runner) {
 		SelectExecutionRegionAcceleratedRunner(selection);

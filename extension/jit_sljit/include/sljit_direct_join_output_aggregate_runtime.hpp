@@ -18,6 +18,7 @@
 #include "sljit_projection_aggregate_descriptor.hpp"
 #include "sljit_region_runtime_state.hpp"
 #include "sljit_region_runtime_trace.hpp"
+#include "sljit_ungrouped_aggregate_payload_update_runtime.hpp"
 
 namespace duckdb {
 
@@ -146,10 +147,11 @@ static bool SljitFlushPendingRowPointerAggregateBatch(ExecutionRegionRuntime &ru
 	const auto source_key0_int64_to_int32_unchecked = batch.source_key0_int64_to_int32_unchecked;
 	SljitApplyJoinProjectionGroupCastProofs(descriptor.group_sources, source_key0_int64_to_int32_unchecked);
 	auto batch_group_sources = descriptor.group_sources;
-	SljitApplyInputVectorGroupBatchCastProofs(batch.input, batch_group_sources, pending_count);
+	auto &payload_input = batch.PayloadInput();
+	SljitApplyInputVectorGroupBatchCastProofs(payload_input, batch_group_sources, pending_count);
 	SljitApplyRowPointerGroupBatchCastProofs(batch.row_pointers, batch_group_sources, pending_count);
 	if (!SljitTryExecuteNativeRowPointerGroupedAggregateUpdate(
-	        runtime, runtime.ExecutionOperators(), *batch.scratch, aggregate_idx, aggregate_op, batch.input,
+	        runtime, runtime.ExecutionOperators(), *batch.scratch, aggregate_idx, aggregate_op, payload_input,
 	        batch.row_pointers, batch_group_sources, descriptor.payload_source_indices, true,
 	        batch.deferred_grouped_finish, source_key0_int64_to_int32_unchecked)) {
 		throw InternalException("SLJIT batched direct row-pointer aggregate update failed");
@@ -160,6 +162,48 @@ static bool SljitFlushPendingRowPointerAggregateBatch(ExecutionRegionRuntime &ru
 	return false;
 }
 
+static bool SljitCanPreclassifyStringSetComplementarySumBatch(SljitExecutableRegionOp &aggregate_op,
+                                                              SljitJoinProjectionAggregateDescriptor &descriptor,
+                                                              DataChunk &aggregate_input,
+                                                              SljitStringSetComplementarySumDescriptor &classification) {
+	return ExecutionRowPointerGroupKeySourcesAreRowPointerFields(descriptor.group_sources) &&
+	       SljitTryBindStringSetComplementarySumDescriptor(aggregate_op, descriptor.payload_source_indices,
+	                                                       classification) &&
+	       SljitStringSetComplementarySumInputIsVarchar(aggregate_input, classification);
+}
+
+static void SljitAppendPreclassifiedStringSetComplementarySumBatch(
+    SljitPendingRowPointerAggregateBatch &batch, const SljitStringSetComplementarySumDescriptor &classification,
+    DataChunk &aggregate_input) {
+	auto &classified_input = batch.preclassified_input;
+	auto &target = classified_input.data[0];
+	const auto old_count = classified_input.size();
+	const auto append_count = aggregate_input.size();
+	auto target_data = FlatVector::GetDataMutable<uint8_t>(target);
+	auto &target_validity = FlatVector::ValidityMutable(target);
+	UnifiedVectorFormat predicate_format;
+	aggregate_input.data[classification.predicate_source_idx].ToUnifiedFormat(predicate_format);
+	auto predicate_data = UnifiedVectorFormat::GetData<string_t>(predicate_format);
+	auto predicate_sel = predicate_format.sel;
+	auto &predicate_validity = predicate_format.validity;
+	for (idx_t idx = 0; idx < append_count; idx++) {
+		const auto target_idx = old_count + idx;
+		const auto predicate_idx = predicate_sel->get_index(idx);
+		if (!predicate_validity.RowIsValid(predicate_idx)) {
+			target_validity.SetInvalid(target_idx);
+			target_data[target_idx] = 0;
+			continue;
+		}
+		target_validity.SetValid(target_idx);
+		auto predicate = predicate_data[predicate_idx];
+		target_data[target_idx] = SljitStringEqualsConstant(predicate, classification.constants[0]) ||
+		                                  SljitStringEqualsConstant(predicate, classification.constants[1])
+		                              ? 1
+		                              : 0;
+	}
+	classified_input.SetChildCardinality(old_count + append_count);
+}
+
 static void SljitAppendPendingRowPointerAggregateBatch(
     ExecutionRegionRuntime &runtime, idx_t aggregate_idx, SljitExecutableRegionOp &aggregate_op,
     SljitJoinProjectionAggregateDescriptor &descriptor, SljitPendingRowPointerAggregateBatch &batch,
@@ -167,16 +211,38 @@ static void SljitAppendPendingRowPointerAggregateBatch(
     Vector &row_pointers, bool source_key0_int64_to_int32_unchecked) {
 	batch.scratch = &scratch;
 	batch.deferred_grouped_finish = deferred_grouped_finish;
-	batch.Ensure(runtime.GetAllocator(), descriptor.input_types);
+	SljitStringSetComplementarySumDescriptor classification;
+	const bool use_preclassified =
+	    SljitCanPreclassifyStringSetComplementarySumBatch(aggregate_op, descriptor, aggregate_input, classification);
+	if (batch.Count() != 0 && batch.uses_preclassified_input != use_preclassified) {
+		SljitFlushPendingRowPointerAggregateBatch(runtime, aggregate_idx, aggregate_op, descriptor, batch);
+	}
+	if (use_preclassified) {
+		batch.EnsurePreclassified(runtime.GetAllocator());
+	} else {
+		batch.Ensure(runtime.GetAllocator(), descriptor.input_types);
+	}
 	if (batch.Count() != 0 && batch.source_key0_int64_to_int32_unchecked != source_key0_int64_to_int32_unchecked) {
 		SljitFlushPendingRowPointerAggregateBatch(runtime, aggregate_idx, aggregate_op, descriptor, batch);
+		if (use_preclassified) {
+			batch.EnsurePreclassified(runtime.GetAllocator());
+		} else {
+			batch.Ensure(runtime.GetAllocator(), descriptor.input_types);
+		}
 	}
 	batch.source_key0_int64_to_int32_unchecked = source_key0_int64_to_int32_unchecked;
 	if (batch.Count() + aggregate_input.size() > STANDARD_VECTOR_SIZE) {
 		SljitFlushPendingRowPointerAggregateBatch(runtime, aggregate_idx, aggregate_op, descriptor, batch);
 		batch.source_key0_int64_to_int32_unchecked = source_key0_int64_to_int32_unchecked;
+		if (use_preclassified) {
+			batch.EnsurePreclassified(runtime.GetAllocator());
+		} else {
+			batch.Ensure(runtime.GetAllocator(), descriptor.input_types);
+		}
 	}
-	if (batch.input.ColumnCount() == 0) {
+	if (use_preclassified) {
+		SljitAppendPreclassifiedStringSetComplementarySumBatch(batch, classification, aggregate_input);
+	} else if (batch.input.ColumnCount() == 0) {
 		batch.input.SetChildCardinality(batch.Count() + aggregate_input.size());
 	} else {
 		batch.input.Append(aggregate_input, VectorAppendMode::ERROR_ON_NO_SPACE);
@@ -196,14 +262,6 @@ SljitDirectJoinOutputAggregateUnsupportedPrefix(const SljitPostJoinProjectionStr
 	return "direct_projection_row_pointer_aggregate_unsupported.";
 }
 
-static const char *
-SljitDirectJoinOutputAggregateUpdatePath(const SljitPostJoinProjectionStrategy &post_join_projection) {
-	if (SljitPostJoinProjectionUsesChain(post_join_projection)) {
-		return "direct_projection_chain_row_pointer_grouped_update";
-	}
-	return "direct_projection_row_pointer_grouped_update";
-}
-
 static void SljitRecordDirectJoinOutputAggregateProjectionUnsupported(
     ExecutionRegionRuntime &runtime, const vector<SljitExecutableRegionOp> &ops,
     const SljitPostJoinProjectionStrategy &post_join_projection, const string &reason, idx_t count) {
@@ -217,7 +275,7 @@ static void SljitRecordDirectJoinOutputAggregateProjectionUnsupported(
 
 static bool SljitFlushDirectJoinOutputAggregate(ExecutionRegionRuntime &runtime, vector<SljitExecutableRegionOp> &ops,
                                                 SljitDirectJoinOutputAggregatePolicy &policy) {
-	if (!policy.UsesPendingBatch()) {
+	if (!policy.HasStrategy()) {
 		return false;
 	}
 	auto &strategy = policy.Strategy();
@@ -363,6 +421,22 @@ static bool SljitTryExecuteDirectJoinOutputAggregate(
 		SljitFlushDirectJoinOutputAggregate(runtime, ops, policy);
 		return false;
 	}
+	auto &sink_info = aggregate_op.aggregate_update.plan.sink_info;
+	if (sink_info.kind == ExecutionRegionSinkKind::UNGROUPED_AGGREGATE_UPDATE) {
+		if (descriptor.remapped_payloads.size() != sink_info.aggregates.size()) {
+			SljitRecordDirectJoinOutputAggregateProjectionUnsupported(runtime, ops, post_join_projection,
+			                                                          "ungrouped_payloads", join_output.size());
+			strategy.last_failure = "ungrouped_payloads";
+			return false;
+		}
+		SljitExecuteNativeUngroupedAggregateUpdateWithPayloads(
+		    runtime, runtime.ExecutionOperators(), scratch, strategy.aggregate_idx, aggregate_op, aggregate_input,
+		    descriptor.remapped_payloads, "direct_join_output_ungrouped_payload_update",
+		    "direct_join_output_ungrouped_payload_update", "direct_join_output_ungrouped_state_update");
+		RecordSljitRegionRuntimePath(runtime, aggregate_op.kind, "direct_join_output_ungrouped_update",
+		                             aggregate_input.size());
+		return true;
+	}
 	auto batch_group_sources = descriptor.group_sources;
 	SljitApplyInputVectorGroupBatchCastProofs(aggregate_input, batch_group_sources, aggregate_input.size());
 	SljitApplyRowPointerGroupBatchCastProofs(row_pointers, batch_group_sources, aggregate_input.size());
@@ -378,36 +452,6 @@ static bool SljitTryExecuteDirectJoinOutputAggregate(
 		SljitRecordDirectJoinOutputAggregateProjectionUnsupported(runtime, ops, post_join_projection,
 		                                                          string("perfect_hash_update_") + perfect_hash_failure,
 		                                                          join_output.size());
-	}
-
-	if (aggregate_op.aggregate_update.plan.sink_info.aggregate_contract.distinct_count_pointer_keys) {
-		SljitFlushDirectJoinOutputAggregate(runtime, ops, policy);
-		if (descriptor.payload_source_indices.size() != 1 ||
-		    descriptor.payload_source_indices[0] >= aggregate_input.ColumnCount()) {
-			SljitRecordDirectJoinOutputAggregateProjectionUnsupported(runtime, ops, post_join_projection,
-			                                                          "distinct_payload_source", join_output.size());
-			strategy.last_failure = "distinct_payload_source";
-			strategy.disabled = true;
-			return false;
-		}
-		auto &binding = SljitBindRecordedNativeSink(
-		    runtime, runtime.ExecutionOperators(), scratch, strategy.aggregate_idx, aggregate_op.kind, aggregate_input,
-		    aggregate_op.aggregate_update.plan.sink_info, "aggregate-update-runtime-binding-failed",
-		    "SLJIT distinct count-pointer row-pointer aggregate update");
-		if (!SljitTryExecuteDistinctCountPointerRowPointerGroupAggregateUpdate(
-		        runtime, binding, strategy.aggregate_idx, aggregate_op, aggregate_input, row_pointers,
-		        aggregate_input.size(), batch_group_sources, aggregate_input.data[descriptor.payload_source_indices[0]],
-		        true, deferred_grouped_finish)) {
-			SljitRecordDirectJoinOutputAggregateProjectionUnsupported(runtime, ops, post_join_projection,
-			                                                          "distinct_update", join_output.size());
-			strategy.last_failure = "distinct_update";
-			strategy.disabled = true;
-			return false;
-		}
-		RecordSljitRegionRuntimePath(runtime, aggregate_op.kind,
-		                             "direct_projection_distinct_count_pointer_row_pointer_update",
-		                             aggregate_input.size());
-		return true;
 	}
 
 	if (!SljitDescriptorUsesRowPointerGroupSource(descriptor) &&
@@ -438,23 +482,6 @@ static bool SljitTryExecuteDirectJoinOutputAggregate(
 			                             aggregate_input.size());
 			return true;
 		}
-	}
-
-	if (!strategy.UsesPendingBatch()) {
-		SljitFlushDirectJoinOutputAggregate(runtime, ops, policy);
-		if (!SljitTryExecuteNativeRowPointerGroupedAggregateUpdate(
-		        runtime, runtime.ExecutionOperators(), scratch, strategy.aggregate_idx, aggregate_op, aggregate_input,
-		        row_pointers, batch_group_sources, descriptor.payload_source_indices, true, deferred_grouped_finish,
-		        source_key0_int64_to_int32_unchecked)) {
-			auto path = string(SljitDirectJoinOutputAggregateUnsupportedPrefix(post_join_projection)) + "update";
-			RecordSljitRegionRuntimePath(runtime, aggregate_op.kind, path.c_str(), join_output.size());
-			strategy.last_failure = "update";
-			return false;
-		}
-		RecordSljitRegionRuntimePath(runtime, aggregate_op.kind,
-		                             SljitDirectJoinOutputAggregateUpdatePath(post_join_projection),
-		                             aggregate_input.size());
-		return true;
 	}
 
 	SljitAppendPendingRowPointerAggregateBatch(runtime, strategy.aggregate_idx, aggregate_op, descriptor,

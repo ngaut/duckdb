@@ -240,52 +240,29 @@ private:
 	bool FlushPendingBatch() {
 		for (idx_t step_idx = 1; step_idx + 1 < recipe.primitive_sequence.count; step_idx++) {
 			auto &step = recipe.primitive_sequence.steps[step_idx];
-			switch (step.kind) {
-			case SljitFullPipelinePrimitiveKind::SOURCE_BATCH_BOUNDARY:
-				if (FlushSourceBoundaryBatch(step_idx)) {
-					return true;
-				}
-				break;
-			case SljitFullPipelinePrimitiveKind::HASH_JOIN_PROBE_MATERIALIZE:
-				if (FlushHashJoinMaterializeBatch(step_idx)) {
-					return true;
-				}
-				break;
-			case SljitFullPipelinePrimitiveKind::PROJECTION_CHAIN:
-				if (FlushProjectionChainBatch(step_idx)) {
-					return true;
-				}
-				break;
-			default:
-				break;
+			if (FlushMaterializingStep(step_idx, step)) {
+				return true;
 			}
 		}
 		auto &terminal_step = TerminalStep();
 		return terminal_runtime.Flush(runtime, result, ops, scratch, terminal_step, processed_batches);
 	}
 
-	bool FlushProjectionChainBatch(idx_t step_idx) {
+	bool FlushMaterializingStep(idx_t step_idx, const SljitFullPipelinePrimitiveStep &step) {
 		auto next_step_idx = step_idx + 1;
 		auto execute_output_batch = [&](DataChunk &batch) -> bool {
 			return ExecuteMaterializedBatch(next_step_idx, batch, false);
 		};
-		return projection_chain.Flush(step_idx, execute_output_batch);
-	}
-
-	bool FlushSourceBoundaryBatch(idx_t step_idx) {
-		auto next_step_idx = step_idx + 1;
-		auto execute_output_batch = [&](DataChunk &batch) -> bool {
-			return ExecuteMaterializedBatch(next_step_idx, batch, false);
-		};
-		return source_batch_boundary.Flush(step_idx, execute_output_batch);
-	}
-
-	bool FlushHashJoinMaterializeBatch(idx_t step_idx) {
-		auto next_step_idx = step_idx + 1;
-		auto execute_output_batch = [&](DataChunk &batch) -> bool {
-			return ExecuteMaterializedBatch(next_step_idx, batch, false);
-		};
-		return hash_join_materialize.Flush(step_idx, execute_output_batch);
+		switch (step.kind) {
+		case SljitFullPipelinePrimitiveKind::SOURCE_BATCH_BOUNDARY:
+			return source_batch_boundary.Flush(step_idx, execute_output_batch);
+		case SljitFullPipelinePrimitiveKind::HASH_JOIN_PROBE_MATERIALIZE:
+			return hash_join_materialize.Flush(step_idx, execute_output_batch);
+		case SljitFullPipelinePrimitiveKind::PROJECTION_CHAIN:
+			return projection_chain.Flush(step_idx, execute_output_batch);
+		default:
+			return false;
+		}
 	}
 
 private:

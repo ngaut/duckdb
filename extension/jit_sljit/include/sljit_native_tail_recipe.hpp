@@ -15,9 +15,10 @@ namespace duckdb {
 
 class SljitNativeTailRecipeBuilder {
 public:
-	SljitNativeTailRecipeBuilder(const vector<SljitExecutableRegionOp> &ops_p, bool uses_scan_filters_p,
+	SljitNativeTailRecipeBuilder(const vector<SljitExecutableRegionOp> &ops_p,
+	                             const SljitFullPipelineScheduleFacts &schedule_facts_p,
 	                             const SljitFullPipelineRecipeBinding &binding_p)
-	    : ops(ops_p), uses_scan_filters(uses_scan_filters_p), binding(binding_p) {
+	    : ops(ops_p), schedule_facts(schedule_facts_p), binding(binding_p) {
 	}
 
 	bool Build(SljitFullPipelineRecipe &recipe) const {
@@ -39,54 +40,63 @@ private:
 	};
 
 	static const RegistryEntry *RecipeRegistry(idx_t &count) {
-		static const RegistryEntry registry[] = {{&SljitNativeTailRecipeBuilder::TryBuildMarkFilterProjection},
-		                                         {&SljitNativeTailRecipeBuilder::TryBuildGeneratedFilterProjection},
-		                                         {&SljitNativeTailRecipeBuilder::TryBuildProjectionFilterProjection},
-		                                         {&SljitNativeTailRecipeBuilder::TryBuildSourceBatch}};
+		static const RegistryEntry registry[] = {
+		    {&SljitNativeTailRecipeBuilder::TryBuildFactsRecipe<SljitMarkFilterProjectionNativeTailFacts>},
+		    {&SljitNativeTailRecipeBuilder::TryBuildFactsRecipe<SljitGeneratedFilterProjectionNativeTailFacts>},
+		    {&SljitNativeTailRecipeBuilder::TryBuildFactsRecipe<SljitProjectionFilterProjectionNativeTailFacts>},
+		    {&SljitNativeTailRecipeBuilder::TryBuildFactsRecipe<SljitSourceBatchNativeTailFacts>}};
 		count = sizeof(registry) / sizeof(registry[0]);
 		return registry;
 	}
 
-	bool TryBuildMarkFilterProjection(SljitFullPipelineRecipe &recipe) const {
-		SljitMarkFilterProjectionNativeTailFacts facts;
-		if (!SljitTryAnalyzeMarkFilterProjectionNativeTail(ops, facts)) {
+	template <class FACTS>
+	bool TryBuildFactsRecipe(SljitFullPipelineRecipe &recipe) const {
+		FACTS facts;
+		if (!AnalyzeFacts(facts)) {
 			return false;
 		}
-		recipe = binding.MakeMarkFilterProjectionNativeTailRecipe(facts);
+		if (!binding.CanMakeNativeTailRecipe(facts.tail_start_idx)) {
+			return false;
+		}
+		recipe = MakeFactsRecipe(facts);
 		return true;
 	}
 
-	bool TryBuildGeneratedFilterProjection(SljitFullPipelineRecipe &recipe) const {
-		SljitGeneratedFilterProjectionNativeTailFacts facts;
-		if (!SljitTryAnalyzeGeneratedFilterProjectionNativeTail(ops, facts)) {
-			return false;
-		}
-		recipe = binding.MakeGeneratedFilterProjectionNativeTailRecipe(facts);
-		return true;
+	bool AnalyzeFacts(SljitMarkFilterProjectionNativeTailFacts &facts) const {
+		return SljitTryAnalyzeMarkFilterProjectionNativeTail(ops, facts);
 	}
 
-	bool TryBuildProjectionFilterProjection(SljitFullPipelineRecipe &recipe) const {
-		SljitProjectionFilterProjectionNativeTailFacts facts;
-		if (!SljitTryAnalyzeProjectionFilterProjectionNativeTail(ops, facts)) {
-			return false;
-		}
-		recipe = binding.MakeProjectionFilterProjectionNativeTailRecipe(facts);
-		return true;
+	bool AnalyzeFacts(SljitGeneratedFilterProjectionNativeTailFacts &facts) const {
+		return SljitTryAnalyzeGeneratedFilterProjectionNativeTail(ops, facts);
 	}
 
-	bool TryBuildSourceBatch(SljitFullPipelineRecipe &recipe) const {
-		SljitSourceBatchNativeTailFacts facts;
-		if (!SljitTryAnalyzeSourceBatchNativeTail(ops, uses_scan_filters, facts) ||
-		    !SljitCanBindNativeTailHandoffPrimitive(ops, facts.tail_start_idx)) {
-			return false;
-		}
-		recipe = binding.MakeSourceBatchNativeTailRecipe(facts);
-		return true;
+	bool AnalyzeFacts(SljitProjectionFilterProjectionNativeTailFacts &facts) const {
+		return SljitTryAnalyzeProjectionFilterProjectionNativeTail(ops, facts);
+	}
+
+	bool AnalyzeFacts(SljitSourceBatchNativeTailFacts &facts) const {
+		return SljitTryAnalyzeSourceBatchNativeTail(schedule_facts, facts);
+	}
+
+	SljitFullPipelineRecipe MakeFactsRecipe(const SljitMarkFilterProjectionNativeTailFacts &facts) const {
+		return binding.MakeMarkFilterProjectionNativeTailRecipe(facts);
+	}
+
+	SljitFullPipelineRecipe MakeFactsRecipe(const SljitGeneratedFilterProjectionNativeTailFacts &facts) const {
+		return binding.MakeGeneratedFilterProjectionNativeTailRecipe(facts);
+	}
+
+	SljitFullPipelineRecipe MakeFactsRecipe(const SljitProjectionFilterProjectionNativeTailFacts &facts) const {
+		return binding.MakeProjectionFilterProjectionNativeTailRecipe(facts);
+	}
+
+	SljitFullPipelineRecipe MakeFactsRecipe(const SljitSourceBatchNativeTailFacts &facts) const {
+		return binding.MakeSourceBatchNativeTailRecipe(facts);
 	}
 
 private:
 	const vector<SljitExecutableRegionOp> &ops;
-	bool uses_scan_filters;
+	const SljitFullPipelineScheduleFacts &schedule_facts;
 	const SljitFullPipelineRecipeBinding &binding;
 };
 

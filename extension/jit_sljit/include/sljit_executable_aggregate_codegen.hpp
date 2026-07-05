@@ -23,6 +23,7 @@ bool SljitBuildExecutableAggregateUpdatePayloadCode(const SljitNativeAggregateUp
                                                     const vector<bool> &input_not_null,
                                                     const vector<Value> &input_min_values,
                                                     const vector<Value> &input_max_values);
+void SljitSelectExecutableAggregateUpdateStrategy(SljitExecutableAggregateUpdate &executable);
 bool SljitBuildExecutableAggregateUpdateFallbackPayloadCode(const SljitNativeAggregateUpdatePlan &op,
                                                             SljitExecutableAggregateUpdate &executable, string &error);
 

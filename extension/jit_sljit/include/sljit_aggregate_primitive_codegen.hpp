@@ -106,6 +106,8 @@ void EmitSljitGroupedAggregateAccumulateInt64(struct sljit_compiler *compiler, s
 void EmitSljitGroupedAggregateIncrementInt64(struct sljit_compiler *compiler, sljit_s32 state_reg);
 void EmitSljitGroupedAggregateAccumulateHugeintInt64(struct sljit_compiler *compiler, sljit_s32 state_reg,
                                                      sljit_s32 value_reg);
+void EmitSljitGroupedAggregateAccumulateDouble(struct sljit_compiler *compiler, sljit_s32 state_reg,
+                                               sljit_s32 value_freg);
 void EmitLoadGroupedAggregateStateAddress(struct sljit_compiler *compiler, sljit_s32 target_reg,
                                           sljit_s32 logical_index_reg);
 void EmitSljitGroupedAggregateValuePointerImmediate(struct sljit_compiler *compiler, sljit_s32 base_reg,
@@ -130,6 +132,9 @@ void EmitSljitGroupedAggregateAccumulateHugeintImmediate(struct sljit_compiler *
 void EmitSljitGroupedAggregateAccumulateHugeintImmediateNoStateSet(struct sljit_compiler *compiler,
                                                                    sljit_s32 base_reg, idx_t state_offset,
                                                                    idx_t value_offset, sljit_s32 value_reg);
+void EmitSljitGroupedAggregateAccumulateDoubleImmediate(struct sljit_compiler *compiler, sljit_s32 base_reg,
+                                                        idx_t state_offset, idx_t value_offset,
+                                                        idx_t state_is_set_offset, sljit_s32 value_freg);
 
 void EmitSljitStoreZeroDoubleLocal(struct sljit_compiler *compiler, sljit_sw local_sum_offset);
 void EmitSljitAggregateAccumulateDouble(struct sljit_compiler *compiler, sljit_sw local_sum_offset,

@@ -9,9 +9,8 @@
 #pragma once
 
 #include "sljit_full_pipeline_primitive_sequence.hpp"
-#include "sljit_generated_filter_projection_runtime.hpp"
+#include "sljit_generated_filter_primitive.hpp"
 #include "sljit_mark_probe_filter_boundary.hpp"
-#include "sljit_native_tail_handoff_runtime.hpp"
 #include "sljit_projection_chain_runtime.hpp"
 
 namespace duckdb {
@@ -39,6 +38,18 @@ static bool SljitFullPipelineSourceFetchOwnsSinkAdvance(const SljitFullPipelineP
 		throw InternalException("SLJIT source-fetch sink ownership requires an executable primitive sequence");
 	}
 	return !SljitFullPipelinePrimitiveOwnsSourceBatchAdvance(primitive_sequence.steps[1]);
+}
+
+static bool SljitNativeTailHandoffCanConsumeTail(const vector<SljitExecutableRegionOp> &ops, idx_t tail_start_idx) {
+	if (tail_start_idx >= ops.size()) {
+		return false;
+	}
+	auto &tail = ops[tail_start_idx];
+	if (tail.kind == SljitNativeRegionOpKind::AGGREGATE_UPDATE &&
+	    tail.aggregate_update.plan.use_primitive_payloads) {
+		return false;
+	}
+	return true;
 }
 
 static bool SljitFullPipelineIntermediatePrimitiveIsExecutable(const vector<SljitExecutableRegionOp> &ops,
@@ -106,7 +117,7 @@ static bool SljitFullPipelineTerminalPrimitiveIsExecutable(const vector<SljitExe
 		       step.delim_join_sink.sink_idx == step.Op(0);
 	case SljitFullPipelinePrimitiveKind::NATIVE_TAIL_HANDOFF:
 		return SljitFullPipelinePrimitiveStepHasOpCount(step, 1) &&
-		       SljitCanBindNativeTailHandoffPrimitive(ops, step.Op(0));
+		       SljitNativeTailHandoffCanConsumeTail(ops, step.Op(0));
 	default:
 		return false;
 	}

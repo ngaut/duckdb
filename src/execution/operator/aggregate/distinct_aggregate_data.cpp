@@ -29,7 +29,6 @@ DistinctAggregateCollectionInfo::DistinctAggregateCollectionInfo(const vector<un
 
 DistinctAggregateState::DistinctAggregateState(const DistinctAggregateData &data, ClientContext &client)
     : child_executor(client) {
-	D_ASSERT(!data.UsesGroupStatePointerKeys());
 	radix_states.resize(data.info.table_count);
 	distinct_output_chunks.resize(data.info.table_count);
 
@@ -75,13 +74,8 @@ DistinctAggregateData::DistinctAggregateData(const DistinctAggregateCollectionIn
 
 DistinctAggregateData::DistinctAggregateData(const DistinctAggregateCollectionInfo &info, const GroupingSet &groups,
                                              const vector<unique_ptr<Expression>> *group_expressions,
-                                             TupleDataValidityType distinct_validity,
-                                             DistinctAggregateKeyStrategy key_strategy_p)
-    : info(info), key_strategy(key_strategy_p) {
-	if (UsesGroupStatePointerKeys()) {
-		return;
-	}
-
+                                             TupleDataValidityType distinct_validity)
+    : info(info) {
 	grouped_aggregate_data.resize(info.table_count);
 	radix_tables.resize(info.table_count);
 	grouping_sets.resize(info.table_count);
@@ -218,10 +212,6 @@ bool DistinctAggregateData::IsDistinct(idx_t index) const {
 	D_ASSERT(found == is_distinct);
 #endif
 	return is_distinct;
-}
-
-bool DistinctAggregateData::UsesGroupStatePointerKeys() const {
-	return key_strategy == DistinctAggregateKeyStrategy::GROUP_STATE_POINTER;
 }
 
 } // namespace duckdb

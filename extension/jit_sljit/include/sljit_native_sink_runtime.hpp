@@ -112,7 +112,8 @@ static bool SljitTryExecuteNativeTerminalSink(ExecutionRegionRuntime &runtime, E
                                               SljitRegionExecutionScratch &scratch, idx_t op_idx,
                                               SljitExecutableRegionOp &op, DataChunk &input, bool is_final_operator,
                                               SinkResultType &sink_result,
-                                              optional_ptr<bool> deferred_grouped_finish = nullptr) {
+                                              optional_ptr<bool> deferred_grouped_finish = nullptr,
+                                              bool force_duckdb_aggregate_update = false) {
 	switch (op.kind) {
 	case SljitNativeRegionOpKind::HASH_JOIN_BUILD:
 		if (!is_final_operator) {
@@ -164,9 +165,12 @@ static bool SljitTryExecuteNativeTerminalSink(ExecutionRegionRuntime &runtime, E
 		if (deferred_grouped_finish) {
 			sink_result =
 			    SljitExecuteNativeAggregateUpdate(runtime, native_runtime, scratch, op_idx, op, input, nullptr,
-			                                      DConstants::INVALID_INDEX, true, deferred_grouped_finish);
+			                                      DConstants::INVALID_INDEX, true, deferred_grouped_finish,
+			                                      force_duckdb_aggregate_update);
 		} else {
-			sink_result = SljitExecuteNativeAggregateUpdate(runtime, native_runtime, scratch, op_idx, op, input);
+			sink_result = SljitExecuteNativeAggregateUpdate(runtime, native_runtime, scratch, op_idx, op, input,
+			                                                nullptr, DConstants::INVALID_INDEX, false, nullptr,
+			                                                force_duckdb_aggregate_update);
 		}
 		return true;
 	default:

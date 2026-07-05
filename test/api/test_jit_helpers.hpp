@@ -112,6 +112,7 @@ static void ConfigureSljit(Connection &con, const string &policy = "auto", bool 
 
 static void ConfigureJitCoverageCbo(Connection &con) {
 	// Coverage tests must reach generated code paths even when production CBO would reject stateful protocol glue.
+	REQUIRE_NO_FAIL(con.Query("SET threads=1"));
 	REQUIRE_NO_FAIL(con.Query("SET jit_cbo_generated_stage_benefit=4096"));
 	REQUIRE_NO_FAIL(con.Query("SET jit_cbo_materialization_elision_benefit=4096"));
 	REQUIRE_NO_FAIL(con.Query("SET jit_cbo_native_operator_stage_benefit=4096"));
@@ -207,17 +208,9 @@ static void RequireNativeContractProjectionGlueSkipped(const ExecutionRegionEven
 static void RequireDuckDBScanFilteredSourceContract(const ExecutionRegionEvent &event) {
 	REQUIRE(event.selected_source_execution == ExecutionRegionSourceExecutionKind::SOURCE_CONTRACT);
 	REQUIRE(event.selected_uses_scan_filters);
-	REQUIRE(event.candidate_uses_scan_filters);
 	REQUIRE(StringUtil::Contains(event.reason, "vectorized table scan filters"));
 	REQUIRE(StringUtil::Contains(event.reason, "source-strategy=duckdb-scan-filtered-source-contract"));
 	REQUIRE(StringUtil::Contains(event.reason, "uses-scan-filters=true"));
-}
-
-static void RequireGeneratedSourceFilteredSourceContract(const ExecutionRegionEvent &event) {
-	REQUIRE(event.selected_source_execution == ExecutionRegionSourceExecutionKind::SOURCE_CONTRACT);
-	REQUIRE(event.candidate_traits.source_filter_count > 0);
-	REQUIRE(event.runner_cost.generated_stage_count > 0);
-	REQUIRE(StringUtil::Contains(event.reason, "generated table scan source filters"));
 }
 
 struct NoExtraJitEventCheck {

@@ -70,6 +70,13 @@ void EmitLoadFusedAggregateIntegerData(struct sljit_compiler *compiler, sljit_sw
 	               NativeIntegerDataScale(kind));
 }
 
+void EmitLoadFusedAggregateDoubleData(struct sljit_compiler *compiler, sljit_sw source_data_array_offset,
+                                      idx_t lane_idx, sljit_s32 index_reg, sljit_s32 target_freg) {
+	sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_R0, 0, SLJIT_MEM1(SLJIT_S0), source_data_array_offset);
+	sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_R0, 0, SLJIT_MEM1(SLJIT_R0), SljitPointerArrayOffset(lane_idx));
+	sljit_emit_fmem(compiler, SLJIT_MOV_F64 | SLJIT_MEM_ALIGNED_32, target_freg, SLJIT_MEM2(SLJIT_R0, index_reg), 3);
+}
+
 sljit_jump *
 EmitLoadFusedTypedAggregateReferenceValue(struct sljit_compiler *compiler,
                                           const SljitNativeRegionExpressionPlan &payload, bool use_source_selection,
@@ -149,11 +156,17 @@ bool SljitFusedGroupedPrimitiveAggregatePayloadSupported(const SljitNativeRegion
 		       payload.return_type.InternalType() == aggregate.child_types[0].InternalType() &&
 		       payload.kind == SljitNativeRegionExpressionKind::REFERENCE;
 	}
-	if ((aggregate.primitive_update_kind != AggregatePrimitiveUpdateKind::SUM_INT64 &&
-	     aggregate.primitive_update_kind != AggregatePrimitiveUpdateKind::SUM_HUGEINT) ||
-	    aggregate.child_types.size() != 1 ||
+	if (aggregate.child_types.size() != 1 ||
 	    aggregate.primitive_update_input_type != aggregate.child_types[0].InternalType() ||
 	    payload.return_type.InternalType() != aggregate.child_types[0].InternalType()) {
+		return false;
+	}
+	if (aggregate.primitive_update_kind == AggregatePrimitiveUpdateKind::SUM_DOUBLE) {
+		return payload.kind == SljitNativeRegionExpressionKind::REFERENCE &&
+		       payload.return_type.InternalType() == PhysicalType::DOUBLE;
+	}
+	if (aggregate.primitive_update_kind != AggregatePrimitiveUpdateKind::SUM_INT64 &&
+	    aggregate.primitive_update_kind != AggregatePrimitiveUpdateKind::SUM_HUGEINT) {
 		return false;
 	}
 	return payload.kind == SljitNativeRegionExpressionKind::REFERENCE;

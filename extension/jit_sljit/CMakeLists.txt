@@ -121,7 +121,6 @@ set(JIT_SLJIT_EXTENSION_FILES
     sljit_region_runtime_trace.cpp
     sljit_region_scalar_expression_plan.cpp
     sljit_region_sink_plan.cpp
-    sljit_region_source_filter_plan.cpp
     sljit_region_source_plan.cpp
     sljit_typed_expression_codegen.cpp
     sljit_typed_expression_control_codegen.cpp

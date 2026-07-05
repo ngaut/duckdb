@@ -95,15 +95,15 @@ static bool TryResolveDirectNewGroupedStateAddresses(ExecutionRegionRuntime &run
 	return resolved;
 }
 
-static bool TryExecuteDirectGroupedFusedPayloadUpdate(
+static bool TryExecuteDirectGroupedStateAddressPayloadUpdate(
     ExecutionRegionRuntime &runtime, SljitRegionExecutionScratch &scratch, idx_t op_idx, SljitExecutableRegionOp &op,
     DataChunk &input, const vector<const ExecutionPrimitiveAggregateUpdateLane *> &payload_lanes,
     ExecutionGroupedAggregateStateAddressBinding &grouped_state, SljitAggregatePayloadAdapterScratch &payload_scratch,
     bool finish = true, optional_ptr<const ExecutionDenseGroupDomain> dense_domain = nullptr) {
 	auto stage_start = SljitRegionStageStart(runtime);
 	auto update_state = SljitBuildGroupedStateAddressUpdateState(op, input, payload_lanes, payload_scratch);
-	const char *stage_name = "direct_new_grouped_fused_payload_update";
-	const char *miss_stage_name = "direct_new_grouped_fused_payload_update_miss";
+	const char *stage_name = "direct_new_grouped_primitive_payload_update";
+	const char *miss_stage_name = "direct_new_grouped_primitive_payload_update_miss";
 	auto updated = ExecuteSljitRegionRecordedOperation(
 	    runtime, op_idx, op.kind, stage_name, stage_start, [&](optional_ptr<ExecutionOperatorStageRecorder> recorder) {
 		    return grouped_state.state->TryUpdateNewGroupsWithSelectedStateAddresses(
@@ -113,12 +113,12 @@ static bool TryExecuteDirectGroupedFusedPayloadUpdate(
 	scratch.RecordDirectNewAggregateUpdateResult(op_idx, updated);
 	RecordSljitRegionStageRuntimePath(runtime, op_idx, op.kind, updated ? stage_name : miss_stage_name, stage_start);
 	if (updated) {
-		RecordSljitRegionMaterializationBoundary(runtime, op.kind, "state_address_selection_new_update", input.size());
+		RecordSljitRegionMaterializationBoundary(runtime, op.kind, "direct_state_update", input.size());
 	}
 	return updated;
 }
 
-static bool TryExecuteDirectProjectedGroupedFusedPayloadUpdate(
+static bool TryExecuteDirectProjectedGroupedStateAddressPayloadUpdate(
     ExecutionRegionRuntime &runtime, SljitRegionExecutionScratch &scratch, idx_t op_idx, SljitExecutableRegionOp &op,
     DataChunk &groups, DataChunk &payload_input, const vector<idx_t> &payload_source_indices,
     const vector<const ExecutionPrimitiveAggregateUpdateLane *> &payload_lanes,

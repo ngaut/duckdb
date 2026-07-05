@@ -8,7 +8,8 @@
 
 #pragma once
 
-#include "sljit_aggregate_count_star_preaggregation.hpp"
+#include "sljit_aggregate_count_star_fixed_preaggregation.hpp"
+#include "sljit_aggregate_count_star_string_preaggregation.hpp"
 #include "sljit_full_pipeline_runtime.hpp"
 #include "sljit_grouped_aggregate_update_runtime.hpp"
 #include "sljit_grouped_count_star_update_runtime.hpp"
@@ -21,7 +22,7 @@ namespace duckdb {
 enum class SljitGroupedAggregateUpdateStrategyKind : uint8_t {
 	INVALID,
 	COUNT_STAR_PREAGGREGATION,
-	DISTINCT_COUNT_POINTER
+	DIRECT_PRIMITIVE_PAYLOAD_UPDATE
 };
 
 enum class SljitGroupedAggregateUpdateInputKind : uint8_t { MATERIALIZED, PROJECTED_INPUT };
@@ -54,13 +55,23 @@ static bool SljitGroupedAggregateUpdateCanUseCountStarPreaggregation(const Sljit
 	return aggregate.child_count == 0 && aggregate.primitive_update_kind == AggregatePrimitiveUpdateKind::COUNT_STAR;
 }
 
+static bool SljitGroupedAggregateUpdateCanUseDirectPrimitivePayloadUpdate(const SljitExecutableRegionOp &op) {
+	if (op.kind != SljitNativeRegionOpKind::AGGREGATE_UPDATE ||
+	    op.aggregate_update.plan.sink_info.kind != ExecutionRegionSinkKind::HASH_AGGREGATE_UPDATE ||
+	    !op.aggregate_update.plan.use_primitive_payloads) {
+		return false;
+	}
+	auto &sink_info = op.aggregate_update.plan.sink_info;
+	return !sink_info.groups.empty() && sink_info.aggregates.size() == op.aggregate_update.payloads.size();
+}
+
 static SljitGroupedAggregateUpdateStrategyKind
 SljitChooseGroupedAggregateUpdateStrategy(const SljitExecutableRegionOp &op) {
-	if (op.aggregate_update.plan.sink_info.aggregate_contract.distinct_count_pointer_keys) {
-		return SljitGroupedAggregateUpdateStrategyKind::DISTINCT_COUNT_POINTER;
-	}
 	if (SljitGroupedAggregateUpdateCanUseCountStarPreaggregation(op)) {
 		return SljitGroupedAggregateUpdateStrategyKind::COUNT_STAR_PREAGGREGATION;
+	}
+	if (SljitGroupedAggregateUpdateCanUseDirectPrimitivePayloadUpdate(op)) {
+		return SljitGroupedAggregateUpdateStrategyKind::DIRECT_PRIMITIVE_PAYLOAD_UPDATE;
 	}
 	return SljitGroupedAggregateUpdateStrategyKind::INVALID;
 }
@@ -136,25 +147,40 @@ static bool SljitTryBuildCountStarGroupProjection(const SljitExecutableRegionOp 
 	SljitExecutableRegionExpression group_expression;
 	SljitBuildBorrowedProjectionExpression(projection_op.projections[group.input_index], group_expression);
 	group_projection.projections.push_back(std::move(group_expression));
-	return SljitCountStarProjectionInputSupported(group_projection);
+	return true;
+}
+
+static SljitGroupedAggregateUpdateStrategyKind
+SljitChooseProjectedInputGroupedAggregateUpdateStrategy(const vector<SljitExecutableRegionOp> &ops,
+                                                        idx_t first_projection_idx, idx_t final_projection_idx,
+                                                        idx_t aggregate_idx) {
+	if (!SljitCanBindProjectionChainPrimitive(ops, first_projection_idx, final_projection_idx) ||
+	    !SljitCanBindGroupedAggregateUpdatePrimitive(ops, aggregate_idx) ||
+	    SljitChooseGroupedAggregateUpdateStrategy(ops[aggregate_idx]) ==
+	        SljitGroupedAggregateUpdateStrategyKind::INVALID) {
+		return SljitGroupedAggregateUpdateStrategyKind::INVALID;
+	}
+	SljitExecutableRegionOp semantic_projection;
+	if (!SljitBuildProjectionChainComposedProjection(ops, first_projection_idx, final_projection_idx,
+	                                                 semantic_projection)) {
+		return SljitGroupedAggregateUpdateStrategyKind::INVALID;
+	}
+	SljitExecutableRegionOp group_projection;
+	if (!SljitTryBuildCountStarGroupProjection(semantic_projection, ops[aggregate_idx], group_projection)) {
+		return SljitGroupedAggregateUpdateStrategyKind::INVALID;
+	}
+	if (SljitCountStarProjectionInputSupported(group_projection)) {
+		return SljitGroupedAggregateUpdateStrategyKind::COUNT_STAR_PREAGGREGATION;
+	}
+	return SljitGroupedAggregateUpdateStrategyKind::INVALID;
 }
 
 static bool SljitCanBindProjectedInputGroupedAggregateUpdatePrimitive(const vector<SljitExecutableRegionOp> &ops,
                                                                       idx_t first_projection_idx,
                                                                       idx_t final_projection_idx, idx_t aggregate_idx) {
-	if (!SljitCanBindProjectionChainPrimitive(ops, first_projection_idx, final_projection_idx) ||
-	    !SljitCanBindGroupedAggregateUpdatePrimitive(ops, aggregate_idx) ||
-	    SljitChooseGroupedAggregateUpdateStrategy(ops[aggregate_idx]) !=
-	        SljitGroupedAggregateUpdateStrategyKind::COUNT_STAR_PREAGGREGATION) {
-		return false;
-	}
-	SljitExecutableRegionOp semantic_projection;
-	if (!SljitBuildProjectionChainSemanticProjection(ops, first_projection_idx, final_projection_idx,
-	                                                 semantic_projection)) {
-		return false;
-	}
-	SljitExecutableRegionOp group_projection;
-	return SljitTryBuildCountStarGroupProjection(semantic_projection, ops[aggregate_idx], group_projection);
+	return SljitChooseProjectedInputGroupedAggregateUpdateStrategy(ops, first_projection_idx, final_projection_idx,
+	                                                               aggregate_idx) !=
+	       SljitGroupedAggregateUpdateStrategyKind::INVALID;
 }
 
 static bool SljitGroupedAggregateUpdateHasDedicatedBackend(const vector<SljitExecutableRegionOp> &ops,
@@ -190,6 +216,8 @@ SljitBindProjectedInputGroupedAggregateUpdatePrimitive(const vector<SljitExecuta
 		throw InternalException("SLJIT projected grouped aggregate update primitive cannot bind requested operators");
 	}
 	auto primitive = SljitBindGroupedAggregateUpdatePrimitive(ops, aggregate_idx);
+	primitive.strategy = SljitChooseProjectedInputGroupedAggregateUpdateStrategy(ops, first_projection_idx,
+	                                                                             final_projection_idx, aggregate_idx);
 	primitive.input_kind = SljitGroupedAggregateUpdateInputKind::PROJECTED_INPUT;
 	primitive.first_projection_idx = first_projection_idx;
 	primitive.final_projection_idx = final_projection_idx;
@@ -202,52 +230,26 @@ static bool SljitCanBindGroupedAggregateUpdatePrimitive(const vector<SljitExecut
 		return false;
 	}
 	auto strategy = SljitChooseGroupedAggregateUpdateStrategy(ops[primitive.aggregate_idx]);
-	if (strategy == SljitGroupedAggregateUpdateStrategyKind::INVALID || primitive.strategy != strategy) {
+	if (strategy == SljitGroupedAggregateUpdateStrategyKind::INVALID) {
 		return false;
 	}
 	switch (primitive.input_kind) {
 	case SljitGroupedAggregateUpdateInputKind::MATERIALIZED:
-		return primitive.first_projection_idx == DConstants::INVALID_INDEX &&
+		return primitive.strategy == strategy && primitive.first_projection_idx == DConstants::INVALID_INDEX &&
 		       primitive.final_projection_idx == DConstants::INVALID_INDEX;
 	case SljitGroupedAggregateUpdateInputKind::PROJECTED_INPUT:
-		return SljitCanBindProjectedInputGroupedAggregateUpdatePrimitive(
-		    ops, primitive.first_projection_idx, primitive.final_projection_idx, primitive.aggregate_idx);
+		return primitive.strategy ==
+		       SljitChooseProjectedInputGroupedAggregateUpdateStrategy(
+		           ops, primitive.first_projection_idx, primitive.final_projection_idx, primitive.aggregate_idx);
 	}
 	return false;
-}
-
-static bool SljitBindGroupedAggregateUpdateInputView(const SljitRuntimeBatchView &input, DataChunk *&chunk) {
-	if (!input.HasChunk()) {
-		throw InternalException("SLJIT grouped aggregate update requires an input chunk");
-	}
-	chunk = &input.Chunk();
-	if (input.count > chunk->size()) {
-		throw InternalException("SLJIT grouped aggregate update count exceeds input chunk cardinality");
-	}
-	if (!input.selection && input.count != chunk->size()) {
-		throw InternalException("SLJIT grouped aggregate update requires a selection for partial chunk input");
-	}
-	return input.count > 0;
-}
-
-static DataChunk &SljitBindMaterializedGroupedAggregateUpdateInput(const SljitRuntimeBatchView &input) {
-	DataChunk *chunk;
-	if (!SljitBindGroupedAggregateUpdateInputView(input, chunk)) {
-		return *chunk;
-	}
-	if (!input.IsMaterializedChunk()) {
-		throw InternalException("SLJIT grouped aggregate update requires a materialized batch view");
-	}
-	if (input.count != chunk->size()) {
-		throw InternalException("SLJIT grouped aggregate update count does not match input chunk cardinality");
-	}
-	return *chunk;
 }
 
 struct SljitGroupedAggregateUpdateRuntimeState {
 	bool Prepare(ExecutionRegionRuntime &runtime, vector<SljitExecutableRegionOp> &ops,
 	             SljitRegionExecutionScratch &scratch, const SljitGroupedAggregateUpdatePrimitive &primitive) {
-		if (primitive.strategy == SljitGroupedAggregateUpdateStrategyKind::DISTINCT_COUNT_POINTER) {
+		if (primitive.strategy == SljitGroupedAggregateUpdateStrategyKind::DIRECT_PRIMITIVE_PAYLOAD_UPDATE) {
+			deferred_grouped_finish = false;
 			return true;
 		}
 		if (primitive.strategy != SljitGroupedAggregateUpdateStrategyKind::COUNT_STAR_PREAGGREGATION) {
@@ -261,9 +263,16 @@ struct SljitGroupedAggregateUpdateRuntimeState {
 			group_types.push_back(group.type);
 		}
 		preaggregated_groups.Initialize(runtime.GetAllocator(), group_types);
+		pending_preaggregated_groups.Initialize(runtime.GetAllocator(), group_types);
+		pending_row_groups.Initialize(runtime.GetAllocator(), group_types);
+		pending_preaggregated_count_deltas.clear();
+		pending_row_count_deltas.clear();
+		pending_preaggregated_row_count = 0;
+		pending_row_count = 0;
+		deferred_grouped_finish = false;
 		if (primitive.input_kind == SljitGroupedAggregateUpdateInputKind::PROJECTED_INPUT) {
 			SljitExecutableRegionOp semantic_projection;
-			if (!SljitBuildProjectionChainSemanticProjection(ops, primitive.first_projection_idx,
+			if (!SljitBuildProjectionChainComposedProjection(ops, primitive.first_projection_idx,
 			                                                 primitive.final_projection_idx, semantic_projection) ||
 			    !SljitTryBuildCountStarGroupProjection(semantic_projection, aggregate_op,
 			                                           projected_count_star_group_projection)) {
@@ -279,45 +288,57 @@ struct SljitGroupedAggregateUpdateRuntimeState {
 	bool Execute(ExecutionRegionRuntime &runtime, ExecutionRegionResult &result, vector<SljitExecutableRegionOp> &ops,
 	             SljitRegionExecutionScratch &scratch, const SljitGroupedAggregateUpdatePrimitive &primitive,
 	             const SljitRuntimeBatchView &input, idx_t &processed_batches) {
-		DataChunk *input_chunk;
-		if (!SljitBindGroupedAggregateUpdateInputView(input, input_chunk)) {
+		if (input.count == 0) {
 			return false;
 		}
-		(void)input_chunk;
 		switch (primitive.strategy) {
-		case SljitGroupedAggregateUpdateStrategyKind::DISTINCT_COUNT_POINTER:
-			return ExecuteDistinctCountPointer(runtime, result, ops, scratch, primitive, input, processed_batches);
 		case SljitGroupedAggregateUpdateStrategyKind::COUNT_STAR_PREAGGREGATION:
 			return ExecuteCountStarPreaggregation(runtime, result, ops, scratch, primitive, input, processed_batches);
+		case SljitGroupedAggregateUpdateStrategyKind::DIRECT_PRIMITIVE_PAYLOAD_UPDATE:
+			return ExecuteDirectPrimitivePayloadUpdate(runtime, result, ops, scratch, primitive, input,
+			                                           processed_batches);
 		case SljitGroupedAggregateUpdateStrategyKind::INVALID:
 			break;
 		}
 		throw InternalException("SLJIT grouped aggregate update primitive has an unknown strategy");
 	}
 
-	bool Flush(ExecutionRegionRuntime &runtime, SljitRegionExecutionScratch &scratch,
-	           const SljitGroupedAggregateUpdatePrimitive &primitive) {
+	bool Flush(ExecutionRegionRuntime &runtime, vector<SljitExecutableRegionOp> &ops,
+	           SljitRegionExecutionScratch &scratch, const SljitGroupedAggregateUpdatePrimitive &primitive) {
+		if (primitive.strategy == SljitGroupedAggregateUpdateStrategyKind::DIRECT_PRIMITIVE_PAYLOAD_UPDATE) {
+			SljitFinishDeferredGroupedAggregateUpdate(runtime, scratch, primitive.aggregate_idx,
+			                                          deferred_grouped_finish);
+			return false;
+		}
+		if (!FlushPendingPreaggregatedCountStar(runtime, scratch, primitive.aggregate_idx,
+		                                        ops[primitive.aggregate_idx])) {
+			throw InternalException("SLJIT grouped count-star pending preaggregation flush failed");
+		}
+		if (!FlushPendingRowCountStar(runtime, scratch, primitive.aggregate_idx, ops[primitive.aggregate_idx])) {
+			throw InternalException("SLJIT grouped count-star pending row-delta flush failed");
+		}
 		SljitFinishDeferredGroupedAggregateUpdate(runtime, scratch, primitive.aggregate_idx, deferred_grouped_finish);
 		return false;
 	}
 
 private:
-	bool ExecuteDistinctCountPointer(ExecutionRegionRuntime &runtime, ExecutionRegionResult &result,
-	                                 vector<SljitExecutableRegionOp> &ops, SljitRegionExecutionScratch &scratch,
-	                                 const SljitGroupedAggregateUpdatePrimitive &primitive,
-	                                 const SljitRuntimeBatchView &input_view, idx_t &processed_batches) {
-		auto &input = SljitBindMaterializedGroupedAggregateUpdateInput(input_view);
+	bool ExecuteDirectPrimitivePayloadUpdate(ExecutionRegionRuntime &runtime, ExecutionRegionResult &result,
+	                                         vector<SljitExecutableRegionOp> &ops,
+	                                         SljitRegionExecutionScratch &scratch,
+	                                         const SljitGroupedAggregateUpdatePrimitive &primitive,
+	                                         const SljitRuntimeBatchView &input, idx_t &processed_batches) {
+		auto &input_chunk = SljitBindMaterializedRuntimeBatchInput(input, "SLJIT grouped aggregate direct update");
 		auto &aggregate_op = ops[primitive.aggregate_idx];
-		auto &binding = SljitBindRecordedNativeSink(
-		    runtime, runtime.ExecutionOperators(), scratch, primitive.aggregate_idx, aggregate_op.kind, input,
-		    aggregate_op.aggregate_update.plan.sink_info, "aggregate-update-runtime-binding-failed",
-		    "SLJIT grouped distinct count-pointer update");
-		auto sink_result = SljitExecuteDistinctCountPointerAggregateUpdate(
-		    runtime, binding, primitive.aggregate_idx, aggregate_op, input, true, &deferred_grouped_finish);
-		if (SljitSinkResultStopsPipeline(sink_result)) {
+		auto &native_runtime = runtime.ExecutionOperators();
+		auto sink_result =
+		    SljitExecutePrimitiveAggregateUpdate(runtime, native_runtime, scratch, primitive.aggregate_idx,
+		                                         aggregate_op, input_chunk, nullptr, DConstants::INVALID_INDEX, true,
+		                                         optional_ptr<bool>(&deferred_grouped_finish));
+		sink_result = native_runtime.RecordSinkResult(input_chunk, sink_result);
+		if (SljitNativeSinkResultStopsExecution(runtime, sink_result, result)) {
 			SljitFinishDeferredGroupedAggregateUpdate(runtime, scratch, primitive.aggregate_idx,
 			                                          deferred_grouped_finish);
-			return SljitNativeSinkResultStopsExecution(runtime, sink_result, result);
+			return true;
 		}
 		processed_batches++;
 		return false;
@@ -343,10 +364,9 @@ private:
 			throw InternalException("SLJIT grouped count-star preaggregation descriptor is not prepared");
 		}
 		if (primitive.input_kind == SljitGroupedAggregateUpdateInputKind::PROJECTED_INPUT) {
-			return TryExecuteProjectedPreaggregatedCountStar(runtime, scratch, primitive.aggregate_idx, aggregate_op,
-			                                                 input);
+			return TryExecuteProjectedPreaggregatedCountStar(runtime, scratch, primitive, aggregate_op, input);
 		}
-		auto &input_chunk = SljitBindMaterializedGroupedAggregateUpdateInput(input);
+		auto &input_chunk = SljitBindMaterializedRuntimeBatchInput(input, "SLJIT grouped count-star update");
 		return TryExecuteMaterializedPreaggregatedCountStar(runtime, scratch, primitive.aggregate_idx, aggregate_op,
 		                                                    input_chunk);
 	}
@@ -358,9 +378,8 @@ private:
 		if (TryPreaggregateFixedWidthCountStarGroups(input, preaggregated_groups, preaggregated_count_deltas)) {
 			RecordSljitRegionStageRuntime(runtime, aggregate_idx, aggregate_op.kind,
 			                              "primitive_grouped_preaggregate_count_star_groups", preaggregate_stage_start);
-			if (!TryExecutePreparedPreaggregatedCountStarGroupedAggregateUpdate(
-			        runtime, scratch, aggregate_idx, aggregate_op, preaggregated_groups, preaggregated_count_deltas,
-			        count_star_update, input.size(), true, &deferred_grouped_finish)) {
+			if (!AccumulatePreaggregatedCountStar(runtime, scratch, aggregate_idx, aggregate_op, preaggregated_groups,
+			                                      preaggregated_count_deltas, input.size())) {
 				return false;
 			}
 			RecordSljitRegionRuntimePath(runtime, aggregate_op.kind,
@@ -370,9 +389,11 @@ private:
 		row_count_deltas.assign(input.size(), 1);
 		RecordSljitRegionStageRuntime(runtime, aggregate_idx, aggregate_op.kind,
 		                              "primitive_grouped_count_star_row_deltas", preaggregate_stage_start);
-		if (!TryExecutePreparedPreaggregatedCountStarGroupedAggregateUpdate(
-		        runtime, scratch, aggregate_idx, aggregate_op, input, row_count_deltas, count_star_update, input.size(),
-		        true, &deferred_grouped_finish)) {
+		if (!FlushPendingPreaggregatedCountStar(runtime, scratch, aggregate_idx, aggregate_op)) {
+			return false;
+		}
+		if (!AccumulateRowCountStar(runtime, scratch, aggregate_idx, aggregate_op, input, row_count_deltas,
+		                            input.size())) {
 			return false;
 		}
 		RecordSljitRegionRuntimePath(runtime, aggregate_op.kind, "primitive_grouped_count_star_row_update",
@@ -392,23 +413,21 @@ private:
 	}
 
 	bool TryExecuteProjectedPreaggregatedCountStar(ExecutionRegionRuntime &runtime,
-	                                               SljitRegionExecutionScratch &scratch, idx_t aggregate_idx,
+	                                               SljitRegionExecutionScratch &scratch,
+	                                               const SljitGroupedAggregateUpdatePrimitive &primitive,
 	                                               SljitExecutableRegionOp &aggregate_op,
 	                                               const SljitRuntimeBatchView &input) {
-		DataChunk *input_chunk;
-		if (!SljitBindGroupedAggregateUpdateInputView(input, input_chunk)) {
-			return false;
-		}
+		auto &input_chunk = SljitBindRuntimeBatchInput(input, "SLJIT projected grouped count-star update");
+		const auto aggregate_idx = primitive.aggregate_idx;
 		auto preaggregate_stage_start = SljitRegionStageStart(runtime);
-		if (SljitTryPreaggregateProjectedCountStarGroups(projected_count_star_group_projection, *input_chunk,
+		if (SljitTryPreaggregateProjectedCountStarGroups(projected_count_star_group_projection, input_chunk,
 		                                                 input.selection, input.count, preaggregated_groups,
 		                                                 preaggregated_count_deltas)) {
 			RecordSljitRegionStageRuntime(runtime, aggregate_idx, aggregate_op.kind,
 			                              "primitive_projected_preaggregate_count_star_groups",
 			                              preaggregate_stage_start);
-			if (!TryExecutePreparedPreaggregatedCountStarGroupedAggregateUpdate(
-			        runtime, scratch, aggregate_idx, aggregate_op, preaggregated_groups, preaggregated_count_deltas,
-			        count_star_update, input.count, true, &deferred_grouped_finish)) {
+			if (!AccumulatePreaggregatedCountStar(runtime, scratch, aggregate_idx, aggregate_op, preaggregated_groups,
+			                                      preaggregated_count_deltas, input.count)) {
 				return false;
 			}
 			RecordSljitRegionRuntimePath(runtime, aggregate_op.kind,
@@ -417,21 +436,124 @@ private:
 		}
 
 		preaggregated_groups.Reset();
-		SljitExecuteProjectionExpression(projected_count_star_group_projection.projections[0], *input_chunk,
+		SljitExecuteProjectionExpression(projected_count_star_group_projection.projections[0], input_chunk,
 		                                 preaggregated_groups.data[0], input.selection, input.count,
 		                                 projected_count_star_group_scratch);
 		preaggregated_groups.SetChildCardinality(input.count);
 		row_count_deltas.assign(input.count, 1);
 		RecordSljitRegionStageRuntime(runtime, aggregate_idx, aggregate_op.kind,
 		                              "primitive_projected_count_star_row_groups", preaggregate_stage_start);
-		if (!TryExecutePreparedPreaggregatedCountStarGroupedAggregateUpdate(
-		        runtime, scratch, aggregate_idx, aggregate_op, preaggregated_groups, row_count_deltas,
-		        count_star_update, input.count, true, &deferred_grouped_finish)) {
+		if (!FlushPendingPreaggregatedCountStar(runtime, scratch, aggregate_idx, aggregate_op)) {
+			return false;
+		}
+		if (!AccumulateRowCountStar(runtime, scratch, aggregate_idx, aggregate_op, preaggregated_groups,
+		                            row_count_deltas, input.count)) {
 			return false;
 		}
 		RecordSljitRegionRuntimePath(runtime, aggregate_op.kind, "primitive_projected_count_star_row_update",
 		                             input.count);
 		return true;
+	}
+
+	bool AccumulatePreaggregatedCountStar(ExecutionRegionRuntime &runtime, SljitRegionExecutionScratch &scratch,
+	                                      idx_t aggregate_idx, SljitExecutableRegionOp &aggregate_op,
+	                                      DataChunk &compact_groups, const vector<int64_t> &count_deltas,
+	                                      idx_t represented_row_count) {
+		if (!FlushPendingRowCountStar(runtime, scratch, aggregate_idx, aggregate_op)) {
+			return false;
+		}
+		if (TryAccumulatePreaggregatedCountStarGroups(compact_groups, count_deltas, pending_preaggregated_groups,
+		                                              pending_preaggregated_count_deltas)) {
+			pending_preaggregated_row_count += represented_row_count;
+			RecordSljitRegionMaterializationBoundary(runtime, aggregate_op.kind,
+			                                         "pending_preaggregated_count_star_groups",
+			                                         pending_preaggregated_groups.size());
+			return true;
+		}
+		if (!FlushPendingPreaggregatedCountStar(runtime, scratch, aggregate_idx, aggregate_op)) {
+			return false;
+		}
+		if (TryAccumulatePreaggregatedCountStarGroups(compact_groups, count_deltas, pending_preaggregated_groups,
+		                                              pending_preaggregated_count_deltas)) {
+			pending_preaggregated_row_count += represented_row_count;
+			RecordSljitRegionMaterializationBoundary(runtime, aggregate_op.kind,
+			                                         "pending_preaggregated_count_star_groups",
+			                                         pending_preaggregated_groups.size());
+			return true;
+		}
+		return TryExecutePreparedPreaggregatedCountStarGroupedAggregateUpdate(
+		    runtime, scratch, aggregate_idx, aggregate_op, compact_groups, count_deltas, count_star_update,
+		    represented_row_count, true, &deferred_grouped_finish);
+	}
+
+	bool FlushPendingPreaggregatedCountStar(ExecutionRegionRuntime &runtime, SljitRegionExecutionScratch &scratch,
+	                                        idx_t aggregate_idx, SljitExecutableRegionOp &aggregate_op) {
+		if (pending_preaggregated_groups.ColumnCount() == 0 || pending_preaggregated_groups.size() == 0) {
+			return true;
+		}
+		const auto represented_row_count = pending_preaggregated_row_count;
+		auto updated = TryExecutePreparedPreaggregatedCountStarGroupedAggregateUpdate(
+		    runtime, scratch, aggregate_idx, aggregate_op, pending_preaggregated_groups,
+		    pending_preaggregated_count_deltas, count_star_update, represented_row_count, true,
+		    &deferred_grouped_finish);
+		pending_preaggregated_groups.Reset();
+		pending_preaggregated_count_deltas.clear();
+		pending_preaggregated_row_count = 0;
+		if (updated) {
+			RecordSljitRegionRuntimePath(runtime, aggregate_op.kind, "primitive_pending_preaggregated_count_star_flush",
+			                             represented_row_count);
+		}
+		return updated;
+	}
+
+	bool AccumulateRowCountStar(ExecutionRegionRuntime &runtime, SljitRegionExecutionScratch &scratch,
+	                            idx_t aggregate_idx, SljitExecutableRegionOp &aggregate_op, DataChunk &groups,
+	                            const vector<int64_t> &count_deltas, idx_t represented_row_count) {
+		if (groups.size() == 0) {
+			return true;
+		}
+		if (count_deltas.size() < groups.size()) {
+			return false;
+		}
+		if (pending_row_groups.ColumnCount() == 0) {
+			return TryExecutePreparedPreaggregatedCountStarGroupedAggregateUpdate(
+			    runtime, scratch, aggregate_idx, aggregate_op, groups, count_deltas, count_star_update,
+			    represented_row_count, true, &deferred_grouped_finish);
+		}
+		if (pending_row_groups.size() + groups.size() > STANDARD_VECTOR_SIZE &&
+		    !FlushPendingRowCountStar(runtime, scratch, aggregate_idx, aggregate_op)) {
+			return false;
+		}
+		pending_row_groups.Append(groups);
+		for (idx_t row_idx = 0; row_idx < groups.size(); row_idx++) {
+			pending_row_count_deltas.push_back(count_deltas[row_idx]);
+		}
+		pending_row_count += represented_row_count;
+		RecordSljitRegionMaterializationBoundary(runtime, aggregate_op.kind, "pending_count_star_row_groups",
+		                                         pending_row_groups.size());
+		if (pending_row_groups.size() < STANDARD_VECTOR_SIZE) {
+			return true;
+		}
+		return FlushPendingRowCountStar(runtime, scratch, aggregate_idx, aggregate_op);
+	}
+
+	bool FlushPendingRowCountStar(ExecutionRegionRuntime &runtime, SljitRegionExecutionScratch &scratch,
+	                              idx_t aggregate_idx, SljitExecutableRegionOp &aggregate_op) {
+		if (pending_row_groups.ColumnCount() == 0 || pending_row_groups.size() == 0) {
+			return true;
+		}
+		const auto represented_row_count = pending_row_count;
+		auto updated = TryExecutePreparedPreaggregatedCountStarGroupedAggregateUpdate(
+		    runtime, scratch, aggregate_idx, aggregate_op, pending_row_groups, pending_row_count_deltas,
+		    count_star_update, represented_row_count, true, &deferred_grouped_finish);
+		pending_row_groups.Reset();
+		pending_row_count_deltas.clear();
+		pending_row_count = 0;
+		if (updated) {
+			RecordSljitRegionRuntimePath(runtime, aggregate_op.kind, "primitive_pending_count_star_row_flush",
+			                             represented_row_count);
+		}
+		return updated;
 	}
 
 private:
@@ -440,6 +562,12 @@ private:
 	DataChunk preaggregated_groups;
 	vector<int64_t> preaggregated_count_deltas;
 	vector<int64_t> row_count_deltas;
+	DataChunk pending_preaggregated_groups;
+	vector<int64_t> pending_preaggregated_count_deltas;
+	idx_t pending_preaggregated_row_count = 0;
+	DataChunk pending_row_groups;
+	vector<int64_t> pending_row_count_deltas;
+	idx_t pending_row_count = 0;
 	SljitExecutableRegionOp projected_count_star_group_projection;
 	SljitExpressionAdapterScratch projected_count_star_group_scratch;
 	SljitCountStarGroupedAggregateUpdateDescriptor count_star_update;

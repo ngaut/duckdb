@@ -10,9 +10,10 @@
 
 #include "sljit_delim_join_sink_runtime.hpp"
 #include "sljit_full_pipeline_primitive_contract.hpp"
+#include "sljit_full_pipeline_runtime.hpp"
 #include "sljit_grouped_aggregate_update_primitive.hpp"
 #include "sljit_join_projection_aggregate_update_runtime.hpp"
-#include "sljit_native_tail_handoff_runtime.hpp"
+#include "sljit_runtime_batch_view.hpp"
 
 namespace duckdb {
 
@@ -72,7 +73,7 @@ public:
 	           idx_t &processed_batches) {
 		switch (terminal_step.kind) {
 		case SljitFullPipelinePrimitiveKind::GROUPED_AGGREGATE_UPDATE:
-			return grouped_aggregate_update.Flush(runtime, scratch, terminal_step.grouped_aggregate_update);
+			return grouped_aggregate_update.Flush(runtime, ops, scratch, terminal_step.grouped_aggregate_update);
 		case SljitFullPipelinePrimitiveKind::JOIN_PROJECTION_AGGREGATE_UPDATE:
 			return join_projection_aggregate_update.Flush(
 			    runtime, result, ops, scratch, terminal_step.join_projection_aggregate_update, execute_hash_join_probe);
@@ -110,12 +111,18 @@ private:
 	                              SljitRegionExecutionScratch &scratch,
 	                              const SljitFullPipelinePrimitiveStep &terminal_step,
 	                              const SljitRuntimeBatchView &input, idx_t &processed_batches) {
-		auto stopped = SljitExecuteNativeTailHandoffBatch(runtime, result, scratch, terminal_step.Op(0), input,
-		                                                  processed_batches, execute_native_full_pipeline_from);
+		if (input.count == 0) {
+			return false;
+		}
+		auto &chunk = SljitBindMaterializedRuntimeBatchInput(input, "SLJIT native tail handoff");
+		auto sink_result = execute_native_full_pipeline_from(scratch, terminal_step.Op(0), chunk);
+		auto stopped = SljitNativeSinkResultStopsExecution(runtime, sink_result, result);
 		if (stopped) {
 			execute_native_full_pipeline_from.Finalize(scratch);
+			return true;
 		}
-		return stopped;
+		processed_batches++;
+		return false;
 	}
 
 	EXECUTE_NATIVE_FULL_PIPELINE_FROM &execute_native_full_pipeline_from;

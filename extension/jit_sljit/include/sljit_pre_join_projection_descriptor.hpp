@@ -44,22 +44,6 @@ struct SljitPreJoinProjectionViewDescriptor {
 	}
 };
 
-struct SljitInt64ToInt32PreJoinProjection {
-	idx_t projection_idx = DConstants::INVALID_INDEX;
-	idx_t hash_join_idx = DConstants::INVALID_INDEX;
-	idx_t key_source_idx = DConstants::INVALID_INDEX;
-	idx_t payload_source_idx = DConstants::INVALID_INDEX;
-	bool source_range_fits_int32 = false;
-
-	bool HasInt64ToInt32Projection() const {
-		return projection_idx != DConstants::INVALID_INDEX;
-	}
-
-	bool UsesUncheckedKeyCast() const {
-		return HasInt64ToInt32Projection() && source_range_fits_int32;
-	}
-};
-
 static bool SljitTryReadSignedIntegerValue(const Value &value, int64_t &result) {
 	if (value.IsNull()) {
 		return false;
@@ -269,35 +253,6 @@ static bool SljitTryBuildPreJoinProjectionViewDescriptor(const vector<SljitExecu
 		    key0_column.source_range_fits_target;
 	}
 	return !descriptor.columns.empty();
-}
-
-static bool SljitTryBuildInt64ToInt32PreJoinProjection(const vector<SljitExecutableRegionOp> &ops, idx_t projection_idx,
-                                                       idx_t hash_join_idx, const vector<Value> &source_min_values,
-                                                       const vector<Value> &source_max_values,
-                                                       SljitInt64ToInt32PreJoinProjection &descriptor) {
-	descriptor = SljitInt64ToInt32PreJoinProjection();
-	SljitPreJoinProjectionViewDescriptor view;
-	if (!SljitTryBuildPreJoinProjectionViewDescriptor(ops, projection_idx, hash_join_idx, source_min_values,
-	                                                  source_max_values, view)) {
-		return false;
-	}
-	if (view.columns.size() != 2 || view.columns[0].kind != SljitPreJoinProjectionViewColumnKind::INT64_TO_INT32_CAST ||
-	    view.columns[0].source_idx != 0 || view.columns[1].kind != SljitPreJoinProjectionViewColumnKind::REFERENCE ||
-	    view.columns[1].source_idx != 1) {
-		return false;
-	}
-	auto &join = ops[hash_join_idx].hash_join_probe.plan;
-	if (join.keys.size() != 1 || join.keys[0].key_input_index != 0 ||
-	    join.keys[0].key_kind != SljitNativeHashJoinKeyKind::INT32) {
-		return false;
-	}
-
-	descriptor.projection_idx = projection_idx;
-	descriptor.hash_join_idx = hash_join_idx;
-	descriptor.key_source_idx = view.columns[0].source_idx;
-	descriptor.payload_source_idx = view.columns[1].source_idx;
-	descriptor.source_range_fits_int32 = view.columns[0].source_range_fits_target;
-	return true;
 }
 
 static bool SljitHashJoinSourceKey0RangeFitsInt32(const vector<SljitExecutableRegionOp> &ops, idx_t hash_join_idx,

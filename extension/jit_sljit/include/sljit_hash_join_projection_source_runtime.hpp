@@ -82,16 +82,6 @@ static bool SljitTryRemapHashJoinProjectionPlanSources(const vector<idx_t> &sour
 	return SljitTryApplyProjectionPlanSources(plan, remap_source, remap_sources, remap_constant, remap_predicate);
 }
 
-static bool SljitTryRemapHashJoinProjectionExpressionInputSources(const vector<idx_t> &source_map,
-                                                                  SljitExecutableRegionExpression &expr) {
-	for (auto &input_source_idx : expr.input_source_indices) {
-		if (!SljitTryRemapHashJoinProjectionSourceIndex(source_map, input_source_idx)) {
-			return false;
-		}
-	}
-	return true;
-}
-
 static bool SljitTryRemapHashJoinProjectionExpressionSources(const vector<idx_t> &source_map,
                                                              SljitExecutableRegionExpression &expr,
                                                              optional_ptr<idx_t> failed_source_index = nullptr) {

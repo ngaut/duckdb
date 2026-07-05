@@ -1526,7 +1526,10 @@ static ExecutionContract BuildExecutionContractSortStateContracts(
 }
 
 static void ApplyExecutionContractFinalizedSourceCardinality(ExecutionContract &contract, optional_idx cardinality) {
+	contract.source.finalized_source_cardinality_required = true;
 	if (!cardinality.IsValid()) {
+		contract.source_boundary_reason += ";finalized_source_cardinality=not_ready";
+		contract.source.reason = contract.source_boundary_reason;
 		return;
 	}
 	const auto count = cardinality.GetIndex();
@@ -1541,15 +1544,9 @@ BuildExecutionContractHashAggregateContract(const PhysicalHashAggregate &aggrega
 static ExecutionRegionAggregateContract
 BuildExecutionContractPerfectHashAggregateContract(const PhysicalPerfectHashAggregate &aggregate);
 
-static bool ExecutionContractHashAggregateUsesDistinctCountPointerKeys(const PhysicalHashAggregate &aggregate) {
-	return aggregate.groupings.size() == 1 && aggregate.groupings[0].distinct_data &&
-	       aggregate.groupings[0].distinct_data->UsesGroupStatePointerKeys();
-}
-
 static string BuildExecutionContractHashAggregateBoundaryReason(const PhysicalHashAggregate &aggregate,
                                                                 const string &marker) {
 	auto &aggregate_data = aggregate.grouped_aggregate_data;
-	const auto distinct_count_pointer_keys = ExecutionContractHashAggregateUsesDistinctCountPointerKeys(aggregate);
 	idx_t distinct_aggregate_count = 0;
 	idx_t distinct_table_count = 0;
 	idx_t distinct_child_count = 0;
@@ -1581,7 +1578,6 @@ static string BuildExecutionContractHashAggregateBoundaryReason(const PhysicalHa
 	result += ";distinct_aggregate_count=" + std::to_string(distinct_aggregate_count);
 	result += ";distinct_table_count=" + std::to_string(distinct_table_count);
 	result += ";distinct_child_count=" + std::to_string(distinct_child_count);
-	result += ";distinct_count_pointer_keys=" + ExecutionContractBool(distinct_count_pointer_keys);
 	result += ";input_group_type_count=" + std::to_string(aggregate.input_group_types.size());
 	result += ";input_group_types=" + BuildExecutionContractLogicalTypeList(aggregate.input_group_types);
 	result += ";non_distinct_filter_count=" + std::to_string(aggregate.non_distinct_filter.size());
@@ -1622,22 +1618,6 @@ static void AddExecutionContractHashAggregateGroupedStateLayout(ExecutionRegionA
 	result.grouped_state_layout_ready = true;
 }
 
-static void AddExecutionContractHashAggregateLookupLayout(ExecutionRegionAggregateContract &result,
-                                                          const PhysicalHashAggregate &aggregate) {
-	if (aggregate.groupings.empty()) {
-		result.hash_lookup_layout_blocker = "hash-aggregate-grouping-layout-missing";
-		return;
-	}
-	ExecutionHashAggregateLookupLayout layout;
-	ExecutionBuildHashAggregateLookupLayout(aggregate.groupings[0].table_data.GetLayout(), layout);
-	result.hash_lookup_layout_present = layout.table_layout_ready;
-	result.hash_lookup_layout_blocker =
-	    layout.blocker.empty() ? "hash-aggregate-lookup-layout-missing" : layout.blocker;
-	result.hash_lookup_layout_row_compare_blocker = layout.row_compare_contract_blocker;
-	result.hash_lookup_layout_backend_lowering_blocker = layout.backend_lowering_blocker;
-	result.hash_lookup_layout_ir = DescribeExecutionHashAggregateLookupLayout(layout);
-}
-
 static void MarkExecutionContractHashAggregateGroupedStateContract(ExecutionRegionAggregateContract &result) {
 	if (!result.grouped_state_layout_ready || result.grouping_set_count != 1 || result.radix_table_count != 1 ||
 	    result.distinct_aggregate_count != 0 || result.aggregate_filter_count != 0 ||
@@ -1646,20 +1626,6 @@ static void MarkExecutionContractHashAggregateGroupedStateContract(ExecutionRegi
 	}
 	result.native_grouped_state_contract.status = ExecutionRegionStateContractStatus::READY;
 	result.native_grouped_state_contract.blocker.clear();
-}
-
-static void MarkExecutionContractHashAggregateLookupContractBoundary(ExecutionRegionAggregateContract &result) {
-	if (result.native_grouped_state_contract.status != ExecutionRegionStateContractStatus::READY) {
-		return;
-	}
-	auto blocker = result.hash_lookup_layout_blocker.empty()
-	                   ? "hash-aggregate-generated-lookup-backend-lowering-missing"
-	                   : result.hash_lookup_layout_blocker;
-	if (blocker.empty()) {
-		MarkExecutionContractNativeOperatorContractReady(result.native_hash_lookup_contract);
-		return;
-	}
-	MarkExecutionContractNativeOperatorContractBlocked(result.native_hash_lookup_contract, std::move(blocker));
 }
 
 static bool ExecutionContractHashAggregateHasDistinctState(const ExecutionRegionAggregateContract &contract) {
@@ -1673,9 +1639,6 @@ static void MarkExecutionContractHashAggregateDistinctStateBoundary(ExecutionReg
 	}
 	if (contract.native_grouped_state_contract.status == ExecutionRegionStateContractStatus::MISSING) {
 		contract.native_grouped_state_contract.blocker = "hash-aggregate-distinct-grouped-state-contract-boundary";
-	}
-	if (contract.native_hash_lookup_contract.status == ExecutionRegionStateContractStatus::MISSING) {
-		contract.native_hash_lookup_contract.blocker = "hash-aggregate-distinct-lookup-contract-boundary";
 	}
 }
 
@@ -1774,8 +1737,6 @@ BuildExecutionContractHashAggregateContract(const PhysicalHashAggregate &aggrega
 	result.present = true;
 	result.kind = ExecutionRegionAggregateOperatorKind::HASH;
 	result.native_grouped_state_contract = BuildExecutionContractNativeGroupedStateContract(result.kind);
-	result.native_hash_lookup_contract =
-	    BuildExecutionContractNativeOperatorContract("hash-aggregate-native-lookup", "hash-aggregate-lookup-boundary");
 	result.native_state_update_contract = BuildExecutionContractNativeOperatorContract(
 	    "hash-aggregate-native-state-update", "hash-aggregate-native-state-update-boundary");
 	auto &aggregate_data = aggregate.grouped_aggregate_data;
@@ -1793,16 +1754,13 @@ BuildExecutionContractHashAggregateContract(const PhysicalHashAggregate &aggrega
 		result.distinct_table_count = aggregate.distinct_collection_info->table_count;
 		result.distinct_child_count = aggregate.distinct_collection_info->total_child_count;
 	}
-	result.distinct_count_pointer_keys = ExecutionContractHashAggregateUsesDistinctCountPointerKeys(aggregate);
 	result.input_group_type_count = aggregate.input_group_types.size();
 	result.input_group_types = aggregate.input_group_types;
 	result.non_distinct_filter_count = aggregate.non_distinct_filter.size();
 	result.distinct_filter_count = aggregate.distinct_filter.size();
 	AddExecutionContractHashAggregateGroupedStateLayout(result, aggregate);
-	AddExecutionContractHashAggregateLookupLayout(result, aggregate);
 	MarkExecutionContractHashAggregateGroupedStateContract(result);
 	MarkExecutionContractHashAggregateDistinctStateBoundary(result);
-	MarkExecutionContractHashAggregateLookupContractBoundary(result);
 	return result;
 }
 
@@ -1847,8 +1805,6 @@ BuildExecutionContractPerfectHashAggregateContract(const PhysicalPerfectHashAggr
 	result.present = true;
 	result.kind = ExecutionRegionAggregateOperatorKind::PERFECT_HASH;
 	result.native_grouped_state_contract = BuildExecutionContractNativeGroupedStateContract(result.kind);
-	result.native_hash_lookup_contract = BuildExecutionContractNativeOperatorContract(
-	    "perfect-hash-aggregate-native-lookup", "perfect-hash-aggregate-lookup-boundary");
 	result.native_state_update_contract = BuildExecutionContractNativeOperatorContract(
 	    "perfect-hash-aggregate-native-state-update", "perfect-hash-aggregate-native-state-update-boundary");
 	AddExecutionContractAggregateContractCommon(result, aggregate.aggregates);
@@ -1864,9 +1820,6 @@ BuildExecutionContractPerfectHashAggregateContract(const PhysicalPerfectHashAggr
 	result.perfect_group_minima = aggregate.group_minima;
 	AddExecutionContractPerfectHashAggregateGroupedStateLayout(result, aggregate);
 	MarkExecutionContractPerfectHashAggregateGroupedStateContract(result);
-	if (result.native_grouped_state_contract.status == ExecutionRegionStateContractStatus::READY) {
-		MarkExecutionContractNativeOperatorContractReady(result.native_hash_lookup_contract);
-	}
 	return result;
 }
 
@@ -2299,6 +2252,11 @@ ExecutionContract PhysicalColumnDataScan::GetExecutionContract() const {
 	result.source_boundary_reason += ";function=" + result.source.function_name;
 	result.source_boundary_reason += ";output_columns=" + std::to_string(result.source.output_column_count);
 	result.source_boundary_reason += ";returned_columns=" + std::to_string(result.source.returned_column_count);
+	if (collection) {
+		result.source.estimated_source_cardinality = collection->Count();
+		result.source.estimated_source_cardinality_exact = true;
+		result.source_boundary_reason += ";column_data_count=" + std::to_string(result.source.estimated_source_cardinality);
+	}
 	result.source.reason = result.source_boundary_reason;
 	return FinalizeExecutionContract(std::move(result));
 }

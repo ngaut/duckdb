@@ -17,6 +17,7 @@
 #include "sljit_projection_chain_runtime.hpp"
 #include "sljit_region_runtime_state.hpp"
 #include "sljit_region_runtime_trace.hpp"
+#include "sljit_ungrouped_aggregate_payload_update_runtime.hpp"
 
 namespace duckdb {
 
@@ -35,12 +36,12 @@ static bool SljitCanExecuteHashJoinUngroupedAggregateUpdate(const vector<SljitEx
 	auto &aggregate_op = ops[aggregate_idx];
 	if (aggregate_op.aggregate_update.plan.sink_info.kind != ExecutionRegionSinkKind::UNGROUPED_AGGREGATE_UPDATE ||
 	    !aggregate_op.aggregate_update.plan.use_primitive_payloads ||
-	    aggregate_op.aggregate_update.fused_payload_update_function ||
 	    aggregate_op.aggregate_update.plan.use_grouped_state_addresses) {
 		return false;
 	}
-	if (aggregate_op.aggregate_update.payloads.size() !=
-	    aggregate_op.aggregate_update.payload_update_functions.size()) {
+	if (!aggregate_op.aggregate_update.fused_payload_update_function &&
+	    aggregate_op.aggregate_update.payloads.size() !=
+	        aggregate_op.aggregate_update.payload_update_functions.size()) {
 		return false;
 	}
 	for (idx_t op_idx = first_projection_idx; op_idx < aggregate_idx; op_idx++) {
@@ -127,40 +128,17 @@ static bool SljitTryPrepareHashJoinFilteredUngroupedPayloadInput(
 		payload_input.data[payload_idx].Reference(payload_sources[payload_idx]);
 	}
 	payload_input.SetChildCardinality(selected_count);
+	vector<idx_t> payload_input_source_indices;
+	payload_input_source_indices.reserve(payloads.size());
+	for (idx_t payload_idx = 0; payload_idx < payloads.size(); payload_idx++) {
+		payload_input_source_indices.push_back(payload_idx);
+	}
+	vector<bool> payload_input_source_not_null(payload_input_source_indices.size(), false);
+	for (auto &remapped_payload : remapped_payloads) {
+		remapped_payload.input_source_indices = payload_input_source_indices;
+		remapped_payload.input_source_not_null = payload_input_source_not_null;
+	}
 	return true;
-}
-
-static SinkResultType SljitExecuteNativeUngroupedAggregateUpdateWithRemappedPayloads(
-    ExecutionRegionRuntime &runtime, ExecutionOperatorRuntime &native_runtime, SljitRegionExecutionScratch &scratch,
-    idx_t op_idx, SljitExecutableRegionOp &op, DataChunk &payload_input,
-    vector<SljitExecutableRegionExpression> &remapped_payloads) {
-	auto &binding = SljitBindRecordedNativeSink(
-	    runtime, native_runtime, scratch, op_idx, op.kind, payload_input, op.aggregate_update.plan.sink_info,
-	    "aggregate-update-runtime-binding-failed", "SLJIT aggregate update sink");
-	if (!binding.ready || !binding.aggregate_update.ready || !binding.aggregate_update.primitive.ready) {
-		throw InternalException("SLJIT direct filtered aggregate update sink binding is incomplete");
-	}
-	auto &aggregates = op.aggregate_update.plan.sink_info.aggregates;
-	if (aggregates.size() != remapped_payloads.size()) {
-		throw InternalException("SLJIT direct filtered aggregate payload count mismatch");
-	}
-	auto &payload_lanes = scratch.AggregatePayloadLanes(op_idx, aggregates, binding.aggregate_update.primitive);
-	for (idx_t payload_idx = 0; payload_idx < aggregates.size(); payload_idx++) {
-		auto lane = payload_lanes[payload_idx];
-		if (!lane) {
-			throw InternalException("SLJIT direct filtered aggregate primitive lane is missing");
-		}
-		auto payload_stage_start = SljitRegionStageStart(runtime);
-		SljitExecutePrimitiveAggregatePayloadUpdate(
-		    remapped_payloads[payload_idx], op.aggregate_update.payload_update_functions[payload_idx], *lane,
-		    payload_input, nullptr, payload_input.size(), scratch.ExpressionAdapterScratch(op_idx, payload_idx));
-		RecordSljitRegionStageRuntime(runtime, op_idx, op.kind, "direct_hash_join_filtered_payload_update",
-		                              payload_stage_start);
-	}
-	RecordSljitRegionRuntimePath(runtime, op.kind, "direct_hash_join_filtered_payload_update", aggregates.size());
-	RecordSljitRegionMaterializationBoundary(runtime, op.kind, "direct_hash_join_filtered_state_update",
-	                                         payload_input.size());
-	return native_runtime.RecordSinkResult(payload_input, SinkResultType::NEED_MORE_INPUT);
 }
 
 template <class EXECUTE_HASH_JOIN_PROBE>
@@ -264,8 +242,10 @@ static bool SljitTryExecuteHashJoinFilteredUngroupedAggregateUpdate(
 		                              "direct_hash_join_filtered_payload_input", payload_input_stage_start);
 
 		updated_aggregate = true;
-		sink_result = SljitExecuteNativeUngroupedAggregateUpdateWithRemappedPayloads(
-		    runtime, native_runtime, scratch, aggregate_idx, aggregate_op, payload_input, remapped_payloads);
+		sink_result = SljitExecuteNativeUngroupedAggregateUpdateWithPayloads(
+		    runtime, native_runtime, scratch, aggregate_idx, aggregate_op, payload_input, remapped_payloads,
+		    "direct_hash_join_filtered_payload_update", "direct_hash_join_filtered_payload_update",
+		    "direct_hash_join_filtered_state_update");
 		if (SljitSinkResultStopsPipeline(sink_result)) {
 			return true;
 		}

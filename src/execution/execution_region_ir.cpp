@@ -89,6 +89,7 @@ BuildExecutionRegionSourceInfo(const ExecutionSourceContract &descriptor, Execut
 	result->function_name = descriptor.function_name;
 	result->estimated_source_cardinality = descriptor.estimated_source_cardinality;
 	result->estimated_source_cardinality_exact = descriptor.estimated_source_cardinality_exact;
+	result->finalized_source_cardinality_required = descriptor.finalized_source_cardinality_required;
 	result->output_column_count = descriptor.output_column_count;
 	result->returned_column_count = descriptor.returned_column_count;
 	result->column_ids = descriptor.column_ids;
@@ -353,20 +354,10 @@ string ExecutionRegionAggregateNativeStateUpdateBlocker(const ExecutionRegionAgg
 	}
 	const bool has_distinct_state = contract.distinct_aggregate_count != 0 || contract.distinct_table_count != 0 ||
 	                                contract.distinct_child_count != 0 || contract.distinct_filter_count != 0;
-	const bool has_regular_hash_distinct_state = has_distinct_state && !contract.distinct_count_pointer_keys &&
-	                                             contract.kind == ExecutionRegionAggregateOperatorKind::HASH;
-	if (has_distinct_state && !contract.distinct_count_pointer_keys && !has_regular_hash_distinct_state) {
+	const bool has_regular_hash_distinct_state =
+	    has_distinct_state && contract.kind == ExecutionRegionAggregateOperatorKind::HASH;
+	if (has_distinct_state && !has_regular_hash_distinct_state) {
 		return "aggregate-state-update-distinct-state";
-	}
-	if (contract.distinct_count_pointer_keys) {
-		if (contract.kind != ExecutionRegionAggregateOperatorKind::HASH) {
-			return "aggregate-state-update-distinct-pointer-kind";
-		}
-		if (contract.distinct_aggregate_count != 1 || contract.distinct_table_count != 1 ||
-		    contract.distinct_child_count != 1 || contract.distinct_filter_count != 1 ||
-		    contract.aggregate_count != 1) {
-			return "aggregate-state-update-distinct-pointer-shape";
-		}
 	}
 	if (contract.aggregate_filter_count != 0) {
 		return "aggregate-state-update-filtered-aggregate";
@@ -381,7 +372,7 @@ string ExecutionRegionAggregateNativeStateUpdateBlocker(const ExecutionRegionAgg
 		if (groups.size() != contract.group_count) {
 			return "aggregate-state-update-group-binding-count";
 		}
-		if (!contract.distinct_count_pointer_keys && !has_regular_hash_distinct_state &&
+		if (!has_regular_hash_distinct_state &&
 		    contract.native_grouped_state_contract.status != ExecutionRegionStateContractStatus::READY) {
 			return contract.native_grouped_state_contract.blocker.empty()
 			           ? "aggregate-state-update-grouped-state-contract"
@@ -406,13 +397,8 @@ string ExecutionRegionAggregateNativeStateUpdateBlocker(const ExecutionRegionAgg
 		if (!aggregate.reason.empty()) {
 			return aggregate.reason;
 		}
-		if (aggregate.distinct && !contract.distinct_count_pointer_keys && !has_regular_hash_distinct_state) {
+		if (aggregate.distinct && !has_regular_hash_distinct_state) {
 			return "aggregate-state-update-distinct-aggregate";
-		}
-		if (contract.distinct_count_pointer_keys &&
-		    (!aggregate.distinct || aggregate.primitive_update_kind != AggregatePrimitiveUpdateKind::COUNT ||
-		     aggregate.child_count != 1)) {
-			return "aggregate-state-update-distinct-pointer-aggregate";
 		}
 		if (aggregate.has_filter) {
 			return "aggregate-state-update-filtered-aggregate";
@@ -451,9 +437,6 @@ bool ExecutionRegionAggregateUpdateGeneratesBody(const ExecutionRegionSinkInfo &
 	}
 	if (!ExecutionRegionAggregateNativeStateUpdateBlocker(contract, sink.aggregates, sink.groups).empty()) {
 		return false;
-	}
-	if (contract.distinct_count_pointer_keys) {
-		return true;
 	}
 	if (sink.aggregates.empty()) {
 		return false;
@@ -570,9 +553,6 @@ static ExecutionRegionCandidateTraits BuildExecutionRegionCandidateTraits(const 
 				}
 				if (ExecutionRegionAggregateUpdateGeneratesBody(*node.sink)) {
 					traits.generated_aggregate_update_count++;
-					if (node.sink->aggregate_contract.distinct_count_pointer_keys) {
-						traits.generated_distinct_count_pointer_aggregate_update_count++;
-					}
 				}
 				if (ExecutionRegionAggregateLookupGeneratesBody(*node.sink)) {
 					traits.generated_aggregate_lookup_count++;
@@ -624,6 +604,9 @@ static ExecutionRegionCandidateTraits BuildExecutionRegionCandidateTraits(const 
 			break;
 		}
 	}
+	if (traits.mark_probe_filter_count > 0 && traits.generated_aggregate_update_count == 0) {
+		traits.mark_probe_materialized_tail_count = traits.mark_probe_filter_count;
+	}
 	FinalizeExecutionRegionCandidateTraits(traits, mode);
 	return traits;
 }
@@ -633,6 +616,11 @@ static idx_t EstimateExecutionRegionCandidateCardinality(const ExecutionRegionIR
 	if (candidate.first_node < region_ir.nodes.size()) {
 		auto &source = region_ir.nodes[candidate.first_node];
 		if (source.kind == ExecutionRegionNodeKind::SOURCE && source.estimated_cardinality_exact) {
+			// Candidate admission is paid per source batch. Downstream physical estimates can be stale for state scans
+			// after finalization, so exact source cardinality must cap the runner cost model.
+			if (source.estimated_cardinality == 0) {
+				return 0;
+			}
 			bool row_preserving_or_reducing = true;
 			for (idx_t node_idx = candidate.first_node + 1; node_idx < candidate.EndNode(); node_idx++) {
 				auto &node = region_ir.nodes[node_idx];
@@ -645,6 +633,11 @@ static idx_t EstimateExecutionRegionCandidateCardinality(const ExecutionRegionIR
 			if (row_preserving_or_reducing) {
 				return source.estimated_cardinality;
 			}
+			idx_t downstream_estimate = 0;
+			for (idx_t node_idx = candidate.first_node; node_idx < candidate.EndNode(); node_idx++) {
+				downstream_estimate = MaxValue(downstream_estimate, region_ir.nodes[node_idx].estimated_cardinality);
+			}
+			return MinValue(source.estimated_cardinality, downstream_estimate);
 		}
 	}
 	idx_t result = 0;

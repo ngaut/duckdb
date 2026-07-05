@@ -36,11 +36,11 @@ struct SljitPostJoinProjectionAggregateRuntimeState {
 	             const vector<Value> &source_max_values) {
 		if (!SljitCanBindPostJoinProjectionAggregatePrimitive(ops, primitive)) {
 			return false;
-		}
-		post_join_projection = primitive.post_join_projection.MakeStrategy();
-		direct_join_output_aggregate_strategy =
-		    make_uniq<SljitDirectJoinOutputAggregateStrategy>(primitive.direct_join_output_aggregate.aggregate_idx,
-		                                                      primitive.direct_join_output_aggregate.update_schedule);
+			}
+			post_join_projection = primitive.post_join_projection.MakeStrategy();
+			auto &direct_aggregate = primitive.direct_join_output_aggregate;
+			direct_join_output_aggregate_strategy =
+			    make_uniq<SljitDirectJoinOutputAggregateStrategy>(direct_aggregate.aggregate_idx);
 		SljitAttachDirectJoinOutputAggregateSourceStats(*direct_join_output_aggregate_strategy, source_distinct_counts,
 		                                                source_min_values, source_max_values);
 		direct_join_output_aggregate = SljitDirectJoinOutputAggregatePolicy(*direct_join_output_aggregate_strategy);

@@ -282,6 +282,28 @@ static bool ExecutionRegionRuntimeCanEnter(Pipeline &pipeline, string &reason) {
 	return true;
 }
 
+static bool ExecutionRegionCandidateNeedsFinalizedSourceCardinality(const ExecutionRegionIR &region_ir,
+                                                                    const ExecutionRegionCandidate &candidate,
+                                                                    string &reason) {
+	for (idx_t node_idx = candidate.first_node; node_idx < candidate.EndNode() && node_idx < region_ir.nodes.size();
+	     node_idx++) {
+		auto &node = region_ir.nodes[node_idx];
+		if (!node.source || !node.source->finalized_source_cardinality_required ||
+		    node.source->estimated_source_cardinality_exact) {
+			continue;
+		}
+		reason = "native state scan source cardinality is not finalized";
+		reason += ";source_node=" + std::to_string(node_idx);
+		reason += ";source_function=" + node.source->function_name;
+		reason += ";source_execution=";
+		reason += ExecutionRegionSourceExecutionKindToString(node.source->execution);
+		reason += ";native_state_scan_status=";
+		reason += ExecutionRegionStateContractStatusToString(node.source->native_state_scan_contract.status);
+		return true;
+	}
+	return false;
+}
+
 static void AccumulateExecutionRegionOpenRequest(ExecutionRegionPlan &plan, const ExecutionRegionIR &region_ir,
                                                  const ExecutionRegionCandidate &candidate,
                                                  const ExecutionRegionLoweringPlan &lowering_plan) {
@@ -329,9 +351,6 @@ static void AccumulateExecutionRegionOpenRequest(ExecutionRegionPlan &plan, cons
 		plan_contract.uses_scan_filters = native_fused_source_owner && lowering_plan.UsesScanFilters() &&
 		                                  (!source.filters.empty() || table_scan_contract.dynamic_filters);
 		plan_contract.source_contract_input_types.clear();
-		if (plan_contract.UsesSourceContract() && lowering_plan.RequiresSourceContractInputLayout()) {
-			plan_contract.source_contract_input_types = table_scan_contract.source_contract_input_types;
-		}
 		return;
 	}
 }
@@ -593,6 +612,23 @@ unique_ptr<ExecutionRegionPlan> ExecutionRegionPlanner::Build(ClientContext &con
 				continue;
 			}
 		}
+		string finalized_cardinality_reason;
+		if (ExecutionRegionCandidateNeedsFinalizedSourceCardinality(lowered_region, candidate,
+		                                                            finalized_cardinality_reason)) {
+			plan->operator_readiness_refresh = true;
+			if (should_record_decision_telemetry) {
+				auto decision_time_us = decision_recorder.ClaimCandidateDecisionTime(candidate_trace);
+				record_decision_event(
+				    decision_event_backend_name(ExecutionRunnerKind::COMPILED_VECTORIZED),
+				    ExecutionRegionCompileStatus::SKIPPED, ExecutionRegionExecutionMode::UNSUPPORTED,
+				    AttachExecutionRegionCandidateReason(candidate, std::move(finalized_cardinality_reason),
+				                                         should_record_detailed_telemetry),
+				    "state_scan_source_cardinality_not_ready", &lowered_region.ir, decision_time_us, &candidate,
+				    ExecutionRunnerKind::VECTORIZED, &stage_timings, ExecutionRegionSourceExecutionKind::NONE, false,
+				    nullptr);
+			}
+			continue;
+		}
 		if (!needs_backend_diagnostics) {
 			auto candidate_cbo_start = std::chrono::steady_clock::now();
 			auto physical_runner = SelectExecutionRegionCostOnlyPhysicalRunner(cost_parameters, candidate);
@@ -745,23 +781,10 @@ unique_ptr<ExecutionRegionPlan> ExecutionRegionPlanner::Build(ClientContext &con
 			continue;
 		}
 		ExecutionRegionPhysicalRunnerSelection physical_runner;
-		const bool cost_only_shape_matches_lowering = has_cost_only_physical_runner && lowering_plan.IsFullyFused() &&
-		                                              candidate.uses_scan_filters == lowering_plan.UsesScanFilters();
-		if (cost_only_shape_matches_lowering) {
-			physical_runner = std::move(cost_only_physical_runner);
-			physical_runner.reason = "duckdb_cbo selects ";
-			physical_runner.reason += ExecutionRegionDecisionRunnerName(physical_runner.SelectedRunner());
-			physical_runner.reason += " physical runner";
-			auto cost_reason = ExecutionRegionCboCostReasonToken(physical_runner.runner_cost);
-			if (!cost_reason.empty()) {
-				physical_runner.reason += ";" + cost_reason;
-			}
-		} else {
-			auto candidate_cbo_start = std::chrono::steady_clock::now();
-			physical_runner = SelectExecutionRegionPhysicalRunner(cost_parameters, candidate, lowering_plan,
-			                                                      should_record_detailed_telemetry);
-			stage_timings.candidate_cbo_time_us += ExecutionRegionPlannerElapsedMicros(candidate_cbo_start);
-		}
+		auto candidate_cbo_start = std::chrono::steady_clock::now();
+		physical_runner = SelectExecutionRegionPhysicalRunner(cost_parameters, candidate, lowering_plan,
+		                                                      should_record_detailed_telemetry);
+		stage_timings.candidate_cbo_time_us += ExecutionRegionPlannerElapsedMicros(candidate_cbo_start);
 		if (!physical_runner.UsesCompiledRunner()) {
 			if (should_record_decision_telemetry) {
 				auto decision_time_us = decision_recorder.ClaimCandidateDecisionTime(candidate_trace);

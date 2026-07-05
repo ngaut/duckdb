@@ -95,14 +95,11 @@ static void AccumulateExecutionRegionRunnerCostTotals(ExecutionRegionRunnerCostT
 	target.generated_backend_stage_count += source.generated_backend_stage_count;
 	target.materialization_elision_count += source.materialization_elision_count;
 	target.materialization_source_append_count += source.materialization_source_append_count;
+	target.unfused_mark_filter_aggregate_count += source.unfused_mark_filter_aggregate_count;
 	target.native_join_stage_count += source.native_join_stage_count;
 	target.native_hash_join_build_sink_count += source.native_hash_join_build_sink_count;
 	target.native_aggregate_stage_count += source.native_aggregate_stage_count;
 	target.native_grouped_aggregate_stage_count += source.native_grouped_aggregate_stage_count;
-	target.native_distinct_count_pointer_aggregate_stage_count +=
-	    source.native_distinct_count_pointer_aggregate_stage_count;
-	target.generated_distinct_count_pointer_aggregate_update_count +=
-	    source.generated_distinct_count_pointer_aggregate_update_count;
 	target.native_sort_stage_count += source.native_sort_stage_count;
 	target.full_pipeline = target.full_pipeline || source.full_pipeline;
 	AccumulateExecutionRegionRuleName(target.input_scope, ExecutionRegionRunnerCostInputScope(source));
@@ -114,6 +111,7 @@ static void AccumulateExecutionRegionRunnerCostTotals(ExecutionRegionRunnerCostT
 	target.native_operator_work += source.native_operator_work;
 	target.materialization_elision_work += source.materialization_elision_work;
 	target.materialization_source_append_penalty += source.materialization_source_append_penalty;
+	target.unfused_mark_filter_aggregate_penalty += source.unfused_mark_filter_aggregate_penalty;
 	target.full_pipeline_work += source.full_pipeline_work;
 	target.stateful_protocol_penalty += source.stateful_protocol_penalty;
 	target.saved_work_per_batch += source.saved_work_per_batch;

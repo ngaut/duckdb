@@ -15,8 +15,6 @@ namespace duckdb {
 
 class GroupedAggregateData;
 
-enum class DistinctAggregateKeyStrategy { GROUP_KEYS, GROUP_STATE_POINTER };
-
 struct DistinctAggregateCollectionInfo {
 public:
 	DistinctAggregateCollectionInfo(const vector<unique_ptr<Expression>> &aggregates, vector<idx_t> indices);
@@ -49,8 +47,7 @@ public:
 	DistinctAggregateData(const DistinctAggregateCollectionInfo &info, TupleDataValidityType distinct_validity);
 	DistinctAggregateData(const DistinctAggregateCollectionInfo &info, const GroupingSet &groups,
 	                      const vector<unique_ptr<Expression>> *group_expressions,
-	                      TupleDataValidityType distinct_validity,
-	                      DistinctAggregateKeyStrategy key_strategy = DistinctAggregateKeyStrategy::GROUP_KEYS);
+	                      TupleDataValidityType distinct_validity);
 	//! The data used by the hashtables
 	vector<unique_ptr<GroupedAggregateData>> grouped_aggregate_data;
 	//! The hashtables
@@ -58,11 +55,9 @@ public:
 	//! The groups (arguments)
 	vector<GroupingSet> grouping_sets;
 	const DistinctAggregateCollectionInfo &info;
-	DistinctAggregateKeyStrategy key_strategy = DistinctAggregateKeyStrategy::GROUP_KEYS;
 
 public:
 	bool IsDistinct(idx_t index) const;
-	bool UsesGroupStatePointerKeys() const;
 };
 
 struct DistinctAggregateState {

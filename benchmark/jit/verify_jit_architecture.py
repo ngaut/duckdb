@@ -51,6 +51,20 @@ def reject_text(path: str, snippets: tuple[str, ...]) -> None:
         raise AssertionError(f"{path}: stale or forbidden text remains {present}")
 
 
+def require_scoped_text(path: str, start: str, end: str, snippets: tuple[str, ...]) -> None:
+    data = read(path)
+    start_idx = data.find(start)
+    if start_idx == -1:
+        raise AssertionError(f"{path}: missing scope start {start!r}")
+    end_idx = data.find(end, start_idx + len(start))
+    if end_idx == -1:
+        raise AssertionError(f"{path}: missing scope end {end!r}")
+    scope = data[start_idx:end_idx]
+    missing = [snippet for snippet in snippets if snippet not in scope]
+    if missing:
+        raise AssertionError(f"{path}: missing required architecture text in scoped block {missing}")
+
+
 def reject_regex(name: str, patterns: tuple[str, ...], globs: tuple[str, ...], allowed: tuple[str, ...] = ()) -> None:
     allowed_paths = {ROOT / path for path in allowed}
     compiled = [(pattern, re.compile(pattern)) for pattern in patterns]
@@ -75,12 +89,12 @@ def verify_required_design_files() -> None:
         "extension/jit_sljit/include/sljit_full_pipeline_primitive_sequence.hpp",
         "extension/jit_sljit/include/sljit_full_pipeline_primitive_contract.hpp",
         "extension/jit_sljit/include/sljit_full_pipeline_terminal_runtime.hpp",
+        "extension/jit_sljit/include/sljit_generated_filter_primitive.hpp",
         "extension/jit_sljit/include/sljit_generated_filter_primitive_runtime.hpp",
         "extension/jit_sljit/include/sljit_join_projection_aggregate_update_primitive.hpp",
         "extension/jit_sljit/include/sljit_join_projection_aggregate_update_runtime.hpp",
         "extension/jit_sljit/include/sljit_mark_probe_filter_boundary.hpp",
         "extension/jit_sljit/include/sljit_mark_probe_filter_boundary_runtime.hpp",
-        "extension/jit_sljit/include/sljit_native_tail_handoff_runtime.hpp",
         "extension/jit_sljit/include/sljit_hash_join_probe_executor_runtime.hpp",
         "extension/jit_sljit/include/sljit_hash_join_probe_materialize_primitive_runtime.hpp",
         "extension/jit_sljit/include/sljit_hash_join_probe_selection_primitive_runtime.hpp",
@@ -123,6 +137,11 @@ def verify_required_design_files() -> None:
     require_absent("extension/jit_sljit/include/sljit_final_projection_aggregate_descriptor.hpp")
     require_absent("extension/jit_sljit/include/sljit_final_projection_aggregate_state.hpp")
     require_absent("extension/jit_sljit/include/sljit_hash_join_projected_aggregate_runtime.hpp")
+    require_absent("extension/jit_sljit/include/sljit_join_projection_aggregate_primitive.hpp")
+    require_absent("extension/jit_sljit/include/sljit_aggregate_count_star_preaggregation.hpp")
+    require_absent("extension/jit_sljit/include/sljit_direct_projection_fixed_runtime.hpp")
+    require_absent("extension/jit_sljit/include/sljit_hash_join_all_valid_probe_runtime.hpp")
+    require_absent("extension/jit_sljit/sljit_region_source_filter_plan.cpp")
     require_text(
         "benchmark/tpch/jit/JIT_PRODUCTION_RECIPE_DESIGN.md",
         (
@@ -145,6 +164,8 @@ def verify_required_design_files() -> None:
             "Native-tail topology recognition is a facts pass",
             "`FILTER -> PROJECTION -> native tail`",
             "`PROJECTION -> FILTER -> PROJECTION -> native tail`",
+            "Hash-join build sinks are native-tail capability boundaries",
+            "native hash-build sink protocol penalty must not erase\ngenerated compute-prefix benefit by default",
             "must not keep local route-predicate helpers for each prefix",
             "ProjectionChain\nGeneratedFilter\nProjectionChain\nNativeTailHandoff",
             "flush materializing primitive batches in\nprimitive step order",
@@ -173,6 +194,9 @@ def verify_required_design_files() -> None:
             "`SourceBatchBoundary` owns advancement for its coalesced source batch",
             "must not be\ninferred from a route or terminal aggregate helper",
             "A scan-filtered source is not, by itself, a reason to insert\nan opaque materialization boundary",
+            "DuckDB-owned table-scan filter pushdown stays in the DuckDB scan contract",
+            "A scan-filtered primitive aggregate update is real generated/backend work",
+            "must not downgrade primitive aggregate updates to weak\naccelerated work just because the source batch came from DuckDB scan filters",
             "high-cardinality batches that cannot fit the\nlocal compact preaggregation table",
             "row-delta path is part of the\ndedicated count-star backend",
             "generated\naggregate update backend is generated/backend work",
@@ -183,6 +207,7 @@ def verify_required_design_files() -> None:
             "Exact source cardinality is a runtime contract fact",
             "Physical-pipeline runner cost must use that exact count",
             "row-expanding operator such as a join breaks the cap",
+            "Scan-filtered source estimates are already estimates of the source output",
             "NativeTailHandoff",
             "SljitAggregateGroupReservePlan",
             "propagated\ngroup-key distinct reserve facts",
@@ -367,8 +392,53 @@ def verify_stale_route_code_removed() -> None:
             r"\bNextStepTraceOp\b",
             r"\bTryExecuteSelectedReferenceProjection\b",
             r"projected_grouped_selected_reference_view",
+            r"\bSljitBuildProjectionChainSemanticProjection\b",
+            r"\bSljitTryBuildProjectionChainExpression\b",
+            r"\bSljitBuildProjectionChainReferenceSourceMap\b",
+            r"\bSljitTryResolveProjectionChainReferenceSource\b",
+            r"\bSljitTryRemapHashJoinProjectionExpressionInputSources\b",
+            r"\bSljitTryMaterializeSelectedProjectionToBatch\b",
+            r"\bSljitTryBuildProjectionInputRowPointerAggregateDescriptor\b",
+            r"\bSljitTryBuildProjectionInputRowPointerGroupDescriptor\b",
+            r"\bSljitProjectOptionalPostJoinProjectionChain\b",
+            r"\bSljitTryMaterializeHashJoinOutputReferenceToBatch\b",
+            r"\bSljitTryExecutePreaggregatedCountStarGroupedAggregateUpdate\b",
+            r"\bSljitTryBuildProjectionInputVectorGroups\b",
+            r"\bSljitProjectionInputVectorGroupSourcesCanMaterialize\b",
+            r"\bSljitTryMaterializeProjectionInputVectorGroupSource\b",
+            r"\bSljitProjectionCanMaterializeInputVectorGroupSource\b",
+            r"\bSljitTryExecuteDistinctCountPointerGroupKeyAggregateUpdate\b",
+            r"\bSljitProjectionTargetCanReceiveExpression\b",
+            r"\bSljitOrProjectionSkips\b",
+            r"\bSljitTryBuildMarkProbeFilterProjectionBoundary\b",
+            r"\bSljitDirectProjectionBatchPassthrough\b",
+            r"\bSljitFindDirectProjectionBatchPassthrough\b",
+            r"\bSljitTryCopyDirectProjectionPassthroughToBatch\b",
+            r"\bdirect_batch_passthrough_projection\b",
+            r"\bSljitBindNativeTailHandoffInput\b",
+            r"\bSljitExecuteNativeTailHandoffIntoSink\b",
+            r"\bSljitNativeTailHandoffPrimitive\b",
+            r"\bSljitCanBindNativeTailHandoffPrimitive\b",
+            r"\bSljitBindNativeTailHandoffPrimitive\b",
+            r"\bSljitExecuteNativeTailHandoffBatch\b",
+            r"\bSljitBindGeneratedFilterInput\b",
+            r"\bSljitBindProjectionChainInput\b",
+            r"\bSljitBindGroupedAggregateUpdateInputView\b",
+            r"\bSljitBindMaterializedGroupedAggregateUpdateInput\b",
+            r"\bSljitJoinProjectionAggregatePrimitive\b",
+            r"\bSljitJoinProjectionAggregateSourceKind\b",
         ),
         ("extension/jit_sljit/**/*.hpp", "extension/jit_sljit/**/*.cpp"),
+    )
+    reject_text(
+        "extension/jit_sljit/include/sljit_full_pipeline_recipe_binding.hpp",
+        (
+            "BindJoinProjectionAggregatePrimitive",
+            "MakeJoinProjectionAggregateRecipe(const SljitJoinProjectionAggregatePrimitive",
+            "BindPostJoinProjectionAggregatePrimitive(const SljitJoinProjectionAggregatePrimitive",
+            "primitive.input_kind",
+            "join-projection aggregate recipe has an unknown input kind",
+        ),
     )
 
 
@@ -382,6 +452,8 @@ def verify_runtime_batch_view() -> None:
             "idx_t count",
             "SljitRuntimeBatchOwnership ownership",
             "SljitRuntimeBatchViewFromChunk",
+            "SljitBindRuntimeBatchInput",
+            "SljitBindMaterializedRuntimeBatchInput",
         ),
     )
     require_text(
@@ -425,8 +497,6 @@ def verify_runtime_batch_view() -> None:
         (
             "SljitTryExecuteDirectJoinOutputAggregate",
             "SljitTryMaterializeHashJoinProjectionAggregateInputsToChunk",
-            "SljitTryExecuteDistinctCountPointerRowPointerGroupAggregateUpdate",
-            "direct_projection_distinct_count_pointer_row_pointer_update",
             "strategy.last_failure",
         ),
     )
@@ -477,47 +547,16 @@ def verify_runtime_batch_view() -> None:
     )
     require_text(
         "src/include/duckdb/execution/execution_aggregate_runtime.hpp",
-        (
-            "input_vector_repeats_with_row_pointer",
-            "EXECUTION_DISTINCT_COUNT_POINTER_INLINE_PAYLOAD_CAPACITY",
-        ),
+        ("input_vector_repeats_with_row_pointer",),
     )
-    require_text(
-        "src/include/duckdb/execution/operator/aggregate/distinct_count_pointer_set.hpp",
+    reject_regex(
+        "batch-local distinct count-pointer payload strategy selection",
         (
-            "UseGlobalPayloadSet",
-            "use_global_payload_set",
+            r"\bSljitSelectDistinctCountPointerPayloadStorageStrategy\b",
+            r"MaxValue\(op\.aggregate_update\.plan\.estimated_input_count,\s*count\)",
+            r"payload_set_target\s*=\s*estimated_payload_count",
         ),
-    )
-    require_text(
-        "src/execution/operator/aggregate/distinct_count_pointer_set.cpp",
-        (
-            "DistinctCountPointerSet::UseGlobalPayloadSet",
-            "ReserveGlobalPayloadEntries",
-            "global_payload_set_reserve_target",
-            "use_global_payload_set = true",
-            "PromoteToOverflow(group)",
-            "groups.back().uses_overflow = use_global_payload_set",
-        ),
-    )
-    require_text(
-        "src/include/duckdb/execution/execution_operator_runtime.hpp",
-        ("UseGlobalPayloadSet",),
-    )
-    require_text(
-        "extension/jit_sljit/include/sljit_grouped_aggregate_update_runtime.hpp",
-        (
-            "SljitDistinctCountPointerPayloadStorageStrategy",
-            "SljitSelectDistinctCountPointerPayloadStorageStrategy",
-            "ADAPTIVE_INLINE_GROUP_PAYLOADS",
-            "GLOBAL_PAIR_SET",
-            "EXECUTION_DISTINCT_COUNT_POINTER_INLINE_PAYLOAD_CAPACITY",
-            "inline_target_payload_capacity",
-            "!reserve.CanReserve()",
-            "op.aggregate_update.plan.estimated_input_count",
-            "distinct.state->UseGlobalPayloadSet(global_payload_set_target)",
-            "distinct_count_pointer_global_payload_set",
-        ),
+        ("extension/jit_sljit/**/*.hpp", "extension/jit_sljit/**/*.cpp"),
     )
     require_text(
         "extension/jit_sljit/sljit_executable_stats.cpp",
@@ -626,7 +665,8 @@ def verify_runtime_batch_view() -> None:
             "mark_match_selection_function",
             "mark_nonmatch_selection_function",
             "EnsureAllValidRegularHashJoinProbeCode(runtime, hash_join_probe, key, mark_selection_mode)",
-            "SljitGeneratedAllValidRegularHashJoinProbeStage(false, mark_selection_mode)",
+            "SljitExecuteAllValidRegularHashJoinMarkSelectionProbePath",
+            "SljitGeneratedAllValidRegularHashJoinProbeStage(SELECTED, mark_selection_mode)",
             "SljitGeneratedRegularHashJoinProbeStage(uses_bloom_filter, mark_selection_mode)",
         ),
     )
@@ -642,7 +682,7 @@ def verify_runtime_batch_view() -> None:
         "extension/jit_sljit/include/sljit_hash_join_probe_primitive.hpp",
         (
             "bool allow_marker_omission = false",
-            "marker omission requires a filtered projection",
+            "marker omission requires an applied filter",
         ),
     )
     require_text(
@@ -653,7 +693,6 @@ def verify_runtime_batch_view() -> None:
             "lhs_boundary_outputs",
             "lhs_boundary_output_types",
             "selected_hash_join_inputs.TryPrepareMarkProbeInput",
-            "selected_hash_join_inputs.BuildMarkOutputView",
             "SljitHashJoinProbeOutputContract::FILTERED_MARK_MATCHES",
             "SljitHashJoinProbeOutputContract::FILTERED_MARK_NON_MATCHES",
             "\"direct_mark_probe_match_selection\"",
@@ -754,20 +793,18 @@ def verify_runtime_batch_view() -> None:
             "JIT mark filter projection native tail uses boundary primitive",
             "JIT first hash join native tail uses source batch boundary recipe",
             "JIT mark match filter emits selected boundary without marker flags",
-            "JIT two-join mark distinct aggregate uses row-pointer distinct backend",
-            "JIT distinct aggregate uses global pair set for high-payload probe groups",
-            "aggregate_update.distinct_count_pointer_row_pointer_group_key_update=",
-            "aggregate_update.direct_projection_distinct_count_pointer_row_pointer_update=",
-            "aggregate_update.direct_projection_aggregate_input.projection_output=",
-            "aggregate_update.direct_projection_aggregate_input.hash_join_lhs_input=",
-            "aggregate_update.distinct_count_pointer_global_payload_set=",
-            "hash_join_probe.selected_mark_probe_input=",
+            "hash_join_probe.source_batch_boundary=",
+            "hash_join_probe.row_pointer_selection_reference=",
             "hash_join_probe.mark_flags=",
             "hash_join_probe.mark_match_selection_reference=",
             "hash_join_probe.mark_nonmatch_selection_reference=",
             "hash_join_probe.mark_filter_lhs_selected_view=",
+            "ContainsMarkMatchProbePath",
+            "ContainsMarkNonmatchProbePath",
+            "hash_join_probe.fast_regular_probe_mark_match",
             "hash_join_probe.generated_regular_probe_mark_match",
-            "hash_join_probe.generated_regular_probe_mark_nonmatch_flat_all_valid_",
+            "hash_join_probe.fast_regular_probe_mark_nonmatch",
+            "hash_join_probe.generated_regular_probe_mark_nonmatch",
             "filter.direct_mark_probe_match_selection=",
             "filter.direct_mark_probe_nonmatch_selection=",
             "REQUIRE_FALSE(StringUtil::Contains(boundaries, \"hash_join_probe.final_output=\"));",
@@ -795,7 +832,7 @@ def verify_runtime_proof_ownership() -> None:
     reject_regex(
         "post-join aggregate primitive owns source-key proof",
         (r"(?s)struct\s+SljitPostJoinProjectionAggregatePrimitive\s*\{[^}]*source_key0_int64_to_int32",),
-        ("extension/jit_sljit/include/sljit_join_projection_aggregate_primitive.hpp",),
+        ("extension/jit_sljit/include/sljit_join_projection_aggregate_update_primitive.hpp",),
     )
     reject_regex(
         "direct aggregate strategy owns pending-batch source-key proof",
@@ -876,13 +913,20 @@ def verify_projection_aggregate_descriptor_boundary() -> None:
     require_text(
         "extension/jit_sljit/include/sljit_direct_join_output_aggregate_state.hpp",
         (
+            "struct SljitPendingRowPointerAggregateBatch",
+            "SljitJoinProjectionAggregateDescriptor descriptor",
+            "SljitPendingRowPointerAggregateBatch pending_batch",
+            "SljitAggregateUpdateHasDedicatedCompiledBackend",
+            "op.aggregate_update.plan.use_primitive_payloads",
+            "SljitAggregateUpdateHasDedicatedCompiledBackend(ops[aggregate_idx])",
+        ),
+    )
+    reject_text(
+        "extension/jit_sljit/include/sljit_direct_join_output_aggregate_state.hpp",
+        (
             "enum class SljitDirectJoinOutputAggregateUpdateSchedule",
             "PENDING_ROW_POINTER_BATCH",
             "IMMEDIATE_ROW_POINTER_UPDATE",
-            "SljitAggregateUpdateHasDedicatedCompiledBackend",
-            "distinct_count_pointer_keys",
-            "op.aggregate_update.plan.use_primitive_payloads",
-            "SljitAggregateUpdateHasDedicatedCompiledBackend(ops[aggregate_idx])",
         ),
     )
     require_text(
@@ -908,19 +952,15 @@ def verify_cost_fact_ownership_boundary() -> None:
         (
             "RemoveExecutionRegionGeneratedAggregateUpdateNativeCost",
             "mark_probe_filter_count",
+            "mark_probe_materialized_tail_count",
+            "ExecutionRegionMarkProbeMaterializedTailCostCount",
             "result.generated_backend_stage_count += candidate.traits.mark_probe_filter_count",
             "traits.generated_aggregate_update_count",
-            "traits.generated_distinct_count_pointer_aggregate_update_count",
-            "candidate.traits.generated_distinct_count_pointer_aggregate_update_count",
-            "input.generated_distinct_count_pointer_aggregate_update_count +=",
             "generated_backend_stage_count",
             "facts.native_aggregate_stage_count -= aggregate_decrement",
             "facts.native_grouped_aggregate_stage_count -= grouped_decrement",
             "idx_t generated_aggregate_update_count = 0",
-            "idx_t generated_distinct_count_pointer_aggregate_update_count = 0",
             "facts.generated_aggregate_update_count++",
-            "facts.generated_distinct_count_pointer_aggregate_update_count++",
-            "cost_input.generated_distinct_count_pointer_aggregate_update_count +=",
             "cost_input.native_aggregate_stage_count > 0 || facts.generated_aggregate_update_count > 0",
             "exact_source_cardinality_bounds_pipeline",
             "contract.source.estimated_source_cardinality_exact",
@@ -935,26 +975,24 @@ def verify_cost_fact_ownership_boundary() -> None:
             "native_probe_output_mode ==",
             "ExecutionHashJoinProbeOutputMode::MARK_PROBE",
             "traits.mark_probe_filter_count++",
-            "traits.generated_distinct_count_pointer_aggregate_update_count++",
         ),
     )
     require_text(
         "src/execution/execution_region_description.cpp",
         (
             "mark_probe_filters=",
-            "generated_distinct_count_pointer_aggregate_updates=",
+            "mark_probe_materialized_tails=",
         ),
     )
     require_text(
         "src/planner/cost_model.cpp",
         (
-            "PhysicalRunnerUsesGeneratedDistinctCountPointerBackend",
-            "input.generated_distinct_count_pointer_aggregate_update_count > 0",
             "PhysicalRunnerMaterializationElisionBenefitCanPay",
             "PhysicalRunnerGeneratedBackendStageBenefitCanPay",
+            "PhysicalRunnerHasGeneratedComputePrefix",
+            "PhysicalRunnerHashJoinBuildSinkProtocolPenaltyApplies",
             "PhysicalRunnerCostedGeneratedBackendStageCount",
             "input.native_hash_join_build_sink_count > 0",
-            "input.generated_distinct_count_pointer_aggregate_update_count == 0",
             "generated_backend_stage_count",
             "generated_expression_stage_count",
             "generated_backend_stage_work",
@@ -962,13 +1000,44 @@ def verify_cost_fact_ownership_boundary() -> None:
         ),
     )
     reject_text(
-        "src/execution/execution_region_cost_input.cpp",
+        "src/planner/cost_model.cpp",
         (
-            "input.native_distinct_count_pointer_aggregate_stage_count +=\n\t    candidate.traits.generated_distinct_count_pointer_aggregate_update_count",
-            "cost_input.native_distinct_count_pointer_aggregate_stage_count +=\n\t    facts.generated_distinct_count_pointer_aggregate_update_count",
+            "for (idx_t filter_idx = 0; filter_idx < filter_count; filter_idx++)",
+            "rows = MaxValue<idx_t>((rows + 9) / 10, 1)",
         ),
     )
     require_text(
+        "src/execution/execution_region_decision.cpp",
+        (
+            "PhysicalPipelineHashJoinBuildNeedsRegionGraph",
+            "cost_input.native_hash_join_build_sink_count > 0",
+            "cost_input.generated_work_class != PhysicalRunnerGeneratedWorkClass::NONE",
+            "cost_input.generated_work_class != PhysicalRunnerGeneratedWorkClass::PROJECTION_GLUE",
+            "duckdb_cbo requires execution-region graph for hash-join build sink decision",
+        ),
+    )
+    require_text(
+        "extension/jit_sljit/sljit_region_source_plan.cpp",
+        (
+            "vectorized table scan filters;source-strategy=duckdb-scan-filtered-source-contract",
+            "source_contract_filter_pushdown=true",
+            "SljitDuckDBScanFilteredSourceContractPlan()",
+        ),
+    )
+    reject_text(
+        "extension/jit_sljit/sljit_region_source_plan.cpp",
+        (
+            "generated table scan source filters",
+            "TryPlanSljitSourceFilters",
+            "generated_source_filter_blocker",
+            "requires_source_contract_input_layout",
+        ),
+    )
+    reject_text(
+        "extension/jit_sljit/sljit_region_plan_facts.cpp",
+        ("SljitRegionPlanHasScanFilteredAggregateTerminal",),
+    )
+    reject_text(
         "src/execution/operator/aggregate/physical_hash_aggregate.cpp",
         (
             "HashAggregateCanPlanDistinctCountPointerKeys",
@@ -1037,19 +1106,22 @@ def verify_preaggregated_primitive_batch_contract() -> None:
             "struct SljitRowPointerGroupedAggregateUpdateDecision",
             "SljitChooseRowPointerGroupedAggregateUpdateStrategies",
             "SljitTryExecuteRowPointerGroupedAggregateUpdateStrategy",
-            "SljitTryExecuteRowPointerPreaggregatedGroupedAggregateUpdateStrategy",
+            "TryExecuteDirectRowPointerPreaggregatedPrimitiveUpdate",
             "SljitTryExecuteInputVectorGroupedAggregateUpdate",
             "TryFindOrCreateInputVectorGroupStateTargets",
             "targets, recorder, dense_domain",
             "direct_input_vector_group_count_one_lookup",
             "direct_input_vector_group_count_one_update",
-            "FUSED_TARGET_PAYLOAD",
-            "SPLIT_PAYLOAD",
+            "TARGET_PAYLOAD_UPDATE",
+            "SPLIT_PAYLOAD_UPDATE",
+            "uses_generated_payload_preaggregation",
         ),
     )
     reject_text(
         "extension/jit_sljit/include/sljit_row_pointer_grouped_aggregate_update_runtime.hpp",
         (
+            "SljitTryExecuteRowPointerPreaggregatedGroupedAggregateUpdateStrategy",
+            "FUSED_TARGET_PAYLOAD",
             "prefer_direct_sparse_row_pointer_target_update",
             "(void)dense_domain;",
         ),
@@ -1102,6 +1174,36 @@ def verify_perfect_hash_aggregate_capability_contract() -> None:
     reject_text(
         "extension/jit_sljit/include/sljit_region_aggregate_payload_fusion.hpp",
         ("AggregatePrimitiveUpdateRequiresPayload(aggregate.primitive_update_kind)",),
+    )
+
+
+def verify_regular_hash_aggregate_lookup_contract() -> None:
+    require_text(
+        "benchmark/tpch/jit/JIT_PRODUCTION_RECIPE_DESIGN.md",
+        (
+            "Regular hash aggregate lookup must not be modeled as a generated backend stage",
+            "grouped state-address resolution plus generated primitive payload update",
+            "Perfect hash",
+        ),
+    )
+    reject_regex(
+        "stale regular hash aggregate generated-lookup contract",
+        (
+            "native_hash_aggregate_lookup",
+            "hash_lookup_layout",
+            "hash_aggregate_lookup_",
+            "blocked_hash_aggregate_lookup_count",
+            "ExecutionHashAggregateLookupLayout",
+            "GetExecutionHashAggregateLookupLayout",
+        ),
+        (
+            "src/**/*.cpp",
+            "src/include/duckdb/**/*.hpp",
+            "extension/jit_sljit/**/*.cpp",
+            "extension/jit_sljit/**/*.hpp",
+            "test/**/*.cpp",
+            "test/**/*.test",
+        ),
     )
 
 
@@ -1260,7 +1362,10 @@ def verify_primitive_sequence() -> None:
             "SljitFullPipelinePrimitiveKind::GROUPED_AGGREGATE_UPDATE",
             "SljitCanBindGroupedAggregateUpdatePrimitive",
             "step.grouped_aggregate_update",
-            "SljitCanBindNativeTailHandoffPrimitive",
+            "SljitFullPipelinePrimitiveKind::NATIVE_TAIL_HANDOFF",
+            "SljitNativeTailHandoffCanConsumeTail",
+            "tail.aggregate_update.plan.use_primitive_payloads",
+            "SljitNativeTailHandoffCanConsumeTail(ops, step.Op(0))",
             "step.generated_filter.filter_idx == step.Op(0)",
             "step.projection_chain.first_projection_idx == step.Op(0)",
             "step.projection_chain.final_projection_idx == step.Op(1)",
@@ -1310,15 +1415,11 @@ def verify_primitive_sequence() -> None:
             "class SljitSelectedHashJoinInputRuntime",
             "TryPrepareMarkProbeInput",
             "TryPrepareHashProbeInput",
-            "BuildMarkOutputView",
             "TryPrepareInput",
             "MarkTargetProbeInputColumns",
             "SljitTryMaterializeSelectedHashJoinOutputColumns",
             "selected_hash_join_mark_input",
             "selected_hash_join_probe_input",
-            "selected_mark_source_selection",
-            "selected_mark_build_selection",
-            "selected_mark_row_pointers",
         ),
     )
     require_text(
@@ -1331,7 +1432,23 @@ def verify_primitive_sequence() -> None:
         "extension/jit_sljit/include/sljit_mark_probe_filter_boundary_runtime.hpp",
         (
             "selected_hash_join_inputs.TryPrepareMarkProbeInput",
+        ),
+    )
+    reject_text(
+        "extension/jit_sljit/include/sljit_mark_probe_filter_boundary_runtime.hpp",
+        (
             "selected_hash_join_inputs.BuildMarkOutputView",
+            "ExecutePreservedSelectedHashJoinBoundary",
+            "preserve_selected_hash_join",
+        ),
+    )
+    reject_text(
+        "extension/jit_sljit/include/sljit_selected_hash_join_input_runtime.hpp",
+        (
+            "BuildMarkOutputView",
+            "selected_mark_source_selection",
+            "selected_mark_build_selection",
+            "selected_mark_row_pointers",
         ),
     )
     reject_text(
@@ -1378,27 +1495,21 @@ def verify_primitive_sequence() -> None:
     require_text(
         "extension/jit_sljit/include/sljit_projection_aggregate_recipe.hpp",
         (
-            "{&SljitProjectionAggregateRecipeBuilder::TryBuildSourceCountStarGrouped}",
-            "{&SljitProjectionAggregateRecipeBuilder::TryBuildSingleJoinMarkFilter}",
-            "{&SljitProjectionAggregateRecipeBuilder::TryBuildSingleJoinSourceFilterProjection}",
-            "{&SljitProjectionAggregateRecipeBuilder::TryBuildSingleJoinPreProjection}",
-            "{&SljitProjectionAggregateRecipeBuilder::TryBuildSingleJoinDirectProjection}",
-            "{&SljitProjectionAggregateRecipeBuilder::TryBuildSingleJoinProjectionChain}",
-            "{&SljitProjectionAggregateRecipeBuilder::TryBuildTwoJoinMarkFilter}",
-            "{&SljitProjectionAggregateRecipeBuilder::TryBuildTwoJoinSourceFilterProjection}",
-            "{&SljitProjectionAggregateRecipeBuilder::TryBuildTwoJoinPreProjection}",
-            "{&SljitProjectionAggregateRecipeBuilder::TryBuildTwoJoinBetweenProjection}",
-            "{&SljitProjectionAggregateRecipeBuilder::TryBuildTwoJoinDirectProjection}",
-            "{&SljitProjectionAggregateRecipeBuilder::TryBuildTwoJoinProjectionChain}",
-            "SourcePrefixHasCountStarGroupedBackend",
-            "SingleJoinHasMarkFilterBoundary",
-            "TwoJoinHasMarkFilterBoundary",
-            "SingleJoinCanUseDirectAggregate",
-            "TwoJoinCanUseSelection",
-            "SingleJoinHasPrefixOperator",
-            "TwoJoinHasPrefixOperator",
+            "const auto prefix_kind = plan.prefix.Kind()",
+            "SljitProjectionAggregatePrefixKind prefix_kind",
+            "registry[entry_idx].prefix_kind != prefix_kind",
+            "SljitProjectionAggregatePrefixKind::SOURCE",
             "SljitProjectionAggregatePrefixKind::SINGLE_JOIN",
             "SljitProjectionAggregatePrefixKind::TWO_JOIN",
+            "&SljitProjectionAggregateRecipeBuilder::TryBuildSourceProjectionAggregate",
+            "&SljitProjectionAggregateRecipeBuilder::TryBuildSingleJoinProjectionAggregate",
+            "&SljitProjectionAggregateRecipeBuilder::TryBuildTwoJoinProjectionAggregate",
+            "SingleJoinHasMarkFilterBoundary",
+            "TwoJoinHasMarkFilterBoundary",
+            "TryBuildSingleJoinMarkBoundary",
+            "TryBuildTwoJoinMarkBoundary",
+            "SingleJoinCanUseDirectAggregate",
+            "TwoJoinCanUseSelection",
         ),
     )
     reject_text(
@@ -1424,12 +1535,33 @@ def verify_primitive_sequence() -> None:
             "two_join_between_projection",
             "two_join_direct_projection",
             "two_join_projection_chain",
+            "TryBuildSourceGroupedAggregate",
+            "TryBuildSingleJoinMarkFilter",
+            "TryBuildSingleJoinSourceFilterProjection",
+            "TryBuildSingleJoinPreProjection",
+            "TryBuildSingleJoinDirectProjection",
+            "TryBuildSingleJoinProjectionChain",
+            "TryBuildTwoJoinMarkFilter",
+            "TryBuildTwoJoinSourceFilterProjection",
+            "TryBuildTwoJoinPreProjection",
+            "TryBuildTwoJoinBetweenProjection",
+            "TryBuildTwoJoinDirectProjection",
+            "TryBuildTwoJoinProjectionChain",
+            "SourcePrefixHasDedicatedGroupedBackend",
+            "SingleJoinHasPrefixOperator",
+            "TwoJoinHasPrefixOperator",
             "SljitProjectionAggregateCanUseSourceCountStarGroupedAggregate",
             "SljitProjectionAggregateCanUseSingleJoinMarkFilterBoundary",
             "SljitProjectionAggregateCanUseSingleJoinSourceFilterProjection",
             "SljitProjectionAggregateCanUseSingleJoinPreJoinProjection",
             "SljitProjectionAggregateCanUseSingleJoinSingleProjection",
             "SljitProjectionAggregateCanUseSingleJoinProjectionChain",
+            "{&SljitProjectionAggregateRecipeBuilder::TryBuildSourceGroupedAggregate}",
+            "{&SljitProjectionAggregateRecipeBuilder::TryBuildSingleJoinMarkFilter}",
+            "{&SljitProjectionAggregateRecipeBuilder::TryBuildTwoJoinMarkFilter}",
+            "plan.prefix.Kind() == SljitProjectionAggregatePrefixKind::SOURCE",
+            "facts.Kind() == SljitProjectionAggregatePrefixKind::SINGLE_JOIN",
+            "facts.Kind() == SljitProjectionAggregatePrefixKind::TWO_JOIN",
         ),
     )
     require_text(
@@ -1438,19 +1570,30 @@ def verify_primitive_sequence() -> None:
             "SljitTryAnalyzeMarkFilterProjectionNativeTail(ops, facts)",
             "SljitTryAnalyzeGeneratedFilterProjectionNativeTail(ops, facts)",
             "SljitTryAnalyzeProjectionFilterProjectionNativeTail(ops, facts)",
-            "SljitTryAnalyzeSourceBatchNativeTail(ops, uses_scan_filters, facts)",
+            "SljitTryAnalyzeSourceBatchNativeTail(schedule_facts, facts)",
             "class SljitNativeTailRecipeBuilder",
-            "TryBuildSourceBatch",
+            "TryBuildFactsRecipe<SljitMarkFilterProjectionNativeTailFacts>",
+            "TryBuildFactsRecipe<SljitGeneratedFilterProjectionNativeTailFacts>",
+            "TryBuildFactsRecipe<SljitProjectionFilterProjectionNativeTailFacts>",
+            "TryBuildFactsRecipe<SljitSourceBatchNativeTailFacts>",
+            "bool TryBuildFactsRecipe(SljitFullPipelineRecipe &recipe) const",
+            "bool AnalyzeFacts(SljitMarkFilterProjectionNativeTailFacts &facts) const",
+            "SljitFullPipelineRecipe MakeFactsRecipe(const SljitSourceBatchNativeTailFacts &facts) const",
         ),
     )
     reject_text(
         "extension/jit_sljit/include/sljit_native_tail_recipe.hpp",
         (
+            "TryBuildMarkFilterProjection",
+            "TryBuildGeneratedFilterProjection",
+            "TryBuildProjectionFilterProjection",
+            "TryBuildSourceBatch",
             "const char *name",
             "\"mark_filter_projection_native_tail\"",
             "\"generated_filter_projection_native_tail\"",
             "\"projection_filter_projection_native_tail\"",
             "\"source_batch_native_tail\"",
+            "uses_scan_filters",
         ),
     )
     reject_text(
@@ -1524,8 +1667,11 @@ def verify_primitive_sequence() -> None:
             "class SljitSourceBatchBoundaryRuntime",
             "boundary_batches",
             "ShouldBatch",
+            "CanCoalesce",
+            "TypeIsConstantSize(type.InternalType())",
             "SljitAdvanceSinkBatchBlocked(runtime, batch, batch_has_more_output)",
             "RecordSljitRegionRuntimePath(runtime, trace_op.kind, \"source_batch_boundary\", chunk.size())",
+            "\"source_batch_boundary_reference_handoff\"",
             "RecordSljitRegionStageRuntime(runtime, op_idx, trace_op.kind, \"source_batch_boundary_append\", stage_start)",
             "RecordSljitRegionMaterializationBoundary(runtime, trace_op.kind, \"source_batch\", chunk.size())",
             "SljitFlushDataChunkBatch(boundary_batch.chunk, execute_batch)",
@@ -1548,9 +1694,8 @@ def verify_primitive_sequence() -> None:
             "terminal_runtime.BudgetReached(runtime, TerminalStep(), max_recipe_batches)",
             "fetched_chunks >= max_recipe_batches",
             "for (idx_t step_idx = 1; step_idx + 1 < recipe.primitive_sequence.count; step_idx++)",
-            "FlushHashJoinMaterializeBatch(step_idx)",
-            "FlushProjectionChainBatch(step_idx)",
-            "FlushSourceBoundaryBatch(step_idx)",
+            "FlushMaterializingStep(step_idx, step)",
+            "bool FlushMaterializingStep(idx_t step_idx, const SljitFullPipelinePrimitiveStep &step)",
             "generated_filter.Execute(step, input, execute_output_view)",
             "hash_join_materialize.Execute(step_idx, step, input, execute_hash_join_probe, execute_output_batch)",
             "hash_join_materialize.Flush(step_idx, execute_output_batch)",
@@ -1572,6 +1717,9 @@ def verify_primitive_sequence() -> None:
         (
             "SljitExecuteGeneratedFilterPrimitive(runtime, scratch, ops, step.generated_filter, input",
             "step.generated_filter",
+            "FlushHashJoinMaterializeBatch(step_idx)",
+            "FlushProjectionChainBatch(step_idx)",
+            "FlushSourceBoundaryBatch(step_idx)",
             "SljitExecuteNativeTailHandoffBatch(runtime, result, scratch, step.Op(0), input",
             "terminal_step.kind == SljitFullPipelinePrimitiveKind::NATIVE_TAIL_HANDOFF",
             "execute_native_full_pipeline_from.Finalize(scratch);\n\t\t\treturn false;",
@@ -1641,7 +1789,7 @@ def verify_primitive_sequence() -> None:
             "shared_ptr<SljitExecutableRegionOp> bound_composed_projection",
             "HasBoundComposedProjection",
             "primitive.bound_composed_projection = std::move(composed_projection)",
-            "SljitBindProjectionChainInput",
+            "SljitBindRuntimeBatchInput(input, \"SLJIT projection-chain primitive\")",
             "SljitTryPrepareSelectedHashJoinProjectionChainInput",
             "unique_ptr<SljitExecutableRegionOp> &mapped_projection",
             "SljitResolveBoundProjectionChain",
@@ -1668,7 +1816,7 @@ def verify_primitive_sequence() -> None:
         ),
     )
     reject_text(
-        "extension/jit_sljit/include/sljit_generated_filter_projection_runtime.hpp",
+        "extension/jit_sljit/include/sljit_generated_filter_primitive.hpp",
         (
             "SljitProjectionChainPrimitive",
             "SljitCanBindProjectionChainPrimitive",
@@ -1686,7 +1834,9 @@ def verify_primitive_sequence() -> None:
             "grouped_aggregate_update.Flush",
             "join_projection_aggregate_update.Execute",
             "join_projection_aggregate_update.Flush",
-            "SljitExecuteNativeTailHandoffBatch(runtime, result, scratch, terminal_step.Op(0), input",
+            "SljitBindMaterializedRuntimeBatchInput(input, \"SLJIT native tail handoff\")",
+            "execute_native_full_pipeline_from(scratch, terminal_step.Op(0), chunk)",
+            "SljitNativeSinkResultStopsExecution(runtime, sink_result, result)",
             "execute_native_full_pipeline_from.Finalize(scratch)",
         ),
     )
@@ -1749,7 +1899,6 @@ def verify_primitive_sequence() -> None:
             "CanElideProjectionWithCurrentHashProbe",
             "SljitTryBuildPreJoinProjectionViewDescriptor",
             "SljitTryBuildPreJoinProjectionViewColumn",
-            "SljitTryBuildInt64ToInt32PreJoinProjection",
             "SljitPreJoinProjectionViewColumnKind::INT64_TO_INT32_CAST",
         ),
     )
@@ -1759,6 +1908,12 @@ def verify_primitive_sequence() -> None:
             "struct SljitHashJoinProbeInputRemap",
             "key_input_indices",
             "residual_probe_source_indices",
+            "prepared_plan",
+            "has_prepared_plan",
+            "SljitPrepareHashJoinProbeInputRemap",
+            "SljitApplyPreparedHashJoinResidualProbeSourceRemap",
+            "input_remap.prepared_plan.operator_info.hash_join_keys[key_idx].input_index",
+            "SLJIT hash join selection remap requires prepared input types",
             "vector<idx_t> output_column_map",
             "HasOutputColumnMap",
         ),
@@ -1767,13 +1922,24 @@ def verify_primitive_sequence() -> None:
         "extension/jit_sljit/include/sljit_hash_join_probe_executor_runtime.hpp",
         (
             "struct SljitHashJoinProbeExecutionContractView",
-            "SljitApplyHashJoinResidualProbeSourceRemap",
             "SljitBuildHashJoinProbeExecutionContractView",
-            "plan.Copy(false)",
-            "view.remapped_operator_info.hash_join_keys[key_idx].input_index",
-            "view.remapped_plan.operator_info = view.remapped_operator_info",
-            "remapped hash join probe input requires selected-view execution",
-            "remapped hash join residual probe source type mismatch",
+            "input_remap->HasRemap()",
+            "input_remap->has_prepared_plan",
+            "view.plan = &input_remap->prepared_plan",
+            "view.operator_info = &input_remap->prepared_plan.operator_info",
+            "prepared hash join probe remap requires selected-view execution",
+            "hash join probe remap was not prepared during primitive binding",
+        ),
+    )
+    reject_text(
+        "extension/jit_sljit/include/sljit_hash_join_probe_executor_runtime.hpp",
+        (
+            "SljitApplyHashJoinResidualProbeSourceRemap",
+            "SljitRemappedHashJoinProbeKeySourceSupported",
+            "remapped_plan",
+            "remapped_operator_info",
+            "view.remapped_plan",
+            "view.remapped_operator_info",
         ),
     )
     require_text(
@@ -1788,13 +1954,51 @@ def verify_primitive_sequence() -> None:
     require_text(
         "extension/jit_sljit/include/sljit_full_pipeline_recipe_binding.hpp",
         (
+            "MakeJoinProjectionAggregateTerminal",
+            "SourceKey0RangeFitsInt32",
+            "TryBuildPreJoinProjectionView",
+            "BindElidedPreJoinHashJoinProbeSelection",
             "SljitPreJoinProjectionViewDescriptor pre_join_view",
+            "SljitTryBuildPreJoinProjectionViewDescriptor",
             "pre_join_view.CanElideProjectionWithCurrentHashProbe()",
             "input_remap.key_input_indices = pre_join_view.hash_probe_key_source_indices",
             "input_remap.residual_probe_source_indices = pre_join_view.residual_probe_source_indices",
+            "pre_join_view.source_key0_int64_to_int32_unchecked",
             "pre_join_view.projected_to_source",
             "remapped_hash_join_selection",
         ),
+    )
+    require_scoped_text(
+        "extension/jit_sljit/include/sljit_full_pipeline_recipe_binding.hpp",
+        "MakePreProjectionSelectedJoinAggregateRecipe",
+        "MakeTwoJoinSelectedAggregateRecipe",
+        (
+            "SljitPreJoinProjectionViewDescriptor pre_join_view",
+            "TryBuildPreJoinProjectionView",
+            "pre_join_view.CanElideProjectionWithCurrentHashProbe()",
+            "BindElidedPreJoinHashJoinProbeSelection",
+            "MakeSourceHashJoinProbeSelectionSequence",
+            "ProjectionChain(pre_join_projection)",
+        ),
+    )
+    require_text(
+        "extension/jit_sljit/include/sljit_string_set_case_projection_runtime.hpp",
+        (
+            "const SljitPreJoinProjectionViewDescriptor &pre_join_view",
+            "pre_join_view.columns[0].kind != SljitPreJoinProjectionViewColumnKind::INT64_TO_INT32_CAST",
+            "pre_join_view.columns[1].kind != SljitPreJoinProjectionViewColumnKind::REFERENCE",
+            "auto &join = ops[pre_join_view.hash_join_idx].hash_join_probe.plan",
+        ),
+    )
+    reject_regex(
+        "stale hard-coded pre-join projection descriptor",
+        (
+            r"\bSljitInt64ToInt32PreJoinProjection\b",
+            r"\bSljitTryBuildInt64ToInt32PreJoinProjection\b",
+            r"\bHasInt64ToInt32Projection\b",
+            r"\bUsesUncheckedKeyCast\b",
+        ),
+        ("extension/jit_sljit/**/*.hpp", "extension/jit_sljit/**/*.cpp"),
     )
     require_text(
         "extension/jit_sljit/include/sljit_hash_join_projection_source_runtime.hpp",
@@ -1830,7 +2034,7 @@ def verify_primitive_sequence() -> None:
         ),
     )
     reject_text(
-        "extension/jit_sljit/include/sljit_generated_filter_projection_runtime.hpp",
+        "extension/jit_sljit/include/sljit_generated_filter_primitive.hpp",
         (
             "SljitPreProjectedFilterProjectionPrimitive",
             "SljitCanBindPreProjectedFilterProjectionPrimitive",
@@ -1859,15 +2063,6 @@ def verify_primitive_sequence() -> None:
     reject_text(
         "extension/jit_sljit/include/sljit_full_pipeline_recipe_binding.hpp",
         ("for (idx_t projection_idx = shape.first_projection_idx", "for (idx_t projection_idx = first_projection_idx"),
-    )
-    require_text(
-        "extension/jit_sljit/include/sljit_grouped_aggregate_update_runtime.hpp",
-        (
-            "distinct_count_pointer_selected_payload_update",
-            "TryUpdateNewGroupsWithSelectedStateAddresses",
-            "AddSelectedPayloads",
-            "distinct_count_pointer_selected_payload_update_miss",
-        ),
     )
     require_text(
         "extension/jit_sljit/include/sljit_full_pipeline_dispatch_runtime.hpp",
@@ -1920,6 +2115,7 @@ def verify_recipe_builder() -> None:
             "MakeTwoJoinMarkFilterPrefix",
             "MakeMarkFilterNativeTailRecipe",
             "MakeSourceProjectionGroupedAggregateRecipe",
+            "MakeSingleJoinProjectionAggregateTailRecipe",
             "MakeProjectionGroupedAggregateRecipe",
             "MakeProjectionAggregateTailRecipe",
             "MakeProjectionNativeTailRecipe",
@@ -1935,7 +2131,10 @@ def verify_recipe_builder() -> None:
             "MakeSourceHashJoinProjectionInputSequence",
             "MakeTwoJoinDirectProjectionAggregateRecipe",
             "MakeHashJoinProbeProjectionInputStep",
-            "sequence.Add(SljitFullPipelinePrimitiveStep::SourceBatchBoundary(hash_join_idx))",
+            "SourceBatchBoundaryCanCoalesce",
+            "AddSourceBatchBoundaryIfUseful",
+            "TypeIsConstantSize(type.InternalType())",
+            "source_output_types",
             "sequence.Add(MakeHashJoinProbeProjectionInputStep(first_hash_join_idx))",
             "MakeHashJoinProbeSelectionStep(second_hash_join_idx)",
             "SljitMakeSelectedJoinOutputAggregateUpdatePrimitive",
@@ -1988,16 +2187,23 @@ def verify_recipe_builder() -> None:
             "BuildSljitFullPipelineRecipePlan",
             "SljitFullPipelineRecipeBuilder",
             "SljitFullPipelineRecipeBinding binding",
-            "SljitAnalyzeFullPipelineScheduleFacts(ops_p, uses_scan_filters_p)",
+            "SljitAnalyzeFullPipelineScheduleFacts(ops_p)",
             "schedule_facts.uses_extended_source_fetch_budget",
             "SljitTryAnalyzeSelectedJoinAggregate(ops, facts)",
             "SljitTryAnalyzeHashJoinDelimJoinSink(ops, facts)",
             "SljitTryAnalyzeProjectionAggregatePlan",
             "SljitProjectionAggregateRecipeBuilder(ops, binding).Build(recipe, plan)",
-            "SljitNativeTailRecipeBuilder(ops, uses_scan_filters, binding).Build(recipe)",
+            "SljitNativeTailRecipeBuilder(ops, schedule_facts, binding).Build(recipe)",
             "struct SljitFullPipelineRecipeRegistryEntry",
             "RecipeRegistry",
             "TryBuildNativeTailRecipe",
+        ),
+    )
+    reject_text(
+        "extension/jit_sljit/include/sljit_full_pipeline_recipe.hpp",
+        (
+            "uses_scan_filters_p",
+            "uses_scan_filters",
         ),
     )
     reject_text(
@@ -2017,20 +2223,17 @@ def verify_recipe_builder() -> None:
             "TryBuildProjectionAggregateRecipeFunction",
             "struct RegistryEntry",
             "RecipeRegistry",
+            "SljitProjectionAggregatePrefixKind prefix_kind",
+            "registry[entry_idx].prefix_kind != prefix_kind",
             "registry[entry_idx].try_build",
             "(this->*registry[entry_idx].try_build)(recipe, plan)",
-            "TryBuildSourceCountStarGrouped",
-            "TryBuildSingleJoinMarkFilter",
-            "TryBuildSingleJoinSourceFilterProjection",
-            "TryBuildSingleJoinPreProjection",
-            "TryBuildSingleJoinDirectProjection",
-            "TryBuildSingleJoinProjectionChain",
-            "TryBuildTwoJoinMarkFilter",
-            "TryBuildTwoJoinSourceFilterProjection",
-            "TryBuildTwoJoinPreProjection",
-            "TryBuildTwoJoinBetweenProjection",
-            "TryBuildTwoJoinDirectProjection",
-            "TryBuildTwoJoinProjectionChain",
+            "TryBuildSourceProjectionAggregate",
+            "TryBuildSingleJoinProjectionAggregate",
+            "TryBuildTwoJoinProjectionAggregate",
+            "TryBuildSingleJoinMarkBoundary",
+            "TryBuildSingleJoinProjectionAggregateTail",
+            "TryBuildTwoJoinMarkBoundary",
+            "SingleJoinCanUseProjectionAggregateTail",
             "CanBindHashJoinProbeProjectionInput",
             "CanBindHashJoinProbeProjectionInput(facts.first_hash_join_idx)",
             "SelectedProjectionAggregateHasDedicatedBackend(shape)",
@@ -2043,11 +2246,14 @@ def verify_recipe_builder() -> None:
             "struct SljitProjectionAggregatePlanFacts",
             "struct SljitProjectionAggregatePrefixFacts",
             "struct SljitFullPipelineScheduleFacts",
+            "has_source_batch_native_tail",
+            "source_batch_boundary_op_idx",
+            "source_batch_tail_start_idx",
+            "SljitFullPipelineOpIsUngroupedPrimitiveAggregateUpdate",
             "struct SljitSelectedJoinAggregateFacts",
             "struct SljitHashJoinDelimJoinSinkFacts",
             "struct SljitSourceBatchNativeTailFacts",
             "SljitAnalyzeFullPipelineScheduleFacts",
-            "SljitFullPipelineUsesScanFilteredAggregateTerminal",
             "SljitTryAnalyzeSelectedJoinAggregate",
             "SljitTryAnalyzeHashJoinDelimJoinSink",
             "SljitTryAnalyzeSourceBatchNativeTail",
@@ -2055,6 +2261,13 @@ def verify_recipe_builder() -> None:
             "SljitTryAnalyzeMarkFilterProjectionNativeTail",
             "SljitTryAnalyzeGeneratedFilterProjectionNativeTail",
             "SljitTryAnalyzeProjectionFilterProjectionNativeTail",
+        ),
+    )
+    reject_text(
+        "extension/jit_sljit/include/sljit_full_pipeline_recipe_facts.hpp",
+        (
+            "SljitFullPipelineUsesScanFilteredAggregateTerminal",
+            "uses_scan_filters",
         ),
     )
     reject_text(
@@ -2173,14 +2386,6 @@ def verify_recipe_builder() -> None:
 
 def verify_native_tail_and_deferred_finish() -> None:
     require_text(
-        "extension/jit_sljit/include/sljit_native_tail_handoff_runtime.hpp",
-        (
-            "SljitBindNativeTailHandoffPrimitive",
-            "SljitExecuteNativeTailHandoffBatch",
-            "SljitBindNativeTailHandoffInput",
-        ),
-    )
-    require_text(
         "extension/jit_sljit/include/sljit_native_pipeline_runtime.hpp",
         (
             "struct SljitNativePipelineGroupedFinishState",
@@ -2201,27 +2406,16 @@ def verify_native_tail_and_deferred_finish() -> None:
 
 
 def verify_distinct_aggregate_backend() -> None:
-    require_text(
-        "src/include/duckdb/execution/execution_operator_runtime.hpp",
-        (
-            "struct ExecutionDistinctCountPointerUpdateState",
-            "ExecutionDistinctCountPointerUpdateBinding distinct_count_pointer",
-            "TryResolveDistinctCountPointerAddresses",
-            "AddPayloads",
-        ),
-    )
-    require_text(
-        "src/execution/operator/aggregate/physical_hash_aggregate.cpp",
-        (
-            "HashAggregateDistinctCountPointerUpdateState",
-            "BindHashAggregateDistinctCountPointerUpdate",
-            "TryResolveDistinctCountPointerAddresses",
-            "HashAggregateUsesDistinctCountPointerKeys",
-        ),
-    )
+    require_absent("src/include/duckdb/execution/operator/aggregate/distinct_count_pointer_set.hpp")
+    require_absent("src/execution/operator/aggregate/distinct_count_pointer_set.cpp")
     reject_text(
         "src/include/duckdb/execution/execution_operator_runtime.hpp",
         (
+            "ExecutionDistinctCountPointerUpdateState",
+            "ExecutionDistinctCountPointerUpdateBinding",
+            "distinct_count_pointer",
+            "TryResolveDistinctCountPointerAddresses",
+            "AddPayloads",
             "TryUpdateNewGroupsWithStateAddresses",
             "TryResolveDistinctCountPointerGroupAddresses",
         ),
@@ -2229,6 +2423,12 @@ def verify_distinct_aggregate_backend() -> None:
     reject_text(
         "src/execution/operator/aggregate/physical_hash_aggregate.cpp",
         (
+            "HashAggregateDistinctCountPointerUpdateState",
+            "BindHashAggregateDistinctCountPointerUpdate",
+            "TryResolveDistinctCountPointerAddresses",
+            "HashAggregateUsesDistinctCountPointerKeys",
+            "HashAggregateCanPlanDistinctCountPointerKeys",
+            "distinct_count_pointer_keys",
             "TryUpdateNewGroupsWithStateAddresses",
             "TryResolveDistinctCountPointerGroupAddresses",
         ),
@@ -2252,23 +2452,6 @@ def verify_distinct_aggregate_backend() -> None:
         ),
     )
     require_text(
-        "extension/jit_sljit/sljit_region_aggregate_sink_plan.cpp",
-        (
-            "contract.distinct_count_pointer_keys",
-            "payload_update=duckdb-distinct-count-pointer",
-        ),
-    )
-    require_text(
-        "extension/jit_sljit/include/sljit_grouped_aggregate_update_runtime.hpp",
-        (
-            "SljitExecuteDistinctCountPointerAggregateUpdate",
-            "TryResolveDistinctCountPointerAddresses",
-            "distinct.state->AddPayloads",
-            "distinct_count_pointer_payload_set_update",
-            "MarkDeferredGroupedFinish",
-        ),
-    )
-    require_text(
         "extension/jit_sljit/include/sljit_grouped_aggregate_update_primitive.hpp",
         (
             "enum class SljitGroupedAggregateUpdateStrategyKind",
@@ -2276,10 +2459,11 @@ def verify_distinct_aggregate_backend() -> None:
             "SljitGroupedAggregateUpdateHasDedicatedBackend",
             "SljitGroupedAggregateUpdateCanUseCountStarPreaggregation",
             "SljitGroupedAggregateUpdateStrategyKind::COUNT_STAR_PREAGGREGATION",
-            "SljitGroupedAggregateUpdateStrategyKind::DISTINCT_COUNT_POINTER",
+            "SljitGroupedAggregateUpdateCanUseDirectPrimitivePayloadUpdate",
+            "SljitGroupedAggregateUpdateStrategyKind::DIRECT_PRIMITIVE_PAYLOAD_UPDATE",
+            "SljitExecutePrimitiveAggregateUpdate",
             "SljitGroupedAggregateUpdateStrategyKind::INVALID",
             "primitive.strategy",
-            "ExecuteDistinctCountPointer",
             "ExecuteCountStarPreaggregation",
             "primitive_grouped_count_star_row_update",
         ),
@@ -2288,9 +2472,33 @@ def verify_distinct_aggregate_backend() -> None:
         "extension/jit_sljit/include/sljit_grouped_aggregate_update_primitive.hpp",
         (
             "SljitGroupedAggregateUpdateStrategyKind::STANDARD",
+            "SljitGroupedAggregateUpdateStrategyKind::DISTINCT_COUNT_POINTER",
             "ExecuteStandard",
+            "ExecuteDistinctCountPointer",
             "SljitExecuteNativeAggregateUpdate",
         ),
+    )
+    reject_regex(
+        "removed distinct count-pointer backend",
+        (
+            r"\bdistinct_count_pointer_keys\b",
+            r"\bdistinct_count_pointer_payload_storage\b",
+            r"\bDistinctCountPointer\b",
+            r"\bExecutionDistinctCountPointer\b",
+            r"\bSljit(?:Try)?ExecuteDistinctCountPointer\b",
+            r"\bUseGlobalPayloadSet\b",
+            r"\bGLOBAL_PAIR_SET\b",
+        ),
+        (
+            "src/**/*.cpp",
+            "src/**/*.hpp",
+            "extension/jit_sljit/**/*.cpp",
+            "extension/jit_sljit/**/*.hpp",
+            "benchmark/jit/**/*.py",
+            "benchmark/tpch/jit/**/*.py",
+            "test/api/**/*.cpp",
+        ),
+        ("benchmark/jit/verify_jit_architecture.py", "test/api/test_jit_runtime.cpp"),
     )
     reject_regex(
         "projection count-star terminal primitive",
@@ -2384,6 +2592,15 @@ def verify_exact_source_cardinality_contract() -> None:
         "src/execution/execution_contract.cpp",
         ("ApplyExecutionContractFinalizedSourceCardinality(result, FinalizedSourceCardinality())",),
     )
+    require_text(
+        "src/execution/execution_region_ir.cpp",
+        (
+            "EstimateExecutionRegionCandidateCardinality",
+            "source.kind == ExecutionRegionNodeKind::SOURCE && source.estimated_cardinality_exact",
+            "exact source cardinality must cap the runner cost model",
+            "return MinValue(source.estimated_cardinality, downstream_estimate)",
+        ),
+    )
 
 
 def verify_group_estimate_contract() -> None:
@@ -2404,6 +2621,7 @@ def verify_group_estimate_contract() -> None:
             "group.supported_reference",
             "group.input_index",
             "reserve.group_count = reserve_count",
+            "plan.estimated_input_count > 0 && reserve_count >= plan.estimated_input_count",
         ),
     )
     require_text(
@@ -2416,10 +2634,9 @@ def verify_group_estimate_contract() -> None:
             "BuildExecutionRegionDistinctReserveCount",
             "source_contract_input_distinct_reserve_counts",
             "source_cardinality == 0",
-            "DistinctStatistics::SampleRate",
             "contract.estimated_source_cardinality",
             "MinValue(stats.GetDistinctCount(), source_cardinality)",
-            "std::ceil(static_cast<double>(distinct_count) / sample_rate)",
+            "return distinct_count",
         ),
     )
     require_text(
@@ -2442,10 +2659,10 @@ def verify_group_estimate_contract() -> None:
     require_text(
         "test/api/test_jit_aggregate.cpp",
         (
-            "JIT preaggregated grouped aggregate reserves source distinct groups once",
+            "JIT preaggregated grouped aggregate avoids source-row reserve",
             "VACUUM jit_preaggregated_group_reserve",
             "aggregate_update.preaggregated_grouped_primitive_reserve_target=200000",
-            "preaggregated_grouped_primitive_reserve.reserve_groups.resize=1",
+            "preaggregated_grouped_primitive_reserve.reserve_groups.resize=",
             "direct_append_preaggregated_grouped_primitive_update.find_new.resize",
         ),
     )
@@ -2548,6 +2765,7 @@ def main() -> None:
     verify_cost_fact_ownership_boundary()
     verify_preaggregated_primitive_batch_contract()
     verify_perfect_hash_aggregate_capability_contract()
+    verify_regular_hash_aggregate_lookup_contract()
     verify_row_pointer_grouped_lookup_contract()
     verify_executable_source_fact_contract()
     verify_primitive_sequence()
