@@ -10,6 +10,7 @@
 #include "duckdb/common/row_operations/row_operations.hpp"
 #include "duckdb/common/types/hash.hpp"
 #include "duckdb/common/types/null_value.hpp"
+#include "duckdb/common/types/date.hpp"
 #include "duckdb/common/types/row/tuple_data_iterator.hpp"
 #include "duckdb/common/types/string_type.hpp"
 #include "duckdb/common/unordered_map.hpp"
@@ -2446,6 +2447,20 @@ static bool AggregateDescriptorGroupKeySourcesSupported(const vector<ExecutionRo
 				return false;
 			}
 			break;
+		case ExecutionRowPointerGroupKeyCastKind::DATE_YEAR_COMPRESS:
+			if (source.source_physical_type != PhysicalType::INT32 || source.source_type.id() != LogicalTypeId::DATE) {
+				return false;
+			}
+			switch (source.target_physical_type) {
+			case PhysicalType::UINT8:
+			case PhysicalType::UINT16:
+			case PhysicalType::UINT32:
+			case PhysicalType::UINT64:
+				break;
+			default:
+				return false;
+			}
+			break;
 		case ExecutionRowPointerGroupKeyCastKind::STRING_COMPRESS:
 			if (source.source_physical_type != PhysicalType::VARCHAR) {
 				return false;
@@ -2581,6 +2596,40 @@ static bool AggregateIntegralCompressedGroupKeyValue(const_data_ptr_t source_dat
 	return true;
 }
 
+static int64_t AggregateExtractDateYearGroupKey(int32_t days) {
+	int32_t year = Date::EPOCH_YEAR;
+	while (days < 0) {
+		days += Date::DAYS_PER_YEAR_INTERVAL;
+		year -= Date::YEAR_INTERVAL;
+	}
+	while (days >= Date::DAYS_PER_YEAR_INTERVAL) {
+		days -= Date::DAYS_PER_YEAR_INTERVAL;
+		year += Date::YEAR_INTERVAL;
+	}
+	auto year_offset = days / 365;
+	while (days < Date::CUMULATIVE_YEAR_DAYS[year_offset]) {
+		year_offset--;
+		D_ASSERT(year_offset >= 0);
+	}
+	return year + year_offset;
+}
+
+template <class DST>
+static bool AggregateDateYearCompressedGroupKeyValue(const_data_ptr_t source_data, idx_t source_idx,
+                                                     const ExecutionRowPointerGroupKeySource &source,
+                                                     DST &target_value) {
+	const auto days = Load<int32_t>(source_data + source_idx * sizeof(int32_t));
+	int64_t compressed_value;
+	if (!TrySubtractOperator::Operation<int64_t, int64_t, int64_t>(AggregateExtractDateYearGroupKey(days),
+	                                                               source.cast_constant, compressed_value)) {
+		return false;
+	}
+	if (!TryCast::Operation<int64_t, DST>(compressed_value, target_value, false)) {
+		return false;
+	}
+	return true;
+}
+
 template <class SRC, class DST>
 static bool AggregateStoreIntegralCompressedGroupKey(const_data_ptr_t source_data, idx_t source_idx, Vector &target,
                                                      idx_t target_idx,
@@ -2611,6 +2660,36 @@ static bool AggregateStoreIntegralCompressedGroupKey(const_data_ptr_t source_dat
 	case PhysicalType::UINT64:
 		return AggregateStoreIntegralCompressedGroupKey<SRC, uint64_t>(source_data, source_idx, target, target_idx,
 		                                                               source);
+	default:
+		return false;
+	}
+}
+
+template <class DST>
+static bool AggregateStoreDateYearCompressedGroupKey(const_data_ptr_t source_data, idx_t source_idx, Vector &target,
+                                                     idx_t target_idx,
+                                                     const ExecutionRowPointerGroupKeySource &source) {
+	DST target_value;
+	if (!AggregateDateYearCompressedGroupKeyValue<DST>(source_data, source_idx, source, target_value)) {
+		return false;
+	}
+	auto target_values = FlatVector::GetDataMutable<DST>(target);
+	target_values[target_idx] = target_value;
+	return true;
+}
+
+static bool AggregateStoreDateYearCompressedGroupKey(const_data_ptr_t source_data, idx_t source_idx, Vector &target,
+                                                     idx_t target_idx,
+                                                     const ExecutionRowPointerGroupKeySource &source) {
+	switch (source.target_physical_type) {
+	case PhysicalType::UINT8:
+		return AggregateStoreDateYearCompressedGroupKey<uint8_t>(source_data, source_idx, target, target_idx, source);
+	case PhysicalType::UINT16:
+		return AggregateStoreDateYearCompressedGroupKey<uint16_t>(source_data, source_idx, target, target_idx, source);
+	case PhysicalType::UINT32:
+		return AggregateStoreDateYearCompressedGroupKey<uint32_t>(source_data, source_idx, target, target_idx, source);
+	case PhysicalType::UINT64:
+		return AggregateStoreDateYearCompressedGroupKey<uint64_t>(source_data, source_idx, target, target_idx, source);
 	default:
 		return false;
 	}
@@ -2673,6 +2752,11 @@ static bool AggregateStoreDescriptorGroupKeyValue(const_data_ptr_t source_data, 
 			return false;
 		}
 	}
+	case ExecutionRowPointerGroupKeyCastKind::DATE_YEAR_COMPRESS:
+		if (source.source_physical_type != PhysicalType::INT32 || source.source_type.id() != LogicalTypeId::DATE) {
+			return false;
+		}
+		return AggregateStoreDateYearCompressedGroupKey(source_data, source_idx, target, target_idx, source);
 	case ExecutionRowPointerGroupKeyCastKind::STRING_COMPRESS: {
 		if (source.source_physical_type != PhysicalType::VARCHAR) {
 			return false;
@@ -2811,6 +2895,12 @@ static bool AggregateRowPointerSingleFieldDirectCastSupported(const ExecutionRow
 		return source.source_physical_type == PhysicalType::INT64 && source.target_physical_type == PhysicalType::INT16;
 	case ExecutionRowPointerGroupKeyCastKind::INT32_TO_INT8:
 		return source.source_physical_type == PhysicalType::INT32 && source.target_physical_type == PhysicalType::INT8;
+	case ExecutionRowPointerGroupKeyCastKind::DATE_YEAR_COMPRESS:
+		return source.source_physical_type == PhysicalType::INT32 && source.source_type.id() == LogicalTypeId::DATE &&
+		       (source.target_physical_type == PhysicalType::UINT8 ||
+		        source.target_physical_type == PhysicalType::UINT16 ||
+		        source.target_physical_type == PhysicalType::UINT32 ||
+		        source.target_physical_type == PhysicalType::UINT64);
 	case ExecutionRowPointerGroupKeyCastKind::STRING_COMPRESS:
 		return source.source_physical_type == PhysicalType::VARCHAR &&
 		       (source.target_physical_type == PhysicalType::UINT8 ||
@@ -3224,6 +3314,38 @@ static bool AggregateHashIntegralCompressedDescriptorValue(const_data_ptr_t sour
 	}
 }
 
+template <class DST>
+static bool AggregateHashDateYearCompressedDescriptorValue(const_data_ptr_t source_data, idx_t source_idx,
+                                                           const ExecutionRowPointerGroupKeySource &source,
+                                                           hash_t &value_hash) {
+	DST target_value;
+	if (!AggregateDateYearCompressedGroupKeyValue<DST>(source_data, source_idx, source, target_value)) {
+		return false;
+	}
+	value_hash = Hash(target_value);
+	return true;
+}
+
+static bool AggregateHashDateYearCompressedDescriptorValue(const_data_ptr_t source_data, idx_t source_idx,
+                                                           const ExecutionRowPointerGroupKeySource &source,
+                                                           hash_t &value_hash) {
+	if (source.source_physical_type != PhysicalType::INT32 || source.source_type.id() != LogicalTypeId::DATE) {
+		return false;
+	}
+	switch (source.target_physical_type) {
+	case PhysicalType::UINT8:
+		return AggregateHashDateYearCompressedDescriptorValue<uint8_t>(source_data, source_idx, source, value_hash);
+	case PhysicalType::UINT16:
+		return AggregateHashDateYearCompressedDescriptorValue<uint16_t>(source_data, source_idx, source, value_hash);
+	case PhysicalType::UINT32:
+		return AggregateHashDateYearCompressedDescriptorValue<uint32_t>(source_data, source_idx, source, value_hash);
+	case PhysicalType::UINT64:
+		return AggregateHashDateYearCompressedDescriptorValue<uint64_t>(source_data, source_idx, source, value_hash);
+	default:
+		return false;
+	}
+}
+
 template <class RESULT_TYPE>
 static bool AggregateHashStringCompressedDescriptorValue(const string_t &value, hash_t &value_hash) {
 	value_hash = Hash(AggregateStringCompressWide<RESULT_TYPE>(value));
@@ -3291,6 +3413,8 @@ static bool AggregateHashDescriptorSourceValue(const_data_ptr_t source_data, idx
 		return true;
 	case ExecutionRowPointerGroupKeyCastKind::INTEGRAL_COMPRESS:
 		return AggregateHashIntegralCompressedDescriptorValue(source_data, source_idx, source, value_hash);
+	case ExecutionRowPointerGroupKeyCastKind::DATE_YEAR_COMPRESS:
+		return AggregateHashDateYearCompressedDescriptorValue(source_data, source_idx, source, value_hash);
 	case ExecutionRowPointerGroupKeyCastKind::STRING_COMPRESS:
 		return AggregateHashStringCompressedDescriptorValue(source_data, source_idx, source, value_hash);
 	default:
@@ -3347,6 +3471,41 @@ static bool AggregateIntegralCompressedDescriptorValuesMatch(const_data_ptr_t le
 	case PhysicalType::INT64:
 		return AggregateIntegralCompressedDescriptorValuesMatch<int64_t>(left_data, left_idx, right_data, right_idx,
 		                                                                 source);
+	default:
+		return false;
+	}
+}
+
+template <class DST>
+static bool AggregateDateYearCompressedDescriptorValuesMatch(const_data_ptr_t left_data, idx_t left_idx,
+                                                             const_data_ptr_t right_data, idx_t right_idx,
+                                                             const ExecutionRowPointerGroupKeySource &source) {
+	DST left_value;
+	DST right_value;
+	return AggregateDateYearCompressedGroupKeyValue<DST>(left_data, left_idx, source, left_value) &&
+	       AggregateDateYearCompressedGroupKeyValue<DST>(right_data, right_idx, source, right_value) &&
+	       left_value == right_value;
+}
+
+static bool AggregateDateYearCompressedDescriptorValuesMatch(const_data_ptr_t left_data, idx_t left_idx,
+                                                             const_data_ptr_t right_data, idx_t right_idx,
+                                                             const ExecutionRowPointerGroupKeySource &source) {
+	if (source.source_physical_type != PhysicalType::INT32 || source.source_type.id() != LogicalTypeId::DATE) {
+		return false;
+	}
+	switch (source.target_physical_type) {
+	case PhysicalType::UINT8:
+		return AggregateDateYearCompressedDescriptorValuesMatch<uint8_t>(left_data, left_idx, right_data, right_idx,
+		                                                                 source);
+	case PhysicalType::UINT16:
+		return AggregateDateYearCompressedDescriptorValuesMatch<uint16_t>(left_data, left_idx, right_data, right_idx,
+		                                                                  source);
+	case PhysicalType::UINT32:
+		return AggregateDateYearCompressedDescriptorValuesMatch<uint32_t>(left_data, left_idx, right_data, right_idx,
+		                                                                  source);
+	case PhysicalType::UINT64:
+		return AggregateDateYearCompressedDescriptorValuesMatch<uint64_t>(left_data, left_idx, right_data, right_idx,
+		                                                                  source);
 	default:
 		return false;
 	}
@@ -3417,6 +3576,8 @@ static bool AggregateDescriptorSourceValuesMatch(const ExecutionRowPointerGroupK
 		       AggregateCheckedGroupKeyCast<int32_t, int8_t>(Load<int32_t>(right_data + right_idx * sizeof(int32_t)));
 	case ExecutionRowPointerGroupKeyCastKind::INTEGRAL_COMPRESS:
 		return AggregateIntegralCompressedDescriptorValuesMatch(left_data, left_idx, right_data, right_idx, source);
+	case ExecutionRowPointerGroupKeyCastKind::DATE_YEAR_COMPRESS:
+		return AggregateDateYearCompressedDescriptorValuesMatch(left_data, left_idx, right_data, right_idx, source);
 	case ExecutionRowPointerGroupKeyCastKind::STRING_COMPRESS:
 		return AggregateStringCompressedDescriptorValuesMatch(left_data, left_idx, right_data, right_idx, source);
 	default:
@@ -3576,6 +3737,41 @@ static bool AggregateIntegralCompressedDescriptorValueMatchesStored(const_data_p
 	}
 }
 
+template <class DST>
+static bool AggregateDateYearCompressedDescriptorValueMatchesStored(const_data_ptr_t source_data, idx_t source_idx,
+                                                                    data_ptr_t row_location, idx_t layout_offset,
+                                                                    const ExecutionRowPointerGroupKeySource &source) {
+	DST target_value;
+	if (!AggregateDateYearCompressedGroupKeyValue<DST>(source_data, source_idx, source, target_value)) {
+		return false;
+	}
+	return Load<DST>(row_location + layout_offset) == target_value;
+}
+
+static bool AggregateDateYearCompressedDescriptorValueMatchesStored(const_data_ptr_t source_data, idx_t source_idx,
+                                                                    data_ptr_t row_location, idx_t layout_offset,
+                                                                    const ExecutionRowPointerGroupKeySource &source) {
+	if (source.source_physical_type != PhysicalType::INT32 || source.source_type.id() != LogicalTypeId::DATE) {
+		return false;
+	}
+	switch (source.target_physical_type) {
+	case PhysicalType::UINT8:
+		return AggregateDateYearCompressedDescriptorValueMatchesStored<uint8_t>(
+		    source_data, source_idx, row_location, layout_offset, source);
+	case PhysicalType::UINT16:
+		return AggregateDateYearCompressedDescriptorValueMatchesStored<uint16_t>(
+		    source_data, source_idx, row_location, layout_offset, source);
+	case PhysicalType::UINT32:
+		return AggregateDateYearCompressedDescriptorValueMatchesStored<uint32_t>(
+		    source_data, source_idx, row_location, layout_offset, source);
+	case PhysicalType::UINT64:
+		return AggregateDateYearCompressedDescriptorValueMatchesStored<uint64_t>(
+		    source_data, source_idx, row_location, layout_offset, source);
+	default:
+		return false;
+	}
+}
+
 template <class RESULT_TYPE>
 static bool AggregateStringCompressedDescriptorValueMatchesStored(const string_t &value, data_ptr_t row_location,
                                                                   idx_t layout_offset) {
@@ -3640,6 +3836,9 @@ static bool AggregateDescriptorSourceValueMatchesStored(const ExecutionRowPointe
 	}
 	case ExecutionRowPointerGroupKeyCastKind::INTEGRAL_COMPRESS:
 		return AggregateIntegralCompressedDescriptorValueMatchesStored(source_data, source_idx, row_location,
+		                                                               layout_offset, source);
+	case ExecutionRowPointerGroupKeyCastKind::DATE_YEAR_COMPRESS:
+		return AggregateDateYearCompressedDescriptorValueMatchesStored(source_data, source_idx, row_location,
 		                                                               layout_offset, source);
 	case ExecutionRowPointerGroupKeyCastKind::STRING_COMPRESS:
 		return AggregateStringCompressedDescriptorValueMatchesStored(source_data, source_idx, row_location,
@@ -4022,6 +4221,12 @@ bool GroupedAggregateHashTable::TryFindOrCreateSingleInputVectorGroupStateTarget
 				return TryCast::Operation<int32_t, int8_t>(source_value, value, false);
 			}
 			return false;
+		case ExecutionRowPointerGroupKeyCastKind::DATE_YEAR_COMPRESS:
+			if constexpr (std::is_same<T, uint8_t>::value || std::is_same<T, uint16_t>::value ||
+			              std::is_same<T, uint32_t>::value || std::is_same<T, uint64_t>::value) {
+				return AggregateDateYearCompressedGroupKeyValue<T>(input_format.data, source_idx, source, value);
+			}
+			return false;
 		default:
 			return false;
 		}
@@ -4347,6 +4552,12 @@ static bool AggregateRowPointerSingleFieldKeyValue(const_data_ptr_t source_data,
 			value = source.unchecked_integral_cast ? static_cast<int8_t>(source_value)
 			                                       : AggregateCheckedGroupKeyCast<int32_t, int8_t>(source_value);
 			return true;
+		}
+		return false;
+	case ExecutionRowPointerGroupKeyCastKind::DATE_YEAR_COMPRESS:
+		if constexpr (std::is_same<T, uint8_t>::value || std::is_same<T, uint16_t>::value ||
+		              std::is_same<T, uint32_t>::value || std::is_same<T, uint64_t>::value) {
+			return AggregateDateYearCompressedGroupKeyValue<T>(source_data, 0, source, value);
 		}
 		return false;
 	case ExecutionRowPointerGroupKeyCastKind::STRING_COMPRESS:

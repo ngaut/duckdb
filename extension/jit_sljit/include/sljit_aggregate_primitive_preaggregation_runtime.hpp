@@ -109,6 +109,9 @@ static bool SljitPreaggregationInputVectorGroupCastSupported(const ExecutionRowP
 	case ExecutionRowPointerGroupKeyCastKind::INTEGRAL_COMPRESS:
 		return SljitPreaggregationIntegralCompressionSourceType(source.source_physical_type) &&
 		       SljitPreaggregationCompressedUnsignedTargetType(source.target_physical_type);
+	case ExecutionRowPointerGroupKeyCastKind::DATE_YEAR_COMPRESS:
+		return source.source_physical_type == PhysicalType::INT32 && source.source_type.id() == LogicalTypeId::DATE &&
+		       SljitPreaggregationCompressedUnsignedTargetType(source.target_physical_type);
 	case ExecutionRowPointerGroupKeyCastKind::STRING_COMPRESS:
 		return source.source_physical_type == PhysicalType::VARCHAR &&
 		       SljitPreaggregationCompressedUnsignedTargetType(source.target_physical_type);

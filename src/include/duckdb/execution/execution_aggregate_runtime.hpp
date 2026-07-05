@@ -28,6 +28,7 @@ enum class ExecutionRowPointerGroupKeyCastKind : uint8_t {
 	INT64_TO_INT16,
 	INT32_TO_INT8,
 	INTEGRAL_COMPRESS,
+	DATE_YEAR_COMPRESS,
 	STRING_COMPRESS
 };
 

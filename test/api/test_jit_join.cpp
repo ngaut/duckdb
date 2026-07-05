@@ -1550,10 +1550,13 @@ static void RequireComposedTwoJoinProjectionChainEvent(ExecutionRegionManager &m
 	    [](const ExecutionRegionEvent &event) {
 		    const auto boundaries = EventJitMaterializationBoundaryCounts(event);
 		    const auto runtime_paths = EventJitRuntimePathCounts(event);
+		    const bool has_projection_input_vector_backend =
+		        StringUtil::Contains(runtime_paths, "aggregate_update.direct_projection_input_vector_grouped_update=");
+		    const bool has_projection_row_pointer_backend =
+		        StringUtil::Contains(runtime_paths, "aggregate_update.direct_projection_row_pointer_grouped_update=");
 		    return EventPhase(event) == "runtime" && EventStatus(event) == "executed" &&
 		           EventExecutionMode(event) == "native" &&
-		           StringUtil::Contains(runtime_paths,
-		                                "aggregate_update.direct_projection_input_vector_grouped_update=") &&
+		           (has_projection_input_vector_backend || has_projection_row_pointer_backend) &&
 		           (StringUtil::Contains(boundaries, "hash_join_probe.row_pointer_selection_reference=") ||
 		            StringUtil::Contains(boundaries, "hash_join_probe.perfect_selection_reference="));
 	    },
@@ -1565,22 +1568,36 @@ static void RequireComposedTwoJoinProjectionChainEvent(ExecutionRegionManager &m
 		        StringUtil::Contains(boundaries, "hash_join_probe.row_pointer_selection_reference=");
 		    const bool has_perfect_selection =
 		        StringUtil::Contains(boundaries, "hash_join_probe.perfect_selection_reference=");
+		    const bool has_projection_input_vector_backend =
+		        StringUtil::Contains(runtime_paths, "aggregate_update.direct_projection_input_vector_grouped_update=");
+		    const bool has_projection_row_pointer_backend =
+		        StringUtil::Contains(runtime_paths, "aggregate_update.direct_projection_row_pointer_grouped_update=");
 		    REQUIRE((has_regular_selection || has_perfect_selection));
-		    REQUIRE(
-		        StringUtil::Contains(runtime_paths, "aggregate_update.direct_projection_input_vector_grouped_update="));
-		    REQUIRE(StringUtil::Contains(runtime_paths,
-		                                 "aggregate_update.direct_projection_aggregate_group.input_vector="));
+		    REQUIRE((has_projection_input_vector_backend || has_projection_row_pointer_backend));
+		    if (has_projection_input_vector_backend) {
+			    REQUIRE(StringUtil::Contains(runtime_paths,
+			                                 "aggregate_update.direct_projection_aggregate_group.input_vector="));
+		    }
+		    if (has_projection_row_pointer_backend) {
+			    REQUIRE(StringUtil::Contains(runtime_paths,
+			                                 "aggregate_update.direct_projection_aggregate_input.projection_output="));
+			    REQUIRE(StringUtil::Contains(runtime_paths,
+			                                 "aggregate_update.direct_projection_aggregate_group.row_pointer_field_cast="));
+			    REQUIRE(StringUtil::Contains(boundaries, "aggregate_update.row_pointer_grouped_lookup_update="));
+		    }
 		    REQUIRE(StringUtil::Contains(stages, "projection.batch_append="));
 		    REQUIRE(StringUtil::Contains(stages, "projection.post_join_direct_reference_payload_view="));
 		    REQUIRE(StringUtil::Contains(stages, "projection.post_join_direct_computed_projection="));
-		    REQUIRE(StringUtil::Contains(boundaries, "aggregate_update.projected_group_payload_update="));
+		    const bool has_projected_group_payload_update =
+		        StringUtil::Contains(boundaries, "aggregate_update.projected_group_payload_update=");
+		    const bool has_row_pointer_grouped_lookup_update =
+		        StringUtil::Contains(boundaries, "aggregate_update.row_pointer_grouped_lookup_update=");
+		    REQUIRE((has_projected_group_payload_update || has_row_pointer_grouped_lookup_update));
 		    REQUIRE_FALSE(StringUtil::Contains(boundaries, "hash_join_probe.final_output="));
 		    REQUIRE_FALSE(StringUtil::Contains(runtime_paths, "projection.direct_between_join_projection="));
 		    REQUIRE_FALSE(StringUtil::Contains(runtime_paths, "projection.direct_second_join_projection="));
 		    REQUIRE_FALSE(
 		        StringUtil::Contains(runtime_paths, "projection.direct_rhs_row_pointer_generated_projection="));
-		    REQUIRE_FALSE(
-		        StringUtil::Contains(runtime_paths, "aggregate_update.direct_row_pointer_grouped_lookup_update="));
 		    REQUIRE_FALSE(StringUtil::Contains(boundaries, "hash_join_probe.direct_row_pointer_reference="));
 		    REQUIRE_FALSE(StringUtil::Contains(boundaries, "hash_join_probe.direct_selection_reference="));
 		    REQUIRE_FALSE(StringUtil::Contains(boundaries, "projection.direct_post_join_batch_projection="));
@@ -1710,7 +1727,7 @@ TEST_CASE("JIT row-pointer grouped aggregate probes compressed string keys as si
 	    });
 }
 
-TEST_CASE("JIT two-join grouped aggregate materializes wide projection tail", "[api][jit]") {
+TEST_CASE("JIT two-join grouped aggregate uses selected projection aggregate backend", "[api][jit]") {
 	DuckDB db;
 	Connection con(db);
 	auto &manager = ExecutionRegionManager::Get(*con.context);

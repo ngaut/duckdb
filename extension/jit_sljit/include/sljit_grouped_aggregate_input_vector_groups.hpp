@@ -12,6 +12,8 @@
 #include "sljit_region_adapter_scratch.hpp"
 
 #include "duckdb/common/operator/cast_operators.hpp"
+#include "duckdb/common/operator/subtract.hpp"
+#include "duckdb/common/types/date.hpp"
 #include "duckdb/common/types/row/tuple_data_layout.hpp"
 #include "duckdb/common/vector/flat_vector.hpp"
 #include "duckdb/common/vector/unified_vector_format.hpp"
@@ -36,6 +38,9 @@ static bool SljitGroupSourceCanMaterializeFromInputVector(DataChunk &payload_inp
 		return source.source_physical_type == PhysicalType::INT64 && source.target_physical_type == PhysicalType::INT16;
 	case ExecutionRowPointerGroupKeyCastKind::INT32_TO_INT8:
 		return source.source_physical_type == PhysicalType::INT32 && source.target_physical_type == PhysicalType::INT8;
+	case ExecutionRowPointerGroupKeyCastKind::DATE_YEAR_COMPRESS:
+		return source.source_physical_type == PhysicalType::INT32 && source.source_type.id() == LogicalTypeId::DATE &&
+		       source.target_physical_type == PhysicalType::UINT8;
 	default:
 		return false;
 	}
@@ -253,6 +258,69 @@ static void SljitMaterializeInputVectorGroupCast(Vector &source, Vector &target,
 	FlatVector::SetSize(target, count);
 }
 
+static int64_t SljitExtractDateYearForGroupKey(int32_t days) {
+	int32_t year = Date::EPOCH_YEAR;
+	while (days < 0) {
+		days += Date::DAYS_PER_YEAR_INTERVAL;
+		year -= Date::YEAR_INTERVAL;
+	}
+	while (days >= Date::DAYS_PER_YEAR_INTERVAL) {
+		days -= Date::DAYS_PER_YEAR_INTERVAL;
+		year += Date::YEAR_INTERVAL;
+	}
+	auto year_offset = days / 365;
+	while (days < Date::CUMULATIVE_YEAR_DAYS[year_offset]) {
+		year_offset--;
+		D_ASSERT(year_offset >= 0);
+	}
+	return year + year_offset;
+}
+
+template <class DST>
+static DST SljitDateYearCompressedGroupKey(int32_t days, int64_t minimum) {
+	int64_t compressed_value;
+	if (!TrySubtractOperator::Operation<int64_t, int64_t, int64_t>(SljitExtractDateYearForGroupKey(days), minimum,
+	                                                               compressed_value)) {
+		throw InvalidInputException("Overflow in date year group compression");
+	}
+	DST result;
+	if (!TryCast::Operation<int64_t, DST>(compressed_value, result, false)) {
+		throw InvalidInputException(CastExceptionText<int64_t, DST>(compressed_value));
+	}
+	return result;
+}
+
+template <class DST>
+static void SljitMaterializeDateYearCompressedInputVectorGroup(Vector &source, Vector &target, idx_t count,
+                                                              int64_t minimum) {
+	target.SetVectorType(VectorType::FLAT_VECTOR);
+	auto &target_validity = FlatVector::ValidityMutable(target);
+	target_validity.Reset(count);
+	target_validity.EnsureWritable();
+	target_validity.SetAllValid(count);
+	auto target_data = FlatVector::GetDataMutable<DST>(target);
+
+	UnifiedVectorFormat source_format;
+	source.ToUnifiedFormat(source_format);
+	auto source_data = UnifiedVectorFormat::GetData<int32_t>(source_format);
+	if (!source_format.validity.CanHaveNull()) {
+		for (idx_t row_idx = 0; row_idx < count; row_idx++) {
+			target_data[row_idx] =
+			    SljitDateYearCompressedGroupKey<DST>(source_data[source_format.sel->get_index(row_idx)], minimum);
+		}
+	} else {
+		for (idx_t row_idx = 0; row_idx < count; row_idx++) {
+			const auto source_idx = source_format.sel->get_index(row_idx);
+			if (!source_format.validity.RowIsValid(source_idx)) {
+				target_validity.SetInvalid(row_idx);
+				continue;
+			}
+			target_data[row_idx] = SljitDateYearCompressedGroupKey<DST>(source_data[source_idx], minimum);
+		}
+	}
+	FlatVector::SetSize(target, count);
+}
+
 static bool SljitTryMaterializeInputVectorGroupSource(DataChunk &payload_input,
                                                       const ExecutionRowPointerGroupKeySource &source, Vector &target,
                                                       idx_t count, bool source_key0_int64_to_int32_unchecked) {
@@ -293,6 +361,13 @@ static bool SljitTryMaterializeInputVectorGroupSource(DataChunk &payload_input,
 			return false;
 		}
 		SljitMaterializeInputVectorGroupCast<int32_t, int8_t>(input, target, count, source.unchecked_integral_cast);
+		return true;
+	case ExecutionRowPointerGroupKeyCastKind::DATE_YEAR_COMPRESS:
+		if (source.source_physical_type != PhysicalType::INT32 || source.source_type.id() != LogicalTypeId::DATE ||
+		    source.target_physical_type != PhysicalType::UINT8) {
+			return false;
+		}
+		SljitMaterializeDateYearCompressedInputVectorGroup<uint8_t>(input, target, count, source.cast_constant);
 		return true;
 	default:
 		return false;

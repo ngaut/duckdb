@@ -14,6 +14,54 @@
 
 namespace duckdb {
 
+static bool SljitGroupKeyCompressedUnsignedTargetType(PhysicalType type) {
+	switch (type) {
+	case PhysicalType::UINT8:
+	case PhysicalType::UINT16:
+	case PhysicalType::UINT32:
+	case PhysicalType::UINT64:
+		return true;
+	default:
+		return false;
+	}
+}
+
+static bool SljitTryReadDateYearCompressGroupKey(const SljitNativeRegionExpressionPlan &plan,
+                                                 const LogicalType &target_type,
+                                                 const ExecutionRowPointerGroupKeySource &group_source,
+                                                 int64_t &minimum) {
+	if (plan.kind != SljitNativeRegionExpressionKind::TYPED_EXPRESSION_TREE || !plan.expression_tree ||
+	    plan.expression_tree_source_indices.size() != 1 || plan.expression_tree_source_indices[0] != 0 ||
+	    plan.return_type.InternalType() != target_type.InternalType() ||
+	    group_source.source_type.id() != LogicalTypeId::DATE ||
+	    group_source.source_physical_type != PhysicalType::INT32 ||
+	    !SljitGroupKeyCompressedUnsignedTargetType(target_type.InternalType())) {
+		return false;
+	}
+	auto &compress = *plan.expression_tree;
+	if (compress.kind != ExecutionExpressionIRKind::INTRINSIC ||
+	    compress.intrinsic != ExecutionExpressionIntrinsicKind::INTEGRAL_COMPRESS ||
+	    compress.return_type.InternalType() != target_type.InternalType() || compress.children.size() != 2 ||
+	    !compress.children[0] || !compress.children[1]) {
+		return false;
+	}
+	auto &date_year = *compress.children[0];
+	auto &constant = *compress.children[1];
+	if (date_year.kind != ExecutionExpressionIRKind::INTRINSIC ||
+	    date_year.intrinsic != ExecutionExpressionIntrinsicKind::DATE_YEAR ||
+	    date_year.return_type.id() != LogicalTypeId::BIGINT || date_year.physical_type != PhysicalType::INT64 ||
+	    date_year.children.size() != 1 || !date_year.children[0] ||
+	    date_year.children[0]->kind != ExecutionExpressionIRKind::REFERENCE ||
+	    date_year.children[0]->ref_index != 0 || date_year.children[0]->return_type.id() != LogicalTypeId::DATE ||
+	    date_year.children[0]->physical_type != PhysicalType::INT32 ||
+	    constant.kind != ExecutionExpressionIRKind::CONSTANT || constant.constant.IsNull() ||
+	    constant.return_type.id() != LogicalTypeId::BIGINT || constant.physical_type != PhysicalType::INT64) {
+		return false;
+	}
+	minimum = constant.constant.GetValueUnsafe<int64_t>();
+	return true;
+}
+
 static bool SljitTryMapGroupKeyCast(const SljitNativeRegionExpressionPlan &plan, const LogicalType &target_type,
                                     ExecutionRowPointerGroupKeySource &group_source) {
 	auto signed_width_matches_physical_type = [](SljitNativeSignedIntegerWidth width, PhysicalType physical_type) {
@@ -48,6 +96,14 @@ static bool SljitTryMapGroupKeyCast(const SljitNativeRegionExpressionPlan &plan,
 	group_source.target_physical_type = target_type.InternalType();
 	if (plan.return_type.InternalType() != target_type.InternalType()) {
 		return false;
+	}
+
+	int64_t date_year_minimum;
+	if (SljitTryReadDateYearCompressGroupKey(plan, target_type, group_source, date_year_minimum)) {
+		group_source.cast_kind = ExecutionRowPointerGroupKeyCastKind::DATE_YEAR_COMPRESS;
+		group_source.cast_constant = date_year_minimum;
+		group_source.ready = true;
+		return true;
 	}
 
 	if (plan.kind == SljitNativeRegionExpressionKind::INTEGER_CAST && !plan.try_cast && plan.source_index == 0) {
@@ -158,6 +214,7 @@ static void SljitAttachHashJoinBuildConditionType(const ExecutionHashJoinProbeBi
 static bool SljitInputVectorGroupSourceUsesProjection(const ExecutionRowPointerGroupKeySource &source) {
 	switch (source.cast_kind) {
 	case ExecutionRowPointerGroupKeyCastKind::INTEGRAL_COMPRESS:
+	case ExecutionRowPointerGroupKeyCastKind::DATE_YEAR_COMPRESS:
 	case ExecutionRowPointerGroupKeyCastKind::STRING_COMPRESS:
 		return true;
 	default:

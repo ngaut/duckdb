@@ -11,6 +11,9 @@
 #include "sljit_aggregate_payload_runtime.hpp"
 #include "sljit_aggregate_primitive_preaggregation_runtime.hpp"
 
+#include "duckdb/common/operator/subtract.hpp"
+#include "duckdb/common/types/date.hpp"
+
 #include <array>
 
 namespace duckdb {
@@ -427,6 +430,69 @@ static bool SljitInputVectorGroupPhysicalRowsEqual(PhysicalType type, const Unif
 	}
 }
 
+static int64_t SljitRowPointerPreaggregationDateYear(int32_t days) {
+	int32_t year = Date::EPOCH_YEAR;
+	while (days < 0) {
+		days += Date::DAYS_PER_YEAR_INTERVAL;
+		year -= Date::YEAR_INTERVAL;
+	}
+	while (days >= Date::DAYS_PER_YEAR_INTERVAL) {
+		days -= Date::DAYS_PER_YEAR_INTERVAL;
+		year += Date::YEAR_INTERVAL;
+	}
+	auto year_offset = days / 365;
+	while (days < Date::CUMULATIVE_YEAR_DAYS[year_offset]) {
+		year_offset--;
+		D_ASSERT(year_offset >= 0);
+	}
+	return year + year_offset;
+}
+
+template <class DST>
+static bool SljitInputVectorGroupDateYearCompressRowsEqual(const UnifiedVectorFormat &format, idx_t left_row,
+                                                           idx_t right_row,
+                                                           const ExecutionRowPointerGroupKeySource &source) {
+	const auto left_idx = format.sel->get_index(left_row);
+	const auto right_idx = format.sel->get_index(right_row);
+	const bool left_valid = format.validity.RowIsValid(left_idx);
+	const bool right_valid = format.validity.RowIsValid(right_idx);
+	if (!left_valid || !right_valid) {
+		return left_valid == right_valid;
+	}
+	auto data = UnifiedVectorFormat::GetData<int32_t>(format);
+	auto load_key = [&](idx_t source_idx, DST &result) {
+		int64_t compressed_value;
+		if (!TrySubtractOperator::Operation<int64_t, int64_t, int64_t>(
+		        SljitRowPointerPreaggregationDateYear(data[source_idx]), source.cast_constant, compressed_value)) {
+			return false;
+		}
+		return TryCast::Operation<int64_t, DST>(compressed_value, result, false);
+	};
+	DST left_value;
+	DST right_value;
+	return load_key(left_idx, left_value) && load_key(right_idx, right_value) && left_value == right_value;
+}
+
+static bool SljitInputVectorGroupDateYearCompressRowsEqual(const UnifiedVectorFormat &format, idx_t left_row,
+                                                           idx_t right_row,
+                                                           const ExecutionRowPointerGroupKeySource &source) {
+	if (source.source_physical_type != PhysicalType::INT32 || source.source_type.id() != LogicalTypeId::DATE) {
+		return false;
+	}
+	switch (source.target_physical_type) {
+	case PhysicalType::UINT8:
+		return SljitInputVectorGroupDateYearCompressRowsEqual<uint8_t>(format, left_row, right_row, source);
+	case PhysicalType::UINT16:
+		return SljitInputVectorGroupDateYearCompressRowsEqual<uint16_t>(format, left_row, right_row, source);
+	case PhysicalType::UINT32:
+		return SljitInputVectorGroupDateYearCompressRowsEqual<uint32_t>(format, left_row, right_row, source);
+	case PhysicalType::UINT64:
+		return SljitInputVectorGroupDateYearCompressRowsEqual<uint64_t>(format, left_row, right_row, source);
+	default:
+		return false;
+	}
+}
+
 static bool SljitInputVectorGroupRowsEqual(const vector<ExecutionRowPointerGroupKeySource> &group_sources,
                                            const vector<UnifiedVectorFormat> &input_group_formats, idx_t left_row,
                                            idx_t right_row) {
@@ -469,6 +535,11 @@ static bool SljitInputVectorGroupRowsEqual(const vector<ExecutionRowPointerGroup
 		case ExecutionRowPointerGroupKeyCastKind::INTEGRAL_COMPRESS:
 		case ExecutionRowPointerGroupKeyCastKind::STRING_COMPRESS:
 			if (!SljitInputVectorGroupPhysicalRowsEqual(source.source_physical_type, format, left_row, right_row)) {
+				return false;
+			}
+			break;
+		case ExecutionRowPointerGroupKeyCastKind::DATE_YEAR_COMPRESS:
+			if (!SljitInputVectorGroupDateYearCompressRowsEqual(format, left_row, right_row, source)) {
 				return false;
 			}
 			break;
