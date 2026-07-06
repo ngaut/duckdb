@@ -1548,6 +1548,7 @@ def verify_primitive_sequence() -> None:
         "extension/jit_sljit/include/sljit_selected_hash_join_input_runtime.hpp",
         (
             "class SljitSelectedHashJoinInputRuntime",
+            "SljitTryGetSelectedHashJoinSourceBinding",
             "SljitTryPrepareSelectedHashJoinProjectionInput",
             "TryPrepareMarkProbeInput",
             "TryPrepareHashProbeInput",

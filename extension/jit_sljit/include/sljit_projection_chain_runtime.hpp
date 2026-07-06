@@ -54,12 +54,8 @@ static bool SljitResolveBoundProjectionChain(vector<SljitExecutableRegionOp> &op
 		projection_op = &ops[primitive.final_projection_idx];
 		return true;
 	}
-	if (!primitive.HasBoundComposedProjection()) {
-		projection_op = nullptr;
-		return false;
-	}
-	projection_op = primitive.bound_composed_projection.get();
-	return true;
+	projection_op = nullptr;
+	return false;
 }
 
 template <class EXECUTE_OUTPUT_BATCH>

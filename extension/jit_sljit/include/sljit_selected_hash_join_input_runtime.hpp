@@ -15,6 +15,26 @@
 
 namespace duckdb {
 
+static ExecutionHashJoinProbeBinding *
+SljitTryGetSelectedHashJoinSourceBinding(const SljitRuntimeBatchView &selected_input, idx_t op_count,
+                                         SljitRegionExecutionScratch &scratch, const char *context) {
+	if (!selected_input.HasHashJoinSelection()) {
+		return nullptr;
+	}
+	const auto source_hash_join_idx = selected_input.hash_join_idx;
+	if (source_hash_join_idx >= op_count) {
+		return nullptr;
+	}
+	if (!scratch.HasOperatorBinding(source_hash_join_idx)) {
+		throw InternalException(string(context) + " has no source hash-join binding");
+	}
+	auto &source_binding = scratch.OperatorBinding(source_hash_join_idx).hash_join_probe;
+	if (!source_binding.ready || source_binding.output_types.empty()) {
+		throw InternalException(string(context) + " has an incomplete source hash-join binding");
+	}
+	return &source_binding;
+}
+
 static bool SljitTryPrepareSelectedHashJoinProjectionInput(
     ExecutionRegionRuntime &runtime, SljitRegionExecutionScratch &scratch, vector<SljitExecutableRegionOp> &ops,
     idx_t projection_idx, SljitExecutableRegionOp &semantic_projection, const SljitRuntimeBatchView &input,
@@ -26,20 +46,19 @@ static bool SljitTryPrepareSelectedHashJoinProjectionInput(
 	if (input.hash_join_idx >= ops.size() || projection_idx >= ops.size()) {
 		throw InternalException("SLJIT selected projection input has invalid operator indexes");
 	}
-	if (!scratch.HasOperatorBinding(input.hash_join_idx)) {
-		throw InternalException("SLJIT selected projection input has no hash-join binding");
-	}
-	auto &binding = scratch.OperatorBinding(input.hash_join_idx).hash_join_probe;
-	if (!binding.ready || binding.output_types.empty()) {
-		throw InternalException("SLJIT selected projection input has an incomplete hash-join binding");
+	auto source_binding =
+	    SljitTryGetSelectedHashJoinSourceBinding(input, ops.size(), scratch, "SLJIT selected projection input");
+	if (!source_binding) {
+		return false;
 	}
 
 	projection_op = &semantic_projection;
 	if (input.hash_join_output_column_map) {
 		string blocker;
 		mapped_projection = make_uniq<SljitExecutableRegionOp>();
-		if (!SljitTryBuildHashJoinMappedProjection(*input.hash_join_output_column_map, binding, semantic_projection,
-		                                           *mapped_projection, optional_ptr<string>(&blocker))) {
+		if (!SljitTryBuildHashJoinMappedProjection(*input.hash_join_output_column_map, *source_binding,
+		                                           semantic_projection, *mapped_projection,
+		                                           optional_ptr<string>(&blocker))) {
 			if (blocker.empty()) {
 				blocker = "mapped_projection";
 			}
@@ -50,15 +69,16 @@ static bool SljitTryPrepareSelectedHashJoinProjectionInput(
 	}
 
 	vector<uint8_t> referenced_columns;
-	if (!SljitBuildProjectionSourceColumnSet(*projection_op, binding.output_types.size(), nullptr, nullptr,
+	if (!SljitBuildProjectionSourceColumnSet(*projection_op, source_binding->output_types.size(), nullptr, nullptr,
 	                                         referenced_columns)) {
 		throw InternalException("SLJIT selected projection input could not collect projection sources");
 	}
 
-	selected_hash_join_input.Ensure(runtime.GetAllocator(), binding.output_types);
+	selected_hash_join_input.Ensure(runtime.GetAllocator(), source_binding->output_types);
 	auto &materialized_input = selected_hash_join_input.chunk;
 	materialized_input.Reset();
-	if (!SljitTryMaterializeSelectedHashJoinOutputColumns(binding, input, referenced_columns, materialized_input)) {
+	if (!SljitTryMaterializeSelectedHashJoinOutputColumns(*source_binding, input, referenced_columns,
+	                                                      materialized_input)) {
 		throw InternalException("SLJIT selected projection input could not materialize hash-join output columns");
 	}
 	input_chunk = &materialized_input;
@@ -106,21 +126,10 @@ public:
 private:
 	ExecutionHashJoinProbeBinding *TryGetSelectedSourceBinding(const SljitRuntimeBatchView &selected_input,
 	                                                           idx_t target_hash_join_idx, const char *context) {
-		if (!selected_input.HasHashJoinSelection()) {
+		if (target_hash_join_idx >= ops.size()) {
 			return nullptr;
 		}
-		const auto source_hash_join_idx = selected_input.hash_join_idx;
-		if (source_hash_join_idx >= ops.size() || target_hash_join_idx >= ops.size()) {
-			return nullptr;
-		}
-		if (!scratch.HasOperatorBinding(source_hash_join_idx)) {
-			throw InternalException(string(context) + " has no source hash-join binding");
-		}
-		auto &source_binding = scratch.OperatorBinding(source_hash_join_idx).hash_join_probe;
-		if (!source_binding.ready || source_binding.output_types.empty()) {
-			throw InternalException(string(context) + " has an incomplete source hash-join binding");
-		}
-		return &source_binding;
+		return SljitTryGetSelectedHashJoinSourceBinding(selected_input, ops.size(), scratch, context);
 	}
 
 	bool TryBindTargetHashJoin(idx_t target_hash_join_idx, DataChunk &compact_input, const char *context,
