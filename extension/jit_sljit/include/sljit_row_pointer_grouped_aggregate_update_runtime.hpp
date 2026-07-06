@@ -93,13 +93,8 @@ static bool SljitTryExecuteInputVectorGroupedAggregateUpdate(
 	const bool count_one_payload = SljitInputVectorCountPayloadIsCountOne(payload_input, payload_source_indices);
 	const bool descriptor_count_one_payload =
 	    payload_source_indices.size() == 1 && payload_source_indices[0] == DConstants::INVALID_INDEX;
-	if (sink_info.aggregates.size() == 1 && count_one_payload && payload_lanes.size() == 1 && payload_lanes[0] &&
-	    payload_lanes[0]->ready &&
-	    (payload_lanes[0]->kind == AggregatePrimitiveUpdateKind::COUNT ||
-	     payload_lanes[0]->kind == AggregatePrimitiveUpdateKind::COUNT_STAR) &&
-	    payload_lanes[0]->kind == sink_info.aggregates[0].primitive_update_kind) {
-		SljitPrimitiveCountOneUpdateState update_state;
-		update_state.lane = payload_lanes[0];
+	SljitPrimitiveCountOneUpdateState count_one_update;
+	if (SljitTryBindPrimitiveCountOneUpdateState(sink_info, payload_lanes, count_one_payload, count_one_update)) {
 		auto stage_start = SljitRegionStageStart(runtime);
 		ExecutionGroupedAggregateStateTargetBatch targets;
 		updated = ExecuteSljitRegionRecordedOperation(
@@ -115,7 +110,7 @@ static bool SljitTryExecuteInputVectorGroupedAggregateUpdate(
 		                                  stage_start);
 		if (updated) {
 			auto update_start = SljitRegionStageStart(runtime);
-			ExecuteSljitPrimitiveCountOneTargetBatch(targets, update_state);
+			ExecuteSljitPrimitiveCountOneTargetBatch(targets, count_one_update);
 			RecordSljitRegionStageRuntime(runtime, op_idx, op.kind, "direct_input_vector_group_count_one_update",
 			                              update_start);
 			if (finish) {
@@ -346,12 +341,10 @@ static bool SljitTryExecuteRowPointerCountOneGroupedAggregateUpdate(
     const vector<const ExecutionPrimitiveAggregateUpdateLane *> &payload_lanes,
     ExecutionGroupedAggregateStateAddressBinding &grouped_state, bool finish = true) {
 	auto &sink_info = op.aggregate_update.plan.sink_info;
-	if (sink_info.aggregates.size() != 1 ||
-	    !SljitInputVectorCountPayloadIsCountOne(payload_input, payload_source_indices) || payload_lanes.size() != 1 ||
-	    !payload_lanes[0] || !payload_lanes[0]->ready ||
-	    (payload_lanes[0]->kind != AggregatePrimitiveUpdateKind::COUNT &&
-	     payload_lanes[0]->kind != AggregatePrimitiveUpdateKind::COUNT_STAR) ||
-	    payload_lanes[0]->kind != sink_info.aggregates[0].primitive_update_kind) {
+	SljitPrimitiveCountOneUpdateState count_one_update;
+	if (!SljitTryBindPrimitiveCountOneUpdateState(
+	        sink_info, payload_lanes, SljitInputVectorCountPayloadIsCountOne(payload_input, payload_source_indices),
+	        count_one_update)) {
 		return false;
 	}
 
@@ -371,10 +364,8 @@ static bool SljitTryExecuteRowPointerCountOneGroupedAggregateUpdate(
 	RecordSljitRegionStageRuntimePath(runtime, op_idx, op.kind, "direct_row_pointer_group_count_one_lookup",
 	                                  lookup_start);
 
-	SljitPrimitiveCountOneUpdateState update_state;
-	update_state.lane = payload_lanes[0];
 	auto update_start = SljitRegionStageStart(runtime);
-	ExecuteSljitPrimitiveCountOneTargetBatch(targets, update_state);
+	ExecuteSljitPrimitiveCountOneTargetBatch(targets, count_one_update);
 	RecordSljitRegionStageRuntime(runtime, op_idx, op.kind, "direct_row_pointer_group_count_one_update", update_start);
 	if (finish) {
 		FinishGroupedAggregateStateUpdates(runtime, op_idx, grouped_state, "finish_grouped_state_updates");

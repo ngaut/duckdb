@@ -24,6 +24,24 @@ struct SljitPrimitiveCountOneUpdateState {
 	const ExecutionPrimitiveAggregateUpdateLane *lane = nullptr;
 };
 
+static bool SljitTryBindPrimitiveCountOneUpdateState(
+    const ExecutionRegionSinkInfo &sink_info, const vector<const ExecutionPrimitiveAggregateUpdateLane *> &payload_lanes,
+    bool count_one_payload, SljitPrimitiveCountOneUpdateState &state) {
+	state = SljitPrimitiveCountOneUpdateState();
+	if (sink_info.aggregates.size() != 1 || !count_one_payload || payload_lanes.size() != 1 || !payload_lanes[0] ||
+	    !payload_lanes[0]->ready) {
+		return false;
+	}
+	auto lane = payload_lanes[0];
+	auto &aggregate = sink_info.aggregates[0];
+	if ((lane->kind != AggregatePrimitiveUpdateKind::COUNT && lane->kind != AggregatePrimitiveUpdateKind::COUNT_STAR) ||
+	    lane->kind != aggregate.primitive_update_kind) {
+		return false;
+	}
+	state.lane = lane;
+	return true;
+}
+
 static inline idx_t SljitSelectedGroupedStateAddressIndex(const sel_t *address_sel, const sel_t *execute_sel, idx_t idx,
                                                           idx_t row_idx) {
 	if (address_sel) {

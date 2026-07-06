@@ -1207,6 +1207,7 @@ def verify_preaggregated_primitive_batch_contract() -> None:
             "try_count_one_targets",
             "try_input_vector_groups",
             "use_target_payload_update",
+            "SljitTryBindPrimitiveCountOneUpdateState",
             "SljitTryExecuteRowPointerGroupedTargetPayloadUpdate",
             "SljitTryExecuteRowPointerGroupedSplitPayloadUpdate",
             "TryExecuteDirectRowPointerPreaggregatedPrimitiveUpdate",
@@ -1216,6 +1217,14 @@ def verify_preaggregated_primitive_batch_contract() -> None:
             "direct_input_vector_group_count_one_lookup",
             "direct_input_vector_group_count_one_update",
             "uses_generated_payload_preaggregation",
+        ),
+    )
+    require_text(
+        "extension/jit_sljit/include/sljit_aggregate_preaggregated_update_runtime.hpp",
+        (
+            "SljitTryBindPrimitiveCountOneUpdateState",
+            "lane->kind != AggregatePrimitiveUpdateKind::COUNT",
+            "state.lane = lane",
         ),
     )
     reject_text(
@@ -1230,6 +1239,7 @@ def verify_preaggregated_primitive_batch_contract() -> None:
             "FUSED_TARGET_PAYLOAD",
             "prefer_direct_sparse_row_pointer_target_update",
             "(void)dense_domain;",
+            "payload_lanes[0]->kind",
         ),
     )
     require_text(
