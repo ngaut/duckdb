@@ -5,7 +5,7 @@
 
 namespace duckdb {
 
-static bool SljitExecutableValueToHugeint(const Value &value, const LogicalType &expected_type, hugeint_t &result) {
+bool SljitExecutableValueToHugeint(const Value &value, const LogicalType &expected_type, hugeint_t &result) {
 	if (value.IsNull() || value.type() != expected_type) {
 		return false;
 	}
