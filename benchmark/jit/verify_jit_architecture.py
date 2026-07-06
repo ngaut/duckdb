@@ -124,6 +124,7 @@ def verify_required_design_files() -> None:
         "extension/jit_sljit/include/sljit_source_batch_boundary_runtime.hpp",
         "extension/jit_sljit/include/sljit_aggregate_payload_source_indices.hpp",
         "extension/jit_sljit/include/sljit_grouped_aggregate_update_primitive.hpp",
+        "extension/jit_sljit/include/sljit_grouped_aggregate_input_vector_update_runtime.hpp",
         "extension/jit_sljit/include/sljit_grouped_direct_aggregate_update_runtime_state.hpp",
         "extension/jit_sljit/include/sljit_grouped_aggregate_update_runtime_state.hpp",
         "extension/jit_sljit/include/sljit_aggregate_row_pointer_preaggregation_analysis.hpp",
@@ -1307,6 +1308,20 @@ def verify_preaggregated_primitive_batch_contract() -> None:
         ),
     )
     require_text(
+        "extension/jit_sljit/include/sljit_grouped_aggregate_input_vector_update_runtime.hpp",
+        (
+            "TryExecuteDirectInputVectorGroupedTargetPayloadUpdate",
+            "SljitTryExecuteInputVectorGroupedAggregateUpdate",
+            "SljitTryExecuteNativeInputVectorGroupedAggregateUpdate",
+            "TryFindOrCreateInputVectorGroupStateTargets",
+            "targets, recorder, dense_domain",
+            "direct_input_vector_group_count_one_lookup",
+            "direct_input_vector_group_count_one_update",
+            "direct_projected_group_payload_update",
+            "SljitTryBuildInputVectorGroups",
+        ),
+    )
+    require_text(
         "extension/jit_sljit/include/sljit_row_pointer_grouped_aggregate_update_runtime.hpp",
         (
             "struct SljitRowPointerGroupedAggregateUpdateDecision",
@@ -1320,10 +1335,6 @@ def verify_preaggregated_primitive_batch_contract() -> None:
             "SljitTryExecuteRowPointerGroupedSplitPayloadUpdate",
             "TryExecuteDirectRowPointerPreaggregatedPrimitiveUpdate",
             "SljitTryExecuteInputVectorGroupedAggregateUpdate",
-            "TryFindOrCreateInputVectorGroupStateTargets",
-            "targets, recorder, dense_domain",
-            "direct_input_vector_group_count_one_lookup",
-            "direct_input_vector_group_count_one_update",
             "uses_generated_payload_preaggregation",
         ),
     )
@@ -1346,9 +1357,18 @@ def verify_preaggregated_primitive_batch_contract() -> None:
             "SljitTryExecuteRowPointerPreaggregatedGroupedAggregateUpdateStrategy",
             "FUSED_TARGET_PAYLOAD",
             "prefer_direct_sparse_row_pointer_target_update",
+            "TryExecuteDirectInputVectorGroupedTargetPayloadUpdate",
+            "SljitTryExecuteNativeInputVectorGroupedAggregateUpdate",
+            "TryFindOrCreateInputVectorGroupStateTargets",
+            "direct_input_vector_group_count_one_lookup",
+            "direct_input_vector_group_count_one_update",
             "(void)dense_domain;",
             "payload_lanes[0]->kind",
         ),
+    )
+    reject_text(
+        "extension/jit_sljit/include/sljit_grouped_aggregate_direct_update_runtime.hpp",
+        ("sljit_row_pointer_grouped_aggregate_update_runtime.hpp",),
     )
     require_text(
         "extension/jit_sljit/include/sljit_aggregate_flat_single_preaggregation.hpp",
@@ -3513,11 +3533,12 @@ def verify_group_estimate_contract() -> None:
         ("SljitTryReserveGroupedAggregateGroups(runtime, op_idx, op, grouped_state)",),
     )
     require_text(
+        "extension/jit_sljit/include/sljit_grouped_aggregate_input_vector_update_runtime.hpp",
+        ("SljitTryReserveGroupedAggregateGroups(runtime, op_idx, op, binding.aggregate_update.grouped_state)",),
+    )
+    require_text(
         "extension/jit_sljit/include/sljit_row_pointer_grouped_aggregate_update_runtime.hpp",
-        (
-            "SljitTryReserveGroupedAggregateGroups(runtime, op_idx, op, binding.aggregate_update.grouped_state)",
-            "SljitTryReserveGroupedAggregateGroups(runtime, op_idx, op, grouped_state)",
-        ),
+        ("SljitTryReserveGroupedAggregateGroups(runtime, op_idx, op, grouped_state)",),
     )
     reject_text(
         "extension/jit_sljit/include/sljit_grouped_aggregate_direct_update_runtime.hpp",

@@ -11,10 +11,12 @@
 #include "sljit_dense_group_domain.hpp"
 #include "sljit_direct_join_output_aggregate_state.hpp"
 #include "sljit_grouped_aggregate_input_vector_groups.hpp"
+#include "sljit_grouped_aggregate_input_vector_update_runtime.hpp"
 #include "sljit_grouped_aggregate_update_runtime.hpp"
 #include "sljit_projection_aggregate_descriptor.hpp"
 #include "sljit_region_runtime_state.hpp"
 #include "sljit_region_runtime_trace.hpp"
+#include "sljit_row_pointer_grouped_aggregate_update_runtime.hpp"
 #include "sljit_string_set_complementary_sum_runtime.hpp"
 
 namespace duckdb {

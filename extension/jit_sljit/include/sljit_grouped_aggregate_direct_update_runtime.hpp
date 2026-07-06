@@ -14,7 +14,6 @@
 #include "sljit_grouped_aggregate_state_address_update_runtime.hpp"
 #include "sljit_grouped_aggregate_state_runtime.hpp"
 #include "sljit_region_runtime_trace.hpp"
-#include "sljit_row_pointer_grouped_aggregate_update_runtime.hpp"
 
 namespace duckdb {
 

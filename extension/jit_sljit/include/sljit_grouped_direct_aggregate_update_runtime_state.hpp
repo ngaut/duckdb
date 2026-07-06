@@ -10,6 +10,7 @@
 
 #include "sljit_filter_runtime.hpp"
 #include "sljit_full_pipeline_runtime.hpp"
+#include "sljit_grouped_aggregate_input_vector_update_runtime.hpp"
 #include "sljit_grouped_aggregate_update_primitive.hpp"
 #include "sljit_grouped_aggregate_update_runtime.hpp"
 #include "sljit_projection_expression_runtime.hpp"

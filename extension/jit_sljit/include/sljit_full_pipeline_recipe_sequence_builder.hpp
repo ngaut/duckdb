@@ -12,6 +12,7 @@
 
 #include "sljit_full_pipeline_primitive_contract.hpp"
 #include "sljit_full_pipeline_recipe_state.hpp"
+#include "sljit_pre_join_projection_descriptor.hpp"
 
 #include <utility>
 
