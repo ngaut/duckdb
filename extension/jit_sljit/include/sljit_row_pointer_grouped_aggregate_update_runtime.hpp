@@ -270,13 +270,11 @@ struct SljitStringSetComplementarySumUpdateState {
 	const ExecutionPrimitiveAggregateUpdateLane *non_matching_lane = nullptr;
 	idx_t predicate_source_idx = DConstants::INVALID_INDEX;
 	std::array<string, SljitStringSetCaseGroupedPayloadProjection::CONSTANT_COUNT> constants;
-	DataChunk *payload_input = nullptr;
 };
 
 struct SljitStringSetComplementarySumDescriptor {
 	idx_t matching_payload_idx = DConstants::INVALID_INDEX;
 	idx_t non_matching_payload_idx = DConstants::INVALID_INDEX;
-	idx_t predicate_source_position = DConstants::INVALID_INDEX;
 	idx_t predicate_source_idx = DConstants::INVALID_INDEX;
 	std::array<string, SljitStringSetCaseGroupedPayloadProjection::CONSTANT_COUNT> constants;
 };
@@ -313,6 +311,7 @@ static bool SljitTryBindStringSetComplementarySumDescriptor(SljitExecutableRegio
 
 	std::array<string, SljitStringSetCaseGroupedPayloadProjection::CONSTANT_COUNT> matching_constants;
 	std::array<string, SljitStringSetCaseGroupedPayloadProjection::CONSTANT_COUNT> non_matching_constants;
+	idx_t predicate_source_position = DConstants::INVALID_INDEX;
 	for (idx_t source_position = 0; source_position < payload_source_indices.size(); source_position++) {
 		if (SljitTryReadStringSetCaseExpression(aggregate_update.payloads[0], source_position, true,
 		                                        matching_constants) &&
@@ -320,7 +319,7 @@ static bool SljitTryBindStringSetComplementarySumDescriptor(SljitExecutableRegio
 		                                        non_matching_constants)) {
 			descriptor.matching_payload_idx = 0;
 			descriptor.non_matching_payload_idx = 1;
-			descriptor.predicate_source_position = source_position;
+			predicate_source_position = source_position;
 			break;
 		}
 		if (SljitTryReadStringSetCaseExpression(aggregate_update.payloads[1], source_position, true,
@@ -329,16 +328,16 @@ static bool SljitTryBindStringSetComplementarySumDescriptor(SljitExecutableRegio
 		                                        non_matching_constants)) {
 			descriptor.matching_payload_idx = 1;
 			descriptor.non_matching_payload_idx = 0;
-			descriptor.predicate_source_position = source_position;
+			predicate_source_position = source_position;
 			break;
 		}
 	}
-	if (descriptor.predicate_source_position == DConstants::INVALID_INDEX ||
+	if (predicate_source_position == DConstants::INVALID_INDEX ||
 	    !SljitSameStringConstantSet(matching_constants, non_matching_constants)) {
 		return false;
 	}
 
-	descriptor.predicate_source_idx = payload_source_indices[descriptor.predicate_source_position];
+	descriptor.predicate_source_idx = payload_source_indices[predicate_source_position];
 	descriptor.constants = matching_constants;
 	return true;
 }
@@ -349,18 +348,10 @@ static bool SljitStringSetComplementarySumInputIsVarchar(DataChunk &payload_inpu
 	       payload_input.data[descriptor.predicate_source_idx].GetType().id() == LogicalTypeId::VARCHAR;
 }
 
-static bool
-SljitTryBindStringSetComplementarySumUpdate(SljitExecutableRegionOp &op, DataChunk &payload_input,
-                                            const vector<idx_t> &payload_source_indices,
-                                            const vector<const ExecutionPrimitiveAggregateUpdateLane *> &payload_lanes,
-                                            SljitStringSetComplementarySumUpdateState &state) {
-	state = SljitStringSetComplementarySumUpdateState();
+static bool SljitTryBindStringSetComplementarySumLanes(
+    SljitExecutableRegionOp &op, const vector<const ExecutionPrimitiveAggregateUpdateLane *> &payload_lanes,
+    const SljitStringSetComplementarySumDescriptor &descriptor, SljitStringSetComplementarySumUpdateState &state) {
 	if (payload_lanes.size() != 2) {
-		return false;
-	}
-	SljitStringSetComplementarySumDescriptor descriptor;
-	if (!SljitTryBindStringSetComplementarySumDescriptor(op, payload_source_indices, descriptor) ||
-	    !SljitStringSetComplementarySumInputIsVarchar(payload_input, descriptor)) {
 		return false;
 	}
 	auto &aggregate_update = op.aggregate_update;
@@ -378,9 +369,23 @@ SljitTryBindStringSetComplementarySumUpdate(SljitExecutableRegionOp &op, DataChu
 
 	state.matching_lane = payload_lanes[descriptor.matching_payload_idx];
 	state.non_matching_lane = payload_lanes[descriptor.non_matching_payload_idx];
+	return true;
+}
+
+static bool
+SljitTryBindStringSetComplementarySumUpdate(SljitExecutableRegionOp &op, DataChunk &payload_input,
+                                            const vector<idx_t> &payload_source_indices,
+                                            const vector<const ExecutionPrimitiveAggregateUpdateLane *> &payload_lanes,
+                                            SljitStringSetComplementarySumUpdateState &state) {
+	state = SljitStringSetComplementarySumUpdateState();
+	SljitStringSetComplementarySumDescriptor descriptor;
+	if (!SljitTryBindStringSetComplementarySumDescriptor(op, payload_source_indices, descriptor) ||
+	    !SljitStringSetComplementarySumInputIsVarchar(payload_input, descriptor) ||
+	    !SljitTryBindStringSetComplementarySumLanes(op, payload_lanes, descriptor, state)) {
+		return false;
+	}
 	state.predicate_source_idx = descriptor.predicate_source_idx;
 	state.constants = descriptor.constants;
-	state.payload_input = &payload_input;
 	return true;
 }
 
@@ -507,26 +512,13 @@ static bool TryExecuteDirectRowPointerPreclassifiedStringSetComplementarySumUpda
     ExecutionGroupedAggregateStateAddressBinding &grouped_state, bool finish = true) {
 	SljitStringSetComplementarySumDescriptor descriptor;
 	SljitStringSetComplementarySumUpdateState state;
-	state = SljitStringSetComplementarySumUpdateState();
-	if (payload_lanes.size() != 2 || payload_input.ColumnCount() != 1 ||
-	    payload_input.data[0].GetType().id() != LogicalTypeId::UTINYINT ||
+	if (payload_input.ColumnCount() != 1 || payload_input.data[0].GetType().id() != LogicalTypeId::UTINYINT ||
 	    !SljitTryBindStringSetComplementarySumDescriptor(op, payload_source_indices, descriptor)) {
 		return false;
 	}
-	auto &aggregate_update = op.aggregate_update;
-	auto &sink_info = aggregate_update.plan.sink_info;
-	if (!SljitStringSetComplementarySumLaneSupported(sink_info.aggregates[descriptor.matching_payload_idx],
-	                                                 sink_info.aggregate_contract,
-	                                                 payload_lanes[descriptor.matching_payload_idx],
-	                                                 aggregate_update.payloads[descriptor.matching_payload_idx]) ||
-	    !SljitStringSetComplementarySumLaneSupported(sink_info.aggregates[descriptor.non_matching_payload_idx],
-	                                                 sink_info.aggregate_contract,
-	                                                 payload_lanes[descriptor.non_matching_payload_idx],
-	                                                 aggregate_update.payloads[descriptor.non_matching_payload_idx])) {
+	if (!SljitTryBindStringSetComplementarySumLanes(op, payload_lanes, descriptor, state)) {
 		return false;
 	}
-	state.matching_lane = payload_lanes[descriptor.matching_payload_idx];
-	state.non_matching_lane = payload_lanes[descriptor.non_matching_payload_idx];
 	state.predicate_source_idx = 0;
 	ExecutionGroupedAggregateStateTargetBatch targets;
 	auto stage_start = SljitRegionStageStart(runtime);
