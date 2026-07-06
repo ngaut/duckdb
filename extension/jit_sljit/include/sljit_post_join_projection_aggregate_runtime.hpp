@@ -20,15 +20,6 @@
 
 namespace duckdb {
 
-static void SljitAttachDirectJoinOutputAggregateSourceStats(SljitDirectJoinOutputAggregateStrategy &strategy,
-                                                            const vector<idx_t> &source_distinct_counts,
-                                                            const vector<Value> &source_min_values,
-                                                            const vector<Value> &source_max_values) {
-	strategy.source_distinct_counts = &source_distinct_counts;
-	strategy.source_min_values = &source_min_values;
-	strategy.source_max_values = &source_max_values;
-}
-
 struct SljitPostJoinProjectionAggregateRuntimeState {
 	bool Prepare(ExecutionRegionRuntime &, vector<SljitExecutableRegionOp> &ops,
 	             const SljitPostJoinProjectionAggregatePrimitive &primitive,
@@ -38,10 +29,8 @@ struct SljitPostJoinProjectionAggregateRuntimeState {
 			return false;
 		}
 		post_join_projection = primitive.post_join_projection.MakeStrategy();
-		direct_join_output_aggregate_strategy =
-		    make_uniq<SljitDirectJoinOutputAggregateStrategy>(primitive.aggregate_idx);
-		SljitAttachDirectJoinOutputAggregateSourceStats(*direct_join_output_aggregate_strategy, source_distinct_counts,
-		                                                source_min_values, source_max_values);
+		direct_join_output_aggregate_strategy = make_uniq<SljitDirectJoinOutputAggregateStrategy>(
+		    primitive.aggregate_idx, source_distinct_counts, source_min_values, source_max_values);
 		prepared = true;
 		return true;
 	}

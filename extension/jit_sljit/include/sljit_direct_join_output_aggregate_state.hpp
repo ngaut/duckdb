@@ -119,7 +119,11 @@ struct SljitPendingInputVectorAggregateBatch {
 };
 
 struct SljitDirectJoinOutputAggregateStrategy {
-	explicit SljitDirectJoinOutputAggregateStrategy(idx_t aggregate_idx_p) : aggregate_idx(aggregate_idx_p) {
+	SljitDirectJoinOutputAggregateStrategy(idx_t aggregate_idx_p, const vector<idx_t> &source_distinct_counts_p,
+	                                       const vector<Value> &source_min_values_p,
+	                                       const vector<Value> &source_max_values_p)
+	    : aggregate_idx(aggregate_idx_p), source_distinct_counts(&source_distinct_counts_p),
+	      source_min_values(&source_min_values_p), source_max_values(&source_max_values_p) {
 	}
 
 	idx_t aggregate_idx;
@@ -132,12 +136,5 @@ struct SljitDirectJoinOutputAggregateStrategy {
 	SljitPendingInputVectorAggregateBatch pending_input_vector_batch;
 	SljitPendingRowPointerAggregateBatch pending_batch;
 };
-
-static bool SljitAggregateUpdateHasDedicatedCompiledBackend(const SljitExecutableRegionOp &op) {
-	if (op.kind != SljitNativeRegionOpKind::AGGREGATE_UPDATE) {
-		return false;
-	}
-	return op.aggregate_update.plan.use_primitive_payloads;
-}
 
 } // namespace duckdb

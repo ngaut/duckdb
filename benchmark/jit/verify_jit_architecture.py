@@ -984,8 +984,8 @@ def verify_projection_aggregate_descriptor_boundary() -> None:
             "struct SljitPendingRowPointerAggregateBatch",
             "SljitJoinProjectionAggregateDescriptor descriptor",
             "SljitPendingRowPointerAggregateBatch pending_batch",
-            "SljitAggregateUpdateHasDedicatedCompiledBackend",
-            "op.aggregate_update.plan.use_primitive_payloads",
+            "SljitDirectJoinOutputAggregateStrategy(idx_t aggregate_idx_p, const vector<idx_t> &source_distinct_counts_p",
+            "source_distinct_counts(&source_distinct_counts_p)",
         ),
     )
     reject_text(
@@ -995,6 +995,7 @@ def verify_projection_aggregate_descriptor_boundary() -> None:
             "PENDING_ROW_POINTER_BATCH",
             "IMMEDIATE_ROW_POINTER_UPDATE",
             "SljitDirectJoinOutputAggregatePolicy",
+            "SljitAggregateUpdateHasDedicatedCompiledBackend",
         ),
     )
     require_text(
@@ -1476,13 +1477,19 @@ def verify_primitive_sequence() -> None:
             "struct SljitPostJoinProjectionAggregatePrimitive",
             "SljitPostJoinProjectionPrimitive post_join_projection",
             "idx_t aggregate_idx = DConstants::INVALID_INDEX",
+            "SljitAggregateUpdateHasDedicatedCompiledBackend",
             "SljitCanBindPostJoinProjectionAggregatePrimitive",
             "SljitAggregateUpdateHasDedicatedCompiledBackend(ops[primitive.aggregate_idx])",
         ),
     )
     reject_text(
         "extension/jit_sljit/include/sljit_post_join_projection_aggregate_primitive.hpp",
-        ("ConsumesSourceSinkAdvance", "selected_join_output", "SljitDirectJoinOutputAggregatePrimitive"),
+        (
+            "ConsumesSourceSinkAdvance",
+            "selected_join_output",
+            "SljitDirectJoinOutputAggregatePrimitive",
+            "sljit_direct_join_output_aggregate_state.hpp",
+        ),
     )
     require_text(
         "extension/jit_sljit/include/sljit_projection_chain_runtime.hpp",
@@ -2809,7 +2816,11 @@ def verify_distinct_aggregate_backend() -> None:
     )
     reject_text(
         "extension/jit_sljit/include/sljit_post_join_projection_aggregate_runtime.hpp",
-        ("SljitDirectJoinOutputAggregatePolicy", "direct_join_output_aggregate ="),
+        (
+            "SljitDirectJoinOutputAggregatePolicy",
+            "direct_join_output_aggregate =",
+            "SljitAttachDirectJoinOutputAggregateSourceStats",
+        ),
     )
     reject_regex(
         "removed distinct count-pointer backend",

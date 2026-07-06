@@ -8,10 +8,16 @@
 
 #pragma once
 
-#include "sljit_direct_join_output_aggregate_state.hpp"
 #include "sljit_post_join_projection_strategy.hpp"
 
 namespace duckdb {
+
+static bool SljitAggregateUpdateHasDedicatedCompiledBackend(const SljitExecutableRegionOp &op) {
+	if (op.kind != SljitNativeRegionOpKind::AGGREGATE_UPDATE) {
+		return false;
+	}
+	return op.aggregate_update.plan.use_primitive_payloads;
+}
 
 struct SljitPostJoinProjectionAggregatePrimitive {
 	SljitPostJoinProjectionPrimitive post_join_projection;
