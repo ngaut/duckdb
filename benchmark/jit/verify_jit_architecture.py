@@ -2075,15 +2075,22 @@ def verify_primitive_sequence() -> None:
     )
     require_scoped_text(
         "extension/jit_sljit/include/sljit_full_pipeline_recipe_binding.hpp",
-        "MakePreProjectionJoinProjectionAggregateRecipe",
-        "MakeFilterProjectionJoinProjectionAggregateRecipe",
+        "MakeSingleJoinDirectProjectionAggregateRecipe",
+        "MakeSingleJoinProjectionAggregateTailRecipe",
         (
+            "const SljitProjectionAggregatePrefixFacts &facts",
+            "facts.HasSourceFilterProjection()",
+            "facts.source_filter_idx",
+            "facts.source_projection_idx",
+            "facts.HasPreJoinProjection()",
             "SljitPreJoinProjectionViewDescriptor pre_join_view",
             "TryBuildPreJoinProjectionView",
             "optional_ptr<const SljitPreJoinProjectionViewDescriptor> pre_join_view_ptr",
             "pre_join_view_ptr = pre_join_view",
-            "MakePreJoinProjectionHashJoinSelectionSequence(pre_join_projection_idx, hash_join_idx, true,",
+            "MakePreJoinProjectionHashJoinSelectionSequence(",
+            "facts.pre_join_projection_idx",
             "pre_join_view_ptr);",
+            "MakeHashJoinProbeSelectionStep(facts.first_hash_join_idx)",
         ),
     )
     require_scoped_text(
@@ -2251,6 +2258,7 @@ def verify_recipe_builder() -> None:
             "MakeTwoJoinMarkFilterPrefix",
             "MakeMarkFilterNativeTailRecipe",
             "MakeSourceProjectionAggregateRecipe",
+            "MakeSingleJoinDirectProjectionAggregateRecipe",
             "MakeSingleJoinProjectionAggregateTailRecipe",
             "MakeProjectionAggregateRecipe",
             "MakeProjectionGroupedAggregateRecipe",
@@ -2267,7 +2275,6 @@ def verify_recipe_builder() -> None:
             "SljitFullPipelinePrimitiveStep::UngroupedAggregateUpdate",
             "SljitFullPipelinePrimitiveStep::GroupedAggregateUpdate",
             "BindPostJoinProjectionAggregatePrimitive",
-            "MakeSourceHashJoinProbeSelectionSequence",
             "MakeSourceHashJoinProjectionInputSequence",
             "MakeTwoJoinDirectProjectionAggregateRecipe",
             "MakeTwoJoinProjectionAggregateRecipe",
@@ -2308,6 +2315,14 @@ def verify_recipe_builder() -> None:
             "MakeBetweenProjectionTwoJoinProjectionAggregateRecipe",
             "MakePreProjectionTwoJoinProjectionAggregateRecipe",
             "MakeTwoJoinProjectionChainAggregateRecipe",
+            "MakeJoinProjectionAggregateRecipe",
+            "MakePreProjectionJoinProjectionAggregateRecipe",
+            "MakeFilterProjectionJoinProjectionAggregateRecipe",
+            "MakeBetweenProjectionTwoJoinDirectAggregateRecipe",
+            "MakeSourceHashJoinProbeSelectionSequence",
+            "idx_t source_filter_idx, idx_t source_projection_idx",
+            "facts.source_filter_idx, facts.source_projection_idx",
+            "DConstants::INVALID_INDEX, DConstants::INVALID_INDEX",
         ),
     )
     require_text(
