@@ -99,6 +99,7 @@ def verify_required_design_files() -> None:
         "extension/jit_sljit/include/sljit_full_pipeline_recipe_state.hpp",
         "extension/jit_sljit/include/sljit_full_pipeline_recipe_binding.hpp",
         "extension/jit_sljit/include/sljit_full_pipeline_recipe_sequence_builder.hpp",
+        "extension/jit_sljit/include/sljit_projection_aggregate_recipe_binding.hpp",
         "extension/jit_sljit/include/sljit_full_pipeline_recipe.hpp",
         "extension/jit_sljit/include/sljit_full_pipeline_recipe_facts.hpp",
         "extension/jit_sljit/include/sljit_full_pipeline_primitive_sequence.hpp",
@@ -1818,6 +1819,13 @@ def verify_primitive_sequence() -> None:
             "AddProjectionChainStep(sequence, facts.projection_idx)",
             "SljitFullPipelinePrimitiveStep::GeneratedFilter(generated_filter)",
             "MakeNativeTailRecipe(std::move(sequence), facts.tail_start_idx)",
+            "ProjectionAggregateBinding().MakeMarkFilterProjectionNativeTailRecipe(facts)",
+        ),
+    )
+    require_text(
+        "extension/jit_sljit/include/sljit_projection_aggregate_recipe_binding.hpp",
+        (
+            "MakeMarkFilterProjectionNativeTailRecipe",
             "MakeMarkFilterPrefix(facts.hash_join_idx, facts.filter_idx, true, facts.first_projection_idx)",
             "MakeProjectionNativeTailRecipe(std::move(sequence), facts.first_projection_idx",
         ),
@@ -2191,7 +2199,7 @@ def verify_primitive_sequence() -> None:
         ),
     )
     require_text(
-        "extension/jit_sljit/include/sljit_full_pipeline_recipe_binding.hpp",
+        "extension/jit_sljit/include/sljit_projection_aggregate_recipe_binding.hpp",
         (
             "TryBuildPreJoinProjectionView",
             "BindElidedPreJoinHashJoinProbeSelection",
@@ -2206,7 +2214,7 @@ def verify_primitive_sequence() -> None:
         ),
     )
     require_scoped_text(
-        "extension/jit_sljit/include/sljit_full_pipeline_recipe_binding.hpp",
+        "extension/jit_sljit/include/sljit_projection_aggregate_recipe_binding.hpp",
         "MakeSingleJoinDirectPrefixSequence(const SljitProjectionAggregatePrefixFacts &facts,",
         "MakeSingleJoinProjectionAggregateTailPrefixSequence(const SljitProjectionAggregatePrefixFacts &facts) const",
         (
@@ -2226,7 +2234,7 @@ def verify_primitive_sequence() -> None:
         ),
     )
     require_scoped_text(
-        "extension/jit_sljit/include/sljit_full_pipeline_recipe_binding.hpp",
+        "extension/jit_sljit/include/sljit_projection_aggregate_recipe_binding.hpp",
         "MakePreJoinProjectionHashJoinSelectionSequence",
         "SljitFullPipelinePrimitiveSequence MakeSourceHashJoinProjectionInputSequence",
         (
@@ -2236,7 +2244,7 @@ def verify_primitive_sequence() -> None:
         ),
     )
     require_scoped_text(
-        "extension/jit_sljit/include/sljit_full_pipeline_recipe_binding.hpp",
+        "extension/jit_sljit/include/sljit_projection_aggregate_recipe_binding.hpp",
         "TryAppendElidedPreJoinHashJoinProbeSelection(SljitFullPipelinePrimitiveSequence &sequence,",
         "AddMaterializedPreJoinProjectionHashJoinSelection",
         (
@@ -2245,7 +2253,7 @@ def verify_primitive_sequence() -> None:
         ),
     )
     require_scoped_text(
-        "extension/jit_sljit/include/sljit_full_pipeline_recipe_binding.hpp",
+        "extension/jit_sljit/include/sljit_projection_aggregate_recipe_binding.hpp",
         "AddMaterializedPreJoinProjectionHashJoinSelection",
         "SljitHashJoinProbeSelectionPrimitive",
         (
@@ -2341,7 +2349,7 @@ def verify_primitive_sequence() -> None:
         ),
     )
     require_text(
-        "extension/jit_sljit/include/sljit_full_pipeline_recipe_binding.hpp",
+        "extension/jit_sljit/include/sljit_projection_aggregate_recipe_binding.hpp",
         (
             "MakeProjectionGroupedAggregateRecipe",
             "AddProjectionChainStep(sequence, shape.first_projection_idx, shape.final_projection_idx)",
@@ -2389,6 +2397,7 @@ def verify_recipe_builder() -> None:
         (
             "class SljitFullPipelineRecipeBinding",
             "SljitFullPipelineRecipeBinding : private SljitFullPipelineRecipeSequenceBuilder",
+            '#include "sljit_projection_aggregate_recipe_binding.hpp"',
             "MakeNativeOnlyPlan",
             "MakePrimitiveRecipePlan",
             "SljitFullPipelinePrimitiveSequenceIsExecutable(ops, recipe.primitive_sequence)",
@@ -2403,9 +2412,21 @@ def verify_recipe_builder() -> None:
             "SljitFullPipelinePrimitiveStep::SourceBatchBoundary(facts.boundary_op_idx)",
             "SljitFullPipelinePrimitiveStep::UngroupedAggregateUpdate",
             "facts.tail_start_idx",
-            "MakeHashJoinProbeMaterializeStep",
-            "MakeMarkFilterPrefix",
-            "MakeTwoJoinMarkFilterPrefix",
+            "ProjectionAggregateBinding",
+            "SljitProjectionAggregateRecipeBinding(ops, source_output_types, source_min_values, source_max_values",
+            "ProjectionAggregateBinding().MakeSourceProjectionAggregateRecipe(shape)",
+            "ProjectionAggregateBinding().MakeJoinDirectProjectionAggregateRecipe(shape, facts)",
+            "ProjectionAggregateBinding().MakeJoinProjectionAggregateTailRecipe(shape, facts)",
+            "ProjectionAggregateBinding().MakeMarkFilterProjectionAggregateRecipe(shape, facts)",
+            "ProjectionAggregateBinding().MakeMarkFilterNativeTailRecipe(facts)",
+            "ProjectionAggregateBinding().ProjectionAggregateHasDedicatedBackend(",
+            "ProjectionAggregateBinding().CanMakeProjectionAggregateTailRecipe(shape)",
+        ),
+    )
+    require_text(
+        "extension/jit_sljit/include/sljit_projection_aggregate_recipe_binding.hpp",
+        (
+            "class SljitProjectionAggregateRecipeBinding : private SljitFullPipelineRecipeSequenceBuilder",
             "MakeMarkFilterNativeTailRecipe",
             "MakeProjectionAggregateMarkFilterPrefix",
             "MakeProjectionAggregateFirstJoinInputSequence",
@@ -2421,7 +2442,6 @@ def verify_recipe_builder() -> None:
             "ProjectionGroupedAggregateHasDedicatedBackend",
             "SljitCanBindUngroupedAggregateUpdatePrimitive(ops, shape.aggregate_idx)",
             "SljitFullPipelinePrimitiveSequence sequence",
-            "SljitFullPipelinePrimitiveStep::SourceBatchBoundary",
             "SljitFullPipelinePrimitiveStep::PostJoinProjectionAggregateUpdate",
             "SljitFullPipelinePrimitiveStep::UngroupedAggregateUpdate",
             "SljitFullPipelinePrimitiveStep::GroupedAggregateUpdate",
@@ -2485,6 +2505,14 @@ def verify_recipe_builder() -> None:
             "bool SourceBatchBoundaryCanCoalesce(",
             "void AddSourceBatchBoundaryIfUseful(",
             "SljitFullPipelinePrimitiveSequence MakeSourceSequence(",
+            "MakeProjectionAggregateFirstJoinInputSequence",
+            "MakeSingleJoinDirectPrefixSequence",
+            "MakeSingleJoinProjectionAggregateTailPrefixSequence",
+            "MakeSecondJoinPrefixSequence",
+            "AddProjectionAggregateFirstJoinPrefix",
+            "BindPostJoinProjectionAggregatePrimitive",
+            "TryBuildPreJoinProjectionView",
+            "BindElidedPreJoinHashJoinProbeSelection",
         ),
     )
     require_scoped_text(
@@ -2823,7 +2851,7 @@ def verify_recipe_builder() -> None:
             r"sequence\.Add\(MakeHashJoinProbeMaterializeStep\(facts\.first_hash_join_idx\)\);\s*"
             r"sequence\.Add\(MakeHashJoinProbeSelectionStep\(facts\.second_hash_join_idx\)\)",
         ),
-        ("extension/jit_sljit/include/sljit_full_pipeline_recipe_binding.hpp",),
+        ("extension/jit_sljit/include/sljit_projection_aggregate_recipe_binding.hpp",),
     )
     reject_text(
         "extension/jit_sljit/include/sljit_full_pipeline_recipe_state.hpp",

@@ -1,0 +1,413 @@
+//===----------------------------------------------------------------------===//
+//                         DuckDB
+//
+// sljit_projection_aggregate_recipe_binding.hpp
+//
+//
+//===----------------------------------------------------------------------===//
+
+#pragma once
+
+#include "sljit_full_pipeline_recipe_facts.hpp"
+#include "sljit_full_pipeline_recipe_sequence_builder.hpp"
+#include "sljit_projected_grouped_aggregate_update_primitive.hpp"
+#include "sljit_string_set_case_projection_runtime.hpp"
+
+namespace duckdb {
+
+class SljitProjectionAggregateRecipeBinding : private SljitFullPipelineRecipeSequenceBuilder {
+public:
+	SljitProjectionAggregateRecipeBinding(const vector<SljitExecutableRegionOp> &ops_p,
+	                                      const vector<LogicalType> &source_output_types_p,
+	                                      const vector<Value> &source_min_values_p,
+	                                      const vector<Value> &source_max_values_p,
+	                                      bool uses_extended_source_fetch_budget_p)
+	    : SljitFullPipelineRecipeSequenceBuilder(ops_p, source_output_types_p, source_min_values_p, source_max_values_p,
+	                                             uses_extended_source_fetch_budget_p) {
+	}
+
+	SljitFullPipelineRecipe
+	MakeMarkFilterProjectionNativeTailRecipe(const SljitMarkFilterProjectionNativeTailFacts &facts) const {
+		auto sequence = MakeMarkFilterPrefix(facts.hash_join_idx, facts.filter_idx, true, facts.first_projection_idx);
+		return MakeProjectionNativeTailRecipe(std::move(sequence), facts.first_projection_idx,
+		                                      facts.final_projection_idx, facts.tail_start_idx);
+	}
+
+	SljitFullPipelineRecipe
+	MakeSourceProjectionAggregateRecipe(const SljitFullPipelineProjectionAggregateShape &shape) const {
+		auto sequence = MakeSourceSequence();
+		AddSourceBatchBoundaryIfUseful(sequence, shape.first_projection_idx);
+		return MakeProjectionAggregateRecipe(std::move(sequence), shape, true);
+	}
+
+	SljitFullPipelineRecipe
+	MakeJoinDirectProjectionAggregateRecipe(const SljitFullPipelineProjectionAggregateShape &shape,
+	                                        const SljitProjectionAggregatePrefixFacts &facts) const {
+		const auto aggregate_join_idx =
+		    facts.HasSecondHashJoin() ? facts.second_hash_join_idx : facts.first_hash_join_idx;
+		auto post_join_aggregate = BindPostJoinProjectionAggregatePrimitive(shape, aggregate_join_idx);
+		SljitFullPipelinePrimitiveSequence sequence;
+		if (facts.HasSecondHashJoin()) {
+			sequence = MakeSecondJoinPrefixSequence(facts);
+		} else {
+			sequence = MakeSingleJoinDirectPrefixSequence(facts, post_join_aggregate);
+		}
+		sequence.Add(SljitFullPipelinePrimitiveStep::PostJoinProjectionAggregateUpdate(post_join_aggregate));
+		return MakePrimitiveSequence(std::move(sequence));
+	}
+
+	SljitFullPipelineRecipe
+	MakeJoinProjectionAggregateTailRecipe(const SljitFullPipelineProjectionAggregateShape &shape,
+	                                      const SljitProjectionAggregatePrefixFacts &facts) const {
+		SljitFullPipelinePrimitiveSequence sequence;
+		if (facts.HasSecondHashJoin()) {
+			sequence = MakeSecondJoinPrefixSequence(facts);
+		} else {
+			sequence = MakeSingleJoinProjectionAggregateTailPrefixSequence(facts);
+		}
+		return MakeProjectionAggregateTailRecipe(std::move(sequence), shape);
+	}
+
+	SljitFullPipelineRecipe
+	MakeMarkFilterProjectionAggregateRecipe(const SljitFullPipelineProjectionAggregateShape &shape,
+	                                        const SljitProjectionAggregatePrefixFacts &facts) const {
+		auto sequence = MakeProjectionAggregateMarkFilterPrefix(facts, false, shape.first_projection_idx);
+		return MakeProjectionAggregateRecipe(std::move(sequence), shape);
+	}
+
+	SljitFullPipelineRecipe MakeMarkFilterNativeTailRecipe(const SljitProjectionAggregatePrefixFacts &facts) const {
+		auto sequence = MakeProjectionAggregateMarkFilterPrefix(facts, true, DConstants::INVALID_INDEX);
+		return MakeNativeTailRecipe(std::move(sequence), facts.mark_filter_idx + 1);
+	}
+
+	bool ProjectionAggregateHasDedicatedBackend(const SljitFullPipelineProjectionAggregateShape &shape,
+	                                            bool allow_direct_projected_primitive_payload_update = false) const {
+		if (SljitCanBindUngroupedAggregateUpdatePrimitive(ops, shape.aggregate_idx)) {
+			return SljitCanBindProjectionChainPrimitive(ops, shape.first_projection_idx, shape.final_projection_idx);
+		}
+		return ProjectionGroupedAggregateHasDedicatedBackend(shape, allow_direct_projected_primitive_payload_update);
+	}
+
+	bool CanMakeProjectionAggregateTailRecipe(const SljitFullPipelineProjectionAggregateShape &shape) const {
+		return ProjectionAggregateHasDedicatedBackend(shape) || CanMakeNativeTailRecipe(shape.aggregate_idx);
+	}
+
+private:
+	SljitFullPipelinePrimitiveSequence
+	MakeProjectionAggregateFirstJoinInputSequence(const SljitProjectionAggregatePrefixFacts &facts) const {
+		auto sequence = MakeSourceSequence();
+		AddProjectionAggregateFirstJoinPrefix(sequence, facts);
+		sequence.Add(MakeHashJoinProbeProjectionInputStep(facts.first_hash_join_idx));
+		return sequence;
+	}
+
+	SljitFullPipelinePrimitiveSequence
+	MakeSingleJoinDirectPrefixSequence(const SljitProjectionAggregatePrefixFacts &facts,
+	                                   SljitPostJoinProjectionAggregatePrimitive &post_join_aggregate) const {
+		auto sequence = MakeSourceSequence();
+		if (facts.HasSourceFilterProjection()) {
+			auto generated_filter = SljitBindGeneratedFilterPrimitive(ops, facts.source_filter_idx);
+			sequence.Add(SljitFullPipelinePrimitiveStep::GeneratedFilter(generated_filter));
+			AddProjectionChainStep(sequence, facts.source_projection_idx);
+			sequence.Add(MakeHashJoinProbeSelectionStep(facts.first_hash_join_idx));
+		} else if (facts.HasPreJoinProjection()) {
+			SljitPreJoinProjectionViewDescriptor pre_join_view;
+			const auto has_pre_join_view =
+			    TryBuildPreJoinProjectionView(facts.pre_join_projection_idx, facts.first_hash_join_idx, pre_join_view);
+			SljitStringSetCaseGroupedPayloadProjection string_set_case_projection;
+			if (has_pre_join_view &&
+			    SljitTryBuildStringSetCaseGroupedPayloadProjection(
+			        ops, pre_join_view, post_join_aggregate.post_join_projection.first_projection_idx,
+			        post_join_aggregate.post_join_projection.final_projection_idx, string_set_case_projection)) {
+				post_join_aggregate.post_join_projection.EnableStringSetCaseGroupedPayload(string_set_case_projection);
+			}
+			optional_ptr<const SljitPreJoinProjectionViewDescriptor> pre_join_view_ptr;
+			if (has_pre_join_view) {
+				pre_join_view_ptr = pre_join_view;
+			}
+			sequence = MakePreJoinProjectionHashJoinSelectionSequence(
+			    facts.pre_join_projection_idx, facts.first_hash_join_idx, true, pre_join_view_ptr);
+		} else {
+			AddSourceBatchBoundaryIfUseful(sequence, facts.first_hash_join_idx);
+			sequence.Add(MakeHashJoinProbeSelectionStep(facts.first_hash_join_idx));
+		}
+		return sequence;
+	}
+
+	SljitFullPipelinePrimitiveSequence
+	MakeSingleJoinProjectionAggregateTailPrefixSequence(const SljitProjectionAggregatePrefixFacts &facts) const {
+		auto sequence = MakeSourceSequence();
+		if (facts.HasPreJoinProjection() && !facts.HasSourceFilterProjection() &&
+		    TryAppendElidedPreJoinHashJoinProbeSelection(sequence, facts.pre_join_projection_idx,
+		                                                 facts.first_hash_join_idx, false)) {
+			return sequence;
+		}
+		AddProjectionAggregateFirstJoinPrefix(sequence, facts);
+		sequence.Add(MakeHashJoinProbeProjectionInputStep(facts.first_hash_join_idx));
+		return sequence;
+	}
+
+	SljitFullPipelinePrimitiveSequence
+	MakeSecondJoinPrefixSequence(const SljitProjectionAggregatePrefixFacts &facts) const {
+		auto sequence = MakeProjectionAggregateFirstJoinInputSequence(facts);
+		if (facts.HasBetweenProjection()) {
+			AddProjectionChainStep(sequence, facts.between_projection_idx);
+		}
+		sequence.Add(MakeHashJoinProbeSelectionStep(facts.second_hash_join_idx));
+		return sequence;
+	}
+
+	void AddProjectionAggregateFirstJoinPrefix(SljitFullPipelinePrimitiveSequence &sequence,
+	                                           const SljitProjectionAggregatePrefixFacts &facts) const {
+		if (facts.HasSourceFilterProjection()) {
+			auto generated_filter = SljitBindGeneratedFilterPrimitive(ops, facts.source_filter_idx);
+			sequence.Add(SljitFullPipelinePrimitiveStep::GeneratedFilter(generated_filter));
+			AddProjectionChainStep(sequence, facts.source_projection_idx);
+		}
+		if (facts.HasPreJoinProjection()) {
+			AddProjectionChainStep(sequence, facts.pre_join_projection_idx);
+		} else if (!facts.HasSourceFilterProjection()) {
+			AddSourceBatchBoundaryIfUseful(sequence, facts.first_hash_join_idx);
+		}
+	}
+
+	SljitFullPipelinePrimitiveStep
+	MakeMarkProbeFilterBoundaryStep(idx_t hash_join_idx, idx_t filter_idx, bool apply_filter_selection,
+	                                idx_t downstream_projection_idx = DConstants::INVALID_INDEX,
+	                                bool materialize_filter_selection = false) const {
+		bool allow_marker_omission = false;
+		if (apply_filter_selection && downstream_projection_idx != DConstants::INVALID_INDEX &&
+		    !materialize_filter_selection) {
+			auto &hash_join_op = ops[hash_join_idx];
+			if (hash_join_op.output_types.empty()) {
+				throw InternalException("SLJIT MARK probe filter boundary has no marker output");
+			}
+			const auto marker_idx = hash_join_op.output_types.size() - 1;
+			allow_marker_omission = !SljitProjectionReferencesInputColumn(ops[downstream_projection_idx],
+			                                                              hash_join_op.output_types.size(), marker_idx);
+		}
+		auto primitive = SljitBindMarkProbeFilterBoundaryPrimitive(ops, hash_join_idx, filter_idx,
+		                                                           apply_filter_selection, downstream_projection_idx,
+		                                                           allow_marker_omission, materialize_filter_selection);
+		return SljitFullPipelinePrimitiveStep::MarkProbeFilterBoundary(primitive);
+	}
+
+	SljitFullPipelinePrimitiveSequence MakeMarkFilterPrefix(idx_t hash_join_idx, idx_t filter_idx,
+	                                                        bool apply_filter_selection,
+	                                                        idx_t downstream_projection_idx = DConstants::INVALID_INDEX,
+	                                                        bool materialize_filter_selection = false) const {
+		auto sequence = MakeSourceSequence();
+		AddSourceBatchBoundaryIfUseful(sequence, hash_join_idx);
+		sequence.Add(MakeMarkProbeFilterBoundaryStep(hash_join_idx, filter_idx, apply_filter_selection,
+		                                             downstream_projection_idx, materialize_filter_selection));
+		return sequence;
+	}
+
+	SljitFullPipelinePrimitiveSequence MakeTwoJoinMarkFilterPrefix(
+	    idx_t first_hash_join_idx, idx_t second_hash_join_idx, idx_t filter_idx, bool apply_filter_selection,
+	    idx_t downstream_projection_idx = DConstants::INVALID_INDEX, bool materialize_filter_selection = false) const {
+		auto sequence = MakeSourceHashJoinProjectionInputSequence(first_hash_join_idx);
+		sequence.Add(MakeMarkProbeFilterBoundaryStep(second_hash_join_idx, filter_idx, apply_filter_selection,
+		                                             downstream_projection_idx, materialize_filter_selection));
+		return sequence;
+	}
+
+	SljitFullPipelinePrimitiveSequence
+	MakeProjectionAggregateMarkFilterPrefix(const SljitProjectionAggregatePrefixFacts &facts,
+	                                        bool materialize_filter_selection,
+	                                        idx_t downstream_projection_idx = DConstants::INVALID_INDEX) const {
+		if (facts.HasSecondHashJoin()) {
+			return MakeTwoJoinMarkFilterPrefix(facts.first_hash_join_idx, facts.second_hash_join_idx,
+			                                   facts.mark_filter_idx, true, downstream_projection_idx,
+			                                   materialize_filter_selection);
+		}
+		return MakeMarkFilterPrefix(facts.first_hash_join_idx, facts.mark_filter_idx, true, downstream_projection_idx,
+		                            materialize_filter_selection);
+	}
+
+	SljitFullPipelinePrimitiveSequence MakePreJoinProjectionHashJoinSelectionSequence(
+	    idx_t pre_join_projection_idx, idx_t hash_join_idx, bool add_source_batch_boundary_for_elided,
+	    optional_ptr<const SljitPreJoinProjectionViewDescriptor> pre_join_view = nullptr) const {
+		auto sequence = MakeSourceSequence();
+		if (pre_join_view &&
+		    TryAppendElidedPreJoinHashJoinProbeSelection(sequence, *pre_join_view, pre_join_projection_idx,
+		                                                 hash_join_idx, add_source_batch_boundary_for_elided)) {
+			return sequence;
+		}
+		if (!pre_join_view &&
+		    TryAppendElidedPreJoinHashJoinProbeSelection(sequence, pre_join_projection_idx, hash_join_idx,
+		                                                 add_source_batch_boundary_for_elided)) {
+			return sequence;
+		}
+		AddMaterializedPreJoinProjectionHashJoinSelection(sequence, pre_join_projection_idx, hash_join_idx);
+		return sequence;
+	}
+
+	SljitFullPipelinePrimitiveSequence MakeSourceHashJoinProjectionInputSequence(idx_t hash_join_idx) const {
+		auto sequence = MakeSourceSequence();
+		AddSourceBatchBoundaryIfUseful(sequence, hash_join_idx);
+		sequence.Add(MakeHashJoinProbeProjectionInputStep(hash_join_idx));
+		return sequence;
+	}
+
+	bool TryBuildPreJoinProjectionView(idx_t pre_join_projection_idx, idx_t hash_join_idx,
+	                                   SljitPreJoinProjectionViewDescriptor &pre_join_view) const {
+		return SljitTryBuildPreJoinProjectionViewDescriptor(ops, pre_join_projection_idx, hash_join_idx,
+		                                                    source_min_values, source_max_values, pre_join_view);
+	}
+
+	bool TryAppendElidedPreJoinHashJoinProbeSelection(SljitFullPipelinePrimitiveSequence &sequence,
+	                                                  idx_t pre_join_projection_idx, idx_t hash_join_idx,
+	                                                  bool add_source_batch_boundary) const {
+		SljitPreJoinProjectionViewDescriptor pre_join_view;
+		if (!TryBuildPreJoinProjectionView(pre_join_projection_idx, hash_join_idx, pre_join_view)) {
+			return false;
+		}
+		return TryAppendElidedPreJoinHashJoinProbeSelection(sequence, pre_join_view, pre_join_projection_idx,
+		                                                    hash_join_idx, add_source_batch_boundary);
+	}
+
+	bool TryAppendElidedPreJoinHashJoinProbeSelection(SljitFullPipelinePrimitiveSequence &sequence,
+	                                                  const SljitPreJoinProjectionViewDescriptor &pre_join_view,
+	                                                  idx_t pre_join_projection_idx, idx_t hash_join_idx,
+	                                                  bool add_source_batch_boundary) const {
+		if (!pre_join_view.CanElideProjectionWithCurrentHashProbe()) {
+			return false;
+		}
+		if (add_source_batch_boundary) {
+			AddSourceBatchBoundaryIfUseful(sequence, hash_join_idx);
+		}
+		auto remapped_hash_join_selection =
+		    BindElidedPreJoinHashJoinProbeSelection(pre_join_view, pre_join_projection_idx, hash_join_idx);
+		sequence.Add(SljitFullPipelinePrimitiveStep::HashJoinProbeSelection(remapped_hash_join_selection));
+		return true;
+	}
+
+	void AddMaterializedPreJoinProjectionHashJoinSelection(SljitFullPipelinePrimitiveSequence &sequence,
+	                                                       idx_t pre_join_projection_idx, idx_t hash_join_idx) const {
+		AddProjectionChainStep(sequence, pre_join_projection_idx);
+		sequence.Add(MakeHashJoinProbeSelectionStep(hash_join_idx));
+	}
+
+	SljitHashJoinProbeSelectionPrimitive
+	BindElidedPreJoinHashJoinProbeSelection(const SljitPreJoinProjectionViewDescriptor &pre_join_view,
+	                                        idx_t pre_join_projection_idx, idx_t hash_join_idx) const {
+		if (!pre_join_view.CanElideProjectionWithCurrentHashProbe() ||
+		    pre_join_view.projection_idx != pre_join_projection_idx || pre_join_view.hash_join_idx != hash_join_idx) {
+			throw InternalException("SLJIT pre-join projection elision cannot bind inconsistent descriptor");
+		}
+		SljitHashJoinProbeInputRemap input_remap;
+		if (!pre_join_view.hash_probe_key_inputs_match_source) {
+			input_remap.key_input_indices = pre_join_view.hash_probe_key_source_indices;
+		}
+		input_remap.residual_probe_source_indices = pre_join_view.residual_probe_source_indices;
+		return SljitBindHashJoinProbeSelectionPrimitive(
+		    ops, hash_join_idx, pre_join_view.source_key0_int64_to_int32_unchecked, std::move(input_remap),
+		    pre_join_view.projected_to_source, pre_join_projection_idx,
+		    optional_ptr<const vector<LogicalType>>(&ops[pre_join_projection_idx].input_types));
+	}
+
+	SljitPostJoinProjectionAggregatePrimitive
+	BindPostJoinProjectionAggregatePrimitive(const SljitFullPipelineProjectionAggregateShape &shape,
+	                                         idx_t hash_join_idx) const {
+		SljitPostJoinProjectionAggregatePrimitive post_join_aggregate;
+		post_join_aggregate.post_join_projection = SljitBindPostJoinProjectionPrimitive(
+		    ops, hash_join_idx, shape.first_projection_idx, shape.final_projection_idx);
+		post_join_aggregate.aggregate_idx = shape.aggregate_idx;
+		if (!SljitCanBindPostJoinProjectionAggregatePrimitive(ops, post_join_aggregate)) {
+			throw InternalException("SLJIT post-join projection aggregate primitive cannot bind requested aggregate");
+		}
+		return post_join_aggregate;
+	}
+
+	bool
+	ProjectionGroupedAggregateHasDedicatedBackend(const SljitFullPipelineProjectionAggregateShape &shape,
+	                                              bool allow_direct_projected_primitive_payload_update = false) const {
+		if (!SljitGroupedAggregateUpdateHasDedicatedBackend(ops, shape.aggregate_idx)) {
+			return false;
+		}
+		if (SljitCanBindProjectedInputGroupedAggregateUpdatePrimitive(
+		        ops, shape.first_projection_idx, shape.final_projection_idx, shape.aggregate_idx,
+		        allow_direct_projected_primitive_payload_update)) {
+			return true;
+		}
+		return SljitCanBindProjectionChainPrimitive(ops, shape.first_projection_idx, shape.final_projection_idx);
+	}
+
+	SljitFullPipelineRecipe
+	MakeProjectionAggregateRecipe(SljitFullPipelinePrimitiveSequence sequence,
+	                              const SljitFullPipelineProjectionAggregateShape &shape,
+	                              bool allow_direct_projected_primitive_payload_update = false) const {
+		if (!SljitCanBindUngroupedAggregateUpdatePrimitive(ops, shape.aggregate_idx)) {
+			return MakeProjectionGroupedAggregateRecipe(std::move(sequence), shape,
+			                                            allow_direct_projected_primitive_payload_update);
+		}
+		if (!SljitCanBindProjectionChainPrimitive(ops, shape.first_projection_idx, shape.final_projection_idx)) {
+			throw InternalException("SLJIT projected ungrouped aggregate recipe cannot bind projection chain");
+		}
+		AddProjectionChainStep(sequence, shape.first_projection_idx, shape.final_projection_idx);
+		auto aggregate_update = SljitBindUngroupedAggregateUpdatePrimitive(ops, shape.aggregate_idx);
+		sequence.Add(SljitFullPipelinePrimitiveStep::UngroupedAggregateUpdate(aggregate_update));
+		return MakePrimitiveSequence(std::move(sequence));
+	}
+
+	SljitFullPipelineRecipe
+	MakeProjectionGroupedAggregateRecipe(SljitFullPipelinePrimitiveSequence sequence,
+	                                     const SljitFullPipelineProjectionAggregateShape &shape,
+	                                     bool allow_direct_projected_primitive_payload_update = false) const {
+		if (!SljitCanBindProjectionChainPrimitive(ops, shape.first_projection_idx, shape.final_projection_idx)) {
+			throw InternalException("SLJIT selected projection aggregate recipe cannot bind projection chain");
+		}
+		if (SljitCanBindProjectedInputGroupedAggregateUpdatePrimitive(
+		        ops, shape.first_projection_idx, shape.final_projection_idx, shape.aggregate_idx,
+		        allow_direct_projected_primitive_payload_update)) {
+			auto grouped_update = SljitBindProjectedInputGroupedAggregateUpdatePrimitive(
+			    ops, shape.first_projection_idx, shape.final_projection_idx, shape.aggregate_idx,
+			    allow_direct_projected_primitive_payload_update);
+			sequence.Add(SljitFullPipelinePrimitiveStep::GroupedAggregateUpdate(grouped_update));
+			return MakePrimitiveSequence(std::move(sequence));
+		}
+		AddProjectionChainStep(sequence, shape.first_projection_idx, shape.final_projection_idx);
+		auto grouped_update = SljitBindGroupedAggregateUpdatePrimitive(ops, shape.aggregate_idx);
+		sequence.Add(SljitFullPipelinePrimitiveStep::GroupedAggregateUpdate(grouped_update));
+		return MakePrimitiveSequence(std::move(sequence));
+	}
+
+	SljitFullPipelineRecipe
+	MakeProjectionAggregateTailRecipe(SljitFullPipelinePrimitiveSequence sequence,
+	                                  const SljitFullPipelineProjectionAggregateShape &shape) const {
+		if (ProjectionAggregateHasDedicatedBackend(shape)) {
+			return MakeProjectionAggregateRecipe(std::move(sequence), shape);
+		}
+		if (!CanMakeNativeTailRecipe(shape.aggregate_idx)) {
+			throw InternalException("SLJIT projection aggregate tail has no valid grouped backend or native tail");
+		}
+		return MakeProjectionNativeTailRecipe(std::move(sequence), shape);
+	}
+
+	SljitFullPipelineRecipe
+	MakeProjectionNativeTailRecipe(SljitFullPipelinePrimitiveSequence sequence,
+	                               const SljitFullPipelineProjectionAggregateShape &shape) const {
+		return MakeProjectionNativeTailRecipe(std::move(sequence), shape.first_projection_idx,
+		                                      shape.final_projection_idx, shape.aggregate_idx);
+	}
+
+	SljitFullPipelineRecipe MakeProjectionNativeTailRecipe(SljitFullPipelinePrimitiveSequence sequence,
+	                                                       idx_t first_projection_idx, idx_t final_projection_idx,
+	                                                       idx_t tail_start_idx) const {
+		if (SljitCanBindProjectedDelimJoinSinkPrimitive(ops, first_projection_idx, final_projection_idx,
+		                                                tail_start_idx)) {
+			auto delim_sink = SljitBindProjectedDelimJoinSinkPrimitive(ops, first_projection_idx, final_projection_idx,
+			                                                           tail_start_idx);
+			sequence.Add(SljitFullPipelinePrimitiveStep::DelimJoinSink(delim_sink));
+			return MakePrimitiveSequence(std::move(sequence));
+		}
+		if (!SljitCanBindProjectionChainPrimitive(ops, first_projection_idx, final_projection_idx)) {
+			throw InternalException("SLJIT projection native-tail recipe cannot bind projection chain");
+		}
+		AddProjectionChainStep(sequence, first_projection_idx, final_projection_idx);
+		return MakeNativeTailRecipe(std::move(sequence), tail_start_idx);
+	}
+};
+
+} // namespace duckdb
