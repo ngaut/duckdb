@@ -99,6 +99,7 @@ def verify_required_design_files() -> None:
         "extension/jit_sljit/include/sljit_full_pipeline_recipe_state.hpp",
         "extension/jit_sljit/include/sljit_full_pipeline_recipe_binding.hpp",
         "extension/jit_sljit/include/sljit_full_pipeline_recipe_sequence_builder.hpp",
+        "extension/jit_sljit/include/sljit_pre_join_projection_recipe.hpp",
         "extension/jit_sljit/include/sljit_projection_aggregate_recipe_binding.hpp",
         "extension/jit_sljit/include/sljit_full_pipeline_recipe.hpp",
         "extension/jit_sljit/include/sljit_full_pipeline_recipe_facts.hpp",
@@ -2688,18 +2689,31 @@ def verify_primitive_sequence() -> None:
         ),
     )
     require_text(
-        "extension/jit_sljit/include/sljit_projection_aggregate_recipe_binding.hpp",
+        "extension/jit_sljit/include/sljit_pre_join_projection_recipe.hpp",
         (
-            "TryBuildPreJoinProjectionView",
-            "BindElidedPreJoinHashJoinProbeSelection",
-            "SljitPreJoinProjectionViewDescriptor pre_join_view",
+            "class SljitPreJoinProjectionRecipeBinding",
+            "TryBuildView",
+            "MakeHashJoinSelectionSequence",
+            "TryAppendElidedHashJoinProbeSelection",
+            "AddMaterializedHashJoinSelection",
+            "BindElidedHashJoinProbeSelection",
             "SljitTryBuildPreJoinProjectionViewDescriptor",
             "pre_join_view.CanElideProjectionWithCurrentHashProbe()",
             "input_remap.key_input_indices = pre_join_view.hash_probe_key_source_indices",
             "input_remap.residual_probe_source_indices = pre_join_view.residual_probe_source_indices",
             "pre_join_view.source_key0_int64_to_int32_unchecked",
             "pre_join_view.projected_to_source",
-            "remapped_hash_join_selection",
+            "SljitBindHashJoinProbeSelectionPrimitive",
+        ),
+    )
+    require_text(
+        "extension/jit_sljit/include/sljit_projection_aggregate_recipe_binding.hpp",
+        (
+            '#include "sljit_pre_join_projection_recipe.hpp"',
+            "SljitPreJoinProjectionRecipeBinding PreJoinProjectionBinding() const",
+            "pre_join_projection.TryBuildView",
+            "pre_join_projection.MakeHashJoinSelectionSequence",
+            "PreJoinProjectionBinding().TryAppendElidedHashJoinProbeSelection",
         ),
     )
     require_scoped_text(
@@ -2713,40 +2727,50 @@ def verify_primitive_sequence() -> None:
             "facts.source_projection_idx",
             "facts.HasPreJoinProjection()",
             "SljitPreJoinProjectionViewDescriptor pre_join_view",
-            "TryBuildPreJoinProjectionView",
+            "pre_join_projection.TryBuildView",
             "optional_ptr<const SljitPreJoinProjectionViewDescriptor> pre_join_view_ptr",
             "pre_join_view_ptr = pre_join_view",
-            "MakePreJoinProjectionHashJoinSelectionSequence(",
+            "pre_join_projection.MakeHashJoinSelectionSequence(",
             "facts.pre_join_projection_idx",
             "pre_join_view_ptr);",
             "MakeHashJoinProbeSelectionStep(facts.first_hash_join_idx)",
         ),
     )
     require_scoped_text(
-        "extension/jit_sljit/include/sljit_projection_aggregate_recipe_binding.hpp",
-        "MakePreJoinProjectionHashJoinSelectionSequence",
-        "SljitFullPipelinePrimitiveSequence MakeSourceHashJoinProjectionInputSequence",
+        "extension/jit_sljit/include/sljit_pre_join_projection_recipe.hpp",
+        "MakeHashJoinSelectionSequence",
+        "bool TryAppendElidedHashJoinProbeSelection(SljitFullPipelinePrimitiveSequence &sequence,",
         (
             "pre_join_view",
-            "TryAppendElidedPreJoinHashJoinProbeSelection",
-            "AddMaterializedPreJoinProjectionHashJoinSelection",
+            "TryAppendElidedHashJoinProbeSelection",
+            "AddMaterializedHashJoinSelection",
         ),
     )
     require_scoped_text(
-        "extension/jit_sljit/include/sljit_projection_aggregate_recipe_binding.hpp",
-        "TryAppendElidedPreJoinHashJoinProbeSelection(SljitFullPipelinePrimitiveSequence &sequence,",
-        "AddMaterializedPreJoinProjectionHashJoinSelection",
+        "extension/jit_sljit/include/sljit_pre_join_projection_recipe.hpp",
+        "TryAppendElidedHashJoinProbeSelection(SljitFullPipelinePrimitiveSequence &sequence,",
+        "private:",
         (
             "pre_join_view.CanElideProjectionWithCurrentHashProbe()",
-            "BindElidedPreJoinHashJoinProbeSelection",
+            "BindElidedHashJoinProbeSelection",
         ),
     )
     require_scoped_text(
-        "extension/jit_sljit/include/sljit_projection_aggregate_recipe_binding.hpp",
-        "AddMaterializedPreJoinProjectionHashJoinSelection",
+        "extension/jit_sljit/include/sljit_pre_join_projection_recipe.hpp",
+        "AddMaterializedHashJoinSelection",
         "SljitHashJoinProbeSelectionPrimitive",
         (
             "AddProjectionChainStep(sequence, pre_join_projection_idx)",
+        ),
+    )
+    reject_text(
+        "extension/jit_sljit/include/sljit_projection_aggregate_recipe_binding.hpp",
+        (
+            "MakePreJoinProjectionHashJoinSelectionSequence",
+            "TryAppendElidedPreJoinHashJoinProbeSelection",
+            "AddMaterializedPreJoinProjectionHashJoinSelection",
+            "BindElidedPreJoinHashJoinProbeSelection",
+            "SljitTryBuildPreJoinProjectionViewDescriptor(ops, pre_join_projection_idx",
         ),
     )
     require_text(
