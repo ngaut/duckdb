@@ -2166,6 +2166,26 @@ def verify_primitive_sequence() -> None:
             "auto &join = ops[pre_join_view.hash_join_idx].hash_join_probe.plan",
         ),
     )
+    require_text(
+        "extension/jit_sljit/include/sljit_string_set_complementary_sum_runtime.hpp",
+        (
+            "struct SljitStringSetComplementarySumDescriptor",
+            "SljitTryBindStringSetComplementarySumDescriptor",
+            "SljitTryBindStringSetComplementarySumLanes",
+            "TryExecuteDirectRowPointerPreclassifiedStringSetComplementarySumUpdate",
+        ),
+    )
+    require_text(
+        "extension/jit_sljit/include/sljit_direct_join_output_aggregate_runtime.hpp",
+        ("sljit_string_set_complementary_sum_runtime.hpp",),
+    )
+    reject_text(
+        "extension/jit_sljit/include/sljit_row_pointer_grouped_aggregate_update_runtime.hpp",
+        (
+            "struct SljitStringSetComplementarySumDescriptor",
+            "SljitStringSetComplementarySumLaneSupported",
+        ),
+    )
     reject_regex(
         "stale hard-coded pre-join projection descriptor",
         (

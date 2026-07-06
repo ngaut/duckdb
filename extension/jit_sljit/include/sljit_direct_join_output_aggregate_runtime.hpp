@@ -18,6 +18,7 @@
 #include "sljit_projection_aggregate_descriptor.hpp"
 #include "sljit_region_runtime_state.hpp"
 #include "sljit_region_runtime_trace.hpp"
+#include "sljit_string_set_complementary_sum_runtime.hpp"
 #include "sljit_ungrouped_aggregate_payload_update_runtime.hpp"
 
 namespace duckdb {
