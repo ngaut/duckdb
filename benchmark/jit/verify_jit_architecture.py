@@ -111,6 +111,7 @@ def verify_required_design_files() -> None:
         "extension/jit_sljit/include/sljit_post_join_projection_aggregate_runtime.hpp",
         "extension/jit_sljit/include/sljit_mark_probe_filter_boundary.hpp",
         "extension/jit_sljit/include/sljit_mark_probe_filter_boundary_runtime.hpp",
+        "extension/jit_sljit/include/sljit_hash_join_all_valid_mark_selection_probe_executor_runtime.hpp",
         "extension/jit_sljit/include/sljit_hash_join_all_valid_mark_selection_probe_dispatch_runtime.hpp",
         "extension/jit_sljit/include/sljit_hash_join_probe_execution_contract.hpp",
         "extension/jit_sljit/include/sljit_hash_join_probe_executor_runtime.hpp",
@@ -785,6 +786,38 @@ def verify_runtime_batch_view() -> None:
             "mark_nonmatch_selection_bloom_code",
             "mark_nonmatch_all_valid_specializations",
             "MarkNonMatchAllValidSpecializationFor",
+        ),
+    )
+    require_text(
+        "extension/jit_sljit/include/sljit_hash_join_all_valid_mark_selection_probe_executor_runtime.hpp",
+        (
+            "ExecuteAllValidHashJoinChainMarkSelectionProbe",
+            "ExecuteAllValidHashJoinChainMarkSelectionExistenceProbe",
+            "ExecuteAllValidHashJoinNoChainMarkSelectionProbe",
+            "ExecuteAllValidHashJoinMarkSelectionProbeWithMatcher",
+            "ExecuteAllValidHashJoinEqualityMarkSelectionProbeWithMatcher",
+            "SljitHashJoinMarkSelectionConsumer",
+            "EmitMatch(row_idx, row_location)",
+            "EmitNoMatch(row_idx)",
+        ),
+    )
+    require_text(
+        "extension/jit_sljit/include/sljit_hash_join_all_valid_probe_executor_runtime.hpp",
+        (
+            "sljit_hash_join_all_valid_mark_selection_probe_executor_runtime.hpp",
+            "ExecuteAllValidHashJoinChainProbe",
+            "ExecuteAllValidHashJoinNoChainProbe",
+            "ExecuteAllValidHashJoinProbeWithMatcher",
+            "SljitHashJoinMatchedRowConsumer",
+        ),
+    )
+    reject_text(
+        "extension/jit_sljit/include/sljit_hash_join_all_valid_probe_executor_runtime.hpp",
+        (
+            "ExecuteAllValidHashJoinChainMarkSelectionProbe(",
+            "ExecuteAllValidHashJoinNoChainMarkSelectionProbe(",
+            "ExecuteAllValidHashJoinMarkSelectionProbeWithMatcher(",
+            "ExecuteAllValidHashJoinEqualityMarkSelectionProbeWithMatcher(",
         ),
     )
     require_text(
