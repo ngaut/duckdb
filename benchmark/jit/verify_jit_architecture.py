@@ -381,6 +381,7 @@ def verify_stale_route_code_removed() -> None:
             r"SljitMakeSelectedJoinOutputAggregateUpdatePrimitive",
             r"SljitCanBindJoinProjectionAggregateUpdatePrimitive",
             r"SljitDirectJoinOutputAggregatePrimitive",
+            r"SljitDirectJoinOutputAggregatePolicy",
             r"SljitCanBindDirectJoinOutputAggregatePrimitive",
             r"SljitBindDirectJoinOutputAggregatePrimitive",
             r"join_projection_aggregate_update",
@@ -993,6 +994,15 @@ def verify_projection_aggregate_descriptor_boundary() -> None:
             "enum class SljitDirectJoinOutputAggregateUpdateSchedule",
             "PENDING_ROW_POINTER_BATCH",
             "IMMEDIATE_ROW_POINTER_UPDATE",
+            "SljitDirectJoinOutputAggregatePolicy",
+        ),
+    )
+    require_text(
+        "extension/jit_sljit/include/sljit_direct_join_output_aggregate_runtime.hpp",
+        (
+            "optional_ptr<SljitDirectJoinOutputAggregateStrategy> strategy_ptr",
+            "if (!strategy_ptr || strategy_ptr->disabled)",
+            "auto &strategy = *strategy_ptr",
         ),
     )
     require_text(
@@ -2785,15 +2795,21 @@ def verify_distinct_aggregate_backend() -> None:
         (
             "SljitBindGroupedPrimitiveAggregateUpdate",
             "SljitExecuteBoundGroupedPrimitiveAggregateUpdate",
+            "optional_ptr<SljitDirectJoinOutputAggregateStrategy> direct_aggregate",
             "optional_ptr<SljitBoundGroupedPrimitiveAggregateUpdate> bound_grouped_update",
         ),
     )
     require_text(
         "extension/jit_sljit/include/sljit_post_join_projection_aggregate_runtime.hpp",
         (
+            "optional_ptr<SljitDirectJoinOutputAggregateStrategy> DirectAggregateStrategyPtr()",
             "SljitBoundGroupedPrimitiveAggregateUpdate bound_projected_grouped_update",
             "bound_grouped_update = &bound_projected_grouped_update",
         ),
+    )
+    reject_text(
+        "extension/jit_sljit/include/sljit_post_join_projection_aggregate_runtime.hpp",
+        ("SljitDirectJoinOutputAggregatePolicy", "direct_join_output_aggregate ="),
     )
     reject_regex(
         "removed distinct count-pointer backend",

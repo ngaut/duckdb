@@ -331,11 +331,11 @@ static void SljitRecordDirectJoinOutputAggregateProjectionUnsupported(
 }
 
 static bool SljitFlushDirectJoinOutputAggregate(ExecutionRegionRuntime &runtime, vector<SljitExecutableRegionOp> &ops,
-                                                SljitDirectJoinOutputAggregatePolicy &policy) {
-	if (!policy.HasStrategy()) {
+                                                optional_ptr<SljitDirectJoinOutputAggregateStrategy> strategy_ptr) {
+	if (!strategy_ptr) {
 		return false;
 	}
-	auto &strategy = policy.Strategy();
+	auto &strategy = *strategy_ptr;
 	if (strategy.aggregate_idx >= ops.size()) {
 		throw InternalException("SLJIT direct join-output aggregate index is out of range");
 	}
@@ -413,15 +413,16 @@ static bool SljitTryExecuteDirectJoinOutputPerfectHashAggregateUpdate(
 
 static bool SljitTryExecuteDirectJoinOutputAggregate(
     ExecutionRegionRuntime &runtime, vector<SljitExecutableRegionOp> &ops, SljitRegionExecutionScratch &scratch,
-    SljitDirectJoinOutputAggregatePolicy &policy, SljitPostJoinProjectionStrategy &post_join_projection,
-    DataChunk &join_input, const SelectionVector &match_selection, const SelectionVector &build_selection,
-    Vector &row_pointers, DataChunk &join_output, optional_ptr<bool> deferred_grouped_finish,
+    optional_ptr<SljitDirectJoinOutputAggregateStrategy> strategy_ptr,
+    SljitPostJoinProjectionStrategy &post_join_projection, DataChunk &join_input,
+    const SelectionVector &match_selection, const SelectionVector &build_selection, Vector &row_pointers,
+    DataChunk &join_output, optional_ptr<bool> deferred_grouped_finish,
     bool source_key0_int64_to_int32_unchecked = false, optional_ptr<const vector<idx_t>> output_column_map = nullptr,
     idx_t output_projection_idx = DConstants::INVALID_INDEX) {
-	if (!policy.Enabled()) {
+	if (!strategy_ptr || strategy_ptr->disabled) {
 		return false;
 	}
-	auto &strategy = policy.Strategy();
+	auto &strategy = *strategy_ptr;
 	auto &descriptor = strategy.descriptor;
 	strategy.last_failure.clear();
 	if (strategy.aggregate_idx >= ops.size()) {
@@ -474,7 +475,7 @@ static bool SljitTryExecuteDirectJoinOutputAggregate(
 			                                                          join_output.size());
 			strategy.last_failure =
 			    materialize_failure.empty() ? string("materialize") : string("materialize_") + materialize_failure;
-			SljitFlushDirectJoinOutputAggregate(runtime, ops, policy);
+			SljitFlushDirectJoinOutputAggregate(runtime, ops, strategy_ptr);
 			return false;
 		}
 	}
@@ -482,7 +483,7 @@ static bool SljitTryExecuteDirectJoinOutputAggregate(
 		SljitRecordDirectJoinOutputAggregateProjectionUnsupported(runtime, ops, post_join_projection, "cardinality",
 		                                                          join_output.size());
 		strategy.last_failure = "cardinality";
-		SljitFlushDirectJoinOutputAggregate(runtime, ops, policy);
+		SljitFlushDirectJoinOutputAggregate(runtime, ops, strategy_ptr);
 		return false;
 	}
 	auto &sink_info = aggregate_op.aggregate_update.plan.sink_info;
@@ -528,7 +529,7 @@ static bool SljitTryExecuteDirectJoinOutputAggregate(
 		return true;
 	}
 
-	SljitFlushDirectJoinOutputAggregate(runtime, ops, policy);
+	SljitFlushDirectJoinOutputAggregate(runtime, ops, strategy_ptr);
 	SljitAppendPendingRowPointerAggregateBatch(runtime, strategy.aggregate_idx, aggregate_op, descriptor,
 	                                           strategy.pending_batch, scratch, deferred_grouped_finish,
 	                                           aggregate_input, row_pointers, source_key0_int64_to_int32_unchecked);

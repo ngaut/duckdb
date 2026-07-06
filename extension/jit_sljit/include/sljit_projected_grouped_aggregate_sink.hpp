@@ -17,14 +17,11 @@
 
 namespace duckdb {
 
-static bool SljitExecuteDeferredGroupedAggregateBatch(ExecutionRegionRuntime &runtime,
-                                                      ExecutionOperatorRuntime &native_runtime,
-                                                      SljitRegionExecutionScratch &scratch, idx_t aggregate_idx,
-                                                      SljitExecutableRegionOp &aggregate_op, DataChunk &input,
-                                                      bool &deferred_grouped_finish, ExecutionRegionResult &result,
-                                                      optional_ptr<SinkResultType> sink_result_out = nullptr,
-                                                      optional_ptr<SljitBoundGroupedPrimitiveAggregateUpdate>
-                                                          bound_grouped_update = nullptr) {
+static bool SljitExecuteDeferredGroupedAggregateBatch(
+    ExecutionRegionRuntime &runtime, ExecutionOperatorRuntime &native_runtime, SljitRegionExecutionScratch &scratch,
+    idx_t aggregate_idx, SljitExecutableRegionOp &aggregate_op, DataChunk &input, bool &deferred_grouped_finish,
+    ExecutionRegionResult &result, optional_ptr<SinkResultType> sink_result_out = nullptr,
+    optional_ptr<SljitBoundGroupedPrimitiveAggregateUpdate> bound_grouped_update = nullptr) {
 	if (input.size() == 0) {
 		return false;
 	}
@@ -34,13 +31,13 @@ static bool SljitExecuteDeferredGroupedAggregateBatch(ExecutionRegionRuntime &ru
 	    aggregate_op.aggregate_update.plan.use_primitive_payloads) {
 		SljitBindGroupedPrimitiveAggregateUpdate(native_runtime, scratch, aggregate_idx, aggregate_op, input,
 		                                         *bound_grouped_update);
-		sink_result = SljitExecuteBoundGroupedPrimitiveAggregateUpdate(
-		    runtime, scratch, *bound_grouped_update, input, nullptr, input.size(), true,
-		    optional_ptr<bool>(&deferred_grouped_finish));
+		sink_result = SljitExecuteBoundGroupedPrimitiveAggregateUpdate(runtime, scratch, *bound_grouped_update, input,
+		                                                               nullptr, input.size(), true,
+		                                                               optional_ptr<bool>(&deferred_grouped_finish));
 	} else {
-		sink_result = SljitExecuteNativeAggregateUpdate(runtime, native_runtime, scratch, aggregate_idx, aggregate_op,
-		                                                input, nullptr, DConstants::INVALID_INDEX, true,
-		                                                &deferred_grouped_finish);
+		sink_result =
+		    SljitExecuteNativeAggregateUpdate(runtime, native_runtime, scratch, aggregate_idx, aggregate_op, input,
+		                                      nullptr, DConstants::INVALID_INDEX, true, &deferred_grouped_finish);
 	}
 	if (sink_result_out) {
 		*sink_result_out = sink_result;
@@ -53,18 +50,15 @@ static bool SljitExecuteDeferredGroupedAggregateBatch(ExecutionRegionRuntime &ru
 }
 
 struct SljitProjectedGroupedAggregateSink {
-	SljitProjectedGroupedAggregateSink(vector<SljitExecutableRegionOp> &ops_p, ExecutionRegionRuntime &runtime_p,
-	                                   ExecutionOperatorRuntime &native_runtime_p,
-	                                   SljitRegionExecutionScratch &scratch_p, ExecutionRegionResult &result_p,
-	                                   idx_t projection_idx_p, SljitExecutableRegionOp &projection_op_p,
-	                                   idx_t aggregate_idx_p, SljitExecutableRegionOp &aggregate_op_p,
-	                                   bool &deferred_grouped_finish_p, idx_t &processed_p,
-	                                   SljitDataChunkBatch &projected_batch_p, const char *append_phase_p,
-	                                   const char *boundary_phase_p,
-	                                   optional_ptr<SljitDirectJoinOutputAggregatePolicy> direct_aggregate_p = nullptr,
-	                                   bool record_sink_result_p = false,
-	                                   optional_ptr<SljitBoundGroupedPrimitiveAggregateUpdate>
-	                                       bound_grouped_update_p = nullptr)
+	SljitProjectedGroupedAggregateSink(
+	    vector<SljitExecutableRegionOp> &ops_p, ExecutionRegionRuntime &runtime_p,
+	    ExecutionOperatorRuntime &native_runtime_p, SljitRegionExecutionScratch &scratch_p,
+	    ExecutionRegionResult &result_p, idx_t projection_idx_p, SljitExecutableRegionOp &projection_op_p,
+	    idx_t aggregate_idx_p, SljitExecutableRegionOp &aggregate_op_p, bool &deferred_grouped_finish_p,
+	    idx_t &processed_p, SljitDataChunkBatch &projected_batch_p, const char *append_phase_p,
+	    const char *boundary_phase_p, optional_ptr<SljitDirectJoinOutputAggregateStrategy> direct_aggregate_p = nullptr,
+	    bool record_sink_result_p = false,
+	    optional_ptr<SljitBoundGroupedPrimitiveAggregateUpdate> bound_grouped_update_p = nullptr)
 	    : ops(ops_p), runtime(runtime_p), native_runtime(native_runtime_p), scratch(scratch_p), result(result_p),
 	      projection_idx(projection_idx_p), projection_op(projection_op_p), aggregate_idx(aggregate_idx_p),
 	      aggregate_op(aggregate_op_p), deferred_grouped_finish(deferred_grouped_finish_p), processed(processed_p),
@@ -74,10 +68,7 @@ struct SljitProjectedGroupedAggregateSink {
 	}
 
 	bool FlushDirectAggregate() {
-		if (!direct_aggregate) {
-			return false;
-		}
-		return SljitFlushDirectJoinOutputAggregate(runtime, ops, *direct_aggregate);
+		return SljitFlushDirectJoinOutputAggregate(runtime, ops, direct_aggregate);
 	}
 
 	void Charge(idx_t rows) {
@@ -218,7 +209,7 @@ struct SljitProjectedGroupedAggregateSink {
 	SljitDataChunkBatch &projected_batch;
 	const char *append_phase;
 	const char *boundary_phase;
-	optional_ptr<SljitDirectJoinOutputAggregatePolicy> direct_aggregate;
+	optional_ptr<SljitDirectJoinOutputAggregateStrategy> direct_aggregate;
 	bool record_sink_result;
 	optional_ptr<SljitBoundGroupedPrimitiveAggregateUpdate> bound_grouped_update;
 };

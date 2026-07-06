@@ -42,7 +42,6 @@ struct SljitPostJoinProjectionAggregateRuntimeState {
 		    make_uniq<SljitDirectJoinOutputAggregateStrategy>(primitive.aggregate_idx);
 		SljitAttachDirectJoinOutputAggregateSourceStats(*direct_join_output_aggregate_strategy, source_distinct_counts,
 		                                                source_min_values, source_max_values);
-		direct_join_output_aggregate = SljitDirectJoinOutputAggregatePolicy(*direct_join_output_aggregate_strategy);
 		prepared = true;
 		return true;
 	}
@@ -78,11 +77,12 @@ struct SljitPostJoinProjectionAggregateRuntimeState {
 		auto hash_join_idx = post_join_projection.hash_join_idx;
 		auto &hash_join_op = ops[hash_join_idx];
 		const bool source_key0_int64_to_int32_safe_for_output = source_key0_int64_to_int32_matches_are_proven;
+		auto direct_strategy = DirectAggregateStrategyPtr();
 		if (!post_join_projection.HasProjectionChain()) {
 			if (SljitTryExecuteDirectJoinOutputAggregate(
-			        runtime, ops, scratch, direct_join_output_aggregate, post_join_projection, join_input,
-			        match_selection, build_selection, row_pointers, join_output, nullptr,
-			        source_key0_int64_to_int32_safe_for_output, output_column_map, output_projection_idx)) {
+			        runtime, ops, scratch, direct_strategy, post_join_projection, join_input, match_selection,
+			        build_selection, row_pointers, join_output, nullptr, source_key0_int64_to_int32_safe_for_output,
+			        output_column_map, output_projection_idx)) {
 				processed_output_rows += join_output.size();
 				return false;
 			}
@@ -104,7 +104,7 @@ struct SljitPostJoinProjectionAggregateRuntimeState {
 		auto &projected = scratch.TemporaryChunk(post_join_projection.final_projection_idx);
 		bool direct_projected = false;
 		if (SljitTryExecuteDirectJoinOutputAggregate(
-		        runtime, ops, scratch, direct_join_output_aggregate, post_join_projection, join_input, match_selection,
+		        runtime, ops, scratch, direct_strategy, post_join_projection, join_input, match_selection,
 		        build_selection, row_pointers, join_output, aggregate_sink.DeferredGroupedFinishPtr(),
 		        source_key0_int64_to_int32_safe_for_output, output_column_map, output_projection_idx)) {
 			aggregate_sink.Charge(join_output.size());
@@ -171,6 +171,10 @@ private:
 		return direct_join_output_aggregate_strategy->aggregate_idx;
 	}
 
+	optional_ptr<SljitDirectJoinOutputAggregateStrategy> DirectAggregateStrategyPtr() {
+		return optional_ptr<SljitDirectJoinOutputAggregateStrategy>(direct_join_output_aggregate_strategy.get());
+	}
+
 	SljitProjectedGroupedAggregateSink MakeAggregateSink(ExecutionRegionRuntime &runtime, ExecutionRegionResult &result,
 	                                                     vector<SljitExecutableRegionOp> &ops,
 	                                                     SljitRegionExecutionScratch &scratch) {
@@ -182,12 +186,11 @@ private:
 		    aggregate_op.aggregate_update.plan.use_primitive_payloads) {
 			bound_grouped_update = &bound_projected_grouped_update;
 		}
-		return SljitProjectedGroupedAggregateSink(
-		    ops, runtime, runtime.ExecutionOperators(), scratch, result, final_projection_idx,
-		    ops[final_projection_idx], aggregate_idx, aggregate_op, deferred_grouped_finish, processed_output_rows,
-		    projected_batch, "post_join_batch_append", "copied_post_join_batch",
-		    optional_ptr<SljitDirectJoinOutputAggregatePolicy>(&direct_join_output_aggregate), false,
-		    bound_grouped_update);
+		return SljitProjectedGroupedAggregateSink(ops, runtime, runtime.ExecutionOperators(), scratch, result,
+		                                          final_projection_idx, ops[final_projection_idx], aggregate_idx,
+		                                          aggregate_op, deferred_grouped_finish, processed_output_rows,
+		                                          projected_batch, "post_join_batch_append", "copied_post_join_batch",
+		                                          DirectAggregateStrategyPtr(), false, bound_grouped_update);
 	}
 
 private:
@@ -197,7 +200,6 @@ private:
 	SljitDataChunkBatch projected_batch;
 	SljitPostJoinProjectionStrategy post_join_projection;
 	unique_ptr<SljitDirectJoinOutputAggregateStrategy> direct_join_output_aggregate_strategy;
-	SljitDirectJoinOutputAggregatePolicy direct_join_output_aggregate;
 	SljitBoundGroupedPrimitiveAggregateUpdate bound_projected_grouped_update;
 };
 

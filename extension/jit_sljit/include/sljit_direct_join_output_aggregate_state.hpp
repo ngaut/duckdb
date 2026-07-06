@@ -140,27 +140,4 @@ static bool SljitAggregateUpdateHasDedicatedCompiledBackend(const SljitExecutabl
 	return op.aggregate_update.plan.use_primitive_payloads;
 }
 
-struct SljitDirectJoinOutputAggregatePolicy {
-	SljitDirectJoinOutputAggregatePolicy() {
-	}
-
-	explicit SljitDirectJoinOutputAggregatePolicy(SljitDirectJoinOutputAggregateStrategy &strategy_p)
-	    : strategy(&strategy_p) {
-	}
-
-	bool Enabled() const {
-		return strategy != nullptr && !strategy->disabled;
-	}
-
-	bool HasStrategy() const {
-		return strategy != nullptr;
-	}
-
-	SljitDirectJoinOutputAggregateStrategy &Strategy() {
-		return *strategy;
-	}
-
-	optional_ptr<SljitDirectJoinOutputAggregateStrategy> strategy;
-};
-
 } // namespace duckdb
