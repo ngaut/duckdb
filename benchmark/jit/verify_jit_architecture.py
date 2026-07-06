@@ -2253,17 +2253,9 @@ def verify_recipe_builder() -> None:
         "MakeGeneratedFilterProjectionNativeTailRecipe",
         (
             "auto sequence = MakeSourceSequence();",
+            "AddSourceBatchBoundaryIfUseful(sequence, facts.aggregate_idx);",
             "SljitBindUngroupedAggregateUpdatePrimitive(ops, facts.aggregate_idx)",
             "sequence.Add(SljitFullPipelinePrimitiveStep::UngroupedAggregateUpdate(aggregate_update));",
-        ),
-    )
-    reject_scoped_text(
-        "extension/jit_sljit/include/sljit_full_pipeline_recipe_binding.hpp",
-        "MakeSourceUngroupedAggregateRecipe",
-        "MakeGeneratedFilterProjectionNativeTailRecipe",
-        (
-            "AddSourceBatchBoundaryIfUseful",
-            "SljitFullPipelinePrimitiveStep::SourceBatchBoundary",
         ),
     )
     reject_text(

@@ -91,6 +91,33 @@ public:
 	optional_ptr<bool> deferred_grouped_finish;
 };
 
+struct SljitPendingInputVectorAggregateBatch {
+	idx_t Count() const {
+		return initialized ? input.size() : 0;
+	}
+
+	void Ensure(Allocator &allocator, const vector<LogicalType> &input_types) {
+		if (!initialized) {
+			input.Initialize(allocator, input_types);
+			initialized = true;
+		}
+	}
+
+	void Reset() {
+		if (!initialized) {
+			return;
+		}
+		input.Reset();
+		source_key0_int64_to_int32_unchecked = false;
+	}
+
+	DataChunk input;
+	bool initialized = false;
+	bool source_key0_int64_to_int32_unchecked = false;
+	optional_ptr<SljitRegionExecutionScratch> scratch;
+	optional_ptr<bool> deferred_grouped_finish;
+};
+
 struct SljitDirectJoinOutputAggregateStrategy;
 
 struct SljitDirectJoinOutputAggregatePrimitive {
@@ -110,6 +137,7 @@ struct SljitDirectJoinOutputAggregateStrategy {
 	optional_ptr<const vector<Value>> source_max_values;
 	string last_failure;
 	SljitJoinProjectionAggregateDescriptor descriptor;
+	SljitPendingInputVectorAggregateBatch pending_input_vector_batch;
 	SljitPendingRowPointerAggregateBatch pending_batch;
 };
 

@@ -80,6 +80,7 @@ public:
 
 	SljitFullPipelineRecipe MakeSourceUngroupedAggregateRecipe(const SljitSourceUngroupedAggregateFacts &facts) const {
 		auto sequence = MakeSourceSequence();
+		AddSourceBatchBoundaryIfUseful(sequence, facts.aggregate_idx);
 		auto aggregate_update = SljitBindUngroupedAggregateUpdatePrimitive(ops, facts.aggregate_idx);
 		sequence.Add(SljitFullPipelinePrimitiveStep::UngroupedAggregateUpdate(aggregate_update));
 		return MakePrimitiveSequence(std::move(sequence));
