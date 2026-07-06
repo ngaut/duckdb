@@ -61,6 +61,7 @@ static string EventJitMaterializationBoundaryCounts(const ExecutionRegionEvent &
 static bool HasDirectGroupedPrimitiveAggregateUpdateStage(const string &stage_counts) {
 	return StringUtil::Contains(stage_counts, "aggregate_update.direct_append_new_grouped_primitive_update=") ||
 	       StringUtil::Contains(stage_counts, "aggregate_update.direct_new_grouped_primitive_payload_update=") ||
+	       StringUtil::Contains(stage_counts, "aggregate_update.direct_input_vector_group_payload_update=") ||
 	       StringUtil::Contains(stage_counts, "aggregate_update.direct_projected_group_payload_update=");
 }
 
@@ -73,6 +74,7 @@ static bool HasDirectGroupedPrimitiveAggregateUpdatePath(const string &runtime_p
 
 static bool HasDirectGroupedPrimitiveAggregateUpdateBoundary(const string &boundary_counts) {
 	return StringUtil::Contains(boundary_counts, "aggregate_update.direct_state_update=") ||
+	       StringUtil::Contains(boundary_counts, "aggregate_update.input_vector_group_payload_update=") ||
 	       StringUtil::Contains(boundary_counts, "aggregate_update.projected_group_payload_update=");
 }
 

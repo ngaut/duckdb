@@ -847,14 +847,18 @@ TEST_CASE("JIT projected grouped primitive updates existing groups directly", "[
 	    manager,
 	    [](const ExecutionRegionEvent &event) {
 		    return IsDirectGroupedPrimitiveAggregateUpdateRuntime(event) &&
-		           StringUtil::Contains(EventGeneratedStageCountBreakdown(event), ".selected_existing_update=");
+		           (StringUtil::Contains(EventGeneratedStageCountBreakdown(event),
+		                                 "aggregate_update.direct_input_vector_group_payload_update=") ||
+		            StringUtil::Contains(EventGeneratedStageCountBreakdown(event),
+		                                 "aggregate_update.direct_projected_group_payload_update="));
 	    },
 	    [](const ExecutionRegionEvent &event) {
 		    RequireDirectGroupedPrimitiveAggregateUpdateRuntime(event);
 		    REQUIRE(StringUtil::Contains(EventJitRuntimePathCounts(event),
 		                                 "aggregate_update.direct_projected_source_input_grouped_update="));
-		    REQUIRE(StringUtil::Contains(EventJitMaterializationBoundaryCounts(event),
-		                                 "aggregate_update.projected_group_payload_update="));
+		    auto boundaries = EventJitMaterializationBoundaryCounts(event);
+		    REQUIRE((StringUtil::Contains(boundaries, "aggregate_update.input_vector_group_payload_update=") ||
+		             StringUtil::Contains(boundaries, "aggregate_update.projected_group_payload_update=")));
 	    });
 }
 
@@ -1177,7 +1181,8 @@ TEST_CASE("JIT regular hash aggregate fuses typed expression payloads with nativ
 		    auto stage_counts = EventGeneratedStageCountBreakdown(event);
 		    REQUIRE((StringUtil::Contains(runtime_paths, "aggregate_update.direct_grouped_dense_group_domain=") ||
 		             StringUtil::Contains(runtime_paths, "aggregate_update.direct_projected_dense_group_domain=")));
-		    REQUIRE(StringUtil::Contains(stage_counts, ".find_or_create_dense.probe="));
+		    REQUIRE((StringUtil::Contains(stage_counts, ".find_or_create_dense.probe=") ||
+		             StringUtil::Contains(stage_counts, ".find_or_create_input_vector_dense.probe=")));
 		    REQUIRE_FALSE(StringUtil::Contains(stage_counts, "aggregate_update.primitive_payload_update_fused="));
 		    REQUIRE_FALSE(StringUtil::Contains(stage_counts, ".find_or_create_fast.probe="));
 		    REQUIRE_FALSE(StringUtil::Contains(EventJitMaterializationBoundaryCounts(event),

@@ -110,6 +110,7 @@ void EmitSljitGroupedAggregateAccumulateDouble(struct sljit_compiler *compiler, 
                                                sljit_s32 value_freg);
 void EmitLoadGroupedAggregateStateAddress(struct sljit_compiler *compiler, sljit_s32 target_reg,
                                           sljit_s32 logical_index_reg);
+void EmitLoadGroupedAggregateStateAddressByLoopIndex(struct sljit_compiler *compiler, sljit_s32 target_reg);
 void EmitSljitGroupedAggregateValuePointerImmediate(struct sljit_compiler *compiler, sljit_s32 base_reg,
                                                     idx_t state_offset, idx_t value_offset);
 void EmitSljitGroupedAggregateSetStateIsSetImmediate(struct sljit_compiler *compiler, sljit_s32 base_reg,

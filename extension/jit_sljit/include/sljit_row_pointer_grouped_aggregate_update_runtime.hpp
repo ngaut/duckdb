@@ -27,6 +27,47 @@ SljitCanAttemptRowPointerCountOneTargetLookup(const vector<ExecutionRowPointerGr
 	return ExecutionRowPointerGroupKeySourcesAreRowPointerFields(group_sources);
 }
 
+static bool TryExecuteDirectInputVectorGroupedTargetPayloadUpdate(
+    ExecutionRegionRuntime &runtime, SljitRegionExecutionScratch &scratch, idx_t op_idx, SljitExecutableRegionOp &op,
+    DataChunk &payload_input, const vector<ExecutionRowPointerGroupKeySource> &group_sources,
+    const vector<idx_t> &payload_source_indices,
+    const vector<const ExecutionPrimitiveAggregateUpdateLane *> &payload_lanes,
+    ExecutionGroupedAggregateStateAddressBinding &grouped_state, SljitAggregatePayloadAdapterScratch &payload_scratch,
+    bool finish, optional_ptr<const ExecutionDenseGroupDomain> dense_domain = nullptr) {
+	SljitTryReserveGroupedAggregateGroups(runtime, op_idx, op, grouped_state);
+
+	auto lookup_start = SljitRegionStageStart(runtime);
+	const char *lookup_stage_name = "direct_input_vector_group_payload_update";
+	const char *lookup_miss_stage_name = "direct_input_vector_group_payload_update_miss";
+	ExecutionGroupedAggregateStateTargetBatch targets;
+	auto updated = ExecuteSljitRegionRecordedOperation(
+	    runtime, op_idx, op.kind, lookup_stage_name, lookup_start,
+	    [&](optional_ptr<ExecutionOperatorStageRecorder> recorder) {
+		    return grouped_state.state->TryFindOrCreateInputVectorGroupStateTargets(
+		        payload_input, payload_input.size(), group_sources, op.aggregate_update.plan.sink_info, targets,
+		        recorder, dense_domain);
+	    });
+	scratch.RecordDirectNewAggregateUpdateResult(op_idx, updated);
+	if (!updated) {
+		RecordSljitRegionStageRuntimePath(runtime, op_idx, op.kind, lookup_miss_stage_name, lookup_start);
+		return false;
+	}
+	RecordSljitRegionStageRuntime(runtime, op_idx, op.kind, lookup_stage_name, lookup_start);
+
+	auto update_start = SljitRegionStageStart(runtime);
+	auto update_state = SljitBuildGroupedStateAddressUpdateState(
+	    op, payload_input, payload_lanes, payload_scratch, optional_ptr<const vector<idx_t>>(&payload_source_indices));
+	SljitExecuteGroupedStateTargetBatch(targets, update_state);
+	RecordSljitRegionStageRuntime(runtime, op_idx, op.kind, "direct_input_vector_group_payload_target_update",
+	                              update_start);
+	if (finish) {
+		FinishGroupedAggregateStateUpdates(runtime, op_idx, grouped_state, "finish_grouped_state_updates");
+	}
+	RecordSljitRegionMaterializationBoundary(runtime, op.kind, "input_vector_group_payload_update",
+	                                         payload_input.size());
+	return true;
+}
+
 static bool SljitTryExecuteInputVectorGroupedAggregateUpdate(
     ExecutionRegionRuntime &runtime, SljitRegionExecutionScratch &scratch, idx_t op_idx, SljitExecutableRegionOp &op,
     DataChunk &payload_input, const vector<ExecutionRowPointerGroupKeySource> &group_sources,
@@ -97,6 +138,23 @@ static bool SljitTryExecuteInputVectorGroupedAggregateUpdate(
 		return false;
 	}
 
+	if (op.aggregate_update.fused_payload_update_function) {
+		if (!SljitCanExecuteDirectGroupedStateAddressPayloadUpdate(scratch, op_idx, op, payload_input, payload_lanes,
+		                                                           nullptr, payload_input.size())) {
+			record_unsupported("state_address_payload_shape");
+		} else {
+			updated = TryExecuteDirectInputVectorGroupedTargetPayloadUpdate(
+			    runtime, scratch, op_idx, op, payload_input, group_sources, payload_source_indices, payload_lanes,
+			    grouped_state, payload_scratch, finish, dense_domain);
+			if (updated) {
+				return true;
+			}
+			if (failure_reason) {
+				*failure_reason = "state_address_target_payload_update";
+			}
+		}
+	}
+
 	DataChunk *groups = nullptr;
 	if (!SljitTryBuildInputVectorGroups(runtime, payload_scratch, payload_input, group_sources, groups,
 	                                    source_key0_int64_to_int32_unchecked)) {
@@ -106,23 +164,6 @@ static bool SljitTryExecuteInputVectorGroupedAggregateUpdate(
 	if (!groups || groups->size() != payload_input.size()) {
 		record_unsupported("groups");
 		return false;
-	}
-
-	if (op.aggregate_update.fused_payload_update_function) {
-		if (!SljitCanExecuteDirectGroupedStateAddressPayloadUpdate(scratch, op_idx, op, payload_input, payload_lanes,
-		                                                           nullptr, payload_input.size())) {
-			record_unsupported("state_address_payload_shape");
-		} else {
-			updated = TryExecuteDirectProjectedGroupedStateAddressPayloadUpdate(
-			    runtime, scratch, op_idx, op, *groups, payload_input, payload_source_indices, payload_lanes,
-			    grouped_state, payload_scratch, finish, nullptr, dense_domain);
-			if (updated) {
-				return true;
-			}
-			if (failure_reason) {
-				*failure_reason = "state_address_payload_update";
-			}
-		}
 	}
 
 	auto stage_start = SljitRegionStageStart(runtime);

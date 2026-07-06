@@ -94,6 +94,12 @@ void EmitLoadGroupedAggregateStateAddress(struct sljit_compiler *compiler, sljit
 	sljit_emit_op1(compiler, SLJIT_MOV_P, target_reg, 0, SLJIT_MEM2(SLJIT_R0, SLJIT_R1), 3);
 }
 
+void EmitLoadGroupedAggregateStateAddressByLoopIndex(struct sljit_compiler *compiler, sljit_s32 target_reg) {
+	sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_R0, 0, SLJIT_MEM1(SLJIT_S0),
+	               offsetof(SljitNativeVectorInput, aggregate_state_addresses));
+	sljit_emit_op1(compiler, SLJIT_MOV_P, target_reg, 0, SLJIT_MEM2(SLJIT_R0, SLJIT_S1), 3);
+}
+
 void EmitSljitGroupedAggregateValuePointerImmediate(struct sljit_compiler *compiler, sljit_s32 base_reg,
                                                     idx_t state_offset, idx_t value_offset) {
 	sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_R0, 0, base_reg, 0);
