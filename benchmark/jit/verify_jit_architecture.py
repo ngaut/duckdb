@@ -121,6 +121,7 @@ def verify_required_design_files() -> None:
         "extension/jit_sljit/include/sljit_source_batch_boundary_runtime.hpp",
         "extension/jit_sljit/include/sljit_aggregate_payload_source_indices.hpp",
         "extension/jit_sljit/include/sljit_grouped_aggregate_update_primitive.hpp",
+        "extension/jit_sljit/include/sljit_grouped_direct_aggregate_update_runtime_state.hpp",
         "extension/jit_sljit/include/sljit_grouped_aggregate_update_runtime_state.hpp",
         "extension/jit_sljit/include/sljit_projected_input_grouped_aggregate_descriptor.hpp",
         "extension/jit_sljit/include/sljit_ungrouped_aggregate_update_primitive.hpp",
@@ -562,11 +563,25 @@ def verify_runtime_batch_view() -> None:
         "extension/jit_sljit/include/sljit_grouped_aggregate_update_runtime_state.hpp",
         (
             "SljitGroupedAggregateUpdateRuntimeState",
+            "SljitGroupedDirectPrimitivePayloadUpdateRuntimeState direct_payload_update",
+            "direct_payload_update.Prepare",
+            "direct_payload_update.Execute",
+            "direct_payload_update.Flush",
+            "ExecuteCountStarPreaggregation",
+        ),
+    )
+    require_text(
+        "extension/jit_sljit/include/sljit_grouped_direct_aggregate_update_runtime_state.hpp",
+        (
+            "class SljitGroupedDirectPrimitivePayloadUpdateRuntimeState",
+            "ExecuteDirectPrimitivePayloadUpdate",
+            "ExecuteFilteredPrimitivePayloadUpdate",
+            "ExecuteProjectedDirectPrimitivePayloadUpdate",
             "SljitBindGroupedPrimitiveAggregateUpdate",
             "SljitExecuteBoundGroupedPrimitiveAggregateUpdate",
             "SljitBoundGroupedPrimitiveAggregateUpdate bound_direct_update",
             "SljitBoundGroupedPrimitiveAggregateUpdate bound_projected_direct_update",
-            "ExecuteCountStarPreaggregation",
+            "projected_direct_update = primitive.projected_direct_update",
         ),
     )
     reject_regex(
@@ -2796,7 +2811,7 @@ def verify_native_tail_and_deferred_finish() -> None:
         ),
     )
     require_text(
-        "extension/jit_sljit/include/sljit_grouped_aggregate_update_runtime_state.hpp",
+        "extension/jit_sljit/include/sljit_grouped_direct_aggregate_update_runtime_state.hpp",
         (
             "SljitBindRuntimeBatchInput(input, \"SLJIT grouped aggregate direct update\")",
             "input.selection, input.count, true",
@@ -2920,17 +2935,42 @@ def verify_distinct_aggregate_backend() -> None:
         "extension/jit_sljit/include/sljit_grouped_aggregate_update_runtime_state.hpp",
         (
             "SljitGroupedAggregateUpdateRuntimeState",
-            "SljitBindGroupedPrimitiveAggregateUpdate",
-            "SljitExecuteBoundGroupedPrimitiveAggregateUpdate",
-            "SljitBoundGroupedPrimitiveAggregateUpdate bound_direct_update",
-            "SljitBoundGroupedPrimitiveAggregateUpdate bound_projected_direct_update",
-            "ExecuteFilteredPrimitivePayloadUpdate",
-            "SLJIT filtered grouped aggregate update",
-            "SljitSelectFilter",
+            "SljitGroupedDirectPrimitivePayloadUpdateRuntimeState direct_payload_update",
+            "direct_payload_update.Prepare",
+            "direct_payload_update.Execute",
+            "direct_payload_update.Flush",
             "ExecuteCountStarPreaggregation",
             "primitive_grouped_count_star_row_update",
-            "projected_direct_update = primitive.projected_direct_update",
             "projected_count_star_group_projection = primitive.projected_count_star_group_projection",
+        ),
+    )
+    reject_text(
+        "extension/jit_sljit/include/sljit_grouped_aggregate_update_runtime_state.hpp",
+        (
+            "ExecuteDirectPrimitivePayloadUpdate",
+            "ExecuteFilteredPrimitivePayloadUpdate",
+            "ExecuteProjectedDirectPrimitivePayloadUpdate",
+            "bound_direct_update",
+            "bound_projected_direct_update",
+            "projected_direct_update = primitive.projected_direct_update",
+            "SLJIT filtered grouped aggregate update",
+            "direct_projected_source_input_grouped_update",
+            "projected_compact_aggregate_input",
+        ),
+    )
+    require_text(
+        "extension/jit_sljit/include/sljit_grouped_direct_aggregate_update_runtime_state.hpp",
+        (
+            "class SljitGroupedDirectPrimitivePayloadUpdateRuntimeState",
+            "ExecuteDirectPrimitivePayloadUpdate",
+            "ExecuteFilteredPrimitivePayloadUpdate",
+            "ExecuteProjectedDirectPrimitivePayloadUpdate",
+            "SljitBoundGroupedPrimitiveAggregateUpdate bound_direct_update",
+            "SljitBoundGroupedPrimitiveAggregateUpdate bound_projected_direct_update",
+            "projected_direct_update = primitive.projected_direct_update",
+            "SLJIT filtered grouped aggregate update",
+            "direct_projected_source_input_grouped_update",
+            "projected_compact_aggregate_input",
         ),
     )
     reject_scoped_text(
