@@ -983,6 +983,7 @@ def verify_projection_aggregate_descriptor_boundary() -> None:
     require_text(
         "extension/jit_sljit/include/sljit_projection_aggregate_descriptor.hpp",
         (
+            'sljit_post_join_projection_strategy.hpp',
             "SljitTryBuildPostJoinProjectionAggregateDescriptor",
             "SljitTryBuildPostJoinSemanticProjection",
             "SljitTryBuildUnmappedPostJoinProjectionAggregateDescriptor",
@@ -994,6 +995,7 @@ def verify_projection_aggregate_descriptor_boundary() -> None:
             "sljit_direct_join_output_aggregate_state.hpp",
             "SljitDirectJoinOutputAggregateStrategy",
             "SljitDirectJoinOutputAggregateMode",
+            "sljit_post_join_projection_runtime.hpp",
             "SljitTryBuildJoinProjectionAggregateDescriptorForDirectOutput",
             "SljitTryBuildPreparedProjectionAggregateDescriptor(",
             "SljitTryBuildProjectionChainAggregateDescriptor",
