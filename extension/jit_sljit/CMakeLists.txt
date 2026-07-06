@@ -52,6 +52,7 @@ set(JIT_SLJIT_EXTENSION_FILES
     sljit_expression_tree_source_codegen.cpp
     sljit_expression_tree_value_codegen.cpp
     sljit_hash_join_runtime.cpp
+    sljit_hash_join_all_valid_probe_fast_path_runtime.cpp
     sljit_hash_join_probe_codegen_validation.cpp
     sljit_hash_join_probe_perfect_codegen.cpp
     sljit_hash_join_probe_regular_codegen.cpp

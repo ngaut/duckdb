@@ -111,6 +111,8 @@ def verify_required_design_files() -> None:
         "extension/jit_sljit/include/sljit_post_join_projection_aggregate_runtime.hpp",
         "extension/jit_sljit/include/sljit_mark_probe_filter_boundary.hpp",
         "extension/jit_sljit/include/sljit_mark_probe_filter_boundary_runtime.hpp",
+        "extension/jit_sljit/include/sljit_hash_join_all_valid_probe_facts.hpp",
+        "extension/jit_sljit/include/sljit_hash_join_all_valid_probe_fast_path_runtime.hpp",
         "extension/jit_sljit/include/sljit_hash_join_all_valid_mark_selection_probe_executor_runtime.hpp",
         "extension/jit_sljit/include/sljit_hash_join_all_valid_mark_selection_probe_dispatch_runtime.hpp",
         "extension/jit_sljit/include/sljit_hash_join_probe_execution_contract.hpp",
@@ -887,8 +889,63 @@ def verify_runtime_batch_view() -> None:
         ("TryExecuteAllValidSingleKeyProbeForKind",),
     )
     require_text(
+        "extension/jit_sljit/include/sljit_hash_join_all_valid_probe_facts.hpp",
+        (
+            "struct SljitAllValidHashJoinProbeFacts",
+            "bool can_use_chain_input",
+            "bool can_use_equality_chain_input",
+        ),
+    )
+    require_text(
+        "extension/jit_sljit/include/sljit_hash_join_all_valid_probe_fast_path_runtime.hpp",
+        (
+            "sljit_hash_join_all_valid_probe_facts.hpp",
+            "struct SljitAllValidHashJoinProbeFastPath",
+            "struct SljitAllValidHashJoinMarkSelectionProbeFastPath",
+            "SljitGeneratedAllValidRegularHashJoinProbeStage",
+            "SljitAllValidHashJoinProbeFastPaths",
+            "SljitAllValidHashJoinMarkSelectionProbeFastPaths",
+        ),
+    )
+    require_text(
+        "extension/jit_sljit/include/sljit_hash_join_all_valid_mark_selection_probe_dispatch_runtime.hpp",
+        ("sljit_hash_join_all_valid_probe_facts.hpp",),
+    )
+    require_text(
+        "extension/jit_sljit/sljit_hash_join_all_valid_probe_fast_path_runtime.cpp",
+        (
+            "sljit_hash_join_all_valid_probe_dispatch_runtime.hpp",
+            "ExecuteAllValidUint64PairProbeFastPath",
+            "ExecuteAllValidSingleKeyProbeFastPath",
+            "ExecuteAllValidSingleKeyMarkSelectionProbeFastPath",
+            "SljitAllValidHashJoinProbeFastPaths",
+            "SljitAllValidHashJoinMarkSelectionProbeFastPaths",
+            "SljitGeneratedAllValidRegularHashJoinProbeStage",
+        ),
+    )
+    reject_text(
+        "extension/jit_sljit/sljit_hash_join_runtime.cpp",
+        (
+            "sljit_hash_join_all_valid_probe_dispatch_runtime.hpp",
+            "SljitAllValidHashJoinProbeFastPaths",
+            "SljitGeneratedAllValidRegularHashJoinProbeStage",
+            "SLJIT_FAST_FLAT_ALL_VALID",
+            "SLJIT_GENERATED_FLAT_ALL_VALID",
+        ),
+    )
+    reject_text(
+        "extension/jit_sljit/include/sljit_hash_join_runtime.hpp",
+        (
+            "struct SljitAllValidHashJoinProbeFacts",
+            "struct SljitAllValidHashJoinProbeFastPath",
+            "SljitAllValidHashJoinProbeFastPaths",
+            "SljitGeneratedAllValidRegularHashJoinProbeStage",
+        ),
+    )
+    require_text(
         "extension/jit_sljit/include/sljit_hash_join_probe_path_runtime.hpp",
         (
+            "sljit_hash_join_all_valid_probe_fast_path_runtime.hpp",
             "uses_bloom_filter",
             "regular.bloom_function",
             "mark_selection_mode",

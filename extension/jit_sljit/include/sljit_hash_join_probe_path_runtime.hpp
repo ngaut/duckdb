@@ -9,6 +9,7 @@
 #pragma once
 
 #include "sljit_filter_runtime.hpp"
+#include "sljit_hash_join_all_valid_probe_fast_path_runtime.hpp"
 #include "sljit_hash_join_probe_runtime.hpp"
 #include "sljit_hash_join_probe_specialization.hpp"
 #include "sljit_hash_join_runtime.hpp"
