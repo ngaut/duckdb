@@ -222,6 +222,28 @@ static bool SljitInputVectorGroupSourceUsesProjection(const ExecutionRowPointerG
 	}
 }
 
+static bool SljitInputVectorGroupKeySourceSupportsMaterialization(
+    const ExecutionRowPointerGroupKeySource &source) {
+	if (!source.ready || source.source_kind != ExecutionRowPointerGroupKeySourceKind::INPUT_VECTOR) {
+		return false;
+	}
+	switch (source.cast_kind) {
+	case ExecutionRowPointerGroupKeyCastKind::NONE:
+		return source.source_physical_type == source.target_physical_type;
+	case ExecutionRowPointerGroupKeyCastKind::INT64_TO_INT32:
+		return source.source_physical_type == PhysicalType::INT64 && source.target_physical_type == PhysicalType::INT32;
+	case ExecutionRowPointerGroupKeyCastKind::INT64_TO_INT16:
+		return source.source_physical_type == PhysicalType::INT64 && source.target_physical_type == PhysicalType::INT16;
+	case ExecutionRowPointerGroupKeyCastKind::INT32_TO_INT8:
+		return source.source_physical_type == PhysicalType::INT32 && source.target_physical_type == PhysicalType::INT8;
+	case ExecutionRowPointerGroupKeyCastKind::DATE_YEAR_COMPRESS:
+		return source.source_physical_type == PhysicalType::INT32 && source.source_type.id() == LogicalTypeId::DATE &&
+		       source.target_physical_type == PhysicalType::UINT8;
+	default:
+		return false;
+	}
+}
+
 static bool SljitTryGetHashJoinLHSInputConditionIndex(const ExecutionHashJoinProbeBinding &binding,
                                                       idx_t input_vector_index, const LogicalType &source_type,
                                                       idx_t &condition_idx) {

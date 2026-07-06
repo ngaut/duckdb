@@ -28,19 +28,7 @@ struct SljitProjectedInputGroupedAggregateDescriptor {
 };
 
 static bool SljitProjectedInputGroupSourceCanUseCompactInput(const ExecutionRowPointerGroupKeySource &group_source) {
-	if (!group_source.ready || group_source.source_kind != ExecutionRowPointerGroupKeySourceKind::INPUT_VECTOR) {
-		return false;
-	}
-	switch (group_source.cast_kind) {
-	case ExecutionRowPointerGroupKeyCastKind::NONE:
-	case ExecutionRowPointerGroupKeyCastKind::INT64_TO_INT32:
-	case ExecutionRowPointerGroupKeyCastKind::INT64_TO_INT16:
-	case ExecutionRowPointerGroupKeyCastKind::INT32_TO_INT8:
-	case ExecutionRowPointerGroupKeyCastKind::DATE_YEAR_COMPRESS:
-		return true;
-	default:
-		return false;
-	}
+	return SljitInputVectorGroupKeySourceSupportsMaterialization(group_source);
 }
 
 static bool
