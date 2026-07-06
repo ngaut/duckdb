@@ -76,13 +76,14 @@ private:
 	                                            SljitRegionExecutionScratch &scratch,
 	                                            const SljitDelimJoinSinkPrimitive &primitive,
 	                                            const SljitRuntimeBatchView &input) {
-		if (!input.HasHashJoinSelection() || input.hash_join_idx != primitive.selected_hash_join_idx) {
+		auto selected = input.BindHashJoinSelection("SLJIT delimiter join sink");
+		if (selected.hash_join_idx != primitive.selected_hash_join_idx) {
 			throw InternalException("SLJIT delimiter join sink expected selected hash-join input");
 		}
-		if (!scratch.HasOperatorBinding(input.hash_join_idx)) {
+		if (!scratch.HasOperatorBinding(selected.hash_join_idx)) {
 			throw InternalException("SLJIT delimiter join sink selected input has no hash-join binding");
 		}
-		auto &binding = scratch.OperatorBinding(input.hash_join_idx).hash_join_probe;
+		auto &binding = scratch.OperatorBinding(selected.hash_join_idx).hash_join_probe;
 		auto &output = projected_input.chunk;
 		if (!binding.ready || binding.output_types != ops[primitive.sink_idx].delim_join_sink.plan.input_types ||
 		    output.ColumnCount() != binding.output_types.size() ||
@@ -95,7 +96,7 @@ private:
 		                                                      output)) {
 			throw InternalException("SLJIT delimiter join sink could not materialize selected hash-join input");
 		}
-		RecordSljitRegionStageRuntime(runtime, input.hash_join_idx, SljitNativeRegionOpKind::HASH_JOIN_PROBE,
+		RecordSljitRegionStageRuntime(runtime, selected.hash_join_idx, SljitNativeRegionOpKind::HASH_JOIN_PROBE,
 		                              "materialize_selected_delim_sink_input", materialize_stage_start);
 		RecordSljitRegionMaterializationBoundary(runtime, SljitNativeRegionOpKind::HASH_JOIN_PROBE,
 		                                         "selected_delim_sink_input", output.size());

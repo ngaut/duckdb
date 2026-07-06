@@ -539,6 +539,9 @@ def verify_runtime_batch_view() -> None:
             "const SelectionVector *selection",
             "idx_t count",
             "SljitRuntimeBatchOwnership ownership",
+            "struct SljitRuntimeHashJoinSelection",
+            "TryGetHashJoinSelection",
+            "BindHashJoinSelection",
             "SljitRuntimeBatchViewFromChunk",
             "SljitBindRuntimeBatchInput",
             "SljitBindMaterializedRuntimeBatchInput",
@@ -548,6 +551,8 @@ def verify_runtime_batch_view() -> None:
         "extension/jit_sljit/include/sljit_hash_join_projection_source_runtime.hpp",
         (
             "SljitTryMaterializeSelectedHashJoinOutputColumns",
+            "SljitRuntimeHashJoinSelection selected",
+            "selected_input.TryGetHashJoinSelection(selected)",
             "const vector<uint8_t> &referenced_columns",
             "SljitSelectedHashJoinSelectionIsIdentity",
             "ExecutionHashJoinProbeOutputMode::MATCHED_PROBE_AND_BUILD",
@@ -555,6 +560,32 @@ def verify_runtime_batch_view() -> None:
             "vector<idx_t> full_source_map = source_map",
             "source_binding.output_types.size()",
             "full_source_map.push_back(source_idx)",
+        ),
+    )
+    reject_text(
+        "extension/jit_sljit/include/sljit_hash_join_projection_source_runtime.hpp",
+        (
+            "selected_input.selection",
+            "selected_input.hash_join_build_selection",
+            "selected_input.hash_join_row_pointers",
+            "selected_input.hash_join_output_column_map",
+        ),
+    )
+    require_text(
+        "extension/jit_sljit/include/sljit_delim_join_sink_runtime.hpp",
+        (
+            "input.BindHashJoinSelection",
+            "selected.hash_join_idx",
+            "selected_hash_join_delim_sink",
+        ),
+    )
+    reject_text(
+        "extension/jit_sljit/include/sljit_delim_join_sink_runtime.hpp",
+        (
+            "input.hash_join_idx",
+            "input.hash_join_build_selection",
+            "input.hash_join_row_pointers",
+            "input.hash_join_output_column_map",
         ),
     )
     require_text(
@@ -1985,11 +2016,21 @@ def verify_primitive_sequence() -> None:
         "extension/jit_sljit/include/sljit_selected_hash_join_input_runtime.hpp",
         (
             "SljitTryPrepareSelectedHashJoinProjectionInput",
-            "input.hash_join_output_column_map",
+            "selected_input.TryGetHashJoinSelection(selected)",
+            "selected.output_column_map",
             "SljitTryBuildHashJoinMappedProjection",
             "SljitBuildProjectionSourceColumnSet",
             "SljitTryMaterializeSelectedHashJoinOutputColumns",
             "unique_ptr<SljitExecutableRegionOp> &mapped_projection",
+        ),
+    )
+    reject_text(
+        "extension/jit_sljit/include/sljit_selected_hash_join_input_runtime.hpp",
+        (
+            "input.hash_join_output_column_map",
+            "input.hash_join_idx",
+            "selected_input.hash_join_idx",
+            "selected_input.count",
         ),
     )
     require_text(
@@ -2536,10 +2577,21 @@ def verify_primitive_sequence() -> None:
         (
             "struct SljitPostJoinProjectionAggregateRuntimeState",
             "SljitCanBindPostJoinProjectionAggregatePrimitive(ops, primitive)",
-            "input.hash_join_output_column_map",
-            "input.hash_join_output_projection_idx",
+            "input.BindHashJoinSelection",
+            "selected.OutputColumnMap()",
+            "selected.output_projection_idx",
             "SLJIT mapped selected join-output aggregate descriptor failed",
             "direct_join_output_aggregate_strategy->last_failure",
+        ),
+    )
+    reject_text(
+        "extension/jit_sljit/include/sljit_post_join_projection_aggregate_runtime.hpp",
+        (
+            "input.hash_join_idx",
+            "input.hash_join_build_selection",
+            "input.hash_join_row_pointers",
+            "input.hash_join_output_column_map",
+            "input.hash_join_output_projection_idx",
         ),
     )
     reject_text(

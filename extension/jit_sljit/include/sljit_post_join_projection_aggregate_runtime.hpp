@@ -37,16 +37,16 @@ struct SljitPostJoinProjectionAggregateRuntimeState {
 	bool Execute(ExecutionRegionRuntime &runtime, ExecutionRegionResult &result, vector<SljitExecutableRegionOp> &ops,
 	             SljitRegionExecutionScratch &scratch, const SljitPostJoinProjectionAggregatePrimitive &primitive,
 	             const SljitRuntimeBatchView &input) {
-		if (!input.HasHashJoinSelection() || input.hash_join_idx != primitive.post_join_projection.hash_join_idx) {
+		auto selected = input.BindHashJoinSelection("SLJIT post-join aggregate primitive");
+		if (selected.hash_join_idx != primitive.post_join_projection.hash_join_idx) {
 			throw InternalException("SLJIT post-join aggregate primitive received an invalid hash-join selection view");
 		}
-		auto &join_output = scratch.TemporaryChunk(input.hash_join_idx);
-		join_output.SetChildCardinality(input.count);
-		return ExecuteSelectedJoinOutput(runtime, result, ops, scratch, input.Chunk(), join_output, *input.selection,
-		                                 *input.hash_join_build_selection, *input.hash_join_row_pointers,
-		                                 input.source_key0_int64_to_int32_matches_are_proven,
-		                                 optional_ptr<const vector<idx_t>>(input.hash_join_output_column_map),
-		                                 input.hash_join_output_projection_idx);
+		auto &join_output = scratch.TemporaryChunk(selected.hash_join_idx);
+		join_output.SetChildCardinality(selected.count);
+		return ExecuteSelectedJoinOutput(runtime, result, ops, scratch, selected.Input(), join_output,
+		                                 selected.MatchSelection(), selected.BuildSelection(), selected.RowPointers(),
+		                                 selected.source_key0_int64_to_int32_matches_are_proven,
+		                                 selected.OutputColumnMap(), selected.output_projection_idx);
 	}
 
 	bool ExecuteSelectedJoinOutput(ExecutionRegionRuntime &runtime, ExecutionRegionResult &result,

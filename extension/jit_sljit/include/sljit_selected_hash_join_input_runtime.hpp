@@ -18,10 +18,11 @@ namespace duckdb {
 static ExecutionHashJoinProbeBinding *
 SljitTryGetSelectedHashJoinSourceBinding(const SljitRuntimeBatchView &selected_input, idx_t op_count,
                                          SljitRegionExecutionScratch &scratch, const char *context) {
-	if (!selected_input.HasHashJoinSelection()) {
+	SljitRuntimeHashJoinSelection selected;
+	if (!selected_input.TryGetHashJoinSelection(selected)) {
 		return nullptr;
 	}
-	const auto source_hash_join_idx = selected_input.hash_join_idx;
+	const auto source_hash_join_idx = selected.hash_join_idx;
 	if (source_hash_join_idx >= op_count) {
 		return nullptr;
 	}
@@ -40,10 +41,11 @@ static bool SljitTryPrepareSelectedHashJoinProjectionInput(
     idx_t projection_idx, SljitExecutableRegionOp &semantic_projection, const SljitRuntimeBatchView &input,
     SljitDataChunkBatch &selected_hash_join_input, DataChunk *&input_chunk,
     unique_ptr<SljitExecutableRegionOp> &mapped_projection, optional_ptr<SljitExecutableRegionOp> &projection_op) {
-	if (!input.HasHashJoinSelection()) {
+	SljitRuntimeHashJoinSelection selected;
+	if (!input.TryGetHashJoinSelection(selected)) {
 		return false;
 	}
-	if (input.hash_join_idx >= ops.size() || projection_idx >= ops.size()) {
+	if (selected.hash_join_idx >= ops.size() || projection_idx >= ops.size()) {
 		throw InternalException("SLJIT selected projection input has invalid operator indexes");
 	}
 	auto source_binding =
@@ -53,11 +55,11 @@ static bool SljitTryPrepareSelectedHashJoinProjectionInput(
 	}
 
 	projection_op = &semantic_projection;
-	if (input.hash_join_output_column_map) {
+	if (selected.output_column_map) {
 		string blocker;
 		mapped_projection = make_uniq<SljitExecutableRegionOp>();
-		if (!SljitTryBuildHashJoinMappedProjection(*input.hash_join_output_column_map, *source_binding,
-		                                           semantic_projection, *mapped_projection,
+		if (!SljitTryBuildHashJoinMappedProjection(*selected.output_column_map, *source_binding, semantic_projection,
+		                                           *mapped_projection,
 		                                           optional_ptr<string>(&blocker))) {
 			if (blocker.empty()) {
 				blocker = "mapped_projection";
@@ -197,7 +199,8 @@ private:
 		vector<uint8_t> referenced_columns(source_binding->output_types.size(), 0);
 		MarkTargetProbeInputColumns(*target_binding, referenced_columns, include_lhs_output_columns, context);
 
-		const auto source_hash_join_idx = selected_input.hash_join_idx;
+		auto selected = selected_input.BindHashJoinSelection(context);
+		const auto source_hash_join_idx = selected.hash_join_idx;
 		auto materialize_stage_start = SljitRegionStageStart(runtime);
 		auto materialized = ExecuteSljitRegionRecordedOperation(
 		    runtime, source_hash_join_idx, ops[source_hash_join_idx].kind, materialize_stage, materialize_stage_start,
@@ -214,7 +217,7 @@ private:
 		RecordSljitRegionStageRuntime(runtime, source_hash_join_idx, ops[source_hash_join_idx].kind, materialize_stage,
 		                              materialize_stage_start);
 		RecordSljitRegionMaterializationBoundary(runtime, ops[source_hash_join_idx].kind, boundary_counter,
-		                                         selected_input.count);
+		                                         selected.count);
 		join_input = &compact_input;
 		return true;
 	}

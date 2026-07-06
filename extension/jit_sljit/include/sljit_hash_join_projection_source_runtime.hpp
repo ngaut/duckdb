@@ -316,15 +316,16 @@ static bool SljitTryMaterializeSelectedHashJoinOutputColumns(const ExecutionHash
                                                              const SljitRuntimeBatchView &selected_input,
                                                              const vector<uint8_t> &referenced_columns,
                                                              DataChunk &result) {
-	if (!binding.ready || !selected_input.HasHashJoinSelection() ||
+	SljitRuntimeHashJoinSelection selected;
+	if (!binding.ready || !selected_input.TryGetHashJoinSelection(selected) ||
 	    referenced_columns.size() != binding.output_types.size() ||
 	    result.ColumnCount() != binding.output_types.size()) {
 		return false;
 	}
-	auto &source_chunk = selected_input.Chunk();
-	const auto count = selected_input.count;
+	auto &source_chunk = selected.Input();
+	const auto count = selected.count;
 	const bool all_probe_rows_selected =
-	    count == source_chunk.size() && SljitSelectedHashJoinSelectionIsIdentity(*selected_input.selection, count);
+	    count == source_chunk.size() && SljitSelectedHashJoinSelectionIsIdentity(selected.MatchSelection(), count);
 	const auto lhs_column_count = binding.lhs_output_column_indices.size();
 	for (idx_t lhs_idx = 0; lhs_idx < lhs_column_count; lhs_idx++) {
 		if (!referenced_columns[lhs_idx]) {
@@ -337,7 +338,7 @@ static bool SljitTryMaterializeSelectedHashJoinOutputColumns(const ExecutionHash
 		if (all_probe_rows_selected) {
 			result.data[lhs_idx].Reference(source_chunk.data[input_col]);
 		} else {
-			result.data[lhs_idx].Slice(source_chunk.data[input_col], *selected_input.selection, count);
+			result.data[lhs_idx].Slice(source_chunk.data[input_col], selected.MatchSelection(), count);
 		}
 	}
 	if (binding.output_mode == ExecutionHashJoinProbeOutputMode::MATCHED_PROBE_AND_BUILD) {
@@ -350,8 +351,7 @@ static bool SljitTryMaterializeSelectedHashJoinOutputColumns(const ExecutionHash
 				continue;
 			}
 			if (binding.layout_kind == ExecutionHashJoinProbeLayoutKind::REGULAR_HASH_TABLE) {
-				SljitGatherHashJoinRHSColumn(binding, *selected_input.hash_join_row_pointers, count, rhs_idx,
-				                             result.data[output_col]);
+				SljitGatherHashJoinRHSColumn(binding, selected.RowPointers(), count, rhs_idx, result.data[output_col]);
 				continue;
 			}
 			if (binding.layout_kind != ExecutionHashJoinProbeLayoutKind::PERFECT_HASH_TABLE ||
@@ -359,7 +359,7 @@ static bool SljitTryMaterializeSelectedHashJoinOutputColumns(const ExecutionHash
 				return false;
 			}
 			result.data[output_col].Dictionary(binding.perfect_layout.rhs_dictionary_buffers[rhs_idx],
-			                                   *selected_input.hash_join_build_selection, count);
+			                                   selected.BuildSelection(), count);
 		}
 	} else {
 		for (idx_t output_col = lhs_column_count; output_col < referenced_columns.size(); output_col++) {
