@@ -105,6 +105,25 @@ SljitProjectedInputGroupedAggregateCanUseCompactInput(const SljitProjectedInputG
 	return true;
 }
 
+static bool
+SljitProjectedInputGroupedAggregateCanUseSourceInput(const SljitProjectedInputGroupedAggregateDescriptor &descriptor) {
+	if (!SljitProjectedInputGroupedAggregateCanUseCompactInput(descriptor) ||
+	    descriptor.payload_projection_indices.size() != descriptor.payload_source_indices.size()) {
+		return false;
+	}
+	for (idx_t payload_idx = 0; payload_idx < descriptor.payload_projection_indices.size(); payload_idx++) {
+		const auto projection_idx = descriptor.payload_projection_indices[payload_idx];
+		const auto source_idx = descriptor.payload_source_indices[payload_idx];
+		if (projection_idx == DConstants::INVALID_INDEX) {
+			continue;
+		}
+		if (source_idx == DConstants::INVALID_INDEX || source_idx >= descriptor.input_types.size()) {
+			return false;
+		}
+	}
+	return true;
+}
+
 static bool SljitTryBuildProjectedInputGroupSource(const SljitExecutableRegionOp &projection_op,
                                                    const ExecutionRegionGroupInput &group,
                                                    ExecutionRowPointerGroupKeySource &group_source,

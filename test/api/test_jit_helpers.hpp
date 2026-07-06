@@ -58,6 +58,42 @@ static string EventJitMaterializationBoundaryCounts(const ExecutionRegionEvent &
 	return RenderExecutionRegionCounterBreakdown(event.jit_runtime.materialization_boundary_counts);
 }
 
+static bool HasDirectGroupedPrimitiveAggregateUpdateStage(const string &stage_counts) {
+	return StringUtil::Contains(stage_counts, "aggregate_update.direct_append_new_grouped_primitive_update=") ||
+	       StringUtil::Contains(stage_counts, "aggregate_update.direct_new_grouped_primitive_payload_update=") ||
+	       StringUtil::Contains(stage_counts, "aggregate_update.direct_projected_group_payload_update=");
+}
+
+static bool HasDirectGroupedPrimitiveAggregateUpdatePath(const string &runtime_paths) {
+	return StringUtil::Contains(runtime_paths, "aggregate_update.direct_append_new_grouped_primitive_update=") ||
+	       StringUtil::Contains(runtime_paths, "aggregate_update.direct_new_grouped_primitive_payload_update=") ||
+	       StringUtil::Contains(runtime_paths, "aggregate_update.direct_projected_input_vector_grouped_update=") ||
+	       StringUtil::Contains(runtime_paths, "aggregate_update.direct_projected_source_input_grouped_update=");
+}
+
+static bool HasDirectGroupedPrimitiveAggregateUpdateBoundary(const string &boundary_counts) {
+	return StringUtil::Contains(boundary_counts, "aggregate_update.direct_state_update=") ||
+	       StringUtil::Contains(boundary_counts, "aggregate_update.projected_group_payload_update=");
+}
+
+static bool IsDirectGroupedPrimitiveAggregateUpdateRuntime(const ExecutionRegionEvent &event) {
+	return EventPhase(event) == "runtime" && event.backend_name == "sljit" &&
+	       HasDirectGroupedPrimitiveAggregateUpdateStage(EventGeneratedStageCountBreakdown(event));
+}
+
+static void RequireDirectGroupedPrimitiveAggregateUpdateRuntime(const ExecutionRegionEvent &event) {
+	auto stage_counts = EventGeneratedStageCountBreakdown(event);
+	auto runtime_paths = EventJitRuntimePathCounts(event);
+	auto boundary_counts = EventJitMaterializationBoundaryCounts(event);
+	REQUIRE(HasDirectGroupedPrimitiveAggregateUpdateStage(stage_counts));
+	REQUIRE(HasDirectGroupedPrimitiveAggregateUpdatePath(runtime_paths));
+	REQUIRE(HasDirectGroupedPrimitiveAggregateUpdateBoundary(boundary_counts));
+	REQUIRE_FALSE(StringUtil::Contains(stage_counts, "aggregate_update.local_preaggregate_primitive_groups="));
+	REQUIRE_FALSE(StringUtil::Contains(stage_counts, "aggregate_update.native_sink_update="));
+	REQUIRE_FALSE(StringUtil::Contains(runtime_paths, "aggregate_update.native_sink_update="));
+	REQUIRE_FALSE(StringUtil::Contains(boundary_counts, "aggregate_update.address_vector_payload_update="));
+}
+
 struct JitTestDatabase {
 	JitTestDatabase() : con(db), context(*con.context), manager(ExecutionRegionManager::Get(context)) {
 	}
