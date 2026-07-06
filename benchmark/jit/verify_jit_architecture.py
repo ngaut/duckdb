@@ -117,6 +117,7 @@ def verify_required_design_files() -> None:
         "extension/jit_sljit/include/sljit_hash_join_all_valid_mark_selection_probe_dispatch_runtime.hpp",
         "extension/jit_sljit/include/sljit_hash_join_probe_execution_contract.hpp",
         "extension/jit_sljit/include/sljit_hash_join_probe_executor_runtime.hpp",
+        "extension/jit_sljit/include/sljit_hash_join_probe_output_runtime.hpp",
         "extension/jit_sljit/include/sljit_hash_join_probe_materialize_primitive_runtime.hpp",
         "extension/jit_sljit/include/sljit_hash_join_probe_selection_primitive_runtime.hpp",
         "extension/jit_sljit/include/sljit_hash_join_projection_source_runtime.hpp",
@@ -737,20 +738,15 @@ def verify_runtime_batch_view() -> None:
     require_text(
         "extension/jit_sljit/include/sljit_hash_join_probe_executor_runtime.hpp",
         (
+            "sljit_hash_join_probe_output_runtime.hpp",
             "SljitExecuteEmptyHashJoinProbe",
             "SljitHashJoinProbeOutputContract",
-            "SljitHashJoinProbeOutputIsFilteredMarkMatches",
             "SljitHashJoinProbeOutputIsFilteredMarkNonMatches",
             "SljitHashJoinMarkSelectionModeForOutputContract",
             "SljitHashJoinProbeProducesSelectedView(output_contract)",
             "ExecutionHashJoinProbeOutputMode::MARK_PROBE",
-            "match_selection.set_index(row_idx, 0)",
-            "\"row_pointer_selection_reference\"",
             "\"perfect_selection_reference\"",
-            "\"mark_flags\"",
-            "\"mark_match_selection_reference\"",
-            "\"mark_nonmatch_selection_reference\"",
-            "\"mark_nonmatch_empty_due_to_build_null\"",
+            "SljitHashJoinProbeSelectedViewBoundaryName(mark_probe, mark_selection_mode)",
             "!probe.hash_table->has_null",
             "state, output_contract",
         ),
@@ -943,6 +939,19 @@ def verify_runtime_batch_view() -> None:
         ),
     )
     require_text(
+        "extension/jit_sljit/include/sljit_hash_join_probe_output_runtime.hpp",
+        (
+            "SljitMaterializeLeftHashJoinProbeUnmatchedOutput",
+            "SljitHashJoinProbeSelectedViewBoundaryName",
+            "SljitSelectHashJoinProbeNonNullKeys",
+            "SljitExecuteMarkProbeNoTrueNonMatches",
+            "SljitExecuteEmptyHashJoinProbe",
+            "SljitHashJoinProbeOutputIsFilteredMarkNonMatches(output_contract)",
+            "SljitHashJoinProbeProducesSelectedView(output_contract)",
+            "\"mark_nonmatch_empty_due_to_build_null\"",
+        ),
+    )
+    require_text(
         "extension/jit_sljit/include/sljit_hash_join_probe_path_runtime.hpp",
         (
             "sljit_hash_join_all_valid_probe_fast_path_runtime.hpp",
@@ -956,6 +965,24 @@ def verify_runtime_batch_view() -> None:
             "SljitExecuteAllValidRegularHashJoinMarkSelectionProbePath",
             "SljitGeneratedAllValidRegularHashJoinProbeStage(SELECTED, mark_selection_mode)",
             "SljitGeneratedRegularHashJoinProbeStage(uses_bloom_filter, mark_selection_mode)",
+        ),
+    )
+    require_text(
+        "extension/jit_sljit/include/sljit_hash_join_probe_executor_runtime.hpp",
+        (
+            "sljit_hash_join_probe_output_runtime.hpp",
+            "SljitHashJoinProbeSelectedViewBoundaryName(mark_probe, mark_selection_mode)",
+            "SljitExecuteEmptyHashJoinProbe(runtime, op_idx, op, probe, input, output, match_selection, row_pointers",
+        ),
+    )
+    reject_text(
+        "extension/jit_sljit/include/sljit_hash_join_probe_executor_runtime.hpp",
+        (
+            "static idx_t SljitSelectHashJoinProbeNonNullKeys",
+            "static ExecutionOperatorBindResult SljitExecuteMarkProbeNoTrueNonMatches",
+            "match_selection.set_index(row_idx, 0)",
+            "\"mark_nonmatch_empty_due_to_build_null\"",
+            "const char *boundary_name = \"row_pointer_selection_reference\"",
         ),
     )
     require_text(
