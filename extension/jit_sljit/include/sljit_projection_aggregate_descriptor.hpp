@@ -46,51 +46,51 @@ static bool SljitTryBuildPreparedProjectionAggregateDescriptorFromProjection(
 	                                                            semantic_to_projection, producer_projection_op);
 }
 
-static bool SljitTryBuildPreparedProjectionAggregateDescriptor(
-    vector<SljitExecutableRegionOp> &ops, SljitRegionExecutionScratch &scratch, idx_t hash_join_idx,
-    idx_t projection_idx, SljitExecutableRegionOp &projection_op, idx_t aggregate_idx,
-    SljitJoinProjectionAggregateDescriptor &descriptor,
-    optional_ptr<const vector<idx_t>> semantic_to_projection = nullptr,
-    optional_ptr<SljitExecutableRegionOp> producer_projection_op = nullptr) {
-	descriptor.BorrowProjection(projection_idx, projection_op);
-	return SljitTryBuildPreparedProjectionAggregateDescriptorFromProjection(
-	    ops, scratch, hash_join_idx, aggregate_idx, descriptor, semantic_to_projection, producer_projection_op);
+static bool SljitTryBuildPostJoinSemanticProjection(vector<SljitExecutableRegionOp> &ops,
+                                                    SljitPostJoinProjectionStrategy &post_join_projection,
+                                                    SljitJoinProjectionAggregateDescriptor &descriptor,
+                                                    unique_ptr<SljitExecutableRegionOp> &owned_projection,
+                                                    optional_ptr<SljitExecutableRegionOp> &semantic_projection) {
+	if (post_join_projection.first_projection_idx == post_join_projection.final_projection_idx) {
+		if (post_join_projection.first_projection_idx >= ops.size()) {
+			return descriptor.Block("operator_bounds");
+		}
+		semantic_projection = &ops[post_join_projection.first_projection_idx];
+		return true;
+	}
+	owned_projection = make_uniq<SljitExecutableRegionOp>();
+	string compose_blocker;
+	if (!SljitBuildProjectionChainComposedProjection(ops, post_join_projection.first_projection_idx,
+	                                                 post_join_projection.final_projection_idx, *owned_projection,
+	                                                 optional_ptr<string>(&compose_blocker))) {
+		if (compose_blocker.empty()) {
+			compose_blocker = "semantic_compose";
+		} else {
+			compose_blocker = "semantic_compose_" + compose_blocker;
+		}
+		return descriptor.Block(compose_blocker.c_str());
+	}
+	semantic_projection = owned_projection.get();
+	return true;
 }
 
-static bool SljitTryBuildProjectionChainAggregateDescriptor(vector<SljitExecutableRegionOp> &ops,
-                                                            SljitRegionExecutionScratch &scratch,
-                                                            SljitPostJoinProjectionStrategy &post_join_projection,
-                                                            idx_t aggregate_idx,
-                                                            SljitJoinProjectionAggregateDescriptor &descriptor) {
-	if (aggregate_idx >= ops.size()) {
-		return descriptor.Block("operator_bounds");
+static bool SljitTryBuildUnmappedPostJoinProjectionAggregateDescriptor(
+    vector<SljitExecutableRegionOp> &ops, SljitRegionExecutionScratch &scratch,
+    SljitPostJoinProjectionStrategy &post_join_projection, idx_t aggregate_idx,
+    SljitJoinProjectionAggregateDescriptor &descriptor) {
+	unique_ptr<SljitExecutableRegionOp> owned_projection;
+	optional_ptr<SljitExecutableRegionOp> semantic_projection;
+	if (!SljitTryBuildPostJoinSemanticProjection(ops, post_join_projection, descriptor, owned_projection,
+	                                             semantic_projection)) {
+		return false;
 	}
-		auto semantic_projection = make_uniq<SljitExecutableRegionOp>();
-		string compose_blocker;
-		if (!SljitBuildProjectionChainComposedProjection(ops, post_join_projection.first_projection_idx,
-		                                                 post_join_projection.final_projection_idx, *semantic_projection,
-		                                                 optional_ptr<string>(&compose_blocker))) {
-			if (compose_blocker.empty()) {
-				compose_blocker = "semantic_compose";
-			} else {
-				compose_blocker = "semantic_compose_" + compose_blocker;
-			}
-			return descriptor.Block(compose_blocker.c_str());
-		}
-		descriptor.OwnProjection(post_join_projection.final_projection_idx, std::move(*semantic_projection));
-		return SljitTryBuildPreparedProjectionAggregateDescriptorFromProjection(
-		    ops, scratch, post_join_projection.hash_join_idx, aggregate_idx, descriptor);
+	if (owned_projection) {
+		descriptor.OwnProjection(post_join_projection.final_projection_idx, std::move(*owned_projection));
+	} else {
+		descriptor.BorrowProjection(post_join_projection.first_projection_idx, *semantic_projection);
 	}
-
-static bool SljitTryBuildSingleProjectionAggregateDescriptor(vector<SljitExecutableRegionOp> &ops,
-                                                             SljitRegionExecutionScratch &scratch, idx_t hash_join_idx,
-                                                             idx_t projection_idx, idx_t aggregate_idx,
-                                                             SljitJoinProjectionAggregateDescriptor &descriptor) {
-	if (projection_idx >= ops.size()) {
-		return descriptor.Block("operator_bounds");
-	}
-	return SljitTryBuildPreparedProjectionAggregateDescriptor(ops, scratch, hash_join_idx, projection_idx,
-	                                                          ops[projection_idx], aggregate_idx, descriptor);
+	return SljitTryBuildPreparedProjectionAggregateDescriptorFromProjection(
+	    ops, scratch, post_join_projection.hash_join_idx, aggregate_idx, descriptor);
 }
 
 static bool SljitTryMarkProjectionAggregateRequiredOutput(const SljitExecutableRegionOp &projection_op,
@@ -156,8 +156,7 @@ static bool SljitTryAddExecutableExpressionSourceColumns(const SljitExecutableRe
 }
 
 static bool SljitTryRemapProjectionSourceIndex(idx_t &source_index, const vector<idx_t> &projection_to_input) {
-	if (source_index >= projection_to_input.size() ||
-	    projection_to_input[source_index] == DConstants::INVALID_INDEX) {
+	if (source_index >= projection_to_input.size() || projection_to_input[source_index] == DConstants::INVALID_INDEX) {
 		return false;
 	}
 	source_index = projection_to_input[source_index];
@@ -341,13 +340,13 @@ static bool SljitTryBuildRemappedUngroupedAggregatePayloads(
 
 static bool SljitTryBuildProjectionUngroupedAggregateDescriptor(
     const ExecutionHashJoinProbeBinding &binding, SljitExecutableRegionOp &aggregate_op,
-    SljitJoinProjectionAggregateDescriptor &descriptor,
-    optional_ptr<SljitExecutableRegionOp> producer_projection_op) {
+    SljitJoinProjectionAggregateDescriptor &descriptor, optional_ptr<SljitExecutableRegionOp> producer_projection_op) {
 	auto &projection_op = descriptor.Projection();
 	vector<uint8_t> required_projection_outputs;
 	vector<idx_t> fused_payload_sources;
 	if (!SljitTryBuildUngroupedAggregateRequiredProjectionOutputs(
-	        projection_op, aggregate_op, required_projection_outputs, optional_ptr<vector<idx_t>>(&fused_payload_sources))) {
+	        projection_op, aggregate_op, required_projection_outputs,
+	        optional_ptr<vector<idx_t>>(&fused_payload_sources))) {
 		return descriptor.Block("ungrouped_payload_sources");
 	}
 	vector<idx_t> projection_to_input(projection_op.projections.size(), DConstants::INVALID_INDEX);
@@ -360,10 +359,9 @@ static bool SljitTryBuildProjectionUngroupedAggregateDescriptor(
 			return descriptor.Block("ungrouped_input_source");
 		}
 	}
-	if (!SljitTryBuildRemappedUngroupedAggregatePayloads(aggregate_op.aggregate_update,
-	                                                     aggregate_op.aggregate_update.plan.sink_info.aggregates,
-	                                                     projection_to_input, fused_payload_sources,
-	                                                     descriptor.remapped_payloads)) {
+	if (!SljitTryBuildRemappedUngroupedAggregatePayloads(
+	        aggregate_op.aggregate_update, aggregate_op.aggregate_update.plan.sink_info.aggregates, projection_to_input,
+	        fused_payload_sources, descriptor.remapped_payloads)) {
 		return descriptor.Block("ungrouped_payload_remap");
 	}
 	descriptor.MarkReady();
@@ -379,35 +377,20 @@ static bool SljitTryBuildMappedPostJoinProjectionAggregateDescriptor(
 		return descriptor.Block("hash_join_binding");
 	}
 	auto &binding = scratch.OperatorBinding(post_join_projection.hash_join_idx).hash_join_probe;
-	auto semantic_projection = make_uniq<SljitExecutableRegionOp>();
-	optional_ptr<SljitExecutableRegionOp> semantic_projection_ptr;
-	if (post_join_projection.first_projection_idx == post_join_projection.final_projection_idx) {
-		if (post_join_projection.first_projection_idx >= ops.size()) {
-			return descriptor.Block("operator_bounds");
-		}
-		semantic_projection_ptr = &ops[post_join_projection.first_projection_idx];
-	} else {
-		string compose_blocker;
-		if (!SljitBuildProjectionChainComposedProjection(ops, post_join_projection.first_projection_idx,
-		                                                 post_join_projection.final_projection_idx, *semantic_projection,
-		                                                 optional_ptr<string>(&compose_blocker))) {
-			if (compose_blocker.empty()) {
-				compose_blocker = "semantic_compose";
-			} else {
-				compose_blocker = "semantic_compose_" + compose_blocker;
-			}
-			return descriptor.Block(compose_blocker.c_str());
-		}
-		semantic_projection_ptr = semantic_projection.get();
+	unique_ptr<SljitExecutableRegionOp> owned_projection;
+	optional_ptr<SljitExecutableRegionOp> semantic_projection;
+	if (!SljitTryBuildPostJoinSemanticProjection(ops, post_join_projection, descriptor, owned_projection,
+	                                             semantic_projection)) {
+		return false;
 	}
 	vector<uint8_t> required_projection_outputs;
 	if (aggregate_idx >= ops.size() || !SljitTryBuildProjectionAggregateRequiredOutputs(
-	                                       *semantic_projection_ptr, ops[aggregate_idx], required_projection_outputs)) {
+	                                       *semantic_projection, ops[aggregate_idx], required_projection_outputs)) {
 		return descriptor.Block("required_projection_outputs");
 	}
 	auto mapped_projection = make_uniq<SljitExecutableRegionOp>();
 	string map_blocker;
-	if (!SljitTryBuildHashJoinMappedProjection(output_column_map, binding, *semantic_projection_ptr, *mapped_projection,
+	if (!SljitTryBuildHashJoinMappedProjection(output_column_map, binding, *semantic_projection, *mapped_projection,
 	                                           optional_ptr<string>(&map_blocker),
 	                                           optional_ptr<const vector<uint8_t>>(&required_projection_outputs))) {
 		if (map_blocker.empty()) {
@@ -518,13 +501,8 @@ static bool SljitTryBuildPostJoinProjectionAggregateDescriptor(
 		return SljitTryBuildMappedPostJoinProjectionAggregateDescriptor(
 		    ops, scratch, post_join_projection, aggregate_idx, descriptor, *output_column_map, output_projection_idx);
 	}
-	if (post_join_projection.first_projection_idx == post_join_projection.final_projection_idx) {
-		return SljitTryBuildSingleProjectionAggregateDescriptor(ops, scratch, post_join_projection.hash_join_idx,
-		                                                        post_join_projection.first_projection_idx,
-		                                                        aggregate_idx, descriptor);
-	}
-	return SljitTryBuildProjectionChainAggregateDescriptor(ops, scratch, post_join_projection, aggregate_idx,
-	                                                       descriptor);
+	return SljitTryBuildUnmappedPostJoinProjectionAggregateDescriptor(ops, scratch, post_join_projection, aggregate_idx,
+	                                                                  descriptor);
 }
 
 static SljitExecutableRegionExpression SljitIdentityProjectionExpression(idx_t source_idx, const LogicalType &type) {
@@ -537,8 +515,8 @@ static SljitExecutableRegionExpression SljitIdentityProjectionExpression(idx_t s
 }
 
 static bool SljitTryBuildSelectedJoinAggregateInputDescriptor(vector<SljitExecutableRegionOp> &ops,
-                                                              SljitRegionExecutionScratch &scratch,
-                                                              idx_t hash_join_idx, idx_t aggregate_idx,
+                                                              SljitRegionExecutionScratch &scratch, idx_t hash_join_idx,
+                                                              idx_t aggregate_idx,
                                                               SljitJoinProjectionAggregateDescriptor &descriptor) {
 	if (descriptor.Built()) {
 		return descriptor.Ready();
