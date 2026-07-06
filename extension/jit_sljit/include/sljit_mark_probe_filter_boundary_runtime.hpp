@@ -10,7 +10,7 @@
 
 #include "sljit_full_pipeline_primitive_sequence.hpp"
 #include "sljit_full_pipeline_runtime.hpp"
-#include "sljit_hash_join_probe_executor_runtime.hpp"
+#include "sljit_hash_join_probe_drain_runtime.hpp"
 #include "sljit_mark_probe_filter_boundary.hpp"
 #include "sljit_region_runtime_state.hpp"
 #include "sljit_runtime_batch_view.hpp"
@@ -68,7 +68,8 @@ public:
 		    (SljitMarkProbeFilterBoundaryOmitsMarker(marker_mode) || primitive.materialize_filter_selection) &&
 		    (mark_filter_mode == SljitMarkProbeFilterMode::MATCHES ||
 		     mark_filter_mode == SljitMarkProbeFilterMode::NON_MATCHES) &&
-		    !hash_join_op.hash_join_probe.plan.perfect_hash_probe && !hash_join_op.hash_join_probe.plan.residual_predicate;
+		    !hash_join_op.hash_join_probe.plan.perfect_hash_probe &&
+		    !hash_join_op.hash_join_probe.plan.residual_predicate;
 		auto probe_output_contract = SljitHashJoinProbeOutputContract::SELECTED_VIEW;
 		if (use_filtered_mark_selection_probe) {
 			probe_output_contract = mark_filter_mode == SljitMarkProbeFilterMode::MATCHES
@@ -80,8 +81,8 @@ public:
 		auto handle_output = [&](DataChunk &output) {
 			const auto mark_count = output.size();
 			if (use_filtered_mark_selection_probe && primitive.materialize_filter_selection) {
-				return ExecuteFilteredMaterializedBoundary(step_idx, hash_join_idx, hash_join_op, filter_op,
-				                                           join_input, marker_mode, mark_filter_mode, mark_count,
+				return ExecuteFilteredMaterializedBoundary(step_idx, hash_join_idx, hash_join_op, filter_op, join_input,
+				                                           marker_mode, mark_filter_mode, mark_count,
 				                                           execute_next_step);
 			}
 			if (use_filtered_mark_selection_probe) {

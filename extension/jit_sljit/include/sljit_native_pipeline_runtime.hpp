@@ -10,7 +10,7 @@
 
 #include "sljit_full_pipeline_runtime.hpp"
 #include "sljit_grouped_aggregate_state_runtime.hpp"
-#include "sljit_hash_join_probe_executor_runtime.hpp"
+#include "sljit_hash_join_probe_drain_runtime.hpp"
 #include "sljit_hash_join_projection_runtime.hpp"
 #include "sljit_native_sink_runtime.hpp"
 #include "sljit_nested_loop_join_runtime.hpp"

@@ -10,7 +10,6 @@
 
 #include "sljit_codegen_util.hpp"
 #include "sljit_full_pipeline_dispatch_runtime.hpp"
-#include "sljit_hash_join_probe_executor_runtime.hpp"
 #include "sljit_hash_join_probe_runtime.hpp"
 #include "sljit_join_probe_codegen.hpp"
 #include "sljit_region_runtime_state.hpp"
@@ -51,9 +50,9 @@ static SljitLazyCodegenTiming TimeSljitLazyCodegen(BUILD build) {
 class SljitNativeRegionKernel : public ExecutionRegionKernel {
 public:
 	SljitNativeRegionKernel(string backend_name_p, vector<SljitExecutableRegionOp> ops_p,
-	                        vector<LogicalType> source_output_types_p,
-	                        vector<idx_t> source_distinct_counts_p, vector<Value> source_min_values_p,
-	                        vector<Value> source_max_values_p, ExecutionRegionABI abi_p)
+	                        vector<LogicalType> source_output_types_p, vector<idx_t> source_distinct_counts_p,
+	                        vector<Value> source_min_values_p, vector<Value> source_max_values_p,
+	                        ExecutionRegionABI abi_p)
 	    : backend_name(std::move(backend_name_p)), ops(std::move(ops_p)),
 	      source_output_types(std::move(source_output_types_p)),
 	      source_distinct_counts(std::move(source_distinct_counts_p)),

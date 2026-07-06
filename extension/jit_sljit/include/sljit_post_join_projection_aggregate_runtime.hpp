@@ -10,7 +10,6 @@
 
 #include "sljit_direct_join_output_aggregate_runtime.hpp"
 #include "sljit_full_pipeline_runtime.hpp"
-#include "sljit_hash_join_probe_executor_runtime.hpp"
 #include "sljit_hash_join_probe_runtime.hpp"
 #include "sljit_hash_join_projection_runtime.hpp"
 #include "sljit_post_join_projection_runtime.hpp"

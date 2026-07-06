@@ -9,7 +9,7 @@
 #pragma once
 
 #include "sljit_full_pipeline_recipe.hpp"
-#include "sljit_hash_join_probe_executor_runtime.hpp"
+#include "sljit_hash_join_probe_drain_runtime.hpp"
 #include "sljit_native_pipeline_runtime.hpp"
 #include "sljit_projection_executor_runtime.hpp"
 #include "sljit_source_pipeline_runtime.hpp"
@@ -54,9 +54,8 @@ private:
 
 	bool TryExecuteNativeOnly() {
 		auto execute_native_full_pipeline = NativePipelineExecutor();
-		return SljitTryExecuteFullPipelineNativeOnly(runtime, result, ops,
-		                                             recipe_plan.uses_extended_source_fetch_budget,
-		                                             execute_native_full_pipeline);
+		return SljitTryExecuteFullPipelineNativeOnly(
+		    runtime, result, ops, recipe_plan.uses_extended_source_fetch_budget, execute_native_full_pipeline);
 	}
 
 	bool TryExecutePrimitiveSequenceBatched() {

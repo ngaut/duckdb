@@ -10,7 +10,7 @@
 
 #include "sljit_full_pipeline_primitive_sequence.hpp"
 #include "sljit_full_pipeline_runtime.hpp"
-#include "sljit_hash_join_probe_executor_runtime.hpp"
+#include "sljit_hash_join_probe_drain_runtime.hpp"
 #include "sljit_region_runtime_state.hpp"
 #include "sljit_runtime_batch_runtime.hpp"
 #include "sljit_runtime_batch_state.hpp"
