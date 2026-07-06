@@ -10,7 +10,6 @@
 
 #include "sljit_full_pipeline_runtime.hpp"
 #include "sljit_grouped_aggregate_state_runtime.hpp"
-#include "sljit_hash_join_filtered_aggregate_runtime.hpp"
 #include "sljit_hash_join_probe_executor_runtime.hpp"
 #include "sljit_hash_join_projection_runtime.hpp"
 #include "sljit_native_sink_runtime.hpp"
@@ -146,10 +145,6 @@ struct SljitNativePipelineTerminalPolicy {
 		return true;
 	}
 
-	static bool CanUseGeneratedAggregateTail() {
-		return true;
-	}
-
 	static bool TryExecuteTerminalSink(ExecutionRegionRuntime &runtime, ExecutionOperatorRuntime &native_runtime,
 	                                   SljitRegionExecutionScratch &scratch, idx_t op_idx, SljitExecutableRegionOp &op,
 	                                   DataChunk &input, bool is_final_operator, SinkResultType &sink_result,
@@ -161,10 +156,6 @@ struct SljitNativePipelineTerminalPolicy {
 
 struct SljitNativeTailHandoffTerminalPolicy {
 	static bool CanDeferGroupedFinish() {
-		return false;
-	}
-
-	static bool CanUseGeneratedAggregateTail() {
 		return false;
 	}
 
@@ -236,18 +227,6 @@ SljitMakeNativeTailPipelineExecutor(KERNEL &kernel, ExecutionRegionRuntime &runt
                                     vector<SljitExecutableRegionOp> &ops, const vector<idx_t> &source_distinct_counts) {
 	return SljitNativePipelineExecutor<KERNEL, SljitNativeTailHandoffTerminalPolicy>(kernel, runtime, ops,
 	                                                                                 source_distinct_counts);
-}
-
-template <class KERNEL>
-static bool SljitTryExecuteNativeHashJoinFilteredUngroupedAggregateUpdate(
-    KERNEL &kernel, ExecutionRegionRuntime &runtime, ExecutionOperatorRuntime &native_runtime,
-    vector<SljitExecutableRegionOp> &ops, SljitRegionExecutionScratch &scratch, idx_t hash_join_idx,
-    SljitExecutableRegionOp &hash_join_op, DataChunk &join_input, SinkResultType &sink_result) {
-	auto execute_hash_join_probe =
-	    SljitMakeFixedScratchRecordedHashJoinProbeCallback(kernel, runtime, native_runtime, scratch);
-	return SljitTryExecuteHashJoinFilteredUngroupedAggregateUpdate(runtime, native_runtime, ops, scratch, hash_join_idx,
-	                                                               hash_join_op, join_input, sink_result,
-	                                                               execute_hash_join_probe);
 }
 
 template <class KERNEL, class TERMINAL_POLICY>
@@ -388,13 +367,6 @@ SljitExecuteNativeFullPipelineFrom(KERNEL &kernel, ExecutionRegionRuntime &runti
 				return direct_append_result;
 			}
 			return native_runtime.RecordSinkResult(*current, direct_append_result);
-		}
-		SinkResultType direct_hash_join_filtered_aggregate_result;
-		if (TERMINAL_POLICY::CanUseGeneratedAggregateTail() &&
-		    SljitTryExecuteNativeHashJoinFilteredUngroupedAggregateUpdate(kernel, runtime, native_runtime, ops, scratch,
-		                                                                  op_idx, op, *current,
-		                                                                  direct_hash_join_filtered_aggregate_result)) {
-			return direct_hash_join_filtered_aggregate_result;
 		}
 		bool single_transform_needs_input = false;
 		if (SljitTryExecuteFullPipelineSingleOperatorTransform(runtime, scratch, op_idx, op, current,
