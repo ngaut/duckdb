@@ -87,7 +87,7 @@ static bool SljitFullPipelineTerminalPrimitiveIsExecutable(const vector<SljitExe
 	case SljitFullPipelinePrimitiveKind::POST_JOIN_PROJECTION_AGGREGATE_UPDATE:
 		return SljitFullPipelinePrimitiveStepHasOpCount(step, 2) &&
 		       step.post_join_projection_aggregate.post_join_projection.hash_join_idx == step.Op(0) &&
-		       step.post_join_projection_aggregate.direct_join_output_aggregate.aggregate_idx == step.Op(1) &&
+		       step.post_join_projection_aggregate.aggregate_idx == step.Op(1) &&
 		       SljitCanBindPostJoinProjectionAggregatePrimitive(ops, step.post_join_projection_aggregate);
 	case SljitFullPipelinePrimitiveKind::UNGROUPED_AGGREGATE_UPDATE:
 		if (!SljitCanBindUngroupedAggregateUpdatePrimitive(ops, step.ungrouped_aggregate_update)) {

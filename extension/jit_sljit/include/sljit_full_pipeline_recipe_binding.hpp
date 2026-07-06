@@ -532,8 +532,10 @@ private:
 		SljitPostJoinProjectionAggregatePrimitive post_join_aggregate;
 		post_join_aggregate.post_join_projection = SljitBindPostJoinProjectionPrimitive(
 		    ops, hash_join_idx, shape.first_projection_idx, shape.final_projection_idx);
-		post_join_aggregate.direct_join_output_aggregate =
-		    SljitBindDirectJoinOutputAggregatePrimitive(ops, shape.aggregate_idx);
+		post_join_aggregate.aggregate_idx = shape.aggregate_idx;
+		if (!SljitCanBindPostJoinProjectionAggregatePrimitive(ops, post_join_aggregate)) {
+			throw InternalException("SLJIT post-join projection aggregate primitive cannot bind requested aggregate");
+		}
 		return post_join_aggregate;
 	}
 

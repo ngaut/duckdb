@@ -118,14 +118,6 @@ struct SljitPendingInputVectorAggregateBatch {
 	optional_ptr<bool> deferred_grouped_finish;
 };
 
-struct SljitDirectJoinOutputAggregateStrategy;
-
-struct SljitDirectJoinOutputAggregatePrimitive {
-	idx_t aggregate_idx = DConstants::INVALID_INDEX;
-
-	SljitDirectJoinOutputAggregateStrategy MakeStrategy() const;
-};
-
 struct SljitDirectJoinOutputAggregateStrategy {
 	explicit SljitDirectJoinOutputAggregateStrategy(idx_t aggregate_idx_p) : aggregate_idx(aggregate_idx_p) {
 	}
@@ -141,30 +133,11 @@ struct SljitDirectJoinOutputAggregateStrategy {
 	SljitPendingRowPointerAggregateBatch pending_batch;
 };
 
-inline SljitDirectJoinOutputAggregateStrategy SljitDirectJoinOutputAggregatePrimitive::MakeStrategy() const {
-	return SljitDirectJoinOutputAggregateStrategy(aggregate_idx);
-}
-
 static bool SljitAggregateUpdateHasDedicatedCompiledBackend(const SljitExecutableRegionOp &op) {
 	if (op.kind != SljitNativeRegionOpKind::AGGREGATE_UPDATE) {
 		return false;
 	}
 	return op.aggregate_update.plan.use_primitive_payloads;
-}
-
-static bool SljitCanBindDirectJoinOutputAggregatePrimitive(const vector<SljitExecutableRegionOp> &ops,
-                                                           idx_t aggregate_idx) {
-	return aggregate_idx < ops.size() && SljitAggregateUpdateHasDedicatedCompiledBackend(ops[aggregate_idx]);
-}
-
-static SljitDirectJoinOutputAggregatePrimitive
-SljitBindDirectJoinOutputAggregatePrimitive(const vector<SljitExecutableRegionOp> &ops, idx_t aggregate_idx) {
-	if (!SljitCanBindDirectJoinOutputAggregatePrimitive(ops, aggregate_idx)) {
-		throw InternalException("SLJIT direct join output aggregate primitive cannot bind requested aggregate");
-	}
-	SljitDirectJoinOutputAggregatePrimitive primitive;
-	primitive.aggregate_idx = aggregate_idx;
-	return primitive;
 }
 
 struct SljitDirectJoinOutputAggregatePolicy {

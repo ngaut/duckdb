@@ -15,7 +15,7 @@ namespace duckdb {
 
 struct SljitPostJoinProjectionAggregatePrimitive {
 	SljitPostJoinProjectionPrimitive post_join_projection;
-	SljitDirectJoinOutputAggregatePrimitive direct_join_output_aggregate;
+	idx_t aggregate_idx = DConstants::INVALID_INDEX;
 };
 
 static bool
@@ -25,7 +25,8 @@ SljitCanBindPostJoinProjectionAggregatePrimitive(const vector<SljitExecutableReg
 	return SljitCanBindPostJoinProjectionPrimitive(ops, post_join_projection.hash_join_idx,
 	                                               post_join_projection.first_projection_idx,
 	                                               post_join_projection.final_projection_idx) &&
-	       SljitCanBindDirectJoinOutputAggregatePrimitive(ops, primitive.direct_join_output_aggregate.aggregate_idx);
+	       primitive.aggregate_idx < ops.size() &&
+	       SljitAggregateUpdateHasDedicatedCompiledBackend(ops[primitive.aggregate_idx]);
 }
 
 } // namespace duckdb

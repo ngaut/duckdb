@@ -111,9 +111,8 @@ struct SljitFullPipelinePrimitiveStep {
 
 	static SljitFullPipelinePrimitiveStep
 	PostJoinProjectionAggregateUpdate(const SljitPostJoinProjectionAggregatePrimitive &primitive) {
-		auto step =
-		    Make(SljitFullPipelinePrimitiveKind::POST_JOIN_PROJECTION_AGGREGATE_UPDATE,
-		         {primitive.post_join_projection.hash_join_idx, primitive.direct_join_output_aggregate.aggregate_idx});
+		auto step = Make(SljitFullPipelinePrimitiveKind::POST_JOIN_PROJECTION_AGGREGATE_UPDATE,
+		                 {primitive.post_join_projection.hash_join_idx, primitive.aggregate_idx});
 		step.post_join_projection_aggregate = primitive;
 		return step;
 	}

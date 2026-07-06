@@ -296,7 +296,8 @@ private:
 
 	bool
 	DirectJoinProjectionAggregateHasDedicatedBackend(const SljitFullPipelineProjectionAggregateShape &shape) const {
-		return SljitCanBindDirectJoinOutputAggregatePrimitive(ops, shape.aggregate_idx);
+		return shape.aggregate_idx < ops.size() &&
+		       SljitAggregateUpdateHasDedicatedCompiledBackend(ops[shape.aggregate_idx]);
 	}
 
 	bool CanBindHashJoinProbeProjectionInput(idx_t hash_join_idx) const {

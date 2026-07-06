@@ -380,6 +380,9 @@ def verify_stale_route_code_removed() -> None:
             r"SljitJoinProjectionAggregateUpdateInputKind",
             r"SljitMakeSelectedJoinOutputAggregateUpdatePrimitive",
             r"SljitCanBindJoinProjectionAggregateUpdatePrimitive",
+            r"SljitDirectJoinOutputAggregatePrimitive",
+            r"SljitCanBindDirectJoinOutputAggregatePrimitive",
+            r"SljitBindDirectJoinOutputAggregatePrimitive",
             r"join_projection_aggregate_update",
             r"sljit_join_projection_aggregate_update",
             r"SljitMakeTwoJoinSourceAggregateUpdatePrimitive",
@@ -982,7 +985,6 @@ def verify_projection_aggregate_descriptor_boundary() -> None:
             "SljitPendingRowPointerAggregateBatch pending_batch",
             "SljitAggregateUpdateHasDedicatedCompiledBackend",
             "op.aggregate_update.plan.use_primitive_payloads",
-            "SljitAggregateUpdateHasDedicatedCompiledBackend(ops[aggregate_idx])",
         ),
     )
     reject_text(
@@ -1463,13 +1465,14 @@ def verify_primitive_sequence() -> None:
         (
             "struct SljitPostJoinProjectionAggregatePrimitive",
             "SljitPostJoinProjectionPrimitive post_join_projection",
-            "SljitDirectJoinOutputAggregatePrimitive direct_join_output_aggregate",
+            "idx_t aggregate_idx = DConstants::INVALID_INDEX",
             "SljitCanBindPostJoinProjectionAggregatePrimitive",
+            "SljitAggregateUpdateHasDedicatedCompiledBackend(ops[primitive.aggregate_idx])",
         ),
     )
     reject_text(
         "extension/jit_sljit/include/sljit_post_join_projection_aggregate_primitive.hpp",
-        ("ConsumesSourceSinkAdvance", "selected_join_output"),
+        ("ConsumesSourceSinkAdvance", "selected_join_output", "SljitDirectJoinOutputAggregatePrimitive"),
     )
     require_text(
         "extension/jit_sljit/include/sljit_projection_chain_runtime.hpp",
