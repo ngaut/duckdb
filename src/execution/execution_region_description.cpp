@@ -223,6 +223,7 @@ static string DescribeExecutionRegionHashJoinContract(const ExecutionRegionHashJ
 	result += ",lhs_output_column_indices=" + BuildExecutionRegionIdxList(contract.lhs_output_column_indices);
 	result += ",lhs_output_types=" + BuildExecutionRegionLogicalTypeList(contract.lhs_output_types);
 	result += ",rhs_output_columns=" + std::to_string(contract.rhs_output_column_count);
+	result += ",rhs_output_column_indices=" + BuildExecutionRegionIdxList(contract.rhs_output_column_indices);
 	result += ",rhs_output_types=" + BuildExecutionRegionLogicalTypeList(contract.rhs_output_types);
 	result += ",lhs_probe_columns=" + std::to_string(contract.lhs_probe_column_count);
 	result += ",lhs_probe_column_indices=" + BuildExecutionRegionIdxList(contract.lhs_probe_column_indices);

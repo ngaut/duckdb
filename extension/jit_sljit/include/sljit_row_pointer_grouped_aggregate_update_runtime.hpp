@@ -30,12 +30,12 @@ SljitCanAttemptRowPointerCountOneTargetLookup(const vector<ExecutionRowPointerGr
 static bool SljitTryExecuteInputVectorGroupedAggregateUpdate(
     ExecutionRegionRuntime &runtime, SljitRegionExecutionScratch &scratch, idx_t op_idx, SljitExecutableRegionOp &op,
     DataChunk &payload_input, const vector<ExecutionRowPointerGroupKeySource> &group_sources,
-	const vector<idx_t> &payload_source_indices,
-	const vector<const ExecutionPrimitiveAggregateUpdateLane *> &payload_lanes,
-	ExecutionGroupedAggregateStateAddressBinding &grouped_state, SljitAggregatePayloadAdapterScratch &payload_scratch,
-	bool finish, bool source_key0_int64_to_int32_unchecked,
-	optional_ptr<const ExecutionDenseGroupDomain> dense_domain = nullptr,
-	optional_ptr<string> failure_reason = nullptr) {
+    const vector<idx_t> &payload_source_indices,
+    const vector<const ExecutionPrimitiveAggregateUpdateLane *> &payload_lanes,
+    ExecutionGroupedAggregateStateAddressBinding &grouped_state, SljitAggregatePayloadAdapterScratch &payload_scratch,
+    bool finish, bool source_key0_int64_to_int32_unchecked,
+    optional_ptr<const ExecutionDenseGroupDomain> dense_domain = nullptr,
+    optional_ptr<string> failure_reason = nullptr) {
 	auto record_unsupported = [&](const char *reason) {
 		if (failure_reason) {
 			*failure_reason = reason;
@@ -151,11 +151,11 @@ static bool SljitTryExecuteInputVectorGroupedAggregateUpdate(
 static bool SljitTryExecuteNativeInputVectorGroupedAggregateUpdate(
     ExecutionRegionRuntime &runtime, ExecutionOperatorRuntime &native_runtime, SljitRegionExecutionScratch &scratch,
     idx_t op_idx, SljitExecutableRegionOp &op, DataChunk &payload_input,
-	const vector<ExecutionRowPointerGroupKeySource> &group_sources, const vector<idx_t> &payload_source_indices,
-	bool defer_grouped_finish, optional_ptr<bool> deferred_grouped_finish,
-	bool source_key0_int64_to_int32_unchecked = false,
-	optional_ptr<const ExecutionDenseGroupDomain> dense_domain = nullptr,
-	optional_ptr<string> failure_reason = nullptr) {
+    const vector<ExecutionRowPointerGroupKeySource> &group_sources, const vector<idx_t> &payload_source_indices,
+    bool defer_grouped_finish, optional_ptr<bool> deferred_grouped_finish,
+    bool source_key0_int64_to_int32_unchecked = false,
+    optional_ptr<const ExecutionDenseGroupDomain> dense_domain = nullptr,
+    optional_ptr<string> failure_reason = nullptr) {
 	auto &binding = SljitBindRecordedNativeSink(
 	    runtime, native_runtime, scratch, op_idx, op.kind, payload_input, op.aggregate_update.plan.sink_info,
 	    "aggregate-update-runtime-binding-failed", "SLJIT aggregate update sink");
@@ -176,6 +176,7 @@ static bool SljitTryExecuteNativeInputVectorGroupedAggregateUpdate(
 	}
 	auto &payload_lanes = scratch.AggregatePayloadLanes(op_idx, aggregates, binding.aggregate_update.primitive);
 	auto &payload_scratch = scratch.AggregatePayloadScratch(op_idx);
+	SljitTryReserveGroupedAggregateGroups(runtime, op_idx, op, binding.aggregate_update.grouped_state);
 	if (!SljitTryExecuteInputVectorGroupedAggregateUpdate(
 	        runtime, scratch, op_idx, op, payload_input, group_sources, payload_source_indices, payload_lanes,
 	        binding.aggregate_update.grouped_state, payload_scratch, !defer_grouped_finish,
@@ -239,9 +240,10 @@ struct SljitStringSetComplementarySumDescriptor {
 	std::array<string, SljitStringSetCaseGroupedPayloadProjection::CONSTANT_COUNT> constants;
 };
 
-static bool SljitStringSetComplementarySumLaneSupported(
-    const ExecutionRegionAggregateInput &aggregate, const ExecutionRegionAggregateContract &contract,
-    const ExecutionPrimitiveAggregateUpdateLane *lane, const SljitExecutableRegionExpression &payload) {
+static bool SljitStringSetComplementarySumLaneSupported(const ExecutionRegionAggregateInput &aggregate,
+                                                        const ExecutionRegionAggregateContract &contract,
+                                                        const ExecutionPrimitiveAggregateUpdateLane *lane,
+                                                        const SljitExecutableRegionExpression &payload) {
 	if (!lane || !lane->ready || lane->state_size == 0 || lane->aggregate_index != aggregate.aggregate_index ||
 	    aggregate.aggregate_index >= contract.grouped_state_offsets.size() ||
 	    lane->state_offset != contract.grouped_state_offsets[aggregate.aggregate_index] ||
@@ -258,9 +260,9 @@ static bool SljitStringSetComplementarySumLaneSupported(
 	return true;
 }
 
-static bool SljitTryBindStringSetComplementarySumDescriptor(
-    SljitExecutableRegionOp &op, const vector<idx_t> &payload_source_indices,
-    SljitStringSetComplementarySumDescriptor &descriptor) {
+static bool SljitTryBindStringSetComplementarySumDescriptor(SljitExecutableRegionOp &op,
+                                                            const vector<idx_t> &payload_source_indices,
+                                                            SljitStringSetComplementarySumDescriptor &descriptor) {
 	descriptor = SljitStringSetComplementarySumDescriptor();
 	auto &aggregate_update = op.aggregate_update;
 	auto &sink_info = aggregate_update.plan.sink_info;
@@ -300,16 +302,17 @@ static bool SljitTryBindStringSetComplementarySumDescriptor(
 	return true;
 }
 
-static bool SljitStringSetComplementarySumInputIsVarchar(
-    DataChunk &payload_input, const SljitStringSetComplementarySumDescriptor &descriptor) {
+static bool SljitStringSetComplementarySumInputIsVarchar(DataChunk &payload_input,
+                                                         const SljitStringSetComplementarySumDescriptor &descriptor) {
 	return descriptor.predicate_source_idx < payload_input.ColumnCount() &&
 	       payload_input.data[descriptor.predicate_source_idx].GetType().id() == LogicalTypeId::VARCHAR;
 }
 
-static bool SljitTryBindStringSetComplementarySumUpdate(
-    SljitExecutableRegionOp &op, DataChunk &payload_input, const vector<idx_t> &payload_source_indices,
-    const vector<const ExecutionPrimitiveAggregateUpdateLane *> &payload_lanes,
-    SljitStringSetComplementarySumUpdateState &state) {
+static bool
+SljitTryBindStringSetComplementarySumUpdate(SljitExecutableRegionOp &op, DataChunk &payload_input,
+                                            const vector<idx_t> &payload_source_indices,
+                                            const vector<const ExecutionPrimitiveAggregateUpdateLane *> &payload_lanes,
+                                            SljitStringSetComplementarySumUpdateState &state) {
 	state = SljitStringSetComplementarySumUpdateState();
 	if (payload_lanes.size() != 2) {
 		return false;
@@ -321,13 +324,14 @@ static bool SljitTryBindStringSetComplementarySumUpdate(
 	}
 	auto &aggregate_update = op.aggregate_update;
 	auto &sink_info = aggregate_update.plan.sink_info;
-	if (!SljitStringSetComplementarySumLaneSupported(
-	        sink_info.aggregates[descriptor.matching_payload_idx], sink_info.aggregate_contract,
-	        payload_lanes[descriptor.matching_payload_idx], aggregate_update.payloads[descriptor.matching_payload_idx]) ||
-	    !SljitStringSetComplementarySumLaneSupported(
-	        sink_info.aggregates[descriptor.non_matching_payload_idx], sink_info.aggregate_contract,
-	        payload_lanes[descriptor.non_matching_payload_idx],
-	        aggregate_update.payloads[descriptor.non_matching_payload_idx])) {
+	if (!SljitStringSetComplementarySumLaneSupported(sink_info.aggregates[descriptor.matching_payload_idx],
+	                                                 sink_info.aggregate_contract,
+	                                                 payload_lanes[descriptor.matching_payload_idx],
+	                                                 aggregate_update.payloads[descriptor.matching_payload_idx]) ||
+	    !SljitStringSetComplementarySumLaneSupported(sink_info.aggregates[descriptor.non_matching_payload_idx],
+	                                                 sink_info.aggregate_contract,
+	                                                 payload_lanes[descriptor.non_matching_payload_idx],
+	                                                 aggregate_update.payloads[descriptor.non_matching_payload_idx])) {
 		return false;
 	}
 
@@ -340,8 +344,7 @@ static bool SljitTryBindStringSetComplementarySumUpdate(
 }
 
 static void SljitApplyStringSetComplementarySumLane(data_ptr_t state_address,
-                                                    const ExecutionPrimitiveAggregateUpdateLane &lane,
-                                                    bool increment) {
+                                                    const ExecutionPrimitiveAggregateUpdateLane &lane, bool increment) {
 	auto state_base = state_address + lane.state_offset;
 	if (lane.kind == AggregatePrimitiveUpdateKind::SUM_INT64) {
 		auto sum = reinterpret_cast<int64_t *>(state_base + lane.state_value_offset);
@@ -388,9 +391,9 @@ static void SljitExecuteStringSetComplementarySumSpan(const ExecutionGroupedAggr
 	}
 }
 
-static void SljitExecutePreclassifiedStringSetComplementarySumSpan(
-    const ExecutionGroupedAggregateStateTargetSpan &span, SljitStringSetComplementarySumUpdateState &state,
-    UnifiedVectorFormat &predicate_format) {
+static void SljitExecutePreclassifiedStringSetComplementarySumSpan(const ExecutionGroupedAggregateStateTargetSpan &span,
+                                                                   SljitStringSetComplementarySumUpdateState &state,
+                                                                   UnifiedVectorFormat &predicate_format) {
 	D_ASSERT(state.matching_lane);
 	D_ASSERT(state.non_matching_lane);
 	auto predicate_data = UnifiedVectorFormat::GetData<uint8_t>(predicate_format);
@@ -432,8 +435,7 @@ static bool TryExecuteDirectRowPointerStringSetComplementarySumUpdate(
 	if (!updated) {
 		scratch.RecordDirectNewAggregateUpdateResult(op_idx, false);
 		RecordSljitRegionStageRuntimePath(runtime, op_idx, op.kind,
-		                                  "direct_row_pointer_string_set_complementary_sum_lookup_miss",
-		                                  stage_start);
+		                                  "direct_row_pointer_string_set_complementary_sum_lookup_miss", stage_start);
 		return false;
 	}
 	RecordSljitRegionStageRuntimePath(runtime, op_idx, op.kind,
@@ -451,7 +453,8 @@ static bool TryExecuteDirectRowPointerStringSetComplementarySumUpdate(
 	}
 	scratch.RecordDirectNewAggregateUpdateResult(op_idx, true);
 	RecordSljitRegionRuntimePath(runtime, op.kind, "direct_row_pointer_string_set_complementary_sum_update", count);
-	RecordSljitRegionMaterializationBoundary(runtime, op.kind, "row_pointer_string_set_complementary_sum_update", count);
+	RecordSljitRegionMaterializationBoundary(runtime, op.kind, "row_pointer_string_set_complementary_sum_update",
+	                                         count);
 	return true;
 }
 
@@ -471,13 +474,14 @@ static bool TryExecuteDirectRowPointerPreclassifiedStringSetComplementarySumUpda
 	}
 	auto &aggregate_update = op.aggregate_update;
 	auto &sink_info = aggregate_update.plan.sink_info;
-	if (!SljitStringSetComplementarySumLaneSupported(
-	        sink_info.aggregates[descriptor.matching_payload_idx], sink_info.aggregate_contract,
-	        payload_lanes[descriptor.matching_payload_idx], aggregate_update.payloads[descriptor.matching_payload_idx]) ||
-	    !SljitStringSetComplementarySumLaneSupported(
-	        sink_info.aggregates[descriptor.non_matching_payload_idx], sink_info.aggregate_contract,
-	        payload_lanes[descriptor.non_matching_payload_idx],
-	        aggregate_update.payloads[descriptor.non_matching_payload_idx])) {
+	if (!SljitStringSetComplementarySumLaneSupported(sink_info.aggregates[descriptor.matching_payload_idx],
+	                                                 sink_info.aggregate_contract,
+	                                                 payload_lanes[descriptor.matching_payload_idx],
+	                                                 aggregate_update.payloads[descriptor.matching_payload_idx]) ||
+	    !SljitStringSetComplementarySumLaneSupported(sink_info.aggregates[descriptor.non_matching_payload_idx],
+	                                                 sink_info.aggregate_contract,
+	                                                 payload_lanes[descriptor.non_matching_payload_idx],
+	                                                 aggregate_update.payloads[descriptor.non_matching_payload_idx])) {
 		return false;
 	}
 	state.matching_lane = payload_lanes[descriptor.matching_payload_idx];
@@ -494,14 +498,13 @@ static bool TryExecuteDirectRowPointerPreclassifiedStringSetComplementarySumUpda
 	    });
 	if (!updated) {
 		scratch.RecordDirectNewAggregateUpdateResult(op_idx, false);
-		RecordSljitRegionStageRuntimePath(
-		    runtime, op_idx, op.kind, "direct_row_pointer_preclassified_string_set_complementary_sum_lookup_miss",
-		    stage_start);
+		RecordSljitRegionStageRuntimePath(runtime, op_idx, op.kind,
+		                                  "direct_row_pointer_preclassified_string_set_complementary_sum_lookup_miss",
+		                                  stage_start);
 		return false;
 	}
-	RecordSljitRegionStageRuntimePath(runtime, op_idx, op.kind,
-	                                  "direct_row_pointer_preclassified_string_set_complementary_sum_lookup",
-	                                  stage_start);
+	RecordSljitRegionStageRuntimePath(
+	    runtime, op_idx, op.kind, "direct_row_pointer_preclassified_string_set_complementary_sum_lookup", stage_start);
 	auto update_start = SljitRegionStageStart(runtime);
 	UnifiedVectorFormat predicate_format;
 	payload_input.data[0].ToUnifiedFormat(predicate_format);
@@ -509,16 +512,15 @@ static bool TryExecuteDirectRowPointerPreclassifiedStringSetComplementarySumUpda
 		SljitExecutePreclassifiedStringSetComplementarySumSpan(span, state, predicate_format);
 	}
 	RecordSljitRegionStageRuntime(runtime, op_idx, op.kind,
-	                              "direct_row_pointer_preclassified_string_set_complementary_sum_update",
-	                              update_start);
+	                              "direct_row_pointer_preclassified_string_set_complementary_sum_update", update_start);
 	if (finish) {
 		FinishGroupedAggregateStateUpdates(runtime, op_idx, grouped_state, "finish_grouped_state_updates");
 	}
 	scratch.RecordDirectNewAggregateUpdateResult(op_idx, true);
 	RecordSljitRegionRuntimePath(runtime, op.kind,
-	                              "direct_row_pointer_preclassified_string_set_complementary_sum_update", count);
-	RecordSljitRegionMaterializationBoundary(
-	    runtime, op.kind, "row_pointer_preclassified_string_set_complementary_sum_update", count);
+	                             "direct_row_pointer_preclassified_string_set_complementary_sum_update", count);
+	RecordSljitRegionMaterializationBoundary(runtime, op.kind,
+	                                         "row_pointer_preclassified_string_set_complementary_sum_update", count);
 	return true;
 }
 
@@ -763,9 +765,9 @@ static bool SljitTryExecuteRowPointerGroupedAggregateUpdateStrategy(
 static bool SljitTryExecuteNativeRowPointerGroupedAggregateUpdate(
     ExecutionRegionRuntime &runtime, ExecutionOperatorRuntime &native_runtime, SljitRegionExecutionScratch &scratch,
     idx_t op_idx, SljitExecutableRegionOp &op, DataChunk &payload_input, Vector &row_pointers,
-	const vector<ExecutionRowPointerGroupKeySource> &group_sources, const vector<idx_t> &payload_source_indices,
-	bool defer_grouped_finish, optional_ptr<bool> deferred_grouped_finish,
-	bool source_key0_int64_to_int32_unchecked = false) {
+    const vector<ExecutionRowPointerGroupKeySource> &group_sources, const vector<idx_t> &payload_source_indices,
+    bool defer_grouped_finish, optional_ptr<bool> deferred_grouped_finish,
+    bool source_key0_int64_to_int32_unchecked = false) {
 	auto record_unsupported = [&](const char *reason) {
 		auto path = string("direct_row_pointer_grouped_lookup_update_unsupported.") + reason;
 		RecordSljitRegionRuntimePath(runtime, op.kind, path.c_str());
@@ -815,6 +817,7 @@ static bool SljitTryExecuteNativeRowPointerGroupedAggregateUpdate(
 	auto &payload_lanes = scratch.AggregatePayloadLanes(op_idx, aggregates, primitive);
 	auto &payload_scratch = scratch.AggregatePayloadScratch(op_idx);
 	const bool finish = !defer_grouped_finish;
+	SljitTryReserveGroupedAggregateGroups(runtime, op_idx, op, grouped_state);
 	auto decision = SljitChooseRowPointerGroupedAggregateUpdateStrategies(scratch, op_idx, op, payload_input,
 	                                                                      row_pointers, count, proven_group_sources,
 	                                                                      payload_source_indices, payload_lanes);

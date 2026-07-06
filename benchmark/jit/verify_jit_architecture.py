@@ -2931,6 +2931,44 @@ def verify_group_estimate_contract() -> None:
             "current_distinct_reserve_counts",
             "SljitTryBuildExecutableAggregateDenseGroupDomain(op.aggregate_update, current_distinct_counts",
             "SljitTryBuildExecutableAggregateGroupReservePlan(op.aggregate_update, current_distinct_reserve_counts",
+            "SljitUpdateExecutableCurrentDistinctReserveCounts(op, current_distinct_reserve_counts",
+            "current_distinct_counts",
+        ),
+    )
+    require_text(
+        "extension/jit_sljit/sljit_executable_stats.cpp",
+        (
+            "BuildSljitHashJoinProbeOutputDistinctReserveCounts",
+            "SljitHashJoinProbeMayDuplicateProbeRows",
+            "SljitTryGetHashJoinRHSOutputConditionIndex",
+            "SljitTryGetHashJoinProbeKeyInputIndex",
+            "rhs_output_column_indices",
+            "ExecutionRegionJoinType::INNER",
+            "ExecutionRegionJoinType::LEFT",
+            "ExecutionRegionJoinType::RIGHT",
+            "ExecutionRegionJoinType::OUTER",
+            "input_distinct_reserve_counts",
+            "input_distinct_counts",
+        ),
+    )
+    require_text(
+        "src/include/duckdb/execution/execution_region_ir.hpp",
+        ("vector<idx_t> rhs_output_column_indices",),
+    )
+    require_text(
+        "src/execution/execution_contract.cpp",
+        (
+            "result.rhs_output_column_indices = join.rhs_output_columns.col_idxs",
+            "rhs_output_column_indices=",
+        ),
+    )
+    require_text(
+        "extension/jit_sljit/sljit_executable_range_stats.cpp",
+        (
+            "SljitTryCastHashJoinEqualityRangeValue",
+            "SljitTryGetHashJoinRHSOutputConditionIndex",
+            "SljitTryGetHashJoinProbeKeyInputIndex",
+            "ExecutionHashJoinProbeOutputMode::MATCHED_PROBE_AND_BUILD",
         ),
     )
     require_text(
@@ -2948,6 +2986,13 @@ def verify_group_estimate_contract() -> None:
         "extension/jit_sljit/include/sljit_grouped_aggregate_direct_update_runtime.hpp",
         ("SljitTryReserveGroupedAggregateGroups(runtime, op_idx, op, grouped_state)",),
     )
+    require_text(
+        "extension/jit_sljit/include/sljit_row_pointer_grouped_aggregate_update_runtime.hpp",
+        (
+            "SljitTryReserveGroupedAggregateGroups(runtime, op_idx, op, binding.aggregate_update.grouped_state)",
+            "SljitTryReserveGroupedAggregateGroups(runtime, op_idx, op, grouped_state)",
+        ),
+    )
     reject_text(
         "extension/jit_sljit/include/sljit_grouped_aggregate_direct_update_runtime.hpp",
         (
@@ -2959,8 +3004,11 @@ def verify_group_estimate_contract() -> None:
         "test/api/test_jit_aggregate.cpp",
         (
             "JIT preaggregated grouped aggregate avoids source-row reserve",
+            "JIT join-expanded unique group keys reserve input-vector aggregate groups",
             "VACUUM jit_preaggregated_group_reserve",
             "aggregate_update.grouped_aggregate_reserve_target=200000",
+            "aggregate_update.grouped_aggregate_reserve_target=",
+            "aggregate_update.grouped_aggregate_reserve_target=400000",
             "grouped_aggregate_reserve.reserve_groups.resize=",
             "direct_append_preaggregated_grouped_primitive_update.find_new.resize",
         ),

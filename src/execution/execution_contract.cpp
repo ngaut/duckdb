@@ -1131,6 +1131,7 @@ static ExecutionRegionHashJoinContract BuildExecutionContractHashJoinContract(co
 	result.lhs_output_column_indices = join.lhs_output_columns.col_idxs;
 	result.lhs_output_types = join.lhs_output_columns.col_types;
 	result.rhs_output_column_count = join.rhs_output_columns.col_idxs.size();
+	result.rhs_output_column_indices = join.rhs_output_columns.col_idxs;
 	result.rhs_output_types = join.rhs_output_columns.col_types;
 	result.lhs_probe_column_count = join.lhs_probe_columns.col_idxs.size();
 	result.lhs_probe_column_indices = join.lhs_probe_columns.col_idxs;
@@ -1191,6 +1192,7 @@ static string BuildExecutionContractHashJoinBoundaryReason(const PhysicalHashJoi
 	result += ";lhs_output_column_indices=" + BuildExecutionContractIdxList(contract.lhs_output_column_indices);
 	result += ";lhs_output_types=" + BuildExecutionContractLogicalTypeList(contract.lhs_output_types);
 	result += ";rhs_output_columns=" + std::to_string(contract.rhs_output_column_count);
+	result += ";rhs_output_column_indices=" + BuildExecutionContractIdxList(contract.rhs_output_column_indices);
 	result += ";rhs_output_types=" + BuildExecutionContractLogicalTypeList(contract.rhs_output_types);
 	result += ";lhs_probe_columns=" + std::to_string(contract.lhs_probe_column_count);
 	result += ";lhs_probe_column_indices=" + BuildExecutionContractIdxList(contract.lhs_probe_column_indices);
@@ -2255,7 +2257,8 @@ ExecutionContract PhysicalColumnDataScan::GetExecutionContract() const {
 	if (collection) {
 		result.source.estimated_source_cardinality = collection->Count();
 		result.source.estimated_source_cardinality_exact = true;
-		result.source_boundary_reason += ";column_data_count=" + std::to_string(result.source.estimated_source_cardinality);
+		result.source_boundary_reason +=
+		    ";column_data_count=" + std::to_string(result.source.estimated_source_cardinality);
 	}
 	result.source.reason = result.source_boundary_reason;
 	return FinalizeExecutionContract(std::move(result));

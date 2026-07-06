@@ -18,6 +18,14 @@ void SljitUpdateExecutableCurrentDistinctCounts(const SljitNativeRegionOpPlan &o
                                                 vector<idx_t> &current_distinct_counts,
                                                 const vector<Value> &current_min_values,
                                                 const vector<Value> &current_max_values);
+void SljitUpdateExecutableCurrentDistinctReserveCounts(const SljitNativeRegionOpPlan &op,
+                                                       vector<idx_t> &current_distinct_reserve_counts,
+                                                       const vector<idx_t> &current_distinct_counts,
+                                                       const vector<Value> &current_min_values,
+                                                       const vector<Value> &current_max_values);
+bool SljitTryGetHashJoinRHSOutputConditionIndex(const ExecutionRegionHashJoinContract &contract, idx_t rhs_output_idx,
+                                                idx_t &condition_idx);
+bool SljitTryGetHashJoinProbeKeyInputIndex(const SljitNativeRegionOpPlan &op, idx_t condition_idx, idx_t &input_idx);
 void SljitUpdateExecutableCurrentRanges(const SljitNativeRegionOpPlan &op, vector<Value> &current_min_values,
                                         vector<Value> &current_max_values);
 

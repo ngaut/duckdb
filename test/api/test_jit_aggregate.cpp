@@ -915,6 +915,60 @@ TEST_CASE("JIT preaggregated grouped aggregate avoids source-row reserve", "[api
 	    });
 }
 
+TEST_CASE("JIT join-expanded unique group keys reserve input-vector aggregate groups", "[api][jit]") {
+	DuckDB db;
+	Connection con(db);
+	auto &manager = ExecutionRegionManager::Get(*con.context);
+
+	ConfigureSljitForCoverage(con, false, true, true, 10000);
+	REQUIRE_NO_FAIL(con.Query("PRAGMA threads=1"));
+	REQUIRE_NO_FAIL(con.Query("SET perfect_ht_threshold=0"));
+	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_join_group_reserve_lhs AS "
+	                          "SELECT i::INTEGER AS k FROM range(100000) tbl(i)"));
+	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_join_group_reserve_rhs AS "
+	                          "SELECT (i % 100000)::INTEGER AS k FROM range(400000) tbl(i)"));
+	REQUIRE_NO_FAIL(con.Query("VACUUM jit_join_group_reserve_lhs"));
+	REQUIRE_NO_FAIL(con.Query("VACUUM jit_join_group_reserve_rhs"));
+
+	const string query = "SELECT lhs.k, count(rhs.k) "
+	                     "FROM jit_join_group_reserve_lhs lhs "
+	                     "LEFT JOIN jit_join_group_reserve_rhs rhs ON lhs.k = rhs.k "
+	                     "GROUP BY lhs.k ORDER BY lhs.k";
+	REQUIRE_NO_FAIL(con.Query("SET jit_policy='off'"));
+	auto reference = con.Query(query);
+	REQUIRE_NO_FAIL(*reference);
+	REQUIRE(reference->RowCount() == 100000);
+
+	ConfigureSljitForCoverageSettings(con, false, true, true, 10000);
+	ClearJitTrace(manager, true);
+	auto result = con.Query(query);
+	REQUIRE_NO_FAIL(*result);
+	REQUIRE(result->RowCount() == reference->RowCount());
+	for (idx_t row_idx = 0; row_idx < result->RowCount(); row_idx++) {
+		for (idx_t col_idx = 0; col_idx < result->ColumnCount(); col_idx++) {
+			REQUIRE(result->GetValue(col_idx, row_idx).ToString() == reference->GetValue(col_idx, row_idx).ToString());
+		}
+	}
+
+	RequireJitEvent(
+	    manager,
+	    [](const ExecutionRegionEvent &event) {
+		    if (EventPhase(event) != "runtime" || event.backend_name != "sljit") {
+			    return false;
+		    }
+		    auto runtime_paths = EventJitRuntimePathCounts(event);
+		    return StringUtil::Contains(runtime_paths, "aggregate_update.grouped_aggregate_reserve_target=") &&
+		           StringUtil::Contains(runtime_paths,
+		                                "aggregate_update.direct_projection_input_vector_grouped_update=");
+	    },
+	    [](const ExecutionRegionEvent &event) {
+		    const auto runtime_paths = EventJitRuntimePathCounts(event);
+		    REQUIRE(StringUtil::Contains(runtime_paths, "aggregate_update.grouped_aggregate_reserve=1"));
+		    REQUIRE_FALSE(
+		        StringUtil::Contains(runtime_paths, "aggregate_update.grouped_aggregate_reserve_target=400000"));
+	    });
+}
+
 TEST_CASE("JIT count-star distribution aggregate uses dense preaggregated groups", "[api][jit]") {
 	DuckDB db;
 	Connection con(db);

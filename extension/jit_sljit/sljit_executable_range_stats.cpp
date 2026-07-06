@@ -138,6 +138,45 @@ static vector<Value> BuildSljitProjectionOutputRanges(const SljitNativeRegionOpP
 	return result;
 }
 
+static bool SljitTryCastHashJoinEqualityRangeValue(const Value &input, const LogicalType &output_type, Value &result) {
+	if (input.IsNull()) {
+		return false;
+	}
+	if (input.type() == output_type) {
+		result = input;
+		return true;
+	}
+	int64_t integer_value;
+	switch (output_type.InternalType()) {
+	case PhysicalType::INT8:
+		if (!SljitSignedIntegerStatsValue<int8_t>(input, integer_value)) {
+			return false;
+		}
+		result = Value::TINYINT(UnsafeNumericCast<int8_t>(integer_value));
+		return true;
+	case PhysicalType::INT16:
+		if (!SljitSignedIntegerStatsValue<int16_t>(input, integer_value)) {
+			return false;
+		}
+		result = Value::SMALLINT(UnsafeNumericCast<int16_t>(integer_value));
+		return true;
+	case PhysicalType::INT32:
+		if (!SljitSignedIntegerStatsValue<int32_t>(input, integer_value)) {
+			return false;
+		}
+		result = Value::INTEGER(UnsafeNumericCast<int32_t>(integer_value));
+		return true;
+	case PhysicalType::INT64:
+		if (!SljitSignedIntegerStatsValue<int64_t>(input, integer_value)) {
+			return false;
+		}
+		result = Value::BIGINT(integer_value);
+		return true;
+	default:
+		return false;
+	}
+}
+
 static vector<Value> BuildSljitHashJoinProbeOutputRanges(const SljitNativeRegionOpPlan &op,
                                                          const vector<Value> &input_values) {
 	vector<Value> result;
@@ -159,6 +198,27 @@ static vector<Value> BuildSljitHashJoinProbeOutputRanges(const SljitNativeRegion
 	}
 	if (result.size() > op.output_types.size()) {
 		result.resize(op.output_types.size());
+	}
+	if (!contract.present ||
+	    op.hash_join_probe.output_mode != ExecutionHashJoinProbeOutputMode::MATCHED_PROBE_AND_BUILD) {
+		return result;
+	}
+	const auto rhs_output_offset = contract.lhs_output_column_indices.size();
+	for (idx_t rhs_output_idx = 0; rhs_output_idx < contract.rhs_output_column_count; rhs_output_idx++) {
+		const auto output_idx = rhs_output_offset + rhs_output_idx;
+		if (output_idx >= result.size() || output_idx >= op.output_types.size()) {
+			continue;
+		}
+		idx_t condition_idx;
+		idx_t input_idx;
+		if (!SljitTryGetHashJoinRHSOutputConditionIndex(contract, rhs_output_idx, condition_idx) ||
+		    !SljitTryGetHashJoinProbeKeyInputIndex(op, condition_idx, input_idx) || input_idx >= input_values.size()) {
+			continue;
+		}
+		Value range_value;
+		if (SljitTryCastHashJoinEqualityRangeValue(input_values[input_idx], op.output_types[output_idx], range_value)) {
+			result[output_idx] = std::move(range_value);
+		}
 	}
 	return result;
 }

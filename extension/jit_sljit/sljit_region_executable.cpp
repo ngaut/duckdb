@@ -244,9 +244,9 @@ bool BuildSljitExecutableRegion(const SljitNativeRegionPlan &region, SljitExecut
 			}
 		}
 		SljitUpdateExecutableCurrentNotNull(op, current_not_null);
+		SljitUpdateExecutableCurrentDistinctReserveCounts(op, current_distinct_reserve_counts, current_distinct_counts,
+		                                                  current_min_values, current_max_values);
 		SljitUpdateExecutableCurrentDistinctCounts(op, current_distinct_counts, current_min_values, current_max_values);
-		SljitUpdateExecutableCurrentDistinctCounts(op, current_distinct_reserve_counts, current_min_values,
-		                                           current_max_values);
 		SljitUpdateExecutableCurrentRanges(op, current_min_values, current_max_values);
 	}
 	return true;

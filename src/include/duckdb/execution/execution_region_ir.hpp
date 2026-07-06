@@ -119,6 +119,7 @@ struct ExecutionRegionHashJoinContract {
 	vector<idx_t> lhs_output_column_indices;
 	vector<LogicalType> lhs_output_types;
 	idx_t rhs_output_column_count = 0;
+	vector<idx_t> rhs_output_column_indices;
 	vector<LogicalType> rhs_output_types;
 	idx_t lhs_probe_column_count = 0;
 	vector<idx_t> lhs_probe_column_indices;
