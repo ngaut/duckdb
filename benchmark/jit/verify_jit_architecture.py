@@ -134,6 +134,7 @@ def verify_required_design_files() -> None:
         "extension/jit_sljit/include/sljit_grouped_aggregate_input_vector_update_runtime.hpp",
         "extension/jit_sljit/include/sljit_grouped_direct_aggregate_update_runtime_state.hpp",
         "extension/jit_sljit/include/sljit_grouped_aggregate_update_runtime_state.hpp",
+        "extension/jit_sljit/include/sljit_aggregate_row_pointer_preaggregation_groups.hpp",
         "extension/jit_sljit/include/sljit_aggregate_row_pointer_preaggregation_analysis.hpp",
         "extension/jit_sljit/include/sljit_direct_join_output_aggregate_batch_runtime.hpp",
         "extension/jit_sljit/include/sljit_direct_join_output_aggregate_trace.hpp",
@@ -1579,8 +1580,19 @@ def verify_preaggregated_primitive_batch_contract() -> None:
         ),
     )
     require_text(
+        "extension/jit_sljit/include/sljit_aggregate_row_pointer_preaggregation_groups.hpp",
+        (
+            "SljitRowPointerPreaggregationHasVariableWidthGroups",
+            "SljitTryPrepareInputVectorGroupFormats",
+            "SljitInputVectorGroupRowsEqual",
+            "SljitRowPointerPreaggregationRowsEqual",
+            "SljitSparseRowPointerTargetCacheTypeSupported",
+        ),
+    )
+    require_text(
         "extension/jit_sljit/include/sljit_aggregate_row_pointer_preaggregation_analysis.hpp",
         (
+            "sljit_aggregate_row_pointer_preaggregation_groups.hpp",
             "enum class SljitRowPointerPreaggregationStrategy",
             "struct SljitRowPointerPreaggregationDecision",
             "SljitChooseRowPointerPreaggregationStrategy",
@@ -1588,6 +1600,15 @@ def verify_preaggregated_primitive_batch_contract() -> None:
             "SljitTryCollectRowPointerPreaggregationSampleStats",
             "SljitRowPointerPreaggregationRowsEqual",
             "SljitShouldPreferDirectSparseRowPointerTargetUpdate",
+        ),
+    )
+    reject_text(
+        "extension/jit_sljit/include/sljit_aggregate_row_pointer_preaggregation_analysis.hpp",
+        (
+            "static bool SljitInputVectorGroupRowsEqual",
+            "static bool SljitInputVectorGroupPhysicalRowsEqual",
+            "static bool SljitTryPrepareInputVectorGroupFormats",
+            "static bool SljitSparseRowPointerTargetCacheTypeSupported",
         ),
     )
     require_text(
