@@ -11,7 +11,6 @@
 #include "sljit_grouped_aggregate_update_runtime.hpp"
 #include "sljit_hash_join_runtime.hpp"
 #include "sljit_native_binding_runtime.hpp"
-#include "sljit_filter_runtime.hpp"
 #include "sljit_projection_expression_runtime.hpp"
 
 namespace duckdb {
@@ -191,8 +190,8 @@ static bool SljitTryExecuteNativeTerminalSink(ExecutionRegionRuntime &runtime, E
 static bool SljitTryExecuteNativeTailTerminalSink(ExecutionRegionRuntime &runtime,
                                                   ExecutionOperatorRuntime &native_runtime,
                                                   SljitRegionExecutionScratch &scratch, idx_t op_idx,
-                                                  SljitExecutableRegionOp &op, DataChunk &input,
-                                                  bool is_final_operator, SinkResultType &sink_result,
+                                                  SljitExecutableRegionOp &op, DataChunk &input, bool is_final_operator,
+                                                  SinkResultType &sink_result,
                                                   optional_ptr<bool> deferred_grouped_finish = nullptr) {
 	if (SljitTryExecuteNativeTerminalNonAggregateSink(runtime, native_runtime, scratch, op_idx, op, input,
 	                                                  is_final_operator, sink_result)) {
@@ -208,59 +207,6 @@ static bool SljitTryExecuteNativeTailTerminalSink(ExecutionRegionRuntime &runtim
 		throw InternalException("SLJIT native tail aggregate sink cannot defer generated grouped finish");
 	}
 	sink_result = SljitExecuteDuckDBAggregateUpdate(runtime, native_runtime, scratch, op_idx, op, input);
-	return true;
-}
-
-static bool SljitCanExecuteFilterAggregateUpdate(const vector<SljitExecutableRegionOp> &ops, idx_t op_idx) {
-	if (op_idx + 2 != ops.size()) {
-		return false;
-	}
-	return ops[op_idx].kind == SljitNativeRegionOpKind::FILTER &&
-	       ops[op_idx + 1].kind == SljitNativeRegionOpKind::AGGREGATE_UPDATE &&
-	       ops[op_idx + 1].aggregate_update.plan.use_primitive_payloads;
-}
-
-static bool SljitCanExecuteGeneratedFilterAggregateUpdate(const vector<SljitExecutableRegionOp> &ops, idx_t op_idx) {
-	return SljitCanExecuteFilterAggregateUpdate(ops, op_idx) &&
-	       ops[op_idx + 1].aggregate_update.filtered_update.IsExecutable();
-}
-
-static bool SljitTryExecuteNativeFilterAggregateUpdate(
-    ExecutionRegionRuntime &runtime, ExecutionOperatorRuntime &native_runtime, SljitRegionExecutionScratch &scratch,
-    vector<SljitExecutableRegionOp> &ops, idx_t op_idx, DataChunk &input, SinkResultType &sink_result,
-    bool &record_sink_result, optional_ptr<bool> deferred_grouped_finish = nullptr) {
-	if (SljitCanExecuteGeneratedFilterAggregateUpdate(ops, op_idx)) {
-		auto &aggregate_op = ops[op_idx + 1];
-		sink_result = SljitExecuteNativeFilteredAggregateUpdate(runtime, native_runtime, scratch, op_idx + 1,
-		                                                        aggregate_op, input);
-		record_sink_result = true;
-		return true;
-	}
-	if (!SljitCanExecuteFilterAggregateUpdate(ops, op_idx)) {
-		return false;
-	}
-
-	auto &filter_op = ops[op_idx];
-	auto &aggregate_op = ops[op_idx + 1];
-	auto &filter_selection = scratch.FilterSelection(op_idx);
-	auto filter_stage_start = SljitRegionStageStart(runtime);
-	auto selected_count =
-	    SljitSelectFilter(filter_op, input, filter_selection, scratch.ExpressionAdapterScratch(op_idx, 0));
-	RecordSljitRegionStageRuntime(runtime, op_idx, filter_op.kind, "selection", filter_stage_start);
-	if (selected_count == 0) {
-		sink_result = SinkResultType::NEED_MORE_INPUT;
-		record_sink_result = false;
-		return true;
-	}
-	if (deferred_grouped_finish) {
-		sink_result =
-		    SljitExecuteNativeAggregateUpdate(runtime, native_runtime, scratch, op_idx + 1, aggregate_op, input,
-		                                      &filter_selection, selected_count, true, deferred_grouped_finish);
-	} else {
-		sink_result = SljitExecuteNativeAggregateUpdate(runtime, native_runtime, scratch, op_idx + 1, aggregate_op,
-		                                                input, &filter_selection, selected_count);
-	}
-	record_sink_result = true;
 	return true;
 }
 

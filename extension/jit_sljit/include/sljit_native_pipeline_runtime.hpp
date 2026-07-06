@@ -9,7 +9,6 @@
 #pragma once
 
 #include "sljit_full_pipeline_runtime.hpp"
-#include "sljit_grouped_aggregate_descriptor.hpp"
 #include "sljit_grouped_aggregate_state_runtime.hpp"
 #include "sljit_hash_join_filtered_aggregate_runtime.hpp"
 #include "sljit_hash_join_probe_executor_runtime.hpp"
@@ -18,7 +17,6 @@
 #include "sljit_nested_loop_join_runtime.hpp"
 #include "sljit_projection_direct_append_runtime.hpp"
 #include "sljit_projection_executor_runtime.hpp"
-#include "sljit_row_pointer_grouped_aggregate_update_runtime.hpp"
 #include "sljit_runtime_batch_runtime.hpp"
 
 namespace duckdb {
@@ -104,7 +102,8 @@ private:
 		return true;
 	}
 
-	SinkResultType ExecuteAggregateUpdateBatch(ExecutionRegionRuntime &runtime, ExecutionOperatorRuntime &native_runtime,
+	SinkResultType ExecuteAggregateUpdateBatch(ExecutionRegionRuntime &runtime,
+	                                           ExecutionOperatorRuntime &native_runtime,
 	                                           SljitRegionExecutionScratch &scratch, idx_t op_idx,
 	                                           SljitExecutableRegionOp &op, DataChunk &batch) {
 		auto deferred_grouped_finish = Prepare(op_idx);
@@ -136,47 +135,6 @@ private:
 	}
 };
 
-struct SljitNativePipelineProjectedAggregateState {
-	optional_ptr<SljitProjectedInputGroupedAggregateDescriptor>
-	GetOrBuild(const vector<SljitExecutableRegionOp> &ops, idx_t first_projection_idx, idx_t final_projection_idx,
-	           idx_t aggregate_idx, string &blocker) {
-		if (first_projection_idx >= ops.size()) {
-			blocker = "operator_bounds";
-			return nullptr;
-		}
-		Ensure(ops.size());
-		if (descriptor_ready[first_projection_idx]) {
-			return optional_ptr<SljitProjectedInputGroupedAggregateDescriptor>(&descriptors[first_projection_idx]);
-		}
-		if (descriptor_rejected[first_projection_idx]) {
-			return nullptr;
-		}
-		if (!SljitTryBuildProjectedInputGroupedAggregateDescriptor(
-		        ops, first_projection_idx, final_projection_idx, aggregate_idx,
-		        optional_ptr<SljitProjectedInputGroupedAggregateDescriptor>(&descriptors[first_projection_idx]),
-		        optional_ptr<string>(&blocker))) {
-			descriptor_rejected[first_projection_idx] = 1;
-			return nullptr;
-		}
-		descriptor_ready[first_projection_idx] = 1;
-		return optional_ptr<SljitProjectedInputGroupedAggregateDescriptor>(&descriptors[first_projection_idx]);
-	}
-
-private:
-	void Ensure(idx_t op_count) {
-		if (descriptors.size() >= op_count) {
-			return;
-		}
-		descriptors.resize(op_count);
-		descriptor_ready.resize(op_count);
-		descriptor_rejected.resize(op_count);
-	}
-
-	vector<SljitProjectedInputGroupedAggregateDescriptor> descriptors;
-	vector<uint8_t> descriptor_ready;
-	vector<uint8_t> descriptor_rejected;
-};
-
 static bool SljitNativePipelineAggregateCanDeferGroupedFinish(const SljitExecutableRegionOp &op) {
 	return op.kind == SljitNativeRegionOpKind::AGGREGATE_UPDATE &&
 	       op.aggregate_update.plan.sink_info.kind == ExecutionRegionSinkKind::HASH_AGGREGATE_UPDATE &&
@@ -193,12 +151,11 @@ struct SljitNativePipelineTerminalPolicy {
 	}
 
 	static bool TryExecuteTerminalSink(ExecutionRegionRuntime &runtime, ExecutionOperatorRuntime &native_runtime,
-	                                   SljitRegionExecutionScratch &scratch, idx_t op_idx,
-	                                   SljitExecutableRegionOp &op, DataChunk &input, bool is_final_operator,
-	                                   SinkResultType &sink_result,
+	                                   SljitRegionExecutionScratch &scratch, idx_t op_idx, SljitExecutableRegionOp &op,
+	                                   DataChunk &input, bool is_final_operator, SinkResultType &sink_result,
 	                                   optional_ptr<bool> deferred_grouped_finish = nullptr) {
-		return SljitTryExecuteNativeTerminalSink(runtime, native_runtime, scratch, op_idx, op, input,
-		                                         is_final_operator, sink_result, deferred_grouped_finish);
+		return SljitTryExecuteNativeTerminalSink(runtime, native_runtime, scratch, op_idx, op, input, is_final_operator,
+		                                         sink_result, deferred_grouped_finish);
 	}
 };
 
@@ -212,9 +169,8 @@ struct SljitNativeTailHandoffTerminalPolicy {
 	}
 
 	static bool TryExecuteTerminalSink(ExecutionRegionRuntime &runtime, ExecutionOperatorRuntime &native_runtime,
-	                                   SljitRegionExecutionScratch &scratch, idx_t op_idx,
-	                                   SljitExecutableRegionOp &op, DataChunk &input, bool is_final_operator,
-	                                   SinkResultType &sink_result,
+	                                   SljitRegionExecutionScratch &scratch, idx_t op_idx, SljitExecutableRegionOp &op,
+	                                   DataChunk &input, bool is_final_operator, SinkResultType &sink_result,
 	                                   optional_ptr<bool> deferred_grouped_finish = nullptr) {
 		return SljitTryExecuteNativeTailTerminalSink(runtime, native_runtime, scratch, op_idx, op, input,
 		                                             is_final_operator, sink_result, deferred_grouped_finish);
@@ -226,24 +182,19 @@ static SinkResultType
 SljitExecuteNativeFullPipelineFrom(KERNEL &kernel, ExecutionRegionRuntime &runtime,
                                    vector<SljitExecutableRegionOp> &ops, const vector<idx_t> &source_distinct_counts,
                                    SljitRegionExecutionScratch &scratch, idx_t start_op_idx, DataChunk &input,
-                                   optional_ptr<SljitNativePipelineGroupedFinishState> grouped_finish = nullptr,
-                                   optional_ptr<SljitNativePipelineProjectedAggregateState> projected_aggregate_state =
-                                       nullptr);
+                                   optional_ptr<SljitNativePipelineGroupedFinishState> grouped_finish = nullptr);
 
 template <class KERNEL, class TERMINAL_POLICY>
 static SinkResultType
 SljitExecuteNativeFullPipeline(KERNEL &kernel, ExecutionRegionRuntime &runtime, vector<SljitExecutableRegionOp> &ops,
                                const vector<idx_t> &source_distinct_counts, SljitRegionExecutionScratch &scratch,
                                DataChunk &input,
-                               optional_ptr<SljitNativePipelineGroupedFinishState> grouped_finish = nullptr,
-                               optional_ptr<SljitNativePipelineProjectedAggregateState> projected_aggregate_state =
-                                   nullptr);
+                               optional_ptr<SljitNativePipelineGroupedFinishState> grouped_finish = nullptr);
 
 template <class KERNEL, class TERMINAL_POLICY>
 struct SljitNativePipelineExecutor {
 	SljitNativePipelineExecutor(KERNEL &kernel_p, ExecutionRegionRuntime &runtime_p,
-	                            vector<SljitExecutableRegionOp> &ops_p,
-	                            const vector<idx_t> &source_distinct_counts_p)
+	                            vector<SljitExecutableRegionOp> &ops_p, const vector<idx_t> &source_distinct_counts_p)
 	    : kernel(kernel_p), runtime(runtime_p), ops(ops_p), source_distinct_counts(source_distinct_counts_p),
 	      grouped_finish(runtime_p.ExecutionOperators(), ops_p) {
 	}
@@ -254,14 +205,13 @@ struct SljitNativePipelineExecutor {
 	const vector<idx_t> &source_distinct_counts;
 
 	SinkResultType operator()(SljitRegionExecutionScratch &scratch, DataChunk &input) {
-		return SljitExecuteNativeFullPipeline<KERNEL, TERMINAL_POLICY>(
-		    kernel, runtime, ops, source_distinct_counts, scratch, input, &grouped_finish, &projected_aggregate_state);
+		return SljitExecuteNativeFullPipeline<KERNEL, TERMINAL_POLICY>(kernel, runtime, ops, source_distinct_counts,
+		                                                               scratch, input, &grouped_finish);
 	}
 
 	SinkResultType operator()(SljitRegionExecutionScratch &scratch, idx_t start_op_idx, DataChunk &input) {
 		return SljitExecuteNativeFullPipelineFrom<KERNEL, TERMINAL_POLICY>(
-		    kernel, runtime, ops, source_distinct_counts, scratch, start_op_idx, input, &grouped_finish,
-		    &projected_aggregate_state);
+		    kernel, runtime, ops, source_distinct_counts, scratch, start_op_idx, input, &grouped_finish);
 	}
 
 	void Finalize(SljitRegionExecutionScratch &scratch) {
@@ -270,7 +220,6 @@ struct SljitNativePipelineExecutor {
 
 private:
 	SljitNativePipelineGroupedFinishState grouped_finish;
-	SljitNativePipelineProjectedAggregateState projected_aggregate_state;
 };
 
 template <class KERNEL>
@@ -278,16 +227,15 @@ static SljitNativePipelineExecutor<KERNEL, SljitNativePipelineTerminalPolicy>
 SljitMakeNativePipelineExecutor(KERNEL &kernel, ExecutionRegionRuntime &runtime, vector<SljitExecutableRegionOp> &ops,
                                 const vector<idx_t> &source_distinct_counts) {
 	return SljitNativePipelineExecutor<KERNEL, SljitNativePipelineTerminalPolicy>(kernel, runtime, ops,
-	                                                                             source_distinct_counts);
+	                                                                              source_distinct_counts);
 }
 
 template <class KERNEL>
 static SljitNativePipelineExecutor<KERNEL, SljitNativeTailHandoffTerminalPolicy>
 SljitMakeNativeTailPipelineExecutor(KERNEL &kernel, ExecutionRegionRuntime &runtime,
-                                    vector<SljitExecutableRegionOp> &ops,
-                                    const vector<idx_t> &source_distinct_counts) {
+                                    vector<SljitExecutableRegionOp> &ops, const vector<idx_t> &source_distinct_counts) {
 	return SljitNativePipelineExecutor<KERNEL, SljitNativeTailHandoffTerminalPolicy>(kernel, runtime, ops,
-	                                                                                source_distinct_counts);
+	                                                                                 source_distinct_counts);
 }
 
 template <class KERNEL>
@@ -308,14 +256,12 @@ static bool SljitTryExecuteNativeHashJoinProbeDirectHashJoinBuild(
     vector<SljitExecutableRegionOp> &ops, const vector<idx_t> &source_distinct_counts,
     SljitRegionExecutionScratch &scratch, idx_t hash_join_idx, SljitExecutableRegionOp &hash_join_op,
     DataChunk &join_input, DataChunk &join_output, SinkResultType &sink_result,
-    optional_ptr<SljitNativePipelineGroupedFinishState> grouped_finish = nullptr,
-    optional_ptr<SljitNativePipelineProjectedAggregateState> projected_aggregate_state = nullptr) {
+    optional_ptr<SljitNativePipelineGroupedFinishState> grouped_finish = nullptr) {
 	auto execute_hash_join_probe =
 	    SljitMakeFixedScratchRecordedHashJoinProbeCallback(kernel, runtime, native_runtime, scratch);
 	auto execute_native_full_pipeline_from = [&](idx_t start_op_idx, DataChunk &next_input) {
 		return SljitExecuteNativeFullPipelineFrom<KERNEL, TERMINAL_POLICY>(
-		    kernel, runtime, ops, source_distinct_counts, scratch, start_op_idx, next_input, grouped_finish,
-		    projected_aggregate_state);
+		    kernel, runtime, ops, source_distinct_counts, scratch, start_op_idx, next_input, grouped_finish);
 	};
 	auto execute_native_hash_join_build = [&](idx_t sink_idx, SljitExecutableRegionOp &sink_op, DataChunk &input) {
 		return SljitExecuteNativeHashJoinBuild(
@@ -332,15 +278,13 @@ static SinkResultType
 SljitDrainNativeHashJoinProbe(KERNEL &kernel, ExecutionRegionRuntime &runtime, vector<SljitExecutableRegionOp> &ops,
                               const vector<idx_t> &source_distinct_counts, SljitRegionExecutionScratch &scratch,
                               idx_t op_idx, DataChunk &input, DataChunk &output,
-                              optional_ptr<SljitNativePipelineGroupedFinishState> grouped_finish = nullptr,
-                              optional_ptr<SljitNativePipelineProjectedAggregateState> projected_aggregate_state =
-                                  nullptr) {
+                              optional_ptr<SljitNativePipelineGroupedFinishState> grouped_finish = nullptr) {
 	auto &op = ops[op_idx];
 	auto &native_runtime = runtime.ExecutionOperators();
 	SinkResultType direct_hash_build_result;
 	if (SljitTryExecuteNativeHashJoinProbeDirectHashJoinBuild<KERNEL, TERMINAL_POLICY>(
 	        kernel, runtime, native_runtime, ops, source_distinct_counts, scratch, op_idx, op, input, output,
-	        direct_hash_build_result, grouped_finish, projected_aggregate_state)) {
+	        direct_hash_build_result, grouped_finish)) {
 		return direct_hash_build_result;
 	}
 	SljitHashJoinProbeDrainState state;
@@ -358,8 +302,7 @@ SljitDrainNativeHashJoinProbe(KERNEL &kernel, ExecutionRegionRuntime &runtime, v
 			continue;
 		}
 		auto sink_result = SljitExecuteNativeFullPipelineFrom<KERNEL, TERMINAL_POLICY>(
-		    kernel, runtime, ops, source_distinct_counts, scratch, op_idx + 1, output, grouped_finish,
-		    projected_aggregate_state);
+		    kernel, runtime, ops, source_distinct_counts, scratch, op_idx + 1, output, grouped_finish);
 		if (SljitSinkResultStopsPipeline(sink_result)) {
 			return sink_result;
 		}
@@ -371,8 +314,7 @@ template <class KERNEL, class TERMINAL_POLICY>
 static SinkResultType SljitDrainNativeNestedLoopJoinProbe(
     KERNEL &kernel, ExecutionRegionRuntime &runtime, vector<SljitExecutableRegionOp> &ops,
     const vector<idx_t> &source_distinct_counts, SljitRegionExecutionScratch &scratch, idx_t op_idx, DataChunk &input,
-    DataChunk &output, optional_ptr<SljitNativePipelineGroupedFinishState> grouped_finish = nullptr,
-    optional_ptr<SljitNativePipelineProjectedAggregateState> projected_aggregate_state = nullptr) {
+    DataChunk &output, optional_ptr<SljitNativePipelineGroupedFinishState> grouped_finish = nullptr) {
 	auto &op = ops[op_idx];
 	SljitNestedLoopJoinProbeDrainState state;
 	auto &native_runtime = runtime.ExecutionOperators();
@@ -392,8 +334,7 @@ static SinkResultType SljitDrainNativeNestedLoopJoinProbe(
 			continue;
 		}
 		auto sink_result = SljitExecuteNativeFullPipelineFrom<KERNEL, TERMINAL_POLICY>(
-		    kernel, runtime, ops, source_distinct_counts, scratch, op_idx + 1, output, grouped_finish,
-		    projected_aggregate_state);
+		    kernel, runtime, ops, source_distinct_counts, scratch, op_idx + 1, output, grouped_finish);
 		if (SljitSinkResultStopsPipeline(sink_result)) {
 			return sink_result;
 		}
@@ -401,89 +342,12 @@ static SinkResultType SljitDrainNativeNestedLoopJoinProbe(
 	return SinkResultType::NEED_MORE_INPUT;
 }
 
-static bool SljitTryFindNativeProjectionAggregateUpdate(const vector<SljitExecutableRegionOp> &ops,
-                                                        idx_t first_projection_idx, idx_t &final_projection_idx,
-                                                        idx_t &aggregate_idx) {
-	if (first_projection_idx >= ops.size() ||
-	    ops[first_projection_idx].kind != SljitNativeRegionOpKind::PROJECTION) {
-		return false;
-	}
-	final_projection_idx = first_projection_idx;
-	while (final_projection_idx + 1 < ops.size() &&
-	       ops[final_projection_idx + 1].kind == SljitNativeRegionOpKind::PROJECTION) {
-		final_projection_idx++;
-	}
-	if (final_projection_idx + 1 >= ops.size()) {
-		return false;
-	}
-	aggregate_idx = final_projection_idx + 1;
-	return aggregate_idx + 1 == ops.size() && ops[aggregate_idx].kind == SljitNativeRegionOpKind::AGGREGATE_UPDATE &&
-	       ops[aggregate_idx].aggregate_update.plan.use_primitive_payloads;
-}
-
-static bool SljitTryExecuteNativeProjectionAggregateUpdate(
-    ExecutionRegionRuntime &runtime, ExecutionOperatorRuntime &native_runtime, SljitRegionExecutionScratch &scratch,
-    vector<SljitExecutableRegionOp> &ops, idx_t first_projection_idx, DataChunk &input,
-    optional_ptr<SljitNativePipelineGroupedFinishState> grouped_finish,
-    optional_ptr<SljitNativePipelineProjectedAggregateState> projected_aggregate_state, SinkResultType &sink_result) {
-	if (!projected_aggregate_state) {
-		return false;
-	}
-	idx_t final_projection_idx;
-	idx_t aggregate_idx;
-	if (!SljitTryFindNativeProjectionAggregateUpdate(ops, first_projection_idx, final_projection_idx, aggregate_idx)) {
-		return false;
-	}
-	string blocker;
-	auto descriptor =
-	    projected_aggregate_state->GetOrBuild(ops, first_projection_idx, final_projection_idx, aggregate_idx, blocker);
-	if (!descriptor) {
-		if (!blocker.empty()) {
-			RecordSljitRegionRuntimePath(runtime, ops[aggregate_idx].kind,
-			                             (string("direct_projected_input_vector_grouped_update_unsupported.") +
-			                              blocker)
-			                                 .c_str(),
-			                             input.size());
-		}
-		return false;
-	}
-	if (!SljitProjectedInputGroupedAggregateCanUseCompactInput(*descriptor)) {
-		return false;
-	}
-	if (input.ColumnCount() != descriptor->input_types.size()) {
-		throw InternalException("SLJIT native projection aggregate direct update input schema mismatch");
-	}
-	auto &aggregate_op = ops[aggregate_idx];
-	optional_ptr<const ExecutionDenseGroupDomain> dense_domain;
-	if (aggregate_op.aggregate_update.dense_group_domain.ready) {
-		dense_domain = &aggregate_op.aggregate_update.dense_group_domain;
-		RecordSljitRegionRuntimePath(runtime, aggregate_op.kind, "direct_projected_dense_group_domain", input.size());
-	}
-	optional_ptr<bool> deferred_grouped_finish;
-	if (grouped_finish && SljitNativePipelineAggregateCanDeferGroupedFinish(aggregate_op)) {
-		deferred_grouped_finish = grouped_finish->Prepare(aggregate_idx);
-	}
-	string failure_reason;
-	if (!SljitTryExecuteNativeInputVectorGroupedAggregateUpdate(
-	        runtime, native_runtime, scratch, aggregate_idx, aggregate_op, input, descriptor->group_sources,
-	        descriptor->payload_source_indices, deferred_grouped_finish != nullptr, deferred_grouped_finish, false,
-	        dense_domain, optional_ptr<string>(&failure_reason))) {
-		throw InternalException("SLJIT native projection aggregate direct update failed: %s",
-		                        failure_reason.empty() ? "unknown" : failure_reason.c_str());
-	}
-	RecordSljitRegionRuntimePath(runtime, aggregate_op.kind, "direct_projected_input_vector_grouped_update",
-	                             input.size());
-	sink_result = SinkResultType::NEED_MORE_INPUT;
-	return true;
-}
-
 template <class KERNEL, class TERMINAL_POLICY>
 static SinkResultType
 SljitExecuteNativeFullPipelineFrom(KERNEL &kernel, ExecutionRegionRuntime &runtime,
                                    vector<SljitExecutableRegionOp> &ops, const vector<idx_t> &source_distinct_counts,
                                    SljitRegionExecutionScratch &scratch, idx_t start_op_idx, DataChunk &input,
-                                   optional_ptr<SljitNativePipelineGroupedFinishState> grouped_finish,
-                                   optional_ptr<SljitNativePipelineProjectedAggregateState> projected_aggregate_state) {
+                                   optional_ptr<SljitNativePipelineGroupedFinishState> grouped_finish) {
 	if (input.size() == 0) {
 		return SinkResultType::NEED_MORE_INPUT;
 	}
@@ -501,30 +365,13 @@ SljitExecuteNativeFullPipelineFrom(KERNEL &kernel, ExecutionRegionRuntime &runti
 		SinkResultType batched_terminal_sink_result;
 		if (TERMINAL_POLICY::CanDeferGroupedFinish() && grouped_finish && op_idx + 1 == ops.size() &&
 		    grouped_finish->TryExecuteBatchedTerminalAggregateUpdate(runtime, native_runtime, scratch, op_idx, op,
-		                                                            *current, batched_terminal_sink_result)) {
+		                                                             *current, batched_terminal_sink_result)) {
 			return batched_terminal_sink_result;
 		}
 		if (TERMINAL_POLICY::TryExecuteTerminalSink(runtime, native_runtime, scratch, op_idx, op, *current,
 		                                            op_idx + 1 == ops.size(), terminal_sink_result,
 		                                            deferred_grouped_finish)) {
 			return native_runtime.RecordSinkResult(*current, terminal_sink_result);
-		}
-		SinkResultType filter_aggregate_result;
-		bool record_filter_aggregate_result = false;
-		optional_ptr<bool> filter_aggregate_deferred_grouped_finish;
-		if (TERMINAL_POLICY::CanDeferGroupedFinish() && grouped_finish &&
-		    SljitCanExecuteFilterAggregateUpdate(ops, op_idx) &&
-		    SljitNativePipelineAggregateCanDeferGroupedFinish(ops[op_idx + 1])) {
-			filter_aggregate_deferred_grouped_finish = grouped_finish->Prepare(op_idx + 1);
-		}
-		if (TERMINAL_POLICY::CanUseGeneratedAggregateTail() &&
-		    SljitTryExecuteNativeFilterAggregateUpdate(runtime, native_runtime, scratch, ops, op_idx, *current,
-		                                               filter_aggregate_result, record_filter_aggregate_result,
-		                                               filter_aggregate_deferred_grouped_finish)) {
-			if (record_filter_aggregate_result) {
-				return native_runtime.RecordSinkResult(*current, filter_aggregate_result);
-			}
-			return filter_aggregate_result;
 		}
 		bool filter_projection_needs_input = false;
 		if (SljitTryExecuteFullPipelineFilterProjection(runtime, scratch, ops, op_idx, current,
@@ -544,17 +391,10 @@ SljitExecuteNativeFullPipelineFrom(KERNEL &kernel, ExecutionRegionRuntime &runti
 		}
 		SinkResultType direct_hash_join_filtered_aggregate_result;
 		if (TERMINAL_POLICY::CanUseGeneratedAggregateTail() &&
-		    SljitTryExecuteNativeHashJoinFilteredUngroupedAggregateUpdate(
-		        kernel, runtime, native_runtime, ops, scratch, op_idx, op, *current,
-		        direct_hash_join_filtered_aggregate_result)) {
+		    SljitTryExecuteNativeHashJoinFilteredUngroupedAggregateUpdate(kernel, runtime, native_runtime, ops, scratch,
+		                                                                  op_idx, op, *current,
+		                                                                  direct_hash_join_filtered_aggregate_result)) {
 			return direct_hash_join_filtered_aggregate_result;
-		}
-		SinkResultType projection_aggregate_result;
-		if (TERMINAL_POLICY::CanUseGeneratedAggregateTail() &&
-		    SljitTryExecuteNativeProjectionAggregateUpdate(runtime, native_runtime, scratch, ops, op_idx, *current,
-		                                                   grouped_finish, projected_aggregate_state,
-		                                                   projection_aggregate_result)) {
-			return native_runtime.RecordSinkResult(*current, projection_aggregate_result);
 		}
 		bool single_transform_needs_input = false;
 		if (SljitTryExecuteFullPipelineSingleOperatorTransform(runtime, scratch, op_idx, op, current,
@@ -569,15 +409,13 @@ SljitExecuteNativeFullPipelineFrom(KERNEL &kernel, ExecutionRegionRuntime &runti
 			auto &output = scratch.TemporaryChunk(op_idx);
 			output.Reset();
 			return SljitDrainNativeHashJoinProbe<KERNEL, TERMINAL_POLICY>(
-			    kernel, runtime, ops, source_distinct_counts, scratch, op_idx, *current, output, grouped_finish,
-			    projected_aggregate_state);
+			    kernel, runtime, ops, source_distinct_counts, scratch, op_idx, *current, output, grouped_finish);
 		}
 		case SljitNativeRegionOpKind::NESTED_LOOP_JOIN_PROBE: {
 			auto &output = scratch.TemporaryChunk(op_idx);
 			output.Reset();
 			return SljitDrainNativeNestedLoopJoinProbe<KERNEL, TERMINAL_POLICY>(
-			    kernel, runtime, ops, source_distinct_counts, scratch, op_idx, *current, output, grouped_finish,
-			    projected_aggregate_state);
+			    kernel, runtime, ops, source_distinct_counts, scratch, op_idx, *current, output, grouped_finish);
 		}
 		default:
 			throw InternalException("Invalid SLJIT full pipeline operator before sink");
@@ -590,11 +428,9 @@ template <class KERNEL, class TERMINAL_POLICY>
 static SinkResultType
 SljitExecuteNativeFullPipeline(KERNEL &kernel, ExecutionRegionRuntime &runtime, vector<SljitExecutableRegionOp> &ops,
                                const vector<idx_t> &source_distinct_counts, SljitRegionExecutionScratch &scratch,
-                               DataChunk &input,
-                               optional_ptr<SljitNativePipelineGroupedFinishState> grouped_finish,
-                               optional_ptr<SljitNativePipelineProjectedAggregateState> projected_aggregate_state) {
-	return SljitExecuteNativeFullPipelineFrom<KERNEL, TERMINAL_POLICY>(
-	    kernel, runtime, ops, source_distinct_counts, scratch, 0, input, grouped_finish, projected_aggregate_state);
+                               DataChunk &input, optional_ptr<SljitNativePipelineGroupedFinishState> grouped_finish) {
+	return SljitExecuteNativeFullPipelineFrom<KERNEL, TERMINAL_POLICY>(kernel, runtime, ops, source_distinct_counts,
+	                                                                   scratch, 0, input, grouped_finish);
 }
 
 } // namespace duckdb

@@ -16,13 +16,15 @@ namespace duckdb {
 enum class SljitGroupedAggregateUpdateStrategyKind : uint8_t {
 	INVALID,
 	COUNT_STAR_PREAGGREGATION,
-	DIRECT_PRIMITIVE_PAYLOAD_UPDATE
+	DIRECT_PRIMITIVE_PAYLOAD_UPDATE,
+	FILTERED_PRIMITIVE_PAYLOAD_UPDATE
 };
 
 enum class SljitGroupedAggregateUpdateInputKind : uint8_t { MATERIALIZED, PROJECTED_INPUT };
 
 struct SljitGroupedAggregateUpdatePrimitive {
 	idx_t aggregate_idx = DConstants::INVALID_INDEX;
+	idx_t filter_idx = DConstants::INVALID_INDEX;
 	idx_t first_projection_idx = DConstants::INVALID_INDEX;
 	idx_t final_projection_idx = DConstants::INVALID_INDEX;
 	SljitGroupedAggregateUpdateStrategyKind strategy = SljitGroupedAggregateUpdateStrategyKind::INVALID;
@@ -59,6 +61,13 @@ static bool SljitGroupedAggregateUpdateCanUseDirectPrimitivePayloadUpdate(const 
 	}
 	auto &sink_info = op.aggregate_update.plan.sink_info;
 	return !sink_info.groups.empty() && sink_info.aggregates.size() == op.aggregate_update.payloads.size();
+}
+
+static bool SljitCanBindFilteredGroupedAggregateUpdatePrimitive(const vector<SljitExecutableRegionOp> &ops,
+                                                                idx_t filter_idx, idx_t aggregate_idx) {
+	return filter_idx < ops.size() && ops[filter_idx].kind == SljitNativeRegionOpKind::FILTER &&
+	       aggregate_idx < ops.size() &&
+	       SljitGroupedAggregateUpdateCanUseDirectPrimitivePayloadUpdate(ops[aggregate_idx]);
 }
 
 static SljitGroupedAggregateUpdateStrategyKind
@@ -252,6 +261,19 @@ SljitBindGroupedAggregateUpdatePrimitive(const vector<SljitExecutableRegionOp> &
 	return primitive;
 }
 
+static SljitGroupedAggregateUpdatePrimitive
+SljitBindFilteredGroupedAggregateUpdatePrimitive(const vector<SljitExecutableRegionOp> &ops, idx_t filter_idx,
+                                                 idx_t aggregate_idx) {
+	if (!SljitCanBindFilteredGroupedAggregateUpdatePrimitive(ops, filter_idx, aggregate_idx)) {
+		throw InternalException("SLJIT filtered grouped aggregate update primitive cannot bind requested operators");
+	}
+	SljitGroupedAggregateUpdatePrimitive primitive;
+	primitive.aggregate_idx = aggregate_idx;
+	primitive.filter_idx = filter_idx;
+	primitive.strategy = SljitGroupedAggregateUpdateStrategyKind::FILTERED_PRIMITIVE_PAYLOAD_UPDATE;
+	return primitive;
+}
+
 static SljitGroupedAggregateUpdatePrimitive SljitBindProjectedInputGroupedAggregateUpdatePrimitive(
     const vector<SljitExecutableRegionOp> &ops, idx_t first_projection_idx, idx_t final_projection_idx,
     idx_t aggregate_idx, bool allow_direct_primitive_payload_update = false) {
@@ -268,15 +290,26 @@ static bool SljitCanBindGroupedAggregateUpdatePrimitive(const vector<SljitExecut
 	if (!SljitCanBindGroupedAggregateUpdatePrimitive(ops, primitive.aggregate_idx)) {
 		return false;
 	}
-	auto strategy = SljitChooseGroupedAggregateUpdateStrategy(ops[primitive.aggregate_idx]);
-	if (strategy == SljitGroupedAggregateUpdateStrategyKind::INVALID) {
-		return false;
-	}
 	switch (primitive.input_kind) {
-	case SljitGroupedAggregateUpdateInputKind::MATERIALIZED:
-		return primitive.strategy == strategy && primitive.first_projection_idx == DConstants::INVALID_INDEX &&
-		       primitive.final_projection_idx == DConstants::INVALID_INDEX;
+	case SljitGroupedAggregateUpdateInputKind::MATERIALIZED: {
+		if (primitive.first_projection_idx != DConstants::INVALID_INDEX ||
+		    primitive.final_projection_idx != DConstants::INVALID_INDEX) {
+			return false;
+		}
+		if (primitive.strategy == SljitGroupedAggregateUpdateStrategyKind::FILTERED_PRIMITIVE_PAYLOAD_UPDATE) {
+			return SljitCanBindFilteredGroupedAggregateUpdatePrimitive(ops, primitive.filter_idx,
+			                                                           primitive.aggregate_idx);
+		}
+		auto strategy = SljitChooseGroupedAggregateUpdateStrategy(ops[primitive.aggregate_idx]);
+		if (strategy == SljitGroupedAggregateUpdateStrategyKind::INVALID) {
+			return false;
+		}
+		return primitive.filter_idx == DConstants::INVALID_INDEX && primitive.strategy == strategy;
+	}
 	case SljitGroupedAggregateUpdateInputKind::PROJECTED_INPUT:
+		if (primitive.filter_idx != DConstants::INVALID_INDEX) {
+			return false;
+		}
 		if (!SljitCanBindProjectionChainPrimitive(ops, primitive.first_projection_idx,
 		                                          primitive.final_projection_idx)) {
 			return false;
@@ -290,6 +323,8 @@ static bool SljitCanBindGroupedAggregateUpdatePrimitive(const vector<SljitExecut
 		case SljitGroupedAggregateUpdateStrategyKind::DIRECT_PRIMITIVE_PAYLOAD_UPDATE:
 			return primitive.projected_direct_update && primitive.projected_direct_update->Ready() &&
 			       SljitProjectedInputGroupedAggregateCanUseCompactInput(*primitive.projected_direct_update);
+		case SljitGroupedAggregateUpdateStrategyKind::FILTERED_PRIMITIVE_PAYLOAD_UPDATE:
+			return false;
 		case SljitGroupedAggregateUpdateStrategyKind::INVALID:
 			return false;
 		}

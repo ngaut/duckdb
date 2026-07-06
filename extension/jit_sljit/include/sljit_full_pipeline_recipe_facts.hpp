@@ -67,6 +67,11 @@ struct SljitSourceUngroupedAggregateFacts {
 	idx_t aggregate_idx = DConstants::INVALID_INDEX;
 };
 
+struct SljitSourceFilterAggregateFacts {
+	idx_t filter_idx = DConstants::INVALID_INDEX;
+	idx_t aggregate_idx = DConstants::INVALID_INDEX;
+};
+
 enum class SljitProjectionAggregatePrefixKind { INVALID, SOURCE, SINGLE_JOIN, TWO_JOIN };
 
 struct SljitProjectionAggregatePrefixFacts {
@@ -142,10 +147,10 @@ struct SljitProjectionFilterProjectionNativeTailFacts {
 	idx_t tail_start_idx = DConstants::INVALID_INDEX;
 };
 
-static SljitFullPipelineScheduleFacts SljitAnalyzeFullPipelineScheduleFacts(const vector<SljitExecutableRegionOp> &ops) {
+static SljitFullPipelineScheduleFacts
+SljitAnalyzeFullPipelineScheduleFacts(const vector<SljitExecutableRegionOp> &ops) {
 	SljitFullPipelineScheduleFacts facts;
-	const bool first_hash_join_native_tail =
-	    !ops.empty() && ops[0].kind == SljitNativeRegionOpKind::HASH_JOIN_PROBE;
+	const bool first_hash_join_native_tail = !ops.empty() && ops[0].kind == SljitNativeRegionOpKind::HASH_JOIN_PROBE;
 	if (first_hash_join_native_tail) {
 		facts.has_source_batch_native_tail = true;
 		facts.source_batch_boundary_op_idx = 0;
@@ -218,6 +223,19 @@ static bool SljitTryAnalyzeSourceUngroupedAggregate(const vector<SljitExecutable
 	return true;
 }
 
+static bool SljitTryAnalyzeSourceFilterAggregate(const vector<SljitExecutableRegionOp> &ops,
+                                                 SljitSourceFilterAggregateFacts &facts) {
+	facts = SljitSourceFilterAggregateFacts();
+	if (ops.size() != 2 || !SljitFullPipelineOpIsAt(ops, 0, SljitNativeRegionOpKind::FILTER) ||
+	    !SljitFullPipelineOpIsAt(ops, 1, SljitNativeRegionOpKind::AGGREGATE_UPDATE) ||
+	    !ops[1].aggregate_update.plan.use_primitive_payloads) {
+		return false;
+	}
+	facts.filter_idx = 0;
+	facts.aggregate_idx = 1;
+	return true;
+}
+
 static bool SljitTryAnalyzeProjectionAggregateSuffix(const vector<SljitExecutableRegionOp> &ops,
                                                      SljitFullPipelineProjectionAggregateShape &shape) {
 	shape = SljitFullPipelineProjectionAggregateShape();
@@ -245,8 +263,7 @@ static bool SljitTryAnalyzeProjectionAggregatePrefix(const vector<SljitExecutabl
                                                      SljitProjectionAggregatePrefixFacts &facts) {
 	facts = SljitProjectionAggregatePrefixFacts();
 	idx_t op_idx = 0;
-	const auto prefix_end =
-	    shape.ProjectionCount() == 0 ? shape.aggregate_idx : shape.first_projection_idx;
+	const auto prefix_end = shape.ProjectionCount() == 0 ? shape.aggregate_idx : shape.first_projection_idx;
 	if (prefix_end == 0) {
 		return true;
 	}

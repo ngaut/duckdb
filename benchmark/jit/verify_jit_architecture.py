@@ -457,6 +457,26 @@ def verify_stale_route_code_removed() -> None:
             "join-projection aggregate recipe has an unknown input kind",
         ),
     )
+    reject_text(
+        "extension/jit_sljit/include/sljit_native_pipeline_runtime.hpp",
+        (
+            "SljitNativePipelineProjectedAggregateState",
+            "SljitTryFindNativeProjectionAggregateUpdate",
+            "SljitTryExecuteNativeProjectionAggregateUpdate",
+            "direct_projected_input_vector_grouped_update_unsupported.",
+            "SljitTryExecuteNativeFilterAggregateUpdate",
+            "SljitCanExecuteFilterAggregateUpdate",
+            "filter_aggregate_deferred_grouped_finish",
+        ),
+    )
+    reject_text(
+        "extension/jit_sljit/include/sljit_native_sink_runtime.hpp",
+        (
+            "SljitTryExecuteNativeFilterAggregateUpdate",
+            "SljitCanExecuteFilterAggregateUpdate",
+            "SljitCanExecuteGeneratedFilterAggregateUpdate",
+        ),
+    )
 
 
 def verify_runtime_batch_view() -> None:
@@ -2197,6 +2217,8 @@ def verify_recipe_builder() -> None:
             "MakeNativeTailRecipe",
             "MakeSourceBatchNativeTailRecipe",
             "MakeSourceUngroupedAggregateRecipe",
+            "MakeSourceFilterAggregateRecipe",
+            "SljitSourceFilterAggregateFacts",
             "const SljitSourceBatchNativeTailFacts &facts",
             "const SljitSourceUngroupedAggregateFacts &facts",
             "SljitFullPipelinePrimitiveStep::SourceBatchBoundary(facts.boundary_op_idx)",
@@ -2279,19 +2301,27 @@ def verify_recipe_builder() -> None:
         "extension/jit_sljit/include/sljit_full_pipeline_recipe.hpp",
         (
             "TryBuildSourceUngroupedAggregateRecipe",
+            "TryBuildSourceFilterAggregateRecipe",
             "SljitTryAnalyzeSourceUngroupedAggregate",
+            "SljitTryAnalyzeSourceFilterAggregate",
             "binding.MakeSourceUngroupedAggregateRecipe",
+            "binding.MakeSourceFilterAggregateRecipe",
         ),
     )
     require_text(
         "extension/jit_sljit/include/sljit_ungrouped_aggregate_update_primitive.hpp",
         (
             "struct SljitUngroupedAggregateUpdatePrimitive",
+            "SljitUngroupedAggregateUpdateStrategyKind",
+            "FILTERED_PRIMITIVE_PAYLOAD_UPDATE",
             "struct SljitBoundUngroupedPrimitiveAggregateUpdate",
             "SljitCanBindUngroupedAggregateUpdatePrimitive",
+            "SljitCanBindFilteredUngroupedAggregateUpdatePrimitive",
+            "SljitBindFilteredUngroupedAggregateUpdatePrimitive",
             "ExecutionRegionSinkKind::UNGROUPED_AGGREGATE_UPDATE",
             "SljitBindUngroupedPrimitiveAggregateUpdate",
             "SljitExecuteBoundUngroupedPrimitiveAggregateUpdate",
+            "SljitExecuteNativeFilteredAggregateUpdate",
             "SljitBoundSingleFusedPrimitiveAggregatePayloadUpdate single_fused_payload_update",
             "SljitBindSingleFusedPrimitiveAggregatePayloadUpdate",
             "SljitExecuteBoundSingleFusedPrimitiveAggregatePayloadUpdate",
@@ -2594,8 +2624,15 @@ def verify_native_tail_and_deferred_finish() -> None:
             "SljitNativePipelineAggregateCanDeferGroupedFinish",
             "grouped_finish.Finish(runtime, scratch)",
             "grouped_finish->Prepare(op_idx)",
-            "grouped_finish->Prepare(op_idx + 1)",
             "SljitExecuteNativeFullPipelineFrom",
+        ),
+    )
+    require_text(
+        "extension/jit_sljit/include/sljit_grouped_aggregate_update_runtime_state.hpp",
+        (
+            "SljitBindRuntimeBatchInput(input, \"SLJIT grouped aggregate direct update\")",
+            "input.selection, input.count, true",
+            "native_runtime.RecordSinkResult(input.count, sink_result)",
         ),
     )
     require_text(
@@ -2663,7 +2700,11 @@ def verify_distinct_aggregate_backend() -> None:
             "SljitGroupedAggregateUpdateStrategyKind::COUNT_STAR_PREAGGREGATION",
             "SljitGroupedAggregateUpdateCanUseDirectPrimitivePayloadUpdate",
             "SljitGroupedAggregateUpdateStrategyKind::DIRECT_PRIMITIVE_PAYLOAD_UPDATE",
+            "SljitGroupedAggregateUpdateStrategyKind::FILTERED_PRIMITIVE_PAYLOAD_UPDATE",
             "SljitGroupedAggregateUpdateStrategyKind::INVALID",
+            "filter_idx",
+            "SljitCanBindFilteredGroupedAggregateUpdatePrimitive",
+            "SljitBindFilteredGroupedAggregateUpdatePrimitive",
             "primitive.strategy",
             "shared_ptr<SljitExecutableRegionOp> projected_count_star_group_projection",
             "shared_ptr<SljitProjectedInputGroupedAggregateDescriptor> projected_direct_update",
@@ -2682,6 +2723,9 @@ def verify_distinct_aggregate_backend() -> None:
             "SljitExecuteBoundGroupedPrimitiveAggregateUpdate",
             "SljitBoundGroupedPrimitiveAggregateUpdate bound_direct_update",
             "SljitBoundGroupedPrimitiveAggregateUpdate bound_projected_direct_update",
+            "ExecuteFilteredPrimitivePayloadUpdate",
+            "SLJIT filtered grouped aggregate update",
+            "SljitSelectFilter",
             "ExecuteCountStarPreaggregation",
             "primitive_grouped_count_star_row_update",
             "projected_direct_update = primitive.projected_direct_update",

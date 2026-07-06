@@ -120,7 +120,10 @@ struct SljitFullPipelinePrimitiveStep {
 
 	static SljitFullPipelinePrimitiveStep
 	UngroupedAggregateUpdate(const SljitUngroupedAggregateUpdatePrimitive &primitive) {
-		auto step = Make(SljitFullPipelinePrimitiveKind::UNGROUPED_AGGREGATE_UPDATE, {primitive.aggregate_idx});
+		auto step = primitive.strategy == SljitUngroupedAggregateUpdateStrategyKind::FILTERED_PRIMITIVE_PAYLOAD_UPDATE
+		                ? Make(SljitFullPipelinePrimitiveKind::UNGROUPED_AGGREGATE_UPDATE,
+		                       {primitive.filter_idx, primitive.aggregate_idx})
+		                : Make(SljitFullPipelinePrimitiveKind::UNGROUPED_AGGREGATE_UPDATE, {primitive.aggregate_idx});
 		step.ungrouped_aggregate_update = primitive;
 		return step;
 	}
@@ -128,7 +131,10 @@ struct SljitFullPipelinePrimitiveStep {
 	static SljitFullPipelinePrimitiveStep
 	GroupedAggregateUpdate(const SljitGroupedAggregateUpdatePrimitive &primitive) {
 		auto step =
-		    primitive.input_kind == SljitGroupedAggregateUpdateInputKind::PROJECTED_INPUT
+		    primitive.strategy == SljitGroupedAggregateUpdateStrategyKind::FILTERED_PRIMITIVE_PAYLOAD_UPDATE
+		        ? Make(SljitFullPipelinePrimitiveKind::GROUPED_AGGREGATE_UPDATE,
+		               {primitive.filter_idx, primitive.aggregate_idx})
+		    : primitive.input_kind == SljitGroupedAggregateUpdateInputKind::PROJECTED_INPUT
 		        ? Make(SljitFullPipelinePrimitiveKind::GROUPED_AGGREGATE_UPDATE,
 		               {primitive.first_projection_idx, primitive.final_projection_idx, primitive.aggregate_idx})
 		        : Make(SljitFullPipelinePrimitiveKind::GROUPED_AGGREGATE_UPDATE, {primitive.aggregate_idx});

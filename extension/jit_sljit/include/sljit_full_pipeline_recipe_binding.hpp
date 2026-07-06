@@ -86,6 +86,48 @@ public:
 		return MakePrimitiveSequence(std::move(sequence));
 	}
 
+	bool CanMakeSourceFilterAggregateRecipe(const SljitSourceFilterAggregateFacts &facts) const {
+		if (!SljitCanBindGeneratedFilterPrimitive(ops, facts.filter_idx)) {
+			return false;
+		}
+		if (SljitCanBindFilteredUngroupedAggregateUpdatePrimitive(ops, facts.filter_idx, facts.aggregate_idx) ||
+		    SljitCanBindUngroupedAggregateUpdatePrimitive(ops, facts.aggregate_idx) ||
+		    SljitCanBindFilteredGroupedAggregateUpdatePrimitive(ops, facts.filter_idx, facts.aggregate_idx)) {
+			return true;
+		}
+		return SljitGroupedAggregateUpdateHasDedicatedBackend(ops, facts.aggregate_idx);
+	}
+
+	SljitFullPipelineRecipe MakeSourceFilterAggregateRecipe(const SljitSourceFilterAggregateFacts &facts) const {
+		auto sequence = MakeSourceSequence();
+		AddSourceBatchBoundaryIfUseful(sequence, facts.aggregate_idx);
+		if (SljitCanBindFilteredUngroupedAggregateUpdatePrimitive(ops, facts.filter_idx, facts.aggregate_idx)) {
+			auto aggregate_update =
+			    SljitBindFilteredUngroupedAggregateUpdatePrimitive(ops, facts.filter_idx, facts.aggregate_idx);
+			sequence.Add(SljitFullPipelinePrimitiveStep::UngroupedAggregateUpdate(aggregate_update));
+			return MakePrimitiveSequence(std::move(sequence));
+		}
+		if (SljitCanBindFilteredGroupedAggregateUpdatePrimitive(ops, facts.filter_idx, facts.aggregate_idx)) {
+			auto aggregate_update =
+			    SljitBindFilteredGroupedAggregateUpdatePrimitive(ops, facts.filter_idx, facts.aggregate_idx);
+			sequence.Add(SljitFullPipelinePrimitiveStep::GroupedAggregateUpdate(aggregate_update));
+			return MakePrimitiveSequence(std::move(sequence));
+		}
+		auto generated_filter = SljitBindGeneratedFilterPrimitive(ops, facts.filter_idx);
+		sequence.Add(SljitFullPipelinePrimitiveStep::GeneratedFilter(generated_filter));
+		if (SljitCanBindUngroupedAggregateUpdatePrimitive(ops, facts.aggregate_idx)) {
+			auto aggregate_update = SljitBindUngroupedAggregateUpdatePrimitive(ops, facts.aggregate_idx);
+			sequence.Add(SljitFullPipelinePrimitiveStep::UngroupedAggregateUpdate(aggregate_update));
+			return MakePrimitiveSequence(std::move(sequence));
+		}
+		if (SljitGroupedAggregateUpdateHasDedicatedBackend(ops, facts.aggregate_idx)) {
+			auto aggregate_update = SljitBindGroupedAggregateUpdatePrimitive(ops, facts.aggregate_idx);
+			sequence.Add(SljitFullPipelinePrimitiveStep::GroupedAggregateUpdate(aggregate_update));
+			return MakePrimitiveSequence(std::move(sequence));
+		}
+		throw InternalException("SLJIT source filter aggregate recipe has no dedicated aggregate backend");
+	}
+
 	SljitFullPipelineRecipe
 	MakeGeneratedFilterProjectionNativeTailRecipe(const SljitGeneratedFilterProjectionNativeTailFacts &facts) const {
 		auto generated_filter = SljitBindGeneratedFilterPrimitive(ops, facts.filter_idx);

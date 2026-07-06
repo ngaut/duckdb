@@ -88,17 +88,37 @@ static bool SljitFullPipelineTerminalPrimitiveIsExecutable(const vector<SljitExe
 		return SljitFullPipelinePrimitiveStepHasOpCount(step, 2) &&
 		       SljitCanBindJoinProjectionAggregateUpdatePrimitive(ops, step.join_projection_aggregate_update);
 	case SljitFullPipelinePrimitiveKind::UNGROUPED_AGGREGATE_UPDATE:
-		return SljitFullPipelinePrimitiveStepHasOpCount(step, 1) &&
-		       step.ungrouped_aggregate_update.aggregate_idx == step.Op(0) &&
-		       SljitCanBindUngroupedAggregateUpdatePrimitive(ops, step.ungrouped_aggregate_update);
+		if (!SljitCanBindUngroupedAggregateUpdatePrimitive(ops, step.ungrouped_aggregate_update)) {
+			return false;
+		}
+		switch (step.ungrouped_aggregate_update.strategy) {
+		case SljitUngroupedAggregateUpdateStrategyKind::DIRECT_PRIMITIVE_PAYLOAD_UPDATE:
+			return SljitFullPipelinePrimitiveStepHasOpCount(step, 1) &&
+			       step.ungrouped_aggregate_update.aggregate_idx == step.Op(0);
+		case SljitUngroupedAggregateUpdateStrategyKind::FILTERED_PRIMITIVE_PAYLOAD_UPDATE:
+			return SljitFullPipelinePrimitiveStepHasOpCount(step, 2) &&
+			       step.ungrouped_aggregate_update.filter_idx == step.Op(0) &&
+			       step.ungrouped_aggregate_update.aggregate_idx == step.Op(1);
+		case SljitUngroupedAggregateUpdateStrategyKind::INVALID:
+			break;
+		}
+		return false;
 	case SljitFullPipelinePrimitiveKind::GROUPED_AGGREGATE_UPDATE:
 		if (!SljitCanBindGroupedAggregateUpdatePrimitive(ops, step.grouped_aggregate_update)) {
 			return false;
 		}
+		if (step.grouped_aggregate_update.strategy ==
+		    SljitGroupedAggregateUpdateStrategyKind::FILTERED_PRIMITIVE_PAYLOAD_UPDATE) {
+			return step.grouped_aggregate_update.input_kind == SljitGroupedAggregateUpdateInputKind::MATERIALIZED &&
+			       SljitFullPipelinePrimitiveStepHasOpCount(step, 2) &&
+			       step.grouped_aggregate_update.filter_idx == step.Op(0) &&
+			       step.grouped_aggregate_update.aggregate_idx == step.Op(1);
+		}
 		switch (step.grouped_aggregate_update.input_kind) {
 		case SljitGroupedAggregateUpdateInputKind::MATERIALIZED:
 			return SljitFullPipelinePrimitiveStepHasOpCount(step, 1) &&
-			       step.grouped_aggregate_update.aggregate_idx == step.Op(0);
+			       step.grouped_aggregate_update.aggregate_idx == step.Op(0) &&
+			       step.grouped_aggregate_update.filter_idx == DConstants::INVALID_INDEX;
 		case SljitGroupedAggregateUpdateInputKind::PROJECTED_INPUT:
 			return SljitFullPipelinePrimitiveStepHasOpCount(step, 3) &&
 			       step.grouped_aggregate_update.first_projection_idx == step.Op(0) &&

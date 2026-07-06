@@ -10,6 +10,7 @@
 
 #include "sljit_aggregate_count_star_fixed_preaggregation.hpp"
 #include "sljit_aggregate_count_star_string_preaggregation.hpp"
+#include "sljit_filter_runtime.hpp"
 #include "sljit_full_pipeline_runtime.hpp"
 #include "sljit_grouped_aggregate_update_primitive.hpp"
 #include "sljit_grouped_aggregate_update_runtime.hpp"
@@ -30,6 +31,10 @@ struct SljitGroupedAggregateUpdateRuntimeState {
 				return projected_direct_update &&
 				       SljitProjectedInputGroupedAggregateCanUseCompactInput(*projected_direct_update);
 			}
+			return true;
+		}
+		if (primitive.strategy == SljitGroupedAggregateUpdateStrategyKind::FILTERED_PRIMITIVE_PAYLOAD_UPDATE) {
+			deferred_grouped_finish = false;
 			return true;
 		}
 		if (primitive.strategy != SljitGroupedAggregateUpdateStrategyKind::COUNT_STAR_PREAGGREGATION) {
@@ -76,6 +81,9 @@ struct SljitGroupedAggregateUpdateRuntimeState {
 		case SljitGroupedAggregateUpdateStrategyKind::DIRECT_PRIMITIVE_PAYLOAD_UPDATE:
 			return ExecuteDirectPrimitivePayloadUpdate(runtime, result, ops, scratch, primitive, input,
 			                                           processed_batches);
+		case SljitGroupedAggregateUpdateStrategyKind::FILTERED_PRIMITIVE_PAYLOAD_UPDATE:
+			return ExecuteFilteredPrimitivePayloadUpdate(runtime, result, ops, scratch, primitive, input,
+			                                             processed_batches);
 		case SljitGroupedAggregateUpdateStrategyKind::INVALID:
 			break;
 		}
@@ -84,7 +92,8 @@ struct SljitGroupedAggregateUpdateRuntimeState {
 
 	bool Flush(ExecutionRegionRuntime &runtime, vector<SljitExecutableRegionOp> &ops,
 	           SljitRegionExecutionScratch &scratch, const SljitGroupedAggregateUpdatePrimitive &primitive) {
-		if (primitive.strategy == SljitGroupedAggregateUpdateStrategyKind::DIRECT_PRIMITIVE_PAYLOAD_UPDATE) {
+		if (primitive.strategy == SljitGroupedAggregateUpdateStrategyKind::DIRECT_PRIMITIVE_PAYLOAD_UPDATE ||
+		    primitive.strategy == SljitGroupedAggregateUpdateStrategyKind::FILTERED_PRIMITIVE_PAYLOAD_UPDATE) {
 			SljitFinishDeferredGroupedAggregateUpdate(runtime, scratch, primitive.aggregate_idx,
 			                                          deferred_grouped_finish);
 			return false;
@@ -109,13 +118,47 @@ private:
 			return ExecuteProjectedDirectPrimitivePayloadUpdate(runtime, result, ops, scratch, primitive, input,
 			                                                    processed_batches);
 		}
-		auto &input_chunk = SljitBindMaterializedRuntimeBatchInput(input, "SLJIT grouped aggregate direct update");
+		auto &input_chunk = SljitBindRuntimeBatchInput(input, "SLJIT grouped aggregate direct update");
 		auto &aggregate_op = ops[primitive.aggregate_idx];
 		auto &native_runtime = runtime.ExecutionOperators();
 		SljitBindGroupedPrimitiveAggregateUpdate(native_runtime, scratch, primitive.aggregate_idx, aggregate_op,
 		                                         input_chunk, bound_direct_update);
 		auto sink_result = SljitExecuteBoundGroupedPrimitiveAggregateUpdate(
-		    runtime, scratch, bound_direct_update, input_chunk, nullptr, input_chunk.size(), true,
+		    runtime, scratch, bound_direct_update, input_chunk, input.selection, input.count, true,
+		    optional_ptr<bool>(&deferred_grouped_finish));
+		sink_result = native_runtime.RecordSinkResult(input.count, sink_result);
+		if (SljitNativeSinkResultStopsExecution(runtime, sink_result, result)) {
+			SljitFinishDeferredGroupedAggregateUpdate(runtime, scratch, primitive.aggregate_idx,
+			                                          deferred_grouped_finish);
+			return true;
+		}
+		processed_batches++;
+		return false;
+	}
+
+	bool ExecuteFilteredPrimitivePayloadUpdate(ExecutionRegionRuntime &runtime, ExecutionRegionResult &result,
+	                                           vector<SljitExecutableRegionOp> &ops,
+	                                           SljitRegionExecutionScratch &scratch,
+	                                           const SljitGroupedAggregateUpdatePrimitive &primitive,
+	                                           const SljitRuntimeBatchView &input, idx_t &processed_batches) {
+		auto &input_chunk = SljitBindMaterializedRuntimeBatchInput(input, "SLJIT filtered grouped aggregate update");
+		auto &filter_op = ops[primitive.filter_idx];
+		auto &filter_selection = scratch.FilterSelection(primitive.filter_idx);
+		auto filter_stage_start = SljitRegionStageStart(runtime);
+		auto selected_count = SljitSelectFilter(filter_op, input_chunk, filter_selection,
+		                                        scratch.ExpressionAdapterScratch(primitive.filter_idx, 0));
+		RecordSljitRegionStageRuntime(runtime, primitive.filter_idx, filter_op.kind, "selection", filter_stage_start);
+		if (selected_count == 0) {
+			processed_batches++;
+			return false;
+		}
+
+		auto &aggregate_op = ops[primitive.aggregate_idx];
+		auto &native_runtime = runtime.ExecutionOperators();
+		SljitBindGroupedPrimitiveAggregateUpdate(native_runtime, scratch, primitive.aggregate_idx, aggregate_op,
+		                                         input_chunk, bound_direct_update);
+		auto sink_result = SljitExecuteBoundGroupedPrimitiveAggregateUpdate(
+		    runtime, scratch, bound_direct_update, input_chunk, &filter_selection, selected_count, true,
 		    optional_ptr<bool>(&deferred_grouped_finish));
 		sink_result = native_runtime.RecordSinkResult(input_chunk, sink_result);
 		if (SljitNativeSinkResultStopsExecution(runtime, sink_result, result)) {

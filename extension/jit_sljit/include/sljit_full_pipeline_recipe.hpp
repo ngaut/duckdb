@@ -53,6 +53,7 @@ private:
 	static const SljitFullPipelineRecipeRegistryEntry *RecipeRegistry(idx_t &count) {
 		static const SljitFullPipelineRecipeRegistryEntry registry[] = {
 		    {&SljitFullPipelineRecipeBuilder::TryBuildSourceUngroupedAggregateRecipe},
+		    {&SljitFullPipelineRecipeBuilder::TryBuildSourceFilterAggregateRecipe},
 		    {&SljitFullPipelineRecipeBuilder::TryBuildHashJoinDelimJoinSinkRecipe},
 		    {&SljitFullPipelineRecipeBuilder::TryBuildProjectionAggregateRecipe},
 		    {&SljitFullPipelineRecipeBuilder::TryBuildNativeTailRecipe}};
@@ -66,6 +67,15 @@ private:
 			return false;
 		}
 		recipe = binding.MakeSourceUngroupedAggregateRecipe(facts);
+		return true;
+	}
+
+	bool TryBuildSourceFilterAggregateRecipe(SljitFullPipelineRecipe &recipe) const {
+		SljitSourceFilterAggregateFacts facts;
+		if (!SljitTryAnalyzeSourceFilterAggregate(ops, facts) || !binding.CanMakeSourceFilterAggregateRecipe(facts)) {
+			return false;
+		}
+		recipe = binding.MakeSourceFilterAggregateRecipe(facts);
 		return true;
 	}
 
