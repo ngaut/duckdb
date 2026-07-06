@@ -126,6 +126,8 @@ def verify_required_design_files() -> None:
         "extension/jit_sljit/include/sljit_grouped_aggregate_update_primitive.hpp",
         "extension/jit_sljit/include/sljit_grouped_direct_aggregate_update_runtime_state.hpp",
         "extension/jit_sljit/include/sljit_grouped_aggregate_update_runtime_state.hpp",
+        "extension/jit_sljit/include/sljit_direct_join_output_aggregate_batch_runtime.hpp",
+        "extension/jit_sljit/include/sljit_direct_join_output_aggregate_trace.hpp",
         "extension/jit_sljit/include/sljit_projected_grouped_aggregate_update_primitive.hpp",
         "extension/jit_sljit/include/sljit_projected_input_grouped_aggregate_descriptor.hpp",
         "extension/jit_sljit/include/sljit_ungrouped_aggregate_update_primitive.hpp",
@@ -1071,10 +1073,53 @@ def verify_projection_aggregate_descriptor_boundary() -> None:
     require_text(
         "extension/jit_sljit/include/sljit_direct_join_output_aggregate_runtime.hpp",
         (
+            'sljit_direct_join_output_aggregate_batch_runtime.hpp',
+            'sljit_direct_join_output_aggregate_trace.hpp',
             "optional_ptr<SljitDirectJoinOutputAggregateStrategy> strategy_ptr",
             "if (!strategy_ptr || strategy_ptr->disabled)",
             "auto &strategy = *strategy_ptr",
         ),
+    )
+    require_text(
+        "extension/jit_sljit/include/sljit_direct_join_output_aggregate_batch_runtime.hpp",
+        (
+            "SljitTryBuildDirectJoinOutputAggregateDenseDomain",
+            "SljitFlushPendingRowPointerAggregateBatch",
+            "SljitFlushPendingInputVectorAggregateBatch",
+            "SljitAppendPendingInputVectorAggregateBatch",
+            "SljitAppendPendingRowPointerAggregateBatch",
+            "SljitFlushDirectJoinOutputAggregate",
+            "sljit_string_set_complementary_sum_runtime.hpp",
+            "SljitCanPreclassifyStringSetComplementarySumBatch",
+        ),
+    )
+    require_text(
+        "extension/jit_sljit/include/sljit_direct_join_output_aggregate_trace.hpp",
+        (
+            "SljitRecordJoinProjectionAggregateDescriptorShape",
+            "SljitRecordDirectJoinOutputAggregateProjectionUnsupported",
+            "SljitDirectJoinOutputAggregateUnsupportedPrefix",
+        ),
+    )
+    reject_text(
+        "extension/jit_sljit/include/sljit_direct_join_output_aggregate_runtime.hpp",
+        (
+            "sljit_string_set_complementary_sum_runtime.hpp",
+            "SljitDescribeJoinProjectionAggregatePayloadSources",
+        ),
+    )
+    reject_regex(
+        "direct join-output aggregate runtime must not own batch/trace helper definitions",
+        (
+            r"static\s+(?:bool|void)\s+SljitTryBuildDirectJoinOutputAggregateDenseDomain",
+            r"static\s+(?:bool|void)\s+SljitFlushPendingRowPointerAggregateBatch",
+            r"static\s+(?:bool|void)\s+SljitFlushPendingInputVectorAggregateBatch",
+            r"static\s+(?:bool|void)\s+SljitAppendPendingInputVectorAggregateBatch",
+            r"static\s+(?:bool|void)\s+SljitAppendPendingRowPointerAggregateBatch",
+            r"static\s+(?:bool|void)\s+SljitRecordJoinProjectionAggregateDescriptorShape",
+            r"static\s+(?:bool|void)\s+SljitRecordDirectJoinOutputAggregateProjectionUnsupported",
+        ),
+        ("extension/jit_sljit/include/sljit_direct_join_output_aggregate_runtime.hpp",),
     )
     require_text(
         "extension/jit_sljit/include/sljit_projection_aggregate_recipe.hpp",
@@ -2304,7 +2349,7 @@ def verify_primitive_sequence() -> None:
         ),
     )
     require_text(
-        "extension/jit_sljit/include/sljit_direct_join_output_aggregate_runtime.hpp",
+        "extension/jit_sljit/include/sljit_direct_join_output_aggregate_batch_runtime.hpp",
         ("sljit_string_set_complementary_sum_runtime.hpp",),
     )
     reject_text(
