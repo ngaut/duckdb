@@ -98,6 +98,7 @@ def verify_required_design_files() -> None:
         "extension/jit_sljit/include/sljit_runtime_batch_view.hpp",
         "extension/jit_sljit/include/sljit_full_pipeline_recipe_state.hpp",
         "extension/jit_sljit/include/sljit_full_pipeline_recipe_binding.hpp",
+        "extension/jit_sljit/include/sljit_full_pipeline_recipe_sequence_builder.hpp",
         "extension/jit_sljit/include/sljit_full_pipeline_recipe.hpp",
         "extension/jit_sljit/include/sljit_full_pipeline_recipe_facts.hpp",
         "extension/jit_sljit/include/sljit_full_pipeline_primitive_sequence.hpp",
@@ -1794,12 +1795,24 @@ def verify_primitive_sequence() -> None:
     require_text(
         "extension/jit_sljit/include/sljit_full_pipeline_recipe_binding.hpp",
         (
-            "MakeProjectionFilterProjectionNativeTailRecipe",
-            "MakeMarkFilterProjectionNativeTailRecipe",
+            "class SljitFullPipelineRecipeBinding : private SljitFullPipelineRecipeSequenceBuilder",
+            "SljitFullPipelineRecipeSequenceBuilder::CanMakeNativeTailRecipe",
+        ),
+    )
+    require_text(
+        "extension/jit_sljit/include/sljit_full_pipeline_recipe_sequence_builder.hpp",
+        (
             "MakeProjectionChainStep(idx_t projection_idx) const",
             "MakeProjectionChainStep(idx_t first_projection_idx",
             "AddProjectionChainStep(SljitFullPipelinePrimitiveSequence &sequence, idx_t projection_idx) const",
             "AddProjectionChainStep(SljitFullPipelinePrimitiveSequence &sequence, idx_t first_projection_idx",
+        ),
+    )
+    require_text(
+        "extension/jit_sljit/include/sljit_full_pipeline_recipe_binding.hpp",
+        (
+            "MakeProjectionFilterProjectionNativeTailRecipe",
+            "MakeMarkFilterProjectionNativeTailRecipe",
             "AddProjectionChainStep(sequence, facts.pre_projection_idx)",
             "SljitBindGeneratedFilterPrimitive(ops, facts.filter_idx)",
             "AddProjectionChainStep(sequence, facts.projection_idx)",
@@ -2375,14 +2388,12 @@ def verify_recipe_builder() -> None:
         "extension/jit_sljit/include/sljit_full_pipeline_recipe_binding.hpp",
         (
             "class SljitFullPipelineRecipeBinding",
+            "SljitFullPipelineRecipeBinding : private SljitFullPipelineRecipeSequenceBuilder",
             "MakeNativeOnlyPlan",
             "MakePrimitiveRecipePlan",
             "SljitFullPipelinePrimitiveSequenceIsExecutable(ops, recipe.primitive_sequence)",
             "invalid full-pipeline primitive sequence",
             "uses_extended_source_fetch_budget",
-            "MakePrimitiveSequence",
-            "MakeSourceSequence",
-            "MakeNativeTailRecipe",
             "MakeSourceBatchNativeTailRecipe",
             "MakeSourceUngroupedAggregateRecipe",
             "MakeSourceFilterAggregateRecipe",
@@ -2411,8 +2422,6 @@ def verify_recipe_builder() -> None:
             "SljitCanBindUngroupedAggregateUpdatePrimitive(ops, shape.aggregate_idx)",
             "SljitFullPipelinePrimitiveSequence sequence",
             "SljitFullPipelinePrimitiveStep::SourceBatchBoundary",
-            "SljitFullPipelinePrimitiveStep::HashJoinProbeSelection",
-            "SljitFullPipelinePrimitiveStep::ProjectionChain",
             "SljitFullPipelinePrimitiveStep::PostJoinProjectionAggregateUpdate",
             "SljitFullPipelinePrimitiveStep::UngroupedAggregateUpdate",
             "SljitFullPipelinePrimitiveStep::GroupedAggregateUpdate",
@@ -2432,17 +2441,50 @@ def verify_recipe_builder() -> None:
             "return MakeTwoJoinMarkFilterPrefix(facts.first_hash_join_idx, facts.second_hash_join_idx",
             "return MakeMarkFilterPrefix(facts.first_hash_join_idx, facts.mark_filter_idx",
             "MakeHashJoinProbeProjectionInputStep",
-            "SourceBatchBoundaryCanCoalesce",
             "AddSourceBatchBoundaryIfUseful",
-            "TypeIsConstantSize(type.InternalType())",
-            "source_output_types",
             "sequence.Add(MakeHashJoinProbeProjectionInputStep(facts.first_hash_join_idx))",
             "MakeHashJoinProbeSelectionStep(facts.second_hash_join_idx)",
             "return MakeProjectionAggregateTailRecipe(std::move(sequence), shape)",
             "return MakeProjectionAggregateRecipe(std::move(sequence), shape)",
             "return MakeProjectionGroupedAggregateRecipe(std::move(sequence), shape,",
             "return MakeProjectionNativeTailRecipe(std::move(sequence), shape)",
+        ),
+    )
+    require_text(
+        "extension/jit_sljit/include/sljit_full_pipeline_recipe_sequence_builder.hpp",
+        (
+            "class SljitFullPipelineRecipeSequenceBuilder",
+            "CanMakeNativeTailRecipe",
+            "SljitNativeTailHandoffCanConsumeTail(ops, tail_start_idx)",
+            "MakePrimitiveSequence",
+            "MakeSourceSequence",
+            "MakeProjectionChainStep(idx_t projection_idx) const",
+            "MakeProjectionChainStep(idx_t first_projection_idx",
+            "AddProjectionChainStep(SljitFullPipelinePrimitiveSequence &sequence, idx_t projection_idx) const",
+            "AddProjectionChainStep(SljitFullPipelinePrimitiveSequence &sequence, idx_t first_projection_idx",
+            "MakeNativeTailRecipe",
+            "MakeHashJoinProbeMaterializeStep",
+            "MakeHashJoinProbeSelectionStep",
+            "MakeHashJoinProbeProjectionInputStep",
+            "SourceBatchBoundaryCanCoalesce",
+            "AddSourceBatchBoundaryIfUseful",
+            "TypeIsConstantSize(type.InternalType())",
+            "source_output_types",
             "SljitFullPipelinePrimitiveStep::NativeTailHandoff",
+            "SljitFullPipelinePrimitiveStep::HashJoinProbeSelection",
+            "SljitFullPipelinePrimitiveStep::ProjectionChain",
+        ),
+    )
+    reject_text(
+        "extension/jit_sljit/include/sljit_full_pipeline_recipe_binding.hpp",
+        (
+            "SljitFullPipelinePrimitiveStep MakeProjectionChainStep(",
+            "SljitFullPipelinePrimitiveStep MakeHashJoinProbeMaterializeStep(",
+            "SljitFullPipelinePrimitiveStep MakeHashJoinProbeSelectionStep(",
+            "SljitFullPipelinePrimitiveStep MakeHashJoinProbeProjectionInputStep(",
+            "bool SourceBatchBoundaryCanCoalesce(",
+            "void AddSourceBatchBoundaryIfUseful(",
+            "SljitFullPipelinePrimitiveSequence MakeSourceSequence(",
         ),
     )
     require_scoped_text(
