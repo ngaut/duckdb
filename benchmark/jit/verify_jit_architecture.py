@@ -2934,15 +2934,25 @@ def verify_group_estimate_contract() -> None:
         ),
     )
     require_text(
-        "extension/jit_sljit/include/sljit_grouped_aggregate_direct_update_runtime.hpp",
+        "extension/jit_sljit/include/sljit_grouped_aggregate_state_address_update_runtime.hpp",
         (
+            "SljitTryReserveGroupedAggregateGroups",
             "auto &reserve = op.aggregate_update.plan.group_reserve",
             "runtime.TryMarkOnce(ExecutionRegionRuntimeOnceFlag::AGGREGATE_GROUP_RESERVE, op_idx)",
-            "const auto max_threads = MaxValue<idx_t>(runtime.MaxThreads(), 1)",
-            "const auto per_local_group_count = (reserve.group_count + max_threads - 1) / max_threads",
-            "const auto reserve_group_count =",
-            "preaggregated_grouped_primitive_reserve_target",
+            "const auto reserve_group_count = MaxValue<idx_t>(reserve.group_count, STANDARD_VECTOR_SIZE)",
+            "grouped_aggregate_reserve_target",
             "ReserveGroups(reserve_group_count, recorder)",
+        ),
+    )
+    require_text(
+        "extension/jit_sljit/include/sljit_grouped_aggregate_direct_update_runtime.hpp",
+        ("SljitTryReserveGroupedAggregateGroups(runtime, op_idx, op, grouped_state)",),
+    )
+    reject_text(
+        "extension/jit_sljit/include/sljit_grouped_aggregate_direct_update_runtime.hpp",
+        (
+            "TryReservePreaggregatedGroupedPrimitiveGroups",
+            "preaggregated_grouped_primitive_reserve_target",
         ),
     )
     require_text(
@@ -2950,8 +2960,8 @@ def verify_group_estimate_contract() -> None:
         (
             "JIT preaggregated grouped aggregate avoids source-row reserve",
             "VACUUM jit_preaggregated_group_reserve",
-            "aggregate_update.preaggregated_grouped_primitive_reserve_target=200000",
-            "preaggregated_grouped_primitive_reserve.reserve_groups.resize=",
+            "aggregate_update.grouped_aggregate_reserve_target=200000",
+            "grouped_aggregate_reserve.reserve_groups.resize=",
             "direct_append_preaggregated_grouped_primitive_update.find_new.resize",
         ),
     )

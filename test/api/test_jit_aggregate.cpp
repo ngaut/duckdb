@@ -824,8 +824,8 @@ TEST_CASE("JIT projected grouped primitive updates existing groups directly", "[
 	                          "FROM range(200000) tbl(i)"));
 
 	const string query = "SELECT k, "
-	                     "       sum(high_payload), "
-	                     "       sum(low_payload) "
+	                     "       sum(high_payload * 3 + 1), "
+	                     "       sum(low_payload * 5 + 2) "
 	                     "FROM jit_preaggregated_existing_grouped_update GROUP BY k ORDER BY k";
 	REQUIRE_NO_FAIL(con.Query("SET jit_policy='off'"));
 	auto reference = con.Query(query);
@@ -900,18 +900,16 @@ TEST_CASE("JIT preaggregated grouped aggregate avoids source-row reserve", "[api
 			    return false;
 		    }
 		    return StringUtil::Contains(EventJitRuntimePathCounts(event),
-		                                "aggregate_update.preaggregated_grouped_primitive_reserve_target=");
+		                                "aggregate_update.grouped_aggregate_reserve_target=");
 	    },
 	    [](const ExecutionRegionEvent &event) {
 		    const auto runtime_paths = EventJitRuntimePathCounts(event);
 		    const auto stage_counts = EventGeneratedStageCountBreakdown(event);
-		    REQUIRE(StringUtil::Contains(runtime_paths,
-		                                 "aggregate_update.preaggregated_grouped_primitive_reserve_target="));
-		    REQUIRE_FALSE(StringUtil::Contains(
-		        runtime_paths, "aggregate_update.preaggregated_grouped_primitive_reserve_target=200000"));
-		    REQUIRE(StringUtil::Contains(runtime_paths, "aggregate_update.preaggregated_grouped_primitive_reserve=1"));
+		    REQUIRE(StringUtil::Contains(runtime_paths, "aggregate_update.grouped_aggregate_reserve_target="));
 		    REQUIRE_FALSE(
-		        StringUtil::Contains(stage_counts, "preaggregated_grouped_primitive_reserve.reserve_groups.resize="));
+		        StringUtil::Contains(runtime_paths, "aggregate_update.grouped_aggregate_reserve_target=200000"));
+		    REQUIRE(StringUtil::Contains(runtime_paths, "aggregate_update.grouped_aggregate_reserve=1"));
+		    REQUIRE_FALSE(StringUtil::Contains(stage_counts, "grouped_aggregate_reserve.reserve_groups.resize="));
 		    REQUIRE_FALSE(StringUtil::Contains(stage_counts,
 		                                       "direct_append_preaggregated_grouped_primitive_update.find_new.resize"));
 	    });

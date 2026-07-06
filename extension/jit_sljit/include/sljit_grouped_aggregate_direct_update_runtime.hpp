@@ -285,35 +285,6 @@ static bool TryExecutePreaggregatedGroupedPrimitiveAppendSuffixWithPrefixUpdate(
 	return true;
 }
 
-static bool TryReservePreaggregatedGroupedPrimitiveGroups(ExecutionRegionRuntime &runtime, idx_t op_idx,
-                                                          SljitExecutableRegionOp &op,
-                                                          ExecutionGroupedAggregateStateAddressBinding &grouped_state) {
-	auto &reserve = op.aggregate_update.plan.group_reserve;
-	if (!reserve.CanReserve() || !grouped_state.ready || !grouped_state.state) {
-		return false;
-	}
-	if (!runtime.TryMarkOnce(ExecutionRegionRuntimeOnceFlag::AGGREGATE_GROUP_RESERVE, op_idx)) {
-		return false;
-	}
-	const auto max_threads = MaxValue<idx_t>(runtime.MaxThreads(), 1);
-	const auto per_local_group_count = (reserve.group_count + max_threads - 1) / max_threads;
-	const auto reserve_group_count =
-	    MinValue(reserve.group_count, MaxValue<idx_t>(per_local_group_count, STANDARD_VECTOR_SIZE));
-	RecordSljitRegionRuntimePath(runtime, op.kind, "preaggregated_grouped_primitive_reserve_target",
-	                             reserve_group_count);
-	auto reserve_stage_start = SljitRegionStageStart(runtime);
-	auto reserved = ExecuteSljitRegionRecordedOperation(
-	    runtime, op_idx, op.kind, "preaggregated_grouped_primitive_reserve", reserve_stage_start,
-	    [&](optional_ptr<ExecutionOperatorStageRecorder> recorder) {
-		    return grouped_state.state->ReserveGroups(reserve_group_count, recorder);
-	    });
-	RecordSljitRegionStageRuntimePath(runtime, op_idx, op.kind,
-	                                  reserved ? "preaggregated_grouped_primitive_reserve"
-	                                           : "preaggregated_grouped_primitive_reserve_miss",
-	                                  reserve_stage_start);
-	return reserved;
-}
-
 static bool TryExecutePreaggregatedGroupedPrimitiveAggregateUpdateBatches(
     ExecutionRegionRuntime &runtime, SljitRegionExecutionScratch &scratch, idx_t op_idx, SljitExecutableRegionOp &op,
     DataChunk &compact_groups, SljitPreaggregatedPrimitiveAggregateScratch &preaggregate_scratch,
@@ -324,7 +295,7 @@ static bool TryExecutePreaggregatedGroupedPrimitiveAggregateUpdateBatches(
 	                                                               payload_lanes, grouped_state)) {
 		return false;
 	}
-	TryReservePreaggregatedGroupedPrimitiveGroups(runtime, op_idx, op, grouped_state);
+	SljitTryReserveGroupedAggregateGroups(runtime, op_idx, op, grouped_state);
 	if (compact_groups.size() <= STANDARD_VECTOR_SIZE) {
 		return TryExecutePreaggregatedGroupedPrimitiveAggregateUpdate(
 		    runtime, scratch, op_idx, op, compact_groups, preaggregate_scratch, payload_lanes, grouped_state,
@@ -459,10 +430,9 @@ static bool TryExecuteDirectGroupedAggregateUpdate(
 		return false;
 	}
 	for (idx_t strategy_idx = 0; strategy_idx < schedule.count; strategy_idx++) {
-		if (TryExecuteDirectGroupedAggregateUpdateStrategy(runtime, scratch, op_idx, op, input, payload_lanes,
-		                                                   execute_sel, count, grouped_state, payload_scratch,
-		                                                   defer_grouped_finish, deferred_grouped_finish,
-		                                                   schedule.strategies[strategy_idx])) {
+		if (TryExecuteDirectGroupedAggregateUpdateStrategy(
+		        runtime, scratch, op_idx, op, input, payload_lanes, execute_sel, count, grouped_state, payload_scratch,
+		        defer_grouped_finish, deferred_grouped_finish, schedule.strategies[strategy_idx])) {
 			return true;
 		}
 	}

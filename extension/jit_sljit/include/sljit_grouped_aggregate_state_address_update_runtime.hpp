@@ -73,6 +73,30 @@ static void SljitExecuteGroupedStateTargetBatch(const ExecutionGroupedAggregateS
 	}
 }
 
+static bool SljitTryReserveGroupedAggregateGroups(ExecutionRegionRuntime &runtime, idx_t op_idx,
+                                                  SljitExecutableRegionOp &op,
+                                                  ExecutionGroupedAggregateStateAddressBinding &grouped_state) {
+	auto &reserve = op.aggregate_update.plan.group_reserve;
+	if (!reserve.CanReserve() || !grouped_state.ready || !grouped_state.state) {
+		return false;
+	}
+	if (!runtime.TryMarkOnce(ExecutionRegionRuntimeOnceFlag::AGGREGATE_GROUP_RESERVE, op_idx)) {
+		return false;
+	}
+	const auto reserve_group_count = MaxValue<idx_t>(reserve.group_count, STANDARD_VECTOR_SIZE);
+	RecordSljitRegionRuntimePath(runtime, op.kind, "grouped_aggregate_reserve_target", reserve_group_count);
+	auto reserve_stage_start = SljitRegionStageStart(runtime);
+	auto reserved = ExecuteSljitRegionRecordedOperation(
+	    runtime, op_idx, op.kind, "grouped_aggregate_reserve", reserve_stage_start,
+	    [&](optional_ptr<ExecutionOperatorStageRecorder> recorder) {
+		    return grouped_state.state->ReserveGroups(reserve_group_count, recorder);
+	    });
+	RecordSljitRegionStageRuntimePath(runtime, op_idx, op.kind,
+	                                  reserved ? "grouped_aggregate_reserve" : "grouped_aggregate_reserve_miss",
+	                                  reserve_stage_start);
+	return reserved;
+}
+
 static bool TryResolveDirectNewGroupedStateAddresses(ExecutionRegionRuntime &runtime,
                                                      SljitRegionExecutionScratch &scratch, idx_t op_idx,
                                                      SljitExecutableRegionOp &op, DataChunk &input,
@@ -100,6 +124,7 @@ static bool TryExecuteDirectGroupedStateAddressPayloadUpdate(
     DataChunk &input, const vector<const ExecutionPrimitiveAggregateUpdateLane *> &payload_lanes,
     ExecutionGroupedAggregateStateAddressBinding &grouped_state, SljitAggregatePayloadAdapterScratch &payload_scratch,
     bool finish = true, optional_ptr<const ExecutionDenseGroupDomain> dense_domain = nullptr) {
+	SljitTryReserveGroupedAggregateGroups(runtime, op_idx, op, grouped_state);
 	auto stage_start = SljitRegionStageStart(runtime);
 	auto update_state = SljitBuildGroupedStateAddressUpdateState(op, input, payload_lanes, payload_scratch);
 	const char *stage_name = "direct_new_grouped_primitive_payload_update";
@@ -128,6 +153,7 @@ static bool TryExecuteDirectProjectedGroupedStateAddressPayloadUpdate(
 	if (groups.size() != payload_input.size()) {
 		return false;
 	}
+	SljitTryReserveGroupedAggregateGroups(runtime, op_idx, op, grouped_state);
 	auto stage_start = SljitRegionStageStart(runtime);
 	auto update_state = SljitBuildGroupedStateAddressUpdateState(op, payload_input, payload_lanes, payload_scratch,
 	                                                             &payload_source_indices);
