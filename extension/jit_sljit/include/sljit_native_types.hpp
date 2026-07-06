@@ -8,6 +8,8 @@
 
 #pragma once
 
+#include "duckdb/common/types/hugeint.hpp"
+#include "duckdb/common/types/uhugeint.hpp"
 #include "duckdb/common/vector/unified_vector_format.hpp"
 #include "duckdb/execution/execution_expression_ir.hpp"
 
@@ -97,8 +99,51 @@ static inline bool SljitHashJoinKeyKindMatchesPhysicalType(SljitNativeHashJoinKe
 	return SljitTryGetHashJoinKeyKind(physical_type, physical_key_kind) && key_kind == physical_key_kind;
 }
 
+static inline bool SljitHashJoinKeyCanUseInt64SourceForInt32Key(idx_t key_idx, SljitNativeHashJoinKeyKind key_kind,
+                                                                PhysicalType source_type) {
+	return key_idx == 0 && key_kind == SljitNativeHashJoinKeyKind::INT32 && source_type == PhysicalType::INT64;
+}
+
 static inline bool SljitHashJoinKeyKindIs128(SljitNativeHashJoinKeyKind kind) {
 	return kind == SljitNativeHashJoinKeyKind::INT128 || kind == SljitNativeHashJoinKeyKind::UINT128;
+}
+
+template <class DISPATCH>
+static bool SljitDispatchHashJoinKeyKind(SljitNativeHashJoinKeyKind kind, DISPATCH &dispatch) {
+	switch (kind) {
+	case SljitNativeHashJoinKeyKind::INT8:
+		dispatch.template Execute<int8_t>();
+		return true;
+	case SljitNativeHashJoinKeyKind::INT16:
+		dispatch.template Execute<int16_t>();
+		return true;
+	case SljitNativeHashJoinKeyKind::INT32:
+		dispatch.template Execute<int32_t>();
+		return true;
+	case SljitNativeHashJoinKeyKind::INT64:
+		dispatch.template Execute<int64_t>();
+		return true;
+	case SljitNativeHashJoinKeyKind::INT128:
+		dispatch.template Execute<hugeint_t>();
+		return true;
+	case SljitNativeHashJoinKeyKind::UINT8:
+		dispatch.template Execute<uint8_t>();
+		return true;
+	case SljitNativeHashJoinKeyKind::UINT16:
+		dispatch.template Execute<uint16_t>();
+		return true;
+	case SljitNativeHashJoinKeyKind::UINT32:
+		dispatch.template Execute<uint32_t>();
+		return true;
+	case SljitNativeHashJoinKeyKind::UINT64:
+		dispatch.template Execute<uint64_t>();
+		return true;
+	case SljitNativeHashJoinKeyKind::UINT128:
+		dispatch.template Execute<uhugeint_t>();
+		return true;
+	default:
+		return false;
+	}
 }
 
 enum class SljitHashJoinProbeLayoutKind : int8_t {

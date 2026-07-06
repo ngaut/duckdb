@@ -13,38 +13,27 @@
 #include "sljit_region_runtime_trace.hpp"
 
 #include "duckdb/common/exception.hpp"
-#include "duckdb/common/types/hugeint.hpp"
-#include "duckdb/common/types/uhugeint.hpp"
 #include "duckdb/common/vector/flat_vector.hpp"
 #include "duckdb/execution/execution_hash_join_runtime.hpp"
 
 namespace duckdb {
 
+struct SljitUnifiedHashJoinKeySourceDataDispatch {
+	UnifiedVectorFormat &format;
+	const_data_ptr_t data = nullptr;
+
+	template <class T>
+	void Execute() {
+		data = reinterpret_cast<const_data_ptr_t>(UnifiedVectorFormat::GetData<T>(format));
+	}
+};
+
 const_data_ptr_t NativeHashJoinKeySourceData(UnifiedVectorFormat &format, SljitNativeHashJoinKeyKind kind) {
-	switch (kind) {
-	case SljitNativeHashJoinKeyKind::INT8:
-		return reinterpret_cast<const_data_ptr_t>(UnifiedVectorFormat::GetData<int8_t>(format));
-	case SljitNativeHashJoinKeyKind::INT16:
-		return reinterpret_cast<const_data_ptr_t>(UnifiedVectorFormat::GetData<int16_t>(format));
-	case SljitNativeHashJoinKeyKind::INT32:
-		return reinterpret_cast<const_data_ptr_t>(UnifiedVectorFormat::GetData<int32_t>(format));
-	case SljitNativeHashJoinKeyKind::INT64:
-		return reinterpret_cast<const_data_ptr_t>(UnifiedVectorFormat::GetData<int64_t>(format));
-	case SljitNativeHashJoinKeyKind::INT128:
-		return reinterpret_cast<const_data_ptr_t>(UnifiedVectorFormat::GetData<hugeint_t>(format));
-	case SljitNativeHashJoinKeyKind::UINT8:
-		return reinterpret_cast<const_data_ptr_t>(UnifiedVectorFormat::GetData<uint8_t>(format));
-	case SljitNativeHashJoinKeyKind::UINT16:
-		return reinterpret_cast<const_data_ptr_t>(UnifiedVectorFormat::GetData<uint16_t>(format));
-	case SljitNativeHashJoinKeyKind::UINT32:
-		return reinterpret_cast<const_data_ptr_t>(UnifiedVectorFormat::GetData<uint32_t>(format));
-	case SljitNativeHashJoinKeyKind::UINT64:
-		return reinterpret_cast<const_data_ptr_t>(UnifiedVectorFormat::GetData<uint64_t>(format));
-	case SljitNativeHashJoinKeyKind::UINT128:
-		return reinterpret_cast<const_data_ptr_t>(UnifiedVectorFormat::GetData<uhugeint_t>(format));
-	default:
+	SljitUnifiedHashJoinKeySourceDataDispatch dispatch {format};
+	if (!SljitDispatchHashJoinKeyKind(kind, dispatch)) {
 		throw InternalException("Unknown SLJIT native hash join key kind");
 	}
+	return dispatch.data;
 }
 
 SljitHashJoinProbeLayoutKind SljitHashJoinTableLayoutKind(const ExecutionHashJoinTableLayout &layout) {
@@ -93,9 +82,9 @@ SljitValidatePerfectHashJoinProbeExecutionLayout(const SljitNativeHashJoinProbeP
 		throw InternalException("SLJIT native perfect hash join probe key binding mismatch");
 	}
 	const auto source_physical_type = input.data[key.key_input_index].GetType().InternalType();
-	const bool source_key0_int64_to_int32 = key.key_kind == SljitNativeHashJoinKeyKind::INT32 &&
-	                                        source_physical_type == PhysicalType::INT64 &&
-	                                        perfect_layout.key_physical_type == PhysicalType::INT32;
+	const bool source_key0_int64_to_int32 =
+	    SljitHashJoinKeyCanUseInt64SourceForInt32Key(0, key.key_kind, source_physical_type) &&
+	    perfect_layout.key_physical_type == PhysicalType::INT32;
 	if (!source_key0_int64_to_int32 && source_physical_type != perfect_layout.key_physical_type) {
 		throw InternalException("SLJIT native perfect hash join probe key type mismatch");
 	}
@@ -108,9 +97,8 @@ void SljitPreparePerfectHashJoinProbeInput(const SljitNativeHashJoinProbeKeyPlan
                                            SljitHashJoinProbeDrainState &state, bool allow_unchecked_int64_to_int32,
                                            SljitPreparedPerfectHashJoinProbeInput &result) {
 	input.data[key.key_input_index].ToUnifiedFormat(result.source_format);
-	const bool source_key0_int64_to_int32 =
-	    key.key_kind == SljitNativeHashJoinKeyKind::INT32 &&
-	    input.data[key.key_input_index].GetType().InternalType() == PhysicalType::INT64;
+	const bool source_key0_int64_to_int32 = SljitHashJoinKeyCanUseInt64SourceForInt32Key(
+	    0, key.key_kind, input.data[key.key_input_index].GetType().InternalType());
 
 	auto &native_input = result.native_input;
 	native_input.source_data =

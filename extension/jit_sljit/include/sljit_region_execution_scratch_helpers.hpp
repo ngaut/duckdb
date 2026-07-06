@@ -16,39 +16,28 @@
 
 #include "duckdb/common/allocator.hpp"
 #include "duckdb/common/exception.hpp"
-#include "duckdb/common/types/hugeint.hpp"
-#include "duckdb/common/types/uhugeint.hpp"
 #include "duckdb/common/types/vector.hpp"
 #include "duckdb/common/vector/flat_vector.hpp"
 #include "duckdb/execution/execution_operator_runtime.hpp"
 
 namespace duckdb {
 
+struct SljitFlatHashJoinKeySourceDataDispatch {
+	Vector &source;
+	const_data_ptr_t data = nullptr;
+
+	template <class T>
+	void Execute() {
+		data = reinterpret_cast<const_data_ptr_t>(FlatVector::GetData<T>(source));
+	}
+};
+
 static const_data_ptr_t SljitFlatHashJoinKeySourceData(Vector &source, SljitNativeHashJoinKeyKind kind) {
-	switch (kind) {
-	case SljitNativeHashJoinKeyKind::INT8:
-		return reinterpret_cast<const_data_ptr_t>(FlatVector::GetData<int8_t>(source));
-	case SljitNativeHashJoinKeyKind::INT16:
-		return reinterpret_cast<const_data_ptr_t>(FlatVector::GetData<int16_t>(source));
-	case SljitNativeHashJoinKeyKind::INT32:
-		return reinterpret_cast<const_data_ptr_t>(FlatVector::GetData<int32_t>(source));
-	case SljitNativeHashJoinKeyKind::INT64:
-		return reinterpret_cast<const_data_ptr_t>(FlatVector::GetData<int64_t>(source));
-	case SljitNativeHashJoinKeyKind::INT128:
-		return reinterpret_cast<const_data_ptr_t>(FlatVector::GetData<hugeint_t>(source));
-	case SljitNativeHashJoinKeyKind::UINT8:
-		return reinterpret_cast<const_data_ptr_t>(FlatVector::GetData<uint8_t>(source));
-	case SljitNativeHashJoinKeyKind::UINT16:
-		return reinterpret_cast<const_data_ptr_t>(FlatVector::GetData<uint16_t>(source));
-	case SljitNativeHashJoinKeyKind::UINT32:
-		return reinterpret_cast<const_data_ptr_t>(FlatVector::GetData<uint32_t>(source));
-	case SljitNativeHashJoinKeyKind::UINT64:
-		return reinterpret_cast<const_data_ptr_t>(FlatVector::GetData<uint64_t>(source));
-	case SljitNativeHashJoinKeyKind::UINT128:
-		return reinterpret_cast<const_data_ptr_t>(FlatVector::GetData<uhugeint_t>(source));
-	default:
+	SljitFlatHashJoinKeySourceDataDispatch dispatch {source};
+	if (!SljitDispatchHashJoinKeyKind(kind, dispatch)) {
 		throw InternalException("Unknown SLJIT native hash join key kind");
 	}
+	return dispatch.data;
 }
 
 struct SljitHashJoinProbeSourceScratch {
@@ -64,8 +53,8 @@ struct SljitHashJoinProbeSourceScratch {
 		for (idx_t key_idx = 0; key_idx < plan.keys.size(); key_idx++) {
 			auto &key = plan.keys[key_idx];
 			auto &source_vector = input.data[key.key_input_index];
-			if (key_idx == 0 && key.key_kind == SljitNativeHashJoinKeyKind::INT32 &&
-			    source_vector.GetType().InternalType() == PhysicalType::INT64) {
+			if (SljitHashJoinKeyCanUseInt64SourceForInt32Key(key_idx, key.key_kind,
+			                                                 source_vector.GetType().InternalType())) {
 				if (source_vector.GetVectorType() == VectorType::FLAT_VECTOR &&
 				    sources.PrepareFlatSource(
 				        input, key.key_input_index, key_idx,

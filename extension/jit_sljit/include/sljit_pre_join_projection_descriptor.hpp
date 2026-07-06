@@ -210,7 +210,8 @@ static bool SljitTryBuildPreJoinProjectionViewDescriptor(const vector<SljitExecu
 			continue;
 		}
 		if (column.kind == SljitPreJoinProjectionViewColumnKind::INT64_TO_INT32_CAST &&
-		    !(key_idx == 0 && key.key_input_index == 0 && key.key_kind == SljitNativeHashJoinKeyKind::INT32)) {
+		    !(key.key_input_index == 0 &&
+		      SljitHashJoinKeyCanUseInt64SourceForInt32Key(key_idx, key.key_kind, column.source_type.InternalType()))) {
 			descriptor.hash_probe_key_inputs_match_source = false;
 			descriptor.hash_probe_key_inputs_can_remap = false;
 			continue;

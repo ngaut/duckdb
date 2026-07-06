@@ -1087,7 +1087,11 @@ def verify_hash_probe_key_source_contract() -> None:
             "SljitTryGetHashJoinKeyKind(PhysicalType physical_type",
             "case PhysicalType::BOOL:",
             "SljitHashJoinKeyKindMatchesPhysicalType",
+            "SljitHashJoinKeyCanUseInt64SourceForInt32Key",
             "SljitHashJoinKeyKindIs128",
+            "SljitDispatchHashJoinKeyKind",
+            "dispatch.template Execute<hugeint_t>()",
+            "dispatch.template Execute<uhugeint_t>()",
         ),
     )
     require_text(
@@ -1101,6 +1105,9 @@ def verify_hash_probe_key_source_contract() -> None:
     require_text(
         "extension/jit_sljit/sljit_hash_join_runtime.cpp",
         (
+            "struct SljitUnifiedHashJoinKeySourceDataDispatch",
+            "SljitDispatchHashJoinKeyKind(kind, dispatch)",
+            "SljitHashJoinKeyCanUseInt64SourceForInt32Key(0, key.key_kind, source_physical_type)",
             "perfect_layout.key_physical_type == PhysicalType::INT32",
             "UnifiedVectorFormat::GetData<int64_t>",
             "native_input.source_key0_int64_to_int32 = source_key0_int64_to_int32",
@@ -1124,11 +1131,25 @@ def verify_hash_probe_key_source_contract() -> None:
     )
     require_text(
         "extension/jit_sljit/include/sljit_hash_join_probe_primitive.hpp",
-        ("SljitHashJoinKeyKindMatchesPhysicalType(key.key_kind, source_type)",),
+        (
+            "SljitHashJoinKeyKindMatchesPhysicalType(key.key_kind, source_type)",
+            "SljitHashJoinKeyCanUseInt64SourceForInt32Key(key_idx, key.key_kind, source_type)",
+        ),
     )
     require_text(
         "extension/jit_sljit/include/sljit_pre_join_projection_descriptor.hpp",
-        ("SljitHashJoinKeyKindMatchesPhysicalType(key.key_kind, column.source_type.InternalType())",),
+        (
+            "SljitHashJoinKeyKindMatchesPhysicalType(key.key_kind, column.source_type.InternalType())",
+            "SljitHashJoinKeyCanUseInt64SourceForInt32Key(key_idx, key.key_kind",
+        ),
+    )
+    require_text(
+        "extension/jit_sljit/include/sljit_region_execution_scratch_helpers.hpp",
+        (
+            "struct SljitFlatHashJoinKeySourceDataDispatch",
+            "SljitDispatchHashJoinKeyKind(kind, dispatch)",
+            "SljitHashJoinKeyCanUseInt64SourceForInt32Key(key_idx, key.key_kind",
+        ),
     )
     reject_text(
         "extension/jit_sljit/sljit_region_join_plan.cpp",
@@ -1145,6 +1166,20 @@ def verify_hash_probe_key_source_contract() -> None:
     reject_text(
         "extension/jit_sljit/include/sljit_hash_join_probe_key_codegen.hpp",
         ("static inline bool SljitHashJoinKeyKindIs128",),
+    )
+    reject_text(
+        "extension/jit_sljit/sljit_hash_join_runtime.cpp",
+        (
+            "UnifiedVectorFormat::GetData<hugeint_t>",
+            "UnifiedVectorFormat::GetData<uhugeint_t>",
+        ),
+    )
+    reject_text(
+        "extension/jit_sljit/include/sljit_region_execution_scratch_helpers.hpp",
+        (
+            "FlatVector::GetData<hugeint_t>",
+            "FlatVector::GetData<uhugeint_t>",
+        ),
     )
     reject_regex(
         "regular-only remapped hash probe contract",

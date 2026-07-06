@@ -119,7 +119,7 @@ static bool SljitPreparedHashJoinRemapKeySourceSupported(const SljitNativeHashJo
 	if (SljitHashJoinKeyKindMatchesPhysicalType(key.key_kind, source_type)) {
 		return true;
 	}
-	return key_idx == 0 && key.key_kind == SljitNativeHashJoinKeyKind::INT32 && source_type == PhysicalType::INT64;
+	return SljitHashJoinKeyCanUseInt64SourceForInt32Key(key_idx, key.key_kind, source_type);
 }
 
 static void SljitApplyPreparedHashJoinResidualProbeSourceRemap(ExecutionRegionOperatorInfo &operator_info,
