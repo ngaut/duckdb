@@ -154,76 +154,31 @@ public:
 	}
 
 	SljitFullPipelineRecipe
-	MakeSingleJoinDirectProjectionAggregateRecipe(const SljitFullPipelineProjectionAggregateShape &shape,
-	                                              const SljitProjectionAggregatePrefixFacts &facts) const {
-		auto post_join_aggregate = BindPostJoinProjectionAggregatePrimitive(shape, facts.first_hash_join_idx);
-		auto sequence = MakeSourceSequence();
-		if (facts.HasSourceFilterProjection()) {
-			auto generated_filter = SljitBindGeneratedFilterPrimitive(ops, facts.source_filter_idx);
-			sequence.Add(SljitFullPipelinePrimitiveStep::GeneratedFilter(generated_filter));
-			AddProjectionChainStep(sequence, facts.source_projection_idx);
-			sequence.Add(MakeHashJoinProbeSelectionStep(facts.first_hash_join_idx));
-		} else if (facts.HasPreJoinProjection()) {
-			SljitPreJoinProjectionViewDescriptor pre_join_view;
-			const auto has_pre_join_view =
-			    TryBuildPreJoinProjectionView(facts.pre_join_projection_idx, facts.first_hash_join_idx, pre_join_view);
-			SljitStringSetCaseGroupedPayloadProjection string_set_case_projection;
-			if (has_pre_join_view &&
-			    SljitTryBuildStringSetCaseGroupedPayloadProjection(
-			        ops, pre_join_view, post_join_aggregate.post_join_projection.first_projection_idx,
-			        post_join_aggregate.post_join_projection.final_projection_idx, string_set_case_projection)) {
-				post_join_aggregate.post_join_projection.EnableStringSetCaseGroupedPayload(string_set_case_projection);
-			}
-			optional_ptr<const SljitPreJoinProjectionViewDescriptor> pre_join_view_ptr;
-			if (has_pre_join_view) {
-				pre_join_view_ptr = pre_join_view;
-			}
-			sequence = MakePreJoinProjectionHashJoinSelectionSequence(
-			    facts.pre_join_projection_idx, facts.first_hash_join_idx, true, pre_join_view_ptr);
+	MakeJoinDirectProjectionAggregateRecipe(const SljitFullPipelineProjectionAggregateShape &shape,
+	                                        const SljitProjectionAggregatePrefixFacts &facts) const {
+		const auto aggregate_join_idx =
+		    facts.HasSecondHashJoin() ? facts.second_hash_join_idx : facts.first_hash_join_idx;
+		auto post_join_aggregate = BindPostJoinProjectionAggregatePrimitive(shape, aggregate_join_idx);
+		SljitFullPipelinePrimitiveSequence sequence;
+		if (facts.HasSecondHashJoin()) {
+			sequence = MakeSecondJoinPrefixSequence(facts);
 		} else {
-			AddSourceBatchBoundaryIfUseful(sequence, facts.first_hash_join_idx);
-			sequence.Add(MakeHashJoinProbeSelectionStep(facts.first_hash_join_idx));
+			sequence = MakeSingleJoinDirectPrefixSequence(facts, post_join_aggregate);
 		}
-		sequence.Add(MakeJoinProjectionAggregateTerminal(post_join_aggregate));
-		return MakePrimitiveSequence(std::move(sequence));
-	}
-
-	SljitFullPipelineRecipe
-	MakeSingleJoinProjectionAggregateTailRecipe(const SljitFullPipelineProjectionAggregateShape &shape,
-	                                            const SljitProjectionAggregatePrefixFacts &facts) const {
-		auto sequence = MakeSourceSequence();
-		if (facts.HasPreJoinProjection() && !facts.HasSourceFilterProjection() &&
-		    TryAppendElidedPreJoinHashJoinProbeSelection(sequence, facts.pre_join_projection_idx,
-		                                                 facts.first_hash_join_idx, false)) {
-			return MakeProjectionAggregateTailRecipe(std::move(sequence), shape);
-		}
-		AddProjectionAggregateFirstJoinPrefix(sequence, facts);
-		sequence.Add(MakeHashJoinProbeProjectionInputStep(facts.first_hash_join_idx));
-		return MakeProjectionAggregateTailRecipe(std::move(sequence), shape);
-	}
-
-	SljitFullPipelineRecipe
-	MakeTwoJoinProjectionAggregateRecipe(const SljitFullPipelineProjectionAggregateShape &shape,
-	                                     const SljitProjectionAggregatePrefixFacts &facts) const {
-		auto sequence = MakeProjectionAggregateFirstJoinInputSequence(facts);
-		if (facts.HasBetweenProjection()) {
-			AddProjectionChainStep(sequence, facts.between_projection_idx);
-		}
-		sequence.Add(MakeHashJoinProbeSelectionStep(facts.second_hash_join_idx));
-		return MakeProjectionAggregateTailRecipe(std::move(sequence), shape);
-	}
-
-	SljitFullPipelineRecipe
-	MakeTwoJoinDirectProjectionAggregateRecipe(const SljitFullPipelineProjectionAggregateShape &shape,
-	                                           const SljitProjectionAggregatePrefixFacts &facts) const {
-		auto post_join_aggregate = BindPostJoinProjectionAggregatePrimitive(shape, facts.second_hash_join_idx);
-		auto sequence = MakeProjectionAggregateFirstJoinInputSequence(facts);
-		if (facts.HasBetweenProjection()) {
-			AddProjectionChainStep(sequence, facts.between_projection_idx);
-		}
-		sequence.Add(MakeHashJoinProbeSelectionStep(facts.second_hash_join_idx));
 		sequence.Add(SljitFullPipelinePrimitiveStep::PostJoinProjectionAggregateUpdate(post_join_aggregate));
 		return MakePrimitiveSequence(std::move(sequence));
+	}
+
+	SljitFullPipelineRecipe
+	MakeJoinProjectionAggregateTailRecipe(const SljitFullPipelineProjectionAggregateShape &shape,
+	                                      const SljitProjectionAggregatePrefixFacts &facts) const {
+		SljitFullPipelinePrimitiveSequence sequence;
+		if (facts.HasSecondHashJoin()) {
+			sequence = MakeSecondJoinPrefixSequence(facts);
+		} else {
+			sequence = MakeSingleJoinProjectionAggregateTailPrefixSequence(facts);
+		}
+		return MakeProjectionAggregateTailRecipe(std::move(sequence), shape);
 	}
 
 	SljitFullPipelineRecipe
@@ -266,6 +221,62 @@ private:
 		auto sequence = MakeSourceSequence();
 		AddProjectionAggregateFirstJoinPrefix(sequence, facts);
 		sequence.Add(MakeHashJoinProbeProjectionInputStep(facts.first_hash_join_idx));
+		return sequence;
+	}
+
+	SljitFullPipelinePrimitiveSequence
+	MakeSingleJoinDirectPrefixSequence(const SljitProjectionAggregatePrefixFacts &facts,
+	                                   SljitPostJoinProjectionAggregatePrimitive &post_join_aggregate) const {
+		auto sequence = MakeSourceSequence();
+		if (facts.HasSourceFilterProjection()) {
+			auto generated_filter = SljitBindGeneratedFilterPrimitive(ops, facts.source_filter_idx);
+			sequence.Add(SljitFullPipelinePrimitiveStep::GeneratedFilter(generated_filter));
+			AddProjectionChainStep(sequence, facts.source_projection_idx);
+			sequence.Add(MakeHashJoinProbeSelectionStep(facts.first_hash_join_idx));
+		} else if (facts.HasPreJoinProjection()) {
+			SljitPreJoinProjectionViewDescriptor pre_join_view;
+			const auto has_pre_join_view =
+			    TryBuildPreJoinProjectionView(facts.pre_join_projection_idx, facts.first_hash_join_idx, pre_join_view);
+			SljitStringSetCaseGroupedPayloadProjection string_set_case_projection;
+			if (has_pre_join_view &&
+			    SljitTryBuildStringSetCaseGroupedPayloadProjection(
+			        ops, pre_join_view, post_join_aggregate.post_join_projection.first_projection_idx,
+			        post_join_aggregate.post_join_projection.final_projection_idx, string_set_case_projection)) {
+				post_join_aggregate.post_join_projection.EnableStringSetCaseGroupedPayload(string_set_case_projection);
+			}
+			optional_ptr<const SljitPreJoinProjectionViewDescriptor> pre_join_view_ptr;
+			if (has_pre_join_view) {
+				pre_join_view_ptr = pre_join_view;
+			}
+			sequence = MakePreJoinProjectionHashJoinSelectionSequence(
+			    facts.pre_join_projection_idx, facts.first_hash_join_idx, true, pre_join_view_ptr);
+		} else {
+			AddSourceBatchBoundaryIfUseful(sequence, facts.first_hash_join_idx);
+			sequence.Add(MakeHashJoinProbeSelectionStep(facts.first_hash_join_idx));
+		}
+		return sequence;
+	}
+
+	SljitFullPipelinePrimitiveSequence
+	MakeSingleJoinProjectionAggregateTailPrefixSequence(const SljitProjectionAggregatePrefixFacts &facts) const {
+		auto sequence = MakeSourceSequence();
+		if (facts.HasPreJoinProjection() && !facts.HasSourceFilterProjection() &&
+		    TryAppendElidedPreJoinHashJoinProbeSelection(sequence, facts.pre_join_projection_idx,
+		                                                 facts.first_hash_join_idx, false)) {
+			return sequence;
+		}
+		AddProjectionAggregateFirstJoinPrefix(sequence, facts);
+		sequence.Add(MakeHashJoinProbeProjectionInputStep(facts.first_hash_join_idx));
+		return sequence;
+	}
+
+	SljitFullPipelinePrimitiveSequence
+	MakeSecondJoinPrefixSequence(const SljitProjectionAggregatePrefixFacts &facts) const {
+		auto sequence = MakeProjectionAggregateFirstJoinInputSequence(facts);
+		if (facts.HasBetweenProjection()) {
+			AddProjectionChainStep(sequence, facts.between_projection_idx);
+		}
+		sequence.Add(MakeHashJoinProbeSelectionStep(facts.second_hash_join_idx));
 		return sequence;
 	}
 
@@ -487,16 +498,6 @@ private:
 			throw InternalException("SLJIT post-join projection aggregate primitive cannot bind requested aggregate");
 		}
 		return post_join_aggregate;
-	}
-
-	SljitFullPipelinePrimitiveStep
-	MakeJoinProjectionAggregateTerminal(const SljitPostJoinProjectionAggregatePrimitive &post_join_aggregate) const {
-		return SljitFullPipelinePrimitiveStep::PostJoinProjectionAggregateUpdate(post_join_aggregate);
-	}
-
-	bool SourceKey0RangeFitsInt32(idx_t hash_join_idx) const {
-		return hash_join_idx == 0 &&
-		       SljitHashJoinSourceKey0RangeFitsInt32(ops, hash_join_idx, source_min_values, source_max_values);
 	}
 
 	bool SourceBatchBoundaryCanCoalesce(idx_t consumer_op_idx) const {

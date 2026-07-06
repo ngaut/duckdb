@@ -1597,15 +1597,12 @@ def verify_primitive_sequence() -> None:
             "SljitProjectionAggregatePrefixKind::SINGLE_JOIN",
             "SljitProjectionAggregatePrefixKind::TWO_JOIN",
             "&SljitProjectionAggregateRecipeBuilder::TryBuildSourceProjectionAggregate",
-            "&SljitProjectionAggregateRecipeBuilder::TryBuildSingleJoinProjectionAggregate",
-            "&SljitProjectionAggregateRecipeBuilder::TryBuildTwoJoinProjectionAggregate",
+            "&SljitProjectionAggregateRecipeBuilder::TryBuildJoinProjectionAggregate",
             "HasMarkFilterBoundary",
             "TryBuildMarkBoundary",
-            "SingleJoinCanUseDirectAggregate",
-            "SingleJoinCanUseDirectAggregateShape",
-            "TwoJoinCanUseDirectAggregate",
-            "TwoJoinCanUseProjectionAggregateTailPrefix",
-            "CanBindSecondHashJoinSelection",
+            "JoinCanUseDirectAggregate",
+            "JoinCanUseProjectionAggregateTail",
+            "JoinProjectionAggregateTailPrefixCanBind",
         ),
     )
     reject_text(
@@ -1628,6 +1625,14 @@ def verify_primitive_sequence() -> None:
             "TryBuildTwoJoinPreparedRecipe",
             "TryBuildTwoJoinDirectAggregate",
             "TryBuildTwoJoinMaterializedTail",
+            "TryBuildSingleJoinProjectionAggregate",
+            "TryBuildTwoJoinProjectionAggregate",
+            "SingleJoinCanUseDirectAggregate",
+            "SingleJoinCanUseDirectAggregateShape",
+            "SingleJoinCanUseProjectionAggregateTail",
+            "TwoJoinCanUseDirectAggregate",
+            "TwoJoinCanUseProjectionAggregateTailPrefix",
+            "CanBindSecondHashJoinSelection",
             "TwoJoinCanUseSelection",
             "TwoJoinCanUseProjectionAggregatePattern",
             "TwoJoinHasPreparedPrefix",
@@ -2065,8 +2070,6 @@ def verify_primitive_sequence() -> None:
     require_text(
         "extension/jit_sljit/include/sljit_full_pipeline_recipe_binding.hpp",
         (
-            "MakeJoinProjectionAggregateTerminal",
-            "SourceKey0RangeFitsInt32",
             "TryBuildPreJoinProjectionView",
             "BindElidedPreJoinHashJoinProbeSelection",
             "SljitPreJoinProjectionViewDescriptor pre_join_view",
@@ -2081,8 +2084,8 @@ def verify_primitive_sequence() -> None:
     )
     require_scoped_text(
         "extension/jit_sljit/include/sljit_full_pipeline_recipe_binding.hpp",
-        "MakeSingleJoinDirectProjectionAggregateRecipe",
-        "MakeSingleJoinProjectionAggregateTailRecipe",
+        "MakeSingleJoinDirectPrefixSequence(const SljitProjectionAggregatePrefixFacts &facts,",
+        "MakeSingleJoinProjectionAggregateTailPrefixSequence(const SljitProjectionAggregatePrefixFacts &facts) const",
         (
             "const SljitProjectionAggregatePrefixFacts &facts",
             "facts.HasSourceFilterProjection()",
@@ -2267,8 +2270,8 @@ def verify_recipe_builder() -> None:
             "MakeProjectionAggregateFirstJoinInputSequence",
             "AddProjectionAggregateFirstJoinPrefix",
             "MakeSourceProjectionAggregateRecipe",
-            "MakeSingleJoinDirectProjectionAggregateRecipe",
-            "MakeSingleJoinProjectionAggregateTailRecipe",
+            "MakeJoinDirectProjectionAggregateRecipe",
+            "MakeJoinProjectionAggregateTailRecipe",
             "MakeProjectionAggregateRecipe",
             "MakeProjectionGroupedAggregateRecipe",
             "MakeProjectionAggregateTailRecipe",
@@ -2285,8 +2288,9 @@ def verify_recipe_builder() -> None:
             "SljitFullPipelinePrimitiveStep::GroupedAggregateUpdate",
             "BindPostJoinProjectionAggregatePrimitive",
             "MakeSourceHashJoinProjectionInputSequence",
-            "MakeTwoJoinDirectProjectionAggregateRecipe",
-            "MakeTwoJoinProjectionAggregateRecipe",
+            "MakeSingleJoinDirectPrefixSequence",
+            "MakeSingleJoinProjectionAggregateTailPrefixSequence",
+            "MakeSecondJoinPrefixSequence",
             "const SljitProjectionAggregatePrefixFacts &facts",
             "facts.HasSourceFilterProjection()",
             "facts.HasPreJoinProjection()",
@@ -2388,6 +2392,8 @@ def verify_recipe_builder() -> None:
     reject_text(
         "extension/jit_sljit/include/sljit_full_pipeline_recipe_binding.hpp",
         (
+            "MakeJoinProjectionAggregateTerminal(",
+            "bool SourceKey0RangeFitsInt32(",
             "SljitMakeSourceJoinProjectionAggregateUpdatePrimitive",
             "source_join.ExecuteSourceChunk",
             "compact_source_contract_output",
@@ -2500,16 +2506,13 @@ def verify_recipe_builder() -> None:
             "(this->*registry[entry_idx].try_build)(recipe, plan)",
             "TryBuildSourceProjectionAggregate",
             "TryBuildMarkBoundary",
-            "TryBuildSingleJoinProjectionAggregate",
-            "TryBuildTwoJoinProjectionAggregate",
+            "TryBuildJoinProjectionAggregate",
             "HasMarkFilterBoundary",
-            "SingleJoinCanUseProjectionAggregateTail",
+            "JoinCanUseDirectAggregate",
+            "JoinCanUseProjectionAggregateTail",
+            "JoinProjectionAggregateTailPrefixCanBind",
             "plan.ProjectionCount() == 0",
             "projection_count != 0 && projection_count != 1",
-            "CanBindSecondHashJoinSelection",
-            "SingleJoinCanUseDirectAggregateShape",
-            "TwoJoinCanUseDirectAggregate",
-            "TwoJoinCanUseProjectionAggregateTailPrefix",
             "CanBindHashJoinProbeProjectionInput",
             "CanBindHashJoinProbeProjectionInput(facts.first_hash_join_idx)",
             "ProjectionAggregateHasDedicatedBackend(shape)",
@@ -2572,6 +2575,12 @@ def verify_recipe_builder() -> None:
             "switch (variant)",
             "TryBuildSingleJoinProjectionAggregate",
             "TryBuildTwoJoinProjectionAggregate",
+            "SingleJoinCanUseDirectAggregate",
+            "SingleJoinCanUseDirectAggregateShape",
+            "SingleJoinCanUseProjectionAggregateTail",
+            "TwoJoinCanUseDirectAggregate",
+            "TwoJoinCanUseProjectionAggregateTailPrefix",
+            "CanBindSecondHashJoinSelection",
             "SingleJoinHasMarkFilterBoundary",
             "TwoJoinHasMarkFilterBoundary",
             "TryBuildSingleJoinMarkBoundary",
@@ -2635,10 +2644,10 @@ def verify_recipe_builder() -> None:
     reject_regex(
         "projection-fed two-join recipes must not force full first-join materialization",
         (
-            r"(?s)MakeTwoJoinProjectionAggregateRecipe.*?"
+            r"(?s)MakeSecondJoinPrefixSequence.*?"
             r"sequence\.Add\(MakeHashJoinProbeMaterializeStep\(facts\.first_hash_join_idx\)\);\s*"
             r"if \(facts\.HasBetweenProjection\(\)\)",
-            r"(?s)MakeTwoJoinProjectionAggregateRecipe.*?"
+            r"(?s)MakeSecondJoinPrefixSequence.*?"
             r"sequence\.Add\(MakeHashJoinProbeMaterializeStep\(facts\.first_hash_join_idx\)\);\s*"
             r"sequence\.Add\(MakeHashJoinProbeSelectionStep\(facts\.second_hash_join_idx\)\)",
         ),
