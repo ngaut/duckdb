@@ -192,22 +192,12 @@ public:
 	MakeSingleJoinProjectionAggregateTailRecipe(const SljitFullPipelineProjectionAggregateShape &shape,
 	                                            const SljitProjectionAggregatePrefixFacts &facts) const {
 		auto sequence = MakeSourceSequence();
-		if (facts.HasSourceFilterProjection()) {
-			auto generated_filter = SljitBindGeneratedFilterPrimitive(ops, facts.source_filter_idx);
-			sequence.Add(SljitFullPipelinePrimitiveStep::GeneratedFilter(generated_filter));
-			AddProjectionChainStep(sequence, facts.source_projection_idx);
+		if (facts.HasPreJoinProjection() && !facts.HasSourceFilterProjection() &&
+		    TryAppendElidedPreJoinHashJoinProbeSelection(sequence, facts.pre_join_projection_idx,
+		                                                 facts.first_hash_join_idx, false)) {
+			return MakeProjectionAggregateTailRecipe(std::move(sequence), shape);
 		}
-		if (facts.HasPreJoinProjection()) {
-			if (!facts.HasSourceFilterProjection()) {
-				if (TryAppendElidedPreJoinHashJoinProbeSelection(sequence, facts.pre_join_projection_idx,
-				                                                 facts.first_hash_join_idx, false)) {
-					return MakeProjectionAggregateTailRecipe(std::move(sequence), shape);
-				}
-			}
-			AddProjectionChainStep(sequence, facts.pre_join_projection_idx);
-		} else if (!facts.HasSourceFilterProjection()) {
-			AddSourceBatchBoundaryIfUseful(sequence, facts.first_hash_join_idx);
-		}
+		AddProjectionAggregateFirstJoinPrefix(sequence, facts);
 		sequence.Add(MakeHashJoinProbeProjectionInputStep(facts.first_hash_join_idx));
 		return MakeProjectionAggregateTailRecipe(std::move(sequence), shape);
 	}
@@ -215,17 +205,7 @@ public:
 	SljitFullPipelineRecipe
 	MakeTwoJoinProjectionAggregateRecipe(const SljitFullPipelineProjectionAggregateShape &shape,
 	                                     const SljitProjectionAggregatePrefixFacts &facts) const {
-		auto sequence = MakeSourceSequence();
-		if (facts.HasSourceFilterProjection()) {
-			auto generated_filter = SljitBindGeneratedFilterPrimitive(ops, facts.source_filter_idx);
-			sequence.Add(SljitFullPipelinePrimitiveStep::GeneratedFilter(generated_filter));
-			AddProjectionChainStep(sequence, facts.source_projection_idx);
-		} else if (facts.HasPreJoinProjection()) {
-			AddProjectionChainStep(sequence, facts.pre_join_projection_idx);
-		} else {
-			AddSourceBatchBoundaryIfUseful(sequence, facts.first_hash_join_idx);
-		}
-		sequence.Add(MakeHashJoinProbeProjectionInputStep(facts.first_hash_join_idx));
+		auto sequence = MakeProjectionAggregateFirstJoinInputSequence(facts);
 		if (facts.HasBetweenProjection()) {
 			AddProjectionChainStep(sequence, facts.between_projection_idx);
 		}
@@ -237,7 +217,7 @@ public:
 	MakeTwoJoinDirectProjectionAggregateRecipe(const SljitFullPipelineProjectionAggregateShape &shape,
 	                                           const SljitProjectionAggregatePrefixFacts &facts) const {
 		auto post_join_aggregate = BindPostJoinProjectionAggregatePrimitive(shape, facts.second_hash_join_idx);
-		auto sequence = MakeSourceHashJoinProjectionInputSequence(facts.first_hash_join_idx);
+		auto sequence = MakeProjectionAggregateFirstJoinInputSequence(facts);
 		if (facts.HasBetweenProjection()) {
 			AddProjectionChainStep(sequence, facts.between_projection_idx);
 		}
@@ -279,6 +259,28 @@ private:
 		SljitFullPipelinePrimitiveSequence sequence;
 		sequence.Add(SljitFullPipelinePrimitiveStep::SourceFetch());
 		return sequence;
+	}
+
+	SljitFullPipelinePrimitiveSequence
+	MakeProjectionAggregateFirstJoinInputSequence(const SljitProjectionAggregatePrefixFacts &facts) const {
+		auto sequence = MakeSourceSequence();
+		AddProjectionAggregateFirstJoinPrefix(sequence, facts);
+		sequence.Add(MakeHashJoinProbeProjectionInputStep(facts.first_hash_join_idx));
+		return sequence;
+	}
+
+	void AddProjectionAggregateFirstJoinPrefix(SljitFullPipelinePrimitiveSequence &sequence,
+	                                           const SljitProjectionAggregatePrefixFacts &facts) const {
+		if (facts.HasSourceFilterProjection()) {
+			auto generated_filter = SljitBindGeneratedFilterPrimitive(ops, facts.source_filter_idx);
+			sequence.Add(SljitFullPipelinePrimitiveStep::GeneratedFilter(generated_filter));
+			AddProjectionChainStep(sequence, facts.source_projection_idx);
+		}
+		if (facts.HasPreJoinProjection()) {
+			AddProjectionChainStep(sequence, facts.pre_join_projection_idx);
+		} else if (!facts.HasSourceFilterProjection()) {
+			AddSourceBatchBoundaryIfUseful(sequence, facts.first_hash_join_idx);
+		}
 	}
 
 	SljitFullPipelinePrimitiveStep MakeProjectionChainStep(idx_t projection_idx) const {
