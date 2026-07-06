@@ -13,6 +13,7 @@
 #include "sljit_grouped_aggregate_update_primitive.hpp"
 #include "sljit_grouped_aggregate_update_runtime.hpp"
 #include "sljit_projection_expression_runtime.hpp"
+#include "sljit_projected_input_grouped_aggregate_descriptor.hpp"
 #include "sljit_region_runtime_state.hpp"
 #include "sljit_runtime_batch_view.hpp"
 

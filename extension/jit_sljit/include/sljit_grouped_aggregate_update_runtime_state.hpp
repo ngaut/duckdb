@@ -14,6 +14,7 @@
 #include "sljit_grouped_direct_aggregate_update_runtime_state.hpp"
 #include "sljit_grouped_aggregate_update_primitive.hpp"
 #include "sljit_grouped_count_star_update_runtime.hpp"
+#include "sljit_projected_grouped_aggregate_update_primitive.hpp"
 #include "sljit_region_runtime_state.hpp"
 #include "sljit_runtime_batch_view.hpp"
 #include "sljit_selected_hash_join_input_runtime.hpp"

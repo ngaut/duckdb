@@ -123,6 +123,7 @@ def verify_required_design_files() -> None:
         "extension/jit_sljit/include/sljit_grouped_aggregate_update_primitive.hpp",
         "extension/jit_sljit/include/sljit_grouped_direct_aggregate_update_runtime_state.hpp",
         "extension/jit_sljit/include/sljit_grouped_aggregate_update_runtime_state.hpp",
+        "extension/jit_sljit/include/sljit_projected_grouped_aggregate_update_primitive.hpp",
         "extension/jit_sljit/include/sljit_projected_input_grouped_aggregate_descriptor.hpp",
         "extension/jit_sljit/include/sljit_ungrouped_aggregate_update_primitive.hpp",
         "src/include/duckdb/execution/aggregate_hashtable.hpp",
@@ -582,6 +583,14 @@ def verify_runtime_batch_view() -> None:
             "SljitBoundGroupedPrimitiveAggregateUpdate bound_direct_update",
             "SljitBoundGroupedPrimitiveAggregateUpdate bound_projected_direct_update",
             "projected_direct_update = primitive.projected_direct_update",
+        ),
+    )
+    require_text(
+        "extension/jit_sljit/include/sljit_projected_grouped_aggregate_update_primitive.hpp",
+        (
+            "SljitTryBindProjectedInputGroupedAggregateUpdateStrategy",
+            "SljitBindProjectedInputGroupedAggregateUpdatePrimitive",
+            "const SljitGroupedAggregateUpdatePrimitive &primitive",
         ),
     )
     reject_regex(
@@ -2909,7 +2918,7 @@ def verify_distinct_aggregate_backend() -> None:
         "extension/jit_sljit/include/sljit_grouped_aggregate_update_primitive.hpp",
         (
             "enum class SljitGroupedAggregateUpdateStrategyKind",
-            "sljit_projected_input_grouped_aggregate_descriptor.hpp",
+            "struct SljitProjectedInputGroupedAggregateDescriptor",
             "SljitChooseGroupedAggregateUpdateStrategy",
             "SljitGroupedAggregateUpdateHasDedicatedBackend",
             "SljitGroupedAggregateUpdateCanUseCountStarPreaggregation",
@@ -2924,11 +2933,39 @@ def verify_distinct_aggregate_backend() -> None:
             "primitive.strategy",
             "shared_ptr<SljitExecutableRegionOp> projected_count_star_group_projection",
             "shared_ptr<SljitProjectedInputGroupedAggregateDescriptor> projected_direct_update",
+        ),
+    )
+    reject_text(
+        "extension/jit_sljit/include/sljit_grouped_aggregate_update_primitive.hpp",
+        (
+            "#include \"sljit_projection_chain_primitive.hpp\"",
+            "#include \"sljit_projected_input_grouped_aggregate_descriptor.hpp\"",
+            "SljitBuildProjectionChainComposedProjection",
+            "SljitTryBuildCountStarGroupProjection",
+            "SljitCountStarProjectionInputSupported",
+            "SljitTryBindProjectedCountStarGroupedAggregateStrategy",
+            "SljitTryBindProjectedDirectPrimitivePayloadUpdateStrategy",
+            "SljitTryBindProjectedInputGroupedAggregateUpdateStrategy",
+            "SljitBindProjectedInputGroupedAggregateUpdatePrimitive",
+            "SljitTryBuildProjectedInputGroupedAggregateDescriptor",
+            "make_shared_ptr<SljitExecutableRegionOp>",
+            "make_shared_ptr<SljitProjectedInputGroupedAggregateDescriptor>",
+        ),
+    )
+    require_text(
+        "extension/jit_sljit/include/sljit_projected_grouped_aggregate_update_primitive.hpp",
+        (
+            "SljitCountStarProjectionInputSupported",
+            "SljitTryBuildCountStarGroupProjection",
             "make_shared_ptr<SljitExecutableRegionOp>",
             "make_shared_ptr<SljitProjectedInputGroupedAggregateDescriptor>",
             "SljitTryBindProjectedCountStarGroupedAggregateStrategy",
             "SljitTryBindProjectedDirectPrimitivePayloadUpdateStrategy",
             "SljitTryBindProjectedInputGroupedAggregateUpdateStrategy",
+            "SljitCanBindProjectedInputGroupedAggregateUpdatePrimitive",
+            "SljitBindProjectedInputGroupedAggregateUpdatePrimitive",
+            "SljitBuildProjectionChainComposedProjection",
+            "const SljitGroupedAggregateUpdatePrimitive &primitive",
         ),
     )
     require_text(
