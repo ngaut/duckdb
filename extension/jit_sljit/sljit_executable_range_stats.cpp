@@ -223,6 +223,78 @@ static vector<Value> BuildSljitHashJoinProbeOutputRanges(const SljitNativeRegion
 	return result;
 }
 
+static bool SljitNativeIntegerPayloadPhysicalRange(const SljitNativeRegionExpressionPlan &payload,
+                                                   SljitExecutableInt128Range &result) {
+	switch (payload.integer_kind) {
+	case SljitNativeIntegerKind::UINT8:
+		result.min = Hugeint::Convert(0);
+		result.max = Hugeint::Convert(NumericLimits<uint8_t>::Maximum());
+		return true;
+	case SljitNativeIntegerKind::INT32:
+	case SljitNativeIntegerKind::DATE:
+		result.min = Hugeint::Convert(NumericLimits<int32_t>::Minimum());
+		result.max = Hugeint::Convert(NumericLimits<int32_t>::Maximum());
+		return true;
+	case SljitNativeIntegerKind::INT64:
+	case SljitNativeIntegerKind::DECIMAL64:
+		result.min = Hugeint::Convert(NumericLimits<int64_t>::Minimum());
+		result.max = Hugeint::Convert(NumericLimits<int64_t>::Maximum());
+		return true;
+	default:
+		return false;
+	}
+}
+
+static bool SljitRangeFits(const SljitExecutableInt128Range &range, const SljitExecutableInt128Range &bounds) {
+	return range.min >= bounds.min && range.max <= bounds.max;
+}
+
+static bool SljitPayloadSemanticRangeFits(const SljitNativeRegionExpressionPlan &payload,
+                                          const SljitExecutableInt128Range &range) {
+	SljitExecutableInt128Range bounds;
+	bounds.min = Hugeint::Convert(payload.result_min);
+	bounds.max = Hugeint::Convert(payload.result_max);
+	return SljitRangeFits(range, bounds);
+}
+
+static void SljitSpecializeIntegerBinaryPayloadRange(SljitNativeRegionExpressionPlan &payload,
+                                                     const vector<Value> &input_min_values,
+                                                     const vector<Value> &input_max_values) {
+	if (payload.kind != SljitNativeRegionExpressionKind::INTEGER_BINARY_CONSTANT &&
+	    payload.kind != SljitNativeRegionExpressionKind::INTEGER_BINARY_REFERENCES) {
+		return;
+	}
+	if (!payload.expression_tree || (!payload.check_arithmetic_overflow && !payload.check_result_range)) {
+		return;
+	}
+	SljitExecutableInt128Range result_range;
+	if (!SljitExecutableExpressionTreeRange(*payload.expression_tree, input_min_values, input_max_values,
+	                                        result_range)) {
+		return;
+	}
+	if (payload.check_arithmetic_overflow) {
+		SljitExecutableInt128Range physical_range;
+		if (SljitNativeIntegerPayloadPhysicalRange(payload, physical_range) &&
+		    SljitRangeFits(result_range, physical_range)) {
+			payload.check_arithmetic_overflow = false;
+		}
+	}
+	if (payload.check_result_range && SljitPayloadSemanticRangeFits(payload, result_range)) {
+		payload.check_result_range = false;
+	}
+}
+
+void SljitSpecializeAggregatePayloadRanges(SljitNativeAggregateUpdatePlan &aggregate_update,
+                                           const vector<Value> &input_min_values,
+                                           const vector<Value> &input_max_values) {
+	if (!aggregate_update.use_primitive_payloads) {
+		return;
+	}
+	for (auto &payload : aggregate_update.payloads) {
+		SljitSpecializeIntegerBinaryPayloadRange(payload, input_min_values, input_max_values);
+	}
+}
+
 void SljitUpdateExecutableCurrentRanges(const SljitNativeRegionOpPlan &op, vector<Value> &current_min_values,
                                         vector<Value> &current_max_values) {
 	switch (op.kind) {

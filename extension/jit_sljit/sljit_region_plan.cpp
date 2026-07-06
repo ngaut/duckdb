@@ -154,6 +154,17 @@ static void ApplySljitAggregateUpdateInputEstimate(SljitNativeRegionPlan &region
 	}
 }
 
+static void SpecializeSljitNativeRegionAggregatePayloadRanges(SljitNativeRegionPlan &region) {
+	auto current_min_values = region.source_min_values;
+	auto current_max_values = region.source_max_values;
+	for (auto &op : region.ops) {
+		if (op.kind == SljitNativeRegionOpKind::AGGREGATE_UPDATE) {
+			SljitSpecializeAggregatePayloadRanges(op.aggregate_update, current_min_values, current_max_values);
+		}
+		SljitUpdateExecutableCurrentRanges(op, current_min_values, current_max_values);
+	}
+}
+
 static void AddSljitLoweredNode(ExecutionRegionLoweringPlan &lowering_plan, const ExecutionRegionNode &node,
                                 const SljitRegionNodePlan &node_plan) {
 	if (node_plan.kind == ExecutionRegionLoweringKind::NATIVE) {
@@ -291,17 +302,18 @@ ExecutionRegionLoweringPlan BuildSljitRegionPlan(const ExecutionRegionIR &region
 				selected_source_contract.Merge(node_plan.source_contract);
 				native_region.uses_scan_filters =
 				    native_region.uses_scan_filters || node_plan.source_contract.uses_scan_filters;
-					vector<bool> source_not_null;
-					if (node.source && node.source->table_scan_contract.present) {
-						native_region.source_distinct_counts =
-						    BuildSljitSourceDistinctCountsForContractPlan(*node.source);
-						native_region.source_distinct_reserve_counts =
-						    BuildSljitSourceDistinctReserveCountsForContractPlan(*node.source);
-						native_region.source_min_values = BuildSljitSourceMinValuesForContractPlan(*node.source);
-						native_region.source_max_values = BuildSljitSourceMaxValuesForContractPlan(*node.source);
-						source_not_null = BuildSljitSourceNotNullForContractPlan(*node.source);
-						native_region.source_not_null = source_not_null;
-					}
+				vector<bool> source_not_null;
+				vector<Value> source_min_values;
+				vector<Value> source_max_values;
+				if (node.source && node.source->table_scan_contract.present) {
+					native_region.source_distinct_counts = BuildSljitSourceDistinctCountsForContractPlan(*node.source);
+					native_region.source_distinct_reserve_counts =
+					    BuildSljitSourceDistinctReserveCountsForContractPlan(*node.source);
+					native_region.source_min_values = BuildSljitSourceMinValuesForContractPlan(*node.source);
+					native_region.source_max_values = BuildSljitSourceMaxValuesForContractPlan(*node.source);
+					source_not_null = BuildSljitSourceNotNullForContractPlan(*node.source);
+					native_region.source_not_null = source_not_null;
+				}
 				cursor.AcceptSource(node, node_plan, std::move(source_not_null));
 			} else {
 				cursor.BreakAtBoundary(node.output_types);
@@ -312,7 +324,7 @@ ExecutionRegionLoweringPlan BuildSljitRegionPlan(const ExecutionRegionIR &region
 			auto node_plan =
 			    ExecutionRegionABIIsFullPipeline(contract.abi)
 			        ? PlanSljitFullPipelineSinkNode(node, cursor.InputTypes(), render_diagnostics)
-			    : candidate.context_has_missing_operator_contract
+			        : candidate.context_has_missing_operator_contract
 			        ? SljitRegionBoundaryNode("sink region requires upstream operators with native contracts")
 			        : PlanSljitRegionNode(node, cursor.InputTypes(), cursor.InputNotNull(), backend_error,
 			                              render_diagnostics);
@@ -353,6 +365,7 @@ ExecutionRegionLoweringPlan BuildSljitRegionPlan(const ExecutionRegionIR &region
 		FuseAdjacentNativeProjections(native_region, render_diagnostics);
 		FusePrimitiveAggregateUpdates(native_region, candidate.input_types, render_diagnostics);
 		ApplySljitAggregateUpdateInputEstimate(native_region, candidate.estimated_cardinality);
+		SpecializeSljitNativeRegionAggregatePayloadRanges(native_region);
 		if (candidate.estimated_cardinality < SLJIT_FLAT_NULLABLE_FAST_PATH_MIN_CARDINALITY) {
 			DisableSljitRegionFlatNullableFastPath(native_region);
 		}

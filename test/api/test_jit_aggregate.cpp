@@ -89,6 +89,44 @@ TEST_CASE("JIT fuses projection payloads into primitive ungrouped aggregate redu
 	REQUIRE(found_runtime);
 }
 
+TEST_CASE("JIT primitive decimal aggregate payloads elide stats-proven checks", "[api][jit]") {
+	DuckDB db;
+	Connection con(db);
+	auto &manager = ExecutionRegionManager::Get(*con.context);
+
+	ConfigureSljitForCoverage(con, false, true, true, 10000);
+	REQUIRE_NO_FAIL(con.Query("SET threads=1"));
+	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_decimal_primitive_safe_payload AS "
+	                          "SELECT CAST(i % 1000 AS DECIMAL(15,2)) AS extended_price, "
+	                          "       CAST(i % 10 AS DECIMAL(15,2)) AS discount "
+	                          "FROM range(10000) tbl(i)"));
+
+	const string query = "SELECT sum(extended_price * discount) FROM jit_decimal_primitive_safe_payload";
+	REQUIRE_NO_FAIL(con.Query("SET jit_policy='off'"));
+	auto reference = con.Query(query);
+	REQUIRE_NO_FAIL(*reference);
+
+	REQUIRE_NO_FAIL(con.Query("SET jit_policy='auto'"));
+	ClearJitTrace(manager, true);
+	auto result = con.Query(query);
+	REQUIRE_NO_FAIL(*result);
+	REQUIRE(result->GetValue(0, 0).ToString() == reference->GetValue(0, 0).ToString());
+
+	bool found_compile = false;
+	for (auto &event : manager.GetEvents()) {
+		if (!IsCompiledSljitRegionEvent(event) || !event.has_candidate ||
+		    event.candidate_traits.sink_kind != ExecutionRegionSinkKind::UNGROUPED_AGGREGATE_UPDATE ||
+		    !StringUtil::Contains(event.ir, "primitive_payloads=native:decimal64-multiply-references")) {
+			continue;
+		}
+		found_compile = true;
+		RequireGeneratedMachineCodeRegion(event);
+		REQUIRE(StringUtil::Contains(event.ir,
+		                             "primitive_payloads=native:decimal64-multiply-references:no-overflow:in-range"));
+	}
+	REQUIRE(found_compile);
+}
+
 TEST_CASE("JIT fuses generated filters into primitive ungrouped aggregate reducers", "[api][jit]") {
 	DuckDB db;
 	Connection con(db);

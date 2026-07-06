@@ -69,6 +69,10 @@ static string DescribeSljitExpressionTreeNode(const ExecutionExpressionIR &node)
 	return result;
 }
 
+static bool SljitExpressionHasSemanticRangeCheck(SljitNativeIntegerKind kind) {
+	return kind == SljitNativeIntegerKind::DECIMAL64 || kind == SljitNativeIntegerKind::DATE;
+}
+
 string DescribeNativeRegionExpression(const SljitNativeRegionExpressionPlan &expr) {
 	string result;
 	switch (expr.kind) {
@@ -85,11 +89,17 @@ string DescribeNativeRegionExpression(const SljitNativeRegionExpressionPlan &exp
 		if (!expr.check_arithmetic_overflow) {
 			result += ":no-overflow";
 		}
+		if (SljitExpressionHasSemanticRangeCheck(expr.integer_kind) && !expr.check_result_range) {
+			result += ":in-range";
+		}
 		break;
 	case SljitNativeRegionExpressionKind::INTEGER_BINARY_REFERENCES:
 		result = NativeIntegerBinaryReferenceReason(expr.integer_kind, expr.binary_op);
 		if (!expr.check_arithmetic_overflow) {
 			result += ":no-overflow";
+		}
+		if (SljitExpressionHasSemanticRangeCheck(expr.integer_kind) && !expr.check_result_range) {
+			result += ":in-range";
 		}
 		break;
 	case SljitNativeRegionExpressionKind::DOUBLE_BINARY_CONSTANT:
@@ -155,7 +165,8 @@ string DescribeNativeRegionExpression(const SljitNativeRegionExpressionPlan &exp
 		result = "native:boolean-predicate";
 		break;
 	case SljitNativeRegionExpressionKind::EXPRESSION_TREE:
-		result = "native:expression-tree:sources=" + DescribeSljitExpressionSourceIndexList(expr.expression_tree_source_indices);
+		result = "native:expression-tree:sources=" +
+		         DescribeSljitExpressionSourceIndexList(expr.expression_tree_source_indices);
 		if (expr.expression_tree) {
 			result += ":tree=" + DescribeSljitExpressionTreeNode(*expr.expression_tree);
 		}

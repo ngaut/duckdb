@@ -28,5 +28,8 @@ bool SljitTryGetHashJoinRHSOutputConditionIndex(const ExecutionRegionHashJoinCon
 bool SljitTryGetHashJoinProbeKeyInputIndex(const SljitNativeRegionOpPlan &op, idx_t condition_idx, idx_t &input_idx);
 void SljitUpdateExecutableCurrentRanges(const SljitNativeRegionOpPlan &op, vector<Value> &current_min_values,
                                         vector<Value> &current_max_values);
+void SljitSpecializeAggregatePayloadRanges(SljitNativeAggregateUpdatePlan &aggregate_update,
+                                           const vector<Value> &input_min_values,
+                                           const vector<Value> &input_max_values);
 
 } // namespace duckdb
