@@ -8,15 +8,14 @@
 
 #pragma once
 
-#include "sljit_hash_join_projection_source_runtime.hpp"
 #include "sljit_projection_chain_primitive.hpp"
 #include "sljit_projection_executor_runtime.hpp"
 #include "sljit_projection_reference_runtime.hpp"
-#include "sljit_projection_source_runtime.hpp"
 #include "sljit_region_runtime_state.hpp"
 #include "sljit_region_runtime_trace.hpp"
 #include "sljit_runtime_batch_runtime.hpp"
 #include "sljit_runtime_batch_view.hpp"
+#include "sljit_selected_hash_join_input_runtime.hpp"
 
 #include "duckdb/common/types.hpp"
 
@@ -43,56 +42,6 @@ struct SljitProjectionChainSyntheticProjectionScratch {
 	SljitProjectionAdapterScratch projection_adapter_scratch;
 	vector<SljitExpressionAdapterScratch> expression_adapter_scratch;
 };
-
-static bool SljitTryPrepareSelectedHashJoinProjectionChainInput(
-    ExecutionRegionRuntime &runtime, SljitRegionExecutionScratch &scratch, vector<SljitExecutableRegionOp> &ops,
-    idx_t projection_idx, SljitExecutableRegionOp &semantic_projection, const SljitRuntimeBatchView &input,
-    SljitDataChunkBatch &selected_hash_join_input, DataChunk *&input_chunk,
-    unique_ptr<SljitExecutableRegionOp> &mapped_projection, optional_ptr<SljitExecutableRegionOp> &projection_op) {
-	if (!input.HasHashJoinSelection()) {
-		return false;
-	}
-	if (input.hash_join_idx >= ops.size() || projection_idx >= ops.size()) {
-		throw InternalException("SLJIT selected projection-chain input has invalid operator indexes");
-	}
-	if (!scratch.HasOperatorBinding(input.hash_join_idx)) {
-		throw InternalException("SLJIT selected projection-chain input has no hash-join binding");
-	}
-	auto &binding = scratch.OperatorBinding(input.hash_join_idx).hash_join_probe;
-	if (!binding.ready || binding.output_types.empty()) {
-		throw InternalException("SLJIT selected projection-chain input has an incomplete hash-join binding");
-	}
-
-	projection_op = &semantic_projection;
-	if (input.hash_join_output_column_map) {
-		string blocker;
-		mapped_projection = make_uniq<SljitExecutableRegionOp>();
-		if (!SljitTryBuildHashJoinMappedProjection(*input.hash_join_output_column_map, binding, semantic_projection,
-		                                           *mapped_projection, optional_ptr<string>(&blocker))) {
-			if (blocker.empty()) {
-				blocker = "mapped_projection";
-			}
-			throw InternalException("SLJIT selected projection-chain input could not map projection sources: %s",
-			                        blocker.c_str());
-		}
-		projection_op = mapped_projection.get();
-	}
-
-	vector<uint8_t> referenced_columns;
-	if (!SljitBuildProjectionSourceColumnSet(*projection_op, binding.output_types.size(), nullptr, nullptr,
-	                                         referenced_columns)) {
-		throw InternalException("SLJIT selected projection-chain input could not collect projection sources");
-	}
-
-	selected_hash_join_input.Ensure(runtime.GetAllocator(), binding.output_types);
-	auto &materialized_input = selected_hash_join_input.chunk;
-	materialized_input.Reset();
-	if (!SljitTryMaterializeSelectedHashJoinOutputColumns(binding, input, referenced_columns, materialized_input)) {
-		throw InternalException("SLJIT selected projection-chain input could not materialize hash-join output columns");
-	}
-	input_chunk = &materialized_input;
-	return materialized_input.size() > 0;
-}
 
 static bool SljitResolveBoundProjectionChain(vector<SljitExecutableRegionOp> &ops,
                                              const SljitProjectionChainPrimitive &primitive,
@@ -152,9 +101,9 @@ static bool SljitMaterializeProjectionChainStep(ExecutionRegionRuntime &runtime,
 	idx_t count = input.count;
 	if (input.HasHashJoinSelection()) {
 		auto &semantic_projection = ops[projection_idx];
-		if (!SljitTryPrepareSelectedHashJoinProjectionChainInput(runtime, scratch, ops, projection_idx,
-		                                                         semantic_projection, input, selected_hash_join_input,
-		                                                         source_chunk, mapped_projection, projection_op)) {
+		if (!SljitTryPrepareSelectedHashJoinProjectionInput(runtime, scratch, ops, projection_idx, semantic_projection,
+		                                                    input, selected_hash_join_input, source_chunk,
+		                                                    mapped_projection, projection_op)) {
 			return false;
 		}
 		selection = nullptr;
@@ -217,9 +166,9 @@ static bool SljitExecuteProjectionChainPrimitive(
 		                                                      execute_output_batch);
 	}
 	if (input.HasHashJoinSelection()) {
-		if (!SljitTryPrepareSelectedHashJoinProjectionChainInput(runtime, scratch, ops, primitive.final_projection_idx,
-		                                                         *projection_op, input, selected_hash_join_input,
-		                                                         source_chunk, mapped_projection, projection_op)) {
+		if (!SljitTryPrepareSelectedHashJoinProjectionInput(runtime, scratch, ops, primitive.final_projection_idx,
+		                                                    *projection_op, input, selected_hash_join_input,
+		                                                    source_chunk, mapped_projection, projection_op)) {
 			return false;
 		}
 		selection = nullptr;

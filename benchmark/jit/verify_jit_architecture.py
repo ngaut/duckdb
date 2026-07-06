@@ -1534,19 +1534,21 @@ def verify_primitive_sequence() -> None:
         ),
     )
     require_text(
-        "extension/jit_sljit/include/sljit_projection_chain_runtime.hpp",
+        "extension/jit_sljit/include/sljit_selected_hash_join_input_runtime.hpp",
         (
-            "SljitTryPrepareSelectedHashJoinProjectionChainInput",
+            "SljitTryPrepareSelectedHashJoinProjectionInput",
             "input.hash_join_output_column_map",
             "SljitTryBuildHashJoinMappedProjection",
             "SljitBuildProjectionSourceColumnSet",
             "SljitTryMaterializeSelectedHashJoinOutputColumns",
+            "unique_ptr<SljitExecutableRegionOp> &mapped_projection",
         ),
     )
     require_text(
         "extension/jit_sljit/include/sljit_selected_hash_join_input_runtime.hpp",
         (
             "class SljitSelectedHashJoinInputRuntime",
+            "SljitTryPrepareSelectedHashJoinProjectionInput",
             "TryPrepareMarkProbeInput",
             "TryPrepareHashProbeInput",
             "TryPrepareInput",
@@ -1968,8 +1970,7 @@ def verify_primitive_sequence() -> None:
         (
             'sljit_projection_chain_primitive.hpp',
             "SljitBindRuntimeBatchInput(input, \"SLJIT projection-chain primitive\")",
-            "SljitTryPrepareSelectedHashJoinProjectionChainInput",
-            "unique_ptr<SljitExecutableRegionOp> &mapped_projection",
+            "SljitTryPrepareSelectedHashJoinProjectionInput",
             "SljitResolveBoundProjectionChain",
             "SljitExecuteProjectionChainPrimitiveSequential",
             "SljitExecuteProjectionChainPrimitive",
@@ -1988,6 +1989,10 @@ def verify_primitive_sequence() -> None:
         (
             "struct SljitProjectionChainPrimitive",
             "SljitBindProjectionChainPrimitive(",
+            "SljitTryPrepareSelectedHashJoinProjectionChainInput",
+            "SljitTryBuildHashJoinMappedProjection",
+            "SljitBuildProjectionSourceColumnSet",
+            "SljitTryMaterializeSelectedHashJoinOutputColumns",
             "SljitTryResolveReferenceThroughProjectionChain",
             "SljitTryBuildRemappedPayloadReference",
             "runtime.PrepareSourceContractBatch(projection_op.output_types)",
@@ -2005,9 +2010,14 @@ def verify_primitive_sequence() -> None:
         "extension/jit_sljit/include/sljit_full_pipeline_recipe_facts.hpp",
         "extension/jit_sljit/include/sljit_grouped_aggregate_descriptor.hpp",
         "extension/jit_sljit/include/sljit_grouped_aggregate_update_primitive.hpp",
+        "extension/jit_sljit/include/sljit_grouped_aggregate_update_runtime_state.hpp",
         "extension/jit_sljit/include/sljit_post_join_projection_runtime.hpp",
     ):
         reject_text(path, ("sljit_projection_chain_runtime.hpp",))
+    reject_text(
+        "extension/jit_sljit/include/sljit_selected_hash_join_input_runtime.hpp",
+        ("SljitTryPrepareSelectedHashJoinProjectionChainInput",),
+    )
     reject_text(
         "extension/jit_sljit/include/sljit_generated_filter_primitive.hpp",
         (

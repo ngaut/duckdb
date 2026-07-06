@@ -15,9 +15,9 @@
 #include "sljit_grouped_aggregate_update_primitive.hpp"
 #include "sljit_grouped_aggregate_update_runtime.hpp"
 #include "sljit_grouped_count_star_update_runtime.hpp"
-#include "sljit_projection_chain_runtime.hpp"
 #include "sljit_region_runtime_state.hpp"
 #include "sljit_runtime_batch_view.hpp"
+#include "sljit_selected_hash_join_input_runtime.hpp"
 
 namespace duckdb {
 
@@ -446,10 +446,10 @@ private:
 		const SelectionVector *selection = input.selection;
 		idx_t count = input.count;
 		if (input.HasHashJoinSelection()) {
-			if (!SljitTryPrepareSelectedHashJoinProjectionChainInput(
-			        runtime, scratch, ops, primitive.final_projection_idx, *projected_count_star_group_projection,
-			        input, projected_count_star_selected_hash_join_input, input_chunk, mapped_projection,
-			        projection_op)) {
+			if (!SljitTryPrepareSelectedHashJoinProjectionInput(runtime, scratch, ops, primitive.final_projection_idx,
+			                                                    *projected_count_star_group_projection, input,
+			                                                    projected_count_star_selected_hash_join_input,
+			                                                    input_chunk, mapped_projection, projection_op)) {
 				return true;
 			}
 			selection = nullptr;
