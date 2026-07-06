@@ -116,6 +116,7 @@ def verify_required_design_files() -> None:
         "extension/jit_sljit/include/sljit_hash_join_probe_selection_primitive_runtime.hpp",
         "extension/jit_sljit/include/sljit_hash_join_projection_source_runtime.hpp",
         "extension/jit_sljit/include/sljit_projection_aggregate_descriptor.hpp",
+        "extension/jit_sljit/include/sljit_projection_aggregate_ungrouped_descriptor.hpp",
         "extension/jit_sljit/include/sljit_projection_chain_primitive.hpp",
         "extension/jit_sljit/include/sljit_projection_chain_runtime.hpp",
         "extension/jit_sljit/include/sljit_projection_chain_primitive_runtime.hpp",
@@ -1013,6 +1014,7 @@ def verify_projection_aggregate_descriptor_boundary() -> None:
         "extension/jit_sljit/include/sljit_projection_aggregate_descriptor.hpp",
         (
             'sljit_post_join_projection_strategy.hpp',
+            'sljit_projection_aggregate_ungrouped_descriptor.hpp',
             "SljitTryBuildPostJoinProjectionAggregateDescriptor",
             "SljitTryBuildPostJoinSemanticProjection",
             "SljitTryBuildUnmappedPostJoinProjectionAggregateDescriptor",
@@ -1029,6 +1031,21 @@ def verify_projection_aggregate_descriptor_boundary() -> None:
             "SljitTryBuildPreparedProjectionAggregateDescriptor(",
             "SljitTryBuildProjectionChainAggregateDescriptor",
             "SljitTryBuildSingleProjectionAggregateDescriptor",
+            "SljitTryBuildUngroupedAggregateRequiredProjectionOutputs",
+            "SljitTryBuildRemappedUngroupedAggregatePayloads",
+            "SljitTryRemapProjectionPlanSourceIndices",
+            "SljitTryRemapProjectionPredicateSourceIndices",
+        ),
+    )
+    require_text(
+        "extension/jit_sljit/include/sljit_projection_aggregate_ungrouped_descriptor.hpp",
+        (
+            "SljitTryBuildProjectionUngroupedAggregateDescriptor",
+            "SljitTryBuildUngroupedAggregateRequiredProjectionOutputs",
+            "SljitTryBuildRemappedUngroupedAggregatePayloads",
+            "SljitTryRemapProjectionPlanSourceIndices",
+            "SljitTryAddJoinProjectionAggregateRequiredInput",
+            "descriptor.remapped_payloads",
         ),
     )
     require_text(
