@@ -80,33 +80,6 @@ static bool SljitSourceRangeFitsInt32(idx_t source_index, const vector<Value> &s
 	return min_value >= NumericLimits<int32_t>::Minimum() && max_value <= NumericLimits<int32_t>::Maximum();
 }
 
-static bool SljitHashJoinKeyKindMatchesPhysicalType(SljitNativeHashJoinKeyKind key_kind, PhysicalType physical_type) {
-	switch (key_kind) {
-	case SljitNativeHashJoinKeyKind::INT8:
-		return physical_type == PhysicalType::INT8;
-	case SljitNativeHashJoinKeyKind::INT16:
-		return physical_type == PhysicalType::INT16;
-	case SljitNativeHashJoinKeyKind::INT32:
-		return physical_type == PhysicalType::INT32;
-	case SljitNativeHashJoinKeyKind::INT64:
-		return physical_type == PhysicalType::INT64;
-	case SljitNativeHashJoinKeyKind::INT128:
-		return physical_type == PhysicalType::INT128;
-	case SljitNativeHashJoinKeyKind::UINT8:
-		return physical_type == PhysicalType::UINT8;
-	case SljitNativeHashJoinKeyKind::UINT16:
-		return physical_type == PhysicalType::UINT16;
-	case SljitNativeHashJoinKeyKind::UINT32:
-		return physical_type == PhysicalType::UINT32;
-	case SljitNativeHashJoinKeyKind::UINT64:
-		return physical_type == PhysicalType::UINT64;
-	case SljitNativeHashJoinKeyKind::UINT128:
-		return physical_type == PhysicalType::UINT128;
-	default:
-		return false;
-	}
-}
-
 static bool SljitTryBuildPreJoinProjectionViewColumn(const SljitExecutableRegionOp &projection_op,
                                                      idx_t projection_output_idx,
                                                      const vector<Value> &source_min_values,

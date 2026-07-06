@@ -1084,6 +1084,18 @@ def verify_hash_probe_key_source_contract() -> None:
             "struct SljitNativePerfectHashJoinProbeInput",
             "bool source_key0_int64_to_int32 = false",
             "bool source_key0_int64_to_int32_unchecked = false",
+            "SljitTryGetHashJoinKeyKind(PhysicalType physical_type",
+            "case PhysicalType::BOOL:",
+            "SljitHashJoinKeyKindMatchesPhysicalType",
+            "SljitHashJoinKeyKindIs128",
+        ),
+    )
+    require_text(
+        "extension/jit_sljit/sljit_region_join_plan.cpp",
+        (
+            "SljitTryGetHashJoinKeyKind(key.type, key_kind)",
+            "SljitHashJoinKeyKindIs128(key_kind)",
+            "SljitHashJoinKeyKindIs128(perfect_key_kind)",
         ),
     )
     require_text(
@@ -1109,6 +1121,30 @@ def verify_hash_probe_key_source_contract() -> None:
     require_text(
         "extension/jit_sljit/include/sljit_hash_join_probe_executor_runtime.hpp",
         ("native_input.source_key0_int64_to_int32",),
+    )
+    require_text(
+        "extension/jit_sljit/include/sljit_hash_join_probe_primitive.hpp",
+        ("SljitHashJoinKeyKindMatchesPhysicalType(key.key_kind, source_type)",),
+    )
+    require_text(
+        "extension/jit_sljit/include/sljit_pre_join_projection_descriptor.hpp",
+        ("SljitHashJoinKeyKindMatchesPhysicalType(key.key_kind, column.source_type.InternalType())",),
+    )
+    reject_text(
+        "extension/jit_sljit/sljit_region_join_plan.cpp",
+        ("TryGetSljitHashJoinKeyKind",),
+    )
+    reject_text(
+        "extension/jit_sljit/include/sljit_hash_join_probe_primitive.hpp",
+        ("SljitPreparedHashJoinRemapKeyMatchesType",),
+    )
+    reject_text(
+        "extension/jit_sljit/include/sljit_pre_join_projection_descriptor.hpp",
+        ("static bool SljitHashJoinKeyKindMatchesPhysicalType",),
+    )
+    reject_text(
+        "extension/jit_sljit/include/sljit_hash_join_probe_key_codegen.hpp",
+        ("static inline bool SljitHashJoinKeyKindIs128",),
     )
     reject_regex(
         "regular-only remapped hash probe contract",

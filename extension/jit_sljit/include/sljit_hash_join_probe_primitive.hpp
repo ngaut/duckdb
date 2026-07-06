@@ -114,37 +114,9 @@ static bool SljitCanBindHashJoinProbeSelectionPrimitive(const vector<SljitExecut
 	            ExecutionHashJoinProbeOutputMode::MATCHED_PROBE_ONLY);
 }
 
-static bool SljitPreparedHashJoinRemapKeyMatchesType(SljitNativeHashJoinKeyKind key_kind,
-                                                     PhysicalType physical_type) {
-	switch (key_kind) {
-	case SljitNativeHashJoinKeyKind::INT8:
-		return physical_type == PhysicalType::INT8;
-	case SljitNativeHashJoinKeyKind::INT16:
-		return physical_type == PhysicalType::INT16;
-	case SljitNativeHashJoinKeyKind::INT32:
-		return physical_type == PhysicalType::INT32;
-	case SljitNativeHashJoinKeyKind::INT64:
-		return physical_type == PhysicalType::INT64;
-	case SljitNativeHashJoinKeyKind::INT128:
-		return physical_type == PhysicalType::INT128;
-	case SljitNativeHashJoinKeyKind::UINT8:
-		return physical_type == PhysicalType::UINT8;
-	case SljitNativeHashJoinKeyKind::UINT16:
-		return physical_type == PhysicalType::UINT16;
-	case SljitNativeHashJoinKeyKind::UINT32:
-		return physical_type == PhysicalType::UINT32;
-	case SljitNativeHashJoinKeyKind::UINT64:
-		return physical_type == PhysicalType::UINT64;
-	case SljitNativeHashJoinKeyKind::UINT128:
-		return physical_type == PhysicalType::UINT128;
-	default:
-		return false;
-	}
-}
-
 static bool SljitPreparedHashJoinRemapKeySourceSupported(const SljitNativeHashJoinProbeKeyPlan &key, idx_t key_idx,
                                                          PhysicalType source_type) {
-	if (SljitPreparedHashJoinRemapKeyMatchesType(key.key_kind, source_type)) {
+	if (SljitHashJoinKeyKindMatchesPhysicalType(key.key_kind, source_type)) {
 		return true;
 	}
 	return key_idx == 0 && key.key_kind == SljitNativeHashJoinKeyKind::INT32 && source_type == PhysicalType::INT64;
@@ -269,12 +241,10 @@ static bool SljitCanBindMarkProbeFilterBoundaryPrimitive(const vector<SljitExecu
 	return true;
 }
 
-static SljitMarkProbeFilterBoundaryPrimitive
-SljitBindMarkProbeFilterBoundaryPrimitive(const vector<SljitExecutableRegionOp> &ops, idx_t hash_join_idx,
-                                          idx_t filter_idx, bool apply_filter_selection = false,
-                                          idx_t downstream_projection_idx = DConstants::INVALID_INDEX,
-                                          bool allow_marker_omission = false,
-                                          bool materialize_filter_selection = false) {
+static SljitMarkProbeFilterBoundaryPrimitive SljitBindMarkProbeFilterBoundaryPrimitive(
+    const vector<SljitExecutableRegionOp> &ops, idx_t hash_join_idx, idx_t filter_idx,
+    bool apply_filter_selection = false, idx_t downstream_projection_idx = DConstants::INVALID_INDEX,
+    bool allow_marker_omission = false, bool materialize_filter_selection = false) {
 	if (!SljitCanBindMarkProbeFilterBoundaryPrimitive(ops, hash_join_idx, filter_idx)) {
 		throw InternalException("SLJIT MARK probe filter boundary primitive cannot bind requested operators");
 	}

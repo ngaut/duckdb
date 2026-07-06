@@ -49,6 +49,58 @@ enum class SljitNativeHashJoinKeyKind : uint8_t {
 	UINT128
 };
 
+static inline bool SljitTryGetHashJoinKeyKind(PhysicalType physical_type, SljitNativeHashJoinKeyKind &kind) {
+	switch (physical_type) {
+	case PhysicalType::BOOL:
+	case PhysicalType::UINT8:
+		kind = SljitNativeHashJoinKeyKind::UINT8;
+		return true;
+	case PhysicalType::INT8:
+		kind = SljitNativeHashJoinKeyKind::INT8;
+		return true;
+	case PhysicalType::UINT16:
+		kind = SljitNativeHashJoinKeyKind::UINT16;
+		return true;
+	case PhysicalType::INT16:
+		kind = SljitNativeHashJoinKeyKind::INT16;
+		return true;
+	case PhysicalType::UINT32:
+		kind = SljitNativeHashJoinKeyKind::UINT32;
+		return true;
+	case PhysicalType::INT32:
+		kind = SljitNativeHashJoinKeyKind::INT32;
+		return true;
+	case PhysicalType::UINT64:
+		kind = SljitNativeHashJoinKeyKind::UINT64;
+		return true;
+	case PhysicalType::INT64:
+		kind = SljitNativeHashJoinKeyKind::INT64;
+		return true;
+	case PhysicalType::UINT128:
+		kind = SljitNativeHashJoinKeyKind::UINT128;
+		return true;
+	case PhysicalType::INT128:
+		kind = SljitNativeHashJoinKeyKind::INT128;
+		return true;
+	default:
+		return false;
+	}
+}
+
+static inline bool SljitTryGetHashJoinKeyKind(const LogicalType &type, SljitNativeHashJoinKeyKind &kind) {
+	return SljitTryGetHashJoinKeyKind(type.InternalType(), kind);
+}
+
+static inline bool SljitHashJoinKeyKindMatchesPhysicalType(SljitNativeHashJoinKeyKind key_kind,
+                                                           PhysicalType physical_type) {
+	SljitNativeHashJoinKeyKind physical_key_kind;
+	return SljitTryGetHashJoinKeyKind(physical_type, physical_key_kind) && key_kind == physical_key_kind;
+}
+
+static inline bool SljitHashJoinKeyKindIs128(SljitNativeHashJoinKeyKind kind) {
+	return kind == SljitNativeHashJoinKeyKind::INT128 || kind == SljitNativeHashJoinKeyKind::UINT128;
+}
+
 enum class SljitHashJoinProbeLayoutKind : int8_t {
 	RUNTIME = -1,
 	NO_CHAIN = 0,

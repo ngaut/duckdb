@@ -10,44 +10,6 @@
 
 namespace duckdb {
 
-static bool TryGetSljitHashJoinKeyKind(const LogicalType &type, SljitNativeHashJoinKeyKind &kind) {
-	switch (type.InternalType()) {
-	case PhysicalType::BOOL:
-	case PhysicalType::UINT8:
-		kind = SljitNativeHashJoinKeyKind::UINT8;
-		return true;
-	case PhysicalType::INT8:
-		kind = SljitNativeHashJoinKeyKind::INT8;
-		return true;
-	case PhysicalType::UINT16:
-		kind = SljitNativeHashJoinKeyKind::UINT16;
-		return true;
-	case PhysicalType::INT16:
-		kind = SljitNativeHashJoinKeyKind::INT16;
-		return true;
-	case PhysicalType::UINT32:
-		kind = SljitNativeHashJoinKeyKind::UINT32;
-		return true;
-	case PhysicalType::INT32:
-		kind = SljitNativeHashJoinKeyKind::INT32;
-		return true;
-	case PhysicalType::UINT64:
-		kind = SljitNativeHashJoinKeyKind::UINT64;
-		return true;
-	case PhysicalType::INT64:
-		kind = SljitNativeHashJoinKeyKind::INT64;
-		return true;
-	case PhysicalType::UINT128:
-		kind = SljitNativeHashJoinKeyKind::UINT128;
-		return true;
-	case PhysicalType::INT128:
-		kind = SljitNativeHashJoinKeyKind::INT128;
-		return true;
-	default:
-		return false;
-	}
-}
-
 static bool SljitHashJoinEqualityComparisonSupported(ExecutionRegionComparisonType comparison_type) {
 	return comparison_type == ExecutionRegionComparisonType::EQUAL ||
 	       comparison_type == ExecutionRegionComparisonType::NOT_DISTINCT_FROM;
@@ -68,8 +30,7 @@ static bool SljitHashJoinMatchPredicateSupported(ExecutionRegionComparisonType c
 
 SljitRegionNodePlan PlanSljitHashJoinProbeOperatorNode(const ExecutionRegionNode &node,
                                                        const vector<LogicalType> &input_types,
-                                                       const vector<bool> &input_not_null,
-                                                       bool render_diagnostics) {
+                                                       const vector<bool> &input_not_null, bool render_diagnostics) {
 	if (!node.operator_info) {
 		return SljitRegionBoundaryNode("hash join probe operator is missing typed operator IR");
 	}
@@ -117,12 +78,11 @@ SljitRegionNodePlan PlanSljitHashJoinProbeOperatorNode(const ExecutionRegionNode
 			return SljitRegionBoundaryNode("hash join probe native lowering key input index is outside operator input");
 		}
 		SljitNativeHashJoinKeyKind key_kind;
-		if (!TryGetSljitHashJoinKeyKind(key.type, key_kind)) {
+		if (!SljitTryGetHashJoinKeyKind(key.type, key_kind)) {
 			return SljitRegionBoundaryNode("hash join probe native lowering has unsupported key type " +
 			                               key.type.ToString());
 		}
-		if (!equality_key &&
-		    (key_kind == SljitNativeHashJoinKeyKind::INT128 || key_kind == SljitNativeHashJoinKeyKind::UINT128)) {
+		if (!equality_key && SljitHashJoinKeyKindIs128(key_kind)) {
 			return SljitRegionBoundaryNode("hash join probe native lowering has unsupported 128-bit match predicate " +
 			                               key.type.ToString());
 		}
@@ -131,13 +91,12 @@ SljitRegionNodePlan PlanSljitHashJoinProbeOperatorNode(const ExecutionRegionNode
 		key_plan.key_layout_offset = contract.layout_offsets[key_idx];
 		key_plan.key_type = key.type;
 		key_plan.key_kind = key_kind;
-			key_plan.comparison_type = comparison_type;
-			key_plan.equality_key = equality_key;
-			key_plan.null_equal = equality_key && comparison_type == ExecutionRegionComparisonType::NOT_DISTINCT_FROM;
-			key_plan.source_known_not_null =
-			    key.input_index < input_not_null.size() && input_not_null[key.input_index];
-			keys.push_back(std::move(key_plan));
-		}
+		key_plan.comparison_type = comparison_type;
+		key_plan.equality_key = equality_key;
+		key_plan.null_equal = equality_key && comparison_type == ExecutionRegionComparisonType::NOT_DISTINCT_FROM;
+		key_plan.source_known_not_null = key.input_index < input_not_null.size() && input_not_null[key.input_index];
+		keys.push_back(std::move(key_plan));
+	}
 
 	SljitNativeRegionOpPlan native_op;
 	native_op.kind = SljitNativeRegionOpKind::HASH_JOIN_PROBE;
@@ -156,8 +115,7 @@ SljitRegionNodePlan PlanSljitHashJoinProbeOperatorNode(const ExecutionRegionNode
 			return SljitRegionBoundaryNode("perfect hash join probe native lowering requires one equality key");
 		}
 		auto perfect_key_kind = native_op.hash_join_probe.keys[0].key_kind;
-		if (perfect_key_kind == SljitNativeHashJoinKeyKind::INT128 ||
-		    perfect_key_kind == SljitNativeHashJoinKeyKind::UINT128) {
+		if (SljitHashJoinKeyKindIs128(perfect_key_kind)) {
 			return SljitRegionBoundaryNode("perfect hash join probe native lowering does not support 128-bit keys");
 		}
 		if (native_op.hash_join_probe.output_mode != ExecutionHashJoinProbeOutputMode::MATCHED_PROBE_AND_BUILD &&

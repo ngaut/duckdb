@@ -83,10 +83,6 @@ static inline sljit_sw SljitHashJoinKeyScale(SljitNativeHashJoinKeyKind kind) {
 	}
 }
 
-static inline bool SljitHashJoinKeyKindIs128(SljitNativeHashJoinKeyKind kind) {
-	return kind == SljitNativeHashJoinKeyKind::INT128 || kind == SljitNativeHashJoinKeyKind::UINT128;
-}
-
 static inline bool SljitHashJoinKeyHashesAsUInt32(SljitNativeHashJoinKeyKind kind) {
 	return kind != SljitNativeHashJoinKeyKind::INT64 && kind != SljitNativeHashJoinKeyKind::UINT64 &&
 	       !SljitHashJoinKeyKindIs128(kind);
