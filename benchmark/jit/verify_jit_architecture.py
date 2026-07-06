@@ -2488,17 +2488,26 @@ def verify_primitive_sequence() -> None:
             'sljit_projection_chain_primitive.hpp',
             "SljitBindRuntimeBatchInput(input, \"SLJIT projection-chain primitive\")",
             "SljitTryPrepareSelectedHashJoinProjectionInput",
+            "struct SljitPreparedProjectionChainInput",
+            "SljitPrepareProjectionChainInput",
             "SljitResolveBoundProjectionChain",
             "SljitExecuteProjectionChainPrimitiveSequential",
             "SljitExecuteProjectionChainPrimitive",
             "SljitDataChunkBatch &projection_chain_batch",
             "SljitDataChunkBatch &selected_hash_join_input",
-            "projection_chain_batch.Ensure(runtime.GetAllocator(), projection_op->output_types)",
+            "projection_chain_batch.Ensure(runtime.GetAllocator(), bound_projection_op.output_types)",
             "SljitTryDirectMaterializeFixedProjectionToBatch",
             "SljitProjectionHasVariableWidthOutput",
             "SljitTrySliceReferenceProjection",
             "reference_view_handoff",
             "SljitFlushDataChunkBatch(batch, execute_output_batch)",
+        ),
+    )
+    reject_text(
+        "extension/jit_sljit/include/sljit_projection_chain_runtime.hpp",
+        (
+            "const SelectionVector *selection = input.selection",
+            "idx_t count = input.count",
         ),
     )
     reject_text(
