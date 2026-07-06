@@ -21,7 +21,7 @@
 #include "sljit_grouped_aggregate_update_primitive.hpp"
 #include "sljit_hash_join_probe_primitive.hpp"
 #include "sljit_post_join_projection_aggregate_primitive.hpp"
-#include "sljit_projection_chain_runtime.hpp"
+#include "sljit_projection_chain_primitive.hpp"
 #include "sljit_ungrouped_aggregate_update_primitive.hpp"
 
 namespace duckdb {

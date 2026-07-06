@@ -11,7 +11,7 @@
 #include "sljit_aggregate_fused_payload_sources.hpp"
 #include "sljit_grouped_aggregate_group_key_source.hpp"
 #include "sljit_join_projection_aggregate_state.hpp"
-#include "sljit_projection_chain_runtime.hpp"
+#include "sljit_projection_chain_primitive.hpp"
 #include "sljit_projection_source_runtime.hpp"
 #include "sljit_region_runtime_state.hpp"
 

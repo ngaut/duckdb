@@ -11,7 +11,6 @@
 #include "sljit_full_pipeline_shape.hpp"
 #include "sljit_grouped_aggregate_update_primitive.hpp"
 #include "sljit_mark_probe_filter_mode.hpp"
-#include "sljit_projection_chain_runtime.hpp"
 
 namespace duckdb {
 

@@ -15,7 +15,7 @@
 #include "sljit_full_pipeline_recipe_state.hpp"
 #include "sljit_full_pipeline_shape.hpp"
 #include "sljit_generated_filter_primitive.hpp"
-#include "sljit_projection_chain_runtime.hpp"
+#include "sljit_projection_chain_primitive.hpp"
 #include "sljit_string_set_case_projection_runtime.hpp"
 
 #include <utility>

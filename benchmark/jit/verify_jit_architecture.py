@@ -114,6 +114,7 @@ def verify_required_design_files() -> None:
         "extension/jit_sljit/include/sljit_hash_join_probe_selection_primitive_runtime.hpp",
         "extension/jit_sljit/include/sljit_hash_join_projection_source_runtime.hpp",
         "extension/jit_sljit/include/sljit_projection_aggregate_descriptor.hpp",
+        "extension/jit_sljit/include/sljit_projection_chain_primitive.hpp",
         "extension/jit_sljit/include/sljit_projection_chain_runtime.hpp",
         "extension/jit_sljit/include/sljit_projection_chain_primitive_runtime.hpp",
         "extension/jit_sljit/include/sljit_selected_hash_join_input_runtime.hpp",
@@ -1939,16 +1940,33 @@ def verify_primitive_sequence() -> None:
         ),
     )
     require_text(
-        "extension/jit_sljit/include/sljit_projection_chain_runtime.hpp",
+        "extension/jit_sljit/include/sljit_projection_chain_primitive.hpp",
         (
             "struct SljitProjectionChainPrimitive",
             "SljitCanBindProjectionChainPrimitive",
             "SljitBindProjectionChainPrimitive",
+            "SljitBuildProjectionChainComposedProjection",
+            "SljitBuildReferenceProjectionOutputMap",
             "idx_t first_projection_idx",
             "idx_t final_projection_idx",
             "shared_ptr<SljitExecutableRegionOp> bound_composed_projection",
             "HasBoundComposedProjection",
             "primitive.bound_composed_projection = std::move(composed_projection)",
+        ),
+    )
+    reject_text(
+        "extension/jit_sljit/include/sljit_projection_chain_primitive.hpp",
+        (
+            "SljitTryPrepareSelectedHashJoinProjectionChainInput",
+            "SljitExecuteProjectionChainPrimitive",
+            "SljitRuntimeBatchView",
+            "SljitDataChunkBatch",
+        ),
+    )
+    require_text(
+        "extension/jit_sljit/include/sljit_projection_chain_runtime.hpp",
+        (
+            'sljit_projection_chain_primitive.hpp',
             "SljitBindRuntimeBatchInput(input, \"SLJIT projection-chain primitive\")",
             "SljitTryPrepareSelectedHashJoinProjectionChainInput",
             "unique_ptr<SljitExecutableRegionOp> &mapped_projection",
@@ -1968,6 +1986,10 @@ def verify_primitive_sequence() -> None:
     reject_text(
         "extension/jit_sljit/include/sljit_projection_chain_runtime.hpp",
         (
+            "struct SljitProjectionChainPrimitive",
+            "SljitBindProjectionChainPrimitive(",
+            "SljitTryResolveReferenceThroughProjectionChain",
+            "SljitTryBuildRemappedPayloadReference",
             "runtime.PrepareSourceContractBatch(projection_op.output_types)",
             "SljitFlushRuntimePendingBatch(runtime, execute_output_batch)",
             "SljitBuildExecutableProjectionChain",
@@ -1975,6 +1997,17 @@ def verify_primitive_sequence() -> None:
             "SljitExecutableRegionOp composed_projection;",
         ),
     )
+    for path in (
+        "extension/jit_sljit/include/sljit_delim_join_sink_primitive.hpp",
+        "extension/jit_sljit/include/sljit_full_pipeline_primitive_sequence.hpp",
+        "extension/jit_sljit/include/sljit_full_pipeline_primitive_contract.hpp",
+        "extension/jit_sljit/include/sljit_full_pipeline_recipe_binding.hpp",
+        "extension/jit_sljit/include/sljit_full_pipeline_recipe_facts.hpp",
+        "extension/jit_sljit/include/sljit_grouped_aggregate_descriptor.hpp",
+        "extension/jit_sljit/include/sljit_grouped_aggregate_update_primitive.hpp",
+        "extension/jit_sljit/include/sljit_post_join_projection_runtime.hpp",
+    ):
+        reject_text(path, ("sljit_projection_chain_runtime.hpp",))
     reject_text(
         "extension/jit_sljit/include/sljit_generated_filter_primitive.hpp",
         (

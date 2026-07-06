@@ -10,7 +10,7 @@
 
 #include "sljit_hash_join_projection_materialization_runtime.hpp"
 #include "sljit_post_join_projection_strategy.hpp"
-#include "sljit_projection_chain_runtime.hpp"
+#include "sljit_projection_chain_primitive.hpp"
 #include "sljit_projection_executor_runtime.hpp"
 #include "sljit_region_runtime_trace.hpp"
 #include "sljit_string_set_case_projection_runtime.hpp"

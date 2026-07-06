@@ -11,7 +11,6 @@
 #include "sljit_full_pipeline_primitive_sequence.hpp"
 #include "sljit_generated_filter_primitive.hpp"
 #include "sljit_mark_probe_filter_boundary.hpp"
-#include "sljit_projection_chain_runtime.hpp"
 
 namespace duckdb {
 

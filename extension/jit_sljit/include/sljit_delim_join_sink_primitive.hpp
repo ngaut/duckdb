@@ -9,7 +9,8 @@
 #pragma once
 
 #include "sljit_hash_join_probe_primitive.hpp"
-#include "sljit_projection_chain_runtime.hpp"
+#include "sljit_projection_chain_primitive.hpp"
+#include "sljit_projection_source_runtime.hpp"
 
 namespace duckdb {
 
@@ -46,8 +47,8 @@ static bool SljitProjectionIsReferencePreserving(const SljitExecutableRegionOp &
 }
 
 static bool SljitTryBuildReferencePreservingProjectionChain(const vector<SljitExecutableRegionOp> &ops,
-                                                           idx_t first_projection_idx, idx_t final_projection_idx,
-                                                           SljitExecutableRegionOp &projection_op) {
+                                                            idx_t first_projection_idx, idx_t final_projection_idx,
+                                                            SljitExecutableRegionOp &projection_op) {
 	if (!SljitCanBindProjectionChainPrimitive(ops, first_projection_idx, final_projection_idx)) {
 		return false;
 	}
@@ -65,13 +66,13 @@ static bool SljitCanBindProjectedDelimJoinSinkPrimitive(const vector<SljitExecut
 	    final_projection_idx + 1 != sink_idx) {
 		return false;
 	}
-		auto projection_op = make_uniq<SljitExecutableRegionOp>();
-		if (!SljitTryBuildReferencePreservingProjectionChain(ops, first_projection_idx, final_projection_idx,
-		                                                     *projection_op)) {
-			return false;
-		}
-		return projection_op->output_types == ops[sink_idx].delim_join_sink.plan.input_types;
+	auto projection_op = make_uniq<SljitExecutableRegionOp>();
+	if (!SljitTryBuildReferencePreservingProjectionChain(ops, first_projection_idx, final_projection_idx,
+	                                                     *projection_op)) {
+		return false;
 	}
+	return projection_op->output_types == ops[sink_idx].delim_join_sink.plan.input_types;
+}
 
 static bool SljitCanBindSelectedHashJoinDelimJoinSinkPrimitive(const vector<SljitExecutableRegionOp> &ops,
                                                                idx_t hash_join_idx, idx_t sink_idx) {
@@ -95,9 +96,10 @@ SljitBindSelectedHashJoinDelimJoinSinkPrimitive(const vector<SljitExecutableRegi
 	return primitive;
 }
 
-static SljitDelimJoinSinkPrimitive SljitBindProjectedDelimJoinSinkPrimitive(
-    const vector<SljitExecutableRegionOp> &ops, idx_t first_projection_idx, idx_t final_projection_idx,
-    idx_t sink_idx) {
+static SljitDelimJoinSinkPrimitive SljitBindProjectedDelimJoinSinkPrimitive(const vector<SljitExecutableRegionOp> &ops,
+                                                                            idx_t first_projection_idx,
+                                                                            idx_t final_projection_idx,
+                                                                            idx_t sink_idx) {
 	if (!SljitCanBindProjectedDelimJoinSinkPrimitive(ops, first_projection_idx, final_projection_idx, sink_idx)) {
 		throw InternalException("SLJIT delimiter join sink primitive cannot bind requested projection tail");
 	}

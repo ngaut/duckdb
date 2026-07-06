@@ -9,7 +9,7 @@
 #pragma once
 
 #include "sljit_grouped_aggregate_descriptor.hpp"
-#include "sljit_projection_chain_runtime.hpp"
+#include "sljit_projection_chain_primitive.hpp"
 
 namespace duckdb {
 
