@@ -119,8 +119,10 @@ def verify_required_design_files() -> None:
         "extension/jit_sljit/include/sljit_projection_chain_primitive_runtime.hpp",
         "extension/jit_sljit/include/sljit_selected_hash_join_input_runtime.hpp",
         "extension/jit_sljit/include/sljit_source_batch_boundary_runtime.hpp",
+        "extension/jit_sljit/include/sljit_aggregate_payload_source_indices.hpp",
         "extension/jit_sljit/include/sljit_grouped_aggregate_update_primitive.hpp",
         "extension/jit_sljit/include/sljit_grouped_aggregate_update_runtime_state.hpp",
+        "extension/jit_sljit/include/sljit_projected_input_grouped_aggregate_descriptor.hpp",
         "extension/jit_sljit/include/sljit_ungrouped_aggregate_update_primitive.hpp",
         "src/include/duckdb/execution/aggregate_hashtable.hpp",
         "src/include/duckdb/execution/execution_operator_runtime.hpp",
@@ -2857,9 +2859,42 @@ def verify_distinct_aggregate_backend() -> None:
         ),
     )
     require_text(
+        "extension/jit_sljit/include/sljit_projected_input_grouped_aggregate_descriptor.hpp",
+        (
+            "struct SljitProjectedInputGroupedAggregateDescriptor",
+            "SljitProjectedInputGroupedAggregateCanUseCompactInput",
+            "SljitProjectedInputGroupedAggregateCanUseSourceInput",
+            "SljitTryBuildProjectedInputGroupedAggregateDescriptor",
+            "SljitTryBuildAggregatePayloadSourceIndices",
+        ),
+    )
+    reject_text(
+        "extension/jit_sljit/include/sljit_projected_input_grouped_aggregate_descriptor.hpp",
+        (
+            "SljitJoinProjectionAggregateDescriptor",
+            "SljitTryBuildProjectionRowPointerAggregateDescriptor",
+        ),
+    )
+    require_text(
+        "extension/jit_sljit/include/sljit_aggregate_payload_source_indices.hpp",
+        (
+            "SljitTryBuildAggregatePayloadSourceIndices",
+            "SljitFusedAggregatePayloadsUseTypedExpressionTrees",
+            "SljitTryGetFusedTypedPayloadCombinedSources",
+        ),
+    )
+    reject_text(
+        "extension/jit_sljit/include/sljit_grouped_aggregate_descriptor.hpp",
+        (
+            "SljitProjectedInputGroupedAggregateDescriptor",
+            "SljitTryBuildProjectedInputGroupedAggregateDescriptor",
+        ),
+    )
+    require_text(
         "extension/jit_sljit/include/sljit_grouped_aggregate_update_primitive.hpp",
         (
             "enum class SljitGroupedAggregateUpdateStrategyKind",
+            "sljit_projected_input_grouped_aggregate_descriptor.hpp",
             "SljitChooseGroupedAggregateUpdateStrategy",
             "SljitGroupedAggregateUpdateHasDedicatedBackend",
             "SljitGroupedAggregateUpdateCanUseCountStarPreaggregation",
@@ -2922,6 +2957,7 @@ def verify_distinct_aggregate_backend() -> None:
             "sljit_aggregate_count_star_string_preaggregation.hpp",
             "sljit_full_pipeline_runtime.hpp",
             "sljit_grouped_aggregate_update_runtime.hpp",
+            "sljit_grouped_aggregate_descriptor.hpp",
             "sljit_grouped_count_star_update_runtime.hpp",
             "SljitGroupedAggregateUpdateStrategyKind::STANDARD",
             "SljitGroupedAggregateUpdateStrategyKind::DISTINCT_COUNT_POINTER",

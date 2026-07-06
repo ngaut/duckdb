@@ -8,8 +8,8 @@
 
 #pragma once
 
-#include "sljit_grouped_aggregate_descriptor.hpp"
 #include "sljit_projection_chain_primitive.hpp"
+#include "sljit_projected_input_grouped_aggregate_descriptor.hpp"
 
 namespace duckdb {
 
