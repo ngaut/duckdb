@@ -116,7 +116,7 @@ static bool BuildExecutableRegionOp(const SljitNativeRegionOpPlan &op, SljitExec
 		                                                    input_not_null, input_min_values, input_max_values)) {
 			return false;
 		}
-		SljitSelectExecutableAggregateUpdateStrategy(executable.aggregate_update);
+		SljitSelectExecutableAggregateDirectUpdatePlan(executable.aggregate_update);
 		return true;
 	case SljitNativeRegionOpKind::PROJECTION:
 		executable.projections.reserve(op.projections.size());
@@ -240,7 +240,7 @@ bool BuildSljitExecutableRegion(const SljitNativeRegionPlan &region, SljitExecut
 				        current_min_values, current_max_values)) {
 					return false;
 				}
-				SljitSelectExecutableAggregateUpdateStrategy(aggregate_update_op.aggregate_update);
+				SljitSelectExecutableAggregateDirectUpdatePlan(aggregate_update_op.aggregate_update);
 			}
 		}
 		SljitUpdateExecutableCurrentNotNull(op, current_not_null);

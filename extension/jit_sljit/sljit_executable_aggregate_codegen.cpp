@@ -352,9 +352,9 @@ bool SljitBuildExecutableAggregateUpdatePayloadCode(const SljitNativeAggregateUp
 	return SljitBuildExecutableAggregateUpdateFallbackPayloadCode(op, executable, error);
 }
 
-void SljitSelectExecutableAggregateUpdateStrategy(SljitExecutableAggregateUpdate &executable) {
-	auto &strategy = executable.grouped_update_strategy;
-	strategy.Clear();
+void SljitSelectExecutableAggregateDirectUpdatePlan(SljitExecutableAggregateUpdate &executable) {
+	auto &direct_update = executable.grouped_direct_update;
+	direct_update.Clear();
 	auto &plan = executable.plan;
 	if (plan.sink_info.kind != ExecutionRegionSinkKind::HASH_AGGREGATE_UPDATE || !plan.use_primitive_payloads ||
 	    !plan.use_grouped_state_addresses || plan.use_perfect_hash_group_lookup ||
@@ -363,15 +363,10 @@ void SljitSelectExecutableAggregateUpdateStrategy(SljitExecutableAggregateUpdate
 	}
 	if (executable.fused_payload_update_function &&
 	    SljitFusedAggregatePayloadsUseTypedExpressionTrees(executable.payloads, plan.sink_info.aggregates)) {
-		strategy.Add(SljitGroupedAggregateUpdateStrategy::DIRECT_STATE_ADDRESS_PAYLOAD_UPDATE);
+		direct_update.kind = SljitGroupedAggregateDirectUpdatePlanKind::DIRECT_STATE_ADDRESS_PAYLOAD_ONLY;
 		return;
 	}
-	strategy.Add(SljitGroupedAggregateUpdateStrategy::PREAGGREGATED_PRIMITIVE_GROUPS);
-	strategy.Add(SljitGroupedAggregateUpdateStrategy::DIRECT_APPEND_NEW_GROUPS);
-	strategy.Add(SljitGroupedAggregateUpdateStrategy::DIRECT_NEW_GROUPS);
-	if (executable.fused_payload_update_function) {
-		strategy.Add(SljitGroupedAggregateUpdateStrategy::DIRECT_STATE_ADDRESS_PAYLOAD_UPDATE);
-	}
+	direct_update.kind = SljitGroupedAggregateDirectUpdatePlanKind::ADAPTIVE_GROUPED_STATE_ADDRESS;
 }
 
 } // namespace duckdb

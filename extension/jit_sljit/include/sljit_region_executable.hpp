@@ -225,36 +225,21 @@ struct SljitExecutableFilteredAggregateUpdate {
 	}
 };
 
-enum class SljitGroupedAggregateUpdateStrategy : uint8_t {
-	PREAGGREGATED_PRIMITIVE_GROUPS,
-	DIRECT_APPEND_NEW_GROUPS,
-	DIRECT_NEW_GROUPS,
-	DIRECT_STATE_ADDRESS_PAYLOAD_UPDATE
+enum class SljitGroupedAggregateDirectUpdatePlanKind : uint8_t {
+	NONE,
+	ADAPTIVE_GROUPED_STATE_ADDRESS,
+	DIRECT_STATE_ADDRESS_PAYLOAD_ONLY
 };
 
-static constexpr idx_t SLJIT_GROUPED_AGGREGATE_UPDATE_STRATEGY_CAPACITY = 4;
-
-struct SljitGroupedAggregateUpdateStrategySchedule {
-	std::array<SljitGroupedAggregateUpdateStrategy, SLJIT_GROUPED_AGGREGATE_UPDATE_STRATEGY_CAPACITY> strategies;
-	idx_t count = 0;
-
-	SljitGroupedAggregateUpdateStrategySchedule() {
-		strategies.fill(SljitGroupedAggregateUpdateStrategy::DIRECT_STATE_ADDRESS_PAYLOAD_UPDATE);
-	}
+struct SljitGroupedAggregateDirectUpdatePlan {
+	SljitGroupedAggregateDirectUpdatePlanKind kind = SljitGroupedAggregateDirectUpdatePlanKind::NONE;
 
 	void Clear() {
-		count = 0;
+		kind = SljitGroupedAggregateDirectUpdatePlanKind::NONE;
 	}
 
-	void Add(SljitGroupedAggregateUpdateStrategy strategy) {
-		if (count >= strategies.size()) {
-			throw InternalException("SLJIT grouped aggregate update strategy schedule is full");
-		}
-		strategies[count++] = strategy;
-	}
-
-	bool Empty() const {
-		return count == 0;
+	bool DirectStateAddressPayloadOnly() const {
+		return kind == SljitGroupedAggregateDirectUpdatePlanKind::DIRECT_STATE_ADDRESS_PAYLOAD_ONLY;
 	}
 };
 
@@ -263,7 +248,7 @@ struct SljitExecutableAggregateUpdate {
 	vector<SljitExecutableRegionExpression> payloads;
 	SljitExecutableFilteredAggregateUpdate filtered_update;
 	ExecutionDenseGroupDomain dense_group_domain;
-	SljitGroupedAggregateUpdateStrategySchedule grouped_update_strategy;
+	SljitGroupedAggregateDirectUpdatePlan grouped_direct_update;
 	unique_ptr<ExecutionRegionCodeHandle> fused_payload_update_code;
 	SljitNativeAggregateUpdateFunction fused_payload_update_function = nullptr;
 	bool fused_payload_update_owns_group_lookup = false;

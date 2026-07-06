@@ -2845,6 +2845,42 @@ def verify_distinct_aggregate_backend() -> None:
         ),
     )
     require_text(
+        "extension/jit_sljit/include/sljit_region_executable.hpp",
+        (
+            "SljitGroupedAggregateDirectUpdatePlanKind",
+            "ADAPTIVE_GROUPED_STATE_ADDRESS",
+            "DIRECT_STATE_ADDRESS_PAYLOAD_ONLY",
+            "SljitGroupedAggregateDirectUpdatePlan grouped_direct_update",
+        ),
+    )
+    reject_text(
+        "extension/jit_sljit/include/sljit_region_executable.hpp",
+        (
+            "SljitGroupedAggregateUpdateStrategySchedule",
+            "SLJIT_GROUPED_AGGREGATE_UPDATE_STRATEGY_CAPACITY",
+            "std::array<SljitGroupedAggregateUpdateStrategy",
+        ),
+    )
+    require_text(
+        "extension/jit_sljit/sljit_executable_aggregate_codegen.cpp",
+        (
+            "SljitSelectExecutableAggregateDirectUpdatePlan",
+            "grouped_direct_update",
+        ),
+    )
+    reject_text(
+        "extension/jit_sljit/sljit_executable_aggregate_codegen.cpp",
+        ("SljitSelectExecutableAggregateUpdateStrategy",),
+    )
+    reject_text(
+        "extension/jit_sljit/include/sljit_grouped_aggregate_direct_update_runtime.hpp",
+        (
+            "TryExecuteDirectGroupedAggregateUpdateStrategy",
+            "schedule.strategies",
+            "schedule.count",
+        ),
+    )
+    require_text(
         "extension/jit_sljit/include/sljit_projected_grouped_aggregate_sink.hpp",
         (
             "SljitBindGroupedPrimitiveAggregateUpdate",

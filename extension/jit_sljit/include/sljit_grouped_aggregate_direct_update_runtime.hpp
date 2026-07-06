@@ -348,75 +348,102 @@ static bool TryExecutePreaggregatedGroupedPrimitiveAggregateUpdateBatches(
 	return true;
 }
 
-static bool TryExecuteDirectGroupedAggregateUpdateStrategy(
+static bool TryExecutePreaggregatedDirectGroupedAggregateUpdate(
+    ExecutionRegionRuntime &runtime, SljitRegionExecutionScratch &scratch, idx_t op_idx, SljitExecutableRegionOp &op,
+    DataChunk &input, const vector<const ExecutionPrimitiveAggregateUpdateLane *> &payload_lanes,
+    const SelectionVector *execute_sel, idx_t count, ExecutionGroupedAggregateStateAddressBinding &grouped_state,
+    bool defer_grouped_finish, optional_ptr<bool> deferred_grouped_finish) {
+	if (!SljitCanExecutePreaggregatedGroupedPrimitiveAggregateUpdate(scratch, op_idx, op, input, payload_lanes,
+	                                                                 execute_sel, count)) {
+		return false;
+	}
+	auto &compact_groups = scratch.AggregatePreaggregatedGroups(op_idx);
+	auto &preaggregate_scratch = scratch.AggregatePreaggregateScratch(op_idx);
+	auto preaggregate_stage_start = SljitRegionStageStart(runtime);
+	if (TryPreaggregateConsecutivePrimitiveGroups(op, input, payload_lanes, compact_groups, preaggregate_scratch)) {
+		RecordSljitRegionStageRuntime(runtime, op_idx, op.kind, "local_preaggregate_primitive_groups",
+		                              preaggregate_stage_start);
+		if (TryExecutePreaggregatedGroupedPrimitiveAggregateUpdateBatches(
+		        runtime, scratch, op_idx, op, compact_groups, preaggregate_scratch, payload_lanes, grouped_state,
+		        input.size(), defer_grouped_finish, deferred_grouped_finish)) {
+			return true;
+		}
+	}
+	return false;
+}
+
+static bool TryExecuteDirectNewGroupedAggregateUpdate(
+    ExecutionRegionRuntime &runtime, SljitRegionExecutionScratch &scratch, idx_t op_idx, SljitExecutableRegionOp &op,
+    DataChunk &input, const vector<const ExecutionPrimitiveAggregateUpdateLane *> &payload_lanes,
+    const SelectionVector *execute_sel, idx_t count, ExecutionGroupedAggregateStateAddressBinding &grouped_state,
+    bool defer_grouped_finish, optional_ptr<bool> deferred_grouped_finish) {
+	optional_ptr<const ExecutionDenseGroupDomain> dense_domain;
+	if (op.aggregate_update.dense_group_domain.ready) {
+		dense_domain = &op.aggregate_update.dense_group_domain;
+		RecordSljitRegionRuntimePath(runtime, op.kind, "direct_grouped_dense_group_domain", count);
+	}
+	if (SljitCanExecuteDirectNewGroupedPrimitiveAggregateUpdate(scratch, op_idx, op, input, payload_lanes, execute_sel,
+	                                                            count) &&
+	    TryExecuteDirectNewGroupedPrimitiveAggregateUpdate(runtime, scratch, op_idx, op, input, payload_lanes,
+	                                                       grouped_state, !defer_grouped_finish, dense_domain)) {
+		MarkDeferredGroupedFinish(defer_grouped_finish, deferred_grouped_finish);
+		return true;
+	}
+	return false;
+}
+
+static bool TryExecuteDirectGroupedStateAddressPayloadUpdatePath(
     ExecutionRegionRuntime &runtime, SljitRegionExecutionScratch &scratch, idx_t op_idx, SljitExecutableRegionOp &op,
     DataChunk &input, const vector<const ExecutionPrimitiveAggregateUpdateLane *> &payload_lanes,
     const SelectionVector *execute_sel, idx_t count, ExecutionGroupedAggregateStateAddressBinding &grouped_state,
     SljitAggregatePayloadAdapterScratch &payload_scratch, bool defer_grouped_finish,
-    optional_ptr<bool> deferred_grouped_finish, SljitGroupedAggregateUpdateStrategy strategy) {
-	const bool finish = !defer_grouped_finish;
-	switch (strategy) {
-	case SljitGroupedAggregateUpdateStrategy::PREAGGREGATED_PRIMITIVE_GROUPS: {
-		if (!SljitCanExecutePreaggregatedGroupedPrimitiveAggregateUpdate(scratch, op_idx, op, input, payload_lanes,
-		                                                                 execute_sel, count)) {
-			return false;
-		}
-		auto &compact_groups = scratch.AggregatePreaggregatedGroups(op_idx);
-		auto &preaggregate_scratch = scratch.AggregatePreaggregateScratch(op_idx);
-		auto preaggregate_stage_start = SljitRegionStageStart(runtime);
-		if (TryPreaggregateConsecutivePrimitiveGroups(op, input, payload_lanes, compact_groups, preaggregate_scratch)) {
-			RecordSljitRegionStageRuntime(runtime, op_idx, op.kind, "local_preaggregate_primitive_groups",
-			                              preaggregate_stage_start);
-			if (TryExecutePreaggregatedGroupedPrimitiveAggregateUpdateBatches(
-			        runtime, scratch, op_idx, op, compact_groups, preaggregate_scratch, payload_lanes, grouped_state,
-			        input.size(), defer_grouped_finish, deferred_grouped_finish)) {
-				return true;
-			}
-		}
-		return false;
+    optional_ptr<bool> deferred_grouped_finish) {
+	optional_ptr<const ExecutionDenseGroupDomain> dense_domain;
+	if (op.aggregate_update.dense_group_domain.ready) {
+		dense_domain = &op.aggregate_update.dense_group_domain;
+		RecordSljitRegionRuntimePath(runtime, op.kind, "direct_grouped_dense_group_domain", count);
 	}
-	case SljitGroupedAggregateUpdateStrategy::DIRECT_APPEND_NEW_GROUPS:
-		if (SljitCanExecuteDirectAppendNewGroupedPrimitiveAggregateUpdate(scratch, op_idx, op, input, payload_lanes,
-		                                                                  execute_sel, count) &&
-		    TryExecuteDirectAppendNewGroupedPrimitiveAggregateUpdate(runtime, scratch, op_idx, op, input, payload_lanes,
-		                                                             grouped_state, finish)) {
-			MarkDeferredGroupedFinish(defer_grouped_finish, deferred_grouped_finish);
-			return true;
-		}
-		return false;
-	case SljitGroupedAggregateUpdateStrategy::DIRECT_NEW_GROUPS: {
-		optional_ptr<const ExecutionDenseGroupDomain> dense_domain;
-		if (op.aggregate_update.dense_group_domain.ready) {
-			dense_domain = &op.aggregate_update.dense_group_domain;
-			RecordSljitRegionRuntimePath(runtime, op.kind, "direct_grouped_dense_group_domain", count);
-		}
-		if (SljitCanExecuteDirectNewGroupedPrimitiveAggregateUpdate(scratch, op_idx, op, input, payload_lanes,
-		                                                            execute_sel, count) &&
-		    TryExecuteDirectNewGroupedPrimitiveAggregateUpdate(runtime, scratch, op_idx, op, input, payload_lanes,
-		                                                       grouped_state, finish, dense_domain)) {
-			MarkDeferredGroupedFinish(defer_grouped_finish, deferred_grouped_finish);
-			return true;
-		}
-		return false;
+	if (SljitCanExecuteDirectGroupedStateAddressPayloadUpdate(scratch, op_idx, op, input, payload_lanes, execute_sel,
+	                                                          count) &&
+	    TryExecuteDirectGroupedStateAddressPayloadUpdate(runtime, scratch, op_idx, op, input, payload_lanes,
+	                                                     grouped_state, payload_scratch, !defer_grouped_finish,
+	                                                     dense_domain)) {
+		MarkDeferredGroupedFinish(defer_grouped_finish, deferred_grouped_finish);
+		return true;
 	}
-	case SljitGroupedAggregateUpdateStrategy::DIRECT_STATE_ADDRESS_PAYLOAD_UPDATE: {
-		optional_ptr<const ExecutionDenseGroupDomain> dense_domain;
-		if (op.aggregate_update.dense_group_domain.ready) {
-			dense_domain = &op.aggregate_update.dense_group_domain;
-			RecordSljitRegionRuntimePath(runtime, op.kind, "direct_grouped_dense_group_domain", count);
-		}
-		if (SljitCanExecuteDirectGroupedStateAddressPayloadUpdate(scratch, op_idx, op, input, payload_lanes,
-		                                                          execute_sel, count) &&
-		    TryExecuteDirectGroupedStateAddressPayloadUpdate(runtime, scratch, op_idx, op, input, payload_lanes,
-		                                                     grouped_state, payload_scratch, finish, dense_domain)) {
-			MarkDeferredGroupedFinish(defer_grouped_finish, deferred_grouped_finish);
-			return true;
-		}
-		return false;
+	return false;
+}
+
+static bool TryExecuteAdaptiveDirectGroupedAggregateUpdate(
+    ExecutionRegionRuntime &runtime, SljitRegionExecutionScratch &scratch, idx_t op_idx, SljitExecutableRegionOp &op,
+    DataChunk &input, const vector<const ExecutionPrimitiveAggregateUpdateLane *> &payload_lanes,
+    const SelectionVector *execute_sel, idx_t count, ExecutionGroupedAggregateStateAddressBinding &grouped_state,
+    SljitAggregatePayloadAdapterScratch &payload_scratch, bool defer_grouped_finish,
+    optional_ptr<bool> deferred_grouped_finish) {
+	if (TryExecutePreaggregatedDirectGroupedAggregateUpdate(runtime, scratch, op_idx, op, input, payload_lanes,
+	                                                        execute_sel, count, grouped_state, defer_grouped_finish,
+	                                                        deferred_grouped_finish)) {
+		return true;
 	}
-	default:
-		throw InternalException("Unknown SLJIT direct grouped aggregate update strategy");
+	if (SljitCanExecuteDirectAppendNewGroupedPrimitiveAggregateUpdate(scratch, op_idx, op, input, payload_lanes,
+	                                                                  execute_sel, count) &&
+	    TryExecuteDirectAppendNewGroupedPrimitiveAggregateUpdate(runtime, scratch, op_idx, op, input, payload_lanes,
+	                                                             grouped_state, !defer_grouped_finish)) {
+		MarkDeferredGroupedFinish(defer_grouped_finish, deferred_grouped_finish);
+		return true;
 	}
+	if (TryExecuteDirectNewGroupedAggregateUpdate(runtime, scratch, op_idx, op, input, payload_lanes, execute_sel,
+	                                              count, grouped_state, defer_grouped_finish,
+	                                              deferred_grouped_finish)) {
+		return true;
+	}
+	if (op.aggregate_update.fused_payload_update_function &&
+	    TryExecuteDirectGroupedStateAddressPayloadUpdatePath(runtime, scratch, op_idx, op, input, payload_lanes,
+	                                                         execute_sel, count, grouped_state, payload_scratch,
+	                                                         defer_grouped_finish, deferred_grouped_finish)) {
+		return true;
+	}
+	return false;
 }
 
 static bool TryExecuteDirectGroupedAggregateUpdate(
@@ -425,18 +452,20 @@ static bool TryExecuteDirectGroupedAggregateUpdate(
     const SelectionVector *execute_sel, idx_t count, ExecutionGroupedAggregateStateAddressBinding &grouped_state,
     SljitAggregatePayloadAdapterScratch &payload_scratch, bool defer_grouped_finish,
     optional_ptr<bool> deferred_grouped_finish) {
-	auto &schedule = op.aggregate_update.grouped_update_strategy;
-	if (schedule.Empty()) {
+	switch (op.aggregate_update.grouped_direct_update.kind) {
+	case SljitGroupedAggregateDirectUpdatePlanKind::NONE:
 		return false;
+	case SljitGroupedAggregateDirectUpdatePlanKind::ADAPTIVE_GROUPED_STATE_ADDRESS:
+		return TryExecuteAdaptiveDirectGroupedAggregateUpdate(runtime, scratch, op_idx, op, input, payload_lanes,
+		                                                      execute_sel, count, grouped_state, payload_scratch,
+		                                                      defer_grouped_finish, deferred_grouped_finish);
+	case SljitGroupedAggregateDirectUpdatePlanKind::DIRECT_STATE_ADDRESS_PAYLOAD_ONLY:
+		return TryExecuteDirectGroupedStateAddressPayloadUpdatePath(runtime, scratch, op_idx, op, input, payload_lanes,
+		                                                            execute_sel, count, grouped_state, payload_scratch,
+		                                                            defer_grouped_finish, deferred_grouped_finish);
+	default:
+		throw InternalException("Unknown SLJIT direct grouped aggregate update plan");
 	}
-	for (idx_t strategy_idx = 0; strategy_idx < schedule.count; strategy_idx++) {
-		if (TryExecuteDirectGroupedAggregateUpdateStrategy(
-		        runtime, scratch, op_idx, op, input, payload_lanes, execute_sel, count, grouped_state, payload_scratch,
-		        defer_grouped_finish, deferred_grouped_finish, schedule.strategies[strategy_idx])) {
-			return true;
-		}
-	}
-	return false;
 }
 
 } // namespace duckdb

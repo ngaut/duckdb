@@ -260,9 +260,7 @@ private:
 			return false;
 		}
 		auto &aggregate_op = ops[primitive.aggregate_idx];
-		auto &schedule = aggregate_op.aggregate_update.grouped_update_strategy;
-		if (schedule.Empty() ||
-		    schedule.strategies[0] != SljitGroupedAggregateUpdateStrategy::DIRECT_STATE_ADDRESS_PAYLOAD_UPDATE) {
+		if (!aggregate_op.aggregate_update.grouped_direct_update.DirectStateAddressPayloadOnly()) {
 			return false;
 		}
 		if (aggregate_op.aggregate_update.dense_group_domain.ready) {
