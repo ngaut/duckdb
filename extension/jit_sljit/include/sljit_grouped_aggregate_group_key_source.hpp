@@ -412,6 +412,25 @@ static bool SljitTryResolveProjectionSemanticIndex(SljitExecutableRegionOp &proj
 	return projection_idx < projection_op.projections.size() && projection_idx < projection_op.output_types.size();
 }
 
+static bool SljitTryBuildSingleRowPointerGroupKeySource(const ExecutionHashJoinProbeBinding &binding,
+                                                        SljitExecutableRegionOp &projection_op, idx_t projection_idx,
+                                                        const ExecutionRegionGroupInput &group,
+                                                        ExecutionRowPointerGroupKeySource &group_source,
+                                                        bool &uses_projection_output) {
+	uses_projection_output = false;
+	if (SljitTryBuildRowPointerGroupKeySource(binding, projection_op.projections[projection_idx], group,
+	                                          group_source)) {
+		return true;
+	}
+	if (SljitTryBuildHashJoinOutputVectorGroupKeySource(binding, projection_op.projections[projection_idx], group,
+	                                                    group_source) ||
+	    SljitTryBuildProjectionOutputVectorGroupKeySource(projection_op, projection_idx, group, group_source)) {
+		uses_projection_output = true;
+		return true;
+	}
+	return false;
+}
+
 static bool SljitTryBuildRowPointerGroupKeySources(const ExecutionHashJoinProbeBinding &binding,
                                                    SljitExecutableRegionOp &projection_op,
                                                    SljitExecutableRegionOp &aggregate_op,
@@ -451,24 +470,18 @@ static bool SljitTryBuildRowPointerGroupKeySources(const ExecutionHashJoinProbeB
 			group_sources.clear();
 			return false;
 		}
-			ExecutionRowPointerGroupKeySource group_source;
-			bool uses_projection_output = false;
-			if (!SljitTryBuildRowPointerGroupKeySource(binding, projection_op.projections[projection_idx], group,
-			                                           group_source)) {
-				if (!SljitTryBuildHashJoinOutputVectorGroupKeySource(binding, projection_op.projections[projection_idx],
-				                                                     group, group_source) &&
-				    !SljitTryBuildProjectionOutputVectorGroupKeySource(projection_op, projection_idx, group,
-				                                                       group_source)) {
-					if (blocker) {
-						*blocker = "group" + to_string(group_idx) + "_source";
-					}
-				group_sources.clear();
-				if (group_source_uses_projection_output) {
-					group_source_uses_projection_output->clear();
-				}
-				return false;
+		ExecutionRowPointerGroupKeySource group_source;
+		bool uses_projection_output;
+		if (!SljitTryBuildSingleRowPointerGroupKeySource(binding, projection_op, projection_idx, group, group_source,
+		                                                 uses_projection_output)) {
+			if (blocker) {
+				*blocker = "group" + to_string(group_idx) + "_source";
 			}
-			uses_projection_output = true;
+			group_sources.clear();
+			if (group_source_uses_projection_output) {
+				group_source_uses_projection_output->clear();
+			}
+			return false;
 		}
 		group_sources.push_back(std::move(group_source));
 		if (group_source_uses_projection_output) {
