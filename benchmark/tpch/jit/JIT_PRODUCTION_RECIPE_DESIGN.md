@@ -1,6 +1,6 @@
 # JIT Production Recipe Runtime Design
 
-Last updated: 2026-07-04
+Last updated: 2026-07-06
 Branch: `codex/jit-native-duckdb-core`
 
 ## Goal
@@ -181,10 +181,11 @@ needed before a native tail, recipe binding must emit
 flag.
 
 Projected grouped aggregate recipes require a dedicated aggregate backend, such
-as distinct count-pointer update or count-star preaggregation. If recipe binding
-cannot prove such a backend, the recipe must use an explicit `NativeTailHandoff`
-before the projection/aggregate tail. A grouped aggregate primitive must not hide
-native sink execution as its normal backend for a selected projection recipe.
+as count-star preaggregation or descriptor-backed direct primitive payload
+update. If recipe binding cannot prove such a backend, the recipe must use an
+explicit `NativeTailHandoff` before the projection/aggregate tail. A grouped
+aggregate primitive must not hide native sink execution as its normal backend
+for a selected projection recipe.
 For count-star grouped aggregate, high-cardinality batches that cannot fit the
 local compact preaggregation table use the same prepared grouped state-address
 backend with one count delta per input row. That row-delta path is part of the
@@ -262,14 +263,13 @@ pre-join projection descriptor and prepared hash-probe remap path. The
 descriptor is the contract; recipe shape must not decide whether pre-join
 materialization is required.
 
-Grouped aggregate update binds an explicit update strategy schedule. Distinct
-count-pointer update is a strategy of `GroupedAggregateUpdate`, not a resurrected
-route-era top-level primitive. The strategy schedule is selected during recipe
-binding and validated by the primitive contract so execution does not own a
-hard-coded route list or rediscover the semantic shape per batch. Individual
-strategies may still decline on batch-local facts, such as whether a reference
-payload batch can be compactly preaggregated or appended as new groups, but the
-candidate order is a bound executable fact.
+Grouped aggregate update binds one explicit update strategy during recipe
+binding and validates it through the primitive contract. Execution must not own
+a hard-coded route list or rediscover the semantic shape per batch. The current
+generated strategies are count-star preaggregation, direct primitive payload
+update, and filtered primitive payload update; all other aggregate shapes must
+use an explicit native handoff until a generated backend owns their full
+contract.
 For regular grouped aggregates, typed-expression payload reducers bind the
 fused grouped payload strategy once in the executable aggregate update. That
 path goes directly to grouped state-address find/update plus fused payload
@@ -278,14 +278,13 @@ direct-reference update strategies first on every batch. Reference payloads keep
 the default strategy order because preaggregation and append-new are their real
 backend strategies, not fallbacks.
 
-Distinct count-pointer update also owns its payload storage strategy. The
-adaptive per-group inline payload table is the default exact backend when group
-cardinality facts are missing: it keeps small groups local and promotes only the
-groups that actually exceed inline capacity. The global `(group, payload)` pair
-set is a separate exact strategy for streams whose capability and estimate facts
-prove the fixed inline tables would run at high occupancy across many groups.
-Strategy selection must be explicit; it must not be hidden in CBO thresholds or
-rediscovered inside the per-row update loop.
+Distinct aggregates deliberately do not have a generated backend today. DuckDB's
+regular distinct aggregate path owns distinct-key lookup, duplicate filtering,
+and aggregate state update. A future generated distinct backend may be admitted
+only as a new `GroupedAggregateUpdate` strategy that owns both distinct lookup
+and payload update with explicit descriptor facts; until then JIT lowering must
+not invent a partial distinct update path or alter DuckDB's physical distinct
+aggregate implementation.
 
 Direct row-pointer grouped aggregate lookup is also a backend contract, not a
 TPC-H route. Descriptor lookup may use row-pointer identity only when the
@@ -303,10 +302,10 @@ for user-visible speed; profile-mode timing is used to identify the next
 bottleneck.
 
 Diagnostic settings must not select different physical backends. A backend
-strategy such as distinct count-pointer aggregation may be gated by execution
-capability and policy, but not by `jit_trace_decisions`, `jit_trace_runtime`,
-`jit_dump_ir`, retained event-log size, or `EXPLAIN ANALYZE`. Tracing can expose
-facts; it cannot create facts.
+strategy such as projected direct payload update or count-star preaggregation
+may be gated by execution capability and policy, but not by
+`jit_trace_decisions`, `jit_trace_runtime`, `jit_dump_ir`, retained event-log
+size, or `EXPLAIN ANALYZE`. Tracing can expose facts; it cannot create facts.
 
 The CBO cost surface must preserve the same ownership boundary. A generated
 aggregate update backend is generated/backend work, even when it updates a
@@ -380,25 +379,12 @@ Row-pointer update batching is an explicit aggregate update schedule selected at
 recipe binding time. It must not be inferred from a projection-chain enum in the
 runtime.
 
-Distinct count-pointer grouped update has two direct descriptor-backed forms:
-
-- input-vector group-key update when the producer already has materialized group
-  vectors;
-- row-pointer group-key update when a selected hash-join producer can resolve
-  group keys from build-side row pointers, probe-side vectors, or referenced
-  producer output vectors, and payloads from selected probe-side input vectors.
-
-Both forms update the same distinct count-pointer contract, but they may choose
-different storage schedules. When bound facts show expected payloads per group
-exceed the inline per-group payload capacity, the row-pointer form uses a global
-`(group,payload)` pair-set backend from the first payload instead of the inline
-array. That keeps random selected-join high-distinct updates compact and makes
-distinct pair insertion the explicit backend shape. Its capacity is seeded from
-the aggregate input estimate as a monotonic reserve target, not grown from
-batch-local guesses. Group capacity proof comes from a propagated aggregate
-group reserve plan built from distinct group-key facts, not query names or
-runtime row-count thresholds. It is not a Q16 special case; it is selected from
-projection semantics, aggregate contract, and producer facts.
+Distinct aggregate descriptors are deliberately outside this layer until there
+is a real generated distinct backend. A future implementation must bind from the
+same descriptor facts as other grouped aggregate updates: materialized input
+vectors, row-pointer group-key sources, payload sources, group reserve facts,
+and exact storage ownership. It must not be a Q16 special case, a count-only
+side path, or a CBO threshold that changes DuckDB's distinct aggregate contract.
 
 This keeps the architecture generic:
 
@@ -562,7 +548,6 @@ Runtime capability analysis should expose explicit facts rather than route names
 - `can_preserve_variable_width_refs`
 - `can_native_tail_handoff`
 - `requires_materialized_chunk`
-- `supports_distinct_update`
 
 Decisions remain separate:
 

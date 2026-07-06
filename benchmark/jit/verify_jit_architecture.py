@@ -196,10 +196,13 @@ def verify_required_design_files() -> None:
             "Regular and perfect probe backends both load",
             "preserve cast-overflow semantics before probe filtering",
             "Row-pointer update batching is an explicit aggregate update schedule",
-            "expected payloads per group\nexceed the inline per-group payload capacity",
-            "`(group,payload)` pair-set backend",
-            "distinct pair insertion the explicit backend shape",
-            "aggregate input estimate as a monotonic reserve target",
+            "current\ngenerated strategies are count-star preaggregation, direct primitive payload\nupdate, and filtered primitive payload update",
+            "Distinct aggregates deliberately do not have a generated backend today",
+            "DuckDB's\nregular distinct aggregate path owns distinct-key lookup",
+            "must\nnot invent a partial distinct update path or alter DuckDB's physical distinct\naggregate implementation",
+            "Distinct aggregate descriptors are deliberately outside this layer",
+            "same descriptor facts as other grouped aggregate updates",
+            "must not be a Q16 special case",
             "projection-chain composition is a primitive binding responsibility",
             "stored in the bound `ProjectionChain` primitive",
             "execution only resolves that bound projection",
@@ -253,6 +256,16 @@ def verify_required_design_files() -> None:
     reject_text(
         "benchmark/tpch/jit/JIT_PRODUCTION_RECIPE_DESIGN.md",
         ("regular hash-table probe",),
+    )
+    reject_text(
+        "benchmark/tpch/jit/JIT_PRODUCTION_RECIPE_DESIGN.md",
+        (
+            "distinct count-pointer",
+            "`(group,payload)` pair-set",
+            "supports_distinct_update",
+            "distinct pair insertion",
+            "expected payloads per group",
+        ),
     )
     reject_text(
         "extension/jit_sljit/include/sljit_full_pipeline_runtime.hpp",
