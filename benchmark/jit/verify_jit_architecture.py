@@ -111,6 +111,7 @@ def verify_required_design_files() -> None:
         "extension/jit_sljit/include/sljit_post_join_projection_aggregate_runtime.hpp",
         "extension/jit_sljit/include/sljit_mark_probe_filter_boundary.hpp",
         "extension/jit_sljit/include/sljit_mark_probe_filter_boundary_runtime.hpp",
+        "extension/jit_sljit/include/sljit_hash_join_all_valid_mark_selection_probe_dispatch_runtime.hpp",
         "extension/jit_sljit/include/sljit_hash_join_probe_execution_contract.hpp",
         "extension/jit_sljit/include/sljit_hash_join_probe_executor_runtime.hpp",
         "extension/jit_sljit/include/sljit_hash_join_probe_materialize_primitive_runtime.hpp",
@@ -784,6 +785,38 @@ def verify_runtime_batch_view() -> None:
             "mark_nonmatch_selection_bloom_code",
             "mark_nonmatch_all_valid_specializations",
             "MarkNonMatchAllValidSpecializationFor",
+        ),
+    )
+    require_text(
+        "extension/jit_sljit/include/sljit_hash_join_all_valid_mark_selection_probe_dispatch_runtime.hpp",
+        (
+            "SljitHashJoinCanUseAllValidMarkSelectionProbe",
+            "SljitHashJoinCanUseAllValidNoChainMarkSelectionProbe",
+            "SljitHashJoinCanUseAllValidChainMarkSelectionProbe",
+            "TryExecuteAllValidUint64PairMarkSelectionProbe",
+            "TryExecuteAllValidSingleKeyComparisonPredicateMarkSelectionProbe",
+            "TryExecuteAllValidSingleKeyMarkSelectionProbe",
+            "ExecutionHashJoinProbeOutputMode::MARK_PROBE",
+            "SljitHashJoinMarkSelectionMode::MATCHES",
+            "SljitHashJoinMarkSelectionMode::NON_MATCHES",
+        ),
+    )
+    require_text(
+        "extension/jit_sljit/include/sljit_hash_join_all_valid_probe_dispatch_runtime.hpp",
+        (
+            "sljit_hash_join_all_valid_mark_selection_probe_dispatch_runtime.hpp",
+            "TryExecuteAllValidUint64PairProbe",
+            "TryExecuteAllValidSingleKeyNotEqualPredicateChainProbe",
+            "TryExecuteAllValidSingleKeyProbe",
+        ),
+    )
+    reject_text(
+        "extension/jit_sljit/include/sljit_hash_join_all_valid_probe_dispatch_runtime.hpp",
+        (
+            "SljitHashJoinCanUseAllValidMarkSelectionProbe(",
+            "TryExecuteAllValidUint64PairMarkSelectionProbe(",
+            "TryExecuteAllValidSingleKeyComparisonPredicateMarkSelectionProbe(",
+            "TryExecuteAllValidSingleKeyMarkSelectionProbe(",
         ),
     )
     require_text(
