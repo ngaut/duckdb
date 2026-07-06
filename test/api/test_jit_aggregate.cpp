@@ -847,18 +847,13 @@ TEST_CASE("JIT projected grouped primitive updates existing groups directly", "[
 	    manager,
 	    [](const ExecutionRegionEvent &event) {
 		    return IsDirectGroupedPrimitiveAggregateUpdateRuntime(event) &&
-		           (StringUtil::Contains(EventGeneratedStageCountBreakdown(event),
-		                                 "aggregate_update.direct_input_vector_group_payload_update=") ||
-		            StringUtil::Contains(EventGeneratedStageCountBreakdown(event),
-		                                 "aggregate_update.direct_projected_group_payload_update="));
+		           HasInputVectorOrProjectedGroupPayloadUpdateStage(EventGeneratedStageCountBreakdown(event));
 	    },
 	    [](const ExecutionRegionEvent &event) {
 		    RequireDirectGroupedPrimitiveAggregateUpdateRuntime(event);
 		    REQUIRE(StringUtil::Contains(EventJitRuntimePathCounts(event),
 		                                 "aggregate_update.direct_projected_source_input_grouped_update="));
-		    auto boundaries = EventJitMaterializationBoundaryCounts(event);
-		    REQUIRE((StringUtil::Contains(boundaries, "aggregate_update.input_vector_group_payload_update=") ||
-		             StringUtil::Contains(boundaries, "aggregate_update.projected_group_payload_update=")));
+		    REQUIRE(HasInputVectorOrProjectedGroupPayloadUpdateBoundary(EventJitMaterializationBoundaryCounts(event)));
 	    });
 }
 

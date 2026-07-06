@@ -723,8 +723,7 @@ TEST_CASE("EXPLAIN ANALYZE exposes grouped hash aggregate native state-address l
 	const auto used_direct_new_update =
 	    StringUtil::Contains(analyzed_plan, "aggregate_update.direct_new_grouped_primitive_update") ||
 	    StringUtil::Contains(analyzed_plan, "aggregate_update.direct_append_new_grouped_primitive_update") ||
-	    StringUtil::Contains(analyzed_plan, "aggregate_update.direct_input_vector_group_payload_update") ||
-	    StringUtil::Contains(analyzed_plan, "aggregate_update.direct_projected_group_payload_update");
+	    HasInputVectorOrProjectedGroupPayloadUpdateText(analyzed_plan);
 	REQUIRE((used_grouped_state_addresses || used_direct_new_update));
 	REQUIRE(
 	    (StringUtil::Contains(analyzed_plan, "aggregate_update.primitive_payload_update") || used_direct_new_update));

@@ -726,8 +726,7 @@ TEST_CASE("JIT perfect hash join grouped aggregate direct-projects input-vector 
 		    REQUIRE(
 		        StringUtil::Contains(runtime_paths, "aggregate_update.direct_projection_input_vector_grouped_update="));
 		    REQUIRE(StringUtil::Contains(boundaries, "hash_join_probe.perfect_selection_reference="));
-		    REQUIRE((StringUtil::Contains(boundaries, "aggregate_update.input_vector_group_payload_update=") ||
-		             StringUtil::Contains(boundaries, "aggregate_update.projected_group_payload_update=")));
+		    REQUIRE(HasInputVectorOrProjectedGroupPayloadUpdateBoundary(boundaries));
 		    REQUIRE_FALSE(StringUtil::Contains(boundaries, "hash_join_probe.final_output="));
 		    REQUIRE_FALSE(StringUtil::Contains(boundaries, "projection.copied_post_join_projection="));
 		    REQUIRE_FALSE(StringUtil::Contains(boundaries, "projection.copied_post_join_batch="));
@@ -795,8 +794,7 @@ TEST_CASE("JIT perfect hash join grouped aggregate composes cast-chain input-vec
 		    REQUIRE(
 		        StringUtil::Contains(runtime_paths, "aggregate_update.direct_projection_input_vector_grouped_update="));
 		    REQUIRE(StringUtil::Contains(boundaries, "hash_join_probe.perfect_selection_reference="));
-		    REQUIRE((StringUtil::Contains(boundaries, "aggregate_update.input_vector_group_payload_update=") ||
-		             StringUtil::Contains(boundaries, "aggregate_update.projected_group_payload_update=")));
+		    REQUIRE(HasInputVectorOrProjectedGroupPayloadUpdateBoundary(boundaries));
 		    REQUIRE_FALSE(StringUtil::Contains(boundaries, "hash_join_probe.final_output="));
 		    REQUIRE_FALSE(StringUtil::Contains(boundaries, "projection.copied_post_join_projection="));
 		    REQUIRE_FALSE(StringUtil::Contains(boundaries, "projection.copied_post_join_batch="));
@@ -1010,8 +1008,7 @@ TEST_CASE("JIT join grouped aggregate direct-projects probe-side grouped keys", 
 		        StringUtil::Contains(runtime_paths, "aggregate_update.direct_projection_input_vector_grouped_update="));
 		    REQUIRE(StringUtil::Contains(runtime_paths, "projection.direct_reference_payload_view="));
 		    REQUIRE(StringUtil::Contains(boundaries, "hash_join_probe.row_pointer_selection_reference="));
-		    REQUIRE((StringUtil::Contains(boundaries, "aggregate_update.input_vector_group_payload_update=") ||
-		             StringUtil::Contains(boundaries, "aggregate_update.projected_group_payload_update=")));
+		    REQUIRE(HasInputVectorOrProjectedGroupPayloadUpdateBoundary(boundaries));
 		    REQUIRE_FALSE(StringUtil::Contains(boundaries, "hash_join_probe.pending_probe_batch="));
 		    REQUIRE_FALSE(StringUtil::Contains(boundaries, "hash_join_probe.final_output="));
 		    REQUIRE_FALSE(StringUtil::Contains(boundaries, "hash_join_probe.projection_source="));
@@ -1076,12 +1073,10 @@ TEST_CASE("JIT join grouped aggregate direct-projects split probe-side keys", "[
 		        StringUtil::Contains(runtime_paths, "aggregate_update.direct_projection_input_vector_grouped_update="));
 		    REQUIRE(StringUtil::Contains(runtime_paths,
 		                                 "aggregate_update.direct_projection_aggregate_group.input_vector="));
-		    REQUIRE((StringUtil::Contains(stage_counts, "aggregate_update.direct_input_vector_group_payload_update=") ||
-		             StringUtil::Contains(stage_counts, "aggregate_update.direct_projected_group_payload_update=")));
+		    REQUIRE(HasInputVectorOrProjectedGroupPayloadUpdateStage(stage_counts));
 		    REQUIRE(StringUtil::Contains(boundaries, "hash_join_probe.row_pointer_selection_reference="));
 		    REQUIRE(StringUtil::Contains(boundaries, "projection.direct_post_join_computed_projection="));
-		    REQUIRE((StringUtil::Contains(boundaries, "aggregate_update.input_vector_group_payload_update=") ||
-		             StringUtil::Contains(boundaries, "aggregate_update.projected_group_payload_update=")));
+		    REQUIRE(HasInputVectorOrProjectedGroupPayloadUpdateBoundary(boundaries));
 		    REQUIRE_FALSE(StringUtil::Contains(boundaries, "hash_join_probe.pending_probe_batch="));
 		    REQUIRE_FALSE(StringUtil::Contains(runtime_paths, "aggregate_update.direct_new_grouped_primitive_update="));
 		    REQUIRE_FALSE(StringUtil::Contains(boundaries, "hash_join_probe.final_output="));
@@ -1587,13 +1582,9 @@ static void RequireComposedTwoJoinProjectionChainEvent(ExecutionRegionManager &m
 		    REQUIRE(StringUtil::Contains(stages, "projection.batch_append="));
 		    REQUIRE(StringUtil::Contains(stages, "projection.post_join_direct_reference_payload_view="));
 		    REQUIRE(StringUtil::Contains(stages, "projection.post_join_direct_computed_projection="));
-		    const bool has_projected_group_payload_update =
-		        StringUtil::Contains(boundaries, "aggregate_update.projected_group_payload_update=");
-		    const bool has_input_vector_group_payload_update =
-		        StringUtil::Contains(boundaries, "aggregate_update.input_vector_group_payload_update=");
 		    const bool has_row_pointer_grouped_lookup_update =
 		        StringUtil::Contains(boundaries, "aggregate_update.row_pointer_grouped_lookup_update=");
-		    REQUIRE((has_projected_group_payload_update || has_input_vector_group_payload_update ||
+		    REQUIRE((HasInputVectorOrProjectedGroupPayloadUpdateBoundary(boundaries) ||
 		             has_row_pointer_grouped_lookup_update));
 		    REQUIRE_FALSE(StringUtil::Contains(boundaries, "hash_join_probe.final_output="));
 		    REQUIRE_FALSE(StringUtil::Contains(runtime_paths, "projection.direct_between_join_projection="));
