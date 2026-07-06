@@ -802,6 +802,16 @@ def verify_runtime_batch_view() -> None:
         ),
     )
     require_text(
+        "extension/jit_sljit/include/sljit_hash_join_all_valid_probe_matcher_runtime.hpp",
+        (
+            "SljitDispatchHashJoinSingleKeyReader",
+            "SljitDispatchHashJoinSingleComparisonPredicateKinds",
+            "SljitDispatchHashJoinPairKeyKinds",
+            "SljitHashJoinDirectKeyReader",
+            "SljitHashJoinInt64ToInt32KeyReader",
+        ),
+    )
+    require_text(
         "extension/jit_sljit/include/sljit_hash_join_all_valid_probe_executor_runtime.hpp",
         (
             "sljit_hash_join_all_valid_mark_selection_probe_executor_runtime.hpp",
@@ -823,9 +833,16 @@ def verify_runtime_batch_view() -> None:
     require_text(
         "extension/jit_sljit/include/sljit_hash_join_all_valid_mark_selection_probe_dispatch_runtime.hpp",
         (
+            "sljit_hash_join_all_valid_mark_selection_probe_executor_runtime.hpp",
             "SljitHashJoinCanUseAllValidMarkSelectionProbe",
             "SljitHashJoinCanUseAllValidNoChainMarkSelectionProbe",
             "SljitHashJoinCanUseAllValidChainMarkSelectionProbe",
+            "SljitAllValidPairMarkSelectionProbeDispatch",
+            "SljitAllValidComparisonPredicateMarkSelectionProbeDispatch",
+            "SljitAllValidSingleKeyMarkSelectionProbeDispatch",
+            "SljitDispatchHashJoinPairKeyKinds",
+            "SljitDispatchHashJoinSingleComparisonPredicateKinds",
+            "SljitDispatchHashJoinSingleKeyReader",
             "TryExecuteAllValidUint64PairMarkSelectionProbe",
             "TryExecuteAllValidSingleKeyComparisonPredicateMarkSelectionProbe",
             "TryExecuteAllValidSingleKeyMarkSelectionProbe",
@@ -834,10 +851,23 @@ def verify_runtime_batch_view() -> None:
             "SljitHashJoinMarkSelectionMode::NON_MATCHES",
         ),
     )
+    reject_text(
+        "extension/jit_sljit/include/sljit_hash_join_all_valid_mark_selection_probe_dispatch_runtime.hpp",
+        (
+            "sljit_hash_join_all_valid_probe_executor_runtime.hpp",
+            "TryExecuteAllValidPairMarkSelectionProbeForKey1Kind",
+            "TryExecuteAllValidPairMarkSelectionProbeForKey0Kind",
+            "TryExecuteAllValidSingleKeyComparisonPredicateMarkSelectionProbeForPredicateKind",
+            "TryExecuteAllValidSingleKeyComparisonPredicateMarkSelectionProbeForKeyKind",
+            "TryExecuteAllValidSingleKeyMarkSelectionProbeForKind",
+        ),
+    )
     require_text(
         "extension/jit_sljit/include/sljit_hash_join_all_valid_probe_dispatch_runtime.hpp",
         (
             "sljit_hash_join_all_valid_mark_selection_probe_dispatch_runtime.hpp",
+            "SljitAllValidSingleKeyProbeDispatch",
+            "SljitDispatchHashJoinSingleKeyReader",
             "TryExecuteAllValidUint64PairProbe",
             "TryExecuteAllValidSingleKeyNotEqualPredicateChainProbe",
             "TryExecuteAllValidSingleKeyProbe",
@@ -851,6 +881,10 @@ def verify_runtime_batch_view() -> None:
             "TryExecuteAllValidSingleKeyComparisonPredicateMarkSelectionProbe(",
             "TryExecuteAllValidSingleKeyMarkSelectionProbe(",
         ),
+    )
+    reject_text(
+        "extension/jit_sljit/include/sljit_hash_join_all_valid_probe_dispatch_runtime.hpp",
+        ("TryExecuteAllValidSingleKeyProbeForKind",),
     )
     require_text(
         "extension/jit_sljit/include/sljit_hash_join_probe_path_runtime.hpp",

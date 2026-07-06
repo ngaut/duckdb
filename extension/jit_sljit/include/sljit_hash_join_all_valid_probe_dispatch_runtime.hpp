@@ -80,52 +80,15 @@ static void ExecuteAllValidSingleKeyProbeForInput(const SljitNativeHashJoinProbe
 }
 
 template <bool SELECTED, bool CHAIN>
-static bool TryExecuteAllValidSingleKeyProbeForKind(const SljitNativeHashJoinProbePlan &plan,
-                                                    SljitNativeRegularHashJoinProbeInput &input) {
-	auto &key = plan.keys[0];
-	if (input.source_key0_int64_to_int32) {
-		if (key.key_kind != SljitNativeHashJoinKeyKind::INT32) {
-			return false;
-		}
-		if (input.source_key0_int64_to_int32_unchecked) {
-			ExecuteAllValidSingleKeyProbeForInput<SljitHashJoinInt64ToInt32KeyReader<true>, SELECTED, CHAIN>(plan,
-			                                                                                                 input);
-		} else {
-			ExecuteAllValidSingleKeyProbeForInput<SljitHashJoinInt64ToInt32KeyReader<false>, SELECTED, CHAIN>(plan,
-			                                                                                                  input);
-		}
-		return true;
-	}
+struct SljitAllValidSingleKeyProbeDispatch {
+	const SljitNativeHashJoinProbePlan &plan;
+	SljitNativeRegularHashJoinProbeInput &input;
 
-	switch (key.key_kind) {
-	case SljitNativeHashJoinKeyKind::INT8:
-		ExecuteAllValidSingleKeyProbeForInput<SljitHashJoinDirectKeyReader<int8_t>, SELECTED, CHAIN>(plan, input);
-		return true;
-	case SljitNativeHashJoinKeyKind::UINT8:
-		ExecuteAllValidSingleKeyProbeForInput<SljitHashJoinDirectKeyReader<uint8_t>, SELECTED, CHAIN>(plan, input);
-		return true;
-	case SljitNativeHashJoinKeyKind::INT16:
-		ExecuteAllValidSingleKeyProbeForInput<SljitHashJoinDirectKeyReader<int16_t>, SELECTED, CHAIN>(plan, input);
-		return true;
-	case SljitNativeHashJoinKeyKind::UINT16:
-		ExecuteAllValidSingleKeyProbeForInput<SljitHashJoinDirectKeyReader<uint16_t>, SELECTED, CHAIN>(plan, input);
-		return true;
-	case SljitNativeHashJoinKeyKind::INT32:
-		ExecuteAllValidSingleKeyProbeForInput<SljitHashJoinDirectKeyReader<int32_t>, SELECTED, CHAIN>(plan, input);
-		return true;
-	case SljitNativeHashJoinKeyKind::UINT32:
-		ExecuteAllValidSingleKeyProbeForInput<SljitHashJoinDirectKeyReader<uint32_t>, SELECTED, CHAIN>(plan, input);
-		return true;
-	case SljitNativeHashJoinKeyKind::INT64:
-		ExecuteAllValidSingleKeyProbeForInput<SljitHashJoinDirectKeyReader<int64_t>, SELECTED, CHAIN>(plan, input);
-		return true;
-	case SljitNativeHashJoinKeyKind::UINT64:
-		ExecuteAllValidSingleKeyProbeForInput<SljitHashJoinDirectKeyReader<uint64_t>, SELECTED, CHAIN>(plan, input);
-		return true;
-	default:
-		return false;
+	template <class KEY_READER>
+	void Execute() {
+		ExecuteAllValidSingleKeyProbeForInput<KEY_READER, SELECTED, CHAIN>(plan, input);
 	}
-}
+};
 
 template <bool SELECTED, bool CHAIN>
 static bool TryExecuteAllValidSingleKeyProbe(const SljitNativeHashJoinProbePlan &plan,
@@ -142,7 +105,8 @@ static bool TryExecuteAllValidSingleKeyProbe(const SljitNativeHashJoinProbePlan 
 			return false;
 		}
 	}
-	return TryExecuteAllValidSingleKeyProbeForKind<SELECTED, CHAIN>(plan, input);
+	SljitAllValidSingleKeyProbeDispatch<SELECTED, CHAIN> dispatch {plan, input};
+	return SljitDispatchHashJoinSingleKeyReader(plan, input, dispatch);
 }
 
 } // namespace duckdb

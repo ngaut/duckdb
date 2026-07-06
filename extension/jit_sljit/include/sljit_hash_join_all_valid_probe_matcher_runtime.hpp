@@ -46,6 +46,177 @@ struct SljitHashJoinInt64ToInt32KeyReader {
 	const int64_t *__restrict data;
 };
 
+template <class DISPATCH>
+static bool SljitDispatchHashJoinSingleKeyReader(const SljitNativeHashJoinProbePlan &plan,
+                                                 const SljitNativeRegularHashJoinProbeInput &input,
+                                                 DISPATCH &dispatch) {
+	auto &key = plan.keys[0];
+	if (input.source_key0_int64_to_int32) {
+		if (key.key_kind != SljitNativeHashJoinKeyKind::INT32) {
+			return false;
+		}
+		if (input.source_key0_int64_to_int32_unchecked) {
+			dispatch.template Execute<SljitHashJoinInt64ToInt32KeyReader<true>>();
+		} else {
+			dispatch.template Execute<SljitHashJoinInt64ToInt32KeyReader<false>>();
+		}
+		return true;
+	}
+
+	switch (key.key_kind) {
+	case SljitNativeHashJoinKeyKind::INT8:
+		dispatch.template Execute<SljitHashJoinDirectKeyReader<int8_t>>();
+		return true;
+	case SljitNativeHashJoinKeyKind::UINT8:
+		dispatch.template Execute<SljitHashJoinDirectKeyReader<uint8_t>>();
+		return true;
+	case SljitNativeHashJoinKeyKind::INT16:
+		dispatch.template Execute<SljitHashJoinDirectKeyReader<int16_t>>();
+		return true;
+	case SljitNativeHashJoinKeyKind::UINT16:
+		dispatch.template Execute<SljitHashJoinDirectKeyReader<uint16_t>>();
+		return true;
+	case SljitNativeHashJoinKeyKind::INT32:
+		dispatch.template Execute<SljitHashJoinDirectKeyReader<int32_t>>();
+		return true;
+	case SljitNativeHashJoinKeyKind::UINT32:
+		dispatch.template Execute<SljitHashJoinDirectKeyReader<uint32_t>>();
+		return true;
+	case SljitNativeHashJoinKeyKind::INT64:
+		dispatch.template Execute<SljitHashJoinDirectKeyReader<int64_t>>();
+		return true;
+	case SljitNativeHashJoinKeyKind::UINT64:
+		dispatch.template Execute<SljitHashJoinDirectKeyReader<uint64_t>>();
+		return true;
+	default:
+		return false;
+	}
+}
+
+template <class KEY_SOURCE, class KEY_LAYOUT, class DISPATCH>
+static bool SljitDispatchHashJoinComparisonPredicateKind(const SljitNativeHashJoinProbePlan &plan, DISPATCH &dispatch) {
+	auto &predicate = plan.keys[1];
+	switch (predicate.key_kind) {
+	case SljitNativeHashJoinKeyKind::INT8:
+		dispatch.template Execute<KEY_SOURCE, KEY_LAYOUT, int8_t>();
+		return true;
+	case SljitNativeHashJoinKeyKind::UINT8:
+		dispatch.template Execute<KEY_SOURCE, KEY_LAYOUT, uint8_t>();
+		return true;
+	case SljitNativeHashJoinKeyKind::INT16:
+		dispatch.template Execute<KEY_SOURCE, KEY_LAYOUT, int16_t>();
+		return true;
+	case SljitNativeHashJoinKeyKind::UINT16:
+		dispatch.template Execute<KEY_SOURCE, KEY_LAYOUT, uint16_t>();
+		return true;
+	case SljitNativeHashJoinKeyKind::INT32:
+		dispatch.template Execute<KEY_SOURCE, KEY_LAYOUT, int32_t>();
+		return true;
+	case SljitNativeHashJoinKeyKind::UINT32:
+		dispatch.template Execute<KEY_SOURCE, KEY_LAYOUT, uint32_t>();
+		return true;
+	case SljitNativeHashJoinKeyKind::INT64:
+		dispatch.template Execute<KEY_SOURCE, KEY_LAYOUT, int64_t>();
+		return true;
+	case SljitNativeHashJoinKeyKind::UINT64:
+		dispatch.template Execute<KEY_SOURCE, KEY_LAYOUT, uint64_t>();
+		return true;
+	default:
+		return false;
+	}
+}
+
+template <class DISPATCH>
+static bool SljitDispatchHashJoinSingleComparisonPredicateKinds(const SljitNativeHashJoinProbePlan &plan,
+                                                                const SljitNativeRegularHashJoinProbeInput &input,
+                                                                DISPATCH &dispatch) {
+	auto &key = plan.keys[0];
+	if (input.source_key0_int64_to_int32) {
+		if (key.key_kind != SljitNativeHashJoinKeyKind::INT32) {
+			return false;
+		}
+		return SljitDispatchHashJoinComparisonPredicateKind<int64_t, int32_t>(plan, dispatch);
+	}
+	switch (key.key_kind) {
+	case SljitNativeHashJoinKeyKind::INT8:
+		return SljitDispatchHashJoinComparisonPredicateKind<int8_t, int8_t>(plan, dispatch);
+	case SljitNativeHashJoinKeyKind::UINT8:
+		return SljitDispatchHashJoinComparisonPredicateKind<uint8_t, uint8_t>(plan, dispatch);
+	case SljitNativeHashJoinKeyKind::INT16:
+		return SljitDispatchHashJoinComparisonPredicateKind<int16_t, int16_t>(plan, dispatch);
+	case SljitNativeHashJoinKeyKind::UINT16:
+		return SljitDispatchHashJoinComparisonPredicateKind<uint16_t, uint16_t>(plan, dispatch);
+	case SljitNativeHashJoinKeyKind::INT32:
+		return SljitDispatchHashJoinComparisonPredicateKind<int32_t, int32_t>(plan, dispatch);
+	case SljitNativeHashJoinKeyKind::UINT32:
+		return SljitDispatchHashJoinComparisonPredicateKind<uint32_t, uint32_t>(plan, dispatch);
+	case SljitNativeHashJoinKeyKind::INT64:
+		return SljitDispatchHashJoinComparisonPredicateKind<int64_t, int64_t>(plan, dispatch);
+	case SljitNativeHashJoinKeyKind::UINT64:
+		return SljitDispatchHashJoinComparisonPredicateKind<uint64_t, uint64_t>(plan, dispatch);
+	default:
+		return false;
+	}
+}
+
+template <class KEY0, class DISPATCH>
+static bool SljitDispatchHashJoinPairKey1Kind(const SljitNativeHashJoinProbePlan &plan, DISPATCH &dispatch) {
+	auto &key1 = plan.keys[1];
+	switch (key1.key_kind) {
+	case SljitNativeHashJoinKeyKind::INT8:
+		dispatch.template Execute<KEY0, int8_t>();
+		return true;
+	case SljitNativeHashJoinKeyKind::UINT8:
+		dispatch.template Execute<KEY0, uint8_t>();
+		return true;
+	case SljitNativeHashJoinKeyKind::INT16:
+		dispatch.template Execute<KEY0, int16_t>();
+		return true;
+	case SljitNativeHashJoinKeyKind::UINT16:
+		dispatch.template Execute<KEY0, uint16_t>();
+		return true;
+	case SljitNativeHashJoinKeyKind::INT32:
+		dispatch.template Execute<KEY0, int32_t>();
+		return true;
+	case SljitNativeHashJoinKeyKind::UINT32:
+		dispatch.template Execute<KEY0, uint32_t>();
+		return true;
+	case SljitNativeHashJoinKeyKind::INT64:
+		dispatch.template Execute<KEY0, int64_t>();
+		return true;
+	case SljitNativeHashJoinKeyKind::UINT64:
+		dispatch.template Execute<KEY0, uint64_t>();
+		return true;
+	default:
+		return false;
+	}
+}
+
+template <class DISPATCH>
+static bool SljitDispatchHashJoinPairKeyKinds(const SljitNativeHashJoinProbePlan &plan, DISPATCH &dispatch) {
+	auto &key0 = plan.keys[0];
+	switch (key0.key_kind) {
+	case SljitNativeHashJoinKeyKind::INT8:
+		return SljitDispatchHashJoinPairKey1Kind<int8_t>(plan, dispatch);
+	case SljitNativeHashJoinKeyKind::UINT8:
+		return SljitDispatchHashJoinPairKey1Kind<uint8_t>(plan, dispatch);
+	case SljitNativeHashJoinKeyKind::INT16:
+		return SljitDispatchHashJoinPairKey1Kind<int16_t>(plan, dispatch);
+	case SljitNativeHashJoinKeyKind::UINT16:
+		return SljitDispatchHashJoinPairKey1Kind<uint16_t>(plan, dispatch);
+	case SljitNativeHashJoinKeyKind::INT32:
+		return SljitDispatchHashJoinPairKey1Kind<int32_t>(plan, dispatch);
+	case SljitNativeHashJoinKeyKind::UINT32:
+		return SljitDispatchHashJoinPairKey1Kind<uint32_t>(plan, dispatch);
+	case SljitNativeHashJoinKeyKind::INT64:
+		return SljitDispatchHashJoinPairKey1Kind<int64_t>(plan, dispatch);
+	case SljitNativeHashJoinKeyKind::UINT64:
+		return SljitDispatchHashJoinPairKey1Kind<uint64_t>(plan, dispatch);
+	default:
+		return false;
+	}
+}
+
 struct SljitHashJoinUint64PairMatcher {
 	struct Row {
 		uint64_t key0;
@@ -100,8 +271,8 @@ struct SljitHashJoinPairEqualityMatcher {
 	SljitHashJoinPairEqualityMatcher(const SljitNativeHashJoinProbePlan &plan,
 	                                 const SljitNativeRegularHashJoinProbeInput &input)
 	    : key0_data(reinterpret_cast<const KEY0 *>(input.source_data[0])),
-	      key1_data(reinterpret_cast<const KEY1 *>(input.source_data[1])),
-	      key0_offset(plan.keys[0].key_layout_offset), key1_offset(plan.keys[1].key_layout_offset) {
+	      key1_data(reinterpret_cast<const KEY1 *>(input.source_data[1])), key0_offset(plan.keys[0].key_layout_offset),
+	      key1_offset(plan.keys[1].key_layout_offset) {
 	}
 
 	inline Row Load(const sel_t source_idx) const {
