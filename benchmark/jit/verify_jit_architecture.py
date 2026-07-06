@@ -111,6 +111,7 @@ def verify_required_design_files() -> None:
         "extension/jit_sljit/include/sljit_post_join_projection_aggregate_runtime.hpp",
         "extension/jit_sljit/include/sljit_mark_probe_filter_boundary.hpp",
         "extension/jit_sljit/include/sljit_mark_probe_filter_boundary_runtime.hpp",
+        "extension/jit_sljit/include/sljit_hash_join_probe_execution_contract.hpp",
         "extension/jit_sljit/include/sljit_hash_join_probe_executor_runtime.hpp",
         "extension/jit_sljit/include/sljit_hash_join_probe_materialize_primitive_runtime.hpp",
         "extension/jit_sljit/include/sljit_hash_join_probe_selection_primitive_runtime.hpp",
@@ -716,14 +717,24 @@ def verify_runtime_batch_view() -> None:
         ),
     )
     require_text(
-        "extension/jit_sljit/include/sljit_hash_join_probe_executor_runtime.hpp",
+        "extension/jit_sljit/include/sljit_hash_join_probe_execution_contract.hpp",
         (
-            "SljitExecuteEmptyHashJoinProbe",
-            "SljitHashJoinProbeOutputContract",
+            "enum class SljitHashJoinProbeOutputContract",
             "MATERIALIZED_OUTPUT",
             "SELECTED_VIEW",
             "FILTERED_MARK_MATCHES",
             "FILTERED_MARK_NON_MATCHES",
+            "SljitHashJoinProbeOutputIsFilteredMarkMatches",
+            "SljitHashJoinProbeOutputIsFilteredMarkNonMatches",
+            "SljitHashJoinMarkSelectionModeForOutputContract",
+            "SljitHashJoinProbeProducesSelectedView(output_contract)",
+        ),
+    )
+    require_text(
+        "extension/jit_sljit/include/sljit_hash_join_probe_executor_runtime.hpp",
+        (
+            "SljitExecuteEmptyHashJoinProbe",
+            "SljitHashJoinProbeOutputContract",
             "SljitHashJoinProbeOutputIsFilteredMarkMatches",
             "SljitHashJoinProbeOutputIsFilteredMarkNonMatches",
             "SljitHashJoinMarkSelectionModeForOutputContract",
@@ -2271,7 +2282,7 @@ def verify_primitive_sequence() -> None:
         ),
     )
     require_text(
-        "extension/jit_sljit/include/sljit_hash_join_probe_executor_runtime.hpp",
+        "extension/jit_sljit/include/sljit_hash_join_probe_execution_contract.hpp",
         (
             "struct SljitHashJoinProbeExecutionContractView",
             "SljitBuildHashJoinProbeExecutionContractView",
