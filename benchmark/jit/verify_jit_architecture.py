@@ -1580,6 +1580,7 @@ def verify_primitive_sequence() -> None:
             "SljitProjectionAggregatePrefixKind::SOURCE",
             "SljitProjectionAggregatePrefixKind::SINGLE_JOIN",
             "SljitProjectionAggregatePrefixKind::TWO_JOIN",
+            "MarkFilterHashJoinIdx() const",
             "struct SljitMarkFilterProjectionNativeTailFacts",
             "struct SljitGeneratedFilterProjectionNativeTailFacts",
             "struct SljitProjectionFilterProjectionNativeTailFacts",
@@ -1616,6 +1617,7 @@ def verify_primitive_sequence() -> None:
             "JoinCanUseDirectAggregate",
             "JoinCanUseProjectionAggregateTail",
             "JoinProjectionAggregateTailPrefixCanBind",
+            "facts.MarkFilterHashJoinIdx()",
         ),
     )
     reject_text(
@@ -2541,8 +2543,6 @@ def verify_recipe_builder() -> None:
             "struct SljitProjectionAggregatePrefixFacts",
             "struct SljitFullPipelineScheduleFacts",
             "has_source_batch_native_tail",
-            "source_batch_boundary_op_idx",
-            "source_batch_tail_start_idx",
             "SljitFullPipelineOpIsUngroupedPrimitiveAggregateUpdate",
             "struct SljitHashJoinDelimJoinSinkFacts",
             "struct SljitSourceBatchNativeTailFacts",
@@ -2561,6 +2561,8 @@ def verify_recipe_builder() -> None:
         (
             "SljitFullPipelineUsesScanFilteredAggregateTerminal",
             "uses_scan_filters",
+            "source_batch_boundary_op_idx",
+            "source_batch_tail_start_idx",
             "struct SljitSelectedJoinAggregateFacts",
             "SljitTryAnalyzeSelectedJoinAggregate",
         ),

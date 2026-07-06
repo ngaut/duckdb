@@ -48,8 +48,6 @@ static bool SljitFullPipelineOpIsUngroupedPrimitiveAggregateUpdate(const SljitEx
 struct SljitFullPipelineScheduleFacts {
 	bool uses_extended_source_fetch_budget = false;
 	bool has_source_batch_native_tail = false;
-	idx_t source_batch_boundary_op_idx = DConstants::INVALID_INDEX;
-	idx_t source_batch_tail_start_idx = DConstants::INVALID_INDEX;
 };
 
 struct SljitHashJoinDelimJoinSinkFacts {
@@ -107,6 +105,13 @@ struct SljitProjectionAggregatePrefixFacts {
 		return mark_filter_idx != DConstants::INVALID_INDEX;
 	}
 
+	idx_t MarkFilterHashJoinIdx() const {
+		if (!HasMarkFilter() || !HasFirstHashJoin()) {
+			return DConstants::INVALID_INDEX;
+		}
+		return HasSecondHashJoin() ? second_hash_join_idx : first_hash_join_idx;
+	}
+
 	SljitProjectionAggregatePrefixKind Kind() const {
 		if (!HasFirstHashJoin()) {
 			return HasSecondHashJoin() ? SljitProjectionAggregatePrefixKind::INVALID
@@ -153,8 +158,6 @@ SljitAnalyzeFullPipelineScheduleFacts(const vector<SljitExecutableRegionOp> &ops
 	const bool first_hash_join_native_tail = !ops.empty() && ops[0].kind == SljitNativeRegionOpKind::HASH_JOIN_PROBE;
 	if (first_hash_join_native_tail) {
 		facts.has_source_batch_native_tail = true;
-		facts.source_batch_boundary_op_idx = 0;
-		facts.source_batch_tail_start_idx = 0;
 	}
 	bool has_hash_join_probe = false;
 	for (auto &op : ops) {
@@ -208,8 +211,8 @@ static bool SljitTryAnalyzeSourceBatchNativeTail(const SljitFullPipelineSchedule
 	if (!schedule_facts.has_source_batch_native_tail) {
 		return false;
 	}
-	facts.boundary_op_idx = schedule_facts.source_batch_boundary_op_idx;
-	facts.tail_start_idx = schedule_facts.source_batch_tail_start_idx;
+	facts.boundary_op_idx = 0;
+	facts.tail_start_idx = 0;
 	return true;
 }
 

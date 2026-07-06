@@ -68,23 +68,17 @@ private:
 
 	bool HasMarkFilterBoundary(const SljitProjectionAggregatePlanFacts &plan) const {
 		auto &facts = plan.prefix;
-		if (!facts.HasMarkFilter() || facts.HasSourceFilterProjection() || facts.HasPreJoinProjection()) {
+		if (!facts.HasMarkFilter() || facts.HasSourceFilterProjection() || facts.HasPreJoinProjection() ||
+		    facts.HasBetweenProjection()) {
 			return false;
 		}
-		switch (facts.Kind()) {
-		case SljitProjectionAggregatePrefixKind::SINGLE_JOIN:
-			return facts.mark_filter_idx == facts.first_hash_join_idx + 1 &&
-			       ops[facts.first_hash_join_idx].hash_join_probe.plan.output_mode ==
-			           ExecutionHashJoinProbeOutputMode::MARK_PROBE &&
-			       SljitIsMarkProbeMarkerFilter(ops[facts.first_hash_join_idx], ops[facts.mark_filter_idx]);
-		case SljitProjectionAggregatePrefixKind::TWO_JOIN:
-			return !facts.HasBetweenProjection() && facts.mark_filter_idx == facts.second_hash_join_idx + 1 &&
-			       ops[facts.second_hash_join_idx].hash_join_probe.plan.output_mode ==
-			           ExecutionHashJoinProbeOutputMode::MARK_PROBE &&
-			       SljitIsMarkProbeMarkerFilter(ops[facts.second_hash_join_idx], ops[facts.mark_filter_idx]);
-		default:
+		const auto hash_join_idx = facts.MarkFilterHashJoinIdx();
+		if (hash_join_idx == DConstants::INVALID_INDEX) {
 			return false;
 		}
+		return facts.mark_filter_idx == hash_join_idx + 1 &&
+		       ops[hash_join_idx].hash_join_probe.plan.output_mode == ExecutionHashJoinProbeOutputMode::MARK_PROBE &&
+		       SljitIsMarkProbeMarkerFilter(ops[hash_join_idx], ops[facts.mark_filter_idx]);
 	}
 
 	bool TryBuildMarkBoundary(SljitFullPipelineRecipe &recipe, const SljitProjectionAggregatePlanFacts &plan) const {
@@ -93,30 +87,18 @@ private:
 		if (!HasMarkFilterBoundary(plan)) {
 			return false;
 		}
-		switch (facts.Kind()) {
-		case SljitProjectionAggregatePrefixKind::SINGLE_JOIN:
-			if (!binding.ProjectionAggregateHasDedicatedBackend(shape)) {
-				if (!binding.CanMakeNativeTailRecipe(facts.mark_filter_idx + 1)) {
-					return false;
-				}
-				recipe = binding.MakeMarkFilterNativeTailRecipe(facts);
-				return true;
-			}
+		const bool can_use_projection_aggregate =
+		    binding.ProjectionAggregateHasDedicatedBackend(shape) &&
+		    (!facts.HasSecondHashJoin() || shape.ProjectionCount() != 0);
+		if (can_use_projection_aggregate) {
 			recipe = binding.MakeMarkFilterProjectionAggregateRecipe(shape, facts);
 			return true;
-		case SljitProjectionAggregatePrefixKind::TWO_JOIN:
-			if (shape.ProjectionCount() != 0 && binding.ProjectionAggregateHasDedicatedBackend(shape)) {
-				recipe = binding.MakeMarkFilterProjectionAggregateRecipe(shape, facts);
-				return true;
-			}
-			if (!binding.CanMakeNativeTailRecipe(facts.mark_filter_idx + 1)) {
-				return false;
-			}
-			recipe = binding.MakeMarkFilterNativeTailRecipe(facts);
-			return true;
-		default:
+		}
+		if (!binding.CanMakeNativeTailRecipe(facts.mark_filter_idx + 1)) {
 			return false;
 		}
+		recipe = binding.MakeMarkFilterNativeTailRecipe(facts);
+		return true;
 	}
 
 	bool TryBuildJoinProjectionAggregate(SljitFullPipelineRecipe &recipe,
