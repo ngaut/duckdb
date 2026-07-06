@@ -73,8 +73,8 @@ public:
 	    const vector<Value> &source_min_values_p, const vector<Value> &source_max_values_p)
 	    : runtime(runtime_p), result(result_p), ops(ops_p), recipe(recipe_p),
 	      execute_hash_join_probe(execute_hash_join_probe_p),
-	      terminal_runtime(execute_native_full_pipeline_from_p, execute_hash_join_probe_p, source_distinct_counts_p,
-	                       source_min_values_p, source_max_values_p),
+	      terminal_runtime(execute_native_full_pipeline_from_p, source_distinct_counts_p, source_min_values_p,
+	                       source_max_values_p),
 	      scratch(runtime.GetAllocator(), ops), selected_hash_join_inputs(runtime, ops, scratch),
 	      generated_filter(runtime, ops, scratch), hash_join_materialize(runtime, result, ops, scratch),
 	      hash_join_selection(runtime, result, ops, scratch, selected_hash_join_inputs),
@@ -271,7 +271,7 @@ private:
 	vector<SljitExecutableRegionOp> &ops;
 	const SljitFullPipelineRecipe &recipe;
 	EXECUTE_HASH_JOIN_PROBE &execute_hash_join_probe;
-	SljitFullPipelineTerminalRuntime<EXECUTE_NATIVE_FULL_PIPELINE_FROM, EXECUTE_HASH_JOIN_PROBE> terminal_runtime;
+	SljitFullPipelineTerminalRuntime<EXECUTE_NATIVE_FULL_PIPELINE_FROM> terminal_runtime;
 	SljitRegionExecutionScratch scratch;
 	SljitSelectedHashJoinInputRuntime selected_hash_join_inputs;
 	SljitGeneratedFilterPrimitiveRuntime generated_filter;

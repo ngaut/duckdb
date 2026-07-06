@@ -1,7 +1,7 @@
 //===----------------------------------------------------------------------===//
 //                         DuckDB
 //
-// sljit_join_projection_aggregate_update_runtime.hpp
+// sljit_post_join_projection_aggregate_runtime.hpp
 //
 //
 //===----------------------------------------------------------------------===//
@@ -13,8 +13,8 @@
 #include "sljit_hash_join_probe_executor_runtime.hpp"
 #include "sljit_hash_join_probe_runtime.hpp"
 #include "sljit_hash_join_projection_runtime.hpp"
-#include "sljit_join_projection_aggregate_update_primitive.hpp"
 #include "sljit_post_join_projection_runtime.hpp"
+#include "sljit_post_join_projection_aggregate_primitive.hpp"
 #include "sljit_projection_executor_runtime.hpp"
 #include "sljit_projected_grouped_aggregate_sink.hpp"
 
@@ -36,11 +36,11 @@ struct SljitPostJoinProjectionAggregateRuntimeState {
 	             const vector<Value> &source_max_values) {
 		if (!SljitCanBindPostJoinProjectionAggregatePrimitive(ops, primitive)) {
 			return false;
-			}
-			post_join_projection = primitive.post_join_projection.MakeStrategy();
-			auto &direct_aggregate = primitive.direct_join_output_aggregate;
-			direct_join_output_aggregate_strategy =
-			    make_uniq<SljitDirectJoinOutputAggregateStrategy>(direct_aggregate.aggregate_idx);
+		}
+		post_join_projection = primitive.post_join_projection.MakeStrategy();
+		auto &direct_aggregate = primitive.direct_join_output_aggregate;
+		direct_join_output_aggregate_strategy =
+		    make_uniq<SljitDirectJoinOutputAggregateStrategy>(direct_aggregate.aggregate_idx);
 		SljitAttachDirectJoinOutputAggregateSourceStats(*direct_join_output_aggregate_strategy, source_distinct_counts,
 		                                                source_min_values, source_max_values);
 		direct_join_output_aggregate = SljitDirectJoinOutputAggregatePolicy(*direct_join_output_aggregate_strategy);
@@ -185,8 +185,8 @@ private:
 		}
 		return SljitProjectedGroupedAggregateSink(
 		    ops, runtime, runtime.ExecutionOperators(), scratch, result, final_projection_idx,
-		    ops[final_projection_idx], aggregate_idx, aggregate_op, deferred_grouped_finish,
-		    processed_output_rows, projected_batch, "post_join_batch_append", "copied_post_join_batch",
+		    ops[final_projection_idx], aggregate_idx, aggregate_op, deferred_grouped_finish, processed_output_rows,
+		    projected_batch, "post_join_batch_append", "copied_post_join_batch",
 		    optional_ptr<SljitDirectJoinOutputAggregatePolicy>(&direct_join_output_aggregate), false,
 		    bound_grouped_update);
 	}
@@ -200,44 +200,6 @@ private:
 	unique_ptr<SljitDirectJoinOutputAggregateStrategy> direct_join_output_aggregate_strategy;
 	SljitDirectJoinOutputAggregatePolicy direct_join_output_aggregate;
 	SljitBoundGroupedPrimitiveAggregateUpdate bound_projected_grouped_update;
-};
-
-struct SljitJoinProjectionAggregateUpdateRuntimeState {
-	bool Prepare(ExecutionRegionRuntime &runtime, vector<SljitExecutableRegionOp> &ops,
-	             const SljitJoinProjectionAggregateUpdatePrimitive &primitive,
-	             const vector<idx_t> &source_distinct_counts, const vector<Value> &source_min_values,
-	             const vector<Value> &source_max_values) {
-		return selected_join_output.Prepare(runtime, ops, primitive.selected_join_output, source_distinct_counts,
-		                                    source_min_values, source_max_values);
-	}
-
-	template <class EXECUTE_HASH_JOIN_PROBE>
-	bool Execute(ExecutionRegionRuntime &runtime, ExecutionRegionResult &result, vector<SljitExecutableRegionOp> &ops,
-	             SljitRegionExecutionScratch &scratch, const SljitJoinProjectionAggregateUpdatePrimitive &primitive,
-	             const SljitRuntimeBatchView &input, bool have_more_output,
-	             EXECUTE_HASH_JOIN_PROBE &execute_hash_join_probe) {
-		(void)have_more_output;
-		(void)execute_hash_join_probe;
-		return selected_join_output.Execute(runtime, result, ops, scratch, primitive.selected_join_output, input);
-	}
-
-	template <class EXECUTE_HASH_JOIN_PROBE>
-	bool Flush(ExecutionRegionRuntime &runtime, ExecutionRegionResult &result, vector<SljitExecutableRegionOp> &ops,
-	           SljitRegionExecutionScratch &scratch, const SljitJoinProjectionAggregateUpdatePrimitive &primitive,
-	           EXECUTE_HASH_JOIN_PROBE &execute_hash_join_probe) {
-		(void)primitive;
-		(void)execute_hash_join_probe;
-		return selected_join_output.Flush(runtime, result, ops, scratch);
-	}
-
-	bool BudgetReached(ExecutionRegionRuntime &runtime, const SljitJoinProjectionAggregateUpdatePrimitive &primitive,
-	                   idx_t max_recipe_batches) const {
-		(void)primitive;
-		return selected_join_output.BudgetReached(runtime, max_recipe_batches);
-	}
-
-private:
-	SljitPostJoinProjectionAggregateRuntimeState selected_join_output;
 };
 
 } // namespace duckdb

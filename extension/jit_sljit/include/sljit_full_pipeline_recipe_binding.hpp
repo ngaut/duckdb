@@ -271,8 +271,7 @@ public:
 		auto sequence = MakeSourceHashJoinProjectionInputSequence(first_hash_join_idx);
 		AddProjectionChainStep(sequence, between_projection_idx);
 		sequence.Add(MakeHashJoinProbeSelectionStep(second_hash_join_idx));
-		sequence.Add(SljitFullPipelinePrimitiveStep::JoinProjectionAggregateUpdate(
-		    SljitMakeSelectedJoinOutputAggregateUpdatePrimitive(post_join_aggregate)));
+		sequence.Add(SljitFullPipelinePrimitiveStep::PostJoinProjectionAggregateUpdate(post_join_aggregate));
 		return MakePrimitiveSequence(std::move(sequence));
 	}
 
@@ -304,8 +303,7 @@ public:
 		auto post_join_aggregate = BindPostJoinProjectionAggregatePrimitive(shape, second_hash_join_idx);
 		auto sequence = MakeSourceHashJoinProjectionInputSequence(first_hash_join_idx);
 		sequence.Add(MakeHashJoinProbeSelectionStep(second_hash_join_idx));
-		sequence.Add(SljitFullPipelinePrimitiveStep::JoinProjectionAggregateUpdate(
-		    SljitMakeSelectedJoinOutputAggregateUpdatePrimitive(post_join_aggregate)));
+		sequence.Add(SljitFullPipelinePrimitiveStep::PostJoinProjectionAggregateUpdate(post_join_aggregate));
 		return MakePrimitiveSequence(std::move(sequence));
 	}
 
@@ -541,8 +539,7 @@ private:
 
 	SljitFullPipelinePrimitiveStep
 	MakeJoinProjectionAggregateTerminal(const SljitPostJoinProjectionAggregatePrimitive &post_join_aggregate) const {
-		return SljitFullPipelinePrimitiveStep::JoinProjectionAggregateUpdate(
-		    SljitMakeSelectedJoinOutputAggregateUpdatePrimitive(post_join_aggregate));
+		return SljitFullPipelinePrimitiveStep::PostJoinProjectionAggregateUpdate(post_join_aggregate);
 	}
 
 	bool SourceKey0RangeFitsInt32(idx_t hash_join_idx) const {

@@ -20,7 +20,7 @@
 #include "sljit_generated_filter_primitive.hpp"
 #include "sljit_grouped_aggregate_update_primitive.hpp"
 #include "sljit_hash_join_probe_primitive.hpp"
-#include "sljit_join_projection_aggregate_update_primitive.hpp"
+#include "sljit_post_join_projection_aggregate_primitive.hpp"
 #include "sljit_projection_chain_runtime.hpp"
 #include "sljit_ungrouped_aggregate_update_primitive.hpp"
 
@@ -35,7 +35,7 @@ enum class SljitFullPipelinePrimitiveKind : uint8_t {
 	HASH_JOIN_PROBE_SELECTION,
 	MARK_PROBE_FILTER_BOUNDARY,
 	PROJECTION_CHAIN,
-	JOIN_PROJECTION_AGGREGATE_UPDATE,
+	POST_JOIN_PROJECTION_AGGREGATE_UPDATE,
 	UNGROUPED_AGGREGATE_UPDATE,
 	GROUPED_AGGREGATE_UPDATE,
 	DELIM_JOIN_SINK,
@@ -54,7 +54,7 @@ struct SljitFullPipelinePrimitiveStep {
 	SljitGeneratedFilterPrimitive generated_filter;
 	SljitMarkProbeFilterBoundaryPrimitive mark_probe_filter_boundary;
 	SljitProjectionChainPrimitive projection_chain;
-	SljitJoinProjectionAggregateUpdatePrimitive join_projection_aggregate_update;
+	SljitPostJoinProjectionAggregatePrimitive post_join_projection_aggregate;
 	SljitUngroupedAggregateUpdatePrimitive ungrouped_aggregate_update;
 	SljitGroupedAggregateUpdatePrimitive grouped_aggregate_update;
 	SljitDelimJoinSinkPrimitive delim_join_sink;
@@ -110,11 +110,11 @@ struct SljitFullPipelinePrimitiveStep {
 	}
 
 	static SljitFullPipelinePrimitiveStep
-	JoinProjectionAggregateUpdate(const SljitJoinProjectionAggregateUpdatePrimitive &primitive) {
-		auto step = Make(SljitFullPipelinePrimitiveKind::JOIN_PROJECTION_AGGREGATE_UPDATE,
-		                 {SljitJoinProjectionAggregateUpdateFirstOpIdx(primitive),
-		                  SljitJoinProjectionAggregateUpdateAggregateIdx(primitive)});
-		step.join_projection_aggregate_update = primitive;
+	PostJoinProjectionAggregateUpdate(const SljitPostJoinProjectionAggregatePrimitive &primitive) {
+		auto step =
+		    Make(SljitFullPipelinePrimitiveKind::POST_JOIN_PROJECTION_AGGREGATE_UPDATE,
+		         {primitive.post_join_projection.hash_join_idx, primitive.direct_join_output_aggregate.aggregate_idx});
+		step.post_join_projection_aggregate = primitive;
 		return step;
 	}
 

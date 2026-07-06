@@ -105,8 +105,8 @@ def verify_required_design_files() -> None:
         "extension/jit_sljit/include/sljit_full_pipeline_terminal_runtime.hpp",
         "extension/jit_sljit/include/sljit_generated_filter_primitive.hpp",
         "extension/jit_sljit/include/sljit_generated_filter_primitive_runtime.hpp",
-        "extension/jit_sljit/include/sljit_join_projection_aggregate_update_primitive.hpp",
-        "extension/jit_sljit/include/sljit_join_projection_aggregate_update_runtime.hpp",
+        "extension/jit_sljit/include/sljit_post_join_projection_aggregate_primitive.hpp",
+        "extension/jit_sljit/include/sljit_post_join_projection_aggregate_runtime.hpp",
         "extension/jit_sljit/include/sljit_mark_probe_filter_boundary.hpp",
         "extension/jit_sljit/include/sljit_mark_probe_filter_boundary_runtime.hpp",
         "extension/jit_sljit/include/sljit_hash_join_probe_executor_runtime.hpp",
@@ -357,6 +357,8 @@ def verify_stale_route_code_removed() -> None:
         "extension/jit_sljit/include/sljit_direct_second_join_input_runtime.hpp",
         "extension/jit_sljit/include/sljit_hash_join_all_valid_probe_core_runtime.hpp",
         "extension/jit_sljit/include/sljit_filter_projection_build_runtime.hpp",
+        "extension/jit_sljit/include/sljit_join_projection_aggregate_update_primitive.hpp",
+        "extension/jit_sljit/include/sljit_join_projection_aggregate_update_runtime.hpp",
     ):
         require_absent(path)
     reject_regex(
@@ -373,7 +375,13 @@ def verify_stale_route_code_removed() -> None:
             r"TWO_HASH_JOIN_PROJECTED_GROUPED_AGGREGATE_UPDATE",
             r"SljitFilterProjectionJoinInput",
             r"SljitPrepareFilterProjectionJoinInput",
+            r"\bJOIN_PROJECTION_AGGREGATE_UPDATE\b",
+            r"SljitJoinProjectionAggregateUpdatePrimitive",
             r"SljitJoinProjectionAggregateUpdateInputKind",
+            r"SljitMakeSelectedJoinOutputAggregateUpdatePrimitive",
+            r"SljitCanBindJoinProjectionAggregateUpdatePrimitive",
+            r"join_projection_aggregate_update",
+            r"sljit_join_projection_aggregate_update",
             r"SljitMakeTwoJoinSourceAggregateUpdatePrimitive",
             r"two_join_source",
             r"TWO_JOIN_SOURCE_INPUT",
@@ -795,15 +803,16 @@ def verify_runtime_batch_view() -> None:
          "\t                   idx_t max_recipe_batches)",),
     )
     require_text(
-        "extension/jit_sljit/include/sljit_join_projection_aggregate_update_runtime.hpp",
-        ("selected_join_output.BudgetReached(runtime, max_recipe_batches)",),
+        "extension/jit_sljit/include/sljit_post_join_projection_aggregate_runtime.hpp",
+        ("SljitDownstreamRowBudgetReached(processed_output_rows, max_recipe_batches)",),
     )
     require_text(
-        "extension/jit_sljit/include/sljit_join_projection_aggregate_update_runtime.hpp",
+        "extension/jit_sljit/include/sljit_post_join_projection_aggregate_runtime.hpp",
         (
             "SljitDownstreamRowBudgetReached(processed_output_rows, max_recipe_batches)",
             "SljitDataChunkBatch projected_batch",
-            "processed_output_rows, projected_batch",
+            "processed_output_rows",
+            "projected_batch",
         ),
     )
     require_text(
@@ -887,7 +896,7 @@ def verify_runtime_proof_ownership() -> None:
     reject_regex(
         "post-join aggregate primitive owns source-key proof",
         (r"(?s)struct\s+SljitPostJoinProjectionAggregatePrimitive\s*\{[^}]*source_key0_int64_to_int32",),
-        ("extension/jit_sljit/include/sljit_join_projection_aggregate_update_primitive.hpp",),
+        ("extension/jit_sljit/include/sljit_post_join_projection_aggregate_primitive.hpp",),
     )
     reject_regex(
         "direct aggregate strategy owns pending-batch source-key proof",
@@ -895,7 +904,7 @@ def verify_runtime_proof_ownership() -> None:
         ("extension/jit_sljit/include/sljit_direct_join_output_aggregate_state.hpp",),
     )
     reject_text(
-        "extension/jit_sljit/include/sljit_join_projection_aggregate_update_runtime.hpp",
+        "extension/jit_sljit/include/sljit_post_join_projection_aggregate_runtime.hpp",
         ("source_key0_int64_to_int32_unchecked || source_key0_int64_to_int32_matches_are_proven",),
     )
 
@@ -1386,21 +1395,21 @@ def verify_primitive_sequence() -> None:
             "HASH_JOIN_PROBE_SELECTION",
             "MARK_PROBE_FILTER_BOUNDARY",
             "PROJECTION_CHAIN",
-            "JOIN_PROJECTION_AGGREGATE_UPDATE",
+            "POST_JOIN_PROJECTION_AGGREGATE_UPDATE",
             "UNGROUPED_AGGREGATE_UPDATE",
             "GROUPED_AGGREGATE_UPDATE",
             "NATIVE_TAIL_HANDOFF",
             "SljitGeneratedFilterPrimitive generated_filter",
             "SljitHashJoinProbeSelectionPrimitive hash_join_probe_selection",
             "SljitProjectionChainPrimitive projection_chain",
-            "SljitJoinProjectionAggregateUpdatePrimitive join_projection_aggregate_update",
+            "SljitPostJoinProjectionAggregatePrimitive post_join_projection_aggregate",
             "SljitUngroupedAggregateUpdatePrimitive ungrouped_aggregate_update",
             "SljitGroupedAggregateUpdatePrimitive grouped_aggregate_update",
             "SourceBatchBoundary(idx_t op_idx)",
             "GeneratedFilter(const SljitGeneratedFilterPrimitive &primitive)",
             "HashJoinProbeSelection(const SljitHashJoinProbeSelectionPrimitive &primitive)",
             "ProjectionChain(const SljitProjectionChainPrimitive &primitive)",
-            "JoinProjectionAggregateUpdate(const SljitJoinProjectionAggregateUpdatePrimitive &primitive)",
+            "PostJoinProjectionAggregateUpdate(const SljitPostJoinProjectionAggregatePrimitive &primitive)",
             "UngroupedAggregateUpdate(const SljitUngroupedAggregateUpdatePrimitive &primitive)",
             "GroupedAggregateUpdate(const SljitGroupedAggregateUpdatePrimitive &primitive)",
             "step.op_count >= SLJIT_FULL_PIPELINE_MAX_PRIMITIVE_STEP_OPS",
@@ -1440,9 +1449,9 @@ def verify_primitive_sequence() -> None:
             "SljitFullPipelinePrimitiveKind::SOURCE_BATCH_BOUNDARY",
             "return true",
             "SljitFullPipelinePrimitiveKind::HASH_JOIN_PROBE_SELECTION",
-            "SljitFullPipelinePrimitiveKind::JOIN_PROJECTION_AGGREGATE_UPDATE",
+            "SljitFullPipelinePrimitiveKind::POST_JOIN_PROJECTION_AGGREGATE_UPDATE",
             "SljitCanBindHashJoinProbeSelectionPrimitive",
-            "SljitCanBindJoinProjectionAggregateUpdatePrimitive",
+            "SljitCanBindPostJoinProjectionAggregatePrimitive",
         ),
     )
     reject_text(
@@ -1450,18 +1459,17 @@ def verify_primitive_sequence() -> None:
         ("SljitFullPipelinePrimitiveConsumesSourceSinkAdvance",),
     )
     require_text(
-        "extension/jit_sljit/include/sljit_join_projection_aggregate_update_primitive.hpp",
+        "extension/jit_sljit/include/sljit_post_join_projection_aggregate_primitive.hpp",
         (
-            "struct SljitJoinProjectionAggregateUpdatePrimitive",
-            "SljitPostJoinProjectionAggregatePrimitive selected_join_output",
-            "SljitMakeSelectedJoinOutputAggregateUpdatePrimitive",
-            "SljitCanBindJoinProjectionAggregateUpdatePrimitive",
-            "SljitCanBindPostJoinProjectionAggregatePrimitive(ops, primitive.selected_join_output)",
+            "struct SljitPostJoinProjectionAggregatePrimitive",
+            "SljitPostJoinProjectionPrimitive post_join_projection",
+            "SljitDirectJoinOutputAggregatePrimitive direct_join_output_aggregate",
+            "SljitCanBindPostJoinProjectionAggregatePrimitive",
         ),
     )
     reject_text(
-        "extension/jit_sljit/include/sljit_join_projection_aggregate_update_primitive.hpp",
-        ("ConsumesSourceSinkAdvance",),
+        "extension/jit_sljit/include/sljit_post_join_projection_aggregate_primitive.hpp",
+        ("ConsumesSourceSinkAdvance", "selected_join_output"),
     )
     require_text(
         "extension/jit_sljit/include/sljit_projection_chain_runtime.hpp",
@@ -1786,7 +1794,7 @@ def verify_primitive_sequence() -> None:
             "source_batch_boundary.Execute(step_idx, step, input, have_more_output, execute_output_batch)",
             "source_batch_boundary.Flush(step_idx, execute_output_batch)",
             "ExecuteSourceBatchBoundary",
-            "SljitFullPipelineTerminalRuntime<EXECUTE_NATIVE_FULL_PIPELINE_FROM, EXECUTE_HASH_JOIN_PROBE> terminal_runtime",
+            "SljitFullPipelineTerminalRuntime<EXECUTE_NATIVE_FULL_PIPELINE_FROM> terminal_runtime",
             "terminal_runtime.Prepare",
             "terminal_runtime.Execute",
             "terminal_runtime.Flush",
@@ -1915,35 +1923,29 @@ def verify_primitive_sequence() -> None:
             "ungrouped_aggregate_update.Flush",
             "grouped_aggregate_update.Execute",
             "grouped_aggregate_update.Flush",
-            "join_projection_aggregate_update.Execute",
-            "join_projection_aggregate_update.Flush",
+            "post_join_projection_aggregate.Execute",
+            "post_join_projection_aggregate.Flush",
             "SljitBindMaterializedRuntimeBatchInput(input, \"SLJIT native tail handoff\")",
             "execute_native_full_pipeline_from(scratch, terminal_step.Op(0), chunk)",
             "SljitNativeSinkResultStopsExecution(runtime, sink_result, result)",
             "execute_native_full_pipeline_from.Finalize(scratch)",
         ),
     )
-    require_text(
-        "extension/jit_sljit/include/sljit_join_projection_aggregate_update_runtime.hpp",
-        (
-            "struct SljitJoinProjectionAggregateUpdateRuntimeState",
-            "selected_join_output.Prepare",
-            "selected_join_output.Execute",
-            "selected_join_output.Flush",
-            "selected_join_output.BudgetReached",
-        ),
-    )
     reject_text(
-        "extension/jit_sljit/include/sljit_join_projection_aggregate_update_runtime.hpp",
+        "extension/jit_sljit/include/sljit_post_join_projection_aggregate_runtime.hpp",
         (
             "source_join.ExecuteSourceChunk",
             "SljitJoinProjectionAggregateUpdateInputKind::SOURCE_JOIN_INPUT",
             "SljitJoinProjectionAggregateRuntimeState source_join",
+            "SljitJoinProjectionAggregateUpdateRuntimeState",
+            "selected_join_output",
         ),
     )
     require_text(
-        "extension/jit_sljit/include/sljit_join_projection_aggregate_update_runtime.hpp",
+        "extension/jit_sljit/include/sljit_post_join_projection_aggregate_runtime.hpp",
         (
+            "struct SljitPostJoinProjectionAggregateRuntimeState",
+            "SljitCanBindPostJoinProjectionAggregatePrimitive(ops, primitive)",
             "input.hash_join_output_column_map",
             "input.hash_join_output_projection_idx",
             "SLJIT mapped selected join-output aggregate descriptor failed",
@@ -1951,7 +1953,7 @@ def verify_primitive_sequence() -> None:
         ),
     )
     reject_text(
-        "extension/jit_sljit/include/sljit_join_projection_aggregate_update_runtime.hpp",
+        "extension/jit_sljit/include/sljit_post_join_projection_aggregate_runtime.hpp",
         (
             "auto &producer_input = scratch.TemporaryChunk(output_projection_idx)",
             "SljitExecuteProjection(scratch, output_projection_idx",
@@ -2241,7 +2243,7 @@ def verify_recipe_builder() -> None:
             "SljitFullPipelinePrimitiveStep::SourceBatchBoundary",
             "SljitFullPipelinePrimitiveStep::HashJoinProbeSelection",
             "SljitFullPipelinePrimitiveStep::ProjectionChain",
-            "SljitFullPipelinePrimitiveStep::JoinProjectionAggregateUpdate",
+            "SljitFullPipelinePrimitiveStep::PostJoinProjectionAggregateUpdate",
             "SljitFullPipelinePrimitiveStep::UngroupedAggregateUpdate",
             "SljitFullPipelinePrimitiveStep::GroupedAggregateUpdate",
             "BindPostJoinProjectionAggregatePrimitive",
@@ -2261,7 +2263,6 @@ def verify_recipe_builder() -> None:
             "source_output_types",
             "sequence.Add(MakeHashJoinProbeProjectionInputStep(facts.first_hash_join_idx))",
             "MakeHashJoinProbeSelectionStep(facts.second_hash_join_idx)",
-            "SljitMakeSelectedJoinOutputAggregateUpdatePrimitive",
             "return MakeProjectionAggregateTailRecipe(std::move(sequence), shape)",
             "return MakeProjectionAggregateRecipe(std::move(sequence), shape)",
             "return MakeProjectionGroupedAggregateRecipe(std::move(sequence), shape,",
@@ -2785,7 +2786,7 @@ def verify_distinct_aggregate_backend() -> None:
         ),
     )
     require_text(
-        "extension/jit_sljit/include/sljit_join_projection_aggregate_update_runtime.hpp",
+        "extension/jit_sljit/include/sljit_post_join_projection_aggregate_runtime.hpp",
         (
             "SljitBoundGroupedPrimitiveAggregateUpdate bound_projected_grouped_update",
             "bound_grouped_update = &bound_projected_grouped_update",
