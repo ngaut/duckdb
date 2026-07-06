@@ -126,6 +126,7 @@ def verify_required_design_files() -> None:
         "extension/jit_sljit/include/sljit_grouped_aggregate_update_primitive.hpp",
         "extension/jit_sljit/include/sljit_grouped_direct_aggregate_update_runtime_state.hpp",
         "extension/jit_sljit/include/sljit_grouped_aggregate_update_runtime_state.hpp",
+        "extension/jit_sljit/include/sljit_aggregate_row_pointer_preaggregation_analysis.hpp",
         "extension/jit_sljit/include/sljit_direct_join_output_aggregate_batch_runtime.hpp",
         "extension/jit_sljit/include/sljit_direct_join_output_aggregate_trace.hpp",
         "extension/jit_sljit/include/sljit_projected_grouped_aggregate_update_primitive.hpp",
@@ -1275,13 +1276,24 @@ def verify_preaggregated_primitive_batch_contract() -> None:
         ),
     )
     require_text(
-        "extension/jit_sljit/include/sljit_aggregate_row_pointer_preaggregation.hpp",
+        "extension/jit_sljit/include/sljit_aggregate_row_pointer_preaggregation_analysis.hpp",
         (
             "enum class SljitRowPointerPreaggregationStrategy",
             "struct SljitRowPointerPreaggregationDecision",
             "SljitChooseRowPointerPreaggregationStrategy",
             "UseConsecutiveGroups()",
             "SljitTryCollectRowPointerPreaggregationSampleStats",
+            "SljitRowPointerPreaggregationRowsEqual",
+            "SljitShouldPreferDirectSparseRowPointerTargetUpdate",
+        ),
+    )
+    require_text(
+        "extension/jit_sljit/include/sljit_aggregate_row_pointer_preaggregation.hpp",
+        (
+            'sljit_aggregate_row_pointer_preaggregation_analysis.hpp',
+            "SljitForEachPreaggregatedRowPointerGroup",
+            "SljitTryPreaggregateRowPointerPrimitiveGroups",
+            "SljitTryPreaggregateRowPointerFusedPrimitiveGroups",
         ),
     )
     reject_text(
@@ -1289,6 +1301,9 @@ def verify_preaggregated_primitive_batch_contract() -> None:
         (
             "SljitRowPointerDescriptorsHaveConsecutiveRepeat",
             "SljitRowPointerPreaggregationProfitableOnSample",
+            "enum class SljitRowPointerPreaggregationStrategy",
+            "struct SljitRowPointerPreaggregationDecision",
+            "SljitTryCollectRowPointerPreaggregationSampleStats",
         ),
     )
     require_text(
