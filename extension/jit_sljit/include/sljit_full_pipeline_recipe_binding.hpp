@@ -213,30 +213,6 @@ public:
 	}
 
 	SljitFullPipelineRecipe
-	MakeMarkFilterProjectionAggregateRecipe(const SljitFullPipelineProjectionAggregateShape &shape, idx_t hash_join_idx,
-	                                        idx_t filter_idx) const {
-		auto sequence = MakeMarkFilterPrefix(hash_join_idx, filter_idx, true, shape.first_projection_idx);
-		return MakeProjectionAggregateRecipe(std::move(sequence), shape);
-	}
-
-	SljitFullPipelineRecipe MakeMarkFilterNativeTailRecipe(idx_t hash_join_idx, idx_t filter_idx) const {
-		auto sequence = MakeMarkFilterPrefix(hash_join_idx, filter_idx, true, DConstants::INVALID_INDEX, true);
-		return MakeNativeTailRecipe(std::move(sequence), filter_idx + 1);
-	}
-
-	bool ProjectionAggregateHasDedicatedBackend(const SljitFullPipelineProjectionAggregateShape &shape,
-	                                            bool allow_direct_projected_primitive_payload_update = false) const {
-		if (SljitCanBindUngroupedAggregateUpdatePrimitive(ops, shape.aggregate_idx)) {
-			return SljitCanBindProjectionChainPrimitive(ops, shape.first_projection_idx, shape.final_projection_idx);
-		}
-		return ProjectionGroupedAggregateHasDedicatedBackend(shape, allow_direct_projected_primitive_payload_update);
-	}
-
-	bool CanMakeProjectionAggregateTailRecipe(const SljitFullPipelineProjectionAggregateShape &shape) const {
-		return ProjectionAggregateHasDedicatedBackend(shape) || CanMakeNativeTailRecipe(shape.aggregate_idx);
-	}
-
-	SljitFullPipelineRecipe
 	MakeTwoJoinProjectionAggregateRecipe(const SljitFullPipelineProjectionAggregateShape &shape,
 	                                     const SljitProjectionAggregatePrefixFacts &facts) const {
 		auto sequence = MakeSourceSequence();
@@ -271,21 +247,27 @@ public:
 	}
 
 	SljitFullPipelineRecipe
-	MakeTwoJoinMarkFilterProjectionAggregateRecipe(const SljitFullPipelineProjectionAggregateShape &shape,
-	                                               idx_t first_hash_join_idx, idx_t second_hash_join_idx,
-	                                               idx_t filter_idx) const {
-		auto sequence = MakeTwoJoinMarkFilterPrefix(first_hash_join_idx, second_hash_join_idx, filter_idx, true,
-		                                            shape.first_projection_idx);
+	MakeMarkFilterProjectionAggregateRecipe(const SljitFullPipelineProjectionAggregateShape &shape,
+	                                        const SljitProjectionAggregatePrefixFacts &facts) const {
+		auto sequence = MakeProjectionAggregateMarkFilterPrefix(facts, false, shape.first_projection_idx);
 		return MakeProjectionAggregateRecipe(std::move(sequence), shape);
 	}
 
-	SljitFullPipelineRecipe
-	MakeTwoJoinMarkFilterNativeTailRecipe(const SljitFullPipelineProjectionAggregateShape &shape,
-	                                      idx_t first_hash_join_idx, idx_t second_hash_join_idx,
-	                                      idx_t filter_idx) const {
-		auto sequence = MakeTwoJoinMarkFilterPrefix(first_hash_join_idx, second_hash_join_idx, filter_idx, true,
-		                                            DConstants::INVALID_INDEX, true);
-		return MakeNativeTailRecipe(std::move(sequence), filter_idx + 1);
+	SljitFullPipelineRecipe MakeMarkFilterNativeTailRecipe(const SljitProjectionAggregatePrefixFacts &facts) const {
+		auto sequence = MakeProjectionAggregateMarkFilterPrefix(facts, true, DConstants::INVALID_INDEX);
+		return MakeNativeTailRecipe(std::move(sequence), facts.mark_filter_idx + 1);
+	}
+
+	bool ProjectionAggregateHasDedicatedBackend(const SljitFullPipelineProjectionAggregateShape &shape,
+	                                            bool allow_direct_projected_primitive_payload_update = false) const {
+		if (SljitCanBindUngroupedAggregateUpdatePrimitive(ops, shape.aggregate_idx)) {
+			return SljitCanBindProjectionChainPrimitive(ops, shape.first_projection_idx, shape.final_projection_idx);
+		}
+		return ProjectionGroupedAggregateHasDedicatedBackend(shape, allow_direct_projected_primitive_payload_update);
+	}
+
+	bool CanMakeProjectionAggregateTailRecipe(const SljitFullPipelineProjectionAggregateShape &shape) const {
+		return ProjectionAggregateHasDedicatedBackend(shape) || CanMakeNativeTailRecipe(shape.aggregate_idx);
 	}
 
 private:
@@ -395,6 +377,19 @@ private:
 		sequence.Add(MakeMarkProbeFilterBoundaryStep(second_hash_join_idx, filter_idx, apply_filter_selection,
 		                                             downstream_projection_idx, materialize_filter_selection));
 		return sequence;
+	}
+
+	SljitFullPipelinePrimitiveSequence
+	MakeProjectionAggregateMarkFilterPrefix(const SljitProjectionAggregatePrefixFacts &facts,
+	                                        bool materialize_filter_selection,
+	                                        idx_t downstream_projection_idx = DConstants::INVALID_INDEX) const {
+		if (facts.HasSecondHashJoin()) {
+			return MakeTwoJoinMarkFilterPrefix(facts.first_hash_join_idx, facts.second_hash_join_idx,
+			                                   facts.mark_filter_idx, true, downstream_projection_idx,
+			                                   materialize_filter_selection);
+		}
+		return MakeMarkFilterPrefix(facts.first_hash_join_idx, facts.mark_filter_idx, true, downstream_projection_idx,
+		                            materialize_filter_selection);
 	}
 
 	SljitFullPipelinePrimitiveSequence MakePreJoinProjectionHashJoinSelectionSequence(

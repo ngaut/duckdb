@@ -111,23 +111,20 @@ private:
 				if (!binding.CanMakeNativeTailRecipe(facts.mark_filter_idx + 1)) {
 					return false;
 				}
-				recipe = binding.MakeMarkFilterNativeTailRecipe(facts.first_hash_join_idx, facts.mark_filter_idx);
+				recipe = binding.MakeMarkFilterNativeTailRecipe(facts);
 				return true;
 			}
-			recipe = binding.MakeMarkFilterProjectionAggregateRecipe(shape, facts.first_hash_join_idx,
-			                                                         facts.mark_filter_idx);
+			recipe = binding.MakeMarkFilterProjectionAggregateRecipe(shape, facts);
 			return true;
 		case SljitProjectionAggregatePrefixKind::TWO_JOIN:
 			if (shape.ProjectionCount() != 0 && binding.ProjectionAggregateHasDedicatedBackend(shape)) {
-				recipe = binding.MakeTwoJoinMarkFilterProjectionAggregateRecipe(
-				    shape, facts.first_hash_join_idx, facts.second_hash_join_idx, facts.mark_filter_idx);
+				recipe = binding.MakeMarkFilterProjectionAggregateRecipe(shape, facts);
 				return true;
 			}
 			if (!binding.CanMakeNativeTailRecipe(facts.mark_filter_idx + 1)) {
 				return false;
 			}
-			recipe = binding.MakeTwoJoinMarkFilterNativeTailRecipe(shape, facts.first_hash_join_idx,
-			                                                       facts.second_hash_join_idx, facts.mark_filter_idx);
+			recipe = binding.MakeMarkFilterNativeTailRecipe(facts);
 			return true;
 		default:
 			return false;
