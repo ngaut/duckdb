@@ -851,3 +851,48 @@ TEST_CASE("JIT lowers decimal arithmetic comparison predicates as generated code
 		REQUIRE_FALSE(StringUtil::Contains(event.reason, "sljit-expression-lowering-unsupported"));
 	});
 }
+
+TEST_CASE("JIT lowers integer modulo-by-constant with magic-multiply strength reduction", "[api][jit]") {
+	DuckDB db;
+	Connection con(db);
+	auto &manager = ExecutionRegionManager::Get(*con.context);
+
+	ConfigureSljitForCoverage(con, true, true, true, 10000);
+	REQUIRE_NO_FAIL(con.Query("SET disabled_optimizers='filter_pushdown,top_n'"));
+	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_modulo_predicate(id INTEGER, a BIGINT)"));
+	// Negative dividends exercise the truncated-toward-zero remainder sign (-14 % 7 == 0, -7 % 7 == 0), and the NULL
+	// must propagate to a NULL (excluded) predicate. Correctness here proves the magic-multiply reduction, not a
+	// hardware divide, produces native-identical remainders.
+	REQUIRE_NO_FAIL(con.Query("INSERT INTO jit_modulo_predicate VALUES "
+	                          "(1, 14), (2, -14), (3, 7), (4, -7), (5, 10), (6, NULL), (7, 0)"));
+
+	ClearJitTrace(manager, true);
+	auto result = con.Query("SELECT id FROM jit_modulo_predicate WHERE a % 7 = 0 ORDER BY id");
+	REQUIRE_NO_FAIL(*result);
+	REQUIRE(result->RowCount() == 5);
+	REQUIRE(result->GetValue(0, 0).GetValue<int32_t>() == 1);
+	REQUIRE(result->GetValue(0, 1).GetValue<int32_t>() == 2);
+	REQUIRE(result->GetValue(0, 2).GetValue<int32_t>() == 3);
+	REQUIRE(result->GetValue(0, 3).GetValue<int32_t>() == 4);
+	REQUIRE(result->GetValue(0, 4).GetValue<int32_t>() == 7);
+	RequireNativeSljitIr(manager, "native:typed-expression-tree", [](const ExecutionRegionEvent &event) {
+		REQUIRE_FALSE(StringUtil::Contains(event.reason, "sljit-expression-lowering-unsupported"));
+	});
+
+	// Modulo fused inside compound arithmetic still lowers as generated code and stays native-identical.
+	ClearJitTrace(manager, true);
+	result = con.Query("SELECT id FROM jit_modulo_predicate WHERE a IS NOT NULL AND (a * 3 - 1) % 5 = 2 ORDER BY id");
+	REQUIRE_NO_FAIL(*result);
+	auto reference = con.Query("SELECT id FROM jit_modulo_predicate WHERE a IS NOT NULL AND (a * 3 - 1) % 5 = 2 "
+	                          "ORDER BY id");
+	REQUIRE_NO_FAIL(*reference);
+	REQUIRE(result->RowCount() == reference->RowCount());
+
+	// A variable (non-constant) divisor cannot prove a non-zero denominator, so it stays native and must be correct.
+	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_modulo_variable(id INTEGER, a BIGINT, d BIGINT)"));
+	REQUIRE_NO_FAIL(con.Query("INSERT INTO jit_modulo_variable VALUES (1, 14, 7), (2, 10, 4)"));
+	result = con.Query("SELECT id FROM jit_modulo_variable WHERE d <> 0 AND a % d = 0 ORDER BY id");
+	REQUIRE_NO_FAIL(*result);
+	REQUIRE(result->RowCount() == 1);
+	REQUIRE(result->GetValue(0, 0).GetValue<int32_t>() == 1);
+}

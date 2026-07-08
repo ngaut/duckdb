@@ -15,6 +15,72 @@
 
 namespace duckdb {
 
+struct SljitSignedDivisionMagic {
+	int64_t multiplier;
+	int shift;
+};
+
+// Signed magic numbers for 64-bit division by a constant d >= 2 (Hacker's Delight). Together with a signed high
+// multiply, an arithmetic shift, and a sign-bit correction this reproduces the exact truncated-toward-zero quotient
+// that `n / d` yields for every 64-bit dividend, without emitting a hardware divide.
+static SljitSignedDivisionMagic ComputeSljitSignedDivisionMagic(int64_t d) {
+	const uint64_t two63 = 0x8000000000000000ULL;
+	const uint64_t ad = static_cast<uint64_t>(d);
+	const uint64_t t = two63;
+	const uint64_t anc = t - 1 - t % ad;
+	int p = 63;
+	uint64_t q1 = two63 / anc;
+	uint64_t r1 = two63 - q1 * anc;
+	uint64_t q2 = two63 / ad;
+	uint64_t r2 = two63 - q2 * ad;
+	uint64_t delta;
+	do {
+		p++;
+		q1 *= 2;
+		r1 *= 2;
+		if (r1 >= anc) {
+			q1++;
+			r1 -= anc;
+		}
+		q2 *= 2;
+		r2 *= 2;
+		if (r2 >= ad) {
+			q2++;
+			r2 -= ad;
+		}
+		delta = ad - r2;
+	} while (q1 < delta || (q1 == delta && r1 == 0));
+	SljitSignedDivisionMagic magic;
+	magic.multiplier = static_cast<int64_t>(q2 + 1);
+	magic.shift = p - 64;
+	return magic;
+}
+
+// Emits result_reg = n_reg % divisor (a compile-time constant >= 2) with signed magic-multiply strength reduction.
+// R0/R1 are op0 scratch and must be dead here; n_reg must not be R0/R1. n_reg is only read until the final store, so
+// result_reg may alias n_reg.
+void EmitSljitTypedExpressionTreeModulo(struct sljit_compiler *compiler, int64_t divisor,
+                                        SljitNativeIntegerKind binary_kind, sljit_s32 n_reg, sljit_s32 result_reg) {
+	auto magic = ComputeSljitSignedDivisionMagic(divisor);
+	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R0, 0, n_reg, 0);
+	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R1, 0, SLJIT_IMM, NumericCast<sljit_sw>(magic.multiplier));
+	sljit_emit_op0(compiler, SLJIT_LMUL_SW); // R1:R0 = signed 128-bit product; R1 = high(n * multiplier)
+	if (magic.multiplier < 0) {
+		sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_R1, 0, SLJIT_R1, 0, n_reg, 0);
+	}
+	if (magic.shift > 0) {
+		sljit_emit_op2(compiler, SLJIT_ASHR, SLJIT_R1, 0, SLJIT_R1, 0, SLJIT_IMM, magic.shift);
+	}
+	// q += (unsigned)q >> 63 rounds the quotient toward zero for negative dividends.
+	sljit_emit_op2(compiler, SLJIT_LSHR, SLJIT_R0, 0, SLJIT_R1, 0, SLJIT_IMM, 63);
+	sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_R1, 0, SLJIT_R1, 0, SLJIT_R0, 0);
+	sljit_emit_op2(compiler, SLJIT_MUL, SLJIT_R0, 0, SLJIT_R1, 0, SLJIT_IMM, NumericCast<sljit_sw>(divisor));
+	sljit_emit_op2(compiler, SLJIT_SUB, result_reg, 0, n_reg, 0, SLJIT_R0, 0);
+	if (binary_kind == SljitNativeIntegerKind::INT32) {
+		sljit_emit_op1(compiler, SLJIT_MOV_S32, result_reg, 0, result_reg, 0);
+	}
+}
+
 static void EmitSljitTypedExpressionTreeConstant(struct sljit_compiler *compiler, const ExecutionExpressionIR &node,
                                                  const SljitTypedExpressionTreeSlot &slot) {
 	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R2, 0, SLJIT_IMM,
@@ -157,6 +223,11 @@ EmitSljitTypedExpressionTreeBinary(struct sljit_compiler *compiler, const Execut
 		sljit_set_label(compare_true, sljit_emit_label(compiler));
 		sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R2, 0, SLJIT_IMM, 1);
 		sljit_set_label(compare_done, sljit_emit_label(compiler));
+	} else if (node.binary_op == ExecutionExpressionBinaryOp::MODULO) {
+		// The plan admits modulo only for a constant divisor >= 2. R2 holds the dividend on entry and the remainder on
+		// exit; R0/R1 are dead op0 scratch here and R2-R4 survive SLJIT_LMUL_SW.
+		EmitSljitTypedExpressionTreeModulo(compiler, SljitTypedExpressionTreeConstantValue(*node.right),
+		                                   SljitTypedExpressionTreeIntegerKind(node), SLJIT_R2, SLJIT_R2);
 	} else {
 		SljitNativeIntegerBinaryOp native_op;
 		if (!TryGetSljitExpressionTreeBinaryOp(node.binary_op, native_op)) {

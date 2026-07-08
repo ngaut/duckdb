@@ -160,6 +160,30 @@ bool SljitTypedExpressionTreeValueCastSupported(const ExecutionExpressionIR &nod
 	return SljitTypedExpressionTreeInt64CastLogic(node) || SljitTypedExpressionTreeDecimal64WideningCastLogic(node);
 }
 
+bool SljitTypedExpressionTreeModuloByPositiveConstantSupported(const ExecutionExpressionIR &node) {
+	if (node.kind != ExecutionExpressionIRKind::BINARY || node.binary_op != ExecutionExpressionBinaryOp::MODULO ||
+	    !node.left || !node.right) {
+		return false;
+	}
+	if (!SljitTypedExpressionTreeIsIntegerNode(node) || !SljitTypedExpressionTreeSameIntegerKind(node, *node.left) ||
+	    !SljitTypedExpressionTreeSameIntegerKind(node, *node.right)) {
+		return false;
+	}
+	auto &divisor = *node.right;
+	if (divisor.kind != ExecutionExpressionIRKind::CONSTANT || divisor.constant.IsNull()) {
+		return false;
+	}
+	// Require a constant divisor >= 2. That is the range where the signed magic-multiply strength reduction is
+	// well-defined, and it rules out both undefined division inputs (zero divisor, and -1 with INT_MIN dividend).
+	const int64_t divisor_value = SljitTypedExpressionTreeIsInt32Node(divisor)
+	                                  ? static_cast<int64_t>(divisor.constant.GetValueUnsafe<int32_t>())
+	                                  : divisor.constant.GetValueUnsafe<int64_t>();
+	if (divisor_value < 2) {
+		return false;
+	}
+	return SljitTypedExpressionTreeIsSupported(*node.left);
+}
+
 bool SljitTypedExpressionTreeIsSupported(const ExecutionExpressionIR &node) {
 	switch (node.kind) {
 	case ExecutionExpressionIRKind::REFERENCE:
@@ -200,6 +224,9 @@ bool SljitTypedExpressionTreeIsSupported(const ExecutionExpressionIR &node) {
 			       SljitTypedExpressionTreeSameArithmeticKind(*node.left, *node.right) &&
 			       SljitTypedExpressionTreeDecimal64BinaryHasRawSemantics(node) &&
 			       SljitTypedExpressionTreeIsSupported(*node.left) && SljitTypedExpressionTreeIsSupported(*node.right);
+		}
+		if (SljitTypedExpressionTreeModuloByPositiveConstantSupported(node)) {
+			return true;
 		}
 		return SljitTypedExpressionTreeIsArithmeticNode(node) &&
 		       SljitTypedExpressionTreeSameArithmeticKind(node, *node.left) &&
