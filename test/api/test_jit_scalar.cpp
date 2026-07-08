@@ -909,3 +909,29 @@ TEST_CASE("JIT lowers integer modulo-by-constant with magic-multiply strength re
 	REQUIRE(result->RowCount() == 1);
 	REQUIRE(result->GetValue(0, 0).GetValue<int32_t>() == 1);
 }
+
+TEST_CASE("JIT lowers int-times-decimal arithmetic through a scale-zero cast", "[api][jit]") {
+	DuckDB db;
+	Connection con(db);
+	auto &manager = ExecutionRegionManager::Get(*con.context);
+
+	ConfigureSljitForCoverage(con, true, true, true, 10000);
+	REQUIRE_NO_FAIL(con.Query("SET disabled_optimizers='filter_pushdown,top_n'"));
+	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_int_decimal(id INTEGER, qty INTEGER, price DECIMAL(13,2))"));
+	// The binder aligns qty * price by casting qty to DECIMAL(x,0); that scale-zero cast is a sign-extended INT64
+	// passthrough the generated tree must own so the whole product lowers instead of delegating. Negatives and a NULL
+	// exercise sign handling and null propagation.
+	REQUIRE_NO_FAIL(con.Query("INSERT INTO jit_int_decimal VALUES "
+	                          "(1, 10, 5.00), (2, -3, 4.00), (3, 7, -2.50), (4, 0, 9.00), (5, NULL, 1.00)"));
+
+	ClearJitTrace(manager, true);
+	// qty*price: 50.00, -12.00, -17.50, 0.00, NULL -> only id 1 (50.00) passes > 6.00.
+	auto result = con.Query("SELECT id FROM jit_int_decimal WHERE qty * price > 6.00 ORDER BY id");
+	REQUIRE_NO_FAIL(*result);
+	REQUIRE(result->RowCount() == 1);
+	REQUIRE(result->GetValue(0, 0).GetValue<int32_t>() == 1);
+	RequireNativeSljitIr(manager, "native:typed-expression-tree", [](const ExecutionRegionEvent &event) {
+		REQUIRE(StringUtil::Contains(event.ir, "cast:DECIMAL"));
+		REQUIRE_FALSE(StringUtil::Contains(event.reason, "sljit-expression-lowering-unsupported"));
+	});
+}

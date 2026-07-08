@@ -156,8 +156,22 @@ static bool SljitTypedExpressionTreeDecimal64WideningCastLogic(const ExecutionEx
 	       SljitTypedExpressionTreeIsSupported(*node.left);
 }
 
+static bool SljitTypedExpressionTreeInt32ToDecimal64ScaleZeroCastLogic(const ExecutionExpressionIR &node) {
+	if (node.kind != ExecutionExpressionIRKind::CAST || !SljitTypedExpressionTreeCastExceptionBehaviorIsSafe(node) ||
+	    !node.left) {
+		return false;
+	}
+	// INT32 -> DECIMAL64 with scale 0 stores the sign-extended integer as the payload (no fractional digits), so it
+	// reuses the integer widening cast codegen. A width >= 10 covers the whole INT32 range, so it cannot overflow. This
+	// is what the binder emits to align `int_col * decimal_col` (e.g. quantity * price) before a decimal multiply.
+	return SljitTypedExpressionTreeIsDecimal64Node(node) && DecimalType::GetScale(node.return_type) == 0 &&
+	       DecimalType::GetWidth(node.return_type) >= 10 && SljitTypedExpressionTreeIsInt32Node(*node.left) &&
+	       SljitTypedExpressionTreeIsSupported(*node.left);
+}
+
 bool SljitTypedExpressionTreeValueCastSupported(const ExecutionExpressionIR &node) {
-	return SljitTypedExpressionTreeInt64CastLogic(node) || SljitTypedExpressionTreeDecimal64WideningCastLogic(node);
+	return SljitTypedExpressionTreeInt64CastLogic(node) || SljitTypedExpressionTreeDecimal64WideningCastLogic(node) ||
+	       SljitTypedExpressionTreeInt32ToDecimal64ScaleZeroCastLogic(node);
 }
 
 bool SljitTypedExpressionTreeConstantDivisorReductionSupported(const ExecutionExpressionIR &node) {
