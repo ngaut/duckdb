@@ -148,9 +148,7 @@ static bool SljitTryMaterializeHashJoinReferenceProjectionsToBatch(
 
 	if (materialized_any) {
 		RecordSljitRegionStageRuntime(runtime, projection_idx, projection_op.kind,
-		                              "post_join_direct_reference_projection", stage_start);
-		RecordSljitRegionMaterializationBoundary(runtime, projection_op.kind, "direct_post_join_reference_projection",
-		                                         count);
+		                              "post_join_reference_projection", stage_start);
 	}
 	return materialized_any;
 }
@@ -198,7 +196,7 @@ static bool SljitTryMaterializeHashJoinComputedProjectionsToBatch(
 				}
 			}
 			if (used_row_pointer_generated_source) {
-				RecordSljitRegionRuntimePath(runtime, projection_op.kind, "direct_rhs_row_pointer_generated_projection",
+				RecordSljitRegionRuntimePath(runtime, projection_op.kind, "rhs_row_pointer_generated_projection",
 				                             count);
 			}
 			return true;
@@ -217,9 +215,7 @@ static bool SljitTryMaterializeHashJoinComputedProjectionsToBatch(
 
 	if (materialized_any) {
 		RecordSljitRegionStageRuntime(runtime, projection_idx, projection_op.kind,
-		                              "post_join_direct_computed_projection", stage_start);
-		RecordSljitRegionMaterializationBoundary(runtime, projection_op.kind, "direct_post_join_computed_projection",
-		                                         count);
+		                              "post_join_computed_projection", stage_start);
 	}
 	return materialized_any;
 }
@@ -283,7 +279,6 @@ static bool SljitTryDirectMaterializeHashJoinProjectionSourcesToBatch(
 	}
 	RecordSljitRegionStageRuntime(runtime, hash_join_idx, hash_join_op.kind, "materialize_projection_sources",
 	                              stage_start);
-	RecordSljitRegionMaterializationBoundary(runtime, hash_join_op.kind, "projection_source", join_source.size());
 	return SljitTryDirectMaterializeFixedProjectionToBatch(runtime, scratch, projection_idx, projection_op, join_source,
 	                                                       batch, output_to_projection, direct_projection_skip_ptr,
 	                                                       projected_hashes);

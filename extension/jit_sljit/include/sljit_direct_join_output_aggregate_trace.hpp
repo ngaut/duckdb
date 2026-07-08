@@ -20,13 +20,15 @@ SljitRecordJoinProjectionAggregateDescriptorShape(ExecutionRegionRuntime &runtim
                                                   const vector<ExecutionRowPointerGroupKeySource> &group_sources,
                                                   idx_t count) {
 	const auto input_prefix = descriptor.projection_idx == DConstants::INVALID_INDEX
-	                              ? string("direct_join_aggregate_input.")
-	                              : string("direct_projection_aggregate_input.");
+	                              ? string("join_aggregate.input.")
+	                              : string("projection_aggregate.input.");
 	const auto group_prefix = descriptor.projection_idx == DConstants::INVALID_INDEX
-	                              ? string("direct_join_aggregate_group.")
-	                              : string("direct_projection_aggregate_group.");
+	                              ? string("join_aggregate.group.")
+	                              : string("projection_aggregate.group.");
 	for (auto &source : descriptor.input_sources) {
 		switch (source.kind) {
+		case SljitJoinProjectionAggregateInputKind::UNUSED:
+			break;
 		case SljitJoinProjectionAggregateInputKind::PROJECTION_OUTPUT:
 			RecordSljitRegionRuntimePath(runtime, kind, (input_prefix + "projection_output").c_str(), count);
 			break;
@@ -76,9 +78,9 @@ static bool SljitPostJoinProjectionUsesChain(const SljitPostJoinProjectionStrate
 static const char *
 SljitDirectJoinOutputAggregateUnsupportedPrefix(const SljitPostJoinProjectionStrategy &post_join_projection) {
 	if (SljitPostJoinProjectionUsesChain(post_join_projection)) {
-		return "direct_projection_chain_row_pointer_aggregate_unsupported.";
+		return "projection_aggregate.chain_unsupported.";
 	}
-	return "direct_projection_row_pointer_aggregate_unsupported.";
+	return "projection_aggregate.unsupported.";
 }
 
 static void SljitRecordDirectJoinOutputAggregateProjectionUnsupported(

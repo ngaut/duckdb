@@ -24,10 +24,11 @@ namespace duckdb {
 
 static idx_t DuckDBExpressionCost(const Expression &expr);
 static constexpr int64_t BASIS_POINT_SCALE = 10000;
-static constexpr int64_t MATERIALIZATION_SOURCE_APPEND_PENALTY = 80;
 static constexpr int64_t NATIVE_JOIN_PROTOCOL_PENALTY = 720;
 static constexpr int64_t NATIVE_HASH_JOIN_BUILD_SINK_PROTOCOL_PENALTY = 720;
 static constexpr int64_t NATIVE_GROUPED_AGGREGATE_PARALLELISM_PENALTY = 160;
+static constexpr int64_t MATERIALIZING_NATIVE_PROTOCOL_STAGE_MULTIPLIER = 2;
+static constexpr int64_t UNKNOWN_OUTPUT_NATIVE_FUSION_MIN_COSTED_BATCHES = 1024;
 
 static int64_t SaturatingCostCast(idx_t value) {
 	auto max_value = static_cast<idx_t>(std::numeric_limits<int64_t>::max());
@@ -68,6 +69,11 @@ static int64_t FractionalCost(int64_t value, int64_t numerator, int64_t denomina
 
 static int64_t DoubleCost(int64_t value) {
 	return AddCost(value, value);
+}
+
+static int64_t MaterializingNativeProtocolPenalty(const PhysicalRunnerCostParameters &parameters) {
+	return MultiplyCost(SaturatingCostCast(MATERIALIZING_NATIVE_PROTOCOL_STAGE_MULTIPLIER),
+	                    SaturatingCostCast(parameters.generated_stage_benefit));
 }
 
 static idx_t DuckDBPhysicalTypeCost(PhysicalType return_type, idx_t multiplier) {
@@ -314,15 +320,52 @@ static int64_t PhysicalRunnerBatches(int64_t rows) {
 struct PhysicalRunnerShapeFacts {
 	int64_t rows = 1;
 	int64_t batches = 1;
+	int64_t costed_batches = 1;
+	int64_t source_contract_input_rows = 0;
+	int64_t source_contract_input_batches = 0;
 	idx_t native_operator_stage_count = 0;
+	bool source_contract_output_cardinality_unknown = false;
 	bool has_generated_compute_work = false;
 	bool no_native_sort = false;
 };
 
-static PhysicalRunnerShapeFacts PhysicalRunnerBuildShapeFacts(const PhysicalRunnerCostInput &input) {
+static bool PhysicalRunnerHasSourceFilterSensitiveDownstreamWork(const PhysicalRunnerCostInput &input) {
+	return input.generated_backend_stage_count > 0 || input.materialization_elision_count > 0 ||
+	       input.native_join_stage_count > 0 || input.native_hash_join_build_sink_count > 0 ||
+	       input.native_aggregate_stage_count > 0 || input.native_sort_stage_count > 0;
+}
+
+static bool PhysicalRunnerUnknownFilteredSourceOutputCapsCostedBatches(const PhysicalRunnerCostInput &input,
+                                                                       const PhysicalRunnerCostParameters &parameters,
+                                                                       int64_t batches) {
+	if (!input.uses_scan_filters || !input.source_contract_output_cardinality_unknown ||
+	    !PhysicalRunnerHasSourceFilterSensitiveDownstreamWork(input)) {
+		return false;
+	}
+	if (parameters.source_contract_scan_filter_penalty == 0) {
+		return false;
+	}
+	if (input.materialization_elision_count > 0) {
+		return false;
+	}
+	if (input.source_contract_input_cardinality == 0) {
+		return true;
+	}
+	return batches < UNKNOWN_OUTPUT_NATIVE_FUSION_MIN_COSTED_BATCHES;
+}
+
+static PhysicalRunnerShapeFacts PhysicalRunnerBuildShapeFacts(const PhysicalRunnerCostInput &input,
+                                                              const PhysicalRunnerCostParameters &parameters) {
 	PhysicalRunnerShapeFacts facts;
 	facts.rows = PhysicalRunnerRows(input);
 	facts.batches = PhysicalRunnerBatches(facts.rows);
+	facts.costed_batches = facts.batches;
+	if (PhysicalRunnerUnknownFilteredSourceOutputCapsCostedBatches(input, parameters, facts.batches)) {
+		facts.costed_batches = 1;
+	}
+	facts.source_contract_input_rows = SaturatingCostCast(input.source_contract_input_cardinality);
+	facts.source_contract_input_batches = PhysicalRunnerBatches(facts.source_contract_input_rows);
+	facts.source_contract_output_cardinality_unknown = input.source_contract_output_cardinality_unknown;
 	facts.native_operator_stage_count =
 	    input.native_join_stage_count + input.native_aggregate_stage_count + input.native_sort_stage_count;
 	facts.has_generated_compute_work = input.generated_work_class != PhysicalRunnerGeneratedWorkClass::NONE &&
@@ -358,11 +401,17 @@ static bool PhysicalRunnerMaterializationElisionBenefitCanPay(const PhysicalRunn
 	if (parameters.materialization_elision_benefit == 0 || input.materialization_elision_count == 0) {
 		return false;
 	}
+	if (input.source_contract_output_cardinality_unknown) {
+		return false;
+	}
 	return true;
 }
 
 static bool PhysicalRunnerGeneratedBackendStageBenefitCanPay(const PhysicalRunnerCostInput &input) {
 	if (input.generated_backend_stage_count == 0 || input.generated_stage_count == 0) {
+		return false;
+	}
+	if (input.source_contract_output_cardinality_unknown) {
 		return false;
 	}
 	if (input.native_hash_join_build_sink_count > 0 && input.native_join_stage_count == 0 &&
@@ -386,11 +435,50 @@ static bool PhysicalRunnerHashJoinBuildSinkProtocolPenaltyApplies(const Physical
 	       input.native_aggregate_stage_count > 0 || input.native_sort_stage_count > 0;
 }
 
+static bool PhysicalRunnerHashJoinBuildSinkExpansionPenaltyApplies(const PhysicalRunnerCostInput &input,
+                                                                   const PhysicalRunnerShapeFacts &facts) {
+	if (input.native_hash_join_build_sink_count == 0 || facts.source_contract_input_rows <= 0) {
+		return false;
+	}
+	return facts.rows > facts.source_contract_input_rows;
+}
+
+static int64_t PhysicalRunnerHashJoinBuildSinkProtocolPenalty(const PhysicalRunnerCostInput &input,
+                                                              const PhysicalRunnerShapeFacts &facts,
+                                                              const PhysicalRunnerCostParameters &parameters) {
+	auto result = NATIVE_HASH_JOIN_BUILD_SINK_PROTOCOL_PENALTY;
+	if (PhysicalRunnerHashJoinBuildSinkExpansionPenaltyApplies(input, facts)) {
+		result = AddCost(result, MaterializingNativeProtocolPenalty(parameters));
+	}
+	return result;
+}
+
 static idx_t PhysicalRunnerCostedGeneratedBackendStageCount(const PhysicalRunnerCostInput &input) {
 	if (!PhysicalRunnerGeneratedBackendStageBenefitCanPay(input)) {
 		return 0;
 	}
 	return MinValue(input.generated_backend_stage_count, input.generated_stage_count);
+}
+
+static int64_t PhysicalRunnerSourceContractScanPenalty(const PhysicalRunnerCostInput &input,
+                                                       const PhysicalRunnerShapeFacts &facts,
+                                                       const PhysicalRunnerCostParameters &parameters) {
+	if (!input.uses_scan_filters || input.source_contract_input_cardinality == 0) {
+		return 0;
+	}
+	if (facts.source_contract_input_batches <= facts.batches) {
+		return 0;
+	}
+	if (!PhysicalRunnerHasSourceFilterSensitiveDownstreamWork(input)) {
+		return 0;
+	}
+	const auto penalty_unit = SaturatingCostCast(parameters.source_contract_scan_filter_penalty);
+	if (penalty_unit <= 0) {
+		return 0;
+	}
+	const auto extra_source_batches = facts.source_contract_input_batches - facts.batches;
+	const auto total_penalty = MultiplyCost(extra_source_batches, penalty_unit);
+	return total_penalty / facts.batches;
 }
 
 struct PhysicalRunnerAdmission {
@@ -522,6 +610,7 @@ static void PhysicalRunnerComputeWorkComponents(const PhysicalRunnerCostInput &i
 		profile.generated_stage_work = AddCost(generated_expression_stage_work, profile.generated_backend_stage_work);
 	}
 	D_ASSERT(input.native_aggregate_stage_count >= input.native_grouped_aggregate_stage_count);
+	D_ASSERT(input.generated_backend_stage_count >= input.generated_grouped_aggregate_stage_count);
 	if (PhysicalRunnerNativeOperatorBenefitPays(input, parameters, admission)) {
 		const auto native_operator_stage_benefit = SaturatingCostCast(parameters.native_operator_stage_benefit);
 		profile.native_operator_work =
@@ -532,9 +621,10 @@ static void PhysicalRunnerComputeWorkComponents(const PhysicalRunnerCostInput &i
 		    MultiplyCost(SaturatingCostCast(input.materialization_elision_count),
 		                 SaturatingCostCast(parameters.materialization_elision_benefit));
 	}
-	if (input.materialization_source_append_count > 0) {
-		profile.materialization_source_append_penalty = MultiplyCost(
-		    SaturatingCostCast(input.materialization_source_append_count), MATERIALIZATION_SOURCE_APPEND_PENALTY);
+	if (input.selected_hash_join_filter_materialization_count > 0) {
+		profile.selected_hash_join_filter_materialization_penalty =
+		    MultiplyCost(SaturatingCostCast(input.selected_hash_join_filter_materialization_count),
+		                 SaturatingCostCast(parameters.generated_stage_benefit));
 	}
 	if (input.full_pipeline) {
 		const auto full_pipeline_benefit = SaturatingCostCast(parameters.full_pipeline_benefit);
@@ -549,20 +639,29 @@ static void PhysicalRunnerComputeWorkComponents(const PhysicalRunnerCostInput &i
 	}
 	if (PhysicalRunnerHashJoinBuildSinkProtocolPenaltyApplies(input)) {
 		const auto native_hash_join_build_sink_count = SaturatingCostCast(input.native_hash_join_build_sink_count);
-		profile.stateful_protocol_penalty =
-		    AddCost(profile.stateful_protocol_penalty,
-		            MultiplyCost(native_hash_join_build_sink_count, NATIVE_HASH_JOIN_BUILD_SINK_PROTOCOL_PENALTY));
+		const auto hash_build_sink_penalty = PhysicalRunnerHashJoinBuildSinkProtocolPenalty(input, facts, parameters);
+		profile.stateful_protocol_penalty = AddCost(
+		    profile.stateful_protocol_penalty, MultiplyCost(native_hash_join_build_sink_count, hash_build_sink_penalty));
 	}
-	if (input.unfused_mark_filter_aggregate_count > 0) {
-		profile.unfused_mark_filter_aggregate_penalty =
-		    DoubleCost(MultiplyCost(SaturatingCostCast(input.unfused_mark_filter_aggregate_count),
-		                            SaturatingCostCast(parameters.generated_stage_benefit)));
-		profile.stateful_protocol_penalty =
-		    AddCost(profile.stateful_protocol_penalty, profile.unfused_mark_filter_aggregate_penalty);
+	if (input.native_grouped_state_address_lookup_count > 0) {
+		const auto native_grouped_lookup_penalty = MaterializingNativeProtocolPenalty(parameters);
+		profile.stateful_protocol_penalty = AddCost(
+		    profile.stateful_protocol_penalty,
+		    MultiplyCost(SaturatingCostCast(input.native_grouped_state_address_lookup_count),
+		                 native_grouped_lookup_penalty));
 	}
+	profile.source_contract_scan_penalty = PhysicalRunnerSourceContractScanPenalty(input, facts, parameters);
 	if (parameters.vectorized_parallelism > 1 && input.native_grouped_aggregate_stage_count > 0) {
 		const auto grouped_aggregate_parallel_penalty =
 		    MultiplyCost(SaturatingCostCast(input.native_grouped_aggregate_stage_count),
+		                 SaturatingCostCast(parameters.vectorized_parallelism - 1));
+		profile.stateful_protocol_penalty =
+		    AddCost(profile.stateful_protocol_penalty,
+		            MultiplyCost(grouped_aggregate_parallel_penalty, NATIVE_GROUPED_AGGREGATE_PARALLELISM_PENALTY));
+	}
+	if (parameters.vectorized_parallelism > 1 && input.generated_grouped_aggregate_stage_count > 0) {
+		const auto grouped_aggregate_parallel_penalty =
+		    MultiplyCost(SaturatingCostCast(input.generated_grouped_aggregate_stage_count),
 		                 SaturatingCostCast(parameters.vectorized_parallelism - 1));
 		profile.stateful_protocol_penalty =
 		    AddCost(profile.stateful_protocol_penalty,
@@ -573,8 +672,9 @@ static void PhysicalRunnerComputeWorkComponents(const PhysicalRunnerCostInput &i
 	work = AddCost(work, profile.native_operator_work);
 	work = AddCost(work, profile.materialization_elision_work);
 	work = AddCost(work, profile.full_pipeline_work);
-	work = SubtractCost(work, profile.materialization_source_append_penalty);
+	work = SubtractCost(work, profile.selected_hash_join_filter_materialization_penalty);
 	work = SubtractCost(work, profile.stateful_protocol_penalty);
+	work = SubtractCost(work, profile.source_contract_scan_penalty);
 	profile.saved_work_per_batch = work;
 }
 
@@ -590,6 +690,7 @@ static PhysicalRunnerCostParameters PhysicalRunnerGpuCostParameters(const Physic
 	result.native_operator_stage_benefit = parameters.gpu_native_operator_stage_benefit;
 	result.materialization_elision_benefit = parameters.gpu_materialization_elision_benefit;
 	result.full_pipeline_benefit = parameters.gpu_full_pipeline_benefit;
+	result.source_contract_scan_filter_penalty = parameters.source_contract_scan_filter_penalty;
 	result.startup_base_cost = parameters.gpu_startup_base_cost;
 	result.startup_margin_basis_points = parameters.gpu_startup_margin_basis_points;
 	result.vectorized_parallelism = parameters.vectorized_parallelism;
@@ -600,6 +701,9 @@ static int64_t PhysicalRunnerRequiredBenefit(const PhysicalRunnerCostProfile &pr
                                              const PhysicalRunnerCostParameters &parameters) {
 	auto margin = FractionalCost(profile.startup_cost, SaturatingCostCast(parameters.startup_margin_basis_points),
 	                             BASIS_POINT_SCALE);
+	if (profile.costed_batches <= 1) {
+		margin = AddCost(margin, profile.startup_cost);
+	}
 	auto required_benefit = AddCost(profile.startup_cost, margin);
 	return required_benefit;
 }
@@ -613,6 +717,9 @@ static int64_t PhysicalRunnerParallelPerBatchWorkFloor(const PhysicalRunnerCostP
 }
 
 static bool PhysicalRunnerParallelPerBatchWorkFloorApplies(const PhysicalRunnerCostInput &input) {
+	if (input.generated_backend_stage_count > 0) {
+		return false;
+	}
 	return input.native_join_stage_count > 0 || input.native_aggregate_stage_count > 0 ||
 	       input.native_sort_stage_count > 0;
 }
@@ -624,12 +731,19 @@ static void PhysicalRunnerInitializeProfile(const PhysicalRunnerCostInput &input
 	profile.input_scope = input.input_scope;
 	profile.rows = facts.rows;
 	profile.batches = facts.batches;
+	profile.costed_batches = facts.costed_batches;
 	profile.expression_cost = SaturatingCostCast(input.expression_cost);
+	profile.source_contract_input_rows = facts.source_contract_input_rows;
+	profile.source_contract_input_batches = facts.source_contract_input_batches;
+	profile.source_contract_output_cardinality_unknown = facts.source_contract_output_cardinality_unknown;
 	profile.generated_stage_count = SaturatingCostCast(input.generated_stage_count);
 	profile.generated_backend_stage_count = SaturatingCostCast(input.generated_backend_stage_count);
+	profile.generated_grouped_aggregate_stage_count = SaturatingCostCast(input.generated_grouped_aggregate_stage_count);
+	profile.native_grouped_state_address_lookup_count =
+	    SaturatingCostCast(input.native_grouped_state_address_lookup_count);
 	profile.materialization_elision_count = SaturatingCostCast(input.materialization_elision_count);
-	profile.materialization_source_append_count = SaturatingCostCast(input.materialization_source_append_count);
-	profile.unfused_mark_filter_aggregate_count = SaturatingCostCast(input.unfused_mark_filter_aggregate_count);
+	profile.selected_hash_join_filter_materialization_count =
+	    SaturatingCostCast(input.selected_hash_join_filter_materialization_count);
 	profile.native_join_stage_count = SaturatingCostCast(input.native_join_stage_count);
 	profile.native_hash_join_build_sink_count = SaturatingCostCast(input.native_hash_join_build_sink_count);
 	profile.native_aggregate_stage_count = SaturatingCostCast(input.native_aggregate_stage_count);
@@ -677,13 +791,13 @@ static PhysicalRunnerSelectionAnalysis PhysicalRunnerAnalyzeSelection(const Phys
 
 PhysicalRunnerCostProfile DuckDBCostModel::SelectPhysicalRunner(const PhysicalRunnerCostInput &input,
                                                                 const PhysicalRunnerCostParameters &parameters) {
-	auto facts = PhysicalRunnerBuildShapeFacts(input);
+	auto facts = PhysicalRunnerBuildShapeFacts(input, parameters);
 	auto compiled_admission = PhysicalRunnerEvaluateAdmission(input, facts, parameters);
 	PhysicalRunnerCostProfile compiled_profile;
 	PhysicalRunnerInitializeProfile(input, facts, compiled_admission, compiled_profile);
 	PhysicalRunnerComputeWorkComponents(input, facts, parameters, compiled_admission, compiled_profile);
 	compiled_profile.accelerated_runner_benefit =
-	    MultiplyCost(compiled_profile.batches, compiled_profile.saved_work_per_batch);
+	    MultiplyCost(compiled_profile.costed_batches, compiled_profile.saved_work_per_batch);
 	compiled_profile.startup_cost = PhysicalRunnerStartupCost(parameters);
 	compiled_profile.required_benefit = PhysicalRunnerRequiredBenefit(compiled_profile, parameters);
 	compiled_profile.net_benefit =
@@ -694,7 +808,7 @@ PhysicalRunnerCostProfile DuckDBCostModel::SelectPhysicalRunner(const PhysicalRu
 	PhysicalRunnerCostProfile gpu_profile;
 	PhysicalRunnerInitializeProfile(input, facts, gpu_admission, gpu_profile);
 	PhysicalRunnerComputeWorkComponents(input, facts, gpu_parameters, gpu_admission, gpu_profile);
-	gpu_profile.accelerated_runner_benefit = MultiplyCost(gpu_profile.batches, gpu_profile.saved_work_per_batch);
+	gpu_profile.accelerated_runner_benefit = MultiplyCost(gpu_profile.costed_batches, gpu_profile.saved_work_per_batch);
 	gpu_profile.gpu_transfer_cost =
 	    MultiplyCost(gpu_profile.batches, SaturatingCostCast(parameters.gpu_transfer_cost_per_batch));
 	gpu_profile.startup_cost = PhysicalRunnerStartupCost(gpu_parameters);

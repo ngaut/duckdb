@@ -155,11 +155,11 @@ static void SljitSelectMarkProbeFilterBoundaryRows(const ExecutionHashJoinProbeB
 static const char *SljitMarkProbeFilterSelectionPath(SljitMarkProbeFilterMode mode) {
 	switch (mode) {
 	case SljitMarkProbeFilterMode::MATCHES:
-		return "direct_mark_selection";
+		return "mark_probe_match_selection";
 	case SljitMarkProbeFilterMode::NON_MATCHES:
-		return "direct_mark_nonmatch_selection";
+		return "mark_probe_nonmatch_selection";
 	default:
-		return "direct_mark_unknown_selection";
+		return "mark_probe_unknown_selection";
 	}
 }
 

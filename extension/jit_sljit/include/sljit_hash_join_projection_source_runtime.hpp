@@ -166,6 +166,52 @@ static bool SljitTryBuildHashJoinMappedProjection(
 	return mapped_projection.projections.size() == projection_op.projections.size();
 }
 
+static bool SljitTryBuildHashJoinMappedFilter(const vector<idx_t> &source_map,
+                                              const ExecutionHashJoinProbeBinding &source_binding,
+                                              SljitExecutableRegionOp &filter_op,
+                                              SljitExecutableRegionOp &mapped_filter, optional_ptr<string> blocker) {
+	if (source_map.size() > source_binding.output_types.size()) {
+		if (blocker) {
+			*blocker = "source_map_shape";
+		}
+		return false;
+	}
+	vector<idx_t> full_source_map = source_map;
+	full_source_map.reserve(source_binding.output_types.size());
+	for (idx_t source_idx = source_map.size(); source_idx < source_binding.output_types.size(); source_idx++) {
+		full_source_map.push_back(source_idx);
+	}
+
+	auto mapped_plan = filter_op.filter.plan.Copy(true, false);
+	idx_t failed_source_index = DConstants::INVALID_INDEX;
+	if (!SljitTryRemapHashJoinProjectionPlanSources(full_source_map, mapped_plan,
+	                                                optional_ptr<idx_t>(&failed_source_index))) {
+		if (blocker) {
+			const auto mapped_source_index = failed_source_index < full_source_map.size()
+			                                     ? full_source_map[failed_source_index]
+			                                     : DConstants::INVALID_INDEX;
+			*blocker = "remap_filter_source_" + std::to_string(failed_source_index) + "_map_size_" +
+			           std::to_string(full_source_map.size()) + "_mapped_" + std::to_string(mapped_source_index);
+		}
+		return false;
+	}
+
+	mapped_filter = SljitExecutableRegionOp();
+	mapped_filter.kind = SljitNativeRegionOpKind::FILTER;
+	mapped_filter.input_types = source_binding.output_types;
+	mapped_filter.output_types = source_binding.output_types;
+	SljitPrepareExecutableRegionExpression(mapped_plan, mapped_filter.filter);
+	string compile_error;
+	if (!SljitCompilePreparedExecutableRegionExpression(mapped_filter.filter, true, compile_error)) {
+		if (blocker) {
+			*blocker = "compile_mapped_filter_" + compile_error;
+		}
+		mapped_filter = SljitExecutableRegionOp();
+		return false;
+	}
+	return true;
+}
+
 static bool SljitTryCollectHashJoinProjectionExpressionSources(const SljitExecutableRegionExpression &expr,
                                                                idx_t input_column_count, vector<uint8_t> &referenced) {
 	referenced.assign(input_column_count, 0);
@@ -312,10 +358,10 @@ static bool SljitSelectedHashJoinSelectionIsIdentity(const SelectionVector &sele
 	return true;
 }
 
-static bool SljitTryMaterializeSelectedHashJoinOutputColumns(const ExecutionHashJoinProbeBinding &binding,
-                                                             const SljitRuntimeBatchView &selected_input,
-                                                             const vector<uint8_t> &referenced_columns,
-                                                             DataChunk &result) {
+static bool SljitTryBuildSelectedHashJoinOutputColumns(const ExecutionHashJoinProbeBinding &binding,
+                                                       const SljitRuntimeBatchView &selected_input,
+                                                       const vector<uint8_t> &referenced_columns, DataChunk &result,
+                                                       bool allow_regular_rhs_gather) {
 	SljitRuntimeHashJoinSelection selected;
 	if (!binding.ready || !selected_input.TryGetHashJoinSelection(selected) ||
 	    referenced_columns.size() != binding.output_types.size() ||
@@ -351,6 +397,9 @@ static bool SljitTryMaterializeSelectedHashJoinOutputColumns(const ExecutionHash
 				continue;
 			}
 			if (binding.layout_kind == ExecutionHashJoinProbeLayoutKind::REGULAR_HASH_TABLE) {
+				if (!allow_regular_rhs_gather) {
+					return false;
+				}
 				SljitGatherHashJoinRHSColumn(binding, selected.RowPointers(), count, rhs_idx, result.data[output_col]);
 				continue;
 			}
@@ -370,6 +419,20 @@ static bool SljitTryMaterializeSelectedHashJoinOutputColumns(const ExecutionHash
 	}
 	result.SetChildCardinality(count);
 	return true;
+}
+
+static bool SljitTryMaterializeSelectedHashJoinOutputColumns(const ExecutionHashJoinProbeBinding &binding,
+                                                             const SljitRuntimeBatchView &selected_input,
+                                                             const vector<uint8_t> &referenced_columns,
+                                                             DataChunk &result) {
+	return SljitTryBuildSelectedHashJoinOutputColumns(binding, selected_input, referenced_columns, result, true);
+}
+
+static bool SljitTryBuildSelectedHashJoinOutputColumnViews(const ExecutionHashJoinProbeBinding &binding,
+                                                           const SljitRuntimeBatchView &selected_input,
+                                                           const vector<uint8_t> &referenced_columns,
+                                                           DataChunk &result) {
+	return SljitTryBuildSelectedHashJoinOutputColumns(binding, selected_input, referenced_columns, result, false);
 }
 
 } // namespace duckdb

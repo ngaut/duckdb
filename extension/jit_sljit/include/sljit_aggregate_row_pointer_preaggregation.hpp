@@ -149,26 +149,13 @@ static bool SljitTryPreaggregateRowPointerFusedPrimitiveGroups(
 		return false;
 	}
 
-	idx_t state_stride = 0;
-	for (auto lane : payload_lanes) {
-		if (!lane || !lane->ready || lane->state_size == 0) {
-			return false;
-		}
-		state_stride = MaxValue<idx_t>(state_stride, lane->state_offset + lane->state_size);
-	}
-	if (state_stride == 0) {
+	if (!SljitPrepareFusedPreaggregatedPrimitiveScratch(scratch, payload_lanes, count, count)) {
 		return false;
 	}
-	state_stride = AlignValue<idx_t>(state_stride);
-	scratch.Prepare(payload_lanes, count);
-	scratch.fused_state_stride = state_stride;
-	scratch.fused_state_storage.assign(count * state_stride, 0);
-	scratch.fused_row_state_addresses.resize(count);
 
 	compact_row_pointers.SetVectorType(VectorType::FLAT_VECTOR);
 	FlatVector::SetSize(compact_row_pointers, count_t(count));
 	auto compact_row_pointer_data = FlatVector::GetDataMutable<data_ptr_t>(compact_row_pointers);
-	auto state_base = scratch.fused_state_storage.data();
 	auto start_group = [&](idx_t row_idx, data_ptr_t row_pointer, idx_t group_idx) {
 		compact_row_pointer_data[group_idx] = row_pointer;
 		scratch.group_rows.push_back(static_cast<sel_t>(row_idx));
@@ -178,7 +165,7 @@ static bool SljitTryPreaggregateRowPointerFusedPrimitiveGroups(
 	auto visit_row = [&](idx_t row_idx, idx_t group_idx) {
 		D_ASSERT(group_idx < scratch.group_row_counts.size());
 		scratch.group_row_counts[group_idx]++;
-		scratch.fused_row_state_addresses[row_idx] = reinterpret_cast<uintptr_t>(state_base + group_idx * state_stride);
+		scratch.fused_row_state_addresses[row_idx] = SljitFusedPreaggregatedPrimitiveStateAddress(scratch, group_idx);
 		return true;
 	};
 	idx_t group_count;
@@ -193,33 +180,8 @@ static bool SljitTryPreaggregateRowPointerFusedPrimitiveGroups(
 	    payload_lanes, payload_input, scratch.fused_row_state_addresses.data(), nullptr, nullptr, false, count,
 	    payload_scratch, optional_ptr<const vector<idx_t>>(&payload_source_indices));
 
-	for (idx_t payload_idx = 0; payload_idx < payload_lanes.size(); payload_idx++) {
-		auto lane = payload_lanes[payload_idx];
-		auto &payload = scratch.payloads[payload_idx];
-		for (idx_t group_idx = 0; group_idx < group_count; group_idx++) {
-			auto group_state = state_base + group_idx * state_stride + lane->state_offset;
-			auto value_ptr = group_state + lane->state_value_offset;
-			switch (lane->kind) {
-			case AggregatePrimitiveUpdateKind::COUNT_STAR:
-				payload.int64_values.push_back(*reinterpret_cast<int64_t *>(value_ptr));
-				break;
-			case AggregatePrimitiveUpdateKind::SUM_INT64: {
-				auto state_is_set = *reinterpret_cast<bool *>(group_state + lane->state_is_set_offset);
-				payload.int64_values.push_back(state_is_set ? *reinterpret_cast<int64_t *>(value_ptr) : 0);
-				payload.value_is_set.push_back(state_is_set ? 1 : 0);
-				break;
-			}
-			case AggregatePrimitiveUpdateKind::SUM_HUGEINT: {
-				auto state_is_set = *reinterpret_cast<bool *>(group_state + lane->state_is_set_offset);
-				payload.hugeint_values.push_back(state_is_set ? *reinterpret_cast<hugeint_t *>(value_ptr)
-				                                              : hugeint_t(0));
-				payload.value_is_set.push_back(state_is_set ? 1 : 0);
-				break;
-			}
-			default:
-				return false;
-			}
-		}
+	if (!SljitExtractFusedPreaggregatedPrimitiveDeltas(scratch, payload_lanes, group_count)) {
+		return false;
 	}
 
 	FlatVector::SetSize(compact_row_pointers, count_t(group_count));

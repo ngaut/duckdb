@@ -994,6 +994,10 @@ void ExecutionRegionLoweringPlan::SetSelectedSourceExecution(ExecutionRegionSour
 	selected_source_execution = source_execution;
 }
 
+void ExecutionRegionLoweringPlan::SetSourceContractInputTypes(vector<LogicalType> input_types) {
+	source_contract_input_types = std::move(input_types);
+}
+
 void ExecutionRegionLoweringPlan::SetOperatorStageIR(string stage_ir) {
 	operator_stage_ir = std::move(stage_ir);
 }
@@ -1028,6 +1032,10 @@ bool ExecutionRegionLoweringPlan::UsesScanFilters() const {
 
 ExecutionRegionSourceExecutionKind ExecutionRegionLoweringPlan::SelectedSourceExecution() const {
 	return selected_source_execution;
+}
+
+const vector<LogicalType> &ExecutionRegionLoweringPlan::SourceContractInputTypes() const {
+	return source_contract_input_types;
 }
 
 static void AppendFirstExecutionRegionLoweringReasonToken(string &result, const string &reason) {

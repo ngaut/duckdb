@@ -27,7 +27,7 @@ public:
 
 	template <class EXECUTE_OUTPUT_BATCH>
 	bool Execute(idx_t step_idx, const SljitFullPipelinePrimitiveStep &step, const SljitRuntimeBatchView &input,
-	             EXECUTE_OUTPUT_BATCH &&execute_output_batch) {
+	             bool direct_handoff, EXECUTE_OUTPUT_BATCH &&execute_output_batch) {
 		auto &projection_chain_batch = projection_chain_batches[step_idx];
 		auto &selected_hash_join_input = selected_hash_join_inputs[step_idx];
 		auto &synthetic_projection_output = synthetic_projection_outputs[step_idx];
@@ -38,7 +38,7 @@ public:
 		return SljitExecuteProjectionChainPrimitive(runtime, scratch, ops, step.projection_chain, input,
 		                                            projection_chain_batch, selected_hash_join_input,
 		                                            synthetic_projection_output, synthetic_projection_scratch,
-		                                            execute_output_batch);
+		                                            direct_handoff, execute_output_batch);
 	}
 
 	template <class EXECUTE_OUTPUT_BATCH>

@@ -191,6 +191,7 @@ static const ConfigurationOption internal_options[] = {
     DUCKDB_SETTING(JitCboGeneratedStageBenefitSetting),
     DUCKDB_SETTING(JitCboMaterializationElisionBenefitSetting),
     DUCKDB_SETTING(JitCboNativeOperatorStageBenefitSetting),
+    DUCKDB_SETTING(JitCboSourceContractScanFilterPenaltySetting),
     DUCKDB_SETTING(JitCboStartupBaseCostSetting),
     DUCKDB_SETTING(JitCboStartupMarginBasisPointsSetting),
     DUCKDB_SETTING(JitDumpIrSetting),

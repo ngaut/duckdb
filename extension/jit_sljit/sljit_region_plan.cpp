@@ -63,29 +63,51 @@ static vector<T> BuildSljitSourceOutputStats(const ExecutionRegionSourceInfo &so
 static void ApplySljitSourceContractPlan(const SljitSourceContractPlan &contract_plan,
                                          ExecutionRegionLoweringPlan &lowering_plan) {
 	lowering_plan.SetUsesScanFilters(contract_plan.uses_scan_filters);
+	lowering_plan.SetSourceContractInputTypes(contract_plan.source_contract_input_types);
 }
 
-static vector<bool> BuildSljitSourceNotNullForContractPlan(const ExecutionRegionSourceInfo &source) {
+static vector<bool> BuildSljitSourceNotNullForContractPlan(const ExecutionRegionSourceInfo &source,
+                                                           const SljitSourceContractPlan &contract_plan) {
+	if (contract_plan.UsesSourceContractInputLayout()) {
+		return source.table_scan_contract.source_contract_input_not_null;
+	}
 	return BuildSljitSourceOutputNotNull(source);
 }
 
-static vector<idx_t> BuildSljitSourceDistinctReserveCountsForContractPlan(const ExecutionRegionSourceInfo &source) {
+static vector<idx_t>
+BuildSljitSourceDistinctReserveCountsForContractPlan(const ExecutionRegionSourceInfo &source,
+                                                     const SljitSourceContractPlan &contract_plan) {
 	auto &counts = source.table_scan_contract.source_contract_input_distinct_reserve_counts;
+	if (contract_plan.UsesSourceContractInputLayout()) {
+		return counts;
+	}
 	return BuildSljitSourceOutputStats(source, counts);
 }
 
-static vector<idx_t> BuildSljitSourceDistinctCountsForContractPlan(const ExecutionRegionSourceInfo &source) {
+static vector<idx_t> BuildSljitSourceDistinctCountsForContractPlan(const ExecutionRegionSourceInfo &source,
+                                                                   const SljitSourceContractPlan &contract_plan) {
 	auto &counts = source.table_scan_contract.source_contract_input_distinct_counts;
+	if (contract_plan.UsesSourceContractInputLayout()) {
+		return counts;
+	}
 	return BuildSljitSourceOutputStats(source, counts);
 }
 
-static vector<Value> BuildSljitSourceMinValuesForContractPlan(const ExecutionRegionSourceInfo &source) {
+static vector<Value> BuildSljitSourceMinValuesForContractPlan(const ExecutionRegionSourceInfo &source,
+                                                              const SljitSourceContractPlan &contract_plan) {
 	auto &values = source.table_scan_contract.source_contract_input_min_values;
+	if (contract_plan.UsesSourceContractInputLayout()) {
+		return values;
+	}
 	return BuildSljitSourceOutputStats(source, values);
 }
 
-static vector<Value> BuildSljitSourceMaxValuesForContractPlan(const ExecutionRegionSourceInfo &source) {
+static vector<Value> BuildSljitSourceMaxValuesForContractPlan(const ExecutionRegionSourceInfo &source,
+                                                              const SljitSourceContractPlan &contract_plan) {
 	auto &values = source.table_scan_contract.source_contract_input_max_values;
+	if (contract_plan.UsesSourceContractInputLayout()) {
+		return values;
+	}
 	return BuildSljitSourceOutputStats(source, values);
 }
 
@@ -203,14 +225,18 @@ struct SljitRegionLoweringCursor {
 
 	void AcceptSource(const ExecutionRegionNode &node, SljitRegionNodePlan &node_plan, vector<bool> source_not_null) {
 		D_ASSERT(node_plan.kind == ExecutionRegionLoweringKind::NATIVE);
-		auto source_output_types = SljitRegionNodeHasNativeOps(node_plan)
-		                               ? SljitRegionNodeLastNativeOp(node_plan).output_types
-		                               : node.output_types;
+		auto source_output_types = node_plan.source_contract.source_output_types.empty()
+		                               ? node.output_types
+		                               : node_plan.source_contract.source_output_types;
 		native_region.source_output_types = source_output_types;
+		if (source_not_null.size() != source_output_types.size()) {
+			source_not_null.assign(source_output_types.size(), false);
+		}
 		AppendIfFusing(node_plan);
-		current_types = std::move(source_output_types);
-		if (source_not_null.size() != current_types.size()) {
-			source_not_null.assign(current_types.size(), false);
+		current_types = SljitRegionNodeHasNativeOps(node_plan) ? SljitRegionNodeLastNativeOp(node_plan).output_types
+		                                                       : std::move(source_output_types);
+		for (auto &op : node_plan.native_ops) {
+			SljitUpdateExecutableCurrentNotNull(op, source_not_null);
 		}
 		current_not_null = std::move(source_not_null);
 	}
@@ -306,12 +332,15 @@ ExecutionRegionLoweringPlan BuildSljitRegionPlan(const ExecutionRegionIR &region
 				vector<Value> source_min_values;
 				vector<Value> source_max_values;
 				if (node.source && node.source->table_scan_contract.present) {
-					native_region.source_distinct_counts = BuildSljitSourceDistinctCountsForContractPlan(*node.source);
+					native_region.source_distinct_counts =
+					    BuildSljitSourceDistinctCountsForContractPlan(*node.source, node_plan.source_contract);
 					native_region.source_distinct_reserve_counts =
-					    BuildSljitSourceDistinctReserveCountsForContractPlan(*node.source);
-					native_region.source_min_values = BuildSljitSourceMinValuesForContractPlan(*node.source);
-					native_region.source_max_values = BuildSljitSourceMaxValuesForContractPlan(*node.source);
-					source_not_null = BuildSljitSourceNotNullForContractPlan(*node.source);
+					    BuildSljitSourceDistinctReserveCountsForContractPlan(*node.source, node_plan.source_contract);
+					native_region.source_min_values =
+					    BuildSljitSourceMinValuesForContractPlan(*node.source, node_plan.source_contract);
+					native_region.source_max_values =
+					    BuildSljitSourceMaxValuesForContractPlan(*node.source, node_plan.source_contract);
+					source_not_null = BuildSljitSourceNotNullForContractPlan(*node.source, node_plan.source_contract);
 					native_region.source_not_null = source_not_null;
 				}
 				cursor.AcceptSource(node, node_plan, std::move(source_not_null));

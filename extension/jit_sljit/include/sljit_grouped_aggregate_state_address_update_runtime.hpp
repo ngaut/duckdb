@@ -23,13 +23,15 @@ struct SljitGroupedStateAddressUpdateState {
 	DataChunk *input = nullptr;
 	SljitAggregatePayloadAdapterScratch *adapter_scratch = nullptr;
 	optional_ptr<const vector<idx_t>> input_source_indices_override;
+	optional_ptr<const vector<bool>> input_source_not_null_override;
 };
 
 static SljitGroupedStateAddressUpdateState
 SljitBuildGroupedStateAddressUpdateState(SljitExecutableRegionOp &op, DataChunk &payload_input,
                                          const vector<const ExecutionPrimitiveAggregateUpdateLane *> &payload_lanes,
                                          SljitAggregatePayloadAdapterScratch &payload_scratch,
-                                         optional_ptr<const vector<idx_t>> input_source_indices_override = nullptr) {
+                                         optional_ptr<const vector<idx_t>> input_source_indices_override = nullptr,
+                                         optional_ptr<const vector<bool>> input_source_not_null_override = nullptr) {
 	auto &aggregate_update = op.aggregate_update;
 	SljitGroupedStateAddressUpdateState update_state;
 	update_state.payloads = &aggregate_update.payloads;
@@ -40,6 +42,7 @@ SljitBuildGroupedStateAddressUpdateState(SljitExecutableRegionOp &op, DataChunk 
 	update_state.input = &payload_input;
 	update_state.adapter_scratch = &payload_scratch;
 	update_state.input_source_indices_override = input_source_indices_override;
+	update_state.input_source_not_null_override = input_source_not_null_override;
 	return update_state;
 }
 
@@ -55,7 +58,7 @@ static void SljitExecuteGroupedSelectedStateAddressUpdate(const uintptr_t *addre
 	SljitExecuteFusedGroupedPrimitiveAggregatePayloadUpdate(
 	    *state.payloads, state.function, *state.aggregates, *state.contract, *state.lanes, *state.input, addresses,
 	    address_sel, execute_sel ? &execute_selection : nullptr, state_addresses_by_loop_index, count,
-	    *state.adapter_scratch, state.input_source_indices_override);
+	    *state.adapter_scratch, state.input_source_indices_override, state.input_source_not_null_override);
 }
 
 static void SljitExecuteGroupedStateTargetSpan(const ExecutionGroupedAggregateStateTargetSpan &span,
@@ -73,17 +76,40 @@ static void SljitExecuteGroupedStateTargetBatch(const ExecutionGroupedAggregateS
 	}
 }
 
+static idx_t SljitDenseGroupDomainReserveCount(const ExecutionDenseGroupDomain &domain) {
+	if (!domain.ready || domain.distinct_count == 0 || domain.max_key < domain.min_key ||
+	    domain.max_key - domain.min_key == NumericLimits<idx_t>::Maximum()) {
+		return 0;
+	}
+	const auto domain_range = domain.max_key - domain.min_key + 1;
+	if (domain_range > EXECUTION_DENSE_GROUP_DOMAIN_MAX_TARGET_ENTRIES) {
+		return domain.distinct_count;
+	}
+	static constexpr idx_t DENSE_DOMAIN_RESERVE_DISTINCT_MULTIPLIER = 4;
+	const auto max_distinct_reserve =
+	    domain.distinct_count > NumericLimits<idx_t>::Maximum() / DENSE_DOMAIN_RESERVE_DISTINCT_MULTIPLIER
+	        ? NumericLimits<idx_t>::Maximum()
+	        : domain.distinct_count * DENSE_DOMAIN_RESERVE_DISTINCT_MULTIPLIER;
+	return MinValue(domain_range, MaxValue(domain.distinct_count, max_distinct_reserve));
+}
+
 static bool SljitTryReserveGroupedAggregateGroups(ExecutionRegionRuntime &runtime, idx_t op_idx,
                                                   SljitExecutableRegionOp &op,
-                                                  ExecutionGroupedAggregateStateAddressBinding &grouped_state) {
+                                                  ExecutionGroupedAggregateStateAddressBinding &grouped_state,
+                                                  idx_t runtime_group_count = 0) {
 	auto &reserve = op.aggregate_update.plan.group_reserve;
-	if (!reserve.CanReserve() || !grouped_state.ready || !grouped_state.state) {
+	if ((!reserve.CanReserve() && runtime_group_count == 0) || !grouped_state.ready || !grouped_state.state) {
 		return false;
 	}
 	if (!runtime.TryMarkOnce(ExecutionRegionRuntimeOnceFlag::AGGREGATE_GROUP_RESERVE, op_idx)) {
 		return false;
 	}
-	const auto reserve_group_count = MaxValue<idx_t>(reserve.group_count, STANDARD_VECTOR_SIZE);
+	auto reserve_group_count = MaxValue<idx_t>(MaxValue<idx_t>(reserve.group_count, runtime_group_count),
+	                                           STANDARD_VECTOR_SIZE);
+	if (op.aggregate_update.dense_group_domain.ready) {
+		reserve_group_count = MaxValue(reserve_group_count,
+		                               SljitDenseGroupDomainReserveCount(op.aggregate_update.dense_group_domain));
+	}
 	RecordSljitRegionRuntimePath(runtime, op.kind, "grouped_aggregate_reserve_target", reserve_group_count);
 	auto reserve_stage_start = SljitRegionStageStart(runtime);
 	auto reserved = ExecuteSljitRegionRecordedOperation(
@@ -114,7 +140,6 @@ static bool TryResolveDirectNewGroupedStateAddresses(ExecutionRegionRuntime &run
 	    runtime, op_idx, op.kind,
 	    resolved ? "direct_new_grouped_state_addresses" : "direct_new_grouped_state_addresses_miss", stage_start);
 	if (resolved) {
-		RecordSljitRegionMaterializationBoundary(runtime, op.kind, "address_vector_direct_new", input.size());
 	}
 	return resolved;
 }
@@ -138,7 +163,7 @@ static bool TryExecuteDirectGroupedStateAddressPayloadUpdate(
 	scratch.RecordDirectNewAggregateUpdateResult(op_idx, updated);
 	RecordSljitRegionStageRuntimePath(runtime, op_idx, op.kind, updated ? stage_name : miss_stage_name, stage_start);
 	if (updated) {
-		RecordSljitRegionMaterializationBoundary(runtime, op.kind, "direct_state_update", input.size());
+		RecordSljitRegionMaterializationElisionProof(runtime, op.kind, stage_name, input.size());
 	}
 	return updated;
 }
@@ -168,8 +193,7 @@ static bool TryExecuteDirectProjectedGroupedStateAddressPayloadUpdate(
 	scratch.RecordDirectNewAggregateUpdateResult(op_idx, updated);
 	if (updated) {
 		RecordSljitRegionStageRuntime(runtime, op_idx, op.kind, stage_name, stage_start);
-		RecordSljitRegionMaterializationBoundary(runtime, op.kind, "projected_group_payload_update",
-		                                         payload_input.size());
+		RecordSljitRegionMaterializationElisionProof(runtime, op.kind, stage_name, payload_input.size());
 	} else {
 		RecordSljitRegionStageRuntimePath(runtime, op_idx, op.kind, miss_stage_name, stage_start);
 	}

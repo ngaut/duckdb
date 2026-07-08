@@ -12,6 +12,8 @@
 #include "sljit_region_runtime_state.hpp"
 #include "sljit_region_runtime_trace.hpp"
 #include "sljit_runtime_batch_view.hpp"
+#include "sljit_runtime_batch_state.hpp"
+#include "sljit_selected_hash_join_input_runtime.hpp"
 
 namespace duckdb {
 
@@ -19,8 +21,30 @@ struct SljitGeneratedFilterPrimitive {
 	idx_t filter_idx = 0;
 };
 
+struct SljitSelectedHashJoinFilterCache {
+	vector<idx_t> source_map;
+	unique_ptr<SljitExecutableRegionOp> mapped_filter;
+};
+
+static bool SljitGeneratedFilterExpressionHasSelector(const SljitExecutableRegionExpression &expression) {
+	switch (expression.plan.kind) {
+	case SljitNativeRegionExpressionKind::PREDICATE:
+		return expression.predicate_select_function != nullptr;
+	case SljitNativeRegionExpressionKind::INTEGER_COMPARE_CONSTANT:
+	case SljitNativeRegionExpressionKind::INTEGER_COMPARE_REFERENCES:
+	case SljitNativeRegionExpressionKind::INTEGER_IN_LIST:
+	case SljitNativeRegionExpressionKind::INTEGER_BETWEEN:
+	case SljitNativeRegionExpressionKind::NULL_CHECK:
+	case SljitNativeRegionExpressionKind::TYPED_EXPRESSION_TREE:
+		return expression.select_function != nullptr;
+	default:
+		return false;
+	}
+}
+
 static bool SljitCanBindGeneratedFilterPrimitive(const vector<SljitExecutableRegionOp> &ops, idx_t filter_idx) {
-	return filter_idx < ops.size() && ops[filter_idx].kind == SljitNativeRegionOpKind::FILTER;
+	return filter_idx < ops.size() && ops[filter_idx].kind == SljitNativeRegionOpKind::FILTER &&
+	       SljitGeneratedFilterExpressionHasSelector(ops[filter_idx].filter);
 }
 
 static SljitGeneratedFilterPrimitive SljitBindGeneratedFilterPrimitive(const vector<SljitExecutableRegionOp> &ops,
@@ -53,6 +77,112 @@ static bool SljitExecuteGeneratedFilterPrimitive(ExecutionRegionRuntime &runtime
 	}
 	const auto selected = selected_count == source_chunk.size() ? nullptr : &filter_selection;
 	output = SljitRuntimeBatchViewFromChunk(source_chunk, selected, selected_count);
+	return true;
+}
+
+static SljitExecutableRegionOp &SljitBindSelectedHashJoinFilterOp(const SljitRuntimeHashJoinSelection &selected,
+                                                                  ExecutionHashJoinProbeBinding &source_binding,
+                                                                  SljitExecutableRegionOp &filter_op,
+                                                                  SljitSelectedHashJoinFilterCache &cache) {
+	auto output_column_map = selected.OutputColumnMap();
+	if (!output_column_map) {
+		return filter_op;
+	}
+	if (!cache.mapped_filter || cache.source_map != *output_column_map) {
+		string blocker;
+		auto mapped_filter = make_uniq<SljitExecutableRegionOp>();
+		if (!SljitTryBuildHashJoinMappedFilter(*output_column_map, source_binding, filter_op, *mapped_filter,
+		                                       optional_ptr<string>(&blocker))) {
+			if (blocker.empty()) {
+				blocker = "mapped_filter";
+			}
+			throw InternalException("SLJIT selected hash-join filter could not map filter sources: %s",
+			                        blocker.c_str());
+		}
+		cache.source_map = *output_column_map;
+		cache.mapped_filter = std::move(mapped_filter);
+	}
+	return *cache.mapped_filter;
+}
+
+static void SljitCompactSelectedHashJoinViewInPlace(SljitRegionExecutionScratch &scratch,
+                                                    const SljitRuntimeHashJoinSelection &selected,
+                                                    const SelectionVector &filter_selection, idx_t selected_count) {
+	if (selected_count == selected.count) {
+		return;
+	}
+	auto &match_selection = scratch.FilterSelection(selected.hash_join_idx);
+	auto &build_selection = scratch.HashJoinBuildSelection(selected.hash_join_idx);
+	auto &row_pointers = scratch.HashJoinRowPointers(selected.hash_join_idx);
+	row_pointers.SetVectorType(VectorType::FLAT_VECTOR);
+	auto row_pointer_data = FlatVector::GetDataMutable<data_ptr_t>(row_pointers);
+	for (idx_t row_idx = 0; row_idx < selected_count; row_idx++) {
+		const auto source_idx = filter_selection.get_index(row_idx);
+		match_selection.set_index(row_idx, match_selection.get_index(source_idx));
+		build_selection.set_index(row_idx, build_selection.get_index(source_idx));
+		row_pointer_data[row_idx] = row_pointer_data[source_idx];
+	}
+	FlatVector::SetSize(row_pointers, count_t(selected_count));
+}
+
+static bool SljitExecuteSelectedHashJoinGeneratedFilterPrimitive(
+    ExecutionRegionRuntime &runtime, SljitRegionExecutionScratch &scratch, vector<SljitExecutableRegionOp> &ops,
+    const SljitGeneratedFilterPrimitive &primitive, const SljitRuntimeBatchView &input,
+    SljitDataChunkBatch &selected_hash_join_filter_input, SljitSelectedHashJoinFilterCache &cache,
+    SljitRuntimeBatchView &output) {
+	auto selected = input.BindHashJoinSelection("SLJIT selected hash-join generated filter");
+	if (selected.count == 0) {
+		return false;
+	}
+	auto source_binding =
+	    SljitTryGetSelectedHashJoinSourceBinding(input, ops.size(), scratch, "SLJIT selected hash-join filter");
+	if (!source_binding) {
+		throw InternalException("SLJIT selected hash-join filter has no source binding");
+	}
+	auto &filter_op = ops[primitive.filter_idx];
+	auto &mapped_filter = SljitBindSelectedHashJoinFilterOp(selected, *source_binding, filter_op, cache);
+
+	vector<uint8_t> referenced_columns;
+	if (!SljitTryCollectHashJoinProjectionExpressionSources(mapped_filter.filter, source_binding->output_types.size(),
+	                                                        referenced_columns)) {
+		throw InternalException("SLJIT selected hash-join filter could not collect filter sources");
+	}
+	selected_hash_join_filter_input.Ensure(runtime.GetAllocator(), source_binding->output_types);
+	auto &filter_input = selected_hash_join_filter_input.chunk;
+	filter_input.Reset();
+	auto materialize_stage_start = SljitRegionStageStart(runtime);
+	auto materialized = ExecuteSljitRegionRecordedOperation(
+	    runtime, selected.hash_join_idx, ops[selected.hash_join_idx].kind, "selected_view_materialization",
+	    materialize_stage_start, [&](optional_ptr<ExecutionOperatorStageRecorder> recorder) {
+		    (void)recorder;
+		    return SljitTryMaterializeSelectedHashJoinOutputColumns(*source_binding, input, referenced_columns,
+		                                                            filter_input);
+	    });
+	if (!materialized) {
+		RecordSljitRegionStageRuntime(runtime, selected.hash_join_idx, ops[selected.hash_join_idx].kind,
+		                              "selected_view_materialization_miss", materialize_stage_start);
+		throw InternalException("SLJIT selected hash-join filter could not materialize filter input");
+	}
+	RecordSljitRegionStageRuntime(runtime, selected.hash_join_idx, ops[selected.hash_join_idx].kind,
+	                              "selected_view_materialization", materialize_stage_start);
+	RecordSljitRegionRuntimeDelegation(runtime, ops[selected.hash_join_idx].kind, "selected_view_materialization",
+	                                   filter_input.size());
+
+	auto &filter_selection = scratch.FilterSelection(primitive.filter_idx);
+	auto selection_stage_start = SljitRegionStageStart(runtime);
+	auto selected_count = SljitSelectFilter(mapped_filter, filter_input, filter_selection,
+	                                        scratch.ExpressionAdapterScratch(primitive.filter_idx, 0));
+	RecordSljitRegionStageRuntime(runtime, primitive.filter_idx, filter_op.kind, "selected_hash_join_selection",
+	                              selection_stage_start);
+	if (selected_count == 0) {
+		return false;
+	}
+	SljitCompactSelectedHashJoinViewInPlace(scratch, selected, filter_selection, selected_count);
+	output = SljitRuntimeBatchViewFromHashJoinSelection(
+	    selected.Input(), scratch.FilterSelection(selected.hash_join_idx),
+	    scratch.HashJoinBuildSelection(selected.hash_join_idx), scratch.HashJoinRowPointers(selected.hash_join_idx),
+	    selected_count, selected.hash_join_idx, selected.source_key0_int64_to_int32_matches_are_proven,
+	    selected.output_column_map, selected.output_projection_idx);
 	return true;
 }
 

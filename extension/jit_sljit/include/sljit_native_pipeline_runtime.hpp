@@ -8,6 +8,7 @@
 
 #pragma once
 
+#include "sljit_aggregate_update_runtime.hpp"
 #include "sljit_full_pipeline_runtime.hpp"
 #include "sljit_grouped_aggregate_state_runtime.hpp"
 #include "sljit_hash_join_probe_drain_runtime.hpp"
@@ -63,8 +64,8 @@ struct SljitNativePipelineGroupedFinishState {
 		};
 		auto trace_op = optional_ptr<const SljitExecutableRegionOp>(&op);
 		if (SljitAppendChunkToInitializedBatch(runtime, pending_aggregate_update.chunk, input, op_idx, trace_op,
-		                                       "pending_grouped_aggregate_input_append",
-		                                       "pending_grouped_aggregate_input", flush_batch, execute_batch)) {
+		                                       "pending_grouped_aggregate_input_append", flush_batch,
+		                                       execute_batch)) {
 			return true;
 		}
 		sink_result = SinkResultType::NEED_MORE_INPUT;
@@ -106,8 +107,9 @@ private:
 	                                           SljitRegionExecutionScratch &scratch, idx_t op_idx,
 	                                           SljitExecutableRegionOp &op, DataChunk &batch) {
 		auto deferred_grouped_finish = Prepare(op_idx);
-		auto result = SljitExecuteNativeAggregateUpdate(runtime, native_runtime, scratch, op_idx, op, batch, nullptr,
-		                                                DConstants::INVALID_INDEX, true, deferred_grouped_finish);
+		auto result =
+		    SljitExecuteNativePipelineAggregateUpdate(runtime, native_runtime, scratch, op_idx, op, batch, nullptr,
+		                                              DConstants::INVALID_INDEX, true, deferred_grouped_finish);
 		return native_runtime.RecordSinkResult(batch, result);
 	}
 
@@ -154,7 +156,7 @@ struct SljitNativePipelineTerminalPolicy {
 	}
 };
 
-struct SljitNativeTailHandoffTerminalPolicy {
+struct SljitNativeTailDelegationTerminalPolicy {
 	static bool CanDeferGroupedFinish() {
 		return false;
 	}
@@ -222,11 +224,11 @@ SljitMakeNativePipelineExecutor(KERNEL &kernel, ExecutionRegionRuntime &runtime,
 }
 
 template <class KERNEL>
-static SljitNativePipelineExecutor<KERNEL, SljitNativeTailHandoffTerminalPolicy>
+static SljitNativePipelineExecutor<KERNEL, SljitNativeTailDelegationTerminalPolicy>
 SljitMakeNativeTailPipelineExecutor(KERNEL &kernel, ExecutionRegionRuntime &runtime,
                                     vector<SljitExecutableRegionOp> &ops, const vector<idx_t> &source_distinct_counts) {
-	return SljitNativePipelineExecutor<KERNEL, SljitNativeTailHandoffTerminalPolicy>(kernel, runtime, ops,
-	                                                                                 source_distinct_counts);
+	return SljitNativePipelineExecutor<KERNEL, SljitNativeTailDelegationTerminalPolicy>(kernel, runtime, ops,
+	                                                                                    source_distinct_counts);
 }
 
 template <class KERNEL, class TERMINAL_POLICY>

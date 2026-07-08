@@ -18,8 +18,7 @@ namespace duckdb {
 static SinkResultType SljitExecuteNativeUngroupedAggregateUpdateWithPayloads(
     ExecutionRegionRuntime &runtime, ExecutionOperatorRuntime &native_runtime, SljitRegionExecutionScratch &scratch,
     idx_t op_idx, SljitExecutableRegionOp &op, DataChunk &payload_input,
-    vector<SljitExecutableRegionExpression> &payloads, const char *stage_name, const char *runtime_path,
-    const char *materialization_boundary) {
+    vector<SljitExecutableRegionExpression> &payloads, const char *stage_name, const char *runtime_path) {
 	auto &sink_info = op.aggregate_update.plan.sink_info;
 	if (sink_info.kind != ExecutionRegionSinkKind::UNGROUPED_AGGREGATE_UPDATE ||
 	    !op.aggregate_update.plan.use_primitive_payloads || op.aggregate_update.plan.use_grouped_state_addresses) {
@@ -63,8 +62,7 @@ static SinkResultType SljitExecuteNativeUngroupedAggregateUpdateWithPayloads(
 			RecordSljitRegionStageRuntime(runtime, op_idx, op.kind, stage_name, payload_stage_start);
 		}
 	}
-	RecordSljitRegionRuntimePath(runtime, op.kind, runtime_path, payload_input.size());
-	RecordSljitRegionMaterializationBoundary(runtime, op.kind, materialization_boundary, payload_input.size());
+	RecordSljitRegionMaterializationElisionPath(runtime, op.kind, runtime_path, payload_input.size());
 	return native_runtime.RecordSinkResult(payload_input, SinkResultType::NEED_MORE_INPUT);
 }
 

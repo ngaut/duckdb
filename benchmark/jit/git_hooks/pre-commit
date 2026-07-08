@@ -1,0 +1,7 @@
+#!/bin/sh
+set -eu
+
+ROOT="$(git rev-parse --show-toplevel)"
+cd "$ROOT"
+
+exec python3 benchmark/jit/run_jit_refactor_guard.py --level auto --change-set staged --auto-max-level unit

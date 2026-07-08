@@ -215,19 +215,15 @@ static bool SljitTryDirectMaterializeFixedProjectionToBatch(
 	const auto stage_start = SljitRegionStageStart(runtime);
 	auto &projection_scratch = scratch.ProjectionScratch(projection_idx);
 	const bool remapped_projection = output_to_projection;
-	auto fallback_to_projection_executor = [&]() {
+	auto materialize_with_expression_runtime = [&]() {
 		SljitExecuteProjectionExpressionsToBatch(scratch, projection_idx, projection_op, input, batch, skip_projection,
 		                                         projection_to_output);
 		SljitFinishDirectProjectionBatchMaterialization(runtime, projection_idx, projection_op, remapped_projection,
 		                                                batch, projected_hashes, input.size(), stage_start);
-		return true;
 	};
-	auto preflight_direct_fixed_projection = [&](optional_ptr<vector<uint8_t>> skip_projection_ptr) {
-		if (!SljitTryDirectMaterializeFixedProjection(projection_op, input, nullptr, source_cache_ptr,
-		                                              skip_projection_ptr)) {
-			return fallback_to_projection_executor();
-		}
-		return false;
+	auto can_materialize_direct_fixed_projection = [&](optional_ptr<vector<uint8_t>> skip_projection_ptr) {
+		return SljitTryDirectMaterializeFixedProjection(projection_op, input, nullptr, source_cache_ptr,
+		                                                skip_projection_ptr);
 	};
 	auto materialize_direct_fixed_projection = [&](optional_ptr<vector<uint8_t>> skip_projection_ptr,
 	                                               const char *shape_changed_message) {
@@ -243,7 +239,8 @@ static bool SljitTryDirectMaterializeFixedProjectionToBatch(
 		vector<uint8_t> post_fused_skip;
 		SljitBuildPostFusedProjectionSkip(skip_projection, projection_scratch.fused, post_fused_skip);
 		auto post_fused_skip_ptr = optional_ptr<vector<uint8_t>>(&post_fused_skip);
-		if (preflight_direct_fixed_projection(post_fused_skip_ptr)) {
+		if (!can_materialize_direct_fixed_projection(post_fused_skip_ptr)) {
+			materialize_with_expression_runtime();
 			return true;
 		}
 		BindFlatFusedFixedProjectionTargets(projection_op, slice, projection_scratch);
@@ -252,7 +249,8 @@ static bool SljitTryDirectMaterializeFixedProjectionToBatch(
 		    post_fused_skip_ptr, "SLJIT fixed fused direct batch projection source shape changed after preflight");
 	} else {
 		auto skip_projection_ptr = optional_ptr<vector<uint8_t>>(&skip_projection);
-		if (preflight_direct_fixed_projection(skip_projection_ptr)) {
+		if (!can_materialize_direct_fixed_projection(skip_projection_ptr)) {
+			materialize_with_expression_runtime();
 			return true;
 		}
 		materialize_direct_fixed_projection(skip_projection_ptr,

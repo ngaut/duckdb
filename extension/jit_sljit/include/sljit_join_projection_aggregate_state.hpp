@@ -17,7 +17,7 @@ namespace duckdb {
 
 struct SljitRegionExecutionScratch;
 
-enum class SljitJoinProjectionAggregateInputKind : uint8_t { PROJECTION_OUTPUT, HASH_JOIN_LHS_INPUT };
+enum class SljitJoinProjectionAggregateInputKind : uint8_t { UNUSED, PROJECTION_OUTPUT, HASH_JOIN_LHS_INPUT };
 
 struct SljitJoinProjectionAggregateInputSource {
 	SljitJoinProjectionAggregateInputKind kind = SljitJoinProjectionAggregateInputKind::PROJECTION_OUTPUT;

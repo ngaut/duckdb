@@ -39,10 +39,10 @@ TEST_CASE("JIT auto compiles decimal projection chains through fused regions", "
 		if (!IsCompiledSljitRegionEvent(event) || EventExecutionMode(event) != "native" ||
 		    event.candidate_traits.projection_count == 0) {
 			return false;
-		}
-		RequireGeneratedMachineCodeRegion(event);
-		RequireDuckDBScanFilteredSourceContract(event);
-		REQUIRE(StringUtil::Contains(event.ir, "projection(native:expression-tree"));
+			}
+			RequireGeneratedMachineCodeRegion(event);
+			RequireGeneratedSourceFilterContract(event);
+			REQUIRE(StringUtil::Contains(event.ir, "projection(native:expression-tree"));
 		REQUIRE(!StringUtil::Contains(event.ir, "op3=projection(native"));
 		return true;
 	});
@@ -145,6 +145,63 @@ TEST_CASE("JIT lowers compressed scalar intrinsics as native projections", "[api
 	REQUIRE(ints->GetValue(0, 10).IsNull());
 	RequireNoUnsupportedReason(manager, "__internal_decompress_integral");
 	RequireNativeSljitIr(manager, "integral_decompress");
+}
+
+TEST_CASE("JIT lowers fixed-prefix substring as native scalar projection", "[api][jit]") {
+	DuckDB db;
+	Connection con(db);
+	auto &manager = ExecutionRegionManager::Get(*con.context);
+
+	ConfigureSljitForCoverage(con, true, true, true, 10000);
+	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_string_substring_projection("
+	                          "id INTEGER, s VARCHAR, amount DECIMAL(15,2))"));
+	REQUIRE_NO_FAIL(con.Query("INSERT INTO jit_string_substring_projection VALUES "
+	                          "(1, '13-0001', 10.00), "
+	                          "(2, '13-0002', 2.50), "
+	                          "(3, '31-0003', 4.00), "
+	                          "(4, '漢字-alpha', 7.00), "
+	                          "(5, '漢a-beta', 11.00), "
+	                          "(6, 'éa-tail', 13.00), "
+	                          "(7, NULL, 17.00)"));
+
+	ClearJitTrace(manager, true);
+	REQUIRE_NO_FAIL(con.Query("CREATE TEMP TABLE jit_string_substring_projection_out AS "
+	                          "SELECT substring(s, 1, 2) AS prefix, count(*) AS c, sum(amount) AS total "
+	                          "FROM jit_string_substring_projection "
+	                          "GROUP BY 1"));
+
+	auto result = con.Query("SELECT c, total FROM jit_string_substring_projection_out WHERE prefix = '13'");
+	REQUIRE_NO_FAIL(*result);
+	REQUIRE(result->RowCount() == 1);
+	REQUIRE(result->GetValue(0, 0).GetValue<int64_t>() == 2);
+	REQUIRE(result->GetValue(1, 0).ToString() == "12.50");
+	result = con.Query("SELECT c, total FROM jit_string_substring_projection_out WHERE prefix = '漢字'");
+	REQUIRE_NO_FAIL(*result);
+	REQUIRE(result->RowCount() == 1);
+	REQUIRE(result->GetValue(0, 0).GetValue<int64_t>() == 1);
+	REQUIRE(result->GetValue(1, 0).ToString() == "7.00");
+	result = con.Query("SELECT c, total FROM jit_string_substring_projection_out WHERE prefix = '漢a'");
+	REQUIRE_NO_FAIL(*result);
+	REQUIRE(result->RowCount() == 1);
+	REQUIRE(result->GetValue(0, 0).GetValue<int64_t>() == 1);
+	REQUIRE(result->GetValue(1, 0).ToString() == "11.00");
+	result = con.Query("SELECT c, total FROM jit_string_substring_projection_out WHERE prefix = 'éa'");
+	REQUIRE_NO_FAIL(*result);
+	REQUIRE(result->RowCount() == 1);
+	REQUIRE(result->GetValue(0, 0).GetValue<int64_t>() == 1);
+	REQUIRE(result->GetValue(1, 0).ToString() == "13.00");
+	result = con.Query("SELECT c, total FROM jit_string_substring_projection_out WHERE prefix IS NULL");
+	REQUIRE_NO_FAIL(*result);
+	REQUIRE(result->RowCount() == 1);
+	REQUIRE(result->GetValue(0, 0).GetValue<int64_t>() == 1);
+	REQUIRE(result->GetValue(1, 0).ToString() == "17.00");
+
+	RequireNativeSljitIr(manager, "native:string-substring:prefix=2", [](const ExecutionRegionEvent &event) {
+		REQUIRE(event.candidate_traits.projection_count > 0);
+		REQUIRE(event.candidate_traits.sink_kind == ExecutionRegionSinkKind::HASH_AGGREGATE_UPDATE);
+		REQUIRE(StringUtil::Contains(event.reason, "backend_group_key_type=varchar"));
+	});
+	RequireNoUnsupportedReason(manager, "function=substring");
 }
 
 TEST_CASE("JIT lowers string predicates without aggregate sink dependence", "[api][jit]") {
@@ -362,7 +419,7 @@ TEST_CASE("JIT lowers long string predicates through packed native comparisons",
 	RequireNoUnsupportedReason(manager, "function=substring");
 }
 
-TEST_CASE("JIT preserves retained table scan filters in the DuckDB scan contract", "[api][jit]") {
+TEST_CASE("JIT owns retained full-layout table scan filters as generated source filters", "[api][jit]") {
 	DuckDB db;
 	Connection con(db);
 	auto &manager = ExecutionRegionManager::Get(*con.context);
@@ -383,12 +440,13 @@ TEST_CASE("JIT preserves retained table scan filters in the DuckDB scan contract
 		           event.candidate_traits.sink_kind == ExecutionRegionSinkKind::UNGROUPED_AGGREGATE_UPDATE;
 	    },
 	    [](const ExecutionRegionEvent &event) {
-		    RequireDuckDBScanFilteredSourceContract(event);
+		    RequireGeneratedSourceFilterContract(event);
 		    RequireGeneratedMachineCodeRegion(event);
 	    });
+	RequireNativeSljitIr(manager, "filter(");
 }
 
-TEST_CASE("JIT preserves pruned table scan filters in the DuckDB scan contract", "[api][jit]") {
+TEST_CASE("JIT owns pruned table scan filters through source input layout", "[api][jit]") {
 	DuckDB db;
 	Connection con(db);
 	auto &manager = ExecutionRegionManager::Get(*con.context);
@@ -411,12 +469,12 @@ TEST_CASE("JIT preserves pruned table scan filters in the DuckDB scan contract",
 		           StringUtil::Contains(event.reason, "source_contract_filter_prune_required=true");
 	    },
 	    [](const ExecutionRegionEvent &event) {
-		    RequireDuckDBScanFilteredSourceContract(event);
+		    RequireGeneratedSourceFilterContract(event);
 		    RequireGeneratedMachineCodeRegion(event);
 	    });
 }
 
-TEST_CASE("JIT keeps date range source filters in the DuckDB scan contract", "[api][jit]") {
+TEST_CASE("JIT owns date range source filters through source input layout", "[api][jit]") {
 	DuckDB db;
 	Connection con(db);
 	auto &manager = ExecutionRegionManager::Get(*con.context);
@@ -438,10 +496,50 @@ TEST_CASE("JIT keeps date range source filters in the DuckDB scan contract", "[a
 	    [](const ExecutionRegionEvent &event) {
 		    return IsCompiledSljitRegionEvent(event) && event.candidate_traits.source_filter_count > 0;
 	    },
-	    [](const ExecutionRegionEvent &event) { RequireDuckDBScanFilteredSourceContract(event); });
+	    [](const ExecutionRegionEvent &event) { RequireGeneratedSourceFilterContract(event); });
 }
 
-TEST_CASE("JIT preserves large complex scan filters in the DuckDB scan contract", "[api][jit]") {
+TEST_CASE("JIT orders generated source filters by generic predicate cost", "[api][jit]") {
+	DuckDB db;
+	Connection con(db);
+	auto &manager = ExecutionRegionManager::Get(*con.context);
+
+	ConfigureSljitForCoverage(con, false, true, false, 10000);
+	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_ordered_source_filter AS "
+	                          "SELECT i::BIGINT AS i, "
+	                          "CASE WHEN i % 11 = 0 THEN 'MAIL' ELSE 'AIR' END AS s, "
+	                          "(DATE '1994-01-01' + ((i % 2000)::INTEGER)) AS d "
+	                          "FROM range(10000) tbl(i)"));
+
+	ClearJitTrace(manager, true);
+	auto result = con.Query("SELECT count(*) FROM jit_ordered_source_filter "
+	                        "WHERE s IN ('MAIL', 'SHIP') AND d < DATE '1995-01-01' AND i > 10");
+	REQUIRE_NO_FAIL(*result);
+	REQUIRE(result->GetValue(0, 0).ToString() == "165");
+
+	RequireJitEvent(
+	    manager,
+	    [](const ExecutionRegionEvent &event) {
+		    return IsCompiledSljitRegionEvent(event) && event.candidate_traits.source_filter_count == 3 &&
+		           StringUtil::Contains(event.reason, "generated_source_filter=");
+	    },
+	    [](const ExecutionRegionEvent &event) {
+		    RequireGeneratedSourceFilterContract(event);
+		    auto generated_filter = event.reason.find("generated_source_filter=");
+		    auto date_filter = event.reason.find("logical=DATE", generated_filter);
+		    auto integer_filter = event.reason.find("logical=BIGINT", generated_filter);
+		    auto string_filter = event.reason.find("in_list<logical=BOOLEAN", generated_filter);
+		    REQUIRE(generated_filter != string::npos);
+		    REQUIRE(date_filter != string::npos);
+		    REQUIRE(integer_filter != string::npos);
+		    REQUIRE(string_filter != string::npos);
+		    REQUIRE(date_filter < integer_filter);
+		    REQUIRE(date_filter < string_filter);
+		    REQUIRE(integer_filter < string_filter);
+	    });
+}
+
+TEST_CASE("JIT owns large complex scan filters through source input layout", "[api][jit]") {
 	DuckDB db;
 	Connection con(db);
 	auto &manager = ExecutionRegionManager::Get(*con.context);
@@ -465,7 +563,7 @@ TEST_CASE("JIT preserves large complex scan filters in the DuckDB scan contract"
 		           event.candidate_traits.sink_kind == ExecutionRegionSinkKind::UNGROUPED_AGGREGATE_UPDATE;
 	    },
 	    [](const ExecutionRegionEvent &event) {
-		    RequireDuckDBScanFilteredSourceContract(event);
+		    RequireGeneratedSourceFilterContract(event);
 		    RequireGeneratedMachineCodeRegion(event);
 	    });
 }
@@ -538,11 +636,11 @@ TEST_CASE("JIT auto preserves cheap source string equality filters under aggress
 	    [](const ExecutionRegionEvent &event) {
 		    return IsCompiledSljitRegionEvent(event) && event.candidate_traits.source_filter_count > 0 &&
 		           event.candidate_traits.projection_count > 0;
-	    },
-	    [](const ExecutionRegionEvent &event) {
-		    RequireDuckDBScanFilteredSourceContract(event);
-		    RequireGeneratedMachineCodeRegion(event);
-	    });
+		    },
+		    [](const ExecutionRegionEvent &event) {
+			    RequireGeneratedSourceFilterContract(event);
+			    RequireGeneratedMachineCodeRegion(event);
+		    });
 	RequireNoUnsupportedReason(manager, "source filter references must be local to one scan column");
 }
 

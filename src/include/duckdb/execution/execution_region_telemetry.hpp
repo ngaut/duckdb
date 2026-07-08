@@ -53,12 +53,17 @@ struct ExecutionRegionRunnerCostTotals {
 	bool present = false;
 	int64_t rows = 0;
 	int64_t batches = 0;
+	int64_t costed_batches = 0;
 	int64_t expression_cost = 0;
+	int64_t source_contract_input_rows = 0;
+	int64_t source_contract_input_batches = 0;
+	bool source_contract_output_cardinality_unknown = false;
 	int64_t generated_stage_count = 0;
 	int64_t generated_backend_stage_count = 0;
+	int64_t generated_grouped_aggregate_stage_count = 0;
+	int64_t native_grouped_state_address_lookup_count = 0;
 	int64_t materialization_elision_count = 0;
-	int64_t materialization_source_append_count = 0;
-	int64_t unfused_mark_filter_aggregate_count = 0;
+	int64_t selected_hash_join_filter_materialization_count = 0;
 	int64_t native_join_stage_count = 0;
 	int64_t native_hash_join_build_sink_count = 0;
 	int64_t native_aggregate_stage_count = 0;
@@ -73,8 +78,8 @@ struct ExecutionRegionRunnerCostTotals {
 	int64_t generated_backend_stage_work = 0;
 	int64_t native_operator_work = 0;
 	int64_t materialization_elision_work = 0;
-	int64_t materialization_source_append_penalty = 0;
-	int64_t unfused_mark_filter_aggregate_penalty = 0;
+	int64_t selected_hash_join_filter_materialization_penalty = 0;
+	int64_t source_contract_scan_penalty = 0;
 	int64_t full_pipeline_work = 0;
 	int64_t stateful_protocol_penalty = 0;
 	int64_t saved_work_per_batch = 0;
@@ -191,6 +196,7 @@ DUCKDB_API int64_t ExecutionRegionEventProfileCompileTime(const ExecutionRegionE
 
 struct ExecutionRegionCounter {
 	string backend_name;
+	idx_t kernel_id = 0;
 	ExecutionRegionEventStatus status_kind = ExecutionRegionEventStatus::NONE;
 	ExecutionRegionExecutionMode execution_mode_kind = ExecutionRegionExecutionMode::NONE;
 	ExecutionRunnerKind selected_runner_kind = ExecutionRunnerKind::VECTORIZED;

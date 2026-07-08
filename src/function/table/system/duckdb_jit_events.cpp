@@ -60,17 +60,23 @@ enum JitEventColumn : idx_t {
 	JIT_EVENT_LAZY_CODE_SIZE,
 	JIT_EVENT_HASH_JOIN_PROBE_LAYOUT,
 	JIT_EVENT_JIT_RUNTIME_PATH_COUNTS,
-	JIT_EVENT_JIT_MATERIALIZATION_BOUNDARY_COUNTS,
+	JIT_EVENT_JIT_RUNTIME_PROOF_COUNTS,
+	JIT_EVENT_JIT_RUNTIME_DELEGATION_COUNTS,
 	JIT_EVENT_CANDIDATE_PIPELINE_SHAPE,
 	JIT_EVENT_RUNNER_COST_PROFILE,
 	JIT_EVENT_RUNNER_COST_ROWS,
 	JIT_EVENT_RUNNER_COST_BATCHES,
+	JIT_EVENT_RUNNER_COST_COSTED_BATCHES,
 	JIT_EVENT_RUNNER_COST_EXPRESSION_COST,
+	JIT_EVENT_RUNNER_COST_SOURCE_CONTRACT_INPUT_ROWS,
+	JIT_EVENT_RUNNER_COST_SOURCE_CONTRACT_INPUT_BATCHES,
+	JIT_EVENT_RUNNER_COST_SOURCE_CONTRACT_OUTPUT_CARDINALITY_UNKNOWN,
 	JIT_EVENT_RUNNER_COST_GENERATED_STAGE_COUNT,
 	JIT_EVENT_RUNNER_COST_GENERATED_BACKEND_STAGE_COUNT,
+	JIT_EVENT_RUNNER_COST_GENERATED_GROUPED_AGGREGATE_STAGE_COUNT,
+	JIT_EVENT_RUNNER_COST_NATIVE_GROUPED_STATE_ADDRESS_LOOKUP_COUNT,
 	JIT_EVENT_RUNNER_COST_MATERIALIZATION_ELISION_COUNT,
-	JIT_EVENT_RUNNER_COST_MATERIALIZATION_SOURCE_APPEND_COUNT,
-	JIT_EVENT_RUNNER_COST_UNFUSED_MARK_FILTER_AGGREGATE_COUNT,
+	JIT_EVENT_RUNNER_COST_SELECTED_HASH_JOIN_FILTER_MATERIALIZATION_COUNT,
 	JIT_EVENT_RUNNER_COST_NATIVE_JOIN_STAGE_COUNT,
 	JIT_EVENT_RUNNER_COST_NATIVE_HASH_JOIN_BUILD_SINK_COUNT,
 	JIT_EVENT_RUNNER_COST_NATIVE_AGGREGATE_STAGE_COUNT,
@@ -87,8 +93,8 @@ enum JitEventColumn : idx_t {
 	JIT_EVENT_RUNNER_COST_GENERATED_BACKEND_STAGE_WORK,
 	JIT_EVENT_RUNNER_COST_NATIVE_OPERATOR_WORK,
 	JIT_EVENT_RUNNER_COST_MATERIALIZATION_ELISION_WORK,
-	JIT_EVENT_RUNNER_COST_MATERIALIZATION_SOURCE_APPEND_PENALTY,
-	JIT_EVENT_RUNNER_COST_UNFUSED_MARK_FILTER_AGGREGATE_PENALTY,
+	JIT_EVENT_RUNNER_COST_SELECTED_HASH_JOIN_FILTER_MATERIALIZATION_PENALTY,
+	JIT_EVENT_RUNNER_COST_SOURCE_CONTRACT_SCAN_PENALTY,
 	JIT_EVENT_RUNNER_COST_FULL_PIPELINE_WORK,
 	JIT_EVENT_RUNNER_COST_STATEFUL_PROTOCOL_PENALTY,
 	JIT_EVENT_RUNNER_COST_SAVED_WORK_PER_BATCH,
@@ -315,9 +321,13 @@ static void AppendJitEventColumn(Vector &output, idx_t column_id, const Executio
 		AppendExecutionRegionNullableString(
 		    output, RenderExecutionRegionCounterBreakdown(entry.jit_runtime.runtime_path_counts));
 		return;
-	case JIT_EVENT_JIT_MATERIALIZATION_BOUNDARY_COUNTS:
+	case JIT_EVENT_JIT_RUNTIME_PROOF_COUNTS:
 		AppendExecutionRegionNullableString(
-		    output, RenderExecutionRegionCounterBreakdown(entry.jit_runtime.materialization_boundary_counts));
+		    output, RenderExecutionRegionCounterBreakdown(entry.jit_runtime.runtime_proof_counts));
+		return;
+	case JIT_EVENT_JIT_RUNTIME_DELEGATION_COUNTS:
+		AppendExecutionRegionNullableString(
+		    output, RenderExecutionRegionCounterBreakdown(entry.jit_runtime.runtime_delegation_counts));
 		return;
 	case JIT_EVENT_CANDIDATE_PIPELINE_SHAPE:
 		if (entry.has_candidate) {
@@ -405,7 +415,8 @@ static unique_ptr<FunctionData> DuckDBJitEventsBind(ClientContext &context, Tabl
 	AddExecutionRegionTableFunctionColumn(return_types, names, "lazy_code_size", LogicalType::UBIGINT);
 	AddExecutionRegionTableFunctionColumn(return_types, names, "hash_join_probe_layout", LogicalType::VARCHAR);
 	AddExecutionRegionTableFunctionColumn(return_types, names, "jit_runtime_path_counts", LogicalType::VARCHAR);
-	AddExecutionRegionTableFunctionColumn(return_types, names, "jit_materialization_boundary_counts",
+	AddExecutionRegionTableFunctionColumn(return_types, names, "jit_runtime_proof_counts", LogicalType::VARCHAR);
+	AddExecutionRegionTableFunctionColumn(return_types, names, "jit_runtime_delegation_counts",
 	                                      LogicalType::VARCHAR);
 	AddExecutionRegionTableFunctionColumn(return_types, names, "candidate_pipeline_shape", LogicalType::VARCHAR);
 	AddJitEventRunnerCostColumns(return_types, names);

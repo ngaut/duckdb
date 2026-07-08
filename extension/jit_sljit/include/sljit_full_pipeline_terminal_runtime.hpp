@@ -12,6 +12,8 @@
 #include "sljit_full_pipeline_primitive_contract.hpp"
 #include "sljit_full_pipeline_runtime.hpp"
 #include "sljit_grouped_aggregate_update_runtime_state.hpp"
+#include "sljit_hash_join_build_sink_runtime.hpp"
+#include "sljit_native_tail_delegation_runtime.hpp"
 #include "sljit_post_join_projection_aggregate_runtime.hpp"
 #include "sljit_runtime_batch_view.hpp"
 #include "sljit_ungrouped_aggregate_update_primitive.hpp"
@@ -24,9 +26,8 @@ public:
 	SljitFullPipelineTerminalRuntime(EXECUTE_NATIVE_FULL_PIPELINE_FROM &execute_native_full_pipeline_from_p,
 	                                 const vector<idx_t> &source_distinct_counts_p,
 	                                 const vector<Value> &source_min_values_p, const vector<Value> &source_max_values_p)
-	    : execute_native_full_pipeline_from(execute_native_full_pipeline_from_p),
-	      source_distinct_counts(source_distinct_counts_p), source_min_values(source_min_values_p),
-	      source_max_values(source_max_values_p) {
+	    : source_distinct_counts(source_distinct_counts_p), source_min_values(source_min_values_p),
+	      source_max_values(source_max_values_p), native_tail_delegation(execute_native_full_pipeline_from_p) {
 	}
 
 	bool Prepare(ExecutionRegionRuntime &runtime, vector<SljitExecutableRegionOp> &ops,
@@ -39,9 +40,11 @@ public:
 		case SljitFullPipelinePrimitiveKind::POST_JOIN_PROJECTION_AGGREGATE_UPDATE:
 			return post_join_projection_aggregate.Prepare(runtime, ops, terminal_step.post_join_projection_aggregate,
 			                                              source_distinct_counts, source_min_values, source_max_values);
+		case SljitFullPipelinePrimitiveKind::HASH_JOIN_BUILD_SINK:
+			return true;
 		case SljitFullPipelinePrimitiveKind::DELIM_JOIN_SINK:
 			return delim_join_sink.Prepare(runtime, ops, terminal_step.delim_join_sink);
-		case SljitFullPipelinePrimitiveKind::NATIVE_TAIL_HANDOFF:
+		case SljitFullPipelinePrimitiveKind::NATIVE_TAIL_DELEGATION:
 			return true;
 		default:
 			return false;
@@ -62,11 +65,15 @@ public:
 			(void)have_more_output;
 			return post_join_projection_aggregate.Execute(runtime, result, ops, scratch,
 			                                              terminal_step.post_join_projection_aggregate, input);
+		case SljitFullPipelinePrimitiveKind::HASH_JOIN_BUILD_SINK:
+			(void)have_more_output;
+			return ExecuteHashJoinBuildSink(runtime, result, ops, scratch, terminal_step, input, processed_batches);
 		case SljitFullPipelinePrimitiveKind::DELIM_JOIN_SINK:
 			return delim_join_sink.Execute(runtime, result, ops, scratch, terminal_step.delim_join_sink, input,
 			                               processed_batches);
-		case SljitFullPipelinePrimitiveKind::NATIVE_TAIL_HANDOFF:
-			return ExecuteNativeTailHandoff(runtime, result, scratch, terminal_step, input, processed_batches);
+		case SljitFullPipelinePrimitiveKind::NATIVE_TAIL_DELEGATION:
+			return native_tail_delegation.Execute(runtime, result, ops, scratch, terminal_step, input,
+			                                      processed_batches);
 		default:
 			throw InternalException("SLJIT primitive sequence contains an unsupported terminal primitive");
 		}
@@ -82,10 +89,12 @@ public:
 			return grouped_aggregate_update.Flush(runtime, ops, scratch, terminal_step.grouped_aggregate_update);
 		case SljitFullPipelinePrimitiveKind::POST_JOIN_PROJECTION_AGGREGATE_UPDATE:
 			return post_join_projection_aggregate.Flush(runtime, result, ops, scratch);
+		case SljitFullPipelinePrimitiveKind::HASH_JOIN_BUILD_SINK:
+			return false;
 		case SljitFullPipelinePrimitiveKind::DELIM_JOIN_SINK:
 			return false;
-		case SljitFullPipelinePrimitiveKind::NATIVE_TAIL_HANDOFF:
-			execute_native_full_pipeline_from.Finalize(scratch);
+		case SljitFullPipelinePrimitiveKind::NATIVE_TAIL_DELEGATION:
+			native_tail_delegation.Finalize(scratch);
 			return false;
 		default:
 			throw InternalException("SLJIT primitive sequence has an unsupported terminal flush primitive");
@@ -111,31 +120,22 @@ private:
 		                                        input, processed_batches);
 	}
 
-	bool ExecuteNativeTailHandoff(ExecutionRegionRuntime &runtime, ExecutionRegionResult &result,
-	                              SljitRegionExecutionScratch &scratch,
+	bool ExecuteHashJoinBuildSink(ExecutionRegionRuntime &runtime, ExecutionRegionResult &result,
+	                              vector<SljitExecutableRegionOp> &ops, SljitRegionExecutionScratch &scratch,
 	                              const SljitFullPipelinePrimitiveStep &terminal_step,
 	                              const SljitRuntimeBatchView &input, idx_t &processed_batches) {
-		if (input.count == 0) {
-			return false;
-		}
-		auto &chunk = SljitBindMaterializedRuntimeBatchInput(input, "SLJIT native tail handoff");
-		auto sink_result = execute_native_full_pipeline_from(scratch, terminal_step.Op(0), chunk);
-		auto stopped = SljitNativeSinkResultStopsExecution(runtime, sink_result, result);
-		if (stopped) {
-			execute_native_full_pipeline_from.Finalize(scratch);
-			return true;
-		}
-		processed_batches++;
-		return false;
+		return hash_join_build_sink.Execute(runtime, result, ops, scratch, terminal_step.hash_join_build_sink, input,
+		                                    processed_batches);
 	}
 
-	EXECUTE_NATIVE_FULL_PIPELINE_FROM &execute_native_full_pipeline_from;
 	const vector<idx_t> &source_distinct_counts;
 	const vector<Value> &source_min_values;
 	const vector<Value> &source_max_values;
 	SljitUngroupedAggregateUpdateRuntimeState ungrouped_aggregate_update;
 	SljitGroupedAggregateUpdateRuntimeState grouped_aggregate_update;
 	SljitPostJoinProjectionAggregateRuntimeState post_join_projection_aggregate;
+	SljitHashJoinBuildSinkRuntimeState hash_join_build_sink;
+	SljitNativeTailDelegationRuntimeState<EXECUTE_NATIVE_FULL_PIPELINE_FROM> native_tail_delegation;
 	SljitDelimJoinSinkRuntimeState delim_join_sink;
 };
 

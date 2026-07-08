@@ -44,6 +44,7 @@ static idx_t ExecutionRegionRingIndex(idx_t start, idx_t capacity, idx_t offset)
 
 static hash_t ExecutionRegionCounterHash(const ExecutionRegionEvent &event) {
 	auto result = ExecutionRegionTelemetryHashString(event.backend_name);
+	result = ExecutionRegionTelemetryCombine(result, Hash(event.kernel_id));
 	result = ExecutionRegionTelemetryCombine(result, ExecutionRegionTelemetryHashEnum(event.status_kind));
 	result = ExecutionRegionTelemetryCombine(result, ExecutionRegionTelemetryHashEnum(event.execution_mode_kind));
 	result = ExecutionRegionTelemetryCombine(result, ExecutionRegionTelemetryHashEnum(event.selected_runner));
@@ -60,8 +61,8 @@ static hash_t ExecutionRegionCounterHash(const ExecutionRegionEvent &event) {
 }
 
 static bool ExecutionRegionCounterMatches(const ExecutionRegionCounter &counter, const ExecutionRegionEvent &event) {
-	return counter.backend_name == event.backend_name && counter.status_kind == event.status_kind &&
-	       counter.execution_mode_kind == event.execution_mode_kind &&
+	return counter.backend_name == event.backend_name && counter.kernel_id == event.kernel_id &&
+	       counter.status_kind == event.status_kind && counter.execution_mode_kind == event.execution_mode_kind &&
 	       counter.selected_runner_kind == event.selected_runner && counter.blocker == event.blocker &&
 	       counter.runner_cost.input_scope == ExecutionRegionRunnerCostInputScope(event.runner_cost) &&
 	       counter.runner_cost.admission_class == event.runner_cost.admission_class &&
@@ -90,12 +91,18 @@ static void AccumulateExecutionRegionRunnerCostTotals(ExecutionRegionRunnerCostT
 	target.present = true;
 	target.rows += source.rows;
 	target.batches += source.batches;
+	target.costed_batches += source.costed_batches;
 	target.expression_cost += source.expression_cost;
+	target.source_contract_input_rows += source.source_contract_input_rows;
+	target.source_contract_input_batches += source.source_contract_input_batches;
+	target.source_contract_output_cardinality_unknown =
+	    target.source_contract_output_cardinality_unknown || source.source_contract_output_cardinality_unknown;
 	target.generated_stage_count += source.generated_stage_count;
 	target.generated_backend_stage_count += source.generated_backend_stage_count;
+	target.generated_grouped_aggregate_stage_count += source.generated_grouped_aggregate_stage_count;
+	target.native_grouped_state_address_lookup_count += source.native_grouped_state_address_lookup_count;
 	target.materialization_elision_count += source.materialization_elision_count;
-	target.materialization_source_append_count += source.materialization_source_append_count;
-	target.unfused_mark_filter_aggregate_count += source.unfused_mark_filter_aggregate_count;
+	target.selected_hash_join_filter_materialization_count += source.selected_hash_join_filter_materialization_count;
 	target.native_join_stage_count += source.native_join_stage_count;
 	target.native_hash_join_build_sink_count += source.native_hash_join_build_sink_count;
 	target.native_aggregate_stage_count += source.native_aggregate_stage_count;
@@ -110,8 +117,9 @@ static void AccumulateExecutionRegionRunnerCostTotals(ExecutionRegionRunnerCostT
 	target.generated_backend_stage_work += source.generated_backend_stage_work;
 	target.native_operator_work += source.native_operator_work;
 	target.materialization_elision_work += source.materialization_elision_work;
-	target.materialization_source_append_penalty += source.materialization_source_append_penalty;
-	target.unfused_mark_filter_aggregate_penalty += source.unfused_mark_filter_aggregate_penalty;
+	target.selected_hash_join_filter_materialization_penalty +=
+	    source.selected_hash_join_filter_materialization_penalty;
+	target.source_contract_scan_penalty += source.source_contract_scan_penalty;
 	target.full_pipeline_work += source.full_pipeline_work;
 	target.stateful_protocol_penalty += source.stateful_protocol_penalty;
 	target.saved_work_per_batch += source.saved_work_per_batch;
@@ -167,8 +175,10 @@ static void AccumulateExecutionRegionCounter(ExecutionRegionCounter &counter, co
 	AccumulateExecutionRegionStageTimings(counter.stage_timings, event.stage_timings);
 	MergeExecutionRegionRecordedCounters(counter.jit_runtime.runtime_path_counts,
 	                                     event.jit_runtime.runtime_path_counts);
-	MergeExecutionRegionRecordedCounters(counter.jit_runtime.materialization_boundary_counts,
-	                                     event.jit_runtime.materialization_boundary_counts);
+	MergeExecutionRegionRecordedCounters(counter.jit_runtime.runtime_proof_counts,
+	                                     event.jit_runtime.runtime_proof_counts);
+	MergeExecutionRegionRecordedCounters(counter.jit_runtime.runtime_delegation_counts,
+	                                     event.jit_runtime.runtime_delegation_counts);
 	AddExecutionRegionLazyCodegenMetrics(counter.jit_runtime.lazy_codegen, event.jit_runtime.lazy_codegen);
 }
 
@@ -187,6 +197,7 @@ void ExecutionRegionEventLog::RecordCounter(const ExecutionRegionEvent &event) {
 	}
 	ExecutionRegionCounter counter;
 	counter.backend_name = event.backend_name;
+	counter.kernel_id = event.kernel_id;
 	counter.status_kind = event.status_kind;
 	counter.execution_mode_kind = event.execution_mode_kind;
 	counter.selected_runner_kind = event.selected_runner;

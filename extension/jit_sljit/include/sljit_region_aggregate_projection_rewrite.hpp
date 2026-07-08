@@ -140,6 +140,7 @@ static bool RewriteSljitDirectPayloadSourcesThroughPartialProjection(
 		case SljitNativeRegionExpressionKind::INTEGRAL_DECOMPRESS:
 		case SljitNativeRegionExpressionKind::STRING_COMPRESS:
 		case SljitNativeRegionExpressionKind::STRING_DECOMPRESS:
+		case SljitNativeRegionExpressionKind::STRING_SUBSTRING:
 		case SljitNativeRegionExpressionKind::DATE_YEAR:
 		case SljitNativeRegionExpressionKind::NULL_CHECK:
 			if (!RewriteSljitDirectPayloadSourceThroughPartialProjection(

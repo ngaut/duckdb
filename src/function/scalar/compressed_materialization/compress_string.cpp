@@ -1,6 +1,7 @@
 #include "duckdb/common/bswap.hpp"
 #include "duckdb/function/scalar/compressed_materialization_functions.hpp"
 #include "duckdb/function/scalar/compressed_materialization_utils.hpp"
+#include "duckdb/function/scalar/string_common.hpp"
 #include "duckdb/common/serializer/serializer.hpp"
 #include "duckdb/common/serializer/deserializer.hpp"
 
@@ -13,69 +14,10 @@ string StringCompressFunctionName(const LogicalType &result_type) {
 	                          StringUtil::Lower(LogicalTypeIdToString(result_type.id())));
 }
 
-template <idx_t LENGTH>
-inline void TemplatedReverseMemCpy(const data_ptr_t &__restrict dest, const const_data_ptr_t &__restrict src) {
-	for (idx_t i = 0; i < LENGTH; i++) {
-		dest[i] = src[LENGTH - 1 - i];
-	}
-}
-
-inline void ReverseMemCpy(const data_ptr_t &__restrict dest, const const_data_ptr_t &__restrict src,
-                          const idx_t &length) {
-	for (idx_t i = 0; i < length; i++) {
-		dest[i] = src[length - 1 - i];
-	}
-}
-
-template <class RESULT_TYPE>
-inline RESULT_TYPE StringCompressInternal(const string_t &input) {
-	RESULT_TYPE result;
-	const auto result_ptr = data_ptr_cast(&result);
-	if (sizeof(RESULT_TYPE) <= string_t::INLINE_LENGTH) {
-		TemplatedReverseMemCpy<sizeof(RESULT_TYPE)>(result_ptr, const_data_ptr_cast(input.GetPrefix()));
-	} else if (input.IsInlined()) {
-		static constexpr auto REMAINDER = sizeof(RESULT_TYPE) - string_t::INLINE_LENGTH;
-		TemplatedReverseMemCpy<string_t::INLINE_LENGTH>(result_ptr + REMAINDER, const_data_ptr_cast(input.GetPrefix()));
-		memset(result_ptr, '\0', REMAINDER);
-	} else {
-		const auto size = MinValue<idx_t>(sizeof(RESULT_TYPE), input.GetSize());
-		const auto remainder = sizeof(RESULT_TYPE) - size;
-		ReverseMemCpy(result_ptr + remainder, data_ptr_cast(input.GetPointer()), size);
-		memset(result_ptr, '\0', remainder);
-	}
-	result_ptr[0] = UnsafeNumericCast<data_t>(input.GetSize());
-	return BSwapIfBE(result);
-}
-
-template <class RESULT_TYPE>
-inline RESULT_TYPE StringCompress(const string_t &input) {
-	D_ASSERT(input.GetSize() < sizeof(RESULT_TYPE));
-	return StringCompressInternal<RESULT_TYPE>(input);
-}
-
-template <class RESULT_TYPE>
-inline RESULT_TYPE MiniStringCompress(const string_t &input) {
-	RESULT_TYPE result;
-	if (sizeof(RESULT_TYPE) <= string_t::INLINE_LENGTH) {
-		result = UnsafeNumericCast<RESULT_TYPE>(input.GetSize() + *const_data_ptr_cast(input.GetPrefix()));
-	} else if (input.GetSize() == 0) {
-		result = 0;
-	} else {
-		result = UnsafeNumericCast<RESULT_TYPE>(input.GetSize() + *const_data_ptr_cast(input.GetPointer()));
-	}
-	return BSwapIfBE(result);
-}
-
-template <>
-inline uint8_t StringCompress(const string_t &input) {
-	D_ASSERT(input.GetSize() <= sizeof(uint8_t));
-	return MiniStringCompress<uint8_t>(input);
-}
-
 template <class RESULT_TYPE>
 void StringCompressFunction(DataChunk &args, ExpressionState &state, Vector &result) {
 	UnaryExecutor::Execute<string_t, RESULT_TYPE>(
-	    args.data[0], result, StringCompress<RESULT_TYPE>,
+	    args.data[0], result, StringCompressValue<RESULT_TYPE>,
 #if defined(D_ASSERT_IS_ENABLED)
 	    FunctionErrors::CAN_THROW_RUNTIME_ERROR); // Can only throw a runtime error when assertions are enabled
 #else
@@ -133,15 +75,15 @@ inline string_t StringDecompress(const INPUT_TYPE &input, ArenaAllocator &alloca
 	string_t result(le_input_str[0]);
 	if (sizeof(INPUT_TYPE) <= string_t::INLINE_LENGTH) {
 		const auto result_ptr = data_ptr_cast(result.GetPrefixWriteable());
-		TemplatedReverseMemCpy<sizeof(INPUT_TYPE)>(result_ptr, le_input_str);
+		StringCompressionReverseMemCpy<sizeof(INPUT_TYPE)>(result_ptr, le_input_str);
 		memset(result_ptr + sizeof(INPUT_TYPE) - 1, '\0', string_t::INLINE_LENGTH - sizeof(INPUT_TYPE) + 1);
 	} else if (result.GetSize() <= string_t::INLINE_LENGTH) {
 		static constexpr auto REMAINDER = sizeof(INPUT_TYPE) - string_t::INLINE_LENGTH;
 		const auto result_ptr = data_ptr_cast(result.GetPrefixWriteable());
-		TemplatedReverseMemCpy<string_t::INLINE_LENGTH>(result_ptr, le_input_str + REMAINDER);
+		StringCompressionReverseMemCpy<string_t::INLINE_LENGTH>(result_ptr, le_input_str + REMAINDER);
 	} else {
 		result.SetPointer(char_ptr_cast(allocator.Allocate(sizeof(INPUT_TYPE))));
-		TemplatedReverseMemCpy<sizeof(INPUT_TYPE)>(data_ptr_cast(result.GetPointer()), le_input_str);
+		StringCompressionReverseMemCpy<sizeof(INPUT_TYPE)>(data_ptr_cast(result.GetPointer()), le_input_str);
 		memcpy(result.GetPrefixWriteable(), result.GetPointer(), string_t::PREFIX_LENGTH);
 	}
 	return result;

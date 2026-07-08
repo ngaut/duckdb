@@ -12,8 +12,8 @@
 #include "sljit_full_pipeline_runtime.hpp"
 #include "sljit_grouped_aggregate_input_vector_update_runtime.hpp"
 #include "sljit_grouped_aggregate_update_primitive.hpp"
-#include "sljit_grouped_aggregate_update_runtime.hpp"
-#include "sljit_projection_expression_runtime.hpp"
+#include "sljit_grouped_primitive_aggregate_update_runtime.hpp"
+#include "sljit_pending_preaggregated_group_batch_runtime.hpp"
 #include "sljit_projected_input_grouped_aggregate_descriptor.hpp"
 #include "sljit_region_runtime_state.hpp"
 #include "sljit_runtime_batch_view.hpp"
@@ -33,7 +33,7 @@ public:
 		if (primitive.input_kind == SljitGroupedAggregateUpdateInputKind::PROJECTED_INPUT) {
 			projected_direct_update = primitive.projected_direct_update;
 			return projected_direct_update &&
-			       SljitProjectedInputGroupedAggregateCanUseCompactInput(*projected_direct_update);
+			       SljitProjectedInputGroupedAggregateCanUseSourceInput(*projected_direct_update);
 		}
 		return true;
 	}
@@ -53,8 +53,11 @@ public:
 		}
 	}
 
-	bool Flush(ExecutionRegionRuntime &runtime, SljitRegionExecutionScratch &scratch,
-	           const SljitGroupedAggregateUpdatePrimitive &primitive) {
+	bool Flush(ExecutionRegionRuntime &runtime, vector<SljitExecutableRegionOp> &ops,
+	           SljitRegionExecutionScratch &scratch, const SljitGroupedAggregateUpdatePrimitive &primitive) {
+		if (!FlushProjectedDirectPreaggregatedBatch(runtime, ops, scratch, primitive)) {
+			throw InternalException("SLJIT projected direct preaggregated grouped update flush failed");
+		}
 		SljitFinishDeferredGroupedAggregateUpdate(runtime, scratch, primitive.aggregate_idx, deferred_grouped_finish);
 		return false;
 	}
@@ -65,7 +68,7 @@ private:
 	                                         const SljitGroupedAggregateUpdatePrimitive &primitive,
 	                                         const SljitRuntimeBatchView &input, idx_t &processed_batches) {
 		if (primitive.input_kind == SljitGroupedAggregateUpdateInputKind::PROJECTED_INPUT) {
-			return ExecuteProjectedDirectPrimitivePayloadUpdate(runtime, result, ops, scratch, primitive, input,
+			return ExecuteProjectedDirectPrimitivePayloadUpdate(runtime, ops, scratch, primitive, input,
 			                                                    processed_batches);
 		}
 		auto &input_chunk = SljitBindRuntimeBatchInput(input, "SLJIT grouped aggregate direct update");
@@ -120,12 +123,12 @@ private:
 		return false;
 	}
 
-	bool ExecuteProjectedDirectPrimitivePayloadUpdate(ExecutionRegionRuntime &runtime, ExecutionRegionResult &result,
+	bool ExecuteProjectedDirectPrimitivePayloadUpdate(ExecutionRegionRuntime &runtime,
 	                                                  vector<SljitExecutableRegionOp> &ops,
 	                                                  SljitRegionExecutionScratch &scratch,
 	                                                  const SljitGroupedAggregateUpdatePrimitive &primitive,
 	                                                  const SljitRuntimeBatchView &input, idx_t &processed_batches) {
-		(void)result;
+		auto stage_start = SljitRegionStageStart(runtime);
 		if (!projected_direct_update || !projected_direct_update->Ready()) {
 			throw InternalException("SLJIT projected grouped aggregate direct update descriptor is not prepared");
 		}
@@ -133,12 +136,12 @@ private:
 			throw InternalException("SLJIT projected grouped aggregate direct update requires a source batch view");
 		}
 		auto &input_chunk = SljitBindRuntimeBatchInput(input, "SLJIT projected grouped aggregate direct update");
-		if (input_chunk.ColumnCount() != projected_direct_update->input_types.size()) {
+		if (!ProjectedDirectSourceInputMatches(input_chunk)) {
 			throw InternalException("SLJIT projected grouped aggregate direct update input schema mismatch");
 		}
 		DataChunk *source_input = &input_chunk;
 		if (input.selection) {
-			projected_direct_selected_input.Ensure(runtime.GetAllocator(), projected_direct_update->input_types);
+			projected_direct_selected_input.Ensure(runtime.GetAllocator(), input_chunk.GetTypes());
 			auto &selected_input = projected_direct_selected_input.chunk;
 			selected_input.Reset();
 			selected_input.Slice(input_chunk, *input.selection, input.count);
@@ -146,32 +149,46 @@ private:
 		}
 		auto &aggregate_op = ops[primitive.aggregate_idx];
 		auto &group_sources = PrepareProjectedDirectGroupSources(aggregate_op);
-		if (TryExecuteProjectedDirectSourceInputPayloadUpdate(runtime, result, ops, scratch, primitive, *source_input,
+		if (TryExecuteProjectedDirectSourceInputPayloadUpdate(runtime, ops, scratch, primitive, *source_input,
 		                                                      group_sources, processed_batches)) {
+			RecordSljitRegionStageRuntime(runtime, primitive.aggregate_idx, aggregate_op.kind,
+			                              "projected_source_input_grouped_update", stage_start);
 			return false;
 		}
-		auto &aggregate_input =
-		    BuildProjectedDirectAggregateInput(runtime, ops, primitive, *source_input, group_sources);
-		if (aggregate_op.aggregate_update.dense_group_domain.ready) {
-			RecordSljitRegionRuntimePath(runtime, aggregate_op.kind, "direct_projected_dense_group_domain",
-			                             aggregate_input.size());
+		RecordSljitRegionStageRuntime(runtime, primitive.aggregate_idx, aggregate_op.kind,
+		                              "projected_source_input_grouped_update_miss", stage_start);
+		const auto failure_reason =
+		    projected_direct_failure_reason.empty() ? "unknown" : projected_direct_failure_reason.c_str();
+		throw InternalException("SLJIT projected source-input grouped aggregate update rejected bound descriptor: %s",
+		                        failure_reason);
+	}
+
+	bool ProjectedDirectSourceInputMatches(DataChunk &input) const {
+		if (!projected_direct_update || input.ColumnCount() > projected_direct_update->input_types.size()) {
+			return false;
 		}
-		auto &native_runtime = runtime.ExecutionOperators();
-		SljitBindGroupedPrimitiveAggregateUpdate(native_runtime, scratch, primitive.aggregate_idx, aggregate_op,
-		                                         aggregate_input, bound_projected_direct_update);
-		auto sink_result = SljitExecuteBoundGroupedPrimitiveAggregateUpdate(
-		    runtime, scratch, bound_projected_direct_update, aggregate_input, nullptr, aggregate_input.size(), true,
-		    optional_ptr<bool>(&deferred_grouped_finish));
-		sink_result = runtime.ExecutionOperators().RecordSinkResult(aggregate_input, sink_result);
-		if (SljitNativeSinkResultStopsExecution(runtime, sink_result, result)) {
-			SljitFinishDeferredGroupedAggregateUpdate(runtime, scratch, primitive.aggregate_idx,
-			                                          deferred_grouped_finish);
-			return true;
+		for (idx_t column_idx = 0; column_idx < input.ColumnCount(); column_idx++) {
+			if (input.data[column_idx].GetType() != projected_direct_update->input_types[column_idx]) {
+				return false;
+			}
 		}
-		RecordSljitRegionRuntimePath(runtime, aggregate_op.kind, "direct_projected_input_vector_grouped_update",
-		                             aggregate_input.size());
-		processed_batches++;
-		return false;
+		for (auto &group_source : projected_direct_update->group_sources) {
+			if (group_source.source_kind != ExecutionRowPointerGroupKeySourceKind::INPUT_VECTOR ||
+			    group_source.input_vector_index >= input.ColumnCount() ||
+			    input.data[group_source.input_vector_index].GetType() != group_source.source_type) {
+				return false;
+			}
+		}
+		for (auto source_idx : projected_direct_update->payload_source_indices) {
+			if (source_idx == DConstants::INVALID_INDEX) {
+				continue;
+			}
+			if (source_idx >= input.ColumnCount() ||
+			    input.data[source_idx].GetType() != projected_direct_update->input_types[source_idx]) {
+				return false;
+			}
+		}
+		return true;
 	}
 
 	bool ProjectedDenseDomainProvesGroupCast(SljitExecutableRegionOp &aggregate_op,
@@ -180,14 +197,7 @@ private:
 		if (!domain.ready || domain.physical_type != group_source.target_physical_type) {
 			return false;
 		}
-		switch (group_source.cast_kind) {
-		case ExecutionRowPointerGroupKeyCastKind::INT64_TO_INT32:
-		case ExecutionRowPointerGroupKeyCastKind::INT64_TO_INT16:
-		case ExecutionRowPointerGroupKeyCastKind::INT32_TO_INT8:
-			return true;
-		default:
-			return false;
-		}
+		return SljitGroupKeyNarrowingIntegralCast(group_source.cast_kind);
 	}
 
 	vector<ExecutionRowPointerGroupKeySource> &
@@ -201,22 +211,15 @@ private:
 	}
 
 	bool TryExecuteProjectedDirectSourceInputPayloadUpdate(
-	    ExecutionRegionRuntime &runtime, ExecutionRegionResult &result, vector<SljitExecutableRegionOp> &ops,
-	    SljitRegionExecutionScratch &scratch, const SljitGroupedAggregateUpdatePrimitive &primitive,
-	    DataChunk &source_input, const vector<ExecutionRowPointerGroupKeySource> &group_sources,
-	    idx_t &processed_batches) {
-		(void)result;
+	    ExecutionRegionRuntime &runtime, vector<SljitExecutableRegionOp> &ops, SljitRegionExecutionScratch &scratch,
+	    const SljitGroupedAggregateUpdatePrimitive &primitive, DataChunk &source_input,
+	    const vector<ExecutionRowPointerGroupKeySource> &group_sources, idx_t &processed_batches) {
+		projected_direct_failure_reason.clear();
 		if (!SljitProjectedInputGroupedAggregateCanUseSourceInput(*projected_direct_update)) {
+			projected_direct_failure_reason = "descriptor";
 			return false;
 		}
 		auto &aggregate_op = ops[primitive.aggregate_idx];
-		if (!aggregate_op.aggregate_update.grouped_direct_update.DirectStateAddressPayloadOnly()) {
-			return false;
-		}
-		if (aggregate_op.aggregate_update.dense_group_domain.ready) {
-			RecordSljitRegionRuntimePath(runtime, aggregate_op.kind, "direct_projected_dense_group_domain",
-			                             source_input.size());
-		}
 		auto &native_runtime = runtime.ExecutionOperators();
 		optional_ptr<const ExecutionDenseGroupDomain> dense_domain;
 		if (aggregate_op.aggregate_update.dense_group_domain.ready) {
@@ -226,99 +229,49 @@ private:
 		if (!SljitTryExecuteNativeInputVectorGroupedAggregateUpdate(
 		        runtime, native_runtime, scratch, primitive.aggregate_idx, aggregate_op, source_input, group_sources,
 		        projected_direct_update->payload_source_indices, true, optional_ptr<bool>(&deferred_grouped_finish),
-		        false, dense_domain, optional_ptr<string>(&failure_reason))) {
-			auto unsupported = string("direct_projected_source_input_grouped_update_unsupported.") +
+		        false, dense_domain, optional_ptr<string>(&failure_reason),
+		        optional_ptr<SljitPendingPreaggregatedPrimitiveGroupBatch>(&projected_direct_preaggregated_batch),
+		        optional_ptr<const vector<bool>>(&projected_direct_update->payload_source_not_null))) {
+			auto unsupported = string("projected_source_input_grouped_update_unsupported.") +
 			                   (failure_reason.empty() ? "unknown" : failure_reason);
 			RecordSljitRegionRuntimePath(runtime, aggregate_op.kind, unsupported.c_str(), source_input.size());
+			projected_direct_failure_reason = failure_reason.empty() ? "unknown" : failure_reason;
 			return false;
 		}
-		RecordSljitRegionRuntimePath(runtime, aggregate_op.kind, "direct_projected_source_input_grouped_update",
-		                             source_input.size());
+		RecordSljitRegionMaterializationElisionPath(runtime, aggregate_op.kind,
+		                                            "projected_source_input_grouped_update", source_input.size());
 		processed_batches++;
 		return true;
 	}
 
-	DataChunk &BuildProjectedDirectAggregateInput(ExecutionRegionRuntime &runtime,
-	                                              const vector<SljitExecutableRegionOp> &ops,
-	                                              const SljitGroupedAggregateUpdatePrimitive &primitive,
-	                                              DataChunk &source_input,
-	                                              const vector<ExecutionRowPointerGroupKeySource> &group_sources) {
+	bool FlushProjectedDirectPreaggregatedBatch(ExecutionRegionRuntime &runtime, vector<SljitExecutableRegionOp> &ops,
+	                                            SljitRegionExecutionScratch &scratch,
+	                                            const SljitGroupedAggregateUpdatePrimitive &primitive) {
+		if (projected_direct_preaggregated_batch.Empty()) {
+			return true;
+		}
+		if (primitive.aggregate_idx >= ops.size()) {
+			throw InternalException("SLJIT projected direct preaggregated grouped update has no aggregate operator");
+		}
 		auto &aggregate_op = ops[primitive.aggregate_idx];
-		auto &sink_info = aggregate_op.aggregate_update.plan.sink_info;
-		auto &projection = projected_direct_update->projection;
-		projected_direct_aggregate_input.Ensure(runtime.GetAllocator(), projection.output_types);
-		auto &aggregate_input = projected_direct_aggregate_input.chunk;
-		aggregate_input.Reset();
-		if (aggregate_input.ColumnCount() != projection.output_types.size()) {
-			throw InternalException("SLJIT projected compact aggregate input schema mismatch");
+		auto &binding = scratch.SinkBinding(primitive.aggregate_idx);
+		if (!binding.ready || !binding.aggregate_update.ready || !binding.aggregate_update.grouped_state.ready ||
+		    !binding.aggregate_update.grouped_state.state) {
+			throw InternalException("SLJIT projected direct preaggregated grouped update has no grouped state");
 		}
-		for (idx_t group_idx = 0; group_idx < sink_info.groups.size(); group_idx++) {
-			auto &group = sink_info.groups[group_idx];
-			if (group.input_index >= aggregate_input.ColumnCount() || group_idx >= group_sources.size()) {
-				throw InternalException("SLJIT projected compact aggregate group source mismatch");
-			}
-			if (!SljitTryMaterializeInputVectorGroupSource(source_input, group_sources[group_idx],
-			                                               aggregate_input.data[group.input_index], source_input.size(),
-			                                               false)) {
-				throw InternalException("SLJIT projected compact aggregate group materialization failed");
-			}
-		}
-		if (projected_direct_update->payload_projection_indices.size() !=
-		    projected_direct_update->payload_source_indices.size()) {
-			throw InternalException("SLJIT projected compact aggregate payload mapping mismatch");
-		}
-		projected_direct_payload_scratch.resize(projection.projections.size());
-		vector<uint8_t> initialized_columns(aggregate_input.ColumnCount(), 0);
-		for (auto &group : sink_info.groups) {
-			if (group.input_index < initialized_columns.size()) {
-				initialized_columns[group.input_index] = 1;
-			}
-		}
-		for (idx_t payload_idx = 0; payload_idx < projected_direct_update->payload_projection_indices.size();
-		     payload_idx++) {
-			const auto projection_idx = projected_direct_update->payload_projection_indices[payload_idx];
-			const auto source_idx = projected_direct_update->payload_source_indices[payload_idx];
-			if (projection_idx == DConstants::INVALID_INDEX) {
-				continue;
-			}
-			if (projection_idx >= aggregate_input.ColumnCount() || projection_idx >= projection.projections.size()) {
-				throw InternalException("SLJIT projected compact aggregate payload projection mismatch");
-			}
-			if (initialized_columns[projection_idx]) {
-				continue;
-			}
-			if (source_idx != DConstants::INVALID_INDEX) {
-				if (source_idx >= source_input.ColumnCount() ||
-				    aggregate_input.data[projection_idx].GetType() != source_input.data[source_idx].GetType()) {
-					throw InternalException("SLJIT projected compact aggregate payload source mismatch");
-				}
-				aggregate_input.data[projection_idx].Reference(source_input.data[source_idx]);
-				initialized_columns[projection_idx] = 1;
-				continue;
-			}
-			if (projection.output_types[projection_idx] != aggregate_input.data[projection_idx].GetType()) {
-				throw InternalException("SLJIT projected compact aggregate payload source mismatch");
-			}
-			SljitExecuteProjectionExpression(projection.projections[projection_idx], source_input,
-			                                 aggregate_input.data[projection_idx], nullptr, source_input.size(),
-			                                 projected_direct_payload_scratch[projection_idx]);
-			initialized_columns[projection_idx] = 1;
-		}
-		aggregate_input.SetChildCardinality(source_input.size());
-		RecordSljitRegionMaterializationBoundary(runtime, aggregate_op.kind, "projected_compact_aggregate_input",
-		                                         source_input.size());
-		return aggregate_input;
+		return SljitFlushPendingPreaggregatedPrimitiveGroups(
+		    runtime, scratch, primitive.aggregate_idx, aggregate_op, projected_direct_preaggregated_batch,
+		    binding.aggregate_update.grouped_state, optional_ptr<bool>(&deferred_grouped_finish));
 	}
 
 private:
 	bool deferred_grouped_finish = false;
 	shared_ptr<SljitProjectedInputGroupedAggregateDescriptor> projected_direct_update;
 	SljitDataChunkBatch projected_direct_selected_input;
-	SljitDataChunkBatch projected_direct_aggregate_input;
+	SljitPendingPreaggregatedPrimitiveGroupBatch projected_direct_preaggregated_batch;
 	vector<ExecutionRowPointerGroupKeySource> projected_direct_group_sources;
-	vector<SljitExpressionAdapterScratch> projected_direct_payload_scratch;
+	string projected_direct_failure_reason;
 	SljitBoundGroupedPrimitiveAggregateUpdate bound_direct_update;
-	SljitBoundGroupedPrimitiveAggregateUpdate bound_projected_direct_update;
 };
 
 } // namespace duckdb

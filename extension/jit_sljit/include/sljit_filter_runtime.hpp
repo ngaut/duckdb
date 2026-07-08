@@ -11,6 +11,7 @@
 #include "sljit_native_runtime.hpp"
 #include "sljit_region_executable.hpp"
 #include "sljit_region_runtime_source.hpp"
+#include "sljit_typed_expression_plan.hpp"
 
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/vector/unified_vector_format.hpp"
@@ -109,6 +110,192 @@ static bool SljitTryFastSelectFlatAllValidIntegerBetween(const SljitNativePredic
 	}
 }
 
+template <class T, SljitNativeIntegerCompareOp OP>
+static bool SljitCompareSelectedValues(T left, T right) {
+	switch (OP) {
+	case SljitNativeIntegerCompareOp::EQUAL:
+		return left == right;
+	case SljitNativeIntegerCompareOp::NOT_EQUAL:
+		return left != right;
+	case SljitNativeIntegerCompareOp::LESS_THAN:
+		return left < right;
+	case SljitNativeIntegerCompareOp::GREATER_THAN:
+		return left > right;
+	case SljitNativeIntegerCompareOp::LESS_THAN_OR_EQUAL:
+		return left <= right;
+	case SljitNativeIntegerCompareOp::GREATER_THAN_OR_EQUAL:
+		return left >= right;
+	default:
+		return false;
+	}
+}
+
+template <class T, SljitNativeIntegerCompareOp OP>
+static idx_t SljitSelectFlatAllValidCompareReferencesLoop(const T *source_data, const sel_t *source_sel_data,
+                                                          const T *right_source_data,
+                                                          const sel_t *right_source_sel_data, idx_t count,
+                                                          SelectionVector &filter_selection) {
+	auto result_data = filter_selection.data();
+	idx_t selected_count = 0;
+	for (idx_t row_idx = 0; row_idx < count; row_idx++) {
+		const auto left = source_data[source_sel_data ? source_sel_data[row_idx] : row_idx];
+		const auto right = right_source_data[right_source_sel_data ? right_source_sel_data[row_idx] : row_idx];
+		if (SljitCompareSelectedValues<T, OP>(left, right)) {
+			result_data[selected_count++] = UnsafeNumericCast<sel_t>(row_idx);
+		}
+	}
+	return selected_count;
+}
+
+template <class T>
+static bool SljitTryFastSelectFlatAllValidCompareReferences(idx_t source_index, idx_t right_source_index,
+                                                            SljitNativeIntegerCompareOp compare_op, DataChunk &input,
+                                                            SelectionVector &filter_selection,
+                                                            idx_t &selected_count) {
+	if (source_index >= input.ColumnCount() || right_source_index >= input.ColumnCount()) {
+		return false;
+	}
+
+	UnifiedVectorFormat source_format;
+	UnifiedVectorFormat right_source_format;
+	input.data[source_index].ToUnifiedFormat(source_format);
+	input.data[right_source_index].ToUnifiedFormat(right_source_format);
+	if ((source_format.validity.CanHaveNull() && !source_format.validity.CheckAllValid(input.size())) ||
+	    (right_source_format.validity.CanHaveNull() && !right_source_format.validity.CheckAllValid(input.size()))) {
+		return false;
+	}
+
+	const auto source_data = UnifiedVectorFormat::GetData<T>(source_format);
+	const auto right_source_data = UnifiedVectorFormat::GetData<T>(right_source_format);
+	const auto source_sel_data = source_format.sel ? source_format.sel->data() : nullptr;
+	const auto right_source_sel_data = right_source_format.sel ? right_source_format.sel->data() : nullptr;
+	switch (compare_op) {
+	case SljitNativeIntegerCompareOp::EQUAL:
+		selected_count = SljitSelectFlatAllValidCompareReferencesLoop<T, SljitNativeIntegerCompareOp::EQUAL>(
+		    source_data, source_sel_data, right_source_data, right_source_sel_data, input.size(), filter_selection);
+		return true;
+	case SljitNativeIntegerCompareOp::NOT_EQUAL:
+		selected_count = SljitSelectFlatAllValidCompareReferencesLoop<T, SljitNativeIntegerCompareOp::NOT_EQUAL>(
+		    source_data, source_sel_data, right_source_data, right_source_sel_data, input.size(), filter_selection);
+		return true;
+	case SljitNativeIntegerCompareOp::LESS_THAN:
+		selected_count = SljitSelectFlatAllValidCompareReferencesLoop<T, SljitNativeIntegerCompareOp::LESS_THAN>(
+		    source_data, source_sel_data, right_source_data, right_source_sel_data, input.size(), filter_selection);
+		return true;
+	case SljitNativeIntegerCompareOp::GREATER_THAN:
+		selected_count = SljitSelectFlatAllValidCompareReferencesLoop<T, SljitNativeIntegerCompareOp::GREATER_THAN>(
+		    source_data, source_sel_data, right_source_data, right_source_sel_data, input.size(), filter_selection);
+		return true;
+	case SljitNativeIntegerCompareOp::LESS_THAN_OR_EQUAL:
+		selected_count =
+		    SljitSelectFlatAllValidCompareReferencesLoop<T, SljitNativeIntegerCompareOp::LESS_THAN_OR_EQUAL>(
+		        source_data, source_sel_data, right_source_data, right_source_sel_data, input.size(), filter_selection);
+		return true;
+	case SljitNativeIntegerCompareOp::GREATER_THAN_OR_EQUAL:
+		selected_count =
+		    SljitSelectFlatAllValidCompareReferencesLoop<T, SljitNativeIntegerCompareOp::GREATER_THAN_OR_EQUAL>(
+		        source_data, source_sel_data, right_source_data, right_source_sel_data, input.size(), filter_selection);
+		return true;
+	default:
+		return false;
+	}
+}
+
+static bool SljitTryFastSelectFlatAllValidIntegerCompareReferences(const SljitNativeRegionExpressionPlan &filter,
+                                                                   DataChunk &input,
+                                                                   SelectionVector &filter_selection,
+                                                                   idx_t &selected_count) {
+	if (filter.kind != SljitNativeRegionExpressionKind::INTEGER_COMPARE_REFERENCES) {
+		return false;
+	}
+	switch (filter.integer_kind) {
+	case SljitNativeIntegerKind::INT8:
+		return SljitTryFastSelectFlatAllValidCompareReferences<int8_t>(
+		    filter.source_index, filter.right_source_index, filter.compare_op, input, filter_selection, selected_count);
+	case SljitNativeIntegerKind::UINT8:
+		return SljitTryFastSelectFlatAllValidCompareReferences<uint8_t>(
+		    filter.source_index, filter.right_source_index, filter.compare_op, input, filter_selection, selected_count);
+	case SljitNativeIntegerKind::INT32:
+	case SljitNativeIntegerKind::DATE:
+		return SljitTryFastSelectFlatAllValidCompareReferences<int32_t>(
+		    filter.source_index, filter.right_source_index, filter.compare_op, input, filter_selection, selected_count);
+	case SljitNativeIntegerKind::INT64:
+	case SljitNativeIntegerKind::DECIMAL64:
+		return SljitTryFastSelectFlatAllValidCompareReferences<int64_t>(
+		    filter.source_index, filter.right_source_index, filter.compare_op, input, filter_selection, selected_count);
+	default:
+		return false;
+	}
+}
+
+static bool SljitTryFastSelectFlatAllValidIntegerCompareReferences(const SljitNativePredicate &predicate,
+                                                                   DataChunk &input,
+                                                                   SelectionVector &filter_selection,
+                                                                   idx_t &selected_count) {
+	if (predicate.kind != SljitNativePredicateKind::INTEGER_COMPARE_REFERENCES) {
+		return false;
+	}
+	switch (predicate.integer_kind) {
+	case SljitNativeIntegerKind::INT8:
+		return SljitTryFastSelectFlatAllValidCompareReferences<int8_t>(
+		    predicate.source_index, predicate.right_source_index, predicate.compare_op, input, filter_selection,
+		    selected_count);
+	case SljitNativeIntegerKind::UINT8:
+		return SljitTryFastSelectFlatAllValidCompareReferences<uint8_t>(
+		    predicate.source_index, predicate.right_source_index, predicate.compare_op, input, filter_selection,
+		    selected_count);
+	case SljitNativeIntegerKind::INT32:
+	case SljitNativeIntegerKind::DATE:
+		return SljitTryFastSelectFlatAllValidCompareReferences<int32_t>(
+		    predicate.source_index, predicate.right_source_index, predicate.compare_op, input, filter_selection,
+		    selected_count);
+	case SljitNativeIntegerKind::INT64:
+	case SljitNativeIntegerKind::DECIMAL64:
+		return SljitTryFastSelectFlatAllValidCompareReferences<int64_t>(
+		    predicate.source_index, predicate.right_source_index, predicate.compare_op, input, filter_selection,
+		    selected_count);
+	default:
+		return false;
+	}
+}
+
+static bool SljitTryFastSelectFlatAllValidTypedCompareReferences(const SljitNativeRegionExpressionPlan &filter,
+                                                                 DataChunk &input,
+                                                                 SelectionVector &filter_selection,
+                                                                 idx_t &selected_count) {
+	if (filter.kind != SljitNativeRegionExpressionKind::TYPED_EXPRESSION_TREE || !filter.expression_tree) {
+		return false;
+	}
+	auto &root = *filter.expression_tree;
+	if (root.kind != ExecutionExpressionIRKind::BINARY || root.return_type.id() != LogicalTypeId::BOOLEAN ||
+	    !root.left || !root.right || root.left->kind != ExecutionExpressionIRKind::REFERENCE ||
+	    root.right->kind != ExecutionExpressionIRKind::REFERENCE ||
+	    !SljitTypedExpressionTreeComparisonSupported(root.binary_op) ||
+	    !SljitTypedExpressionTreeSameIntegerKind(*root.left, *root.right)) {
+		return false;
+	}
+	const auto compare_op = SljitTypedExpressionTreeCompareOp(root.binary_op);
+	const auto integer_kind = SljitTypedExpressionTreeIntegerKind(*root.left);
+	switch (integer_kind) {
+	case SljitNativeIntegerKind::INT8:
+		return SljitTryFastSelectFlatAllValidCompareReferences<int8_t>(
+		    root.left->ref_index, root.right->ref_index, compare_op, input, filter_selection, selected_count);
+	case SljitNativeIntegerKind::UINT8:
+		return SljitTryFastSelectFlatAllValidCompareReferences<uint8_t>(
+		    root.left->ref_index, root.right->ref_index, compare_op, input, filter_selection, selected_count);
+	case SljitNativeIntegerKind::INT32:
+	case SljitNativeIntegerKind::DATE:
+		return SljitTryFastSelectFlatAllValidCompareReferences<int32_t>(
+		    root.left->ref_index, root.right->ref_index, compare_op, input, filter_selection, selected_count);
+	case SljitNativeIntegerKind::INT64:
+	case SljitNativeIntegerKind::DECIMAL64:
+		return SljitTryFastSelectFlatAllValidCompareReferences<int64_t>(
+		    root.left->ref_index, root.right->ref_index, compare_op, input, filter_selection, selected_count);
+	default:
+		return false;
+	}
+}
+
 template <class ADAPTER_SCRATCH>
 static idx_t SljitSelectExpression(SljitExecutableRegionExpression &expression, DataChunk &input,
                                    SelectionVector &filter_selection, ADAPTER_SCRATCH &adapter_scratch) {
@@ -120,6 +307,11 @@ static idx_t SljitSelectExpression(SljitExecutableRegionExpression &expression, 
 		                                                 fast_selected_count)) {
 			return fast_selected_count;
 		}
+		if (filter.predicate &&
+		    SljitTryFastSelectFlatAllValidIntegerCompareReferences(*filter.predicate, input, filter_selection,
+		                                                           fast_selected_count)) {
+			return fast_selected_count;
+		}
 		auto native_input = SljitPrepareNativePredicateInput(adapter_scratch, input, expression.input_source_indices,
 		                                                     nullptr, input.size(), nullptr, nullptr,
 		                                                     filter_selection.data(), nullptr);
@@ -129,6 +321,10 @@ static idx_t SljitSelectExpression(SljitExecutableRegionExpression &expression, 
 	if (filter.kind == SljitNativeRegionExpressionKind::TYPED_EXPRESSION_TREE) {
 		if (!expression.select_function) {
 			throw InternalException("SLJIT typed filter expression has no generated selector");
+		}
+		idx_t fast_selected_count;
+		if (SljitTryFastSelectFlatAllValidTypedCompareReferences(filter, input, filter_selection, fast_selected_count)) {
+			return fast_selected_count;
 		}
 		SljitNativeVectorInput native_input;
 		adapter_scratch.PrepareExpressionTree(input, expression, native_input, nullptr, input.size());
@@ -149,6 +345,9 @@ static idx_t SljitSelectExpression(SljitExecutableRegionExpression &expression, 
 	         filter.kind == SljitNativeRegionExpressionKind::NULL_CHECK);
 	idx_t fast_selected_count;
 	if (SljitTryFastSelectFlatAllValidIntegerBetween(filter, input, filter_selection, fast_selected_count)) {
+		return fast_selected_count;
+	}
+	if (SljitTryFastSelectFlatAllValidIntegerCompareReferences(filter, input, filter_selection, fast_selected_count)) {
 		return fast_selected_count;
 	}
 	UnifiedVectorFormat source_format;

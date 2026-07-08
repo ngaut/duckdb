@@ -10,10 +10,8 @@
 
 #include <array>
 #include <initializer_list>
-#include <utility>
 
 #include "duckdb/common/constants.hpp"
-#include "duckdb/common/exception.hpp"
 #include "duckdb/common/vector.hpp"
 
 #include "sljit_delim_join_sink_primitive.hpp"
@@ -29,7 +27,6 @@ namespace duckdb {
 enum class SljitFullPipelinePrimitiveKind : uint8_t {
 	INVALID,
 	SOURCE_FETCH,
-	SOURCE_BATCH_BOUNDARY,
 	GENERATED_FILTER,
 	HASH_JOIN_PROBE_MATERIALIZE,
 	HASH_JOIN_PROBE_SELECTION,
@@ -38,8 +35,9 @@ enum class SljitFullPipelinePrimitiveKind : uint8_t {
 	POST_JOIN_PROJECTION_AGGREGATE_UPDATE,
 	UNGROUPED_AGGREGATE_UPDATE,
 	GROUPED_AGGREGATE_UPDATE,
+	HASH_JOIN_BUILD_SINK,
 	DELIM_JOIN_SINK,
-	NATIVE_TAIL_HANDOFF
+	NATIVE_TAIL_DELEGATION
 };
 
 static constexpr idx_t SLJIT_FULL_PIPELINE_MAX_PRIMITIVES = 16;
@@ -57,138 +55,36 @@ struct SljitFullPipelinePrimitiveStep {
 	SljitPostJoinProjectionAggregatePrimitive post_join_projection_aggregate;
 	SljitUngroupedAggregateUpdatePrimitive ungrouped_aggregate_update;
 	SljitGroupedAggregateUpdatePrimitive grouped_aggregate_update;
+	SljitHashJoinBuildSinkPrimitive hash_join_build_sink;
 	SljitDelimJoinSinkPrimitive delim_join_sink;
 
-	idx_t Op(idx_t index) const {
-		if (index >= op_count) {
-			throw InternalException("SLJIT primitive step operator index is out of range");
-		}
-		return op_indices[index];
-	}
+	idx_t Op(idx_t index) const;
 
-	static SljitFullPipelinePrimitiveStep SourceFetch() {
-		return Make(SljitFullPipelinePrimitiveKind::SOURCE_FETCH, {});
-	}
-
-	static SljitFullPipelinePrimitiveStep SourceBatchBoundary(idx_t op_idx) {
-		return Make(SljitFullPipelinePrimitiveKind::SOURCE_BATCH_BOUNDARY, {op_idx});
-	}
-
-	static SljitFullPipelinePrimitiveStep GeneratedFilter(const SljitGeneratedFilterPrimitive &primitive) {
-		auto step = Make(SljitFullPipelinePrimitiveKind::GENERATED_FILTER, {primitive.filter_idx});
-		step.generated_filter = primitive;
-		return step;
-	}
-
+	static SljitFullPipelinePrimitiveStep SourceFetch();
+	static SljitFullPipelinePrimitiveStep GeneratedFilter(const SljitGeneratedFilterPrimitive &primitive);
 	static SljitFullPipelinePrimitiveStep
-	HashJoinProbeMaterialize(const SljitHashJoinProbeMaterializePrimitive &primitive) {
-		auto step = Make(SljitFullPipelinePrimitiveKind::HASH_JOIN_PROBE_MATERIALIZE, {primitive.hash_join_idx});
-		step.hash_join_probe_materialize = primitive;
-		return step;
-	}
-
+	HashJoinProbeMaterialize(const SljitHashJoinProbeMaterializePrimitive &primitive);
+	static SljitFullPipelinePrimitiveStep HashJoinProbeSelection(const SljitHashJoinProbeSelectionPrimitive &primitive);
+	static SljitFullPipelinePrimitiveStep MarkProbeFilterBoundary(const SljitMarkProbeFilterBoundaryPrimitive &primitive);
+	static SljitFullPipelinePrimitiveStep ProjectionChain(const SljitProjectionChainPrimitive &primitive);
 	static SljitFullPipelinePrimitiveStep
-	HashJoinProbeSelection(const SljitHashJoinProbeSelectionPrimitive &primitive) {
-		auto step = Make(SljitFullPipelinePrimitiveKind::HASH_JOIN_PROBE_SELECTION, {primitive.hash_join_idx});
-		step.hash_join_probe_selection = primitive;
-		return step;
-	}
-
-	static SljitFullPipelinePrimitiveStep
-	MarkProbeFilterBoundary(const SljitMarkProbeFilterBoundaryPrimitive &primitive) {
-		auto step = Make(SljitFullPipelinePrimitiveKind::MARK_PROBE_FILTER_BOUNDARY,
-		                 {primitive.hash_join_idx, primitive.filter_idx});
-		step.mark_probe_filter_boundary = primitive;
-		return step;
-	}
-
-	static SljitFullPipelinePrimitiveStep ProjectionChain(const SljitProjectionChainPrimitive &primitive) {
-		auto step = Make(SljitFullPipelinePrimitiveKind::PROJECTION_CHAIN,
-		                 {primitive.first_projection_idx, primitive.final_projection_idx});
-		step.projection_chain = primitive;
-		return step;
-	}
-
-	static SljitFullPipelinePrimitiveStep
-	PostJoinProjectionAggregateUpdate(const SljitPostJoinProjectionAggregatePrimitive &primitive) {
-		auto step = Make(SljitFullPipelinePrimitiveKind::POST_JOIN_PROJECTION_AGGREGATE_UPDATE,
-		                 {primitive.post_join_projection.hash_join_idx, primitive.aggregate_idx});
-		step.post_join_projection_aggregate = primitive;
-		return step;
-	}
-
-	static SljitFullPipelinePrimitiveStep
-	UngroupedAggregateUpdate(const SljitUngroupedAggregateUpdatePrimitive &primitive) {
-		auto step = primitive.strategy == SljitUngroupedAggregateUpdateStrategyKind::FILTERED_PRIMITIVE_PAYLOAD_UPDATE
-		                ? Make(SljitFullPipelinePrimitiveKind::UNGROUPED_AGGREGATE_UPDATE,
-		                       {primitive.filter_idx, primitive.aggregate_idx})
-		                : Make(SljitFullPipelinePrimitiveKind::UNGROUPED_AGGREGATE_UPDATE, {primitive.aggregate_idx});
-		step.ungrouped_aggregate_update = primitive;
-		return step;
-	}
-
-	static SljitFullPipelinePrimitiveStep
-	GroupedAggregateUpdate(const SljitGroupedAggregateUpdatePrimitive &primitive) {
-		auto step =
-		    primitive.strategy == SljitGroupedAggregateUpdateStrategyKind::FILTERED_PRIMITIVE_PAYLOAD_UPDATE
-		        ? Make(SljitFullPipelinePrimitiveKind::GROUPED_AGGREGATE_UPDATE,
-		               {primitive.filter_idx, primitive.aggregate_idx})
-		    : primitive.input_kind == SljitGroupedAggregateUpdateInputKind::PROJECTED_INPUT
-		        ? Make(SljitFullPipelinePrimitiveKind::GROUPED_AGGREGATE_UPDATE,
-		               {primitive.first_projection_idx, primitive.final_projection_idx, primitive.aggregate_idx})
-		        : Make(SljitFullPipelinePrimitiveKind::GROUPED_AGGREGATE_UPDATE, {primitive.aggregate_idx});
-		step.grouped_aggregate_update = primitive;
-		return step;
-	}
-
-	static SljitFullPipelinePrimitiveStep DelimJoinSink(const SljitDelimJoinSinkPrimitive &primitive) {
-		auto step = primitive.HasProjection()
-		                ? Make(SljitFullPipelinePrimitiveKind::DELIM_JOIN_SINK,
-		                       {primitive.first_projection_idx, primitive.final_projection_idx, primitive.sink_idx})
-		                : Make(SljitFullPipelinePrimitiveKind::DELIM_JOIN_SINK, {primitive.sink_idx});
-		step.delim_join_sink = primitive;
-		return step;
-	}
-
-	static SljitFullPipelinePrimitiveStep NativeTailHandoff(idx_t op_idx) {
-		return Make(SljitFullPipelinePrimitiveKind::NATIVE_TAIL_HANDOFF, {op_idx});
-	}
+	PostJoinProjectionAggregateUpdate(const SljitPostJoinProjectionAggregatePrimitive &primitive);
+	static SljitFullPipelinePrimitiveStep UngroupedAggregateUpdate(const SljitUngroupedAggregateUpdatePrimitive &primitive);
+	static SljitFullPipelinePrimitiveStep GroupedAggregateUpdate(const SljitGroupedAggregateUpdatePrimitive &primitive);
+	static SljitFullPipelinePrimitiveStep HashJoinBuildSink(const SljitHashJoinBuildSinkPrimitive &primitive);
+	static SljitFullPipelinePrimitiveStep DelimJoinSink(const SljitDelimJoinSinkPrimitive &primitive);
+	static SljitFullPipelinePrimitiveStep NativeTailDelegation(idx_t op_idx);
 
 private:
 	static SljitFullPipelinePrimitiveStep Make(SljitFullPipelinePrimitiveKind kind,
-	                                           std::initializer_list<idx_t> op_indices) {
-		SljitFullPipelinePrimitiveStep step;
-		step.kind = kind;
-		step.op_indices.fill(DConstants::INVALID_INDEX);
-		for (auto op_idx : op_indices) {
-			if (step.op_count >= SLJIT_FULL_PIPELINE_MAX_PRIMITIVE_STEP_OPS) {
-				throw InternalException("SLJIT full-pipeline primitive step exceeds the maximum operator count");
-			}
-			step.op_indices[step.op_count++] = op_idx;
-		}
-		return step;
-	}
+	                                           std::initializer_list<idx_t> op_indices);
 };
 
 class SljitFullPipelinePrimitiveSequence {
 public:
-	SljitFullPipelinePrimitiveSequence() {
-		steps.reserve(SLJIT_FULL_PIPELINE_MAX_PRIMITIVES);
-	}
+	SljitFullPipelinePrimitiveSequence();
 
-	explicit SljitFullPipelinePrimitiveSequence(std::initializer_list<SljitFullPipelinePrimitiveStep> steps) {
-		this->steps.reserve(SLJIT_FULL_PIPELINE_MAX_PRIMITIVES);
-		for (auto step : steps) {
-			Add(step);
-		}
-	}
-
-	void Add(SljitFullPipelinePrimitiveStep step) {
-		if (Count() >= SLJIT_FULL_PIPELINE_MAX_PRIMITIVES) {
-			throw InternalException("SLJIT full-pipeline primitive sequence exceeds the maximum step count");
-		}
-		steps.push_back(std::move(step));
-	}
+	void Add(SljitFullPipelinePrimitiveStep step);
 
 	idx_t Count() const {
 		return steps.size();

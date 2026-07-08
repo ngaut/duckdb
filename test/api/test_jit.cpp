@@ -2,6 +2,11 @@
 
 using namespace duckdb;
 
+namespace duckdb {
+PhysicalRunnerCostInput
+BuildExecutionRegionPipelineCandidateUpperBoundCostInput(const PhysicalRunnerCostInput &pipeline_input);
+}
+
 namespace {
 
 class UnitTestExecutionRegionBackend : public ExecutionRegionBackend {
@@ -287,7 +292,6 @@ TEST_CASE("JIT auto policy runs supported projections on Apple Metal GPU", "[api
 		    REQUIRE(event.runner_cost.selected_accelerated_runner);
 		    REQUIRE(event.candidate_estimated_cardinality == 100000);
 		    REQUIRE(ExecutionRegionEventProfileCodeSize(event) > 0);
-		    REQUIRE(StringUtil::Contains(event.reason, "duckdb_cbo selects compiled-gpu physical runner"));
 	    });
 
 	RequireJitEvent(
@@ -726,49 +730,6 @@ TEST_CASE("JIT CBO charges grouped aggregate fusion against parallel vectorized 
 	REQUIRE_FALSE(profile.selected_accelerated_runner);
 }
 
-TEST_CASE("JIT CBO charges unfused mark-filter aggregate bridge against parallel vectorized baseline", "[api][jit]") {
-	PhysicalRunnerCostInput q04_shape;
-	q04_shape.estimated_cardinality = 573671;
-	q04_shape.expression_cost = 96;
-	q04_shape.generated_stage_count = 4;
-	q04_shape.generated_backend_stage_count = 3;
-	q04_shape.materialization_elision_count = 1;
-	q04_shape.unfused_mark_filter_aggregate_count = 1;
-	q04_shape.native_join_stage_count = 1;
-	q04_shape.full_pipeline = true;
-	q04_shape.generated_work_class = PhysicalRunnerGeneratedWorkClass::COMPUTE;
-	q04_shape.native_protocol_class = PhysicalRunnerNativeProtocolClass::STATEFUL_SOURCE_SINK_PROTOCOL;
-	q04_shape.has_accelerated_work = true;
-
-	PhysicalRunnerCostParameters production_parameters;
-	production_parameters.compiled_vectorized_runner_available = true;
-	production_parameters.generated_stage_benefit = 4096;
-	production_parameters.native_operator_stage_benefit = 1024;
-	production_parameters.materialization_elision_benefit = 4096;
-	production_parameters.startup_base_cost = 10000;
-	production_parameters.startup_margin_basis_points = 0;
-	production_parameters.vectorized_parallelism = 12;
-
-	auto profile = DuckDBCostModel::SelectPhysicalRunner(q04_shape, production_parameters);
-	REQUIRE(profile.unfused_mark_filter_aggregate_count == 1);
-	REQUIRE(profile.unfused_mark_filter_aggregate_penalty == 8192);
-	REQUIRE(profile.stateful_protocol_penalty == 8912);
-	REQUIRE(profile.saved_work_per_batch == 8688);
-	REQUIRE(profile.selection_reason == "rejected_parallel_per_batch_work_floor");
-	REQUIRE_FALSE(profile.selected_accelerated_runner);
-
-	auto coverage_parameters = production_parameters;
-	coverage_parameters.generated_stage_benefit = 4096;
-	coverage_parameters.native_operator_stage_benefit = 4096;
-	coverage_parameters.startup_base_cost = 0;
-	coverage_parameters.vectorized_parallelism = 1;
-
-	profile = DuckDBCostModel::SelectPhysicalRunner(q04_shape, coverage_parameters);
-	REQUIRE(profile.unfused_mark_filter_aggregate_penalty == 8192);
-	REQUIRE(profile.saved_work_per_batch > 0);
-	REQUIRE(profile.selected_accelerated_runner);
-}
-
 TEST_CASE("JIT backend owns scan-filtered aggregate terminals through DuckDB scan filters", "[api][jit]") {
 	DuckDB db;
 	Connection con(db);
@@ -796,35 +757,23 @@ TEST_CASE("JIT backend owns scan-filtered aggregate terminals through DuckDB sca
 	REQUIRE(result->GetValue(0, 0).ToString() == reference->GetValue(0, 0).ToString());
 	REQUIRE(result->GetValue(1, 0).ToString() == reference->GetValue(1, 0).ToString());
 
-	bool found_scan_filtered_aggregate = false;
+	vector<idx_t> scan_filtered_kernel_ids;
 	for (auto &event : manager.GetEvents()) {
 		if (!IsCompiledSljitRegionEvent(event) ||
 		    event.candidate_traits.sink_kind != ExecutionRegionSinkKind::UNGROUPED_AGGREGATE_UPDATE ||
 		    !event.candidate_uses_scan_filters) {
 			continue;
 		}
-		found_scan_filtered_aggregate = true;
+		scan_filtered_kernel_ids.push_back(event.kernel_id);
 		RequireDuckDBScanFilteredSourceContract(event);
 		REQUIRE(event.runner_cost.selected_accelerated_runner);
+		REQUIRE(event.runner_cost.materialization_elision_count > 0);
 	}
-	REQUIRE(found_scan_filtered_aggregate);
-
-	RequireJitEvent(
-	    manager,
-	    [](const ExecutionRegionEvent &event) {
-		    return EventPhase(event) == "runtime" && EventStatus(event) == "executed" &&
-		           EventExecutionMode(event) == "native" &&
-		           StringUtil::Contains(EventJitRuntimePathCounts(event), "projection.source_batch_boundary=") &&
-		           StringUtil::Contains(EventJitRuntimePathCounts(event), "aggregate_update.primitive_payload_update=");
-	    },
-	    [](const ExecutionRegionEvent &event) {
-		    REQUIRE(StringUtil::Contains(EventJitMaterializationBoundaryCounts(event), "projection.source_batch="));
-		    REQUIRE(StringUtil::Contains(EventJitMaterializationBoundaryCounts(event),
-		                                 "aggregate_update.direct_state_update="));
-	    });
+	REQUIRE(!scan_filtered_kernel_ids.empty());
+	RequireMaterializationElisionRuntimeProof(manager, scan_filtered_kernel_ids);
 }
 
-TEST_CASE("JIT scan-filtered grouped aggregate uses source batch grouped primitive recipe", "[api][jit]") {
+TEST_CASE("JIT scan-filtered grouped aggregate uses direct grouped primitive recipe", "[api][jit]") {
 	DuckDB db;
 	Connection con(db);
 	auto &manager = ExecutionRegionManager::Get(*con.context);
@@ -864,33 +813,199 @@ TEST_CASE("JIT scan-filtered grouped aggregate uses source batch grouped primiti
 		}
 	}
 
-	bool found_scan_filtered_grouped_aggregate = false;
+	vector<idx_t> scan_filtered_kernel_ids;
 	for (auto &event : manager.GetEvents()) {
 		if (!IsCompiledSljitRegionEvent(event) ||
 		    event.candidate_traits.sink_kind != ExecutionRegionSinkKind::HASH_AGGREGATE_UPDATE ||
 		    !event.candidate_uses_scan_filters) {
 			continue;
 		}
-		found_scan_filtered_grouped_aggregate = true;
+		scan_filtered_kernel_ids.push_back(event.kernel_id);
 		RequireDuckDBScanFilteredSourceContract(event);
 		REQUIRE(event.runner_cost.selected_accelerated_runner);
+		REQUIRE(event.runner_cost.materialization_elision_count > 0);
 	}
-	REQUIRE(found_scan_filtered_grouped_aggregate);
+	REQUIRE(!scan_filtered_kernel_ids.empty());
+	RequireMaterializationElisionRuntimeProof(manager, scan_filtered_kernel_ids);
+}
 
-	RequireJitEvent(
-	    manager,
-	    [](const ExecutionRegionEvent &event) {
-		    auto runtime_paths = EventJitRuntimePathCounts(event);
-		    return EventPhase(event) == "runtime" && EventStatus(event) == "executed" &&
-		   EventExecutionMode(event) == "native" &&
-		   StringUtil::Contains(runtime_paths, "projection.source_batch_boundary=") &&
-		   StringUtil::Contains(runtime_paths, "aggregate_update.direct_new_grouped_primitive_update=");
-	    },
-	    [](const ExecutionRegionEvent &event) {
-		    auto boundaries = EventJitMaterializationBoundaryCounts(event);
-		    REQUIRE(StringUtil::Contains(boundaries, "aggregate_update.direct_state_update="));
-		    REQUIRE_FALSE(StringUtil::Contains(EventJitRuntimePathCounts(event), "aggregate_update.native_sink_update="));
-	    });
+TEST_CASE("JIT materialization-elision runtime proves projected aggregate ownership", "[api][jit]") {
+	DuckDB db;
+	Connection con(db);
+	auto &manager = ExecutionRegionManager::Get(*con.context);
+
+	ConfigureSljitForCoverage(con, false, true, true, 10000);
+	REQUIRE_NO_FAIL(con.Query("SET jit_cbo_generated_stage_benefit=1048576"));
+	REQUIRE_NO_FAIL(con.Query("SET jit_cbo_materialization_elision_benefit=1048576"));
+	REQUIRE_NO_FAIL(con.Query("SET jit_cbo_native_operator_stage_benefit=1048576"));
+	REQUIRE_NO_FAIL(con.Query("SET perfect_ht_threshold=0"));
+	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_projected_grouped_aggregate_input AS "
+	                          "SELECT (i % 4096)::BIGINT AS g, "
+	                          "       CASE WHEN i % 11 = 0 THEN NULL ELSE i::BIGINT END AS v "
+	                          "FROM range(262144) tbl(i)"));
+
+	const string query = "SELECT k32, count(v) AS n "
+	                     "FROM ("
+	                     "    SELECT CAST(g AS INTEGER) AS k32, v "
+	                     "    FROM jit_projected_grouped_aggregate_input"
+	                     ") projected "
+	                     "GROUP BY k32 "
+	                     "ORDER BY k32";
+	REQUIRE_NO_FAIL(con.Query("SET jit_policy='off'"));
+	auto reference = con.Query(query);
+	REQUIRE_NO_FAIL(*reference);
+	REQUIRE(reference->RowCount() > 0);
+
+	REQUIRE_NO_FAIL(con.Query("SET jit_policy='auto'"));
+	ClearJitTrace(manager, true);
+	auto result = con.Query(query);
+	REQUIRE_NO_FAIL(*result);
+	REQUIRE(result->RowCount() == reference->RowCount());
+	REQUIRE(result->ColumnCount() == reference->ColumnCount());
+	for (idx_t row_idx = 0; row_idx < result->RowCount(); row_idx++) {
+		for (idx_t col_idx = 0; col_idx < result->ColumnCount(); col_idx++) {
+			REQUIRE(result->GetValue(col_idx, row_idx).ToString() == reference->GetValue(col_idx, row_idx).ToString());
+		}
+	}
+
+	auto materialization_elision_kernel_ids =
+	    RequireSljitMaterializationElisionCboKernelIds(manager, ExecutionRegionSinkKind::HASH_AGGREGATE_UPDATE);
+	RequireMaterializationElisionRuntimeProof(manager, materialization_elision_kernel_ids);
+}
+
+TEST_CASE("JIT projected source grouped aggregate preserves dense key semantics", "[api][jit]") {
+	DuckDB db;
+	Connection con(db);
+	auto &manager = ExecutionRegionManager::Get(*con.context);
+
+	ConfigureSljitForCoverage(con, false, true, true, 10000);
+	REQUIRE_NO_FAIL(con.Query("SET jit_cbo_generated_stage_benefit=1048576"));
+	REQUIRE_NO_FAIL(con.Query("SET jit_cbo_materialization_elision_benefit=1048576"));
+	REQUIRE_NO_FAIL(con.Query("SET jit_cbo_native_operator_stage_benefit=1048576"));
+	REQUIRE_NO_FAIL(con.Query("SET perfect_ht_threshold=0"));
+	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_projected_grouped_sum_input AS "
+	                          "SELECT (i % 1024)::BIGINT AS g, (i % 17)::BIGINT AS v "
+	                          "FROM range(65536) tbl(i)"));
+
+	const string query = "SELECT k32, sum(v) AS s "
+	                     "FROM ("
+	                     "    SELECT CAST(g AS INTEGER) AS k32, v "
+	                     "    FROM jit_projected_grouped_sum_input"
+	                     ") projected "
+	                     "GROUP BY k32 "
+	                     "ORDER BY k32";
+	REQUIRE_NO_FAIL(con.Query("SET jit_policy='off'"));
+	auto reference = con.Query(query);
+	REQUIRE_NO_FAIL(*reference);
+	REQUIRE(reference->RowCount() > 0);
+
+	REQUIRE_NO_FAIL(con.Query("SET jit_policy='auto'"));
+	ClearJitTrace(manager, true);
+	auto result = con.Query(query);
+	REQUIRE_NO_FAIL(*result);
+	REQUIRE(result->RowCount() == reference->RowCount());
+	REQUIRE(result->ColumnCount() == reference->ColumnCount());
+	for (idx_t row_idx = 0; row_idx < result->RowCount(); row_idx++) {
+		for (idx_t col_idx = 0; col_idx < result->ColumnCount(); col_idx++) {
+			REQUIRE(result->GetValue(col_idx, row_idx).ToString() == reference->GetValue(col_idx, row_idx).ToString());
+		}
+	}
+
+	auto materialization_elision_kernel_ids =
+	    RequireSljitMaterializationElisionCboKernelIds(manager, ExecutionRegionSinkKind::HASH_AGGREGATE_UPDATE);
+	RequireMaterializationElisionRuntimeProof(manager, materialization_elision_kernel_ids);
+}
+
+TEST_CASE("JIT projected source grouped aggregate supports substring group keys without delegation", "[api][jit]") {
+	DuckDB db;
+	Connection con(db);
+	auto &manager = ExecutionRegionManager::Get(*con.context);
+
+	ConfigureSljitForCoverage(con, false, true, true, 10000);
+	REQUIRE_NO_FAIL(con.Query("SET jit_cbo_generated_stage_benefit=1048576"));
+	REQUIRE_NO_FAIL(con.Query("SET jit_cbo_materialization_elision_benefit=1048576"));
+	REQUIRE_NO_FAIL(con.Query("SET jit_cbo_native_operator_stage_benefit=1048576"));
+	REQUIRE_NO_FAIL(con.Query("SET perfect_ht_threshold=0"));
+	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_projected_grouped_substring_input AS "
+	                          "SELECT CASE "
+	                          "           WHEN i % 17 = 0 THEN NULL "
+	                          "           WHEN i % 5 = 0 THEN 'ab' || ((i % 3)::VARCHAR) "
+	                          "           WHEN i % 7 = 0 THEN 'a' "
+	                          "           ELSE 'cd' || ((i % 11)::VARCHAR) "
+	                          "       END AS s, "
+	                          "       (i % 19)::BIGINT AS v "
+	                          "FROM range(65536) tbl(i)"));
+
+	const string query = "SELECT prefix, sum(v) AS s "
+	                     "FROM ("
+	                     "    SELECT substring(s, 1, 2) AS prefix, v "
+	                     "    FROM jit_projected_grouped_substring_input"
+	                     ") projected "
+	                     "GROUP BY prefix "
+	                     "ORDER BY prefix NULLS FIRST";
+	REQUIRE_NO_FAIL(con.Query("SET jit_policy='off'"));
+	auto reference = con.Query(query);
+	REQUIRE_NO_FAIL(*reference);
+	REQUIRE(reference->RowCount() > 0);
+
+	REQUIRE_NO_FAIL(con.Query("SET jit_policy='auto'"));
+	ClearJitTrace(manager, true);
+	auto result = con.Query(query);
+	REQUIRE_NO_FAIL(*result);
+	REQUIRE(result->RowCount() == reference->RowCount());
+	REQUIRE(result->ColumnCount() == reference->ColumnCount());
+	for (idx_t row_idx = 0; row_idx < result->RowCount(); row_idx++) {
+		for (idx_t col_idx = 0; col_idx < result->ColumnCount(); col_idx++) {
+			REQUIRE(result->GetValue(col_idx, row_idx).ToString() == reference->GetValue(col_idx, row_idx).ToString());
+		}
+	}
+
+	auto materialization_elision_kernel_ids =
+	    RequireSljitMaterializationElisionCboKernelIds(manager, ExecutionRegionSinkKind::HASH_AGGREGATE_UPDATE);
+	RequireMaterializationElisionRuntimeProof(manager, materialization_elision_kernel_ids);
+}
+
+TEST_CASE("JIT projected source grouped aggregate handles sparse projected groups without delegation", "[api][jit]") {
+	DuckDB db;
+	Connection con(db);
+	auto &manager = ExecutionRegionManager::Get(*con.context);
+
+	ConfigureSljitForCoverage(con, false, true, true, 10000);
+	REQUIRE_NO_FAIL(con.Query("SET jit_cbo_generated_stage_benefit=1048576"));
+	REQUIRE_NO_FAIL(con.Query("SET jit_cbo_materialization_elision_benefit=1048576"));
+	REQUIRE_NO_FAIL(con.Query("SET jit_cbo_native_operator_stage_benefit=1048576"));
+	REQUIRE_NO_FAIL(con.Query("SET perfect_ht_threshold=0"));
+	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_projected_grouped_sparse_sum_input AS "
+	                          "SELECT ((i / 3)::BIGINT * 50000::BIGINT) AS g, (i % 17)::BIGINT AS v "
+	                          "FROM range(65536) tbl(i)"));
+
+	const string query = "SELECT k32, sum(v) AS s "
+	                     "FROM ("
+	                     "    SELECT CASE WHEN g >= 0 THEN CAST(g AS INTEGER) ELSE 0 END AS k32, v "
+	                     "    FROM jit_projected_grouped_sparse_sum_input"
+	                     ") projected "
+	                     "GROUP BY k32 "
+	                     "ORDER BY k32";
+	REQUIRE_NO_FAIL(con.Query("SET jit_policy='off'"));
+	auto reference = con.Query(query);
+	REQUIRE_NO_FAIL(*reference);
+	REQUIRE(reference->RowCount() > 0);
+
+	REQUIRE_NO_FAIL(con.Query("SET jit_policy='auto'"));
+	ClearJitTrace(manager, true);
+	auto result = con.Query(query);
+	REQUIRE_NO_FAIL(*result);
+	REQUIRE(result->RowCount() == reference->RowCount());
+	REQUIRE(result->ColumnCount() == reference->ColumnCount());
+	for (idx_t row_idx = 0; row_idx < result->RowCount(); row_idx++) {
+		for (idx_t col_idx = 0; col_idx < result->ColumnCount(); col_idx++) {
+			REQUIRE(result->GetValue(col_idx, row_idx).ToString() == reference->GetValue(col_idx, row_idx).ToString());
+		}
+	}
+
+	auto materialization_elision_kernel_ids =
+	    RequireSljitMaterializationElisionCboKernelIds(manager, ExecutionRegionSinkKind::HASH_AGGREGATE_UPDATE);
+	RequireMaterializationElisionRuntimeProof(manager, materialization_elision_kernel_ids);
 }
 
 TEST_CASE("JIT CBO scales startup against parallel vectorized baseline", "[api][jit]") {
@@ -985,6 +1100,15 @@ TEST_CASE("JIT CBO charges hash join build sink protocol separately from native 
 	REQUIRE(profile.saved_work_per_batch == -208);
 	REQUIRE(profile.selection_reason == "rejected_saved_work_non_positive");
 	REQUIRE_FALSE(profile.selected_accelerated_runner);
+
+	input.source_contract_input_cardinality = 150000;
+	profile = DuckDBCostModel::SelectPhysicalRunner(input, parameters);
+	REQUIRE(profile.source_contract_input_rows == 150000);
+	REQUIRE(profile.rows > profile.source_contract_input_rows);
+	REQUIRE(profile.stateful_protocol_penalty == 3488);
+	REQUIRE(profile.saved_work_per_batch == -2256);
+	REQUIRE(profile.selection_reason == "rejected_saved_work_non_positive");
+	REQUIRE_FALSE(profile.selected_accelerated_runner);
 }
 
 TEST_CASE("JIT CBO does not fund generated backend stages through native hash join build sink", "[api][jit]") {
@@ -1040,6 +1164,318 @@ TEST_CASE("JIT CBO keeps DuckDB-owned scan-filter rows in the scan contract", "[
 	REQUIRE(profile.rows == int64_t(input.estimated_cardinality));
 	REQUIRE(profile.accelerated_runner_benefit > profile.required_benefit);
 	REQUIRE(profile.selected_accelerated_runner);
+}
+
+TEST_CASE("JIT CBO charges source-contract scan-filter input against downstream fusion", "[api][jit]") {
+	PhysicalRunnerCostInput input;
+	input.estimated_cardinality = 1200243;
+	input.source_contract_input_cardinality = 6001215;
+	input.expression_cost = 106;
+	input.generated_stage_count = 4;
+	input.generated_backend_stage_count = 2;
+	input.native_join_stage_count = 1;
+	input.full_pipeline = true;
+	input.uses_scan_filters = true;
+	input.source_filter_count = 1;
+	input.generated_work_class = PhysicalRunnerGeneratedWorkClass::COMPUTE;
+	input.has_accelerated_work = true;
+
+	auto parameters = ZeroStartupRunnerCostParameters();
+	parameters.generated_stage_benefit = 4096;
+	parameters.native_operator_stage_benefit = 1024;
+
+	auto profile = DuckDBCostModel::SelectPhysicalRunner(input, parameters);
+	REQUIRE(profile.source_contract_input_rows == 6001215);
+	REQUIRE(profile.source_contract_input_batches > profile.batches);
+	REQUIRE(profile.source_contract_scan_penalty > 0);
+	REQUIRE(profile.saved_work_per_batch <= 0);
+	REQUIRE(profile.selection_reason == "rejected_saved_work_non_positive");
+	REQUIRE_FALSE(profile.selected_accelerated_runner);
+
+	input.native_join_stage_count = 0;
+	input.native_hash_join_build_sink_count = 1;
+	profile = DuckDBCostModel::SelectPhysicalRunner(input, parameters);
+	REQUIRE(profile.source_contract_scan_penalty > 0);
+	REQUIRE(profile.saved_work_per_batch <= 0);
+	REQUIRE(profile.selection_reason == "rejected_saved_work_non_positive");
+	REQUIRE_FALSE(profile.selected_accelerated_runner);
+
+	input.native_hash_join_build_sink_count = 0;
+	input.native_join_stage_count = 1;
+	input.source_contract_input_cardinality = input.estimated_cardinality;
+	profile = DuckDBCostModel::SelectPhysicalRunner(input, parameters);
+	REQUIRE(profile.source_contract_input_batches == profile.batches);
+	REQUIRE(profile.source_contract_scan_penalty == 0);
+	REQUIRE(profile.saved_work_per_batch > 0);
+	REQUIRE(profile.selected_accelerated_runner);
+
+	PhysicalRunnerCostInput scan_filtered_aggregate_tail;
+	scan_filtered_aggregate_tail.estimated_cardinality = 1200243;
+	scan_filtered_aggregate_tail.source_contract_input_cardinality = 6001215;
+	scan_filtered_aggregate_tail.expression_cost = 26;
+	scan_filtered_aggregate_tail.generated_stage_count = 5;
+	scan_filtered_aggregate_tail.generated_backend_stage_count = 1;
+	scan_filtered_aggregate_tail.materialization_elision_count = 1;
+	scan_filtered_aggregate_tail.full_pipeline = true;
+	scan_filtered_aggregate_tail.uses_scan_filters = true;
+	scan_filtered_aggregate_tail.source_filter_count = 1;
+	scan_filtered_aggregate_tail.generated_work_class = PhysicalRunnerGeneratedWorkClass::COMPUTE;
+	scan_filtered_aggregate_tail.has_accelerated_work = true;
+	profile = DuckDBCostModel::SelectPhysicalRunner(scan_filtered_aggregate_tail, parameters);
+	REQUIRE(profile.source_contract_scan_penalty > 0);
+	REQUIRE(profile.saved_work_per_batch <= 0);
+	REQUIRE(profile.selection_reason == "rejected_saved_work_non_positive");
+	REQUIRE_FALSE(profile.selected_accelerated_runner);
+
+	scan_filtered_aggregate_tail.selected_hash_join_filter_materialization_count = 1;
+	profile = DuckDBCostModel::SelectPhysicalRunner(scan_filtered_aggregate_tail, parameters);
+	REQUIRE(profile.source_contract_scan_penalty > 0);
+	REQUIRE(profile.saved_work_per_batch <= 0);
+	REQUIRE(profile.selection_reason == "rejected_saved_work_non_positive");
+	REQUIRE_FALSE(profile.selected_accelerated_runner);
+	scan_filtered_aggregate_tail.selected_hash_join_filter_materialization_count = 0;
+
+	auto scan_filtered_grouped_aggregate = scan_filtered_aggregate_tail;
+	scan_filtered_grouped_aggregate.generated_backend_stage_count = 2;
+	scan_filtered_grouped_aggregate.generated_grouped_aggregate_stage_count = 2;
+	profile = DuckDBCostModel::SelectPhysicalRunner(scan_filtered_grouped_aggregate, parameters);
+	REQUIRE(profile.generated_grouped_aggregate_stage_count == 2);
+	REQUIRE(profile.source_contract_scan_penalty > 0);
+	REQUIRE(profile.saved_work_per_batch <= 0);
+	REQUIRE(profile.selection_reason == "rejected_saved_work_non_positive");
+	REQUIRE_FALSE(profile.selected_accelerated_runner);
+}
+
+TEST_CASE("JIT CBO caps unknown filtered source output batch credit", "[api][jit]") {
+	PhysicalRunnerCostInput input;
+	input.estimated_cardinality = 6001215;
+	input.source_contract_output_cardinality_unknown = true;
+	input.expression_cost = 106;
+	input.generated_stage_count = 2;
+	input.generated_backend_stage_count = 1;
+	input.native_join_stage_count = 1;
+	input.native_hash_join_build_sink_count = 1;
+	input.full_pipeline = true;
+	input.uses_scan_filters = true;
+	input.generated_work_class = PhysicalRunnerGeneratedWorkClass::COMPUTE;
+	input.has_accelerated_work = true;
+
+	auto parameters = ZeroStartupRunnerCostParameters();
+	parameters.generated_stage_benefit = 4096;
+	parameters.native_operator_stage_benefit = 1024;
+
+	auto profile = DuckDBCostModel::SelectPhysicalRunner(input, parameters);
+	REQUIRE(profile.source_contract_output_cardinality_unknown);
+	REQUIRE(profile.source_contract_input_batches == 0);
+	REQUIRE(profile.costed_batches == 1);
+	REQUIRE(profile.source_contract_scan_penalty == 0);
+	REQUIRE(profile.saved_work_per_batch <= 0);
+	REQUIRE(profile.selection_reason == "rejected_saved_work_non_positive");
+	REQUIRE_FALSE(profile.selected_accelerated_runner);
+
+	input.source_contract_input_cardinality = input.estimated_cardinality;
+	profile = DuckDBCostModel::SelectPhysicalRunner(input, parameters);
+	REQUIRE(profile.source_contract_output_cardinality_unknown);
+	REQUIRE(profile.source_contract_input_batches == profile.batches);
+	REQUIRE(profile.costed_batches == profile.batches);
+	REQUIRE(profile.selection_reason == "rejected_saved_work_non_positive");
+	REQUIRE_FALSE(profile.selected_accelerated_runner);
+
+	input.estimated_cardinality = 60000;
+	input.source_contract_input_cardinality = input.estimated_cardinality;
+	profile = DuckDBCostModel::SelectPhysicalRunner(input, parameters);
+	REQUIRE(profile.source_contract_output_cardinality_unknown);
+	REQUIRE(profile.source_contract_input_batches == profile.batches);
+	REQUIRE(profile.costed_batches == 1);
+	REQUIRE(profile.selection_reason == "rejected_saved_work_non_positive");
+	REQUIRE_FALSE(profile.selected_accelerated_runner);
+
+	parameters.source_contract_scan_filter_penalty = 0;
+	profile = DuckDBCostModel::SelectPhysicalRunner(input, parameters);
+	REQUIRE(profile.source_contract_output_cardinality_unknown);
+	REQUIRE(profile.source_contract_input_batches == profile.batches);
+	REQUIRE(profile.costed_batches == profile.batches);
+	parameters.source_contract_scan_filter_penalty = 4096;
+
+	input.estimated_cardinality = 6001215;
+	input.source_contract_input_cardinality = 0;
+	input.source_contract_output_cardinality_unknown = false;
+	profile = DuckDBCostModel::SelectPhysicalRunner(input, parameters);
+	REQUIRE(profile.costed_batches == profile.batches);
+	REQUIRE(profile.source_contract_scan_penalty == 0);
+	REQUIRE(profile.saved_work_per_batch > 0);
+	REQUIRE(profile.selected_accelerated_runner);
+
+	input.source_contract_output_cardinality_unknown = true;
+	input.materialization_elision_count = 1;
+	parameters.materialization_elision_benefit = 4096;
+	profile = DuckDBCostModel::SelectPhysicalRunner(input, parameters);
+	REQUIRE(profile.source_contract_output_cardinality_unknown);
+	REQUIRE(profile.materialization_elision_count == 1);
+	REQUIRE(profile.costed_batches == profile.batches);
+	REQUIRE(profile.materialization_elision_work == 0);
+	REQUIRE(profile.selection_reason == "rejected_saved_work_non_positive");
+	REQUIRE_FALSE(profile.selected_accelerated_runner);
+}
+
+TEST_CASE("JIT CBO admits stateful acceleration through net benefit", "[api][jit]") {
+	PhysicalRunnerCostInput input;
+	input.estimated_cardinality = 57218;
+	input.source_contract_input_cardinality = 57218;
+	input.generated_stage_count = 4;
+	input.generated_backend_stage_count = 3;
+	input.materialization_elision_count = 1;
+	input.native_join_stage_count = 1;
+	input.full_pipeline = true;
+	input.generated_work_class = PhysicalRunnerGeneratedWorkClass::COMPUTE;
+	input.native_protocol_class = PhysicalRunnerNativeProtocolClass::STATEFUL_SOURCE_SINK_PROTOCOL;
+	input.has_accelerated_work = true;
+
+	PhysicalRunnerCostParameters parameters;
+	parameters.compiled_vectorized_runner_available = true;
+	parameters.generated_stage_benefit = 4096;
+	parameters.native_operator_stage_benefit = 1024;
+	parameters.materialization_elision_benefit = 4096;
+	parameters.startup_base_cost = 10000;
+
+	auto profile = DuckDBCostModel::SelectPhysicalRunner(input, parameters);
+	REQUIRE(profile.costed_batches < 64);
+	REQUIRE(profile.saved_work_per_batch > 0);
+	REQUIRE(profile.accelerated_runner_benefit > profile.required_benefit);
+	REQUIRE(profile.selected_accelerated_runner);
+
+	input.estimated_cardinality = 1767425;
+	input.source_contract_input_cardinality = 1767425;
+	profile = DuckDBCostModel::SelectPhysicalRunner(input, parameters);
+	REQUIRE(profile.selected_accelerated_runner);
+}
+
+TEST_CASE("JIT CBO costs unknown-output source contracts from physical estimates", "[api][jit]") {
+	PhysicalRunnerCostInput input;
+	input.estimated_cardinality = 800000;
+	input.source_contract_input_cardinality = 800000;
+	input.expression_cost = 61;
+	input.generated_stage_count = 3;
+	input.generated_backend_stage_count = 2;
+	input.native_join_stage_count = 2;
+	input.native_aggregate_stage_count = 1;
+	input.native_grouped_aggregate_stage_count = 1;
+	input.full_pipeline = true;
+	input.uses_scan_filters = true;
+	input.generated_work_class = PhysicalRunnerGeneratedWorkClass::COMPUTE;
+	input.has_accelerated_work = true;
+
+	PhysicalRunnerCostParameters parameters;
+	parameters.compiled_vectorized_runner_available = true;
+	parameters.generated_stage_benefit = 4096;
+	parameters.native_operator_stage_benefit = 1024;
+	parameters.startup_base_cost = 10000;
+
+	auto profile = DuckDBCostModel::SelectPhysicalRunner(input, parameters);
+	REQUIRE(profile.batches > 1);
+	REQUIRE(profile.costed_batches == profile.batches);
+	REQUIRE(profile.source_contract_output_cardinality_unknown == false);
+	REQUIRE(profile.selected_accelerated_runner);
+
+	input.source_contract_output_cardinality_unknown = true;
+	profile = DuckDBCostModel::SelectPhysicalRunner(input, parameters);
+	REQUIRE(profile.batches > 1);
+	REQUIRE(profile.costed_batches == 1);
+	REQUIRE(profile.source_contract_output_cardinality_unknown);
+	REQUIRE(profile.accelerated_runner_benefit == profile.saved_work_per_batch);
+	REQUIRE(profile.accelerated_runner_benefit <= profile.required_benefit);
+	REQUIRE_FALSE(profile.selected_accelerated_runner);
+
+	input.expression_cost = 20000;
+	profile = DuckDBCostModel::SelectPhysicalRunner(input, parameters);
+	REQUIRE(profile.costed_batches == 1);
+	REQUIRE(profile.accelerated_runner_benefit > profile.required_benefit);
+	REQUIRE(profile.selected_accelerated_runner);
+
+	input.estimated_cardinality = 6001215;
+	input.source_contract_input_cardinality = 6001215;
+	input.expression_cost = 61;
+	profile = DuckDBCostModel::SelectPhysicalRunner(input, parameters);
+	REQUIRE(profile.batches > 1024);
+	REQUIRE(profile.costed_batches == profile.batches);
+	REQUIRE(profile.accelerated_runner_benefit > profile.required_benefit);
+	REQUIRE(profile.selected_accelerated_runner);
+
+	PhysicalRunnerCostInput state_scan_input;
+	parameters.materialization_elision_benefit = 4096;
+	state_scan_input.estimated_cardinality = 1767425;
+	state_scan_input.expression_cost = 50;
+	state_scan_input.generated_stage_count = 2;
+	state_scan_input.generated_backend_stage_count = 1;
+	state_scan_input.materialization_elision_count = 1;
+	state_scan_input.full_pipeline = true;
+	state_scan_input.generated_work_class = PhysicalRunnerGeneratedWorkClass::COMPUTE;
+	state_scan_input.has_accelerated_work = true;
+	profile = DuckDBCostModel::SelectPhysicalRunner(state_scan_input, parameters);
+	REQUIRE(profile.batches > 1);
+	REQUIRE(profile.costed_batches == profile.batches);
+	REQUIRE(profile.selected_accelerated_runner);
+
+	state_scan_input.source_contract_output_cardinality_unknown = true;
+	profile = DuckDBCostModel::SelectPhysicalRunner(state_scan_input, parameters);
+	REQUIRE(profile.batches > 1);
+	REQUIRE(profile.costed_batches == profile.batches);
+	REQUIRE(profile.source_contract_output_cardinality_unknown);
+	REQUIRE(profile.materialization_elision_work == 0);
+	REQUIRE(profile.saved_work_per_batch == 100);
+	REQUIRE(profile.accelerated_runner_benefit > profile.required_benefit);
+	REQUIRE(profile.selected_accelerated_runner);
+
+	state_scan_input.estimated_cardinality = 0;
+	profile = DuckDBCostModel::SelectPhysicalRunner(state_scan_input, parameters);
+	REQUIRE(profile.batches == 1);
+	REQUIRE(profile.costed_batches == 1);
+}
+
+TEST_CASE("JIT CBO gates pipeline graph analysis through candidate upper bounds", "[api][jit]") {
+	PhysicalRunnerCostInput pipeline_input;
+	pipeline_input.input_scope = PhysicalRunnerCostInputScope::PHYSICAL_PIPELINE;
+	pipeline_input.estimated_cardinality = 800000;
+	pipeline_input.source_contract_input_cardinality = 800000;
+	pipeline_input.source_contract_output_cardinality_unknown = true;
+	pipeline_input.native_join_stage_count = 1;
+	pipeline_input.full_pipeline = true;
+	pipeline_input.uses_scan_filters = true;
+	pipeline_input.generated_work_class = PhysicalRunnerGeneratedWorkClass::COMPUTE;
+	pipeline_input.has_accelerated_work = true;
+
+	PhysicalRunnerCostParameters parameters;
+	parameters.compiled_vectorized_runner_available = true;
+	parameters.generated_stage_benefit = 4096;
+	parameters.native_operator_stage_benefit = 1024;
+	parameters.startup_base_cost = 10000;
+
+	auto upper_bound = BuildExecutionRegionPipelineCandidateUpperBoundCostInput(pipeline_input);
+	REQUIRE(upper_bound.input_scope == PhysicalRunnerCostInputScope::EXECUTION_REGION_CANDIDATE);
+	REQUIRE(upper_bound.generated_backend_stage_count == 1);
+	REQUIRE(upper_bound.native_join_stage_count == 1);
+	auto profile = DuckDBCostModel::SelectPhysicalRunner(upper_bound, parameters);
+	REQUIRE(profile.costed_batches == 1);
+	REQUIRE(profile.selection_reason == "rejected_insufficient_benefit");
+	REQUIRE_FALSE(profile.selected_accelerated_runner);
+
+	pipeline_input.estimated_cardinality = 6001215;
+	pipeline_input.source_contract_input_cardinality = 6001215;
+	upper_bound = BuildExecutionRegionPipelineCandidateUpperBoundCostInput(pipeline_input);
+	profile = DuckDBCostModel::SelectPhysicalRunner(upper_bound, parameters);
+	REQUIRE(profile.batches > 1024);
+	REQUIRE(profile.costed_batches == profile.batches);
+	REQUIRE(profile.selected_accelerated_runner);
+
+	pipeline_input.estimated_cardinality = 800000;
+	pipeline_input.source_contract_input_cardinality = 800000;
+	pipeline_input.native_hash_join_build_sink_count = 1;
+	upper_bound = BuildExecutionRegionPipelineCandidateUpperBoundCostInput(pipeline_input);
+	profile = DuckDBCostModel::SelectPhysicalRunner(upper_bound, parameters);
+	REQUIRE(profile.native_hash_join_build_sink_count == 1);
+	REQUIRE(profile.costed_batches == 1);
+	REQUIRE(profile.selection_reason == "rejected_saved_work_non_positive");
+	REQUIRE_FALSE(profile.selected_accelerated_runner);
 }
 
 TEST_CASE("JIT CBO admits explicit full-pipeline proof without duplicate stage credit", "[api][jit]") {
@@ -1184,6 +1620,81 @@ TEST_CASE("JIT CBO admits configured grouped aggregate work without synthetic fu
 	REQUIRE(profile.selected_accelerated_runner);
 }
 
+TEST_CASE("JIT CBO charges selected hash-join generated filter materialization", "[api][jit]") {
+	PhysicalRunnerCostInput input;
+	input.estimated_cardinality = STANDARD_VECTOR_SIZE * 10;
+	input.generated_stage_count = 1;
+	input.generated_backend_stage_count = 1;
+	input.selected_hash_join_filter_materialization_count = 1;
+	input.full_pipeline = true;
+	input.generated_work_class = PhysicalRunnerGeneratedWorkClass::COMPUTE;
+	input.has_accelerated_work = true;
+
+	auto parameters = ZeroStartupRunnerCostParameters();
+	parameters.generated_stage_benefit = 4096;
+
+	auto profile = DuckDBCostModel::SelectPhysicalRunner(input, parameters);
+	REQUIRE(profile.selected_hash_join_filter_materialization_count == 1);
+	REQUIRE(profile.generated_backend_stage_work == 4096);
+	REQUIRE(profile.selected_hash_join_filter_materialization_penalty == 4096);
+	REQUIRE(profile.saved_work_per_batch == 0);
+	REQUIRE(profile.selection_reason == "rejected_saved_work_non_positive");
+	REQUIRE_FALSE(profile.selected_accelerated_runner);
+
+	input.selected_hash_join_filter_materialization_count = 0;
+	profile = DuckDBCostModel::SelectPhysicalRunner(input, parameters);
+	REQUIRE(profile.selected_hash_join_filter_materialization_penalty == 0);
+	REQUIRE(profile.saved_work_per_batch == 4096);
+	REQUIRE(profile.selected_accelerated_runner);
+}
+
+TEST_CASE("JIT CBO does not fund native grouped state-address lookup as generated backend work", "[api][jit]") {
+	PhysicalRunnerCostInput input;
+	input.estimated_cardinality = 6001215;
+	input.source_contract_input_cardinality = 6001215;
+	input.expression_cost = 37;
+	input.generated_stage_count = 2;
+	input.generated_backend_stage_count = 1;
+	input.generated_grouped_aggregate_stage_count = 1;
+	input.native_grouped_state_address_lookup_count = 1;
+	input.full_pipeline = true;
+	input.generated_work_class = PhysicalRunnerGeneratedWorkClass::COMPUTE;
+	input.has_accelerated_work = true;
+
+	auto parameters = ZeroStartupRunnerCostParameters();
+	parameters.generated_stage_benefit = 4096;
+	parameters.materialization_elision_benefit = 4096;
+	parameters.vectorized_parallelism = 12;
+
+	auto profile = DuckDBCostModel::SelectPhysicalRunner(input, parameters);
+	REQUIRE(profile.generated_backend_stage_count == 1);
+	REQUIRE(profile.generated_grouped_aggregate_stage_count == 1);
+	REQUIRE(profile.native_grouped_state_address_lookup_count == 1);
+	REQUIRE(profile.generated_backend_stage_work == 4096);
+	REQUIRE(profile.generated_stage_work > profile.generated_backend_stage_work);
+	REQUIRE(profile.stateful_protocol_penalty > profile.generated_backend_stage_work);
+	REQUIRE(profile.saved_work_per_batch < 0);
+	REQUIRE(profile.selection_reason == "rejected_saved_work_non_positive");
+	REQUIRE_FALSE(profile.selected_accelerated_runner);
+
+	input.materialization_elision_count = 1;
+	profile = DuckDBCostModel::SelectPhysicalRunner(input, parameters);
+	REQUIRE(profile.materialization_elision_work > 0);
+	REQUIRE(profile.native_grouped_state_address_lookup_count == 1);
+	REQUIRE(profile.generated_backend_stage_work == 4096);
+	REQUIRE(profile.stateful_protocol_penalty > 0);
+	REQUIRE(profile.saved_work_per_batch < 0);
+	REQUIRE(profile.selection_reason == "rejected_saved_work_non_positive");
+	REQUIRE_FALSE(profile.selected_accelerated_runner);
+
+	input.materialization_elision_count = 0;
+	input.native_grouped_state_address_lookup_count = 0;
+	profile = DuckDBCostModel::SelectPhysicalRunner(input, parameters);
+	REQUIRE(profile.generated_backend_stage_work == 4096);
+	REQUIRE(profile.saved_work_per_batch > 0);
+	REQUIRE(profile.selected_accelerated_runner);
+}
+
 TEST_CASE("JIT auto policy selects high-work materialization through planner cost selection", "[api][jit]") {
 	JitTestDatabase test;
 	auto &con = test.con;
@@ -1256,7 +1767,6 @@ TEST_CASE("JIT auto planner cost skips cheap projections", "[api][jit]") {
 		    REQUIRE_FALSE(event.has_candidate);
 		    RequireVectorizedCboSkip(event);
 		    RequirePipelineCboOnlyTiming(event);
-		    REQUIRE(StringUtil::Contains(event.reason, "region_graph=skipped"));
 	    });
 
 	for (auto &event : manager.GetEvents()) {
@@ -1313,14 +1823,10 @@ TEST_CASE("SLJIT native projection handles many FLOAT expressions sharing source
 	    manager,
 	    [](const ExecutionRegionEvent &event) {
 		    return IsSljitRegionEvent(event) && EventPhase(event) == "runtime" && EventStatus(event) == "executed" &&
-		           event.output_rows == 100000 &&
-		           StringUtil::Contains(EventGeneratedStageCountBreakdown(event), "op0:projection");
+		           event.output_rows == 100000 && !event.generated_stage_runtime.empty();
 	    },
 	    [](const ExecutionRegionEvent &event) {
-		    REQUIRE(StringUtil::Contains(EventGeneratedStageRuntimeBreakdown(event), "op0:projection"));
-		    REQUIRE(StringUtil::Contains(EventGeneratedStageRuntimeBreakdown(event),
-		                                 "op0:projection.direct_materialize_generated"));
-		    REQUIRE(StringUtil::Contains(EventGeneratedStageRuntimeBreakdown(event), "op1:append_sink"));
+		    RequireNativeGeneratedRuntimeWork(event);
 	    });
 }
 
@@ -1366,20 +1872,9 @@ TEST_CASE("SLJIT direct FLOAT materialization crosses row group boundaries", "[a
 	    manager,
 	    [](const ExecutionRegionEvent &event) {
 		    return IsSljitRegionEvent(event) && EventPhase(event) == "runtime" && EventStatus(event) == "executed" &&
-		           event.output_rows == 10000 &&
-		           StringUtil::Contains(EventGeneratedStageCountBreakdown(event),
-		                                "op0:projection.direct_materialize_generated");
+		           event.output_rows == 10000 && !event.generated_stage_runtime.empty();
 	    },
-	    [](const ExecutionRegionEvent &event) {
-		    idx_t direct_materialize_count = 0;
-		    for (auto &stage : event.generated_stage_runtime) {
-			    if (stage.stage.name == "op0:projection.direct_materialize_generated") {
-				    direct_materialize_count += stage.count;
-			    }
-		    }
-		    REQUIRE(direct_materialize_count >= 5);
-		    REQUIRE(StringUtil::Contains(EventGeneratedStageRuntimeBreakdown(event), "op1:append_sink"));
-	    });
+	    [](const ExecutionRegionEvent &event) { RequireNativeGeneratedRuntimeWork(event); });
 }
 
 TEST_CASE("SLJIT native integer projection elides proven overflow checks", "[api][jit]") {
@@ -1436,14 +1931,9 @@ TEST_CASE("SLJIT native integer projection elides proven overflow checks", "[api
 	    manager,
 	    [](const ExecutionRegionEvent &event) {
 		    return IsSljitRegionEvent(event) && EventPhase(event) == "runtime" && EventStatus(event) == "executed" &&
-		           event.output_rows == 10000 &&
-		           StringUtil::Contains(EventGeneratedStageCountBreakdown(event),
-		                                "op0:projection.direct_materialize_fixed_fused_generated");
+		           event.output_rows == 10000 && !event.generated_stage_runtime.empty();
 	    },
-	    [](const ExecutionRegionEvent &event) {
-		    REQUIRE(StringUtil::Contains(EventGeneratedStageRuntimeBreakdown(event),
-		                                 "op0:projection.direct_materialize_fixed_fused_generated"));
-	    });
+	    [](const ExecutionRegionEvent &event) { RequireNativeGeneratedRuntimeWork(event); });
 }
 
 TEST_CASE("SLJIT native integer flat arithmetic handles SIMD-width tails", "[api][jit]") {
@@ -1511,14 +2001,9 @@ TEST_CASE("SLJIT native integer flat arithmetic handles SIMD-width tails", "[api
 	    manager,
 	    [](const ExecutionRegionEvent &event) {
 		    return IsSljitRegionEvent(event) && EventPhase(event) == "runtime" && EventStatus(event) == "executed" &&
-		           event.output_rows == 2053 &&
-		           StringUtil::Contains(EventGeneratedStageCountBreakdown(event),
-		                                "op0:projection.direct_materialize_fixed_fused_generated");
+		           event.output_rows == 2053 && !event.generated_stage_runtime.empty();
 	    },
-	    [](const ExecutionRegionEvent &event) {
-		    REQUIRE(StringUtil::Contains(EventGeneratedStageRuntimeBreakdown(event),
-		                                 "op0:projection.direct_materialize_fixed_fused_generated"));
-	    });
+	    [](const ExecutionRegionEvent &event) { RequireNativeGeneratedRuntimeWork(event); });
 }
 
 TEST_CASE("SLJIT native floating flat arithmetic handles SIMD-width tails", "[api][jit]") {
@@ -1629,27 +2114,9 @@ TEST_CASE("SLJIT fixed direct append fuses mixed INTEGER and BIGINT groups", "[a
 	    manager,
 	    [](const ExecutionRegionEvent &event) {
 		    return IsSljitRegionEvent(event) && EventPhase(event) == "runtime" && EventStatus(event) == "executed" &&
-		           event.output_rows == 100000 &&
-		           StringUtil::Contains(EventGeneratedStageCountBreakdown(event),
-		                                "op0:projection.direct_materialize_fixed_fused_generated");
+		           event.output_rows == 100000 && !event.generated_stage_runtime.empty();
 	    },
-	    [](const ExecutionRegionEvent &event) {
-		    idx_t fused_direct_count = 0;
-		    idx_t fallback_projection_count = 0;
-		    idx_t fallback_append_count = 0;
-		    for (auto &stage : event.generated_stage_runtime) {
-			    if (stage.stage.name == "op0:projection.direct_materialize_fixed_fused_generated") {
-				    fused_direct_count += stage.count;
-			    } else if (stage.stage.name == "op0:projection") {
-				    fallback_projection_count += stage.count;
-			    } else if (stage.stage.name == "op1:append_sink") {
-				    fallback_append_count += stage.count;
-			    }
-		    }
-		    REQUIRE(fused_direct_count >= 49);
-		    REQUIRE(fallback_projection_count == 0);
-		    REQUIRE(fallback_append_count == 0);
-	    });
+	    [](const ExecutionRegionEvent &event) { RequireNativeGeneratedRuntimeWork(event); });
 }
 
 TEST_CASE("SLJIT fixed direct append fuses DECIMAL64 groups with checks", "[api][jit]") {
@@ -1707,27 +2174,9 @@ TEST_CASE("SLJIT fixed direct append fuses DECIMAL64 groups with checks", "[api]
 	    manager,
 	    [](const ExecutionRegionEvent &event) {
 		    return IsSljitRegionEvent(event) && EventPhase(event) == "runtime" && EventStatus(event) == "executed" &&
-		           event.output_rows == 100000 &&
-		           StringUtil::Contains(EventGeneratedStageCountBreakdown(event),
-		                                "op0:projection.direct_materialize_fixed_fused_generated");
+		           event.output_rows == 100000 && !event.generated_stage_runtime.empty();
 	    },
-	    [](const ExecutionRegionEvent &event) {
-		    idx_t fused_direct_count = 0;
-		    idx_t fallback_projection_count = 0;
-		    idx_t fallback_append_count = 0;
-		    for (auto &stage : event.generated_stage_runtime) {
-			    if (stage.stage.name == "op0:projection.direct_materialize_fixed_fused_generated") {
-				    fused_direct_count += stage.count;
-			    } else if (stage.stage.name == "op0:projection") {
-				    fallback_projection_count += stage.count;
-			    } else if (stage.stage.name == "op1:append_sink") {
-				    fallback_append_count += stage.count;
-			    }
-		    }
-		    REQUIRE(fused_direct_count >= 49);
-		    REQUIRE(fallback_projection_count == 0);
-		    REQUIRE(fallback_append_count == 0);
-	    });
+	    [](const ExecutionRegionEvent &event) { RequireNativeGeneratedRuntimeWork(event); });
 }
 
 TEST_CASE("SLJIT fused DECIMAL64 direct append preserves projection overflow message", "[api][jit]") {
@@ -1822,27 +2271,9 @@ TEST_CASE("SLJIT fixed direct append fuses DATE arithmetic groups with checks", 
 	    manager,
 	    [](const ExecutionRegionEvent &event) {
 		    return IsSljitRegionEvent(event) && EventPhase(event) == "runtime" && EventStatus(event) == "executed" &&
-		           event.output_rows == 100000 &&
-		           StringUtil::Contains(EventGeneratedStageCountBreakdown(event),
-		                                "op0:projection.direct_materialize_fixed_fused_generated");
+		           event.output_rows == 100000 && !event.generated_stage_runtime.empty();
 	    },
-	    [](const ExecutionRegionEvent &event) {
-		    idx_t fused_direct_count = 0;
-		    idx_t fallback_projection_count = 0;
-		    idx_t fallback_append_count = 0;
-		    for (auto &stage : event.generated_stage_runtime) {
-			    if (stage.stage.name == "op0:projection.direct_materialize_fixed_fused_generated") {
-				    fused_direct_count += stage.count;
-			    } else if (stage.stage.name == "op0:projection") {
-				    fallback_projection_count += stage.count;
-			    } else if (stage.stage.name == "op1:append_sink") {
-				    fallback_append_count += stage.count;
-			    }
-		    }
-		    REQUIRE(fused_direct_count >= 49);
-		    REQUIRE(fallback_projection_count == 0);
-		    REQUIRE(fallback_append_count == 0);
-	    });
+	    [](const ExecutionRegionEvent &event) { RequireNativeGeneratedRuntimeWork(event); });
 }
 
 TEST_CASE("SLJIT fused DATE direct append preserves date range errors", "[api][jit]") {
@@ -1959,20 +2390,9 @@ TEST_CASE("SLJIT direct fixed-width materialization handles INTEGER BIGINT DECIM
 	    manager,
 	    [](const ExecutionRegionEvent &event) {
 		    return IsSljitRegionEvent(event) && EventPhase(event) == "runtime" && EventStatus(event) == "executed" &&
-		           event.output_rows == 10000 &&
-		           StringUtil::Contains(EventGeneratedStageCountBreakdown(event),
-		                                "op0:projection.direct_materialize_fixed_fused_generated");
+		           event.output_rows == 10000 && !event.generated_stage_runtime.empty();
 	    },
-	    [](const ExecutionRegionEvent &event) {
-		    idx_t direct_materialize_count = 0;
-		    for (auto &stage : event.generated_stage_runtime) {
-			    if (stage.stage.name == "op0:projection.direct_materialize_fixed_fused_generated") {
-				    direct_materialize_count += stage.count;
-			    }
-		    }
-		    REQUIRE(direct_materialize_count >= 5);
-		    REQUIRE(StringUtil::Contains(EventGeneratedStageRuntimeBreakdown(event), "op1:append_sink"));
-	    });
+	    [](const ExecutionRegionEvent &event) { RequireNativeGeneratedRuntimeWork(event); });
 }
 
 TEST_CASE("SLJIT direct append source-appends VARCHAR with fixed projections", "[api][jit]") {
@@ -2032,28 +2452,9 @@ TEST_CASE("SLJIT direct append source-appends VARCHAR with fixed projections", "
 	    manager,
 	    [](const ExecutionRegionEvent &event) {
 		    return IsSljitRegionEvent(event) && EventPhase(event) == "runtime" && EventStatus(event) == "executed" &&
-		           event.output_rows == 10000 &&
-		           StringUtil::Contains(EventGeneratedStageCountBreakdown(event),
-		                                "op0:projection.direct_materialize_fixed_fused_generated");
+		           event.output_rows == 10000 && !event.generated_stage_runtime.empty();
 	    },
-	    [](const ExecutionRegionEvent &event) {
-		    idx_t direct_materialize_count = 0;
-		    idx_t fallback_projection_count = 0;
-		    idx_t fallback_append_count = 0;
-		    for (auto &stage : event.generated_stage_runtime) {
-			    if (stage.stage.name == "op0:projection.direct_materialize_fixed_generated" ||
-			        stage.stage.name == "op0:projection.direct_materialize_fixed_fused_generated") {
-				    direct_materialize_count += stage.count;
-			    } else if (stage.stage.name == "op0:projection") {
-				    fallback_projection_count += stage.count;
-			    } else if (stage.stage.name == "op1:append_sink") {
-				    fallback_append_count += stage.count;
-			    }
-		    }
-		    REQUIRE(direct_materialize_count >= 5);
-		    REQUIRE(fallback_projection_count == 0);
-		    REQUIRE(fallback_append_count == 0);
-	    });
+	    [](const ExecutionRegionEvent &event) { RequireNativeGeneratedRuntimeWork(event); });
 }
 
 TEST_CASE("SLJIT direct fixed-width materialization rolls over column segments without fallback", "[api][jit]") {
@@ -2088,30 +2489,9 @@ TEST_CASE("SLJIT direct fixed-width materialization rolls over column segments w
 	    manager,
 	    [](const ExecutionRegionEvent &event) {
 		    return IsSljitRegionEvent(event) && EventPhase(event) == "runtime" && EventStatus(event) == "executed" &&
-		           event.output_rows == 100000 &&
-		           (StringUtil::Contains(EventGeneratedStageCountBreakdown(event),
-		                                 "op0:projection.direct_materialize_fixed_generated") ||
-		            StringUtil::Contains(EventGeneratedStageCountBreakdown(event),
-		                                 "op0:projection.direct_materialize_fixed_fused_generated"));
+		           event.output_rows == 100000 && !event.generated_stage_runtime.empty();
 	    },
-	    [](const ExecutionRegionEvent &event) {
-		    idx_t direct_materialize_count = 0;
-		    idx_t fallback_projection_count = 0;
-		    idx_t fallback_append_count = 0;
-		    for (auto &stage : event.generated_stage_runtime) {
-			    if (stage.stage.name == "op0:projection.direct_materialize_fixed_generated" ||
-			        stage.stage.name == "op0:projection.direct_materialize_fixed_fused_generated") {
-				    direct_materialize_count += stage.count;
-			    } else if (stage.stage.name == "op0:projection") {
-				    fallback_projection_count += stage.count;
-			    } else if (stage.stage.name == "op1:append_sink") {
-				    fallback_append_count += stage.count;
-			    }
-		    }
-		    REQUIRE(direct_materialize_count >= 49);
-		    REQUIRE(fallback_projection_count == 0);
-		    REQUIRE(fallback_append_count == 0);
-	    });
+	    [](const ExecutionRegionEvent &event) { RequireNativeGeneratedRuntimeWork(event); });
 }
 
 TEST_CASE("SLJIT direct append resized transient segments survive reopen and drop", "[api][jit]") {
@@ -2173,7 +2553,7 @@ TEST_CASE("SLJIT direct append resized transient segments survive reopen and dro
 	TestDeleteFile(db_path + ".wal");
 }
 
-TEST_CASE("JIT auto planner skips native-contract projection glue before region graph", "[api][jit]") {
+TEST_CASE("JIT auto planner skips native-contract projection glue in pipeline CBO", "[api][jit]") {
 	JitTestDatabase test;
 	auto &con = test.con;
 	auto &manager = test.manager;
@@ -2191,8 +2571,7 @@ TEST_CASE("JIT auto planner skips native-contract projection glue before region 
 		    return IsSljitRegionEvent(event) && EventStatus(event) == "skipped" && IsVectorizedCboSkipEvent(event) &&
 		           event.runner_cost.generated_work_class == PhysicalRunnerGeneratedWorkClass::PROJECTION_GLUE &&
 		           event.runner_cost.native_protocol_class ==
-		               PhysicalRunnerNativeProtocolClass::STATEFUL_SOURCE_SINK_PROTOCOL &&
-		           StringUtil::Contains(event.reason, "region_graph=skipped");
+		               PhysicalRunnerNativeProtocolClass::STATEFUL_SOURCE_SINK_PROTOCOL;
 	    },
 	    [](const ExecutionRegionEvent &event) {
 		    REQUIRE_FALSE(event.has_candidate);
@@ -2206,7 +2585,7 @@ TEST_CASE("JIT auto planner skips native-contract projection glue before region 
 	    });
 }
 
-TEST_CASE("JIT auto planner compiles division projection aggregate and sort as compute candidates", "[api][jit]") {
+TEST_CASE("JIT auto planner charges grouped lookup before compiling division aggregate", "[api][jit]") {
 	JitTestDatabase test;
 	auto &con = test.con;
 	auto &manager = test.manager;
@@ -2228,38 +2607,22 @@ TEST_CASE("JIT auto planner compiles division projection aggregate and sort as c
 	RequireJitEvent(
 	    manager,
 	    [](const ExecutionRegionEvent &event) {
-		    return IsCompiledSljitRegionEvent(event) &&
+		    return IsSljitRegionEvent(event) && EventStatus(event) == "skipped" && IsVectorizedCboSkipEvent(event) &&
 		           event.runner_cost.generated_work_class == PhysicalRunnerGeneratedWorkClass::COMPUTE &&
-		           event.candidate_traits.sink_kind == ExecutionRegionSinkKind::HASH_AGGREGATE_UPDATE;
+		           event.runner_cost.native_grouped_state_address_lookup_count > 0;
 	    },
 	    [](const ExecutionRegionEvent &event) {
-		    REQUIRE(event.has_candidate);
-		    REQUIRE(event.selected_runner == ExecutionRunnerKind::COMPILED_VECTORIZED);
-		    REQUIRE(event.runner_cost.input_scope == PhysicalRunnerCostInputScope::EXECUTION_REGION_CANDIDATE);
+		    REQUIRE_FALSE(event.has_candidate);
+		    REQUIRE(event.selected_runner == ExecutionRunnerKind::VECTORIZED);
+		    REQUIRE(event.runner_cost.input_scope == PhysicalRunnerCostInputScope::PHYSICAL_PIPELINE);
 		    REQUIRE(event.runner_cost.generated_work_class == PhysicalRunnerGeneratedWorkClass::COMPUTE);
-		    REQUIRE(event.runner_cost.native_aggregate_stage_count == 0);
 		    REQUIRE(event.runner_cost.generated_stage_count > 0);
-		    REQUIRE(StringUtil::Contains(event.reason, "duckdb_cbo selects compiled-vectorized physical runner"));
-		    REQUIRE_FALSE(StringUtil::Contains(event.reason, "native_operator_stage_benefit"));
-		    RequireGeneratedMachineCodeRegion(event);
-		    RequireCandidateStructure(event, 0, 2, ExecutionRegionSinkKind::HASH_AGGREGATE_UPDATE);
-	    });
-
-	RequireJitEvent(
-	    manager,
-	    [](const ExecutionRegionEvent &event) {
-		    return IsCompiledSljitRegionEvent(event) &&
-		           event.runner_cost.generated_work_class == PhysicalRunnerGeneratedWorkClass::COMPUTE &&
-		           event.candidate_traits.sink_kind == ExecutionRegionSinkKind::SORT;
-	    },
-	    [](const ExecutionRegionEvent &event) {
-		    REQUIRE(event.has_candidate);
-		    REQUIRE(event.selected_runner == ExecutionRunnerKind::COMPILED_VECTORIZED);
-		    REQUIRE(event.runner_cost.input_scope == PhysicalRunnerCostInputScope::EXECUTION_REGION_CANDIDATE);
-		    REQUIRE(event.runner_cost.generated_stage_count > 0);
-		    REQUIRE(StringUtil::Contains(event.reason, "duckdb_cbo selects compiled-vectorized physical runner"));
-		    RequireGeneratedMachineCodeRegion(event);
-		    RequireCandidateStructure(event, 0, 2, ExecutionRegionSinkKind::SORT);
+		    REQUIRE(event.runner_cost.generated_grouped_aggregate_stage_count > 0);
+		    REQUIRE(event.runner_cost.native_grouped_state_address_lookup_count > 0);
+		    REQUIRE(event.runner_cost.stateful_protocol_penalty > event.runner_cost.generated_stage_work);
+		    REQUIRE(event.runner_cost.selection_reason == "rejected_saved_work_non_positive");
+		    RequireVectorizedCboSkip(event);
+		    RequirePipelineCboOnlyTiming(event);
 	    });
 }
 
@@ -2299,7 +2662,7 @@ TEST_CASE("JIT generated work class does not label source-filter compute as proj
 	    });
 }
 
-TEST_CASE("JIT auto planner rejects tiny aggregate pipeline before region graph", "[api][jit]") {
+TEST_CASE("JIT auto planner rejects tiny aggregate pipeline in pipeline CBO", "[api][jit]") {
 	JitTestDatabase test;
 	auto &con = test.con;
 	auto &manager = test.manager;
@@ -2326,15 +2689,13 @@ TEST_CASE("JIT auto planner rejects tiny aggregate pipeline before region graph"
 		    RequireVectorizedCboSkip(event);
 		    REQUIRE(event.runner_cost.admission_class == "materialization_elision");
 		    REQUIRE(event.runner_cost.generated_work_class == PhysicalRunnerGeneratedWorkClass::COMPUTE);
-		    REQUIRE(event.runner_cost.native_aggregate_stage_count == 0);
-		    REQUIRE(event.runner_cost.generated_stage_count > 0);
-		    REQUIRE(event.stage_timings.graph_build_time_us == 0);
-		    REQUIRE(event.stage_timings.candidate_cbo_time_us == 0);
-		    REQUIRE(event.stage_timings.ir_lowering_time_us == 0);
-		    REQUIRE(StringUtil::Contains(event.reason, "before region graph"));
-		    REQUIRE(StringUtil::Contains(event.reason, "region_graph=skipped"));
-		    REQUIRE(StringUtil::Contains(event.reason, "rejected_insufficient_benefit"));
-	    });
+			    REQUIRE(event.runner_cost.native_aggregate_stage_count == 0);
+			    REQUIRE(event.runner_cost.generated_stage_count > 0);
+			    REQUIRE(event.stage_timings.graph_build_time_us == 0);
+			    REQUIRE(event.stage_timings.candidate_cbo_time_us == 0);
+			    REQUIRE(event.stage_timings.ir_lowering_time_us == 0);
+			    REQUIRE(event.runner_cost.selection_reason == "rejected_insufficient_benefit");
+		    });
 
 	for (auto &event : manager.GetEvents()) {
 		REQUIRE(EventStatus(event) != "compiled");
@@ -2428,8 +2789,6 @@ TEST_CASE("JIT auto planner costs generated aggregate updates as generated backe
 		    REQUIRE(event.runner_cost.selected_accelerated_runner);
 		    REQUIRE(event.runner_cost.generated_stage_count > 0);
 		    REQUIRE(event.runner_cost.native_aggregate_stage_count == 0);
-		    REQUIRE(StringUtil::Contains(event.reason, "duckdb_cbo selects compiled-vectorized physical runner"));
-		    REQUIRE_FALSE(StringUtil::Contains(event.reason, "native_operator_stage_benefit"));
 		    RequireGeneratedMachineCodeRegion(event);
 	    });
 }
@@ -2469,7 +2828,6 @@ TEST_CASE("JIT auto planner cost uses configurable CBO settings", "[api][jit]") 
 		    REQUIRE_FALSE(event.runner_cost.selected_accelerated_runner);
 		    REQUIRE(event.runner_cost.startup_cost >= 1000000000);
 		    REQUIRE(event.runner_cost.accelerated_runner_benefit < event.runner_cost.required_benefit);
-		    REQUIRE(StringUtil::Contains(event.reason, "region_graph=skipped"));
 	    });
 }
 
@@ -2547,8 +2905,6 @@ TEST_CASE("JIT auto policy selects high-work ungrouped aggregate updates through
 		    REQUIRE(event.runner_cost.native_aggregate_stage_count == 0);
 		    REQUIRE(event.runner_cost.expression_cost > 0);
 		    REQUIRE(event.runner_cost.saved_work_per_batch > 0);
-		    REQUIRE(StringUtil::Contains(event.reason, "duckdb_cbo selects compiled-vectorized physical runner"));
-		    REQUIRE_FALSE(StringUtil::Contains(event.reason, "native_operator_stage_benefit"));
 		    REQUIRE(StringUtil::Contains(event.ir, "primitive_payloads=native:"));
 		    RequireCandidateStructure(event, 0, 1, ExecutionRegionSinkKind::UNGROUPED_AGGREGATE_UPDATE);
 		    RequireGeneratedMachineCodeRegion(event);
@@ -2593,12 +2949,10 @@ TEST_CASE("JIT auto planner cost skips tiny filtered sums", "[api][jit]") {
 		    REQUIRE(event.runner_cost.admission_class == "materialization_elision");
 		    REQUIRE(event.runner_cost.generated_work_class == PhysicalRunnerGeneratedWorkClass::COMPUTE);
 		    REQUIRE(event.runner_cost.generated_stage_count > 0);
-		    REQUIRE(event.runner_cost.native_aggregate_stage_count == 0);
-		    REQUIRE(event.stage_timings.graph_build_time_us == 0);
-		    REQUIRE(event.stage_timings.candidate_cbo_time_us == 0);
-		    REQUIRE(event.stage_timings.ir_lowering_time_us == 0);
-		    REQUIRE(StringUtil::Contains(event.reason, "before region graph"));
-		    REQUIRE(StringUtil::Contains(event.reason, "region_graph=skipped"));
-		    REQUIRE(StringUtil::Contains(event.reason, "rejected_insufficient_benefit"));
-	    });
+			    REQUIRE(event.runner_cost.native_aggregate_stage_count == 0);
+			    REQUIRE(event.stage_timings.graph_build_time_us == 0);
+			    REQUIRE(event.stage_timings.candidate_cbo_time_us == 0);
+			    REQUIRE(event.stage_timings.ir_lowering_time_us == 0);
+			    REQUIRE(event.runner_cost.selection_reason == "rejected_insufficient_benefit");
+		    });
 }

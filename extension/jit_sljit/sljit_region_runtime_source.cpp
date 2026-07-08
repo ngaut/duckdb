@@ -219,7 +219,8 @@ idx_t SljitSourceVectorScratch::Count() const {
 UnifiedVectorFormat &SljitSourceVectorScratch::PrepareFormat(DataChunk &input, idx_t input_index, idx_t source_idx,
                                                              const char *out_of_range_error) {
 	if (input_index >= input.ColumnCount()) {
-		throw InternalException(out_of_range_error);
+		throw InternalException("%s: input_index=%llu column_count=%llu source_idx=%llu", out_of_range_error,
+		                        input_index, input.ColumnCount(), source_idx);
 	}
 	CheckSourceIndex(source_idx);
 	input.data[input_index].ToUnifiedFormat(formats[source_idx]);

@@ -21,7 +21,6 @@ struct SljitFullPipelineRecipe {
 
 struct SljitFullPipelineRecipePlan {
 	bool has_recipe = false;
-	bool uses_extended_source_fetch_budget = false;
 	SljitFullPipelineRecipe recipe;
 };
 
@@ -37,27 +36,18 @@ SljitMakeFullPipelinePrimitiveRecipe(bool uses_extended_source_fetch_budget,
 	return recipe;
 }
 
-static SljitFullPipelineRecipe
-SljitMakeFullPipelinePrimitiveRecipe(bool uses_extended_source_fetch_budget,
-                                     std::initializer_list<SljitFullPipelinePrimitiveStep> steps) {
-	return SljitMakeFullPipelinePrimitiveRecipe(uses_extended_source_fetch_budget,
-	                                            SljitFullPipelinePrimitiveSequence(steps));
-}
-
 static SljitFullPipelineRecipePlan SljitMakeFullPipelinePrimitiveRecipePlan(SljitFullPipelineRecipe recipe) {
 	if (recipe.primitive_sequence.Count() == 0) {
 		throw InternalException("SLJIT full-pipeline primitive recipe cannot be empty");
 	}
 	SljitFullPipelineRecipePlan plan;
 	plan.has_recipe = true;
-	plan.uses_extended_source_fetch_budget = recipe.uses_extended_source_fetch_budget;
 	plan.recipe = std::move(recipe);
 	return plan;
 }
 
-static SljitFullPipelineRecipePlan SljitMakeFullPipelineNativeOnlyPlan(bool uses_extended_source_fetch_budget) {
+static SljitFullPipelineRecipePlan SljitMakeFullPipelineNativeOnlyPlan() {
 	SljitFullPipelineRecipePlan plan;
-	plan.uses_extended_source_fetch_budget = uses_extended_source_fetch_budget;
 	return plan;
 }
 

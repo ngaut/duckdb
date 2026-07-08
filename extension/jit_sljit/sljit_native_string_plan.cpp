@@ -187,8 +187,8 @@ static bool IsNativeAsciiString(const string &value) {
 	return true;
 }
 
-static bool TryReadNativeSubstringReference(const ExecutionExpressionIR &substring, idx_t &source_index,
-                                            idx_t &substring_length) {
+bool TryReadNativeStringSubstringReference(const ExecutionExpressionIR &substring, idx_t &source_index,
+                                           idx_t &substring_length) {
 	if (substring.kind != ExecutionExpressionIRKind::INTRINSIC ||
 	    substring.intrinsic != ExecutionExpressionIntrinsicKind::STRING_SUBSTRING ||
 	    substring.return_type.id() != LogicalTypeId::VARCHAR || substring.children.size() != 3 ||
@@ -214,7 +214,7 @@ static bool TryReadNativeSubstringReference(const ExecutionExpressionIR &substri
 static bool TryReadNativeSubstringConstant(const ExecutionExpressionIR &substring,
                                            const ExecutionExpressionIR &constant, idx_t &source_index,
                                            idx_t &substring_length, string &value) {
-	if (!TryReadNativeSubstringReference(substring, source_index, substring_length) ||
+	if (!TryReadNativeStringSubstringReference(substring, source_index, substring_length) ||
 	    constant.kind != ExecutionExpressionIRKind::CONSTANT || constant.return_type.id() != LogicalTypeId::VARCHAR ||
 	    constant.constant.IsNull()) {
 		return false;
@@ -242,7 +242,7 @@ bool TryReadNativeStringSubstringInListConstant(const ExecutionExpressionIR &roo
 
 	if (root.kind == ExecutionExpressionIRKind::IN_LIST) {
 		if (root.not_in || root.children.size() < 2 || !root.children[0] ||
-		    !TryReadNativeSubstringReference(*root.children[0], source_index, substring_length)) {
+		    !TryReadNativeStringSubstringReference(*root.children[0], source_index, substring_length)) {
 			return false;
 		}
 		for (idx_t child_idx = 1; child_idx < root.children.size(); child_idx++) {

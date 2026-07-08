@@ -1448,6 +1448,18 @@ struct JitCboNativeOperatorStageBenefitSetting {
 	static constexpr idx_t SettingIndex = NEXT_SETTING_INDEX();
 };
 
+struct JitCboSourceContractScanFilterPenaltySetting {
+	using RETURN_TYPE = idx_t;
+	static constexpr const char *Name = "jit_cbo_source_contract_scan_filter_penalty";
+	static constexpr const char *Description =
+	    "Per-vector protocol cost for scan-filtered source contracts feeding native join fusion in the JIT CBO "
+	    "physical-runner decision";
+	static constexpr const char *InputType = "UBIGINT";
+	static constexpr const char *DefaultValue = "4096";
+	static constexpr SettingScopeTarget Scope = SettingScopeTarget::LOCAL_DEFAULT;
+	static constexpr idx_t SettingIndex = NEXT_SETTING_INDEX();
+};
+
 struct JitCboStartupBaseCostSetting {
 	using RETURN_TYPE = idx_t;
 	static constexpr const char *Name = "jit_cbo_startup_base_cost";

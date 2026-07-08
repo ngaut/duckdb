@@ -13,8 +13,7 @@ namespace duckdb {
 
 static bool BuildExecutableRegionOp(const SljitNativeRegionOpPlan &op, SljitExecutableRegionOp &executable,
                                     string &error, const vector<bool> &input_not_null,
-                                    const vector<Value> &input_min_values, const vector<Value> &input_max_values,
-                                    bool build_filter_code = true, bool build_aggregate_update_payload_code = true) {
+                                    const vector<Value> &input_min_values, const vector<Value> &input_max_values) {
 	executable.kind = op.kind;
 	executable.operator_index = op.operator_index;
 	executable.input_types = op.input_types;
@@ -22,10 +21,7 @@ static bool BuildExecutableRegionOp(const SljitNativeRegionOpPlan &op, SljitExec
 	executable.output_not_null = SljitBuildExecutableOutputNotNull(op, input_not_null);
 	switch (op.kind) {
 	case SljitNativeRegionOpKind::FILTER:
-		SljitPrepareExecutableRegionExpression(op.filter, executable.filter, &input_not_null, !build_filter_code);
-		if (!build_filter_code) {
-			return true;
-		}
+		SljitPrepareExecutableRegionExpression(op.filter, executable.filter, &input_not_null, true);
 		return SljitCompilePreparedExecutableRegionExpression(executable.filter, true, error);
 	case SljitNativeRegionOpKind::HASH_JOIN_PROBE:
 		executable.hash_join_probe.plan = op.hash_join_probe.Copy(false);
@@ -109,9 +105,6 @@ static bool BuildExecutableRegionOp(const SljitNativeRegionOpPlan &op, SljitExec
 		return true;
 	case SljitNativeRegionOpKind::AGGREGATE_UPDATE:
 		SljitBuildExecutableAggregateUpdateMetadata(op.aggregate_update, executable.aggregate_update, input_not_null);
-		if (!build_aggregate_update_payload_code) {
-			return true;
-		}
 		if (!SljitBuildExecutableAggregateUpdatePayloadCode(op.aggregate_update, executable.aggregate_update, error,
 		                                                    input_not_null, input_min_values, input_max_values)) {
 			return false;
@@ -187,7 +180,7 @@ static void SljitTryBuildExecutableAggregateGroupReservePlan(const SljitNativeAg
 	reserve.group_count = reserve_count;
 }
 
-static bool SljitCanDeferAggregateUpdatePayloadCode(const vector<SljitNativeRegionOpPlan> &ops, idx_t op_idx) {
+static bool SljitCanBuildFilteredAggregateUpdate(const vector<SljitNativeRegionOpPlan> &ops, idx_t op_idx) {
 	if (op_idx == 0 || op_idx + 1 != ops.size() || ops[op_idx].kind != SljitNativeRegionOpKind::AGGREGATE_UPDATE) {
 		return false;
 	}
@@ -209,11 +202,8 @@ bool BuildSljitExecutableRegion(const SljitNativeRegionPlan &region, SljitExecut
 	for (idx_t op_idx = 0; op_idx < region.ops.size(); op_idx++) {
 		auto &op = region.ops[op_idx];
 		SljitExecutableRegionOp executable_op;
-		auto defer_aggregate_payload_code = SljitCanDeferAggregateUpdatePayloadCode(region.ops, op_idx);
-		const auto defer_filter_code = op.kind == SljitNativeRegionOpKind::FILTER && op_idx + 1 < region.ops.size() &&
-		                               SljitCanDeferAggregateUpdatePayloadCode(region.ops, op_idx + 1);
-		if (!BuildExecutableRegionOp(op, executable_op, error, current_not_null, current_min_values, current_max_values,
-		                             !defer_filter_code, !defer_aggregate_payload_code)) {
+		if (!BuildExecutableRegionOp(op, executable_op, error, current_not_null, current_min_values,
+		                             current_max_values)) {
 			return false;
 		}
 		if (op.kind == SljitNativeRegionOpKind::AGGREGATE_UPDATE) {
@@ -224,23 +214,11 @@ bool BuildSljitExecutableRegion(const SljitNativeRegionPlan &region, SljitExecut
 			                                                 executable_op.aggregate_update.plan.group_reserve);
 		}
 		executable.ops.push_back(std::move(executable_op));
-		if (defer_aggregate_payload_code) {
+		if (SljitCanBuildFilteredAggregateUpdate(region.ops, op_idx)) {
 			auto &aggregate_update_op = executable.ops[op_idx];
 			if (!SljitTryBuildFilteredAggregateUpdate(executable.ops[op_idx - 1], aggregate_update_op, error,
 			                                          current_not_null, current_min_values, current_max_values)) {
 				return false;
-			}
-			if (!aggregate_update_op.aggregate_update.filtered_update.IsExecutable() &&
-			    !SljitCompilePreparedExecutableRegionExpression(executable.ops[op_idx - 1].filter, true, error)) {
-				return false;
-			}
-			if (!aggregate_update_op.aggregate_update.filtered_update.IsExecutable()) {
-				if (!SljitBuildExecutableAggregateUpdatePayloadCode(
-				        op.aggregate_update, aggregate_update_op.aggregate_update, error, current_not_null,
-				        current_min_values, current_max_values)) {
-					return false;
-				}
-				SljitSelectExecutableAggregateDirectUpdatePlan(aggregate_update_op.aggregate_update);
 			}
 		}
 		SljitUpdateExecutableCurrentNotNull(op, current_not_null);

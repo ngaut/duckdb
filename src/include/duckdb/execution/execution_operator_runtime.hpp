@@ -76,6 +76,22 @@ struct ExecutionAggregateUpdateState {
 	virtual ~ExecutionAggregateUpdateState() {
 	}
 	virtual SinkResultType Sink(DataChunk &input) = 0;
+	virtual bool SupportsDistinctSink() const {
+		return false;
+	}
+	virtual bool SupportsDistinctSelectedSink() const {
+		return false;
+	}
+	virtual SinkResultType SinkDistinct(DataChunk &input) {
+		(void)input;
+		throw InternalException("execution aggregate update state does not support distinct sink ingestion");
+	}
+	virtual SinkResultType SinkDistinctSelected(DataChunk &input, const SelectionVector &selection, idx_t count) {
+		(void)input;
+		(void)selection;
+		(void)count;
+		throw InternalException("execution aggregate update state does not support selected distinct sink ingestion");
+	}
 };
 
 struct ExecutionOperatorStageRecorder {
@@ -140,12 +156,14 @@ struct ExecutionGroupedAggregateStateAddressState {
 	virtual bool TryAppendNewGroups(DataChunk &input, const ExecutionRegionSinkInfo &sink_info,
 	                                const vector<const ExecutionPrimitiveAggregateUpdateLane *> &lanes,
 	                                optional_ptr<ExecutionOperatorStageRecorder> recorder = nullptr,
-	                                bool finish = true) {
+	                                bool finish = true,
+	                                optional_ptr<const ExecutionDenseGroupDomain> dense_domain = nullptr) {
 		(void)input;
 		(void)sink_info;
 		(void)lanes;
 		(void)recorder;
 		(void)finish;
+		(void)dense_domain;
 		return false;
 	}
 	virtual bool TryUpdateNewGroupsWithSelectedStateAddresses(
@@ -232,13 +250,29 @@ struct ExecutionGroupedAggregateStateAddressState {
 	virtual bool TryAppendNewGroupsWithStateAddresses(
 	    DataChunk &input, const ExecutionRegionSinkInfo &sink_info,
 	    ExecutionGroupedAggregateStateAddressUpdateFunction update_function, void *update_state,
-	    optional_ptr<ExecutionOperatorStageRecorder> recorder = nullptr, bool finish = true) {
+	    optional_ptr<ExecutionOperatorStageRecorder> recorder = nullptr, bool finish = true,
+	    optional_ptr<const ExecutionDenseGroupDomain> dense_domain = nullptr) {
 		(void)input;
 		(void)sink_info;
 		(void)update_function;
 		(void)update_state;
 		(void)recorder;
 		(void)finish;
+		(void)dense_domain;
+		return false;
+	}
+	virtual bool TryAppendNewGroupKeysWithStateAddresses(
+	    DataChunk &groups, const ExecutionRegionSinkInfo &sink_info,
+	    ExecutionGroupedAggregateStateAddressUpdateFunction update_function, void *update_state,
+	    optional_ptr<ExecutionOperatorStageRecorder> recorder = nullptr, bool finish = true,
+	    optional_ptr<const ExecutionDenseGroupDomain> dense_domain = nullptr) {
+		(void)groups;
+		(void)sink_info;
+		(void)update_function;
+		(void)update_state;
+		(void)recorder;
+		(void)finish;
+		(void)dense_domain;
 		return false;
 	}
 	virtual bool TryResolveNewGroups(DataChunk &input, const ExecutionRegionSinkInfo &sink_info, Vector &addresses,
@@ -250,6 +284,9 @@ struct ExecutionGroupedAggregateStateAddressState {
 		(void)recorder;
 		(void)finish;
 		return false;
+	}
+	virtual void RecordDirectStateAddressUpdates(idx_t count) {
+		(void)count;
 	}
 	virtual void FinishStateUpdates() {
 	}

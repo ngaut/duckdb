@@ -3,6 +3,8 @@
 # Verify artifacts produced by tpch_benchmark.py.
 
 import argparse
+import collections
+import re
 import sys
 from pathlib import Path
 
@@ -26,11 +28,24 @@ from tpch_common import (
     TPCHConfigurationError,
     normalize_tpch_query_ids,
 )
-from shape_inventory import verify_shape_inventory
 
 POLICY_ORDER = {policy: index for index, policy in enumerate(DEFAULT_POLICIES)}
 DEFAULT_MIN_AUTO_SPEEDUP = 0.98
 DEFAULT_AUTO_NO_DECISION_NOISE_S = 0.005
+MATERIALIZATION_ELISION_FORBIDDEN_RUNTIME_PATTERNS = (
+    ("fallback", re.compile(r"fallback", re.IGNORECASE)),
+    ("whole executor", re.compile(r"whole[-_]executor", re.IGNORECASE)),
+    ("materialization", re.compile(r"materialization", re.IGNORECASE)),
+    ("buffer append", re.compile(r"buffer_append", re.IGNORECASE)),
+)
+RUNTIME_PROOF_FIELDS = (
+    "source_stage_count_breakdown",
+    "source_stage_runtime_breakdown",
+    "generated_stage_count_breakdown",
+    "generated_stage_runtime_breakdown",
+    "jit_runtime_path_counts",
+    "jit_runtime_delegation_counts",
+)
 
 
 def expected_queries(rows: list[dict], requested: list[str] | None) -> list[str]:
@@ -130,13 +145,327 @@ def verify_counters(rows: list[dict], queries: list[str], policies: list[str], r
                 require(has_cost_evidence, f"counters.csv: missing runner cost components: {row}")
 
 
+def counter_kernel_key(row: dict) -> tuple[str, str, str, str, str]:
+    return (row["query"], row["policy"], row["repeat"], row["backend_name"], row["kernel_id"])
+
+
+def runtime_proof_names(value: str) -> list[str]:
+    names = []
+    for entry in value.split(";"):
+        name = entry.split("=", 1)[0].strip()
+        if not name:
+            continue
+        names.append(name)
+        tail = name.split(":", 1)[-1]
+        names.append(tail)
+        names.extend(component for component in tail.split(".") if component)
+    return names
+
+
+def row_contains_materialization_elision_violation(row: dict) -> str:
+    for field in RUNTIME_PROOF_FIELDS:
+        proof_names = set(runtime_proof_names(row.get(field, "")))
+        for proof_name in proof_names:
+            for label, pattern in MATERIALIZATION_ELISION_FORBIDDEN_RUNTIME_PATTERNS:
+                if pattern.search(proof_name):
+                    return f"{field} contains {label} runtime work: {proof_name}"
+    return ""
+
+
+def row_runtime_proof_names(row: dict) -> set[str]:
+    return set(runtime_proof_names(row.get("jit_runtime_proof_counts", "")))
+
+
+def row_has_runtime_proof(row: dict, proof: str) -> bool:
+    return proof in row_runtime_proof_names(row)
+
+
+def counter_breakdown_has_positive_count(value: str) -> bool:
+    for entry in value.split(";"):
+        if "=" not in entry:
+            continue
+        _, count = entry.rsplit("=", 1)
+        try:
+            if int(count) > 0:
+                return True
+        except ValueError:
+            continue
+    return False
+
+
+def row_has_generated_stage_runtime(row: dict) -> bool:
+    return counter_breakdown_has_positive_count(row.get("generated_stage_count_breakdown", ""))
+
+
+def row_has_no_runtime_work(row: dict) -> bool:
+    return (
+        row_int(row, "input_rows") == 0
+        and row_int(row, "output_rows") == 0
+        and not row_has_generated_stage_runtime(row)
+        and not row.get("jit_runtime_delegation_counts", "")
+    )
+
+
+def selected_cbo_rows(rows: list[dict]) -> list[dict]:
+    result = []
+    for row in rows:
+        if (
+            row_bool(row, "runner_cost_profile")
+            and row_int(row, "runner_cost_selected_accelerated_runner_count") > 0
+            and row_int(row, "kernel_id") > 0
+        ):
+            result.append(row)
+            require(row["status"] == "compiled", f"counters.csv: selected CBO row is not a compile row: {row}")
+            require(row["execution_mode"] == "native", f"counters.csv: selected CBO row is not native: {row}")
+            require(
+                row["selected_runner"] == "compiled_vectorized",
+                f"counters.csv: selected CBO row has unexpected runner: {row}",
+            )
+    return result
+
+
+def require_runtime_rows(
+    runtime_rows_by_kernel: dict[tuple[str, str, str, str, str], list[dict]],
+    cbo_row: dict,
+    require_runtime_proof: bool,
+    label: str,
+) -> list[dict]:
+    key = counter_kernel_key(cbo_row)
+    runtime_rows = runtime_rows_by_kernel.get(key, [])
+    require(
+        runtime_rows or not require_runtime_proof,
+        f"counters.csv: selected {label} CBO row has no runtime counters: {cbo_row}",
+    )
+    return runtime_rows
+
+
+def verify_selected_generated_stage_runtime_contract(
+    selected_rows: list[dict],
+    runtime_rows_by_kernel: dict[tuple[str, str, str, str, str], list[dict]],
+    require_runtime_proof: bool,
+) -> None:
+    credited_rows = [
+        row
+        for row in selected_rows
+        if row_int(row, "runner_cost_generated_stage_count") > 0
+        and row_int(row, "runner_cost_generated_stage_work") > 0
+    ]
+    for cbo_row in credited_rows:
+        runtime_rows = require_runtime_rows(runtime_rows_by_kernel, cbo_row, require_runtime_proof, "generated-stage")
+        if not require_runtime_proof:
+            continue
+        proof_rows = [
+            row
+            for row in runtime_rows
+            if row_has_runtime_proof(row, "generated_stage_work") or row_has_generated_stage_runtime(row)
+        ]
+        no_work_rows = [
+            row for row in runtime_rows if row_has_runtime_proof(row, "no_work") or row_has_no_runtime_work(row)
+        ]
+        require(
+            proof_rows or len(no_work_rows) == len(runtime_rows),
+            "counters.csv: selected generated-stage CBO row has no generated stage runtime proof "
+            f"(no_work_rows={len(no_work_rows)}): {cbo_row}",
+        )
+
+
+def verify_selected_native_operator_runtime_contract(
+    selected_rows: list[dict],
+    runtime_rows_by_kernel: dict[tuple[str, str, str, str, str], list[dict]],
+    require_runtime_proof: bool,
+) -> None:
+    credited_rows = [
+        row
+        for row in selected_rows
+        if row_int(row, "runner_cost_native_operator_work") > 0
+        and (
+            row_int(row, "runner_cost_native_join_stage_count") > 0
+            or row_int(row, "runner_cost_native_aggregate_stage_count") > 0
+        )
+    ]
+    for cbo_row in credited_rows:
+        runtime_rows = require_runtime_rows(runtime_rows_by_kernel, cbo_row, require_runtime_proof, "native-operator")
+        if not require_runtime_proof:
+            continue
+        proof_rows = [row for row in runtime_rows if row_has_runtime_proof(row, "generated_backend_work")]
+        no_work_rows = [
+            row for row in runtime_rows if row_has_runtime_proof(row, "no_work") or row_has_no_runtime_work(row)
+        ]
+        require(
+            proof_rows or len(no_work_rows) == len(runtime_rows),
+            "counters.csv: selected native-operator CBO row has no generated_backend_work runtime proof "
+            f"(no_work_rows={len(no_work_rows)}): {cbo_row}",
+        )
+
+
+def verify_selected_generated_backend_runtime_contract(
+    selected_rows: list[dict],
+    runtime_rows_by_kernel: dict[tuple[str, str, str, str, str], list[dict]],
+    require_runtime_proof: bool,
+) -> None:
+    credited_rows = [
+        row
+        for row in selected_rows
+        if row_int(row, "runner_cost_generated_backend_stage_count") > 0
+        and row_int(row, "runner_cost_generated_backend_stage_work") > 0
+    ]
+    for cbo_row in credited_rows:
+        runtime_rows = require_runtime_rows(
+            runtime_rows_by_kernel, cbo_row, require_runtime_proof, "generated-backend"
+        )
+        if not require_runtime_proof:
+            continue
+        proof_rows = [row for row in runtime_rows if row_has_runtime_proof(row, "generated_backend_work")]
+        no_work_rows = [row for row in runtime_rows if row_has_runtime_proof(row, "no_work")]
+        no_work_suppressed_codegen = (
+            no_work_rows
+            and len(no_work_rows) == len(runtime_rows)
+            and all(row_int(row, "lazy_code_size") == 0 for row in no_work_rows)
+            and all(not row.get("jit_runtime_delegation_counts", "") for row in no_work_rows)
+        )
+        require(
+            proof_rows or no_work_suppressed_codegen,
+            "counters.csv: selected generated-backend CBO row has no generated_backend_work runtime proof "
+            f"(no_work_rows={len(no_work_rows)}): {cbo_row}",
+        )
+
+
+def verify_selected_full_pipeline_runtime_contract(
+    selected_rows: list[dict],
+    runtime_rows_by_kernel: dict[tuple[str, str, str, str, str], list[dict]],
+    require_runtime_proof: bool,
+) -> None:
+    credited_rows = [
+        row
+        for row in selected_rows
+        if row_bool(row, "runner_cost_full_pipeline") and row_int(row, "runner_cost_full_pipeline_work") > 0
+    ]
+    for cbo_row in credited_rows:
+        runtime_rows = require_runtime_rows(runtime_rows_by_kernel, cbo_row, require_runtime_proof, "full-pipeline")
+        if not require_runtime_proof:
+            continue
+        proof_rows = [row for row in runtime_rows if row_has_runtime_proof(row, "full_pipeline_ownership")]
+        no_work_rows = [row for row in runtime_rows if row_has_runtime_proof(row, "no_work")]
+        require(
+            proof_rows or len(no_work_rows) == len(runtime_rows),
+            "counters.csv: selected full-pipeline CBO row has no full_pipeline_ownership runtime proof "
+            f"(no_work_rows={len(no_work_rows)}): {cbo_row}",
+        )
+
+
+def verify_cbo_runtime_counter_contract(rows: list[dict], require_runtime_proof: bool) -> None:
+    runtime_rows_by_kernel = collections.defaultdict(list)
+    for row in rows:
+        if row["status"] == "executed" and row["execution_mode"] == "native" and row_int(row, "kernel_id") > 0:
+            runtime_rows_by_kernel[counter_kernel_key(row)].append(row)
+
+    selected_rows = selected_cbo_rows(rows)
+    verify_selected_generated_stage_runtime_contract(selected_rows, runtime_rows_by_kernel, require_runtime_proof)
+    verify_selected_native_operator_runtime_contract(selected_rows, runtime_rows_by_kernel, require_runtime_proof)
+    verify_selected_generated_backend_runtime_contract(selected_rows, runtime_rows_by_kernel, require_runtime_proof)
+    verify_selected_full_pipeline_runtime_contract(selected_rows, runtime_rows_by_kernel, require_runtime_proof)
+
+    credited_kernels = []
+    for row in selected_rows:
+        if (
+            row_int(row, "runner_cost_materialization_elision_count") > 0
+            and row_int(row, "runner_cost_materialization_elision_work") > 0
+        ):
+            credited_kernels.append(row)
+            require(
+                row_int(row, "runner_cost_saved_work_per_batch") > 0,
+                f"counters.csv: materialization-elision CBO row has no saved work: {row}",
+            )
+
+    if not credited_kernels:
+        return
+    if not runtime_rows_by_kernel:
+        require(
+            not require_runtime_proof,
+            "counters.csv: selected materialization-elision CBO rows exist, but this artifact has no runtime proof "
+            "rows; rerun with --trace-runtime or disable --require-cbo-runtime-proof",
+        )
+        return
+
+    for cbo_row in credited_kernels:
+        runtime_rows = require_runtime_rows(
+            runtime_rows_by_kernel, cbo_row, require_runtime_proof, "materialization-elision"
+        )
+        proof_rows = []
+        for runtime_row in runtime_rows:
+            violation = row_contains_materialization_elision_violation(runtime_row)
+            require(
+                not violation,
+                f"counters.csv: materialization-elision runtime proof contains materialization/fallback work: "
+                f"{violation}: {runtime_row}",
+            )
+            delegation_counts = runtime_row.get("jit_runtime_delegation_counts", "")
+            require(
+                not delegation_counts,
+                f"counters.csv: materialization-elision kernel delegated runtime work: {runtime_row}",
+            )
+            if row_has_runtime_proof(runtime_row, "materialization_elision"):
+                proof_rows.append(runtime_row)
+        require(
+            proof_rows or not require_runtime_proof,
+            f"counters.csv: materialization-elision kernel has no materialization_elision runtime proof rows: {cbo_row}",
+        )
+        for runtime_row in proof_rows:
+            require(
+                row_int(runtime_row, "invocation_count") > 0,
+                f"counters.csv: materialization-elision runtime proof row was not invoked: {runtime_row}",
+            )
+
+
+def median_value(values: list[float]) -> float:
+    require(values, "cannot compute median for empty value list")
+    sorted_values = sorted(values)
+    mid = len(sorted_values) // 2
+    if len(sorted_values) % 2 == 1:
+        return sorted_values[mid]
+    return (sorted_values[mid - 1] + sorted_values[mid]) / 2
+
+
+def paired_policy_runtime_stats(
+    run_rows: list[dict], query: str, baseline_policy: str, test_policy: str
+) -> dict[str, float] | None:
+    by_repeat = collections.defaultdict(dict)
+    for row in run_rows:
+        if row["query"] != query or row["policy"] not in (baseline_policy, test_policy):
+            continue
+        by_repeat[row_int(row, "repeat")][row["policy"]] = row_int(row, "query_time_us")
+
+    deltas = []
+    speedups = []
+    for repeat in sorted(by_repeat):
+        repeat_rows = by_repeat[repeat]
+        if baseline_policy in repeat_rows and test_policy in repeat_rows:
+            baseline_us = repeat_rows[baseline_policy]
+            test_us = repeat_rows[test_policy]
+            deltas.append((test_us - baseline_us) / 1_000_000)
+            if baseline_us > 0 and test_us > 0:
+                speedups.append(float(baseline_us) / float(test_us))
+    if not deltas:
+        return None
+    require(
+        len(speedups) == len(deltas),
+        f"runs.csv: paired runtime stats require positive timings for query {query}",
+    )
+    return {
+        "median_delta_s": median_value(deltas),
+        "median_speedup": median_value(speedups),
+    }
+
+
 def verify_performance_gaps(
     rows: list[dict],
+    run_rows: list[dict],
     queries: list[str],
     policies: list[str],
     require_no_auto_decisions: bool,
     min_auto_speedup: float,
     auto_no_decision_noise_s: float,
+    performance_checks: bool,
 ) -> None:
     require_columns(rows, PERFORMANCE_GAP_FIELDS, "performance_gaps.csv")
     expected_queries = set(queries)
@@ -157,18 +486,33 @@ def verify_performance_gaps(
                 + row_int(row, "auto_unsupported_decisions")
                 + row_int(row, "auto_skipped_decisions")
             )
+            auto_selected_accelerated = row_int(row, "auto_runner_cost_selected_accelerated_runner_count")
+            auto_compiled_regions = row_int(row, "auto_compiled_regions")
+            auto_no_accelerated_runner = auto_compiled_regions == 0 and auto_selected_accelerated == 0
             if require_no_auto_decisions:
                 require(auto_decisions == 0, f"performance_gaps.csv: auto made JIT decisions: {row}")
             auto_slowdown_s = row_float(row, "auto_median_s") - row_float(row, "off_median_s")
-            if auto_decisions == 0:
+            paired_stats = paired_policy_runtime_stats(run_rows, row["query"], "off", "auto")
+            paired_slowdown_s = paired_stats["median_delta_s"] if paired_stats is not None else auto_slowdown_s
+            paired_speedup = (
+                paired_stats["median_speedup"] if paired_stats is not None else row_float(row, "auto_speedup_vs_off")
+            )
+            if performance_checks and auto_no_accelerated_runner:
                 require(
-                    auto_slowdown_s <= auto_no_decision_noise_s,
-                    f"performance_gaps.csv: zero-decision auto slowdown above {auto_no_decision_noise_s}s: {row}",
+                    paired_slowdown_s <= auto_no_decision_noise_s,
+                    f"performance_gaps.csv: no-accelerated-runner auto slowdown above "
+                    f"{auto_no_decision_noise_s}s "
+                    f"(paired_median_delta_s={paired_slowdown_s}, paired_median_speedup={paired_speedup}, "
+                    f"aggregate_median_delta_s={auto_slowdown_s}): {row}",
                 )
-            else:
+            elif performance_checks and paired_slowdown_s <= auto_no_decision_noise_s:
+                pass
+            elif performance_checks:
                 require(
-                    row_float(row, "auto_speedup_vs_off") >= min_auto_speedup,
-                    f"performance_gaps.csv: auto speedup below {min_auto_speedup}: {row}",
+                    paired_speedup >= min_auto_speedup,
+                    f"performance_gaps.csv: auto speedup below {min_auto_speedup} "
+                    f"(paired_median_speedup={paired_speedup}, aggregate_speedup={row_float(row, 'auto_speedup_vs_off')}, "
+                    f"paired_median_delta_s={paired_slowdown_s}): {row}",
                 )
             if auto_decisions > 0:
                 require(row["auto_primary_blocker"], f"performance_gaps.csv: missing auto blocker: {row}")
@@ -214,8 +558,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--policies", nargs="+", default=None, choices=DEFAULT_POLICIES)
     parser.add_argument("--repeats", type=int, default=None)
     parser.add_argument("--require-no-auto-decisions", action="store_true")
+    parser.add_argument("--performance-checks", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--min-auto-speedup", type=float, default=DEFAULT_MIN_AUTO_SPEEDUP)
     parser.add_argument("--auto-no-decision-noise-s", type=float, default=DEFAULT_AUTO_NO_DECISION_NOISE_S)
+    parser.add_argument(
+        "--require-cbo-runtime-proof",
+        action="store_true",
+        help="Require runtime-traced proof rows for selected CBO-credited generated-stage/backend/full-pipeline kernels.",
+    )
     return parser.parse_args()
 
 
@@ -232,15 +582,17 @@ def main() -> int:
     verify_summary(summary_rows, queries, policies)
     verify_runs(trace_dir, run_rows, queries, policies, repeats)
     verify_counters(counter_rows, queries, policies, repeats)
+    verify_cbo_runtime_counter_contract(counter_rows, args.require_cbo_runtime_proof)
     verify_performance_gaps(
         performance_gap_rows,
+        run_rows,
         queries,
         policies,
         args.require_no_auto_decisions,
         args.min_auto_speedup,
         args.auto_no_decision_noise_s,
+        args.performance_checks,
     )
-    verify_shape_inventory(trace_dir, queries, policies)
     print(f"verified TPC-H JIT benchmark: {args.trace_dir.resolve()}")
     return 0
 

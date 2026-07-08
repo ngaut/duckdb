@@ -13,11 +13,26 @@
 
 namespace duckdb {
 
-static bool ExecutionRegionExpressionCanUseGeneratedSourceStage(const ExecutionExpressionFragment &expression) {
-	if (!expression.root) {
+static bool ExecutionRegionExpressionReferencesOnlyLocalSourceFilterInput(const ExecutionExpressionIR &expression) {
+	if (expression.kind == ExecutionExpressionIRKind::REFERENCE && expression.ref_index != 0) {
 		return false;
 	}
-	return !expression.traits.has_arithmetic_binary;
+	if (expression.left && !ExecutionRegionExpressionReferencesOnlyLocalSourceFilterInput(*expression.left)) {
+		return false;
+	}
+	if (expression.right && !ExecutionRegionExpressionReferencesOnlyLocalSourceFilterInput(*expression.right)) {
+		return false;
+	}
+	if (expression.else_node &&
+	    !ExecutionRegionExpressionReferencesOnlyLocalSourceFilterInput(*expression.else_node)) {
+		return false;
+	}
+	for (auto &child : expression.children) {
+		if (child && !ExecutionRegionExpressionReferencesOnlyLocalSourceFilterInput(*child)) {
+			return false;
+		}
+	}
+	return true;
 }
 
 static bool ExecutionRegionTypeCanUseGeneratedSourceStage(const LogicalType &type) {
@@ -41,16 +56,41 @@ static bool ExecutionRegionTypeCanUseGeneratedSourceStage(const LogicalType &typ
 	}
 }
 
+ExecutionRegionGeneratedSourceFilterCapability
+GetExecutionRegionGeneratedSourceFilterCapability(const ExecutionExpressionFragment &expression,
+                                                  const LogicalType &source_type) {
+	ExecutionRegionGeneratedSourceFilterCapability result;
+	if (!expression.root) {
+		result.blocker = "source filter expression lowering unavailable";
+		return result;
+	}
+	if (expression.traits.has_arithmetic_binary) {
+		result.blocker = "source filter expression contains unsupported arithmetic";
+		return result;
+	}
+	if (!ExecutionRegionExpressionReferencesOnlyLocalSourceFilterInput(*expression.root)) {
+		result.blocker = "source filter expression references non-local input";
+		return result;
+	}
+	if (!ExecutionRegionTypeCanUseGeneratedSourceStage(source_type)) {
+		result.blocker = "source filter type is unsupported";
+		return result;
+	}
+	result.can_generate = true;
+	return result;
+}
+
 static bool ExecutionRegionSourceFilterCanUseGeneratedSourceStage(const ExecutionSourceContract &descriptor,
                                                                   const ExecutionRegionSourceFilter &filter) {
-	if (!filter.expression || !ExecutionRegionExpressionCanUseGeneratedSourceStage(*filter.expression)) {
+	if (!filter.expression) {
 		return false;
 	}
 	auto &input_types = descriptor.table_scan_contract.source_contract_input_types;
 	if (filter.scan_column_index >= input_types.size()) {
 		return false;
 	}
-	return ExecutionRegionTypeCanUseGeneratedSourceStage(input_types[filter.scan_column_index]);
+	return GetExecutionRegionGeneratedSourceFilterCapability(*filter.expression, input_types[filter.scan_column_index])
+	    .can_generate;
 }
 
 static void AddExecutionRegionSourceFilters(const ExecutionSourceContract &descriptor,
@@ -75,6 +115,14 @@ static void AddExecutionRegionSourceFilters(const ExecutionSourceContract &descr
 		} else {
 			filter.generated_source_stage_candidate =
 			    ExecutionRegionSourceFilterCanUseGeneratedSourceStage(descriptor, filter);
+			if (!filter.generated_source_stage_candidate) {
+				auto &input_types = descriptor.table_scan_contract.source_contract_input_types;
+				filter.reason = filter.scan_column_index < input_types.size()
+				                    ? GetExecutionRegionGeneratedSourceFilterCapability(*filter.expression,
+				                                                                         input_types[filter.scan_column_index])
+				                          .blocker
+				                    : "source filter scan column is outside source input layout";
+			}
 		}
 		source.filters.push_back(std::move(filter));
 	}
@@ -432,6 +480,10 @@ bool ExecutionRegionAggregateUpdateGeneratesBody(const ExecutionRegionSinkInfo &
 		return false;
 	}
 	auto &contract = sink.aggregate_contract;
+	if (contract.distinct_aggregate_count != 0 || contract.distinct_table_count != 0 ||
+	    contract.distinct_child_count != 0 || contract.distinct_filter_count != 0) {
+		return false;
+	}
 	if (contract.native_state_update_contract.status != ExecutionRegionStateContractStatus::READY) {
 		return false;
 	}
@@ -487,6 +539,18 @@ static void AccumulateExecutionRegionSourceTraits(const ExecutionRegionNode &nod
 		return;
 	}
 
+	if (execution == ExecutionRegionSourceExecutionKind::SOURCE_CONTRACT) {
+		auto source_cardinality = node.source->estimated_source_cardinality;
+		if (source_cardinality == 0) {
+			source_cardinality = node.estimated_cardinality;
+		}
+		traits.source_contract_input_cardinality = source_cardinality;
+		const bool stateful_hash_join_output_unknown =
+		    node.source->kind == ExecutionRegionSourceKind::STATEFUL_OPERATOR &&
+		    node.source->hash_join_contract.present && !node.source->estimated_source_cardinality_exact;
+		traits.source_contract_output_cardinality_unknown =
+		    node.source->dynamic_filters || source_cardinality == 0 || stateful_hash_join_output_unknown;
+	}
 	traits.source_filter_count = node.source->filters.size();
 	for (auto &filter : node.source->filters) {
 		if (!filter.expression || !filter.expression->root) {
@@ -504,6 +568,22 @@ static bool ExecutionRegionNodeIsMarkHashJoinProbe(const ExecutionRegionNode &no
 	       node.operator_info->hash_join_contract.present &&
 	       node.operator_info->hash_join_contract.native_probe_output_mode ==
 	           ExecutionHashJoinProbeOutputMode::MARK_PROBE;
+}
+
+static bool ExecutionRegionNodeProducesMatchedHashJoinSelection(const ExecutionRegionNode &node) {
+	return node.kind == ExecutionRegionNodeKind::OPERATOR && node.operator_info &&
+	       node.operator_info->hash_join_contract.present &&
+	       node.operator_info->hash_join_contract.native_probe_output_mode ==
+	           ExecutionHashJoinProbeOutputMode::MATCHED_PROBE_AND_BUILD;
+}
+
+static bool PreviousExecutionRegionNodeProducesMatchedHashJoinSelection(const ExecutionRegionIR &region_ir,
+                                                                        const ExecutionRegionCandidate &candidate,
+                                                                        idx_t node_idx) {
+	if (node_idx <= candidate.first_node || node_idx == 0) {
+		return false;
+	}
+	return ExecutionRegionNodeProducesMatchedHashJoinSelection(region_ir.nodes[node_idx - 1]);
 }
 
 static bool ExecutionRegionExpressionReadsColumn(const ExecutionExpressionIR &node, idx_t column_index) {
@@ -561,9 +641,13 @@ static ExecutionRegionCandidateTraits BuildExecutionRegionCandidateTraits(const 
 			break;
 		case ExecutionRegionNodeKind::FILTER:
 			traits.filter_count++;
-			if (node_idx > candidate.first_node &&
-			    ExecutionRegionFilterReadsMarkProbeMarker(region_ir.nodes[node_idx - 1], node)) {
-				traits.mark_probe_filter_count++;
+			if (node_idx > candidate.first_node && node_idx > 0) {
+				auto &previous_node = region_ir.nodes[node_idx - 1];
+				if (ExecutionRegionFilterReadsMarkProbeMarker(previous_node, node)) {
+					traits.mark_probe_filter_count++;
+				} else if (ExecutionRegionNodeProducesMatchedHashJoinSelection(previous_node)) {
+					traits.selected_hash_join_filter_materialization_count++;
+				}
 			}
 			if (node.filter && node.filter->root) {
 				AccumulateExecutionRegionExpressionTraits(node.filter->traits, traits);
@@ -571,6 +655,9 @@ static ExecutionRegionCandidateTraits BuildExecutionRegionCandidateTraits(const 
 			break;
 		case ExecutionRegionNodeKind::PROJECTION:
 			traits.projection_count++;
+			if (PreviousExecutionRegionNodeProducesMatchedHashJoinSelection(region_ir, candidate, node_idx)) {
+				traits.selected_hash_join_view_materialization_count++;
+			}
 			if (node.projections.empty()) {
 				break;
 			}
@@ -581,9 +668,6 @@ static ExecutionRegionCandidateTraits BuildExecutionRegionCandidateTraits(const 
 				AccumulateExecutionRegionExpressionTraits(projection->traits, traits);
 				if (projection->traits.root_is_reference) {
 					traits.reference_projection_count++;
-					if (projection->return_type.id() == LogicalTypeId::VARCHAR) {
-						traits.reference_varchar_projection_count++;
-					}
 				}
 				if (projection->traits.has_arithmetic_binary) {
 					traits.arithmetic_projection_count++;
@@ -595,6 +679,9 @@ static ExecutionRegionCandidateTraits BuildExecutionRegionCandidateTraits(const 
 			break;
 		case ExecutionRegionNodeKind::OPERATOR:
 			traits.operator_count++;
+			if (PreviousExecutionRegionNodeProducesMatchedHashJoinSelection(region_ir, candidate, node_idx)) {
+				traits.selected_hash_join_view_materialization_count++;
+			}
 			if (node.operator_info && node.operator_info->hash_join_contract.present) {
 				traits.hash_join_operator_count++;
 			}
@@ -603,9 +690,6 @@ static ExecutionRegionCandidateTraits BuildExecutionRegionCandidateTraits(const 
 			traits.operator_count++;
 			break;
 		}
-	}
-	if (traits.mark_probe_filter_count > 0 && traits.generated_aggregate_update_count == 0) {
-		traits.mark_probe_materialized_tail_count = traits.mark_probe_filter_count;
 	}
 	FinalizeExecutionRegionCandidateTraits(traits, mode);
 	return traits;

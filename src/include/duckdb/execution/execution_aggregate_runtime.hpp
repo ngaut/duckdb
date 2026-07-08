@@ -14,6 +14,8 @@
 
 namespace duckdb {
 
+static constexpr idx_t EXECUTION_DENSE_GROUP_DOMAIN_MAX_TARGET_ENTRIES = STANDARD_VECTOR_SIZE * 4096ULL;
+
 struct ExecutionDenseGroupDomain {
 	bool ready = false;
 	PhysicalType physical_type = PhysicalType::INVALID;
@@ -29,7 +31,8 @@ enum class ExecutionRowPointerGroupKeyCastKind : uint8_t {
 	INT32_TO_INT8,
 	INTEGRAL_COMPRESS,
 	DATE_YEAR_COMPRESS,
-	STRING_COMPRESS
+	STRING_COMPRESS,
+	STRING_SUBSTRING
 };
 
 enum class ExecutionRowPointerGroupKeySourceKind : uint8_t { ROW_POINTER_FIELD, INPUT_VECTOR };
@@ -50,6 +53,7 @@ struct ExecutionRowPointerGroupKeySource {
 	idx_t row_layout_column_count = 0;
 	ExecutionRowPointerGroupKeyCastKind cast_kind = ExecutionRowPointerGroupKeyCastKind::NONE;
 	int64_t cast_constant = 0;
+	idx_t string_substring_length = 0;
 	bool unchecked_integral_cast = false;
 	bool all_valid = false;
 	string blocker;

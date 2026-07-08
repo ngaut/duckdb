@@ -157,6 +157,15 @@ bool TryReadNativeScalarIntrinsicRegionExpression(const ExecutionExpressionIR &r
 		expr.string_decompress_source_size = GetTypeIdSize(root.children[0]->physical_type);
 		return true;
 	}
+	idx_t substring_source_index;
+	idx_t substring_length;
+	if (TryReadNativeStringSubstringReference(root, substring_source_index, substring_length)) {
+		expr.kind = SljitNativeRegionExpressionKind::STRING_SUBSTRING;
+		expr.return_type = root.return_type;
+		expr.source_index = substring_source_index;
+		expr.string_substring_length = substring_length;
+		return true;
+	}
 
 	idx_t source_index;
 	SljitNativeSignedIntegerWidth integral_compress_source_width;

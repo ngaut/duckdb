@@ -12,7 +12,6 @@
 #include "sljit_direct_join_output_aggregate_state.hpp"
 #include "sljit_grouped_aggregate_input_vector_groups.hpp"
 #include "sljit_grouped_aggregate_input_vector_update_runtime.hpp"
-#include "sljit_grouped_aggregate_update_runtime.hpp"
 #include "sljit_projection_aggregate_descriptor.hpp"
 #include "sljit_region_runtime_state.hpp"
 #include "sljit_region_runtime_trace.hpp"
@@ -52,13 +51,13 @@ static bool SljitTryBuildDirectJoinOutputAggregateDenseDomain(const SljitDirectJ
 	    (*strategy.source_min_values)[source_idx], (*strategy.source_max_values)[source_idx], domain);
 }
 
-static bool SljitFlushPendingRowPointerAggregateBatch(ExecutionRegionRuntime &runtime, idx_t aggregate_idx,
+static void SljitFlushPendingRowPointerAggregateBatch(ExecutionRegionRuntime &runtime, idx_t aggregate_idx,
                                                       SljitExecutableRegionOp &aggregate_op,
                                                       SljitJoinProjectionAggregateDescriptor &descriptor,
                                                       SljitPendingRowPointerAggregateBatch &batch) {
 	const auto pending_count = batch.Count();
 	if (pending_count == 0) {
-		return false;
+		return;
 	}
 	if (!batch.scratch) {
 		throw InternalException("SLJIT batched direct row-pointer aggregate has no scratch state");
@@ -75,20 +74,19 @@ static bool SljitFlushPendingRowPointerAggregateBatch(ExecutionRegionRuntime &ru
 	        batch.deferred_grouped_finish, source_key0_int64_to_int32_unchecked)) {
 		throw InternalException("SLJIT batched direct row-pointer aggregate update failed");
 	}
-	RecordSljitRegionRuntimePath(runtime, aggregate_op.kind, "direct_projection_row_pointer_grouped_update",
-	                             pending_count);
+	RecordSljitRegionMaterializationElisionPath(runtime, aggregate_op.kind,
+	                                            "projection_aggregate.row_pointer_grouped_update", pending_count);
 	batch.Reset();
-	return false;
 }
 
-static bool SljitFlushPendingInputVectorAggregateBatch(ExecutionRegionRuntime &runtime,
+static void SljitFlushPendingInputVectorAggregateBatch(ExecutionRegionRuntime &runtime,
                                                        SljitRegionExecutionScratch &scratch, idx_t aggregate_idx,
                                                        SljitExecutableRegionOp &aggregate_op,
                                                        SljitDirectJoinOutputAggregateStrategy &strategy) {
 	auto &batch = strategy.pending_input_vector_batch;
 	const auto pending_count = batch.Count();
 	if (pending_count == 0) {
-		return false;
+		return;
 	}
 	auto batch_group_sources = strategy.descriptor.group_sources;
 	auto &aggregate_input = batch.input;
@@ -97,7 +95,8 @@ static bool SljitFlushPendingInputVectorAggregateBatch(ExecutionRegionRuntime &r
 	optional_ptr<const ExecutionDenseGroupDomain> dense_domain_ptr;
 	if (SljitTryBuildDirectJoinOutputAggregateDenseDomain(strategy, strategy.descriptor, dense_domain)) {
 		dense_domain_ptr = &dense_domain;
-		RecordSljitRegionRuntimePath(runtime, aggregate_op.kind, "direct_projection_dense_group_domain", pending_count);
+		RecordSljitRegionRuntimePath(runtime, aggregate_op.kind, "projection_aggregate.dense_group_domain",
+		                             pending_count);
 	}
 	string input_vector_failure;
 	if (!SljitTryExecuteNativeInputVectorGroupedAggregateUpdate(
@@ -108,10 +107,9 @@ static bool SljitFlushPendingInputVectorAggregateBatch(ExecutionRegionRuntime &r
 		throw InternalException("SLJIT batched direct input-vector aggregate update failed: %s",
 		                        input_vector_failure.empty() ? "unknown" : input_vector_failure.c_str());
 	}
-	RecordSljitRegionRuntimePath(runtime, aggregate_op.kind, "direct_projection_input_vector_grouped_update",
-	                             pending_count);
+	RecordSljitRegionMaterializationElisionPath(runtime, aggregate_op.kind,
+	                                            "projection_aggregate.input_vector_grouped_update", pending_count);
 	batch.Reset();
-	return false;
 }
 
 static bool SljitCanPreclassifyStringSetComplementarySumBatch(
@@ -226,10 +224,10 @@ static void SljitAppendPendingRowPointerAggregateBatch(
 	batch.row_pointers.Append(row_pointers, aggregate_input.size(), VectorAppendMode::ERROR_ON_NO_SPACE);
 }
 
-static bool SljitFlushDirectJoinOutputAggregate(ExecutionRegionRuntime &runtime, vector<SljitExecutableRegionOp> &ops,
+static void SljitFlushDirectJoinOutputAggregate(ExecutionRegionRuntime &runtime, vector<SljitExecutableRegionOp> &ops,
                                                 optional_ptr<SljitDirectJoinOutputAggregateStrategy> strategy_ptr) {
 	if (!strategy_ptr) {
-		return false;
+		return;
 	}
 	auto &strategy = *strategy_ptr;
 	if (strategy.aggregate_idx >= ops.size()) {
@@ -243,8 +241,8 @@ static bool SljitFlushDirectJoinOutputAggregate(ExecutionRegionRuntime &runtime,
 		SljitFlushPendingInputVectorAggregateBatch(runtime, *strategy.pending_input_vector_batch.scratch,
 		                                           strategy.aggregate_idx, aggregate_op, strategy);
 	}
-	return SljitFlushPendingRowPointerAggregateBatch(runtime, strategy.aggregate_idx, aggregate_op, strategy.descriptor,
-	                                                 strategy.pending_batch);
+	SljitFlushPendingRowPointerAggregateBatch(runtime, strategy.aggregate_idx, aggregate_op, strategy.descriptor,
+	                                          strategy.pending_batch);
 }
 
 } // namespace duckdb

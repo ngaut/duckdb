@@ -100,6 +100,7 @@ struct ExecutionRegionLoweringPlan {
 	void SetFullyFused(bool fully_fused);
 	void SetUsesScanFilters(bool uses_scan_filters);
 	void SetSelectedSourceExecution(ExecutionRegionSourceExecutionKind source_execution);
+	void SetSourceContractInputTypes(vector<LogicalType> input_types);
 	void SetOperatorStageIR(string stage_ir);
 	idx_t NativeCount() const;
 	idx_t BoundaryCount() const;
@@ -109,6 +110,7 @@ struct ExecutionRegionLoweringPlan {
 	bool IsFullyFused() const;
 	bool UsesScanFilters() const;
 	ExecutionRegionSourceExecutionKind SelectedSourceExecution() const;
+	const vector<LogicalType> &SourceContractInputTypes() const;
 	string CompactEventReason() const;
 	string EventReason() const;
 
@@ -124,6 +126,7 @@ struct ExecutionRegionLoweringPlan {
 	bool fully_fused = false;
 	ExecutionRegionSourceExecutionKind selected_source_execution = ExecutionRegionSourceExecutionKind::NONE;
 	bool uses_scan_filters = false;
+	vector<LogicalType> source_contract_input_types;
 	string operator_stage_ir;
 	string first_boundary_reason;
 	string first_fusion_blocker;

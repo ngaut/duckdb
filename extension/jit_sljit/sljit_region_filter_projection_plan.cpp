@@ -31,7 +31,8 @@ SljitRegionNodePlan PlanSljitFilterNode(const ExecutionRegionNode &node, string 
 		return SljitUnsupportedExpressionBoundaryNode(error);
 	}
 
-	return SljitNativeNode(std::move(native_op), "generated typed predicate filter");
+	auto reason = "generated typed predicate filter;expr=" + DescribeNativeRegionExpression(native_op.filter);
+	return SljitNativeNode(std::move(native_op), std::move(reason));
 }
 
 static bool TryPlanDirectSljitProjection(const ExecutionRegionNode &node, SljitNativeRegionOpPlan &native_op,

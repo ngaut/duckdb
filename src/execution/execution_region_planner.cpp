@@ -292,6 +292,9 @@ static bool ExecutionRegionCandidateNeedsFinalizedSourceCardinality(const Execut
 		    node.source->estimated_source_cardinality_exact) {
 			continue;
 		}
+		if (candidate.estimated_cardinality > 0 || node.estimated_cardinality > 0) {
+			continue;
+		}
 		reason = "native state scan source cardinality is not finalized";
 		reason += ";source_node=" + std::to_string(node_idx);
 		reason += ";source_function=" + node.source->function_name;
@@ -333,7 +336,8 @@ static void AccumulateExecutionRegionOpenRequest(ExecutionRegionPlan &plan, cons
 			        ? ExecutionRegionSourceExecutionKind::SOURCE_CONTRACT
 			        : ExecutionRegionSourceExecutionKind::NONE;
 			contract.uses_scan_filters = false;
-			contract.source_contract_input_types.clear();
+			contract.source_contract_input_types =
+			    native_fused_source_owner ? lowering_plan.SourceContractInputTypes() : vector<LogicalType>();
 			return;
 		}
 		if (!source.table_scan_contract.present) {
@@ -350,7 +354,8 @@ static void AccumulateExecutionRegionOpenRequest(ExecutionRegionPlan &plan, cons
 		        : ExecutionRegionSourceExecutionKind::NONE;
 		plan_contract.uses_scan_filters = native_fused_source_owner && lowering_plan.UsesScanFilters() &&
 		                                  (!source.filters.empty() || table_scan_contract.dynamic_filters);
-		plan_contract.source_contract_input_types.clear();
+		plan_contract.source_contract_input_types =
+		    native_fused_source_owner ? lowering_plan.SourceContractInputTypes() : vector<LogicalType>();
 		return;
 	}
 }

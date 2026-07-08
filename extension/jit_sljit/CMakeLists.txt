@@ -95,6 +95,18 @@ set(JIT_SLJIT_EXTENSION_FILES
     sljit_predicate_string_branch_codegen.cpp
     sljit_predicate_string_runtime.cpp
     sljit_predicate_structural_branch_codegen.cpp
+    sljit_full_pipeline_primitive_contract.cpp
+    sljit_full_pipeline_primitive_sequence.cpp
+    sljit_full_pipeline_recipe_binding.cpp
+    sljit_full_pipeline_recipe.cpp
+    sljit_full_pipeline_recipe_facts.cpp
+    sljit_full_pipeline_recipe_sequence_builder.cpp
+    sljit_generated_source_filter_plan.cpp
+    sljit_hash_join_delim_join_sink_recipe.cpp
+    sljit_native_tail_recipe.cpp
+    sljit_pre_join_projection_recipe.cpp
+    sljit_projection_aggregate_recipe_binding.cpp
+    sljit_projection_aggregate_recipe.cpp
     sljit_region_description.cpp
     sljit_region_aggregate_sink_plan.cpp
     sljit_region_aggregate_fusion.cpp

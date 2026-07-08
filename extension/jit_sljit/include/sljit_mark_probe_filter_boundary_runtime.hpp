@@ -112,8 +112,8 @@ private:
 	                                          EXECUTE_NEXT_STEP &execute_next_step) {
 		RecordSljitRegionRuntimePath(runtime, filter_op.kind,
 		                             mark_filter_mode == SljitMarkProbeFilterMode::MATCHES
-		                                 ? "direct_mark_probe_match_selection"
-		                                 : "direct_mark_probe_nonmatch_selection",
+		                                 ? "mark_probe_match_selection"
+		                                 : "mark_probe_nonmatch_selection",
 		                             mark_count);
 		if (mark_count == 0) {
 			return false;
@@ -125,8 +125,6 @@ private:
 		if (!built_mark_boundary) {
 			throw InternalException("SLJIT filtered MARK probe boundary could not build its marker-omitted output");
 		}
-		RecordSljitRegionMaterializationBoundary(runtime, hash_join_op.kind, "mark_filter_lhs_selected_view",
-		                                         mark_count);
 		auto selected_output = SljitRuntimeBatchViewFromChunk(mark_boundary.OutputChunk(),
 		                                                      &scratch.FilterSelection(hash_join_idx), mark_count);
 		return execute_next_step(selected_output);
@@ -141,8 +139,8 @@ private:
 	                                         EXECUTE_NEXT_STEP &execute_next_step) {
 		RecordSljitRegionRuntimePath(runtime, filter_op.kind,
 		                             mark_filter_mode == SljitMarkProbeFilterMode::MATCHES
-		                                 ? "direct_mark_probe_match_materialized"
-		                                 : "direct_mark_probe_nonmatch_materialized",
+		                                 ? "mark_probe_match_materialized"
+		                                 : "mark_probe_nonmatch_materialized",
 		                             mark_count);
 		if (mark_count == 0) {
 			return false;
@@ -159,8 +157,6 @@ private:
 		                                                  mark_count, marker_mode, mark_result)) {
 			throw InternalException("SLJIT filtered MARK probe boundary could not build materialized output");
 		}
-		RecordSljitRegionMaterializationBoundary(runtime, hash_join_op.kind, "mark_filter_materialized_view",
-		                                         mark_count);
 		return execute_next_step(mark_result.output);
 	}
 
@@ -178,10 +174,6 @@ private:
 		if (!built_mark_boundary) {
 			throw InternalException("SLJIT MARK probe filter boundary primitive could not build its bound output");
 		}
-		RecordSljitRegionMaterializationBoundary(
-		    runtime, hash_join_op.kind,
-		    SljitMarkProbeFilterBoundaryOmitsMarker(marker_mode) ? "mark_filter_lhs_view" : "mark_filter_vector",
-		    mark_count);
 		if (!apply_filter_selection) {
 			return execute_next_step(mark_boundary.result.output);
 		}

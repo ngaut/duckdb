@@ -19,33 +19,27 @@ struct SljitProjectedInputGroupedAggregateDescriptor {
 	vector<ExecutionRowPointerGroupKeySource> group_sources;
 	vector<idx_t> payload_projection_indices;
 	vector<idx_t> payload_source_indices;
+	vector<bool> payload_source_not_null;
 	vector<LogicalType> input_types;
 
 	bool Ready() const {
 		return projection.kind == SljitNativeRegionOpKind::PROJECTION && !group_sources.empty() &&
-		       !payload_source_indices.empty();
+		       !payload_source_indices.empty() && payload_source_not_null.size() == payload_source_indices.size();
 	}
 };
 
-static bool SljitProjectedInputGroupSourceCanUseCompactInput(const ExecutionRowPointerGroupKeySource &group_source) {
-	return SljitInputVectorGroupKeySourceSupportsMaterialization(group_source);
-}
-
-static bool
-SljitProjectedInputGroupedAggregateCanUseCompactInput(const SljitProjectedInputGroupedAggregateDescriptor &descriptor) {
-	for (auto &group_source : descriptor.group_sources) {
-		if (!SljitProjectedInputGroupSourceCanUseCompactInput(group_source)) {
-			return false;
-		}
-	}
-	return true;
-}
-
 static bool
 SljitProjectedInputGroupedAggregateCanUseSourceInput(const SljitProjectedInputGroupedAggregateDescriptor &descriptor) {
-	if (!SljitProjectedInputGroupedAggregateCanUseCompactInput(descriptor) ||
-	    descriptor.payload_projection_indices.size() != descriptor.payload_source_indices.size()) {
+	if (descriptor.payload_projection_indices.size() != descriptor.payload_source_indices.size()) {
 		return false;
+	}
+	if (descriptor.payload_source_not_null.size() != descriptor.payload_source_indices.size()) {
+		return false;
+	}
+	for (auto &group_source : descriptor.group_sources) {
+		if (!SljitInputVectorGroupKeySourceSupportsMaterialization(group_source)) {
+			return false;
+		}
 	}
 	for (idx_t payload_idx = 0; payload_idx < descriptor.payload_projection_indices.size(); payload_idx++) {
 		const auto projection_idx = descriptor.payload_projection_indices[payload_idx];
@@ -98,7 +92,8 @@ static bool SljitTryBuildProjectedInputGroupSource(const SljitExecutableRegionOp
 }
 
 static bool SljitTryResolveProjectedInputPayloadSource(const SljitExecutableRegionOp &projection_op,
-                                                       idx_t projection_idx, idx_t &source_idx) {
+                                                       idx_t projection_idx, idx_t &source_idx,
+                                                       bool &source_not_null) {
 	if (projection_idx >= projection_op.projections.size() || projection_idx >= projection_op.output_types.size()) {
 		return false;
 	}
@@ -109,12 +104,14 @@ static bool SljitTryResolveProjectedInputPayloadSource(const SljitExecutableRegi
 	    !SljitProjectionIsSingleSourceReferenceLike(remapped_expr.plan)) {
 		return false;
 	}
+	source_not_null = SljitInputSourceKnownNotNull(remapped_expr.input_source_not_null, 0);
 	return projection_op.output_types[projection_idx] == projection_op.input_types[source_idx];
 }
 
 static bool SljitTryBindProjectedInputPayloadOutput(const SljitExecutableRegionOp &projection_op, idx_t projection_idx,
-                                                    idx_t &source_idx) {
-	if (SljitTryResolveProjectedInputPayloadSource(projection_op, projection_idx, source_idx)) {
+                                                    idx_t &source_idx, bool &source_not_null) {
+	source_not_null = false;
+	if (SljitTryResolveProjectedInputPayloadSource(projection_op, projection_idx, source_idx, source_not_null)) {
 		return true;
 	}
 	if (projection_idx >= projection_op.projections.size() || projection_idx >= projection_op.output_types.size() ||
@@ -168,19 +165,24 @@ static bool SljitTryBuildProjectedInputGroupedAggregateDescriptor(
 	}
 
 	vector<idx_t> payload_source_indices;
+	vector<bool> payload_source_not_null;
 	vector<idx_t> payload_projection_indices;
 	auto add_count_star_payload = [&]() {
 		payload_projection_indices.push_back(DConstants::INVALID_INDEX);
 		payload_source_indices.push_back(DConstants::INVALID_INDEX);
+		payload_source_not_null.push_back(false);
 		return true;
 	};
 	auto add_fused_payload_source = [&](idx_t projection_idx) {
 		idx_t source_idx;
-		if (!SljitTryBindProjectedInputPayloadOutput(*semantic_projection, projection_idx, source_idx)) {
+		bool source_not_null;
+		if (!SljitTryBindProjectedInputPayloadOutput(*semantic_projection, projection_idx, source_idx,
+		                                             source_not_null)) {
 			return block("fused_payload_source");
 		}
 		payload_projection_indices.push_back(projection_idx);
 		payload_source_indices.push_back(source_idx);
+		payload_source_not_null.push_back(source_not_null);
 		return true;
 	};
 	auto check_direct_payload = [&](const ExecutionRegionAggregateInput &, idx_t) {
@@ -188,15 +190,18 @@ static bool SljitTryBuildProjectedInputGroupedAggregateDescriptor(
 	};
 	auto add_direct_payload_source = [&](const ExecutionRegionAggregateInput &aggregate, idx_t) {
 		idx_t source_idx;
+		bool source_not_null;
 		if (aggregate.payload_index >= semantic_projection->output_types.size() ||
 		    semantic_projection->output_types[aggregate.payload_index] != aggregate.child_types[0]) {
 			return block("direct_payload_type");
 		}
-		if (!SljitTryBindProjectedInputPayloadOutput(*semantic_projection, aggregate.payload_index, source_idx)) {
+		if (!SljitTryBindProjectedInputPayloadOutput(*semantic_projection, aggregate.payload_index, source_idx,
+		                                             source_not_null)) {
 			return block("direct_payload_source");
 		}
 		payload_projection_indices.push_back(aggregate.payload_index);
 		payload_source_indices.push_back(source_idx);
+		payload_source_not_null.push_back(source_not_null);
 		return true;
 	};
 	bool uses_fused_payload_update;
@@ -214,6 +219,7 @@ static bool SljitTryBuildProjectedInputGroupedAggregateDescriptor(
 		descriptor->group_sources = std::move(group_sources);
 		descriptor->payload_projection_indices = std::move(payload_projection_indices);
 		descriptor->payload_source_indices = std::move(payload_source_indices);
+		descriptor->payload_source_not_null = std::move(payload_source_not_null);
 		descriptor->input_types = descriptor->projection.input_types;
 	}
 	return true;

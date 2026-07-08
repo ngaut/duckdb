@@ -66,6 +66,61 @@ static bool SljitTryAddJoinLHSInputAggregateInput(SljitJoinProjectionAggregateDe
 	return true;
 }
 
+static bool SljitProducerMapValueMatchesProbeInput(const ExecutionHashJoinProbeBinding &binding, idx_t map_value,
+                                                   idx_t probe_input_idx) {
+	if (map_value == probe_input_idx) {
+		return true;
+	}
+	return map_value < binding.lhs_output_column_indices.size() &&
+	       binding.lhs_output_column_indices[map_value] == probe_input_idx;
+}
+
+static bool SljitProducerProjectionSourceMatchesProbeInput(const ExecutionHashJoinProbeBinding &binding,
+                                                           idx_t producer_source_idx, idx_t probe_input_idx) {
+	if (producer_source_idx == probe_input_idx) {
+		return true;
+	}
+	return producer_source_idx < binding.lhs_output_column_indices.size() &&
+	       binding.lhs_output_column_indices[producer_source_idx] == probe_input_idx;
+}
+
+static bool SljitTryResolveMappedProducerProbeInput(
+    const ExecutionHashJoinProbeBinding &binding, const SljitJoinProjectionAggregateDescriptor &descriptor,
+    optional_ptr<SljitExecutableRegionOp> producer_projection_op, idx_t probe_input_idx,
+    const LogicalType *&source_type, optional_ptr<SljitExecutableRegionExpression> resolved_expr = nullptr) {
+	if (!producer_projection_op || !descriptor.has_producer_output_column_map) {
+		return false;
+	}
+	for (idx_t output_idx = 0; output_idx < descriptor.producer_output_column_map.size(); output_idx++) {
+		const auto map_value = descriptor.producer_output_column_map[output_idx];
+		if (map_value == DConstants::INVALID_INDEX ||
+		    !SljitProducerMapValueMatchesProbeInput(binding, map_value, probe_input_idx)) {
+			continue;
+		}
+		if (output_idx >= producer_projection_op->projections.size() ||
+		    output_idx >= producer_projection_op->output_types.size()) {
+			return false;
+		}
+		SljitExecutableRegionExpression producer_expr;
+		idx_t source_idx;
+		if (!SljitTryBuildSingleSourceProjectionExpression(producer_projection_op->projections[output_idx],
+		                                                   producer_expr, source_idx) ||
+		    !SljitProjectionIsSingleSourceReferenceLike(producer_expr.plan) ||
+		    !SljitProducerProjectionSourceMatchesProbeInput(binding, source_idx, probe_input_idx) ||
+		    source_idx >= producer_projection_op->input_types.size() ||
+		    producer_expr.plan.return_type != producer_projection_op->output_types[output_idx] ||
+		    producer_projection_op->input_types[source_idx] != producer_expr.plan.return_type) {
+			return false;
+		}
+		if (resolved_expr) {
+			*resolved_expr = std::move(producer_expr);
+		}
+		source_type = &producer_projection_op->input_types[source_idx];
+		return true;
+	}
+	return false;
+}
+
 static bool SljitTryAddJoinLHSInputAggregateInputFromProjection(
     const ExecutionHashJoinProbeBinding &binding, SljitJoinProjectionAggregateDescriptor &descriptor,
     SljitExecutableRegionOp &projection_op, idx_t projection_idx, idx_t &input_idx,
@@ -80,32 +135,22 @@ static bool SljitTryAddJoinLHSInputAggregateInputFromProjection(
 	    !SljitProjectionIsSingleSourceReferenceLike(remapped_expr.plan)) {
 		return false;
 	}
-	if (descriptor.has_producer_output_column_map &&
-	    join_output_source_index < descriptor.producer_output_column_map.size()) {
-		if (join_output_source_index >= binding.lhs_output_column_indices.size() || !producer_projection_op) {
+	if (descriptor.has_producer_output_column_map) {
+		if (join_output_source_index >= binding.lhs_output_column_indices.size()) {
 			return false;
 		}
-		const auto projected_input_idx = binding.lhs_output_column_indices[join_output_source_index];
-		if (projected_input_idx >= descriptor.producer_output_column_map.size() ||
-		    projected_input_idx >= producer_projection_op->projections.size()) {
+		const auto input_col = binding.lhs_output_column_indices[join_output_source_index];
+		const LogicalType *producer_source_type = nullptr;
+		if (!SljitTryResolveMappedProducerProbeInput(binding, descriptor, producer_projection_op, input_col,
+		                                             producer_source_type) ||
+		    !producer_source_type) {
 			return false;
 		}
-		const auto input_col = descriptor.producer_output_column_map[projected_input_idx];
-		if (input_col == DConstants::INVALID_INDEX) {
+		auto &projection_type = projection_op.output_types[projection_idx];
+		if (remapped_expr.plan.return_type != projection_type || *producer_source_type != projection_type) {
 			return false;
 		}
-		SljitExecutableRegionExpression producer_expr;
-		idx_t producer_source_idx;
-		if (!SljitTryBuildSingleSourceProjectionExpression(producer_projection_op->projections[projected_input_idx],
-		                                                   producer_expr, producer_source_idx) ||
-		    !SljitProjectionIsSingleSourceReferenceLike(producer_expr.plan) || producer_source_idx != input_col) {
-			return false;
-		}
-		auto &source_type = projection_op.output_types[projection_idx];
-		if (remapped_expr.plan.return_type != source_type || producer_expr.plan.return_type != source_type) {
-			return false;
-		}
-		return SljitTryAddJoinLHSInputAggregateInput(descriptor, input_col, source_type, input_idx);
+		return SljitTryAddJoinLHSInputAggregateInput(descriptor, input_col, projection_type, input_idx);
 	}
 	if (join_output_source_index >= binding.lhs_output_column_indices.size() ||
 	    join_output_source_index >= binding.output_types.size()) {
@@ -217,42 +262,26 @@ static bool SljitTryMapProducerGroupSource(
 		blocker = "producer_group_projection_source";
 		return false;
 	}
-	idx_t projected_input_idx;
+	idx_t probe_input_idx;
 	idx_t condition_idx;
 	bool repeats_with_row_pointer;
-	if (!SljitTryResolveHashJoinMatchedProbeInputForOutput(binding, join_output_source_index, projected_input_idx,
+	if (!SljitTryResolveHashJoinMatchedProbeInputForOutput(binding, join_output_source_index, probe_input_idx,
 	                                                       condition_idx, repeats_with_row_pointer)) {
 		return true;
 	}
-	if (projected_input_idx >= descriptor.producer_output_column_map.size() ||
-	    projected_input_idx >= producer_projection_op->projections.size()) {
-		blocker = "producer_group_output_map";
-		return false;
-	}
-	const auto input_col = descriptor.producer_output_column_map[projected_input_idx];
-	if (input_col == DConstants::INVALID_INDEX) {
-		blocker = "producer_group_output_map";
-		return false;
-	}
 	SljitExecutableRegionExpression producer_expr;
-	idx_t producer_source_idx;
-	if (!SljitTryBuildSingleSourceProjectionExpression(producer_projection_op->projections[projected_input_idx],
-	                                                   producer_expr, producer_source_idx)) {
-		blocker = "producer_group_projection_source";
+	const LogicalType *producer_source_type = nullptr;
+	if (!SljitTryResolveMappedProducerProbeInput(binding, descriptor, producer_projection_op, probe_input_idx,
+	                                             producer_source_type,
+	                                             optional_ptr<SljitExecutableRegionExpression>(&producer_expr)) ||
+	    !producer_source_type) {
+		blocker = "producer_group_output_map";
 		return false;
 	}
-	if (producer_source_idx != input_col) {
-		blocker = "producer_group_map_mismatch_projection_source_" + to_string(producer_source_idx) + "_map_" +
-		          to_string(input_col);
-		return false;
-	}
-	if (producer_source_idx >= producer_projection_op->input_types.size()) {
-		blocker = "producer_group_source_bounds";
-		return false;
-	}
-	const auto &source_type = producer_projection_op->input_types[producer_source_idx];
+	const auto &source_type = *producer_source_type;
 	ExecutionRowPointerGroupKeySource producer_group_source;
-	SljitInitializeInputVectorGroupKeySource(input_col, source_type, group.type, producer_group_source, condition_idx);
+	SljitInitializeInputVectorGroupKeySource(probe_input_idx, source_type, group.type, producer_group_source,
+	                                         condition_idx);
 	producer_group_source.input_vector_repeats_with_row_pointer = repeats_with_row_pointer;
 	SljitAttachHashJoinBuildConditionType(binding, producer_group_source, condition_idx);
 	if (!SljitTryFinalizeRowPointerGroupKeySource(producer_expr.plan, group.type, producer_group_source)) {
@@ -345,14 +374,6 @@ static bool SljitTryBuildProjectionRowPointerAggregateDescriptor(
 			group_source.cast_kind = ExecutionRowPointerGroupKeyCastKind::NONE;
 		}
 	}
-	bool descriptor_uses_row_pointer_group_source = false;
-	for (auto &group_source : descriptor.group_sources) {
-		if (group_source.source_kind == ExecutionRowPointerGroupKeySourceKind::ROW_POINTER_FIELD) {
-			descriptor_uses_row_pointer_group_source = true;
-			break;
-		}
-	}
-
 	auto add_count_star_payload = [&]() {
 		descriptor.payload_source_indices.push_back(DConstants::INVALID_INDEX);
 		return true;
@@ -378,8 +399,7 @@ static bool SljitTryBuildProjectionRowPointerAggregateDescriptor(
 		                                            projection_idx)) {
 			return descriptor.Block("payload_projection");
 		}
-		if (!descriptor_uses_row_pointer_group_source &&
-		    aggregate.primitive_update_kind == AggregatePrimitiveUpdateKind::COUNT &&
+		if (aggregate.primitive_update_kind == AggregatePrimitiveUpdateKind::COUNT &&
 		    SljitProjectionOutputIsCountOnePayload(binding, projection_op, projection_idx)) {
 			descriptor.payload_source_indices.push_back(DConstants::INVALID_INDEX);
 			return true;

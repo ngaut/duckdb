@@ -48,14 +48,11 @@ static ExecutionOperatorBindResult SljitExecutePerfectHashJoinProbe(
 		return ExecutionOperatorBindResult::READY;
 	}
 	if (SljitHashJoinProbeProducesSelectedView(output_contract)) {
-		RecordSljitRegionMaterializationBoundary(runtime, op.kind, "perfect_selection_reference",
-		                                         native_input.selected_count);
 		output.SetChildCardinality(native_input.selected_count);
 		return ExecutionOperatorBindResult::READY;
 	}
 	auto materialize_stage_start = SljitRegionStageStart(runtime);
 	SljitRegionStageRecorder recorder(runtime, op_idx, op.kind, "materialize_output");
-	RecordSljitRegionMaterializationBoundary(runtime, op.kind, "final_output", native_input.selected_count);
 	ExecutionMaterializePerfectHashJoinProbe(probe, input, match_selection, build_selection,
 	                                         native_input.selected_count, output, &recorder);
 	RecordSljitRegionStageRuntime(runtime, op_idx, op.kind, "materialize_output", materialize_stage_start);
@@ -134,16 +131,13 @@ static ExecutionOperatorBindResult SljitExecuteRegularHashJoinProbe(
 	}
 	if (SljitHashJoinProbeProducesSelectedView(output_contract)) {
 		const auto boundary_name = SljitHashJoinProbeSelectedViewBoundaryName(mark_probe, mark_selection_mode);
-		RecordSljitRegionMaterializationBoundary(runtime, op.kind, boundary_name, selected_count);
 		output.SetChildCardinality(selected_count);
 		return ExecutionOperatorBindResult::READY;
 	}
 	auto materialize_stage_start = SljitRegionStageStart(runtime);
 	SljitRegionStageRecorder recorder(runtime, op_idx, op.kind, "materialize_output");
 	if (!mark_probe) {
-		RecordSljitRegionMaterializationBoundary(runtime, op.kind, "row_pointer_reference", selected_count);
 	}
-	RecordSljitRegionMaterializationBoundary(runtime, op.kind, "final_output", selected_count);
 	ExecutionMaterializeHashJoinProbe(probe, input, row_pointers, match_selection, selected_count, output, &recorder);
 	RecordSljitRegionStageRuntime(runtime, op_idx, op.kind, "materialize_output", materialize_stage_start);
 	return ExecutionOperatorBindResult::READY;

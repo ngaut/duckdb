@@ -40,7 +40,6 @@ from tpch_common import (
     prepare_tpch_database,
     read_query,
 )
-from shape_inventory import write_shape_inventory
 
 COUNTER_VALUE_FIELDS = COUNTER_FIELDS[3:]
 
@@ -64,6 +63,14 @@ def create_baseline(args: argparse.Namespace, db_path: Path, query_id: str, quer
     )
 
 
+def should_use_separate_counter_run(args: argparse.Namespace, policy: str) -> bool:
+    return (
+        policy != "off"
+        and args.timing_mode == "production"
+        and (args.event_log_size > 0 or args.trace_decisions or args.trace_runtime)
+    )
+
+
 def run_once(
     args: argparse.Namespace,
     db_path: Path,
@@ -72,6 +79,7 @@ def run_once(
     query_sql: str,
     policy: str,
     repeat: int,
+    collect_counters: bool,
 ) -> tuple[dict, list[dict]]:
     result_table = f"__jit_benchmark_result_q{query_id}_{policy}_{repeat}"
     artifact_name = f"q{query_id}_{policy}_r{repeat}_{args.timing_mode}.json"
@@ -79,8 +87,9 @@ def run_once(
     setup_sql = jit_setup_sql(
         args,
         policy,
-        trace_runtime=args.trace_runtime,
-        trace_decisions=args.trace_decisions,
+        trace_runtime=args.trace_runtime if collect_counters else False,
+        trace_decisions=args.trace_decisions if collect_counters else False,
+        event_log_size=args.event_log_size if collect_counters else 0,
         reset_events=True,
         reset_counters=True,
     )
@@ -96,7 +105,7 @@ def run_once(
     attempt_kwargs = {
         "validation_sql": correctness_sql(f"__jit_benchmark_baseline_q{query_id}", result_table),
         "cleanup_sql": f"DROP TABLE IF EXISTS {result_table};",
-        "collect_counters": True,
+        "collect_counters": collect_counters,
     }
     if args.timing_mode == "profile":
         attempt = profile_materialized_attempt(*attempt_args, **attempt_kwargs)
@@ -106,7 +115,8 @@ def run_once(
         attempt = timed_materialized_attempt(*attempt_args, **attempt_kwargs)
         query_time_us = attempt["query_time_us"]
         profile_name = ""
-    region_metrics = counter_region_summary(attempt["counters"])
+    counter_rows = attempt["counters"]
+    region_metrics = counter_region_summary(counter_rows)
     correctness = correctness_from_rows(attempt["validation"], result_table)
     row = {
         "query": query_id,
@@ -118,7 +128,41 @@ def run_once(
         "profile_json": profile_name,
         **region_metrics,
     }
-    return row, attempt["counters"]
+    return row, counter_rows
+
+
+def collect_counter_once(
+    args: argparse.Namespace,
+    db_path: Path,
+    out_dir: Path,
+    query_id: str,
+    query_sql: str,
+    policy: str,
+    repeat: int,
+) -> list[dict]:
+    result_table = f"__jit_benchmark_counter_q{query_id}_{policy}_{repeat}"
+    setup_sql = jit_setup_sql(
+        args,
+        policy,
+        trace_runtime=args.trace_runtime,
+        trace_decisions=args.trace_decisions,
+        event_log_size=args.event_log_size,
+        reset_events=True,
+        reset_counters=True,
+    )
+    counter_artifact_path = out_dir / f"q{query_id}_{policy}_r{repeat}_{args.timing_mode}_counters.json"
+    attempt = timed_materialized_attempt(
+        args,
+        db_path,
+        setup_sql,
+        result_table,
+        query_sql,
+        counter_artifact_path,
+        f"counter collection q{query_id} {policy} repeat {repeat}",
+        cleanup_sql=f"DROP TABLE IF EXISTS {result_table};",
+        collect_counters=True,
+    )
+    return attempt["counters"]
 
 
 def benchmark_counter_rows(counter_rows: list[dict], query_id: str, policy: str, repeat: int) -> list[dict]:
@@ -290,15 +334,31 @@ def main() -> int:
     root = repo_root()
     rows = []
     counter_rows = []
+    counter_jobs = []
+    run_rows = {}
     try:
         for query_id in args.queries:
             query_sql = read_query(root, query_id)
             create_baseline(args, db_path, query_id, query_sql)
             for repeat in range(1, args.repeats + 1):
-                for policy in args.policies:
-                    row, counters = run_once(args, db_path, out_dir, query_id, query_sql, policy, repeat)
+                policies = list(args.policies)
+                if args.timing_mode == "production" and repeat % 2 == 0:
+                    policies.reverse()
+                for policy in policies:
+                    collect_counters = not should_use_separate_counter_run(args, policy)
+                    row, counters = run_once(
+                        args, db_path, out_dir, query_id, query_sql, policy, repeat, collect_counters
+                    )
                     rows.append(row)
-                    counter_rows.extend(benchmark_counter_rows(counters, query_id, policy, repeat))
+                    run_rows[(query_id, policy, repeat)] = row
+                    if collect_counters:
+                        counter_rows.extend(benchmark_counter_rows(counters, query_id, policy, repeat))
+                    else:
+                        counter_jobs.append((query_id, policy, repeat, query_sql))
+        for query_id, policy, repeat, query_sql in counter_jobs:
+            counters = collect_counter_once(args, db_path, out_dir, query_id, query_sql, policy, repeat)
+            run_rows[(query_id, policy, repeat)].update(counter_region_summary(counters))
+            counter_rows.extend(benchmark_counter_rows(counters, query_id, policy, repeat))
         summary_rows = summarize(rows)
         write_csv(out_dir / "runs.csv", RUN_FIELDS, rows)
         write_csv(out_dir / "summary.csv", SUMMARY_FIELDS, summary_rows)
@@ -306,7 +366,6 @@ def main() -> int:
         write_csv(
             out_dir / "performance_gaps.csv", PERFORMANCE_GAP_FIELDS, performance_gap_rows(summary_rows, counter_rows)
         )
-        write_shape_inventory(out_dir, workload="tpch")
         print(f"benchmark output: {out_dir}")
         print(f"summary: {out_dir / 'summary.csv'}")
     finally:

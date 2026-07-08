@@ -864,6 +864,24 @@ void RadixPartitionedHashTable::PopulateGroupChunk(DataChunk &group_chunk, DataC
 	group_chunk.Verify();
 }
 
+void RadixPartitionedHashTable::PopulateGroupChunk(DataChunk &group_chunk, DataChunk &input_chunk,
+                                                   const SelectionVector &selection, idx_t count) const {
+	idx_t chunk_index = 0;
+	for (auto &group_idx : grouping_set) {
+		auto &group = op.groups[group_idx];
+		D_ASSERT(group->GetExpressionType() == ExpressionType::BOUND_REF);
+		auto &bound_ref_expr = group->Cast<BoundReferenceExpression>();
+		auto &target = group_chunk.data[chunk_index++];
+		target.Reference(input_chunk.data[bound_ref_expr.Index()]);
+		target.Slice(selection, count);
+	}
+	group_chunk.SetChildCardinality(count);
+	if (grouping_set.empty()) {
+		FlatVector::SetSize(group_chunk.data[0], count_t(count));
+	}
+	group_chunk.Verify();
+}
+
 void DecideAdaptation(RadixHTGlobalSinkState &gstate, RadixHTLocalSinkState &lstate,
                       optional_ptr<TupleDataRowLocationRemap> row_location_remap = nullptr) {
 	//! If the number of unique values is greater than this percentage, we skip lookups altogether
@@ -1050,6 +1068,23 @@ void RadixPartitionedHashTable::Sink(ExecutionContext &context, DataChunk &chunk
 	FinishRadixHTSinkState(context.client, gstate, lstate);
 }
 
+void RadixPartitionedHashTable::SinkSelected(ExecutionContext &context, DataChunk &chunk, OperatorSinkInput &input,
+                                             DataChunk &payload_input, const unsafe_vector<idx_t> &filter,
+                                             const SelectionVector &selection, idx_t count) const {
+	if (count == 0) {
+		return;
+	}
+	auto &gstate = input.global_state.Cast<RadixHTGlobalSinkState>();
+	auto &lstate = input.local_state.Cast<RadixHTLocalSinkState>();
+	auto &ht = PrepareRadixHTSinkState(context, *this, input);
+
+	auto &group_chunk = lstate.group_chunk;
+	PopulateGroupChunk(group_chunk, chunk, selection, count);
+
+	ht.AddChunk(group_chunk, payload_input, filter);
+	FinishRadixHTSinkState(context.client, gstate, lstate);
+}
+
 void RadixPartitionedHashTable::ResolveStateAddresses(ExecutionContext &context, DataChunk &chunk,
                                                       OperatorSinkInput &input, Vector &addresses_out,
                                                       optional_ptr<ExecutionOperatorStageRecorder> recorder) const {
@@ -1184,7 +1219,8 @@ bool RadixPartitionedHashTable::TryUpdateNewPrimitiveGroupsWithPayloadInput(
 bool RadixPartitionedHashTable::TryAppendNewPrimitiveGroups(
     ExecutionContext &context, DataChunk &chunk, OperatorSinkInput &input, const ExecutionRegionSinkInfo &sink_info,
     const vector<const ExecutionPrimitiveAggregateUpdateLane *> &lanes,
-    optional_ptr<ExecutionOperatorStageRecorder> recorder, bool finish) const {
+    optional_ptr<ExecutionOperatorStageRecorder> recorder, bool finish,
+    optional_ptr<const ExecutionDenseGroupDomain> dense_domain) const {
 	auto &lstate = input.local_state.Cast<RadixHTLocalSinkState>();
 	auto &payloads = lstate.primitive_payloads;
 	if (!RadixValidatePrimitiveAggregateUpdate(sink_info, lanes, chunk, payloads)) {
@@ -1206,7 +1242,7 @@ bool RadixPartitionedHashTable::TryAppendNewPrimitiveGroups(
 	update_state.payloads = &payloads;
 	auto append_start = RadixTraceStart(recorder);
 	if (!ht.TryAppendNewGroupsWithStateAddressesFast(group_chunk, RadixUpdatePrimitiveGroupAddresses, &update_state,
-	                                                 recorder)) {
+	                                                 recorder, dense_domain)) {
 		RecordRadixTraceStage(recorder, "direct_append_new.append_miss", append_start);
 		return false;
 	}
@@ -1327,15 +1363,15 @@ bool RadixPartitionedHashTable::TryFindOrCreateRowPointerGroupStateTargets(
 
 	auto prepare_start = RadixTraceStart(recorder);
 	auto &ht = PrepareRadixHTSinkState(context, *this, input);
-	RecordRadixTraceStage(recorder, "direct_row_pointer_grouped_targets.prepare_sink_state", prepare_start);
+	RecordRadixTraceStage(recorder, "row_pointer_grouped_targets.prepare_sink_state", prepare_start);
 
 	auto lookup_start = RadixTraceStart(recorder);
 	if (!ht.TryFindOrCreateRowPointerGroupStateTargetsFast(payload_input, row_pointers, count, group_sources, targets,
 	                                                       recorder)) {
-		RecordRadixTraceStage(recorder, "direct_row_pointer_grouped_targets.lookup_miss", lookup_start);
+		RecordRadixTraceStage(recorder, "row_pointer_grouped_targets.lookup_miss", lookup_start);
 		return false;
 	}
-	RecordRadixTraceStage(recorder, "direct_row_pointer_grouped_targets.lookup", lookup_start);
+	RecordRadixTraceStage(recorder, "row_pointer_grouped_targets.lookup", lookup_start);
 	return true;
 }
 
@@ -1413,7 +1449,8 @@ bool RadixPartitionedHashTable::TryUpdateRowPointerGroupPrimitivePayloads(
 bool RadixPartitionedHashTable::TryAppendNewGroupsWithStateAddresses(
     ExecutionContext &context, DataChunk &chunk, OperatorSinkInput &input, const ExecutionRegionSinkInfo &sink_info,
     ExecutionGroupedAggregateStateAddressUpdateFunction update_function, void *update_state,
-    optional_ptr<ExecutionOperatorStageRecorder> recorder, bool finish) const {
+    optional_ptr<ExecutionOperatorStageRecorder> recorder, bool finish,
+    optional_ptr<const ExecutionDenseGroupDomain> dense_domain) const {
 	if (!RadixValidateStateAddressCallbackUpdate(sink_info, update_function)) {
 		return false;
 	}
@@ -1430,7 +1467,8 @@ bool RadixPartitionedHashTable::TryAppendNewGroupsWithStateAddresses(
 	RecordRadixTraceStage(recorder, "direct_append_new_state_address.populate_group_chunk", populate_start);
 
 	auto append_start = RadixTraceStart(recorder);
-	if (!ht.TryAppendNewGroupsWithStateAddressesFast(group_chunk, update_function, update_state, recorder)) {
+	if (!ht.TryAppendNewGroupsWithStateAddressesFast(group_chunk, update_function, update_state, recorder,
+	                                                 dense_domain)) {
 		RecordRadixTraceStage(recorder, "direct_append_new_state_address.append_miss", append_start);
 		return false;
 	}
@@ -1440,6 +1478,43 @@ bool RadixPartitionedHashTable::TryAppendNewGroupsWithStateAddresses(
 		auto finish_start = RadixTraceStart(recorder);
 		FinishRadixHTSinkState(context.client, gstate, lstate);
 		RecordRadixTraceStage(recorder, "direct_append_new_state_address.finish_sink_state", finish_start);
+	}
+	return true;
+}
+
+bool RadixPartitionedHashTable::TryAppendNewGroupKeysWithStateAddresses(
+    ExecutionContext &context, DataChunk &groups, OperatorSinkInput &input, const ExecutionRegionSinkInfo &sink_info,
+    ExecutionGroupedAggregateStateAddressUpdateFunction update_function, void *update_state,
+    optional_ptr<ExecutionOperatorStageRecorder> recorder, bool finish,
+    optional_ptr<const ExecutionDenseGroupDomain> dense_domain) const {
+	if (!RadixValidateStateAddressCallbackUpdate(sink_info, update_function) ||
+	    groups.ColumnCount() != sink_info.groups.size()) {
+		return false;
+	}
+	for (idx_t group_idx = 0; group_idx < sink_info.groups.size(); group_idx++) {
+		if (groups.data[group_idx].GetType() != sink_info.groups[group_idx].type) {
+			return false;
+		}
+	}
+
+	auto &gstate = input.global_state.Cast<RadixHTGlobalSinkState>();
+	auto &lstate = input.local_state.Cast<RadixHTLocalSinkState>();
+	auto prepare_start = RadixTraceStart(recorder);
+	auto &ht = PrepareRadixHTSinkState(context, *this, input);
+	RecordRadixTraceStage(recorder, "direct_append_new_group_keys_state_address.prepare_sink_state", prepare_start);
+
+	auto append_start = RadixTraceStart(recorder);
+	if (!ht.TryAppendNewGroupsWithStateAddressesFast(groups, update_function, update_state, recorder, dense_domain)) {
+		RecordRadixTraceStage(recorder, "direct_append_new_group_keys_state_address.append_miss", append_start);
+		return false;
+	}
+	RecordRadixTraceStage(recorder, "direct_append_new_group_keys_state_address.append", append_start);
+
+	if (finish) {
+		auto finish_start = RadixTraceStart(recorder);
+		FinishRadixHTSinkState(context.client, gstate, lstate);
+		RecordRadixTraceStage(recorder, "direct_append_new_group_keys_state_address.finish_sink_state",
+		                      finish_start);
 	}
 	return true;
 }
@@ -1477,6 +1552,12 @@ bool RadixPartitionedHashTable::TryResolveNewGroupAddresses(
 		RecordRadixTraceStage(recorder, "direct_new_address.finish_sink_state", finish_start);
 	}
 	return true;
+}
+
+void RadixPartitionedHashTable::RecordDirectStateAddressUpdates(ExecutionContext &context, OperatorSinkInput &input,
+                                                                idx_t count) const {
+	auto &ht = PrepareRadixHTSinkState(context, *this, input);
+	ht.RecordSinkCount(count);
 }
 
 void RadixPartitionedHashTable::FinishStateUpdates(ExecutionContext &context, OperatorSinkInput &input,

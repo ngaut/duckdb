@@ -77,6 +77,8 @@ bool TryReadNativeIntegerBetween(const ExecutionExpressionIR &root, SljitNativeI
                                  int64_t &lower, int64_t &upper, bool &lower_inclusive, bool &upper_inclusive,
                                  bool &not_between);
 bool TryReadNativeStringPrefixConstant(const ExecutionExpressionIR &root, idx_t &source_index, string &prefix);
+bool TryReadNativeStringSubstringReference(const ExecutionExpressionIR &root, idx_t &source_index,
+                                           idx_t &substring_length);
 bool TryReadNativeStringSubstringInListConstant(const ExecutionExpressionIR &root, idx_t &source_index,
                                                 idx_t &substring_length, vector<string> &constants);
 bool TryReadNativeNullCheck(const ExecutionExpressionIR &root, SljitNativeNullCheckOp &op, idx_t &source_index);

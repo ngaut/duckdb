@@ -322,6 +322,24 @@ public:
 		return op.Sink(context, input, sink_input);
 	}
 
+	bool SupportsDistinctSink() const override {
+		return op.SupportsExecutionDistinctSink();
+	}
+
+	bool SupportsDistinctSelectedSink() const override {
+		return op.SupportsExecutionDistinctSelectedSink();
+	}
+
+	SinkResultType SinkDistinct(DataChunk &input) override {
+		OperatorSinkInput sink_input {global_state, local_state, interrupt_state};
+		return op.SinkExecutionDistinct(context, input, sink_input);
+	}
+
+	SinkResultType SinkDistinctSelected(DataChunk &input, const SelectionVector &selection, idx_t count) override {
+		OperatorSinkInput sink_input {global_state, local_state, interrupt_state};
+		return op.SinkExecutionDistinctSelected(context, input, sink_input, selection, count);
+	}
+
 private:
 	ExecutionContext &context;
 	const PhysicalHashAggregate &op;
@@ -427,13 +445,15 @@ public:
 	bool TryAppendNewGroups(DataChunk &input, const ExecutionRegionSinkInfo &sink_info,
 	                        const vector<const ExecutionPrimitiveAggregateUpdateLane *> &lanes,
 	                        optional_ptr<ExecutionOperatorStageRecorder> recorder = nullptr,
-	                        bool finish = true) override {
+	                        bool finish = true,
+	                        optional_ptr<const ExecutionDenseGroupDomain> dense_domain = nullptr) override {
 		if (!CanUseSingleGroupingState()) {
 			return false;
 		}
 		auto single_grouping = GetSingleGroupingSinkState();
 		return single_grouping.grouping.table_data.TryAppendNewPrimitiveGroups(context, input, single_grouping.input,
-		                                                                       sink_info, lanes, recorder, finish);
+		                                                                       sink_info, lanes, recorder, finish,
+		                                                                       dense_domain);
 	}
 
 	bool TryUpdateNewGroupsWithSelectedStateAddresses(
@@ -514,13 +534,30 @@ public:
 	                                          ExecutionGroupedAggregateStateAddressUpdateFunction update_function,
 	                                          void *update_state,
 	                                          optional_ptr<ExecutionOperatorStageRecorder> recorder = nullptr,
-	                                          bool finish = true) override {
+	                                          bool finish = true,
+	                                          optional_ptr<const ExecutionDenseGroupDomain> dense_domain = nullptr) override {
 		if (!CanUseSingleGroupingState()) {
 			return false;
 		}
 		auto single_grouping = GetSingleGroupingSinkState();
 		return single_grouping.grouping.table_data.TryAppendNewGroupsWithStateAddresses(
-		    context, input, single_grouping.input, sink_info, update_function, update_state, recorder, finish);
+		    context, input, single_grouping.input, sink_info, update_function, update_state, recorder, finish,
+		    dense_domain);
+	}
+
+	bool TryAppendNewGroupKeysWithStateAddresses(DataChunk &groups, const ExecutionRegionSinkInfo &sink_info,
+	                                             ExecutionGroupedAggregateStateAddressUpdateFunction update_function,
+	                                             void *update_state,
+	                                             optional_ptr<ExecutionOperatorStageRecorder> recorder = nullptr,
+	                                             bool finish = true,
+	                                             optional_ptr<const ExecutionDenseGroupDomain> dense_domain = nullptr) override {
+		if (!CanUseSingleGroupingState()) {
+			return false;
+		}
+		auto single_grouping = GetSingleGroupingSinkState();
+		return single_grouping.grouping.table_data.TryAppendNewGroupKeysWithStateAddresses(
+		    context, groups, single_grouping.input, sink_info, update_function, update_state, recorder, finish,
+		    dense_domain);
 	}
 
 	bool TryResolveNewGroups(DataChunk &input, const ExecutionRegionSinkInfo &sink_info, Vector &addresses,
@@ -532,6 +569,14 @@ public:
 		auto single_grouping = GetSingleGroupingSinkState();
 		return single_grouping.grouping.table_data.TryResolveNewGroupAddresses(context, input, single_grouping.input,
 		                                                                       sink_info, addresses, recorder, finish);
+	}
+
+	void RecordDirectStateAddressUpdates(idx_t count) override {
+		if (!CanUseSingleGroupingState()) {
+			return;
+		}
+		auto single_grouping = GetSingleGroupingSinkState();
+		single_grouping.grouping.table_data.RecordDirectStateAddressUpdates(context, single_grouping.input, count);
 	}
 
 	void FinishStateUpdates() override {
@@ -755,6 +800,91 @@ void PhysicalHashAggregate::SinkDistinct(ExecutionContext &context, DataChunk &c
 	for (idx_t i = 0; i < groupings.size(); i++) {
 		SinkDistinctGrouping(context, chunk, input, i);
 	}
+}
+
+bool PhysicalHashAggregate::SupportsExecutionDistinctSink() const {
+	return distinct_collection_info && CanSkipRegularSink();
+}
+
+bool PhysicalHashAggregate::SupportsExecutionDistinctSelectedSink() const {
+	if (!SupportsExecutionDistinctSink()) {
+		return false;
+	}
+	for (auto &idx : distinct_collection_info->indices) {
+		auto &aggregate = grouped_aggregate_data.aggregates[idx]->Cast<BoundAggregateExpression>();
+		if (aggregate.GetFilter()) {
+			return false;
+		}
+	}
+	return true;
+}
+
+SinkResultType PhysicalHashAggregate::SinkExecutionDistinct(ExecutionContext &context, DataChunk &chunk,
+                                                            OperatorSinkInput &input) const {
+	if (!SupportsExecutionDistinctSink()) {
+		throw InternalException("hash aggregate distinct execution sink requires distinct-only aggregate input");
+	}
+	SinkDistinct(context, chunk, input);
+	return SinkResultType::NEED_MORE_INPUT;
+}
+
+void PhysicalHashAggregate::SinkDistinctGroupingSelected(ExecutionContext &context, DataChunk &chunk,
+                                                         OperatorSinkInput &input, const SelectionVector &selection,
+                                                         idx_t count, idx_t grouping_idx) const {
+	if (count == 0) {
+		return;
+	}
+	auto &sink = input.local_state.Cast<HashAggregateLocalSinkState>();
+	auto &global_sink = input.global_state.Cast<HashAggregateGlobalSinkState>();
+
+	auto &grouping_gstate = global_sink.grouping_states[grouping_idx];
+	auto &grouping_lstate = sink.grouping_states[grouping_idx];
+	auto &distinct_info = *distinct_collection_info;
+
+	auto &distinct_state = grouping_gstate.distinct_state;
+	auto &distinct_data = groupings[grouping_idx].distinct_data;
+
+	DataChunk empty_chunk;
+	unsafe_vector<idx_t> empty_filter;
+
+	for (idx_t &idx : distinct_info.indices) {
+		auto &aggregate = grouped_aggregate_data.aggregates[idx]->Cast<BoundAggregateExpression>();
+		if (aggregate.GetFilter()) {
+			throw InternalException("hash aggregate selected distinct execution sink does not support filters");
+		}
+
+		D_ASSERT(distinct_info.table_map.count(idx));
+		idx_t table_idx = distinct_info.table_map[idx];
+		if (!distinct_data->radix_tables[table_idx]) {
+			continue;
+		}
+		auto &radix_table = *distinct_data->radix_tables[table_idx];
+		auto &radix_global_sink = *distinct_state->radix_states[table_idx];
+		auto &radix_local_sink = *grouping_lstate.distinct_states[table_idx];
+
+		InterruptState interrupt_state;
+		OperatorSinkInput sink_input {radix_global_sink, radix_local_sink, interrupt_state};
+		radix_table.SinkSelected(context, chunk, sink_input, empty_chunk, empty_filter, selection, count);
+	}
+}
+
+void PhysicalHashAggregate::SinkDistinctSelected(ExecutionContext &context, DataChunk &chunk,
+                                                 OperatorSinkInput &input, const SelectionVector &selection,
+                                                 idx_t count) const {
+	for (idx_t i = 0; i < groupings.size(); i++) {
+		SinkDistinctGroupingSelected(context, chunk, input, selection, count, i);
+	}
+}
+
+SinkResultType PhysicalHashAggregate::SinkExecutionDistinctSelected(ExecutionContext &context, DataChunk &chunk,
+                                                                    OperatorSinkInput &input,
+                                                                    const SelectionVector &selection,
+                                                                    idx_t count) const {
+	if (!SupportsExecutionDistinctSelectedSink()) {
+		throw InternalException("hash aggregate selected distinct execution sink requires unfiltered distinct-only input");
+	}
+	SinkDistinctSelected(context, chunk, input, selection, count);
+	return SinkResultType::NEED_MORE_INPUT;
 }
 
 SinkResultType PhysicalHashAggregate::Sink(ExecutionContext &context, DataChunk &chunk,

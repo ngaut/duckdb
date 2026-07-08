@@ -84,6 +84,7 @@ SljitNativeRegionExpressionPlan SljitNativeRegionExpressionPlan::Copy(bool copy_
 	result.query_location = query_location;
 	result.string_compress_target_size = string_compress_target_size;
 	result.string_decompress_source_size = string_decompress_source_size;
+	result.string_substring_length = string_substring_length;
 	result.guard_source_index = guard_source_index;
 	result.guard_compare_op = guard_compare_op;
 	result.guard_constant = guard_constant;

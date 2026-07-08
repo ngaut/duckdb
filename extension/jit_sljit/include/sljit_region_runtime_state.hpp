@@ -81,6 +81,10 @@ struct SljitRegionExecutionScratch {
 		return aggregate_scratch.PreaggregatedRowPointers(op_idx);
 	}
 
+	SljitPreaggregatedGroupContinuationState &AggregatePreaggregatedGroupContinuation(idx_t op_idx) {
+		return aggregate_scratch.PreaggregatedGroupContinuation(op_idx);
+	}
+
 	SljitPreaggregatedPrimitiveAggregateScratch &AggregatePreaggregateScratch(idx_t op_idx) {
 		return aggregate_scratch.PreaggregateScratch(op_idx);
 	}

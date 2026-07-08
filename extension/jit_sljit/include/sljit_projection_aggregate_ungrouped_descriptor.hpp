@@ -84,7 +84,7 @@ static bool SljitTryRemapProjectionPlanSourceIndices(SljitNativeRegionExpression
 }
 
 static bool SljitTryBuildUngroupedAggregateRequiredProjectionOutputs(
-    SljitExecutableRegionOp &projection_op, SljitExecutableRegionOp &aggregate_op,
+    const SljitExecutableRegionOp &projection_op, const SljitExecutableRegionOp &aggregate_op,
     vector<uint8_t> &required_projection_outputs, optional_ptr<vector<idx_t>> fused_payload_sources = nullptr) {
 	if (projection_op.kind != SljitNativeRegionOpKind::PROJECTION ||
 	    aggregate_op.kind != SljitNativeRegionOpKind::AGGREGATE_UPDATE ||
@@ -164,7 +164,7 @@ static bool SljitTryAddJoinProjectionAggregateRequiredInput(
 }
 
 static bool SljitTryBuildRemappedUngroupedAggregatePayloads(
-    SljitExecutableAggregateUpdate &aggregate_update, const vector<ExecutionRegionAggregateInput> &aggregates,
+    const SljitExecutableAggregateUpdate &aggregate_update, const vector<ExecutionRegionAggregateInput> &aggregates,
     const vector<idx_t> &projection_to_input, const vector<idx_t> &fused_payload_sources,
     vector<SljitExecutableRegionExpression> &remapped_payloads) {
 	remapped_payloads.clear();

@@ -249,9 +249,8 @@ static bool TryExecuteDirectRowPointerStringSetComplementarySumUpdate(
 		FinishGroupedAggregateStateUpdates(runtime, op_idx, grouped_state, "finish_grouped_state_updates");
 	}
 	scratch.RecordDirectNewAggregateUpdateResult(op_idx, true);
-	RecordSljitRegionRuntimePath(runtime, op.kind, "direct_row_pointer_string_set_complementary_sum_update", count);
-	RecordSljitRegionMaterializationBoundary(runtime, op.kind, "row_pointer_string_set_complementary_sum_update",
-	                                         count);
+	RecordSljitRegionMaterializationElisionPath(runtime, op.kind,
+	                                            "direct_row_pointer_string_set_complementary_sum_update", count);
 	return true;
 }
 
@@ -274,7 +273,7 @@ static bool TryExecuteDirectRowPointerPreclassifiedStringSetComplementarySumUpda
 	ExecutionGroupedAggregateStateTargetBatch targets;
 	auto stage_start = SljitRegionStageStart(runtime);
 	auto updated = ExecuteSljitRegionRecordedOperation(
-	    runtime, op_idx, op.kind, "direct_row_pointer_preclassified_string_set_complementary_sum_lookup", stage_start,
+	    runtime, op_idx, op.kind, "row_pointer_preclassified_string_set_complementary_sum_lookup", stage_start,
 	    [&](optional_ptr<ExecutionOperatorStageRecorder> recorder) {
 		    return grouped_state.state->TryFindOrCreateRowPointerGroupStateTargets(
 		        payload_input, row_pointers, count, group_sources, op.aggregate_update.plan.sink_info, targets,
@@ -283,12 +282,12 @@ static bool TryExecuteDirectRowPointerPreclassifiedStringSetComplementarySumUpda
 	if (!updated) {
 		scratch.RecordDirectNewAggregateUpdateResult(op_idx, false);
 		RecordSljitRegionStageRuntimePath(runtime, op_idx, op.kind,
-		                                  "direct_row_pointer_preclassified_string_set_complementary_sum_lookup_miss",
+		                                  "row_pointer_preclassified_string_set_complementary_sum_lookup_miss",
 		                                  stage_start);
 		return false;
 	}
 	RecordSljitRegionStageRuntimePath(
-	    runtime, op_idx, op.kind, "direct_row_pointer_preclassified_string_set_complementary_sum_lookup", stage_start);
+	    runtime, op_idx, op.kind, "row_pointer_preclassified_string_set_complementary_sum_lookup", stage_start);
 	auto update_start = SljitRegionStageStart(runtime);
 	UnifiedVectorFormat predicate_format;
 	payload_input.data[0].ToUnifiedFormat(predicate_format);
@@ -296,15 +295,13 @@ static bool TryExecuteDirectRowPointerPreclassifiedStringSetComplementarySumUpda
 		SljitExecutePreclassifiedStringSetComplementarySumSpan(span, state, predicate_format);
 	}
 	RecordSljitRegionStageRuntime(runtime, op_idx, op.kind,
-	                              "direct_row_pointer_preclassified_string_set_complementary_sum_update", update_start);
+	                              "row_pointer_preclassified_string_set_complementary_sum_update", update_start);
 	if (finish) {
 		FinishGroupedAggregateStateUpdates(runtime, op_idx, grouped_state, "finish_grouped_state_updates");
 	}
 	scratch.RecordDirectNewAggregateUpdateResult(op_idx, true);
-	RecordSljitRegionRuntimePath(runtime, op.kind,
-	                             "direct_row_pointer_preclassified_string_set_complementary_sum_update", count);
-	RecordSljitRegionMaterializationBoundary(runtime, op.kind,
-	                                         "row_pointer_preclassified_string_set_complementary_sum_update", count);
+	RecordSljitRegionMaterializationElisionPath(
+	    runtime, op.kind, "row_pointer_preclassified_string_set_complementary_sum_update", count);
 	return true;
 }
 

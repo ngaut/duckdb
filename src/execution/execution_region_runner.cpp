@@ -215,11 +215,26 @@ public:
 		AddExecutionRegionRecordedCounter(jit_runtime.runtime_path_counts, ExecutionRegionStageId(path), count);
 	}
 
-	void RecordJitMaterializationBoundary(const char *boundary, idx_t count) override {
-		if (!trace_runtime || !boundary || !boundary[0]) {
+	void RecordJitRuntimeProof(ExecutionRegionJitRuntimeProof proof, idx_t count) override {
+		if (!trace_runtime) {
 			return;
 		}
-		AddExecutionRegionRecordedCounter(jit_runtime.materialization_boundary_counts, ExecutionRegionStageId(boundary),
+		AddExecutionRegionRecordedCounter(jit_runtime.runtime_proof_counts,
+		                                  ExecutionRegionStageId(ExecutionRegionJitRuntimeProofName(proof)), count);
+	}
+
+	void RecordJitRuntimeProofDetail(const char *proof, idx_t count) override {
+		if (!trace_runtime || !proof || !proof[0]) {
+			return;
+		}
+		AddExecutionRegionRecordedCounter(jit_runtime.runtime_proof_counts, ExecutionRegionStageId(proof), count);
+	}
+
+	void RecordJitRuntimeDelegation(const char *delegation, idx_t count) override {
+		if (!trace_runtime || !delegation || !delegation[0]) {
+			return;
+		}
+		AddExecutionRegionRecordedCounter(jit_runtime.runtime_delegation_counts, ExecutionRegionStageId(delegation),
 		                                  count);
 	}
 

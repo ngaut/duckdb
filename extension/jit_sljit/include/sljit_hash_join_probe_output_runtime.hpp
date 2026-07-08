@@ -23,7 +23,6 @@ static ExecutionOperatorBindResult SljitMaterializeLeftHashJoinProbeUnmatchedOut
 	auto materialize_stage_start = SljitRegionStageStart(runtime);
 	SljitRegionStageRecorder recorder(runtime, op_idx, op.kind, "materialize_left_unmatched");
 	SljitMaterializeLeftHashJoinProbeUnmatched(probe, input, output, match_selection, state, &recorder);
-	RecordSljitRegionMaterializationBoundary(runtime, op.kind, "final_output_left_unmatched", output.size());
 	RecordSljitRegionStageRuntime(runtime, op_idx, op.kind, "materialize_left_unmatched", materialize_stage_start);
 	return ExecutionOperatorBindResult::READY;
 }
@@ -36,7 +35,7 @@ static const char *SljitHashJoinProbeSelectedViewBoundaryName(bool mark_probe,
 	if (mark_selection_mode == SljitHashJoinMarkSelectionMode::NON_MATCHES) {
 		return "mark_nonmatch_selection_reference";
 	}
-	return mark_probe ? "mark_flags" : "row_pointer_selection_reference";
+	return mark_probe ? "mark_flags" : "selection_reference.regular";
 }
 
 static idx_t SljitSelectHashJoinProbeNonNullKeys(const ExecutionHashJoinProbeBinding &probe, DataChunk &input,
@@ -86,6 +85,8 @@ static ExecutionOperatorBindResult SljitExecuteMarkProbeNoTrueNonMatches(Executi
 	state.finished = true;
 	state.source_key0_int64_to_int32_matches_are_proven = false;
 	RecordSljitRegionRuntimePath(runtime, op.kind, "mark_nonmatch_empty_due_to_build_null");
+	RecordSljitRegionRuntimeProof(runtime, op.kind, ExecutionRegionJitRuntimeProof::NO_WORK,
+	                              "mark_nonmatch_empty_due_to_build_null");
 	output.Reset();
 	return ExecutionOperatorBindResult::READY;
 }
@@ -93,10 +94,11 @@ static ExecutionOperatorBindResult SljitExecuteMarkProbeNoTrueNonMatches(Executi
 static ExecutionOperatorBindResult SljitExecuteEmptyHashJoinProbe(
     ExecutionRegionRuntime &runtime, idx_t op_idx, SljitExecutableRegionOp &op,
     const ExecutionHashJoinProbeBinding &probe, DataChunk &input, DataChunk &output, SelectionVector &match_selection,
-    Vector &row_pointers, SljitHashJoinProbeDrainState &state,
-    SljitHashJoinProbeOutputContract output_contract = SljitHashJoinProbeOutputContract::MATERIALIZED_OUTPUT) {
+	Vector &row_pointers, SljitHashJoinProbeDrainState &state,
+	SljitHashJoinProbeOutputContract output_contract = SljitHashJoinProbeOutputContract::MATERIALIZED_OUTPUT) {
 	state.finished = true;
 	RecordSljitRegionRuntimePath(runtime, op.kind, "empty_build_side");
+	RecordSljitRegionRuntimeProof(runtime, op.kind, ExecutionRegionJitRuntimeProof::NO_WORK, "empty_build_side");
 	switch (op.hash_join_probe.plan.output_mode) {
 	case ExecutionHashJoinProbeOutputMode::LEFT_PROBE_AND_BUILD:
 		return SljitMaterializeLeftHashJoinProbeUnmatchedOutput(runtime, op_idx, op, probe, input, output,
@@ -108,8 +110,6 @@ static ExecutionOperatorBindResult SljitExecuteEmptyHashJoinProbe(
 				output.Reset();
 				break;
 			}
-			RecordSljitRegionMaterializationBoundary(runtime, op.kind, "mark_nonmatch_selection_reference",
-			                                         selected_count);
 			output.SetChildCardinality(selected_count);
 			break;
 		}
@@ -121,13 +121,11 @@ static ExecutionOperatorBindResult SljitExecuteEmptyHashJoinProbe(
 			for (idx_t row_idx = 0; row_idx < input.size(); row_idx++) {
 				match_selection.set_index(row_idx, 0);
 			}
-			RecordSljitRegionMaterializationBoundary(runtime, op.kind, "mark_flags", input.size());
 			output.SetChildCardinality(input.size());
 			break;
 		}
 		auto materialize_stage_start = SljitRegionStageStart(runtime);
 		SljitRegionStageRecorder recorder(runtime, op_idx, op.kind, "materialize_output");
-		RecordSljitRegionMaterializationBoundary(runtime, op.kind, "final_output", input.size());
 		ExecutionMaterializeHashJoinProbe(probe, input, row_pointers, match_selection, input.size(), output, &recorder);
 		RecordSljitRegionStageRuntime(runtime, op_idx, op.kind, "materialize_output", materialize_stage_start);
 	} break;

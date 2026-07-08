@@ -97,10 +97,10 @@ private:
 			throw InternalException("SLJIT delimiter join sink could not materialize selected hash-join input");
 		}
 		RecordSljitRegionStageRuntime(runtime, selected.hash_join_idx, SljitNativeRegionOpKind::HASH_JOIN_PROBE,
-		                              "materialize_selected_delim_sink_input", materialize_stage_start);
-		RecordSljitRegionMaterializationBoundary(runtime, SljitNativeRegionOpKind::HASH_JOIN_PROBE,
-		                                         "selected_delim_sink_input", output.size());
-		RecordSljitRegionRuntimePath(runtime, SljitNativeRegionOpKind::DELIM_JOIN_SINK, "selected_hash_join_delim_sink",
+		                              "selected_view_materialization", materialize_stage_start);
+		RecordSljitRegionRuntimeDelegation(runtime, SljitNativeRegionOpKind::DELIM_JOIN_SINK,
+		                                   "selected_view_materialization", output.size());
+		RecordSljitRegionRuntimePath(runtime, SljitNativeRegionOpKind::DELIM_JOIN_SINK, "hash_join_selected_delim_sink",
 		                             output.size());
 		return output;
 	}
@@ -121,7 +121,7 @@ private:
 		RecordSljitRegionStageRuntime(runtime, primitive.final_projection_idx, SljitNativeRegionOpKind::PROJECTION,
 		                              "reference_slice", project_stage_start);
 		RecordSljitRegionRuntimePath(runtime, SljitNativeRegionOpKind::DELIM_JOIN_SINK,
-		                             "direct_reference_projection_delim_sink", output.size());
+		                             "reference_projection_delim_sink", output.size());
 		return output;
 	}
 

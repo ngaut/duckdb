@@ -75,7 +75,7 @@ private:
 		const auto op_idx = step.Op(0);
 		return SljitAppendChunkToInitializedBatch(
 		    runtime, batch, output, op_idx, optional_ptr<const SljitExecutableRegionOp>(&ops[op_idx]),
-		    "hash_join_materialize_batch_append", "hash_join_materialize_batch", flush_batch, execute_output_batch);
+		    "hash_join_output_buffer_append", flush_batch, execute_output_batch);
 	}
 
 private:

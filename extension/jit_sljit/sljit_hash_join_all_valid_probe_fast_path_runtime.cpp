@@ -12,87 +12,87 @@
 namespace duckdb {
 
 static constexpr const char *SLJIT_GENERATED_FLAT_ALL_VALID_HASH_JOIN_PROBE_STAGE =
-    "generated_regular_probe_flat_all_valid_function";
+    "regular_probe.generated.all_valid.flat";
 static constexpr const char *SLJIT_GENERATED_MARK_MATCH_FLAT_ALL_VALID_HASH_JOIN_PROBE_STAGE =
-    "generated_regular_probe_mark_match_flat_all_valid_function";
+    "regular_probe.generated.all_valid.mark_match.flat";
 static constexpr const char *SLJIT_GENERATED_MARK_NONMATCH_FLAT_ALL_VALID_HASH_JOIN_PROBE_STAGE =
-    "generated_regular_probe_mark_nonmatch_flat_all_valid_function";
+    "regular_probe.generated.all_valid.mark_nonmatch.flat";
 static constexpr const char *SLJIT_GENERATED_SELECTED_ALL_VALID_HASH_JOIN_PROBE_STAGE =
-    "generated_regular_probe_selected_all_valid_function";
+    "regular_probe.generated.all_valid.selected";
 static constexpr const char *SLJIT_GENERATED_MARK_MATCH_SELECTED_ALL_VALID_HASH_JOIN_PROBE_STAGE =
-    "generated_regular_probe_mark_match_selected_all_valid_function";
+    "regular_probe.generated.all_valid.mark_match.selected";
 static constexpr const char *SLJIT_GENERATED_MARK_NONMATCH_SELECTED_ALL_VALID_HASH_JOIN_PROBE_STAGE =
-    "generated_regular_probe_mark_nonmatch_selected_all_valid_function";
+    "regular_probe.generated.all_valid.mark_nonmatch.selected";
 static constexpr const char *SLJIT_FAST_FLAT_ALL_VALID_UINT64_PAIR_HASH_JOIN_PROBE_STAGE =
-    "fast_regular_probe_flat_all_valid_int64_pair_no_chain";
+    "regular_probe.all_valid.flat.int64_pair.no_chain";
 static constexpr const char *SLJIT_FAST_FLAT_ALL_VALID_UINT64_PAIR_CHAIN_HASH_JOIN_PROBE_STAGE =
-    "fast_regular_probe_flat_all_valid_int64_pair_chain";
+    "regular_probe.all_valid.flat.int64_pair.chain";
 static constexpr const char *SLJIT_FAST_SELECTED_ALL_VALID_UINT64_PAIR_HASH_JOIN_PROBE_STAGE =
-    "fast_regular_probe_selected_all_valid_int64_pair_no_chain";
+    "regular_probe.all_valid.selected.int64_pair.no_chain";
 static constexpr const char *SLJIT_FAST_SELECTED_ALL_VALID_UINT64_PAIR_CHAIN_HASH_JOIN_PROBE_STAGE =
-    "fast_regular_probe_selected_all_valid_int64_pair_chain";
+    "regular_probe.all_valid.selected.int64_pair.chain";
 static constexpr const char *SLJIT_FAST_FLAT_ALL_VALID_SINGLE_KEY_NOTEQUAL_CHAIN_HASH_JOIN_PROBE_STAGE =
-    "fast_regular_probe_flat_all_valid_single_key_notequal_chain";
+    "regular_probe.all_valid.flat.single_key.notequal_chain";
 static constexpr const char *SLJIT_FAST_FLAT_ALL_VALID_SINGLE_KEY_HASH_JOIN_PROBE_STAGE =
-    "fast_regular_probe_flat_all_valid_single_key_no_chain";
+    "regular_probe.all_valid.flat.single_key.no_chain";
 static constexpr const char *SLJIT_FAST_SELECTED_ALL_VALID_SINGLE_KEY_HASH_JOIN_PROBE_STAGE =
-    "fast_regular_probe_selected_all_valid_single_key_no_chain";
+    "regular_probe.all_valid.selected.single_key.no_chain";
 static constexpr const char *SLJIT_FAST_FLAT_ALL_VALID_SINGLE_KEY_CHAIN_HASH_JOIN_PROBE_STAGE =
-    "fast_regular_probe_flat_all_valid_single_key_chain";
+    "regular_probe.all_valid.flat.single_key.chain";
 static constexpr const char *SLJIT_FAST_SELECTED_ALL_VALID_SINGLE_KEY_CHAIN_HASH_JOIN_PROBE_STAGE =
-    "fast_regular_probe_selected_all_valid_single_key_chain";
+    "regular_probe.all_valid.selected.single_key.chain";
 static constexpr const char *SLJIT_FAST_SELECTED_ALL_VALID_SINGLE_KEY_NOTEQUAL_CHAIN_HASH_JOIN_PROBE_STAGE =
-    "fast_regular_probe_selected_all_valid_single_key_notequal_chain";
+    "regular_probe.all_valid.selected.single_key.notequal_chain";
 static constexpr const char *SLJIT_FAST_MARK_MATCH_FLAT_ALL_VALID_UINT64_PAIR_HASH_JOIN_PROBE_STAGE =
-    "fast_regular_probe_mark_match_flat_all_valid_int64_pair_no_chain";
+    "regular_probe.all_valid.mark_match.flat.int64_pair.no_chain";
 static constexpr const char *SLJIT_FAST_MARK_MATCH_FLAT_ALL_VALID_UINT64_PAIR_CHAIN_HASH_JOIN_PROBE_STAGE =
-    "fast_regular_probe_mark_match_flat_all_valid_int64_pair_chain";
+    "regular_probe.all_valid.mark_match.flat.int64_pair.chain";
 static constexpr const char *SLJIT_FAST_MARK_MATCH_SELECTED_ALL_VALID_UINT64_PAIR_HASH_JOIN_PROBE_STAGE =
-    "fast_regular_probe_mark_match_selected_all_valid_int64_pair_no_chain";
+    "regular_probe.all_valid.mark_match.selected.int64_pair.no_chain";
 static constexpr const char *SLJIT_FAST_MARK_MATCH_SELECTED_ALL_VALID_UINT64_PAIR_CHAIN_HASH_JOIN_PROBE_STAGE =
-    "fast_regular_probe_mark_match_selected_all_valid_int64_pair_chain";
+    "regular_probe.all_valid.mark_match.selected.int64_pair.chain";
 static constexpr const char *SLJIT_FAST_MARK_MATCH_FLAT_ALL_VALID_SINGLE_KEY_COMPARISON_CHAIN_HASH_JOIN_PROBE_STAGE =
-    "fast_regular_probe_mark_match_flat_all_valid_single_key_comparison_chain";
+    "regular_probe.all_valid.mark_match.flat.single_key.comparison_chain";
 static constexpr const char *SLJIT_FAST_MARK_MATCH_FLAT_ALL_VALID_SINGLE_KEY_COMPARISON_HASH_JOIN_PROBE_STAGE =
-    "fast_regular_probe_mark_match_flat_all_valid_single_key_comparison_no_chain";
+    "regular_probe.all_valid.mark_match.flat.single_key.comparison_no_chain";
 static constexpr const char *SLJIT_FAST_MARK_MATCH_SELECTED_ALL_VALID_SINGLE_KEY_COMPARISON_HASH_JOIN_PROBE_STAGE =
-    "fast_regular_probe_mark_match_selected_all_valid_single_key_comparison_no_chain";
+    "regular_probe.all_valid.mark_match.selected.single_key.comparison_no_chain";
 static constexpr const char
     *SLJIT_FAST_MARK_MATCH_SELECTED_ALL_VALID_SINGLE_KEY_COMPARISON_CHAIN_HASH_JOIN_PROBE_STAGE =
-        "fast_regular_probe_mark_match_selected_all_valid_single_key_comparison_chain";
+        "regular_probe.all_valid.mark_match.selected.single_key.comparison_chain";
 static constexpr const char *SLJIT_FAST_MARK_MATCH_FLAT_ALL_VALID_SINGLE_KEY_HASH_JOIN_PROBE_STAGE =
-    "fast_regular_probe_mark_match_flat_all_valid_single_key_no_chain";
+    "regular_probe.all_valid.mark_match.flat.single_key.no_chain";
 static constexpr const char *SLJIT_FAST_MARK_MATCH_SELECTED_ALL_VALID_SINGLE_KEY_HASH_JOIN_PROBE_STAGE =
-    "fast_regular_probe_mark_match_selected_all_valid_single_key_no_chain";
+    "regular_probe.all_valid.mark_match.selected.single_key.no_chain";
 static constexpr const char *SLJIT_FAST_MARK_MATCH_FLAT_ALL_VALID_SINGLE_KEY_CHAIN_HASH_JOIN_PROBE_STAGE =
-    "fast_regular_probe_mark_match_flat_all_valid_single_key_chain";
+    "regular_probe.all_valid.mark_match.flat.single_key.chain";
 static constexpr const char *SLJIT_FAST_MARK_MATCH_SELECTED_ALL_VALID_SINGLE_KEY_CHAIN_HASH_JOIN_PROBE_STAGE =
-    "fast_regular_probe_mark_match_selected_all_valid_single_key_chain";
+    "regular_probe.all_valid.mark_match.selected.single_key.chain";
 static constexpr const char *SLJIT_FAST_MARK_NONMATCH_FLAT_ALL_VALID_UINT64_PAIR_HASH_JOIN_PROBE_STAGE =
-    "fast_regular_probe_mark_nonmatch_flat_all_valid_int64_pair_no_chain";
+    "regular_probe.all_valid.mark_nonmatch.flat.int64_pair.no_chain";
 static constexpr const char *SLJIT_FAST_MARK_NONMATCH_FLAT_ALL_VALID_UINT64_PAIR_CHAIN_HASH_JOIN_PROBE_STAGE =
-    "fast_regular_probe_mark_nonmatch_flat_all_valid_int64_pair_chain";
+    "regular_probe.all_valid.mark_nonmatch.flat.int64_pair.chain";
 static constexpr const char *SLJIT_FAST_MARK_NONMATCH_SELECTED_ALL_VALID_UINT64_PAIR_HASH_JOIN_PROBE_STAGE =
-    "fast_regular_probe_mark_nonmatch_selected_all_valid_int64_pair_no_chain";
+    "regular_probe.all_valid.mark_nonmatch.selected.int64_pair.no_chain";
 static constexpr const char *SLJIT_FAST_MARK_NONMATCH_SELECTED_ALL_VALID_UINT64_PAIR_CHAIN_HASH_JOIN_PROBE_STAGE =
-    "fast_regular_probe_mark_nonmatch_selected_all_valid_int64_pair_chain";
+    "regular_probe.all_valid.mark_nonmatch.selected.int64_pair.chain";
 static constexpr const char *SLJIT_FAST_MARK_NONMATCH_FLAT_ALL_VALID_SINGLE_KEY_COMPARISON_CHAIN_HASH_JOIN_PROBE_STAGE =
-    "fast_regular_probe_mark_nonmatch_flat_all_valid_single_key_comparison_chain";
+    "regular_probe.all_valid.mark_nonmatch.flat.single_key.comparison_chain";
 static constexpr const char *SLJIT_FAST_MARK_NONMATCH_FLAT_ALL_VALID_SINGLE_KEY_COMPARISON_HASH_JOIN_PROBE_STAGE =
-    "fast_regular_probe_mark_nonmatch_flat_all_valid_single_key_comparison_no_chain";
+    "regular_probe.all_valid.mark_nonmatch.flat.single_key.comparison_no_chain";
 static constexpr const char *SLJIT_FAST_MARK_NONMATCH_SELECTED_ALL_VALID_SINGLE_KEY_COMPARISON_HASH_JOIN_PROBE_STAGE =
-    "fast_regular_probe_mark_nonmatch_selected_all_valid_single_key_comparison_no_chain";
+    "regular_probe.all_valid.mark_nonmatch.selected.single_key.comparison_no_chain";
 static constexpr const char
     *SLJIT_FAST_MARK_NONMATCH_SELECTED_ALL_VALID_SINGLE_KEY_COMPARISON_CHAIN_HASH_JOIN_PROBE_STAGE =
-        "fast_regular_probe_mark_nonmatch_selected_all_valid_single_key_comparison_chain";
+        "regular_probe.all_valid.mark_nonmatch.selected.single_key.comparison_chain";
 static constexpr const char *SLJIT_FAST_MARK_NONMATCH_FLAT_ALL_VALID_SINGLE_KEY_HASH_JOIN_PROBE_STAGE =
-    "fast_regular_probe_mark_nonmatch_flat_all_valid_single_key_no_chain";
+    "regular_probe.all_valid.mark_nonmatch.flat.single_key.no_chain";
 static constexpr const char *SLJIT_FAST_MARK_NONMATCH_SELECTED_ALL_VALID_SINGLE_KEY_HASH_JOIN_PROBE_STAGE =
-    "fast_regular_probe_mark_nonmatch_selected_all_valid_single_key_no_chain";
+    "regular_probe.all_valid.mark_nonmatch.selected.single_key.no_chain";
 static constexpr const char *SLJIT_FAST_MARK_NONMATCH_FLAT_ALL_VALID_SINGLE_KEY_CHAIN_HASH_JOIN_PROBE_STAGE =
-    "fast_regular_probe_mark_nonmatch_flat_all_valid_single_key_chain";
+    "regular_probe.all_valid.mark_nonmatch.flat.single_key.chain";
 static constexpr const char *SLJIT_FAST_MARK_NONMATCH_SELECTED_ALL_VALID_SINGLE_KEY_CHAIN_HASH_JOIN_PROBE_STAGE =
-    "fast_regular_probe_mark_nonmatch_selected_all_valid_single_key_chain";
+    "regular_probe.all_valid.mark_nonmatch.selected.single_key.chain";
 
 template <bool SELECTED, bool CHAIN>
 static bool ExecuteAllValidUint64PairProbeFastPath(const SljitNativeHashJoinProbePlan &plan,

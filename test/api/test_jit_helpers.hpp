@@ -50,63 +50,256 @@ static string EventGeneratedStageCountBreakdown(const ExecutionRegionEvent &even
 	return RenderExecutionRegionStageCountBreakdown(event.generated_stage_runtime);
 }
 
+static idx_t TotalGeneratedStageExecutions(const ExecutionRegionEvent &event) {
+	idx_t result = 0;
+	for (auto &stage : event.generated_stage_runtime) {
+		result += stage.count;
+	}
+	return result;
+}
+
+static bool ExecutionRegionStageNameHasOperatorKind(const string &name, const string &operator_kind) {
+	auto separator = name.find(':');
+	if (separator == string::npos) {
+		return false;
+	}
+	const auto kind_start = separator + 1;
+	auto kind_end = name.find('.', kind_start);
+	if (kind_end == string::npos) {
+		kind_end = name.size();
+	}
+	return name.substr(kind_start, kind_end - kind_start) == operator_kind;
+}
+
+static idx_t GeneratedOperatorStageEntryCount(const ExecutionRegionEvent &event, const string &operator_kind) {
+	idx_t result = 0;
+	for (auto &stage : event.generated_stage_runtime) {
+		if (ExecutionRegionStageNameHasOperatorKind(stage.stage.name, operator_kind)) {
+			result++;
+		}
+	}
+	return result;
+}
+
+static idx_t GeneratedOperatorStageExecutionCount(const ExecutionRegionEvent &event, const string &operator_kind) {
+	idx_t result = 0;
+	for (auto &stage : event.generated_stage_runtime) {
+		if (ExecutionRegionStageNameHasOperatorKind(stage.stage.name, operator_kind)) {
+			result += stage.count;
+		}
+	}
+	return result;
+}
+
+static void RequireNativeGeneratedRuntimeWork(const ExecutionRegionEvent &event) {
+	REQUIRE(EventPhase(event) == "runtime");
+	REQUIRE(EventStatus(event) == "executed");
+	REQUIRE(EventExecutionMode(event) == "native");
+	REQUIRE(event.generated_body_runtime_time_us >= 0);
+	REQUIRE(!event.generated_stage_runtime.empty());
+	REQUIRE(TotalGeneratedStageExecutions(event) > 0);
+}
+
 static string EventJitRuntimePathCounts(const ExecutionRegionEvent &event) {
 	return RenderExecutionRegionCounterBreakdown(event.jit_runtime.runtime_path_counts);
 }
 
-static string EventJitMaterializationBoundaryCounts(const ExecutionRegionEvent &event) {
-	return RenderExecutionRegionCounterBreakdown(event.jit_runtime.materialization_boundary_counts);
+static string EventJitRuntimeProofCounts(const ExecutionRegionEvent &event) {
+	return RenderExecutionRegionCounterBreakdown(event.jit_runtime.runtime_proof_counts);
 }
 
-static bool HasInputVectorOrProjectedGroupPayloadUpdateStage(const string &stage_counts) {
-	return StringUtil::Contains(stage_counts, "aggregate_update.direct_input_vector_group_payload_update=") ||
-	       StringUtil::Contains(stage_counts, "aggregate_update.direct_projected_group_payload_update=");
+static string EventJitRuntimeDelegationCounts(const ExecutionRegionEvent &event) {
+	return RenderExecutionRegionCounterBreakdown(event.jit_runtime.runtime_delegation_counts);
 }
 
-static bool HasInputVectorOrProjectedGroupPayloadUpdateBoundary(const string &boundary_counts) {
-	return StringUtil::Contains(boundary_counts, "aggregate_update.input_vector_group_payload_update=") ||
-	       StringUtil::Contains(boundary_counts, "aggregate_update.projected_group_payload_update=");
+static bool StageNameHasPrefix(const vector<ExecutionRegionRecordedStageRuntime> &stages, const string &prefix) {
+	for (auto &stage : stages) {
+		if (StringUtil::StartsWith(stage.stage.name, prefix)) {
+			return true;
+		}
+	}
+	return false;
 }
 
-static bool HasInputVectorOrProjectedGroupPayloadUpdateText(const string &text) {
-	return StringUtil::Contains(text, "aggregate_update.direct_input_vector_group_payload_update") ||
-	       StringUtil::Contains(text, "aggregate_update.direct_projected_group_payload_update");
+static bool StageNameContains(const vector<ExecutionRegionRecordedStageRuntime> &stages, const string &needle) {
+	for (auto &stage : stages) {
+		if (StringUtil::Contains(stage.stage.name, needle)) {
+			return true;
+		}
+	}
+	return false;
 }
 
-static bool HasDirectGroupedPrimitiveAggregateUpdateStage(const string &stage_counts) {
-	return StringUtil::Contains(stage_counts, "aggregate_update.direct_append_new_grouped_primitive_update=") ||
-	       StringUtil::Contains(stage_counts, "aggregate_update.direct_new_grouped_primitive_payload_update=") ||
-	       HasInputVectorOrProjectedGroupPayloadUpdateStage(stage_counts);
+static bool CounterNameHasPrefix(const vector<ExecutionRegionRecordedCounter> &counters, const string &prefix) {
+	for (auto &counter : counters) {
+		if (StringUtil::StartsWith(counter.counter.name, prefix)) {
+			return true;
+		}
+	}
+	return false;
 }
 
-static bool HasDirectGroupedPrimitiveAggregateUpdatePath(const string &runtime_paths) {
-	return StringUtil::Contains(runtime_paths, "aggregate_update.direct_append_new_grouped_primitive_update=") ||
-	       StringUtil::Contains(runtime_paths, "aggregate_update.direct_new_grouped_primitive_payload_update=") ||
-	       StringUtil::Contains(runtime_paths, "aggregate_update.direct_projected_input_vector_grouped_update=") ||
-	       StringUtil::Contains(runtime_paths, "aggregate_update.direct_projected_source_input_grouped_update=");
+static bool CounterNameHasComponent(const string &name, const string &component) {
+	if (name == component) {
+		return true;
+	}
+	idx_t component_start = 0;
+	for (idx_t idx = 0; idx <= name.size(); idx++) {
+		if (idx != name.size() && name[idx] != '.' && name[idx] != ':') {
+			continue;
+		}
+		if (idx > component_start && name.substr(component_start, idx - component_start) == component) {
+			return true;
+		}
+		component_start = idx + 1;
+	}
+	return false;
 }
 
-static bool HasDirectGroupedPrimitiveAggregateUpdateBoundary(const string &boundary_counts) {
-	return StringUtil::Contains(boundary_counts, "aggregate_update.direct_state_update=") ||
-	       HasInputVectorOrProjectedGroupPayloadUpdateBoundary(boundary_counts);
+static bool CounterNameHasComponent(const vector<ExecutionRegionRecordedCounter> &counters,
+                                    const string &component) {
+	for (auto &counter : counters) {
+		if (CounterNameHasComponent(counter.counter.name, component)) {
+			return true;
+		}
+	}
+	return false;
 }
 
-static bool IsDirectGroupedPrimitiveAggregateUpdateRuntime(const ExecutionRegionEvent &event) {
-	return EventPhase(event) == "runtime" && event.backend_name == "sljit" &&
-	       HasDirectGroupedPrimitiveAggregateUpdateStage(EventGeneratedStageCountBreakdown(event));
+static bool HasJitRuntimeProof(const ExecutionRegionEvent &event, const string &proof) {
+	return CounterNameHasComponent(event.jit_runtime.runtime_proof_counts, proof);
 }
 
-static void RequireDirectGroupedPrimitiveAggregateUpdateRuntime(const ExecutionRegionEvent &event) {
-	auto stage_counts = EventGeneratedStageCountBreakdown(event);
-	auto runtime_paths = EventJitRuntimePathCounts(event);
-	auto boundary_counts = EventJitMaterializationBoundaryCounts(event);
-	REQUIRE(HasDirectGroupedPrimitiveAggregateUpdateStage(stage_counts));
-	REQUIRE(HasDirectGroupedPrimitiveAggregateUpdatePath(runtime_paths));
-	REQUIRE(HasDirectGroupedPrimitiveAggregateUpdateBoundary(boundary_counts));
-	REQUIRE_FALSE(StringUtil::Contains(stage_counts, "aggregate_update.local_preaggregate_primitive_groups="));
-	REQUIRE_FALSE(StringUtil::Contains(stage_counts, "aggregate_update.native_sink_update="));
-	REQUIRE_FALSE(StringUtil::Contains(runtime_paths, "aggregate_update.native_sink_update="));
-	REQUIRE_FALSE(StringUtil::Contains(boundary_counts, "aggregate_update.address_vector_payload_update="));
+static bool HasJitRuntimeProof(const ExecutionRegionEvent &event, ExecutionRegionJitRuntimeProof proof) {
+	return HasJitRuntimeProof(event, ExecutionRegionJitRuntimeProofName(proof));
+}
+
+static bool HasGeneratedHashJoinProbeStage(const ExecutionRegionEvent &event) {
+	return GeneratedOperatorStageEntryCount(event, "hash_join_probe") > 0;
+}
+
+static bool HasJitRuntimePathPrefix(const ExecutionRegionEvent &event, const string &prefix) {
+	return CounterNameHasPrefix(event.jit_runtime.runtime_path_counts, prefix);
+}
+
+static bool HasJitAggregateUpdatePath(const ExecutionRegionEvent &event) {
+	return HasJitRuntimePathPrefix(event, "aggregate_update.");
+}
+
+static bool HasJitFilterRuntimePath(const ExecutionRegionEvent &event) {
+	return HasJitRuntimePathPrefix(event, "filter.");
+}
+
+static bool HasJitDelimJoinSinkRuntimePath(const ExecutionRegionEvent &event) {
+	return HasJitRuntimePathPrefix(event, "delim_join_sink.");
+}
+
+static bool HasGeneratedAggregateUpdateStage(const ExecutionRegionEvent &event) {
+	return GeneratedOperatorStageEntryCount(event, "aggregate_update") > 0;
+}
+
+static bool HasGeneratedDelimJoinSinkStage(const ExecutionRegionEvent &event) {
+	return StageNameContains(event.generated_stage_runtime, "delim_join_sink.");
+}
+
+static bool HasHashJoinProbeRuntimePath(const ExecutionRegionEvent &event) {
+	return HasGeneratedHashJoinProbeStage(event) && HasJitRuntimePathPrefix(event, "hash_join_probe.");
+}
+
+static void RequireHashProbeAggregateUpdateRuntimeOwnership(const ExecutionRegionEvent &event) {
+	REQUIRE(HasHashJoinProbeRuntimePath(event));
+	REQUIRE(HasJitAggregateUpdatePath(event));
+	REQUIRE(event.jit_runtime.runtime_delegation_counts.empty());
+}
+
+template <class COUNTER>
+static idx_t TotalExecutionRegionCounterCount(const vector<COUNTER> &counters) {
+	idx_t result = 0;
+	for (auto &counter : counters) {
+		result += counter.count;
+	}
+	return result;
+}
+
+static bool EventKernelIdMatches(const ExecutionRegionEvent &event, const vector<idx_t> &kernel_ids) {
+	for (auto kernel_id : kernel_ids) {
+		if (event.kernel_id == kernel_id) {
+			return true;
+		}
+	}
+	return false;
+}
+
+static vector<idx_t> RequireSljitMaterializationElisionCboKernelIds(ExecutionRegionManager &manager,
+                                                                    ExecutionRegionSinkKind sink_kind) {
+	vector<idx_t> kernel_ids;
+	for (auto &event : manager.GetEvents()) {
+		if (event.backend_name != "sljit" || EventStatus(event) != "compiled" || !event.has_candidate ||
+		    event.candidate_traits.sink_kind != sink_kind || event.runner_cost.materialization_elision_count == 0) {
+			continue;
+		}
+		kernel_ids.push_back(event.kernel_id);
+		REQUIRE(event.runner_cost.selected_accelerated_runner);
+	}
+	REQUIRE(!kernel_ids.empty());
+	return kernel_ids;
+}
+
+static vector<idx_t> RequireSljitMaterializationElisionCboKernelIds(ExecutionRegionManager &manager) {
+	vector<idx_t> kernel_ids;
+	for (auto &event : manager.GetEvents()) {
+		if (event.backend_name != "sljit" || EventStatus(event) != "compiled" ||
+		    event.runner_cost.materialization_elision_count == 0) {
+			continue;
+		}
+		kernel_ids.push_back(event.kernel_id);
+		REQUIRE(event.runner_cost.selected_accelerated_runner);
+	}
+	REQUIRE(!kernel_ids.empty());
+	return kernel_ids;
+}
+
+static void RequireMaterializationElisionRuntimeProof(const ExecutionRegionEvent &event) {
+	INFO(EventJitRuntimeDelegationCounts(event));
+	INFO(EventJitRuntimePathCounts(event));
+	INFO(EventJitRuntimeProofCounts(event));
+	RequireNativeGeneratedRuntimeWork(event);
+	REQUIRE(event.jit_runtime.runtime_delegation_counts.empty());
+	REQUIRE(!event.jit_runtime.runtime_path_counts.empty());
+	REQUIRE(HasJitRuntimeProof(event, ExecutionRegionJitRuntimeProof::GENERATED_BACKEND_WORK));
+	REQUIRE(HasJitRuntimeProof(event, ExecutionRegionJitRuntimeProof::MATERIALIZATION_ELISION));
+}
+
+static idx_t RequireMaterializationElisionRuntimeProof(ExecutionRegionManager &manager,
+                                                       const vector<idx_t> &kernel_ids) {
+	idx_t runtime_count = 0;
+	for (auto &event : manager.GetEvents()) {
+		if (EventPhase(event) != "runtime" || EventStatus(event) != "executed" ||
+		    EventExecutionMode(event) != "native" || !EventKernelIdMatches(event, kernel_ids)) {
+			continue;
+		}
+		runtime_count++;
+		RequireMaterializationElisionRuntimeProof(event);
+	}
+	REQUIRE(runtime_count > 0);
+	return runtime_count;
+}
+
+static idx_t RequireAllSljitMaterializationElisionRuntimeProof(ExecutionRegionManager &manager) {
+	auto kernel_ids = RequireSljitMaterializationElisionCboKernelIds(manager);
+	return RequireMaterializationElisionRuntimeProof(manager, kernel_ids);
+}
+
+static bool IsGeneratedAggregateUpdateRuntime(const ExecutionRegionEvent &event) {
+	return EventPhase(event) == "runtime" && EventStatus(event) == "executed" &&
+	       EventExecutionMode(event) == "native" && event.backend_name == "sljit" && HasJitAggregateUpdatePath(event);
+}
+
+static void RequireGeneratedAggregateUpdateRuntimeOwnership(const ExecutionRegionEvent &event) {
+	RequireNativeGeneratedRuntimeWork(event);
+	REQUIRE(HasJitAggregateUpdatePath(event));
+	REQUIRE(HasGeneratedAggregateUpdateStage(event));
+	REQUIRE(EventJitRuntimeDelegationCounts(event).empty());
 }
 
 struct JitTestDatabase {
@@ -118,14 +311,6 @@ struct JitTestDatabase {
 	ClientContext &context;
 	ExecutionRegionManager &manager;
 };
-
-static idx_t TotalExecutionRegionCounterCount(const vector<ExecutionRegionCounter> &counters) {
-	idx_t result = 0;
-	for (auto &counter : counters) {
-		result += counter.count;
-	}
-	return result;
-}
 
 static bool ContainsTypedIrNode(const string &ir, const string &node_kind, const string &logical_type,
                                 const string &physical_type) {
@@ -166,7 +351,8 @@ static void ConfigureJitCoverageCbo(Connection &con) {
 	REQUIRE_NO_FAIL(con.Query("SET threads=1"));
 	REQUIRE_NO_FAIL(con.Query("SET jit_cbo_generated_stage_benefit=4096"));
 	REQUIRE_NO_FAIL(con.Query("SET jit_cbo_materialization_elision_benefit=4096"));
-	REQUIRE_NO_FAIL(con.Query("SET jit_cbo_native_operator_stage_benefit=4096"));
+	REQUIRE_NO_FAIL(con.Query("SET jit_cbo_native_operator_stage_benefit=1048576"));
+	REQUIRE_NO_FAIL(con.Query("SET jit_cbo_source_contract_scan_filter_penalty=0"));
 	REQUIRE_NO_FAIL(con.Query("SET jit_cbo_full_pipeline_benefit=0"));
 	REQUIRE_NO_FAIL(con.Query("SET jit_cbo_startup_base_cost=0"));
 	REQUIRE_NO_FAIL(con.Query("SET jit_cbo_startup_margin_basis_points=0"));
@@ -214,14 +400,6 @@ static bool IsVectorizedCboSkipEvent(const ExecutionRegionEvent &event) {
 	return event.blocker == EXECUTION_REGION_BLOCKER_DUCKDB_SELECTED_VECTORIZED && event.runner_cost.present;
 }
 
-static bool IsStatefulSortProjectionGlueCandidate(const ExecutionRegionEvent &event) {
-	return event.has_candidate && event.candidate_traits.source_kind == ExecutionRegionSourceKind::STATEFUL_OPERATOR &&
-	       event.candidate_traits.source_execution == ExecutionRegionSourceExecutionKind::SOURCE_CONTRACT &&
-	       event.candidate_traits.sink_kind == ExecutionRegionSinkKind::SORT &&
-	       event.candidate_traits.projection_count > 0 && event.candidate_traits.filter_count == 0 &&
-	       event.candidate_traits.operator_count == 0;
-}
-
 static void RequireGeneratedMachineCodeRegion(const ExecutionRegionEvent &event) {
 	REQUIRE(EventExecutionMode(event) == "native");
 	REQUIRE(ExecutionRegionEventProfileCodeSize(event) > 0);
@@ -242,26 +420,21 @@ static void RequirePipelineCboOnlyTiming(const ExecutionRegionEvent &event) {
 	REQUIRE(event.stage_timings.backend_analysis_time_us == 0);
 }
 
-static void RequireNativeContractProjectionGlueSkipped(const ExecutionRegionEvent &event) {
-	REQUIRE(event.runner_cost.present);
-	REQUIRE(event.runner_cost.full_pipeline);
-	REQUIRE(event.runner_cost.generated_work_class == PhysicalRunnerGeneratedWorkClass::PROJECTION_GLUE);
-	REQUIRE(event.runner_cost.native_protocol_class ==
-	        PhysicalRunnerNativeProtocolClass::STATEFUL_SOURCE_SINK_PROTOCOL);
-	REQUIRE(event.runner_cost.generated_expression_work == 0);
-	REQUIRE(event.runner_cost.generated_stage_work == 0);
-	REQUIRE(event.runner_cost.full_pipeline_work == 0);
-	REQUIRE(event.runner_cost.stateful_protocol_penalty == 0);
-	REQUIRE(event.runner_cost.saved_work_per_batch == 0);
-	RequireVectorizedCboSkip(event);
-}
-
 static void RequireDuckDBScanFilteredSourceContract(const ExecutionRegionEvent &event) {
 	REQUIRE(event.selected_source_execution == ExecutionRegionSourceExecutionKind::SOURCE_CONTRACT);
 	REQUIRE(event.selected_uses_scan_filters);
 	REQUIRE(StringUtil::Contains(event.reason, "vectorized table scan filters"));
 	REQUIRE(StringUtil::Contains(event.reason, "source-strategy=duckdb-scan-filtered-source-contract"));
 	REQUIRE(StringUtil::Contains(event.reason, "uses-scan-filters=true"));
+}
+
+static void RequireGeneratedSourceFilterContract(const ExecutionRegionEvent &event) {
+	REQUIRE(event.selected_source_execution == ExecutionRegionSourceExecutionKind::SOURCE_CONTRACT);
+	REQUIRE_FALSE(event.selected_uses_scan_filters);
+	REQUIRE(StringUtil::Contains(event.reason, "generated table scan filters"));
+	REQUIRE(StringUtil::Contains(event.reason, "source-strategy=generated-source-filter"));
+	REQUIRE(StringUtil::Contains(event.reason, "source_contract_input_layout=true"));
+	REQUIRE_FALSE(StringUtil::Contains(event.reason, "uses-scan-filters=true"));
 }
 
 struct NoExtraJitEventCheck {

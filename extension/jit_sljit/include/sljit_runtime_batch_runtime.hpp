@@ -135,8 +135,8 @@ static bool SljitTryFastAppendFixedAllValid(DataChunk &target, DataChunk &source
 template <class FLUSH_BATCH, class EXECUTE_BATCH>
 static bool SljitAppendChunkToInitializedBatch(ExecutionRegionRuntime &runtime, DataChunk &batch, DataChunk &chunk,
                                                idx_t trace_op_idx, optional_ptr<const SljitExecutableRegionOp> trace_op,
-                                               const char *append_phase, const char *boundary_phase,
-                                               FLUSH_BATCH flush_batch, EXECUTE_BATCH execute_batch) {
+                                               const char *append_phase, FLUSH_BATCH flush_batch,
+                                               EXECUTE_BATCH execute_batch) {
 	if (chunk.size() == 0) {
 		return false;
 	}
@@ -165,9 +165,6 @@ static bool SljitAppendChunkToInitializedBatch(ExecutionRegionRuntime &runtime, 
 	if (trace_append) {
 		RecordSljitRegionStageRuntime(runtime, trace_op_idx, trace_op->kind, append_phase, append_stage_start);
 	}
-	if (trace_op && boundary_phase) {
-		RecordSljitRegionMaterializationBoundary(runtime, trace_op->kind, boundary_phase, chunk.size());
-	}
 	if (batch.size() == STANDARD_VECTOR_SIZE) {
 		if (flush_batch()) {
 			return true;
@@ -193,10 +190,8 @@ struct SljitRuntimeChunkBatch {
 	}
 
 	SljitRuntimeChunkBatch(ExecutionRegionRuntime &runtime_p, idx_t trace_op_idx_p,
-	                       optional_ptr<const SljitExecutableRegionOp> trace_op_p, const char *append_phase_p,
-	                       const char *boundary_phase_p)
-	    : runtime(runtime_p), trace_op_idx(trace_op_idx_p), trace_op(trace_op_p), append_phase(append_phase_p),
-	      boundary_phase(boundary_phase_p) {
+	                       optional_ptr<const SljitExecutableRegionOp> trace_op_p, const char *append_phase_p)
+	    : runtime(runtime_p), trace_op_idx(trace_op_idx_p), trace_op(trace_op_p), append_phase(append_phase_p) {
 	}
 
 	template <class EXECUTE_BATCH>
@@ -217,7 +212,7 @@ struct SljitRuntimeChunkBatch {
 			return Flush(execute_batch);
 		};
 		return SljitAppendChunkToInitializedBatch(runtime, batch.chunk, chunk, trace_op_idx, trace_op, append_phase,
-		                                          boundary_phase, flush_batch, execute_batch);
+		                                          flush_batch, execute_batch);
 	}
 
 	SljitDataChunkBatch &Batch() {
@@ -230,7 +225,6 @@ private:
 	idx_t trace_op_idx = 0;
 	optional_ptr<const SljitExecutableRegionOp> trace_op;
 	const char *append_phase = nullptr;
-	const char *boundary_phase = nullptr;
 };
 
 } // namespace duckdb

@@ -77,14 +77,14 @@ static bool SljitTryPrepareSelectedHashJoinProjectionInput(
 	}
 
 	selected_hash_join_input.Ensure(runtime.GetAllocator(), source_binding->output_types);
-	auto &materialized_input = selected_hash_join_input.chunk;
-	materialized_input.Reset();
+	auto &selected_output = selected_hash_join_input.chunk;
+	selected_output.Reset();
 	if (!SljitTryMaterializeSelectedHashJoinOutputColumns(*source_binding, input, referenced_columns,
-	                                                      materialized_input)) {
+	                                                      selected_output)) {
 		throw InternalException("SLJIT selected projection input could not materialize hash-join output columns");
 	}
-	input_chunk = &materialized_input;
-	return materialized_input.size() > 0;
+	input_chunk = &selected_output;
+	return selected_output.size() > 0;
 }
 
 class SljitSelectedHashJoinInputRuntime {
@@ -99,9 +99,8 @@ public:
 		DataChunk *compact_input = nullptr;
 		ExecutionHashJoinProbeBinding *target_binding = nullptr;
 		if (!TryPrepareInput(mark_hash_join_idx, selected_input, true, selected_hash_join_mark_input,
-		                     "SLJIT selected MARK probe input", "materialize_selected_mark_input",
-		                     "materialize_selected_mark_input_miss", "selected_mark_probe_input", compact_input,
-		                     target_binding, deferred_reason)) {
+		                     "SLJIT selected MARK probe input", "mark_probe_input_view", compact_input, target_binding,
+		                     deferred_reason)) {
 			return false;
 		}
 		if (target_binding->output_mode != ExecutionHashJoinProbeOutputMode::MARK_PROBE) {
@@ -116,9 +115,8 @@ public:
 		DataChunk *compact_input = nullptr;
 		ExecutionHashJoinProbeBinding *target_binding = nullptr;
 		if (!TryPrepareInput(target_hash_join_idx, selected_input, true, selected_hash_join_probe_input,
-		                     "SLJIT selected hash probe input", "materialize_selected_hash_probe_input",
-		                     "materialize_selected_hash_probe_input_miss", "selected_hash_probe_input", compact_input,
-		                     target_binding, deferred_reason)) {
+		                     "SLJIT selected hash probe input", "hash_probe_input_view", compact_input, target_binding,
+		                     deferred_reason)) {
 			return false;
 		}
 		join_input = compact_input;
@@ -179,8 +177,7 @@ private:
 
 	bool TryPrepareInput(idx_t target_hash_join_idx, const SljitRuntimeBatchView &selected_input,
 	                     bool include_lhs_output_columns, SljitDataChunkBatch &input_batch, const char *context,
-	                     const char *materialize_stage, const char *materialize_miss_stage,
-	                     const char *boundary_counter, DataChunk *&join_input,
+	                     const char *view_stage, DataChunk *&join_input,
 	                     ExecutionHashJoinProbeBinding *&target_binding, string &deferred_reason) {
 		join_input = nullptr;
 		target_binding = nullptr;
@@ -201,23 +198,33 @@ private:
 
 		auto selected = selected_input.BindHashJoinSelection(context);
 		const auto source_hash_join_idx = selected.hash_join_idx;
+		auto view_stage_start = SljitRegionStageStart(runtime);
+		if (SljitTryBuildSelectedHashJoinOutputColumnViews(*source_binding, selected_input, referenced_columns,
+		                                                   compact_input)) {
+			RecordSljitRegionStageRuntime(runtime, source_hash_join_idx, ops[source_hash_join_idx].kind, view_stage,
+			                              view_stage_start);
+			join_input = &compact_input;
+			return true;
+		}
+
+		compact_input.Reset();
 		auto materialize_stage_start = SljitRegionStageStart(runtime);
 		auto materialized = ExecuteSljitRegionRecordedOperation(
-		    runtime, source_hash_join_idx, ops[source_hash_join_idx].kind, materialize_stage, materialize_stage_start,
-		    [&](optional_ptr<ExecutionOperatorStageRecorder> recorder) {
+		    runtime, source_hash_join_idx, ops[source_hash_join_idx].kind, "selected_view_materialization",
+		    materialize_stage_start, [&](optional_ptr<ExecutionOperatorStageRecorder> recorder) {
 			    (void)recorder;
 			    return SljitTryMaterializeSelectedHashJoinOutputColumns(*source_binding, selected_input,
 			                                                            referenced_columns, compact_input);
 		    });
 		if (!materialized) {
-			RecordSljitRegionStageRuntimePath(runtime, source_hash_join_idx, ops[source_hash_join_idx].kind,
-			                                  materialize_miss_stage, materialize_stage_start);
+			RecordSljitRegionStageRuntime(runtime, source_hash_join_idx, ops[source_hash_join_idx].kind,
+			                              "selected_view_materialization_miss", materialize_stage_start);
 			return false;
 		}
-		RecordSljitRegionStageRuntime(runtime, source_hash_join_idx, ops[source_hash_join_idx].kind, materialize_stage,
-		                              materialize_stage_start);
-		RecordSljitRegionMaterializationBoundary(runtime, ops[source_hash_join_idx].kind, boundary_counter,
-		                                         selected.count);
+		RecordSljitRegionStageRuntime(runtime, source_hash_join_idx, ops[source_hash_join_idx].kind,
+		                              "selected_view_materialization", materialize_stage_start);
+		RecordSljitRegionRuntimeDelegation(runtime, ops[source_hash_join_idx].kind, "selected_view_materialization",
+		                                   compact_input.size());
 		join_input = &compact_input;
 		return true;
 	}

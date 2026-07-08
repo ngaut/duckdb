@@ -11,7 +11,6 @@
 #include "sljit_direct_join_output_aggregate_batch_runtime.hpp"
 #include "sljit_direct_join_output_aggregate_trace.hpp"
 #include "sljit_grouped_aggregate_input_vector_groups.hpp"
-#include "sljit_grouped_aggregate_update_runtime.hpp"
 #include "sljit_hash_join_projection_aggregate_input_runtime.hpp"
 #include "sljit_hash_join_projection_materialization_runtime.hpp"
 #include "sljit_post_join_projection_strategy.hpp"
@@ -73,12 +72,70 @@ static bool SljitTryExecuteDirectJoinOutputPerfectHashAggregateUpdate(
 	    sink_info.groups, plan.group_expressions, sink_info.aggregate_contract, payload_lanes,
 	    grouped_state.perfect_hash_layout, aggregate_input, nullptr, aggregate_input.size(), payload_scratch);
 	RecordSljitRegionStageRuntime(runtime, op_idx, op.kind, "primitive_payload_update_fused", payload_stage_start);
-	RecordSljitRegionRuntimePath(runtime, op.kind, "direct_join_output_perfect_hash_payload_update",
-	                             aggregate_input.size());
-	RecordSljitRegionRuntimePath(runtime, op.kind, "fused_payload_update_owns_perfect_hash_group_lookup",
-	                             aggregate_input.size());
-	RecordSljitRegionMaterializationBoundary(runtime, op.kind, "direct_perfect_hash_state_update",
-	                                         aggregate_input.size());
+	RecordSljitRegionMaterializationElisionPath(runtime, op.kind, "join_output_perfect_hash_payload_update",
+	                                            aggregate_input.size());
+	RecordSljitRegionMaterializationElisionPath(runtime, op.kind,
+	                                            "fused_payload_update_owns_perfect_hash_group_lookup",
+	                                            aggregate_input.size());
+	return true;
+}
+
+static bool SljitDirectJoinOutputAggregatePayloadSourcesValid(const SljitJoinProjectionAggregateDescriptor &descriptor,
+                                                              const SljitExecutableRegionOp &aggregate_op,
+                                                              DataChunk &aggregate_input,
+                                                              optional_ptr<string> failure_reason) {
+	auto &aggregate_update = aggregate_op.aggregate_update;
+	auto &sink_info = aggregate_op.aggregate_update.plan.sink_info;
+	if (sink_info.kind != ExecutionRegionSinkKind::HASH_AGGREGATE_UPDATE &&
+	    sink_info.kind != ExecutionRegionSinkKind::PERFECT_HASH_AGGREGATE_UPDATE) {
+		return true;
+	}
+	auto fused_override_status = SljitGetFusedTypedPayloadSourceOverrideStatus(
+	    aggregate_update, sink_info.aggregates, aggregate_input, descriptor.payload_source_indices);
+	if (fused_override_status == SljitFusedTypedPayloadSourceOverrideStatus::READY) {
+		return true;
+	}
+	if (fused_override_status == SljitFusedTypedPayloadSourceOverrideStatus::INVALID) {
+		if (failure_reason) {
+			*failure_reason = "fused_payload_sources";
+		}
+		return false;
+	}
+	if (descriptor.payload_source_indices.size() != sink_info.aggregates.size()) {
+		if (failure_reason) {
+			*failure_reason = "payload_source_count_" + to_string(descriptor.payload_source_indices.size()) + "_" +
+			                  to_string(sink_info.aggregates.size());
+		}
+		return false;
+	}
+	for (idx_t payload_idx = 0; payload_idx < descriptor.payload_source_indices.size(); payload_idx++) {
+		auto source_idx = descriptor.payload_source_indices[payload_idx];
+		auto &aggregate = sink_info.aggregates[payload_idx];
+		if (source_idx == DConstants::INVALID_INDEX) {
+			if (aggregate.primitive_update_kind == AggregatePrimitiveUpdateKind::COUNT_STAR ||
+			    aggregate.primitive_update_kind == AggregatePrimitiveUpdateKind::COUNT) {
+				continue;
+			}
+			if (failure_reason) {
+				*failure_reason = "payload_source_invalid_" + to_string(payload_idx);
+			}
+			return false;
+		}
+		if (source_idx >= aggregate_input.ColumnCount()) {
+			if (failure_reason) {
+				*failure_reason = "payload_source_bounds_" + to_string(payload_idx) + "_" + to_string(source_idx) +
+				                  "_" + to_string(aggregate_input.ColumnCount());
+			}
+			return false;
+		}
+		if (aggregate.child_types.size() == 1 &&
+		    aggregate_input.data[source_idx].GetType() != aggregate.child_types[0]) {
+			if (failure_reason) {
+				*failure_reason = "payload_source_type_" + to_string(payload_idx);
+			}
+			return false;
+		}
+	}
 	return true;
 }
 
@@ -106,7 +163,8 @@ static bool SljitTryExecuteDirectJoinOutputAggregate(
 	                                                             strategy.aggregate_idx, descriptor, output_column_map,
 	                                                             output_projection_idx)
 	        : SljitTryBuildSelectedJoinAggregateInputDescriptor(ops, scratch, post_join_projection.hash_join_idx,
-	                                                            strategy.aggregate_idx, descriptor);
+	                                                            strategy.aggregate_idx, descriptor, output_column_map,
+	                                                            output_projection_idx);
 	if (!descriptor_ready) {
 		SljitRecordDirectJoinOutputAggregateProjectionUnsupported(runtime, ops, post_join_projection,
 		                                                          descriptor.Blocker(), join_output.size());
@@ -167,11 +225,22 @@ static bool SljitTryExecuteDirectJoinOutputAggregate(
 		}
 		SljitExecuteNativeUngroupedAggregateUpdateWithPayloads(
 		    runtime, runtime.ExecutionOperators(), scratch, strategy.aggregate_idx, aggregate_op, aggregate_input,
-		    descriptor.remapped_payloads, "direct_join_output_ungrouped_payload_update",
-		    "direct_join_output_ungrouped_payload_update", "direct_join_output_ungrouped_state_update");
-		RecordSljitRegionRuntimePath(runtime, aggregate_op.kind, "direct_join_output_ungrouped_update",
-		                             aggregate_input.size());
+		    descriptor.remapped_payloads, "join_output_ungrouped_payload_update",
+		    "join_output_ungrouped_payload_update");
+		RecordSljitRegionMaterializationElisionPath(runtime, aggregate_op.kind, "join_output_ungrouped_update",
+		                                            aggregate_input.size());
 		return true;
+	}
+	string payload_source_failure;
+	if (!SljitDirectJoinOutputAggregatePayloadSourcesValid(descriptor, aggregate_op, aggregate_input,
+	                                                       optional_ptr<string>(&payload_source_failure))) {
+		const auto reason = payload_source_failure.empty() ? string("payload_sources")
+		                                                   : string("payload_sources_") + payload_source_failure;
+		SljitRecordDirectJoinOutputAggregateProjectionUnsupported(runtime, ops, post_join_projection, reason,
+		                                                          join_output.size());
+		strategy.last_failure = reason;
+		SljitFlushDirectJoinOutputAggregate(runtime, ops, strategy_ptr);
+		return false;
 	}
 	auto batch_group_sources = descriptor.group_sources;
 	SljitApplyInputVectorGroupBatchCastProofs(aggregate_input, batch_group_sources, aggregate_input.size());

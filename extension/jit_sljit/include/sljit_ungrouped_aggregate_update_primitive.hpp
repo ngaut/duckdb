@@ -8,9 +8,10 @@
 
 #pragma once
 
+#include "sljit_aggregate_contract_utils.hpp"
 #include "sljit_aggregate_payload_runtime.hpp"
+#include "sljit_filtered_aggregate_update_runtime.hpp"
 #include "sljit_full_pipeline_runtime.hpp"
-#include "sljit_grouped_aggregate_update_runtime.hpp"
 #include "sljit_native_binding_runtime.hpp"
 #include "sljit_runtime_batch_view.hpp"
 
@@ -36,7 +37,8 @@ static bool SljitCanBindUngroupedAggregateUpdatePrimitive(const vector<SljitExec
 	return aggregate_idx < ops.size() && ops[aggregate_idx].kind == SljitNativeRegionOpKind::AGGREGATE_UPDATE &&
 	       ops[aggregate_idx].aggregate_update.plan.sink_info.kind ==
 	           ExecutionRegionSinkKind::UNGROUPED_AGGREGATE_UPDATE &&
-	       ops[aggregate_idx].aggregate_update.plan.use_primitive_payloads;
+	       ops[aggregate_idx].aggregate_update.plan.use_primitive_payloads &&
+	       !SljitAggregateSinkHasDistinctState(ops[aggregate_idx].aggregate_update.plan.sink_info);
 }
 
 static bool SljitCanBindFilteredUngroupedAggregateUpdatePrimitive(const vector<SljitExecutableRegionOp> &ops,
@@ -98,7 +100,11 @@ struct SljitBoundUngroupedPrimitiveAggregateUpdate {
 static void SljitBindUngroupedPrimitiveAggregateUpdate(ExecutionOperatorRuntime &native_runtime,
                                                        SljitRegionExecutionScratch &scratch, idx_t op_idx,
                                                        SljitExecutableRegionOp &op, DataChunk &input,
-                                                       SljitBoundUngroupedPrimitiveAggregateUpdate &bound) {
+                                                       SljitBoundUngroupedPrimitiveAggregateUpdate &bound,
+                                                       optional_ptr<bool> sink_bound = nullptr) {
+	if (sink_bound) {
+		*sink_bound = false;
+	}
 	if (bound.ready) {
 		return;
 	}
@@ -107,9 +113,9 @@ static void SljitBindUngroupedPrimitiveAggregateUpdate(ExecutionOperatorRuntime 
 	    !op.aggregate_update.plan.use_primitive_payloads || op.aggregate_update.plan.use_grouped_state_addresses) {
 		throw InternalException("SLJIT ungrouped primitive aggregate update received a non-ungrouped aggregate");
 	}
-	auto &binding =
-	    SljitBindNativeSink(native_runtime, scratch, op_idx, input, sink_info,
-	                        "aggregate-update-runtime-binding-failed", "SLJIT ungrouped aggregate update sink");
+	auto &binding = SljitBindNativeSink(native_runtime, scratch, op_idx, input, sink_info,
+	                                    "aggregate-update-runtime-binding-failed",
+	                                    "SLJIT ungrouped aggregate update sink", sink_bound);
 	if (!binding.ready || !binding.aggregate_update.ready) {
 		throw InternalException("SLJIT ungrouped aggregate update sink binding did not return a ready aggregate state");
 	}
@@ -141,6 +147,20 @@ static void SljitBindUngroupedPrimitiveAggregateUpdate(ExecutionOperatorRuntime 
 	bound.payload_scratch = &payload_scratch;
 }
 
+static void SljitBindRecordedUngroupedPrimitiveAggregateUpdate(ExecutionRegionRuntime &runtime,
+                                                               ExecutionOperatorRuntime &native_runtime,
+                                                               SljitRegionExecutionScratch &scratch, idx_t op_idx,
+                                                               SljitExecutableRegionOp &op, DataChunk &input,
+                                                               SljitBoundUngroupedPrimitiveAggregateUpdate &bound) {
+	auto bind_stage_start = SljitRegionStageStart(runtime);
+	bool sink_bound = false;
+	SljitBindUngroupedPrimitiveAggregateUpdate(native_runtime, scratch, op_idx, op, input, bound,
+	                                           optional_ptr<bool>(&sink_bound));
+	if (sink_bound) {
+		RecordSljitRegionStageRuntime(runtime, op_idx, op.kind, "bind_sink_contract", bind_stage_start);
+	}
+}
+
 static SinkResultType
 SljitExecuteBoundUngroupedPrimitiveAggregateUpdate(ExecutionRegionRuntime &runtime,
                                                    SljitRegionExecutionScratch &scratch,
@@ -164,8 +184,7 @@ SljitExecuteBoundUngroupedPrimitiveAggregateUpdate(ExecutionRegionRuntime &runti
 			    payload_lanes, input, execute_sel, count, payload_scratch);
 		}
 		if (trace_runtime) {
-			RecordSljitRegionRuntimePath(runtime, op.kind, "fused_payload_update");
-			RecordSljitRegionMaterializationBoundary(runtime, op.kind, "direct_state_update", count);
+			RecordSljitRegionMaterializationElisionPath(runtime, op.kind, "fused_payload_update");
 			RecordSljitRegionStageRuntime(runtime, bound.op_idx, op.kind, "primitive_payload_update_fused",
 			                              payload_stage_start);
 		}
@@ -189,8 +208,8 @@ SljitExecuteBoundUngroupedPrimitiveAggregateUpdate(ExecutionRegionRuntime &runti
 		}
 	}
 	if (trace_runtime) {
-		RecordSljitRegionRuntimePath(runtime, op.kind, "primitive_payload_update", aggregates.size());
-		RecordSljitRegionMaterializationBoundary(runtime, op.kind, "direct_state_update", count);
+		RecordSljitRegionMaterializationElisionPath(runtime, op.kind, "primitive_payload_update",
+		                                            aggregates.size());
 	}
 	return SinkResultType::NEED_MORE_INPUT;
 }

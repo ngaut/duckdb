@@ -274,6 +274,21 @@ struct SljitPreaggregatedPrimitivePayloadSources {
 		       SljitLoadPreaggregatedHugeintPayload(sources[payload_idx], row_idx, result);
 	}
 
+	bool SourceCanHaveNull(idx_t payload_idx) const {
+		if (payload_idx >= sources.size()) {
+			return true;
+		}
+		auto &source = sources[payload_idx];
+		return source.type != PhysicalType::INVALID && source.format.validity.CanHaveNull();
+	}
+
+	optional_ptr<const SljitPreaggregatedPrimitivePayloadSource> GetSource(idx_t payload_idx) const {
+		if (payload_idx >= sources.size()) {
+			return nullptr;
+		}
+		return optional_ptr<const SljitPreaggregatedPrimitivePayloadSource>(&sources[payload_idx]);
+	}
+
 private:
 	vector<SljitPreaggregatedPrimitivePayloadSource> sources;
 };

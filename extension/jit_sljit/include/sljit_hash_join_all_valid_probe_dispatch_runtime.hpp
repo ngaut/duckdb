@@ -26,6 +26,90 @@ static bool SljitHashJoinHasUint64PairEqualityKeys(const SljitNativeHashJoinProb
 	return true;
 }
 
+template <bool SELECTED>
+static bool TryExecuteAllValidUint64PairNoChainProbeFastest(const SljitNativeHashJoinProbePlan &plan,
+                                                            SljitNativeRegularHashJoinProbeInput &input) {
+	if (!SljitHashJoinHasUint64PairEqualityKeys(plan) ||
+	    !SljitHashJoinCanUseAllValidNoChainProbe(plan, input, SELECTED) ||
+	    input.layout_kind != SljitHashJoinProbeLayoutKind::NO_CHAIN || input.bloom_filter_bits ||
+	    plan.mark_build_match || plan.output_mode != ExecutionHashJoinProbeOutputMode::MATCHED_PROBE_AND_BUILD) {
+		return false;
+	}
+
+	const auto count = input.count;
+	if (count > input.output_capacity) {
+		throw InternalException("SLJIT no-chain hash join probe input exceeds output capacity");
+	}
+
+	const auto key0_data = reinterpret_cast<const uint64_t *__restrict>(input.source_data[0]);
+	const auto key1_data = reinterpret_cast<const uint64_t *__restrict>(input.source_data[1]);
+	const sel_t *__restrict key_sel = nullptr;
+	if constexpr (SELECTED) {
+		key_sel = input.source_sel[0];
+	}
+	const auto entries = reinterpret_cast<const ht_entry_t *__restrict>(input.entries);
+	const auto bitmask = input.bitmask;
+	const auto key0_offset = plan.keys[0].key_layout_offset;
+	const auto key1_offset = plan.keys[1].key_layout_offset;
+	data_ptr_t *__restrict row_pointers = input.row_pointers;
+	sel_t *__restrict match_sel = input.match_sel;
+	auto selected_count = input.selected_count;
+
+	auto row_idx = input.input_offset;
+	if (row_idx < count) {
+		auto source_idx = SELECTED ? key_sel[row_idx] : UnsafeNumericCast<sel_t>(row_idx);
+		auto key0 = key0_data[source_idx];
+		auto key1 = key1_data[source_idx];
+		auto ht_offset =
+		    UnsafeNumericCast<idx_t>(SljitHashJoinCombineHashScalar(Hash<uint64_t>(key0), Hash<uint64_t>(key1)) &
+		                             bitmask);
+		while (true) {
+			const auto next_row_idx = row_idx + 1;
+			const bool has_next = next_row_idx < count;
+			uint64_t next_key0 = 0;
+			uint64_t next_key1 = 0;
+			idx_t next_ht_offset = 0;
+			if (has_next) {
+				const auto next_source_idx = SELECTED ? key_sel[next_row_idx] : UnsafeNumericCast<sel_t>(next_row_idx);
+				next_key0 = key0_data[next_source_idx];
+				next_key1 = key1_data[next_source_idx];
+				next_ht_offset = UnsafeNumericCast<idx_t>(
+				    SljitHashJoinCombineHashScalar(Hash<uint64_t>(next_key0), Hash<uint64_t>(next_key1)) & bitmask);
+				SljitPrefetchHashJoinEntry(entries, next_ht_offset);
+			}
+
+			while (true) {
+				const auto entry_value = entries[ht_offset].GetValue();
+				if (!entry_value) {
+					break;
+				}
+				auto row_location = SljitHashJoinEntryPointer(entry_value);
+				if (SljitHashJoinKeysEqual<uint64_t>(row_location, key0_offset, key0) &&
+				    SljitHashJoinKeysEqual<uint64_t>(row_location, key1_offset, key1)) {
+					row_pointers[selected_count] = row_location;
+					match_sel[selected_count] = UnsafeNumericCast<sel_t>(row_idx);
+					selected_count++;
+					break;
+				}
+				ht_offset = UnsafeNumericCast<idx_t>((ht_offset + 1) & bitmask);
+			}
+			if (!has_next) {
+				break;
+			}
+			row_idx = next_row_idx;
+			key0 = next_key0;
+			key1 = next_key1;
+			ht_offset = next_ht_offset;
+		}
+	}
+
+	input.selected_count = selected_count;
+	input.input_offset = count;
+	input.resume_row_pointer = nullptr;
+	input.finished = true;
+	return true;
+}
+
 static bool SljitHashJoinHasUint64SingleEqualityNotEqualPredicate(const SljitNativeHashJoinProbePlan &plan) {
 	if (plan.keys.size() != 2 || plan.equality_key_count != 1) {
 		return false;
@@ -49,6 +133,9 @@ static bool TryExecuteAllValidUint64PairProbe(const SljitNativeHashJoinProbePlan
 			return false;
 		}
 	} else {
+		if (TryExecuteAllValidUint64PairNoChainProbeFastest<SELECTED>(plan, input)) {
+			return true;
+		}
 		if (!SljitHashJoinCanUseAllValidNoChainProbe(plan, input, SELECTED)) {
 			return false;
 		}

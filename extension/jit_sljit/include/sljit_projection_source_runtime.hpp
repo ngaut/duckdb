@@ -137,6 +137,7 @@ static bool SljitTryApplyProjectionPlanSources(PLAN &plan, HANDLE_SOURCE &&handl
 	case SljitNativeRegionExpressionKind::INTEGRAL_DECOMPRESS:
 	case SljitNativeRegionExpressionKind::STRING_COMPRESS:
 	case SljitNativeRegionExpressionKind::STRING_DECOMPRESS:
+	case SljitNativeRegionExpressionKind::STRING_SUBSTRING:
 	case SljitNativeRegionExpressionKind::DATE_YEAR:
 	case SljitNativeRegionExpressionKind::NULL_CHECK:
 		return handle_source(plan.source_index) && handle_sources(plan.expression_tree_source_indices);

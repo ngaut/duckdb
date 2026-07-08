@@ -8,7 +8,7 @@
 
 #pragma once
 
-#include "sljit_grouped_aggregate_update_runtime.hpp"
+#include "sljit_aggregate_update_runtime.hpp"
 #include "sljit_hash_join_runtime.hpp"
 #include "sljit_native_binding_runtime.hpp"
 #include "sljit_projection_expression_runtime.hpp"
@@ -179,10 +179,11 @@ static bool SljitTryExecuteNativeTerminalSink(ExecutionRegionRuntime &runtime, E
 		throw InternalException("SLJIT aggregate update sink must be the final full pipeline operator");
 	}
 	if (deferred_grouped_finish) {
-		sink_result = SljitExecuteNativeAggregateUpdate(runtime, native_runtime, scratch, op_idx, op, input, nullptr,
-		                                                DConstants::INVALID_INDEX, true, deferred_grouped_finish);
+		sink_result =
+		    SljitExecuteNativePipelineAggregateUpdate(runtime, native_runtime, scratch, op_idx, op, input, nullptr,
+		                                              DConstants::INVALID_INDEX, true, deferred_grouped_finish);
 	} else {
-		sink_result = SljitExecuteNativeAggregateUpdate(runtime, native_runtime, scratch, op_idx, op, input);
+		sink_result = SljitExecuteNativePipelineAggregateUpdate(runtime, native_runtime, scratch, op_idx, op, input);
 	}
 	return true;
 }

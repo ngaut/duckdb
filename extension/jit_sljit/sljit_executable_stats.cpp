@@ -204,6 +204,8 @@ static bool SljitExpressionResultNotNull(const SljitNativeRegionExpressionPlan &
 		return !expr.constant_value.IsNull();
 	case SljitNativeRegionExpressionKind::REFERENCE:
 		return expr.source_index < input_not_null.size() && input_not_null[expr.source_index];
+	case SljitNativeRegionExpressionKind::STRING_SUBSTRING:
+		return expr.source_index < input_not_null.size() && input_not_null[expr.source_index];
 	default:
 		return false;
 	}

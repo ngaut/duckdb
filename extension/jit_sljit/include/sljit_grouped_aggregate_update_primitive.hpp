@@ -8,6 +8,7 @@
 
 #pragma once
 
+#include "sljit_aggregate_contract_utils.hpp"
 #include "sljit_region_executable.hpp"
 
 namespace duckdb {
@@ -18,7 +19,8 @@ enum class SljitGroupedAggregateUpdateStrategyKind : uint8_t {
 	INVALID,
 	COUNT_STAR_PREAGGREGATION,
 	DIRECT_PRIMITIVE_PAYLOAD_UPDATE,
-	FILTERED_PRIMITIVE_PAYLOAD_UPDATE
+	FILTERED_PRIMITIVE_PAYLOAD_UPDATE,
+	DISTINCT_KEY_SINK
 };
 
 enum class SljitGroupedAggregateUpdateInputKind : uint8_t { MATERIALIZED, PROJECTED_INPUT };
@@ -31,6 +33,7 @@ struct SljitGroupedAggregateUpdatePrimitive {
 	SljitGroupedAggregateUpdateStrategyKind strategy = SljitGroupedAggregateUpdateStrategyKind::INVALID;
 	SljitGroupedAggregateUpdateInputKind input_kind = SljitGroupedAggregateUpdateInputKind::MATERIALIZED;
 	shared_ptr<SljitExecutableRegionOp> projected_count_star_group_projection;
+	shared_ptr<SljitExecutableRegionOp> projected_distinct_key_input_projection;
 	shared_ptr<SljitProjectedInputGroupedAggregateDescriptor> projected_direct_update;
 };
 
@@ -47,6 +50,9 @@ static bool SljitGroupedAggregateUpdateCanUseCountStarPreaggregation(const Sljit
 		return false;
 	}
 	auto &sink_info = op.aggregate_update.plan.sink_info;
+	if (SljitAggregateSinkHasDistinctState(sink_info)) {
+		return false;
+	}
 	if (sink_info.groups.size() != 1 || sink_info.aggregates.size() != 1 || op.aggregate_update.payloads.size() != 1) {
 		return false;
 	}
@@ -61,7 +67,18 @@ static bool SljitGroupedAggregateUpdateCanUseDirectPrimitivePayloadUpdate(const 
 		return false;
 	}
 	auto &sink_info = op.aggregate_update.plan.sink_info;
+	if (SljitAggregateSinkHasDistinctState(sink_info)) {
+		return false;
+	}
 	return !sink_info.groups.empty() && sink_info.aggregates.size() == op.aggregate_update.payloads.size();
+}
+
+static bool SljitGroupedAggregateUpdateCanUseDistinctKeySink(const SljitExecutableRegionOp &op) {
+	if (op.kind != SljitNativeRegionOpKind::AGGREGATE_UPDATE ||
+	    op.aggregate_update.plan.sink_info.kind != ExecutionRegionSinkKind::HASH_AGGREGATE_UPDATE) {
+		return false;
+	}
+	return SljitAggregateSinkCanUseDistinctKeySink(op.aggregate_update.plan.sink_info);
 }
 
 static bool SljitCanBindFilteredGroupedAggregateUpdatePrimitive(const vector<SljitExecutableRegionOp> &ops,
@@ -78,6 +95,9 @@ SljitChooseGroupedAggregateUpdateStrategy(const SljitExecutableRegionOp &op) {
 	}
 	if (SljitGroupedAggregateUpdateCanUseDirectPrimitivePayloadUpdate(op)) {
 		return SljitGroupedAggregateUpdateStrategyKind::DIRECT_PRIMITIVE_PAYLOAD_UPDATE;
+	}
+	if (SljitGroupedAggregateUpdateCanUseDistinctKeySink(op)) {
+		return SljitGroupedAggregateUpdateStrategyKind::DISTINCT_KEY_SINK;
 	}
 	return SljitGroupedAggregateUpdateStrategyKind::INVALID;
 }

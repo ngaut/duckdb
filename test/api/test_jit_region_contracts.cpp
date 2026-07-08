@@ -26,10 +26,10 @@ TEST_CASE("JIT table scan source contract fuses with generated projection and ap
 		if (EventStatus(event) == "compiled" &&
 		    event.selected_source_execution == ExecutionRegionSourceExecutionKind::SOURCE_CONTRACT &&
 		    StringUtil::Contains(event.ir, "table_scan_contract<function=seq_scan")) {
-			found_source_contract = true;
-			RequireGeneratedMachineCodeRegion(event);
-			RequireDuckDBScanFilteredSourceContract(event);
-			REQUIRE(StringUtil::Contains(event.ir, "source_contract<status=ready"));
+				found_source_contract = true;
+				RequireGeneratedMachineCodeRegion(event);
+				RequireGeneratedSourceFilterContract(event);
+				REQUIRE(StringUtil::Contains(event.ir, "source_contract<status=ready"));
 			REQUIRE(StringUtil::Contains(event.reason, "append sink contract"));
 			REQUIRE(StringUtil::Contains(event.reason, "sink_contract_status=ready"));
 		}
@@ -159,7 +159,6 @@ TEST_CASE("JIT aggregate sinks expose ready native state-update contracts", "[ap
 		REQUIRE(StringUtil::Contains(event.reason, "native aggregate update sink contract"));
 		REQUIRE(StringUtil::Contains(event.reason, "aggregate_state_update_contract_status=ready"));
 		REQUIRE(StringUtil::Contains(event.reason, "execution:native-sljit-region-aggregate-update"));
-		REQUIRE_FALSE(StringUtil::Contains(event.reason, "whole-vectorized-operator-boundary;stage=aggregate-update"));
 		REQUIRE(StringUtil::Contains(event.ir, "native_aggregate_state_update_contract_status=ready"));
 		REQUIRE(StringUtil::Contains(event.ir, "primitive_payloads=native:reference"));
 	}

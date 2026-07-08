@@ -18,6 +18,7 @@ static bool SljitNativeRegionExpressionGeneratesCode(const SljitNativeRegionExpr
 	case SljitNativeRegionExpressionKind::CONSTANT:
 	case SljitNativeRegionExpressionKind::DECIMAL64_TO_DOUBLE:
 	case SljitNativeRegionExpressionKind::DECIMAL128_SCALE_UP:
+	case SljitNativeRegionExpressionKind::STRING_SUBSTRING:
 		return false;
 	default:
 		return true;
@@ -116,7 +117,7 @@ static string SljitNativeRegionOpBoundaryBlocker(const SljitNativeRegionOpPlan &
 	if (SljitNativeRegionOpIsNativeSink(op)) {
 		return string();
 	}
-	return "operator-contract-blocker:whole-vectorized-operator-boundary;stage=" +
+	return "operator-contract-blocker:unsupported-operator-boundary;stage=" +
 	       string(SljitNativeRegionOpKindName(op.kind));
 }
 

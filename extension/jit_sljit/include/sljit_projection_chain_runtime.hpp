@@ -71,7 +71,7 @@ static bool SljitAppendProjectionChainOutputBatch(ExecutionRegionRuntime &runtim
 	};
 	return SljitAppendChunkToInitializedBatch(runtime, batch, output, trace_projection_idx,
 	                                          optional_ptr<const SljitExecutableRegionOp>(&trace_projection_op),
-	                                          "batch_append", nullptr, flush_output_batch, execute_output_batch);
+	                                          "projection_buffer_append", flush_output_batch, execute_output_batch);
 }
 
 static bool SljitProjectionHasVariableWidthOutput(const SljitExecutableRegionOp &projection_op) {
@@ -141,7 +141,7 @@ static bool SljitExecuteProjectionChainPrimitiveSequential(
     ExecutionRegionRuntime &runtime, SljitRegionExecutionScratch &scratch, vector<SljitExecutableRegionOp> &ops,
     const SljitProjectionChainPrimitive &primitive, const SljitRuntimeBatchView &input,
     SljitDataChunkBatch &projection_chain_batch, SljitDataChunkBatch &selected_hash_join_input,
-    EXECUTE_OUTPUT_BATCH &&execute_output_batch) {
+    bool direct_handoff, EXECUTE_OUTPUT_BATCH &&execute_output_batch) {
 	SljitRuntimeBatchView current_input = input;
 	DataChunk *final_output = nullptr;
 	for (idx_t projection_idx = primitive.first_projection_idx; projection_idx <= primitive.final_projection_idx;
@@ -157,10 +157,61 @@ static bool SljitExecuteProjectionChainPrimitiveSequential(
 	if (!final_output || final_output->size() == 0) {
 		return false;
 	}
+	if (direct_handoff) {
+		return execute_output_batch(*final_output);
+	}
 	projection_chain_batch.Ensure(runtime.GetAllocator(), ops[primitive.final_projection_idx].output_types);
 	return SljitAppendProjectionChainOutputBatch(runtime, projection_chain_batch.chunk, *final_output,
 	                                             primitive.final_projection_idx, ops[primitive.final_projection_idx],
 	                                             execute_output_batch);
+}
+
+template <class EXECUTE_OUTPUT_BATCH>
+static bool SljitExecuteProjectionChainPrimitiveDirectHandoff(
+    ExecutionRegionRuntime &runtime, SljitRegionExecutionScratch &scratch,
+    const SljitProjectionChainPrimitive &primitive, SljitExecutableRegionOp &bound_projection_op,
+    DataChunk &source_chunk, const SelectionVector *selection, idx_t count,
+    SljitDataChunkBatch &synthetic_projection_output,
+    optional_ptr<SljitProjectionChainSyntheticProjectionScratch> synthetic_projection_scratch,
+    EXECUTE_OUTPUT_BATCH &&execute_output_batch) {
+	DataChunk *output_ptr;
+	if (synthetic_projection_scratch) {
+		synthetic_projection_output.Ensure(runtime.GetAllocator(), bound_projection_op.output_types);
+		output_ptr = &synthetic_projection_output.chunk;
+	} else {
+		output_ptr = &scratch.TemporaryChunk(primitive.final_projection_idx);
+	}
+	auto &output = *output_ptr;
+	output.Reset();
+	if (SljitProjectionHasVariableWidthOutput(bound_projection_op) &&
+	    SljitTrySliceReferenceProjection(output, source_chunk, bound_projection_op, selection, count)) {
+		auto handoff_stage_start = SljitRegionStageStart(runtime);
+		RecordSljitRegionStageRuntime(runtime, primitive.final_projection_idx, bound_projection_op.kind,
+		                              "reference_view_handoff", handoff_stage_start);
+		return output.size() > 0 && execute_output_batch(output);
+	}
+
+	bool direct_materialized = false;
+	if (!selection && count == source_chunk.size()) {
+		if (synthetic_projection_scratch) {
+			direct_materialized = SljitTryDirectMaterializeFixedProjectionToBatch(
+			    runtime, *synthetic_projection_scratch, primitive.final_projection_idx, bound_projection_op,
+			    source_chunk, output);
+		} else {
+			direct_materialized = SljitTryDirectMaterializeFixedProjectionToBatch(
+			    runtime, scratch, primitive.final_projection_idx, bound_projection_op, source_chunk, output);
+		}
+	}
+	if (!direct_materialized) {
+		if (synthetic_projection_scratch) {
+			SljitExecuteProjection(*synthetic_projection_scratch, primitive.final_projection_idx, bound_projection_op,
+			                       source_chunk, output, selection, count);
+		} else {
+			SljitExecuteProjection(scratch, primitive.final_projection_idx, bound_projection_op, source_chunk, output,
+			                       selection, count);
+		}
+	}
+	return output.size() > 0 && execute_output_batch(output);
 }
 
 template <class EXECUTE_OUTPUT_BATCH>
@@ -170,11 +221,12 @@ static bool SljitExecuteProjectionChainPrimitive(
     SljitDataChunkBatch &projection_chain_batch, SljitDataChunkBatch &selected_hash_join_input,
     SljitDataChunkBatch &synthetic_projection_output,
     optional_ptr<SljitProjectionChainSyntheticProjectionScratch> synthetic_projection_scratch,
-    EXECUTE_OUTPUT_BATCH &&execute_output_batch) {
+    bool direct_handoff, EXECUTE_OUTPUT_BATCH &&execute_output_batch) {
 	optional_ptr<SljitExecutableRegionOp> projection_op;
 	if (!SljitResolveBoundProjectionChain(ops, primitive, projection_op)) {
 		return SljitExecuteProjectionChainPrimitiveSequential(runtime, scratch, ops, primitive, input,
 		                                                      projection_chain_batch, selected_hash_join_input,
+		                                                      direct_handoff,
 		                                                      execute_output_batch);
 	}
 	SljitPreparedProjectionChainInput prepared;
@@ -188,6 +240,11 @@ static bool SljitExecuteProjectionChainPrimitive(
 	const auto count = prepared.count;
 	if (synthetic_projection_scratch) {
 		synthetic_projection_scratch->Ensure(bound_projection_op);
+	}
+	if (direct_handoff) {
+		return SljitExecuteProjectionChainPrimitiveDirectHandoff(
+		    runtime, scratch, primitive, bound_projection_op, source_chunk, selection, count,
+		    synthetic_projection_output, synthetic_projection_scratch, execute_output_batch);
 	}
 	projection_chain_batch.Ensure(runtime.GetAllocator(), bound_projection_op.output_types);
 	auto &batch = projection_chain_batch.chunk;
@@ -224,8 +281,8 @@ static bool SljitExecuteProjectionChainPrimitive(
 	if (!selection && count == source_chunk.size()) {
 		if (synthetic_projection_scratch) {
 			direct_materialized = SljitTryDirectMaterializeFixedProjectionToBatch(
-			    runtime, *synthetic_projection_scratch, primitive.final_projection_idx, bound_projection_op, source_chunk,
-			    batch);
+			    runtime, *synthetic_projection_scratch, primitive.final_projection_idx, bound_projection_op,
+			    source_chunk, batch);
 		} else {
 			direct_materialized = SljitTryDirectMaterializeFixedProjectionToBatch(
 			    runtime, scratch, primitive.final_projection_idx, bound_projection_op, source_chunk, batch);
@@ -256,8 +313,8 @@ static bool SljitExecuteProjectionChainPrimitive(
 				batch.Append(filtered);
 			}
 		}
-		RecordSljitRegionStageRuntime(runtime, primitive.final_projection_idx, bound_projection_op.kind, "batch_append",
-		                              append_stage_start);
+		RecordSljitRegionStageRuntime(runtime, primitive.final_projection_idx, bound_projection_op.kind,
+		                              "projection_buffer_append", append_stage_start);
 	}
 	return batch.size() == STANDARD_VECTOR_SIZE && flush_output_batch();
 }

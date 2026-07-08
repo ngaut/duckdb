@@ -46,17 +46,22 @@ static constexpr ExecutionRegionTraceColumn EXECUTION_REGION_RUNNER_COST_PROFILE
     {"runner_cost_profile", LogicalTypeId::BOOLEAN},
     {"runner_cost_rows", LogicalTypeId::BIGINT},
     {"runner_cost_batches", LogicalTypeId::BIGINT},
+    {"runner_cost_costed_batches", LogicalTypeId::BIGINT},
     {"runner_cost_expression_cost", LogicalTypeId::BIGINT},
+    {"runner_cost_source_contract_input_rows", LogicalTypeId::BIGINT},
+    {"runner_cost_source_contract_input_batches", LogicalTypeId::BIGINT},
+    {"runner_cost_source_contract_output_cardinality_unknown", LogicalTypeId::BOOLEAN},
     {"runner_cost_generated_stage_count", LogicalTypeId::BIGINT},
     {"runner_cost_generated_backend_stage_count", LogicalTypeId::BIGINT},
+    {"runner_cost_generated_grouped_aggregate_stage_count", LogicalTypeId::BIGINT},
+    {"runner_cost_native_grouped_state_address_lookup_count", LogicalTypeId::BIGINT},
     {"runner_cost_materialization_elision_count", LogicalTypeId::BIGINT},
-    {"runner_cost_materialization_source_append_count", LogicalTypeId::BIGINT},
-    {"runner_cost_unfused_mark_filter_aggregate_count", LogicalTypeId::BIGINT},
+    {"runner_cost_selected_hash_join_filter_materialization_count", LogicalTypeId::BIGINT},
     {"runner_cost_native_join_stage_count", LogicalTypeId::BIGINT},
     {"runner_cost_native_hash_join_build_sink_count", LogicalTypeId::BIGINT},
-	    {"runner_cost_native_aggregate_stage_count", LogicalTypeId::BIGINT},
-	    {"runner_cost_native_grouped_aggregate_stage_count", LogicalTypeId::BIGINT},
-	    {"runner_cost_native_sort_stage_count", LogicalTypeId::BIGINT},
+    {"runner_cost_native_aggregate_stage_count", LogicalTypeId::BIGINT},
+    {"runner_cost_native_grouped_aggregate_stage_count", LogicalTypeId::BIGINT},
+    {"runner_cost_native_sort_stage_count", LogicalTypeId::BIGINT},
     {"runner_cost_full_pipeline", LogicalTypeId::BOOLEAN},
     {"runner_cost_input_scope", LogicalTypeId::VARCHAR},
     {"runner_cost_admission_class", LogicalTypeId::VARCHAR},
@@ -72,8 +77,8 @@ static constexpr ExecutionRegionTraceColumn EXECUTION_REGION_RUNNER_COST_WORK_CO
     {"runner_cost_generated_backend_stage_work", LogicalTypeId::BIGINT},
     {"runner_cost_native_operator_work", LogicalTypeId::BIGINT},
     {"runner_cost_materialization_elision_work", LogicalTypeId::BIGINT},
-    {"runner_cost_materialization_source_append_penalty", LogicalTypeId::BIGINT},
-    {"runner_cost_unfused_mark_filter_aggregate_penalty", LogicalTypeId::BIGINT},
+    {"runner_cost_selected_hash_join_filter_materialization_penalty", LogicalTypeId::BIGINT},
+    {"runner_cost_source_contract_scan_penalty", LogicalTypeId::BIGINT},
     {"runner_cost_full_pipeline_work", LogicalTypeId::BIGINT},
     {"runner_cost_stateful_protocol_penalty", LogicalTypeId::BIGINT},
     {"runner_cost_saved_work_per_batch", LogicalTypeId::BIGINT},
@@ -139,7 +144,6 @@ static constexpr ExecutionRegionTraceColumn EXECUTION_REGION_CANDIDATE_TRACE_COL
     {"candidate_missing_contract_count", LogicalTypeId::UBIGINT},
     {"candidate_required_capabilities", LogicalTypeId::VARCHAR},
     {"candidate_fusion_blockers", LogicalTypeId::VARCHAR},
-    {"candidate_reference_varchar_projection_count", LogicalTypeId::UBIGINT},
 };
 
 static constexpr idx_t EXECUTION_REGION_CANDIDATE_TRACE_COLUMN_COUNT =
@@ -227,48 +231,63 @@ static inline void AppendExecutionRegionRunnerCostProfileColumn(Vector &output, 
 		output.Append(Value::BIGINT(cost.batches));
 		return;
 	case 3:
-		output.Append(Value::BIGINT(cost.expression_cost));
+		output.Append(Value::BIGINT(cost.costed_batches));
 		return;
 	case 4:
-		output.Append(Value::BIGINT(cost.generated_stage_count));
+		output.Append(Value::BIGINT(cost.expression_cost));
 		return;
 	case 5:
-		output.Append(Value::BIGINT(cost.generated_backend_stage_count));
+		output.Append(Value::BIGINT(cost.source_contract_input_rows));
 		return;
 	case 6:
-		output.Append(Value::BIGINT(cost.materialization_elision_count));
+		output.Append(Value::BIGINT(cost.source_contract_input_batches));
 		return;
 	case 7:
-		output.Append(Value::BIGINT(cost.materialization_source_append_count));
+		output.Append(Value::BOOLEAN(cost.source_contract_output_cardinality_unknown));
 		return;
 	case 8:
-		output.Append(Value::BIGINT(cost.unfused_mark_filter_aggregate_count));
+		output.Append(Value::BIGINT(cost.generated_stage_count));
 		return;
 	case 9:
-		output.Append(Value::BIGINT(cost.native_join_stage_count));
+		output.Append(Value::BIGINT(cost.generated_backend_stage_count));
 		return;
 	case 10:
-		output.Append(Value::BIGINT(cost.native_hash_join_build_sink_count));
+		output.Append(Value::BIGINT(cost.generated_grouped_aggregate_stage_count));
 		return;
 	case 11:
-		output.Append(Value::BIGINT(cost.native_aggregate_stage_count));
+		output.Append(Value::BIGINT(cost.native_grouped_state_address_lookup_count));
 		return;
 	case 12:
-		output.Append(Value::BIGINT(cost.native_grouped_aggregate_stage_count));
+		output.Append(Value::BIGINT(cost.materialization_elision_count));
 		return;
 	case 13:
-		output.Append(Value::BIGINT(cost.native_sort_stage_count));
+		output.Append(Value::BIGINT(cost.selected_hash_join_filter_materialization_count));
 		return;
 	case 14:
-		output.Append(Value::BOOLEAN(cost.full_pipeline));
+		output.Append(Value::BIGINT(cost.native_join_stage_count));
 		return;
 	case 15:
-		AppendExecutionRegionRunnerCostInputScope(output, cost.input_scope);
+		output.Append(Value::BIGINT(cost.native_hash_join_build_sink_count));
 		return;
 	case 16:
-		AppendExecutionRegionNullableString(output, cost.admission_class);
+		output.Append(Value::BIGINT(cost.native_aggregate_stage_count));
 		return;
 	case 17:
+		output.Append(Value::BIGINT(cost.native_grouped_aggregate_stage_count));
+		return;
+	case 18:
+		output.Append(Value::BIGINT(cost.native_sort_stage_count));
+		return;
+	case 19:
+		output.Append(Value::BOOLEAN(cost.full_pipeline));
+		return;
+	case 20:
+		AppendExecutionRegionRunnerCostInputScope(output, cost.input_scope);
+		return;
+	case 21:
+		AppendExecutionRegionNullableString(output, cost.admission_class);
+		return;
+	case 22:
 		AppendExecutionRegionNullableString(output, cost.selection_reason);
 		return;
 	default:
@@ -295,10 +314,10 @@ static inline void AppendExecutionRegionRunnerCostWorkColumn(Vector &output, idx
 		output.Append(Value::BIGINT(cost.materialization_elision_work));
 		return;
 	case 5:
-		output.Append(Value::BIGINT(cost.materialization_source_append_penalty));
+		output.Append(Value::BIGINT(cost.selected_hash_join_filter_materialization_penalty));
 		return;
 	case 6:
-		output.Append(Value::BIGINT(cost.unfused_mark_filter_aggregate_penalty));
+		output.Append(Value::BIGINT(cost.source_contract_scan_penalty));
 		return;
 	case 7:
 		output.Append(Value::BIGINT(cost.full_pipeline_work));
@@ -478,9 +497,6 @@ static inline void AppendExecutionRegionCandidateTraceColumn(Vector &output, idx
 		return;
 	case 31:
 		output.Append(Value(FormatExecutionRegionStringList(contract.blockers)));
-		return;
-	case 32:
-		output.Append(Value::UBIGINT(traits.reference_varchar_projection_count));
 		return;
 	default:
 		throw InternalException("Unsupported execution region candidate trace column index");

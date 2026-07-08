@@ -94,6 +94,7 @@ PhysicalRunnerCostParameters BuildPhysicalRunnerCostParameters(ClientContext &co
 	result.native_operator_stage_benefit = Settings::Get<JitCboNativeOperatorStageBenefitSetting>(context);
 	result.materialization_elision_benefit = Settings::Get<JitCboMaterializationElisionBenefitSetting>(context);
 	result.full_pipeline_benefit = Settings::Get<JitCboFullPipelineBenefitSetting>(context);
+	result.source_contract_scan_filter_penalty = Settings::Get<JitCboSourceContractScanFilterPenaltySetting>(context);
 	result.startup_base_cost = Settings::Get<JitCboStartupBaseCostSetting>(context);
 	result.startup_margin_basis_points = Settings::Get<JitCboStartupMarginBasisPointsSetting>(context);
 	result.vectorized_parallelism =
@@ -207,14 +208,25 @@ static bool PhysicalPipelineDecisionNeedsRegionGraph(const PhysicalRunnerCostInp
 		return false;
 	}
 	return cost_input.native_join_stage_count > 0 || cost_input.native_aggregate_stage_count > 0 ||
-	       cost_input.native_grouped_aggregate_stage_count > 0 || cost_input.native_sort_stage_count > 0 ||
-	       cost_input.materialization_source_append_count > 0;
+	       cost_input.native_grouped_aggregate_stage_count > 0 || cost_input.native_sort_stage_count > 0;
 }
 
 static bool PhysicalPipelineHashJoinBuildNeedsRegionGraph(const PhysicalRunnerCostInput &cost_input) {
 	return cost_input.full_pipeline && cost_input.native_hash_join_build_sink_count > 0 &&
 	       cost_input.generated_work_class != PhysicalRunnerGeneratedWorkClass::NONE &&
 	       cost_input.generated_work_class != PhysicalRunnerGeneratedWorkClass::PROJECTION_GLUE;
+}
+
+static bool PhysicalPipelineNeedsRegionGraph(const PhysicalRunnerCostInput &cost_input) {
+	return PhysicalPipelineHashJoinBuildNeedsRegionGraph(cost_input) ||
+	       PhysicalPipelineDecisionNeedsRegionGraph(cost_input);
+}
+
+static string PhysicalPipelineRegionGraphDecisionReason(const PhysicalRunnerCostInput &cost_input) {
+	if (PhysicalPipelineHashJoinBuildNeedsRegionGraph(cost_input)) {
+		return "duckdb_cbo requires execution-region graph for hash-join build sink decision";
+	}
+	return "duckdb_cbo requires execution-region graph for physical runner decision";
 }
 
 static PhysicalRunnerCostProfile
@@ -234,16 +246,16 @@ SelectExecutionRegionPipelinePhysicalRunner(const PhysicalRunnerCostParameters &
 		cost_input.estimated_cardinality = source->estimated_cardinality;
 		selection.runner_cost = DuckDBCostModel::SelectPhysicalRunner(cost_input, cost_parameters);
 		selection.reason = "duckdb_cbo selects vectorized physical runner before region graph";
-		selection.reason += ";region_graph=skipped;source_produces_rows=false";
+		selection.reason += ";source_produces_rows=false";
 		AppendExecutionRegionCboCostReason(selection.reason, selection.runner_cost);
 		selection.blocker = EXECUTION_REGION_BLOCKER_DUCKDB_SELECTED_VECTORIZED;
 		return selection;
 	}
 	PhysicalRunnerCostInput cost_input;
 	if (!TryBuildExecutionRegionPipelineCostInput(pipeline, cost_input)) {
-		selection.use_compiled_runner = true;
-		selection.selected_runner = ExecutionRunnerKind::COMPILED_VECTORIZED;
-		selection.reason = "duckdb_cbo requires execution-region graph for physical runner decision";
+		selection.reason = "duckdb_cbo selects vectorized physical runner before region graph";
+		selection.reason += ";pipeline_cost_input=unsupported";
+		selection.blocker = EXECUTION_REGION_BLOCKER_DUCKDB_SELECTED_VECTORIZED;
 		return selection;
 	}
 	selection.runner_cost = DuckDBCostModel::SelectPhysicalRunner(cost_input, cost_parameters);
@@ -253,33 +265,24 @@ SelectExecutionRegionPipelinePhysicalRunner(const PhysicalRunnerCostParameters &
 		AppendExecutionRegionCboCostReason(selection.reason, selection.runner_cost);
 		return selection;
 	}
-	if (PhysicalPipelineHashJoinBuildNeedsRegionGraph(cost_input)) {
-		selection.use_compiled_runner = true;
-		selection.selected_runner = ExecutionRunnerKind::COMPILED_VECTORIZED;
-		selection.reason = "duckdb_cbo requires execution-region graph for hash-join build sink decision";
-		selection.reason += ";region_graph=required";
-		AppendExecutionRegionCboCostReason(selection.reason, selection.runner_cost);
-		return selection;
-	}
-	if (PhysicalPipelineDecisionNeedsRegionGraph(cost_input)) {
+	if (PhysicalPipelineNeedsRegionGraph(cost_input)) {
 		auto upper_bound_cost = SelectExecutionRegionPipelineCandidateUpperBoundRunner(cost_parameters, cost_input);
 		if (!upper_bound_cost.selected_accelerated_runner) {
 			selection.runner_cost = std::move(upper_bound_cost);
 			selection.reason = "duckdb_cbo selects vectorized physical runner before region graph";
-			selection.reason += ";region_graph=skipped;candidate_upper_bound=rejected";
+			selection.reason += ";candidate_upper_bound=rejected";
 			AppendExecutionRegionCboCostReason(selection.reason, selection.runner_cost);
 			selection.blocker = EXECUTION_REGION_BLOCKER_DUCKDB_SELECTED_VECTORIZED;
 			return selection;
 		}
 		selection.use_compiled_runner = true;
 		selection.selected_runner = upper_bound_cost.selected_runner;
-		selection.reason = "duckdb_cbo requires execution-region graph for physical runner decision";
+		selection.reason = PhysicalPipelineRegionGraphDecisionReason(cost_input);
 		selection.reason += ";region_graph=required";
 		AppendExecutionRegionCboCostReason(selection.reason, upper_bound_cost);
 		return selection;
 	}
 	selection.reason = "duckdb_cbo selects vectorized physical runner before region graph";
-	selection.reason += ";region_graph=skipped";
 	AppendExecutionRegionCboCostReason(selection.reason, selection.runner_cost);
 	selection.blocker = EXECUTION_REGION_BLOCKER_DUCKDB_SELECTED_VECTORIZED;
 	return selection;
@@ -311,7 +314,7 @@ SelectExecutionRegionPhysicalRunner(const PhysicalRunnerCostParameters &cost_par
                                     const ExecutionRegionLoweringPlan &lowering_plan, bool record_detailed_telemetry) {
 	ExecutionRegionPhysicalRunnerSelection selection;
 	if (!lowering_plan.IsFullyFused()) {
-		selection.reason = "duckdb_cbo skips compiled-vectorized runner because region is not fully fused";
+		selection.reason = "duckdb_cbo skips accelerated runner because region is not fully fused";
 		selection.reason += ";requires=fused";
 		selection.reason += ";" + ExecutionRegionLoweringEventReason(lowering_plan, record_detailed_telemetry);
 		selection.blocker = EXECUTION_REGION_BLOCKER_NOT_FULLY_FUSED;
@@ -321,9 +324,9 @@ SelectExecutionRegionPhysicalRunner(const PhysicalRunnerCostParameters &cost_par
 	selection.runner_cost = DuckDBCostModel::SelectPhysicalRunner(cost_input, cost_parameters);
 	if (selection.runner_cost.selected_accelerated_runner) {
 		SelectExecutionRegionAcceleratedRunner(selection);
-		selection.reason = "duckdb_cbo selects ";
+		selection.reason = "duckdb_cbo selects accelerated physical runner";
+		selection.reason += ";runner=";
 		selection.reason += ExecutionRegionDecisionRunnerName(selection.SelectedRunner());
-		selection.reason += " physical runner";
 		AppendExecutionRegionCboCostReason(selection.reason, selection.runner_cost);
 		return selection;
 	}

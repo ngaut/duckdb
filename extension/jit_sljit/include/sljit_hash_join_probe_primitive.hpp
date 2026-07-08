@@ -77,6 +77,15 @@ struct SljitHashJoinProbeSelectionPrimitive {
 	}
 };
 
+struct SljitHashJoinBuildSinkPrimitive {
+	idx_t sink_idx = DConstants::INVALID_INDEX;
+	idx_t projection_idx = DConstants::INVALID_INDEX;
+
+	bool HasProjection() const {
+		return projection_idx != DConstants::INVALID_INDEX;
+	}
+};
+
 struct SljitMarkProbeFilterBoundaryPrimitive {
 	idx_t hash_join_idx = DConstants::INVALID_INDEX;
 	idx_t filter_idx = DConstants::INVALID_INDEX;
@@ -211,6 +220,29 @@ static SljitHashJoinProbeSelectionPrimitive SljitBindHashJoinProbeSelectionPrimi
 	primitive.input_remap = std::move(input_remap);
 	primitive.output_column_map = std::move(output_column_map);
 	primitive.output_projection_idx = output_projection_idx;
+	return primitive;
+}
+
+static bool SljitCanBindHashJoinBuildSinkPrimitive(const vector<SljitExecutableRegionOp> &ops, idx_t sink_idx,
+                                                   idx_t projection_idx = DConstants::INVALID_INDEX) {
+	if (sink_idx >= ops.size() || ops[sink_idx].kind != SljitNativeRegionOpKind::HASH_JOIN_BUILD ||
+	    ops[sink_idx].hash_join_build.plan.sink_info.kind != ExecutionRegionSinkKind::HASH_JOIN_BUILD) {
+		return false;
+	}
+	return projection_idx == DConstants::INVALID_INDEX ||
+	       (projection_idx < ops.size() && ops[projection_idx].kind == SljitNativeRegionOpKind::PROJECTION);
+}
+
+static SljitHashJoinBuildSinkPrimitive SljitBindHashJoinBuildSinkPrimitive(const vector<SljitExecutableRegionOp> &ops,
+                                                                           idx_t sink_idx,
+                                                                           idx_t projection_idx =
+	                                                                               DConstants::INVALID_INDEX) {
+	if (!SljitCanBindHashJoinBuildSinkPrimitive(ops, sink_idx, projection_idx)) {
+		throw InternalException("SLJIT hash join build sink primitive cannot bind requested operator");
+	}
+	SljitHashJoinBuildSinkPrimitive primitive;
+	primitive.sink_idx = sink_idx;
+	primitive.projection_idx = projection_idx;
 	return primitive;
 }
 

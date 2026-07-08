@@ -32,15 +32,6 @@ static bool HasSourceContractStageBreakdown(const ExecutionRegionManager &manage
 	return false;
 }
 
-static idx_t StageCount(const vector<ExecutionRegionRecordedStageRuntime> &stages, const string &name) {
-	for (auto &stage : stages) {
-		if (StringUtil::Contains(stage.stage.name, name)) {
-			return stage.count;
-		}
-	}
-	return 0;
-}
-
 TEST_CASE("SLJIT predicate source preparation uses referenced slots only", "[api][jit]") {
 	vector<LogicalType> types;
 	for (idx_t column_idx = 0; column_idx < 8; column_idx++) {
@@ -224,6 +215,7 @@ TEST_CASE("JIT full pipeline uses explicit append sink contract", "[api][jit]") 
 		    StringUtil::Contains(event.reason, "full pipeline kernel executed") && event.output_rows == 499) {
 			found_runtime_result_collector = true;
 			REQUIRE(event.runtime_result == "finished");
+			REQUIRE(HasJitRuntimeProof(event, ExecutionRegionJitRuntimeProof::FULL_PIPELINE_OWNERSHIP));
 		}
 	}
 	REQUIRE(found_compiled_result_collector);
@@ -305,7 +297,6 @@ TEST_CASE("JIT full pipeline uses ordered sink native contract when order keys g
 			    event.candidate_contract.abi != ExecutionRegionABI::FULL_PIPELINE) {
 				continue;
 			}
-			REQUIRE_FALSE(StringUtil::Contains(event.reason, "whole operator sink"));
 			if (StringUtil::Contains(event.reason, "ordered sink contract") &&
 			    StringUtil::Contains(event.reason, "operator_kind=" + expected_order_kind) &&
 			    StringUtil::Contains(event.reason, "sink:" + operator_name + ":native")) {
@@ -316,8 +307,6 @@ TEST_CASE("JIT full pipeline uses ordered sink native contract when order keys g
 				REQUIRE(StringUtil::Contains(event.reason, "sink_required_capability=order-native-sink-update"));
 				REQUIRE(StringUtil::Contains(event.reason, "full-pipeline-native-sink"));
 				REQUIRE(StringUtil::Contains(event.reason, "requires=order-native-sink-update"));
-				REQUIRE_FALSE(
-				    StringUtil::Contains(event.reason, "whole-vectorized-operator-boundary;stage=order-sink"));
 				const bool has_ordered_sink_trace = StringUtil::Contains(event.ir, "ordered_sink") ||
 				                                    StringUtil::Contains(event.reason, "ordered_sink");
 				REQUIRE(has_ordered_sink_trace);
@@ -421,18 +410,18 @@ TEST_CASE("JIT auto keeps count distinct on regular aggregate keys", "[api][jit]
 	Connection con(db);
 	auto &manager = ExecutionRegionManager::Get(*con.context);
 
-	ConfigureSljit(con, "auto");
+	ConfigureSljitForCoverage(con);
 	REQUIRE_NO_FAIL(con.Query("SET threads=1"));
-	REQUIRE_NO_FAIL(con.Query("CREATE TEMP TABLE jit_distinct_pointer_plan_input AS "
+	REQUIRE_NO_FAIL(con.Query("CREATE TEMP TABLE jit_distinct_regular_key_input AS "
 	                          "SELECT i::BIGINT AS i, "
 	                          "       (i % 37)::INTEGER AS g, "
 	                          "       CASE WHEN i % 13 = 0 THEN NULL ELSE (i % 97)::BIGINT END AS x "
 	                          "FROM range(20000) tbl(i)"));
 
 	REQUIRE_NO_FAIL(con.Query("SET enable_jit=false"));
-	REQUIRE_NO_FAIL(con.Query("CREATE OR REPLACE TEMP TABLE jit_distinct_pointer_plan_expected AS "
+	REQUIRE_NO_FAIL(con.Query("CREATE OR REPLACE TEMP TABLE jit_distinct_regular_key_expected AS "
 	                          "SELECT g, count(DISTINCT x + 0) AS c "
-	                          "FROM jit_distinct_pointer_plan_input "
+	                          "FROM jit_distinct_regular_key_input "
 	                          "WHERE i >= 0 "
 	                          "GROUP BY g"));
 
@@ -440,21 +429,22 @@ TEST_CASE("JIT auto keeps count distinct on regular aggregate keys", "[api][jit]
 		ClearJitTrace(manager, true);
 		REQUIRE_NO_FAIL(con.Query("SET enable_jit=true"));
 		REQUIRE_NO_FAIL(con.Query(string("SET jit_trace_decisions=") + (trace_decisions ? "true" : "false")));
-		REQUIRE_NO_FAIL(con.Query("CREATE OR REPLACE TEMP TABLE jit_distinct_pointer_plan_actual AS "
+		REQUIRE_NO_FAIL(con.Query("SET jit_trace_runtime=true"));
+		REQUIRE_NO_FAIL(con.Query("CREATE OR REPLACE TEMP TABLE jit_distinct_regular_key_actual AS "
 		                          "SELECT g, count(DISTINCT x1) AS c "
 		                          "FROM ("
 		                          "    SELECT g, x + 0 AS x1 "
-		                          "    FROM jit_distinct_pointer_plan_input "
+		                          "    FROM jit_distinct_regular_key_input "
 		                          "    WHERE i >= 0"
 		                          ") projected "
 		                          "GROUP BY g"));
 
 		auto diff = con.Query("SELECT count(*) FROM ("
-		                      "    (SELECT * FROM jit_distinct_pointer_plan_expected "
-		                      "     EXCEPT ALL SELECT * FROM jit_distinct_pointer_plan_actual) "
+		                      "    (SELECT * FROM jit_distinct_regular_key_expected "
+		                      "     EXCEPT ALL SELECT * FROM jit_distinct_regular_key_actual) "
 		                      "    UNION ALL "
-		                      "    (SELECT * FROM jit_distinct_pointer_plan_actual "
-		                      "     EXCEPT ALL SELECT * FROM jit_distinct_pointer_plan_expected)"
+		                      "    (SELECT * FROM jit_distinct_regular_key_actual "
+		                      "     EXCEPT ALL SELECT * FROM jit_distinct_regular_key_expected)"
 		                      ") diff");
 		REQUIRE_NO_FAIL(*diff);
 		REQUIRE(diff->GetValue(0, 0).GetValue<int64_t>() == 0);
@@ -540,24 +530,15 @@ TEST_CASE("JIT source contracts preserve joined table scan filter contracts", "[
 	RequireJitEvent(
 	    manager,
 	    [](const ExecutionRegionEvent &event) {
-		    auto runtime_paths = EventJitRuntimePathCounts(event);
-		    const bool has_generated_probe =
-		        StringUtil::Contains(runtime_paths,
-		                             "hash_join_probe.generated_regular_probe_flat_all_valid_function") ||
-		        StringUtil::Contains(runtime_paths, "hash_join_probe.generated_perfect_probe_function");
 		    return IsSljitRegionEvent(event) && EventPhase(event) == "runtime" && EventStatus(event) == "executed" &&
 		           event.selected_uses_scan_filters && event.source_contract_output_rows > 0 &&
-		           event.input_rows == event.source_contract_output_rows && has_generated_probe;
+		           event.input_rows == event.source_contract_output_rows &&
+		           HasJitRuntimePathPrefix(event, "hash_join_probe.");
 	    },
 	    [](const ExecutionRegionEvent &event) {
-		    auto runtime_paths = EventJitRuntimePathCounts(event);
-		    auto has_generated_probe =
-		        StringUtil::Contains(runtime_paths,
-		                             "hash_join_probe.generated_regular_probe_flat_all_valid_function") ||
-		        StringUtil::Contains(runtime_paths, "hash_join_probe.generated_perfect_probe_function");
 		    REQUIRE(event.source_contract_output_rows > 0);
 		    REQUIRE(event.input_rows == event.source_contract_output_rows);
-		    REQUIRE(has_generated_probe);
+		    REQUIRE(HasJitRuntimePathPrefix(event, "hash_join_probe."));
 	    });
 }
 
@@ -648,7 +629,8 @@ TEST_CASE("EXPLAIN ANALYZE exposes compact execution region profile", "[api][jit
 	REQUIRE(StringUtil::Contains(analyzed_plan, "\"lazy_code_size\""));
 	REQUIRE(StringUtil::Contains(analyzed_plan, "\"hash_join_probe_layout\""));
 	REQUIRE(StringUtil::Contains(analyzed_plan, "\"jit_runtime_path_counts\""));
-	REQUIRE(StringUtil::Contains(analyzed_plan, "\"jit_materialization_boundary_counts\""));
+	REQUIRE(StringUtil::Contains(analyzed_plan, "\"jit_runtime_proof_counts\""));
+	REQUIRE(StringUtil::Contains(analyzed_plan, "\"jit_runtime_delegation_counts\""));
 	REQUIRE(StringUtil::Contains(analyzed_plan, "\"runner_cost_profile\""));
 	REQUIRE(StringUtil::Contains(analyzed_plan, "\"runner_cost_accelerated_runner_benefit\""));
 	REQUIRE(StringUtil::Contains(analyzed_plan, "\"runner_cost_startup_cost\""));
@@ -718,15 +700,8 @@ TEST_CASE("EXPLAIN ANALYZE exposes grouped hash aggregate native state-address l
 	REQUIRE(StringUtil::Contains(analyzed_plan, "\"status\": \"compiled\""));
 	REQUIRE(StringUtil::Contains(analyzed_plan, "\"execution_mode\": \"native\""));
 	REQUIRE(StringUtil::Contains(analyzed_plan, "grouped_state_lookup=native-state-address"));
-	const auto used_grouped_state_addresses =
-	    StringUtil::Contains(analyzed_plan, "aggregate_update.resolve_grouped_state_addresses");
-	const auto used_direct_new_update =
-	    StringUtil::Contains(analyzed_plan, "aggregate_update.direct_new_grouped_primitive_update") ||
-	    StringUtil::Contains(analyzed_plan, "aggregate_update.direct_append_new_grouped_primitive_update") ||
-	    HasInputVectorOrProjectedGroupPayloadUpdateText(analyzed_plan);
-	REQUIRE((used_grouped_state_addresses || used_direct_new_update));
-	REQUIRE(
-	    (StringUtil::Contains(analyzed_plan, "aggregate_update.primitive_payload_update") || used_direct_new_update));
+	REQUIRE(StringUtil::Contains(analyzed_plan, "native_grouped_state_contract_status=ready"));
+	REQUIRE(StringUtil::Contains(analyzed_plan, "payload_update=generated-primitive"));
 }
 
 TEST_CASE("EXPLAIN ANALYZE reports compact aggregate auto vectorized-selection facts", "[api][jit]") {

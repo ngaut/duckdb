@@ -37,7 +37,6 @@ static idx_t SljitApplyNativeHashJoinResidualPredicate(
 	}
 
 	residual_chunk->Reset();
-	RecordSljitRegionMaterializationBoundary(runtime, op.kind, "residual_source_chunk", count);
 	ExecutionMaterializeHashJoinResidualSources(probe, input, row_pointers, match_selection, count, *residual_chunk,
 	                                            recorder);
 

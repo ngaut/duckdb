@@ -15,9 +15,11 @@
 #include "duckdb/common/operator/cast_operators.hpp"
 #include "duckdb/common/types/row/tuple_data_layout.hpp"
 #include "duckdb/common/vector/flat_vector.hpp"
+#include "duckdb/common/vector/string_vector.hpp"
 #include "duckdb/common/vector/unified_vector_format.hpp"
 #include "duckdb/execution/execution_aggregate_runtime.hpp"
 #include "duckdb/execution/execution_region_runtime.hpp"
+#include "duckdb/function/scalar/string_common.hpp"
 
 namespace duckdb {
 
@@ -66,27 +68,21 @@ static bool SljitInputVectorGroupBatchFitsCast(DataChunk &payload_input,
 	return true;
 }
 
+struct SljitInputVectorGroupBatchCastFitDispatch {
+	DataChunk &payload_input;
+	const ExecutionRowPointerGroupKeySource &source;
+	idx_t count;
+
+	template <class SRC, class DST>
+	bool Execute() {
+		return SljitInputVectorGroupBatchFitsCast<SRC, DST>(payload_input, source, count);
+	}
+};
+
 static bool SljitInputVectorGroupBatchCastFits(DataChunk &payload_input,
                                                const ExecutionRowPointerGroupKeySource &source, idx_t count) {
-	switch (source.cast_kind) {
-	case ExecutionRowPointerGroupKeyCastKind::INT64_TO_INT32:
-		if (source.source_physical_type != PhysicalType::INT64 || source.target_physical_type != PhysicalType::INT32) {
-			return false;
-		}
-		return SljitInputVectorGroupBatchFitsCast<int64_t, int32_t>(payload_input, source, count);
-	case ExecutionRowPointerGroupKeyCastKind::INT64_TO_INT16:
-		if (source.source_physical_type != PhysicalType::INT64 || source.target_physical_type != PhysicalType::INT16) {
-			return false;
-		}
-		return SljitInputVectorGroupBatchFitsCast<int64_t, int16_t>(payload_input, source, count);
-	case ExecutionRowPointerGroupKeyCastKind::INT32_TO_INT8:
-		if (source.source_physical_type != PhysicalType::INT32 || source.target_physical_type != PhysicalType::INT8) {
-			return false;
-		}
-		return SljitInputVectorGroupBatchFitsCast<int32_t, int8_t>(payload_input, source, count);
-	default:
-		return false;
-	}
+	SljitInputVectorGroupBatchCastFitDispatch dispatch {payload_input, source, count};
+	return SljitDispatchGroupKeyNarrowingIntegralCast(source, dispatch);
 }
 
 static void SljitApplyInputVectorGroupBatchCastProofs(DataChunk &payload_input,
@@ -149,27 +145,21 @@ static bool SljitRowPointerGroupBatchFitsCast(Vector &row_pointers, const Execut
 	return true;
 }
 
+struct SljitRowPointerGroupBatchCastFitDispatch {
+	Vector &row_pointers;
+	const ExecutionRowPointerGroupKeySource &source;
+	idx_t count;
+
+	template <class SRC, class DST>
+	bool Execute() {
+		return SljitRowPointerGroupBatchFitsCast<SRC, DST>(row_pointers, source, count);
+	}
+};
+
 static bool SljitRowPointerGroupBatchCastFits(Vector &row_pointers, const ExecutionRowPointerGroupKeySource &source,
                                               idx_t count) {
-	switch (source.cast_kind) {
-	case ExecutionRowPointerGroupKeyCastKind::INT64_TO_INT32:
-		if (source.source_physical_type != PhysicalType::INT64 || source.target_physical_type != PhysicalType::INT32) {
-			return false;
-		}
-		return SljitRowPointerGroupBatchFitsCast<int64_t, int32_t>(row_pointers, source, count);
-	case ExecutionRowPointerGroupKeyCastKind::INT64_TO_INT16:
-		if (source.source_physical_type != PhysicalType::INT64 || source.target_physical_type != PhysicalType::INT16) {
-			return false;
-		}
-		return SljitRowPointerGroupBatchFitsCast<int64_t, int16_t>(row_pointers, source, count);
-	case ExecutionRowPointerGroupKeyCastKind::INT32_TO_INT8:
-		if (source.source_physical_type != PhysicalType::INT32 || source.target_physical_type != PhysicalType::INT8) {
-			return false;
-		}
-		return SljitRowPointerGroupBatchFitsCast<int32_t, int8_t>(row_pointers, source, count);
-	default:
-		return false;
-	}
+	SljitRowPointerGroupBatchCastFitDispatch dispatch {row_pointers, source, count};
+	return SljitDispatchGroupKeyNarrowingIntegralCast(source, dispatch);
 }
 
 static void SljitApplyRowPointerGroupBatchCastProofs(Vector &row_pointers,
@@ -242,9 +232,22 @@ static void SljitMaterializeInputVectorGroupCast(Vector &source, Vector &target,
 	FlatVector::SetSize(target, count);
 }
 
+struct SljitInputVectorGroupCastMaterializeDispatch {
+	Vector &input;
+	Vector &target;
+	idx_t count;
+	bool unchecked;
+
+	template <class SRC, class DST>
+	bool Execute() {
+		SljitMaterializeInputVectorGroupCast<SRC, DST>(input, target, count, unchecked);
+		return true;
+	}
+};
+
 template <class DST>
 static void SljitMaterializeDateYearCompressedInputVectorGroup(Vector &source, Vector &target, idx_t count,
-                                                              int64_t minimum) {
+                                                               int64_t minimum) {
 	target.SetVectorType(VectorType::FLAT_VECTOR);
 	auto &target_validity = FlatVector::ValidityMutable(target);
 	target_validity.Reset(count);
@@ -286,33 +289,19 @@ static bool SljitTryMaterializeInputVectorGroupSource(DataChunk &payload_input,
 		return false;
 	}
 	auto &input = payload_input.data[source.input_vector_index];
+	if (SljitGroupKeyNarrowingIntegralCast(source.cast_kind)) {
+		const auto unchecked = source.unchecked_integral_cast ||
+		                       (source.cast_kind == ExecutionRowPointerGroupKeyCastKind::INT64_TO_INT32 &&
+		                        source_key0_int64_to_int32_unchecked && source.hash_join_condition_idx == 0);
+		SljitInputVectorGroupCastMaterializeDispatch dispatch {input, target, count, unchecked};
+		return SljitDispatchGroupKeyNarrowingIntegralCast(source, dispatch);
+	}
 	switch (source.cast_kind) {
 	case ExecutionRowPointerGroupKeyCastKind::NONE:
 		if (source.source_physical_type != source.target_physical_type) {
 			return false;
 		}
 		target.Reference(input);
-		return true;
-	case ExecutionRowPointerGroupKeyCastKind::INT64_TO_INT32:
-		if (source.source_physical_type != PhysicalType::INT64 || source.target_physical_type != PhysicalType::INT32) {
-			return false;
-		}
-		SljitMaterializeInputVectorGroupCast<int64_t, int32_t>(
-		    input, target, count,
-		    source.unchecked_integral_cast ||
-		        (source_key0_int64_to_int32_unchecked && source.hash_join_condition_idx == 0));
-		return true;
-	case ExecutionRowPointerGroupKeyCastKind::INT64_TO_INT16:
-		if (source.source_physical_type != PhysicalType::INT64 || source.target_physical_type != PhysicalType::INT16) {
-			return false;
-		}
-		SljitMaterializeInputVectorGroupCast<int64_t, int16_t>(input, target, count, source.unchecked_integral_cast);
-		return true;
-	case ExecutionRowPointerGroupKeyCastKind::INT32_TO_INT8:
-		if (source.source_physical_type != PhysicalType::INT32 || source.target_physical_type != PhysicalType::INT8) {
-			return false;
-		}
-		SljitMaterializeInputVectorGroupCast<int32_t, int8_t>(input, target, count, source.unchecked_integral_cast);
 		return true;
 	case ExecutionRowPointerGroupKeyCastKind::DATE_YEAR_COMPRESS:
 		if (source.source_physical_type != PhysicalType::INT32 || source.source_type.id() != LogicalTypeId::DATE ||
@@ -321,6 +310,33 @@ static bool SljitTryMaterializeInputVectorGroupSource(DataChunk &payload_input,
 		}
 		SljitMaterializeDateYearCompressedInputVectorGroup<uint8_t>(input, target, count, source.cast_constant);
 		return true;
+	case ExecutionRowPointerGroupKeyCastKind::STRING_SUBSTRING: {
+		if (source.source_physical_type != PhysicalType::VARCHAR ||
+		    source.target_physical_type != PhysicalType::VARCHAR) {
+			return false;
+		}
+		target.SetVectorType(VectorType::FLAT_VECTOR);
+		auto &target_validity = FlatVector::ValidityMutable(target);
+		target_validity.Reset(count);
+		target_validity.EnsureWritable();
+		target_validity.SetAllValid(count);
+		StringVector::AddHeapReference(target, input);
+
+		UnifiedVectorFormat input_format;
+		input.ToUnifiedFormat(input_format);
+		auto input_data = UnifiedVectorFormat::GetData<string_t>(input_format);
+		auto target_data = FlatVector::GetDataMutable<string_t>(target);
+		for (idx_t row_idx = 0; row_idx < count; row_idx++) {
+			const auto input_idx = input_format.sel->get_index(row_idx);
+			if (!input_format.validity.RowIsValid(input_idx)) {
+				target_validity.SetInvalid(row_idx);
+				continue;
+			}
+			target_data[row_idx] = SubstringPrefixUnicode(input_data[input_idx], source.string_substring_length);
+		}
+		FlatVector::SetSize(target, count);
+		return true;
+	}
 	default:
 		return false;
 	}

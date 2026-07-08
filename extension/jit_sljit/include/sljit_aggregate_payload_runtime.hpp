@@ -347,7 +347,8 @@ static void SljitExecuteFusedGroupedPrimitiveAggregatePayloadUpdate(
     const uintptr_t *grouped_state_addresses, const sel_t *grouped_state_address_sel,
     const SelectionVector *execute_sel, bool state_addresses_by_loop_index, idx_t count,
     SljitAggregatePayloadAdapterScratch &adapter_scratch,
-    optional_ptr<const vector<idx_t>> input_source_indices_override = nullptr) {
+    optional_ptr<const vector<idx_t>> input_source_indices_override = nullptr,
+    optional_ptr<const vector<bool>> input_source_not_null_override = nullptr) {
 	if (!function) {
 		throw InternalException("SLJIT fused grouped aggregate primitive payload update is missing generated code");
 	}
@@ -370,6 +371,11 @@ static void SljitExecuteFusedGroupedPrimitiveAggregatePayloadUpdate(
 		if (input_source_indices_override) {
 			if (input_source_indices_override->size() != combined_sources->size()) {
 				throw InternalException("SLJIT fused grouped typed aggregate payload source override size mismatch");
+			}
+			if (input_source_not_null_override &&
+			    input_source_not_null_override->size() != input_source_indices_override->size()) {
+				throw InternalException(
+				    "SLJIT fused grouped typed aggregate payload source fact override size mismatch");
 			}
 			combined_sources = input_source_indices_override;
 		}
@@ -400,13 +406,13 @@ static void SljitExecuteFusedGroupedPrimitiveAggregatePayloadUpdate(
 			    "SLJIT fused grouped typed aggregate primitive payload type mismatch");
 		}
 
+		const auto combined_source_not_null =
+		    input_source_indices_override
+		        ? input_source_not_null_override
+		        : SljitGetFusedTypedPayloadCombinedSourceNotNull(payloads, aggregates, combined_sources->size());
 		SljitPrepareTypedAggregatePayloadSources(input, *combined_sources, execute_sel, count, payload_sources,
 		                                         "SLJIT fused grouped typed aggregate source is out of range",
-		                                         input_source_indices_override
-		                                             ? nullptr
-		                                             : SljitGetFusedTypedPayloadCombinedSourceNotNull(
-		                                                   payloads, aggregates, combined_sources->size())
-		                                                   .get());
+		                                         combined_source_not_null.get());
 
 		SljitNativeVectorInput native_input;
 		native_input.execute_sel = execute_sel ? execute_sel->data() : nullptr;
@@ -424,6 +430,11 @@ static void SljitExecuteFusedGroupedPrimitiveAggregatePayloadUpdate(
 	auto &payload_sources = adapter_scratch.payload_sources;
 	if (input_source_indices_override && input_source_indices_override->size() != payloads.size()) {
 		throw InternalException("SLJIT fused grouped aggregate payload source override size mismatch");
+	}
+	if (input_source_not_null_override &&
+	    (!input_source_indices_override ||
+	     input_source_not_null_override->size() != input_source_indices_override->size())) {
+		throw InternalException("SLJIT fused grouped aggregate payload source fact override size mismatch");
 	}
 
 	for (idx_t payload_idx = 0; payload_idx < payloads.size(); payload_idx++) {
@@ -447,15 +458,20 @@ static void SljitExecuteFusedGroupedPrimitiveAggregatePayloadUpdate(
 		const auto source_index =
 		    input_source_indices_override ? (*input_source_indices_override)[payload_idx] : plan.source_index;
 		if (lane.kind == AggregatePrimitiveUpdateKind::COUNT) {
+			const auto known_not_null =
+			    input_source_indices_override
+			        ? input_source_not_null_override &&
+			              SljitInputSourceKnownNotNull(*input_source_not_null_override, payload_idx)
+			        : SljitInputSourceKnownNotNull(payloads[payload_idx].input_source_not_null, 0);
 			payload_sources.PrepareValiditySource(input, source_index, payload_idx, execute_sel, count,
 			                                      "SLJIT fused grouped aggregate reference source is out of range",
-			                                      !input_source_indices_override &&
-			                                          SljitInputSourceKnownNotNull(
-			                                              payloads[payload_idx].input_source_not_null, 0));
+			                                      known_not_null);
 		} else {
 			const auto known_not_null =
-			    !input_source_indices_override &&
-			    SljitInputSourceKnownNotNull(payloads[payload_idx].input_source_not_null, 0);
+			    input_source_indices_override
+			        ? input_source_not_null_override &&
+			              SljitInputSourceKnownNotNull(*input_source_not_null_override, payload_idx)
+			        : SljitInputSourceKnownNotNull(payloads[payload_idx].input_source_not_null, 0);
 			if (lane.kind == AggregatePrimitiveUpdateKind::SUM_DOUBLE) {
 				payload_sources.PrepareTypedExpressionSource(
 				    input, source_index, payload_idx, execute_sel, count,

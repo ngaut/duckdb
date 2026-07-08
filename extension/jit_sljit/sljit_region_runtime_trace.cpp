@@ -52,6 +52,22 @@ string SljitRegionStageName(idx_t op_idx, SljitNativeRegionOpKind kind, const st
 	return SljitRegionStageName(op_idx, kind) + "." + phase;
 }
 
+static bool SljitRegionOpKindProvesGeneratedBackendWork(SljitNativeRegionOpKind kind) {
+	switch (kind) {
+	case SljitNativeRegionOpKind::HASH_JOIN_PROBE:
+	case SljitNativeRegionOpKind::HASH_JOIN_BUILD:
+	case SljitNativeRegionOpKind::NESTED_LOOP_JOIN_PROBE:
+	case SljitNativeRegionOpKind::NESTED_LOOP_JOIN_BUILD:
+	case SljitNativeRegionOpKind::ORDER_SINK:
+	case SljitNativeRegionOpKind::APPEND_SINK:
+	case SljitNativeRegionOpKind::DELIM_JOIN_SINK:
+	case SljitNativeRegionOpKind::AGGREGATE_UPDATE:
+		return true;
+	default:
+		return false;
+	}
+}
+
 std::chrono::steady_clock::time_point SljitRegionStageStart(ExecutionRegionRuntime &runtime) {
 	return runtime.TraceRuntime() ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point();
 }
@@ -81,19 +97,52 @@ void RecordSljitRegionRuntimePath(ExecutionRegionRuntime &runtime, SljitNativeRe
 	runtime.RecordJitRuntimePath(runtime_path.c_str(), count);
 }
 
-void RecordSljitRegionMaterializationBoundary(ExecutionRegionRuntime &runtime, SljitNativeRegionOpKind kind,
-                                              const char *boundary, idx_t row_count) {
+void RecordSljitRegionRuntimeProof(ExecutionRegionRuntime &runtime, SljitNativeRegionOpKind kind,
+                                   ExecutionRegionJitRuntimeProof proof, const char *detail, idx_t count) {
+	if (!runtime.TraceRuntime()) {
+		return;
+	}
+	runtime.RecordJitRuntimeProof(proof, count);
+	if (!detail || !detail[0]) {
+		return;
+	}
+	auto runtime_proof =
+	    string(SljitRegionOpKindName(kind)) + "." + ExecutionRegionJitRuntimeProofName(proof) + "." + detail;
+	runtime.RecordJitRuntimeProofDetail(runtime_proof.c_str(), count);
+}
+
+void RecordSljitRegionMaterializationElisionProof(ExecutionRegionRuntime &runtime, SljitNativeRegionOpKind kind,
+                                                  const char *detail, idx_t count) {
+	RecordSljitRegionRuntimeProof(runtime, kind, ExecutionRegionJitRuntimeProof::GENERATED_BACKEND_WORK, detail,
+	                              count);
+	RecordSljitRegionRuntimeProof(runtime, kind, ExecutionRegionJitRuntimeProof::MATERIALIZATION_ELISION, detail,
+	                              count);
+}
+
+void RecordSljitRegionMaterializationElisionPath(ExecutionRegionRuntime &runtime, SljitNativeRegionOpKind kind,
+                                                 const char *path, idx_t count) {
+	RecordSljitRegionRuntimePath(runtime, kind, path, count);
+	RecordSljitRegionMaterializationElisionProof(runtime, kind, path, count);
+}
+
+void RecordSljitRegionRuntimeDelegation(ExecutionRegionRuntime &runtime, SljitNativeRegionOpKind kind,
+                                        const char *delegation, idx_t row_count) {
 	if (!runtime.TraceRuntime() || row_count == 0) {
 		return;
 	}
-	auto materialization_boundary = string(SljitRegionOpKindName(kind)) + "." + boundary;
-	runtime.RecordJitMaterializationBoundary(materialization_boundary.c_str(), row_count);
+	auto runtime_delegation = string(SljitRegionOpKindName(kind)) + "." + delegation;
+	runtime.RecordJitRuntimeDelegation(runtime_delegation.c_str(), row_count);
+	runtime.RecordJitRuntimeProof(ExecutionRegionJitRuntimeProof::DELEGATED_RUNTIME_WORK, row_count);
 }
 
 void RecordSljitRegionStageRuntimePath(ExecutionRegionRuntime &runtime, idx_t op_idx, SljitNativeRegionOpKind kind,
                                        const char *phase, std::chrono::steady_clock::time_point start) {
 	RecordSljitRegionStageRuntime(runtime, op_idx, kind, phase, start);
 	RecordSljitRegionRuntimePath(runtime, kind, phase);
+	runtime.RecordJitRuntimeProof(ExecutionRegionJitRuntimeProof::GENERATED_STAGE_WORK);
+	if (SljitRegionOpKindProvesGeneratedBackendWork(kind)) {
+		runtime.RecordJitRuntimeProof(ExecutionRegionJitRuntimeProof::GENERATED_BACKEND_WORK);
+	}
 }
 
 void RecordSljitRegionStageRuntimeWithSuffix(ExecutionRegionRuntime &runtime, idx_t op_idx,
@@ -118,7 +167,7 @@ void RecordSljitDirectAppendProfile(ExecutionRegionRuntime &runtime, idx_t op_id
 	if (!runtime.TraceRuntime()) {
 		return;
 	}
-	auto prepare_prefix = SljitRegionStageName(op_idx, kind, "direct_append_prepare");
+	auto prepare_prefix = SljitRegionStageName(op_idx, kind, "append_prepare");
 	RecordSljitDirectAppendProfileStage(runtime, prepare_prefix, "storage_finalize_row_group",
 	                                    profile.prepare_finalize_row_group_time_us);
 	RecordSljitDirectAppendProfileStage(runtime, prepare_prefix, "storage_new_row_group",
@@ -126,7 +175,7 @@ void RecordSljitDirectAppendProfile(ExecutionRegionRuntime &runtime, idx_t op_id
 	RecordSljitDirectAppendProfileStage(runtime, prepare_prefix, "storage_fixed_column_prepare",
 	                                    profile.prepare_fixed_column_time_us, profile.prepare_fixed_column_count);
 
-	auto commit_prefix = SljitRegionStageName(op_idx, kind, "direct_append_commit");
+	auto commit_prefix = SljitRegionStageName(op_idx, kind, "append_commit");
 	RecordSljitDirectAppendProfileStage(runtime, commit_prefix, "storage_source_format",
 	                                    profile.commit_source_format_time_us,
 	                                    profile.commit_source_append_column_count);

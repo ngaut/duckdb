@@ -26,6 +26,15 @@ struct ExecutionRegionSourceFilter {
 	string reason;
 };
 
+struct ExecutionRegionGeneratedSourceFilterCapability {
+	bool can_generate = false;
+	string blocker;
+};
+
+DUCKDB_API ExecutionRegionGeneratedSourceFilterCapability
+GetExecutionRegionGeneratedSourceFilterCapability(const ExecutionExpressionFragment &expression,
+                                                  const LogicalType &source_type);
+
 struct ExecutionRegionContractField {
 	string name;
 	string value;
@@ -418,6 +427,8 @@ struct ExecutionRegionCandidateTraits {
 	ExecutionRegionSourceExecutionKind source_execution = ExecutionRegionSourceExecutionKind::NONE;
 	ExecutionRegionSinkKind sink_kind = ExecutionRegionSinkKind::NONE;
 	bool sink_present = false;
+	idx_t source_contract_input_cardinality = 0;
+	bool source_contract_output_cardinality_unknown = false;
 	idx_t source_filter_count = 0;
 	idx_t source_filter_expression_count = 0;
 	idx_t source_conjunction_filter_count = 0;
@@ -427,13 +438,13 @@ struct ExecutionRegionCandidateTraits {
 	idx_t hash_join_operator_count = 0;
 	idx_t aggregate_count = 0;
 	idx_t mark_probe_filter_count = 0;
-	idx_t mark_probe_materialized_tail_count = 0;
+	idx_t selected_hash_join_filter_materialization_count = 0;
+	idx_t selected_hash_join_view_materialization_count = 0;
 	idx_t generated_aggregate_update_count = 0;
 	idx_t generated_aggregate_lookup_count = 0;
 	idx_t arithmetic_projection_count = 0;
 	idx_t high_cost_projection_count = 0;
 	idx_t reference_projection_count = 0;
-	idx_t reference_varchar_projection_count = 0;
 	idx_t predicate_expression_count = 0;
 	idx_t control_expression_count = 0;
 	idx_t expression_cost = 0;

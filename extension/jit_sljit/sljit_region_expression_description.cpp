@@ -146,6 +146,9 @@ string DescribeNativeRegionExpression(const SljitNativeRegionExpressionPlan &exp
 	case SljitNativeRegionExpressionKind::STRING_DECOMPRESS:
 		result = "native:string-decompress:" + std::to_string(expr.string_decompress_source_size);
 		break;
+	case SljitNativeRegionExpressionKind::STRING_SUBSTRING:
+		result = "native:string-substring:prefix=" + std::to_string(expr.string_substring_length);
+		break;
 	case SljitNativeRegionExpressionKind::INTEGRAL_COMPRESS:
 		result = "native:integral-compress";
 		break;

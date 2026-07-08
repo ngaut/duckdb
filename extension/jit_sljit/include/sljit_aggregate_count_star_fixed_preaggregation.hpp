@@ -101,20 +101,6 @@ template <class T>
 static bool TryPreaggregateDenseFixedWidthCountStarGroupsTemplated(UnifiedVectorFormat &format,
                                                                    const SelectionVector *execute_sel, idx_t count,
                                                                    DataChunk &compact_groups,
-                                                                   vector<int64_t> &count_deltas);
-
-template <class T>
-static bool TryPreaggregateDenseFixedWidthCountStarGroupsTemplated(UnifiedVectorFormat &format, idx_t count,
-                                                                   DataChunk &compact_groups,
-                                                                   vector<int64_t> &count_deltas) {
-	return TryPreaggregateDenseFixedWidthCountStarGroupsTemplated<T>(format, nullptr, count, compact_groups,
-	                                                                 count_deltas);
-}
-
-template <class T>
-static bool TryPreaggregateDenseFixedWidthCountStarGroupsTemplated(UnifiedVectorFormat &format,
-                                                                   const SelectionVector *execute_sel, idx_t count,
-                                                                   DataChunk &compact_groups,
                                                                    vector<int64_t> &count_deltas) {
 	if constexpr (std::is_same<T, hugeint_t>::value || std::is_same<T, uhugeint_t>::value) {
 		return false;
@@ -192,19 +178,6 @@ static bool TryPreaggregateDenseFixedWidthCountStarGroupsTemplated(UnifiedVector
 template <class T>
 static bool TryPreaggregateFixedWidthCountStarVectorTemplated(Vector &input_group, const SelectionVector *execute_sel,
                                                               idx_t count, DataChunk &compact_groups,
-                                                              vector<int64_t> &count_deltas);
-
-template <class T>
-static bool TryPreaggregateFixedWidthCountStarVectorTemplated(Vector &input_group, idx_t count,
-                                                              DataChunk &compact_groups,
-                                                              vector<int64_t> &count_deltas) {
-	return TryPreaggregateFixedWidthCountStarVectorTemplated<T>(input_group, nullptr, count, compact_groups,
-	                                                            count_deltas);
-}
-
-template <class T>
-static bool TryPreaggregateFixedWidthCountStarVectorTemplated(Vector &input_group, const SelectionVector *execute_sel,
-                                                              idx_t count, DataChunk &compact_groups,
                                                               vector<int64_t> &count_deltas) {
 	if (count == 0 || compact_groups.ColumnCount() != 1 || input_group.GetType() != compact_groups.data[0].GetType()) {
 		return false;
@@ -237,15 +210,6 @@ static bool TryPreaggregateFixedWidthCountStarVectorTemplated(Vector &input_grou
 	}
 	MaterializePreaggregatedCountStarGroups(keys, counts, group_count, compact_groups, count_deltas);
 	return true;
-}
-
-static bool TryPreaggregateFixedWidthCountStarVector(Vector &input_group, const SelectionVector *execute_sel,
-                                                     idx_t count, DataChunk &compact_groups,
-                                                     vector<int64_t> &count_deltas);
-
-static bool TryPreaggregateFixedWidthCountStarVector(Vector &input_group, idx_t count, DataChunk &compact_groups,
-                                                     vector<int64_t> &count_deltas) {
-	return TryPreaggregateFixedWidthCountStarVector(input_group, nullptr, count, compact_groups, count_deltas);
 }
 
 static bool TryPreaggregateFixedWidthCountStarVector(Vector &input_group, const SelectionVector *execute_sel,
@@ -292,7 +256,7 @@ static bool TryPreaggregateFixedWidthCountStarGroups(DataChunk &input_groups, Da
 	if (input_groups.ColumnCount() != 1) {
 		return false;
 	}
-	return TryPreaggregateFixedWidthCountStarVector(input_groups.data[0], input_groups.size(), compact_groups,
+	return TryPreaggregateFixedWidthCountStarVector(input_groups.data[0], nullptr, input_groups.size(), compact_groups,
 	                                                count_deltas);
 }
 
@@ -381,18 +345,6 @@ static bool TryAccumulatePreaggregatedCountStarGroups(DataChunk &source_groups,
 static bool TryPreaggregateProjectedFixedWidthCountStarGroups(const SljitExecutableRegionOp &projection_op,
                                                               DataChunk &input, const SelectionVector *execute_sel,
                                                               idx_t count, DataChunk &compact_groups,
-                                                              vector<int64_t> &count_deltas);
-
-static bool TryPreaggregateProjectedFixedWidthCountStarGroups(const SljitExecutableRegionOp &projection_op,
-                                                              DataChunk &input, DataChunk &compact_groups,
-                                                              vector<int64_t> &count_deltas) {
-	return TryPreaggregateProjectedFixedWidthCountStarGroups(projection_op, input, nullptr, input.size(),
-	                                                         compact_groups, count_deltas);
-}
-
-static bool TryPreaggregateProjectedFixedWidthCountStarGroups(const SljitExecutableRegionOp &projection_op,
-                                                              DataChunk &input, const SelectionVector *execute_sel,
-                                                              idx_t count, DataChunk &compact_groups,
                                                               vector<int64_t> &count_deltas) {
 	if (input.size() == 0 || projection_op.kind != SljitNativeRegionOpKind::PROJECTION ||
 	    projection_op.projections.size() != 1 || projection_op.output_types.size() != 1 ||
@@ -408,34 +360,6 @@ static bool TryPreaggregateProjectedFixedWidthCountStarGroups(const SljitExecuta
 	}
 	return TryPreaggregateFixedWidthCountStarVector(input.data[source_index], execute_sel, count, compact_groups,
 	                                                count_deltas);
-}
-
-template <class T>
-static bool
-MergePreaggregatedFixedWidthCountStarGroupsTemplated(DataChunk &compact_groups, const vector<int64_t> &count_deltas,
-                                                     std::array<T, SLJIT_LOCAL_PREAGGREGATED_GROUP_LIMIT> &keys,
-                                                     std::array<int64_t, SLJIT_LOCAL_PREAGGREGATED_GROUP_LIMIT> &counts,
-                                                     idx_t &group_count) {
-	if (compact_groups.ColumnCount() != 1 || count_deltas.size() < compact_groups.size()) {
-		return false;
-	}
-	UnifiedVectorFormat format;
-	compact_groups.data[0].ToUnifiedFormat(format);
-	auto source_data = UnifiedVectorFormat::GetData<T>(format);
-	auto source_sel = format.sel;
-	auto &source_validity = format.validity;
-	const bool can_have_null = source_validity.CanHaveNull();
-	for (idx_t row_idx = 0; row_idx < compact_groups.size(); row_idx++) {
-		const auto source_idx = source_sel->get_index(row_idx);
-		if (can_have_null && !source_validity.RowIsValid(source_idx)) {
-			return false;
-		}
-		if (!AccumulatePreaggregatedCountStarDeltaKey(source_data[source_idx], count_deltas[row_idx], keys, counts,
-		                                              group_count)) {
-			return false;
-		}
-	}
-	return true;
 }
 
 } // namespace duckdb

@@ -31,8 +31,6 @@ static bool SljitTryFastProjectJoinOutput(ExecutionRegionRuntime &runtime, const
 		}
 		RecordSljitRegionStageRuntime(runtime, strategy.final_projection_idx, ops[strategy.final_projection_idx].kind,
 		                              "post_join_string_set_case_projection", projection_stage_start);
-		RecordSljitRegionMaterializationBoundary(runtime, ops[strategy.final_projection_idx].kind,
-		                                         "copied_post_join_projection", projected.size());
 		return true;
 	}
 	throw InternalException("Unsupported SLJIT post-join projection fast path");
@@ -47,13 +45,10 @@ static void SljitProjectProjectionStep(ExecutionRegionRuntime &runtime, SljitReg
 	if (SljitTryReferenceProjection(output, input, projection_op)) {
 		RecordSljitRegionStageRuntime(runtime, projection_idx, projection_op.kind, reference_phase,
 		                              projection_stage_start);
-		RecordSljitRegionMaterializationBoundary(runtime, projection_op.kind, "reference_post_join_projection",
-		                                         output.size());
 		return;
 	}
 	SljitExecuteProjection(scratch, projection_idx, projection_op, input, output);
 	RecordSljitRegionStageRuntime(runtime, projection_idx, projection_op.kind, batch_phase, projection_stage_start);
-	RecordSljitRegionMaterializationBoundary(runtime, projection_op.kind, "copied_post_join_projection", output.size());
 }
 
 static void SljitProjectPostJoinProjectionChain(ExecutionRegionRuntime &runtime, SljitRegionExecutionScratch &scratch,

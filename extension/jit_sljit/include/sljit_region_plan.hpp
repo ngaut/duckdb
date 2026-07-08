@@ -47,6 +47,7 @@ enum class SljitNativeRegionExpressionKind : uint8_t {
 	INTEGRAL_DECOMPRESS,
 	STRING_COMPRESS,
 	STRING_DECOMPRESS,
+	STRING_SUBSTRING,
 	DATE_YEAR,
 	ERROR_GUARDED_REFERENCE,
 	NULL_CHECK,
@@ -95,6 +96,7 @@ struct SljitNativeRegionExpressionPlan {
 	optional_idx query_location;
 	idx_t string_compress_target_size = 0;
 	idx_t string_decompress_source_size = 0;
+	idx_t string_substring_length = 0;
 	idx_t guard_source_index = 0;
 	SljitNativeIntegerCompareOp guard_compare_op = SljitNativeIntegerCompareOp::GREATER_THAN;
 	int64_t guard_constant = 0;

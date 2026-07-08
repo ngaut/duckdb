@@ -254,6 +254,20 @@ unique_ptr<ExecutionExpressionIR> CopySljitExpressionPlanAsInputTree(const Sljit
 		result->children.push_back(std::move(child));
 		return result;
 	}
+	case SljitNativeRegionExpressionKind::STRING_SUBSTRING: {
+		if (expr.return_type.id() != LogicalTypeId::VARCHAR) {
+			return nullptr;
+		}
+		auto child = MakeSljitTreeReference(expr.source_index, LogicalType::VARCHAR);
+		auto start = MakeSljitTreeConstant(Value::BIGINT(1), LogicalType::BIGINT);
+		auto length = MakeSljitTreeConstant(Value::BIGINT(NumericCast<int64_t>(expr.string_substring_length)),
+		                                    LogicalType::BIGINT);
+		auto result = MakeSljitTreeIntrinsic(ExecutionExpressionIntrinsicKind::STRING_SUBSTRING, expr.return_type);
+		result->children.push_back(std::move(child));
+		result->children.push_back(std::move(start));
+		result->children.push_back(std::move(length));
+		return result;
+	}
 	default:
 		if (expr.expression_tree) {
 			auto result = expr.expression_tree->Copy();
@@ -284,6 +298,7 @@ bool TryMapNativeProjectionExpressionSources(const vector<SljitNativeRegionExpre
 	case SljitNativeRegionExpressionKind::INTEGRAL_DECOMPRESS:
 	case SljitNativeRegionExpressionKind::STRING_COMPRESS:
 	case SljitNativeRegionExpressionKind::STRING_DECOMPRESS:
+	case SljitNativeRegionExpressionKind::STRING_SUBSTRING:
 	case SljitNativeRegionExpressionKind::DATE_YEAR:
 	case SljitNativeRegionExpressionKind::ERROR_GUARDED_REFERENCE:
 	case SljitNativeRegionExpressionKind::NULL_CHECK:

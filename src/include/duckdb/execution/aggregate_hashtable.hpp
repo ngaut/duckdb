@@ -130,7 +130,8 @@ public:
 	bool TryAppendNewGroupsWithStateAddressesFast(DataChunk &groups,
 	                                              ExecutionGroupedAggregateStateAddressUpdateFunction update_function,
 	                                              void *update_state,
-	                                              optional_ptr<ExecutionOperatorStageRecorder> recorder = nullptr);
+	                                              optional_ptr<ExecutionOperatorStageRecorder> recorder = nullptr,
+	                                              optional_ptr<const ExecutionDenseGroupDomain> dense_domain = nullptr);
 
 	const PartitionedTupleData &GetPartitionedData() const;
 	unique_ptr<PartitionedTupleData>
@@ -153,6 +154,8 @@ public:
 	idx_t GetRadixBits() const;
 	//! Get the total number of tuples sunk into this HT
 	idx_t GetSinkCount() const;
+	//! Record state-address updates that bypass group lookup but still consume sink input
+	void RecordSinkCount(idx_t count);
 	//! Get the total number of tuples materialized currently in this HT
 	idx_t GetMaterializedCount() const;
 	//! Skips lookups from here on out
@@ -350,11 +353,23 @@ private:
 	    DataChunk &payload_input, idx_t count, const vector<ExecutionRowPointerGroupKeySource> &group_sources,
 	    ExecutionGroupedAggregateStateTargetBatch &targets, optional_ptr<ExecutionOperatorStageRecorder> recorder,
 	    optional_ptr<const ExecutionDenseGroupDomain> dense_domain = nullptr);
+	bool TryFindOrCreateInputVectorSingleFieldGroupStateTargetsDirect(
+	    DataChunk &payload_input, idx_t count, const vector<ExecutionRowPointerGroupKeySource> &group_sources,
+	    ExecutionGroupedAggregateStateTargetBatch &targets, optional_ptr<ExecutionOperatorStageRecorder> recorder);
+	template <class T>
+	bool TryFindOrCreateInputVectorSingleFieldGroupStateTargetsDirectTemplated(
+	    DataChunk &payload_input, idx_t count, const vector<ExecutionRowPointerGroupKeySource> &group_sources,
+	    ExecutionGroupedAggregateStateTargetBatch &targets, optional_ptr<ExecutionOperatorStageRecorder> recorder);
 	template <class T>
 	bool TryFindOrCreateRowPointerSingleFieldGroupStateTargetsDirectTemplated(
 	    DataChunk &payload_input, Vector &row_pointers, idx_t count,
 	    const vector<ExecutionRowPointerGroupKeySource> &group_sources,
 	    ExecutionGroupedAggregateStateTargetBatch &targets, optional_ptr<ExecutionOperatorStageRecorder> recorder);
+	template <class T, class SOURCE>
+	bool TryFindOrCreateSingleFieldGroupStateTargetsDirectTemplated(
+	    idx_t count, const vector<ExecutionRowPointerGroupKeySource> &group_sources,
+	    ExecutionGroupedAggregateStateTargetBatch &targets, optional_ptr<ExecutionOperatorStageRecorder> recorder,
+	    SOURCE &source);
 	template <class T>
 	bool TryFindOrCreateRowPointerSingleFieldGroupStateTargetsDense(
 	    Vector &row_pointers, idx_t count, const vector<ExecutionRowPointerGroupKeySource> &group_sources,
@@ -371,6 +386,9 @@ private:
 	    ExecutionGroupedAggregateStateTargetBatch &targets,
 	    optional_ptr<ExecutionOperatorStageRecorder> recorder,
 	    optional_ptr<const ExecutionDenseGroupDomain> dense_domain = nullptr);
+	bool TryFindOrCreateInputVectorStringPrefixGroupStateTargets(
+	    DataChunk &payload_input, idx_t count, const vector<ExecutionRowPointerGroupKeySource> &group_sources,
+	    ExecutionGroupedAggregateStateTargetBatch &targets, optional_ptr<ExecutionOperatorStageRecorder> recorder);
 	bool TryFindOrCreateRowPointerGroupStateTargetsMaterialized(
 	    DataChunk &payload_input, Vector &row_pointers, idx_t count,
 	    const vector<ExecutionRowPointerGroupKeySource> &group_sources,
@@ -378,7 +396,8 @@ private:
 	bool TryAppendNewGroupsFastInternal(DataChunk &groups, optional_ptr<Vector> addresses_out,
 	                                    ExecutionGroupedAggregateStateAddressUpdateFunction address_update_function,
 	                                    void *address_update_state,
-	                                    optional_ptr<ExecutionOperatorStageRecorder> recorder);
+	                                    optional_ptr<ExecutionOperatorStageRecorder> recorder,
+	                                    optional_ptr<const ExecutionDenseGroupDomain> dense_domain = nullptr);
 
 	//! Verify the pointer table of the HT
 	void Verify();

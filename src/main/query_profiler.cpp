@@ -176,19 +176,22 @@ static string ExecutionRegionProfileShape(const ExecutionRegionEvent &event) {
 
 static string ExecutionRegionProfileStageCosts(const PhysicalRunnerCostProfile &cost) {
 	string result = "gen:" + std::to_string(cost.generated_stage_count);
+	result += ",gen_grouped_agg:" + std::to_string(cost.generated_grouped_aggregate_stage_count);
+	result += ",native_group_lookup:" + std::to_string(cost.native_grouped_state_address_lookup_count);
 	result += ",join:" + std::to_string(cost.native_join_stage_count);
 	result += ",join_build_sink:" + std::to_string(cost.native_hash_join_build_sink_count);
 	result += ",agg:" + std::to_string(cost.native_aggregate_stage_count);
 	result += ",grouped_agg:" + std::to_string(cost.native_grouped_aggregate_stage_count);
 	result += ",sort:" + std::to_string(cost.native_sort_stage_count);
 	result += ",mat:" + std::to_string(cost.materialization_elision_count);
-	result += ",source_append:" + std::to_string(cost.materialization_source_append_count);
-	result += ",unfused_mark_filter_agg:" + std::to_string(cost.unfused_mark_filter_aggregate_count);
+	result += ",selected_filter_mat:" + std::to_string(cost.selected_hash_join_filter_materialization_count);
 	result += ",full:";
 	result += cost.full_pipeline ? "true" : "false";
 	result += ",scope:";
 	result += PhysicalRunnerCostInputScopeToString(cost.input_scope);
 	result += ",expr:" + std::to_string(cost.expression_cost);
+	result += ",source_rows:" + std::to_string(cost.source_contract_input_rows);
+	result += ",source_batches:" + std::to_string(cost.source_contract_input_batches);
 	result += ",gen_class:";
 	result += PhysicalRunnerGeneratedWorkClassToString(cost.generated_work_class);
 	result += ",native_protocol:";
@@ -207,8 +210,8 @@ static string ExecutionRegionProfileCostComponents(const PhysicalRunnerCostProfi
 	result += ",gen_stage:" + std::to_string(cost.generated_stage_work);
 	result += ",native:" + std::to_string(cost.native_operator_work);
 	result += ",mat:" + std::to_string(cost.materialization_elision_work);
-	result += ",source_append_penalty:" + std::to_string(cost.materialization_source_append_penalty);
-	result += ",unfused_mark_filter_agg_penalty:" + std::to_string(cost.unfused_mark_filter_aggregate_penalty);
+	result += ",selected_filter_mat_penalty:" + std::to_string(cost.selected_hash_join_filter_materialization_penalty);
+	result += ",source_contract_scan_penalty:" + std::to_string(cost.source_contract_scan_penalty);
 	result += ",full:" + std::to_string(cost.full_pipeline_work);
 	result += ",protocol_penalty:" + std::to_string(cost.stateful_protocol_penalty);
 	result += ",gpu_transfer:" + std::to_string(cost.gpu_transfer_cost);
@@ -332,22 +335,28 @@ static void AddExecutionRegionEvent(QueryProfileResult &row, const ExecutionRegi
 	     {"selected_runner", Text(ExecutionRunnerKindToString(event.selected_runner))},
 	     {"runner_cost_profile", Value::BOOLEAN(event.runner_cost.present)},
 	     {"runner_cost_rows", Time(event.runner_cost.rows)},
-		     {"runner_cost_batches", Time(event.runner_cost.batches)},
-		     {"runner_cost_expression_cost", Time(event.runner_cost.expression_cost)},
-		     {"runner_cost_generated_stage_count", Time(event.runner_cost.generated_stage_count)},
-		     {"runner_cost_generated_backend_stage_count", Time(event.runner_cost.generated_backend_stage_count)},
-		     {"runner_cost_materialization_elision_count", Time(event.runner_cost.materialization_elision_count)},
-	     {"runner_cost_materialization_source_append_count",
-	      Time(event.runner_cost.materialization_source_append_count)},
-	     {"runner_cost_unfused_mark_filter_aggregate_count",
-	      Time(event.runner_cost.unfused_mark_filter_aggregate_count)},
+	     {"runner_cost_batches", Time(event.runner_cost.batches)},
+	     {"runner_cost_costed_batches", Time(event.runner_cost.costed_batches)},
+	     {"runner_cost_expression_cost", Time(event.runner_cost.expression_cost)},
+	     {"runner_cost_source_contract_input_rows", Time(event.runner_cost.source_contract_input_rows)},
+	     {"runner_cost_source_contract_input_batches", Time(event.runner_cost.source_contract_input_batches)},
+	     {"runner_cost_source_contract_output_cardinality_unknown",
+	      Value::BOOLEAN(event.runner_cost.source_contract_output_cardinality_unknown)},
+	     {"runner_cost_generated_stage_count", Time(event.runner_cost.generated_stage_count)},
+	     {"runner_cost_generated_backend_stage_count", Time(event.runner_cost.generated_backend_stage_count)},
+	     {"runner_cost_generated_grouped_aggregate_stage_count",
+	      Time(event.runner_cost.generated_grouped_aggregate_stage_count)},
+	     {"runner_cost_native_grouped_state_address_lookup_count",
+	      Time(event.runner_cost.native_grouped_state_address_lookup_count)},
+	     {"runner_cost_materialization_elision_count", Time(event.runner_cost.materialization_elision_count)},
+	     {"runner_cost_selected_hash_join_filter_materialization_count",
+	      Time(event.runner_cost.selected_hash_join_filter_materialization_count)},
 	     {"runner_cost_native_join_stage_count", Time(event.runner_cost.native_join_stage_count)},
-		     {"runner_cost_native_hash_join_build_sink_count",
-		      Time(event.runner_cost.native_hash_join_build_sink_count)},
-		     {"runner_cost_native_aggregate_stage_count", Time(event.runner_cost.native_aggregate_stage_count)},
-		     {"runner_cost_native_grouped_aggregate_stage_count",
-		      Time(event.runner_cost.native_grouped_aggregate_stage_count)},
-		     {"runner_cost_native_sort_stage_count", Time(event.runner_cost.native_sort_stage_count)},
+	     {"runner_cost_native_hash_join_build_sink_count", Time(event.runner_cost.native_hash_join_build_sink_count)},
+	     {"runner_cost_native_aggregate_stage_count", Time(event.runner_cost.native_aggregate_stage_count)},
+	     {"runner_cost_native_grouped_aggregate_stage_count",
+	      Time(event.runner_cost.native_grouped_aggregate_stage_count)},
+	     {"runner_cost_native_sort_stage_count", Time(event.runner_cost.native_sort_stage_count)},
 	     {"runner_cost_full_pipeline", Value::BOOLEAN(event.runner_cost.full_pipeline)},
 	     {"runner_cost_input_scope", Text(PhysicalRunnerCostInputScopeToString(event.runner_cost.input_scope))},
 	     {"runner_cost_generated_work_class",
@@ -356,15 +365,14 @@ static void AddExecutionRegionEvent(QueryProfileResult &row, const ExecutionRegi
 	      Text(PhysicalRunnerNativeProtocolClassToString(event.runner_cost.native_protocol_class))},
 	     {"runner_cost_admission_class", NullableText(event.runner_cost.admission_class)},
 	     {"runner_cost_selection_reason", NullableText(event.runner_cost.selection_reason)},
-		     {"runner_cost_generated_expression_work", Time(event.runner_cost.generated_expression_work)},
-		     {"runner_cost_generated_stage_work", Time(event.runner_cost.generated_stage_work)},
-		     {"runner_cost_generated_backend_stage_work", Time(event.runner_cost.generated_backend_stage_work)},
-		     {"runner_cost_native_operator_work", Time(event.runner_cost.native_operator_work)},
+	     {"runner_cost_generated_expression_work", Time(event.runner_cost.generated_expression_work)},
+	     {"runner_cost_generated_stage_work", Time(event.runner_cost.generated_stage_work)},
+	     {"runner_cost_generated_backend_stage_work", Time(event.runner_cost.generated_backend_stage_work)},
+	     {"runner_cost_native_operator_work", Time(event.runner_cost.native_operator_work)},
 	     {"runner_cost_materialization_elision_work", Time(event.runner_cost.materialization_elision_work)},
-	     {"runner_cost_materialization_source_append_penalty",
-	      Time(event.runner_cost.materialization_source_append_penalty)},
-	     {"runner_cost_unfused_mark_filter_aggregate_penalty",
-	      Time(event.runner_cost.unfused_mark_filter_aggregate_penalty)},
+	     {"runner_cost_selected_hash_join_filter_materialization_penalty",
+	      Time(event.runner_cost.selected_hash_join_filter_materialization_penalty)},
+	     {"runner_cost_source_contract_scan_penalty", Time(event.runner_cost.source_contract_scan_penalty)},
 	     {"runner_cost_full_pipeline_work", Time(event.runner_cost.full_pipeline_work)},
 	     {"runner_cost_stateful_protocol_penalty", Time(event.runner_cost.stateful_protocol_penalty)},
 	     {"runner_cost_saved_work_per_batch", Time(event.runner_cost.saved_work_per_batch)},
@@ -413,8 +421,10 @@ static void AddExecutionRegionEvent(QueryProfileResult &row, const ExecutionRegi
 	     {"hash_join_probe_layout", NullableText(event.jit_runtime.hash_join_probe_layout)},
 	     {"jit_runtime_path_counts",
 	      NullableText(RenderExecutionRegionCounterBreakdown(event.jit_runtime.runtime_path_counts))},
-	     {"jit_materialization_boundary_counts",
-	      NullableText(RenderExecutionRegionCounterBreakdown(event.jit_runtime.materialization_boundary_counts))},
+	     {"jit_runtime_proof_counts",
+	      NullableText(RenderExecutionRegionCounterBreakdown(event.jit_runtime.runtime_proof_counts))},
+	     {"jit_runtime_delegation_counts",
+	      NullableText(RenderExecutionRegionCounterBreakdown(event.jit_runtime.runtime_delegation_counts))},
 	     {"runtime_time_us", Time(event.runtime_time_us)},
 	     {"source_runtime_time_us", Time(event.source_contract_runtime_time_us)},
 	     {"sink_next_batch_runtime_time_us", Time(event.sink_next_batch_runtime_time_us)},
@@ -547,9 +557,12 @@ static void RenderExecutionRegionRuntimePipelineToStream(std::ostream &ss,
 		   << " jit_runtime_path_counts="
 		   << ExecutionRegionProfileToken(RenderExecutionRegionCounterBreakdown(event.jit_runtime.runtime_path_counts),
 		                                  128)
-		   << " jit_materialization_boundary_counts="
+		   << " jit_runtime_proof_counts="
+		   << ExecutionRegionProfileToken(RenderExecutionRegionCounterBreakdown(event.jit_runtime.runtime_proof_counts),
+		                                  128)
+		   << " jit_runtime_delegation_counts="
 		   << ExecutionRegionProfileToken(
-		          RenderExecutionRegionCounterBreakdown(event.jit_runtime.materialization_boundary_counts), 128)
+		          RenderExecutionRegionCounterBreakdown(event.jit_runtime.runtime_delegation_counts), 128)
 		   << " lazy_codegen_us=" << event.jit_runtime.lazy_codegen.codegen_time_us
 		   << " lazy_machine_codegen_us=" << event.jit_runtime.lazy_codegen.machine_codegen_time_us
 		   << " lazy_code_size=" << event.jit_runtime.lazy_codegen.code_size

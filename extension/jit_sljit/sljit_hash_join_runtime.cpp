@@ -160,18 +160,17 @@ SljitValidateRegularHashJoinProbeExecutionLayout(const SljitNativeHashJoinProbeP
 	return table_layout_kind;
 }
 
-static constexpr const char *SLJIT_GENERATED_REGULAR_HASH_JOIN_PROBE_STAGE = "generated_regular_probe_function";
-static constexpr const char *SLJIT_GENERATED_REGULAR_HASH_JOIN_PROBE_BLOOM_STAGE =
-    "generated_regular_probe_bloom_function";
+static constexpr const char *SLJIT_GENERATED_REGULAR_HASH_JOIN_PROBE_STAGE = "regular_probe.generated";
+static constexpr const char *SLJIT_GENERATED_REGULAR_HASH_JOIN_PROBE_BLOOM_STAGE = "regular_probe.generated.bloom";
 static constexpr const char *SLJIT_GENERATED_REGULAR_HASH_JOIN_MARK_MATCH_SELECTION_PROBE_STAGE =
-    "generated_regular_probe_mark_match_selection_function";
+    "regular_probe.generated.mark_match_selection";
 static constexpr const char *SLJIT_GENERATED_REGULAR_HASH_JOIN_MARK_MATCH_SELECTION_BLOOM_PROBE_STAGE =
-    "generated_regular_probe_mark_match_selection_bloom_function";
+    "regular_probe.generated.mark_match_selection.bloom";
 static constexpr const char *SLJIT_GENERATED_REGULAR_HASH_JOIN_MARK_NONMATCH_SELECTION_PROBE_STAGE =
-    "generated_regular_probe_mark_nonmatch_selection_function";
+    "regular_probe.generated.mark_nonmatch_selection";
 static constexpr const char *SLJIT_GENERATED_REGULAR_HASH_JOIN_MARK_NONMATCH_SELECTION_BLOOM_PROBE_STAGE =
-    "generated_regular_probe_mark_nonmatch_selection_bloom_function";
-static constexpr const char *SLJIT_GENERATED_PERFECT_HASH_JOIN_PROBE_STAGE = "generated_perfect_probe_function";
+    "regular_probe.generated.mark_nonmatch_selection.bloom";
+static constexpr const char *SLJIT_GENERATED_PERFECT_HASH_JOIN_PROBE_STAGE = "perfect_probe.generated";
 
 const char *SljitGeneratedRegularHashJoinProbeStage() {
 	return SLJIT_GENERATED_REGULAR_HASH_JOIN_PROBE_STAGE;

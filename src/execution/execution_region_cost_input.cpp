@@ -20,6 +20,7 @@
 #include "duckdb/parallel/pipeline.hpp"
 #include "duckdb/planner/expression/bound_aggregate_expression.hpp"
 #include "duckdb/planner/expression/bound_function_expression.hpp"
+#include "duckdb/planner/filter/expression_filter.hpp"
 #include "duckdb/planner/expression_iterator.hpp"
 #include "duckdb/common/vector_size.hpp"
 
@@ -63,12 +64,15 @@ enum class ExecutionRegionStageCostWorkKind : uint8_t {
 struct ExecutionRegionStageCostFact {
 	ExecutionRegionStageCostWorkKind work_kind = ExecutionRegionStageCostWorkKind::NONE;
 	bool is_filter = false;
+	bool is_projection = false;
 	bool may_anchor_compiled_body = false;
 };
 
 struct ExecutionRegionCostFacts {
 	idx_t generated_stage_count = 0;
 	idx_t generated_backend_stage_count = 0;
+	idx_t generated_grouped_aggregate_stage_count = 0;
+	idx_t native_grouped_state_address_lookup_count = 0;
 	idx_t materialization_elision_count = 0;
 	idx_t native_join_stage_count = 0;
 	idx_t native_hash_join_build_sink_count = 0;
@@ -100,6 +104,7 @@ static void RemoveExecutionRegionGeneratedAggregateUpdateNativeCost(ExecutionReg
 	if (!ExecutionRegionSinkKindIsGroupedAggregateUpdate(traits.sink_kind)) {
 		return;
 	}
+	facts.generated_grouped_aggregate_stage_count += generated_update_count;
 	const auto grouped_decrement = MinValue(facts.native_grouped_aggregate_stage_count, generated_update_count);
 	facts.native_grouped_aggregate_stage_count -= grouped_decrement;
 }
@@ -111,6 +116,9 @@ static ExecutionRegionStageCostFact GetExecutionRegionStageCostFact(const Execut
 	}
 	if (stage.kind == ExecutionRegionStageKind::FILTER || stage.kind == ExecutionRegionStageKind::SOURCE_FILTER) {
 		result.is_filter = true;
+	}
+	if (stage.kind == ExecutionRegionStageKind::PROJECTION) {
+		result.is_projection = true;
 	}
 	if (stage.execution == ExecutionRegionStageExecutionKind::GENERATED_IR) {
 		result.work_kind = ExecutionRegionStageCostWorkKind::GENERATED;
@@ -185,14 +193,11 @@ ClassifyExecutionRegionNativeProtocol(const ExecutionRegionCandidateTraits &trai
 }
 
 static void AccumulateExecutionRegionCostFact(const ExecutionRegionStageCostFact &fact,
-                                              ExecutionRegionCostFacts &result, bool &has_filter) {
+                                              ExecutionRegionCostFacts &result, bool &has_filter,
+                                              bool &has_projection) {
 	result.may_anchor_compiled_body = result.may_anchor_compiled_body || fact.may_anchor_compiled_body;
 	has_filter = has_filter || fact.is_filter;
-	const bool native_aggregate = fact.work_kind == ExecutionRegionStageCostWorkKind::NATIVE_GROUPED_AGGREGATE ||
-	                              fact.work_kind == ExecutionRegionStageCostWorkKind::NATIVE_UNGROUPED_AGGREGATE;
-	if (has_filter && result.materialization_elision_count == 0 && native_aggregate) {
-		result.materialization_elision_count = 1;
-	}
+	has_projection = has_projection || fact.is_projection;
 	switch (fact.work_kind) {
 	case ExecutionRegionStageCostWorkKind::GENERATED:
 		result.generated_stage_count++;
@@ -215,10 +220,18 @@ static void AccumulateExecutionRegionCostFact(const ExecutionRegionStageCostFact
 static ExecutionRegionCostFacts BuildExecutionRegionCostFacts(const ExecutionRegionCandidate &candidate) {
 	ExecutionRegionCostFacts result;
 	bool has_filter = false;
+	bool has_projection = false;
 	for (auto &stage : candidate.stage_plan.stages) {
-		AccumulateExecutionRegionCostFact(GetExecutionRegionStageCostFact(stage), result, has_filter);
+		AccumulateExecutionRegionCostFact(GetExecutionRegionStageCostFact(stage), result, has_filter, has_projection);
 	}
 	RemoveExecutionRegionGeneratedAggregateUpdateNativeCost(result, candidate.traits);
+	const bool has_selected_view_materialization =
+	    candidate.traits.selected_hash_join_filter_materialization_count > 0 ||
+	    candidate.traits.selected_hash_join_view_materialization_count > 0;
+	if ((has_filter || has_projection) && candidate.traits.generated_aggregate_update_count > 0 &&
+	    !has_selected_view_materialization) {
+		result.materialization_elision_count = 1;
+	}
 	result.generated_stage_count += result.native_join_stage_count;
 	result.generated_backend_stage_count += result.native_join_stage_count;
 	result.generated_backend_stage_count += candidate.traits.mark_probe_filter_count;
@@ -226,6 +239,14 @@ static ExecutionRegionCostFacts BuildExecutionRegionCostFacts(const ExecutionReg
 	result.generated_stage_count += candidate.traits.generated_aggregate_lookup_count;
 	result.generated_backend_stage_count += candidate.traits.generated_aggregate_update_count;
 	result.generated_backend_stage_count += candidate.traits.generated_aggregate_lookup_count;
+	if (ExecutionRegionSinkKindIsGroupedAggregateUpdate(candidate.traits.sink_kind)) {
+		result.generated_grouped_aggregate_stage_count += candidate.traits.generated_aggregate_lookup_count;
+	}
+	if (candidate.traits.sink_kind == ExecutionRegionSinkKind::HASH_AGGREGATE_UPDATE &&
+	    candidate.traits.generated_aggregate_update_count > candidate.traits.generated_aggregate_lookup_count) {
+		result.native_grouped_state_address_lookup_count +=
+		    candidate.traits.generated_aggregate_update_count - candidate.traits.generated_aggregate_lookup_count;
+	}
 	result.may_anchor_compiled_body = result.may_anchor_compiled_body ||
 	                                  candidate.traits.generated_aggregate_update_count > 0 ||
 	                                  candidate.traits.generated_aggregate_lookup_count > 0;
@@ -237,38 +258,23 @@ static ExecutionRegionCostFacts BuildExecutionRegionCostFacts(const ExecutionReg
 	return result;
 }
 
-static idx_t ExecutionRegionMarkProbeMaterializedTailCostCount(const ExecutionRegionCandidateTraits &traits) {
-	return traits.mark_probe_materialized_tail_count * STANDARD_VECTOR_SIZE;
-}
-
-static idx_t ExecutionRegionUnfusedMarkFilterAggregateCount(const ExecutionRegionCandidateTraits &traits) {
-	if (traits.mark_probe_filter_count == 0 || traits.generated_aggregate_update_count == 0) {
-		return 0;
-	}
-	if (!ExecutionRegionSinkKindIsGroupedAggregateUpdate(traits.sink_kind)) {
-		return 0;
-	}
-	return MinValue(traits.mark_probe_filter_count, traits.generated_aggregate_update_count);
-}
-
 PhysicalRunnerCostInput BuildExecutionRegionCandidateCostInput(const ExecutionRegionCandidate &candidate) {
 	auto cost_facts = BuildExecutionRegionCostFacts(candidate);
 	PhysicalRunnerCostInput input;
 	input.input_scope = PhysicalRunnerCostInputScope::EXECUTION_REGION_CANDIDATE;
 	input.estimated_cardinality = candidate.estimated_cardinality;
 	input.expression_cost = candidate.traits.expression_cost;
+	input.source_contract_input_cardinality = candidate.traits.source_contract_input_cardinality;
+	input.source_contract_output_cardinality_unknown = candidate.traits.source_contract_output_cardinality_unknown;
 	input.generated_stage_count = cost_facts.generated_stage_count;
 	input.generated_backend_stage_count = cost_facts.generated_backend_stage_count;
+	input.generated_grouped_aggregate_stage_count = cost_facts.generated_grouped_aggregate_stage_count;
+	input.native_grouped_state_address_lookup_count = cost_facts.native_grouped_state_address_lookup_count;
 	input.materialization_elision_count = cost_facts.materialization_elision_count;
 	input.full_pipeline =
 	    ExecutionRegionABIIsFullPipeline(candidate.contract.abi) && cost_facts.may_anchor_compiled_body;
-	if (candidate.traits.sink_kind == ExecutionRegionSinkKind::MATERIALIZATION) {
-		input.materialization_source_append_count = candidate.traits.reference_varchar_projection_count;
-		input.materialization_source_append_is_structural = input.materialization_source_append_count > 0;
-	} else {
-		input.materialization_source_append_count = ExecutionRegionMarkProbeMaterializedTailCostCount(candidate.traits);
-	}
-	input.unfused_mark_filter_aggregate_count = ExecutionRegionUnfusedMarkFilterAggregateCount(candidate.traits);
+	input.selected_hash_join_filter_materialization_count =
+	    candidate.traits.selected_hash_join_filter_materialization_count;
 	input.native_join_stage_count = cost_facts.native_join_stage_count;
 	input.native_hash_join_build_sink_count = cost_facts.native_hash_join_build_sink_count;
 	input.native_aggregate_stage_count = cost_facts.native_aggregate_stage_count;
@@ -286,18 +292,25 @@ PhysicalRunnerCostInput BuildExecutionRegionCandidateCostInput(const ExecutionRe
 	auto input = BuildExecutionRegionCandidateCostInput(candidate);
 	input.uses_scan_filters = lowering_plan.UsesScanFilters();
 	auto &backend_facts = lowering_plan.capability_facts;
+	input.native_grouped_state_address_lookup_count = backend_facts.backend_native_state_address_lookup_count;
 	const bool weak_stateful_grouped_update =
 	    candidate.traits.source_kind == ExecutionRegionSourceKind::STATEFUL_OPERATOR &&
 	    candidate.traits.source_execution == ExecutionRegionSourceExecutionKind::SOURCE_CONTRACT &&
 	    candidate.traits.sink_kind == ExecutionRegionSinkKind::HASH_AGGREGATE_UPDATE &&
 	    input.materialization_elision_count == 0 && backend_facts.backend_hash_aggregate_update_count > 0 &&
 	    backend_facts.backend_native_state_address_lookup_count > 0;
-	if (backend_facts.backend_weak_accelerated_work_count == 0 && !weak_stateful_grouped_update) {
+	if (backend_facts.backend_weak_accelerated_work_count == 0) {
+		return input;
+	}
+	if (weak_stateful_grouped_update) {
 		return input;
 	}
 	input.generated_stage_count = 0;
 	input.generated_backend_stage_count = 0;
+	input.generated_grouped_aggregate_stage_count = 0;
+	input.native_grouped_state_address_lookup_count = 0;
 	input.materialization_elision_count = 0;
+	input.selected_hash_join_filter_materialization_count = 0;
 	input.generated_work_class = PhysicalRunnerGeneratedWorkClass::NONE;
 	input.has_accelerated_work = false;
 	return input;
@@ -310,10 +323,9 @@ BuildExecutionRegionPipelineCandidateUpperBoundCostInput(const PhysicalRunnerCos
 	const auto native_backend_stage_count = input.native_join_stage_count + input.native_aggregate_stage_count;
 	input.generated_stage_count += native_backend_stage_count;
 	input.generated_backend_stage_count += native_backend_stage_count;
+	input.generated_grouped_aggregate_stage_count += input.native_grouped_aggregate_stage_count;
+	input.native_grouped_state_address_lookup_count += input.native_grouped_aggregate_stage_count;
 	input.native_sort_stage_count = 0;
-	if (!input.materialization_source_append_is_structural) {
-		input.materialization_source_append_count = 0;
-	}
 	input.has_accelerated_work = input.has_accelerated_work || input.generated_stage_count > 0 ||
 	                             input.generated_backend_stage_count > 0 || input.materialization_elision_count > 0 ||
 	                             input.full_pipeline;
@@ -448,9 +460,6 @@ static void AccumulateExecutionRegionPhysicalProjectionTraits(const Expression &
 	traits.expression_cost += expression_cost;
 	if (ExecutionRegionPhysicalExpressionIsReference(expression)) {
 		traits.reference_projection_count++;
-		if (expression.GetReturnType().id() == LogicalTypeId::VARCHAR) {
-			traits.reference_varchar_projection_count++;
-		}
 		return;
 	}
 	if (expression_cost == 0) {
@@ -472,6 +481,21 @@ static void AccumulateExecutionRegionPhysicalProjectionListTraits(const vector<u
 	}
 }
 
+static bool ExecutionRegionPhysicalTableFilterCanUseGeneratedSourceStage(const TableFilter &table_filter,
+                                                                         const LogicalType &source_type,
+                                                                         idx_t filter_index) {
+	if (table_filter.filter_type != TableFilterType::EXPRESSION_FILTER) {
+		return false;
+	}
+	auto &expression_filter = table_filter.Cast<ExpressionFilter>();
+	auto expression =
+	    TryLowerExecutionExpression(*expression_filter.expr, filter_index, ExecutionExpressionIRMode::COMPACT);
+	if (!expression) {
+		return false;
+	}
+	return GetExecutionRegionGeneratedSourceFilterCapability(*expression, source_type).can_generate;
+}
+
 static bool TryAccumulateExecutionRegionPhysicalScanCost(const PhysicalOperator &op,
                                                          ExecutionRegionPhysicalPipelineCostFacts &facts) {
 	if (op.type != PhysicalOperatorType::TABLE_SCAN) {
@@ -482,22 +506,37 @@ static bool TryAccumulateExecutionRegionPhysicalScanCost(const PhysicalOperator 
 	    scan.function.filter_pushdown && scan.dynamic_filters && scan.dynamic_filters->HasFilters();
 	if (has_pushed_dynamic_filters) {
 		facts.cost_input.uses_scan_filters = true;
+		facts.cost_input.source_contract_output_cardinality_unknown = true;
 	}
 	if (!scan.table_filters || !scan.table_filters->HasFilters()) {
 		return true;
 	}
+	auto contract = scan.GetExecutionContract();
+	auto &source_input_types = contract.source.table_scan_contract.source_contract_input_types;
 	idx_t filter_cost = 0;
 	idx_t filter_count = 0;
+	idx_t generated_filter_count = 0;
 	for (auto &filter : *scan.table_filters) {
-		filter_cost += DuckDBCostModel::FilterCost(filter.Filter());
+		auto filter_idx = filter.GetIndex().GetIndex();
+		const bool can_generate =
+		    filter_idx < source_input_types.size() &&
+		    ExecutionRegionPhysicalTableFilterCanUseGeneratedSourceStage(filter.Filter(), source_input_types[filter_idx],
+		                                                                 filter_count);
+		if (can_generate) {
+			filter_cost += DuckDBCostModel::FilterCost(filter.Filter());
+			generated_filter_count++;
+		}
 		filter_count++;
 	}
 	facts.traits.source_filter_count += filter_count;
-	facts.traits.source_filter_expression_count += filter_count;
-	if (scan.function.filter_pushdown) {
+	facts.traits.source_filter_expression_count += generated_filter_count;
+	const bool generated_source_filters = generated_filter_count == filter_count;
+	if (scan.function.filter_pushdown && !generated_source_filters) {
 		facts.cost_input.uses_scan_filters = true;
 	}
-	AddExecutionRegionGeneratedExpressionWork(facts.cost_input, filter_cost);
+	if (generated_source_filters) {
+		AddExecutionRegionGeneratedExpressionWork(facts.cost_input, filter_cost);
+	}
 	return true;
 }
 
@@ -541,6 +580,39 @@ static void AccumulateExecutionRegionPhysicalSourceTraits(const PhysicalOperator
 
 static bool ExecutionRegionPhysicalOperatorIsStatefulSource(const PhysicalOperator &op) {
 	return ExecutionRegionPhysicalSourceKind(op.type) == ExecutionRegionSourceKind::STATEFUL_OPERATOR;
+}
+
+static bool ExecutionRegionPhysicalSourceUsesReadySourceContract(const ExecutionContract &contract) {
+	return contract.source.execution == ExecutionRegionSourceExecutionKind::SOURCE_CONTRACT &&
+	       contract.source.source_contract.status == ExecutionRegionSourceContractStatus::READY;
+}
+
+static idx_t ExecutionRegionPhysicalSourceContractInputCardinality(const PhysicalOperator &source,
+                                                                   const ExecutionContract &contract) {
+	if (contract.source.estimated_source_cardinality > 0) {
+		return contract.source.estimated_source_cardinality;
+	}
+	return source.estimated_cardinality;
+}
+
+static void AccumulateExecutionRegionPhysicalSourceContractCost(const PhysicalOperator &source,
+                                                                ExecutionRegionPhysicalPipelineCostFacts &facts) {
+	auto contract = source.GetExecutionContract();
+	if (!ExecutionRegionPhysicalSourceUsesReadySourceContract(contract)) {
+		return;
+	}
+	auto &cost_input = facts.cost_input;
+	auto source_cardinality = ExecutionRegionPhysicalSourceContractInputCardinality(source, contract);
+	if (source_cardinality > 0) {
+		cost_input.source_contract_input_cardinality = source_cardinality;
+	}
+	if (contract.source.dynamic_filters) {
+		cost_input.source_contract_output_cardinality_unknown = true;
+	}
+	if (contract.source.kind == ExecutionRegionSourceKind::STATEFUL_OPERATOR &&
+	    !contract.source.estimated_source_cardinality_exact) {
+		cost_input.source_contract_output_cardinality_unknown = true;
+	}
 }
 
 static void AccumulateExecutionRegionPhysicalSinkTraits(const PhysicalOperator &sink,
@@ -590,6 +662,7 @@ static bool TryAccumulateExecutionRegionPhysicalOperatorCost(const PhysicalOpera
 	input.estimated_cardinality = MaxValue(input.estimated_cardinality, op.estimated_cardinality);
 	if (slot == ExecutionRegionPhysicalPipelineSlot::SOURCE) {
 		AccumulateExecutionRegionPhysicalSourceTraits(op, traits);
+		AccumulateExecutionRegionPhysicalSourceContractCost(op, facts);
 	}
 	if (slot == ExecutionRegionPhysicalPipelineSlot::SINK) {
 		AccumulateExecutionRegionPhysicalSinkTraits(op, traits);
@@ -657,8 +730,12 @@ static bool TryAccumulateExecutionRegionPhysicalOperatorCost(const PhysicalOpera
 			return true;
 		}
 		AddExecutionRegionGeneratedBodyStage(input);
+		input.generated_grouped_aggregate_stage_count++;
 		if (ExecutionRegionAggregateLookupGeneratesBody(sink)) {
 			AddExecutionRegionGeneratedBodyStage(input);
+			input.generated_grouped_aggregate_stage_count++;
+		} else {
+			input.native_grouped_state_address_lookup_count++;
 		}
 		facts.generated_aggregate_update_count++;
 		return true;
@@ -682,8 +759,12 @@ static bool TryAccumulateExecutionRegionPhysicalOperatorCost(const PhysicalOpera
 			return true;
 		}
 		AddExecutionRegionGeneratedBodyStage(input);
+		input.generated_grouped_aggregate_stage_count++;
 		if (ExecutionRegionAggregateLookupGeneratesBody(sink)) {
 			AddExecutionRegionGeneratedBodyStage(input);
+			input.generated_grouped_aggregate_stage_count++;
+		} else {
+			input.native_grouped_state_address_lookup_count++;
 		}
 		facts.generated_aggregate_update_count++;
 		return true;
@@ -742,12 +823,6 @@ static bool TryAccumulateExecutionRegionPhysicalOperatorCost(const PhysicalOpera
 	}
 }
 
-static bool ExecutionRegionPhysicalSourceUsesReadySourceContract(const PhysicalOperator &source) {
-	auto contract = source.GetExecutionContract();
-	return contract.source.execution == ExecutionRegionSourceExecutionKind::SOURCE_CONTRACT &&
-	       contract.source.source_contract.status == ExecutionRegionSourceContractStatus::READY;
-}
-
 static void FinalizeExecutionRegionPhysicalPipelineCostInput(Pipeline &pipeline,
                                                              ExecutionRegionPhysicalPipelineCostFacts &facts) {
 	auto &cost_input = facts.cost_input;
@@ -765,7 +840,8 @@ static void FinalizeExecutionRegionPhysicalPipelineCostInput(Pipeline &pipeline,
 	    cost_input.generated_work_class == PhysicalRunnerGeneratedWorkClass::PROJECTION_GLUE &&
 	    facts.traits.source_kind == ExecutionRegionSourceKind::STATEFUL_OPERATOR) {
 		D_ASSERT(source);
-		if (ExecutionRegionPhysicalSourceUsesReadySourceContract(*source)) {
+		auto contract = source->GetExecutionContract();
+		if (ExecutionRegionPhysicalSourceUsesReadySourceContract(contract)) {
 			facts.traits.source_execution = ExecutionRegionSourceExecutionKind::SOURCE_CONTRACT;
 			cost_input.native_protocol_class = ClassifyExecutionRegionNativeProtocol(facts.traits);
 		}
@@ -775,18 +851,11 @@ static void FinalizeExecutionRegionPhysicalPipelineCostInput(Pipeline &pipeline,
 	    facts.traits.sink_kind == ExecutionRegionSinkKind::SORT) {
 		cost_input.native_sort_stage_count = 0;
 	}
-	if ((cost_input.native_aggregate_stage_count > 0 || facts.generated_aggregate_update_count > 0) &&
+	if (facts.generated_aggregate_update_count > 0 &&
 	    (facts.traits.filter_count > 0 || facts.traits.source_filter_expression_count > 0)) {
 		cost_input.materialization_elision_count = 1;
 	}
 	cost_input.source_filter_count = facts.traits.source_filter_count;
-	cost_input.materialization_source_append_count =
-	    facts.traits.sink_kind == ExecutionRegionSinkKind::MATERIALIZATION
-	        ? facts.traits.reference_varchar_projection_count
-	        : 0;
-	cost_input.materialization_source_append_is_structural =
-	    facts.traits.sink_kind == ExecutionRegionSinkKind::MATERIALIZATION &&
-	    cost_input.materialization_source_append_count > 0;
 	cost_input.native_hash_join_build_sink_count =
 	    facts.traits.sink_kind == ExecutionRegionSinkKind::HASH_JOIN_BUILD ? 1 : 0;
 	cost_input.has_accelerated_work =

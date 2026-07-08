@@ -8,52 +8,11 @@
 
 #pragma once
 
+#include "sljit_count_star_projection_input.hpp"
 #include "sljit_grouped_aggregate_update_primitive.hpp"
 #include "sljit_projected_input_grouped_aggregate_descriptor.hpp"
 
 namespace duckdb {
-
-static bool SljitCountStarFixedWidthProjectionInputSupported(const SljitExecutableRegionOp &projection_op) {
-	if (projection_op.kind != SljitNativeRegionOpKind::PROJECTION || projection_op.projections.size() != 1 ||
-	    projection_op.output_types.size() != 1) {
-		return false;
-	}
-	idx_t source_index;
-	auto &projection = projection_op.projections[0].plan;
-	return TryReadProjectionSourceReferenceIndex(projection, source_index) &&
-	       source_index < projection_op.input_types.size() && projection.return_type == projection_op.output_types[0] &&
-	       projection_op.input_types[source_index] == projection_op.output_types[0] &&
-	       TypeIsConstantSize(projection_op.output_types[0].InternalType());
-}
-
-static bool SljitCountStarStringCompressedProjectionInputSupported(const SljitExecutableRegionOp &projection_op) {
-	if (projection_op.kind != SljitNativeRegionOpKind::PROJECTION || projection_op.projections.size() != 1 ||
-	    projection_op.output_types.size() != 1) {
-		return false;
-	}
-	auto &projection = projection_op.projections[0].plan;
-	if (projection.kind != SljitNativeRegionExpressionKind::STRING_COMPRESS ||
-	    projection.return_type != projection_op.output_types[0] ||
-	    projection.source_index >= projection_op.input_types.size() ||
-	    projection_op.input_types[projection.source_index].id() != LogicalTypeId::VARCHAR) {
-		return false;
-	}
-	switch (projection_op.output_types[0].InternalType()) {
-	case PhysicalType::UINT8:
-	case PhysicalType::UINT16:
-	case PhysicalType::UINT32:
-	case PhysicalType::UINT64:
-	case PhysicalType::UINT128:
-		return projection.string_compress_target_size == GetTypeIdSize(projection_op.output_types[0].InternalType());
-	default:
-		return false;
-	}
-}
-
-static bool SljitCountStarProjectionInputSupported(const SljitExecutableRegionOp &projection_op) {
-	return SljitCountStarFixedWidthProjectionInputSupported(projection_op) ||
-	       SljitCountStarStringCompressedProjectionInputSupported(projection_op);
-}
 
 static bool SljitTryBuildCountStarGroupProjection(const SljitExecutableRegionOp &projection_op,
                                                   const SljitExecutableRegionOp &aggregate_op,
@@ -113,6 +72,48 @@ static bool SljitTryBindProjectedCountStarGroupedAggregateStrategy(SljitGroupedA
 	return true;
 }
 
+static bool SljitTryBindProjectedDistinctKeySinkStrategy(SljitGroupedAggregateUpdatePrimitive &primitive,
+                                                         SljitExecutableRegionOp &semantic_projection,
+                                                         const SljitExecutableRegionOp &aggregate_op) {
+	if (!SljitGroupedAggregateUpdateCanUseDistinctKeySink(aggregate_op)) {
+		return false;
+	}
+	vector<LogicalType> expected_input_types;
+	if (!SljitTryBuildDistinctKeySinkInputTypes(aggregate_op.aggregate_update.plan.sink_info, expected_input_types)) {
+		return false;
+	}
+	if (semantic_projection.kind != SljitNativeRegionOpKind::PROJECTION ||
+	    semantic_projection.output_types != expected_input_types) {
+		return false;
+	}
+	auto projected_input = make_shared_ptr<SljitExecutableRegionOp>();
+	*projected_input = std::move(semantic_projection);
+	primitive.strategy = SljitGroupedAggregateUpdateStrategyKind::DISTINCT_KEY_SINK;
+	primitive.projected_distinct_key_input_projection = std::move(projected_input);
+	return true;
+}
+
+static bool
+SljitTryBindSingleProjectionDistinctKeySinkStrategy(SljitGroupedAggregateUpdatePrimitive &primitive,
+                                                    const vector<SljitExecutableRegionOp> &ops,
+                                                    idx_t first_projection_idx, idx_t final_projection_idx) {
+	if (first_projection_idx != final_projection_idx || final_projection_idx >= ops.size()) {
+		return false;
+	}
+	auto &projection_op = ops[final_projection_idx];
+	auto &aggregate_op = ops[primitive.aggregate_idx];
+	vector<LogicalType> expected_input_types;
+	if (!SljitGroupedAggregateUpdateCanUseDistinctKeySink(aggregate_op) ||
+	    !SljitTryBuildDistinctKeySinkInputTypes(aggregate_op.aggregate_update.plan.sink_info, expected_input_types) ||
+	    projection_op.kind != SljitNativeRegionOpKind::PROJECTION ||
+	    projection_op.output_types != expected_input_types) {
+		return false;
+	}
+	primitive.strategy = SljitGroupedAggregateUpdateStrategyKind::DISTINCT_KEY_SINK;
+	primitive.projected_distinct_key_input_projection.reset();
+	return true;
+}
+
 static bool SljitTryBindProjectedDirectPrimitivePayloadUpdateStrategy(SljitGroupedAggregateUpdatePrimitive &primitive,
                                                                       const vector<SljitExecutableRegionOp> &ops,
                                                                       idx_t first_projection_idx,
@@ -121,7 +122,7 @@ static bool SljitTryBindProjectedDirectPrimitivePayloadUpdateStrategy(SljitGroup
 	if (!SljitTryBuildProjectedInputGroupedAggregateDescriptor(
 	        ops, first_projection_idx, final_projection_idx, primitive.aggregate_idx,
 	        optional_ptr<SljitProjectedInputGroupedAggregateDescriptor>(descriptor.get())) ||
-	    !SljitProjectedInputGroupedAggregateCanUseCompactInput(*descriptor)) {
+	    !SljitProjectedInputGroupedAggregateCanUseSourceInput(*descriptor)) {
 		return false;
 	}
 	primitive.strategy = SljitGroupedAggregateUpdateStrategyKind::DIRECT_PRIMITIVE_PAYLOAD_UPDATE;
@@ -134,13 +135,21 @@ static bool SljitTryBindProjectedInputGroupedAggregateUpdateStrategy(const vecto
                                                                      idx_t final_projection_idx,
                                                                      bool allow_direct_primitive_payload_update,
                                                                      SljitGroupedAggregateUpdatePrimitive &primitive) {
-	if (!SljitCanBindProjectionChainPrimitive(ops, first_projection_idx, final_projection_idx) ||
-	    !SljitCanBindGroupedAggregateUpdatePrimitive(ops, primitive.aggregate_idx) ||
-	    SljitChooseGroupedAggregateUpdateStrategy(ops[primitive.aggregate_idx]) ==
-	        SljitGroupedAggregateUpdateStrategyKind::INVALID) {
+	if (!SljitCanBindProjectionChainPrimitive(ops, first_projection_idx, final_projection_idx)) {
+		return false;
+	}
+	if (!SljitCanBindGroupedAggregateUpdatePrimitive(ops, primitive.aggregate_idx)) {
+		return false;
+	}
+	if (SljitChooseGroupedAggregateUpdateStrategy(ops[primitive.aggregate_idx]) ==
+	    SljitGroupedAggregateUpdateStrategyKind::INVALID) {
 		return false;
 	}
 	SljitInitializeProjectedInputGroupedAggregatePrimitive(primitive, first_projection_idx, final_projection_idx);
+	if (SljitTryBindSingleProjectionDistinctKeySinkStrategy(primitive, ops, first_projection_idx,
+	                                                        final_projection_idx)) {
+		return true;
+	}
 	auto semantic_projection = make_uniq<SljitExecutableRegionOp>();
 	if (!SljitBuildProjectionChainComposedProjection(ops, first_projection_idx, final_projection_idx,
 	                                                 *semantic_projection)) {
@@ -149,6 +158,12 @@ static bool SljitTryBindProjectedInputGroupedAggregateUpdateStrategy(const vecto
 	if (SljitTryBindProjectedCountStarGroupedAggregateStrategy(primitive, *semantic_projection,
 	                                                           ops[primitive.aggregate_idx])) {
 		return true;
+	}
+	if (SljitTryBindProjectedDistinctKeySinkStrategy(primitive, *semantic_projection, ops[primitive.aggregate_idx])) {
+		return true;
+	}
+	if (SljitAggregateSinkHasDistinctState(ops[primitive.aggregate_idx].aggregate_update.plan.sink_info)) {
+		return false;
 	}
 	if (allow_direct_primitive_payload_update) {
 		return SljitTryBindProjectedDirectPrimitivePayloadUpdateStrategy(primitive, ops, first_projection_idx,
@@ -217,7 +232,25 @@ static bool SljitCanBindGroupedAggregateUpdatePrimitive(const vector<SljitExecut
 			       SljitCountStarProjectionInputSupported(*primitive.projected_count_star_group_projection);
 		case SljitGroupedAggregateUpdateStrategyKind::DIRECT_PRIMITIVE_PAYLOAD_UPDATE:
 			return primitive.projected_direct_update && primitive.projected_direct_update->Ready() &&
-			       SljitProjectedInputGroupedAggregateCanUseCompactInput(*primitive.projected_direct_update);
+			       SljitProjectedInputGroupedAggregateCanUseSourceInput(*primitive.projected_direct_update);
+		case SljitGroupedAggregateUpdateStrategyKind::DISTINCT_KEY_SINK: {
+			if (!SljitGroupedAggregateUpdateCanUseDistinctKeySink(ops[primitive.aggregate_idx])) {
+				return false;
+			}
+			vector<LogicalType> expected_input_types;
+			if (!SljitTryBuildDistinctKeySinkInputTypes(
+			        ops[primitive.aggregate_idx].aggregate_update.plan.sink_info, expected_input_types)) {
+				return false;
+			}
+			if (primitive.projected_distinct_key_input_projection) {
+				return primitive.projected_distinct_key_input_projection->kind == SljitNativeRegionOpKind::PROJECTION &&
+				       primitive.projected_distinct_key_input_projection->output_types == expected_input_types;
+			}
+			return primitive.first_projection_idx == primitive.final_projection_idx &&
+			       primitive.final_projection_idx < ops.size() &&
+			       ops[primitive.final_projection_idx].kind == SljitNativeRegionOpKind::PROJECTION &&
+			       ops[primitive.final_projection_idx].output_types == expected_input_types;
+		}
 		case SljitGroupedAggregateUpdateStrategyKind::FILTERED_PRIMITIVE_PAYLOAD_UPDATE:
 			return false;
 		case SljitGroupedAggregateUpdateStrategyKind::INVALID:

@@ -43,15 +43,15 @@ public:
 	SljitDirectProjectionStageTimers(ExecutionRegionRuntime &runtime, idx_t projection_idx,
 	                                 SljitNativeRegionOpKind projection_kind, idx_t sink_idx,
 	                                 SljitNativeRegionOpKind sink_kind, const SljitDirectProjectionCandidate &candidate)
-	    : prepare(runtime, sink_idx, sink_kind, "direct_append_prepare"),
-	      floating_source_prepare(runtime, projection_idx, projection_kind, "direct_append_floating_source_prepare"),
-	      floating_run(runtime, projection_idx, projection_kind, "direct_append_floating_run"),
-	      floating_generated(runtime, projection_idx, projection_kind, "direct_materialize_generated"),
-	      floating_stats(runtime, projection_idx, projection_kind, "direct_append_floating_finish_stats"),
-	      fixed_generated(runtime, projection_idx, projection_kind, "direct_materialize_fixed_generated"),
-	      fixed_fused_generated(runtime, projection_idx, projection_kind, "direct_materialize_fixed_fused_generated"),
-	      fixed_stats(runtime, projection_idx, projection_kind, "direct_append_fixed_stats"),
-	      commit(runtime, sink_idx, sink_kind, "direct_append_commit") {
+	    : prepare(runtime, sink_idx, sink_kind, "append_prepare"),
+	      floating_source_prepare(runtime, projection_idx, projection_kind, "append_floating_source_prepare"),
+	      floating_run(runtime, projection_idx, projection_kind, "append_floating_run"),
+	      floating_generated(runtime, projection_idx, projection_kind, "materialize_generated"),
+	      floating_stats(runtime, projection_idx, projection_kind, "append_floating_finish_stats"),
+	      fixed_generated(runtime, projection_idx, projection_kind, "materialize_fixed_generated"),
+	      fixed_fused_generated(runtime, projection_idx, projection_kind, "materialize_fixed_fused_generated"),
+	      fixed_stats(runtime, projection_idx, projection_kind, "append_fixed_stats"),
+	      commit(runtime, sink_idx, sink_kind, "append_commit") {
 		switch (candidate.kind) {
 		case SljitDirectProjectionMaterializerKind::FLOATING_FUSED:
 			generated = &floating_generated;
@@ -136,7 +136,7 @@ static bool SljitTrySelectDirectProjectionCandidate(ExecutionRegionRuntime &runt
 		if (!PrepareFlatFusedFloatingProjectionSources(op, input, nullptr, input.size(), projection_scratch, false)) {
 			return false;
 		}
-		RecordSljitRegionStageRuntime(runtime, op_idx, op.kind, "direct_append_floating_preflight",
+		RecordSljitRegionStageRuntime(runtime, op_idx, op.kind, "append_floating_preflight",
 		                              preflight_stage_start);
 		candidate.kind = SljitDirectProjectionMaterializerKind::FLOATING_FUSED;
 		candidate.stats_mode = op.flat_fused_floating_projection_plan.stats_mode;
@@ -149,7 +149,7 @@ static bool SljitTrySelectDirectProjectionCandidate(ExecutionRegionRuntime &runt
 		if (!SljitTryDirectMaterializeFixedProjection(op, input, nullptr, source_cache, &projection_scratch.fused)) {
 			return false;
 		}
-		RecordSljitRegionStageRuntime(runtime, op_idx, op.kind, "direct_append_fixed_preflight", preflight_stage_start);
+		RecordSljitRegionStageRuntime(runtime, op_idx, op.kind, "append_fixed_preflight", preflight_stage_start);
 		candidate.kind = SljitDirectProjectionMaterializerKind::FIXED_FUSED;
 		candidate.stats_mode = SljitDirectProjectionStatsMode::POSTPASS_FIXED_STATS;
 		candidate.shape_changed_message =
@@ -157,7 +157,7 @@ static bool SljitTrySelectDirectProjectionCandidate(ExecutionRegionRuntime &runt
 		return true;
 	}
 	if (SljitTryDirectMaterializeFixedProjection(op, input, nullptr, source_cache)) {
-		RecordSljitRegionStageRuntime(runtime, op_idx, op.kind, "direct_append_fixed_preflight", preflight_stage_start);
+		RecordSljitRegionStageRuntime(runtime, op_idx, op.kind, "append_fixed_preflight", preflight_stage_start);
 		candidate.kind = SljitDirectProjectionMaterializerKind::FIXED_SCALAR;
 		candidate.stats_mode = SljitDirectProjectionStatsMode::POSTPASS_FIXED_STATS;
 		candidate.shape_changed_message =

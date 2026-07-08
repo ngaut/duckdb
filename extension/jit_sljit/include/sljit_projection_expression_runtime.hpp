@@ -16,7 +16,9 @@
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/types/hugeint.hpp"
 #include "duckdb/common/vector/flat_vector.hpp"
+#include "duckdb/common/vector/string_vector.hpp"
 #include "duckdb/common/vector/unified_vector_format.hpp"
+#include "duckdb/function/scalar/string_common.hpp"
 
 namespace duckdb {
 
@@ -153,6 +155,31 @@ static void SljitExecuteProjectionExpression(SljitExecutableRegionExpression &ex
 		FlatVector::SetSize(result, count_t(count));
 		return;
 	}
+	if (plan.kind == SljitNativeRegionExpressionKind::STRING_SUBSTRING) {
+		UnifiedVectorFormat source_format;
+		input.data[plan.source_index].ToUnifiedFormat(source_format);
+		result.SetVectorType(VectorType::FLAT_VECTOR);
+		auto &result_validity = FlatVector::ValidityMutable(result);
+		result_validity.Reset(count);
+		result_validity.EnsureWritable();
+		result_validity.SetAllValid(count);
+		StringVector::AddHeapReference(result, input.data[plan.source_index]);
+
+		auto source_data = UnifiedVectorFormat::GetData<string_t>(source_format);
+		auto result_data = FlatVector::GetDataMutable<string_t>(result);
+		const auto length = plan.string_substring_length;
+		for (idx_t row_idx = 0; row_idx < count; row_idx++) {
+			auto input_idx = execute_sel ? execute_sel->get_index(row_idx) : row_idx;
+			auto source_idx = source_format.sel ? source_format.sel->get_index(input_idx) : input_idx;
+			if (!source_format.validity.RowIsValid(source_idx)) {
+				result_validity.SetInvalid(row_idx);
+				continue;
+			}
+			result_data[row_idx] = SubstringPrefixUnicode(source_data[source_idx], length);
+		}
+		FlatVector::SetSize(result, count_t(count));
+		return;
+	}
 	D_ASSERT(plan.kind == SljitNativeRegionExpressionKind::INTEGER_BINARY_CONSTANT ||
 	         plan.kind == SljitNativeRegionExpressionKind::CONSTANT ||
 	         plan.kind == SljitNativeRegionExpressionKind::INTEGER_BINARY_REFERENCES ||
@@ -171,6 +198,7 @@ static void SljitExecuteProjectionExpression(SljitExecutableRegionExpression &ex
 	         plan.kind == SljitNativeRegionExpressionKind::INTEGRAL_DECOMPRESS ||
 	         plan.kind == SljitNativeRegionExpressionKind::STRING_COMPRESS ||
 	         plan.kind == SljitNativeRegionExpressionKind::STRING_DECOMPRESS ||
+	         plan.kind == SljitNativeRegionExpressionKind::STRING_SUBSTRING ||
 	         plan.kind == SljitNativeRegionExpressionKind::DATE_YEAR ||
 	         plan.kind == SljitNativeRegionExpressionKind::ERROR_GUARDED_REFERENCE ||
 	         plan.kind == SljitNativeRegionExpressionKind::NULL_CHECK);

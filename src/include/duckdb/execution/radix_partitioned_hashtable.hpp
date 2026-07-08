@@ -51,6 +51,9 @@ public:
 
 	void Sink(ExecutionContext &context, DataChunk &chunk, OperatorSinkInput &input, DataChunk &aggregate_input_chunk,
 	          const unsafe_vector<idx_t> &filter) const;
+	void SinkSelected(ExecutionContext &context, DataChunk &chunk, OperatorSinkInput &input,
+	                  DataChunk &aggregate_input_chunk, const unsafe_vector<idx_t> &filter,
+	                  const SelectionVector &selection, idx_t count) const;
 	void ResolveStateAddresses(ExecutionContext &context, DataChunk &chunk, OperatorSinkInput &input,
 	                           Vector &addresses_out,
 	                           optional_ptr<ExecutionOperatorStageRecorder> recorder = nullptr) const;
@@ -73,7 +76,8 @@ public:
 	                                 const ExecutionRegionSinkInfo &sink_info,
 	                                 const vector<const ExecutionPrimitiveAggregateUpdateLane *> &lanes,
 	                                 optional_ptr<ExecutionOperatorStageRecorder> recorder = nullptr,
-	                                 bool finish = true) const;
+	                                 bool finish = true,
+	                                 optional_ptr<const ExecutionDenseGroupDomain> dense_domain = nullptr) const;
 	bool TryUpdateNewGroupsWithSelectedStateAddresses(
 	    ExecutionContext &context, DataChunk &chunk, OperatorSinkInput &input, const ExecutionRegionSinkInfo &sink_info,
 	    ExecutionGroupedAggregateStateSelectedAddressUpdateFunction update_function, void *update_state,
@@ -111,11 +115,19 @@ public:
 	                                          ExecutionGroupedAggregateStateAddressUpdateFunction update_function,
 	                                          void *update_state,
 	                                          optional_ptr<ExecutionOperatorStageRecorder> recorder = nullptr,
-	                                          bool finish = true) const;
+	                                          bool finish = true,
+	                                          optional_ptr<const ExecutionDenseGroupDomain> dense_domain = nullptr) const;
+	bool TryAppendNewGroupKeysWithStateAddresses(
+	    ExecutionContext &context, DataChunk &groups, OperatorSinkInput &input,
+	    const ExecutionRegionSinkInfo &sink_info,
+	    ExecutionGroupedAggregateStateAddressUpdateFunction update_function, void *update_state,
+	    optional_ptr<ExecutionOperatorStageRecorder> recorder = nullptr, bool finish = true,
+	    optional_ptr<const ExecutionDenseGroupDomain> dense_domain = nullptr) const;
 	bool TryResolveNewGroupAddresses(ExecutionContext &context, DataChunk &chunk, OperatorSinkInput &input,
 	                                 const ExecutionRegionSinkInfo &sink_info, Vector &addresses_out,
 	                                 optional_ptr<ExecutionOperatorStageRecorder> recorder = nullptr,
 	                                 bool finish = true) const;
+	void RecordDirectStateAddressUpdates(ExecutionContext &context, OperatorSinkInput &input, idx_t count) const;
 	void FinishStateUpdates(ExecutionContext &context, OperatorSinkInput &input,
 	                        optional_ptr<TupleDataRowLocationRemap> row_location_remap = nullptr) const;
 	void Combine(ExecutionContext &context, GlobalSinkState &gstate, LocalSinkState &lstate,
@@ -144,6 +156,8 @@ public:
 private:
 	void SetGroupingValues();
 	void PopulateGroupChunk(DataChunk &group_chunk, DataChunk &input_chunk) const;
+	void PopulateGroupChunk(DataChunk &group_chunk, DataChunk &input_chunk, const SelectionVector &selection,
+	                        idx_t count) const;
 
 	shared_ptr<TupleDataLayout> layout_ptr;
 };

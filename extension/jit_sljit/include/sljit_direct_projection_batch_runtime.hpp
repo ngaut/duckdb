@@ -112,12 +112,9 @@ static void SljitRecordDirectProjectionBatchMaterialization(ExecutionRegionRunti
                                                             bool remapped_projection, idx_t count,
                                                             std::chrono::steady_clock::time_point stage_start) {
 	RecordSljitRegionStageRuntime(runtime, projection_idx, projection_op.kind,
-	                              remapped_projection ? "post_join_direct_remap_batch_projection"
-	                                                  : "post_join_direct_batch_projection",
+	                              remapped_projection ? "post_join_remap_batch_projection"
+	                                                  : "post_join_batch_projection",
 	                              stage_start);
-	RecordSljitRegionMaterializationBoundary(
-	    runtime, projection_op.kind,
-	    remapped_projection ? "direct_remap_post_join_batch_projection" : "direct_post_join_batch_projection", count);
 }
 
 static void SljitHashDirectProjectionBatch(ExecutionRegionRuntime &runtime, idx_t projection_idx,
@@ -126,8 +123,8 @@ static void SljitHashDirectProjectionBatch(ExecutionRegionRuntime &runtime, idx_
 	auto hash_start = SljitRegionStageStart(runtime);
 	batch.Hash(hashes);
 	RecordSljitRegionStageRuntime(runtime, projection_idx, projection_op.kind,
-	                              remapped_projection ? "post_join_direct_remap_batch_projection_hash"
-	                                                  : "post_join_direct_batch_projection_hash",
+	                              remapped_projection ? "post_join_remap_batch_projection_hash"
+	                                                  : "post_join_batch_projection_hash",
 	                              hash_start);
 }
 

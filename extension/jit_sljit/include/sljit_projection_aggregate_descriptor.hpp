@@ -10,6 +10,7 @@
 
 #include "sljit_post_join_projection_strategy.hpp"
 #include "sljit_projection_aggregate_ungrouped_descriptor.hpp"
+#include "sljit_projection_perfect_hash_aggregate_descriptor.hpp"
 
 namespace duckdb {
 
@@ -36,6 +37,10 @@ static bool SljitTryBuildPreparedProjectionAggregateDescriptorFromProjection(
 	if (aggregate_op.aggregate_update.plan.sink_info.kind == ExecutionRegionSinkKind::UNGROUPED_AGGREGATE_UPDATE) {
 		return SljitTryBuildProjectionUngroupedAggregateDescriptor(binding, aggregate_op, descriptor,
 		                                                           producer_projection_op);
+	}
+	if (aggregate_op.aggregate_update.plan.sink_info.kind == ExecutionRegionSinkKind::PERFECT_HASH_AGGREGATE_UPDATE) {
+		return SljitTryBuildProjectionPerfectHashAggregateDescriptor(binding, aggregate_op, descriptor,
+		                                                             semantic_to_projection);
 	}
 	return SljitTryBuildProjectionRowPointerAggregateDescriptor(binding, aggregate_op, descriptor,
 	                                                            semantic_to_projection, producer_projection_op);
@@ -97,7 +102,8 @@ static bool SljitTryBuildProjectionAggregateRequiredOutputs(const SljitExecutabl
 	}
 	auto &aggregate_update = aggregate_op.aggregate_update;
 	auto &sink_info = aggregate_update.plan.sink_info;
-	if (sink_info.kind != ExecutionRegionSinkKind::HASH_AGGREGATE_UPDATE ||
+	if ((sink_info.kind != ExecutionRegionSinkKind::HASH_AGGREGATE_UPDATE &&
+	     sink_info.kind != ExecutionRegionSinkKind::PERFECT_HASH_AGGREGATE_UPDATE) ||
 	    projection_op.projections.size() != projection_op.output_types.size()) {
 		return false;
 	}
@@ -232,9 +238,7 @@ static bool SljitBuildKeyDomainFitsSignedTarget(PhysicalType source_type, Physic
 static void SljitApplyJoinProjectionGroupCastProofs(vector<ExecutionRowPointerGroupKeySource> &group_sources,
                                                     bool source_key0_range_fits_int32) {
 	for (auto &source : group_sources) {
-		if (source.cast_kind != ExecutionRowPointerGroupKeyCastKind::INT64_TO_INT32 &&
-		    source.cast_kind != ExecutionRowPointerGroupKeyCastKind::INT64_TO_INT16 &&
-		    source.cast_kind != ExecutionRowPointerGroupKeyCastKind::INT32_TO_INT8) {
+		if (!SljitGroupKeyNarrowingIntegralCast(source.cast_kind)) {
 			source.unchecked_integral_cast = false;
 			continue;
 		}
@@ -277,26 +281,10 @@ static SljitExecutableRegionExpression SljitIdentityProjectionExpression(idx_t s
 	return expression;
 }
 
-static bool SljitTryBuildSelectedJoinAggregateInputDescriptor(vector<SljitExecutableRegionOp> &ops,
-                                                              SljitRegionExecutionScratch &scratch, idx_t hash_join_idx,
-                                                              idx_t aggregate_idx,
-                                                              SljitJoinProjectionAggregateDescriptor &descriptor) {
-	if (descriptor.Built()) {
-		return descriptor.Ready();
-	}
-	descriptor.ClearBuiltState();
-	if (aggregate_idx >= ops.size() || !scratch.HasOperatorBinding(hash_join_idx)) {
-		return descriptor.Block("operator_bounds");
-	}
-	auto &binding = scratch.OperatorBinding(hash_join_idx).hash_join_probe;
-	const bool regular_hash_join = binding.layout_kind == ExecutionHashJoinProbeLayoutKind::REGULAR_HASH_TABLE;
-	const bool perfect_hash_join = binding.layout_kind == ExecutionHashJoinProbeLayoutKind::PERFECT_HASH_TABLE;
-	if (!binding.ready || (!regular_hash_join && !perfect_hash_join) || (regular_hash_join && !binding.hash_table) ||
-	    (perfect_hash_join && !binding.perfect_layout.ready) ||
-	    binding.output_mode != ExecutionHashJoinProbeOutputMode::MATCHED_PROBE_AND_BUILD) {
-		return descriptor.Block("hash_join_shape");
-	}
-	auto &aggregate_update = ops[aggregate_idx].aggregate_update;
+static bool SljitTryBuildSelectedJoinIdentityProjection(const ExecutionHashJoinProbeBinding &binding,
+                                                        const SljitExecutableRegionOp &aggregate_op,
+                                                        SljitJoinProjectionAggregateDescriptor &descriptor) {
+	auto &aggregate_update = aggregate_op.aggregate_update;
 	if (aggregate_update.plan.input_types.size() != binding.output_types.size()) {
 		return descriptor.Block("input_shape");
 	}
@@ -315,21 +303,74 @@ static bool SljitTryBuildSelectedJoinAggregateInputDescriptor(vector<SljitExecut
 		    SljitIdentityProjectionExpression(input_idx, identity_projection->output_types[input_idx]));
 	}
 	descriptor.OwnProjection(DConstants::INVALID_INDEX, std::move(*identity_projection));
-	if (aggregate_update.plan.sink_info.kind == ExecutionRegionSinkKind::UNGROUPED_AGGREGATE_UPDATE) {
-		return SljitTryBuildProjectionUngroupedAggregateDescriptor(binding, ops[aggregate_idx], descriptor, nullptr);
-	}
-	auto &projection_op = descriptor.Projection();
-	for (idx_t input_idx = 0; input_idx < projection_op.output_types.size(); input_idx++) {
-		SljitJoinProjectionAggregateInputSource source;
-		source.kind = SljitJoinProjectionAggregateInputKind::PROJECTION_OUTPUT;
-		source.projection_idx = input_idx;
-		source.type = projection_op.output_types[input_idx];
-		descriptor.input_sources.push_back(std::move(source));
-		descriptor.output_to_projection.push_back(input_idx);
-		descriptor.input_types.push_back(projection_op.output_types[input_idx]);
-	}
-	descriptor.MarkReady();
 	return true;
+}
+
+static bool SljitTryBuildMappedSelectedJoinAggregateInputDescriptor(vector<SljitExecutableRegionOp> &ops,
+                                                                    SljitRegionExecutionScratch &scratch,
+                                                                    idx_t hash_join_idx, idx_t aggregate_idx,
+                                                                    SljitJoinProjectionAggregateDescriptor &descriptor,
+                                                                    optional_ptr<const vector<idx_t>> output_column_map,
+                                                                    idx_t output_projection_idx) {
+	if (!output_column_map) {
+		return descriptor.Block("producer_output_map");
+	}
+	if (aggregate_idx >= ops.size() || !scratch.HasOperatorBinding(hash_join_idx)) {
+		return descriptor.Block("operator_bounds");
+	}
+	auto &binding = scratch.OperatorBinding(hash_join_idx).hash_join_probe;
+	const bool regular_hash_join = binding.layout_kind == ExecutionHashJoinProbeLayoutKind::REGULAR_HASH_TABLE;
+	const bool perfect_hash_join = binding.layout_kind == ExecutionHashJoinProbeLayoutKind::PERFECT_HASH_TABLE;
+	if (!binding.ready || (!regular_hash_join && !perfect_hash_join) || (regular_hash_join && !binding.hash_table) ||
+	    (perfect_hash_join && !binding.perfect_layout.ready) ||
+	    binding.output_mode != ExecutionHashJoinProbeOutputMode::MATCHED_PROBE_AND_BUILD) {
+		return descriptor.Block("hash_join_shape");
+	}
+	if (!SljitTryBuildSelectedJoinIdentityProjection(binding, ops[aggregate_idx], descriptor)) {
+		return false;
+	}
+	if (output_projection_idx == DConstants::INVALID_INDEX || output_projection_idx >= ops.size() ||
+	    ops[output_projection_idx].kind != SljitNativeRegionOpKind::PROJECTION) {
+		return descriptor.Block("producer_projection");
+	}
+	auto producer_projection_op = optional_ptr<SljitExecutableRegionOp>(&ops[output_projection_idx]);
+	return SljitTryBuildPreparedProjectionAggregateDescriptorFromProjection(
+	    ops, scratch, hash_join_idx, aggregate_idx, descriptor, nullptr, producer_projection_op);
+}
+
+static bool SljitTryBuildSelectedJoinAggregateInputDescriptor(
+    vector<SljitExecutableRegionOp> &ops, SljitRegionExecutionScratch &scratch, idx_t hash_join_idx,
+    idx_t aggregate_idx, SljitJoinProjectionAggregateDescriptor &descriptor,
+    optional_ptr<const vector<idx_t>> output_column_map = nullptr,
+    idx_t output_projection_idx = DConstants::INVALID_INDEX) {
+	if (descriptor.Built()) {
+		if (!descriptor.ProducerOutputColumnMapMatches(output_column_map)) {
+			return descriptor.Block("producer_shape_changed");
+		}
+		return descriptor.Ready();
+	}
+	descriptor.ClearBuiltState();
+	descriptor.SetProducerOutputColumnMap(output_column_map);
+	if (output_column_map) {
+		return SljitTryBuildMappedSelectedJoinAggregateInputDescriptor(
+		    ops, scratch, hash_join_idx, aggregate_idx, descriptor, output_column_map, output_projection_idx);
+	}
+	if (aggregate_idx >= ops.size() || !scratch.HasOperatorBinding(hash_join_idx)) {
+		return descriptor.Block("operator_bounds");
+	}
+	auto &binding = scratch.OperatorBinding(hash_join_idx).hash_join_probe;
+	const bool regular_hash_join = binding.layout_kind == ExecutionHashJoinProbeLayoutKind::REGULAR_HASH_TABLE;
+	const bool perfect_hash_join = binding.layout_kind == ExecutionHashJoinProbeLayoutKind::PERFECT_HASH_TABLE;
+	if (!binding.ready || (!regular_hash_join && !perfect_hash_join) || (regular_hash_join && !binding.hash_table) ||
+	    (perfect_hash_join && !binding.perfect_layout.ready) ||
+	    binding.output_mode != ExecutionHashJoinProbeOutputMode::MATCHED_PROBE_AND_BUILD) {
+		return descriptor.Block("hash_join_shape");
+	}
+	if (!SljitTryBuildSelectedJoinIdentityProjection(binding, ops[aggregate_idx], descriptor)) {
+		return false;
+	}
+	return SljitTryBuildPreparedProjectionAggregateDescriptorFromProjection(ops, scratch, hash_join_idx, aggregate_idx,
+	                                                                        descriptor);
 }
 
 } // namespace duckdb

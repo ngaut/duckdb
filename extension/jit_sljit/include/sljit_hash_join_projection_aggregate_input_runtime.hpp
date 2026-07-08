@@ -39,6 +39,9 @@ static bool SljitTryReferenceHashJoinProjectionAggregateInputsToChunk(
 		idx_t input_col = DConstants::INVALID_INDEX;
 		LogicalType input_type;
 		switch (source.kind) {
+		case SljitJoinProjectionAggregateInputKind::UNUSED:
+			input_columns.push_back(DConstants::INVALID_INDEX);
+			continue;
 		case SljitJoinProjectionAggregateInputKind::PROJECTION_OUTPUT: {
 			const auto projected_idx = source.projection_idx;
 			if (projected_idx >= projection_op.projections.size() ||
@@ -77,12 +80,15 @@ static bool SljitTryReferenceHashJoinProjectionAggregateInputsToChunk(
 
 	const auto stage_start = SljitRegionStageStart(runtime);
 	for (idx_t output_idx = 0; output_idx < input_columns.size(); output_idx++) {
+		if (input_columns[output_idx] == DConstants::INVALID_INDEX) {
+			continue;
+		}
 		result.data[output_idx].Slice(join_input.data[input_columns[output_idx]], match_selection, count);
 	}
 	result.SetChildCardinality(count);
 	RecordSljitRegionStageRuntime(runtime, projection_idx, projection_op.kind,
-	                              "post_join_direct_reference_payload_view", stage_start);
-	RecordSljitRegionRuntimePath(runtime, projection_op.kind, "direct_reference_payload_view", count);
+	                              "projection_aggregate_reference_payload_view", stage_start);
+	RecordSljitRegionRuntimePath(runtime, projection_op.kind, "projection_aggregate.reference_payload_view", count);
 	return true;
 }
 
@@ -132,6 +138,9 @@ static bool SljitTryMaterializeHashJoinProjectionAggregateInputsToChunk(
 	for (idx_t output_idx = 0; output_idx < input_sources.size(); output_idx++) {
 		auto &source = input_sources[output_idx];
 		auto &target = result.data[output_idx];
+		if (source.kind == SljitJoinProjectionAggregateInputKind::UNUSED) {
+			continue;
+		}
 		if (source.kind == SljitJoinProjectionAggregateInputKind::HASH_JOIN_LHS_INPUT) {
 			const auto input_col = source.input_idx;
 			if (input_col >= join_input.ColumnCount()) {
@@ -243,7 +252,7 @@ static bool SljitTryMaterializeHashJoinProjectionAggregateInputsToChunk(
 				return block("computed_hash_join_shape");
 			}
 			if (used_row_pointer_generated_source) {
-				RecordSljitRegionRuntimePath(runtime, projection_op.kind, "direct_rhs_row_pointer_generated_projection",
+				RecordSljitRegionRuntimePath(runtime, projection_op.kind, "rhs_row_pointer_generated_projection",
 				                             count);
 			}
 		} else {
@@ -258,21 +267,18 @@ static bool SljitTryMaterializeHashJoinProjectionAggregateInputsToChunk(
 
 	result.SetChildCardinality(current_size + count);
 	if (referenced_direct_input) {
-		RecordSljitRegionStageRuntime(runtime, projection_idx, projection_op.kind,
-		                              "post_join_direct_reference_payload_view", stage_start);
-		RecordSljitRegionRuntimePath(runtime, projection_op.kind, "direct_reference_payload_view", count);
+			RecordSljitRegionStageRuntime(runtime, projection_idx, projection_op.kind,
+			                              "projection_aggregate_reference_payload_view", stage_start);
+			RecordSljitRegionRuntimePath(runtime, projection_op.kind, "projection_aggregate.reference_payload_view",
+			                             count);
 	}
 	if (materialized_reference) {
 		RecordSljitRegionStageRuntime(runtime, projection_idx, projection_op.kind,
-		                              "post_join_direct_reference_projection", stage_start);
-		RecordSljitRegionMaterializationBoundary(runtime, projection_op.kind, "direct_post_join_reference_projection",
-		                                         count);
+		                              "post_join_reference_projection", stage_start);
 	}
 	if (materialized_computed) {
 		RecordSljitRegionStageRuntime(runtime, projection_idx, projection_op.kind,
-		                              "post_join_direct_computed_projection", stage_start);
-		RecordSljitRegionMaterializationBoundary(runtime, projection_op.kind, "direct_post_join_computed_projection",
-		                                         count);
+		                              "post_join_computed_projection", stage_start);
 	}
 	return true;
 }

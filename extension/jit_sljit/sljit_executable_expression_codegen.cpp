@@ -207,6 +207,12 @@ bool SljitCompilePreparedExecutableRegionExpression(SljitExecutableRegionExpress
 		}
 		expr.code = BuildSljitNativeStringDecompress(semantic.string_decompress_source_size, expr.function, error);
 		return expr.code != nullptr;
+	case SljitNativeRegionExpressionKind::STRING_SUBSTRING:
+		if (require_boolean) {
+			error = "SLJIT string substring cannot lower as a predicate";
+			return false;
+		}
+		return true;
 	case SljitNativeRegionExpressionKind::INTEGRAL_COMPRESS:
 		if (require_boolean) {
 			error = "SLJIT integral compression cannot lower as a predicate";

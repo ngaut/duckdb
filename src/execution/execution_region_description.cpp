@@ -879,6 +879,9 @@ static string DescribeExecutionRegionCandidateTraits(const ExecutionRegionCandid
 	result += ",source_kind=" + string(ExecutionRegionSourceKindToString(traits.source_kind));
 	result += ",source_execution=" + string(ExecutionRegionSourceExecutionKindToString(traits.source_execution));
 	result += ",sink_kind=" + string(ExecutionRegionSinkKindToString(traits.sink_kind));
+	result += ",source_contract_input_cardinality=" + std::to_string(traits.source_contract_input_cardinality);
+	result += ",source_contract_output_cardinality_unknown=" +
+	          ExecutionRegionBool(traits.source_contract_output_cardinality_unknown);
 	result += ",source_filters=" + std::to_string(traits.source_filter_count);
 	result += ",source_filter_expressions=" + std::to_string(traits.source_filter_expression_count);
 	result += ",source_conjunction_filters=" + std::to_string(traits.source_conjunction_filter_count);
@@ -888,13 +891,15 @@ static string DescribeExecutionRegionCandidateTraits(const ExecutionRegionCandid
 	result += ",hash_join_operators=" + std::to_string(traits.hash_join_operator_count);
 	result += ",aggregates=" + std::to_string(traits.aggregate_count);
 	result += ",mark_probe_filters=" + std::to_string(traits.mark_probe_filter_count);
-	result += ",mark_probe_materialized_tails=" + std::to_string(traits.mark_probe_materialized_tail_count);
+	result += ",selected_hash_join_filter_materializations=" +
+	          std::to_string(traits.selected_hash_join_filter_materialization_count);
+	result += ",selected_hash_join_view_materializations=" +
+	          std::to_string(traits.selected_hash_join_view_materialization_count);
 	result += ",generated_aggregate_updates=" + std::to_string(traits.generated_aggregate_update_count);
 	result += ",generated_aggregate_lookups=" + std::to_string(traits.generated_aggregate_lookup_count);
 	result += ",arithmetic_projections=" + std::to_string(traits.arithmetic_projection_count);
 	result += ",high_cost_projections=" + std::to_string(traits.high_cost_projection_count);
 	result += ",reference_projections=" + std::to_string(traits.reference_projection_count);
-	result += ",reference_varchar_projections=" + std::to_string(traits.reference_varchar_projection_count);
 	result += ",predicate_expressions=" + std::to_string(traits.predicate_expression_count);
 	result += ",control_expressions=" + std::to_string(traits.control_expression_count);
 	result += ",expression_cost=" + std::to_string(traits.expression_cost);

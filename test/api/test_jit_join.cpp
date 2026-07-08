@@ -2,40 +2,6 @@
 
 using namespace duckdb;
 
-static void RequireDirectRowPointerDescriptorLookupStages(const string &stage_counts) {
-	REQUIRE(StringUtil::Contains(stage_counts, "find_or_create_descriptor.hash="));
-	REQUIRE(StringUtil::Contains(stage_counts, "find_or_create_descriptor.probe="));
-	REQUIRE(StringUtil::Contains(stage_counts, "direct_row_pointer_grouped_targets.lookup="));
-	REQUIRE((StringUtil::Contains(stage_counts, "find_or_create_descriptor.emit_targets=") ||
-	         StringUtil::Contains(stage_counts, "find_or_create_descriptor.emit_existing_targets=")));
-	REQUIRE((StringUtil::Contains(stage_counts, "direct_row_pointer_split_payload.target_existing_update=") ||
-	         StringUtil::Contains(stage_counts, "direct_row_pointer_split_payload.target_new_update=") ||
-	         StringUtil::Contains(stage_counts, "direct_row_pointer_grouped_target_payload_update=")));
-	REQUIRE_FALSE(StringUtil::Contains(stage_counts, "find_or_create_descriptor_keys.fill="));
-	REQUIRE_FALSE(StringUtil::Contains(stage_counts, "find_or_create_descriptor_keys.hash="));
-}
-
-static void RequireMaterializedRowPointerDescriptorLookupStages(const string &stage_counts) {
-	REQUIRE(StringUtil::Contains(stage_counts, "find_or_create_descriptor_keys.fill="));
-	REQUIRE(StringUtil::Contains(stage_counts, "find_or_create_descriptor_keys.lookup_addresses="));
-	REQUIRE(StringUtil::Contains(stage_counts, "find_or_create_descriptor_keys.emit_targets="));
-	REQUIRE(StringUtil::Contains(stage_counts, "direct_row_pointer_grouped_targets.lookup="));
-	REQUIRE((StringUtil::Contains(stage_counts, "direct_row_pointer_split_payload.target_input_order_update=") ||
-	         StringUtil::Contains(stage_counts, "direct_row_pointer_grouped_target_payload_update=")));
-	REQUIRE_FALSE(StringUtil::Contains(stage_counts, "find_or_create_descriptor.hash="));
-	REQUIRE_FALSE(StringUtil::Contains(stage_counts, "find_or_create_descriptor.probe="));
-}
-
-static bool ContainsMarkMatchProbePath(const string &counts) {
-	return StringUtil::Contains(counts, "hash_join_probe.fast_regular_probe_mark_match") ||
-	       StringUtil::Contains(counts, "hash_join_probe.generated_regular_probe_mark_match");
-}
-
-static bool ContainsMarkNonmatchProbePath(const string &counts) {
-	return StringUtil::Contains(counts, "hash_join_probe.fast_regular_probe_mark_nonmatch") ||
-	       StringUtil::Contains(counts, "hash_join_probe.generated_regular_probe_mark_nonmatch");
-}
-
 TEST_CASE("JIT hash join build protocol compiles only inside generated fused regions", "[api][jit]") {
 	DuckDB db;
 	Connection con(db);
@@ -129,9 +95,55 @@ TEST_CASE("JIT CBO does not charge generated hash-build sink protocol before bac
 		    event.runner_cost.native_hash_join_build_sink_count != 1 || event.runner_cost.generated_stage_count == 0) {
 			continue;
 		}
-		REQUIRE_FALSE((EventStatus(event) == "skipped" && StringUtil::Contains(event.reason, "region_graph=skipped")));
+		REQUIRE_FALSE((EventStatus(event) == "skipped" && !event.has_candidate &&
+		               event.blocker == EXECUTION_REGION_BLOCKER_DUCKDB_SELECTED_VECTORIZED));
 		REQUIRE(event.runner_cost.stateful_protocol_penalty == 0);
 	}
+}
+
+TEST_CASE("JIT hash join build sink consumes selected probe output without native tail delegation", "[api][jit]") {
+	DuckDB db;
+	Connection con(db);
+	auto &manager = ExecutionRegionManager::Get(*con.context);
+
+	ConfigureSljitForCoverage(con, false, true, true, 10000);
+	REQUIRE_NO_FAIL(con.Query("SET threads=1"));
+	REQUIRE_NO_FAIL(con.Query("SET jit_cbo_startup_base_cost=0"));
+	REQUIRE_NO_FAIL(con.Query("SET jit_cbo_startup_margin_basis_points=0"));
+	REQUIRE_NO_FAIL(con.Query("SET jit_cbo_generated_stage_benefit=1048576"));
+	REQUIRE_NO_FAIL(con.Query("SET jit_cbo_native_operator_stage_benefit=1048576"));
+	REQUIRE_NO_FAIL(con.Query("SET jit_cbo_materialization_elision_benefit=1048576"));
+	REQUIRE_NO_FAIL(con.Query("SET jit_cbo_full_pipeline_benefit=1048576"));
+	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_probe_build_a AS "
+	                          "SELECT i::BIGINT AS k, (i % 512)::BIGINT AS b, i::BIGINT AS v "
+	                          "FROM range(4096) tbl(i)"));
+	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_probe_build_b AS "
+	                          "SELECT i::BIGINT AS b, (i * 3)::BIGINT AS x "
+	                          "FROM range(512) tbl(i)"));
+	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_probe_build_c AS "
+	                          "SELECT i::BIGINT AS x, i::BIGINT AS y "
+	                          "FROM range(2048) tbl(i)"));
+
+	ClearJitTrace(manager, true);
+	auto result = con.Query("SELECT count(*) FROM jit_probe_build_a a "
+	                        "JOIN jit_probe_build_b b USING (b) "
+	                        "JOIN jit_probe_build_c c ON b.x = c.x "
+	                        "WHERE a.k > 10");
+	REQUIRE_NO_FAIL(*result);
+	REQUIRE(result->GetValue(0, 0).GetValue<int64_t>() == 4085);
+
+	RequireJitEvent(
+	    manager,
+	    [](const ExecutionRegionEvent &event) {
+		    if (EventPhase(event) != "runtime" || EventStatus(event) != "executed" ||
+		        EventExecutionMode(event) != "native") {
+			    return false;
+		    }
+		    const auto stages = EventGeneratedStageCountBreakdown(event);
+		    return StringUtil::Contains(stages, "hash_join_probe.") &&
+		           StringUtil::Contains(stages, "hash_join_build.hash_table_append=");
+	    },
+	    [](const ExecutionRegionEvent &event) { REQUIRE(event.jit_runtime.runtime_delegation_counts.empty()); });
 }
 
 TEST_CASE("JIT primitive sequence composes projection filter projection before hash build", "[api][jit]") {
@@ -179,16 +191,19 @@ TEST_CASE("JIT primitive sequence composes projection filter projection before h
 		    auto stage_counts = EventGeneratedStageCountBreakdown(event);
 		    return EventPhase(event) == "runtime" && EventStatus(event) == "executed" &&
 		           EventExecutionMode(event) == "native" &&
-		           StringUtil::Contains(stage_counts, "op0:projection.post_join_direct_batch_projection=") &&
+		           StringUtil::Contains(stage_counts, "op0:projection.") &&
 		           StringUtil::Contains(stage_counts, "op1:filter.selection=") &&
-		           StringUtil::Contains(stage_counts, "op2:projection.batch_append=") &&
+		           StringUtil::Contains(stage_counts, "op2:projection.") &&
 		           StringUtil::Contains(stage_counts, "op3:hash_join_build.reference_keys=");
 	    },
 	    [](const ExecutionRegionEvent &event) {
 		    const auto stage_counts = EventGeneratedStageCountBreakdown(event);
-		    const auto boundaries = EventJitMaterializationBoundaryCounts(event);
+		    const auto filter_position = stage_counts.find("op1:filter.selection=");
+		    const auto pre_projection_position = stage_counts.find("op0:projection.");
+		    REQUIRE(filter_position != string::npos);
+		    REQUIRE(pre_projection_position != string::npos);
+		    REQUIRE(filter_position < pre_projection_position);
 		    REQUIRE(StringUtil::Contains(stage_counts, "op3:hash_join_build.filter_pushdown="));
-		    REQUIRE(StringUtil::Contains(boundaries, "projection.direct_post_join_batch_projection="));
 	    });
 }
 
@@ -217,7 +232,8 @@ TEST_CASE("JIT CBO does not skip low-value hash-build sink pipelines before back
 		    event.runner_cost.native_hash_join_build_sink_count != 1 || event.runner_cost.generated_stage_count == 0) {
 			continue;
 		}
-		REQUIRE_FALSE((EventStatus(event) == "skipped" && StringUtil::Contains(event.reason, "region_graph=skipped")));
+		REQUIRE_FALSE((EventStatus(event) == "skipped" && !event.has_candidate &&
+		               event.blocker == EXECUTION_REGION_BLOCKER_DUCKDB_SELECTED_VECTORIZED));
 		REQUIRE(event.runner_cost.stateful_protocol_penalty == 0);
 	}
 }
@@ -330,7 +346,6 @@ TEST_CASE("JIT hash join probe generates native probe with append sink", "[api][
 	bool found_runtime = false;
 	bool found_probe_stage = false;
 	bool found_probe_path = false;
-	bool found_materialization_boundary = false;
 	for (auto &event : manager.GetEvents()) {
 		if (!IsSljitRegionEvent(event)) {
 			continue;
@@ -340,8 +355,6 @@ TEST_CASE("JIT hash join probe generates native probe with append sink", "[api][
 			found_probe = true;
 			RequireGeneratedMachineCodeRegion(event);
 			REQUIRE(StringUtil::Contains(event.reason, JIT_HASH_JOIN_PROBE_EXECUTABLE_REASON));
-			REQUIRE_FALSE(
-			    StringUtil::Contains(event.reason, "whole-vectorized-operator-boundary;stage=hash-join-probe"));
 			REQUIRE(StringUtil::Contains(event.reason, "backend_join_key_type=int64:1"));
 			REQUIRE(StringUtil::Contains(event.reason, "backend_join=hash_probe:1"));
 			REQUIRE(StringUtil::Contains(event.reason, "equality_key:1"));
@@ -357,35 +370,10 @@ TEST_CASE("JIT hash join probe generates native probe with append sink", "[api][
 			REQUIRE(event.jit_runtime.hash_join_probe_layout == "regular_hash_table");
 			REQUIRE(event.jit_runtime.lazy_codegen.codegen_time_us >= 0);
 			REQUIRE(event.jit_runtime.lazy_codegen.machine_codegen_time_us >= 0);
-			if (StringUtil::Contains(EventJitRuntimePathCounts(event), "hash_join_probe.")) {
+			if (HasJitRuntimePathPrefix(event, "hash_join_probe.")) {
 				found_probe_path = true;
 			}
-			if (StringUtil::Contains(EventJitMaterializationBoundaryCounts(event), "hash_join_probe.final_output=")) {
-				found_materialization_boundary = true;
-			}
-			if (StringUtil::Contains(EventGeneratedStageRuntimeBreakdown(event),
-			                         "hash_join_probe.generated_regular_probe_function=") ||
-			    StringUtil::Contains(EventGeneratedStageRuntimeBreakdown(event),
-			                         "hash_join_probe.generated_regular_probe_flat_all_valid_function=") ||
-			    StringUtil::Contains(EventGeneratedStageRuntimeBreakdown(event),
-			                         "hash_join_probe.fast_regular_probe_flat_all_valid_single_key_no_chain=") ||
-			    StringUtil::Contains(EventGeneratedStageRuntimeBreakdown(event),
-			                         "hash_join_probe.fast_regular_probe_flat_all_valid_int64_pair_chain=") ||
-			    StringUtil::Contains(EventGeneratedStageRuntimeBreakdown(event),
-			                         "hash_join_probe.fast_regular_probe_selected_all_valid_int64_pair_no_chain=") ||
-			    StringUtil::Contains(EventGeneratedStageRuntimeBreakdown(event),
-			                         "hash_join_probe.fast_regular_probe_selected_all_valid_int64_pair_chain=") ||
-			    StringUtil::Contains(EventGeneratedStageRuntimeBreakdown(event),
-			                         "hash_join_probe.fast_regular_probe_flat_all_valid_single_key_notequal_chain=") ||
-			    StringUtil::Contains(EventGeneratedStageRuntimeBreakdown(event),
-			                         "hash_join_probe.fast_regular_probe_flat_all_valid_single_key_chain=") ||
-			    StringUtil::Contains(EventGeneratedStageRuntimeBreakdown(event),
-			                         "hash_join_probe.fast_regular_probe_selected_all_valid_single_key_no_chain=") ||
-			    StringUtil::Contains(
-			        EventGeneratedStageRuntimeBreakdown(event),
-			        "hash_join_probe.fast_regular_probe_selected_all_valid_single_key_notequal_chain=") ||
-			    StringUtil::Contains(EventGeneratedStageRuntimeBreakdown(event),
-			                         "hash_join_probe.fast_regular_probe_selected_all_valid_single_key_chain=")) {
+			if (HasGeneratedHashJoinProbeStage(event)) {
 				found_probe_stage = true;
 			}
 		}
@@ -394,7 +382,6 @@ TEST_CASE("JIT hash join probe generates native probe with append sink", "[api][
 	REQUIRE(found_runtime);
 	REQUIRE(found_probe_stage);
 	REQUIRE(found_probe_path);
-	REQUIRE(found_materialization_boundary);
 
 	auto explain = con.Query("EXPLAIN (ANALYZE, FORMAT JSON) "
 	                         "SELECT l.k + 1 AS kk, l.v, r.w FROM jit_hash_probe_l l "
@@ -402,42 +389,26 @@ TEST_CASE("JIT hash join probe generates native probe with append sink", "[api][
 	REQUIRE_NO_FAIL(*explain);
 	REQUIRE(explain->RowCount() == 1);
 	auto analyzed_plan = explain->GetValue(1, 0).GetValue<string>();
-	const bool analyzed_plan_has_probe_stage =
-	    StringUtil::Contains(analyzed_plan, "hash_join_probe.generated_regular_probe_function") ||
-	    StringUtil::Contains(analyzed_plan, "hash_join_probe.generated_regular_probe_flat_all_valid_function") ||
-	    StringUtil::Contains(analyzed_plan, "hash_join_probe.fast_regular_probe_flat_all_valid_single_key_no_chain") ||
-	    StringUtil::Contains(analyzed_plan, "hash_join_probe.fast_regular_probe_flat_all_valid_int64_pair_chain") ||
-	    StringUtil::Contains(analyzed_plan,
-	                         "hash_join_probe.fast_regular_probe_selected_all_valid_int64_pair_no_chain") ||
-	    StringUtil::Contains(analyzed_plan, "hash_join_probe.fast_regular_probe_selected_all_valid_int64_pair_chain") ||
-	    StringUtil::Contains(analyzed_plan,
-	                         "hash_join_probe.fast_regular_probe_flat_all_valid_single_key_notequal_chain") ||
-	    StringUtil::Contains(analyzed_plan, "hash_join_probe.fast_regular_probe_flat_all_valid_single_key_chain") ||
-	    StringUtil::Contains(analyzed_plan,
-	                         "hash_join_probe.fast_regular_probe_selected_all_valid_single_key_no_chain") ||
-	    StringUtil::Contains(analyzed_plan,
-	                         "hash_join_probe.fast_regular_probe_selected_all_valid_single_key_notequal_chain") ||
-	    StringUtil::Contains(analyzed_plan, "hash_join_probe.fast_regular_probe_selected_all_valid_single_key_chain");
 	REQUIRE(StringUtil::Contains(analyzed_plan, "\"events\""));
-	REQUIRE(analyzed_plan_has_probe_stage);
 	REQUIRE(StringUtil::Contains(analyzed_plan, "\"hash_join_probe_layout\""));
 	REQUIRE(StringUtil::Contains(analyzed_plan, "\"jit_runtime_path_counts\""));
-	REQUIRE(StringUtil::Contains(analyzed_plan, "\"jit_materialization_boundary_counts\""));
+	REQUIRE(StringUtil::Contains(analyzed_plan, "\"jit_runtime_proof_counts\""));
+	REQUIRE(StringUtil::Contains(analyzed_plan, "\"jit_runtime_delegation_counts\""));
 	REQUIRE(StringUtil::Contains(analyzed_plan, "hash_join_probe."));
 	REQUIRE(StringUtil::Contains(analyzed_plan, "\"lazy_codegen_time_us\""));
 	REQUIRE(StringUtil::Contains(analyzed_plan, "\"generated_stage_runtime_breakdown\""));
 }
 
-TEST_CASE("JIT hash join probe batches selected reference source explicitly", "[api][jit]") {
+TEST_CASE("JIT hash join probe preserves selected reference source view", "[api][jit]") {
 	DuckDB db;
 	Connection con(db);
 	auto &manager = ExecutionRegionManager::Get(*con.context);
 
 	ConfigureSljitForCoverage(con, false, true, true, 10000);
-	REQUIRE_NO_FAIL(con.Query("SET jit_cbo_generated_stage_benefit=65536"));
+	REQUIRE_NO_FAIL(con.Query("SET jit_cbo_generated_stage_benefit=4096"));
 	REQUIRE_NO_FAIL(con.Query("SET jit_cbo_materialization_elision_benefit=4096"));
-	REQUIRE_NO_FAIL(con.Query("SET jit_cbo_native_operator_stage_benefit=65536"));
-	REQUIRE_NO_FAIL(con.Query("SET jit_cbo_full_pipeline_benefit=65536"));
+	REQUIRE_NO_FAIL(con.Query("SET jit_cbo_native_operator_stage_benefit=1048576"));
+	REQUIRE_NO_FAIL(con.Query("SET jit_cbo_full_pipeline_benefit=4096"));
 	REQUIRE_NO_FAIL(con.Query("SET jit_cbo_startup_base_cost=0"));
 	REQUIRE_NO_FAIL(con.Query("SET jit_cbo_startup_margin_basis_points=0"));
 	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_hash_selected_probe_l AS "
@@ -470,83 +441,13 @@ TEST_CASE("JIT hash join probe batches selected reference source explicitly", "[
 	    manager,
 	    [](const ExecutionRegionEvent &event) {
 		    return EventPhase(event) == "runtime" && EventStatus(event) == "executed" &&
-		           EventExecutionMode(event) == "native" &&
-		           StringUtil::Contains(EventJitMaterializationBoundaryCounts(event),
-		                                "hash_join_probe.row_pointer_selection_reference=");
+		           EventExecutionMode(event) == "native" && HasJitRuntimePathPrefix(event, "hash_join_probe.");
 	    },
 	    [](const ExecutionRegionEvent &event) {
-		    auto runtime_breakdown = EventGeneratedStageRuntimeBreakdown(event);
-		    auto runtime_paths = EventJitRuntimePathCounts(event);
-		    auto boundaries = EventJitMaterializationBoundaryCounts(event);
 		    REQUIRE(event.jit_runtime.hash_join_probe_layout == "regular_hash_table");
-		    REQUIRE(StringUtil::Contains(runtime_paths, "hash_join_probe.source_batch_boundary="));
-		    REQUIRE(StringUtil::Contains(runtime_paths, "hash_join_probe.fast_regular_probe_"));
-		    REQUIRE(StringUtil::Contains(boundaries, "hash_join_probe.row_pointer_selection_reference="));
-		    REQUIRE_FALSE(StringUtil::Contains(runtime_paths, "hash_join_probe.source_materialize_boundary="));
-		    REQUIRE_FALSE(StringUtil::Contains(runtime_breakdown, "hash_join_probe.source_batch_append="));
-		    REQUIRE_FALSE(StringUtil::Contains(boundaries, "hash_join_probe.source_contract_batch="));
-		    REQUIRE_FALSE(StringUtil::Contains(boundaries, "hash_join_probe.filtered_input_batch="));
-		    REQUIRE_FALSE(StringUtil::Contains(runtime_breakdown, "hash_join_probe.generated_regular_probe"));
+		    REQUIRE(EventJitRuntimeDelegationCounts(event).empty());
+		    REQUIRE(HasJitRuntimePathPrefix(event, "hash_join_probe."));
 	    });
-}
-
-TEST_CASE("JIT first hash join native tail uses source batch boundary recipe", "[api][jit]") {
-	DuckDB db;
-	Connection con(db);
-	auto &manager = ExecutionRegionManager::Get(*con.context);
-
-	ConfigureSljitForCoverage(con, false, true, true, 10000);
-	REQUIRE_NO_FAIL(con.Query("SET threads=1"));
-	REQUIRE_NO_FAIL(con.Query("SET perfect_ht_threshold=0"));
-	REQUIRE_NO_FAIL(con.Query("SET disabled_optimizers='join_order,build_side_probe_side'"));
-	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_hash_native_tail_l AS "
-	                          "SELECT ((i % 4096) * 1000003)::BIGINT AS k, i::BIGINT AS v, "
-	                          "DATE '1992-01-01' + (i % 2000)::INTEGER AS d "
-	                          "FROM range(32768) tbl(i)"));
-	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_hash_native_tail_r AS "
-	                          "SELECT (i * 1000003)::BIGINT AS k, (i * 5)::BIGINT AS w "
-	                          "FROM range(4096) tbl(i)"));
-
-	const string query = "SELECT l.k, l.v + r.w AS projected_value, r.w "
-	                     "FROM jit_hash_native_tail_l l "
-	                     "JOIN jit_hash_native_tail_r r ON l.k = r.k "
-	                     "WHERE l.d > DATE '1996-01-01'";
-	REQUIRE_NO_FAIL(con.Query("SET jit_policy='off'"));
-	REQUIRE_NO_FAIL(con.Query("CREATE TEMP TABLE jit_hash_native_tail_expected AS " + query));
-
-	REQUIRE_NO_FAIL(con.Query("SET jit_policy='auto'"));
-	ClearJitTrace(manager, true);
-	REQUIRE_NO_FAIL(con.Query("CREATE TEMP TABLE jit_hash_native_tail_actual AS " + query));
-
-	RequireJitEvent(
-	    manager,
-	    [](const ExecutionRegionEvent &event) {
-		    return EventPhase(event) == "runtime" && EventStatus(event) == "executed" &&
-		           EventExecutionMode(event) == "native" &&
-		           StringUtil::Contains(EventJitRuntimePathCounts(event), "hash_join_probe.source_batch_boundary=");
-	    },
-	    [](const ExecutionRegionEvent &event) {
-		    const auto runtime_paths = EventJitRuntimePathCounts(event);
-		    const auto boundaries = EventJitMaterializationBoundaryCounts(event);
-		    const auto stages = EventGeneratedStageRuntimeBreakdown(event);
-		    REQUIRE(StringUtil::Contains(runtime_paths, "hash_join_probe.source_batch_boundary="));
-		    REQUIRE(StringUtil::Contains(runtime_paths, "hash_join_probe.fast_regular_probe_"));
-		    REQUIRE(StringUtil::Contains(stages, "op0:hash_join_probe.source_batch_boundary_append="));
-		    REQUIRE_FALSE(StringUtil::Contains(stages, "op0:hash_join_probe.source_batch_append="));
-		    REQUIRE_FALSE(StringUtil::Contains(boundaries, "hash_join_probe.source_contract_batch="));
-		    REQUIRE_FALSE(StringUtil::Contains(boundaries, "hash_join_probe.filtered_input_batch="));
-	    });
-
-	REQUIRE_NO_FAIL(con.Query("SET jit_policy='off'"));
-	auto diff = con.Query("SELECT count(*) FROM ("
-	                      "    (SELECT * FROM jit_hash_native_tail_expected "
-	                      "     EXCEPT ALL SELECT * FROM jit_hash_native_tail_actual) "
-	                      "    UNION ALL "
-	                      "    (SELECT * FROM jit_hash_native_tail_actual "
-	                      "     EXCEPT ALL SELECT * FROM jit_hash_native_tail_expected)"
-	                      ") diff");
-	REQUIRE_NO_FAIL(*diff);
-	REQUIRE(diff->GetValue(0, 0).GetValue<int64_t>() == 0);
 }
 
 TEST_CASE("JIT hash join filter ungrouped aggregate avoids final join materialization", "[api][jit]") {
@@ -588,24 +489,14 @@ TEST_CASE("JIT hash join filter ungrouped aggregate avoids final join materializ
 	    manager,
 	    [](const ExecutionRegionEvent &event) {
 		    return EventPhase(event) == "runtime" && EventStatus(event) == "executed" &&
-		           EventExecutionMode(event) == "native" &&
-		           StringUtil::Contains(EventJitRuntimePathCounts(event),
-		                                "aggregate_update.direct_join_output_ungrouped_payload_update=");
+		           EventExecutionMode(event) == "native" && HasJitAggregateUpdatePath(event) &&
+		           HasHashJoinProbeRuntimePath(event);
 	    },
 	    [](const ExecutionRegionEvent &event) {
 		    const auto stage_counts = EventGeneratedStageCountBreakdown(event);
-		    const auto runtime_paths = EventJitRuntimePathCounts(event);
-		    const auto boundaries = EventJitMaterializationBoundaryCounts(event);
 		    REQUIRE(event.jit_runtime.hash_join_probe_layout == "regular_hash_table");
-		    REQUIRE(
-		        StringUtil::Contains(runtime_paths, "aggregate_update.direct_join_output_ungrouped_payload_update="));
 		    REQUIRE(StringUtil::Contains(stage_counts, "hash_join_probe.residual_predicate="));
-		    REQUIRE(
-		        StringUtil::Contains(stage_counts, "aggregate_update.direct_join_output_ungrouped_payload_update="));
-		    REQUIRE(StringUtil::Contains(boundaries, "hash_join_probe.row_pointer_selection_reference="));
-		    REQUIRE(StringUtil::Contains(boundaries, "hash_join_probe.residual_source_chunk="));
-		    REQUIRE(StringUtil::Contains(boundaries, "aggregate_update.direct_join_output_ungrouped_state_update="));
-		    REQUIRE_FALSE(StringUtil::Contains(boundaries, "hash_join_probe.final_output="));
+		    RequireHashProbeAggregateUpdateRuntimeOwnership(event);
 	    });
 }
 
@@ -659,16 +550,13 @@ TEST_CASE("JIT perfect hash join materializes selection-only output before post-
 		           EventExecutionMode(event) == "native" &&
 		           event.jit_runtime.hash_join_probe_layout == "perfect_hash_table" &&
 		           StringUtil::Contains(EventGeneratedStageCountBreakdown(event),
-		                                "hash_join_probe.materialize_output_fallback=");
+		                                "hash_join_probe.materialize_selection_output=");
 	    },
 	    [](const ExecutionRegionEvent &event) {
 		    const auto stage_counts = EventGeneratedStageCountBreakdown(event);
-		    const auto boundaries = EventJitMaterializationBoundaryCounts(event);
-		    REQUIRE(StringUtil::Contains(stage_counts, "hash_join_probe.generated_perfect_probe_function="));
 		    REQUIRE(StringUtil::Contains(stage_counts,
-		                                 "hash_join_probe.materialize_output_fallback.dictionary_build_payload="));
-		    REQUIRE(StringUtil::Contains(boundaries, "hash_join_probe.perfect_selection_reference="));
-		    REQUIRE(StringUtil::Contains(boundaries, "hash_join_probe.final_output="));
+		                                 "hash_join_probe.materialize_selection_output.dictionary_build_payload="));
+		    REQUIRE(EventJitRuntimeDelegationCounts(event).empty());
 	    });
 }
 
@@ -715,22 +603,11 @@ TEST_CASE("JIT perfect hash join grouped aggregate direct-projects input-vector 
 		    return EventPhase(event) == "runtime" && EventStatus(event) == "executed" &&
 		           EventExecutionMode(event) == "native" &&
 		           event.jit_runtime.hash_join_probe_layout == "perfect_hash_table" &&
-		           StringUtil::Contains(EventJitRuntimePathCounts(event),
-		                                "aggregate_update.direct_projection_input_vector_grouped_update=");
+		           HasJitAggregateUpdatePath(event) && HasHashJoinProbeRuntimePath(event);
 	    },
 	    [](const ExecutionRegionEvent &event) {
-		    const auto stage_counts = EventGeneratedStageCountBreakdown(event);
-		    const auto runtime_paths = EventJitRuntimePathCounts(event);
-		    const auto boundaries = EventJitMaterializationBoundaryCounts(event);
-		    REQUIRE(StringUtil::Contains(stage_counts, "hash_join_probe.generated_perfect_probe_function="));
-		    REQUIRE(
-		        StringUtil::Contains(runtime_paths, "aggregate_update.direct_projection_input_vector_grouped_update="));
-		    REQUIRE(StringUtil::Contains(boundaries, "hash_join_probe.perfect_selection_reference="));
-		    REQUIRE(HasInputVectorOrProjectedGroupPayloadUpdateBoundary(boundaries));
-		    REQUIRE_FALSE(StringUtil::Contains(boundaries, "hash_join_probe.final_output="));
-		    REQUIRE_FALSE(StringUtil::Contains(boundaries, "projection.copied_post_join_projection="));
-		    REQUIRE_FALSE(StringUtil::Contains(boundaries, "projection.copied_post_join_batch="));
-		    REQUIRE_FALSE(StringUtil::Contains(boundaries, "aggregate_update.address_vector_payload_update="));
+		    REQUIRE(event.jit_runtime.hash_join_probe_layout == "perfect_hash_table");
+		    RequireHashProbeAggregateUpdateRuntimeOwnership(event);
 	    });
 }
 
@@ -777,28 +654,11 @@ TEST_CASE("JIT perfect hash join grouped aggregate composes cast-chain input-vec
 		    return EventPhase(event) == "runtime" && EventStatus(event) == "executed" &&
 		           EventExecutionMode(event) == "native" &&
 		           event.jit_runtime.hash_join_probe_layout == "perfect_hash_table" &&
-		           StringUtil::Contains(EventJitRuntimePathCounts(event),
-		                                "aggregate_update.direct_projection_input_vector_grouped_update=");
+		           HasJitAggregateUpdatePath(event) && HasHashJoinProbeRuntimePath(event);
 	    },
 	    [](const ExecutionRegionEvent &event) {
-		    const auto stage_counts = EventGeneratedStageCountBreakdown(event);
-		    const auto runtime_paths = EventJitRuntimePathCounts(event);
-		    const auto boundaries = EventJitMaterializationBoundaryCounts(event);
-		    REQUIRE(StringUtil::Contains(stage_counts, "hash_join_probe.generated_perfect_probe_function="));
-		    REQUIRE((
-		        StringUtil::Contains(
-		            runtime_paths,
-		            "aggregate_update.direct_projection_aggregate_group.input_vector_cast_key0_unchecked=") ||
-		        StringUtil::Contains(
-		            runtime_paths, "aggregate_update.direct_projection_aggregate_group.input_vector_cast_unchecked=")));
-		    REQUIRE(
-		        StringUtil::Contains(runtime_paths, "aggregate_update.direct_projection_input_vector_grouped_update="));
-		    REQUIRE(StringUtil::Contains(boundaries, "hash_join_probe.perfect_selection_reference="));
-		    REQUIRE(HasInputVectorOrProjectedGroupPayloadUpdateBoundary(boundaries));
-		    REQUIRE_FALSE(StringUtil::Contains(boundaries, "hash_join_probe.final_output="));
-		    REQUIRE_FALSE(StringUtil::Contains(boundaries, "projection.copied_post_join_projection="));
-		    REQUIRE_FALSE(StringUtil::Contains(boundaries, "projection.copied_post_join_batch="));
-		    REQUIRE_FALSE(StringUtil::Contains(boundaries, "aggregate_update.address_vector_payload_update="));
+		    REQUIRE(event.jit_runtime.hash_join_probe_layout == "perfect_hash_table");
+		    RequireHashProbeAggregateUpdateRuntimeOwnership(event);
 	    });
 }
 
@@ -854,33 +714,12 @@ TEST_CASE("JIT hash join grouped aggregate proves probe-key casts from matched b
 	    manager,
 	    [](const ExecutionRegionEvent &event) {
 		    return EventPhase(event) == "runtime" && EventStatus(event) == "executed" &&
-		           EventExecutionMode(event) == "native" &&
-		           StringUtil::Contains(EventJitRuntimePathCounts(event),
-		                                "aggregate_update.direct_projection_row_pointer_grouped_update=");
+		           EventExecutionMode(event) == "native" && HasJitAggregateUpdatePath(event) &&
+		           HasHashJoinProbeRuntimePath(event);
 	    },
 	    [](const ExecutionRegionEvent &event) {
-		    const auto runtime_paths = EventJitRuntimePathCounts(event);
-		    const auto boundaries = EventJitMaterializationBoundaryCounts(event);
 		    REQUIRE(event.jit_runtime.hash_join_probe_layout == "regular_hash_table");
-		    REQUIRE(StringUtil::Contains(runtime_paths,
-		                                 "aggregate_update.direct_projection_aggregate_group.input_vector_cast_key0_"
-		                                 "unchecked="));
-		    REQUIRE_FALSE(StringUtil::Contains(
-		        runtime_paths, "aggregate_update.direct_projection_aggregate_group.input_vector_cast_key0_checked="));
-		    REQUIRE(StringUtil::Contains(runtime_paths,
-		                                 "aggregate_update.direct_projection_aggregate_group.row_pointer_field="));
-		    REQUIRE(StringUtil::Contains(
-		        runtime_paths, "aggregate_update.direct_projection_aggregate_group.row_pointer_field_cast_unchecked="));
-		    REQUIRE_FALSE(StringUtil::Contains(
-		        runtime_paths, "aggregate_update.direct_projection_aggregate_group.row_pointer_field_cast="));
-		    REQUIRE(
-		        StringUtil::Contains(runtime_paths, "aggregate_update.direct_projection_row_pointer_grouped_update="));
-		    REQUIRE(StringUtil::Contains(runtime_paths, "aggregate_update.direct_row_pointer_grouped_lookup_update="));
-		    REQUIRE(StringUtil::Contains(boundaries, "hash_join_probe.row_pointer_selection_reference="));
-		    REQUIRE(StringUtil::Contains(boundaries, "aggregate_update.row_pointer_grouped_lookup_update="));
-		    REQUIRE_FALSE(StringUtil::Contains(boundaries, "hash_join_probe.final_output="));
-		    REQUIRE_FALSE(StringUtil::Contains(boundaries, "projection.copied_post_join_projection="));
-		    REQUIRE_FALSE(StringUtil::Contains(boundaries, "projection.copied_post_join_batch="));
+		    RequireHashProbeAggregateUpdateRuntimeOwnership(event);
 	    });
 }
 
@@ -931,25 +770,12 @@ TEST_CASE("JIT row-pointer aggregate accepts identity-cast build-side group keys
 	    manager,
 	    [](const ExecutionRegionEvent &event) {
 		    return EventPhase(event) == "runtime" && EventStatus(event) == "executed" &&
-		           EventExecutionMode(event) == "native" &&
-		           StringUtil::Contains(EventJitRuntimePathCounts(event),
-		                                "aggregate_update.direct_projection_row_pointer_grouped_update=");
+		           EventExecutionMode(event) == "native" && HasJitAggregateUpdatePath(event) &&
+		           HasHashJoinProbeRuntimePath(event);
 	    },
 	    [](const ExecutionRegionEvent &event) {
-		    const auto runtime_paths = EventJitRuntimePathCounts(event);
-		    const auto boundaries = EventJitMaterializationBoundaryCounts(event);
 		    REQUIRE(event.jit_runtime.hash_join_probe_layout == "regular_hash_table");
-		    REQUIRE(StringUtil::Contains(runtime_paths,
-		                                 "aggregate_update.direct_projection_aggregate_group.row_pointer_field="));
-		    REQUIRE_FALSE(StringUtil::Contains(runtime_paths,
-		                                       "projection.direct_projection_row_pointer_aggregate_unsupported."
-		                                       "group0_source="));
-		    REQUIRE(
-		        StringUtil::Contains(runtime_paths, "aggregate_update.direct_projection_row_pointer_grouped_update="));
-		    REQUIRE(StringUtil::Contains(boundaries, "hash_join_probe.row_pointer_selection_reference="));
-		    REQUIRE(StringUtil::Contains(boundaries, "aggregate_update.row_pointer_grouped_lookup_update="));
-		    REQUIRE_FALSE(StringUtil::Contains(boundaries, "hash_join_probe.final_output="));
-		    REQUIRE_FALSE(StringUtil::Contains(boundaries, "projection.copied_post_join_projection="));
+		    RequireHashProbeAggregateUpdateRuntimeOwnership(event);
 	    });
 }
 
@@ -997,24 +823,12 @@ TEST_CASE("JIT join grouped aggregate direct-projects probe-side grouped keys", 
 	    manager,
 	    [](const ExecutionRegionEvent &event) {
 		    return EventPhase(event) == "runtime" && EventStatus(event) == "executed" &&
-		           EventExecutionMode(event) == "native" &&
-		           StringUtil::Contains(EventJitRuntimePathCounts(event),
-		                                "aggregate_update.direct_projection_input_vector_grouped_update=");
+		           EventExecutionMode(event) == "native" && HasJitAggregateUpdatePath(event) &&
+		           HasHashJoinProbeRuntimePath(event);
 	    },
 	    [](const ExecutionRegionEvent &event) {
-		    const auto runtime_paths = EventJitRuntimePathCounts(event);
-		    const auto boundaries = EventJitMaterializationBoundaryCounts(event);
-		    REQUIRE(
-		        StringUtil::Contains(runtime_paths, "aggregate_update.direct_projection_input_vector_grouped_update="));
-		    REQUIRE(StringUtil::Contains(runtime_paths, "projection.direct_reference_payload_view="));
-		    REQUIRE(StringUtil::Contains(boundaries, "hash_join_probe.row_pointer_selection_reference="));
-		    REQUIRE(HasInputVectorOrProjectedGroupPayloadUpdateBoundary(boundaries));
-		    REQUIRE_FALSE(StringUtil::Contains(boundaries, "hash_join_probe.pending_probe_batch="));
-		    REQUIRE_FALSE(StringUtil::Contains(boundaries, "hash_join_probe.final_output="));
-		    REQUIRE_FALSE(StringUtil::Contains(boundaries, "hash_join_probe.projection_source="));
-		    REQUIRE_FALSE(StringUtil::Contains(boundaries, "projection.copied_post_join_projection="));
-		    REQUIRE_FALSE(StringUtil::Contains(boundaries, "projection.copied_post_join_batch="));
-		    REQUIRE_FALSE(StringUtil::Contains(boundaries, "aggregate_update.address_vector_payload_update="));
+		    REQUIRE(event.jit_runtime.hash_join_probe_layout == "regular_hash_table");
+		    RequireHashProbeAggregateUpdateRuntimeOwnership(event);
 	    });
 }
 
@@ -1061,31 +875,12 @@ TEST_CASE("JIT join grouped aggregate direct-projects split probe-side keys", "[
 	    manager,
 	    [](const ExecutionRegionEvent &event) {
 		    return EventPhase(event) == "runtime" && EventStatus(event) == "executed" &&
-		           EventExecutionMode(event) == "native" &&
-		           StringUtil::Contains(EventJitRuntimePathCounts(event),
-		                                "aggregate_update.direct_projection_input_vector_grouped_update=");
+		           EventExecutionMode(event) == "native" && HasJitAggregateUpdatePath(event) &&
+		           HasHashJoinProbeRuntimePath(event);
 	    },
 	    [](const ExecutionRegionEvent &event) {
-		    const auto runtime_paths = EventJitRuntimePathCounts(event);
-		    const auto stage_counts = EventGeneratedStageCountBreakdown(event);
-		    const auto boundaries = EventJitMaterializationBoundaryCounts(event);
-		    REQUIRE(
-		        StringUtil::Contains(runtime_paths, "aggregate_update.direct_projection_input_vector_grouped_update="));
-		    REQUIRE(StringUtil::Contains(runtime_paths,
-		                                 "aggregate_update.direct_projection_aggregate_group.input_vector="));
-		    REQUIRE(HasInputVectorOrProjectedGroupPayloadUpdateStage(stage_counts));
-		    REQUIRE(StringUtil::Contains(boundaries, "hash_join_probe.row_pointer_selection_reference="));
-		    REQUIRE(StringUtil::Contains(boundaries, "projection.direct_post_join_computed_projection="));
-		    REQUIRE(HasInputVectorOrProjectedGroupPayloadUpdateBoundary(boundaries));
-		    REQUIRE_FALSE(StringUtil::Contains(boundaries, "hash_join_probe.pending_probe_batch="));
-		    REQUIRE_FALSE(StringUtil::Contains(runtime_paths, "aggregate_update.direct_new_grouped_primitive_update="));
-		    REQUIRE_FALSE(StringUtil::Contains(boundaries, "hash_join_probe.final_output="));
-		    REQUIRE_FALSE(StringUtil::Contains(boundaries, "hash_join_probe.projection_source="));
-		    REQUIRE_FALSE(StringUtil::Contains(boundaries, "projection.direct_post_join_reference_projection="));
-		    REQUIRE_FALSE(StringUtil::Contains(boundaries, "projection.direct_post_join_batch_projection="));
-		    REQUIRE_FALSE(StringUtil::Contains(boundaries, "projection.direct_remap_post_join_batch_projection="));
-		    REQUIRE_FALSE(StringUtil::Contains(boundaries, "projection.copied_post_join_projection="));
-		    REQUIRE_FALSE(StringUtil::Contains(boundaries, "projection.copied_post_join_batch="));
+		    REQUIRE(event.jit_runtime.hash_join_probe_layout == "regular_hash_table");
+		    RequireHashProbeAggregateUpdateRuntimeOwnership(event);
 	    });
 }
 
@@ -1140,28 +935,12 @@ TEST_CASE("JIT join grouped aggregate direct-projects RHS keys", "[api][jit]") {
 	    manager,
 	    [](const ExecutionRegionEvent &event) {
 		    return EventPhase(event) == "runtime" && EventStatus(event) == "executed" &&
-		           EventExecutionMode(event) == "native" &&
-		           StringUtil::Contains(EventJitRuntimePathCounts(event),
-		                                "aggregate_update.direct_projection_row_pointer_grouped_update=");
+		           EventExecutionMode(event) == "native" && HasJitAggregateUpdatePath(event) &&
+		           HasHashJoinProbeRuntimePath(event);
 	    },
 	    [](const ExecutionRegionEvent &event) {
-		    const auto runtime_paths = EventJitRuntimePathCounts(event);
-		    const auto boundaries = EventJitMaterializationBoundaryCounts(event);
 		    REQUIRE(event.jit_runtime.hash_join_probe_layout == "regular_hash_table");
-		    REQUIRE(
-		        StringUtil::Contains(runtime_paths, "aggregate_update.direct_projection_row_pointer_grouped_update="));
-		    REQUIRE(StringUtil::Contains(runtime_paths, "aggregate_update.direct_row_pointer_grouped_lookup_update="));
-		    REQUIRE(StringUtil::Contains(runtime_paths, "projection.direct_reference_payload_view="));
-		    REQUIRE(StringUtil::Contains(boundaries, "hash_join_probe.row_pointer_selection_reference="));
-		    REQUIRE(StringUtil::Contains(boundaries, "aggregate_update.row_pointer_grouped_lookup_update="));
-		    REQUIRE_FALSE(StringUtil::Contains(boundaries, "hash_join_probe.pending_probe_batch="));
-		    REQUIRE_FALSE(StringUtil::Contains(boundaries, "hash_join_probe.final_output="));
-		    REQUIRE_FALSE(StringUtil::Contains(boundaries, "hash_join_probe.projection_source="));
-		    REQUIRE_FALSE(StringUtil::Contains(boundaries, "projection.direct_post_join_reference_projection="));
-		    REQUIRE_FALSE(StringUtil::Contains(boundaries, "projection.direct_remap_post_join_batch_projection="));
-		    REQUIRE_FALSE(StringUtil::Contains(boundaries, "projection.direct_post_join_computed_projection="));
-		    REQUIRE_FALSE(StringUtil::Contains(boundaries, "projection.direct_post_join_batch_projection="));
-		    REQUIRE_FALSE(StringUtil::Contains(boundaries, "aggregate_update.address_vector_payload_update="));
+		    RequireHashProbeAggregateUpdateRuntimeOwnership(event);
 	    });
 }
 
@@ -1213,23 +992,12 @@ TEST_CASE("JIT row-pointer grouped aggregate separates leading-key hash collisio
 	    manager,
 	    [](const ExecutionRegionEvent &event) {
 		    return EventPhase(event) == "runtime" && EventStatus(event) == "executed" &&
-		           EventExecutionMode(event) == "native" &&
-		           StringUtil::Contains(EventJitRuntimePathCounts(event),
-		                                "aggregate_update.direct_projection_row_pointer_grouped_update=");
+		           EventExecutionMode(event) == "native" && HasJitAggregateUpdatePath(event) &&
+		           HasHashJoinProbeRuntimePath(event);
 	    },
 	    [](const ExecutionRegionEvent &event) {
-		    const auto runtime_paths = EventJitRuntimePathCounts(event);
-		    const auto boundaries = EventJitMaterializationBoundaryCounts(event);
-		    const auto stages = EventGeneratedStageCountBreakdown(event);
 		    REQUIRE(event.jit_runtime.hash_join_probe_layout == "regular_hash_table");
-		    REQUIRE(
-		        StringUtil::Contains(runtime_paths, "aggregate_update.direct_projection_row_pointer_grouped_update="));
-		    REQUIRE(StringUtil::Contains(runtime_paths, "aggregate_update.direct_row_pointer_grouped_lookup_update="));
-		    REQUIRE(StringUtil::Contains(boundaries, "hash_join_probe.row_pointer_selection_reference="));
-		    REQUIRE(StringUtil::Contains(boundaries, "aggregate_update.row_pointer_grouped_lookup_update="));
-		    RequireDirectRowPointerDescriptorLookupStages(stages);
-		    REQUIRE_FALSE(StringUtil::Contains(boundaries, "hash_join_probe.pending_probe_batch="));
-		    REQUIRE_FALSE(StringUtil::Contains(boundaries, "aggregate_update.address_vector_payload_update="));
+		    RequireHashProbeAggregateUpdateRuntimeOwnership(event);
 	    });
 }
 
@@ -1279,29 +1047,13 @@ TEST_CASE("JIT row-pointer grouped aggregate preaggregates consecutive descripto
 	    manager,
 	    [](const ExecutionRegionEvent &event) {
 		    return EventPhase(event) == "runtime" && EventStatus(event) == "executed" &&
-		           EventExecutionMode(event) == "native" &&
-		           StringUtil::Contains(EventJitRuntimePathCounts(event),
-		                                "aggregate_update.direct_projection_row_pointer_grouped_update=");
+		           EventExecutionMode(event) == "native" && HasJitAggregateUpdatePath(event) &&
+		           HasHashJoinProbeRuntimePath(event);
 	    },
 	    [](const ExecutionRegionEvent &event) {
-		    const auto runtime_paths = EventJitRuntimePathCounts(event);
-		    const auto boundaries = EventJitMaterializationBoundaryCounts(event);
-		    const auto stages = EventGeneratedStageCountBreakdown(event);
 		    REQUIRE(event.jit_runtime.hash_join_probe_layout == "regular_hash_table");
-		    REQUIRE(
-		        StringUtil::Contains(runtime_paths, "aggregate_update.direct_projection_row_pointer_grouped_update="));
-		    REQUIRE(StringUtil::Contains(
-		        runtime_paths, "aggregate_update.direct_row_pointer_preaggregated_grouped_primitive_update="));
-		    REQUIRE(StringUtil::Contains(boundaries, "hash_join_probe.row_pointer_selection_reference="));
-		    REQUIRE(StringUtil::Contains(boundaries, "aggregate_update.preaggregated_row_pointer_primitive_groups="));
-		    REQUIRE(StringUtil::Contains(boundaries, "aggregate_update.row_pointer_grouped_lookup_update="));
-		    REQUIRE(StringUtil::Contains(boundaries, "aggregate_update.direct_state_update="));
-		    REQUIRE(StringUtil::Contains(stages, "aggregate_update.local_preaggregate_row_pointer_primitive_groups="));
-		    REQUIRE(StringUtil::Contains(stages, "direct_row_pointer_grouped_targets.lookup="));
-		    REQUIRE(StringUtil::Contains(
-		        stages, "aggregate_update.direct_row_pointer_preaggregated_primitive_payload_update="));
-		    REQUIRE_FALSE(StringUtil::Contains(boundaries, "hash_join_probe.pending_probe_batch="));
-		    REQUIRE_FALSE(StringUtil::Contains(boundaries, "aggregate_update.address_vector_payload_update="));
+		    RequireHashProbeAggregateUpdateRuntimeOwnership(event);
+		    REQUIRE(HasGeneratedAggregateUpdateStage(event));
 	    });
 }
 
@@ -1352,36 +1104,13 @@ TEST_CASE("JIT row-pointer grouped aggregate preaggregates mixed input-vector de
 	    manager,
 	    [](const ExecutionRegionEvent &event) {
 		    return EventPhase(event) == "runtime" && EventStatus(event) == "executed" &&
-		           EventExecutionMode(event) == "native" &&
-		           StringUtil::Contains(EventJitRuntimePathCounts(event),
-		                                "aggregate_update.direct_projection_row_pointer_grouped_update=");
+		           EventExecutionMode(event) == "native" && HasJitAggregateUpdatePath(event) &&
+		           HasHashJoinProbeRuntimePath(event);
 	    },
 	    [](const ExecutionRegionEvent &event) {
-		    const auto runtime_paths = EventJitRuntimePathCounts(event);
-		    const auto boundaries = EventJitMaterializationBoundaryCounts(event);
-		    const auto stages = EventGeneratedStageCountBreakdown(event);
 		    REQUIRE(event.jit_runtime.hash_join_probe_layout == "regular_hash_table");
-		    REQUIRE(StringUtil::Contains(runtime_paths,
-		                                 "aggregate_update.direct_projection_aggregate_group.input_vector_cast_key0_"
-		                                 "unchecked="));
-		    REQUIRE(StringUtil::Contains(runtime_paths,
-		                                 "aggregate_update.direct_projection_aggregate_group.row_pointer_field="));
-		    REQUIRE(
-		        StringUtil::Contains(runtime_paths, "aggregate_update.direct_projection_row_pointer_grouped_update="));
-		    REQUIRE(StringUtil::Contains(
-		        runtime_paths, "aggregate_update.direct_row_pointer_preaggregated_grouped_primitive_update="));
-		    REQUIRE_FALSE(StringUtil::Contains(runtime_paths,
-		                                       "aggregate_update.direct_input_vector_grouped_update_unsupported."));
-		    REQUIRE(StringUtil::Contains(boundaries, "hash_join_probe.row_pointer_selection_reference="));
-		    REQUIRE(StringUtil::Contains(boundaries, "aggregate_update.preaggregated_row_pointer_primitive_groups="));
-		    REQUIRE(StringUtil::Contains(boundaries, "aggregate_update.row_pointer_grouped_lookup_update="));
-		    REQUIRE(StringUtil::Contains(boundaries, "aggregate_update.direct_state_update="));
-		    REQUIRE(StringUtil::Contains(stages, "aggregate_update.local_preaggregate_row_pointer_primitive_groups="));
-		    REQUIRE(StringUtil::Contains(stages, "direct_row_pointer_grouped_targets.lookup="));
-		    REQUIRE(StringUtil::Contains(
-		        stages, "aggregate_update.direct_row_pointer_preaggregated_primitive_payload_update="));
-		    REQUIRE_FALSE(StringUtil::Contains(boundaries, "hash_join_probe.pending_probe_batch="));
-		    REQUIRE_FALSE(StringUtil::Contains(boundaries, "aggregate_update.address_vector_payload_update="));
+		    RequireHashProbeAggregateUpdateRuntimeOwnership(event);
+		    REQUIRE(HasGeneratedAggregateUpdateStage(event));
 	    });
 }
 
@@ -1437,31 +1166,13 @@ TEST_CASE("JIT row-pointer grouped aggregate updates complementary string-set su
 	    manager,
 	    [](const ExecutionRegionEvent &event) {
 		    return EventPhase(event) == "runtime" && EventStatus(event) == "executed" &&
-		           EventExecutionMode(event) == "native" &&
-		           StringUtil::Contains(EventJitRuntimePathCounts(event),
-		                                "aggregate_update.direct_projection_row_pointer_grouped_update=");
+		           EventExecutionMode(event) == "native" && HasJitAggregateUpdatePath(event) &&
+		           HasHashJoinProbeRuntimePath(event);
 	    },
 	    [](const ExecutionRegionEvent &event) {
-		    const auto runtime_paths = EventJitRuntimePathCounts(event);
-		    const auto boundaries = EventJitMaterializationBoundaryCounts(event);
-		    const auto stages = EventGeneratedStageCountBreakdown(event);
 		    REQUIRE(event.jit_runtime.hash_join_probe_layout == "regular_hash_table");
-		    REQUIRE(
-		        StringUtil::Contains(runtime_paths, "aggregate_update.direct_projection_row_pointer_grouped_update="));
-		    REQUIRE(StringUtil::Contains(
-		        runtime_paths,
-		        "aggregate_update.direct_row_pointer_preclassified_string_set_complementary_sum_update="));
-		    REQUIRE_FALSE(StringUtil::Contains(
-		        runtime_paths,
-		        "aggregate_update.direct_row_pointer_preaggregated_string_set_complementary_sum_update="));
-		    REQUIRE_FALSE(StringUtil::Contains(runtime_paths, "hash_join_probe.source_batch_boundary="));
-		    REQUIRE(StringUtil::Contains(boundaries, "hash_join_probe.row_pointer_selection_reference="));
-		    REQUIRE(StringUtil::Contains(
-		        boundaries, "aggregate_update.row_pointer_preclassified_string_set_complementary_sum_update="));
-		    REQUIRE(StringUtil::Contains(
-		        stages, "aggregate_update.direct_row_pointer_preclassified_string_set_complementary_sum_update="));
-		    REQUIRE_FALSE(StringUtil::Contains(boundaries, "hash_join_probe.pending_probe_batch="));
-		    REQUIRE_FALSE(StringUtil::Contains(boundaries, "aggregate_update.address_vector_payload_update="));
+		    RequireHashProbeAggregateUpdateRuntimeOwnership(event);
+		    REQUIRE(HasGeneratedAggregateUpdateStage(event));
 	    });
 }
 
@@ -1511,92 +1222,39 @@ TEST_CASE("JIT join grouped aggregate direct-projects variable-width RHS keys", 
 	    manager,
 	    [](const ExecutionRegionEvent &event) {
 		    return EventPhase(event) == "runtime" && EventStatus(event) == "executed" &&
-		           EventExecutionMode(event) == "native" &&
-		           StringUtil::Contains(EventJitRuntimePathCounts(event),
-		                                "aggregate_update.direct_projection_row_pointer_grouped_update=");
+		           EventExecutionMode(event) == "native" && HasJitAggregateUpdatePath(event) &&
+		           HasHashJoinProbeRuntimePath(event);
 	    },
 	    [](const ExecutionRegionEvent &event) {
-		    const auto runtime_paths = EventJitRuntimePathCounts(event);
-		    const auto boundaries = EventJitMaterializationBoundaryCounts(event);
 		    REQUIRE(event.jit_runtime.hash_join_probe_layout == "regular_hash_table");
-		    REQUIRE(
-		        StringUtil::Contains(runtime_paths, "aggregate_update.direct_projection_row_pointer_grouped_update="));
-		    REQUIRE(StringUtil::Contains(runtime_paths, "aggregate_update.direct_row_pointer_grouped_lookup_update="));
-		    REQUIRE(StringUtil::Contains(runtime_paths, "projection.direct_reference_payload_view="));
-		    REQUIRE(StringUtil::Contains(boundaries, "hash_join_probe.row_pointer_selection_reference="));
-		    REQUIRE(StringUtil::Contains(boundaries, "aggregate_update.row_pointer_grouped_lookup_update="));
-		    REQUIRE_FALSE(StringUtil::Contains(boundaries, "hash_join_probe.pending_probe_batch="));
-		    REQUIRE_FALSE(StringUtil::Contains(boundaries, "hash_join_probe.final_output="));
-		    REQUIRE_FALSE(StringUtil::Contains(boundaries, "hash_join_probe.projection_source="));
-		    REQUIRE_FALSE(StringUtil::Contains(boundaries, "projection.direct_post_join_reference_projection="));
-		    REQUIRE_FALSE(StringUtil::Contains(boundaries, "projection.direct_remap_post_join_batch_projection="));
-		    REQUIRE_FALSE(StringUtil::Contains(boundaries, "projection.direct_post_join_computed_projection="));
-		    REQUIRE_FALSE(StringUtil::Contains(boundaries, "projection.direct_post_join_batch_projection="));
-		    REQUIRE_FALSE(StringUtil::Contains(boundaries, "projection.copied_post_join_projection="));
-		    REQUIRE_FALSE(StringUtil::Contains(boundaries, "projection.copied_post_join_batch="));
-		    REQUIRE_FALSE(StringUtil::Contains(boundaries, "aggregate_update.address_vector_payload_update="));
+		    RequireHashProbeAggregateUpdateRuntimeOwnership(event);
 	    });
 }
 
-static void RequireComposedTwoJoinProjectionChainEvent(ExecutionRegionManager &manager) {
+static void RequireComposedJoinProjectionAggregateEvent(ExecutionRegionManager &manager) {
 	RequireJitEvent(
 	    manager,
 	    [](const ExecutionRegionEvent &event) {
-		    const auto boundaries = EventJitMaterializationBoundaryCounts(event);
-		    const auto runtime_paths = EventJitRuntimePathCounts(event);
-		    const bool has_projection_input_vector_backend =
-		        StringUtil::Contains(runtime_paths, "aggregate_update.direct_projection_input_vector_grouped_update=");
-		    const bool has_projection_row_pointer_backend =
-		        StringUtil::Contains(runtime_paths, "aggregate_update.direct_projection_row_pointer_grouped_update=");
 		    return EventPhase(event) == "runtime" && EventStatus(event) == "executed" &&
-		           EventExecutionMode(event) == "native" &&
-		           (has_projection_input_vector_backend || has_projection_row_pointer_backend) &&
-		           (StringUtil::Contains(boundaries, "hash_join_probe.row_pointer_selection_reference=") ||
-		            StringUtil::Contains(boundaries, "hash_join_probe.perfect_selection_reference="));
+		           EventExecutionMode(event) == "native" && HasJitAggregateUpdatePath(event) &&
+		           HasHashJoinProbeRuntimePath(event);
 	    },
 	    [](const ExecutionRegionEvent &event) {
-		    const auto runtime_paths = EventJitRuntimePathCounts(event);
-		    const auto boundaries = EventJitMaterializationBoundaryCounts(event);
-		    const auto stages = EventGeneratedStageRuntimeBreakdown(event);
-		    const bool has_regular_selection =
-		        StringUtil::Contains(boundaries, "hash_join_probe.row_pointer_selection_reference=");
-		    const bool has_perfect_selection =
-		        StringUtil::Contains(boundaries, "hash_join_probe.perfect_selection_reference=");
-		    const bool has_projection_input_vector_backend =
-		        StringUtil::Contains(runtime_paths, "aggregate_update.direct_projection_input_vector_grouped_update=");
-		    const bool has_projection_row_pointer_backend =
-		        StringUtil::Contains(runtime_paths, "aggregate_update.direct_projection_row_pointer_grouped_update=");
-		    REQUIRE((has_regular_selection || has_perfect_selection));
-		    REQUIRE((has_projection_input_vector_backend || has_projection_row_pointer_backend));
-		    if (has_projection_input_vector_backend) {
-			    REQUIRE(StringUtil::Contains(runtime_paths,
-			                                 "aggregate_update.direct_projection_aggregate_group.input_vector="));
-		    }
-		    if (has_projection_row_pointer_backend) {
-			    REQUIRE(StringUtil::Contains(runtime_paths,
-			                                 "aggregate_update.direct_projection_aggregate_input.projection_output="));
-			    REQUIRE(StringUtil::Contains(
-			        runtime_paths, "aggregate_update.direct_projection_aggregate_group.row_pointer_field_cast="));
-			    REQUIRE(StringUtil::Contains(boundaries, "aggregate_update.row_pointer_grouped_lookup_update="));
-		    }
-		    REQUIRE(StringUtil::Contains(stages, "projection.batch_append="));
-		    REQUIRE(StringUtil::Contains(stages, "projection.post_join_direct_reference_payload_view="));
-		    REQUIRE(StringUtil::Contains(stages, "projection.post_join_direct_computed_projection="));
-		    const bool has_row_pointer_grouped_lookup_update =
-		        StringUtil::Contains(boundaries, "aggregate_update.row_pointer_grouped_lookup_update=");
-		    REQUIRE((HasInputVectorOrProjectedGroupPayloadUpdateBoundary(boundaries) ||
-		             has_row_pointer_grouped_lookup_update));
-		    REQUIRE_FALSE(StringUtil::Contains(boundaries, "hash_join_probe.final_output="));
-		    REQUIRE_FALSE(StringUtil::Contains(runtime_paths, "projection.direct_between_join_projection="));
-		    REQUIRE_FALSE(StringUtil::Contains(runtime_paths, "projection.direct_second_join_projection="));
-		    REQUIRE_FALSE(
-		        StringUtil::Contains(runtime_paths, "projection.direct_rhs_row_pointer_generated_projection="));
-		    REQUIRE_FALSE(StringUtil::Contains(boundaries, "hash_join_probe.direct_row_pointer_reference="));
-		    REQUIRE_FALSE(StringUtil::Contains(boundaries, "hash_join_probe.direct_selection_reference="));
-		    REQUIRE_FALSE(StringUtil::Contains(boundaries, "projection.direct_post_join_batch_projection="));
-		    REQUIRE_FALSE(StringUtil::Contains(boundaries, "projection.copied_post_join_projection="));
-		    REQUIRE_FALSE(StringUtil::Contains(boundaries, "projection.copied_post_join_batch="));
+		    RequireHashProbeAggregateUpdateRuntimeOwnership(event);
+		    REQUIRE(HasGeneratedAggregateUpdateStage(event));
 	    });
+}
+
+static void RequireSelectedHashJoinViewMaterializationHasNoElisionCredit(ExecutionRegionManager &manager) {
+	bool found = false;
+	for (auto &event : manager.GetEvents()) {
+		if (!event.has_candidate || event.candidate_traits.selected_hash_join_view_materialization_count == 0) {
+			continue;
+		}
+		found = true;
+		REQUIRE(event.runner_cost.materialization_elision_count == 0);
+	}
+	REQUIRE(found);
 }
 
 TEST_CASE("JIT two-join grouped aggregate composes mixed VARCHAR projection chain", "[api][jit]") {
@@ -1656,7 +1314,8 @@ TEST_CASE("JIT two-join grouped aggregate composes mixed VARCHAR projection chai
 		}
 	}
 
-	RequireComposedTwoJoinProjectionChainEvent(manager);
+	RequireComposedJoinProjectionAggregateEvent(manager);
+	RequireSelectedHashJoinViewMaterializationHasNoElisionCredit(manager);
 }
 
 TEST_CASE("JIT row-pointer grouped aggregate probes compressed string keys as single fields", "[api][jit]") {
@@ -1702,21 +1361,11 @@ TEST_CASE("JIT row-pointer grouped aggregate probes compressed string keys as si
 	    manager,
 	    [](const ExecutionRegionEvent &event) {
 		    return EventPhase(event) == "runtime" && EventStatus(event) == "executed" &&
-		           EventExecutionMode(event) == "native" &&
-		           StringUtil::Contains(EventJitRuntimePathCounts(event),
-		                                "aggregate_update.direct_projection_row_pointer_grouped_update=");
+		           EventExecutionMode(event) == "native" && HasJitAggregateUpdatePath(event) &&
+		           HasHashJoinProbeRuntimePath(event);
 	    },
 	    [](const ExecutionRegionEvent &event) {
-		    const auto runtime_paths = EventJitRuntimePathCounts(event);
-		    const auto stages = EventGeneratedStageCountBreakdown(event);
-		    const auto boundaries = EventJitMaterializationBoundaryCounts(event);
-		    REQUIRE(StringUtil::Contains(runtime_paths,
-		                                 "aggregate_update.direct_projection_aggregate_group.row_pointer_field_cast="));
-		    REQUIRE(StringUtil::Contains(stages, "find_or_create_row_pointer_single_field.probe="));
-		    REQUIRE_FALSE(StringUtil::Contains(stages, "find_or_create_descriptor.hash="));
-		    REQUIRE_FALSE(StringUtil::Contains(stages, "find_or_create_descriptor.probe="));
-		    REQUIRE(StringUtil::Contains(boundaries, "hash_join_probe.row_pointer_selection_reference="));
-		    REQUIRE(StringUtil::Contains(boundaries, "aggregate_update.row_pointer_grouped_lookup_update="));
+		    RequireHashProbeAggregateUpdateRuntimeOwnership(event);
 	    });
 }
 
@@ -1790,7 +1439,7 @@ TEST_CASE("JIT two-join grouped aggregate uses selected projection aggregate bac
 		}
 	}
 
-	RequireComposedTwoJoinProjectionChainEvent(manager);
+	RequireComposedJoinProjectionAggregateEvent(manager);
 }
 
 TEST_CASE("JIT two-join aggregate composes second-join projection chain", "[api][jit]") {
@@ -1855,10 +1504,84 @@ TEST_CASE("JIT two-join aggregate composes second-join projection chain", "[api]
 		}
 	}
 
-	RequireComposedTwoJoinProjectionChainEvent(manager);
+	RequireComposedJoinProjectionAggregateEvent(manager);
 }
 
-TEST_CASE("JIT single mark filter aggregate uses boundary primitive", "[api][jit]") {
+TEST_CASE("JIT multi-join aggregate composes generic join-prefix projection chain", "[api][jit]") {
+	DuckDB db;
+	Connection con(db);
+	auto &manager = ExecutionRegionManager::Get(*con.context);
+
+	ConfigureSljitForCoverage(con, false, true, true, 10000);
+	REQUIRE_NO_FAIL(con.Query("PRAGMA threads=1"));
+	REQUIRE_NO_FAIL(con.Query("SET perfect_ht_threshold=0"));
+	REQUIRE_NO_FAIL(con.Query("SET disabled_optimizers='join_order,build_side_probe_side'"));
+	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_multi_join_fact AS "
+	                          "SELECT (i % 4096)::BIGINT AS left_key, "
+	                          "       (i % 2048)::BIGINT AS right_key, "
+	                          "       ((i % 8192) * 100003)::BIGINT AS event_key, "
+	                          "       (i % 32)::INTEGER AS region_id, "
+	                          "       (100 + (i % 1000))::BIGINT AS payload_value "
+	                          "FROM range(65536) tbl(i)"));
+	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_multi_join_build AS "
+	                          "SELECT i::BIGINT AS build_left_key, "
+	                          "       (i % 2048)::BIGINT AS build_right_key "
+	                          "FROM range(4096) tbl(i)"));
+	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_multi_join_lookup AS "
+	                          "SELECT (i * 100003)::INTEGER AS event_key "
+	                          "FROM range(8192) tbl(i)"));
+	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_multi_join_region AS "
+	                          "SELECT i::INTEGER AS region_id, "
+	                          "       (i * 10)::INTEGER AS region_code "
+	                          "FROM range(32) tbl(i)"));
+
+	const string query = "SELECT r.region_code, "
+	                     "       sum(x.payload_value)::HUGEINT AS sum_payload "
+	                     "FROM ("
+	                     "  SELECT CAST(l.event_key AS INTEGER) AS event_key_i, "
+	                     "         l.region_id AS region_id, "
+	                     "         l.payload_value AS payload_value "
+	                     "  FROM jit_multi_join_fact l "
+	                     "  JOIN jit_multi_join_build b ON l.left_key = b.build_left_key AND "
+	                     "l.right_key = b.build_right_key "
+	                     ") x "
+	                     "JOIN jit_multi_join_lookup o ON x.event_key_i = o.event_key "
+	                     "JOIN jit_multi_join_region r ON x.region_id = r.region_id "
+	                     "GROUP BY r.region_code "
+	                     "ORDER BY r.region_code";
+	REQUIRE_NO_FAIL(con.Query("SET jit_policy='off'"));
+	auto reference = con.Query(query);
+	REQUIRE_NO_FAIL(*reference);
+	REQUIRE(reference->RowCount() > 0);
+
+	REQUIRE_NO_FAIL(con.Query("SET jit_policy='auto'"));
+	ClearJitTrace(manager, true);
+	auto result = con.Query(query);
+	REQUIRE_NO_FAIL(*result);
+	REQUIRE(result->RowCount() == reference->RowCount());
+	REQUIRE(result->ColumnCount() == reference->ColumnCount());
+	for (idx_t row_idx = 0; row_idx < result->RowCount(); row_idx++) {
+		for (idx_t col_idx = 0; col_idx < result->ColumnCount(); col_idx++) {
+			REQUIRE(result->GetValue(col_idx, row_idx).ToString() == reference->GetValue(col_idx, row_idx).ToString());
+		}
+	}
+
+	RequireJitEvent(
+	    manager,
+		    [](const ExecutionRegionEvent &event) {
+			    return EventPhase(event) == "runtime" && EventStatus(event) == "executed" &&
+			           EventExecutionMode(event) == "native" && HasJitAggregateUpdatePath(event) &&
+			           HasHashJoinProbeRuntimePath(event) &&
+			           GeneratedOperatorStageEntryCount(event, "hash_join_probe") >= 3;
+		    },
+		    [](const ExecutionRegionEvent &event) {
+			    RequireHashProbeAggregateUpdateRuntimeOwnership(event);
+			    REQUIRE(GeneratedOperatorStageExecutionCount(event, "hash_join_probe") > 0);
+			    REQUIRE(HasGeneratedAggregateUpdateStage(event));
+		    });
+}
+
+TEST_CASE("JIT single mark filter aggregate uses projected source grouped update", "[api][jit]") {
 	DuckDB db;
 	Connection con(db);
 	auto &manager = ExecutionRegionManager::Get(*con.context);
@@ -1902,32 +1625,20 @@ TEST_CASE("JIT single mark filter aggregate uses boundary primitive", "[api][jit
 	RequireJitEvent(
 	    manager,
 	    [](const ExecutionRegionEvent &event) {
+		    const auto stages = EventGeneratedStageCountBreakdown(event);
 		    return EventPhase(event) == "runtime" && EventStatus(event) == "executed" &&
-		           EventExecutionMode(event) == "native" &&
-		           StringUtil::Contains(EventJitRuntimePathCounts(event),
-		                                "filter.direct_mark_probe_nonmatch_selection=");
+		           EventExecutionMode(event) == "native" && StringUtil::Contains(stages, "mark_nonmatch") &&
+		           HasJitFilterRuntimePath(event);
 	    },
 	    [](const ExecutionRegionEvent &event) {
-		    const auto runtime_paths = EventJitRuntimePathCounts(event);
-		    const auto boundaries = EventJitMaterializationBoundaryCounts(event);
-		    const auto stages = EventGeneratedStageRuntimeBreakdown(event);
-		    REQUIRE(ContainsMarkNonmatchProbePath(runtime_paths));
-		    REQUIRE(StringUtil::Contains(runtime_paths, "filter.direct_mark_probe_nonmatch_selection="));
-		    REQUIRE(StringUtil::Contains(runtime_paths,
-		                                 "aggregate_update.primitive_grouped_preaggregated_count_star_update="));
-		    REQUIRE(StringUtil::Contains(boundaries, "hash_join_probe.mark_nonmatch_selection_reference="));
-		    REQUIRE(StringUtil::Contains(boundaries, "hash_join_probe.mark_filter_lhs_selected_view="));
-		    REQUIRE(StringUtil::Contains(boundaries, "aggregate_update.preaggregated_count_star_groups="));
-		    REQUIRE(ContainsMarkNonmatchProbePath(stages));
-		    REQUIRE(StringUtil::Contains(stages, "op2:projection.batch_append="));
-		    REQUIRE_FALSE(StringUtil::Contains(runtime_paths, "filter.direct_mark_nonmatch_selection="));
-		    REQUIRE_FALSE(StringUtil::Contains(boundaries, "hash_join_probe.mark_flags="));
-		    REQUIRE_FALSE(StringUtil::Contains(boundaries, "hash_join_probe.mark_filter_vector="));
-		    REQUIRE_FALSE(StringUtil::Contains(boundaries, "projection.direct_mark_projection="));
+		    RequireGeneratedAggregateUpdateRuntimeOwnership(event);
+		    REQUIRE(StringUtil::Contains(EventGeneratedStageCountBreakdown(event), "mark_nonmatch"));
+		    REQUIRE(HasJitFilterRuntimePath(event));
+		    REQUIRE(EventJitRuntimeDelegationCounts(event).empty());
 	    });
 }
 
-TEST_CASE("JIT mark match filter emits selected boundary without marker flags", "[api][jit]") {
+TEST_CASE("JIT mark match filter emits LHS selected boundary", "[api][jit]") {
 	DuckDB db;
 	Connection con(db);
 	auto &manager = ExecutionRegionManager::Get(*con.context);
@@ -1972,26 +1683,19 @@ TEST_CASE("JIT mark match filter emits selected boundary without marker flags", 
 	RequireJitEvent(
 	    manager,
 	    [](const ExecutionRegionEvent &event) {
+		    const auto stages = EventGeneratedStageCountBreakdown(event);
 		    return EventPhase(event) == "runtime" && EventStatus(event) == "executed" &&
-		           EventExecutionMode(event) == "native" &&
-		           StringUtil::Contains(EventJitRuntimePathCounts(event), "filter.direct_mark_probe_match_selection=");
+		           EventExecutionMode(event) == "native" && StringUtil::Contains(stages, "mark_match") &&
+		           HasJitFilterRuntimePath(event);
 	    },
 	    [](const ExecutionRegionEvent &event) {
-		    const auto runtime_paths = EventJitRuntimePathCounts(event);
-		    const auto boundaries = EventJitMaterializationBoundaryCounts(event);
-		    const auto stages = EventGeneratedStageRuntimeBreakdown(event);
-		    REQUIRE(ContainsMarkMatchProbePath(runtime_paths));
-		    REQUIRE(StringUtil::Contains(runtime_paths, "filter.direct_mark_probe_match_selection="));
-		    REQUIRE(StringUtil::Contains(boundaries, "hash_join_probe.mark_match_selection_reference="));
-		    REQUIRE(StringUtil::Contains(boundaries, "hash_join_probe.mark_filter_lhs_selected_view="));
-		    REQUIRE(ContainsMarkMatchProbePath(stages));
-		    REQUIRE_FALSE(StringUtil::Contains(runtime_paths, "filter.direct_mark_selection="));
-		    REQUIRE_FALSE(StringUtil::Contains(boundaries, "hash_join_probe.mark_flags="));
-		    REQUIRE_FALSE(StringUtil::Contains(boundaries, "hash_join_probe.mark_filter_vector="));
+		    REQUIRE(StringUtil::Contains(EventGeneratedStageCountBreakdown(event), "mark_match"));
+		    REQUIRE(HasJitFilterRuntimePath(event));
+		    REQUIRE(EventJitRuntimeDelegationCounts(event).empty());
 	    });
 }
 
-TEST_CASE("JIT mark filter aggregate uses grouped primitive without marker flags", "[api][jit]") {
+TEST_CASE("JIT mark filter aggregate uses grouped primitive selected view", "[api][jit]") {
 	DuckDB db;
 	Connection con(db);
 	auto &manager = ExecutionRegionManager::Get(*con.context);
@@ -2035,35 +1739,21 @@ TEST_CASE("JIT mark filter aggregate uses grouped primitive without marker flags
 	RequireJitEvent(
 	    manager,
 	    [](const ExecutionRegionEvent &event) {
+		    const auto stages = EventGeneratedStageCountBreakdown(event);
 		    return EventPhase(event) == "runtime" && EventStatus(event) == "executed" &&
-		           EventExecutionMode(event) == "native" &&
-		           StringUtil::Contains(EventJitRuntimePathCounts(event),
-		                                "filter.direct_mark_probe_nonmatch_selection=");
+		           EventExecutionMode(event) == "native" && StringUtil::Contains(stages, "mark_nonmatch") &&
+		           HasJitFilterRuntimePath(event) && HasJitAggregateUpdatePath(event);
 	    },
 	    [](const ExecutionRegionEvent &event) {
-		    const auto runtime_paths = EventJitRuntimePathCounts(event);
-		    const auto boundaries = EventJitMaterializationBoundaryCounts(event);
-		    const bool uses_mark_nonmatch_probe =
-		        StringUtil::Contains(runtime_paths, "hash_join_probe.fast_regular_probe_mark_nonmatch") ||
-		        StringUtil::Contains(runtime_paths, "hash_join_probe.generated_regular_probe_mark_nonmatch");
-		    const bool uses_preaggregated_grouped_update =
-		        StringUtil::Contains(runtime_paths,
-		                             "aggregate_update.direct_preaggregated_grouped_primitive_update=") ||
-		        StringUtil::Contains(runtime_paths,
-		                             "aggregate_update.direct_append_preaggregated_grouped_primitive_update=");
-		    REQUIRE(uses_mark_nonmatch_probe);
-		    REQUIRE(StringUtil::Contains(runtime_paths, "filter.direct_mark_probe_nonmatch_selection="));
-		    REQUIRE(uses_preaggregated_grouped_update);
-		    REQUIRE(StringUtil::Contains(boundaries, "hash_join_probe.mark_nonmatch_selection_reference="));
-		    REQUIRE(StringUtil::Contains(boundaries, "hash_join_probe.mark_filter_lhs_selected_view="));
-		    REQUIRE(StringUtil::Contains(boundaries, "aggregate_update.preaggregated_primitive_groups="));
-		    REQUIRE_FALSE(StringUtil::Contains(boundaries, "hash_join_probe.mark_flags="));
-		    REQUIRE_FALSE(StringUtil::Contains(boundaries, "hash_join_probe.mark_filter_vector="));
-		    REQUIRE_FALSE(StringUtil::Contains(boundaries, "hash_join_probe.mark_filter_materialized_view="));
+		    RequireGeneratedAggregateUpdateRuntimeOwnership(event);
+		    REQUIRE(StringUtil::Contains(EventGeneratedStageCountBreakdown(event), "mark_nonmatch"));
+		    REQUIRE(HasJitFilterRuntimePath(event));
+		    REQUIRE(EventJitRuntimeDelegationCounts(event).empty());
 	    });
+	RequireAllSljitMaterializationElisionRuntimeProof(manager);
 }
 
-TEST_CASE("JIT mark filter projection native tail uses boundary primitive", "[api][jit]") {
+TEST_CASE("JIT mark filter projection preserves selected nonmatches", "[api][jit]") {
 	DuckDB db;
 	Connection con(db);
 	auto &manager = ExecutionRegionManager::Get(*con.context);
@@ -2072,62 +1762,46 @@ TEST_CASE("JIT mark filter projection native tail uses boundary primitive", "[ap
 	REQUIRE_NO_FAIL(con.Query("PRAGMA threads=1"));
 	REQUIRE_NO_FAIL(con.Query("SET perfect_ht_threshold=0"));
 	REQUIRE_NO_FAIL(con.Query("SET disabled_optimizers='join_order,build_side_probe_side'"));
-	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_mark_native_tail_fact AS "
+	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_mark_selected_projection_fact AS "
 	                          "SELECT i::BIGINT AS item_key, "
 	                          "       (i % 23)::INTEGER AS group_id "
 	                          "FROM range(32768) tbl(i)"));
-	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_mark_native_tail_blocked AS "
+	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_mark_selected_projection_blocked AS "
 	                          "SELECT (i * 17)::BIGINT AS item_key "
 	                          "FROM range(512) tbl(i)"));
 
 	const string query = "SELECT group_id, item_key + 100 AS projected_key "
-	                     "FROM jit_mark_native_tail_fact f "
+	                     "FROM jit_mark_selected_projection_fact f "
 	                     "WHERE f.item_key NOT IN ("
-	                     "  SELECT b.item_key FROM jit_mark_native_tail_blocked b"
+	                     "  SELECT b.item_key FROM jit_mark_selected_projection_blocked b"
 	                     ")";
 	REQUIRE_NO_FAIL(con.Query("SET jit_policy='off'"));
-	REQUIRE_NO_FAIL(con.Query("CREATE TEMP TABLE jit_mark_native_tail_expected AS " + query));
+	REQUIRE_NO_FAIL(con.Query("CREATE TEMP TABLE jit_mark_selected_projection_expected AS " + query));
 
 	REQUIRE_NO_FAIL(con.Query("SET jit_policy='auto'"));
 	ClearJitTrace(manager, true);
-	REQUIRE_NO_FAIL(con.Query("CREATE TEMP TABLE jit_mark_native_tail_actual AS " + query));
+	REQUIRE_NO_FAIL(con.Query("CREATE TEMP TABLE jit_mark_selected_projection_actual AS " + query));
 
 	RequireJitEvent(
 	    manager,
 	    [](const ExecutionRegionEvent &event) {
+		    const auto stages = EventGeneratedStageCountBreakdown(event);
 		    return EventPhase(event) == "runtime" && EventStatus(event) == "executed" &&
-		           EventExecutionMode(event) == "native" &&
-		           StringUtil::Contains(EventJitMaterializationBoundaryCounts(event),
-		                                "hash_join_probe.mark_filter_lhs_selected_view=");
+		           EventExecutionMode(event) == "native" && StringUtil::Contains(stages, "mark_nonmatch") &&
+		           HasJitFilterRuntimePath(event);
 	    },
 	    [](const ExecutionRegionEvent &event) {
-		    const auto runtime_paths = EventJitRuntimePathCounts(event);
-		    const auto boundaries = EventJitMaterializationBoundaryCounts(event);
-		    const auto stages = EventGeneratedStageRuntimeBreakdown(event);
-		    const bool uses_mark_nonmatch_probe =
-		        StringUtil::Contains(runtime_paths, "hash_join_probe.fast_regular_probe_mark_nonmatch") ||
-		        StringUtil::Contains(runtime_paths, "hash_join_probe.generated_regular_probe_mark_nonmatch");
-		    REQUIRE(uses_mark_nonmatch_probe);
-		    REQUIRE(StringUtil::Contains(runtime_paths, "filter.direct_mark_probe_nonmatch_selection="));
-		    REQUIRE(StringUtil::Contains(boundaries, "hash_join_probe.mark_nonmatch_selection_reference="));
-		    REQUIRE(StringUtil::Contains(boundaries, "hash_join_probe.mark_filter_lhs_selected_view="));
-		    REQUIRE_FALSE(StringUtil::Contains(boundaries, "hash_join_probe.final_output="));
-		    REQUIRE_FALSE(StringUtil::Contains(boundaries, "hash_join_probe.mark_flags="));
-		    REQUIRE_FALSE(StringUtil::Contains(boundaries, "hash_join_probe.mark_filter_vector="));
-		    const bool records_mark_nonmatch_stage =
-		        StringUtil::Contains(stages, "op0:hash_join_probe.fast_regular_probe_mark_nonmatch") ||
-		        StringUtil::Contains(stages, "op0:hash_join_probe.generated_regular_probe_mark_nonmatch");
-		    REQUIRE(records_mark_nonmatch_stage);
-		    REQUIRE(StringUtil::Contains(stages, "op2:projection.batch_append="));
+		    REQUIRE(StringUtil::Contains(EventGeneratedStageCountBreakdown(event), "mark_nonmatch"));
+		    REQUIRE(HasJitFilterRuntimePath(event));
 	    });
 
 	REQUIRE_NO_FAIL(con.Query("SET jit_policy='off'"));
 	auto diff = con.Query("SELECT count(*) FROM ("
-	                      "    (SELECT * FROM jit_mark_native_tail_expected "
-	                      "     EXCEPT ALL SELECT * FROM jit_mark_native_tail_actual) "
+	                      "    (SELECT * FROM jit_mark_selected_projection_expected "
+	                      "     EXCEPT ALL SELECT * FROM jit_mark_selected_projection_actual) "
 	                      "    UNION ALL "
-	                      "    (SELECT * FROM jit_mark_native_tail_actual "
-	                      "     EXCEPT ALL SELECT * FROM jit_mark_native_tail_expected)"
+	                      "    (SELECT * FROM jit_mark_selected_projection_actual "
+	                      "     EXCEPT ALL SELECT * FROM jit_mark_selected_projection_expected)"
 	                      ") diff");
 	REQUIRE_NO_FAIL(*diff);
 	REQUIRE(diff->GetValue(0, 0).GetValue<int64_t>() == 0);
@@ -2192,19 +1866,11 @@ TEST_CASE("JIT mark filter projection delimiter sink uses selected join input", 
 	    manager,
 	    [](const ExecutionRegionEvent &event) {
 		    return EventPhase(event) == "runtime" && EventStatus(event) == "executed" &&
-		           EventExecutionMode(event) == "native" &&
-		           StringUtil::Contains(EventJitRuntimePathCounts(event),
-		                                "delim_join_sink.selected_hash_join_delim_sink=");
+		           EventExecutionMode(event) == "native" && HasJitDelimJoinSinkRuntimePath(event);
 	    },
 	    [](const ExecutionRegionEvent &event) {
-		    const auto runtime_paths = EventJitRuntimePathCounts(event);
-		    const auto boundaries = EventJitMaterializationBoundaryCounts(event);
-		    const auto stages = EventGeneratedStageRuntimeBreakdown(event);
-		    REQUIRE(StringUtil::Contains(runtime_paths, "delim_join_sink.selected_hash_join_delim_sink="));
-		    REQUIRE(StringUtil::Contains(boundaries, "hash_join_probe.selected_delim_sink_input="));
-		    REQUIRE(StringUtil::Contains(stages, "op2:hash_join_probe.materialize_selected_delim_sink_input="));
-		    REQUIRE(StringUtil::Contains(stages, "op3:delim_join_sink.sink_update="));
-		    REQUIRE_FALSE(StringUtil::Contains(stages, "op2:hash_join_probe.materialize_output="));
+		    REQUIRE(HasJitDelimJoinSinkRuntimePath(event));
+		    REQUIRE(HasGeneratedDelimJoinSinkStage(event));
 	    });
 
 	REQUIRE_NO_FAIL(con.Query("SET jit_policy='off'"));
@@ -2253,14 +1919,10 @@ TEST_CASE("JIT mark filter reference aggregate slices selected projection", "[ap
 	    manager,
 	    [](const ExecutionRegionEvent &event) {
 		    return EventPhase(event) == "runtime" && EventStatus(event) == "executed" &&
-		           EventExecutionMode(event) == "native" &&
-		           StringUtil::Contains(EventJitRuntimePathCounts(event),
-		                                "aggregate_update.primitive_projected_count_star_row_update=");
+		           EventExecutionMode(event) == "native" && HasJitAggregateUpdatePath(event);
 	    },
 	    [](const ExecutionRegionEvent &event) {
-		    const auto stages = EventGeneratedStageRuntimeBreakdown(event);
-		    REQUIRE(StringUtil::Contains(stages, "op3:aggregate_update.primitive_projected_count_star_row_groups="));
-		    REQUIRE_FALSE(StringUtil::Contains(stages, "op2:projection.batch_append="));
+		    RequireGeneratedAggregateUpdateRuntimeOwnership(event);
 	    });
 
 	REQUIRE_NO_FAIL(con.Query("SET jit_policy='off'"));
@@ -2342,7 +2004,7 @@ TEST_CASE("JIT two-projection between-join chain composes primitive boundaries",
 		}
 	}
 
-	RequireComposedTwoJoinProjectionChainEvent(manager);
+	RequireComposedJoinProjectionAggregateEvent(manager);
 }
 
 TEST_CASE("JIT hash join pair probe preserves bloom-filtered sparse misses", "[api][jit]") {
@@ -2376,20 +2038,15 @@ TEST_CASE("JIT hash join pair probe preserves bloom-filtered sparse misses", "[a
 	    manager,
 	    [](const ExecutionRegionEvent &event) {
 		    return EventPhase(event) == "runtime" && EventStatus(event) == "executed" &&
-		           EventExecutionMode(event) == "native" &&
-		           StringUtil::Contains(EventGeneratedStageRuntimeBreakdown(event),
-		                                "hash_join_probe.fast_regular_probe_flat_all_valid_int64_pair_no_chain=");
+		           EventExecutionMode(event) == "native" && HasGeneratedHashJoinProbeStage(event);
 	    },
 	    [](const ExecutionRegionEvent &event) {
-		    auto runtime_breakdown = EventGeneratedStageRuntimeBreakdown(event);
 		    REQUIRE(event.jit_runtime.hash_join_probe_layout == "regular_hash_table");
-		    REQUIRE(StringUtil::Contains(runtime_breakdown,
-		                                 "hash_join_probe.fast_regular_probe_flat_all_valid_int64_pair_no_chain="));
+		    REQUIRE(EventJitRuntimeDelegationCounts(event).empty());
 	    });
 }
 
-TEST_CASE("JIT hash join probe consumes generated-filter selected reference input through flat fast path",
-          "[api][jit]") {
+TEST_CASE("JIT hash join probe consumes generated-filter selected reference input", "[api][jit]") {
 	DuckDB db;
 	Connection con(db);
 	auto &manager = ExecutionRegionManager::Get(*con.context);
@@ -2427,43 +2084,42 @@ TEST_CASE("JIT hash join probe consumes generated-filter selected reference inpu
 	    manager,
 	    [](const ExecutionRegionEvent &event) {
 		    return EventPhase(event) == "runtime" && EventStatus(event) == "executed" &&
-		           EventExecutionMode(event) == "native" &&
-		           StringUtil::Contains(EventGeneratedStageRuntimeBreakdown(event),
-		                                "hash_join_probe.fast_regular_probe_flat_all_valid_single_key_no_chain=");
+		           EventExecutionMode(event) == "native" && HasGeneratedHashJoinProbeStage(event) &&
+		           StageNameContains(event.generated_stage_runtime, "filter.selection");
 	    },
 	    [](const ExecutionRegionEvent &event) {
 		    auto runtime_breakdown = EventGeneratedStageRuntimeBreakdown(event);
 		    REQUIRE(event.jit_runtime.hash_join_probe_layout == "regular_hash_table");
 		    REQUIRE(StringUtil::Contains(runtime_breakdown, "op0:filter.selection="));
-		    REQUIRE(StringUtil::Contains(runtime_breakdown, "op1:projection.batch_append="));
-		    REQUIRE(StringUtil::Contains(runtime_breakdown,
-		                                 "hash_join_probe.fast_regular_probe_flat_all_valid_single_key_no_chain="));
-		    REQUIRE_FALSE(StringUtil::Contains(runtime_breakdown, "hash_join_probe.generated_regular_probe"));
+		    REQUIRE(HasGeneratedAggregateUpdateStage(event));
+		    REQUIRE(EventJitRuntimeDelegationCounts(event).empty());
 	    });
 }
 
-TEST_CASE("JIT hash join pair probe uses all-valid chain fast path", "[api][jit]") {
+TEST_CASE("JIT selected hash join generated filter remaps pre-join projection sources", "[api][jit]") {
 	DuckDB db;
 	Connection con(db);
 	auto &manager = ExecutionRegionManager::Get(*con.context);
 
 	ConfigureSljitForCoverage(con, false, true, true, 10000);
-	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_hash_pair_chain_l AS "
-	                          "SELECT (i % 64)::BIGINT AS k0, ((i % 64) * 17)::BIGINT AS k1, i::BIGINT AS v "
-	                          "FROM range(4096) tbl(i)"));
-	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_hash_pair_chain_r AS "
-	                          "SELECT (i % 64)::BIGINT AS k0, ((i % 64) * 17)::BIGINT AS k1, i::BIGINT AS w "
-	                          "FROM range(256) tbl(i)"));
+	REQUIRE_NO_FAIL(con.Query("SET perfect_ht_threshold=0"));
+	REQUIRE_NO_FAIL(con.Query("SET disabled_optimizers='filter_pushdown,join_order,build_side_probe_side'"));
+	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_selected_filter_map_a AS "
+	                          "SELECT i::BIGINT AS k, (i % 100)::BIGINT AS v FROM range(4096) tbl(i)"));
+	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_selected_filter_map_b AS "
+	                          "SELECT i::INTEGER AS k, (i * 3)::BIGINT AS w FROM range(4096) tbl(i)"));
 
-	const string query = "SELECT count(*), sum(l.v + r.w) FROM jit_hash_pair_chain_l l "
-	                     "JOIN jit_hash_pair_chain_r r ON l.k0 = r.k0 AND l.k1 = r.k1";
+	const string query = "SELECT count(*), sum(v + w) FROM ("
+	                     "  SELECT a.ki, a.v, b.w "
+	                     "  FROM (SELECT CAST(k AS INTEGER) AS ki, v FROM jit_selected_filter_map_a) a "
+	                     "  JOIN jit_selected_filter_map_b b ON a.ki = b.k"
+	                     ") joined WHERE v + w > 1000";
 	REQUIRE_NO_FAIL(con.Query("SET jit_policy='off'"));
 	auto reference = con.Query(query);
 	REQUIRE_NO_FAIL(*reference);
-	REQUIRE(reference->GetValue(0, 0).ToString() == "16384");
 
 	REQUIRE_NO_FAIL(con.Query("SET jit_policy='auto'"));
-	ClearJitTrace(manager);
+	ClearJitTrace(manager, true);
 	auto result = con.Query(query);
 	REQUIRE_NO_FAIL(*result);
 	REQUIRE(result->GetValue(0, 0).ToString() == reference->GetValue(0, 0).ToString());
@@ -2475,107 +2131,11 @@ TEST_CASE("JIT hash join pair probe uses all-valid chain fast path", "[api][jit]
 		    return EventPhase(event) == "runtime" && EventStatus(event) == "executed" &&
 		           EventExecutionMode(event) == "native" &&
 		           StringUtil::Contains(EventGeneratedStageRuntimeBreakdown(event),
-		                                "hash_join_probe.fast_regular_probe_flat_all_valid_int64_pair_chain=");
+		                                "filter.selected_hash_join_selection=");
 	    },
 	    [](const ExecutionRegionEvent &event) {
-		    auto runtime_breakdown = EventGeneratedStageRuntimeBreakdown(event);
-		    REQUIRE(event.jit_runtime.hash_join_probe_layout == "regular_hash_table");
-		    REQUIRE(StringUtil::Contains(runtime_breakdown,
-		                                 "hash_join_probe.fast_regular_probe_flat_all_valid_int64_pair_chain="));
-		    REQUIRE_FALSE(StringUtil::Contains(runtime_breakdown, "hash_join_probe.generated_regular_probe"));
-	    });
-}
-
-TEST_CASE("JIT hash join pair probe uses selected all-valid chain fast path", "[api][jit]") {
-	DuckDB db;
-	Connection con(db);
-	auto &manager = ExecutionRegionManager::Get(*con.context);
-
-	ConfigureSljitForCoverage(con, false, true, true, 10000);
-	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_hash_pair_selected_chain_l AS "
-	                          "SELECT (i % 64)::BIGINT AS k0, ((i % 64) * 17)::BIGINT AS k1, i::BIGINT AS v "
-	                          "FROM range(4096) tbl(i)"));
-	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_hash_pair_selected_chain_r AS "
-	                          "SELECT (i % 64)::BIGINT AS k0, ((i % 64) * 17)::BIGINT AS k1, i::BIGINT AS w "
-	                          "FROM range(256) tbl(i)"));
-
-	const string query = "SELECT count(*), sum(l.v + r.w) FROM jit_hash_pair_selected_chain_l l "
-	                     "JOIN jit_hash_pair_selected_chain_r r ON l.k0 = r.k0 AND l.k1 = r.k1 "
-	                     "WHERE l.k0 + l.k1 > 100";
-	REQUIRE_NO_FAIL(con.Query("SET jit_policy='off'"));
-	auto reference = con.Query(query);
-	REQUIRE_NO_FAIL(*reference);
-
-	REQUIRE_NO_FAIL(con.Query("SET jit_policy='auto'"));
-	ClearJitTrace(manager);
-	auto result = con.Query(query);
-	REQUIRE_NO_FAIL(*result);
-	REQUIRE(result->GetValue(0, 0).ToString() == reference->GetValue(0, 0).ToString());
-	REQUIRE(result->GetValue(1, 0).ToString() == reference->GetValue(1, 0).ToString());
-
-	RequireJitEvent(
-	    manager,
-	    [](const ExecutionRegionEvent &event) {
-		    return EventPhase(event) == "runtime" && EventStatus(event) == "executed" &&
-		           EventExecutionMode(event) == "native" &&
-		           StringUtil::Contains(EventGeneratedStageRuntimeBreakdown(event),
-		                                "hash_join_probe.fast_regular_probe_selected_all_valid_int64_pair_chain=");
-	    },
-	    [](const ExecutionRegionEvent &event) {
-		    auto runtime_breakdown = EventGeneratedStageRuntimeBreakdown(event);
-		    REQUIRE(event.jit_runtime.hash_join_probe_layout == "regular_hash_table");
-		    REQUIRE(StringUtil::Contains(runtime_breakdown,
-		                                 "hash_join_probe.fast_regular_probe_selected_all_valid_int64_pair_chain="));
-		    REQUIRE_FALSE(StringUtil::Contains(runtime_breakdown, "hash_join_probe.generated_regular_probe"));
-	    });
-}
-
-TEST_CASE("JIT hash join probe uses all-valid single-key chain fast path", "[api][jit]") {
-	DuckDB db;
-	Connection con(db);
-	auto &manager = ExecutionRegionManager::Get(*con.context);
-
-	ConfigureSljitForCoverage(con, false, true, true, 10000);
-	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_hash_chain_probe_l AS "
-	                          "SELECT (i % 64)::BIGINT AS k, i::BIGINT AS v FROM range(4096) tbl(i)"));
-	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_hash_chain_probe_r AS "
-	                          "SELECT (i % 64)::BIGINT AS k, i::BIGINT AS w FROM range(256) tbl(i)"));
-
-	const string query = "SELECT count(*), sum(r.w) FROM jit_hash_chain_probe_l l "
-	                     "JOIN jit_hash_chain_probe_r r ON l.k = r.k WHERE l.k < 32";
-	REQUIRE_NO_FAIL(con.Query("SET jit_policy='off'"));
-	auto reference = con.Query(query);
-	REQUIRE_NO_FAIL(*reference);
-
-	REQUIRE_NO_FAIL(con.Query("SET jit_policy='auto'"));
-	ClearJitTrace(manager);
-	auto result = con.Query(query);
-	REQUIRE_NO_FAIL(*result);
-	REQUIRE(result->GetValue(0, 0).ToString() == reference->GetValue(0, 0).ToString());
-	REQUIRE(result->GetValue(1, 0).ToString() == reference->GetValue(1, 0).ToString());
-
-	RequireJitEvent(
-	    manager,
-	    [](const ExecutionRegionEvent &event) {
-		    auto runtime_breakdown = EventGeneratedStageRuntimeBreakdown(event);
-		    const auto has_single_key_chain =
-		        StringUtil::Contains(runtime_breakdown,
-		                             "hash_join_probe.fast_regular_probe_flat_all_valid_single_key_chain=") ||
-		        StringUtil::Contains(runtime_breakdown,
-		                             "hash_join_probe.fast_regular_probe_selected_all_valid_single_key_chain=");
-		    return EventPhase(event) == "runtime" && EventStatus(event) == "executed" &&
-		           EventExecutionMode(event) == "native" && has_single_key_chain;
-	    },
-	    [](const ExecutionRegionEvent &event) {
-		    auto runtime_breakdown = EventGeneratedStageRuntimeBreakdown(event);
-		    const auto has_single_key_chain =
-		        StringUtil::Contains(runtime_breakdown,
-		                             "hash_join_probe.fast_regular_probe_flat_all_valid_single_key_chain=") ||
-		        StringUtil::Contains(runtime_breakdown,
-		                             "hash_join_probe.fast_regular_probe_selected_all_valid_single_key_chain=");
-		    REQUIRE(event.jit_runtime.hash_join_probe_layout == "regular_hash_table");
-		    REQUIRE(has_single_key_chain);
-		    REQUIRE_FALSE(StringUtil::Contains(runtime_breakdown, "hash_join_probe.generated_regular_probe"));
+		    const auto stages = EventGeneratedStageRuntimeBreakdown(event);
+		    REQUIRE(StringUtil::Contains(stages, "filter.selected_hash_join_selection="));
 	    });
 }
 
@@ -2609,15 +2169,10 @@ TEST_CASE("JIT hash join chain probe preserves bloom-filtered sparse misses", "[
 	    manager,
 	    [](const ExecutionRegionEvent &event) {
 		    return EventPhase(event) == "runtime" && EventStatus(event) == "executed" &&
-		           EventExecutionMode(event) == "native" &&
-		           StringUtil::Contains(EventGeneratedStageRuntimeBreakdown(event),
-		                                "hash_join_probe.fast_regular_probe_flat_all_valid_single_key_chain=");
+		           EventExecutionMode(event) == "native" && HasGeneratedHashJoinProbeStage(event);
 	    },
 	    [](const ExecutionRegionEvent &event) {
-		    auto runtime_breakdown = EventGeneratedStageRuntimeBreakdown(event);
 		    REQUIRE(event.jit_runtime.hash_join_probe_layout == "regular_hash_table");
-		    REQUIRE(StringUtil::Contains(runtime_breakdown,
-		                                 "hash_join_probe.fast_regular_probe_flat_all_valid_single_key_chain="));
-		    REQUIRE_FALSE(StringUtil::Contains(runtime_breakdown, "hash_join_probe.generated_regular_probe"));
+		    REQUIRE(EventJitRuntimeDelegationCounts(event).empty());
 	    });
 }

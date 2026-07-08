@@ -113,7 +113,27 @@ static void ExecuteSljitPrimitiveCountOneTargetBatch(const ExecutionGroupedAggre
 struct SljitPreaggregatedPrimitiveUpdateState {
 	const vector<const ExecutionPrimitiveAggregateUpdateLane *> *lanes = nullptr;
 	const vector<SljitPreaggregatedPrimitivePayloadDeltas> *payloads = nullptr;
+	idx_t capture_row_idx = DConstants::INVALID_INDEX;
+	uintptr_t captured_address = 0;
 };
+
+static SljitPreaggregatedPrimitiveUpdateState SljitMakePreaggregatedPrimitiveUpdateState(
+    const vector<const ExecutionPrimitiveAggregateUpdateLane *> &lanes,
+    const vector<SljitPreaggregatedPrimitivePayloadDeltas> &payloads,
+    idx_t capture_row_idx = DConstants::INVALID_INDEX) {
+	SljitPreaggregatedPrimitiveUpdateState state;
+	state.lanes = &lanes;
+	state.payloads = &payloads;
+	state.capture_row_idx = capture_row_idx;
+	return state;
+}
+
+static void SljitCapturePreaggregatedPrimitiveAddress(SljitPreaggregatedPrimitiveUpdateState &state, idx_t row_idx,
+                                                      uintptr_t address) {
+	if (state.capture_row_idx == row_idx) {
+		state.captured_address = address;
+	}
+}
 
 static bool ExecuteSljitSingleLanePreaggregatedPrimitiveUpdate(
     const uintptr_t *addresses, const sel_t *address_sel, const sel_t *execute_sel, idx_t count,
@@ -138,6 +158,7 @@ static bool ExecuteSljitSingleLanePreaggregatedPrimitiveUpdate(
 			D_ASSERT(row_idx < payload.int64_values.size());
 			const auto address_idx = SljitSelectedGroupedStateAddressIndex(address_sel, execute_sel, idx, row_idx);
 			auto state_address = reinterpret_cast<data_ptr_t>(addresses[address_idx]);
+			SljitCapturePreaggregatedPrimitiveAddress(state, row_idx, addresses[address_idx]);
 			auto count_ptr = reinterpret_cast<int64_t *>(state_address + state_value_offset);
 			*count_ptr += values[row_idx];
 		}
@@ -156,6 +177,7 @@ static bool ExecuteSljitSingleLanePreaggregatedPrimitiveUpdate(
 			}
 			const auto address_idx = SljitSelectedGroupedStateAddressIndex(address_sel, execute_sel, idx, row_idx);
 			auto state_address = reinterpret_cast<data_ptr_t>(addresses[address_idx]);
+			SljitCapturePreaggregatedPrimitiveAddress(state, row_idx, addresses[address_idx]);
 			auto sum = reinterpret_cast<int64_t *>(state_address + state_value_offset);
 			*sum += values[row_idx];
 			auto state_is_set = reinterpret_cast<bool *>(state_address + state_is_set_offset);
@@ -176,6 +198,7 @@ static bool ExecuteSljitSingleLanePreaggregatedPrimitiveUpdate(
 			}
 			const auto address_idx = SljitSelectedGroupedStateAddressIndex(address_sel, execute_sel, idx, row_idx);
 			auto state_address = reinterpret_cast<data_ptr_t>(addresses[address_idx]);
+			SljitCapturePreaggregatedPrimitiveAddress(state, row_idx, addresses[address_idx]);
 			auto sum = reinterpret_cast<hugeint_t *>(state_address + state_value_offset);
 			*sum += values[row_idx];
 			auto state_is_set = reinterpret_cast<bool *>(state_address + state_is_set_offset);
@@ -203,6 +226,7 @@ static void ExecuteSljitPreaggregatedPrimitiveUpdate(const uintptr_t *addresses,
 		const auto row_idx = execute_sel ? execute_sel[idx] : idx;
 		const auto address_idx = SljitSelectedGroupedStateAddressIndex(address_sel, execute_sel, idx, row_idx);
 		auto state_address = reinterpret_cast<data_ptr_t>(addresses[address_idx]);
+		SljitCapturePreaggregatedPrimitiveAddress(state, row_idx, addresses[address_idx]);
 		for (idx_t payload_idx = 0; payload_idx < lanes.size(); payload_idx++) {
 			auto lane = lanes[payload_idx];
 			if (!lane || !lane->ready || lane->state_size == 0) {

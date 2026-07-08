@@ -38,6 +38,10 @@
       "value": "4096"
     },
     {
+      "name": "jit_cbo_source_contract_scan_filter_penalty",
+      "value": "0"
+    },
+    {
       "name": "jit_cbo_startup_base_cost",
       "value": "0"
     },

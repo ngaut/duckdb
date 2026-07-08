@@ -114,9 +114,10 @@ static bool SljitCanExecuteDirectGroupedStateAddressPayloadUpdate(
 enum class SljitFusedTypedPayloadSourceOverrideStatus : uint8_t { NONE, READY, INVALID };
 
 static SljitFusedTypedPayloadSourceOverrideStatus
-SljitGetFusedTypedPayloadSourceOverrideStatus(SljitExecutableAggregateUpdate &aggregate_update,
+SljitGetFusedTypedPayloadSourceOverrideStatus(const SljitExecutableAggregateUpdate &aggregate_update,
                                               const vector<ExecutionRegionAggregateInput> &aggregates,
-                                              DataChunk &payload_input, const vector<idx_t> &payload_source_indices) {
+                                              const DataChunk &payload_input,
+                                              const vector<idx_t> &payload_source_indices) {
 	if (!aggregate_update.fused_payload_update_function) {
 		return SljitFusedTypedPayloadSourceOverrideStatus::NONE;
 	}

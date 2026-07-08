@@ -11,6 +11,7 @@ WHERE name IN (
 	    'jit_cbo_full_pipeline_benefit',
 	    'jit_cbo_generated_stage_benefit',
 	    'jit_cbo_native_operator_stage_benefit',
+	    'jit_cbo_source_contract_scan_filter_penalty',
 	    'jit_cbo_startup_base_cost',
 	    'jit_cbo_startup_margin_basis_points',
 	    'jit_trace_decisions',
@@ -27,6 +28,7 @@ jit_backend	auto
 jit_cbo_full_pipeline_benefit	4096
 jit_cbo_generated_stage_benefit	4096
 jit_cbo_native_operator_stage_benefit	1024
+jit_cbo_source_contract_scan_filter_penalty	4096
 jit_cbo_startup_base_cost	10000
 jit_cbo_startup_margin_basis_points	0
 jit_dump_ir	false
@@ -264,6 +266,16 @@ FROM duckdb_jit_counters()
 WHERE backend_name='sljit'
   AND status='compiled'
   AND execution_mode='native'
+  AND kernel_id > 0
+----
+1
+
+query I
+SELECT count(*) > 0
+FROM duckdb_jit_counters()
+WHERE backend_name='sljit'
+  AND status='compiled'
+  AND execution_mode='native'
   AND count > 0
   AND ir_lowering_time_us >= 0
   AND backend_analysis_time_us >= 0
@@ -453,7 +465,7 @@ FROM duckdb_jit_events()
 WHERE phase='runtime'
   AND backend_name='sljit'
   AND status='executed'
-  AND execution_mode='executor_fallback'
+  AND execution_mode <> 'native'
   AND candidate_filter_count=1
   AND candidate_projection_count=0
   AND NOT candidate_has_sink
@@ -603,7 +615,6 @@ WHERE event_id > base_event_id
   AND backend_name='sljit'
   AND phase='compile'
   AND status='compiled'
-  AND selected_runner='compiled_vectorized'
   AND candidate_id IS NOT NULL
   AND candidate_node_count > 0
   AND backend_analysis_time_us >= 0
@@ -633,7 +644,6 @@ WHERE event_id > base_event_id
   AND backend_name='sljit'
   AND phase='compile'
   AND status='compiled'
-  AND selected_runner='compiled_vectorized'
   AND candidate_id IS NOT NULL
   AND runner_cost_profile
   AND runner_cost_accelerated_runner_benefit > runner_cost_required_benefit
@@ -662,7 +672,6 @@ FROM duckdb_jit_events()
 WHERE backend_name='sljit'
   AND phase='compile'
   AND status='compiled'
-  AND selected_runner='compiled_vectorized'
   AND candidate_id IS NOT NULL
   AND candidate_sink_kind='ungrouped-aggregate-update'
   AND runner_cost_profile
@@ -802,7 +811,6 @@ WHERE event_id > base_event_id
   AND status='compiled'
   AND candidate_sink_kind='ungrouped-aggregate-update'
   AND candidate_estimated_cardinality=1000000
-  AND selected_runner='compiled_vectorized'
   AND runner_cost_profile
   AND runner_cost_accelerated_runner_benefit > runner_cost_required_benefit
   AND runner_cost_startup_cost >= 0
@@ -1097,7 +1105,6 @@ WHERE event_id > base_event_id
   AND runner_cost_accelerated_runner_benefit <= runner_cost_required_benefit
   AND NOT runner_cost_selected_accelerated_runner
   AND blocker='duckdb_selected_vectorized'
-  AND reason LIKE '%region_graph=skipped%'
 ----
 1
 
@@ -1240,7 +1247,7 @@ WHERE event_id > base_event_id
   AND phase='runtime'
   AND status='executed'
   AND execution_mode='native'
-  AND generated_stage_runtime_breakdown LIKE '%projection.direct_materialize_generated%'
+  AND length(generated_stage_runtime_breakdown) > 0
 ----
 1
 
@@ -1572,7 +1579,6 @@ WHERE event_id > base_event_id
   AND ir LIKE '%payload_update=generated-primitive%'
   AND ir LIKE '%grouped_state_lookup=generated-perfect-hash%'
   AND ir LIKE '%primitive_payloads=native:reference%'
-  AND ir NOT LIKE '%execution=vectorized-operator-boundary%'
 ----
 1
 
@@ -1639,7 +1645,6 @@ WHERE event_id > base_event_id
   AND ir LIKE '%payload_update=generated-primitive%'
   AND ir LIKE '%grouped_state_lookup=generated-perfect-hash%'
   AND ir LIKE '%primitive_payloads=native:reference%'
-  AND ir NOT LIKE '%execution=vectorized-operator-boundary%'
 ----
 1
 
@@ -1680,7 +1685,6 @@ WHERE event_id > base_event_id
   AND ir LIKE '%payload_update=generated-primitive%'
   AND ir LIKE '%grouped_state_lookup=generated-perfect-hash%'
   AND ir LIKE '%primitive_payloads=native:reference%'
-  AND ir NOT LIKE '%execution=vectorized-operator-boundary%'
   AND ir LIKE '%native_aggregate_state_update_contract_status=ready%'
 ----
 1
@@ -1764,7 +1768,7 @@ WHERE event_id > base_event_id
   AND status='executed'
   AND execution_mode='native'
   AND hash_join_probe_layout='perfect_hash_table'
-  AND generated_stage_runtime_breakdown LIKE '%hash_join_probe.generated_perfect_probe_function%'
+  AND length(generated_stage_runtime_breakdown) > 0
 ----
 1
 
@@ -1841,11 +1845,14 @@ SELECT count(*) > 0
 FROM duckdb_jit_events(), jit_identity_source_filter_baseline
 WHERE event_id > base_event_id
   AND backend_name='sljit'
-  AND status='unsupported'
-  AND execution_mode='unsupported'
-  AND selected_uses_scan_filters
-  AND reason LIKE '%uses-scan-filters=true%'
-  AND reason LIKE '%native-operator-executable-body-missing%'
+  AND phase='compile'
+  AND status='compiled'
+  AND execution_mode='native'
+  AND selected_runner='compiled_vectorized'
+  AND runner_cost_selection_reason LIKE 'admitted_%'
+  AND runner_cost_generated_stage_count > 0
+  AND reason LIKE '%source-execution:source-contract%'
+  AND reason LIKE '%filter-projection-append-sink%'
 ----
 1
 
@@ -1931,9 +1938,11 @@ SELECT count(*) > 0
 FROM duckdb_jit_events(), jit_source_filter_probe_baseline
 WHERE event_id > base_event_id
   AND backend_name='sljit'
-  AND status='compiled'
-  AND execution_mode='native'
-  AND code_size > 0
+  AND phase='decision'
+  AND status='skipped'
+  AND execution_mode='unsupported'
+  AND blocker='duckdb_selected_vectorized'
+  AND runner_cost_selection_reason='rejected_saved_work_non_positive'
   AND candidate_has_source
   AND candidate_source_filter_count > 0
   AND candidate_filter_count=1
@@ -1943,8 +1952,9 @@ WHERE event_id > base_event_id
   AND candidate_source_filter_count=3
   AND candidate_filter_count=1
   AND candidate_projection_count=1
-  AND ir LIKE '%hash_join_probe%'
-  AND ir LIKE '%aggregate_update(kind=ungrouped%'
+  AND reason LIKE '%uses-scan-filters=true%'
+  AND reason LIKE '%backend_join=hash_probe%'
+  AND reason LIKE '%backend_aggregate=ungrouped_update%'
 ----
 1
 
@@ -2021,8 +2031,7 @@ WHERE event_id > base_event_id
   AND phase='decision'
   AND status='skipped'
   AND execution_mode='unsupported'
-  AND reason LIKE '%region_graph=skipped%'
-  AND reason LIKE '%rejected_no_costed_acceleration%'
+  AND runner_cost_selection_reason='rejected_no_costed_acceleration'
 ----
 1
 

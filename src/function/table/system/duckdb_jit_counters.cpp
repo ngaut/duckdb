@@ -10,6 +10,7 @@ struct DuckDBJitCountersData : public ExecutionRegionTableFunctionState<Executio
 
 enum JitCounterColumn : idx_t {
 	JIT_COUNTER_BACKEND_NAME,
+	JIT_COUNTER_KERNEL_ID,
 	JIT_COUNTER_STATUS,
 	JIT_COUNTER_EXECUTION_MODE,
 	JIT_COUNTER_SELECTED_RUNNER,
@@ -46,16 +47,22 @@ enum JitCounterColumn : idx_t {
 	JIT_COUNTER_LAZY_CODE_SIZE,
 	JIT_COUNTER_HASH_JOIN_PROBE_LAYOUT,
 	JIT_COUNTER_JIT_RUNTIME_PATH_COUNTS,
-	JIT_COUNTER_JIT_MATERIALIZATION_BOUNDARY_COUNTS,
+	JIT_COUNTER_JIT_RUNTIME_PROOF_COUNTS,
+	JIT_COUNTER_JIT_RUNTIME_DELEGATION_COUNTS,
 	JIT_COUNTER_RUNNER_COST_PROFILE,
 	JIT_COUNTER_RUNNER_COST_ROWS,
 	JIT_COUNTER_RUNNER_COST_BATCHES,
+	JIT_COUNTER_RUNNER_COST_COSTED_BATCHES,
 	JIT_COUNTER_RUNNER_COST_EXPRESSION_COST,
+	JIT_COUNTER_RUNNER_COST_SOURCE_CONTRACT_INPUT_ROWS,
+	JIT_COUNTER_RUNNER_COST_SOURCE_CONTRACT_INPUT_BATCHES,
+	JIT_COUNTER_RUNNER_COST_SOURCE_CONTRACT_OUTPUT_CARDINALITY_UNKNOWN,
 	JIT_COUNTER_RUNNER_COST_GENERATED_STAGE_COUNT,
 	JIT_COUNTER_RUNNER_COST_GENERATED_BACKEND_STAGE_COUNT,
+	JIT_COUNTER_RUNNER_COST_GENERATED_GROUPED_AGGREGATE_STAGE_COUNT,
+	JIT_COUNTER_RUNNER_COST_NATIVE_GROUPED_STATE_ADDRESS_LOOKUP_COUNT,
 	JIT_COUNTER_RUNNER_COST_MATERIALIZATION_ELISION_COUNT,
-	JIT_COUNTER_RUNNER_COST_MATERIALIZATION_SOURCE_APPEND_COUNT,
-	JIT_COUNTER_RUNNER_COST_UNFUSED_MARK_FILTER_AGGREGATE_COUNT,
+	JIT_COUNTER_RUNNER_COST_SELECTED_HASH_JOIN_FILTER_MATERIALIZATION_COUNT,
 	JIT_COUNTER_RUNNER_COST_NATIVE_JOIN_STAGE_COUNT,
 	JIT_COUNTER_RUNNER_COST_NATIVE_HASH_JOIN_BUILD_SINK_COUNT,
 	JIT_COUNTER_RUNNER_COST_NATIVE_AGGREGATE_STAGE_COUNT,
@@ -70,8 +77,8 @@ enum JitCounterColumn : idx_t {
 	JIT_COUNTER_RUNNER_COST_GENERATED_BACKEND_STAGE_WORK,
 	JIT_COUNTER_RUNNER_COST_NATIVE_OPERATOR_WORK,
 	JIT_COUNTER_RUNNER_COST_MATERIALIZATION_ELISION_WORK,
-	JIT_COUNTER_RUNNER_COST_MATERIALIZATION_SOURCE_APPEND_PENALTY,
-	JIT_COUNTER_RUNNER_COST_UNFUSED_MARK_FILTER_AGGREGATE_PENALTY,
+	JIT_COUNTER_RUNNER_COST_SELECTED_HASH_JOIN_FILTER_MATERIALIZATION_PENALTY,
+	JIT_COUNTER_RUNNER_COST_SOURCE_CONTRACT_SCAN_PENALTY,
 	JIT_COUNTER_RUNNER_COST_FULL_PIPELINE_WORK,
 	JIT_COUNTER_RUNNER_COST_STATEFUL_PROTOCOL_PENALTY,
 	JIT_COUNTER_RUNNER_COST_SAVED_WORK_PER_BATCH,
@@ -141,6 +148,9 @@ static void AppendJitCounterColumn(Vector &output, idx_t column_id, const Execut
 	switch (column_id) {
 	case JIT_COUNTER_BACKEND_NAME:
 		output.Append(Value(entry.backend_name));
+		return;
+	case JIT_COUNTER_KERNEL_ID:
+		output.Append(Value::UBIGINT(entry.kernel_id));
 		return;
 	case JIT_COUNTER_STATUS:
 		output.Append(Value(ExecutionRegionEventStatusToString(entry.status_kind)));
@@ -228,9 +238,13 @@ static void AppendJitCounterColumn(Vector &output, idx_t column_id, const Execut
 		AppendExecutionRegionNullableString(
 		    output, RenderExecutionRegionCounterBreakdown(entry.jit_runtime.runtime_path_counts));
 		return;
-	case JIT_COUNTER_JIT_MATERIALIZATION_BOUNDARY_COUNTS:
+	case JIT_COUNTER_JIT_RUNTIME_PROOF_COUNTS:
 		AppendExecutionRegionNullableString(
-		    output, RenderExecutionRegionCounterBreakdown(entry.jit_runtime.materialization_boundary_counts));
+		    output, RenderExecutionRegionCounterBreakdown(entry.jit_runtime.runtime_proof_counts));
+		return;
+	case JIT_COUNTER_JIT_RUNTIME_DELEGATION_COUNTS:
+		AppendExecutionRegionNullableString(
+		    output, RenderExecutionRegionCounterBreakdown(entry.jit_runtime.runtime_delegation_counts));
 		return;
 	case JIT_COUNTER_RUNNER_COST_SELECTED_ACCELERATED_RUNNER_COUNT:
 		output.Append(Value::UBIGINT(entry.runner_cost.selected_accelerated_runner_count));
@@ -249,6 +263,7 @@ static void AppendJitCounterColumn(Vector &output, idx_t column_id, const Execut
 static unique_ptr<FunctionData> DuckDBJitCountersBind(ClientContext &context, TableFunctionBindInput &input,
                                                       vector<LogicalType> &return_types, vector<string> &names) {
 	AddExecutionRegionTableFunctionColumn(return_types, names, "backend_name", LogicalType::VARCHAR);
+	AddExecutionRegionTableFunctionColumn(return_types, names, "kernel_id", LogicalType::UBIGINT);
 	AddExecutionRegionTableFunctionColumn(return_types, names, "status", LogicalType::VARCHAR);
 	AddExecutionRegionTableFunctionColumn(return_types, names, "execution_mode", LogicalType::VARCHAR);
 	AddExecutionRegionTableFunctionColumn(return_types, names, "selected_runner", LogicalType::VARCHAR);
@@ -280,7 +295,8 @@ static unique_ptr<FunctionData> DuckDBJitCountersBind(ClientContext &context, Ta
 	AddExecutionRegionTableFunctionColumn(return_types, names, "lazy_code_size", LogicalType::UBIGINT);
 	AddExecutionRegionTableFunctionColumn(return_types, names, "hash_join_probe_layout", LogicalType::VARCHAR);
 	AddExecutionRegionTableFunctionColumn(return_types, names, "jit_runtime_path_counts", LogicalType::VARCHAR);
-	AddExecutionRegionTableFunctionColumn(return_types, names, "jit_materialization_boundary_counts",
+	AddExecutionRegionTableFunctionColumn(return_types, names, "jit_runtime_proof_counts", LogicalType::VARCHAR);
+	AddExecutionRegionTableFunctionColumn(return_types, names, "jit_runtime_delegation_counts",
 	                                      LogicalType::VARCHAR);
 	AddJitCounterRunnerCostColumns(return_types, names);
 	return nullptr;

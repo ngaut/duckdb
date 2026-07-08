@@ -16,9 +16,12 @@
 
 #include "duckdb/common/allocator.hpp"
 #include "duckdb/common/exception.hpp"
+#include "duckdb/common/types/hugeint.hpp"
 #include "duckdb/common/types/vector.hpp"
 #include "duckdb/common/vector/flat_vector.hpp"
 #include "duckdb/execution/execution_operator_runtime.hpp"
+
+#include <array>
 
 namespace duckdb {
 
@@ -138,12 +141,26 @@ struct SljitDirectAggregateUpdateTracker {
 	const char *scratch_name;
 };
 
+struct SljitPreaggregatedGroupContinuationState {
+	void Clear() {
+		ready = false;
+		physical_type = PhysicalType::INVALID;
+		state_address = 0;
+	}
+
+	bool ready = false;
+	PhysicalType physical_type = PhysicalType::INVALID;
+	std::array<uint8_t, sizeof(hugeint_t)> key {};
+	uintptr_t state_address = 0;
+};
+
 struct SljitAggregateUpdateScratchState {
 	void Resize(idx_t count) {
 		state_addresses.resize(count);
 		preaggregated_groups.resize(count);
 		preaggregated_group_slices.resize(count);
 		preaggregated_row_pointers.resize(count);
+		preaggregated_group_continuations.resize(count);
 		preaggregate_scratch.resize(count);
 		preaggregate_scratch_slices.resize(count);
 		payload_scratch.resize(count);
@@ -177,6 +194,11 @@ struct SljitAggregateUpdateScratchState {
 	Vector &PreaggregatedRowPointers(idx_t op_idx) {
 		return SljitCheckedScratchPtr(preaggregated_row_pointers, op_idx,
 		                              "SLJIT aggregate update has no preaggregated row-pointer scratch");
+	}
+
+	SljitPreaggregatedGroupContinuationState &PreaggregatedGroupContinuation(idx_t op_idx) {
+		return SljitCheckedScratchSlot(preaggregated_group_continuations, op_idx,
+		                               "SLJIT aggregate update has no preaggregated group continuation scratch");
 	}
 
 	SljitPreaggregatedPrimitiveAggregateScratch &PreaggregateScratch(idx_t op_idx) {
@@ -262,6 +284,7 @@ private:
 	vector<unique_ptr<DataChunk>> preaggregated_groups;
 	vector<unique_ptr<DataChunk>> preaggregated_group_slices;
 	vector<unique_ptr<Vector>> preaggregated_row_pointers;
+	vector<SljitPreaggregatedGroupContinuationState> preaggregated_group_continuations;
 	vector<SljitPreaggregatedPrimitiveAggregateScratch> preaggregate_scratch;
 	vector<SljitPreaggregatedPrimitiveAggregateScratch> preaggregate_scratch_slices;
 	vector<SljitAggregatePayloadAdapterScratch> payload_scratch;

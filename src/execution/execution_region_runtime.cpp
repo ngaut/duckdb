@@ -52,6 +52,25 @@ bool ExecutionRegionStageId::IsValid() const {
 	return key != 0 && !name.empty();
 }
 
+const char *ExecutionRegionJitRuntimeProofName(ExecutionRegionJitRuntimeProof proof) {
+	switch (proof) {
+	case ExecutionRegionJitRuntimeProof::GENERATED_STAGE_WORK:
+		return "generated_stage_work";
+	case ExecutionRegionJitRuntimeProof::GENERATED_BACKEND_WORK:
+		return "generated_backend_work";
+	case ExecutionRegionJitRuntimeProof::MATERIALIZATION_ELISION:
+		return "materialization_elision";
+	case ExecutionRegionJitRuntimeProof::FULL_PIPELINE_OWNERSHIP:
+		return "full_pipeline_ownership";
+	case ExecutionRegionJitRuntimeProof::DELEGATED_RUNTIME_WORK:
+		return "delegated_runtime_work";
+	case ExecutionRegionJitRuntimeProof::NO_WORK:
+		return "no_work";
+	default:
+		throw InternalException("unknown JIT runtime proof");
+	}
+}
+
 ExecutionOperatorStageTimer::ExecutionOperatorStageTimer(optional_ptr<ExecutionOperatorStageRecorder> recorder_p,
                                                          ExecutionRegionStageId stage_p)
     : recorder(recorder_p), stage(std::move(stage_p)),
@@ -245,7 +264,13 @@ void ExecutionRegionRuntime::RecordHashJoinProbeLayout(const char *) {
 void ExecutionRegionRuntime::RecordJitRuntimePath(const char *, idx_t) {
 }
 
-void ExecutionRegionRuntime::RecordJitMaterializationBoundary(const char *, idx_t) {
+void ExecutionRegionRuntime::RecordJitRuntimeProof(ExecutionRegionJitRuntimeProof, idx_t) {
+}
+
+void ExecutionRegionRuntime::RecordJitRuntimeProofDetail(const char *, idx_t) {
+}
+
+void ExecutionRegionRuntime::RecordJitRuntimeDelegation(const char *, idx_t) {
 }
 
 void ExecutionRegionRuntime::RecordLazyCodegen(const ExecutionRegionLazyCodegenMetrics &) {

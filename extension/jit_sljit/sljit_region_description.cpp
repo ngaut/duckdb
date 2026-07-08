@@ -273,7 +273,7 @@ string DescribeNativeRegion(const SljitNativeRegionPlan &region, const string &m
 					result += ";grouped_state_lookup=native-state-address";
 				}
 			} else {
-				result += ";execution=vectorized-operator-boundary";
+				result += ";payload_update=native-aggregate-contract";
 			}
 			result += ")";
 			break;

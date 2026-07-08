@@ -51,8 +51,8 @@ static bool SljitTryReadDateYearCompressGroupKey(const SljitNativeRegionExpressi
 	    date_year.intrinsic != ExecutionExpressionIntrinsicKind::DATE_YEAR ||
 	    date_year.return_type.id() != LogicalTypeId::BIGINT || date_year.physical_type != PhysicalType::INT64 ||
 	    date_year.children.size() != 1 || !date_year.children[0] ||
-	    date_year.children[0]->kind != ExecutionExpressionIRKind::REFERENCE ||
-	    date_year.children[0]->ref_index != 0 || date_year.children[0]->return_type.id() != LogicalTypeId::DATE ||
+	    date_year.children[0]->kind != ExecutionExpressionIRKind::REFERENCE || date_year.children[0]->ref_index != 0 ||
+	    date_year.children[0]->return_type.id() != LogicalTypeId::DATE ||
 	    date_year.children[0]->physical_type != PhysicalType::INT32 ||
 	    constant.kind != ExecutionExpressionIRKind::CONSTANT || constant.constant.IsNull() ||
 	    constant.return_type.id() != LogicalTypeId::BIGINT || constant.physical_type != PhysicalType::INT64) {
@@ -165,6 +165,14 @@ static bool SljitTryMapGroupKeyCast(const SljitNativeRegionExpressionPlan &plan,
 			break;
 		}
 	}
+	if (plan.kind == SljitNativeRegionExpressionKind::STRING_SUBSTRING && plan.source_index == 0 &&
+	    group_source.source_physical_type == PhysicalType::VARCHAR &&
+	    target_type.InternalType() == PhysicalType::VARCHAR) {
+		group_source.cast_kind = ExecutionRowPointerGroupKeyCastKind::STRING_SUBSTRING;
+		group_source.string_substring_length = plan.string_substring_length;
+		group_source.ready = true;
+		return true;
+	}
 	return false;
 }
 
@@ -216,14 +224,49 @@ static bool SljitInputVectorGroupSourceUsesProjection(const ExecutionRowPointerG
 	case ExecutionRowPointerGroupKeyCastKind::INTEGRAL_COMPRESS:
 	case ExecutionRowPointerGroupKeyCastKind::DATE_YEAR_COMPRESS:
 	case ExecutionRowPointerGroupKeyCastKind::STRING_COMPRESS:
+	case ExecutionRowPointerGroupKeyCastKind::STRING_SUBSTRING:
 		return true;
 	default:
 		return false;
 	}
 }
 
-static bool SljitInputVectorGroupKeySourceSupportsMaterialization(
-    const ExecutionRowPointerGroupKeySource &source) {
+static bool SljitGroupKeyNarrowingIntegralCast(ExecutionRowPointerGroupKeyCastKind cast_kind) {
+	switch (cast_kind) {
+	case ExecutionRowPointerGroupKeyCastKind::INT64_TO_INT32:
+	case ExecutionRowPointerGroupKeyCastKind::INT64_TO_INT16:
+	case ExecutionRowPointerGroupKeyCastKind::INT32_TO_INT8:
+		return true;
+	default:
+		return false;
+	}
+}
+
+template <class CAST_DISPATCH>
+static bool SljitDispatchGroupKeyNarrowingIntegralCast(const ExecutionRowPointerGroupKeySource &source,
+                                                       CAST_DISPATCH &dispatch) {
+	switch (source.cast_kind) {
+	case ExecutionRowPointerGroupKeyCastKind::INT64_TO_INT32:
+		if (source.source_physical_type != PhysicalType::INT64 || source.target_physical_type != PhysicalType::INT32) {
+			return false;
+		}
+		return dispatch.template Execute<int64_t, int32_t>();
+	case ExecutionRowPointerGroupKeyCastKind::INT64_TO_INT16:
+		if (source.source_physical_type != PhysicalType::INT64 || source.target_physical_type != PhysicalType::INT16) {
+			return false;
+		}
+		return dispatch.template Execute<int64_t, int16_t>();
+	case ExecutionRowPointerGroupKeyCastKind::INT32_TO_INT8:
+		if (source.source_physical_type != PhysicalType::INT32 || source.target_physical_type != PhysicalType::INT8) {
+			return false;
+		}
+		return dispatch.template Execute<int32_t, int8_t>();
+	default:
+		return false;
+	}
+}
+
+static bool SljitInputVectorGroupKeySourceSupportsMaterialization(const ExecutionRowPointerGroupKeySource &source) {
 	if (!source.ready || source.source_kind != ExecutionRowPointerGroupKeySourceKind::INPUT_VECTOR) {
 		return false;
 	}
@@ -239,6 +282,9 @@ static bool SljitInputVectorGroupKeySourceSupportsMaterialization(
 	case ExecutionRowPointerGroupKeyCastKind::DATE_YEAR_COMPRESS:
 		return source.source_physical_type == PhysicalType::INT32 && source.source_type.id() == LogicalTypeId::DATE &&
 		       source.target_physical_type == PhysicalType::UINT8;
+	case ExecutionRowPointerGroupKeyCastKind::STRING_SUBSTRING:
+		return source.source_physical_type == PhysicalType::VARCHAR &&
+		       source.target_physical_type == PhysicalType::VARCHAR;
 	default:
 		return false;
 	}
@@ -287,9 +333,8 @@ static bool SljitTryGetHashJoinRHSFixedColumnConditionIndex(const ExecutionHashJ
 }
 
 static bool SljitTryResolveHashJoinMatchedProbeInputForOutput(const ExecutionHashJoinProbeBinding &binding,
-                                                              idx_t join_output_source_index,
-                                                              idx_t &probe_input_idx, idx_t &condition_idx,
-                                                              bool &repeats_with_row_pointer) {
+                                                              idx_t join_output_source_index, idx_t &probe_input_idx,
+                                                              idx_t &condition_idx, bool &repeats_with_row_pointer) {
 	probe_input_idx = DConstants::INVALID_INDEX;
 	condition_idx = DConstants::INVALID_INDEX;
 	repeats_with_row_pointer = false;
@@ -299,8 +344,8 @@ static bool SljitTryResolveHashJoinMatchedProbeInputForOutput(const ExecutionHas
 			return false;
 		}
 		probe_input_idx = binding.lhs_output_column_indices[join_output_source_index];
-		SljitTryGetHashJoinLHSInputConditionIndex(
-		    binding, probe_input_idx, binding.output_types[join_output_source_index], condition_idx);
+		SljitTryGetHashJoinLHSInputConditionIndex(binding, probe_input_idx,
+		                                          binding.output_types[join_output_source_index], condition_idx);
 		return true;
 	}
 
@@ -411,7 +456,8 @@ static bool SljitTryBuildProjectionOutputVectorGroupKeySource(const SljitExecuta
                                                               idx_t projection_idx,
                                                               const ExecutionRegionGroupInput &group,
                                                               ExecutionRowPointerGroupKeySource &group_source) {
-	if (projection_idx >= projection_op.output_types.size() || projection_op.output_types[projection_idx] != group.type) {
+	if (projection_idx >= projection_op.output_types.size() ||
+	    projection_op.output_types[projection_idx] != group.type) {
 		return false;
 	}
 	SljitInitializeInputVectorGroupKeySource(projection_idx, group.type, group.type, group_source);
@@ -453,14 +499,13 @@ static bool SljitTryBuildSingleRowPointerGroupKeySource(const ExecutionHashJoinP
 	return false;
 }
 
-static bool SljitTryBuildRowPointerGroupKeySources(const ExecutionHashJoinProbeBinding &binding,
-                                                   SljitExecutableRegionOp &projection_op,
-                                                   SljitExecutableRegionOp &aggregate_op,
-                                                   vector<ExecutionRowPointerGroupKeySource> &group_sources,
-                                                   optional_ptr<const vector<idx_t>> semantic_to_projection = nullptr,
-                                                   optional_ptr<vector<uint8_t>> group_source_uses_projection_output =
-                                                       nullptr,
-                                                   optional_ptr<string> blocker = nullptr) {
+static bool
+SljitTryBuildRowPointerGroupKeySources(const ExecutionHashJoinProbeBinding &binding,
+                                       SljitExecutableRegionOp &projection_op, SljitExecutableRegionOp &aggregate_op,
+                                       vector<ExecutionRowPointerGroupKeySource> &group_sources,
+                                       optional_ptr<const vector<idx_t>> semantic_to_projection = nullptr,
+                                       optional_ptr<vector<uint8_t>> group_source_uses_projection_output = nullptr,
+                                       optional_ptr<string> blocker = nullptr) {
 	auto &sink_info = aggregate_op.aggregate_update.plan.sink_info;
 	if (sink_info.kind != ExecutionRegionSinkKind::HASH_AGGREGATE_UPDATE || sink_info.groups.empty()) {
 		if (blocker) {
