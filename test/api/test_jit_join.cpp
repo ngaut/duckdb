@@ -1695,6 +1695,75 @@ TEST_CASE("JIT mark match filter emits LHS selected boundary", "[api][jit]") {
 	    });
 }
 
+TEST_CASE("JIT mark match count-star preaggregates compressed string groups", "[api][jit]") {
+	DuckDB db;
+	Connection con(db);
+	auto &manager = ExecutionRegionManager::Get(*con.context);
+
+	ConfigureSljitForCoverage(con, false, true, true, 10000);
+	REQUIRE_NO_FAIL(con.Query("PRAGMA threads=1"));
+	REQUIRE_NO_FAIL(con.Query("SET perfect_ht_threshold=0"));
+	REQUIRE_NO_FAIL(con.Query("SET disabled_optimizers='join_order,build_side_probe_side'"));
+	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_mark_count_star_string_fact AS "
+	                          "SELECT i::BIGINT AS item_key, "
+	                          "       CASE i % 5 "
+	                          "           WHEN 0 THEN '1-URGENT' "
+	                          "           WHEN 1 THEN '2-HIGH' "
+	                          "           WHEN 2 THEN '3-MEDIUM' "
+	                          "           WHEN 3 THEN '4-NOT SPECIFIED' "
+	                          "           ELSE '5-LOW' "
+	                          "       END AS group_name "
+	                          "FROM range(65536) tbl(i)"));
+	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_mark_count_star_string_allowed AS "
+	                          "SELECT (i * 17)::BIGINT AS item_key "
+	                          "FROM range(4096) tbl(i)"));
+
+	const string query = "SELECT group_name, count(*) AS kept_count "
+	                     "FROM jit_mark_count_star_string_fact f "
+	                     "WHERE EXISTS ("
+	                     "  SELECT 1 FROM jit_mark_count_star_string_allowed a "
+	                     "  WHERE a.item_key = f.item_key"
+	                     ") "
+	                     "GROUP BY group_name "
+	                     "ORDER BY group_name";
+	REQUIRE_NO_FAIL(con.Query("SET jit_policy='off'"));
+	auto reference = con.Query(query);
+	REQUIRE_NO_FAIL(*reference);
+	REQUIRE(reference->RowCount() == 5);
+
+	REQUIRE_NO_FAIL(con.Query("SET jit_policy='auto'"));
+	ClearJitTrace(manager, true);
+	auto result = con.Query(query);
+	REQUIRE_NO_FAIL(*result);
+	REQUIRE(result->RowCount() == reference->RowCount());
+	REQUIRE(result->ColumnCount() == reference->ColumnCount());
+	for (idx_t row_idx = 0; row_idx < result->RowCount(); row_idx++) {
+		for (idx_t col_idx = 0; col_idx < result->ColumnCount(); col_idx++) {
+			REQUIRE(result->GetValue(col_idx, row_idx).ToString() == reference->GetValue(col_idx, row_idx).ToString());
+		}
+	}
+
+	RequireJitEvent(
+	    manager,
+	    [](const ExecutionRegionEvent &event) {
+		    const auto stages = EventGeneratedStageCountBreakdown(event);
+		    return EventPhase(event) == "runtime" && EventStatus(event) == "executed" &&
+		           EventExecutionMode(event) == "native" && StringUtil::Contains(stages, "mark_match") &&
+		           HasJitFilterRuntimePath(event) && HasJitAggregateUpdatePath(event);
+	    },
+	    [](const ExecutionRegionEvent &event) {
+		    RequireGeneratedAggregateUpdateRuntimeOwnership(event);
+		    REQUIRE(StringUtil::Contains(EventGeneratedStageCountBreakdown(event),
+		                                 "primitive_projected_preaggregate_count_star_groups"));
+		    REQUIRE(StringUtil::Contains(EventJitRuntimePathCounts(event),
+		                                 "aggregate_update.primitive_projected_preaggregated_count_star_update"));
+		    REQUIRE(StringUtil::Contains(EventJitRuntimePathCounts(event),
+		                                 "aggregate_update.primitive_pending_preaggregated_count_star_flush"));
+		    REQUIRE(EventJitRuntimeDelegationCounts(event).empty());
+	    });
+	RequireAllSljitMaterializationElisionRuntimeProof(manager);
+}
+
 TEST_CASE("JIT mark filter aggregate uses grouped primitive selected view", "[api][jit]") {
 	DuckDB db;
 	Connection con(db);

@@ -20,14 +20,34 @@
 
 namespace duckdb {
 
+struct SljitCountStarStringGroupSignature {
+	idx_t size = 0;
+	uint32_t prefix = 0;
+};
+
+static SljitCountStarStringGroupSignature SljitCountStarStringGroupSignatureOf(const string_t &key) {
+	SljitCountStarStringGroupSignature result;
+	result.size = key.GetSize();
+	result.prefix = key.GetPrefixIntegerComparable();
+	return result;
+}
+
+static bool SljitCountStarStringGroupSignatureMatches(const SljitCountStarStringGroupSignature &left,
+                                                      const SljitCountStarStringGroupSignature &right) {
+	return left.size == right.size && left.prefix == right.prefix;
+}
+
 template <class T>
 static bool AccumulatePreaggregatedStringCompressedCountStarKey(
     const string_t &key, std::array<string_t, SLJIT_LOCAL_PREAGGREGATED_GROUP_LIMIT> &lookup_keys,
+    std::array<SljitCountStarStringGroupSignature, SLJIT_LOCAL_PREAGGREGATED_GROUP_LIMIT> &lookup_signatures,
     std::array<T, SLJIT_LOCAL_PREAGGREGATED_GROUP_LIMIT> &compressed_keys,
     std::array<int64_t, SLJIT_LOCAL_PREAGGREGATED_GROUP_LIMIT> &counts, idx_t &group_count) {
+	const auto signature = SljitCountStarStringGroupSignatureOf(key);
 	idx_t group_idx = 0;
 	for (; group_idx < group_count; group_idx++) {
-		if (lookup_keys[group_idx] == key) {
+		if (SljitCountStarStringGroupSignatureMatches(lookup_signatures[group_idx], signature) &&
+		    lookup_keys[group_idx] == key) {
 			break;
 		}
 	}
@@ -40,6 +60,7 @@ static bool AccumulatePreaggregatedStringCompressedCountStarKey(
 			return false;
 		}
 		lookup_keys[group_count] = key;
+		lookup_signatures[group_count] = signature;
 		compressed_keys[group_count] = compressed_key;
 		counts[group_count] = 0;
 		group_count++;
@@ -57,17 +78,20 @@ static bool TryPreaggregateStringCompressedCountStarGroupsTemplated(Vector &sour
 		if (validity.CannotHaveNull() || (!execute_sel && validity.CheckAllValid(count))) {
 			auto source_data = FlatVector::GetData<string_t>(source);
 			std::array<string_t, SLJIT_LOCAL_PREAGGREGATED_GROUP_LIMIT> lookup_keys;
+			std::array<SljitCountStarStringGroupSignature, SLJIT_LOCAL_PREAGGREGATED_GROUP_LIMIT> lookup_signatures;
 			std::array<T, SLJIT_LOCAL_PREAGGREGATED_GROUP_LIMIT> compressed_keys;
 			std::array<int64_t, SLJIT_LOCAL_PREAGGREGATED_GROUP_LIMIT> counts;
 			idx_t group_count = 0;
 			for (idx_t row_idx = 0; row_idx < count; row_idx++) {
 				const auto source_idx = execute_sel ? execute_sel->get_index(row_idx) : row_idx;
 				if (!AccumulatePreaggregatedStringCompressedCountStarKey(source_data[source_idx], lookup_keys,
-				                                                         compressed_keys, counts, group_count)) {
+				                                                         lookup_signatures, compressed_keys, counts,
+				                                                         group_count)) {
 					return false;
 				}
 			}
-			MaterializePreaggregatedCountStarGroups(compressed_keys, counts, group_count, compact_groups, count_deltas);
+			MaterializePreaggregatedCountStarGroups(compressed_keys, counts, group_count, compact_groups,
+			                                        count_deltas);
 			return true;
 		}
 	}
@@ -79,6 +103,7 @@ static bool TryPreaggregateStringCompressedCountStarGroupsTemplated(Vector &sour
 	auto &source_validity = format.validity;
 	const bool can_have_null = source_validity.CanHaveNull();
 	std::array<string_t, SLJIT_LOCAL_PREAGGREGATED_GROUP_LIMIT> lookup_keys;
+	std::array<SljitCountStarStringGroupSignature, SLJIT_LOCAL_PREAGGREGATED_GROUP_LIMIT> lookup_signatures;
 	std::array<T, SLJIT_LOCAL_PREAGGREGATED_GROUP_LIMIT> compressed_keys;
 	std::array<int64_t, SLJIT_LOCAL_PREAGGREGATED_GROUP_LIMIT> counts;
 	idx_t group_count = 0;
@@ -89,8 +114,9 @@ static bool TryPreaggregateStringCompressedCountStarGroupsTemplated(Vector &sour
 		if (can_have_null && !source_validity.RowIsValid(source_idx)) {
 			return false;
 		}
-		if (!AccumulatePreaggregatedStringCompressedCountStarKey(source_data[source_idx], lookup_keys, compressed_keys,
-		                                                         counts, group_count)) {
+		if (!AccumulatePreaggregatedStringCompressedCountStarKey(source_data[source_idx], lookup_keys,
+		                                                         lookup_signatures, compressed_keys, counts,
+		                                                         group_count)) {
 			return false;
 		}
 	}
