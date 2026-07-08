@@ -1443,7 +1443,7 @@ struct JitCboNativeOperatorStageBenefitSetting {
 	static constexpr const char *Description =
 	    "Per-vector benefit per native operator protocol stage used by the JIT CBO physical-runner decision";
 	static constexpr const char *InputType = "UBIGINT";
-	static constexpr const char *DefaultValue = "1024";
+	static constexpr const char *DefaultValue = "3072";
 	static constexpr SettingScopeTarget Scope = SettingScopeTarget::LOCAL_DEFAULT;
 	static constexpr idx_t SettingIndex = NEXT_SETTING_INDEX();
 };
