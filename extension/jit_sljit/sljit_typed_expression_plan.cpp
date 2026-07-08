@@ -160,8 +160,10 @@ bool SljitTypedExpressionTreeValueCastSupported(const ExecutionExpressionIR &nod
 	return SljitTypedExpressionTreeInt64CastLogic(node) || SljitTypedExpressionTreeDecimal64WideningCastLogic(node);
 }
 
-bool SljitTypedExpressionTreeModuloByPositiveConstantSupported(const ExecutionExpressionIR &node) {
-	if (node.kind != ExecutionExpressionIRKind::BINARY || node.binary_op != ExecutionExpressionBinaryOp::MODULO ||
+bool SljitTypedExpressionTreeConstantDivisorReductionSupported(const ExecutionExpressionIR &node) {
+	if (node.kind != ExecutionExpressionIRKind::BINARY ||
+	    (node.binary_op != ExecutionExpressionBinaryOp::MODULO &&
+	     node.binary_op != ExecutionExpressionBinaryOp::INTEGER_DIVIDE) ||
 	    !node.left || !node.right) {
 		return false;
 	}
@@ -173,8 +175,9 @@ bool SljitTypedExpressionTreeModuloByPositiveConstantSupported(const ExecutionEx
 	if (divisor.kind != ExecutionExpressionIRKind::CONSTANT || divisor.constant.IsNull()) {
 		return false;
 	}
-	// Require a constant divisor >= 2. That is the range where the signed magic-multiply strength reduction is
-	// well-defined, and it rules out both undefined division inputs (zero divisor, and -1 with INT_MIN dividend).
+	// Require a constant divisor >= 2. That is the range where the signed magic-multiply strength reduction (shared by
+	// modulo and truncating integer division) is well-defined, and it rules out both undefined division inputs (zero
+	// divisor, and -1 with INT_MIN dividend).
 	const int64_t divisor_value = SljitTypedExpressionTreeIsInt32Node(divisor)
 	                                  ? static_cast<int64_t>(divisor.constant.GetValueUnsafe<int32_t>())
 	                                  : divisor.constant.GetValueUnsafe<int64_t>();
@@ -225,7 +228,7 @@ bool SljitTypedExpressionTreeIsSupported(const ExecutionExpressionIR &node) {
 			       SljitTypedExpressionTreeDecimal64BinaryHasRawSemantics(node) &&
 			       SljitTypedExpressionTreeIsSupported(*node.left) && SljitTypedExpressionTreeIsSupported(*node.right);
 		}
-		if (SljitTypedExpressionTreeModuloByPositiveConstantSupported(node)) {
+		if (SljitTypedExpressionTreeConstantDivisorReductionSupported(node)) {
 			return true;
 		}
 		return SljitTypedExpressionTreeIsArithmeticNode(node) &&

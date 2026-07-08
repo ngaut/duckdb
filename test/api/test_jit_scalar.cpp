@@ -888,6 +888,19 @@ TEST_CASE("JIT lowers integer modulo-by-constant with magic-multiply strength re
 	REQUIRE_NO_FAIL(*reference);
 	REQUIRE(result->RowCount() == reference->RowCount());
 
+	// Truncating integer division ("//") shares the same magic-multiply reduction and must truncate toward zero for
+	// negative dividends (-14 // 4 == -3, not the floor -4).
+	ClearJitTrace(manager, true);
+	result = con.Query("SELECT id, a // 4 AS q FROM jit_modulo_predicate WHERE a IS NOT NULL ORDER BY id");
+	REQUIRE_NO_FAIL(*result);
+	REQUIRE(result->RowCount() == 6);
+	REQUIRE(result->GetValue(1, 0).GetValue<int64_t>() == 3);  // 14 // 4
+	REQUIRE(result->GetValue(1, 1).GetValue<int64_t>() == -3); // -14 // 4 truncates toward zero
+	REQUIRE(result->GetValue(1, 3).GetValue<int64_t>() == -1); // -7 // 4
+	RequireNativeSljitIr(manager, "native:typed-expression-tree", [](const ExecutionRegionEvent &event) {
+		REQUIRE_FALSE(StringUtil::Contains(event.reason, "sljit-expression-lowering-unsupported"));
+	});
+
 	// A variable (non-constant) divisor cannot prove a non-zero denominator, so it stays native and must be correct.
 	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_modulo_variable(id INTEGER, a BIGINT, d BIGINT)"));
 	REQUIRE_NO_FAIL(con.Query("INSERT INTO jit_modulo_variable VALUES (1, 14, 7), (2, 10, 4)"));

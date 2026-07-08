@@ -45,6 +45,9 @@ void EmitStoreSljitTypedExpressionTreeBool(struct sljit_compiler *compiler, cons
 int64_t SljitTypedExpressionTreeConstantValue(const ExecutionExpressionIR &node);
 void EmitSljitTypedExpressionTreeModulo(struct sljit_compiler *compiler, int64_t divisor,
                                         SljitNativeIntegerKind binary_kind, sljit_s32 n_reg, sljit_s32 result_reg);
+void EmitSljitTypedExpressionTreeIntegerDivide(struct sljit_compiler *compiler, int64_t divisor,
+                                               SljitNativeIntegerKind binary_kind, sljit_s32 n_reg,
+                                               sljit_s32 result_reg);
 void AddSljitTypedExpressionTreeDecimal64RangeJumps(struct sljit_compiler *compiler, const ExecutionExpressionIR &node,
                                                     sljit_s32 target,
                                                     vector<SljitExpressionTreeOverflowJumps> &overflows,

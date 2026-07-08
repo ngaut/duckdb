@@ -63,11 +63,17 @@ static void EmitSljitTypedExpressionTreeFastBinaryOpReg(struct sljit_compiler *c
 		sljit_set_label(compare_done, sljit_emit_label(compiler));
 		return;
 	}
-	if (node.binary_op == ExecutionExpressionBinaryOp::MODULO) {
+	if (node.binary_op == ExecutionExpressionBinaryOp::MODULO ||
+	    node.binary_op == ExecutionExpressionBinaryOp::INTEGER_DIVIDE) {
 		// left_reg holds the dividend and is never R0/R1 here (the fast path only parks live values in R2-R4 and on
 		// the stack), so the op0 magic-multiply reduction can borrow R0/R1 freely.
-		EmitSljitTypedExpressionTreeModulo(compiler, SljitTypedExpressionTreeConstantValue(*node.right),
-		                                   SljitTypedExpressionTreeIntegerKind(node), left_reg, target_reg);
+		const int64_t divisor = SljitTypedExpressionTreeConstantValue(*node.right);
+		auto binary_kind = SljitTypedExpressionTreeIntegerKind(node);
+		if (node.binary_op == ExecutionExpressionBinaryOp::MODULO) {
+			EmitSljitTypedExpressionTreeModulo(compiler, divisor, binary_kind, left_reg, target_reg);
+		} else {
+			EmitSljitTypedExpressionTreeIntegerDivide(compiler, divisor, binary_kind, left_reg, target_reg);
+		}
 		return;
 	}
 	SljitNativeIntegerBinaryOp native_op;

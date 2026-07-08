@@ -48,7 +48,7 @@ bool TryReadSljitTypedExpressionTreeStringCompareConstant(const ExecutionExpress
 bool SljitTypedExpressionTreeIsSupported(const ExecutionExpressionIR &node);
 bool SljitTypedExpressionTreeInt64CastSupported(const ExecutionExpressionIR &node);
 bool SljitTypedExpressionTreeValueCastSupported(const ExecutionExpressionIR &node);
-bool SljitTypedExpressionTreeModuloByPositiveConstantSupported(const ExecutionExpressionIR &node);
+bool SljitTypedExpressionTreeConstantDivisorReductionSupported(const ExecutionExpressionIR &node);
 bool SljitTypedExpressionTreeFastPathSupported(const ExecutionExpressionIR &node);
 bool SljitTypedExpressionTreeCanPrecheckNulls(const ExecutionExpressionIR &node);
 SljitNativeIntegerKind SljitTypedExpressionTreeIntegerKind(const ExecutionExpressionIR &node);
