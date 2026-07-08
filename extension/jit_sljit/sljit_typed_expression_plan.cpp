@@ -130,16 +130,43 @@ static bool SljitTypedExpressionTreeIntegralCompressSupported(const ExecutionExp
 	       SljitTypedExpressionTreeSameIntegerKind(source, minimum);
 }
 
+static bool SljitTypedExpressionTreeCastExceptionBehaviorIsSafe(const ExecutionExpressionIR &node) {
+	return !node.try_cast && node.exception_behavior != ExecutionExpressionExceptionKind::NULL_ON_CAST_ERROR &&
+	       node.exception_behavior != ExecutionExpressionExceptionKind::ERROR;
+}
+
+static bool SljitTypedExpressionTreeInt64CastLogic(const ExecutionExpressionIR &node) {
+	return node.kind == ExecutionExpressionIRKind::CAST && SljitTypedExpressionTreeCastExceptionBehaviorIsSafe(node) &&
+	       SljitTypedExpressionTreeIsInt64Node(node) && node.left &&
+	       SljitTypedExpressionTreeIsIntegerNode(*node.left) && SljitTypedExpressionTreeIsSupported(*node.left);
+}
+
+static bool SljitTypedExpressionTreeDecimal64WideningCastLogic(const ExecutionExpressionIR &node) {
+	if (node.kind != ExecutionExpressionIRKind::CAST || !SljitTypedExpressionTreeCastExceptionBehaviorIsSafe(node) ||
+	    !node.left) {
+		return false;
+	}
+	if (!SljitTypedExpressionTreeIsDecimal64Node(node) || !SljitTypedExpressionTreeIsDecimal64Node(*node.left)) {
+		return false;
+	}
+	// A same-scale, non-narrowing DECIMAL64 -> DECIMAL64 cast keeps the physical INT64 payload identical, so the cast
+	// is a value passthrough that cannot round, rescale, or overflow.
+	return DecimalType::GetScale(node.return_type) == DecimalType::GetScale(node.left->return_type) &&
+	       DecimalType::GetWidth(node.return_type) >= DecimalType::GetWidth(node.left->return_type) &&
+	       SljitTypedExpressionTreeIsSupported(*node.left);
+}
+
+bool SljitTypedExpressionTreeValueCastSupported(const ExecutionExpressionIR &node) {
+	return SljitTypedExpressionTreeInt64CastLogic(node) || SljitTypedExpressionTreeDecimal64WideningCastLogic(node);
+}
+
 bool SljitTypedExpressionTreeIsSupported(const ExecutionExpressionIR &node) {
 	switch (node.kind) {
 	case ExecutionExpressionIRKind::REFERENCE:
 	case ExecutionExpressionIRKind::CONSTANT:
 		return SljitTypedExpressionTreeIsValueNode(node);
 	case ExecutionExpressionIRKind::CAST:
-		return !node.try_cast && node.exception_behavior != ExecutionExpressionExceptionKind::NULL_ON_CAST_ERROR &&
-		       node.exception_behavior != ExecutionExpressionExceptionKind::ERROR &&
-		       SljitTypedExpressionTreeIsInt64Node(node) && node.left &&
-		       SljitTypedExpressionTreeIsIntegerNode(*node.left) && SljitTypedExpressionTreeIsSupported(*node.left);
+		return SljitTypedExpressionTreeValueCastSupported(node);
 	case ExecutionExpressionIRKind::UNARY:
 		if (!node.left) {
 			return false;
@@ -230,11 +257,11 @@ bool SljitTypedExpressionTreeIsSupported(const ExecutionExpressionIR &node) {
 }
 
 bool SljitTypedExpressionTreeInt64CastSupported(const ExecutionExpressionIR &node) {
-	return node.kind == ExecutionExpressionIRKind::CAST && SljitTypedExpressionTreeIsSupported(node);
+	return SljitTypedExpressionTreeInt64CastLogic(node);
 }
 
 bool SljitTypedExpressionTreeFastPathSupported(const ExecutionExpressionIR &node) {
-	if (SljitTypedExpressionTreeInt64CastSupported(node)) {
+	if (SljitTypedExpressionTreeValueCastSupported(node)) {
 		return true;
 	}
 	if (node.kind == ExecutionExpressionIRKind::INTRINSIC) {

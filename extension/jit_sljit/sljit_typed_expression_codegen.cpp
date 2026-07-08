@@ -58,7 +58,7 @@ static void EmitSljitTypedExpressionTreeCast(struct sljit_compiler *compiler, co
                                              idx_t &slot_index, vector<SljitExpressionTreeOverflowJumps> &overflows,
                                              const SljitTypedExpressionTreeSlot &slot,
                                              const vector<idx_t> *known_valid_sources) {
-	D_ASSERT(SljitTypedExpressionTreeInt64CastSupported(node));
+	D_ASSERT(SljitTypedExpressionTreeValueCastSupported(node));
 	auto &source = *node.left;
 	auto source_slot = EmitSljitTypedExpressionTreeValue(compiler, source, slot_index, overflows, known_valid_sources);
 	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R2, 0, SLJIT_MEM1(SLJIT_SP), source_slot.value_offset);

@@ -175,7 +175,7 @@ EmitSljitTypedExpressionTreeFastCastReg(struct sljit_compiler *compiler, const E
                                         SljitTypedExpressionTreeFastIndexMode index_mode,
                                         const vector<SljitTypedExpressionTreeDataPointerHoist> *data_hoists) {
 	D_ASSERT(node.left);
-	D_ASSERT(SljitTypedExpressionTreeInt64CastSupported(node));
+	D_ASSERT(SljitTypedExpressionTreeValueCastSupported(node));
 	EmitSljitTypedExpressionTreeFastValueRegInternal(compiler, *node.left, spill_index, overflows, index_mode,
 	                                                 data_hoists);
 	if (SljitTypedExpressionTreeIsInt32Node(*node.left)) {

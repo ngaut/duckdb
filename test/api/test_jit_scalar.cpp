@@ -815,3 +815,39 @@ TEST_CASE("JIT lowers casted numeric double comparison predicates as generated c
 		REQUIRE_FALSE(StringUtil::Contains(event.reason, "sljit-expression-lowering-unsupported"));
 	});
 }
+
+TEST_CASE("JIT lowers decimal arithmetic comparison predicates as generated code", "[api][jit]") {
+	DuckDB db;
+	Connection con(db);
+	auto &manager = ExecutionRegionManager::Get(*con.context);
+
+	ConfigureSljitForCoverage(con, true, true, true, 10000);
+	REQUIRE_NO_FAIL(con.Query("SET disabled_optimizers='filter_pushdown,top_n'"));
+	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_decimal_arith_predicate("
+	                          "id INTEGER, a DECIMAL(13,2), b DECIMAL(13,2), c DECIMAL(13,2))"));
+	// a + b widens to DECIMAL(14,2); the binder aligns the comparison by casting c to DECIMAL(14,2). That cast keeps
+	// the same scale and only widens the declared width, so the generated path must own it as an INT64 passthrough
+	// instead of delegating the whole compound-arithmetic predicate to native.
+	REQUIRE_NO_FAIL(con.Query("INSERT INTO jit_decimal_arith_predicate VALUES "
+	                          "(1, 10.00, 5.00, 12.00), "
+	                          "(2, 3.00, 2.00, 10.00), "
+	                          "(3, NULL, 5.00, 1.00), "
+	                          "(4, 8.00, 8.00, NULL), "
+	                          "(5, -5.00, 3.00, -10.00)"));
+
+	ClearJitTrace(manager, true);
+	auto result = con.Query("SELECT id FROM jit_decimal_arith_predicate "
+	                        "WHERE a + b > c "
+	                        "ORDER BY id");
+	REQUIRE_NO_FAIL(*result);
+	REQUIRE(result->RowCount() == 2);
+	REQUIRE(result->GetValue(0, 0).GetValue<int32_t>() == 1);
+	REQUIRE(result->GetValue(0, 1).GetValue<int32_t>() == 5);
+	RequireNativeSljitIr(manager, "native:typed-expression-tree", [](const ExecutionRegionEvent &event) {
+		// The same-scale widening cast (c -> DECIMAL(14,2)) is lowered inside the generated tree instead of forcing
+		// the whole compound-arithmetic predicate to delegate to native.
+		REQUIRE(StringUtil::Contains(event.ir, "cast:DECIMAL(14,2)"));
+		REQUIRE(StringUtil::Contains(event.ir, "DECIMAL(13,2)"));
+		REQUIRE_FALSE(StringUtil::Contains(event.reason, "sljit-expression-lowering-unsupported"));
+	});
+}
