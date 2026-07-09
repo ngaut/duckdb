@@ -79,10 +79,13 @@ static const sljit_u8 freg_map[SLJIT_NUMBER_OF_FLOAT_REGISTERS + 3] = {
 #define ADDI		0x91000000
 #define ADR		0x10000000
 #define ADRP		0x90000000
+#define ADD_v		0x0e208400
 #define AND		0x8a000000
 #define ANDI		0x92000000
 #define AND_v		0x0e201c00
 #define ASRV		0x9ac02800
+#define CMEQ_v		0x2e208c00
+#define CMGT_v		0x0e203400
 #define B		0x14000000
 #define B_CC		0x54000000
 #define BL		0x94000000
@@ -141,6 +144,7 @@ static const sljit_u8 freg_map[SLJIT_NUMBER_OF_FLOAT_REGISTERS + 3] = {
 #define MOVK		0xf2800000
 #define MOVN		0x92800000
 #define MOVZ		0xd2800000
+#define MUL_v		0x0e209c00
 #define NOP		0xd503201f
 #define ORN		0xaa200000
 #define ORR		0xaa000000
@@ -178,6 +182,7 @@ static const sljit_u8 freg_map[SLJIT_NUMBER_OF_FLOAT_REGISTERS + 3] = {
 #define SUB		0xcb000000
 #define SUBI		0xd1000000
 #define SUBS		0xeb000000
+#define SUB_v		0x2e208400
 #define TBZ		0x36000000
 #define TBL_v		0x0e000000
 #define UBFM		0xd3400000
@@ -3429,9 +3434,6 @@ SLJIT_API_FUNC_ATTRIBUTE sljit_s32 sljit_emit_simd_op2(struct sljit_compiler *co
 	if ((type & SLJIT_SIMD_FLOAT) && (elem_size < 2 || elem_size > 3))
 		return SLJIT_ERR_UNSUPPORTED;
 
-	if (type & SLJIT_SIMD_TEST)
-		return SLJIT_SUCCESS;
-
 	switch (SLJIT_SIMD_GET_OPCODE(type)) {
 	case SLJIT_SIMD_OP2_AND:
 		ins = AND_v;
@@ -3445,7 +3447,43 @@ SLJIT_API_FUNC_ATTRIBUTE sljit_s32 sljit_emit_simd_op2(struct sljit_compiler *co
 	case SLJIT_SIMD_OP2_SHUFFLE:
 		ins = TBL_v;
 		break;
+	case SLJIT_SIMD_OP2_ADD:
+	case SLJIT_SIMD_OP2_SUB:
+	case SLJIT_SIMD_OP2_MUL:
+	case SLJIT_SIMD_OP2_CMPGT:
+	case SLJIT_SIMD_OP2_CMPEQ:
+		/* Integer element operations only. */
+		if (type & SLJIT_SIMD_FLOAT)
+			return SLJIT_ERR_UNSUPPORTED;
+		/* NEON has no 64-bit element integer multiply (no MUL.2d). */
+		if (SLJIT_SIMD_GET_OPCODE(type) == SLJIT_SIMD_OP2_MUL && elem_size == 3)
+			return SLJIT_ERR_UNSUPPORTED;
+
+		if (type & SLJIT_SIMD_TEST)
+			return SLJIT_SUCCESS;
+		switch (SLJIT_SIMD_GET_OPCODE(type)) {
+		case SLJIT_SIMD_OP2_ADD:
+			ins = ADD_v;
+			break;
+		case SLJIT_SIMD_OP2_SUB:
+			ins = SUB_v;
+			break;
+		case SLJIT_SIMD_OP2_MUL:
+			ins = MUL_v;
+			break;
+		case SLJIT_SIMD_OP2_CMPGT:
+			ins = CMGT_v;
+			break;
+		default: /* SLJIT_SIMD_OP2_CMPEQ */
+			ins = CMEQ_v;
+			break;
+		}
+		ins |= (sljit_ins)elem_size << 22;
+		break;
 	}
+
+	if (type & SLJIT_SIMD_TEST)
+		return SLJIT_SUCCESS;
 
 	if (src2 & SLJIT_MEM) {
 		if (elem_size > 3)

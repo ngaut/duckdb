@@ -1,0 +1,209 @@
+# name: test/sql/jit/test_jit_simd_filter.test
+# description: SIMD-vectorized integer arithmetic filter (packed count + select paths)
+# group: [jit]
+
+statement ok
+LOAD jit_sljit;
+
+# jit_verify cross-checks generated output against native per region and errors on
+# any mismatch, so every jit_policy='auto' query below is a generated-vs-native oracle.
+statement ok
+SET jit_verify=true;
+
+# Bounded columns so arithmetic overflow is provably impossible: the CBO drops the
+# overflow check, native computes wrapping arithmetic, and the SIMD gate admits the
+# predicate. range(100003) is deliberately not a multiple of the lane count, so the
+# packed loop's scalar tail is exercised. Row values have no nulls (flat all-valid).
+statement ok
+CREATE TABLE t AS SELECT (i%1000)::INT a, (i%777)::INT b, (i%555)::INT c, (i%333)::INT d FROM range(100003) tbl(i);
+
+# ---------------------------------------------------------------------------
+# SIMD packed COUNT(*) filter path (BuildSljitNativeFilteredUngroupedFusedPrimitiveAggregateUpdate)
+# ---------------------------------------------------------------------------
+statement ok
+SET jit_policy='auto';
+
+query I
+SELECT count(*) FROM t WHERE a*3+b*2-c > 1500 AND a*2-d*3+c < 900 AND b*4-a > 500;
+----
+22756
+
+# same predicate must match native exactly
+statement ok
+SET jit_policy='off';
+
+query I
+SELECT count(*) FROM t WHERE a*3+b*2-c > 1500 AND a*2-d*3+c < 900 AND b*4-a > 500;
+----
+22756
+
+# NOT-producing comparisons (>=, !=) exercise the all-ones/XOR mask path
+statement ok
+SET jit_policy='auto';
+
+query I
+SELECT count(*) FROM t WHERE a+b >= c AND a*2-b != 100 AND c < 400;
+----
+69693
+
+statement ok
+SET jit_policy='off';
+
+query I
+SELECT count(*) FROM t WHERE a+b >= c AND a*2-b != 100 AND c < 400;
+----
+69693
+
+# ---------------------------------------------------------------------------
+# SIMD packed selection path (BuildSljitNativeTypedExpressionTreeSelect): projection filter
+# ---------------------------------------------------------------------------
+statement ok
+SET jit_policy='auto';
+
+query I
+SELECT count(*) FROM (SELECT a,b FROM t WHERE a*3+b*2-c > 1500 AND a*2-d*3+c < 900 AND b*4-a > 500);
+----
+22756
+
+# full row-level parity with native (rowid pins each row)
+statement ok
+SET jit_policy='auto';
+
+statement ok
+CREATE TEMP TABLE rj AS SELECT rowid AS rid, a, b, c FROM t WHERE a*3+b*2-c > 1500 AND a*2-d*3+c < 900 AND b*4-a > 500;
+
+statement ok
+SET jit_policy='off';
+
+statement ok
+CREATE TEMP TABLE rn AS SELECT rowid AS rid, a, b, c FROM t WHERE a*3+b*2-c > 1500 AND a*2-d*3+c < 900 AND b*4-a > 500;
+
+query I
+SELECT count(*) FROM (SELECT * FROM rj EXCEPT SELECT * FROM rn);
+----
+0
+
+query I
+SELECT count(*) FROM (SELECT * FROM rn EXCEPT SELECT * FROM rj);
+----
+0
+
+# ---------------------------------------------------------------------------
+# SIMD packed SUM(int32 column) filter path (SADALP widen+accumulate)
+# ---------------------------------------------------------------------------
+statement ok
+SET jit_policy='auto';
+
+query I
+SELECT sum(a) FROM t WHERE a*3+b*2-c > 1500 AND a*2-d*3+c < 900 AND b*4-a > 500;
+----
+9537371
+
+statement ok
+SET jit_policy='off';
+
+query I
+SELECT sum(a) FROM t WHERE a*3+b*2-c > 1500 AND a*2-d*3+c < 900 AND b*4-a > 500;
+----
+9537371
+
+# different payload column + NOT-producing comparisons
+statement ok
+SET jit_policy='auto';
+
+query I
+SELECT sum(b) FROM t WHERE a+b >= c AND a*2-b != 100 AND c < 400;
+----
+27413738
+
+statement ok
+SET jit_policy='off';
+
+query I
+SELECT sum(b) FROM t WHERE a+b >= c AND a*2-b != 100 AND c < 400;
+----
+27413738
+
+# empty filtered set: SUM must be NULL, not 0 (saw_value handling)
+statement ok
+SET jit_policy='auto';
+
+query I
+SELECT sum(a) FROM t WHERE a*3+b*2-c > 1500 AND a > 900000;
+----
+NULL
+
+statement ok
+SET jit_policy='off';
+
+query I
+SELECT sum(a) FROM t WHERE a*3+b*2-c > 1500 AND a > 900000;
+----
+NULL
+
+# ---------------------------------------------------------------------------
+# 64-bit element predicate (2 lanes). int64 add/sub/compare are SIMD; int64
+# multiply is correctly NOT vectorized (gate excludes it) so this stays correct.
+# ---------------------------------------------------------------------------
+statement ok
+SET jit_policy='auto';
+
+query I
+SELECT count(*) FROM (SELECT (a::BIGINT) x, (b::BIGINT) y FROM t) s WHERE x*3+y*2 > 2000 AND x*2-y < 1500 AND x+y >= 100;
+----
+51025
+
+statement ok
+SET jit_policy='off';
+
+query I
+SELECT count(*) FROM (SELECT (a::BIGINT) x, (b::BIGINT) y FROM t) s WHERE x*3+y*2 > 2000 AND x*2-y < 1500 AND x+y >= 100;
+----
+51025
+
+# ---------------------------------------------------------------------------
+# Overflow safety. A wide-range column makes overflow possible, so the CBO keeps
+# the overflow check and the SIMD gate rejects the predicate (packed ops wrap and
+# cannot trap). The scalar path runs instead, matching native exactly.
+# ---------------------------------------------------------------------------
+statement ok
+CREATE TABLE w AS SELECT (i*2000)::INT wa, (i%777)::INT wb FROM range(1000000) tbl(i);
+
+# Overflow-possible but not reached at runtime (predicate ordering filters first):
+# gate rejects -> scalar path -> must equal native.
+statement ok
+SET jit_policy='auto';
+
+query I
+SELECT count(*) FROM w WHERE wa*3 + wb > 1000 AND wa*2 < 100000000;
+----
+24999
+
+statement ok
+SET jit_policy='off';
+
+query I
+SELECT count(*) FROM w WHERE wa*3 + wb > 1000 AND wa*2 < 100000000;
+----
+24999
+
+# Overflow unavoidably reached: gate rejects, scalar trap fires, and both jit and
+# native raise an overflow error (the SIMD path must never silently wrap this).
+statement ok
+CREATE TABLE ov AS SELECT (1000000000 + (i%1000000000))::INT AS x, (i%777)::INT AS y FROM range(1000000) tbl(i);
+
+statement ok
+SET jit_policy='auto';
+
+statement error
+SELECT count(*) FROM ov WHERE x*3 - y > 0 AND x - y*2 > -100;
+----
+<REGEX>:.*[Oo]verflow.*
+
+statement ok
+SET jit_policy='off';
+
+statement error
+SELECT count(*) FROM ov WHERE x*3 - y > 0 AND x - y*2 > -100;
+----
+<REGEX>:.*[Oo]verflow.*

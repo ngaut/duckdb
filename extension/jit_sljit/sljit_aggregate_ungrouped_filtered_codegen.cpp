@@ -7,6 +7,7 @@
 #include "sljit_codegen_internal.hpp"
 #include "sljit_codegen_util.hpp"
 #include "sljit_typed_expression_plan.hpp"
+#include "sljit_typed_expression_simd_codegen.hpp"
 
 #include "sljitLir.h"
 
@@ -111,7 +112,39 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeFilteredUngroupedFusedPrim
 		local_size += NumericCast<sljit_sw>(sizeof(sljit_sw));
 	}
 
-	sljit_emit_enter(compiler, 0, SLJIT_ARGS1V(P), 5, 7, local_size);
+	// Packed-lane COUNT(*) filter: applies when the sole aggregate is COUNT(*),
+	// the flat all-valid fast path is available, and the predicate is SIMD-
+	// profitable. Counts full lane groups with SIMD; the scalar fast loop below
+	// handles the < lanes tail.
+	SljitTypedExpressionTreeSimdPlan simd_plan;
+	bool simd_is_sum = false;
+	if (payloads.size() == 1 && codegen_plan.fast_path_supported) {
+		auto kind = aggregates[0].primitive_update_kind;
+		if (kind == AggregatePrimitiveUpdateKind::COUNT_STAR) {
+			simd_plan = TryPlanSljitTypedExpressionTreeSimd(predicate);
+		} else if (kind == AggregatePrimitiveUpdateKind::SUM_INT64 && payloads[0].expression_tree &&
+		           SljitTypedExpressionTreeSimdSumPayloadSupported(*payloads[0].expression_tree)) {
+			auto predicate_plan = TryPlanSljitTypedExpressionTreeSimd(predicate);
+			// SADALP widens int32->int64, so the packed SUM path needs a 4-lane int32 predicate.
+			if (predicate_plan.supported && predicate_plan.elem_scale == 2) {
+				simd_plan = predicate_plan;
+				simd_is_sum = true;
+			}
+		}
+	}
+	sljit_sw simd_mask_offset = 0;
+	sljit_s32 simd_scratches = 5;
+	if (simd_plan.supported) {
+		simd_mask_offset = (local_size + 15) & ~sljit_sw(15);
+		local_size = simd_mask_offset + 16;
+		// constants + all-ones + accumulator(s) + peak live temporaries (+1 payload for SUM).
+		auto accumulators = simd_is_sum ? idx_t(2) : idx_t(1);
+		auto vector_regs = simd_plan.constant_count + (simd_plan.needs_all_ones ? 1 : 0) + accumulators +
+		                   simd_plan.max_live_temps + (simd_is_sum ? idx_t(1) : idx_t(0));
+		simd_scratches = 5 | SLJIT_ENTER_VECTOR(NumericCast<sljit_s32>(vector_regs));
+	}
+
+	sljit_emit_enter(compiler, 0, SLJIT_ARGS1V(P), simd_scratches, 7, local_size);
 	EmitInitSljitNativeVectorLoop(compiler);
 	for (idx_t payload_idx = 0; payload_idx < payloads.size(); payload_idx++) {
 		sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_MEM1(SLJIT_SP), local_count_offsets[payload_idx], SLJIT_IMM, 0);
@@ -134,6 +167,18 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeFilteredUngroupedFusedPrim
 		               offsetof(SljitNativeVectorInput, expression_tree_flat_all_valid));
 		auto use_generic_loop = sljit_emit_cmp(compiler, SLJIT_EQUAL, SLJIT_R0, 0, SLJIT_IMM, 0);
 
+		if (simd_is_sum) {
+			// Sum full lane groups with packed SIMD (masked payload widened via SADALP);
+			// the scalar fast loop below finishes the < lanes remainder.
+			EmitSljitTypedExpressionTreeSimdSumLoop(compiler, predicate, *payloads[0].expression_tree, simd_plan,
+			                                        local_sum_offsets[0], local_count_offsets[0], saw_value_offsets[0],
+			                                        simd_mask_offset);
+		} else if (simd_plan.supported) {
+			// Count full lane groups with packed SIMD; S1 is left at the tail start
+			// and the scalar fast loop below finishes the < lanes remainder.
+			EmitSljitTypedExpressionTreeSimdCountLoop(compiler, predicate, simd_plan, local_count_offsets[0],
+			                                          simd_mask_offset);
+		}
 		auto fast_loop = sljit_emit_label(compiler);
 		fast_done = sljit_emit_cmp(compiler, SLJIT_GREATER_EQUAL, SLJIT_S1, 0, SLJIT_S2, 0);
 		idx_t predicate_spill_index = 0;

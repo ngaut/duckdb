@@ -2341,6 +2341,19 @@ SLJIT_API_FUNC_ATTRIBUTE sljit_s32 sljit_emit_simd_sign(struct sljit_compiler *c
 #define SLJIT_SIMD_OP2_XOR		0x000003
 /* Shuffle bytes of src1 using the indicies in src2 */
 #define SLJIT_SIMD_OP2_SHUFFLE		0x000004
+/* Packed integer add: dst[i] = src1[i] + src2[i] (per element) */
+#define SLJIT_SIMD_OP2_ADD		0x000005
+/* Packed integer subtract: dst[i] = src1[i] - src2[i] (per element) */
+#define SLJIT_SIMD_OP2_SUB		0x000006
+/* Packed integer multiply (low half): dst[i] = src1[i] * src2[i].
+   Not all element sizes are available on every architecture (e.g. 64-bit
+   element multiply is unsupported on ARM NEON and pre-AVX-512 x86); the
+   operation returns SLJIT_ERR_UNSUPPORTED in that case. */
+#define SLJIT_SIMD_OP2_MUL		0x000007
+/* Packed signed compare-greater: dst[i] = (src1[i] > src2[i]) ? all-ones : 0 */
+#define SLJIT_SIMD_OP2_CMPGT		0x000008
+/* Packed compare-equal: dst[i] = (src1[i] == src2[i]) ? all-ones : 0 */
+#define SLJIT_SIMD_OP2_CMPEQ		0x000009
 
 /* Perform simd operations using vector registers.
 

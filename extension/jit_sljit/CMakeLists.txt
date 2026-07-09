@@ -143,6 +143,7 @@ set(JIT_SLJIT_EXTENSION_FILES
     sljit_typed_expression_string_codegen.cpp
     sljit_typed_expression_aggregate_codegen.cpp
     sljit_typed_expression_select_codegen.cpp
+    sljit_typed_expression_simd_codegen.cpp
     sljit_typed_expression_type_plan.cpp
     sljit_typed_expression_plan.cpp
     sljit_typed_expression_utility_codegen.cpp
