@@ -204,6 +204,27 @@ SELECT max(a) FROM t WHERE a > 900000;
 ----
 NULL
 
+# grouped native-callback aggregates: the generated filter feeds the native
+# HASH/PERFECT_HASH aggregate sink the same way
+statement ok
+CREATE TABLE g AS SELECT (i%1000)::INT a, (i%777)::INT b, (i%555)::INT c, (i%333)::INT d, (i%10)::INT k FROM range(100003) tbl(i);
+
+statement ok
+SET jit_policy='auto';
+
+query III
+SELECT count(*), sum(mx), min(mn) FROM (SELECT k, max(a) mx, min(b) mn FROM g WHERE a*3+b*2-c > 1500 AND a*2-d*3+c < 900 AND b*4-a > 500 GROUP BY k);
+----
+10	6605	222
+
+statement ok
+SET jit_policy='off';
+
+query III
+SELECT count(*), sum(mx), min(mn) FROM (SELECT k, max(a) mx, min(b) mn FROM g WHERE a*3+b*2-c > 1500 AND a*2-d*3+c < 900 AND b*4-a > 500 GROUP BY k);
+----
+10	6605	222
+
 # ---------------------------------------------------------------------------
 # 64-bit element predicate (2 lanes). int64 add/sub/compare are SIMD; int64
 # multiply is correctly NOT vectorized (gate excludes it) so this stays correct.

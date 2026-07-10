@@ -735,6 +735,13 @@ static bool TryAccumulateExecutionRegionPhysicalOperatorCost(const PhysicalOpera
 		auto contract = op.GetExecutionContract();
 		auto &sink = contract.sink;
 		if (!ExecutionRegionAggregateUpdateGeneratesBody(sink)) {
+			// Same shape as the ungrouped case: a READY native-state-update sink is a
+			// native contract stage the generated prefix can feed, not a boundary.
+			if (sink.aggregate_contract.native_state_update_contract.status ==
+			    ExecutionRegionStateContractStatus::READY) {
+				AddExecutionRegionNativeAggregateStage(input, true);
+				return true;
+			}
 			facts.native_sink_boundary = true;
 			return true;
 		}
@@ -764,6 +771,13 @@ static bool TryAccumulateExecutionRegionPhysicalOperatorCost(const PhysicalOpera
 		auto contract = op.GetExecutionContract();
 		auto &sink = contract.sink;
 		if (!ExecutionRegionAggregateUpdateGeneratesBody(sink)) {
+			// Same shape as the ungrouped case: a READY native-state-update sink is a
+			// native contract stage the generated prefix can feed, not a boundary.
+			if (sink.aggregate_contract.native_state_update_contract.status ==
+			    ExecutionRegionStateContractStatus::READY) {
+				AddExecutionRegionNativeAggregateStage(input, true);
+				return true;
+			}
 			facts.native_sink_boundary = true;
 			return true;
 		}
