@@ -175,6 +175,36 @@ SELECT sum(a) FROM t WHERE a*3+b*2-c > 1500 AND a > 900000;
 NULL
 
 # ---------------------------------------------------------------------------
+# Native-callback aggregates (MAX/MIN/AVG have no primitive-update ABI): the
+# generated SIMD filter feeds the aggregate through the native state-update sink,
+# so ANY state-update aggregate composes with the accelerated filter.
+# ---------------------------------------------------------------------------
+statement ok
+SET jit_policy='auto';
+
+query III
+SELECT max(a), min(b), round(avg(c),6) FROM t WHERE a*3+b*2-c > 1500 AND a*2-d*3+c < 900 AND b*4-a > 500;
+----
+665	222	238.791132
+
+statement ok
+SET jit_policy='off';
+
+query III
+SELECT max(a), min(b), round(avg(c),6) FROM t WHERE a*3+b*2-c > 1500 AND a*2-d*3+c < 900 AND b*4-a > 500;
+----
+665	222	238.791132
+
+# empty filtered set through the native sink: aggregates must be NULL
+statement ok
+SET jit_policy='auto';
+
+query I
+SELECT max(a) FROM t WHERE a > 900000;
+----
+NULL
+
+# ---------------------------------------------------------------------------
 # 64-bit element predicate (2 lanes). int64 add/sub/compare are SIMD; int64
 # multiply is correctly NOT vectorized (gate excludes it) so this stays correct.
 # ---------------------------------------------------------------------------

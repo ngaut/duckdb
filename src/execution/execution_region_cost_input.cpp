@@ -704,6 +704,15 @@ static bool TryAccumulateExecutionRegionPhysicalOperatorCost(const PhysicalOpera
 		auto contract = op.GetExecutionContract();
 		auto &sink = contract.sink;
 		if (!ExecutionRegionAggregateUpdateGeneratesBody(sink)) {
+			// A ready native-state-update sink without a generated body is still a
+			// native contract stage inside the region (the generated prefix feeds it
+			// through the native sink binding), matching the candidate stage model.
+			// Only an unready contract forms a boundary.
+			if (sink.aggregate_contract.native_state_update_contract.status ==
+			    ExecutionRegionStateContractStatus::READY) {
+				AddExecutionRegionNativeAggregateStage(input, false);
+				return true;
+			}
 			facts.native_sink_boundary = true;
 			return true;
 		}
