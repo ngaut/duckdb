@@ -226,6 +226,60 @@ SELECT count(*), sum(mx), min(mn) FROM (SELECT k, max(a) mx, min(b) mn FROM g WH
 10	6605	222
 
 # ---------------------------------------------------------------------------
+# Mixed-width predicates (int32 + int64 comparisons in one conjunction): 64-bit
+# comparison masks are evaluated per half and narrowed (UZP1) into the 4-lane
+# loop. The hybrid loop runs scalar payloads per matching lane, so any payload
+# kind (bigint sum here) composes with the packed mixed-width mask.
+# ---------------------------------------------------------------------------
+statement ok
+CREATE TABLE mx AS SELECT (i%1000)::INT a, (i%777)::BIGINT b, (i%555)::INT c, (i%333)::BIGINT d FROM range(100003) tbl(i);
+
+statement ok
+SET jit_policy='auto';
+
+query I
+SELECT sum(b) FROM mx WHERE a*3+c > 1500 AND b+d < 700 AND c*2 < 800;
+----
+7555475
+
+query I
+SELECT count(*) FROM mx WHERE a*2-c >= 500 AND b+d != 500 AND d-b <= 200;
+----
+57869
+
+query I
+SELECT max(a) FROM mx WHERE a*3+c > 1500 AND b+d < 700;
+----
+999
+
+statement ok
+SET jit_policy='off';
+
+query I
+SELECT sum(b) FROM mx WHERE a*3+c > 1500 AND b+d < 700 AND c*2 < 800;
+----
+7555475
+
+query I
+SELECT count(*) FROM mx WHERE a*2-c >= 500 AND b+d != 500 AND d-b <= 200;
+----
+57869
+
+query I
+SELECT max(a) FROM mx WHERE a*3+c > 1500 AND b+d < 700;
+----
+999
+
+# empty mixed-width filtered set: SUM must be NULL through the hybrid loop
+statement ok
+SET jit_policy='auto';
+
+query I
+SELECT sum(b) FROM mx WHERE a*3+c > 1500 AND b+d < -1;
+----
+NULL
+
+# ---------------------------------------------------------------------------
 # 64-bit element predicate (2 lanes). int64 add/sub/compare are SIMD; int64
 # multiply is correctly NOT vectorized (gate excludes it) so this stays correct.
 # ---------------------------------------------------------------------------

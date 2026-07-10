@@ -119,6 +119,7 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeFilteredUngroupedFusedPrim
 	SljitTypedExpressionTreeSimdPlan simd_plan;
 	SljitTypedExpressionTreeSimdPlan simd_payload_plan;
 	bool simd_is_sum = false;
+	bool simd_is_hybrid = false;
 	if (payloads.size() == 1 && codegen_plan.fast_path_supported) {
 		auto kind = aggregates[0].primitive_update_kind;
 		if (kind == AggregatePrimitiveUpdateKind::COUNT_STAR) {
@@ -135,6 +136,15 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeFilteredUngroupedFusedPrim
 				simd_is_sum = true;
 			}
 #endif
+		}
+	}
+	// Hybrid: when no fully-packed form fits the payloads, the predicate mask can
+	// still vectorize with the payload work staying scalar per matching lane.
+	if (!simd_plan.supported && codegen_plan.fast_path_supported) {
+		auto predicate_plan = TryPlanSljitTypedExpressionTreeSimd(predicate);
+		if (predicate_plan.supported) {
+			simd_plan = predicate_plan;
+			simd_is_hybrid = true;
 		}
 	}
 	sljit_sw simd_mask_offset = 0;
@@ -174,12 +184,35 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeFilteredUngroupedFusedPrim
 		               offsetof(SljitNativeVectorInput, expression_tree_flat_all_valid));
 		auto use_generic_loop = sljit_emit_cmp(compiler, SLJIT_EQUAL, SLJIT_R0, 0, SLJIT_IMM, 0);
 
+		// The scalar per-row payload updates, shared by the scalar fast loop and the
+		// hybrid packed-mask loop (which runs them once per matching lane).
+		auto emit_payload_updates = [&]() {
+			for (idx_t payload_idx = 0; payload_idx < payloads.size(); payload_idx++) {
+				auto kind = aggregates[payload_idx].primitive_update_kind;
+				if (kind == AggregatePrimitiveUpdateKind::COUNT_STAR) {
+					EmitSljitAggregateIncrementLocalCount(compiler, local_count_offsets[payload_idx]);
+					continue;
+				}
+				idx_t payload_spill_index = 0;
+				EmitSljitTypedExpressionTreeFastValueReg(compiler, *payloads[payload_idx].expression_tree,
+				                                         payload_spill_index, overflows);
+				EmitUngroupedAggregateAccumulate(compiler, kind, local_sum_offsets[payload_idx],
+				                                 local_sum_upper_offsets[payload_idx], saw_value_offsets[payload_idx],
+				                                 SLJIT_R2);
+				EmitSljitAggregateIncrementLocalCount(compiler, local_count_offsets[payload_idx]);
+			}
+		};
+
 		if (simd_is_sum) {
 			// Sum full lane groups with packed SIMD (masked payload widened via SADALP);
 			// the scalar fast loop below finishes the < lanes remainder.
 			EmitSljitTypedExpressionTreeSimdSumLoop(compiler, predicate, *payloads[0].expression_tree, simd_plan,
 			                                        local_sum_offsets[0], local_count_offsets[0], saw_value_offsets[0],
 			                                        simd_mask_offset);
+		} else if (simd_is_hybrid) {
+			// Packed predicate mask; the payload updates stay scalar per matching lane.
+			EmitSljitTypedExpressionTreeSimdHybridFilterLoop(compiler, predicate, simd_plan, simd_mask_offset,
+			                                                 emit_payload_updates);
 		} else if (simd_plan.supported) {
 			// Count full lane groups with packed SIMD; S1 is left at the tail start
 			// and the scalar fast loop below finishes the < lanes remainder.
@@ -191,20 +224,7 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeFilteredUngroupedFusedPrim
 		idx_t predicate_spill_index = 0;
 		EmitSljitTypedExpressionTreeFastValueReg(compiler, predicate, predicate_spill_index, overflows);
 		auto predicate_false = sljit_emit_cmp(compiler, SLJIT_EQUAL, SLJIT_R2, 0, SLJIT_IMM, 0);
-		for (idx_t payload_idx = 0; payload_idx < payloads.size(); payload_idx++) {
-			auto kind = aggregates[payload_idx].primitive_update_kind;
-			if (kind == AggregatePrimitiveUpdateKind::COUNT_STAR) {
-				EmitSljitAggregateIncrementLocalCount(compiler, local_count_offsets[payload_idx]);
-				continue;
-			}
-			idx_t payload_spill_index = 0;
-			EmitSljitTypedExpressionTreeFastValueReg(compiler, *payloads[payload_idx].expression_tree,
-			                                         payload_spill_index, overflows);
-			EmitUngroupedAggregateAccumulate(compiler, kind, local_sum_offsets[payload_idx],
-			                                 local_sum_upper_offsets[payload_idx], saw_value_offsets[payload_idx],
-			                                 SLJIT_R2);
-			EmitSljitAggregateIncrementLocalCount(compiler, local_count_offsets[payload_idx]);
-		}
+		emit_payload_updates();
 		sljit_set_label(predicate_false, sljit_emit_label(compiler));
 		EmitNextSljitNativeVectorLoop(compiler, fast_loop);
 

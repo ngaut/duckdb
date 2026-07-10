@@ -74,12 +74,14 @@ static bool SljitSimdComparisonSupported(ExecutionExpressionBinaryOp op, bool &n
 }
 
 // Only 32-bit (INT32/DATE) and 64-bit (INT64/DECIMAL64) integer element widths
-// map to a packed lane; return the SLJIT data scale (2 or 3) or false.
+// map to a packed lane; return the SLJIT data scale (2 or 3) or false. DECIMAL64
+// participates as its int64 representation, exactly like the scalar fast path.
 static bool SljitSimdNodeScale(const ExecutionExpressionIR &node, sljit_s32 &scale) {
-	if (!SljitTypedExpressionTreeIsIntegerNode(node)) {
+	SljitNativeIntegerKind kind;
+	if (!TryGetSljitTypedExpressionTreeResultKind(node, kind)) {
 		return false;
 	}
-	auto data_scale = NativeIntegerDataScale(SljitTypedExpressionTreeIntegerKind(node));
+	auto data_scale = NativeIntegerDataScale(kind);
 	if (data_scale != 2 && data_scale != 3) {
 		return false;
 	}
@@ -87,11 +89,11 @@ static bool SljitSimdNodeScale(const ExecutionExpressionIR &node, sljit_s32 &sca
 	return true;
 }
 
-// Recursively validate SIMD eligibility and collect the facts needed to size
-// the register budget. `value_scale` is the single element width the whole
-// tree must share (references drive it; constants adapt).
-static bool CheckSljitSimdEligible(const ExecutionExpressionIR &node, sljit_s32 &value_scale,
-                                   set<int64_t> &distinct_constants, bool &needs_all_ones, idx_t &node_count) {
+// Recursively validate a pure VALUE subtree (references, constants, add/sub/mul)
+// and resolve its single element width. `value_scale` is anchored by the first
+// reference; constants adapt and are collected for later width-tagged broadcast.
+static bool CheckSljitSimdEligibleValue(const ExecutionExpressionIR &node, sljit_s32 &value_scale,
+                                        vector<int64_t> &constants, idx_t &node_count) {
 	node_count++;
 	switch (node.kind) {
 	case ExecutionExpressionIRKind::REFERENCE: {
@@ -102,42 +104,72 @@ static bool CheckSljitSimdEligible(const ExecutionExpressionIR &node, sljit_s32 
 		if (value_scale == 0) {
 			value_scale = scale;
 		} else if (value_scale != scale) {
-			return false; // mixed element widths cannot share one packed loop
+			return false; // a single value expression cannot mix element widths
 		}
 		return true;
 	}
 	case ExecutionExpressionIRKind::CONSTANT: {
-		if (!SljitTypedExpressionTreeIsIntegerNode(node)) {
+		sljit_s32 scale;
+		if (!SljitSimdNodeScale(node, scale)) {
 			return false;
 		}
-		distinct_constants.insert(SljitTypedExpressionTreeConstantValue(node));
+		constants.push_back(SljitTypedExpressionTreeConstantValue(node));
 		return true;
 	}
+	case ExecutionExpressionIRKind::BINARY: {
+		if (!node.left || !node.right || SljitTypedExpressionTreeComparisonSupported(node.binary_op)) {
+			return false;
+		}
+		// Arithmetic: packed ops wrap silently, so only accept when no overflow
+		// trap is required. Check children first so `value_scale` is resolved,
+		// then validate a profitable packed op exists (excludes 64-bit multiply).
+		if (node.arithmetic_overflow_check) {
+			return false;
+		}
+		if (!CheckSljitSimdEligibleValue(*node.left, value_scale, constants, node_count) ||
+		    !CheckSljitSimdEligibleValue(*node.right, value_scale, constants, node_count)) {
+			return false;
+		}
+		return SljitSimdPackedArithProfitable(value_scale, node.binary_op);
+	}
+	default:
+		return false;
+	}
+}
+
+// Recursively validate a MASK subtree (comparisons combined by conjunctions).
+// Each comparison anchors its own element width, so a conjunction may mix
+// 32-bit and 64-bit comparisons: 64-bit masks are evaluated per half and
+// narrowed to the 32-bit loop width before combining.
+static bool CheckSljitSimdEligibleMask(const ExecutionExpressionIR &node,
+                                       set<std::pair<int64_t, sljit_s32>> &distinct_constants, bool &needs_all_ones,
+                                       idx_t &node_count, bool &has_scale32, bool &has_scale64) {
+	node_count++;
+	switch (node.kind) {
 	case ExecutionExpressionIRKind::BINARY: {
 		if (!node.left || !node.right) {
 			return false;
 		}
-		if (SljitTypedExpressionTreeComparisonSupported(node.binary_op)) {
-			bool negate;
-			if (!SljitSimdComparisonSupported(node.binary_op, negate)) {
-				return false;
-			}
-			needs_all_ones = needs_all_ones || negate;
-			return CheckSljitSimdEligible(*node.left, value_scale, distinct_constants, needs_all_ones, node_count) &&
-			       CheckSljitSimdEligible(*node.right, value_scale, distinct_constants, needs_all_ones, node_count);
-		}
-		// Arithmetic: packed ops wrap silently, so only accept when no overflow
-		// trap is required (Step 3a).
-		if (node.arithmetic_overflow_check) {
+		bool negate;
+		if (!SljitSimdComparisonSupported(node.binary_op, negate)) {
 			return false;
 		}
-		// Check children first so `value_scale` is resolved, then validate that a
-		// profitable packed op exists for that width (excludes 64-bit multiply).
-		if (!CheckSljitSimdEligible(*node.left, value_scale, distinct_constants, needs_all_ones, node_count) ||
-		    !CheckSljitSimdEligible(*node.right, value_scale, distinct_constants, needs_all_ones, node_count)) {
+		needs_all_ones = needs_all_ones || negate;
+		sljit_s32 comparison_scale = 0;
+		vector<int64_t> constants;
+		if (!CheckSljitSimdEligibleValue(*node.left, comparison_scale, constants, node_count) ||
+		    !CheckSljitSimdEligibleValue(*node.right, comparison_scale, constants, node_count)) {
 			return false;
 		}
-		return SljitSimdPackedArithProfitable(value_scale, node.binary_op);
+		if (comparison_scale != 2 && comparison_scale != 3) {
+			return false; // no integer reference to anchor the comparison width
+		}
+		for (auto value : constants) {
+			distinct_constants.insert({value, comparison_scale});
+		}
+		has_scale32 = has_scale32 || comparison_scale == 2;
+		has_scale64 = has_scale64 || comparison_scale == 3;
+		return true;
 	}
 	case ExecutionExpressionIRKind::CONJUNCTION: {
 		if (node.conjunction_op != ExecutionExpressionConjunctionOp::AND &&
@@ -148,7 +180,8 @@ static bool CheckSljitSimdEligible(const ExecutionExpressionIR &node, sljit_s32 
 			return false;
 		}
 		for (auto &child : node.children) {
-			if (!CheckSljitSimdEligible(*child, value_scale, distinct_constants, needs_all_ones, node_count)) {
+			if (!CheckSljitSimdEligibleMask(*child, distinct_constants, needs_all_ones, node_count, has_scale32,
+			                                has_scale64)) {
 				return false;
 			}
 		}
@@ -156,6 +189,22 @@ static bool CheckSljitSimdEligible(const ExecutionExpressionIR &node, sljit_s32 
 	}
 	default:
 		return false;
+	}
+}
+
+// Resolve the anchored element scale of a value subtree (0 when only constants).
+static sljit_s32 SljitSimdSubtreeScale(const ExecutionExpressionIR &node) {
+	switch (node.kind) {
+	case ExecutionExpressionIRKind::REFERENCE: {
+		sljit_s32 scale;
+		return SljitSimdNodeScale(node, scale) ? scale : 0;
+	}
+	case ExecutionExpressionIRKind::BINARY: {
+		auto left = node.left ? SljitSimdSubtreeScale(*node.left) : 0;
+		return left != 0 ? left : (node.right ? SljitSimdSubtreeScale(*node.right) : 0);
+	}
+	default:
+		return 0;
 	}
 }
 
@@ -226,28 +275,36 @@ SljitTypedExpressionTreeSimdPlan TryPlanSljitTypedExpressionTreeSimd(const Execu
 	      SljitTypedExpressionTreeComparisonSupported(root.binary_op))) {
 		return plan;
 	}
-	sljit_s32 value_scale = 0;
-	set<int64_t> distinct_constants;
+	set<std::pair<int64_t, sljit_s32>> distinct_constants;
 	bool needs_all_ones = false;
 	idx_t node_count = 0;
-	if (!CheckSljitSimdEligible(root, value_scale, distinct_constants, needs_all_ones, node_count)) {
+	bool has_scale32 = false;
+	bool has_scale64 = false;
+	if (!CheckSljitSimdEligibleMask(root, distinct_constants, needs_all_ones, node_count, has_scale32, has_scale64)) {
 		return plan;
 	}
-	if (value_scale != 2 && value_scale != 3) {
-		return plan; // no integer reference to anchor the width
+	const bool mixed = has_scale32 && has_scale64;
+#if !(defined(SLJIT_CONFIG_ARM_64) && SLJIT_CONFIG_ARM_64)
+	if (mixed) {
+		return plan; // 64->32 mask narrowing (UZP1) is emitted as a raw ARM64 instruction
 	}
+#endif
 	// Register budget: persistent registers (constants + all-ones) plus peak live
 	// temporaries plus one accumulator must fit the vector register file with
-	// margin. This uses true register pressure, not node count.
-	auto max_live = SljitSimdMaxLiveTemps(root);
+	// margin. This uses true register pressure, not node count. Mixed-width masks
+	// hold up to two extra half-masks while narrowing.
+	auto max_live = SljitSimdMaxLiveTemps(root) + (mixed ? 2 : 0);
 	auto persistent = distinct_constants.size() + (needs_all_ones ? 1 : 0);
 	if (persistent + max_live + 1 > 28) {
 		return plan;
 	}
+	// Mixed masks combine at the 32-bit width (4 lanes); pure trees keep their width.
+	const auto loop_scale = mixed ? sljit_s32(2) : (has_scale64 ? sljit_s32(3) : sljit_s32(2));
 	plan.supported = true;
-	plan.elem_scale = value_scale;
-	plan.lanes = value_scale == 2 ? 4 : 2;
-	plan.simd_type = SLJIT_SIMD_REG_128 | (value_scale == 2 ? SLJIT_SIMD_ELEM_32 : SLJIT_SIMD_ELEM_64);
+	plan.mixed_width = mixed;
+	plan.elem_scale = loop_scale;
+	plan.lanes = loop_scale == 2 ? 4 : 2;
+	plan.simd_type = SLJIT_SIMD_REG_128 | (loop_scale == 2 ? SLJIT_SIMD_ELEM_32 : SLJIT_SIMD_ELEM_64);
 	plan.constant_count = distinct_constants.size();
 	plan.needs_all_ones = needs_all_ones;
 	plan.node_count = node_count;
@@ -280,21 +337,24 @@ SljitTypedExpressionTreeSimdPlan TryPlanSljitTypedExpressionTreeSimdValue(const 
 		return plan;
 	}
 	sljit_s32 value_scale = want_scale;
-	set<int64_t> distinct_constants;
-	bool needs_all_ones = false;
+	vector<int64_t> constants;
 	idx_t node_count = 0;
-	if (!CheckSljitSimdEligible(root, value_scale, distinct_constants, needs_all_ones, node_count)) {
+	if (!CheckSljitSimdEligibleValue(root, value_scale, constants, node_count)) {
 		return plan;
 	}
 	if (value_scale != want_scale) {
 		return plan; // payload width must match the predicate width
+	}
+	set<std::pair<int64_t, sljit_s32>> distinct_constants;
+	for (auto value : constants) {
+		distinct_constants.insert({value, want_scale});
 	}
 	plan.supported = true;
 	plan.elem_scale = want_scale;
 	plan.lanes = want_scale == 2 ? 4 : 2;
 	plan.simd_type = SLJIT_SIMD_REG_128 | (want_scale == 2 ? SLJIT_SIMD_ELEM_32 : SLJIT_SIMD_ELEM_64);
 	plan.constant_count = distinct_constants.size();
-	plan.needs_all_ones = needs_all_ones; // always false: a pure value has no comparisons
+	plan.needs_all_ones = false; // a pure value has no comparisons
 	plan.node_count = node_count;
 	plan.max_live_temps = SljitSimdMaxLiveTemps(root);
 	return plan;
@@ -304,11 +364,14 @@ namespace {
 
 // Vector-register allocator: constants and the all-ones mask occupy fixed low
 // registers (persistent for the whole loop); tree temporaries are drawn from a
-// free list above them.
+// free list above them. `scale`/`simd_type` describe the LOOP width (the width
+// masks are combined at); individual comparisons may evaluate at a different
+// width and narrow (mixed mode).
 struct SljitSimdEmitContext {
 	sljit_s32 simd_type;
 	sljit_s32 scale;
-	map<int64_t, sljit_s32> constant_reg;
+	bool mixed = false;
+	map<std::pair<int64_t, sljit_s32>, sljit_s32> constant_reg; // (value, element scale) -> vreg
 	sljit_s32 all_ones_reg = -1;
 	sljit_s32 next_temp = 0;
 	vector<sljit_s32> free_temps;
@@ -318,6 +381,10 @@ struct SljitSimdValue {
 	sljit_s32 reg;
 	bool is_temp;
 };
+
+sljit_s32 SljitSimdTypeForScale(sljit_s32 scale) {
+	return SLJIT_SIMD_REG_128 | (scale == 2 ? SLJIT_SIMD_ELEM_32 : SLJIT_SIMD_ELEM_64);
+}
 
 sljit_s32 AllocSimdTemp(SljitSimdEmitContext &ctx) {
 	if (!ctx.free_temps.empty()) {
@@ -334,31 +401,86 @@ void FreeSimdValue(SljitSimdEmitContext &ctx, const SljitSimdValue &value) {
 	}
 }
 
-SljitSimdValue EmitSljitSimdMask(struct sljit_compiler *compiler, const ExecutionExpressionIR &node,
-                                 SljitSimdEmitContext &ctx);
-
 void EmitSljitSimdNot(struct sljit_compiler *compiler, SljitSimdEmitContext &ctx, sljit_s32 reg) {
+	// Bitwise complement via the shared all-ones register; width-agnostic.
 	sljit_emit_simd_op2(compiler, ctx.simd_type | SLJIT_SIMD_OP2_XOR, SLJIT_VR(reg), SLJIT_VR(reg),
 	                    SLJIT_VR(ctx.all_ones_reg), 0);
 }
 
-SljitSimdValue EmitSljitSimdReference(struct sljit_compiler *compiler, const ExecutionExpressionIR &node,
-                                      SljitSimdEmitContext &ctx) {
-	auto reg = AllocSimdTemp(ctx);
-	// Column base pointer = source_data_array[ref_index] (S5 holds the array).
-	sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_R0, 0, SLJIT_MEM1(SLJIT_S5),
-	               NumericCast<sljit_sw>(node.ref_index * sizeof(const_data_ptr_t)));
-	// Load lanes contiguously from column[S1] (S1 is the flat row base).
-	sljit_emit_simd_mov(compiler, ctx.simd_type, SLJIT_VR(reg), SLJIT_MEM2(SLJIT_R0, SLJIT_S1), ctx.scale);
-	return {reg, true};
+#if defined(SLJIT_CONFIG_ARM_64) && SLJIT_CONFIG_ARM_64
+// UZP1 Vd.4S, Vn.4S, Vm.4S : take the even-indexed 32-bit elements of Vn then Vm.
+// For two 2x64-bit masks (each lane all-ones/all-zeros) this packs the low words
+// into one 4x32-bit mask covering rows 0..3 — the 64->32 mask narrowing step.
+void EmitSljitSimdUzp1Narrow(struct sljit_compiler *compiler, sljit_s32 dst_vreg, sljit_s32 lo_vreg,
+                             sljit_s32 hi_vreg) {
+	auto dst = sljit_get_register_index(SLJIT_SIMD_REG_128, SLJIT_VR(dst_vreg));
+	auto lo = sljit_get_register_index(SLJIT_SIMD_REG_128, SLJIT_VR(lo_vreg));
+	auto hi = sljit_get_register_index(SLJIT_SIMD_REG_128, SLJIT_VR(hi_vreg));
+	uint32_t instruction = 0x4e801800u | (UnsafeNumericCast<uint32_t>(hi) << 16) |
+	                       (UnsafeNumericCast<uint32_t>(lo) << 5) | UnsafeNumericCast<uint32_t>(dst);
+	sljit_emit_op_custom(compiler, &instruction, sizeof(instruction));
+}
+#endif
+
+// Evaluate a pure VALUE expression (references, constants, add/sub/mul) at the
+// given element scale, reading rows starting at S1 + row_offset.
+SljitSimdValue EmitSljitSimdValueExpr(struct sljit_compiler *compiler, const ExecutionExpressionIR &node,
+                                      SljitSimdEmitContext &ctx, sljit_s32 scale, sljit_sw row_offset) {
+	switch (node.kind) {
+	case ExecutionExpressionIRKind::REFERENCE: {
+		auto reg = AllocSimdTemp(ctx);
+		// Column base pointer = source_data_array[ref_index] (S5 holds the array).
+		sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_R0, 0, SLJIT_MEM1(SLJIT_S5),
+		               NumericCast<sljit_sw>(node.ref_index * sizeof(const_data_ptr_t)));
+		if (row_offset == 0) {
+			sljit_emit_simd_mov(compiler, SljitSimdTypeForScale(scale), SLJIT_VR(reg), SLJIT_MEM2(SLJIT_R0, SLJIT_S1),
+			                    scale);
+		} else {
+			sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_R1, 0, SLJIT_S1, 0, SLJIT_IMM, row_offset);
+			sljit_emit_simd_mov(compiler, SljitSimdTypeForScale(scale), SLJIT_VR(reg), SLJIT_MEM2(SLJIT_R0, SLJIT_R1),
+			                    scale);
+		}
+		return {reg, true};
+	}
+	case ExecutionExpressionIRKind::CONSTANT:
+		return {ctx.constant_reg.at({SljitTypedExpressionTreeConstantValue(node), scale}), false};
+	case ExecutionExpressionIRKind::BINARY: {
+		auto left = EmitSljitSimdValueExpr(compiler, *node.left, ctx, scale, row_offset);
+		auto right = EmitSljitSimdValueExpr(compiler, *node.right, ctx, scale, row_offset);
+		auto dst = AllocSimdTemp(ctx);
+		sljit_s32 op;
+		switch (node.binary_op) {
+		case ExecutionExpressionBinaryOp::ADD:
+			op = SLJIT_SIMD_OP2_ADD;
+			break;
+		case ExecutionExpressionBinaryOp::SUBTRACT:
+			op = SLJIT_SIMD_OP2_SUB;
+			break;
+		case ExecutionExpressionBinaryOp::MULTIPLY:
+			op = SLJIT_SIMD_OP2_MUL;
+			break;
+		default:
+			throw InternalException("Unsupported SLJIT SIMD arithmetic operator");
+		}
+		sljit_emit_simd_op2(compiler, SljitSimdTypeForScale(scale) | op, SLJIT_VR(dst), SLJIT_VR(left.reg),
+		                    SLJIT_VR(right.reg), 0);
+		FreeSimdValue(ctx, left);
+		FreeSimdValue(ctx, right);
+		return {dst, true};
+	}
+	default:
+		throw InternalException("Unsupported SLJIT SIMD value node kind");
+	}
 }
 
-SljitSimdValue EmitSljitSimdComparison(struct sljit_compiler *compiler, const ExecutionExpressionIR &node,
-                                       SljitSimdEmitContext &ctx) {
-	auto left = EmitSljitSimdMask(compiler, *node.left, ctx);
-	auto right = EmitSljitSimdMask(compiler, *node.right, ctx);
+// Emit one comparison at the given element scale / row offset, producing a mask
+// of that width.
+SljitSimdValue EmitSljitSimdComparisonAt(struct sljit_compiler *compiler, const ExecutionExpressionIR &node,
+                                         SljitSimdEmitContext &ctx, sljit_s32 scale, sljit_sw row_offset) {
+	auto left = EmitSljitSimdValueExpr(compiler, *node.left, ctx, scale, row_offset);
+	auto right = EmitSljitSimdValueExpr(compiler, *node.right, ctx, scale, row_offset);
 	auto dst = AllocSimdTemp(ctx);
-	auto st = ctx.simd_type;
+	auto st = SljitSimdTypeForScale(scale);
 	switch (node.binary_op) {
 	case ExecutionExpressionBinaryOp::COMPARE_GREATERTHAN: // left > right
 		sljit_emit_simd_op2(compiler, st | SLJIT_SIMD_OP2_CMPGT, SLJIT_VR(dst), SLJIT_VR(left.reg),
@@ -395,29 +517,36 @@ SljitSimdValue EmitSljitSimdComparison(struct sljit_compiler *compiler, const Ex
 	return {dst, true};
 }
 
-SljitSimdValue EmitSljitSimdArithmetic(struct sljit_compiler *compiler, const ExecutionExpressionIR &node,
-                                       SljitSimdEmitContext &ctx) {
-	auto left = EmitSljitSimdMask(compiler, *node.left, ctx);
-	auto right = EmitSljitSimdMask(compiler, *node.right, ctx);
-	auto dst = AllocSimdTemp(ctx);
-	sljit_s32 op;
-	switch (node.binary_op) {
-	case ExecutionExpressionBinaryOp::ADD:
-		op = SLJIT_SIMD_OP2_ADD;
-		break;
-	case ExecutionExpressionBinaryOp::SUBTRACT:
-		op = SLJIT_SIMD_OP2_SUB;
-		break;
-	case ExecutionExpressionBinaryOp::MULTIPLY:
-		op = SLJIT_SIMD_OP2_MUL;
-		break;
-	default:
-		throw InternalException("Unsupported SLJIT SIMD arithmetic operator");
+SljitSimdValue EmitSljitSimdMask(struct sljit_compiler *compiler, const ExecutionExpressionIR &node,
+                                 SljitSimdEmitContext &ctx);
+
+// Emit a comparison as a LOOP-width mask. In mixed mode a 64-bit comparison is
+// evaluated for both row halves and the two 2x64 masks are narrowed into one
+// 4x32 mask; otherwise the comparison width equals the loop width.
+SljitSimdValue EmitSljitSimdComparisonMask(struct sljit_compiler *compiler, const ExecutionExpressionIR &node,
+                                           SljitSimdEmitContext &ctx) {
+	auto comparison_scale = SljitSimdSubtreeScale(*node.left);
+	if (comparison_scale == 0) {
+		comparison_scale = SljitSimdSubtreeScale(*node.right);
 	}
-	sljit_emit_simd_op2(compiler, ctx.simd_type | op, SLJIT_VR(dst), SLJIT_VR(left.reg), SLJIT_VR(right.reg), 0);
-	FreeSimdValue(ctx, left);
-	FreeSimdValue(ctx, right);
+	if (comparison_scale == 0) {
+		throw InternalException("SLJIT SIMD comparison has no anchored element width");
+	}
+	if (!ctx.mixed || comparison_scale == ctx.scale) {
+		return EmitSljitSimdComparisonAt(compiler, node, ctx, ctx.scale, 0);
+	}
+#if defined(SLJIT_CONFIG_ARM_64) && SLJIT_CONFIG_ARM_64
+	D_ASSERT(comparison_scale == 3 && ctx.scale == 2);
+	auto lo = EmitSljitSimdComparisonAt(compiler, node, ctx, 3, 0);
+	auto hi = EmitSljitSimdComparisonAt(compiler, node, ctx, 3, 2);
+	auto dst = AllocSimdTemp(ctx);
+	EmitSljitSimdUzp1Narrow(compiler, dst, lo.reg, hi.reg);
+	FreeSimdValue(ctx, lo);
+	FreeSimdValue(ctx, hi);
 	return {dst, true};
+#else
+	throw InternalException("SLJIT SIMD mixed-width mask narrowing requires ARM64");
+#endif
 }
 
 SljitSimdValue EmitSljitSimdConjunction(struct sljit_compiler *compiler, const ExecutionExpressionIR &node,
@@ -425,12 +554,6 @@ SljitSimdValue EmitSljitSimdConjunction(struct sljit_compiler *compiler, const E
 	auto combine = node.conjunction_op == ExecutionExpressionConjunctionOp::AND ? SLJIT_SIMD_OP2_AND
 	                                                                             : SLJIT_SIMD_OP2_OR;
 	auto acc = EmitSljitSimdMask(compiler, *node.children[0], ctx);
-	if (!acc.is_temp) {
-		// A constant child cannot be mutated in place; copy into a temp.
-		auto reg = AllocSimdTemp(ctx);
-		sljit_emit_simd_mov(compiler, ctx.simd_type, SLJIT_VR(reg), SLJIT_VR(acc.reg), 0);
-		acc = {reg, true};
-	}
 	for (idx_t child_idx = 1; child_idx < node.children.size(); child_idx++) {
 		auto child = EmitSljitSimdMask(compiler, *node.children[child_idx], ctx);
 		sljit_emit_simd_op2(compiler, ctx.simd_type | combine, SLJIT_VR(acc.reg), SLJIT_VR(acc.reg),
@@ -443,15 +566,16 @@ SljitSimdValue EmitSljitSimdConjunction(struct sljit_compiler *compiler, const E
 SljitSimdValue EmitSljitSimdMask(struct sljit_compiler *compiler, const ExecutionExpressionIR &node,
                                  SljitSimdEmitContext &ctx) {
 	switch (node.kind) {
-	case ExecutionExpressionIRKind::REFERENCE:
-		return EmitSljitSimdReference(compiler, node, ctx);
-	case ExecutionExpressionIRKind::CONSTANT:
-		return {ctx.constant_reg.at(SljitTypedExpressionTreeConstantValue(node)), false};
 	case ExecutionExpressionIRKind::BINARY:
 		if (SljitTypedExpressionTreeComparisonSupported(node.binary_op)) {
-			return EmitSljitSimdComparison(compiler, node, ctx);
+			return EmitSljitSimdComparisonMask(compiler, node, ctx);
 		}
-		return EmitSljitSimdArithmetic(compiler, node, ctx);
+		// A bare value expression used where a mask is expected only happens for
+		// pure-width payload evaluation; route through the value emitter.
+		return EmitSljitSimdValueExpr(compiler, node, ctx, ctx.scale, 0);
+	case ExecutionExpressionIRKind::REFERENCE:
+	case ExecutionExpressionIRKind::CONSTANT:
+		return EmitSljitSimdValueExpr(compiler, node, ctx, ctx.scale, 0);
 	case ExecutionExpressionIRKind::CONJUNCTION:
 		return EmitSljitSimdConjunction(compiler, node, ctx);
 	default:
@@ -459,36 +583,63 @@ SljitSimdValue EmitSljitSimdMask(struct sljit_compiler *compiler, const Executio
 	}
 }
 
-// Broadcast every distinct constant (and the all-ones mask if needed) into a
-// persistent vector register before the loop starts.
-void EmitSljitSimdBroadcastConstants(struct sljit_compiler *compiler, const ExecutionExpressionIR &node,
-                                     SljitSimdEmitContext &ctx) {
+// Broadcast the distinct constants of a VALUE subtree at the given element scale.
+void EmitSljitSimdBroadcastValueConstants(struct sljit_compiler *compiler, const ExecutionExpressionIR &node,
+                                          SljitSimdEmitContext &ctx, sljit_s32 scale) {
 	switch (node.kind) {
 	case ExecutionExpressionIRKind::CONSTANT: {
 		auto value = SljitTypedExpressionTreeConstantValue(node);
-		if (ctx.constant_reg.find(value) != ctx.constant_reg.end()) {
+		if (ctx.constant_reg.find({value, scale}) != ctx.constant_reg.end()) {
 			return;
 		}
 		auto reg = ctx.next_temp++;
-		ctx.constant_reg[value] = reg;
+		ctx.constant_reg[{value, scale}] = reg;
 		sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R0, 0, SLJIT_IMM, NumericCast<sljit_sw>(value));
-		sljit_emit_simd_replicate(compiler, ctx.simd_type, SLJIT_VR(reg), SLJIT_R0, 0);
+		sljit_emit_simd_replicate(compiler, SljitSimdTypeForScale(scale), SLJIT_VR(reg), SLJIT_R0, 0);
 		return;
 	}
 	case ExecutionExpressionIRKind::BINARY:
 		if (node.left) {
-			EmitSljitSimdBroadcastConstants(compiler, *node.left, ctx);
+			EmitSljitSimdBroadcastValueConstants(compiler, *node.left, ctx, scale);
 		}
 		if (node.right) {
-			EmitSljitSimdBroadcastConstants(compiler, *node.right, ctx);
+			EmitSljitSimdBroadcastValueConstants(compiler, *node.right, ctx, scale);
 		}
 		return;
+	default:
+		return;
+	}
+}
+
+// Broadcast every distinct (value, width) constant of a MASK tree into a
+// persistent vector register before the loop starts. Each comparison's constants
+// broadcast at that comparison's anchored width.
+void EmitSljitSimdBroadcastConstants(struct sljit_compiler *compiler, const ExecutionExpressionIR &node,
+                                     SljitSimdEmitContext &ctx) {
+	switch (node.kind) {
+	case ExecutionExpressionIRKind::BINARY: {
+		if (SljitTypedExpressionTreeComparisonSupported(node.binary_op)) {
+			auto comparison_scale = SljitSimdSubtreeScale(*node.left);
+			if (comparison_scale == 0) {
+				comparison_scale = SljitSimdSubtreeScale(*node.right);
+			}
+			if (comparison_scale == 0) {
+				comparison_scale = ctx.scale;
+			}
+			EmitSljitSimdBroadcastValueConstants(compiler, *node.left, ctx, comparison_scale);
+			EmitSljitSimdBroadcastValueConstants(compiler, *node.right, ctx, comparison_scale);
+			return;
+		}
+		EmitSljitSimdBroadcastValueConstants(compiler, node, ctx, ctx.scale);
+		return;
+	}
 	case ExecutionExpressionIRKind::CONJUNCTION:
 		for (auto &child : node.children) {
 			EmitSljitSimdBroadcastConstants(compiler, *child, ctx);
 		}
 		return;
 	default:
+		EmitSljitSimdBroadcastValueConstants(compiler, node, ctx, ctx.scale);
 		return;
 	}
 }
@@ -500,6 +651,7 @@ void EmitSljitTypedExpressionTreeSimdSelectLoop(struct sljit_compiler *compiler,
 	SljitSimdEmitContext ctx;
 	ctx.simd_type = plan.simd_type;
 	ctx.scale = plan.elem_scale;
+	ctx.mixed = plan.mixed_width;
 
 	// Persistent registers: constants first, then all-ones.
 	EmitSljitSimdBroadcastConstants(compiler, root, ctx);
@@ -555,6 +707,7 @@ void EmitSljitTypedExpressionTreeSimdSumLoop(struct sljit_compiler *compiler, co
 	SljitSimdEmitContext ctx;
 	ctx.simd_type = plan.simd_type;
 	ctx.scale = plan.elem_scale;
+	ctx.mixed = plan.mixed_width;
 	auto sum_type = SLJIT_SIMD_REG_128 | SLJIT_SIMD_ELEM_64;
 
 	// Predicate and payload constants share one broadcast map (deduplicated by value).
@@ -631,6 +784,7 @@ void EmitSljitTypedExpressionTreeSimdCountLoop(struct sljit_compiler *compiler, 
 	SljitSimdEmitContext ctx;
 	ctx.simd_type = plan.simd_type;
 	ctx.scale = plan.elem_scale;
+	ctx.mixed = plan.mixed_width;
 
 	EmitSljitSimdBroadcastConstants(compiler, root, ctx);
 	if (plan.needs_all_ones) {
@@ -669,6 +823,49 @@ void EmitSljitTypedExpressionTreeSimdCountLoop(struct sljit_compiler *compiler, 
 		sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_R2, 0, SLJIT_R2, 0, SLJIT_R3, 0);
 	}
 	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_MEM1(SLJIT_SP), count_offset, SLJIT_R2, 0);
+}
+
+void EmitSljitTypedExpressionTreeSimdHybridFilterLoop(struct sljit_compiler *compiler,
+                                                      const ExecutionExpressionIR &predicate,
+                                                      const SljitTypedExpressionTreeSimdPlan &plan,
+                                                      sljit_sw mask_offset,
+                                                      const std::function<void()> &emit_matching_row) {
+	SljitSimdEmitContext ctx;
+	ctx.simd_type = plan.simd_type;
+	ctx.scale = plan.elem_scale;
+	ctx.mixed = plan.mixed_width;
+
+	EmitSljitSimdBroadcastConstants(compiler, predicate, ctx);
+	if (plan.needs_all_ones) {
+		ctx.all_ones_reg = ctx.next_temp++;
+		sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R0, 0, SLJIT_IMM, -1);
+		sljit_emit_simd_replicate(compiler, ctx.simd_type, SLJIT_VR(ctx.all_ones_reg), SLJIT_R0, 0);
+	}
+
+	// S1 is the flat row base (0 on entry).
+	auto simd_loop = sljit_emit_label(compiler);
+	sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_R0, 0, SLJIT_S1, 0, SLJIT_IMM, plan.lanes);
+	auto simd_done = sljit_emit_cmp(compiler, SLJIT_GREATER, SLJIT_R0, 0, SLJIT_S2, 0);
+
+	auto mask = EmitSljitSimdMask(compiler, predicate, ctx);
+	sljit_emit_simd_mov(compiler, ctx.simd_type | SLJIT_SIMD_STORE, SLJIT_VR(mask.reg), SLJIT_MEM1(SLJIT_SP),
+	                    mask_offset);
+	FreeSimdValue(ctx, mask);
+
+	// Per lane: if the mask lane is set, run the scalar row work at S1; the row
+	// index advances by one per lane so the callback always reads the lane's row.
+	auto lane_load_op = plan.elem_scale == 2 ? SLJIT_MOV_S32 : SLJIT_MOV;
+	auto lane_bytes = NumericCast<sljit_sw>(sljit_sw(1) << plan.elem_scale);
+	for (sljit_s32 lane = 0; lane < plan.lanes; lane++) {
+		sljit_emit_op1(compiler, lane_load_op, SLJIT_R2, 0, SLJIT_MEM1(SLJIT_SP), mask_offset + lane * lane_bytes);
+		auto lane_false = sljit_emit_cmp(compiler, SLJIT_EQUAL, SLJIT_R2, 0, SLJIT_IMM, 0);
+		emit_matching_row();
+		sljit_set_label(lane_false, sljit_emit_label(compiler));
+		sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_S1, 0, SLJIT_S1, 0, SLJIT_IMM, 1);
+	}
+	auto repeat = sljit_emit_jump(compiler, SLJIT_JUMP);
+	sljit_set_label(repeat, simd_loop);
+	sljit_set_label(simd_done, sljit_emit_label(compiler));
 }
 
 } // namespace duckdb

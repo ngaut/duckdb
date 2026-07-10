@@ -14,6 +14,8 @@
 
 #include "sljitLir.h"
 
+#include <functional>
+
 namespace duckdb {
 
 struct SljitTypedExpressionTreeSimdPlan {
@@ -25,6 +27,9 @@ struct SljitTypedExpressionTreeSimdPlan {
 	idx_t node_count = 0;
 	idx_t max_live_temps = 0; // peak simultaneous vector temporaries (register pressure)
 	bool needs_all_ones = false;
+	// The predicate mixes 32-bit and 64-bit comparisons: the loop runs 4 lanes at
+	// 32-bit width and 64-bit comparison masks are evaluated per half and narrowed.
+	bool mixed_width = false;
 };
 
 // Returns a supported plan iff the boolean predicate can be evaluated with
@@ -69,5 +74,19 @@ void EmitSljitTypedExpressionTreeSimdSumLoop(struct sljit_compiler *compiler, co
                                              const ExecutionExpressionIR &payload,
                                              const SljitTypedExpressionTreeSimdPlan &plan, sljit_sw sum_offset,
                                              sljit_sw count_offset, sljit_sw saw_value_offset, sljit_sw scratch_offset);
+
+// Emits the hybrid packed-mask filter loop: the predicate mask for `lanes` rows is
+// computed with packed SIMD, then `emit_matching_row` is invoked once per lane to
+// emit the scalar work for a matching row (S1 holds that row's flat index; the
+// callback must preserve S1/S2/S5 and may clobber R0-R4). Used when the payloads
+// have no packed form (arbitrary aggregate payload kinds); the predicate — usually
+// the dominant cost under selective filters — still vectorizes. Assumes the flat
+// all-valid context; advances S1 to the last full lane group, the caller's scalar
+// fast loop handles the tail. `mask_offset` is a 16-byte, 16-aligned scratch slot.
+void EmitSljitTypedExpressionTreeSimdHybridFilterLoop(struct sljit_compiler *compiler,
+                                                      const ExecutionExpressionIR &predicate,
+                                                      const SljitTypedExpressionTreeSimdPlan &plan,
+                                                      sljit_sw mask_offset,
+                                                      const std::function<void()> &emit_matching_row);
 
 } // namespace duckdb
