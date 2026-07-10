@@ -53,8 +53,10 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeTypedExpressionTreeSelect(
 	if (simd_plan.supported) {
 		simd_mask_offset = (local_size + 15) & ~sljit_sw(15);
 		local_size = simd_mask_offset + 16;
-		// Vector registers used: constants + all-ones + peak live temporaries.
-		auto vector_regs = simd_plan.constant_count + (simd_plan.needs_all_ones ? 1 : 0) + simd_plan.max_live_temps;
+		// Vector registers used: constants + all-ones + lane bits + validity nibble
+		// + peak live temporaries.
+		auto vector_regs = simd_plan.constant_count + (simd_plan.needs_all_ones ? 1 : 0) + simd_plan.max_live_temps +
+		                   (simd_plan.nullable_capable ? idx_t(2) : idx_t(0));
 		simd_scratches = 5 | SLJIT_ENTER_VECTOR(NumericCast<sljit_s32>(vector_regs));
 	}
 	sljit_emit_enter(compiler, 0, SLJIT_ARGS1V(P), simd_scratches, 7, local_size);
@@ -84,6 +86,39 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeTypedExpressionTreeSelect(
 		auto fast_repeat = sljit_emit_jump(compiler, SLJIT_JUMP);
 		sljit_set_label(fast_repeat, fast_loop);
 		sljit_set_label(use_slow_loop, sljit_emit_label(compiler));
+	}
+	// Flat batches that MAY contain NULLs run the packed loop with a lane-expanded
+	// validity mask ANDed in (AND-only predicates: a row with a NULL referenced
+	// source cannot pass); the scalar tail pre-checks sources per row.
+	struct sljit_jump *nullable_simd_done = nullptr;
+	if (fast_path.fast_path_supported && simd_plan.supported && simd_plan.nullable_capable) {
+		sljit_emit_op1(compiler, SLJIT_MOV_U8, SLJIT_R0, 0, SLJIT_MEM1(SLJIT_S0),
+		               offsetof(SljitNativeVectorInput, expression_tree_flat_no_selection));
+		auto skip_nullable_simd = sljit_emit_cmp(compiler, SLJIT_EQUAL, SLJIT_R0, 0, SLJIT_IMM, 0);
+		sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_S1, 0, SLJIT_IMM, 0);
+		EmitSljitTypedExpressionTreeSimdSelectLoop(compiler, root, simd_plan, simd_mask_offset,
+		                                           &simd_plan.source_refs);
+		auto nullable_tail_loop = sljit_emit_label(compiler);
+		auto nullable_tail_done = sljit_emit_cmp(compiler, SLJIT_GREATER_EQUAL, SLJIT_S1, 0, SLJIT_S2, 0);
+		vector<sljit_jump *> tail_null_jumps;
+		for (auto source_index : simd_plan.source_refs) {
+			tail_null_jumps.push_back(EmitJumpIfSljitExpressionTreeFlatSourceNull(compiler, source_index));
+		}
+		idx_t nullable_tail_spill_index = 0;
+		EmitSljitTypedExpressionTreeFastValueReg(compiler, root, nullable_tail_spill_index, overflows);
+		auto nullable_tail_false = sljit_emit_cmp(compiler, SLJIT_EQUAL, SLJIT_R2, 0, SLJIT_IMM, 0);
+		EmitStoreSljitTypedExpressionTreeTrueSelection(compiler, SLJIT_S1);
+		auto nullable_tail_skip = sljit_emit_label(compiler);
+		sljit_set_label(nullable_tail_false, nullable_tail_skip);
+		for (auto null_jump : tail_null_jumps) {
+			sljit_set_label(null_jump, nullable_tail_skip);
+		}
+		sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_S1, 0, SLJIT_S1, 0, SLJIT_IMM, 1);
+		auto nullable_tail_repeat = sljit_emit_jump(compiler, SLJIT_JUMP);
+		sljit_set_label(nullable_tail_repeat, nullable_tail_loop);
+		sljit_set_label(nullable_tail_done, sljit_emit_label(compiler));
+		nullable_simd_done = sljit_emit_jump(compiler, SLJIT_JUMP);
+		sljit_set_label(skip_nullable_simd, sljit_emit_label(compiler));
 	}
 	struct sljit_jump *flat_nullable_done = nullptr;
 	struct sljit_jump *use_generic_loop = nullptr;
@@ -150,6 +185,9 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeTypedExpressionTreeSelect(
 	}
 	if (flat_nullable_done) {
 		sljit_set_label(flat_nullable_done, done_label);
+	}
+	if (nullable_simd_done) {
+		sljit_set_label(nullable_simd_done, done_label);
 	}
 	sljit_set_label(done, done_label);
 	for (auto jump : helper_done) {

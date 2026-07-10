@@ -10,6 +10,7 @@
 
 #include "sljit_native_plan.hpp"
 #include "sljit_native_util.hpp"
+#include "sljit_typed_expression_simd_codegen.hpp"
 
 namespace duckdb {
 
@@ -33,6 +34,16 @@ bool TryReadNativeRegionExpression(const ExecutionExpressionIR &root, bool requi
 	}
 
 	if (!require_boolean && TryReadNativeScalarIntrinsicRegionExpression(root, expr)) {
+		return true;
+	}
+
+	// A conjunction the SIMD gate accepts runs faster through the typed
+	// expression-tree select (packed mask loop) than through the branch-based
+	// predicate select, so prefer it. Single comparisons keep their specialized
+	// predicate handlers; string/IN/BETWEEN predicates fail the gate and fall
+	// through unchanged.
+	if (require_boolean && root.kind == ExecutionExpressionIRKind::CONJUNCTION &&
+	    TryPlanSljitTypedExpressionTreeSimd(root).supported && TryBuildSljitNativeTypedExpressionTreePlan(root, expr)) {
 		return true;
 	}
 

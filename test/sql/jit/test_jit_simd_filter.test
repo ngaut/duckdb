@@ -280,6 +280,60 @@ SELECT sum(b) FROM mx WHERE a*3+c > 1500 AND b+d < -1;
 NULL
 
 # ---------------------------------------------------------------------------
+# NULLABLE data: the packed loops run with a lane-expanded validity mask ANDed
+# into the predicate mask (AND-only trees: a row with a NULL referenced source
+# cannot pass). Covers the count, sum, native-callback and select paths.
+# ---------------------------------------------------------------------------
+statement ok
+CREATE TABLE nn AS SELECT CASE WHEN i%3=0 THEN NULL ELSE (i%1000)::INT END a, CASE WHEN i%97=0 THEN NULL ELSE (i%777)::INT END b, (i%555)::INT c, (i%333)::INT d FROM range(100003) tbl(i);
+
+statement ok
+SET jit_policy='auto';
+
+query I
+SELECT count(*) FROM nn WHERE a*3+b*2-c > 1500 AND a*2-d*3+c < 900 AND b*4-a > 500;
+----
+15050
+
+query I
+SELECT sum(a) FROM nn WHERE a*3+b*2-c > 1500 AND a*2-d*3+c < 900 AND b*4-a > 500;
+----
+6310184
+
+query II
+SELECT max(a), min(b) FROM nn WHERE a*3+b*2-c > 1500 AND b*4-a > 500;
+----
+999	223
+
+query I
+SELECT count(*) FROM (SELECT a,b FROM nn WHERE a*3+b*2-c > 1500 AND b*4-a > 500);
+----
+30817
+
+statement ok
+SET jit_policy='off';
+
+query I
+SELECT count(*) FROM nn WHERE a*3+b*2-c > 1500 AND a*2-d*3+c < 900 AND b*4-a > 500;
+----
+15050
+
+query I
+SELECT sum(a) FROM nn WHERE a*3+b*2-c > 1500 AND a*2-d*3+c < 900 AND b*4-a > 500;
+----
+6310184
+
+query II
+SELECT max(a), min(b) FROM nn WHERE a*3+b*2-c > 1500 AND b*4-a > 500;
+----
+999	223
+
+query I
+SELECT count(*) FROM (SELECT a,b FROM nn WHERE a*3+b*2-c > 1500 AND b*4-a > 500);
+----
+30817
+
+# ---------------------------------------------------------------------------
 # 64-bit element predicate (2 lanes). int64 add/sub/compare are SIMD; int64
 # multiply is correctly NOT vectorized (gate excludes it) so this stays correct.
 # ---------------------------------------------------------------------------

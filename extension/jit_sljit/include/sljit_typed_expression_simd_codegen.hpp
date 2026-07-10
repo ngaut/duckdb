@@ -30,6 +30,13 @@ struct SljitTypedExpressionTreeSimdPlan {
 	// The predicate mixes 32-bit and 64-bit comparisons: the loop runs 4 lanes at
 	// 32-bit width and 64-bit comparison masks are evaluated per half and narrowed.
 	bool mixed_width = false;
+	// AND-only tree: a row with any NULL referenced source cannot pass (SQL
+	// three-valued logic), so the packed loops may run on nullable flat data by
+	// ANDing a lane-expanded validity mask into the predicate mask. OR trees are
+	// excluded (NULL OR TRUE is TRUE).
+	bool nullable_capable = false;
+	// Distinct source indices referenced by the predicate (validity mask inputs).
+	vector<idx_t> source_refs;
 };
 
 // Returns a supported plan iff the boolean predicate can be evaluated with
@@ -43,7 +50,8 @@ SljitTypedExpressionTreeSimdPlan TryPlanSljitTypedExpressionTreeSimd(const Execu
 // scalar fast loop then handles the < lanes tail. `mask_offset` is a 16-byte,
 // 16-aligned scratch slot in the local frame.
 void EmitSljitTypedExpressionTreeSimdSelectLoop(struct sljit_compiler *compiler, const ExecutionExpressionIR &root,
-                                                const SljitTypedExpressionTreeSimdPlan &plan, sljit_sw mask_offset);
+                                                const SljitTypedExpressionTreeSimdPlan &plan, sljit_sw mask_offset,
+                                                const vector<idx_t> *validity_refs = nullptr);
 
 // Appends `index_reg` to the true-selection vector (shared with the scalar path).
 void EmitStoreSljitTypedExpressionTreeTrueSelection(struct sljit_compiler *compiler, sljit_s32 index_reg);
@@ -56,7 +64,7 @@ void EmitStoreSljitTypedExpressionTreeTrueSelection(struct sljit_compiler *compi
 // 16-aligned scratch slot in the local frame.
 void EmitSljitTypedExpressionTreeSimdCountLoop(struct sljit_compiler *compiler, const ExecutionExpressionIR &root,
                                                const SljitTypedExpressionTreeSimdPlan &plan, sljit_sw count_offset,
-                                               sljit_sw mask_offset);
+                                               sljit_sw mask_offset, const vector<idx_t> *validity_refs = nullptr);
 
 // Plan for a pure integer value expression (references, constants, add/sub/mul) at a
 // required element width; used to gate SUM payloads (which must be values, not masks).
@@ -73,7 +81,8 @@ SljitTypedExpressionTreeSimdPlan TryPlanSljitTypedExpressionTreeSimdValue(const 
 void EmitSljitTypedExpressionTreeSimdSumLoop(struct sljit_compiler *compiler, const ExecutionExpressionIR &predicate,
                                              const ExecutionExpressionIR &payload,
                                              const SljitTypedExpressionTreeSimdPlan &plan, sljit_sw sum_offset,
-                                             sljit_sw count_offset, sljit_sw saw_value_offset, sljit_sw scratch_offset);
+                                             sljit_sw count_offset, sljit_sw saw_value_offset, sljit_sw scratch_offset,
+                                             const vector<idx_t> *validity_refs = nullptr);
 
 // Emits the hybrid packed-mask filter loop: the predicate mask for `lanes` rows is
 // computed with packed SIMD, then `emit_matching_row` is invoked once per lane to
@@ -87,6 +96,7 @@ void EmitSljitTypedExpressionTreeSimdHybridFilterLoop(struct sljit_compiler *com
                                                       const ExecutionExpressionIR &predicate,
                                                       const SljitTypedExpressionTreeSimdPlan &plan,
                                                       sljit_sw mask_offset,
-                                                      const std::function<void()> &emit_matching_row);
+                                                      const std::function<void()> &emit_matching_row,
+                                                      const vector<idx_t> *validity_refs = nullptr);
 
 } // namespace duckdb

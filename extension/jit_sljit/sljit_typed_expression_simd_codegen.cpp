@@ -143,7 +143,7 @@ static bool CheckSljitSimdEligibleValue(const ExecutionExpressionIR &node, sljit
 // narrowed to the 32-bit loop width before combining.
 static bool CheckSljitSimdEligibleMask(const ExecutionExpressionIR &node,
                                        set<std::pair<int64_t, sljit_s32>> &distinct_constants, bool &needs_all_ones,
-                                       idx_t &node_count, bool &has_scale32, bool &has_scale64) {
+                                       idx_t &node_count, bool &has_scale32, bool &has_scale64, bool &has_or) {
 	node_count++;
 	switch (node.kind) {
 	case ExecutionExpressionIRKind::BINARY: {
@@ -179,9 +179,10 @@ static bool CheckSljitSimdEligibleMask(const ExecutionExpressionIR &node,
 		if (node.children.empty()) {
 			return false;
 		}
+		has_or = has_or || node.conjunction_op == ExecutionExpressionConjunctionOp::OR;
 		for (auto &child : node.children) {
 			if (!CheckSljitSimdEligibleMask(*child, distinct_constants, needs_all_ones, node_count, has_scale32,
-			                                has_scale64)) {
+			                                has_scale64, has_or)) {
 				return false;
 			}
 		}
@@ -280,7 +281,9 @@ SljitTypedExpressionTreeSimdPlan TryPlanSljitTypedExpressionTreeSimd(const Execu
 	idx_t node_count = 0;
 	bool has_scale32 = false;
 	bool has_scale64 = false;
-	if (!CheckSljitSimdEligibleMask(root, distinct_constants, needs_all_ones, node_count, has_scale32, has_scale64)) {
+	bool has_or = false;
+	if (!CheckSljitSimdEligibleMask(root, distinct_constants, needs_all_ones, node_count, has_scale32, has_scale64,
+	                                has_or)) {
 		return plan;
 	}
 	const bool mixed = has_scale32 && has_scale64;
@@ -309,6 +312,11 @@ SljitTypedExpressionTreeSimdPlan TryPlanSljitTypedExpressionTreeSimd(const Execu
 	plan.needs_all_ones = needs_all_ones;
 	plan.node_count = node_count;
 	plan.max_live_temps = max_live;
+	// Row-skip null semantics hold only for AND-only trees.
+	if (!has_or) {
+		CollectSljitTypedExpressionTreeReferences(root, plan.source_refs);
+		plan.nullable_capable = !plan.source_refs.empty();
+	}
 	return plan;
 }
 
@@ -373,6 +381,9 @@ struct SljitSimdEmitContext {
 	bool mixed = false;
 	map<std::pair<int64_t, sljit_s32>, sljit_s32> constant_reg; // (value, element scale) -> vreg
 	sljit_s32 all_ones_reg = -1;
+	// Lane bit positions {1,2,4,8} (or {1,2}) used to expand a validity nibble
+	// into a lane mask; only initialized when the loop runs on nullable data.
+	sljit_s32 lane_bits_reg = -1;
 	sljit_s32 next_temp = 0;
 	vector<sljit_s32> free_temps;
 };
@@ -583,6 +594,56 @@ SljitSimdValue EmitSljitSimdMask(struct sljit_compiler *compiler, const Executio
 	}
 }
 
+// Initialize the persistent lane-bit-position register {1,2,...} through the
+// caller's 16-byte scratch slot (replicate cannot produce distinct lanes).
+void EmitSljitSimdInitLaneBits(struct sljit_compiler *compiler, SljitSimdEmitContext &ctx, sljit_s32 lanes,
+                               sljit_sw scratch_offset) {
+	ctx.lane_bits_reg = ctx.next_temp++;
+	auto lane_bytes = NumericCast<sljit_sw>(sljit_sw(16) / lanes);
+	auto store_op = lanes == 4 ? SLJIT_MOV32 : SLJIT_MOV;
+	for (sljit_s32 lane = 0; lane < lanes; lane++) {
+		sljit_emit_op1(compiler, store_op, SLJIT_MEM1(SLJIT_SP), scratch_offset + lane * lane_bytes, SLJIT_IMM,
+		               sljit_sw(1) << lane);
+	}
+	sljit_emit_simd_mov(compiler, ctx.simd_type, SLJIT_VR(ctx.lane_bits_reg), SLJIT_MEM1(SLJIT_SP), scratch_offset);
+}
+
+// AND the group's validity into `mask_reg`: combine the per-source validity bits
+// for rows S1..S1+lanes-1 into a nibble (a NULL validity pointer means all-valid),
+// and unless the nibble is full, expand it to lanes (broadcast, AND lane bits,
+// CMPEQ lane bits) and AND it into the mask. Clobbers R0-R3.
+void EmitSljitSimdValidityAnd(struct sljit_compiler *compiler, SljitSimdEmitContext &ctx,
+                              const vector<idx_t> &source_refs, sljit_s32 lanes, sljit_s32 mask_reg) {
+	const sljit_sw full_bits = (sljit_sw(1) << lanes) - 1;
+	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R2, 0, SLJIT_IMM, full_bits);
+	for (auto source_index : source_refs) {
+		sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_R0, 0, SLJIT_MEM1(SLJIT_S6),
+		               NumericCast<sljit_sw>(source_index * sizeof(const validity_t *)));
+		auto source_all_valid = sljit_emit_cmp(compiler, SLJIT_EQUAL, SLJIT_R0, 0, SLJIT_IMM, 0);
+		// R3 = validity_word[S1 >> 6] >> (S1 & 63); the group's bits stay inside one
+		// word because the loop advances S1 by `lanes`, which divides 64.
+		sljit_emit_op2(compiler, SLJIT_LSHR, SLJIT_R1, 0, SLJIT_S1, 0, SLJIT_IMM, 6);
+		sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R3, 0, SLJIT_MEM2(SLJIT_R0, SLJIT_R1), 3);
+		sljit_emit_op2(compiler, SLJIT_AND, SLJIT_R1, 0, SLJIT_S1, 0, SLJIT_IMM, 63);
+		sljit_emit_op2(compiler, SLJIT_LSHR, SLJIT_R3, 0, SLJIT_R3, 0, SLJIT_R1, 0);
+		sljit_emit_op2(compiler, SLJIT_AND, SLJIT_R2, 0, SLJIT_R2, 0, SLJIT_R3, 0);
+		sljit_set_label(source_all_valid, sljit_emit_label(compiler));
+	}
+	sljit_emit_op2(compiler, SLJIT_AND, SLJIT_R2, 0, SLJIT_R2, 0, SLJIT_IMM, full_bits);
+	// Common case: every row in the group is valid — leave the mask untouched.
+	auto group_all_valid = sljit_emit_cmp(compiler, SLJIT_EQUAL, SLJIT_R2, 0, SLJIT_IMM, full_bits);
+	auto nibble = AllocSimdTemp(ctx);
+	sljit_emit_simd_replicate(compiler, ctx.simd_type, SLJIT_VR(nibble), SLJIT_R2, 0);
+	sljit_emit_simd_op2(compiler, ctx.simd_type | SLJIT_SIMD_OP2_AND, SLJIT_VR(nibble), SLJIT_VR(nibble),
+	                    SLJIT_VR(ctx.lane_bits_reg), 0);
+	sljit_emit_simd_op2(compiler, ctx.simd_type | SLJIT_SIMD_OP2_CMPEQ, SLJIT_VR(nibble), SLJIT_VR(nibble),
+	                    SLJIT_VR(ctx.lane_bits_reg), 0);
+	sljit_emit_simd_op2(compiler, ctx.simd_type | SLJIT_SIMD_OP2_AND, SLJIT_VR(mask_reg), SLJIT_VR(mask_reg),
+	                    SLJIT_VR(nibble), 0);
+	FreeSimdValue(ctx, {nibble, true});
+	sljit_set_label(group_all_valid, sljit_emit_label(compiler));
+}
+
 // Broadcast the distinct constants of a VALUE subtree at the given element scale.
 void EmitSljitSimdBroadcastValueConstants(struct sljit_compiler *compiler, const ExecutionExpressionIR &node,
                                           SljitSimdEmitContext &ctx, sljit_s32 scale) {
@@ -647,18 +708,22 @@ void EmitSljitSimdBroadcastConstants(struct sljit_compiler *compiler, const Exec
 } // namespace
 
 void EmitSljitTypedExpressionTreeSimdSelectLoop(struct sljit_compiler *compiler, const ExecutionExpressionIR &root,
-                                                const SljitTypedExpressionTreeSimdPlan &plan, sljit_sw mask_offset) {
+                                                const SljitTypedExpressionTreeSimdPlan &plan, sljit_sw mask_offset,
+                                                const vector<idx_t> *validity_refs) {
 	SljitSimdEmitContext ctx;
 	ctx.simd_type = plan.simd_type;
 	ctx.scale = plan.elem_scale;
 	ctx.mixed = plan.mixed_width;
 
-	// Persistent registers: constants first, then all-ones.
+	// Persistent registers: constants first, then all-ones and lane bits.
 	EmitSljitSimdBroadcastConstants(compiler, root, ctx);
 	if (plan.needs_all_ones) {
 		ctx.all_ones_reg = ctx.next_temp++;
 		sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R0, 0, SLJIT_IMM, -1);
 		sljit_emit_simd_replicate(compiler, ctx.simd_type, SLJIT_VR(ctx.all_ones_reg), SLJIT_R0, 0);
+	}
+	if (validity_refs) {
+		EmitSljitSimdInitLaneBits(compiler, ctx, plan.lanes, mask_offset);
 	}
 
 	// S1 is the flat row base (already 0 after the loop-init helper).
@@ -668,6 +733,9 @@ void EmitSljitTypedExpressionTreeSimdSelectLoop(struct sljit_compiler *compiler,
 	auto simd_done = sljit_emit_cmp(compiler, SLJIT_GREATER, SLJIT_R0, 0, SLJIT_S2, 0);
 
 	auto mask = EmitSljitSimdMask(compiler, root, ctx);
+	if (validity_refs) {
+		EmitSljitSimdValidityAnd(compiler, ctx, *validity_refs, plan.lanes, mask.reg);
+	}
 	sljit_emit_simd_mov(compiler, ctx.simd_type | SLJIT_SIMD_STORE, SLJIT_VR(mask.reg), SLJIT_MEM1(SLJIT_SP),
 	                    mask_offset);
 
@@ -702,7 +770,8 @@ static void EmitSljitSimdSadalp2d4s(struct sljit_compiler *compiler, sljit_s32 d
 void EmitSljitTypedExpressionTreeSimdSumLoop(struct sljit_compiler *compiler, const ExecutionExpressionIR &predicate,
                                              const ExecutionExpressionIR &payload,
                                              const SljitTypedExpressionTreeSimdPlan &plan, sljit_sw sum_offset,
-                                             sljit_sw count_offset, sljit_sw saw_value_offset, sljit_sw scratch_offset) {
+                                             sljit_sw count_offset, sljit_sw saw_value_offset, sljit_sw scratch_offset,
+                                             const vector<idx_t> *validity_refs) {
 	// plan is the predicate plan; the packed path requires a 32-bit (4-lane) predicate.
 	SljitSimdEmitContext ctx;
 	ctx.simd_type = plan.simd_type;
@@ -718,6 +787,9 @@ void EmitSljitTypedExpressionTreeSimdSumLoop(struct sljit_compiler *compiler, co
 		sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R0, 0, SLJIT_IMM, -1);
 		sljit_emit_simd_replicate(compiler, ctx.simd_type, SLJIT_VR(ctx.all_ones_reg), SLJIT_R0, 0);
 	}
+	if (validity_refs) {
+		EmitSljitSimdInitLaneBits(compiler, ctx, plan.lanes, scratch_offset);
+	}
 	auto count_acc = ctx.next_temp++;
 	auto sum_acc = ctx.next_temp++;
 	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R0, 0, SLJIT_IMM, 0);
@@ -729,6 +801,9 @@ void EmitSljitTypedExpressionTreeSimdSumLoop(struct sljit_compiler *compiler, co
 	auto simd_done = sljit_emit_cmp(compiler, SLJIT_GREATER, SLJIT_R0, 0, SLJIT_S2, 0);
 
 	auto mask = EmitSljitSimdMask(compiler, predicate, ctx);
+	if (validity_refs) {
+		EmitSljitSimdValidityAnd(compiler, ctx, *validity_refs, plan.lanes, mask.reg);
+	}
 	// Compute the int32 payload value (column load or arithmetic) and mask it: masked
 	// lanes are 0 where the predicate is false.
 	auto payload_val = EmitSljitSimdMask(compiler, payload, ctx);
@@ -780,7 +855,7 @@ void EmitSljitTypedExpressionTreeSimdSumLoop(struct sljit_compiler *compiler, co
 
 void EmitSljitTypedExpressionTreeSimdCountLoop(struct sljit_compiler *compiler, const ExecutionExpressionIR &root,
                                                const SljitTypedExpressionTreeSimdPlan &plan, sljit_sw count_offset,
-                                               sljit_sw mask_offset) {
+                                               sljit_sw mask_offset, const vector<idx_t> *validity_refs) {
 	SljitSimdEmitContext ctx;
 	ctx.simd_type = plan.simd_type;
 	ctx.scale = plan.elem_scale;
@@ -791,6 +866,9 @@ void EmitSljitTypedExpressionTreeSimdCountLoop(struct sljit_compiler *compiler, 
 		ctx.all_ones_reg = ctx.next_temp++;
 		sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R0, 0, SLJIT_IMM, -1);
 		sljit_emit_simd_replicate(compiler, ctx.simd_type, SLJIT_VR(ctx.all_ones_reg), SLJIT_R0, 0);
+	}
+	if (validity_refs) {
+		EmitSljitSimdInitLaneBits(compiler, ctx, plan.lanes, mask_offset);
 	}
 	// Per-lane match accumulator: acc[i] += 1 for every matching row in lane i.
 	auto acc = ctx.next_temp++;
@@ -803,6 +881,9 @@ void EmitSljitTypedExpressionTreeSimdCountLoop(struct sljit_compiler *compiler, 
 	auto simd_done = sljit_emit_cmp(compiler, SLJIT_GREATER, SLJIT_R0, 0, SLJIT_S2, 0);
 
 	auto mask = EmitSljitSimdMask(compiler, root, ctx);
+	if (validity_refs) {
+		EmitSljitSimdValidityAnd(compiler, ctx, *validity_refs, plan.lanes, mask.reg);
+	}
 	// mask lanes are all-ones (=-1) where true; acc -= mask adds 1 per matching lane.
 	sljit_emit_simd_op2(compiler, ctx.simd_type | SLJIT_SIMD_OP2_SUB, SLJIT_VR(acc), SLJIT_VR(acc),
 	                    SLJIT_VR(mask.reg), 0);
@@ -829,7 +910,8 @@ void EmitSljitTypedExpressionTreeSimdHybridFilterLoop(struct sljit_compiler *com
                                                       const ExecutionExpressionIR &predicate,
                                                       const SljitTypedExpressionTreeSimdPlan &plan,
                                                       sljit_sw mask_offset,
-                                                      const std::function<void()> &emit_matching_row) {
+                                                      const std::function<void()> &emit_matching_row,
+                                                      const vector<idx_t> *validity_refs) {
 	SljitSimdEmitContext ctx;
 	ctx.simd_type = plan.simd_type;
 	ctx.scale = plan.elem_scale;
@@ -841,6 +923,9 @@ void EmitSljitTypedExpressionTreeSimdHybridFilterLoop(struct sljit_compiler *com
 		sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R0, 0, SLJIT_IMM, -1);
 		sljit_emit_simd_replicate(compiler, ctx.simd_type, SLJIT_VR(ctx.all_ones_reg), SLJIT_R0, 0);
 	}
+	if (validity_refs) {
+		EmitSljitSimdInitLaneBits(compiler, ctx, plan.lanes, mask_offset);
+	}
 
 	// S1 is the flat row base (0 on entry).
 	auto simd_loop = sljit_emit_label(compiler);
@@ -848,6 +933,9 @@ void EmitSljitTypedExpressionTreeSimdHybridFilterLoop(struct sljit_compiler *com
 	auto simd_done = sljit_emit_cmp(compiler, SLJIT_GREATER, SLJIT_R0, 0, SLJIT_S2, 0);
 
 	auto mask = EmitSljitSimdMask(compiler, predicate, ctx);
+	if (validity_refs) {
+		EmitSljitSimdValidityAnd(compiler, ctx, *validity_refs, plan.lanes, mask.reg);
+	}
 	sljit_emit_simd_mov(compiler, ctx.simd_type | SLJIT_SIMD_STORE, SLJIT_VR(mask.reg), SLJIT_MEM1(SLJIT_SP),
 	                    mask_offset);
 	FreeSimdValue(ctx, mask);
