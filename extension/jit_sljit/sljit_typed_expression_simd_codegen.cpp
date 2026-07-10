@@ -255,6 +255,51 @@ SljitTypedExpressionTreeSimdPlan TryPlanSljitTypedExpressionTreeSimd(const Execu
 	return plan;
 }
 
+// A pure integer value expression: references, constants and add/sub/mul only.
+// Excludes comparisons/conjunctions (which produce -1/0 masks, not values) so a
+// SUM payload never accumulates a boolean mask.
+static bool SljitSimdIsPureValueExpression(const ExecutionExpressionIR &node) {
+	switch (node.kind) {
+	case ExecutionExpressionIRKind::REFERENCE:
+	case ExecutionExpressionIRKind::CONSTANT:
+		return true;
+	case ExecutionExpressionIRKind::BINARY:
+		if (!node.left || !node.right || SljitTypedExpressionTreeComparisonSupported(node.binary_op)) {
+			return false;
+		}
+		return SljitSimdIsPureValueExpression(*node.left) && SljitSimdIsPureValueExpression(*node.right);
+	default:
+		return false;
+	}
+}
+
+SljitTypedExpressionTreeSimdPlan TryPlanSljitTypedExpressionTreeSimdValue(const ExecutionExpressionIR &root,
+                                                                         sljit_s32 want_scale) {
+	SljitTypedExpressionTreeSimdPlan plan;
+	if (!SljitSimdIsPureValueExpression(root)) {
+		return plan;
+	}
+	sljit_s32 value_scale = want_scale;
+	set<int64_t> distinct_constants;
+	bool needs_all_ones = false;
+	idx_t node_count = 0;
+	if (!CheckSljitSimdEligible(root, value_scale, distinct_constants, needs_all_ones, node_count)) {
+		return plan;
+	}
+	if (value_scale != want_scale) {
+		return plan; // payload width must match the predicate width
+	}
+	plan.supported = true;
+	plan.elem_scale = want_scale;
+	plan.lanes = want_scale == 2 ? 4 : 2;
+	plan.simd_type = SLJIT_SIMD_REG_128 | (want_scale == 2 ? SLJIT_SIMD_ELEM_32 : SLJIT_SIMD_ELEM_64);
+	plan.constant_count = distinct_constants.size();
+	plan.needs_all_ones = needs_all_ones; // always false: a pure value has no comparisons
+	plan.node_count = node_count;
+	plan.max_live_temps = SljitSimdMaxLiveTemps(root);
+	return plan;
+}
+
 namespace {
 
 // Vector-register allocator: constants and the all-ones mask occupy fixed low
@@ -502,17 +547,6 @@ static void EmitSljitSimdSadalp2d4s(struct sljit_compiler *compiler, sljit_s32 d
 	sljit_emit_op_custom(compiler, &instruction, sizeof(instruction));
 }
 
-bool SljitTypedExpressionTreeSimdSumPayloadSupported(const ExecutionExpressionIR &payload) {
-#if defined(SLJIT_CONFIG_ARM_64) && SLJIT_CONFIG_ARM_64
-	// v1: sum over a single 32-bit integer column; SADALP widens it to int64 as it
-	// accumulates, so no per-lane overflow is possible in the sum itself.
-	return payload.kind == ExecutionExpressionIRKind::REFERENCE && SljitTypedExpressionTreeIsIntegerNode(payload) &&
-	       NativeIntegerDataScale(SljitTypedExpressionTreeIntegerKind(payload)) == 2;
-#else
-	return false;
-#endif
-}
-
 void EmitSljitTypedExpressionTreeSimdSumLoop(struct sljit_compiler *compiler, const ExecutionExpressionIR &predicate,
                                              const ExecutionExpressionIR &payload,
                                              const SljitTypedExpressionTreeSimdPlan &plan, sljit_sw sum_offset,
@@ -523,7 +557,9 @@ void EmitSljitTypedExpressionTreeSimdSumLoop(struct sljit_compiler *compiler, co
 	ctx.scale = plan.elem_scale;
 	auto sum_type = SLJIT_SIMD_REG_128 | SLJIT_SIMD_ELEM_64;
 
+	// Predicate and payload constants share one broadcast map (deduplicated by value).
 	EmitSljitSimdBroadcastConstants(compiler, predicate, ctx);
+	EmitSljitSimdBroadcastConstants(compiler, payload, ctx);
 	if (plan.needs_all_ones) {
 		ctx.all_ones_reg = ctx.next_temp++;
 		sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R0, 0, SLJIT_IMM, -1);
@@ -540,18 +576,22 @@ void EmitSljitTypedExpressionTreeSimdSumLoop(struct sljit_compiler *compiler, co
 	auto simd_done = sljit_emit_cmp(compiler, SLJIT_GREATER, SLJIT_R0, 0, SLJIT_S2, 0);
 
 	auto mask = EmitSljitSimdMask(compiler, predicate, ctx);
-	// load the payload column and mask it: masked lanes are 0 where the predicate is false.
-	auto payload_vreg = AllocSimdTemp(ctx);
-	sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_R0, 0, SLJIT_MEM1(SLJIT_S5),
-	               NumericCast<sljit_sw>(payload.ref_index * sizeof(const_data_ptr_t)));
-	sljit_emit_simd_mov(compiler, ctx.simd_type, SLJIT_VR(payload_vreg), SLJIT_MEM2(SLJIT_R0, SLJIT_S1), ctx.scale);
-	sljit_emit_simd_op2(compiler, ctx.simd_type | SLJIT_SIMD_OP2_AND, SLJIT_VR(payload_vreg), SLJIT_VR(payload_vreg),
-	                    SLJIT_VR(mask.reg), 0);
+	// Compute the int32 payload value (column load or arithmetic) and mask it: masked
+	// lanes are 0 where the predicate is false.
+	auto payload_val = EmitSljitSimdMask(compiler, payload, ctx);
+	if (!payload_val.is_temp) {
+		// A bare constant payload shares a persistent register; copy before the in-place AND.
+		auto reg = AllocSimdTemp(ctx);
+		sljit_emit_simd_mov(compiler, ctx.simd_type, SLJIT_VR(reg), SLJIT_VR(payload_val.reg), 0);
+		payload_val = {reg, true};
+	}
+	sljit_emit_simd_op2(compiler, ctx.simd_type | SLJIT_SIMD_OP2_AND, SLJIT_VR(payload_val.reg),
+	                    SLJIT_VR(payload_val.reg), SLJIT_VR(mask.reg), 0);
 	// sum_acc.2d += widened pairwise sum of masked.4s ; count_acc -= mask
-	EmitSljitSimdSadalp2d4s(compiler, sum_acc, payload_vreg);
+	EmitSljitSimdSadalp2d4s(compiler, sum_acc, payload_val.reg);
 	sljit_emit_simd_op2(compiler, ctx.simd_type | SLJIT_SIMD_OP2_SUB, SLJIT_VR(count_acc), SLJIT_VR(count_acc),
 	                    SLJIT_VR(mask.reg), 0);
-	FreeSimdValue(ctx, {payload_vreg, true});
+	FreeSimdValue(ctx, payload_val);
 	FreeSimdValue(ctx, mask);
 
 	sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_S1, 0, SLJIT_S1, 0, SLJIT_IMM, plan.lanes);

@@ -117,19 +117,24 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeFilteredUngroupedFusedPrim
 	// profitable. Counts full lane groups with SIMD; the scalar fast loop below
 	// handles the < lanes tail.
 	SljitTypedExpressionTreeSimdPlan simd_plan;
+	SljitTypedExpressionTreeSimdPlan simd_payload_plan;
 	bool simd_is_sum = false;
 	if (payloads.size() == 1 && codegen_plan.fast_path_supported) {
 		auto kind = aggregates[0].primitive_update_kind;
 		if (kind == AggregatePrimitiveUpdateKind::COUNT_STAR) {
 			simd_plan = TryPlanSljitTypedExpressionTreeSimd(predicate);
-		} else if (kind == AggregatePrimitiveUpdateKind::SUM_INT64 && payloads[0].expression_tree &&
-		           SljitTypedExpressionTreeSimdSumPayloadSupported(*payloads[0].expression_tree)) {
+		} else if (kind == AggregatePrimitiveUpdateKind::SUM_INT64 && payloads[0].expression_tree) {
 			auto predicate_plan = TryPlanSljitTypedExpressionTreeSimd(predicate);
-			// SADALP widens int32->int64, so the packed SUM path needs a 4-lane int32 predicate.
-			if (predicate_plan.supported && predicate_plan.elem_scale == 2) {
+			// SADALP widens int32->int64, so the packed SUM path needs a 4-lane int32
+			// predicate and a 4-lane int32 value payload; it is ARM64-only.
+#if defined(SLJIT_CONFIG_ARM_64) && SLJIT_CONFIG_ARM_64
+			auto payload_plan = TryPlanSljitTypedExpressionTreeSimdValue(*payloads[0].expression_tree, 2);
+			if (predicate_plan.supported && predicate_plan.elem_scale == 2 && payload_plan.supported) {
 				simd_plan = predicate_plan;
+				simd_payload_plan = payload_plan;
 				simd_is_sum = true;
 			}
+#endif
 		}
 	}
 	sljit_sw simd_mask_offset = 0;
@@ -137,10 +142,12 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeFilteredUngroupedFusedPrim
 	if (simd_plan.supported) {
 		simd_mask_offset = (local_size + 15) & ~sljit_sw(15);
 		local_size = simd_mask_offset + 16;
-		// constants + all-ones + accumulator(s) + peak live temporaries (+1 payload for SUM).
+		// constants (predicate + payload, an over-estimate if they share values) + all-ones
+		// + accumulator(s) + peak live temporaries for predicate and payload.
 		auto accumulators = simd_is_sum ? idx_t(2) : idx_t(1);
-		auto vector_regs = simd_plan.constant_count + (simd_plan.needs_all_ones ? 1 : 0) + accumulators +
-		                   simd_plan.max_live_temps + (simd_is_sum ? idx_t(1) : idx_t(0));
+		auto vector_regs = simd_plan.constant_count + simd_payload_plan.constant_count +
+		                   (simd_plan.needs_all_ones ? 1 : 0) + accumulators + simd_plan.max_live_temps +
+		                   simd_payload_plan.max_live_temps + (simd_is_sum ? idx_t(1) : idx_t(0));
 		simd_scratches = 5 | SLJIT_ENTER_VECTOR(NumericCast<sljit_s32>(vector_regs));
 	}
 

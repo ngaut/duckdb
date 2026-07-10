@@ -53,9 +53,10 @@ void EmitSljitTypedExpressionTreeSimdCountLoop(struct sljit_compiler *compiler, 
                                                const SljitTypedExpressionTreeSimdPlan &plan, sljit_sw count_offset,
                                                sljit_sw mask_offset);
 
-// Whether a filtered SUM(payload) can use the packed path (v1: a single 32-bit
-// integer column, ARM64 only -- SADALP widens int32->int64 as it accumulates).
-bool SljitTypedExpressionTreeSimdSumPayloadSupported(const ExecutionExpressionIR &payload);
+// Plan for a pure integer value expression (references, constants, add/sub/mul) at a
+// required element width; used to gate SUM payloads (which must be values, not masks).
+SljitTypedExpressionTreeSimdPlan TryPlanSljitTypedExpressionTreeSimdValue(const ExecutionExpressionIR &root,
+                                                                         sljit_s32 want_scale);
 
 // Emits the packed-lane SUM(payload) filter loop: for a 4-lane int32 predicate and a
 // 32-bit column payload, accumulates the masked payload (widened to int64) and the

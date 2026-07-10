@@ -124,6 +124,39 @@ SELECT sum(b) FROM t WHERE a+b >= c AND a*2-b != 100 AND c < 400;
 ----
 27413738
 
+# computed int32 payloads (arithmetic value expression, not just a bare column)
+statement ok
+SET jit_policy='auto';
+
+query I
+SELECT sum(a+b) FROM t WHERE a*3+b*2-c > 1500 AND a*2-d*3+c < 900 AND b*4-a > 500;
+----
+22165434
+
+statement ok
+SET jit_policy='off';
+
+query I
+SELECT sum(a+b) FROM t WHERE a*3+b*2-c > 1500 AND a*2-d*3+c < 900 AND b*4-a > 500;
+----
+22165434
+
+statement ok
+SET jit_policy='auto';
+
+query I
+SELECT sum(a*2-c) FROM t WHERE a+b >= c AND a*2-b != 100 AND c < 400;
+----
+58006219
+
+statement ok
+SET jit_policy='off';
+
+query I
+SELECT sum(a*2-c) FROM t WHERE a+b >= c AND a*2-b != 100 AND c < 400;
+----
+58006219
+
 # empty filtered set: SUM must be NULL, not 0 (saw_value handling)
 statement ok
 SET jit_policy='auto';
