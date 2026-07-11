@@ -8,14 +8,19 @@
 #include "duckdb/execution/execution_region_graph.hpp"
 
 #include "duckdb/execution/operator/scan/physical_table_scan.hpp"
+#include "duckdb/execution/execution_hash_join_runtime.hpp"
+#include "duckdb/execution/operator/join/perfect_hash_join_executor.hpp"
 #include "duckdb/execution/physical_operator.hpp"
 #include "duckdb/function/table_function.hpp"
 #include "duckdb/main/client_context.hpp"
 #include "duckdb/parallel/pipeline.hpp"
+#include "duckdb/planner/expression_iterator.hpp"
 #include "duckdb/planner/filter/expression_filter.hpp"
 #include "duckdb/planner/filter/table_filter_functions.hpp"
 #include "duckdb/storage/statistics/base_statistics.hpp"
 #include "duckdb/storage/statistics/numeric_stats.hpp"
+
+#include <cmath>
 
 namespace duckdb {
 
@@ -271,9 +276,79 @@ static idx_t EstimateExecutionRegionEqualityFilterRows(idx_t source_cardinality,
 	return MaxValue<idx_t>((source_cardinality + distinct_count - 1) / distinct_count, 1);
 }
 
+static bool TryGetExecutionRegionRuntimeMembershipFilterUniqueCount(const Expression &expr, idx_t &unique_count) {
+	auto current = optional_ptr<const Expression>(expr);
+	while (current) {
+		auto unwrapped = TryUnwrapExecutionRegionOptionalFilterExpression(*current);
+		if (!unwrapped) {
+			return false;
+		}
+		if (unwrapped.get() == current.get()) {
+			break;
+		}
+		current = unwrapped;
+	}
+	if (!current) {
+		return false;
+	}
+	if (current->GetExpressionClass() == ExpressionClass::BOUND_FUNCTION) {
+		auto &function = current->Cast<BoundFunctionExpression>();
+		if (function.Function().GetName() == PerfectHashJoinScalarFun::NAME && function.BindInfo()) {
+			auto &data = function.BindInfo()->Cast<PerfectHashJoinFunctionData>();
+			if (!data.executor) {
+				return false;
+			}
+			ExecutionPerfectHashJoinTableLayout layout;
+			if (!data.executor->GetExecutionPerfectHashJoinTableLayout(layout) || !layout.ready) {
+				return false;
+			}
+			unique_count = layout.build_unique_count;
+			return true;
+		}
+		if (function.Function().GetName() == PrefixRangeScalarFun::NAME && function.BindInfo()) {
+			auto &data = function.BindInfo()->Cast<PrefixRangeFunctionData>();
+			if (!data.filter || !data.filter->IsInitialized()) {
+				return false;
+			}
+			unique_count = data.filter->DistinctCountUpperBound();
+			return unique_count > 0;
+		}
+	}
+
+	bool found = false;
+	idx_t narrowest_count = 0;
+	ExpressionIterator::EnumerateChildren(*current, [&](const Expression &child) {
+		idx_t child_count;
+		if (!TryGetExecutionRegionRuntimeMembershipFilterUniqueCount(child, child_count)) {
+			return;
+		}
+		if (!found || child_count < narrowest_count) {
+			narrowest_count = child_count;
+		}
+		found = true;
+	});
+	if (found) {
+		unique_count = narrowest_count;
+	}
+	return found;
+}
+
+static idx_t EstimateExecutionRegionDistinctSubsetRows(idx_t input_cardinality, idx_t allowed_distinct_count,
+                                                       idx_t source_distinct_count) {
+	if (input_cardinality == 0 || source_distinct_count == 0) {
+		return 0;
+	}
+	if (allowed_distinct_count == 0) {
+		return 0;
+	}
+	allowed_distinct_count = MinValue(allowed_distinct_count, source_distinct_count);
+	const auto scaled = std::ceil(static_cast<double>(input_cardinality) * static_cast<double>(allowed_distinct_count) /
+	                              static_cast<double>(source_distinct_count));
+	return MaxValue<idx_t>(static_cast<idx_t>(scaled), 1);
+}
+
 static void ApplyExecutionRegionFinalizedDynamicFilterEstimate(const PhysicalTableScan &scan,
-                                                               ExecutionContract &descriptor,
-                                                               ClientContext &context) {
+                                                               ExecutionContract &descriptor, ClientContext &context) {
 	auto &contract = descriptor.source.table_scan_contract;
 	if (!contract.dynamic_filters || !scan.dynamic_filters || !scan.dynamic_filters->HasFilters()) {
 		return;
@@ -285,6 +360,7 @@ static void ApplyExecutionRegionFinalizedDynamicFilterEstimate(const PhysicalTab
 
 	auto source_cardinality = contract.estimated_source_cardinality;
 	auto estimated_cardinality = source_cardinality;
+	bool used_finalized_filter_estimate = false;
 	for (auto &filter_entry : *filters) {
 		auto filter_idx = filter_entry.GetIndex().GetIndex();
 		if (filter_idx >= scan.column_ids.size() || filter_idx >= contract.source_contract_input_types.size()) {
@@ -292,6 +368,21 @@ static void ApplyExecutionRegionFinalizedDynamicFilterEstimate(const PhysicalTab
 		}
 		auto &expr_filter =
 		    ExpressionFilter::GetExpressionFilter(filter_entry.Filter(), "execution-region dynamic filter estimate");
+		auto stats = TryGetExecutionRegionScanColumnStatistics(scan, context, scan.column_ids[filter_idx]);
+		if (!stats) {
+			continue;
+		}
+		idx_t allowed_distinct_count;
+		if (TryGetExecutionRegionRuntimeMembershipFilterUniqueCount(*expr_filter.expr, allowed_distinct_count)) {
+			auto filter_estimate = EstimateExecutionRegionDistinctSubsetRows(
+			    estimated_cardinality, allowed_distinct_count, stats->GetDistinctCount());
+			used_finalized_filter_estimate = used_finalized_filter_estimate || filter_estimate < estimated_cardinality;
+			estimated_cardinality = filter_estimate;
+			if (estimated_cardinality == 0) {
+				break;
+			}
+			continue;
+		}
 		SignedNumericRangeFilterData range;
 		if (!TryGetExecutionRegionSignedNumericFilterRange(expr_filter,
 		                                                   contract.source_contract_input_types[filter_idx], range)) {
@@ -299,30 +390,41 @@ static void ApplyExecutionRegionFinalizedDynamicFilterEstimate(const PhysicalTab
 		}
 		if (range.empty) {
 			estimated_cardinality = 0;
+			used_finalized_filter_estimate = true;
 			break;
 		}
 		if (!range.has_lower || !range.has_upper || range.lower != range.upper) {
 			continue;
 		}
-		auto stats = TryGetExecutionRegionScanColumnStatistics(scan, context, scan.column_ids[filter_idx]);
-		if (!stats) {
-			continue;
-		}
-		auto equality_estimate = EstimateExecutionRegionEqualityFilterRows(source_cardinality, stats->GetDistinctCount());
+		auto equality_estimate =
+		    EstimateExecutionRegionEqualityFilterRows(source_cardinality, stats->GetDistinctCount());
 		if (equality_estimate == 0) {
 			continue;
 		}
-		estimated_cardinality = MinValue(estimated_cardinality, equality_estimate);
+		if (equality_estimate < estimated_cardinality) {
+			estimated_cardinality = equality_estimate;
+			used_finalized_filter_estimate = true;
+		}
 	}
-	if (estimated_cardinality < descriptor.source.estimated_source_cardinality) {
+	if (used_finalized_filter_estimate && estimated_cardinality < source_cardinality) {
+		// Runtime membership filters are much stronger evidence than optimizer-time estimates, but correlated
+		// filter columns can make independence estimates too selective. Keep one bit of uncertainty so profitable
+		// multi-stage regions are not rejected merely because two finalized filters overlap.
+		estimated_cardinality =
+		    estimated_cardinality <= source_cardinality / 2 ? estimated_cardinality * 2 : source_cardinality;
 		descriptor.source.estimated_source_cardinality = estimated_cardinality;
-		contract.estimated_source_cardinality = estimated_cardinality;
+		contract.finalized_dynamic_filter_cardinality_estimate = true;
 	}
 }
 
 static void ApplyExecutionRegionSourceCardinalityEstimate(ExecutionRegionOperatorEntry &entry,
                                                           const ExecutionContract &descriptor) {
-	if (entry.slot != ExecutionRegionOperatorSlot::SOURCE || descriptor.source.estimated_source_cardinality == 0) {
+	if (entry.slot != ExecutionRegionOperatorSlot::SOURCE) {
+		return;
+	}
+	const bool finalized_dynamic_filter_estimate =
+	    descriptor.source.table_scan_contract.finalized_dynamic_filter_cardinality_estimate;
+	if (descriptor.source.estimated_source_cardinality == 0 && !finalized_dynamic_filter_estimate) {
 		return;
 	}
 	entry.estimated_cardinality = MinValue(entry.estimated_cardinality, descriptor.source.estimated_source_cardinality);

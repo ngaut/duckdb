@@ -14,8 +14,8 @@
 
 namespace duckdb {
 
-static bool SljitPerfectHashGroupExpressionsUseTypedTree(
-    const vector<SljitNativeRegionExpressionPlan> &group_expressions) {
+static bool
+SljitPerfectHashGroupExpressionsUseTypedTree(const vector<SljitNativeRegionExpressionPlan> &group_expressions) {
 	for (auto &group_expression : group_expressions) {
 		if (group_expression.kind == SljitNativeRegionExpressionKind::TYPED_EXPRESSION_TREE) {
 			return true;
@@ -93,9 +93,10 @@ static void SljitExecuteFusedPerfectHashGroupedPrimitiveAggregatePayloadUpdate(
 		if (group_expression.kind == SljitNativeRegionExpressionKind::REFERENCE) {
 			group_sources.SetData(group_idx,
 			                      NativeIntegerSourceData(group_format, SljitPerfectHashGroupIntegerKind(group.type)));
-		} else if (group_expression.kind == SljitNativeRegionExpressionKind::INTEGRAL_COMPRESS) {
-			group_sources.SetData(group_idx, NativeSignedIntegerSourceData(group_format,
-			                                                               group_expression.cast_source_width));
+		} else if (group_expression.kind == SljitNativeRegionExpressionKind::INTEGRAL_COMPRESS ||
+		           group_expression.kind == SljitNativeRegionExpressionKind::INTEGER_CAST) {
+			group_sources.SetData(group_idx,
+			                      NativeSignedIntegerSourceData(group_format, group_expression.cast_source_width));
 		} else if (group_expression.kind == SljitNativeRegionExpressionKind::STRING_COMPRESS &&
 		           group.type.InternalType() == PhysicalType::UINT8 &&
 		           group_expression.string_compress_target_size == sizeof(uint8_t)) {
@@ -108,24 +109,23 @@ static void SljitExecuteFusedPerfectHashGroupedPrimitiveAggregatePayloadUpdate(
 
 	auto &payload_sources = adapter_scratch.payload_sources;
 	if (typed_payloads) {
-		SljitPrepareTypedAggregatePayloadSources(input, *combined_sources, execute_sel, count, payload_sources,
-		                                         "SLJIT fused perfect-hash typed aggregate source is out of range",
-		                                         SljitGetFusedTypedPayloadCombinedSourceNotNull(payloads, aggregates,
-		                                                                                        combined_sources->size())
-		                                             .get());
+		SljitPrepareTypedAggregatePayloadSources(
+		    input, *combined_sources, execute_sel, count, payload_sources,
+		    "SLJIT fused perfect-hash typed aggregate source is out of range",
+		    SljitGetFusedTypedPayloadCombinedSourceNotNull(payloads, aggregates, combined_sources->size()).get());
 	}
 	for (idx_t payload_idx = 0; payload_idx < payloads.size(); payload_idx++) {
 		auto &aggregate = aggregates[payload_idx];
 		auto &lane = SljitRequireAggregatePrimitiveLane(
 		    lanes, aggregates, payload_idx,
 		    "SLJIT fused perfect-hash aggregate primitive lane missing for aggregate %llu");
-		SljitValidateGroupedPrimitiveLaneLayout(
-		    aggregate, contract, lane, "SLJIT fused perfect-hash aggregate state offset is out of range",
-		    "SLJIT fused perfect-hash aggregate primitive lane is incomplete: %s",
-		    "SLJIT fused perfect-hash aggregate primitive lane layout mismatch");
+		SljitValidateGroupedPrimitiveLaneLayout(aggregate, contract, lane,
+		                                        "SLJIT fused perfect-hash aggregate state offset is out of range",
+		                                        "SLJIT fused perfect-hash aggregate primitive lane is incomplete: %s",
+		                                        "SLJIT fused perfect-hash aggregate primitive lane layout mismatch");
 		auto &plan = payloads[payload_idx].plan;
-		if (SljitSkipCountStarPrimitivePayload(aggregate, lane,
-		                                       "SLJIT fused perfect-hash count-star aggregate has unexpected payload")) {
+		if (SljitSkipCountStarPrimitivePayload(
+		        aggregate, lane, "SLJIT fused perfect-hash count-star aggregate has unexpected payload")) {
 			continue;
 		}
 		SljitRequireAggregatePayloadPrimitiveLane(
@@ -147,10 +147,10 @@ static void SljitExecuteFusedPerfectHashGroupedPrimitiveAggregatePayloadUpdate(
 		if (typed_payloads) {
 			continue;
 		}
-		payload_sources.PrepareIntegerSource(input, plan.source_index, payload_idx, plan.integer_kind, execute_sel,
-		                                     count, "SLJIT fused perfect-hash aggregate payload source is unsupported",
-		                                     SljitInputSourceKnownNotNull(payloads[payload_idx].input_source_not_null,
-		                                                                  0));
+		payload_sources.PrepareIntegerSource(
+		    input, plan.source_index, payload_idx, plan.integer_kind, execute_sel, count,
+		    "SLJIT fused perfect-hash aggregate payload source is unsupported",
+		    SljitInputSourceKnownNotNull(payloads[payload_idx].input_source_not_null, 0));
 	}
 
 	const auto native_execute_sel =

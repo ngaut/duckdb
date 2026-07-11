@@ -54,9 +54,13 @@ public:
 	void SinkSelected(ExecutionContext &context, DataChunk &chunk, OperatorSinkInput &input,
 	                  DataChunk &aggregate_input_chunk, const unsafe_vector<idx_t> &filter,
 	                  const SelectionVector &selection, idx_t count) const;
+	bool TrySinkGroupsFast(ExecutionContext &context, DataChunk &chunk, OperatorSinkInput &input,
+	                       const SelectionVector *selection = nullptr, idx_t count = DConstants::INVALID_INDEX,
+	                       optional_ptr<ExecutionOperatorStageRecorder> recorder = nullptr,
+	                       idx_t estimated_input_count = 0, idx_t distinct_key_cardinality_upper_bound = 0) const;
 	void ResolveStateAddresses(ExecutionContext &context, DataChunk &chunk, OperatorSinkInput &input,
-	                           Vector &addresses_out,
-	                           optional_ptr<ExecutionOperatorStageRecorder> recorder = nullptr) const;
+	                           Vector &addresses_out, optional_ptr<ExecutionOperatorStageRecorder> recorder = nullptr,
+	                           bool prefer_fast_lookup = false) const;
 	bool ReserveGroups(ExecutionContext &context, OperatorSinkInput &input, idx_t group_count,
 	                   optional_ptr<ExecutionOperatorStageRecorder> recorder = nullptr) const;
 	bool TryUpdateNewPrimitiveGroups(ExecutionContext &context, DataChunk &chunk, OperatorSinkInput &input,
@@ -102,6 +106,14 @@ public:
 	    ExecutionGroupedAggregateStateTargetBatch &targets,
 	    optional_ptr<ExecutionOperatorStageRecorder> recorder = nullptr,
 	    optional_ptr<const ExecutionDenseGroupDomain> dense_domain = nullptr) const;
+	bool TryUpdateInputVectorGroupCountOne(ExecutionContext &context, DataChunk &payload_input, idx_t count,
+	                                       OperatorSinkInput &input,
+	                                       const vector<ExecutionRowPointerGroupKeySource> &group_sources,
+	                                       const ExecutionRegionSinkInfo &sink_info,
+	                                       const ExecutionPrimitiveAggregateUpdateLane &lane,
+	                                       optional_ptr<ExecutionOperatorStageRecorder> recorder = nullptr,
+	                                       bool finish = true,
+	                                       optional_ptr<const ExecutionDenseGroupDomain> dense_domain = nullptr) const;
 	bool TryUpdateRowPointerGroupPrimitivePayloads(ExecutionContext &context, DataChunk &payload_input,
 	                                               Vector &row_pointers, idx_t count,
 	                                               const vector<ExecutionRowPointerGroupKeySource> &group_sources,
@@ -110,18 +122,15 @@ public:
 	                                               const vector<const ExecutionPrimitiveAggregateUpdateLane *> &lanes,
 	                                               optional_ptr<ExecutionOperatorStageRecorder> recorder = nullptr,
 	                                               bool finish = true) const;
-	bool TryAppendNewGroupsWithStateAddresses(ExecutionContext &context, DataChunk &chunk, OperatorSinkInput &input,
-	                                          const ExecutionRegionSinkInfo &sink_info,
-	                                          ExecutionGroupedAggregateStateAddressUpdateFunction update_function,
-	                                          void *update_state,
-	                                          optional_ptr<ExecutionOperatorStageRecorder> recorder = nullptr,
-	                                          bool finish = true,
-	                                          optional_ptr<const ExecutionDenseGroupDomain> dense_domain = nullptr) const;
-	bool TryAppendNewGroupKeysWithStateAddresses(
-	    ExecutionContext &context, DataChunk &groups, OperatorSinkInput &input,
-	    const ExecutionRegionSinkInfo &sink_info,
+	bool TryAppendNewGroupsWithStateAddresses(
+	    ExecutionContext &context, DataChunk &chunk, OperatorSinkInput &input, const ExecutionRegionSinkInfo &sink_info,
 	    ExecutionGroupedAggregateStateAddressUpdateFunction update_function, void *update_state,
 	    optional_ptr<ExecutionOperatorStageRecorder> recorder = nullptr, bool finish = true,
+	    optional_ptr<const ExecutionDenseGroupDomain> dense_domain = nullptr) const;
+	bool TryAppendNewGroupKeysWithStateAddresses(
+	    ExecutionContext &context, DataChunk &groups, OperatorSinkInput &input,
+	    const ExecutionRegionSinkInfo &sink_info, ExecutionGroupedAggregateStateAddressUpdateFunction update_function,
+	    void *update_state, optional_ptr<ExecutionOperatorStageRecorder> recorder = nullptr, bool finish = true,
 	    optional_ptr<const ExecutionDenseGroupDomain> dense_domain = nullptr) const;
 	bool TryResolveNewGroupAddresses(ExecutionContext &context, DataChunk &chunk, OperatorSinkInput &input,
 	                                 const ExecutionRegionSinkInfo &sink_info, Vector &addresses_out,

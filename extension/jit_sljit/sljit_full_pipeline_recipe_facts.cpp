@@ -10,8 +10,7 @@
 
 namespace duckdb {
 
-bool SljitFullPipelineOpIsAt(const vector<SljitExecutableRegionOp> &ops, idx_t op_idx,
-                             SljitNativeRegionOpKind kind) {
+bool SljitFullPipelineOpIsAt(const vector<SljitExecutableRegionOp> &ops, idx_t op_idx, SljitNativeRegionOpKind kind) {
 	return op_idx < ops.size() && ops[op_idx].kind == kind;
 }
 
@@ -87,8 +86,25 @@ bool SljitTryAnalyzeHashJoinDelimJoinSink(const vector<SljitExecutableRegionOp> 
 	return true;
 }
 
-bool SljitTryAnalyzeHashJoinBuildSink(const vector<SljitExecutableRegionOp> &ops,
-                                      SljitHashJoinBuildSinkFacts &facts) {
+bool SljitTryAnalyzeHashJoinAppendSink(const vector<SljitExecutableRegionOp> &ops,
+                                       SljitHashJoinAppendSinkFacts &facts) {
+	facts = SljitHashJoinAppendSinkFacts();
+	if (ops.size() < 2 || ops.back().kind != SljitNativeRegionOpKind::APPEND_SINK) {
+		return false;
+	}
+	const auto sink_idx = ops.size() - 1;
+	for (idx_t hash_join_idx = 0; hash_join_idx < sink_idx; hash_join_idx++) {
+		if (!SljitFullPipelineOpIsAt(ops, hash_join_idx, SljitNativeRegionOpKind::HASH_JOIN_PROBE)) {
+			return false;
+		}
+	}
+	facts.first_hash_join_idx = 0;
+	facts.final_hash_join_idx = sink_idx - 1;
+	facts.sink_idx = sink_idx;
+	return true;
+}
+
+bool SljitTryAnalyzeHashJoinBuildSink(const vector<SljitExecutableRegionOp> &ops, SljitHashJoinBuildSinkFacts &facts) {
 	facts = SljitHashJoinBuildSinkFacts();
 	if (ops.size() < 2 || ops.back().kind != SljitNativeRegionOpKind::HASH_JOIN_BUILD) {
 		return false;

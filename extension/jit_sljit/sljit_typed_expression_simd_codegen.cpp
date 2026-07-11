@@ -38,8 +38,7 @@ static bool SljitSimdPackedArithProfitable(sljit_s32 scale, ExecutionExpressionB
 	if (!sljit_has_cpu_feature(SLJIT_HAS_SIMD)) {
 		return false;
 	}
-#if (defined(SLJIT_CONFIG_ARM_64) && SLJIT_CONFIG_ARM_64) ||                                                            \
-    (defined(SLJIT_CONFIG_X86_64) && SLJIT_CONFIG_X86_64)
+#if (defined(SLJIT_CONFIG_ARM_64) && SLJIT_CONFIG_ARM_64) || (defined(SLJIT_CONFIG_X86_64) && SLJIT_CONFIG_X86_64)
 	switch (op) {
 	case ExecutionExpressionBinaryOp::ADD:
 	case ExecutionExpressionBinaryOp::SUBTRACT:
@@ -339,7 +338,7 @@ static bool SljitSimdIsPureValueExpression(const ExecutionExpressionIR &node) {
 }
 
 SljitTypedExpressionTreeSimdPlan TryPlanSljitTypedExpressionTreeSimdValue(const ExecutionExpressionIR &root,
-                                                                         sljit_s32 want_scale) {
+                                                                          sljit_s32 want_scale) {
 	SljitTypedExpressionTreeSimdPlan plan;
 	if (!SljitSimdIsPureValueExpression(root)) {
 		return plan;
@@ -380,6 +379,7 @@ struct SljitSimdEmitContext {
 	sljit_s32 scale;
 	bool mixed = false;
 	map<std::pair<int64_t, sljit_s32>, sljit_s32> constant_reg; // (value, element scale) -> vreg
+	map<idx_t, sljit_s32> source_data_reg;                      // flat-loop source pointer hoists
 	sljit_s32 all_ones_reg = -1;
 	// Lane bit positions {1,2,4,8} (or {1,2}) used to expand a validity nibble
 	// into a lane mask; only initialized when the loop runs on nullable data.
@@ -431,6 +431,29 @@ void EmitSljitSimdUzp1Narrow(struct sljit_compiler *compiler, sljit_s32 dst_vreg
 	                       (UnsafeNumericCast<uint32_t>(lo) << 5) | UnsafeNumericCast<uint32_t>(dst);
 	sljit_emit_op_custom(compiler, &instruction, sizeof(instruction));
 }
+
+// Reduce an all-ones/all-zeros predicate mask to the signed sum of its lanes.
+// 4x32 uses ADDV; 2x64 uses ADDP. A second UMOV transfers the scalar result to
+// a GP register. The portable sljit_emit_simd_sign movemask needs several more
+// instructions on ARM64 and is reserved for genuinely mixed masks.
+void EmitSljitSimdMaskLaneSum(struct sljit_compiler *compiler, sljit_s32 dst_vreg, sljit_s32 src_vreg,
+                              sljit_s32 elem_scale, sljit_s32 target_reg) {
+	auto dst = sljit_get_register_index(SLJIT_SIMD_REG_128, SLJIT_VR(dst_vreg));
+	auto src = sljit_get_register_index(SLJIT_SIMD_REG_128, SLJIT_VR(src_vreg));
+	auto target = sljit_get_register_index(SLJIT_GP_REGISTER, target_reg);
+	uint32_t reduce;
+	uint32_t move;
+	if (elem_scale == 2) {
+		reduce = 0x4eb1b800u | (UnsafeNumericCast<uint32_t>(src) << 5) | UnsafeNumericCast<uint32_t>(dst);
+		move = 0x0e043c00u | (UnsafeNumericCast<uint32_t>(dst) << 5) | UnsafeNumericCast<uint32_t>(target);
+	} else {
+		D_ASSERT(elem_scale == 3);
+		reduce = 0x5ef1b800u | (UnsafeNumericCast<uint32_t>(src) << 5) | UnsafeNumericCast<uint32_t>(dst);
+		move = 0x4e083c00u | (UnsafeNumericCast<uint32_t>(dst) << 5) | UnsafeNumericCast<uint32_t>(target);
+	}
+	sljit_emit_op_custom(compiler, &reduce, sizeof(reduce));
+	sljit_emit_op_custom(compiler, &move, sizeof(move));
+}
 #endif
 
 // Evaluate a pure VALUE expression (references, constants, add/sub/mul) at the
@@ -440,15 +463,22 @@ SljitSimdValue EmitSljitSimdValueExpr(struct sljit_compiler *compiler, const Exe
 	switch (node.kind) {
 	case ExecutionExpressionIRKind::REFERENCE: {
 		auto reg = AllocSimdTemp(ctx);
-		// Column base pointer = source_data_array[ref_index] (S5 holds the array).
-		sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_R0, 0, SLJIT_MEM1(SLJIT_S5),
-		               NumericCast<sljit_sw>(node.ref_index * sizeof(const_data_ptr_t)));
+		// Column base pointer = source_data_array[ref_index], unless the flat
+		// selector hoisted its one or two hot sources into saved registers.
+		auto hoisted = ctx.source_data_reg.find(node.ref_index);
+		auto data_reg = SLJIT_R0;
+		if (hoisted != ctx.source_data_reg.end()) {
+			data_reg = hoisted->second;
+		} else {
+			sljit_emit_op1(compiler, SLJIT_MOV_P, data_reg, 0, SLJIT_MEM1(SLJIT_S5),
+			               NumericCast<sljit_sw>(node.ref_index * sizeof(const_data_ptr_t)));
+		}
 		if (row_offset == 0) {
-			sljit_emit_simd_mov(compiler, SljitSimdTypeForScale(scale), SLJIT_VR(reg), SLJIT_MEM2(SLJIT_R0, SLJIT_S1),
+			sljit_emit_simd_mov(compiler, SljitSimdTypeForScale(scale), SLJIT_VR(reg), SLJIT_MEM2(data_reg, SLJIT_S1),
 			                    scale);
 		} else {
 			sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_R1, 0, SLJIT_S1, 0, SLJIT_IMM, row_offset);
-			sljit_emit_simd_mov(compiler, SljitSimdTypeForScale(scale), SLJIT_VR(reg), SLJIT_MEM2(SLJIT_R0, SLJIT_R1),
+			sljit_emit_simd_mov(compiler, SljitSimdTypeForScale(scale), SLJIT_VR(reg), SLJIT_MEM2(data_reg, SLJIT_R1),
 			                    scale);
 		}
 		return {reg, true};
@@ -494,30 +524,30 @@ SljitSimdValue EmitSljitSimdComparisonAt(struct sljit_compiler *compiler, const 
 	auto st = SljitSimdTypeForScale(scale);
 	switch (node.binary_op) {
 	case ExecutionExpressionBinaryOp::COMPARE_GREATERTHAN: // left > right
-		sljit_emit_simd_op2(compiler, st | SLJIT_SIMD_OP2_CMPGT, SLJIT_VR(dst), SLJIT_VR(left.reg),
-		                    SLJIT_VR(right.reg), 0);
+		sljit_emit_simd_op2(compiler, st | SLJIT_SIMD_OP2_CMPGT, SLJIT_VR(dst), SLJIT_VR(left.reg), SLJIT_VR(right.reg),
+		                    0);
 		break;
 	case ExecutionExpressionBinaryOp::COMPARE_LESSTHAN: // left < right == right > left
-		sljit_emit_simd_op2(compiler, st | SLJIT_SIMD_OP2_CMPGT, SLJIT_VR(dst), SLJIT_VR(right.reg),
-		                    SLJIT_VR(left.reg), 0);
+		sljit_emit_simd_op2(compiler, st | SLJIT_SIMD_OP2_CMPGT, SLJIT_VR(dst), SLJIT_VR(right.reg), SLJIT_VR(left.reg),
+		                    0);
 		break;
 	case ExecutionExpressionBinaryOp::COMPARE_GREATERTHANOREQUALTO: // !(left < right) == !(right > left)
-		sljit_emit_simd_op2(compiler, st | SLJIT_SIMD_OP2_CMPGT, SLJIT_VR(dst), SLJIT_VR(right.reg),
-		                    SLJIT_VR(left.reg), 0);
+		sljit_emit_simd_op2(compiler, st | SLJIT_SIMD_OP2_CMPGT, SLJIT_VR(dst), SLJIT_VR(right.reg), SLJIT_VR(left.reg),
+		                    0);
 		EmitSljitSimdNot(compiler, ctx, dst);
 		break;
 	case ExecutionExpressionBinaryOp::COMPARE_LESSTHANOREQUALTO: // !(left > right)
-		sljit_emit_simd_op2(compiler, st | SLJIT_SIMD_OP2_CMPGT, SLJIT_VR(dst), SLJIT_VR(left.reg),
-		                    SLJIT_VR(right.reg), 0);
+		sljit_emit_simd_op2(compiler, st | SLJIT_SIMD_OP2_CMPGT, SLJIT_VR(dst), SLJIT_VR(left.reg), SLJIT_VR(right.reg),
+		                    0);
 		EmitSljitSimdNot(compiler, ctx, dst);
 		break;
 	case ExecutionExpressionBinaryOp::COMPARE_EQUAL:
-		sljit_emit_simd_op2(compiler, st | SLJIT_SIMD_OP2_CMPEQ, SLJIT_VR(dst), SLJIT_VR(left.reg),
-		                    SLJIT_VR(right.reg), 0);
+		sljit_emit_simd_op2(compiler, st | SLJIT_SIMD_OP2_CMPEQ, SLJIT_VR(dst), SLJIT_VR(left.reg), SLJIT_VR(right.reg),
+		                    0);
 		break;
 	case ExecutionExpressionBinaryOp::COMPARE_NOTEQUAL:
-		sljit_emit_simd_op2(compiler, st | SLJIT_SIMD_OP2_CMPEQ, SLJIT_VR(dst), SLJIT_VR(left.reg),
-		                    SLJIT_VR(right.reg), 0);
+		sljit_emit_simd_op2(compiler, st | SLJIT_SIMD_OP2_CMPEQ, SLJIT_VR(dst), SLJIT_VR(left.reg), SLJIT_VR(right.reg),
+		                    0);
 		EmitSljitSimdNot(compiler, ctx, dst);
 		break;
 	default:
@@ -562,8 +592,8 @@ SljitSimdValue EmitSljitSimdComparisonMask(struct sljit_compiler *compiler, cons
 
 SljitSimdValue EmitSljitSimdConjunction(struct sljit_compiler *compiler, const ExecutionExpressionIR &node,
                                         SljitSimdEmitContext &ctx) {
-	auto combine = node.conjunction_op == ExecutionExpressionConjunctionOp::AND ? SLJIT_SIMD_OP2_AND
-	                                                                             : SLJIT_SIMD_OP2_OR;
+	auto combine =
+	    node.conjunction_op == ExecutionExpressionConjunctionOp::AND ? SLJIT_SIMD_OP2_AND : SLJIT_SIMD_OP2_OR;
 	auto acc = EmitSljitSimdMask(compiler, *node.children[0], ctx);
 	for (idx_t child_idx = 1; child_idx < node.children.size(); child_idx++) {
 		auto child = EmitSljitSimdMask(compiler, *node.children[child_idx], ctx);
@@ -707,6 +737,25 @@ void EmitSljitSimdBroadcastConstants(struct sljit_compiler *compiler, const Exec
 
 } // namespace
 
+// Materialize the deferred identity prefix [0, S1) when a packed filter sees
+// its first false lane. S3 == S1 means every preceding row passed. A completely
+// all-true selection stays implicit and is represented by selected_count.
+static void EmitSljitSimdEnsureIdentityPrefixMaterialized(struct sljit_compiler *compiler) {
+	auto already_materialized = sljit_emit_cmp(compiler, SLJIT_NOT_EQUAL, SLJIT_S3, 0, SLJIT_S1, 0);
+	auto no_true_sel = sljit_emit_cmp(compiler, SLJIT_EQUAL, SLJIT_S4, 0, SLJIT_IMM, 0);
+	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R0, 0, SLJIT_IMM, 0);
+	auto backfill_loop = sljit_emit_label(compiler);
+	auto backfill_done = sljit_emit_cmp(compiler, SLJIT_GREATER_EQUAL, SLJIT_R0, 0, SLJIT_S1, 0);
+	sljit_emit_op1(compiler, SLJIT_MOV_U32, SLJIT_MEM2(SLJIT_S4, SLJIT_R0), 2, SLJIT_R0, 0);
+	sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_R0, 0, SLJIT_R0, 0, SLJIT_IMM, 1);
+	auto backfill_repeat = sljit_emit_jump(compiler, SLJIT_JUMP);
+	sljit_set_label(backfill_repeat, backfill_loop);
+	auto materialized = sljit_emit_label(compiler);
+	sljit_set_label(already_materialized, materialized);
+	sljit_set_label(no_true_sel, materialized);
+	sljit_set_label(backfill_done, materialized);
+}
+
 void EmitSljitTypedExpressionTreeSimdSelectLoop(struct sljit_compiler *compiler, const ExecutionExpressionIR &root,
                                                 const SljitTypedExpressionTreeSimdPlan &plan, sljit_sw mask_offset,
                                                 const vector<idx_t> *validity_refs) {
@@ -725,6 +774,36 @@ void EmitSljitTypedExpressionTreeSimdSelectLoop(struct sljit_compiler *compiler,
 	if (validity_refs) {
 		EmitSljitSimdInitLaneBits(compiler, ctx, plan.lanes, mask_offset);
 	}
+#if defined(SLJIT_CONFIG_ARM_64) && SLJIT_CONFIG_ARM_64
+	// Persistent reduction destination; predicate temporaries start after it.
+	auto mask_reduce_reg = ctx.next_temp++;
+#endif
+
+	// Flat packed selection does not use the generic-loop logical-index register
+	// (S3) or the source-selection-array register (S4). Keep the append cursor in
+	// those saved registers for the whole packed loop. Reloading selected_count
+	// and true_sel through native_input for every true lane made result compaction
+	// more expensive than the comparison itself for common column-vs-column
+	// filters.
+	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_S3, 0, SLJIT_MEM1(SLJIT_S0),
+	               offsetof(SljitNativeVectorInput, selected_count));
+	sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_S4, 0, SLJIT_MEM1(SLJIT_S0),
+	               offsetof(SljitNativeVectorInput, true_sel));
+	const bool hoist_source_data = !validity_refs && !plan.source_refs.empty() && plan.source_refs.size() <= 2;
+	if (hoist_source_data) {
+		// Load the second pointer first because S5 initially owns the pointer
+		// array and becomes the first source pointer after the final load.
+		if (plan.source_refs.size() == 2) {
+			auto source_index = plan.source_refs[1];
+			sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_S6, 0, SLJIT_MEM1(SLJIT_S5),
+			               NumericCast<sljit_sw>(source_index * sizeof(const_data_ptr_t)));
+			ctx.source_data_reg[source_index] = SLJIT_S6;
+		}
+		auto source_index = plan.source_refs[0];
+		sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_S5, 0, SLJIT_MEM1(SLJIT_S5),
+		               NumericCast<sljit_sw>(source_index * sizeof(const_data_ptr_t)));
+		ctx.source_data_reg[source_index] = SLJIT_S5;
+	}
 
 	// S1 is the flat row base (already 0 after the loop-init helper).
 	auto simd_loop = sljit_emit_label(compiler);
@@ -736,23 +815,81 @@ void EmitSljitTypedExpressionTreeSimdSelectLoop(struct sljit_compiler *compiler,
 	if (validity_refs) {
 		EmitSljitSimdValidityAnd(compiler, ctx, *validity_refs, plan.lanes, mask.reg);
 	}
-	sljit_emit_simd_mov(compiler, ctx.simd_type | SLJIT_SIMD_STORE, SLJIT_VR(mask.reg), SLJIT_MEM1(SLJIT_SP),
-	                    mask_offset);
+	// Classify all-true/all-false masks cheaply. ARM64 uses a two-instruction
+	// horizontal lane sum; other backends use their native movemask. The full
+	// bitset is needed only by the mixed-lane path below.
+#if defined(SLJIT_CONFIG_ARM_64) && SLJIT_CONFIG_ARM_64
+	EmitSljitSimdMaskLaneSum(compiler, mask_reduce_reg, mask.reg, plan.elem_scale, SLJIT_R3);
+	const auto all_lanes_mask = NumericCast<sljit_sw>(-plan.lanes);
+#else
+	sljit_emit_simd_sign(compiler, ctx.simd_type | SLJIT_SIMD_STORE | SLJIT_32, SLJIT_VR(mask.reg), SLJIT_R3, 0);
+	const auto all_lanes_mask = NumericCast<sljit_sw>((sljit_uw(1) << plan.lanes) - 1);
+#endif
+	auto not_all_lanes = sljit_emit_cmp(compiler, SLJIT_NOT_EQUAL, SLJIT_R3, 0, SLJIT_IMM, all_lanes_mask);
 
-	auto lane_load_op = plan.elem_scale == 2 ? SLJIT_MOV_S32 : SLJIT_MOV;
-	auto lane_bytes = NumericCast<sljit_sw>(sljit_sw(1) << plan.elem_scale);
+	// All lanes pass. Defer writes while the whole prefix remains identity;
+	// already-mixed vectors append the contiguous group eagerly.
+	auto defer_all_true = sljit_emit_cmp(compiler, SLJIT_EQUAL, SLJIT_S3, 0, SLJIT_S1, 0);
+	auto no_true_sel = sljit_emit_cmp(compiler, SLJIT_EQUAL, SLJIT_S4, 0, SLJIT_IMM, 0);
+	sljit_emit_op2(compiler, SLJIT_SHL, SLJIT_R2, 0, SLJIT_S3, 0, SLJIT_IMM, 2);
+	sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_R2, 0, SLJIT_S4, 0, SLJIT_R2, 0);
 	for (sljit_s32 lane = 0; lane < plan.lanes; lane++) {
-		sljit_emit_op1(compiler, lane_load_op, SLJIT_R3, 0, SLJIT_MEM1(SLJIT_SP), mask_offset + lane * lane_bytes);
-		auto lane_false = sljit_emit_cmp(compiler, SLJIT_EQUAL, SLJIT_R3, 0, SLJIT_IMM, 0);
+		if (lane == 0) {
+			sljit_emit_op1(compiler, SLJIT_MOV_U32, SLJIT_MEM1(SLJIT_R2), 0, SLJIT_S1, 0);
+		} else {
+			sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_R1, 0, SLJIT_S1, 0, SLJIT_IMM, lane);
+			sljit_emit_op1(compiler, SLJIT_MOV_U32, SLJIT_MEM1(SLJIT_R2), lane * sizeof(sel_t), SLJIT_R1, 0);
+		}
+	}
+	sljit_set_label(no_true_sel, sljit_emit_label(compiler));
+	auto count_all_true = sljit_emit_label(compiler);
+	sljit_set_label(defer_all_true, count_all_true);
+	sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_S3, 0, SLJIT_S3, 0, SLJIT_IMM, plan.lanes);
+	auto lanes_appended = sljit_emit_jump(compiler, SLJIT_JUMP);
+
+	// A mixed mask is uncommon for high-selectivity range predicates. Test its
+	// scalar bitset without reloading vector lanes from the stack.
+	sljit_set_label(not_all_lanes, sljit_emit_label(compiler));
+	auto no_lanes_true = sljit_emit_cmp(compiler, SLJIT_EQUAL, SLJIT_R3, 0, SLJIT_IMM, 0);
+	EmitSljitSimdEnsureIdentityPrefixMaterialized(compiler);
+#if defined(SLJIT_CONFIG_ARM_64) && SLJIT_CONFIG_ARM_64
+	sljit_emit_simd_sign(compiler, ctx.simd_type | SLJIT_SIMD_STORE | SLJIT_32, SLJIT_VR(mask.reg), SLJIT_R3, 0);
+#endif
+	for (sljit_s32 lane = 0; lane < plan.lanes; lane++) {
+		sljit_emit_op2(compiler, SLJIT_AND, SLJIT_R1, 0, SLJIT_R3, 0, SLJIT_IMM, sljit_sw(1) << lane);
+		auto lane_false = sljit_emit_cmp(compiler, SLJIT_EQUAL, SLJIT_R1, 0, SLJIT_IMM, 0);
 		sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_R1, 0, SLJIT_S1, 0, SLJIT_IMM, lane);
-		EmitStoreSljitTypedExpressionTreeTrueSelection(compiler, SLJIT_R1);
+		auto no_mixed_true_sel = sljit_emit_cmp(compiler, SLJIT_EQUAL, SLJIT_S4, 0, SLJIT_IMM, 0);
+		sljit_emit_op1(compiler, SLJIT_MOV_U32, SLJIT_MEM2(SLJIT_S4, SLJIT_S3), 2, SLJIT_R1, 0);
+		sljit_set_label(no_mixed_true_sel, sljit_emit_label(compiler));
+		sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_S3, 0, SLJIT_S3, 0, SLJIT_IMM, 1);
 		sljit_set_label(lane_false, sljit_emit_label(compiler));
 	}
+	auto mixed_lanes_appended = sljit_emit_jump(compiler, SLJIT_JUMP);
+
+	// The first empty group proves the deferred identity prefix now needs to be
+	// real. Later empty groups skip the backfill because S3 no longer equals S1.
+	sljit_set_label(no_lanes_true, sljit_emit_label(compiler));
+	EmitSljitSimdEnsureIdentityPrefixMaterialized(compiler);
+	auto append_done = sljit_emit_label(compiler);
+	sljit_set_label(lanes_appended, append_done);
+	sljit_set_label(mixed_lanes_appended, append_done);
 
 	sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_S1, 0, SLJIT_S1, 0, SLJIT_IMM, plan.lanes);
 	auto repeat = sljit_emit_jump(compiler, SLJIT_JUMP);
 	sljit_set_label(repeat, simd_loop);
 	sljit_set_label(simd_done, sljit_emit_label(compiler));
+	// The scalar tail uses the eager append helper. If a partial group remains,
+	// materialize a still-deferred prefix before handing control back to it.
+	auto no_scalar_tail = sljit_emit_cmp(compiler, SLJIT_GREATER_EQUAL, SLJIT_S1, 0, SLJIT_S2, 0);
+	EmitSljitSimdEnsureIdentityPrefixMaterialized(compiler);
+	sljit_set_label(no_scalar_tail, sljit_emit_label(compiler));
+	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_MEM1(SLJIT_S0), offsetof(SljitNativeVectorInput, selected_count),
+	               SLJIT_S3, 0);
+	if (hoist_source_data) {
+		// The caller's scalar tail expects the generic source-array register map.
+		EmitInitSljitNativeVectorSourceArrays(compiler);
+	}
 }
 
 // SADALP Vd.2D, Vn.4S : sign-extend each 32-bit lane of src and pairwise-add into
@@ -885,8 +1022,8 @@ void EmitSljitTypedExpressionTreeSimdCountLoop(struct sljit_compiler *compiler, 
 		EmitSljitSimdValidityAnd(compiler, ctx, *validity_refs, plan.lanes, mask.reg);
 	}
 	// mask lanes are all-ones (=-1) where true; acc -= mask adds 1 per matching lane.
-	sljit_emit_simd_op2(compiler, ctx.simd_type | SLJIT_SIMD_OP2_SUB, SLJIT_VR(acc), SLJIT_VR(acc),
-	                    SLJIT_VR(mask.reg), 0);
+	sljit_emit_simd_op2(compiler, ctx.simd_type | SLJIT_SIMD_OP2_SUB, SLJIT_VR(acc), SLJIT_VR(acc), SLJIT_VR(mask.reg),
+	                    0);
 	FreeSimdValue(ctx, mask);
 
 	sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_S1, 0, SLJIT_S1, 0, SLJIT_IMM, plan.lanes);

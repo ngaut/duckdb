@@ -216,6 +216,7 @@ struct SljitNativeAggregateUpdatePlan {
 	vector<SljitNativeRegionExpressionPlan> payloads;
 	vector<SljitNativeRegionExpressionPlan> group_expressions;
 	idx_t estimated_input_count = 0;
+	idx_t distinct_key_cardinality_upper_bound = 0;
 	SljitAggregateGroupReservePlan group_reserve;
 	bool use_primitive_payloads = false;
 	bool use_grouped_state_addresses = false;

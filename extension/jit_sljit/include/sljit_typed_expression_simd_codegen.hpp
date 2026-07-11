@@ -20,7 +20,7 @@ namespace duckdb {
 
 struct SljitTypedExpressionTreeSimdPlan {
 	bool supported = false;
-	sljit_s32 simd_type = 0; // SLJIT_SIMD_REG_128 | SLJIT_SIMD_ELEM_32/64
+	sljit_s32 simd_type = 0;  // SLJIT_SIMD_REG_128 | SLJIT_SIMD_ELEM_32/64
 	sljit_s32 elem_scale = 0; // 2 (32-bit) or 3 (64-bit)
 	sljit_s32 lanes = 0;      // 4 or 2
 	idx_t constant_count = 0;
@@ -46,9 +46,10 @@ SljitTypedExpressionTreeSimdPlan TryPlanSljitTypedExpressionTreeSimd(const Execu
 
 // Emits the packed-lane predicate loop for a boolean select. Assumes the flat
 // all-valid fast path context (S1 = flat row base = 0 on entry, S2 = count,
-// S5 = source_data_array). Advances S1 to the last full lane group; the caller's
-// scalar fast loop then handles the < lanes tail. `mask_offset` is a 16-byte,
-// 16-aligned scratch slot in the local frame.
+// S5 = source_data_array). Uses S3/S4 as a packed-loop-local output cursor,
+// advances S1 to the last full lane group, and writes selected_count back before
+// the caller's scalar fast loop handles the < lanes tail. `mask_offset` is a
+// 16-byte, 16-aligned scratch slot in the local frame.
 void EmitSljitTypedExpressionTreeSimdSelectLoop(struct sljit_compiler *compiler, const ExecutionExpressionIR &root,
                                                 const SljitTypedExpressionTreeSimdPlan &plan, sljit_sw mask_offset,
                                                 const vector<idx_t> *validity_refs = nullptr);
@@ -69,7 +70,7 @@ void EmitSljitTypedExpressionTreeSimdCountLoop(struct sljit_compiler *compiler, 
 // Plan for a pure integer value expression (references, constants, add/sub/mul) at a
 // required element width; used to gate SUM payloads (which must be values, not masks).
 SljitTypedExpressionTreeSimdPlan TryPlanSljitTypedExpressionTreeSimdValue(const ExecutionExpressionIR &root,
-                                                                         sljit_s32 want_scale);
+                                                                          sljit_s32 want_scale);
 
 // Emits the packed-lane SUM(payload) filter loop: for a 4-lane int32 predicate and a
 // 32-bit column payload, accumulates the masked payload (widened to int64) and the

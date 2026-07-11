@@ -31,9 +31,8 @@ struct ExecutionRegionGeneratedSourceFilterCapability {
 	string blocker;
 };
 
-DUCKDB_API ExecutionRegionGeneratedSourceFilterCapability
-GetExecutionRegionGeneratedSourceFilterCapability(const ExecutionExpressionFragment &expression,
-                                                  const LogicalType &source_type);
+DUCKDB_API ExecutionRegionGeneratedSourceFilterCapability GetExecutionRegionGeneratedSourceFilterCapability(
+    const ExecutionExpressionFragment &expression, const LogicalType &source_type);
 
 struct ExecutionRegionContractField {
 	string name;
@@ -106,6 +105,7 @@ struct ExecutionRegionTableScanContract {
 	bool filter_pushdown = false;
 	bool filter_prune = false;
 	bool dynamic_filters = false;
+	bool finalized_dynamic_filter_cardinality_estimate = false;
 	bool in_out_function = false;
 	idx_t filter_count = 0;
 	string ir;
@@ -429,6 +429,7 @@ struct ExecutionRegionCandidateTraits {
 	bool sink_present = false;
 	idx_t source_contract_input_cardinality = 0;
 	bool source_contract_output_cardinality_unknown = false;
+	bool finalized_dynamic_filter_cardinality_estimate = false;
 	idx_t source_filter_count = 0;
 	idx_t source_filter_expression_count = 0;
 	idx_t source_conjunction_filter_count = 0;

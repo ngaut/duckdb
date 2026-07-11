@@ -2,9 +2,9 @@
 
 Last updated: 2026-07-07
 
-This file is the short active milestone pointer. The production architecture,
-contracts, and refactor gates live in `JIT_PRODUCTION_RECIPE_DESIGN.md`; do not
-duplicate them here.
+This file is the TPC-H milestone pointer. The generic production architecture,
+contracts, and refactor gates live in
+`benchmark/jit/JIT_PRODUCTION_RECIPE_DESIGN.md`; do not duplicate them here.
 
 ## Current Milestone
 

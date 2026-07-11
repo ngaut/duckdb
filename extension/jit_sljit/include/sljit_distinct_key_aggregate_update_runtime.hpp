@@ -32,6 +32,22 @@ static SinkResultType SljitExecuteDistinctKeyAggregateUpdate(ExecutionRegionRunt
 	if (!binding.aggregate_update.state->SupportsDistinctSink()) {
 		throw InternalException("SLJIT distinct aggregate key sink binding does not support distinct ingestion");
 	}
+	auto fast_insert_start = SljitRegionStageStart(runtime);
+	const auto used_fast_insert = ExecuteSljitRegionRecordedOperation(
+	    runtime, op_idx, op.kind, "distinct_key_fast_insert", fast_insert_start,
+	    [&](optional_ptr<ExecutionOperatorStageRecorder> recorder) {
+		    return binding.aggregate_update.state->TrySinkDistinctFast(
+		        input, execute_sel, count, recorder, op.aggregate_update.plan.estimated_input_count,
+		        op.aggregate_update.plan.distinct_key_cardinality_upper_bound);
+	    });
+	if (used_fast_insert) {
+		RecordSljitRegionRuntimePath(runtime, op.kind, "distinct_key_fast_insert", count);
+		RecordSljitRegionRuntimeProof(runtime, op.kind, ExecutionRegionJitRuntimeProof::GENERATED_STAGE_WORK,
+		                              "distinct_key_fast_insert");
+		RecordSljitRegionRuntimeProof(runtime, op.kind, ExecutionRegionJitRuntimeProof::GENERATED_BACKEND_WORK,
+		                              "distinct_key_fast_insert");
+		return SinkResultType::NEED_MORE_INPUT;
+	}
 	if (execute_sel != nullptr || count != input.size()) {
 		if (execute_sel == nullptr || !binding.aggregate_update.state->SupportsDistinctSelectedSink()) {
 			throw InternalException("SLJIT distinct aggregate key sink requires a materialized input chunk");

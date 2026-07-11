@@ -75,8 +75,32 @@ static bool SljitTryReadStringSetCaseExpression(const SljitExecutableRegionExpre
 	                                                  constants[1]);
 }
 
-static bool SljitStringEqualsConstant(const string_t &value, const string &constant) {
-	return value.GetSize() == constant.size() && memcmp(value.GetData(), constant.data(), constant.size()) == 0;
+struct SljitStringConstantSignature {
+	uint64_t header = 0;
+	uint64_t inline_tail = 0;
+	bool inlined = false;
+};
+
+static SljitStringConstantSignature SljitPrepareStringConstantSignature(const string &constant) {
+	SljitStringConstantSignature result;
+	string_t value(constant);
+	result.header = Load<uint64_t>(const_data_ptr_cast(&value));
+	result.inlined = value.IsInlined();
+	if (result.inlined) {
+		result.inline_tail = Load<uint64_t>(const_data_ptr_cast(&value) + sizeof(uint64_t));
+	}
+	return result;
+}
+
+static bool SljitStringEqualsConstant(const string_t &value, const string &constant,
+                                      const SljitStringConstantSignature &signature) {
+	if (Load<uint64_t>(const_data_ptr_cast(&value)) != signature.header) {
+		return false;
+	}
+	if (signature.inlined) {
+		return Load<uint64_t>(const_data_ptr_cast(&value) + sizeof(uint64_t)) == signature.inline_tail;
+	}
+	return memcmp(value.GetData(), constant.data(), constant.size()) == 0;
 }
 
 static bool SljitTryFastProjectStringSetCaseGroupedPayload(const SljitStringSetCaseGroupedPayloadProjection &descriptor,
@@ -105,14 +129,18 @@ static bool SljitTryFastProjectStringSetCaseGroupedPayload(const SljitStringSetC
 	auto predicate_data = UnifiedVectorFormat::GetData<string_t>(predicate_format);
 	auto predicate_sel = predicate_format.sel;
 	auto &predicate_validity = predicate_format.validity;
+	std::array<SljitStringConstantSignature, SljitStringSetCaseGroupedPayloadProjection::CONSTANT_COUNT> signatures;
+	for (idx_t constant_idx = 0; constant_idx < signatures.size(); constant_idx++) {
+		signatures[constant_idx] = SljitPrepareStringConstantSignature(descriptor.constants[constant_idx]);
+	}
 	for (idx_t row_idx = 0; row_idx < count; row_idx++) {
 		const auto source_idx = predicate_sel->get_index(row_idx);
 		bool high = false;
 		bool low = false;
 		if (predicate_validity.RowIsValid(source_idx)) {
 			auto predicate = predicate_data[source_idx];
-			high = SljitStringEqualsConstant(predicate, descriptor.constants[0]) ||
-			       SljitStringEqualsConstant(predicate, descriptor.constants[1]);
+			high = SljitStringEqualsConstant(predicate, descriptor.constants[0], signatures[0]) ||
+			       SljitStringEqualsConstant(predicate, descriptor.constants[1], signatures[1]);
 			low = !high;
 		}
 		high_data[row_idx] = high ? 1 : 0;

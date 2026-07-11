@@ -164,9 +164,8 @@ static bool AppendPreaggregatedPrimitivePayloadRange(const SljitPreaggregatedPri
 	}
 }
 
-static bool PreaggregatedPrimitivePayloadsCanAppendRange(
-    const SljitPreaggregatedPrimitiveAggregateScratch &source,
-    const SljitPreaggregatedPrimitiveAggregateScratch &target) {
+static bool PreaggregatedPrimitivePayloadsCanAppendRange(const SljitPreaggregatedPrimitiveAggregateScratch &source,
+                                                         const SljitPreaggregatedPrimitiveAggregateScratch &target) {
 	if (source.payloads.size() != target.payloads.size()) {
 		return false;
 	}
@@ -202,7 +201,7 @@ static bool SlicePreaggregatedPrimitiveScratch(const SljitPreaggregatedPrimitive
 	}
 	for (idx_t payload_idx = 0; payload_idx < source.payloads.size(); payload_idx++) {
 		if (!AppendPreaggregatedPrimitivePayloadRange(source.payloads[payload_idx], offset, count,
-		                                             target.payloads[payload_idx])) {
+		                                              target.payloads[payload_idx])) {
 			return false;
 		}
 	}
@@ -228,12 +227,16 @@ static bool AppendPreaggregatedPrimitiveScratch(const SljitPreaggregatedPrimitiv
 	if (!PreaggregatedPrimitivePayloadsCanAppendRange(source, target)) {
 		return false;
 	}
-	if (!AppendPreaggregatedPrimitiveScratchRows(source, offset, count, target, true)) {
-		return false;
-	}
+	// group_rows are positions in one input chunk. They have no stable meaning after
+	// compact groups from multiple chunks are buffered together; only the compact
+	// payload deltas and their represented row counts cross that boundary.
+	const auto begin = UnsafeNumericCast<int64_t>(offset);
+	const auto end = UnsafeNumericCast<int64_t>(offset + count);
+	target.group_row_counts.insert(target.group_row_counts.end(), source.group_row_counts.begin() + begin,
+	                               source.group_row_counts.begin() + end);
 	for (idx_t payload_idx = 0; payload_idx < source.payloads.size(); payload_idx++) {
 		if (!AppendPreaggregatedPrimitivePayloadRange(source.payloads[payload_idx], offset, count,
-		                                             target.payloads[payload_idx])) {
+		                                              target.payloads[payload_idx])) {
 			return false;
 		}
 	}
@@ -245,8 +248,8 @@ static bool MergePreaggregatedPrimitiveScratchGroup(const SljitPreaggregatedPrim
                                                     idx_t source_idx,
                                                     SljitPreaggregatedPrimitiveAggregateScratch &target,
                                                     idx_t target_idx) {
-	if (!CanSlicePreaggregatedPrimitiveScratch(source, lanes, source_idx, 1) || target.payloads.size() != lanes.size() ||
-	    target.group_row_counts.size() <= target_idx) {
+	if (!CanSlicePreaggregatedPrimitiveScratch(source, lanes, source_idx, 1) ||
+	    target.payloads.size() != lanes.size() || target.group_row_counts.size() <= target_idx) {
 		return false;
 	}
 	for (idx_t payload_idx = 0; payload_idx < source.payloads.size(); payload_idx++) {
@@ -263,8 +266,7 @@ static bool MergePreaggregatedPrimitiveScratchGroup(const SljitPreaggregatedPrim
 			}
 			break;
 		case AggregatePrimitiveUpdateKind::SUM_INT64:
-			if (target_payload.int64_values.size() <= target_idx ||
-			    target_payload.value_is_set.size() <= target_idx) {
+			if (target_payload.int64_values.size() <= target_idx || target_payload.value_is_set.size() <= target_idx) {
 				return false;
 			}
 			break;
@@ -318,9 +320,10 @@ static bool PreaggregatedPrimitiveRepresentedRowCount(const SljitPreaggregatedPr
 	return true;
 }
 
-static bool SljitPrepareFusedPreaggregatedPrimitiveScratch(
-    SljitPreaggregatedPrimitiveAggregateScratch &scratch,
-    const vector<const ExecutionPrimitiveAggregateUpdateLane *> &lanes, idx_t group_capacity, idx_t row_capacity) {
+static bool
+SljitPrepareFusedPreaggregatedPrimitiveScratch(SljitPreaggregatedPrimitiveAggregateScratch &scratch,
+                                               const vector<const ExecutionPrimitiveAggregateUpdateLane *> &lanes,
+                                               idx_t group_capacity, idx_t row_capacity) {
 	idx_t state_stride = 0;
 	for (auto lane : lanes) {
 		if (!lane || !lane->ready || lane->state_size == 0) {
@@ -339,17 +342,16 @@ static bool SljitPrepareFusedPreaggregatedPrimitiveScratch(
 	return true;
 }
 
-static uintptr_t SljitFusedPreaggregatedPrimitiveStateAddress(
-    SljitPreaggregatedPrimitiveAggregateScratch &scratch, idx_t group_idx) {
+static uintptr_t SljitFusedPreaggregatedPrimitiveStateAddress(SljitPreaggregatedPrimitiveAggregateScratch &scratch,
+                                                              idx_t group_idx) {
 	D_ASSERT(scratch.fused_state_stride > 0);
 	D_ASSERT(group_idx * scratch.fused_state_stride < scratch.fused_state_storage.size());
-	return reinterpret_cast<uintptr_t>(scratch.fused_state_storage.data() +
-	                                   group_idx * scratch.fused_state_stride);
+	return reinterpret_cast<uintptr_t>(scratch.fused_state_storage.data() + group_idx * scratch.fused_state_stride);
 }
 
-static bool SljitFusedPreaggregatedPrimitiveStateBoundsValid(
-    const SljitPreaggregatedPrimitiveAggregateScratch &scratch, const ExecutionPrimitiveAggregateUpdateLane &lane,
-    idx_t value_size, bool needs_state_is_set) {
+static bool SljitFusedPreaggregatedPrimitiveStateBoundsValid(const SljitPreaggregatedPrimitiveAggregateScratch &scratch,
+                                                             const ExecutionPrimitiveAggregateUpdateLane &lane,
+                                                             idx_t value_size, bool needs_state_is_set) {
 	if (scratch.fused_state_stride == 0 || lane.state_offset > scratch.fused_state_stride ||
 	    lane.state_value_offset > scratch.fused_state_stride - lane.state_offset ||
 	    value_size > scratch.fused_state_stride - lane.state_offset - lane.state_value_offset) {
@@ -362,11 +364,13 @@ static bool SljitFusedPreaggregatedPrimitiveStateBoundsValid(
 	       sizeof(bool) <= scratch.fused_state_stride - lane.state_offset - lane.state_is_set_offset;
 }
 
-static bool SljitExtractFusedPreaggregatedPrimitiveDeltas(
-    SljitPreaggregatedPrimitiveAggregateScratch &scratch,
-    const vector<const ExecutionPrimitiveAggregateUpdateLane *> &lanes, idx_t group_count) {
+static bool
+SljitExtractFusedPreaggregatedPrimitiveDeltas(SljitPreaggregatedPrimitiveAggregateScratch &scratch,
+                                              const vector<const ExecutionPrimitiveAggregateUpdateLane *> &lanes,
+                                              idx_t group_count) {
 	if (scratch.payloads.size() != lanes.size() || scratch.group_row_counts.size() != group_count ||
-	    scratch.fused_state_stride == 0 || scratch.fused_state_storage.size() < group_count * scratch.fused_state_stride) {
+	    scratch.fused_state_stride == 0 ||
+	    scratch.fused_state_storage.size() < group_count * scratch.fused_state_stride) {
 		return false;
 	}
 	auto state_base = scratch.fused_state_storage.data();

@@ -9,12 +9,14 @@
 #pragma once
 
 #include "sljit_join_projection_aggregate_state.hpp"
+#include "sljit_string_set_complementary_sum_runtime.hpp"
 
 #include "duckdb/common/vector/flat_vector.hpp"
 
 namespace duckdb {
 
 struct SljitRegionExecutionScratch;
+struct SljitPendingPreaggregatedPrimitiveGroupBatch;
 
 struct SljitPendingRowPointerAggregateBatch {
 	SljitPendingRowPointerAggregateBatch() : row_pointers(LogicalType::POINTER) {
@@ -134,7 +136,12 @@ struct SljitDirectJoinOutputAggregateStrategy {
 	string last_failure;
 	SljitJoinProjectionAggregateDescriptor descriptor;
 	SljitPendingInputVectorAggregateBatch pending_input_vector_batch;
+	shared_ptr<SljitPendingPreaggregatedPrimitiveGroupBatch> pending_preaggregated_input_vector_groups;
 	SljitPendingRowPointerAggregateBatch pending_batch;
+	vector<idx_t> string_set_classification_payload_sources;
+	SljitStringSetComplementarySumDescriptor string_set_classification;
+	bool string_set_classification_checked = false;
+	bool string_set_classification_ready = false;
 };
 
 } // namespace duckdb

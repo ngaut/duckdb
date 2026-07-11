@@ -305,15 +305,34 @@ static void AppendExecutionContractGroupedStateLayoutReason(string &reason,
 	reason += ";grouped_state_payload_sizes=" + BuildExecutionContractIdxList(contract.grouped_state_payload_sizes);
 }
 
-static bool IsExecutionContractNativeDuckTableScanSupported(const PhysicalTableScan &scan) {
-	if (StringUtil::Lower(scan.function.name.GetIdentifierName()) != "seq_scan") {
-		return false;
+ExecutionSourceContractCapability GetExecutionSourceContractCapability(const PhysicalTableScan &scan) {
+	ExecutionSourceContractCapability result;
+	auto function_name = StringUtil::Lower(scan.function.name.GetIdentifierName());
+	result.kind = function_name == "seq_scan" ? ExecutionRegionSourceKind::DUCKDB_TABLE_SCAN
+	                                          : ExecutionRegionSourceKind::TABLE_FUNCTION_SCAN;
+	if (!scan.function.function && !scan.function.in_out_function) {
+		return result;
 	}
-	if (!scan.function.function || scan.function.in_out_function || !scan.bind_data) {
-		return false;
+	if (result.kind == ExecutionRegionSourceKind::DUCKDB_TABLE_SCAN) {
+		if (!scan.bind_data) {
+			return result;
+		}
+		auto &bind_data = scan.bind_data->Cast<TableScanBindData>();
+		if (bind_data.is_index_scan) {
+			return result;
+		}
+		result.uses_storage_scan = true;
+		result.supports_source_contract_input_layout = true;
+	} else {
+		// The generic callback path can expose the source-contract layout only when the function does not
+		// independently project its output columns.
+		if (scan.function.projection_pushdown) {
+			return result;
+		}
+		result.supports_source_contract_input_layout = true;
 	}
-	auto &bind_data = scan.bind_data->Cast<TableScanBindData>();
-	return !bind_data.is_index_scan;
+	result.execution = ExecutionRegionSourceExecutionKind::SOURCE_CONTRACT;
+	return result;
 }
 
 static string BuildExecutionContractAggregateFunctionList(const vector<unique_ptr<Expression>> &aggregates) {
@@ -1880,13 +1899,17 @@ BuildExecutionContractUngroupedAggregateContract(const PhysicalUngroupedAggregat
 	return result;
 }
 
-static ExecutionRegionTableScanContract BuildExecutionContractTableScanContract(const PhysicalTableScan &scan) {
+static ExecutionRegionTableScanContract
+BuildExecutionContractTableScanContract(const PhysicalTableScan &scan,
+                                        const ExecutionSourceContractCapability &capability) {
 	ExecutionRegionTableScanContract result;
 	result.present = true;
 	result.function_name = StringUtil::Lower(scan.function.name.GetIdentifierName());
-	if (scan.bind_data && result.function_name == "seq_scan") {
+	if (capability.uses_storage_scan) {
 		auto &bind_data = scan.bind_data->Cast<TableScanBindData>();
 		result.estimated_source_cardinality = bind_data.table.GetStorage().GetTotalRows();
+	} else {
+		result.estimated_source_cardinality = scan.estimated_cardinality;
 	}
 	result.output_column_count = scan.GetTypes().size();
 	result.returned_column_count = scan.returned_types.size();
@@ -1912,12 +1935,12 @@ static ExecutionRegionTableScanContract BuildExecutionContractTableScanContract(
 	return result;
 }
 
-static string BuildExecutionContractTableScanSourceBoundaryReason(const PhysicalTableScan &scan,
+static string BuildExecutionContractTableScanSourceBoundaryReason(const ExecutionRegionTableScanContract &contract,
                                                                   ExecutionRegionSourceExecutionKind execution) {
-	auto contract = BuildExecutionContractTableScanContract(scan);
+	auto source_name = contract.function_name == "seq_scan" ? "table scan" : "table-function";
 	string result = execution == ExecutionRegionSourceExecutionKind::SOURCE_CONTRACT
-	                    ? "DuckDB table scan source contract"
-	                    : "DuckDB table scan source boundary";
+	                    ? "DuckDB " + string(source_name) + " source contract"
+	                    : "DuckDB " + string(source_name) + " source boundary";
 	if (execution == ExecutionRegionSourceExecutionKind::DUCKDB_SOURCE_BOUNDARY) {
 		result += ";source-contract-blocker:requires-source-contract;source_execution=duckdb-source-boundary";
 	}
@@ -2213,16 +2236,18 @@ static void AddExecutionContractTableScanSourceFilters(const PhysicalTableScan &
 
 ExecutionContract PhysicalTableScan::GetExecutionContract() const {
 	ExecutionContract result;
-	auto function_name = StringUtil::Lower(function.name.GetIdentifierName());
-	result.source.kind = function_name == "seq_scan" ? ExecutionRegionSourceKind::DUCKDB_TABLE_SCAN
-	                                                 : ExecutionRegionSourceKind::TABLE_FUNCTION_SCAN;
-	result.source.execution = IsExecutionContractNativeDuckTableScanSupported(*this)
-	                              ? ExecutionRegionSourceExecutionKind::SOURCE_CONTRACT
-	                              : ExecutionRegionSourceExecutionKind::DUCKDB_SOURCE_BOUNDARY;
-	result.source_boundary_reason = BuildExecutionContractTableScanSourceBoundaryReason(*this, result.source.execution);
+	auto capability = GetExecutionSourceContractCapability(*this);
+	auto table_scan_contract = BuildExecutionContractTableScanContract(*this, capability);
+	result.source.kind = capability.kind;
+	result.source.execution = capability.execution;
+	if (result.source.execution == ExecutionRegionSourceExecutionKind::NONE) {
+		result.source.execution = ExecutionRegionSourceExecutionKind::DUCKDB_SOURCE_BOUNDARY;
+	}
+	result.source_boundary_reason =
+	    BuildExecutionContractTableScanSourceBoundaryReason(table_scan_contract, result.source.execution);
 	result.source.source_contract = BuildExecutionSourceProtocolContract(result.source.kind, result.source.execution);
 	result.source.reason = result.source_boundary_reason;
-	result.source.function_name = function_name;
+	result.source.function_name = table_scan_contract.function_name;
 	result.source.output_column_count = GetTypes().size();
 	result.source.returned_column_count = returned_types.size();
 	result.source.column_ids = BuildExecutionContractColumnIndexList(column_ids);
@@ -2232,7 +2257,7 @@ ExecutionContract PhysicalTableScan::GetExecutionContract() const {
 	result.source.filter_prune = function.filter_prune;
 	result.source.dynamic_filters = dynamic_filters && dynamic_filters->HasFilters();
 	result.source.in_out_function = static_cast<bool>(function.in_out_function);
-	result.source.table_scan_contract = BuildExecutionContractTableScanContract(*this);
+	result.source.table_scan_contract = std::move(table_scan_contract);
 	result.source.estimated_source_cardinality = result.source.table_scan_contract.estimated_source_cardinality;
 	AddExecutionContractTableScanSourceFilters(*this, result.source);
 	return FinalizeExecutionContract(std::move(result));

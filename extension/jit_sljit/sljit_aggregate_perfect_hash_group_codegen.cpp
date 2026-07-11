@@ -201,11 +201,11 @@ static void EmitLoadFusedAggregateGroupMiniStringCompressData(struct sljit_compi
 	sljit_set_label(have_result, sljit_emit_label(compiler));
 }
 
-static void EmitLoadFusedAggregateGroupIntegralCompressData(struct sljit_compiler *compiler, idx_t group_idx,
-                                                            const SljitPerfectHashGroupPlan &group,
-                                                            sljit_s32 index_reg, sljit_s32 target_reg,
-                                                            bool use_hoisted_group_data, sljit_s32 group_data_reg,
-                                                            sljit_s32 group_data_array_base_reg) {
+static void EmitLoadFusedAggregateGroupTransformedIntegerData(struct sljit_compiler *compiler, idx_t group_idx,
+                                                              const SljitPerfectHashGroupPlan &group,
+                                                              sljit_s32 index_reg, sljit_s32 target_reg,
+                                                              bool use_hoisted_group_data, sljit_s32 group_data_reg,
+                                                              sljit_s32 group_data_array_base_reg) {
 	if (use_hoisted_group_data) {
 		if (group_data_reg != SLJIT_R0) {
 			sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_R0, 0, group_data_reg, 0);
@@ -218,20 +218,23 @@ static void EmitLoadFusedAggregateGroupIntegralCompressData(struct sljit_compile
 		               offsetof(SljitNativeVectorInput, group_data_array));
 		sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_R0, 0, SLJIT_MEM1(SLJIT_R0), SljitPointerArrayOffset(group_idx));
 	}
-	sljit_emit_op1(compiler, NativeSignedIntegerLoadOp(group.integral_compress_source_width), target_reg, 0,
-	               SLJIT_MEM2(SLJIT_R0, index_reg), NativeSignedIntegerDataScale(group.integral_compress_source_width));
-	sljit_emit_op2(compiler, SLJIT_SUB, target_reg, 0, target_reg, 0, SLJIT_IMM,
-	               NumericCast<sljit_sw>(group.integral_compress_minimum));
+	sljit_emit_op1(compiler, NativeSignedIntegerLoadOp(group.integer_source_width), target_reg, 0,
+	               SLJIT_MEM2(SLJIT_R0, index_reg), NativeSignedIntegerDataScale(group.integer_source_width));
+	if (group.expression_kind == SljitNativeRegionExpressionKind::INTEGRAL_COMPRESS) {
+		sljit_emit_op2(compiler, SLJIT_SUB, target_reg, 0, target_reg, 0, SLJIT_IMM,
+		               NumericCast<sljit_sw>(group.integer_source_minimum));
+	}
 }
 
 void EmitLoadFusedAggregateGroupData(struct sljit_compiler *compiler, idx_t group_idx,
                                      const SljitPerfectHashGroupPlan &group, sljit_s32 index_reg, sljit_s32 target_reg,
                                      bool use_hoisted_group_data, sljit_s32 group_data_reg,
                                      bool use_precomputed_string_offset, sljit_s32 group_data_array_base_reg) {
-	if (group.expression_kind == SljitNativeRegionExpressionKind::INTEGRAL_COMPRESS) {
-		EmitLoadFusedAggregateGroupIntegralCompressData(compiler, group_idx, group, index_reg, target_reg,
-		                                                use_hoisted_group_data, group_data_reg,
-		                                                group_data_array_base_reg);
+	if (group.expression_kind == SljitNativeRegionExpressionKind::INTEGRAL_COMPRESS ||
+	    group.expression_kind == SljitNativeRegionExpressionKind::INTEGER_CAST) {
+		EmitLoadFusedAggregateGroupTransformedIntegerData(compiler, group_idx, group, index_reg, target_reg,
+		                                                  use_hoisted_group_data, group_data_reg,
+		                                                  group_data_array_base_reg);
 		return;
 	}
 	if (group.expression_kind == SljitNativeRegionExpressionKind::STRING_COMPRESS) {

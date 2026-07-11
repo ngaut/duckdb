@@ -342,7 +342,7 @@ FROM jit_overlap_region
 64	1	64
 
 query I
-SELECT count(*) > 0
+SELECT count(*) = 0
 FROM duckdb_jit_events()
 WHERE backend_name='sljit'
   AND phase='decision'
@@ -370,24 +370,15 @@ query I
 SELECT count(*) > 0
 FROM duckdb_jit_events()
 WHERE backend_name='sljit'
-  AND status='unsupported'
-  AND execution_mode='unsupported'
+  AND phase='compile'
+  AND status='compiled'
+  AND execution_mode='native'
+  AND candidate_source_kind='table-function-scan'
+  AND selected_source_execution='source-contract'
   AND candidate_filter_count=1
   AND candidate_projection_count=2
   AND candidate_has_sink
-  AND candidate_signature_context='full-pipeline'
-  AND candidate_start_operator_index=0
-  AND candidate_end_operator_index > candidate_start_operator_index
-  AND code_size = 0
-  AND ir LIKE 'duckdb.region typed-vector-ir;%'
-  AND ir LIKE '%compare_greater_than%'
-  AND ir LIKE '%add%'
-  AND ir LIKE '%aggregate0<function=sum%'
-  AND ir LIKE '%payload_index=0%'
-  AND ir LIKE '%native_aggregate_state_update_contract_status=ready%'
-  AND ir LIKE '%candidate0<first_node=%'
-  AND ir LIKE '%sink:sink:UNGROUPED_AGGREGATE%'
-  AND ir LIKE '%op2:projection:PROJECTION%'
+  AND candidate_contract_abi='full_pipeline'
 ----
 1
 
@@ -1938,11 +1929,11 @@ SELECT count(*) > 0
 FROM duckdb_jit_events(), jit_source_filter_probe_baseline
 WHERE event_id > base_event_id
   AND backend_name='sljit'
-  AND phase='decision'
-  AND status='skipped'
-  AND execution_mode='unsupported'
-  AND blocker='duckdb_selected_vectorized'
-  AND runner_cost_selection_reason='rejected_saved_work_non_positive'
+  AND phase='compile'
+  AND status='compiled'
+  AND execution_mode='native'
+  AND selected_runner='compiled_vectorized'
+  AND runner_cost_selection_reason LIKE 'admitted_%'
   AND candidate_has_source
   AND candidate_source_filter_count > 0
   AND candidate_filter_count=1

@@ -17,6 +17,7 @@ namespace duckdb {
 struct SljitTypedExpressionTreeFastPathPlan {
 	bool fast_path_supported = false;
 	bool precheck_nulls_supported = false;
+	bool hybrid_nulls_supported = false;
 	vector<idx_t> source_refs;
 };
 
@@ -33,8 +34,7 @@ bool SljitExpressionTreeBinaryOpSupported(ExecutionExpressionBinaryOp op);
 bool SljitTypedExpressionTreeComparisonSupported(ExecutionExpressionBinaryOp op);
 bool SljitTypedExpressionTreeIsInt64Node(const ExecutionExpressionIR &node);
 bool SljitTypedExpressionTreeIsDecimal64Node(const ExecutionExpressionIR &node);
-bool TryGetSljitTypedExpressionTreeDecimal64Range(const LogicalType &type, int64_t &result_min,
-                                                  int64_t &result_max);
+bool TryGetSljitTypedExpressionTreeDecimal64Range(const LogicalType &type, int64_t &result_min, int64_t &result_max);
 bool SljitTypedExpressionTreeIsInt32Node(const ExecutionExpressionIR &node);
 bool SljitTypedExpressionTreeIsBoolNode(const ExecutionExpressionIR &node);
 bool SljitTypedExpressionTreeIsValueNode(const ExecutionExpressionIR &node);

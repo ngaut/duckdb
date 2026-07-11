@@ -122,9 +122,12 @@ bool SljitFullPipelineTerminalPrimitiveIsExecutable(const vector<SljitExecutable
 			       step.delim_join_sink.sink_idx == step.Op(2);
 		}
 		return SljitFullPipelinePrimitiveStepHasOpCount(step, 1) && step.delim_join_sink.sink_idx == step.Op(0);
+	case SljitFullPipelinePrimitiveKind::APPEND_SINK:
+		return SljitFullPipelinePrimitiveStepHasOpCount(step, 2) &&
+		       step.append_sink.selected_hash_join_idx == step.Op(0) && step.append_sink.sink_idx == step.Op(1) &&
+		       SljitCanBindAppendSinkPrimitive(ops, step.append_sink);
 	case SljitFullPipelinePrimitiveKind::NATIVE_TAIL_DELEGATION:
-		return SljitFullPipelinePrimitiveStepHasOpCount(step, 1) &&
-		       SljitNativeTailCanConsumeTail(ops, step.Op(0));
+		return SljitFullPipelinePrimitiveStepHasOpCount(step, 1) && SljitNativeTailCanConsumeTail(ops, step.Op(0));
 	default:
 		return false;
 	}
@@ -137,6 +140,27 @@ bool SljitFullPipelineSourceFetchOwnsSinkAdvance(const SljitFullPipelinePrimitiv
 		throw InternalException("SLJIT source-fetch sink ownership requires an executable primitive sequence");
 	}
 	return true;
+}
+
+bool SljitFullPipelineSourceFetchNeedsPartitionPreservingChunks(
+    const SljitFullPipelinePrimitiveSequence &primitive_sequence) {
+	if (!SljitFullPipelineSourceFetchOwnsSinkAdvance(primitive_sequence)) {
+		return false;
+	}
+	// A source-generated filter can turn one ordered scan partition into several sparse chunks. Those chunks must
+	// reach the sink separately so the core batch-index protocol can associate each one with its source partition.
+	return primitive_sequence.Step(1).kind == SljitFullPipelinePrimitiveKind::GENERATED_FILTER;
+}
+
+bool SljitFullPipelineIsSelectedHashJoinSinkSequence(const SljitFullPipelinePrimitiveSequence &primitive_sequence) {
+	if (primitive_sequence.Count() != 3 ||
+	    primitive_sequence.Step(0).kind != SljitFullPipelinePrimitiveKind::SOURCE_FETCH ||
+	    primitive_sequence.Step(1).kind != SljitFullPipelinePrimitiveKind::HASH_JOIN_PROBE_SELECTION) {
+		return false;
+	}
+	auto terminal_kind = primitive_sequence.Step(2).kind;
+	return terminal_kind == SljitFullPipelinePrimitiveKind::APPEND_SINK ||
+	       terminal_kind == SljitFullPipelinePrimitiveKind::DELIM_JOIN_SINK;
 }
 
 bool SljitNativeTailCanConsumeTail(const vector<SljitExecutableRegionOp> &ops, idx_t tail_start_idx) {

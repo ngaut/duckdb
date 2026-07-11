@@ -245,7 +245,7 @@ RelationStats RelationStatisticsHelper::ExtractGetStats(LogicalGet &get, ClientC
 
 			if (column_statistics) {
 				idx_t cardinality_with_filter =
-				    InspectTableFilter(base_table_cardinality, entry.Filter(), *column_statistics);
+				    InspectTableFilter(context, base_table_cardinality, entry.Filter(), *column_statistics);
 				cardinality_after_filters = MinValue(cardinality_after_filters, cardinality_with_filter);
 			}
 
@@ -558,7 +558,7 @@ RelationStats RelationStatisticsHelper::ExtractEmptyResultStats(LogicalEmptyResu
 	return stats;
 }
 
-idx_t RelationStatisticsHelper::InspectTableFilter(idx_t cardinality, const TableFilter &filter,
+idx_t RelationStatisticsHelper::InspectTableFilter(ClientContext &context, idx_t cardinality, const TableFilter &filter,
                                                    BaseStatistics &base_stats) {
 	auto cardinality_after_filters = cardinality;
 	auto &expr_filter = ExpressionFilter::GetExpressionFilter(filter, "RelationStatisticsHelper::InspectTableFilter");
@@ -568,7 +568,7 @@ idx_t RelationStatisticsHelper::InspectTableFilter(idx_t cardinality, const Tabl
 		for (auto &child : conj.GetChildren()) {
 			ExpressionFilter child_filter(child->Copy());
 			cardinality_after_filters =
-			    MinValue(cardinality_after_filters, InspectTableFilter(cardinality, child_filter, base_stats));
+			    MinValue(cardinality_after_filters, InspectTableFilter(context, cardinality, child_filter, base_stats));
 		}
 		return cardinality_after_filters;
 	}
@@ -579,7 +579,24 @@ idx_t RelationStatisticsHelper::InspectTableFilter(idx_t cardinality, const Tabl
 	if (comparison.GetExpressionType() != ExpressionType::COMPARE_EQUAL) {
 		return cardinality_after_filters;
 	}
-	auto column_count = GetDistinctCountFromStats(base_stats, cardinality).distinct_count;
+	optional_ptr<const Expression> filtered_expression;
+	auto &left = BoundComparisonExpression::Left(comparison);
+	auto &right = BoundComparisonExpression::Right(comparison);
+	if (left.IsFoldable() && !right.IsFoldable()) {
+		filtered_expression = right;
+	} else if (right.IsFoldable() && !left.IsFoldable()) {
+		filtered_expression = left;
+	}
+	idx_t column_count = 0;
+	if (filtered_expression) {
+		auto expression_stats = ExpressionFilter::TryGetExpressionStatistics(context, *filtered_expression, base_stats);
+		if (expression_stats) {
+			column_count = GetDistinctCountFromStats(*expression_stats, cardinality).distinct_count;
+		}
+	}
+	if (column_count == 0) {
+		column_count = GetDistinctCountFromStats(base_stats, cardinality).distinct_count;
+	}
 	// column_count = 0 when there is no HLL and no usable min/max proxy.
 	if (column_count > 0) {
 		// we want the ceil of cardinality/column_count. We also want to avoid compiler errors

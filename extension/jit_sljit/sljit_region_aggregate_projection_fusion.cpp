@@ -21,8 +21,7 @@ static bool SljitPrimitiveAggregatePayloadCanEraseProjection(const SljitNativeRe
 	return payload.references_region_input;
 }
 
-static bool SljitPerfectHashIntegralCompressSourceMatchesInput(SljitNativeSignedIntegerWidth width,
-                                                               const LogicalType &type) {
+static bool SljitPerfectHashSignedSourceMatchesInput(SljitNativeSignedIntegerWidth width, const LogicalType &type) {
 	switch (width) {
 	case SljitNativeSignedIntegerWidth::INT8:
 		return type.InternalType() == PhysicalType::INT8;
@@ -102,7 +101,24 @@ static bool SljitPerfectHashGroupExpressionCanEraseProjection(const vector<Logic
 		if (expr.source_index >= input_types.size()) {
 			return false;
 		}
-		return SljitPerfectHashIntegralCompressSourceMatchesInput(expr.cast_source_width, input_types[expr.source_index]);
+		return SljitPerfectHashSignedSourceMatchesInput(expr.cast_source_width, input_types[expr.source_index]);
+	case SljitNativeRegionExpressionKind::INTEGER_CAST:
+		if (expr.source_index >= input_types.size() ||
+		    !SljitPerfectHashSignedSourceMatchesInput(expr.cast_source_width, input_types[expr.source_index])) {
+			return false;
+		}
+		switch (expr.cast_target_width) {
+		case SljitNativeSignedIntegerWidth::INT8:
+			return group.type.InternalType() == PhysicalType::INT8;
+		case SljitNativeSignedIntegerWidth::INT16:
+			return group.type.InternalType() == PhysicalType::INT16;
+		case SljitNativeSignedIntegerWidth::INT32:
+			return group.type.InternalType() == PhysicalType::INT32;
+		case SljitNativeSignedIntegerWidth::INT64:
+			return group.type.InternalType() == PhysicalType::INT64;
+		default:
+			return false;
+		}
 	case SljitNativeRegionExpressionKind::STRING_COMPRESS:
 		if (expr.source_index >= input_types.size()) {
 			return false;

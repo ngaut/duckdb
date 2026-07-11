@@ -53,6 +53,10 @@ public:
 	SljitFullPipelineRecipe MakeHashJoinDelimJoinSinkRecipe(idx_t first_hash_join_idx, idx_t final_hash_join_idx,
 	                                                        idx_t sink_idx) const;
 
+	bool CanMakeHashJoinAppendSinkRecipe(const SljitHashJoinAppendSinkFacts &facts) const;
+
+	SljitFullPipelineRecipe MakeHashJoinAppendSinkRecipe(const SljitHashJoinAppendSinkFacts &facts) const;
+
 	bool CanMakeHashJoinBuildSinkRecipe(const SljitHashJoinBuildSinkFacts &facts) const;
 
 	SljitFullPipelineRecipe MakeHashJoinBuildSinkRecipe(const SljitHashJoinBuildSinkFacts &facts) const;

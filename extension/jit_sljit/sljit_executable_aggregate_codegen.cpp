@@ -24,13 +24,11 @@ struct SljitFusedTypedAggregatePayloads {
 	vector<Value> combined_source_max_values;
 };
 
-static bool TryBuildFusedTypedAggregatePayloads(const SljitNativeAggregateUpdatePlan &op,
-                                                SljitFusedTypedAggregatePayloads &payloads,
-                                                const vector<bool> *input_not_null = nullptr,
-                                                const vector<Value> *input_min_values = nullptr,
-                                                const vector<Value> *input_max_values = nullptr,
-                                                const vector<SljitNativeRegionExpressionPlan> *group_expressions =
-                                                    nullptr) {
+static bool TryBuildFusedTypedAggregatePayloads(
+    const SljitNativeAggregateUpdatePlan &op, SljitFusedTypedAggregatePayloads &payloads,
+    const vector<bool> *input_not_null = nullptr, const vector<Value> *input_min_values = nullptr,
+    const vector<Value> *input_max_values = nullptr,
+    const vector<SljitNativeRegionExpressionPlan> *group_expressions = nullptr) {
 	payloads = SljitFusedTypedAggregatePayloads();
 	payloads.executable_payloads.reserve(op.payloads.size());
 	payloads.codegen_payloads.reserve(op.payloads.size());
@@ -147,7 +145,7 @@ static bool TryBuildPerfectHashGroupedFusedTypedExpressionAggregateUpdate(
 
 	SljitFusedTypedAggregatePayloads payloads;
 	if (!TryBuildFusedTypedAggregatePayloads(op, payloads, &input_not_null, &input_min_values, &input_max_values,
-	                                        &op.group_expressions)) {
+	                                         &op.group_expressions)) {
 		return true;
 	}
 
@@ -240,6 +238,7 @@ void SljitBuildExecutableAggregateUpdateMetadata(const SljitNativeAggregateUpdat
 	executable.plan.sink_info = op.sink_info;
 	executable.plan.input_types = op.input_types;
 	executable.plan.estimated_input_count = op.estimated_input_count;
+	executable.plan.distinct_key_cardinality_upper_bound = op.distinct_key_cardinality_upper_bound;
 	executable.plan.group_reserve = op.group_reserve;
 	executable.plan.use_primitive_payloads = op.use_primitive_payloads;
 	executable.plan.use_grouped_state_addresses = op.use_grouped_state_addresses;

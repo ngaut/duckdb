@@ -76,6 +76,7 @@ struct ExecutionRegionCostFacts {
 	idx_t materialization_elision_count = 0;
 	idx_t native_join_stage_count = 0;
 	idx_t native_hash_join_build_sink_count = 0;
+	bool native_delim_join_sink = false;
 	idx_t native_aggregate_stage_count = 0;
 	idx_t native_grouped_aggregate_stage_count = 0;
 	bool may_anchor_compiled_body = false;
@@ -255,6 +256,7 @@ static ExecutionRegionCostFacts BuildExecutionRegionCostFacts(const ExecutionReg
 	if (candidate.traits.sink_kind == ExecutionRegionSinkKind::HASH_JOIN_BUILD) {
 		result.native_hash_join_build_sink_count++;
 	}
+	result.native_delim_join_sink = candidate.traits.sink_kind == ExecutionRegionSinkKind::DELIM_JOIN_SINK;
 	return result;
 }
 
@@ -266,6 +268,8 @@ PhysicalRunnerCostInput BuildExecutionRegionCandidateCostInput(const ExecutionRe
 	input.expression_cost = candidate.traits.expression_cost;
 	input.source_contract_input_cardinality = candidate.traits.source_contract_input_cardinality;
 	input.source_contract_output_cardinality_unknown = candidate.traits.source_contract_output_cardinality_unknown;
+	input.finalized_dynamic_filter_cardinality_estimate =
+	    candidate.traits.finalized_dynamic_filter_cardinality_estimate;
 	input.generated_stage_count = cost_facts.generated_stage_count;
 	input.generated_backend_stage_count = cost_facts.generated_backend_stage_count;
 	input.generated_grouped_aggregate_stage_count = cost_facts.generated_grouped_aggregate_stage_count;
@@ -277,6 +281,7 @@ PhysicalRunnerCostInput BuildExecutionRegionCandidateCostInput(const ExecutionRe
 	    candidate.traits.selected_hash_join_filter_materialization_count;
 	input.native_join_stage_count = cost_facts.native_join_stage_count;
 	input.native_hash_join_build_sink_count = cost_facts.native_hash_join_build_sink_count;
+	input.native_delim_join_sink = cost_facts.native_delim_join_sink;
 	input.native_aggregate_stage_count = cost_facts.native_aggregate_stage_count;
 	input.native_grouped_aggregate_stage_count = cost_facts.native_grouped_aggregate_stage_count;
 	input.source_filter_count = candidate.traits.source_filter_count;
@@ -293,6 +298,18 @@ PhysicalRunnerCostInput BuildExecutionRegionCandidateCostInput(const ExecutionRe
 	input.uses_scan_filters = lowering_plan.UsesScanFilters();
 	auto &backend_facts = lowering_plan.capability_facts;
 	input.native_grouped_state_address_lookup_count = backend_facts.backend_native_state_address_lookup_count;
+	const auto distinct_key_fast_insert_count =
+	    MinValue(input.native_aggregate_stage_count, backend_facts.backend_distinct_key_fast_insert_count);
+	if (distinct_key_fast_insert_count > 0) {
+		input.native_aggregate_stage_count -= distinct_key_fast_insert_count;
+		const auto grouped_decrement =
+		    MinValue(input.native_grouped_aggregate_stage_count, distinct_key_fast_insert_count);
+		input.native_grouped_aggregate_stage_count -= grouped_decrement;
+		input.generated_stage_count += distinct_key_fast_insert_count;
+		input.generated_backend_stage_count += distinct_key_fast_insert_count;
+		input.generated_grouped_aggregate_stage_count += distinct_key_fast_insert_count;
+		input.has_accelerated_work = true;
+	}
 	const bool weak_stateful_grouped_update =
 	    candidate.traits.source_kind == ExecutionRegionSourceKind::STATEFUL_OPERATOR &&
 	    candidate.traits.source_execution == ExecutionRegionSourceExecutionKind::SOURCE_CONTRACT &&
@@ -518,10 +535,9 @@ static bool TryAccumulateExecutionRegionPhysicalScanCost(const PhysicalOperator 
 	idx_t generated_filter_count = 0;
 	for (auto &filter : *scan.table_filters) {
 		auto filter_idx = filter.GetIndex().GetIndex();
-		const bool can_generate =
-		    filter_idx < source_input_types.size() &&
-		    ExecutionRegionPhysicalTableFilterCanUseGeneratedSourceStage(filter.Filter(), source_input_types[filter_idx],
-		                                                                 filter_count);
+		const bool can_generate = filter_idx < source_input_types.size() &&
+		                          ExecutionRegionPhysicalTableFilterCanUseGeneratedSourceStage(
+		                              filter.Filter(), source_input_types[filter_idx], filter_count);
 		if (can_generate) {
 			filter_cost += DuckDBCostModel::FilterCost(filter.Filter());
 			generated_filter_count++;
@@ -874,13 +890,19 @@ static void FinalizeExecutionRegionPhysicalPipelineCostInput(Pipeline &pipeline,
 	    facts.traits.sink_kind == ExecutionRegionSinkKind::SORT) {
 		cost_input.native_sort_stage_count = 0;
 	}
-	if (facts.generated_aggregate_update_count > 0 &&
-	    (facts.traits.filter_count > 0 || facts.traits.source_filter_expression_count > 0)) {
+	const bool generated_filtered_reduction =
+	    facts.traits.sink_kind == ExecutionRegionSinkKind::UNGROUPED_AGGREGATE_UPDATE &&
+	    cost_input.generated_backend_stage_count > 0 && facts.traits.source_filter_count > 0 &&
+	    facts.traits.projection_count > 0;
+	if ((facts.generated_aggregate_update_count > 0 &&
+	     (facts.traits.filter_count > 0 || facts.traits.source_filter_expression_count > 0)) ||
+	    generated_filtered_reduction) {
 		cost_input.materialization_elision_count = 1;
 	}
 	cost_input.source_filter_count = facts.traits.source_filter_count;
 	cost_input.native_hash_join_build_sink_count =
 	    facts.traits.sink_kind == ExecutionRegionSinkKind::HASH_JOIN_BUILD ? 1 : 0;
+	cost_input.native_delim_join_sink = facts.traits.sink_kind == ExecutionRegionSinkKind::DELIM_JOIN_SINK;
 	cost_input.has_accelerated_work =
 	    !facts.native_sink_boundary &&
 	    (cost_input.generated_stage_count > 0 || cost_input.native_join_stage_count > 0 ||

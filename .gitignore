@@ -366,3 +366,4 @@ generated_extension_loader_package_build.cpp
 
 # clangd tidy/format cache
 .cache
+.gstack/

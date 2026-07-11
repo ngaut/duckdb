@@ -1297,6 +1297,85 @@ hugeint_t ModuloOperator::Operation(hugeint_t left, hugeint_t right) {
 	return left % right;
 }
 
+template <class T>
+static unique_ptr<BaseStatistics> PropagateIntegralModuloStats(FunctionStatisticsInput &input) {
+	auto &left = input.child_stats[0];
+	auto &right = input.child_stats[1];
+	if (!NumericStats::HasMinMax(left) || !NumericStats::HasMinMax(right)) {
+		return nullptr;
+	}
+	const auto divisor = NumericStats::GetMin<T>(right);
+	if (divisor != NumericStats::GetMax<T>(right) || divisor <= 0) {
+		return nullptr;
+	}
+	const auto left_min = NumericStats::GetMin<T>(left);
+	const auto left_max = NumericStats::GetMax<T>(left);
+	const auto remainder_bound = static_cast<T>(divisor - 1);
+	T result_min = 0;
+	T result_max = 0;
+	if constexpr (std::is_signed<T>::value) {
+		if (left_min < 0) {
+			result_min = -remainder_bound;
+		}
+		if (left_max > 0) {
+			result_max = remainder_bound;
+		}
+	} else {
+		result_max = MinValue(left_max, remainder_bound);
+	}
+
+	auto result = NumericStats::CreateEmpty(input.expr.GetReturnType());
+	NumericStats::SetMin(result, NumericStatsValue(input.expr.GetReturnType(), result_min));
+	NumericStats::SetMax(result, NumericStatsValue(input.expr.GetReturnType(), result_max));
+	result.CombineValidity(left, right);
+
+	idx_t domain_count = NumericLimits<idx_t>::Maximum();
+	const auto divisor_count = static_cast<uint64_t>(divisor);
+	if constexpr (std::is_signed<T>::value) {
+		if (left_min >= 0 || left_max <= 0) {
+			domain_count = divisor_count > NumericLimits<idx_t>::Maximum() ? NumericLimits<idx_t>::Maximum()
+			                                                               : static_cast<idx_t>(divisor_count);
+		} else if (divisor_count <= NumericLimits<idx_t>::Maximum() / 2ULL + 1ULL) {
+			domain_count = static_cast<idx_t>(divisor_count * 2ULL - 1ULL);
+		}
+	} else {
+		domain_count = divisor_count > NumericLimits<idx_t>::Maximum() ? NumericLimits<idx_t>::Maximum()
+		                                                               : static_cast<idx_t>(divisor_count);
+	}
+	const auto input_distinct = left.GetDistinctCount();
+	if (input_distinct > 0) {
+		domain_count = MinValue(domain_count, input_distinct);
+	}
+	result.SetDistinctCount(domain_count);
+	return result.ToUnique();
+}
+
+static unique_ptr<BaseStatistics> PropagateModuloStats(ClientContext &, FunctionStatisticsInput &input) {
+	if (input.child_stats.size() != 2) {
+		return nullptr;
+	}
+	switch (input.expr.GetReturnType().InternalType()) {
+	case PhysicalType::INT8:
+		return PropagateIntegralModuloStats<int8_t>(input);
+	case PhysicalType::INT16:
+		return PropagateIntegralModuloStats<int16_t>(input);
+	case PhysicalType::INT32:
+		return PropagateIntegralModuloStats<int32_t>(input);
+	case PhysicalType::INT64:
+		return PropagateIntegralModuloStats<int64_t>(input);
+	case PhysicalType::UINT8:
+		return PropagateIntegralModuloStats<uint8_t>(input);
+	case PhysicalType::UINT16:
+		return PropagateIntegralModuloStats<uint16_t>(input);
+	case PhysicalType::UINT32:
+		return PropagateIntegralModuloStats<uint32_t>(input);
+	case PhysicalType::UINT64:
+		return PropagateIntegralModuloStats<uint64_t>(input);
+	default:
+		return nullptr;
+	}
+}
+
 ScalarFunctionSet OperatorModuloFun::GetFunctions() {
 	ScalarFunctionSet modulo("%");
 	for (auto &type : LogicalType::Numeric()) {
@@ -1311,6 +1390,9 @@ ScalarFunctionSet OperatorModuloFun::GetFunctions() {
 	}
 	for (auto &func : modulo.functions) {
 		func.SetFallible();
+		if (TypeIsIntegral(func.GetReturnType().InternalType())) {
+			func.SetStatisticsCallback(PropagateModuloStats);
+		}
 	}
 
 	return modulo;

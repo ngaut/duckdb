@@ -184,6 +184,8 @@ static string DescribeExecutionRegionTableScanContract(const ExecutionRegionTabl
 	result += ",filter_pushdown=" + ExecutionRegionBool(contract.filter_pushdown);
 	result += ",filter_prune=" + ExecutionRegionBool(contract.filter_prune);
 	result += ",dynamic_filters=" + ExecutionRegionBool(contract.dynamic_filters);
+	result += ",finalized_dynamic_filter_cardinality_estimate=" +
+	          ExecutionRegionBool(contract.finalized_dynamic_filter_cardinality_estimate);
 	result += ",in_out_function=" + ExecutionRegionBool(contract.in_out_function);
 	result += ",filter_count=" + std::to_string(contract.filter_count);
 	result += ">";
@@ -631,7 +633,6 @@ static string ExecutionRegionSourceBoundaryMarker(ExecutionRegionSourceKind kind
                                                   ExecutionRegionSourceExecutionKind execution) {
 	switch (kind) {
 	case ExecutionRegionSourceKind::DUCKDB_TABLE_SCAN:
-	case ExecutionRegionSourceKind::TABLE_FUNCTION_SCAN:
 	case ExecutionRegionSourceKind::GENERIC_SCAN:
 		if (execution == ExecutionRegionSourceExecutionKind::SOURCE_CONTRACT) {
 			return "DuckDB table scan source contract";
@@ -641,6 +642,15 @@ static string ExecutionRegionSourceBoundaryMarker(ExecutionRegionSourceKind kind
 			       "source_execution=duckdb-source-boundary";
 		}
 		return "DuckDB table scan source boundary;source_execution=none";
+	case ExecutionRegionSourceKind::TABLE_FUNCTION_SCAN:
+		if (execution == ExecutionRegionSourceExecutionKind::SOURCE_CONTRACT) {
+			return "DuckDB table-function source contract";
+		}
+		if (execution == ExecutionRegionSourceExecutionKind::DUCKDB_SOURCE_BOUNDARY) {
+			return "DuckDB table-function source boundary;source-contract-blocker:requires-source-contract;"
+			       "source_execution=duckdb-source-boundary";
+		}
+		return "DuckDB table-function source boundary;source_execution=none";
 	default:
 		return string();
 	}
@@ -882,6 +892,8 @@ static string DescribeExecutionRegionCandidateTraits(const ExecutionRegionCandid
 	result += ",source_contract_input_cardinality=" + std::to_string(traits.source_contract_input_cardinality);
 	result += ",source_contract_output_cardinality_unknown=" +
 	          ExecutionRegionBool(traits.source_contract_output_cardinality_unknown);
+	result += ",finalized_dynamic_filter_cardinality_estimate=" +
+	          ExecutionRegionBool(traits.finalized_dynamic_filter_cardinality_estimate);
 	result += ",source_filters=" + std::to_string(traits.source_filter_count);
 	result += ",source_filter_expressions=" + std::to_string(traits.source_filter_expression_count);
 	result += ",source_conjunction_filters=" + std::to_string(traits.source_conjunction_filter_count);

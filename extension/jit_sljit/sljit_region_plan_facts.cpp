@@ -8,6 +8,7 @@
 
 #include "sljit_region_plan_internal.hpp"
 
+#include "sljit_aggregate_contract_utils.hpp"
 #include "sljit_hash_join_probe_codegen_validation.hpp"
 
 namespace duckdb {
@@ -166,8 +167,7 @@ static bool SljitRegionPlanExpressionTreeReferencesMarker(const ExecutionExpress
 	if (node.left && SljitRegionPlanExpressionTreeReferencesMarker(*node.left, input_source_indices, marker_index)) {
 		return true;
 	}
-	return node.right &&
-	       SljitRegionPlanExpressionTreeReferencesMarker(*node.right, input_source_indices, marker_index);
+	return node.right && SljitRegionPlanExpressionTreeReferencesMarker(*node.right, input_source_indices, marker_index);
 }
 
 static bool SljitRegionPlanFilterReferencesMarkProbeMarker(const SljitNativeRegionOpPlan &hash_join_op,
@@ -297,6 +297,12 @@ void AddSljitNativeRegionCapabilityFacts(ExecutionRegionLoweringPlan &lowering_p
 			lowering_plan.AddBackendAggregateUpdateCapability(
 			    aggregate_update.sink_info.aggregate_contract.kind, aggregate_update.use_primitive_payloads,
 			    aggregate_update.use_grouped_state_addresses, aggregate_update.use_perfect_hash_group_lookup);
+			auto &aggregate_contract = aggregate_update.sink_info.aggregate_contract;
+			if (SljitAggregateSinkCanUseDistinctKeySink(aggregate_update.sink_info) &&
+			    aggregate_contract.grouping_set_count == 1 && aggregate_contract.distinct_aggregate_count == 1 &&
+			    aggregate_contract.distinct_table_count == 1 && aggregate_update.sink_info.aggregates.size() == 1) {
+				lowering_plan.AddBackendDistinctKeyFastInsertCapability();
+			}
 			break;
 		}
 		default:

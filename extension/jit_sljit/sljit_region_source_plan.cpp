@@ -53,6 +53,14 @@ static SljitRegionNodePlan SljitNativeSourceNode(string reason, const ExecutionR
 	return result;
 }
 
+static const char *SljitSourceKindName(const ExecutionRegionNode &node) {
+	return node.source->kind == ExecutionRegionSourceKind::TABLE_FUNCTION_SCAN ? "table-function" : "table scan";
+}
+
+static string SljitSourceContractName(const ExecutionRegionNode &node) {
+	return string(SljitSourceKindName(node)) + " source contract";
+}
+
 string SljitSourceBoundaryReason(const ExecutionRegionNode &node, bool render_diagnostics) {
 	string result =
 	    node.blocker_reason.empty() ? "source node is outside SLJIT native region lowering" : node.blocker_reason;
@@ -90,7 +98,8 @@ static SljitRegionNodePlan PlanSljitSourceContractNode(const ExecutionRegionNode
 	}
 
 	if (table_scan_contract.dynamic_filters && table_scan_contract.filter_pushdown) {
-		string reason = "vectorized dynamic table scan filters;source-strategy=duckdb-scan-filtered-source-contract";
+		string reason = "vectorized dynamic " + string(SljitSourceKindName(node)) +
+		                " filters;source-strategy=duckdb-scan-filtered-source-contract";
 		AppendSljitSourceFilterFacts(reason, node, table_scan_contract, false);
 		reason += ";source_contract_filter_pushdown=true";
 		reason += ";source_contract_dynamic_filters=true";
@@ -99,15 +108,16 @@ static SljitRegionNodePlan PlanSljitSourceContractNode(const ExecutionRegionNode
 	}
 
 	if (node.source->filters.empty()) {
-		return SljitNativeSourceNode("table scan source contract", node, render_diagnostics);
+		return SljitNativeSourceNode(SljitSourceContractName(node), node, render_diagnostics);
 	}
 
 	vector<SljitNativeRegionOpPlan> generated_filter_ops;
 	SljitSourceContractPlan generated_filter_contract;
 	string generated_filter_error;
 	if (TryPlanSljitGeneratedSourceFilters(node, generated_filter_contract, generated_filter_ops,
-	                                      generated_filter_error, render_diagnostics)) {
-		string reason = "generated table scan filters;source-strategy=generated-source-filter";
+	                                       generated_filter_error, render_diagnostics)) {
+		string reason =
+		    "generated " + string(SljitSourceKindName(node)) + " filters;source-strategy=generated-source-filter";
 		AppendSljitSourceFilterFacts(reason, node, table_scan_contract, false);
 		reason += ";source_contract_filter_pushdown=false";
 		reason += ";source_contract_input_layout=true";
@@ -122,7 +132,8 @@ static SljitRegionNodePlan PlanSljitSourceContractNode(const ExecutionRegionNode
 	}
 
 	if (table_scan_contract.filter_pushdown) {
-		string reason = "vectorized table scan filters;source-strategy=duckdb-scan-filtered-source-contract";
+		string reason = "vectorized " + string(SljitSourceKindName(node)) +
+		                " filters;source-strategy=duckdb-scan-filtered-source-contract";
 		AppendSljitSourceFilterFacts(reason, node, table_scan_contract, false);
 		reason += ";generated-source-filter-blocker:" + generated_filter_error;
 		reason += ";source_contract_filter_pushdown=true";
@@ -130,7 +141,8 @@ static SljitRegionNodePlan PlanSljitSourceContractNode(const ExecutionRegionNode
 		                             SljitDuckDBScanFilteredSourceContractPlan());
 	}
 
-	return SljitRegionBoundaryNode("table scan source filters require DuckDB scan filter pushdown");
+	return SljitRegionBoundaryNode(string(SljitSourceKindName(node)) +
+	                               " source filters require DuckDB scan filter pushdown");
 }
 
 static SljitRegionNodePlan PlanSljitNativeStateScanSourceNode(const ExecutionRegionNode &node,

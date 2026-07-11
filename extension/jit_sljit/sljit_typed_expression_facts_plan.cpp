@@ -71,12 +71,14 @@ SljitTypedExpressionTreeFastPathPlan BuildSljitTypedExpressionTreeFastPathPlan(c
                                                                                bool emit_flat_nullable_fast_path) {
 	SljitTypedExpressionTreeFastPathPlan result;
 	result.fast_path_supported = SljitTypedExpressionTreeFastPathSupported(root);
-	const auto precheck_nulls_candidate =
-	    emit_flat_nullable_fast_path && result.fast_path_supported && SljitTypedExpressionTreeCanPrecheckNulls(root);
-	if (precheck_nulls_candidate) {
+	const auto nullable_fast_path_candidate = emit_flat_nullable_fast_path && result.fast_path_supported;
+	if (nullable_fast_path_candidate) {
 		CollectSljitTypedExpressionTreeReferences(root, result.source_refs);
 	}
-	result.precheck_nulls_supported = precheck_nulls_candidate && !result.source_refs.empty();
+	result.precheck_nulls_supported =
+	    nullable_fast_path_candidate && SljitTypedExpressionTreeCanPrecheckNulls(root) && !result.source_refs.empty();
+	result.hybrid_nulls_supported =
+	    nullable_fast_path_candidate && !result.precheck_nulls_supported && !result.source_refs.empty();
 	return result;
 }
 

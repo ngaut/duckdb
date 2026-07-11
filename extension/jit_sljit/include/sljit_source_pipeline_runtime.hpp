@@ -49,6 +49,9 @@ public:
 		if (!PrimitiveSequenceIsExecutable()) {
 			throw InternalException("SLJIT primitive sequence executor received an invalid recipe");
 		}
+		if (SljitFullPipelineIsSelectedHashJoinSinkSequence(recipe.primitive_sequence)) {
+			return ExecuteLoweredSelectedHashJoinSinkRecipe();
+		}
 		if (!terminal_runtime.Prepare(runtime, ops, scratch, TerminalStep())) {
 			throw InternalException("SLJIT primitive sequence terminal preparation failed");
 		}
@@ -84,6 +87,40 @@ public:
 	}
 
 private:
+	bool ExecuteLoweredSelectedHashJoinSinkRecipe() {
+		auto &hash_join_step = recipe.primitive_sequence.Step(1);
+		auto &terminal_step = recipe.primitive_sequence.Step(2);
+		if (!terminal_runtime.Prepare(runtime, ops, scratch, terminal_step)) {
+			throw InternalException("SLJIT lowered selected hash-join terminal preparation failed");
+		}
+		idx_t fetched_chunks = 0;
+		const auto max_chunks = runtime.MaxChunks();
+		auto execute_source_batch = [&](const SljitRuntimeBatchView &input, bool have_more_output) {
+			auto execute_terminal = [&](const SljitRuntimeBatchView &selected_output) {
+				return terminal_runtime.Execute(runtime, result, ops, scratch, terminal_step, selected_output,
+				                                have_more_output, processed_batches);
+			};
+			return hash_join_selection.Execute(hash_join_step, input, execute_hash_join_probe, execute_terminal);
+		};
+		auto execute_source_chunk = [&](DataChunk &source_chunk, bool have_more_output) {
+			return source_fetch.Execute(source_chunk, have_more_output, execute_source_batch);
+		};
+		auto stop_after_flush = [&](ExecutionRegionResult stop_result, bool have_more_output) {
+			if (source_fetch.Flush(have_more_output, execute_source_batch)) {
+				return true;
+			}
+			if (terminal_runtime.Flush(runtime, result, ops, scratch, terminal_step, processed_batches)) {
+				return true;
+			}
+			return SljitStopFullPipeline(result, stop_result);
+		};
+		return SljitRunFullPipelineSourceContractLoop(
+		    runtime, fetched_chunks, [&]() { return fetched_chunks >= max_chunks; }, execute_source_chunk,
+		    [&]() { return stop_after_flush(ExecutionRegionResult::NOT_FINISHED, true); },
+		    [&]() { return stop_after_flush(ExecutionRegionResult::INTERRUPTED, true); },
+		    [&]() { return stop_after_flush(ExecutionRegionResult::FINISHED, false); });
+	}
+
 	bool PrimitiveSequenceIsExecutable() const {
 		return SljitFullPipelinePrimitiveSequenceIsExecutable(ops, recipe.primitive_sequence);
 	}
@@ -155,7 +192,15 @@ private:
 		auto execute_output_batch = [&](DataChunk &batch) -> bool {
 			return ExecuteMaterializedBatch(next_step_idx, batch);
 		};
-		return hash_join_materialize.Execute(step_idx, step, input, execute_hash_join_probe, execute_output_batch);
+		const auto direct_handoff =
+		    HashJoinMaterializeCanDirectHandoffTo(recipe.primitive_sequence.Step(next_step_idx));
+		return hash_join_materialize.Execute(step_idx, step, input, direct_handoff, execute_hash_join_probe,
+		                                     execute_output_batch);
+	}
+
+	bool HashJoinMaterializeCanDirectHandoffTo(const SljitFullPipelinePrimitiveStep &step) const {
+		return step.kind == SljitFullPipelinePrimitiveKind::HASH_JOIN_PROBE_MATERIALIZE ||
+		       step.kind == SljitFullPipelinePrimitiveKind::HASH_JOIN_PROBE_SELECTION;
 	}
 
 	bool ExecuteHashJoinProbeSelection(idx_t step_idx, const SljitFullPipelinePrimitiveStep &step,
@@ -181,9 +226,8 @@ private:
 		auto execute_output_batch = [&](DataChunk &batch) -> bool {
 			return ExecuteMaterializedBatch(next_step_idx, batch);
 		};
-		const auto direct_handoff =
-		    IsTerminalStep(next_step_idx) &&
-		    ProjectionChainCanDirectHandoffTo(recipe.primitive_sequence.Step(next_step_idx));
+		const auto direct_handoff = IsTerminalStep(next_step_idx) &&
+		                            ProjectionChainCanDirectHandoffTo(recipe.primitive_sequence.Step(next_step_idx));
 		return projection_chain.Execute(step_idx, step, input, direct_handoff, execute_output_batch);
 	}
 

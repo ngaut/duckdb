@@ -42,8 +42,17 @@ static bool TryGetSljitPerfectHashGroupMinimum(const LogicalType &type, const Va
 	case PhysicalType::UINT8:
 		result = NumericCast<int64_t>(minimum.GetValueUnsafe<uint8_t>());
 		return true;
+	case PhysicalType::INT16:
+		result = NumericCast<int64_t>(minimum.GetValueUnsafe<int16_t>());
+		return true;
+	case PhysicalType::UINT16:
+		result = NumericCast<int64_t>(minimum.GetValueUnsafe<uint16_t>());
+		return true;
 	case PhysicalType::INT32:
 		result = NumericCast<int64_t>(minimum.GetValueUnsafe<int32_t>());
+		return true;
+	case PhysicalType::UINT32:
+		result = NumericCast<int64_t>(minimum.GetValueUnsafe<uint32_t>());
 		return true;
 	case PhysicalType::INT64:
 		result = minimum.GetValueUnsafe<int64_t>();
@@ -67,6 +76,22 @@ static bool SljitPerfectHashIntegralCompressTargetMatchesGroup(SljitNativeUnsign
 	}
 }
 
+static bool SljitPerfectHashIntegerCastTargetMatchesGroup(SljitNativeSignedIntegerWidth width,
+                                                          PhysicalType physical_type) {
+	switch (width) {
+	case SljitNativeSignedIntegerWidth::INT8:
+		return physical_type == PhysicalType::INT8;
+	case SljitNativeSignedIntegerWidth::INT16:
+		return physical_type == PhysicalType::INT16;
+	case SljitNativeSignedIntegerWidth::INT32:
+		return physical_type == PhysicalType::INT32;
+	case SljitNativeSignedIntegerWidth::INT64:
+		return physical_type == PhysicalType::INT64;
+	default:
+		return false;
+	}
+}
+
 static bool SljitPerfectHashGroupExpressionSupported(const SljitNativeRegionExpressionPlan &expr,
                                                      const ExecutionRegionGroupInput &group,
                                                      bool allow_typed_expression_tree) {
@@ -79,6 +104,8 @@ static bool SljitPerfectHashGroupExpressionSupported(const SljitNativeRegionExpr
 	case SljitNativeRegionExpressionKind::INTEGRAL_COMPRESS:
 		return SljitPerfectHashIntegralCompressTargetMatchesGroup(expr.unsigned_cast_target_width,
 		                                                          group.type.InternalType());
+	case SljitNativeRegionExpressionKind::INTEGER_CAST:
+		return SljitPerfectHashIntegerCastTargetMatchesGroup(expr.cast_target_width, group.type.InternalType());
 	case SljitNativeRegionExpressionKind::STRING_COMPRESS:
 		return group.type.InternalType() == PhysicalType::UINT8 && expr.string_compress_target_size == sizeof(uint8_t);
 	case SljitNativeRegionExpressionKind::TYPED_EXPRESSION_TREE: {
@@ -100,8 +127,7 @@ static bool SljitPerfectHashGroupExpressionSupported(const SljitNativeRegionExpr
 bool TryBuildSljitPerfectHashGroupPlans(const vector<ExecutionRegionGroupInput> &groups,
                                         const vector<SljitNativeRegionExpressionPlan> &group_expressions,
                                         const ExecutionRegionAggregateContract &contract,
-                                        vector<SljitPerfectHashGroupPlan> &result,
-                                        bool allow_typed_expression_tree) {
+                                        vector<SljitPerfectHashGroupPlan> &result, bool allow_typed_expression_tree) {
 	if (contract.kind != ExecutionRegionAggregateOperatorKind::PERFECT_HASH ||
 	    contract.perfect_required_bits.size() != groups.size() ||
 	    contract.perfect_group_minima.size() != groups.size() ||
@@ -120,8 +146,7 @@ bool TryBuildSljitPerfectHashGroupPlans(const vector<ExecutionRegionGroupInput> 
 		}
 		shift -= contract.perfect_required_bits[group_idx];
 		SljitPerfectHashGroupPlan plan;
-		if (!TryGetSljitPerfectHashGroupIntegerKind(group.type, plan.integer_kind) ||
-		    !TryGetSljitPerfectHashGroupMinimum(group.type, contract.perfect_group_minima[group_idx], plan.minimum)) {
+		if (!TryGetSljitPerfectHashGroupMinimum(group.type, contract.perfect_group_minima[group_idx], plan.minimum)) {
 			return false;
 		}
 		if (group_expressions.empty()) {
@@ -135,12 +160,17 @@ bool TryBuildSljitPerfectHashGroupPlans(const vector<ExecutionRegionGroupInput> 
 			plan.expression_kind = group_expression.kind;
 			plan.source_index = group_expression.source_index;
 			plan.string_compress_target_size = group_expression.string_compress_target_size;
-			plan.integral_compress_source_width = group_expression.cast_source_width;
-			plan.integral_compress_minimum = group_expression.constant;
+			plan.integer_source_width = group_expression.cast_source_width;
+			plan.integer_source_minimum = group_expression.constant;
 			if (group_expression.kind == SljitNativeRegionExpressionKind::TYPED_EXPRESSION_TREE) {
 				plan.expression_tree = group_expression.expression_tree->Copy();
 				plan.expression_tree_source_indices = group_expression.expression_tree_source_indices;
 			}
+		}
+		if ((plan.expression_kind == SljitNativeRegionExpressionKind::REFERENCE ||
+		     plan.expression_kind == SljitNativeRegionExpressionKind::TYPED_EXPRESSION_TREE) &&
+		    !TryGetSljitPerfectHashGroupIntegerKind(group.type, plan.integer_kind)) {
+			return false;
 		}
 		plan.shift = shift;
 		result.push_back(std::move(plan));

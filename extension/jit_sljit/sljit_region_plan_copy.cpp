@@ -203,6 +203,8 @@ static SljitNativeRegionOpPlan CopySljitNativeRegionOp(const SljitNativeRegionOp
 	result.aggregate_update.sink_info = input.aggregate_update.sink_info;
 	result.aggregate_update.input_types = input.aggregate_update.input_types;
 	result.aggregate_update.estimated_input_count = input.aggregate_update.estimated_input_count;
+	result.aggregate_update.distinct_key_cardinality_upper_bound =
+	    input.aggregate_update.distinct_key_cardinality_upper_bound;
 	result.aggregate_update.group_reserve = input.aggregate_update.group_reserve;
 	result.aggregate_update.use_primitive_payloads = input.aggregate_update.use_primitive_payloads;
 	result.aggregate_update.use_grouped_state_addresses = input.aggregate_update.use_grouped_state_addresses;

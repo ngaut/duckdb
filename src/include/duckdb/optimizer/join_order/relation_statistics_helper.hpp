@@ -55,7 +55,8 @@ public:
 	static constexpr double DEFAULT_SELECTIVITY = 0.2;
 
 public:
-	static idx_t InspectTableFilter(idx_t cardinality, const TableFilter &filter, BaseStatistics &base_stats);
+	static idx_t InspectTableFilter(ClientContext &context, idx_t cardinality, const TableFilter &filter,
+	                                BaseStatistics &base_stats);
 	//! Extract Statistics from a LogicalGet.
 	static RelationStats ExtractGetStats(LogicalGet &get, ClientContext &context);
 	static RelationStats ExtractDelimGetStats(LogicalDelimGet &delim_get, ClientContext &context);

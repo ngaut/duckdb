@@ -93,12 +93,12 @@ struct SljitDeferredPerfectHashFlagPlan {
 struct SljitPerfectHashGroupPlan {
 	SljitNativeRegionExpressionKind expression_kind = SljitNativeRegionExpressionKind::REFERENCE;
 	SljitNativeIntegerKind integer_kind = SljitNativeIntegerKind::INT64;
-	SljitNativeSignedIntegerWidth integral_compress_source_width = SljitNativeSignedIntegerWidth::INT32;
+	SljitNativeSignedIntegerWidth integer_source_width = SljitNativeSignedIntegerWidth::INT32;
 	unique_ptr<ExecutionExpressionIR> expression_tree;
 	vector<idx_t> expression_tree_source_indices;
 	idx_t source_index = DConstants::INVALID_INDEX;
 	idx_t string_compress_target_size = 0;
-	int64_t integral_compress_minimum = 0;
+	int64_t integer_source_minimum = 0;
 	int64_t minimum = 0;
 	idx_t shift = 0;
 };
@@ -117,8 +117,7 @@ BuildSljitPerfectHashSourceDataPointerHoists(const vector<SljitNativeRegionExpre
 vector<SljitTypedExpressionTreeDataPointerHoist>
 BuildSljitPerfectHashSpareFastSourceDataPointerHoists(const vector<SljitNativeRegionExpressionPlan> &payloads);
 void EmitSljitPerfectHashSetOutputGroup(struct sljit_compiler *compiler, sljit_s32 group_index_reg);
-void EmitSljitPerfectHashStatePointer(struct sljit_compiler *compiler, sljit_s32 group_index_reg,
-                                      sljit_s32 target_reg);
+void EmitSljitPerfectHashStatePointer(struct sljit_compiler *compiler, sljit_s32 group_index_reg, sljit_s32 target_reg);
 void EmitLoadFusedAggregateGroupSourceIndex(
     struct sljit_compiler *compiler, idx_t group_idx, sljit_s32 target_reg,
     SljitFusedAggregateGroupIndexMode mode = SljitFusedAggregateGroupIndexMode::SELECTED_NULLABLE,

@@ -28,6 +28,7 @@ struct PhysicalRunnerCostInput {
 	idx_t expression_cost = 0;
 	idx_t source_contract_input_cardinality = 0;
 	bool source_contract_output_cardinality_unknown = false;
+	bool finalized_dynamic_filter_cardinality_estimate = false;
 	idx_t generated_stage_count = 0;
 	idx_t generated_backend_stage_count = 0;
 	idx_t generated_grouped_aggregate_stage_count = 0;
@@ -36,6 +37,7 @@ struct PhysicalRunnerCostInput {
 	idx_t selected_hash_join_filter_materialization_count = 0;
 	idx_t native_join_stage_count = 0;
 	idx_t native_hash_join_build_sink_count = 0;
+	bool native_delim_join_sink = false;
 	idx_t native_aggregate_stage_count = 0;
 	idx_t native_grouped_aggregate_stage_count = 0;
 	idx_t native_sort_stage_count = 0;

@@ -51,6 +51,9 @@ public:
 	static FilterPropagateResult CheckExpressionStatistics(const Expression &expr, const BaseStatistics &stats);
 	static FilterPropagateResult CheckExpressionStatistics(optional_ptr<ClientContext> context_p,
 	                                                       const Expression &expr, const BaseStatistics &stats);
+	//! Derive statistics for an expression over a single filtered column.
+	static unique_ptr<BaseStatistics> TryGetExpressionStatistics(ClientContext &context, const Expression &expr,
+	                                                             const BaseStatistics &stats);
 	//! Check if an expression tree contains an internal function with the given name
 	static bool ContainsInternalFunction(const Expression &expr, const string &func_name);
 	//! Check if an expression tree is entirely optional filter semantics

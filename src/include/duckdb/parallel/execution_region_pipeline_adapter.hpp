@@ -29,6 +29,7 @@ public:
 	Allocator &GetAllocator() const;
 	bool IsCompiledExecutionSuppressed() const;
 	idx_t MaxThreads() const;
+	bool PreserveSourceChunkBoundaries() const;
 
 	PipelineExecuteResult ExecuteVectorizedPipeline(idx_t max_chunks);
 	bool HasSourceAndSink() const;

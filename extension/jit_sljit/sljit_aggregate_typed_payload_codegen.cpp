@@ -35,7 +35,7 @@ static bool BuildSljitFusedTypedAggregatePayloadPlan(const SljitNativeRegionExpr
 	if (payload.kind != SljitNativeRegionExpressionKind::TYPED_EXPRESSION_TREE || !payload.expression_tree) {
 		return false;
 	}
-	payload_plan = BuildSljitTypedExpressionTreePlan(*payload.expression_tree, false);
+	payload_plan = BuildSljitTypedExpressionTreePlan(*payload.expression_tree, true);
 	return SljitAggregateTypedPayloadPlanSupported(payload_plan, aggregate);
 }
 

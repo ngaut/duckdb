@@ -2,6 +2,47 @@
 
 using namespace duckdb;
 
+TEST_CASE("JIT table-function sources use the generic source contract", "[api][jit]") {
+	DuckDB db;
+	Connection con(db);
+	auto &manager = ExecutionRegionManager::Get(*con.context);
+
+	ConfigureSljitForCoverage(con, false, true, true, 10000);
+	ClearJitTrace(manager);
+	auto result = con.Query("SELECT sum(i * 31 + (i % 97)) FROM range(100000) AS t(i)");
+	REQUIRE_NO_FAIL(*result);
+	REQUIRE(result->GetValue(0, 0).ToString() == "155003249685");
+
+	bool found_source_contract = false;
+	bool found_runtime = false;
+	for (auto &event : manager.GetEvents()) {
+		if (!IsSljitRegionEvent(event)) {
+			continue;
+		}
+		if (IsCompiledSljitRegionEvent(event) && event.has_candidate &&
+		    event.candidate_traits.source_kind == ExecutionRegionSourceKind::TABLE_FUNCTION_SCAN &&
+		    event.selected_source_execution == ExecutionRegionSourceExecutionKind::SOURCE_CONTRACT &&
+		    event.candidate_contract.source_ownership == ExecutionRegionOwnershipKind::NATIVE_CONTRACT) {
+			found_source_contract = true;
+			RequireGeneratedMachineCodeRegion(event);
+			REQUIRE(event.runner_cost.source_contract_input_rows == 100000);
+			REQUIRE_FALSE(event.runner_cost.source_contract_output_cardinality_unknown);
+			REQUIRE(StringUtil::Contains(event.ir, "table_scan_contract<function=range"));
+			REQUIRE(StringUtil::Contains(event.ir, "in_out_function=true"));
+			REQUIRE(StringUtil::Contains(event.reason, "table-function source contract"));
+		}
+		if (EventPhase(event) == "runtime" && EventStatus(event) == "executed" &&
+		    EventExecutionMode(event) == "native" &&
+		    event.selected_source_execution == ExecutionRegionSourceExecutionKind::SOURCE_CONTRACT &&
+		    event.source_contract_output_rows > 0) {
+			found_runtime = true;
+			RequireNativeGeneratedRuntimeWork(event);
+		}
+	}
+	REQUIRE(found_source_contract);
+	REQUIRE(found_runtime);
+}
+
 TEST_CASE("JIT table scan source contract fuses with generated projection and append sink", "[api][jit]") {
 	DuckDB db;
 	Connection con(db);
@@ -26,10 +67,10 @@ TEST_CASE("JIT table scan source contract fuses with generated projection and ap
 		if (EventStatus(event) == "compiled" &&
 		    event.selected_source_execution == ExecutionRegionSourceExecutionKind::SOURCE_CONTRACT &&
 		    StringUtil::Contains(event.ir, "table_scan_contract<function=seq_scan")) {
-				found_source_contract = true;
-				RequireGeneratedMachineCodeRegion(event);
-				RequireGeneratedSourceFilterContract(event);
-				REQUIRE(StringUtil::Contains(event.ir, "source_contract<status=ready"));
+			found_source_contract = true;
+			RequireGeneratedMachineCodeRegion(event);
+			RequireGeneratedSourceFilterContract(event);
+			REQUIRE(StringUtil::Contains(event.ir, "source_contract<status=ready"));
 			REQUIRE(StringUtil::Contains(event.reason, "append sink contract"));
 			REQUIRE(StringUtil::Contains(event.reason, "sink_contract_status=ready"));
 		}

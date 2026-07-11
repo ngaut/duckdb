@@ -104,12 +104,14 @@ static bool SljitTryReserveGroupedAggregateGroups(ExecutionRegionRuntime &runtim
 	if (!runtime.TryMarkOnce(ExecutionRegionRuntimeOnceFlag::AGGREGATE_GROUP_RESERVE, op_idx)) {
 		return false;
 	}
-	auto reserve_group_count = MaxValue<idx_t>(MaxValue<idx_t>(reserve.group_count, runtime_group_count),
-	                                           STANDARD_VECTOR_SIZE);
+	auto reserve_group_count = MaxValue<idx_t>(reserve.group_count, runtime_group_count);
 	if (op.aggregate_update.dense_group_domain.ready) {
-		reserve_group_count = MaxValue(reserve_group_count,
-		                               SljitDenseGroupDomainReserveCount(op.aggregate_update.dense_group_domain));
+		reserve_group_count =
+		    MaxValue(reserve_group_count, SljitDenseGroupDomainReserveCount(op.aggregate_update.dense_group_domain));
 	}
+	const auto parallelism = MaxValue<idx_t>(runtime.MaxThreads(), 1);
+	reserve_group_count = reserve_group_count / parallelism + (reserve_group_count % parallelism != 0 ? 1 : 0);
+	reserve_group_count = MaxValue<idx_t>(reserve_group_count, STANDARD_VECTOR_SIZE);
 	RecordSljitRegionRuntimePath(runtime, op.kind, "grouped_aggregate_reserve_target", reserve_group_count);
 	auto reserve_stage_start = SljitRegionStageStart(runtime);
 	auto reserved = ExecuteSljitRegionRecordedOperation(

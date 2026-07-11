@@ -164,8 +164,8 @@ private:
 	}
 
 	bool ExecuteMaterializedAggregateBatch(ExecutionRegionRuntime &runtime, ExecutionRegionResult &result,
-	                                       vector<SljitExecutableRegionOp> &ops,
-	                                       SljitRegionExecutionScratch &scratch, DataChunk &input) {
+	                                       vector<SljitExecutableRegionOp> &ops, SljitRegionExecutionScratch &scratch,
+	                                       DataChunk &input) {
 		auto aggregate_idx = AggregateIndex();
 		auto &aggregate_op = ops[aggregate_idx];
 		if (SljitExecuteProjectedAggregateBatch(runtime, runtime.ExecutionOperators(), scratch, aggregate_idx,
@@ -184,9 +184,9 @@ private:
 		auto final_projection_idx = post_join_projection.final_projection_idx;
 		auto &aggregate_op = ops[aggregate_idx];
 		return SljitProjectedAggregateSink(ops, runtime, runtime.ExecutionOperators(), scratch, result,
-		                                   final_projection_idx, ops[final_projection_idx], aggregate_idx,
-		                                   aggregate_op, deferred_grouped_finish, processed_output_rows,
-		                                   projected_batch, "post_join_projection_buffer_append", DirectAggregateStrategyPtr(),
+		                                   final_projection_idx, ops[final_projection_idx], aggregate_idx, aggregate_op,
+		                                   deferred_grouped_finish, processed_output_rows, projected_batch,
+		                                   "post_join_projection_buffer_append", DirectAggregateStrategyPtr(),
 		                                   BoundGroupedUpdatePtr(aggregate_op));
 	}
 

@@ -24,6 +24,12 @@ struct SljitHashJoinDelimJoinSinkFacts {
 	idx_t sink_idx = DConstants::INVALID_INDEX;
 };
 
+struct SljitHashJoinAppendSinkFacts {
+	idx_t first_hash_join_idx = DConstants::INVALID_INDEX;
+	idx_t final_hash_join_idx = DConstants::INVALID_INDEX;
+	idx_t sink_idx = DConstants::INVALID_INDEX;
+};
+
 struct SljitHashJoinBuildSinkFacts {
 	idx_t pre_projection_idx = DConstants::INVALID_INDEX;
 	idx_t filter_idx = DConstants::INVALID_INDEX;
@@ -180,15 +186,14 @@ struct SljitProjectionFilterProjectionNativeTailFacts {
 	bool filter_can_run_before_pre_projection = false;
 };
 
-bool SljitFullPipelineOpIsAt(const vector<SljitExecutableRegionOp> &ops, idx_t op_idx,
-                             SljitNativeRegionOpKind kind);
+bool SljitFullPipelineOpIsAt(const vector<SljitExecutableRegionOp> &ops, idx_t op_idx, SljitNativeRegionOpKind kind);
 bool SljitFullPipelineHashJoinProbeIsMatchedProbeAndBuild(const vector<SljitExecutableRegionOp> &ops, idx_t op_idx);
 
 SljitFullPipelineScheduleFacts SljitAnalyzeFullPipelineScheduleFacts(const vector<SljitExecutableRegionOp> &ops);
 bool SljitTryAnalyzeHashJoinDelimJoinSink(const vector<SljitExecutableRegionOp> &ops,
                                           SljitHashJoinDelimJoinSinkFacts &facts);
-bool SljitTryAnalyzeHashJoinBuildSink(const vector<SljitExecutableRegionOp> &ops,
-                                      SljitHashJoinBuildSinkFacts &facts);
+bool SljitTryAnalyzeHashJoinAppendSink(const vector<SljitExecutableRegionOp> &ops, SljitHashJoinAppendSinkFacts &facts);
+bool SljitTryAnalyzeHashJoinBuildSink(const vector<SljitExecutableRegionOp> &ops, SljitHashJoinBuildSinkFacts &facts);
 bool SljitTryAnalyzeSourceUngroupedAggregate(const vector<SljitExecutableRegionOp> &ops,
                                              SljitSourceUngroupedAggregateFacts &facts);
 bool SljitTryAnalyzeSourceFilterAggregate(const vector<SljitExecutableRegionOp> &ops,

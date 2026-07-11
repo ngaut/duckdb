@@ -64,8 +64,7 @@ struct SljitNativePipelineGroupedFinishState {
 		};
 		auto trace_op = optional_ptr<const SljitExecutableRegionOp>(&op);
 		if (SljitAppendChunkToInitializedBatch(runtime, pending_aggregate_update.chunk, input, op_idx, trace_op,
-		                                       "pending_grouped_aggregate_input_append", flush_batch,
-		                                       execute_batch)) {
+		                                       "pending_grouped_aggregate_input_append", flush_batch, execute_batch)) {
 			return true;
 		}
 		sink_result = SinkResultType::NEED_MORE_INPUT;

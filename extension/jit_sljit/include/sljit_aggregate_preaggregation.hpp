@@ -11,6 +11,7 @@
 #include "sljit_aggregate_flat_single_preaggregation.hpp"
 #include "sljit_aggregate_primitive_preaggregation_runtime.hpp"
 #include "sljit_aggregate_preaggregation_common.hpp"
+#include "sljit_dense_group_preaggregation.hpp"
 
 #include "duckdb/common/types/hugeint.hpp"
 #include "duckdb/common/types/uhugeint.hpp"
@@ -137,6 +138,10 @@ static bool TryPreaggregateConsecutivePrimitiveGroupsTemplated(
 		previous_key = key;
 	}
 	const bool prefer_consecutive_runs = monotonic_nondecreasing && has_consecutive_repeat;
+	if (!prefer_consecutive_runs &&
+	    TryPreaggregateDensePrimitiveGroups(op, input, payload_lanes, compact_groups, scratch)) {
+		return true;
+	}
 	if (!prefer_consecutive_runs &&
 	    TryPreaggregateBoundedPrimitiveGroupsTemplated<T>(op, input, payload_lanes, compact_groups, scratch)) {
 		return true;

@@ -32,6 +32,10 @@ idx_t ExecutionRegionPipelineAdapter::MaxThreads() const {
 	return executor.pipeline.GetMaxThreads();
 }
 
+bool ExecutionRegionPipelineAdapter::PreserveSourceChunkBoundaries() const {
+	return executor.required_partition_info.AnyRequired();
+}
+
 PipelineExecuteResult ExecutionRegionPipelineAdapter::ExecuteVectorizedPipeline(idx_t max_chunks) {
 	return executor.ExecuteVectorizedPipeline(max_chunks);
 }

@@ -68,9 +68,13 @@ private:
 	                                         const SljitGroupedAggregateUpdatePrimitive &primitive,
 	                                         const SljitRuntimeBatchView &input, idx_t &processed_batches) {
 		if (primitive.input_kind == SljitGroupedAggregateUpdateInputKind::PROJECTED_INPUT) {
+			RecordSljitRegionRuntimePath(runtime, ops[primitive.aggregate_idx].kind, "grouped_direct_projected_input",
+			                             input.count);
 			return ExecuteProjectedDirectPrimitivePayloadUpdate(runtime, ops, scratch, primitive, input,
 			                                                    processed_batches);
 		}
+		RecordSljitRegionRuntimePath(runtime, ops[primitive.aggregate_idx].kind, "grouped_direct_materialized_input",
+		                             input.count);
 		auto &input_chunk = SljitBindRuntimeBatchInput(input, "SLJIT grouped aggregate direct update");
 		auto &aggregate_op = ops[primitive.aggregate_idx];
 		auto &native_runtime = runtime.ExecutionOperators();
@@ -238,8 +242,8 @@ private:
 			projected_direct_failure_reason = failure_reason.empty() ? "unknown" : failure_reason;
 			return false;
 		}
-		RecordSljitRegionMaterializationElisionPath(runtime, aggregate_op.kind,
-		                                            "projected_source_input_grouped_update", source_input.size());
+		RecordSljitRegionMaterializationElisionPath(runtime, aggregate_op.kind, "projected_source_input_grouped_update",
+		                                            source_input.size());
 		processed_batches++;
 		return true;
 	}
@@ -247,7 +251,7 @@ private:
 	bool FlushProjectedDirectPreaggregatedBatch(ExecutionRegionRuntime &runtime, vector<SljitExecutableRegionOp> &ops,
 	                                            SljitRegionExecutionScratch &scratch,
 	                                            const SljitGroupedAggregateUpdatePrimitive &primitive) {
-		if (projected_direct_preaggregated_batch.Empty()) {
+		if (!projected_direct_preaggregated_batch.HasPending()) {
 			return true;
 		}
 		if (primitive.aggregate_idx >= ops.size()) {

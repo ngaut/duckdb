@@ -49,4 +49,12 @@ static void MarkDeferredGroupedFinish(bool defer_grouped_finish, optional_ptr<bo
 	}
 }
 
+static void
+RecordPreaggregatedGroupedAggregateRepresentedRows(ExecutionGroupedAggregateStateAddressBinding &grouped_state,
+                                                   idx_t represented_row_count, idx_t compact_group_count) {
+	if (represented_row_count > compact_group_count) {
+		grouped_state.state->RecordDirectStateAddressUpdates(represented_row_count - compact_group_count);
+	}
+}
+
 } // namespace duckdb

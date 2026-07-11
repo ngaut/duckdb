@@ -41,27 +41,14 @@ struct TableScanExecutionSourceContractGlobalState {
 	bool is_create_index = false;
 };
 
-static bool IsExecutionTableScanSourceContractSupported(const PhysicalTableScan &op) {
-	if (StringUtil::Lower(op.function.name.GetIdentifierName()) != "seq_scan") {
-		return false;
-	}
-	if (!op.function.function || op.function.in_out_function) {
-		return false;
-	}
-	if (!op.bind_data) {
-		return false;
-	}
-	auto &bind_data = op.bind_data->Cast<TableScanBindData>();
-	return !bind_data.is_index_scan;
-}
-
 static TableScanExecutionSourceConfig
 BuildTableScanExecutionSourceConfig(const PhysicalTableScan &op, optional_ptr<TableFilterSet> filters,
                                     const ExecutionRegionOpenRequest &open_request) {
+	auto capability = GetExecutionSourceContractCapability(op);
 	TableScanExecutionSourceConfig result;
 	result.projection_ids = op.projection_ids;
 	result.filters = filters;
-	result.use_source_contract = open_request.UsesSourceContract() && IsExecutionTableScanSourceContractSupported(op);
+	result.use_source_contract = open_request.UsesSourceContract() && capability.IsReady();
 	if (result.use_source_contract && open_request.UsesSourceContractInputLayout()) {
 		result.source_contract_input_types = open_request.source_contract_input_types;
 		result.return_source_contract_input = true;
@@ -103,7 +90,7 @@ static void
 InitializeExecutionSourceContractTableScanGlobalState(ClientContext &context, const PhysicalTableScan &op,
                                                       TableScanExecutionSourceConfig &execution_source_config,
                                                       TableScanExecutionSourceContractGlobalState &contract_state) {
-	if (!execution_source_config.use_source_contract) {
+	if (!execution_source_config.use_source_contract || !GetExecutionSourceContractCapability(op).uses_storage_scan) {
 		return;
 	}
 	auto &bind_data = op.bind_data->Cast<TableScanBindData>();
@@ -291,11 +278,15 @@ PhysicalTableScan::GetGlobalSourceState(ClientContext &context, const ExecutionR
 }
 
 bool PhysicalTableScan::SupportsExecutionSourceContract(const ExecutionRegionOpenRequest &open_request) const {
-	return open_request.UsesSourceContract() && IsExecutionTableScanSourceContractSupported(*this);
+	return open_request.UsesSourceContract() && GetExecutionSourceContractCapability(*this).IsReady();
 }
 
 SourceResultType PhysicalTableScan::GetExecutionSourceContractDataInternal(ExecutionContext &context, DataChunk &chunk,
                                                                            OperatorSourceInput &input) const {
+	if (!GetExecutionSourceContractCapability(*this).uses_storage_scan) {
+		ExecutionOperatorStageTimer timer(input.stage_recorder, "source_contract.table_function.data");
+		return GetDataInternal(context, chunk, input);
+	}
 	auto &g_state = input.global_state.Cast<TableScanGlobalSourceState>();
 	auto &l_state = input.local_state.Cast<TableScanLocalSourceState>();
 	if (!g_state.execution_source_contract.storage) {

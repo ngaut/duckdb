@@ -24,7 +24,15 @@ from tpch_common import (
 
 ROOT = Path(__file__).resolve().parents[3]
 DEFAULT_BASELINE_ENV = "DUCKDB_JIT_TPCH_BASELINE"
-DEFAULT_BASELINE_STATE = ROOT / "benchmark" / "tpch" / "jit" / "tmp" / "tpch_refactor_guard_state.json"
+DEFAULT_BASELINE_STATE = (
+    ROOT / "benchmark" / "tpch" / "jit" / "tmp" / "tpch_refactor_guard_state.json"
+)
+PROMOTED_BASELINE_CSV_FILES = (
+    "summary.csv",
+    "runs.csv",
+    "counters.csv",
+    "performance_gaps.csv",
+)
 
 
 def script_path(name: str) -> Path:
@@ -46,7 +54,9 @@ def run_command(command: list[str], label: str, *, check: bool = True) -> int:
 
 def require_artifact_dir(path: Path, label: str) -> None:
     if not path.is_dir():
-        raise TPCHConfigurationError(f"{label} artifact directory does not exist: {path}")
+        raise TPCHConfigurationError(
+            f"{label} artifact directory does not exist: {path}"
+        )
     for filename in (
         "summary.csv",
         "runs.csv",
@@ -55,7 +65,9 @@ def require_artifact_dir(path: Path, label: str) -> None:
     ):
         artifact = path / filename
         if not artifact.is_file():
-            raise TPCHConfigurationError(f"{label} artifact is missing {filename}: {path}")
+            raise TPCHConfigurationError(
+                f"{label} artifact is missing {filename}: {path}"
+            )
 
 
 def load_baseline_state(path: Path) -> Path | None:
@@ -65,14 +77,23 @@ def load_baseline_state(path: Path) -> Path | None:
         with path.open(encoding="utf-8") as handle:
             state = json.load(handle)
     except json.JSONDecodeError as exc:
-        raise TPCHConfigurationError(f"baseline state is not valid JSON: {path}") from exc
+        raise TPCHConfigurationError(
+            f"baseline state is not valid JSON: {path}"
+        ) from exc
     baseline = state.get("current_baseline")
     if not baseline:
-        raise TPCHConfigurationError(f"baseline state is missing current_baseline: {path}")
+        raise TPCHConfigurationError(
+            f"baseline state is missing current_baseline: {path}"
+        )
     return Path(baseline).resolve()
 
 
-def write_baseline_state(args: argparse.Namespace, artifact_dir: Path, source: str) -> None:
+def write_baseline_state(
+    args: argparse.Namespace,
+    artifact_dir: Path,
+    source: str,
+    repeats: int | None = None,
+) -> None:
     if not args.allow_partial_baseline and args.queries != list(DEFAULT_QUERIES):
         raise TPCHConfigurationError(
             "refusing to write accepted baseline for a partial query set; "
@@ -86,16 +107,104 @@ def write_baseline_state(args: argparse.Namespace, artifact_dir: Path, source: s
         "queries": list(args.queries),
         "scale_factor": args.scale_factor,
         "threads": args.threads,
-        "repeats": args.repeats,
+        "repeats": repeats if repeats is not None else args.repeats,
         "timing_mode": args.timing_mode,
         "duckdb": str(args.duckdb),
     }
-    with args.baseline_state.open("w", encoding="utf-8") as handle:
+    temporary_state = args.baseline_state.with_name(
+        f".{args.baseline_state.name}.{os.getpid()}.tmp"
+    )
+    with temporary_state.open("w", encoding="utf-8") as handle:
         json.dump(state, handle, indent=2)
         handle.write("\n")
+    os.replace(temporary_state, args.baseline_state)
 
 
-def write_gate_metadata(args: argparse.Namespace, out_dir: Path, baseline: Path | None, mode: str) -> None:
+def read_csv_artifact(path: Path) -> tuple[list[str], list[dict[str, str]]]:
+    with path.open(newline="", encoding="utf-8") as handle:
+        reader = csv.DictReader(handle)
+        if not reader.fieldnames:
+            raise TPCHConfigurationError(f"CSV artifact has no header: {path}")
+        return list(reader.fieldnames), list(reader)
+
+
+def merge_rechecked_csv_artifact(
+    candidate_path: Path,
+    recheck_path: Path,
+    output_path: Path,
+    rechecked_queries: list[str],
+    require_query_rows: bool = True,
+) -> None:
+    candidate_fields, candidate_rows = read_csv_artifact(candidate_path)
+    recheck_fields, recheck_rows = read_csv_artifact(recheck_path)
+    if candidate_fields != recheck_fields:
+        raise TPCHConfigurationError(
+            f"focused recheck CSV schema does not match candidate: {recheck_path} != {candidate_path}"
+        )
+    rechecked = set(rechecked_queries)
+    replacement_by_query = {query: [] for query in rechecked_queries}
+    for row in recheck_rows:
+        query = row.get("query", "")
+        if query not in rechecked:
+            raise TPCHConfigurationError(
+                f"focused recheck contains unexpected query {query}: {recheck_path}"
+            )
+        replacement_by_query[query].append(row)
+    if require_query_rows:
+        missing = [query for query, rows in replacement_by_query.items() if not rows]
+        if missing:
+            raise TPCHConfigurationError(
+                f"focused recheck is missing queries {' '.join(missing)}: {recheck_path}"
+            )
+
+    merged_rows = []
+    inserted = set()
+    for row in candidate_rows:
+        query = row.get("query", "")
+        if query not in rechecked:
+            merged_rows.append(row)
+        elif query not in inserted:
+            merged_rows.extend(replacement_by_query[query])
+            inserted.add(query)
+    if require_query_rows:
+        missing = [query for query in rechecked_queries if query not in inserted]
+        if missing:
+            raise TPCHConfigurationError(
+                f"candidate is missing queries {' '.join(missing)}: {candidate_path}"
+            )
+
+    with output_path.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=candidate_fields)
+        writer.writeheader()
+        writer.writerows(merged_rows)
+
+
+def merge_promoted_baseline_artifact(
+    promoted_dir: Path,
+    focused_dir: Path,
+    rechecked_queries: list[str],
+) -> Path:
+    accepted_dir = promoted_dir / "accepted_baseline"
+    if accepted_dir.exists() and any(accepted_dir.iterdir()):
+        raise TPCHConfigurationError(
+            f"accepted baseline artifact directory is not empty: {accepted_dir}"
+        )
+    accepted_dir.mkdir(parents=True, exist_ok=True)
+    for filename in PROMOTED_BASELINE_CSV_FILES:
+        merge_rechecked_csv_artifact(
+            promoted_dir / filename,
+            focused_dir / filename,
+            accepted_dir / filename,
+            rechecked_queries,
+            require_query_rows=filename != "counters.csv",
+        )
+    require_artifact_dir(accepted_dir, "accepted baseline")
+    return accepted_dir
+
+
+def write_gate_metadata(
+    args: argparse.Namespace, out_dir: Path, baseline: Path | None, mode: str
+) -> None:
     metadata = {
         "mode": mode,
         "created_at": datetime.now().isoformat(timespec="seconds"),
@@ -161,8 +270,12 @@ def benchmark_command(
     queries = queries if queries is not None else args.queries
     repeats = repeats if repeats is not None else args.repeats
     timing_mode = timing_mode if timing_mode is not None else args.timing_mode
-    event_log_size = event_log_size if event_log_size is not None else args.event_log_size
-    trace_decisions = trace_decisions if trace_decisions is not None else args.trace_decisions
+    event_log_size = (
+        event_log_size if event_log_size is not None else args.event_log_size
+    )
+    trace_decisions = (
+        trace_decisions if trace_decisions is not None else args.trace_decisions
+    )
     trace_runtime = trace_runtime if trace_runtime is not None else args.trace_runtime
     command = [
         sys.executable,
@@ -209,7 +322,11 @@ def verify_command(
 ) -> list[str]:
     queries = queries if queries is not None else args.queries
     repeats = repeats if repeats is not None else args.repeats
-    min_auto_speedup = min_auto_speedup if min_auto_speedup is not None else args.artifact_min_auto_speedup
+    min_auto_speedup = (
+        min_auto_speedup
+        if min_auto_speedup is not None
+        else args.artifact_min_auto_speedup
+    )
     command = [
         sys.executable,
         str(script_path("verify_tpch_benchmark.py")),
@@ -302,15 +419,25 @@ def comparison_failure_queries(report: Path, fallback_queries: list[str]) -> lis
                 continue
             seen.add(query)
             failed.append(query)
-    return sorted(failed, key=lambda query: int(query)) if failed else list(fallback_queries)
+    return (
+        sorted(failed, key=lambda query: int(query))
+        if failed
+        else list(fallback_queries)
+    )
 
 
-def triage_failed_comparison(args: argparse.Namespace, baseline: Path, out_dir: Path, report: Path) -> bool:
+def triage_failed_comparison(
+    args: argparse.Namespace, baseline: Path, out_dir: Path, report: Path
+) -> bool:
     failed_queries = comparison_failure_queries(report, args.queries)
     print(f"[triage] focused failed queries: {' '.join(failed_queries)}", flush=True)
 
     recheck_dir = out_dir / "focused_recheck"
-    recheck_repeats = args.triage_repeats if args.triage_repeats is not None else max(args.repeats * 3, 15)
+    recheck_repeats = (
+        args.triage_repeats
+        if args.triage_repeats is not None
+        else max(args.repeats * 3, 15)
+    )
     run_command(
         benchmark_command(
             args,
@@ -326,22 +453,36 @@ def triage_failed_comparison(args: argparse.Namespace, baseline: Path, out_dir: 
     )
     require_artifact_dir(recheck_dir, "focused recheck")
     run_command(
-        verify_command(args, recheck_dir, queries=failed_queries, repeats=recheck_repeats),
+        verify_command(
+            args, recheck_dir, queries=failed_queries, repeats=recheck_repeats
+        ),
         "focused recheck artifact verification",
     )
     focused_report = recheck_dir / "comparison_failures.csv"
     focused_result = run_command(
-        compare_command(args, baseline, recheck_dir, queries=failed_queries, failure_report=focused_report),
+        compare_command(
+            args,
+            baseline,
+            recheck_dir,
+            queries=failed_queries,
+            failure_report=focused_report,
+        ),
         "focused recheck baseline comparison",
         check=False,
     )
     if focused_result == 0:
-        print(f"[triage] full-suite failure cleared by focused recheck: {recheck_dir}", flush=True)
+        print(
+            f"[triage] full-suite failure cleared by focused recheck: {recheck_dir}",
+            flush=True,
+        )
         return True
 
     if args.triage_profile:
         persistent_queries = comparison_failure_queries(focused_report, failed_queries)
-        print(f"[triage] persistent failed queries: {' '.join(persistent_queries)}", flush=True)
+        print(
+            f"[triage] persistent failed queries: {' '.join(persistent_queries)}",
+            flush=True,
+        )
         profile_dir = out_dir / "focused_profile"
         run_command(
             benchmark_command(
@@ -371,8 +512,109 @@ def triage_failed_comparison(args: argparse.Namespace, baseline: Path, out_dir: 
     return False
 
 
+def promotion_recheck_repeats(args: argparse.Namespace) -> int:
+    if args.promotion_repeats is not None:
+        return args.promotion_repeats
+    return max(args.repeats * 3, 15)
+
+
+def build_promoted_baseline(
+    args: argparse.Namespace, baseline: Path, out_dir: Path
+) -> tuple[Path, int]:
+    promoted_dir = out_dir / "promotion_recheck"
+    repeats = promotion_recheck_repeats(args)
+    run_command(
+        benchmark_command(
+            args,
+            promoted_dir,
+            queries=args.queries,
+            repeats=repeats,
+            timing_mode="production",
+            event_log_size=0,
+            trace_decisions=False,
+            trace_runtime=False,
+        ),
+        "baseline promotion high-sample benchmark",
+    )
+    require_artifact_dir(promoted_dir, "baseline promotion high-sample artifact")
+    run_command(
+        verify_command(args, promoted_dir, queries=args.queries, repeats=repeats),
+        "baseline promotion high-sample artifact verification",
+    )
+    comparison_report = promoted_dir / "baseline_comparison_failures.csv"
+    comparison_result = run_command(
+        compare_command(args, baseline, promoted_dir, failure_report=comparison_report),
+        "baseline promotion high-sample comparison",
+        check=False,
+    )
+    accepted_dir = promoted_dir
+    focused_queries = []
+    if comparison_result != 0:
+        focused_queries = comparison_failure_queries(comparison_report, args.queries)
+        focused_dir = promoted_dir / "focused_recheck"
+        run_command(
+            benchmark_command(
+                args,
+                focused_dir,
+                queries=focused_queries,
+                repeats=repeats,
+                timing_mode="production",
+                event_log_size=0,
+                trace_decisions=False,
+                trace_runtime=False,
+            ),
+            "baseline promotion focused high-sample benchmark",
+        )
+        require_artifact_dir(
+            focused_dir, "baseline promotion focused high-sample artifact"
+        )
+        run_command(
+            verify_command(args, focused_dir, queries=focused_queries, repeats=repeats),
+            "baseline promotion focused high-sample artifact verification",
+        )
+        focused_report = focused_dir / "baseline_comparison_failures.csv"
+        run_command(
+            compare_command(
+                args,
+                baseline,
+                focused_dir,
+                queries=focused_queries,
+                failure_report=focused_report,
+            ),
+            "baseline promotion focused high-sample comparison",
+        )
+        accepted_dir = merge_promoted_baseline_artifact(
+            promoted_dir, focused_dir, focused_queries
+        )
+        accepted_report = accepted_dir / "baseline_comparison_failures.csv"
+        run_command(
+            compare_command(
+                args, baseline, accepted_dir, failure_report=accepted_report
+            ),
+            "accepted baseline full comparison",
+        )
+    metadata = {
+        "created_at": datetime.now().isoformat(timespec="seconds"),
+        "source_candidate": str(out_dir.resolve()),
+        "full_high_sample_artifact": str(promoted_dir.resolve()),
+        "previous_baseline": str(baseline.resolve()),
+        "queries": list(args.queries),
+        "focused_recheck_queries": focused_queries,
+        "repeats": repeats,
+        "timing_mode": "production",
+        "trace_decisions": False,
+        "trace_runtime": False,
+    }
+    with (accepted_dir / "promotion.json").open("w", encoding="utf-8") as handle:
+        json.dump(metadata, handle, indent=2)
+        handle.write("\n")
+    return accepted_dir, repeats
+
+
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Run the TPC-H JIT refactor regression gate")
+    parser = argparse.ArgumentParser(
+        description="Run the TPC-H JIT refactor regression gate"
+    )
     parser.add_argument("--baseline", type=Path, default=None)
     parser.add_argument("--baseline-state", type=Path, default=DEFAULT_BASELINE_STATE)
     parser.add_argument(
@@ -383,23 +625,35 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--promote-baseline",
         action="store_true",
-        help="After a successful comparison, store the candidate artifact as the accepted local refactor baseline.",
+        help=(
+            "After a successful comparison, run a full high-sample qualification and store that artifact "
+            "as the accepted local refactor baseline."
+        ),
     )
     parser.add_argument(
         "--allow-partial-baseline",
         action="store_true",
         help="Allow --init-baseline/--promote-baseline for a partial query set. Intended only for focused local work.",
     )
-    parser.add_argument("--duckdb", type=Path, default=ROOT / "build" / "reldebug" / "duckdb")
+    parser.add_argument(
+        "--duckdb", type=Path, default=ROOT / "build" / "reldebug" / "duckdb"
+    )
     parser.add_argument("--build-dir", type=Path, default=ROOT / "build" / "reldebug")
     parser.add_argument("--build-config", default="RelWithDebInfo")
     parser.add_argument("--no-build", action="store_true")
     parser.add_argument("--skip-architecture", action="store_true")
     parser.add_argument("--out-dir", type=Path, default=None)
     parser.add_argument("--queries", nargs="+", default=list(DEFAULT_QUERIES))
-    parser.add_argument("--policies", nargs="+", default=list(DEFAULT_POLICIES), choices=DEFAULT_POLICIES)
+    parser.add_argument(
+        "--policies",
+        nargs="+",
+        default=list(DEFAULT_POLICIES),
+        choices=DEFAULT_POLICIES,
+    )
     parser.add_argument("--repeats", type=int, default=5)
-    parser.add_argument("--timing-mode", choices=("production", "profile"), default="production")
+    parser.add_argument(
+        "--timing-mode", choices=("production", "profile"), default="production"
+    )
     parser.add_argument("--scale-factor", type=float, default=1)
     parser.add_argument("--threads", type=int, default=1)
     parser.add_argument("--db", type=Path, default=None)
@@ -431,17 +685,31 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--min-auto-speedup", type=float, default=0.98)
     parser.add_argument("--preserve-win-speedup", type=float, default=1.02)
     parser.add_argument("--max-win-speedup-drop", type=float, default=0.03)
-    parser.add_argument("--fail-on-win-coverage-drop", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument(
+        "--fail-on-win-coverage-drop",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+    )
     parser.add_argument("--max-runtime-component-ratio", type=float, default=1.10)
     parser.add_argument("--max-runtime-component-us", type=int, default=200)
-    parser.add_argument("--triage-failures", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument(
+        "--triage-failures", action=argparse.BooleanOptionalAction, default=True
+    )
     parser.add_argument(
         "--triage-repeats",
         type=int,
         default=None,
         help="Focused production rerun repeat count for failed queries. Defaults to max(repeats*3, 15).",
     )
-    parser.add_argument("--triage-profile", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument(
+        "--promotion-repeats",
+        type=int,
+        default=None,
+        help="Full-query repeat count used only for baseline promotion. Defaults to max(repeats*3, 15).",
+    )
+    parser.add_argument(
+        "--triage-profile", action=argparse.BooleanOptionalAction, default=True
+    )
     parser.add_argument("--triage-profile-repeats", type=int, default=3)
     parser.add_argument("--triage-event-log-size", type=int, default=10000)
     parser.add_argument(
@@ -466,6 +734,8 @@ def validate_args(args: argparse.Namespace) -> tuple[Path | None, Path]:
         raise TPCHConfigurationError("--threads must be positive")
     if args.triage_repeats is not None and args.triage_repeats <= 0:
         raise TPCHConfigurationError("--triage-repeats must be positive")
+    if args.promotion_repeats is not None and args.promotion_repeats <= 0:
+        raise TPCHConfigurationError("--promotion-repeats must be positive")
     if args.triage_profile_repeats <= 0:
         raise TPCHConfigurationError("--triage-profile-repeats must be positive")
     if args.triage_event_log_size < 0:
@@ -473,11 +743,17 @@ def validate_args(args: argparse.Namespace) -> tuple[Path | None, Path]:
     if args.runtime_contract_repeats <= 0:
         raise TPCHConfigurationError("--runtime-contract-repeats must be positive")
     if args.runtime_contract_event_log_size < 0:
-        raise TPCHConfigurationError("--runtime-contract-event-log-size must be non-negative")
+        raise TPCHConfigurationError(
+            "--runtime-contract-event-log-size must be non-negative"
+        )
     if args.init_baseline and args.baseline is not None:
-        raise TPCHConfigurationError("--init-baseline does not accept --baseline; it creates the accepted baseline")
+        raise TPCHConfigurationError(
+            "--init-baseline does not accept --baseline; it creates the accepted baseline"
+        )
     if args.init_baseline and args.promote_baseline:
-        raise TPCHConfigurationError("--init-baseline and --promote-baseline are mutually exclusive")
+        raise TPCHConfigurationError(
+            "--init-baseline and --promote-baseline are mutually exclusive"
+        )
     baseline = None if args.init_baseline else normalize_baseline(args)
     if baseline is not None:
         require_artifact_dir(baseline, "baseline")
@@ -495,10 +771,15 @@ def main() -> int:
     if not args.no_build:
         run_command(build_command(args), "build")
         if not args.duckdb.exists():
-            raise TPCHConfigurationError(f"DuckDB binary does not exist after build: {args.duckdb}")
+            raise TPCHConfigurationError(
+                f"DuckDB binary does not exist after build: {args.duckdb}"
+            )
     if not args.skip_architecture:
         run_command(
-            [sys.executable, str(ROOT / "benchmark" / "jit" / "verify_jit_architecture.py")],
+            [
+                sys.executable,
+                str(ROOT / "benchmark" / "jit" / "verify_jit_architecture.py"),
+            ],
             "architecture",
         )
     run_command(benchmark_command(args, out_dir), "benchmark")
@@ -515,7 +796,9 @@ def main() -> int:
                     queries=contract_queries,
                     repeats=args.runtime_contract_repeats,
                     timing_mode="production",
-                    event_log_size=max(args.event_log_size, args.runtime_contract_event_log_size),
+                    event_log_size=max(
+                        args.event_log_size, args.runtime_contract_event_log_size
+                    ),
                     trace_decisions=False,
                     trace_runtime=True,
                 ),
@@ -549,15 +832,26 @@ def main() -> int:
     if comparison_result != 0:
         triage_cleared = False
         if args.triage_failures:
-            triage_cleared = triage_failed_comparison(args, baseline, out_dir, comparison_report)
+            triage_cleared = triage_failed_comparison(
+                args, baseline, out_dir, comparison_report
+            )
         if not triage_cleared:
             raise RuntimeError(
                 "baseline comparison failed; see "
                 f"{comparison_report}"
-                + (f" and {out_dir / 'focused_profile'}" if args.triage_failures and args.triage_profile else "")
+                + (
+                    f" and {out_dir / 'focused_profile'}"
+                    if args.triage_failures and args.triage_profile
+                    else ""
+                )
             )
     if args.promote_baseline:
-        write_baseline_state(args, out_dir, "promote-baseline")
+        promoted_baseline, promoted_repeats = build_promoted_baseline(
+            args, baseline, out_dir
+        )
+        write_baseline_state(
+            args, promoted_baseline, "promote-baseline", repeats=promoted_repeats
+        )
         print(f"accepted baseline promoted: {args.baseline_state}")
     print(f"TPC-H JIT regression gate passed: {out_dir}")
     return 0

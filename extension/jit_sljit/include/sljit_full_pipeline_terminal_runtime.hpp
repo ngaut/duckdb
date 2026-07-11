@@ -8,6 +8,7 @@
 
 #pragma once
 
+#include "sljit_append_sink_runtime.hpp"
 #include "sljit_delim_join_sink_runtime.hpp"
 #include "sljit_full_pipeline_primitive_contract.hpp"
 #include "sljit_full_pipeline_runtime.hpp"
@@ -44,6 +45,8 @@ public:
 			return true;
 		case SljitFullPipelinePrimitiveKind::DELIM_JOIN_SINK:
 			return delim_join_sink.Prepare(runtime, ops, terminal_step.delim_join_sink);
+		case SljitFullPipelinePrimitiveKind::APPEND_SINK:
+			return append_sink.Prepare(runtime, ops, terminal_step.append_sink);
 		case SljitFullPipelinePrimitiveKind::NATIVE_TAIL_DELEGATION:
 			return true;
 		default:
@@ -71,6 +74,9 @@ public:
 		case SljitFullPipelinePrimitiveKind::DELIM_JOIN_SINK:
 			return delim_join_sink.Execute(runtime, result, ops, scratch, terminal_step.delim_join_sink, input,
 			                               processed_batches);
+		case SljitFullPipelinePrimitiveKind::APPEND_SINK:
+			return append_sink.Execute(runtime, result, ops, scratch, terminal_step.append_sink, input,
+			                           processed_batches);
 		case SljitFullPipelinePrimitiveKind::NATIVE_TAIL_DELEGATION:
 			return native_tail_delegation.Execute(runtime, result, ops, scratch, terminal_step, input,
 			                                      processed_batches);
@@ -92,7 +98,10 @@ public:
 		case SljitFullPipelinePrimitiveKind::HASH_JOIN_BUILD_SINK:
 			return false;
 		case SljitFullPipelinePrimitiveKind::DELIM_JOIN_SINK:
-			return false;
+			return delim_join_sink.Flush(runtime, result, ops, scratch, terminal_step.delim_join_sink,
+			                             processed_batches);
+		case SljitFullPipelinePrimitiveKind::APPEND_SINK:
+			return append_sink.Flush(runtime, result, ops, scratch, terminal_step.append_sink, processed_batches);
 		case SljitFullPipelinePrimitiveKind::NATIVE_TAIL_DELEGATION:
 			native_tail_delegation.Finalize(scratch);
 			return false;
@@ -137,6 +146,7 @@ private:
 	SljitHashJoinBuildSinkRuntimeState hash_join_build_sink;
 	SljitNativeTailDelegationRuntimeState<EXECUTE_NATIVE_FULL_PIPELINE_FROM> native_tail_delegation;
 	SljitDelimJoinSinkRuntimeState delim_join_sink;
+	SljitAppendSinkRuntimeState append_sink;
 };
 
 } // namespace duckdb

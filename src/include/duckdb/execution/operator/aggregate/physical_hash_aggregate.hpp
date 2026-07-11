@@ -118,11 +118,15 @@ public:
 	SinkResultType Sink(ExecutionContext &context, DataChunk &chunk, OperatorSinkInput &input) const override;
 	bool SupportsExecutionDistinctSink() const;
 	bool SupportsExecutionDistinctSelectedSink() const;
-	SinkResultType SinkExecutionDistinct(ExecutionContext &context, DataChunk &chunk,
-	                                     OperatorSinkInput &input) const;
-	SinkResultType SinkExecutionDistinctSelected(ExecutionContext &context, DataChunk &chunk,
-	                                             OperatorSinkInput &input, const SelectionVector &selection,
-	                                             idx_t count) const;
+	bool SupportsExecutionDistinctFastSink() const;
+	bool TrySinkExecutionDistinctFast(ExecutionContext &context, DataChunk &chunk, OperatorSinkInput &input,
+	                                  const SelectionVector *selection, idx_t count,
+	                                  optional_ptr<ExecutionOperatorStageRecorder> recorder = nullptr,
+	                                  idx_t estimated_input_count = 0,
+	                                  idx_t distinct_key_cardinality_upper_bound = 0) const;
+	SinkResultType SinkExecutionDistinct(ExecutionContext &context, DataChunk &chunk, OperatorSinkInput &input) const;
+	SinkResultType SinkExecutionDistinctSelected(ExecutionContext &context, DataChunk &chunk, OperatorSinkInput &input,
+	                                             const SelectionVector &selection, idx_t count) const;
 	SinkCombineResultType Combine(ExecutionContext &context, OperatorSinkCombineInput &input) const override;
 	SinkFinalizeType Finalize(Pipeline &pipeline, Event &event, ClientContext &context,
 	                          OperatorSinkFinalizeInput &input) const override;

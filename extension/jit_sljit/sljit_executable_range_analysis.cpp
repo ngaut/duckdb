@@ -98,6 +98,21 @@ static bool SljitExecutableRangeMultiply(const SljitExecutableInt128Range &left,
 	return true;
 }
 
+static bool SljitExecutableRangeModulo(const SljitExecutableInt128Range &left, const SljitExecutableInt128Range &right,
+                                       const LogicalType &result_type, SljitExecutableInt128Range &result) {
+	if (left.min < 0 || right.min != right.max || right.min <= 0) {
+		return false;
+	}
+	result.type = result_type;
+	result.min = hugeint_t(0);
+	result.max = right.max;
+	if (!Hugeint::TrySubtractInPlace(result.max, hugeint_t(1))) {
+		return false;
+	}
+	result.max = MinValue(result.max, left.max);
+	return true;
+}
+
 static bool SljitExecutableDecimal64BinaryHasRawSemantics(const ExecutionExpressionIR &node) {
 	if (!node.left || !node.right) {
 		return false;
@@ -204,6 +219,8 @@ bool SljitExecutableExpressionTreeRange(const ExecutionExpressionIR &node, const
 			return SljitExecutableRangeSubtract(left, right, node.return_type, result);
 		case ExecutionExpressionBinaryOp::MULTIPLY:
 			return SljitExecutableRangeMultiply(left, right, node.return_type, result);
+		case ExecutionExpressionBinaryOp::MODULO:
+			return SljitExecutableRangeModulo(left, right, node.return_type, result);
 		default:
 			return false;
 		}

@@ -62,6 +62,7 @@ struct ExecutionPerfectHashJoinTableLayout {
 	bool is_build_dense = false;
 	idx_t build_range = 0;
 	idx_t build_capacity = 0;
+	idx_t build_unique_count = 0;
 	uint64_t build_min = 0;
 	uint64_t build_max = 0;
 	const validity_t *build_validity = nullptr;

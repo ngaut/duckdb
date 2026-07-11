@@ -26,7 +26,10 @@ struct SljitSourceFetchPrimitiveRuntime {
 		if (source_chunk.size() == 0) {
 			return false;
 		}
-		if (!ShouldBatchSourceContractChunk(source_contract_batch.Count(), source_chunk.size())) {
+		if (SljitFullPipelineIsSelectedHashJoinSinkSequence(sequence) ||
+		    (runtime.PreserveSourceChunkBoundaries() &&
+		     SljitFullPipelineSourceFetchNeedsPartitionPreservingChunks(sequence)) ||
+		    !ShouldBatchSourceContractChunk(source_contract_batch.Count(), source_chunk.size())) {
 			return ExecuteSourceChunk(source_chunk, have_more_output, execute_next_step);
 		}
 		if (source_contract_batch.Initialized() && source_contract_batch.ColumnCount() != source_chunk.ColumnCount()) {

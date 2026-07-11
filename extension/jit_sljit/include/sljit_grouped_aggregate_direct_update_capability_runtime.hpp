@@ -113,11 +113,9 @@ static bool SljitCanExecuteDirectGroupedStateAddressPayloadUpdate(
 
 enum class SljitFusedTypedPayloadSourceOverrideStatus : uint8_t { NONE, READY, INVALID };
 
-static SljitFusedTypedPayloadSourceOverrideStatus
-SljitGetFusedTypedPayloadSourceOverrideStatus(const SljitExecutableAggregateUpdate &aggregate_update,
-                                              const vector<ExecutionRegionAggregateInput> &aggregates,
-                                              const DataChunk &payload_input,
-                                              const vector<idx_t> &payload_source_indices) {
+static SljitFusedTypedPayloadSourceOverrideStatus SljitGetFusedTypedPayloadSourceOverrideStatus(
+    const SljitExecutableAggregateUpdate &aggregate_update, const vector<ExecutionRegionAggregateInput> &aggregates,
+    const DataChunk &payload_input, const vector<idx_t> &payload_source_indices) {
 	if (!aggregate_update.fused_payload_update_function) {
 		return SljitFusedTypedPayloadSourceOverrideStatus::NONE;
 	}
@@ -139,9 +137,49 @@ SljitGetFusedTypedPayloadSourceOverrideStatus(const SljitExecutableAggregateUpda
 	return SljitFusedTypedPayloadSourceOverrideStatus::READY;
 }
 
-static bool
-SljitCanPreaggregateRowPointerGroupSources(DataChunk &payload_input,
-                                           const vector<ExecutionRowPointerGroupKeySource> &group_sources) {
+static bool SljitCanPreaggregateInputVectorFusedPrimitivePayloads(
+    SljitExecutableRegionOp &op, DataChunk &input, const vector<idx_t> &payload_source_indices,
+    const vector<const ExecutionPrimitiveAggregateUpdateLane *> &payload_lanes) {
+	auto &aggregate_update = op.aggregate_update;
+	auto &sink_info = aggregate_update.plan.sink_info;
+	if (!aggregate_update.fused_payload_update_function || aggregate_update.fused_payload_update_owns_group_lookup ||
+	    sink_info.kind != ExecutionRegionSinkKind::HASH_AGGREGATE_UPDATE ||
+	    !aggregate_update.plan.use_primitive_payloads || !aggregate_update.plan.use_grouped_state_addresses ||
+	    aggregate_update.plan.use_perfect_hash_group_lookup ||
+	    sink_info.aggregates.size() != aggregate_update.payloads.size() ||
+	    sink_info.aggregates.size() != payload_lanes.size()) {
+		return false;
+	}
+	auto fused_override_status = SljitGetFusedTypedPayloadSourceOverrideStatus(aggregate_update, sink_info.aggregates,
+	                                                                           input, payload_source_indices);
+	if (fused_override_status != SljitFusedTypedPayloadSourceOverrideStatus::READY) {
+		return false;
+	}
+	for (idx_t payload_idx = 0; payload_idx < sink_info.aggregates.size(); payload_idx++) {
+		auto &aggregate = sink_info.aggregates[payload_idx];
+		auto lane = payload_lanes[payload_idx];
+		if (!lane || !lane->ready || lane->aggregate_index != aggregate.aggregate_index ||
+		    aggregate.aggregate_index >= sink_info.aggregate_contract.grouped_state_offsets.size() ||
+		    lane->state_offset != sink_info.aggregate_contract.grouped_state_offsets[aggregate.aggregate_index] ||
+		    lane->state_value_offset != aggregate.primitive_update_state_value_offset ||
+		    lane->state_is_set_offset != aggregate.primitive_update_state_is_set_offset ||
+		    lane->kind != aggregate.primitive_update_kind ||
+		    !SljitPreaggregatedPrimitivePayloadSupported(lane->kind, lane->payload_type)) {
+			return false;
+		}
+		if (lane->kind == AggregatePrimitiveUpdateKind::COUNT_STAR && aggregate.child_count != 0) {
+			return false;
+		}
+		if (lane->kind != AggregatePrimitiveUpdateKind::COUNT_STAR &&
+		    aggregate_update.payloads[payload_idx].plan.return_type.InternalType() != lane->payload_type) {
+			return false;
+		}
+	}
+	return true;
+}
+
+static bool SljitCanPreaggregateRowPointerGroupSources(DataChunk &payload_input,
+                                                       const vector<ExecutionRowPointerGroupKeySource> &group_sources) {
 	if (group_sources.empty()) {
 		return false;
 	}
@@ -185,8 +223,8 @@ static bool SljitCanExecuteDirectRowPointerPreaggregatedPrimitiveUpdate(
 	    !SljitCanPreaggregateRowPointerGroupSources(payload_input, group_sources)) {
 		return false;
 	}
-	auto fused_override_status = SljitGetFusedTypedPayloadSourceOverrideStatus(
-	    aggregate_update, sink_info.aggregates, payload_input, payload_source_indices);
+	auto fused_override_status = SljitGetFusedTypedPayloadSourceOverrideStatus(aggregate_update, sink_info.aggregates,
+	                                                                           payload_input, payload_source_indices);
 	if (fused_override_status == SljitFusedTypedPayloadSourceOverrideStatus::INVALID) {
 		return false;
 	}
@@ -217,8 +255,7 @@ static bool SljitCanExecuteDirectRowPointerPreaggregatedPrimitiveUpdate(
 		}
 		if (payload_sources_match_aggregates) {
 			const auto source_idx = payload_source_indices[payload_idx];
-			if (lane->kind == AggregatePrimitiveUpdateKind::COUNT &&
-			    source_idx == DConstants::INVALID_INDEX) {
+			if (lane->kind == AggregatePrimitiveUpdateKind::COUNT && source_idx == DConstants::INVALID_INDEX) {
 				continue;
 			}
 			if (source_idx >= payload_input.ColumnCount() ||

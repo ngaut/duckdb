@@ -89,12 +89,11 @@ static bool TryExecuteRunPreaggregatedInputVectorCarryoverOnlyUpdate(
 	uintptr_t address = continuation.state_address;
 	auto stage_start = SljitRegionStageStart(runtime);
 	ExecuteSljitPreaggregatedPrimitiveAddressUpdate(&address, nullptr, run_group_keys.size(), &update_state);
-	grouped_state.state->RecordDirectStateAddressUpdates(run_group_keys.size());
+	grouped_state.state->RecordDirectStateAddressUpdates(represented_row_count);
 	RecordSljitRegionStageRuntimePath(runtime, op_idx, op.kind,
 	                                  "direct_input_vector_run_preaggregated_carryover_update", stage_start);
-	RecordSljitRegionMaterializationElisionPath(runtime, op.kind,
-	                                            "direct_input_vector_run_preaggregated_carryover_update",
-	                                            represented_row_count);
+	RecordSljitRegionMaterializationElisionPath(
+	    runtime, op.kind, "direct_input_vector_run_preaggregated_carryover_update", represented_row_count);
 	SljitRecordInputVectorPreaggregatedUpdateBoundaries(runtime, op.kind, run_group_keys.size(), represented_row_count);
 	if (finish) {
 		FinishGroupedAggregateStateUpdates(runtime, op_idx, grouped_state, "finish_grouped_state_updates");
@@ -180,11 +179,11 @@ static bool TryExecuteRunPreaggregatedInputVectorAppendSuffixWithPrefixUpdate(
 	auto prefix_stage_start = SljitRegionStageStart(runtime);
 	ExecuteSljitPreaggregatedPrimitiveAddressUpdate(&prefix_address, nullptr, prefix_count, &prefix_update_state);
 	grouped_state.state->RecordDirectStateAddressUpdates(prefix_count);
+	RecordPreaggregatedGroupedAggregateRepresentedRows(grouped_state, represented_row_count, run_group_keys.size());
 	RecordSljitRegionStageRuntimePath(
 	    runtime, op_idx, op.kind, "direct_input_vector_run_preaggregated_prefix_carryover_update", prefix_stage_start);
-	RecordSljitRegionMaterializationElisionPath(runtime, op.kind,
-	                                            "direct_input_vector_run_preaggregated_prefix_carryover_update",
-	                                            prefix_row_count);
+	RecordSljitRegionMaterializationElisionPath(
+	    runtime, op.kind, "direct_input_vector_run_preaggregated_prefix_carryover_update", prefix_row_count);
 	SljitRecordInputVectorPreaggregatedUpdateBoundaries(runtime, op.kind, prefix_count, prefix_row_count);
 
 	if (finish) {
@@ -229,6 +228,7 @@ static bool TryExecuteRunPreaggregatedInputVectorAppendNewUpdate(
 		        finish, dense_domain);
 	    });
 	if (appended) {
+		RecordPreaggregatedGroupedAggregateRepresentedRows(grouped_state, represented_row_count, run_group_keys.size());
 		scratch.RecordDirectAppendNewAggregateUpdateResult(op_idx, true);
 		auto &continuation = scratch.AggregatePreaggregatedGroupContinuation(op_idx);
 		if (finish) {
@@ -267,21 +267,11 @@ static bool TryExecuteRunPreaggregatedInputVectorGroupedTargetPayloadUpdate(
 	auto &preaggregate_scratch = scratch.AggregatePreaggregateScratch(op_idx);
 	auto &run_group_keys = scratch.AggregatePreaggregatedGroups(op_idx);
 	idx_t run_count = 0;
-	bool run_group_keys_ready = false;
 	bool fused_run_payloads = false;
 	auto preaggregate_stage_start = SljitRegionStageStart(runtime);
-	run_group_keys_ready = TryPreaggregateInputVectorFusedPrimitiveGroupRunsFast(
-	    op, payload_input, group_sources, payload_source_indices, payload_lanes, preaggregate_scratch, payload_scratch,
-	    optional_ptr<DataChunk>(&run_group_keys), run_count);
-	fused_run_payloads = run_group_keys_ready;
-	if (!run_group_keys_ready) {
-		run_group_keys_ready = TryPreaggregateInputVectorPrimitiveGroupRunsFast(
-		    op, payload_input, group_sources, payload_source_indices, payload_lanes, preaggregate_scratch,
-		    optional_ptr<DataChunk>(&run_group_keys), run_count);
-	}
-	if (!run_group_keys_ready && !TryPreaggregateInputVectorPrimitiveGroupRuns(
-	                                 op, payload_input, group_sources, payload_source_indices, payload_lanes,
-	                                 preaggregate_scratch, optional_ptr<DataChunk>(&run_group_keys), run_count)) {
+	if (!TryPreaggregateInputVectorPrimitiveGroupRunsBest(
+	        op, payload_input, group_sources, payload_source_indices, payload_lanes, preaggregate_scratch,
+	        payload_scratch, optional_ptr<DataChunk>(&run_group_keys), run_count, fused_run_payloads)) {
 		return false;
 	}
 	RecordSljitRegionStageRuntime(runtime, op_idx, op.kind,
@@ -325,19 +315,18 @@ static bool TryExecuteRunPreaggregatedInputVectorGroupedTargetPayloadUpdate(
 	auto update_start = SljitRegionStageStart(runtime);
 	auto update_state = SljitMakePreaggregatedPrimitiveUpdateState(payload_lanes, preaggregate_scratch.payloads);
 	ExecuteSljitPreaggregatedPrimitiveTargetBatch(targets, update_state);
+	RecordPreaggregatedGroupedAggregateRepresentedRows(grouped_state, payload_input.size(), run_count);
 	RecordSljitRegionStageRuntime(runtime, op_idx, op.kind, "direct_input_vector_run_preaggregated_payload_update",
 	                              update_start);
 	if (finish) {
 		FinishGroupedAggregateStateUpdates(runtime, op_idx, grouped_state, "finish_grouped_state_updates");
 	}
 	if (fused_run_payloads) {
-		RecordSljitRegionMaterializationElisionPath(runtime, op.kind,
-		                                            "direct_input_vector_run_fused_preaggregated_grouped_update",
-		                                            payload_input.size());
+		RecordSljitRegionMaterializationElisionPath(
+		    runtime, op.kind, "direct_input_vector_run_fused_preaggregated_grouped_update", payload_input.size());
 	}
-	RecordSljitRegionMaterializationElisionPath(runtime, op.kind,
-	                                            "direct_input_vector_run_preaggregated_grouped_update",
-	                                            payload_input.size());
+	RecordSljitRegionMaterializationElisionPath(
+	    runtime, op.kind, "direct_input_vector_run_preaggregated_grouped_update", payload_input.size());
 	SljitRecordInputVectorPreaggregatedUpdateBoundaries(runtime, op.kind, run_count, payload_input.size());
 	return true;
 }

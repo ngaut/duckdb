@@ -8,6 +8,8 @@
 
 #include "sljit_executable_stats.hpp"
 
+#include "sljit_executable_range_analysis.hpp"
+
 #include "duckdb/common/operator/numeric_cast.hpp"
 
 namespace duckdb {
@@ -75,6 +77,25 @@ static idx_t SljitExpressionDistinctCount(const SljitNativeRegionExpressionPlan 
 			return 0;
 		}
 		return input_distinct_counts[expr.source_index];
+	case SljitNativeRegionExpressionKind::EXPRESSION_TREE:
+	case SljitNativeRegionExpressionKind::TYPED_EXPRESSION_TREE: {
+		if (!expr.expression_tree || expr.expression_tree->kind != ExecutionExpressionIRKind::BINARY ||
+		    expr.expression_tree->binary_op != ExecutionExpressionBinaryOp::MODULO || !expr.expression_tree->left ||
+		    !expr.expression_tree->right) {
+			return 0;
+		}
+		SljitExecutableInt128Range left;
+		SljitExecutableInt128Range right;
+		if (!SljitExecutableExpressionTreeRange(*expr.expression_tree->left, input_min_values, input_max_values,
+		                                        left) ||
+		    !SljitExecutableExpressionTreeRange(*expr.expression_tree->right, input_min_values, input_max_values,
+		                                        right) ||
+		    left.min < 0 || right.min != right.max || right.min <= 0 ||
+		    right.min > hugeint_t(NumericLimits<idx_t>::Maximum())) {
+			return 0;
+		}
+		return UnsafeNumericCast<idx_t>(right.min.lower);
+	}
 	default:
 		return 0;
 	}

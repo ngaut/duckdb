@@ -48,8 +48,8 @@ SljitFullPipelinePrimitiveStep::HashJoinProbeSelection(const SljitHashJoinProbeS
 
 SljitFullPipelinePrimitiveStep
 SljitFullPipelinePrimitiveStep::MarkProbeFilterBoundary(const SljitMarkProbeFilterBoundaryPrimitive &primitive) {
-	auto step =
-	    Make(SljitFullPipelinePrimitiveKind::MARK_PROBE_FILTER_BOUNDARY, {primitive.hash_join_idx, primitive.filter_idx});
+	auto step = Make(SljitFullPipelinePrimitiveKind::MARK_PROBE_FILTER_BOUNDARY,
+	                 {primitive.hash_join_idx, primitive.filter_idx});
 	step.mark_probe_filter_boundary = primitive;
 	return step;
 }
@@ -95,10 +95,10 @@ SljitFullPipelinePrimitiveStep::GroupedAggregateUpdate(const SljitGroupedAggrega
 
 SljitFullPipelinePrimitiveStep
 SljitFullPipelinePrimitiveStep::HashJoinBuildSink(const SljitHashJoinBuildSinkPrimitive &primitive) {
-	auto step = primitive.HasProjection() ? Make(SljitFullPipelinePrimitiveKind::HASH_JOIN_BUILD_SINK,
-	                                            {primitive.projection_idx, primitive.sink_idx})
-	                                      : Make(SljitFullPipelinePrimitiveKind::HASH_JOIN_BUILD_SINK,
-	                                             {primitive.sink_idx});
+	auto step =
+	    primitive.HasProjection()
+	        ? Make(SljitFullPipelinePrimitiveKind::HASH_JOIN_BUILD_SINK, {primitive.projection_idx, primitive.sink_idx})
+	        : Make(SljitFullPipelinePrimitiveKind::HASH_JOIN_BUILD_SINK, {primitive.sink_idx});
 	step.hash_join_build_sink = primitive;
 	return step;
 }
@@ -113,12 +113,19 @@ SljitFullPipelinePrimitiveStep::DelimJoinSink(const SljitDelimJoinSinkPrimitive 
 	return step;
 }
 
+SljitFullPipelinePrimitiveStep SljitFullPipelinePrimitiveStep::AppendSink(const SljitAppendSinkPrimitive &primitive) {
+	auto step =
+	    Make(SljitFullPipelinePrimitiveKind::APPEND_SINK, {primitive.selected_hash_join_idx, primitive.sink_idx});
+	step.append_sink = primitive;
+	return step;
+}
+
 SljitFullPipelinePrimitiveStep SljitFullPipelinePrimitiveStep::NativeTailDelegation(idx_t op_idx) {
 	return Make(SljitFullPipelinePrimitiveKind::NATIVE_TAIL_DELEGATION, {op_idx});
 }
 
-SljitFullPipelinePrimitiveStep
-SljitFullPipelinePrimitiveStep::Make(SljitFullPipelinePrimitiveKind kind, std::initializer_list<idx_t> op_indices) {
+SljitFullPipelinePrimitiveStep SljitFullPipelinePrimitiveStep::Make(SljitFullPipelinePrimitiveKind kind,
+                                                                    std::initializer_list<idx_t> op_indices) {
 	SljitFullPipelinePrimitiveStep step;
 	step.kind = kind;
 	step.op_indices.fill(DConstants::INVALID_INDEX);

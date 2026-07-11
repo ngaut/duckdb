@@ -179,6 +179,10 @@ public:
 		return pipeline.GetAllocator();
 	}
 
+	bool PreserveSourceChunkBoundaries() const override {
+		return pipeline.PreserveSourceChunkBoundaries();
+	}
+
 	ExecutionOperatorRuntime &ExecutionOperators() override {
 		return *this;
 	}

@@ -13,6 +13,7 @@
 #include "sljit_native_binding_runtime.hpp"
 #include "sljit_projection_reference_runtime.hpp"
 #include "sljit_region_runtime_trace.hpp"
+#include "sljit_runtime_batch_runtime.hpp"
 #include "sljit_runtime_batch_state.hpp"
 #include "sljit_runtime_batch_view.hpp"
 
@@ -22,6 +23,7 @@ namespace duckdb {
 
 struct SljitDelimJoinSinkRuntimeState {
 	SljitDataChunkBatch projected_input;
+	SljitDataChunkBatch selected_sink_batch;
 	vector<uint8_t> selected_hash_join_referenced_columns;
 
 	bool Prepare(ExecutionRegionRuntime &runtime, const vector<SljitExecutableRegionOp> &ops,
@@ -50,6 +52,42 @@ struct SljitDelimJoinSinkRuntimeState {
 		if (sink_input.size() == 0) {
 			return false;
 		}
+		if (primitive.HasSelectedHashJoinInput()) {
+			return AppendSelectedSinkInput(runtime, result, ops, scratch, primitive, sink_input, processed_batches);
+		}
+		return ExecuteSinkInput(runtime, result, ops, scratch, primitive, sink_input, processed_batches);
+	}
+
+	bool Flush(ExecutionRegionRuntime &runtime, ExecutionRegionResult &result, vector<SljitExecutableRegionOp> &ops,
+	           SljitRegionExecutionScratch &scratch, const SljitDelimJoinSinkPrimitive &primitive,
+	           idx_t &processed_batches) {
+		auto execute_batch = [&](DataChunk &batch) {
+			return ExecuteSinkInput(runtime, result, ops, scratch, primitive, batch, processed_batches);
+		};
+		return SljitFlushDataChunkBatch(selected_sink_batch.chunk, execute_batch);
+	}
+
+private:
+	bool AppendSelectedSinkInput(ExecutionRegionRuntime &runtime, ExecutionRegionResult &result,
+	                             vector<SljitExecutableRegionOp> &ops, SljitRegionExecutionScratch &scratch,
+	                             const SljitDelimJoinSinkPrimitive &primitive, DataChunk &sink_input,
+	                             idx_t &processed_batches) {
+		selected_sink_batch.EnsureFromChunk(runtime.GetAllocator(), sink_input);
+		auto execute_batch = [&](DataChunk &batch) {
+			return ExecuteSinkInput(runtime, result, ops, scratch, primitive, batch, processed_batches);
+		};
+		auto flush_batch = [&]() {
+			return Flush(runtime, result, ops, scratch, primitive, processed_batches);
+		};
+		return SljitAppendChunkToInitializedBatch(runtime, selected_sink_batch.chunk, sink_input, primitive.sink_idx,
+		                                          optional_ptr<const SljitExecutableRegionOp>(&ops[primitive.sink_idx]),
+		                                          "selected_sink_batch_append", flush_batch, execute_batch);
+	}
+
+	bool ExecuteSinkInput(ExecutionRegionRuntime &runtime, ExecutionRegionResult &result,
+	                      vector<SljitExecutableRegionOp> &ops, SljitRegionExecutionScratch &scratch,
+	                      const SljitDelimJoinSinkPrimitive &primitive, DataChunk &sink_input,
+	                      idx_t &processed_batches) {
 		auto sink_result = ExecuteSink(runtime, ops, scratch, primitive.sink_idx, sink_input);
 		sink_result = runtime.ExecutionOperators().RecordSinkResult(sink_input, sink_result);
 		if (SljitNativeSinkResultStopsExecution(runtime, sink_result, result)) {
@@ -58,8 +96,6 @@ struct SljitDelimJoinSinkRuntimeState {
 		processed_batches++;
 		return false;
 	}
-
-private:
 	DataChunk &SinkInput(ExecutionRegionRuntime &runtime, vector<SljitExecutableRegionOp> &ops,
 	                     SljitRegionExecutionScratch &scratch, const SljitDelimJoinSinkPrimitive &primitive,
 	                     const SljitRuntimeBatchView &input) {
@@ -91,17 +127,26 @@ private:
 			throw InternalException("SLJIT delimiter join sink selected input contract mismatch");
 		}
 		output.Reset();
-		auto materialize_stage_start = SljitRegionStageStart(runtime);
-		if (!SljitTryMaterializeSelectedHashJoinOutputColumns(binding, input, selected_hash_join_referenced_columns,
-		                                                      output)) {
-			throw InternalException("SLJIT delimiter join sink could not materialize selected hash-join input");
+		auto view_stage_start = SljitRegionStageStart(runtime);
+		const bool built_view = SljitTryBuildSelectedHashJoinOutputColumnViews(
+		    binding, input, selected_hash_join_referenced_columns, output);
+		if (!built_view) {
+			output.Reset();
+			if (!SljitTryMaterializeSelectedHashJoinOutputColumns(binding, input, selected_hash_join_referenced_columns,
+			                                                      output)) {
+				throw InternalException("SLJIT delimiter join sink could not build selected hash-join input");
+			}
 		}
+		const char *view_stage = built_view ? "selected_delim_view" : "selected_delim_materialization";
 		RecordSljitRegionStageRuntime(runtime, selected.hash_join_idx, SljitNativeRegionOpKind::HASH_JOIN_PROBE,
-		                              "selected_view_materialization", materialize_stage_start);
-		RecordSljitRegionRuntimeDelegation(runtime, SljitNativeRegionOpKind::DELIM_JOIN_SINK,
-		                                   "selected_view_materialization", output.size());
-		RecordSljitRegionRuntimePath(runtime, SljitNativeRegionOpKind::DELIM_JOIN_SINK, "hash_join_selected_delim_sink",
-		                             output.size());
+		                              view_stage, view_stage_start);
+		if (!built_view) {
+			RecordSljitRegionRuntimeDelegation(runtime, SljitNativeRegionOpKind::DELIM_JOIN_SINK,
+			                                   "selected_delim_materialization", output.size());
+		}
+		RecordSljitRegionRuntimePath(
+		    runtime, SljitNativeRegionOpKind::DELIM_JOIN_SINK,
+		    built_view ? "hash_join_selected_delim_view" : "hash_join_selected_delim_materialized", output.size());
 		return output;
 	}
 

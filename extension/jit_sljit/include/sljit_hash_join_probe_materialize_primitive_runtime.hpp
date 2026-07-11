@@ -30,7 +30,8 @@ public:
 
 	template <class EXECUTE_HASH_JOIN_PROBE, class EXECUTE_OUTPUT_BATCH>
 	bool Execute(idx_t step_idx, const SljitFullPipelinePrimitiveStep &step, const SljitRuntimeBatchView &input,
-	             EXECUTE_HASH_JOIN_PROBE &execute_hash_join_probe, EXECUTE_OUTPUT_BATCH &&execute_output_batch) {
+	             bool direct_handoff, EXECUTE_HASH_JOIN_PROBE &execute_hash_join_probe,
+	             EXECUTE_OUTPUT_BATCH &&execute_output_batch) {
 		auto &join_input = SljitBindMaterializedRuntimeBatchInput(input, "SLJIT hash join materialize primitive");
 		if (join_input.size() == 0) {
 			return false;
@@ -40,7 +41,7 @@ public:
 		auto &hash_join_op = ops[hash_join_idx];
 		auto &join_output = scratch.TemporaryChunk(hash_join_idx);
 		auto handle_output = [&](DataChunk &output) {
-			return AppendBatch(step_idx, step, output, execute_output_batch);
+			return AppendBatch(step_idx, step, output, direct_handoff, execute_output_batch);
 		};
 		auto handle_defer = [&](string &deferred_reason) {
 			if (Flush(step_idx, execute_output_batch)) {
@@ -64,8 +65,15 @@ public:
 
 private:
 	template <class EXECUTE_OUTPUT_BATCH>
-	bool AppendBatch(idx_t step_idx, const SljitFullPipelinePrimitiveStep &step, DataChunk &output,
+	bool AppendBatch(idx_t step_idx, const SljitFullPipelinePrimitiveStep &step, DataChunk &output, bool direct_handoff,
 	                 EXECUTE_OUTPUT_BATCH &execute_output_batch) {
+		if (direct_handoff) {
+			if (Flush(step_idx, execute_output_batch)) {
+				return true;
+			}
+			RecordSljitRegionRuntimePath(runtime, ops[step.Op(0)].kind, "direct_materialized_handoff", output.size());
+			return execute_output_batch(output);
+		}
 		auto &hash_join_materialize_batch = batches[step_idx];
 		hash_join_materialize_batch.Ensure(runtime.GetAllocator(), output.GetTypes());
 		auto &batch = hash_join_materialize_batch.chunk;
@@ -73,9 +81,9 @@ private:
 			return Flush(step_idx, execute_output_batch);
 		};
 		const auto op_idx = step.Op(0);
-		return SljitAppendChunkToInitializedBatch(
-		    runtime, batch, output, op_idx, optional_ptr<const SljitExecutableRegionOp>(&ops[op_idx]),
-		    "hash_join_output_buffer_append", flush_batch, execute_output_batch);
+		return SljitAppendChunkToInitializedBatch(runtime, batch, output, op_idx,
+		                                          optional_ptr<const SljitExecutableRegionOp>(&ops[op_idx]),
+		                                          "hash_join_output_buffer_append", flush_batch, execute_output_batch);
 	}
 
 private:

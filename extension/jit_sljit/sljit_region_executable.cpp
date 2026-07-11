@@ -1,5 +1,6 @@
 #include "sljit_region_executable.hpp"
 
+#include "sljit_aggregate_contract_utils.hpp"
 #include "sljit_executable_aggregate_codegen.hpp"
 #include "sljit_dense_group_domain.hpp"
 #include "sljit_executable_expression_codegen.hpp"
@@ -180,6 +181,43 @@ static void SljitTryBuildExecutableAggregateGroupReservePlan(const SljitNativeAg
 	reserve.group_count = reserve_count;
 }
 
+static idx_t SljitBuildDistinctKeyCardinalityUpperBound(const SljitNativeAggregateUpdatePlan &plan,
+                                                        const vector<idx_t> &current_distinct_counts) {
+	if (!SljitAggregateSinkCanUseDistinctKeySink(plan.sink_info)) {
+		return 0;
+	}
+	idx_t result = 1;
+	auto add_input = [&](idx_t input_idx) {
+		if (input_idx >= current_distinct_counts.size() || current_distinct_counts[input_idx] == 0) {
+			return false;
+		}
+		const auto distinct_count = current_distinct_counts[input_idx];
+		const auto estimated_distinct_factor =
+		    plan.estimated_input_count / distinct_count + (plan.estimated_input_count % distinct_count != 0 ? 1 : 0);
+		if (plan.estimated_input_count > 0 && result >= estimated_distinct_factor) {
+			result = plan.estimated_input_count;
+			return true;
+		}
+		return SljitTryMultiplyGroupReserveCount(result, distinct_count, result);
+	};
+	for (auto &group : plan.sink_info.groups) {
+		if (!group.supported_reference || !add_input(group.input_index)) {
+			return 0;
+		}
+	}
+	for (auto &aggregate : plan.sink_info.aggregates) {
+		if (aggregate.child_indices.empty()) {
+			return 0;
+		}
+		for (auto child_idx : aggregate.child_indices) {
+			if (!add_input(child_idx)) {
+				return 0;
+			}
+		}
+	}
+	return result;
+}
+
 static bool SljitCanBuildFilteredAggregateUpdate(const vector<SljitNativeRegionOpPlan> &ops, idx_t op_idx) {
 	if (op_idx == 0 || op_idx + 1 != ops.size() || ops[op_idx].kind != SljitNativeRegionOpKind::AGGREGATE_UPDATE) {
 		return false;
@@ -212,6 +250,8 @@ bool BuildSljitExecutableRegion(const SljitNativeRegionPlan &region, SljitExecut
 			                                                 executable_op.aggregate_update.dense_group_domain);
 			SljitTryBuildExecutableAggregateGroupReservePlan(op.aggregate_update, current_distinct_reserve_counts,
 			                                                 executable_op.aggregate_update.plan.group_reserve);
+			executable_op.aggregate_update.plan.distinct_key_cardinality_upper_bound =
+			    SljitBuildDistinctKeyCardinalityUpperBound(op.aggregate_update, current_distinct_counts);
 		}
 		executable.ops.push_back(std::move(executable_op));
 		if (SljitCanBuildFilteredAggregateUpdate(region.ops, op_idx)) {

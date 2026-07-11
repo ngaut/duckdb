@@ -65,6 +65,58 @@ SELECT count(*) FROM (SELECT a,b FROM t WHERE a*3+b*2-c > 1500 AND a*2-d*3+c < 9
 ----
 22756
 
+# Single reference-vs-reference comparisons use the same typed selector.
+# These cases cover an implicit all-true identity vector, an empty vector, a
+# first mixed lane that backfills the deferred prefix, and a scalar-width tail.
+statement ok
+CREATE TABLE sr AS
+SELECT i::INT a, (i+1)::INT b_all, (i-1)::INT b_none,
+       (i + CASE WHEN i%17=0 THEN -1 ELSE 1 END)::INT b_mixed
+FROM range(100003) tbl(i);
+
+statement ok
+SET jit_policy='auto';
+
+query I
+SELECT count(*) FROM (SELECT a, b_all FROM sr WHERE a < b_all);
+----
+100003
+
+query I
+SELECT count(*) FROM (SELECT a, b_none FROM sr WHERE a < b_none);
+----
+0
+
+# Reference-vs-constant uses the same ARM64 unrolled selector (Q1 shape).
+query I
+SELECT count(*) FROM (SELECT a FROM sr WHERE a < 50000);
+----
+50000
+
+statement ok
+CREATE TEMP TABLE srj AS SELECT a, b_mixed FROM sr WHERE a < b_mixed;
+
+query I
+SELECT count(*) FROM srj;
+----
+94120
+
+statement ok
+SET jit_policy='off';
+
+statement ok
+CREATE TEMP TABLE srn AS SELECT a, b_mixed FROM sr WHERE a < b_mixed;
+
+query I
+SELECT count(*) FROM (SELECT * FROM srj EXCEPT SELECT * FROM srn);
+----
+0
+
+query I
+SELECT count(*) FROM (SELECT * FROM srn EXCEPT SELECT * FROM srj);
+----
+0
+
 # full row-level parity with native (rowid pins each row)
 statement ok
 SET jit_policy='auto';

@@ -74,8 +74,7 @@ static bool SljitTryExecuteDirectJoinOutputPerfectHashAggregateUpdate(
 	RecordSljitRegionStageRuntime(runtime, op_idx, op.kind, "primitive_payload_update_fused", payload_stage_start);
 	RecordSljitRegionMaterializationElisionPath(runtime, op.kind, "join_output_perfect_hash_payload_update",
 	                                            aggregate_input.size());
-	RecordSljitRegionMaterializationElisionPath(runtime, op.kind,
-	                                            "fused_payload_update_owns_perfect_hash_group_lookup",
+	RecordSljitRegionMaterializationElisionPath(runtime, op.kind, "fused_payload_update_owns_perfect_hash_group_lookup",
 	                                            aggregate_input.size());
 	return true;
 }
@@ -269,10 +268,16 @@ static bool SljitTryExecuteDirectJoinOutputAggregate(
 		return true;
 	}
 
-	SljitFlushDirectJoinOutputAggregate(runtime, ops, strategy_ptr);
+	// Switching from input-vector grouping to row-pointer grouping must flush the
+	// former, but the row-pointer batch itself remains valid across join output
+	// chunks and owns capacity/cast-proof transitions internally.
+	SljitFlushPendingDirectInputVectorAggregate(runtime, aggregate_op, strategy);
+	auto string_set_classification =
+	    SljitGetDirectJoinOutputStringSetClassification(strategy, aggregate_op, aggregate_input);
 	SljitAppendPendingRowPointerAggregateBatch(runtime, strategy.aggregate_idx, aggregate_op, descriptor,
 	                                           strategy.pending_batch, scratch, deferred_grouped_finish,
-	                                           aggregate_input, row_pointers, source_key0_int64_to_int32_unchecked);
+	                                           aggregate_input, row_pointers, source_key0_int64_to_int32_unchecked,
+	                                           string_set_classification);
 	return true;
 }
 

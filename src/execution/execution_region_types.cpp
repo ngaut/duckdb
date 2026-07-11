@@ -961,6 +961,10 @@ void ExecutionRegionLoweringPlan::AddBackendAggregateUpdateCapability(ExecutionR
 	}
 }
 
+void ExecutionRegionLoweringPlan::AddBackendDistinctKeyFastInsertCapability() {
+	capability_facts.backend_distinct_key_fast_insert_count++;
+}
+
 void ExecutionRegionLoweringPlan::AddBackendWeakAcceleratedWorkCapability() {
 	capability_facts.backend_weak_accelerated_work_count++;
 }
@@ -1230,6 +1234,8 @@ static void AppendExecutionRegionBackendCapabilityFacts(string &result, const Ex
 	                                     facts.backend_ungrouped_aggregate_update_count, first_aggregate);
 	AppendExecutionRegionCapabilityCount(result, "backend_aggregate", "primitive_payload_update",
 	                                     facts.backend_primitive_aggregate_payload_update_count, first_aggregate);
+	AppendExecutionRegionCapabilityCount(result, "backend_aggregate", "distinct_key_fast_insert",
+	                                     facts.backend_distinct_key_fast_insert_count, first_aggregate);
 	AppendExecutionRegionCapabilityCount(result, "backend_aggregate", "grouped_state_address_lookup",
 	                                     facts.backend_grouped_state_address_lookup_count, first_aggregate);
 	AppendExecutionRegionCapabilityCount(result, "backend_aggregate", "generated_perfect_hash_lookup",

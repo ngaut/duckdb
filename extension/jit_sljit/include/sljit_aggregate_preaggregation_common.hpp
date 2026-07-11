@@ -13,6 +13,8 @@
 namespace duckdb {
 
 static constexpr idx_t SLJIT_LOCAL_PREAGGREGATED_GROUP_LIMIT = 64;
+static constexpr idx_t SLJIT_LOCAL_DENSE_PREAGGREGATED_GROUP_LIMIT = STANDARD_VECTOR_SIZE;
+static constexpr idx_t SLJIT_LOCAL_DENSE_PREAGGREGATION_MIN_COMPRESSION = 8;
 
 template <class T>
 static T *PrepareFlatPreaggregatedGroupTarget(DataChunk &compact_groups) {

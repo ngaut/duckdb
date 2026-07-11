@@ -48,6 +48,7 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeUngroupedFusedTypedExpress
 	const auto hoist_source_data_pointers = update_plan.hoist_source_data_pointers;
 	const auto hoist_fast_source_data_pointers = update_plan.hoist_fast_source_data_pointers;
 	const auto fast_data_hoists = hoist_fast_source_data_pointers ? &fast_source_data_hoists : nullptr;
+	const auto hybrid_data_hoists = hoist_source_data_pointers ? &source_data_hoists : nullptr;
 	const auto saved_register_count = update_plan.saved_register_count;
 
 	sljit_emit_enter(compiler, 0, SLJIT_ARGS1V(P), 5, saved_register_count, local_size);
@@ -91,6 +92,7 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeUngroupedFusedTypedExpress
 	vector<SljitExpressionTreeOverflowJumps> overflows;
 	struct sljit_jump *fast_done = nullptr;
 	struct sljit_jump *selected_fast_done = nullptr;
+	struct sljit_jump *hybrid_done = nullptr;
 	struct sljit_jump *done = nullptr;
 	if (codegen_plan.fast_path_supported) {
 		sljit_emit_op1(compiler, SLJIT_MOV_U8, SLJIT_R0, 0, SLJIT_MEM1(SLJIT_S0),
@@ -140,6 +142,55 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeUngroupedFusedTypedExpress
 		EmitNextSljitNativeVectorLoop(compiler, selected_fast_loop);
 
 		sljit_set_label(use_generic_selected_loop, sljit_emit_label(compiler));
+		sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_S1, 0, SLJIT_IMM, 0);
+	}
+
+	const bool use_hybrid_nullable_loop = !codegen_plan.conditional_shared_payload && payloads.size() == 1 &&
+	                                      payloads[0].expression_tree &&
+	                                      codegen_plan.payloads[0].fast_path.hybrid_nulls_supported;
+	if (use_hybrid_nullable_loop) {
+		auto &payload = payloads[0];
+		auto &fast_path = codegen_plan.payloads[0].fast_path;
+		auto kind = aggregates[0].primitive_update_kind;
+		sljit_emit_op1(compiler, SLJIT_MOV_U8, SLJIT_R0, 0, SLJIT_MEM1(SLJIT_S0),
+		               offsetof(SljitNativeVectorInput, expression_tree_flat_no_selection));
+		auto use_generic_loop = sljit_emit_cmp(compiler, SLJIT_EQUAL, SLJIT_R0, 0, SLJIT_IMM, 0);
+		sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_S1, 0, SLJIT_IMM, 0);
+		// The hybrid loop can enter generic nullable evaluation on any row. Keep
+		// S6 owned by the validity-pointer array instead of borrowing it for the
+		// third all-valid-only data hoist.
+		auto hybrid_loop = sljit_emit_label(compiler);
+		hybrid_done = sljit_emit_cmp(compiler, SLJIT_GREATER_EQUAL, SLJIT_S1, 0, SLJIT_S2, 0);
+		vector<sljit_jump *> source_null_jumps;
+		for (auto source_index : fast_path.source_refs) {
+			source_null_jumps.push_back(EmitJumpIfSljitExpressionTreeFlatSourceNull(compiler, source_index));
+		}
+		idx_t fast_spill_index = 0;
+		EmitSljitTypedExpressionTreeFastValueReg(compiler, *payload.expression_tree, fast_spill_index, overflows,
+		                                         hybrid_data_hoists);
+		EmitUngroupedAggregateAccumulate(compiler, kind, local_sum_offsets[0], local_sum_upper_offsets[0],
+		                                 saw_value_offsets[0], SLJIT_R2);
+		auto fast_row_done = sljit_emit_jump(compiler, SLJIT_JUMP);
+
+		auto generic_row = sljit_emit_label(compiler);
+		for (auto source_null_jump : source_null_jumps) {
+			sljit_set_label(source_null_jump, generic_row);
+		}
+		EmitLoadSljitExpressionTreeLogicalIndex(compiler);
+		idx_t slot_index = 0;
+		auto payload_slot =
+		    EmitSljitTypedExpressionTreeValue(compiler, *payload.expression_tree, slot_index, overflows);
+		sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R3, 0, SLJIT_MEM1(SLJIT_SP), payload_slot.valid_offset);
+		auto generic_row_invalid = sljit_emit_cmp(compiler, SLJIT_EQUAL, SLJIT_R3, 0, SLJIT_IMM, 0);
+		sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R2, 0, SLJIT_MEM1(SLJIT_SP), payload_slot.value_offset);
+		EmitUngroupedAggregateAccumulate(compiler, kind, local_sum_offsets[0], local_sum_upper_offsets[0],
+		                                 saw_value_offsets[0], SLJIT_R2);
+		auto next_row = sljit_emit_label(compiler);
+		sljit_set_label(fast_row_done, next_row);
+		sljit_set_label(generic_row_invalid, next_row);
+		EmitNextSljitNativeVectorLoop(compiler, hybrid_loop);
+
+		sljit_set_label(use_generic_loop, sljit_emit_label(compiler));
 		sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_S1, 0, SLJIT_IMM, 0);
 	}
 
@@ -235,6 +286,9 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeUngroupedFusedTypedExpress
 	}
 	if (selected_fast_done) {
 		sljit_set_label(selected_fast_done, done_label);
+	}
+	if (hybrid_done) {
+		sljit_set_label(hybrid_done, done_label);
 	}
 	sljit_set_label(done, done_label);
 	if (use_conditional_hugeint_register_accumulators) {

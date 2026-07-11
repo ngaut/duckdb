@@ -15,6 +15,20 @@
 namespace duckdb {
 
 class Expression;
+class PhysicalTableScan;
+
+struct ExecutionSourceContractCapability {
+	ExecutionRegionSourceKind kind = ExecutionRegionSourceKind::NONE;
+	ExecutionRegionSourceExecutionKind execution = ExecutionRegionSourceExecutionKind::NONE;
+	bool supports_source_contract_input_layout = false;
+	bool uses_storage_scan = false;
+
+	bool IsReady() const {
+		return execution == ExecutionRegionSourceExecutionKind::SOURCE_CONTRACT;
+	}
+};
+
+DUCKDB_API ExecutionSourceContractCapability GetExecutionSourceContractCapability(const PhysicalTableScan &scan);
 
 struct ExecutionSourceFilterContract {
 	idx_t filter_index = 0;

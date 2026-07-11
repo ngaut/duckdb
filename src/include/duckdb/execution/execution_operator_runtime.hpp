@@ -33,6 +33,7 @@ struct OperatorSinkInput;
 struct PartitionedTupleDataAppendState;
 struct JoinFilterLocalState;
 struct JoinFilterPushdownInfo;
+struct ExecutionOperatorStageRecorder;
 
 enum class ExecutionOperatorBindResult : uint8_t { READY, DEFERRED, INVALID };
 enum class ExecutionOperatorReadinessStatus : uint8_t { READY, NOT_READY, INVALID };
@@ -80,6 +81,17 @@ struct ExecutionAggregateUpdateState {
 		return false;
 	}
 	virtual bool SupportsDistinctSelectedSink() const {
+		return false;
+	}
+	virtual bool TrySinkDistinctFast(DataChunk &input, const SelectionVector *selection, idx_t count,
+	                                 optional_ptr<ExecutionOperatorStageRecorder> recorder = nullptr,
+	                                 idx_t estimated_input_count = 0, idx_t distinct_key_cardinality_upper_bound = 0) {
+		(void)input;
+		(void)selection;
+		(void)count;
+		(void)recorder;
+		(void)estimated_input_count;
+		(void)distinct_key_cardinality_upper_bound;
 		return false;
 	}
 	virtual SinkResultType SinkDistinct(DataChunk &input) {
@@ -155,8 +167,7 @@ struct ExecutionGroupedAggregateStateAddressState {
 	}
 	virtual bool TryAppendNewGroups(DataChunk &input, const ExecutionRegionSinkInfo &sink_info,
 	                                const vector<const ExecutionPrimitiveAggregateUpdateLane *> &lanes,
-	                                optional_ptr<ExecutionOperatorStageRecorder> recorder = nullptr,
-	                                bool finish = true,
+	                                optional_ptr<ExecutionOperatorStageRecorder> recorder = nullptr, bool finish = true,
 	                                optional_ptr<const ExecutionDenseGroupDomain> dense_domain = nullptr) {
 		(void)input;
 		(void)sink_info;
@@ -213,19 +224,32 @@ struct ExecutionGroupedAggregateStateAddressState {
 		(void)recorder;
 		return false;
 	}
-	virtual bool
-	TryFindOrCreateInputVectorGroupStateTargets(DataChunk &payload_input, idx_t count,
-	                                            const vector<ExecutionRowPointerGroupKeySource> &group_sources,
-	                                            const ExecutionRegionSinkInfo &sink_info,
-	                                            ExecutionGroupedAggregateStateTargetBatch &targets,
-	                                            optional_ptr<ExecutionOperatorStageRecorder> recorder = nullptr,
-	                                            optional_ptr<const ExecutionDenseGroupDomain> dense_domain = nullptr) {
+	virtual bool TryFindOrCreateInputVectorGroupStateTargets(
+	    DataChunk &payload_input, idx_t count, const vector<ExecutionRowPointerGroupKeySource> &group_sources,
+	    const ExecutionRegionSinkInfo &sink_info, ExecutionGroupedAggregateStateTargetBatch &targets,
+	    optional_ptr<ExecutionOperatorStageRecorder> recorder = nullptr,
+	    optional_ptr<const ExecutionDenseGroupDomain> dense_domain = nullptr) {
 		(void)payload_input;
 		(void)count;
 		(void)group_sources;
 		(void)sink_info;
 		(void)targets;
 		(void)recorder;
+		(void)dense_domain;
+		return false;
+	}
+	virtual bool TryUpdateInputVectorGroupCountOne(
+	    DataChunk &payload_input, idx_t count, const vector<ExecutionRowPointerGroupKeySource> &group_sources,
+	    const ExecutionRegionSinkInfo &sink_info, const ExecutionPrimitiveAggregateUpdateLane &lane,
+	    optional_ptr<ExecutionOperatorStageRecorder> recorder = nullptr, bool finish = true,
+	    optional_ptr<const ExecutionDenseGroupDomain> dense_domain = nullptr) {
+		(void)payload_input;
+		(void)count;
+		(void)group_sources;
+		(void)sink_info;
+		(void)lane;
+		(void)recorder;
+		(void)finish;
 		(void)dense_domain;
 		return false;
 	}

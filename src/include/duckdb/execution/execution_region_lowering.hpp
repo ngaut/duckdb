@@ -66,6 +66,7 @@ struct ExecutionRegionLoweringCapabilityFacts {
 	idx_t backend_perfect_hash_aggregate_update_count = 0;
 	idx_t backend_ungrouped_aggregate_update_count = 0;
 	idx_t backend_primitive_aggregate_payload_update_count = 0;
+	idx_t backend_distinct_key_fast_insert_count = 0;
 	idx_t backend_grouped_state_address_lookup_count = 0;
 	idx_t backend_generated_perfect_hash_lookup_count = 0;
 	idx_t backend_native_state_address_lookup_count = 0;
@@ -93,6 +94,7 @@ struct ExecutionRegionLoweringPlan {
 	void AddBackendNestedLoopJoinBuildCapability();
 	void AddBackendAggregateUpdateCapability(ExecutionRegionAggregateOperatorKind kind, bool primitive_payloads,
 	                                         bool grouped_state_addresses, bool perfect_hash_group_lookup);
+	void AddBackendDistinctKeyFastInsertCapability();
 	void AddBackendWeakAcceleratedWorkCapability();
 	void AddFusionBlocker(string reason);
 	void SetRecordDetailedNodes(bool record_detailed_nodes);

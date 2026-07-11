@@ -14,7 +14,7 @@
 #include "sljit_region_runtime_trace.hpp"
 #include "sljit_runtime_batch_runtime.hpp"
 
-#include <cstring>
+#include <array>
 
 namespace duckdb {
 
@@ -27,6 +27,14 @@ struct SljitPendingPreaggregatedPrimitiveGroupBatch {
 		return count == 0;
 	}
 
+	bool DenseSingleLaneEmpty() const {
+		return dense_single_lane_represented_row_count == 0;
+	}
+
+	bool HasPending() const {
+		return !Empty() || !DenseSingleLaneEmpty();
+	}
+
 	void Reset() {
 		groups.Reset();
 		scratch.Prepare(lanes, STANDARD_VECTOR_SIZE);
@@ -34,12 +42,228 @@ struct SljitPendingPreaggregatedPrimitiveGroupBatch {
 		count = 0;
 	}
 
+	void ResetDenseSingleLane() {
+		dense_single_lane_initialized = false;
+		dense_single_lane_domain = ExecutionDenseGroupDomain();
+		dense_single_lane_group_type = LogicalType();
+		dense_single_lane_lane = nullptr;
+		dense_single_lane_deltas.clear();
+		dense_single_lane_touched_offsets.clear();
+		dense_single_lane_represented_row_count = 0;
+	}
+
 	SljitDataChunkBatch groups;
 	SljitPreaggregatedPrimitiveAggregateScratch scratch;
 	vector<const ExecutionPrimitiveAggregateUpdateLane *> lanes;
 	idx_t represented_row_count = 0;
 	idx_t count = 0;
+
+	bool dense_single_lane_initialized = false;
+	ExecutionDenseGroupDomain dense_single_lane_domain;
+	LogicalType dense_single_lane_group_type;
+	const ExecutionPrimitiveAggregateUpdateLane *dense_single_lane_lane = nullptr;
+	vector<int64_t> dense_single_lane_deltas;
+	vector<idx_t> dense_single_lane_touched_offsets;
+	std::array<idx_t, STANDARD_VECTOR_SIZE> dense_single_lane_batch_offsets;
+	idx_t dense_single_lane_represented_row_count = 0;
+	SljitDataChunkBatch dense_single_lane_groups;
+	SljitPreaggregatedPrimitiveAggregateScratch dense_single_lane_scratch;
+	string dense_single_lane_blocker;
 };
+
+static constexpr idx_t SLJIT_PENDING_DENSE_SINGLE_LANE_MAX_RANGE = STANDARD_VECTOR_SIZE * 512ULL;
+static constexpr idx_t SLJIT_PENDING_DENSE_SINGLE_LANE_MIN_COMPRESSION = 2;
+
+template <class TARGET_TYPE>
+static bool SljitPendingDenseSingleLaneKey(TARGET_TYPE value, idx_t &key) {
+	if constexpr (std::is_same<TARGET_TYPE, bool>::value) {
+		key = value ? 1 : 0;
+		return true;
+	} else {
+		if constexpr (std::is_signed<TARGET_TYPE>::value) {
+			if (value < 0) {
+				return false;
+			}
+		}
+		using UNSIGNED_TYPE = typename std::make_unsigned<TARGET_TYPE>::type;
+		const auto unsigned_value = static_cast<UNSIGNED_TYPE>(value);
+		if (unsigned_value > NumericLimits<idx_t>::Maximum()) {
+			return false;
+		}
+		key = static_cast<idx_t>(unsigned_value);
+		return true;
+	}
+}
+
+static bool SljitPendingDenseSingleLaneProfitable(const SljitExecutableRegionOp &op,
+                                                  const ExecutionDenseGroupDomain &dense_domain, idx_t &range) {
+	if (!dense_domain.ready || dense_domain.min_key > dense_domain.max_key ||
+	    dense_domain.max_key == NumericLimits<idx_t>::Maximum()) {
+		return false;
+	}
+	range = dense_domain.max_key - dense_domain.min_key + 1;
+	if (range == 0 || range > SLJIT_PENDING_DENSE_SINGLE_LANE_MAX_RANGE) {
+		return false;
+	}
+	const auto estimated_input_count = op.aggregate_update.plan.estimated_input_count;
+	return estimated_input_count / SLJIT_PENDING_DENSE_SINGLE_LANE_MIN_COMPRESSION >= range;
+}
+
+template <class TARGET_TYPE, class SOURCE_TYPE, bool CAST_KEY>
+static bool SljitAccumulatePendingDenseSingleLaneKeyData(DataChunk &input, UnifiedVectorFormat &group_format,
+                                                         const ExecutionDenseGroupDomain &dense_domain,
+                                                         SljitPendingPreaggregatedPrimitiveGroupBatch &pending) {
+	auto group_data = UnifiedVectorFormat::GetData<SOURCE_TYPE>(group_format);
+	auto group_sel = group_format.sel;
+	const bool can_have_null = group_format.validity.CanHaveNull();
+	const auto touched_count_before_batch = pending.dense_single_lane_touched_offsets.size();
+	auto rollback = [&](idx_t row_count) {
+		for (idx_t rollback_idx = 0; rollback_idx < row_count; rollback_idx++) {
+			auto &delta = pending.dense_single_lane_deltas[pending.dense_single_lane_batch_offsets[rollback_idx]];
+			D_ASSERT(delta > 0);
+			delta--;
+		}
+		pending.dense_single_lane_touched_offsets.resize(touched_count_before_batch);
+		pending.dense_single_lane_blocker = "key";
+		return false;
+	};
+	for (idx_t row_idx = 0; row_idx < input.size(); row_idx++) {
+		const auto source_idx = group_sel->get_index(row_idx);
+		if (can_have_null && !group_format.validity.RowIsValid(source_idx)) {
+			return rollback(row_idx);
+		}
+		TARGET_TYPE value;
+		if constexpr (CAST_KEY) {
+			value = static_cast<TARGET_TYPE>(group_data[source_idx]);
+		} else {
+			value = group_data[source_idx];
+		}
+		idx_t key;
+		if (!SljitPendingDenseSingleLaneKey(value, key) || key < dense_domain.min_key || key > dense_domain.max_key) {
+			return rollback(row_idx);
+		}
+		const auto offset = key - dense_domain.min_key;
+		pending.dense_single_lane_batch_offsets[row_idx] = offset;
+		auto &delta = pending.dense_single_lane_deltas[offset];
+		if (delta == 0) {
+			pending.dense_single_lane_touched_offsets.push_back(offset);
+		}
+		if (delta == NumericLimits<int64_t>::Maximum()) {
+			throw OutOfRangeException("Dense pending grouped count overflow");
+		}
+		delta++;
+	}
+	pending.dense_single_lane_represented_row_count += input.size();
+	pending.dense_single_lane_blocker.clear();
+	return true;
+}
+
+template <class TARGET_TYPE>
+struct SljitPendingDenseSingleLaneKeyDispatch {
+	DataChunk &input;
+	const ExecutionDenseGroupDomain &dense_domain;
+	SljitPendingPreaggregatedPrimitiveGroupBatch &pending;
+
+	template <class DISPATCH_TARGET_TYPE, class SOURCE_TYPE, bool CAST_KEY>
+	bool Execute(UnifiedVectorFormat &group_format) {
+		static_assert(std::is_same<TARGET_TYPE, DISPATCH_TARGET_TYPE>::value,
+		              "Dense single-lane key dispatch changed target type");
+		return SljitAccumulatePendingDenseSingleLaneKeyData<TARGET_TYPE, SOURCE_TYPE, CAST_KEY>(input, group_format,
+		                                                                                        dense_domain, pending);
+	}
+};
+
+template <class TARGET_TYPE>
+static bool SljitTryAccumulatePendingDenseSingleLaneGroupsTemplated(
+    SljitExecutableRegionOp &op, DataChunk &input, const vector<ExecutionRowPointerGroupKeySource> &group_sources,
+    const vector<const ExecutionPrimitiveAggregateUpdateLane *> &payload_lanes,
+    const ExecutionDenseGroupDomain &dense_domain, SljitPendingPreaggregatedPrimitiveGroupBatch &pending) {
+	auto reject = [&](const char *blocker) {
+		pending.dense_single_lane_blocker = blocker;
+		return false;
+	};
+	pending.dense_single_lane_blocker.clear();
+	if (input.size() == 0 || input.size() > STANDARD_VECTOR_SIZE || group_sources.size() != 1 ||
+	    payload_lanes.size() != 1 || !payload_lanes[0] || !pending.Empty()) {
+		return reject("shape");
+	}
+	auto &lane = *payload_lanes[0];
+	if (!lane.ready ||
+	    (lane.kind != AggregatePrimitiveUpdateKind::COUNT && lane.kind != AggregatePrimitiveUpdateKind::COUNT_STAR)) {
+		return reject("lane");
+	}
+	auto &sink_info = op.aggregate_update.plan.sink_info;
+	if (sink_info.groups.size() != 1 || sink_info.aggregates.size() != 1 ||
+	    sink_info.groups[0].type.InternalType() != dense_domain.physical_type ||
+	    group_sources[0].target_physical_type != dense_domain.physical_type) {
+		return reject("sink");
+	}
+	idx_t range;
+	if (!SljitPendingDenseSingleLaneProfitable(op, dense_domain, range)) {
+		return reject("economics");
+	}
+	SljitPreaggregatedInputVectorGroupKeySource group_source;
+	if (!SljitPreparePreaggregatedInputVectorGroupKeySource(input, group_sources[0], group_source) ||
+	    !SljitPreaggregatedInputVectorGroupKeyReplayable(group_source)) {
+		return reject("source");
+	}
+	if (pending.dense_single_lane_initialized) {
+		if (pending.dense_single_lane_domain.physical_type != dense_domain.physical_type ||
+		    pending.dense_single_lane_domain.min_key != dense_domain.min_key ||
+		    pending.dense_single_lane_domain.max_key != dense_domain.max_key ||
+		    pending.dense_single_lane_group_type != sink_info.groups[0].type ||
+		    pending.dense_single_lane_lane != payload_lanes[0] || pending.dense_single_lane_deltas.size() != range) {
+			return reject("state");
+		}
+	} else {
+		pending.dense_single_lane_initialized = true;
+		pending.dense_single_lane_domain = dense_domain;
+		pending.dense_single_lane_group_type = sink_info.groups[0].type;
+		pending.dense_single_lane_lane = payload_lanes[0];
+		pending.dense_single_lane_deltas.assign(range, 0);
+		pending.dense_single_lane_touched_offsets.clear();
+		pending.dense_single_lane_touched_offsets.reserve(MinValue(range, dense_domain.distinct_count));
+	}
+
+	SljitPendingDenseSingleLaneKeyDispatch<TARGET_TYPE> dispatch {input, dense_domain, pending};
+	if (!SljitDispatchPreaggregatedInputVectorGroupKeyCast<TARGET_TYPE>(group_source, dispatch)) {
+		if (pending.dense_single_lane_blocker.empty()) {
+			return reject("key_dispatch");
+		}
+		return false;
+	}
+	return true;
+}
+
+struct SljitPendingDenseSingleLaneTargetDispatch {
+	SljitExecutableRegionOp &op;
+	DataChunk &input;
+	const vector<ExecutionRowPointerGroupKeySource> &group_sources;
+	const vector<const ExecutionPrimitiveAggregateUpdateLane *> &payload_lanes;
+	const ExecutionDenseGroupDomain &dense_domain;
+	SljitPendingPreaggregatedPrimitiveGroupBatch &pending;
+
+	template <class TARGET_TYPE>
+	bool Execute() {
+		if constexpr (std::is_integral<TARGET_TYPE>::value) {
+			return SljitTryAccumulatePendingDenseSingleLaneGroupsTemplated<TARGET_TYPE>(
+			    op, input, group_sources, payload_lanes, dense_domain, pending);
+		}
+		return false;
+	}
+};
+
+static bool SljitTryAccumulatePendingDenseSingleLaneGroups(
+    SljitExecutableRegionOp &op, DataChunk &input, const vector<ExecutionRowPointerGroupKeySource> &group_sources,
+    const vector<const ExecutionPrimitiveAggregateUpdateLane *> &payload_lanes,
+    const ExecutionDenseGroupDomain &dense_domain, SljitPendingPreaggregatedPrimitiveGroupBatch &pending) {
+	SljitPendingDenseSingleLaneTargetDispatch dispatch {op, input, group_sources, payload_lanes, dense_domain, pending};
+	const auto accumulated = SljitDispatchPreaggregatedInputVectorGroupTargetType(dense_domain.physical_type, dispatch);
+	if (!accumulated && pending.dense_single_lane_blocker.empty()) {
+		pending.dense_single_lane_blocker = "target_type";
+	}
+	return accumulated;
+}
 
 static bool SljitPreaggregatedPrimitiveSingleGroupKeysMatch(DataChunk &left, idx_t left_idx, DataChunk &right,
                                                             idx_t right_idx) {
@@ -112,12 +336,122 @@ SljitAppendPreaggregatedPrimitiveGroupRange(ExecutionRegionRuntime &runtime, Slj
 	return true;
 }
 
+template <class TARGET_TYPE>
+static bool SljitFlushPendingDenseSingleLaneGroupsTemplated(ExecutionRegionRuntime &runtime,
+                                                            SljitRegionExecutionScratch &scratch, idx_t op_idx,
+                                                            SljitExecutableRegionOp &op,
+                                                            SljitPendingPreaggregatedPrimitiveGroupBatch &pending,
+                                                            ExecutionGroupedAggregateStateAddressBinding &grouped_state,
+                                                            optional_ptr<bool> deferred_grouped_finish = nullptr) {
+	if (pending.DenseSingleLaneEmpty()) {
+		return true;
+	}
+	if (!pending.dense_single_lane_initialized || !pending.dense_single_lane_lane ||
+	    pending.dense_single_lane_group_type.InternalType() != pending.dense_single_lane_domain.physical_type ||
+	    pending.dense_single_lane_touched_offsets.empty()) {
+		return false;
+	}
+	vector<const ExecutionPrimitiveAggregateUpdateLane *> lanes {pending.dense_single_lane_lane};
+	pending.dense_single_lane_groups.Ensure(runtime.GetAllocator(),
+	                                        vector<LogicalType> {pending.dense_single_lane_group_type});
+	auto &groups = pending.dense_single_lane_groups.chunk;
+	idx_t flushed_row_count = 0;
+	SljitTryReserveGroupedAggregateGroups(runtime, op_idx, op, grouped_state,
+	                                      pending.dense_single_lane_touched_offsets.size());
+	for (idx_t offset = 0; offset < pending.dense_single_lane_touched_offsets.size(); offset += STANDARD_VECTOR_SIZE) {
+		const auto group_count =
+		    MinValue<idx_t>(STANDARD_VECTOR_SIZE, pending.dense_single_lane_touched_offsets.size() - offset);
+		auto target_data = PrepareFlatPreaggregatedGroupTarget<TARGET_TYPE>(groups);
+		auto &preaggregate_scratch = pending.dense_single_lane_scratch;
+		preaggregate_scratch.Prepare(lanes, group_count);
+		idx_t represented_row_count = 0;
+		for (idx_t group_idx = 0; group_idx < group_count; group_idx++) {
+			const auto dense_offset = pending.dense_single_lane_touched_offsets[offset + group_idx];
+			const auto key = pending.dense_single_lane_domain.min_key + dense_offset;
+			target_data[group_idx] = static_cast<TARGET_TYPE>(key);
+			switch (pending.dense_single_lane_lane->kind) {
+			case AggregatePrimitiveUpdateKind::COUNT:
+			case AggregatePrimitiveUpdateKind::COUNT_STAR: {
+				const auto delta = pending.dense_single_lane_deltas[dense_offset];
+				if (delta <= 0 || UnsafeNumericCast<uint64_t>(delta) > NumericLimits<idx_t>::Maximum()) {
+					throw InternalException("SLJIT pending dense single-lane count delta is invalid");
+				}
+				const auto row_count = UnsafeNumericCast<idx_t>(delta);
+				preaggregate_scratch.group_row_counts.push_back(row_count);
+				preaggregate_scratch.payloads[0].int64_values.push_back(delta);
+				represented_row_count += row_count;
+				break;
+			}
+			default:
+				throw InternalException("Unsupported SLJIT pending dense single-lane aggregate");
+			}
+		}
+		FinishFlatPreaggregatedGroupTarget(groups, group_count);
+		if (!TryExecutePreaggregatedGroupedPrimitiveAggregateUpdateBatches(
+		        runtime, scratch, op_idx, op, groups, preaggregate_scratch, lanes, grouped_state, represented_row_count,
+		        true, deferred_grouped_finish)) {
+			throw InternalException("Validated SLJIT pending dense single-lane grouped update failed");
+		}
+		flushed_row_count += represented_row_count;
+	}
+	if (flushed_row_count != pending.dense_single_lane_represented_row_count) {
+		throw InternalException("SLJIT pending dense single-lane flush row count mismatch");
+	}
+	RecordSljitRegionMaterializationElisionPath(runtime, op.kind, "pending_dense_single_lane_grouped_update_flush",
+	                                            pending.dense_single_lane_represented_row_count);
+	pending.ResetDenseSingleLane();
+	return true;
+}
+
+static bool SljitFlushPendingDenseSingleLaneGroups(ExecutionRegionRuntime &runtime,
+                                                   SljitRegionExecutionScratch &scratch, idx_t op_idx,
+                                                   SljitExecutableRegionOp &op,
+                                                   SljitPendingPreaggregatedPrimitiveGroupBatch &pending,
+                                                   ExecutionGroupedAggregateStateAddressBinding &grouped_state,
+                                                   optional_ptr<bool> deferred_grouped_finish = nullptr) {
+	switch (pending.dense_single_lane_domain.physical_type) {
+	case PhysicalType::BOOL:
+		return SljitFlushPendingDenseSingleLaneGroupsTemplated<bool>(runtime, scratch, op_idx, op, pending,
+		                                                             grouped_state, deferred_grouped_finish);
+	case PhysicalType::INT8:
+		return SljitFlushPendingDenseSingleLaneGroupsTemplated<int8_t>(runtime, scratch, op_idx, op, pending,
+		                                                               grouped_state, deferred_grouped_finish);
+	case PhysicalType::INT16:
+		return SljitFlushPendingDenseSingleLaneGroupsTemplated<int16_t>(runtime, scratch, op_idx, op, pending,
+		                                                                grouped_state, deferred_grouped_finish);
+	case PhysicalType::INT32:
+		return SljitFlushPendingDenseSingleLaneGroupsTemplated<int32_t>(runtime, scratch, op_idx, op, pending,
+		                                                                grouped_state, deferred_grouped_finish);
+	case PhysicalType::INT64:
+		return SljitFlushPendingDenseSingleLaneGroupsTemplated<int64_t>(runtime, scratch, op_idx, op, pending,
+		                                                                grouped_state, deferred_grouped_finish);
+	case PhysicalType::UINT8:
+		return SljitFlushPendingDenseSingleLaneGroupsTemplated<uint8_t>(runtime, scratch, op_idx, op, pending,
+		                                                                grouped_state, deferred_grouped_finish);
+	case PhysicalType::UINT16:
+		return SljitFlushPendingDenseSingleLaneGroupsTemplated<uint16_t>(runtime, scratch, op_idx, op, pending,
+		                                                                 grouped_state, deferred_grouped_finish);
+	case PhysicalType::UINT32:
+		return SljitFlushPendingDenseSingleLaneGroupsTemplated<uint32_t>(runtime, scratch, op_idx, op, pending,
+		                                                                 grouped_state, deferred_grouped_finish);
+	case PhysicalType::UINT64:
+		return SljitFlushPendingDenseSingleLaneGroupsTemplated<uint64_t>(runtime, scratch, op_idx, op, pending,
+		                                                                 grouped_state, deferred_grouped_finish);
+	default:
+		return pending.DenseSingleLaneEmpty();
+	}
+}
+
 static bool SljitFlushPendingPreaggregatedPrimitiveGroups(ExecutionRegionRuntime &runtime,
                                                           SljitRegionExecutionScratch &scratch, idx_t op_idx,
                                                           SljitExecutableRegionOp &op,
                                                           SljitPendingPreaggregatedPrimitiveGroupBatch &pending,
                                                           ExecutionGroupedAggregateStateAddressBinding &grouped_state,
                                                           optional_ptr<bool> deferred_grouped_finish = nullptr) {
+	if (!SljitFlushPendingDenseSingleLaneGroups(runtime, scratch, op_idx, op, pending, grouped_state,
+	                                            deferred_grouped_finish)) {
+		return false;
+	}
 	if (pending.Empty()) {
 		return true;
 	}
@@ -166,8 +500,20 @@ static bool SljitBufferPreaggregatedPrimitiveGroups(
 		offset = 1;
 		RecordSljitRegionRuntimePath(runtime, op.kind, "pending_preaggregated_group_boundary_merge");
 	}
-	const auto append_count = groups.size() - offset;
+	auto append_count = groups.size() - offset;
 	if (append_count > 0 && pending.Count() + append_count > STANDARD_VECTOR_SIZE) {
+		const auto fill_count = STANDARD_VECTOR_SIZE - pending.Count();
+		if (fill_count > 0) {
+			idx_t fill_row_count;
+			if (!PreaggregatedPrimitiveRepresentedRowCount(source_scratch, offset, fill_count, fill_row_count) ||
+			    !SljitAppendPreaggregatedPrimitiveGroupRange(runtime, scratch, op_idx, op, pending, groups,
+			                                                 source_scratch, payload_lanes, offset, fill_count,
+			                                                 fill_row_count)) {
+				return false;
+			}
+			offset += fill_count;
+			append_count -= fill_count;
+		}
 		if (!SljitFlushPendingPreaggregatedPrimitiveGroups(runtime, scratch, op_idx, op, pending, grouped_state,
 		                                                   deferred_grouped_finish)) {
 			return false;

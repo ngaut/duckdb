@@ -269,6 +269,13 @@ static optional_ptr<const BaseStatistics> TryGetFilterStats(optional_ptr<ClientC
 	}
 }
 
+unique_ptr<BaseStatistics> ExpressionFilter::TryGetExpressionStatistics(ClientContext &context, const Expression &expr,
+                                                                        const BaseStatistics &stats) {
+	vector<unique_ptr<BaseStatistics>> owned_stats;
+	auto result = TryGetFilterStats(context, expr, stats, owned_stats);
+	return result ? result->Copy().ToUnique() : nullptr;
+}
+
 static FilterPropagateResult CheckComparisonStatistics(optional_ptr<ClientContext> context_p,
                                                        const BoundFunctionExpression &comp_expr,
                                                        const BaseStatistics &stats) {

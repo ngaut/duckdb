@@ -102,8 +102,9 @@ static bool SljitTryPreaggregateRowPointerPrimitiveGroups(
     DataChunk &payload_input, Vector &row_pointers, const vector<ExecutionRowPointerGroupKeySource> &group_sources,
     const vector<idx_t> &payload_source_indices,
     const vector<const ExecutionPrimitiveAggregateUpdateLane *> &payload_lanes, Vector &compact_row_pointers,
-    SljitPreaggregatedPrimitiveAggregateScratch &scratch, idx_t &compact_count) {
+    SljitPreaggregatedPrimitiveAggregateScratch &scratch, idx_t &compact_count, const char *&failure_reason) {
 	compact_count = 0;
+	failure_reason = "shape";
 	const auto count = payload_input.size();
 	if (count < 2 || row_pointers.GetVectorType() != VectorType::FLAT_VECTOR) {
 		return false;
@@ -111,6 +112,7 @@ static bool SljitTryPreaggregateRowPointerPrimitiveGroups(
 
 	SljitPreaggregatedPrimitivePayloadSources payload_sources;
 	if (!payload_sources.Prepare(payload_input, payload_source_indices, payload_lanes)) {
+		failure_reason = "payload_sources";
 		return false;
 	}
 	scratch.Prepare(payload_lanes, count);
@@ -129,6 +131,7 @@ static bool SljitTryPreaggregateRowPointerPrimitiveGroups(
 	idx_t group_count;
 	if (!SljitForEachPreaggregatedRowPointerGroup(payload_input, row_pointers, group_sources,
 	                                              scratch.input_group_formats, start_group, visit_row, group_count)) {
+		failure_reason = "groups";
 		return false;
 	}
 	FlatVector::SetSize(compact_row_pointers, count_t(group_count));
@@ -141,8 +144,9 @@ static bool SljitTryPreaggregateRowPointerFusedPrimitiveGroups(
     const vector<ExecutionRowPointerGroupKeySource> &group_sources, const vector<idx_t> &payload_source_indices,
     const vector<const ExecutionPrimitiveAggregateUpdateLane *> &payload_lanes, Vector &compact_row_pointers,
     SljitPreaggregatedPrimitiveAggregateScratch &scratch, SljitAggregatePayloadAdapterScratch &payload_scratch,
-    idx_t &compact_count) {
+    idx_t &compact_count, const char *&failure_reason) {
 	compact_count = 0;
+	failure_reason = "shape";
 	const auto count = payload_input.size();
 	if (count < 2 || row_pointers.GetVectorType() != VectorType::FLAT_VECTOR ||
 	    !op.aggregate_update.fused_payload_update_function) {
@@ -150,6 +154,7 @@ static bool SljitTryPreaggregateRowPointerFusedPrimitiveGroups(
 	}
 
 	if (!SljitPrepareFusedPreaggregatedPrimitiveScratch(scratch, payload_lanes, count, count)) {
+		failure_reason = "scratch";
 		return false;
 	}
 
@@ -171,6 +176,7 @@ static bool SljitTryPreaggregateRowPointerFusedPrimitiveGroups(
 	idx_t group_count;
 	if (!SljitForEachPreaggregatedRowPointerGroup(payload_input, row_pointers, group_sources,
 	                                              scratch.input_group_formats, start_group, visit_row, group_count)) {
+		failure_reason = "groups";
 		return false;
 	}
 
@@ -181,6 +187,7 @@ static bool SljitTryPreaggregateRowPointerFusedPrimitiveGroups(
 	    payload_scratch, optional_ptr<const vector<idx_t>>(&payload_source_indices));
 
 	if (!SljitExtractFusedPreaggregatedPrimitiveDeltas(scratch, payload_lanes, group_count)) {
+		failure_reason = "extract";
 		return false;
 	}
 

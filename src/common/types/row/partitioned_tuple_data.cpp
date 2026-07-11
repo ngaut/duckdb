@@ -93,6 +93,120 @@ void PartitionedTupleData::AppendUnified(PartitionedTupleDataAppendState &state,
 	Verify();
 }
 
+bool PartitionedTupleData::TryAppendUnifiedSinglePartition(PartitionedTupleDataAppendState &state, DataChunk &input,
+                                                           const SelectionVector &append_sel,
+                                                           const idx_t append_count) {
+	if (partitions.size() != 1) {
+		return false;
+	}
+	const idx_t actual_append_count = append_count == DConstants::INVALID_INDEX ? input.size() : append_count;
+	if (actual_append_count == 0) {
+		return true;
+	}
+	if (state.compute_reverse_partition_sel) {
+		for (sel_t i = 0; i < actual_append_count; i++) {
+			state.reverse_partition_sel[append_sel.get_index(i)] = i;
+		}
+	}
+	auto &partition = *partitions[0];
+	auto &partition_pin_state = state.partition_pin_states[0];
+	const auto size_before = partition.data_size;
+	partition.AppendUnified(partition_pin_state, state.chunk_state, input, append_sel, actual_append_count);
+	data_size += partition.data_size - size_before;
+	count += actual_append_count;
+	Verify();
+	return true;
+}
+
+bool PartitionedTupleData::TryAppendUnifiedFixedWidthSinglePartition(PartitionedTupleDataAppendState &state,
+                                                                     DataChunk &input,
+                                                                     const SelectionVector &append_sel,
+                                                                     const idx_t append_count) {
+	static constexpr idx_t MAX_FAST_COLUMNS = 16;
+	struct FixedColumnSource {
+		const_data_ptr_t data;
+		const SelectionVector *selection;
+		idx_t width;
+		idx_t row_offset;
+	};
+
+	if (partitions.size() != 1 || !layout.AllConstant() || input.ColumnCount() != layout.ColumnCount() ||
+	    input.ColumnCount() > MAX_FAST_COLUMNS) {
+		return false;
+	}
+	const idx_t actual_append_count = append_count == DConstants::INVALID_INDEX ? input.size() : append_count;
+	if (actual_append_count == 0) {
+		return true;
+	}
+
+	FixedColumnSource sources[MAX_FAST_COLUMNS];
+	const auto &layout_types = layout.GetTypes();
+	const auto &layout_offsets = layout.GetOffsets();
+	for (idx_t col_idx = 0; col_idx < input.ColumnCount(); col_idx++) {
+		const auto physical_type = layout_types[col_idx].InternalType();
+		if (!TypeIsConstantSize(physical_type) || input.data[col_idx].GetType() != layout_types[col_idx]) {
+			return false;
+		}
+		auto &format = state.chunk_state.vector_data[col_idx].unified;
+		if (!format.validity.CheckAllValid(input.size())) {
+			return false;
+		}
+		sources[col_idx] = {format.data, format.sel, GetTypeIdSize(physical_type), layout_offsets[col_idx]};
+	}
+
+	if (state.compute_reverse_partition_sel) {
+		for (sel_t i = 0; i < actual_append_count; i++) {
+			state.reverse_partition_sel[append_sel.get_index_unsafe(i)] = i;
+		}
+	}
+
+	auto &partition = *partitions[0];
+	auto &partition_pin_state = state.partition_pin_states[0];
+	const auto size_before = partition.data_size;
+	partition.Build(partition_pin_state, state.chunk_state, 0, actual_append_count);
+	FlatVector::SetSize(state.chunk_state.row_locations, actual_append_count);
+	const auto row_locations = FlatVector::GetData<data_ptr_t>(state.chunk_state.row_locations);
+	const auto validity_bytes =
+	    layout.CanHaveNull() ? TupleDataLayout::ValidityBytes::SizeInBytes(layout.ColumnCount()) : 0;
+	for (idx_t row_idx = 0; row_idx < actual_append_count; row_idx++) {
+		const auto input_idx = append_sel.get_index_unsafe(row_idx);
+		auto row_location = row_locations[row_idx];
+		if (validity_bytes != 0) {
+			FastMemset(row_location, 0xff, validity_bytes);
+		}
+		for (idx_t col_idx = 0; col_idx < input.ColumnCount(); col_idx++) {
+			const auto &source = sources[col_idx];
+			const auto source_idx = source.selection->get_index(input_idx);
+			const auto source_location = source.data + source_idx * source.width;
+			auto target_location = row_location + source.row_offset;
+			switch (source.width) {
+			case 1:
+				*target_location = *source_location;
+				break;
+			case 2:
+				Store<uint16_t>(Load<uint16_t>(source_location), target_location);
+				break;
+			case 4:
+				Store<uint32_t>(Load<uint32_t>(source_location), target_location);
+				break;
+			case 8:
+				Store<uint64_t>(Load<uint64_t>(source_location), target_location);
+				break;
+			case 16:
+				FastMemcpy(target_location, source_location, 16);
+				break;
+			default:
+				throw InternalException("Unsupported fixed-width row-store column width");
+			}
+		}
+	}
+
+	data_size += partition.data_size - size_before;
+	count += actual_append_count;
+	Verify();
+	return true;
+}
+
 void PartitionedTupleData::Append(PartitionedTupleDataAppendState &state, TupleDataChunkState &input,
                                   const idx_t append_count,
                                   optional_ptr<TupleDataRowLocationRemap> row_location_remap) {

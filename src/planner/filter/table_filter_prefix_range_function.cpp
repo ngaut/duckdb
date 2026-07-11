@@ -37,6 +37,8 @@
 #include "duckdb/storage/buffer_manager.hpp"
 #include "duckdb/planner/table_filter_state.hpp"
 
+#include <limits>
+
 namespace duckdb {
 
 AllocatedData AllocateBitmap(ClientContext &context, const idx_t word_count, uint64_t *&bitmap_begin) {
@@ -228,6 +230,28 @@ public:
 		return bitmap;
 	}
 
+	idx_t DistinctCountUpperBound() const {
+		if (!initialized) {
+			return 0;
+		}
+		idx_t occupied_buckets = 0;
+		for (idx_t word_idx = 0; word_idx < word_count; word_idx++) {
+			auto word = bitmap[word_idx];
+			while (word) {
+				word &= word - 1;
+				occupied_buckets++;
+			}
+		}
+		if (shift >= sizeof(idx_t) * 8) {
+			return std::numeric_limits<idx_t>::max();
+		}
+		const auto bucket_width = idx_t(1) << shift;
+		if (occupied_buckets > std::numeric_limits<idx_t>::max() / bucket_width) {
+			return std::numeric_limits<idx_t>::max();
+		}
+		return occupied_buckets * bucket_width;
+	}
+
 private:
 	static constexpr idx_t MAX_PREFIX_LENGTH = 20;
 	static constexpr idx_t CAP_BITS = 1ULL << MAX_PREFIX_LENGTH;
@@ -312,7 +336,8 @@ public:
 		return bitmap.template LookupKeys<T, NumericConverter<T>>(keys, result_sel, count);
 	}
 
-	idx_t LookupKeys(Vector &keys, const SelectionVector &sel, SelectionVector &result_sel, idx_t count) const override {
+	idx_t LookupKeys(Vector &keys, const SelectionVector &sel, SelectionVector &result_sel,
+	                 idx_t count) const override {
 		if (keys.GetVectorType() == VectorType::CONSTANT_VECTOR) {
 			if (!bitmap.template LookupOne<T, NumericConverter<T>>(keys.GetValue(0))) {
 				return 0;
@@ -334,6 +359,10 @@ public:
 		result.shift = bitmap.Shift();
 		result.bitmap = bitmap.BitmapData();
 		return true;
+	}
+
+	idx_t DistinctCountUpperBound() const override {
+		return bitmap.DistinctCountUpperBound();
 	}
 
 	FilterPropagateResult LookupRange(const Value &lower_bound, const Value &upper_bound) const override {
@@ -390,7 +419,8 @@ public:
 		return bitmap.template LookupKeys<string_t, StringPrefixConverter>(keys, result_sel, count);
 	}
 
-	idx_t LookupKeys(Vector &keys, const SelectionVector &sel, SelectionVector &result_sel, idx_t count) const override {
+	idx_t LookupKeys(Vector &keys, const SelectionVector &sel, SelectionVector &result_sel,
+	                 idx_t count) const override {
 		if (keys.GetVectorType() == VectorType::CONSTANT_VECTOR) {
 			if (!bitmap.template LookupOne<string_t, StringPrefixConverter>(keys.GetValue(0))) {
 				return 0;
@@ -405,6 +435,10 @@ public:
 
 	bool GetSignedLookupData(PrefixRangeLookupData &result) const override {
 		return false;
+	}
+
+	idx_t DistinctCountUpperBound() const override {
+		return bitmap.DistinctCountUpperBound();
 	}
 
 	FilterPropagateResult LookupRange(const Value &lower_bound, const Value &upper_bound) const override {

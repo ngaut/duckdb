@@ -39,10 +39,10 @@ TEST_CASE("JIT auto compiles decimal projection chains through fused regions", "
 		if (!IsCompiledSljitRegionEvent(event) || EventExecutionMode(event) != "native" ||
 		    event.candidate_traits.projection_count == 0) {
 			return false;
-			}
-			RequireGeneratedMachineCodeRegion(event);
-			RequireGeneratedSourceFilterContract(event);
-			REQUIRE(StringUtil::Contains(event.ir, "projection(native:expression-tree"));
+		}
+		RequireGeneratedMachineCodeRegion(event);
+		RequireGeneratedSourceFilterContract(event);
+		REQUIRE(StringUtil::Contains(event.ir, "projection(native:expression-tree"));
 		REQUIRE(!StringUtil::Contains(event.ir, "op3=projection(native"));
 		return true;
 	});
@@ -568,6 +568,41 @@ TEST_CASE("JIT owns large complex scan filters through source input layout", "[a
 	    });
 }
 
+TEST_CASE("JIT preserves ordered sink partitions for sparse generated source filters", "[api][jit]") {
+	DuckDB db;
+	Connection con(db);
+	auto &manager = ExecutionRegionManager::Get(*con.context);
+
+	ConfigureSljitForCoverage(con, false, true, true, 10000);
+	REQUIRE_NO_FAIL(con.Query("SET threads=4"));
+	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_sparse_parallel_source_filter AS "
+	                          "SELECT i::BIGINT AS i, "
+	                          "CASE WHEN i % 10000 = 0 THEN 'EUROPE' ELSE 'OTHER' END AS region "
+	                          "FROM range(1000000) tbl(i)"));
+
+	ClearJitTrace(manager, true);
+	REQUIRE_NO_FAIL(con.Query("CREATE TEMP TABLE jit_sparse_parallel_source_filter_output AS "
+	                          "SELECT i + 1 AS i "
+	                          "FROM jit_sparse_parallel_source_filter "
+	                          "WHERE region = 'EUROPE'"));
+	auto result = con.Query("SELECT count(*), sum(i) FROM jit_sparse_parallel_source_filter_output");
+	REQUIRE_NO_FAIL(*result);
+	REQUIRE(result->GetValue(0, 0).GetValue<int64_t>() == 100);
+	REQUIRE(result->GetValue(1, 0).GetValue<int64_t>() == 49500100);
+
+	RequireJitEvent(
+	    manager,
+	    [](const ExecutionRegionEvent &event) {
+		    return IsCompiledSljitRegionEvent(event) && event.candidate_traits.source_filter_count > 0 &&
+		           event.candidate_traits.sink_kind == ExecutionRegionSinkKind::MATERIALIZATION;
+	    },
+	    [](const ExecutionRegionEvent &event) { RequireGeneratedSourceFilterContract(event); });
+	RequireJitEvent(manager, [](const ExecutionRegionEvent &event) {
+		return IsSljitRegionEvent(event) && EventPhase(event) == "runtime" && EventStatus(event) == "executed" &&
+		       event.sink_next_batch_invocation_count > 0;
+	});
+}
+
 TEST_CASE("JIT auto planner cost skips source-only string filters", "[api][jit]") {
 	DuckDB db;
 	Connection con(db);
@@ -636,11 +671,11 @@ TEST_CASE("JIT auto preserves cheap source string equality filters under aggress
 	    [](const ExecutionRegionEvent &event) {
 		    return IsCompiledSljitRegionEvent(event) && event.candidate_traits.source_filter_count > 0 &&
 		           event.candidate_traits.projection_count > 0;
-		    },
-		    [](const ExecutionRegionEvent &event) {
-			    RequireGeneratedSourceFilterContract(event);
-			    RequireGeneratedMachineCodeRegion(event);
-		    });
+	    },
+	    [](const ExecutionRegionEvent &event) {
+		    RequireGeneratedSourceFilterContract(event);
+		    RequireGeneratedMachineCodeRegion(event);
+	    });
 	RequireNoUnsupportedReason(manager, "source filter references must be local to one scan column");
 }
 
@@ -879,12 +914,29 @@ TEST_CASE("JIT lowers integer modulo-by-constant with magic-multiply strength re
 		REQUIRE_FALSE(StringUtil::Contains(event.reason, "sljit-expression-lowering-unsupported"));
 	});
 
+	// Exercise full eight-row selector groups plus a tail with positive and negative remainders.
+	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_modulo_selector AS "
+	                          "SELECT (i - 1031)::BIGINT AS a FROM range(2063) tbl(i)"));
+	const string selector_query = "SELECT count(*), sum(a) FROM jit_modulo_selector WHERE a % 7 = 3";
+	REQUIRE_NO_FAIL(con.Query("SET jit_policy='off'"));
+	auto selector_reference = con.Query(selector_query);
+	REQUIRE_NO_FAIL(*selector_reference);
+	REQUIRE_NO_FAIL(con.Query("SET jit_policy='auto'"));
+	ClearJitTrace(manager, true);
+	auto selector_result = con.Query(selector_query);
+	REQUIRE_NO_FAIL(*selector_result);
+	REQUIRE(selector_result->GetValue(0, 0) == selector_reference->GetValue(0, 0));
+	REQUIRE(selector_result->GetValue(1, 0) == selector_reference->GetValue(1, 0));
+	RequireNativeSljitIr(manager, "native:typed-expression-tree", [](const ExecutionRegionEvent &event) {
+		REQUIRE_FALSE(StringUtil::Contains(event.reason, "sljit-expression-lowering-unsupported"));
+	});
+
 	// Modulo fused inside compound arithmetic still lowers as generated code and stays native-identical.
 	ClearJitTrace(manager, true);
 	result = con.Query("SELECT id FROM jit_modulo_predicate WHERE a IS NOT NULL AND (a * 3 - 1) % 5 = 2 ORDER BY id");
 	REQUIRE_NO_FAIL(*result);
 	auto reference = con.Query("SELECT id FROM jit_modulo_predicate WHERE a IS NOT NULL AND (a * 3 - 1) % 5 = 2 "
-	                          "ORDER BY id");
+	                           "ORDER BY id");
 	REQUIRE_NO_FAIL(*reference);
 	REQUIRE(result->RowCount() == reference->RowCount());
 

@@ -32,7 +32,7 @@ static bool TryExecuteDirectRowPointerGroupedTargetPayloadUpdate(
     const vector<ExecutionRowPointerGroupKeySource> &group_sources, const vector<idx_t> &payload_source_indices,
     const vector<const ExecutionPrimitiveAggregateUpdateLane *> &payload_lanes,
     ExecutionGroupedAggregateStateAddressBinding &grouped_state, SljitAggregatePayloadAdapterScratch &payload_scratch,
-	bool finish = true) {
+    bool finish = true) {
 	auto stage_start = SljitRegionStageStart(runtime);
 	const char *stage_name = "row_pointer_grouped_lookup_update";
 	const char *miss_stage_name = "row_pointer_grouped_lookup_update_miss";
@@ -73,18 +73,21 @@ static bool TryExecuteDirectRowPointerPreaggregatedPrimitiveUpdate(
 	auto &compact_row_pointers = scratch.AggregatePreaggregatedRowPointers(op_idx);
 	auto &preaggregate_scratch = scratch.AggregatePreaggregateScratch(op_idx);
 	idx_t compact_count = 0;
+	const char *failure_reason = "unknown";
 	auto preaggregate_stage_start = SljitRegionStageStart(runtime);
 	const bool preaggregated =
 	    uses_generated_payload_preaggregation
 	        ? SljitTryPreaggregateRowPointerFusedPrimitiveGroups(
 	              op, payload_input, row_pointers, group_sources, payload_source_indices, payload_lanes,
-	              compact_row_pointers, preaggregate_scratch, payload_scratch, compact_count)
+	              compact_row_pointers, preaggregate_scratch, payload_scratch, compact_count, failure_reason)
 	        : SljitTryPreaggregateRowPointerPrimitiveGroups(payload_input, row_pointers, group_sources,
 	                                                        payload_source_indices, payload_lanes, compact_row_pointers,
-	                                                        preaggregate_scratch, compact_count);
+	                                                        preaggregate_scratch, compact_count, failure_reason);
 	if (!preaggregated) {
 		scratch.RecordRowPointerPreaggregateResult(op_idx, false);
 		RecordSljitRegionRuntimePath(runtime, op.kind, "direct_row_pointer_preaggregated_groups_miss", count);
+		auto reason_path = string("direct_row_pointer_preaggregated_groups_miss.") + failure_reason;
+		RecordSljitRegionRuntimePath(runtime, op.kind, reason_path.c_str(), count);
 		return false;
 	}
 	scratch.RecordRowPointerPreaggregateResult(op_idx, true);
@@ -114,8 +117,8 @@ static bool TryExecuteDirectRowPointerPreaggregatedPrimitiveUpdate(
 	if (!updated) {
 		scratch.RecordRowPointerPreaggregateResult(op_idx, false);
 		scratch.RecordDirectNewAggregateUpdateResult(op_idx, false);
-		RecordSljitRegionStageRuntimePath(
-		    runtime, op_idx, op.kind, "row_pointer_preaggregated_grouped_primitive_update_miss", stage_start);
+		RecordSljitRegionStageRuntimePath(runtime, op_idx, op.kind,
+		                                  "row_pointer_preaggregated_grouped_primitive_update_miss", stage_start);
 		return false;
 	}
 
@@ -130,10 +133,10 @@ static bool TryExecuteDirectRowPointerPreaggregatedPrimitiveUpdate(
 		FinishGroupedAggregateStateUpdates(runtime, op_idx, grouped_state, "finish_grouped_state_updates");
 	}
 	scratch.RecordDirectNewAggregateUpdateResult(op_idx, true);
-	RecordSljitRegionStageRuntimePath(runtime, op_idx, op.kind,
-	                                  "row_pointer_preaggregated_grouped_primitive_update", stage_start);
-	RecordSljitRegionMaterializationElisionProof(runtime, op.kind,
-	                                             "row_pointer_preaggregated_grouped_primitive_update", count);
+	RecordSljitRegionStageRuntimePath(runtime, op_idx, op.kind, "row_pointer_preaggregated_grouped_primitive_update",
+	                                  stage_start);
+	RecordSljitRegionMaterializationElisionProof(runtime, op.kind, "row_pointer_preaggregated_grouped_primitive_update",
+	                                             count);
 	return true;
 }
 
@@ -250,10 +253,9 @@ static bool SljitTryExecuteRowPointerGroupedSplitPayloadUpdate(
 		        op.aggregate_update.plan.sink_info, payload_lanes, recorder, finish);
 	    });
 	scratch.RecordDirectNewAggregateUpdateResult(op_idx, updated);
-	RecordSljitRegionStageRuntimePath(runtime, op_idx, op.kind,
-	                                  updated ? "row_pointer_grouped_lookup_update"
-	                                          : "row_pointer_grouped_lookup_update_miss",
-	                                  stage_start);
+	RecordSljitRegionStageRuntimePath(
+	    runtime, op_idx, op.kind,
+	    updated ? "row_pointer_grouped_lookup_update" : "row_pointer_grouped_lookup_update_miss", stage_start);
 	if (updated) {
 		RecordSljitRegionMaterializationElisionProof(runtime, op.kind, "row_pointer_grouped_lookup_update", count);
 	}
@@ -265,7 +267,7 @@ static bool SljitTryExecuteNativeRowPointerGroupedAggregateUpdate(
     idx_t op_idx, SljitExecutableRegionOp &op, DataChunk &payload_input, Vector &row_pointers,
     const vector<ExecutionRowPointerGroupKeySource> &group_sources, const vector<idx_t> &payload_source_indices,
     bool defer_grouped_finish, optional_ptr<bool> deferred_grouped_finish,
-	bool source_key0_int64_to_int32_unchecked = false) {
+    bool source_key0_int64_to_int32_unchecked = false) {
 	auto record_unsupported = [&](const char *reason) {
 		auto path = string("row_pointer_grouped_lookup_update_unsupported.") + reason;
 		RecordSljitRegionRuntimePath(runtime, op.kind, path.c_str());

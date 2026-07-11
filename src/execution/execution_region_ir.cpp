@@ -23,8 +23,7 @@ static bool ExecutionRegionExpressionReferencesOnlyLocalSourceFilterInput(const 
 	if (expression.right && !ExecutionRegionExpressionReferencesOnlyLocalSourceFilterInput(*expression.right)) {
 		return false;
 	}
-	if (expression.else_node &&
-	    !ExecutionRegionExpressionReferencesOnlyLocalSourceFilterInput(*expression.else_node)) {
+	if (expression.else_node && !ExecutionRegionExpressionReferencesOnlyLocalSourceFilterInput(*expression.else_node)) {
 		return false;
 	}
 	for (auto &child : expression.children) {
@@ -118,8 +117,8 @@ static void AddExecutionRegionSourceFilters(const ExecutionSourceContract &descr
 			if (!filter.generated_source_stage_candidate) {
 				auto &input_types = descriptor.table_scan_contract.source_contract_input_types;
 				filter.reason = filter.scan_column_index < input_types.size()
-				                    ? GetExecutionRegionGeneratedSourceFilterCapability(*filter.expression,
-				                                                                         input_types[filter.scan_column_index])
+				                    ? GetExecutionRegionGeneratedSourceFilterCapability(
+				                          *filter.expression, input_types[filter.scan_column_index])
 				                          .blocker
 				                    : "source filter scan column is outside source input layout";
 			}
@@ -540,11 +539,15 @@ static void AccumulateExecutionRegionSourceTraits(const ExecutionRegionNode &nod
 	}
 
 	if (execution == ExecutionRegionSourceExecutionKind::SOURCE_CONTRACT) {
-		auto source_cardinality = node.source->estimated_source_cardinality;
+		auto source_cardinality = node.source->table_scan_contract.present
+		                              ? node.source->table_scan_contract.estimated_source_cardinality
+		                              : node.source->estimated_source_cardinality;
 		if (source_cardinality == 0) {
 			source_cardinality = node.estimated_cardinality;
 		}
 		traits.source_contract_input_cardinality = source_cardinality;
+		traits.finalized_dynamic_filter_cardinality_estimate =
+		    node.source->table_scan_contract.finalized_dynamic_filter_cardinality_estimate;
 		const bool stateful_hash_join_output_unknown =
 		    node.source->kind == ExecutionRegionSourceKind::STATEFUL_OPERATOR &&
 		    node.source->hash_join_contract.present && !node.source->estimated_source_cardinality_exact;
@@ -695,10 +698,45 @@ static ExecutionRegionCandidateTraits BuildExecutionRegionCandidateTraits(const 
 	return traits;
 }
 
+static bool ExecutionRegionNodeCannotExpandInput(const ExecutionRegionNode &node) {
+	if (node.kind == ExecutionRegionNodeKind::FILTER || node.kind == ExecutionRegionNodeKind::PROJECTION ||
+	    node.kind == ExecutionRegionNodeKind::SINK) {
+		return true;
+	}
+	if (node.kind != ExecutionRegionNodeKind::OPERATOR || !node.operator_info ||
+	    !node.operator_info->hash_join_contract.present) {
+		return false;
+	}
+	auto &join = node.operator_info->hash_join_contract;
+	return join.perfect_hash_probe_shape_ready || join.join_type == ExecutionRegionJoinType::SEMI ||
+	       join.join_type == ExecutionRegionJoinType::ANTI || join.join_type == ExecutionRegionJoinType::MARK;
+}
+
 static idx_t EstimateExecutionRegionCandidateCardinality(const ExecutionRegionIR &region_ir,
                                                          const ExecutionRegionCandidate &candidate) {
 	if (candidate.first_node < region_ir.nodes.size()) {
 		auto &source = region_ir.nodes[candidate.first_node];
+		const bool has_finalized_dynamic_filter_estimate =
+		    source.kind == ExecutionRegionNodeKind::SOURCE && source.source &&
+		    source.source->table_scan_contract.present &&
+		    source.source->table_scan_contract.finalized_dynamic_filter_cardinality_estimate;
+		if (has_finalized_dynamic_filter_estimate && source.estimated_cardinality == 0) {
+			return 0;
+		}
+		if (has_finalized_dynamic_filter_estimate &&
+		    source.estimated_cardinality < source.source->table_scan_contract.estimated_source_cardinality) {
+			bool source_estimate_caps_candidate = true;
+			for (idx_t node_idx = candidate.first_node + 1; node_idx < candidate.EndNode(); node_idx++) {
+				auto &node = region_ir.nodes[node_idx];
+				if (!ExecutionRegionNodeCannotExpandInput(node)) {
+					source_estimate_caps_candidate = false;
+					break;
+				}
+			}
+			if (source_estimate_caps_candidate) {
+				return source.estimated_cardinality;
+			}
+		}
 		if (source.kind == ExecutionRegionNodeKind::SOURCE && source.estimated_cardinality_exact) {
 			// Candidate admission is paid per source batch. Downstream physical estimates can be stale for state scans
 			// after finalization, so exact source cardinality must cap the runner cost model.

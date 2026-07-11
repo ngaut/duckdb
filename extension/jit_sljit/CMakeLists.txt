@@ -38,6 +38,7 @@ set(JIT_SLJIT_EXTENSION_FILES
     sljit_aggregate_ungrouped_typed_payload_codegen.cpp
     sljit_backend.cpp
     sljit_codegen_util.cpp
+    sljit_dense_group_preaggregation.cpp
     sljit_executable_aggregate_codegen.cpp
     sljit_executable_aggregate_filtered_codegen.cpp
     sljit_executable_aggregate_payload_codegen.cpp

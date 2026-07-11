@@ -99,11 +99,16 @@ static void SljitFlushPendingInputVectorAggregateBatch(ExecutionRegionRuntime &r
 		                             pending_count);
 	}
 	string input_vector_failure;
+	if (!strategy.pending_preaggregated_input_vector_groups) {
+		strategy.pending_preaggregated_input_vector_groups =
+		    make_shared_ptr<SljitPendingPreaggregatedPrimitiveGroupBatch>();
+	}
 	if (!SljitTryExecuteNativeInputVectorGroupedAggregateUpdate(
 	        runtime, runtime.ExecutionOperators(), scratch, aggregate_idx, aggregate_op, aggregate_input,
 	        batch_group_sources, strategy.descriptor.payload_source_indices, true, batch.deferred_grouped_finish,
-	        batch.source_key0_int64_to_int32_unchecked, dense_domain_ptr,
-	        optional_ptr<string>(&input_vector_failure))) {
+	        batch.source_key0_int64_to_int32_unchecked, dense_domain_ptr, optional_ptr<string>(&input_vector_failure),
+	        optional_ptr<SljitPendingPreaggregatedPrimitiveGroupBatch>(
+	            strategy.pending_preaggregated_input_vector_groups.get()))) {
 		throw InternalException("SLJIT batched direct input-vector aggregate update failed: %s",
 		                        input_vector_failure.empty() ? "unknown" : input_vector_failure.c_str());
 	}
@@ -112,13 +117,23 @@ static void SljitFlushPendingInputVectorAggregateBatch(ExecutionRegionRuntime &r
 	batch.Reset();
 }
 
-static bool SljitCanPreclassifyStringSetComplementarySumBatch(
-    SljitExecutableRegionOp &aggregate_op, SljitJoinProjectionAggregateDescriptor &descriptor,
-    DataChunk &aggregate_input, SljitStringSetComplementarySumDescriptor &classification) {
-	return ExecutionRowPointerGroupKeySourcesAreRowPointerFields(descriptor.group_sources) &&
-	       SljitTryBindStringSetComplementarySumDescriptor(aggregate_op, descriptor.payload_source_indices,
-	                                                       classification) &&
-	       SljitStringSetComplementarySumInputIsVarchar(aggregate_input, classification);
+static optional_ptr<const SljitStringSetComplementarySumDescriptor>
+SljitGetDirectJoinOutputStringSetClassification(SljitDirectJoinOutputAggregateStrategy &strategy,
+                                                SljitExecutableRegionOp &aggregate_op, DataChunk &aggregate_input) {
+	auto &descriptor = strategy.descriptor;
+	if (!strategy.string_set_classification_checked ||
+	    strategy.string_set_classification_payload_sources != descriptor.payload_source_indices) {
+		strategy.string_set_classification_checked = true;
+		strategy.string_set_classification_payload_sources = descriptor.payload_source_indices;
+		strategy.string_set_classification_ready = SljitTryBindStringSetComplementarySumDescriptor(
+		    aggregate_op, descriptor.payload_source_indices, strategy.string_set_classification);
+	}
+	if (!strategy.string_set_classification_ready ||
+	    !ExecutionRowPointerGroupKeySourcesAreRowPointerFields(descriptor.group_sources) ||
+	    !SljitStringSetComplementarySumInputIsVarchar(aggregate_input, strategy.string_set_classification)) {
+		return nullptr;
+	}
+	return &strategy.string_set_classification;
 }
 
 static void
@@ -146,10 +161,11 @@ SljitAppendPreclassifiedStringSetComplementarySumBatch(SljitPendingRowPointerAgg
 		}
 		target_validity.SetValid(target_idx);
 		auto predicate = predicate_data[predicate_idx];
-		target_data[target_idx] = SljitStringEqualsConstant(predicate, classification.constants[0]) ||
-		                                  SljitStringEqualsConstant(predicate, classification.constants[1])
-		                              ? 1
-		                              : 0;
+		target_data[target_idx] =
+		    SljitStringEqualsConstant(predicate, classification.constants[0], classification.signatures[0]) ||
+		            SljitStringEqualsConstant(predicate, classification.constants[1], classification.signatures[1])
+		        ? 1
+		        : 0;
 	}
 	classified_input.SetChildCardinality(old_count + append_count);
 }
@@ -182,12 +198,11 @@ static void SljitAppendPendingRowPointerAggregateBatch(
     ExecutionRegionRuntime &runtime, idx_t aggregate_idx, SljitExecutableRegionOp &aggregate_op,
     SljitJoinProjectionAggregateDescriptor &descriptor, SljitPendingRowPointerAggregateBatch &batch,
     SljitRegionExecutionScratch &scratch, optional_ptr<bool> deferred_grouped_finish, DataChunk &aggregate_input,
-    Vector &row_pointers, bool source_key0_int64_to_int32_unchecked) {
+    Vector &row_pointers, bool source_key0_int64_to_int32_unchecked,
+    optional_ptr<const SljitStringSetComplementarySumDescriptor> classification) {
 	batch.scratch = &scratch;
 	batch.deferred_grouped_finish = deferred_grouped_finish;
-	SljitStringSetComplementarySumDescriptor classification;
-	const bool use_preclassified =
-	    SljitCanPreclassifyStringSetComplementarySumBatch(aggregate_op, descriptor, aggregate_input, classification);
+	const bool use_preclassified = classification != nullptr;
 	if (batch.Count() != 0 && batch.uses_preclassified_input != use_preclassified) {
 		SljitFlushPendingRowPointerAggregateBatch(runtime, aggregate_idx, aggregate_op, descriptor, batch);
 	}
@@ -215,13 +230,43 @@ static void SljitAppendPendingRowPointerAggregateBatch(
 		}
 	}
 	if (use_preclassified) {
-		SljitAppendPreclassifiedStringSetComplementarySumBatch(batch, classification, aggregate_input);
+		SljitAppendPreclassifiedStringSetComplementarySumBatch(batch, *classification, aggregate_input);
 	} else if (batch.input.ColumnCount() == 0) {
 		batch.input.SetChildCardinality(batch.Count() + aggregate_input.size());
 	} else {
 		batch.input.Append(aggregate_input, VectorAppendMode::ERROR_ON_NO_SPACE);
 	}
 	batch.row_pointers.Append(row_pointers, aggregate_input.size(), VectorAppendMode::ERROR_ON_NO_SPACE);
+}
+
+static void SljitFlushPendingDirectInputVectorAggregate(ExecutionRegionRuntime &runtime,
+                                                        SljitExecutableRegionOp &aggregate_op,
+                                                        SljitDirectJoinOutputAggregateStrategy &strategy) {
+	if (strategy.pending_input_vector_batch.Count() != 0) {
+		if (!strategy.pending_input_vector_batch.scratch) {
+			throw InternalException("SLJIT batched direct input-vector aggregate has no scratch state");
+		}
+		SljitFlushPendingInputVectorAggregateBatch(runtime, *strategy.pending_input_vector_batch.scratch,
+		                                           strategy.aggregate_idx, aggregate_op, strategy);
+	}
+	if (strategy.pending_preaggregated_input_vector_groups &&
+	    strategy.pending_preaggregated_input_vector_groups->HasPending()) {
+		if (!strategy.pending_input_vector_batch.scratch) {
+			throw InternalException("SLJIT pending direct input-vector preaggregation has no scratch state");
+		}
+		auto &scratch = *strategy.pending_input_vector_batch.scratch;
+		auto &binding = scratch.SinkBinding(strategy.aggregate_idx);
+		if (!binding.ready || !binding.aggregate_update.ready || !binding.aggregate_update.grouped_state.ready ||
+		    !binding.aggregate_update.grouped_state.state) {
+			throw InternalException("SLJIT pending direct input-vector preaggregation has no grouped state");
+		}
+		if (!SljitFlushPendingPreaggregatedPrimitiveGroups(
+		        runtime, scratch, strategy.aggregate_idx, aggregate_op,
+		        *strategy.pending_preaggregated_input_vector_groups, binding.aggregate_update.grouped_state,
+		        strategy.pending_input_vector_batch.deferred_grouped_finish)) {
+			throw InternalException("SLJIT pending direct input-vector preaggregation flush failed");
+		}
+	}
 }
 
 static void SljitFlushDirectJoinOutputAggregate(ExecutionRegionRuntime &runtime, vector<SljitExecutableRegionOp> &ops,
@@ -234,13 +279,7 @@ static void SljitFlushDirectJoinOutputAggregate(ExecutionRegionRuntime &runtime,
 		throw InternalException("SLJIT direct join-output aggregate index is out of range");
 	}
 	auto &aggregate_op = ops[strategy.aggregate_idx];
-	if (strategy.pending_input_vector_batch.Count() != 0) {
-		if (!strategy.pending_input_vector_batch.scratch) {
-			throw InternalException("SLJIT batched direct input-vector aggregate has no scratch state");
-		}
-		SljitFlushPendingInputVectorAggregateBatch(runtime, *strategy.pending_input_vector_batch.scratch,
-		                                           strategy.aggregate_idx, aggregate_op, strategy);
-	}
+	SljitFlushPendingDirectInputVectorAggregate(runtime, aggregate_op, strategy);
 	SljitFlushPendingRowPointerAggregateBatch(runtime, strategy.aggregate_idx, aggregate_op, strategy.descriptor,
 	                                          strategy.pending_batch);
 }

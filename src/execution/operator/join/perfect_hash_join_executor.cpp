@@ -203,6 +203,7 @@ bool PerfectHashJoinExecutor::GetExecutionPerfectHashJoinTableLayout(
 	layout.is_build_dense = perfect_join_statistics.is_build_dense;
 	layout.build_range = perfect_join_statistics.build_range;
 	layout.build_capacity = perfect_join_statistics.build_range + 1;
+	layout.build_unique_count = unique_keys;
 	layout.build_validity = bitmap_build_idx.GetData();
 	layout.rhs_output_column_count = perfect_hash_table.size();
 	layout.rhs_output_types = join.rhs_output_columns.col_types;

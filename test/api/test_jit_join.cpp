@@ -8,6 +8,8 @@ TEST_CASE("JIT hash join build protocol compiles only inside generated fused reg
 	auto &manager = ExecutionRegionManager::Get(*con.context);
 
 	ConfigureSljitForCoverage(con, false, true, true, 10000);
+	// Exercise the build protocol from generated expression work without over-crediting protocol stages.
+	REQUIRE_NO_FAIL(con.Query("SET jit_cbo_generated_stage_benefit=256"));
 	string lhs_key = "i";
 	string rhs_key = "j";
 	for (idx_t term_idx = 1; term_idx <= 60; term_idx++) {
@@ -152,6 +154,8 @@ TEST_CASE("JIT primitive sequence composes projection filter projection before h
 	auto &manager = ExecutionRegionManager::Get(*con.context);
 
 	ConfigureSljitForCoverage(con, false, true, true, 10000);
+	// Exercise the build protocol from generated expression work without over-crediting protocol stages.
+	REQUIRE_NO_FAIL(con.Query("SET jit_cbo_generated_stage_benefit=256"));
 	REQUIRE_NO_FAIL(con.Query("SET disabled_optimizers='filter_pushdown,expression_rewriter'"));
 	string lhs_key = "i";
 	string rhs_key = "p";
@@ -190,8 +194,7 @@ TEST_CASE("JIT primitive sequence composes projection filter projection before h
 	    [](const ExecutionRegionEvent &event) {
 		    auto stage_counts = EventGeneratedStageCountBreakdown(event);
 		    return EventPhase(event) == "runtime" && EventStatus(event) == "executed" &&
-		           EventExecutionMode(event) == "native" &&
-		           StringUtil::Contains(stage_counts, "op0:projection.") &&
+		           EventExecutionMode(event) == "native" && StringUtil::Contains(stage_counts, "op0:projection.") &&
 		           StringUtil::Contains(stage_counts, "op1:filter.selection=") &&
 		           StringUtil::Contains(stage_counts, "op2:projection.") &&
 		           StringUtil::Contains(stage_counts, "op3:hash_join_build.reference_keys=");
@@ -397,6 +400,52 @@ TEST_CASE("JIT hash join probe generates native probe with append sink", "[api][
 	REQUIRE(StringUtil::Contains(analyzed_plan, "hash_join_probe."));
 	REQUIRE(StringUtil::Contains(analyzed_plan, "\"lazy_codegen_time_us\""));
 	REQUIRE(StringUtil::Contains(analyzed_plan, "\"generated_stage_runtime_breakdown\""));
+}
+
+TEST_CASE("JIT hash join selected output appends through a primitive recipe", "[api][jit]") {
+	DuckDB db;
+	Connection con(db);
+	auto &manager = ExecutionRegionManager::Get(*con.context);
+
+	ConfigureSljitForCoverage(con, false, true, true, 10000);
+	REQUIRE_NO_FAIL(con.Query("SET threads=1"));
+	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_selected_append_l AS "
+	                          "SELECT (i % 128)::BIGINT AS k, i::BIGINT AS v FROM range(65536) tbl(i)"));
+	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_selected_append_r AS "
+	                          "SELECT i::BIGINT AS k, (i * 3)::BIGINT AS w FROM range(64) tbl(i)"));
+
+	const string query = "WITH matched AS MATERIALIZED ("
+	                     "SELECT l.k, l.v, r.w FROM jit_selected_append_l l "
+	                     "JOIN jit_selected_append_r r ON l.k = r.k"
+	                     ") SELECT count(*), sum(k), sum(v), sum(w) FROM matched";
+	REQUIRE_NO_FAIL(con.Query("SET jit_policy='off'"));
+	auto reference = con.Query(query);
+	REQUIRE_NO_FAIL(*reference);
+
+	REQUIRE_NO_FAIL(con.Query("SET jit_policy='auto'"));
+	ClearJitTrace(manager);
+	auto result = con.Query(query);
+	REQUIRE_NO_FAIL(*result);
+	REQUIRE(result->RowCount() == reference->RowCount());
+	REQUIRE(result->ColumnCount() == reference->ColumnCount());
+	for (idx_t col_idx = 0; col_idx < result->ColumnCount(); col_idx++) {
+		REQUIRE(result->GetValue(col_idx, 0).ToString() == reference->GetValue(col_idx, 0).ToString());
+	}
+
+	RequireJitEvent(
+	    manager,
+	    [](const ExecutionRegionEvent &event) {
+		    return EventPhase(event) == "runtime" && EventStatus(event) == "executed" &&
+		           EventExecutionMode(event) == "native" &&
+		           HasJitRuntimePathPrefix(event, "append_sink.hash_join_selected_append_view");
+	    },
+	    [](const ExecutionRegionEvent &event) {
+		    auto stages = EventGeneratedStageRuntimeBreakdown(event);
+		    REQUIRE(StringUtil::Contains(stages, "hash_join_probe.selected_append_view="));
+		    REQUIRE(StringUtil::Contains(stages, "append_sink.selected_append_sink="));
+		    REQUIRE_FALSE(StringUtil::Contains(stages, "hash_join_probe.materialize_output="));
+		    REQUIRE(EventJitRuntimeDelegationCounts(event).empty());
+	    });
 }
 
 TEST_CASE("JIT hash join probe preserves selected reference source view", "[api][jit]") {
@@ -1364,9 +1413,7 @@ TEST_CASE("JIT row-pointer grouped aggregate probes compressed string keys as si
 		           EventExecutionMode(event) == "native" && HasJitAggregateUpdatePath(event) &&
 		           HasHashJoinProbeRuntimePath(event);
 	    },
-	    [](const ExecutionRegionEvent &event) {
-		    RequireHashProbeAggregateUpdateRuntimeOwnership(event);
-	    });
+	    [](const ExecutionRegionEvent &event) { RequireHashProbeAggregateUpdateRuntimeOwnership(event); });
 }
 
 TEST_CASE("JIT two-join grouped aggregate uses selected projection aggregate backend", "[api][jit]") {
@@ -1568,17 +1615,17 @@ TEST_CASE("JIT multi-join aggregate composes generic join-prefix projection chai
 
 	RequireJitEvent(
 	    manager,
-		    [](const ExecutionRegionEvent &event) {
-			    return EventPhase(event) == "runtime" && EventStatus(event) == "executed" &&
-			           EventExecutionMode(event) == "native" && HasJitAggregateUpdatePath(event) &&
-			           HasHashJoinProbeRuntimePath(event) &&
-			           GeneratedOperatorStageEntryCount(event, "hash_join_probe") >= 3;
-		    },
-		    [](const ExecutionRegionEvent &event) {
-			    RequireHashProbeAggregateUpdateRuntimeOwnership(event);
-			    REQUIRE(GeneratedOperatorStageExecutionCount(event, "hash_join_probe") > 0);
-			    REQUIRE(HasGeneratedAggregateUpdateStage(event));
-		    });
+	    [](const ExecutionRegionEvent &event) {
+		    return EventPhase(event) == "runtime" && EventStatus(event) == "executed" &&
+		           EventExecutionMode(event) == "native" && HasJitAggregateUpdatePath(event) &&
+		           HasHashJoinProbeRuntimePath(event) &&
+		           GeneratedOperatorStageEntryCount(event, "hash_join_probe") >= 3;
+	    },
+	    [](const ExecutionRegionEvent &event) {
+		    RequireHashProbeAggregateUpdateRuntimeOwnership(event);
+		    REQUIRE(GeneratedOperatorStageExecutionCount(event, "hash_join_probe") > 0);
+		    REQUIRE(HasGeneratedAggregateUpdateStage(event));
+	    });
 }
 
 TEST_CASE("JIT single mark filter aggregate uses projected source grouped update", "[api][jit]") {
@@ -1935,11 +1982,13 @@ TEST_CASE("JIT mark filter projection delimiter sink uses selected join input", 
 	    manager,
 	    [](const ExecutionRegionEvent &event) {
 		    return EventPhase(event) == "runtime" && EventStatus(event) == "executed" &&
-		           EventExecutionMode(event) == "native" && HasJitDelimJoinSinkRuntimePath(event);
+		           EventExecutionMode(event) == "native" && HasJitDelimJoinSinkRuntimePath(event) &&
+		           StringUtil::Contains(EventGeneratedStageCountBreakdown(event), "selected_sink_batch_append");
 	    },
 	    [](const ExecutionRegionEvent &event) {
 		    REQUIRE(HasJitDelimJoinSinkRuntimePath(event));
 		    REQUIRE(HasGeneratedDelimJoinSinkStage(event));
+		    REQUIRE(StringUtil::Contains(EventGeneratedStageCountBreakdown(event), "selected_sink_batch_append"));
 	    });
 
 	REQUIRE_NO_FAIL(con.Query("SET jit_policy='off'"));
@@ -1990,9 +2039,7 @@ TEST_CASE("JIT mark filter reference aggregate slices selected projection", "[ap
 		    return EventPhase(event) == "runtime" && EventStatus(event) == "executed" &&
 		           EventExecutionMode(event) == "native" && HasJitAggregateUpdatePath(event);
 	    },
-	    [](const ExecutionRegionEvent &event) {
-		    RequireGeneratedAggregateUpdateRuntimeOwnership(event);
-	    });
+	    [](const ExecutionRegionEvent &event) { RequireGeneratedAggregateUpdateRuntimeOwnership(event); });
 
 	REQUIRE_NO_FAIL(con.Query("SET jit_policy='off'"));
 	auto diff = con.Query("SELECT count(*) FROM ("

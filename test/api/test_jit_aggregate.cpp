@@ -26,10 +26,10 @@ TEST_CASE("JIT ungrouped aggregate sinks use native state-update contracts", "[a
 		if (!event.has_candidate || !event.candidate_contract.OwnsSink() ||
 		    event.candidate_traits.sink_kind != ExecutionRegionSinkKind::UNGROUPED_AGGREGATE_UPDATE) {
 			continue;
-			}
-			found_aggregate_update = true;
-			RequireGeneratedMachineCodeRegion(event);
-			RequireGeneratedSourceFilterContract(event);
+		}
+		found_aggregate_update = true;
+		RequireGeneratedMachineCodeRegion(event);
+		RequireGeneratedSourceFilterContract(event);
 		REQUIRE(event.candidate_contract.missing_contract_count == 0);
 		REQUIRE(StringUtil::Contains(event.reason, "native aggregate update sink contract"));
 		REQUIRE(StringUtil::Contains(event.reason, "ungrouped-aggregate-native-state-update"));
@@ -166,7 +166,8 @@ TEST_CASE("JIT fuses generated filters into primitive ungrouped aggregate reduce
 	REQUIRE(found_filtered_aggregate);
 }
 
-TEST_CASE("JIT filtered aggregate remaps expression-tree sources after generated source-filter projection", "[api][jit]") {
+TEST_CASE("JIT filtered aggregate remaps expression-tree sources after generated source-filter projection",
+          "[api][jit]") {
 	DuckDB db;
 	Connection con(db);
 	auto &manager = ExecutionRegionManager::Get(*con.context);
@@ -806,7 +807,6 @@ TEST_CASE("JIT regular hash aggregate updates mixed preaggregated groups directl
 			REQUIRE(result->GetValue(col_idx, row_idx).ToString() == reference->GetValue(col_idx, row_idx).ToString());
 		}
 	}
-
 	RequireJitEvent(
 	    manager,
 	    [](const ExecutionRegionEvent &event) {
@@ -820,9 +820,7 @@ TEST_CASE("JIT regular hash aggregate updates mixed preaggregated groups directl
 	    [](const ExecutionRegionEvent &event) {
 		    return IsGeneratedAggregateUpdateRuntime(event) && HasGeneratedAggregateUpdateStage(event);
 	    },
-	    [](const ExecutionRegionEvent &event) {
-		    RequireGeneratedAggregateUpdateRuntimeOwnership(event);
-	    });
+	    [](const ExecutionRegionEvent &event) { RequireGeneratedAggregateUpdateRuntimeOwnership(event); });
 }
 
 TEST_CASE("JIT projected grouped primitive updates existing groups directly", "[api][jit]") {
@@ -858,13 +856,9 @@ TEST_CASE("JIT projected grouped primitive updates existing groups directly", "[
 			REQUIRE(result->GetValue(col_idx, row_idx).ToString() == reference->GetValue(col_idx, row_idx).ToString());
 		}
 	}
-
 	RequireJitEvent(
-	    manager,
-	    [](const ExecutionRegionEvent &event) { return IsGeneratedAggregateUpdateRuntime(event); },
-	    [](const ExecutionRegionEvent &event) {
-		    RequireGeneratedAggregateUpdateRuntimeOwnership(event);
-	    });
+	    manager, [](const ExecutionRegionEvent &event) { return IsGeneratedAggregateUpdateRuntime(event); },
+	    [](const ExecutionRegionEvent &event) { RequireGeneratedAggregateUpdateRuntimeOwnership(event); });
 }
 
 TEST_CASE("JIT preaggregated grouped aggregate avoids source-row reserve", "[api][jit]") {
@@ -960,7 +954,6 @@ TEST_CASE("JIT join-expanded unique group keys reserve input-vector aggregate gr
 			REQUIRE(result->GetValue(col_idx, row_idx).ToString() == reference->GetValue(col_idx, row_idx).ToString());
 		}
 	}
-
 	RequireJitEvent(
 	    manager,
 	    [](const ExecutionRegionEvent &event) {
@@ -1022,13 +1015,122 @@ TEST_CASE("JIT count-star distribution aggregate uses dense preaggregated groups
 			REQUIRE(result->GetValue(col_idx, row_idx).ToString() == reference->GetValue(col_idx, row_idx).ToString());
 		}
 	}
+	RequireJitEvent(
+	    manager, [](const ExecutionRegionEvent &event) { return IsGeneratedAggregateUpdateRuntime(event); },
+	    [](const ExecutionRegionEvent &event) { RequireGeneratedAggregateUpdateRuntimeOwnership(event); });
+}
+
+TEST_CASE("JIT direct join aggregate accumulates dense count-one groups across batches", "[api][jit]") {
+	DuckDB db;
+	Connection con(db);
+	auto &manager = ExecutionRegionManager::Get(*con.context);
+
+	ConfigureSljitForCoverage(con, false, true, true, 10000);
+	REQUIRE_NO_FAIL(con.Query("PRAGMA threads=1"));
+	REQUIRE_NO_FAIL(con.Query("SET perfect_ht_threshold=0"));
+	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_dense_pending_count_lhs AS "
+	                          "SELECT i::BIGINT AS id FROM range(1, 150001) tbl(i)"));
+	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_dense_pending_count_rhs AS "
+	                          "SELECT ((i * 7919) % 150000 + 1)::BIGINT AS id, i::BIGINT AS seq "
+	                          "FROM range(1500000) tbl(i)"));
+	REQUIRE_NO_FAIL(con.Query("VACUUM jit_dense_pending_count_lhs"));
+	REQUIRE_NO_FAIL(con.Query("VACUUM jit_dense_pending_count_rhs"));
+
+	const string query = "SELECT lhs.id, count(rhs.seq) AS c "
+	                     "FROM jit_dense_pending_count_lhs lhs "
+	                     "LEFT JOIN jit_dense_pending_count_rhs rhs ON lhs.id = rhs.id "
+	                     "GROUP BY lhs.id";
+	REQUIRE_NO_FAIL(con.Query("SET jit_policy='off'"));
+	REQUIRE_NO_FAIL(con.Query("CREATE TEMP TABLE jit_dense_pending_count_reference AS " + query));
+
+	ConfigureSljitForCoverageSettings(con, false, true, true, 10000);
+	ClearJitTrace(manager, true);
+	REQUIRE_NO_FAIL(con.Query("CREATE TEMP TABLE jit_dense_pending_count_output AS " + query));
+	auto result_shape = con.Query("SELECT count(*), min(c), max(c) FROM jit_dense_pending_count_output");
+	REQUIRE_NO_FAIL(*result_shape);
+	REQUIRE(result_shape->GetValue(0, 0).ToString() == "150000");
+	REQUIRE(result_shape->GetValue(1, 0).ToString() == "10");
+	REQUIRE(result_shape->GetValue(2, 0).ToString() == "10");
+	auto difference = con.Query("SELECT count(*) FROM ("
+	                            "  (SELECT * FROM jit_dense_pending_count_output EXCEPT ALL "
+	                            "   SELECT * FROM jit_dense_pending_count_reference) UNION ALL "
+	                            "  (SELECT * FROM jit_dense_pending_count_reference EXCEPT ALL "
+	                            "   SELECT * FROM jit_dense_pending_count_output)"
+	                            ") differences");
+	REQUIRE_NO_FAIL(*difference);
+	REQUIRE(difference->GetValue(0, 0).ToString() == "0");
+	string observed_runtime_paths;
+	for (auto &event : manager.GetEvents()) {
+		if (EventPhase(event) == "runtime") {
+			observed_runtime_paths += EventJitRuntimePathCounts(event) + "\n";
+		}
+	}
+	INFO(observed_runtime_paths);
 
 	RequireJitEvent(
 	    manager,
-	    [](const ExecutionRegionEvent &event) { return IsGeneratedAggregateUpdateRuntime(event); },
 	    [](const ExecutionRegionEvent &event) {
-		    RequireGeneratedAggregateUpdateRuntimeOwnership(event);
-	    });
+		    if (EventPhase(event) != "runtime" || event.backend_name != "sljit") {
+			    return false;
+		    }
+		    auto runtime_paths = EventJitRuntimePathCounts(event);
+		    return StringUtil::Contains(runtime_paths,
+		                                "aggregate_update.pending_dense_single_lane_grouped_update=1500000") &&
+		           StringUtil::Contains(runtime_paths,
+		                                "aggregate_update.pending_dense_single_lane_grouped_update_flush=1500000");
+	    },
+	    [](const ExecutionRegionEvent &event) { RequireGeneratedAggregateUpdateRuntimeOwnership(event); });
+}
+
+TEST_CASE("JIT sorted grouped sums buffer compact runs across input batches", "[api][jit]") {
+	DuckDB db;
+	Connection con(db);
+	auto &manager = ExecutionRegionManager::Get(*con.context);
+
+	ConfigureSljitForCoverage(con, false, true, true, 10000);
+	REQUIRE_NO_FAIL(con.Query("PRAGMA threads=1"));
+	REQUIRE_NO_FAIL(con.Query("SET perfect_ht_threshold=0"));
+	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_sorted_grouped_sum AS "
+	                          "SELECT (i // 3)::BIGINT AS group_id, (i % 97)::INTEGER AS value "
+	                          "FROM range(32768) tbl(i)"));
+
+	const string query = "SELECT group_id, sum(value) AS value_sum "
+	                     "FROM jit_sorted_grouped_sum GROUP BY group_id";
+	REQUIRE_NO_FAIL(con.Query("SET jit_policy='off'"));
+	REQUIRE_NO_FAIL(con.Query("CREATE TEMP TABLE jit_sorted_grouped_sum_reference AS " + query));
+
+	ConfigureSljitForCoverageSettings(con, false, true, true, 10000);
+	REQUIRE_NO_FAIL(con.Query("SET jit_cbo_generated_stage_benefit=1"));
+	ClearJitTrace(manager, true);
+	REQUIRE_NO_FAIL(con.Query("CREATE TEMP TABLE jit_sorted_grouped_sum_output AS " + query));
+	auto difference = con.Query("SELECT count(*) FROM ("
+	                            "  (SELECT * FROM jit_sorted_grouped_sum_output EXCEPT ALL "
+	                            "   SELECT * FROM jit_sorted_grouped_sum_reference) UNION ALL "
+	                            "  (SELECT * FROM jit_sorted_grouped_sum_reference EXCEPT ALL "
+	                            "   SELECT * FROM jit_sorted_grouped_sum_output)"
+	                            ") differences");
+	REQUIRE_NO_FAIL(*difference);
+	REQUIRE(difference->GetValue(0, 0).ToString() == "0");
+	string observed_runtime_paths;
+	for (auto &event : manager.GetEvents()) {
+		if (EventPhase(event) == "runtime") {
+			observed_runtime_paths += EventJitRuntimePathCounts(event) + "\n";
+		}
+	}
+	INFO(observed_runtime_paths);
+
+	RequireJitEvent(
+	    manager,
+	    [](const ExecutionRegionEvent &event) {
+		    if (EventPhase(event) != "runtime" || event.backend_name != "sljit") {
+			    return false;
+		    }
+		    const auto runtime_paths = EventJitRuntimePathCounts(event);
+		    return StringUtil::Contains(runtime_paths,
+		                                "aggregate_update.pending_preaggregated_grouped_update_flush=32768") &&
+		           StringUtil::Contains(runtime_paths, "aggregate_update.pending_preaggregated_group_boundary_merge=");
+	    },
+	    [](const ExecutionRegionEvent &event) { RequireGeneratedAggregateUpdateRuntimeOwnership(event); });
 }
 
 TEST_CASE("JIT count-star grouped aggregate uses row-delta backend for high-cardinality batches", "[api][jit]") {
@@ -1163,11 +1265,8 @@ TEST_CASE("JIT regular hash aggregate fuses typed expression payloads with nativ
 	    });
 
 	RequireJitEvent(
-	    manager,
-	    [](const ExecutionRegionEvent &event) { return IsGeneratedAggregateUpdateRuntime(event); },
-	    [](const ExecutionRegionEvent &event) {
-		    RequireGeneratedAggregateUpdateRuntimeOwnership(event);
-	    });
+	    manager, [](const ExecutionRegionEvent &event) { return IsGeneratedAggregateUpdateRuntime(event); },
+	    [](const ExecutionRegionEvent &event) { RequireGeneratedAggregateUpdateRuntimeOwnership(event); });
 }
 
 TEST_CASE("JIT regular hash aggregate fuses typed expression payloads for existing groups", "[api][jit]") {
@@ -1218,8 +1317,7 @@ TEST_CASE("JIT regular hash aggregate fuses typed expression payloads for existi
 	    });
 
 	RequireJitEvent(
-	    manager,
-	    [](const ExecutionRegionEvent &event) { return IsGeneratedAggregateUpdateRuntime(event); },
+	    manager, [](const ExecutionRegionEvent &event) { return IsGeneratedAggregateUpdateRuntime(event); },
 	    [](const ExecutionRegionEvent &event) {
 		    RequireGeneratedAggregateUpdateRuntimeOwnership(event);
 		    REQUIRE_FALSE(StringUtil::Contains(EventGeneratedStageCountBreakdown(event),
@@ -1344,8 +1442,7 @@ TEST_CASE("JIT regular hash aggregate fuses INT32 CASE payloads into hugeint gro
 	    });
 
 	RequireJitEvent(
-	    manager,
-	    [](const ExecutionRegionEvent &event) { return IsGeneratedAggregateUpdateRuntime(event); },
+	    manager, [](const ExecutionRegionEvent &event) { return IsGeneratedAggregateUpdateRuntime(event); },
 	    [](const ExecutionRegionEvent &event) { RequireGeneratedAggregateUpdateRuntimeOwnership(event); });
 }
 
@@ -1836,10 +1933,11 @@ TEST_CASE("JIT grouped distinct aggregate uses explicit distinct key sink", "[ap
 	                          "       (i % 251)::INTEGER AS supp_id "
 	                          "FROM range(65536) tbl(i)"));
 
-	const string query = "SELECT brand_id + 1 AS brand_key, type_id, size_id, count(DISTINCT supp_id) AS supplier_count "
-	                     "FROM jit_grouped_distinct_input "
-	                     "GROUP BY brand_key, type_id, size_id "
-	                     "ORDER BY brand_key, type_id, size_id";
+	const string query =
+	    "SELECT brand_id + 1 AS brand_key, type_id, size_id, count(DISTINCT supp_id) AS supplier_count "
+	    "FROM jit_grouped_distinct_input "
+	    "GROUP BY brand_key, type_id, size_id "
+	    "ORDER BY brand_key, type_id, size_id";
 	REQUIRE_NO_FAIL(con.Query("SET jit_policy='off'"));
 	auto reference = con.Query(query);
 	REQUIRE_NO_FAIL(*reference);
@@ -1866,7 +1964,10 @@ TEST_CASE("JIT grouped distinct aggregate uses explicit distinct key sink", "[ap
 	    },
 	    [](const ExecutionRegionEvent &event) {
 		    REQUIRE(event.runner_cost.materialization_elision_count == 0);
-		    REQUIRE(event.runner_cost.native_aggregate_stage_count > 0);
+		    REQUIRE(event.runner_cost.native_aggregate_stage_count == 0);
+		    REQUIRE(event.runner_cost.generated_backend_stage_count > 0);
+		    REQUIRE(event.runner_cost.generated_grouped_aggregate_stage_count > 0);
+		    REQUIRE(StringUtil::Contains(event.reason, "distinct_key_fast_insert:1"));
 	    });
 
 	RequireJitEvent(
@@ -1874,13 +1975,118 @@ TEST_CASE("JIT grouped distinct aggregate uses explicit distinct key sink", "[ap
 	    [](const ExecutionRegionEvent &event) {
 		    return EventPhase(event) == "runtime" && EventStatus(event) == "executed" &&
 		           event.backend_name == "sljit" &&
-		           StringUtil::Contains(EventJitRuntimePathCounts(event), "aggregate_update.distinct_key_sink=");
+		           StringUtil::Contains(EventJitRuntimePathCounts(event), "aggregate_update.distinct_key_fast_insert=");
 	    },
 	    [](const ExecutionRegionEvent &event) {
 		    auto stage_counts = EventGeneratedStageCountBreakdown(event);
-		    REQUIRE(StringUtil::Contains(stage_counts, "aggregate_update.distinct_key_sink="));
-		    REQUIRE(StringUtil::Contains(EventJitRuntimeDelegationCounts(event),
-		                                 "aggregate_update.distinct_key_sink="));
+		    REQUIRE(StringUtil::Contains(stage_counts, "aggregate_update.distinct_key_fast_insert."));
+		    REQUIRE(EventJitRuntimeDelegationCounts(event).empty());
+	    });
+}
+
+TEST_CASE("JIT grouped distinct direct count handles nullable and variable-width keys", "[api][jit]") {
+	DuckDB db;
+	Connection con(db);
+	auto &manager = ExecutionRegionManager::Get(*con.context);
+
+	ConfigureSljitForCoverage(con, false, true, true, 10000);
+	REQUIRE_NO_FAIL(con.Query("PRAGMA threads=1"));
+	REQUIRE_NO_FAIL(con.Query("SET jit_cbo_generated_stage_benefit=1048576"));
+	REQUIRE_NO_FAIL(con.Query("SET jit_cbo_native_operator_stage_benefit=1048576"));
+	REQUIRE_NO_FAIL(con.Query("SET perfect_ht_threshold=0"));
+	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_nullable_distinct_input AS "
+	                          "SELECT CASE WHEN i % 19 = 0 THEN NULL ELSE (i % 257)::INTEGER END AS group_id, "
+	                          "       CASE WHEN i % 13 = 0 THEN NULL ELSE (i % 509)::INTEGER END AS supp_id "
+	                          "FROM range(65536) tbl(i)"));
+	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_string_distinct_input AS "
+	                          "SELECT 'group-' || (i % 257)::VARCHAR AS group_id, "
+	                          "       'supplier-' || (i % 509)::VARCHAR AS supp_id "
+	                          "FROM range(65536) tbl(i)"));
+
+	auto verify_query = [&](const string &query, bool require_fixed_pair) {
+		REQUIRE_NO_FAIL(con.Query("SET jit_policy='off'"));
+		auto reference = con.Query(query);
+		REQUIRE_NO_FAIL(*reference);
+		REQUIRE_NO_FAIL(con.Query("SET jit_policy='auto'"));
+		ClearJitTrace(manager, true);
+		auto result = con.Query(query);
+		REQUIRE_NO_FAIL(*result);
+		REQUIRE(result->RowCount() == reference->RowCount());
+		for (idx_t row_idx = 0; row_idx < result->RowCount(); row_idx++) {
+			for (idx_t col_idx = 0; col_idx < result->ColumnCount(); col_idx++) {
+				REQUIRE(result->GetValue(col_idx, row_idx).ToString() ==
+				        reference->GetValue(col_idx, row_idx).ToString());
+			}
+		}
+		RequireJitEvent(
+		    manager,
+		    [](const ExecutionRegionEvent &event) {
+			    return EventPhase(event) == "runtime" && EventStatus(event) == "executed" &&
+			           event.backend_name == "sljit" &&
+			           StringUtil::Contains(EventGeneratedStageCountBreakdown(event),
+			                                "aggregate_update.distinct_key_fast_insert.direct_group_identity_count=");
+		    },
+		    [require_fixed_pair](const ExecutionRegionEvent &event) {
+			    auto stage_counts = EventGeneratedStageCountBreakdown(event);
+			    REQUIRE(EventJitRuntimeDelegationCounts(event).empty());
+			    REQUIRE(StringUtil::Contains(stage_counts,
+			                                 "aggregate_update.distinct_key_fast_insert.direct_fixed_pair_probe=") ==
+			            require_fixed_pair);
+		    });
+	};
+
+	verify_query("SELECT group_id, count(DISTINCT supp_id) FROM jit_nullable_distinct_input "
+	             "GROUP BY group_id ORDER BY group_id NULLS FIRST",
+	             true);
+	verify_query("SELECT group_id, count(DISTINCT supp_id) FROM jit_string_distinct_input "
+	             "GROUP BY group_id ORDER BY group_id",
+	             false);
+}
+
+TEST_CASE("JIT grouped distinct keeps exact parallel fallback", "[api][jit]") {
+	DuckDB db;
+	Connection con(db);
+	auto &manager = ExecutionRegionManager::Get(*con.context);
+
+	ConfigureSljitForCoverage(con, false, true, true, 10000);
+	REQUIRE_NO_FAIL(con.Query("PRAGMA threads=4"));
+	REQUIRE_NO_FAIL(con.Query("SET jit_cbo_generated_stage_benefit=1048576"));
+	REQUIRE_NO_FAIL(con.Query("SET jit_cbo_native_operator_stage_benefit=1048576"));
+	REQUIRE_NO_FAIL(con.Query("SET perfect_ht_threshold=0"));
+	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_parallel_distinct_input AS "
+	                          "SELECT (i % 127)::INTEGER AS group_id, (i % 1009)::INTEGER AS supp_id "
+	                          "FROM range(262144) tbl(i)"));
+	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_parallel_distinct_blocked AS "
+	                          "SELECT (i * 17 % 1009)::INTEGER AS supp_id FROM range(29) tbl(i)"));
+
+	const string query = "SELECT group_id, count(DISTINCT supp_id) FROM jit_parallel_distinct_input "
+	                     "WHERE supp_id NOT IN (SELECT supp_id FROM jit_parallel_distinct_blocked) "
+	                     "GROUP BY group_id ORDER BY group_id";
+	REQUIRE_NO_FAIL(con.Query("SET jit_policy='off'"));
+	auto reference = con.Query(query);
+	REQUIRE_NO_FAIL(*reference);
+	REQUIRE_NO_FAIL(con.Query("SET jit_policy='auto'"));
+	ClearJitTrace(manager, true);
+	auto result = con.Query(query);
+	REQUIRE_NO_FAIL(*result);
+	REQUIRE(result->RowCount() == reference->RowCount());
+	for (idx_t row_idx = 0; row_idx < result->RowCount(); row_idx++) {
+		for (idx_t col_idx = 0; col_idx < result->ColumnCount(); col_idx++) {
+			REQUIRE(result->GetValue(col_idx, row_idx).ToString() == reference->GetValue(col_idx, row_idx).ToString());
+		}
+	}
+	RequireJitEvent(
+	    manager,
+	    [](const ExecutionRegionEvent &event) {
+		    return EventPhase(event) == "runtime" && EventStatus(event) == "executed" &&
+		           event.backend_name == "sljit" &&
+		           StringUtil::Contains(EventJitRuntimePathCounts(event), "aggregate_update.distinct_key_fast_insert=");
+	    },
+	    [](const ExecutionRegionEvent &event) {
+		    REQUIRE_FALSE(
+		        StringUtil::Contains(EventGeneratedStageCountBreakdown(event),
+		                             "aggregate_update.distinct_key_fast_insert.direct_group_identity_count="));
+		    REQUIRE(EventJitRuntimeDelegationCounts(event).empty());
 	    });
 }
 
@@ -1906,12 +2112,11 @@ TEST_CASE("JIT projected grouped distinct aggregate uses selected reference dist
 	                          "SELECT (i * 13 % 251)::BIGINT AS supp_id "
 	                          "FROM range(23) tbl(i)"));
 
-	const string query =
-	    "SELECT brand_key, type_id, size_id, count(DISTINCT supp_id) AS supplier_count "
-	    "FROM jit_projected_distinct_item "
-	    "WHERE supp_id NOT IN (SELECT supp_id FROM jit_projected_distinct_blocked) "
-	    "GROUP BY brand_key, type_id, size_id "
-	    "ORDER BY brand_key, type_id, size_id";
+	const string query = "SELECT brand_key, type_id, size_id, count(DISTINCT supp_id) AS supplier_count "
+	                     "FROM jit_projected_distinct_item "
+	                     "WHERE supp_id NOT IN (SELECT supp_id FROM jit_projected_distinct_blocked) "
+	                     "GROUP BY brand_key, type_id, size_id "
+	                     "ORDER BY brand_key, type_id, size_id";
 	REQUIRE_NO_FAIL(con.Query("SET jit_policy='off'"));
 	auto reference = con.Query(query);
 	REQUIRE_NO_FAIL(*reference);
@@ -1939,7 +2144,10 @@ TEST_CASE("JIT projected grouped distinct aggregate uses selected reference dist
 	    },
 	    [](const ExecutionRegionEvent &event) {
 		    REQUIRE(event.runner_cost.materialization_elision_count == 0);
-		    REQUIRE(event.runner_cost.native_aggregate_stage_count > 0);
+		    REQUIRE(event.runner_cost.native_aggregate_stage_count == 0);
+		    REQUIRE(event.runner_cost.generated_backend_stage_count > 0);
+		    REQUIRE(event.runner_cost.generated_grouped_aggregate_stage_count > 0);
+		    REQUIRE(StringUtil::Contains(event.reason, "distinct_key_fast_insert:1"));
 	    });
 
 	RequireJitEvent(
@@ -1952,9 +2160,8 @@ TEST_CASE("JIT projected grouped distinct aggregate uses selected reference dist
 	    },
 	    [](const ExecutionRegionEvent &event) {
 		    auto stage_counts = EventGeneratedStageCountBreakdown(event);
-		    REQUIRE(StringUtil::Contains(stage_counts, "aggregate_update.distinct_key_selected_sink="));
-		    REQUIRE(StringUtil::Contains(EventJitRuntimeDelegationCounts(event),
-		                                 "aggregate_update.distinct_key_selected_sink="));
+		    REQUIRE(StringUtil::Contains(stage_counts, "aggregate_update.distinct_key_fast_insert."));
+		    REQUIRE(EventJitRuntimeDelegationCounts(event).empty());
 	    });
 }
 
@@ -1982,13 +2189,12 @@ TEST_CASE("JIT grouped distinct aggregate feeds MARK probe from selected join vi
 	                          "SELECT (i * 13 % 251)::BIGINT AS supp_id "
 	                          "FROM range(23) tbl(i)"));
 
-	const string query =
-	    "SELECT d.family_name, d.class_name, d.size_code, count(DISTINCT f.supp_id) AS supplier_count "
-	    "FROM jit_distinct_two_probe_fact f "
-	    "JOIN jit_distinct_two_probe_dim d ON f.item_id = d.item_id "
-	    "WHERE f.supp_id NOT IN (SELECT supp_id FROM jit_distinct_two_probe_blocked) "
-	    "GROUP BY d.family_name, d.class_name, d.size_code "
-	    "ORDER BY supplier_count DESC, d.family_name, d.class_name, d.size_code";
+	const string query = "SELECT d.family_name, d.class_name, d.size_code, count(DISTINCT f.supp_id) AS supplier_count "
+	                     "FROM jit_distinct_two_probe_fact f "
+	                     "JOIN jit_distinct_two_probe_dim d ON f.item_id = d.item_id "
+	                     "WHERE f.supp_id NOT IN (SELECT supp_id FROM jit_distinct_two_probe_blocked) "
+	                     "GROUP BY d.family_name, d.class_name, d.size_code "
+	                     "ORDER BY supplier_count DESC, d.family_name, d.class_name, d.size_code";
 	REQUIRE_NO_FAIL(con.Query("SET jit_policy='off'"));
 	auto reference = con.Query(query);
 	REQUIRE_NO_FAIL(*reference);
@@ -2017,9 +2223,11 @@ TEST_CASE("JIT grouped distinct aggregate feeds MARK probe from selected join vi
 	    [](const ExecutionRegionEvent &event) {
 		    auto stage_counts = EventGeneratedStageCountBreakdown(event);
 		    REQUIRE(StringUtil::Contains(stage_counts, "mark_probe_input_view="));
-		    REQUIRE(StringUtil::Contains(EventJitRuntimePathCounts(event), "aggregate_update.projected_distinct_key_sink="));
-		    REQUIRE(StringUtil::Contains(EventJitRuntimeDelegationCounts(event),
-		                                 "aggregate_update.distinct_key_sink="));
+		    REQUIRE(StringUtil::Contains(EventJitRuntimePathCounts(event),
+		                                 "aggregate_update.projected_distinct_key_sink="));
+		    REQUIRE(
+		        StringUtil::Contains(EventJitRuntimePathCounts(event), "aggregate_update.distinct_key_fast_insert="));
+		    REQUIRE(EventJitRuntimeDelegationCounts(event).empty());
 	    });
 }
 
@@ -2074,11 +2282,11 @@ TEST_CASE("JIT gates perfect-hash aggregate updates with generated source filter
 		    return IsCompiledSljitRegionEvent(event) && event.has_candidate &&
 		           event.candidate_traits.sink_kind == ExecutionRegionSinkKind::PERFECT_HASH_AGGREGATE_UPDATE &&
 		           StringUtil::Contains(event.ir, "grouped_state_lookup=generated-perfect-hash");
-		    },
-		    [](const ExecutionRegionEvent &event) {
-			    RequireGeneratedMachineCodeRegion(event);
-			    RequireGeneratedSourceFilterContract(event);
-			    REQUIRE(StringUtil::Contains(event.ir, "native:typed-expression-tree"));
+	    },
+	    [](const ExecutionRegionEvent &event) {
+		    RequireGeneratedMachineCodeRegion(event);
+		    RequireGeneratedSourceFilterContract(event);
+		    REQUIRE(StringUtil::Contains(event.ir, "native:typed-expression-tree"));
 		    REQUIRE(StringUtil::Contains(event.ir, "aggregate_update(kind=perfect-hash"));
 	    });
 }
@@ -2160,6 +2368,61 @@ TEST_CASE("JIT perfect hash aggregate generates primitive decimal sum and count 
 		    StringUtil::Contains(EventGeneratedStageRuntimeBreakdown(event), "resolve_grouped_state_addresses"));
 	}
 	REQUIRE(found_runtime);
+}
+
+TEST_CASE("JIT perfect hash aggregate fuses computed smallint group expressions", "[api][jit]") {
+	DuckDB db;
+	Connection con(db);
+	auto &manager = ExecutionRegionManager::Get(*con.context);
+
+	ConfigureSljitForCoverage(con, false, true, true, 10000);
+	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_perfect_hash_smallint_group AS "
+	                          "SELECT i::BIGINT AS i FROM range(200000) tbl(i)"));
+	const string query = "SELECT i % 1000 AS key, sum(i * 31) AS value "
+	                     "FROM jit_perfect_hash_smallint_group GROUP BY key ORDER BY key";
+
+	REQUIRE_NO_FAIL(con.Query("SET jit_policy='off'"));
+	auto reference = con.Query(query);
+	REQUIRE_NO_FAIL(*reference);
+	REQUIRE(reference->RowCount() == 1000);
+
+	REQUIRE_NO_FAIL(con.Query("SET jit_policy='auto'"));
+	ClearJitTrace(manager, true);
+	auto result = con.Query(query);
+	REQUIRE_NO_FAIL(*result);
+	REQUIRE(result->RowCount() == reference->RowCount());
+	for (idx_t row_idx = 0; row_idx < result->RowCount(); row_idx++) {
+		for (idx_t col_idx = 0; col_idx < result->ColumnCount(); col_idx++) {
+			REQUIRE(result->GetValue(col_idx, row_idx).ToString() == reference->GetValue(col_idx, row_idx).ToString());
+		}
+	}
+
+	RequireJitEvent(
+	    manager,
+	    [](const ExecutionRegionEvent &event) {
+		    return IsCompiledSljitRegionEvent(event) && event.has_candidate &&
+		           event.candidate_traits.sink_kind == ExecutionRegionSinkKind::PERFECT_HASH_AGGREGATE_UPDATE &&
+		           StringUtil::Contains(event.ir, "perfect_hash_group_projection_composed=true");
+	    },
+	    [](const ExecutionRegionEvent &event) {
+		    RequireGeneratedMachineCodeRegion(event);
+		    REQUIRE(StringUtil::Contains(event.ir, "grouped_state_lookup=generated-perfect-hash"));
+		    REQUIRE(StringUtil::Contains(event.ir, "native:typed-expression-tree"));
+	    });
+
+	RequireJitEvent(
+	    manager,
+	    [](const ExecutionRegionEvent &event) {
+		    return IsGeneratedAggregateUpdateRuntime(event) &&
+		           StringUtil::Contains(EventGeneratedStageCountBreakdown(event),
+		                                "aggregate_update.primitive_payload_update_fused=");
+	    },
+	    [](const ExecutionRegionEvent &event) {
+		    REQUIRE(StringUtil::Contains(EventJitRuntimePathCounts(event),
+		                                 "fused_payload_update_owns_perfect_hash_group_lookup="));
+		    REQUIRE_FALSE(
+		        StringUtil::Contains(EventGeneratedStageRuntimeBreakdown(event), "resolve_grouped_state_addresses"));
+	    });
 }
 
 TEST_CASE("JIT hash aggregate cast-only keys use native state addresses", "[api][jit]") {

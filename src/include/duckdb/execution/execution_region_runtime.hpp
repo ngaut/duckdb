@@ -102,6 +102,8 @@ public:
 	virtual idx_t MaxChunks() const = 0;
 	virtual idx_t MaxThreads() const = 0;
 	virtual Allocator &GetAllocator() = 0;
+	//! Whether source chunks must remain separate to preserve the sink's partition protocol.
+	virtual bool PreserveSourceChunkBoundaries() const = 0;
 	virtual SourceResultType FetchSourceContract(DataChunk *&result) = 0;
 	virtual SinkNextBatchType AdvanceSinkBatch(DataChunk &source_chunk, bool have_more_output) = 0;
 	virtual ExecutionOperatorRuntime &ExecutionOperators() = 0;
