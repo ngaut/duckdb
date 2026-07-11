@@ -298,6 +298,14 @@ PhysicalRunnerCostInput BuildExecutionRegionCandidateCostInput(const ExecutionRe
 	input.uses_scan_filters = lowering_plan.UsesScanFilters();
 	auto &backend_facts = lowering_plan.capability_facts;
 	input.native_grouped_state_address_lookup_count = backend_facts.backend_native_state_address_lookup_count;
+	const auto direct_hash_join_build_count =
+	    MinValue(input.native_hash_join_build_sink_count, backend_facts.backend_direct_hash_join_build_count);
+	if (direct_hash_join_build_count > 0) {
+		input.native_hash_join_build_sink_count -= direct_hash_join_build_count;
+		input.generated_stage_count += direct_hash_join_build_count;
+		input.generated_backend_stage_count += direct_hash_join_build_count;
+		input.has_accelerated_work = true;
+	}
 	const auto distinct_key_fast_insert_count =
 	    MinValue(input.native_aggregate_stage_count, backend_facts.backend_distinct_key_fast_insert_count);
 	if (distinct_key_fast_insert_count > 0) {
@@ -337,11 +345,17 @@ PhysicalRunnerCostInput
 BuildExecutionRegionPipelineCandidateUpperBoundCostInput(const PhysicalRunnerCostInput &pipeline_input) {
 	auto input = pipeline_input;
 	input.input_scope = PhysicalRunnerCostInputScope::EXECUTION_REGION_CANDIDATE;
-	const auto native_backend_stage_count = input.native_join_stage_count + input.native_aggregate_stage_count;
+	const auto hash_join_build_backend_stage_count =
+	    input.native_join_stage_count == 0 ? input.native_hash_join_build_sink_count : 0;
+	const auto native_backend_stage_count =
+	    input.native_join_stage_count + input.native_aggregate_stage_count + hash_join_build_backend_stage_count;
 	input.generated_stage_count += native_backend_stage_count;
 	input.generated_backend_stage_count += native_backend_stage_count;
 	input.generated_grouped_aggregate_stage_count += input.native_grouped_aggregate_stage_count;
 	input.native_grouped_state_address_lookup_count += input.native_grouped_aggregate_stage_count;
+	if (hash_join_build_backend_stage_count > 0) {
+		input.native_hash_join_build_sink_count = 0;
+	}
 	input.native_sort_stage_count = 0;
 	input.has_accelerated_work = input.has_accelerated_work || input.generated_stage_count > 0 ||
 	                             input.generated_backend_stage_count > 0 || input.materialization_elision_count > 0 ||

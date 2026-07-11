@@ -12,6 +12,10 @@
 
 namespace duckdb {
 
+//! Stable query-local identity shared by a runtime filter and the operator state that owns it.
+//! Identity equality is the proof that both sides describe the same finalized membership set.
+struct ExecutionRuntimeFilterIdentity {};
+
 enum class ExecutionRegionCompileStatus : uint8_t { COMPILED, SKIPPED, UNSUPPORTED, UNAVAILABLE, DISABLED, ERROR };
 enum class ExecutionRegionExecutionMode : uint8_t { NONE, NATIVE, GPU, VECTORIZED, UNSUPPORTED };
 enum class ExecutionRegionLoweringKind : uint8_t { NATIVE, BOUNDARY };

@@ -142,6 +142,25 @@ bool SljitTryAnalyzeHashJoinBuildSink(const vector<SljitExecutableRegionOp> &ops
 	return true;
 }
 
+bool SljitTryAnalyzeSourceHashJoinBuildSink(const vector<SljitExecutableRegionOp> &ops,
+                                            SljitSourceHashJoinBuildSinkFacts &facts) {
+	facts = SljitSourceHashJoinBuildSinkFacts();
+	if (ops.empty() || ops.back().kind != SljitNativeRegionOpKind::HASH_JOIN_BUILD) {
+		return false;
+	}
+	for (idx_t op_idx = 0; op_idx + 1 < ops.size(); op_idx++) {
+		switch (ops[op_idx].kind) {
+		case SljitNativeRegionOpKind::FILTER:
+		case SljitNativeRegionOpKind::PROJECTION:
+			break;
+		default:
+			return false;
+		}
+	}
+	facts.sink_idx = ops.size() - 1;
+	return true;
+}
+
 bool SljitTryAnalyzeSourceUngroupedAggregate(const vector<SljitExecutableRegionOp> &ops,
                                              SljitSourceUngroupedAggregateFacts &facts) {
 	facts = SljitSourceUngroupedAggregateFacts();

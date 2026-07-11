@@ -136,6 +136,7 @@ struct SljitNativeHashJoinProbePlan {
 	bool mark_build_match_after_residual = false;
 	bool residual_predicate = false;
 	bool perfect_hash_probe = false;
+	shared_ptr<ExecutionRuntimeFilterIdentity> exact_source_filter_identity;
 	idx_t found_match_offset = 0;
 	idx_t pointer_offset = 0;
 	ExecutionHashJoinProbeOutputMode output_mode = ExecutionHashJoinProbeOutputMode::NONE;

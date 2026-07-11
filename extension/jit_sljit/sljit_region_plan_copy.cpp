@@ -141,6 +141,7 @@ SljitNativeHashJoinProbePlan SljitNativeHashJoinProbePlan::Copy(bool copy_ir) co
 	result.mark_build_match_after_residual = mark_build_match_after_residual;
 	result.residual_predicate = residual_predicate;
 	result.perfect_hash_probe = perfect_hash_probe;
+	result.exact_source_filter_identity = exact_source_filter_identity;
 	result.found_match_offset = found_match_offset;
 	result.pointer_offset = pointer_offset;
 	result.output_mode = output_mode;

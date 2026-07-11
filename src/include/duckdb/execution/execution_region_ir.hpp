@@ -17,6 +17,11 @@ namespace duckdb {
 
 static constexpr idx_t HIGH_COST_GENERATED_PROJECTION_EXPRESSION_COST = 1000;
 
+struct ExecutionRegionExactFilterProof {
+	idx_t source_input_index = DConstants::INVALID_INDEX;
+	shared_ptr<ExecutionRuntimeFilterIdentity> identity;
+};
+
 struct ExecutionRegionSourceFilter {
 	idx_t filter_index = 0;
 	idx_t scan_column_index = 0;
@@ -353,6 +358,7 @@ struct ExecutionRegionSourceInfo {
 	bool dynamic_filters = false;
 	bool in_out_function = false;
 	vector<ExecutionRegionSourceFilter> filters;
+	vector<ExecutionRegionExactFilterProof> exact_filter_proofs;
 	ExecutionRegionTableScanContract table_scan_contract;
 	ExecutionRegionHashJoinContract hash_join_contract;
 	ExecutionRegionNestedLoopJoinContract nested_loop_join_contract;

@@ -709,6 +709,17 @@ string DescribeExecutionRegionSourceInfo(const ExecutionRegionSourceInfo &source
 	result += ",dynamic_filters=" + ExecutionRegionBool(source.dynamic_filters);
 	result += ",in_out_function=" + ExecutionRegionBool(source.in_out_function);
 	result += ",filter_count=" + std::to_string(source.filters.size());
+	result += ",exact_filter_proof_count=" + std::to_string(source.exact_filter_proofs.size());
+	if (!source.exact_filter_proofs.empty()) {
+		result += ",exact_filter_proof_inputs=[";
+		for (idx_t proof_idx = 0; proof_idx < source.exact_filter_proofs.size(); proof_idx++) {
+			if (proof_idx > 0) {
+				result += "|";
+			}
+			result += std::to_string(source.exact_filter_proofs[proof_idx].source_input_index);
+		}
+		result += "]";
+	}
 	if (!source.table_scan_contract.ir.empty()) {
 		result += "," + source.table_scan_contract.ir;
 	}

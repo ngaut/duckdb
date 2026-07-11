@@ -612,6 +612,22 @@ public:
 		    dense_domain);
 	}
 
+	bool TryEnableProvenUniqueAppend(DataChunk &groups) override {
+		if (!CanUseSingleGroupingState()) {
+			return false;
+		}
+		auto single_grouping = GetSingleGroupingSinkState();
+		return single_grouping.grouping.table_data.TryEnableProvenUniqueAppend(context, single_grouping.input, groups);
+	}
+
+	void RequireAppendFinalCombine() override {
+		if (!CanUseSingleGroupingState()) {
+			return;
+		}
+		auto single_grouping = GetSingleGroupingSinkState();
+		single_grouping.grouping.table_data.RequireAppendFinalCombine(context, single_grouping.input);
+	}
+
 	bool TryResolveNewGroups(DataChunk &input, const ExecutionRegionSinkInfo &sink_info, Vector &addresses,
 	                         optional_ptr<ExecutionOperatorStageRecorder> recorder = nullptr,
 	                         bool finish = true) override {

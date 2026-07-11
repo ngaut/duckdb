@@ -132,6 +132,24 @@ GENERIC_WORKLOADS = (
         "requires_compiled_auto": True,
     },
     {
+        "name": "grouped_dense_multi_aggregate",
+        "setup_sql": (
+            "CREATE OR REPLACE TABLE __jit_generic_dense_multi AS "
+            "SELECT i::BIGINT AS i FROM range(20000000) tbl(i);"
+        ),
+        "sql": (
+            "SELECT (i % 8)::SMALLINT AS key, "
+            "sum(i * 31 + i % 97) AS total, "
+            "sum(CASE WHEN i % 7 = 3 THEN i ELSE 0 END) AS selected, "
+            "count(*) AS row_count "
+            "FROM __jit_generic_dense_multi GROUP BY key ORDER BY key"
+        ),
+        "minimum_auto_speedup": 0.0,
+        "minimum_auto_speedup_by_threads": {1: 1.80, 4: 1.60},
+        "max_auto_slowdown": 1.05,
+        "requires_compiled_auto": True,
+    },
+    {
         "name": "grouped_sorted_runs",
         "setup_sql": (
             "CREATE OR REPLACE TABLE __jit_generic_sorted_runs AS "
@@ -145,7 +163,7 @@ GENERIC_WORKLOADS = (
             ") grouped"
         ),
         "minimum_auto_speedup": 0.0,
-        "minimum_auto_speedup_by_threads": {1: 1.15, 4: 1.00},
+        "minimum_auto_speedup_by_threads": {1: 1.20, 4: 1.05},
         "max_auto_slowdown": 1.05,
         "requires_compiled_auto": True,
     },
@@ -177,6 +195,28 @@ GENERIC_WORKLOADS = (
         "minimum_auto_speedup": 0.0,
         "max_auto_slowdown": 1.05,
         "requires_compiled_auto": False,
+    },
+    {
+        "name": "join_exact_filter_build",
+        "setup_sql": (
+            "CREATE OR REPLACE TABLE __jit_generic_exact_fact AS "
+            "SELECT (i % 500000)::INTEGER AS filter_key, i::BIGINT AS join_key, "
+            "(i % 97)::BIGINT AS payload FROM range(8000000) tbl(i); "
+            "CREATE OR REPLACE TABLE __jit_generic_exact_filter AS "
+            "SELECT ((i * 251) % 500000)::INTEGER AS filter_key FROM range(2000) tbl(i); "
+            "CREATE OR REPLACE TABLE __jit_generic_exact_probe AS "
+            "SELECT i::BIGINT AS join_key FROM range(8000000) tbl(i);"
+        ),
+        "sql": (
+            "SELECT sum(selected.payload) AS value FROM __jit_generic_exact_probe probe "
+            "JOIN (SELECT fact.join_key, fact.payload "
+            "      FROM __jit_generic_exact_fact fact "
+            "      JOIN __jit_generic_exact_filter filter USING (filter_key)) selected "
+            "USING (join_key)"
+        ),
+        "minimum_auto_speedup": 1.08,
+        "max_auto_slowdown": 1.05,
+        "requires_compiled_auto": True,
     },
     {
         "name": "join_string_complementary_grouped_sum",
@@ -294,7 +334,22 @@ def run_workload(
 ) -> dict:
     workload_name = workload["name"]
     result_table = f"__jit_generic_result_{workload_name}_{policy}_{repeat}"
-    setup_sql = jit_setup_sql(
+    preparation_sql = ""
+    workload_setup_sql = workload.get("setup_sql", "")
+    if workload_setup_sql or create_expected:
+        preparation_sql = jit_setup_sql(
+            args,
+            "off",
+            trace_runtime=False,
+            trace_decisions=False,
+            event_log_size=0,
+        )
+        preparation_sql += workload_setup_sql
+    if create_expected:
+        preparation_sql += (
+            f"\nCREATE OR REPLACE TABLE {expected_table} AS\n{workload['sql']};"
+        )
+    setup_sql = preparation_sql + jit_setup_sql(
         args,
         policy,
         trace_runtime=args.trace_runtime,
@@ -302,9 +357,6 @@ def run_workload(
         reset_events=True,
         reset_counters=True,
     )
-    pre_sql = workload.get("setup_sql", "")
-    if create_expected:
-        pre_sql += f"\nCREATE OR REPLACE TABLE {expected_table} AS\n{workload['sql']};"
     artifact_path = out_dir / f"{workload_name}_{policy}_{repeat}.json"
     attempt = timed_materialized_attempt(
         args,
@@ -314,7 +366,6 @@ def run_workload(
         workload["sql"],
         artifact_path,
         f"generic workload {workload_name} {policy} repeat {repeat}",
-        pre_sql=pre_sql,
         validation_sql=correctness_sql(expected_table, result_table),
         cleanup_sql=f"DROP TABLE IF EXISTS {result_table};",
         collect_counters=True,

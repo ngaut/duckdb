@@ -41,6 +41,9 @@ public:
 	const LogicalType &GetKeyType() const;
 	bool BuildPerfectHashTable();
 	bool GetExecutionPerfectHashJoinTableLayout(ExecutionPerfectHashJoinTableLayout &layout) const;
+	const shared_ptr<ExecutionRuntimeFilterIdentity> &GetRuntimeFilterIdentity() const {
+		return runtime_filter_identity;
+	}
 
 	unique_ptr<OperatorState> GetOperatorState(ExecutionContext &context);
 	OperatorResultType ProbePerfectHashTable(ExecutionContext &context, DataChunk &input, DataChunk &lhs_output_columns,
@@ -48,6 +51,9 @@ public:
 
 	void FillSelectionVectorSwitchProbe(const Vector &source, const idx_t &count, SelectionVector &probe_sel_vec,
 	                                    idx_t &probe_sel_count, optional_ptr<SelectionVector> build_sel_vec) const;
+	idx_t FilterSelection(const UnifiedVectorFormat &source, const LogicalType &source_type,
+	                      optional_ptr<const SelectionVector> input_sel, idx_t count,
+	                      SelectionVector &result_sel) const;
 
 private:
 	template <bool BUILD_SEL_VEC>
@@ -56,6 +62,20 @@ private:
 	template <typename T, bool BUILD_SEL_VEC>
 	void TemplatedFillSelectionVectorProbe(const Vector &source, const idx_t &count, SelectionVector &probe_sel_vec,
 	                                       idx_t &probe_sel_count, SelectionVector *build_sel_vec) const;
+	template <typename SOURCE, typename TARGET, bool HAS_NULL>
+	idx_t TemplatedFilterSelection(const UnifiedVectorFormat &source, optional_ptr<const SelectionVector> input_sel,
+	                               idx_t count, SelectionVector &result_sel) const;
+	template <typename SOURCE, typename TARGET, bool HAS_NULL, bool BUILD_DENSE>
+	idx_t TemplatedFilterSelectionLayoutSwitch(const UnifiedVectorFormat &source,
+	                                           optional_ptr<const SelectionVector> input_sel, idx_t count,
+	                                           SelectionVector &result_sel) const;
+	template <typename SOURCE, typename TARGET, bool HAS_NULL, bool BUILD_DENSE, bool INPUT_SELECTED,
+	          bool SOURCE_SELECTED>
+	idx_t TemplatedFilterSelectionLoop(const UnifiedVectorFormat &source, const sel_t *input_selection,
+	                                   const sel_t *source_selection, idx_t count, SelectionVector &result_sel) const;
+	template <typename SOURCE, bool HAS_NULL>
+	idx_t FilterSelectionTargetSwitch(const UnifiedVectorFormat &source, optional_ptr<const SelectionVector> input_sel,
+	                                  idx_t count, SelectionVector &result_sel) const;
 
 	bool FillSelectionVectorSwitchBuild(const Vector &source, SelectionVector &sel_vec, SelectionVector &seq_sel_vec,
 	                                    idx_t count);
@@ -75,6 +95,7 @@ private:
 	ValidityMask bitmap_build_idx;
 	//! Stores the number of unique keys in the build side
 	idx_t unique_keys = 0;
+	shared_ptr<ExecutionRuntimeFilterIdentity> runtime_filter_identity;
 };
 
 } // namespace duckdb

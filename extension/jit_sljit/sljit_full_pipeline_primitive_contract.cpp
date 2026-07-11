@@ -163,6 +163,33 @@ bool SljitFullPipelineIsSelectedHashJoinSinkSequence(const SljitFullPipelinePrim
 	       terminal_kind == SljitFullPipelinePrimitiveKind::DELIM_JOIN_SINK;
 }
 
+bool SljitFullPipelineHasDirectSourceHashBuild(const SljitFullPipelinePrimitiveSequence &primitive_sequence) {
+	if (primitive_sequence.Count() < 2 ||
+	    primitive_sequence.Step(0).kind != SljitFullPipelinePrimitiveKind::SOURCE_FETCH) {
+		return false;
+	}
+	auto &terminal = primitive_sequence.Step(primitive_sequence.Count() - 1);
+	return terminal.kind == SljitFullPipelinePrimitiveKind::HASH_JOIN_BUILD_SINK &&
+	       terminal.hash_join_build_sink.direct_source_ingress;
+}
+
+bool SljitFullPipelineHasExactFilterProbeHashBuild(const vector<SljitExecutableRegionOp> &ops,
+                                                   const SljitFullPipelinePrimitiveSequence &primitive_sequence) {
+	if (primitive_sequence.Count() != 3 ||
+	    primitive_sequence.Step(0).kind != SljitFullPipelinePrimitiveKind::SOURCE_FETCH ||
+	    primitive_sequence.Step(1).kind != SljitFullPipelinePrimitiveKind::HASH_JOIN_PROBE_SELECTION ||
+	    primitive_sequence.Step(2).kind != SljitFullPipelinePrimitiveKind::HASH_JOIN_BUILD_SINK) {
+		return false;
+	}
+	const auto probe_idx = primitive_sequence.Step(1).Op(0);
+	if (probe_idx >= ops.size() || ops[probe_idx].kind != SljitNativeRegionOpKind::HASH_JOIN_PROBE) {
+		return false;
+	}
+	auto &probe = ops[probe_idx].hash_join_probe.plan;
+	return probe.perfect_hash_probe && probe.exact_source_filter_identity && !probe.residual_predicate &&
+	       probe.output_mode == ExecutionHashJoinProbeOutputMode::MATCHED_PROBE_AND_BUILD;
+}
+
 bool SljitNativeTailCanConsumeTail(const vector<SljitExecutableRegionOp> &ops, idx_t tail_start_idx) {
 	if (tail_start_idx >= ops.size()) {
 		return false;

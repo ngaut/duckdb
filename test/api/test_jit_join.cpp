@@ -2,13 +2,13 @@
 
 using namespace duckdb;
 
-TEST_CASE("JIT hash join build protocol compiles only inside generated fused regions", "[api][jit]") {
+TEST_CASE("JIT hash join build selected ingress compiles only inside generated fused regions", "[api][jit]") {
 	DuckDB db;
 	Connection con(db);
 	auto &manager = ExecutionRegionManager::Get(*con.context);
 
 	ConfigureSljitForCoverage(con, false, true, true, 10000);
-	// Exercise the build protocol from generated expression work without over-crediting protocol stages.
+	// Exercise backend-owned filtered projection ingress into the build protocol.
 	REQUIRE_NO_FAIL(con.Query("SET jit_cbo_generated_stage_benefit=256"));
 	string lhs_key = "i";
 	string rhs_key = "j";
@@ -40,7 +40,9 @@ TEST_CASE("JIT hash join build protocol compiles only inside generated fused reg
 				REQUIRE(event.runner_cost.present);
 				REQUIRE(event.runner_cost.generated_stage_count > 0);
 				REQUIRE(event.runner_cost.native_join_stage_count == 0);
-				REQUIRE(event.runner_cost.native_hash_join_build_sink_count == 1);
+				REQUIRE(event.runner_cost.native_hash_join_build_sink_count == 0);
+				REQUIRE(event.runner_cost.generated_backend_stage_count > 0);
+				REQUIRE(event.runner_cost.materialization_elision_count == 0);
 				REQUIRE(event.runner_cost.saved_work_per_batch > 0);
 				REQUIRE(event.code_size > 0);
 				REQUIRE(StringUtil::Contains(event.reason, JIT_HASH_JOIN_BUILD_READY_CONTRACT));
@@ -52,6 +54,9 @@ TEST_CASE("JIT hash join build protocol compiles only inside generated fused reg
 		if (EventPhase(event) == "runtime" && EventStatus(event) == "executed" &&
 		    StringUtil::Contains(EventGeneratedStageRuntimeBreakdown(event), "hash_join_build.hash_table_prepare")) {
 			found_build_runtime = true;
+			REQUIRE(EventJitRuntimeDelegationCounts(event).empty());
+			REQUIRE(StringUtil::Contains(EventJitRuntimeProofCounts(event), "generated_backend_work="));
+			REQUIRE_FALSE(StringUtil::Contains(EventJitRuntimeProofCounts(event), "materialization_elision="));
 			REQUIRE(
 			    StringUtil::Contains(EventGeneratedStageRuntimeBreakdown(event), "hash_join_build.bind_sink_contract"));
 			REQUIRE(StringUtil::Contains(EventGeneratedStageRuntimeBreakdown(event), "hash_join_build.reference_keys"));
@@ -103,6 +108,130 @@ TEST_CASE("JIT CBO does not charge generated hash-build sink protocol before bac
 	}
 }
 
+TEST_CASE("JIT composes DuckDB string-set scans with direct hash build", "[api][jit]") {
+	DuckDB db;
+	Connection con(db);
+	auto &manager = ExecutionRegionManager::Get(*con.context);
+
+	ConfigureSljitForCoverage(con, false, true, true, 10000);
+	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_string_build_l AS "
+	                          "SELECT i::BIGINT AS k FROM range(10000) tbl(i)"));
+	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_string_build_r AS "
+	                          "SELECT i::BIGINT AS k, CASE WHEN i % 4 = 0 THEN 'EUROPE' ELSE 'OTHER' END AS region "
+	                          "FROM range(10000) tbl(i)"));
+
+	ClearJitTrace(manager, true);
+	auto result = con.Query("SELECT count(*) FROM jit_string_build_l l "
+	                        "JOIN (SELECT k FROM jit_string_build_r WHERE region IN ('EUROPE', 'ASIA')) r USING (k)");
+	REQUIRE_NO_FAIL(*result);
+	REQUIRE(result->GetValue(0, 0).ToString() == "2500");
+
+	bool found_build_compile = false;
+	bool found_build_runtime = false;
+	for (auto &event : manager.GetEvents()) {
+		if (IsCompiledSljitRegionEvent(event) && event.has_candidate &&
+		    event.candidate_traits.sink_kind == ExecutionRegionSinkKind::HASH_JOIN_BUILD &&
+		    event.candidate_traits.source_filter_count > 0) {
+			found_build_compile = true;
+			REQUIRE(event.runner_cost.present);
+			REQUIRE(event.runner_cost.native_join_stage_count == 0);
+			REQUIRE(event.runner_cost.native_hash_join_build_sink_count == 0);
+			REQUIRE(event.runner_cost.generated_backend_stage_count > 0);
+			REQUIRE(StringUtil::Contains(event.reason, "duckdb-scan-filtered-source-contract"));
+		}
+		if (EventPhase(event) == "runtime" && EventStatus(event) == "executed" &&
+		    StringUtil::Contains(EventJitRuntimeProofCounts(event),
+		                         "hash_join_build.generated_backend_work.direct_source_ingress=")) {
+			found_build_runtime = true;
+			REQUIRE(EventJitRuntimeDelegationCounts(event).empty());
+		}
+	}
+	REQUIRE(found_build_compile);
+	REQUIRE(found_build_runtime);
+}
+
+TEST_CASE("JIT composes mixed storage filters with direct hash build", "[api][jit]") {
+	DuckDB db;
+	Connection con(db);
+	auto &manager = ExecutionRegionManager::Get(*con.context);
+
+	ConfigureSljitForCoverage(con, false, true, true, 10000);
+	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_mixed_build_l AS "
+	                          "SELECT i::BIGINT AS k FROM range(10000) tbl(i)"));
+	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_mixed_build_r AS "
+	                          "SELECT i::BIGINT AS k, (i % 20)::INTEGER AS bucket, "
+	                          "CASE WHEN i % 4 = 0 THEN 'LARGE BRASS' ELSE 'OTHER' END AS kind "
+	                          "FROM range(10000) tbl(i)"));
+
+	ClearJitTrace(manager, true);
+	auto result = con.Query("SELECT count(*) FROM jit_mixed_build_l l "
+	                        "JOIN (SELECT k FROM jit_mixed_build_r "
+	                        "      WHERE bucket = 0 AND suffix(kind, 'BRASS')) r USING (k)");
+	REQUIRE_NO_FAIL(*result);
+	REQUIRE(result->GetValue(0, 0).ToString() == "500");
+
+	bool found_build_compile = false;
+	for (auto &event : manager.GetEvents()) {
+		if (!IsCompiledSljitRegionEvent(event) || !event.has_candidate ||
+		    event.candidate_traits.sink_kind != ExecutionRegionSinkKind::HASH_JOIN_BUILD ||
+		    event.candidate_traits.source_filter_count != 2) {
+			continue;
+		}
+		found_build_compile = true;
+		REQUIRE(event.selected_uses_scan_filters);
+		REQUIRE(event.runner_cost.generated_backend_stage_count > 0);
+		REQUIRE(StringUtil::Contains(event.reason, "duckdb-scan-filtered-source-contract"));
+		REQUIRE_FALSE(StringUtil::Contains(event.reason, "generated_source_filter="));
+	}
+	REQUIRE(found_build_compile);
+}
+
+TEST_CASE("JIT executes exact-filter probe to hash-build primitive sequences", "[api][jit]") {
+	DuckDB db;
+	Connection con(db);
+	auto &manager = ExecutionRegionManager::Get(*con.context);
+
+	ConfigureSljitForCoverage(con, false, true, true, 10000);
+	REQUIRE_NO_FAIL(con.Query("SET threads=1"));
+	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_exact_build_fact AS "
+	                          "SELECT (i % 50000)::INTEGER AS filter_key, i::BIGINT AS join_key "
+	                          "FROM range(200000) tbl(i)"));
+	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_exact_build_filter AS "
+	                          "SELECT i::INTEGER AS filter_key FROM range(500) tbl(i)"));
+	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_exact_build_probe AS "
+	                          "SELECT i::BIGINT AS join_key FROM range(200000) tbl(i)"));
+
+	ClearJitTrace(manager, true);
+	auto result = con.Query("SELECT count(*) FROM jit_exact_build_probe p JOIN ("
+	                        "  SELECT f.join_key FROM jit_exact_build_fact f "
+	                        "  JOIN jit_exact_build_filter d USING (filter_key)"
+	                        ") selected USING (join_key)");
+	REQUIRE_NO_FAIL(*result);
+	REQUIRE(result->GetValue(0, 0).ToString() == "2000");
+
+	bool found_primitive_compile = false;
+	bool found_primitive_runtime = false;
+	for (auto &event : manager.GetEvents()) {
+		if (IsCompiledSljitRegionEvent(event) && event.has_candidate &&
+		    event.candidate_traits.sink_kind == ExecutionRegionSinkKind::HASH_JOIN_BUILD &&
+		    event.candidate_traits.hash_join_operator_count == 1 && event.selected_uses_scan_filters &&
+		    StringUtil::Contains(event.reason, "exact_filter_proof_count=1")) {
+			found_primitive_compile = true;
+			REQUIRE(event.code_size == 0);
+		}
+		if (EventPhase(event) == "runtime" && EventStatus(event) == "executed" &&
+		    StringUtil::Contains(EventJitRuntimePathCounts(event),
+		                         "hash_join_probe.perfect_probe.exact_source_filter=") &&
+		    StringUtil::Contains(EventJitRuntimePathCounts(event), "hash_join_build.selected_required_sources=")) {
+			found_primitive_runtime = true;
+			REQUIRE(StringUtil::Contains(EventJitRuntimeProofCounts(event), "generated_backend_work="));
+			REQUIRE(EventJitRuntimeDelegationCounts(event).empty());
+		}
+	}
+	REQUIRE(found_primitive_compile);
+	REQUIRE(found_primitive_runtime);
+}
+
 TEST_CASE("JIT hash join build sink consumes selected probe output without native tail delegation", "[api][jit]") {
 	DuckDB db;
 	Connection con(db);
@@ -117,13 +246,13 @@ TEST_CASE("JIT hash join build sink consumes selected probe output without nativ
 	REQUIRE_NO_FAIL(con.Query("SET jit_cbo_materialization_elision_benefit=1048576"));
 	REQUIRE_NO_FAIL(con.Query("SET jit_cbo_full_pipeline_benefit=1048576"));
 	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_probe_build_a AS "
-	                          "SELECT i::BIGINT AS k, (i % 512)::BIGINT AS b, i::BIGINT AS v "
+	                          "SELECT i::BIGINT AS k, ((i % 512) * 1000003)::BIGINT AS b, i::BIGINT AS v "
 	                          "FROM range(4096) tbl(i)"));
 	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_probe_build_b AS "
-	                          "SELECT i::BIGINT AS b, (i * 3)::BIGINT AS x "
+	                          "SELECT (i * 1000003)::BIGINT AS b, (i * 3 * 1000003)::BIGINT AS x "
 	                          "FROM range(512) tbl(i)"));
 	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_probe_build_c AS "
-	                          "SELECT i::BIGINT AS x, i::BIGINT AS y "
+	                          "SELECT (i * 1000003)::BIGINT AS x, i::BIGINT AS y "
 	                          "FROM range(2048) tbl(i)"));
 
 	ClearJitTrace(manager, true);
@@ -181,33 +310,47 @@ TEST_CASE("JIT primitive sequence composes projection filter projection before h
 	RequireJitEvent(
 	    manager,
 	    [](const ExecutionRegionEvent &event) {
-		    return EventPhase(event) == "compile" && EventStatus(event) == "compiled" &&
-		           EventExecutionMode(event) == "native" &&
-		           StringUtil::Contains(event.reason, "candidate_shape=projection-filter-projection-sink");
-	    },
-	    [](const ExecutionRegionEvent &event) {
-		    REQUIRE(StringUtil::Contains(event.reason,
-		                                 "execution:native-sljit-region-projection-filter-projection-hash-join-build"));
-	    });
-	RequireJitEvent(
-	    manager,
-	    [](const ExecutionRegionEvent &event) {
 		    auto stage_counts = EventGeneratedStageCountBreakdown(event);
 		    return EventPhase(event) == "runtime" && EventStatus(event) == "executed" &&
 		           EventExecutionMode(event) == "native" && StringUtil::Contains(stage_counts, "op0:projection.") &&
 		           StringUtil::Contains(stage_counts, "op1:filter.selection=") &&
-		           StringUtil::Contains(stage_counts, "op2:projection.") &&
 		           StringUtil::Contains(stage_counts, "op3:hash_join_build.reference_keys=");
 	    },
 	    [](const ExecutionRegionEvent &event) {
 		    const auto stage_counts = EventGeneratedStageCountBreakdown(event);
-		    const auto filter_position = stage_counts.find("op1:filter.selection=");
-		    const auto pre_projection_position = stage_counts.find("op0:projection.");
-		    REQUIRE(filter_position != string::npos);
-		    REQUIRE(pre_projection_position != string::npos);
-		    REQUIRE(filter_position < pre_projection_position);
 		    REQUIRE(StringUtil::Contains(stage_counts, "op3:hash_join_build.filter_pushdown="));
+		    REQUIRE_FALSE(StringUtil::Contains(stage_counts, "op2:projection."));
+		    REQUIRE(EventJitRuntimeDelegationCounts(event).empty());
 	    });
+}
+
+TEST_CASE("JIT composes selected source filters before hash build without delegation", "[api][jit]") {
+	DuckDB db;
+	Connection con(db);
+	auto &manager = ExecutionRegionManager::Get(*con.context);
+
+	ConfigureSljitForCoverage(con, false, true, true, 10000);
+	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_selected_build_l AS "
+	                          "SELECT i::BIGINT AS k FROM range(4096) tbl(i)"));
+	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_selected_build_r AS "
+	                          "SELECT i::BIGINT AS k, i::BIGINT AS v, (i + 1)::BIGINT AS w "
+	                          "FROM range(4096) tbl(i)"));
+
+	ClearJitTrace(manager, true);
+	auto result =
+	    con.Query("SELECT sum(r.v) FROM jit_selected_build_l l "
+	              "JOIN (SELECT * FROM jit_selected_build_r WHERE k > 10 AND k < 4090 AND v < w) r USING (k)");
+	REQUIRE_NO_FAIL(*result);
+	REQUIRE(result->GetValue(0, 0).GetValue<int64_t>() == 8361950);
+
+	RequireJitEvent(
+	    manager,
+	    [](const ExecutionRegionEvent &event) {
+		    return EventPhase(event) == "runtime" && EventStatus(event) == "executed" &&
+		           StringUtil::Contains(EventJitRuntimePathCounts(event), "filter.selected_input_view=") &&
+		           StringUtil::Contains(EventGeneratedStageCountBreakdown(event), "hash_join_build.hash_table_append=");
+	    },
+	    [](const ExecutionRegionEvent &event) { REQUIRE(EventJitRuntimeDelegationCounts(event).empty()); });
 }
 
 TEST_CASE("JIT CBO does not skip low-value hash-build sink pipelines before backend analysis", "[api][jit]") {
@@ -410,9 +553,10 @@ TEST_CASE("JIT hash join selected output appends through a primitive recipe", "[
 	ConfigureSljitForCoverage(con, false, true, true, 10000);
 	REQUIRE_NO_FAIL(con.Query("SET threads=1"));
 	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_selected_append_l AS "
-	                          "SELECT (i % 128)::BIGINT AS k, i::BIGINT AS v FROM range(65536) tbl(i)"));
+	                          "SELECT ((i % 128) * 1000003)::BIGINT AS k, i::BIGINT AS v "
+	                          "FROM range(65536) tbl(i)"));
 	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_selected_append_r AS "
-	                          "SELECT i::BIGINT AS k, (i * 3)::BIGINT AS w FROM range(64) tbl(i)"));
+	                          "SELECT (i * 1000003)::BIGINT AS k, (i * 3)::BIGINT AS w FROM range(64) tbl(i)"));
 
 	const string query = "WITH matched AS MATERIALIZED ("
 	                     "SELECT l.k, l.v, r.w FROM jit_selected_append_l l "
@@ -437,11 +581,11 @@ TEST_CASE("JIT hash join selected output appends through a primitive recipe", "[
 	    [](const ExecutionRegionEvent &event) {
 		    return EventPhase(event) == "runtime" && EventStatus(event) == "executed" &&
 		           EventExecutionMode(event) == "native" &&
-		           HasJitRuntimePathPrefix(event, "append_sink.hash_join_selected_append_view");
+		           HasJitRuntimePathPrefix(event, "append_sink.hash_join_selected_append_");
 	    },
 	    [](const ExecutionRegionEvent &event) {
 		    auto stages = EventGeneratedStageRuntimeBreakdown(event);
-		    REQUIRE(StringUtil::Contains(stages, "hash_join_probe.selected_append_view="));
+		    REQUIRE(StringUtil::Contains(stages, "hash_join_probe.selected_append_materialization="));
 		    REQUIRE(StringUtil::Contains(stages, "append_sink.selected_append_sink="));
 		    REQUIRE_FALSE(StringUtil::Contains(stages, "hash_join_probe.materialize_output="));
 		    REQUIRE(EventJitRuntimeDelegationCounts(event).empty());

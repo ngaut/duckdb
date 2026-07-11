@@ -199,6 +199,9 @@ static bool SljitTryExecuteInputVectorGroupedAggregateUpdate(
 		record_unsupported("pending_preaggregated_flush");
 		return false;
 	}
+	if (pending_preaggregated_groups) {
+		SljitInvalidateProvenUniqueAppendContract(runtime, op, *pending_preaggregated_groups, grouped_state);
+	}
 
 	bool updated = false;
 	if (count_one_update_ready) {

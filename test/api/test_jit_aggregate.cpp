@@ -1128,9 +1128,59 @@ TEST_CASE("JIT sorted grouped sums buffer compact runs across input batches", "[
 		    const auto runtime_paths = EventJitRuntimePathCounts(event);
 		    return StringUtil::Contains(runtime_paths,
 		                                "aggregate_update.pending_preaggregated_grouped_update_flush=32768") &&
-		           StringUtil::Contains(runtime_paths, "aggregate_update.pending_preaggregated_group_boundary_merge=");
+		           StringUtil::Contains(runtime_paths,
+		                                "aggregate_update.pending_preaggregated_group_boundary_merge=") &&
+		           StringUtil::Contains(runtime_paths, "aggregate_update.proven_unique_append.enabled=1") &&
+		           !StringUtil::Contains(runtime_paths, "proven_unique_append.final_combine_required");
 	    },
 	    [](const ExecutionRegionEvent &event) { RequireGeneratedAggregateUpdateRuntimeOwnership(event); });
+}
+
+TEST_CASE("JIT high-uniqueness grouped append reconciles late duplicates", "[api][jit]") {
+	DuckDB db;
+	Connection con(db);
+	auto &manager = ExecutionRegionManager::Get(*con.context);
+
+	ConfigureSljitForCoverage(con, false, true, true, 10000);
+	REQUIRE_NO_FAIL(con.Query("PRAGMA threads=1"));
+	REQUIRE_NO_FAIL(con.Query("SET perfect_ht_threshold=0"));
+	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_late_duplicate_groups AS "
+	                          "SELECT (i // 2)::BIGINT AS group_id, 1::BIGINT AS value "
+	                          "FROM range(300000) tbl(i) "
+	                          "UNION ALL SELECT 149999::BIGINT, 5::BIGINT"));
+
+	const string query = "SELECT group_id, sum(value) AS total "
+	                     "FROM jit_late_duplicate_groups GROUP BY group_id";
+	REQUIRE_NO_FAIL(con.Query("SET jit_policy='off'"));
+	REQUIRE_NO_FAIL(con.Query("CREATE TEMP TABLE jit_late_duplicate_reference AS " + query));
+
+	ConfigureSljitForCoverageSettings(con, false, true, true, 10000);
+	ClearJitTrace(manager, true);
+	REQUIRE_NO_FAIL(con.Query("CREATE TEMP TABLE jit_late_duplicate_output AS " + query));
+	auto shape = con.Query("SELECT count(*), min(total), max(total), "
+	                       "sum(CASE WHEN group_id=149999 THEN total ELSE 0 END) "
+	                       "FROM jit_late_duplicate_output");
+	REQUIRE_NO_FAIL(*shape);
+	REQUIRE(shape->GetValue(0, 0).ToString() == "150000");
+	REQUIRE(shape->GetValue(1, 0).ToString() == "2");
+	REQUIRE(shape->GetValue(2, 0).ToString() == "7");
+	REQUIRE(shape->GetValue(3, 0).ToString() == "7");
+	auto difference = con.Query("SELECT count(*) FROM ("
+	                            "  (SELECT * FROM jit_late_duplicate_output EXCEPT ALL "
+	                            "   SELECT * FROM jit_late_duplicate_reference) UNION ALL "
+	                            "  (SELECT * FROM jit_late_duplicate_reference EXCEPT ALL "
+	                            "   SELECT * FROM jit_late_duplicate_output)"
+	                            ") differences");
+	REQUIRE_NO_FAIL(*difference);
+	REQUIRE(difference->GetValue(0, 0).ToString() == "0");
+	string observed_runtime_paths;
+	for (auto &event : manager.GetEvents()) {
+		if (EventPhase(event) == "runtime") {
+			observed_runtime_paths += EventJitRuntimePathCounts(event) + "\n";
+		}
+	}
+	INFO(observed_runtime_paths);
+	REQUIRE(StringUtil::Contains(observed_runtime_paths, "proven_unique_append.enabled"));
 }
 
 TEST_CASE("JIT count-star grouped aggregate uses row-delta backend for high-cardinality batches", "[api][jit]") {

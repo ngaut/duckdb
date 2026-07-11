@@ -360,7 +360,11 @@ GroupedAggregateHashTable::GroupedAggregateHashTable(ClientContext &context_p, A
                                                      TupleDataValidityType group_validity)
     : BaseAggregateHashTable(context_p, allocator, aggregate_objects_p, std::move(payload_types_p)), context(context_p),
       radix_bits(radix_bits), count(0), capacity(0), sink_count(0), skip_lookups(false), enable_hll(false),
-      aggregate_allocator(make_shared_ptr<ArenaAllocator>(allocator)), state(*aggregate_allocator) {
+      aggregate_allocator(make_shared_ptr<ArenaAllocator>(allocator)), state(*aggregate_allocator),
+      skip_lookups_require_final_combine(false), proven_unique_append_key_type(PhysicalType::INVALID),
+      proven_unique_append_has_last_key(false), proven_unique_append_first_signed_key(0),
+      proven_unique_append_last_signed_key(0), proven_unique_append_first_unsigned_key(0),
+      proven_unique_append_last_unsigned_key(0) {
 	clustered_state.all_clustered = AllAggregatesClustered(aggregate_objects_p);
 	clustered_state.n_clustered = CountAggregatesClustered(aggregate_objects_p);
 	if (clustered_state.n_clustered > 1) {
@@ -607,9 +611,170 @@ idx_t GroupedAggregateHashTable::GetMaterializedCount() const {
 	return result;
 }
 
-void GroupedAggregateHashTable::SkipLookups() {
+void GroupedAggregateHashTable::SkipLookups(bool require_final_combine) {
 	skip_lookups = true;
+	skip_lookups_require_final_combine = skip_lookups_require_final_combine || require_final_combine;
 	dense_single_field_target_cache.Disable();
+}
+
+void GroupedAggregateHashTable::RequireFinalCombine() {
+	if (skip_lookups) {
+		skip_lookups_require_final_combine = true;
+	}
+}
+
+template <class KEY_TYPE>
+static bool AggregateGroupsContinueIncreasing(DataChunk &groups, bool has_last_key, int64_t last_signed_key,
+                                              uint64_t last_unsigned_key, KEY_TYPE &first_key, KEY_TYPE &last_key) {
+	if (groups.ColumnCount() != 1 || groups.size() == 0) {
+		return false;
+	}
+	UnifiedVectorFormat format;
+	groups.data[0].ToUnifiedFormat(format);
+	auto data = UnifiedVectorFormat::GetData<KEY_TYPE>(format);
+	auto sel = format.sel;
+	const bool can_have_null = format.validity.CanHaveNull();
+	bool has_previous = false;
+	KEY_TYPE previous {};
+	for (idx_t row_idx = 0; row_idx < groups.size(); row_idx++) {
+		const auto source_idx = sel->get_index(row_idx);
+		if (can_have_null && !format.validity.RowIsValid(source_idx)) {
+			return false;
+		}
+		const auto key = data[source_idx];
+		if (!has_previous) {
+			first_key = key;
+		}
+		if (has_previous && key <= previous) {
+			return false;
+		}
+		if (!has_previous && has_last_key) {
+			const auto prior = std::is_signed<KEY_TYPE>::value ? static_cast<KEY_TYPE>(last_signed_key)
+			                                                   : static_cast<KEY_TYPE>(last_unsigned_key);
+			if (key <= prior) {
+				return false;
+			}
+		}
+		previous = key;
+		has_previous = true;
+	}
+	last_key = previous;
+	return true;
+}
+
+template <class KEY_TYPE>
+static bool AggregateTryContinueProvenUniqueAppendTyped(DataChunk &groups, bool &has_last_key, int64_t &last_signed_key,
+                                                        uint64_t &last_unsigned_key, int64_t &first_signed_key,
+                                                        uint64_t &first_unsigned_key) {
+	KEY_TYPE first_key;
+	KEY_TYPE last_key;
+	if (!AggregateGroupsContinueIncreasing(groups, has_last_key, last_signed_key, last_unsigned_key, first_key,
+	                                       last_key)) {
+		return false;
+	}
+	if constexpr (std::is_signed<KEY_TYPE>::value) {
+		if (!has_last_key) {
+			first_signed_key = static_cast<int64_t>(first_key);
+		}
+		last_signed_key = static_cast<int64_t>(last_key);
+	} else {
+		if (!has_last_key) {
+			first_unsigned_key = static_cast<uint64_t>(first_key);
+		}
+		last_unsigned_key = static_cast<uint64_t>(last_key);
+	}
+	has_last_key = true;
+	return true;
+}
+
+bool GroupedAggregateHashTable::TryContinueProvenUniqueAppend(DataChunk &groups) {
+	if (skip_lookups_require_final_combine || (sink_count != 0 && !skip_lookups) || groups.ColumnCount() != 1) {
+		return false;
+	}
+	const auto key_type = groups.data[0].GetType().InternalType();
+	if (proven_unique_append_key_type != PhysicalType::INVALID && proven_unique_append_key_type != key_type) {
+		RequireFinalCombine();
+		return false;
+	}
+	proven_unique_append_key_type = key_type;
+	bool continued;
+	switch (key_type) {
+	case PhysicalType::INT8:
+		continued = AggregateTryContinueProvenUniqueAppendTyped<int8_t>(
+		    groups, proven_unique_append_has_last_key, proven_unique_append_last_signed_key,
+		    proven_unique_append_last_unsigned_key, proven_unique_append_first_signed_key,
+		    proven_unique_append_first_unsigned_key);
+		break;
+	case PhysicalType::INT16:
+		continued = AggregateTryContinueProvenUniqueAppendTyped<int16_t>(
+		    groups, proven_unique_append_has_last_key, proven_unique_append_last_signed_key,
+		    proven_unique_append_last_unsigned_key, proven_unique_append_first_signed_key,
+		    proven_unique_append_first_unsigned_key);
+		break;
+	case PhysicalType::INT32:
+		continued = AggregateTryContinueProvenUniqueAppendTyped<int32_t>(
+		    groups, proven_unique_append_has_last_key, proven_unique_append_last_signed_key,
+		    proven_unique_append_last_unsigned_key, proven_unique_append_first_signed_key,
+		    proven_unique_append_first_unsigned_key);
+		break;
+	case PhysicalType::INT64:
+		continued = AggregateTryContinueProvenUniqueAppendTyped<int64_t>(
+		    groups, proven_unique_append_has_last_key, proven_unique_append_last_signed_key,
+		    proven_unique_append_last_unsigned_key, proven_unique_append_first_signed_key,
+		    proven_unique_append_first_unsigned_key);
+		break;
+	case PhysicalType::UINT8:
+		continued = AggregateTryContinueProvenUniqueAppendTyped<uint8_t>(
+		    groups, proven_unique_append_has_last_key, proven_unique_append_last_signed_key,
+		    proven_unique_append_last_unsigned_key, proven_unique_append_first_signed_key,
+		    proven_unique_append_first_unsigned_key);
+		break;
+	case PhysicalType::UINT16:
+		continued = AggregateTryContinueProvenUniqueAppendTyped<uint16_t>(
+		    groups, proven_unique_append_has_last_key, proven_unique_append_last_signed_key,
+		    proven_unique_append_last_unsigned_key, proven_unique_append_first_signed_key,
+		    proven_unique_append_first_unsigned_key);
+		break;
+	case PhysicalType::UINT32:
+		continued = AggregateTryContinueProvenUniqueAppendTyped<uint32_t>(
+		    groups, proven_unique_append_has_last_key, proven_unique_append_last_signed_key,
+		    proven_unique_append_last_unsigned_key, proven_unique_append_first_signed_key,
+		    proven_unique_append_first_unsigned_key);
+		break;
+	case PhysicalType::UINT64:
+		continued = AggregateTryContinueProvenUniqueAppendTyped<uint64_t>(
+		    groups, proven_unique_append_has_last_key, proven_unique_append_last_signed_key,
+		    proven_unique_append_last_unsigned_key, proven_unique_append_first_signed_key,
+		    proven_unique_append_first_unsigned_key);
+		break;
+	default:
+		continued = false;
+		break;
+	}
+	if (!continued) {
+		RequireFinalCombine();
+		return false;
+	}
+	if (!skip_lookups) {
+		SkipLookups(false);
+	}
+	return true;
+}
+
+bool GroupedAggregateHashTable::LookupsSkippedRequireFinalCombine() const {
+	return skip_lookups && skip_lookups_require_final_combine;
+}
+
+bool GroupedAggregateHashTable::GetProvenUniqueAppendRange(GroupedAggregateProvenUniqueRange &range) const {
+	if (!skip_lookups || skip_lookups_require_final_combine || !proven_unique_append_has_last_key) {
+		return false;
+	}
+	range.key_type = proven_unique_append_key_type;
+	range.first_signed_key = proven_unique_append_first_signed_key;
+	range.last_signed_key = proven_unique_append_last_signed_key;
+	range.first_unsigned_key = proven_unique_append_first_unsigned_key;
+	range.last_unsigned_key = proven_unique_append_last_unsigned_key;
+	return true;
 }
 
 void GroupedAggregateHashTable::EnableHLL(bool enable) {
@@ -7174,6 +7339,13 @@ void GroupedAggregateHashTable::ResetForNewIteration(idx_t initial_capacity, idx
 	count = 0;
 	sink_count = 0;
 	skip_lookups = false;
+	skip_lookups_require_final_combine = false;
+	proven_unique_append_key_type = PhysicalType::INVALID;
+	proven_unique_append_has_last_key = false;
+	proven_unique_append_first_signed_key = 0;
+	proven_unique_append_last_signed_key = 0;
+	proven_unique_append_first_unsigned_key = 0;
+	proven_unique_append_last_unsigned_key = 0;
 	enable_hll = false;
 	hll = HyperLogLog();
 	state.compressed_group_state.dictionary_id = string();

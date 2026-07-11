@@ -15,6 +15,7 @@
 #include "sljit_runtime_batch_runtime.hpp"
 
 #include <array>
+#include <type_traits>
 
 namespace duckdb {
 
@@ -69,10 +70,48 @@ struct SljitPendingPreaggregatedPrimitiveGroupBatch {
 	SljitDataChunkBatch dense_single_lane_groups;
 	SljitPreaggregatedPrimitiveAggregateScratch dense_single_lane_scratch;
 	string dense_single_lane_blocker;
+
+	bool proven_unique_append_active = false;
+	bool proven_unique_append_failed = false;
 };
+
+static void SljitUpdateProvenUniqueAppendContract(ExecutionRegionRuntime &runtime, SljitExecutableRegionOp &op,
+                                                  SljitPendingPreaggregatedPrimitiveGroupBatch &pending,
+                                                  DataChunk &groups,
+                                                  ExecutionGroupedAggregateStateAddressBinding &grouped_state) {
+	if (pending.proven_unique_append_failed) {
+		return;
+	}
+	if (!grouped_state.state->TryEnableProvenUniqueAppend(groups)) {
+		if (pending.proven_unique_append_active) {
+			RecordSljitRegionRuntimePath(runtime, op.kind, "proven_unique_append.final_combine_required");
+		}
+		pending.proven_unique_append_active = false;
+		pending.proven_unique_append_failed = true;
+		return;
+	}
+	if (!pending.proven_unique_append_active) {
+		RecordSljitRegionRuntimePath(runtime, op.kind, "proven_unique_append.enabled");
+	}
+	pending.proven_unique_append_active = true;
+}
+
+static void SljitInvalidateProvenUniqueAppendContract(ExecutionRegionRuntime &runtime, SljitExecutableRegionOp &op,
+                                                      SljitPendingPreaggregatedPrimitiveGroupBatch &pending,
+                                                      ExecutionGroupedAggregateStateAddressBinding &grouped_state) {
+	grouped_state.state->RequireAppendFinalCombine();
+	if (pending.proven_unique_append_active) {
+		RecordSljitRegionRuntimePath(runtime, op.kind, "proven_unique_append.final_combine_required");
+	}
+	pending.proven_unique_append_active = false;
+	pending.proven_unique_append_failed = true;
+}
 
 static constexpr idx_t SLJIT_PENDING_DENSE_SINGLE_LANE_MAX_RANGE = STANDARD_VECTOR_SIZE * 512ULL;
 static constexpr idx_t SLJIT_PENDING_DENSE_SINGLE_LANE_MIN_COMPRESSION = 2;
+// Keep one compact group unpublished between source invocations. If an input run crosses a
+// vector boundary, its next delta merges into this carry before any hash-table append.
+static constexpr idx_t SLJIT_PENDING_PREAGGREGATED_GROUP_CAPACITY = STANDARD_VECTOR_SIZE - 1;
 
 template <class TARGET_TYPE>
 static bool SljitPendingDenseSingleLaneKey(TARGET_TYPE value, idx_t &key) {
@@ -459,6 +498,7 @@ static bool SljitFlushPendingPreaggregatedPrimitiveGroups(ExecutionRegionRuntime
 	if (pending.Count() != pending.scratch.group_row_counts.size()) {
 		return false;
 	}
+	SljitUpdateProvenUniqueAppendContract(runtime, op, pending, pending.groups.chunk, grouped_state);
 	SljitTryReserveGroupedAggregateGroups(runtime, op_idx, op, grouped_state, pending.Count());
 	if (!TryExecutePreaggregatedGroupedPrimitiveAggregateUpdateBatches(
 	        runtime, scratch, op_idx, op, pending.groups.chunk, pending.scratch, pending.lanes, grouped_state,
@@ -501,8 +541,8 @@ static bool SljitBufferPreaggregatedPrimitiveGroups(
 		RecordSljitRegionRuntimePath(runtime, op.kind, "pending_preaggregated_group_boundary_merge");
 	}
 	auto append_count = groups.size() - offset;
-	if (append_count > 0 && pending.Count() + append_count > STANDARD_VECTOR_SIZE) {
-		const auto fill_count = STANDARD_VECTOR_SIZE - pending.Count();
+	if (append_count > 0 && pending.Count() + append_count > SLJIT_PENDING_PREAGGREGATED_GROUP_CAPACITY) {
+		const auto fill_count = SLJIT_PENDING_PREAGGREGATED_GROUP_CAPACITY - pending.Count();
 		if (fill_count > 0) {
 			idx_t fill_row_count;
 			if (!PreaggregatedPrimitiveRepresentedRowCount(source_scratch, offset, fill_count, fill_row_count) ||
@@ -527,7 +567,7 @@ static bool SljitBufferPreaggregatedPrimitiveGroups(
 			return false;
 		}
 	}
-	if (finish || pending.Count() == STANDARD_VECTOR_SIZE) {
+	if (finish) {
 		if (!SljitFlushPendingPreaggregatedPrimitiveGroups(runtime, scratch, op_idx, op, pending, grouped_state,
 		                                                   deferred_grouped_finish)) {
 			return false;

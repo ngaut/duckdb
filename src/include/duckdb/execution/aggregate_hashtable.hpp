@@ -26,6 +26,14 @@ struct ExecutionOperatorStageRecorder;
 
 struct FlushMoveState;
 
+struct GroupedAggregateProvenUniqueRange {
+	PhysicalType key_type = PhysicalType::INVALID;
+	int64_t first_signed_key = 0;
+	int64_t last_signed_key = 0;
+	uint64_t first_unsigned_key = 0;
+	uint64_t last_unsigned_key = 0;
+};
+
 //! GroupedAggregateHashTable is a linear probing HT that is used for computing
 //! aggregates
 /*!
@@ -168,8 +176,18 @@ public:
 	void RecordSinkCount(idx_t count);
 	//! Get the total number of tuples materialized currently in this HT
 	idx_t GetMaterializedCount() const;
-	//! Skips lookups from here on out
-	void SkipLookups();
+	//! Skips lookups from here on out. Statistical admission requires final combination; a proven-unique
+	//! stream may defer that requirement until its proof fails.
+	void SkipLookups(bool require_final_combine = true);
+	//! Permanently require final combination for the current append-only stream.
+	void RequireFinalCombine();
+	//! Continue a fixed-width strictly increasing compact-key stream. The proof is owned by this HT
+	//! so it survives backend/runtime invocation boundaries.
+	bool TryContinueProvenUniqueAppend(DataChunk &groups);
+	//! Whether append-only rows require final duplicate reconciliation.
+	bool LookupsSkippedRequireFinalCombine() const;
+	//! Return the exact local range when the append-only uniqueness proof is still intact.
+	bool GetProvenUniqueAppendRange(GroupedAggregateProvenUniqueRange &range) const;
 	//! Enable/disable HLL
 	void EnableHLL(bool enable);
 	//! Whether HLL is enabled
@@ -342,6 +360,16 @@ private:
 	AggregateRowPointerDescriptorTargetCache row_pointer_descriptor_target_cache;
 
 	ClusteredAggrState clustered_state;
+
+	//! Cold append-only proof state is kept after the existing hot hash-table members so adding the
+	//! contract does not shift descriptor lookup, aggregate update, or cache state.
+	bool skip_lookups_require_final_combine;
+	PhysicalType proven_unique_append_key_type;
+	bool proven_unique_append_has_last_key;
+	int64_t proven_unique_append_first_signed_key;
+	int64_t proven_unique_append_last_signed_key;
+	uint64_t proven_unique_append_first_unsigned_key;
+	uint64_t proven_unique_append_last_unsigned_key;
 
 private:
 	//! Disabled the copy constructor

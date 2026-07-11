@@ -54,6 +54,7 @@ private:
 		    {&SljitFullPipelineRecipeBuilder::TryBuildSourceUngroupedAggregateRecipe},
 		    {&SljitFullPipelineRecipeBuilder::TryBuildSourceFilterAggregateRecipe},
 		    {&SljitFullPipelineRecipeBuilder::TryBuildJoinFilterAggregateRecipe},
+		    {&SljitFullPipelineRecipeBuilder::TryBuildSourceHashJoinBuildSinkRecipe},
 		    {&SljitFullPipelineRecipeBuilder::TryBuildHashJoinDelimJoinSinkRecipe},
 		    {&SljitFullPipelineRecipeBuilder::TryBuildHashJoinAppendSinkRecipe},
 		    {&SljitFullPipelineRecipeBuilder::TryBuildHashJoinBuildSinkRecipe},
@@ -87,6 +88,16 @@ private:
 			return false;
 		}
 		recipe = binding.MakeJoinFilterAggregateRecipe(facts);
+		return true;
+	}
+
+	bool TryBuildSourceHashJoinBuildSinkRecipe(SljitFullPipelineRecipe &recipe) const {
+		SljitSourceHashJoinBuildSinkFacts facts;
+		if (!SljitTryAnalyzeSourceHashJoinBuildSink(ops, facts) ||
+		    !binding.CanMakeSourceHashJoinBuildSinkRecipe(facts)) {
+			return false;
+		}
+		recipe = binding.MakeSourceHashJoinBuildSinkRecipe(facts);
 		return true;
 	}
 

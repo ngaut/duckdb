@@ -10,6 +10,7 @@
 
 #include "sljit_codegen_util.hpp"
 #include "sljit_full_pipeline_dispatch_runtime.hpp"
+#include "sljit_full_pipeline_primitive_contract.hpp"
 #include "sljit_hash_join_probe_runtime.hpp"
 #include "sljit_join_probe_codegen.hpp"
 #include "sljit_region_runtime_state.hpp"
@@ -49,11 +50,11 @@ static SljitLazyCodegenTiming TimeSljitLazyCodegen(BUILD build) {
 
 class SljitNativeRegionKernel : public ExecutionRegionKernel {
 public:
-	SljitNativeRegionKernel(string backend_name_p, vector<SljitExecutableRegionOp> ops_p,
+	SljitNativeRegionKernel(string backend_name_p, vector<SljitExecutableRegionOp> ops_p, bool uses_scan_filters_p,
 	                        vector<LogicalType> source_output_types_p, vector<idx_t> source_distinct_counts_p,
 	                        vector<Value> source_min_values_p, vector<Value> source_max_values_p,
 	                        ExecutionRegionABI abi_p)
-	    : backend_name(std::move(backend_name_p)), ops(std::move(ops_p)),
+	    : backend_name(std::move(backend_name_p)), ops(std::move(ops_p)), uses_scan_filters(uses_scan_filters_p),
 	      source_output_types(std::move(source_output_types_p)),
 	      source_distinct_counts(std::move(source_distinct_counts_p)),
 	      source_min_values(std::move(source_min_values_p)), source_max_values(std::move(source_max_values_p)),
@@ -80,7 +81,10 @@ public:
 				return true;
 			}
 		}
-		return false;
+		return uses_scan_filters && full_pipeline_recipe_plan.has_recipe &&
+		       (SljitFullPipelineHasDirectSourceHashBuild(full_pipeline_recipe_plan.recipe.primitive_sequence) ||
+		        SljitFullPipelineHasExactFilterProbeHashBuild(ops,
+		                                                      full_pipeline_recipe_plan.recipe.primitive_sequence));
 	}
 
 	bool CanExecuteFullPipeline() const override {
@@ -211,6 +215,7 @@ public:
 private:
 	string backend_name;
 	vector<SljitExecutableRegionOp> ops;
+	bool uses_scan_filters;
 	vector<LogicalType> source_output_types;
 	vector<idx_t> source_distinct_counts;
 	vector<Value> source_min_values;
@@ -225,7 +230,7 @@ unique_ptr<ExecutionRegionKernel> CreateSljitNativeRegionKernel(ClientContext &c
                                                                 ExecutionRegionABI abi) {
 	(void)context;
 	return make_uniq<SljitNativeRegionKernel>(
-	    std::move(backend_name), std::move(region.ops), std::move(region.source_output_types),
+	    std::move(backend_name), std::move(region.ops), region.uses_scan_filters, std::move(region.source_output_types),
 	    std::move(region.source_distinct_counts), std::move(region.source_min_values),
 	    std::move(region.source_max_values), abi);
 }

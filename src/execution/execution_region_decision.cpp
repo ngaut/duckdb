@@ -211,19 +211,19 @@ static bool PhysicalPipelineDecisionNeedsRegionGraph(const PhysicalRunnerCostInp
 	       cost_input.native_grouped_aggregate_stage_count > 0 || cost_input.native_sort_stage_count > 0;
 }
 
-static bool PhysicalPipelineHashJoinBuildNeedsRegionGraph(const PhysicalRunnerCostInput &cost_input) {
+static bool HashJoinBuildNeedsBackendCapabilityAnalysis(const PhysicalRunnerCostInput &cost_input) {
 	return cost_input.full_pipeline && cost_input.native_hash_join_build_sink_count > 0 &&
 	       cost_input.generated_work_class != PhysicalRunnerGeneratedWorkClass::NONE &&
 	       cost_input.generated_work_class != PhysicalRunnerGeneratedWorkClass::PROJECTION_GLUE;
 }
 
 static bool PhysicalPipelineNeedsRegionGraph(const PhysicalRunnerCostInput &cost_input) {
-	return PhysicalPipelineHashJoinBuildNeedsRegionGraph(cost_input) ||
+	return HashJoinBuildNeedsBackendCapabilityAnalysis(cost_input) ||
 	       PhysicalPipelineDecisionNeedsRegionGraph(cost_input);
 }
 
 static string PhysicalPipelineRegionGraphDecisionReason(const PhysicalRunnerCostInput &cost_input) {
-	if (PhysicalPipelineHashJoinBuildNeedsRegionGraph(cost_input)) {
+	if (HashJoinBuildNeedsBackendCapabilityAnalysis(cost_input)) {
 		return "duckdb_cbo requires execution-region graph for hash-join build sink decision";
 	}
 	return "duckdb_cbo requires execution-region graph for physical runner decision";
@@ -299,6 +299,16 @@ SelectExecutionRegionCostOnlyPhysicalRunner(const PhysicalRunnerCostParameters &
 		selection.reason = "duckdb_cbo cost model admits backend capability analysis";
 		AppendExecutionRegionCboCostReason(selection.reason, selection.runner_cost);
 		return selection;
+	}
+	if (HashJoinBuildNeedsBackendCapabilityAnalysis(cost_input)) {
+		auto upper_bound_cost = SelectExecutionRegionPipelineCandidateUpperBoundRunner(cost_parameters, cost_input);
+		if (upper_bound_cost.selected_accelerated_runner) {
+			selection.runner_cost = std::move(upper_bound_cost);
+			SelectExecutionRegionAcceleratedRunner(selection);
+			selection.reason = "duckdb_cbo hash-build upper bound admits backend capability analysis";
+			AppendExecutionRegionCboCostReason(selection.reason, selection.runner_cost);
+			return selection;
+		}
 	}
 
 	selection.reason = "duckdb_cbo selects vectorized physical runner before backend analysis";

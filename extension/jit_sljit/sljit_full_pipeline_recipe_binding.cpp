@@ -164,6 +164,46 @@ SljitFullPipelineRecipe SljitFullPipelineRecipeBinding::MakeGeneratedFilterProje
 	return MakeNativeTailRecipe(std::move(sequence), facts.tail_start_idx);
 }
 
+bool SljitFullPipelineRecipeBinding::CanMakeSourceHashJoinBuildSinkRecipe(
+    const SljitSourceHashJoinBuildSinkFacts &facts) const {
+	if (facts.sink_idx + 1 != ops.size() || !SljitCanBindHashJoinBuildSinkPrimitive(ops, facts.sink_idx)) {
+		return false;
+	}
+	for (idx_t op_idx = 0; op_idx < facts.sink_idx; op_idx++) {
+		if (ops[op_idx].kind == SljitNativeRegionOpKind::FILTER) {
+			if (!SljitCanBindGeneratedFilterPrimitive(ops, op_idx)) {
+				return false;
+			}
+		} else if (ops[op_idx].kind == SljitNativeRegionOpKind::PROJECTION) {
+			if (!SljitCanBindProjectionChainPrimitive(ops, op_idx)) {
+				return false;
+			}
+		} else {
+			return false;
+		}
+	}
+	return true;
+}
+
+SljitFullPipelineRecipe SljitFullPipelineRecipeBinding::MakeSourceHashJoinBuildSinkRecipe(
+    const SljitSourceHashJoinBuildSinkFacts &facts) const {
+	auto sequence = MakeSourceSequence();
+	for (idx_t op_idx = 0; op_idx < facts.sink_idx; op_idx++) {
+		if (ops[op_idx].kind == SljitNativeRegionOpKind::FILTER) {
+			auto generated_filter = SljitBindGeneratedFilterPrimitive(ops, op_idx);
+			sequence.Add(SljitFullPipelinePrimitiveStep::GeneratedFilter(generated_filter));
+		} else if (ops[op_idx].kind == SljitNativeRegionOpKind::PROJECTION) {
+			AddProjectionChainStep(sequence, op_idx);
+		} else {
+			throw InternalException("SLJIT source hash-build recipe contains an invalid prefix operator");
+		}
+	}
+	auto sink = SljitBindHashJoinBuildSinkPrimitive(ops, facts.sink_idx);
+	sink.direct_source_ingress = true;
+	sequence.Add(SljitFullPipelinePrimitiveStep::HashJoinBuildSink(sink));
+	return MakePrimitiveSequence(std::move(sequence));
+}
+
 SljitFullPipelineRecipe SljitFullPipelineRecipeBinding::MakeHashJoinDelimJoinSinkRecipe(idx_t first_hash_join_idx,
                                                                                         idx_t final_hash_join_idx,
                                                                                         idx_t sink_idx) const {

@@ -26,8 +26,18 @@ struct SljitHashJoinBuildSinkRuntimeState {
 		auto &sink_op = ops[sink_idx];
 		DataChunk *sink_input = nullptr;
 		if (!TryBindSelectedHashJoinBuildInput(runtime, ops, scratch, sink_op, primitive, input, sink_input)) {
-			sink_input = &SljitBindMaterializedRuntimeBatchInput(input, "SLJIT hash join build sink primitive");
-			RecordSljitRegionRuntimePath(runtime, sink_op.kind, "runtime_batch_input", sink_input->size());
+			if (input.selection) {
+				auto &source = SljitBindRuntimeBatchInput(input, "SLJIT selected hash join build sink primitive");
+				selected_source_input.Ensure(runtime.GetAllocator(), source.GetTypes());
+				auto &selected = selected_source_input.chunk;
+				selected.Reset();
+				selected.Slice(source, *input.selection, input.count);
+				sink_input = &selected;
+				RecordSljitRegionRuntimePath(runtime, sink_op.kind, "selected_source_view", sink_input->size());
+			} else {
+				sink_input = &SljitBindMaterializedRuntimeBatchInput(input, "SLJIT hash join build sink primitive");
+				RecordSljitRegionRuntimePath(runtime, sink_op.kind, "runtime_batch_input", sink_input->size());
+			}
 		}
 		auto &native_runtime = runtime.ExecutionOperators();
 		auto build_result = SljitExecuteNativeHashJoinBuild(runtime, native_runtime, scratch, sink_idx, sink_op,
@@ -35,6 +45,10 @@ struct SljitHashJoinBuildSinkRuntimeState {
 		                                                    scratch.HashJoinBuildHashValues(sink_idx),
 		                                                    scratch.HashJoinBuildSelection(sink_idx));
 		auto sink_result = native_runtime.RecordSinkResult(*sink_input, build_result);
+		if (primitive.direct_source_ingress) {
+			RecordSljitRegionRuntimeProof(runtime, sink_op.kind, ExecutionRegionJitRuntimeProof::GENERATED_BACKEND_WORK,
+			                              "direct_source_ingress", sink_input->size());
+		}
 		if (SljitNativeSinkResultStopsExecution(runtime, sink_result, result)) {
 			return true;
 		}
@@ -43,6 +57,8 @@ struct SljitHashJoinBuildSinkRuntimeState {
 	}
 
 private:
+	SljitDataChunkBatch selected_source_input;
+
 	bool TryBindSelectedHashJoinBuildInput(ExecutionRegionRuntime &runtime, vector<SljitExecutableRegionOp> &ops,
 	                                       SljitRegionExecutionScratch &scratch, SljitExecutableRegionOp &sink_op,
 	                                       const SljitHashJoinBuildSinkPrimitive &primitive,
@@ -103,8 +119,7 @@ private:
 		                                                       projection_op, join_input, selected.MatchSelection(),
 		                                                       selected.BuildSelection(), selected.RowPointers(),
 		                                                       selected.count, required_columns, projected)) {
-			RecordSljitRegionRuntimePath(runtime, hash_join_op.kind, "projected_hash_build_views",
-			                             projected.size());
+			RecordSljitRegionRuntimePath(runtime, hash_join_op.kind, "projected_hash_build_views", projected.size());
 			sink_input = &projected;
 			return true;
 		}
@@ -118,8 +133,7 @@ private:
 		if (SljitTryMaterializeHashJoinRequiredProjectionOutputs(
 		        runtime, ops, scratch, selected.hash_join_idx, projection_idx, projection_op, join_input,
 		        selected.MatchSelection(), selected.RowPointers(), join_output, projected, required_columns)) {
-			RecordSljitRegionRuntimePath(runtime, hash_join_op.kind, "projected_hash_build_outputs",
-			                             projected.size());
+			RecordSljitRegionRuntimePath(runtime, hash_join_op.kind, "projected_hash_build_outputs", projected.size());
 			sink_input = &projected;
 			return true;
 		}

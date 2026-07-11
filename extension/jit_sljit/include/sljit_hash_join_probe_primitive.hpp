@@ -80,6 +80,7 @@ struct SljitHashJoinProbeSelectionPrimitive {
 struct SljitHashJoinBuildSinkPrimitive {
 	idx_t sink_idx = DConstants::INVALID_INDEX;
 	idx_t projection_idx = DConstants::INVALID_INDEX;
+	bool direct_source_ingress = false;
 
 	bool HasProjection() const {
 		return projection_idx != DConstants::INVALID_INDEX;
@@ -233,10 +234,9 @@ static bool SljitCanBindHashJoinBuildSinkPrimitive(const vector<SljitExecutableR
 	       (projection_idx < ops.size() && ops[projection_idx].kind == SljitNativeRegionOpKind::PROJECTION);
 }
 
-static SljitHashJoinBuildSinkPrimitive SljitBindHashJoinBuildSinkPrimitive(const vector<SljitExecutableRegionOp> &ops,
-                                                                           idx_t sink_idx,
-                                                                           idx_t projection_idx =
-	                                                                               DConstants::INVALID_INDEX) {
+static SljitHashJoinBuildSinkPrimitive
+SljitBindHashJoinBuildSinkPrimitive(const vector<SljitExecutableRegionOp> &ops, idx_t sink_idx,
+                                    idx_t projection_idx = DConstants::INVALID_INDEX) {
 	if (!SljitCanBindHashJoinBuildSinkPrimitive(ops, sink_idx, projection_idx)) {
 		throw InternalException("SLJIT hash join build sink primitive cannot bind requested operator");
 	}

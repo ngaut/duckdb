@@ -198,6 +198,9 @@ SljitRegionNodePlan PlanSljitHashJoinProbeOperatorNode(const ExecutionRegionNode
 	if (render_diagnostics) {
 		reason += ";requires=native_operator_runtime_binding;requires=native_hash_join_table_layout;"
 		          "native-hash-join-probe-executable=ready;native_probe_shape_ready=true";
+		reason += ";native_probe_key0_input=" + std::to_string(native_op.hash_join_probe.keys[0].key_input_index);
+		reason += ";native_probe_output_mode=" +
+		          string(SljitHashJoinProbeOutputModeToString(native_op.hash_join_probe.output_mode));
 	}
 	AppendSljitReasonPart(reason, node.operator_info->ir, render_diagnostics);
 	return SljitNativeNode(std::move(native_op), std::move(reason));

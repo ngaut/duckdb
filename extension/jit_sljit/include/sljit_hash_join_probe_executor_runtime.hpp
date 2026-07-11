@@ -8,6 +8,7 @@
 
 #pragma once
 
+#include "sljit_exact_perfect_hash_join_runtime.hpp"
 #include "sljit_hash_join_probe_execution_contract.hpp"
 #include "sljit_hash_join_probe_output_runtime.hpp"
 #include "sljit_hash_join_probe_primitive.hpp"
@@ -20,6 +21,34 @@
 
 namespace duckdb {
 
+static void SljitPopulateExactPerfectHashJoinSelections(const SljitNativeHashJoinProbeKeyPlan &key,
+                                                        SljitNativePerfectHashJoinProbeInput &input) {
+	if (input.source_key0_int64_to_int32) {
+		SljitPopulateExactPerfectHashJoinSelections<int32_t, int64_t>(input);
+		return;
+	}
+	switch (key.key_kind) {
+	case SljitNativeHashJoinKeyKind::INT8:
+		return SljitPopulateExactPerfectHashJoinSelections<int8_t>(input);
+	case SljitNativeHashJoinKeyKind::INT16:
+		return SljitPopulateExactPerfectHashJoinSelections<int16_t>(input);
+	case SljitNativeHashJoinKeyKind::INT32:
+		return SljitPopulateExactPerfectHashJoinSelections<int32_t>(input);
+	case SljitNativeHashJoinKeyKind::INT64:
+		return SljitPopulateExactPerfectHashJoinSelections<int64_t>(input);
+	case SljitNativeHashJoinKeyKind::UINT8:
+		return SljitPopulateExactPerfectHashJoinSelections<uint8_t>(input);
+	case SljitNativeHashJoinKeyKind::UINT16:
+		return SljitPopulateExactPerfectHashJoinSelections<uint16_t>(input);
+	case SljitNativeHashJoinKeyKind::UINT32:
+		return SljitPopulateExactPerfectHashJoinSelections<uint32_t>(input);
+	case SljitNativeHashJoinKeyKind::UINT64:
+		return SljitPopulateExactPerfectHashJoinSelections<uint64_t>(input);
+	default:
+		throw InternalException("exact perfect hash join filter proof has an unsupported key width");
+	}
+}
+
 template <class OWNER>
 static ExecutionOperatorBindResult SljitExecutePerfectHashJoinProbe(
     OWNER &owner, ExecutionRegionRuntime &runtime, idx_t op_idx, SljitExecutableRegionOp &op,
@@ -27,6 +56,32 @@ static ExecutionOperatorBindResult SljitExecutePerfectHashJoinProbe(
     DataChunk &output, SelectionVector &match_selection, SelectionVector &build_selection,
     SljitHashJoinProbeDrainState &state, bool source_key0_int64_to_int32_unchecked = false,
     SljitHashJoinProbeOutputContract output_contract = SljitHashJoinProbeOutputContract::MATERIALIZED_OUTPUT) {
+	if (plan.exact_source_filter_identity) {
+		runtime.RecordJitRuntimePath("hash_join_probe.perfect_probe.exact_source_filter_candidate");
+	}
+	if (plan.exact_source_filter_identity &&
+	    plan.exact_source_filter_identity == probe.perfect_layout.runtime_filter_identity) {
+		auto &key = SljitValidatePerfectHashJoinProbeExecutionLayout(plan, probe, input);
+		SljitPreparedPerfectHashJoinProbeInput prepared_input;
+		SljitPreparePerfectHashJoinProbeInput(key, probe.perfect_layout, input, match_selection, build_selection, state,
+		                                      source_key0_int64_to_int32_unchecked, prepared_input);
+		auto &native_input = prepared_input.native_input;
+		SljitPopulateExactPerfectHashJoinSelections(key, native_input);
+		state.input_offset = native_input.input_offset;
+		state.resume_row_pointer = nullptr;
+		state.finished = native_input.finished;
+		state.source_key0_int64_to_int32_matches_are_proven = native_input.source_key0_int64_to_int32;
+		runtime.RecordJitRuntimePath("hash_join_probe.perfect_probe.exact_source_filter", native_input.selected_count);
+		RecordSljitRegionRuntimeProof(runtime, op.kind, ExecutionRegionJitRuntimeProof::GENERATED_BACKEND_WORK,
+		                              "exact_source_filter", native_input.selected_count);
+		if (SljitHashJoinProbeProducesSelectedView(output_contract)) {
+			output.SetChildCardinality(native_input.selected_count);
+			return ExecutionOperatorBindResult::READY;
+		}
+		ExecutionMaterializePerfectHashJoinProbe(probe, input, match_selection, build_selection,
+		                                         native_input.selected_count, output, nullptr);
+		return ExecutionOperatorBindResult::READY;
+	}
 	owner.EnsurePerfectHashJoinProbeCode(runtime, op.hash_join_probe);
 	auto &key = SljitValidatePerfectHashJoinProbeExecutionLayout(plan, probe, input);
 	SljitPreparedPerfectHashJoinProbeInput prepared_input;

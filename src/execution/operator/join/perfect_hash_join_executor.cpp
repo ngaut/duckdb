@@ -1,13 +1,14 @@
 #include "duckdb/execution/operator/join/perfect_hash_join_executor.hpp"
 
 #include "duckdb/common/operator/subtract.hpp"
+#include "duckdb/common/operator/cast_operators.hpp"
 #include "duckdb/execution/execution_hash_join_runtime.hpp"
 #include "duckdb/execution/operator/join/physical_hash_join.hpp"
 
 namespace duckdb {
 
 PerfectHashJoinExecutor::PerfectHashJoinExecutor(const PhysicalHashJoin &join_p, JoinHashTable &ht_p)
-    : join(join_p), ht(ht_p) {
+    : join(join_p), ht(ht_p), runtime_filter_identity(make_shared_ptr<ExecutionRuntimeFilterIdentity>()) {
 }
 
 const LogicalType &PerfectHashJoinExecutor::GetKeyType() const {
@@ -205,6 +206,7 @@ bool PerfectHashJoinExecutor::GetExecutionPerfectHashJoinTableLayout(
 	layout.build_capacity = perfect_join_statistics.build_range + 1;
 	layout.build_unique_count = unique_keys;
 	layout.build_validity = bitmap_build_idx.GetData();
+	layout.runtime_filter_identity = runtime_filter_identity;
 	layout.rhs_output_column_count = perfect_hash_table.size();
 	layout.rhs_output_types = join.rhs_output_columns.col_types;
 	layout.rhs_dictionary_buffers = perfect_hash_table;
@@ -432,6 +434,198 @@ void PerfectHashJoinExecutor::FillSelectionVectorSwitchProbe(const Vector &sourc
 	default:
 		throw NotImplementedException("Type not supported");
 	}
+}
+
+idx_t PerfectHashJoinExecutor::FilterSelection(const UnifiedVectorFormat &source, const LogicalType &source_type,
+                                               optional_ptr<const SelectionVector> input_sel, idx_t count,
+                                               SelectionVector &result_sel) const {
+	const bool has_null = !source.validity.CannotHaveNull();
+	switch (source_type.InternalType()) {
+	case PhysicalType::INT8:
+		return has_null ? FilterSelectionTargetSwitch<int8_t, true>(source, input_sel, count, result_sel)
+		                : FilterSelectionTargetSwitch<int8_t, false>(source, input_sel, count, result_sel);
+	case PhysicalType::INT16:
+		return has_null ? FilterSelectionTargetSwitch<int16_t, true>(source, input_sel, count, result_sel)
+		                : FilterSelectionTargetSwitch<int16_t, false>(source, input_sel, count, result_sel);
+	case PhysicalType::INT32:
+		return has_null ? FilterSelectionTargetSwitch<int32_t, true>(source, input_sel, count, result_sel)
+		                : FilterSelectionTargetSwitch<int32_t, false>(source, input_sel, count, result_sel);
+	case PhysicalType::INT64:
+		return has_null ? FilterSelectionTargetSwitch<int64_t, true>(source, input_sel, count, result_sel)
+		                : FilterSelectionTargetSwitch<int64_t, false>(source, input_sel, count, result_sel);
+	case PhysicalType::INT128:
+		return has_null ? FilterSelectionTargetSwitch<hugeint_t, true>(source, input_sel, count, result_sel)
+		                : FilterSelectionTargetSwitch<hugeint_t, false>(source, input_sel, count, result_sel);
+	case PhysicalType::UINT8:
+		return has_null ? FilterSelectionTargetSwitch<uint8_t, true>(source, input_sel, count, result_sel)
+		                : FilterSelectionTargetSwitch<uint8_t, false>(source, input_sel, count, result_sel);
+	case PhysicalType::UINT16:
+		return has_null ? FilterSelectionTargetSwitch<uint16_t, true>(source, input_sel, count, result_sel)
+		                : FilterSelectionTargetSwitch<uint16_t, false>(source, input_sel, count, result_sel);
+	case PhysicalType::UINT32:
+		return has_null ? FilterSelectionTargetSwitch<uint32_t, true>(source, input_sel, count, result_sel)
+		                : FilterSelectionTargetSwitch<uint32_t, false>(source, input_sel, count, result_sel);
+	case PhysicalType::UINT64:
+		return has_null ? FilterSelectionTargetSwitch<uint64_t, true>(source, input_sel, count, result_sel)
+		                : FilterSelectionTargetSwitch<uint64_t, false>(source, input_sel, count, result_sel);
+	case PhysicalType::UINT128:
+		return has_null ? FilterSelectionTargetSwitch<uhugeint_t, true>(source, input_sel, count, result_sel)
+		                : FilterSelectionTargetSwitch<uhugeint_t, false>(source, input_sel, count, result_sel);
+	default:
+		throw NotImplementedException("Type not supported");
+	}
+}
+
+template <typename SOURCE, bool HAS_NULL>
+idx_t PerfectHashJoinExecutor::FilterSelectionTargetSwitch(const UnifiedVectorFormat &source,
+                                                           optional_ptr<const SelectionVector> input_sel, idx_t count,
+                                                           SelectionVector &result_sel) const {
+	switch (GetKeyType().InternalType()) {
+	case PhysicalType::INT8:
+		return TemplatedFilterSelection<SOURCE, int8_t, HAS_NULL>(source, input_sel, count, result_sel);
+	case PhysicalType::INT16:
+		return TemplatedFilterSelection<SOURCE, int16_t, HAS_NULL>(source, input_sel, count, result_sel);
+	case PhysicalType::INT32:
+		return TemplatedFilterSelection<SOURCE, int32_t, HAS_NULL>(source, input_sel, count, result_sel);
+	case PhysicalType::INT64:
+		return TemplatedFilterSelection<SOURCE, int64_t, HAS_NULL>(source, input_sel, count, result_sel);
+	case PhysicalType::INT128:
+		return TemplatedFilterSelection<SOURCE, hugeint_t, HAS_NULL>(source, input_sel, count, result_sel);
+	case PhysicalType::UINT8:
+		return TemplatedFilterSelection<SOURCE, uint8_t, HAS_NULL>(source, input_sel, count, result_sel);
+	case PhysicalType::UINT16:
+		return TemplatedFilterSelection<SOURCE, uint16_t, HAS_NULL>(source, input_sel, count, result_sel);
+	case PhysicalType::UINT32:
+		return TemplatedFilterSelection<SOURCE, uint32_t, HAS_NULL>(source, input_sel, count, result_sel);
+	case PhysicalType::UINT64:
+		return TemplatedFilterSelection<SOURCE, uint64_t, HAS_NULL>(source, input_sel, count, result_sel);
+	case PhysicalType::UINT128:
+		return TemplatedFilterSelection<SOURCE, uhugeint_t, HAS_NULL>(source, input_sel, count, result_sel);
+	default:
+		throw NotImplementedException("Type not supported");
+	}
+}
+
+template <typename SOURCE, typename TARGET, bool HAS_NULL>
+idx_t PerfectHashJoinExecutor::TemplatedFilterSelection(const UnifiedVectorFormat &source,
+                                                        optional_ptr<const SelectionVector> input_sel, idx_t count,
+                                                        SelectionVector &result_sel) const {
+	if constexpr (std::is_same<SOURCE, TARGET>::value && !HAS_NULL) {
+		return perfect_join_statistics.is_build_dense
+		           ? TemplatedFilterSelectionLayoutSwitch<SOURCE, TARGET, HAS_NULL, true>(source, input_sel, count,
+		                                                                                  result_sel)
+		           : TemplatedFilterSelectionLayoutSwitch<SOURCE, TARGET, HAS_NULL, false>(source, input_sel, count,
+		                                                                                   result_sel);
+	} else {
+		const auto min_value = perfect_join_statistics.build_min.GetValueUnsafe<TARGET>();
+		const auto max_value = perfect_join_statistics.build_max.GetValueUnsafe<TARGET>();
+		const auto data = UnifiedVectorFormat::GetData<const SOURCE>(source);
+		const auto input_selection = input_sel ? input_sel->data() : nullptr;
+		const auto source_selection = source.sel->data();
+		idx_t result_count = 0;
+		for (idx_t i = 0; i < count; i++) {
+			const auto row_idx = input_selection ? input_selection[i] : i;
+			const auto source_idx = source_selection ? source_selection[row_idx] : row_idx;
+			if (HAS_NULL && !source.validity.RowIsValidUnsafe(source_idx)) {
+				continue;
+			}
+			TARGET input_value;
+			if constexpr (std::is_same<SOURCE, TARGET>::value) {
+				input_value = data[source_idx];
+			} else if (!TryCast::Operation(data[source_idx], input_value)) {
+				continue;
+			}
+			if (input_value >= min_value && input_value <= max_value &&
+			    (perfect_join_statistics.is_build_dense ||
+			     bitmap_build_idx.RowIsValidUnsafe(UnsafeNumericCast<idx_t>(input_value - min_value)))) {
+				result_sel.set_index(result_count++, row_idx);
+			}
+		}
+		return result_count;
+	}
+}
+
+template <typename SOURCE, typename TARGET, bool HAS_NULL, bool BUILD_DENSE>
+idx_t PerfectHashJoinExecutor::TemplatedFilterSelectionLayoutSwitch(const UnifiedVectorFormat &source,
+                                                                    optional_ptr<const SelectionVector> input_sel,
+                                                                    idx_t count, SelectionVector &result_sel) const {
+	const auto input_selection = input_sel ? input_sel->data() : nullptr;
+	const auto source_selection = source.sel->data();
+	if (input_selection) {
+		return source_selection ? TemplatedFilterSelectionLoop<SOURCE, TARGET, HAS_NULL, BUILD_DENSE, true, true>(
+		                              source, input_selection, source_selection, count, result_sel)
+		                        : TemplatedFilterSelectionLoop<SOURCE, TARGET, HAS_NULL, BUILD_DENSE, true, false>(
+		                              source, input_selection, source_selection, count, result_sel);
+	}
+	return source_selection ? TemplatedFilterSelectionLoop<SOURCE, TARGET, HAS_NULL, BUILD_DENSE, false, true>(
+	                              source, input_selection, source_selection, count, result_sel)
+	                        : TemplatedFilterSelectionLoop<SOURCE, TARGET, HAS_NULL, BUILD_DENSE, false, false>(
+	                              source, input_selection, source_selection, count, result_sel);
+}
+
+template <typename SOURCE, typename TARGET, bool HAS_NULL, bool BUILD_DENSE, bool INPUT_SELECTED, bool SOURCE_SELECTED>
+idx_t PerfectHashJoinExecutor::TemplatedFilterSelectionLoop(const UnifiedVectorFormat &source,
+                                                            const sel_t *input_selection, const sel_t *source_selection,
+                                                            idx_t count, SelectionVector &result_sel) const {
+	const auto min_value = perfect_join_statistics.build_min.GetValueUnsafe<TARGET>();
+	const auto max_value = perfect_join_statistics.build_max.GetValueUnsafe<TARGET>();
+	const auto data = UnifiedVectorFormat::GetData<const SOURCE>(source);
+	auto result_selection = result_sel.data();
+	idx_t result_count = 0;
+	idx_t i = 0;
+	if constexpr (std::is_same<SOURCE, TARGET>::value && !HAS_NULL && !BUILD_DENSE) {
+		auto row_index = [&](idx_t input_idx) {
+			return UnsafeNumericCast<sel_t>(INPUT_SELECTED ? input_selection[input_idx] : input_idx);
+		};
+		auto matches = [&](sel_t row_idx) {
+			const auto source_idx = SOURCE_SELECTED ? source_selection[row_idx] : row_idx;
+			const auto input_value = data[source_idx];
+			return input_value >= min_value && input_value <= max_value &&
+			       bitmap_build_idx.RowIsValidUnsafe(UnsafeNumericCast<idx_t>(input_value - min_value));
+		};
+		for (; i + 4 <= count; i += 4) {
+			const auto row0 = row_index(i);
+			const auto row1 = row_index(i + 1);
+			const auto row2 = row_index(i + 2);
+			const auto row3 = row_index(i + 3);
+			const auto match0 = matches(row0);
+			const auto match1 = matches(row1);
+			const auto match2 = matches(row2);
+			const auto match3 = matches(row3);
+			D_ASSERT(result_count + 4 <= result_sel.Capacity());
+			if (match0) {
+				result_selection[result_count++] = row0;
+			}
+			if (match1) {
+				result_selection[result_count++] = row1;
+			}
+			if (match2) {
+				result_selection[result_count++] = row2;
+			}
+			if (match3) {
+				result_selection[result_count++] = row3;
+			}
+		}
+	}
+	for (; i < count; i++) {
+		const auto row_idx = INPUT_SELECTED ? input_selection[i] : i;
+		const auto source_idx = SOURCE_SELECTED ? source_selection[row_idx] : row_idx;
+		if (HAS_NULL && !source.validity.RowIsValidUnsafe(source_idx)) {
+			continue;
+		}
+		TARGET input_value;
+		if constexpr (std::is_same<SOURCE, TARGET>::value) {
+			input_value = data[source_idx];
+		} else if (!TryCast::Operation(data[source_idx], input_value)) {
+			continue;
+		}
+		if (input_value >= min_value && input_value <= max_value &&
+		    (BUILD_DENSE || bitmap_build_idx.RowIsValidUnsafe(UnsafeNumericCast<idx_t>(input_value - min_value)))) {
+			D_ASSERT(result_count < result_sel.Capacity());
+			result_selection[result_count++] = UnsafeNumericCast<sel_t>(row_idx);
+		}
+	}
+	return result_count;
 }
 
 template <typename T, bool BUILD_SEL_VEC>

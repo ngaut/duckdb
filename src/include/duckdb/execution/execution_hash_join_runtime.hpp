@@ -66,6 +66,7 @@ struct ExecutionPerfectHashJoinTableLayout {
 	uint64_t build_min = 0;
 	uint64_t build_max = 0;
 	const validity_t *build_validity = nullptr;
+	shared_ptr<ExecutionRuntimeFilterIdentity> runtime_filter_identity;
 	idx_t rhs_output_column_count = 0;
 	vector<LogicalType> rhs_output_types;
 	vector<buffer_ptr<DictionaryEntry>> rhs_dictionary_buffers;

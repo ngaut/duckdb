@@ -145,6 +145,7 @@ BuildExecutionRegionSourceInfo(const ExecutionSourceContract &descriptor, Execut
 	result->filter_pushdown = descriptor.filter_pushdown;
 	result->filter_prune = descriptor.filter_prune;
 	result->dynamic_filters = descriptor.dynamic_filters;
+	result->exact_filter_proofs = descriptor.exact_filter_proofs;
 	result->in_out_function = descriptor.in_out_function;
 	result->table_scan_contract = descriptor.table_scan_contract;
 	result->hash_join_contract = descriptor.hash_join_contract;

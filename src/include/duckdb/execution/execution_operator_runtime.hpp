@@ -299,6 +299,12 @@ struct ExecutionGroupedAggregateStateAddressState {
 		(void)dense_domain;
 		return false;
 	}
+	virtual bool TryEnableProvenUniqueAppend(DataChunk &groups) {
+		(void)groups;
+		return false;
+	}
+	virtual void RequireAppendFinalCombine() {
+	}
 	virtual bool TryResolveNewGroups(DataChunk &input, const ExecutionRegionSinkInfo &sink_info, Vector &addresses,
 	                                 optional_ptr<ExecutionOperatorStageRecorder> recorder = nullptr,
 	                                 bool finish = true) {

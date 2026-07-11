@@ -100,11 +100,12 @@ bool TryPlanSljitGeneratedSourceFilters(const ExecutionRegionNode &node, SljitSo
                                         vector<SljitNativeRegionOpPlan> &native_ops, string &error,
                                         bool render_diagnostics);
 SljitRegionNodePlan PlanSljitSourceNode(const ExecutionRegionNode &node, const ExecutionRegionContract &contract,
-                                        ExecutionRegionSourceExecutionKind source_execution, bool render_diagnostics);
+                                        ExecutionRegionSourceExecutionKind source_execution, bool render_diagnostics,
+                                        bool prefer_duckdb_scan_filters = false);
 bool SljitCanExecuteSourceNode(const ExecutionRegionNode &node, const ExecutionRegionContract &contract);
-	SljitRegionNodePlan PlanSljitHashJoinProbeOperatorNode(const ExecutionRegionNode &node,
-	                                                       const vector<LogicalType> &input_types,
-	                                                       const vector<bool> &input_not_null, bool render_diagnostics);
+SljitRegionNodePlan PlanSljitHashJoinProbeOperatorNode(const ExecutionRegionNode &node,
+                                                       const vector<LogicalType> &input_types,
+                                                       const vector<bool> &input_not_null, bool render_diagnostics);
 SljitRegionNodePlan PlanSljitNestedLoopJoinProbeOperatorNode(const ExecutionRegionNode &node,
                                                              const vector<LogicalType> &input_types,
                                                              bool render_diagnostics);

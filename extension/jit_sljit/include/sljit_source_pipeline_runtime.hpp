@@ -235,6 +235,7 @@ private:
 		switch (step.kind) {
 		case SljitFullPipelinePrimitiveKind::UNGROUPED_AGGREGATE_UPDATE:
 		case SljitFullPipelinePrimitiveKind::GROUPED_AGGREGATE_UPDATE:
+		case SljitFullPipelinePrimitiveKind::HASH_JOIN_BUILD_SINK:
 			return true;
 		default:
 			return false;

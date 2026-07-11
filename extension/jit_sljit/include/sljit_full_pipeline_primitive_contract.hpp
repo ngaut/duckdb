@@ -19,6 +19,11 @@ bool SljitFullPipelineSourceFetchNeedsPartitionPreservingChunks(
 
 bool SljitFullPipelineIsSelectedHashJoinSinkSequence(const SljitFullPipelinePrimitiveSequence &primitive_sequence);
 
+bool SljitFullPipelineHasDirectSourceHashBuild(const SljitFullPipelinePrimitiveSequence &primitive_sequence);
+
+bool SljitFullPipelineHasExactFilterProbeHashBuild(const vector<SljitExecutableRegionOp> &ops,
+                                                   const SljitFullPipelinePrimitiveSequence &primitive_sequence);
+
 bool SljitNativeTailCanConsumeTail(const vector<SljitExecutableRegionOp> &ops, idx_t tail_start_idx);
 
 bool SljitFullPipelinePrimitiveSequenceIsExecutable(const vector<SljitExecutableRegionOp> &ops,

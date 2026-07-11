@@ -17,6 +17,7 @@
 #include "duckdb/planner/expression_iterator.hpp"
 #include "duckdb/planner/filter/expression_filter.hpp"
 #include "duckdb/planner/filter/table_filter_functions.hpp"
+#include "duckdb/planner/expression/bound_cast_expression.hpp"
 #include "duckdb/storage/statistics/base_statistics.hpp"
 #include "duckdb/storage/statistics/numeric_stats.hpp"
 
@@ -347,6 +348,59 @@ static idx_t EstimateExecutionRegionDistinctSubsetRows(idx_t input_cardinality, 
 	return MaxValue<idx_t>(static_cast<idx_t>(scaled), 1);
 }
 
+static void AddExecutionRegionExactPerfectHashFilterProofs(const Expression &expr, const LogicalType &source_type,
+                                                           idx_t source_input_index,
+                                                           vector<ExecutionRegionExactFilterProof> &proofs) {
+	auto unwrapped = TryUnwrapExecutionRegionOptionalFilterExpression(expr);
+	if (!unwrapped) {
+		return;
+	}
+	if (unwrapped.get() != &expr) {
+		AddExecutionRegionExactPerfectHashFilterProofs(*unwrapped, source_type, source_input_index, proofs);
+		return;
+	}
+	if (expr.GetExpressionClass() == ExpressionClass::BOUND_CONJUNCTION &&
+	    expr.GetExpressionType() == ExpressionType::CONJUNCTION_AND) {
+		for (auto &child : expr.Cast<BoundConjunctionExpression>().GetChildren()) {
+			AddExecutionRegionExactPerfectHashFilterProofs(*child, source_type, source_input_index, proofs);
+		}
+		return;
+	}
+	if (expr.GetExpressionClass() != ExpressionClass::BOUND_FUNCTION) {
+		return;
+	}
+	auto &function = expr.Cast<BoundFunctionExpression>();
+	if (function.Function().GetName() != PerfectHashJoinScalarFun::NAME || !function.BindInfo() ||
+	    function.GetChildren().size() != 1) {
+		return;
+	}
+	auto &data = function.BindInfo()->Cast<PerfectHashJoinFunctionData>();
+	if (!data.executor) {
+		return;
+	}
+	auto &input = *function.GetChildren()[0];
+	const bool direct_reference = input.GetExpressionClass() == ExpressionClass::BOUND_REF &&
+	                              input.GetReturnType() == source_type && data.executor->GetKeyType() == source_type;
+	bool checked_integral_cast = false;
+	if (input.GetExpressionClass() == ExpressionClass::BOUND_CAST &&
+	    input.GetReturnType() == data.executor->GetKeyType() && TypeIsInteger(source_type.InternalType()) &&
+	    TypeIsInteger(input.GetReturnType().InternalType())) {
+		auto &cast = input.Cast<BoundCastExpression>();
+		checked_integral_cast = cast.Child().GetExpressionClass() == ExpressionClass::BOUND_REF &&
+		                        cast.Child().GetReturnType() == source_type;
+	}
+	if (!direct_reference && !checked_integral_cast) {
+		return;
+	}
+	auto &identity = data.executor->GetRuntimeFilterIdentity();
+	for (auto &proof : proofs) {
+		if (proof.source_input_index == source_input_index && proof.identity == identity) {
+			return;
+		}
+	}
+	proofs.push_back({source_input_index, identity});
+}
+
 static void ApplyExecutionRegionFinalizedDynamicFilterEstimate(const PhysicalTableScan &scan,
                                                                ExecutionContract &descriptor, ClientContext &context) {
 	auto &contract = descriptor.source.table_scan_contract;
@@ -368,6 +422,9 @@ static void ApplyExecutionRegionFinalizedDynamicFilterEstimate(const PhysicalTab
 		}
 		auto &expr_filter =
 		    ExpressionFilter::GetExpressionFilter(filter_entry.Filter(), "execution-region dynamic filter estimate");
+		AddExecutionRegionExactPerfectHashFilterProofs(*expr_filter.expr,
+		                                               contract.source_contract_input_types[filter_idx], filter_idx,
+		                                               descriptor.source.exact_filter_proofs);
 		auto stats = TryGetExecutionRegionScanColumnStatistics(scan, context, scan.column_ids[filter_idx]);
 		if (!stats) {
 			continue;

@@ -36,7 +36,20 @@ public:
 			}
 			return execute_output_view(filtered_input);
 		}
-		if (!SljitExecuteGeneratedFilterPrimitive(runtime, scratch, ops, step.generated_filter, input,
+		const SljitRuntimeBatchView *filter_input = &input;
+		SljitRuntimeBatchView selected_filter_view;
+		if (input.selection) {
+			auto &source = SljitBindRuntimeBatchInput(input, "SLJIT selected generated filter");
+			selected_filter_input.Ensure(runtime.GetAllocator(), source.GetTypes());
+			auto &selected = selected_filter_input.chunk;
+			selected.Reset();
+			selected.Slice(source, *input.selection, input.count);
+			selected_filter_view = SljitRuntimeBatchViewFromChunk(selected);
+			filter_input = &selected_filter_view;
+			RecordSljitRegionRuntimePath(runtime, ops[step.generated_filter.filter_idx].kind, "selected_input_view",
+			                             input.count);
+		}
+		if (!SljitExecuteGeneratedFilterPrimitive(runtime, scratch, ops, step.generated_filter, *filter_input,
 		                                          filtered_input)) {
 			return false;
 		}
@@ -47,6 +60,7 @@ private:
 	ExecutionRegionRuntime &runtime;
 	vector<SljitExecutableRegionOp> &ops;
 	SljitRegionExecutionScratch &scratch;
+	SljitDataChunkBatch selected_filter_input;
 	SljitDataChunkBatch selected_hash_join_filter_input;
 	vector<SljitSelectedHashJoinFilterCache> selected_hash_join_filter_caches;
 };

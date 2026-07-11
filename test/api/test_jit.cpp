@@ -1,4 +1,5 @@
 #include "test_jit_helpers.hpp"
+#include "sljit_exact_perfect_hash_join_runtime.hpp"
 
 using namespace duckdb;
 
@@ -1810,9 +1811,21 @@ TEST_CASE("JIT CBO prices generated join fusion through candidate upper bounds",
 	profile = DuckDBCostModel::SelectPhysicalRunner(upper_bound, parameters);
 	REQUIRE(profile.native_hash_join_build_sink_count == 1);
 	REQUIRE(profile.costed_batches == profile.batches);
+	REQUIRE(profile.generated_backend_stage_count == 3);
 	REQUIRE(profile.generated_backend_stage_work == 0);
+	REQUIRE(profile.materialization_elision_count == 0);
 	REQUIRE(profile.stateful_protocol_penalty == 4 * 720);
 	REQUIRE(profile.selection_reason.rfind("admitted_", 0) == 0);
+	REQUIRE(profile.selected_accelerated_runner);
+
+	pipeline_input.native_join_stage_count = 0;
+	pipeline_input.expression_cost = 512;
+	upper_bound = BuildExecutionRegionPipelineCandidateUpperBoundCostInput(pipeline_input);
+	profile = DuckDBCostModel::SelectPhysicalRunner(upper_bound, parameters);
+	REQUIRE(profile.native_hash_join_build_sink_count == 0);
+	REQUIRE(profile.generated_backend_stage_count == 1);
+	REQUIRE(profile.materialization_elision_count == 0);
+	REQUIRE(profile.stateful_protocol_penalty == 0);
 	REQUIRE(profile.selected_accelerated_runner);
 }
 
@@ -3133,7 +3146,9 @@ TEST_CASE("JIT CBO uses finalized perfect-hash dynamic filter cardinality", "[ap
 	REQUIRE_NO_FAIL(con.Query("SET threads=1"));
 	REQUIRE_NO_FAIL(con.Query("CREATE TEMP TABLE jit_dynamic_filter_fact AS "
 	                          "SELECT (i % 50000)::INTEGER AS k1, (i % 10000)::INTEGER AS k2, "
-	                          "       i::BIGINT AS payload FROM range(200000) tbl(i)"));
+	                          "       i::BIGINT AS payload, "
+	                          "       CASE WHEN i % 7 = 0 THEN 'keep' ELSE 'drop' END AS tag "
+	                          "FROM range(200000) tbl(i)"));
 	REQUIRE_NO_FAIL(con.Query("CREATE TEMP TABLE jit_dynamic_filter_dim1 AS "
 	                          "SELECT i::INTEGER AS k1 FROM range(500) tbl(i)"));
 	REQUIRE_NO_FAIL(con.Query("CREATE TEMP TABLE jit_dynamic_filter_dim2 AS "
@@ -3146,6 +3161,16 @@ TEST_CASE("JIT CBO uses finalized perfect-hash dynamic filter cardinality", "[ap
 	                        "JOIN jit_dynamic_filter_dim2 d2 USING (k2)");
 	REQUIRE_NO_FAIL(*result);
 	REQUIRE(result->GetValue(0, 0).GetValue<int64_t>() == 150499000);
+	bool saw_exact_perfect_filter_proof = false;
+	for (auto &event : manager.GetEvents()) {
+		if (StringUtil::Contains(EventJitRuntimePathCounts(event),
+		                         "hash_join_probe.perfect_probe.exact_source_filter=")) {
+			saw_exact_perfect_filter_proof = true;
+			REQUIRE(StringUtil::Contains(EventJitRuntimeProofCounts(event), "generated_backend_work="));
+			break;
+		}
+	}
+	REQUIRE(saw_exact_perfect_filter_proof);
 	string observed_costs;
 	for (auto &event : manager.GetEvents()) {
 		if (!event.runner_cost.present) {
@@ -3172,6 +3197,112 @@ TEST_CASE("JIT CBO uses finalized perfect-hash dynamic filter cardinality", "[ap
 		    REQUIRE(event.runner_cost.rows < event.runner_cost.source_contract_input_rows / 10);
 		    REQUIRE(event.runner_cost.source_contract_output_cardinality_unknown);
 	    });
+
+	ClearJitTrace(manager, true);
+	result = con.Query("SELECT sum(f.payload) FROM jit_dynamic_filter_fact f "
+	                   "JOIN jit_dynamic_filter_dim1 d1 USING (k1) "
+	                   "WHERE contains(f.tag, 'keep')");
+	REQUIRE_NO_FAIL(*result);
+	REQUIRE(result->GetValue(0, 0).GetValue<int64_t>() == 21521500);
+	RequireJitEvent(
+	    manager,
+	    [](const ExecutionRegionEvent &event) {
+		    return EventPhase(event) == "runtime" && EventStatus(event) == "executed" &&
+		           StringUtil::Contains(EventJitRuntimePathCounts(event),
+		                                "hash_join_probe.perfect_probe.exact_source_filter=");
+	    },
+	    [](const ExecutionRegionEvent &event) {
+		    REQUIRE(StringUtil::Contains(EventJitRuntimeProofCounts(event), "generated_backend_work="));
+	    });
+}
+
+TEST_CASE("JIT exact perfect-hash filter proofs preserve checked cast domains", "[api][jit]") {
+	int64_t source[] = {-2147483649LL, -2, 0, 2147483648LL, 2};
+	sel_t match_selection[5];
+	sel_t build_selection[5];
+	int32_t min_value = -2;
+	int32_t max_value = 2;
+	uint64_t min_bits = 0;
+	uint64_t max_bits = 0;
+	memcpy(&min_bits, &min_value, sizeof(min_value));
+	memcpy(&max_bits, &max_value, sizeof(max_value));
+
+	SljitNativePerfectHashJoinProbeInput input;
+	input.source_data = reinterpret_cast<const_data_ptr_t>(source);
+	input.count = 5;
+	input.match_sel = match_selection;
+	input.build_sel = build_selection;
+	input.perfect_min = min_bits;
+	input.perfect_max = max_bits;
+
+	SljitPopulateExactPerfectHashJoinSelections<int32_t, int64_t>(input);
+	REQUIRE(input.selected_count == 3);
+	REQUIRE(input.input_offset == 5);
+	REQUIRE(input.finished);
+	REQUIRE(match_selection[0] == 1);
+	REQUIRE(match_selection[1] == 2);
+	REQUIRE(match_selection[2] == 4);
+	REQUIRE(build_selection[0] == 0);
+	REQUIRE(build_selection[1] == 2);
+	REQUIRE(build_selection[2] == 4);
+}
+
+TEST_CASE("JIT exact dynamic filters compose with bitpacked storage scans", "[api][jit]") {
+	JitTestDatabase test;
+	auto &con = test.con;
+	auto &manager = test.manager;
+
+	ConfigureSljitForCoverage(con, false, true, true, 10000);
+	ConfigureJitDecisionTrace(con);
+	REQUIRE_NO_FAIL(con.Query("SET threads=1"));
+	REQUIRE_NO_FAIL(con.Query("PRAGMA force_compression='bitpacking'"));
+	auto db_path = TestCreatePath("jit_bitpacked_exact_dynamic_filter.db");
+	TestDeleteFile(db_path);
+	TestDeleteFile(db_path + ".wal");
+	REQUIRE_NO_FAIL(con.Query("ATTACH " + SQLString(db_path) + " AS packed (ROW_GROUP_SIZE 2048)"));
+	REQUIRE_NO_FAIL(con.Query("CREATE TABLE packed.fact AS "
+	                          "SELECT (i % 50000)::INTEGER AS k, i::BIGINT AS payload, "
+	                          "       CASE WHEN i % 7 = 0 THEN 'keep' ELSE 'drop' END AS tag "
+	                          "FROM range(200000) tbl(i)"));
+	REQUIRE_NO_FAIL(con.Query("CREATE TABLE packed.dim AS SELECT i::INTEGER AS k FROM range(100, 200) tbl(i)"));
+	REQUIRE_NO_FAIL(con.Query("CHECKPOINT packed"));
+	auto storage = con.Query("SELECT count(*) FROM pragma_storage_info('packed.fact') "
+	                         "WHERE column_name = 'k' AND compression = 'BitPacking'");
+	REQUIRE_NO_FAIL(*storage);
+	REQUIRE(storage->GetValue(0, 0).GetValue<int64_t>() > 0);
+
+	ClearJitTrace(manager, true);
+	auto result = con.Query("SELECT sum(f.payload) FROM packed.fact f JOIN packed.dim d USING(k) "
+	                        "WHERE f.k BETWEEN 120 AND 180");
+	REQUIRE_NO_FAIL(*result);
+	REQUIRE(result->GetValue(0, 0).GetValue<int64_t>() == 18336600);
+
+	int64_t mixed_expected = 0;
+	for (int64_t i = 0; i < 200000; i++) {
+		auto key = i % 50000;
+		if (key >= 120 && key <= 180 && i % 7 == 0) {
+			mixed_expected += i;
+		}
+	}
+	result = con.Query("SELECT sum(f.payload) FROM packed.fact f JOIN packed.dim d USING(k) "
+	                   "WHERE f.k BETWEEN 120 AND 180 AND contains(f.tag, 'keep')");
+	REQUIRE_NO_FAIL(*result);
+	REQUIRE(result->GetValue(0, 0).GetValue<int64_t>() == mixed_expected);
+
+	RequireJitEvent(
+	    manager,
+	    [](const ExecutionRegionEvent &event) {
+		    return EventPhase(event) == "runtime" && EventStatus(event) == "executed" &&
+		           StringUtil::Contains(EventJitRuntimePathCounts(event),
+		                                "hash_join_probe.perfect_probe.exact_source_filter=");
+	    },
+	    [](const ExecutionRegionEvent &event) {
+		    REQUIRE(StringUtil::Contains(EventJitRuntimeProofCounts(event), "generated_backend_work="));
+	    });
+
+	REQUIRE_NO_FAIL(con.Query("DETACH packed"));
+	TestDeleteFile(db_path);
+	TestDeleteFile(db_path + ".wal");
 }
 
 TEST_CASE("JIT CBO carries finalized dynamic filter cardinality through regular semi joins", "[api][jit]") {

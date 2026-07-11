@@ -124,6 +124,8 @@ static bool PhysicalRunnerCanAmortizeNativeGroupedStateAddressLookup(const Physi
 		}
 		return true;
 	}
+	// A complete grouped-lookup replacement is thread-local by contract. The planner cannot assume that
+	// runtime local ranges will be disjoint, so only cost it as a full replacement in serial execution.
 	return (parameters.vectorized_parallelism == 1 && PhysicalRunnerHasGeneratedGroupedLookupReplacementProof(input)) ||
 	       input.generated_stage_count > input.native_grouped_state_address_lookup_count * 2;
 }

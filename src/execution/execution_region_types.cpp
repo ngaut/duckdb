@@ -923,6 +923,10 @@ void ExecutionRegionLoweringPlan::AddBackendHashJoinBuildCapability() {
 	capability_facts.backend_hash_join_build_count++;
 }
 
+void ExecutionRegionLoweringPlan::AddBackendDirectHashJoinBuildCapability() {
+	capability_facts.backend_direct_hash_join_build_count++;
+}
+
 void ExecutionRegionLoweringPlan::AddBackendNestedLoopJoinProbeCapability() {
 	capability_facts.backend_nested_loop_join_probe_count++;
 }
@@ -1220,6 +1224,8 @@ static void AppendExecutionRegionBackendCapabilityFacts(string &result, const Ex
 	                                     facts.backend_hash_join_non_equality_key_count, first_join);
 	AppendExecutionRegionCapabilityCount(result, "backend_join", "hash_build", facts.backend_hash_join_build_count,
 	                                     first_join);
+	AppendExecutionRegionCapabilityCount(result, "backend_join", "direct_hash_build",
+	                                     facts.backend_direct_hash_join_build_count, first_join);
 	AppendExecutionRegionCapabilityCount(result, "backend_join", "nested_loop_probe",
 	                                     facts.backend_nested_loop_join_probe_count, first_join);
 	AppendExecutionRegionCapabilityCount(result, "backend_join", "nested_loop_build",

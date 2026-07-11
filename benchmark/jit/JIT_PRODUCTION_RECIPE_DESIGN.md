@@ -191,6 +191,10 @@ per batch.
   consumers that require concrete indices materialize that identity once at
   the C++ boundary. The generated mixed-mask path backfills a deferred identity
   prefix at the first false lane.
+- Consecutive generated filters compose selections. When a source contract or
+  prior filter publishes a selected batch, the next filter builds dictionary
+  views over that selection and evaluates only the surviving rows. It must not
+  copy values merely to restore a materialized chunk invariant.
 - Projection chains may consume selected views through the producer map and
   materialize only referenced columns. Reference lifetimes, especially for
   variable-width values, must remain valid until the consumer finishes.
@@ -217,6 +221,51 @@ map needed by downstream projection or aggregate consumers. Full join-output
 materialization is an explicit requirement of a consumer, not the default
 representation of a selected probe.
 
+Exact perfect-hash runtime filters and their owning join table share a
+query-local identity. Storage applies an exact PHJ conjunct as a mandatory
+prefilter, including checked integral input conversion, even when another
+conjunct still requires the generic expression executor. The source contract
+may carry that identity through filters and reference-only projections;
+computed projections, joins, and native boundaries invalidate it. When the
+downstream perfect-hash probe binds the same identity, the backend derives the
+match and build dictionary selections directly from the already-validated key
+and skips the duplicate NULL, range, and membership probe. Identity mismatch
+always uses the normal generated probe. This is an execution proof, not a
+cardinality estimate or a TPC-H-specific rule.
+
+The storage-side exact-filter loop selects its input/source vector layouts once
+per batch. An identity selection is represented explicitly as absent input
+selection, so the dominant all-valid, same-width sparse path contains no
+selection-vector load. That path probes four bitmap entries before publishing
+matches, hiding membership-load latency without duplicating cast or NULL
+semantics in the uncommon paths.
+
+Storage expression filtering analyzes an AND expression before mutating its
+selection. Fully supported internal expressions lower once per filter state to
+a typed operation list; vector execution never rediscovers function identity,
+rebuilds numeric intervals, or reallocates expression-analysis scratch.
+Mandatory exact membership operations are ordered before ranges and other
+conjuncts, making every later selector consume only surviving rows instead of
+rescanning the raw source cardinality. Mixed expressions split exact membership
+from a cached residual executor, so the generic residual never rechecks exact
+membership.
+
+Compression codecs consume that same typed operation plan rather than parsing a
+second copy of the filter tree. Bitpacked integral scans fuse a same-width exact
+perfect-hash membership operation, plus immediately following signed ranges,
+into the shared bitmap-lookup decompression loop. Full compression groups still
+decompress directly into the result vector; partial groups use the scan scratch
+buffer. The codec then resumes the canonical plan at the first unfused
+operation. This preserves one operation order and one fallback boundary while
+avoiding a decode-copy-filter pipeline for sparse exact joins.
+
+An exact-filter perfect-hash probe followed by `HashJoinBuildSink` is also an
+executable primitive sequence when every operation is backend-owned but no
+machine-code body remains. Admission requires the exact source-filter identity,
+scan-filter ownership, a matched probe/build view, and the explicit build sink.
+Runtime must prove both exact-filter backend work and selected build ingress;
+the sequence never receives synthetic machine-code credit.
+
 A pure hash-probe chain may terminate in `AppendSink` without first publishing
 a full output chunk. The final probe remains selected, while intermediate probes
 materialize only when the next join contract requires it. The common
@@ -224,6 +273,33 @@ materialize only when the next join contract requires it. The common
 lowered executor that streams sparse probe input and coalesces selected terminal
 output, avoiding both wide pre-join copies and tiny sink calls without hiding a
 separate execution route.
+
+A source pipeline ending in a hash-build sink uses the same explicit recipe
+model: `SourceFetch`, any linear generated filter/projection prefix, then
+`HashJoinBuildSink`. The terminal accepts materialized projection handoffs,
+selected source views, and selected hash-probe views. Selected source input is
+represented with dictionary vectors; it is not copied into an intermediate
+filtered chunk. The backend reports `backend_join.direct_hash_build` only when
+the fully fused lowering has this primitive shape. CBO then replaces the native
+sink-protocol charge with one generated backend stage. Direct hash-build
+ownership does not automatically claim materialization elision: projection
+buffer work remains visible and must be priced independently.
+
+A source hash-build with positive string equality/set predicates or string
+prefix/suffix predicates composes DuckDB's filtered scan and filter-column
+pruning with the explicit backend build primitive. A string match may carry
+additional positive reference/constant equality or `IN` conjuncts, allowing
+mixed storage filters without moving standalone numeric/date ranges out of
+generated code. The backend primitive is sufficient executable work for this
+shape even when no machine-code filter is needed, and runtime telemetry must
+prove its direct source ingress. Contains, general LIKE, OR, range, and
+computed predicates remain eligible for the generated source-build recipe.
+
+The physical and candidate prechecks use a direct-hash-build upper bound only
+for source-prefix build pipelines with no upstream join stage, and only to
+permit backend capability analysis. Final admission still consumes the
+backend's explicit `direct_hash_build` fact. An upper bound is never runtime
+credit and cannot select a compiled runner by itself.
 
 MARK joins use `MarkProbeFilterBoundary` to publish the filtered LHS view. The
 boundary supports match and non-match marker predicates, marker omission or
@@ -294,18 +370,34 @@ and failure clears every tag before another strategy can run. Low-bit tagging
 is admitted only for an even row stride; odd-stride group-only layouts use the
 general exact lookup path.
 
-Pending preaggregated groups fill every standard-vector batch before flushing.
-When an incoming preaggregated range crosses the boundary, the runtime appends
-the exact prefix that fills the current batch, flushes 2,048 groups, and carries
-only the suffix forward. It does not discard residual capacity and emit two
-short hash-table calls.
+Pending preaggregated groups use 2,047 entries and retain the final compact
+group across source invocations. If an input run crosses a vector boundary, its
+next delta merges into that unpublished carry before any hash-table append.
+Overflow within one already-compacted input range flushes the exact prefix and
+carries only the suffix. This makes every published batch strictly increasing
+without a special duplicate case in the grouped hash table.
 
-Direct append reports new-group success to DuckDB's radix adaptivity. In the
-single-thread grow strategy, where HLL adaptation is intentionally disabled,
-at least 1,048,576 attempted preaggregated rows with more than 95% proven new
-groups switch the local table to DuckDB's existing append-only mode. Rare later
-duplicates are deferred to normal finalize reconciliation. Multi-threaded
-execution keeps its HLL/radix owner; the two adaptation policies never compete.
+Direct append reports exact new-group success to DuckDB's radix adaptivity.
+After 131,072 attempted compact groups, more than 95% proven-new groups switch
+the local table to append-only mode. This statistical route always marks the
+table for final duplicate reconciliation; it never relies on the single-table
+finalize shortcut. Raw-tuple HLL adaptation retains its independent 1,048,576
+row threshold and ownership.
+
+Sorted compact-key streams can establish a stronger contract. The grouped hash
+table, rather than a JIT backend, owns a monotonic proof for one all-valid,
+fixed-width integer key. Every compact batch must be strictly increasing and
+its first key must be greater than the preceding batch's last key. Once proven,
+the local table can append without duplicate lookups. The proof spans backend
+invocations and applies equally to serial and parallel local tables; parallel
+tables reconcile cross-thread overlap during normal radix finalization. When
+every local proof remains intact and the exact local key ranges are disjoint,
+the radix owner marks the already-aggregated partitions ready to scan without
+rehashing them during finalize.
+
+Any null, type change, key repetition or regression, unsupported route, or
+fallback permanently requires final combination for that local table. A
+single-table finalize shortcut is legal only while the proof remains intact.
 
 `DISTINCT_KEY_SINK` is backend-owned key ingestion through a DuckDB hash-table
 contract. Lowering reports `distinct_key_fast_insert` only when the complete
@@ -467,6 +559,10 @@ python3 benchmark/jit/run_jit_refactor_guard.py --level unit --no-build --skip-a
 python3 benchmark/jit/generic_benchmark.py --duckdb build/reldebug/duckdb --threads 1
 python3 benchmark/jit/generic_benchmark.py --duckdb build/reldebug/duckdb --threads 4
 ```
+
+The generic harness runs setup and reference-result creation with JIT disabled,
+then resets telemetry before the timed statement. Setup CTAS compilation must
+never satisfy target-workload compilation or runtime-proof requirements.
 
 Run the TPC-H regression gate for runtime, planner, backend, or performance
 changes:

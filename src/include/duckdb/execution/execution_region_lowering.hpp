@@ -60,6 +60,7 @@ struct ExecutionRegionLoweringCapabilityFacts {
 	idx_t backend_hash_join_equality_key_count = 0;
 	idx_t backend_hash_join_non_equality_key_count = 0;
 	idx_t backend_hash_join_build_count = 0;
+	idx_t backend_direct_hash_join_build_count = 0;
 	idx_t backend_nested_loop_join_probe_count = 0;
 	idx_t backend_nested_loop_join_build_count = 0;
 	idx_t backend_hash_aggregate_update_count = 0;
@@ -90,6 +91,7 @@ struct ExecutionRegionLoweringPlan {
 	void AddBackendHashJoinProbeCapability(bool perfect_hash_probe, bool residual_predicate, idx_t equality_key_count,
 	                                       idx_t key_count);
 	void AddBackendHashJoinBuildCapability();
+	void AddBackendDirectHashJoinBuildCapability();
 	void AddBackendNestedLoopJoinProbeCapability();
 	void AddBackendNestedLoopJoinBuildCapability();
 	void AddBackendAggregateUpdateCapability(ExecutionRegionAggregateOperatorKind kind, bool primitive_payloads,

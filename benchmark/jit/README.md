@@ -41,14 +41,34 @@ python3 benchmark/jit/generic_benchmark.py --duckdb build/reldebug/duckdb --thre
 The generic gate covers arithmetic, filters, CASE-heavy expressions, multiple
 aggregate lanes, filtered scans, persistent column-vs-column comparisons,
 single- and multi-source nullable persistent scans, grouped DISTINCT, dense
-computed grouping, sorted-run grouping, and joins. Arithmetic, CASE,
+computed multi-aggregate grouping, sorted-run grouping, and joins. Arithmetic, CASE,
 multi-aggregate, scan-expression, scan-filter, column-comparison, both nullable
 classes, and the proven grouped workloads require compiled speedups at their
 configured thread counts. The column-comparison gate requires at least 1.25x
-at both one and four threads. Join workloads without a proven compiled route
+at both one and four threads. Dense multi-aggregate grouping requires at least
+1.80x at one thread and 1.60x at four threads; sorted-run grouping requires
+1.20x and 1.05x respectively. Join workloads without a proven compiled route
 have a bounded auto-policy slowdown and may remain vectorized.
 Short production failures receive an automatic focused high-sample recheck
 before the gate decides.
+
+Join-heavy validation also covers exact perfect-hash dynamic filters. Storage
+executes exact PHJ conjuncts before generic residual predicates, and a
+query-local filter/table identity lets compiled probes reuse that proof without
+repeating membership work. Runtime tracing reports
+`hash_join_probe.perfect_probe.exact_source_filter` when this contract fires.
+
+Filtered hash-build validation covers source-filter selection composition and
+direct build ingress. Runtime tracing reports `filter.selected_input_view` when
+one generated filter consumes a previous selection, and
+`hash_join_build.selected_source_view` when the terminal consumes a selection
+without an intervening projection. These are dictionary-view paths and must
+have no runtime delegation entries.
+
+Workload preparation and expected-result materialization always run with JIT
+off. The gate resets events and counters after preparation, immediately before
+the measured query, so compiled/runtime coverage can only be credited to the
+target workload.
 
 Runtime proof is a separate traced mode:
 

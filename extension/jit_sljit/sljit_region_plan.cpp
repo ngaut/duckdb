@@ -213,6 +213,19 @@ struct SljitRegionLoweringCursor {
 		return current_not_null;
 	}
 
+	void ApplyExactFilterProof(SljitRegionNodePlan &node_plan) const {
+		for (auto &op : node_plan.native_ops) {
+			if (op.kind != SljitNativeRegionOpKind::HASH_JOIN_PROBE || !op.hash_join_probe.perfect_hash_probe ||
+			    op.hash_join_probe.keys.size() != 1) {
+				continue;
+			}
+			auto source_index = op.hash_join_probe.keys[0].key_input_index;
+			if (source_index < current_exact_filter_identities.size()) {
+				op.hash_join_probe.exact_source_filter_identity = current_exact_filter_identities[source_index];
+			}
+		}
+	}
+
 	bool CanFuse() const {
 		return can_fuse;
 	}
@@ -221,6 +234,7 @@ struct SljitRegionLoweringCursor {
 		can_fuse = false;
 		current_types = boundary_output_types;
 		current_not_null.assign(current_types.size(), false);
+		current_exact_filter_identities.assign(current_types.size(), nullptr);
 	}
 
 	void AcceptSource(const ExecutionRegionNode &node, SljitRegionNodePlan &node_plan, vector<bool> source_not_null) {
@@ -228,6 +242,28 @@ struct SljitRegionLoweringCursor {
 		auto source_output_types = node_plan.source_contract.source_output_types.empty()
 		                               ? node.output_types
 		                               : node_plan.source_contract.source_output_types;
+		current_exact_filter_identities.assign(source_output_types.size(), nullptr);
+		if (node.source && node_plan.native_ops.empty()) {
+			auto &contract = node.source->table_scan_contract;
+			for (auto &proof : node.source->exact_filter_proofs) {
+				if (!proof.identity) {
+					continue;
+				}
+				if (node_plan.source_contract.UsesSourceContractInputLayout()) {
+					if (proof.source_input_index < current_exact_filter_identities.size()) {
+						current_exact_filter_identities[proof.source_input_index] = proof.identity;
+					}
+					continue;
+				}
+				for (idx_t output_idx = 0; output_idx < contract.source_contract_output_projection_map.size();
+				     output_idx++) {
+					if (contract.source_contract_output_projection_map[output_idx] == proof.source_input_index &&
+					    output_idx < current_exact_filter_identities.size()) {
+						current_exact_filter_identities[output_idx] = proof.identity;
+					}
+				}
+			}
+		}
 		native_region.source_output_types = source_output_types;
 		if (source_not_null.size() != source_output_types.size()) {
 			source_not_null.assign(source_output_types.size(), false);
@@ -259,6 +295,7 @@ struct SljitRegionLoweringCursor {
 		}
 		for (auto &op : node_plan.native_ops) {
 			SljitUpdateExecutableCurrentNotNull(op, current_not_null);
+			UpdateExactFilterProofs(op);
 		}
 		auto output_types = SljitRegionNodeLastNativeOp(node_plan).output_types;
 		AppendIfFusing(node_plan);
@@ -266,6 +303,25 @@ struct SljitRegionLoweringCursor {
 	}
 
 private:
+	void UpdateExactFilterProofs(const SljitNativeRegionOpPlan &op) {
+		if (op.kind == SljitNativeRegionOpKind::FILTER) {
+			return;
+		}
+		if (op.kind == SljitNativeRegionOpKind::PROJECTION) {
+			vector<shared_ptr<ExecutionRuntimeFilterIdentity>> projected(op.projections.size());
+			for (idx_t output_idx = 0; output_idx < op.projections.size(); output_idx++) {
+				auto &projection = op.projections[output_idx];
+				if (projection.kind == SljitNativeRegionExpressionKind::REFERENCE &&
+				    projection.source_index < current_exact_filter_identities.size()) {
+					projected[output_idx] = current_exact_filter_identities[projection.source_index];
+				}
+			}
+			current_exact_filter_identities = std::move(projected);
+			return;
+		}
+		current_exact_filter_identities.assign(op.output_types.size(), nullptr);
+	}
+
 	void AppendIfFusing(SljitRegionNodePlan &node_plan) {
 		if (can_fuse) {
 			for (auto &op : node_plan.native_ops) {
@@ -276,6 +332,7 @@ private:
 
 	vector<LogicalType> current_types;
 	vector<bool> current_not_null;
+	vector<shared_ptr<ExecutionRuntimeFilterIdentity>> current_exact_filter_identities;
 	SljitNativeRegionPlan &native_region;
 	bool can_fuse = true;
 };
@@ -301,14 +358,16 @@ ExecutionRegionLoweringPlan BuildSljitRegionPlan(const ExecutionRegionIR &region
 		auto &node = region_ir.nodes[node_idx];
 		if (node.kind == ExecutionRegionNodeKind::SOURCE) {
 			auto executable_source = SljitCanExecuteSourceNode(node, contract);
+			const bool prefer_duckdb_scan_filters =
+			    candidate.traits.sink_kind == ExecutionRegionSinkKind::HASH_JOIN_BUILD;
 			auto source_execution =
 			    candidate.source_execution != ExecutionRegionSourceExecutionKind::NONE
 			        ? candidate.source_execution
 			        : (node.source ? node.source->execution : ExecutionRegionSourceExecutionKind::NONE);
-			auto node_plan = executable_source
-			                     ? PlanSljitSourceNode(node, contract, source_execution, render_diagnostics)
-			                     : PlanSljitRegionNode(node, cursor.InputTypes(), cursor.InputNotNull(), backend_error,
-			                                           render_diagnostics);
+			auto node_plan = executable_source ? PlanSljitSourceNode(node, contract, source_execution,
+			                                                         render_diagnostics, prefer_duckdb_scan_filters)
+			                                   : PlanSljitRegionNode(node, cursor.InputTypes(), cursor.InputNotNull(),
+			                                                         backend_error, render_diagnostics);
 			const bool source_requires_native = executable_source &&
 			                                    node_plan.kind == ExecutionRegionLoweringKind::BOUNDARY &&
 			                                    node_plan.requires_source_contract;
@@ -353,7 +412,7 @@ ExecutionRegionLoweringPlan BuildSljitRegionPlan(const ExecutionRegionIR &region
 			auto node_plan =
 			    ExecutionRegionABIIsFullPipeline(contract.abi)
 			        ? PlanSljitFullPipelineSinkNode(node, cursor.InputTypes(), render_diagnostics)
-			        : candidate.context_has_missing_operator_contract
+			    : candidate.context_has_missing_operator_contract
 			        ? SljitRegionBoundaryNode("sink region requires upstream operators with native contracts")
 			        : PlanSljitRegionNode(node, cursor.InputTypes(), cursor.InputNotNull(), backend_error,
 			                              render_diagnostics);
@@ -381,6 +440,9 @@ ExecutionRegionLoweringPlan BuildSljitRegionPlan(const ExecutionRegionIR &region
 		} else {
 			node_plan = PlanSljitRegionNode(node, cursor.InputTypes(), cursor.InputNotNull(), backend_error,
 			                                render_diagnostics);
+		}
+		if (node_plan.kind == ExecutionRegionLoweringKind::NATIVE) {
+			cursor.ApplyExactFilterProof(node_plan);
 		}
 		AddSljitLoweredNode(lowering_plan, node, node_plan);
 		AddSljitOperatorContractBlockers(lowering_plan, backend_error, node, node_plan);

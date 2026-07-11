@@ -36,6 +36,12 @@ static bool SljitNativeRegionExpressionsGenerateCode(const vector<SljitNativeReg
 }
 
 static bool SljitNativeHashJoinProbeGeneratesDeferredCode(const SljitNativeHashJoinProbePlan &plan) {
+	// An exact perfect-hash source filter bypasses the deferred probe kernel at runtime. It can
+	// participate in a region anchored by other generated work, but it cannot prove that the
+	// region itself has an executable machine-code body.
+	if (plan.perfect_hash_probe && plan.exact_source_filter_identity) {
+		return false;
+	}
 	string unused_error;
 	return SljitValidateHashJoinProbePlan(plan, unused_error);
 }
@@ -209,6 +215,67 @@ static bool SljitRegionPlanHasWeakMarkFilterProbe(const vector<SljitNativeRegion
 	return SljitRegionPlanFilterReferencesMarkProbeMarker(hash_join_op, ops[op_idx + 1]);
 }
 
+static bool SljitRegionPlanHasDirectSourceHashBuild(const vector<SljitNativeRegionOpPlan> &ops) {
+	if (ops.empty() || ops.back().kind != SljitNativeRegionOpKind::HASH_JOIN_BUILD) {
+		return false;
+	}
+	for (idx_t op_idx = 0; op_idx + 1 < ops.size(); op_idx++) {
+		if (ops[op_idx].kind != SljitNativeRegionOpKind::FILTER &&
+		    ops[op_idx].kind != SljitNativeRegionOpKind::PROJECTION) {
+			return false;
+		}
+	}
+	return true;
+}
+
+static bool SljitRegionPlanHasExactFilterProbeHashBuild(const vector<SljitNativeRegionOpPlan> &ops) {
+	if (ops.size() != 2 || ops[0].kind != SljitNativeRegionOpKind::HASH_JOIN_PROBE ||
+	    ops[1].kind != SljitNativeRegionOpKind::HASH_JOIN_BUILD) {
+		return false;
+	}
+	auto &probe = ops[0].hash_join_probe;
+	return probe.perfect_hash_probe && probe.exact_source_filter_identity && !probe.residual_predicate &&
+	       probe.output_mode == ExecutionHashJoinProbeOutputMode::MATCHED_PROBE_AND_BUILD;
+}
+
+static bool SljitPredicateContainsOnlyStringSets(const SljitNativePredicate &predicate) {
+	if (predicate.kind == SljitNativePredicateKind::STRING_EQUAL_CONSTANT ||
+	    (predicate.kind == SljitNativePredicateKind::STRING_IN_LIST_CONSTANT && !predicate.not_in)) {
+		return true;
+	}
+	if (predicate.kind != SljitNativePredicateKind::CONJUNCTION ||
+	    predicate.conjunction_op != ExecutionExpressionConjunctionOp::AND || predicate.children.empty()) {
+		return false;
+	}
+	for (auto &child : predicate.children) {
+		if (!child || !SljitPredicateContainsOnlyStringSets(*child)) {
+			return false;
+		}
+	}
+	return true;
+}
+
+static bool SljitRegionPlanHasWeakStringSetSourceHashBuild(const vector<SljitNativeRegionOpPlan> &ops) {
+	if (!SljitRegionPlanHasDirectSourceHashBuild(ops)) {
+		return false;
+	}
+	bool has_filter = false;
+	for (idx_t op_idx = 0; op_idx + 1 < ops.size(); op_idx++) {
+		auto &op = ops[op_idx];
+		if (op.kind == SljitNativeRegionOpKind::FILTER) {
+			has_filter = true;
+			if (op.filter.kind != SljitNativeRegionExpressionKind::PREDICATE || !op.filter.predicate ||
+			    !SljitPredicateContainsOnlyStringSets(*op.filter.predicate)) {
+				return false;
+			}
+		} else if (op.kind == SljitNativeRegionOpKind::PROJECTION &&
+		           SljitNativeRegionExpressionsGenerateCode(op.projections)) {
+			return false;
+		}
+	}
+	return has_filter;
+}
+
 void DisableSljitRegionFlatNullableFastPath(SljitNativeRegionPlan &region) {
 	auto set_expression = [&](SljitNativeRegionExpressionPlan &expr) {
 		expr.emit_flat_nullable_fast_path = false;
@@ -243,6 +310,12 @@ bool SljitNativeRegionHasExecutableBodyGap(const SljitNativeRegionPlan &region, 
 		generates_machine_code = generates_machine_code || SljitNativeRegionOpGeneratesMachineCode(op);
 	}
 	if (!generates_machine_code) {
+		if (region.uses_scan_filters && SljitRegionPlanHasDirectSourceHashBuild(region.ops)) {
+			return false;
+		}
+		if (region.uses_scan_filters && SljitRegionPlanHasExactFilterProbeHashBuild(region.ops)) {
+			return false;
+		}
 		blocker = "SLJIT native region emits no generated machine code";
 		return true;
 	}
@@ -251,6 +324,10 @@ bool SljitNativeRegionHasExecutableBodyGap(const SljitNativeRegionPlan &region, 
 
 void AddSljitNativeRegionCapabilityFacts(ExecutionRegionLoweringPlan &lowering_plan,
                                          const SljitNativeRegionPlan &native_region) {
+	const bool direct_source_hash_build = SljitRegionPlanHasDirectSourceHashBuild(native_region.ops);
+	if (SljitRegionPlanHasWeakStringSetSourceHashBuild(native_region.ops)) {
+		lowering_plan.AddBackendWeakAcceleratedWorkCapability();
+	}
 	for (auto not_null : native_region.source_not_null) {
 		lowering_plan.AddBackendSourceValidityCapability(not_null);
 	}
@@ -273,6 +350,9 @@ void AddSljitNativeRegionCapabilityFacts(ExecutionRegionLoweringPlan &lowering_p
 				lowering_plan.AddBackendJoinKeyTypeCapability(key.type);
 			}
 			lowering_plan.AddBackendHashJoinBuildCapability();
+			if (direct_source_hash_build) {
+				lowering_plan.AddBackendDirectHashJoinBuildCapability();
+			}
 			break;
 		case SljitNativeRegionOpKind::NESTED_LOOP_JOIN_PROBE:
 			for (auto &condition : op.nested_loop_join_probe.conditions) {

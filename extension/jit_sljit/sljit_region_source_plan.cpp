@@ -61,6 +61,92 @@ static string SljitSourceContractName(const ExecutionRegionNode &node) {
 	return string(SljitSourceKindName(node)) + " source contract";
 }
 
+struct SljitDirectBuildStorageFilterFacts {
+	bool supported = false;
+	bool has_string_match = false;
+	bool is_string_set = false;
+};
+
+static SljitDirectBuildStorageFilterFacts
+SljitDirectBuildStorageFilterExpressionFacts(const ExecutionExpressionIR &expression) {
+	if (expression.kind == ExecutionExpressionIRKind::BINARY) {
+		if (expression.binary_op != ExecutionExpressionBinaryOp::COMPARE_EQUAL || !expression.left ||
+		    !expression.right) {
+			return {};
+		}
+		auto reference = expression.left->kind == ExecutionExpressionIRKind::REFERENCE ? expression.left.get()
+		                                                                               : expression.right.get();
+		auto constant = reference == expression.left.get() ? expression.right.get() : expression.left.get();
+		if (reference->kind != ExecutionExpressionIRKind::REFERENCE ||
+		    constant->kind != ExecutionExpressionIRKind::CONSTANT) {
+			return {};
+		}
+		return {true, false, reference->return_type.id() == LogicalTypeId::VARCHAR};
+	}
+	if (expression.kind == ExecutionExpressionIRKind::IN_LIST) {
+		if (expression.not_in || expression.children.size() < 2 || !expression.children[0] ||
+		    expression.children[0]->kind != ExecutionExpressionIRKind::REFERENCE) {
+			return {};
+		}
+		for (idx_t child_idx = 1; child_idx < expression.children.size(); child_idx++) {
+			if (!expression.children[child_idx] ||
+			    expression.children[child_idx]->kind != ExecutionExpressionIRKind::CONSTANT) {
+				return {};
+			}
+		}
+		return {true, false, expression.children[0]->return_type.id() == LogicalTypeId::VARCHAR};
+	}
+	if (expression.kind == ExecutionExpressionIRKind::INTRINSIC) {
+		if (expression.intrinsic != ExecutionExpressionIntrinsicKind::STRING_PREFIX &&
+		    expression.intrinsic != ExecutionExpressionIntrinsicKind::STRING_SUFFIX) {
+			return {};
+		}
+		if (expression.children.size() != 2 || !expression.children[0] || !expression.children[1] ||
+		    expression.children[0]->kind != ExecutionExpressionIRKind::REFERENCE ||
+		    expression.children[1]->kind != ExecutionExpressionIRKind::CONSTANT) {
+			return {};
+		}
+		return {true, true, false};
+	}
+	if (expression.kind != ExecutionExpressionIRKind::CONJUNCTION ||
+	    expression.conjunction_op != ExecutionExpressionConjunctionOp::AND || expression.children.empty()) {
+		return {};
+	}
+	SljitDirectBuildStorageFilterFacts result {true, false, true};
+	for (auto &child : expression.children) {
+		if (!child) {
+			return {};
+		}
+		auto child_facts = SljitDirectBuildStorageFilterExpressionFacts(*child);
+		if (!child_facts.supported) {
+			return {};
+		}
+		result.has_string_match = result.has_string_match || child_facts.has_string_match;
+		result.is_string_set = result.is_string_set && child_facts.is_string_set;
+	}
+	return result;
+}
+
+static bool SljitSourceHasOnlyDirectBuildStorageFilters(const ExecutionRegionNode &node) {
+	if (!node.source || node.source->filters.empty()) {
+		return false;
+	}
+	bool has_string_match = false;
+	bool all_string_sets = true;
+	for (auto &filter : node.source->filters) {
+		if (!filter.expression || !filter.expression->root) {
+			return false;
+		}
+		auto facts = SljitDirectBuildStorageFilterExpressionFacts(*filter.expression->root);
+		if (!facts.supported) {
+			return false;
+		}
+		has_string_match = has_string_match || facts.has_string_match;
+		all_string_sets = all_string_sets && facts.is_string_set;
+	}
+	return has_string_match || all_string_sets;
+}
+
 string SljitSourceBoundaryReason(const ExecutionRegionNode &node, bool render_diagnostics) {
 	string result =
 	    node.blocker_reason.empty() ? "source node is outside SLJIT native region lowering" : node.blocker_reason;
@@ -86,8 +172,8 @@ static SljitRegionNodePlan SljitSourceBoundaryRequiresContract(const ExecutionRe
 }
 
 static SljitRegionNodePlan PlanSljitSourceContractNode(const ExecutionRegionNode &node,
-                                                       const ExecutionRegionContract &contract,
-                                                       bool render_diagnostics) {
+                                                       const ExecutionRegionContract &contract, bool render_diagnostics,
+                                                       bool prefer_duckdb_scan_filters) {
 	D_ASSERT(node.source);
 	auto &table_scan_contract = node.source->table_scan_contract;
 	if (!table_scan_contract.present) {
@@ -109,6 +195,15 @@ static SljitRegionNodePlan PlanSljitSourceContractNode(const ExecutionRegionNode
 
 	if (node.source->filters.empty()) {
 		return SljitNativeSourceNode(SljitSourceContractName(node), node, render_diagnostics);
+	}
+	if (prefer_duckdb_scan_filters && table_scan_contract.filter_pushdown &&
+	    SljitSourceHasOnlyDirectBuildStorageFilters(node)) {
+		string reason = "vectorized " + string(SljitSourceKindName(node)) +
+		                " filters before direct hash build;source-strategy=duckdb-scan-filtered-source-contract";
+		AppendSljitSourceFilterFacts(reason, node, table_scan_contract, false);
+		reason += ";source_contract_filter_pushdown=true";
+		return SljitNativeSourceNode(std::move(reason), node, render_diagnostics,
+		                             SljitDuckDBScanFilteredSourceContractPlan());
 	}
 
 	vector<SljitNativeRegionOpPlan> generated_filter_ops;
@@ -194,7 +289,8 @@ static SljitRegionNodePlan PlanSljitNativeStatefulSourceNode(const ExecutionRegi
 }
 
 SljitRegionNodePlan PlanSljitSourceNode(const ExecutionRegionNode &node, const ExecutionRegionContract &contract,
-                                        ExecutionRegionSourceExecutionKind source_execution, bool render_diagnostics) {
+                                        ExecutionRegionSourceExecutionKind source_execution, bool render_diagnostics,
+                                        bool prefer_duckdb_scan_filters) {
 	if (!node.source) {
 		return SljitRegionBoundaryNode("source boundary requires typed source IR");
 	}
@@ -220,7 +316,7 @@ SljitRegionNodePlan PlanSljitSourceNode(const ExecutionRegionNode &node, const E
 			}
 			return PlanSljitNativeStatefulSourceNode(node, contract, render_diagnostics);
 		}
-		return PlanSljitSourceContractNode(node, contract, render_diagnostics);
+		return PlanSljitSourceContractNode(node, contract, render_diagnostics, prefer_duckdb_scan_filters);
 	}
 	if (node.operator_kind == ExecutionRegionOperatorKind::TABLE_SCAN && !node.source->table_scan_contract.present) {
 		return SljitRegionBoundaryNode("table scan source boundary requires typed table scan contract IR");

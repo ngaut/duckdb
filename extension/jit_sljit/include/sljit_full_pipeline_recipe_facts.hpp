@@ -52,6 +52,10 @@ struct SljitHashJoinBuildSinkFacts {
 	}
 };
 
+struct SljitSourceHashJoinBuildSinkFacts {
+	idx_t sink_idx = DConstants::INVALID_INDEX;
+};
+
 struct SljitSourceUngroupedAggregateFacts {
 	idx_t aggregate_idx = DConstants::INVALID_INDEX;
 };
@@ -194,6 +198,8 @@ bool SljitTryAnalyzeHashJoinDelimJoinSink(const vector<SljitExecutableRegionOp> 
                                           SljitHashJoinDelimJoinSinkFacts &facts);
 bool SljitTryAnalyzeHashJoinAppendSink(const vector<SljitExecutableRegionOp> &ops, SljitHashJoinAppendSinkFacts &facts);
 bool SljitTryAnalyzeHashJoinBuildSink(const vector<SljitExecutableRegionOp> &ops, SljitHashJoinBuildSinkFacts &facts);
+bool SljitTryAnalyzeSourceHashJoinBuildSink(const vector<SljitExecutableRegionOp> &ops,
+                                            SljitSourceHashJoinBuildSinkFacts &facts);
 bool SljitTryAnalyzeSourceUngroupedAggregate(const vector<SljitExecutableRegionOp> &ops,
                                              SljitSourceUngroupedAggregateFacts &facts);
 bool SljitTryAnalyzeSourceFilterAggregate(const vector<SljitExecutableRegionOp> &ops,

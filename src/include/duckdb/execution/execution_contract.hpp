@@ -56,6 +56,7 @@ struct ExecutionSourceContract {
 	bool dynamic_filters = false;
 	bool in_out_function = false;
 	vector<ExecutionSourceFilterContract> filters;
+	vector<ExecutionRegionExactFilterProof> exact_filter_proofs;
 	ExecutionRegionTableScanContract table_scan_contract;
 	ExecutionRegionHashJoinContract hash_join_contract;
 	ExecutionRegionNestedLoopJoinContract nested_loop_join_contract;

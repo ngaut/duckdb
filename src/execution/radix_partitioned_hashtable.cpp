@@ -17,6 +17,7 @@
 #include "duckdb/planner/expression/bound_reference_expression.hpp"
 #include "duckdb/storage/temporary_memory_manager.hpp"
 
+#include <algorithm>
 #include <chrono>
 
 namespace duckdb {
@@ -565,6 +566,11 @@ public:
 	atomic<bool> any_combined;
 	//! If any thread has called ht.Abandon() during Sink (meaning uncombined_data may have duplicates)
 	atomic<bool> any_abandoned;
+	//! If any local HT appended without duplicate lookup, final combination is required even for one thread
+	atomic<bool> requires_final_combine;
+	//! Exact monotonic local ranges. Disjoint ranges are already globally unique and need no finalize rehash.
+	bool all_local_ranges_proven_unique;
+	vector<GroupedAggregateProvenUniqueRange> proven_unique_ranges;
 
 	//! The radix HT
 	const RadixPartitionedHashTable &radix_ht;
@@ -598,7 +604,8 @@ RadixHTGlobalSinkState::RadixHTGlobalSinkState(ClientContext &context_p, const R
       number_of_threads(NumericCast<idx_t>(TaskScheduler::GetScheduler(context).NumberOfThreads())),
       memory_limit(BufferManager::GetBufferManager(context).GetOperatorMemoryLimit()),
       block_alloc_size(BufferManager::GetBufferManager(context).GetBlockAllocSize()), any_combined(false),
-      any_abandoned(false), radix_ht(radix_ht_p), config(*this), stored_allocators_size(0), finalize_done(0),
+      any_abandoned(false), requires_final_combine(false), all_local_ranges_proven_unique(true), radix_ht(radix_ht_p),
+      config(*this), stored_allocators_size(0), finalize_done(0),
       scan_pin_properties(TupleDataPinProperties::DESTROY_AFTER_DONE), count_before_combining(0),
       max_partition_size(0) {
 	// Compute minimum reservation
@@ -788,6 +795,9 @@ public:
 	//! After seeing this many tuples, we decide whether to adapt our strategy
 	//! This also serves as the maximum HT sink capacity
 	static constexpr idx_t ADAPTIVITY_THRESHOLD = 1048576;
+	//! Direct append receives exact all-new feedback for every compact group batch, so it can
+	//! identify high-uniqueness streams substantially earlier than raw tuple HLL adaptation.
+	static constexpr idx_t DIRECT_APPEND_ADAPTIVITY_THRESHOLD = 131072;
 	//! Whether we have decided to adapt our strategy
 	bool adapted;
 	//! Direct-append rows observed after backend preaggregation
@@ -858,6 +868,9 @@ void RadixPartitionedHashTable::ResetGlobalSinkState(ClientContext &context, Glo
 	gstate.active_threads = 0;
 	gstate.any_combined = false;
 	gstate.any_abandoned = false;
+	gstate.requires_final_combine = false;
+	gstate.all_local_ranges_proven_unique = true;
+	gstate.proven_unique_ranges.clear();
 	gstate.config.Reset();
 	gstate.uncombined_data.reset();
 	gstate.stored_allocators.clear();
@@ -1068,7 +1081,7 @@ static void RecordRadixHTDirectAppendResult(RadixHTGlobalSinkState &gstate, Radi
 	if (all_new) {
 		lstate.direct_append_new_rows += row_count;
 	}
-	if (lstate.direct_append_attempted_rows < RadixHTLocalSinkState::ADAPTIVITY_THRESHOLD) {
+	if (lstate.direct_append_attempted_rows < RadixHTLocalSinkState::DIRECT_APPEND_ADAPTIVITY_THRESHOLD) {
 		return;
 	}
 	const auto new_percentage =
@@ -1672,6 +1685,22 @@ bool RadixPartitionedHashTable::TryAppendNewGroupKeysWithStateAddresses(
 	return true;
 }
 
+bool RadixPartitionedHashTable::TryEnableProvenUniqueAppend(ExecutionContext &context, OperatorSinkInput &input,
+                                                            DataChunk &groups) const {
+	auto &lstate = input.local_state.Cast<RadixHTLocalSinkState>();
+	auto &ht = PrepareRadixHTSinkState(context, *this, input);
+	if (!ht.TryContinueProvenUniqueAppend(groups)) {
+		return false;
+	}
+	lstate.direct_append_adapted = true;
+	return true;
+}
+
+void RadixPartitionedHashTable::RequireAppendFinalCombine(ExecutionContext &context, OperatorSinkInput &input) const {
+	auto &ht = PrepareRadixHTSinkState(context, *this, input);
+	ht.RequireFinalCombine();
+}
+
 bool RadixPartitionedHashTable::TryResolveNewGroupAddresses(
     ExecutionContext &context, DataChunk &chunk, OperatorSinkInput &input, const ExecutionRegionSinkInfo &sink_info,
     Vector &addresses_out, optional_ptr<ExecutionOperatorStageRecorder> recorder, bool finish) const {
@@ -1733,6 +1762,11 @@ void RadixPartitionedHashTable::Combine(ExecutionContext &context, GlobalSinkSta
 	MaybeRepartition(context.client, gstate, lstate, true, row_location_remap);
 
 	auto &ht = *lstate.ht;
+	if (ht.LookupsSkippedRequireFinalCombine()) {
+		gstate.requires_final_combine = true;
+	}
+	GroupedAggregateProvenUniqueRange proven_unique_range;
+	const auto has_proven_unique_range = ht.GetProvenUniqueAppendRange(proven_unique_range);
 	auto lstate_data = ht.AcquirePartitionedData(row_location_remap);
 	if (lstate.abandoned_data) {
 		D_ASSERT(gstate.external);
@@ -1748,6 +1782,11 @@ void RadixPartitionedHashTable::Combine(ExecutionContext &context, GlobalSinkSta
 
 	const annotated_lock_guard<annotated_mutex> guard {gstate.lock};
 	D_ASSERT(!gstate.finalized);
+	if (has_proven_unique_range) {
+		gstate.proven_unique_ranges.push_back(proven_unique_range);
+	} else {
+		gstate.all_local_ranges_proven_unique = false;
+	}
 	if (gstate.uncombined_data) {
 		gstate.uncombined_data->Combine(*lstate.abandoned_data);
 	} else {
@@ -1755,6 +1794,64 @@ void RadixPartitionedHashTable::Combine(ExecutionContext &context, GlobalSinkSta
 	}
 	gstate.stored_allocators.emplace_back(std::move(aggregate_allocator));
 	gstate.stored_allocators_size += gstate.stored_allocators.back()->AllocationSize();
+}
+
+template <class KEY_TYPE>
+static bool RadixHTProvenUniqueRangesDisjoint(vector<GroupedAggregateProvenUniqueRange> &ranges) {
+	auto first_key = [](const GroupedAggregateProvenUniqueRange &range) {
+		if constexpr (std::is_signed<KEY_TYPE>::value) {
+			return static_cast<KEY_TYPE>(range.first_signed_key);
+		} else {
+			return static_cast<KEY_TYPE>(range.first_unsigned_key);
+		}
+	};
+	auto last_key = [](const GroupedAggregateProvenUniqueRange &range) {
+		if constexpr (std::is_signed<KEY_TYPE>::value) {
+			return static_cast<KEY_TYPE>(range.last_signed_key);
+		} else {
+			return static_cast<KEY_TYPE>(range.last_unsigned_key);
+		}
+	};
+	std::sort(ranges.begin(), ranges.end(),
+	          [&](const auto &left, const auto &right) { return first_key(left) < first_key(right); });
+	for (idx_t range_idx = 1; range_idx < ranges.size(); range_idx++) {
+		if (first_key(ranges[range_idx]) <= last_key(ranges[range_idx - 1])) {
+			return false;
+		}
+	}
+	return true;
+}
+
+static bool RadixHTProvenUniqueRangesDisjoint(vector<GroupedAggregateProvenUniqueRange> &ranges) {
+	if (ranges.empty()) {
+		return false;
+	}
+	const auto key_type = ranges[0].key_type;
+	for (const auto &range : ranges) {
+		if (range.key_type != key_type) {
+			return false;
+		}
+	}
+	switch (key_type) {
+	case PhysicalType::INT8:
+		return RadixHTProvenUniqueRangesDisjoint<int8_t>(ranges);
+	case PhysicalType::INT16:
+		return RadixHTProvenUniqueRangesDisjoint<int16_t>(ranges);
+	case PhysicalType::INT32:
+		return RadixHTProvenUniqueRangesDisjoint<int32_t>(ranges);
+	case PhysicalType::INT64:
+		return RadixHTProvenUniqueRangesDisjoint<int64_t>(ranges);
+	case PhysicalType::UINT8:
+		return RadixHTProvenUniqueRangesDisjoint<uint8_t>(ranges);
+	case PhysicalType::UINT16:
+		return RadixHTProvenUniqueRangesDisjoint<uint16_t>(ranges);
+	case PhysicalType::UINT32:
+		return RadixHTProvenUniqueRangesDisjoint<uint32_t>(ranges);
+	case PhysicalType::UINT64:
+		return RadixHTProvenUniqueRangesDisjoint<uint64_t>(ranges);
+	default:
+		return false;
+	}
 }
 
 void RadixPartitionedHashTable::Finalize(ClientContext &context, GlobalSinkState &gstate_p,
@@ -1771,7 +1868,13 @@ void RadixPartitionedHashTable::Finalize(ClientContext &context, GlobalSinkState
 		// If true there is no need to combine, it was all done by a single thread in a single HT.
 		// This is the case when only one thread contributed data and the HT never overflowed its
 		// capacity (which would have caused Abandon() to be called, creating duplicates).
-		const auto single_ht = !gstate.external && gstate.active_threads == 1 && !gstate.any_abandoned;
+		const auto single_ht =
+		    !gstate.external && gstate.active_threads == 1 && !gstate.any_abandoned && !gstate.requires_final_combine;
+		const auto disjoint_proven_ranges = !gstate.external && !gstate.any_abandoned &&
+		                                    !gstate.requires_final_combine && gstate.all_local_ranges_proven_unique &&
+		                                    gstate.proven_unique_ranges.size() == gstate.active_threads.load() &&
+		                                    RadixHTProvenUniqueRangesDisjoint(gstate.proven_unique_ranges);
+		const auto already_combined = single_ht || disjoint_proven_ranges;
 
 		auto &uncombined_partition_data = uncombined_data.GetPartitions();
 		const auto n_partitions = uncombined_partition_data.size();
@@ -1784,7 +1887,7 @@ void RadixPartitionedHashTable::Finalize(ClientContext &context, GlobalSinkState
 			gstate.max_partition_size = MaxValue(gstate.max_partition_size, partition_size);
 
 			gstate.partitions.emplace_back(make_uniq<AggregatePartition>(std::move(partition)));
-			if (single_ht) {
+			if (already_combined) {
 				gstate.finalize_done++;
 				gstate.partitions.back()->progress = 1;
 				gstate.partitions.back()->state = AggregatePartitionState::READY_TO_SCAN;

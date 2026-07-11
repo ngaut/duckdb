@@ -49,6 +49,8 @@ public:
 
 	SljitFullPipelineRecipe
 	MakeGeneratedFilterProjectionNativeTailRecipe(const SljitGeneratedFilterProjectionNativeTailFacts &facts) const;
+	bool CanMakeSourceHashJoinBuildSinkRecipe(const SljitSourceHashJoinBuildSinkFacts &facts) const;
+	SljitFullPipelineRecipe MakeSourceHashJoinBuildSinkRecipe(const SljitSourceHashJoinBuildSinkFacts &facts) const;
 
 	SljitFullPipelineRecipe MakeHashJoinDelimJoinSinkRecipe(idx_t first_hash_join_idx, idx_t final_hash_join_idx,
 	                                                        idx_t sink_idx) const;
