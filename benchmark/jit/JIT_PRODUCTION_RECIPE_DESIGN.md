@@ -178,9 +178,11 @@ per batch.
   chunk only after explicitly mapping those local IDs back to input columns.
 - A SIMD-eligible boolean root uses packed evaluation when result extraction is
   profitable. On ARM64, a single integer or DATE comparison uses an eight-row
-  unrolled generated scalar selector: NEON has no cheap integer movemask, while
-  conjunctions and filtered reductions retain their proven packed SIMD loops.
-  This is a target capability decision, not a query-name rule.
+  unrolled branchless scalar selector: NEON has no cheap integer movemask. Each
+  lane overwrites the current candidate selection slot, and condition flags
+  advance the cursor only for a match. Conjunctions and filtered reductions
+  retain their proven packed SIMD loops. This is a target capability decision,
+  not a query-name rule.
 - A flat all-valid `(integer_reference % positive_constant) compare constant`
   predicate also uses an eight-row unrolled selector. It hoists the source and
   selection cursors and reuses the exact signed magic-multiply remainder
@@ -232,6 +234,12 @@ match and build dictionary selections directly from the already-validated key
 and skips the duplicate NULL, range, and membership probe. Identity mismatch
 always uses the normal generated probe. This is an execution proof, not a
 cardinality estimate or a TPC-H-specific rule.
+
+The proof consumer distinguishes representation identity from checked
+conversion. A same-type key uses the exact-membership proof directly; a wider
+input still performs checked conversion and validates the perfect-table domain
+before deriving an offset. Proof reuse therefore removes only work already
+established by the producer.
 
 The storage-side exact-filter loop selects its input/source vector layouts once
 per batch. An identity selection is represented explicitly as absent input

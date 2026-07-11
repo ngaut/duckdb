@@ -32,14 +32,14 @@ static void SljitPopulateExactPerfectHashJoinSelections(SljitNativePerfectHashJo
 		const auto source_idx = input.source_sel ? input.source_sel[row_idx] : row_idx;
 		TARGET value;
 		if constexpr (std::is_same<TARGET, SOURCE>::value) {
+			// Identity equality already proves exact membership for the native key type.
 			value = source[source_idx];
-		} else if (!TryCast::Operation(source[source_idx], value)) {
-			continue;
-		}
-		// Exact filter identity proves membership. Retaining the cast-domain bounds here makes the
-		// proof consumer independently safe if a wider scan key reaches this boundary.
-		if (value < min_value || value > max_value) {
-			continue;
+		} else {
+			// A wider scan key still crosses a checked proof boundary. Validate both conversion and
+			// the perfect-table domain before deriving its build offset.
+			if (!TryCast::Operation(source[source_idx], value) || value < min_value || value > max_value) {
+				continue;
+			}
 		}
 		input.match_sel[selected_count] = UnsafeNumericCast<sel_t>(row_idx);
 		input.build_sel[selected_count] = UnsafeNumericCast<sel_t>(value - min_value);

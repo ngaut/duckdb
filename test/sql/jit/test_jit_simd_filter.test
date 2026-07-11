@@ -87,11 +87,63 @@ SELECT count(*) FROM (SELECT a, b_none FROM sr WHERE a < b_none);
 ----
 0
 
+# Every signed comparison condition is derived from SUBS flags and compacted
+# without a data-dependent branch. Keep all six conditions under jit_verify.
+query I
+SELECT count(*) FROM (SELECT a, b_mixed FROM sr WHERE a <= b_mixed);
+----
+94120
+
+query I
+SELECT count(*) FROM (SELECT a, b_mixed FROM sr WHERE a > b_mixed);
+----
+5883
+
+query I
+SELECT count(*) FROM (SELECT a, b_mixed FROM sr WHERE a >= b_mixed);
+----
+5883
+
+query I
+SELECT count(*) FROM (SELECT a, b_mixed FROM sr WHERE a = b_mixed);
+----
+0
+
+query I
+SELECT count(*) FROM (SELECT a, b_mixed FROM sr WHERE a != b_mixed);
+----
+100003
+
 # Reference-vs-constant uses the same ARM64 unrolled selector (Q1 shape).
 query I
 SELECT count(*) FROM (SELECT a FROM sr WHERE a < 50000);
 ----
 50000
+
+query I
+SELECT count(*) FROM (SELECT a FROM sr WHERE a <= 50000);
+----
+50001
+
+query I
+SELECT count(*) FROM (SELECT a FROM sr WHERE a > 50000);
+----
+50002
+
+query I
+SELECT count(*) FROM (SELECT a FROM sr WHERE a >= 50000);
+----
+50003
+
+query I
+SELECT count(*) FROM (SELECT a FROM sr WHERE a = 50000);
+----
+1
+
+query I
+SELECT count(*) FROM (SELECT a FROM sr WHERE a != 50000);
+----
+100002
 
 statement ok
 CREATE TEMP TABLE srj AS SELECT a, b_mixed FROM sr WHERE a < b_mixed;

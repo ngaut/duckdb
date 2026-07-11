@@ -31,6 +31,22 @@ static bool SljitUseArm64FlatSimpleCompareSelect(const ExecutionExpressionIR &ro
 #endif
 }
 
+static sljit_s32 SljitArm64SimpleCompareFlags(ExecutionExpressionBinaryOp op) {
+	switch (op) {
+	case ExecutionExpressionBinaryOp::COMPARE_EQUAL:
+	case ExecutionExpressionBinaryOp::COMPARE_NOTEQUAL:
+		return SLJIT_SET_Z;
+	case ExecutionExpressionBinaryOp::COMPARE_LESSTHAN:
+	case ExecutionExpressionBinaryOp::COMPARE_GREATERTHANOREQUALTO:
+		return SLJIT_SET_SIG_LESS;
+	case ExecutionExpressionBinaryOp::COMPARE_GREATERTHAN:
+	case ExecutionExpressionBinaryOp::COMPARE_LESSTHANOREQUALTO:
+		return SLJIT_SET_SIG_GREATER;
+	default:
+		throw InternalException("Unsupported ARM64 simple comparison selector operation");
+	}
+}
+
 static bool SljitUseFlatConstantModuloCompareSelect(const ExecutionExpressionIR &root) {
 	if (root.kind != ExecutionExpressionIRKind::BINARY || root.return_type.id() != LogicalTypeId::BOOLEAN ||
 	    !root.left || !root.right || !SljitTypedExpressionTreeComparisonSupported(root.binary_op) ||
@@ -110,10 +126,11 @@ static void EmitSljitFlatConstantModuloCompareSelect(struct sljit_compiler *comp
 	               SLJIT_S3, 0);
 }
 
-// ARM64 has no cheap integer movemask, so a single simple comparison is
-// faster as a generated scalar loop than as packed compare + mask reduction.
-// Keep both source pointers and the append cursor in saved registers; this is
-// still the typed-expression path and therefore uses adapter-local source IDs.
+// ARM64 has no cheap integer movemask, so a single simple comparison is faster
+// as a branchless generated scalar loop than as packed compare + mask reduction.
+// Keep both source pointers and the append cursor in saved registers; each row
+// overwrites the current candidate slot and CSET advances the cursor only for a
+// match. This removes the data-dependent branch without materializing false rows.
 static void EmitSljitArm64FlatSimpleCompareSelect(struct sljit_compiler *compiler, const ExecutionExpressionIR &root) {
 	D_ASSERT(SljitUseArm64FlatSimpleCompareSelect(root));
 	auto left_is_reference = root.left->kind == ExecutionExpressionIRKind::REFERENCE;
@@ -140,7 +157,8 @@ static void EmitSljitArm64FlatSimpleCompareSelect(struct sljit_compiler *compile
 	auto data_scale = NativeIntegerDataScale(integer_kind);
 	auto data_width = sljit_sw(1) << data_scale;
 	auto compare_type = NativeIntegerCompareJumpType(integer_kind, SljitTypedExpressionTreeCompareOp(root.binary_op));
-	auto emit_not_selected = [&](sljit_sw data_offset) {
+	auto compare_flags = SljitArm64SimpleCompareFlags(root.binary_op);
+	auto emit_lane = [&](sljit_sw lane, sljit_sw data_offset) {
 		sljit_s32 left_operand;
 		sljit_sw left_operand_value;
 		if (left_is_reference) {
@@ -162,11 +180,25 @@ static void EmitSljitArm64FlatSimpleCompareSelect(struct sljit_compiler *compile
 			right_operand = SLJIT_IMM;
 			right_operand_value = NumericCast<sljit_sw>(SljitTypedExpressionTreeConstantValue(*root.right));
 		}
-		return sljit_emit_cmp(compiler, compare_type ^ 1, left_operand, left_operand_value, right_operand,
-		                      right_operand_value);
+		if (lane != 0) {
+			sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_R1, 0, SLJIT_S1, 0, SLJIT_IMM, lane);
+		}
+		auto subtract_op = SLJIT_SUB | SLJIT_SET_Z | compare_flags;
+		if (integer_kind == SljitNativeIntegerKind::INT32 || integer_kind == SljitNativeIntegerKind::DATE) {
+			subtract_op |= SLJIT_32;
+		}
+		sljit_emit_op2(compiler, subtract_op, SLJIT_R0, 0, left_operand, left_operand_value, right_operand,
+		               right_operand_value);
+		sljit_emit_op_flags(compiler, SLJIT_MOV, SLJIT_R0, 0, compare_type & ~SLJIT_32);
+		if (lane == 0) {
+			sljit_emit_op1(compiler, SLJIT_MOV_U32, SLJIT_MEM2(SLJIT_S4, SLJIT_S3), 2, SLJIT_S1, 0);
+		} else {
+			sljit_emit_op1(compiler, SLJIT_MOV_U32, SLJIT_MEM2(SLJIT_S4, SLJIT_S3), 2, SLJIT_R1, 0);
+		}
+		sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_S3, 0, SLJIT_S3, 0, SLJIT_R0, 0);
 	};
 
-	// Match the optimized native loop shape: eight independent scalar compares
+	// Match the optimized native loop shape: independent scalar compares
 	// per iteration, one loop branch, and pointer bumps only at the group edge.
 	// Typed filter selection always provides true_sel; the outer C++ adapter owns
 	// the optional identity-materialization policy.
@@ -175,15 +207,7 @@ static void EmitSljitArm64FlatSimpleCompareSelect(struct sljit_compiler *compile
 	sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_R0, 0, SLJIT_S1, 0, SLJIT_IMM, UNROLL);
 	auto scalar_tail = sljit_emit_cmp(compiler, SLJIT_GREATER, SLJIT_R0, 0, SLJIT_S2, 0);
 	for (sljit_sw lane = 0; lane < UNROLL; lane++) {
-		auto not_selected = emit_not_selected(lane * data_width);
-		if (lane == 0) {
-			sljit_emit_op1(compiler, SLJIT_MOV_U32, SLJIT_MEM2(SLJIT_S4, SLJIT_S3), 2, SLJIT_S1, 0);
-		} else {
-			sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_R1, 0, SLJIT_S1, 0, SLJIT_IMM, lane);
-			sljit_emit_op1(compiler, SLJIT_MOV_U32, SLJIT_MEM2(SLJIT_S4, SLJIT_S3), 2, SLJIT_R1, 0);
-		}
-		sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_S3, 0, SLJIT_S3, 0, SLJIT_IMM, 1);
-		sljit_set_label(not_selected, sljit_emit_label(compiler));
+		emit_lane(lane, lane * data_width);
 	}
 	sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_S1, 0, SLJIT_S1, 0, SLJIT_IMM, UNROLL);
 	sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_S5, 0, SLJIT_S5, 0, SLJIT_IMM, UNROLL * data_width);
@@ -196,10 +220,7 @@ static void EmitSljitArm64FlatSimpleCompareSelect(struct sljit_compiler *compile
 	sljit_set_label(scalar_tail, sljit_emit_label(compiler));
 	auto tail_loop = sljit_emit_label(compiler);
 	auto done = sljit_emit_cmp(compiler, SLJIT_GREATER_EQUAL, SLJIT_S1, 0, SLJIT_S2, 0);
-	auto tail_not_selected = emit_not_selected(0);
-	sljit_emit_op1(compiler, SLJIT_MOV_U32, SLJIT_MEM2(SLJIT_S4, SLJIT_S3), 2, SLJIT_S1, 0);
-	sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_S3, 0, SLJIT_S3, 0, SLJIT_IMM, 1);
-	sljit_set_label(tail_not_selected, sljit_emit_label(compiler));
+	emit_lane(0, 0);
 	sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_S1, 0, SLJIT_S1, 0, SLJIT_IMM, 1);
 	sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_S5, 0, SLJIT_S5, 0, SLJIT_IMM, data_width);
 	if (left_is_reference && right_is_reference) {
