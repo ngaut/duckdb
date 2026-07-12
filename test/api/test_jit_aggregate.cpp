@@ -2606,6 +2606,31 @@ TEST_CASE("JIT gates perfect-hash aggregate updates with generated source filter
 		    REQUIRE(StringUtil::Contains(event.ir, "native:typed-expression-tree"));
 		    REQUIRE(StringUtil::Contains(event.ir, "aggregate_update(kind=perfect-hash"));
 	    });
+	RequireJitEvent(
+	    manager,
+	    [](const ExecutionRegionEvent &event) {
+		    return EventPhase(event) == "runtime" && EventStatus(event) == "executed" &&
+		           StringUtil::Contains(EventJitRuntimePathCounts(event),
+		                                "aggregate_update.filtered_perfect_hash_update=");
+	    },
+	    [](const ExecutionRegionEvent &event) { REQUIRE(EventJitRuntimeDelegationCounts(event).empty()); });
+
+	const string high_selectivity_query = StringUtil::Replace(query, "DATE '1998-09-02'", "DATE '1998-09-05'");
+	REQUIRE_NO_FAIL(con.Query("SET jit_policy='off'"));
+	auto high_selectivity_reference = con.Query(high_selectivity_query);
+	REQUIRE_NO_FAIL(*high_selectivity_reference);
+	REQUIRE_NO_FAIL(con.Query("SET jit_policy='auto'"));
+	ClearJitTrace(manager, true);
+	auto high_selectivity_result = con.Query(high_selectivity_query);
+	REQUIRE_NO_FAIL(*high_selectivity_result);
+	REQUIRE(high_selectivity_result->ToString() == high_selectivity_reference->ToString());
+	for (auto &event : manager.GetEvents()) {
+		if (EventPhase(event) != "runtime" || EventStatus(event) != "executed") {
+			continue;
+		}
+		REQUIRE_FALSE(
+		    StringUtil::Contains(EventJitRuntimePathCounts(event), "aggregate_update.filtered_perfect_hash_update="));
+	}
 }
 
 TEST_CASE("JIT perfect hash aggregate generates primitive decimal sum and count star updates", "[api][jit]") {

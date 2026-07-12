@@ -39,8 +39,16 @@ struct SljitGroupedAggregateUpdatePrimitive {
 
 static bool SljitCanBindGroupedAggregateUpdatePrimitive(const vector<SljitExecutableRegionOp> &ops,
                                                         idx_t aggregate_idx) {
-	return aggregate_idx < ops.size() && ops[aggregate_idx].kind == SljitNativeRegionOpKind::AGGREGATE_UPDATE &&
-	       ops[aggregate_idx].aggregate_update.plan.sink_info.kind == ExecutionRegionSinkKind::HASH_AGGREGATE_UPDATE;
+	if (aggregate_idx >= ops.size() || ops[aggregate_idx].kind != SljitNativeRegionOpKind::AGGREGATE_UPDATE) {
+		return false;
+	}
+	auto &aggregate = ops[aggregate_idx].aggregate_update;
+	if (aggregate.plan.sink_info.kind == ExecutionRegionSinkKind::HASH_AGGREGATE_UPDATE) {
+		return true;
+	}
+	return aggregate.plan.sink_info.kind == ExecutionRegionSinkKind::PERFECT_HASH_AGGREGATE_UPDATE &&
+	       aggregate.filtered_update.IsExecutable() &&
+	       aggregate.filtered_update.kind == SljitFilteredAggregateKernelKind::PERFECT_HASH_GROUPED;
 }
 
 static bool SljitGroupedAggregateUpdateCanUseCountStarPreaggregation(const SljitExecutableRegionOp &op) {
@@ -83,9 +91,16 @@ static bool SljitGroupedAggregateUpdateCanUseDistinctKeySink(const SljitExecutab
 
 static bool SljitCanBindFilteredGroupedAggregateUpdatePrimitive(const vector<SljitExecutableRegionOp> &ops,
                                                                 idx_t filter_idx, idx_t aggregate_idx) {
-	return filter_idx < ops.size() && ops[filter_idx].kind == SljitNativeRegionOpKind::FILTER &&
-	       aggregate_idx < ops.size() &&
-	       SljitGroupedAggregateUpdateCanUseDirectPrimitivePayloadUpdate(ops[aggregate_idx]);
+	if (filter_idx >= ops.size() || ops[filter_idx].kind != SljitNativeRegionOpKind::FILTER ||
+	    aggregate_idx >= ops.size()) {
+		return false;
+	}
+	auto &aggregate = ops[aggregate_idx];
+	return SljitGroupedAggregateUpdateCanUseDirectPrimitivePayloadUpdate(aggregate) ||
+	       (aggregate.kind == SljitNativeRegionOpKind::AGGREGATE_UPDATE &&
+	        aggregate.aggregate_update.plan.sink_info.kind == ExecutionRegionSinkKind::PERFECT_HASH_AGGREGATE_UPDATE &&
+	        aggregate.aggregate_update.filtered_update.IsExecutable() &&
+	        aggregate.aggregate_update.filtered_update.kind == SljitFilteredAggregateKernelKind::PERFECT_HASH_GROUPED);
 }
 
 static SljitGroupedAggregateUpdateStrategyKind

@@ -81,15 +81,18 @@ FindSljitSparseLocalRunCachedLane(const vector<SljitSparseLocalRunCachedLane> &c
 void EmitSljitSparseLocalRunCacheFlush(struct sljit_compiler *compiler, const SljitLocalPerfectHashAggregatePlan &plan,
                                        const vector<SljitSparseLocalRunCachedLane> &cached_lanes,
                                        sljit_s32 group_pointer_reg, sljit_sw cached_group_offset,
-                                       sljit_sw cached_start_offset, sljit_s32 current_index_reg) {
+                                       sljit_sw cached_position_offset, bool explicit_count,
+                                       sljit_s32 current_index_reg) {
 	if (!SljitSparseLocalUsesCountSeen(plan)) {
 		return;
 	}
 	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R0, 0, SLJIT_MEM1(SLJIT_SP), cached_group_offset);
 	auto no_cached_group = sljit_emit_cmp(compiler, SLJIT_EQUAL, SLJIT_R0, 0, SLJIT_IMM, -1);
 	auto &count_lane = plan.lanes[plan.count_seen_lane];
-	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R3, 0, SLJIT_MEM1(SLJIT_SP), cached_start_offset);
-	sljit_emit_op2(compiler, SLJIT_SUB, SLJIT_R3, 0, current_index_reg, 0, SLJIT_R3, 0);
+	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R3, 0, SLJIT_MEM1(SLJIT_SP), cached_position_offset);
+	if (!explicit_count) {
+		sljit_emit_op2(compiler, SLJIT_SUB, SLJIT_R3, 0, current_index_reg, 0, SLJIT_R3, 0);
+	}
 	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R4, 0, SLJIT_MEM1(group_pointer_reg), count_lane.count_offset);
 	sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_R4, 0, SLJIT_R4, 0, SLJIT_R3, 0);
 	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_MEM1(group_pointer_reg), count_lane.count_offset, SLJIT_R4, 0);
@@ -103,10 +106,11 @@ void EmitSljitSparseLocalRunCacheFlush(struct sljit_compiler *compiler, const Sl
 void EmitSljitSparseLocalRunCacheLoadCurrent(struct sljit_compiler *compiler,
                                              const SljitLocalPerfectHashAggregatePlan &plan,
                                              const vector<SljitSparseLocalRunCachedLane> &cached_lanes,
-                                             sljit_s32 group_pointer_reg, sljit_sw cached_start_offset,
-                                             sljit_s32 current_index_reg) {
+                                             sljit_s32 group_pointer_reg, sljit_sw cached_position_offset,
+                                             bool explicit_count, sljit_s32 current_index_reg) {
 	D_ASSERT(SljitSparseLocalUsesCountSeen(plan));
-	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_MEM1(SLJIT_SP), cached_start_offset, current_index_reg, 0);
+	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_MEM1(SLJIT_SP), cached_position_offset,
+	               explicit_count ? SLJIT_IMM : current_index_reg, explicit_count ? 1 : 0);
 	for (auto &cached_lane : cached_lanes) {
 		auto &lane = plan.lanes[cached_lane.payload_idx];
 		sljit_emit_op1(compiler, SLJIT_MOV, cached_lane.lower_reg, 0, SLJIT_MEM1(group_pointer_reg), lane.lower_offset);

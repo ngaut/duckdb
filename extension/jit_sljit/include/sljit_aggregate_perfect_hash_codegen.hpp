@@ -186,12 +186,13 @@ void EmitSljitSparseLocalPerfectHashAccumulate(struct sljit_compiler *compiler,
 void EmitSljitSparseLocalRunCacheFlush(struct sljit_compiler *compiler, const SljitLocalPerfectHashAggregatePlan &plan,
                                        const vector<SljitSparseLocalRunCachedLane> &cached_lanes,
                                        sljit_s32 group_pointer_reg, sljit_sw cached_group_offset,
-                                       sljit_sw cached_start_offset, sljit_s32 current_index_reg);
+                                       sljit_sw cached_position_offset, bool explicit_count,
+                                       sljit_s32 current_index_reg);
 void EmitSljitSparseLocalRunCacheLoadCurrent(struct sljit_compiler *compiler,
                                              const SljitLocalPerfectHashAggregatePlan &plan,
                                              const vector<SljitSparseLocalRunCachedLane> &cached_lanes,
-                                             sljit_s32 group_pointer_reg, sljit_sw cached_start_offset,
-                                             sljit_s32 current_index_reg);
+                                             sljit_s32 group_pointer_reg, sljit_sw cached_position_offset,
+                                             bool explicit_count, sljit_s32 current_index_reg);
 void EmitSljitSparseLocalRunCacheAccumulate(struct sljit_compiler *compiler,
                                             const SljitLocalPerfectHashAggregateLane &lane,
                                             AggregatePrimitiveUpdateKind kind, sljit_s32 lower_reg,

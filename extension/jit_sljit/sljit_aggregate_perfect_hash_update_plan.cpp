@@ -25,10 +25,10 @@ SljitPerfectHashGroupExpressionsUseTypedTree(const vector<SljitNativeRegionExpre
 }
 
 bool TryBuildSljitPerfectHashFusedUpdatePlan(
-    const vector<SljitNativeRegionExpressionPlan> &payloads, const vector<ExecutionRegionAggregateInput> &aggregates,
-    const vector<ExecutionRegionGroupInput> &groups, const vector<SljitNativeRegionExpressionPlan> &group_expressions,
-    const ExecutionRegionAggregateContract &contract, const vector<bool> &source_not_null,
-    const vector<Value> &source_min_values, const vector<Value> &source_max_values,
+    const ExecutionExpressionIR *predicate, const vector<SljitNativeRegionExpressionPlan> &payloads,
+    const vector<ExecutionRegionAggregateInput> &aggregates, const vector<ExecutionRegionGroupInput> &groups,
+    const vector<SljitNativeRegionExpressionPlan> &group_expressions, const ExecutionRegionAggregateContract &contract,
+    const vector<bool> &source_not_null, const vector<Value> &source_min_values, const vector<Value> &source_max_values,
     SljitPerfectHashFusedUpdatePlan &result, string &error) {
 	result = SljitPerfectHashFusedUpdatePlan();
 	const bool typed_group_expressions = SljitPerfectHashGroupExpressionsUseTypedTree(group_expressions);
@@ -56,6 +56,16 @@ bool TryBuildSljitPerfectHashFusedUpdatePlan(
 		result.codegen_plan.fast_path_supported =
 		    result.codegen_plan.fast_path_supported && tree_plan.fast_path.fast_path_supported;
 	}
+	if (predicate) {
+		auto predicate_plan = BuildSljitTypedExpressionTreePlan(*predicate, false);
+		if (!predicate_plan.supported || !predicate_plan.result_is_bool) {
+			error = "unsupported filtered fused perfect-hash aggregate predicate shape";
+			return false;
+		}
+		result.codegen_plan.tree_node_count += predicate_plan.node_count;
+		result.codegen_plan.fast_path_supported =
+		    result.codegen_plan.fast_path_supported && predicate_plan.fast_path.fast_path_supported;
+	}
 	if (contract.perfect_required_bits_total >= 8 * sizeof(idx_t)) {
 		error = "unsupported fused perfect-hash typed aggregate domain size";
 		return false;
@@ -82,11 +92,11 @@ bool TryBuildSljitPerfectHashFusedUpdatePlan(
 	                                           result.local_aggregate_plan);
 	AnnotateSljitLocalPerfectHashAggregatePlan(result.local_aggregate_plan, payloads, aggregates, source_min_values,
 	                                           source_max_values);
-
 	result.sparse_run_cache_enabled =
 	    result.codegen_plan.fast_path_supported && SLJIT_HAS_SPARSE_LOCAL_RUN_CACHE_REGS &&
 	    result.local_aggregate_plan.enabled && result.local_aggregate_plan.sparse &&
 	    !result.local_aggregate_plan.sparse_eager_zero && SljitSparseLocalUsesCountSeen(result.local_aggregate_plan);
+	result.sparse_run_cache_uses_explicit_count = result.sparse_run_cache_enabled && predicate;
 	const auto sparse_run_cacheable_lane_count =
 	    result.sparse_run_cache_enabled
 	        ? CountSljitSparseLocalRunCacheableLanes(result.local_aggregate_plan, aggregates)
@@ -113,7 +123,7 @@ bool TryBuildSljitPerfectHashFusedUpdatePlan(
 		result.local_size += NumericCast<sljit_sw>(sizeof(sljit_sw));
 		result.sparse_run_cached_pointer_offset = result.local_size;
 		result.local_size += NumericCast<sljit_sw>(sizeof(uintptr_t));
-		result.sparse_run_cached_start_offset = result.local_size;
+		result.sparse_run_cached_position_offset = result.local_size;
 		result.local_size += NumericCast<sljit_sw>(sizeof(sljit_sw));
 	}
 	if (!result.local_aggregate_plan.enabled) {

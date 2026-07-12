@@ -9,14 +9,15 @@
 
 namespace duckdb {
 
-unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativePerfectHashGroupedFusedTypedExpressionAggregateUpdate(
-    const vector<SljitNativeRegionExpressionPlan> &payloads, const vector<ExecutionRegionAggregateInput> &aggregates,
-    const vector<ExecutionRegionGroupInput> &groups, const vector<SljitNativeRegionExpressionPlan> &group_expressions,
-    const ExecutionRegionAggregateContract &contract, const vector<bool> &source_not_null,
-    const vector<Value> &source_min_values, const vector<Value> &source_max_values,
+static unique_ptr<ExecutionRegionCodeHandle>
+BuildSljitNativePerfectHashGroupedFusedTypedExpressionAggregateUpdateInternal(
+    const ExecutionExpressionIR *predicate, const vector<SljitNativeRegionExpressionPlan> &payloads,
+    const vector<ExecutionRegionAggregateInput> &aggregates, const vector<ExecutionRegionGroupInput> &groups,
+    const vector<SljitNativeRegionExpressionPlan> &group_expressions, const ExecutionRegionAggregateContract &contract,
+    const vector<bool> &source_not_null, const vector<Value> &source_min_values, const vector<Value> &source_max_values,
     SljitNativeAggregateUpdateFunction &function, string &error) {
 	SljitPerfectHashFusedUpdatePlan update_plan;
-	if (!TryBuildSljitPerfectHashFusedUpdatePlan(payloads, aggregates, groups, group_expressions, contract,
+	if (!TryBuildSljitPerfectHashFusedUpdatePlan(predicate, payloads, aggregates, groups, group_expressions, contract,
 	                                             source_not_null, source_min_values, source_max_values, update_plan,
 	                                             error)) {
 		return nullptr;
@@ -40,7 +41,7 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativePerfectHashGroupedFusedTyp
 	const auto binary_shared_value_offset = update_plan.binary_shared_value_offset;
 	const auto sparse_run_cached_group_offset = update_plan.sparse_run_cached_group_offset;
 	const auto sparse_run_cached_pointer_offset = update_plan.sparse_run_cached_pointer_offset;
-	const auto sparse_run_cached_start_offset = update_plan.sparse_run_cached_start_offset;
+	const auto sparse_run_cached_position_offset = update_plan.sparse_run_cached_position_offset;
 	const auto sparse_run_cache_enabled = update_plan.sparse_run_cache_enabled;
 	const auto hoist_source_data_pointers = update_plan.hoist_source_data_pointers;
 	const auto hoist_group_data_pointers = update_plan.hoist_group_data_pointers;
@@ -57,7 +58,7 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativePerfectHashGroupedFusedTyp
 	if (sparse_run_cache_enabled) {
 		sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_MEM1(SLJIT_SP), sparse_run_cached_group_offset, SLJIT_IMM, -1);
 		sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_MEM1(SLJIT_SP), sparse_run_cached_pointer_offset, SLJIT_IMM, 0);
-		sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_MEM1(SLJIT_SP), sparse_run_cached_start_offset, SLJIT_IMM, 0);
+		sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_MEM1(SLJIT_SP), sparse_run_cached_position_offset, SLJIT_IMM, 0);
 	}
 	EmitInitSljitNativeVectorLoop(compiler);
 	EmitInitSljitNativeVectorSourceArrays(compiler);
@@ -77,6 +78,7 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativePerfectHashGroupedFusedTyp
 	}
 	SljitPerfectHashFusedUpdateEmitContext emit_context {
 	    compiler,
+	    predicate,
 	    payloads,
 	    aggregates,
 	    group_plans,
@@ -118,6 +120,28 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativePerfectHashGroupedFusedTyp
 	sljit_emit_return_void(compiler);
 
 	return FinishSljitCode(compiler, function, error);
+}
+
+unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativePerfectHashGroupedFusedTypedExpressionAggregateUpdate(
+    const vector<SljitNativeRegionExpressionPlan> &payloads, const vector<ExecutionRegionAggregateInput> &aggregates,
+    const vector<ExecutionRegionGroupInput> &groups, const vector<SljitNativeRegionExpressionPlan> &group_expressions,
+    const ExecutionRegionAggregateContract &contract, const vector<bool> &source_not_null,
+    const vector<Value> &source_min_values, const vector<Value> &source_max_values,
+    SljitNativeAggregateUpdateFunction &function, string &error) {
+	return BuildSljitNativePerfectHashGroupedFusedTypedExpressionAggregateUpdateInternal(
+	    nullptr, payloads, aggregates, groups, group_expressions, contract, source_not_null, source_min_values,
+	    source_max_values, function, error);
+}
+
+unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeFilteredPerfectHashGroupedFusedTypedExpressionAggregateUpdate(
+    const ExecutionExpressionIR &predicate, const vector<SljitNativeRegionExpressionPlan> &payloads,
+    const vector<ExecutionRegionAggregateInput> &aggregates, const vector<ExecutionRegionGroupInput> &groups,
+    const vector<SljitNativeRegionExpressionPlan> &group_expressions, const ExecutionRegionAggregateContract &contract,
+    const vector<bool> &source_not_null, const vector<Value> &source_min_values, const vector<Value> &source_max_values,
+    SljitNativeAggregateUpdateFunction &function, string &error) {
+	return BuildSljitNativePerfectHashGroupedFusedTypedExpressionAggregateUpdateInternal(
+	    &predicate, payloads, aggregates, groups, group_expressions, contract, source_not_null, source_min_values,
+	    source_max_values, function, error);
 }
 
 } // namespace duckdb

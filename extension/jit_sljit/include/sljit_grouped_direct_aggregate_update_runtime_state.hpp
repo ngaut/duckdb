@@ -100,6 +100,35 @@ private:
 	                                           const SljitGroupedAggregateUpdatePrimitive &primitive,
 	                                           const SljitRuntimeBatchView &input, idx_t &processed_batches) {
 		auto &input_chunk = SljitBindMaterializedRuntimeBatchInput(input, "SLJIT filtered grouped aggregate update");
+		auto &aggregate_op = ops[primitive.aggregate_idx];
+		if (aggregate_op.aggregate_update.filtered_update.kind ==
+		    SljitFilteredAggregateKernelKind::PERFECT_HASH_GROUPED) {
+			auto &native_runtime = runtime.ExecutionOperators();
+			auto &bound = scratch.AggregateBoundGroupedUpdate(primitive.aggregate_idx);
+			SljitBindRecordedGroupedPrimitiveAggregateUpdate(runtime, native_runtime, scratch, primitive.aggregate_idx,
+			                                                 aggregate_op, input_chunk, bound);
+			if (bound.strategy != SljitBoundGroupedAggregateStrategy::PERFECT_HASH_FUSED || !bound.grouped_state ||
+			    !bound.payload_lanes || !bound.reduction_lanes || !bound.payload_scratch) {
+				throw InternalException("SLJIT filtered perfect-hash aggregate binding is incomplete");
+			}
+			auto stage_start = SljitRegionStageStart(runtime);
+			SljitExecuteFusedPerfectHashGroupedPrimitiveAggregatePayloadUpdate(
+			    aggregate_op.aggregate_update.filtered_update.payloads,
+			    aggregate_op.aggregate_update.filtered_update.compiled.Function(),
+			    aggregate_op.aggregate_update.plan.sink_info.groups,
+			    aggregate_op.aggregate_update.plan.group_expressions,
+			    aggregate_op.aggregate_update.group_source_not_null,
+			    aggregate_op.aggregate_update.plan.sink_info.aggregate_contract,
+			    aggregate_op.aggregate_update.payload_descriptors, *bound.payload_lanes, *bound.reduction_lanes,
+			    bound.grouped_state->perfect_hash_layout, input_chunk, nullptr, input_chunk.size(),
+			    *bound.payload_scratch);
+			RecordSljitRegionStageRuntime(runtime, primitive.aggregate_idx, aggregate_op.kind,
+			                              "filtered_perfect_hash_update", stage_start);
+			RecordSljitRegionMaterializationElisionPath(runtime, aggregate_op.kind, "filtered_perfect_hash_update",
+			                                            input_chunk.size());
+			processed_batches++;
+			return false;
+		}
 		auto &filter_op = ops[primitive.filter_idx];
 		auto &filter_selection = scratch.FilterSelection(primitive.filter_idx);
 		auto filter_stage_start = SljitRegionStageStart(runtime);
@@ -111,7 +140,6 @@ private:
 			return false;
 		}
 
-		auto &aggregate_op = ops[primitive.aggregate_idx];
 		auto &native_runtime = runtime.ExecutionOperators();
 		auto &bound_direct_update = scratch.AggregateBoundGroupedUpdate(primitive.aggregate_idx);
 		SljitBindGroupedPrimitiveAggregateUpdate(native_runtime, scratch, primitive.aggregate_idx, aggregate_op,

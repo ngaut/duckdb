@@ -141,12 +141,15 @@ struct SljitExecutableOrderSink {
 	}
 };
 
+enum class SljitFilteredAggregateKernelKind : uint8_t { NONE, UNGROUPED_PAYLOAD, PERFECT_HASH_GROUPED };
+
 struct SljitExecutableFilteredAggregateUpdate {
 	SljitExecutableRegionExpression filter;
 	vector<SljitExecutableRegionExpression> payloads;
 	vector<idx_t> input_source_indices;
 	vector<bool> input_source_not_null;
 	SljitCompiledFunction<SljitNativeAggregateUpdateFunction> compiled;
+	SljitFilteredAggregateKernelKind kind = SljitFilteredAggregateKernelKind::NONE;
 
 	bool IsExecutable() const {
 		return compiled.IsExecutable();

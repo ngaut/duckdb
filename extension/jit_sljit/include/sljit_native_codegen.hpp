@@ -203,6 +203,12 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativePerfectHashGroupedFusedTyp
     const ExecutionRegionAggregateContract &contract, const vector<bool> &source_not_null,
     const vector<Value> &source_min_values, const vector<Value> &source_max_values,
     SljitNativeAggregateUpdateFunction &function, string &error);
+unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeFilteredPerfectHashGroupedFusedTypedExpressionAggregateUpdate(
+    const ExecutionExpressionIR &predicate, const vector<SljitNativeRegionExpressionPlan> &payloads,
+    const vector<ExecutionRegionAggregateInput> &aggregates, const vector<ExecutionRegionGroupInput> &groups,
+    const vector<SljitNativeRegionExpressionPlan> &group_expressions, const ExecutionRegionAggregateContract &contract,
+    const vector<bool> &source_not_null, const vector<Value> &source_min_values, const vector<Value> &source_max_values,
+    SljitNativeAggregateUpdateFunction &function, string &error);
 unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeIntegralCompress(SljitNativeSignedIntegerWidth source_width,
                                                                        SljitNativeUnsignedIntegerWidth target_width,
                                                                        SljitNativeVectorFunction &function,
