@@ -116,6 +116,24 @@ EmitSljitPerfectHashFlatFastLoop(const SljitPerfectHashFusedUpdateEmitContext &c
                                  const vector<SljitTypedExpressionTreeDataPointerHoist> *fast_data_hoists) {
 	auto compiler = context.compiler;
 	auto &local_plan = update_plan.local_aggregate_plan;
+	if (update_plan.predicate_simd_plan.supported) {
+		EmitSljitTypedExpressionTreeSimdHybridFilterLoop(
+		    compiler, *context.predicate, update_plan.predicate_simd_plan, update_plan.predicate_simd_mask_offset,
+		    [&]() {
+			    EmitLoadFusedAggregateExecuteIndex(compiler, true);
+			    auto lookup = SljitPerfectHashDirectGroupLookupOptions(context, local_plan.sparse,
+			                                                           update_plan.hoist_fast_group_data_array_base);
+			    lookup.expression_fast_path = true;
+			    lookup.expression_all_valid = true;
+			    lookup.expression_data_hoists = fast_data_hoists;
+			    if (update_plan.hoist_fast_group_data_array_base) {
+				    EmitSljitPerfectHashFastGroupDataArrayBase(compiler);
+			    }
+			    EmitSljitPerfectHashGroupLookup(context, lookup);
+			    EmitSljitPerfectHashPayloadUpdates(
+			        context, SljitPerfectHashPayloadUpdateOptionsForLoop(true, true, false, fast_data_hoists));
+		    });
+	}
 	auto fast_loop = sljit_emit_label(compiler);
 	auto fast_done = sljit_emit_cmp(compiler, SLJIT_GREATER_EQUAL, SLJIT_S1, 0, SLJIT_S2, 0);
 	EmitLoadFusedAggregateExecuteIndex(compiler, true);

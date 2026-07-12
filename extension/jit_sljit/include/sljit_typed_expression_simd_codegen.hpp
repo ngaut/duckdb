@@ -92,7 +92,8 @@ void EmitSljitTypedExpressionTreeSimdSumLoop(struct sljit_compiler *compiler, co
 // have no packed form (arbitrary aggregate payload kinds); the predicate — usually
 // the dominant cost under selective filters — still vectorizes. Assumes the flat
 // all-valid context; advances S1 to the last full lane group, the caller's scalar
-// fast loop handles the tail. `mask_offset` is a 16-byte, 16-aligned scratch slot.
+// fast loop handles the tail. `mask_offset` is a 32-byte, 16-aligned scratch block:
+// the first 16 bytes retain nullable lane bits and the second 16 bytes hold compact-loop state.
 void EmitSljitTypedExpressionTreeSimdHybridFilterLoop(struct sljit_compiler *compiler,
                                                       const ExecutionExpressionIR &predicate,
                                                       const SljitTypedExpressionTreeSimdPlan &plan,

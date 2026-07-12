@@ -170,7 +170,7 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeFilteredUngroupedFusedPrim
 	sljit_s32 simd_scratches = 5;
 	if (simd_plan.supported) {
 		simd_mask_offset = (local_size + 15) & ~sljit_sw(15);
-		local_size = simd_mask_offset + 16;
+		local_size = simd_mask_offset + 32;
 		// constants (predicate + payload, an over-estimate if they share values) + all-ones
 		// + lane bits + accumulator(s) + peak live temporaries (+1 validity nibble).
 		auto accumulators = simd_is_sum ? idx_t(2) : idx_t(1);

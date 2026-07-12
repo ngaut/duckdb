@@ -290,6 +290,12 @@ per batch.
   advance the cursor only for a match. Conjunctions and filtered reductions
   retain their proven packed SIMD loops. This is a target capability decision,
   not a query-name rule.
+- A selective single-comparison predicate may feed a fused perfect-hash
+  multi-aggregate reducer through the same packed mask contract. The mask loop
+  keeps one scalar reducer body per control-flow class instead of cloning it per
+  SIMD lane. High-selectivity predicates retain the separate selected-input
+  path, and conjunctions retain scalar short-circuit evaluation; both choices
+  follow measured work avoided, not query identity.
 - A flat all-valid `(integer_reference % positive_constant) compare constant`
   predicate also uses an eight-row unrolled selector. It hoists the source and
   selection cursors and reuses the exact signed magic-multiply remainder
@@ -807,11 +813,12 @@ by the JIT API helpers and `benchmark/tpch/jit/verify_tpch_benchmark.py`.
 
 The generic production gate is part of the performance contract. Arithmetic,
 CASE-heavy, multi-aggregate, persistent-table expression, filtered scan,
-column-vs-column comparison, single- and multi-source nullable scan, and
-single-thread grouped-DISTINCT workloads must show an auto-policy speedup and
-compiled-region ownership; the arithmetic-heavy and column-comparison classes
-use material speedup floors. Dense computed perfect-hash grouping is also a
-compiled performance contract, including both serial and parallel execution.
+column-vs-column comparison, single- and multi-source nullable scan, selective
+perfect-hash multi-aggregate, and single-thread grouped-DISTINCT workloads must
+show an auto-policy speedup and compiled-region ownership; the arithmetic-heavy
+and column-comparison classes use material speedup floors. Dense computed
+perfect-hash grouping is also a compiled performance contract, including both
+serial and parallel execution.
 Other grouped and join workloads must remain within the bounded slowdown
 budget; a vectorized result is valid when capability analysis cannot prove a
 faster compiled route. This keeps JIT admission honest across production

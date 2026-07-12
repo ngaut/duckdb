@@ -87,6 +87,18 @@ bool TryBuildSljitPerfectHashFusedUpdatePlan(
 	if (result.codegen_plan.binary_shared_payload) {
 		result.local_size += NumericCast<sljit_sw>(sizeof(sljit_sw));
 	}
+	if (predicate && predicate->kind == ExecutionExpressionIRKind::BINARY &&
+	    SljitTypedExpressionTreeComparisonSupported(predicate->binary_op) && result.codegen_plan.fast_path_supported) {
+		result.predicate_simd_plan = TryPlanSljitTypedExpressionTreeSimd(*predicate);
+		if (result.predicate_simd_plan.supported) {
+			result.predicate_simd_mask_offset = (result.local_size + 15) & ~sljit_sw(15);
+			result.local_size = result.predicate_simd_mask_offset + 32;
+			auto vector_register_count = result.predicate_simd_plan.constant_count +
+			                             result.predicate_simd_plan.max_live_temps +
+			                             (result.predicate_simd_plan.needs_all_ones ? idx_t(1) : idx_t(0));
+			result.scratch_register_count = 5 | SLJIT_ENTER_VECTOR(NumericCast<sljit_s32>(vector_register_count));
+		}
+	}
 	auto payloads_not_null = BuildSljitAggregatePayloadNotNull(payloads, aggregates, source_not_null);
 	TryBuildSljitLocalPerfectHashAggregatePlan(aggregates, contract, payloads_not_null, result.local_size,
 	                                           result.local_aggregate_plan);

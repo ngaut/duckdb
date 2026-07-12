@@ -12,6 +12,7 @@
 #include "sljit_aggregate_perfect_hash_codegen.hpp"
 #include "sljit_aggregate_typed_payload_codegen.hpp"
 #include "sljit_typed_expression_plan.hpp"
+#include "sljit_typed_expression_simd_codegen.hpp"
 
 namespace duckdb {
 
@@ -67,6 +68,7 @@ struct SljitPerfectHashFusedUpdatePlan {
 	SljitFusedTypedAggregateCodegenPlan codegen_plan;
 	SljitLocalPerfectHashAggregatePlan local_aggregate_plan;
 	SljitDeferredPerfectHashFlagPlan deferred_flag_plan;
+	SljitTypedExpressionTreeSimdPlan predicate_simd_plan;
 	vector<SljitTypedExpressionTreeDataPointerHoist> source_data_hoists;
 	vector<SljitTypedExpressionTreeDataPointerHoist> fast_source_data_hoists;
 	idx_t perfect_hash_group_count = 0;
@@ -74,6 +76,7 @@ struct SljitPerfectHashFusedUpdatePlan {
 	sljit_sw state_pointer_offset = -1;
 	sljit_sw group_index_offset = -1;
 	sljit_sw binary_shared_value_offset = -1;
+	sljit_sw predicate_simd_mask_offset = -1;
 	bool hoist_source_data_pointers = false;
 	bool hoist_group_data_pointers = false;
 	bool hoist_fast_source_data_pointers = false;
@@ -83,6 +86,7 @@ struct SljitPerfectHashFusedUpdatePlan {
 	sljit_s32 state_pointer_reg = SLJIT_S4;
 	sljit_s32 group_index_reg = SLJIT_S4;
 	sljit_s32 saved_register_count = 0;
+	sljit_s32 scratch_register_count = 5;
 };
 
 bool TryBuildSljitPerfectHashFusedUpdatePlan(

@@ -45,10 +45,11 @@ BuildSljitNativePerfectHashGroupedFusedTypedExpressionAggregateUpdateInternal(
 	const auto state_pointer_reg = update_plan.state_pointer_reg;
 	const auto group_index_reg = update_plan.group_index_reg;
 	const auto saved_register_count = update_plan.saved_register_count;
+	const auto scratch_register_count = update_plan.scratch_register_count;
 
 	vector<SljitExpressionTreeOverflowJumps> overflows;
 	vector<sljit_jump *> group_out_of_range;
-	sljit_emit_enter(compiler, 0, SLJIT_ARGS1V(P), 5, saved_register_count, local_size);
+	sljit_emit_enter(compiler, 0, SLJIT_ARGS1V(P), scratch_register_count, saved_register_count, local_size);
 	EmitZeroSljitLocalPerfectHashAggregateArrays(compiler, local_aggregate_plan);
 	EmitZeroSljitDeferredPerfectHashFlagArray(compiler, deferred_flag_plan);
 	EmitInitSljitNativeVectorLoop(compiler);

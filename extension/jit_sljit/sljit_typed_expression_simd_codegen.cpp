@@ -1073,21 +1073,50 @@ void EmitSljitTypedExpressionTreeSimdHybridFilterLoop(struct sljit_compiler *com
 	if (validity_refs) {
 		EmitSljitSimdValidityAnd(compiler, ctx, *validity_refs, plan.lanes, mask.reg);
 	}
-	sljit_emit_simd_mov(compiler, ctx.simd_type | SLJIT_SIMD_STORE, SLJIT_VR(mask.reg), SLJIT_MEM1(SLJIT_SP),
-	                    mask_offset);
+	sljit_emit_simd_sign(compiler, ctx.simd_type | SLJIT_SIMD_STORE | SLJIT_32, SLJIT_VR(mask.reg), SLJIT_R3, 0);
 	FreeSimdValue(ctx, mask);
 
-	// Per lane: if the mask lane is set, run the scalar row work at S1; the row
-	// index advances by one per lane so the callback always reads the lane's row.
-	auto lane_load_op = plan.elem_scale == 2 ? SLJIT_MOV_S32 : SLJIT_MOV;
-	auto lane_bytes = NumericCast<sljit_sw>(sljit_sw(1) << plan.elem_scale);
-	for (sljit_s32 lane = 0; lane < plan.lanes; lane++) {
-		sljit_emit_op1(compiler, lane_load_op, SLJIT_R2, 0, SLJIT_MEM1(SLJIT_SP), mask_offset + lane * lane_bytes);
-		auto lane_false = sljit_emit_cmp(compiler, SLJIT_EQUAL, SLJIT_R2, 0, SLJIT_IMM, 0);
-		emit_matching_row();
-		sljit_set_label(lane_false, sljit_emit_label(compiler));
-		sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_S1, 0, SLJIT_S1, 0, SLJIT_IMM, 1);
-	}
+	// High-selectivity predicates commonly produce an all-true mask. Run that
+	// group in a compact scalar lane loop without per-lane tests. Mixed masks use
+	// a second compact loop over the scalar sign bitset. Keeping one callback body
+	// per control-flow class avoids multiplying a large aggregate reducer by the
+	// SIMD lane count.
+	const auto all_lanes_mask = NumericCast<sljit_sw>((sljit_uw(1) << plan.lanes) - 1);
+	auto mixed_mask = sljit_emit_cmp(compiler, SLJIT_NOT_EQUAL, SLJIT_R3, 0, SLJIT_IMM, all_lanes_mask);
+	sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_R0, 0, SLJIT_S1, 0, SLJIT_IMM, plan.lanes);
+	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_MEM1(SLJIT_SP), mask_offset + 24, SLJIT_R0, 0);
+	auto all_true_loop = sljit_emit_label(compiler);
+	emit_matching_row();
+	sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_S1, 0, SLJIT_S1, 0, SLJIT_IMM, 1);
+	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R0, 0, SLJIT_MEM1(SLJIT_SP), mask_offset + 24);
+	auto repeat_all_true = sljit_emit_cmp(compiler, SLJIT_LESS, SLJIT_S1, 0, SLJIT_R0, 0);
+	sljit_set_label(repeat_all_true, all_true_loop);
+	auto group_done = sljit_emit_jump(compiler, SLJIT_JUMP);
+
+	sljit_set_label(mixed_mask, sljit_emit_label(compiler));
+	auto no_lanes_true = sljit_emit_cmp(compiler, SLJIT_EQUAL, SLJIT_R3, 0, SLJIT_IMM, 0);
+	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_MEM1(SLJIT_SP), mask_offset + 16, SLJIT_R3, 0);
+	sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_R0, 0, SLJIT_S1, 0, SLJIT_IMM, plan.lanes);
+	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_MEM1(SLJIT_SP), mask_offset + 24, SLJIT_R0, 0);
+	auto mixed_loop = sljit_emit_label(compiler);
+	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R3, 0, SLJIT_MEM1(SLJIT_SP), mask_offset + 16);
+	sljit_emit_op2(compiler, SLJIT_AND, SLJIT_R2, 0, SLJIT_R3, 0, SLJIT_IMM, 1);
+	auto lane_false = sljit_emit_cmp(compiler, SLJIT_EQUAL, SLJIT_R2, 0, SLJIT_IMM, 0);
+	emit_matching_row();
+	sljit_set_label(lane_false, sljit_emit_label(compiler));
+	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R3, 0, SLJIT_MEM1(SLJIT_SP), mask_offset + 16);
+	sljit_emit_op2(compiler, SLJIT_LSHR, SLJIT_R3, 0, SLJIT_R3, 0, SLJIT_IMM, 1);
+	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_MEM1(SLJIT_SP), mask_offset + 16, SLJIT_R3, 0);
+	sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_S1, 0, SLJIT_S1, 0, SLJIT_IMM, 1);
+	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R0, 0, SLJIT_MEM1(SLJIT_SP), mask_offset + 24);
+	auto repeat_mixed = sljit_emit_cmp(compiler, SLJIT_LESS, SLJIT_S1, 0, SLJIT_R0, 0);
+	sljit_set_label(repeat_mixed, mixed_loop);
+	auto mixed_done = sljit_emit_jump(compiler, SLJIT_JUMP);
+	sljit_set_label(no_lanes_true, sljit_emit_label(compiler));
+	sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_S1, 0, SLJIT_S1, 0, SLJIT_IMM, plan.lanes);
+	auto advance_done = sljit_emit_label(compiler);
+	sljit_set_label(group_done, advance_done);
+	sljit_set_label(mixed_done, advance_done);
 	auto repeat = sljit_emit_jump(compiler, SLJIT_JUMP);
 	sljit_set_label(repeat, simd_loop);
 	sljit_set_label(simd_done, sljit_emit_label(compiler));
