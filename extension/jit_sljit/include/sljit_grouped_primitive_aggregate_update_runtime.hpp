@@ -158,9 +158,9 @@ static SinkResultType SljitExecuteBoundGroupedPrimitiveAggregateUpdate(
 		SljitExecuteFusedPerfectHashGroupedPrimitiveAggregatePayloadUpdate(
 		    op.aggregate_update.payloads, op.aggregate_update.fused_payload_update.Function(),
 		    op.aggregate_update.plan.sink_info.groups, op.aggregate_update.plan.group_expressions,
-		    op.aggregate_update.plan.sink_info.aggregate_contract, op.aggregate_update.payload_descriptors,
-		    payload_lanes, reduction_lanes, bound.grouped_state->perfect_hash_layout, input, execute_sel, count,
-		    payload_scratch);
+		    op.aggregate_update.group_source_not_null, op.aggregate_update.plan.sink_info.aggregate_contract,
+		    op.aggregate_update.payload_descriptors, payload_lanes, reduction_lanes,
+		    bound.grouped_state->perfect_hash_layout, input, execute_sel, count, payload_scratch);
 		RecordSljitRegionMaterializationElisionPath(runtime, op.kind,
 		                                            "fused_payload_update_owns_perfect_hash_group_lookup");
 		RecordSljitRegionStageRuntime(runtime, bound.op_idx, op.kind, "primitive_payload_update_fused",

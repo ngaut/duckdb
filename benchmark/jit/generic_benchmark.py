@@ -150,6 +150,33 @@ GENERIC_WORKLOADS = (
         "requires_compiled_auto": True,
     },
     {
+        "name": "grouped_non_null_string_multi_aggregate",
+        "setup_sql": (
+            "CREATE OR REPLACE TABLE __jit_generic_non_null_string_groups("
+            "group_flag VARCHAR NOT NULL, group_status VARCHAR NOT NULL, "
+            "quantity DECIMAL(15,2) NOT NULL, price DECIMAL(15,2) NOT NULL, "
+            "discount DECIMAL(15,2) NOT NULL, tax DECIMAL(15,2) NOT NULL); "
+            "INSERT INTO __jit_generic_non_null_string_groups "
+            "SELECT CASE i % 3 WHEN 0 THEN 'A' WHEN 1 THEN 'N' ELSE 'R' END, "
+            "CASE i % 2 WHEN 0 THEN 'F' ELSE 'O' END, "
+            "CAST(1 + i % 50 AS DECIMAL(15,2)), CAST(100 + i % 1000 AS DECIMAL(15,2)), "
+            "CAST(i % 10 AS DECIMAL(15,2)), CAST(i % 8 AS DECIMAL(15,2)) "
+            "FROM range(8000000) tbl(i);"
+        ),
+        "sql": (
+            "SELECT group_flag, group_status, sum(quantity), sum(price), "
+            "sum(price * (1.00::DECIMAL(15,2) - discount)), "
+            "sum(price * (1.00::DECIMAL(15,2) - discount) * (1.00::DECIMAL(15,2) + tax)), "
+            "sum(discount), count(*) "
+            "FROM __jit_generic_non_null_string_groups "
+            "WHERE quantity > 10.00::DECIMAL(15,2) "
+            "GROUP BY group_flag, group_status ORDER BY group_flag, group_status"
+        ),
+        "minimum_auto_speedup": 1.15,
+        "max_auto_slowdown": 1.05,
+        "requires_compiled_auto": True,
+    },
+    {
         "name": "grouped_sorted_runs",
         "setup_sql": (
             "CREATE OR REPLACE TABLE __jit_generic_sorted_runs AS "

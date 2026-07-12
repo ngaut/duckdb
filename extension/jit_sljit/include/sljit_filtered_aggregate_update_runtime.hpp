@@ -49,9 +49,9 @@ static SinkResultType SljitExecuteNativeFilteredAggregateUpdate(ExecutionRegionR
 		SljitExecuteFusedPerfectHashGroupedPrimitiveAggregatePayloadUpdate(
 		    op.aggregate_update.filtered_update.payloads, op.aggregate_update.filtered_update.compiled.Function(),
 		    op.aggregate_update.plan.sink_info.groups, op.aggregate_update.plan.group_expressions,
-		    op.aggregate_update.plan.sink_info.aggregate_contract, op.aggregate_update.payload_descriptors,
-		    payload_lanes, reduction_lanes, grouped_state.perfect_hash_layout, input, nullptr, input.size(),
-		    payload_scratch);
+		    op.aggregate_update.group_source_not_null, op.aggregate_update.plan.sink_info.aggregate_contract,
+		    op.aggregate_update.payload_descriptors, payload_lanes, reduction_lanes, grouped_state.perfect_hash_layout,
+		    input, nullptr, input.size(), payload_scratch);
 		RecordSljitRegionStageRuntimePath(runtime, op_idx, op.kind, "filtered_perfect_hash_update",
 		                                  aggregate_stage_start);
 		RecordSljitRegionMaterializationElisionProof(runtime, op.kind, "filtered_perfect_hash_update", input.size());

@@ -1962,20 +1962,24 @@ TEST_CASE("JIT preserves stats-proven non-overflowing decimal arithmetic in expr
 	REQUIRE(found_compile);
 }
 
-TEST_CASE("JIT fuses multi-key perfect-hash aggregate payloads", "[api][jit]") {
+TEST_CASE("JIT fuses non-null multi-key perfect-hash aggregate payloads", "[api][jit]") {
 	DuckDB db;
 	Connection con(db);
 	auto &manager = ExecutionRegionManager::Get(*con.context);
 
 	ConfigureSljitForCoverage(con, false, true, true, 10000);
 	REQUIRE_NO_FAIL(con.Query("PRAGMA threads=1"));
-	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_multi_key_perfect_hash_payload AS "
-	                          "SELECT CASE WHEN i % 3 = 0 THEN 'A' WHEN i % 3 = 1 THEN 'N' ELSE 'R' END AS group_flag, "
-	                          "       CASE WHEN i % 2 = 0 THEN 'F' ELSE 'O' END AS group_status, "
-	                          "       CAST(1 + (i % 50) AS DECIMAL(15,2)) AS qty_value, "
-	                          "       CAST(100 + (i % 1000) AS DECIMAL(15,2)) AS gross_value, "
-	                          "       CAST(i % 10 AS DECIMAL(15,2)) AS discount_rate, "
-	                          "       CAST(i % 8 AS DECIMAL(15,2)) AS tax_rate "
+	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_multi_key_perfect_hash_payload("
+	                          "group_flag VARCHAR NOT NULL, group_status VARCHAR NOT NULL, "
+	                          "qty_value DECIMAL(15,2) NOT NULL, gross_value DECIMAL(15,2) NOT NULL, "
+	                          "discount_rate DECIMAL(15,2) NOT NULL, tax_rate DECIMAL(15,2) NOT NULL)"));
+	REQUIRE_NO_FAIL(con.Query("INSERT INTO jit_multi_key_perfect_hash_payload "
+	                          "SELECT CASE WHEN i % 3 = 0 THEN 'A' WHEN i % 3 = 1 THEN 'N' ELSE 'R' END, "
+	                          "       CASE WHEN i % 2 = 0 THEN 'F' ELSE 'O' END, "
+	                          "       CAST(1 + (i % 50) AS DECIMAL(15,2)), "
+	                          "       CAST(100 + (i % 1000) AS DECIMAL(15,2)), "
+	                          "       CAST(i % 10 AS DECIMAL(15,2)), "
+	                          "       CAST(i % 8 AS DECIMAL(15,2)) "
 	                          "FROM range(120000) tbl(i)"));
 
 	const string query = "SELECT group_flag, group_status, "
@@ -2014,7 +2018,7 @@ TEST_CASE("JIT fuses multi-key perfect-hash aggregate payloads", "[api][jit]") {
 	    },
 	    [](const ExecutionRegionEvent &event) {
 		    RequireGeneratedMachineCodeRegion(event);
-		    REQUIRE(StringUtil::Contains(event.reason, "backend_source_validity=may-have-null:6"));
+		    REQUIRE(StringUtil::Contains(event.reason, "backend_source_validity=not-null:6"));
 		    REQUIRE(StringUtil::Contains(event.reason, "backend_group_key_type=uint8:2"));
 		    REQUIRE(StringUtil::Contains(event.reason, "backend_payload_type=int64:1|decimal64:5"));
 		    REQUIRE(StringUtil::Contains(

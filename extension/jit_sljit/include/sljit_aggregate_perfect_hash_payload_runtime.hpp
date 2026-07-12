@@ -28,7 +28,7 @@ SljitPerfectHashGroupExpressionsUseTypedTree(const vector<SljitNativeRegionExpre
 static void SljitExecuteFusedPerfectHashGroupedPrimitiveAggregatePayloadUpdate(
     vector<SljitExecutableRegionExpression> &payloads, SljitNativeAggregateUpdateFunction function,
     const vector<ExecutionRegionGroupInput> &groups, const vector<SljitNativeRegionExpressionPlan> &group_expressions,
-    const ExecutionRegionAggregateContract &contract,
+    const vector<bool> &group_source_not_null, const ExecutionRegionAggregateContract &contract,
     const vector<SljitAggregatePayloadDescriptor> &payload_descriptors,
     const vector<const ExecutionPrimitiveAggregateUpdateLane *> &lanes,
     const vector<SljitGroupedReductionLaneBinding> &reduction_lanes,
@@ -53,6 +53,9 @@ static void SljitExecuteFusedPerfectHashGroupedPrimitiveAggregatePayloadUpdate(
 	}
 	if (!group_expressions.empty() && group_expressions.size() != groups.size()) {
 		throw InternalException("SLJIT fused perfect-hash aggregate group expression count mismatch");
+	}
+	if (group_source_not_null.size() != groups.size()) {
+		throw InternalException("SLJIT fused perfect-hash aggregate group source fact count mismatch");
 	}
 	if (reduction_lanes.size() != payload_descriptors.size() || !SljitGroupedReductionLanesReady(reduction_lanes)) {
 		throw InternalException("SLJIT fused perfect-hash aggregate primitive lane layout mismatch");
@@ -110,7 +113,7 @@ static void SljitExecuteFusedPerfectHashGroupedPrimitiveAggregatePayloadUpdate(
 		} else {
 			throw InternalException("SLJIT fused perfect-hash aggregate group expression is unsupported");
 		}
-		group_sources.FinishSource(group_idx, execute_sel, count);
+		group_sources.FinishSource(group_idx, execute_sel, count, group_source_not_null[group_idx]);
 	}
 
 	auto &payload_sources = adapter_scratch.payload_sources;

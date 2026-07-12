@@ -71,9 +71,9 @@ static bool SljitTryExecuteDirectJoinOutputPerfectHashAggregateUpdate(
 	auto payload_stage_start = SljitRegionStageStart(runtime);
 	SljitExecuteFusedPerfectHashGroupedPrimitiveAggregatePayloadUpdate(
 	    aggregate_update.payloads, aggregate_update.fused_payload_update.Function(), sink_info.groups,
-	    plan.group_expressions, sink_info.aggregate_contract, aggregate_update.payload_descriptors, payload_lanes,
-	    reduction_lanes, grouped_state.perfect_hash_layout, aggregate_input, nullptr, aggregate_input.size(),
-	    payload_scratch);
+	    plan.group_expressions, aggregate_update.group_source_not_null, sink_info.aggregate_contract,
+	    aggregate_update.payload_descriptors, payload_lanes, reduction_lanes, grouped_state.perfect_hash_layout,
+	    aggregate_input, nullptr, aggregate_input.size(), payload_scratch);
 	RecordSljitRegionStageRuntime(runtime, op_idx, op.kind, "primitive_payload_update_fused", payload_stage_start);
 	RecordSljitRegionMaterializationElisionPath(runtime, op.kind, "join_output_perfect_hash_payload_update",
 	                                            aggregate_input.size());

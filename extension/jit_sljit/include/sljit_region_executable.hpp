@@ -180,6 +180,7 @@ struct SljitExecutableAggregateUpdate {
 	SljitNativeAggregateUpdatePlan plan;
 	vector<SljitExecutableRegionExpression> payloads;
 	vector<SljitAggregatePayloadDescriptor> payload_descriptors;
+	vector<bool> group_source_not_null;
 	SljitExecutableFilteredAggregateUpdate filtered_update;
 	ExecutionDenseGroupDomain dense_group_domain;
 	SljitGroupedAggregateDirectUpdatePlan grouped_direct_update;

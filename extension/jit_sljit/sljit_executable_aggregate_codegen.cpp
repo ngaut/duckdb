@@ -235,6 +235,22 @@ static void PopulateSljitExecutableAggregatePayloadSourceFacts(SljitExecutableRe
 	}
 }
 
+static void PopulateSljitExecutableAggregateGroupSourceFacts(const SljitNativeAggregateUpdatePlan &op,
+                                                             SljitExecutableAggregateUpdate &executable,
+                                                             const vector<bool> &input_not_null) {
+	auto &groups = op.sink_info.groups;
+	if (!op.group_expressions.empty() && op.group_expressions.size() != groups.size()) {
+		throw InternalException("SLJIT aggregate group expression count mismatch");
+	}
+	executable.group_source_not_null.clear();
+	executable.group_source_not_null.reserve(groups.size());
+	for (idx_t group_idx = 0; group_idx < groups.size(); group_idx++) {
+		const auto source_idx =
+		    op.group_expressions.empty() ? groups[group_idx].input_index : op.group_expressions[group_idx].source_index;
+		executable.group_source_not_null.push_back(SljitSourceKnownNotNull(&input_not_null, source_idx));
+	}
+}
+
 void SljitBuildExecutableAggregateUpdateMetadata(const SljitNativeAggregateUpdatePlan &op,
                                                  SljitExecutableAggregateUpdate &executable,
                                                  const vector<bool> &input_not_null) {
@@ -250,6 +266,7 @@ void SljitBuildExecutableAggregateUpdateMetadata(const SljitNativeAggregateUpdat
 	for (auto &group_expression : op.group_expressions) {
 		executable.plan.group_expressions.push_back(group_expression.Copy(true, false));
 	}
+	PopulateSljitExecutableAggregateGroupSourceFacts(op, executable, input_not_null);
 	if (op.use_primitive_payloads) {
 		if (op.payloads.size() != op.sink_info.aggregates.size()) {
 			throw InternalException("SLJIT aggregate payload descriptor count mismatch");
