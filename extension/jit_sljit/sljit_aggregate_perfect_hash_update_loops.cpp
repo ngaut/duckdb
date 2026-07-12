@@ -74,10 +74,9 @@ static void EmitSljitPerfectHashFastSourceDataHoists(struct sljit_compiler *comp
 static SljitPerfectHashGroupLookupOptions
 SljitPerfectHashDirectGroupLookupOptions(const SljitPerfectHashFusedUpdateEmitContext &context,
                                          bool mark_local_payloads_seen, bool use_fast_group_data_array_base);
-static SljitPerfectHashPayloadUpdateOptions
-SljitPerfectHashPayloadUpdateOptionsForLoop(bool fast_path, bool all_valid, bool no_source_selection,
-                                            const vector<SljitTypedExpressionTreeDataPointerHoist> *payload_data_hoists,
-                                            const vector<SljitSparseLocalRunCachedLane> *run_cached_lanes = nullptr);
+static SljitPerfectHashPayloadUpdateOptions SljitPerfectHashPayloadUpdateOptionsForLoop(
+    bool fast_path, bool all_valid, bool no_source_selection,
+    const vector<SljitTypedExpressionTreeDataPointerHoist> *payload_data_hoists);
 
 static SljitPerfectHashGroupLookupOptions
 SljitPerfectHashDirectGroupLookupOptions(const SljitPerfectHashFusedUpdateEmitContext &context,
@@ -100,16 +99,14 @@ SljitPerfectHashSelectedGroupLookupOptions(const SljitPerfectHashFusedUpdateEmit
 	return result;
 }
 
-static SljitPerfectHashPayloadUpdateOptions
-SljitPerfectHashPayloadUpdateOptionsForLoop(bool fast_path, bool all_valid, bool no_source_selection,
-                                            const vector<SljitTypedExpressionTreeDataPointerHoist> *payload_data_hoists,
-                                            const vector<SljitSparseLocalRunCachedLane> *run_cached_lanes) {
+static SljitPerfectHashPayloadUpdateOptions SljitPerfectHashPayloadUpdateOptionsForLoop(
+    bool fast_path, bool all_valid, bool no_source_selection,
+    const vector<SljitTypedExpressionTreeDataPointerHoist> *payload_data_hoists) {
 	SljitPerfectHashPayloadUpdateOptions result;
 	result.fast_path = fast_path;
 	result.all_valid = all_valid;
 	result.no_source_selection = no_source_selection;
 	result.payload_data_hoists = payload_data_hoists;
-	result.run_cached_lanes = run_cached_lanes;
 	return result;
 }
 
@@ -123,59 +120,6 @@ EmitSljitPerfectHashFlatFastLoop(const SljitPerfectHashFusedUpdateEmitContext &c
 	auto fast_done = sljit_emit_cmp(compiler, SLJIT_GREATER_EQUAL, SLJIT_S1, 0, SLJIT_S2, 0);
 	EmitLoadFusedAggregateExecuteIndex(compiler, true);
 	auto predicate_skip_jumps = EmitSljitPerfectHashPredicateSkipJumps(context, true, true, false, fast_data_hoists);
-	if (update_plan.sparse_run_cache_enabled) {
-		if (update_plan.hoist_fast_group_data_array_base) {
-			EmitSljitPerfectHashFastGroupDataArrayBase(compiler);
-		}
-		auto lookup =
-		    SljitPerfectHashDirectGroupLookupOptions(context, false, update_plan.hoist_fast_group_data_array_base);
-		lookup.materialize_state_pointer = false;
-		lookup.mark_local_group = false;
-		lookup.expression_fast_path = true;
-		lookup.expression_all_valid = true;
-		lookup.expression_data_hoists = fast_data_hoists;
-		EmitSljitPerfectHashGroupLookup(context, lookup);
-		sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R0, 0, SLJIT_MEM1(SLJIT_SP),
-		               update_plan.sparse_run_cached_group_offset);
-		auto group_changed = sljit_emit_cmp(compiler, SLJIT_NOT_EQUAL, SLJIT_R0, 0, SLJIT_S4, 0);
-		sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_PERFECT_HASH_STATE_REG, 0, SLJIT_MEM1(SLJIT_SP),
-		               update_plan.sparse_run_cached_pointer_offset);
-		if (update_plan.sparse_run_cache_uses_explicit_count) {
-			sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R0, 0, SLJIT_MEM1(SLJIT_SP),
-			               update_plan.sparse_run_cached_position_offset);
-			sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_R0, 0, SLJIT_R0, 0, SLJIT_IMM, 1);
-			sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_MEM1(SLJIT_SP), update_plan.sparse_run_cached_position_offset,
-			               SLJIT_R0, 0);
-		}
-		EmitSljitPerfectHashPayloadUpdates(
-		    context, SljitPerfectHashPayloadUpdateOptionsForLoop(true, true, false, fast_data_hoists,
-		                                                         &update_plan.sparse_run_cached_lanes));
-		EmitSljitPerfectHashPredicateSkipLabel(compiler, predicate_skip_jumps);
-		EmitNextSljitNativeVectorLoop(compiler, fast_loop);
-
-		sljit_set_label(group_changed, sljit_emit_label(compiler));
-		sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_PERFECT_HASH_STATE_REG, 0, SLJIT_MEM1(SLJIT_SP),
-		               update_plan.sparse_run_cached_pointer_offset);
-		EmitSljitSparseLocalRunCacheFlush(compiler, local_plan, update_plan.sparse_run_cached_lanes,
-		                                  SLJIT_PERFECT_HASH_STATE_REG, update_plan.sparse_run_cached_group_offset,
-		                                  update_plan.sparse_run_cached_position_offset,
-		                                  update_plan.sparse_run_cache_uses_explicit_count, SLJIT_S1);
-		EmitMarkSljitLocalPerfectHashGroupSeen(compiler, local_plan, SLJIT_S4, SLJIT_PERFECT_HASH_STATE_REG, true,
-		                                       false);
-		EmitSljitSparseLocalRunCacheLoadCurrent(
-		    compiler, local_plan, update_plan.sparse_run_cached_lanes, SLJIT_PERFECT_HASH_STATE_REG,
-		    update_plan.sparse_run_cached_position_offset, update_plan.sparse_run_cache_uses_explicit_count, SLJIT_S1);
-		sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_MEM1(SLJIT_SP), update_plan.sparse_run_cached_group_offset, SLJIT_S4,
-		               0);
-		sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_MEM1(SLJIT_SP), update_plan.sparse_run_cached_pointer_offset,
-		               SLJIT_PERFECT_HASH_STATE_REG, 0);
-		EmitSljitPerfectHashPayloadUpdates(
-		    context, SljitPerfectHashPayloadUpdateOptionsForLoop(true, true, false, fast_data_hoists,
-		                                                         &update_plan.sparse_run_cached_lanes));
-		EmitNextSljitNativeVectorLoop(compiler, fast_loop);
-		return fast_done;
-	}
-
 	if (update_plan.hoist_fast_group_data_array_base) {
 		EmitSljitPerfectHashFastGroupDataArrayBase(compiler);
 	}
@@ -288,23 +232,9 @@ void EmitSljitPerfectHashFusedUpdateLoops(const SljitPerfectHashFusedUpdateEmitC
 	loop_options.payload_update = SljitPerfectHashPayloadUpdateOptionsForLoop(false, false, false, data_hoists);
 	auto done = EmitSljitPerfectHashUpdateLoop(context, loop_options);
 
-	sljit_jump *fast_run_cache_flushed = nullptr;
-	if (update_plan.sparse_run_cache_enabled && fast_done) {
-		sljit_set_label(fast_done, sljit_emit_label(compiler));
-		sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_PERFECT_HASH_STATE_REG, 0, SLJIT_MEM1(SLJIT_SP),
-		               update_plan.sparse_run_cached_pointer_offset);
-		EmitSljitSparseLocalRunCacheFlush(compiler, local_plan, update_plan.sparse_run_cached_lanes,
-		                                  SLJIT_PERFECT_HASH_STATE_REG, update_plan.sparse_run_cached_group_offset,
-		                                  update_plan.sparse_run_cached_position_offset,
-		                                  update_plan.sparse_run_cache_uses_explicit_count, SLJIT_S1);
-		fast_run_cache_flushed = sljit_emit_jump(compiler, SLJIT_JUMP);
-	}
 	auto done_label = sljit_emit_label(compiler);
-	if (fast_done && !update_plan.sparse_run_cache_enabled) {
+	if (fast_done) {
 		sljit_set_label(fast_done, done_label);
-	}
-	if (fast_run_cache_flushed) {
-		sljit_set_label(fast_run_cache_flushed, done_label);
 	}
 	if (logical_fast_done) {
 		sljit_set_label(logical_fast_done, done_label);

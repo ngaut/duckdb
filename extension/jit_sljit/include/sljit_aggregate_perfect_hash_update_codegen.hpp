@@ -60,7 +60,6 @@ struct SljitPerfectHashPayloadUpdateOptions {
 	bool all_valid = false;
 	bool no_source_selection = false;
 	const vector<SljitTypedExpressionTreeDataPointerHoist> *payload_data_hoists = nullptr;
-	const vector<SljitSparseLocalRunCachedLane> *run_cached_lanes = nullptr;
 };
 
 struct SljitPerfectHashFusedUpdatePlan {
@@ -68,7 +67,6 @@ struct SljitPerfectHashFusedUpdatePlan {
 	SljitFusedTypedAggregateCodegenPlan codegen_plan;
 	SljitLocalPerfectHashAggregatePlan local_aggregate_plan;
 	SljitDeferredPerfectHashFlagPlan deferred_flag_plan;
-	vector<SljitSparseLocalRunCachedLane> sparse_run_cached_lanes;
 	vector<SljitTypedExpressionTreeDataPointerHoist> source_data_hoists;
 	vector<SljitTypedExpressionTreeDataPointerHoist> fast_source_data_hoists;
 	idx_t perfect_hash_group_count = 0;
@@ -76,11 +74,6 @@ struct SljitPerfectHashFusedUpdatePlan {
 	sljit_sw state_pointer_offset = -1;
 	sljit_sw group_index_offset = -1;
 	sljit_sw binary_shared_value_offset = -1;
-	sljit_sw sparse_run_cached_group_offset = -1;
-	sljit_sw sparse_run_cached_pointer_offset = -1;
-	sljit_sw sparse_run_cached_position_offset = -1;
-	bool sparse_run_cache_enabled = false;
-	bool sparse_run_cache_uses_explicit_count = false;
 	bool hoist_source_data_pointers = false;
 	bool hoist_group_data_pointers = false;
 	bool hoist_fast_source_data_pointers = false;

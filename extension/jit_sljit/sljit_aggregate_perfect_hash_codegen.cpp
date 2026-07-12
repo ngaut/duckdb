@@ -6,6 +6,10 @@
 
 namespace duckdb {
 
+bool SljitSparseLocalUsesCountSeen(const SljitLocalPerfectHashAggregatePlan &plan) {
+	return plan.count_seen_lane != DConstants::INVALID_INDEX;
+}
+
 template <class EMIT_GROUP>
 static void EmitSljitLocalPerfectHashGroupIndexLoop(struct sljit_compiler *compiler, idx_t group_count,
                                                     EMIT_GROUP &&emit_group) {

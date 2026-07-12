@@ -44,20 +44,6 @@ constexpr bool SLJIT_HAS_PERFECT_HASH_GROUP_DATA_REGS = false;
 constexpr sljit_s32 SLJIT_PERFECT_HASH_GROUP_DATA_SAVED_REG_COUNT = SLJIT_PERFECT_HASH_SAVED_REG_COUNT;
 #endif
 
-#if defined(SLJIT_NUMBER_OF_SAVED_REGISTERS) && SLJIT_NUMBER_OF_SAVED_REGISTERS >= 10
-constexpr bool SLJIT_HAS_SPARSE_LOCAL_RUN_CACHE_REGS = true;
-constexpr sljit_s32 SLJIT_SPARSE_LOCAL_RUN_LOWER0_REG = SLJIT_S6;
-constexpr sljit_s32 SLJIT_SPARSE_LOCAL_RUN_LOWER1_REG = SLJIT_S8;
-constexpr sljit_s32 SLJIT_SPARSE_LOCAL_RUN_LOWER2_REG = SLJIT_S9;
-constexpr sljit_s32 SLJIT_SPARSE_LOCAL_RUN_SAVED_REG_COUNT = 10;
-#else
-constexpr bool SLJIT_HAS_SPARSE_LOCAL_RUN_CACHE_REGS = false;
-constexpr sljit_s32 SLJIT_SPARSE_LOCAL_RUN_LOWER0_REG = SLJIT_R0;
-constexpr sljit_s32 SLJIT_SPARSE_LOCAL_RUN_LOWER1_REG = SLJIT_R0;
-constexpr sljit_s32 SLJIT_SPARSE_LOCAL_RUN_LOWER2_REG = SLJIT_R0;
-constexpr sljit_s32 SLJIT_SPARSE_LOCAL_RUN_SAVED_REG_COUNT = SLJIT_PERFECT_HASH_SAVED_REG_COUNT;
-#endif
-
 struct SljitLocalPerfectHashAggregateLane {
 	sljit_sw lower_offset = -1;
 	sljit_sw upper_offset = -1;
@@ -80,11 +66,6 @@ struct SljitLocalPerfectHashAggregatePlan {
 	sljit_sw group_payload_offset = -1;
 	sljit_sw group_payload_stride = 0;
 	vector<SljitLocalPerfectHashAggregateLane> lanes;
-};
-
-struct SljitSparseLocalRunCachedLane {
-	idx_t payload_idx = DConstants::INVALID_INDEX;
-	sljit_s32 lower_reg = 0;
 };
 
 struct SljitDeferredPerfectHashFlagPlan {
@@ -151,15 +132,6 @@ void AnnotateSljitLocalPerfectHashAggregatePlan(SljitLocalPerfectHashAggregatePl
                                                 const vector<Value> &source_min_values,
                                                 const vector<Value> &source_max_values);
 bool SljitSparseLocalUsesCountSeen(const SljitLocalPerfectHashAggregatePlan &plan);
-idx_t CountSljitSparseLocalRunCacheableLanes(const SljitLocalPerfectHashAggregatePlan &plan,
-                                             const vector<ExecutionRegionAggregateInput> &aggregates);
-vector<SljitSparseLocalRunCachedLane>
-BuildSljitSparseLocalRunCachedLanes(const SljitLocalPerfectHashAggregatePlan &plan,
-                                    const vector<ExecutionRegionAggregateInput> &aggregates,
-                                    const vector<sljit_s32> &lower_regs);
-const SljitSparseLocalRunCachedLane *
-FindSljitSparseLocalRunCachedLane(const vector<SljitSparseLocalRunCachedLane> &cached_lanes, idx_t payload_idx);
-
 void EmitZeroSljitLocalPerfectHashAggregateArrays(struct sljit_compiler *compiler,
                                                   const SljitLocalPerfectHashAggregatePlan &plan);
 void EmitZeroSljitDeferredPerfectHashFlagArray(struct sljit_compiler *compiler,
@@ -183,20 +155,6 @@ void EmitSljitSparseLocalPerfectHashAccumulate(struct sljit_compiler *compiler,
                                                const SljitLocalPerfectHashAggregateLane &lane,
                                                AggregatePrimitiveUpdateKind kind, sljit_s32 group_pointer_reg,
                                                sljit_s32 value_reg, bool store_saw = true);
-void EmitSljitSparseLocalRunCacheFlush(struct sljit_compiler *compiler, const SljitLocalPerfectHashAggregatePlan &plan,
-                                       const vector<SljitSparseLocalRunCachedLane> &cached_lanes,
-                                       sljit_s32 group_pointer_reg, sljit_sw cached_group_offset,
-                                       sljit_sw cached_position_offset, bool explicit_count,
-                                       sljit_s32 current_index_reg);
-void EmitSljitSparseLocalRunCacheLoadCurrent(struct sljit_compiler *compiler,
-                                             const SljitLocalPerfectHashAggregatePlan &plan,
-                                             const vector<SljitSparseLocalRunCachedLane> &cached_lanes,
-                                             sljit_s32 group_pointer_reg, sljit_sw cached_position_offset,
-                                             bool explicit_count, sljit_s32 current_index_reg);
-void EmitSljitSparseLocalRunCacheAccumulate(struct sljit_compiler *compiler,
-                                            const SljitLocalPerfectHashAggregateLane &lane,
-                                            AggregatePrimitiveUpdateKind kind, sljit_s32 lower_reg,
-                                            sljit_s32 group_pointer_reg, sljit_s32 value_reg);
 void EmitSljitLocalPerfectHashCommit(struct sljit_compiler *compiler,
                                      const SljitLocalPerfectHashAggregatePlan &local_plan,
                                      const vector<SljitAggregatePayloadDescriptor> &payload_descriptors,

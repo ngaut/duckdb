@@ -39,10 +39,6 @@ BuildSljitNativePerfectHashGroupedFusedTypedExpressionAggregateUpdateInternal(
 	const auto state_pointer_offset = update_plan.state_pointer_offset;
 	const auto group_index_offset = update_plan.group_index_offset;
 	const auto binary_shared_value_offset = update_plan.binary_shared_value_offset;
-	const auto sparse_run_cached_group_offset = update_plan.sparse_run_cached_group_offset;
-	const auto sparse_run_cached_pointer_offset = update_plan.sparse_run_cached_pointer_offset;
-	const auto sparse_run_cached_position_offset = update_plan.sparse_run_cached_position_offset;
-	const auto sparse_run_cache_enabled = update_plan.sparse_run_cache_enabled;
 	const auto hoist_source_data_pointers = update_plan.hoist_source_data_pointers;
 	const auto hoist_group_data_pointers = update_plan.hoist_group_data_pointers;
 	const auto dedicated_state_register = update_plan.dedicated_state_register;
@@ -55,11 +51,6 @@ BuildSljitNativePerfectHashGroupedFusedTypedExpressionAggregateUpdateInternal(
 	sljit_emit_enter(compiler, 0, SLJIT_ARGS1V(P), 5, saved_register_count, local_size);
 	EmitZeroSljitLocalPerfectHashAggregateArrays(compiler, local_aggregate_plan);
 	EmitZeroSljitDeferredPerfectHashFlagArray(compiler, deferred_flag_plan);
-	if (sparse_run_cache_enabled) {
-		sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_MEM1(SLJIT_SP), sparse_run_cached_group_offset, SLJIT_IMM, -1);
-		sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_MEM1(SLJIT_SP), sparse_run_cached_pointer_offset, SLJIT_IMM, 0);
-		sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_MEM1(SLJIT_SP), sparse_run_cached_position_offset, SLJIT_IMM, 0);
-	}
 	EmitInitSljitNativeVectorLoop(compiler);
 	EmitInitSljitNativeVectorSourceArrays(compiler);
 	if (hoist_source_data_pointers) {

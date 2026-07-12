@@ -254,18 +254,9 @@ void EmitSljitPerfectHashPayloadUpdates(const SljitPerfectHashFusedUpdateEmitCon
 		}
 		if (local_aggregate_plan.enabled) {
 			if (local_aggregate_plan.sparse) {
-				auto cached_lane = options.run_cached_lanes && options.all_valid
-				                       ? FindSljitSparseLocalRunCachedLane(*options.run_cached_lanes, payload_idx)
-				                       : nullptr;
-				if (cached_lane) {
-					EmitSljitSparseLocalRunCacheAccumulate(compiler, local_aggregate_plan.lanes[payload_idx],
-					                                       descriptor.primitive_kind, cached_lane->lower_reg,
-					                                       SLJIT_PERFECT_HASH_STATE_REG, SLJIT_R2);
-				} else {
-					EmitSljitSparseLocalPerfectHashAccumulate(compiler, local_aggregate_plan.lanes[payload_idx],
-					                                          descriptor.primitive_kind, SLJIT_PERFECT_HASH_STATE_REG,
-					                                          SLJIT_R2, !options.all_valid);
-				}
+				EmitSljitSparseLocalPerfectHashAccumulate(compiler, local_aggregate_plan.lanes[payload_idx],
+				                                          descriptor.primitive_kind, SLJIT_PERFECT_HASH_STATE_REG,
+				                                          SLJIT_R2, !options.all_valid);
 			} else {
 				if (context.group_index_reg == SLJIT_S4) {
 					sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_S4, 0, SLJIT_MEM1(SLJIT_SP), context.group_index_offset);

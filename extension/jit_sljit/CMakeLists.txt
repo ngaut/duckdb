@@ -19,7 +19,6 @@ set(JIT_SLJIT_EXTENSION_FILES
     sljit_aggregate_perfect_hash_group_plan.cpp
     sljit_aggregate_perfect_hash_plan.cpp
     sljit_aggregate_perfect_hash_range_plan.cpp
-    sljit_aggregate_perfect_hash_run_cache_codegen.cpp
     sljit_aggregate_perfect_hash_primitive_update_codegen.cpp
     sljit_aggregate_perfect_hash_update_plan.cpp
     sljit_aggregate_perfect_hash_update_codegen.cpp

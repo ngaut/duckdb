@@ -92,58 +92,26 @@ bool TryBuildSljitPerfectHashFusedUpdatePlan(
 	                                           result.local_aggregate_plan);
 	AnnotateSljitLocalPerfectHashAggregatePlan(result.local_aggregate_plan, payloads, aggregates, source_min_values,
 	                                           source_max_values);
-	result.sparse_run_cache_enabled =
-	    result.codegen_plan.fast_path_supported && SLJIT_HAS_SPARSE_LOCAL_RUN_CACHE_REGS &&
-	    result.local_aggregate_plan.enabled && result.local_aggregate_plan.sparse &&
-	    !result.local_aggregate_plan.sparse_eager_zero && SljitSparseLocalUsesCountSeen(result.local_aggregate_plan);
-	result.sparse_run_cache_uses_explicit_count = result.sparse_run_cache_enabled && predicate;
-	const auto sparse_run_cacheable_lane_count =
-	    result.sparse_run_cache_enabled
-	        ? CountSljitSparseLocalRunCacheableLanes(result.local_aggregate_plan, aggregates)
-	        : idx_t(0);
 	result.source_data_hoists = BuildSljitPerfectHashSourceDataPointerHoists(payloads);
 	result.hoist_source_data_pointers = SLJIT_HAS_PERFECT_HASH_GROUP_DATA_REGS &&
 	                                    result.source_data_hoists.size() >= result.group_plans.size() &&
 	                                    !result.source_data_hoists.empty();
 	const bool group_data_pointer_hoist_candidate =
 	    !result.hoist_source_data_pointers && SLJIT_HAS_PERFECT_HASH_GROUP_DATA_REGS && result.group_plans.size() <= 2;
-	const bool sparse_run_cache_payload_register_mode =
-	    result.sparse_run_cache_enabled && sparse_run_cacheable_lane_count >= 3 && result.group_plans.size() <= 2 &&
-	    !result.hoist_source_data_pointers && !group_data_pointer_hoist_candidate;
-	if (result.sparse_run_cache_enabled) {
-		vector<sljit_s32> sparse_run_cache_lower_regs;
-		sparse_run_cache_lower_regs.push_back(SLJIT_SPARSE_LOCAL_RUN_LOWER0_REG);
-		if (sparse_run_cache_payload_register_mode) {
-			sparse_run_cache_lower_regs.push_back(SLJIT_SPARSE_LOCAL_RUN_LOWER1_REG);
-			sparse_run_cache_lower_regs.push_back(SLJIT_SPARSE_LOCAL_RUN_LOWER2_REG);
-		}
-		result.sparse_run_cached_lanes =
-		    BuildSljitSparseLocalRunCachedLanes(result.local_aggregate_plan, aggregates, sparse_run_cache_lower_regs);
-		result.sparse_run_cached_group_offset = result.local_size;
-		result.local_size += NumericCast<sljit_sw>(sizeof(sljit_sw));
-		result.sparse_run_cached_pointer_offset = result.local_size;
-		result.local_size += NumericCast<sljit_sw>(sizeof(uintptr_t));
-		result.sparse_run_cached_position_offset = result.local_size;
-		result.local_size += NumericCast<sljit_sw>(sizeof(sljit_sw));
-	}
 	if (!result.local_aggregate_plan.enabled) {
 		TryBuildSljitDeferredPerfectHashFlagPlan(aggregates, contract, result.local_size, result.deferred_flag_plan);
 	}
 	result.fast_source_data_hoists =
-	    result.sparse_run_cache_enabled
-	        ? (result.hoist_source_data_pointers ? result.source_data_hoists
-	                                             : vector<SljitTypedExpressionTreeDataPointerHoist>())
-	        : (result.codegen_plan.fast_path_supported
-	               ? (result.hoist_source_data_pointers
-	                      ? BuildSljitPerfectHashSourceDataPointerHoists(payloads, 3, true)
-	                      : BuildSljitPerfectHashSpareFastSourceDataPointerHoists(payloads))
-	               : result.source_data_hoists);
+	    result.codegen_plan.fast_path_supported
+	        ? (result.hoist_source_data_pointers ? BuildSljitPerfectHashSourceDataPointerHoists(payloads, 3, true)
+	                                             : BuildSljitPerfectHashSpareFastSourceDataPointerHoists(payloads))
+	        : result.source_data_hoists;
 	if (!result.hoist_source_data_pointers) {
 		result.source_data_hoists.clear();
 	} else if (result.fast_source_data_hoists.size() < result.source_data_hoists.size()) {
 		result.fast_source_data_hoists = result.source_data_hoists;
 	}
-	result.hoist_group_data_pointers = !sparse_run_cache_payload_register_mode && group_data_pointer_hoist_candidate;
+	result.hoist_group_data_pointers = group_data_pointer_hoist_candidate;
 	result.hoist_fast_source_data_pointers = !result.fast_source_data_hoists.empty() &&
 	                                         (!result.hoist_source_data_pointers ||
 	                                          result.fast_source_data_hoists.size() > result.source_data_hoists.size());
@@ -164,9 +132,6 @@ bool TryBuildSljitPerfectHashFusedUpdatePlan(
 	}
 	if (result.hoist_group_data_pointers || result.hoist_source_data_pointers) {
 		result.saved_register_count = SLJIT_PERFECT_HASH_GROUP_DATA_SAVED_REG_COUNT;
-	}
-	if (result.sparse_run_cache_enabled && result.saved_register_count < SLJIT_SPARSE_LOCAL_RUN_SAVED_REG_COUNT) {
-		result.saved_register_count = SLJIT_SPARSE_LOCAL_RUN_SAVED_REG_COUNT;
 	}
 	return true;
 }
