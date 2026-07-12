@@ -19,6 +19,8 @@
 
 namespace duckdb {
 
+enum class SljitPendingRunStrategy : uint8_t { UNDECIDED, BUFFERED, STREAMING };
+
 struct SljitPendingPreaggregatedPrimitiveGroupBatch {
 	idx_t Count() const {
 		return count;
@@ -73,6 +75,7 @@ struct SljitPendingPreaggregatedPrimitiveGroupBatch {
 
 	bool proven_unique_append_active = false;
 	bool proven_unique_append_failed = false;
+	SljitPendingRunStrategy run_strategy = SljitPendingRunStrategy::UNDECIDED;
 };
 
 static void SljitUpdateProvenUniqueAppendContract(ExecutionRegionRuntime &runtime, SljitExecutableRegionOp &op,

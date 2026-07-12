@@ -13,6 +13,34 @@
 
 namespace duckdb {
 
+static constexpr idx_t SLJIT_PENDING_RUN_MIN_COMPRESSION = 3;
+
+template <class TARGET_TYPE, class LOAD_KEY>
+static bool SljitTryInputVectorHasProfitablePendingRuns(idx_t count, LOAD_KEY &&load_key, bool &profitable) {
+	profitable = false;
+	if (count < 2) {
+		return true;
+	}
+	TARGET_TYPE previous_key;
+	if (!load_key(0, previous_key)) {
+		return false;
+	}
+	const auto sample_count = MinValue<idx_t>(count, 64);
+	idx_t run_count = 1;
+	for (idx_t row_idx = 1; row_idx < sample_count; row_idx++) {
+		TARGET_TYPE key;
+		if (!load_key(row_idx, key)) {
+			return false;
+		}
+		if (!(key == previous_key)) {
+			run_count++;
+		}
+		previous_key = key;
+	}
+	profitable = run_count * SLJIT_PENDING_RUN_MIN_COMPRESSION <= sample_count;
+	return true;
+}
+
 template <class TARGET_TYPE>
 static bool SljitPendingPreaggregatedPrimitiveLastGroupMatches(SljitPendingPreaggregatedPrimitiveGroupBatch &pending,
                                                                TARGET_TYPE key) {
@@ -26,7 +54,7 @@ static bool SljitPendingPreaggregatedPrimitiveLastGroupMatches(SljitPendingPreag
 template <class TARGET_TYPE>
 static bool SljitAppendPendingPreaggregatedPrimitiveGroup(
     SljitPendingPreaggregatedPrimitiveGroupBatch &pending, TARGET_TYPE key,
-    const vector<const ExecutionPrimitiveAggregateUpdateLane *> &payload_lanes) {
+    const vector<const ExecutionPrimitiveAggregateUpdateLane *> &payload_lanes, TARGET_TYPE *key_data = nullptr) {
 	if (!pending.groups.Initialized() || pending.groups.chunk.ColumnCount() != 1 ||
 	    pending.Count() >= STANDARD_VECTOR_SIZE) {
 		return false;
@@ -34,19 +62,20 @@ static bool SljitAppendPendingPreaggregatedPrimitiveGroup(
 	if (!SljitStartPreaggregatedPrimitivePayloadGroup(pending.scratch, payload_lanes)) {
 		return false;
 	}
-	auto &target = pending.groups.chunk.data[0];
-	target.SetVectorType(VectorType::FLAT_VECTOR);
-	auto data = FlatVector::GetDataMutable<TARGET_TYPE>(target);
-	data[pending.Count()] = key;
+	if (!key_data) {
+		auto &target = pending.groups.chunk.data[0];
+		target.SetVectorType(VectorType::FLAT_VECTOR);
+		key_data = FlatVector::GetDataMutable<TARGET_TYPE>(target);
+	}
+	key_data[pending.Count()] = key;
 	pending.count++;
 	return true;
 }
 
 template <class TARGET_TYPE>
-static bool
-SljitAppendPendingSingleLanePreaggregatedPrimitiveGroup(SljitPendingPreaggregatedPrimitiveGroupBatch &pending,
-                                                        TARGET_TYPE key,
-                                                        const ExecutionPrimitiveAggregateUpdateLane &lane) {
+static bool SljitAppendPendingSingleLanePreaggregatedPrimitiveGroup(
+    SljitPendingPreaggregatedPrimitiveGroupBatch &pending, TARGET_TYPE key,
+    const ExecutionPrimitiveAggregateUpdateLane &lane, TARGET_TYPE *key_data = nullptr) {
 	if (!pending.groups.Initialized() || pending.groups.chunk.ColumnCount() != 1 ||
 	    pending.Count() >= STANDARD_VECTOR_SIZE || pending.scratch.payloads.size() != 1) {
 		return false;
@@ -72,22 +101,39 @@ SljitAppendPendingSingleLanePreaggregatedPrimitiveGroup(SljitPendingPreaggregate
 	    lane.kind == AggregatePrimitiveUpdateKind::SUM_HUGEINT) {
 		payload.value_is_set.push_back(0);
 	}
-	auto &target = pending.groups.chunk.data[0];
-	target.SetVectorType(VectorType::FLAT_VECTOR);
-	auto data = FlatVector::GetDataMutable<TARGET_TYPE>(target);
-	data[pending.Count()] = key;
+	if (!key_data) {
+		auto &target = pending.groups.chunk.data[0];
+		target.SetVectorType(VectorType::FLAT_VECTOR);
+		key_data = FlatVector::GetDataMutable<TARGET_TYPE>(target);
+	}
+	key_data[pending.Count()] = key;
 	pending.count++;
 	return true;
 }
 
 struct SljitPendingSingleLaneCountAccumulator {
-	bool AccumulateRow(SljitPendingPreaggregatedPrimitiveGroupBatch &pending, idx_t row_idx, idx_t group_idx) const {
+	struct GroupState {
+		int64_t value = 0;
+		idx_t row_count = 0;
+	};
+
+	void StartGroup(GroupState &state) const {
+		state = GroupState();
+	}
+
+	void AccumulateGroupState(GroupState &state, idx_t row_idx) const {
 		(void)row_idx;
+		state.value++;
+		state.row_count++;
+	}
+
+	bool MergeGroupState(SljitPendingPreaggregatedPrimitiveGroupBatch &pending, idx_t group_idx,
+	                     const GroupState &state) const {
 		if (pending.scratch.payloads.size() != 1 || group_idx >= pending.scratch.group_row_counts.size()) {
 			return false;
 		}
-		pending.scratch.payloads[0].int64_values[group_idx]++;
-		pending.scratch.group_row_counts[group_idx]++;
+		pending.scratch.payloads[0].int64_values[group_idx] += state.value;
+		pending.scratch.group_row_counts[group_idx] += state.row_count;
 		return true;
 	}
 };
@@ -101,15 +147,30 @@ struct SljitPendingSingleLaneInt64SumAccumulator {
 	const PAYLOAD_TYPE *data;
 	const SelectionVector *selection;
 
-	bool AccumulateRow(SljitPendingPreaggregatedPrimitiveGroupBatch &pending, idx_t row_idx, idx_t group_idx) const {
+	struct GroupState {
+		int64_t value = 0;
+		idx_t row_count = 0;
+	};
+
+	void StartGroup(GroupState &state) const {
+		state = GroupState();
+	}
+
+	void AccumulateGroupState(GroupState &state, idx_t row_idx) const {
+		const auto source_idx = HAS_SELECTION ? selection->get_index_unsafe(row_idx) : row_idx;
+		state.value += SljitPreaggregatedPayloadAsInt64(data[source_idx]);
+		state.row_count++;
+	}
+
+	bool MergeGroupState(SljitPendingPreaggregatedPrimitiveGroupBatch &pending, idx_t group_idx,
+	                     const GroupState &state) const {
 		if (pending.scratch.payloads.size() != 1 || group_idx >= pending.scratch.group_row_counts.size()) {
 			return false;
 		}
-		const auto source_idx = HAS_SELECTION ? selection->get_index(row_idx) : row_idx;
 		auto &payload = pending.scratch.payloads[0];
-		payload.int64_values[group_idx] += SljitPreaggregatedPayloadAsInt64(data[source_idx]);
+		payload.int64_values[group_idx] += state.value;
 		payload.value_is_set[group_idx] = 1;
-		pending.scratch.group_row_counts[group_idx]++;
+		pending.scratch.group_row_counts[group_idx] += state.row_count;
 		return true;
 	}
 };
@@ -123,15 +184,30 @@ struct SljitPendingSingleLaneHugeintSumAccumulator {
 	const PAYLOAD_TYPE *data;
 	const SelectionVector *selection;
 
-	bool AccumulateRow(SljitPendingPreaggregatedPrimitiveGroupBatch &pending, idx_t row_idx, idx_t group_idx) const {
+	struct GroupState {
+		hugeint_t value = 0;
+		idx_t row_count = 0;
+	};
+
+	void StartGroup(GroupState &state) const {
+		state = GroupState();
+	}
+
+	void AccumulateGroupState(GroupState &state, idx_t row_idx) const {
+		const auto source_idx = HAS_SELECTION ? selection->get_index_unsafe(row_idx) : row_idx;
+		state.value += SljitPreaggregatedPayloadAsHugeint(data[source_idx]);
+		state.row_count++;
+	}
+
+	bool MergeGroupState(SljitPendingPreaggregatedPrimitiveGroupBatch &pending, idx_t group_idx,
+	                     const GroupState &state) const {
 		if (pending.scratch.payloads.size() != 1 || group_idx >= pending.scratch.group_row_counts.size()) {
 			return false;
 		}
-		const auto source_idx = HAS_SELECTION ? selection->get_index(row_idx) : row_idx;
 		auto &payload = pending.scratch.payloads[0];
-		payload.hugeint_values[group_idx] += SljitPreaggregatedPayloadAsHugeint(data[source_idx]);
+		payload.hugeint_values[group_idx] += state.value;
 		payload.value_is_set[group_idx] = 1;
-		pending.scratch.group_row_counts[group_idx]++;
+		pending.scratch.group_row_counts[group_idx] += state.row_count;
 		return true;
 	}
 };
@@ -154,22 +230,37 @@ static bool TryPreaggregateInputVectorPrimitiveGroupsIntoPendingWithAccumulator(
 			return value;
 		}
 	};
-	if (!SljitInputVectorHasConsecutiveRepeat(count, load_key)) {
-		return false;
-	}
 	TARGET_TYPE active_key {};
 	bool has_active_key = false;
+	idx_t active_group_idx = DConstants::INVALID_INDEX;
+	typename ACCUMULATOR::GroupState active_state;
+	auto &pending_key_vector = pending.groups.chunk.data[0];
+	pending_key_vector.SetVectorType(VectorType::FLAT_VECTOR);
+	auto pending_key_data = FlatVector::GetDataMutable<TARGET_TYPE>(pending_key_vector);
+	auto flush_active_group = [&]() {
+		if (!has_active_key) {
+			return true;
+		}
+		return accumulator.MergeGroupState(pending, active_group_idx, active_state);
+	};
 	for (idx_t row_idx = 0; row_idx < count; row_idx++) {
 		auto key = load_key(row_idx);
 		if (!has_active_key || !(key == active_key)) {
-			if (!SljitPendingPreaggregatedPrimitiveLastGroupMatches<TARGET_TYPE>(pending, key)) {
-				if (pending.Count() == STANDARD_VECTOR_SIZE &&
+			const bool first_input_run = !has_active_key;
+			if (!flush_active_group()) {
+				throw InternalException("SLJIT proven pending preaggregated group merge failed");
+			}
+			if (!first_input_run || !SljitPendingPreaggregatedPrimitiveLastGroupMatches<TARGET_TYPE>(pending, key)) {
+				if (pending.Count() == SLJIT_PENDING_PREAGGREGATED_GROUP_CAPACITY &&
 				    !SljitFlushPendingPreaggregatedPrimitiveGroups(runtime, scratch, op_idx, op, pending, grouped_state,
 				                                                   deferred_grouped_finish)) {
 					throw InternalException("SLJIT proven pending preaggregated group flush failed");
 				}
-				if (!SljitAppendPendingSingleLanePreaggregatedPrimitiveGroup<TARGET_TYPE>(pending, key,
-				                                                                          *payload_lanes[0])) {
+				if (pending.Empty()) {
+					pending_key_data = FlatVector::GetDataMutable<TARGET_TYPE>(pending_key_vector);
+				}
+				if (!SljitAppendPendingSingleLanePreaggregatedPrimitiveGroup<TARGET_TYPE>(
+				        pending, key, *payload_lanes[0], pending_key_data)) {
 					throw InternalException("SLJIT proven pending preaggregated group append failed");
 				}
 			} else {
@@ -177,14 +268,16 @@ static bool TryPreaggregateInputVectorPrimitiveGroupsIntoPendingWithAccumulator(
 			}
 			active_key = key;
 			has_active_key = true;
+			active_group_idx = pending.Count() - 1;
+			accumulator.StartGroup(active_state);
 		}
-		const auto group_idx = pending.Count() - 1;
-		if (!accumulator.AccumulateRow(pending, row_idx, group_idx)) {
-			throw InternalException("SLJIT proven typed input-vector payload replay failed");
-		}
-		pending.represented_row_count++;
+		accumulator.AccumulateGroupState(active_state, row_idx);
 	}
-	if (finish || pending.Count() == STANDARD_VECTOR_SIZE) {
+	if (!flush_active_group()) {
+		throw InternalException("SLJIT proven pending preaggregated group merge failed");
+	}
+	pending.represented_row_count += count;
+	if (finish) {
 		if (!SljitFlushPendingPreaggregatedPrimitiveGroups(runtime, scratch, op_idx, op, pending, grouped_state,
 		                                                   deferred_grouped_finish)) {
 			throw InternalException("SLJIT proven pending preaggregated group flush failed");
@@ -351,24 +444,32 @@ static bool SljitReplayInputVectorPrimitiveGroupsIntoPending(
 	const bool use_single_lane = payload_lanes.size() == 1 && payload_lanes[0];
 	TARGET_TYPE active_key {};
 	bool has_active_key = false;
+	auto &pending_key_vector = pending.groups.chunk.data[0];
+	pending_key_vector.SetVectorType(VectorType::FLAT_VECTOR);
+	auto pending_key_data = FlatVector::GetDataMutable<TARGET_TYPE>(pending_key_vector);
 	for (idx_t row_idx = 0; row_idx < count; row_idx++) {
 		TARGET_TYPE key;
 		if (!load_key(row_idx, key)) {
 			throw InternalException("SLJIT proven input-vector group key replay failed");
 		}
 		if (!has_active_key || !(key == active_key)) {
-			if (!SljitPendingPreaggregatedPrimitiveLastGroupMatches<TARGET_TYPE>(pending, key)) {
-				if (pending.Count() == STANDARD_VECTOR_SIZE &&
+			const bool first_input_run = !has_active_key;
+			if (!first_input_run || !SljitPendingPreaggregatedPrimitiveLastGroupMatches<TARGET_TYPE>(pending, key)) {
+				if (pending.Count() == SLJIT_PENDING_PREAGGREGATED_GROUP_CAPACITY &&
 				    !SljitFlushPendingPreaggregatedPrimitiveGroups(runtime, scratch, op_idx, op, pending, grouped_state,
 				                                                   deferred_grouped_finish)) {
 					return false;
 				}
+				if (pending.Empty()) {
+					pending_key_data = FlatVector::GetDataMutable<TARGET_TYPE>(pending_key_vector);
+				}
 				if (use_single_lane) {
-					if (!SljitAppendPendingSingleLanePreaggregatedPrimitiveGroup<TARGET_TYPE>(pending, key,
-					                                                                          *payload_lanes[0])) {
+					if (!SljitAppendPendingSingleLanePreaggregatedPrimitiveGroup<TARGET_TYPE>(
+					        pending, key, *payload_lanes[0], pending_key_data)) {
 						return false;
 					}
-				} else if (!SljitAppendPendingPreaggregatedPrimitiveGroup<TARGET_TYPE>(pending, key, payload_lanes)) {
+				} else if (!SljitAppendPendingPreaggregatedPrimitiveGroup<TARGET_TYPE>(pending, key, payload_lanes,
+				                                                                       pending_key_data)) {
 					return false;
 				}
 			} else {
@@ -384,7 +485,7 @@ static bool SljitReplayInputVectorPrimitiveGroupsIntoPending(
 		}
 		pending.represented_row_count++;
 	}
-	if (finish || pending.Count() == STANDARD_VECTOR_SIZE) {
+	if (finish) {
 		if (!SljitFlushPendingPreaggregatedPrimitiveGroups(runtime, scratch, op_idx, op, pending, grouped_state,
 		                                                   deferred_grouped_finish)) {
 			return false;
@@ -411,9 +512,6 @@ static bool TryPreaggregateInputVectorPrimitiveGroupsIntoPendingWithKeyData(
 			return value;
 		}
 	};
-	if (!SljitInputVectorHasConsecutiveRepeat(count, load_key)) {
-		return false;
-	}
 	const bool use_single_lane = payload_lanes.size() == 1 && payload_lanes[0];
 	if (use_single_lane &&
 	    TryPreaggregateInputVectorPrimitiveGroupsIntoPendingWithTypedSingleLanePayload<TARGET_TYPE, SOURCE_TYPE,
@@ -476,9 +574,7 @@ static bool TryPreaggregateInputVectorPrimitiveGroupsIntoPendingTemplated(
 	auto load_key = [&](idx_t row_idx, TARGET_TYPE &key) {
 		return SljitLoadPreaggregatedInputVectorGroupKey(group_source, row_idx, key);
 	};
-	bool has_consecutive_repeat;
-	if (!SljitTryInputVectorHasConsecutiveRepeat<TARGET_TYPE>(count, load_key, has_consecutive_repeat) ||
-	    !has_consecutive_repeat) {
+	if (pending.run_strategy == SljitPendingRunStrategy::BUFFERED) {
 		return false;
 	}
 	SljitPreaggregatedPrimitivePayloadSources payload_sources;
@@ -491,6 +587,17 @@ static bool TryPreaggregateInputVectorPrimitiveGroupsIntoPendingTemplated(
 	}
 	if (pending.groups.chunk.ColumnCount() != 1 || pending.groups.chunk.data[0].GetType() != sink_info.groups[0].type) {
 		return false;
+	}
+	if (pending.run_strategy == SljitPendingRunStrategy::UNDECIDED) {
+		bool profitable_pending_runs;
+		if (!SljitTryInputVectorHasProfitablePendingRuns<TARGET_TYPE>(count, load_key, profitable_pending_runs)) {
+			return false;
+		}
+		pending.run_strategy =
+		    profitable_pending_runs ? SljitPendingRunStrategy::STREAMING : SljitPendingRunStrategy::BUFFERED;
+		if (!profitable_pending_runs) {
+			return false;
+		}
 	}
 	if (pending.Empty()) {
 		pending.lanes = payload_lanes;

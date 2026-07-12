@@ -113,7 +113,19 @@ static bool SljitTryExecuteInputVectorGroupedAggregateUpdate(
 		auto path = string("pending_dense_single_lane_grouped_update_miss.") + blocker;
 		RecordSljitRegionRuntimePath(runtime, op.kind, path.c_str(), payload_input.size());
 	}
-
+	if (pending_preaggregated_groups) {
+		auto pending_preaggregate_start = SljitRegionStageStart(runtime);
+		if (TryPreaggregateInputVectorPrimitiveGroupsIntoPending(
+		        runtime, scratch, op_idx, op, payload_input, group_sources, payload_source_indices, payload_lanes,
+		        grouped_state, *pending_preaggregated_groups, finish, deferred_grouped_finish)) {
+			RecordSljitRegionStageRuntime(runtime, op_idx, op.kind,
+			                              "local_preaggregate_input_vector_pending_primitive_group_runs",
+			                              pending_preaggregate_start);
+			RecordSljitRegionMaterializationElisionPath(
+			    runtime, op.kind, "direct_input_vector_pending_preaggregated_grouped_update", payload_input.size());
+			return true;
+		}
+	}
 	auto &preaggregated_groups = scratch.AggregatePreaggregatedGroups(op_idx);
 	auto &preaggregate_scratch = scratch.AggregatePreaggregateScratch(op_idx);
 	auto preaggregate_stage_start = SljitRegionStageStart(runtime);

@@ -1,6 +1,6 @@
 # JIT Production Recipe Architecture
 
-Last updated: 2026-07-11
+Last updated: 2026-07-12
 
 This is the active architecture contract for DuckDB execution-region JIT. It
 defines ownership, admission, runtime-view, and accounting rules. It is not a
@@ -392,6 +392,22 @@ next delta merges into that unpublished carry before any hash-table append.
 Overflow within one already-compacted input range flushes the exact prefix and
 carries only the suffix. This makes every published batch strictly increasing
 without a special duplicate case in the grouped hash table.
+
+Consecutive fixed-width group keys have two pending representations. The
+buffered representation compacts each source vector and bulk-copies its groups
+and payload deltas into pending storage. The streaming representation loads the
+source directly, keeps one active run delta in registers, and merges that delta
+once per group. A bounded sample selects streaming only when it predicts at
+least 3x run compression; lower-density streams retain the bulk-copy route.
+This is a typed runtime-density decision, not a workload or query rule.
+
+The selected run representation belongs to the aggregate runtime for the whole
+input stream. It is decided once and never changes at a source-vector boundary:
+a later unique-key vector is still consumed by a previously selected streaming
+owner. Per-vector switching is invalid because the two representations share
+the unpublished boundary group and proven-unique append contract. Strategy
+admission therefore completes source, payload, and pending-layout validation
+before publishing the decision.
 
 Direct append reports exact new-group success to DuckDB's radix adaptivity.
 After 131,072 attempted compact groups, more than 95% proven-new groups switch

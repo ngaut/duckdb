@@ -1136,6 +1136,66 @@ TEST_CASE("JIT sorted grouped sums buffer compact runs across input batches", "[
 	    [](const ExecutionRegionEvent &event) { RequireGeneratedAggregateUpdateRuntimeOwnership(event); });
 }
 
+TEST_CASE("JIT sorted grouped sums keep one run strategy across changing batch density", "[api][jit]") {
+	DuckDB db;
+	Connection con(db);
+	auto &manager = ExecutionRegionManager::Get(*con.context);
+
+	ConfigureSljitForCoverage(con, false, true, true, 10000);
+	REQUIRE_NO_FAIL(con.Query("PRAGMA threads=1"));
+	REQUIRE_NO_FAIL(con.Query("SET perfect_ht_threshold=0"));
+	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_changing_run_density AS "
+	                          "SELECT CASE WHEN i < 2048 THEN i // 8 ELSE i END::BIGINT AS group_id, "
+	                          "       (i % 97)::INTEGER AS value "
+	                          "FROM range(8192) tbl(i)"));
+
+	const string query = "SELECT group_id, sum(value) AS value_sum "
+	                     "FROM jit_changing_run_density GROUP BY group_id";
+	REQUIRE_NO_FAIL(con.Query("SET jit_policy='off'"));
+	REQUIRE_NO_FAIL(con.Query("CREATE TEMP TABLE jit_changing_run_density_reference AS " + query));
+
+	ConfigureSljitForCoverageSettings(con, false, true, true, 10000);
+	REQUIRE_NO_FAIL(con.Query("SET jit_cbo_generated_stage_benefit=1"));
+	ClearJitTrace(manager, true);
+	REQUIRE_NO_FAIL(con.Query("CREATE TEMP TABLE jit_changing_run_density_output AS " + query));
+	auto shape = con.Query("SELECT count(*), sum(value_sum) FROM jit_changing_run_density_output");
+	REQUIRE_NO_FAIL(*shape);
+	REQUIRE(shape->GetValue(0, 0).ToString() == "6400");
+	REQUIRE(shape->GetValue(1, 0).ToString() == "392050");
+	auto difference = con.Query("SELECT count(*) FROM ("
+	                            "  (SELECT * FROM jit_changing_run_density_output EXCEPT ALL "
+	                            "   SELECT * FROM jit_changing_run_density_reference) UNION ALL "
+	                            "  (SELECT * FROM jit_changing_run_density_reference EXCEPT ALL "
+	                            "   SELECT * FROM jit_changing_run_density_output)"
+	                            ") differences");
+	REQUIRE_NO_FAIL(*difference);
+	REQUIRE(difference->GetValue(0, 0).ToString() == "0");
+	string observed_runtime_paths;
+	for (auto &event : manager.GetEvents()) {
+		if (EventPhase(event) == "runtime") {
+			observed_runtime_paths += EventJitRuntimePathCounts(event) + "\n";
+		}
+	}
+	INFO(observed_runtime_paths);
+
+	RequireJitEvent(
+	    manager,
+	    [](const ExecutionRegionEvent &event) {
+		    if (EventPhase(event) != "runtime" || event.backend_name != "sljit") {
+			    return false;
+		    }
+		    const auto runtime_paths = EventJitRuntimePathCounts(event);
+		    return StringUtil::Contains(
+		               runtime_paths,
+		               "aggregate_update.direct_input_vector_pending_preaggregated_grouped_update=8192") &&
+		           StringUtil::Contains(runtime_paths,
+		                                "aggregate_update.pending_preaggregated_grouped_update_flush=8192") &&
+		           StringUtil::Contains(runtime_paths, "aggregate_update.proven_unique_append.enabled=1") &&
+		           !StringUtil::Contains(runtime_paths, "proven_unique_append.final_combine_required");
+	    },
+	    [](const ExecutionRegionEvent &event) { RequireGeneratedAggregateUpdateRuntimeOwnership(event); });
+}
+
 TEST_CASE("JIT high-uniqueness grouped append reconciles late duplicates", "[api][jit]") {
 	DuckDB db;
 	Connection con(db);
