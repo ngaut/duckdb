@@ -973,6 +973,12 @@ void ExecutionRegionLoweringPlan::AddBackendWeakAcceleratedWorkCapability() {
 	capability_facts.backend_weak_accelerated_work_count++;
 }
 
+void ExecutionRegionLoweringPlan::AddBackendLowCardinalityStringPredicatePreference(idx_t distinct_count) {
+	capability_facts.backend_low_cardinality_string_predicate_count++;
+	capability_facts.backend_low_cardinality_string_max_distinct_count =
+	    MaxValue(capability_facts.backend_low_cardinality_string_max_distinct_count, distinct_count);
+}
+
 void ExecutionRegionLoweringPlan::AddFusionBlocker(string reason) {
 	if (first_fusion_blocker.empty()) {
 		first_fusion_blocker = reason;
@@ -1256,6 +1262,10 @@ static void AppendExecutionRegionBackendCapabilityFacts(string &result, const Ex
 	bool first_cost = true;
 	AppendExecutionRegionCapabilityCount(result, "backend_cost", "weak_accelerated_work",
 	                                     facts.backend_weak_accelerated_work_count, first_cost);
+	AppendExecutionRegionCapabilityCount(result, "backend_cost", "low_cardinality_string_predicate",
+	                                     facts.backend_low_cardinality_string_predicate_count, first_cost);
+	AppendExecutionRegionCapabilityCount(result, "backend_cost", "low_cardinality_string_max_distinct",
+	                                     facts.backend_low_cardinality_string_max_distinct_count, first_cost);
 }
 
 string ExecutionRegionLoweringPlan::CompactEventReason() const {

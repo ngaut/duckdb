@@ -15,6 +15,45 @@
 namespace duckdb {
 
 static constexpr idx_t SLJIT_FLAT_NULLABLE_FAST_PATH_MIN_CARDINALITY = STANDARD_VECTOR_SIZE * 4;
+static constexpr idx_t SLJIT_STRING_SEARCH_LOW_CARDINALITY_LIMIT = 64;
+
+static bool SljitPredicateHasLowCardinalityStringLike(const SljitNativePredicate &predicate,
+                                                      const vector<idx_t> &input_distinct_counts,
+                                                      idx_t &distinct_count) {
+	if (predicate.kind == SljitNativePredicateKind::STRING_LIKE_CONSTANT) {
+		if (predicate.source_index >= input_distinct_counts.size()) {
+			return false;
+		}
+		distinct_count = input_distinct_counts[predicate.source_index];
+		return distinct_count > 0 && distinct_count <= SLJIT_STRING_SEARCH_LOW_CARDINALITY_LIMIT;
+	}
+	if (predicate.child &&
+	    SljitPredicateHasLowCardinalityStringLike(*predicate.child, input_distinct_counts, distinct_count)) {
+		return true;
+	}
+	for (auto &child : predicate.children) {
+		if (child && SljitPredicateHasLowCardinalityStringLike(*child, input_distinct_counts, distinct_count)) {
+			return true;
+		}
+	}
+	return false;
+}
+
+static void AddSljitLowCardinalityStringPredicatePreferences(const SljitNativeRegionPlan &region,
+                                                             ExecutionRegionLoweringPlan &lowering_plan) {
+	auto current_distinct_counts = region.source_distinct_counts;
+	auto current_min_values = region.source_min_values;
+	auto current_max_values = region.source_max_values;
+	for (auto &op : region.ops) {
+		idx_t distinct_count;
+		if (op.kind == SljitNativeRegionOpKind::FILTER && op.filter.predicate &&
+		    SljitPredicateHasLowCardinalityStringLike(*op.filter.predicate, current_distinct_counts, distinct_count)) {
+			lowering_plan.AddBackendLowCardinalityStringPredicatePreference(distinct_count);
+		}
+		SljitUpdateExecutableCurrentDistinctCounts(op, current_distinct_counts, current_min_values, current_max_values);
+		SljitUpdateExecutableCurrentRanges(op, current_min_values, current_max_values);
+	}
+}
 
 static bool IsIdentityProjection(const SljitNativeRegionOpPlan &op, const vector<LogicalType> &input_types) {
 	if (op.kind != SljitNativeRegionOpKind::PROJECTION || op.projections.size() != input_types.size() ||
@@ -465,6 +504,7 @@ ExecutionRegionLoweringPlan BuildSljitRegionPlan(const ExecutionRegionIR &region
 			DisableSljitRegionFlatNullableFastPath(native_region);
 		}
 		AddSljitNativeRegionCapabilityFacts(lowering_plan, native_region);
+		AddSljitLowCardinalityStringPredicatePreferences(native_region, lowering_plan);
 		ApplySljitSourceContractPlan(selected_source_contract, lowering_plan);
 		string codegen_blocker;
 		if (SljitNativeRegionHasExecutableBodyGap(native_region, codegen_blocker)) {

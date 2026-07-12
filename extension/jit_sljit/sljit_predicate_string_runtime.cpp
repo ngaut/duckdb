@@ -13,6 +13,10 @@
 #include <cstring>
 #include <utility>
 
+#if defined(__aarch64__)
+#include <arm_neon.h>
+#endif
+
 namespace duckdb {
 
 static uint8_t SljitLikeFragmentAnchorScore(unsigned char c) {
@@ -42,8 +46,71 @@ static idx_t SljitLikeFragmentAnchor(const char *data, idx_t length) {
 	return anchor;
 }
 
+static idx_t SljitLikeFragmentPairAnchor(const char *data, idx_t length) {
+	D_ASSERT(length >= 2);
+	idx_t anchor = 0;
+	auto best_score = NumericCast<uint16_t>(SljitLikeFragmentAnchorScore(static_cast<unsigned char>(data[0]))) +
+	                  SljitLikeFragmentAnchorScore(static_cast<unsigned char>(data[1]));
+	for (idx_t idx = 1; idx + 1 < length; idx++) {
+		auto score = NumericCast<uint16_t>(SljitLikeFragmentAnchorScore(static_cast<unsigned char>(data[idx]))) +
+		             SljitLikeFragmentAnchorScore(static_cast<unsigned char>(data[idx + 1]));
+		if (score < best_score) {
+			anchor = idx;
+			best_score = score;
+		}
+	}
+	return anchor;
+}
+
+#if defined(__aarch64__)
+static idx_t SljitFindLikeFragmentPairArm64(const char *sdata, idx_t slen, const char *fragment, idx_t fragment_length,
+                                            idx_t pair_anchor) {
+	D_ASSERT(fragment_length >= 2);
+	if (fragment_length > slen) {
+		return DConstants::INVALID_INDEX;
+	}
+	const auto first_byte = vdupq_n_u8(static_cast<uint8_t>(fragment[pair_anchor]));
+	const auto second_byte = vdupq_n_u8(static_cast<uint8_t>(fragment[pair_anchor + 1]));
+	idx_t position = pair_anchor;
+	const auto last_pair = slen - fragment_length + pair_anchor;
+	while (position + 15 <= last_pair) {
+		auto first_matches = vceqq_u8(vld1q_u8(reinterpret_cast<const uint8_t *>(sdata + position)), first_byte);
+		auto second_matches = vceqq_u8(vld1q_u8(reinterpret_cast<const uint8_t *>(sdata + position + 1)), second_byte);
+		if (vmaxvq_u8(vandq_u8(first_matches, second_matches)) != 0) {
+			for (idx_t lane = 0; lane < 16; lane++) {
+				auto pair_position = position + lane;
+				if (sdata[pair_position] != fragment[pair_anchor] ||
+				    sdata[pair_position + 1] != fragment[pair_anchor + 1]) {
+					continue;
+				}
+				auto fragment_position = pair_position - pair_anchor;
+				if (memcmp(sdata + fragment_position, fragment, fragment_length) == 0) {
+					return fragment_position;
+				}
+			}
+		}
+		position += 16;
+	}
+	while (position <= last_pair) {
+		if (sdata[position] == fragment[pair_anchor] && sdata[position + 1] == fragment[pair_anchor + 1]) {
+			auto fragment_position = position - pair_anchor;
+			if (memcmp(sdata + fragment_position, fragment, fragment_length) == 0) {
+				return fragment_position;
+			}
+		}
+		position++;
+	}
+	return DConstants::INVALID_INDEX;
+}
+#endif
+
 static idx_t SljitFindLikeFragment(const char *sdata, idx_t slen, const char *fragment, idx_t fragment_length,
-                                   idx_t anchor) {
+                                   idx_t anchor, idx_t pair_anchor) {
+#if defined(__aarch64__)
+	if (fragment_length >= 2) {
+		return SljitFindLikeFragmentPairArm64(sdata, slen, fragment, fragment_length, pair_anchor);
+	}
+#endif
 	if (fragment_length > slen) {
 		return DConstants::INVALID_INDEX;
 	}
@@ -80,7 +147,10 @@ SljitNativeStringConstant::SljitNativeStringConstant(string value_p) : value(std
 		const auto fragment_length = pattern_idx - fragment_start;
 		if (fragment_length > 0) {
 			const auto anchor = SljitLikeFragmentAnchor(value.data() + fragment_start, fragment_length);
-			like_fragments.push_back({fragment_start, fragment_length, anchor});
+			const auto pair_anchor = fragment_length >= 2
+			                             ? SljitLikeFragmentPairAnchor(value.data() + fragment_start, fragment_length)
+			                             : idx_t(0);
+			like_fragments.push_back({fragment_start, fragment_length, anchor, pair_anchor});
 		}
 	}
 }
@@ -121,7 +191,7 @@ sljit_sw SLJIT_FUNC SljitNativeStringLikePercentOnly(const char *sdata, idx_t sl
 		}
 
 		auto match_offset = SljitFindLikeFragment(sdata + position, slen - position, pdata + fragment_start,
-		                                          fragment_length, fragment.anchor);
+		                                          fragment_length, fragment.anchor, fragment.pair_anchor);
 		if (match_offset == DConstants::INVALID_INDEX) {
 			return false;
 		}

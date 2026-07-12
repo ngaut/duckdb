@@ -20,6 +20,7 @@ struct SljitNativeStringLikeFragment {
 	idx_t start = 0;
 	idx_t length = 0;
 	idx_t anchor = 0;
+	idx_t pair_anchor = 0;
 };
 
 struct SljitNativeStringConstant {

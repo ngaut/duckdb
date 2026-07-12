@@ -237,7 +237,12 @@ filters are never silently evaluated twice or silently dropped.
 SLJIT chooses between `ALL` and `DYNAMIC_ONLY` from workload-independent source
 facts and the complete candidate shape. Generated mixed string filtering
 requires a downstream grouped-aggregate contract that consumes the repaired
-source layout; highly reusable string domains remain storage-owned. The mixed
+source layout. String predicates over a source domain with at most 64 known
+distinct values publish a backend cost preference for vectorized execution;
+they are supported by native lowering, but DuckDB's compressed/dictionary
+vector path can evaluate them once per reusable value instead of once per row.
+The physical-runner CBO consumes this preference, so the choice is a normal
+runner selection rather than a false backend-capability failure. The mixed
 path records `source-strategy=mixed-source-filter` and
 `source_contract_filter_pushdown=dynamic-only`, so runtime proof can distinguish
 composed ownership from the legacy all-or-nothing path.
@@ -280,6 +285,11 @@ per batch.
 - Scalar and SIMD implementations are two implementations of the same
   generated contract. SIMD admission must preserve the scalar SQL semantics,
   including NULL handling, overflow, and cast behavior.
+- On ARM64, percent-only constant `LIKE` fragments of at least two bytes use a
+  16-position NEON candidate scan over the rarest adjacent byte pair. Candidate
+  matches still use exact `memcmp`, preserving ordered-fragment semantics and
+  arbitrary byte values. One-byte fragments and non-ARM64 targets retain the
+  portable anchored search path.
 - Typed-expression source IDs are adapter-local. Every generated selector reads
   the adapter's source arrays; a runtime specialization may touch the input
   chunk only after explicitly mapping those local IDs back to input columns.
@@ -603,8 +613,16 @@ CBO uses backend-neutral, measurable facts rather than query identity:
 - materialization-elision opportunities and selected-join materialization
   penalties;
 - source-contract scan penalties, stateful protocol costs, and startup cost;
+- backend-published vectorized-execution preferences for low-cardinality string
+  predicate domains;
 - whether the candidate is a full pipeline and which native protocol class it
   uses.
+
+A vectorized-execution preference is cost evidence, not a capability blocker.
+The backend still produces a complete lowering plan and executable contract;
+runner selection records `rejected_vectorized_execution_preferred`. This keeps
+capability truth separate from a representation-dependent performance choice
+and lets the same native string lowering serve high-cardinality sources.
 
 Physical-pipeline upper bounds and post-lowering candidate costs use the same
 materialization-elision rule for generated projection-to-aggregate pipelines.
@@ -816,7 +834,10 @@ CASE-heavy, multi-aggregate, persistent-table expression, filtered scan,
 column-vs-column comparison, single- and multi-source nullable scan, selective
 perfect-hash multi-aggregate, and single-thread grouped-DISTINCT workloads must
 show an auto-policy speedup and compiled-region ownership; the arithmetic-heavy
-and column-comparison classes use material speedup floors. Dense computed
+and column-comparison classes use material speedup floors. High-cardinality
+multi-fragment string search must compile and meet its material speedup floor;
+the matching low-cardinality case must select vectorized execution and stay
+inside the independent raw-runtime slowdown ceiling. Dense computed
 perfect-hash grouping is also a compiled performance contract, including both
 serial and parallel execution.
 Other grouped and join workloads must remain within the bounded slowdown

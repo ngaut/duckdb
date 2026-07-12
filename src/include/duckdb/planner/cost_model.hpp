@@ -48,6 +48,7 @@ struct PhysicalRunnerCostInput {
 	PhysicalRunnerGeneratedWorkClass generated_work_class = PhysicalRunnerGeneratedWorkClass::NONE;
 	PhysicalRunnerNativeProtocolClass native_protocol_class = PhysicalRunnerNativeProtocolClass::NONE;
 	bool has_accelerated_work = false;
+	bool vectorized_execution_preferred = false;
 };
 
 struct PhysicalRunnerCostParameters {

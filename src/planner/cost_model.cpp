@@ -1019,6 +1019,10 @@ static PhysicalRunnerSelectionAnalysis PhysicalRunnerAnalyzeSelection(const Phys
 		result.selection_reason = "rejected_runner_unavailable";
 		return result;
 	}
+	if (input.vectorized_execution_preferred) {
+		result.selection_reason = "rejected_vectorized_execution_preferred";
+		return result;
+	}
 	result.selection_reason = PhysicalRunnerRejectedAcceleratedWorkReason(input, admission, profile);
 	if (!result.selection_reason.empty()) {
 		return result;

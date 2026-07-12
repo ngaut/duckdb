@@ -299,6 +299,7 @@ PhysicalRunnerCostInput BuildExecutionRegionCandidateCostInput(const ExecutionRe
 	input.uses_scan_filters = lowering_plan.UsesScanFilters();
 	auto &backend_facts = lowering_plan.capability_facts;
 	input.native_grouped_state_address_lookup_count = backend_facts.backend_native_state_address_lookup_count;
+	input.vectorized_execution_preferred = backend_facts.backend_low_cardinality_string_predicate_count > 0;
 	const auto direct_hash_join_build_count =
 	    MinValue(input.native_hash_join_build_sink_count, backend_facts.backend_direct_hash_join_build_count);
 	if (direct_hash_join_build_count > 0) {

@@ -72,6 +72,8 @@ struct ExecutionRegionLoweringCapabilityFacts {
 	idx_t backend_generated_perfect_hash_lookup_count = 0;
 	idx_t backend_native_state_address_lookup_count = 0;
 	idx_t backend_weak_accelerated_work_count = 0;
+	idx_t backend_low_cardinality_string_predicate_count = 0;
+	idx_t backend_low_cardinality_string_max_distinct_count = 0;
 };
 
 struct DUCKDB_API ExecutionRegionLoweringPlan {
@@ -98,6 +100,7 @@ struct DUCKDB_API ExecutionRegionLoweringPlan {
 	                                         bool grouped_state_addresses, bool perfect_hash_group_lookup);
 	void AddBackendDistinctKeyFastInsertCapability();
 	void AddBackendWeakAcceleratedWorkCapability();
+	void AddBackendLowCardinalityStringPredicatePreference(idx_t distinct_count);
 	void AddFusionBlocker(string reason);
 	void SetRecordDetailedNodes(bool record_detailed_nodes);
 	void SetCompiledExecutionMode(ExecutionRegionExecutionMode execution_mode);

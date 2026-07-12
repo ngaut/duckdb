@@ -75,6 +75,43 @@ GENERIC_WORKLOADS = (
         "requires_compiled_auto": True,
     },
     {
+        "name": "scan_like_fragments",
+        "setup_sql": (
+            "CREATE OR REPLACE TABLE __jit_generic_like_fragments(id BIGINT NOT NULL, comment VARCHAR NOT NULL); "
+            "INSERT INTO __jit_generic_like_fragments "
+            "SELECT i, CASE WHEN i % 100 = 0 "
+            "THEN 'ordinary package with special shipping requests included ' || CAST(i AS VARCHAR) "
+            "ELSE 'ordinary shipping package comment with several common words ' || CAST(i AS VARCHAR) END "
+            "FROM range(4000000) tbl(i);"
+        ),
+        "sql": (
+            "SELECT sum(id * 31) AS value FROM __jit_generic_like_fragments "
+            "WHERE comment NOT LIKE '%special%requests%'"
+        ),
+        "minimum_auto_speedup": 1.10,
+        "max_auto_slowdown": 1.05,
+        "requires_compiled_auto": True,
+    },
+    {
+        "name": "scan_low_cardinality_like",
+        "setup_sql": (
+            "CREATE OR REPLACE TABLE __jit_generic_low_cardinality_like("
+            "id BIGINT NOT NULL, comment VARCHAR NOT NULL); "
+            "INSERT INTO __jit_generic_low_cardinality_like "
+            "SELECT i, CASE WHEN i % 100 = 0 "
+            "THEN 'ordinary package with special shipping requests included' "
+            "ELSE 'ordinary shipping package comment with several common words' END "
+            "FROM range(4000000) tbl(i);"
+        ),
+        "sql": (
+            "SELECT sum(id * 31) AS value FROM __jit_generic_low_cardinality_like "
+            "WHERE comment NOT LIKE '%special%requests%'"
+        ),
+        "minimum_auto_speedup": 0.0,
+        "max_auto_slowdown": 1.05,
+        "requires_compiled_auto": False,
+    },
+    {
         "name": "scan_compare_columns",
         "setup_sql": (
             "CREATE OR REPLACE TABLE __jit_generic_compare_input AS "

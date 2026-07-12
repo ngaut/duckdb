@@ -232,6 +232,29 @@ TEST_CASE("JIT lowers string predicates without aggregate sink dependence", "[ap
 	RequireNativeSljitIr(manager, "string_contains");
 	RequireNativeSljitIr(manager, "string_like");
 
+	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_string_pair_scan(id INTEGER, s VARCHAR)"));
+	REQUIRE_NO_FAIL(con.Query("INSERT INTO jit_string_pair_scan VALUES "
+	                          "(1, 'ab'), "
+	                          "(2, 'xxabyy'), "
+	                          "(3, '0123456789abcdefabtail'), "
+	                          "(4, '0123456789abcdeabtail'), "
+	                          "(5, 'no-match-string-over-sixteen-bytes'), "
+	                          "(6, NULL)"));
+	ClearJitTrace(manager, true);
+	result = con.Query("WITH t AS MATERIALIZED (SELECT id, s FROM jit_string_pair_scan) "
+	                   "SELECT id FROM t WHERE s LIKE '%ab%' ORDER BY id");
+	REQUIRE_NO_FAIL(*result);
+	REQUIRE(CHECK_COLUMN(result, 0, {1, 2, 3, 4}));
+	result = con.Query("WITH t AS MATERIALIZED (SELECT id, s FROM jit_string_pair_scan) "
+	                   "SELECT id FROM t WHERE s LIKE '%ab%tail%' ORDER BY id");
+	REQUIRE_NO_FAIL(*result);
+	REQUIRE(CHECK_COLUMN(result, 0, {3, 4}));
+	result = con.Query("WITH t AS MATERIALIZED (SELECT id, s FROM jit_string_pair_scan) "
+	                   "SELECT id FROM t WHERE s LIKE '%x%' ORDER BY id");
+	REQUIRE_NO_FAIL(*result);
+	REQUIRE(CHECK_COLUMN(result, 0, {2}));
+	RequireNativeSljitIr(manager, "string_like");
+
 	REQUIRE_NO_FAIL(con.Query("SET disabled_optimizers='in_clause'"));
 	ClearJitTrace(manager, true);
 	result = con.Query("CREATE TEMP TABLE jit_string_projected_predicates AS "
@@ -290,6 +313,40 @@ TEST_CASE("JIT lowers string predicates without aggregate sink dependence", "[ap
 		    IsCompiledSljitRegionEvent(event) && StringUtil::Contains(event.ir, "string_like");
 		REQUIRE_FALSE(generated_percent_only_like);
 	}
+}
+
+TEST_CASE("JIT CBO preserves vectorized low-cardinality string predicates", "[api][jit]") {
+	DuckDB db;
+	Connection con(db);
+	auto &manager = ExecutionRegionManager::Get(*con.context);
+
+	ConfigureSljitForCoverage(con, false, true, false, 10000);
+	ConfigureJitDecisionTrace(con);
+	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_low_cardinality_like AS "
+	                          "SELECT i, CASE WHEN i % 100 = 0 "
+	                          "THEN 'ordinary package with special shipping requests included' "
+	                          "ELSE 'ordinary shipping package comment with several common words' END AS s "
+	                          "FROM range(10000) tbl(i)"));
+
+	ClearJitTrace(manager, true);
+	auto result = con.Query("SELECT sum(i * 31) FROM jit_low_cardinality_like "
+	                        "WHERE s NOT LIKE '%special%requests%'");
+	REQUIRE_NO_FAIL(*result);
+	REQUIRE(result->GetValue(0, 0).ToString() == "1534500000");
+
+	bool found_vectorized_preference = false;
+	for (auto &event : manager.GetEvents()) {
+		REQUIRE_FALSE((IsCompiledSljitRegionEvent(event) && StringUtil::Contains(event.ir, "string_like")));
+		if (EventPhase(event) != "decision" || EventStatus(event) != "skipped" ||
+		    event.runner_cost.selection_reason != "rejected_vectorized_execution_preferred") {
+			continue;
+		}
+		found_vectorized_preference = true;
+		REQUIRE(StringUtil::Contains(event.reason, "backend_cost=low_cardinality_string_predicate:1"));
+		REQUIRE(StringUtil::Contains(event.reason, "low_cardinality_string_max_distinct:2"));
+		REQUIRE_FALSE(StringUtil::Contains(event.reason, "region-lowering-blocked"));
+	}
+	REQUIRE(found_vectorized_preference);
 }
 
 TEST_CASE("JIT lowers decimal CASE payloads with string prefix conditions", "[api][jit]") {
