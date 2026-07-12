@@ -388,6 +388,34 @@ def verify_runtime_proofs_are_typed() -> None:
 
 
 def verify_compiled_artifact_ownership() -> None:
+	artifact = read("extension/jit_sljit/include/sljit_compiled_function.hpp")
+	for immutable_contract in (
+		"static SljitCompiledFunction TryCreate",
+		"FUNCTION Function() const",
+	):
+		if immutable_contract not in artifact:
+			raise AssertionError(f"compiled artifacts are missing immutable construction contract: {immutable_contract}")
+	for mutable_api in (
+		"shared_ptr<ExecutionRegionCodeHandle> &Code()",
+		"FUNCTION &Function()",
+		"void Set(",
+	):
+		if mutable_api in artifact:
+			raise AssertionError(f"compiled artifacts must not expose split mutable state: {mutable_api}")
+	eager_artifact = artifact.split("class SljitLazyCompiledFunction", 1)[0]
+	if "class BUILD" in eager_artifact:
+		raise AssertionError("compiled artifact ownership must not template code-generation policy into the artifact")
+	reject_regex(
+		"split compiled artifact publication",
+		(
+			r"\.(?:Code|Function)\(\)\s*=",
+			r"\.Set\(\s*std::move\([^\n]+code",
+		),
+		(
+			"extension/jit_sljit/**/*.hpp",
+			"extension/jit_sljit/**/*.cpp",
+		),
+	)
 	executable = read("extension/jit_sljit/include/sljit_region_executable.hpp")
 	if "SljitCompiledFunction" not in executable or "SljitLazyCompiledFunction" not in executable:
 		raise AssertionError("SLJIT executable regions must own code and callables through typed artifacts")

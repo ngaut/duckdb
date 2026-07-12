@@ -142,8 +142,9 @@ bool SljitTryBuildFilteredAggregateUpdate(SljitExecutableRegionOp &filter_op, Sl
 		    aggregate_update.plan.sink_info.groups, aggregate_update.plan.group_expressions,
 		    aggregate_update.plan.sink_info.aggregate_contract, combined_source_not_null, combined_source_min_values,
 		    combined_source_max_values, function, filtered_error);
-		if (code && function) {
-			filtered_update.compiled.Set(std::move(code), function);
+		auto compiled = SljitCompiledFunction<SljitNativeAggregateUpdateFunction>::TryCreate(std::move(code), function);
+		if (compiled.IsExecutable()) {
+			filtered_update.compiled = std::move(compiled);
 			filtered_update.owns_perfect_hash_group_lookup = true;
 			aggregate_update.filtered_update = std::move(filtered_update);
 			return true;
@@ -216,9 +217,9 @@ bool SljitTryBuildFilteredAggregateUpdate(SljitExecutableRegionOp &filter_op, Sl
 	auto code = BuildSljitNativeFilteredUngroupedFusedPrimitiveAggregateUpdate(
 	    *filtered_update.filter.plan.expression_tree, codegen_payloads, aggregate_update.plan.sink_info.aggregates,
 	    function, filtered_error);
-
-	if (code && function) {
-		filtered_update.compiled.Set(std::move(code), function);
+	auto compiled = SljitCompiledFunction<SljitNativeAggregateUpdateFunction>::TryCreate(std::move(code), function);
+	if (compiled.IsExecutable()) {
+		filtered_update.compiled = std::move(compiled);
 		aggregate_update.filtered_update = std::move(filtered_update);
 		return true;
 	}

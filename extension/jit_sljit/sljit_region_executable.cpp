@@ -37,7 +37,7 @@ static bool BuildExecutableRegionOp(const SljitNativeRegionOpPlan &op, SljitExec
 		executable.hash_join_build.plan.sink_info = op.hash_join_build.sink_info;
 		executable.hash_join_build.plan.input_types = op.hash_join_build.input_types;
 		return true;
-	case SljitNativeRegionOpKind::NESTED_LOOP_JOIN_PROBE:
+	case SljitNativeRegionOpKind::NESTED_LOOP_JOIN_PROBE: {
 		executable.nested_loop_join_probe.plan.operator_index = op.nested_loop_join_probe.operator_index;
 		executable.nested_loop_join_probe.plan.input_types = op.nested_loop_join_probe.input_types;
 		executable.nested_loop_join_probe.plan.condition_types = op.nested_loop_join_probe.condition_types;
@@ -60,9 +60,16 @@ static bool BuildExecutableRegionOp(const SljitNativeRegionOpPlan &op, SljitExec
 			}
 			executable.nested_loop_join_probe.lhs_conditions.push_back(std::move(executable_condition));
 		}
-		return executable.nested_loop_join_probe.compiled.Build([&](SljitNativeNestedLoopJoinProbeFunction &function) {
-			return BuildSljitNestedLoopJoinProbe(executable.nested_loop_join_probe.plan, function, error);
-		});
+		SljitNativeNestedLoopJoinProbeFunction function = nullptr;
+		auto code = BuildSljitNestedLoopJoinProbe(executable.nested_loop_join_probe.plan, function, error);
+		auto compiled =
+		    SljitCompiledFunction<SljitNativeNestedLoopJoinProbeFunction>::TryCreate(std::move(code), function);
+		if (!compiled.IsExecutable()) {
+			return false;
+		}
+		executable.nested_loop_join_probe.compiled = std::move(compiled);
+		return true;
+	}
 	case SljitNativeRegionOpKind::NESTED_LOOP_JOIN_BUILD:
 		executable.nested_loop_join_build.plan.sink_info = op.nested_loop_join_build.sink_info;
 		executable.nested_loop_join_build.plan.input_types = op.nested_loop_join_build.input_types;

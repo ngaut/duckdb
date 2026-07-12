@@ -150,7 +150,12 @@ aggregate-state ABI.
 
 Generated machine code and its callable entry point are one lifetime unit.
 `SljitCompiledFunction<T>` owns both; remapped expressions share that complete
-immutable artifact instead of copying a raw function pointer. Lazy artifacts add
+immutable artifact instead of copying a raw function pointer. Eager generators
+build the owner and callable locally, construct a complete artifact through
+`TryCreate`, and publish it with one whole-value move. Code-generation policy
+stays outside the ownership type, avoiding one builder-template body per call
+site. The artifact exposes no mutable code-owner, callable, or split `Set` API.
+Lazy artifacts add
 their one-time publication state to the same owner. The release-store publishes
 the complete artifact, and every callable read follows an acquire-load or the
 `call_once` synchronization edge.

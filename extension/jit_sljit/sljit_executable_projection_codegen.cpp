@@ -135,7 +135,8 @@ static bool TryBuildFlatFusedFloatingProjection(SljitExecutableRegionOp &op, str
 	string fused_error;
 	auto code =
 	    BuildSljitNativeFlatDoubleProjection(projection_plans, direct_plan.projection_indices, function, fused_error);
-	if (!code || !function) {
+	auto compiled = SljitCompiledFunction<SljitNativeVectorFunction>::TryCreate(std::move(code), function);
+	if (!compiled.IsExecutable()) {
 		if (fused_error.empty() || fused_error.rfind("SLJIT flat floating projection", 0) == 0) {
 			return true;
 		}
@@ -143,7 +144,7 @@ static bool TryBuildFlatFusedFloatingProjection(SljitExecutableRegionOp &op, str
 		return false;
 	}
 	op.flat_fused_floating_projection_plan = std::move(direct_plan);
-	op.flat_fused_floating_projection.Set(std::move(code), function);
+	op.flat_fused_floating_projection = std::move(compiled);
 	return true;
 }
 

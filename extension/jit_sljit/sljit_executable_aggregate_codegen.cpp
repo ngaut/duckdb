@@ -122,10 +122,11 @@ static bool TryBuildUngroupedFusedTypedExpressionAggregateUpdate(const SljitNati
 	string fused_error;
 	auto fused_code = BuildSljitNativeUngroupedFusedTypedExpressionAggregateUpdate(
 	    payloads.codegen_payloads, op.sink_info.aggregates, fused_function, fused_error);
-	if (fused_code && fused_function) {
+	auto compiled =
+	    SljitCompiledFunction<SljitNativeAggregateUpdateFunction>::TryCreate(std::move(fused_code), fused_function);
+	if (compiled.IsExecutable()) {
 		executable.payloads = std::move(payloads.executable_payloads);
-		executable.fused_payload_update.Code() = std::move(fused_code);
-		executable.fused_payload_update.Function() = fused_function;
+		executable.fused_payload_update = std::move(compiled);
 		return true;
 	}
 	if (!fused_error.empty() && fused_error.rfind("unsupported", 0) != 0) {
@@ -155,10 +156,11 @@ static bool TryBuildPerfectHashGroupedFusedTypedExpressionAggregateUpdate(
 	    payloads.codegen_payloads, op.sink_info.aggregates, op.sink_info.groups, payloads.codegen_group_expressions,
 	    op.sink_info.aggregate_contract, payloads.combined_source_not_null, payloads.combined_source_min_values,
 	    payloads.combined_source_max_values, fused_function, fused_error);
-	if (fused_code && fused_function) {
+	auto compiled =
+	    SljitCompiledFunction<SljitNativeAggregateUpdateFunction>::TryCreate(std::move(fused_code), fused_function);
+	if (compiled.IsExecutable()) {
 		executable.payloads = std::move(payloads.executable_payloads);
-		executable.fused_payload_update.Code() = std::move(fused_code);
-		executable.fused_payload_update.Function() = fused_function;
+		executable.fused_payload_update = std::move(compiled);
 		executable.fused_payload_update_owns_group_lookup = true;
 		return true;
 	}
@@ -187,10 +189,11 @@ static bool TryBuildGroupedFusedTypedExpressionAggregateUpdate(const SljitNative
 	auto fused_code = BuildSljitNativeGroupedFusedTypedExpressionAggregateUpdate(
 	    payloads.codegen_payloads, op.sink_info.aggregates, op.sink_info.aggregate_contract, fused_function,
 	    fused_error);
-	if (fused_code && fused_function) {
+	auto compiled =
+	    SljitCompiledFunction<SljitNativeAggregateUpdateFunction>::TryCreate(std::move(fused_code), fused_function);
+	if (compiled.IsExecutable()) {
 		executable.payloads = std::move(payloads.executable_payloads);
-		executable.fused_payload_update.Code() = std::move(fused_code);
-		executable.fused_payload_update.Function() = fused_function;
+		executable.fused_payload_update = std::move(compiled);
 		return true;
 	}
 	if (!fused_error.empty() && fused_error.rfind("unsupported", 0) != 0) {
@@ -295,9 +298,10 @@ bool SljitBuildExecutableAggregateUpdatePayloadCode(const SljitNativeAggregateUp
 		string fused_error;
 		auto fused_code = BuildSljitNativeUngroupedFusedPrimitiveAggregateUpdate(op.payloads, op.sink_info.aggregates,
 		                                                                         fused_function, fused_error);
-		if (fused_code && fused_function) {
-			executable.fused_payload_update.Code() = std::move(fused_code);
-			executable.fused_payload_update.Function() = fused_function;
+		auto compiled =
+		    SljitCompiledFunction<SljitNativeAggregateUpdateFunction>::TryCreate(std::move(fused_code), fused_function);
+		if (compiled.IsExecutable()) {
+			executable.fused_payload_update = std::move(compiled);
 			return true;
 		}
 		if (!fused_error.empty() && fused_error.rfind("unsupported", 0) != 0) {
@@ -334,9 +338,10 @@ bool SljitBuildExecutableAggregateUpdatePayloadCode(const SljitNativeAggregateUp
 		auto fused_code = BuildSljitNativePerfectHashGroupedFusedPrimitiveAggregateUpdate(
 		    op.payloads, op.sink_info.aggregates, op.sink_info.groups, op.group_expressions,
 		    op.sink_info.aggregate_contract, fused_function, fused_error);
-		if (fused_code && fused_function) {
-			executable.fused_payload_update.Code() = std::move(fused_code);
-			executable.fused_payload_update.Function() = fused_function;
+		auto compiled =
+		    SljitCompiledFunction<SljitNativeAggregateUpdateFunction>::TryCreate(std::move(fused_code), fused_function);
+		if (compiled.IsExecutable()) {
+			executable.fused_payload_update = std::move(compiled);
 			executable.fused_payload_update_owns_group_lookup = true;
 			return true;
 		}
@@ -350,9 +355,10 @@ bool SljitBuildExecutableAggregateUpdatePayloadCode(const SljitNativeAggregateUp
 		string fused_error;
 		auto fused_code = BuildSljitNativeGroupedFusedPrimitiveAggregateUpdate(
 		    op.payloads, op.sink_info.aggregates, op.sink_info.aggregate_contract, fused_function, fused_error);
-		if (fused_code && fused_function) {
-			executable.fused_payload_update.Code() = std::move(fused_code);
-			executable.fused_payload_update.Function() = fused_function;
+		auto compiled =
+		    SljitCompiledFunction<SljitNativeAggregateUpdateFunction>::TryCreate(std::move(fused_code), fused_function);
+		if (compiled.IsExecutable()) {
+			executable.fused_payload_update = std::move(compiled);
 			return true;
 		}
 		if (!fused_error.empty() && fused_error.rfind("unsupported", 0) != 0) {

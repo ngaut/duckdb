@@ -27,31 +27,11 @@ public:
 		D_ASSERT((code != nullptr) == (function != nullptr));
 	}
 
-	void Set(unique_ptr<ExecutionRegionCodeHandle> code_p, FUNCTION function_p) {
-		D_ASSERT((code_p != nullptr) == (function_p != nullptr));
-		code = std::move(code_p);
-		function = function_p;
-	}
-
-	template <class BUILD>
-	bool Build(BUILD build) {
-		FUNCTION built_function = nullptr;
-		auto built_code = build(built_function);
-		if (!built_code || !built_function) {
-			code.reset();
-			function = nullptr;
-			return false;
+	static SljitCompiledFunction TryCreate(unique_ptr<ExecutionRegionCodeHandle> code_p, FUNCTION function_p) {
+		if (!code_p || !function_p) {
+			return {};
 		}
-		Set(std::move(built_code), built_function);
-		return true;
-	}
-
-	shared_ptr<ExecutionRegionCodeHandle> &Code() {
-		return code;
-	}
-
-	FUNCTION &Function() {
-		return function;
+		return SljitCompiledFunction(std::move(code_p), function_p);
 	}
 
 	FUNCTION Function() const {
