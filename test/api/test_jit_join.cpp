@@ -347,7 +347,7 @@ TEST_CASE("JIT composes selected source filters before hash build without delega
 	    manager,
 	    [](const ExecutionRegionEvent &event) {
 		    return EventPhase(event) == "runtime" && EventStatus(event) == "executed" &&
-		           StringUtil::Contains(EventJitRuntimePathCounts(event), "filter.selected_input_view=") &&
+		           StringUtil::Contains(EventJitRuntimePathCounts(event), "filter.selected_input_zero_copy=") &&
 		           StringUtil::Contains(EventGeneratedStageCountBreakdown(event), "hash_join_build.hash_table_append=");
 	    },
 	    [](const ExecutionRegionEvent &event) { REQUIRE(EventJitRuntimeDelegationCounts(event).empty()); });

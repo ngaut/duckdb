@@ -259,21 +259,24 @@ static bool SljitTryFastSelectFlatAllValidIntegerCompareReferences(const SljitNa
 template <class ADAPTER_SCRATCH>
 static idx_t SljitSelectExpression(SljitExecutableRegionExpression &expression, DataChunk &input,
                                    SelectionVector &filter_selection, ADAPTER_SCRATCH &adapter_scratch,
+                                   const SelectionVector *execute_sel, idx_t count,
                                    bool materialize_all_true_selection = true) {
 	auto &filter = expression.plan;
 	if (filter.kind == SljitNativeRegionExpressionKind::PREDICATE) {
 		idx_t fast_selected_count;
-		if (filter.predicate && SljitTryFastSelectFlatAllValidIntegerBetween(*filter.predicate, input, filter_selection,
-		                                                                     fast_selected_count)) {
+		if (!execute_sel && filter.predicate &&
+		    SljitTryFastSelectFlatAllValidIntegerBetween(*filter.predicate, input, filter_selection,
+		                                                 fast_selected_count)) {
 			return fast_selected_count;
 		}
-		if (filter.predicate && SljitTryFastSelectFlatAllValidIntegerCompareReferences(
-		                            *filter.predicate, input, filter_selection, fast_selected_count)) {
+		if (!execute_sel && filter.predicate &&
+		    SljitTryFastSelectFlatAllValidIntegerCompareReferences(*filter.predicate, input, filter_selection,
+		                                                           fast_selected_count)) {
 			return fast_selected_count;
 		}
 		auto native_input =
-		    SljitPrepareNativePredicateInput(adapter_scratch, input, expression.input_source_indices, nullptr,
-		                                     input.size(), nullptr, nullptr, filter_selection.data(), nullptr);
+		    SljitPrepareNativePredicateInput(adapter_scratch, input, expression.input_source_indices, execute_sel,
+		                                     count, nullptr, nullptr, filter_selection.data(), nullptr);
 		SljitExecuteNativeFunction(expression.predicate_select_function, native_input);
 		return native_input.selected_count;
 	}
@@ -282,22 +285,22 @@ static idx_t SljitSelectExpression(SljitExecutableRegionExpression &expression, 
 			throw InternalException("SLJIT typed filter expression has no generated selector");
 		}
 		SljitNativeVectorInput native_input;
-		adapter_scratch.PrepareExpressionTree(input, expression, native_input, nullptr, input.size());
-		native_input.execute_sel = nullptr;
+		adapter_scratch.PrepareExpressionTree(input, expression, native_input, execute_sel, count);
+		native_input.execute_sel = execute_sel ? execute_sel->data() : nullptr;
 		native_input.true_sel = filter_selection.data();
 		native_input.false_sel = nullptr;
 		native_input.selected_count = 0;
 		native_input.overflow_message = expression.overflow_message.c_str();
 		native_input.query_location = filter.query_location;
-		native_input.count = input.size();
+		native_input.count = count;
 		SljitExecuteNativeFunction(expression.select_function, native_input);
 		// A generated selector may leave an all-true identity vector unwritten.
 		// Ordinary filters represent that result by count alone; direct selector
 		// consumers request concrete indices here without burdening every generated
 		// lane group with a runtime mode branch.
-		if (materialize_all_true_selection && native_input.selected_count == input.size()) {
-			for (idx_t row_idx = 0; row_idx < input.size(); row_idx++) {
-				filter_selection.set_index(row_idx, row_idx);
+		if (materialize_all_true_selection && native_input.selected_count == count) {
+			for (idx_t row_idx = 0; row_idx < count; row_idx++) {
+				filter_selection.set_index(row_idx, execute_sel ? execute_sel->get_index(row_idx) : row_idx);
 			}
 		}
 		return native_input.selected_count;
@@ -308,10 +311,12 @@ static idx_t SljitSelectExpression(SljitExecutableRegionExpression &expression, 
 	         filter.kind == SljitNativeRegionExpressionKind::INTEGER_BETWEEN ||
 	         filter.kind == SljitNativeRegionExpressionKind::NULL_CHECK);
 	idx_t fast_selected_count;
-	if (SljitTryFastSelectFlatAllValidIntegerBetween(filter, input, filter_selection, fast_selected_count)) {
+	if (!execute_sel &&
+	    SljitTryFastSelectFlatAllValidIntegerBetween(filter, input, filter_selection, fast_selected_count)) {
 		return fast_selected_count;
 	}
-	if (SljitTryFastSelectFlatAllValidIntegerCompareReferences(filter, input, filter_selection, fast_selected_count)) {
+	if (!execute_sel &&
+	    SljitTryFastSelectFlatAllValidIntegerCompareReferences(filter, input, filter_selection, fast_selected_count)) {
 		return fast_selected_count;
 	}
 	UnifiedVectorFormat source_format;
@@ -329,7 +334,7 @@ static idx_t SljitSelectExpression(SljitExecutableRegionExpression &expression, 
 	native_input.right_source_data = filter.kind == SljitNativeRegionExpressionKind::INTEGER_COMPARE_REFERENCES
 	                                     ? NativeIntegerSourceData(right_source_format, filter.integer_kind)
 	                                     : nullptr;
-	native_input.execute_sel = nullptr;
+	native_input.execute_sel = execute_sel ? execute_sel->data() : nullptr;
 	native_input.source_sel = source_format.sel ? source_format.sel->data() : nullptr;
 	native_input.right_source_sel =
 	    filter.kind == SljitNativeRegionExpressionKind::INTEGER_COMPARE_REFERENCES && right_source_format.sel
@@ -347,18 +352,30 @@ static idx_t SljitSelectExpression(SljitExecutableRegionExpression &expression, 
 	native_input.false_sel = nullptr;
 	native_input.selected_count = 0;
 	native_input.overflow_message = nullptr;
-	native_input.count = input.size();
+	native_input.count = count;
 	SljitExecuteNativeFunction(expression.select_function, native_input);
 
 	return native_input.selected_count;
 }
 
 template <class ADAPTER_SCRATCH>
+static idx_t SljitSelectExpression(SljitExecutableRegionExpression &expression, DataChunk &input,
+                                   SelectionVector &filter_selection, ADAPTER_SCRATCH &adapter_scratch,
+                                   bool materialize_all_true_selection = true) {
+	return SljitSelectExpression(expression, input, filter_selection, adapter_scratch, nullptr, input.size(),
+	                             materialize_all_true_selection);
+}
+
+template <class ADAPTER_SCRATCH>
 static idx_t SljitSelectFilter(SljitExecutableRegionOp &op, DataChunk &input, SelectionVector &filter_selection,
-                               ADAPTER_SCRATCH &adapter_scratch) {
-	// Every filter primitive represents selected_count == input.size() as an
-	// identity view, so its selector need not write an all-true selection.
-	return SljitSelectExpression(op.filter, input, filter_selection, adapter_scratch, false);
+                               ADAPTER_SCRATCH &adapter_scratch, const SelectionVector *execute_sel = nullptr,
+                               idx_t count = DConstants::INVALID_INDEX) {
+	// Every filter primitive represents selected_count == count as the unchanged
+	// input view, so its selector need not write an all-true selection.
+	if (count == DConstants::INVALID_INDEX) {
+		count = input.size();
+	}
+	return SljitSelectExpression(op.filter, input, filter_selection, adapter_scratch, execute_sel, count, false);
 }
 
 template <class ADAPTER_SCRATCH>

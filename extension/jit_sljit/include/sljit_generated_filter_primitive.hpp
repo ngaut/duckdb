@@ -61,21 +61,26 @@ static bool SljitExecuteGeneratedFilterPrimitive(ExecutionRegionRuntime &runtime
                                                  vector<SljitExecutableRegionOp> &ops,
                                                  const SljitGeneratedFilterPrimitive &primitive,
                                                  const SljitRuntimeBatchView &input, SljitRuntimeBatchView &output) {
-	auto &source_chunk = SljitBindMaterializedRuntimeBatchInput(input, "SLJIT generated filter");
-	if (source_chunk.size() == 0) {
+	auto &source_chunk = SljitBindRuntimeBatchInput(input, "SLJIT generated filter");
+	if (input.count == 0) {
 		return false;
 	}
 
 	auto &filter_op = ops[primitive.filter_idx];
 	auto &filter_selection = scratch.FilterSelection(primitive.filter_idx);
 	auto filter_stage_start = SljitRegionStageStart(runtime);
-	auto selected_count = SljitSelectFilter(filter_op, source_chunk, filter_selection,
-	                                        scratch.ExpressionAdapterScratch(primitive.filter_idx, 0));
+	auto selected_count =
+	    SljitSelectFilter(filter_op, source_chunk, filter_selection,
+	                      scratch.ExpressionAdapterScratch(primitive.filter_idx, 0), input.selection, input.count);
 	RecordSljitRegionStageRuntime(runtime, primitive.filter_idx, filter_op.kind, "selection", filter_stage_start);
 	if (selected_count == 0) {
 		return false;
 	}
-	const auto selected = selected_count == source_chunk.size() ? nullptr : &filter_selection;
+	if (selected_count == input.count) {
+		output = input;
+		return true;
+	}
+	const auto selected = &filter_selection;
 	output = SljitRuntimeBatchViewFromChunk(source_chunk, selected, selected_count);
 	return true;
 }

@@ -193,10 +193,18 @@ per batch.
   consumers that require concrete indices materialize that identity once at
   the C++ boundary. The generated mixed-mask path backfills a deferred identity
   prefix at the first false lane.
-- Consecutive generated filters compose selections. When a source contract or
-  prior filter publishes a selected batch, the next filter builds dictionary
-  views over that selection and evaluates only the surviving rows. It must not
-  copy values merely to restore a materialized chunk invariant.
+- Consecutive generated filters compose absolute selections over the original
+  producer chunk. When a source contract or prior filter publishes a selected
+  batch, the next selector receives that selection as its execution domain and
+  emits original-row indices for the survivors. It does not build a dictionary
+  chunk merely to restore a materialized input invariant. The runtime proof is
+  `filter.selected_input_zero_copy`.
+- A selected hash-join result is a different ownership class: it can combine
+  probe selection, build selection, row pointers, and a semantic output map.
+  A generated filter materializes that virtual join view only when its
+  expression cannot execute against the referenced producer chunk directly.
+  Such scratch storage is owned per filter operation so nested filters cannot
+  alias or overwrite another operation's input.
 - Projection chains may consume selected views through the producer map and
   materialize only referenced columns. Reference lifetimes, especially for
   variable-width values, must remain valid until the consumer finishes.

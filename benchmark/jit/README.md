@@ -59,11 +59,12 @@ repeating membership work. Runtime tracing reports
 `hash_join_probe.perfect_probe.exact_source_filter` when this contract fires.
 
 Filtered hash-build validation covers source-filter selection composition and
-direct build ingress. Runtime tracing reports `filter.selected_input_view` when
-one generated filter consumes a previous selection, and
+direct build ingress. Runtime tracing reports `filter.selected_input_zero_copy`
+when one generated filter evaluates a previous selection against the original
+producer chunk, and
 `hash_join_build.selected_source_view` when the terminal consumes a selection
-without an intervening projection. These are dictionary-view paths and must
-have no runtime delegation entries.
+without an intervening projection. These selected-view paths must have no
+runtime delegation entries.
 
 Workload preparation and expected-result materialization always run with JIT
 off. The gate resets events and counters after preparation, immediately before
