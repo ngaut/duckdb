@@ -416,6 +416,27 @@ def verify_compiled_artifact_ownership() -> None:
 			"extension/jit_sljit/**/*.cpp",
 		),
 	)
+
+
+def verify_scan_filter_ownership() -> None:
+	common = read("src/include/duckdb/execution/execution_region_common.hpp")
+	for mode in ("NONE", "ALL", "DYNAMIC_ONLY"):
+		if mode not in common:
+			raise AssertionError(f"scan-filter ownership is missing explicit mode: {mode}")
+	lowering = read("src/include/duckdb/execution/execution_region_lowering.hpp")
+	if "ExecutionRegionScanFilterMode scan_filter_mode" not in lowering:
+		raise AssertionError("backend lowering must publish explicit scan-filter ownership")
+	source_plan = read("extension/jit_sljit/sljit_region_source_plan.cpp")
+	for contract in (
+		"source-strategy=mixed-source-filter",
+		"source_contract_filter_pushdown=dynamic-only",
+		"ExecutionRegionScanFilterMode::DYNAMIC_ONLY",
+	):
+		if contract not in source_plan:
+			raise AssertionError(f"SLJIT mixed source filtering is missing contract: {contract}")
+	scan = read("src/execution/operator/scan/physical_table_scan.cpp")
+	if "UsesDynamicScanFiltersOnly()" not in scan or "GetFinalTableFilters(op, nullptr)" not in scan:
+		raise AssertionError("table scan must derive dynamic-only filters from finalized runtime-filter state")
 	executable = read("extension/jit_sljit/include/sljit_region_executable.hpp")
 	if "SljitCompiledFunction" not in executable or "SljitLazyCompiledFunction" not in executable:
 		raise AssertionError("SLJIT executable regions must own code and callables through typed artifacts")
@@ -452,6 +473,7 @@ def main() -> None:
 	verify_aggregate_payload_descriptor_owns_typed_abi()
 	verify_grouped_reduction_lane_binding()
 	verify_compiled_artifact_ownership()
+	verify_scan_filter_ownership()
 	verify_runtime_proofs_are_typed()
 	verify_production_contract_ownership()
 	print("Execution-region architecture verification passed")

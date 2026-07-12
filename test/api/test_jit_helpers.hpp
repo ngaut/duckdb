@@ -437,6 +437,16 @@ static void RequireGeneratedSourceFilterContract(const ExecutionRegionEvent &eve
 	REQUIRE_FALSE(StringUtil::Contains(event.reason, "uses-scan-filters=true"));
 }
 
+static void RequireMixedSourceFilterContract(const ExecutionRegionEvent &event) {
+	INFO(event.reason);
+	REQUIRE(event.selected_source_execution == ExecutionRegionSourceExecutionKind::SOURCE_CONTRACT);
+	REQUIRE(event.selected_uses_scan_filters);
+	REQUIRE(StringUtil::Contains(event.reason, "generated static table scan filters with vectorized dynamic filters"));
+	REQUIRE(StringUtil::Contains(event.reason, "source-strategy=mixed-source-filter"));
+	REQUIRE(StringUtil::Contains(event.reason, "source_contract_filter_pushdown=dynamic-only"));
+	REQUIRE(StringUtil::Contains(event.reason, "uses-scan-filters=true"));
+}
+
 struct NoExtraJitEventCheck {
 	void operator()(const ExecutionRegionEvent &) const {
 	}

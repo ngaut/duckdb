@@ -994,8 +994,8 @@ void ExecutionRegionLoweringPlan::SetFullyFused(bool fully_fused_p) {
 	fully_fused = fully_fused_p;
 }
 
-void ExecutionRegionLoweringPlan::SetUsesScanFilters(bool uses_scan_filters_p) {
-	uses_scan_filters = uses_scan_filters_p;
+void ExecutionRegionLoweringPlan::SetScanFilterMode(ExecutionRegionScanFilterMode scan_filter_mode_p) {
+	scan_filter_mode = scan_filter_mode_p;
 }
 
 void ExecutionRegionLoweringPlan::SetSelectedSourceExecution(ExecutionRegionSourceExecutionKind source_execution) {
@@ -1035,7 +1035,11 @@ bool ExecutionRegionLoweringPlan::IsFullyFused() const {
 }
 
 bool ExecutionRegionLoweringPlan::UsesScanFilters() const {
-	return uses_scan_filters;
+	return scan_filter_mode != ExecutionRegionScanFilterMode::NONE;
+}
+
+ExecutionRegionScanFilterMode ExecutionRegionLoweringPlan::ScanFilterMode() const {
+	return scan_filter_mode;
 }
 
 ExecutionRegionSourceExecutionKind ExecutionRegionLoweringPlan::SelectedSourceExecution() const {
@@ -1290,7 +1294,7 @@ string ExecutionRegionLoweringPlan::CompactEventReason() const {
 		result += ";selected-source-execution=";
 		result += ExecutionRegionSourceExecutionKindToString(selected_source_execution);
 	}
-	if (uses_scan_filters) {
+	if (UsesScanFilters()) {
 		result += ";uses-scan-filters=true";
 	}
 	return result;

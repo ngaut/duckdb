@@ -26,16 +26,24 @@ struct SljitProjectionGraphLowering {
 };
 
 struct SljitSourceContractPlan {
-	bool uses_scan_filters = false;
+	ExecutionRegionScanFilterMode scan_filter_mode = ExecutionRegionScanFilterMode::NONE;
 	vector<LogicalType> source_contract_input_types;
 	vector<LogicalType> source_output_types;
+
+	bool UsesScanFilters() const {
+		return scan_filter_mode != ExecutionRegionScanFilterMode::NONE;
+	}
 
 	bool UsesSourceContractInputLayout() const {
 		return !source_contract_input_types.empty();
 	}
 
 	void Merge(const SljitSourceContractPlan &other) {
-		uses_scan_filters = uses_scan_filters || other.uses_scan_filters;
+		if (other.scan_filter_mode != ExecutionRegionScanFilterMode::NONE) {
+			D_ASSERT(scan_filter_mode == ExecutionRegionScanFilterMode::NONE ||
+			         scan_filter_mode == other.scan_filter_mode);
+			scan_filter_mode = other.scan_filter_mode;
+		}
 		if (source_contract_input_types.empty()) {
 			source_contract_input_types = other.source_contract_input_types;
 		}
@@ -43,6 +51,11 @@ struct SljitSourceContractPlan {
 			source_output_types = other.source_output_types;
 		}
 	}
+};
+
+struct SljitSourceStrategyContext {
+	bool prefer_duckdb_scan_filters = false;
+	bool supports_generated_mixed_filter = false;
 };
 
 struct SljitRegionNodePlan {
@@ -101,7 +114,7 @@ bool TryPlanSljitGeneratedSourceFilters(const ExecutionRegionNode &node, SljitSo
                                         bool render_diagnostics);
 SljitRegionNodePlan PlanSljitSourceNode(const ExecutionRegionNode &node, const ExecutionRegionContract &contract,
                                         ExecutionRegionSourceExecutionKind source_execution, bool render_diagnostics,
-                                        bool prefer_duckdb_scan_filters = false);
+                                        const SljitSourceStrategyContext &strategy_context = {});
 bool SljitCanExecuteSourceNode(const ExecutionRegionNode &node, const ExecutionRegionContract &contract);
 SljitRegionNodePlan PlanSljitHashJoinProbeOperatorNode(const ExecutionRegionNode &node,
                                                        const vector<LogicalType> &input_types,

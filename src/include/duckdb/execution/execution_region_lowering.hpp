@@ -102,7 +102,7 @@ struct DUCKDB_API ExecutionRegionLoweringPlan {
 	void SetRecordDetailedNodes(bool record_detailed_nodes);
 	void SetCompiledExecutionMode(ExecutionRegionExecutionMode execution_mode);
 	void SetFullyFused(bool fully_fused);
-	void SetUsesScanFilters(bool uses_scan_filters);
+	void SetScanFilterMode(ExecutionRegionScanFilterMode scan_filter_mode);
 	void SetSelectedSourceExecution(ExecutionRegionSourceExecutionKind source_execution);
 	void SetSourceContractInputTypes(vector<LogicalType> input_types);
 	void SetOperatorStageIR(string stage_ir);
@@ -113,6 +113,7 @@ struct DUCKDB_API ExecutionRegionLoweringPlan {
 	ExecutionRegionExecutionMode ExpectedCompiledExecutionMode() const;
 	bool IsFullyFused() const;
 	bool UsesScanFilters() const;
+	ExecutionRegionScanFilterMode ScanFilterMode() const;
 	ExecutionRegionSourceExecutionKind SelectedSourceExecution() const;
 	const vector<LogicalType> &SourceContractInputTypes() const;
 	string CompactEventReason() const;
@@ -129,7 +130,7 @@ struct DUCKDB_API ExecutionRegionLoweringPlan {
 	bool record_detailed_nodes = true;
 	bool fully_fused = false;
 	ExecutionRegionSourceExecutionKind selected_source_execution = ExecutionRegionSourceExecutionKind::NONE;
-	bool uses_scan_filters = false;
+	ExecutionRegionScanFilterMode scan_filter_mode = ExecutionRegionScanFilterMode::NONE;
 	vector<LogicalType> source_contract_input_types;
 	string operator_stage_ir;
 	string first_boundary_reason;

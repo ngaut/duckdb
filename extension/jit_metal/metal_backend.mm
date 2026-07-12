@@ -612,7 +612,7 @@ static shared_ptr<MetalRegionBackendPlan> BuildMetalRegionPlan(const ExecutionRe
     lowering_plan.SetFullyFused(true);
     lowering_plan.SetCompiledExecutionMode(ExecutionRegionExecutionMode::GPU);
     lowering_plan.SetSelectedSourceExecution(ExecutionRegionSourceExecutionKind::SOURCE_CONTRACT);
-    lowering_plan.SetUsesScanFilters(false);
+    lowering_plan.SetScanFilterMode(ExecutionRegionScanFilterMode::NONE);
     lowering_plan.backend_plan = plan;
     return plan;
 }

@@ -185,7 +185,13 @@ public:
 			if (global_state) {
 				max_threads = global_state->MaxThreads();
 			}
-			execution_source_config = BuildTableScanExecutionSourceConfig(op, filters, open_request);
+			auto execution_filters = filters;
+			if (open_request.UsesDynamicScanFiltersOnly()) {
+				execution_source_scan_filters =
+				    op.dynamic_filters ? op.dynamic_filters->GetFinalTableFilters(op, nullptr) : nullptr;
+				execution_filters = execution_source_scan_filters.get();
+			}
+			execution_source_config = BuildTableScanExecutionSourceConfig(op, execution_filters, open_request);
 			InitializeExecutionSourceContractTableScanGlobalState(context, op, execution_source_config,
 			                                                      execution_source_contract);
 		} else {
@@ -211,6 +217,8 @@ public:
 	DataChunk input_chunk;
 	//! Combined table filters, if we have dynamic filters
 	unique_ptr<TableFilterSet> table_filters;
+	//! Scan-owned filter subset when generated code owns static filters.
+	unique_ptr<TableFilterSet> execution_source_scan_filters;
 	TableScanExecutionSourceConfig execution_source_config;
 	TableScanExecutionSourceContractGlobalState execution_source_contract;
 

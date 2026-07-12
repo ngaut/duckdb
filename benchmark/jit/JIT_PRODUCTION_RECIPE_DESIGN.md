@@ -224,6 +224,24 @@ source-state opening, and source execution all consume that descriptor. This
 prevents planner/runtime drift and keeps storage-specific bind-data casts out of
 the generic table-function path.
 
+### Scan-filter ownership
+
+Scan-filter ownership is an explicit mode, not a boolean. `NONE` gives the
+generated source the unfiltered input contract, `ALL` keeps static and dynamic
+filters in DuckDB's scan, and `DYNAMIC_ONLY` lets DuckDB apply finalized runtime
+filters while the generated source owns supported static predicates. The open
+request and lowering plan publish the same mode, and `PhysicalTableScan` derives
+the dynamic-only filter set from the finalized dynamic-filter state. Static
+filters are never silently evaluated twice or silently dropped.
+
+SLJIT chooses between `ALL` and `DYNAMIC_ONLY` from workload-independent source
+facts and the complete candidate shape. Generated mixed string filtering
+requires a downstream grouped-aggregate contract that consumes the repaired
+source layout; highly reusable string domains remain storage-owned. The mixed
+path records `source-strategy=mixed-source-filter` and
+`source_contract_filter_pushdown=dynamic-only`, so runtime proof can distinguish
+composed ownership from the legacy all-or-nothing path.
+
 ## Primitive sequence
 
 The current primitive kinds are:

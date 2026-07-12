@@ -335,7 +335,7 @@ static void AccumulateExecutionRegionOpenRequest(ExecutionRegionPlan &plan, cons
 			            native_fused_source_owner
 			        ? ExecutionRegionSourceExecutionKind::SOURCE_CONTRACT
 			        : ExecutionRegionSourceExecutionKind::NONE;
-			contract.uses_scan_filters = false;
+			contract.scan_filter_mode = ExecutionRegionScanFilterMode::NONE;
 			contract.source_contract_input_types =
 			    native_fused_source_owner ? lowering_plan.SourceContractInputTypes() : vector<LogicalType>();
 			return;
@@ -352,8 +352,10 @@ static void AccumulateExecutionRegionOpenRequest(ExecutionRegionPlan &plan, cons
 		            native_fused_source_owner
 		        ? ExecutionRegionSourceExecutionKind::SOURCE_CONTRACT
 		        : ExecutionRegionSourceExecutionKind::NONE;
-		plan_contract.uses_scan_filters = native_fused_source_owner && lowering_plan.UsesScanFilters() &&
-		                                  (!source.filters.empty() || table_scan_contract.dynamic_filters);
+		plan_contract.scan_filter_mode =
+		    native_fused_source_owner && (!source.filters.empty() || table_scan_contract.dynamic_filters)
+		        ? lowering_plan.ScanFilterMode()
+		        : ExecutionRegionScanFilterMode::NONE;
 		plan_contract.source_contract_input_types =
 		    native_fused_source_owner ? lowering_plan.SourceContractInputTypes() : vector<LogicalType>();
 		return;

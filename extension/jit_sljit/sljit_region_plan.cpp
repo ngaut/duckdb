@@ -62,7 +62,7 @@ static vector<T> BuildSljitSourceOutputStats(const ExecutionRegionSourceInfo &so
 
 static void ApplySljitSourceContractPlan(const SljitSourceContractPlan &contract_plan,
                                          ExecutionRegionLoweringPlan &lowering_plan) {
-	lowering_plan.SetUsesScanFilters(contract_plan.uses_scan_filters);
+	lowering_plan.SetScanFilterMode(contract_plan.scan_filter_mode);
 	lowering_plan.SetSourceContractInputTypes(contract_plan.source_contract_input_types);
 }
 
@@ -358,14 +358,18 @@ ExecutionRegionLoweringPlan BuildSljitRegionPlan(const ExecutionRegionIR &region
 		auto &node = region_ir.nodes[node_idx];
 		if (node.kind == ExecutionRegionNodeKind::SOURCE) {
 			auto executable_source = SljitCanExecuteSourceNode(node, contract);
-			const bool prefer_duckdb_scan_filters =
+			SljitSourceStrategyContext source_strategy;
+			source_strategy.prefer_duckdb_scan_filters =
 			    candidate.traits.sink_kind == ExecutionRegionSinkKind::HASH_JOIN_BUILD;
+			source_strategy.supports_generated_mixed_filter =
+			    candidate.traits.sink_kind == ExecutionRegionSinkKind::HASH_AGGREGATE_UPDATE ||
+			    candidate.traits.sink_kind == ExecutionRegionSinkKind::PERFECT_HASH_AGGREGATE_UPDATE;
 			auto source_execution =
 			    candidate.source_execution != ExecutionRegionSourceExecutionKind::NONE
 			        ? candidate.source_execution
 			        : (node.source ? node.source->execution : ExecutionRegionSourceExecutionKind::NONE);
 			auto node_plan = executable_source ? PlanSljitSourceNode(node, contract, source_execution,
-			                                                         render_diagnostics, prefer_duckdb_scan_filters)
+			                                                         render_diagnostics, source_strategy)
 			                                   : PlanSljitRegionNode(node, cursor.InputTypes(), cursor.InputNotNull(),
 			                                                         backend_error, render_diagnostics);
 			const bool source_requires_native = executable_source &&
@@ -386,7 +390,7 @@ ExecutionRegionLoweringPlan BuildSljitRegionPlan(const ExecutionRegionIR &region
 			if (executable_source && node_plan.kind == ExecutionRegionLoweringKind::NATIVE) {
 				selected_source_contract.Merge(node_plan.source_contract);
 				native_region.uses_scan_filters =
-				    native_region.uses_scan_filters || node_plan.source_contract.uses_scan_filters;
+				    native_region.uses_scan_filters || node_plan.source_contract.UsesScanFilters();
 				vector<bool> source_not_null;
 				vector<Value> source_min_values;
 				vector<Value> source_max_values;

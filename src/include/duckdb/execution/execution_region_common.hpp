@@ -62,6 +62,7 @@ enum class ExecutionRegionSourceKind : uint8_t {
 	STATEFUL_OPERATOR
 };
 enum class ExecutionRegionSourceExecutionKind : uint8_t { NONE, DUCKDB_SOURCE_BOUNDARY, SOURCE_CONTRACT };
+enum class ExecutionRegionScanFilterMode : uint8_t { NONE, ALL, DYNAMIC_ONLY };
 enum class ExecutionRegionSourceContractStatus : uint8_t { NONE, READY, BLOCKED };
 enum class ExecutionRegionStateContractStatus : uint8_t { NONE, READY, MISSING, BLOCKED };
 enum class ExecutionRegionOperatorContractKind : uint8_t { NONE, HASH_JOIN_PROBE, NESTED_LOOP_JOIN_PROBE };
@@ -309,7 +310,7 @@ struct ExecutionRegionRecordedCounter {
 struct ExecutionRegionOpenRequest {
 	bool present = false;
 	ExecutionRegionSourceExecutionKind source_execution = ExecutionRegionSourceExecutionKind::NONE;
-	bool uses_scan_filters = false;
+	ExecutionRegionScanFilterMode scan_filter_mode = ExecutionRegionScanFilterMode::NONE;
 	vector<LogicalType> source_contract_input_types;
 
 	bool UsesSourceContract() const {
@@ -317,7 +318,11 @@ struct ExecutionRegionOpenRequest {
 	}
 
 	bool UsesScanFilters() const {
-		return uses_scan_filters;
+		return scan_filter_mode != ExecutionRegionScanFilterMode::NONE;
+	}
+
+	bool UsesDynamicScanFiltersOnly() const {
+		return scan_filter_mode == ExecutionRegionScanFilterMode::DYNAMIC_ONLY;
 	}
 
 	bool UsesSourceContractInputLayout() const {

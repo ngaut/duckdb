@@ -542,6 +542,63 @@ TEST_CASE("JIT source contracts preserve joined table scan filter contracts", "[
 	    });
 }
 
+TEST_CASE("JIT composes dynamic scan filters with generated static filters", "[api][jit]") {
+	DuckDB db;
+	Connection con(db);
+	auto &manager = ExecutionRegionManager::Get(*con.context);
+
+	ConfigureSljitForCoverage(con, false, true, true, 10000);
+	REQUIRE_NO_FAIL(con.Query("SET threads=1"));
+	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_mixed_filter_keys AS "
+	                          "SELECT i::INTEGER AS join_key FROM range(2500, 7500) tbl(i)"));
+	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_mixed_filter_fact AS "
+	                          "SELECT (i % 10000)::INTEGER AS join_key, i::BIGINT AS payload, "
+	                          "       (i % 50000)::INTEGER AS group_key, "
+	                          "       CASE WHEN i % 10 = 0 THEN 'special-' || i || '-requests' "
+	                          "            ELSE 'regular-' || i END AS comment "
+	                          "FROM range(131072) tbl(i)"));
+
+	const string query = "SELECT sum(group_total) FROM ("
+	                     "SELECT fact.group_key, sum(fact.payload) AS group_total "
+	                     "FROM jit_mixed_filter_fact fact "
+	                     "JOIN jit_mixed_filter_keys keys USING (join_key) "
+	                     "WHERE fact.comment NOT LIKE '%special%requests%' "
+	                     "GROUP BY group_key) grouped";
+	REQUIRE_NO_FAIL(con.Query("SET jit_policy='off'"));
+	auto expected = con.Query(query);
+	REQUIRE_NO_FAIL(*expected);
+	REQUIRE_NO_FAIL(con.Query("SET jit_policy='auto'"));
+	ClearJitTrace(manager, true);
+	auto actual = con.Query(query);
+	REQUIRE_NO_FAIL(*actual);
+	REQUIRE(actual->GetValue(0, 0) == expected->GetValue(0, 0));
+
+	RequireJitEvent(
+	    manager,
+	    [](const ExecutionRegionEvent &event) {
+		    return IsCompiledSljitRegionEvent(event) && event.has_candidate &&
+		           event.candidate_traits.source_filter_count > 0 &&
+		           event.candidate_traits.sink_kind == ExecutionRegionSinkKind::HASH_AGGREGATE_UPDATE &&
+		           StringUtil::Contains(event.ir, "dynamic_filters=true");
+	    },
+	    [](const ExecutionRegionEvent &event) {
+		    REQUIRE(event.candidate_uses_scan_filters);
+		    RequireMixedSourceFilterContract(event);
+		    RequireGeneratedMachineCodeRegion(event);
+	    });
+	RequireJitEvent(
+	    manager,
+	    [](const ExecutionRegionEvent &event) {
+		    return IsSljitRegionEvent(event) && EventPhase(event) == "runtime" && EventStatus(event) == "executed" &&
+		           event.selected_uses_scan_filters && event.source_contract_output_rows > 0 &&
+		           HasJitRuntimePathPrefix(event, "filter.") && HasJitRuntimePathPrefix(event, "hash_join_probe.");
+	    },
+	    [](const ExecutionRegionEvent &event) {
+		    REQUIRE(HasJitRuntimePathPrefix(event, "filter."));
+		    REQUIRE(HasJitRuntimePathPrefix(event, "hash_join_probe."));
+	    });
+}
+
 TEST_CASE("EXPLAIN ANALYZE exposes compact execution region profile", "[api][jit]") {
 	DuckDB db;
 	Connection con(db);
