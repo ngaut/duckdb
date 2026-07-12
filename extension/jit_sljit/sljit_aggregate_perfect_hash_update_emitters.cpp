@@ -43,34 +43,6 @@ static sljit_jump *EmitSljitPerfectHashExpressionTreeValue(
 	return invalid;
 }
 
-vector<sljit_jump *>
-EmitSljitPerfectHashPredicateSkipJumps(const SljitPerfectHashFusedUpdateEmitContext &context, bool fast_path,
-                                       bool all_valid, bool no_source_selection,
-                                       const vector<SljitTypedExpressionTreeDataPointerHoist> *predicate_data_hoists) {
-	vector<sljit_jump *> result;
-	if (!context.predicate) {
-		return result;
-	}
-	auto predicate_invalid = EmitSljitPerfectHashExpressionTreeValue(context, *context.predicate, fast_path, all_valid,
-	                                                                 no_source_selection, predicate_data_hoists);
-	if (predicate_invalid) {
-		result.push_back(predicate_invalid);
-	}
-	result.push_back(sljit_emit_cmp(context.compiler, SLJIT_EQUAL, SLJIT_R2, 0, SLJIT_IMM, 0));
-	return result;
-}
-
-void EmitSljitPerfectHashPredicateSkipLabel(struct sljit_compiler *compiler,
-                                            const vector<sljit_jump *> &predicate_skip_jumps) {
-	if (predicate_skip_jumps.empty()) {
-		return;
-	}
-	auto predicate_skip_label = sljit_emit_label(compiler);
-	for (auto jump : predicate_skip_jumps) {
-		sljit_set_label(jump, predicate_skip_label);
-	}
-}
-
 static void EmitSljitPerfectHashPayloadStatePointer(const SljitPerfectHashFusedUpdateEmitContext &context) {
 	if (context.dedicated_state_register) {
 		return;

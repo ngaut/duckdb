@@ -17,7 +17,6 @@ namespace duckdb {
 
 struct SljitPerfectHashFusedUpdateEmitContext {
 	struct sljit_compiler *compiler;
-	const ExecutionExpressionIR *predicate;
 	const vector<SljitNativeRegionExpressionPlan> &payloads;
 	const vector<ExecutionRegionAggregateInput> &aggregates;
 	const vector<SljitPerfectHashGroupPlan> &group_plans;
@@ -79,9 +78,7 @@ struct SljitPerfectHashFusedUpdatePlan {
 	sljit_sw sparse_run_cached_group_offset = -1;
 	sljit_sw sparse_run_cached_pointer_offset = -1;
 	sljit_sw sparse_run_cached_start_offset = -1;
-	sljit_sw sparse_run_cached_count_offset = -1;
 	bool sparse_run_cache_enabled = false;
-	bool sparse_run_cache_count_accepted_rows = false;
 	bool hoist_source_data_pointers = false;
 	bool hoist_group_data_pointers = false;
 	bool hoist_fast_source_data_pointers = false;
@@ -94,20 +91,14 @@ struct SljitPerfectHashFusedUpdatePlan {
 };
 
 bool TryBuildSljitPerfectHashFusedUpdatePlan(
-    const ExecutionExpressionIR *predicate, const vector<SljitNativeRegionExpressionPlan> &payloads,
-    const vector<ExecutionRegionAggregateInput> &aggregates, const vector<ExecutionRegionGroupInput> &groups,
-    const vector<SljitNativeRegionExpressionPlan> &group_expressions, const ExecutionRegionAggregateContract &contract,
-    const vector<bool> &source_not_null, const vector<Value> &source_min_values, const vector<Value> &source_max_values,
+    const vector<SljitNativeRegionExpressionPlan> &payloads, const vector<ExecutionRegionAggregateInput> &aggregates,
+    const vector<ExecutionRegionGroupInput> &groups, const vector<SljitNativeRegionExpressionPlan> &group_expressions,
+    const ExecutionRegionAggregateContract &contract, const vector<bool> &source_not_null,
+    const vector<Value> &source_min_values, const vector<Value> &source_max_values,
     SljitPerfectHashFusedUpdatePlan &result, string &error);
 
 void EmitSljitPerfectHashFusedUpdateLoops(const SljitPerfectHashFusedUpdateEmitContext &context,
                                           const SljitPerfectHashFusedUpdatePlan &update_plan);
-vector<sljit_jump *>
-EmitSljitPerfectHashPredicateSkipJumps(const SljitPerfectHashFusedUpdateEmitContext &context, bool fast_path,
-                                       bool all_valid, bool no_source_selection,
-                                       const vector<SljitTypedExpressionTreeDataPointerHoist> *predicate_data_hoists);
-void EmitSljitPerfectHashPredicateSkipLabel(struct sljit_compiler *compiler,
-                                            const vector<sljit_jump *> &predicate_skip_jumps);
 void EmitSljitPerfectHashGroupLookup(const SljitPerfectHashFusedUpdateEmitContext &context,
                                      const SljitPerfectHashGroupLookupOptions &options);
 void EmitSljitPerfectHashPayloadUpdates(const SljitPerfectHashFusedUpdateEmitContext &context,

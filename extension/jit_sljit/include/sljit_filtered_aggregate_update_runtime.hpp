@@ -41,27 +41,11 @@ static SinkResultType SljitExecuteNativeFilteredAggregateUpdate(ExecutionRegionR
 
 	auto aggregate_stage_start = SljitRegionStageStart(runtime);
 	auto &payload_scratch = scratch.AggregatePayloadScratch(op_idx);
-	if (op.aggregate_update.filtered_update.owns_perfect_hash_group_lookup) {
-		auto &grouped_state = binding.aggregate_update.grouped_state;
-		auto &reduction_lanes =
-		    scratch.GroupedReductionLanes(op_idx, op.aggregate_update.plan.sink_info.aggregate_contract,
-		                                  op.aggregate_update.payload_descriptors, payload_lanes);
-		SljitExecuteFusedPerfectHashGroupedPrimitiveAggregatePayloadUpdate(
-		    op.aggregate_update.filtered_update.payloads, op.aggregate_update.filtered_update.compiled.Function(),
-		    op.aggregate_update.plan.sink_info.groups, op.aggregate_update.plan.group_expressions,
-		    op.aggregate_update.group_source_not_null, op.aggregate_update.plan.sink_info.aggregate_contract,
-		    op.aggregate_update.payload_descriptors, payload_lanes, reduction_lanes, grouped_state.perfect_hash_layout,
-		    input, nullptr, input.size(), payload_scratch);
-		RecordSljitRegionStageRuntimePath(runtime, op_idx, op.kind, "filtered_perfect_hash_update",
-		                                  aggregate_stage_start);
-		RecordSljitRegionMaterializationElisionProof(runtime, op.kind, "filtered_perfect_hash_update", input.size());
-	} else {
-		SljitExecuteFilteredPrimitiveAggregateUpdate(op.aggregate_update.filtered_update,
-		                                             op.aggregate_update.payload_descriptors, payload_lanes, input,
-		                                             input.size(), payload_scratch);
-		RecordSljitRegionStageRuntimePath(runtime, op_idx, op.kind, "filtered_primitive_update", aggregate_stage_start);
-		RecordSljitRegionMaterializationElisionProof(runtime, op.kind, "filtered_primitive_update", input.size());
-	}
+	SljitExecuteFilteredPrimitiveAggregateUpdate(op.aggregate_update.filtered_update,
+	                                             op.aggregate_update.payload_descriptors, payload_lanes, input,
+	                                             input.size(), payload_scratch);
+	RecordSljitRegionStageRuntimePath(runtime, op_idx, op.kind, "filtered_primitive_update", aggregate_stage_start);
+	RecordSljitRegionMaterializationElisionProof(runtime, op.kind, "filtered_primitive_update", input.size());
 	return SinkResultType::NEED_MORE_INPUT;
 }
 

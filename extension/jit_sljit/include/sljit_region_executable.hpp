@@ -147,7 +147,6 @@ struct SljitExecutableFilteredAggregateUpdate {
 	vector<idx_t> input_source_indices;
 	vector<bool> input_source_not_null;
 	SljitCompiledFunction<SljitNativeAggregateUpdateFunction> compiled;
-	bool owns_perfect_hash_group_lookup = false;
 
 	bool IsExecutable() const {
 		return compiled.IsExecutable();
