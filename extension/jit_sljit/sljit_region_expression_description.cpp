@@ -128,6 +128,10 @@ string DescribeNativeRegionExpression(const SljitNativeRegionExpressionPlan &exp
 	case SljitNativeRegionExpressionKind::DECIMAL128_SCALE_UP:
 		result = "native:decimal128-scale-up:factor=" + std::to_string(expr.constant);
 		break;
+	case SljitNativeRegionExpressionKind::DECIMAL128_WIDENING_MULTIPLY:
+		result = "native:decimal128-widening-multiply:" + NativeSignedIntegerTypeName(expr.cast_source_width) + "x" +
+		         NativeSignedIntegerTypeName(expr.right_cast_source_width);
+		break;
 	case SljitNativeRegionExpressionKind::INTEGER_COALESCE:
 		result = NativeIntegerCoalesceReason(expr.signed_integer_width);
 		break;

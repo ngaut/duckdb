@@ -8,21 +8,26 @@
 
 #include "sljit_executable_aggregate_codegen.hpp"
 
+#include "sljit_aggregate_payload_descriptor.hpp"
 #include "sljit_native_codegen.hpp"
 
 namespace duckdb {
 
 bool SljitBuildExecutableAggregateUpdateFallbackPayloadCode(const SljitNativeAggregateUpdatePlan &op,
                                                             SljitExecutableAggregateUpdate &executable, string &error) {
-	executable.payload_update_code.reserve(op.payloads.size());
-	executable.payload_update_functions.reserve(op.payloads.size());
+	executable.payload_updates.reserve(op.payloads.size());
 	for (idx_t payload_idx = 0; payload_idx < op.payloads.size(); payload_idx++) {
 		auto &payload = op.payloads[payload_idx];
 		if (payload_idx >= op.sink_info.aggregates.size()) {
 			error = "SLJIT aggregate update payload has no aggregate contract";
 			return false;
 		}
-		auto primitive_kind = op.sink_info.aggregates[payload_idx].primitive_update_kind;
+		SljitAggregatePayloadDescriptor descriptor;
+		if (!SljitTryBindAggregatePayloadDescriptor(payload, op.sink_info.aggregates[payload_idx], descriptor)) {
+			error = "SLJIT aggregate update payload descriptor is invalid";
+			return false;
+		}
+		auto primitive_kind = descriptor.primitive_kind;
 		SljitNativeAggregateUpdateFunction function = nullptr;
 		unique_ptr<ExecutionRegionCodeHandle> code;
 		if (primitive_kind == AggregatePrimitiveUpdateKind::COUNT_STAR) {
@@ -37,8 +42,7 @@ bool SljitBuildExecutableAggregateUpdateFallbackPayloadCode(const SljitNativeAgg
 				}
 				return false;
 			}
-			executable.payload_update_code.push_back(std::move(code));
-			executable.payload_update_functions.push_back(function);
+			executable.payload_updates.emplace_back(std::move(code), function);
 			continue;
 		}
 		switch (payload.kind) {
@@ -47,7 +51,9 @@ bool SljitBuildExecutableAggregateUpdateFallbackPayloadCode(const SljitNativeAgg
 				if (primitive_kind == AggregatePrimitiveUpdateKind::SUM_INT64) {
 					code = BuildSljitNativeGroupedSumInt64Reference(payload.integer_kind, function, error);
 				} else if (primitive_kind == AggregatePrimitiveUpdateKind::SUM_HUGEINT) {
-					code = BuildSljitNativeGroupedSumHugeintReference(payload.integer_kind, function, error);
+					code = descriptor.IsDoubleWord()
+					           ? BuildSljitNativeGroupedSumHugeint128Reference(function, error)
+					           : BuildSljitNativeGroupedSumHugeintReference(payload.integer_kind, function, error);
 				} else if (primitive_kind == AggregatePrimitiveUpdateKind::SUM_DOUBLE) {
 					code = BuildSljitNativeGroupedSumDoubleReference(payload.double_source_kind, function, error);
 				} else if (primitive_kind == AggregatePrimitiveUpdateKind::COUNT) {
@@ -59,6 +65,8 @@ bool SljitBuildExecutableAggregateUpdateFallbackPayloadCode(const SljitNativeAgg
 			} else {
 				if (primitive_kind == AggregatePrimitiveUpdateKind::SUM_INT64) {
 					code = BuildSljitNativeUngroupedSumInt64Reference(payload.integer_kind, function, error);
+				} else if (primitive_kind == AggregatePrimitiveUpdateKind::SUM_HUGEINT && descriptor.IsDoubleWord()) {
+					code = BuildSljitNativeUngroupedSumHugeint128Reference(function, error);
 				} else if (primitive_kind == AggregatePrimitiveUpdateKind::SUM_DOUBLE) {
 					code = BuildSljitNativeUngroupedSumDoubleReference(payload.double_source_kind, function, error);
 				} else if (primitive_kind == AggregatePrimitiveUpdateKind::COUNT) {
@@ -163,8 +171,7 @@ bool SljitBuildExecutableAggregateUpdateFallbackPayloadCode(const SljitNativeAgg
 			}
 			return false;
 		}
-		executable.payload_update_code.push_back(std::move(code));
-		executable.payload_update_functions.push_back(function);
+		executable.payload_updates.emplace_back(std::move(code), function);
 	}
 	return true;
 }

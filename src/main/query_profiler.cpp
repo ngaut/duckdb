@@ -178,6 +178,7 @@ static string ExecutionRegionProfileStageCosts(const PhysicalRunnerCostProfile &
 	string result = "gen:" + std::to_string(cost.generated_stage_count);
 	result += ",gen_grouped_agg:" + std::to_string(cost.generated_grouped_aggregate_stage_count);
 	result += ",native_group_lookup:" + std::to_string(cost.native_grouped_state_address_lookup_count);
+	result += ",group_estimate:" + std::to_string(cost.grouped_aggregate_estimated_cardinality);
 	result += ",join:" + std::to_string(cost.native_join_stage_count);
 	result += ",join_build_sink:" + std::to_string(cost.native_hash_join_build_sink_count);
 	result += ",agg:" + std::to_string(cost.native_aggregate_stage_count);
@@ -348,6 +349,8 @@ static void AddExecutionRegionEvent(QueryProfileResult &row, const ExecutionRegi
 	      Time(event.runner_cost.generated_grouped_aggregate_stage_count)},
 	     {"runner_cost_native_grouped_state_address_lookup_count",
 	      Time(event.runner_cost.native_grouped_state_address_lookup_count)},
+	     {"runner_cost_grouped_aggregate_estimated_cardinality",
+	      Time(event.runner_cost.grouped_aggregate_estimated_cardinality)},
 	     {"runner_cost_materialization_elision_count", Time(event.runner_cost.materialization_elision_count)},
 	     {"runner_cost_selected_hash_join_filter_materialization_count",
 	      Time(event.runner_cost.selected_hash_join_filter_materialization_count)},
@@ -365,6 +368,8 @@ static void AddExecutionRegionEvent(QueryProfileResult &row, const ExecutionRegi
 	      Text(PhysicalRunnerNativeProtocolClassToString(event.runner_cost.native_protocol_class))},
 	     {"runner_cost_admission_class", NullableText(event.runner_cost.admission_class)},
 	     {"runner_cost_selection_reason", NullableText(event.runner_cost.selection_reason)},
+	     {"runner_cost_required_runtime_proofs",
+	      NullableText(RenderExecutionRegionJitRuntimeProofRequirements(event.runner_cost.required_runtime_proofs))},
 	     {"runner_cost_generated_expression_work", Time(event.runner_cost.generated_expression_work)},
 	     {"runner_cost_generated_stage_work", Time(event.runner_cost.generated_stage_work)},
 	     {"runner_cost_generated_backend_stage_work", Time(event.runner_cost.generated_backend_stage_work)},
@@ -507,6 +512,9 @@ static void RenderExecutionRegionCboPipelineToStream(std::ostream &ss, const Que
 			   << " saved=" << event.runner_cost.saved_work_per_batch
 			   << " benefit=" << event.runner_cost.accelerated_runner_benefit
 			   << " required=" << event.runner_cost.required_benefit << " net=" << event.runner_cost.net_benefit
+			   << " runtime_proofs="
+			   << ExecutionRegionProfileToken(
+			          RenderExecutionRegionJitRuntimeProofRequirements(event.runner_cost.required_runtime_proofs), 64)
 			   << " selected=" << (event.runner_cost.selected_accelerated_runner ? "true" : "false");
 		} else {
 			ss << " cost=none";

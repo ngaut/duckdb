@@ -151,10 +151,11 @@ bool TryPartiallyFuseNativeProjectionIntoRegularHashAggregateUpdate(const vector
 			if (!SljitPrimitiveAggregatePayloadSupported(payload, aggregate, true)) {
 				return false;
 			}
-		} else if (aggregate.child_types.size() != 1 ||
-		           payload.return_type.InternalType() != aggregate.child_types[0].InternalType() ||
-		           !aggregate.primitive_update_ready) {
-			return false;
+		} else {
+			SljitAggregatePayloadDescriptor descriptor;
+			if (!SljitTryBindAggregatePayloadDescriptor(payload, aggregate, descriptor)) {
+				return false;
+			}
 		}
 		payloads.push_back(std::move(payload));
 	}

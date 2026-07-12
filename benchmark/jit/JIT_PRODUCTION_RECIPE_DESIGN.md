@@ -79,6 +79,90 @@ The terminal primitive is one of the following:
 materialized, unselected input view, and it must report delegated runtime work.
 It is not whole-executor delegation.
 
+## Typed primitive recipe descriptor
+
+Each primitive payload recipe has one type-driven descriptor. Matcher, codegen,
+runtime adapter, and CBO consume the same
+descriptor rather than independently inferring support from expression kind or
+aggregate return type. The descriptor owns:
+
+- input physical type, width, signedness, and nullability contract;
+- result width and generated-value ABI;
+- grouped and ungrouped aggregate state layout;
+- supported expression forms and overflow semantics;
+- runtime source adapter and generated code entry point;
+- generated-stage, startup, and per-batch cost facts.
+
+Capability is rejected when any consumer cannot honor the descriptor. In
+particular, the typed expression reducer produces one signed machine-word
+value; it cannot admit an INT128 reference merely because the aggregate result
+state is a hugeint. INT128 values use the exact-width primitive reducer. This
+single boundary eliminates the former mixed BIGINT/HUGEINT special case and is
+the model for adding future widths or scalar types.
+
+The migration order is: define the descriptor from DuckDB aggregate ABI facts,
+make recipe binding the only capability decision, bind runtime adapters and
+codegen from that descriptor, then delete duplicate type switches. The
+descriptor exports backend-neutral work facts into `PhysicalRunnerCostInput`;
+DuckDB core remains the sole owner of CBO policy. No descriptor may contain
+workload, query, relation, or column identity.
+
+The ABI and state-layout migration is complete. `SljitAggregatePayloadValueABI`
+classifies payload storage once, while `SljitAggregatePayloadDescriptor` binds
+the primitive kind, aggregate index, input type, state size, and state offsets.
+Capability analysis, grouped and perfect-hash codegen, generic fallback codegen,
+specialized ungrouped and filtered-ungrouped reducers, and standalone runtime
+adapters consume that descriptor. Runtime validates the descriptor against
+DuckDB's live aggregate lane before executing. Exact-width reference reducers
+share one INT128 loader and one two-word add-with-carry emitter across grouped
+and ungrouped state locations. The descriptor also carries logical typed-lowering
+identity, so INT64 and DECIMAL64 payloads that share a machine-word storage ABI
+cannot be conflated by typed-expression planning. Generic, grouped, and
+perfect-hash typed plans consume the bound descriptor, including shared-payload
+optimizations. Remaining descriptor work is calibrated backend-neutral cost
+facts; it must not move CBO policy out of DuckDB core.
+
+Payload execution has no planner-aggregate dependency. Fused source
+classification, filtered and unfiltered adapters, perfect-hash adapters,
+preaggregated count binding, and payload-lane scratch lookup all consume the
+descriptor vector. Planner aggregate records stop at capability and native-sink
+binding; runtime cannot reconstruct primitive kind or state ABI from them.
+
+Grouped runtime strategies bind descriptors to DuckDB's live primitive lanes
+through `SljitGroupedReductionLaneBinding`. That binding owns the single check
+for aggregate identity, primitive kind, payload type, state size, grouped state
+offset, and value/is-set offsets. One `SljitAggregateOperatorScratch` owns every
+runtime-lifetime object for an aggregate operator: payload lanes, grouped
+reduction lanes, adapter and preaggregation scratch, continuation state,
+adaptive miss trackers, and the grouped sink binding. Ordinary, projected,
+row-pointer, and direct grouped terminals all reuse that owner; none may create
+a terminal-local binding. The first bind also selects one immutable execution
+family: perfect-hash fused lookup, grouped-state fused payload update, or
+grouped-state per-payload update. Every later chunk dispatches through that
+family instead of rediscovering the combination from mutable flags. Direct-new,
+append-new, state-address, and preaggregation admission consume the cached lane
+bindings instead of rebuilding lane validity. Perfect-hash commit and
+deferred-flag emitters consume payload descriptors directly. Local perfect-hash
+scratch offsets remain strategy-local storage and are not mistaken for DuckDB
+aggregate-state ABI.
+
+## Compiled artifact ownership
+
+Generated machine code and its callable entry point are one lifetime unit.
+`SljitCompiledFunction<T>` owns both; remapped expressions share that complete
+immutable artifact instead of copying a raw function pointer. Lazy artifacts add
+their one-time publication state to the same owner. The release-store publishes
+the complete artifact, and every callable read follows an acquire-load or the
+`call_once` synchronization edge.
+
+Regular hash-join code uses one specialization cache keyed by input validity,
+selection, layout, bloom use, and MARK-selection mode. Named variant fields,
+parallel specialization arrays, and independent publication objects are
+forbidden. Perfect-hash probes use the same lazy artifact contract. Expression,
+aggregate, nested-loop, and fused-projection code use the eager artifact
+contract, so code size, callable lifetime, and borrowed/remapped ownership
+cannot drift apart.
+
 ## Runtime batch ownership
 
 All primitives communicate through `SljitRuntimeBatchView`.
@@ -344,6 +428,15 @@ resolves native grouped state addresses and uses generated payload updates.
 Perfect-hash grouping owns its generated group lookup when the domain contract
 is valid.
 
+Widening decimal multiplication has an exact fixed-width recipe. It accepts two
+signed INT8/INT16/INT32/INT64 references cast to an INT128-backed decimal,
+lowers signed 64-by-64 multiplication to SLJIT's two-word result, and publishes
+one ordinary `hugeint_t` vector. `SUM(INT128)` uses DuckDB's primitive aggregate
+ABI and adds both lower and upper words, including carry, into the normal
+`SumState<hugeint_t>`. Grouped and ungrouped execution share the same semantic
+two-word addition contract. Wider values never enter the machine-word typed
+expression ABI.
+
 Computed perfect-hash keys may carry a signed integer cast into the generated
 lookup. The group plan keeps the pre-cast source width, loads that source
 directly, and lets the perfect-hash domain check reject values outside the
@@ -357,6 +450,13 @@ generated lookup replaces the native grouped-state lookup.
 Projected grouped updates may compose projection semantics into the grouped
 primitive when the descriptor proves the required sources. Otherwise recipe
 binding chooses an explicit projection materialization path or a native tail.
+Producer output maps resolve an expression and its original input separately.
+The resolver does not silently require identity: each consumer decides which
+mapped expression kinds it supports. Direct-input consumers still require an
+identity-like reference, while grouped-key consumers may preserve a proven
+integer cast in the row-pointer key descriptor. This keeps the semantic map
+generic and prevents one consumer's representation restriction from blocking a
+different consumer's valid fused path.
 
 Dense grouped preaggregation has two generic scopes:
 
@@ -366,9 +466,12 @@ Dense grouped preaggregation has two generic scopes:
   touched key;
 - pipeline-lifetime count-one preaggregation is admitted for one fixed-width
   integer group key, one `COUNT` or `COUNT_STAR` lane, a proven dense domain,
-  at least 2x estimated compression, and at most 1,048,576 domain slots. It
-  accumulates across source and join-output batches, then flushes standard-sized
-  unique-key chunks through the same grouped-state contract.
+  at least 2x estimated compression, and a compact domain within a 32 MiB local
+  accumulator budget. The common path stores 32-bit deltas plus touched-key
+  offsets; before the represented row count can overflow a compact delta, the
+  state promotes once to 64-bit deltas. It accumulates across source and
+  join-output batches, then flushes standard-sized unique-key chunks through
+  the same grouped-state contract.
 
 Pipeline accumulation is transactional per input batch: key rejection rolls
 back that batch before another route can run. The fallback grouped primitive
@@ -445,6 +548,12 @@ to generated backend work. Runtime selection is cardinality-driven:
   collisions retain exact SQL semantics. Unsupported shapes remain native or
   explicitly delegated.
 
+Semantic aggregate state lives at aggregate-pipeline scope, not compiled-region
+scratch scope. In particular, the direct grouped `COUNT(DISTINCT value)` pair
+set belongs to `HashAggregateLocalSinkState` and resets only with that local
+sink state. A region execution binding is a disposable adapter and must not own
+deduplication state whose meaning spans multiple compiled executions.
+
 Fast grouped state-address lookup is never a global aggregate default. The
 ordinary aggregate API uses DuckDB's regular lookup; only the direct DISTINCT
 count and DISTINCT finalize owners request the fast lookup explicitly. This
@@ -467,6 +576,14 @@ CBO uses backend-neutral, measurable facts rather than query identity:
 - source-contract scan penalties, stateful protocol costs, and startup cost;
 - whether the candidate is a full pipeline and which native protocol class it
   uses.
+
+Physical-pipeline upper bounds and post-lowering candidate costs use the same
+materialization-elision rule for generated projection-to-aggregate pipelines.
+The physical precheck may admit backend analysis when a projection feeds a
+generated aggregate update; final candidate admission still requires backend
+ownership and runtime proof. This avoids rejecting profitable adaptive grouped
+run preaggregation before capability analysis while preserving conservative
+fallback for unsupported or high-uniqueness shapes.
 
 Finalized runtime membership filters expose a build-side distinct-key upper
 bound through the core runtime layout. This includes perfect-hash membership
@@ -549,6 +666,14 @@ configured zero startup cost disables these two join startup guards for focused
 coverage and deliberate no-startup deployments; it does not weaken the native
 aggregate floor.
 
+A stateful source/sink candidate with known input cardinality receives no
+generated-backend or materialization-elision credit below 32 standard-vector
+batches. Expression work may still justify a stateless recipe, but stateful
+protocol startup cannot be hidden by a shallow generated prefix. The threshold
+is workload-independent: it keeps SF1-sized decimal aggregation vectorized
+while admitting the same exact recipe at SF10 and other sufficiently large
+inputs.
+
 Hash-build sinks never receive generated backend-stage credit when source output
 is unknown, and every candidate pays the native sink protocol. A direct build
 sink binds and materializes only the selected required source columns; when a
@@ -568,6 +693,14 @@ CBO credit must match typed runtime proofs. The proof vocabulary is:
 | Materialization elision | `MATERIALIZATION_ELISION` plus the applicable generated-work proof |
 | Full-pipeline ownership | `FULL_PIPELINE_OWNERSHIP` |
 | Explicit native/delegated work | `DELEGATED_RUNTIME_WORK`; it must not be counted as generated or elided work |
+
+The cost model derives a typed proof-requirement mask from the exact work
+components it credits and carries that mask through event and counter
+telemetry. Verification consumes `runner_cost_required_runtime_proofs`
+directly; benchmark code must not reconstruct requirements from individual
+cost columns. Adding a new credited work class therefore requires one core
+proof mapping and one runtime satisfaction rule, rather than parallel
+benchmark-specific inference paths.
 
 `NO_WORK` is used for compiled invocations that did not process input. A
 selected candidate must not receive credit for work that runtime counters cannot
@@ -595,6 +728,10 @@ python3 benchmark/jit/generic_benchmark.py --duckdb build/reldebug/duckdb --thre
 The generic harness runs setup and reference-result creation with JIT disabled,
 then resets telemetry before the timed statement. Setup CTAS compilation must
 never satisfy target-workload compilation or runtime-proof requirements.
+Production timing comes from the shell's monotonic microsecond wall clock and
+is emitted with six decimal places. Millisecond-rounded timing is too coarse for
+the short generic contracts: a one-millisecond median shift can fabricate or
+erase a material speedup without any execution change.
 
 Run the TPC-H regression gate for runtime, planner, backend, or performance
 changes:
@@ -611,6 +748,15 @@ old-baseline comparison, and a full-query high-sample promotion qualification:
 ```bash
 python3 benchmark/tpch/jit/run_tpch_regression_gate.py --promote-baseline --promotion-repeats 31 --no-build --queries all
 ```
+
+The default state is the accepted SF10 matrix. The independent SF1 state is
+`benchmark/tpch/jit/tmp/tpch_refactor_guard_state_sf1.json`; run or promote it
+with `--scale-factor 1 --baseline-state <that-path>`. Both accepted states must
+remain complete, production-mode, one-thread, 31-repeat artifacts.
+When `--scale-factor` is omitted, the gate inherits it from the selected
+accepted state. An explicit scale factor, thread count, timing mode, or query
+set that does not match that state is rejected before benchmarking. A candidate
+must never be compared with an artifact from a different TPC-H configuration.
 
 Baseline promotion is a ratchet, not a way to accept a regression. Partial
 query sets cannot update the accepted state unless the caller explicitly opts
@@ -656,6 +802,26 @@ focused recheck up to the configured high-sample count before the gate decides;
 correctness, compilation, and missing-runtime-proof failures are never retried
 as timing noise.
 
+Current accepted generic evidence is stored in
+`benchmark/jit/tmp/generic_t1_final_20260712` and
+`benchmark/jit/tmp/generic_t4_final_20260712`. Both production gates pass with
+zero correctness or compile errors across range arithmetic, filters, CASE,
+multi-aggregate, persistent scans, nullable expressions, grouped aggregation,
+DISTINCT, numeric joins, and string joins. These artifacts are workload-class
+evidence; they do not authorize workload-specific capability checks.
+
+Current full-suite validation is stored in
+`generic_runtime_boundary_t{1,4}_20260712` (the t1 artifact uses the `_retry`
+suffix after an unrelated signal-9 interruption): all 16 workload classes pass
+with zero correctness or compile errors and 1.09x-3.76x speedups. Complete
+final-code SF1 and SF10 artifacts under
+`sf{1,10}_runtime_boundary_full_20260712` pass accepted-baseline and
+runtime-contract verification. SF10's isolated three-repeat Q7 outlier clears
+the automatic 15-repeat focused recheck. Final seven-repeat Q1/Q9/Q13/Q18 rechecks under
+`sf{1,10}_runtime_boundary_20260712` preserve 4/4 JIT coverage and 4/4 material
+wins. A 15-repeat SF10 Q13 recheck confirms its marginal material win; Q17
+remains a correct, baseline-equivalent non-material JIT selection.
+
 ## Current boundaries
 
 - Mixed, filtered, ordered, multi-aggregate, and unsupported DISTINCT shapes
@@ -663,9 +829,10 @@ as timing noise.
 - Variable-width and string expression coverage is narrower than fixed-width
   coverage.
 - Pipeline-lifetime dense accumulation currently covers only one `COUNT` or
-  `COUNT_STAR` lane. Other unordered sparse payload shapes use batch-local
-  dense preaggregation when profitable, consecutive-run preaggregation when
-  proven, or exact per-row grouped-state updates.
+  `COUNT_STAR` lane within the 32 MiB compact-domain budget. Other unordered
+  sparse payload shapes use batch-local dense preaggregation when profitable,
+  consecutive-run preaggregation when proven, or exact per-row grouped-state
+  updates.
 - Native source/sink protocols remain native unless an explicit execution
   contract makes them safe to compose.
 - Native-only execution is a valid result of capability analysis, not a failed

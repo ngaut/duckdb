@@ -44,21 +44,15 @@ static bool SljitCanApplyRunPreaggregatedInputVectorAggregateUpdate(
 	auto &sink_info = op.aggregate_update.plan.sink_info;
 	if (sink_info.groups.size() != group_sources.size() ||
 	    sink_info.aggregates.size() != op.aggregate_update.payloads.size() ||
+	    sink_info.aggregates.size() != op.aggregate_update.payload_descriptors.size() ||
 	    sink_info.aggregates.size() != payload_lanes.size() ||
 	    sink_info.aggregates.size() != preaggregate_scratch.payloads.size() ||
 	    preaggregate_scratch.group_row_counts.size() != run_count) {
 		return false;
 	}
 	for (idx_t payload_idx = 0; payload_idx < sink_info.aggregates.size(); payload_idx++) {
-		auto &aggregate = sink_info.aggregates[payload_idx];
-		auto lane = payload_lanes[payload_idx];
-		if (!lane || !lane->ready || lane->aggregate_index != aggregate.aggregate_index ||
-		    aggregate.aggregate_index >= sink_info.aggregate_contract.grouped_state_offsets.size() ||
-		    lane->state_offset != sink_info.aggregate_contract.grouped_state_offsets[aggregate.aggregate_index] ||
-		    lane->state_value_offset != aggregate.primitive_update_state_value_offset ||
-		    lane->state_is_set_offset != aggregate.primitive_update_state_is_set_offset ||
-		    lane->kind != aggregate.primitive_update_kind ||
-		    lane->kind != preaggregate_scratch.payloads[payload_idx].kind) {
+		if (op.aggregate_update.payload_descriptors[payload_idx].primitive_kind !=
+		    preaggregate_scratch.payloads[payload_idx].kind) {
 			return false;
 		}
 	}
@@ -262,6 +256,7 @@ static bool TryExecuteRunPreaggregatedInputVectorGroupedTargetPayloadUpdate(
     DataChunk &payload_input, const vector<ExecutionRowPointerGroupKeySource> &group_sources,
     const vector<idx_t> &payload_source_indices,
     const vector<const ExecutionPrimitiveAggregateUpdateLane *> &payload_lanes,
+    const vector<SljitGroupedReductionLaneBinding> &reduction_lanes,
     ExecutionGroupedAggregateStateAddressBinding &grouped_state, SljitAggregatePayloadAdapterScratch &payload_scratch,
     bool finish, optional_ptr<const ExecutionDenseGroupDomain> dense_domain = nullptr) {
 	auto &preaggregate_scratch = scratch.AggregatePreaggregateScratch(op_idx);
@@ -269,9 +264,10 @@ static bool TryExecuteRunPreaggregatedInputVectorGroupedTargetPayloadUpdate(
 	idx_t run_count = 0;
 	bool fused_run_payloads = false;
 	auto preaggregate_stage_start = SljitRegionStageStart(runtime);
-	if (!TryPreaggregateInputVectorPrimitiveGroupRunsBest(
-	        op, payload_input, group_sources, payload_source_indices, payload_lanes, preaggregate_scratch,
-	        payload_scratch, optional_ptr<DataChunk>(&run_group_keys), run_count, fused_run_payloads)) {
+	if (!TryPreaggregateInputVectorPrimitiveGroupRunsBest(op, payload_input, group_sources, payload_source_indices,
+	                                                      payload_lanes, reduction_lanes, preaggregate_scratch,
+	                                                      payload_scratch, optional_ptr<DataChunk>(&run_group_keys),
+	                                                      run_count, fused_run_payloads)) {
 		return false;
 	}
 	RecordSljitRegionStageRuntime(runtime, op_idx, op.kind,

@@ -8,8 +8,11 @@
 
 #pragma once
 
+#include "sljit_aggregate_payload_descriptor.hpp"
+#include "sljit_compiled_function.hpp"
 #include "sljit_function_types.hpp"
 #include "sljit_hash_join_probe_specialization.hpp"
+
 #include "sljit_region_plan.hpp"
 
 #include "duckdb/execution/execution_aggregate_runtime.hpp"
@@ -23,36 +26,16 @@ struct SljitExecutableRegionExpression {
 	SljitNativeRegionExpressionPlan plan;
 	vector<idx_t> input_source_indices;
 	vector<bool> input_source_not_null;
-	unique_ptr<ExecutionRegionCodeHandle> code;
-	SljitNativeVectorFunction function = nullptr;
-	unique_ptr<ExecutionRegionCodeHandle> flat_code;
-	SljitNativeVectorFunction flat_function = nullptr;
-	unique_ptr<ExecutionRegionCodeHandle> select_code;
-	SljitNativeVectorFunction select_function = nullptr;
-	unique_ptr<ExecutionRegionCodeHandle> predicate_code;
-	SljitNativePredicateFunction predicate_function = nullptr;
-	unique_ptr<ExecutionRegionCodeHandle> predicate_select_code;
-	SljitNativePredicateFunction predicate_select_function = nullptr;
+	SljitCompiledFunction<SljitNativeVectorFunction> vector;
+	SljitCompiledFunction<SljitNativeVectorFunction> flat;
+	SljitCompiledFunction<SljitNativeVectorFunction> select;
+	SljitCompiledFunction<SljitNativePredicateFunction> predicate;
+	SljitCompiledFunction<SljitNativePredicateFunction> predicate_select;
 	string overflow_message;
 
 	idx_t CodeSize() const {
-		idx_t result = 0;
-		if (code) {
-			result += code->CodeSize();
-		}
-		if (flat_code) {
-			result += flat_code->CodeSize();
-		}
-		if (select_code) {
-			result += select_code->CodeSize();
-		}
-		if (predicate_code) {
-			result += predicate_code->CodeSize();
-		}
-		if (predicate_select_code) {
-			result += predicate_select_code->CodeSize();
-		}
-		return result;
+		return vector.CodeSize() + flat.CodeSize() + select.CodeSize() + predicate.CodeSize() +
+		       predicate_select.CodeSize();
 	}
 };
 
@@ -65,75 +48,27 @@ static inline bool SljitSourceKnownNotNull(const vector<bool> *source_not_null, 
 }
 
 struct SljitExecutableRegularHashJoinProbeCode {
-	unique_ptr<ExecutionRegionCodeHandle> code;
-	SljitNativeRegularHashJoinProbeFunction function = nullptr;
-	unique_ptr<ExecutionRegionCodeHandle> bloom_code;
-	SljitNativeRegularHashJoinProbeFunction bloom_function = nullptr;
-	unique_ptr<ExecutionRegionCodeHandle> mark_match_selection_code;
-	SljitNativeRegularHashJoinProbeFunction mark_match_selection_function = nullptr;
-	unique_ptr<ExecutionRegionCodeHandle> mark_match_selection_bloom_code;
-	SljitNativeRegularHashJoinProbeFunction mark_match_selection_bloom_function = nullptr;
-	unique_ptr<ExecutionRegionCodeHandle> mark_nonmatch_selection_code;
-	SljitNativeRegularHashJoinProbeFunction mark_nonmatch_selection_function = nullptr;
-	unique_ptr<ExecutionRegionCodeHandle> mark_nonmatch_selection_bloom_code;
-	SljitNativeRegularHashJoinProbeFunction mark_nonmatch_selection_bloom_function = nullptr;
-
-	struct AllValidSpecialization {
-		unique_ptr<ExecutionRegionCodeHandle> code;
-		SljitNativeRegularHashJoinProbeFunction function = nullptr;
-
-		idx_t CodeSize() const {
-			return code ? code->CodeSize() : 0;
-		}
-	};
-	static constexpr idx_t ALL_VALID_SPECIALIZATION_COUNT =
-	    SljitHashJoinProbeAllValidSpecializationKey::SPECIALIZATION_COUNT;
-	AllValidSpecialization all_valid_specializations[ALL_VALID_SPECIALIZATION_COUNT];
-
-	AllValidSpecialization &AllValidSpecializationFor(const SljitHashJoinProbeAllValidSpecializationKey &key) {
-		return all_valid_specializations[key.CacheIndex()];
-	}
-
-	AllValidSpecialization mark_match_all_valid_specializations[ALL_VALID_SPECIALIZATION_COUNT];
-
-	AllValidSpecialization &MarkMatchAllValidSpecializationFor(const SljitHashJoinProbeAllValidSpecializationKey &key) {
-		return mark_match_all_valid_specializations[key.CacheIndex()];
-	}
-
-	AllValidSpecialization mark_nonmatch_all_valid_specializations[ALL_VALID_SPECIALIZATION_COUNT];
-
-	AllValidSpecialization &
-	MarkNonMatchAllValidSpecializationFor(const SljitHashJoinProbeAllValidSpecializationKey &key) {
-		return mark_nonmatch_all_valid_specializations[key.CacheIndex()];
+	SljitLazyCompiledFunction<SljitNativeRegularHashJoinProbeFunction> &
+	Specialization(const SljitHashJoinProbeSpecializationKey &key) {
+		return specializations[key.CacheIndex()];
 	}
 
 	idx_t CodeSize() const {
-		idx_t result = code ? code->CodeSize() : 0;
-		result += bloom_code ? bloom_code->CodeSize() : 0;
-		result += mark_match_selection_code ? mark_match_selection_code->CodeSize() : 0;
-		result += mark_match_selection_bloom_code ? mark_match_selection_bloom_code->CodeSize() : 0;
-		result += mark_nonmatch_selection_code ? mark_nonmatch_selection_code->CodeSize() : 0;
-		result += mark_nonmatch_selection_bloom_code ? mark_nonmatch_selection_bloom_code->CodeSize() : 0;
-		for (auto &specialization : all_valid_specializations) {
-			result += specialization.CodeSize();
-		}
-		for (auto &specialization : mark_match_all_valid_specializations) {
-			result += specialization.CodeSize();
-		}
-		for (auto &specialization : mark_nonmatch_all_valid_specializations) {
+		idx_t result = 0;
+		for (auto &specialization : specializations) {
 			result += specialization.CodeSize();
 		}
 		return result;
 	}
+
+private:
+	array<SljitLazyCompiledFunction<SljitNativeRegularHashJoinProbeFunction>,
+	      SljitHashJoinProbeSpecializationKey::SPECIALIZATION_COUNT>
+	    specializations;
 };
 
 struct SljitExecutablePerfectHashJoinProbeCode {
-	unique_ptr<ExecutionRegionCodeHandle> code;
-	SljitNativePerfectHashJoinProbeFunction function = nullptr;
-
-	idx_t CodeSize() const {
-		return code ? code->CodeSize() : 0;
-	}
+	SljitLazyCompiledFunction<SljitNativePerfectHashJoinProbeFunction> compiled;
 };
 
 struct SljitExecutableHashJoinProbe {
@@ -148,7 +83,7 @@ struct SljitExecutableHashJoinProbe {
 
 	idx_t CodeSize() const {
 		idx_t result = regular.CodeSize();
-		result += perfect.CodeSize();
+		result += perfect.compiled.CodeSize();
 		result += residual_filter.CodeSize();
 		return result;
 	}
@@ -160,12 +95,11 @@ struct SljitExecutableHashJoinBuild {
 
 struct SljitExecutableNestedLoopJoinProbe {
 	SljitNativeNestedLoopJoinProbePlan plan;
-	unique_ptr<ExecutionRegionCodeHandle> code;
-	SljitNativeNestedLoopJoinProbeFunction function = nullptr;
+	SljitCompiledFunction<SljitNativeNestedLoopJoinProbeFunction> compiled;
 	vector<SljitExecutableRegionExpression> lhs_conditions;
 
 	idx_t CodeSize() const {
-		idx_t result = code ? code->CodeSize() : 0;
+		idx_t result = compiled.CodeSize();
 		for (auto &condition : lhs_conditions) {
 			result += condition.CodeSize();
 		}
@@ -212,16 +146,15 @@ struct SljitExecutableFilteredAggregateUpdate {
 	vector<SljitExecutableRegionExpression> payloads;
 	vector<idx_t> input_source_indices;
 	vector<bool> input_source_not_null;
-	unique_ptr<ExecutionRegionCodeHandle> code;
-	SljitNativeAggregateUpdateFunction function = nullptr;
+	SljitCompiledFunction<SljitNativeAggregateUpdateFunction> compiled;
 	bool owns_perfect_hash_group_lookup = false;
 
 	bool IsExecutable() const {
-		return code && function;
+		return compiled.IsExecutable();
 	}
 
 	idx_t CodeSize() const {
-		return code ? code->CodeSize() : 0;
+		return compiled.CodeSize();
 	}
 };
 
@@ -246,14 +179,13 @@ struct SljitGroupedAggregateDirectUpdatePlan {
 struct SljitExecutableAggregateUpdate {
 	SljitNativeAggregateUpdatePlan plan;
 	vector<SljitExecutableRegionExpression> payloads;
+	vector<SljitAggregatePayloadDescriptor> payload_descriptors;
 	SljitExecutableFilteredAggregateUpdate filtered_update;
 	ExecutionDenseGroupDomain dense_group_domain;
 	SljitGroupedAggregateDirectUpdatePlan grouped_direct_update;
-	unique_ptr<ExecutionRegionCodeHandle> fused_payload_update_code;
-	SljitNativeAggregateUpdateFunction fused_payload_update_function = nullptr;
+	SljitCompiledFunction<SljitNativeAggregateUpdateFunction> fused_payload_update;
 	bool fused_payload_update_owns_group_lookup = false;
-	vector<unique_ptr<ExecutionRegionCodeHandle>> payload_update_code;
-	vector<SljitNativeAggregateUpdateFunction> payload_update_functions;
+	vector<SljitCompiledFunction<SljitNativeAggregateUpdateFunction>> payload_updates;
 
 	idx_t CodeSize() const {
 		idx_t result = 0;
@@ -261,9 +193,9 @@ struct SljitExecutableAggregateUpdate {
 			result += payload.CodeSize();
 		}
 		result += filtered_update.CodeSize();
-		result += fused_payload_update_code ? fused_payload_update_code->CodeSize() : 0;
-		for (auto &code : payload_update_code) {
-			result += code ? code->CodeSize() : 0;
+		result += fused_payload_update.CodeSize();
+		for (auto &payload_update : payload_updates) {
+			result += payload_update.CodeSize();
 		}
 		return result;
 	}
@@ -308,11 +240,9 @@ struct SljitExecutableRegionOp {
 	SljitExecutableAggregateUpdate aggregate_update;
 	vector<SljitExecutableRegionExpression> projections;
 	SljitDirectProjectionPlan flat_fused_floating_projection_plan;
-	unique_ptr<ExecutionRegionCodeHandle> flat_fused_floating_projection_code;
-	SljitNativeVectorFunction flat_fused_floating_projection_function = nullptr;
+	SljitCompiledFunction<SljitNativeVectorFunction> flat_fused_floating_projection;
 	vector<SljitDirectProjectionPlan> flat_fused_fixed_projection_plans;
-	vector<unique_ptr<ExecutionRegionCodeHandle>> flat_fused_fixed_projection_codes;
-	vector<SljitNativeVectorFunction> flat_fused_fixed_projection_functions;
+	vector<SljitCompiledFunction<SljitNativeVectorFunction>> flat_fused_fixed_projections;
 
 	idx_t CodeSize() const {
 		idx_t result = 0;
@@ -334,11 +264,9 @@ struct SljitExecutableRegionOp {
 		if (kind == SljitNativeRegionOpKind::AGGREGATE_UPDATE) {
 			result += aggregate_update.CodeSize();
 		}
-		if (flat_fused_floating_projection_code) {
-			result += flat_fused_floating_projection_code->CodeSize();
-		}
-		for (auto &code : flat_fused_fixed_projection_codes) {
-			result += code ? code->CodeSize() : 0;
+		result += flat_fused_floating_projection.CodeSize();
+		for (auto &projection : flat_fused_fixed_projections) {
+			result += projection.CodeSize();
 		}
 		for (auto &projection : projections) {
 			result += projection.CodeSize();

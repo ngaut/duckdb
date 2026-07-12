@@ -13,29 +13,28 @@
 
 namespace duckdb {
 
-static void SljitExecuteFilteredPrimitiveAggregateUpdate(
-    SljitExecutableFilteredAggregateUpdate &filtered_update, const vector<ExecutionRegionAggregateInput> &aggregates,
-    const vector<const ExecutionPrimitiveAggregateUpdateLane *> &lanes, DataChunk &input, idx_t count,
-    SljitAggregatePayloadAdapterScratch &adapter_scratch) {
-	if (!filtered_update.function) {
+static void
+SljitExecuteFilteredPrimitiveAggregateUpdate(SljitExecutableFilteredAggregateUpdate &filtered_update,
+                                             const vector<SljitAggregatePayloadDescriptor> &payload_descriptors,
+                                             const vector<const ExecutionPrimitiveAggregateUpdateLane *> &lanes,
+                                             DataChunk &input, idx_t count,
+                                             SljitAggregatePayloadAdapterScratch &adapter_scratch) {
+	if (!filtered_update.compiled.Function()) {
 		throw InternalException("SLJIT filtered aggregate primitive payload update is missing generated code");
 	}
-	if (aggregates.size() != filtered_update.payloads.size() || aggregates.size() != lanes.size()) {
+	if (payload_descriptors.size() != filtered_update.payloads.size() || payload_descriptors.size() != lanes.size()) {
 		throw InternalException("SLJIT filtered aggregate primitive payload count mismatch");
 	}
 
-	adapter_scratch.PrepareFiltered(filtered_update.input_source_indices.size(), aggregates.size());
+	adapter_scratch.PrepareFiltered(filtered_update.input_source_indices.size(), payload_descriptors.size());
 	auto &aggregate_int64_values = adapter_scratch.aggregate_int64_values;
 	auto &aggregate_hugeint_values = adapter_scratch.aggregate_hugeint_values;
 	auto &aggregate_state_is_sets = adapter_scratch.aggregate_state_is_sets;
 	auto &aggregate_row_counts = adapter_scratch.aggregate_row_counts;
-	for (idx_t payload_idx = 0; payload_idx < aggregates.size(); payload_idx++) {
-		auto &lane = SljitRequireAggregatePrimitiveLane(
-		    lanes, aggregates, payload_idx, "SLJIT filtered aggregate primitive lane missing for aggregate %llu");
-		auto &aggregate = aggregates[payload_idx];
-		if (lane.kind != aggregate.primitive_update_kind) {
-			throw InternalException("SLJIT filtered aggregate primitive lane kind mismatch");
-		}
+	for (idx_t payload_idx = 0; payload_idx < payload_descriptors.size(); payload_idx++) {
+		auto &lane =
+		    SljitRequireAggregatePayloadLane(lanes, payload_descriptors, payload_idx,
+		                                     "SLJIT filtered aggregate primitive lane invalid for aggregate %llu");
 		if (lane.kind == AggregatePrimitiveUpdateKind::COUNT_STAR) {
 			SljitBindUngroupedCountStarPrimitiveLane(lane, aggregate_int64_values, aggregate_row_counts, payload_idx,
 			                                         "SLJIT filtered aggregate count-star lane is incomplete: %s");
@@ -54,10 +53,9 @@ static void SljitExecuteFilteredPrimitiveAggregateUpdate(
 	}
 
 	auto &payload_sources = adapter_scratch.payload_sources;
-	SljitPrepareTypedAggregatePayloadSources(input, filtered_update.input_source_indices, nullptr, count,
-	                                         payload_sources,
-	                                         "SLJIT filtered aggregate expression-tree source is out of range",
-	                                         &filtered_update.input_source_not_null);
+	SljitPrepareTypedAggregatePayloadSources(
+	    input, filtered_update.input_source_indices, nullptr, count, payload_sources,
+	    "SLJIT filtered aggregate expression-tree source is out of range", &filtered_update.input_source_not_null);
 
 	SljitNativeVectorInput native_input;
 	SljitBindTypedAggregatePayloadSources(native_input, payload_sources, nullptr);
@@ -67,7 +65,7 @@ static void SljitExecuteFilteredPrimitiveAggregateUpdate(
 	native_input.aggregate_row_counts = aggregate_row_counts.data();
 	native_input.count = count;
 	native_input.has_error = false;
-	SljitExecuteNativeAggregatePayloadFunction(filtered_update.function, native_input);
+	SljitExecuteNativeAggregatePayloadFunction(filtered_update.compiled.Function(), native_input);
 }
 
 } // namespace duckdb

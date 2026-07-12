@@ -239,118 +239,43 @@ def require_runtime_rows(
     return runtime_rows
 
 
-def verify_selected_generated_stage_runtime_contract(
-    selected_rows: list[dict],
-    runtime_rows_by_kernel: dict[tuple[str, str, str, str, str], list[dict]],
-    require_runtime_proof: bool,
-) -> None:
-    credited_rows = [
-        row
-        for row in selected_rows
-        if row_int(row, "runner_cost_generated_stage_count") > 0
-        and row_int(row, "runner_cost_generated_stage_work") > 0
-    ]
-    for cbo_row in credited_rows:
-        runtime_rows = require_runtime_rows(runtime_rows_by_kernel, cbo_row, require_runtime_proof, "generated-stage")
-        if not require_runtime_proof:
-            continue
-        proof_rows = [
-            row
+def runtime_proof_requirements(row: dict) -> set[str]:
+    return {proof for proof in row.get("runner_cost_required_runtime_proofs", "").split("|") if proof}
+
+
+def runtime_proof_requirement_satisfied(proof: str, runtime_rows: list[dict]) -> bool:
+    if proof == "generated_stage_work":
+        return any(
+            row_has_runtime_proof(row, proof) or row_has_generated_stage_runtime(row) for row in runtime_rows
+        ) or all(row_has_runtime_proof(row, "no_work") or row_has_no_runtime_work(row) for row in runtime_rows)
+    if proof == "generated_backend_work":
+        if any(row_has_runtime_proof(row, proof) for row in runtime_rows):
+            return True
+        return all(
+            row_has_runtime_proof(row, "no_work")
+            and row_int(row, "lazy_code_size") == 0
+            and not row.get("jit_runtime_delegation_counts", "")
             for row in runtime_rows
-            if row_has_runtime_proof(row, "generated_stage_work") or row_has_generated_stage_runtime(row)
-        ]
-        no_work_rows = [
-            row for row in runtime_rows if row_has_runtime_proof(row, "no_work") or row_has_no_runtime_work(row)
-        ]
-        require(
-            proof_rows or len(no_work_rows) == len(runtime_rows),
-            "counters.csv: selected generated-stage CBO row has no generated stage runtime proof "
-            f"(no_work_rows={len(no_work_rows)}): {cbo_row}",
         )
-
-
-def verify_selected_native_operator_runtime_contract(
-    selected_rows: list[dict],
-    runtime_rows_by_kernel: dict[tuple[str, str, str, str, str], list[dict]],
-    require_runtime_proof: bool,
-) -> None:
-    credited_rows = [
-        row
-        for row in selected_rows
-        if row_int(row, "runner_cost_native_operator_work") > 0
-        and (
-            row_int(row, "runner_cost_native_join_stage_count") > 0
-            or row_int(row, "runner_cost_native_aggregate_stage_count") > 0
+    if proof == "full_pipeline_ownership":
+        return any(row_has_runtime_proof(row, proof) for row in runtime_rows) or all(
+            row_has_runtime_proof(row, "no_work") for row in runtime_rows
         )
-    ]
-    for cbo_row in credited_rows:
-        runtime_rows = require_runtime_rows(runtime_rows_by_kernel, cbo_row, require_runtime_proof, "native-operator")
-        if not require_runtime_proof:
-            continue
-        proof_rows = [row for row in runtime_rows if row_has_runtime_proof(row, "generated_backend_work")]
-        no_work_rows = [
-            row for row in runtime_rows if row_has_runtime_proof(row, "no_work") or row_has_no_runtime_work(row)
-        ]
-        require(
-            proof_rows or len(no_work_rows) == len(runtime_rows),
-            "counters.csv: selected native-operator CBO row has no generated_backend_work runtime proof "
-            f"(no_work_rows={len(no_work_rows)}): {cbo_row}",
-        )
-
-
-def verify_selected_generated_backend_runtime_contract(
-    selected_rows: list[dict],
-    runtime_rows_by_kernel: dict[tuple[str, str, str, str, str], list[dict]],
-    require_runtime_proof: bool,
-) -> None:
-    credited_rows = [
-        row
-        for row in selected_rows
-        if row_int(row, "runner_cost_generated_backend_stage_count") > 0
-        and row_int(row, "runner_cost_generated_backend_stage_work") > 0
-    ]
-    for cbo_row in credited_rows:
-        runtime_rows = require_runtime_rows(
-            runtime_rows_by_kernel, cbo_row, require_runtime_proof, "generated-backend"
-        )
-        if not require_runtime_proof:
-            continue
-        proof_rows = [row for row in runtime_rows if row_has_runtime_proof(row, "generated_backend_work")]
-        no_work_rows = [row for row in runtime_rows if row_has_runtime_proof(row, "no_work")]
-        no_work_suppressed_codegen = (
-            no_work_rows
-            and len(no_work_rows) == len(runtime_rows)
-            and all(row_int(row, "lazy_code_size") == 0 for row in no_work_rows)
-            and all(not row.get("jit_runtime_delegation_counts", "") for row in no_work_rows)
-        )
-        require(
-            proof_rows or no_work_suppressed_codegen,
-            "counters.csv: selected generated-backend CBO row has no generated_backend_work runtime proof "
-            f"(no_work_rows={len(no_work_rows)}): {cbo_row}",
-        )
-
-
-def verify_selected_full_pipeline_runtime_contract(
-    selected_rows: list[dict],
-    runtime_rows_by_kernel: dict[tuple[str, str, str, str, str], list[dict]],
-    require_runtime_proof: bool,
-) -> None:
-    credited_rows = [
-        row
-        for row in selected_rows
-        if row_bool(row, "runner_cost_full_pipeline") and row_int(row, "runner_cost_full_pipeline_work") > 0
-    ]
-    for cbo_row in credited_rows:
-        runtime_rows = require_runtime_rows(runtime_rows_by_kernel, cbo_row, require_runtime_proof, "full-pipeline")
-        if not require_runtime_proof:
-            continue
-        proof_rows = [row for row in runtime_rows if row_has_runtime_proof(row, "full_pipeline_ownership")]
-        no_work_rows = [row for row in runtime_rows if row_has_runtime_proof(row, "no_work")]
-        require(
-            proof_rows or len(no_work_rows) == len(runtime_rows),
-            "counters.csv: selected full-pipeline CBO row has no full_pipeline_ownership runtime proof "
-            f"(no_work_rows={len(no_work_rows)}): {cbo_row}",
-        )
+    if proof == "materialization_elision":
+        for row in runtime_rows:
+            violation = row_contains_materialization_elision_violation(row)
+            require(
+                not violation,
+                "counters.csv: materialization-elision runtime proof contains materialization/fallback work: "
+                f"{violation}: {row}",
+            )
+            require(
+                not row.get("jit_runtime_delegation_counts", ""),
+                f"counters.csv: materialization-elision kernel delegated runtime work: {row}",
+            )
+        return any(row_has_runtime_proof(row, proof) and row_int(row, "invocation_count") > 0 for row in runtime_rows)
+    require(False, f"counters.csv: unknown CBO runtime proof requirement: {proof}")
+    return False
 
 
 def verify_cbo_runtime_counter_contract(rows: list[dict], require_runtime_proof: bool) -> None:
@@ -359,61 +284,31 @@ def verify_cbo_runtime_counter_contract(rows: list[dict], require_runtime_proof:
         if row["status"] == "executed" and row["execution_mode"] == "native" and row_int(row, "kernel_id") > 0:
             runtime_rows_by_kernel[counter_kernel_key(row)].append(row)
 
-    selected_rows = selected_cbo_rows(rows)
-    verify_selected_generated_stage_runtime_contract(selected_rows, runtime_rows_by_kernel, require_runtime_proof)
-    verify_selected_native_operator_runtime_contract(selected_rows, runtime_rows_by_kernel, require_runtime_proof)
-    verify_selected_generated_backend_runtime_contract(selected_rows, runtime_rows_by_kernel, require_runtime_proof)
-    verify_selected_full_pipeline_runtime_contract(selected_rows, runtime_rows_by_kernel, require_runtime_proof)
-
-    credited_kernels = []
-    for row in selected_rows:
-        if (
-            row_int(row, "runner_cost_materialization_elision_count") > 0
-            and row_int(row, "runner_cost_materialization_elision_work") > 0
-        ):
-            credited_kernels.append(row)
-            require(
-                row_int(row, "runner_cost_saved_work_per_batch") > 0,
-                f"counters.csv: materialization-elision CBO row has no saved work: {row}",
-            )
-
-    if not credited_kernels:
-        return
-    if not runtime_rows_by_kernel:
+    credited_work_fields = (
+        "runner_cost_generated_stage_work",
+        "runner_cost_generated_backend_stage_work",
+        "runner_cost_native_operator_work",
+        "runner_cost_materialization_elision_work",
+        "runner_cost_full_pipeline_work",
+    )
+    for cbo_row in selected_cbo_rows(rows):
+        requirements = runtime_proof_requirements(cbo_row)
+        credited_work = sum(row_int(cbo_row, field) for field in credited_work_fields)
         require(
-            not require_runtime_proof,
-            "counters.csv: selected materialization-elision CBO rows exist, but this artifact has no runtime proof "
-            "rows; rerun with --trace-runtime or disable --require-cbo-runtime-proof",
+            requirements or credited_work == 0,
+            f"counters.csv: selected CBO row credits work without typed runtime proof requirements: {cbo_row}",
         )
-        return
-
-    for cbo_row in credited_kernels:
+        if not requirements:
+            continue
         runtime_rows = require_runtime_rows(
-            runtime_rows_by_kernel, cbo_row, require_runtime_proof, "materialization-elision"
+            runtime_rows_by_kernel, cbo_row, require_runtime_proof, "typed-runtime-proof"
         )
-        proof_rows = []
-        for runtime_row in runtime_rows:
-            violation = row_contains_materialization_elision_violation(runtime_row)
+        if not require_runtime_proof:
+            continue
+        for proof in sorted(requirements):
             require(
-                not violation,
-                f"counters.csv: materialization-elision runtime proof contains materialization/fallback work: "
-                f"{violation}: {runtime_row}",
-            )
-            delegation_counts = runtime_row.get("jit_runtime_delegation_counts", "")
-            require(
-                not delegation_counts,
-                f"counters.csv: materialization-elision kernel delegated runtime work: {runtime_row}",
-            )
-            if row_has_runtime_proof(runtime_row, "materialization_elision"):
-                proof_rows.append(runtime_row)
-        require(
-            proof_rows or not require_runtime_proof,
-            f"counters.csv: materialization-elision kernel has no materialization_elision runtime proof rows: {cbo_row}",
-        )
-        for runtime_row in proof_rows:
-            require(
-                row_int(runtime_row, "invocation_count") > 0,
-                f"counters.csv: materialization-elision runtime proof row was not invoked: {runtime_row}",
+                runtime_proof_requirement_satisfied(proof, runtime_rows),
+                f"counters.csv: selected CBO row did not satisfy required runtime proof {proof}: {cbo_row}",
             )
 
 

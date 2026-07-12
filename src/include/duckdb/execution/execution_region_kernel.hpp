@@ -9,18 +9,20 @@
 
 #include "duckdb/execution/execution_region_ir.hpp"
 
+#include <atomic>
+
 namespace duckdb {
 
 class ExecutionRegionRuntime;
 
-class ExecutionRegionCodeHandle {
+class DUCKDB_API ExecutionRegionCodeHandle {
 public:
 	virtual ~ExecutionRegionCodeHandle();
 
 	virtual idx_t CodeSize() const;
 };
 
-class ExecutionRegionKernel {
+class DUCKDB_API ExecutionRegionKernel {
 public:
 	virtual ~ExecutionRegionKernel();
 
@@ -29,6 +31,7 @@ public:
 	virtual bool HasExecutableBody() const;
 	void SetTraceInfo(idx_t trace_id, ExecutionRegionExecutionMode execution_mode, string compile_reason,
 	                  int64_t compile_time_us, idx_t code_size);
+	void AddTraceCodeSize(idx_t code_size);
 	void SetTraceSelectedSourceExecution(ExecutionRegionSourceExecutionKind source_execution);
 	void SetTraceUsesScanFilters(bool uses_scan_filters);
 	void SetTracePipeline(const ExecutionRegionCandidate &candidate);
@@ -58,6 +61,7 @@ private:
 	string trace_compile_reason;
 	int64_t trace_compile_time_us = 0;
 	idx_t trace_code_size = 0;
+	std::atomic<idx_t> trace_lazy_code_size {0};
 	bool has_trace_pipeline = false;
 	string trace_candidate_shape;
 	string trace_candidate_pipeline_shape;

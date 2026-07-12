@@ -69,6 +69,10 @@ struct SljitRegionExecutionScratch {
 		return aggregate_scratch.PayloadScratch(op_idx);
 	}
 
+	SljitBoundGroupedPrimitiveAggregateUpdate &AggregateBoundGroupedUpdate(idx_t op_idx) {
+		return aggregate_scratch.BoundGroupedUpdate(op_idx);
+	}
+
 	DataChunk &AggregatePreaggregatedGroups(idx_t op_idx) {
 		return aggregate_scratch.PreaggregatedGroups(op_idx);
 	}
@@ -94,9 +98,16 @@ struct SljitRegionExecutionScratch {
 	}
 
 	const vector<const ExecutionPrimitiveAggregateUpdateLane *> &
-	AggregatePayloadLanes(idx_t op_idx, const vector<ExecutionRegionAggregateInput> &aggregates,
+	AggregatePayloadLanes(idx_t op_idx, const vector<SljitAggregatePayloadDescriptor> &payload_descriptors,
 	                      const ExecutionPrimitiveAggregateUpdateBinding &primitive) {
-		return aggregate_scratch.PayloadLanes(op_idx, aggregates, primitive);
+		return aggregate_scratch.PayloadLanes(op_idx, payload_descriptors, primitive);
+	}
+
+	const vector<SljitGroupedReductionLaneBinding> &
+	GroupedReductionLanes(idx_t op_idx, const ExecutionRegionAggregateContract &contract,
+	                      const vector<SljitAggregatePayloadDescriptor> &payload_descriptors,
+	                      const vector<const ExecutionPrimitiveAggregateUpdateLane *> &payload_lanes) {
+		return aggregate_scratch.GroupedReductionLanes(op_idx, contract, payload_descriptors, payload_lanes);
 	}
 
 	bool DirectNewAggregateUpdateDisabled(idx_t op_idx) const {

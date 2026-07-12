@@ -121,23 +121,8 @@ static const char *SljitExecuteRegularHashJoinProbePath(
 		    owner, runtime, hash_join_probe, plan, needs_chain_matcher, native_input, mark_selection_mode);
 	}
 	const bool uses_bloom_filter = native_input.bloom_filter_bits != nullptr;
-	owner.EnsureRegularHashJoinProbeCode(runtime, hash_join_probe, uses_bloom_filter, mark_selection_mode);
-	SljitNativeRegularHashJoinProbeFunction function = nullptr;
-	switch (mark_selection_mode) {
-	case SljitHashJoinMarkSelectionMode::NONE:
-		function = uses_bloom_filter ? hash_join_probe.regular.bloom_function : hash_join_probe.regular.function;
-		break;
-	case SljitHashJoinMarkSelectionMode::MATCHES:
-		function = uses_bloom_filter ? hash_join_probe.regular.mark_match_selection_bloom_function
-		                             : hash_join_probe.regular.mark_match_selection_function;
-		break;
-	case SljitHashJoinMarkSelectionMode::NON_MATCHES:
-		function = uses_bloom_filter ? hash_join_probe.regular.mark_nonmatch_selection_bloom_function
-		                             : hash_join_probe.regular.mark_nonmatch_selection_function;
-		break;
-	default:
-		throw InternalException("Unsupported SLJIT MARK selection mode");
-	}
+	auto function =
+	    owner.EnsureRegularHashJoinProbeCode(runtime, hash_join_probe, uses_bloom_filter, mark_selection_mode);
 	SljitExecuteNativeFunction(function, native_input);
 	return SljitGeneratedRegularHashJoinProbeStage(uses_bloom_filter, mark_selection_mode);
 }

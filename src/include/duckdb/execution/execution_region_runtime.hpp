@@ -35,16 +35,8 @@ struct ExecutionRegionLazyCodegenMetrics {
 	idx_t code_size = 0;
 };
 
-enum class ExecutionRegionJitRuntimeProof : uint8_t {
-	GENERATED_STAGE_WORK,
-	GENERATED_BACKEND_WORK,
-	MATERIALIZATION_ELISION,
-	FULL_PIPELINE_OWNERSHIP,
-	DELEGATED_RUNTIME_WORK,
-	NO_WORK
-};
-
 DUCKDB_API const char *ExecutionRegionJitRuntimeProofName(ExecutionRegionJitRuntimeProof proof);
+DUCKDB_API string RenderExecutionRegionJitRuntimeProofRequirements(ExecutionRegionJitRuntimeProofMask requirements);
 
 struct ExecutionRegionJitRuntimeMetrics {
 	string hash_join_probe_layout;

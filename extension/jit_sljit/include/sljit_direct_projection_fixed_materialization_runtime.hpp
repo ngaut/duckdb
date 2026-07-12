@@ -19,7 +19,7 @@ namespace duckdb {
 
 static bool IsFixedDirectProjectionGeneratedExpression(const SljitExecutableRegionExpression &expr) {
 	auto &plan = expr.plan;
-	if (!expr.function || !DirectAppendSupportsFixedSizeType(plan.return_type)) {
+	if (!expr.vector.Function() || !DirectAppendSupportsFixedSizeType(plan.return_type)) {
 		return false;
 	}
 	switch (plan.kind) {
@@ -182,7 +182,7 @@ static bool TryDirectMaterializeFixedGenerated(const SljitExecutableRegionExpres
 	native_input.query_location = plan.query_location;
 	native_input.count = count;
 	native_input.has_error = false;
-	auto function = expr.flat_function ? expr.flat_function : expr.function;
+	auto function = expr.flat.Function() ? expr.flat.Function() : expr.vector.Function();
 	SljitExecuteNativeFunction(function, native_input);
 	return true;
 }

@@ -76,7 +76,7 @@ BuildSljitProjectionPlans(const vector<SljitExecutableRegionExpression> &project
 }
 
 static bool SljitCanUseFlatFusedFloatingProjection(const SljitExecutableRegionExpression &expr, bool single_precision) {
-	if (!expr.flat_function) {
+	if (!expr.flat.Function()) {
 		return false;
 	}
 	auto &plan = expr.plan;
@@ -143,8 +143,7 @@ static bool TryBuildFlatFusedFloatingProjection(SljitExecutableRegionOp &op, str
 		return false;
 	}
 	op.flat_fused_floating_projection_plan = std::move(direct_plan);
-	op.flat_fused_floating_projection_code = std::move(code);
-	op.flat_fused_floating_projection_function = function;
+	op.flat_fused_floating_projection.Set(std::move(code), function);
 	return true;
 }
 
@@ -156,7 +155,7 @@ static bool SljitCanUseFlatFusedFixedProjection(const SljitExecutableRegionExpre
 	}
 	switch (integer_kind) {
 	case SljitNativeIntegerKind::INT32:
-		if (!expr.flat_function || plan.check_arithmetic_overflow || plan.check_result_range) {
+		if (!expr.flat.Function() || plan.check_arithmetic_overflow || plan.check_result_range) {
 			return false;
 		}
 		if (plan.return_type.InternalType() != PhysicalType::INT32) {
@@ -164,7 +163,7 @@ static bool SljitCanUseFlatFusedFixedProjection(const SljitExecutableRegionExpre
 		}
 		break;
 	case SljitNativeIntegerKind::INT64:
-		if (!expr.flat_function || plan.check_arithmetic_overflow || plan.check_result_range) {
+		if (!expr.flat.Function() || plan.check_arithmetic_overflow || plan.check_result_range) {
 			return false;
 		}
 		if (plan.return_type.InternalType() != PhysicalType::INT64) {
@@ -258,8 +257,7 @@ static bool TryBuildFlatFusedFixedProjection(SljitExecutableRegionOp &op, string
 			return false;
 		}
 		op.flat_fused_fixed_projection_plans.push_back(std::move(direct_plan));
-		op.flat_fused_fixed_projection_codes.push_back(std::move(code));
-		op.flat_fused_fixed_projection_functions.push_back(function);
+		op.flat_fused_fixed_projections.emplace_back(std::move(code), function);
 	}
 	return true;
 }

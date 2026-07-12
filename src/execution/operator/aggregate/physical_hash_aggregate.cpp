@@ -250,6 +250,8 @@ public:
 	}
 };
 
+struct HashAggregateDirectDistinctCountState;
+
 class HashAggregateLocalSinkState : public LocalSinkState {
 public:
 	HashAggregateLocalSinkState(const PhysicalHashAggregate &op, ExecutionContext &context) : op(op) {
@@ -272,11 +274,13 @@ public:
 
 		filter_set.Initialize(context.client, aggregate_objects, payload_types);
 	}
+	~HashAggregateLocalSinkState() override;
 
 	const PhysicalHashAggregate &op;
 	DataChunk aggregate_input_chunk;
 	vector<HashAggregateGroupingLocalState> grouping_states;
 	AggregateFilterDataSet filter_set;
+	unique_ptr<HashAggregateDirectDistinctCountState> direct_distinct_count_state;
 
 	bool SupportsReuse() const override {
 		return true;
@@ -288,6 +292,7 @@ public:
 		// Use Reset() rather than SetChildCardinality(0): the chunk may still hold non-flat (e.g. dictionary)
 		// references from a previous iteration that SetChildCardinality cannot resize.
 		aggregate_input_chunk.Reset();
+		direct_distinct_count_state.reset();
 		for (idx_t grouping_idx = 0; grouping_idx < op.groupings.size(); grouping_idx++) {
 			auto &grouping = op.groupings[grouping_idx];
 			auto &grouping_gstate = gstate.grouping_states[grouping_idx];
@@ -331,6 +336,8 @@ public:
 	SelectionVector direct_valid_selection {STANDARD_VECTOR_SIZE};
 	SelectionVector direct_new_pairs {STANDARD_VECTOR_SIZE};
 };
+
+HashAggregateLocalSinkState::~HashAggregateLocalSinkState() = default;
 
 class HashAggregateExecutionRegionSinkState : public ExecutionAggregateUpdateState {
 public:
@@ -381,7 +388,6 @@ private:
 	                                OperatorSinkInput &sink_input,
 	                                optional_ptr<ExecutionOperatorStageRecorder> recorder, idx_t estimated_input_count,
 	                                idx_t distinct_key_cardinality_upper_bound);
-	unique_ptr<HashAggregateDirectDistinctCountState> direct_distinct_count_state;
 
 	ExecutionContext &context;
 	const PhysicalHashAggregate &op;
@@ -1023,10 +1029,10 @@ bool HashAggregateExecutionRegionSinkState::TrySinkDirectDistinctCount(
 	if (!selection && count != input.size()) {
 		return false;
 	}
-	if (!direct_distinct_count_state) {
-		direct_distinct_count_state = make_uniq<HashAggregateDirectDistinctCountState>();
+	if (!local_state.direct_distinct_count_state) {
+		local_state.direct_distinct_count_state = make_uniq<HashAggregateDirectDistinctCountState>();
 	}
-	auto &direct_state = *direct_distinct_count_state;
+	auto &direct_state = *local_state.direct_distinct_count_state;
 	auto &direct_selected_input = direct_state.direct_selected_input;
 	auto &direct_pair_groups = direct_state.direct_pair_groups;
 	auto &direct_group_addresses = direct_state.direct_group_addresses;

@@ -9,6 +9,7 @@
 #include "sljit_native_codegen.hpp"
 
 #include "sljit_aggregate_fused_codegen.hpp"
+#include "sljit_aggregate_payload_descriptor.hpp"
 #include "sljit_aggregate_perfect_hash_codegen.hpp"
 #include "sljit_aggregate_primitive_codegen.hpp"
 #include "sljit_codegen_internal.hpp"
@@ -30,9 +31,12 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativePerfectHashGroupedFusedPri
 		error = "unsupported fused perfect-hash aggregate payload shape";
 		return nullptr;
 	}
+	vector<SljitAggregatePayloadDescriptor> descriptors(payloads.size());
 	for (idx_t payload_idx = 0; payload_idx < payloads.size(); payload_idx++) {
 		if (!SljitFusedGroupedPrimitiveAggregatePayloadSupported(payloads[payload_idx], aggregates[payload_idx],
-		                                                         contract)) {
+		                                                         contract) ||
+		    !SljitTryBindAggregatePayloadDescriptor(payloads[payload_idx], aggregates[payload_idx],
+		                                            descriptors[payload_idx])) {
 			error = "unsupported fused perfect-hash aggregate payload shape";
 			return nullptr;
 		}
@@ -79,11 +83,11 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativePerfectHashGroupedFusedPri
 	EmitSljitPerfectHashStatePointer(compiler, SLJIT_S4, SLJIT_S4);
 
 	for (idx_t payload_idx = 0; payload_idx < payloads.size(); payload_idx++) {
-		auto &aggregate = aggregates[payload_idx];
-		const auto state_offset = contract.grouped_state_offsets[aggregate.aggregate_index];
-		if (aggregate.primitive_update_kind == AggregatePrimitiveUpdateKind::COUNT_STAR) {
+		auto &descriptor = descriptors[payload_idx];
+		const auto state_offset = contract.grouped_state_offsets[descriptor.aggregate_index];
+		if (descriptor.primitive_kind == AggregatePrimitiveUpdateKind::COUNT_STAR) {
 			EmitSljitGroupedAggregateIncrementInt64Immediate(compiler, SLJIT_S4, state_offset,
-			                                                 aggregate.primitive_update_state_value_offset);
+			                                                 descriptor.state_value_offset);
 			continue;
 		}
 		auto &payload = payloads[payload_idx];
@@ -91,21 +95,35 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativePerfectHashGroupedFusedPri
 		                                  SLJIT_R1, true);
 		auto source_is_null = EmitFusedAggregateJumpIfValidityNull(
 		    compiler, offsetof(SljitNativeVectorInput, source_validity_array), payload_idx, SLJIT_R1);
-		if (aggregate.primitive_update_kind == AggregatePrimitiveUpdateKind::COUNT) {
+		if (descriptor.primitive_kind == AggregatePrimitiveUpdateKind::COUNT) {
 			EmitSljitGroupedAggregateIncrementInt64Immediate(compiler, SLJIT_S4, state_offset,
-			                                                 aggregate.primitive_update_state_value_offset);
-		} else if (aggregate.primitive_update_kind == AggregatePrimitiveUpdateKind::SUM_INT64) {
+			                                                 descriptor.state_value_offset);
+		} else if (descriptor.primitive_kind == AggregatePrimitiveUpdateKind::SUM_INT64) {
 			EmitLoadFusedAggregateIntegerData(compiler, offsetof(SljitNativeVectorInput, source_data_array),
 			                                  payload_idx, payload.integer_kind, SLJIT_R1, SLJIT_R2);
 			EmitSljitGroupedAggregateAccumulateInt64Immediate(compiler, SLJIT_S4, state_offset,
-			                                                  aggregate.primitive_update_state_value_offset,
-			                                                  aggregate.primitive_update_state_is_set_offset, SLJIT_R2);
+			                                                  descriptor.state_value_offset,
+			                                                  descriptor.state_is_set_offset, SLJIT_R2);
+		} else if (descriptor.primitive_kind == AggregatePrimitiveUpdateKind::SUM_HUGEINT) {
+			if (descriptor.IsDoubleWord()) {
+				EmitLoadFusedAggregateHugeintData(compiler, offsetof(SljitNativeVectorInput, source_data_array),
+				                                  payload_idx, SLJIT_R1, SLJIT_R2, SLJIT_R3);
+				EmitSljitGroupedAggregateAccumulateHugeintValueImmediate(
+				    compiler, SLJIT_S4, state_offset, descriptor.state_value_offset, descriptor.state_is_set_offset,
+				    SLJIT_R2, SLJIT_R3);
+			} else {
+				EmitLoadFusedAggregateIntegerData(compiler, offsetof(SljitNativeVectorInput, source_data_array),
+				                                  payload_idx, payload.integer_kind, SLJIT_R1, SLJIT_R2);
+				EmitSljitGroupedAggregateAccumulateHugeintImmediate(compiler, SLJIT_S4, state_offset,
+				                                                    descriptor.state_value_offset,
+				                                                    descriptor.state_is_set_offset, SLJIT_R2);
+			}
 		} else {
-			EmitLoadFusedAggregateIntegerData(compiler, offsetof(SljitNativeVectorInput, source_data_array),
-			                                  payload_idx, payload.integer_kind, SLJIT_R1, SLJIT_R2);
-			EmitSljitGroupedAggregateAccumulateHugeintImmediate(
-			    compiler, SLJIT_S4, state_offset, aggregate.primitive_update_state_value_offset,
-			    aggregate.primitive_update_state_is_set_offset, SLJIT_R2);
+			EmitLoadFusedAggregateDoubleData(compiler, offsetof(SljitNativeVectorInput, source_data_array), payload_idx,
+			                                 SLJIT_R1, SLJIT_TMP_FR0);
+			EmitSljitGroupedAggregateAccumulateDoubleImmediate(compiler, SLJIT_S4, state_offset,
+			                                                   descriptor.state_value_offset,
+			                                                   descriptor.state_is_set_offset, SLJIT_TMP_FR0);
 		}
 		auto payload_done = sljit_emit_jump(compiler, SLJIT_JUMP);
 		auto payload_invalid = sljit_emit_label(compiler);

@@ -24,18 +24,17 @@ struct SljitPrimitiveCountOneUpdateState {
 	const ExecutionPrimitiveAggregateUpdateLane *lane = nullptr;
 };
 
-static bool SljitTryBindPrimitiveCountOneUpdateState(
-    const ExecutionRegionSinkInfo &sink_info, const vector<const ExecutionPrimitiveAggregateUpdateLane *> &payload_lanes,
-    bool count_one_payload, SljitPrimitiveCountOneUpdateState &state) {
+static bool
+SljitTryBindPrimitiveCountOneUpdateState(const vector<SljitAggregatePayloadDescriptor> &payload_descriptors,
+                                         const vector<const ExecutionPrimitiveAggregateUpdateLane *> &payload_lanes,
+                                         bool count_one_payload, SljitPrimitiveCountOneUpdateState &state) {
 	state = SljitPrimitiveCountOneUpdateState();
-	if (sink_info.aggregates.size() != 1 || !count_one_payload || payload_lanes.size() != 1 || !payload_lanes[0] ||
-	    !payload_lanes[0]->ready) {
+	if (payload_descriptors.size() != 1 || !count_one_payload || payload_lanes.size() != 1 || !payload_lanes[0] ||
+	    !SljitAggregatePayloadDescriptorMatchesLane(payload_descriptors[0], *payload_lanes[0])) {
 		return false;
 	}
 	auto lane = payload_lanes[0];
-	auto &aggregate = sink_info.aggregates[0];
-	if ((lane->kind != AggregatePrimitiveUpdateKind::COUNT && lane->kind != AggregatePrimitiveUpdateKind::COUNT_STAR) ||
-	    lane->kind != aggregate.primitive_update_kind) {
+	if (lane->kind != AggregatePrimitiveUpdateKind::COUNT && lane->kind != AggregatePrimitiveUpdateKind::COUNT_STAR) {
 		return false;
 	}
 	state.lane = lane;
@@ -117,10 +116,10 @@ struct SljitPreaggregatedPrimitiveUpdateState {
 	uintptr_t captured_address = 0;
 };
 
-static SljitPreaggregatedPrimitiveUpdateState SljitMakePreaggregatedPrimitiveUpdateState(
-    const vector<const ExecutionPrimitiveAggregateUpdateLane *> &lanes,
-    const vector<SljitPreaggregatedPrimitivePayloadDeltas> &payloads,
-    idx_t capture_row_idx = DConstants::INVALID_INDEX) {
+static SljitPreaggregatedPrimitiveUpdateState
+SljitMakePreaggregatedPrimitiveUpdateState(const vector<const ExecutionPrimitiveAggregateUpdateLane *> &lanes,
+                                           const vector<SljitPreaggregatedPrimitivePayloadDeltas> &payloads,
+                                           idx_t capture_row_idx = DConstants::INVALID_INDEX) {
 	SljitPreaggregatedPrimitiveUpdateState state;
 	state.lanes = &lanes;
 	state.payloads = &payloads;
@@ -135,9 +134,9 @@ static void SljitCapturePreaggregatedPrimitiveAddress(SljitPreaggregatedPrimitiv
 	}
 }
 
-static bool ExecuteSljitSingleLanePreaggregatedPrimitiveUpdate(
-    const uintptr_t *addresses, const sel_t *address_sel, const sel_t *execute_sel, idx_t count,
-    SljitPreaggregatedPrimitiveUpdateState &state) {
+static bool ExecuteSljitSingleLanePreaggregatedPrimitiveUpdate(const uintptr_t *addresses, const sel_t *address_sel,
+                                                               const sel_t *execute_sel, idx_t count,
+                                                               SljitPreaggregatedPrimitiveUpdateState &state) {
 	auto &lanes = *state.lanes;
 	auto &payloads = *state.payloads;
 	if (lanes.size() != 1 || payloads.size() != 1) {

@@ -8,6 +8,7 @@
 
 #pragma once
 
+#include "sljit_hash_join_probe_specialization.hpp"
 #include "sljit_region_plan.hpp"
 
 #include "duckdb/common/enums/operator_result_type.hpp"
@@ -28,8 +29,6 @@ struct ExecutionPerfectHashJoinTableLayout;
 struct SljitHashJoinProbeDrainState;
 
 enum class SljitHashJoinProbeInputKind { GENERIC, FLAT_ALL_VALID, SELECTED_ALL_VALID };
-
-enum class SljitHashJoinMarkSelectionMode : uint8_t { NONE, MATCHES, NON_MATCHES };
 
 static inline bool SljitHashJoinEmitsMarkSelection(SljitHashJoinMarkSelectionMode mode) {
 	return mode != SljitHashJoinMarkSelectionMode::NONE;

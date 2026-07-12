@@ -42,6 +42,7 @@ enum class SljitNativeRegionExpressionKind : uint8_t {
 	INTEGER_BETWEEN,
 	DECIMAL64_TO_DOUBLE,
 	DECIMAL128_SCALE_UP,
+	DECIMAL128_WIDENING_MULTIPLY,
 	CONSTANT_OR_NULL,
 	INTEGRAL_COMPRESS,
 	INTEGRAL_DECOMPRESS,
@@ -90,6 +91,7 @@ struct SljitNativeRegionExpressionPlan {
 	double double_right_source_scale = 1;
 	SljitNativeIntegerCompareOp compare_op = SljitNativeIntegerCompareOp::EQUAL;
 	SljitNativeSignedIntegerWidth cast_source_width = SljitNativeSignedIntegerWidth::INT32;
+	SljitNativeSignedIntegerWidth right_cast_source_width = SljitNativeSignedIntegerWidth::INT32;
 	SljitNativeSignedIntegerWidth cast_target_width = SljitNativeSignedIntegerWidth::INT32;
 	SljitNativeUnsignedIntegerWidth unsigned_source_width = SljitNativeUnsignedIntegerWidth::UINT8;
 	SljitNativeUnsignedIntegerWidth unsigned_cast_target_width = SljitNativeUnsignedIntegerWidth::UINT16;

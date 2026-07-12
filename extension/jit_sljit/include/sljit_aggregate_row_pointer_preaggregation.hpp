@@ -142,14 +142,15 @@ static bool SljitTryPreaggregateRowPointerPrimitiveGroups(
 static bool SljitTryPreaggregateRowPointerFusedPrimitiveGroups(
     SljitExecutableRegionOp &op, DataChunk &payload_input, Vector &row_pointers,
     const vector<ExecutionRowPointerGroupKeySource> &group_sources, const vector<idx_t> &payload_source_indices,
-    const vector<const ExecutionPrimitiveAggregateUpdateLane *> &payload_lanes, Vector &compact_row_pointers,
+    const vector<const ExecutionPrimitiveAggregateUpdateLane *> &payload_lanes,
+    const vector<SljitGroupedReductionLaneBinding> &reduction_lanes, Vector &compact_row_pointers,
     SljitPreaggregatedPrimitiveAggregateScratch &scratch, SljitAggregatePayloadAdapterScratch &payload_scratch,
     idx_t &compact_count, const char *&failure_reason) {
 	compact_count = 0;
 	failure_reason = "shape";
 	const auto count = payload_input.size();
 	if (count < 2 || row_pointers.GetVectorType() != VectorType::FLAT_VECTOR ||
-	    !op.aggregate_update.fused_payload_update_function) {
+	    !op.aggregate_update.fused_payload_update.Function()) {
 		return false;
 	}
 
@@ -181,9 +182,9 @@ static bool SljitTryPreaggregateRowPointerFusedPrimitiveGroups(
 	}
 
 	SljitExecuteFusedGroupedPrimitiveAggregatePayloadUpdate(
-	    op.aggregate_update.payloads, op.aggregate_update.fused_payload_update_function,
-	    op.aggregate_update.plan.sink_info.aggregates, op.aggregate_update.plan.sink_info.aggregate_contract,
-	    payload_lanes, payload_input, scratch.fused_row_state_addresses.data(), nullptr, nullptr, false, count,
+	    op.aggregate_update.payloads, op.aggregate_update.fused_payload_update.Function(),
+	    op.aggregate_update.plan.sink_info.aggregate_contract, op.aggregate_update.payload_descriptors, payload_lanes,
+	    reduction_lanes, payload_input, scratch.fused_row_state_addresses.data(), nullptr, nullptr, false, count,
 	    payload_scratch, optional_ptr<const vector<idx_t>>(&payload_source_indices));
 
 	if (!SljitExtractFusedPreaggregatedPrimitiveDeltas(scratch, payload_lanes, group_count)) {

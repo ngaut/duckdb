@@ -26,7 +26,7 @@ SljitExecutePrimitiveAggregateUpdate(ExecutionRegionRuntime &runtime, ExecutionO
 	}
 	auto &sink_info = op.aggregate_update.plan.sink_info;
 	if (SljitGroupedPrimitiveAggregateSinkKind(sink_info.kind)) {
-		SljitBoundGroupedPrimitiveAggregateUpdate bound;
+		auto &bound = scratch.AggregateBoundGroupedUpdate(op_idx);
 		SljitBindRecordedGroupedPrimitiveAggregateUpdate(runtime, native_runtime, scratch, op_idx, op, input, bound);
 		return SljitExecuteBoundGroupedPrimitiveAggregateUpdate(runtime, scratch, bound, input, execute_sel, count,
 		                                                        defer_grouped_finish, deferred_grouped_finish);

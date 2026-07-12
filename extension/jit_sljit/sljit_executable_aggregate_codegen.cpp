@@ -124,8 +124,8 @@ static bool TryBuildUngroupedFusedTypedExpressionAggregateUpdate(const SljitNati
 	    payloads.codegen_payloads, op.sink_info.aggregates, fused_function, fused_error);
 	if (fused_code && fused_function) {
 		executable.payloads = std::move(payloads.executable_payloads);
-		executable.fused_payload_update_code = std::move(fused_code);
-		executable.fused_payload_update_function = fused_function;
+		executable.fused_payload_update.Code() = std::move(fused_code);
+		executable.fused_payload_update.Function() = fused_function;
 		return true;
 	}
 	if (!fused_error.empty() && fused_error.rfind("unsupported", 0) != 0) {
@@ -157,8 +157,8 @@ static bool TryBuildPerfectHashGroupedFusedTypedExpressionAggregateUpdate(
 	    payloads.combined_source_max_values, fused_function, fused_error);
 	if (fused_code && fused_function) {
 		executable.payloads = std::move(payloads.executable_payloads);
-		executable.fused_payload_update_code = std::move(fused_code);
-		executable.fused_payload_update_function = fused_function;
+		executable.fused_payload_update.Code() = std::move(fused_code);
+		executable.fused_payload_update.Function() = fused_function;
 		executable.fused_payload_update_owns_group_lookup = true;
 		return true;
 	}
@@ -189,8 +189,8 @@ static bool TryBuildGroupedFusedTypedExpressionAggregateUpdate(const SljitNative
 	    fused_error);
 	if (fused_code && fused_function) {
 		executable.payloads = std::move(payloads.executable_payloads);
-		executable.fused_payload_update_code = std::move(fused_code);
-		executable.fused_payload_update_function = fused_function;
+		executable.fused_payload_update.Code() = std::move(fused_code);
+		executable.fused_payload_update.Function() = fused_function;
 		return true;
 	}
 	if (!fused_error.empty() && fused_error.rfind("unsupported", 0) != 0) {
@@ -247,6 +247,18 @@ void SljitBuildExecutableAggregateUpdateMetadata(const SljitNativeAggregateUpdat
 	for (auto &group_expression : op.group_expressions) {
 		executable.plan.group_expressions.push_back(group_expression.Copy(true, false));
 	}
+	if (op.use_primitive_payloads) {
+		if (op.payloads.size() != op.sink_info.aggregates.size()) {
+			throw InternalException("SLJIT aggregate payload descriptor count mismatch");
+		}
+		executable.payload_descriptors.resize(op.payloads.size());
+		for (idx_t payload_idx = 0; payload_idx < op.payloads.size(); payload_idx++) {
+			if (!SljitTryBindAggregatePayloadDescriptor(op.payloads[payload_idx], op.sink_info.aggregates[payload_idx],
+			                                            executable.payload_descriptors[payload_idx])) {
+				throw InternalException("SLJIT aggregate payload descriptor binding failed");
+			}
+		}
+	}
 	executable.payloads.reserve(op.payloads.size());
 	for (auto &payload : op.payloads) {
 		SljitExecutableRegionExpression executable_payload;
@@ -284,8 +296,8 @@ bool SljitBuildExecutableAggregateUpdatePayloadCode(const SljitNativeAggregateUp
 		auto fused_code = BuildSljitNativeUngroupedFusedPrimitiveAggregateUpdate(op.payloads, op.sink_info.aggregates,
 		                                                                         fused_function, fused_error);
 		if (fused_code && fused_function) {
-			executable.fused_payload_update_code = std::move(fused_code);
-			executable.fused_payload_update_function = fused_function;
+			executable.fused_payload_update.Code() = std::move(fused_code);
+			executable.fused_payload_update.Function() = fused_function;
 			return true;
 		}
 		if (!fused_error.empty() && fused_error.rfind("unsupported", 0) != 0) {
@@ -296,20 +308,20 @@ bool SljitBuildExecutableAggregateUpdatePayloadCode(const SljitNativeAggregateUp
 	if (!TryBuildUngroupedFusedTypedExpressionAggregateUpdate(op, executable, error, input_not_null)) {
 		return false;
 	}
-	if (executable.fused_payload_update_function) {
+	if (executable.fused_payload_update.Function()) {
 		return true;
 	}
 	if (!TryBuildPerfectHashGroupedFusedTypedExpressionAggregateUpdate(op, executable, error, input_not_null,
 	                                                                   input_min_values, input_max_values)) {
 		return false;
 	}
-	if (executable.fused_payload_update_function) {
+	if (executable.fused_payload_update.Function()) {
 		return true;
 	}
 	if (!TryBuildGroupedFusedTypedExpressionAggregateUpdate(op, executable, error, input_not_null)) {
 		return false;
 	}
-	if (executable.fused_payload_update_function) {
+	if (executable.fused_payload_update.Function()) {
 		return true;
 	}
 	if (SljitAggregateUpdateRequiresTypedGroupedBackend(op)) {
@@ -323,8 +335,8 @@ bool SljitBuildExecutableAggregateUpdatePayloadCode(const SljitNativeAggregateUp
 		    op.payloads, op.sink_info.aggregates, op.sink_info.groups, op.group_expressions,
 		    op.sink_info.aggregate_contract, fused_function, fused_error);
 		if (fused_code && fused_function) {
-			executable.fused_payload_update_code = std::move(fused_code);
-			executable.fused_payload_update_function = fused_function;
+			executable.fused_payload_update.Code() = std::move(fused_code);
+			executable.fused_payload_update.Function() = fused_function;
 			executable.fused_payload_update_owns_group_lookup = true;
 			return true;
 		}
@@ -339,8 +351,8 @@ bool SljitBuildExecutableAggregateUpdatePayloadCode(const SljitNativeAggregateUp
 		auto fused_code = BuildSljitNativeGroupedFusedPrimitiveAggregateUpdate(
 		    op.payloads, op.sink_info.aggregates, op.sink_info.aggregate_contract, fused_function, fused_error);
 		if (fused_code && fused_function) {
-			executable.fused_payload_update_code = std::move(fused_code);
-			executable.fused_payload_update_function = fused_function;
+			executable.fused_payload_update.Code() = std::move(fused_code);
+			executable.fused_payload_update.Function() = fused_function;
 			return true;
 		}
 		if (!fused_error.empty() && fused_error.rfind("unsupported", 0) != 0) {
@@ -360,8 +372,8 @@ void SljitSelectExecutableAggregateDirectUpdatePlan(SljitExecutableAggregateUpda
 	    executable.fused_payload_update_owns_group_lookup) {
 		return;
 	}
-	if (executable.fused_payload_update_function &&
-	    SljitFusedAggregatePayloadsUseTypedExpressionTrees(executable.payloads, plan.sink_info.aggregates)) {
+	if (executable.fused_payload_update.Function() &&
+	    SljitFusedAggregatePayloadsUseTypedExpressionTrees(executable.payloads, executable.payload_descriptors)) {
 		direct_update.kind = SljitGroupedAggregateDirectUpdatePlanKind::DIRECT_STATE_ADDRESS_PAYLOAD_ONLY;
 		return;
 	}

@@ -10,11 +10,9 @@
 
 namespace duckdb {
 
-static sljit_jump *
-EmitSljitPerfectHashExpressionTreeValue(const SljitPerfectHashFusedUpdateEmitContext &context,
-                                        const ExecutionExpressionIR &expression, bool fast_path, bool all_valid,
-                                        bool no_source_selection,
-                                        const vector<SljitTypedExpressionTreeDataPointerHoist> *data_hoists) {
+static sljit_jump *EmitSljitPerfectHashExpressionTreeValue(
+    const SljitPerfectHashFusedUpdateEmitContext &context, const ExecutionExpressionIR &expression, bool fast_path,
+    bool all_valid, bool no_source_selection, const vector<SljitTypedExpressionTreeDataPointerHoist> *data_hoists) {
 	auto compiler = context.compiler;
 	if (fast_path) {
 		idx_t spill_index = 0;
@@ -53,9 +51,8 @@ EmitSljitPerfectHashPredicateSkipJumps(const SljitPerfectHashFusedUpdateEmitCont
 	if (!context.predicate) {
 		return result;
 	}
-	auto predicate_invalid =
-	    EmitSljitPerfectHashExpressionTreeValue(context, *context.predicate, fast_path, all_valid, no_source_selection,
-	                                            predicate_data_hoists);
+	auto predicate_invalid = EmitSljitPerfectHashExpressionTreeValue(context, *context.predicate, fast_path, all_valid,
+	                                                                 no_source_selection, predicate_data_hoists);
 	if (predicate_invalid) {
 		result.push_back(predicate_invalid);
 	}
@@ -195,15 +192,15 @@ void EmitSljitPerfectHashPayloadUpdates(const SljitPerfectHashFusedUpdateEmitCon
                                         const SljitPerfectHashPayloadUpdateOptions &options) {
 	auto compiler = context.compiler;
 	auto &payloads = context.payloads;
-	auto &aggregates = context.aggregates;
 	auto &contract = context.contract;
 	auto &codegen_plan = context.codegen_plan;
+	auto &descriptors = codegen_plan.payload_descriptors;
 	auto &local_aggregate_plan = context.local_aggregate_plan;
 	auto &deferred_flag_plan = context.deferred_flag_plan;
 	for (idx_t payload_idx = 0; payload_idx < payloads.size(); payload_idx++) {
-		auto &aggregate = aggregates[payload_idx];
-		const auto state_offset = contract.grouped_state_offsets[aggregate.aggregate_index];
-		if (aggregate.primitive_update_kind == AggregatePrimitiveUpdateKind::COUNT_STAR) {
+		auto &descriptor = descriptors[payload_idx];
+		const auto state_offset = contract.grouped_state_offsets[descriptor.aggregate_index];
+		if (descriptor.primitive_kind == AggregatePrimitiveUpdateKind::COUNT_STAR) {
 			if (local_aggregate_plan.enabled) {
 				if (local_aggregate_plan.sparse && payload_idx == local_aggregate_plan.sparse_count_seen_lane) {
 					continue;
@@ -220,11 +217,11 @@ void EmitSljitPerfectHashPayloadUpdates(const SljitPerfectHashFusedUpdateEmitCon
 			}
 			EmitSljitPerfectHashPayloadStatePointer(context);
 			if (deferred_flag_plan.enabled && options.all_valid) {
-				EmitSljitGroupedAggregateIncrementInt64ImmediateDirect(
-				    compiler, context.state_pointer_reg, state_offset, aggregate.primitive_update_state_value_offset);
+				EmitSljitGroupedAggregateIncrementInt64ImmediateDirect(compiler, context.state_pointer_reg,
+				                                                       state_offset, descriptor.state_value_offset);
 			} else {
 				EmitSljitGroupedAggregateIncrementInt64Immediate(compiler, context.state_pointer_reg, state_offset,
-				                                                 aggregate.primitive_update_state_value_offset);
+				                                                 descriptor.state_value_offset);
 			}
 			continue;
 		}
@@ -255,42 +252,40 @@ void EmitSljitPerfectHashPayloadUpdates(const SljitPerfectHashFusedUpdateEmitCon
 				                       : nullptr;
 				if (cached_lane) {
 					EmitSljitSparseLocalRunCacheAccumulate(compiler, local_aggregate_plan.lanes[payload_idx],
-					                                       aggregate.primitive_update_kind, cached_lane->lower_reg,
+					                                       descriptor.primitive_kind, cached_lane->lower_reg,
 					                                       SLJIT_PERFECT_HASH_STATE_REG, SLJIT_R2);
 				} else {
-					EmitSljitSparseLocalPerfectHashAccumulate(
-					    compiler, local_aggregate_plan.lanes[payload_idx], aggregate.primitive_update_kind,
-					    SLJIT_PERFECT_HASH_STATE_REG, SLJIT_R2, !options.all_valid);
+					EmitSljitSparseLocalPerfectHashAccumulate(compiler, local_aggregate_plan.lanes[payload_idx],
+					                                          descriptor.primitive_kind, SLJIT_PERFECT_HASH_STATE_REG,
+					                                          SLJIT_R2, !options.all_valid);
 				}
 			} else {
 				sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_S4, 0, SLJIT_MEM1(SLJIT_SP), context.group_index_offset);
 				EmitSljitLocalPerfectHashAccumulate(compiler, local_aggregate_plan.lanes[payload_idx],
-				                                    aggregate.primitive_update_kind, SLJIT_S4, SLJIT_R2);
+				                                    descriptor.primitive_kind, SLJIT_S4, SLJIT_R2);
 			}
 			EmitSljitPerfectHashPayloadInvalidContinuation(compiler, payload_invalid);
 			continue;
 		}
 
 		EmitSljitPerfectHashPayloadStatePointer(context);
-		if (aggregate.primitive_update_kind == AggregatePrimitiveUpdateKind::SUM_INT64) {
+		if (descriptor.primitive_kind == AggregatePrimitiveUpdateKind::SUM_INT64) {
 			if (deferred_flag_plan.enabled && options.all_valid) {
 				EmitSljitGroupedAggregateAccumulateInt64ImmediateNoStateSet(
-				    compiler, context.state_pointer_reg, state_offset, aggregate.primitive_update_state_value_offset,
-				    SLJIT_R2);
+				    compiler, context.state_pointer_reg, state_offset, descriptor.state_value_offset, SLJIT_R2);
 			} else {
-				EmitSljitGroupedAggregateAccumulateInt64Immediate(
-				    compiler, context.state_pointer_reg, state_offset, aggregate.primitive_update_state_value_offset,
-				    aggregate.primitive_update_state_is_set_offset, SLJIT_R2);
+				EmitSljitGroupedAggregateAccumulateInt64Immediate(compiler, context.state_pointer_reg, state_offset,
+				                                                  descriptor.state_value_offset,
+				                                                  descriptor.state_is_set_offset, SLJIT_R2);
 			}
 		} else {
 			if (deferred_flag_plan.enabled && options.all_valid) {
 				EmitSljitGroupedAggregateAccumulateHugeintImmediateNoStateSet(
-				    compiler, context.state_pointer_reg, state_offset, aggregate.primitive_update_state_value_offset,
-				    SLJIT_R2);
+				    compiler, context.state_pointer_reg, state_offset, descriptor.state_value_offset, SLJIT_R2);
 			} else {
-				EmitSljitGroupedAggregateAccumulateHugeintImmediate(
-				    compiler, context.state_pointer_reg, state_offset, aggregate.primitive_update_state_value_offset,
-				    aggregate.primitive_update_state_is_set_offset, SLJIT_R2);
+				EmitSljitGroupedAggregateAccumulateHugeintImmediate(compiler, context.state_pointer_reg, state_offset,
+				                                                    descriptor.state_value_offset,
+				                                                    descriptor.state_is_set_offset, SLJIT_R2);
 			}
 		}
 		EmitSljitPerfectHashPayloadInvalidContinuation(compiler, payload_invalid);

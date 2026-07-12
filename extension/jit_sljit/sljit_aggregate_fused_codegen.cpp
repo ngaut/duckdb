@@ -1,5 +1,6 @@
 #include "sljit_aggregate_fused_codegen.hpp"
 
+#include "sljit_aggregate_payload_descriptor.hpp"
 #include "sljit_codegen_util.hpp"
 
 namespace duckdb {
@@ -70,6 +71,17 @@ void EmitLoadFusedAggregateIntegerData(struct sljit_compiler *compiler, sljit_sw
 	               NativeIntegerDataScale(kind));
 }
 
+void EmitLoadFusedAggregateHugeintData(struct sljit_compiler *compiler, sljit_sw source_data_array_offset,
+                                       idx_t lane_idx, sljit_s32 index_reg, sljit_s32 lower_target_reg,
+                                       sljit_s32 upper_target_reg) {
+	sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_R0, 0, SLJIT_MEM1(SLJIT_S0), source_data_array_offset);
+	sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_R0, 0, SLJIT_MEM1(SLJIT_R0), SljitPointerArrayOffset(lane_idx));
+	sljit_emit_op2(compiler, SLJIT_SHL, SLJIT_R4, 0, index_reg, 0, SLJIT_IMM, 4);
+	sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_R0, 0, SLJIT_R0, 0, SLJIT_R4, 0);
+	sljit_emit_op1(compiler, SLJIT_MOV, lower_target_reg, 0, SLJIT_MEM1(SLJIT_R0), offsetof(hugeint_t, lower));
+	sljit_emit_op1(compiler, SLJIT_MOV, upper_target_reg, 0, SLJIT_MEM1(SLJIT_R0), offsetof(hugeint_t, upper));
+}
+
 void EmitLoadFusedAggregateDoubleData(struct sljit_compiler *compiler, sljit_sw source_data_array_offset,
                                       idx_t lane_idx, sljit_s32 index_reg, sljit_s32 target_freg) {
 	sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_R0, 0, SLJIT_MEM1(SLJIT_S0), source_data_array_offset);
@@ -118,55 +130,37 @@ EmitLoadFusedTypedAggregateReferenceValue(struct sljit_compiler *compiler,
 	return source_is_null;
 }
 
-static bool TryGetSljitAggregatePayloadIntegerKind(const LogicalType &payload_type, SljitNativeIntegerKind &kind) {
-	switch (payload_type.InternalType()) {
-	case PhysicalType::INT32:
-		kind = SljitNativeIntegerKind::INT32;
-		return true;
-	case PhysicalType::INT64:
-		kind = payload_type.id() == LogicalTypeId::DECIMAL ? SljitNativeIntegerKind::DECIMAL64
-		                                                   : SljitNativeIntegerKind::INT64;
-		return true;
-	default:
-		return false;
-	}
-}
-
 bool SljitAggregateTypedPayloadPlanSupported(const SljitTypedExpressionTreePlan &payload_plan,
-                                             const ExecutionRegionAggregateInput &aggregate) {
-	if (!payload_plan.supported || aggregate.child_types.size() != 1) {
+                                             const SljitAggregatePayloadDescriptor &descriptor) {
+	if (!payload_plan.supported) {
 		return false;
 	}
 	SljitNativeIntegerKind aggregate_payload_kind;
-	return TryGetSljitAggregatePayloadIntegerKind(aggregate.child_types[0], aggregate_payload_kind) &&
+	return descriptor.TryGetTypedIntegerKind(aggregate_payload_kind) &&
 	       payload_plan.result_kind == aggregate_payload_kind;
 }
 
 bool SljitFusedGroupedPrimitiveAggregatePayloadSupported(const SljitNativeRegionExpressionPlan &payload,
                                                          const ExecutionRegionAggregateInput &aggregate,
                                                          const ExecutionRegionAggregateContract &contract) {
-	if (!aggregate.primitive_update_ready || aggregate.aggregate_index >= contract.grouped_state_offsets.size()) {
+	if (aggregate.aggregate_index >= contract.grouped_state_offsets.size()) {
 		return false;
 	}
-	if (aggregate.primitive_update_kind == AggregatePrimitiveUpdateKind::COUNT_STAR) {
-		return aggregate.child_count == 0 && aggregate.child_types.empty();
-	}
-	if (aggregate.primitive_update_kind == AggregatePrimitiveUpdateKind::COUNT) {
-		return aggregate.child_types.size() == 1 &&
-		       payload.return_type.InternalType() == aggregate.child_types[0].InternalType() &&
-		       payload.kind == SljitNativeRegionExpressionKind::REFERENCE;
-	}
-	if (aggregate.child_types.size() != 1 ||
-	    aggregate.primitive_update_input_type != aggregate.child_types[0].InternalType() ||
-	    payload.return_type.InternalType() != aggregate.child_types[0].InternalType()) {
+	SljitAggregatePayloadDescriptor descriptor;
+	if (!SljitTryBindAggregatePayloadDescriptor(payload, aggregate, descriptor)) {
 		return false;
 	}
-	if (aggregate.primitive_update_kind == AggregatePrimitiveUpdateKind::SUM_DOUBLE) {
-		return payload.kind == SljitNativeRegionExpressionKind::REFERENCE &&
-		       payload.return_type.InternalType() == PhysicalType::DOUBLE;
+	if (!descriptor.has_payload) {
+		return true;
 	}
-	if (aggregate.primitive_update_kind != AggregatePrimitiveUpdateKind::SUM_INT64 &&
-	    aggregate.primitive_update_kind != AggregatePrimitiveUpdateKind::SUM_HUGEINT) {
+	if (descriptor.value_abi == SljitAggregatePayloadValueABI::VALIDITY_ONLY) {
+		return payload.kind == SljitNativeRegionExpressionKind::REFERENCE;
+	}
+	if (descriptor.primitive_kind == AggregatePrimitiveUpdateKind::SUM_DOUBLE) {
+		return payload.kind == SljitNativeRegionExpressionKind::REFERENCE;
+	}
+	if (descriptor.primitive_kind != AggregatePrimitiveUpdateKind::SUM_INT64 &&
+	    descriptor.primitive_kind != AggregatePrimitiveUpdateKind::SUM_HUGEINT) {
 		return false;
 	}
 	return payload.kind == SljitNativeRegionExpressionKind::REFERENCE;
@@ -174,18 +168,23 @@ bool SljitFusedGroupedPrimitiveAggregatePayloadSupported(const SljitNativeRegion
 
 bool SljitFusedGroupedTypedAggregatePayloadSupported(const SljitNativeRegionExpressionPlan &payload,
                                                      const ExecutionRegionAggregateInput &aggregate,
-                                                     const ExecutionRegionAggregateContract &contract) {
-	if (!aggregate.primitive_update_ready || aggregate.aggregate_index >= contract.grouped_state_offsets.size()) {
+                                                     const ExecutionRegionAggregateContract &contract,
+                                                     SljitAggregatePayloadDescriptor *bound_descriptor) {
+	if (aggregate.aggregate_index >= contract.grouped_state_offsets.size()) {
 		return false;
 	}
-	if (aggregate.primitive_update_kind == AggregatePrimitiveUpdateKind::COUNT_STAR) {
-		return aggregate.child_count == 0 && aggregate.child_types.empty();
+	SljitAggregatePayloadDescriptor descriptor;
+	if (!SljitTryBindAggregatePayloadDescriptor(payload, aggregate, descriptor)) {
+		return false;
 	}
-	if ((aggregate.primitive_update_kind != AggregatePrimitiveUpdateKind::SUM_INT64 &&
-	     aggregate.primitive_update_kind != AggregatePrimitiveUpdateKind::SUM_HUGEINT) ||
-	    aggregate.child_types.size() != 1 ||
-	    aggregate.primitive_update_input_type != aggregate.child_types[0].InternalType() ||
-	    payload.return_type.InternalType() != aggregate.child_types[0].InternalType()) {
+	if (bound_descriptor) {
+		*bound_descriptor = descriptor;
+	}
+	if (!descriptor.has_payload) {
+		return true;
+	}
+	if (!descriptor.IsMachineWord() || (descriptor.primitive_kind != AggregatePrimitiveUpdateKind::SUM_INT64 &&
+	                                    descriptor.primitive_kind != AggregatePrimitiveUpdateKind::SUM_HUGEINT)) {
 		return false;
 	}
 	return payload.kind == SljitNativeRegionExpressionKind::REFERENCE ||

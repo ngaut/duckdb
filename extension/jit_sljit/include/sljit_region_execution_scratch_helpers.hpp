@@ -9,6 +9,7 @@
 #pragma once
 
 #include "sljit_hash_join_runtime.hpp"
+#include "sljit_grouped_reduction_lane.hpp"
 #include "sljit_region_adapter_scratch.hpp"
 #include "sljit_region_executable.hpp"
 #include "sljit_region_runtime_source.hpp"
@@ -109,36 +110,26 @@ private:
 };
 
 struct SljitDirectAggregateUpdateTracker {
-	SljitDirectAggregateUpdateTracker(idx_t miss_limit_p, const char *scratch_name_p)
-	    : miss_limit(miss_limit_p), scratch_name(scratch_name_p) {
+	explicit SljitDirectAggregateUpdateTracker(idx_t miss_limit_p) : miss_limit(miss_limit_p) {
 	}
 
-	void Resize(idx_t count) {
-		disabled.resize(count);
-		misses.resize(count);
+	bool Disabled() const {
+		return disabled;
 	}
 
-	bool Disabled(idx_t op_idx) const {
-		return op_idx >= disabled.size() || disabled[op_idx];
-	}
-
-	void Record(idx_t op_idx, bool updated) {
-		if (op_idx >= disabled.size() || op_idx >= misses.size()) {
-			throw InternalException("SLJIT aggregate update has no %s scratch", scratch_name);
-		}
+	void Record(bool updated) {
 		if (updated) {
-			misses[op_idx] = 0;
+			misses = 0;
 			return;
 		}
-		if (++misses[op_idx] >= miss_limit) {
-			disabled[op_idx] = true;
+		if (++misses >= miss_limit) {
+			disabled = true;
 		}
 	}
 
-	vector<bool> disabled;
-	vector<idx_t> misses;
+	bool disabled = false;
+	idx_t misses = 0;
 	idx_t miss_limit;
-	const char *scratch_name;
 };
 
 struct SljitPreaggregatedGroupContinuationState {
@@ -154,77 +145,112 @@ struct SljitPreaggregatedGroupContinuationState {
 	uintptr_t state_address = 0;
 };
 
+enum class SljitBoundGroupedAggregateStrategy : uint8_t {
+	UNBOUND,
+	PERFECT_HASH_FUSED,
+	GROUPED_STATE_FUSED,
+	GROUPED_STATE_PER_PAYLOAD
+};
+
+struct SljitBoundGroupedPrimitiveAggregateUpdate {
+	bool ready = false;
+	idx_t op_idx = DConstants::INVALID_INDEX;
+	optional_ptr<SljitExecutableRegionOp> op;
+	optional_ptr<const vector<SljitAggregatePayloadDescriptor>> payload_descriptors;
+	optional_ptr<const vector<const ExecutionPrimitiveAggregateUpdateLane *>> payload_lanes;
+	optional_ptr<const vector<SljitGroupedReductionLaneBinding>> reduction_lanes;
+	optional_ptr<SljitAggregatePayloadAdapterScratch> payload_scratch;
+	optional_ptr<ExecutionGroupedAggregateStateAddressBinding> grouped_state;
+	SljitBoundGroupedAggregateStrategy strategy = SljitBoundGroupedAggregateStrategy::UNBOUND;
+};
+
+struct SljitAggregateOperatorScratch {
+	unique_ptr<Vector> state_addresses;
+	unique_ptr<DataChunk> preaggregated_groups;
+	unique_ptr<DataChunk> preaggregated_group_slice;
+	unique_ptr<Vector> preaggregated_row_pointers;
+	SljitPreaggregatedGroupContinuationState preaggregated_group_continuation;
+	SljitPreaggregatedPrimitiveAggregateScratch preaggregate_scratch;
+	SljitPreaggregatedPrimitiveAggregateScratch preaggregate_scratch_slice;
+	SljitAggregatePayloadAdapterScratch payload_scratch;
+	vector<const ExecutionPrimitiveAggregateUpdateLane *> payload_lanes;
+	bool payload_lanes_ready = false;
+	vector<SljitGroupedReductionLaneBinding> grouped_reduction_lanes;
+	bool grouped_reduction_lanes_ready = false;
+	SljitDirectAggregateUpdateTracker direct_new {8};
+	SljitDirectAggregateUpdateTracker direct_append_new {2};
+	SljitDirectAggregateUpdateTracker row_pointer_preaggregate {8};
+	SljitBoundGroupedPrimitiveAggregateUpdate bound_grouped_update;
+};
+
 struct SljitAggregateUpdateScratchState {
 	void Resize(idx_t count) {
-		state_addresses.resize(count);
-		preaggregated_groups.resize(count);
-		preaggregated_group_slices.resize(count);
-		preaggregated_row_pointers.resize(count);
-		preaggregated_group_continuations.resize(count);
-		preaggregate_scratch.resize(count);
-		preaggregate_scratch_slices.resize(count);
-		payload_scratch.resize(count);
-		payload_lanes.resize(count);
-		payload_lanes_ready.resize(count);
-		direct_new.Resize(count);
-		direct_append_new.Resize(count);
-		row_pointer_preaggregate.Resize(count);
+		operators.resize(count);
 	}
 
 	Vector &StateAddresses(idx_t op_idx) {
-		return SljitCheckedScratchPtr(state_addresses, op_idx,
-		                              "SLJIT aggregate update has no grouped state-address scratch");
+		auto &state = Operator(op_idx);
+		if (!state.state_addresses) {
+			throw InternalException("SLJIT aggregate update has no grouped state-address scratch");
+		}
+		return *state.state_addresses;
 	}
 
 	SljitAggregatePayloadAdapterScratch &PayloadScratch(idx_t op_idx) {
-		return SljitCheckedScratchSlot(payload_scratch, op_idx,
-		                               "SLJIT aggregate update has no payload-adapter scratch");
+		return Operator(op_idx).payload_scratch;
+	}
+
+	SljitBoundGroupedPrimitiveAggregateUpdate &BoundGroupedUpdate(idx_t op_idx) {
+		return Operator(op_idx).bound_grouped_update;
 	}
 
 	DataChunk &PreaggregatedGroups(idx_t op_idx) {
-		return SljitCheckedScratchPtr(preaggregated_groups, op_idx,
-		                              "SLJIT aggregate update has no preaggregated group scratch");
+		auto &state = Operator(op_idx);
+		if (!state.preaggregated_groups) {
+			throw InternalException("SLJIT aggregate update has no preaggregated group scratch");
+		}
+		return *state.preaggregated_groups;
 	}
 
 	DataChunk &PreaggregatedGroupSlice(idx_t op_idx) {
-		return SljitCheckedScratchPtr(preaggregated_group_slices, op_idx,
-		                              "SLJIT aggregate update has no preaggregated group slice scratch");
+		auto &state = Operator(op_idx);
+		if (!state.preaggregated_group_slice) {
+			throw InternalException("SLJIT aggregate update has no preaggregated group slice scratch");
+		}
+		return *state.preaggregated_group_slice;
 	}
 
 	Vector &PreaggregatedRowPointers(idx_t op_idx) {
-		return SljitCheckedScratchPtr(preaggregated_row_pointers, op_idx,
-		                              "SLJIT aggregate update has no preaggregated row-pointer scratch");
+		auto &state = Operator(op_idx);
+		if (!state.preaggregated_row_pointers) {
+			throw InternalException("SLJIT aggregate update has no preaggregated row-pointer scratch");
+		}
+		return *state.preaggregated_row_pointers;
 	}
 
 	SljitPreaggregatedGroupContinuationState &PreaggregatedGroupContinuation(idx_t op_idx) {
-		return SljitCheckedScratchSlot(preaggregated_group_continuations, op_idx,
-		                               "SLJIT aggregate update has no preaggregated group continuation scratch");
+		return Operator(op_idx).preaggregated_group_continuation;
 	}
 
 	SljitPreaggregatedPrimitiveAggregateScratch &PreaggregateScratch(idx_t op_idx) {
-		return SljitCheckedScratchSlot(preaggregate_scratch, op_idx,
-		                               "SLJIT aggregate update has no preaggregate scratch");
+		return Operator(op_idx).preaggregate_scratch;
 	}
 
 	SljitPreaggregatedPrimitiveAggregateScratch &PreaggregateScratchSlice(idx_t op_idx) {
-		return SljitCheckedScratchSlot(preaggregate_scratch_slices, op_idx,
-		                               "SLJIT aggregate update has no preaggregate slice scratch");
+		return Operator(op_idx).preaggregate_scratch_slice;
 	}
 
 	const vector<const ExecutionPrimitiveAggregateUpdateLane *> &
-	PayloadLanes(idx_t op_idx, const vector<ExecutionRegionAggregateInput> &aggregates,
+	PayloadLanes(idx_t op_idx, const vector<SljitAggregatePayloadDescriptor> &payload_descriptors,
 	             const ExecutionPrimitiveAggregateUpdateBinding &primitive) {
-		if (op_idx >= payload_lanes.size() || op_idx >= payload_lanes_ready.size()) {
-			throw InternalException("SLJIT aggregate update has no payload-lane scratch");
+		auto &state = Operator(op_idx);
+		if (state.payload_lanes_ready) {
+			return state.payload_lanes;
 		}
-		if (payload_lanes_ready[op_idx]) {
-			return payload_lanes[op_idx];
-		}
-		auto &lanes = payload_lanes[op_idx];
-		lanes.assign(aggregates.size(), nullptr);
-		for (idx_t payload_idx = 0; payload_idx < aggregates.size(); payload_idx++) {
-			auto &aggregate = aggregates[payload_idx];
-			auto aggregate_index = aggregate.aggregate_index;
+		auto &lanes = state.payload_lanes;
+		lanes.assign(payload_descriptors.size(), nullptr);
+		for (idx_t payload_idx = 0; payload_idx < payload_descriptors.size(); payload_idx++) {
+			auto aggregate_index = payload_descriptors[payload_idx].aggregate_index;
 			auto lane = primitive.FindLane(aggregate_index);
 			if (!lane) {
 				throw InternalException("SLJIT aggregate primitive lane missing for aggregate %llu",
@@ -232,40 +258,61 @@ struct SljitAggregateUpdateScratchState {
 			}
 			lanes[payload_idx] = lane;
 		}
-		payload_lanes_ready[op_idx] = true;
+		state.payload_lanes_ready = true;
+		return lanes;
+	}
+
+	const vector<SljitGroupedReductionLaneBinding> &
+	GroupedReductionLanes(idx_t op_idx, const ExecutionRegionAggregateContract &contract,
+	                      const vector<SljitAggregatePayloadDescriptor> &payload_descriptors,
+	                      const vector<const ExecutionPrimitiveAggregateUpdateLane *> &payload_lanes) {
+		auto &state = Operator(op_idx);
+		if (state.grouped_reduction_lanes_ready) {
+			return state.grouped_reduction_lanes;
+		}
+		auto &lanes = state.grouped_reduction_lanes;
+		if (!SljitTryBindGroupedReductionLanes(contract, payload_descriptors, payload_lanes, lanes)) {
+			throw InternalException("SLJIT grouped aggregate reduction lane binding failed");
+		}
+		state.grouped_reduction_lanes_ready = true;
 		return lanes;
 	}
 
 	bool DirectNewDisabled(idx_t op_idx) const {
-		return direct_new.Disabled(op_idx);
+		return Operator(op_idx).direct_new.Disabled();
 	}
 
 	void RecordDirectNewResult(idx_t op_idx, bool updated) {
-		direct_new.Record(op_idx, updated);
+		Operator(op_idx).direct_new.Record(updated);
 	}
 
 	bool DirectAppendNewDisabled(idx_t op_idx) const {
-		return direct_append_new.Disabled(op_idx);
+		return Operator(op_idx).direct_append_new.Disabled();
 	}
 
 	void RecordDirectAppendNewResult(idx_t op_idx, bool updated) {
-		direct_append_new.Record(op_idx, updated);
+		Operator(op_idx).direct_append_new.Record(updated);
 	}
 
 	bool RowPointerPreaggregateDisabled(idx_t op_idx) const {
-		return row_pointer_preaggregate.Disabled(op_idx);
+		return Operator(op_idx).row_pointer_preaggregate.Disabled();
 	}
 
 	void RecordRowPointerPreaggregateResult(idx_t op_idx, bool updated) {
-		row_pointer_preaggregate.Record(op_idx, updated);
+		Operator(op_idx).row_pointer_preaggregate.Record(updated);
 	}
 
 	void Initialize(Allocator &allocator, idx_t op_idx, const SljitExecutableRegionOp &op) {
+		if (op_idx >= operators.size() || operators[op_idx]) {
+			throw InternalException("SLJIT aggregate update scratch initialized more than once");
+		}
+		operators[op_idx] = make_uniq<SljitAggregateOperatorScratch>();
 		if (!op.aggregate_update.plan.use_grouped_state_addresses) {
 			return;
 		}
-		state_addresses[op_idx] = make_uniq<Vector>(LogicalType::POINTER);
-		preaggregated_row_pointers[op_idx] = make_uniq<Vector>(LogicalType::POINTER);
+		auto &state = *operators[op_idx];
+		state.state_addresses = make_uniq<Vector>(LogicalType::POINTER);
+		state.preaggregated_row_pointers = make_uniq<Vector>(LogicalType::POINTER);
 		auto &groups = op.aggregate_update.plan.sink_info.groups;
 		if (groups.empty()) {
 			return;
@@ -275,24 +322,26 @@ struct SljitAggregateUpdateScratchState {
 		for (auto &group : groups) {
 			group_types.push_back(group.type);
 		}
-		SljitInitializeScratchChunk(allocator, group_types, preaggregated_groups[op_idx]);
-		SljitInitializeScratchChunk(allocator, group_types, preaggregated_group_slices[op_idx]);
+		SljitInitializeScratchChunk(allocator, group_types, state.preaggregated_groups);
+		SljitInitializeScratchChunk(allocator, group_types, state.preaggregated_group_slice);
 	}
 
 private:
-	vector<unique_ptr<Vector>> state_addresses;
-	vector<unique_ptr<DataChunk>> preaggregated_groups;
-	vector<unique_ptr<DataChunk>> preaggregated_group_slices;
-	vector<unique_ptr<Vector>> preaggregated_row_pointers;
-	vector<SljitPreaggregatedGroupContinuationState> preaggregated_group_continuations;
-	vector<SljitPreaggregatedPrimitiveAggregateScratch> preaggregate_scratch;
-	vector<SljitPreaggregatedPrimitiveAggregateScratch> preaggregate_scratch_slices;
-	vector<SljitAggregatePayloadAdapterScratch> payload_scratch;
-	vector<vector<const ExecutionPrimitiveAggregateUpdateLane *>> payload_lanes;
-	vector<bool> payload_lanes_ready;
-	SljitDirectAggregateUpdateTracker direct_new {8, "direct-new"};
-	SljitDirectAggregateUpdateTracker direct_append_new {2, "direct-append-new"};
-	SljitDirectAggregateUpdateTracker row_pointer_preaggregate {8, "row-pointer-preaggregate"};
+	SljitAggregateOperatorScratch &Operator(idx_t op_idx) {
+		if (op_idx >= operators.size() || !operators[op_idx]) {
+			throw InternalException("SLJIT aggregate update has no operator scratch");
+		}
+		return *operators[op_idx];
+	}
+
+	const SljitAggregateOperatorScratch &Operator(idx_t op_idx) const {
+		if (op_idx >= operators.size() || !operators[op_idx]) {
+			throw InternalException("SLJIT aggregate update has no operator scratch");
+		}
+		return *operators[op_idx];
+	}
+
+	vector<unique_ptr<SljitAggregateOperatorScratch>> operators;
 };
 
 } // namespace duckdb

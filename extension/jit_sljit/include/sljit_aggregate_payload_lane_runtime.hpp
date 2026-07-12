@@ -8,18 +8,22 @@
 
 #pragma once
 
+#include "sljit_aggregate_payload_lane_contract.hpp"
 #include "sljit_region_runtime_state.hpp"
 
 namespace duckdb {
 
-static const ExecutionPrimitiveAggregateUpdateLane &SljitRequireAggregatePrimitiveLane(
-    const vector<const ExecutionPrimitiveAggregateUpdateLane *> &lanes,
-    const vector<ExecutionRegionAggregateInput> &aggregates, idx_t payload_idx, const char *message) {
-	auto lane = lanes[payload_idx];
-	if (!lane) {
-		throw InternalException(message, static_cast<unsigned long long>(aggregates[payload_idx].aggregate_index));
+static const ExecutionPrimitiveAggregateUpdateLane &
+SljitRequireAggregatePayloadLane(const vector<const ExecutionPrimitiveAggregateUpdateLane *> &lanes,
+                                 const vector<SljitAggregatePayloadDescriptor> &descriptors, idx_t payload_idx,
+                                 const char *message) {
+	if (payload_idx >= lanes.size() || payload_idx >= descriptors.size() || !lanes[payload_idx] ||
+	    !SljitAggregatePayloadDescriptorMatchesLane(descriptors[payload_idx], *lanes[payload_idx])) {
+		auto aggregate_index =
+		    payload_idx < descriptors.size() ? descriptors[payload_idx].aggregate_index : DConstants::INVALID_INDEX;
+		throw InternalException(message, static_cast<unsigned long long>(aggregate_index));
 	}
-	return *lane;
+	return *lanes[payload_idx];
 }
 
 static void SljitThrowIncompletePrimitiveLane(const ExecutionPrimitiveAggregateUpdateLane &lane, const char *message,
@@ -80,36 +84,13 @@ static void SljitBindUngroupedInt64SumPrimitiveLane(const ExecutionPrimitiveAggr
 	aggregate_row_counts[payload_idx] = lane.row_count;
 }
 
-static void SljitValidateGroupedPrimitiveLaneState(const ExecutionPrimitiveAggregateUpdateLane &lane,
-                                                   const char *message, const char *default_blocker) {
-	if (!lane.ready || lane.state_size == 0) {
-		SljitThrowIncompletePrimitiveLane(lane, message, default_blocker);
-	}
-}
-
-static void SljitValidateGroupedPrimitiveLaneLayout(const ExecutionRegionAggregateInput &aggregate,
-                                                    const ExecutionRegionAggregateContract &contract,
-                                                    const ExecutionPrimitiveAggregateUpdateLane &lane,
-                                                    const char *offset_message, const char *incomplete_message,
-                                                    const char *layout_mismatch_message) {
-	if (aggregate.aggregate_index >= contract.grouped_state_offsets.size()) {
-		throw InternalException(offset_message);
-	}
-	SljitValidateGroupedPrimitiveLaneState(lane, incomplete_message, "aggregate-primitive-grouped-lane-incomplete");
-	if (lane.state_offset != contract.grouped_state_offsets[aggregate.aggregate_index] ||
-	    lane.state_value_offset != aggregate.primitive_update_state_value_offset ||
-	    lane.state_is_set_offset != aggregate.primitive_update_state_is_set_offset) {
-		throw InternalException(layout_mismatch_message);
-	}
-}
-
-static bool SljitSkipCountStarPrimitivePayload(const ExecutionRegionAggregateInput &aggregate,
+static bool SljitSkipCountStarPrimitivePayload(const SljitAggregatePayloadDescriptor &descriptor,
                                                const ExecutionPrimitiveAggregateUpdateLane &lane,
                                                const char *unexpected_payload_message) {
 	if (lane.kind != AggregatePrimitiveUpdateKind::COUNT_STAR) {
 		return false;
 	}
-	if (aggregate.child_count != 0) {
+	if (descriptor.has_payload) {
 		throw InternalException(unexpected_payload_message);
 	}
 	return true;
@@ -185,8 +166,7 @@ static void SljitBindTypedAggregatePayloadSources(SljitNativeVectorInput &native
 	native_input.source_validity_array = payload_sources.ValidityArray();
 	native_input.expression_tree_flat_no_selection =
 	    payload_sources.FlatNoSelection(native_execute_sel, source_common_sel);
-	native_input.expression_tree_flat_all_valid =
-	    payload_sources.FlatAllValid(native_execute_sel, source_common_sel);
+	native_input.expression_tree_flat_all_valid = payload_sources.FlatAllValid(native_execute_sel, source_common_sel);
 	native_input.expression_tree_all_valid = payload_sources.AllValid();
 }
 

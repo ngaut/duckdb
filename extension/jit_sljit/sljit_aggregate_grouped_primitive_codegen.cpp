@@ -59,6 +59,16 @@ void EmitSljitGroupedAggregateAccumulateHugeintInt64(struct sljit_compiler *comp
 	EmitSljitGroupedAggregateSetStateIsSet(compiler, state_reg);
 }
 
+void EmitSljitGroupedAggregateAccumulateHugeint(struct sljit_compiler *compiler, sljit_s32 state_reg,
+                                                sljit_s32 lower_value_reg, sljit_s32 upper_value_reg) {
+	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R0, 0, SLJIT_MEM1(SLJIT_S0),
+	               offsetof(SljitNativeVectorInput, aggregate_state_value_offset));
+	sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_R0, 0, state_reg, 0, SLJIT_R0, 0);
+	EmitSljitAccumulateHugeintWords(compiler, SLJIT_R0, offsetof(hugeint_t, lower), offsetof(hugeint_t, upper),
+	                                lower_value_reg, upper_value_reg);
+	EmitSljitGroupedAggregateSetStateIsSet(compiler, state_reg);
+}
+
 void EmitSljitGroupedAggregateAccumulateDouble(struct sljit_compiler *compiler, sljit_s32 state_reg,
                                                sljit_s32 value_freg) {
 	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R0, 0, SLJIT_MEM1(SLJIT_S0),
@@ -175,6 +185,16 @@ void EmitSljitGroupedAggregateAccumulateHugeintImmediate(struct sljit_compiler *
 	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_MEM1(SLJIT_R0), offsetof(hugeint_t, lower), SLJIT_R3, 0);
 	sljit_emit_op_flags(compiler, SLJIT_MOV, SLJIT_R1, 0, SLJIT_CARRY);
 	EmitSljitAccumulateHugeintUpperIfNeeded(compiler, SLJIT_R0, offsetof(hugeint_t, upper), SLJIT_R4, SLJIT_R1);
+	EmitSljitGroupedAggregateSetStateIsSetImmediate(compiler, base_reg, state_offset, state_is_set_offset);
+}
+
+void EmitSljitGroupedAggregateAccumulateHugeintValueImmediate(struct sljit_compiler *compiler, sljit_s32 base_reg,
+                                                              idx_t state_offset, idx_t value_offset,
+                                                              idx_t state_is_set_offset, sljit_s32 lower_value_reg,
+                                                              sljit_s32 upper_value_reg) {
+	EmitSljitGroupedAggregateValuePointerImmediate(compiler, base_reg, state_offset, value_offset);
+	EmitSljitAccumulateHugeintWords(compiler, SLJIT_R0, offsetof(hugeint_t, lower), offsetof(hugeint_t, upper),
+	                                lower_value_reg, upper_value_reg);
 	EmitSljitGroupedAggregateSetStateIsSetImmediate(compiler, base_reg, state_offset, state_is_set_offset);
 }
 

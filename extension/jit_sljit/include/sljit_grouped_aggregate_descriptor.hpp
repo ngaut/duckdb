@@ -105,11 +105,9 @@ static bool SljitTryResolveMappedProducerProbeInput(
 		idx_t source_idx;
 		if (!SljitTryBuildSingleSourceProjectionExpression(producer_projection_op->projections[output_idx],
 		                                                   producer_expr, source_idx) ||
-		    !SljitProjectionIsSingleSourceReferenceLike(producer_expr.plan) ||
 		    !SljitProducerProjectionSourceMatchesProbeInput(binding, source_idx, probe_input_idx) ||
 		    source_idx >= producer_projection_op->input_types.size() ||
-		    producer_expr.plan.return_type != producer_projection_op->output_types[output_idx] ||
-		    producer_projection_op->input_types[source_idx] != producer_expr.plan.return_type) {
+		    producer_expr.plan.return_type != producer_projection_op->output_types[output_idx]) {
 			return false;
 		}
 		if (resolved_expr) {
@@ -141,9 +139,11 @@ static bool SljitTryAddJoinLHSInputAggregateInputFromProjection(
 		}
 		const auto input_col = binding.lhs_output_column_indices[join_output_source_index];
 		const LogicalType *producer_source_type = nullptr;
+		SljitExecutableRegionExpression producer_expr;
 		if (!SljitTryResolveMappedProducerProbeInput(binding, descriptor, producer_projection_op, input_col,
-		                                             producer_source_type) ||
-		    !producer_source_type) {
+		                                             producer_source_type,
+		                                             optional_ptr<SljitExecutableRegionExpression>(&producer_expr)) ||
+		    !producer_source_type || !SljitProjectionIsSingleSourceReferenceLike(producer_expr.plan)) {
 			return false;
 		}
 		auto &projection_type = projection_op.output_types[projection_idx];

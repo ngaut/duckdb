@@ -91,10 +91,6 @@ public:
 		return ExecutionRegionABIIsFullPipeline(abi);
 	}
 
-	void RefreshTraceCodeSize() {
-		SetTraceInfo(TraceId(), ExecutionMode(), TraceCompileReason(), TraceCompileTime(), CodeSize());
-	}
-
 	void RecordLazyHashJoinProbeCodegen(ExecutionRegionRuntime &runtime, const SljitLazyCodegenTiming &timing,
 	                                    idx_t code_size) {
 		ExecutionRegionLazyCodegenMetrics metrics;
@@ -102,93 +98,56 @@ public:
 		metrics.machine_codegen_time_us = timing.machine_codegen_time_us;
 		metrics.code_size = code_size;
 		runtime.RecordLazyCodegen(metrics);
-		RefreshTraceCodeSize();
+		AddTraceCodeSize(code_size);
 	}
 
 	template <class FUNCTION, class BUILD>
-	void EnsureLazyHashJoinProbeCode(ExecutionRegionRuntime &runtime, unique_ptr<ExecutionRegionCodeHandle> &code,
-	                                 FUNCTION &function, const string &failure_message, BUILD build) {
-		if (function) {
-			return;
-		}
-		lock_guard<mutex> guard(codegen_lock);
-		if (function) {
-			return;
-		}
-		string error;
-		auto timing = TimeSljitLazyCodegen([&]() { code = build(error); });
-		if (!code || !function) {
-			throw InternalException("%s: %s", failure_message.c_str(), error.empty() ? "unknown error" : error);
-		}
-		RecordLazyHashJoinProbeCodegen(runtime, timing, code->CodeSize());
+	FUNCTION EnsureLazyHashJoinProbeCode(ExecutionRegionRuntime &runtime, SljitLazyCompiledFunction<FUNCTION> &artifact,
+	                                     const string &failure_message, BUILD build) {
+		return artifact.Ensure([&]() {
+			string error;
+			FUNCTION function = nullptr;
+			unique_ptr<ExecutionRegionCodeHandle> code;
+			auto timing = TimeSljitLazyCodegen([&]() { code = build(function, error); });
+			if (!code || !function) {
+				throw InternalException("%s: %s", failure_message.c_str(), error.empty() ? "unknown error" : error);
+			}
+			auto code_size = code->CodeSize();
+			RecordLazyHashJoinProbeCodegen(runtime, timing, code_size);
+			return SljitCompiledFunction<FUNCTION>(std::move(code), function);
+		});
 	}
 
-	void EnsurePerfectHashJoinProbeCode(ExecutionRegionRuntime &runtime, SljitExecutableHashJoinProbe &probe) {
-		auto &perfect = probe.perfect;
-		if (perfect.function) {
-			return;
-		}
-		EnsureLazyHashJoinProbeCode(
-		    runtime, perfect.code, perfect.function, "SLJIT native perfect hash join probe lazy code generation failed",
-		    [&](string &error) { return BuildSljitPerfectHashJoinProbe(probe.plan, perfect.function, error); });
+	SljitNativePerfectHashJoinProbeFunction EnsurePerfectHashJoinProbeCode(ExecutionRegionRuntime &runtime,
+	                                                                       SljitExecutableHashJoinProbe &probe) {
+		return EnsureLazyHashJoinProbeCode(runtime, probe.perfect.compiled,
+		                                   "SLJIT native perfect hash join probe lazy code generation failed",
+		                                   [&](SljitNativePerfectHashJoinProbeFunction &function, string &error) {
+			                                   return BuildSljitPerfectHashJoinProbe(probe.plan, function, error);
+		                                   });
 	}
 
-	void EnsureRegularHashJoinProbeCode(
+	SljitNativeRegularHashJoinProbeFunction EnsureRegularHashJoinProbeCode(
 	    ExecutionRegionRuntime &runtime, SljitExecutableHashJoinProbe &probe, bool uses_bloom_filter = false,
 	    SljitHashJoinMarkSelectionMode mark_selection_mode = SljitHashJoinMarkSelectionMode::NONE) {
-		auto &regular = probe.regular;
-		unique_ptr<ExecutionRegionCodeHandle> *code_ptr;
-		SljitNativeRegularHashJoinProbeFunction *function_ptr;
-		switch (mark_selection_mode) {
-		case SljitHashJoinMarkSelectionMode::NONE:
-			code_ptr = uses_bloom_filter ? &regular.bloom_code : &regular.code;
-			function_ptr = uses_bloom_filter ? &regular.bloom_function : &regular.function;
-			break;
-		case SljitHashJoinMarkSelectionMode::MATCHES:
-			code_ptr =
-			    uses_bloom_filter ? &regular.mark_match_selection_bloom_code : &regular.mark_match_selection_code;
-			function_ptr = uses_bloom_filter ? &regular.mark_match_selection_bloom_function
-			                                 : &regular.mark_match_selection_function;
-			break;
-		case SljitHashJoinMarkSelectionMode::NON_MATCHES:
-			code_ptr =
-			    uses_bloom_filter ? &regular.mark_nonmatch_selection_bloom_code : &regular.mark_nonmatch_selection_code;
-			function_ptr = uses_bloom_filter ? &regular.mark_nonmatch_selection_bloom_function
-			                                 : &regular.mark_nonmatch_selection_function;
-			break;
-		default:
-			throw InternalException("Unsupported SLJIT MARK selection mode");
-		}
+		auto key = SljitHashJoinProbeSpecializationKey::General(uses_bloom_filter, mark_selection_mode);
+		auto &specialization = probe.regular.Specialization(key);
 		SljitHashJoinProbeCodegenConfig config;
 		config.uses_bloom_filter = uses_bloom_filter;
 		config.mark_selection_mode = mark_selection_mode;
-		EnsureLazyHashJoinProbeCode(
-		    runtime, *code_ptr, *function_ptr, "SLJIT native hash join probe lazy code generation failed",
-		    [&](string &error) { return BuildSljitRegularHashJoinProbe(probe.plan, *function_ptr, error, config); });
+		return EnsureLazyHashJoinProbeCode(
+		    runtime, specialization, "SLJIT native hash join probe lazy code generation failed",
+		    [&](SljitNativeRegularHashJoinProbeFunction &function, string &error) {
+			    return BuildSljitRegularHashJoinProbe(probe.plan, function, error, config);
+		    });
 	}
 
 	SljitNativeRegularHashJoinProbeFunction EnsureAllValidRegularHashJoinProbeCode(
 	    ExecutionRegionRuntime &runtime, SljitExecutableHashJoinProbe &probe,
 	    const SljitHashJoinProbeAllValidSpecializationKey &key,
 	    SljitHashJoinMarkSelectionMode mark_selection_mode = SljitHashJoinMarkSelectionMode::NONE) {
-		SljitExecutableRegularHashJoinProbeCode::AllValidSpecialization *specialization_ptr;
-		switch (mark_selection_mode) {
-		case SljitHashJoinMarkSelectionMode::NONE:
-			specialization_ptr = &probe.regular.AllValidSpecializationFor(key);
-			break;
-		case SljitHashJoinMarkSelectionMode::MATCHES:
-			specialization_ptr = &probe.regular.MarkMatchAllValidSpecializationFor(key);
-			break;
-		case SljitHashJoinMarkSelectionMode::NON_MATCHES:
-			specialization_ptr = &probe.regular.MarkNonMatchAllValidSpecializationFor(key);
-			break;
-		default:
-			throw InternalException("Unsupported SLJIT all-valid MARK selection mode");
-		}
-		auto &specialization = *specialization_ptr;
-		if (specialization.function) {
-			return specialization.function;
-		}
+		auto specialization_key = SljitHashJoinProbeSpecializationKey::AllValid(key, mark_selection_mode);
+		auto &specialization = probe.regular.Specialization(specialization_key);
 		auto config = SljitHashJoinProbeCodegenConfig::ForAllValidSpecialization(key);
 		config.mark_selection_mode = mark_selection_mode;
 		auto failure_message = string("SLJIT native ") + (key.selected ? "selected" : "flat") +
@@ -197,11 +156,11 @@ public:
 		                            : (mark_selection_mode == SljitHashJoinMarkSelectionMode::MATCHES
 		                                   ? " all-valid MARK-match hash join probe codegen failed"
 		                                   : " all-valid MARK-nonmatch hash join probe codegen failed"));
-		EnsureLazyHashJoinProbeCode(
-		    runtime, specialization.code, specialization.function, failure_message, [&](string &error) {
-			    return BuildSljitRegularHashJoinProbe(probe.plan, specialization.function, error, config);
-		    });
-		return specialization.function;
+		return EnsureLazyHashJoinProbeCode(runtime, specialization, failure_message,
+		                                   [&](SljitNativeRegularHashJoinProbeFunction &function, string &error) {
+			                                   return BuildSljitRegularHashJoinProbe(probe.plan, function, error,
+			                                                                         config);
+		                                   });
 	}
 
 	bool TryExecuteFullPipeline(ExecutionRegionRuntime &runtime, ExecutionRegionResult &result) override {
@@ -222,7 +181,6 @@ private:
 	vector<Value> source_max_values;
 	SljitFullPipelineRecipePlan full_pipeline_recipe_plan;
 	ExecutionRegionABI abi;
-	mutex codegen_lock;
 };
 
 unique_ptr<ExecutionRegionKernel> CreateSljitNativeRegionKernel(ClientContext &context, string backend_name,

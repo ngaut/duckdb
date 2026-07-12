@@ -33,6 +33,7 @@ struct PhysicalRunnerCostInput {
 	idx_t generated_backend_stage_count = 0;
 	idx_t generated_grouped_aggregate_stage_count = 0;
 	idx_t native_grouped_state_address_lookup_count = 0;
+	idx_t grouped_aggregate_estimated_cardinality = 0;
 	idx_t materialization_elision_count = 0;
 	idx_t selected_hash_join_filter_materialization_count = 0;
 	idx_t native_join_stage_count = 0;
@@ -84,6 +85,7 @@ struct PhysicalRunnerCostProfile {
 	int64_t generated_backend_stage_count = 0;
 	int64_t generated_grouped_aggregate_stage_count = 0;
 	int64_t native_grouped_state_address_lookup_count = 0;
+	int64_t grouped_aggregate_estimated_cardinality = 0;
 	int64_t materialization_elision_count = 0;
 	int64_t selected_hash_join_filter_materialization_count = 0;
 	int64_t native_join_stage_count = 0;
@@ -120,6 +122,7 @@ struct PhysicalRunnerCostProfile {
 	int64_t startup_cost = 0;
 	int64_t required_benefit = 0;
 	int64_t net_benefit = 0;
+	ExecutionRegionJitRuntimeProofMask required_runtime_proofs = 0;
 	bool selected_accelerated_runner = false;
 	bool selected_compiled_vectorized_runner = false;
 	bool selected_gpu_runner = false;

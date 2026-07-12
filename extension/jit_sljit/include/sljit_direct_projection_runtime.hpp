@@ -130,14 +130,13 @@ static bool SljitTrySelectDirectProjectionCandidate(ExecutionRegionRuntime &runt
                                                     SljitDirectProjectionCandidate &candidate) {
 	candidate = SljitDirectProjectionCandidate();
 	const bool use_floating_direct_append =
-	    op.flat_fused_floating_projection_function && op.flat_fused_floating_projection_plan.covers_all_projections;
+	    op.flat_fused_floating_projection.Function() && op.flat_fused_floating_projection_plan.covers_all_projections;
 	auto preflight_stage_start = SljitRegionStageStart(runtime);
 	if (use_floating_direct_append) {
 		if (!PrepareFlatFusedFloatingProjectionSources(op, input, nullptr, input.size(), projection_scratch, false)) {
 			return false;
 		}
-		RecordSljitRegionStageRuntime(runtime, op_idx, op.kind, "append_floating_preflight",
-		                              preflight_stage_start);
+		RecordSljitRegionStageRuntime(runtime, op_idx, op.kind, "append_floating_preflight", preflight_stage_start);
 		candidate.kind = SljitDirectProjectionMaterializerKind::FLOATING_FUSED;
 		candidate.stats_mode = op.flat_fused_floating_projection_plan.stats_mode;
 		candidate.shape_changed_message = "SLJIT direct append source shape changed after direct-append preflight";

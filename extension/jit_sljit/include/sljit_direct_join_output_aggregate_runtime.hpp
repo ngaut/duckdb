@@ -27,7 +27,7 @@ static bool SljitTryExecuteDirectJoinOutputPerfectHashAggregateUpdate(
 	auto &aggregate_update = op.aggregate_update;
 	auto &plan = aggregate_update.plan;
 	auto &sink_info = plan.sink_info;
-	if (!aggregate_update.fused_payload_update_function || !aggregate_update.fused_payload_update_owns_group_lookup ||
+	if (!aggregate_update.fused_payload_update.Function() || !aggregate_update.fused_payload_update_owns_group_lookup ||
 	    !plan.use_primitive_payloads || !plan.use_perfect_hash_group_lookup ||
 	    sink_info.kind != ExecutionRegionSinkKind::PERFECT_HASH_AGGREGATE_UPDATE ||
 	    sink_info.aggregates.size() != aggregate_update.payloads.size()) {
@@ -58,7 +58,7 @@ static bool SljitTryExecuteDirectJoinOutputPerfectHashAggregateUpdate(
 		return false;
 	}
 	auto &payload_lanes =
-	    scratch.AggregatePayloadLanes(op_idx, sink_info.aggregates, binding.aggregate_update.primitive);
+	    scratch.AggregatePayloadLanes(op_idx, aggregate_update.payload_descriptors, binding.aggregate_update.primitive);
 	if (payload_lanes.size() != sink_info.aggregates.size()) {
 		if (failure_reason) {
 			*failure_reason = "payload_lanes";
@@ -66,11 +66,14 @@ static bool SljitTryExecuteDirectJoinOutputPerfectHashAggregateUpdate(
 		return false;
 	}
 	auto &payload_scratch = scratch.AggregatePayloadScratch(op_idx);
+	auto &reduction_lanes = scratch.GroupedReductionLanes(op_idx, sink_info.aggregate_contract,
+	                                                      aggregate_update.payload_descriptors, payload_lanes);
 	auto payload_stage_start = SljitRegionStageStart(runtime);
 	SljitExecuteFusedPerfectHashGroupedPrimitiveAggregatePayloadUpdate(
-	    aggregate_update.payloads, aggregate_update.fused_payload_update_function, sink_info.aggregates,
-	    sink_info.groups, plan.group_expressions, sink_info.aggregate_contract, payload_lanes,
-	    grouped_state.perfect_hash_layout, aggregate_input, nullptr, aggregate_input.size(), payload_scratch);
+	    aggregate_update.payloads, aggregate_update.fused_payload_update.Function(), sink_info.groups,
+	    plan.group_expressions, sink_info.aggregate_contract, aggregate_update.payload_descriptors, payload_lanes,
+	    reduction_lanes, grouped_state.perfect_hash_layout, aggregate_input, nullptr, aggregate_input.size(),
+	    payload_scratch);
 	RecordSljitRegionStageRuntime(runtime, op_idx, op.kind, "primitive_payload_update_fused", payload_stage_start);
 	RecordSljitRegionMaterializationElisionPath(runtime, op.kind, "join_output_perfect_hash_payload_update",
 	                                            aggregate_input.size());
@@ -89,8 +92,8 @@ static bool SljitDirectJoinOutputAggregatePayloadSourcesValid(const SljitJoinPro
 	    sink_info.kind != ExecutionRegionSinkKind::PERFECT_HASH_AGGREGATE_UPDATE) {
 		return true;
 	}
-	auto fused_override_status = SljitGetFusedTypedPayloadSourceOverrideStatus(
-	    aggregate_update, sink_info.aggregates, aggregate_input, descriptor.payload_source_indices);
+	auto fused_override_status = SljitGetFusedTypedPayloadSourceOverrideStatus(aggregate_update, aggregate_input,
+	                                                                           descriptor.payload_source_indices);
 	if (fused_override_status == SljitFusedTypedPayloadSourceOverrideStatus::READY) {
 		return true;
 	}
@@ -100,7 +103,8 @@ static bool SljitDirectJoinOutputAggregatePayloadSourcesValid(const SljitJoinPro
 		}
 		return false;
 	}
-	if (descriptor.payload_source_indices.size() != sink_info.aggregates.size()) {
+	if (descriptor.payload_source_indices.size() != sink_info.aggregates.size() ||
+	    descriptor.payload_source_indices.size() != aggregate_update.payload_descriptors.size()) {
 		if (failure_reason) {
 			*failure_reason = "payload_source_count_" + to_string(descriptor.payload_source_indices.size()) + "_" +
 			                  to_string(sink_info.aggregates.size());
@@ -110,9 +114,10 @@ static bool SljitDirectJoinOutputAggregatePayloadSourcesValid(const SljitJoinPro
 	for (idx_t payload_idx = 0; payload_idx < descriptor.payload_source_indices.size(); payload_idx++) {
 		auto source_idx = descriptor.payload_source_indices[payload_idx];
 		auto &aggregate = sink_info.aggregates[payload_idx];
+		auto &payload_descriptor = aggregate_update.payload_descriptors[payload_idx];
 		if (source_idx == DConstants::INVALID_INDEX) {
-			if (aggregate.primitive_update_kind == AggregatePrimitiveUpdateKind::COUNT_STAR ||
-			    aggregate.primitive_update_kind == AggregatePrimitiveUpdateKind::COUNT) {
+			if (payload_descriptor.primitive_kind == AggregatePrimitiveUpdateKind::COUNT_STAR ||
+			    payload_descriptor.primitive_kind == AggregatePrimitiveUpdateKind::COUNT) {
 				continue;
 			}
 			if (failure_reason) {

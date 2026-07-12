@@ -1,6 +1,7 @@
 #include "sljit_native_codegen.hpp"
 
 #include "sljit_aggregate_fused_codegen.hpp"
+#include "sljit_aggregate_payload_descriptor.hpp"
 #include "sljit_aggregate_primitive_codegen.hpp"
 #include "sljit_aggregate_typed_payload_codegen.hpp"
 #include "sljit_aggregate_ungrouped_shared_codegen.hpp"
@@ -16,30 +17,31 @@ namespace duckdb {
 struct SljitFilteredFusedPrimitiveAggregateCodegenPlan {
 	SljitTypedExpressionTreePlan predicate;
 	vector<SljitTypedExpressionTreePlan> payloads;
+	vector<SljitAggregatePayloadDescriptor> payload_descriptors;
 	idx_t tree_node_count = 0;
 	bool fast_path_supported = false;
 };
 
 static bool BuildSljitFilteredFusedPrimitiveAggregatePayloadPlan(const SljitNativeRegionExpressionPlan &payload,
                                                                  const ExecutionRegionAggregateInput &aggregate,
-                                                                 SljitTypedExpressionTreePlan &payload_plan) {
-	if (!aggregate.primitive_update_ready) {
+                                                                 SljitTypedExpressionTreePlan &payload_plan,
+                                                                 SljitAggregatePayloadDescriptor &descriptor) {
+	if (!SljitTryBindAggregatePayloadDescriptor(payload, aggregate, descriptor)) {
 		return false;
 	}
-	if (aggregate.primitive_update_kind == AggregatePrimitiveUpdateKind::COUNT_STAR) {
-		return aggregate.child_count == 0 && aggregate.child_types.empty();
+	if (descriptor.primitive_kind == AggregatePrimitiveUpdateKind::COUNT_STAR) {
+		return true;
 	}
-	if (aggregate.primitive_update_kind != AggregatePrimitiveUpdateKind::SUM_INT64 &&
-	    aggregate.primitive_update_kind != AggregatePrimitiveUpdateKind::SUM_HUGEINT) {
+	if ((descriptor.primitive_kind != AggregatePrimitiveUpdateKind::SUM_INT64 &&
+	     descriptor.primitive_kind != AggregatePrimitiveUpdateKind::SUM_HUGEINT) ||
+	    !descriptor.IsMachineWord()) {
 		return false;
 	}
-	if (aggregate.child_types.size() != 1 ||
-	    aggregate.primitive_update_input_type != aggregate.child_types[0].InternalType() ||
-	    payload.return_type.InternalType() != aggregate.child_types[0].InternalType() || !payload.expression_tree) {
+	if (!payload.expression_tree) {
 		return false;
 	}
 	payload_plan = BuildSljitTypedExpressionTreePlan(*payload.expression_tree, false);
-	return SljitAggregateTypedPayloadPlanSupported(payload_plan, aggregate);
+	return SljitAggregateTypedPayloadPlanSupported(payload_plan, descriptor);
 }
 
 static bool
@@ -58,12 +60,14 @@ BuildSljitFilteredFusedPrimitiveAggregateCodegenPlan(const ExecutionExpressionIR
 	codegen_plan.tree_node_count = codegen_plan.predicate.node_count;
 	codegen_plan.fast_path_supported = codegen_plan.predicate.fast_path.fast_path_supported;
 	codegen_plan.payloads.resize(payloads.size());
+	codegen_plan.payload_descriptors.resize(payloads.size());
 	for (idx_t payload_idx = 0; payload_idx < payloads.size(); payload_idx++) {
 		if (!BuildSljitFilteredFusedPrimitiveAggregatePayloadPlan(payloads[payload_idx], aggregates[payload_idx],
-		                                                          codegen_plan.payloads[payload_idx])) {
+		                                                          codegen_plan.payloads[payload_idx],
+		                                                          codegen_plan.payload_descriptors[payload_idx])) {
 			return false;
 		}
-		if (aggregates[payload_idx].primitive_update_kind == AggregatePrimitiveUpdateKind::COUNT_STAR) {
+		if (codegen_plan.payload_descriptors[payload_idx].primitive_kind == AggregatePrimitiveUpdateKind::COUNT_STAR) {
 			continue;
 		}
 		codegen_plan.tree_node_count += codegen_plan.payloads[payload_idx].node_count;
@@ -98,7 +102,7 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeFilteredUngroupedFusedPrim
 	for (idx_t payload_idx = 0; payload_idx < payloads.size(); payload_idx++) {
 		local_count_offsets[payload_idx] = local_size;
 		local_size += NumericCast<sljit_sw>(sizeof(sljit_sw));
-		auto kind = aggregates[payload_idx].primitive_update_kind;
+		auto kind = codegen_plan.payload_descriptors[payload_idx].primitive_kind;
 		if (kind == AggregatePrimitiveUpdateKind::COUNT_STAR) {
 			continue;
 		}
@@ -121,7 +125,7 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeFilteredUngroupedFusedPrim
 	bool simd_is_sum = false;
 	bool simd_is_hybrid = false;
 	if (payloads.size() == 1 && codegen_plan.fast_path_supported) {
-		auto kind = aggregates[0].primitive_update_kind;
+		auto kind = codegen_plan.payload_descriptors[0].primitive_kind;
 		if (kind == AggregatePrimitiveUpdateKind::COUNT_STAR) {
 			simd_plan = TryPlanSljitTypedExpressionTreeSimd(predicate);
 		} else if (kind == AggregatePrimitiveUpdateKind::SUM_INT64 && payloads[0].expression_tree) {
@@ -154,7 +158,7 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeFilteredUngroupedFusedPrim
 	bool simd_nullable_ok = false;
 	if (simd_plan.supported && simd_plan.nullable_capable && payloads.size() == 1) {
 		simd_validity_refs = simd_plan.source_refs;
-		auto kind = aggregates[0].primitive_update_kind;
+		auto kind = codegen_plan.payload_descriptors[0].primitive_kind;
 		if (kind == AggregatePrimitiveUpdateKind::COUNT_STAR) {
 			simd_nullable_ok = true;
 		} else if (payloads[0].expression_tree) {
@@ -205,7 +209,7 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeFilteredUngroupedFusedPrim
 		// hybrid packed-mask loop (which runs them once per matching lane).
 		auto emit_payload_updates = [&]() {
 			for (idx_t payload_idx = 0; payload_idx < payloads.size(); payload_idx++) {
-				auto kind = aggregates[payload_idx].primitive_update_kind;
+				auto kind = codegen_plan.payload_descriptors[payload_idx].primitive_kind;
 				if (kind == AggregatePrimitiveUpdateKind::COUNT_STAR) {
 					EmitSljitAggregateIncrementLocalCount(compiler, local_count_offsets[payload_idx]);
 					continue;
@@ -302,7 +306,7 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeFilteredUngroupedFusedPrim
 		                                                 overflows);
 		auto selected_predicate_false = sljit_emit_cmp(compiler, SLJIT_EQUAL, SLJIT_R2, 0, SLJIT_IMM, 0);
 		for (idx_t payload_idx = 0; payload_idx < payloads.size(); payload_idx++) {
-			auto kind = aggregates[payload_idx].primitive_update_kind;
+			auto kind = codegen_plan.payload_descriptors[payload_idx].primitive_kind;
 			if (kind == AggregatePrimitiveUpdateKind::COUNT_STAR) {
 				EmitSljitAggregateIncrementLocalCount(compiler, local_count_offsets[payload_idx]);
 				continue;
@@ -335,7 +339,7 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeFilteredUngroupedFusedPrim
 	row_skip_jumps.push_back(sljit_emit_cmp(compiler, SLJIT_EQUAL, SLJIT_R2, 0, SLJIT_IMM, 0));
 
 	for (idx_t payload_idx = 0; payload_idx < payloads.size(); payload_idx++) {
-		auto kind = aggregates[payload_idx].primitive_update_kind;
+		auto kind = codegen_plan.payload_descriptors[payload_idx].primitive_kind;
 		if (kind == AggregatePrimitiveUpdateKind::COUNT_STAR) {
 			EmitSljitAggregateIncrementLocalCount(compiler, local_count_offsets[payload_idx]);
 			continue;
@@ -388,7 +392,7 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeFilteredUngroupedFusedPrim
 	}
 	sljit_set_label(done, done_label);
 	for (idx_t payload_idx = 0; payload_idx < payloads.size(); payload_idx++) {
-		auto kind = aggregates[payload_idx].primitive_update_kind;
+		auto kind = codegen_plan.payload_descriptors[payload_idx].primitive_kind;
 		sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R2, 0, SLJIT_MEM1(SLJIT_SP), local_count_offsets[payload_idx]);
 		if (kind == AggregatePrimitiveUpdateKind::COUNT_STAR) {
 			EmitUngroupedAggregateCommitCountStar(compiler, payload_idx, SLJIT_R2);

@@ -16,13 +16,13 @@ namespace duckdb {
 
 static bool
 SljitFusedAggregatePayloadsUseTypedExpressionTrees(const vector<SljitExecutableRegionExpression> &payloads,
-                                                   const vector<ExecutionRegionAggregateInput> &aggregates) {
-	if (payloads.size() != aggregates.size()) {
+                                                   const vector<SljitAggregatePayloadDescriptor> &descriptors) {
+	if (payloads.size() != descriptors.size()) {
 		return false;
 	}
 	bool has_typed_payload = false;
 	for (idx_t payload_idx = 0; payload_idx < payloads.size(); payload_idx++) {
-		if (aggregates[payload_idx].primitive_update_kind == AggregatePrimitiveUpdateKind::COUNT_STAR) {
+		if (!descriptors[payload_idx].has_payload) {
 			continue;
 		}
 		if (payloads[payload_idx].plan.kind == SljitNativeRegionExpressionKind::TYPED_EXPRESSION_TREE) {
@@ -39,13 +39,13 @@ SljitFusedAggregatePayloadsUseTypedExpressionTrees(const vector<SljitExecutableR
 
 static bool
 SljitFusedGroupedAggregatePayloadsUseReferenceAdapter(const vector<SljitExecutableRegionExpression> &payloads,
-                                                      const vector<ExecutionRegionAggregateInput> &aggregates) {
-	if (payloads.size() != aggregates.size()) {
+                                                      const vector<SljitAggregatePayloadDescriptor> &descriptors) {
+	if (payloads.size() != descriptors.size()) {
 		return false;
 	}
 	bool has_payload_reference = false;
 	for (idx_t payload_idx = 0; payload_idx < payloads.size(); payload_idx++) {
-		if (aggregates[payload_idx].primitive_update_kind == AggregatePrimitiveUpdateKind::COUNT_STAR) {
+		if (!descriptors[payload_idx].has_payload) {
 			continue;
 		}
 		if (payloads[payload_idx].plan.kind != SljitNativeRegionExpressionKind::REFERENCE) {
@@ -58,9 +58,9 @@ SljitFusedGroupedAggregatePayloadsUseReferenceAdapter(const vector<SljitExecutab
 
 static bool
 SljitFusedGroupedAggregatePayloadsUseRuntimeInputAdapter(const vector<SljitExecutableRegionExpression> &payloads,
-                                                         const vector<ExecutionRegionAggregateInput> &aggregates) {
-	return SljitFusedAggregatePayloadsUseTypedExpressionTrees(payloads, aggregates) ||
-	       SljitFusedGroupedAggregatePayloadsUseReferenceAdapter(payloads, aggregates);
+                                                         const vector<SljitAggregatePayloadDescriptor> &descriptors) {
+	return SljitFusedAggregatePayloadsUseTypedExpressionTrees(payloads, descriptors) ||
+	       SljitFusedGroupedAggregatePayloadsUseReferenceAdapter(payloads, descriptors);
 }
 
 enum class SljitFusedTypedPayloadSourceStatus : uint8_t {
@@ -78,11 +78,11 @@ struct SljitFusedTypedPayloadSourceResult {
 
 static SljitFusedTypedPayloadSourceResult
 SljitGetFusedTypedPayloadCombinedSourceIndices(const vector<SljitExecutableRegionExpression> &payloads,
-                                               const vector<ExecutionRegionAggregateInput> &aggregates) {
+                                               const vector<SljitAggregatePayloadDescriptor> &descriptors) {
 	SljitFusedTypedPayloadSourceResult result;
-	bool supported_payloads = payloads.size() == aggregates.size();
+	bool supported_payloads = payloads.size() == descriptors.size();
 	for (idx_t payload_idx = 0; payload_idx < payloads.size(); payload_idx++) {
-		if (aggregates[payload_idx].primitive_update_kind == AggregatePrimitiveUpdateKind::COUNT_STAR) {
+		if (!descriptors[payload_idx].has_payload) {
 			auto &source_indices = payloads[payload_idx].input_source_indices;
 			if (source_indices.empty()) {
 				continue;
@@ -127,9 +127,9 @@ SljitGetFusedTypedPayloadCombinedSourceIndices(const vector<SljitExecutableRegio
 }
 
 static const vector<idx_t> &SljitRequireFusedTypedPayloadCombinedSourceIndices(
-    const vector<SljitExecutableRegionExpression> &payloads, const vector<ExecutionRegionAggregateInput> &aggregates,
+    const vector<SljitExecutableRegionExpression> &payloads, const vector<SljitAggregatePayloadDescriptor> &descriptors,
     const char *missing_sources_message, const char *source_mismatch_message, const char *no_payloads_message) {
-	auto result = SljitGetFusedTypedPayloadCombinedSourceIndices(payloads, aggregates);
+	auto result = SljitGetFusedTypedPayloadCombinedSourceIndices(payloads, descriptors);
 	switch (result.status) {
 	case SljitFusedTypedPayloadSourceStatus::READY:
 		return *result.sources;
@@ -147,11 +147,11 @@ static const vector<idx_t> &SljitRequireFusedTypedPayloadCombinedSourceIndices(
 
 static optional_ptr<const vector<bool>>
 SljitGetFusedTypedPayloadCombinedSourceNotNull(const vector<SljitExecutableRegionExpression> &payloads,
-                                               const vector<ExecutionRegionAggregateInput> &aggregates,
+                                               const vector<SljitAggregatePayloadDescriptor> &descriptors,
                                                idx_t source_count) {
 	optional_ptr<const vector<bool>> result;
 	for (idx_t payload_idx = 0; payload_idx < payloads.size(); payload_idx++) {
-		if (aggregates[payload_idx].primitive_update_kind == AggregatePrimitiveUpdateKind::COUNT_STAR) {
+		if (!descriptors[payload_idx].has_payload) {
 			continue;
 		}
 		auto &source_not_null = payloads[payload_idx].input_source_not_null;
@@ -168,9 +168,9 @@ SljitGetFusedTypedPayloadCombinedSourceNotNull(const vector<SljitExecutableRegio
 }
 
 static bool SljitTryGetFusedTypedPayloadCombinedSources(const vector<SljitExecutableRegionExpression> &payloads,
-                                                        const vector<ExecutionRegionAggregateInput> &aggregates,
+                                                        const vector<SljitAggregatePayloadDescriptor> &descriptors,
                                                         vector<idx_t> &combined_sources) {
-	auto result = SljitGetFusedTypedPayloadCombinedSourceIndices(payloads, aggregates);
+	auto result = SljitGetFusedTypedPayloadCombinedSourceIndices(payloads, descriptors);
 	if (result.status != SljitFusedTypedPayloadSourceStatus::READY) {
 		combined_sources.clear();
 		return false;

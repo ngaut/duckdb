@@ -82,7 +82,7 @@ static ExecutionOperatorBindResult SljitExecutePerfectHashJoinProbe(
 		                                         native_input.selected_count, output, nullptr);
 		return ExecutionOperatorBindResult::READY;
 	}
-	owner.EnsurePerfectHashJoinProbeCode(runtime, op.hash_join_probe);
+	auto function = owner.EnsurePerfectHashJoinProbeCode(runtime, op.hash_join_probe);
 	auto &key = SljitValidatePerfectHashJoinProbeExecutionLayout(plan, probe, input);
 	SljitPreparedPerfectHashJoinProbeInput prepared_input;
 	SljitPreparePerfectHashJoinProbeInput(key, probe.perfect_layout, input, match_selection, build_selection, state,
@@ -90,7 +90,7 @@ static ExecutionOperatorBindResult SljitExecutePerfectHashJoinProbe(
 	auto &native_input = prepared_input.native_input;
 
 	auto generated_stage_start = SljitRegionStageStart(runtime);
-	SljitExecuteNativeFunction(op.hash_join_probe.perfect.function, native_input);
+	SljitExecuteNativeFunction(function, native_input);
 	RecordSljitRegionStageRuntimePath(runtime, op_idx, op.kind, SljitGeneratedPerfectHashJoinProbeStage(),
 	                                  generated_stage_start);
 	state.input_offset = native_input.input_offset;

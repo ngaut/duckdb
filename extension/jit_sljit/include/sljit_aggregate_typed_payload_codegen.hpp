@@ -8,6 +8,7 @@
 
 #pragma once
 
+#include "sljit_aggregate_payload_descriptor.hpp"
 #include "sljit_codegen_internal.hpp"
 #include "sljit_region_plan.hpp"
 #include "sljit_typed_expression_plan.hpp"
@@ -16,6 +17,7 @@ namespace duckdb {
 
 struct SljitFusedTypedAggregateCodegenPlan {
 	vector<SljitTypedExpressionTreePlan> payloads;
+	vector<SljitAggregatePayloadDescriptor> payload_descriptors;
 	idx_t tree_node_count = 0;
 	bool fast_path_supported = false;
 	bool conditional_shared_payload = false;

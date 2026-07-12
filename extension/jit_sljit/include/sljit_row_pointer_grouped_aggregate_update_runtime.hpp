@@ -45,8 +45,11 @@ static bool TryExecuteDirectRowPointerGroupedTargetPayloadUpdate(
 	    });
 	if (updated) {
 		auto target_payload_start = SljitRegionStageStart(runtime);
+		auto &reduction_lanes =
+		    scratch.GroupedReductionLanes(op_idx, op.aggregate_update.plan.sink_info.aggregate_contract,
+		                                  op.aggregate_update.payload_descriptors, payload_lanes);
 		auto update_state =
-		    SljitBuildGroupedStateAddressUpdateState(op, payload_input, payload_lanes, payload_scratch,
+		    SljitBuildGroupedStateAddressUpdateState(op, payload_input, payload_lanes, reduction_lanes, payload_scratch,
 		                                             optional_ptr<const vector<idx_t>>(&payload_source_indices));
 		SljitExecuteGroupedStateTargetBatch(targets, update_state);
 		RecordSljitRegionStageRuntime(runtime, op_idx, op.kind, "direct_row_pointer_grouped_target_payload_update",
@@ -75,11 +78,14 @@ static bool TryExecuteDirectRowPointerPreaggregatedPrimitiveUpdate(
 	idx_t compact_count = 0;
 	const char *failure_reason = "unknown";
 	auto preaggregate_stage_start = SljitRegionStageStart(runtime);
+	auto &reduction_lanes = scratch.GroupedReductionLanes(op_idx, op.aggregate_update.plan.sink_info.aggregate_contract,
+	                                                      op.aggregate_update.payload_descriptors, payload_lanes);
 	const bool preaggregated =
 	    uses_generated_payload_preaggregation
-	        ? SljitTryPreaggregateRowPointerFusedPrimitiveGroups(
-	              op, payload_input, row_pointers, group_sources, payload_source_indices, payload_lanes,
-	              compact_row_pointers, preaggregate_scratch, payload_scratch, compact_count, failure_reason)
+	        ? SljitTryPreaggregateRowPointerFusedPrimitiveGroups(op, payload_input, row_pointers, group_sources,
+	                                                             payload_source_indices, payload_lanes, reduction_lanes,
+	                                                             compact_row_pointers, preaggregate_scratch,
+	                                                             payload_scratch, compact_count, failure_reason)
 	        : SljitTryPreaggregateRowPointerPrimitiveGroups(payload_input, row_pointers, group_sources,
 	                                                        payload_source_indices, payload_lanes, compact_row_pointers,
 	                                                        preaggregate_scratch, compact_count, failure_reason);
@@ -149,8 +155,8 @@ static bool SljitTryExecuteRowPointerCountOneGroupedAggregateUpdate(
 	auto &sink_info = op.aggregate_update.plan.sink_info;
 	SljitPrimitiveCountOneUpdateState count_one_update;
 	if (!SljitTryBindPrimitiveCountOneUpdateState(
-	        sink_info, payload_lanes, SljitInputVectorCountPayloadIsCountOne(payload_input, payload_source_indices),
-	        count_one_update)) {
+	        op.aggregate_update.payload_descriptors, payload_lanes,
+	        SljitInputVectorCountPayloadIsCountOne(payload_input, payload_source_indices), count_one_update)) {
 		return false;
 	}
 
@@ -190,15 +196,13 @@ struct SljitRowPointerGroupedAggregateUpdateDecision {
 	bool prefer_sparse_row_pointer_target_update = false;
 };
 
-static SljitRowPointerGroupedAggregateUpdateDecision
-SljitPlanRowPointerGroupedAggregateUpdate(SljitRegionExecutionScratch &scratch, idx_t op_idx,
-                                          SljitExecutableRegionOp &op, DataChunk &payload_input, Vector &row_pointers,
-                                          idx_t count, const vector<ExecutionRowPointerGroupKeySource> &group_sources,
-                                          const vector<idx_t> &payload_source_indices,
-                                          const vector<const ExecutionPrimitiveAggregateUpdateLane *> &payload_lanes) {
+static SljitRowPointerGroupedAggregateUpdateDecision SljitPlanRowPointerGroupedAggregateUpdate(
+    SljitRegionExecutionScratch &scratch, idx_t op_idx, SljitExecutableRegionOp &op, DataChunk &payload_input,
+    Vector &row_pointers, idx_t count, const vector<ExecutionRowPointerGroupKeySource> &group_sources,
+    const vector<idx_t> &payload_source_indices, const vector<SljitGroupedReductionLaneBinding> &reduction_lanes) {
 	SljitRowPointerGroupedAggregateUpdateDecision decision;
 	const bool can_execute_direct_grouped_state_address_payload_update =
-	    SljitCanExecuteDirectGroupedStateAddressPayloadUpdate(scratch, op_idx, op, payload_input, payload_lanes,
+	    SljitCanExecuteDirectGroupedStateAddressPayloadUpdate(scratch, op_idx, op, payload_input, reduction_lanes,
 	                                                          nullptr, count);
 	decision.prefer_sparse_row_pointer_target_update =
 	    can_execute_direct_grouped_state_address_payload_update &&
@@ -206,7 +210,7 @@ SljitPlanRowPointerGroupedAggregateUpdate(SljitRegionExecutionScratch &scratch, 
 
 	if (!decision.prefer_sparse_row_pointer_target_update && !scratch.RowPointerPreaggregateDisabled(op_idx) &&
 	    SljitCanExecuteDirectRowPointerPreaggregatedPrimitiveUpdate(
-	        scratch, op_idx, op, payload_input, row_pointers, group_sources, payload_source_indices, payload_lanes,
+	        scratch, op_idx, op, payload_input, row_pointers, group_sources, payload_source_indices, reduction_lanes,
 	        count, decision.uses_generated_payload_preaggregation)) {
 		decision.try_preaggregated_primitive_groups = true;
 	}
@@ -314,13 +318,15 @@ static bool SljitTryExecuteNativeRowPointerGroupedAggregateUpdate(
 		return false;
 	}
 
-	auto &payload_lanes = scratch.AggregatePayloadLanes(op_idx, aggregates, primitive);
+	auto &payload_lanes = scratch.AggregatePayloadLanes(op_idx, op.aggregate_update.payload_descriptors, primitive);
+	auto &reduction_lanes = scratch.GroupedReductionLanes(op_idx, op.aggregate_update.plan.sink_info.aggregate_contract,
+	                                                      op.aggregate_update.payload_descriptors, payload_lanes);
 	auto &payload_scratch = scratch.AggregatePayloadScratch(op_idx);
 	const bool finish = !defer_grouped_finish;
 	SljitTryReserveGroupedAggregateGroups(runtime, op_idx, op, grouped_state);
 	auto decision =
 	    SljitPlanRowPointerGroupedAggregateUpdate(scratch, op_idx, op, payload_input, row_pointers, count,
-	                                              proven_group_sources, payload_source_indices, payload_lanes);
+	                                              proven_group_sources, payload_source_indices, reduction_lanes);
 	if (decision.prefer_sparse_row_pointer_target_update) {
 		RecordSljitRegionRuntimePath(runtime, op.kind, "direct_row_pointer_sparse_target_update_preferred", count);
 	}

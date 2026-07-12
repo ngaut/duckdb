@@ -631,6 +631,10 @@ static ExecutionRegionCandidateTraits BuildExecutionRegionCandidateTraits(const 
 		case ExecutionRegionNodeKind::SINK:
 			traits.sink_present = true;
 			traits.sink_kind = node.sink ? node.sink->kind : ExecutionRegionSinkKind::NONE;
+			if (traits.sink_kind == ExecutionRegionSinkKind::HASH_AGGREGATE_UPDATE ||
+			    traits.sink_kind == ExecutionRegionSinkKind::PERFECT_HASH_AGGREGATE_UPDATE) {
+				traits.grouped_aggregate_estimated_cardinality = node.estimated_cardinality;
+			}
 			if (node.sink) {
 				if (node.sink->aggregate_contract.present) {
 					traits.aggregate_count += node.sink->aggregate_contract.aggregate_count;

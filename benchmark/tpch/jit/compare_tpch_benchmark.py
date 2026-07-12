@@ -129,7 +129,6 @@ def auto_runtime_preserved(
     candidate_gap: dict,
     max_slowdown_ratio: Decimal,
     max_slowdown_s: Decimal,
-    candidate_paired_speedup: Decimal | None = None,
 ) -> bool:
     base_auto_s = row_decimal(base_gap, "auto_median_s")
     candidate_auto_s = row_decimal(candidate_gap, "auto_median_s")
@@ -137,11 +136,7 @@ def auto_runtime_preserved(
         return True
     allowed_s = allowed_auto_slowdown(base_auto_s, max_slowdown_ratio, max_slowdown_s)
     raw_slowdown_s = candidate_auto_s - base_auto_s
-    normalized_candidate_auto_s = off_normalized_candidate_auto_s(
-        base_gap, candidate_gap, candidate_paired_speedup
-    )
-    normalized_slowdown_s = normalized_candidate_auto_s - base_auto_s
-    return raw_slowdown_s <= allowed_s or normalized_slowdown_s <= allowed_s
+    return raw_slowdown_s <= allowed_s
 
 
 def has_auto_decision(row: dict) -> bool:
@@ -254,7 +249,6 @@ def compare_auto_speed(
             candidate,
             max_slowdown_ratio,
             max_slowdown_s,
-            (candidate_paired_speedups or {}).get(query),
         ):
             normalized_candidate_auto_s = off_normalized_candidate_auto_s(
                 base, candidate, (candidate_paired_speedups or {}).get(query)
@@ -323,7 +317,6 @@ def compare_preserved_wins(
                 candidate_gaps[query],
                 max_slowdown_ratio,
                 max_slowdown_s,
-                candidate_speedup,
             )
             win_preserved = (
                 candidate_speedup >= preserve_win_speedup or runtime_preserved

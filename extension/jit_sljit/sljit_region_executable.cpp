@@ -60,10 +60,9 @@ static bool BuildExecutableRegionOp(const SljitNativeRegionOpPlan &op, SljitExec
 			}
 			executable.nested_loop_join_probe.lhs_conditions.push_back(std::move(executable_condition));
 		}
-		executable.nested_loop_join_probe.code = BuildSljitNestedLoopJoinProbe(
-		    executable.nested_loop_join_probe.plan, executable.nested_loop_join_probe.function, error);
-		return executable.nested_loop_join_probe.code != nullptr &&
-		       executable.nested_loop_join_probe.function != nullptr;
+		return executable.nested_loop_join_probe.compiled.Build([&](SljitNativeNestedLoopJoinProbeFunction &function) {
+			return BuildSljitNestedLoopJoinProbe(executable.nested_loop_join_probe.plan, function, error);
+		});
 	case SljitNativeRegionOpKind::NESTED_LOOP_JOIN_BUILD:
 		executable.nested_loop_join_build.plan.sink_info = op.nested_loop_join_build.sink_info;
 		executable.nested_loop_join_build.plan.input_types = op.nested_loop_join_build.input_types;

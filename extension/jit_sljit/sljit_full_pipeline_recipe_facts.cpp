@@ -379,6 +379,7 @@ static bool SljitCollectExpressionSourceIndices(const SljitExecutableRegionExpre
 	case SljitNativeRegionExpressionKind::INTEGER_BINARY_REFERENCES:
 	case SljitNativeRegionExpressionKind::DOUBLE_BINARY_REFERENCES:
 	case SljitNativeRegionExpressionKind::INTEGER_COMPARE_REFERENCES:
+	case SljitNativeRegionExpressionKind::DECIMAL128_WIDENING_MULTIPLY:
 		SljitAddUniqueExpressionSource(sources, plan.source_index);
 		SljitAddUniqueExpressionSource(sources, plan.right_source_index);
 		return true;

@@ -99,16 +99,17 @@ static bool SljitTryBuildUngroupedAggregateRequiredProjectionOutputs(
 	    aggregate_update.payloads.size() != sink_info.aggregates.size()) {
 		return false;
 	}
-	if (!aggregate_update.fused_payload_update_function &&
-	    aggregate_update.payload_update_functions.size() != sink_info.aggregates.size()) {
+	if (!aggregate_update.fused_payload_update.Function() &&
+	    aggregate_update.payload_updates.size() != sink_info.aggregates.size()) {
 		return false;
 	}
 
 	required_projection_outputs.assign(projection_op.projections.size(), 0);
 	vector<idx_t> combined_sources;
-	if (aggregate_update.fused_payload_update_function &&
-	    SljitFusedAggregatePayloadsUseTypedExpressionTrees(aggregate_update.payloads, sink_info.aggregates) &&
-	    SljitTryGetFusedTypedPayloadCombinedSources(aggregate_update.payloads, sink_info.aggregates,
+	if (aggregate_update.fused_payload_update.Function() &&
+	    SljitFusedAggregatePayloadsUseTypedExpressionTrees(aggregate_update.payloads,
+	                                                       aggregate_update.payload_descriptors) &&
+	    SljitTryGetFusedTypedPayloadCombinedSources(aggregate_update.payloads, aggregate_update.payload_descriptors,
 	                                                combined_sources)) {
 		for (auto source_idx : combined_sources) {
 			if (!SljitTryMarkProjectionAggregateRequiredOutput(projection_op, source_idx,
@@ -173,7 +174,7 @@ static bool SljitTryBuildRemappedUngroupedAggregatePayloads(
 		remapped_payloads.emplace_back();
 		SljitBuildBorrowedProjectionExpression(payload, remapped_payloads.back());
 	}
-	if (aggregate_update.fused_payload_update_function && !fused_payload_sources.empty()) {
+	if (aggregate_update.fused_payload_update.Function() && !fused_payload_sources.empty()) {
 		vector<idx_t> compact_sources;
 		compact_sources.reserve(fused_payload_sources.size());
 		for (auto source_idx : fused_payload_sources) {

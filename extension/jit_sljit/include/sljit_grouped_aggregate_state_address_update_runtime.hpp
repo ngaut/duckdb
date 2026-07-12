@@ -17,9 +17,10 @@ namespace duckdb {
 struct SljitGroupedStateAddressUpdateState {
 	vector<SljitExecutableRegionExpression> *payloads = nullptr;
 	SljitNativeAggregateUpdateFunction function = nullptr;
-	const vector<ExecutionRegionAggregateInput> *aggregates = nullptr;
 	const ExecutionRegionAggregateContract *contract = nullptr;
+	const vector<SljitAggregatePayloadDescriptor> *payload_descriptors = nullptr;
 	const vector<const ExecutionPrimitiveAggregateUpdateLane *> *lanes = nullptr;
+	const vector<SljitGroupedReductionLaneBinding> *reduction_lanes = nullptr;
 	DataChunk *input = nullptr;
 	SljitAggregatePayloadAdapterScratch *adapter_scratch = nullptr;
 	optional_ptr<const vector<idx_t>> input_source_indices_override;
@@ -29,16 +30,18 @@ struct SljitGroupedStateAddressUpdateState {
 static SljitGroupedStateAddressUpdateState
 SljitBuildGroupedStateAddressUpdateState(SljitExecutableRegionOp &op, DataChunk &payload_input,
                                          const vector<const ExecutionPrimitiveAggregateUpdateLane *> &payload_lanes,
+                                         const vector<SljitGroupedReductionLaneBinding> &reduction_lanes,
                                          SljitAggregatePayloadAdapterScratch &payload_scratch,
                                          optional_ptr<const vector<idx_t>> input_source_indices_override = nullptr,
                                          optional_ptr<const vector<bool>> input_source_not_null_override = nullptr) {
 	auto &aggregate_update = op.aggregate_update;
 	SljitGroupedStateAddressUpdateState update_state;
 	update_state.payloads = &aggregate_update.payloads;
-	update_state.function = aggregate_update.fused_payload_update_function;
-	update_state.aggregates = &aggregate_update.plan.sink_info.aggregates;
+	update_state.function = aggregate_update.fused_payload_update.Function();
 	update_state.contract = &aggregate_update.plan.sink_info.aggregate_contract;
+	update_state.payload_descriptors = &aggregate_update.payload_descriptors;
 	update_state.lanes = &payload_lanes;
+	update_state.reduction_lanes = &reduction_lanes;
 	update_state.input = &payload_input;
 	update_state.adapter_scratch = &payload_scratch;
 	update_state.input_source_indices_override = input_source_indices_override;
@@ -49,16 +52,17 @@ SljitBuildGroupedStateAddressUpdateState(SljitExecutableRegionOp &op, DataChunk 
 static void SljitExecuteGroupedSelectedStateAddressUpdate(const uintptr_t *addresses, const sel_t *address_sel,
                                                           const sel_t *execute_sel, idx_t count, void *state_p) {
 	auto &state = *reinterpret_cast<SljitGroupedStateAddressUpdateState *>(state_p);
-	if (!state.payloads || !state.function || !state.aggregates || !state.contract || !state.lanes || !state.input ||
-	    !state.adapter_scratch) {
+	if (!state.payloads || !state.function || !state.contract || !state.payload_descriptors || !state.lanes ||
+	    !state.reduction_lanes || !state.input || !state.adapter_scratch) {
 		throw InternalException("SLJIT grouped selected state-address callback is incomplete");
 	}
 	SelectionVector execute_selection(const_cast<sel_t *>(execute_sel), execute_sel ? count : 0);
 	const bool state_addresses_by_loop_index = execute_sel && !address_sel;
 	SljitExecuteFusedGroupedPrimitiveAggregatePayloadUpdate(
-	    *state.payloads, state.function, *state.aggregates, *state.contract, *state.lanes, *state.input, addresses,
-	    address_sel, execute_sel ? &execute_selection : nullptr, state_addresses_by_loop_index, count,
-	    *state.adapter_scratch, state.input_source_indices_override, state.input_source_not_null_override);
+	    *state.payloads, state.function, *state.contract, *state.payload_descriptors, *state.lanes,
+	    *state.reduction_lanes, *state.input, addresses, address_sel, execute_sel ? &execute_selection : nullptr,
+	    state_addresses_by_loop_index, count, *state.adapter_scratch, state.input_source_indices_override,
+	    state.input_source_not_null_override);
 }
 
 static void SljitExecuteGroupedStateTargetSpan(const ExecutionGroupedAggregateStateTargetSpan &span,
@@ -153,7 +157,10 @@ static bool TryExecuteDirectGroupedStateAddressPayloadUpdate(
     bool finish = true, optional_ptr<const ExecutionDenseGroupDomain> dense_domain = nullptr) {
 	SljitTryReserveGroupedAggregateGroups(runtime, op_idx, op, grouped_state);
 	auto stage_start = SljitRegionStageStart(runtime);
-	auto update_state = SljitBuildGroupedStateAddressUpdateState(op, input, payload_lanes, payload_scratch);
+	auto &reduction_lanes = scratch.GroupedReductionLanes(op_idx, op.aggregate_update.plan.sink_info.aggregate_contract,
+	                                                      op.aggregate_update.payload_descriptors, payload_lanes);
+	auto update_state =
+	    SljitBuildGroupedStateAddressUpdateState(op, input, payload_lanes, reduction_lanes, payload_scratch);
 	const char *stage_name = "direct_new_grouped_primitive_payload_update";
 	const char *miss_stage_name = "direct_new_grouped_primitive_payload_update_miss";
 	auto updated = ExecuteSljitRegionRecordedOperation(
@@ -182,8 +189,10 @@ static bool TryExecuteDirectProjectedGroupedStateAddressPayloadUpdate(
 	}
 	SljitTryReserveGroupedAggregateGroups(runtime, op_idx, op, grouped_state);
 	auto stage_start = SljitRegionStageStart(runtime);
-	auto update_state = SljitBuildGroupedStateAddressUpdateState(op, payload_input, payload_lanes, payload_scratch,
-	                                                             &payload_source_indices);
+	auto &reduction_lanes = scratch.GroupedReductionLanes(op_idx, op.aggregate_update.plan.sink_info.aggregate_contract,
+	                                                      op.aggregate_update.payload_descriptors, payload_lanes);
+	auto update_state = SljitBuildGroupedStateAddressUpdateState(op, payload_input, payload_lanes, reduction_lanes,
+	                                                             payload_scratch, &payload_source_indices);
 	const char *stage_name = "direct_projected_group_payload_update";
 	const char *miss_stage_name = "direct_projected_group_payload_update_miss";
 	auto updated = ExecuteSljitRegionRecordedOperation(

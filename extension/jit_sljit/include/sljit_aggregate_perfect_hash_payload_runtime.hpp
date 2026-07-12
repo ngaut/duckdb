@@ -10,6 +10,7 @@
 
 #include "sljit_aggregate_fused_payload_sources.hpp"
 #include "sljit_aggregate_payload_lane_runtime.hpp"
+#include "sljit_grouped_reduction_lane.hpp"
 #include "sljit_region_runtime_state.hpp"
 
 namespace duckdb {
@@ -26,9 +27,11 @@ SljitPerfectHashGroupExpressionsUseTypedTree(const vector<SljitNativeRegionExpre
 
 static void SljitExecuteFusedPerfectHashGroupedPrimitiveAggregatePayloadUpdate(
     vector<SljitExecutableRegionExpression> &payloads, SljitNativeAggregateUpdateFunction function,
-    const vector<ExecutionRegionAggregateInput> &aggregates, const vector<ExecutionRegionGroupInput> &groups,
-    const vector<SljitNativeRegionExpressionPlan> &group_expressions, const ExecutionRegionAggregateContract &contract,
+    const vector<ExecutionRegionGroupInput> &groups, const vector<SljitNativeRegionExpressionPlan> &group_expressions,
+    const ExecutionRegionAggregateContract &contract,
+    const vector<SljitAggregatePayloadDescriptor> &payload_descriptors,
     const vector<const ExecutionPrimitiveAggregateUpdateLane *> &lanes,
+    const vector<SljitGroupedReductionLaneBinding> &reduction_lanes,
     const ExecutionPerfectAggregateStateAddressLayout &layout, DataChunk &input, const SelectionVector *execute_sel,
     idx_t count, SljitAggregatePayloadAdapterScratch &adapter_scratch) {
 	if (!function) {
@@ -38,10 +41,10 @@ static void SljitExecuteFusedPerfectHashGroupedPrimitiveAggregatePayloadUpdate(
 		auto blocker = layout.blocker.empty() ? "perfect-hash-state-layout-missing" : layout.blocker;
 		throw InternalException("SLJIT fused perfect-hash aggregate state layout is incomplete: %s", blocker.c_str());
 	}
-	if (!contract.grouped_state_layout_ready || contract.grouped_state_offsets.size() < aggregates.size()) {
+	if (!contract.grouped_state_layout_ready || contract.grouped_state_offsets.size() < payload_descriptors.size()) {
 		throw InternalException("SLJIT fused perfect-hash aggregate state contract is incomplete");
 	}
-	if (aggregates.size() != payloads.size()) {
+	if (payload_descriptors.size() != payloads.size()) {
 		throw InternalException("SLJIT fused perfect-hash aggregate primitive payload count mismatch");
 	}
 	if (contract.perfect_required_bits.size() != groups.size() ||
@@ -51,13 +54,16 @@ static void SljitExecuteFusedPerfectHashGroupedPrimitiveAggregatePayloadUpdate(
 	if (!group_expressions.empty() && group_expressions.size() != groups.size()) {
 		throw InternalException("SLJIT fused perfect-hash aggregate group expression count mismatch");
 	}
+	if (reduction_lanes.size() != payload_descriptors.size() || !SljitGroupedReductionLanesReady(reduction_lanes)) {
+		throw InternalException("SLJIT fused perfect-hash aggregate primitive lane layout mismatch");
+	}
 
-	const bool typed_payloads = SljitFusedAggregatePayloadsUseTypedExpressionTrees(payloads, aggregates) ||
+	const bool typed_payloads = SljitFusedAggregatePayloadsUseTypedExpressionTrees(payloads, payload_descriptors) ||
 	                            SljitPerfectHashGroupExpressionsUseTypedTree(group_expressions);
 	optional_ptr<const vector<idx_t>> combined_sources;
 	if (typed_payloads) {
 		combined_sources = SljitRequireFusedTypedPayloadCombinedSourceIndices(
-		    payloads, aggregates, "SLJIT fused perfect-hash typed aggregate payload is missing sources",
+		    payloads, payload_descriptors, "SLJIT fused perfect-hash typed aggregate payload is missing sources",
 		    "SLJIT fused perfect-hash typed aggregate payload sources are not normalized",
 		    "SLJIT fused perfect-hash typed aggregate payload has no typed payloads");
 		adapter_scratch.PreparePerfectHash(combined_sources->size(), groups.size());
@@ -112,20 +118,15 @@ static void SljitExecuteFusedPerfectHashGroupedPrimitiveAggregatePayloadUpdate(
 		SljitPrepareTypedAggregatePayloadSources(
 		    input, *combined_sources, execute_sel, count, payload_sources,
 		    "SLJIT fused perfect-hash typed aggregate source is out of range",
-		    SljitGetFusedTypedPayloadCombinedSourceNotNull(payloads, aggregates, combined_sources->size()).get());
+		    SljitGetFusedTypedPayloadCombinedSourceNotNull(payloads, payload_descriptors, combined_sources->size())
+		        .get());
 	}
 	for (idx_t payload_idx = 0; payload_idx < payloads.size(); payload_idx++) {
-		auto &aggregate = aggregates[payload_idx];
-		auto &lane = SljitRequireAggregatePrimitiveLane(
-		    lanes, aggregates, payload_idx,
-		    "SLJIT fused perfect-hash aggregate primitive lane missing for aggregate %llu");
-		SljitValidateGroupedPrimitiveLaneLayout(aggregate, contract, lane,
-		                                        "SLJIT fused perfect-hash aggregate state offset is out of range",
-		                                        "SLJIT fused perfect-hash aggregate primitive lane is incomplete: %s",
-		                                        "SLJIT fused perfect-hash aggregate primitive lane layout mismatch");
+		auto &descriptor = payload_descriptors[payload_idx];
+		auto &lane = *reduction_lanes[payload_idx].runtime_lane;
 		auto &plan = payloads[payload_idx].plan;
 		if (SljitSkipCountStarPrimitivePayload(
-		        aggregate, lane, "SLJIT fused perfect-hash count-star aggregate has unexpected payload")) {
+		        descriptor, lane, "SLJIT fused perfect-hash count-star aggregate has unexpected payload")) {
 			continue;
 		}
 		SljitRequireAggregatePayloadPrimitiveLane(

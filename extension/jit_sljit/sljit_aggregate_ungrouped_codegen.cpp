@@ -1,6 +1,7 @@
 #include "sljit_native_codegen.hpp"
 
 #include "sljit_aggregate_fused_codegen.hpp"
+#include "sljit_aggregate_payload_descriptor.hpp"
 #include "sljit_aggregate_primitive_codegen.hpp"
 #include "sljit_aggregate_ungrouped_shared_codegen.hpp"
 #include "sljit_codegen_internal.hpp"
@@ -11,30 +12,24 @@
 namespace duckdb {
 
 static bool SljitFusedUngroupedPrimitiveAggregatePayloadSupported(const SljitNativeRegionExpressionPlan &payload,
-                                                                  const ExecutionRegionAggregateInput &aggregate) {
-	if (!aggregate.primitive_update_ready) {
+                                                                  const ExecutionRegionAggregateInput &aggregate,
+                                                                  SljitAggregatePayloadDescriptor &descriptor) {
+	if (!SljitTryBindAggregatePayloadDescriptor(payload, aggregate, descriptor)) {
 		return false;
 	}
-	if (aggregate.primitive_update_kind == AggregatePrimitiveUpdateKind::COUNT_STAR) {
-		return aggregate.child_count == 0 && aggregate.child_types.empty();
+	if (descriptor.primitive_kind == AggregatePrimitiveUpdateKind::COUNT_STAR) {
+		return true;
 	}
-	if (aggregate.primitive_update_kind != AggregatePrimitiveUpdateKind::SUM_INT64 ||
-	    aggregate.child_types.size() != 1 ||
-	    aggregate.primitive_update_input_type != aggregate.child_types[0].InternalType() ||
-	    payload.return_type.InternalType() != aggregate.child_types[0].InternalType()) {
-		return false;
-	}
-	return aggregate.primitive_update_kind == AggregatePrimitiveUpdateKind::SUM_INT64 &&
+	return descriptor.primitive_kind == AggregatePrimitiveUpdateKind::SUM_INT64 && descriptor.IsMachineWord() &&
 	       (payload.kind == SljitNativeRegionExpressionKind::REFERENCE ||
 	        payload.kind == SljitNativeRegionExpressionKind::INTEGER_BINARY_CONSTANT ||
 	        payload.kind == SljitNativeRegionExpressionKind::INTEGER_BINARY_REFERENCES);
 }
 
 static unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeUngroupedSingleFusedPrimitiveAggregateUpdate(
-    const SljitNativeRegionExpressionPlan &payload, const ExecutionRegionAggregateInput &aggregate,
+    const SljitNativeRegionExpressionPlan &payload, const SljitAggregatePayloadDescriptor &descriptor,
     SljitNativeAggregateUpdateFunction &function, string &error) {
-	if (!SljitFusedUngroupedPrimitiveAggregatePayloadSupported(payload, aggregate) ||
-	    aggregate.primitive_update_kind != AggregatePrimitiveUpdateKind::SUM_INT64) {
+	if (descriptor.primitive_kind != AggregatePrimitiveUpdateKind::SUM_INT64 || !descriptor.IsMachineWord()) {
 		error = "unsupported fused aggregate payload shape";
 		return nullptr;
 	}
@@ -63,14 +58,16 @@ BuildSljitNativeUngroupedFusedPrimitiveAggregateUpdate(const vector<SljitNativeR
 		error = "unsupported fused aggregate payload shape";
 		return nullptr;
 	}
+	vector<SljitAggregatePayloadDescriptor> descriptors(payloads.size());
 	for (idx_t payload_idx = 0; payload_idx < payloads.size(); payload_idx++) {
-		if (!SljitFusedUngroupedPrimitiveAggregatePayloadSupported(payloads[payload_idx], aggregates[payload_idx])) {
+		if (!SljitFusedUngroupedPrimitiveAggregatePayloadSupported(payloads[payload_idx], aggregates[payload_idx],
+		                                                           descriptors[payload_idx])) {
 			error = "unsupported fused aggregate payload shape";
 			return nullptr;
 		}
 	}
 	if (payloads.size() == 1) {
-		return BuildSljitNativeUngroupedSingleFusedPrimitiveAggregateUpdate(payloads[0], aggregates[0], function,
+		return BuildSljitNativeUngroupedSingleFusedPrimitiveAggregateUpdate(payloads[0], descriptors[0], function,
 		                                                                    error);
 	}
 
@@ -85,7 +82,7 @@ BuildSljitNativeUngroupedFusedPrimitiveAggregateUpdate(const vector<SljitNativeR
 	bool has_sum_lane = false;
 	sljit_sw local_size = 0;
 	for (idx_t payload_idx = 0; payload_idx < payloads.size(); payload_idx++) {
-		if (aggregates[payload_idx].primitive_update_kind != AggregatePrimitiveUpdateKind::SUM_INT64) {
+		if (descriptors[payload_idx].primitive_kind != AggregatePrimitiveUpdateKind::SUM_INT64) {
 			continue;
 		}
 		has_sum_lane = true;
@@ -116,7 +113,7 @@ BuildSljitNativeUngroupedFusedPrimitiveAggregateUpdate(const vector<SljitNativeR
 	EmitLoadFusedAggregateExecuteIndex(compiler);
 
 	for (idx_t payload_idx = 0; payload_idx < payloads.size(); payload_idx++) {
-		if (aggregates[payload_idx].primitive_update_kind == AggregatePrimitiveUpdateKind::COUNT_STAR) {
+		if (descriptors[payload_idx].primitive_kind == AggregatePrimitiveUpdateKind::COUNT_STAR) {
 			continue;
 		}
 		auto &payload = payloads[payload_idx];
@@ -199,7 +196,7 @@ BuildSljitNativeUngroupedFusedPrimitiveAggregateUpdate(const vector<SljitNativeR
 	auto done_label = sljit_emit_label(compiler);
 	sljit_set_label(done, done_label);
 	for (idx_t payload_idx = 0; payload_idx < payloads.size(); payload_idx++) {
-		if (aggregates[payload_idx].primitive_update_kind == AggregatePrimitiveUpdateKind::COUNT_STAR) {
+		if (descriptors[payload_idx].primitive_kind == AggregatePrimitiveUpdateKind::COUNT_STAR) {
 			EmitUngroupedAggregateCommitCountStar(compiler, payload_idx);
 		} else {
 			EmitUngroupedAggregateCommitSumInt64(compiler, payload_idx, local_sum_offsets[payload_idx],

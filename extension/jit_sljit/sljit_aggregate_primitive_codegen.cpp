@@ -113,6 +113,35 @@ void EmitSljitAggregateAccumulateHugeintInt64(struct sljit_compiler *compiler, s
 	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_MEM1(SLJIT_SP), saw_value_offset, SLJIT_IMM, 1);
 }
 
+void EmitSljitAggregateAccumulateHugeint(struct sljit_compiler *compiler, sljit_sw local_lower_offset,
+                                         sljit_sw local_upper_offset, sljit_sw saw_value_offset,
+                                         sljit_s32 lower_value_reg, sljit_s32 upper_value_reg) {
+	EmitSljitAccumulateHugeintWords(compiler, SLJIT_SP, local_lower_offset, local_upper_offset, lower_value_reg,
+	                                upper_value_reg);
+	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_MEM1(SLJIT_SP), saw_value_offset, SLJIT_IMM, 1);
+}
+
+void EmitLoadSljitHugeintReference(struct sljit_compiler *compiler, sljit_sw source_data_offset,
+                                   sljit_s32 source_index_reg, sljit_s32 lower_target_reg, sljit_s32 upper_target_reg) {
+	sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_R0, 0, SLJIT_MEM1(SLJIT_S0), source_data_offset);
+	sljit_emit_op2(compiler, SLJIT_SHL, SLJIT_R4, 0, source_index_reg, 0, SLJIT_IMM, 4);
+	sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_R0, 0, SLJIT_R0, 0, SLJIT_R4, 0);
+	sljit_emit_op1(compiler, SLJIT_MOV, lower_target_reg, 0, SLJIT_MEM1(SLJIT_R0), offsetof(hugeint_t, lower));
+	sljit_emit_op1(compiler, SLJIT_MOV, upper_target_reg, 0, SLJIT_MEM1(SLJIT_R0), offsetof(hugeint_t, upper));
+}
+
+void EmitSljitAccumulateHugeintWords(struct sljit_compiler *compiler, sljit_s32 base_reg, sljit_sw lower_offset,
+                                     sljit_sw upper_offset, sljit_s32 lower_value_reg, sljit_s32 upper_value_reg) {
+	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R4, 0, SLJIT_MEM1(base_reg), lower_offset);
+	sljit_emit_op2(compiler, SLJIT_ADD | SLJIT_SET_CARRY, SLJIT_R4, 0, SLJIT_R4, 0, lower_value_reg, 0);
+	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_MEM1(base_reg), lower_offset, SLJIT_R4, 0);
+	sljit_emit_op_flags(compiler, SLJIT_MOV, lower_value_reg, 0, SLJIT_CARRY);
+	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R4, 0, SLJIT_MEM1(base_reg), upper_offset);
+	sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_R4, 0, SLJIT_R4, 0, upper_value_reg, 0);
+	sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_R4, 0, SLJIT_R4, 0, lower_value_reg, 0);
+	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_MEM1(base_reg), upper_offset, SLJIT_R4, 0);
+}
+
 void EmitSljitAggregateCommitHugeint(struct sljit_compiler *compiler, sljit_sw local_lower_offset,
                                      sljit_sw local_upper_offset, sljit_sw saw_value_offset) {
 	EmitSljitAggregateAddRowCount(compiler, SLJIT_S2);

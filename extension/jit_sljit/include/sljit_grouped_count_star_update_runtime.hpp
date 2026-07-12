@@ -13,6 +13,7 @@
 #include "sljit_aggregate_preaggregated_update_runtime.hpp"
 #include "sljit_grouped_aggregate_update_primitive.hpp"
 #include "sljit_grouped_aggregate_state_runtime.hpp"
+#include "sljit_grouped_reduction_lane.hpp"
 #include "sljit_native_binding_runtime.hpp"
 #include "sljit_count_star_projection_input.hpp"
 #include "sljit_projected_aggregate_input_runtime.hpp"
@@ -42,29 +43,27 @@ static bool TryBuildCountStarGroupedAggregateUpdateDescriptor(
 	}
 	auto &sink_info = op.aggregate_update.plan.sink_info;
 	if (sink_info.groups.size() != bind_groups.ColumnCount() || sink_info.aggregates.size() != 1 ||
-	    op.aggregate_update.payloads.size() != 1) {
+	    op.aggregate_update.payloads.size() != 1 || op.aggregate_update.payload_descriptors.size() != 1) {
 		return false;
 	}
 	auto &aggregate = sink_info.aggregates[0];
-	if (aggregate.child_count != 0 || aggregate.primitive_update_kind != AggregatePrimitiveUpdateKind::COUNT_STAR) {
+	auto &payload_descriptor = op.aggregate_update.payload_descriptors[0];
+	if (aggregate.child_count != 0 || payload_descriptor.primitive_kind != AggregatePrimitiveUpdateKind::COUNT_STAR) {
 		return false;
 	}
 	if (!binding.ready || !binding.aggregate_update.ready || !binding.aggregate_update.primitive.ready ||
 	    !binding.aggregate_update.grouped_state.ready || !binding.aggregate_update.grouped_state.state) {
 		return false;
 	}
-	auto &payload_lanes =
-	    scratch.AggregatePayloadLanes(op_idx, sink_info.aggregates, binding.aggregate_update.primitive);
+	auto &payload_lanes = scratch.AggregatePayloadLanes(op_idx, op.aggregate_update.payload_descriptors,
+	                                                    binding.aggregate_update.primitive);
 	if (payload_lanes.size() != 1 || !payload_lanes[0]) {
 		return false;
 	}
 	auto lane = payload_lanes[0];
-	if (!lane->ready || lane->kind != AggregatePrimitiveUpdateKind::COUNT_STAR ||
-	    lane->aggregate_index != aggregate.aggregate_index ||
-	    aggregate.aggregate_index >= sink_info.aggregate_contract.grouped_state_offsets.size() ||
-	    lane->state_offset != sink_info.aggregate_contract.grouped_state_offsets[aggregate.aggregate_index] ||
-	    lane->state_value_offset != aggregate.primitive_update_state_value_offset ||
-	    lane->state_is_set_offset != aggregate.primitive_update_state_is_set_offset) {
+	SljitGroupedReductionLaneBinding reduction_lane;
+	if (!SljitTryBindGroupedReductionLane(sink_info.aggregate_contract, payload_descriptor, lane, reduction_lane) ||
+	    reduction_lane.descriptor->primitive_kind != AggregatePrimitiveUpdateKind::COUNT_STAR) {
 		return false;
 	}
 
@@ -87,9 +86,8 @@ static bool SljitTryPrepareCountStarGroupedAggregateUpdate(ExecutionRegionRuntim
 
 static bool TryExecutePreparedPreaggregatedCountStarGroupedAggregateUpdate(
     ExecutionRegionRuntime &runtime, idx_t op_idx, SljitExecutableRegionOp &op, DataChunk &compact_groups,
-    const vector<int64_t> &count_deltas,
-    SljitCountStarGroupedAggregateUpdateDescriptor &descriptor, idx_t preaggregated_row_count,
-    bool defer_grouped_finish, optional_ptr<bool> deferred_grouped_finish) {
+    const vector<int64_t> &count_deltas, SljitCountStarGroupedAggregateUpdateDescriptor &descriptor,
+    idx_t preaggregated_row_count, bool defer_grouped_finish, optional_ptr<bool> deferred_grouped_finish) {
 	if (compact_groups.size() == 0 || count_deltas.size() < compact_groups.size() || !descriptor.Ready()) {
 		return false;
 	}
@@ -169,8 +167,7 @@ public:
 	}
 
 	bool Flush(ExecutionRegionRuntime &runtime, vector<SljitExecutableRegionOp> &ops,
-	           SljitRegionExecutionScratch &scratch,
-	           const SljitGroupedAggregateUpdatePrimitive &primitive) {
+	           SljitRegionExecutionScratch &scratch, const SljitGroupedAggregateUpdatePrimitive &primitive) {
 		if (!FlushPendingPreaggregatedCountStar(runtime, scratch, primitive.aggregate_idx,
 		                                        ops[primitive.aggregate_idx])) {
 			throw InternalException("SLJIT grouped count-star pending preaggregation flush failed");
@@ -209,9 +206,8 @@ private:
 			                                      preaggregated_count_deltas, input.size())) {
 				return false;
 			}
-			RecordSljitRegionMaterializationElisionPath(runtime, aggregate_op.kind,
-			                                            "primitive_grouped_preaggregated_count_star_update",
-			                                            input.size());
+			RecordSljitRegionMaterializationElisionPath(
+			    runtime, aggregate_op.kind, "primitive_grouped_preaggregated_count_star_update", input.size());
 			return true;
 		}
 		row_count_deltas.assign(input.size(), 1);
@@ -252,15 +248,14 @@ private:
 			throw InternalException("SLJIT projected count-star group projection is not prepared");
 		}
 		SljitPreparedProjectedAggregateInput prepared;
-		if (!SljitPrepareProjectedAggregateInput(runtime, ops, scratch, primitive, input,
-		                                         *projected_count_star_group_projection,
-		                                         projected_count_star_selected_hash_join_input,
-		                                         "SLJIT projected grouped count-star update", prepared)) {
+		if (!SljitPrepareProjectedAggregateInput(
+		        runtime, ops, scratch, primitive, input, *projected_count_star_group_projection,
+		        projected_count_star_selected_hash_join_input, "SLJIT projected grouped count-star update", prepared)) {
 			return true;
 		}
 		if (SljitTryPreaggregateProjectedCountStarGroups(*prepared.projection_op, *prepared.source_chunk,
-		                                                 prepared.selection, prepared.count,
-		                                                 preaggregated_groups, preaggregated_count_deltas)) {
+		                                                 prepared.selection, prepared.count, preaggregated_groups,
+		                                                 preaggregated_count_deltas)) {
 			RecordSljitRegionStageRuntime(runtime, aggregate_idx, aggregate_op.kind,
 			                              "primitive_projected_preaggregate_count_star_groups",
 			                              preaggregate_stage_start);
@@ -268,9 +263,8 @@ private:
 			                                      preaggregated_count_deltas, prepared.count)) {
 				return false;
 			}
-			RecordSljitRegionMaterializationElisionPath(runtime, aggregate_op.kind,
-			                                            "primitive_projected_preaggregated_count_star_update",
-			                                            prepared.count);
+			RecordSljitRegionMaterializationElisionPath(
+			    runtime, aggregate_op.kind, "primitive_projected_preaggregated_count_star_update", prepared.count);
 			return true;
 		}
 
@@ -280,8 +274,8 @@ private:
 		                                 projected_count_star_group_scratch);
 		preaggregated_groups.SetChildCardinality(prepared.count);
 		row_count_deltas.assign(prepared.count, 1);
-		RecordSljitRegionStageRuntime(runtime, aggregate_idx, aggregate_op.kind,
-		                              "count_star_projected_row_groups", preaggregate_stage_start);
+		RecordSljitRegionStageRuntime(runtime, aggregate_idx, aggregate_op.kind, "count_star_projected_row_groups",
+		                              preaggregate_stage_start);
 		if (!FlushPendingPreaggregatedCountStar(runtime, scratch, aggregate_idx, aggregate_op)) {
 			return false;
 		}
@@ -332,9 +326,8 @@ private:
 		pending_preaggregated_count_deltas.clear();
 		pending_preaggregated_row_count = 0;
 		if (updated) {
-			RecordSljitRegionMaterializationElisionPath(runtime, aggregate_op.kind,
-			                                            "primitive_pending_preaggregated_count_star_flush",
-			                                            represented_row_count);
+			RecordSljitRegionMaterializationElisionPath(
+			    runtime, aggregate_op.kind, "primitive_pending_preaggregated_count_star_flush", represented_row_count);
 		}
 		return updated;
 	}
@@ -381,9 +374,8 @@ private:
 		pending_row_count_deltas.clear();
 		pending_row_count = 0;
 		if (updated) {
-			RecordSljitRegionMaterializationElisionPath(runtime, aggregate_op.kind,
-			                                            "primitive_pending_count_star_row_flush",
-			                                            represented_row_count);
+			RecordSljitRegionMaterializationElisionPath(
+			    runtime, aggregate_op.kind, "primitive_pending_count_star_row_flush", represented_row_count);
 		}
 		return updated;
 	}

@@ -22,7 +22,7 @@
 namespace duckdb {
 
 static void SljitValidateNativeNestedLoopJoinProbeExecutable(SljitExecutableNestedLoopJoinProbe &executable) {
-	if (!executable.function) {
+	if (!executable.compiled.Function()) {
 		throw InternalException("SLJIT native nested loop join probe reached runtime without generated code");
 	}
 	if (executable.plan.conditions.size() != 1 || executable.lhs_conditions.size() != 1) {
@@ -121,7 +121,7 @@ SljitExecuteNativeNestedLoopJoinProbe(SljitExecutableNestedLoopJoinProbe &execut
 		SljitNativeNestedLoopJoinProbeInput native_input;
 		SljitPrepareNestedLoopJoinProbeInput(executable.plan.conditions[0], left_condition, *probe.right_condition,
 		                                     left_selection, right_selection, state, native_input);
-		executable.function(&native_input);
+		executable.compiled.Function()(&native_input);
 		state.left_offset = native_input.left_offset;
 		state.right_offset = native_input.right_offset;
 		state.right_chunk_finished = native_input.right_chunk_finished;

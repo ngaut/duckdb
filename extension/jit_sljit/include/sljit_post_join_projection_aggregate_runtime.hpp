@@ -154,23 +154,13 @@ private:
 		return optional_ptr<SljitDirectJoinOutputAggregateStrategy>(direct_join_output_aggregate_strategy.get());
 	}
 
-	optional_ptr<SljitBoundGroupedPrimitiveAggregateUpdate>
-	BoundGroupedUpdatePtr(SljitExecutableRegionOp &aggregate_op) {
-		if (SljitGroupedPrimitiveAggregateSinkKind(aggregate_op.aggregate_update.plan.sink_info.kind) &&
-		    aggregate_op.aggregate_update.plan.use_primitive_payloads) {
-			return &bound_grouped_update;
-		}
-		return nullptr;
-	}
-
 	bool ExecuteMaterializedAggregateBatch(ExecutionRegionRuntime &runtime, ExecutionRegionResult &result,
 	                                       vector<SljitExecutableRegionOp> &ops, SljitRegionExecutionScratch &scratch,
 	                                       DataChunk &input) {
 		auto aggregate_idx = AggregateIndex();
 		auto &aggregate_op = ops[aggregate_idx];
 		if (SljitExecuteProjectedAggregateBatch(runtime, runtime.ExecutionOperators(), scratch, aggregate_idx,
-		                                        aggregate_op, input, deferred_grouped_finish, result,
-		                                        BoundGroupedUpdatePtr(aggregate_op))) {
+		                                        aggregate_op, input, deferred_grouped_finish, result)) {
 			return true;
 		}
 		processed_output_rows += input.size();
@@ -186,8 +176,7 @@ private:
 		return SljitProjectedAggregateSink(ops, runtime, runtime.ExecutionOperators(), scratch, result,
 		                                   final_projection_idx, ops[final_projection_idx], aggregate_idx, aggregate_op,
 		                                   deferred_grouped_finish, processed_output_rows, projected_batch,
-		                                   "post_join_projection_buffer_append", DirectAggregateStrategyPtr(),
-		                                   BoundGroupedUpdatePtr(aggregate_op));
+		                                   "post_join_projection_buffer_append", DirectAggregateStrategyPtr());
 	}
 
 private:
@@ -197,7 +186,6 @@ private:
 	SljitDataChunkBatch projected_batch;
 	SljitPostJoinProjectionStrategy post_join_projection;
 	unique_ptr<SljitDirectJoinOutputAggregateStrategy> direct_join_output_aggregate_strategy;
-	SljitBoundGroupedPrimitiveAggregateUpdate bound_grouped_update;
 };
 
 } // namespace duckdb

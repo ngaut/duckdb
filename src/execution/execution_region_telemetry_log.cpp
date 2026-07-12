@@ -101,6 +101,7 @@ static void AccumulateExecutionRegionRunnerCostTotals(ExecutionRegionRunnerCostT
 	target.generated_backend_stage_count += source.generated_backend_stage_count;
 	target.generated_grouped_aggregate_stage_count += source.generated_grouped_aggregate_stage_count;
 	target.native_grouped_state_address_lookup_count += source.native_grouped_state_address_lookup_count;
+	target.grouped_aggregate_estimated_cardinality += source.grouped_aggregate_estimated_cardinality;
 	target.materialization_elision_count += source.materialization_elision_count;
 	target.selected_hash_join_filter_materialization_count += source.selected_hash_join_filter_materialization_count;
 	target.native_join_stage_count += source.native_join_stage_count;
@@ -136,6 +137,7 @@ static void AccumulateExecutionRegionRunnerCostTotals(ExecutionRegionRunnerCostT
 	target.startup_cost += source.startup_cost;
 	target.required_benefit += source.required_benefit;
 	target.net_benefit += source.net_benefit;
+	target.required_runtime_proofs |= source.required_runtime_proofs;
 	target.selected_accelerated_runner_count += source.selected_accelerated_runner ? 1 : 0;
 	target.selected_compiled_vectorized_runner_count += source.selected_compiled_vectorized_runner ? 1 : 0;
 	target.selected_gpu_runner_count += source.selected_gpu_runner ? 1 : 0;

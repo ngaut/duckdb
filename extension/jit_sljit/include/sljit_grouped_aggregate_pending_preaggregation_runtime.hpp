@@ -26,18 +26,20 @@ static bool SljitTryInputVectorHasProfitablePendingRuns(idx_t count, LOAD_KEY &&
 		return false;
 	}
 	const auto sample_count = MinValue<idx_t>(count, 64);
-	idx_t run_count = 1;
+	idx_t transition_count = 0;
 	for (idx_t row_idx = 1; row_idx < sample_count; row_idx++) {
 		TARGET_TYPE key;
 		if (!load_key(row_idx, key)) {
 			return false;
 		}
 		if (!(key == previous_key)) {
-			run_count++;
+			transition_count++;
 		}
 		previous_key = key;
 	}
-	profitable = run_count * SLJIT_PENDING_RUN_MIN_COMPRESSION <= sample_count;
+	// Transitions measure the distance between run starts without charging the
+	// sample's partial leading and trailing runs as complete groups.
+	profitable = transition_count == 0 || transition_count * SLJIT_PENDING_RUN_MIN_COMPRESSION <= sample_count - 1;
 	return true;
 }
 

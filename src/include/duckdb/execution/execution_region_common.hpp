@@ -199,6 +199,26 @@ enum class ExecutionRegionStageExecutionKind : uint8_t {
 enum class ExecutionRunnerKind : uint8_t { VECTORIZED, COMPILED_VECTORIZED, COMPILED_GPU };
 enum class ExecutionRegionPolicyMode : uint8_t { AUTO, OFF };
 enum class ExecutionRegionResult : uint8_t { NOT_FINISHED, FINISHED, INTERRUPTED, DEFERRED };
+enum class ExecutionRegionJitRuntimeProof : uint8_t {
+	GENERATED_STAGE_WORK,
+	GENERATED_BACKEND_WORK,
+	MATERIALIZATION_ELISION,
+	FULL_PIPELINE_OWNERSHIP,
+	DELEGATED_RUNTIME_WORK,
+	NO_WORK,
+	COUNT
+};
+using ExecutionRegionJitRuntimeProofMask = uint32_t;
+
+static constexpr ExecutionRegionJitRuntimeProofMask
+ExecutionRegionJitRuntimeProofBit(ExecutionRegionJitRuntimeProof proof) {
+	return ExecutionRegionJitRuntimeProofMask(1) << static_cast<uint8_t>(proof);
+}
+
+static constexpr bool ExecutionRegionJitRuntimeProofRequired(ExecutionRegionJitRuntimeProofMask requirements,
+                                                             ExecutionRegionJitRuntimeProof proof) {
+	return (requirements & ExecutionRegionJitRuntimeProofBit(proof)) != 0;
+}
 enum class ExecutionExpressionValidityKind : uint8_t {
 	UNKNOWN,
 	CONSTANT_NULL,

@@ -26,6 +26,7 @@ static bool TryExecuteDirectInputVectorGroupedTargetPayloadUpdate(
     DataChunk &payload_input, const vector<ExecutionRowPointerGroupKeySource> &group_sources,
     const vector<idx_t> &payload_source_indices, optional_ptr<const vector<bool>> payload_source_not_null,
     const vector<const ExecutionPrimitiveAggregateUpdateLane *> &payload_lanes,
+    const vector<SljitGroupedReductionLaneBinding> &reduction_lanes,
     ExecutionGroupedAggregateStateAddressBinding &grouped_state, SljitAggregatePayloadAdapterScratch &payload_scratch,
     bool finish, bool reserve_from_input_count = true,
     optional_ptr<const ExecutionDenseGroupDomain> dense_domain = nullptr) {
@@ -53,8 +54,8 @@ static bool TryExecuteDirectInputVectorGroupedTargetPayloadUpdate(
 
 	auto update_start = SljitRegionStageStart(runtime);
 	auto update_state = SljitBuildGroupedStateAddressUpdateState(
-	    op, payload_input, payload_lanes, payload_scratch, optional_ptr<const vector<idx_t>>(&payload_source_indices),
-	    payload_source_not_null);
+	    op, payload_input, payload_lanes, reduction_lanes, payload_scratch,
+	    optional_ptr<const vector<idx_t>>(&payload_source_indices), payload_source_not_null);
 	SljitExecuteGroupedStateTargetBatch(targets, update_state);
 	RecordSljitRegionStageRuntime(runtime, op_idx, op.kind, "direct_input_vector_group_payload_target_update",
 	                              update_start);
@@ -82,6 +83,8 @@ static bool SljitTryExecuteInputVectorGroupedAggregateUpdate(
 		RecordSljitRegionRuntimePath(runtime, op.kind, path.c_str(), payload_input.size());
 	};
 	auto &sink_info = op.aggregate_update.plan.sink_info;
+	auto &reduction_lanes = scratch.GroupedReductionLanes(op_idx, sink_info.aggregate_contract,
+	                                                      op.aggregate_update.payload_descriptors, payload_lanes);
 	if (group_sources.empty() || group_sources.size() != sink_info.groups.size() || !grouped_state.ready ||
 	    !grouped_state.state) {
 		record_unsupported("shape");
@@ -92,11 +95,14 @@ static bool SljitTryExecuteInputVectorGroupedAggregateUpdate(
 	const bool descriptor_count_one_payload =
 	    payload_source_indices.size() == 1 && payload_source_indices[0] == DConstants::INVALID_INDEX;
 	SljitPrimitiveCountOneUpdateState count_one_update;
-	const bool count_one_update_ready =
-	    SljitTryBindPrimitiveCountOneUpdateState(sink_info, payload_lanes, count_one_payload, count_one_update);
+	const bool count_one_update_ready = SljitTryBindPrimitiveCountOneUpdateState(
+	    op.aggregate_update.payload_descriptors, payload_lanes, count_one_payload, count_one_update);
 	if (pending_preaggregated_groups && dense_domain && dense_domain->ready && count_one_update_ready) {
+		auto dense_pending_start = SljitRegionStageStart(runtime);
 		if (SljitTryAccumulatePendingDenseSingleLaneGroups(op, payload_input, group_sources, payload_lanes,
 		                                                   *dense_domain, *pending_preaggregated_groups)) {
+			RecordSljitRegionStageRuntime(runtime, op_idx, op.kind, "pending_dense_single_lane_accumulate",
+			                              dense_pending_start);
 			RecordSljitRegionMaterializationElisionPath(runtime, op.kind, "pending_dense_single_lane_grouped_update",
 			                                            payload_input.size());
 			if (finish && !SljitFlushPendingPreaggregatedPrimitiveGroups(runtime, scratch, op_idx, op,
@@ -132,10 +138,10 @@ static bool SljitTryExecuteInputVectorGroupedAggregateUpdate(
 	if (pending_preaggregated_groups) {
 		idx_t preaggregated_group_count = 0;
 		bool fused_run_payloads = false;
-		if (TryPreaggregateInputVectorPrimitiveGroupRunsBest(op, payload_input, group_sources, payload_source_indices,
-		                                                     payload_lanes, preaggregate_scratch, payload_scratch,
-		                                                     optional_ptr<DataChunk>(&preaggregated_groups),
-		                                                     preaggregated_group_count, fused_run_payloads)) {
+		if (TryPreaggregateInputVectorPrimitiveGroupRunsBest(
+		        op, payload_input, group_sources, payload_source_indices, payload_lanes, reduction_lanes,
+		        preaggregate_scratch, payload_scratch, optional_ptr<DataChunk>(&preaggregated_groups),
+		        preaggregated_group_count, fused_run_payloads)) {
 			RecordSljitRegionStageRuntime(runtime, op_idx, op.kind,
 			                              fused_run_payloads
 			                                  ? "local_preaggregate_input_vector_fused_primitive_group_runs"
@@ -153,7 +159,7 @@ static bool SljitTryExecuteInputVectorGroupedAggregateUpdate(
 	}
 
 	if (!descriptor_count_one_payload && dense_domain && dense_domain->ready &&
-	    op.aggregate_update.fused_payload_update_function) {
+	    op.aggregate_update.fused_payload_update.Function()) {
 		if (pending_preaggregated_groups && pending_preaggregated_groups->HasPending() &&
 		    !SljitFlushPendingPreaggregatedPrimitiveGroups(runtime, scratch, op_idx, op, *pending_preaggregated_groups,
 		                                                   grouped_state, deferred_grouped_finish)) {
@@ -162,12 +168,12 @@ static bool SljitTryExecuteInputVectorGroupedAggregateUpdate(
 		}
 		if (TryExecuteRunPreaggregatedInputVectorGroupedTargetPayloadUpdate(
 		        runtime, scratch, op_idx, op, payload_input, group_sources, payload_source_indices, payload_lanes,
-		        grouped_state, payload_scratch, finish, dense_domain)) {
+		        reduction_lanes, grouped_state, payload_scratch, finish, dense_domain)) {
 			return true;
 		}
 		if (TryExecuteDirectInputVectorGroupedTargetPayloadUpdate(
 		        runtime, scratch, op_idx, op, payload_input, group_sources, payload_source_indices,
-		        payload_source_not_null, payload_lanes, grouped_state, payload_scratch, finish,
+		        payload_source_not_null, payload_lanes, reduction_lanes, grouped_state, payload_scratch, finish,
 		        !pending_preaggregated_groups, dense_domain)) {
 			RecordSljitRegionMaterializationElisionPath(
 			    runtime, op.kind, "direct_input_vector_dense_target_grouped_update", payload_input.size());
@@ -273,14 +279,15 @@ static bool SljitTryExecuteInputVectorGroupedAggregateUpdate(
 		return false;
 	}
 
-	if (op.aggregate_update.fused_payload_update_function) {
-		if (!SljitCanExecuteDirectGroupedStateAddressPayloadUpdate(scratch, op_idx, op, payload_input, payload_lanes,
+	if (op.aggregate_update.fused_payload_update.Function()) {
+		if (!SljitCanExecuteDirectGroupedStateAddressPayloadUpdate(scratch, op_idx, op, payload_input, reduction_lanes,
 		                                                           nullptr, payload_input.size())) {
 			record_unsupported("state_address_payload_shape");
 		}
 		updated = TryExecuteDirectInputVectorGroupedTargetPayloadUpdate(
 		    runtime, scratch, op_idx, op, payload_input, group_sources, payload_source_indices, payload_source_not_null,
-		    payload_lanes, grouped_state, payload_scratch, finish, !pending_preaggregated_groups, dense_domain);
+		    payload_lanes, reduction_lanes, grouped_state, payload_scratch, finish, !pending_preaggregated_groups,
+		    dense_domain);
 		if (updated) {
 			return true;
 		}
@@ -300,8 +307,8 @@ static bool SljitTryExecuteInputVectorGroupedAggregateUpdate(
 		return false;
 	}
 
-	if (op.aggregate_update.fused_payload_update_function &&
-	    SljitCanExecuteDirectGroupedStateAddressPayloadUpdate(scratch, op_idx, op, payload_input, payload_lanes,
+	if (op.aggregate_update.fused_payload_update.Function() &&
+	    SljitCanExecuteDirectGroupedStateAddressPayloadUpdate(scratch, op_idx, op, payload_input, reduction_lanes,
 	                                                          nullptr, payload_input.size())) {
 		updated = TryExecuteDirectProjectedGroupedStateAddressPayloadUpdate(
 		    runtime, scratch, op_idx, op, *groups, payload_input, payload_source_indices, payload_lanes, grouped_state,
@@ -364,7 +371,8 @@ static bool SljitTryExecuteNativeInputVectorGroupedAggregateUpdate(
 		}
 		return false;
 	}
-	auto &payload_lanes = scratch.AggregatePayloadLanes(op_idx, aggregates, binding.aggregate_update.primitive);
+	auto &payload_lanes = scratch.AggregatePayloadLanes(op_idx, op.aggregate_update.payload_descriptors,
+	                                                    binding.aggregate_update.primitive);
 	auto &payload_scratch = scratch.AggregatePayloadScratch(op_idx);
 	if (!pending_preaggregated_groups) {
 		SljitTryReserveGroupedAggregateGroups(runtime, op_idx, op, binding.aggregate_update.grouped_state,

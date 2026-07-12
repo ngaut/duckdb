@@ -8,6 +8,7 @@
 
 #pragma once
 
+#include "sljit_aggregate_payload_descriptor.hpp"
 #include "sljit_aggregate_fused_codegen.hpp"
 #include "sljit_aggregate_perfect_hash_codegen.hpp"
 #include "sljit_aggregate_typed_payload_codegen.hpp"
@@ -19,42 +20,20 @@
 
 namespace duckdb {
 
-static bool TryGetSljitPrimitiveAggregatePayloadKind(const LogicalType &payload_type,
-                                                     SljitNativeIntegerKind &integer_kind) {
-	switch (payload_type.InternalType()) {
-	case PhysicalType::INT32:
-		integer_kind = SljitNativeIntegerKind::INT32;
-		return true;
-	case PhysicalType::INT64:
-		integer_kind = payload_type.id() == LogicalTypeId::DECIMAL ? SljitNativeIntegerKind::DECIMAL64
-		                                                           : SljitNativeIntegerKind::INT64;
-		return true;
-	default:
-		return false;
-	}
-}
-
 static bool SljitPrimitiveAggregatePayloadSupported(SljitNativeRegionExpressionPlan &payload,
                                                     const ExecutionRegionAggregateInput &aggregate,
                                                     bool grouped_state = false) {
-	if (aggregate.primitive_update_kind == AggregatePrimitiveUpdateKind::COUNT_STAR) {
-		return aggregate.child_count == 0 && aggregate.child_types.empty() && aggregate.primitive_update_ready;
-	}
-	if (aggregate.child_types.size() != 1 ||
-	    payload.return_type.InternalType() != aggregate.child_types[0].InternalType()) {
+	SljitAggregatePayloadDescriptor descriptor;
+	if (!SljitTryBindAggregatePayloadDescriptor(payload, aggregate, descriptor)) {
 		return false;
 	}
-	if (aggregate.primitive_update_kind == AggregatePrimitiveUpdateKind::COUNT) {
-		return aggregate.primitive_update_ready && payload.kind == SljitNativeRegionExpressionKind::REFERENCE;
+	if (!descriptor.has_payload) {
+		return true;
 	}
-	if (!aggregate.primitive_update_ready ||
-	    aggregate.primitive_update_input_type != aggregate.child_types[0].InternalType()) {
-		return false;
+	if (descriptor.value_abi == SljitAggregatePayloadValueABI::VALIDITY_ONLY) {
+		return payload.kind == SljitNativeRegionExpressionKind::REFERENCE;
 	}
-	if (aggregate.primitive_update_kind == AggregatePrimitiveUpdateKind::SUM_DOUBLE) {
-		if (aggregate.child_types[0].InternalType() != PhysicalType::DOUBLE) {
-			return false;
-		}
+	if (descriptor.primitive_kind == AggregatePrimitiveUpdateKind::SUM_DOUBLE) {
 		switch (payload.kind) {
 		case SljitNativeRegionExpressionKind::REFERENCE:
 			payload.double_source_kind = SljitNativeDoubleSourceKind::DOUBLE;
@@ -66,11 +45,14 @@ static bool SljitPrimitiveAggregatePayloadSupported(SljitNativeRegionExpressionP
 			return false;
 		}
 	}
+	if (descriptor.primitive_kind == AggregatePrimitiveUpdateKind::SUM_HUGEINT && descriptor.IsDoubleWord()) {
+		return payload.kind == SljitNativeRegionExpressionKind::REFERENCE;
+	}
 	SljitNativeIntegerKind aggregate_payload_kind;
-	if (!TryGetSljitPrimitiveAggregatePayloadKind(aggregate.child_types[0], aggregate_payload_kind)) {
+	if (!descriptor.TryGetTypedIntegerKind(aggregate_payload_kind)) {
 		return false;
 	}
-	if (aggregate.primitive_update_kind == AggregatePrimitiveUpdateKind::SUM_HUGEINT) {
+	if (descriptor.primitive_kind == AggregatePrimitiveUpdateKind::SUM_HUGEINT) {
 		if (grouped_state && payload.kind == SljitNativeRegionExpressionKind::REFERENCE) {
 			payload.integer_kind = aggregate_payload_kind;
 			return true;
@@ -93,7 +75,7 @@ static bool SljitPrimitiveAggregatePayloadSupported(SljitNativeRegionExpressionP
 		}
 		return false;
 	}
-	if (aggregate.primitive_update_kind != AggregatePrimitiveUpdateKind::SUM_INT64) {
+	if (descriptor.primitive_kind != AggregatePrimitiveUpdateKind::SUM_INT64) {
 		return false;
 	}
 	switch (payload.kind) {
@@ -123,8 +105,9 @@ static bool SljitAggregateUpdateUsesGeneratedPerfectHashLookup(const ExecutionRe
 	       sink.aggregate_contract.native_grouped_state_contract.status == ExecutionRegionStateContractStatus::READY;
 }
 
-static bool SljitGroupedStateAddressPrimitivePayloadsSupported(
-    const ExecutionRegionSinkInfo &sink, const vector<SljitNativeRegionExpressionPlan> &payloads) {
+static bool
+SljitGroupedStateAddressPrimitivePayloadsSupported(const ExecutionRegionSinkInfo &sink,
+                                                   const vector<SljitNativeRegionExpressionPlan> &payloads) {
 	if (payloads.empty() || payloads.size() != sink.aggregates.size()) {
 		return false;
 	}
@@ -137,8 +120,8 @@ static bool SljitGroupedStateAddressPrimitivePayloadsSupported(
 	return true;
 }
 
-static bool SljitGroupedStateAddressTypedPayloadsSupported(
-    const ExecutionRegionSinkInfo &sink, const vector<SljitNativeRegionExpressionPlan> &payloads) {
+static bool SljitGroupedStateAddressTypedPayloadsSupported(const ExecutionRegionSinkInfo &sink,
+                                                           const vector<SljitNativeRegionExpressionPlan> &payloads) {
 	auto &contract = sink.aggregate_contract;
 	if (!contract.grouped_state_layout_ready || payloads.empty() || payloads.size() != sink.aggregates.size()) {
 		return false;
@@ -147,10 +130,11 @@ static bool SljitGroupedStateAddressTypedPayloadsSupported(
 	for (idx_t payload_idx = 0; payload_idx < payloads.size(); payload_idx++) {
 		auto &aggregate = sink.aggregates[payload_idx];
 		auto &payload = payloads[payload_idx];
-		if (!SljitFusedGroupedTypedAggregatePayloadSupported(payload, aggregate, contract)) {
+		SljitAggregatePayloadDescriptor descriptor;
+		if (!SljitFusedGroupedTypedAggregatePayloadSupported(payload, aggregate, contract, &descriptor)) {
 			return false;
 		}
-		if (aggregate.primitive_update_kind == AggregatePrimitiveUpdateKind::COUNT_STAR ||
+		if (descriptor.primitive_kind == AggregatePrimitiveUpdateKind::COUNT_STAR ||
 		    payload.kind == SljitNativeRegionExpressionKind::REFERENCE) {
 			continue;
 		}
@@ -158,7 +142,7 @@ static bool SljitGroupedStateAddressTypedPayloadsSupported(
 			return false;
 		}
 		auto payload_plan = BuildSljitTypedExpressionTreePlan(*payload.expression_tree, false);
-		if (!SljitAggregateTypedPayloadPlanSupported(payload_plan, aggregate)) {
+		if (!SljitAggregateTypedPayloadPlanSupported(payload_plan, descriptor)) {
 			return false;
 		}
 		has_typed_payload = true;
@@ -166,9 +150,8 @@ static bool SljitGroupedStateAddressTypedPayloadsSupported(
 	return has_typed_payload;
 }
 
-static bool
-SljitGroupedStateAddressPayloadsSupported(const ExecutionRegionSinkInfo &sink,
-                                          const vector<SljitNativeRegionExpressionPlan> &payloads) {
+static bool SljitGroupedStateAddressPayloadsSupported(const ExecutionRegionSinkInfo &sink,
+                                                      const vector<SljitNativeRegionExpressionPlan> &payloads) {
 	auto &contract = sink.aggregate_contract;
 	if ((sink.kind != ExecutionRegionSinkKind::HASH_AGGREGATE_UPDATE &&
 	     sink.kind != ExecutionRegionSinkKind::PERFECT_HASH_AGGREGATE_UPDATE) ||
@@ -343,8 +326,7 @@ static bool SljitPerfectHashGroupLookupSupported(
 	auto &resolved_group_expressions = group_expressions ? *group_expressions : empty_group_expressions;
 	vector<SljitPerfectHashGroupPlan> primitive_group_plans;
 	const bool primitive_group_lookup_supported =
-	    TryBuildSljitPerfectHashGroupPlans(sink.groups, resolved_group_expressions, contract,
-	                                       primitive_group_plans) &&
+	    TryBuildSljitPerfectHashGroupPlans(sink.groups, resolved_group_expressions, contract, primitive_group_plans) &&
 	    !primitive_group_plans.empty();
 	vector<SljitPerfectHashGroupPlan> typed_group_plans;
 	if (!TryBuildSljitPerfectHashGroupPlans(sink.groups, resolved_group_expressions, contract, typed_group_plans,

@@ -29,14 +29,14 @@ struct SljitSelectedHashJoinFilterCache {
 static bool SljitGeneratedFilterExpressionHasSelector(const SljitExecutableRegionExpression &expression) {
 	switch (expression.plan.kind) {
 	case SljitNativeRegionExpressionKind::PREDICATE:
-		return expression.predicate_select_function != nullptr;
+		return expression.predicate_select.Function() != nullptr;
 	case SljitNativeRegionExpressionKind::INTEGER_COMPARE_CONSTANT:
 	case SljitNativeRegionExpressionKind::INTEGER_COMPARE_REFERENCES:
 	case SljitNativeRegionExpressionKind::INTEGER_IN_LIST:
 	case SljitNativeRegionExpressionKind::INTEGER_BETWEEN:
 	case SljitNativeRegionExpressionKind::NULL_CHECK:
 	case SljitNativeRegionExpressionKind::TYPED_EXPRESSION_TREE:
-		return expression.select_function != nullptr;
+		return expression.select.Function() != nullptr;
 	default:
 		return false;
 	}

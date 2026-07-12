@@ -73,7 +73,7 @@ class TestExactRegressionThresholds(unittest.TestCase):
         )
         self.assertEqual([failure["category"] for failure in failures], ["runtime_component"])
 
-    def test_paired_speedup_ignores_unpaired_runtime_outliers(self) -> None:
+    def test_paired_speedup_does_not_hide_raw_runtime_regression(self) -> None:
         paired = paired_policy_speedups(
             [
                 {"query": "18", "repeat": "1", "policy": "off", "query_time_us": "100000"},
@@ -93,7 +93,18 @@ class TestExactRegressionThresholds(unittest.TestCase):
             Decimal("0.98"),
             paired,
         )
-        self.assertEqual(failures, [])
+        self.assertEqual([failure["category"] for failure in failures], ["auto_runtime"])
+
+    def test_shared_off_and_auto_slowdown_fails_raw_runtime_gate(self) -> None:
+        failures = compare_auto_speed(
+            {"18": gap("0.090", "0.100")},
+            {"18": gap("0.180", "0.200")},
+            ["18"],
+            Decimal("1.02"),
+            Decimal("0.002"),
+            Decimal("0.98"),
+        )
+        self.assertEqual([failure["category"] for failure in failures], ["auto_runtime"])
 
     def test_paired_slowdown_still_fails(self) -> None:
         failures = compare_auto_speed(

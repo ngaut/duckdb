@@ -14,20 +14,24 @@
 
 namespace duckdb {
 
-struct SljitBoundGroupedPrimitiveAggregateUpdate {
-	bool ready = false;
-	idx_t op_idx = DConstants::INVALID_INDEX;
-	optional_ptr<SljitExecutableRegionOp> op;
-	optional_ptr<const vector<ExecutionRegionAggregateInput>> aggregates;
-	optional_ptr<const vector<const ExecutionPrimitiveAggregateUpdateLane *>> payload_lanes;
-	optional_ptr<SljitAggregatePayloadAdapterScratch> payload_scratch;
-	optional_ptr<ExecutionGroupedAggregateStateAddressBinding> grouped_state;
-	bool needs_grouped_state_address_plan = false;
-};
-
 static bool SljitGroupedPrimitiveAggregateSinkKind(ExecutionRegionSinkKind kind) {
 	return kind == ExecutionRegionSinkKind::HASH_AGGREGATE_UPDATE ||
 	       kind == ExecutionRegionSinkKind::PERFECT_HASH_AGGREGATE_UPDATE;
+}
+
+static SljitBoundGroupedAggregateStrategy SljitBindGroupedAggregateStrategy(const SljitExecutableRegionOp &op) {
+	if (op.aggregate_update.fused_payload_update_owns_group_lookup) {
+		if (!op.aggregate_update.fused_payload_update.Function()) {
+			throw InternalException("SLJIT perfect-hash grouped aggregate strategy has no fused payload function");
+		}
+		return SljitBoundGroupedAggregateStrategy::PERFECT_HASH_FUSED;
+	}
+	if (!op.aggregate_update.plan.use_grouped_state_addresses) {
+		throw InternalException("SLJIT grouped aggregate strategy has no grouped-state ownership");
+	}
+	return op.aggregate_update.fused_payload_update.Function()
+	           ? SljitBoundGroupedAggregateStrategy::GROUPED_STATE_FUSED
+	           : SljitBoundGroupedAggregateStrategy::GROUPED_STATE_PER_PAYLOAD;
 }
 
 static void SljitBindGroupedPrimitiveAggregateUpdate(ExecutionOperatorRuntime &native_runtime,
@@ -60,13 +64,16 @@ static void SljitBindGroupedPrimitiveAggregateUpdate(ExecutionOperatorRuntime &n
 	if (aggregates.size() != op.aggregate_update.payloads.size()) {
 		throw InternalException("SLJIT grouped aggregate primitive payload count mismatch");
 	}
-	if (!op.aggregate_update.fused_payload_update_function &&
-	    aggregates.size() != op.aggregate_update.payload_update_functions.size()) {
+	if (!op.aggregate_update.fused_payload_update.Function() &&
+	    aggregates.size() != op.aggregate_update.payload_updates.size()) {
 		throw InternalException("SLJIT grouped aggregate primitive payload function count mismatch");
 	}
-	auto &payload_lanes = scratch.AggregatePayloadLanes(op_idx, aggregates, primitive);
+	auto &payload_lanes = scratch.AggregatePayloadLanes(op_idx, op.aggregate_update.payload_descriptors, primitive);
+	bound.reduction_lanes = &scratch.GroupedReductionLanes(op_idx, sink_info.aggregate_contract,
+	                                                       op.aggregate_update.payload_descriptors, payload_lanes);
 	auto &payload_scratch = scratch.AggregatePayloadScratch(op_idx);
-	auto needs_grouped_state_address_plan = NeedsGroupedAggregateStateAddressPlan(op.aggregate_update);
+	auto strategy = SljitBindGroupedAggregateStrategy(op);
+	const bool needs_grouped_state_address_plan = strategy != SljitBoundGroupedAggregateStrategy::PERFECT_HASH_FUSED;
 	optional_ptr<ExecutionGroupedAggregateStateAddressBinding> grouped_state;
 	if (needs_grouped_state_address_plan || op.aggregate_update.fused_payload_update_owns_group_lookup) {
 		auto &state_binding = binding.aggregate_update.grouped_state;
@@ -80,11 +87,11 @@ static void SljitBindGroupedPrimitiveAggregateUpdate(ExecutionOperatorRuntime &n
 	bound.ready = true;
 	bound.op_idx = op_idx;
 	bound.op = &op;
-	bound.aggregates = &aggregates;
+	bound.payload_descriptors = &op.aggregate_update.payload_descriptors;
 	bound.payload_lanes = &payload_lanes;
 	bound.payload_scratch = &payload_scratch;
 	bound.grouped_state = grouped_state;
-	bound.needs_grouped_state_address_plan = needs_grouped_state_address_plan;
+	bound.strategy = strategy;
 }
 
 static void SljitBindRecordedGroupedPrimitiveAggregateUpdate(ExecutionRegionRuntime &runtime,
@@ -105,21 +112,24 @@ static SinkResultType SljitExecuteBoundGroupedPrimitiveAggregateUpdate(
     ExecutionRegionRuntime &runtime, SljitRegionExecutionScratch &scratch,
     SljitBoundGroupedPrimitiveAggregateUpdate &bound, DataChunk &input, const SelectionVector *execute_sel, idx_t count,
     bool defer_grouped_finish = false, optional_ptr<bool> deferred_grouped_finish = nullptr) {
-	if (!bound.ready || !bound.op || !bound.aggregates || !bound.payload_lanes || !bound.payload_scratch) {
+	if (!bound.ready || bound.strategy == SljitBoundGroupedAggregateStrategy::UNBOUND || !bound.op ||
+	    !bound.payload_descriptors || !bound.payload_lanes || !bound.reduction_lanes || !bound.payload_scratch) {
 		throw InternalException("SLJIT grouped primitive aggregate update executed before binding");
 	}
 	auto &op = *bound.op;
-	auto &aggregates = *bound.aggregates;
+	auto &payload_descriptors = *bound.payload_descriptors;
 	auto &payload_lanes = *bound.payload_lanes;
+	auto &reduction_lanes = *bound.reduction_lanes;
 	auto &payload_scratch = *bound.payload_scratch;
 	optional_ptr<Vector> grouped_state_addresses;
-	if (bound.needs_grouped_state_address_plan) {
+	const bool owns_grouped_state_addresses = bound.strategy != SljitBoundGroupedAggregateStrategy::PERFECT_HASH_FUSED;
+	if (owns_grouped_state_addresses) {
 		if (!bound.grouped_state) {
 			throw InternalException("SLJIT grouped primitive aggregate update is missing grouped state binding");
 		}
 		auto &grouped_state = *bound.grouped_state;
 		if (TryExecuteDirectGroupedAggregateUpdate(runtime, scratch, bound.op_idx, op, input, payload_lanes,
-		                                           execute_sel, count, grouped_state, payload_scratch,
+		                                           reduction_lanes, execute_sel, count, grouped_state, payload_scratch,
 		                                           defer_grouped_finish, deferred_grouped_finish)) {
 			return SinkResultType::NEED_MORE_INPUT;
 		}
@@ -138,59 +148,63 @@ static SinkResultType SljitExecuteBoundGroupedPrimitiveAggregateUpdate(
 		}
 		RecordSljitRegionRuntimePath(runtime, op.kind, "resolve_grouped_state_addresses");
 	}
-	if (op.aggregate_update.fused_payload_update_function) {
+
+	switch (bound.strategy) {
+	case SljitBoundGroupedAggregateStrategy::PERFECT_HASH_FUSED: {
 		auto payload_stage_start = SljitRegionStageStart(runtime);
-		if (op.aggregate_update.fused_payload_update_owns_group_lookup) {
-			if (!bound.grouped_state) {
-				throw InternalException("SLJIT perfect-hash grouped primitive update is missing grouped state binding");
-			}
-			SljitExecuteFusedPerfectHashGroupedPrimitiveAggregatePayloadUpdate(
-			    op.aggregate_update.payloads, op.aggregate_update.fused_payload_update_function, aggregates,
-			    op.aggregate_update.plan.sink_info.groups, op.aggregate_update.plan.group_expressions,
-			    op.aggregate_update.plan.sink_info.aggregate_contract, payload_lanes,
-			    bound.grouped_state->perfect_hash_layout, input, execute_sel, count, payload_scratch);
-			RecordSljitRegionMaterializationElisionPath(runtime, op.kind,
-			                                            "fused_payload_update_owns_perfect_hash_group_lookup");
-		} else if (op.aggregate_update.plan.use_grouped_state_addresses) {
-			if (!grouped_state_addresses) {
-				throw InternalException("SLJIT fused grouped aggregate update is missing state addresses");
-			}
-			grouped_state_addresses->Flatten();
-			const auto grouped_state_address_data = FlatVector::GetData<uintptr_t>(*grouped_state_addresses);
-			SljitExecuteFusedGroupedPrimitiveAggregatePayloadUpdate(
-			    op.aggregate_update.payloads, op.aggregate_update.fused_payload_update_function, aggregates,
-			    op.aggregate_update.plan.sink_info.aggregate_contract, payload_lanes, input, grouped_state_address_data,
-			    nullptr, execute_sel, false, count, payload_scratch);
-			RecordSljitRegionMaterializationElisionPath(runtime, op.kind,
-			                                            "fused_payload_update_with_grouped_state_addresses");
-		} else {
-			SljitExecuteFusedPrimitiveAggregatePayloadUpdate(
-			    op.aggregate_update.payloads, op.aggregate_update.fused_payload_update_function, aggregates,
-			    payload_lanes, input, execute_sel, count, payload_scratch);
-			RecordSljitRegionMaterializationElisionPath(runtime, op.kind, "fused_payload_update");
+		if (!bound.grouped_state) {
+			throw InternalException("SLJIT perfect-hash grouped primitive update is missing grouped state binding");
 		}
+		SljitExecuteFusedPerfectHashGroupedPrimitiveAggregatePayloadUpdate(
+		    op.aggregate_update.payloads, op.aggregate_update.fused_payload_update.Function(),
+		    op.aggregate_update.plan.sink_info.groups, op.aggregate_update.plan.group_expressions,
+		    op.aggregate_update.plan.sink_info.aggregate_contract, op.aggregate_update.payload_descriptors,
+		    payload_lanes, reduction_lanes, bound.grouped_state->perfect_hash_layout, input, execute_sel, count,
+		    payload_scratch);
+		RecordSljitRegionMaterializationElisionPath(runtime, op.kind,
+		                                            "fused_payload_update_owns_perfect_hash_group_lookup");
 		RecordSljitRegionStageRuntime(runtime, bound.op_idx, op.kind, "primitive_payload_update_fused",
 		                              payload_stage_start);
-	} else {
-		for (idx_t payload_idx = 0; payload_idx < aggregates.size(); payload_idx++) {
-			auto &aggregate = aggregates[payload_idx];
-			auto lane = payload_lanes[payload_idx];
-			if (!lane) {
-				throw InternalException("SLJIT aggregate primitive lane missing for aggregate %llu",
-				                        static_cast<unsigned long long>(aggregate.aggregate_index));
-			}
+		break;
+	}
+	case SljitBoundGroupedAggregateStrategy::GROUPED_STATE_FUSED: {
+		if (!grouped_state_addresses) {
+			throw InternalException("SLJIT fused grouped aggregate update is missing state addresses");
+		}
+		auto payload_stage_start = SljitRegionStageStart(runtime);
+		grouped_state_addresses->Flatten();
+		const auto grouped_state_address_data = FlatVector::GetData<uintptr_t>(*grouped_state_addresses);
+		SljitExecuteFusedGroupedPrimitiveAggregatePayloadUpdate(
+		    op.aggregate_update.payloads, op.aggregate_update.fused_payload_update.Function(),
+		    op.aggregate_update.plan.sink_info.aggregate_contract, op.aggregate_update.payload_descriptors,
+		    payload_lanes, reduction_lanes, input, grouped_state_address_data, nullptr, execute_sel, false, count,
+		    payload_scratch);
+		RecordSljitRegionMaterializationElisionPath(runtime, op.kind,
+		                                            "fused_payload_update_with_grouped_state_addresses");
+		RecordSljitRegionStageRuntime(runtime, bound.op_idx, op.kind, "primitive_payload_update_fused",
+		                              payload_stage_start);
+		break;
+	}
+	case SljitBoundGroupedAggregateStrategy::GROUPED_STATE_PER_PAYLOAD:
+		for (idx_t payload_idx = 0; payload_idx < payload_descriptors.size(); payload_idx++) {
+			auto &lane =
+			    SljitRequireAggregatePayloadLane(payload_lanes, payload_descriptors, payload_idx,
+			                                     "SLJIT grouped aggregate primitive lane invalid for aggregate %llu");
 			auto payload_stage_start = SljitRegionStageStart(runtime);
 			SljitExecutePrimitiveAggregatePayloadUpdate(
-			    op.aggregate_update.payloads[payload_idx], op.aggregate_update.payload_update_functions[payload_idx],
-			    *lane, input, execute_sel, count, scratch.ExpressionAdapterScratch(bound.op_idx, payload_idx),
-			    grouped_state_addresses);
+			    op.aggregate_update.payloads[payload_idx], op.aggregate_update.payload_updates[payload_idx].Function(),
+			    lane, payload_descriptors[payload_idx], input, execute_sel, count,
+			    scratch.ExpressionAdapterScratch(bound.op_idx, payload_idx), grouped_state_addresses);
 			RecordSljitRegionStageRuntime(runtime, bound.op_idx, op.kind, "primitive_payload_update",
 			                              payload_stage_start);
 		}
 		RecordSljitRegionMaterializationElisionPath(runtime, op.kind, "primitive_payload_update",
-		                                            aggregates.size());
+		                                            payload_descriptors.size());
+		break;
+	default:
+		throw InternalException("SLJIT grouped primitive aggregate update has an invalid bound strategy");
 	}
-	if (bound.needs_grouped_state_address_plan) {
+	if (owns_grouped_state_addresses) {
 		if (defer_grouped_finish) {
 			MarkDeferredGroupedFinish(defer_grouped_finish, deferred_grouped_finish);
 		} else {

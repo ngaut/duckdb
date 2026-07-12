@@ -13,8 +13,7 @@
 namespace duckdb {
 
 static bool SljitEnsureJoinProjectionAggregateInputSlot(SljitJoinProjectionAggregateDescriptor &descriptor,
-                                                        const SljitExecutableRegionOp &projection_op,
-                                                        idx_t input_idx) {
+                                                        const SljitExecutableRegionOp &projection_op, idx_t input_idx) {
 	if (input_idx >= projection_op.output_types.size()) {
 		return false;
 	}
@@ -39,8 +38,7 @@ static bool SljitProjectionInputSourceMatches(const SljitJoinProjectionAggregate
 }
 
 static bool SljitTryAssignJoinProjectionAggregateInputAt(SljitJoinProjectionAggregateDescriptor &descriptor,
-                                                         const SljitExecutableRegionOp &projection_op,
-                                                         idx_t input_idx,
+                                                         const SljitExecutableRegionOp &projection_op, idx_t input_idx,
                                                          SljitJoinProjectionAggregateInputSource incoming_source,
                                                          idx_t output_projection_idx) {
 	if (!SljitEnsureJoinProjectionAggregateInputSlot(descriptor, projection_op, input_idx)) {
@@ -73,7 +71,8 @@ static bool SljitTryResolveJoinLHSProjectionInputSource(const ExecutionHashJoinP
 		return false;
 	}
 	auto &output_type = projection_op.output_types[projection_idx];
-	if (remapped_expr.plan.return_type != output_type || binding.output_types[join_output_source_index] != output_type) {
+	if (remapped_expr.plan.return_type != output_type ||
+	    binding.output_types[join_output_source_index] != output_type) {
 		return false;
 	}
 	source = SljitJoinProjectionAggregateInputSource();
@@ -109,9 +108,9 @@ static bool SljitTrySetJoinProjectionAggregateInputAt(const ExecutionHashJoinPro
 	                                                    output_projection_idx);
 }
 
-static bool SljitTryCollectPerfectHashGroupExpressionSources(
-    const SljitExecutableAggregateUpdate &aggregate_update, const vector<ExecutionRegionGroupInput> &groups,
-    vector<uint8_t> &required_semantic_inputs) {
+static bool SljitTryCollectPerfectHashGroupExpressionSources(const SljitExecutableAggregateUpdate &aggregate_update,
+                                                             const vector<ExecutionRegionGroupInput> &groups,
+                                                             vector<uint8_t> &required_semantic_inputs) {
 	auto mark_source = [&](idx_t source_idx) {
 		return SljitAddProjectionSourceColumn(source_idx, required_semantic_inputs.size(), required_semantic_inputs);
 	};
@@ -158,13 +157,14 @@ static bool SljitTryBuildProjectionPerfectHashAggregateDescriptor(
 	auto &projection_op = descriptor.Projection();
 	if (sink_info.kind != ExecutionRegionSinkKind::PERFECT_HASH_AGGREGATE_UPDATE || sink_info.groups.empty() ||
 	    !aggregate_update.plan.use_primitive_payloads || !aggregate_update.plan.use_perfect_hash_group_lookup ||
-	    !aggregate_update.fused_payload_update_owns_group_lookup || !aggregate_update.fused_payload_update_function ||
+	    !aggregate_update.fused_payload_update_owns_group_lookup || !aggregate_update.fused_payload_update.Function() ||
 	    aggregate_update.payloads.size() != sink_info.aggregates.size() ||
 	    projection_op.projections.size() != projection_op.output_types.size()) {
 		return descriptor.Block("aggregate_shape");
 	}
 	vector<uint8_t> required_semantic_inputs(projection_op.projections.size(), 0);
-	if (!SljitTryCollectPerfectHashGroupExpressionSources(aggregate_update, sink_info.groups, required_semantic_inputs)) {
+	if (!SljitTryCollectPerfectHashGroupExpressionSources(aggregate_update, sink_info.groups,
+	                                                      required_semantic_inputs)) {
 		return descriptor.Block("group_sources");
 	}
 	vector<idx_t> payload_source_indices;
@@ -215,8 +215,9 @@ static bool SljitTryBuildProjectionPerfectHashAggregateDescriptor(
 		reference_group.kind = SljitNativeRegionExpressionKind::REFERENCE;
 		reference_group.return_type = group.type;
 		reference_group.source_index = group.input_index;
-		auto &group_expression =
-		    aggregate_update.plan.group_expressions.empty() ? reference_group : aggregate_update.plan.group_expressions[group_idx];
+		auto &group_expression = aggregate_update.plan.group_expressions.empty()
+		                             ? reference_group
+		                             : aggregate_update.plan.group_expressions[group_idx];
 		idx_t source_semantic_idx;
 		if (!SljitTryFindSingleProjectionPlanSource(group_expression, source_semantic_idx)) {
 			return descriptor.Block("input_group_source");

@@ -101,8 +101,8 @@ BuildSljitNativePerfectHashGroupedFusedTypedExpressionAggregateUpdateInternal(
 	    state_pointer_reg,
 	};
 	EmitSljitPerfectHashFusedUpdateLoops(emit_context, update_plan);
-	EmitSljitLocalPerfectHashCommit(compiler, local_aggregate_plan, aggregates, contract, false);
-	EmitSljitDeferredPerfectHashFlagsCommit(compiler, deferred_flag_plan, aggregates, contract);
+	EmitSljitLocalPerfectHashCommit(compiler, local_aggregate_plan, codegen_plan.payload_descriptors, contract, false);
+	EmitSljitDeferredPerfectHashFlagsCommit(compiler, deferred_flag_plan, codegen_plan.payload_descriptors, contract);
 	sljit_emit_return_void(compiler);
 
 	for (auto &overflow : overflows) {

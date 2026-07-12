@@ -34,20 +34,21 @@ static SinkResultType SljitExecuteNativeUngroupedAggregateUpdateWithPayloads(
 	if (aggregates.size() != payloads.size()) {
 		throw InternalException("SLJIT ungrouped aggregate direct update payload count mismatch");
 	}
-	if (!op.aggregate_update.fused_payload_update_function &&
-	    aggregates.size() != op.aggregate_update.payload_update_functions.size()) {
+	if (!op.aggregate_update.fused_payload_update.Function() &&
+	    aggregates.size() != op.aggregate_update.payload_updates.size()) {
 		throw InternalException("SLJIT ungrouped aggregate direct update payload function count mismatch");
 	}
-	auto &payload_lanes = scratch.AggregatePayloadLanes(op_idx, aggregates, binding.aggregate_update.primitive);
+	auto &payload_lanes = scratch.AggregatePayloadLanes(op_idx, op.aggregate_update.payload_descriptors,
+	                                                    binding.aggregate_update.primitive);
 	if (payload_lanes.size() != aggregates.size()) {
 		throw InternalException("SLJIT ungrouped aggregate direct update primitive lane count mismatch");
 	}
 	auto &payload_scratch = scratch.AggregatePayloadScratch(op_idx);
-	if (op.aggregate_update.fused_payload_update_function) {
+	if (op.aggregate_update.fused_payload_update.Function()) {
 		auto payload_stage_start = SljitRegionStageStart(runtime);
-		SljitExecuteFusedPrimitiveAggregatePayloadUpdate(payloads, op.aggregate_update.fused_payload_update_function,
-		                                                 aggregates, payload_lanes, payload_input, nullptr,
-		                                                 payload_input.size(), payload_scratch);
+		SljitExecuteFusedPrimitiveAggregatePayloadUpdate(payloads, op.aggregate_update.fused_payload_update.Function(),
+		                                                 op.aggregate_update.payload_descriptors, payload_lanes,
+		                                                 payload_input, nullptr, payload_input.size(), payload_scratch);
 		RecordSljitRegionStageRuntime(runtime, op_idx, op.kind, stage_name, payload_stage_start);
 	} else {
 		for (idx_t payload_idx = 0; payload_idx < aggregates.size(); payload_idx++) {
@@ -57,8 +58,9 @@ static SinkResultType SljitExecuteNativeUngroupedAggregateUpdateWithPayloads(
 			}
 			auto payload_stage_start = SljitRegionStageStart(runtime);
 			SljitExecutePrimitiveAggregatePayloadUpdate(
-			    payloads[payload_idx], op.aggregate_update.payload_update_functions[payload_idx], *lane, payload_input,
-			    nullptr, payload_input.size(), scratch.ExpressionAdapterScratch(op_idx, payload_idx));
+			    payloads[payload_idx], op.aggregate_update.payload_updates[payload_idx].Function(), *lane,
+			    op.aggregate_update.payload_descriptors[payload_idx], payload_input, nullptr, payload_input.size(),
+			    scratch.ExpressionAdapterScratch(op_idx, payload_idx));
 			RecordSljitRegionStageRuntime(runtime, op_idx, op.kind, stage_name, payload_stage_start);
 		}
 	}

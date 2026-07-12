@@ -53,7 +53,7 @@ static void SljitExecuteProjectionExpression(SljitExecutableRegionExpression &ex
 		    SljitPrepareNativePredicateInput(adapter_scratch, input, expr.input_source_indices, execute_sel, count,
 		                                     reinterpret_cast<data_ptr_t>(FlatVector::GetDataMutable<bool>(result)),
 		                                     result_validity.GetData(), nullptr, nullptr);
-		SljitExecuteNativeFunction(expr.predicate_function, native_input);
+		SljitExecuteNativeFunction(expr.predicate.Function(), native_input);
 		FlatVector::SetSize(result, count_t(count));
 		return;
 	}
@@ -70,7 +70,7 @@ static void SljitExecuteProjectionExpression(SljitExecutableRegionExpression &ex
 			auto native_input =
 			    SljitPrepareNativePredicateInput(adapter_scratch, input, expr.input_source_indices, execute_sel, count,
 			                                     nullptr, result_validity.GetData(), nullptr, nullptr);
-			SljitExecuteNativeFunction(expr.predicate_function, native_input);
+			SljitExecuteNativeFunction(expr.predicate.Function(), native_input);
 		}
 		FlatVector::SetSize(result, count_t(count));
 		return;
@@ -100,7 +100,7 @@ static void SljitExecuteProjectionExpression(SljitExecutableRegionExpression &ex
 		native_input.overflow_message = expr.overflow_message.c_str();
 		native_input.query_location = plan.query_location;
 		native_input.count = count;
-		SljitExecuteNativeFunction(expr.function, native_input);
+		SljitExecuteNativeFunction(expr.vector.Function(), native_input);
 		FlatVector::SetSize(result, count_t(count));
 		return;
 	}
@@ -191,6 +191,7 @@ static void SljitExecuteProjectionExpression(SljitExecutableRegionExpression &ex
 	         plan.kind == SljitNativeRegionExpressionKind::SIGNED_TO_UNSIGNED_INTEGER_CAST ||
 	         plan.kind == SljitNativeRegionExpressionKind::DECIMAL64_TO_DOUBLE ||
 	         plan.kind == SljitNativeRegionExpressionKind::DECIMAL128_SCALE_UP ||
+	         plan.kind == SljitNativeRegionExpressionKind::DECIMAL128_WIDENING_MULTIPLY ||
 	         plan.kind == SljitNativeRegionExpressionKind::INTEGER_COALESCE ||
 	         plan.kind == SljitNativeRegionExpressionKind::INTEGER_IN_LIST ||
 	         plan.kind == SljitNativeRegionExpressionKind::INTEGER_BETWEEN ||
@@ -208,6 +209,7 @@ static void SljitExecuteProjectionExpression(SljitExecutableRegionExpression &ex
 	auto has_right_source = plan.kind == SljitNativeRegionExpressionKind::INTEGER_BINARY_REFERENCES ||
 	                        plan.kind == SljitNativeRegionExpressionKind::DOUBLE_BINARY_REFERENCES ||
 	                        plan.kind == SljitNativeRegionExpressionKind::INTEGER_COMPARE_REFERENCES ||
+	                        plan.kind == SljitNativeRegionExpressionKind::DECIMAL128_WIDENING_MULTIPLY ||
 	                        plan.kind == SljitNativeRegionExpressionKind::ERROR_GUARDED_REFERENCE ||
 	                        (plan.kind == SljitNativeRegionExpressionKind::INTEGER_COALESCE &&
 	                         plan.coalesce_rhs_kind == SljitNativeCoalesceRhsKind::REFERENCE);
@@ -244,7 +246,8 @@ static void SljitExecuteProjectionExpression(SljitExecutableRegionExpression &ex
 		native_input.source_data = NativeUnsignedIntegerSourceData(source_format, plan.unsigned_source_width);
 	} else if (plan.kind == SljitNativeRegionExpressionKind::INTEGRAL_COMPRESS ||
 	           plan.kind == SljitNativeRegionExpressionKind::SIGNED_TO_UNSIGNED_INTEGER_CAST ||
-	           plan.kind == SljitNativeRegionExpressionKind::INTEGER_CAST) {
+	           plan.kind == SljitNativeRegionExpressionKind::INTEGER_CAST ||
+	           plan.kind == SljitNativeRegionExpressionKind::DECIMAL128_WIDENING_MULTIPLY) {
 		native_input.source_data = NativeSignedIntegerSourceData(source_format, plan.cast_source_width);
 	} else if (plan.kind == SljitNativeRegionExpressionKind::DATE_YEAR) {
 		native_input.source_data = NativeIntegerSourceData(source_format, SljitNativeIntegerKind::INT32);
@@ -266,6 +269,9 @@ static void SljitExecuteProjectionExpression(SljitExecutableRegionExpression &ex
 	} else if (plan.kind == SljitNativeRegionExpressionKind::INTEGER_BINARY_REFERENCES ||
 	           plan.kind == SljitNativeRegionExpressionKind::INTEGER_COMPARE_REFERENCES) {
 		native_input.right_source_data = NativeIntegerSourceData(right_source_format, plan.integer_kind);
+	} else if (plan.kind == SljitNativeRegionExpressionKind::DECIMAL128_WIDENING_MULTIPLY) {
+		native_input.right_source_data =
+		    NativeSignedIntegerSourceData(right_source_format, plan.right_cast_source_width);
 	} else if (plan.kind == SljitNativeRegionExpressionKind::ERROR_GUARDED_REFERENCE) {
 		native_input.right_source_data = NativeIntegerSourceData(right_source_format, SljitNativeIntegerKind::INT64);
 	} else {
@@ -310,6 +316,8 @@ static void SljitExecuteProjectionExpression(SljitExecutableRegionExpression &ex
 	} else if (plan.kind == SljitNativeRegionExpressionKind::INTEGER_BINARY_CONSTANT ||
 	           plan.kind == SljitNativeRegionExpressionKind::INTEGER_BINARY_REFERENCES) {
 		native_input.result_data = NativeIntegerResultData(result, plan.integer_kind);
+	} else if (plan.kind == SljitNativeRegionExpressionKind::DECIMAL128_WIDENING_MULTIPLY) {
+		native_input.result_data = reinterpret_cast<data_ptr_t>(FlatVector::GetDataMutable<hugeint_t>(result));
 	} else {
 		native_input.result_data = reinterpret_cast<data_ptr_t>(FlatVector::GetDataMutable<bool>(result));
 	}
@@ -334,12 +342,12 @@ static void SljitExecuteProjectionExpression(SljitExecutableRegionExpression &ex
 	native_input.active_result_index = 0;
 	native_input.count = count;
 	native_input.has_error = false;
-	auto use_flat_function = expr.flat_function && !execute_sel &&
+	auto use_flat_function = expr.flat.Function() && !execute_sel &&
 	                         SljitUnifiedFormatHasIdentitySelection(source_format) &&
 	                         source_format.validity.CannotHaveNull() &&
 	                         (!has_right_source || (SljitUnifiedFormatHasIdentitySelection(right_source_format) &&
 	                                                right_source_format.validity.CannotHaveNull()));
-	auto vector_function = use_flat_function ? expr.flat_function : expr.function;
+	auto vector_function = use_flat_function ? expr.flat.Function() : expr.vector.Function();
 	SljitExecuteNativeFunction(vector_function, native_input);
 	FlatVector::SetSize(result, count_t(count));
 }

@@ -78,6 +78,7 @@ SljitNativeRegionExpressionPlan SljitNativeRegionExpressionPlan::Copy(bool copy_
 	result.double_right_source_scale = double_right_source_scale;
 	result.compare_op = compare_op;
 	result.cast_source_width = cast_source_width;
+	result.right_cast_source_width = right_cast_source_width;
 	result.cast_target_width = cast_target_width;
 	result.unsigned_source_width = unsigned_source_width;
 	result.unsigned_cast_target_width = unsigned_cast_target_width;

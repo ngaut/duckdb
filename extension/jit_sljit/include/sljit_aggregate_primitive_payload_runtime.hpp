@@ -8,6 +8,7 @@
 
 #pragma once
 
+#include "sljit_aggregate_payload_value_abi.hpp"
 #include "sljit_aggregate_payload_lane_runtime.hpp"
 #include "sljit_region_runtime_state.hpp"
 
@@ -16,19 +17,19 @@ namespace duckdb {
 static void SljitExecutePrimitiveAggregatePayloadUpdate(SljitExecutableRegionExpression &payload,
                                                         SljitNativeAggregateUpdateFunction function,
                                                         const ExecutionPrimitiveAggregateUpdateLane &lane,
+                                                        const SljitAggregatePayloadDescriptor &descriptor,
                                                         DataChunk &input, const SelectionVector *execute_sel,
                                                         idx_t count, SljitExpressionAdapterScratch &adapter_scratch,
                                                         optional_ptr<Vector> grouped_state_addresses = nullptr) {
 	if (!function) {
 		throw InternalException("SLJIT aggregate primitive payload update is missing generated code");
 	}
+	if (!SljitAggregatePayloadDescriptorMatchesLane(descriptor, lane)) {
+		throw InternalException("SLJIT aggregate primitive payload descriptor does not match runtime lane");
+	}
 	if (lane.kind == AggregatePrimitiveUpdateKind::COUNT_STAR) {
-		if (grouped_state_addresses) {
-			SljitValidateGroupedPrimitiveLaneState(lane, "SLJIT grouped aggregate count-star lane is incomplete: %s",
-			                                       "aggregate-count-star-grouped-lane-incomplete");
-		} else {
-			SljitValidateUngroupedCountStarPrimitiveLane(
-			    lane, "SLJIT aggregate count-star lane is incomplete: %s");
+		if (!grouped_state_addresses) {
+			SljitValidateUngroupedCountStarPrimitiveLane(lane, "SLJIT aggregate count-star lane is incomplete: %s");
 		}
 
 		SljitNativeVectorInput native_input;
@@ -46,10 +47,7 @@ static void SljitExecutePrimitiveAggregatePayloadUpdate(SljitExecutableRegionExp
 		SljitExecuteNativeFunction(function, native_input);
 		return;
 	}
-	if (grouped_state_addresses) {
-		SljitValidateGroupedPrimitiveLaneState(lane, "SLJIT grouped aggregate primitive lane is incomplete: %s",
-		                                       "aggregate-primitive-grouped-lane-incomplete");
-	} else {
+	if (!grouped_state_addresses) {
 		SljitValidateUngroupedPrimitiveLaneState(lane, "SLJIT aggregate primitive lane is incomplete: %s",
 		                                         "aggregate-primitive-lane-incomplete");
 	}
@@ -87,15 +85,15 @@ static void SljitExecutePrimitiveAggregatePayloadUpdate(SljitExecutableRegionExp
 		if (lane.kind == AggregatePrimitiveUpdateKind::COUNT) {
 			native_input.source_data = nullptr;
 		} else {
-			native_input.source_data = plan.return_type.InternalType() == PhysicalType::DOUBLE
+			native_input.source_data = SljitAggregatePayloadUsesRawVectorData(descriptor.value_abi)
 			                               ? source_format.data
 			                               : NativeIntegerSourceData(source_format, plan.integer_kind);
 		}
 		native_input.source_sel = SljitNormalizedSourceSelectionData(source_format);
-		native_input.source_validity = SljitInputSourceKnownNotNull(payload.input_source_not_null, 0)
-		                                   ? nullptr
-		                                   : SljitNormalizedSourceValidityData(source_format, native_input.source_sel,
-		                                                                       execute_sel, count);
+		native_input.source_validity =
+		    SljitInputSourceKnownNotNull(payload.input_source_not_null, 0)
+		        ? nullptr
+		        : SljitNormalizedSourceValidityData(source_format, native_input.source_sel, execute_sel, count);
 		break;
 	case SljitNativeRegionExpressionKind::INTEGER_BINARY_CONSTANT:
 		if (plan.source_index >= input.ColumnCount()) {
@@ -104,10 +102,10 @@ static void SljitExecutePrimitiveAggregatePayloadUpdate(SljitExecutableRegionExp
 		input.data[plan.source_index].ToUnifiedFormat(source_format);
 		native_input.source_data = NativeIntegerSourceData(source_format, plan.integer_kind);
 		native_input.source_sel = SljitNormalizedSourceSelectionData(source_format);
-		native_input.source_validity = SljitInputSourceKnownNotNull(payload.input_source_not_null, 0)
-		                                   ? nullptr
-		                                   : SljitNormalizedSourceValidityData(source_format, native_input.source_sel,
-		                                                                       execute_sel, count);
+		native_input.source_validity =
+		    SljitInputSourceKnownNotNull(payload.input_source_not_null, 0)
+		        ? nullptr
+		        : SljitNormalizedSourceValidityData(source_format, native_input.source_sel, execute_sel, count);
 		native_input.constant = plan.constant;
 		break;
 	case SljitNativeRegionExpressionKind::INTEGER_BINARY_REFERENCES:
@@ -118,10 +116,10 @@ static void SljitExecutePrimitiveAggregatePayloadUpdate(SljitExecutableRegionExp
 		input.data[plan.right_source_index].ToUnifiedFormat(right_source_format);
 		native_input.source_data = NativeIntegerSourceData(source_format, plan.integer_kind);
 		native_input.source_sel = SljitNormalizedSourceSelectionData(source_format);
-		native_input.source_validity = SljitInputSourceKnownNotNull(payload.input_source_not_null, 0)
-		                                   ? nullptr
-		                                   : SljitNormalizedSourceValidityData(source_format, native_input.source_sel,
-		                                                                       execute_sel, count);
+		native_input.source_validity =
+		    SljitInputSourceKnownNotNull(payload.input_source_not_null, 0)
+		        ? nullptr
+		        : SljitNormalizedSourceValidityData(source_format, native_input.source_sel, execute_sel, count);
 		native_input.right_source_data = NativeIntegerSourceData(right_source_format, plan.integer_kind);
 		native_input.right_source_sel = SljitNormalizedSourceSelectionData(right_source_format);
 		native_input.right_source_validity =
@@ -137,10 +135,10 @@ static void SljitExecutePrimitiveAggregatePayloadUpdate(SljitExecutableRegionExp
 		input.data[plan.source_index].ToUnifiedFormat(source_format);
 		native_input.source_data = source_format.data;
 		native_input.source_sel = SljitNormalizedSourceSelectionData(source_format);
-		native_input.source_validity = SljitInputSourceKnownNotNull(payload.input_source_not_null, 0)
-		                                   ? nullptr
-		                                   : SljitNormalizedSourceValidityData(source_format, native_input.source_sel,
-		                                                                       execute_sel, count);
+		native_input.source_validity =
+		    SljitInputSourceKnownNotNull(payload.input_source_not_null, 0)
+		        ? nullptr
+		        : SljitNormalizedSourceValidityData(source_format, native_input.source_sel, execute_sel, count);
 		native_input.double_constant = plan.double_constant;
 		native_input.source_double_scale = plan.double_source_scale;
 		break;
@@ -152,10 +150,10 @@ static void SljitExecutePrimitiveAggregatePayloadUpdate(SljitExecutableRegionExp
 		input.data[plan.right_source_index].ToUnifiedFormat(right_source_format);
 		native_input.source_data = source_format.data;
 		native_input.source_sel = SljitNormalizedSourceSelectionData(source_format);
-		native_input.source_validity = SljitInputSourceKnownNotNull(payload.input_source_not_null, 0)
-		                                   ? nullptr
-		                                   : SljitNormalizedSourceValidityData(source_format, native_input.source_sel,
-		                                                                       execute_sel, count);
+		native_input.source_validity =
+		    SljitInputSourceKnownNotNull(payload.input_source_not_null, 0)
+		        ? nullptr
+		        : SljitNormalizedSourceValidityData(source_format, native_input.source_sel, execute_sel, count);
 		native_input.right_source_data = right_source_format.data;
 		native_input.right_source_sel = SljitNormalizedSourceSelectionData(right_source_format);
 		native_input.right_source_validity =

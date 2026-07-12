@@ -417,12 +417,13 @@ static bool TryPreaggregateInputVectorFusedPrimitiveGroupRunsWithSelection(
     SljitExecutableRegionOp &op, DataChunk &input, const SOURCE_TYPE *group_data, const SelectionVector *group_sel,
     const vector<idx_t> &payload_source_indices,
     const vector<const ExecutionPrimitiveAggregateUpdateLane *> &payload_lanes,
+    const vector<SljitGroupedReductionLaneBinding> &reduction_lanes,
     SljitPreaggregatedPrimitiveAggregateScratch &scratch, SljitAggregatePayloadAdapterScratch &payload_scratch,
     optional_ptr<DataChunk> run_group_keys, idx_t &group_count) {
 	const auto count = input.size();
 	group_count = 0;
 	if (count < 2 ||
-	    !SljitCanPreaggregateInputVectorFusedPrimitivePayloads(op, input, payload_source_indices, payload_lanes)) {
+	    !SljitCanPreaggregateInputVectorFusedPrimitivePayloads(op, input, payload_source_indices, reduction_lanes)) {
 		return false;
 	}
 	TARGET_TYPE *run_key_data = nullptr;
@@ -472,10 +473,10 @@ static bool TryPreaggregateInputVectorFusedPrimitiveGroupRunsWithSelection(
 		FinishFlatPreaggregatedGroupTarget(*run_group_keys, group_count);
 	}
 	SljitExecuteFusedGroupedPrimitiveAggregatePayloadUpdate(
-	    op.aggregate_update.payloads, op.aggregate_update.fused_payload_update_function,
-	    op.aggregate_update.plan.sink_info.aggregates, op.aggregate_update.plan.sink_info.aggregate_contract,
-	    payload_lanes, input, scratch.fused_row_state_addresses.data(), nullptr, nullptr, false, count, payload_scratch,
-	    optional_ptr<const vector<idx_t>>(&payload_source_indices));
+	    op.aggregate_update.payloads, op.aggregate_update.fused_payload_update.Function(),
+	    op.aggregate_update.plan.sink_info.aggregate_contract, op.aggregate_update.payload_descriptors, payload_lanes,
+	    reduction_lanes, input, scratch.fused_row_state_addresses.data(), nullptr, nullptr, false, count,
+	    payload_scratch, optional_ptr<const vector<idx_t>>(&payload_source_indices));
 	if (!SljitExtractFusedPreaggregatedPrimitiveDeltas(scratch, payload_lanes, group_count)) {
 		throw InternalException("SLJIT fused input-vector preaggregated primitive delta extraction failed");
 	}
@@ -487,18 +488,19 @@ static bool TryPreaggregateInputVectorFusedPrimitiveGroupRunsWithKeyData(
     SljitExecutableRegionOp &op, DataChunk &input, UnifiedVectorFormat &group_format,
     const vector<idx_t> &payload_source_indices,
     const vector<const ExecutionPrimitiveAggregateUpdateLane *> &payload_lanes,
+    const vector<SljitGroupedReductionLaneBinding> &reduction_lanes,
     SljitPreaggregatedPrimitiveAggregateScratch &scratch, SljitAggregatePayloadAdapterScratch &payload_scratch,
     optional_ptr<DataChunk> run_group_keys, idx_t &group_count) {
 	auto group_data = UnifiedVectorFormat::GetData<SOURCE_TYPE>(group_format);
 	auto group_sel = group_format.sel;
 	if (group_sel->IsSet()) {
 		return TryPreaggregateInputVectorFusedPrimitiveGroupRunsWithSelection<TARGET_TYPE, SOURCE_TYPE, CAST_KEY, true>(
-		    op, input, group_data, group_sel, payload_source_indices, payload_lanes, scratch, payload_scratch,
-		    run_group_keys, group_count);
+		    op, input, group_data, group_sel, payload_source_indices, payload_lanes, reduction_lanes, scratch,
+		    payload_scratch, run_group_keys, group_count);
 	}
 	return TryPreaggregateInputVectorFusedPrimitiveGroupRunsWithSelection<TARGET_TYPE, SOURCE_TYPE, CAST_KEY, false>(
-	    op, input, group_data, group_sel, payload_source_indices, payload_lanes, scratch, payload_scratch,
-	    run_group_keys, group_count);
+	    op, input, group_data, group_sel, payload_source_indices, payload_lanes, reduction_lanes, scratch,
+	    payload_scratch, run_group_keys, group_count);
 }
 
 struct SljitFusedRunPreaggregationKeyDispatch {
@@ -506,6 +508,7 @@ struct SljitFusedRunPreaggregationKeyDispatch {
 	DataChunk &input;
 	const vector<idx_t> &payload_source_indices;
 	const vector<const ExecutionPrimitiveAggregateUpdateLane *> &payload_lanes;
+	const vector<SljitGroupedReductionLaneBinding> &reduction_lanes;
 	SljitPreaggregatedPrimitiveAggregateScratch &scratch;
 	SljitAggregatePayloadAdapterScratch &payload_scratch;
 	optional_ptr<DataChunk> run_group_keys;
@@ -514,8 +517,8 @@ struct SljitFusedRunPreaggregationKeyDispatch {
 	template <class TARGET_TYPE, class SOURCE_TYPE, bool CAST_KEY>
 	bool Execute(UnifiedVectorFormat &group_format) {
 		return TryPreaggregateInputVectorFusedPrimitiveGroupRunsWithKeyData<TARGET_TYPE, SOURCE_TYPE, CAST_KEY>(
-		    op, input, group_format, payload_source_indices, payload_lanes, scratch, payload_scratch, run_group_keys,
-		    group_count);
+		    op, input, group_format, payload_source_indices, payload_lanes, reduction_lanes, scratch, payload_scratch,
+		    run_group_keys, group_count);
 	}
 };
 
@@ -524,6 +527,7 @@ static bool TryPreaggregateInputVectorFusedPrimitiveGroupRunsFastTemplated(
     SljitExecutableRegionOp &op, DataChunk &input, const vector<ExecutionRowPointerGroupKeySource> &group_sources,
     const vector<idx_t> &payload_source_indices,
     const vector<const ExecutionPrimitiveAggregateUpdateLane *> &payload_lanes,
+    const vector<SljitGroupedReductionLaneBinding> &reduction_lanes,
     SljitPreaggregatedPrimitiveAggregateScratch &scratch, SljitAggregatePayloadAdapterScratch &payload_scratch,
     optional_ptr<DataChunk> run_group_keys, idx_t &group_count) {
 	auto &sink_info = op.aggregate_update.plan.sink_info;
@@ -537,8 +541,9 @@ static bool TryPreaggregateInputVectorFusedPrimitiveGroupRunsFastTemplated(
 	    !SljitPreaggregatedInputVectorGroupKeyReplayable(group_source)) {
 		return false;
 	}
-	SljitFusedRunPreaggregationKeyDispatch dispatch {op,      input,           payload_source_indices, payload_lanes,
-	                                                 scratch, payload_scratch, run_group_keys,         group_count};
+	SljitFusedRunPreaggregationKeyDispatch dispatch {
+	    op,      input,           payload_source_indices, payload_lanes, reduction_lanes,
+	    scratch, payload_scratch, run_group_keys,         group_count};
 	return SljitDispatchPreaggregatedInputVectorGroupKeyCast<TARGET_TYPE>(group_source, dispatch);
 }
 
@@ -548,6 +553,7 @@ struct SljitFusedRunPreaggregationTargetDispatch {
 	const vector<ExecutionRowPointerGroupKeySource> &group_sources;
 	const vector<idx_t> &payload_source_indices;
 	const vector<const ExecutionPrimitiveAggregateUpdateLane *> &payload_lanes;
+	const vector<SljitGroupedReductionLaneBinding> &reduction_lanes;
 	SljitPreaggregatedPrimitiveAggregateScratch &scratch;
 	SljitAggregatePayloadAdapterScratch &payload_scratch;
 	optional_ptr<DataChunk> run_group_keys;
@@ -556,8 +562,8 @@ struct SljitFusedRunPreaggregationTargetDispatch {
 	template <class TARGET_TYPE>
 	bool Execute() {
 		return TryPreaggregateInputVectorFusedPrimitiveGroupRunsFastTemplated<TARGET_TYPE>(
-		    op, input, group_sources, payload_source_indices, payload_lanes, scratch, payload_scratch, run_group_keys,
-		    group_count);
+		    op, input, group_sources, payload_source_indices, payload_lanes, reduction_lanes, scratch, payload_scratch,
+		    run_group_keys, group_count);
 	}
 };
 
@@ -565,6 +571,7 @@ static bool TryPreaggregateInputVectorFusedPrimitiveGroupRunsFast(
     SljitExecutableRegionOp &op, DataChunk &input, const vector<ExecutionRowPointerGroupKeySource> &group_sources,
     const vector<idx_t> &payload_source_indices,
     const vector<const ExecutionPrimitiveAggregateUpdateLane *> &payload_lanes,
+    const vector<SljitGroupedReductionLaneBinding> &reduction_lanes,
     SljitPreaggregatedPrimitiveAggregateScratch &scratch, SljitAggregatePayloadAdapterScratch &payload_scratch,
     optional_ptr<DataChunk> run_group_keys, idx_t &group_count) {
 	if (group_sources.size() != 1) {
@@ -575,6 +582,7 @@ static bool TryPreaggregateInputVectorFusedPrimitiveGroupRunsFast(
 	                                                    group_sources,
 	                                                    payload_source_indices,
 	                                                    payload_lanes,
+	                                                    reduction_lanes,
 	                                                    scratch,
 	                                                    payload_scratch,
 	                                                    run_group_keys,
@@ -586,6 +594,7 @@ static bool TryPreaggregateInputVectorPrimitiveGroupRunsBest(
     SljitExecutableRegionOp &op, DataChunk &input, const vector<ExecutionRowPointerGroupKeySource> &group_sources,
     const vector<idx_t> &payload_source_indices,
     const vector<const ExecutionPrimitiveAggregateUpdateLane *> &payload_lanes,
+    const vector<SljitGroupedReductionLaneBinding> &reduction_lanes,
     SljitPreaggregatedPrimitiveAggregateScratch &scratch, SljitAggregatePayloadAdapterScratch &payload_scratch,
     optional_ptr<DataChunk> run_group_keys, idx_t &group_count, bool &fused_payloads) {
 	fused_payloads = false;
@@ -594,8 +603,8 @@ static bool TryPreaggregateInputVectorPrimitiveGroupRunsBest(
 		return true;
 	}
 	if (TryPreaggregateInputVectorFusedPrimitiveGroupRunsFast(op, input, group_sources, payload_source_indices,
-	                                                          payload_lanes, scratch, payload_scratch, run_group_keys,
-	                                                          group_count)) {
+	                                                          payload_lanes, reduction_lanes, scratch, payload_scratch,
+	                                                          run_group_keys, group_count)) {
 		fused_payloads = true;
 		return true;
 	}

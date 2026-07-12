@@ -8,6 +8,7 @@
 
 #pragma once
 
+#include "sljit_aggregate_payload_descriptor.hpp"
 #include "sljit_codegen_internal.hpp"
 #include "sljit_codegen_util.hpp"
 #include "sljit_region_plan.hpp"
@@ -197,12 +198,12 @@ void EmitSljitSparseLocalRunCacheAccumulate(struct sljit_compiler *compiler,
                                             sljit_s32 group_pointer_reg, sljit_s32 value_reg);
 void EmitSljitLocalPerfectHashCommit(struct sljit_compiler *compiler,
                                      const SljitLocalPerfectHashAggregatePlan &local_plan,
-                                     const vector<ExecutionRegionAggregateInput> &aggregates,
+                                     const vector<SljitAggregatePayloadDescriptor> &payload_descriptors,
                                      const ExecutionRegionAggregateContract &contract,
                                      bool local_payloads_known_seen = false);
 void EmitSljitDeferredPerfectHashFlagsCommit(struct sljit_compiler *compiler,
                                              const SljitDeferredPerfectHashFlagPlan &deferred_plan,
-                                             const vector<ExecutionRegionAggregateInput> &aggregates,
+                                             const vector<SljitAggregatePayloadDescriptor> &payload_descriptors,
                                              const ExecutionRegionAggregateContract &contract);
 
 } // namespace duckdb

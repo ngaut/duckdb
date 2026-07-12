@@ -238,8 +238,8 @@ unique_ptr<ExecutionExpressionIR> CopySljitExpressionPlanAsInputTree(const Sljit
 			return nullptr;
 		}
 		auto child = MakeSljitTreeReference(expr.source_index, source_type);
-		auto constant = MakeSljitTreeConstant(SljitSignedIntegerValue(expr.cast_source_width, expr.constant),
-		                                      source_type);
+		auto constant =
+		    MakeSljitTreeConstant(SljitSignedIntegerValue(expr.cast_source_width, expr.constant), source_type);
 		auto result = MakeSljitTreeIntrinsic(ExecutionExpressionIntrinsicKind::INTEGRAL_COMPRESS, expr.return_type);
 		result->children.push_back(std::move(child));
 		result->children.push_back(std::move(constant));
@@ -320,6 +320,7 @@ bool TryMapNativeProjectionExpressionSources(const vector<SljitNativeRegionExpre
 	case SljitNativeRegionExpressionKind::INTEGER_BINARY_REFERENCES:
 	case SljitNativeRegionExpressionKind::DOUBLE_BINARY_REFERENCES:
 	case SljitNativeRegionExpressionKind::INTEGER_COMPARE_REFERENCES:
+	case SljitNativeRegionExpressionKind::DECIMAL128_WIDENING_MULTIPLY:
 		return TryMapNativeProjectionSourceIndex(input_projection, expr.source_index) &&
 		       TryMapNativeProjectionSourceIndex(input_projection, expr.right_source_index) &&
 		       TryMapNativeExpressionTreeSourceIndicesThroughProjection(input_projection, expr);

@@ -72,6 +72,8 @@ enum JitCounterColumn : idx_t {
 	JIT_COUNTER_RUNNER_COST_INPUT_SCOPE,
 	JIT_COUNTER_RUNNER_COST_ADMISSION_CLASS,
 	JIT_COUNTER_RUNNER_COST_SELECTION_REASON,
+	JIT_COUNTER_RUNNER_COST_GROUPED_AGGREGATE_ESTIMATED_CARDINALITY,
+	JIT_COUNTER_RUNNER_COST_REQUIRED_RUNTIME_PROOFS,
 	JIT_COUNTER_RUNNER_COST_GENERATED_EXPRESSION_WORK,
 	JIT_COUNTER_RUNNER_COST_GENERATED_STAGE_WORK,
 	JIT_COUNTER_RUNNER_COST_GENERATED_BACKEND_STAGE_WORK,
@@ -105,7 +107,7 @@ static constexpr idx_t JIT_COUNTER_STAGE_TIMING_COLUMN_OFFSET = JIT_COUNTER_IR_L
 static_assert(JIT_COUNTER_KERNEL_BUILD_TIME_US - JIT_COUNTER_STAGE_TIMING_COLUMN_OFFSET + 1 ==
               EXECUTION_REGION_STAGE_TIMING_COLUMN_COUNT);
 static constexpr idx_t JIT_COUNTER_RUNNER_COST_PROFILE_COLUMN_OFFSET = JIT_COUNTER_RUNNER_COST_PROFILE;
-static_assert(JIT_COUNTER_RUNNER_COST_SELECTION_REASON - JIT_COUNTER_RUNNER_COST_PROFILE_COLUMN_OFFSET + 1 ==
+static_assert(JIT_COUNTER_RUNNER_COST_REQUIRED_RUNTIME_PROOFS - JIT_COUNTER_RUNNER_COST_PROFILE_COLUMN_OFFSET + 1 ==
               EXECUTION_REGION_RUNNER_COST_PROFILE_COLUMN_COUNT);
 static constexpr idx_t JIT_COUNTER_RUNNER_COST_WORK_COLUMN_OFFSET = JIT_COUNTER_RUNNER_COST_GENERATED_EXPRESSION_WORK;
 static_assert(JIT_COUNTER_RUNNER_COST_GPU_NET_BENEFIT - JIT_COUNTER_RUNNER_COST_WORK_COLUMN_OFFSET + 1 ==
@@ -296,8 +298,7 @@ static unique_ptr<FunctionData> DuckDBJitCountersBind(ClientContext &context, Ta
 	AddExecutionRegionTableFunctionColumn(return_types, names, "hash_join_probe_layout", LogicalType::VARCHAR);
 	AddExecutionRegionTableFunctionColumn(return_types, names, "jit_runtime_path_counts", LogicalType::VARCHAR);
 	AddExecutionRegionTableFunctionColumn(return_types, names, "jit_runtime_proof_counts", LogicalType::VARCHAR);
-	AddExecutionRegionTableFunctionColumn(return_types, names, "jit_runtime_delegation_counts",
-	                                      LogicalType::VARCHAR);
+	AddExecutionRegionTableFunctionColumn(return_types, names, "jit_runtime_delegation_counts", LogicalType::VARCHAR);
 	AddJitCounterRunnerCostColumns(return_types, names);
 	return nullptr;
 }

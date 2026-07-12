@@ -71,6 +71,21 @@ const char *ExecutionRegionJitRuntimeProofName(ExecutionRegionJitRuntimeProof pr
 	}
 }
 
+string RenderExecutionRegionJitRuntimeProofRequirements(ExecutionRegionJitRuntimeProofMask requirements) {
+	string result;
+	for (uint8_t proof_idx = 0; proof_idx < static_cast<uint8_t>(ExecutionRegionJitRuntimeProof::COUNT); proof_idx++) {
+		auto proof = static_cast<ExecutionRegionJitRuntimeProof>(proof_idx);
+		if (!ExecutionRegionJitRuntimeProofRequired(requirements, proof)) {
+			continue;
+		}
+		if (!result.empty()) {
+			result += "|";
+		}
+		result += ExecutionRegionJitRuntimeProofName(proof);
+	}
+	return result;
+}
+
 ExecutionOperatorStageTimer::ExecutionOperatorStageTimer(optional_ptr<ExecutionOperatorStageRecorder> recorder_p,
                                                          ExecutionRegionStageId stage_p)
     : recorder(recorder_p), stage(std::move(stage_p)),

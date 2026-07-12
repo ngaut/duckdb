@@ -51,8 +51,25 @@ struct SljitPendingPreaggregatedPrimitiveGroupBatch {
 		dense_single_lane_group_type = LogicalType();
 		dense_single_lane_lane = nullptr;
 		dense_single_lane_deltas.clear();
+		dense_single_lane_wide_deltas.clear();
 		dense_single_lane_touched_offsets.clear();
 		dense_single_lane_represented_row_count = 0;
+	}
+
+	uint64_t DenseSingleLaneDelta(idx_t offset) const {
+		D_ASSERT(offset < dense_single_lane_deltas.size());
+		return dense_single_lane_wide_deltas.empty() ? dense_single_lane_deltas[offset]
+		                                             : dense_single_lane_wide_deltas[offset];
+	}
+
+	void PromoteDenseSingleLaneDeltas() {
+		if (!dense_single_lane_wide_deltas.empty()) {
+			return;
+		}
+		dense_single_lane_wide_deltas.assign(dense_single_lane_deltas.size(), 0);
+		for (auto touched_offset : dense_single_lane_touched_offsets) {
+			dense_single_lane_wide_deltas[touched_offset] = dense_single_lane_deltas[touched_offset];
+		}
 	}
 
 	SljitDataChunkBatch groups;
@@ -65,7 +82,8 @@ struct SljitPendingPreaggregatedPrimitiveGroupBatch {
 	ExecutionDenseGroupDomain dense_single_lane_domain;
 	LogicalType dense_single_lane_group_type;
 	const ExecutionPrimitiveAggregateUpdateLane *dense_single_lane_lane = nullptr;
-	vector<int64_t> dense_single_lane_deltas;
+	vector<uint32_t> dense_single_lane_deltas;
+	vector<uint64_t> dense_single_lane_wide_deltas;
 	vector<idx_t> dense_single_lane_touched_offsets;
 	std::array<idx_t, STANDARD_VECTOR_SIZE> dense_single_lane_batch_offsets;
 	idx_t dense_single_lane_represented_row_count = 0;
@@ -110,7 +128,10 @@ static void SljitInvalidateProvenUniqueAppendContract(ExecutionRegionRuntime &ru
 	pending.proven_unique_append_failed = true;
 }
 
-static constexpr idx_t SLJIT_PENDING_DENSE_SINGLE_LANE_MAX_RANGE = STANDARD_VECTOR_SIZE * 512ULL;
+static constexpr idx_t SLJIT_PENDING_DENSE_SINGLE_LANE_MEMORY_BUDGET = 32ULL * 1024ULL * 1024ULL;
+static constexpr idx_t SLJIT_PENDING_DENSE_SINGLE_LANE_BYTES_PER_GROUP = sizeof(uint32_t) + sizeof(idx_t);
+static constexpr idx_t SLJIT_PENDING_DENSE_SINGLE_LANE_MAX_RANGE =
+    SLJIT_PENDING_DENSE_SINGLE_LANE_MEMORY_BUDGET / SLJIT_PENDING_DENSE_SINGLE_LANE_BYTES_PER_GROUP;
 static constexpr idx_t SLJIT_PENDING_DENSE_SINGLE_LANE_MIN_COMPRESSION = 2;
 // Keep one compact group unpublished between source invocations. If an input run crosses a
 // vector boundary, its next delta merges into this carry before any hash-table append.
@@ -158,46 +179,61 @@ static bool SljitAccumulatePendingDenseSingleLaneKeyData(DataChunk &input, Unifi
 	auto group_data = UnifiedVectorFormat::GetData<SOURCE_TYPE>(group_format);
 	auto group_sel = group_format.sel;
 	const bool can_have_null = group_format.validity.CanHaveNull();
-	const auto touched_count_before_batch = pending.dense_single_lane_touched_offsets.size();
-	auto rollback = [&](idx_t row_count) {
-		for (idx_t rollback_idx = 0; rollback_idx < row_count; rollback_idx++) {
-			auto &delta = pending.dense_single_lane_deltas[pending.dense_single_lane_batch_offsets[rollback_idx]];
-			D_ASSERT(delta > 0);
-			delta--;
-		}
-		pending.dense_single_lane_touched_offsets.resize(touched_count_before_batch);
-		pending.dense_single_lane_blocker = "key";
-		return false;
-	};
-	for (idx_t row_idx = 0; row_idx < input.size(); row_idx++) {
-		const auto source_idx = group_sel->get_index(row_idx);
-		if (can_have_null && !group_format.validity.RowIsValid(source_idx)) {
-			return rollback(row_idx);
-		}
-		TARGET_TYPE value;
-		if constexpr (CAST_KEY) {
-			value = static_cast<TARGET_TYPE>(group_data[source_idx]);
-		} else {
-			value = group_data[source_idx];
-		}
-		idx_t key;
-		if (!SljitPendingDenseSingleLaneKey(value, key) || key < dense_domain.min_key || key > dense_domain.max_key) {
-			return rollback(row_idx);
-		}
-		const auto offset = key - dense_domain.min_key;
-		pending.dense_single_lane_batch_offsets[row_idx] = offset;
-		auto &delta = pending.dense_single_lane_deltas[offset];
-		if (delta == 0) {
-			pending.dense_single_lane_touched_offsets.push_back(offset);
-		}
-		if (delta == NumericLimits<int64_t>::Maximum()) {
-			throw OutOfRangeException("Dense pending grouped count overflow");
-		}
-		delta++;
+	if (pending.dense_single_lane_wide_deltas.empty() &&
+	    (pending.dense_single_lane_represented_row_count > NumericLimits<uint32_t>::Maximum() ||
+	     input.size() > NumericLimits<uint32_t>::Maximum() - pending.dense_single_lane_represented_row_count)) {
+		pending.PromoteDenseSingleLaneDeltas();
 	}
-	pending.dense_single_lane_represented_row_count += input.size();
-	pending.dense_single_lane_blocker.clear();
-	return true;
+	auto accumulate = [&](auto *deltas) {
+		using DELTA_TYPE = typename std::remove_pointer<decltype(deltas)>::type;
+		const auto touched_count_before_batch = pending.dense_single_lane_touched_offsets.size();
+		auto rollback = [&](idx_t row_count) {
+			for (idx_t rollback_idx = 0; rollback_idx < row_count; rollback_idx++) {
+				auto &delta = deltas[pending.dense_single_lane_batch_offsets[rollback_idx]];
+				D_ASSERT(delta > 0);
+				delta--;
+			}
+			pending.dense_single_lane_touched_offsets.resize(touched_count_before_batch);
+			pending.dense_single_lane_blocker = "key";
+			return false;
+		};
+		for (idx_t row_idx = 0; row_idx < input.size(); row_idx++) {
+			const auto source_idx = group_sel->get_index(row_idx);
+			if (can_have_null && !group_format.validity.RowIsValid(source_idx)) {
+				return rollback(row_idx);
+			}
+			TARGET_TYPE value;
+			if constexpr (CAST_KEY) {
+				value = static_cast<TARGET_TYPE>(group_data[source_idx]);
+			} else {
+				value = group_data[source_idx];
+			}
+			idx_t key;
+			if (!SljitPendingDenseSingleLaneKey(value, key) || key < dense_domain.min_key ||
+			    key > dense_domain.max_key) {
+				return rollback(row_idx);
+			}
+			const auto offset = key - dense_domain.min_key;
+			pending.dense_single_lane_batch_offsets[row_idx] = offset;
+			auto &delta = deltas[offset];
+			if (delta == 0) {
+				pending.dense_single_lane_touched_offsets.push_back(offset);
+			}
+			if constexpr (std::is_same<DELTA_TYPE, uint64_t>::value) {
+				if (delta == NumericLimits<int64_t>::Maximum()) {
+					throw OutOfRangeException("Dense pending grouped count overflow");
+				}
+			}
+			delta++;
+		}
+		pending.dense_single_lane_represented_row_count += input.size();
+		pending.dense_single_lane_blocker.clear();
+		return true;
+	};
+	if (pending.dense_single_lane_wide_deltas.empty()) {
+		return accumulate(pending.dense_single_lane_deltas.data());
+	}
+	return accumulate(pending.dense_single_lane_wide_deltas.data());
 }
 
 template <class TARGET_TYPE>
@@ -254,7 +290,8 @@ static bool SljitTryAccumulatePendingDenseSingleLaneGroupsTemplated(
 		    pending.dense_single_lane_domain.min_key != dense_domain.min_key ||
 		    pending.dense_single_lane_domain.max_key != dense_domain.max_key ||
 		    pending.dense_single_lane_group_type != sink_info.groups[0].type ||
-		    pending.dense_single_lane_lane != payload_lanes[0] || pending.dense_single_lane_deltas.size() != range) {
+		    pending.dense_single_lane_lane != payload_lanes[0] || pending.dense_single_lane_deltas.size() != range ||
+		    (!pending.dense_single_lane_wide_deltas.empty() && pending.dense_single_lane_wide_deltas.size() != range)) {
 			return reject("state");
 		}
 	} else {
@@ -414,13 +451,14 @@ static bool SljitFlushPendingDenseSingleLaneGroupsTemplated(ExecutionRegionRunti
 			switch (pending.dense_single_lane_lane->kind) {
 			case AggregatePrimitiveUpdateKind::COUNT:
 			case AggregatePrimitiveUpdateKind::COUNT_STAR: {
-				const auto delta = pending.dense_single_lane_deltas[dense_offset];
-				if (delta <= 0 || UnsafeNumericCast<uint64_t>(delta) > NumericLimits<idx_t>::Maximum()) {
+				const auto delta = pending.DenseSingleLaneDelta(dense_offset);
+				if (delta == 0 || delta > NumericLimits<int64_t>::Maximum() ||
+				    delta > NumericLimits<idx_t>::Maximum()) {
 					throw InternalException("SLJIT pending dense single-lane count delta is invalid");
 				}
 				const auto row_count = UnsafeNumericCast<idx_t>(delta);
 				preaggregate_scratch.group_row_counts.push_back(row_count);
-				preaggregate_scratch.payloads[0].int64_values.push_back(delta);
+				preaggregate_scratch.payloads[0].int64_values.push_back(UnsafeNumericCast<int64_t>(delta));
 				represented_row_count += row_count;
 				break;
 			}

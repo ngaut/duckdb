@@ -274,6 +274,7 @@ PhysicalRunnerCostInput BuildExecutionRegionCandidateCostInput(const ExecutionRe
 	input.generated_backend_stage_count = cost_facts.generated_backend_stage_count;
 	input.generated_grouped_aggregate_stage_count = cost_facts.generated_grouped_aggregate_stage_count;
 	input.native_grouped_state_address_lookup_count = cost_facts.native_grouped_state_address_lookup_count;
+	input.grouped_aggregate_estimated_cardinality = candidate.traits.grouped_aggregate_estimated_cardinality;
 	input.materialization_elision_count = cost_facts.materialization_elision_count;
 	input.full_pipeline =
 	    ExecutionRegionABIIsFullPipeline(candidate.contract.abi) && cost_facts.may_anchor_compiled_body;
@@ -752,6 +753,9 @@ static bool TryAccumulateExecutionRegionPhysicalOperatorCost(const PhysicalOpera
 	}
 	case PhysicalOperatorType::HASH_GROUP_BY: {
 		auto &aggregate = op.Cast<PhysicalHashAggregate>();
+		if (slot == ExecutionRegionPhysicalPipelineSlot::SINK) {
+			input.grouped_aggregate_estimated_cardinality = aggregate.estimated_cardinality;
+		}
 		auto expression_cost = ExecutionRegionPhysicalExpressionListCost(aggregate.grouped_aggregate_data.groups);
 		expression_cost += ExecutionRegionPhysicalAggregateListCost(aggregate.grouped_aggregate_data.aggregates);
 		AddExecutionRegionGeneratedExpressionWork(input, expression_cost);
@@ -788,6 +792,9 @@ static bool TryAccumulateExecutionRegionPhysicalOperatorCost(const PhysicalOpera
 	}
 	case PhysicalOperatorType::PERFECT_HASH_GROUP_BY: {
 		auto &aggregate = op.Cast<PhysicalPerfectHashAggregate>();
+		if (slot == ExecutionRegionPhysicalPipelineSlot::SINK) {
+			input.grouped_aggregate_estimated_cardinality = aggregate.estimated_cardinality;
+		}
 		auto expression_cost = ExecutionRegionPhysicalExpressionListCost(aggregate.groups);
 		expression_cost += ExecutionRegionPhysicalAggregateListCost(aggregate.aggregates);
 		AddExecutionRegionGeneratedExpressionWork(input, expression_cost);
@@ -908,9 +915,11 @@ static void FinalizeExecutionRegionPhysicalPipelineCostInput(Pipeline &pipeline,
 	    facts.traits.sink_kind == ExecutionRegionSinkKind::UNGROUPED_AGGREGATE_UPDATE &&
 	    cost_input.generated_backend_stage_count > 0 && facts.traits.source_filter_count > 0 &&
 	    facts.traits.projection_count > 0;
+	const bool generated_projection_aggregate =
+	    facts.generated_aggregate_update_count > 0 && facts.traits.projection_count > 0;
 	if ((facts.generated_aggregate_update_count > 0 &&
 	     (facts.traits.filter_count > 0 || facts.traits.source_filter_expression_count > 0)) ||
-	    generated_filtered_reduction) {
+	    generated_filtered_reduction || generated_projection_aggregate) {
 		cost_input.materialization_elision_count = 1;
 	}
 	cost_input.source_filter_count = facts.traits.source_filter_count;

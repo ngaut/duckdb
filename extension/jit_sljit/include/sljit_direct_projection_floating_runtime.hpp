@@ -47,7 +47,7 @@ static bool PrepareFlatFusedFloatingProjectionSources(SljitExecutableRegionOp &o
                                                       const SelectionVector *execute_sel, idx_t count,
                                                       PROJECTION_SCRATCH &adapter_scratch, bool track_fused,
                                                       idx_t source_offset = 0) {
-	if (!op.flat_fused_floating_projection_function || execute_sel) {
+	if (!op.flat_fused_floating_projection.Function() || execute_sel) {
 		return false;
 	}
 	adapter_scratch.Prepare(op.projections.size(), track_fused);
@@ -89,7 +89,7 @@ static void RunFlatFusedFloatingProjection(SljitExecutableRegionOp &op, idx_t co
 	}
 	native_input.count = count;
 	native_input.has_error = false;
-	SljitExecuteNativeFunction(op.flat_fused_floating_projection_function, native_input);
+	SljitExecuteNativeFunction(op.flat_fused_floating_projection.Function(), native_input);
 }
 
 template <class PROJECTION_SCRATCH>

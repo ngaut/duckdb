@@ -8,6 +8,7 @@
 
 #pragma once
 
+#include "sljit_aggregate_payload_descriptor.hpp"
 #include "sljit_aggregate_perfect_hash_codegen.hpp"
 #include "sljit_aggregate_typed_payload_codegen.hpp"
 #include "sljit_typed_expression_plan.hpp"

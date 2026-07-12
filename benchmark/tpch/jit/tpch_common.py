@@ -107,6 +107,7 @@ COUNTER_RUNNER_COST_PROFILE_FIELDS = (
     "runner_cost_generated_backend_stage_count",
     "runner_cost_generated_grouped_aggregate_stage_count",
     "runner_cost_native_grouped_state_address_lookup_count",
+    "runner_cost_grouped_aggregate_estimated_cardinality",
     "runner_cost_materialization_elision_count",
     "runner_cost_selected_hash_join_filter_materialization_count",
     "runner_cost_native_join_stage_count",
@@ -118,6 +119,7 @@ COUNTER_RUNNER_COST_PROFILE_FIELDS = (
     "runner_cost_input_scope",
     "runner_cost_admission_class",
     "runner_cost_selection_reason",
+    "runner_cost_required_runtime_proofs",
 )
 
 COUNTER_RUNNER_COST_WORK_FIELDS = (

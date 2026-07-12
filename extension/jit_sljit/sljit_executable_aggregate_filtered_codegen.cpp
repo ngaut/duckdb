@@ -143,8 +143,7 @@ bool SljitTryBuildFilteredAggregateUpdate(SljitExecutableRegionOp &filter_op, Sl
 		    aggregate_update.plan.sink_info.aggregate_contract, combined_source_not_null, combined_source_min_values,
 		    combined_source_max_values, function, filtered_error);
 		if (code && function) {
-			filtered_update.code = std::move(code);
-			filtered_update.function = function;
+			filtered_update.compiled.Set(std::move(code), function);
 			filtered_update.owns_perfect_hash_group_lookup = true;
 			aggregate_update.filtered_update = std::move(filtered_update);
 			return true;
@@ -219,8 +218,7 @@ bool SljitTryBuildFilteredAggregateUpdate(SljitExecutableRegionOp &filter_op, Sl
 	    function, filtered_error);
 
 	if (code && function) {
-		filtered_update.code = std::move(code);
-		filtered_update.function = function;
+		filtered_update.compiled.Set(std::move(code), function);
 		aggregate_update.filtered_update = std::move(filtered_update);
 		return true;
 	}

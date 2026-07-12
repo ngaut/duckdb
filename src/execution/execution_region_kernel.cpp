@@ -27,6 +27,11 @@ void ExecutionRegionKernel::SetTraceInfo(idx_t trace_id_p, ExecutionRegionExecut
 	trace_compile_reason = std::move(compile_reason);
 	trace_compile_time_us = compile_time_us;
 	trace_code_size = code_size;
+	trace_lazy_code_size.store(0, std::memory_order_relaxed);
+}
+
+void ExecutionRegionKernel::AddTraceCodeSize(idx_t code_size) {
+	trace_lazy_code_size.fetch_add(code_size, std::memory_order_relaxed);
 }
 
 void ExecutionRegionKernel::SetTraceSelectedSourceExecution(ExecutionRegionSourceExecutionKind source_execution) {
@@ -78,7 +83,7 @@ int64_t ExecutionRegionKernel::TraceCompileTime() const {
 }
 
 idx_t ExecutionRegionKernel::TraceCodeSize() const {
-	return trace_code_size;
+	return trace_code_size + trace_lazy_code_size.load(std::memory_order_relaxed);
 }
 
 bool ExecutionRegionKernel::HasTracePipeline() const {

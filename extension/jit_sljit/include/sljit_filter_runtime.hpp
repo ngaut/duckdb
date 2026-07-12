@@ -277,11 +277,11 @@ static idx_t SljitSelectExpression(SljitExecutableRegionExpression &expression, 
 		auto native_input =
 		    SljitPrepareNativePredicateInput(adapter_scratch, input, expression.input_source_indices, execute_sel,
 		                                     count, nullptr, nullptr, filter_selection.data(), nullptr);
-		SljitExecuteNativeFunction(expression.predicate_select_function, native_input);
+		SljitExecuteNativeFunction(expression.predicate_select.Function(), native_input);
 		return native_input.selected_count;
 	}
 	if (filter.kind == SljitNativeRegionExpressionKind::TYPED_EXPRESSION_TREE) {
-		if (!expression.select_function) {
+		if (!expression.select.Function()) {
 			throw InternalException("SLJIT typed filter expression has no generated selector");
 		}
 		SljitNativeVectorInput native_input;
@@ -293,7 +293,7 @@ static idx_t SljitSelectExpression(SljitExecutableRegionExpression &expression, 
 		native_input.overflow_message = expression.overflow_message.c_str();
 		native_input.query_location = filter.query_location;
 		native_input.count = count;
-		SljitExecuteNativeFunction(expression.select_function, native_input);
+		SljitExecuteNativeFunction(expression.select.Function(), native_input);
 		// A generated selector may leave an all-true identity vector unwritten.
 		// Ordinary filters represent that result by count alone; direct selector
 		// consumers request concrete indices here without burdening every generated
@@ -353,7 +353,7 @@ static idx_t SljitSelectExpression(SljitExecutableRegionExpression &expression, 
 	native_input.selected_count = 0;
 	native_input.overflow_message = nullptr;
 	native_input.count = count;
-	SljitExecuteNativeFunction(expression.select_function, native_input);
+	SljitExecuteNativeFunction(expression.select.Function(), native_input);
 
 	return native_input.selected_count;
 }

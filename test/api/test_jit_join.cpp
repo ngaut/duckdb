@@ -545,6 +545,48 @@ TEST_CASE("JIT hash join probe generates native probe with append sink", "[api][
 	REQUIRE(StringUtil::Contains(analyzed_plan, "\"generated_stage_runtime_breakdown\""));
 }
 
+TEST_CASE("JIT hash join lazy code is published once across parallel pipeline executors", "[api][jit]") {
+	DuckDB db;
+	Connection con(db);
+	auto &manager = ExecutionRegionManager::Get(*con.context);
+
+	ConfigureSljitForCoverage(con, false, false, true, 10000, 12);
+	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_parallel_lazy_probe_l AS "
+	                          "SELECT CASE WHEN i % 1024 = 0 THEN NULL ELSE ((i % 32) * 1000003)::BIGINT END AS k, "
+	                          "i::BIGINT AS v FROM range(4194304) tbl(i)"));
+	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_parallel_lazy_probe_r AS "
+	                          "SELECT (i * 1000003)::BIGINT AS k, (i * 3)::BIGINT AS w FROM range(32) tbl(i)"));
+
+	REQUIRE_NO_FAIL(con.Query("SET jit_policy='off'"));
+	auto expected = con.Query("SELECT sum(l.v + r.w) FROM jit_parallel_lazy_probe_l l "
+	                          "JOIN jit_parallel_lazy_probe_r r ON l.k=r.k");
+	REQUIRE_NO_FAIL(*expected);
+
+	ClearJitTrace(manager);
+	REQUIRE_NO_FAIL(con.Query("SET jit_policy='auto'"));
+	auto result = con.Query("SELECT sum(l.v + r.w) FROM jit_parallel_lazy_probe_l l "
+	                        "JOIN jit_parallel_lazy_probe_r r ON l.k=r.k");
+	REQUIRE_NO_FAIL(*result);
+	REQUIRE(result->GetValue(0, 0) == expected->GetValue(0, 0));
+
+	idx_t runtime_event_count = 0;
+	idx_t lazy_codegen_event_count = 0;
+	idx_t lazy_codegen_code_size = 0;
+	for (auto &event : manager.GetEvents()) {
+		if (!IsSljitRegionEvent(event) || EventPhase(event) != "runtime" || EventStatus(event) != "executed") {
+			continue;
+		}
+		runtime_event_count++;
+		if (event.jit_runtime.lazy_codegen.code_size > 0) {
+			lazy_codegen_event_count++;
+			lazy_codegen_code_size += event.jit_runtime.lazy_codegen.code_size;
+		}
+	}
+	REQUIRE(runtime_event_count > 1);
+	REQUIRE(lazy_codegen_event_count == 1);
+	REQUIRE(lazy_codegen_code_size > 0);
+}
+
 TEST_CASE("JIT hash join selected output appends through a primitive recipe", "[api][jit]") {
 	DuckDB db;
 	Connection con(db);
@@ -1448,6 +1490,67 @@ static void RequireSelectedHashJoinViewMaterializationHasNoElisionCredit(Executi
 		REQUIRE(event.runner_cost.materialization_elision_count == 0);
 	}
 	REQUIRE(found);
+}
+
+TEST_CASE("JIT mapped join casts feed dense grouped counts", "[api][jit]") {
+	DuckDB db;
+	Connection con(db);
+	auto &manager = ExecutionRegionManager::Get(*con.context);
+
+	ConfigureSljitForCoverage(con, false, true, true, 10000);
+	REQUIRE_NO_FAIL(con.Query("PRAGMA threads=1"));
+	REQUIRE_NO_FAIL(con.Query("SET perfect_ht_threshold=0"));
+	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_mapped_dense_customer AS "
+	                          "SELECT i::BIGINT AS customer_id FROM range(1, 150001) tbl(i)"));
+	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_mapped_dense_orders AS "
+	                          "SELECT ((i * 7919) % 100000 + 1)::BIGINT AS customer_id, i::BIGINT AS order_id "
+	                          "FROM range(1500000) tbl(i)"));
+	REQUIRE_NO_FAIL(con.Query("VACUUM jit_mapped_dense_customer"));
+	REQUIRE_NO_FAIL(con.Query("VACUUM jit_mapped_dense_orders"));
+
+	const string query = "SELECT c.customer_id, count(o.order_id) AS order_count "
+	                     "FROM jit_mapped_dense_customer c "
+	                     "LEFT JOIN jit_mapped_dense_orders o ON c.customer_id = o.customer_id "
+	                     "GROUP BY c.customer_id";
+	REQUIRE_NO_FAIL(con.Query("SET jit_policy='off'"));
+	REQUIRE_NO_FAIL(con.Query("CREATE TEMP TABLE jit_mapped_dense_reference AS " + query));
+
+	REQUIRE_NO_FAIL(con.Query("SET jit_policy='auto'"));
+	ClearJitTrace(manager, true);
+	REQUIRE_NO_FAIL(con.Query("CREATE TEMP TABLE jit_mapped_dense_output AS " + query));
+	auto shape = con.Query("SELECT count(*), min(order_count), max(order_count), sum(order_count) "
+	                       "FROM jit_mapped_dense_output");
+	REQUIRE_NO_FAIL(*shape);
+	REQUIRE(shape->GetValue(0, 0).ToString() == "150000");
+	REQUIRE(shape->GetValue(1, 0).ToString() == "0");
+	REQUIRE(shape->GetValue(2, 0).ToString() == "15");
+	REQUIRE(shape->GetValue(3, 0).ToString() == "1500000");
+	auto difference = con.Query("SELECT count(*) FROM ("
+	                            "  (SELECT * FROM jit_mapped_dense_output EXCEPT ALL "
+	                            "   SELECT * FROM jit_mapped_dense_reference) UNION ALL "
+	                            "  (SELECT * FROM jit_mapped_dense_reference EXCEPT ALL "
+	                            "   SELECT * FROM jit_mapped_dense_output)"
+	                            ") differences");
+	REQUIRE_NO_FAIL(*difference);
+	REQUIRE(difference->GetValue(0, 0).ToString() == "0");
+
+	RequireJitEvent(
+	    manager,
+	    [](const ExecutionRegionEvent &event) {
+		    if (EventPhase(event) != "runtime" || event.backend_name != "sljit") {
+			    return false;
+		    }
+		    const auto runtime_paths = EventJitRuntimePathCounts(event);
+		    return StringUtil::Contains(
+		               runtime_paths,
+		               "aggregate_update.projection_aggregate.group.input_vector_cast_key0_unchecked=1500000") &&
+		           StringUtil::Contains(runtime_paths,
+		                                "aggregate_update.pending_dense_single_lane_grouped_update=1500000") &&
+		           StringUtil::Contains(runtime_paths,
+		                                "aggregate_update.pending_dense_single_lane_grouped_update_flush=1500000") &&
+		           !StringUtil::Contains(runtime_paths, "producer_group_output_map");
+	    },
+	    [](const ExecutionRegionEvent &event) { RequireHashProbeAggregateUpdateRuntimeOwnership(event); });
 }
 
 TEST_CASE("JIT two-join grouped aggregate composes mixed VARCHAR projection chain", "[api][jit]") {

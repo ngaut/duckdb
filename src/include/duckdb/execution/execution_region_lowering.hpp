@@ -74,7 +74,7 @@ struct ExecutionRegionLoweringCapabilityFacts {
 	idx_t backend_weak_accelerated_work_count = 0;
 };
 
-struct ExecutionRegionLoweringPlan {
+struct DUCKDB_API ExecutionRegionLoweringPlan {
 	void AddNode(string label, string operator_name, ExecutionRegionLoweringKind kind, string reason);
 	void AddNode(string label, string operator_name, ExecutionRegionOperatorKind operator_kind,
 	             ExecutionRegionLoweringKind kind, string reason);

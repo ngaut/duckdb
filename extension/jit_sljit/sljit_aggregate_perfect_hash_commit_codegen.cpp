@@ -151,28 +151,28 @@ static void EmitSljitPerfectHashCommitHugeint(struct sljit_compiler *compiler,
 
 static void EmitSljitPerfectHashCommitPayloads(struct sljit_compiler *compiler,
                                                const SljitLocalPerfectHashAggregatePlan &local_plan,
-                                               const vector<ExecutionRegionAggregateInput> &aggregates,
+                                               const vector<SljitAggregatePayloadDescriptor> &payload_descriptors,
                                                const ExecutionRegionAggregateContract &contract, sljit_s32 state_reg,
                                                const SljitPerfectHashCommitLaneSource &source,
                                                bool payload_values_known_seen) {
-	for (idx_t payload_idx = 0; payload_idx < aggregates.size(); payload_idx++) {
-		auto &aggregate = aggregates[payload_idx];
+	for (idx_t payload_idx = 0; payload_idx < payload_descriptors.size(); payload_idx++) {
+		auto &descriptor = payload_descriptors[payload_idx];
 		auto &lane = local_plan.lanes[payload_idx];
-		const auto state_offset = contract.grouped_state_offsets[aggregate.aggregate_index];
-		switch (aggregate.primitive_update_kind) {
+		const auto state_offset = contract.grouped_state_offsets[descriptor.aggregate_index];
+		switch (descriptor.primitive_kind) {
 		case AggregatePrimitiveUpdateKind::COUNT_STAR:
 			EmitSljitPerfectHashCommitCount(compiler, lane, state_reg, source, state_offset,
-			                                aggregate.primitive_update_state_value_offset, true);
+			                                descriptor.state_value_offset, true);
 			break;
 		case AggregatePrimitiveUpdateKind::SUM_INT64:
-			EmitSljitPerfectHashCommitInt64(
-			    compiler, lane, state_reg, source, state_offset, aggregate.primitive_update_state_value_offset,
-			    aggregate.primitive_update_state_is_set_offset, payload_values_known_seen || lane.value_always_seen);
+			EmitSljitPerfectHashCommitInt64(compiler, lane, state_reg, source, state_offset,
+			                                descriptor.state_value_offset, descriptor.state_is_set_offset,
+			                                payload_values_known_seen || lane.value_always_seen);
 			break;
 		case AggregatePrimitiveUpdateKind::SUM_HUGEINT:
-			EmitSljitPerfectHashCommitHugeint(
-			    compiler, lane, state_reg, source, state_offset, aggregate.primitive_update_state_value_offset,
-			    aggregate.primitive_update_state_is_set_offset, payload_values_known_seen || lane.value_always_seen);
+			EmitSljitPerfectHashCommitHugeint(compiler, lane, state_reg, source, state_offset,
+			                                  descriptor.state_value_offset, descriptor.state_is_set_offset,
+			                                  payload_values_known_seen || lane.value_always_seen);
 			break;
 		default:
 			throw InternalException("Unsupported SLJIT local perfect-hash aggregate commit kind");
@@ -182,7 +182,7 @@ static void EmitSljitPerfectHashCommitPayloads(struct sljit_compiler *compiler,
 
 void EmitSljitLocalPerfectHashCommit(struct sljit_compiler *compiler,
                                      const SljitLocalPerfectHashAggregatePlan &local_plan,
-                                     const vector<ExecutionRegionAggregateInput> &aggregates,
+                                     const vector<SljitAggregatePayloadDescriptor> &payload_descriptors,
                                      const ExecutionRegionAggregateContract &contract, bool local_payloads_known_seen) {
 	if (!local_plan.enabled) {
 		return;
@@ -201,7 +201,7 @@ void EmitSljitLocalPerfectHashCommit(struct sljit_compiler *compiler,
 			auto no_group = sljit_emit_cmp(compiler, SLJIT_EQUAL, SLJIT_R2, 0, SLJIT_IMM, 0);
 			EmitSljitPerfectHashSetOutputGroup(compiler, SLJIT_S3);
 			EmitSljitPerfectHashStatePointer(compiler, SLJIT_S3, SLJIT_S4);
-			EmitSljitPerfectHashCommitPayloads(compiler, local_plan, aggregates, contract, SLJIT_S4,
+			EmitSljitPerfectHashCommitPayloads(compiler, local_plan, payload_descriptors, contract, SLJIT_S4,
 			                                   SparseLocalCommitLaneSource(SLJIT_PERFECT_HASH_STATE_REG), true);
 			sljit_set_label(no_group, sljit_emit_label(compiler));
 			EmitNextSljitNativeVectorLoop(compiler, loop);
@@ -216,7 +216,7 @@ void EmitSljitLocalPerfectHashCommit(struct sljit_compiler *compiler,
 		EmitSljitSparseLocalPerfectHashGroupPointer(compiler, local_plan, SLJIT_S3, SLJIT_PERFECT_HASH_STATE_REG);
 		EmitSljitPerfectHashSetOutputGroup(compiler, SLJIT_S3);
 		EmitSljitPerfectHashStatePointer(compiler, SLJIT_S3, SLJIT_S4);
-		EmitSljitPerfectHashCommitPayloads(compiler, local_plan, aggregates, contract, SLJIT_S4,
+		EmitSljitPerfectHashCommitPayloads(compiler, local_plan, payload_descriptors, contract, SLJIT_S4,
 		                                   SparseLocalCommitLaneSource(SLJIT_PERFECT_HASH_STATE_REG),
 		                                   local_payloads_known_seen);
 		EmitNextSljitNativeVectorLoop(compiler, loop);
@@ -224,28 +224,28 @@ void EmitSljitLocalPerfectHashCommit(struct sljit_compiler *compiler,
 		return;
 	}
 	EmitSljitDensePerfectHashSeenGroupCommitLoop(compiler, local_plan.group_count, local_plan.group_seen_offset, [&]() {
-		EmitSljitPerfectHashCommitPayloads(compiler, local_plan, aggregates, contract, SLJIT_S4,
+		EmitSljitPerfectHashCommitPayloads(compiler, local_plan, payload_descriptors, contract, SLJIT_S4,
 		                                   DenseLocalCommitLaneSource(SLJIT_S1), local_payloads_known_seen);
 	});
 }
 
 void EmitSljitDeferredPerfectHashFlagsCommit(struct sljit_compiler *compiler,
                                              const SljitDeferredPerfectHashFlagPlan &deferred_plan,
-                                             const vector<ExecutionRegionAggregateInput> &aggregates,
+                                             const vector<SljitAggregatePayloadDescriptor> &payload_descriptors,
                                              const ExecutionRegionAggregateContract &contract) {
 	if (!deferred_plan.enabled) {
 		return;
 	}
 	EmitSljitDensePerfectHashSeenGroupCommitLoop(
 	    compiler, deferred_plan.group_count, deferred_plan.group_seen_offset, [&]() {
-		    for (idx_t payload_idx = 0; payload_idx < aggregates.size(); payload_idx++) {
-			    auto &aggregate = aggregates[payload_idx];
-			    if (aggregate.primitive_update_kind == AggregatePrimitiveUpdateKind::COUNT_STAR) {
+		    for (idx_t payload_idx = 0; payload_idx < payload_descriptors.size(); payload_idx++) {
+			    auto &descriptor = payload_descriptors[payload_idx];
+			    if (descriptor.primitive_kind == AggregatePrimitiveUpdateKind::COUNT_STAR) {
 				    continue;
 			    }
-			    const auto state_offset = contract.grouped_state_offsets[aggregate.aggregate_index];
+			    const auto state_offset = contract.grouped_state_offsets[descriptor.aggregate_index];
 			    EmitSljitGroupedAggregateSetStateIsSetImmediate(compiler, SLJIT_S4, state_offset,
-			                                                    aggregate.primitive_update_state_is_set_offset);
+			                                                    descriptor.state_is_set_offset);
 		    }
 	    });
 }

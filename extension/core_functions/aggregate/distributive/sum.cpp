@@ -359,6 +359,7 @@ AggregateFunction GetSumAggregate(PhysicalType type) {
 		    AggregateFunction::UnaryAggregate<SumState<hugeint_t>, hugeint_t, hugeint_t, HugeintSumOperation>(
 		        LogicalType::HUGEINT, LogicalType::HUGEINT);
 		function.SetOrderDependent(AggregateOrderDependent::NOT_ORDER_DEPENDENT);
+		function.SetPrimitiveUpdateABI(SumHugeintPrimitiveUpdateABI(type));
 		return function;
 	}
 	default:
@@ -375,7 +376,7 @@ unique_ptr<FunctionData> BindDecimalSum(BindAggregateFunctionInput &input) {
 	function.GetArguments()[0] = decimal_type;
 	function.SetReturnType(LogicalType::DECIMAL(Decimal::MAX_WIDTH_DECIMAL, DecimalType::GetScale(decimal_type)));
 	function.SetOrderDependent(AggregateOrderDependent::NOT_ORDER_DEPENDENT);
-	if (decimal_type.InternalType() == PhysicalType::INT64) {
+	if (decimal_type.InternalType() == PhysicalType::INT64 || decimal_type.InternalType() == PhysicalType::INT128) {
 		function.SetPrimitiveUpdateABI(SumHugeintPrimitiveUpdateABI(decimal_type.InternalType()));
 	}
 	return nullptr;

@@ -150,6 +150,7 @@ static bool SljitTryApplyProjectionPlanSources(PLAN &plan, HANDLE_SOURCE &&handl
 	case SljitNativeRegionExpressionKind::INTEGER_BINARY_REFERENCES:
 	case SljitNativeRegionExpressionKind::DOUBLE_BINARY_REFERENCES:
 	case SljitNativeRegionExpressionKind::INTEGER_COMPARE_REFERENCES:
+	case SljitNativeRegionExpressionKind::DECIMAL128_WIDENING_MULTIPLY:
 		return handle_source(plan.source_index) && handle_source(plan.right_source_index) &&
 		       handle_sources(plan.expression_tree_source_indices);
 	case SljitNativeRegionExpressionKind::INTEGER_COALESCE:
@@ -293,11 +294,11 @@ static void SljitBuildBorrowedProjectionExpression(const SljitExecutableRegionEx
 	target.plan = source.plan.Copy(true, false);
 	target.input_source_indices = source.input_source_indices;
 	target.input_source_not_null = source.input_source_not_null;
-	target.function = source.function;
-	target.flat_function = source.flat_function;
-	target.select_function = source.select_function;
-	target.predicate_function = source.predicate_function;
-	target.predicate_select_function = source.predicate_select_function;
+	target.vector = source.vector;
+	target.flat = source.flat;
+	target.select = source.select;
+	target.predicate = source.predicate;
+	target.predicate_select = source.predicate_select;
 	target.overflow_message = source.overflow_message;
 }
 

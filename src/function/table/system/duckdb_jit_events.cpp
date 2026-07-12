@@ -86,6 +86,8 @@ enum JitEventColumn : idx_t {
 	JIT_EVENT_RUNNER_COST_INPUT_SCOPE,
 	JIT_EVENT_RUNNER_COST_ADMISSION_CLASS,
 	JIT_EVENT_RUNNER_COST_SELECTION_REASON,
+	JIT_EVENT_RUNNER_COST_GROUPED_AGGREGATE_ESTIMATED_CARDINALITY,
+	JIT_EVENT_RUNNER_COST_REQUIRED_RUNTIME_PROOFS,
 	JIT_EVENT_RUNNER_COST_GENERATED_WORK_CLASS,
 	JIT_EVENT_RUNNER_COST_NATIVE_PROTOCOL_CLASS,
 	JIT_EVENT_RUNNER_COST_GENERATED_EXPRESSION_WORK,
@@ -121,7 +123,7 @@ static constexpr idx_t JIT_EVENT_STAGE_TIMING_COLUMN_OFFSET = JIT_EVENT_IR_LOWER
 static_assert(JIT_EVENT_KERNEL_BUILD_TIME_US - JIT_EVENT_STAGE_TIMING_COLUMN_OFFSET + 1 ==
               EXECUTION_REGION_STAGE_TIMING_COLUMN_COUNT);
 static constexpr idx_t JIT_EVENT_RUNNER_COST_PROFILE_COLUMN_OFFSET = JIT_EVENT_RUNNER_COST_PROFILE;
-static_assert(JIT_EVENT_RUNNER_COST_SELECTION_REASON - JIT_EVENT_RUNNER_COST_PROFILE_COLUMN_OFFSET + 1 ==
+static_assert(JIT_EVENT_RUNNER_COST_REQUIRED_RUNTIME_PROOFS - JIT_EVENT_RUNNER_COST_PROFILE_COLUMN_OFFSET + 1 ==
               EXECUTION_REGION_RUNNER_COST_PROFILE_COLUMN_COUNT);
 static constexpr idx_t JIT_EVENT_RUNNER_COST_WORK_COLUMN_OFFSET = JIT_EVENT_RUNNER_COST_GENERATED_EXPRESSION_WORK;
 static_assert(JIT_EVENT_RUNNER_COST_GPU_NET_BENEFIT - JIT_EVENT_RUNNER_COST_WORK_COLUMN_OFFSET + 1 ==
@@ -416,8 +418,7 @@ static unique_ptr<FunctionData> DuckDBJitEventsBind(ClientContext &context, Tabl
 	AddExecutionRegionTableFunctionColumn(return_types, names, "hash_join_probe_layout", LogicalType::VARCHAR);
 	AddExecutionRegionTableFunctionColumn(return_types, names, "jit_runtime_path_counts", LogicalType::VARCHAR);
 	AddExecutionRegionTableFunctionColumn(return_types, names, "jit_runtime_proof_counts", LogicalType::VARCHAR);
-	AddExecutionRegionTableFunctionColumn(return_types, names, "jit_runtime_delegation_counts",
-	                                      LogicalType::VARCHAR);
+	AddExecutionRegionTableFunctionColumn(return_types, names, "jit_runtime_delegation_counts", LogicalType::VARCHAR);
 	AddExecutionRegionTableFunctionColumn(return_types, names, "candidate_pipeline_shape", LogicalType::VARCHAR);
 	AddJitEventRunnerCostColumns(return_types, names);
 	AddExecutionRegionCandidateTraceColumns(return_types, names);

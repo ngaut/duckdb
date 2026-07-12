@@ -113,6 +113,57 @@ static bool TryReadNativeDecimal128ScaleUp(const ExecutionExpressionIR &root, id
 	return true;
 }
 
+static bool TryGetNativeWideningMultiplySource(const ExecutionExpressionIR &cast,
+                                               SljitNativeSignedIntegerWidth &source_width, idx_t &source_index) {
+	if (cast.kind != ExecutionExpressionIRKind::CAST || cast.try_cast || !cast.left ||
+	    cast.return_type.id() != LogicalTypeId::DECIMAL || cast.physical_type != PhysicalType::INT128 ||
+	    cast.left->kind != ExecutionExpressionIRKind::REFERENCE) {
+		return false;
+	}
+	switch (cast.left->physical_type) {
+	case PhysicalType::INT8:
+		source_width = SljitNativeSignedIntegerWidth::INT8;
+		break;
+	case PhysicalType::INT16:
+		source_width = SljitNativeSignedIntegerWidth::INT16;
+		break;
+	case PhysicalType::INT32:
+		source_width = SljitNativeSignedIntegerWidth::INT32;
+		break;
+	case PhysicalType::INT64:
+		source_width = SljitNativeSignedIntegerWidth::INT64;
+		break;
+	default:
+		return false;
+	}
+	source_index = cast.left->ref_index;
+	return true;
+}
+
+static bool TryReadNativeDecimal128WideningMultiply(const ExecutionExpressionIR &root,
+                                                    SljitNativeRegionExpressionPlan &expr) {
+	if (root.kind != ExecutionExpressionIRKind::BINARY || root.binary_op != ExecutionExpressionBinaryOp::MULTIPLY ||
+	    !root.left || !root.right || root.return_type.id() != LogicalTypeId::DECIMAL ||
+	    root.physical_type != PhysicalType::INT128) {
+		return false;
+	}
+	SljitNativeSignedIntegerWidth left_width;
+	SljitNativeSignedIntegerWidth right_width;
+	idx_t left_source;
+	idx_t right_source;
+	if (!TryGetNativeWideningMultiplySource(*root.left, left_width, left_source) ||
+	    !TryGetNativeWideningMultiplySource(*root.right, right_width, right_source)) {
+		return false;
+	}
+	expr.kind = SljitNativeRegionExpressionKind::DECIMAL128_WIDENING_MULTIPLY;
+	expr.return_type = root.return_type;
+	expr.source_index = left_source;
+	expr.right_source_index = right_source;
+	expr.cast_source_width = left_width;
+	expr.right_cast_source_width = right_width;
+	return true;
+}
+
 static bool TryReadNativeDecimal64ToDouble(const ExecutionExpressionIR &root, idx_t &source_index,
                                            double &scale_factor) {
 	if (root.kind != ExecutionExpressionIRKind::CAST || root.try_cast || !root.left ||
@@ -134,6 +185,9 @@ static bool TryReadNativeDecimal64ToDouble(const ExecutionExpressionIR &root, id
 
 bool TryReadNativeScalarIntrinsicRegionExpression(const ExecutionExpressionIR &root,
                                                   SljitNativeRegionExpressionPlan &expr) {
+	if (TryReadNativeDecimal128WideningMultiply(root, expr)) {
+		return true;
+	}
 	if (TryReadNativeErrorGuardedReference(root, expr)) {
 		return true;
 	}

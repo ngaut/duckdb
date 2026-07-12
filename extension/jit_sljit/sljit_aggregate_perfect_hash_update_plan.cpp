@@ -14,7 +14,8 @@
 
 namespace duckdb {
 
-static bool SljitPerfectHashGroupExpressionsUseTypedTree(const vector<SljitNativeRegionExpressionPlan> &group_expressions) {
+static bool
+SljitPerfectHashGroupExpressionsUseTypedTree(const vector<SljitNativeRegionExpressionPlan> &group_expressions) {
 	for (auto &group_expression : group_expressions) {
 		if (group_expression.kind == SljitNativeRegionExpressionKind::TYPED_EXPRESSION_TREE) {
 			return true;
@@ -34,8 +35,7 @@ bool TryBuildSljitPerfectHashFusedUpdatePlan(
 	if (!TryBuildSljitPerfectHashGroupPlans(groups, group_expressions, contract, result.group_plans,
 	                                        typed_group_expressions) ||
 	    result.group_plans.empty() || !contract.grouped_state_layout_ready ||
-	    !BuildSljitFusedTypedAggregateCodegenPlan(payloads, aggregates, result.codegen_plan,
-	                                              typed_group_expressions)) {
+	    !BuildSljitFusedTypedAggregateCodegenPlan(payloads, aggregates, result.codegen_plan, typed_group_expressions)) {
 		error = "unsupported fused perfect-hash typed aggregate payload shape";
 		return false;
 	}

@@ -30,6 +30,10 @@ BuildSljitNativeIntegerBinaryReferences(SljitNativeIntegerKind kind, SljitNative
                                         SljitNativeVectorFunction &function, string &error,
                                         bool check_arithmetic_overflow = true, bool check_result_range = false,
                                         int64_t result_min = 0, int64_t result_max = 0);
+unique_ptr<ExecutionRegionCodeHandle>
+BuildSljitNativeDecimal128WideningMultiply(SljitNativeSignedIntegerWidth left_width,
+                                           SljitNativeSignedIntegerWidth right_width,
+                                           SljitNativeVectorFunction &function, string &error);
 unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeFlatIntegerBinaryReferences(SljitNativeIntegerKind kind,
                                                                                   SljitNativeIntegerBinaryOp op,
                                                                                   SljitNativeVectorFunction &function,
@@ -138,6 +142,8 @@ unique_ptr<ExecutionRegionCodeHandle>
 BuildSljitNativeUngroupedSumInt64Reference(SljitNativeIntegerKind kind, SljitNativeAggregateUpdateFunction &function,
                                            string &error);
 unique_ptr<ExecutionRegionCodeHandle>
+BuildSljitNativeUngroupedSumHugeint128Reference(SljitNativeAggregateUpdateFunction &function, string &error);
+unique_ptr<ExecutionRegionCodeHandle>
 BuildSljitNativeUngroupedSumDoubleReference(SljitNativeDoubleSourceKind kind,
                                             SljitNativeAggregateUpdateFunction &function, string &error);
 unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeUngroupedCountStar(SljitNativeAggregateUpdateFunction &function,
@@ -150,6 +156,8 @@ BuildSljitNativeGroupedSumInt64Reference(SljitNativeIntegerKind kind, SljitNativ
 unique_ptr<ExecutionRegionCodeHandle>
 BuildSljitNativeGroupedSumHugeintReference(SljitNativeIntegerKind kind, SljitNativeAggregateUpdateFunction &function,
                                            string &error);
+unique_ptr<ExecutionRegionCodeHandle>
+BuildSljitNativeGroupedSumHugeint128Reference(SljitNativeAggregateUpdateFunction &function, string &error);
 unique_ptr<ExecutionRegionCodeHandle>
 BuildSljitNativeGroupedSumDoubleReference(SljitNativeDoubleSourceKind kind,
                                           SljitNativeAggregateUpdateFunction &function, string &error);

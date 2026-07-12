@@ -1451,9 +1451,8 @@ struct JitCboNativeOperatorStageBenefitSetting {
 struct JitCboSourceContractScanFilterPenaltySetting {
 	using RETURN_TYPE = idx_t;
 	static constexpr const char *Name = "jit_cbo_source_contract_scan_filter_penalty";
-	static constexpr const char *Description =
-	    "Per-vector protocol cost for scan-filtered source contracts feeding native join fusion in the JIT CBO "
-	    "physical-runner decision";
+	static constexpr const char *Description = "Per-vector protocol cost for scan-filtered source contracts feeding "
+	                                           "native join fusion in the JIT CBO physical-runner decision";
 	static constexpr const char *InputType = "UBIGINT";
 	static constexpr const char *DefaultValue = "4096";
 	static constexpr SettingScopeTarget Scope = SettingScopeTarget::LOCAL_DEFAULT;
@@ -1520,7 +1519,7 @@ struct JitPolicySetting {
 struct JitTraceDecisionsSetting {
 	using RETURN_TYPE = bool;
 	static constexpr const char *Name = "jit_trace_decisions";
-	static constexpr const char *Description = "Record physical-runner decision events";
+	static constexpr const char *Description = "Record detailed per-candidate physical-runner decision events";
 	static constexpr const char *InputType = "BOOLEAN";
 	static constexpr const char *DefaultValue = "false";
 	static constexpr SettingScopeTarget Scope = SettingScopeTarget::LOCAL_DEFAULT;

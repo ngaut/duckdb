@@ -29,12 +29,12 @@ static bool TryPrepareFlatFusedFixedProjectionSources(SljitExecutableRegionOp &o
                                                       optional_ptr<SljitFixedDirectProjectionSourceCache> source_cache,
                                                       PROJECTION_SCRATCH &adapter_scratch) {
 	if (op.flat_fused_fixed_projection_plans.empty() ||
-	    op.flat_fused_fixed_projection_plans.size() != op.flat_fused_fixed_projection_functions.size()) {
+	    op.flat_fused_fixed_projection_plans.size() != op.flat_fused_fixed_projections.size()) {
 		return false;
 	}
 	adapter_scratch.Prepare(op.projections.size(), true);
 	for (idx_t plan_idx = 0; plan_idx < op.flat_fused_fixed_projection_plans.size(); plan_idx++) {
-		if (!op.flat_fused_fixed_projection_functions[plan_idx]) {
+		if (!op.flat_fused_fixed_projections[plan_idx].Function()) {
 			return false;
 		}
 		auto &direct_plan = op.flat_fused_fixed_projection_plans[plan_idx];
@@ -106,9 +106,9 @@ static void RunFlatFusedFixedProjection(SljitExecutableRegionOp &op, idx_t count
 	native_input.overflow_messages = adapter_scratch.overflow_messages.data();
 	native_input.count = count;
 	native_input.has_error = false;
-	for (auto function : op.flat_fused_fixed_projection_functions) {
+	for (auto &projection : op.flat_fused_fixed_projections) {
 		native_input.error = nullptr;
-		SljitExecuteNativeFunction(function, native_input);
+		SljitExecuteNativeFunction(projection.Function(), native_input);
 	}
 }
 

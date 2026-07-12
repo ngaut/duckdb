@@ -156,8 +156,7 @@ static bool CounterNameHasComponent(const string &name, const string &component)
 	return false;
 }
 
-static bool CounterNameHasComponent(const vector<ExecutionRegionRecordedCounter> &counters,
-                                    const string &component) {
+static bool CounterNameHasComponent(const vector<ExecutionRegionRecordedCounter> &counters, const string &component) {
 	for (auto &counter : counters) {
 		if (CounterNameHasComponent(counter.counter.name, component)) {
 			return true;
@@ -346,9 +345,9 @@ static void ConfigureSljit(Connection &con, const string &policy = "auto", bool 
 	ConfigureSljitSettings(con, policy, verify, dump_ir, trace_runtime, event_log_size);
 }
 
-static void ConfigureJitCoverageCbo(Connection &con) {
+static void ConfigureJitCoverageCbo(Connection &con, idx_t threads = 1) {
 	// Coverage tests must reach generated code paths even when production CBO would reject stateful protocol glue.
-	REQUIRE_NO_FAIL(con.Query("SET threads=1"));
+	REQUIRE_NO_FAIL(con.Query("SET threads=" + to_string(threads)));
 	REQUIRE_NO_FAIL(con.Query("SET jit_cbo_generated_stage_benefit=4096"));
 	REQUIRE_NO_FAIL(con.Query("SET jit_cbo_materialization_elision_benefit=4096"));
 	REQUIRE_NO_FAIL(con.Query("SET jit_cbo_native_operator_stage_benefit=1048576"));
@@ -363,15 +362,16 @@ static void ConfigureJitDecisionTrace(Connection &con) {
 }
 
 static void ConfigureSljitForCoverageSettings(Connection &con, bool verify = false, bool dump_ir = false,
-                                              bool trace_runtime = false, idx_t event_log_size = 10000) {
+                                              bool trace_runtime = false, idx_t event_log_size = 10000,
+                                              idx_t threads = 1) {
 	ConfigureSljitSettings(con, "auto", verify, dump_ir, trace_runtime, event_log_size);
-	ConfigureJitCoverageCbo(con);
+	ConfigureJitCoverageCbo(con, threads);
 }
 
 static void ConfigureSljitForCoverage(Connection &con, bool verify = false, bool dump_ir = false,
-                                      bool trace_runtime = false, idx_t event_log_size = 10000) {
+                                      bool trace_runtime = false, idx_t event_log_size = 10000, idx_t threads = 1) {
 	LoadSljit(con);
-	ConfigureSljitForCoverageSettings(con, verify, dump_ir, trace_runtime, event_log_size);
+	ConfigureSljitForCoverageSettings(con, verify, dump_ir, trace_runtime, event_log_size, threads);
 }
 
 static PhysicalRunnerCostParameters ZeroStartupRunnerCostParameters() {

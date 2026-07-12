@@ -169,10 +169,10 @@ static void setTextMode(FILE *file, int isOutput) {
 /* True if the timer is enabled */
 static bool enableTimer = false;
 
-/* Return the current wall-clock time */
-static int64_t timeOfDay(void) {
-	auto current_time = std::chrono::system_clock::now().time_since_epoch();
-	return (int64_t)std::chrono::duration_cast<std::chrono::milliseconds>(current_time).count();
+/* Return monotonic elapsed-time ticks in microseconds. */
+static int64_t monotonicTimeMicros(void) {
+	auto current_time = std::chrono::steady_clock::now().time_since_epoch();
+	return (int64_t)std::chrono::duration_cast<std::chrono::microseconds>(current_time).count();
 }
 
 #if !defined(_WIN32) && !defined(WIN32) && !defined(__minux)
@@ -198,7 +198,7 @@ static int64_t iBegin;       /* Wall-clock time at start */
 static void beginTimer(void) {
 	if (enableTimer) {
 		getrusage(RUSAGE_SELF, &sBegin);
-		iBegin = timeOfDay();
+		iBegin = monotonicTimeMicros();
 	}
 }
 
@@ -212,10 +212,10 @@ static double timeDiff(struct timeval *pStart, struct timeval *pEnd) {
 */
 static void endTimer(void) {
 	if (enableTimer) {
-		int64_t iEnd = timeOfDay();
+		int64_t iEnd = monotonicTimeMicros();
 		struct rusage sEnd;
 		getrusage(RUSAGE_SELF, &sEnd);
-		printf("Run Time (s): real %.3f user %f sys %f\n", (iEnd - iBegin) * 0.001,
+		printf("Run Time (s): real %.6f user %f sys %f\n", (iEnd - iBegin) * 0.000001,
 		       timeDiff(&sBegin.ru_utime, &sEnd.ru_utime), timeDiff(&sBegin.ru_stime, &sEnd.ru_stime));
 	}
 }
@@ -270,7 +270,7 @@ static void beginTimer(void) {
 	if (enableTimer && getProcessTimesAddr) {
 		FILETIME ftCreation, ftExit;
 		getProcessTimesAddr(hProcess, &ftCreation, &ftExit, &ftKernelBegin, &ftUserBegin);
-		ftWallBegin = timeOfDay();
+		ftWallBegin = monotonicTimeMicros();
 	}
 }
 
@@ -287,9 +287,9 @@ static double timeDiff(FILETIME *pStart, FILETIME *pEnd) {
 static void endTimer(void) {
 	if (enableTimer && getProcessTimesAddr) {
 		FILETIME ftCreation, ftExit, ftKernelEnd, ftUserEnd;
-		int64_t ftWallEnd = timeOfDay();
+		int64_t ftWallEnd = monotonicTimeMicros();
 		getProcessTimesAddr(hProcess, &ftCreation, &ftExit, &ftKernelEnd, &ftUserEnd);
-		printf("Run Time (s): real %.3f user %f sys %f\n", (ftWallEnd - ftWallBegin) * 0.001,
+		printf("Run Time (s): real %.6f user %f sys %f\n", (ftWallEnd - ftWallBegin) * 0.000001,
 		       timeDiff(&ftUserBegin, &ftUserEnd), timeDiff(&ftKernelBegin, &ftKernelEnd));
 	}
 }

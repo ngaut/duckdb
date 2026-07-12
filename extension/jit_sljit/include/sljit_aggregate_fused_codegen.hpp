@@ -8,6 +8,7 @@
 
 #pragma once
 
+#include "sljit_aggregate_payload_descriptor.hpp"
 #include "sljit_codegen_internal.hpp"
 #include "sljit_region_plan.hpp"
 #include "sljit_typed_expression_plan.hpp"
@@ -22,6 +23,9 @@ struct sljit_jump *EmitFusedAggregateJumpIfValidityNull(struct sljit_compiler *c
 void EmitLoadFusedAggregateIntegerData(struct sljit_compiler *compiler, sljit_sw source_data_array_offset,
                                        idx_t lane_idx, SljitNativeIntegerKind kind, sljit_s32 index_reg,
                                        sljit_s32 target_reg);
+void EmitLoadFusedAggregateHugeintData(struct sljit_compiler *compiler, sljit_sw source_data_array_offset,
+                                       idx_t lane_idx, sljit_s32 index_reg, sljit_s32 lower_target_reg,
+                                       sljit_s32 upper_target_reg);
 void EmitLoadFusedAggregateDoubleData(struct sljit_compiler *compiler, sljit_sw source_data_array_offset,
                                       idx_t lane_idx, sljit_s32 index_reg, sljit_s32 target_freg);
 sljit_jump *EmitLoadFusedTypedAggregateReferenceValue(
@@ -30,12 +34,13 @@ sljit_jump *EmitLoadFusedTypedAggregateReferenceValue(
     const vector<SljitTypedExpressionTreeDataPointerHoist> *data_hoists = nullptr);
 
 bool SljitAggregateTypedPayloadPlanSupported(const SljitTypedExpressionTreePlan &payload_plan,
-                                             const ExecutionRegionAggregateInput &aggregate);
+                                             const SljitAggregatePayloadDescriptor &descriptor);
 bool SljitFusedGroupedPrimitiveAggregatePayloadSupported(const SljitNativeRegionExpressionPlan &payload,
                                                          const ExecutionRegionAggregateInput &aggregate,
                                                          const ExecutionRegionAggregateContract &contract);
 bool SljitFusedGroupedTypedAggregatePayloadSupported(const SljitNativeRegionExpressionPlan &payload,
                                                      const ExecutionRegionAggregateInput &aggregate,
-                                                     const ExecutionRegionAggregateContract &contract);
+                                                     const ExecutionRegionAggregateContract &contract,
+                                                     SljitAggregatePayloadDescriptor *descriptor = nullptr);
 
 } // namespace duckdb

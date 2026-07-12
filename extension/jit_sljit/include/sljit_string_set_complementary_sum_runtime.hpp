@@ -11,6 +11,7 @@
 #include "sljit_aggregate_preaggregated_update_runtime.hpp"
 #include "sljit_aggregate_row_pointer_preaggregation.hpp"
 #include "sljit_grouped_aggregate_state_runtime.hpp"
+#include "sljit_grouped_reduction_lane.hpp"
 #include "sljit_string_set_case_projection_runtime.hpp"
 
 #include "duckdb/function/scalar/string_common.hpp"
@@ -35,21 +36,15 @@ struct SljitStringSetComplementarySumDescriptor {
 	std::array<SljitStringConstantSignature, SljitStringSetCaseGroupedPayloadProjection::CONSTANT_COUNT> signatures;
 };
 
-static bool SljitStringSetComplementarySumLaneSupported(const ExecutionRegionAggregateInput &aggregate,
+static bool SljitStringSetComplementarySumLaneSupported(const SljitAggregatePayloadDescriptor &descriptor,
                                                         const ExecutionRegionAggregateContract &contract,
                                                         const ExecutionPrimitiveAggregateUpdateLane *lane,
                                                         const SljitExecutableRegionExpression &payload) {
-	if (!lane || !lane->ready || lane->state_size == 0 || lane->aggregate_index != aggregate.aggregate_index ||
-	    aggregate.aggregate_index >= contract.grouped_state_offsets.size() ||
-	    lane->state_offset != contract.grouped_state_offsets[aggregate.aggregate_index] ||
-	    lane->state_value_offset != aggregate.primitive_update_state_value_offset ||
-	    lane->state_is_set_offset != aggregate.primitive_update_state_is_set_offset ||
-	    lane->kind != aggregate.primitive_update_kind ||
-	    (lane->kind != AggregatePrimitiveUpdateKind::SUM_INT64 &&
-	     lane->kind != AggregatePrimitiveUpdateKind::SUM_HUGEINT) ||
-	    lane->payload_type != PhysicalType::INT32 || payload.plan.return_type.id() != LogicalTypeId::INTEGER ||
-	    aggregate.child_count != 1 || aggregate.child_types.size() != 1 ||
-	    aggregate.child_types[0].InternalType() != PhysicalType::INT32) {
+	SljitGroupedReductionLaneBinding reduction_lane;
+	if (!SljitTryBindGroupedReductionLane(contract, descriptor, lane, reduction_lane) ||
+	    (descriptor.primitive_kind != AggregatePrimitiveUpdateKind::SUM_INT64 &&
+	     descriptor.primitive_kind != AggregatePrimitiveUpdateKind::SUM_HUGEINT) ||
+	    descriptor.input_type != PhysicalType::INT32 || payload.plan.return_type.id() != LogicalTypeId::INTEGER) {
 		return false;
 	}
 	return true;
@@ -110,19 +105,19 @@ static bool SljitStringSetComplementarySumInputIsVarchar(DataChunk &payload_inpu
 static bool SljitTryBindStringSetComplementarySumLanes(
     SljitExecutableRegionOp &op, const vector<const ExecutionPrimitiveAggregateUpdateLane *> &payload_lanes,
     const SljitStringSetComplementarySumDescriptor &descriptor, SljitStringSetComplementarySumUpdateState &state) {
-	if (payload_lanes.size() != 2) {
+	if (payload_lanes.size() != 2 || op.aggregate_update.payload_descriptors.size() != 2) {
 		return false;
 	}
 	auto &aggregate_update = op.aggregate_update;
 	auto &sink_info = aggregate_update.plan.sink_info;
-	if (!SljitStringSetComplementarySumLaneSupported(sink_info.aggregates[descriptor.matching_payload_idx],
-	                                                 sink_info.aggregate_contract,
-	                                                 payload_lanes[descriptor.matching_payload_idx],
-	                                                 aggregate_update.payloads[descriptor.matching_payload_idx]) ||
-	    !SljitStringSetComplementarySumLaneSupported(sink_info.aggregates[descriptor.non_matching_payload_idx],
-	                                                 sink_info.aggregate_contract,
-	                                                 payload_lanes[descriptor.non_matching_payload_idx],
-	                                                 aggregate_update.payloads[descriptor.non_matching_payload_idx])) {
+	if (!SljitStringSetComplementarySumLaneSupported(
+	        aggregate_update.payload_descriptors[descriptor.matching_payload_idx], sink_info.aggregate_contract,
+	        payload_lanes[descriptor.matching_payload_idx],
+	        aggregate_update.payloads[descriptor.matching_payload_idx]) ||
+	    !SljitStringSetComplementarySumLaneSupported(
+	        aggregate_update.payload_descriptors[descriptor.non_matching_payload_idx], sink_info.aggregate_contract,
+	        payload_lanes[descriptor.non_matching_payload_idx],
+	        aggregate_update.payloads[descriptor.non_matching_payload_idx])) {
 		return false;
 	}
 

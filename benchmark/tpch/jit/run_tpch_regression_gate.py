@@ -70,7 +70,7 @@ def require_artifact_dir(path: Path, label: str) -> None:
             )
 
 
-def load_baseline_state(path: Path) -> Path | None:
+def read_baseline_state(path: Path) -> dict | None:
     if not path.is_file():
         return None
     try:
@@ -80,12 +80,53 @@ def load_baseline_state(path: Path) -> Path | None:
         raise TPCHConfigurationError(
             f"baseline state is not valid JSON: {path}"
         ) from exc
+    return state
+
+
+def load_baseline_state(path: Path) -> Path | None:
+    state = read_baseline_state(path)
+    if state is None:
+        return None
     baseline = state.get("current_baseline")
     if not baseline:
         raise TPCHConfigurationError(
             f"baseline state is missing current_baseline: {path}"
         )
     return Path(baseline).resolve()
+
+
+def apply_baseline_state_contract(args: argparse.Namespace, state: dict) -> None:
+    state_scale_factor = state.get("scale_factor")
+    if state_scale_factor is None:
+        raise TPCHConfigurationError(
+            f"baseline state is missing scale_factor: {args.baseline_state}"
+        )
+    state_scale_factor = float(state_scale_factor)
+    if args.scale_factor is None:
+        args.scale_factor = state_scale_factor
+    elif args.scale_factor != state_scale_factor:
+        raise TPCHConfigurationError(
+            f"requested scale factor {args.scale_factor:g} does not match accepted baseline "
+            f"scale factor {state_scale_factor:g}: {args.baseline_state}"
+        )
+    state_threads = int(state.get("threads", 0))
+    if state_threads != args.threads:
+        raise TPCHConfigurationError(
+            f"requested thread count {args.threads} does not match accepted baseline "
+            f"thread count {state_threads}: {args.baseline_state}"
+        )
+    state_timing_mode = state.get("timing_mode")
+    if state_timing_mode != args.timing_mode:
+        raise TPCHConfigurationError(
+            f"requested timing mode {args.timing_mode} does not match accepted baseline "
+            f"timing mode {state_timing_mode}: {args.baseline_state}"
+        )
+    state_queries = set(normalize_tpch_query_ids(state.get("queries", [])))
+    missing_queries = [query for query in args.queries if query not in state_queries]
+    if missing_queries:
+        raise TPCHConfigurationError(
+            f"accepted baseline does not cover requested queries {' '.join(missing_queries)}: {args.baseline_state}"
+        )
 
 
 def write_baseline_state(
@@ -266,6 +307,7 @@ def benchmark_command(
     event_log_size: int | None = None,
     trace_decisions: bool | None = None,
     trace_runtime: bool | None = None,
+    reuse_database: bool = False,
 ) -> list[str]:
     queries = queries if queries is not None else args.queries
     repeats = repeats if repeats is not None else args.repeats
@@ -301,7 +343,11 @@ def benchmark_command(
     ]
     if args.db is not None:
         command.extend(["--db", str(args.db)])
-    add_bool_flag(command, args.use_existing_db, "--use-existing-db")
+    add_bool_flag(
+        command,
+        args.use_existing_db or (reuse_database and args.keep_db),
+        "--use-existing-db",
+    )
     add_bool_flag(command, args.keep_db, "--keep-db")
     add_bool_flag(command, trace_decisions, "--trace-decisions")
     add_bool_flag(command, trace_runtime, "--trace-runtime")
@@ -349,6 +395,21 @@ def verify_command(
     return command
 
 
+def summary_counter(row: dict[str, str], name: str) -> int:
+    value = row.get(name, "0") or "0"
+    try:
+        result = int(value)
+    except ValueError as exc:
+        raise TPCHConfigurationError(
+            f"summary.csv has invalid {name} value {value!r}"
+        ) from exc
+    if result < 0:
+        raise TPCHConfigurationError(
+            f"summary.csv has negative {name} value {result}"
+        )
+    return result
+
+
 def selected_auto_queries(out_dir: Path, fallback_queries: list[str]) -> list[str]:
     summary_path = out_dir / "summary.csv"
     if not summary_path.is_file():
@@ -358,11 +419,11 @@ def selected_auto_queries(out_dir: Path, fallback_queries: list[str]) -> list[st
         for row in csv.DictReader(handle):
             if row.get("policy") != "auto":
                 continue
-            try:
-                compiled_regions = int(row.get("compiled_regions", "0") or "0")
-            except ValueError:
-                compiled_regions = 0
-            if compiled_regions > 0:
+            compiled_regions = summary_counter(row, "compiled_regions")
+            selected_accelerated_runners = summary_counter(
+                row, "runner_cost_selected_accelerated_runner_count"
+            )
+            if compiled_regions > 0 or selected_accelerated_runners > 0:
                 selected.append(row["query"])
     return sorted(set(selected), key=lambda query: int(query))
 
@@ -448,6 +509,7 @@ def triage_failed_comparison(
             event_log_size=args.event_log_size,
             trace_decisions=False,
             trace_runtime=False,
+            reuse_database=True,
         ),
         "focused recheck benchmark",
     )
@@ -494,6 +556,7 @@ def triage_failed_comparison(
                 event_log_size=args.triage_event_log_size,
                 trace_decisions=True,
                 trace_runtime=True,
+                reuse_database=True,
             ),
             "focused profile benchmark",
         )
@@ -533,6 +596,7 @@ def build_promoted_baseline(
             event_log_size=0,
             trace_decisions=False,
             trace_runtime=False,
+            reuse_database=True,
         ),
         "baseline promotion high-sample benchmark",
     )
@@ -562,6 +626,7 @@ def build_promoted_baseline(
                 event_log_size=0,
                 trace_decisions=False,
                 trace_runtime=False,
+                reuse_database=True,
             ),
             "baseline promotion focused high-sample benchmark",
         )
@@ -654,7 +719,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--timing-mode", choices=("production", "profile"), default="production"
     )
-    parser.add_argument("--scale-factor", type=float, default=1)
+    parser.add_argument(
+        "--scale-factor",
+        type=float,
+        default=None,
+        help="TPC-H scale factor. Defaults to the accepted baseline state's scale factor.",
+    )
     parser.add_argument("--threads", type=int, default=1)
     parser.add_argument("--db", type=Path, default=None)
     parser.add_argument("--use-existing-db", action="store_true")
@@ -728,6 +798,17 @@ def validate_args(args: argparse.Namespace) -> tuple[Path | None, Path]:
     args.build_dir = args.build_dir.resolve()
     args.baseline_state = args.baseline_state.resolve()
     args.queries = normalize_tpch_query_ids(args.queries)
+    uses_baseline_state = (
+        not args.init_baseline
+        and args.baseline is None
+        and not os.environ.get(DEFAULT_BASELINE_ENV)
+    )
+    if uses_baseline_state:
+        state = read_baseline_state(args.baseline_state)
+        if state is not None:
+            apply_baseline_state_contract(args, state)
+    if args.scale_factor is None:
+        args.scale_factor = 1.0
     if args.repeats <= 0:
         raise TPCHConfigurationError("--repeats must be positive")
     if args.threads <= 0:
@@ -801,6 +882,7 @@ def main() -> int:
                     ),
                     trace_decisions=False,
                     trace_runtime=True,
+                    reuse_database=True,
                 ),
                 "runtime contract benchmark",
             )

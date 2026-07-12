@@ -135,12 +135,9 @@ static bool SljitTryMaterializeHashJoinRHSDateYearProjectionToBatch(const Execut
 	return true;
 }
 
-static bool
-SljitTryMaterializeHashJoinRHSInlineStringDecompressProjectionToBatch(const ExecutionHashJoinProbeBinding &binding,
-                                                                      const SljitNativeRegionExpressionPlan &plan,
-                                                                      idx_t rhs_col_idx, Vector &row_pointers,
-                                                                      Vector &target, idx_t current_size,
-                                                                      idx_t count) {
+static bool SljitTryMaterializeHashJoinRHSInlineStringDecompressProjectionToBatch(
+    const ExecutionHashJoinProbeBinding &binding, const SljitNativeRegionExpressionPlan &plan, idx_t rhs_col_idx,
+    Vector &row_pointers, Vector &target, idx_t current_size, idx_t count) {
 	if (plan.kind != SljitNativeRegionExpressionKind::STRING_DECOMPRESS || plan.source_index != 0 ||
 	    plan.string_decompress_source_size != sizeof(uhugeint_t) || plan.return_type != target.GetType() ||
 	    target.GetType().id() != LogicalTypeId::VARCHAR || target.GetVectorType() != VectorType::FLAT_VECTOR ||
@@ -281,7 +278,7 @@ static bool SljitTryMaterializeHashJoinComputedRHSProjectionToBatch(const Execut
 		used_row_pointer_generated_source = true;
 		return true;
 	}
-	if (!remapped_expr.function && !remapped_expr.flat_function) {
+	if (!remapped_expr.vector.Function() && !remapped_expr.flat.Function()) {
 		return false;
 	}
 

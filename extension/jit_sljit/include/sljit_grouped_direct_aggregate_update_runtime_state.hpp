@@ -78,6 +78,7 @@ private:
 		auto &input_chunk = SljitBindRuntimeBatchInput(input, "SLJIT grouped aggregate direct update");
 		auto &aggregate_op = ops[primitive.aggregate_idx];
 		auto &native_runtime = runtime.ExecutionOperators();
+		auto &bound_direct_update = scratch.AggregateBoundGroupedUpdate(primitive.aggregate_idx);
 		SljitBindGroupedPrimitiveAggregateUpdate(native_runtime, scratch, primitive.aggregate_idx, aggregate_op,
 		                                         input_chunk, bound_direct_update);
 		auto sink_result = SljitExecuteBoundGroupedPrimitiveAggregateUpdate(
@@ -112,6 +113,7 @@ private:
 
 		auto &aggregate_op = ops[primitive.aggregate_idx];
 		auto &native_runtime = runtime.ExecutionOperators();
+		auto &bound_direct_update = scratch.AggregateBoundGroupedUpdate(primitive.aggregate_idx);
 		SljitBindGroupedPrimitiveAggregateUpdate(native_runtime, scratch, primitive.aggregate_idx, aggregate_op,
 		                                         input_chunk, bound_direct_update);
 		auto sink_result = SljitExecuteBoundGroupedPrimitiveAggregateUpdate(
@@ -275,7 +277,6 @@ private:
 	SljitPendingPreaggregatedPrimitiveGroupBatch projected_direct_preaggregated_batch;
 	vector<ExecutionRowPointerGroupKeySource> projected_direct_group_sources;
 	string projected_direct_failure_reason;
-	SljitBoundGroupedPrimitiveAggregateUpdate bound_direct_update;
 };
 
 } // namespace duckdb

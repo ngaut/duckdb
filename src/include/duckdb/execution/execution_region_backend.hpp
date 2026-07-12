@@ -24,12 +24,12 @@ struct ExecutionRegionBackendInfo {
 	bool selected = false;
 };
 
-class ExecutionRegionBackendPlan {
+class DUCKDB_API ExecutionRegionBackendPlan {
 public:
 	virtual ~ExecutionRegionBackendPlan();
 };
 
-struct ExecutionRegionCompilationInput {
+struct DUCKDB_API ExecutionRegionCompilationInput {
 	ExecutionRegionCompilationInput(ClientContext &context, const ExecutionRegionIR &region_ir,
 	                                const ExecutionRegionCandidate &candidate);
 
@@ -45,7 +45,7 @@ struct ExecutionRegionCompileTimings {
 	int64_t kernel_build_time_us = 0;
 };
 
-struct ExecutionRegionCompileResult {
+struct DUCKDB_API ExecutionRegionCompileResult {
 	static ExecutionRegionCompileResult Compiled(unique_ptr<ExecutionRegionKernel> kernel,
 	                                             ExecutionRegionExecutionMode execution_mode, string reason = string(),
 	                                             string ir = string());
@@ -61,7 +61,7 @@ struct ExecutionRegionCompileResult {
 	unique_ptr<ExecutionRegionKernel> kernel;
 };
 
-class ExecutionRegionBackend {
+class DUCKDB_API ExecutionRegionBackend {
 public:
 	virtual ~ExecutionRegionBackend();
 

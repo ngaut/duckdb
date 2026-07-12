@@ -128,16 +128,16 @@ static void SljitBindUngroupedPrimitiveAggregateUpdate(ExecutionOperatorRuntime 
 	if (aggregates.size() != op.aggregate_update.payloads.size()) {
 		throw InternalException("SLJIT ungrouped aggregate primitive payload count mismatch");
 	}
-	if (!op.aggregate_update.fused_payload_update_function &&
-	    aggregates.size() != op.aggregate_update.payload_update_functions.size()) {
+	if (!op.aggregate_update.fused_payload_update.Function() &&
+	    aggregates.size() != op.aggregate_update.payload_updates.size()) {
 		throw InternalException("SLJIT ungrouped aggregate primitive payload function count mismatch");
 	}
-	auto &payload_lanes = scratch.AggregatePayloadLanes(op_idx, aggregates, primitive);
+	auto &payload_lanes = scratch.AggregatePayloadLanes(op_idx, op.aggregate_update.payload_descriptors, primitive);
 	auto &payload_scratch = scratch.AggregatePayloadScratch(op_idx);
-	if (op.aggregate_update.fused_payload_update_function) {
+	if (op.aggregate_update.fused_payload_update.Function()) {
 		SljitBindSingleFusedPrimitiveAggregatePayloadUpdate(
-		    op.aggregate_update.payloads, op.aggregate_update.fused_payload_update_function, aggregates, payload_lanes,
-		    bound.single_fused_payload_update);
+		    op.aggregate_update.payloads, op.aggregate_update.fused_payload_update.Function(),
+		    op.aggregate_update.payload_descriptors, payload_lanes, bound.single_fused_payload_update);
 	}
 	bound.ready = true;
 	bound.op_idx = op_idx;
@@ -174,14 +174,14 @@ SljitExecuteBoundUngroupedPrimitiveAggregateUpdate(ExecutionRegionRuntime &runti
 	auto &payload_lanes = *bound.payload_lanes;
 	auto &payload_scratch = *bound.payload_scratch;
 	const auto trace_runtime = runtime.TraceRuntime();
-	if (op.aggregate_update.fused_payload_update_function) {
+	if (op.aggregate_update.fused_payload_update.Function()) {
 		auto payload_stage_start =
 		    trace_runtime ? SljitRegionStageStart(runtime) : std::chrono::steady_clock::time_point();
 		if (!SljitExecuteBoundSingleFusedPrimitiveAggregatePayloadUpdate(bound.single_fused_payload_update, input,
 		                                                                 execute_sel, count, payload_scratch)) {
 			SljitExecuteFusedPrimitiveAggregatePayloadUpdate(
-			    op.aggregate_update.payloads, op.aggregate_update.fused_payload_update_function, aggregates,
-			    payload_lanes, input, execute_sel, count, payload_scratch);
+			    op.aggregate_update.payloads, op.aggregate_update.fused_payload_update.Function(),
+			    op.aggregate_update.payload_descriptors, payload_lanes, input, execute_sel, count, payload_scratch);
 		}
 		if (trace_runtime) {
 			RecordSljitRegionMaterializationElisionPath(runtime, op.kind, "fused_payload_update");
@@ -200,16 +200,16 @@ SljitExecuteBoundUngroupedPrimitiveAggregateUpdate(ExecutionRegionRuntime &runti
 		auto payload_stage_start =
 		    trace_runtime ? SljitRegionStageStart(runtime) : std::chrono::steady_clock::time_point();
 		SljitExecutePrimitiveAggregatePayloadUpdate(
-		    op.aggregate_update.payloads[payload_idx], op.aggregate_update.payload_update_functions[payload_idx], *lane,
-		    input, execute_sel, count, scratch.ExpressionAdapterScratch(bound.op_idx, payload_idx));
+		    op.aggregate_update.payloads[payload_idx], op.aggregate_update.payload_updates[payload_idx].Function(),
+		    *lane, op.aggregate_update.payload_descriptors[payload_idx], input, execute_sel, count,
+		    scratch.ExpressionAdapterScratch(bound.op_idx, payload_idx));
 		if (trace_runtime) {
 			RecordSljitRegionStageRuntime(runtime, bound.op_idx, op.kind, "primitive_payload_update",
 			                              payload_stage_start);
 		}
 	}
 	if (trace_runtime) {
-		RecordSljitRegionMaterializationElisionPath(runtime, op.kind, "primitive_payload_update",
-		                                            aggregates.size());
+		RecordSljitRegionMaterializationElisionPath(runtime, op.kind, "primitive_payload_update", aggregates.size());
 	}
 	return SinkResultType::NEED_MORE_INPUT;
 }

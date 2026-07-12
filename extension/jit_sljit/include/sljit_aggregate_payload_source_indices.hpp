@@ -21,8 +21,10 @@ static bool SljitTryBuildAggregatePayloadSourceIndices(
     HANDLE_DIRECT_PAYLOAD &&handle_direct_payload, SET_BLOCKER &&set_blocker) {
 	uses_fused_update = false;
 	vector<idx_t> fused_payload_sources;
-	if (SljitFusedAggregatePayloadsUseTypedExpressionTrees(aggregate_update.payloads, aggregates) &&
-	    SljitTryGetFusedTypedPayloadCombinedSources(aggregate_update.payloads, aggregates, fused_payload_sources)) {
+	if (SljitFusedAggregatePayloadsUseTypedExpressionTrees(aggregate_update.payloads,
+	                                                       aggregate_update.payload_descriptors) &&
+	    SljitTryGetFusedTypedPayloadCombinedSources(aggregate_update.payloads, aggregate_update.payload_descriptors,
+	                                                fused_payload_sources)) {
 		for (auto source_idx : fused_payload_sources) {
 			if (!handle_fused_source(source_idx)) {
 				return false;

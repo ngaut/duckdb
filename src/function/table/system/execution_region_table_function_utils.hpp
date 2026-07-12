@@ -66,6 +66,8 @@ static constexpr ExecutionRegionTraceColumn EXECUTION_REGION_RUNNER_COST_PROFILE
     {"runner_cost_input_scope", LogicalTypeId::VARCHAR},
     {"runner_cost_admission_class", LogicalTypeId::VARCHAR},
     {"runner_cost_selection_reason", LogicalTypeId::VARCHAR},
+    {"runner_cost_grouped_aggregate_estimated_cardinality", LogicalTypeId::BIGINT},
+    {"runner_cost_required_runtime_proofs", LogicalTypeId::VARCHAR},
 };
 
 static constexpr idx_t EXECUTION_REGION_RUNNER_COST_PROFILE_COLUMN_COUNT =
@@ -289,6 +291,13 @@ static inline void AppendExecutionRegionRunnerCostProfileColumn(Vector &output, 
 		return;
 	case 22:
 		AppendExecutionRegionNullableString(output, cost.selection_reason);
+		return;
+	case 23:
+		output.Append(Value::BIGINT(cost.grouped_aggregate_estimated_cardinality));
+		return;
+	case 24:
+		AppendExecutionRegionNullableString(
+		    output, RenderExecutionRegionJitRuntimeProofRequirements(cost.required_runtime_proofs));
 		return;
 	default:
 		throw InternalException("Unsupported execution region runner cost profile column index");
