@@ -111,26 +111,24 @@ bool TryBuildSljitLocalPerfectHashAggregatePlan(const vector<ExecutionRegionAggr
 	result.group_count = group_count;
 	idx_t count_star_count = 0;
 	idx_t count_star_lane = DConstants::INVALID_INDEX;
-	if (result.sparse) {
-		for (idx_t aggregate_idx = 0; aggregate_idx < aggregates.size(); aggregate_idx++) {
-			if (aggregates[aggregate_idx].primitive_update_kind == AggregatePrimitiveUpdateKind::COUNT_STAR) {
-				count_star_count++;
-				count_star_lane = aggregate_idx;
-			}
-		}
-		if (count_star_count == 1) {
-			result.sparse_count_seen_lane = count_star_lane;
+	for (idx_t aggregate_idx = 0; aggregate_idx < aggregates.size(); aggregate_idx++) {
+		if (aggregates[aggregate_idx].primitive_update_kind == AggregatePrimitiveUpdateKind::COUNT_STAR) {
+			count_star_count++;
+			count_star_lane = aggregate_idx;
 		}
 	}
+	if (count_star_count == 1) {
+		result.count_seen_lane = count_star_lane;
+	}
 	if (result.sparse) {
-		if (result.sparse_count_seen_lane == DConstants::INVALID_INDEX) {
+		if (result.count_seen_lane == DConstants::INVALID_INDEX) {
 			result.group_seen_is_byte = true;
 			result.group_seen_offset = AllocateSljitLocalPerfectHashByteArray(local_size, group_count);
 		}
 		result.active_groups_offset = AllocateSljitLocalPerfectHashArray(local_size, group_count);
 		result.active_count_offset = local_size;
 		local_size += NumericCast<sljit_sw>(sizeof(sljit_sw));
-	} else {
+	} else if (result.count_seen_lane == DConstants::INVALID_INDEX) {
 		result.group_seen_offset = AllocateSljitLocalPerfectHashArray(local_size, group_count);
 	}
 	result.lanes.resize(aggregates.size());
@@ -172,7 +170,7 @@ bool TryBuildSljitLocalPerfectHashAggregatePlan(const vector<ExecutionRegionAggr
 		result.group_payload_stride = padded_stride;
 		result.group_payload_offset = local_size;
 		local_size += NumericCast<sljit_sw>(group_count) * result.group_payload_stride;
-		bool payloads_always_seen = result.sparse_count_seen_lane != DConstants::INVALID_INDEX;
+		bool payloads_always_seen = result.count_seen_lane != DConstants::INVALID_INDEX;
 		for (auto &lane : result.lanes) {
 			payloads_always_seen = payloads_always_seen && lane.saw_offset < 0;
 		}

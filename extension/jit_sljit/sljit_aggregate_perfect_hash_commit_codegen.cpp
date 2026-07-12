@@ -19,12 +19,18 @@ namespace duckdb {
 
 template <class EMIT_GROUP>
 static void EmitSljitDensePerfectHashSeenGroupCommitLoop(struct sljit_compiler *compiler, idx_t group_count,
-                                                         sljit_sw group_seen_offset, EMIT_GROUP &&emit_group) {
+                                                         sljit_sw group_seen_offset, sljit_sw count_seen_offset,
+                                                         EMIT_GROUP &&emit_group) {
 	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_S1, 0, SLJIT_IMM, 0);
 	auto loop = sljit_emit_label(compiler);
 	auto done =
 	    sljit_emit_cmp(compiler, SLJIT_GREATER_EQUAL, SLJIT_S1, 0, SLJIT_IMM, NumericCast<sljit_sw>(group_count));
-	auto group_not_seen = EmitJumpIfSljitLocalArrayZero(compiler, group_seen_offset, SLJIT_S1);
+	sljit_jump *group_not_seen;
+	if (count_seen_offset < 0) {
+		group_not_seen = EmitJumpIfSljitLocalArrayZero(compiler, group_seen_offset, SLJIT_S1);
+	} else {
+		group_not_seen = EmitJumpIfSljitLocalArrayZero(compiler, count_seen_offset, SLJIT_S1);
+	}
 	EmitSljitPerfectHashSetOutputGroup(compiler, SLJIT_S1);
 	EmitSljitPerfectHashStatePointer(compiler, SLJIT_S1, SLJIT_S4);
 	emit_group();
@@ -189,7 +195,7 @@ void EmitSljitLocalPerfectHashCommit(struct sljit_compiler *compiler,
 	}
 	if (local_plan.sparse) {
 		if (local_plan.sparse_eager_zero) {
-			auto &count_lane = local_plan.lanes[local_plan.sparse_count_seen_lane];
+			auto &count_lane = local_plan.lanes[local_plan.count_seen_lane];
 			sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_S1, 0, SLJIT_IMM, 0);
 			auto loop = sljit_emit_label(compiler);
 			auto done = sljit_emit_cmp(compiler, SLJIT_GREATER_EQUAL, SLJIT_S1, 0, SLJIT_IMM,
@@ -223,10 +229,14 @@ void EmitSljitLocalPerfectHashCommit(struct sljit_compiler *compiler,
 		sljit_set_label(done, sljit_emit_label(compiler));
 		return;
 	}
-	EmitSljitDensePerfectHashSeenGroupCommitLoop(compiler, local_plan.group_count, local_plan.group_seen_offset, [&]() {
-		EmitSljitPerfectHashCommitPayloads(compiler, local_plan, payload_descriptors, contract, SLJIT_S4,
-		                                   DenseLocalCommitLaneSource(SLJIT_S1), local_payloads_known_seen);
-	});
+	const auto count_seen_offset = local_plan.count_seen_lane == DConstants::INVALID_INDEX
+	                                   ? sljit_sw(-1)
+	                                   : local_plan.lanes[local_plan.count_seen_lane].count_offset;
+	EmitSljitDensePerfectHashSeenGroupCommitLoop(
+	    compiler, local_plan.group_count, local_plan.group_seen_offset, count_seen_offset, [&]() {
+		    EmitSljitPerfectHashCommitPayloads(compiler, local_plan, payload_descriptors, contract, SLJIT_S4,
+		                                       DenseLocalCommitLaneSource(SLJIT_S1), local_payloads_known_seen);
+	    });
 }
 
 void EmitSljitDeferredPerfectHashFlagsCommit(struct sljit_compiler *compiler,
@@ -237,7 +247,7 @@ void EmitSljitDeferredPerfectHashFlagsCommit(struct sljit_compiler *compiler,
 		return;
 	}
 	EmitSljitDensePerfectHashSeenGroupCommitLoop(
-	    compiler, deferred_plan.group_count, deferred_plan.group_seen_offset, [&]() {
+	    compiler, deferred_plan.group_count, deferred_plan.group_seen_offset, -1, [&]() {
 		    for (idx_t payload_idx = 0; payload_idx < payload_descriptors.size(); payload_idx++) {
 			    auto &descriptor = payload_descriptors[payload_idx];
 			    if (descriptor.primitive_kind == AggregatePrimitiveUpdateKind::COUNT_STAR) {

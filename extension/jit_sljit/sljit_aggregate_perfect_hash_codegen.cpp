@@ -48,7 +48,7 @@ static void EmitZeroSljitSparseLocalPerfectHashPayloads(struct sljit_compiler *c
 static void EmitZeroSljitSparseLocalPerfectHashCountSentinel(struct sljit_compiler *compiler,
                                                              const SljitLocalPerfectHashAggregatePlan &plan) {
 	D_ASSERT(SljitSparseLocalUsesCountSeen(plan));
-	const auto &lane = plan.lanes[plan.sparse_count_seen_lane];
+	const auto &lane = plan.lanes[plan.count_seen_lane];
 	D_ASSERT(lane.count_offset >= 0);
 	sljit_get_local_base(compiler, SLJIT_R0, 0, plan.group_payload_offset + lane.count_offset);
 	EmitSljitLocalPerfectHashGroupIndexLoop(compiler, plan.group_count, [&]() {
@@ -78,7 +78,9 @@ void EmitZeroSljitLocalPerfectHashAggregateArrays(struct sljit_compiler *compile
 		return;
 	}
 	EmitSljitLocalPerfectHashGroupIndexLoop(compiler, plan.group_count, [&]() {
-		EmitStoreSljitLocalGroupSeenImmediate(compiler, plan, SLJIT_S1, 0);
+		if (plan.count_seen_lane == DConstants::INVALID_INDEX) {
+			EmitStoreSljitLocalGroupSeenImmediate(compiler, plan, SLJIT_S1, 0);
+		}
 		for (auto &lane : plan.lanes) {
 			if (lane.count_offset >= 0) {
 				EmitStoreSljitLocalArrayImmediate(compiler, lane.count_offset, SLJIT_S1, 0);
@@ -114,13 +116,15 @@ void EmitMarkSljitLocalPerfectHashGroupSeen(struct sljit_compiler *compiler,
 		return;
 	}
 	if (!plan.sparse) {
-		EmitStoreSljitLocalGroupSeenImmediate(compiler, plan, group_index_reg, 1);
+		if (plan.count_seen_lane == DConstants::INVALID_INDEX) {
+			EmitStoreSljitLocalGroupSeenImmediate(compiler, plan, group_index_reg, 1);
+		}
 		return;
 	}
 	EmitSljitSparseLocalPerfectHashGroupPointer(compiler, plan, group_index_reg, group_pointer_reg);
 	if (plan.sparse_eager_zero) {
 		if (SljitSparseLocalUsesCountSeen(plan) && increment_count_seen) {
-			auto &count_seen_lane = plan.lanes[plan.sparse_count_seen_lane];
+			auto &count_seen_lane = plan.lanes[plan.count_seen_lane];
 			sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R3, 0, SLJIT_MEM1(group_pointer_reg),
 			               count_seen_lane.count_offset);
 			sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_R3, 0, SLJIT_R3, 0, SLJIT_IMM, 1);
@@ -130,7 +134,7 @@ void EmitMarkSljitLocalPerfectHashGroupSeen(struct sljit_compiler *compiler,
 		return;
 	}
 	const auto use_count_seen = SljitSparseLocalUsesCountSeen(plan);
-	const auto &count_seen_lane = use_count_seen ? plan.lanes[plan.sparse_count_seen_lane] : plan.lanes[0];
+	const auto &count_seen_lane = use_count_seen ? plan.lanes[plan.count_seen_lane] : plan.lanes[0];
 	sljit_jump *group_seen;
 	if (use_count_seen) {
 		D_ASSERT(count_seen_lane.count_offset >= 0);
@@ -174,17 +178,19 @@ void EmitMarkSljitDeferredPerfectHashGroupSeen(struct sljit_compiler *compiler,
 void EmitSljitLocalPerfectHashIncrementCount(struct sljit_compiler *compiler,
                                              const SljitLocalPerfectHashAggregateLane &lane,
                                              sljit_s32 group_index_reg) {
-	EmitLoadSljitLocalArrayValue(compiler, lane.count_offset, group_index_reg, SLJIT_R3);
+	sljit_get_local_base(compiler, SLJIT_R0, 0, lane.count_offset);
+	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R3, 0, SLJIT_MEM2(SLJIT_R0, group_index_reg), 3);
 	sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_R3, 0, SLJIT_R3, 0, SLJIT_IMM, 1);
-	EmitStoreSljitLocalArrayValue(compiler, lane.count_offset, group_index_reg, SLJIT_R3);
+	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_MEM2(SLJIT_R0, group_index_reg), 3, SLJIT_R3, 0);
 }
 
 static void EmitSljitLocalPerfectHashAccumulateInt64(struct sljit_compiler *compiler,
                                                      const SljitLocalPerfectHashAggregateLane &lane,
                                                      sljit_s32 group_index_reg, sljit_s32 value_reg) {
-	EmitLoadSljitLocalArrayValue(compiler, lane.lower_offset, group_index_reg, SLJIT_R3);
+	sljit_get_local_base(compiler, SLJIT_R0, 0, lane.lower_offset);
+	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R3, 0, SLJIT_MEM2(SLJIT_R0, group_index_reg), 3);
 	sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_R3, 0, SLJIT_R3, 0, value_reg, 0);
-	EmitStoreSljitLocalArrayValue(compiler, lane.lower_offset, group_index_reg, SLJIT_R3);
+	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_MEM2(SLJIT_R0, group_index_reg), 3, SLJIT_R3, 0);
 	if (lane.saw_offset >= 0) {
 		EmitStoreSljitLocalArrayImmediate(compiler, lane.saw_offset, group_index_reg, 1);
 	}
@@ -193,10 +199,19 @@ static void EmitSljitLocalPerfectHashAccumulateInt64(struct sljit_compiler *comp
 static void EmitSljitLocalPerfectHashAccumulateHugeint(struct sljit_compiler *compiler,
                                                        const SljitLocalPerfectHashAggregateLane &lane,
                                                        sljit_s32 group_index_reg, sljit_s32 value_reg) {
+	sljit_get_local_base(compiler, SLJIT_R0, 0, lane.lower_offset);
+	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R3, 0, SLJIT_MEM2(SLJIT_R0, group_index_reg), 3);
+	if (lane.local_lower_never_overflows) {
+		sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_R3, 0, SLJIT_R3, 0, value_reg, 0);
+		sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_MEM2(SLJIT_R0, group_index_reg), 3, SLJIT_R3, 0);
+		if (lane.saw_offset >= 0) {
+			EmitStoreSljitLocalArrayImmediate(compiler, lane.saw_offset, group_index_reg, 1);
+		}
+		return;
+	}
 	sljit_emit_op2(compiler, SLJIT_ASHR, SLJIT_R4, 0, value_reg, 0, SLJIT_IMM, 63);
-	EmitLoadSljitLocalArrayValue(compiler, lane.lower_offset, group_index_reg, SLJIT_R3);
 	sljit_emit_op2(compiler, SLJIT_ADD | SLJIT_SET_CARRY, SLJIT_R3, 0, SLJIT_R3, 0, value_reg, 0);
-	EmitStoreSljitLocalArrayValue(compiler, lane.lower_offset, group_index_reg, SLJIT_R3);
+	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_MEM2(SLJIT_R0, group_index_reg), 3, SLJIT_R3, 0);
 	sljit_emit_op_flags(compiler, SLJIT_MOV, SLJIT_R1, 0, SLJIT_CARRY);
 	sljit_emit_op2(compiler, SLJIT_OR, SLJIT_R2, 0, SLJIT_R4, 0, SLJIT_R1, 0);
 	auto no_upper_update = sljit_emit_cmp(compiler, SLJIT_EQUAL, SLJIT_R2, 0, SLJIT_IMM, 0);

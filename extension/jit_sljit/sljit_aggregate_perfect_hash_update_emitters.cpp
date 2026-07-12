@@ -170,10 +170,15 @@ void EmitSljitPerfectHashGroupLookup(const SljitPerfectHashFusedUpdateEmitContex
 			return;
 		}
 		if (!local_aggregate_plan.sparse) {
-			sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_MEM1(SLJIT_SP), context.group_index_offset, SLJIT_S4, 0);
+			if (context.group_index_reg == SLJIT_S4) {
+				sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_MEM1(SLJIT_SP), context.group_index_offset, SLJIT_S4, 0);
+			} else {
+				sljit_emit_op1(compiler, SLJIT_MOV, context.group_index_reg, 0, SLJIT_S4, 0);
+			}
 		}
-		EmitMarkSljitLocalPerfectHashGroupSeen(compiler, local_aggregate_plan, SLJIT_S4, SLJIT_PERFECT_HASH_STATE_REG,
-		                                       options.mark_local_payloads_seen, options.increment_count_seen);
+		EmitMarkSljitLocalPerfectHashGroupSeen(compiler, local_aggregate_plan, context.group_index_reg,
+		                                       SLJIT_PERFECT_HASH_STATE_REG, options.mark_local_payloads_seen,
+		                                       options.increment_count_seen);
 		return;
 	}
 	if (options.defer_flags) {
@@ -202,16 +207,19 @@ void EmitSljitPerfectHashPayloadUpdates(const SljitPerfectHashFusedUpdateEmitCon
 		const auto state_offset = contract.grouped_state_offsets[descriptor.aggregate_index];
 		if (descriptor.primitive_kind == AggregatePrimitiveUpdateKind::COUNT_STAR) {
 			if (local_aggregate_plan.enabled) {
-				if (local_aggregate_plan.sparse && payload_idx == local_aggregate_plan.sparse_count_seen_lane) {
+				if (local_aggregate_plan.sparse && payload_idx == local_aggregate_plan.count_seen_lane) {
 					continue;
 				}
 				if (local_aggregate_plan.sparse) {
 					EmitSljitSparseLocalPerfectHashIncrementCount(compiler, local_aggregate_plan.lanes[payload_idx],
 					                                              SLJIT_PERFECT_HASH_STATE_REG);
 				} else {
-					sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_S4, 0, SLJIT_MEM1(SLJIT_SP), context.group_index_offset);
+					if (context.group_index_reg == SLJIT_S4) {
+						sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_S4, 0, SLJIT_MEM1(SLJIT_SP),
+						               context.group_index_offset);
+					}
 					EmitSljitLocalPerfectHashIncrementCount(compiler, local_aggregate_plan.lanes[payload_idx],
-					                                        SLJIT_S4);
+					                                        context.group_index_reg);
 				}
 				continue;
 			}
@@ -260,9 +268,11 @@ void EmitSljitPerfectHashPayloadUpdates(const SljitPerfectHashFusedUpdateEmitCon
 					                                          SLJIT_R2, !options.all_valid);
 				}
 			} else {
-				sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_S4, 0, SLJIT_MEM1(SLJIT_SP), context.group_index_offset);
+				if (context.group_index_reg == SLJIT_S4) {
+					sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_S4, 0, SLJIT_MEM1(SLJIT_SP), context.group_index_offset);
+				}
 				EmitSljitLocalPerfectHashAccumulate(compiler, local_aggregate_plan.lanes[payload_idx],
-				                                    descriptor.primitive_kind, SLJIT_S4, SLJIT_R2);
+				                                    descriptor.primitive_kind, context.group_index_reg, SLJIT_R2);
 			}
 			EmitSljitPerfectHashPayloadInvalidContinuation(compiler, payload_invalid);
 			continue;

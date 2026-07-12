@@ -158,10 +158,16 @@ bool TryBuildSljitPerfectHashFusedUpdatePlan(
 	    result.local_aggregate_plan.sparse && SljitCanPrecomputePerfectHashStringGroupOffset(result.group_plans);
 	result.dedicated_state_register =
 	    SLJIT_HAS_DEDICATED_PERFECT_HASH_STATE_REG && !result.local_aggregate_plan.enabled;
+	result.dedicated_group_index_register = SLJIT_HAS_DEDICATED_PERFECT_HASH_STATE_REG &&
+	                                        result.local_aggregate_plan.enabled && !result.local_aggregate_plan.sparse;
 	result.state_pointer_reg = result.dedicated_state_register ? SLJIT_PERFECT_HASH_STATE_REG : SLJIT_S4;
+	result.group_index_reg = result.dedicated_group_index_register ? SLJIT_PERFECT_HASH_GROUP_INDEX_REG : SLJIT_S4;
 	result.saved_register_count = (result.dedicated_state_register || result.local_aggregate_plan.sparse)
 	                                  ? SLJIT_PERFECT_HASH_SAVED_REG_COUNT
 	                                  : NumericCast<sljit_s32>(7);
+	if (result.dedicated_group_index_register) {
+		result.saved_register_count = SLJIT_PERFECT_HASH_SAVED_REG_COUNT;
+	}
 	if (result.hoist_group_data_pointers || result.hoist_source_data_pointers) {
 		result.saved_register_count = SLJIT_PERFECT_HASH_GROUP_DATA_SAVED_REG_COUNT;
 	}

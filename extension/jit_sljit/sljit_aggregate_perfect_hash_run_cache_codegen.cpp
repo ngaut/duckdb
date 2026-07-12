@@ -3,7 +3,7 @@
 namespace duckdb {
 
 bool SljitSparseLocalUsesCountSeen(const SljitLocalPerfectHashAggregatePlan &plan) {
-	return plan.sparse_count_seen_lane != DConstants::INVALID_INDEX;
+	return plan.count_seen_lane != DConstants::INVALID_INDEX;
 }
 
 idx_t CountSljitSparseLocalRunCacheableLanes(const SljitLocalPerfectHashAggregatePlan &plan,
@@ -14,7 +14,7 @@ idx_t CountSljitSparseLocalRunCacheableLanes(const SljitLocalPerfectHashAggregat
 	}
 	idx_t result = 0;
 	for (idx_t payload_idx = 0; payload_idx < aggregates.size(); payload_idx++) {
-		if (payload_idx >= plan.lanes.size() || payload_idx == plan.sparse_count_seen_lane) {
+		if (payload_idx >= plan.lanes.size() || payload_idx == plan.count_seen_lane) {
 			continue;
 		}
 		auto &lane = plan.lanes[payload_idx];
@@ -46,7 +46,7 @@ BuildSljitSparseLocalRunCachedLanes(const SljitLocalPerfectHashAggregatePlan &pl
 		if (result.size() >= lower_regs.size()) {
 			break;
 		}
-		if (payload_idx >= plan.lanes.size() || payload_idx == plan.sparse_count_seen_lane) {
+		if (payload_idx >= plan.lanes.size() || payload_idx == plan.count_seen_lane) {
 			continue;
 		}
 		auto &lane = plan.lanes[payload_idx];
@@ -88,7 +88,7 @@ void EmitSljitSparseLocalRunCacheFlush(struct sljit_compiler *compiler, const Sl
 	}
 	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R0, 0, SLJIT_MEM1(SLJIT_SP), cached_group_offset);
 	auto no_cached_group = sljit_emit_cmp(compiler, SLJIT_EQUAL, SLJIT_R0, 0, SLJIT_IMM, -1);
-	auto &count_lane = plan.lanes[plan.sparse_count_seen_lane];
+	auto &count_lane = plan.lanes[plan.count_seen_lane];
 	if (cached_count_offset >= 0) {
 		sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R3, 0, SLJIT_MEM1(SLJIT_SP), cached_count_offset);
 	} else {

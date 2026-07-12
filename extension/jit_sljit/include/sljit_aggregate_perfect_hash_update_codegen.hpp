@@ -34,6 +34,7 @@ struct SljitPerfectHashFusedUpdateEmitContext {
 	bool hoist_group_data_pointers;
 	bool dedicated_state_register;
 	sljit_s32 state_pointer_reg;
+	sljit_s32 group_index_reg;
 };
 
 struct SljitPerfectHashGroupLookupOptions {
@@ -86,7 +87,9 @@ struct SljitPerfectHashFusedUpdatePlan {
 	bool hoist_fast_source_data_pointers = false;
 	bool hoist_fast_group_data_array_base = false;
 	bool dedicated_state_register = false;
+	bool dedicated_group_index_register = false;
 	sljit_s32 state_pointer_reg = SLJIT_S4;
+	sljit_s32 group_index_reg = SLJIT_S4;
 	sljit_s32 saved_register_count = 0;
 };
 
