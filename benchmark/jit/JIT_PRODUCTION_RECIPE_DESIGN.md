@@ -728,9 +728,11 @@ as benchmark queries.
 Constant `IN` predicates use the same subject statistics. Non-null foldable
 members are deduplicated, capped by the subject's distinct-count bound, and
 scaled as `matching_distinct / subject_distinct`. Unsupported, nullable, or
-non-constant lists retain the conservative estimate. This keeps join-order and
-build-side selection aligned with the real filtered relation without adding a
-JIT-specific optimizer rule.
+non-constant lists retain the conservative estimate. A base-column distinct
+count is never substituted when a derived subject lacks expression statistics;
+doing so would estimate the wrong domain and can reverse join orientation.
+This keeps join-order and build-side selection aligned with the real filtered
+relation without adding a JIT-specific optimizer rule.
 
 An ungrouped generated filtered reduction with full-pipeline ownership and no
 join, grouped lookup, native aggregate, sort, or selected-view materialization

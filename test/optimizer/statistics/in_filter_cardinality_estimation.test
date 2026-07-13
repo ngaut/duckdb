@@ -30,3 +30,10 @@ EXPLAIN (FORMAT JSON)
 SELECT count(*) FROM in_filter_stats WHERE category IN ('MAIL', 'MAIL');
 ----
 physical_plan	<REGEX>:.*"Estimated Cardinality": "2000".*
+
+# Base-column NDV cannot stand in for a derived expression with no statistics.
+query II
+EXPLAIN (FORMAT JSON)
+SELECT count(*) FROM in_filter_stats WHERE substring(category, 1, 1) IN ('M', 'S');
+----
+physical_plan	<REGEX>:.*"Estimated Cardinality": "1200".*

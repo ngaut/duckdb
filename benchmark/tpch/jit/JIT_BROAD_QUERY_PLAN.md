@@ -36,9 +36,12 @@ The active architecture work is generic grouped and join execution:
 
 ## Accepted SF1 evidence
 
-Configuration: TPC-H SF1, one thread, production timing, tracing disabled, 31
-alternating repeats, result verification enabled. Accepted artifact:
+Configuration: TPC-H SF1, one thread, production timing, tracing disabled, and
+result verification enabled. This historical artifact used 31 alternating
+repeats and remains only as the accepted comparison receipt:
 `benchmark/tpch/jit/tmp/sf1_proof_batch_pregraph_simd_promotion_20260713/promotion_recheck`.
+Current candidate gates use five repeats and focused triage or promotion uses
+ten; the workflow never reruns 31 repetitions.
 
 | Query | Non-JIT (s) | JIT (s) | Speedup |
 | ---: | ---: | ---: | ---: |
@@ -73,9 +76,12 @@ wins from 18 to 19 with no accepted-baseline regression.
 
 ## Accepted SF10 evidence
 
-Configuration: TPC-H SF10, one thread, production timing, tracing disabled, 31
-alternating repeats, result verification enabled. Accepted artifact:
+Configuration: TPC-H SF10, one thread, production timing, tracing disabled, and
+result verification enabled. This historical artifact used 31 alternating
+repeats and remains only as the accepted comparison receipt:
 `benchmark/tpch/jit/tmp/sf10_proof_batch_pregraph_simd_promotion_20260713/promotion_recheck`.
+Current candidate gates use five repeats and focused triage or promotion uses
+ten; the workflow never reruns 31 repetitions.
 
 | Query | Non-JIT (s) | JIT (s) | Speedup |
 | ---: | ---: | ---: | ---: |
@@ -100,11 +106,15 @@ alternating repeats, result verification enabled. Accepted artifact:
 | Q19 | 0.296 | 0.268 | 1.105x |
 | Q20 | 0.609 | 0.529 | 1.152x |
 | Q21 | 1.392 | 1.250 | 1.114x |
-| Q22 | 0.185 | 0.144 | 1.290x |
+| Q22 | 0.185 | 0.141 | 1.311x |
 
 All results are correct and all 22 queries execute compiled regions with traced
-runtime ownership. Summed medians improve from 13.710s to 11.083s (1.237x),
-the per-query geometric-mean speedup is 1.210x, and the promoted gate increases
+runtime ownership. Q22 is ratcheted from the focused ten-repeat artifact
+`benchmark/tpch/jit/tmp/q22_derived_in_stats_fix_promotion10_20260713`; its two
+compiled regions are present in every JIT run. The other rows retain the
+accepted all-query receipt above. With the ratcheted Q22 result, summed medians
+improve from 13.710s to 11.080s (1.237x), the per-query geometric-mean speedup
+is 1.211x, and the promoted gate increases
 material JIT wins from 21 to all 22 queries. Q11 lowers its widening decimal
 product and exact INT128 sum to native machine code; the same recipe is
 rejected at SF1 because there are not enough batches to amortize stateful

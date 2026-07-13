@@ -561,14 +561,23 @@ RelationStats RelationStatisticsHelper::ExtractEmptyResultStats(LogicalEmptyResu
 	return stats;
 }
 
-static idx_t GetFilterSubjectDistinctCount(ClientContext &context, const Expression &subject,
-                                           BaseStatistics &base_stats, idx_t cardinality) {
+static idx_t TryGetFilterSubjectDistinctCount(ClientContext &context, const Expression &subject,
+                                              BaseStatistics &base_stats, idx_t cardinality) {
 	auto expression_stats = ExpressionFilter::TryGetExpressionStatistics(context, subject, base_stats);
 	if (expression_stats) {
 		auto distinct_count = GetDistinctCountFromStats(*expression_stats, cardinality).distinct_count;
 		if (distinct_count > 0) {
 			return distinct_count;
 		}
+	}
+	return 0;
+}
+
+static idx_t GetFilterSubjectDistinctCount(ClientContext &context, const Expression &subject,
+                                           BaseStatistics &base_stats, idx_t cardinality) {
+	auto distinct_count = TryGetFilterSubjectDistinctCount(context, subject, base_stats, cardinality);
+	if (distinct_count > 0) {
+		return distinct_count;
 	}
 	return GetDistinctCountFromStats(base_stats, cardinality).distinct_count;
 }
@@ -592,7 +601,9 @@ static idx_t EstimateInFilterCardinality(ClientContext &context, idx_t cardinali
 		unique_values.insert(constant.GetValue());
 	}
 
-	auto distinct_count = GetFilterSubjectDistinctCount(context, *children[0], base_stats, cardinality);
+	// A base-column NDV is not a valid substitute for a derived subject such as
+	// substring(column, ...). Only use statistics proven for the IN subject.
+	auto distinct_count = TryGetFilterSubjectDistinctCount(context, *children[0], base_stats, cardinality);
 	if (distinct_count == 0) {
 		return cardinality;
 	}
