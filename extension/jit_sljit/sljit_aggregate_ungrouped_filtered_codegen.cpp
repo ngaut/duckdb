@@ -146,7 +146,7 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeFilteredUngroupedFusedPrim
 	// still vectorize with the payload work staying scalar per matching lane.
 	if (!simd_plan.supported && codegen_plan.fast_path_supported) {
 		auto predicate_plan = TryPlanSljitTypedExpressionTreeSimd(predicate);
-		if (predicate_plan.supported) {
+		if (SljitTypedExpressionTreeSimdHybridFilterProfitable(predicate_plan)) {
 			simd_plan = predicate_plan;
 			simd_is_hybrid = true;
 		}
@@ -170,9 +170,10 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeFilteredUngroupedFusedPrim
 	sljit_s32 simd_scratches = 5;
 	if (simd_plan.supported) {
 		simd_mask_offset = (local_size + 15) & ~sljit_sw(15);
-		local_size = simd_mask_offset + 32;
-		// constants (predicate + payload, an over-estimate if they share values) + all-ones
-		// + lane bits + accumulator(s) + peak live temporaries (+1 validity nibble).
+		local_size = simd_mask_offset + 24;
+		// Constants (predicate + payload, an over-estimate if they share values),
+		// all-ones, lane bits, peak live temporaries, and loop state. The single
+		// non-SUM register is either COUNT's accumulator or ARM64 hybrid mask reducer.
 		auto accumulators = simd_is_sum ? idx_t(2) : idx_t(1);
 		auto vector_regs = simd_plan.constant_count + simd_payload_plan.constant_count +
 		                   (simd_plan.needs_all_ones ? 1 : 0) + accumulators + simd_plan.max_live_temps +

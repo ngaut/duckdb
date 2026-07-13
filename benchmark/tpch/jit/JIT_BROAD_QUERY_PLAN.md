@@ -31,17 +31,24 @@ The active architecture work is generic grouped and join execution:
   invalidate only the facts they actually change;
 - low-cardinality generated string search is rejected from physical-pipeline
   facts before graph construction, IR lowering, or backend analysis;
-- hybrid SIMD is selected only when the packed predicate has enough work to
-  amortize mask setup before the remaining scalar grouped update.
+- hybrid SIMD classifies uniform ARM64 masks before materializing lane bits and
+  uses an aligned compact-mask loop for mixed groups; one backend-wide scalar-
+  operation cost contract admits arithmetic-comparison scalar-terminal hybrids.
+  AND hybrids build the complete mask branchlessly and classify it once; OR
+  stays scalar in scalar-terminal hybrids after a neutral matched proof, while
+  fully packed select/count/sum kernels retain their independent SIMD plans;
+- generic benchmark fixtures are materialized once per read-only setup identity
+  and reused across alternating samples, eliminating repeated table rebuilds and
+  measuring stable persisted storage.
 
 ## Accepted SF1 evidence
 
 Configuration: TPC-H SF1, one thread, production timing, tracing disabled, and
-result verification enabled. This historical artifact used 31 alternating
-repeats and remains only as the accepted comparison receipt:
+result verification enabled. This legacy high-sample artifact remains only as
+the accepted comparison receipt:
 `benchmark/tpch/jit/tmp/sf1_proof_batch_pregraph_simd_promotion_20260713/promotion_recheck`.
 Current candidate gates use five repeats and focused triage or promotion uses
-ten; the workflow never reruns 31 repetitions.
+ten; no higher repetition count is scheduled.
 
 | Query | Non-JIT (s) | JIT (s) | Speedup |
 | ---: | ---: | ---: | ---: |
@@ -77,11 +84,11 @@ wins from 18 to 19 with no accepted-baseline regression.
 ## Accepted SF10 evidence
 
 Configuration: TPC-H SF10, one thread, production timing, tracing disabled, and
-result verification enabled. This historical artifact used 31 alternating
-repeats and remains only as the accepted comparison receipt:
+result verification enabled. This legacy high-sample artifact remains only as
+the accepted comparison receipt:
 `benchmark/tpch/jit/tmp/sf10_proof_batch_pregraph_simd_promotion_20260713/promotion_recheck`.
 Current candidate gates use five repeats and focused triage or promotion uses
-ten; the workflow never reruns 31 repetitions.
+ten; no higher repetition count is scheduled.
 
 | Query | Non-JIT (s) | JIT (s) | Speedup |
 | ---: | ---: | ---: | ---: |

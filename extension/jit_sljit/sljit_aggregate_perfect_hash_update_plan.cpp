@@ -14,8 +14,6 @@
 
 namespace duckdb {
 
-static constexpr idx_t SLJIT_PERFECT_HASH_HYBRID_SIMD_SIMPLE_COMPARISON_NODE_COUNT = 3;
-
 static bool
 SljitPerfectHashGroupExpressionsUseTypedTree(const vector<SljitNativeRegionExpressionPlan> &group_expressions) {
 	for (auto &group_expression : group_expressions) {
@@ -89,20 +87,23 @@ bool TryBuildSljitPerfectHashFusedUpdatePlan(
 	if (result.codegen_plan.binary_shared_payload) {
 		result.local_size += NumericCast<sljit_sw>(sizeof(sljit_sw));
 	}
-	if (predicate && predicate->kind == ExecutionExpressionIRKind::BINARY &&
-	    SljitTypedExpressionTreeComparisonSupported(predicate->binary_op) && result.codegen_plan.fast_path_supported) {
+	if (predicate && result.codegen_plan.fast_path_supported) {
 		auto predicate_simd_plan = TryPlanSljitTypedExpressionTreeSimd(*predicate);
-		// Perfect-hash group lookup and arbitrary aggregate payloads remain scalar after
-		// the packed predicate mask. A bare reference-vs-constant comparison has no
-		// expression work to amortize that hybrid-loop setup; its scalar branch is cheaper.
-		if (predicate_simd_plan.supported &&
-		    predicate_simd_plan.node_count > SLJIT_PERFECT_HASH_HYBRID_SIMD_SIMPLE_COMPARISON_NODE_COUNT) {
+		// The shared hybrid cost contract compares scalar predicate work with mask
+		// dispatch overhead. Terminals consume that decision instead of embedding
+		// their own expression-shape threshold.
+		if (SljitTypedExpressionTreeSimdHybridFilterProfitable(predicate_simd_plan)) {
 			result.predicate_simd_plan = std::move(predicate_simd_plan);
 			result.predicate_simd_mask_offset = (result.local_size + 15) & ~sljit_sw(15);
-			result.local_size = result.predicate_simd_mask_offset + 32;
+			result.local_size = result.predicate_simd_mask_offset + 24;
 			auto vector_register_count = result.predicate_simd_plan.constant_count +
 			                             result.predicate_simd_plan.max_live_temps +
 			                             (result.predicate_simd_plan.needs_all_ones ? idx_t(1) : idx_t(0));
+#if defined(SLJIT_CONFIG_ARM_64) && SLJIT_CONFIG_ARM_64
+			// ARM64 keeps one horizontal mask-reduction destination live so uniform
+			// groups avoid materializing a full scalar movemask.
+			vector_register_count++;
+#endif
 			result.scratch_register_count = 5 | SLJIT_ENTER_VECTOR(NumericCast<sljit_s32>(vector_register_count));
 		}
 	}

@@ -932,15 +932,39 @@ corresponding workload floor or accepted comparison artifact must be tightened
 before the implementation lands; otherwise the gate still permits the
 performance that the implementation just replaced. Floors remain
 thread-specific when parallel scheduling noise changes the demonstrated
-margin. Three independent 15-repeat production runs of the exact-filter join
-currently prove 1.179x-1.191x at one thread and 1.110x-1.128x at four threads,
-so its one-thread floor is 1.15x while the four-thread floor remains 1.08x.
-For filtered perfect-hash grouped updates, packed hybrid filtering is reserved
-for predicates with expression or conjunction work to amortize mask setup;
-simple reference-to-constant comparisons stay on the scalar fast loop while
-fully packed count and sum kernels keep their SIMD paths. The selective
-multi-aggregate workload now proves 1.145x at one thread and 1.126x at four
-threads in its retained historical artifact, and its checked-in floor is 1.11x.
+margin. Retained exact-filter evidence proves 1.179x-1.191x at one thread and
+1.110x-1.128x at four threads, so its floors remain 1.15x and 1.08x. Current
+candidate gates use five alternating repetitions and promotion or focused
+triage uses ten; no routine gate schedules a larger sample.
+
+Filtered perfect-hash and ungrouped scalar-terminal hybrids consume one SIMD
+profitability contract based on scalar predicate operations. A lone comparison
+stays on the scalar fast loop because terminal work remains row-at-a-time.
+Arithmetic comparisons amortize mask dispatch directly. AND conjunctions build
+the complete packed mask branchlessly and classify it once: classifying an
+intermediate mask serializes the vector pipeline on broad scans. The SF10 Q6
+regression gate exposed that architectural boundary when per-child horizontal
+reductions cut the established JIT win from 2.046x to 1.657x; removing those
+reductions restored 2.044x in the focused development proof while retaining the
+grouped conjunction floors. OR remains available to fully packed kernels but
+stays scalar for scalar-terminal hybrids because matched production timing did
+not amortize its all-true check. Fully packed select, count, and sum kernels do
+not use this hybrid gate. On ARM64, uniform completed masks use a horizontal
+classifier and avoid a full movemask; mixed groups test the compact mask in an
+aligned lane loop with no separate end-index slot.
+
+Generic benchmark fixtures are created once per read-only setup identity, before
+the alternating samples. Reopening the stable database for every sample proves
+persisted production data instead of repeatedly timing a just-inserted table.
+Under that contract, independent promotion runs put the simple selective
+workload at 1.238x-1.265x at one thread and 1.195x-1.215x at four threads, with
+floors of 1.22x and 1.17x. After the branchless-mask root fix, the two-way
+conjunction proves 1.334x-1.366x and 1.276x-1.278x, with floors of 1.31x and
+1.25x. The three-way conjunction proves 1.302x-1.315x and 1.225x-1.227x, with
+floors of 1.25x and 1.20x. The ten-run SF10 Q6 proof restores 2.044x and passes
+the strict comparison against the prior 2.054x accepted baseline. The non-null
+grouped workload proves 1.167x-1.176x at one thread and 1.143x at four
+threads, with thread-specific floors of 1.16x and 1.13x.
 The mixed-source complementary join proves 1.290x at one thread and 1.207x at
 four threads in alternating 10-repeat promotion runs, so its checked-in floors
 are now 1.28x and 1.18x respectively.
@@ -951,6 +975,10 @@ Current accepted generic evidence is stored in
 production gates pass with zero correctness or compile errors across range
 arithmetic, filters, CASE, multi-aggregate, persistent scans, nullable
 expressions, grouped aggregation, DISTINCT, numeric joins, and string joins.
+The branchless conjunction promotion receipts are
+`benchmark/jit/tmp/branchless_conjunction_root_fix_promotion_t1_20260713`,
+`benchmark/jit/tmp/branchless_conjunction_root_fix_promotion_t4_20260713`, and
+`benchmark/tpch/jit/tmp/q06_branchless_root_fix_promotion_20260713`.
 These artifacts are workload-class evidence; they do not authorize
 workload-specific capability checks.
 

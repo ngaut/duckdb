@@ -2558,12 +2558,17 @@ TEST_CASE("JIT gates perfect-hash aggregate updates with generated source filter
 	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_filtered_perfect_hash_payload AS "
 	                          "SELECT CASE WHEN i % 3 = 0 THEN 'A' WHEN i % 3 = 1 THEN 'N' ELSE 'R' END AS group_flag, "
 	                          "       CASE WHEN i % 2 = 0 THEN 'F' ELSE 'O' END AS group_status, "
-	                          "       DATE '1998-08-30' + CAST(i % 8 AS INTEGER) AS event_date, "
+	                          // Four passing rows, four rejected rows, then a mixed group exercise every packed-mask
+	                          // control class. The conjunction also exercises packed-group short-circuiting; the final
+	                          // three rows exercise the scalar tail.
+	                          "       DATE '1998-08-30' + CASE i % 12 "
+	                          "           WHEN 8 THEN 4 WHEN 9 THEN 5 WHEN 10 THEN 0 WHEN 11 THEN 1 "
+	                          "           ELSE CAST(i % 12 AS INTEGER) END AS event_date, "
 	                          "       CAST(1 + (i % 50) AS DECIMAL(15,2)) AS qty_value, "
 	                          "       CAST(100 + (i % 1000) AS DECIMAL(15,2)) AS gross_value, "
 	                          "       CAST(i % 10 AS DECIMAL(15,2)) AS discount_rate, "
 	                          "       CAST(i % 8 AS DECIMAL(15,2)) AS tax_rate "
-	                          "FROM range(120000) tbl(i)"));
+	                          "FROM range(120003) tbl(i)"));
 
 	const string query = "SELECT group_flag, group_status, "
 	                     "       sum(qty_value), "
@@ -2575,6 +2580,7 @@ TEST_CASE("JIT gates perfect-hash aggregate updates with generated source filter
 	                     "       count(*) "
 	                     "FROM jit_filtered_perfect_hash_payload "
 	                     "WHERE event_date <= DATE '1998-09-02' "
+	                     "  AND tax_rate <= 3.00::DECIMAL(15,2) "
 	                     "GROUP BY group_flag, group_status "
 	                     "ORDER BY group_flag, group_status";
 	REQUIRE_NO_FAIL(con.Query("SET jit_policy='off'"));
@@ -2615,7 +2621,8 @@ TEST_CASE("JIT gates perfect-hash aggregate updates with generated source filter
 	    },
 	    [](const ExecutionRegionEvent &event) { REQUIRE(EventJitRuntimeDelegationCounts(event).empty()); });
 
-	const string high_selectivity_query = StringUtil::Replace(query, "DATE '1998-09-02'", "DATE '1998-09-05'");
+	auto high_selectivity_query = StringUtil::Replace(query, "DATE '1998-09-02'", "DATE '1998-09-05'");
+	high_selectivity_query = StringUtil::Replace(high_selectivity_query, "tax_rate <= 3.00", "tax_rate <= 7.00");
 	REQUIRE_NO_FAIL(con.Query("SET jit_policy='off'"));
 	auto high_selectivity_reference = con.Query(high_selectivity_query);
 	REQUIRE_NO_FAIL(*high_selectivity_reference);

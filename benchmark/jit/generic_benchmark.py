@@ -22,8 +22,29 @@ from benchmark_common import (  # noqa: E402
     make_output_dir,
     repo_root,
     row_int,
+    run_duckdb,
     timed_materialized_attempt,
     write_csv,
+)
+
+
+# Read-only query variants share this immutable fixture through `setup_id`.
+# Preparation runs in a separate process so every timed sample reopens the same
+# checkpointed database state.
+GROUPED_SELECTIVE_MULTI_AGGREGATE_SETUP_SQL = (
+    "CREATE OR REPLACE TABLE __jit_generic_selective_groups("
+    "group_flag VARCHAR NOT NULL, group_status VARCHAR NOT NULL, event_date DATE NOT NULL, "
+    "quantity DECIMAL(15,2) NOT NULL, price DECIMAL(15,2) NOT NULL, "
+    "discount DECIMAL(15,2) NOT NULL, tax DECIMAL(15,2) NOT NULL); "
+    "INSERT INTO __jit_generic_selective_groups "
+    "SELECT CASE i % 3 WHEN 0 THEN 'A' WHEN 1 THEN 'N' ELSE 'R' END, "
+    "CASE i % 2 WHEN 0 THEN 'F' ELSE 'O' END, "
+    "DATE '2024-01-01' + CASE i % 12 "
+    "WHEN 8 THEN 4 WHEN 9 THEN 5 WHEN 10 THEN 0 WHEN 11 THEN 1 "
+    "ELSE CAST(i % 12 AS INTEGER) END, "
+    "CAST(1 + i % 50 AS DECIMAL(15,2)), CAST(100 + i % 1000 AS DECIMAL(15,2)), "
+    "CAST(i % 10 AS DECIMAL(15,2)), CAST(i % 8 AS DECIMAL(15,2)) "
+    "FROM range(8000000) tbl(i);"
 )
 
 
@@ -210,23 +231,14 @@ GENERIC_WORKLOADS = (
             "GROUP BY group_flag, group_status ORDER BY group_flag, group_status"
         ),
         "minimum_auto_speedup": 1.15,
+        "minimum_auto_speedup_by_threads": {1: 1.16, 4: 1.13},
         "max_auto_slowdown": 1.05,
         "requires_compiled_auto": True,
     },
     {
         "name": "grouped_selective_multi_aggregate",
-        "setup_sql": (
-            "CREATE OR REPLACE TABLE __jit_generic_selective_groups("
-            "group_flag VARCHAR NOT NULL, group_status VARCHAR NOT NULL, event_date DATE NOT NULL, "
-            "quantity DECIMAL(15,2) NOT NULL, price DECIMAL(15,2) NOT NULL, "
-            "discount DECIMAL(15,2) NOT NULL, tax DECIMAL(15,2) NOT NULL); "
-            "INSERT INTO __jit_generic_selective_groups "
-            "SELECT CASE i % 3 WHEN 0 THEN 'A' WHEN 1 THEN 'N' ELSE 'R' END, "
-            "CASE i % 2 WHEN 0 THEN 'F' ELSE 'O' END, DATE '2024-01-01' + CAST(i % 8 AS INTEGER), "
-            "CAST(1 + i % 50 AS DECIMAL(15,2)), CAST(100 + i % 1000 AS DECIMAL(15,2)), "
-            "CAST(i % 10 AS DECIMAL(15,2)), CAST(i % 8 AS DECIMAL(15,2)) "
-            "FROM range(8000000) tbl(i);"
-        ),
+        "setup_id": "grouped_selective_multi_aggregate_input",
+        "setup_sql": GROUPED_SELECTIVE_MULTI_AGGREGATE_SETUP_SQL,
         "sql": (
             "SELECT group_flag, group_status, sum(quantity), sum(price), "
             "sum(price * (1.00::DECIMAL(15,2) - discount)), "
@@ -235,7 +247,46 @@ GENERIC_WORKLOADS = (
             "FROM __jit_generic_selective_groups WHERE event_date <= DATE '2024-01-04' "
             "GROUP BY group_flag, group_status ORDER BY group_flag, group_status"
         ),
-        "minimum_auto_speedup": 1.11,
+        "minimum_auto_speedup": 1.12,
+        "minimum_auto_speedup_by_threads": {1: 1.22, 4: 1.17},
+        "max_auto_slowdown": 1.05,
+        "requires_compiled_auto": True,
+    },
+    {
+        "name": "grouped_selective_conjunction_multi_aggregate",
+        "setup_id": "grouped_selective_multi_aggregate_input",
+        "setup_sql": GROUPED_SELECTIVE_MULTI_AGGREGATE_SETUP_SQL,
+        "sql": (
+            "SELECT group_flag, group_status, sum(quantity), sum(price), "
+            "sum(price * (1.00::DECIMAL(15,2) - discount)), "
+            "sum(price * (1.00::DECIMAL(15,2) - discount) * (1.00::DECIMAL(15,2) + tax)), "
+            "sum(discount), count(*) "
+            "FROM __jit_generic_selective_groups "
+            "WHERE event_date <= DATE '2024-01-04' AND tax <= 3.00::DECIMAL(15,2) "
+            "GROUP BY group_flag, group_status ORDER BY group_flag, group_status"
+        ),
+        "minimum_auto_speedup": 1.00,
+        "minimum_auto_speedup_by_threads": {1: 1.31, 4: 1.25},
+        "max_auto_slowdown": 1.05,
+        "requires_compiled_auto": True,
+    },
+    {
+        "name": "grouped_selective_three_way_conjunction_multi_aggregate",
+        "setup_id": "grouped_selective_multi_aggregate_input",
+        "setup_sql": GROUPED_SELECTIVE_MULTI_AGGREGATE_SETUP_SQL,
+        "sql": (
+            "SELECT group_flag, group_status, sum(quantity), sum(price), "
+            "sum(price * (1.00::DECIMAL(15,2) - discount)), "
+            "sum(price * (1.00::DECIMAL(15,2) - discount) * (1.00::DECIMAL(15,2) + tax)), "
+            "sum(discount), count(*) "
+            "FROM __jit_generic_selective_groups "
+            "WHERE event_date <= DATE '2024-01-04' "
+            "AND tax <= 3.00::DECIMAL(15,2) "
+            "AND quantity <= 25.00::DECIMAL(15,2) "
+            "GROUP BY group_flag, group_status ORDER BY group_flag, group_status"
+        ),
+        "minimum_auto_speedup": 1.00,
+        "minimum_auto_speedup_by_threads": {1: 1.25, 4: 1.20},
         "max_auto_slowdown": 1.05,
         "requires_compiled_auto": True,
     },
@@ -382,7 +433,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--backend", default="sljit")
     parser.add_argument("--jit-extension", default="jit_sljit")
     parser.add_argument("--threads", type=int, default=1)
-    parser.add_argument("--repeats", type=int, default=3)
+    parser.add_argument("--repeats", type=int, default=5)
     parser.add_argument("--triage-repeats", type=int, default=10)
     parser.add_argument("--event-log-size", type=int, default=0)
     parser.add_argument("--workloads", nargs="+", default=None)
@@ -414,6 +465,31 @@ def median_us(values: list[int]) -> int:
     return int(round(statistics.median(values))) if values else 0
 
 
+def prepare_workload(
+    args: SimpleNamespace,
+    db_path: Path,
+    workload: dict,
+    expected_table: str,
+    prepare_setup: bool,
+) -> None:
+    sql = jit_setup_sql(
+        args,
+        "off",
+        trace_runtime=False,
+        trace_decisions=False,
+        event_log_size=0,
+    )
+    if prepare_setup:
+        sql += workload.get("setup_sql", "")
+    sql += f"\nCREATE OR REPLACE TABLE {expected_table} AS\n{workload['sql']};"
+    run_duckdb(
+        args.duckdb,
+        db_path,
+        sql,
+        f"generic workload {workload['name']} fixture preparation",
+    )
+
+
 def run_workload(
     args: SimpleNamespace,
     db_path: Path,
@@ -422,26 +498,10 @@ def run_workload(
     policy: str,
     repeat: int,
     expected_table: str,
-    create_expected: bool,
 ) -> dict:
     workload_name = workload["name"]
     result_table = f"__jit_generic_result_{workload_name}_{policy}_{repeat}"
-    preparation_sql = ""
-    workload_setup_sql = workload.get("setup_sql", "")
-    if workload_setup_sql or create_expected:
-        preparation_sql = jit_setup_sql(
-            args,
-            "off",
-            trace_runtime=False,
-            trace_decisions=False,
-            event_log_size=0,
-        )
-        preparation_sql += workload_setup_sql
-    if create_expected:
-        preparation_sql += (
-            f"\nCREATE OR REPLACE TABLE {expected_table} AS\n{workload['sql']};"
-        )
-    setup_sql = preparation_sql + jit_setup_sql(
+    setup_sql = jit_setup_sql(
         args,
         policy,
         trace_runtime=args.trace_runtime,
@@ -609,6 +669,7 @@ def main() -> int:
     db_path = out_dir / "generic.duckdb"
     runtime_args = make_args(args)
     rows = []
+    prepared_setups: dict[str, str] = {}
     known_workloads = {workload["name"]: workload for workload in GENERIC_WORKLOADS}
     if args.workloads:
         unknown_workloads = [
@@ -622,6 +683,21 @@ def main() -> int:
     try:
         for workload in workloads:
             expected_table = f"__jit_generic_expected_{workload['name']}"
+            setup_id = workload.get("setup_id", workload["name"])
+            setup_sql = workload.get("setup_sql", "")
+            if setup_id in prepared_setups and prepared_setups[setup_id] != setup_sql:
+                raise ValueError(
+                    f"workloads sharing setup_id {setup_id!r} must use identical setup_sql"
+                )
+            materialize_setup = setup_id not in prepared_setups
+            prepare_workload(
+                runtime_args,
+                db_path,
+                workload,
+                expected_table,
+                prepare_setup=materialize_setup,
+            )
+            prepared_setups[setup_id] = setup_sql
             for repeat in range(1, args.repeats + 1):
                 for policy in ("off", "auto"):
                     rows.append(
@@ -633,7 +709,6 @@ def main() -> int:
                             policy,
                             repeat,
                             expected_table,
-                            create_expected=policy == "off" and repeat == 1,
                         )
                     )
         summary = summarize(rows, workloads, args.threads, args.trace_runtime)
@@ -666,7 +741,6 @@ def main() -> int:
                                 policy,
                                 repeat,
                                 expected_table,
-                                create_expected=False,
                             )
                         )
             summary = summarize(rows, workloads, args.threads, args.trace_runtime)

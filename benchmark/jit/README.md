@@ -29,8 +29,8 @@ Pre-commit validates the staged tree with the build, architecture, Python, and
 JIT unit ratchet, then publishes the verified Git tree hash. When HEAD matches
 that receipt, pre-push reuses the result and adds only the generic and TPC-H
 production gates required by performance-sensitive branch changes. A missing
-or stale receipt makes pre-push run the complete guard.
-Focused generic and TPC-H timing rechecks use 10 repetitions by default.
+or stale receipt makes pre-push run the complete guard. Candidate timing gates
+use five alternating repetitions; focused triage and promotion use ten.
 
 TPC-H benchmark and comparison gate:
 
@@ -73,8 +73,19 @@ When a production run verifies a durable performance improvement, the same
 increment must tighten the corresponding checked-in speedup floor or refresh
 the accepted comparison artifact. A performance change is incomplete while
 the regression gate still accepts the older, slower performance level.
-The selective grouped multi-aggregate floor is 1.11x at both one and four
-threads after removing unprofitable hybrid SIMD setup for simple predicates.
+Read-only fixtures are built once per shared setup and reopened for each sample;
+the timed policies no longer rebuild multi-million-row tables. The selective
+grouped multi-aggregate floors are 1.22x at one thread and 1.17x at four threads,
+against independent ten-repeat proofs no lower than 1.238x and 1.195x. The
+two-way conjunction carries 1.31x and 1.25x floors; the three-way variant adds
+1.25x and 1.20x floors. The neighboring non-null grouped workload has 1.16x and
+1.13x thread-specific floors.
+Hybrid SIMD admission uses one shared scalar-operation cost contract: fully
+packed select/count/sum kernels retain simple comparisons, while scalar-terminal
+hybrids require enough predicate work to amortize mask dispatch. AND hybrids
+evaluate their packed masks branchlessly and classify only the completed mask;
+OR remains available to fully packed kernels but stays scalar in hybrids after a
+neutral matched proof.
 
 Filtered hash-build validation covers source-filter selection composition and
 direct build ingress. Runtime tracing reports `filter.selected_input_zero_copy`

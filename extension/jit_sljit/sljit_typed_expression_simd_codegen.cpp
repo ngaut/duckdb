@@ -264,6 +264,29 @@ static idx_t SljitSimdMaxLiveTemps(const ExecutionExpressionIR &node) {
 	return MaxValue<idx_t>(peak, 1);
 }
 
+static idx_t SljitSimdScalarOperationCount(const ExecutionExpressionIR &node) {
+	idx_t result = 0;
+	switch (node.kind) {
+	case ExecutionExpressionIRKind::BINARY:
+		result = 1;
+		if (node.left) {
+			result += SljitSimdScalarOperationCount(*node.left);
+		}
+		if (node.right) {
+			result += SljitSimdScalarOperationCount(*node.right);
+		}
+		return result;
+	case ExecutionExpressionIRKind::CONJUNCTION:
+		result = node.children.empty() ? 0 : node.children.size() - 1;
+		for (auto &child : node.children) {
+			result += SljitSimdScalarOperationCount(*child);
+		}
+		return result;
+	default:
+		return 0;
+	}
+}
+
 SljitTypedExpressionTreeSimdPlan TryPlanSljitTypedExpressionTreeSimd(const ExecutionExpressionIR &root) {
 	SljitTypedExpressionTreeSimdPlan plan;
 	if (getenv("DUCKDB_JIT_NO_SIMD")) {
@@ -310,6 +333,9 @@ SljitTypedExpressionTreeSimdPlan TryPlanSljitTypedExpressionTreeSimd(const Execu
 	plan.constant_count = distinct_constants.size();
 	plan.needs_all_ones = needs_all_ones;
 	plan.node_count = node_count;
+	plan.scalar_operation_count = SljitSimdScalarOperationCount(root);
+	plan.root_is_conjunction = root.kind == ExecutionExpressionIRKind::CONJUNCTION;
+	plan.has_or = has_or;
 	plan.max_live_temps = max_live;
 	// Row-skip null semantics hold only for AND-only trees.
 	if (!has_or) {
@@ -317,6 +343,22 @@ SljitTypedExpressionTreeSimdPlan TryPlanSljitTypedExpressionTreeSimd(const Execu
 		plan.nullable_capable = !plan.source_refs.empty();
 	}
 	return plan;
+}
+
+bool SljitTypedExpressionTreeSimdHybridFilterProfitable(const SljitTypedExpressionTreeSimdPlan &plan) {
+	if (!plan.supported) {
+		return false;
+	}
+	// OR scalar-terminal hybrids are neutral-to-negative in matched production
+	// measurements: their all-true group check does not recover enough work. Keep
+	// OR available to fully packed terminals while rejecting it here.
+	if (plan.has_or) {
+		return false;
+	}
+	// Arithmetic comparisons need one operation beyond the final comparison to
+	// amortize lane dispatch. Conjunctions need at least two comparisons, whose
+	// branchless mask combine is useful packed work rather than dispatch overhead.
+	return plan.scalar_operation_count >= (plan.root_is_conjunction ? 3 : 2);
 }
 
 // A pure integer value expression: references, constants and add/sub/mul only.
@@ -455,6 +497,25 @@ void EmitSljitSimdMaskLaneSum(struct sljit_compiler *compiler, sljit_s32 dst_vre
 	sljit_emit_op_custom(compiler, &move, sizeof(move));
 }
 #endif
+
+// Publish a packed boolean mask as one scalar classification value. On ARM64
+// this is the signed lane sum (0 for all-false, -lanes for all-true); elsewhere
+// it is the conventional lane bitset (0 for all-false, (1 << lanes) - 1 for
+// all-true). The hybrid loop uses this contract once for final dispatch.
+static sljit_sw EmitSljitSimdMaskClass(struct sljit_compiler *compiler, const SljitSimdEmitContext &ctx,
+                                       const SljitTypedExpressionTreeSimdPlan &plan, sljit_s32 mask_reg,
+                                       sljit_s32 mask_reduce_reg) {
+#if defined(SLJIT_CONFIG_ARM_64) && SLJIT_CONFIG_ARM_64
+	EmitSljitSimdMaskLaneSum(compiler, mask_reduce_reg, mask_reg, plan.elem_scale, SLJIT_R3);
+	return NumericCast<sljit_sw>(-plan.lanes);
+#else
+	(void)mask_reduce_reg;
+	sljit_emit_simd_sign(compiler, ctx.simd_type | SLJIT_SIMD_STORE | SLJIT_32, SLJIT_VR(mask_reg), SLJIT_R3, 0);
+	const auto all_lanes_mask = NumericCast<sljit_sw>((sljit_uw(1) << plan.lanes) - 1);
+	sljit_emit_op2(compiler, SLJIT_AND, SLJIT_R3, 0, SLJIT_R3, 0, SLJIT_IMM, all_lanes_mask);
+	return all_lanes_mask;
+#endif
+}
 
 // Evaluate a pure VALUE expression (references, constants, add/sub/mul) at the
 // given element scale, reading rows starting at S1 + row_offset.
@@ -1063,41 +1124,57 @@ void EmitSljitTypedExpressionTreeSimdHybridFilterLoop(struct sljit_compiler *com
 	if (validity_refs) {
 		EmitSljitSimdInitLaneBits(compiler, ctx, plan.lanes, mask_offset);
 	}
+#if defined(SLJIT_CONFIG_ARM_64) && SLJIT_CONFIG_ARM_64
+	// Keep the horizontal classifier live across predicate evaluation. It lets
+	// all-true and all-false groups bypass ARM64's more expensive full movemask.
+	auto mask_reduce_reg = ctx.next_temp++;
+#else
+	const sljit_s32 mask_reduce_reg = 0;
+#endif
 
 	// S1 is the flat row base (0 on entry).
 	auto simd_loop = sljit_emit_label(compiler);
 	sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_R0, 0, SLJIT_S1, 0, SLJIT_IMM, plan.lanes);
 	auto simd_done = sljit_emit_cmp(compiler, SLJIT_GREATER, SLJIT_R0, 0, SLJIT_S2, 0);
 
+	// Keep packed conjunction evaluation branchless. Classifying intermediate
+	// masks serializes the vector pipeline and costs more than the comparisons it
+	// can skip on broad scans. Classify once after the complete predicate instead.
 	auto mask = EmitSljitSimdMask(compiler, predicate, ctx);
 	if (validity_refs) {
 		EmitSljitSimdValidityAnd(compiler, ctx, *validity_refs, plan.lanes, mask.reg);
 	}
-	sljit_emit_simd_sign(compiler, ctx.simd_type | SLJIT_SIMD_STORE | SLJIT_32, SLJIT_VR(mask.reg), SLJIT_R3, 0);
-	FreeSimdValue(ctx, mask);
+	const auto all_lanes_mask = EmitSljitSimdMaskClass(compiler, ctx, plan, mask.reg, mask_reduce_reg);
 
-	// High-selectivity predicates commonly produce an all-true mask. Run that
-	// group in a compact scalar lane loop without per-lane tests. Mixed masks use
-	// a second compact loop over the scalar sign bitset. Keeping one callback body
-	// per control-flow class avoids multiplying a large aggregate reducer by the
-	// SIMD lane count.
-	const auto all_lanes_mask = NumericCast<sljit_sw>((sljit_uw(1) << plan.lanes) - 1);
+	// Classify uniform groups before materializing a full bitset. High-selectivity
+	// predicates commonly produce all-true masks, while clustered data also makes
+	// all-false masks common. Only genuinely mixed masks need lane extraction.
 	auto mixed_mask = sljit_emit_cmp(compiler, SLJIT_NOT_EQUAL, SLJIT_R3, 0, SLJIT_IMM, all_lanes_mask);
-	sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_R0, 0, SLJIT_S1, 0, SLJIT_IMM, plan.lanes);
-	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_MEM1(SLJIT_SP), mask_offset + 24, SLJIT_R0, 0);
+	D_ASSERT(plan.lanes == 2 || plan.lanes == 4);
 	auto all_true_loop = sljit_emit_label(compiler);
 	emit_matching_row();
 	sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_S1, 0, SLJIT_S1, 0, SLJIT_IMM, 1);
-	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R0, 0, SLJIT_MEM1(SLJIT_SP), mask_offset + 24);
-	auto repeat_all_true = sljit_emit_cmp(compiler, SLJIT_LESS, SLJIT_S1, 0, SLJIT_R0, 0);
+	// Packed groups begin at a lane-aligned index. The callback preserves S1, so
+	// its low bits are a free loop counter and avoid a stack reload per lane.
+	sljit_emit_op2(compiler, SLJIT_AND, SLJIT_R0, 0, SLJIT_S1, 0, SLJIT_IMM, plan.lanes - 1);
+	auto repeat_all_true = sljit_emit_cmp(compiler, SLJIT_NOT_EQUAL, SLJIT_R0, 0, SLJIT_IMM, 0);
 	sljit_set_label(repeat_all_true, all_true_loop);
 	auto group_done = sljit_emit_jump(compiler, SLJIT_JUMP);
 
 	sljit_set_label(mixed_mask, sljit_emit_label(compiler));
-	auto no_lanes_true = sljit_emit_cmp(compiler, SLJIT_EQUAL, SLJIT_R3, 0, SLJIT_IMM, 0);
+	// Empty groups need no compact-loop state. Advance directly; only genuinely
+	// mixed masks publish an end index for the callback loop below.
+	auto nonempty_mask = sljit_emit_cmp(compiler, SLJIT_NOT_EQUAL, SLJIT_R3, 0, SLJIT_IMM, 0);
+	sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_S1, 0, SLJIT_S1, 0, SLJIT_IMM, plan.lanes);
+	auto empty_done = sljit_emit_jump(compiler, SLJIT_JUMP);
+	sljit_set_label(nonempty_mask, sljit_emit_label(compiler));
+#if defined(SLJIT_CONFIG_ARM_64) && SLJIT_CONFIG_ARM_64
+	// The lane sum distinguishes uniform masks but does not preserve lane bits.
+	// Materialize the full movemask only for a genuinely mixed group.
+	sljit_emit_simd_sign(compiler, ctx.simd_type | SLJIT_SIMD_STORE | SLJIT_32, SLJIT_VR(mask.reg), SLJIT_R3, 0);
+#endif
+	FreeSimdValue(ctx, mask);
 	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_MEM1(SLJIT_SP), mask_offset + 16, SLJIT_R3, 0);
-	sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_R0, 0, SLJIT_S1, 0, SLJIT_IMM, plan.lanes);
-	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_MEM1(SLJIT_SP), mask_offset + 24, SLJIT_R0, 0);
 	auto mixed_loop = sljit_emit_label(compiler);
 	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R3, 0, SLJIT_MEM1(SLJIT_SP), mask_offset + 16);
 	sljit_emit_op2(compiler, SLJIT_AND, SLJIT_R2, 0, SLJIT_R3, 0, SLJIT_IMM, 1);
@@ -1108,14 +1185,15 @@ void EmitSljitTypedExpressionTreeSimdHybridFilterLoop(struct sljit_compiler *com
 	sljit_emit_op2(compiler, SLJIT_LSHR, SLJIT_R3, 0, SLJIT_R3, 0, SLJIT_IMM, 1);
 	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_MEM1(SLJIT_SP), mask_offset + 16, SLJIT_R3, 0);
 	sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_S1, 0, SLJIT_S1, 0, SLJIT_IMM, 1);
-	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R0, 0, SLJIT_MEM1(SLJIT_SP), mask_offset + 24);
-	auto repeat_mixed = sljit_emit_cmp(compiler, SLJIT_LESS, SLJIT_S1, 0, SLJIT_R0, 0);
+	// The packed group starts aligned, so low index bits terminate the compact
+	// lane loop without carrying a separate end pointer through memory.
+	sljit_emit_op2(compiler, SLJIT_AND, SLJIT_R0, 0, SLJIT_S1, 0, SLJIT_IMM, plan.lanes - 1);
+	auto repeat_mixed = sljit_emit_cmp(compiler, SLJIT_NOT_EQUAL, SLJIT_R0, 0, SLJIT_IMM, 0);
 	sljit_set_label(repeat_mixed, mixed_loop);
 	auto mixed_done = sljit_emit_jump(compiler, SLJIT_JUMP);
-	sljit_set_label(no_lanes_true, sljit_emit_label(compiler));
-	sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_S1, 0, SLJIT_S1, 0, SLJIT_IMM, plan.lanes);
 	auto advance_done = sljit_emit_label(compiler);
 	sljit_set_label(group_done, advance_done);
+	sljit_set_label(empty_done, advance_done);
 	sljit_set_label(mixed_done, advance_done);
 	auto repeat = sljit_emit_jump(compiler, SLJIT_JUMP);
 	sljit_set_label(repeat, simd_loop);

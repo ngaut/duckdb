@@ -25,8 +25,11 @@ struct SljitTypedExpressionTreeSimdPlan {
 	sljit_s32 lanes = 0;      // 4 or 2
 	idx_t constant_count = 0;
 	idx_t node_count = 0;
-	idx_t max_live_temps = 0; // peak simultaneous vector temporaries (register pressure)
+	idx_t scalar_operation_count = 0; // comparisons, arithmetic, and conjunction combines
+	idx_t max_live_temps = 0;         // peak simultaneous vector temporaries (register pressure)
 	bool needs_all_ones = false;
+	bool root_is_conjunction = false;
+	bool has_or = false;
 	// The predicate mixes 32-bit and 64-bit comparisons: the loop runs 4 lanes at
 	// 32-bit width and 64-bit comparison masks are evaluated per half and narrowed.
 	bool mixed_width = false;
@@ -43,6 +46,14 @@ struct SljitTypedExpressionTreeSimdPlan {
 // packed SIMD ops profitably on the current architecture (single element width,
 // no overflow-trapping arithmetic, packed ops available for every op).
 SljitTypedExpressionTreeSimdPlan TryPlanSljitTypedExpressionTreeSimd(const ExecutionExpressionIR &root);
+
+// Hybrid loops vectorize only the predicate and retain scalar terminal work. This
+// cost contract rejects predicates whose saved scalar operations cannot amortize
+// mask classification and lane dispatch. AND hybrids evaluate the complete mask
+// branchlessly and classify it once; OR hybrids stay scalar.
+// Fully packed select/count/sum loops do not use this gate because their
+// terminals vectorize too.
+bool SljitTypedExpressionTreeSimdHybridFilterProfitable(const SljitTypedExpressionTreeSimdPlan &plan);
 
 // Emits the packed-lane predicate loop for a boolean select. Assumes the flat
 // all-valid fast path context (S1 = flat row base = 0 on entry, S2 = count,
@@ -89,11 +100,13 @@ void EmitSljitTypedExpressionTreeSimdSumLoop(struct sljit_compiler *compiler, co
 // computed with packed SIMD, then `emit_matching_row` is invoked once per lane to
 // emit the scalar work for a matching row (S1 holds that row's flat index; the
 // callback must preserve S1/S2/S5 and may clobber R0-R4). Used when the payloads
-// have no packed form (arbitrary aggregate payload kinds); the predicate — usually
-// the dominant cost under selective filters — still vectorizes. Assumes the flat
-// all-valid context; advances S1 to the last full lane group, the caller's scalar
-// fast loop handles the tail. `mask_offset` is a 32-byte, 16-aligned scratch block:
-// the first 16 bytes retain nullable lane bits and the second 16 bytes hold compact-loop state.
+// have no packed form (arbitrary aggregate payload kinds). Uniform groups advance
+// directly; mixed groups test a compact scalar mask without recomputing the
+// predicate, so rejected lanes do not pay scalar predicate or payload work.
+// Assumes the flat all-valid context; advances S1 to the last full lane group,
+// and the caller's scalar fast loop handles the tail. `mask_offset` is a 24-byte,
+// 16-aligned scratch block: the first 16 bytes retain nullable lane bits and the
+// final word holds the mixed mask.
 void EmitSljitTypedExpressionTreeSimdHybridFilterLoop(struct sljit_compiler *compiler,
                                                       const ExecutionExpressionIR &predicate,
                                                       const SljitTypedExpressionTreeSimdPlan &plan,
