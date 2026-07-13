@@ -542,15 +542,20 @@ path.
 A mixed-source grouped reduction may consume a group key from the selected
 probe input while reading an aggregate predicate from the matched build row.
 The current contract recognizes two complementary `SUM(CASE ... THEN 1 ELSE
-0 END)` lanes over the same constant string set. It materializes only the probe
-group key, compares a fixed-width compressed build field to precompressed
-constants when the producer applied string decompression, and accumulates exact
-primitive deltas. Nullable predicates still contribute the non-null `ELSE 0`
-value to both sums. Pattern binding, row-layout resolution, and constant
-compression are operator-lifetime plan state; chunks contain only data work.
-The resulting compact deltas use the ordinary pending preaggregation owner and
-flush through DuckDB's grouped-state contract. Admission depends only on typed
-expressions, source coordinates, row-layout facts, and primitive lanes.
+0 END)` lanes over the same constant string set. An already-typed group key
+retains the producer's selected vector view; a remaining narrowing or
+compression transform is read directly through the producer selection instead
+of creating a full join-output vector. Fixed-width build fields use typed loads
+against precompressed constants. Nullable predicates still contribute the
+non-null `ELSE 0` value to both sums. Pattern binding, row-layout resolution,
+and constant compression are operator-lifetime plan state; chunks contain only
+data work. A source domain of at most 64 groups admits a pipeline-lifetime exact
+accumulator with physical capacity for 128 groups. If stale statistics exceed
+that capacity, the accumulator flushes through the ordinary pending
+preaggregation owner and retries the current row, preserving exact semantics.
+Fallible selected-key transforms are preflighted before pipeline state changes,
+so native fallback cannot duplicate a partial batch. Admission depends only on
+typed expressions, source coordinates, row-layout facts, and primitive lanes.
 
 Dense grouped preaggregation has two generic scopes:
 
@@ -935,7 +940,10 @@ for predicates with expression or conjunction work to amortize mask setup;
 simple reference-to-constant comparisons stay on the scalar fast loop while
 fully packed count and sum kernels keep their SIMD paths. The selective
 multi-aggregate workload now proves 1.145x at one thread and 1.126x at four
-threads across 31 repeats, and its checked-in floor is 1.11x.
+threads in its retained historical artifact, and its checked-in floor is 1.11x.
+The mixed-source complementary join proves 1.290x at one thread and 1.207x at
+four threads in alternating 10-repeat promotion runs, so its checked-in floors
+are now 1.28x and 1.18x respectively.
 
 Current accepted generic evidence is stored in
 `benchmark/jit/tmp/generic_proof_batch_pregraph_simd_t1_20260713` and

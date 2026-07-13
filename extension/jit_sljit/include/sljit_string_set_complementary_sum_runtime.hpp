@@ -8,6 +8,8 @@
 
 #pragma once
 
+#include "sljit_typed_local_group_index.hpp"
+
 #include "sljit_aggregate_preaggregated_update_runtime.hpp"
 #include "sljit_aggregate_row_pointer_preaggregation.hpp"
 #include "sljit_grouped_aggregate_state_runtime.hpp"
@@ -214,14 +216,6 @@ static void SljitExecutePreclassifiedStringSetComplementarySumSpan(const Executi
 }
 
 template <class T>
-struct SljitTypedRowPointerPreaggregationEntry {
-	bool occupied = false;
-	bool valid = false;
-	T key {};
-	idx_t group_idx = DConstants::INVALID_INDEX;
-};
-
-template <class T>
 static bool SljitTryPreaggregateTypedRowPointerComplementarySums(
     DataChunk &payload_input, Vector &row_pointers, idx_t count,
     const vector<ExecutionRowPointerGroupKeySource> &group_sources,
@@ -257,11 +251,7 @@ static bool SljitTryPreaggregateTypedRowPointerComplementarySums(
 	auto predicate_sel = predicate_format.sel;
 	auto &predicate_validity = predicate_format.validity;
 
-	static constexpr idx_t CACHE_CAPACITY = SLJIT_ROW_POINTER_LOCAL_PREAGGREGATION_MAX_GROUPS * 2;
-	static constexpr idx_t HOT_KEY_CAPACITY = 8;
-	std::array<SljitTypedRowPointerPreaggregationEntry<T>, CACHE_CAPACITY> entries {};
-	std::array<T, SLJIT_ROW_POINTER_LOCAL_PREAGGREGATION_MAX_GROUPS> group_keys {};
-	std::array<bool, SLJIT_ROW_POINTER_LOCAL_PREAGGREGATION_MAX_GROUPS> group_validity {};
+	SljitTypedLocalGroupIndex<T, SLJIT_ROW_POINTER_LOCAL_PREAGGREGATION_MAX_GROUPS> group_index;
 	std::array<int64_t, SLJIT_ROW_POINTER_LOCAL_PREAGGREGATION_MAX_GROUPS> matching_counts {};
 	std::array<int64_t, SLJIT_ROW_POINTER_LOCAL_PREAGGREGATION_MAX_GROUPS> valid_counts {};
 	for (idx_t row_idx = 0; row_idx < count; row_idx++) {
@@ -278,53 +268,17 @@ static bool SljitTryPreaggregateTypedRowPointerComplementarySums(
 				return false;
 			}
 		}
-		idx_t group_idx = DConstants::INVALID_INDEX;
-		const auto hot_key_count = MinValue<idx_t>(compact_count, HOT_KEY_CAPACITY);
-		for (idx_t hot_idx = 0; hot_idx < hot_key_count; hot_idx++) {
-			if (group_validity[hot_idx] == source_is_valid && (!source_is_valid || group_keys[hot_idx] == key)) {
-				group_idx = hot_idx;
-				break;
-			}
-		}
-		if (group_idx != DConstants::INVALID_INDEX) {
-			const auto predicate_idx = predicate_sel->get_index(row_idx);
-			if (predicate_validity.RowIsValid(predicate_idx)) {
-				matching_counts[group_idx] += predicate_data[predicate_idx] != 0 ? 1 : 0;
-				valid_counts[group_idx]++;
-			}
-			continue;
-		}
-
-		const auto hash = source_is_valid ? Hash(key) : hash_t(0);
-		auto entry_idx = static_cast<idx_t>(hash) & (CACHE_CAPACITY - 1);
-		for (idx_t probe_idx = 0; probe_idx < CACHE_CAPACITY; probe_idx++) {
-			auto &entry = entries[entry_idx];
-			if (!entry.occupied) {
-				if (compact_count == SLJIT_ROW_POINTER_LOCAL_PREAGGREGATION_MAX_GROUPS) {
-					return false;
-				}
-				entry.occupied = true;
-				entry.valid = source_is_valid;
-				entry.key = key;
-				entry.group_idx = compact_count;
-				group_idx = compact_count++;
-				group_keys[group_idx] = key;
-				group_validity[group_idx] = source_is_valid;
-				compact_row_pointer_data[group_idx] = row_pointer;
-				preaggregate_scratch.group_rows.push_back(static_cast<sel_t>(row_idx));
-				if (!SljitStartPreaggregatedPrimitivePayloadGroup(preaggregate_scratch, payload_lanes)) {
-					return false;
-				}
-				break;
-			}
-			if (entry.valid == source_is_valid && (!source_is_valid || entry.key == key)) {
-				group_idx = entry.group_idx;
-				break;
-			}
-			entry_idx = (entry_idx + 1) & (CACHE_CAPACITY - 1);
-		}
-		if (group_idx == DConstants::INVALID_INDEX) {
+		idx_t group_idx;
+		bool created;
+		if (!group_index.FindOrCreate(source_is_valid, key, group_idx, created)) {
 			return false;
+		}
+		if (created) {
+			compact_row_pointer_data[group_idx] = row_pointer;
+			preaggregate_scratch.group_rows.push_back(static_cast<sel_t>(row_idx));
+			if (!SljitStartPreaggregatedPrimitivePayloadGroup(preaggregate_scratch, payload_lanes)) {
+				return false;
+			}
 		}
 		const auto predicate_idx = predicate_sel->get_index(row_idx);
 		if (predicate_validity.RowIsValid(predicate_idx)) {
@@ -332,6 +286,7 @@ static bool SljitTryPreaggregateTypedRowPointerComplementarySums(
 			valid_counts[group_idx]++;
 		}
 	}
+	compact_count = group_index.Count();
 	if (compact_count == count) {
 		return false;
 	}

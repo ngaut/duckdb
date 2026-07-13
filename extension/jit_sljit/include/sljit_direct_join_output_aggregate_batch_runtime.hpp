@@ -8,6 +8,8 @@
 
 #pragma once
 
+#include "sljit_join_input_complementary_sum_accumulator.hpp"
+
 #include "sljit_dense_group_domain.hpp"
 #include "sljit_direct_join_output_aggregate_state.hpp"
 #include "sljit_grouped_aggregate_input_vector_groups.hpp"
@@ -277,6 +279,9 @@ static void SljitFlushDirectJoinOutputAggregate(ExecutionRegionRuntime &runtime,
 		throw InternalException("SLJIT direct join-output aggregate index is out of range");
 	}
 	auto &aggregate_op = ops[strategy.aggregate_idx];
+	if (!SljitFlushJoinInputComplementarySumAccumulator(runtime, aggregate_op, strategy)) {
+		throw InternalException("SLJIT join-input complementary accumulator flush failed");
+	}
 	SljitFlushPendingDirectInputVectorAggregate(runtime, aggregate_op, strategy);
 	SljitFlushPendingRowPointerAggregateBatch(runtime, strategy.aggregate_idx, aggregate_op, strategy.descriptor,
 	                                          strategy.pending_batch);

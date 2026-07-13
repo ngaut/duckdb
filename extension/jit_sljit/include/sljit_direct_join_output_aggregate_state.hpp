@@ -32,7 +32,20 @@ struct SljitJoinInputRowPointerComplementarySumPlan {
 	idx_t group_input_vector_idx = DConstants::INVALID_INDEX;
 	idx_t join_input_group_column_idx = DConstants::INVALID_INDEX;
 	LogicalType join_input_group_type;
+	bool pipeline_accumulator_checked = false;
+	bool pipeline_accumulator_enabled = false;
 	bool blocker_recorded = false;
+};
+
+struct SljitJoinInputRowPointerComplementarySumAccumulator {
+	explicit SljitJoinInputRowPointerComplementarySumAccumulator(PhysicalType physical_type_p)
+	    : physical_type(physical_type_p) {
+	}
+	virtual ~SljitJoinInputRowPointerComplementarySumAccumulator() = default;
+	virtual bool Empty() const = 0;
+	virtual void Reset() = 0;
+
+	PhysicalType physical_type;
 };
 
 struct SljitPendingRowPointerAggregateBatch {
@@ -158,6 +171,9 @@ struct SljitDirectJoinOutputAggregateStrategy {
 	optional_ptr<bool> pending_preaggregated_deferred_grouped_finish;
 	SljitPendingRowPointerAggregateBatch pending_batch;
 	SljitJoinInputRowPointerComplementarySumPlan join_input_complementary_sum_plan;
+	unique_ptr<SljitJoinInputRowPointerComplementarySumAccumulator> join_input_complementary_sum_accumulator;
+	optional_ptr<SljitRegionExecutionScratch> join_input_complementary_sum_scratch;
+	optional_ptr<bool> join_input_complementary_sum_deferred_grouped_finish;
 	vector<idx_t> string_set_classification_payload_sources;
 	SljitStringSetComplementarySumDescriptor string_set_classification;
 	bool string_set_classification_checked = false;

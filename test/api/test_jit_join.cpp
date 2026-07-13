@@ -1580,7 +1580,7 @@ TEST_CASE("JIT row-pointer grouped aggregate preaggregates mixed input-vector de
 	    });
 }
 
-TEST_CASE("JIT row-pointer grouped aggregate updates complementary string-set sums directly", "[api][jit]") {
+TEST_CASE("JIT accumulates selected transformed groups with build-side complementary sums", "[api][jit]") {
 	DuckDB db;
 	Connection con(db);
 	auto &manager = ExecutionRegionManager::Get(*con.context);
@@ -1591,26 +1591,26 @@ TEST_CASE("JIT row-pointer grouped aggregate updates complementary string-set su
 	REQUIRE_NO_FAIL(con.Query("SET disabled_optimizers='join_order,build_side_probe_side,partial_aggregate_pushdown,"
 	                          "compressed_materialization'"));
 	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_string_set_preagg_orders AS "
-	                          "SELECT (((i // 8) % 2048) * 100003)::BIGINT AS orderkey, "
+	                          "SELECT (i * 100003)::BIGINT AS orderkey, "
 	                          "       CASE WHEN i % 5 = 0 THEN '1-URGENT' "
 	                          "            WHEN i % 5 = 1 THEN '2-HIGH' "
 	                          "            ELSE '3-MEDIUM' END AS orderpriority "
-	                          "FROM range(32768) tbl(i)"));
-	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_string_set_preagg_lineitem AS "
-	                          "SELECT (i * 100003)::BIGINT AS line_orderkey, "
-	                          "       (i % 2)::INTEGER AS shipmode_id "
 	                          "FROM range(2048) tbl(i)"));
+	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_string_set_preagg_lineitem AS "
+	                          "SELECT ((i % 2048) * 100003)::BIGINT AS line_orderkey, "
+	                          "       (i % 2)::INTEGER AS shipmode_id "
+	                          "FROM range(32768) tbl(i)"));
 
 	const string query =
-	    "SELECT l.shipmode_id, "
+	    "SELECT CAST(l.shipmode_id AS TINYINT) AS shipmode_id, "
 	    "       sum(CASE WHEN o.orderpriority = '1-URGENT' OR o.orderpriority = '2-HIGH' THEN 1 ELSE 0 END) "
 	    "           AS high_priority_count, "
 	    "       sum(CASE WHEN o.orderpriority <> '1-URGENT' AND o.orderpriority <> '2-HIGH' THEN 1 ELSE 0 END) "
 	    "           AS low_priority_count "
-	    "FROM jit_string_set_preagg_orders o "
-	    "JOIN jit_string_set_preagg_lineitem l ON o.orderkey = l.line_orderkey "
-	    "GROUP BY l.shipmode_id "
-	    "ORDER BY l.shipmode_id";
+	    "FROM jit_string_set_preagg_lineitem l "
+	    "JOIN jit_string_set_preagg_orders o ON o.orderkey = l.line_orderkey "
+	    "GROUP BY CAST(l.shipmode_id AS TINYINT) "
+	    "ORDER BY shipmode_id";
 	REQUIRE_NO_FAIL(con.Query("SET jit_policy='off'"));
 	auto reference = con.Query(query);
 	REQUIRE_NO_FAIL(*reference);
@@ -1636,7 +1636,13 @@ TEST_CASE("JIT row-pointer grouped aggregate updates complementary string-set su
 		           HasHashJoinProbeRuntimePath(event);
 	    },
 	    [](const ExecutionRegionEvent &event) {
+		    const auto paths = EventJitRuntimePathCounts(event);
+		    INFO(paths);
 		    REQUIRE(event.jit_runtime.hash_join_probe_layout == "regular_hash_table");
+		    REQUIRE(StringUtil::Contains(
+		        paths, "aggregate_update.join_input_pipeline_complementary_sum.selected_group_transform="));
+		    REQUIRE(StringUtil::Contains(paths,
+		                                 "aggregate_update.join_input_pipeline_complementary_sum_accumulator_flush="));
 		    RequireHashProbeAggregateUpdateRuntimeOwnership(event);
 		    REQUIRE(HasGeneratedAggregateUpdateStage(event));
 	    });
@@ -1650,6 +1656,7 @@ TEST_CASE("JIT preaggregates probe groups with compressed build-side complementa
 	ConfigureSljitForCoverage(con, false, true, true, 10000);
 	REQUIRE_NO_FAIL(con.Query("PRAGMA threads=1"));
 	REQUIRE_NO_FAIL(con.Query("SET perfect_ht_threshold=0"));
+	REQUIRE_NO_FAIL(con.Query("SET disabled_optimizers='join_order,build_side_probe_side,partial_aggregate_pushdown'"));
 	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_compressed_complementary_orders AS "
 	                          "SELECT (i * 100003)::BIGINT AS orderkey, "
 	                          "       CASE i % 7 WHEN 0 THEN NULL WHEN 1 THEN '1-URGENT' "
@@ -1658,18 +1665,18 @@ TEST_CASE("JIT preaggregates probe groups with compressed build-side complementa
 	                          "FROM range(16384) tbl(i)"));
 	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_compressed_complementary_shipments AS "
 	                          "SELECT ((i % 16384) * 100003)::BIGINT AS orderkey, "
-	                          "       CASE i % 3 WHEN 0 THEN 'MAIL' WHEN 1 THEN 'SHIP' ELSE 'RAIL' END AS shipmode "
+	                          "       (i % 3)::UTINYINT AS shipmode_id "
 	                          "FROM range(65536) tbl(i)"));
 
-	const string query = "SELECT shipment.shipmode, "
+	const string query = "SELECT shipment.shipmode_id, "
 	                     "       sum(CASE WHEN orders.orderpriority = '1-URGENT' OR orders.orderpriority = '2-HIGH' "
 	                     "                THEN 1 ELSE 0 END) AS high_priority_count, "
 	                     "       sum(CASE WHEN orders.orderpriority <> '1-URGENT' AND orders.orderpriority <> '2-HIGH' "
 	                     "                THEN 1 ELSE 0 END) AS low_priority_count "
 	                     "FROM jit_compressed_complementary_shipments shipment "
 	                     "JOIN jit_compressed_complementary_orders orders USING (orderkey) "
-	                     "WHERE shipment.shipmode IN ('MAIL', 'SHIP') "
-	                     "GROUP BY shipment.shipmode ORDER BY shipment.shipmode";
+	                     "WHERE shipment.shipmode_id IN (0, 1) "
+	                     "GROUP BY shipment.shipmode_id ORDER BY shipment.shipmode_id";
 	REQUIRE_NO_FAIL(con.Query("SET jit_policy='off'"));
 	auto reference = con.Query(query);
 	REQUIRE_NO_FAIL(*reference);
@@ -1699,6 +1706,10 @@ TEST_CASE("JIT preaggregates probe groups with compressed build-side complementa
 	    [](const ExecutionRegionEvent &event) {
 		    const auto paths = EventJitRuntimePathCounts(event);
 		    REQUIRE(event.jit_runtime.hash_join_probe_layout == "regular_hash_table");
+		    REQUIRE(StringUtil::Contains(paths,
+		                                 "aggregate_update.join_input_pipeline_complementary_sum.typed_group_view="));
+		    REQUIRE(StringUtil::Contains(paths,
+		                                 "aggregate_update.join_input_pipeline_complementary_sum_accumulator_flush="));
 		    REQUIRE(StringUtil::Contains(paths, "aggregate_update.pending_preaggregated_grouped_update_flush="));
 		    RequireHashProbeAggregateUpdateRuntimeOwnership(event);
 		    REQUIRE(HasGeneratedAggregateUpdateStage(event));

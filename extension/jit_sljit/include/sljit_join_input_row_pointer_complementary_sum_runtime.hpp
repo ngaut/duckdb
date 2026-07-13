@@ -11,16 +11,10 @@
 #include "sljit_direct_join_output_aggregate_batch_runtime.hpp"
 #include "sljit_grouped_aggregate_preaggregated_update_runtime.hpp"
 #include "sljit_hash_join_projection_aggregate_input_runtime.hpp"
+#include "sljit_selected_input_vector_group_key.hpp"
+#include "sljit_typed_local_group_index.hpp"
 
 namespace duckdb {
-
-template <class T>
-struct SljitJoinInputComplementaryGroupEntry {
-	bool occupied = false;
-	bool valid = false;
-	T key {};
-	idx_t group_idx = DConstants::INVALID_INDEX;
-};
 
 static bool SljitTryResolveComplementarySumRHSField(const ExecutionHashJoinProbeBinding &binding,
                                                     SljitJoinProjectionAggregateDescriptor &descriptor,
@@ -184,75 +178,79 @@ static bool SljitTryBuildJoinInputRowPointerComplementarySumPlan(const Execution
 
 static bool SljitComplementarySumRHSFieldMatches(data_ptr_t row_pointer, const SljitComplementarySumRHSField &field,
                                                  const SljitStringSetComplementarySumDescriptor &classification) {
-	if (field.compressed_size != 0) {
-		auto source = row_pointer + field.source.layout_offset;
-		return memcmp(source, field.compressed_constants[0].data(), field.compressed_size) == 0 ||
-		       memcmp(source, field.compressed_constants[1].data(), field.compressed_size) == 0;
+	auto source = row_pointer + field.source.layout_offset;
+	switch (field.compressed_size) {
+	case sizeof(uint8_t): {
+		const auto value = Load<uint8_t>(source);
+		return value == Load<uint8_t>(field.compressed_constants[0].data()) ||
+		       value == Load<uint8_t>(field.compressed_constants[1].data());
 	}
-	auto predicate = Load<string_t>(row_pointer + field.source.layout_offset);
+	case sizeof(uint16_t): {
+		const auto value = Load<uint16_t>(source);
+		return value == Load<uint16_t>(field.compressed_constants[0].data()) ||
+		       value == Load<uint16_t>(field.compressed_constants[1].data());
+	}
+	case sizeof(uint32_t): {
+		const auto value = Load<uint32_t>(source);
+		return value == Load<uint32_t>(field.compressed_constants[0].data()) ||
+		       value == Load<uint32_t>(field.compressed_constants[1].data());
+	}
+	case sizeof(uint64_t): {
+		const auto value = Load<uint64_t>(source);
+		return value == Load<uint64_t>(field.compressed_constants[0].data()) ||
+		       value == Load<uint64_t>(field.compressed_constants[1].data());
+	}
+	case sizeof(uhugeint_t): {
+		const auto value = Load<uhugeint_t>(source);
+		return value == Load<uhugeint_t>(field.compressed_constants[0].data()) ||
+		       value == Load<uhugeint_t>(field.compressed_constants[1].data());
+	}
+	case 0:
+		break;
+	default:
+		throw InternalException("SLJIT complementary sum has an unsupported compressed field width");
+	}
+	auto predicate = Load<string_t>(source);
 	return SljitStringEqualsConstant(predicate, classification.constants[0], classification.signatures[0]) ||
 	       SljitStringEqualsConstant(predicate, classification.constants[1], classification.signatures[1]);
 }
 
-template <class GROUP_TYPE>
+template <class GROUP_TYPE, class LOAD_GROUP>
 static bool SljitTryPreaggregateJoinInputRowPointerComplementarySums(
-    Vector &groups, Vector &row_pointers, idx_t count, const SljitComplementarySumRHSField &predicate_field,
+    LOAD_GROUP &&load_group, Vector &row_pointers, idx_t count, const SljitComplementarySumRHSField &predicate_field,
     const SljitStringSetComplementarySumDescriptor &classification,
     const vector<const ExecutionPrimitiveAggregateUpdateLane *> &payload_lanes, DataChunk &compact_groups,
     SljitPreaggregatedPrimitiveAggregateScratch &preaggregate_scratch, idx_t &compact_count) {
 	compact_count = 0;
-	if (count == 0 || compact_groups.ColumnCount() != 1 || row_pointers.GetVectorType() != VectorType::FLAT_VECTOR ||
-	    groups.GetType().InternalType() != GetTypeId<GROUP_TYPE>()) {
+	if (count == 0 || compact_groups.ColumnCount() != 1 || row_pointers.GetVectorType() != VectorType::FLAT_VECTOR) {
 		return false;
 	}
 
-	UnifiedVectorFormat group_format;
-	groups.ToUnifiedFormat(group_format);
-	auto group_data = UnifiedVectorFormat::GetData<GROUP_TYPE>(group_format);
 	auto row_pointer_data = FlatVector::GetData<data_ptr_t>(row_pointers);
 	auto compact_group_data = PrepareFlatPreaggregatedGroupTarget<GROUP_TYPE>(compact_groups);
 
 	static constexpr idx_t GROUP_LIMIT = SLJIT_ROW_POINTER_LOCAL_PREAGGREGATION_MAX_GROUPS;
-	static constexpr idx_t CACHE_CAPACITY = GROUP_LIMIT * 2;
-	std::array<SljitJoinInputComplementaryGroupEntry<GROUP_TYPE>, CACHE_CAPACITY> entries {};
-	std::array<bool, GROUP_LIMIT> group_validity {};
+	// This path already has a fixed-width group key, so direct hash lookup is
+	// cheaper than a branchy linear tier. Row-pointer reducers keep the hot tier
+	// because extracting their build-side key is more expensive.
+	SljitTypedLocalGroupIndex<GROUP_TYPE, GROUP_LIMIT, 0> group_index;
 	std::array<int64_t, GROUP_LIMIT> matching_counts {};
 	std::array<int64_t, GROUP_LIMIT> non_matching_counts {};
 	std::array<idx_t, GROUP_LIMIT> represented_rows {};
 
 	for (idx_t row_idx = 0; row_idx < count; row_idx++) {
-		const auto source_idx = group_format.sel->get_index(row_idx);
-		const bool group_is_valid = group_format.validity.RowIsValid(source_idx);
 		GROUP_TYPE key {};
-		if (group_is_valid) {
-			key = group_data[source_idx];
-		}
-		const auto hash = group_is_valid ? Hash(key) : hash_t(0);
-		auto entry_idx = static_cast<idx_t>(hash) & (CACHE_CAPACITY - 1);
-		idx_t group_idx = DConstants::INVALID_INDEX;
-		for (idx_t probe_idx = 0; probe_idx < CACHE_CAPACITY; probe_idx++) {
-			auto &entry = entries[entry_idx];
-			if (!entry.occupied) {
-				if (compact_count == GROUP_LIMIT) {
-					return false;
-				}
-				entry.occupied = true;
-				entry.valid = group_is_valid;
-				entry.key = key;
-				entry.group_idx = compact_count;
-				group_idx = compact_count++;
-				group_validity[group_idx] = group_is_valid;
-				compact_group_data[group_idx] = key;
-				break;
-			}
-			if (entry.valid == group_is_valid && (!group_is_valid || entry.key == key)) {
-				group_idx = entry.group_idx;
-				break;
-			}
-			entry_idx = (entry_idx + 1) & (CACHE_CAPACITY - 1);
-		}
-		if (group_idx == DConstants::INVALID_INDEX) {
+		bool group_is_valid;
+		if (!load_group(row_idx, key, group_is_valid)) {
 			return false;
+		}
+		idx_t group_idx;
+		bool created;
+		if (!group_index.FindOrCreate(group_is_valid, key, group_idx, created)) {
+			return false;
+		}
+		if (created) {
+			compact_group_data[group_idx] = key;
 		}
 
 		represented_rows[group_idx]++;
@@ -267,12 +265,13 @@ static bool SljitTryPreaggregateJoinInputRowPointerComplementarySums(
 			non_matching_counts[group_idx]++;
 		}
 	}
+	compact_count = group_index.Count();
 
 	auto &target_validity = FlatVector::ValidityMutable(compact_groups.data[0]);
 	target_validity.Reset(compact_count);
 	target_validity.SetAllValid(compact_count);
 	for (idx_t group_idx = 0; group_idx < compact_count; group_idx++) {
-		if (!group_validity[group_idx]) {
+		if (!group_index.IsValid(group_idx)) {
 			target_validity.SetInvalid(group_idx);
 		}
 	}
@@ -305,55 +304,230 @@ static bool SljitTryPreaggregateJoinInputRowPointerComplementarySums(
 	return true;
 }
 
-static bool SljitTryPreaggregateJoinInputRowPointerComplementarySums(
+template <class GROUP_TYPE>
+static bool SljitTryPreaggregateSelectedJoinInputRowPointerComplementarySums(
+    Vector &group_input, const SelectionVector &match_selection, const ExecutionRowPointerGroupKeySource &group_source,
+    Vector &row_pointers, idx_t count, const SljitComplementarySumRHSField &predicate_field,
+    const SljitStringSetComplementarySumDescriptor &classification,
+    const vector<const ExecutionPrimitiveAggregateUpdateLane *> &payload_lanes, DataChunk &compact_groups,
+    SljitPreaggregatedPrimitiveAggregateScratch &preaggregate_scratch, idx_t &compact_count,
+    bool source_key0_int64_to_int32_unchecked) {
+	auto consume = [&](auto &&load_group, auto &&, auto &&) {
+		return SljitTryPreaggregateJoinInputRowPointerComplementarySums<GROUP_TYPE>(
+		    std::forward<decltype(load_group)>(load_group), row_pointers, count, predicate_field, classification,
+		    payload_lanes, compact_groups, preaggregate_scratch, compact_count);
+	};
+	return SljitDispatchSelectedInputVectorGroupKey<GROUP_TYPE>(group_input, match_selection, group_source,
+	                                                            source_key0_int64_to_int32_unchecked, consume);
+}
+
+template <class GROUP_TYPE>
+static bool SljitTryPreaggregateMaterializedJoinInputRowPointerComplementarySums(
     Vector &groups, Vector &row_pointers, idx_t count, const SljitComplementarySumRHSField &predicate_field,
     const SljitStringSetComplementarySumDescriptor &classification,
     const vector<const ExecutionPrimitiveAggregateUpdateLane *> &payload_lanes, DataChunk &compact_groups,
     SljitPreaggregatedPrimitiveAggregateScratch &preaggregate_scratch, idx_t &compact_count) {
-	switch (groups.GetType().InternalType()) {
-	case PhysicalType::INT8:
-		return SljitTryPreaggregateJoinInputRowPointerComplementarySums<int8_t>(
-		    groups, row_pointers, count, predicate_field, classification, payload_lanes, compact_groups,
-		    preaggregate_scratch, compact_count);
-	case PhysicalType::INT16:
-		return SljitTryPreaggregateJoinInputRowPointerComplementarySums<int16_t>(
-		    groups, row_pointers, count, predicate_field, classification, payload_lanes, compact_groups,
-		    preaggregate_scratch, compact_count);
-	case PhysicalType::INT32:
-		return SljitTryPreaggregateJoinInputRowPointerComplementarySums<int32_t>(
-		    groups, row_pointers, count, predicate_field, classification, payload_lanes, compact_groups,
-		    preaggregate_scratch, compact_count);
-	case PhysicalType::INT64:
-		return SljitTryPreaggregateJoinInputRowPointerComplementarySums<int64_t>(
-		    groups, row_pointers, count, predicate_field, classification, payload_lanes, compact_groups,
-		    preaggregate_scratch, compact_count);
-	case PhysicalType::INT128:
-		return SljitTryPreaggregateJoinInputRowPointerComplementarySums<hugeint_t>(
-		    groups, row_pointers, count, predicate_field, classification, payload_lanes, compact_groups,
-		    preaggregate_scratch, compact_count);
-	case PhysicalType::UINT8:
-		return SljitTryPreaggregateJoinInputRowPointerComplementarySums<uint8_t>(
-		    groups, row_pointers, count, predicate_field, classification, payload_lanes, compact_groups,
-		    preaggregate_scratch, compact_count);
-	case PhysicalType::UINT16:
-		return SljitTryPreaggregateJoinInputRowPointerComplementarySums<uint16_t>(
-		    groups, row_pointers, count, predicate_field, classification, payload_lanes, compact_groups,
-		    preaggregate_scratch, compact_count);
-	case PhysicalType::UINT32:
-		return SljitTryPreaggregateJoinInputRowPointerComplementarySums<uint32_t>(
-		    groups, row_pointers, count, predicate_field, classification, payload_lanes, compact_groups,
-		    preaggregate_scratch, compact_count);
-	case PhysicalType::UINT64:
-		return SljitTryPreaggregateJoinInputRowPointerComplementarySums<uint64_t>(
-		    groups, row_pointers, count, predicate_field, classification, payload_lanes, compact_groups,
-		    preaggregate_scratch, compact_count);
-	case PhysicalType::UINT128:
-		return SljitTryPreaggregateJoinInputRowPointerComplementarySums<uhugeint_t>(
-		    groups, row_pointers, count, predicate_field, classification, payload_lanes, compact_groups,
-		    preaggregate_scratch, compact_count);
-	default:
+	if (groups.GetType().InternalType() != GetTypeId<GROUP_TYPE>()) {
 		return false;
 	}
+	UnifiedVectorFormat group_format;
+	groups.ToUnifiedFormat(group_format);
+	auto group_data = UnifiedVectorFormat::GetData<GROUP_TYPE>(group_format);
+	auto load_group = [&](idx_t row_idx, GROUP_TYPE &key, bool &valid) {
+		const auto source_idx = group_format.sel->get_index(row_idx);
+		valid = group_format.validity.RowIsValid(source_idx);
+		key = valid ? group_data[source_idx] : GROUP_TYPE {};
+		return true;
+	};
+	return SljitTryPreaggregateJoinInputRowPointerComplementarySums<GROUP_TYPE>(
+	    load_group, row_pointers, count, predicate_field, classification, payload_lanes, compact_groups,
+	    preaggregate_scratch, compact_count);
+}
+
+struct SljitMaterializedJoinInputComplementaryPreaggregateDispatch {
+	Vector &groups;
+	Vector &row_pointers;
+	idx_t count;
+	const SljitComplementarySumRHSField &predicate_field;
+	const SljitStringSetComplementarySumDescriptor &classification;
+	const vector<const ExecutionPrimitiveAggregateUpdateLane *> &payload_lanes;
+	DataChunk &compact_groups;
+	SljitPreaggregatedPrimitiveAggregateScratch &preaggregate_scratch;
+	idx_t &compact_count;
+
+	template <class GROUP_TYPE>
+	bool Execute() {
+		return SljitTryPreaggregateMaterializedJoinInputRowPointerComplementarySums<GROUP_TYPE>(
+		    groups, row_pointers, count, predicate_field, classification, payload_lanes, compact_groups,
+		    preaggregate_scratch, compact_count);
+	}
+};
+
+static bool SljitTryPreaggregateMaterializedJoinInputRowPointerComplementarySums(
+    Vector &groups, Vector &row_pointers, idx_t count, const SljitComplementarySumRHSField &predicate_field,
+    const SljitStringSetComplementarySumDescriptor &classification,
+    const vector<const ExecutionPrimitiveAggregateUpdateLane *> &payload_lanes, DataChunk &compact_groups,
+    SljitPreaggregatedPrimitiveAggregateScratch &preaggregate_scratch, idx_t &compact_count) {
+	SljitMaterializedJoinInputComplementaryPreaggregateDispatch dispatch {
+	    groups,         row_pointers,         count,        predicate_field, classification, payload_lanes,
+	    compact_groups, preaggregate_scratch, compact_count};
+	return SljitDispatchPreaggregatedInputVectorGroupTargetType(groups.GetType().InternalType(), dispatch);
+}
+
+struct SljitSelectedJoinInputComplementaryPreaggregateDispatch {
+	Vector &group_input;
+	const SelectionVector &match_selection;
+	const ExecutionRowPointerGroupKeySource &group_source;
+	Vector &row_pointers;
+	idx_t count;
+	const SljitComplementarySumRHSField &predicate_field;
+	const SljitStringSetComplementarySumDescriptor &classification;
+	const vector<const ExecutionPrimitiveAggregateUpdateLane *> &payload_lanes;
+	DataChunk &compact_groups;
+	SljitPreaggregatedPrimitiveAggregateScratch &preaggregate_scratch;
+	idx_t &compact_count;
+	bool source_key0_int64_to_int32_unchecked;
+
+	template <class GROUP_TYPE>
+	bool Execute() {
+		return SljitTryPreaggregateSelectedJoinInputRowPointerComplementarySums<GROUP_TYPE>(
+		    group_input, match_selection, group_source, row_pointers, count, predicate_field, classification,
+		    payload_lanes, compact_groups, preaggregate_scratch, compact_count, source_key0_int64_to_int32_unchecked);
+	}
+};
+
+static bool SljitTryPreaggregateJoinInputRowPointerComplementarySums(
+    Vector &group_input, const SelectionVector &match_selection, const ExecutionRowPointerGroupKeySource &group_source,
+    Vector &row_pointers, idx_t count, const SljitComplementarySumRHSField &predicate_field,
+    const SljitStringSetComplementarySumDescriptor &classification,
+    const vector<const ExecutionPrimitiveAggregateUpdateLane *> &payload_lanes, DataChunk &compact_groups,
+    SljitPreaggregatedPrimitiveAggregateScratch &preaggregate_scratch, idx_t &compact_count,
+    bool source_key0_int64_to_int32_unchecked) {
+	SljitSelectedJoinInputComplementaryPreaggregateDispatch dispatch {
+	    group_input,    match_selection,      group_source,   row_pointers,
+	    count,          predicate_field,      classification, payload_lanes,
+	    compact_groups, preaggregate_scratch, compact_count,  source_key0_int64_to_int32_unchecked};
+	return SljitDispatchPreaggregatedInputVectorGroupTargetType(group_source.target_physical_type, dispatch);
+}
+
+template <class GROUP_TYPE, class LOAD_GROUP, class PREFLIGHT, class FLUSH_ACCUMULATOR>
+static bool
+SljitAccumulateJoinInputRowPointerComplementarySums(SljitDirectJoinOutputAggregateStrategy &strategy,
+                                                    LOAD_GROUP &&load_group, Vector &row_pointers, idx_t count,
+                                                    const SljitComplementarySumRHSField &predicate_field,
+                                                    const SljitStringSetComplementarySumDescriptor &classification,
+                                                    PREFLIGHT &&preflight, FLUSH_ACCUMULATOR &flush_accumulator) {
+	if (count == 0 || row_pointers.GetVectorType() != VectorType::FLAT_VECTOR) {
+		return false;
+	}
+	auto &accumulator = SljitGetJoinInputComplementarySumAccumulator<GROUP_TYPE>(strategy);
+	auto row_pointer_data = FlatVector::GetData<data_ptr_t>(row_pointers);
+	if (!preflight(count)) {
+		return false;
+	}
+	for (idx_t row_idx = 0; row_idx < count; row_idx++) {
+		GROUP_TYPE key {};
+		bool group_is_valid;
+		if (!load_group(row_idx, key, group_is_valid)) {
+			throw InternalException("SLJIT selected group transform failed after successful preflight");
+		}
+		auto row_pointer = row_pointer_data[row_idx];
+		const bool predicate_is_valid = SljitHashJoinRHSFixedColumnSourceIsValid(row_pointer, predicate_field.source);
+		const bool predicate_matches =
+		    predicate_is_valid && SljitComplementarySumRHSFieldMatches(row_pointer, predicate_field, classification);
+		if (accumulator.Accumulate(group_is_valid, key, predicate_is_valid, predicate_matches)) {
+			continue;
+		}
+		if (!flush_accumulator()) {
+			throw InternalException("SLJIT join-input complementary accumulator overflow flush failed");
+		}
+		if (!accumulator.Accumulate(group_is_valid, key, predicate_is_valid, predicate_matches)) {
+			throw InternalException("SLJIT join-input complementary accumulator remained full after flush");
+		}
+	}
+	return true;
+}
+
+template <class FLUSH_ACCUMULATOR>
+struct SljitSelectedJoinInputComplementaryAccumulatorDispatch {
+	SljitDirectJoinOutputAggregateStrategy &strategy;
+	Vector &group_input;
+	const SelectionVector &match_selection;
+	const ExecutionRowPointerGroupKeySource &group_source;
+	Vector &row_pointers;
+	idx_t count;
+	const SljitComplementarySumRHSField &predicate_field;
+	const SljitStringSetComplementarySumDescriptor &classification;
+	bool source_key0_int64_to_int32_unchecked;
+	FLUSH_ACCUMULATOR &flush_accumulator;
+
+	template <class GROUP_TYPE>
+	bool Execute() {
+		auto consume = [&](auto &&, auto &&preflight, auto &&preflighted_load_group) {
+			return SljitAccumulateJoinInputRowPointerComplementarySums<GROUP_TYPE>(
+			    strategy, std::forward<decltype(preflighted_load_group)>(preflighted_load_group), row_pointers, count,
+			    predicate_field, classification, std::forward<decltype(preflight)>(preflight), flush_accumulator);
+		};
+		return SljitDispatchSelectedInputVectorGroupKey<GROUP_TYPE>(group_input, match_selection, group_source,
+		                                                            source_key0_int64_to_int32_unchecked, consume);
+	}
+};
+
+template <class FLUSH_ACCUMULATOR>
+static bool SljitTryAccumulateSelectedJoinInputRowPointerComplementarySums(
+    SljitDirectJoinOutputAggregateStrategy &strategy, Vector &group_input, const SelectionVector &match_selection,
+    const ExecutionRowPointerGroupKeySource &group_source, Vector &row_pointers, idx_t count,
+    const SljitComplementarySumRHSField &predicate_field,
+    const SljitStringSetComplementarySumDescriptor &classification, bool source_key0_int64_to_int32_unchecked,
+    FLUSH_ACCUMULATOR &flush_accumulator) {
+	SljitSelectedJoinInputComplementaryAccumulatorDispatch<FLUSH_ACCUMULATOR> dispatch {
+	    strategy,         group_input,    match_selection,
+	    group_source,     row_pointers,   count,
+	    predicate_field,  classification, source_key0_int64_to_int32_unchecked,
+	    flush_accumulator};
+	return SljitDispatchPreaggregatedInputVectorGroupTargetType(group_source.target_physical_type, dispatch);
+}
+
+template <class FLUSH_ACCUMULATOR>
+struct SljitMaterializedJoinInputComplementaryAccumulatorDispatch {
+	SljitDirectJoinOutputAggregateStrategy &strategy;
+	Vector &groups;
+	Vector &row_pointers;
+	idx_t count;
+	const SljitComplementarySumRHSField &predicate_field;
+	const SljitStringSetComplementarySumDescriptor &classification;
+	FLUSH_ACCUMULATOR &flush_accumulator;
+
+	template <class GROUP_TYPE>
+	bool Execute() {
+		if (groups.GetType().InternalType() != GetTypeId<GROUP_TYPE>()) {
+			return false;
+		}
+		UnifiedVectorFormat group_format;
+		groups.ToUnifiedFormat(group_format);
+		auto group_data = UnifiedVectorFormat::GetData<GROUP_TYPE>(group_format);
+		auto load_group = [&](idx_t row_idx, GROUP_TYPE &key, bool &valid) {
+			const auto source_idx = group_format.sel->get_index(row_idx);
+			valid = group_format.validity.RowIsValid(source_idx);
+			key = valid ? group_data[source_idx] : GROUP_TYPE {};
+			return true;
+		};
+		auto preflight = [](idx_t) {
+			return true;
+		};
+		return SljitAccumulateJoinInputRowPointerComplementarySums<GROUP_TYPE>(
+		    strategy, load_group, row_pointers, count, predicate_field, classification, preflight, flush_accumulator);
+	}
+};
+
+template <class FLUSH_ACCUMULATOR>
+static bool SljitTryAccumulateMaterializedJoinInputRowPointerComplementarySums(
+    SljitDirectJoinOutputAggregateStrategy &strategy, Vector &groups, Vector &row_pointers, idx_t count,
+    const SljitComplementarySumRHSField &predicate_field,
+    const SljitStringSetComplementarySumDescriptor &classification, FLUSH_ACCUMULATOR &flush_accumulator) {
+	SljitMaterializedJoinInputComplementaryAccumulatorDispatch<FLUSH_ACCUMULATOR> dispatch {
+	    strategy, groups, row_pointers, count, predicate_field, classification, flush_accumulator};
+	return SljitDispatchPreaggregatedInputVectorGroupTargetType(groups.GetType().InternalType(), dispatch);
 }
 
 static bool SljitTryExecuteJoinInputRowPointerComplementarySumUpdate(
@@ -389,24 +563,26 @@ static bool SljitTryExecuteJoinInputRowPointerComplementarySumUpdate(
 		return block("group_input");
 	}
 	auto group_source = descriptor.group_sources[0];
-
+	const bool direct_selected_group_transform = group_source.cast_kind != ExecutionRowPointerGroupKeyCastKind::NONE;
 	descriptor.EnsureInput(runtime.GetAllocator());
 	auto &aggregate_input = descriptor.input.chunk;
 	aggregate_input.Reset();
-	aggregate_input.data[plan.group_input_vector_idx].Slice(join_input.data[plan.join_input_group_column_idx],
-	                                                        match_selection, count);
 	aggregate_input.SetChildCardinality(count);
-	SljitApplyInputVectorGroupBatchCastProofs(aggregate_input, descriptor.group_sources, count);
-	group_source = descriptor.group_sources[0];
-
-	auto &payload_scratch = scratch.AggregatePayloadScratch(strategy.aggregate_idx);
-	auto &materialized_groups =
-	    payload_scratch.PrepareInputVectorGroups(runtime.GetAllocator(), descriptor.group_sources);
-	if (!SljitTryMaterializeInputVectorGroupSource(aggregate_input, group_source, materialized_groups.data[0], count,
-	                                               source_key0_int64_to_int32_unchecked)) {
-		return block("group_materialize");
+	DataChunk *materialized_groups = nullptr;
+	if (!direct_selected_group_transform) {
+		aggregate_input.data[plan.group_input_vector_idx].Slice(join_input.data[plan.join_input_group_column_idx],
+		                                                        match_selection, count);
+		SljitApplyInputVectorGroupBatchCastProofs(aggregate_input, descriptor.group_sources, count);
+		group_source = descriptor.group_sources[0];
+		auto &payload_scratch = scratch.AggregatePayloadScratch(strategy.aggregate_idx);
+		materialized_groups =
+		    &payload_scratch.PrepareInputVectorGroups(runtime.GetAllocator(), descriptor.group_sources);
+		if (!SljitTryMaterializeInputVectorGroupSource(aggregate_input, group_source, materialized_groups->data[0],
+		                                               count, source_key0_int64_to_int32_unchecked)) {
+			return block("group_materialize");
+		}
+		materialized_groups->SetChildCardinality(count);
 	}
-	materialized_groups.SetChildCardinality(count);
 
 	auto &sink_binding = SljitBindRecordedNativeSink(
 	    runtime, native_runtime, scratch, strategy.aggregate_idx, aggregate_op.kind, aggregate_input,
@@ -423,21 +599,59 @@ static bool SljitTryExecuteJoinInputRowPointerComplementarySumUpdate(
 	if (!SljitTryBindStringSetComplementarySumLanes(aggregate_op, payload_lanes, plan.classification, update_state)) {
 		return block("payload_lanes");
 	}
+	SljitFlushPendingRowPointerAggregateBatch(runtime, strategy.aggregate_idx, aggregate_op, descriptor,
+	                                          strategy.pending_batch);
+	if (SljitJoinInputComplementarySumAccumulatorEnabled(strategy, plan)) {
+		strategy.join_input_complementary_sum_scratch = &scratch;
+		strategy.join_input_complementary_sum_deferred_grouped_finish = deferred_grouped_finish;
+		auto flush_accumulator = [&]() {
+			return SljitFlushJoinInputComplementarySumAccumulator(runtime, aggregate_op, strategy);
+		};
+		auto accumulate_start = SljitRegionStageStart(runtime);
+		const bool accumulated = direct_selected_group_transform
+		                             ? SljitTryAccumulateSelectedJoinInputRowPointerComplementarySums(
+		                                   strategy, join_input.data[plan.join_input_group_column_idx], match_selection,
+		                                   group_source, row_pointers, count, plan.predicate_field, plan.classification,
+		                                   source_key0_int64_to_int32_unchecked, flush_accumulator)
+		                             : SljitTryAccumulateMaterializedJoinInputRowPointerComplementarySums(
+		                                   strategy, materialized_groups->data[0], row_pointers, count,
+		                                   plan.predicate_field, plan.classification, flush_accumulator);
+		if (!accumulated) {
+			return block("pipeline_accumulate");
+		}
+		RecordSljitRegionStageRuntime(runtime, strategy.aggregate_idx, aggregate_op.kind,
+		                              "pipeline_accumulate_join_input_row_pointer_complementary_sum", accumulate_start);
+		RecordSljitRegionMaterializationElisionPath(runtime, aggregate_op.kind,
+		                                            "join_input_pipeline_complementary_sum_accumulate", count);
+		RecordSljitRegionMaterializationElisionPath(
+		    runtime, aggregate_op.kind,
+		    direct_selected_group_transform ? "join_input_pipeline_complementary_sum.selected_group_transform"
+		                                    : "join_input_pipeline_complementary_sum.typed_group_view",
+		    count);
+		RecordSljitRegionMaterializationElisionPath(
+		    runtime, aggregate_op.kind, "join_input_row_pointer_preaggregated_complementary_sum_update", count);
+		return true;
+	}
 
 	auto &compact_groups = scratch.AggregatePreaggregatedGroups(strategy.aggregate_idx);
 	auto &preaggregate_scratch = scratch.AggregatePreaggregateScratch(strategy.aggregate_idx);
 	idx_t compact_count;
 	auto preaggregate_start = SljitRegionStageStart(runtime);
-	if (!SljitTryPreaggregateJoinInputRowPointerComplementarySums(
-	        materialized_groups.data[0], row_pointers, count, plan.predicate_field, plan.classification, payload_lanes,
-	        compact_groups, preaggregate_scratch, compact_count)) {
+	const bool preaggregated =
+	    direct_selected_group_transform
+	        ? SljitTryPreaggregateJoinInputRowPointerComplementarySums(
+	              join_input.data[plan.join_input_group_column_idx], match_selection, group_source, row_pointers, count,
+	              plan.predicate_field, plan.classification, payload_lanes, compact_groups, preaggregate_scratch,
+	              compact_count, source_key0_int64_to_int32_unchecked)
+	        : SljitTryPreaggregateMaterializedJoinInputRowPointerComplementarySums(
+	              materialized_groups->data[0], row_pointers, count, plan.predicate_field, plan.classification,
+	              payload_lanes, compact_groups, preaggregate_scratch, compact_count);
+	if (!preaggregated) {
 		return block("preaggregate");
 	}
 	RecordSljitRegionStageRuntime(runtime, strategy.aggregate_idx, aggregate_op.kind,
 	                              "local_preaggregate_join_input_row_pointer_complementary_sum", preaggregate_start);
 
-	SljitFlushPendingRowPointerAggregateBatch(runtime, strategy.aggregate_idx, aggregate_op, descriptor,
-	                                          strategy.pending_batch);
 	if (!strategy.pending_preaggregated_groups) {
 		strategy.pending_preaggregated_groups = make_shared_ptr<SljitPendingPreaggregatedPrimitiveGroupBatch>();
 	}
