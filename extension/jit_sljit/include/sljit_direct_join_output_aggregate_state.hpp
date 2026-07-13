@@ -18,6 +18,23 @@ namespace duckdb {
 struct SljitRegionExecutionScratch;
 struct SljitPendingPreaggregatedPrimitiveGroupBatch;
 
+struct SljitComplementarySumRHSField {
+	ExecutionHashJoinRHSFixedColumnSource source;
+	idx_t compressed_size = 0;
+	std::array<std::array<data_t, sizeof(uhugeint_t)>, SljitStringSetCaseGroupedPayloadProjection::CONSTANT_COUNT>
+	    compressed_constants {};
+};
+
+struct SljitJoinInputRowPointerComplementarySumPlan {
+	SljitDeferredBuildState build_state;
+	SljitStringSetComplementarySumDescriptor classification;
+	SljitComplementarySumRHSField predicate_field;
+	idx_t group_input_vector_idx = DConstants::INVALID_INDEX;
+	idx_t join_input_group_column_idx = DConstants::INVALID_INDEX;
+	LogicalType join_input_group_type;
+	bool blocker_recorded = false;
+};
+
 struct SljitPendingRowPointerAggregateBatch {
 	SljitPendingRowPointerAggregateBatch() : row_pointers(LogicalType::POINTER) {
 	}
@@ -136,8 +153,11 @@ struct SljitDirectJoinOutputAggregateStrategy {
 	string last_failure;
 	SljitJoinProjectionAggregateDescriptor descriptor;
 	SljitPendingInputVectorAggregateBatch pending_input_vector_batch;
-	shared_ptr<SljitPendingPreaggregatedPrimitiveGroupBatch> pending_preaggregated_input_vector_groups;
+	shared_ptr<SljitPendingPreaggregatedPrimitiveGroupBatch> pending_preaggregated_groups;
+	optional_ptr<SljitRegionExecutionScratch> pending_preaggregated_scratch;
+	optional_ptr<bool> pending_preaggregated_deferred_grouped_finish;
 	SljitPendingRowPointerAggregateBatch pending_batch;
+	SljitJoinInputRowPointerComplementarySumPlan join_input_complementary_sum_plan;
 	vector<idx_t> string_set_classification_payload_sources;
 	SljitStringSetComplementarySumDescriptor string_set_classification;
 	bool string_set_classification_checked = false;

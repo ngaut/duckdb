@@ -1642,6 +1642,69 @@ TEST_CASE("JIT row-pointer grouped aggregate updates complementary string-set su
 	    });
 }
 
+TEST_CASE("JIT preaggregates probe groups with compressed build-side complementary sums", "[api][jit]") {
+	DuckDB db;
+	Connection con(db);
+	auto &manager = ExecutionRegionManager::Get(*con.context);
+
+	ConfigureSljitForCoverage(con, false, true, true, 10000);
+	REQUIRE_NO_FAIL(con.Query("PRAGMA threads=1"));
+	REQUIRE_NO_FAIL(con.Query("SET perfect_ht_threshold=0"));
+	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_compressed_complementary_orders AS "
+	                          "SELECT (i * 100003)::BIGINT AS orderkey, "
+	                          "       CASE i % 7 WHEN 0 THEN NULL WHEN 1 THEN '1-URGENT' "
+	                          "            WHEN 2 THEN '2-HIGH' WHEN 3 THEN '3-MEDIUM' "
+	                          "            ELSE '4-NOT SPECIFIED' END AS orderpriority "
+	                          "FROM range(16384) tbl(i)"));
+	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_compressed_complementary_shipments AS "
+	                          "SELECT ((i % 16384) * 100003)::BIGINT AS orderkey, "
+	                          "       CASE i % 3 WHEN 0 THEN 'MAIL' WHEN 1 THEN 'SHIP' ELSE 'RAIL' END AS shipmode "
+	                          "FROM range(65536) tbl(i)"));
+
+	const string query = "SELECT shipment.shipmode, "
+	                     "       sum(CASE WHEN orders.orderpriority = '1-URGENT' OR orders.orderpriority = '2-HIGH' "
+	                     "                THEN 1 ELSE 0 END) AS high_priority_count, "
+	                     "       sum(CASE WHEN orders.orderpriority <> '1-URGENT' AND orders.orderpriority <> '2-HIGH' "
+	                     "                THEN 1 ELSE 0 END) AS low_priority_count "
+	                     "FROM jit_compressed_complementary_shipments shipment "
+	                     "JOIN jit_compressed_complementary_orders orders USING (orderkey) "
+	                     "WHERE shipment.shipmode IN ('MAIL', 'SHIP') "
+	                     "GROUP BY shipment.shipmode ORDER BY shipment.shipmode";
+	REQUIRE_NO_FAIL(con.Query("SET jit_policy='off'"));
+	auto reference = con.Query(query);
+	REQUIRE_NO_FAIL(*reference);
+	REQUIRE(reference->RowCount() == 2);
+
+	REQUIRE_NO_FAIL(con.Query("SET jit_policy='auto'"));
+	ClearJitTrace(manager, true);
+	auto result = con.Query(query);
+	REQUIRE_NO_FAIL(*result);
+	REQUIRE(result->RowCount() == reference->RowCount());
+	REQUIRE(result->ColumnCount() == reference->ColumnCount());
+	for (idx_t row_idx = 0; row_idx < result->RowCount(); row_idx++) {
+		for (idx_t col_idx = 0; col_idx < result->ColumnCount(); col_idx++) {
+			REQUIRE(result->GetValue(col_idx, row_idx).ToString() == reference->GetValue(col_idx, row_idx).ToString());
+		}
+	}
+
+	RequireJitEvent(
+	    manager,
+	    [](const ExecutionRegionEvent &event) {
+		    const auto paths = EventJitRuntimePathCounts(event);
+		    return EventPhase(event) == "runtime" && EventStatus(event) == "executed" &&
+		           EventExecutionMode(event) == "native" &&
+		           StringUtil::Contains(
+		               paths, "aggregate_update.join_input_row_pointer_preaggregated_complementary_sum_update=");
+	    },
+	    [](const ExecutionRegionEvent &event) {
+		    const auto paths = EventJitRuntimePathCounts(event);
+		    REQUIRE(event.jit_runtime.hash_join_probe_layout == "regular_hash_table");
+		    REQUIRE(StringUtil::Contains(paths, "aggregate_update.pending_preaggregated_grouped_update_flush="));
+		    RequireHashProbeAggregateUpdateRuntimeOwnership(event);
+		    REQUIRE(HasGeneratedAggregateUpdateStage(event));
+	    });
+}
+
 TEST_CASE("JIT join grouped aggregate direct-projects variable-width RHS keys", "[api][jit]") {
 	DuckDB db;
 	Connection con(db);

@@ -276,6 +276,62 @@ static void SljitMaterializeDateYearCompressedInputVectorGroup(Vector &source, V
 	FlatVector::SetSize(target, count);
 }
 
+template <class DST>
+static bool SljitMaterializeStringCompressedInputVectorGroup(Vector &source, Vector &target, idx_t count) {
+	target.SetVectorType(VectorType::FLAT_VECTOR);
+	auto &target_validity = FlatVector::ValidityMutable(target);
+	target_validity.Reset(count);
+	target_validity.EnsureWritable();
+	target_validity.SetAllValid(count);
+	auto target_data = FlatVector::GetDataMutable<DST>(target);
+
+	UnifiedVectorFormat source_format;
+	source.ToUnifiedFormat(source_format);
+	auto source_data = UnifiedVectorFormat::GetData<string_t>(source_format);
+	for (idx_t row_idx = 0; row_idx < count; row_idx++) {
+		const auto source_idx = source_format.sel->get_index(row_idx);
+		if (!source_format.validity.RowIsValid(source_idx)) {
+			target_validity.SetInvalid(row_idx);
+			continue;
+		}
+		if (!TryStringCompressValue(source_data[source_idx], target_data[row_idx])) {
+			return false;
+		}
+	}
+	FlatVector::SetSize(target, count);
+	return true;
+}
+
+struct SljitInputVectorStringCompressMaterializeDispatch {
+	Vector &input;
+	Vector &target;
+	idx_t count;
+
+	template <class DST>
+	bool Execute() {
+		return SljitMaterializeStringCompressedInputVectorGroup<DST>(input, target, count);
+	}
+};
+
+static bool SljitTryMaterializeStringCompressedInputVectorGroup(Vector &input, Vector &target, idx_t count,
+                                                                const ExecutionRowPointerGroupKeySource &source) {
+	SljitInputVectorStringCompressMaterializeDispatch dispatch {input, target, count};
+	switch (source.target_physical_type) {
+	case PhysicalType::UINT8:
+		return dispatch.Execute<uint8_t>();
+	case PhysicalType::UINT16:
+		return dispatch.Execute<uint16_t>();
+	case PhysicalType::UINT32:
+		return dispatch.Execute<uint32_t>();
+	case PhysicalType::UINT64:
+		return dispatch.Execute<uint64_t>();
+	case PhysicalType::UINT128:
+		return dispatch.Execute<uhugeint_t>();
+	default:
+		return false;
+	}
+}
+
 static bool SljitTryMaterializeInputVectorGroupSource(DataChunk &payload_input,
                                                       const ExecutionRowPointerGroupKeySource &source, Vector &target,
                                                       idx_t count, bool source_key0_int64_to_int32_unchecked) {
@@ -310,6 +366,11 @@ static bool SljitTryMaterializeInputVectorGroupSource(DataChunk &payload_input,
 		}
 		SljitMaterializeDateYearCompressedInputVectorGroup<uint8_t>(input, target, count, source.cast_constant);
 		return true;
+	case ExecutionRowPointerGroupKeyCastKind::STRING_COMPRESS:
+		if (source.source_physical_type != PhysicalType::VARCHAR) {
+			return false;
+		}
+		return SljitTryMaterializeStringCompressedInputVectorGroup(input, target, count, source);
 	case ExecutionRowPointerGroupKeyCastKind::STRING_SUBSTRING: {
 		if (source.source_physical_type != PhysicalType::VARCHAR ||
 		    source.target_physical_type != PhysicalType::VARCHAR) {

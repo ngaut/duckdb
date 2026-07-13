@@ -282,6 +282,9 @@ static bool SljitInputVectorGroupKeySourceSupportsMaterialization(const Executio
 	case ExecutionRowPointerGroupKeyCastKind::DATE_YEAR_COMPRESS:
 		return source.source_physical_type == PhysicalType::INT32 && source.source_type.id() == LogicalTypeId::DATE &&
 		       source.target_physical_type == PhysicalType::UINT8;
+	case ExecutionRowPointerGroupKeyCastKind::STRING_COMPRESS:
+		return source.source_physical_type == PhysicalType::VARCHAR &&
+		       SljitGroupKeyCompressedUnsignedTargetType(source.target_physical_type);
 	case ExecutionRowPointerGroupKeyCastKind::STRING_SUBSTRING:
 		return source.source_physical_type == PhysicalType::VARCHAR &&
 		       source.target_physical_type == PhysicalType::VARCHAR;

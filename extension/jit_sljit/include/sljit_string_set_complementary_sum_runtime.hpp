@@ -204,13 +204,12 @@ static void SljitExecutePreclassifiedStringSetComplementarySumSpan(const Executi
 		const auto row_idx = span.row_sel ? span.row_sel[idx] : idx;
 		const auto address_idx = SljitSelectedGroupedStateAddressIndex(span.address_sel, span.row_sel, idx, row_idx);
 		const auto predicate_idx = predicate_sel->get_index(row_idx);
-		if (!predicate_validity.RowIsValid(predicate_idx)) {
-			continue;
-		}
 		auto state_address = reinterpret_cast<data_ptr_t>(span.addresses[address_idx]);
-		const bool matches = predicate_data[predicate_idx] != 0;
+		const bool predicate_is_valid = predicate_validity.RowIsValid(predicate_idx);
+		const bool matches = predicate_is_valid && predicate_data[predicate_idx] != 0;
 		SljitApplyStringSetComplementarySumLane(state_address, *state.matching_lane, matches);
-		SljitApplyStringSetComplementarySumLane(state_address, *state.non_matching_lane, !matches);
+		SljitApplyStringSetComplementarySumLane(state_address, *state.non_matching_lane,
+		                                        predicate_is_valid && !matches);
 	}
 }
 
@@ -352,7 +351,8 @@ static bool SljitTryPreaggregateTypedRowPointerComplementarySums(
 			default:
 				return false;
 			}
-			payload.value_is_set[group_idx] = valid_counts[group_idx] != 0 ? 1 : 0;
+			// CASE ... ELSE 0 contributes a non-null zero for null predicates.
+			payload.value_is_set[group_idx] = 1;
 		}
 	}
 	FlatVector::SetSize(compact_row_pointers, count_t(compact_count));

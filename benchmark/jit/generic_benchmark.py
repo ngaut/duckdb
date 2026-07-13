@@ -333,7 +333,8 @@ GENERIC_WORKLOADS = (
             "WHERE shipment.ship_mode IN ('MAIL', 'SHIP') "
             "GROUP BY shipment.ship_mode ORDER BY shipment.ship_mode"
         ),
-        "minimum_auto_speedup": 1.08,
+        "minimum_auto_speedup": 1.10,
+        "minimum_auto_speedup_by_threads": {1: 1.18},
         "max_auto_slowdown": 1.05,
         "requires_compiled_auto": True,
     },

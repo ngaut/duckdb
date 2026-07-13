@@ -4,11 +4,14 @@
 #include "duckdb/planner/filter/expression_filter.hpp"
 #include "duckdb/planner/expression/bound_comparison_expression.hpp"
 #include "duckdb/planner/expression/bound_conjunction_expression.hpp"
+#include "duckdb/planner/expression/bound_operator_expression.hpp"
 #include "duckdb/planner/expression_iterator.hpp"
 #include "duckdb/catalog/catalog_entry/table_catalog_entry.hpp"
 #include "duckdb/common/operator/add.hpp"
 #include "duckdb/common/operator/subtract.hpp"
 #include "duckdb/common/types/hugeint.hpp"
+#include "duckdb/common/types/uhugeint.hpp"
+#include "duckdb/common/types/value_map.hpp"
 #include "duckdb/function/table/table_scan.hpp"
 #include "duckdb/planner/operator/logical_get.hpp"
 #include "duckdb/storage/data_table.hpp"
@@ -558,6 +561,52 @@ RelationStats RelationStatisticsHelper::ExtractEmptyResultStats(LogicalEmptyResu
 	return stats;
 }
 
+static idx_t GetFilterSubjectDistinctCount(ClientContext &context, const Expression &subject,
+                                           BaseStatistics &base_stats, idx_t cardinality) {
+	auto expression_stats = ExpressionFilter::TryGetExpressionStatistics(context, subject, base_stats);
+	if (expression_stats) {
+		auto distinct_count = GetDistinctCountFromStats(*expression_stats, cardinality).distinct_count;
+		if (distinct_count > 0) {
+			return distinct_count;
+		}
+	}
+	return GetDistinctCountFromStats(base_stats, cardinality).distinct_count;
+}
+
+static idx_t EstimateInFilterCardinality(ClientContext &context, idx_t cardinality,
+                                         const BoundOperatorExpression &in_expression, BaseStatistics &base_stats) {
+	auto &children = in_expression.GetChildren();
+	if (children.size() < 2 || children[0]->IsFoldable()) {
+		return cardinality;
+	}
+
+	value_set_t unique_values;
+	for (idx_t child_idx = 1; child_idx < children.size(); child_idx++) {
+		if (children[child_idx]->GetExpressionClass() != ExpressionClass::BOUND_CONSTANT) {
+			return cardinality;
+		}
+		auto &constant = children[child_idx]->Cast<BoundConstantExpression>();
+		if (constant.GetValue().IsNull()) {
+			return cardinality;
+		}
+		unique_values.insert(constant.GetValue());
+	}
+
+	auto distinct_count = GetFilterSubjectDistinctCount(context, *children[0], base_stats, cardinality);
+	if (distinct_count == 0) {
+		return cardinality;
+	}
+	const auto matching_distinct_count = MinValue<idx_t>(unique_values.size(), distinct_count);
+	auto numerator = Uhugeint::Multiply(Uhugeint::Convert(cardinality), Uhugeint::Convert(matching_distinct_count));
+	numerator = Uhugeint::Add(numerator, Uhugeint::Convert(distinct_count - 1));
+	const auto estimate = Uhugeint::Divide(numerator, Uhugeint::Convert(distinct_count));
+	idx_t estimated_cardinality;
+	if (!Uhugeint::TryCast(estimate, estimated_cardinality)) {
+		return cardinality;
+	}
+	return MinValue(estimated_cardinality, cardinality);
+}
+
 idx_t RelationStatisticsHelper::InspectTableFilter(ClientContext &context, idx_t cardinality, const TableFilter &filter,
                                                    BaseStatistics &base_stats) {
 	auto cardinality_after_filters = cardinality;
@@ -571,6 +620,9 @@ idx_t RelationStatisticsHelper::InspectTableFilter(ClientContext &context, idx_t
 			    MinValue(cardinality_after_filters, InspectTableFilter(context, cardinality, child_filter, base_stats));
 		}
 		return cardinality_after_filters;
+	}
+	if (expr.GetExpressionType() == ExpressionType::COMPARE_IN) {
+		return EstimateInFilterCardinality(context, cardinality, expr.Cast<BoundOperatorExpression>(), base_stats);
 	}
 	if (!BoundComparisonExpression::IsComparison(expr)) {
 		return cardinality_after_filters;
@@ -589,12 +641,8 @@ idx_t RelationStatisticsHelper::InspectTableFilter(ClientContext &context, idx_t
 	}
 	idx_t column_count = 0;
 	if (filtered_expression) {
-		auto expression_stats = ExpressionFilter::TryGetExpressionStatistics(context, *filtered_expression, base_stats);
-		if (expression_stats) {
-			column_count = GetDistinctCountFromStats(*expression_stats, cardinality).distinct_count;
-		}
-	}
-	if (column_count == 0) {
+		column_count = GetFilterSubjectDistinctCount(context, *filtered_expression, base_stats, cardinality);
+	} else {
 		column_count = GetDistinctCountFromStats(base_stats, cardinality).distinct_count;
 	}
 	// column_count = 0 when there is no HLL and no usable min/max proxy.

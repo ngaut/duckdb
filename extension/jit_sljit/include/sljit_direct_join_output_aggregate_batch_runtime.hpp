@@ -99,16 +99,16 @@ static void SljitFlushPendingInputVectorAggregateBatch(ExecutionRegionRuntime &r
 		                             pending_count);
 	}
 	string input_vector_failure;
-	if (!strategy.pending_preaggregated_input_vector_groups) {
-		strategy.pending_preaggregated_input_vector_groups =
-		    make_shared_ptr<SljitPendingPreaggregatedPrimitiveGroupBatch>();
+	if (!strategy.pending_preaggregated_groups) {
+		strategy.pending_preaggregated_groups = make_shared_ptr<SljitPendingPreaggregatedPrimitiveGroupBatch>();
 	}
+	strategy.pending_preaggregated_scratch = &scratch;
+	strategy.pending_preaggregated_deferred_grouped_finish = batch.deferred_grouped_finish;
 	if (!SljitTryExecuteNativeInputVectorGroupedAggregateUpdate(
 	        runtime, runtime.ExecutionOperators(), scratch, aggregate_idx, aggregate_op, aggregate_input,
 	        batch_group_sources, strategy.descriptor.payload_source_indices, true, batch.deferred_grouped_finish,
 	        batch.source_key0_int64_to_int32_unchecked, dense_domain_ptr, optional_ptr<string>(&input_vector_failure),
-	        optional_ptr<SljitPendingPreaggregatedPrimitiveGroupBatch>(
-	            strategy.pending_preaggregated_input_vector_groups.get()))) {
+	        optional_ptr<SljitPendingPreaggregatedPrimitiveGroupBatch>(strategy.pending_preaggregated_groups.get()))) {
 		throw InternalException("SLJIT batched direct input-vector aggregate update failed: %s",
 		                        input_vector_failure.empty() ? "unknown" : input_vector_failure.c_str());
 	}
@@ -249,22 +249,20 @@ static void SljitFlushPendingDirectInputVectorAggregate(ExecutionRegionRuntime &
 		SljitFlushPendingInputVectorAggregateBatch(runtime, *strategy.pending_input_vector_batch.scratch,
 		                                           strategy.aggregate_idx, aggregate_op, strategy);
 	}
-	if (strategy.pending_preaggregated_input_vector_groups &&
-	    strategy.pending_preaggregated_input_vector_groups->HasPending()) {
-		if (!strategy.pending_input_vector_batch.scratch) {
-			throw InternalException("SLJIT pending direct input-vector preaggregation has no scratch state");
+	if (strategy.pending_preaggregated_groups && strategy.pending_preaggregated_groups->HasPending()) {
+		if (!strategy.pending_preaggregated_scratch) {
+			throw InternalException("SLJIT pending direct preaggregation has no scratch state");
 		}
-		auto &scratch = *strategy.pending_input_vector_batch.scratch;
+		auto &scratch = *strategy.pending_preaggregated_scratch;
 		auto &binding = scratch.SinkBinding(strategy.aggregate_idx);
 		if (!binding.ready || !binding.aggregate_update.ready || !binding.aggregate_update.grouped_state.ready ||
 		    !binding.aggregate_update.grouped_state.state) {
 			throw InternalException("SLJIT pending direct input-vector preaggregation has no grouped state");
 		}
 		if (!SljitFlushPendingPreaggregatedPrimitiveGroups(
-		        runtime, scratch, strategy.aggregate_idx, aggregate_op,
-		        *strategy.pending_preaggregated_input_vector_groups, binding.aggregate_update.grouped_state,
-		        strategy.pending_input_vector_batch.deferred_grouped_finish)) {
-			throw InternalException("SLJIT pending direct input-vector preaggregation flush failed");
+		        runtime, scratch, strategy.aggregate_idx, aggregate_op, *strategy.pending_preaggregated_groups,
+		        binding.aggregate_update.grouped_state, strategy.pending_preaggregated_deferred_grouped_finish)) {
+			throw InternalException("SLJIT pending direct preaggregation flush failed");
 		}
 	}
 }

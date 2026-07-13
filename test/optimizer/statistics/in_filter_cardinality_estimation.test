@@ -1,0 +1,32 @@
+# name: test/optimizer/statistics/in_filter_cardinality_estimation.test
+# description: Constant IN filters use catalog distinct-count statistics
+# group: [statistics]
+
+statement ok
+CREATE TABLE in_filter_stats AS
+SELECT i::BIGINT AS id,
+       CASE i % 3 WHEN 0 THEN 'MAIL' WHEN 1 THEN 'SHIP' ELSE 'RAIL' END AS category
+FROM range(6000) tbl(i);
+
+query I
+SELECT count(*) FROM in_filter_stats WHERE category IN ('MAIL', 'SHIP');
+----
+4000
+
+query II
+EXPLAIN (FORMAT JSON)
+SELECT count(*) FROM in_filter_stats WHERE category IN ('MAIL', 'SHIP');
+----
+physical_plan	<REGEX>:.*"Estimated Cardinality": "4000".*
+
+query II
+EXPLAIN (FORMAT JSON)
+SELECT count(*) FROM in_filter_stats WHERE category IN ('MAIL');
+----
+physical_plan	<REGEX>:.*"Estimated Cardinality": "2000".*
+
+query II
+EXPLAIN (FORMAT JSON)
+SELECT count(*) FROM in_filter_stats WHERE category IN ('MAIL', 'MAIL');
+----
+physical_plan	<REGEX>:.*"Estimated Cardinality": "2000".*

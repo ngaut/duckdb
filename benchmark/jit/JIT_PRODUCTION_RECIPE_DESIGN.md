@@ -1,6 +1,6 @@
 # JIT Production Recipe Architecture
 
-Last updated: 2026-07-12
+Last updated: 2026-07-13
 
 This is the active architecture contract for DuckDB execution-region JIT. It
 defines ownership, admission, runtime-view, and accounting rules. It is not a
@@ -529,12 +529,28 @@ Projected grouped updates may compose projection semantics into the grouped
 primitive when the descriptor proves the required sources. Otherwise recipe
 binding chooses an explicit projection materialization path or a native tail.
 Producer output maps resolve an expression and its original input separately.
-The resolver does not silently require identity: each consumer decides which
-mapped expression kinds it supports. Direct-input consumers still require an
-identity-like reference, while grouped-key consumers may preserve a proven
-integer cast in the row-pointer key descriptor. This keeps the semantic map
-generic and prevents one consumer's representation restriction from blocking a
-different consumer's valid fused path.
+The map has one coordinate system: projection output to raw probe input. It is
+never reinterpreted as a join-output ordinal. A downstream grouped expression
+is composed with the mapped producer expression before the consumer validates
+the result. Each consumer then decides which composed expression kinds it
+supports. Direct-input consumers still require an identity-like reference,
+while grouped-key consumers may preserve a proven integer or string-compression
+transform. This keeps the semantic map generic and prevents one consumer's
+representation restriction from blocking a different consumer's valid fused
+path.
+
+A mixed-source grouped reduction may consume a group key from the selected
+probe input while reading an aggregate predicate from the matched build row.
+The current contract recognizes two complementary `SUM(CASE ... THEN 1 ELSE
+0 END)` lanes over the same constant string set. It materializes only the probe
+group key, compares a fixed-width compressed build field to precompressed
+constants when the producer applied string decompression, and accumulates exact
+primitive deltas. Nullable predicates still contribute the non-null `ELSE 0`
+value to both sums. Pattern binding, row-layout resolution, and constant
+compression are operator-lifetime plan state; chunks contain only data work.
+The resulting compact deltas use the ordinary pending preaggregation owner and
+flush through DuckDB's grouped-state contract. Admission depends only on typed
+expressions, source coordinates, row-layout facts, and primitive lanes.
 
 Dense grouped preaggregation has two generic scopes:
 
@@ -569,10 +585,11 @@ general exact lookup path.
 
 Pending preaggregated groups use 2,047 entries and retain the final compact
 group across source invocations. If an input run crosses a vector boundary, its
-next delta merges into that unpublished carry before any hash-table append.
+next delta merges into that unpublished carry before any hash-table update.
 Overflow within one already-compacted input range flushes the exact prefix and
-carries only the suffix. This makes every published batch strictly increasing
-without a special duplicate case in the grouped hash table.
+carries only the suffix. Arbitrary compact producers may retain non-adjacent
+duplicate keys; those batches use the normal exact grouped-state update and do
+not publish a proven-unique append contract.
 
 Consecutive fixed-width group keys have two pending representations. The
 buffered representation compacts each source vector and bulk-copies its groups
@@ -707,6 +724,13 @@ distinct count survives. Dense filtered reductions can therefore fund JIT
 startup, while sparse modulo predicates remain below the admission floor. The
 rule is type- and expression-driven and applies to ordinary workloads as well
 as benchmark queries.
+
+Constant `IN` predicates use the same subject statistics. Non-null foldable
+members are deduplicated, capped by the subject's distinct-count bound, and
+scaled as `matching_distinct / subject_distinct`. Unsupported, nullable, or
+non-constant lists retain the conservative estimate. This keeps join-order and
+build-side selection aligned with the real filtered relation without adding a
+JIT-specific optimizer rule.
 
 An ungrouped generated filtered reduction with full-pipeline ownership and no
 join, grouped lookup, native aggregate, sort, or selected-view materialization

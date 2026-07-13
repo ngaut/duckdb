@@ -13,6 +13,7 @@
 #include "sljit_grouped_aggregate_input_vector_groups.hpp"
 #include "sljit_hash_join_projection_aggregate_input_runtime.hpp"
 #include "sljit_hash_join_projection_materialization_runtime.hpp"
+#include "sljit_join_input_row_pointer_complementary_sum_runtime.hpp"
 #include "sljit_post_join_projection_strategy.hpp"
 #include "sljit_projection_aggregate_descriptor.hpp"
 #include "sljit_region_runtime_state.hpp"
@@ -180,6 +181,23 @@ static bool SljitTryExecuteDirectJoinOutputAggregate(
 	auto &aggregate_input = descriptor.input.chunk;
 	aggregate_input.Reset();
 	auto &aggregate_op = ops[strategy.aggregate_idx];
+	string complementary_sum_failure;
+	if (SljitTryExecuteJoinInputRowPointerComplementarySumUpdate(
+	        runtime, runtime.ExecutionOperators(), scratch, post_join_projection.hash_join_idx, aggregate_op, strategy,
+	        join_input, match_selection, row_pointers, join_output.size(), deferred_grouped_finish,
+	        output_proof.source_key0_int64_to_int32, optional_ptr<string>(&complementary_sum_failure))) {
+		return true;
+	}
+	if (!complementary_sum_failure.empty()) {
+		auto &plan = strategy.join_input_complementary_sum_plan;
+		if (!plan.blocker_recorded) {
+			SljitRecordDirectJoinOutputAggregateProjectionUnsupported(
+			    runtime, ops, post_join_projection, string("complementary_sum_") + complementary_sum_failure,
+			    join_output.size());
+			plan.blocker_recorded = true;
+		}
+	}
+	aggregate_input.Reset();
 	if (has_projection_chain && descriptor.projection_idx == DConstants::INVALID_INDEX) {
 		throw InternalException("SLJIT direct row-pointer aggregate descriptor has no projection index");
 	}
