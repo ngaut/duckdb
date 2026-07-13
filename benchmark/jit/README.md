@@ -24,6 +24,14 @@ Install repo-local guard hooks:
 python3 benchmark/jit/install_refactor_guard_hooks.py
 ```
 
+The hooks divide responsibility instead of repeating the same work.
+Pre-commit validates the staged tree with the build, architecture, Python, and
+JIT unit ratchet, then publishes the verified Git tree hash. When HEAD matches
+that receipt, pre-push reuses the result and adds only the generic and TPC-H
+production gates required by performance-sensitive branch changes. A missing
+or stale receipt makes pre-push run the complete guard.
+Focused generic and TPC-H timing rechecks use 10 repetitions by default.
+
 TPC-H benchmark and comparison gate:
 
 ```sh

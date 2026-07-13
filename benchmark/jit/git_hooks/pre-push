@@ -4,4 +4,23 @@ set -eu
 ROOT="$(git rev-parse --show-toplevel)"
 cd "$ROOT"
 
+RECEIPT="$ROOT/benchmark/jit/tmp/pre_commit_verified_tree"
+CURRENT_TREE="$(git rev-parse 'HEAD^{tree}')"
+VERIFIED_TREE=""
+if [ -f "$RECEIPT" ]; then
+    VERIFIED_TREE="$(sed -n '1p' "$RECEIPT")"
+fi
+
+if [ "$VERIFIED_TREE" = "$CURRENT_TREE" ]; then
+    echo "pre-push reusing pre-commit verification for tree $CURRENT_TREE"
+    exec python3 benchmark/jit/run_jit_refactor_guard.py \
+        --level auto \
+        --change-set branch \
+        --no-build \
+        --skip-architecture \
+        --skip-py-compile \
+        --skip-unit
+fi
+
+echo "pre-push has no matching pre-commit receipt; running the complete guard"
 exec python3 benchmark/jit/run_jit_refactor_guard.py --level auto --change-set branch

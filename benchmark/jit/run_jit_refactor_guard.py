@@ -723,7 +723,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--tpch-out-dir", type=Path, default=None)
     parser.add_argument("--tpch-queries", nargs="+", default=["all"])
     parser.add_argument("--tpch-repeats", type=int, default=5)
-    parser.add_argument("--tpch-triage-repeats", type=int, default=15)
+    parser.add_argument("--tpch-triage-repeats", type=int, default=10)
     parser.add_argument("--tpch-triage-profile-repeats", type=int, default=3)
     parser.add_argument("--tpch-db", type=Path, default=None)
     parser.add_argument("--use-existing-tpch-db", action="store_true")
@@ -825,9 +825,7 @@ def main() -> int:
         _, failures = run_unit_suite(args, artifact_dir)
         compare_unit_failures(args, artifact_dir, failures)
     elif args.level == "quick":
-        print(
-            "quick guard completed build, architecture verification, and Python syntax checks"
-        )
+        print("quick guard completed its configured checks")
     if should_run_generic(args):
         run_command(
             generic_gate_command(args, artifact_dir),

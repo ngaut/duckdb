@@ -4,4 +4,13 @@ set -eu
 ROOT="$(git rev-parse --show-toplevel)"
 cd "$ROOT"
 
-exec python3 benchmark/jit/run_jit_refactor_guard.py --level auto --change-set staged --auto-max-level unit
+python3 benchmark/jit/run_jit_refactor_guard.py --level auto --change-set staged --auto-max-level unit
+
+# Publish the exact staged tree only after every configured check succeeds.
+# Pre-push may reuse this receipt when HEAD has the same tree; rebases, merges,
+# amended commits, and bypassed hooks naturally miss and receive a full guard.
+RECEIPT="$ROOT/benchmark/jit/tmp/pre_commit_verified_tree"
+RECEIPT_TMP="$RECEIPT.$$"
+mkdir -p "$(dirname "$RECEIPT")"
+git write-tree > "$RECEIPT_TMP"
+mv "$RECEIPT_TMP" "$RECEIPT"
